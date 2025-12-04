@@ -1,0 +1,147 @@
+============================= test session starts ==============================
+platform darwin -- Python 3.13.3, pytest-8.4.2, pluggy-1.6.0 -- /Users/mar/MIT Dropbox/Marielle Russo/2025_workspace/PrxteinMPNN/.venv/bin/python3
+cachedir: .pytest_cache
+rootdir: /Users/mar/MIT Dropbox/Marielle Russo/2025_workspace/PrxteinMPNN
+configfile: pyproject.toml
+plugins: jaxtyping-0.3.3, anyio-4.11.0, cov-7.0.0
+collecting ... collected 13 items
+
+tests/physics/test_features.py::test_compute_electrostatic_node_features_shape[jit] ERROR [  7%]
+tests/physics/test_features.py::test_compute_electrostatic_node_features_shape[eager] ERROR [ 15%]
+tests/physics/test_features.py::test_compute_electrostatic_node_features_no_charges ERROR [ 23%]
+tests/physics/test_features.py::test_compute_electrostatic_node_features_no_full_coordinates ERROR [ 30%]
+tests/physics/test_features.py::test_compute_electrostatic_node_features_jittable[jit] ERROR [ 38%]
+tests/physics/test_features.py::test_compute_electrostatic_node_features_jittable[eager] ERROR [ 46%]
+tests/physics/test_features.py::test_compute_electrostatic_features_batch_shape[jit] ERROR [ 53%]
+tests/physics/test_features.py::test_compute_electrostatic_features_batch_shape[eager] ERROR [ 61%]
+tests/physics/test_features.py::test_compute_electrostatic_features_batch_padding[jit] ERROR [ 69%]
+tests/physics/test_features.py::test_compute_electrostatic_features_batch_padding[eager] ERROR [ 76%]
+tests/physics/test_features.py::test_compute_electrostatic_features_batch_empty_list PASSED [ 84%]
+tests/physics/test_features.py::test_compute_electrostatic_features_batch_max_length_too_small ERROR [ 92%]
+tests/physics/test_features.py::test_compute_electrostatic_node_features_thermal_mode ERROR [100%]
+
+==================================== ERRORS ====================================
+____ ERROR at setup of test_compute_electrostatic_node_features_shape[jit] _____
+file /Users/mar/MIT Dropbox/Marielle Russo/2025_workspace/PrxteinMPNN/prolix/tests/physics/test_features.py, line 24
+  @pytest.mark.parametrize("jit_compile", [True, False], ids=["jit", "eager"])
+  def test_compute_electrostatic_node_features_shape(
+E       fixture 'pqr_protein_tuple' not found
+>       available fixtures: anyio_backend, anyio_backend_name, anyio_backend_options, backbone_charges_multi_residue, backbone_charges_single_residue, backbone_positions_multi_residue, backbone_positions_single_residue, cache, capfd, capfdbinary, caplog, capsys, capsysbinary, capteesys, cov, doctest_namespace, free_tcp_port, free_tcp_port_factory, free_udp_port, free_udp_port_factory, lj_parameters, monkeypatch, no_cover, pytestconfig, record_property, record_testsuite_property, record_xml_attribute, recwarn, simple_charges, simple_positions, temp_ff_dir, tmp_path, tmp_path_factory, tmpdir, tmpdir_factory
+>       use 'pytest --fixtures [testpath]' for help on them.
+
+/Users/mar/MIT Dropbox/Marielle Russo/2025_workspace/PrxteinMPNN/prolix/tests/physics/test_features.py:24
+___ ERROR at setup of test_compute_electrostatic_node_features_shape[eager] ____
+file /Users/mar/MIT Dropbox/Marielle Russo/2025_workspace/PrxteinMPNN/prolix/tests/physics/test_features.py, line 24
+  @pytest.mark.parametrize("jit_compile", [True, False], ids=["jit", "eager"])
+  def test_compute_electrostatic_node_features_shape(
+E       fixture 'pqr_protein_tuple' not found
+>       available fixtures: anyio_backend, anyio_backend_name, anyio_backend_options, backbone_charges_multi_residue, backbone_charges_single_residue, backbone_positions_multi_residue, backbone_positions_single_residue, cache, capfd, capfdbinary, caplog, capsys, capsysbinary, capteesys, cov, doctest_namespace, free_tcp_port, free_tcp_port_factory, free_udp_port, free_udp_port_factory, lj_parameters, monkeypatch, no_cover, pytestconfig, record_property, record_testsuite_property, record_xml_attribute, recwarn, simple_charges, simple_positions, temp_ff_dir, tmp_path, tmp_path_factory, tmpdir, tmpdir_factory
+>       use 'pytest --fixtures [testpath]' for help on them.
+
+/Users/mar/MIT Dropbox/Marielle Russo/2025_workspace/PrxteinMPNN/prolix/tests/physics/test_features.py:24
+____ ERROR at setup of test_compute_electrostatic_node_features_no_charges _____
+file /Users/mar/MIT Dropbox/Marielle Russo/2025_workspace/PrxteinMPNN/prolix/tests/physics/test_features.py, line 46
+  def test_compute_electrostatic_node_features_no_charges(
+E       fixture 'pqr_protein_tuple' not found
+>       available fixtures: anyio_backend, anyio_backend_name, anyio_backend_options, backbone_charges_multi_residue, backbone_charges_single_residue, backbone_positions_multi_residue, backbone_positions_single_residue, cache, capfd, capfdbinary, caplog, capsys, capsysbinary, capteesys, cov, doctest_namespace, free_tcp_port, free_tcp_port_factory, free_udp_port, free_udp_port_factory, lj_parameters, monkeypatch, no_cover, pytestconfig, record_property, record_testsuite_property, record_xml_attribute, recwarn, simple_charges, simple_positions, temp_ff_dir, tmp_path, tmp_path_factory, tmpdir, tmpdir_factory
+>       use 'pytest --fixtures [testpath]' for help on them.
+
+/Users/mar/MIT Dropbox/Marielle Russo/2025_workspace/PrxteinMPNN/prolix/tests/physics/test_features.py:46
+_ ERROR at setup of test_compute_electrostatic_node_features_no_full_coordinates _
+file /Users/mar/MIT Dropbox/Marielle Russo/2025_workspace/PrxteinMPNN/prolix/tests/physics/test_features.py, line 55
+  def test_compute_electrostatic_node_features_no_full_coordinates(
+E       fixture 'pqr_protein_tuple' not found
+>       available fixtures: anyio_backend, anyio_backend_name, anyio_backend_options, backbone_charges_multi_residue, backbone_charges_single_residue, backbone_positions_multi_residue, backbone_positions_single_residue, cache, capfd, capfdbinary, caplog, capsys, capsysbinary, capteesys, cov, doctest_namespace, free_tcp_port, free_tcp_port_factory, free_udp_port, free_udp_port_factory, lj_parameters, monkeypatch, no_cover, pytestconfig, record_property, record_testsuite_property, record_xml_attribute, recwarn, simple_charges, simple_positions, temp_ff_dir, tmp_path, tmp_path_factory, tmpdir, tmpdir_factory
+>       use 'pytest --fixtures [testpath]' for help on them.
+
+/Users/mar/MIT Dropbox/Marielle Russo/2025_workspace/PrxteinMPNN/prolix/tests/physics/test_features.py:55
+___ ERROR at setup of test_compute_electrostatic_node_features_jittable[jit] ___
+file /Users/mar/MIT Dropbox/Marielle Russo/2025_workspace/PrxteinMPNN/prolix/tests/physics/test_features.py, line 64
+  @pytest.mark.parametrize("jit_compile", [True, False], ids=["jit", "eager"])
+  def test_compute_electrostatic_node_features_jittable(
+E       fixture 'pqr_protein_tuple' not found
+>       available fixtures: anyio_backend, anyio_backend_name, anyio_backend_options, backbone_charges_multi_residue, backbone_charges_single_residue, backbone_positions_multi_residue, backbone_positions_single_residue, cache, capfd, capfdbinary, caplog, capsys, capsysbinary, capteesys, cov, doctest_namespace, free_tcp_port, free_tcp_port_factory, free_udp_port, free_udp_port_factory, lj_parameters, monkeypatch, no_cover, pytestconfig, record_property, record_testsuite_property, record_xml_attribute, recwarn, simple_charges, simple_positions, temp_ff_dir, tmp_path, tmp_path_factory, tmpdir, tmpdir_factory
+>       use 'pytest --fixtures [testpath]' for help on them.
+
+/Users/mar/MIT Dropbox/Marielle Russo/2025_workspace/PrxteinMPNN/prolix/tests/physics/test_features.py:64
+__ ERROR at setup of test_compute_electrostatic_node_features_jittable[eager] __
+file /Users/mar/MIT Dropbox/Marielle Russo/2025_workspace/PrxteinMPNN/prolix/tests/physics/test_features.py, line 64
+  @pytest.mark.parametrize("jit_compile", [True, False], ids=["jit", "eager"])
+  def test_compute_electrostatic_node_features_jittable(
+E       fixture 'pqr_protein_tuple' not found
+>       available fixtures: anyio_backend, anyio_backend_name, anyio_backend_options, backbone_charges_multi_residue, backbone_charges_single_residue, backbone_positions_multi_residue, backbone_positions_single_residue, cache, capfd, capfdbinary, caplog, capsys, capsysbinary, capteesys, cov, doctest_namespace, free_tcp_port, free_tcp_port_factory, free_udp_port, free_udp_port_factory, lj_parameters, monkeypatch, no_cover, pytestconfig, record_property, record_testsuite_property, record_xml_attribute, recwarn, simple_charges, simple_positions, temp_ff_dir, tmp_path, tmp_path_factory, tmpdir, tmpdir_factory
+>       use 'pytest --fixtures [testpath]' for help on them.
+
+/Users/mar/MIT Dropbox/Marielle Russo/2025_workspace/PrxteinMPNN/prolix/tests/physics/test_features.py:64
+____ ERROR at setup of test_compute_electrostatic_features_batch_shape[jit] ____
+file /Users/mar/MIT Dropbox/Marielle Russo/2025_workspace/PrxteinMPNN/prolix/tests/physics/test_features.py, line 85
+  @pytest.mark.parametrize("jit_compile", [True, False], ids=["jit", "eager"])
+  def test_compute_electrostatic_features_batch_shape(
+E       fixture 'pqr_protein_tuple' not found
+>       available fixtures: anyio_backend, anyio_backend_name, anyio_backend_options, backbone_charges_multi_residue, backbone_charges_single_residue, backbone_positions_multi_residue, backbone_positions_single_residue, cache, capfd, capfdbinary, caplog, capsys, capsysbinary, capteesys, cov, doctest_namespace, free_tcp_port, free_tcp_port_factory, free_udp_port, free_udp_port_factory, lj_parameters, monkeypatch, no_cover, pytestconfig, record_property, record_testsuite_property, record_xml_attribute, recwarn, simple_charges, simple_positions, temp_ff_dir, tmp_path, tmp_path_factory, tmpdir, tmpdir_factory
+>       use 'pytest --fixtures [testpath]' for help on them.
+
+/Users/mar/MIT Dropbox/Marielle Russo/2025_workspace/PrxteinMPNN/prolix/tests/physics/test_features.py:85
+___ ERROR at setup of test_compute_electrostatic_features_batch_shape[eager] ___
+file /Users/mar/MIT Dropbox/Marielle Russo/2025_workspace/PrxteinMPNN/prolix/tests/physics/test_features.py, line 85
+  @pytest.mark.parametrize("jit_compile", [True, False], ids=["jit", "eager"])
+  def test_compute_electrostatic_features_batch_shape(
+E       fixture 'pqr_protein_tuple' not found
+>       available fixtures: anyio_backend, anyio_backend_name, anyio_backend_options, backbone_charges_multi_residue, backbone_charges_single_residue, backbone_positions_multi_residue, backbone_positions_single_residue, cache, capfd, capfdbinary, caplog, capsys, capsysbinary, capteesys, cov, doctest_namespace, free_tcp_port, free_tcp_port_factory, free_udp_port, free_udp_port_factory, lj_parameters, monkeypatch, no_cover, pytestconfig, record_property, record_testsuite_property, record_xml_attribute, recwarn, simple_charges, simple_positions, temp_ff_dir, tmp_path, tmp_path_factory, tmpdir, tmpdir_factory
+>       use 'pytest --fixtures [testpath]' for help on them.
+
+/Users/mar/MIT Dropbox/Marielle Russo/2025_workspace/PrxteinMPNN/prolix/tests/physics/test_features.py:85
+___ ERROR at setup of test_compute_electrostatic_features_batch_padding[jit] ___
+file /Users/mar/MIT Dropbox/Marielle Russo/2025_workspace/PrxteinMPNN/prolix/tests/physics/test_features.py, line 109
+  @pytest.mark.parametrize("jit_compile", [True, False], ids=["jit", "eager"])
+  def test_compute_electrostatic_features_batch_padding(
+E       fixture 'pqr_protein_tuple' not found
+>       available fixtures: anyio_backend, anyio_backend_name, anyio_backend_options, backbone_charges_multi_residue, backbone_charges_single_residue, backbone_positions_multi_residue, backbone_positions_single_residue, cache, capfd, capfdbinary, caplog, capsys, capsysbinary, capteesys, cov, doctest_namespace, free_tcp_port, free_tcp_port_factory, free_udp_port, free_udp_port_factory, lj_parameters, monkeypatch, no_cover, pytestconfig, record_property, record_testsuite_property, record_xml_attribute, recwarn, simple_charges, simple_positions, temp_ff_dir, tmp_path, tmp_path_factory, tmpdir, tmpdir_factory
+>       use 'pytest --fixtures [testpath]' for help on them.
+
+/Users/mar/MIT Dropbox/Marielle Russo/2025_workspace/PrxteinMPNN/prolix/tests/physics/test_features.py:109
+__ ERROR at setup of test_compute_electrostatic_features_batch_padding[eager] __
+file /Users/mar/MIT Dropbox/Marielle Russo/2025_workspace/PrxteinMPNN/prolix/tests/physics/test_features.py, line 109
+  @pytest.mark.parametrize("jit_compile", [True, False], ids=["jit", "eager"])
+  def test_compute_electrostatic_features_batch_padding(
+E       fixture 'pqr_protein_tuple' not found
+>       available fixtures: anyio_backend, anyio_backend_name, anyio_backend_options, backbone_charges_multi_residue, backbone_charges_single_residue, backbone_positions_multi_residue, backbone_positions_single_residue, cache, capfd, capfdbinary, caplog, capsys, capsysbinary, capteesys, cov, doctest_namespace, free_tcp_port, free_tcp_port_factory, free_udp_port, free_udp_port_factory, lj_parameters, monkeypatch, no_cover, pytestconfig, record_property, record_testsuite_property, record_xml_attribute, recwarn, simple_charges, simple_positions, temp_ff_dir, tmp_path, tmp_path_factory, tmpdir, tmpdir_factory
+>       use 'pytest --fixtures [testpath]' for help on them.
+
+/Users/mar/MIT Dropbox/Marielle Russo/2025_workspace/PrxteinMPNN/prolix/tests/physics/test_features.py:109
+_ ERROR at setup of test_compute_electrostatic_features_batch_max_length_too_small _
+file /Users/mar/MIT Dropbox/Marielle Russo/2025_workspace/PrxteinMPNN/prolix/tests/physics/test_features.py, line 141
+  def test_compute_electrostatic_features_batch_max_length_too_small(
+E       fixture 'pqr_protein_tuple' not found
+>       available fixtures: anyio_backend, anyio_backend_name, anyio_backend_options, backbone_charges_multi_residue, backbone_charges_single_residue, backbone_positions_multi_residue, backbone_positions_single_residue, cache, capfd, capfdbinary, caplog, capsys, capsysbinary, capteesys, cov, doctest_namespace, free_tcp_port, free_tcp_port_factory, free_udp_port, free_udp_port_factory, lj_parameters, monkeypatch, no_cover, pytestconfig, record_property, record_testsuite_property, record_xml_attribute, recwarn, simple_charges, simple_positions, temp_ff_dir, tmp_path, tmp_path_factory, tmpdir, tmpdir_factory
+>       use 'pytest --fixtures [testpath]' for help on them.
+
+/Users/mar/MIT Dropbox/Marielle Russo/2025_workspace/PrxteinMPNN/prolix/tests/physics/test_features.py:141
+___ ERROR at setup of test_compute_electrostatic_node_features_thermal_mode ____
+file /Users/mar/MIT Dropbox/Marielle Russo/2025_workspace/PrxteinMPNN/prolix/tests/physics/test_features.py, line 151
+  def test_compute_electrostatic_node_features_thermal_mode(
+E       fixture 'pqr_protein_tuple' not found
+>       available fixtures: anyio_backend, anyio_backend_name, anyio_backend_options, backbone_charges_multi_residue, backbone_charges_single_residue, backbone_positions_multi_residue, backbone_positions_single_residue, cache, capfd, capfdbinary, caplog, capsys, capsysbinary, capteesys, cov, doctest_namespace, free_tcp_port, free_tcp_port_factory, free_udp_port, free_udp_port_factory, lj_parameters, monkeypatch, no_cover, pytestconfig, record_property, record_testsuite_property, record_xml_attribute, recwarn, simple_charges, simple_positions, temp_ff_dir, tmp_path, tmp_path_factory, tmpdir, tmpdir_factory
+>       use 'pytest --fixtures [testpath]' for help on them.
+
+/Users/mar/MIT Dropbox/Marielle Russo/2025_workspace/PrxteinMPNN/prolix/tests/physics/test_features.py:151
+=============================== warnings summary ===============================
+../.venv/lib/python3.13/site-packages/e3nn_jax/_src/irreps.py:654
+  /Users/mar/MIT Dropbox/Marielle Russo/2025_workspace/PrxteinMPNN/.venv/lib/python3.13/site-packages/e3nn_jax/_src/irreps.py:654: DeprecationWarning: Creating NamedTuple classes using keyword arguments is deprecated and will be disallowed in Python 3.15. Use the class-based or functional syntax instead.
+    ) -> NamedTuple("Sort", irreps="Irreps", p=Tuple[int, ...], inv=Tuple[int, ...]):
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+ERROR tests/physics/test_features.py::test_compute_electrostatic_node_features_shape[jit]
+ERROR tests/physics/test_features.py::test_compute_electrostatic_node_features_shape[eager]
+ERROR tests/physics/test_features.py::test_compute_electrostatic_node_features_no_charges
+ERROR tests/physics/test_features.py::test_compute_electrostatic_node_features_no_full_coordinates
+ERROR tests/physics/test_features.py::test_compute_electrostatic_node_features_jittable[jit]
+ERROR tests/physics/test_features.py::test_compute_electrostatic_node_features_jittable[eager]
+ERROR tests/physics/test_features.py::test_compute_electrostatic_features_batch_shape[jit]
+ERROR tests/physics/test_features.py::test_compute_electrostatic_features_batch_shape[eager]
+ERROR tests/physics/test_features.py::test_compute_electrostatic_features_batch_padding[jit]
+ERROR tests/physics/test_features.py::test_compute_electrostatic_features_batch_padding[eager]
+ERROR tests/physics/test_features.py::test_compute_electrostatic_features_batch_max_length_too_small
+ERROR tests/physics/test_features.py::test_compute_electrostatic_node_features_thermal_mode
+=================== 1 passed, 1 warning, 12 errors in 5.40s ====================

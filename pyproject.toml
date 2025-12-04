@@ -1,0 +1,100 @@
+[build-system]
+requires = ["setuptools", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "prolix"
+version = "0.1.0"
+description = "Protein Physics and Molecular Dynamics in JAX"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "jax",
+    "jax-md",
+    "equinox",
+    "priox",
+    "biotite",
+    "mdtraj",
+    "numpy",
+    "scipy",
+    "chex",
+    "jaxtyping",
+]
+
+[tool.uv.sources]
+priox = { workspace = true }
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[project.optional-dependencies]
+dev = [
+    "ruff",
+    "pytest",
+    "pytest-cov",
+    "pytest-xdist",
+    "pyright",
+    "openmm>=8.4.0",
+]
+
+docs = [
+    "sphinx",
+    "sphinx-book-theme",
+    "myst-nb",
+    "sphinx-design",
+    "sphinx-copybutton",
+    "sphinx-autodoc-typehints",
+    "sphinxext-rediraffe",
+]
+
+[tool.pytest.ini_options]
+markers = [
+    "smoke: marks tests as smoke tests (fast and critical)",
+]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+
+[tool.ruff]
+line-length = 100
+fix = true
+indent-width = 2
+force-exclude = true
+exclude = [
+    ".venv",
+    "venv",
+    "build",
+    "dist",
+    "__pycache__",
+    "*.ipynb",
+]
+
+[tool.ruff.lint]
+select = ["ALL"]
+ignore = ["PD", "D203", "D213", "COM812", "ISC001"]
+pylint.max-args = 15
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**/*.py" = [
+    "S101",    # assert allowed in tests
+    "T201",    # print allowed in tests
+    "ANN201",  # return type not required
+    "INP001",  # implicit namespace package
+    "PLC0415", # import outside top-level
+    "SLF001",  # private member access
+    "PLR2004", # magic value comparison
+    "ANN001",  # missing type annotation
+    "D100", "D101", "D102", "D103",  # missing docstrings
+]
+"scripts/**/*.py" = [
+    "T201",    # print allowed in scripts
+    "INP001",  # implicit namespace package
+]
+
+[tool.pyright]
+include = ["src"]
+exclude = ["**/__pycache__", "build", "dist"]
+reportMissingTypeStubs = false
+reportImportCycles = false
+

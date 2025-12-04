@@ -1,0 +1,8 @@
+jax
+jax-md
+equinox
+priox
+biotite
+mdtraj
+numpy
+scipy
