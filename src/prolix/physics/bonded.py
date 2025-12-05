@@ -119,11 +119,9 @@ def make_dihedral_energy_fn(
     # b0: i -> j
     # b1: j -> k
     # b2: k -> l
-    # b0: i -> j (vector from j to i for correct angle definition? No, usually i->j)
-    # Wait, analysis showed we need r_i - r_j to match IUPAC with current angle logic.
     # displacement_fn(a, b) = a - b.
-    # We want r_i - r_j. So displacement_fn(r_i, r_j).
-    b0 = jax.vmap(displacement_fn)(r_i, r_j)
+    # We want b0 = r_j - r_i (i -> j).
+    b0 = jax.vmap(displacement_fn)(r_j, r_i)
     b1 = jax.vmap(displacement_fn)(r_k, r_j)
     b2 = jax.vmap(displacement_fn)(r_l, r_k)
 
@@ -144,8 +142,10 @@ def make_dihedral_energy_fn(
     # y = (b1_unit x v) . w
     x = jnp.sum(v * w, axis=-1)
     y = jnp.sum(jnp.cross(b1_unit, v) * w, axis=-1)
-
-    phi = jnp.arctan2(y, x)  # in radians
+    phi = jnp.arctan2(y, x)
+    # Shift phi by Pi to match Amber/OpenMM convention (Cis=0)
+    # Standard arctan2 gives Cis=Pi (180).
+    phi = phi - jnp.pi
 
     # Energy
     # E = k * (1 + cos(n * phi - gamma))

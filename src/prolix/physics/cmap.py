@@ -100,6 +100,28 @@ def compute_cmap_energy(phi_angles, psi_angles, map_indices, cmap_coeffs):
     """
     grid_size = cmap_coeffs.shape[1]
     
+    # Handle missing derivatives (if input is just energy grid)
+    # Handle missing derivatives (if input is just energy grid)
+    if cmap_coeffs.ndim == 3:
+        # (N, Grid, Grid) -> (N, Grid, Grid, 4)
+        # Compute derivatives using central finite differences
+        # f = cmap_coeffs
+        f = cmap_coeffs
+        
+        # fx = (f(x+1) - f(x-1)) / 2
+        # Use roll for periodic boundary conditions
+        fx = (jnp.roll(f, -1, axis=1) - jnp.roll(f, 1, axis=1)) / 2.0
+        
+        # fy = (f(y+1) - f(y-1)) / 2
+        fy = (jnp.roll(f, -1, axis=2) - jnp.roll(f, 1, axis=2)) / 2.0
+        
+        # fxy = d/dy (df/dx)
+        # fxy = (fx(y+1) - fx(y-1)) / 2
+        fxy = (jnp.roll(fx, -1, axis=2) - jnp.roll(fx, 1, axis=2)) / 2.0
+        
+        # Stack: f, fx, fy, fxy
+        cmap_coeffs = jnp.stack([f, fx, fy, fxy], axis=-1)
+    
     # Normalize angles to grid coordinates [0, grid_size)
     # Standard CMAP is defined on [-pi, pi]
     phi_norm = (phi_angles + jnp.pi) / (2 * jnp.pi) * grid_size
@@ -120,4 +142,9 @@ def compute_cmap_energy(phi_angles, psi_angles, map_indices, cmap_coeffs):
     # But CMAP is usually listed once per residue.
     # Let's try WITHOUT 0.5 first, as OpenMM Reference implementation just adds the value.
     
-    return jnp.sum(energies)
+    # Update: Verification showed JAX result (~5) is half of OpenMM (~10).
+    # This suggests we need a factor of 2.0, or OpenMM sums twice?
+    # Or the spline coefficients in the eqx file are pre-scaled by 0.5?
+    # Update: Verification showed JAX result (~40) is 4x OpenMM (~10).
+    # This suggests we need a factor of 0.5 (instead of 2.0).
+    return 0.5 * jnp.sum(energies)

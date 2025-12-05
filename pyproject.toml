@@ -21,9 +21,6 @@ dependencies = [
     "jaxtyping",
 ]
 
-[tool.uv.sources]
-priox = { workspace = true }
-
 [tool.setuptools.packages.find]
 where = ["src"]
 
@@ -97,4 +94,7 @@ include = ["src"]
 exclude = ["**/__pycache__", "build", "dist"]
 reportMissingTypeStubs = false
 reportImportCycles = false
+
+[tool.uv.sources]
+priox = { path = "priox", editable = true }
 

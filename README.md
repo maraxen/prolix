@@ -14,13 +14,27 @@
 
 ## Installation
 
-To install Prolix, simply run:
+### From GitHub (Recommended)
 
 ```bash
+# Install priox first (dependency)
+pip install git+https://github.com/maraxen/priox.git@main
+
+# Then install prolix
+pip install git+https://github.com/maraxen/prolix.git@main
+```
+
+### From Source
+
+To install Prolix from source:
+
+```bash
+git clone https://github.com/maraxen/prolix.git
+cd prolix
 pip install .
 ```
 
-For development installation with test dependencies:
+For development installation with test dependencies (including OpenMM):
 
 ```bash
 pip install -e ".[dev]"
