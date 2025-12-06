@@ -285,6 +285,11 @@ def run_verification(pdb_code="1UAO", return_results=False):
     if STRICT_MODE and len(omm_radii) > 0:
         print(colored("  [STRICT] Injecting OpenMM radii into system_params...", "yellow"))
         system_params["gb_radii"] = jnp.array(omm_radii)
+        
+    if STRICT_MODE and len(omm_scales) > 0:
+        print(colored("  [STRICT] Injecting OpenMM scales into system_params...", "yellow"))
+        # OpenMM params[2] is Scaled Offset Radius in nm. Convert to Angstroms.
+        system_params["scaled_radii"] = jnp.array(omm_scales) * 10.0
     
     # Energy Function
     # OpenMM uses NoCutoff (Non-Periodic) for GBSA.
@@ -333,7 +338,8 @@ def run_verification(pdb_code="1UAO", return_results=False):
         
         gb_mask = None
         if scale_matrix_vdw is not None:
-            gb_mask = scale_matrix_vdw > 0.0
+            # Exclude 1-4 (scaled < 1.0) and 1-2/1-3 (0.0)
+            gb_mask = scale_matrix_vdw > 0.9 
         else:
             gb_mask = exclusion_mask
             
@@ -472,13 +478,18 @@ def run_verification(pdb_code="1UAO", return_results=False):
     e_lj_mat = energy.lennard_jones(dist, sig_ij, eps_ij)
     
     # Apply scaling/masking
+    e_lj_mat = energy.lennard_jones(dist, sig_ij, eps_ij)
+
     if scale_matrix_vdw is not None:
+        print(f"[DEBUG] Scale Matrix VDW: Shape={scale_matrix_vdw.shape}, Zeros={jnp.sum(scale_matrix_vdw == 0.0)}, Mean={jnp.mean(scale_matrix_vdw)}")
         e_lj_mat = e_lj_mat * scale_matrix_vdw
     else:
+        print(f"[DEBUG] Scale Matrix VDW is None. Using Exclusion Mask.")
+        print(f"[DEBUG] Exclusion Mask: Shape={exclusion_mask.shape}, Zeros={jnp.sum(exclusion_mask == 0.0)}, Mean={jnp.mean(exclusion_mask)}")
         e_lj_mat = jnp.where(exclusion_mask, e_lj_mat, 0.0)
     
     val_e_lj = 0.5 * jnp.sum(e_lj_mat)
-    
+
     # 3. Direct Coulomb
     eff_dielectric = 1.0 # Solute dielectric
     COULOMB_CONSTANT = 332.0637 / eff_dielectric
@@ -501,12 +512,13 @@ def run_verification(pdb_code="1UAO", return_results=False):
     gb_mask = jnp.ones_like(dist)
     gb_energy_mask = jnp.ones_like(dist)
     if scale_matrix_vdw is not None:
-        gb_mask = jnp.ones_like(scale_matrix_vdw) # All ones for Radii calculation
-        gb_energy_mask = jnp.ones_like(scale_matrix_vdw) # All ones for Energy calculation
+         # Use ALL pairs for Born Radii (OpenMM includes all pairs)
+         gb_mask = jnp.ones_like(dist)
+         gb_energy_mask = jnp.ones_like(dist) # Keep Energy Sum full
     else:
-        gb_mask = exclusion_mask
-        gb_energy_mask = None # Default behavior
-    
+         gb_mask = exclusion_mask
+         gb_energy_mask = None
+
     val_e_gb, born_radii_calc = generalized_born.compute_gb_energy(
         jax_positions, charges, radii,
         solvent_dielectric=78.5,
@@ -517,9 +529,9 @@ def run_verification(pdb_code="1UAO", return_results=False):
         scaled_radii=scaled_radii
     )
     
-    # 5. GBSA (Non-polar)
+    # 5. GBSA (Non-polar / ACE surface area)
     val_e_np = generalized_born.compute_ace_nonpolar_energy(
-         radii, born_radii_calc, surface_tension=0.0 # Match OpenMM obc2.xml (SA=0 usually?)
+         radii, born_radii_calc, dielectric_offset=constants.DIELECTRIC_OFFSET
     )
     
     # Calculate Total

@@ -224,60 +224,74 @@ def compute_gb_energy(
 
 
 def compute_pair_integral(distance: Array, radius_i: Array, radius_j: Array) -> Array:
-    """Computes the pair integral term $H_{ij}$ for OBC.
+    """Computes the pair integral term $I_{ij}$ for OBC (OpenMM-compatible).
     
-    This integral represents the volume of atom j that overlaps with the descreening region of atom i.
-
-    $$
-    H_{ij} = \\frac{1}{2} \\left[ \\frac{1}{L_{ij}} - \\frac{1}{U_{ij}} \\right] + \\frac{1}{4r_{ij}} \\left[ \\frac{1}{U_{ij}^2} - \\frac{1}{L_{ij}^2} \\right] + \\frac{1}{2r_{ij}} \\ln \\frac{L_{ij}}{U_{ij}}
-    $$
-
-    where $L_{ij} = \\max(\\rho_i, |r_{ij} - \\rho_j|)$ and $U_{ij} = r_{ij} + \\rho_j$.
+    This integral represents the descreening contribution from atom j to atom i.
+    
+    OpenMM Formula:
+    I = 0.5*(1/L-1/U+0.25*(r-sr2^2/r)*(1/(U^2)-1/(L^2))+0.5*log(L/U)/r)
+    
+    where:
+    - L = max(or1, abs(r-sr2))  [or1 = offset_radius of atom i]
+    - U = r + sr2                [sr2 = scaled_radius of atom j]
+    - r = distance
     
     Args:
         distance: Distance between atoms i and j ($r_{ij}$).
-        radius_i: Radius of atom i ($\\rho_i$, usually offset radius).
-        radius_j: Radius of atom j ($\\rho_j$, usually vdW radius).
+        radius_i: Offset radius of atom i ($or_i$).
+        radius_j: Scaled radius of atom j ($sr_j$).
         
     Returns:
-        The integral value $H_{ij}$.
+        The integral value $I_{ij}$.
     """
-    lower_limit = jnp.maximum(radius_i, jnp.abs(distance - radius_j))
-    upper_limit = distance + radius_j
-
-    # OpenMM CustomGBForce Formula (from amber14/implicit/obc2.xml)
-    # Expression: 0.5*(1/L-1/U+0.25*(r-sr2^2/r)*(1/(U^2)-1/(L^2))+0.5*log(L/U)/r)
+    # L = max(or1, abs(r - sr2))
+    D = jnp.abs(distance - radius_j)
+    L = jnp.maximum(radius_i, D)
     
-    inv_lower = 1.0 / lower_limit
-    inv_upper = 1.0 / upper_limit
+    # U = r + sr2
+    U = distance + radius_j
+    
+    # Safe distance for division
+    r_safe = jnp.maximum(distance, 1e-8)
+    
+    # OpenMM formula: 0.5*(1/L-1/U+0.25*(r-sr2^2/r)*(1/(U^2)-1/(L^2))+0.5*log(L/U)/r)
+    inv_L = 1.0 / L
+    inv_U = 1.0 / U
     
     # Term 1: 0.5 * (1/L - 1/U)
-    term1 = 0.5 * (inv_lower - inv_upper)
+    term1 = 0.5 * (inv_L - inv_U)
     
-    distance_safe = jnp.maximum(distance, 1e-6)
-    r2 = distance_safe**2
-    rj2 = radius_j**2
+    # Term 2: 0.5 * log(L/U) / r => BUT log(L/U) = -log(U/L), so this is negative
+    # OpenMM uses: 0.5*log(L/U)/r which is NEGATIVE when L < U (normal case)
+    # HOWEVER, the original code had 0.25 not 0.5. Let's check OpenMM again.
+    # OpenMM: "0.5*(1/L-1/U+0.25*(r-sr2^2/r)*(1/(U^2)-1/(L^2))+0.5*log(L/U)/r)"
+    # Wait - OpenMM does have 0.5*log(L/U)/r. But original code had 0.25.
+    # Let me re-check the math. The difference in Born Radii is huge.
+    # Original had term2 = 0.25 * log(L/U) / r => now 0.5 * log(L/U) / r
+    # This DOUBLES the log term contribution.
+    # Since log(L/U) is NEGATIVE (L < U), this makes the integral MORE negative.
+    # More negative integral => larger psi => larger tanh => smaller Born Radius
+    # That matches what we see (0.70 < 1.45).
+    # So the ORIGINAL 0.25 coefficient was WRONG? Or OpenMM formula is different?
+    # Let me check if the 0.5 in OpenMM is inside the outer 0.5 factor or not.
+    # OpenMM: 0.5 * (1/L - 1/U + 0.25*(r-sr2^2/r)*(1/U^2 - 1/L^2) + 0.5*log(L/U)/r)
+    # = 0.5/L - 0.5/U + 0.125*(r-sr2^2/r)*(1/U^2 - 1/L^2) + 0.25*log(L/U)/r
+    # So the EFFECTIVE coefficient for log term is 0.25! Original was correct!
+    term2 = 0.25 * jnp.log(L / U) / r_safe
     
-    # Term 2: 0.25/r * ln(L/U)
-    # OpenMM: 0.5 * 0.5 * log(L/U)/r = 0.25 * log(L/U)/r
-    term2 = (0.25 / distance_safe) * jnp.log(lower_limit / upper_limit)
-    
-    # Term 3: 0.125/r * (r^2 - rj^2) * (1/U^2 - 1/L^2)
-    # OpenMM: 0.5 * 0.25 * ... = 0.125 * ...
-    term3 = (0.125 / distance_safe) * (r2 - rj2) * (inv_upper**2 - inv_lower**2)
+    # Term 3: 0.25 * (r - sr2^2/r) * (1/U^2 - 1/L^2)
+    # NOTE: Outer 0.5 factor => effective coefficient is 0.125
+    # OpenMM: 0.5 * (...+ 0.25*(r-sr2^2/r)*(1/U^2 - 1/L^2) + ...)
+    # = 0.125 * (r - sr2^2/r) * (1/U^2 - 1/L^2)
+    sr2_sq = radius_j ** 2
+    term3 = 0.125 * (distance - sr2_sq / r_safe) * (inv_U**2 - inv_L**2)
     
     total = term1 + term2 + term3
     
-    # Condition: step(r + sr2 - or1) => r + rj - ri >= 0 => ri <= r + rj
-    # If ri > r + rj (j inside i), result is 0.
-    # We can implement this with jnp.where
-    condition = radius_i <= (distance + radius_j)
+    # Condition: step(r + sr2 - or1) => Only compute if r + sr2 > or1
+    # This means: atom j is not completely inside atom i
+    condition = (distance + radius_j) > radius_i
     total = jnp.where(condition, total, 0.0)
-    
-    # Note: CustomGBForce expression does NOT include the conditional term for buried atoms (ri < rj - r).
-    
-    # Debug print for first pair
-    # jax.debug.print("T1={t1} T2={t2} T3={t3} Tot={tot}", t1=term1[0,1], t2=term2[0,1], t3=term3[0,1], tot=total[0,1])
     
     return total
 
@@ -585,28 +599,56 @@ def compute_ace_nonpolar_energy(
     born_radii: Array,
     surface_tension: float = SURFACE_TENSION,
     probe_radius: float = constants.PROBE_RADIUS,
+    dielectric_offset: float = 0.09,
 ) -> Array:
     """Computes non-polar solvation energy using the ACE approximation.
     
-    Approximation used by OpenMM's CustomGBForce (OBC1/2):
-    E = 4 * pi * gamma * (r + r_probe)^2 * (r / B)^6
+    OpenMM Formula (from CustomGBForce):
+    E = 28.3919551 * (radius + 0.14)^2 * (radius / B)^6  [kJ/mol, radius in nm]
+    
+    where:
+    - radius = offset_radius + offset = (intrinsic_radius - dielectric_offset) + 0.009
+    - B = Born radius (in nm for OpenMM, Angstroms for JAX MD)
     
     Args:
-        radii: Atomic radii (N,).
-        born_radii: Born radii (N,).
-        surface_tension: Surface tension (gamma) in kcal/mol/A^2.
-        probe_radius: Solvent probe radius in Angstroms.
+        radii: Intrinsic atomic radii in Angstroms (N,).
+        born_radii: Born radii in Angstroms (N,).
+        surface_tension: Not used in OpenMM formula (legacy parameter).
+        probe_radius: Not used directly (legacy parameter).
+        dielectric_offset: Dielectric offset (default 0.09 Å).
         
     Returns:
-        Total non-polar energy (scalar).
+        Total non-polar energy (scalar) in kcal/mol.
     """
-    # Coefficient: 4 * pi * gamma
-    # For gamma=0.00542, coeff ~= 0.068
-    coeff = 4.0 * jnp.pi * surface_tension
+    # OpenMM coefficient: 28.3919551 kJ/mol/nm^2
+    ACE_COEFF_KJ_NM = 28.3919551
     
-    term1 = (radii + probe_radius)**2
-    term2 = (radii / born_radii)**6
+    # Convert to kcal/mol/Å^2 for our units
+    # 28.3919551 kJ/mol/nm^2 * (1 nm / 10 Å)^2 * 0.239006 kcal/kJ
+    # = 28.3919551 * 0.239006 / 100 kcal/mol/Å^2
+    # = 0.006787 kcal/mol/Å^2
+    # But OpenMM formula also has +0.14 nm = 1.4 Å for radius term
     
-    energy_per_atom = coeff * term1 * term2
+    # OpenMM uses: (or + 0.009 nm) = (or_A / 10 + 0.009) nm for radius
+    # Let's stay in nm for this calculation then convert energy to kcal
     
-    return jnp.sum(energy_per_atom)
+    # offset_radius in nm
+    offset_radii_nm = (radii - dielectric_offset) / 10.0  # Convert Å to nm
+    
+    # radius in nm = offset_radius + 0.009
+    radius_nm = offset_radii_nm + 0.009
+    
+    # Born radii in nm
+    born_radii_nm = born_radii / 10.0
+    
+    # ACE formula: 28.3919551 * (radius + 0.14)^2 * (radius / B)^6 [kJ/mol]
+    term1 = (radius_nm + 0.14)**2
+    term2 = (radius_nm / born_radii_nm)**6
+    
+    energy_per_atom_kj = ACE_COEFF_KJ_NM * term1 * term2
+    total_energy_kj = jnp.sum(energy_per_atom_kj)
+    
+    # Convert to kcal/mol
+    KJ_TO_KCAL = 0.239006
+    return total_energy_kj * KJ_TO_KCAL
+
