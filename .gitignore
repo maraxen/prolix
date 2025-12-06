@@ -1,1 +1,24 @@
+# Python build artifacts
+build/
+dist/
+*.egg-info/
+__pycache__/
+*.pyc
+*.pyo
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# Test/debug output
+verify_*.txt
+*.log
+batch_physics_results.csv
+
+# External dependencies (cloned repos)
 scripts/openmmforcefields/
+openmmforcefields/
+
+# Generated force field files
+src/priox.physics.force_fields/
