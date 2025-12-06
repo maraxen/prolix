@@ -340,7 +340,8 @@ def make_energy_fn(
           return 0.0
           
       cmap_indices = system_params["cmap_indices"]
-      cmap_coeffs = system_params["cmap_coeffs"]
+      # Use raw energy grids - new CMAP computes periodic spline coefficients
+      cmap_grids = system_params["cmap_energy_grids"]
       
       # cmap_torsions is (N, 5) [i, j, k, l, m]
       # Phi: i-j-k-l
@@ -353,10 +354,7 @@ def make_energy_fn(
       psi = compute_dihedral_angles(r, psi_indices, displacement_fn)
       
       # Swapped to (psi, phi) based on validation results matching OpenMM
-      # jax.debug.print("CMAP Phi[0]: {}", phi[0])
-      # jax.debug.print("CMAP Psi[0]: {}", psi[0])
-      e_cmap = cmap.compute_cmap_energy(psi, phi, cmap_indices, cmap_coeffs)
-      # jax.debug.print("CMAP Energy (psi, phi): {}", e_cmap)
+      e_cmap = cmap.compute_cmap_energy(psi, phi, cmap_indices, cmap_grids)
       return e_cmap
 
   # Total Energy Function
