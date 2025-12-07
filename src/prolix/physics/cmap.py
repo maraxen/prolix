@@ -205,6 +205,38 @@ def compute_map_derivatives(
     
     return d1, d2, d12
 
+    d12 = jax.vmap(compute_d12_col)(jnp.arange(size)).T
+    
+    return d1, d2, d12
+
+
+def precompute_cmap_coefficients(cmap_grids: jnp.ndarray) -> jnp.ndarray:
+    """Precompute bicubic spline coefficients for a batch of CMAP grids.
+    
+    Args:
+        cmap_grids: (N_maps, Grid, Grid) raw energy grids
+        
+    Returns:
+        coeffs: (N_maps, Grid, Grid, 16) precomputed coefficients
+    """
+    if cmap_grids.ndim != 3:
+        raise ValueError(f"cmap_grids must be 3D (N, Grid, Grid), got {cmap_grids.shape}")
+        
+    n_maps = cmap_grids.shape[0]
+    grid_size = cmap_grids.shape[1]
+    
+    # Transpose grids: OpenMM stores energy[i+size*j] (column-major) but XML
+    # parsing with Python default reshape uses C-order, transposing phi/psi axes.
+    # We transpose each grid to match OpenMM convention: grid[phi_idx, psi_idx]
+    cmap_grids_transposed = jnp.transpose(cmap_grids, (0, 2, 1))
+    
+    # Compute coefficients for each map
+    def compute_map_coeffs(m):
+        return compute_bicubic_coefficients(cmap_grids_transposed[m], grid_size)
+    
+    # We use vmap to compute efficienty
+    coeffs = jax.vmap(compute_map_coeffs)(jnp.arange(n_maps))
+    return coeffs
 
 
 

@@ -8,7 +8,7 @@ import jax
 import jax.numpy as jnp
 from jax_md import energy, partition, space, util
 
-from prolix.physics import bonded, generalized_born, cmap, sasa
+from prolix.physics import bonded, generalized_born, cmap, sasa, pme, virtual_sites
 from priox.physics import constants
 from priox.md.jax_md_bridge import SystemParams
 
@@ -52,6 +52,12 @@ def make_energy_fn(
   solute_dielectric: float = constants.DIELECTRIC_PROTEIN,
   surface_tension: float = constants.SURFACE_TENSION,
   dielectric_offset: float = constants.DIELECTRIC_OFFSET,
+  # PBC / Explicit Solvent parameters
+  box: Array | None = None,
+  use_pbc: bool = False,
+  cutoff_distance: float = 9.0,
+  pme_grid_points: int | Array = 64,
+  pme_alpha: float = 0.34,
 ) -> Callable[[Array], Array]:
   """Creates the total potential energy function.
 
@@ -71,11 +77,33 @@ def make_energy_fn(
       solute_dielectric: Solute dielectric constant (default 1.0).
       surface_tension: Surface tension for SASA term (kcal/mol/A^2).
       dielectric_offset: Offset for Born radius calculation (default 0.09 A).
+      box: Simulation box dimensions (optional).
+      use_pbc: Whether to use periodic boundary conditions.
+      cutoff_distance: Cutoff for non-bonded interactions (Angstroms).
+      pme_grid_points: Grid points for PME (e.g. 64).
+      pme_alpha: Ewald splitting parameter.
 
   Returns:
       A function energy(R, neighbor=None) -> float.
 
   """
+
+  # Pre-compute CMAP coefficients
+  # This moves the spline fitting cost from JIT/runtime to setup time
+  cmap_grids = system_params.get("cmap_energy_grids")
+  cmap_coeffs_precomputed = None
+  
+  if cmap_grids is not None and cmap_grids.shape[0] > 0:
+      # We compute them eagerly here
+      # Check if already 4D (pre-computed externally) or 3D (raw grids)
+      if cmap_grids.ndim == 3:
+          # Compute!
+          # We need to make sure we don't accidentally trace this if make_energy_fn 
+          # is somehow called inside a transform, but typically it is not.
+          # Even if it is, this is efficient.
+          cmap_coeffs_precomputed = cmap.precompute_cmap_coefficients(cmap_grids)
+      elif cmap_grids.ndim == 4:
+          cmap_coeffs_precomputed = cmap_grids
 
   # 1. Bonded Terms
   bond_energy_fn = bonded.make_bond_energy_fn(
@@ -101,6 +129,18 @@ def make_energy_fn(
     system_params["impropers"],
     system_params["improper_params"],
   )
+
+  # Urey-Bradley Terms (Harmonic Bond between 1-3 pairs)
+  ub_energy_fn = bonded.make_bond_energy_fn(
+    displacement_fn,
+    system_params.get("urey_bradley_bonds", jnp.zeros((0, 2), dtype=jnp.int32)),
+    system_params.get("urey_bradley_params", jnp.zeros((0, 2), dtype=jnp.float32)),
+  )
+
+  # Virtual Sites
+  vs_def = system_params.get("virtual_site_def", jnp.zeros((0, 4), dtype=jnp.int32))
+  vs_params = system_params.get("virtual_site_params", jnp.zeros((0, 12), dtype=jnp.float32))
+  has_virtual_sites = (vs_params.shape[0] > 0)
 
   # 2. Non-Bonded Terms
   charges = system_params["charges"]
@@ -184,15 +224,57 @@ def make_energy_fn(
       # Non-polar Solvation (SASA) - Now computed separately using ACE
       pass
     
-    # Direct Coulomb / Screened Coulomb
+    # Direct Coulomb / Screened Coulomb / PME
+    if use_pbc and box is not None:
+        # PME Electrostatics (Explicit Solvent / Periodic)
+        # ================================================
+        
+        # 1. Reciprocal Space (Long Range)
+        # This is computed globally (N^2 or N log N via FFT) on the grid
+        # We assume standard PME behavior where Reciprocal is pre-calculated fn
+        # Note: charges are captured from closure
+        pme_recip_fn = pme.make_pme_energy_fn(
+            charges, box, grid_points=pme_grid_points, alpha=pme_alpha
+        )
+        e_recip = pme_recip_fn(r)
+        
+        # 2. Direct Space (Short Range)
+        # E_direct = sum_ij [ q_i*q_j * erfc(alpha*r_ij) / r_ij ]
+        # computed within neighbor list loop below or separate call?
+        # We'll compute it inside the neighbor block below by modifying logic.
+        pass # Handle in neighbor block logic switch
+        
+    else:
+        e_recip = 0.0
+
     if implicit_solvent:
         eff_dielectric = solute_dielectric
         kappa = 0.0
     else:
         eff_dielectric = dielectric_constant
-        kappa = 0.1  # Legacy screened coulomb kappa
+        kappa = 0.1  # Legacy screened coulomb kappa for vacuum?
+        if use_pbc:
+            kappa = 0.0 # No screening for PME direct space (uses erfc)
+            eff_dielectric = 1.0 # PME assumes vacuum permittivity units usually (332.06...)
 
     COULOMB_CONSTANT = 332.0637 / eff_dielectric
+    
+    # Apply scaling to PME Reciprocal
+    # jax_md PME returns energy in internal units (assuming q in e, r in A -> V ~ e^2/A)
+    # We need to scale by COULOMB_CONSTANT to get kcal/mol
+    if use_pbc and box is not None:
+        e_recip = e_recip * COULOMB_CONSTANT
+        
+        # PME Self Energy Correction
+        # E_self = - COULOMB_CONSTANT * (alpha / sqrt(pi)) * sum(q^2)
+        # logic: e_recip includes self term? No, reciprocal sum usually positive.
+        # We need to subtract self energy of Gaussian distribution.
+        
+        q_sq_sum = jnp.sum(charges**2)
+        e_self = COULOMB_CONSTANT * (pme_alpha / jnp.sqrt(jnp.pi)) * q_sq_sum
+        
+        # Standard Ewald: Total = Real + Recip - Self
+        e_recip = e_recip - e_self
     
     if neighbor_idx is None:
       # Dense
@@ -202,7 +284,12 @@ def make_energy_fn(
       
       dist_safe = dist + 1e-6
       
-      if kappa > 0:
+      if use_pbc and box is not None:
+          # Dense PME Direct Space
+          # E = C * q_i * q_j * erfc(alpha * r) / r
+          erfc_term = jax.scipy.special.erfc(pme_alpha * dist)
+          e_coul = COULOMB_CONSTANT * (q_ij / dist_safe) * erfc_term
+      elif kappa > 0:
           e_coul = COULOMB_CONSTANT * (q_ij / dist_safe) * jnp.exp(-kappa * dist)
       else:
           e_coul = COULOMB_CONSTANT * (q_ij / dist_safe)
@@ -217,6 +304,7 @@ def make_energy_fn(
           e_coul = jnp.where(exclusion_mask, e_coul, 0.0)
 
       e_direct = 0.5 * jnp.sum(e_coul)
+      
     else:
       # Neighbor List
       idx = neighbor_idx
@@ -231,7 +319,11 @@ def make_energy_fn(
       
       dist_safe = dist + 1e-6
       
-      if kappa > 0:
+      if use_pbc and box is not None:
+          # Neighbor List PME Direct Space
+          erfc_term = jax.scipy.special.erfc(pme_alpha * dist)
+          e_coul = COULOMB_CONSTANT * (q_ij / dist_safe) * erfc_term
+      elif kappa > 0:
           e_coul = COULOMB_CONSTANT * (q_ij / dist_safe) * jnp.exp(-kappa * dist)
       else:
           e_coul = COULOMB_CONSTANT * (q_ij / dist_safe)
@@ -258,7 +350,10 @@ def make_energy_fn(
     if implicit_solvent:
         return e_gb, e_direct, born_radii
     else:
-        return 0.0, e_direct, None
+        # Return total electrostatics (Recip + Direct)
+        # Note return signature is (GB_Energy, Elec_Energy, BornRadii)
+        # We treat PME total as e_direct here for signature compatibility
+        return 0.0, e_direct + e_recip, None
 
   # Combine Non-Bonded
   # -------------------------------------------------------------------------
@@ -343,7 +438,6 @@ def make_energy_fn(
       # Use raw energy grids - new CMAP computes periodic spline coefficients
       cmap_grids = system_params["cmap_energy_grids"]
       
-      # cmap_torsions is (N, 5) [i, j, k, l, m]
       # Phi: i-j-k-l
       # Psi: j-k-l-m
       
@@ -354,14 +448,26 @@ def make_energy_fn(
       psi = compute_dihedral_angles(r, psi_indices, displacement_fn)
       
       # Swapped to (psi, phi) based on validation results matching OpenMM
-      e_cmap = cmap.compute_cmap_energy(psi, phi, cmap_indices, cmap_grids)
+      # Use pre-computed coefficients if available (captured from outer scope)
+      # Otherwise fall back to grid (should be None if we did our job)
+      coeffs_to_use = cmap_coeffs_precomputed if cmap_coeffs_precomputed is not None else cmap_grids
+      
+      e_cmap = cmap.compute_cmap_energy(psi, phi, cmap_indices, coeffs_to_use)
       return e_cmap
 
   # Total Energy Function
   # -------------------------------------------------------------------------
   def total_energy(r: Array, neighbor: partition.NeighborList | None = None, **kwargs) -> Array:
+    # 0. Update Virtual Sites
+    # We do this first so all energy terms seeing VS see correct positions.
+    # Bonded terms involving VS (if any) and Non-bonded terms will use updated R.
+    # Note: Gradients will backprop through this reconstruction to parent atoms/params.
+    if has_virtual_sites:
+        r = virtual_sites.reconstruct_virtual_sites(r, vs_def, vs_params)
+
     e_bond = bond_energy_fn(r)
     e_angle = angle_energy_fn(r)
+    e_ub = ub_energy_fn(r)
     e_dihedral = dihedral_energy_fn(r)
     e_improper = improper_energy_fn(r)
     e_cmap = compute_cmap_term(r)
@@ -376,6 +482,6 @@ def make_energy_fn(
     e_elec = e_gb + e_direct
     e_np = compute_nonpolar(r, born_radii, neighbor_idx)
     
-    return e_bond + e_angle + e_dihedral + e_improper + e_cmap + e_lj + e_elec + e_np
+    return e_bond + e_angle + e_ub + e_dihedral + e_improper + e_cmap + e_lj + e_elec + e_np
 
   return total_energy

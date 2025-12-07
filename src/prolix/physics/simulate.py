@@ -9,6 +9,7 @@ import jax.numpy as jnp
 from jax import random, jit
 from jax_md import minimize, simulate, space, util, quantity
 import dataclasses
+from dataclasses import dataclass
 from functools import partial
 
 from prolix.physics import system
@@ -18,24 +19,52 @@ from priox.md.jax_md_bridge import SystemParams
 Array = util.Array
 
 
+@dataclass
+class SimulationSpec:
+    """Configuration for running a simulation."""
+    total_time_ns: float
+    step_size_fs: float = 2.0
+    ensemble: str = "nvt_langevin"  # "nve", "nvt_nose_hoover", "nvt_langevin", "brownian"
+    temperature: float = 300.0
+    pressure: float | None = None  # Future support for NPT
+    gamma: float = 1.0  # Friction coefficient (1/ps) for Langevin
+    tau: float = 0.5  # Time constant (ps) for Nose-Hoover
+    chain_length: int = 5 # Nose-Hoover chain length
+    chain_steps: int = 1 # Nose-Hoover chain steps
+    save_interval_ns: float = 0.001
+    accumulate_steps: int = 500
+    save_path: str = "trajectory.array_record"
+    use_shake: bool = False
+
+    @property
+    def dt(self) -> float:
+        """Time step in picoseconds."""
+        return self.step_size_fs / 1000.0
+
+    @property
+    def steps(self) -> int:
+        """Total number of steps."""
+        return int(self.total_time_ns * 1000.0 / self.dt)
+
+
 @jax.tree_util.register_pytree_node_class
 @dataclasses.dataclass
 class NVTLangevinState:
-  position: Array
-  momentum: Array
-  force: Array
-  mass: Array
-  rng: Array
+    position: Array
+    momentum: Array
+    force: Array
+    mass: Array
+    rng: Array
 
-  def set(self, **kwargs):
-      return dataclasses.replace(self, **kwargs)
+    def set(self, **kwargs):
+        return dataclasses.replace(self, **kwargs)
 
-  def tree_flatten(self):
-    return ((self.position, self.momentum, self.force, self.mass, self.rng), None)
+    def tree_flatten(self):
+        return ((self.position, self.momentum, self.force, self.mass, self.rng), None)
 
-  @classmethod
-  def tree_unflatten(cls, aux_data, children):
-    return cls(*children)
+    @classmethod
+    def tree_unflatten(cls, aux_data, children):
+        return cls(*children)
 
 def rattle_langevin(
     energy_or_force_fn: Callable[..., Array],
@@ -370,6 +399,116 @@ def run_thermalization(
   return state.position
 
 
+
+
+def run_nve(
+    energy_fn: Callable[[Array], Array],
+    r_init: Array,
+    steps: int,
+    dt: float = 2e-3,
+    mass: Array | float = 1.0,
+    use_shake: bool = False,
+    constraints: tuple[Array, Array] | None = None,
+) -> Array:
+    """Run NVE simulation using Velocity Verlet (or RATTLE if constrained)."""
+    if use_shake and constraints is not None:
+         # Reuse rattle_langevin with gamma=0 (effectively NVE with constraints)
+         init_fn, apply_fn = rattle_langevin(
+            energy_fn,
+            shift_fn=space.free()[1],
+            dt=dt,
+            kT=0.0, 
+            gamma=0.0,
+            mass=mass,
+            constraints=constraints
+         )
+         key = jax.random.PRNGKey(0) 
+         state = init_fn(key, r_init, kT=0.0)
+    else:
+        init_fn, apply_fn = simulate.nve(
+            energy_fn,
+            shift_fn=space.free()[1],
+            dt=dt
+        )
+        kT = BOLTZMANN_KCAL * 300.0 # Default assumption if not passed
+        key = jax.random.PRNGKey(0)
+        state = init_fn(key, r_init, mass=mass, kT=kT)
+
+    @jax.jit
+    def step_fn(i, state):
+        return apply_fn(state)
+
+    state = jax.lax.fori_loop(0, steps, step_fn, state)
+    return state.position
+
+
+def run_nvt_nose_hoover(
+    energy_fn: Callable[[Array], Array],
+    r_init: Array,
+    steps: int,
+    dt: float = 2e-3,
+    temperature: float = 300.0,
+    tau: float = 0.5,
+    chain_length: int = 5,
+    chain_steps: int = 1,
+    mass: Array | float = 1.0,
+) -> Array:
+    """Run NVT simulation using Nose-Hoover chain."""
+    kT = BOLTZMANN_KCAL * temperature
+    
+    init_fn, apply_fn = simulate.nvt_nose_hoover(
+        energy_fn,
+        shift_fn=space.free()[1],
+        dt=dt,
+        kT=kT,
+        tau=tau,
+        chain_length=chain_length,
+        chain_steps=chain_steps
+    )
+    
+    key = jax.random.PRNGKey(0)
+    state = init_fn(key, r_init, mass=mass)
+
+    @jax.jit
+    def step_fn(i, state):
+        return apply_fn(state)
+
+    state = jax.lax.fori_loop(0, steps, step_fn, state)
+    return state.position
+
+
+def run_brownian(
+    energy_fn: Callable[[Array], Array],
+    r_init: Array,
+    steps: int,
+    dt: float = 2e-3,
+    temperature: float = 300.0,
+    gamma: float = 0.1,
+    mass: Array | float = 1.0,
+) -> Array:
+    """Run Brownian dynamics simulation."""
+    kT = BOLTZMANN_KCAL * temperature
+    
+    # jax_md.simulate.brownian(energy_or_force, shift, dt, kT, gamma=0.1)
+    init_fn, apply_fn = simulate.brownian(
+        energy_fn,
+        shift=space.free()[1],
+        dt=dt,
+        kT=kT,
+        gamma=gamma
+    )
+    
+    key = jax.random.PRNGKey(0)
+    state = init_fn(key, r_init)
+
+    @jax.jit
+    def step_fn(i, state):
+        return apply_fn(state)
+
+    state = jax.lax.fori_loop(0, steps, step_fn, state)
+    return state.position
+
+
 def run_simulation(
   system_params: SystemParams,
   r_init: Array,
@@ -381,8 +520,9 @@ def run_simulation(
   solvent_dielectric: float = 78.5,
   solute_dielectric: float = 1.0,
   key: Array | None = None,
+  sim_spec: SimulationSpec | None = None,
 ) -> Array:
-  """Run full simulation: Minimization -> Thermalization.
+  """Run full simulation: Minimization -> Thermalization -> Production.
 
   Args:
       system_params: System parameters.
@@ -395,11 +535,24 @@ def run_simulation(
       solvent_dielectric: Solvent dielectric for GB.
       solute_dielectric: Solute dielectric for GB.
       key: PRNG key.
+      sim_spec: Simulation configuration specification (optional).
 
   Returns:
       Final positions.
 
   """
+  dt_production = 2e-3 # Default
+  steps_production = 0
+  
+  # Resolve Configuration
+  if sim_spec is not None:
+      # Use spec values for production defaults
+      temperature = sim_spec.temperature
+      dt_production = sim_spec.dt
+      steps_production = sim_spec.steps
+      # Note: min/therm steps might not be in spec efficiently yet,
+      # but we use args for those stages or defaults.
+  
   displacement_fn, _ = space.free()
   energy_fn = system.make_energy_fn(
       displacement_fn, 
@@ -436,7 +589,8 @@ def run_simulation(
           constraints = (constrained_bonds, constrained_lengths)
 
   # 2. Thermalize
-  r_final = run_thermalization(
+  # Always use NVT Langevin for thermalization for stability
+  r_therm = run_thermalization(
     energy_fn,
     r_min,
     temperature=temperature,
@@ -447,4 +601,48 @@ def run_simulation(
     key=key
   )
 
-  return r_final
+  # 3. Production (if spec provided)
+  if sim_spec is not None and steps_production > 0:
+      print(f"Running Production: {sim_spec.ensemble} for {sim_spec.total_time_ns} ns ({steps_production} steps)")
+      
+      if sim_spec.ensemble == "nve":
+          return run_nve(
+              energy_fn, r_therm, steps_production, 
+              dt=dt_production, mass=masses, 
+              use_shake=sim_spec.use_shake or use_shake, # Use spec shake or system implied shake
+              constraints=constraints
+          )
+      elif sim_spec.ensemble == "nvt_nose_hoover":
+          return run_nvt_nose_hoover(
+              energy_fn, r_therm, steps_production,
+              dt=dt_production, temperature=temperature,
+              tau=sim_spec.tau,
+              chain_length=sim_spec.chain_length,
+              chain_steps=sim_spec.chain_steps,
+              mass=masses
+          )
+      elif sim_spec.ensemble == "nvt_langevin":
+          # Use existing thermalization/langevin runner but purely for production steps
+           return run_thermalization(
+                energy_fn,
+                r_therm,
+                temperature=temperature,
+                steps=steps_production,
+                dt=dt_production,
+                gamma=sim_spec.gamma,
+                mass=masses,
+                use_shake=sim_spec.use_shake or use_shake,
+                constraints=constraints,
+                key=key # Re-use key? Ideally split.
+          )
+      elif sim_spec.ensemble == "brownian":
+          return run_brownian(
+              energy_fn, r_therm, steps_production,
+              dt=dt_production, temperature=temperature,
+              gamma=sim_spec.gamma,
+              mass=masses
+          )
+      else:
+          raise ValueError(f"Unknown ensemble: {sim_spec.ensemble}")
+  
+  return r_therm

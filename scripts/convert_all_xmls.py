@@ -149,6 +149,53 @@ def parse_xml_to_eqx(xml_path: str, output_dir: str):
         hyperparams['propers'] = parse_tor('Proper')
         hyperparams['impropers'] = parse_tor('Improper')
 
+        # --- 1.5 Urey-Bradley Parsing (AmoebaUreyBradleyForce) ---
+        ub_terms = []
+        for ub_force in root.findall('AmoebaUreyBradleyForce'):
+            for ub in ub_force.findall('UreyBradley'):
+                c1 = ub.attrib.get('class1', ub.attrib.get('type1'))
+                c2 = ub.attrib.get('class2', ub.attrib.get('type2'))
+                if c1 and c2:
+                    d_nm = float(ub.attrib['d'])
+                    d_a = d_nm * NM_TO_ANGSTROM
+                    k_kj_nm2 = float(ub.attrib['k'])
+                    k_kcal_a2 = k_kj_nm2 * KJ_TO_KCAL / (NM_TO_ANGSTROM**2)
+                    ub_terms.append((c1, c2, d_a, k_kcal_a2))
+        
+        hyperparams["urey_bradley_bonds"] = ub_terms
+        if ub_terms:
+            print(f"DEBUG: Parsed {len(ub_terms)} Urey-Bradley terms.")
+
+        # --- 1.6 Virtual Site Parsing ---
+        if "virtual_sites" not in hyperparams:
+            hyperparams["virtual_sites"] = {}
+
+        for res in root.findall('Residues/Residue'):
+            res_name = res.attrib['name']
+            vs_list = []
+            for vs in res.findall('VirtualSite'):
+                if vs.attrib.get('type') == 'localCoords':
+                    try:
+                        data = {
+                            'type': 'localCoords',
+                            'siteName': vs.attrib['siteName'], 
+                            'atoms': [vs.attrib['atomName1'], vs.attrib['atomName2'], vs.attrib['atomName3']],
+                            'p': [float(vs.attrib['p1']), float(vs.attrib['p2']), float(vs.attrib['p3'])], # nm
+                            'wo': [float(vs.attrib.get('wo1',0)), float(vs.attrib.get('wo2',0)), float(vs.attrib.get('wo3',0))],
+                            'wx': [float(vs.attrib.get('wx1',0)), float(vs.attrib.get('wx2',0)), float(vs.attrib.get('wx3',0))],
+                            'wy': [float(vs.attrib.get('wy1',0)), float(vs.attrib.get('wy2',0)), float(vs.attrib.get('wy3',0))]
+                        }
+                        # Convert p from nm to Angstrom
+                        data['p'] = [x * NM_TO_ANGSTROM for x in data['p']]
+                        vs_list.append(data)
+                    except Exception as e:
+                        print(f"  WARNING: Failed to parse VirtualSite in {res_name}: {e}")
+            
+            if vs_list:
+                hyperparams["virtual_sites"][res_name] = vs_list
+                if len(hyperparams["virtual_sites"]) <= 5: 
+                     print(f"  DEBUG: Found {len(vs_list)} Virtual Sites in {res_name}")
+
         # --- 2. CMAP Parsing ---
         cmap_grids = []
         for cmap_force in root.findall('CMAPTorsionForce'):
@@ -317,11 +364,11 @@ if __name__ == "__main__":
         print("Cloning repo...")
         os.system("git clone --depth 1 https://github.com/openmm/openmmforcefields.git")
     
-    output_dir = "src/priox.physics.force_fields/eqx"
+    output_dir = "data/force_fields"
     os.makedirs(output_dir, exist_ok=True)
     
     # Recursive search for ANY xml file
-    xml_files = glob.glob("openmmforcefields/**/*.xml", recursive=True)
+    xml_files = glob.glob("openmmforcefields/openmmforcefields/**/*.xml", recursive=True)
     print(f"Found {len(xml_files)} potential XML files.")
     
     for xml in xml_files:

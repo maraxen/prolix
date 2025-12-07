@@ -1,0 +1,20 @@
+Imports done.
+Benchmarking JAX MD vs OpenMM for 1UAO (1000 steps)
+
+[1] OpenMM Benchmark...
+OpenMM (CPU): 2.8512 ms/step
+
+[2] JAX MD Benchmark...
+DEBUG CORE: Torsion 11-10-13-14 Matched 4 terms.
+  Classes: protein-C-protein-XC-protein-CT-protein-CA
+  Types: cmap-TYR-C-cmap-TYR-CA-protein-CT-protein-CA
+  Best Terms: [[4, 3.141592653589793, 0.011999999993088], [3, 0.0, 0.191999999889408], [2, 3.141592653589793, 0.468999999729856], [1, 0.0, 0.05499999996832]]
+JAX MD (Grad/Force, Python Loop): 1.6479 ms/step
+
+[3] JAX MD Benchmark (lax.scan)...
+JAX MD (lax.scan): 2.2718 ms/step
+
+------------------------------------------------
+Ratio (JAX-Python / OpenMM): 0.58x
+Speedup vs OpenMM: 1.26x
+------------------------------------------------
