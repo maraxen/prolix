@@ -6,6 +6,7 @@ from typing import Callable
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 from jax_md import energy, partition, space, util
 
 from prolix.physics import bonded, generalized_born, cmap, sasa, pme, virtual_sites
@@ -152,6 +153,19 @@ def make_energy_fn(
   scale_matrix_elec = system_params.get("scale_matrix_elec")
   exclusion_mask = system_params["exclusion_mask"]
 
+  # Constants
+  if implicit_solvent:
+      eff_dielectric = solute_dielectric
+      kappa = 0.0
+  else:
+      eff_dielectric = dielectric_constant
+      kappa = 0.1  # Legacy screened coulomb kappa for vacuum?
+      if use_pbc:
+          kappa = 0.0 # No screening for PME direct space (uses erfc)
+          eff_dielectric = 1.0 # PME assumes vacuum permittivity units usually (332.06...)
+
+  COULOMB_CONSTANT = 332.0637 / eff_dielectric
+
   def lj_pair(dr, sigma_i, sigma_j, eps_i, eps_j, **kwargs):
     sigma = 0.5 * (sigma_i + sigma_j)
     epsilon = jnp.sqrt(eps_i * eps_j)
@@ -160,6 +174,7 @@ def make_energy_fn(
   # Electrostatics
   # -------------------------------------------------------------------------
   def compute_electrostatics(r, neighbor_idx=None):
+    # Prepare parameters
     # Prepare parameters
     if "gb_radii" in system_params and system_params["gb_radii"] is not None:
       radii = system_params["gb_radii"]
@@ -247,17 +262,7 @@ def make_energy_fn(
     else:
         e_recip = 0.0
 
-    if implicit_solvent:
-        eff_dielectric = solute_dielectric
-        kappa = 0.0
-    else:
-        eff_dielectric = dielectric_constant
-        kappa = 0.1  # Legacy screened coulomb kappa for vacuum?
-        if use_pbc:
-            kappa = 0.0 # No screening for PME direct space (uses erfc)
-            eff_dielectric = 1.0 # PME assumes vacuum permittivity units usually (332.06...)
-
-    COULOMB_CONSTANT = 332.0637 / eff_dielectric
+    # COULOMB_CONSTANT is defined in outer scope
     
     # Apply scaling to PME Reciprocal
     # jax_md PME returns energy in internal units (assuming q in e, r in A -> V ~ e^2/A)
@@ -266,9 +271,8 @@ def make_energy_fn(
         e_recip = e_recip * COULOMB_CONSTANT
         
         # PME Self Energy Correction
-        # E_self = - COULOMB_CONSTANT * (alpha / sqrt(pi)) * sum(q^2)
-        # logic: e_recip includes self term? No, reciprocal sum usually positive.
-        # We need to subtract self energy of Gaussian distribution.
+        # Re-enabling manual subtraction as it yields physically plausible results (-18k vs +30k)
+        # Suggesting JAX MD does not fully subtract the Gaussian Self Energy in the way we calculate it.
         
         q_sq_sum = jnp.sum(charges**2)
         e_self = COULOMB_CONSTANT * (pme_alpha / jnp.sqrt(jnp.pi)) * q_sq_sum
@@ -455,6 +459,173 @@ def make_energy_fn(
       e_cmap = cmap.compute_cmap_energy(psi, phi, cmap_indices, coeffs_to_use)
       return e_cmap
 
+
+  # PME Exclusion Corrections (Pre-computation)
+  # -------------------------------------------------------------------------
+  
+  # Robust Topological Search for Exclusions
+  # We cannot rely solely on 'angles' and 'dihedrals' arrays because they might correspond
+  # only to defined force field terms, not necessarily all topological pairs.
+  # We rebuild the connectivity graph from bonds to find all 1-2, 1-3, and 1-4 pairs.
+
+  pme_bonds = system_params.get("bonds")
+  n_atoms = charges.shape[0]
+  
+  # Python-side Graph Search (Fast enough for <10k atoms)
+  # using numpy for input, lists for output
+  
+  if pme_bonds is not None and pme_bonds.shape[0] > 0:
+      import collections
+      # Build Adjacency
+      adj = collections.defaultdict(list)
+      # Ensure bonds are on CPU (numpy) for iteration
+      bonds_np = np.array(pme_bonds) 
+      for b in bonds_np:
+          adj[b[0]].append(b[1])
+          adj[b[1]].append(b[0])
+          
+      excl_12 = []
+      excl_13 = []
+      excl_14 = []
+      
+      # Iterate all atoms
+      for i in range(n_atoms):
+          # 1-2
+          for j in adj[i]:
+              if j > i:
+                  excl_12.append([i, j])
+                  
+              # 1-3
+              for k in adj[j]:
+                  if k == i: continue
+                  if k > i:
+                      excl_13.append([i, k])
+                      
+                  # 1-4
+                  for l in adj[k]:
+                      if l == j: continue
+                      if l == i: continue # Ring of 3?
+                      if l > i:
+                          excl_14.append([i, l])
+
+      # Convert to JAX arrays and Unique-ify
+      if len(excl_12) > 0:
+          pme_idx_12 = jnp.array(excl_12, dtype=jnp.int32)
+          # 1-2 pairs from adjacency are unique if we enforced j > i and graph is undirected
+          # and bonds input was unique. Bonds input is usually unique.
+      else:
+          pme_idx_12 = jnp.zeros((0, 2), dtype=jnp.int32)
+          
+      if len(excl_13) > 0:
+          # 1-3 pairs: (i, k).
+          # Graph search might find (i, k) via multiple paths (rings).
+          # We must unique-ify.
+          pme_idx_13 = jnp.unique(jnp.array(excl_13, dtype=jnp.int32), axis=0)
+      else:
+          pme_idx_13 = jnp.zeros((0, 2), dtype=jnp.int32)
+          
+      if len(excl_14) > 0:
+          # 1-4 pairs: (i, l). Must unique-ify.
+          pme_idx_14 = jnp.unique(jnp.array(excl_14, dtype=jnp.int32), axis=0)
+      else:
+          pme_idx_14 = jnp.zeros((0, 2), dtype=jnp.int32)
+          
+      # Filter overlaps:
+      # If a pair is 1-2, it cannot be 1-3 or 1-4.
+      # If a pair is 1-3, it cannot be 1-4.
+      # (Important for rings).
+      # PME exclusions logic: 1-2 takes precedence (Scale 0). 1-3 takes next (Scale 0).
+      # 1-4 is scaled.
+      # Our search logic: (i, l) is 1-4. If (i, l) is also 1-2 (ring of 3), it was added to excl_12.
+      # We just process lists sequentially? 
+      # No, compute_pme_exceptions calculates them independently.
+      # If I include (i,j) in both 1-2 and 1-4 lists:
+      # 1-2: sub Recip.
+      # 1-4: sub (1-sc)*Recip.
+      # Total sub: Recip + (1-sc)*Recip = (2-sc)*Recip. Too much!
+      # We must ensure disjoint sets.
+      
+      # Since we use JDE/XLA, sets are hard.
+      # But at setup time (here), we can use python sets of tuples.
+      
+      set_12 = set(tuple(x) for x in excl_12)
+      set_13 = set(tuple(x) for x in excl_13)
+      set_14 = set(tuple(x) for x in excl_14)
+      
+      # 1-2 are definitely 1-2.
+      # Remove 1-2 from 1-3
+      set_13 = set_13 - set_12
+      # Remove 1-2 and 1-3 from 1-4
+      set_14 = set_14 - set_12 - set_13
+      
+      if len(set_13) > 0:
+          pme_idx_13 = jnp.array(list(set_13), dtype=jnp.int32)
+      else:
+          pme_idx_13 = jnp.zeros((0, 2), dtype=jnp.int32)
+          
+      if len(set_14) > 0:
+          pme_idx_14 = jnp.array(list(set_14), dtype=jnp.int32)
+      else:
+          pme_idx_14 = jnp.zeros((0, 2), dtype=jnp.int32)
+          
+  else:
+      pme_idx_12 = jnp.zeros((0, 2), dtype=jnp.int32)
+      pme_idx_13 = jnp.zeros((0, 2), dtype=jnp.int32)
+      pme_idx_14 = jnp.zeros((0, 2), dtype=jnp.int32)
+
+  # Scaling for 1-4
+  coul_14_scale = system_params.get("coulomb14scale", 0.83333333)
+
+  def compute_pme_exceptions(r):
+      """Computes the reciprocal space correction for excluded/scaled pairs."""
+      if not use_pbc or box is None:
+          return 0.0
+
+      # Correction Formula: E_corr = - (1.0 - scale) * q_i * q_j * erf(alpha * r) / r
+      # For 1-2 and 1-3: scale = 0.0 => E_corr = -1.0 * Recip
+      # For 1-4: scale = sc => E_corr = -(1.0 - sc) * Recip
+      
+      def calc_correction_term(indices, scale_factor):
+          if indices.shape[0] == 0:
+              return 0.0
+              
+          r_i = r[indices[:, 0]]
+          r_j = r[indices[:, 1]]
+          
+          # Displacement
+          dr = jax.vmap(displacement_fn)(r_i, r_j)
+          dist = space.distance(dr)
+          
+          # Charges
+          q_i = charges[indices[:, 0]]
+          q_j = charges[indices[:, 1]]
+          
+          # Reciprocal Part of Energy (what we want to remove)
+          # E_recip_pair = q_i * q_j * erf(alpha * r) / r
+          # We use COULOMB_CONSTANT for units
+          
+          # Avoid singularity
+          dist_safe = dist + 1e-6
+          erf_term = jax.scipy.special.erf(pme_alpha * dist)
+          
+          e_pair_recip = COULOMB_CONSTANT * (q_i * q_j / dist_safe) * erf_term
+          
+          # We subtract (1 - scale) * E_recip_pair
+          factor = 1.0 - scale_factor
+          return jnp.sum(e_pair_recip * factor)
+
+      e_corr = 0.0
+      # 1-2 (Scale 0.0)
+      e_corr += calc_correction_term(pme_idx_12, 0.0)
+      # 1-3 (Scale 0.0)
+      e_corr += calc_correction_term(pme_idx_13, 0.0)
+      # 1-4 (Scale coul_14_scale)
+      e_corr += calc_correction_term(pme_idx_14, coul_14_scale)
+      
+      # We subtract this correction
+      return -e_corr
+
+
   # Total Energy Function
   # -------------------------------------------------------------------------
   def total_energy(r: Array, neighbor: partition.NeighborList | None = None, **kwargs) -> Array:
@@ -472,9 +643,6 @@ def make_energy_fn(
     e_improper = improper_energy_fn(r)
     e_cmap = compute_cmap_term(r)
 
-
-
-    
     neighbor_idx = neighbor.idx if neighbor is not None else None
     
     e_lj = compute_lj(r, neighbor_idx)
@@ -482,6 +650,10 @@ def make_energy_fn(
     e_elec = e_gb + e_direct
     e_np = compute_nonpolar(r, born_radii, neighbor_idx)
     
+    if use_pbc and box is not None:
+        e_pme_corr = compute_pme_exceptions(r)
+        e_elec += e_pme_corr
+        
     return e_bond + e_angle + e_ub + e_dihedral + e_improper + e_cmap + e_lj + e_elec + e_np
 
   return total_energy

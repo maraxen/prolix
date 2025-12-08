@@ -1,9 +1,10 @@
 Metadata-Version: 2.4
 Name: prolix
 Version: 0.1.0
-Summary: Add your description here
+Summary: Protein Physics and Molecular Dynamics in JAX
 Requires-Python: >=3.11
 Description-Content-Type: text/markdown
+License-File: LICENSE
 Requires-Dist: jax
 Requires-Dist: jax-md
 Requires-Dist: equinox
@@ -12,3 +13,148 @@ Requires-Dist: biotite
 Requires-Dist: mdtraj
 Requires-Dist: numpy
 Requires-Dist: scipy
+Requires-Dist: chex
+Requires-Dist: jaxtyping
+Requires-Dist: py2dmol>=1.5.1
+Requires-Dist: matplotlib>=3.10.7
+Requires-Dist: imageio>=2.37.2
+Provides-Extra: dev
+Requires-Dist: ruff; extra == "dev"
+Requires-Dist: pytest; extra == "dev"
+Requires-Dist: pytest-cov; extra == "dev"
+Requires-Dist: pytest-xdist; extra == "dev"
+Requires-Dist: pyright; extra == "dev"
+Requires-Dist: openmm>=8.4.0; extra == "dev"
+Provides-Extra: docs
+Requires-Dist: sphinx; extra == "docs"
+Requires-Dist: sphinx-book-theme; extra == "docs"
+Requires-Dist: myst-nb; extra == "docs"
+Requires-Dist: sphinx-design; extra == "docs"
+Requires-Dist: sphinx-copybutton; extra == "docs"
+Requires-Dist: sphinx-autodoc-typehints; extra == "docs"
+Requires-Dist: sphinxext-rediraffe; extra == "docs"
+Provides-Extra: viz
+Requires-Dist: py2Dmol>=1.5.0; extra == "viz"
+Requires-Dist: flask>=3.0.0; extra == "viz"
+Dynamic: license-file
+
+# Prolix
+
+**Prolix** is a specialized library for Protein Physics and molecular dynamics simulations in JAX. It provides efficient implementations of force fields, energy calculations, and MD integrations for the JAX ecosystem.
+
+**NOTE**: This is a work-in-progress library and is not yet ready for production use. It is currently in active development and subject to change.
+
+## Features
+
+- **JAX MD Integration**: Seamless bridging between protein force fields and JAX MD simulations
+- **Implicit Solvent**: Generalized Born (GBSA) implementation with OBC2 model
+- **Force Fields**: Support for AMBER force fields (ff14SB, ff19SB) with CMAP corrections
+- **Energy Calculations**: Bond, angle, torsion, and non-bonded energy terms
+- **MD Simulations**: Stable molecular dynamics with customizable thermostats and integrators
+
+## Installation
+
+### From GitHub (Recommended)
+
+```bash
+# Install priox first (dependency)
+pip install git+https://github.com/maraxen/priox.git@main
+
+# Then install prolix
+pip install git+https://github.com/maraxen/prolix.git@main
+```
+
+### From Source
+
+To install Prolix from source:
+
+```bash
+git clone https://github.com/maraxen/prolix.git
+cd prolix
+pip install .
+```
+
+For development installation with test dependencies (including OpenMM):
+
+```bash
+pip install -e ".[dev]"
+```
+
+## Usage
+
+### Running a Simple MD Simulation
+
+```python
+from prolix.physics import system, simulate
+from priox.physics import force_fields
+from priox.io.parsing import biotite as bio
+
+# Load structure and force field
+structure = bio.load_structure_with_hydride("protein.pdb")
+ff = force_fields.load_force_field("path/to/ff19SB.eqx")
+
+# Set up simulation
+params = system.parameterize_system(ff, structure)
+trajectory = simulate.run_md(
+    positions=structure.coord,
+    params=params,
+    temperature=300.0,
+    steps=10000
+)
+```
+
+### Computing Energy
+
+```python
+from jax_md import space
+from prolix.physics import system
+
+# Create energy function
+displacement_fn, _ = space.free()
+energy_fn = system.make_energy_fn(
+    displacement_fn=displacement_fn,
+    system_params=params,
+    implicit_solvent=True
+)
+
+# Compute energy
+energy = energy_fn(positions)
+```
+
+## Development
+
+### Running Tests
+
+Run the full test suite:
+
+```bash
+pytest
+```
+
+Run fast "smoke" tests to verify core functionality:
+
+```bash
+pytest -m smoke
+```
+
+### Linting and Typing
+
+Check code quality:
+
+```bash
+ruff check .
+pyright
+```
+
+## Dependencies
+
+Prolix depends on:
+
+- **priox**: For protein I/O and force field loading
+- **jax-md**: For molecular dynamics engine
+- **jax**: For automatic differentiation and GPU acceleration
+- **equinox**: For neural network modules and serialization
+
+## License
+
+MIT License - see LICENSE file for details.

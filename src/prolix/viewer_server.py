@@ -19,6 +19,7 @@ import argparse
 import json
 import logging
 import os
+import traceback
 import webbrowser
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -152,24 +153,25 @@ def create_app(
     
     try:
       frames = []
-      with TrajectoryReader(traj_path) as reader:
-        for state in reader:
-          positions = np.asarray(state.positions)
-          # Filter to CA only if we have indices
-          if ca_indices:
-            ca_positions = positions[ca_indices].tolist()
-          else:
-            ca_positions = positions.tolist()
-          
-          frames.append({
-            "positions": ca_positions,
-            "time_ns": float(np.asarray(state.time_ns)) if state.time_ns is not None else None,
-            "potential_energy": float(np.asarray(state.potential_energy)) if state.potential_energy is not None else None,
-          })
+      reader = TrajectoryReader(traj_path)
+      for state in reader:
+        positions = np.asarray(state.positions)
+        # Filter to CA only if we have indices
+        if ca_indices:
+          ca_positions = positions[ca_indices].tolist()
+        else:
+          ca_positions = positions.tolist()
+        
+        frames.append({
+          "positions": ca_positions,
+          "time_ns": float(np.asarray(state.time_ns)) if state.time_ns is not None else None,
+          "potential_energy": float(np.asarray(state.potential_energy)) if state.potential_energy is not None else None,
+        })
       
       return jsonify({"frames": frames, "num_ca_atoms": len(ca_indices) if ca_indices else len(frames[0]["positions"]) if frames else 0})
     except Exception as e:
       logger.exception("Error reading trajectory")
+      print(traceback.format_exc())
       return jsonify({"error": str(e)}), 500
 
   @app.route("/api/trajectory/<int:frame_idx>")

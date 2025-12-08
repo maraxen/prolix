@@ -132,27 +132,61 @@ class TestPositionPlausibility:
         assert np.isfinite(e_final), f"Final energy is not finite: {e_final}"
 
     def test_minimization_finite_forces(self, chignolin_setup):
-        """Forces after minimization should be finite and reasonable."""
+        """Forces after minimization should be finite and within reasonable bounds."""
         from prolix.physics import simulate
         
         energy_fn = chignolin_setup["energy_fn"]
         positions = chignolin_setup["positions"]
+        system_params = chignolin_setup["system_params"] # Assuming this is available
         
         r_min = simulate.run_minimization(energy_fn, positions, steps=500)
         
-        # Compute forces
-        forces = -jax.grad(energy_fn)(r_min)
-        forces_np = np.asarray(forces)
+        from jax_md import space
+        from prolix.physics import system
         
-        # Forces should be finite
-        assert np.all(np.isfinite(forces_np)), "Forces contain NaN or Inf"
+        displacement_fn, _ = space.free()
         
-        # Force magnitudes should be reasonable (< 15 million kcal/mol/Å after minimization in x32)
-        force_magnitudes = np.linalg.norm(forces_np, axis=1)
-        max_force = force_magnitudes.max()
+        # Compute forces (-grad E)
+        # Re-create energy_fn if the one from setup is not suitable for direct grad
+        # Or use the one from setup if it's already jax-grad compatible
+        energy_fn_for_grad = system.make_energy_fn(displacement_fn, system_params, implicit_solvent=True)
+        forces = -jax.grad(energy_fn_for_grad)(r_min)
         
-        assert max_force < 15000000, (
+        # Check finite
+        assert jnp.all(jnp.isfinite(forces))
+        
+        # Check magnitude (max force < 1e5 kJ/mol/nm or similar)
+        # OpenMM minimization usually targets 10 kJ/mol/nm. 
+        # But we just want strict "not exploding".
+        max_force = jnp.max(jnp.linalg.norm(forces, axis=-1))
+        
+        # Note: units are kcal/mol/A. 1000 is high but finite.
+        # Unminimized system might have 1e5+. Minimized should be < 100 or so.
+        # But we are checking simple finiteness/plausibility.
+        assert max_force < 5000.0, (
             f"Max force after minimization is too large: {max_force:.1f} kcal/mol/Å"
+        )
+
+    def test_all_atoms_bonded(self, chignolin_setup):
+        """Verify every atom has at least one bond to prevent floating atoms."""
+        system_params = chignolin_setup['system_params'] # Corrected to 'system_params'
+        atom_names = chignolin_setup['atom_names']
+        
+        bonds = np.array(system_params['bonds'])
+        
+        bonded_atoms = set()
+        for a, b in bonds:
+            bonded_atoms.add(int(a))
+            bonded_atoms.add(int(b))
+        
+        n_atoms = len(atom_names)
+        unbonded_indices = [i for i in range(n_atoms) if i not in bonded_atoms]
+        unbonded_details = [
+            f"{i}: {atom_names[i]}" for i in unbonded_indices
+        ]
+        
+        assert len(unbonded_indices) == 0, (
+            f"Found {len(unbonded_indices)} unbonded atoms that will float away: {unbonded_details}"
         )
 
 
@@ -431,14 +465,14 @@ class TestTrajectoryPositions:
         
         from prolix.visualization import TrajectoryReader
         
-        with TrajectoryReader(str(traj_path)) as reader:
-            for i in range(min(len(reader), 10)):  # Check first 10 frames
-                state = reader[i]
-                pos = np.asarray(state.positions)
-                centered = pos - pos.mean(axis=0)
-                
-                # Positions should stay within ±200 Å (generous for minor outliers)
-                assert centered.min() > -200 and centered.max() < 200, (
-                    f"Frame {i} has positions outside molecular range: "
-                    f"[{centered.min():.1f}, {centered.max():.1f}]"
-                )
+        reader = TrajectoryReader(str(traj_path))
+        for i in range(min(len(reader), 10)):  # Check first 10 frames
+            state = reader.get_state(i)
+            pos = np.asarray(state.positions)
+            centered = pos - pos.mean(axis=0)
+            
+            # Positions should stay within ±200 Å (generous for minor outliers)
+            assert centered.min() > -200 and centered.max() < 200, (
+                f"Frame {i} has positions outside molecular range: "
+                f"[{centered.min():.1f}, {centered.max():.1f}]"
+            )
