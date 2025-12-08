@@ -1,0 +1,16 @@
+{
+  "name": "prolix-viewer",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Trajectory visualization for prolix molecular dynamics",
+  "scripts": {
+    "dev": "rspack dev",
+    "build": "rspack build",
+    "preview": "rspack preview"
+  },
+  "devDependencies": {
+    "@rspack/cli": "^1.6.6",
+    "@rspack/core": "^1.6.6",
+    "typescript": "^5.9.3"
+  }
+}

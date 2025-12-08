@@ -1,0 +1,151 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+    <title>py2Dmol Debug Test</title>
+    <style>
+        body {
+            font-family: sans-serif;
+            padding: 20px;
+        }
+
+        #status {
+            margin: 20px 0;
+            padding: 10px;
+            background: #f0f0f0;
+        }
+
+        button {
+            margin: 5px;
+            padding: 10px 20px;
+        }
+    </style>
+</head>
+
+<body>
+    <h1>py2Dmol Debug Test</h1>
+
+    <div id="status">Loading...</div>
+
+    <button onclick="loadPDB()">Load PDB from API</button>
+    <button onclick="loadHardcoded()">Load Hardcoded Test</button>
+
+    <h2>py2Dmol Viewer:</h2>
+    <iframe id="viewer-frame" src="/py2dmol_viewer.html" width="800" height="600"
+        style="border: 1px solid #ccc;"></iframe>
+
+    <script>
+        const statusEl = document.getElementById('status');
+        const frame = document.getElementById('viewer-frame');
+
+        // Listen for ready message from iframe
+        window.addEventListener('message', (event) => {
+            console.log('Message from iframe:', event.data);
+            if (event.data && event.data.type === 'py2dmol_ready') {
+                statusEl.textContent = 'py2Dmol viewer is ready!';
+            }
+        });
+
+        async function loadPDB() {
+            statusEl.textContent = 'Fetching PDB...';
+            try {
+                // Fetch PDB
+                const pdbResponse = await fetch('/api/pdb');
+                const pdbContent = await pdbResponse.text();
+                console.log('PDB content (first 500 chars):', pdbContent.substring(0, 500));
+
+                // Parse CA atoms from PDB
+                const atoms = parsePDB(pdbContent);
+                console.log('Parsed atoms:', atoms);
+                statusEl.textContent = `Parsed ${atoms.length} C-alpha atoms from PDB`;
+
+                // Send to py2Dmol
+                sendToViewer(atoms);
+            } catch (e) {
+                statusEl.textContent = 'Error: ' + e.message;
+                console.error(e);
+            }
+        }
+
+        function loadHardcoded() {
+            statusEl.textContent = 'Loading hardcoded test data...';
+
+            // Hardcoded C-alpha coordinates for a small helix
+            const atoms = [
+                { coord: [0, 0, 0], chain: 'A', plddt: 90 },
+                { coord: [3.8, 0, 0], chain: 'A', plddt: 85 },
+                { coord: [7.6, 1.5, 0], chain: 'A', plddt: 80 },
+                { coord: [11.4, 0, 1.5], chain: 'A', plddt: 75 },
+                { coord: [15.2, 1, 0], chain: 'A', plddt: 70 },
+                { coord: [19, 0, -1.5], chain: 'A', plddt: 65 },
+                { coord: [22.8, 1.5, 0], chain: 'A', plddt: 60 },
+                { coord: [26.6, 0, 1], chain: 'A', plddt: 55 },
+            ];
+
+            console.log('Hardcoded atoms:', atoms);
+            sendToViewer(atoms);
+            statusEl.textContent = `Sent ${atoms.length} hardcoded atoms to viewer`;
+        }
+
+        function parsePDB(content) {
+            const lines = content.split('\n');
+            const atoms = [];
+
+            for (const line of lines) {
+                if (!line.startsWith('ATOM') && !line.startsWith('HETATM')) continue;
+
+                const atomName = line.substring(12, 16).trim();
+                const chainId = line.substring(21, 22).trim() || 'A';
+
+                // Only C-alpha atoms
+                if (atomName !== 'CA') continue;
+
+                const x = parseFloat(line.substring(30, 38).trim());
+                const y = parseFloat(line.substring(38, 46).trim());
+                const z = parseFloat(line.substring(46, 54).trim());
+                const bFactor = parseFloat(line.substring(60, 66).trim()) || 50;
+
+                atoms.push({
+                    coord: [x, y, z],
+                    chain: chainId,
+                    plddt: Math.min(100, Math.max(0, bFactor)),
+                });
+            }
+
+            return atoms;
+        }
+
+        function sendToViewer(atoms) {
+            if (!frame.contentWindow) {
+                statusEl.textContent = 'Error: iframe not ready';
+                return;
+            }
+
+            // First, create a new trajectory
+            frame.contentWindow.postMessage({
+                type: 'py2DmolNewTrajectory',
+                name: 'Test'
+            }, '*');
+
+            // Then send the frame data
+            const payload = {
+                coords: atoms.map(a => a.coord),
+                plddts: atoms.map(a => a.plddt),
+                chains: atoms.map(a => a.chain),
+                atom_types: atoms.map(() => 'P'),
+            };
+
+            console.log('Sending payload to viewer:', payload);
+
+            frame.contentWindow.postMessage({
+                type: 'py2DmolUpdate',
+                trajectoryName: 'Test',
+                payload: payload
+            }, '*');
+
+            statusEl.textContent += ' - Data sent to viewer!';
+        }
+    </script>
+</body>
+
+</html>

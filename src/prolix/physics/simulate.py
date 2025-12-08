@@ -84,15 +84,20 @@ def rattle_langevin(
     key, split = random.split(key)
     force = force_fn(R, **kwargs)
     
-    # Handle mass
-    mass = jnp.array(mass, dtype=R.dtype)
-    if mass.ndim == 0:
-        mass = jnp.ones_like(R[..., 0]) * mass
-    elif mass.ndim == 1 and mass.shape[0] == R.shape[0]:
-        mass = mass[:, None] # (N, 1) for broadcasting
-        
-    state = NVTLangevinState(R, None, force, mass, key)
-    return simulate.initialize_momenta(state, split, _kT)
+    # Handle mass - keep as 1D for state, expand for broadcasting in calculations
+    mass_arr = jnp.array(mass, dtype=R.dtype)
+    if mass_arr.ndim == 0:
+        mass_arr = jnp.ones((R.shape[0],), dtype=R.dtype) * mass_arr
+    
+    # Initialize momenta manually to avoid jax_md shape issues
+    # p = sqrt(m * kT) * N(0,1)
+    # Use mass_arr[:, None] for broadcasting with shape (N, 3)
+    momenta = jnp.sqrt(mass_arr[:, jnp.newaxis] * _kT) * random.normal(split, R.shape, dtype=R.dtype)
+    
+    # Store mass as (N, 1) for broadcasting in apply_fn
+    mass_for_state = mass_arr[:, jnp.newaxis]
+    
+    return NVTLangevinState(R, momenta, force, mass_for_state, key)
 
   def apply_fn(state, **kwargs):
     _dt = kwargs.pop('dt', dt)
@@ -308,30 +313,113 @@ def run_minimization(
   steps: int = 500,
   dt_start: float = 2e-3,  # 2 fs - typical for MD
   dt_max: float = 4e-3,     # 4 fs max
+  max_displacement_per_step: float = 0.1,  # Maximum Å per step (prevents explosion)
+  force_threshold: float = 1000.0,  # kcal/mol/Å - switch from SD to FIRE when below
+  sd_steps: int = 200,  # Steepest descent pre-conditioning steps
 ) -> Array:
-  """Run energy minimization using FIRE descent.
+  """Run energy minimization using robust multi-stage approach.
+
+  For high-energy structures with large forces, a simple FIRE minimization can
+  cause positions to explode. This function uses:
+  1. Steepest descent pre-conditioning with adaptive step size
+  2. FIRE descent for final optimization
+  3. Position sanity check at the end
 
   Args:
       energy_fn: Energy function E(R).
       r_init: Initial positions (N, 3).
-      steps: Number of minimization steps.
-      dt_start: Initial time step.
-      dt_max: Maximum time step.
+      steps: Number of FIRE minimization steps.
+      dt_start: Initial time step for FIRE.
+      dt_max: Maximum time step for FIRE.
+      max_displacement_per_step: Maximum atomic displacement per step (Å).
+      force_threshold: Switch to FIRE when max force drops below this.
+      sd_steps: Maximum steepest descent pre-conditioning steps.
 
   Returns:
       Minimized positions.
 
   """
-  init_fn, apply_fn = minimize.fire_descent(energy_fn, shift_fn=space.free()[1], dt_start=dt_start, dt_max=dt_max)
-  state = init_fn(r_init)
+  # -------------------------------------------------------------------------
+  # Stage 1: Steepest Descent Pre-conditioning
+  # -------------------------------------------------------------------------
+  # This handles high-energy starting structures safely by using adaptive dt
+  
+  @jax.jit
+  def steepest_descent_step(r, _):
+    """Single steepest descent step with adaptive step size."""
+    forces = -jax.grad(energy_fn)(r)
+    force_magnitudes = jnp.linalg.norm(forces, axis=-1)
+    max_force = jnp.max(force_magnitudes) + 1e-8
+    
+    # Adaptive step size: limit maximum displacement
+    adaptive_dt = max_displacement_per_step / max_force
+    adaptive_dt = jnp.minimum(adaptive_dt, dt_max)
+    
+    # Simple steepest descent: r_new = r + dt * F (move along force direction)
+    r_new = r + adaptive_dt * forces
+    
+    return r_new, max_force
+  
+  # Run steepest descent with early exit when forces are low enough
+  r_current = r_init
+  
+  # Compute initial forces to decide if SD is needed
+  forces_init = -jax.grad(energy_fn)(r_init)
+  max_force_init = float(jnp.max(jnp.linalg.norm(forces_init, axis=-1)))
+  
+  if max_force_init > force_threshold:
+    # Need steepest descent pre-conditioning
+    r_current, max_forces = jax.lax.scan(steepest_descent_step, r_init, jnp.arange(sd_steps))
+    
+    # Check final force magnitude
+    forces_after_sd = -jax.grad(energy_fn)(r_current)
+    max_force_after_sd = float(jnp.max(jnp.linalg.norm(forces_after_sd, axis=-1)))
+  else:
+    max_force_after_sd = max_force_init
+  
+  # -------------------------------------------------------------------------
+  # Stage 2: FIRE Optimization
+  # -------------------------------------------------------------------------
+  # Use smaller dt if forces are still high
+  effective_dt_start = dt_start
+  if max_force_after_sd > 100.0:
+    # Scale down dt based on force magnitude
+    effective_dt_start = min(dt_start, max_displacement_per_step / max_force_after_sd)
+  
+  effective_dt_max = min(dt_max, effective_dt_start * 10.0)
+  
+  init_fn, apply_fn = minimize.fire_descent(
+    energy_fn, 
+    shift_fn=space.free()[1], 
+    dt_start=effective_dt_start, 
+    dt_max=effective_dt_max
+  )
+  state = init_fn(r_current)
 
-  # JIT the loop body for speed
   @jax.jit
   def step_fn(i, state):  # noqa: ARG001
     return apply_fn(state)
 
   state = jax.lax.fori_loop(0, steps, step_fn, state)
-  return state.position
+  r_final = state.position
+  
+  # -------------------------------------------------------------------------
+  # Position Sanity Check
+  # -------------------------------------------------------------------------
+  r_final_np = jnp.asarray(r_final)
+  center = jnp.mean(r_final_np, axis=0)
+  centered = r_final_np - center
+  max_displacement = jnp.max(jnp.abs(centered))
+  
+  # Warning if positions seem unreasonable (but don't fail - let caller decide)
+  if float(max_displacement) > 500.0:
+    import warnings
+    warnings.warn(
+      f"Minimization produced positions with max displacement {float(max_displacement):.1f} Å "
+      f"from center of mass. This may indicate numerical instability."
+    )
+  
+  return r_final
 
 
 def run_thermalization(

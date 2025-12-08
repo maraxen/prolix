@@ -19,6 +19,9 @@ dependencies = [
     "scipy",
     "chex",
     "jaxtyping",
+    "py2dmol>=1.5.1",
+    "matplotlib>=3.10.7",
+    "imageio>=2.37.2",
 ]
 
 [tool.setuptools.packages.find]
@@ -32,6 +35,7 @@ dev = [
     "pytest-xdist",
     "pyright",
     "openmm>=8.4.0",
+    # "openff-toolkit>=0.14.0",  # TODO: Requires conda or special channel
 ]
 
 docs = [
@@ -42,6 +46,11 @@ docs = [
     "sphinx-copybutton",
     "sphinx-autodoc-typehints",
     "sphinxext-rediraffe",
+]
+
+viz = [
+    "py2Dmol>=1.5.0",
+    "flask>=3.0.0",
 ]
 
 [tool.pytest.ini_options]
@@ -98,3 +107,7 @@ reportImportCycles = false
 [tool.uv.sources]
 priox = { path = "priox", editable = true }
 
+[tool.uv]
+environments = [
+    "sys_platform == 'darwin'",
+]

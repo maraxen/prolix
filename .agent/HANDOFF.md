@@ -1,22 +1,130 @@
-# Prolix MD Physics Handoff Summary
+# Prolix MD - Development Handoff
 
-## Current Status: OpenMM Parity Achieved ✅
+## Project Status
 
-**Benchmark Date:** 2025-12-06
-**Test Protein:** 1UAO (Trp-cage, 138 atoms)
+**OpenMM Physics Parity:** ✅ Achieved (Dec 2025)  
+**Position Stability:** ✅ Fixed (terminal topology and minimization)  
+**Test Protein:** 1UAO (Trp-cage, 138 atoms)  
 **Force Field:** ff19SB + GBSA/OBC2
 
-### Energy Comparison (No Parameter Injection)
+---
 
-| Component | OpenMM (kcal/mol) | JAX MD (kcal/mol) | Δ |
-|-----------|-------------------|-------------------|---|
-| Bond | 20.3124 | 20.3124 | 0.0000 ✓ |
-| Angle | 7.9587 | 7.9587 | 0.0000 ✓ |
-| Torsion | 49.6248 | 49.6248 | 0.0000 ✓ |
-| CMAP | 10.2384 | 10.2384 | 0.0000 ✓ |
-| NonBonded (LJ+Coulomb) | -23.1066 | -23.1066 | ~0.0 ✓ |
-| GBSA Total | -361.3371 | -361.3368 | ~0.0003 ✓ |
-| **Total Energy** | **-296.3094** | **-296.3092** | **0.0002 ✓** |
+## Current Goals
+
+### 1. OpenMM Equivalence & Plausibility Test Suite
+
+> **Priority: High** | Look at [OpenMM's own test suite](https://github.com/openmm/openmm/tree/master/tests) for inspiration.
+
+**Objective:** Build a comprehensive test suite comparing JAX MD to OpenMM across:
+
+- [ ] **Energy decomposition tests** - per-component energy comparison (bond, angle, torsion, LJ, Coulomb, GBSA)
+- [ ] **Force comparison tests** - gradient accuracy against OpenMM forces
+- [ ] **Position plausibility tests** ✓ - already implemented in `tests/physics/test_position_plausibility.py`
+- [ ] **Trajectory stability tests** - long-time dynamics stability
+- [ ] **Ensemble property tests** - temperature, pressure, kinetic energy distributions
+- [ ] **Conservation tests** - energy conservation in NVE, temperature in NVT
+
+**Code coverage goals:**
+
+- [ ] Test all energy components with multiple proteins
+- [ ] Test all ensemble types (NVE, NVT, NPT when available)
+- [ ] Test edge cases (single residue, capping groups, unusual bonds)
+
+**Key files:**
+
+- `tests/physics/test_position_plausibility.py` - existing position tests
+- `benchmarks/verify_end_to_end_physics.py` - energy comparison benchmark
+- *NEW:* `tests/physics/test_openmm_parity.py` - comprehensive OpenMM comparison
+
+---
+
+### 2. Visualization Suite Completion
+
+> **Priority: Medium**
+
+**Objective:** Complete the visualization tools for trajectory analysis.
+
+- [ ] `prolix.visualization.animate_trajectory()` - GIF/video generation
+- [ ] `prolix.visualization.TrajectoryReader` - efficient trajectory loading
+- [ ] RMSD plotting over trajectory
+- [ ] Contact map visualization
+- [ ] Ramachandran plots
+- [ ] Energy vs. time plots
+- [ ] 3D structure viewer integration (py3Dmol, NGLView)
+
+**Key files:**
+
+- `src/prolix/visualization/__init__.py`
+- `src/prolix/analysis.py` - trajectory analysis functions
+
+---
+
+### 3. Explicit Solvent with Pre-Equilibrated Water Boxes
+
+> **Priority: High** | Study [OpenMM's modeller](https://github.com/openmm/openmm/blob/master/wrappers/python/openmm/app/modeller.py) for reference.
+
+**Objective:** Support explicit solvation using pre-equilibrated water boxes (TIP3P, TIP4P, SPC/E).
+
+- [ ] **Water box initialization** - load pre-equilibrated boxes from GROMACS/AMBER format
+- [ ] **Solvation workflow** - `Modeller.addSolvent()` equivalent
+- [ ] **Ion placement** - neutralization and ionic strength control
+- [ ] **PME electrostatics** - already partially implemented in `src/prolix/physics/pme.py`
+- [ ] **Long-range corrections** - LJ tail corrections
+
+**OpenMM reference files:**
+
+- `openmm/app/modeller.py` - water box placement
+- `openmm/app/forcefield.py` - water templates
+- Pre-equilibrated box sources: `openmm/app/data/`
+
+**Key prolix files:**
+
+- `src/prolix/physics/pme.py` - PME implementation
+- `src/prolix/physics/system.py` - energy function with PBC
+- *NEW:* `src/prolix/solvation.py` - water box utilities
+
+---
+
+### 4. Demo Jupyter/Colab Notebook
+
+> **Priority: Medium**
+
+**Objective:** Create a polished notebook demonstrating all supported features.
+
+**Contents:**
+
+1. **Setup** - installation, imports
+2. **Loading structures** - PDB parsing, force field loading
+3. **Energy minimization** - robust multi-stage approach
+4. **MD simulation** - NVT Langevin, trajectory saving
+5. **Analysis** - RMSD, contacts, energy visualization
+6. **Advanced features** - implicit solvent, constraints, multiple proteins
+
+**Target location:** `notebooks/prolix_tutorial.ipynb`
+
+---
+
+### 5. Force Field Support Certification
+
+> **Priority: High**
+
+**Objective:** Determine which force fields are fully supported through stress testing.
+
+| Force Field | Status | Notes |
+|-------------|--------|-------|
+| ff19SB | ✅ Supported | Primary development target |
+| ff14SB | ⚠️ To test | Amber family |
+| ff99SB | ⚠️ To test | Legacy Amber |
+| CHARMM36 | ⚠️ To test | May need Urey-Bradley |
+| GAFF/GAFF2 | ⚠️ Partial | Ligand support in progress |
+| SMIRNOFF | ❌ Not started | Requires OpenFF integration |
+
+**Certification criteria:**
+
+- [ ] All energy components match OpenMM (< 0.1 kcal/mol difference)
+- [ ] Minimization converges without position explosion
+- [ ] 100 ps NVT simulation remains stable
+- [ ] Forces match OpenMM (RMSE < 5 kcal/mol/Å)
 
 ---
 
@@ -24,187 +132,61 @@
 
 ```
 prolix/
-├── src/prolix/               # Main physics library
-│   └── physics/
-│       ├── system.py         # Energy function factory
-│       ├── bonded.py         # Bond/Angle/Torsion energy
-│       ├── cmap.py           # CMAP with periodic splines ⭐NEW
-│       ├── generalized_born.py  # GBSA/OBC2 solvation
-│       └── sasa.py           # Surface area calculation
-├── priox/src/priox/          # IO and bridge submodule
-│   └── md/bridge/
-│       ├── core.py           # SystemParams creation from PDB+FF
-│       └── types.py          # SystemParams TypedDict definition
+├── src/prolix/
+│   ├── physics/          # Energy functions
+│   │   ├── system.py     # Main energy factory
+│   │   ├── bonded.py     # Bond/Angle/Torsion
+│   │   ├── cmap.py       # CMAP with periodic splines
+│   │   ├── generalized_born.py  # GBSA/OBC2
+│   │   ├── pme.py        # Particle Mesh Ewald
+│   │   └── simulate.py   # Minimization, dynamics
+│   ├── visualization/    # Trajectory viz
+│   ├── analysis.py       # RMSD, contacts, etc.
+│   └── simulate.py       # SimulationSpec, trajectory writing
+├── priox/src/priox/
+│   ├── md/bridge/        # PDB+FF → SystemParams
+│   │   ├── core.py       # parameterize_system
+│   │   └── types.py      # SystemParams TypedDict
+│   └── physics/force_fields/  # .eqx loader
+├── tests/physics/
+│   ├── test_position_plausibility.py  # NEW
+│   └── test_ensembles.py
 ├── benchmarks/
-│   └── verify_end_to_end_physics.py  # Main validation script
-├── data/
-│   ├── pdb/                  # Test structures
-│   └── force_fields/         # Pre-converted .eqx force fields
-└── scripts/
-    └── convert_all_xmls.py   # OpenMM XML → .eqx converter
+│   └── verify_end_to_end_physics.py
+├── notebooks/            # Tutorials
+└── data/
+    ├── pdb/              # Test structures
+    └── force_fields/     # Pre-converted .eqx
 ```
 
 ---
 
-## Agent Task Registry
+## Running Tests
 
-Use `.agent/agent_tasks.jsonl` (append-only) to coordinate:
+```bash
+# Position plausibility tests (includes OpenMM comparison)
+uv run pytest tests/physics/test_position_plausibility.py -v
 
-```json
-{"timestamp": "...", "agent_id": "...", "task": "...", "status": "IN_PROGRESS|COMPLETED|BLOCKED", "files_in_scope": [...], "summary": "..."}
+# Full physics benchmark
+uv run python benchmarks/verify_end_to_end_physics.py
+
+# Run simulation demo
+uv run python scripts/simulate_chignolin_gif.py
 ```
 
 ---
 
-## Development Tasks for Parallel Agents
+## Recent Fixes (Dec 2025)
 
-### 1. Force Field Brittleness Assessment
-
-**Scope:** `scripts/convert_all_xmls.py`, `data/force_fields/`
-
-- Test with ff14SB, ff99SB, CHARMM36
-- Identify XML parsing failures
-- Document unsupported features (virtual sites, polarizable)
-
-### 2. Force Field Extensibility
-
-**Scope:** `priox/src/priox/physics/force_fields/`, `convert_all_xmls.py`
-
-- Improve modularity and ensure complete scoping of ForceField class
-- Support lazy loading
-- Add validation schemas
-- Add support for GAFF/GAFF2
-- Add support for SMIRNOFF
-- Add support for ligands
-- Add support for polarizable water
-- Add support for virtual sites
-- Add support for periodic boundary conditions
-- Add support for explicit solvation
-- Add support for PME
-- Add support for GBSA/OBC2
-
-### 3. Code Optimization
-
-**Scope:** `src/prolix/physics/`
-
-- Profile JIT compilation times
-- Pre-compute CMAP coefficients (avoid per-step spline fitting)
-- Consider `jax.lax.scan` for neighbor list updates, vectorization, or jax-md neighbor list updates where
-available
-
-### 4. Simulation Loop Specification
-
-**Scope:** New `src/prolix/simulate.py`
-
-```python
-@dataclass
-class SimulationSpec:
-    total_time_ns: float
-    step_size_fs: float = 2.0
-    save_interval_ns: float = 0.001  # 1 ps
-    accumulate_steps: int = 500      # inner scan loop
-    save_path: str = "trajectory.array_record"
-
-```
-
-```python
-class SimulationState(eqx.Module):
-    ...
-
-    def to_array_record(self):
-        packed_states = m.packb(self.numpy())
-        return writer.write(packed_states)
-        
-    
-    @classmethod
-    def from_array_record(cls, packed_states):
-        return cls(**m.unpackb(packed_states))
-    
-    def numpy(self):
-        return jax.tree_util.tree_map(np.asarray, self)
-
-```
-
-```python
-import msgpack_numpy as m
-m.patch()
-from array_record.python import ArrayRecordWriter
-writer = ArrayRecordWriter(...)
-def write_trajectory(states):
-    # convert to msgpack bytes
-    msgpack_bytes = m.packb(states)
-    # write to file
-    writer.write(msgpack_bytes)
-
-for epoch in range(total_epochs):  # outer Python loop (dynamic)
-    def wrap_step(state,):
-        return jax.fori_loop(0, int(total_time_ns / save_interval_ns), step_fn, state)
-    
-    accumulated_states = jax.lax.scan(wrap_step, state, None, length=accumulate_steps)
-    jax.block_until_ready(accumulated_states)
-    state = accumulated_states[-1]
-    cpu_states = jax.device_put(accumulated_states, 'cpu')
-    write_trajectory(cpu_states)
-
-```
-
-- analyze chingnolin trajectory and compare to openmm
-    1. calculate RMSD
-    2. calculate free energy
-    3. calculate binding free energy
-    4. calculate dihedral distributions and validity over the simulation
-    5. calculate contact map
-
-### 5. Parallel Tempering
-
-**Scope:** New `src/prolix/pt/`
-
-- Implement replica exchange
-- Temperature ladder generation
-- Swap acceptance criterion
-
-### 6. Ligand Support
-
-**Scope:** `priox/src/priox/md/bridge/core.py`, `convert_all_xmls.py`
-
-- GAFF/GAFF2 parameter parsing
-- MOL2/SDF topology reading
-- Separate ligand residue handling
-- RDKit integration
-
-### 7. Periodic Boundary Conditions and Explicit Solvation
-
-**Scope:** `src/prolix/physics/`
-
-- Implement periodic boundary conditions
-- Implement PME (NOTE: jax-md.energy may or may not have this already. be sure to check the actual source files jax_md/src/python/.../_energy.py)
-- Implement explicit solvation
-- benchmark performance with periodic boundary conditions against OpenMM
+1. **Terminal topology fix** - H bonds now properly inferred from naming conventions (bonds: 73→136)
+2. **Robust minimization** - steepest descent pre-conditioning prevents position explosion
+3. **rattle_langevin fix** - manual momenta initialization for shape compatibility
 
 ---
 
 ## Known Limitations
 
-1. **No Periodic Boundary Conditions** - vacuum/implicit only
-2. **N² Non-bonded** - neighbor lists available but slower
-3. **GBSA Radii Approximation** - uses scaled radii, not exact Born calculation
-4. **Force RMSE ~2.7 kcal/mol/Å** - acceptable for sampling, not exact dynamics
-
----
-
-## Running Validation
-
-```bash
-# Single protein
-uv run python benchmarks/verify_end_to_end_physics.py
-
-# Batch (multiple proteins)
-uv run python benchmarks/verify_batch_physics.py
-```
-
----
-
-## Git Commits (This Session)
-
-1. `29ee68c` - feat(cmap): Implement OpenMM-compatible periodic spline CMAP interpolation
-2. `63faa7d` - fix(cmap): Update system.py to use cmap_energy_grids with new CMAP implementation
+1. **N² non-bonded scaling** - neighbor lists available but O(N²) default
+2. **GBSA approximation** - uses scaled radii, matches OpenMM ~0.0003 kcal/mol
+3. **No explicit solvent** - implicit only (explicit in development)
+4. **Force RMSE ~2.7 kcal/mol/Å** - acceptable for sampling

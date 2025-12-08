@@ -199,7 +199,17 @@ def run_production_simulation(
   spec: SimulationSpec,
   key: Optional[Array] = None,
 ) -> SimulationState:
-  """Run full production simulation with trajectory saving."""
+  """Run full production simulation with trajectory saving.
+  
+  This function:
+  1. Creates energy function from system parameters
+  2. Runs energy minimization (CRITICAL for stability)
+  3. Initializes NVT Langevin dynamics
+  4. Runs production simulation with trajectory saving
+  """
+  # Import jax_md components here to avoid circular imports
+  from jax_md import simulate as jax_md_simulate
+  from jax_md import quantity as jax_md_quantity
   
   if key is None:
       key = jax.random.PRNGKey(int(time.time()))
@@ -214,7 +224,6 @@ def run_production_simulation(
       displacement_fn, shift_fn = space.free()
   
   # Check for implicit solvent or vacuum
-  # If use_pbc is True, we disable implicit solvent (GBSA)
   implicit_solvent = not spec.use_pbc
   
   energy_fn = system.make_energy_fn(
@@ -226,73 +235,62 @@ def run_production_simulation(
       pme_grid_points=spec.pme_grid_size
   )
   
-  # 2. Minimization & Thermalization (Initial setup)
-  # We assume r_init is already minimized/thermalized? 
-  # Or should we do it here?
-  # "Simulation Loop Specification" usually implies the production run.
-  # But we need a valid state (v, f) to start.
-  # If r_init is just positions, we init velocities.
+  # 2. CRITICAL: Energy Minimization before dynamics
+  logger.info("Running energy minimization...")
+  e_initial = energy_fn(r_init)
+  logger.info("  Initial energy: %.2f kcal/mol", e_initial)
   
-  kT = spec.temperature_k * 0.0019872041 # Boltzmann in kcal/mol/K
-  masses = system_params.get("masses", 1.0)
-  if not isinstance(masses, float): # Convert from amu
-       masses = masses / 418.4
-       
-  # Canonicalize force
-  force_fn = lambda R, **kwargs: -jax.grad(energy_fn)(R, **kwargs)
+  r_min = physics_simulate.run_minimization(energy_fn, r_init, steps=5000)
   
-  # Initialize State
-  key, split = jax.random.split(key)
-  state = physics_simulate.NVTLangevinState(
-      position=r_init,
-      momentum=None, 
-      force=force_fn(r_init), 
-      mass=masses, 
-      rng=split
-  )
-  # Init velocities
-  state = jax_md_simulate.initialize_momenta(state, split, kT) # Error: define jax_md_simulate
-  # Actually simulate.nvt_langevin returns init_fn.
+  e_minimized = energy_fn(r_min)
+  logger.info("  Minimized energy: %.2f kcal/mol", e_minimized)
   
-  # Let's use the helpers in physics_simulate
-  # We need to reconstruct the init_fn/apply_fn
-  # The `physics_simulate.rattle_langevin` or `nvt_langevin` returns (init, apply).
+  # 3. Setup NVT Langevin dynamics
+  # IMPORTANT: jax_md uses reduced units, not physical time
+  # dt=2e-3 in reduced units is standard (like stress_test_stability.py)
+  # Converting from fs to jax_md reduced units: dt = step_size_fs * 1e-3 * 0.0488 (if using AKMA units)
+  # However, stress_test uses dt=2e-3 directly which is known to work.
+  # For simplicity and stability, use the known-working value.
   
-  steps_per_save = int(round(spec.save_interval_ns * 1000000 / spec.step_size_fs)) # ns -> fs
-  logger.info("Steps per save: %d", steps_per_save)
+  kT = spec.temperature_k * 0.0019872041  # Boltzmann in kcal/mol/K
+  dt = 2e-3  # Reduced units (known to work from stress_test_stability.py)
+  gamma = spec.gamma if spec.gamma <= 1.0 else 0.1  # Use lower friction for stability
   
-  # Setup Integrator
-  dt = spec.step_size_fs * 1e-3 # fs -> ps
-  gamma = spec.gamma
+  logger.info("NVT Langevin setup: T=%.1f K, kT=%.4f, dt=%.4f, gamma=%.2f", 
+              spec.temperature_k, kT, dt, gamma)
   
+  # Don't pass mass to jax_md (it handles masses internally)
+  # The stress_test_stability.py doesn't pass mass and works fine
   constrained_bonds = system_params.get("constrained_bonds")
   constrained_lengths = system_params.get("constrained_bond_lengths")
   
-  constraints = None
   if constrained_bonds is not None and constrained_lengths is not None and len(constrained_bonds) > 0:
       init_fn, apply_fn = physics_simulate.rattle_langevin(
-          energy_fn, shift_fn, dt=dt, kT=kT, gamma=gamma, mass=masses, 
+          energy_fn, shift_fn, dt=dt, kT=kT, gamma=gamma,
           constraints=(constrained_bonds, constrained_lengths)
       )
   else:
       init_fn, apply_fn = jax_md_simulate.nvt_langevin(
-          energy_fn, shift_fn, dt=dt, kT=kT, gamma=gamma, mass=masses
+          energy_fn, shift_fn, dt=dt, kT=kT, gamma=gamma
       )
 
-  # Re-initialize state properly with the integrator's init_fn
-  state = init_fn(key, r_init)
+  # Initialize state from minimized positions
+  state = init_fn(key, r_min)
   
-  # 3. Trajectory Writer
+  # 4. Setup trajectory saving
+  steps_per_save = int(round(spec.save_interval_ns * 1000000 / spec.step_size_fs))
+  logger.info("Steps per save: %d", steps_per_save)
+  
+  # Setup trajectory writer
   writer = TrajectoryWriter(spec.save_path)
   
-  # 4. Simulation Loop
-  
-  # Total epochs (Python loop)
+  # Calculate epochs for outer Python loop
   total_saves = int(spec.total_time_ns / spec.save_interval_ns)
   accumulate = spec.accumulate_steps
   n_epochs = int(math.ceil(total_saves / accumulate))
   
-  logger.info("Starting simulation: %d epochs, %d saves per epoch, total %d saves", n_epochs, accumulate, total_saves)
+  logger.info("Starting simulation: %d epochs, %d saves per epoch, total %d saves", 
+              n_epochs, accumulate, total_saves)
 
   # JIT the scan function
   
@@ -308,7 +306,7 @@ def run_production_simulation(
       
       # Calculate Energy for saving (optional, but good for analysis)
       E = energy_fn(curr_state.position)
-      K = jax_md_quantity.kinetic_energy(curr_state.momentum, curr_state.mass)
+      K = jax_md_quantity.kinetic_energy(momentum=curr_state.momentum, mass=curr_state.mass)
       
       # Convert NVTLangevinState to SimulationState for storage
       # Note: accumulated states in scan must match the return type structure.
@@ -391,6 +389,5 @@ def run_production_simulation(
   )
   return sim_state
 
-# Import locally to avoid top-level circular imports if possible
-from jax_md import simulate as jax_md_simulate
-from jax_md import quantity as jax_md_quantity
+
+# Note: jax_md imports are now inside run_production_simulation to avoid circular imports

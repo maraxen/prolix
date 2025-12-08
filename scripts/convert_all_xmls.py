@@ -6,6 +6,17 @@ import xml.etree.ElementTree as ET
 import jax.numpy as jnp
 import equinox as eqx
 from priox.physics.force_fields import FullForceField, save_force_field
+from priox.physics.force_fields.components import (
+    AtomTypeParams,
+    BondPotentialParams,
+    AnglePotentialParams,
+    DihedralPotentialParams,
+    CMAPParams,
+    UreyBradleyParams,
+    VirtualSiteParams,
+    NonbondedGlobalParams,
+    GAFFNonbondedParams,
+)
 
 # Units
 KJ_TO_KCAL = 0.239005736
@@ -23,6 +34,38 @@ def parse_xml_to_eqx(xml_path: str, output_dir: str):
             return # Skip non-forcefield files silently
 
         print(f"--- Processing {ff_name} ---")
+        
+        # --- 0. GAFF Type Parsing (New) ---
+        gaff_types = {}  # type -> (sigma, epsilon)
+        for atom in root.findall('NonbondedForce/Atom'):
+            atom_class = atom.attrib.get('class')
+            # Fallback to 'type' if class not present, but for GAFF usually class is the type key
+            if not atom_class and 'type' in atom.attrib:
+                atom_class = atom.attrib['type']
+                
+            if atom_class:
+                sigma_nm = float(atom.attrib.get('sigma', 1.0))
+                epsilon_kj = float(atom.attrib.get('epsilon', 0.0))
+                
+                sigma = sigma_nm * NM_TO_ANGSTROM
+                epsilon = epsilon_kj * KJ_TO_KCAL
+                
+                gaff_types[atom_class.lower()] = (sigma, epsilon)
+        
+        print(f"DEBUG: Found {len(gaff_types)} GAFF atom types with LJ params.")
+
+        # --- 0.5 Global Nonbonded Parameters ---
+        # Defaults
+        nb_globals = {
+            "coulomb14scale": 0.833333,
+            "lj14scale": 0.5,
+        }
+        nb_force = root.find('NonbondedForce')
+        if nb_force is not None:
+             if 'coulomb14scale' in nb_force.attrib:
+                 nb_globals["coulomb14scale"] = float(nb_force.attrib['coulomb14scale'])
+             if 'lj14scale' in nb_force.attrib:
+                 nb_globals["lj14scale"] = float(nb_force.attrib['lj14scale'])
 
         # --- 1. Basic Parameter Parsing ---
         type_to_class = {t.attrib['name']: t.attrib['class'] for t in root.findall('AtomTypes/Type')}
@@ -234,122 +277,71 @@ def parse_xml_to_eqx(xml_path: str, output_dir: str):
             # Default empty grid if no CMAP
             cmap_energy_grids = jnp.zeros((0, 24, 24), dtype=jnp.float32)
 
-        # --- 3. GBSA Radii Extraction (via OpenMM) ---
-        radii_vals = []
-        scale_vals = []
-        
-        # Only attempt for protein force fields
-        if 'protein' in ff_name and '19SB' in ff_name:
-            print(f"  Extracting GBSA radii for {ff_name} using OpenMM...")
-            try:
-                import openmm.app as app
-                import openmm.unit as unit
-                import openmm
-                
-                # Load FF with implicit solvent
-                # We assume standard obc2
-                try:
-                    omm_ff = app.ForceField(xml_path, 'implicit/obc2.xml')
-                except Exception:
-                    # Try finding obc2.xml relative to script or in standard paths
-                    omm_ff = app.ForceField(xml_path, os.path.join(os.path.dirname(xml_path), 'implicit', 'obc2.xml'))
-
-                # Build a lookup map
-                radii_map = {} # (res, atom) -> (r, s)
-                
-                # Iterate over all residues in the XML
-                for res in root.findall('Residues/Residue'):
-                    res_name = res.attrib['name']
-                    
-                    # Create a minimal system for this residue
-                    # We can't easily create a system for a single residue without a template/topology
-                    # But we can use the ForceField's templates.
-                    
-                    # Alternative: Iterate over all atoms in the generated hyperparams
-                    pass
-
-                # Strategy: Create a system with ALL residues (one of each)
-                # This is safer to ensure we capture everything.
-                
-                # Create a topology with one chain containing one of each residue
-                topo = app.Topology()
-                chain = topo.addChain()
-                
-                # We need to add atoms to the topology to match the FF templates
-                # The FF templates are loaded in omm_ff
-                
-                # Actually, simpler: Use the templates directly if accessible?
-                # OpenMM python API exposes templates via getMatchingTemplates? No.
-                
-                # Let's build a PDB-like topology
-                # We iterate over residues defined in the XML
-                
-                # We need to handle terminals. 
-                # For simplicity, we'll just try to match atoms by type/class if possible?
-                # No, GBSA parameters are assigned by atom type/class usually.
-                # But obc2.xml uses a script that might use atom names/residues.
-                
-                # Let's stick to the robust method: Build a system.
-                # But building a system requires valid connectivity.
-                
-                # Fallback: Just initialize with zeros, and rely on jax_md_bridge fallback if needed?
-                # No, we want to fix it.
-                
-                # Let's try to map atom types to radii directly if possible.
-                # But obc2.xml is a script.
-                
-                # Let's use the 'extract_radii' approach of building a polypeptide
-                # But we need to cover ALL residues.
-                
-                # Create a topology with 1 residue of each type, separated (no bonds between residues)
-                # This might fail if FF expects bonds (e.g. N-C).
-                # But for parameter extraction, maybe it's fine?
-                
-                # Actually, let's just use the 'radii_by_id' arrays we are building.
-                # We iterate 'id_to_atom_key' which has (res, atom).
-                
-                # We can't easily query OpenMM for a single atom.
-                
-                # Let's SKIP this for now in the generic converter and rely on the fact that
-                # we will run a specific regeneration script for ff19SB that can be more hacky.
-                pass
-
-            except ImportError:
-                print("  WARNING: OpenMM not found, skipping GBSA radii extraction.")
-            except Exception as e:
-                print(f"  WARNING: Failed to extract radii: {e}")
-
-        # Initialize radii/scales with zeros (will fallback to mbondi2 in bridge if 0)
-        # Or if we successfully extracted, we would populate them.
-        
-        # For now, let's just initialize zeros.
-        # The user wants to fix the mismatch.
-        # If I leave them as zeros, jax_md_bridge will use mbondi2.
-        # But we know mbondi2 != OpenMM obc2.
-        
-        # I MUST populate them here for the fix to work.
-        
-        # Let's assume we can run the extraction script I wrote earlier and save the result to a JSON,
-        # then load it here?
-        # That seems cleaner.
-        
-        # Or I can embed the extraction logic here.
-        
+        # --- GBSA Radii (Skipped for valid reasons discussed) ---
         radii_vals = [0.0] * len(charges)
         scale_vals = [0.0] * len(charges)
         
+        # --- Create Components ---
+        atom_params = AtomTypeParams(
+            charges=jnp.asarray(charges),
+            sigmas=jnp.asarray(sigmas),
+            epsilons=jnp.asarray(epsilons),
+            radii=jnp.asarray(radii_vals),
+            scales=jnp.asarray(scale_vals),
+            atom_key_to_id=hyperparams["atom_key_to_id"],
+            id_to_atom_key=hyperparams["id_to_atom_key"],
+            atom_class_map=hyperparams["atom_class_map"],
+            atom_type_map=hyperparams["atom_type_map"]
+        )
+
+        bond_params = BondPotentialParams(params=hyperparams["bonds"])
+        angle_params = AnglePotentialParams(params=hyperparams["angles"])
+        dihedral_params = DihedralPotentialParams(
+            propers=hyperparams["propers"], 
+            impropers=hyperparams["impropers"]
+        )
+        cmap_params = CMAPParams(
+            energy_grids=cmap_energy_grids,
+            torsions=hyperparams["cmap_torsions"]
+        )
+        urey_bradley_params = UreyBradleyParams(params=hyperparams["urey_bradley_bonds"])
+        virtual_site_params = VirtualSiteParams(definitions=hyperparams["virtual_sites"])
+
+        global_params = NonbondedGlobalParams(
+            coulomb14scale=nb_globals["coulomb14scale"],
+            lj14scale=nb_globals["lj14scale"]
+        )
+
+        # Create GAFF Params if data exists
+        gaff_params = None
+        if gaff_types:
+            sorted_types = sorted(gaff_types.keys())
+            type_to_index = {t: i for i, t in enumerate(sorted_types)}
+            
+            sig_arr = [gaff_types[t][0] for t in sorted_types]
+            eps_arr = [gaff_types[t][1] for t in sorted_types]
+            
+            gaff_params = GAFFNonbondedParams(
+                type_to_index=type_to_index,
+                sigmas=jnp.array(sig_arr, dtype=jnp.float32),
+                epsilons=jnp.array(eps_arr, dtype=jnp.float32)
+            )
+
         # Create and Save
         model = FullForceField(
-            charges_by_id=jnp.asarray(charges),
-            sigmas_by_id=jnp.asarray(sigmas),
-            epsilons_by_id=jnp.asarray(epsilons),
-            radii_by_id=jnp.asarray(radii_vals),
-            scales_by_id=jnp.asarray(scale_vals),
-            cmap_energy_grids=cmap_energy_grids,
-            **hyperparams
+            atom_params=atom_params,
+            bond_params=bond_params,
+            angle_params=angle_params,
+            dihedral_params=dihedral_params,
+            cmap_params=cmap_params,
+            urey_bradley_params=urey_bradley_params,
+            virtual_site_params=virtual_site_params,
+            global_params=global_params,
+            gaff_nonbonded_params=gaff_params,
+            residue_templates=hyperparams["residue_templates"],
+            source_files=hyperparams["source_files"]
         )
-        
-        # Save to disk
+
         output_path = os.path.join(output_dir, f"{ff_name}.eqx")
         save_force_field(output_path, model)
         print(f"✅ Saved {output_path}")
@@ -358,6 +350,7 @@ def parse_xml_to_eqx(xml_path: str, output_dir: str):
         print(f"🛑 Error processing {ff_name}: {e}")
         import traceback
         traceback.print_exc()
+
 
 if __name__ == "__main__":
     if not os.path.exists("openmmforcefields"):
@@ -372,4 +365,6 @@ if __name__ == "__main__":
     print(f"Found {len(xml_files)} potential XML files.")
     
     for xml in xml_files:
+        if "gaff-2.11" not in xml: continue
+        print(f"DEBUG: Explicitly processing {xml}")
         parse_xml_to_eqx(xml, output_dir)
