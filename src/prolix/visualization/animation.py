@@ -42,6 +42,19 @@ def animate_trajectory(
     
     if len(positions) == 0:
         raise ValueError("No frames found or stride too large.")
+    
+    # Check for NaN/Inf values (indicates simulation instability)
+    if not np.all(np.isfinite(positions)):
+        nan_frames = np.where(~np.all(np.isfinite(positions), axis=(1, 2)))[0]
+        raise ValueError(
+            f"Trajectory contains NaN or Inf positions. Simulation was unstable!\n"
+            f"First bad frame: {nan_frames[0]} (out of {len(positions)} frames)\n"
+            f"This typically indicates:\n"
+            f"  - Timestep too large for the system\n"
+            f"  - Insufficient energy minimization\n"
+            f"  - Numerical precision issues (esp. on TPU with float32)\n"
+            f"Reduce timestep, increase minimization steps, or check PME parameters."
+        )
         
     n_frames, n_atoms, _ = positions.shape
     logger.info(f"Animating {n_frames} frames (stride={frame_stride})...")

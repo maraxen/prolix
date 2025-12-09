@@ -319,6 +319,13 @@ def run_production_simulation(
           
       curr_state = jax.lax.fori_loop(0, steps_per_save, step_fn, curr_state)
       
+      # STABILITY CHECK: Detect NaN/Inf positions early
+      positions_valid = jnp.all(jnp.isfinite(curr_state.position))
+      
+      # If positions are invalid, this will cause scan to fail with a helpful error
+      # Note: We can't raise Python exceptions inside JIT, but we can use jax.debug.print
+      # For now, let the NaN propagate and catch it in the writer or final state
+      
       # Calculate Energy for saving (optional, but good for analysis)
       E = energy_fn(curr_state.position)
       K = jax_md_quantity.kinetic_energy(momentum=curr_state.momentum, mass=curr_state.mass)
@@ -371,6 +378,26 @@ def run_production_simulation(
       
       # Block until ready
       jax.block_until_ready(stacked_sim_states)
+      
+      # CRITICAL: Check for NaN/Inf in positions before saving
+      # This catches simulation instability early
+      positions_cpu = np.asarray(stacked_sim_states.positions)
+      if not np.all(np.isfinite(positions_cpu)):
+          bad_frame = np.where(~np.all(np.isfinite(positions_cpu), axis=(1, 2)))[0][0]
+          bad_step = epoch * accumulate + bad_frame
+          logger.error(f"Simulation became unstable at step {bad_step} (epoch {epoch}, frame {bad_frame})")
+          raise RuntimeError(
+              f"Simulation instability detected: NaN/Inf positions at step {bad_step}.\n"
+              f"This typically indicates:\n"
+              f"  - Timestep too large (current: {spec.step_size_fs} fs)\n"
+              f"  - Insufficient minimization (current: 5000 steps)\n"
+              f"  - PME parameters inappropriate for box size\n"
+              f"  - Numerical precision issues (TPU float32)\n"
+              f"Suggestions:\n"
+              f"  - Reduce step_size_fs (try 1.0 or 0.5 fs)\n"
+              f"  - Increase minimization steps\n"
+              f"  - Check PME grid size matches box dimensions"
+          )
       
       # Update state for next epoch
       state = final_state
