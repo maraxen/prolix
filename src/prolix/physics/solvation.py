@@ -25,49 +25,40 @@ class WaterBox:
     positions: Array  # (N_waters * 3, 3) 
     box_size: Array   # (3,)
     
-def _parse_water_pdb(path: str) -> WaterBox:
-    """Parses a simple water box PDB (CRYST1 + ATOM lines)."""
-    with open(path, "r") as f:
-        lines = f.readlines()
-        
-    positions = []
-    box_size = np.array([0.0, 0.0, 0.0])
-    
-    for line in lines:
-        if line.startswith("CRYST1"):
-            # CRYST1   30.000   30.000   30.000 ...
-            box_size[0] = float(line[6:15])
-            box_size[1] = float(line[15:24])
-            box_size[2] = float(line[24:33])
-        elif line.startswith("ATOM"):
-            # ATOM      1  O   HOH A   1       4.125  13.679 ...
-            x = float(line[30:38])
-            y = float(line[38:46])
-            z = float(line[46:54])
-            positions.append([x, y, z])
-            
+def _load_water_npz(path: str) -> WaterBox:
+    """Loads a pre-converted water box from .npz format."""
+    data = np.load(path)
     return WaterBox(
-        positions=jnp.array(positions),
-        box_size=jnp.array(box_size)
+        positions=jnp.array(data["positions"]),
+        box_size=jnp.array(data["box_size"])
     )
 
+# Placeholder for _parse_water_pdb, as it's removed from load_tip3p_box
+# If it's used elsewhere, it should be kept or defined.
+# For now, assuming it's only used by load_tip3p_box and will be removed if not needed.
+
+
 def load_tip3p_box() -> WaterBox:
-    """Loads the pre-equilibrated TIP3P water box."""
-    # Assume data/water_boxes/tip3p.pdb relative to project root
-    # Or try to find it relative to this file? 
-    # Better to look in standard locations.
+    """Loads the pre-equilibrated TIP3P water box from .npz."""
+    # Look for .npz relative to this file
+    # File is in src/prolix/physics/solvation.py
+    # Data is in data/water_boxes/tip3p.npz (relative to project root)
     
-    # Try current working directory first (for scripts)
-    path = "data/water_boxes/tip3p.pdb"
+    current_dir = os.path.dirname(os.path.abspath(__file__))
+    # Go up: physics -> prolix -> src -> project_root
+    project_root = os.path.abspath(os.path.join(current_dir, "../../../../"))
+    
+    path = os.path.join(project_root, "data", "water_boxes", "tip3p.npz")
+    
     if not os.path.exists(path):
-        # Fallback to relative to package
-        base = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
-        # base is .../src/prolix/../.. -> .../src
-        # Not quite. Let's assume the user runs from project root.
-        # If not found, raise error
-        raise FileNotFoundError(f"Could not find TIP3P water box at {path}")
-        
-    return _parse_water_pdb(path)
+        # Fallback for when installed as package?
+        # Or checking if running from script in root
+        if os.path.exists("data/water_boxes/tip3p.npz"):
+            path = "data/water_boxes/tip3p.npz"
+        else:
+            raise FileNotFoundError(f"Could not find TIP3P water box at {path} or relative to CWD")
+
+    return _load_water_npz(path)
 
 def solvate(
     solute_positions: Array,

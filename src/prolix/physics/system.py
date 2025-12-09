@@ -159,9 +159,9 @@ def make_energy_fn(
       kappa = 0.0
   else:
       eff_dielectric = dielectric_constant
-      kappa = 0.1  # Legacy screened coulomb kappa for vacuum?
+      kappa = 0.0  # Use standard Coulomb (kappa=0) for explicit/vacuum
       if use_pbc:
-          kappa = 0.0 # No screening for PME direct space (uses erfc)
+          kappa = 0.0 # No screening for PME direct space (uses erfc independently)
           eff_dielectric = 1.0 # PME assumes vacuum permittivity units usually (332.06...)
 
   COULOMB_CONSTANT = 332.0637 / eff_dielectric
@@ -576,56 +576,151 @@ def make_energy_fn(
   # Scaling for 1-4
   coul_14_scale = system_params.get("coulomb14scale", 0.83333333)
 
-  def compute_pme_exceptions(r):
-      """Computes the reciprocal space correction for excluded/scaled pairs."""
-      if not use_pbc or box is None:
-          return 0.0
-
-      # Correction Formula: E_corr = - (1.0 - scale) * q_i * q_j * erf(alpha * r) / r
-      # For 1-2 and 1-3: scale = 0.0 => E_corr = -1.0 * Recip
-      # For 1-4: scale = sc => E_corr = -(1.0 - sc) * Recip
+  
+  def compute_lj_tail_correction(
+      box: Array,
+      sigma: Array,
+      epsilon: Array,
+      cutoff: float,
+      N_atoms: int
+  ) -> float:
+      """Computes the Lennard-Jones long-range dispersion correction.
       
-      def calc_correction_term(indices, scale_factor):
-          if indices.shape[0] == 0:
-              return 0.0
-              
-          r_i = r[indices[:, 0]]
-          r_j = r[indices[:, 1]]
-          
-          # Displacement
-          dr = jax.vmap(displacement_fn)(r_i, r_j)
-          dist = space.distance(dr)
-          
-          # Charges
-          q_i = charges[indices[:, 0]]
-          q_j = charges[indices[:, 1]]
-          
-          # Reciprocal Part of Energy (what we want to remove)
-          # E_recip_pair = q_i * q_j * erf(alpha * r) / r
-          # We use COULOMB_CONSTANT for units
-          
-          # Avoid singularity
-          dist_safe = dist + 1e-6
-          erf_term = jax.scipy.special.erf(pme_alpha * dist)
-          
-          e_pair_recip = COULOMB_CONSTANT * (q_i * q_j / dist_safe) * erf_term
-          
-          # We subtract (1 - scale) * E_recip_pair
-          factor = 1.0 - scale_factor
-          return jnp.sum(e_pair_recip * factor)
-
-      e_corr = 0.0
-      # 1-2 (Scale 0.0)
-      e_corr += calc_correction_term(pme_idx_12, 0.0)
-      # 1-3 (Scale 0.0)
-      e_corr += calc_correction_term(pme_idx_13, 0.0)
-      # 1-4 (Scale coul_14_scale)
-      e_corr += calc_correction_term(pme_idx_14, coul_14_scale)
+      Standard homogenous correction:
+      E_LRC = (8 * pi * N^2) / (3 * V) * <epsilon * sigma^6> * (1/(3 * Rc^3)) ?
       
-      # We subtract this correction
-      return -e_corr
-
-
+      Analytical integral of 4*eps*((sigma/r)^12 - (sigma/r)^6) from Rc to infinity.
+      U_tail = 8 * pi * rho * epsilon * sigma^6 * [ (sigma^6)/(9*Rc^9) - 1/(3*Rc^3) ] ???
+      
+      Standard formula for ONE pair type:
+      U_tail = (8/3) * pi * rho * N * epsilon * sigma^3 * [ (1/3)*(sigma/Rc)^9 - (sigma/Rc)^3 ]
+      
+      Wait. 
+      Rho = N/V.
+      Total Energy U_total = (1/2) * N * U_tail_per_particle
+      U_total = (N/2) * (8 * pi * rho) * epsilon * sigma^3 ...
+      U_total = (8 * pi * N^2) / (2 * V) * ...
+      
+      For a mixture, we use average parameters <sigma^3> and <epsilon> is an approximation?
+      Better approximation: <epsilon * sigma^6> and <epsilon * sigma^12>.
+      
+      Let's use the average coefficient <C6> and <C12>.
+      C6_ij = 4 * eps_ij * sigma_ij^6
+      C12_ij = 4 * eps_ij * sigma_ij^12
+      
+      U_LRC = (2 * pi * N^2 / V) * ( <C12>/(9 * Rc^9) - <C6>/(3 * Rc^3) )
+      
+      This is exact if the radial distribution function g(r) = 1 beyond cutoff.
+      
+      We compute <C6> and <C12> by averaging over all pairs?
+      Sum over all pairs N*(N-1)/2 is O(N^2). Too slow to do dynamically if types change (they don't).
+      
+      We can compute Mean C6 and Mean C12 from the arrays.
+      sigma_ij = (sigma_i + sigma_j)/2
+      eps_ij = sqrt(eps_i * eps_j)
+      
+      This is still O(N^2) to compute exact average.
+      
+      Approximation for large systems (mostly solvent):
+      Use average sigma and average epsilon of the ATOMS.
+      sigma_bar = mean(sigma)
+      epsilon_bar = mean(epsilon)
+      
+      Then use those in the formula.
+      """
+      
+      # Volume
+      if box.ndim == 1:
+          volume = box[0] * box[1] * box[2]
+      else:
+          volume = jnp.linalg.det(box)
+      
+      rho = N_atoms / volume
+      
+      # Compute average parameters (approximation)
+      # OR, assume dominant solvent properties?
+      # For now, simple average of parameters.
+      # Note: openmm uses exact counts of pairs.
+      
+      avg_sig = jnp.mean(sigma)
+      avg_eps = jnp.mean(epsilon)
+      
+      # Combined parameters (Lorentz-Berthelot self-interaction effectively)
+      # sigma_mix = avg_sig
+      # eps_mix = avg_eps
+      
+      # Formula using these averages:
+      # E = 8 * pi * N_atoms * rho * avg_eps * avg_sig^3 * [ (1/9)*(avg_sig/cutoff)^9 - (1/3)*(avg_sig/cutoff)^3 ]
+      # Factor of 1/2 for double counting pairs included in N * rho
+      
+      # Let's check sign. Dispersion is attractive (-).
+      # - (sigma/Rc)^3 term dominates at large Rc.
+      
+      sig3 = avg_sig**3
+      sig9 = avg_sig**9
+      rc3 = cutoff**3
+      rc9 = cutoff**9
+      
+      term = (1.0/9.0) * (sig9/rc9) - (1.0/3.0) * (sig3/rc3)
+      
+      # 8 * pi * avg_eps * term
+      # Multiply by N^2 / V?
+      # Total energy.
+      
+      e_lrc = (8.0 * jnp.pi * (N_atoms**2) / volume) * avg_eps * term
+      
+      return e_lrc
+  
+  def compute_pme_exceptions(r: Array) -> float:
+        """Computes the reciprocal space correction for excluded/scaled pairs."""
+        if not use_pbc or box is None:
+            return 0.0
+  
+        # Correction Formula: E_corr = - (1.0 - scale) * q_i * q_j * erf(alpha * r) / r
+        # For 1-2 and 1-3: scale = 0.0 => E_corr = -1.0 * Recip
+        # For 1-4: scale = sc => E_corr = -(1.0 - sc) * Recip
+        
+        def calc_correction_term(indices, scale_factor):
+            if indices.shape[0] == 0:
+                return 0.0
+                
+            r_i = r[indices[:, 0]]
+            r_j = r[indices[:, 1]]
+            
+            # Displacement
+            dr = jax.vmap(displacement_fn)(r_i, r_j)
+            dist = space.distance(dr)
+            
+            # Charges
+            q_i = charges[indices[:, 0]]
+            q_j = charges[indices[:, 1]]
+            
+            # Reciprocal Part of Energy (what we want to remove)
+            # E_recip_pair = q_i * q_j * erf(alpha * r) / r
+            # We use COULOMB_CONSTANT for units
+            
+            # Avoid singularity
+            dist_safe = dist + 1e-6
+            erf_term = jax.scipy.special.erf(pme_alpha * dist)
+            
+            e_pair_recip = COULOMB_CONSTANT * (q_i * q_j / dist_safe) * erf_term
+            
+            # We subtract (1 - scale) * E_recip_pair
+            factor = 1.0 - scale_factor
+            return jnp.sum(e_pair_recip * factor)
+  
+        e_corr = 0.0
+        # 1-2 (Scale 0.0)
+        e_corr += calc_correction_term(pme_idx_12, 0.0)
+        # 1-3 (Scale 0.0)
+        e_corr += calc_correction_term(pme_idx_13, 0.0)
+        # 1-4 (Scale coul_14_scale)
+        e_corr += calc_correction_term(pme_idx_14, coul_14_scale)
+        
+        # We subtract this correction
+        return -e_corr
+  
+  
   # Total Energy Function
   # -------------------------------------------------------------------------
   def total_energy(r: Array, neighbor: partition.NeighborList | None = None, **kwargs) -> Array:
@@ -653,6 +748,16 @@ def make_energy_fn(
     if use_pbc and box is not None:
         e_pme_corr = compute_pme_exceptions(r)
         e_elec += e_pme_corr
+        
+        # Long-Range LJ Correction
+        e_lj_lrc = compute_lj_tail_correction(
+            box=box, 
+            sigma=sigmas, 
+            epsilon=epsilons, 
+            cutoff=cutoff_distance, 
+            N_atoms=r.shape[0]
+        )
+        e_lj += e_lj_lrc
         
     return e_bond + e_angle + e_ub + e_dihedral + e_improper + e_cmap + e_lj + e_elec + e_np
 

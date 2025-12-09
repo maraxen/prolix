@@ -67,10 +67,10 @@
 Keep this in the JAX ecosystem and independent of
 outside dependencies as much as possible.
 
-- [ ] **Water box initialization** - load pre-equilibrated boxes from GROMACS/AMBER format
-- [ ] **Solvation workflow** - `Modeller.addSolvent()` equivalent
-- [ ] **Ion placement** - neutralization and ionic strength control
-- [ ] **PME electrostatics** - already partially implemented in `src/prolix/physics/pme.py`
+- [x] **Water box initialization** - load pre-equilibrated boxes from GROMACS/AMBER format
+- [x] **Solvation workflow** - `Modeller.addSolvent()` equivalent
+- [x] **Ion placement** - neutralization and ionic strength control
+- [x] **PME electrostatics** - already partially implemented in `src/prolix/physics/pme.py`
 - [ ] **Long-range corrections** - LJ tail corrections
 
 **OpenMM reference files:**
@@ -87,7 +87,7 @@ outside dependencies as much as possible.
 
 ---
 
-### 4. Demo Jupyter/Colab Notebook
+### 4. Demo Jupyter/Colab Notebook ✅ Completed (Dec 2025)
 
 > **Priority: Medium**
 
@@ -100,7 +100,7 @@ outside dependencies as much as possible.
 3. **Energy minimization** - robust multi-stage approach
 4. **MD simulation** - NVT Langevin, trajectory saving
 5. **Analysis** - RMSD, contacts, energy visualization
-6. **Advanced features** - implicit solvent, constraints, multiple proteins
+6. **Advanced features** - implicit solvent, constraints, multiple proteins, parallel tempering
 
 **Target location:** `notebooks/prolix_tutorial.ipynb`
 

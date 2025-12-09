@@ -108,7 +108,8 @@ def save_trajectory_html(
     output_path: str,
     stride: int = 1,
     style: str = "cartoon",
-    title: str = "Trajectory Visualization"
+    title: str = "Trajectory Visualization",
+    custom_styles: Optional[list[tuple[dict, dict]]] = None
 ):
     """Save trajectory visualization to a standalone HTML file.
     
@@ -120,8 +121,10 @@ def save_trajectory_html(
         pdb_path: Topology PDB file
         output_path: Output HTML file path
         stride: Frame stride
-        style: Visualization style
+        style: Default visualization style (applied to everything not matched by custom_styles)
         title: Page title
+        custom_styles: List of (selection, style) tuples. 
+                       Example: [({'resn': 'WAT'}, {'sphere': {'radius': 0.5}})]
     """
     if isinstance(trajectory, str):
         trajectory = TrajectoryReader(trajectory)
@@ -156,6 +159,25 @@ def save_trajectory_html(
         
     pdb_data = "".join(out_lines)
     
+    # Build JS for styles
+    style_js = ""
+    
+    # If no custom styles, just apply default style to everything
+    if not custom_styles:
+        style_js = f"viewer.setStyle({{ {style}: {{ color: 'spectrum' }} }});"
+    else:
+        # Apply default style first to everything (or exclude things?)
+        # Better approach: Apply default style to "all", then override?
+        # Or apply default style to "not water"?
+        # Let's assume 'style' argument is the "base" style.
+        style_js += f"viewer.setStyle({{ {style}: {{ color: 'spectrum' }} }});\n"
+        
+        import json
+        for sel, sty in custom_styles:
+            sel_json = json.dumps(sel)
+            sty_json = json.dumps(sty)
+            style_js += f"            viewer.addStyle({sel_json}, {sty_json});\n"
+
     # HTML Template
     # We use backticks for template string in JS to handle newlines in pdb_data safely
     html_content = f"""<!DOCTYPE html>
@@ -185,7 +207,10 @@ def save_trajectory_html(
             let pdbData = `{pdb_data}`;
             
             viewer.addModelsAsFrames(pdbData, "pdb");
-            viewer.setStyle({{ {style}: {{ color: 'spectrum' }} }});
+            
+            // Set Styles
+{style_js}
+            
             viewer.zoomTo();
             viewer.animate({{ loop: "forward", reps: 0 }});
             viewer.render();
