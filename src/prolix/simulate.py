@@ -277,6 +277,19 @@ def run_production_simulation(
   # Initialize state from minimized positions
   state = init_fn(key, r_min)
   
+  # PRE-COMPILE the step function to avoid expensive tracing during scan
+  # This forces JIT compilation upfront, making subsequent steps fast
+  logger.info("Pre-compiling step function (this may take 1-2 minutes)...")
+  
+  @jax.jit
+  def jit_apply_fn(s):
+      return apply_fn(s)
+  
+  # Force compilation by running one step
+  _test_state = jit_apply_fn(state)
+  jax.block_until_ready(_test_state.position)
+  logger.info("Step function compiled!")
+  
   # 4. Setup trajectory saving
   steps_per_save = int(round(spec.save_interval_ns * 1000000 / spec.step_size_fs))
   logger.info("Steps per save: %d", steps_per_save)
@@ -300,7 +313,7 @@ def run_production_simulation(
       
       # Run inner loop (interval steps)
       def step_fn(i, s):
-          return apply_fn(s)
+          return jit_apply_fn(s)
           
       curr_state = jax.lax.fori_loop(0, steps_per_save, step_fn, curr_state)
       
