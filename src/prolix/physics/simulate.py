@@ -314,7 +314,6 @@ def run_minimization(
   dt_start: float = 2e-3,  # 2 fs - typical for MD
   dt_max: float = 4e-3,     # 4 fs max
   max_displacement_per_step: float = 0.1,  # Maximum Å per step (prevents explosion)
-  force_threshold: float = 1000.0,  # kcal/mol/Å - switch from SD to FIRE when below
   sd_steps: int = 200,  # Steepest descent pre-conditioning steps
 ) -> Array:
   """Run energy minimization using robust multi-stage approach.
@@ -323,7 +322,8 @@ def run_minimization(
   cause positions to explode. This function uses:
   1. Steepest descent pre-conditioning with adaptive step size
   2. FIRE descent for final optimization
-  3. Position sanity check at the end
+
+  FULLY JIT-COMPATIBLE - no eager Python conversions.
 
   Args:
       energy_fn: Energy function E(R).
@@ -332,17 +332,15 @@ def run_minimization(
       dt_start: Initial time step for FIRE.
       dt_max: Maximum time step for FIRE.
       max_displacement_per_step: Maximum atomic displacement per step (Å).
-      force_threshold: Switch to FIRE when max force drops below this.
-      sd_steps: Maximum steepest descent pre-conditioning steps.
+      sd_steps: Steepest descent pre-conditioning steps.
 
   Returns:
       Minimized positions.
 
   """
   # -------------------------------------------------------------------------
-  # Stage 1: Steepest Descent Pre-conditioning
+  # Stage 1: Steepest Descent Pre-conditioning (always run, fully JITted)
   # -------------------------------------------------------------------------
-  # This handles high-energy starting structures safely by using adaptive dt
   
   @jax.jit
   def steepest_descent_step(r, _):
@@ -360,66 +358,34 @@ def run_minimization(
     
     return r_new, max_force
   
-  # Run steepest descent with early exit when forces are low enough
-  r_current = r_init
-  
-  # Compute initial forces to decide if SD is needed
-  forces_init = -jax.grad(energy_fn)(r_init)
-  max_force_init = float(jnp.max(jnp.linalg.norm(forces_init, axis=-1)))
-  
-  if max_force_init > force_threshold:
-    # Need steepest descent pre-conditioning
-    r_current, max_forces = jax.lax.scan(steepest_descent_step, r_init, jnp.arange(sd_steps))
-    
-    # Check final force magnitude
-    forces_after_sd = -jax.grad(energy_fn)(r_current)
-    max_force_after_sd = float(jnp.max(jnp.linalg.norm(forces_after_sd, axis=-1)))
-  else:
-    max_force_after_sd = max_force_init
+  # Run steepest descent (always, to warm up structure)
+  print("Minimization: Running steepest descent pre-conditioning...")
+  r_after_sd, _ = jax.lax.scan(steepest_descent_step, r_init, jnp.arange(sd_steps))
+  jax.block_until_ready(r_after_sd)
+  print("Minimization: Steepest descent complete, starting FIRE...")
   
   # -------------------------------------------------------------------------
-  # Stage 2: FIRE Optimization
+  # Stage 2: FIRE Optimization (fully JITted)
   # -------------------------------------------------------------------------
-  # Use smaller dt if forces are still high
-  effective_dt_start = dt_start
-  if max_force_after_sd > 100.0:
-    # Scale down dt based on force magnitude
-    effective_dt_start = min(dt_start, max_displacement_per_step / max_force_after_sd)
-  
-  effective_dt_max = min(dt_max, effective_dt_start * 10.0)
   
   init_fn, apply_fn = minimize.fire_descent(
     energy_fn, 
     shift_fn=space.free()[1], 
-    dt_start=effective_dt_start, 
-    dt_max=effective_dt_max
+    dt_start=dt_start, 
+    dt_max=dt_max
   )
-  state = init_fn(r_current)
+  state = init_fn(r_after_sd)
 
   @jax.jit
-  def step_fn(i, state):  # noqa: ARG001
+  def fire_step_fn(i, state):  # noqa: ARG001
     return apply_fn(state)
 
-  state = jax.lax.fori_loop(0, steps, step_fn, state)
-  r_final = state.position
+  print("Minimization: Running FIRE optimization...")
+  state = jax.lax.fori_loop(0, steps, fire_step_fn, state)
+  jax.block_until_ready(state.position)
+  print("Minimization: FIRE complete!")
   
-  # -------------------------------------------------------------------------
-  # Position Sanity Check
-  # -------------------------------------------------------------------------
-  r_final_np = jnp.asarray(r_final)
-  center = jnp.mean(r_final_np, axis=0)
-  centered = r_final_np - center
-  max_displacement = jnp.max(jnp.abs(centered))
-  
-  # Warning if positions seem unreasonable (but don't fail - let caller decide)
-  if float(max_displacement) > 500.0:
-    import warnings
-    warnings.warn(
-      f"Minimization produced positions with max displacement {float(max_displacement):.1f} Å "
-      f"from center of mass. This may indicate numerical instability."
-    )
-  
-  return r_final
+  return state.position
 
 
 def run_thermalization(

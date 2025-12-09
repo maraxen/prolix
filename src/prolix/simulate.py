@@ -279,6 +279,7 @@ def run_production_simulation(
   
   # PRE-COMPILE the step function to avoid expensive tracing during scan
   # This forces JIT compilation upfront, making subsequent steps fast
+  print("Pre-compiling step function (this may take 1-2 minutes)...")
   logger.info("Pre-compiling step function (this may take 1-2 minutes)...")
   
   @jax.jit
@@ -288,6 +289,7 @@ def run_production_simulation(
   # Force compilation by running one step
   _test_state = jit_apply_fn(state)
   jax.block_until_ready(_test_state.position)
+  print("Step function compiled!")
   logger.info("Step function compiled!")
   
   # 4. Setup trajectory saving
