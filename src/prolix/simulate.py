@@ -142,7 +142,7 @@ class TrajectoryWriter:
           states = [states]
           
       # If states is a PyTree (e.g. from scan), we might need to unzip it?
-      # Usually run_production_simulation returns a stack of states.
+      # Usually run_simulation returns a stack of states.
       # Which is a SimulationState where each leaf has an extra leading dimension.
       # We need to iterate over that dimension.
       
@@ -193,7 +193,7 @@ class TrajectoryWriter:
       self.close()
 
 
-def run_production_simulation(
+def run_simulation(
   system_params: SystemParams,
   r_init: Array,
   spec: SimulationSpec,
@@ -432,4 +432,4 @@ def run_production_simulation(
   return sim_state
 
 
-# Note: jax_md imports are now inside run_production_simulation to avoid circular imports
+# Note: jax_md imports are now inside run_simulation to avoid circular imports

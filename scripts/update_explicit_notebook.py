@@ -37,7 +37,7 @@ for cell in nb["cells"]:
             ")\n",
             "\n",
             "print(\"Running 50ps explicit solvent simulation...\")\n",
-            "final_state = simulate.run_production_simulation(\n",
+            "final_state = simulate.run_simulation(\n",
             "    system_params=system_params,\n",
             "    r_init=positions,\n",
             "    spec=spec,\n",

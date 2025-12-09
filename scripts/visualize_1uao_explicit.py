@@ -45,7 +45,7 @@ def main():
     print(f"Water Oxygens: {np.sum(is_water_o)}")
     print(f"Water Hydrogens: {np.sum(is_water_h)}")
     
-    # 1. HTML Visualization with py3Dmol
+    # 1. HTML Visualization with py2Dmol
     # -----------------------------------------------
     print("\nGenerating HTML visualization...")
     
@@ -58,12 +58,12 @@ def main():
         # Water Oxygens (Blue spheres, low opacity)
         ({'resn': ['WAT', 'HOH'], 'atom': 'O'}, {'sphere': {'radius': 0.5, 'color': 'blue', 'opacity': 0.3}}),
         
-        # Hide Water Hydrogens? py3Dmol default is to show everything unless hidden.
+        # Hide Water Hydrogens? py2Dmol default is to show everything unless hidden.
         # We can style everything else hidden? Or just not style them?
         # If we specify styles, do others get hidden? 
         # save_trajectory_html logic applies a default style if custom_styles is None.
         # But if custom_styles is provided, it does `addStyle`. 
-        # addStyle ADDS to existing? No, py3Dmol models start with no style usually?
+        # addStyle ADDS to existing? No, py2Dmol models start with no style usually?
         # Actually save_trajectory_html applies default style first if no custom styles?
         # My implementation:
         # if custom_styles:
@@ -73,8 +73,8 @@ def main():
         # Cartoon on atoms doesn't do much.
         # But maybe we want to HIDE them explicitly.
         ({'resn': ['WAT', 'HOH'], 'atom': ['H1', 'H2']}, {'hidden': True}) 
-        # Note: 'hidden': True might not be valid py3Dmol syntax directly in style dict?
-        # py3Dmol style object keys are render types (sphere, stick).
+        # Note: 'hidden': True might not be valid py2Dmol syntax directly in style dict?
+        # py2Dmol style object keys are render types (sphere, stick).
         # To hide, we just DON'T style them, provided we didn't apply a global style.
         # BUT my implementation applies global style first!
         # `viewer.setStyle({ {style}: { color: 'spectrum' } });`
@@ -82,7 +82,7 @@ def main():
         # So it might be fine.
     ]
     
-    # Actually, applying cartoon to water might be weird if py3Dmol tries to trace it.
+    # Actually, applying cartoon to water might be weird if py2Dmol tries to trace it.
     # But usually it ignores non-protein.
     
     output_html = "1uao_explicit_viz.html"

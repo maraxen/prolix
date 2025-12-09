@@ -139,7 +139,7 @@ def test_production_simulation_short_run(tmp_path, mock_array_record):
     # total_time=4fs. save_interval=2fs. 2 saves. accumulate_steps=2 (1 batch).
     spec.save_path = str(tmp_path / "traj.array_record")
 
-    final_state = simulate.run_production_simulation(
+    final_state = simulate.run_simulation(
         params, positions, spec
     )
     

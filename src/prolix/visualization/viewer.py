@@ -5,33 +5,33 @@ import logging
 from typing import Optional, Union, Any
 import numpy as np
 
-# Try importing py3Dmol
+# Try importing py2Dmol
 try:
-    import py3Dmol
+    import py2Dmol
 except ImportError:
-    py3Dmol = None
+    py2Dmol = None
 
 from .trajectory import TrajectoryReader
 
 logger = logging.getLogger(__name__)
 
-def _require_py3dmol():
-    if py3Dmol is None:
-        raise ImportError("py3Dmol is required for interactive visualization. Please install it with `pip install py3Dmol`.")
+def _require_py2dmol():
+    if py2Dmol is None:
+        raise ImportError("py2Dmol is required for interactive visualization. Please install it with `pip install py2Dmol`.")
 
 def view_structure(pdb_path: str, style: str = "cartoon") -> Any:
-    """View a single structure using py3Dmol.
+    """View a single structure using py2Dmol.
     
     Args:
         pdb_path: Path to PDB file
         style: Visualization style ('cartoon', 'stick', 'line', 'sphere')
     """
-    _require_py3dmol()
+    _require_py2dmol()
     
     with open(pdb_path, 'r') as f:
         pdb_data = f.read()
         
-    view = py3Dmol.view(width=800, height=600)
+    view = py2Dmol.view(width=800, height=600)
     view.addModel(pdb_data, "pdb")
     view.setStyle({style: {'color': 'spectrum'}})
     view.zoomTo()
@@ -43,14 +43,14 @@ def view_trajectory(
     stride: int = 1,
     style: str = "cartoon"
 ) -> Any:
-    """View trajectory using py3Dmol.
+    """View trajectory using py2Dmol.
     
     Args:
         trajectory: TrajectoryReader instance or path
         pdb_path: Topology PDB file
         stride: Frame stride
     """
-    _require_py3dmol()
+    _require_py2dmol()
     
     if isinstance(trajectory, str):
         trajectory = TrajectoryReader(trajectory)
@@ -94,7 +94,7 @@ def view_trajectory(
         
     pdb_data = "".join(out_lines)
     
-    view = py3Dmol.view(width=800, height=600)
+    view = py2Dmol.view(width=800, height=600)
     view.addModelsAsFrames(pdb_data, "pdb")
     view.setStyle({style: {'color': 'spectrum'}})
     view.animate({'loop': "forward"})
@@ -113,7 +113,7 @@ def save_trajectory_html(
 ):
     """Save trajectory visualization to a standalone HTML file.
     
-    This method does NOT require py3Dmol to be installed, as it generates
+    This method does NOT require py2Dmol to be installed, as it generates
     standard HTML using the 3Dmol.js CDN.
     
     Args:

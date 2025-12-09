@@ -19,7 +19,7 @@ dependencies = [
     "scipy",
     "chex",
     "jaxtyping",
-    "py2dmol>=1.5.1",
+    "py2Dmol>=1.5.1",
     "matplotlib>=3.10.7",
     "imageio>=2.37.2",
 ]

@@ -134,7 +134,7 @@ def main():
   print(f"  Box: {box_size}")
   print(f"  PME Grid: {spec.pme_grid_size}")
   
-  final_state = simulate.run_production_simulation(
+  final_state = simulate.run_simulation(
      system_params=system_params,
      r_init=positions,
      spec=spec,

@@ -88,7 +88,7 @@ def main():
   
   print(f"Running implicit solvent simulation for {spec.total_time_ns} ns...")
   
-  final_state = simulate.run_production_simulation(
+  final_state = simulate.run_simulation(
      system_params=system_params,
      r_init=positions,
      spec=spec,

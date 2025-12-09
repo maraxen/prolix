@@ -8,7 +8,7 @@ import jax.numpy as jnp
 import numpy as np
 from jax_md import space
 
-from prolix.simulate import SimulationSpec, run_production_simulation, SimulationState, TrajectoryWriter
+from prolix.simulate import SimulationSpec, run_simulation, SimulationState, TrajectoryWriter
 from prolix import analysis
 from priox.md.jax_md_bridge import create_system_from_pdb
 
@@ -122,7 +122,7 @@ def main():
         )
         
         start = time.time()
-        final_state = run_production_simulation(params, positions, spec)
+        final_state = run_simulation(params, positions, spec)
         end = time.time()
         print(f"Simulation completed in {end - start:.2f}s")
         
