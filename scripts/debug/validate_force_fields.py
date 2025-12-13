@@ -11,7 +11,7 @@ import biotite.database.rcsb as rcsb
 
 # PrxteinMPNN imports
 from prolix.physics import simulate, force_fields, jax_md_bridge, system
-from priox.chem import residues as residue_constants
+from proxide.chem import residues as residue_constants
 
 # Enable x64 for physics
 jax.config.update("jax_enable_x64", True)
@@ -129,7 +129,7 @@ def validate_force_field(ff_path, pdb_id="1UAO"):
         return False
 
 if __name__ == "__main__":
-    ff_dir = "src/priox.physics.force_fields/eqx"
+    ff_dir = "proxide/src/proxide/physics/force_fields/eqx"
     force_fields_to_test = [
         os.path.join(ff_dir, "protein19SB.eqx"),
         os.path.join(ff_dir, "amber14-all.eqx")

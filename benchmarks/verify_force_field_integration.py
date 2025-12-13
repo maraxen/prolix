@@ -1,8 +1,8 @@
 import jax
 import jax.numpy as jnp
 import equinox as eqx
-from priox.physics.force_fields import load_force_field
-from priox.io.parsing import biotite as parsing_biotite
+from proxide.physics.force_fields import load_force_field
+from proxide.io.parsing import biotite as parsing_biotite
 from prolix.physics import system
 from jax_md import space
 import time

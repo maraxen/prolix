@@ -9,7 +9,7 @@ import pytest
 
 from prolix import simulate
 from prolix import analysis
-from priox.md.jax_md_bridge import SystemParams
+from proxide.md.jax_md_bridge import SystemParams
 
 # Mock ArrayRecord if not installed
 @pytest.fixture

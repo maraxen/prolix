@@ -36,7 +36,7 @@ def generate_ff():
         else:
             print(f"Warning: protein.ff19SB.xml not found at {ff19sb_path}")
 
-    output_dir = "../../priox/src/priox/physics/force_fields/eqx"
+    output_dir = "../../proxide/src/proxide/physics/force_fields/eqx"
     os.makedirs(output_dir, exist_ok=True)
     
     for xml_path in xmls_to_convert:

@@ -7,13 +7,13 @@ import openmm
 from openmm import app, unit
 import os
 import biotite.structure.io.pdb as pdb
-from priox.io.parsing import biotite as parsing_biotite
-from priox.md.bridge import core as bridge_core
-from priox.physics.force_fields import loader as ff_loader
+from proxide.io.parsing import biotite as parsing_biotite
+from proxide.md.bridge import core as bridge_core
+from proxide.physics.force_fields import loader as ff_loader
 from prolix.physics import system, bonded
 from jax_md import space
 
-PROLIX_FF = "data/force_fields/ff14SB.eqx"
+PROLIX_FF = "protein.ff14SB.xml"
 PDB_1UAO = "data/pdb/1UAO.pdb"
 SOLVATED_PDB = "data/pdb/1UAO_solvated_tip3p.pdb"
 

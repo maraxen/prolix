@@ -111,8 +111,8 @@ def extract_radii():
     mean_r = sum(radii_vals) / len(radii_vals)
     print(f"Mean radius: {mean_r:.4f} A")
     
-    # Compare to current priox values
-    from priox.physics import force_fields
+    # Compare to current proxide values
+    from proxide.physics import force_fields
     ff_eqx = force_fields.load_force_field("data/force_fields/protein19SB.eqx")
     
     print("\nComparing to existing force field...")

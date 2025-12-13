@@ -13,8 +13,8 @@ import argparse
 
 # PrxteinMPNN imports
 from prolix.physics import simulate, force_fields, system, jax_md_bridge
-# from priox.md import jax_md_bridge
-from priox.chem import residues as residue_constants
+# from proxide.md import jax_md_bridge
+from proxide.chem import residues as residue_constants
 
 # Enable x64 for physics
 jax.config.update("jax_enable_x64", True)
@@ -26,7 +26,7 @@ NUM_SAMPLES = 8
 MD_STEPS = 1000
 MD_THERM = 1000
 
-from priox.io.parsing import biotite as parsing_biotite
+from proxide.io.parsing import biotite as parsing_biotite
 
 # --- Shared Helpers ---
 def download_and_load_pdb(pdb_id, output_dir="data/pdb"):
@@ -185,7 +185,7 @@ def is_allowed_jax(phi, psi):
     
     return is_alpha | is_beta | is_left_alpha
 
-def run_benchmark(pdb_set=DEV_SET, force_field_path="src/priox.physics.force_fields/eqx/protein19SB.eqx"):
+def run_benchmark(pdb_set=DEV_SET, force_field_path="proxide/src/proxide/physics/force_fields/eqx/protein19SB.eqx"):
     print(f"Benchmarking Conformational Validity (Optimized with VMAP) on {pdb_set}...")
     try:
         if os.path.exists(force_field_path):
@@ -301,7 +301,7 @@ def run_benchmark(pdb_set=DEV_SET, force_field_path="src/priox.physics.force_fie
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Run conformational validity benchmark.")
     parser.add_argument("--quick", action="store_true", help="Run on quick dev set (Chignolin).")
-    parser.add_argument("--force_field", type=str, default="src/priox.physics.force_fields/eqx/protein19SB.eqx", help="Path to force field file.")
+    parser.add_argument("--force_field", type=str, default="proxide/src/proxide/physics/force_fields/eqx/protein19SB.eqx", help="Path to force field file.")
     args = parser.parse_args()
     
     target_set = QUICK_DEV_SET if args.quick else DEV_SET

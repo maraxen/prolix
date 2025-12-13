@@ -13,8 +13,8 @@ from dataclasses import dataclass
 from functools import partial
 
 from prolix.physics import system
-from priox.physics.constants import BOLTZMANN_KCAL
-from priox.md.jax_md_bridge import SystemParams
+from proxide.physics.constants import BOLTZMANN_KCAL
+from proxide.md import SystemParams
 
 Array = util.Array
 

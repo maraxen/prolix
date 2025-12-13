@@ -23,7 +23,7 @@ except ImportError:
   ArrayRecordWriter = None  # type: ignore
 
 from prolix.physics import system, simulate as physics_simulate
-from priox.md.jax_md_bridge import SystemParams
+from proxide.md import SystemParams
 
 m.patch()
 

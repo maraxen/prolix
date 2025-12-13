@@ -14,11 +14,11 @@ import tempfile
 import os
 from biotite.structure.io import pdb
 
-from priox.physics import force_fields
+from proxide.physics import force_fields
 from prolix.physics import system
-from priox.md import jax_md_bridge
-from priox.io.parsing import biotite as parsing_biotite
-from priox.chem import residues as residue_constants
+from proxide.md import jax_md_bridge
+from proxide.io.parsing import biotite as parsing_biotite
+from proxide.chem import residues as residue_constants
 
 # Simple ALA-ALA dipeptide (heavy atoms)
 PDB_ALA_ALA = """ATOM      1  N   ALA A   1      -0.525   1.364   0.000  1.00  0.00           N
@@ -64,10 +64,8 @@ def test_jax_openmm_energy_equivalency():
         atom_array = parsing_biotite.load_structure_with_hydride(tmp.name, model=1, add_hydrogens=True)
         
         # 3. Parameterize JAX MD
-        # Use local force field from priox
-        ff_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../../priox/src/priox/physics/force_fields/eqx/protein19SB.eqx"))
-            
-        ff = force_fields.load_force_field(ff_path)
+        # Use force field from assets
+        ff = force_fields.load_force_field("protein.ff19SB")
         params, coords = parsing_biotite.biotite_to_jax_md_system(atom_array, ff)
         
         # 4. Compute JAX Energy
@@ -99,10 +97,10 @@ def test_jax_openmm_energy_equivalency():
             topology = pdb_file_omm.topology
             positions = pdb_file_omm.positions
             
-            # Use local ff19SB XML from priox to match JAX MD's protein19SB.eqx
+            # Use local ff19SB XML from proxide to match JAX MD's protein19SB.eqx
             ff19sb_xml = os.path.abspath(os.path.join(
                 os.path.dirname(__file__), 
-                "../../../priox/src/priox/physics/force_fields/xml/protein.ff19SB.xml"
+                "../../../proxide/src/proxide/physics/force_fields/xml/protein.ff19SB.xml"
             ))
             if not os.path.exists(ff19sb_xml):
                 pytest.skip(f"FF19SB XML not found at {ff19sb_xml}")

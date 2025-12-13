@@ -39,10 +39,10 @@ def jax_openmm_system(openmm_available):
     import openmm
     import openmm.app as app
     import openmm.unit as unit
-    from priox.io.parsing import biotite as parsing_biotite
-    from priox.physics.force_fields.loader import load_force_field
-    from priox.md.bridge.core import parameterize_system
-    from priox.physics import constants
+    from proxide.io.parsing import biotite as parsing_biotite
+    from proxide.physics.force_fields.loader import load_force_field
+    from proxide.md.bridge.core import parameterize_system
+    from proxide.physics import constants
     from prolix.physics import system, bonded, cmap, generalized_born
     from jax_md import space
     import biotite.structure as struc
@@ -80,7 +80,7 @@ def jax_openmm_system(openmm_available):
         residues[0] = "N" + residues[0]
         residues[-1] = "C" + residues[-1]
 
-    ff = load_force_field("data/force_fields/protein19SB.eqx")
+    ff = load_force_field("protein.ff19SB")
     system_params = parameterize_system(ff, residues, atom_names, atom_counts)
 
     displacement_fn, shift_fn = space.free()
@@ -452,9 +452,9 @@ class TestMultiProtein:
         import openmm
         import openmm.app as app
         import openmm.unit as unit
-        from priox.io.parsing import biotite as parsing_biotite
-        from priox.physics.force_fields.loader import load_force_field
-        from priox.md.bridge.core import parameterize_system
+        from proxide.io.parsing import biotite as parsing_biotite
+        from proxide.physics.force_fields.loader import load_force_field
+        from proxide.md.bridge.core import parameterize_system
         from prolix.physics import system
         from jax_md import space
         import biotite.structure as struc
@@ -507,7 +507,7 @@ class TestMultiProtein:
             residues[0] = "N" + residues[0]
             residues[-1] = "C" + residues[-1]
 
-        ff = load_force_field("data/force_fields/protein19SB.eqx")
+        ff = load_force_field("protein.ff19SB")
         system_params = parameterize_system(ff, residues, atom_names, atom_counts)
 
         displacement_fn, shift_fn = space.free()

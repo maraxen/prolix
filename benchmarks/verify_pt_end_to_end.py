@@ -23,14 +23,13 @@ jax.config.update("jax_enable_x64", True)
 
 # Add paths
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../src")))
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../priox/src")))
 
 from prolix.pt import replica_exchange, temperature
 from prolix.physics import system
-from priox.physics import force_fields
-from priox.md import jax_md_bridge
-from priox.io.parsing import biotite as parsing_biotite
-from priox.physics.constants import BOLTZMANN_KCAL
+from proxide.physics import force_fields
+from proxide.md import jax_md_bridge
+from proxide.io.parsing import biotite as parsing_biotite
+from proxide.physics.constants import BOLTZMANN_KCAL
 import biotite.structure.io.pdb as pdb
 
 # Configuration

@@ -7,9 +7,9 @@ import jax
 import jax.numpy as jnp
 from jaxtyping import PRNGKeyArray
 
-from priox.chem.ordering import PDB_ORDER_INDICES
-from priox.chem.residues import atom_order
-from priox.core.types import (
+from proxide.chem.ordering import PDB_ORDER_INDICES
+from proxide.chem.residues import atom_order
+from proxide.core.types import (
   AlphaCarbonDistance,
   AtomicCoordinate,
   BackboneCoordinates,

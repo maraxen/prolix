@@ -3,9 +3,9 @@
 import jax.numpy as jnp
 import pytest
 
-from priox.physics import force_fields
-from priox.md import jax_md_bridge
-from priox.chem import residues as residue_constants
+from proxide.physics import force_fields
+from proxide.md import jax_md_bridge
+from proxide.chem import residues as residue_constants
 
 
 @pytest.fixture
@@ -33,12 +33,17 @@ def mock_force_field():
       self.cmap_torsions = []
       self.cmap_energy_grids = jnp.zeros((0, 24, 24))
       self.residue_templates = {}
+      self.urey_bradley_bonds = []
+      self.virtual_sites = {}
       
     def get_charge(self, res, atom):
       return 0.0
 
     def get_lj_params(self, res, atom):
       return 1.0, 0.1
+
+    def get_gbsa_params(self, res, atom):
+      return 1.5, 0.8  # radius, scale
 
   return MockFF()
 
@@ -52,7 +57,7 @@ def mock_stereo_chemical_props(monkeypatch):
     # Bond(atom1, atom2, length, stddev)
     # BondAngle(atom1, atom2, atom3, rad, stddev)
     
-    from priox.chem.residues import Bond, BondAngle
+    from proxide.chem.residues import Bond, BondAngle
     
     bonds = {
         "ALA": [

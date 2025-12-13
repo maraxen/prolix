@@ -8,9 +8,9 @@ import openmm.app as app
 import openmm.unit as unit
 from termcolor import colored
 from prolix.physics import simulate, system
-from priox.physics import force_fields
-from priox.md import jax_md_bridge
-from priox.physics import constants
+from proxide.physics import force_fields
+from proxide.md import jax_md_bridge
+from proxide.physics import constants
 from jax_md import space
 
 # Configuration
@@ -27,7 +27,7 @@ def benchmark_ensembles():
     # 1. Setup Input
     import biotite.structure.io.pdb as pdb
     import biotite.structure as struc
-    from priox.io.parsing import biotite as parsing_biotite
+    from proxide.io.parsing import biotite as parsing_biotite
     
     atom_array = parsing_biotite.load_structure_with_hydride(PDB_PATH, model=1)
     

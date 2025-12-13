@@ -7,8 +7,8 @@ from pathlib import Path
 import jax
 import jax.numpy as jnp
 import pytest
-from priox.io.parsing.dispatch import load_structure as parse_input
-from priox.core.containers import ProteinTuple
+from proxide.io.parsing.dispatch import load_structure as parse_input
+from proxide.core.containers import Protein
 
 @pytest.fixture
 def simple_charges() -> jax.Array:
@@ -99,7 +99,7 @@ def temp_ff_dir(tmp_path: Path) -> Path:
     return ff_dir
 
 @pytest.fixture(scope="session")
-def pqr_protein_tuple() -> "ProteinTuple":
+def pqr_protein() -> "Protein":
     """Load a sample protein structure from a PQR file."""
     pqr_path = Path(__file__).parent / "data" / "1a00.pqr"
     return next(parse_input(str(pqr_path)))

@@ -12,7 +12,8 @@ dependencies = [
     "jax",
     "jax-md",
     "equinox",
-    "priox",
+    "proxide",
+    "oxidize",
     "biotite",
     "mdtraj",
     "numpy",
@@ -105,9 +106,11 @@ reportMissingTypeStubs = false
 reportImportCycles = false
 
 [tool.uv.sources]
-priox = { path = "priox", editable = true }
+proxide = { path = "proxide", editable = true }
+oxidize = { path = "proxide/oxidize", editable = true }
 
 [tool.uv]
 environments = [
     "sys_platform == 'darwin'",
+    "sys_platform == 'linux'",
 ]

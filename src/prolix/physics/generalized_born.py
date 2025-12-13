@@ -11,7 +11,7 @@ import jax
 import jax.numpy as jnp
 from jax_md import util
 
-from priox.physics import constants
+from proxide.physics import constants
 
 Array = util.Array
 

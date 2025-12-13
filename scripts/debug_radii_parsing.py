@@ -3,7 +3,7 @@ import os
 import sys
 import xml.etree.ElementTree as ET
 import openmm.app as app
-from priox.physics.force_fields import FullForceField
+from proxide.physics.force_fields import FullForceField
 import dataclasses
 
 def test_parse_radii():
@@ -61,7 +61,7 @@ def test_parse_radii():
     if 'radii_by_id' in field_names:
         print("SUCCESS: FullForceField already has 'radii_by_id'.")
     else:
-        print("FAILURE: FullForceField MISSING 'radii_by_id'. Must modify priox source.")
+        print("FAILURE: FullForceField MISSING 'radii_by_id'. Must modify proxide source.")
 
 if __name__ == "__main__":
     test_parse_radii()

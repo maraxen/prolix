@@ -15,7 +15,7 @@ import biotite.structure.io.pdb as pdb
 
 from jax_md import space, simulate as jax_simulate, quantity
 
-from priox.chem import residues as residue_constants
+from proxide.chem import residues as residue_constants
 from prolix.physics import simulate, force_fields, jax_md_bridge, system, constants
 
 # Enable x64 for physics
@@ -72,7 +72,7 @@ def extract_system_from_biotite(atom_array):
     coords = np.vstack(coords_list)
     return coords, res_names, atom_names
 
-def run_stress_test(pdb_id=DEFAULT_PDB_ID, force_field_path="src/priox.physics.force_fields/eqx/protein19SB.eqx"):
+def run_stress_test(pdb_id=DEFAULT_PDB_ID, force_field_path="proxide/src/proxide/physics/force_fields/eqx/protein19SB.eqx"):
     print(f"Running Stability Stress Test on {pdb_id}...")
     print(f"Total Steps: {TOTAL_STEPS}, Log Interval: {LOG_INTERVAL}")
     

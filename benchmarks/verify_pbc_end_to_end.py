@@ -29,9 +29,9 @@ except ImportError:
 # Prolix Imports
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../src")))
 from prolix.physics import system, pbc, pme
-from priox.physics import force_fields, constants
-from priox.md import jax_md_bridge
-from priox.io.parsing import biotite as parsing_biotite
+from proxide.physics import force_fields, constants
+from proxide.md import jax_md_bridge
+from proxide.io.parsing import biotite as parsing_biotite
 import biotite.structure.io.pdb as pdb_io
 
 # Configuration

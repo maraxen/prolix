@@ -7,9 +7,9 @@ import biotite.structure as struc
 from jax_md import simulate, energy, space
 from prolix.physics import solvation, system, simulate as p_simulate
 
-from priox.io.parsing import biotite as parsing_biotite
-from priox.md.bridge import core as bridge_core
-from priox.physics.force_fields import loader as ff_loader
+from proxide.io.parsing import biotite as parsing_biotite
+from proxide.md.bridge import core as bridge_core
+from proxide.physics.force_fields import loader as ff_loader
 
 def test_solvation_stability():
     print("===========================================================")
@@ -89,10 +89,10 @@ def test_solvation_stability():
     
     # 4. Parameterize
     print("Parameterizing System...")
-    # Using locally available ff14SB
-    ff_path = "data/force_fields/ff14SB.eqx"
-    print(f"Loading Force Field: {ff_path}")
-    ff = ff_loader.load_force_field(ff_path)
+    # Using ff14SB from assets
+    ff_name = "amber/ff14SB"
+    print(f"Loading Force Field: {ff_name}")
+    ff = ff_loader.load_force_field(ff_name)
     
     params = bridge_core.parameterize_system(
         ff, 

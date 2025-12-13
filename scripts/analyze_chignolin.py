@@ -10,7 +10,7 @@ from jax_md import space
 
 from prolix.simulate import SimulationSpec, run_simulation, SimulationState, TrajectoryWriter
 from prolix import analysis
-from priox.md.jax_md_bridge import create_system_from_pdb
+from proxide.md.jax_md_bridge import create_system_from_pdb
 
 def analyze_trajectory(trajectory_path: str, pdb_path: str, output_dir: str = "analysis_results"):
     """Analyze a trajectory file."""
@@ -26,7 +26,7 @@ def analyze_trajectory(trajectory_path: str, pdb_path: str, output_dir: str = "a
     # 2. Iterate Trajectory
     # In a real scenario, we might iterate efficiently using ArrayRecordReader
     # For this script, we'll assume we can load it via SimulationState.from_array_record 
-    # if we iterate manually, OR we use the Grain loader from priox.
+    # if we iterate manually, OR we use the Grain loader from proxide.
     
     # Let's use array_record_module directly since we want raw access
     from array_record.python.array_record_module import ArrayRecordReader

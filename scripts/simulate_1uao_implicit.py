@@ -11,9 +11,9 @@ from prolix import simulate
 from prolix.visualization import animate_trajectory, TrajectoryReader, save_trajectory_html
 
 # Priox imports
-from priox.md.bridge.core import parameterize_system
-from priox.physics.force_fields.loader import load_force_field
-from priox.io.parsing import biotite as parsing_biotite
+from proxide.md.bridge.core import parameterize_system
+from proxide.physics.force_fields.loader import load_force_field
+from proxide.io.parsing import biotite as parsing_biotite
 import biotite.structure as struc
 
 def main():

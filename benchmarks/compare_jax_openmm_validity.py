@@ -19,8 +19,8 @@ import openmm.unit as unit
 
 # PrxteinMPNN imports
 from prolix.physics import simulate, force_fields, jax_md_bridge, system, constants
-from priox.chem import residues as residue_constants
-from priox.io.parsing import biotite as parsing_biotite
+from proxide.chem import residues as residue_constants
+from proxide.io.parsing import biotite as parsing_biotite
 from jax_md import space
 
 # Enable x64 for physics
@@ -327,7 +327,7 @@ def main():
     atom_array, topology, positions = extract_system_with_hydride(pdb_path)
     
     # Load FF
-    ff = force_fields.load_force_field("src/priox.physics.force_fields/eqx/protein19SB.eqx")
+    ff = force_fields.load_force_field("proxide/src/proxide/physics/force_fields/eqx/protein19SB.eqx")
     
     print(f"DEBUG: FF Residue Templates Count: {len(ff.residue_templates) if ff.residue_templates else 0}")
     

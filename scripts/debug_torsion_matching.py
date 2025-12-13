@@ -1,7 +1,7 @@
 import jax
 import jax.numpy as jnp
 import equinox as eqx
-from priox.physics import force_fields
+from proxide.physics import force_fields
 
 def debug_torsion_matching():
     ff_path = "data/force_fields/protein19SB.eqx"

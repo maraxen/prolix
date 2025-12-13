@@ -16,8 +16,8 @@ import msgpack # For array_record if needed, though usually we save analysis dat
 from prolix.physics import simulate as physics_simulate
 from prolix.physics import system
 from prolix.pt import temperature
-from priox.md.jax_md_bridge import SystemParams
-from priox.physics.constants import BOLTZMANN_KCAL
+from proxide.md import SystemParams
+from proxide.physics.constants import BOLTZMANN_KCAL
 from jax_md import simulate, quantity
 
 logger = logging.getLogger(__name__)

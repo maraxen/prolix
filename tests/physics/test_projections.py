@@ -4,7 +4,7 @@ import jax
 import jax.numpy as jnp
 import pytest
 
-from priox.physics.projections import (
+from proxide.physics.projections import (
     compute_backbone_frame,
     project_forces_onto_backbone,
     project_forces_onto_backbone_per_atom,

@@ -3,9 +3,9 @@
 import jax
 import jax.numpy as jnp
 import pytest
-from priox.physics import force_fields
+from proxide.physics import force_fields
 from prolix.physics import system, simulate, generalized_born
-from priox.md import jax_md_bridge
+from proxide.md import jax_md_bridge
 from jax_md import space
 
 def test_implicit_solvent_md_stability():
@@ -67,10 +67,10 @@ def test_implicit_solvent_md_stability():
     
     # 2. Parameterize
     import os
-    ff_path = "src/priox.physics.force_fields/eqx/ff14SB.eqx"
+    ff_path = "proxide/src/proxide/physics/force_fields/eqx/ff14SB.eqx"
     if not os.path.exists(ff_path):
         # Try relative to repo root if running from prolix
-        ff_path = "../priox/src/priox/physics/force_fields/eqx/ff14SB.eqx"
+        ff_path = "../proxide/src/proxide/physics/force_fields/eqx/ff14SB.eqx"
     
     if os.path.exists(ff_path):
         print(f"Loading local FF from {ff_path}")

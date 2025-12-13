@@ -6,7 +6,7 @@ import jax
 import jax.numpy as jnp
 import pytest
 
-from priox.physics.electrostatics import (
+from proxide.physics.electrostatics import (
     compute_coulomb_forces,
     compute_coulomb_forces_at_backbone,
     compute_pairwise_displacements,

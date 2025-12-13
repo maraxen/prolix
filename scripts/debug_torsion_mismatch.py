@@ -9,9 +9,9 @@ import openmm
 import openmm.app as app
 import openmm.unit as unit
 from prolix.physics import system
-from priox.physics import force_fields
-from priox.md import jax_md_bridge
-from priox.io.parsing import biotite as parsing_biotite
+from proxide.physics import force_fields
+from proxide.md import jax_md_bridge
+from proxide.io.parsing import biotite as parsing_biotite
 import biotite.structure.io.pdb as pdb
 
 # Enable x64

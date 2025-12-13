@@ -21,10 +21,10 @@ except ImportError:
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../../src")))
 from prolix.physics import force_fields, jax_md_bridge, system
 from prxteinmpnn.utils import residue_constants
-from priox.io.parsing import biotite as parsing_biotite
+from proxide.io.parsing import biotite as parsing_biotite
 
 # Configuration
-FF_EQX_PATH = "src/priox.physics.force_fields/eqx/protein19SB.eqx"
+FF_EQX_PATH = "proxide/src/proxide/physics/force_fields/eqx/protein19SB.eqx"
 OPENMM_XMLS = ['amber14-all.xml', 'implicit/obc2.xml'] # Fallback to 14SB if 19SB not available in OpenMM
 
 def create_tri_alanine_pdb(filename="tri_alanine.pdb"):

@@ -21,19 +21,19 @@ except ImportError:
 # Assuming the script is run from the root or scripts/debug_md
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../../src")))
 from prolix.physics import cmap, system, generalized_born, bonded
-from priox.md import jax_md_bridge
-from priox.assets.forcefields import loader as force_fields
+from proxide.md import jax_md_bridge
+from proxide.physics.force_fields import loader as force_fields
 print(f"DEBUG: Loaded system module from: {system.__file__}")
 print(f"DEBUG: Loaded generalized_born module from: {generalized_born.__file__}")
-import priox.chem.residues as residue_constants
-from priox.io.parsing import biotite as parsing_biotite
+import proxide.chem.residues as residue_constants
+from proxide.io.parsing import biotite as parsing_biotite
 import biotite.structure.io.pdb as pdb
 
 # =============================================================================
 # Configuration
 # =============================================================================
 PDB_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../data/pdb/1UBQ.pdb"))
-FF_EQX_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../../../priox/src/priox/physics/force_fields/eqx/protein19SB.eqx"))
+FF_EQX_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../../../proxide/src/proxide/physics/force_fields/eqx/protein19SB.eqx"))
 OPENMM_FF_XMLS = ['amber14-all.xml', 'implicit/obc2.xml'] # Using amber14-all which includes ff19SB usually or similar
 # Note: OpenMM might not have 'amber19sb.xml' by default in older versions, checking...
 # If amber19sb.xml is not found, we might need to use amber14/protein.ff14SB.xml as fallback or ensure 19SB is available.
@@ -102,10 +102,10 @@ def run_validation():
                 print(f"  Atom: {atom.name}")
             break
 
-    # Create ForceField - use local ff19SB XML from priox
+    # Create ForceField - use local ff19SB XML from proxide
     ff19sb_xml = os.path.abspath(os.path.join(
         os.path.dirname(__file__), 
-        "../../../priox/src/priox/physics/force_fields/xml/protein.ff19SB.xml"
+        "../../../proxide/src/proxide/physics/force_fields/xml/protein.ff19SB.xml"
     ))
     
     if not os.path.exists(ff19sb_xml):

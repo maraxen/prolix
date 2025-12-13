@@ -22,14 +22,14 @@ except ImportError:
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../../src")))
 from prolix.physics import force_fields, jax_md_bridge, system
 from prxteinmpnn.utils import residue_constants
-from priox.io.parsing import biotite as parsing_biotite
+from proxide.io.parsing import biotite as parsing_biotite
 import biotite.structure.io.pdb as pdb
 
 # =============================================================================
 # Configuration
 # =============================================================================
 PDB_PATH = "data/pdb/1UAO.pdb"
-FF_EQX_PATH = "src/priox.physics.force_fields/eqx/protein19SB.eqx"
+FF_EQX_PATH = "proxide/src/proxide/physics/force_fields/eqx/protein19SB.eqx"
 OPENMM_FF_XMLS = ['amber14-all.xml', 'implicit/obc2.xml'] # Using amber14-all which includes ff19SB usually or similar
 # Note: OpenMM might not have 'amber19sb.xml' by default in older versions, checking...
 # If amber19sb.xml is not found, we might need to use amber14/protein.ff14SB.xml as fallback or ensure 19SB is available.

@@ -13,7 +13,6 @@ jax.config.update("jax_enable_x64", True)
 
 # Add source path
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../src")))
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../priox/src")))
 
 
 try:
@@ -27,9 +26,9 @@ except ImportError:
 print("Imports done.")
 
 from prolix.physics import system
-from priox.physics import force_fields
-from priox.md import jax_md_bridge
-from priox.io.parsing import biotite as parsing_biotite
+from proxide.physics import force_fields
+from proxide.md import jax_md_bridge
+from proxide.io.parsing import biotite as parsing_biotite
 from biotite import structure
 import biotite.database.rcsb as rcsb
 

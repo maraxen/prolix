@@ -15,9 +15,9 @@ from pathlib import Path
 import equinox as eqx
 
 # Prolix imports
-from priox.io.parsing.molecule import Molecule
-from priox.physics.force_fields import load_force_field
-from priox.md.bridge.ligand import parameterize_ligand
+from proxide.io.parsing.molecule import Molecule
+from proxide.physics.force_fields import load_force_field
+from proxide.md.bridge.ligand import parameterize_ligand
 from prolix.physics.system import make_energy_fn
 from jax_md import space
 
@@ -152,7 +152,7 @@ def run_gaff_comparison(mol2_path: str, ff_path: str, ff_xml_version: str = "gaf
 if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser()
-    parser.add_argument("--mol2", type=str, default="priox/tests/io/parsing/imatinib.mol2")
+    parser.add_argument("--mol2", type=str, default="proxide/tests/io/parsing/imatinib.mol2")
     parser.add_argument("--ff", type=str, default="data/force_fields/gaff-2.11.eqx")
     parser.add_argument("--xml_version", type=str, default="gaff-2.11")
     args = parser.parse_args()

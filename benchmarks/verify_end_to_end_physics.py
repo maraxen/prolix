@@ -29,12 +29,11 @@ except ImportError:
 
 # PrxteinMPNN Imports
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../../src")))
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../priox/src"))) # Insert local priox at start
 from prolix.physics import system, bonded, cmap, generalized_born
-from priox.physics import force_fields
-from priox.physics import constants
-from priox.md import jax_md_bridge
-from priox.io.parsing import biotite as parsing_biotite
+from proxide.physics import force_fields
+from proxide.physics import constants
+from proxide.md import jax_md_bridge
+from proxide.io.parsing import biotite as parsing_biotite
 import biotite.structure.io.pdb as pdb
 
 # Configuration

@@ -15,8 +15,8 @@ import numpy as np
 # Add source paths
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
-from priox.io.parsing.molecule import Molecule
-from priox.physics.force_fields import load_force_field
+from proxide.io.parsing.molecule import Molecule
+from proxide.physics.force_fields import load_force_field
 
 
 def verify_mol2_parsing():
@@ -80,7 +80,7 @@ def verify_gaff_loading():
 
 def verify_ligand_parameterization(mol, ff):
     """Test ligand parameterization."""
-    from priox.md.bridge.ligand import parameterize_ligand
+    from proxide.md.bridge.ligand import parameterize_ligand
     
     print("\n" + "=" * 60)
     print("Verifying Ligand Parameterization")

@@ -3,7 +3,7 @@ import jax.numpy as jnp
 import numpy as np
 import biotite.structure.io.pdb as pdb
 import biotite.structure as struc
-from priox.io.parsing import biotite as parsing_biotite
+from proxide.io.parsing import biotite as parsing_biotite
 import openmm.app as app
 import openmm
 import sys

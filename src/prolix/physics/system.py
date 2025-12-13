@@ -10,8 +10,8 @@ import numpy as np
 from jax_md import energy, partition, space, util
 
 from prolix.physics import bonded, generalized_born, cmap, sasa, pme, virtual_sites
-from priox.physics import constants
-from priox.md.jax_md_bridge import SystemParams
+from proxide.physics import constants
+from proxide.md import SystemParams
 
 Array = util.Array
 
@@ -66,7 +66,7 @@ def make_energy_fn(
 
   Args:
       displacement_fn: JAX MD displacement function.
-      system_params: System parameters from `jax_md_bridge`.
+      system_params: System parameters from `proxide.md`.
       neighbor_list: Optional neighbor list. If provided, non-bonded terms
                      will use it. If None, they will be N^2 (slow).
                      NOTE: For proteins, N^2 is often acceptable for small systems,

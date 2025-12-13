@@ -13,7 +13,7 @@ import biotite.structure.io as struc_io
 import biotite.database.rcsb as rcsb
 
 from prolix.physics import force_fields, jax_md_bridge, system
-from priox.io.parsing import biotite as parsing_biotite
+from proxide.io.parsing import biotite as parsing_biotite
 from prxteinmpnn.utils import residue_constants
 
 def test_debug_gbsa_offset():
@@ -40,9 +40,9 @@ def test_debug_gbsa_offset():
         atom_array = parsing_biotite.load_structure_with_hydride(tmp.name, model=1, add_hydrogens=True)
         
         # Parameterize JAX MD
-        ff_path = "src/priox.physics.force_fields/eqx/protein19SB.eqx"
+        ff_path = "proxide/src/proxide/physics/force_fields/eqx/protein19SB.eqx"
         if not os.path.exists(ff_path):
-            ff_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../src/priox.physics.force_fields/eqx/protein19SB.eqx"))
+            ff_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../proxide/src/proxide/physics/force_fields/eqx/protein19SB.eqx"))
             
         ff = force_fields.load_force_field(ff_path)
         params, coords = parsing_biotite.biotite_to_jax_md_system(atom_array, ff)

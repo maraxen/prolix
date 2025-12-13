@@ -11,12 +11,12 @@ import equinox as eqx
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from scripts.convert_all_xmls import parse_xml_to_eqx
-from priox.physics import force_fields
+from proxide.physics import force_fields
 
 # Path to XML
 xml_path = os.path.abspath("openmmforcefields/openmmforcefields/ffxml/amber/protein.ff19SB.xml")
-# Update output dir to point to the local priox clone
-output_dir = "priox/src/priox/physics/force_fields/eqx"
+# Update output dir to point to the local proxide clone
+output_dir = "proxide/src/proxide/physics/force_fields/eqx"
 
 if not os.path.exists(xml_path):
     print(f"Error: XML not found at {xml_path}")

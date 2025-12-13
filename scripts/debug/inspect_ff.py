@@ -3,7 +3,7 @@ import os
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../../src")))
 from prolix.physics import force_fields
 
-FF_PATH = "src/priox.physics.force_fields/eqx/amber14-all.eqx"
+FF_PATH = "proxide/src/proxide/physics/force_fields/eqx/amber14-all.eqx"
 
 try:
     ff = force_fields.load_force_field(FF_PATH)

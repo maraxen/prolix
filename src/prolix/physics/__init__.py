@@ -1,6 +1,6 @@
 """Physics-based feature calculations for protein structure."""
 
-from priox.physics.constants import (
+from proxide.physics.constants import (
   ANGSTROM_TO_NM,
   COULOMB_CONSTANT,
   COULOMB_CONSTANT_ATOMIC,
@@ -12,24 +12,22 @@ from priox.physics.constants import (
   MIN_DISTANCE,
   NM_TO_ANGSTROM,
 )
-from priox.physics.electrostatics import (
+from proxide.physics.electrostatics import (
   compute_coulomb_forces,
   compute_coulomb_forces_at_backbone,
   compute_pairwise_displacements,
 )
-from priox.physics.force_fields import (
+from proxide.physics.force_fields import (
   FullForceField,
   list_available_force_fields,
   load_force_field,
-  load_force_field_from_hub,
-  save_force_field,
 )
-from priox.physics.projections import (
+from proxide.physics.projections import (
   compute_backbone_frame,
   project_forces_onto_backbone,
   project_forces_onto_backbone_per_atom,
 )
-from priox.physics.vdw import (
+from proxide.physics.vdw import (
   combine_lj_parameters,
   compute_lj_energy_at_backbone,
   compute_lj_energy_at_positions,
@@ -69,8 +67,6 @@ __all__ = [
   "compute_pairwise_displacements",
   "list_available_force_fields",
   "load_force_field",
-  "load_force_field_from_hub",
   "project_forces_onto_backbone",
   "project_forces_onto_backbone_per_atom",
-  "save_force_field",
 ]

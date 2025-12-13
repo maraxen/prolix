@@ -20,8 +20,8 @@ except ImportError:
 
 # PrxteinMPNN Imports (for residue constants and dihedral calc)
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../../src")))
-from priox.chem import residues as residue_constants
-from priox.io.parsing import biotite as parsing_biotite
+from proxide.chem import residues as residue_constants
+from proxide.io.parsing import biotite as parsing_biotite
 
 # Constants
 PDB_ID = "5AWL"

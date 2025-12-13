@@ -8,14 +8,14 @@ from termcolor import colored
 
 # PrxteinMPNN Imports
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../../src")))
-from priox.physics import force_fields
+from proxide.physics import force_fields
 from prolix.physics import system, bonded, generalized_born, cmap
-from priox.md import jax_md_bridge
-from priox.io.parsing import biotite as parsing_biotite
+from proxide.md import jax_md_bridge
+from proxide.io.parsing import biotite as parsing_biotite
 import biotite.structure.io.pdb as pdb
 
 PDB_PATH = "data/pdb/1UBQ.pdb"
-FF_EQX_PATH = "src/priox.physics.force_fields/eqx/protein19SB.eqx"
+FF_EQX_PATH = "proxide/src/proxide/physics/force_fields/eqx/protein19SB.eqx"
 
 # Enable x64
 jax.config.update("jax_enable_x64", True)

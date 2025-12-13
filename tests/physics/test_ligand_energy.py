@@ -3,15 +3,15 @@
 import jax.numpy as jnp
 import numpy as np
 import pytest
-from priox.io.parsing.molecule import Molecule
-from priox.md.bridge.ligand import parameterize_ligand
-from priox.physics.force_fields import FullForceField, load_force_field
+from proxide.io.parsing.molecule import Molecule
+from proxide.md.bridge.ligand import parameterize_ligand
+from proxide.physics.force_fields import FullForceField, load_force_field
 
 # Use temporary directory for creating test force fields
 @pytest.fixture
 def mock_gaff_ff(tmp_path):
     """Create a mock GAFF force field with GAFFNonbondedParams."""
-    from priox.physics.force_fields.components import (
+    from proxide.physics.force_fields.components import (
         AtomTypeParams,
         BondPotentialParams,
         AnglePotentialParams,

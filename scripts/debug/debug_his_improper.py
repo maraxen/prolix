@@ -8,12 +8,12 @@ from termcolor import colored
 # PrxteinMPNN Imports
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../../src")))
 from prolix.physics import bonded, jax_md_bridge, force_fields
-from priox.io.parsing import biotite as parsing_biotite
+from proxide.io.parsing import biotite as parsing_biotite
 from jax_md import space
 
 # Configuration
 PDB_PATH = "data/pdb/1UBQ.pdb"
-FF_EQX_PATH = "src/priox.physics.force_fields/eqx/protein19SB.eqx"
+FF_EQX_PATH = "proxide/src/proxide/physics/force_fields/eqx/protein19SB.eqx"
 
 def debug_his_improper():
     print(colored("===========================================================", "cyan"))

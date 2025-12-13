@@ -9,7 +9,7 @@ from mpl_toolkits.mplot3d import Axes3D
 import jax.numpy as jnp
 
 from prolix.visualization import TrajectoryReader, save_trajectory_html
-from priox.io.parsing import biotite as parsing_biotite
+from proxide.io.parsing import biotite as parsing_biotite
 import biotite.structure as struc
 
 def main():

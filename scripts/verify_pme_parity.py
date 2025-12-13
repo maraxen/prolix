@@ -9,7 +9,7 @@ import os
 # Add src to path
 sys.path.append(os.path.join(os.path.dirname(__file__), "../src"))
 from prolix.physics import system
-from priox.physics import constants
+from proxide.physics import constants
 
 def verify_pme():
     print("Verifying PME Parity...")

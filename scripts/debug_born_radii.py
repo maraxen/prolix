@@ -3,7 +3,6 @@
 import jax.numpy as jnp
 import numpy as np
 import sys
-sys.path.insert(0, 'priox/src')
 sys.path.insert(0, 'src')
 
 # Load structure and get positions
@@ -207,7 +206,7 @@ print(f"OpenMM GBSA Energy: {omm_gbsa_energy:.4f} kcal/mol")
 
 # Compute JAX GBSA Energy
 from prolix.physics import generalized_born
-from priox.physics import constants
+from proxide.physics import constants
 
 jax_positions = jnp.array(positions)
 jax_radii = jnp.array(omm_offset_radii + 0.09)  # Intrinsic radii

@@ -17,7 +17,7 @@ except ImportError:
 
 # PrxteinMPNN Imports (for Dihedral Calculation)
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../../src")))
-from priox.io.parsing import biotite as parsing_biotite
+from proxide.io.parsing import biotite as parsing_biotite
 import biotite.structure.io.pdb as pdb
 # We need compute_dihedrals_jax from benchmark_conformation.py, but it's not in a module.
 # Let's copy the dihedral logic or import it if possible.

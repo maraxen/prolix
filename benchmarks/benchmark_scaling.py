@@ -13,7 +13,7 @@ import argparse
 
 # PrxteinMPNN imports
 from prolix.physics import simulate, force_fields, jax_md_bridge, system
-from priox.chem import residues as residue_constants
+from proxide.chem import residues as residue_constants
 
 # Enable x64 for physics
 jax.config.update("jax_enable_x64", True)
@@ -105,7 +105,7 @@ def create_dummy_system(base_atom_array, target_length):
     coords = np.vstack(coords_list)
     return coords, res_names, atom_names
 
-def run_benchmark(pdb_id=PDB_ID, lengths=LENGTHS, force_field_path="src/priox.physics.force_fields/eqx/protein19SB.eqx"):
+def run_benchmark(pdb_id=PDB_ID, lengths=LENGTHS, force_field_path="proxide/src/proxide/physics/force_fields/eqx/protein19SB.eqx"):
     print(f"Benchmarking Computational Scaling on {pdb_id} with lengths {lengths}...")
     
     if os.path.exists(force_field_path):

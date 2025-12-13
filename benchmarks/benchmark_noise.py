@@ -11,15 +11,15 @@ import biotite.structure.io.pdb as pdb
 import biotite.structure as struc
 import biotite.database.rcsb as rcsb
 from prolix.physics import simulate, force_fields, jax_md_bridge, system
-from priox.chem import residues as residue_constants
+from proxide.chem import residues as residue_constants
 from jax_md import space
 
 # Dev Set PDB IDs
 DEV_SET = ["1UBQ", "1CRN", "1BPTI", "2GB1", "1L2Y"]
 NUM_SAMPLES = 32
 
-from priox.io.process import frame_iterator_from_inputs
-from priox.core.containers import ProteinTuple
+from proxide.io.process import frame_iterator_from_inputs
+from proxide.core.containers import ProteinTuple
 
 # Dev Set PDB IDs
 DEV_SET = ["1UBQ", "1CRN", "1BPTI", "2GB1", "1L2Y"]
@@ -142,7 +142,7 @@ def run_benchmark(pdb_set=DEV_SET):
             pdb_paths.append(pdb_path)
 
     # Use unified data loader
-    from priox.io import process
+    from proxide.io import process
     
     for pdb_path in pdb_paths:
         pdb_id = os.path.basename(pdb_path).split(".")[0].upper()

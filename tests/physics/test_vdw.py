@@ -3,7 +3,7 @@
 import jax
 import jax.numpy as jnp
 
-from priox.physics.vdw import (
+from proxide.physics.vdw import (
     combine_lj_parameters,
     compute_lj_energy_at_backbone,
     compute_lj_energy_at_positions,
@@ -145,7 +145,7 @@ def test_lj_force_attractive_at_long_distance():
 
 def test_lj_forces_vector_direction(simple_positions, lj_parameters):
     """Test that LJ force vectors point in correct direction."""
-    from priox.physics.electrostatics import compute_pairwise_displacements
+    from proxide.physics.electrostatics import compute_pairwise_displacements
 
     # Two atoms along x-axis at repulsive distance
     positions = jnp.array([[0.0, 0.0, 0.0], [2.5, 0.0, 0.0]])  # Short distance
@@ -204,7 +204,7 @@ def test_lj_energy_at_backbone_shape(
 
 def test_lj_is_jittable(simple_positions, lj_parameters):
     """Test that LJ calculations can be JIT compiled."""
-    from priox.physics.electrostatics import compute_pairwise_displacements
+    from proxide.physics.electrostatics import compute_pairwise_displacements
 
     displacements, distances = compute_pairwise_displacements(
         simple_positions, simple_positions,
@@ -227,7 +227,7 @@ def test_lj_is_jittable(simple_positions, lj_parameters):
 
 def test_lj_is_differentiable(simple_positions, lj_parameters):
     """Test that LJ energy is differentiable w.r.t. positions."""
-    from priox.physics.electrostatics import compute_pairwise_displacements
+    from proxide.physics.electrostatics import compute_pairwise_displacements
 
     def total_energy(positions):
         displacements, distances = compute_pairwise_displacements(positions, positions)

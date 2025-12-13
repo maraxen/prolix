@@ -31,7 +31,7 @@ def view_structure(pdb_path: str, style: str = "cartoon") -> Any:
     with open(pdb_path, 'r') as f:
         pdb_data = f.read()
         
-    view = py2Dmol.view(width=800, height=600)
+    view = py2Dmol.view()
     view.addModel(pdb_data, "pdb")
     view.setStyle({style: {'color': 'spectrum'}})
     view.zoomTo()
@@ -94,7 +94,7 @@ def view_trajectory(
         
     pdb_data = "".join(out_lines)
     
-    view = py2Dmol.view(width=800, height=600)
+    view = py2Dmol.view()
     view.addModelsAsFrames(pdb_data, "pdb")
     view.setStyle({style: {'color': 'spectrum'}})
     view.animate({'loop': "forward"})

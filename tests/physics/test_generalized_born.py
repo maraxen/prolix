@@ -5,7 +5,7 @@ import jax.numpy as jnp
 import pytest
 from jax import test_util
 
-from priox.physics import constants
+from proxide.physics import constants
 from prolix.physics import generalized_born
 
 class TestGeneralizedBorn:

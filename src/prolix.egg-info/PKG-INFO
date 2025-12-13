@@ -8,14 +8,15 @@ License-File: LICENSE
 Requires-Dist: jax
 Requires-Dist: jax-md
 Requires-Dist: equinox
-Requires-Dist: priox
+Requires-Dist: proxide
+Requires-Dist: oxidize
 Requires-Dist: biotite
 Requires-Dist: mdtraj
 Requires-Dist: numpy
 Requires-Dist: scipy
 Requires-Dist: chex
 Requires-Dist: jaxtyping
-Requires-Dist: py2dmol>=1.5.1
+Requires-Dist: py2Dmol>=1.5.1
 Requires-Dist: matplotlib>=3.10.7
 Requires-Dist: imageio>=2.37.2
 Provides-Extra: dev

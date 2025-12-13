@@ -6,7 +6,7 @@ import pytest
 
 from prolix.pt import temperature, replica_exchange
 from prolix.physics import system
-from priox.md.jax_md_bridge import SystemParams
+from proxide.md.jax_md_bridge import SystemParams
 
 def test_temperature_ladder():
     temps = temperature.generate_temperature_ladder(4, 300, 400, geometric=True)

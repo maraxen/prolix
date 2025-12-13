@@ -22,9 +22,9 @@ from prolix.physics import system, simulate as physics_simulate, constants
 from prolix.simulate import TrajectoryWriter, SimulationState
 
 # Priox imports
-from priox.md.bridge.core import parameterize_system
-from priox.physics.force_fields.loader import load_force_field
-from priox.io.parsing import biotite as parsing_biotite
+from proxide.md.bridge.core import parameterize_system
+from proxide.physics.force_fields.loader import load_force_field
+from proxide.io.parsing import biotite as parsing_biotite
 import biotite.structure as struc
 
 

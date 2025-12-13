@@ -9,7 +9,7 @@ key = jax.random.PRNGKey(2)
 
 # Create a system (Single ALA)
 res_names = ["ALA"]
-from priox.chem import residues as residue_constants
+from proxide.chem import residues as residue_constants
 atom_names = residue_constants.residue_atoms["ALA"]
 
 ff = force_fields.load_force_field_from_hub("ff14SB")

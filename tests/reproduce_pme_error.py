@@ -5,9 +5,9 @@ import numpy as np
 from openmm import app, unit
 import os
 import openmm
-from priox.io.parsing import biotite as parsing_biotite
-from priox.md.bridge import core as bridge_core
-from priox.physics.force_fields import loader as ff_loader
+from proxide.io.parsing import biotite as parsing_biotite
+from proxide.md.bridge import core as bridge_core
+from proxide.physics.force_fields import loader as ff_loader
 from prolix.physics import system
 from jax_md import space
 

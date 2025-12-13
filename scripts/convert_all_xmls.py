@@ -5,8 +5,8 @@ import json
 import xml.etree.ElementTree as ET
 import jax.numpy as jnp
 import equinox as eqx
-from priox.physics.force_fields import FullForceField, save_force_field
-from priox.physics.force_fields.components import (
+from proxide.physics.force_fields import FullForceField, save_force_field
+from proxide.physics.force_fields.components import (
     AtomTypeParams,
     BondPotentialParams,
     AnglePotentialParams,

@@ -5,16 +5,16 @@ import jax.numpy as jnp
 import pytest
 from jax_md import space
 
-from priox.md import jax_md_bridge
+from proxide.md import jax_md_bridge
 from prolix.physics import system
-from priox.chem import residues as residue_constants
+from proxide.chem import residues as residue_constants
 
 
 @pytest.fixture(autouse=True)
 def mock_stereo_chemical_props(monkeypatch):
   """Mock stereo chemical props loading."""
   def mock_load():
-    from priox.chem.residues import Bond, BondAngle
+    from proxide.chem.residues import Bond, BondAngle
     bonds = {
         "ALA": [
             Bond("N", "CA", 1.46, 0.01),
@@ -52,12 +52,18 @@ def mock_force_field():
       self.cmap_energy_grids = []
       self.cmap_torsions = []
       self.residue_templates = {}
+      self.urey_bradley_bonds = []
+      self.virtual_sites = {}
 
     def get_charge(self, res, atom):
       return 0.1
 
     def get_lj_params(self, res, atom):
       return 3.0, 0.1
+
+    def get_gbsa_params(self, res, atom):
+      return 1.5, 0.8  # radius, scale
+
   return MockFF()
 
 

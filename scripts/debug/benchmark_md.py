@@ -36,7 +36,7 @@ def benchmark_function(func, name, warmup=3, iterations=10):
 
 def create_ala_system():
     """Create single ALA residue."""
-    from priox.chem import residues as residue_constants
+    from proxide.chem import residues as residue_constants
     
     ff = force_fields.load_force_field_from_hub("ff14SB")
     res_names = ["ALA"]
@@ -63,7 +63,7 @@ def create_ala_system():
 
 def create_dipeptide_system():
     """Create 2-residue dipeptide."""
-    from priox.chem import residues as residue_constants
+    from proxide.chem import residues as residue_constants
     
     ff = force_fields.load_force_field_from_hub("ff14SB")
     res_names = ["ALA", "ALA"]
@@ -120,7 +120,7 @@ def main():
     print("2. System Parameterization")
     print("="*60)
     
-    from priox.chem import residues as residue_constants
+    from proxide.chem import residues as residue_constants
     ff = force_fields.load_force_field_from_hub("ff14SB")
     
     def param_ala():

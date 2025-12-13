@@ -1,8 +1,8 @@
 
 import jax
 import numpy as np
-from priox.io.operations import pad_and_collate_proteins
-from priox.core.containers import ProteinTuple
+from proxide.io.operations import pad_and_collate_proteins
+from proxide.core.containers import ProteinTuple
 
 def test_bug():
     # Create dummy protein

@@ -1,4 +1,4 @@
-from priox.io.parsing import biotite
+from proxide.io.parsing import biotite
 import biotite.structure.io.pdb as pdb
 import os
 

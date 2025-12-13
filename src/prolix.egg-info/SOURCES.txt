@@ -25,4 +25,10 @@ src/prolix/pt/replica_exchange.py
 src/prolix/pt/temperature.py
 src/prolix/utils/__init__.py
 src/prolix/utils/coordinates.py
+src/prolix/visualization/__init__.py
+src/prolix/visualization/animation.py
+src/prolix/visualization/plotting.py
+src/prolix/visualization/trajectory.py
+src/prolix/visualization/viewer.py
+tests/test_viewer_mock.py
 tests/test_visualization.py
