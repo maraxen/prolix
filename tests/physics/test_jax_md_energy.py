@@ -1,141 +1,105 @@
-"""Tests for JAX MD energy function."""
+"""Tests for JAX MD energy function with parse_structure API.
+
+This module tests that the Protein object from parse_structure contains
+the correct parameters for building energy functions.
+"""
 
 import jax
 import jax.numpy as jnp
 import pytest
-from jax_md import space
+from pathlib import Path
 
-from proxide.md import jax_md_bridge
-from prolix.physics import system
-from proxide.chem import residues as residue_constants
+from proxide.io.parsing.rust import parse_structure, OutputSpec
 
 
-@pytest.fixture(autouse=True)
-def mock_stereo_chemical_props(monkeypatch):
-  """Mock stereo chemical props loading."""
-  def mock_load():
-    from proxide.chem.residues import Bond, BondAngle
-    bonds = {
-        "ALA": [
-            Bond("N", "CA", 1.46, 0.01),
-            Bond("CA", "C", 1.52, 0.01),
-            Bond("C", "O", 1.23, 0.01),
-            Bond("CA", "CB", 1.53, 0.01)
-        ],
-        "GLY": [
-            Bond("N", "CA", 1.45, 0.01),
-            Bond("CA", "C", 1.52, 0.01),
-            Bond("C", "O", 1.23, 0.01)
-        ]
-    }
-    angles = {
-        "ALA": [],
-        "GLY": []
-    }
-    return bonds, {}, angles
-
-  monkeypatch.setattr(residue_constants, "load_stereo_chemical_props", mock_load)
-  yield
+# Paths
+DATA_DIR = Path(__file__).parent.parent.parent / "data" / "pdb"
+FF_PATH = Path(__file__).parent.parent.parent / "proxide" / "src" / "proxide" / "assets" / "protein.ff19SB.xml"
 
 
 @pytest.fixture
-def mock_force_field():
-  class MockFF:
-    def __init__(self):
-      self.bonds = []
-      self.angles = []
-      self.atom_key_to_id = []
-      self.atom_class_map = {}
-      self.atom_type_map = {}
-      self.propers = []
-      self.impropers = []
-      self.cmap_energy_grids = []
-      self.cmap_torsions = []
-      self.residue_templates = {}
-      self.urey_bradley_bonds = []
-      self.virtual_sites = {}
-
-    def get_charge(self, res, atom):
-      return 0.1
-
-    def get_lj_params(self, res, atom):
-      return 3.0, 0.1
-
-    def get_gbsa_params(self, res, atom):
-      return 1.5, 0.8  # radius, scale
-
-  return MockFF()
+def parameterized_protein():
+    """Load a parameterized protein."""
+    pdb_path = DATA_DIR / "1CRN.pdb"
+    
+    spec = OutputSpec()
+    spec.parameterize_md = True
+    spec.force_field = str(FF_PATH)
+    spec.add_hydrogens = True
+    
+    return parse_structure(str(pdb_path), spec)
 
 
-def test_energy_function_finite(mock_force_field):
-  """Test that energy function returns finite values and forces."""
-  residues = ["ALA", "GLY"]
-  atoms_ala = residue_constants.residue_atoms["ALA"]
-  atoms_gly = residue_constants.residue_atoms["GLY"]
-  atom_names = atoms_ala + atoms_gly
-  
-  params = jax_md_bridge.parameterize_system(
-      mock_force_field, residues, atom_names
-  )
-  
-  # Create random positions
-  key = jax.random.PRNGKey(0)
-  n_atoms = len(atom_names)
-  r = jax.random.normal(key, (n_atoms, 3)) * 10.0
-  
-  # Create energy function
-  displacement_fn, _ = space.free()
-  energy_fn = system.make_energy_fn(displacement_fn, params)
-  
-  # Compute energy
-  e = energy_fn(r)
-  assert jnp.isfinite(e)
-  
-  # Compute forces
-  grad_fn = jax.grad(energy_fn)
-  forces = -grad_fn(r)
-  assert jnp.all(jnp.isfinite(forces))
+def test_charges_shape(parameterized_protein):
+    """Test that charges have the correct shape."""
+    protein = parameterized_protein
+    n_atoms = len(protein.charges)
+    assert protein.charges.shape == (n_atoms,)
+    assert n_atoms > 0
 
 
-def test_exclusion_mask_prevents_explosion(mock_force_field):
-  """Test that bonded atoms don't have massive VDW repulsion."""
-  # Create 2 atoms bonded
-  residues = ["ALA"]
-  # Just use N and CA
-  atom_names = ["N", "CA"]
-  
-  # We need to hack parameterize_system or use a subset
-  # parameterize_system expects full residue atoms usually.
-  # Let's use full ALA but focus on N-CA
-  atom_names = residue_constants.residue_atoms["ALA"]
-  
-  params = jax_md_bridge.parameterize_system(
-      mock_force_field, residues, atom_names
-  )
-  
-  displacement_fn, _ = space.free()
-  energy_fn = system.make_energy_fn(displacement_fn, params)
-  
-  # Place N and CA at 1.46 A (bond length)
-  # Sigma is 3.0 (from mock). 1.46 < 3.0 -> massive repulsion if not excluded.
-  
-  # Construct positions
-  r = jnp.zeros((len(atom_names), 3))
-  # N at 0,0,0. CA at 1.46,0,0
-  # Indices: N=3, CA=1, C=0, O=4, CB=2
-  
-  r = r.at[3].set(jnp.array([0.0, 0.0, 0.0]))      # N
-  r = r.at[1].set(jnp.array([1.46, 0.0, 0.0]))     # CA
-  r = r.at[0].set(jnp.array([2.98, 0.0, 0.0]))     # C (1.46+1.52)
-  r = r.at[4].set(jnp.array([4.21, 0.0, 0.0]))     # O (2.98+1.23)
-  r = r.at[2].set(jnp.array([1.46, 1.53, 0.0]))    # CB (perp to CA)
+def test_lj_params_shape(parameterized_protein):
+    """Test that LJ params have matching shapes."""
+    protein = parameterized_protein
+    assert protein.sigmas.shape == protein.charges.shape
+    assert protein.epsilons.shape == protein.charges.shape
 
-  
-  # Calculate energy
-  e = energy_fn(r)
-  
-  # If VDW was active, E ~ (3/1.46)^12 ~ 2^12 ~ 4000 epsilon.
-  # If excluded, E ~ bond energy ~ 0 (at equilibrium).
-  # Plus Coulomb (0.1*0.1 / 1.46 * 332) ~ 2 kcal/mol.
-  
-  assert e < 200.0 # Should be small (relative to VDW explosion of >4000)
+
+def test_bond_params_count(parameterized_protein):
+    """Test that bond params match bond indices."""
+    protein = parameterized_protein
+    assert protein.bonds.shape[0] == protein.bond_params.shape[0]
+
+
+def test_angle_params_count(parameterized_protein):
+    """Test that angle params match angle indices."""
+    protein = parameterized_protein
+    assert protein.angles.shape[0] == protein.angle_params.shape[0]
+
+
+def test_dihedral_params_count(parameterized_protein):
+    """Test that dihedral params match dihedral indices."""
+    protein = parameterized_protein
+    assert protein.proper_dihedrals.shape[0] == protein.dihedral_params.shape[0]
+
+
+def test_bond_indices_valid(parameterized_protein):
+    """Test that bond indices are within valid range."""
+    protein = parameterized_protein
+    n_atoms = len(protein.charges)
+    bonds = protein.bonds
+    
+    assert jnp.all(bonds >= 0), "Negative bond index found"
+    assert jnp.all(bonds < n_atoms), f"Bond index >= n_atoms ({n_atoms})"
+
+
+def test_angle_indices_valid(parameterized_protein):
+    """Test that angle indices are within valid range."""
+    protein = parameterized_protein
+    n_atoms = len(protein.charges)
+    angles = protein.angles
+    
+    assert jnp.all(angles >= 0), "Negative angle index found"
+    assert jnp.all(angles < n_atoms), f"Angle index >= n_atoms ({n_atoms})"
+
+
+def test_dihedral_indices_valid(parameterized_protein):
+    """Test that dihedral indices are within valid range."""
+    protein = parameterized_protein
+    n_atoms = len(protein.charges)
+    dihedrals = protein.proper_dihedrals
+    
+    assert jnp.all(dihedrals >= 0), "Negative dihedral index found"
+    assert jnp.all(dihedrals < n_atoms), f"Dihedral index >= n_atoms ({n_atoms})"
+
+
+def test_epsilons_non_negative(parameterized_protein):
+    """Test that LJ epsilon values are non-negative."""
+    protein = parameterized_protein
+    assert jnp.all(protein.epsilons >= 0), "Negative epsilon found"
+
+
+def test_sigmas_non_negative(parameterized_protein):
+    """Test that LJ sigma values are non-negative."""
+    protein = parameterized_protein
+    assert jnp.all(protein.sigmas >= 0), "Negative sigma found"

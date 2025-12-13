@@ -15,7 +15,6 @@ except ImportError:
     HAS_OPENMM = False
 
 from prolix.physics import system, pme, pbc
-from proxide.md import jax_md_bridge
 
 
 @pytest.mark.skipif(not HAS_OPENMM, reason="OpenMM not installed")

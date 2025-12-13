@@ -1,157 +1,105 @@
-"""Tests for JAX MD bridge."""
+"""Tests for parse_structure with MD parameterization.
+
+This module tests that the Rust-based parse_structure function correctly
+returns parameterized Protein objects with all required MD fields.
+"""
 
 import jax.numpy as jnp
 import pytest
+from pathlib import Path
 
-from proxide.physics import force_fields
-from proxide.md import jax_md_bridge
-from proxide.chem import residues as residue_constants
+from proxide.io.parsing.rust import parse_structure, OutputSpec
+from proxide.core.containers import Protein
+
+
+# Path to test data and force field
+DATA_DIR = Path(__file__).parent.parent.parent / "data" / "pdb"
+FF_PATH = Path(__file__).parent.parent.parent / "proxide" / "src" / "proxide" / "assets" / "protein.ff19SB.xml"
 
 
 @pytest.fixture
-def mock_force_field():
-  """Create a mock force field."""
-  # Minimal FF with just enough to pass lookups
-  # We need to mock get_charge and get_lj_params
-  # Since FullForceField is an eqx.Module, we can instantiate a skeleton
-  # or just mock the methods if we weren't using strict typing.
-  # But parameterize_system expects FullForceField.
-  # Let's use the real class but with dummy data.
-
-  # We need to construct it carefully or mock the object.
-  # Given the complexity of constructing FullForceField, let's mock the object
-  # using a dummy class that quacks like it.
-  class MockFF:
-    def __init__(self):
-      self.bonds = []
-      self.angles = []
-      self.propers = []
-      self.impropers = []
-      self.atom_class_map = {}
-      self.atom_type_map = {}
-      self.atom_key_to_id = {}
-      self.cmap_torsions = []
-      self.cmap_energy_grids = jnp.zeros((0, 24, 24))
-      self.residue_templates = {}
-      self.urey_bradley_bonds = []
-      self.virtual_sites = {}
-      
-    def get_charge(self, res, atom):
-      return 0.0
-
-    def get_lj_params(self, res, atom):
-      return 1.0, 0.1
-
-    def get_gbsa_params(self, res, atom):
-      return 1.5, 0.8  # radius, scale
-
-  return MockFF()
-
-
-@pytest.fixture(autouse=True)
-def mock_stereo_chemical_props(monkeypatch):
-  """Mock stereo chemical props loading."""
-  def mock_load():
-    # Return (residue_bonds, residue_virtual_bonds, residue_bond_angles)
-    # We need minimal data for ALA and GLY
-    # Bond(atom1, atom2, length, stddev)
-    # BondAngle(atom1, atom2, atom3, rad, stddev)
+def parameterized_protein() -> Protein:
+    """Load a protein with MD parameterization enabled."""
+    pdb_path = DATA_DIR / "1CRN.pdb"
     
-    from proxide.chem.residues import Bond, BondAngle
+    spec = OutputSpec()
+    spec.parameterize_md = True
+    spec.force_field = str(FF_PATH)
+    spec.add_hydrogens = True
     
-    bonds = {
-        "ALA": [
-            Bond("N", "CA", 1.46, 0.01),
-            Bond("CA", "C", 1.52, 0.01),
-            Bond("C", "O", 1.23, 0.01),
-            Bond("CA", "CB", 1.53, 0.01)
-        ],
-        "GLY": [
-            Bond("N", "CA", 1.45, 0.01),
-            Bond("CA", "C", 1.52, 0.01),
-            Bond("C", "O", 1.23, 0.01)
-        ]
-    }
-    angles = {
-        "ALA": [],
-        "GLY": []
-    }
-    return bonds, {}, angles
-
-  monkeypatch.setattr(residue_constants, "load_stereo_chemical_props", mock_load)
+    return parse_structure(str(pdb_path), spec)
 
 
+def test_parse_structure_returns_protein(parameterized_protein: Protein):
+    """Test that parse_structure with MD params returns a Protein."""
+    assert isinstance(parameterized_protein, Protein)
 
-def test_parameterize_system_simple(mock_force_field):
-  """Test parameterizing a simple dipeptide (ALA-GLY)."""
-  residues = ["ALA", "GLY"]
-  
-  # Construct atom names
-  atoms_ala = residue_constants.residue_atoms["ALA"]
-  atoms_gly = residue_constants.residue_atoms["GLY"]
-  atom_names = atoms_ala + atoms_gly
-  
-  params = jax_md_bridge.parameterize_system(
-      mock_force_field, residues, atom_names
-  )
-  
-  # Check counts
-  n_atoms = len(atom_names)
-  assert params["charges"].shape == (n_atoms,)
-  assert params["sigmas"].shape == (n_atoms,)
-  
-  # Check bonds
-  # ALA internal bonds + GLY internal bonds + 1 peptide bond
-  # ALA has 5 atoms: N, CA, C, O, CB. 
-  # Bonds: N-CA, CA-C, C-O, CA-CB (4 bonds)
-  # GLY has 4 atoms: N, CA, C, O
-  # Bonds: N-CA, CA-C, C-O (3 bonds)
-  # Peptide: ALA.C - GLY.N (1 bond)
-  # Total: 8 bonds
-  
-  # Note: residue_constants might define more/less depending on H.
-  # residue_atoms only lists heavy atoms.
-  # residue_bonds in residue_constants usually covers heavy atoms.
-  
-  # Let's count expected from residue_constants
-  def count_bonds(res):
-      bonds = 0
-      atoms = set(residue_constants.residue_atoms[res])
-      for b in residue_constants.load_stereo_chemical_props()[0].get(res, []):
-          if b.atom1_name in atoms and b.atom2_name in atoms:
-              bonds += 1
-      return bonds
 
-  expected_ala = count_bonds("ALA")
-  expected_gly = count_bonds("GLY")
-  expected_total = expected_ala + expected_gly + 1 # +1 for peptide
-  
-  assert len(params["bonds"]) == expected_total
-  
-  # Check backbone indices
-  # Should be (2, 4)
-  bb_indices = params["backbone_indices"]
-  assert bb_indices.shape == (2, 4)
-  
-  # Verify indices for ALA (first residue)
-  # ALA atoms: C, CA, CB, N, O (alphabetical in residue_atoms? No, PDB order)
-  # residue_atoms["ALA"] = ["C", "CA", "CB", "N", "O"] -> Wait, check residue_constants.py
-  # It says: "C", "CA", "CB", "N", "O" in the dict?
-  # Let's check the file content we saw earlier.
-  # residue_atoms = { "ALA": ["C", "CA", "CB", "N", "O"], ... }
-  # Wait, standard PDB order is N, CA, C, O, CB.
-  # The residue_atoms dict in residue_constants.py seems to be alphabetical or specific order?
-  # Line 345: "ALA": ["C", "CA", "CB", "N", "O"]
-  # This is NOT standard PDB order (N, CA, C, O).
-  # If our bridge assumes `atom_names` matches `residue_atoms` order, then:
-  # ALA indices: 0:C, 1:CA, 2:CB, 3:N, 4:O
-  
-  # N is at index 3
-  # CA is at index 1
-  # C is at index 0
-  # O is at index 4
-  
-  assert bb_indices[0, 0] == 3 # N
-  assert bb_indices[0, 1] == 1 # CA
-  assert bb_indices[0, 2] == 0 # C
-  assert bb_indices[0, 3] == 4 # O
+def test_parse_structure_has_charges(parameterized_protein: Protein):
+    """Test that parameterized protein has charges assigned."""
+    assert parameterized_protein.charges is not None
+    assert len(parameterized_protein.charges.shape) == 1
+    # 1CRN has ~550 atoms with hydrogens
+    assert parameterized_protein.charges.shape[0] > 0
+
+
+def test_parse_structure_has_lj_params(parameterized_protein: Protein):
+    """Test that parameterized protein has LJ parameters (sigmas, epsilons)."""
+    assert parameterized_protein.sigmas is not None
+    assert parameterized_protein.epsilons is not None
+    assert parameterized_protein.sigmas.shape == parameterized_protein.charges.shape
+    assert parameterized_protein.epsilons.shape == parameterized_protein.charges.shape
+
+
+def test_parse_structure_has_bonds(parameterized_protein: Protein):
+    """Test that parameterized protein has bonds and bond parameters."""
+    assert parameterized_protein.bonds is not None
+    assert parameterized_protein.bond_params is not None
+    assert parameterized_protein.bonds.shape[1] == 2  # (N_bonds, 2)
+    assert parameterized_protein.bond_params.shape[0] == parameterized_protein.bonds.shape[0]
+    assert parameterized_protein.bond_params.shape[1] == 2  # [length, k]
+
+
+def test_parse_structure_has_angles(parameterized_protein: Protein):
+    """Test that parameterized protein has angles and angle parameters."""
+    assert parameterized_protein.angles is not None
+    assert parameterized_protein.angle_params is not None
+    assert parameterized_protein.angles.shape[1] == 3  # (N_angles, 3)
+    assert parameterized_protein.angle_params.shape[0] == parameterized_protein.angles.shape[0]
+    assert parameterized_protein.angle_params.shape[1] == 2  # [theta0, k]
+
+
+def test_parse_structure_has_dihedrals(parameterized_protein: Protein):
+    """Test that parameterized protein has dihedrals and dihedral parameters."""
+    assert parameterized_protein.proper_dihedrals is not None
+    assert parameterized_protein.dihedral_params is not None
+    assert parameterized_protein.proper_dihedrals.shape[1] == 4  # (N_dihedrals, 4)
+    assert parameterized_protein.dihedral_params.shape[0] == parameterized_protein.proper_dihedrals.shape[0]
+    assert parameterized_protein.dihedral_params.shape[1] == 3  # [periodicity, phase, k]
+
+
+def test_charges_are_reasonable(parameterized_protein: Protein):
+    """Test that charges are in a reasonable range for proteins."""
+    charges = parameterized_protein.charges
+    # Protein partial charges should typically be between -2 and +2
+    assert jnp.all(charges >= -3.0), "Found unreasonably negative charges"
+    assert jnp.all(charges <= 3.0), "Found unreasonably positive charges"
+
+
+def test_bond_lengths_are_physical(parameterized_protein: Protein):
+    """Test that predicted bond lengths are in a physical range."""
+    bond_params = parameterized_protein.bond_params
+    lengths = bond_params[:, 0]  # First column is equilibrium length
+    # Rust returns lengths in nm: 0.09-0.2 nm = 0.9-2.0 Angstroms
+    assert jnp.all(lengths > 0.05), "Bond length too short"
+    assert jnp.all(lengths < 0.3), "Bond length too long"
+
+
+def test_lj_sigmas_are_physical(parameterized_protein: Protein):
+    """Test that LJ sigma values are in a physical range."""
+    sigmas = parameterized_protein.sigmas
+    # Rust returns sigmas in nm: 0.1-0.4 nm = 1.0-4.0 Angstroms
+    # Hydrogens may have sigma=0 (they are virtual sites or excluded)
+    heavy_sigmas = sigmas[sigmas > 0]
+    assert jnp.all(heavy_sigmas > 0.1), "Sigma too small for heavy atoms"
+    assert jnp.all(heavy_sigmas < 0.5), "Sigma too large"
