@@ -1,93 +1,49 @@
 # Prolix Parity Testing Roadmap
 
-## Current Status: 13/13 Tests Passing
+## Current Status: ✅ Primary Goals Achieved
 
-All current parity tests pass with `add_hydrogens=False`.
+- ✅ **Hydrogen Addition:** Enabled and validated.
+- ✅ **Explicit Solvent Parity:** Initial energy parity achieved.
+- ✅ **Simulation Stability:** SETTLE + Langevin stable.
 
-## Phase 1: Fix Hydrogen Addition (BLOCKED)
+---
 
-### Goal
+## Phase 1: Energy Parity (COMPLETED)
 
-Enable `add_hydrogens=True` in `parse_structure()` without hanging.
+- ✅ Bonded energy parity (bond, angle, dihedral).
+- ✅ Basic nonbonded validation.
+- ✅ CMAP support.
 
-### Actions
+---
 
-1. Merge `origin/optimization/split_lib_rs` branch in proxide
-2. Use `maturin develop --release` for builds (bypasses uv cache issue)
-3. Verify fragment library loads correctly
-4. Trace exact hang location
+## Phase 2: Force and Trajectory Parity (ACTIVE)
 
-### Testing
+### Goals
 
-```bash
-uv run python -c "
-from oxidize import parse_structure, OutputSpec, CoordFormat, HydrogenSource
-spec = OutputSpec()
-spec.add_hydrogens = True
-spec.hydrogen_source = HydrogenSource.FragmentLibrary
-result = parse_structure('data/pdb/1CRN.pdb', spec)
-print('Success:', len(result['atom_mask']))
-"
-```
+Full validation of forces and dynamics against OpenMM.
 
-## Phase 2: Explicit Solvent Parity (IN PROGRESS)
+### Tasks
 
-### Goal
+- [ ] `test_force_parity` - Vector comparison of forces.
+- [ ] `test_14_nonbonded_parity` - Detailed 1-4 scaling validation.
+- [ ] `test_trajectory_parity` - Comparison of N-step dynamics.
 
-Full energy parity between Prolix and OpenMM for explicit solvent.
-
-### Current Status
-
-- Solvation logic implemented and verified ✅
-- PME electrostatics implemented ✅
-- **Blocker**: Simulation instability at step 0 (investigating)
-
-### Tests to Add
-
-- [ ] `test_coulomb_energy_parity` - Compare electrostatic energy
-- [ ] `test_lj_energy_parity` - Compare Lennard-Jones energy
-- [ ] `test_14_nonbonded_parity` - Compare 1-4 scaled interactions
-- [ ] `test_total_explicit_energy_parity` - Full system comparison
-
-### Files
-
-- `tests/physics/test_explicit_parity.py`
-- `scripts/simulate_explicit_rust.py` (instability reproduction)
+---
 
 ## Phase 3: Implicit Solvent (GBSA) Parity
 
-### Goal
+### Goals
 
-GBSA energy parity between Prolix and OpenMM.
+GBSA energy and force parity between Prolix and OpenMM.
 
-### Tests to Add
+### Tasks
 
 - [ ] `test_gbsa_born_radii_parity`
-- [ ] `test_gbsa_polar_energy_parity`
-- [ ] `test_gbsa_nonpolar_energy_parity`
 - [ ] `test_gbsa_total_energy_parity`
 
-### Files
+---
 
-- `tests/physics/test_implicit_parity.py` (new)
+## Phase 4: Extended Conditions
 
-## Phase 4: End-to-End Simulation
-
-### Goal
-
-Run short MD simulations in both Prolix (JAX) and OpenMM, compare trajectories.
-
-### Tests
-
-- [ ] Energy conservation
-- [ ] Forces comparison at each step
-- [ ] RMS displacement correlation
-
-## Key Files
-
-| File | Description |
-|------|-------------|
-| `tests/physics/test_explicit_parity.py` | Explicit solvent tests |
-| `proxide/oxidize/src/lib.rs` | Main Rust entry point |
-| `proxide/oxidize/src/geometry/hydrogens.rs` | H addition |
-| `proxide/oxidize/src/spec.rs` | OutputSpec, HydrogenSource |
+- [ ] Test multiple forcefields (ff14SB, ff19SB).
+- [ ] Test different water models (TIP3P, SPC/E).

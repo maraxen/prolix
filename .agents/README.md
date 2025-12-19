@@ -33,11 +33,19 @@ Before modifying a file, check `agent_tasks.jsonl` for any `IN_PROGRESS` tasks w
 | Agent Task | File Scope |
 |------------|------------|
 | Force Field Assessment | `scripts/convert_all_xmls.py`, `data/force_fields/*` |
-| Force Field Extensibility | `priox/src/priox/physics/force_fields/*` |
+| Force Field Extensibility | `proxide/src/proxide/physics/force_fields/*` |
 | Code Optimization | `src/prolix/physics/*` |
-| Simulation Loop | `src/prolix/simulate.py` (NEW) |
-| Parallel Tempering | `src/prolix/pt/*` (NEW) |
-| Ligand Support | `priox/src/priox/md/bridge/core.py` |
+| Simulation Loop | `src/prolix/simulate.py` |
+| Parallel Tempering | `src/prolix/pt/*` |
+| Ligand Support | `proxide/src/proxide/md/bridge/core.py` |
+
+## Debugging Artifacts
+
+Simulation outputs (GIFs, trajectories, logs) should be stored in the root `outputs/` directory.
+
+- This directory is excluded from version control via `.gitignore`.
+- Agents may generate files in the base directory during active debugging for performance or visibility, but **MUST** move them to `outputs/` once the task is complete.
+- For files the agent does not need direct read access to, store them in `outputs/` immediately.
 
 ## Conflict Resolution
 

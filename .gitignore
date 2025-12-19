@@ -22,3 +22,4 @@ openmmforcefields/
 
 # Generated force field files
 src/priox.physics.force_fields/
+outputs/

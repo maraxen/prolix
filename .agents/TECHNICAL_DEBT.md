@@ -1,87 +1,40 @@
-# Prolix/Proxide Technical Debt
+# Prolix Technical Debt
 
 ## Active Issues
 
-### 1. Hydrogen Addition Hangs (HIGH PRIORITY)
+### 1. Test Standardization
 
-- **Status**: Blocked
-- **File**: `proxide/oxidize/src/lib.rs`, `geometry/hydrogens.rs`
-- **Issue**: `parse_structure()` with `add_hydrogens=True` hangs indefinitely
-- **Root Cause**: `uv run` overwrites manually installed wheels with cached build from editable path
-- **See**: `.agents/HYDROGEN_ADDITION_DEBUG.md`
+- **Status**: Planning
+- **Goal**: Create reusable test fixtures and utilities for parity testing across different systems and conditions.
 
-### 2. lib.rs Needs Refactoring
+### 2. CI Pipeline Enhancement
 
-- **Status**: Partially done on `origin/optimization/split_lib_rs` branch
-- **Issue**: `lib.rs` is 1700+ lines, should be split into modules
-
-### 3. Explicit Solvent Simulation Instability (HIGH PRIORITY)
-
-- **Status**: Active
-- **File**: `scripts/simulate_explicit_rust.py`, `src/prolix/physics/system.py`
-- **Issue**: MD simulation crashes at step 0 with NaN/Inf positions for explicit solvent
-- **Possible Causes**:
-  - Missing bond constraints (SETTLE for water, SHAKE for H-bonds)
-  - PME parameters or grid size mismatch
-  - Float32 precision limitations on GPU
-  - Integration timesteps (need 0.5-1.0fs or constraints)
+- **Status**: Planning
+- **Goal**: Integrate Rust builds for `oxidize` into GitHub Actions and add smoke/integration test splits.
 
 ## Completed Items ✅
 
-### Explicit Solvation Logic
+### 1. Hydrogen Addition
 
-- Water box tiling fixed (symmetric tiling, proper bounds check)
-- Solvation integration in simulation pipeline
-- PME/PBC support added to energy function (with neighbor lists pending)
+- ✅ Resolved hanging issue.
+- ✅ Validated geometry placement and energy relaxation.
 
-### Hydrogen Source Enum
+### 2. Explicit Solvent Stability
 
-- `HydrogenSource` enum implemented and exported
-- Variants: `ForceFieldFirst`, `FragmentLibrary`, `ForceFieldOnly`
-- Currently all variants use FragmentLibrary (FF coords TBD)
+- ✅ Stable simulations with SETTLE and Langevin integrator.
+- ✅ Molecule-aware PBC wrapping implemented.
 
-### OpenMM Parity Tests
+### 3. OpenMM Parity (Basic)
 
-- Bond energy parity ✅
-- Angle energy parity ✅  
-- Dihedral energy parity ✅
-- Nonbonded validation ✅
-
-### Cell List Optimization
-
-- Replaced O(n²) neighbor search with O(n) cell list algorithm
-- File: `geometry/cell_list.rs`, `geometry/topology.rs`
-
-### Fragment Library
-
-- Lazy_static replaced with `once_cell::OnceCell`
-- Eager initialization in pymodule init
-- Rayon parallelization removed (GIL issues)
+- ✅ Bonded energy parity (bonds, angles, dihedrals).
+- ✅ Basic nonbonded validation.
 
 ## Deferred Items
 
-### 1. Force-Field Based Hydrogen Coordinates
+### 1. Full Nonbonded Parity
 
-- Currently all `HydrogenSource` variants use geometric placement
-- True FF-based coordinate generation not implemented
+- Need full Coulomb + LJ + 1-4 comparison vs OpenMM.
 
-### 2. Implicit Solvent (GBSA) Parity Tests
+### 2. Implicit Solvent (GBSA) Parity
 
-- Need to add GBSA energy comparison tests
-
-### 3. Full Nonbonded Parity
-
-- Current test only validates finiteness
-- Need full Coulomb + LJ + 1-4 comparison
-
-## Environment Notes
-
-```bash
-# Build oxidize correctly (bypasses uv cache)
-cd proxide/oxidize
-maturin develop --release
-
-# OR clear uv cache
-rm -rf ~/.cache/uv/builds-v0/oxidize*
-uv sync
-```
+- Need comparison of Born radii and polar/nonpolar energies.
