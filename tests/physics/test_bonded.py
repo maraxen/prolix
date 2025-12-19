@@ -2,7 +2,6 @@
 
 import jax
 import jax.numpy as jnp
-import pytest
 from jax_md import space
 
 from prolix.physics import bonded

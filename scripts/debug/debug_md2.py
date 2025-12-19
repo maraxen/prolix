@@ -1,13 +1,14 @@
 """Test MD with realistic initial coordinates."""
-import jax
 import jax.numpy as jnp
 import numpy as np
-from prolix.physics import simulate, force_fields, jax_md_bridge, system
 from jax_md import space
+
+from prolix.physics import force_fields, jax_md_bridge, system
 
 # Create a simple 1-residue system
 res_names = ["ALA"]
 from prxteinmpnn.utils import residue_constants
+
 atom_names = residue_constants.residue_atoms["ALA"]
 
 print(f"Atom names for ALA: {atom_names}")
@@ -23,7 +24,7 @@ print(f"Number of atoms: {n_atoms}")
 # Let's build a simple extended chain conformation
 coords = np.array([
     [0.0, 0.0, 0.0],      # N
-    [1.45, 0.0, 0.0],     # CA  
+    [1.45, 0.0, 0.0],     # CA
     [2.0, 1.5, 0.0],      # C
     [3.2, 1.7, 0.0],      # O
     [2.0, -0.5, 1.0],     # CB
@@ -54,20 +55,20 @@ print(f"Is finite: {jnp.isfinite(E_init)}")
 
 if jnp.isfinite(E_init) and E_init < 1e10:  # Reasonable energy
     print("\n✓ Initial energy is reasonable")
-    
+
     # Try minimization with smaller timestep
-    print(f"\nRunning minimization with dt_start=1e-5...")
-    
+    print("\nRunning minimization with dt_start=1e-5...")
+
     # Manually create minimizer with smaller timestep
     from jax_md import minimize
     init_fn, apply_fn = minimize.fire_descent(
-        energy_fn, 
-        shift_fn=shift_fn, 
+        energy_fn,
+        shift_fn=shift_fn,
         dt_start=1e-5,  # Much smaller
         dt_max=1e-3     # Much smaller max too
     )
     state = init_fn(coords)
-    
+
     # Run a few steps manually to monitor
     for i in range(20):
         state = apply_fn(state)
@@ -77,9 +78,9 @@ if jnp.isfinite(E_init) and E_init < 1e10:  # Reasonable energy
         if not jnp.isfinite(E):
             print(f"⚠️ NaN at step {i}")
             break
-    
+
     if jnp.isfinite(E):
-        print(f"\n✓ Minimization stable!")
+        print("\n✓ Minimization stable!")
         print(f"Final energy: {E:.2e}")
         print(f"Energy drop: {E_init - E:.2e}")
 else:

@@ -2,9 +2,6 @@
 
 from __future__ import annotations
 
-from typing import Tuple, Callable
-
-import jax
 import jax.numpy as jnp
 from jax_md import space, util
 
@@ -13,7 +10,7 @@ Array = util.Array
 
 def create_periodic_space(
     box: Array,
-) -> Tuple[space.DisplacementFn, space.ShiftFn]:
+) -> tuple[space.DisplacementFn, space.ShiftFn]:
     """Creates displacement and shift functions for a periodic box.
 
     Args:
@@ -23,15 +20,16 @@ def create_periodic_space(
 
     Returns:
         (displacement_fn, shift_fn)
+
     """
     if box.ndim == 1:
         # Orthogonal box
         return space.periodic(box)
-    elif box.ndim == 2:
+    if box.ndim == 2:
         # Triclinic box
         return space.periodic_general(box)
-    else:
-        raise ValueError(f"Box must be 1D or 2D, got shape {box.shape}")
+    msg = f"Box must be 1D or 2D, got shape {box.shape}"
+    raise ValueError(msg)
 
 
 def minimum_image_distance(r1: Array, r2: Array, box: Array) -> Array:
@@ -44,6 +42,7 @@ def minimum_image_distance(r1: Array, r2: Array, box: Array) -> Array:
 
     Returns:
         Distances (N,) or scalar
+
     """
     # Simple implementation for orthogonal boxes
     # For triclinic, need to use space.periodic_general displacement
@@ -61,5 +60,6 @@ def wrap_positions(positions: Array, box: Array) -> Array:
 
     Returns:
         Wrapped positions (N, 3)
+
     """
     return positions % box

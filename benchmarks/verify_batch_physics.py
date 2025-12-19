@@ -1,13 +1,9 @@
-"""
-Batch Validation for Prolix vs OpenMM Physics.
+"""Batch Validation for Prolix vs OpenMM Physics.
 """
 
-import os
-import sys
 import pandas as pd
-from termcolor import colored
-import matplotlib.pyplot as plt
 import verify_end_to_end_physics
+from termcolor import colored
 
 # Proteins to test (<100 AA)
 PROTEINS = [
@@ -21,9 +17,9 @@ PROTEINS = [
 
 def run_batch():
     results = []
-    
+
     print(colored("Starting Batch Validation...", "cyan"))
-    
+
     for pdb in PROTEINS:
         print(colored(f"\nProcessing {pdb}...", "yellow"))
         try:
@@ -36,21 +32,21 @@ def run_batch():
             print(colored(f"Exception running {pdb}: {e}", "red"))
             import traceback
             traceback.print_exc()
-            
+
     df = pd.DataFrame(results)
     print("\nBatch Results:")
     print(df)
-    
+
     # Save
     df.to_csv("batch_physics_results.csv", index=False)
-    
+
     # Stats
     if not df.empty:
-        mae = (df['omm_energy'] - df['jax_energy']).abs().mean()
-        corr = df['omm_energy'].corr(df['jax_energy'])
+        mae = (df["omm_energy"] - df["jax_energy"]).abs().mean()
+        corr = df["omm_energy"].corr(df["jax_energy"])
         print(f"\nMAE Total Energy: {mae:.4f} kcal/mol")
         print(f"Correlation (R): {corr:.4f}")
-        
+
     print(colored("\nDone.", "green"))
 
 if __name__ == "__main__":

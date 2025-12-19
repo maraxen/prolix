@@ -7,8 +7,8 @@ The old equinox-based save/load has been deprecated.
 import pytest
 from proxide.physics.force_fields import (
     FullForceField,
-    load_force_field,
     list_available_force_fields,
+    load_force_field,
 )
 
 
@@ -25,7 +25,7 @@ def test_load_force_field_from_assets():
     ff_list = list_available_force_fields()
     if not ff_list:
         pytest.skip("No force field assets available")
-    
+
     # Load the first available force field
     ff = load_force_field(ff_list[0])
     assert isinstance(ff, FullForceField)
@@ -47,7 +47,7 @@ def test_force_field_get_charge():
         ff = load_force_field("protein.ff14SB")
     except ValueError:
         pytest.skip("protein.ff14SB.xml not available")
-    
+
     # For a typical amino acid
     charge = ff.get_charge("ALA", "CA")
     # CA typically has a small or zero charge
@@ -60,7 +60,7 @@ def test_force_field_get_lj_params():
         ff = load_force_field("protein.ff14SB")
     except ValueError:
         pytest.skip("protein.ff14SB.xml not available")
-    
+
     sigma, epsilon = ff.get_lj_params("ALA", "CA")
     assert isinstance(sigma, float)
     assert isinstance(epsilon, float)

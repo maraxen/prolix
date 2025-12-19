@@ -1,116 +1,126 @@
-"""Tests for GAFF ligand energy parameterization.
+"""Tests for ligand and LJ parameter validation.
 
-NOTE: This test is skipped because the ligand parameterization module was moved to Rust.
+Tests that the Rust-based parse_structure correctly assigns LJ parameters
+to molecular systems. GAFF-specific tests are skipped until proxide supports
+GAFF charge assignment.
 """
 
+from pathlib import Path
+
+import jax.numpy as jnp
 import pytest
+from proxide.io.parsing.rust import OutputSpec, parse_structure
 
-pytest.skip("Ligand parameterization moved to Rust - tests need migration", allow_module_level=True)
+# Paths
+DATA_DIR = Path(__file__).parent.parent.parent / "data"
+FF_PATH = (
+    Path(__file__).parent.parent.parent
+    / "proxide" / "src" / "proxide" / "assets" / "protein.ff19SB.xml"
+)
 
-# Use temporary directory for creating test force fields
-@pytest.fixture
-def mock_gaff_ff(tmp_path):
-    """Create a mock GAFF force field with GAFFNonbondedParams."""
-    from proxide.physics.force_fields.components import (
-        AtomTypeParams,
-        BondPotentialParams,
-        AnglePotentialParams,
-        DihedralPotentialParams,
-        CMAPParams,
-        UreyBradleyParams,
-        VirtualSiteParams,
-        NonbondedGlobalParams,
-        GAFFNonbondedParams,
-    )
-    
-    # Basic components
-    atom_params = AtomTypeParams(
-        charges=jnp.array([0.0]),
-        sigmas=jnp.array([1.0]),
-        epsilons=jnp.array([0.0]),
-        radii=jnp.array([1.0]),
-        scales=jnp.array([0.0]),
-        atom_key_to_id={("LIG", "C1"): 0},
-        id_to_atom_key=[("LIG", "C1")],
-        atom_class_map={},
-        atom_type_map={},
-    )
-    
-    # The crucial part: GAFF LJ params
-    gaff_params = GAFFNonbondedParams(
-        type_to_index={"ca": 0, "ha": 1},
-        sigmas=jnp.array([3.4, 2.6]),  # Angstroms
-        epsilons=jnp.array([0.1, 0.05]), # kcal/mol
-    )
-    
-    ff = FullForceField(
-        atom_params=atom_params,
-        bond_params=BondPotentialParams(params=[]),
-        angle_params=AnglePotentialParams(params=[]),
-        dihedral_params=DihedralPotentialParams(propers=[], impropers=[]),
-        cmap_params=CMAPParams(energy_grids=jnp.zeros((0, 24, 24)), torsions=[]),
-        urey_bradley_params=UreyBradleyParams(params=[]),
-        virtual_site_params=VirtualSiteParams(definitions={}),
-        global_params=NonbondedGlobalParams(),
-        gaff_nonbonded_params=gaff_params,
-        residue_templates={},
-        source_files=[],
-    )
-    return ff
 
-def test_gaff_lj_lookup_uses_ff(mock_gaff_ff):
-    """Test that parameterize_ligand uses the force field's GAFF params."""
-    # Create a dummy molecule
-    mol = Molecule(
-        name="test",
-        atom_names=["C1", "H1"],
-        atom_types=["ca", "ha"],
-        elements=["C", "H"],
-        positions=np.zeros((2, 3)),
-        charges=np.zeros(2),
-        bonds=[],
-        bond_orders=[],
-    )
-    
-    params = parameterize_ligand(mol, mock_gaff_ff)
-    
-    # Should use values from mock_gaff_ff
-    # ca: sigma=3.4, epsilon=0.1
-    # ha: sigma=2.6, epsilon=0.05
-    sigmas = params["sigmas"]
-    epsilons = params["epsilons"]
-    
-    assert sigmas[0] == pytest.approx(3.4)
-    assert epsilons[0] == pytest.approx(0.1)
-    assert sigmas[1] == pytest.approx(2.6)
-    assert epsilons[1] == pytest.approx(0.05)
+class TestGAFFParameterization:
+    """Tests for GAFF atom typing and LJ parameter assignment."""
 
-def test_gaff_missing_lj_fallback(mock_gaff_ff, capsys):
-    """Test fallback when GAFF type is missing from FF params."""
-    mol = Molecule(
-        name="test",
-        atom_names=["X1"],
-        atom_types=["missing_type"],
-        elements=["C"],
-        positions=np.zeros((1, 3)),
-        charges=np.zeros(1),
-        bonds=[],
-        bond_orders=[],
-    )
-    
-    # Should fall back to hardcoded defaults (or defaults logic inside ligand.py)
-    # Current ligand.py logic prints a warning
-    params = parameterize_ligand(mol, mock_gaff_ff)
-    
-    captured = capsys.readouterr()
-    assert "No LJ params for atom type 'missing_type'" in captured.out
-    
-    # Default fallback is 1.7, 0.1
-    assert params["sigmas"][0] == pytest.approx(1.7)
-    assert params["epsilons"][0] == pytest.approx(0.1)
+    @pytest.mark.skip(reason="GAFF charge assignment not yet supported in proxide")
+    def test_gaff_atom_types_from_mol2(self):
+        """Test that MOL2 files with GAFF types are parsed correctly."""
 
-def test_default_gaff_loading():
-    """Test that standard GAFF loading works (even without new params initially)."""
-    # This relies on the real gaff-2.2.20.eqx or similar being present/mocked if we want integration test
-    # But for unit test, we can just check if loading existing FF creates None gaff_params
-    pass 
+    @pytest.mark.skip(reason="GAFF charge assignment not yet supported in proxide")
+    def test_parse_structure_with_gaff(self):
+        """Test parse_structure with GAFF force field for ligands."""
+
+
+class TestAtomicSystemMDAttributes:
+    """Tests that AtomicSystem has all expected static attributes for MD."""
+
+    @pytest.fixture
+    def parameterized_system(self):
+        """Load a parameterized protein system."""
+        pdb_path = DATA_DIR / "pdb" / "1CRN.pdb"
+        if not pdb_path.exists():
+            pytest.skip("1CRN.pdb not found")
+
+        spec = OutputSpec(
+            parameterize_md=True,
+            force_field=str(FF_PATH),
+            add_hydrogens=True,
+        )
+        return parse_structure(str(pdb_path), spec)
+
+    def test_has_static_md_attributes(self, parameterized_system):
+        """Test that AtomicSystem has all static MD attributes needed."""
+        system = parameterized_system
+
+        # All these should be present (static params for partial binding)
+        static_attrs = [
+            "coordinates",  # Dynamic during sim
+            "atom_mask",
+            "charges",
+            "sigmas",
+            "epsilons",
+            "bonds",
+            "bond_params",
+            "angles",
+            "angle_params",
+            "proper_dihedrals",
+            "dihedral_params",
+        ]
+
+        for attr in static_attrs:
+            value = getattr(system, attr, None)
+            assert value is not None, f"AtomicSystem missing {attr}"
+
+    def test_shapes_consistent(self, parameterized_system):
+        """Test that array shapes are consistent."""
+        system = parameterized_system
+        n_atoms = len(system.charges)
+
+        assert system.sigmas.shape == (n_atoms,)
+        assert system.epsilons.shape == (n_atoms,)
+        assert system.bonds.shape[1] == 2, "Bonds should be (N_bonds, 2)"
+        assert system.angles.shape[1] == 3, "Angles should be (N_angles, 3)"
+        assert system.proper_dihedrals.shape[1] == 4, "Dihedrals should be (N_dihedrals, 4)"
+
+
+class TestLJParameterValues:
+    """Tests for reasonable LJ parameter values."""
+
+    @pytest.fixture
+    def parameterized_system(self):
+        """Load a parameterized protein system."""
+        pdb_path = DATA_DIR / "pdb" / "1CRN.pdb"
+        if not pdb_path.exists():
+            pytest.skip("1CRN.pdb not found")
+
+        spec = OutputSpec(
+            parameterize_md=True,
+            force_field=str(FF_PATH),
+            add_hydrogens=True,
+        )
+        return parse_structure(str(pdb_path), spec)
+
+    def test_sigma_values_physical(self, parameterized_system):
+        """Test that sigma values are in physical range."""
+        sigmas = parameterized_system.sigmas
+        nonzero_sigmas = sigmas[sigmas > 0]
+
+        if len(nonzero_sigmas) > 0:
+            # Rust returns units in nm: 0.1-0.4 nm = 1.0-4.0 Angstroms
+            assert jnp.all(nonzero_sigmas > 0.05), "Sigma too small"
+            assert jnp.all(nonzero_sigmas < 0.5), "Sigma too large"
+
+    def test_epsilon_values_physical(self, parameterized_system):
+        """Test that epsilon values are in physical range."""
+        epsilons = parameterized_system.epsilons
+
+        assert jnp.all(epsilons >= 0), "Found negative epsilon"
+        nonzero_eps = epsilons[epsilons > 0]
+
+        if len(nonzero_eps) > 0:
+            # Rust returns units in kJ/mol
+            assert jnp.all(nonzero_eps < 5.0), "Epsilon too large"
+
+
+if __name__ == "__main__":
+    pytest.main([__file__, "-v"])

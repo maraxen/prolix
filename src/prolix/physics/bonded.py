@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
-from typing import Callable
+from typing import TYPE_CHECKING
 
 import jax
 import jax.numpy as jnp
 from jax_md import energy, space, util
+
+if TYPE_CHECKING:
+  from collections.abc import Callable
 
 Array = util.Array
 
@@ -58,7 +61,7 @@ def make_angle_energy_fn(
   theta0 = angle_params[:, 0]
   k = angle_params[:, 1]
 
-  def angle_energy(r: Array, **kwargs) -> Array:  # noqa: ARG001
+  def angle_energy(r: Array, **kwargs) -> Array:
     # Extract positions
     r_i = r[angle_indices[:, 0]]
     r_j = r[angle_indices[:, 1]]
@@ -108,7 +111,7 @@ def make_dihedral_energy_fn(
   phase = dihedral_params[:, 1]
   k = dihedral_params[:, 2]
 
-  def dihedral_energy(r: Array, **kwargs) -> Array:  # noqa: ARG001
+  def dihedral_energy(r: Array, **kwargs) -> Array:
     # Extract positions
     r_i = r[dihedral_indices[:, 0]]
     r_j = r[dihedral_indices[:, 1]]

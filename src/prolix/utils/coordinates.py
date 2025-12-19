@@ -6,7 +6,6 @@ prolix.utils.coordinates
 import jax
 import jax.numpy as jnp
 from jaxtyping import PRNGKeyArray
-
 from proxide.chem.ordering import PDB_ORDER_INDICES
 from proxide.chem.residues import atom_order
 from proxide.core.types import (
@@ -54,12 +53,12 @@ def apply_noise_to_coordinates(
     no_noise,
     coordinates,
   )
-  # Ensure output type matches input type explicitly if needed, 
+  # Ensure output type matches input type explicitly if needed,
   # but the issue is likely that add_noise produces f64 while coordinates is f32.
   # We should cast the result of cond or ensure add_noise respects input dtype.
   # However, JAX random.normal might produce f64 if enable_x64 is True.
   # Let's cast the noise to the coordinate dtype.
-  
+
   return noisy_coordinates.astype(coordinates.dtype), key
 
 

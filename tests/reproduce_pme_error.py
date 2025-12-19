@@ -1,15 +1,15 @@
 
-import jax
-import jax.numpy as jnp
-import numpy as np
-from openmm import app, unit
 import os
+
+import jax.numpy as jnp
 import openmm
+from jax_md import space
+from openmm import app, unit
 from proxide.io.parsing import biotite as parsing_biotite
 from proxide.md.bridge import core as bridge_core
 from proxide.physics.force_fields import loader as ff_loader
+
 from prolix.physics import system
-from jax_md import space
 
 PROLIX_FF = "data/force_fields/ff14SB.eqx"
 SOLVATED_PDB = "data/pdb/1UAO_solvated_tip3p.pdb"
@@ -23,7 +23,7 @@ def reproduce_pme_issue():
     # Load Structure
     atom_array = parsing_biotite.load_structure_with_hydride(SOLVATED_PDB, model=1, remove_solvent=False)
     pos = jnp.array(atom_array.coord)
-    
+
     # Box
     if atom_array.box is not None:
         box = atom_array.box
@@ -51,9 +51,9 @@ def reproduce_pme_issue():
 
     ff = ff_loader.load_force_field(PROLIX_FF)
     params = bridge_core.parameterize_system(
-        ff, residues, atom_names, atom_counts, 
-        water_model="TIP3P", 
-        rigid_water=True 
+        ff, residues, atom_names, atom_counts,
+        water_model="TIP3P",
+        rigid_water=True
     )
 
     # Displacements
@@ -67,27 +67,27 @@ def reproduce_pme_issue():
         box=box_size,
         use_pbc=True,
         implicit_solvent=False,
-        cutoff_distance=9.0, 
-        pme_grid_points=64, 
+        cutoff_distance=9.0,
+        pme_grid_points=64,
         pme_alpha=0.34
     )
-    
+
     # Run
     print("computing energy...")
     e_total = energy_fn(pos)
     print(f"Prolix Total Energy (PME): {e_total} kcal/mol")
-    
+
     # Compare with OpenMM
     print("Comparing with OpenMM...")
     pdb_in = app.PDBFile(SOLVATED_PDB)
-    ff_omm = app.ForceField('amber14-all.xml', 'amber14/tip3p.xml')
-    system_omm = ff_omm.createSystem(pdb_in.topology, 
-                                 nonbondedMethod=app.PME, 
-                                 nonbondedCutoff=0.9*unit.nanometers, 
-                                 constraints=app.HBonds, 
+    ff_omm = app.ForceField("amber14-all.xml", "amber14/tip3p.xml")
+    system_omm = ff_omm.createSystem(pdb_in.topology,
+                                 nonbondedMethod=app.PME,
+                                 nonbondedCutoff=0.9*unit.nanometers,
+                                 constraints=app.HBonds,
                                  rigidWater=True,
                                  ewaldErrorTolerance=0.0005)
-    
+
     integrator = openmm.VerletIntegrator(0.001)
     context = openmm.Context(system_omm, integrator)
     context.setPositions(pdb_in.positions)

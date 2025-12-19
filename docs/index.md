@@ -31,9 +31,9 @@ Run your first simulation:
 
 ```python
 from prolix.physics import system
-from priox.physics import force_fields
+from proxide.physics import force_fields
 
-# Load force field and run MD
-ff = force_fields.load_force_field("ff19SB.eqx")
+# Load force field
+ff = force_fields.load_force_field("ff19SB")
 # ... (see examples for more)
 ```

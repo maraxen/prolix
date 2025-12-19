@@ -115,9 +115,8 @@ class TestTrajectoryReader:
   def test_index_out_of_range(self, sample_trajectory):
     from prolix.visualization import TrajectoryReader
 
-    with TrajectoryReader(sample_trajectory) as reader:
-      with pytest.raises(IndexError):
-        _ = reader[10]
+    with TrajectoryReader(sample_trajectory) as reader, pytest.raises(IndexError):
+      _ = reader[10]
 
   def test_iter(self, sample_trajectory):
     from prolix.visualization import TrajectoryReader

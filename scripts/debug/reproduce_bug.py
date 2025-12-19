@@ -1,8 +1,8 @@
 
-import jax
 import numpy as np
-from proxide.io.operations import pad_and_collate_proteins
 from proxide.core.containers import ProteinTuple
+from proxide.io.operations import pad_and_collate_proteins
+
 
 def test_bug():
     # Create dummy protein
@@ -18,14 +18,14 @@ def test_bug():
         epsilons=np.zeros(N*37),
         full_coordinates=np.zeros((N, 37, 3)),
     )
-    
+
     print("Calling pad_and_collate_proteins with defaults (backbone_noise_mode='direct')...")
     # We expect _apply_md_parameterization NOT to be called (no force field loading).
-    # Since we can't easily mock, we rely on the fact that if it runs, it might print "Loading force field..." 
+    # Since we can't easily mock, we rely on the fact that if it runs, it might print "Loading force field..."
     # or we can check if md_bonds are populated (if we didn't provide them).
-    
+
     batch = pad_and_collate_proteins([protein], backbone_noise_mode="direct", use_electrostatics=False, use_vdw=False)
-    
+
     if batch.md_bonds is not None:
         print("BUG: md_bonds populated! _apply_md_parameterization was called.")
     else:

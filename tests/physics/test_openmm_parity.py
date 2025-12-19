@@ -4,12 +4,13 @@ Comprehensive test suite comparing JAX MD physics to OpenMM as ground truth.
 Tests energy decomposition, force accuracy, trajectory stability, and ensemble properties.
 """
 
-import pytest
-import numpy as np
-import jax
-import jax.numpy as jnp
 import os
 import tempfile
+
+import jax
+import jax.numpy as jnp
+import numpy as np
+import pytest
 
 # Enable x64 for physics
 jax.config.update("jax_enable_x64", True)
@@ -24,7 +25,7 @@ def openmm_available():
     """Check if OpenMM is available."""
     try:
         import openmm
-        import openmm.app as app
+        from openmm import app
         return True
     except ImportError:
         pytest.skip("OpenMM not installed")
@@ -32,21 +33,19 @@ def openmm_available():
 
 @pytest.fixture(scope="module")
 def jax_openmm_system(openmm_available):
-    """
-    Setup both JAX MD and OpenMM systems on same structure (1UAO).
+    """Setup both JAX MD and OpenMM systems on same structure (1UAO).
     Returns dict with all components needed for comparison tests.
     """
-    import openmm
-    import openmm.app as app
-    import openmm.unit as unit
-    from proxide.io.parsing import biotite as parsing_biotite
-    from proxide.physics.force_fields.loader import load_force_field
-    from proxide.md.bridge.core import parameterize_system
-    from proxide.physics import constants
-    from prolix.physics import system, bonded, cmap, generalized_born
-    from jax_md import space
     import biotite.structure as struc
-    import biotite.structure.io.pdb as pdb
+    import openmm
+    from biotite.structure.io import pdb
+    from jax_md import space
+    from openmm import app, unit
+    from proxide.io.parsing import biotite as parsing_biotite
+    from proxide.md.bridge.core import parameterize_system
+    from proxide.physics.force_fields.loader import load_force_field
+
+    from prolix.physics import bonded, system
 
     pdb_path = "data/pdb/1UAO.pdb"
     atom_array = parsing_biotite.load_structure_with_hydride(pdb_path, model=1)
@@ -109,7 +108,7 @@ def jax_openmm_system(openmm_available):
 
     os.unlink(tmp_path)
 
-    omm_ff = app.ForceField(ff_xml_path, 'implicit/obc2.xml')
+    omm_ff = app.ForceField(ff_xml_path, "implicit/obc2.xml")
     omm_system = omm_ff.createSystem(
         topology,
         nonbondedMethod=app.NoCutoff,
@@ -123,7 +122,7 @@ def jax_openmm_system(openmm_available):
         force.setForceGroup(i)
 
     integrator = openmm.VerletIntegrator(1.0 * unit.femtoseconds)
-    platform = openmm.Platform.getPlatformByName('Reference')
+    platform = openmm.Platform.getPlatformByName("Reference")
     simulation = app.Simulation(topology, omm_system, integrator, platform)
     simulation.context.setPositions(omm_positions)
 
@@ -144,16 +143,16 @@ def jax_openmm_system(openmm_available):
 
     # ---- JAX MD Energy Components ----
     e_bond_fn = bonded.make_bond_energy_fn(
-        displacement_fn, system_params['bonds'], system_params['bond_params']
+        displacement_fn, system_params["bonds"], system_params["bond_params"]
     )
     e_angle_fn = bonded.make_angle_energy_fn(
-        displacement_fn, system_params['angles'], system_params['angle_params']
+        displacement_fn, system_params["angles"], system_params["angle_params"]
     )
     e_dih_fn = bonded.make_dihedral_energy_fn(
-        displacement_fn, system_params['dihedrals'], system_params['dihedral_params']
+        displacement_fn, system_params["dihedrals"], system_params["dihedral_params"]
     )
     e_imp_fn = bonded.make_dihedral_energy_fn(
-        displacement_fn, system_params['impropers'], system_params['improper_params']
+        displacement_fn, system_params["impropers"], system_params["improper_params"]
     )
 
     return {
@@ -231,14 +230,15 @@ class TestEnergyDecomposition:
 
     def test_cmap_energy_matches_openmm(self, jax_openmm_system):
         """CMAP correction energy should match OpenMM."""
-        from prolix.physics import cmap, system as sys_module
+        from prolix.physics import cmap
+        from prolix.physics import system as sys_module
         data = jax_openmm_system
         params = data["system_params"]
         pos = data["jax_positions"]
         disp_fn = data["displacement_fn"]
 
         jax_cmap = 0.0
-        if 'cmap_torsions' in params and len(params['cmap_torsions']) > 0:
+        if "cmap_torsions" in params and len(params["cmap_torsions"]) > 0:
             cmap_torsions = params["cmap_torsions"]
             cmap_indices = params["cmap_indices"]
             cmap_grids = params["cmap_energy_grids"]
@@ -377,8 +377,7 @@ class TestEnsembleProperties:
 
     def test_nve_energy_conservation(self):
         """NVE should conserve total energy."""
-        from prolix.physics import simulate
-        from jax_md import space, energy, quantity
+        from jax_md import energy, quantity, space
         from jax_md import simulate as jax_simulate
 
         displacement_fn, shift_fn = space.free()
@@ -420,8 +419,9 @@ class TestEnsembleProperties:
 
     def test_nvt_maintains_temperature(self):
         """NVT should maintain target temperature approximately."""
-        from prolix.physics import simulate
         from jax_md import space
+
+        from prolix.physics import simulate
 
         displacement_fn, shift_fn = space.free()
         N = 16
@@ -449,17 +449,14 @@ class TestMultiProtein:
     @pytest.fixture
     def protein_setup(self, request, openmm_available):
         """Parametrized fixture for multi-protein tests."""
-        import openmm
-        import openmm.app as app
-        import openmm.unit as unit
-        from proxide.io.parsing import biotite as parsing_biotite
-        from proxide.physics.force_fields.loader import load_force_field
-        from proxide.md.bridge.core import parameterize_system
-        from prolix.physics import system
-        from jax_md import space
         import biotite.structure as struc
-        import biotite.structure.io.pdb as pdb
-        import biotite.database.rcsb as rcsb
+        from biotite.database import rcsb
+        from jax_md import space
+        from proxide.io.parsing import biotite as parsing_biotite
+        from proxide.md.bridge.core import parameterize_system
+        from proxide.physics.force_fields.loader import load_force_field
+
+        from prolix.physics import system
 
         pdb_code = request.param
         pdb_path = f"data/pdb/{pdb_code}.pdb"

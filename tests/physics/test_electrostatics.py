@@ -5,7 +5,6 @@ import chex
 import jax
 import jax.numpy as jnp
 import pytest
-
 from proxide.physics.electrostatics import (
     compute_coulomb_forces,
     compute_coulomb_forces_at_backbone,

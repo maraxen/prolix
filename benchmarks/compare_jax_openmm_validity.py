@@ -1,27 +1,20 @@
 """Compare JAX MD and OpenMM Validity Trajectories."""
 import os
-import sys
-import time
-import numpy as np
-import pandas as pd
+
 import jax
 import jax.numpy as jnp
-import biotite.structure.io.pdb as pdb
-import biotite.structure as struc
-import biotite.database.rcsb as rcsb
-import argparse
 
 # OpenMM Imports
 import openmm as mm
-import openmm.app as app
-import openmm.unit as unit
-import openmm.unit as unit
+import pandas as pd
+from biotite.database import rcsb
+from biotite.structure.io import pdb
+from jax_md import space
+from openmm import app, unit
+from proxide.io.parsing import biotite as parsing_biotite
 
 # PrxteinMPNN imports
-from prolix.physics import simulate, force_fields, jax_md_bridge, system, constants
-from proxide.chem import residues as residue_constants
-from proxide.io.parsing import biotite as parsing_biotite
-from jax_md import space
+from prolix.physics import constants, force_fields, simulate, system
 
 # Enable x64 for physics
 jax.config.update("jax_enable_x64", True)
@@ -42,16 +35,16 @@ def download_and_load_pdb(pdb_id, output_dir="data/pdb"):
             pdb_path = rcsb.fetch(pdb_id, "pdb", output_dir)
         except Exception:
             return None, None
-    
+
     return pdb_path
 
 def extract_system_with_hydride(pdb_path):
     print(f"Loading {pdb_path} with Hydride...")
-    
+
     # Load with hydride (adds H if missing, removes solvent)
     # We must specify model=1 to get an AtomArray, not Stack, and to ensure Hydride works.
     atom_array = parsing_biotite.load_structure_with_hydride(pdb_path, model=1)
-    
+
     # Convert to OpenMM Topology/Positions via temporary PDB
     # This ensures OpenMM gets exactly what we have in Biotite/Hydride
     import tempfile
@@ -64,7 +57,7 @@ def extract_system_with_hydride(pdb_path):
         pdb_file_omm = app.PDBFile(tmp.name)
         topology = pdb_file_omm.topology
         positions = pdb_file_omm.positions
-            
+
     return atom_array, topology, positions
 
 def compute_dihedrals_jax(coords, n_idx, ca_idx, c_idx):
@@ -89,7 +82,7 @@ def compute_dihedrals_jax(coords, n_idx, ca_idx, c_idx):
     n_curr = coords[n_idx[1:]]
     ca_curr = coords[ca_idx[1:]]
     c_curr_phi = coords[c_idx[1:]]
-    
+
     phi_vals = compute_dihedral(c_prev, n_curr, ca_curr, c_curr_phi)
     phi = jnp.concatenate([jnp.array([0.0]), phi_vals])
 
@@ -98,10 +91,10 @@ def compute_dihedrals_jax(coords, n_idx, ca_idx, c_idx):
     ca_curr_psi = coords[ca_idx[:-1]]
     c_curr_psi = coords[c_idx[:-1]]
     n_next = coords[n_idx[1:]]
-    
+
     psi_vals = compute_dihedral(n_curr_psi, ca_curr_psi, c_curr_psi, n_next)
     psi = jnp.concatenate([psi_vals, jnp.array([0.0])])
-    
+
     return phi, psi
 
 def is_allowed_jax(phi, psi):
@@ -112,15 +105,15 @@ def is_allowed_jax(phi, psi):
     return is_alpha | is_beta | is_left_alpha
 
 def run_openmm_simulation(topology, positions, n_idx, ca_idx, c_idx):
-    print(f"Running OpenMM Simulation...")
-    
+    print("Running OpenMM Simulation...")
+
     # pdb = app.PDBFile(pdb_path) # Removed
-    forcefield = app.ForceField('amber14-all.xml', 'implicit/obc2.xml')
-    
+    forcefield = app.ForceField("amber14-all.xml", "implicit/obc2.xml")
+
     # Add missing hydrogens if needed (though our PDB should have them)
     modeller = app.Modeller(topology, positions)
     # modeller.addHydrogens(forcefield) # Skip, we trust our PDB has H
-    
+
     try:
         system = forcefield.createSystem(
             modeller.topology,
@@ -145,41 +138,41 @@ def run_openmm_simulation(topology, positions, n_idx, ca_idx, c_idx):
             return []
 
     integrator = mm.LangevinIntegrator(
-        300*unit.kelvin, 
-        1.0/unit.picosecond, 
+        300*unit.kelvin,
+        1.0/unit.picosecond,
         2.0*unit.femtosecond
     )
-    
+
     simulation = app.Simulation(modeller.topology, system, integrator)
     simulation.context.setPositions(modeller.positions)
-    
+
     # Minimize
     print("  Minimizing...")
     simulation.minimizeEnergy()
-    
+
     # Thermalize & Production
     results = []
-    
+
     total_steps = THERM_STEPS + PROD_STEPS
-    
+
     for step in range(0, total_steps, REPORT_INTERVAL):
         simulation.step(REPORT_INTERVAL)
-        
+
         # Get State
         state = simulation.context.getState(getPositions=True, getEnergy=True)
         pos = state.getPositions(asNumpy=True).value_in_unit(unit.angstrom)
         pe = state.getPotentialEnergy().value_in_unit(unit.kilocalories_per_mole)
         ke = state.getKineticEnergy().value_in_unit(unit.kilocalories_per_mole)
-        
+
         # Temp
         n_atoms = pos.shape[0]
         temp = 2 * ke / (3 * n_atoms * KB)
-        
+
         # Compute Validity
         phi, psi = compute_dihedrals_jax(jnp.array(pos), n_idx, ca_idx, c_idx)
         valid = is_allowed_jax(phi, psi)
         pct = float(jnp.mean(valid[1:-1]) * 100)
-        
+
         phase = "Therm" if step < THERM_STEPS else "Prod"
         results.append({
             "step": step + REPORT_INTERVAL,
@@ -192,21 +185,21 @@ def run_openmm_simulation(topology, positions, n_idx, ca_idx, c_idx):
             "ke": ke,
             "temp": temp
         })
-        
+
     # Get Minimized Positions for JAX MD
     state_min = simulation.context.getState(getPositions=True)
     minimized_pos = state_min.getPositions(asNumpy=True).value_in_unit(unit.angstrom)
-    
+
     return results, minimized_pos
 
 def run_jax_simulation(coords, params, n_idx, ca_idx, c_idx):
     print("Running JAX MD Simulation...")
-    
+
     displacement_fn, shift_fn = space.free()
-    
+
     # Setup
     key = jax.random.PRNGKey(0)
-    
+
     # Energy Fn
     energy_fn = system.make_energy_fn(
         displacement_fn=displacement_fn,
@@ -214,10 +207,10 @@ def run_jax_simulation(coords, params, n_idx, ca_idx, c_idx):
         implicit_solvent=True,
         solvent_dielectric=78.5,
         solute_dielectric=1.0,
-        dielectric_offset=constants.DIELECTRIC_OFFSET, 
+        dielectric_offset=constants.DIELECTRIC_OFFSET,
         surface_tension=0.0 # kcal/mol/A^2 (Matches OpenMM obc2.xml default of 0.0)
     )
-    
+
     # Init
     init_fn, apply_fn = simulate.rattle_langevin(
         energy_fn,
@@ -227,7 +220,7 @@ def run_jax_simulation(coords, params, n_idx, ca_idx, c_idx):
         gamma=1.0, # 1/ps
         constraints=(params["constrained_bonds"], params["constrained_bond_lengths"])
     )
-    
+
     # Check Initial PE
     pe_initial = float(energy_fn(coords))
     print(f"  Initial PE (OpenMM Minimized): {pe_initial:.4f} kcal/mol")
@@ -235,75 +228,75 @@ def run_jax_simulation(coords, params, n_idx, ca_idx, c_idx):
     # Minimize (Refinement)
     print("  Minimizing (Refinement)...")
     r_min = simulate.run_minimization(energy_fn, coords, steps=100)
-    
+
     # Project constraints after minimization to avoid shock
     if params["constrained_bonds"] is not None:
         print("  Projecting constraints after minimization...")
         # We need mass in correct shape (N, 1)
         masses = params["masses"]
         if masses.ndim == 1: masses = masses[:, None]
-        
+
         # Need shift_fn
         displacement_fn, shift_fn = space.free()
-        
+
         r_min = simulate.project_positions(
-            r_min, 
-            params["constrained_bonds"], 
-            params["constrained_bond_lengths"], 
-            masses, 
+            r_min,
+            params["constrained_bonds"],
+            params["constrained_bond_lengths"],
+            masses,
             shift_fn
         )
-        
+
     # Check PE after minimization
     pe_min = float(energy_fn(r_min))
     print(f"  PE after minimization (and projection): {pe_min:.4f} kcal/mol")
 
     # Initialize State
     state = init_fn(key, r_min, mass=params["masses"])
-    
+
     # Run Loop
     results = []
-    
+
     total_steps = THERM_STEPS + PROD_STEPS
-    
+
     # JIT the step function
     @jax.jit
     def step_fn(state, key):
         return apply_fn(state, key=key)
-        
+
     current_state = state
     current_key = key
-    
+
     for step in range(0, total_steps, REPORT_INTERVAL):
         # Run chunk
         for _ in range(REPORT_INTERVAL):
             current_key, subkey = jax.random.split(current_key)
             current_state = step_fn(current_state, subkey)
-            
+
         pos = current_state.position
-        
+
         # Compute Energy/Temp
         pe = float(energy_fn(pos))
-        
+
         # KE = 0.5 * sum(p^2 / m)
         # Mass in simulate.py is passed as m_amu / 418.4
         # But NVTLangevinState stores mass.
         # Let's check if state.mass is the scaled mass.
         # Yes, init_fn in simulate.py sets it.
-        
+
         # KE in kcal/mol
         ke = 0.5 * jnp.sum(current_state.momentum**2 / current_state.mass)
         ke = float(ke)
-        
+
         # Temp
         # T = 2 * KE / (3 * N * KB)
         n_atoms = pos.shape[0]
         temp = 2 * ke / (3 * n_atoms * KB)
-        
+
         phi, psi = compute_dihedrals_jax(pos, n_idx, ca_idx, c_idx)
         valid = is_allowed_jax(phi, psi)
         pct = float(jnp.mean(valid[1:-1]) * 100)
-        
+
         phase = "Therm" if step < THERM_STEPS else "Prod"
         results.append({
             "step": step + REPORT_INTERVAL,
@@ -316,48 +309,48 @@ def run_jax_simulation(coords, params, n_idx, ca_idx, c_idx):
             "ke": ke,
             "temp": temp
         })
-        
+
     return results
 
 def main():
     print(f"Comparing JAX MD vs OpenMM on {PDB_ID}...")
-    
+
     # Load Data
     pdb_path = download_and_load_pdb(PDB_ID)
     atom_array, topology, positions = extract_system_with_hydride(pdb_path)
-    
+
     # Load FF
     ff = force_fields.load_force_field("proxide/src/proxide/physics/force_fields/eqx/protein19SB.eqx")
-    
+
     print(f"DEBUG: FF Residue Templates Count: {len(ff.residue_templates) if ff.residue_templates else 0}")
-    
+
     # Parameterize using native IO
     print("Parameterizing system using native IO (biotite_to_jax_md_system)...")
     params, coords = parsing_biotite.biotite_to_jax_md_system(atom_array, ff)
-    
+
     # Get indices from params
     # backbone_indices is (N_res, 4) [N, CA, C, O]
     n_idx = params["backbone_indices"][:, 0]
     ca_idx = params["backbone_indices"][:, 1]
     c_idx = params["backbone_indices"][:, 2]
-    
+
     print(f"DEBUG: Coords Shape: {coords.shape}")
     print(f"DEBUG: Params Sigmas Shape: {params['sigmas'].shape}")
     print(f"DEBUG: Params Charges Shape: {params['charges'].shape}")
-    
+
     # Run OpenMM
     omm_results, minimized_coords = run_openmm_simulation(topology, positions, n_idx, ca_idx, c_idx)
-    
+
     # Run JAX MD (using minimized coords from OpenMM)
     print(f"DEBUG: Using OpenMM Minimized Coords for JAX MD. Shape: {minimized_coords.shape}")
     jax_results = run_jax_simulation(jnp.array(minimized_coords), params, n_idx, ca_idx, c_idx)
-    
+
     # Save
     all_results = omm_results + jax_results
     df = pd.DataFrame(all_results)
     df.to_csv("comparison_validity.csv", index=False)
     print("Saved to comparison_validity.csv")
-    
+
     # Summary
     print("\nSummary (Last 5 steps):")
     print(df.tail(10))

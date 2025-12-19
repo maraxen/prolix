@@ -4,13 +4,12 @@ This module tests that the Rust-based parse_structure function correctly
 returns parameterized Protein objects with all required MD fields.
 """
 
-import jax.numpy as jnp
-import pytest
 from pathlib import Path
 
-from proxide.io.parsing.rust import parse_structure, OutputSpec
+import jax.numpy as jnp
+import pytest
 from proxide.core.containers import Protein
-
+from proxide.io.parsing.rust import OutputSpec, parse_structure
 
 # Path to test data and force field
 DATA_DIR = Path(__file__).parent.parent.parent / "data" / "pdb"
@@ -21,12 +20,12 @@ FF_PATH = Path(__file__).parent.parent.parent / "proxide" / "src" / "proxide" / 
 def parameterized_protein() -> Protein:
     """Load a protein with MD parameterization enabled."""
     pdb_path = DATA_DIR / "1CRN.pdb"
-    
+
     spec = OutputSpec()
     spec.parameterize_md = True
     spec.force_field = str(FF_PATH)
     spec.add_hydrogens = True
-    
+
     return parse_structure(str(pdb_path), spec)
 
 

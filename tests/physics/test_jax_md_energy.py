@@ -4,13 +4,11 @@ This module tests that the Protein object from parse_structure contains
 the correct parameters for building energy functions.
 """
 
-import jax
-import jax.numpy as jnp
-import pytest
 from pathlib import Path
 
-from proxide.io.parsing.rust import parse_structure, OutputSpec
-
+import jax.numpy as jnp
+import pytest
+from proxide.io.parsing.rust import OutputSpec, parse_structure
 
 # Paths
 DATA_DIR = Path(__file__).parent.parent.parent / "data" / "pdb"
@@ -21,12 +19,12 @@ FF_PATH = Path(__file__).parent.parent.parent / "proxide" / "src" / "proxide" / 
 def parameterized_protein():
     """Load a parameterized protein."""
     pdb_path = DATA_DIR / "1CRN.pdb"
-    
+
     spec = OutputSpec()
     spec.parameterize_md = True
     spec.force_field = str(FF_PATH)
     spec.add_hydrogens = True
-    
+
     return parse_structure(str(pdb_path), spec)
 
 
@@ -68,7 +66,7 @@ def test_bond_indices_valid(parameterized_protein):
     protein = parameterized_protein
     n_atoms = len(protein.charges)
     bonds = protein.bonds
-    
+
     assert jnp.all(bonds >= 0), "Negative bond index found"
     assert jnp.all(bonds < n_atoms), f"Bond index >= n_atoms ({n_atoms})"
 
@@ -78,7 +76,7 @@ def test_angle_indices_valid(parameterized_protein):
     protein = parameterized_protein
     n_atoms = len(protein.charges)
     angles = protein.angles
-    
+
     assert jnp.all(angles >= 0), "Negative angle index found"
     assert jnp.all(angles < n_atoms), f"Angle index >= n_atoms ({n_atoms})"
 
@@ -88,7 +86,7 @@ def test_dihedral_indices_valid(parameterized_protein):
     protein = parameterized_protein
     n_atoms = len(protein.charges)
     dihedrals = protein.proper_dihedrals
-    
+
     assert jnp.all(dihedrals >= 0), "Negative dihedral index found"
     assert jnp.all(dihedrals < n_atoms), f"Dihedral index >= n_atoms ({n_atoms})"
 

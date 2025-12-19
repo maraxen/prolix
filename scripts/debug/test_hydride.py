@@ -1,6 +1,6 @@
-from proxide.io.parsing import biotite
-import biotite.structure.io.pdb as pdb
 import os
+
+from proxide.io.parsing import biotite
 
 PDB_PATH = "data/pdb/1UBQ.pdb"
 if not os.path.exists(PDB_PATH):

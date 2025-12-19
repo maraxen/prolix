@@ -2,7 +2,6 @@
 
 import jax
 import jax.numpy as jnp
-
 from proxide.physics.vdw import (
     combine_lj_parameters,
     compute_lj_energy_at_backbone,

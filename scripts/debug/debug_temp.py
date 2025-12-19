@@ -2,14 +2,17 @@
 import jax
 import jax.numpy as jnp
 import numpy as np
-from prolix.physics import simulate, force_fields, jax_md_bridge, system
-from jax_md import quantity, space, simulate as jax_simulate
+from jax_md import quantity, space
+from jax_md import simulate as jax_simulate
+
+from prolix.physics import force_fields, jax_md_bridge, system
 
 key = jax.random.PRNGKey(2)
 
 # Create a system (Single ALA)
 res_names = ["ALA"]
 from proxide.chem import residues as residue_constants
+
 atom_names = residue_constants.residue_atoms["ALA"]
 
 ff = force_fields.load_force_field_from_hub("ff14SB")
@@ -20,7 +23,7 @@ n_atoms = len(params["charges"])
 # Create realistic initial coordinates
 coords = np.array([
     [0.0, 0.0, 0.0],      # N
-    [1.45, 0.0, 0.0],     # CA  
+    [1.45, 0.0, 0.0],     # CA
     [2.0, 1.5, 0.0],      # C
     [3.2, 1.7, 0.0],      # O
     [2.0, -0.5, 1.0],     # CB
@@ -83,7 +86,7 @@ kB = 0.001987  # kcal/(mol·K)
 # Expected: KE = (3/2) * N_atoms * kB * T
 expected_K = (3 * n_atoms / 2) * kB * target_temp
 
-print(f"\nResults:")
+print("\nResults:")
 print(f"Average KE: {avg_K:.2f} ± {std_K:.2f}")
 print(f"Expected KE: {expected_K:.2f}")
 print(f"Ratio: {avg_K/expected_K:.2f}")

@@ -3,12 +3,11 @@ import chex
 import jax
 import jax.numpy as jnp
 import pytest
-
+from proxide.core.containers import Protein
 from proxide.physics.features import (
     compute_electrostatic_features_batch,
     compute_electrostatic_node_features,
 )
-from proxide.core.containers import Protein
 
 
 @pytest.mark.parametrize("jit_compile", [True, False], ids=["jit", "eager"])

@@ -3,7 +3,6 @@ import chex
 import jax
 import jax.numpy as jnp
 import pytest
-
 from proxide.physics.projections import (
     compute_backbone_frame,
     project_forces_onto_backbone,

@@ -1,20 +1,19 @@
 """Benchmark Conformational Validity (Ramachandran)."""
+import argparse
 import os
-import sys
-import time
-import numpy as np
-import pandas as pd
+
+import biotite.structure as struc
 import jax
 import jax.numpy as jnp
-import biotite.structure.io.pdb as pdb
-import biotite.structure as struc
-import biotite.database.rcsb as rcsb
-import argparse
+import numpy as np
+import pandas as pd
+from biotite.database import rcsb
 
-# PrxteinMPNN imports
-from prolix.physics import simulate, force_fields, system, jax_md_bridge
 # from proxide.md import jax_md_bridge
 from proxide.chem import residues as residue_constants
+
+# PrxteinMPNN imports
+from prolix.physics import force_fields, jax_md_bridge, simulate
 
 # Enable x64 for physics
 jax.config.update("jax_enable_x64", True)
@@ -28,6 +27,7 @@ MD_THERM = 1000
 
 from proxide.io.parsing import biotite as parsing_biotite
 
+
 # --- Shared Helpers ---
 def download_and_load_pdb(pdb_id, output_dir="data/pdb"):
     os.makedirs(output_dir, exist_ok=True)
@@ -37,7 +37,7 @@ def download_and_load_pdb(pdb_id, output_dir="data/pdb"):
             pdb_path = rcsb.fetch(pdb_id, "pdb", output_dir)
         except Exception:
             return None
-    
+
     # Use our parsing utility which handles Hydride
     # Note: We load as AtomArray (model=1)
     try:
@@ -55,60 +55,60 @@ def extract_system_from_biotite(atom_array):
     chains = struc.get_chains(atom_array)
     if len(chains) > 0:
         atom_array = atom_array[atom_array.chain_id == chains[0]]
-        
+
     res_names = []
     atom_names = []
     atom_names = []
     atom_counts = []
     coords_list = []
-    
+
     # We also need to track indices of N, CA, C for each residue for dihedral calc
     n_indices = []
     ca_indices = []
     c_indices = []
-    
+
     current_atom_idx = 0
-    
+
     # Iterate residues
     # Note: We must preserve the atoms returned by Hydride/Biotite
     for i, res in enumerate(struc.residue_iter(atom_array)):
         res_name = res[0].res_name
         if res_name not in residue_constants.restype_3to1: continue
-        
+
         # Check backbone
         backbone_mask = np.isin(res.atom_name, ["N", "CA", "C", "O"])
         if np.sum(backbone_mask) < 4: continue
-            
+
         res_names.append(res_name)
-        
+
         # Extract all atoms in this residue
         res_atom_names = res.atom_name.tolist()
         res_coords = res.coord
-        
+
         # Fix N-term H -> H1, H2, H3 for Amber (if present)
         if i == 0:
             # Check if we have H1, H2, H3 already
             has_h1 = "H1" in res_atom_names
             has_h2 = "H2" in res_atom_names
             has_h3 = "H3" in res_atom_names
-            
+
             if not (has_h1 and has_h2 and has_h3):
                  # If we have H, rename it to H1 (legacy fallback)
                  for k, name in enumerate(res_atom_names):
                     if name == "H":
                         res_atom_names[k] = "H1"
-        
+
         atom_names.extend(res_atom_names)
         atom_counts.append(len(res_atom_names))
         coords_list.append(res_coords)
-        
+
         # Find indices for dihedrals
         # We need relative index within residue
         try:
             n_local = res_atom_names.index("N")
             ca_local = res_atom_names.index("CA")
             c_local = res_atom_names.index("C")
-            
+
             n_indices.append(current_atom_idx + n_local)
             ca_indices.append(current_atom_idx + ca_local)
             c_indices.append(current_atom_idx + c_local)
@@ -116,7 +116,7 @@ def extract_system_from_biotite(atom_array):
             pass # Should be caught by backbone check above
 
         current_atom_idx += len(res_atom_names)
-        
+
     if not coords_list: return None, None, None, None, None, None, None, None
     coords = np.vstack(coords_list)
     return coords, res_names, atom_names, atom_array, np.array(n_indices), np.array(ca_indices), np.array(c_indices), np.array(atom_counts)
@@ -136,6 +136,7 @@ def compute_dihedrals_jax(coords, n_idx, ca_idx, c_idx):
     Returns:
         phi: (N_res,) in degrees
         psi: (N_res,) in degrees
+
     """
     def compute_dihedral(p1, p2, p3, p4):
         b0 = -1.0 * (p2 - p1)
@@ -158,7 +159,7 @@ def compute_dihedrals_jax(coords, n_idx, ca_idx, c_idx):
     n_curr = coords[n_idx[1:]]
     ca_curr = coords[ca_idx[1:]]
     c_curr_phi = coords[c_idx[1:]]
-    
+
     phi_vals = compute_dihedral(c_prev, n_curr, ca_curr, c_curr_phi)
     # Pad first residue with 0.0
     phi = jnp.concatenate([jnp.array([0.0]), phi_vals])
@@ -169,11 +170,11 @@ def compute_dihedrals_jax(coords, n_idx, ca_idx, c_idx):
     ca_curr_psi = coords[ca_idx[:-1]]
     c_curr_psi = coords[c_idx[:-1]]
     n_next = coords[n_idx[1:]]
-    
+
     psi_vals = compute_dihedral(n_curr_psi, ca_curr_psi, c_curr_psi, n_next)
     # Pad last residue
     psi = jnp.concatenate([psi_vals, jnp.array([0.0])])
-    
+
     return phi, psi
 
 def is_allowed_jax(phi, psi):
@@ -182,7 +183,7 @@ def is_allowed_jax(phi, psi):
     is_alpha = (phi > -160) & (phi < -20) & (psi > -100) & (psi < 50)
     is_beta = (phi > -180) & (phi < -20) & (psi > 50) & (psi < 180)
     is_left_alpha = (phi > 20) & (phi < 100) & (psi > 0) & (psi < 100)
-    
+
     return is_alpha | is_beta | is_left_alpha
 
 def run_benchmark(pdb_set=DEV_SET, force_field_path="proxide/src/proxide/physics/force_fields/eqx/protein19SB.eqx"):
@@ -196,15 +197,15 @@ def run_benchmark(pdb_set=DEV_SET, force_field_path="proxide/src/proxide/physics
     except Exception:
         print(f"Force field {force_field_path} not found, falling back to ff14SB from Hub...")
         ff = force_fields.load_force_field_from_hub("ff14SB")
-    
+
     results = []
     key = jax.random.PRNGKey(0)
-    
+
     for pdb_id in pdb_set:
         print(f"\nProcessing {pdb_id}...")
         cache_path = os.path.join("data", "cache", f"{pdb_id}_system.npz")
         os.makedirs(os.path.dirname(cache_path), exist_ok=True)
-        
+
         if os.path.exists(cache_path):
             print(f"  Loading from cache: {cache_path}")
             data = np.load(cache_path)
@@ -218,21 +219,21 @@ def run_benchmark(pdb_set=DEV_SET, force_field_path="proxide/src/proxide/physics
         else:
             atom_array = download_and_load_pdb(pdb_id)
             if atom_array is None: continue
-            
+
             coords_np, res_names, atom_names, filtered_array, n_idx, ca_idx, c_idx, atom_counts = extract_system_from_biotite(atom_array)
             if coords_np is None: continue
-            
+
             np.savez(
-                cache_path, 
-                coords=coords_np, 
-                res_names=res_names, 
-                atom_names=atom_names, 
-                n_idx=n_idx, 
-                ca_idx=ca_idx, 
+                cache_path,
+                coords=coords_np,
+                res_names=res_names,
+                atom_names=atom_names,
+                n_idx=n_idx,
+                ca_idx=ca_idx,
                 c_idx=c_idx,
                 atom_counts=atom_counts
             )
-        
+
         print(f"DEBUG: len(atom_names) passed to parameterize: {len(atom_names)}")
         params = jax_md_bridge.parameterize_system(ff, res_names, atom_names, atom_counts=atom_counts)
         print(f"DEBUG: params['sigmas'].shape: {params['sigmas'].shape}")
@@ -240,7 +241,7 @@ def run_benchmark(pdb_set=DEV_SET, force_field_path="proxide/src/proxide/physics
         n_idx = jnp.array(n_idx)
         ca_idx = jnp.array(ca_idx)
         c_idx = jnp.array(c_idx)
-        
+
         # 1. Baseline
         phi, psi = compute_dihedrals_jax(coords, n_idx, ca_idx, c_idx)
         valid = is_allowed_jax(phi, psi)
@@ -249,10 +250,10 @@ def run_benchmark(pdb_set=DEV_SET, force_field_path="proxide/src/proxide/physics
         else:
             pct_valid = 0.0
         results.append({"pdb": pdb_id, "method": "baseline", "param": 0, "valid_pct": float(pct_valid)})
-        
+
         # 2. Gaussian (VMAP)
         print("  Method: Gaussian...")
-        
+
         @jax.jit
         def run_gaussian_batch(keys, scale):
             # vmap over keys
@@ -261,7 +262,7 @@ def run_benchmark(pdb_set=DEV_SET, force_field_path="proxide/src/proxide/physics
                 phi, psi = compute_dihedrals_jax(noisy, n_idx, ca_idx, c_idx)
                 valid = is_allowed_jax(phi, psi)
                 return jnp.mean(valid[1:-1]) * 100
-            
+
             return jax.vmap(single_run)(keys)
 
         for scale in [0.1, 0.2, 0.5]:
@@ -269,10 +270,10 @@ def run_benchmark(pdb_set=DEV_SET, force_field_path="proxide/src/proxide/physics
             subkeys = jax.random.split(subkey, NUM_SAMPLES)
             scores = run_gaussian_batch(subkeys, scale)
             results.append({"pdb": pdb_id, "method": "gaussian", "param": scale, "valid_pct": float(jnp.mean(scores))})
-            
+
         # 3. MD (VMAP)
         print("  Method: MD...")
-        
+
         @jax.jit
         def run_md_batch(keys, temp_kelvin):
             # vmap over keys
@@ -285,7 +286,7 @@ def run_benchmark(pdb_set=DEV_SET, force_field_path="proxide/src/proxide/physics
                 phi, psi = compute_dihedrals_jax(md_coords, n_idx, ca_idx, c_idx)
                 valid = is_allowed_jax(phi, psi)
                 return jnp.mean(valid[1:-1]) * 100
-            
+
             return jax.vmap(single_run)(keys)
 
         for temp in [250, 298, 350, 450]:
@@ -303,6 +304,6 @@ if __name__ == "__main__":
     parser.add_argument("--quick", action="store_true", help="Run on quick dev set (Chignolin).")
     parser.add_argument("--force_field", type=str, default="proxide/src/proxide/physics/force_fields/eqx/protein19SB.eqx", help="Path to force field file.")
     args = parser.parse_args()
-    
+
     target_set = QUICK_DEV_SET if args.quick else DEV_SET
     run_benchmark(target_set, args.force_field)

@@ -1,17 +1,17 @@
 import os
 import sys
-import jax.numpy as jnp
-import numpy as np
-import openmm
-import openmm.app as app
-import openmm.unit as unit
+
 import equinox as eqx
+import jax.numpy as jnp
+import openmm
+from openmm import app, unit
 
 # Add root to path
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
-from scripts.convert_all_xmls import parse_xml_to_eqx
 from proxide.physics import force_fields
+
+from scripts.convert_all_xmls import parse_xml_to_eqx
 
 # Path to XML
 xml_path = os.path.abspath("openmmforcefields/openmmforcefields/ffxml/amber/protein.ff19SB.xml")
@@ -33,9 +33,9 @@ ff = force_fields.load_force_field(ff_path)
 print("Extracting GBSA radii from OpenMM...")
 # Load FF with implicit solvent
 try:
-    omm_ff = app.ForceField(xml_path, 'implicit/obc2.xml')
+    omm_ff = app.ForceField(xml_path, "implicit/obc2.xml")
 except Exception:
-    omm_ff = app.ForceField(xml_path, os.path.join(os.path.dirname(xml_path), 'implicit', 'obc2.xml'))
+    omm_ff = app.ForceField(xml_path, os.path.join(os.path.dirname(xml_path), "implicit", "obc2.xml"))
 
 # Build a system with all residues to extract radii
 radii_map = {} # (res, atom) -> (r, s)
@@ -47,7 +47,7 @@ print(f"Found {len(templates)} templates in OpenMM FF.")
 def create_system_for_res(res_name, cap_n=False, cap_c=False):
     topo = app.Topology()
     chain = topo.addChain()
-    
+
     # Add ACE if needed
     if cap_n:
         ace = topo.addResidue("ACE", chain)
@@ -89,13 +89,13 @@ def create_system_for_res(res_name, cap_n=False, cap_c=False):
         # ACE C connects to Res N
         if "C" in ace_atoms and "N" in atoms:
             topo.addBond(ace_atoms["C"], atoms["N"])
-            
+
     # Res-NME
     if cap_c:
         # Res C connects to NME N
         if "C" in atoms and "N" in nme_atoms:
             topo.addBond(atoms["C"], nme_atoms["N"])
-            
+
     return topo
 
 for res_name, template in templates.items():
@@ -112,30 +112,27 @@ for res_name, template in templates.items():
         (True, False),  # ACE-Res (C-term)
         (False, False)  # Res (Ion/Cap)
     ]
-    
+
     success = False
     for cap_n, cap_c in strategies:
         try:
             topo = create_system_for_res(res_name, cap_n, cap_c)
             system = omm_ff.createSystem(topo, nonbondedMethod=app.NoCutoff, constraints=None)
-            
+
             # Extract Radii
             gb_force = None
             for f in system.getForces():
-                if isinstance(f, openmm.GBSAOBCForce):
+                if isinstance(f, openmm.GBSAOBCForce) or isinstance(f, openmm.CustomGBForce):
                     gb_force = f
                     break
-                elif isinstance(f, openmm.CustomGBForce):
-                    gb_force = f
-                    break
-            
+
             if gb_force:
                 # Find the target residue in the topology
                 # It's the 2nd residue if cap_n is True, else 1st
                 target_res_idx = 1 if cap_n else 0
                 # But if we failed to add ACE (e.g. if res is ACE), indices shift.
                 # Actually, we construct topo explicitly.
-                
+
                 # Iterate atoms and find those belonging to res_name
                 for i, atom in enumerate(topo.atoms()):
                     if atom.residue.name == res_name:
@@ -149,23 +146,23 @@ for res_name, template in templates.items():
                             # param 0: charge
                             # param 1: offset_radius (nm) = radius - offset
                             # param 2: scaled_radius (nm) = scale * (radius - offset)
-                            
+
                             # We need intrinsic radius: r_val = (param 1 * 10) + 0.09
                             r_val = params[1] * 10.0 + 0.09
-                            
+
                             # We need scale factor: s_val = param 2 / param 1
                             if abs(params[1]) > 1e-6:
                                 s_val = params[2] / params[1]
                             else:
                                 s_val = 0.0
-                        
+
                         radii_map[(res_name, atom.name)] = (r_val, s_val)
-                
+
                 success = True
                 break
         except Exception:
             continue
-            
+
     if not success:
         print(f"  Failed to extract radii for {res_name}")
 
@@ -177,7 +174,6 @@ if ("ACE", "C") not in radii_map:
         system = omm_ff.createSystem(topo, nonbondedMethod=app.NoCutoff, constraints=None)
         # Extract...
         # (Simplified for brevity, assuming main loop catches most)
-        pass
     except: pass
 
 print(f"Extracted radii for {len(radii_map)} atoms.")
@@ -191,7 +187,7 @@ for i, key in enumerate(ff.id_to_atom_key):
     # key is (res, atom)
     # Handle tuple/list conversion if needed
     if isinstance(key, list): key = tuple(key)
-    
+
     res, atom = key
     if (res, atom) in radii_map:
         r, s = radii_map[(res, atom)]
@@ -200,9 +196,9 @@ for i, key in enumerate(ff.id_to_atom_key):
     else:
         # Try mapping terminals (NALA -> ALA)
         core_res = res
-        if len(res) == 4 and res.startswith('N'): core_res = res[1:]
-        if len(res) == 4 and res.startswith('C'): core_res = res[1:]
-        
+        if len(res) == 4 and res.startswith("N"): core_res = res[1:]
+        if len(res) == 4 and res.startswith("C"): core_res = res[1:]
+
         if (core_res, atom) in radii_map:
              r, s = radii_map[(core_res, atom)]
              radii_list.append(r)

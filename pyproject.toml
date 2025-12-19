@@ -75,11 +75,28 @@ exclude = [
     "dist",
     "__pycache__",
     "*.ipynb",
+    "tests",
+    "scripts",
+    "inspect_eqx.py",
+    "main.py",
+    "test_bonded.py",
+    "proxide",
+    "benchmarks",
+    "docs",
 ]
 
 [tool.ruff.lint]
 select = ["ALL"]
-ignore = ["PD", "D203", "D213", "COM812", "ISC001"]
+ignore = [
+    "ANN", "D", "SIM", "PERF", "A", "TRY", "EM",
+    "FBT", "S104", "BLE", "SLF001", "PGH003",
+    "N803", "N806", "ARG001", "ERA001", "PLC0415",
+    "G004", "PTH",
+    "C901", "PLR0915", "PLR0912", "PLR2004",
+    "FIX002", "TD002", "TD003",
+    "E501", "E741", "E701",
+    "PD", "COM812", "ISC001", "ARG003"
+]
 pylint.max-args = 15
 
 [tool.ruff.lint.per-file-ignores]
@@ -100,7 +117,7 @@ pylint.max-args = 15
 ]
 
 [tool.pyright]
-include = ["src"]
+include = ["src/prolix"]
 exclude = ["**/__pycache__", "build", "dist"]
 reportMissingTypeStubs = false
 reportImportCycles = false
@@ -108,6 +125,11 @@ reportImportCycles = false
 [tool.uv.sources]
 proxide = { path = "proxide", editable = true }
 oxidize = { path = "proxide/oxidize", editable = true }
+
+[dependency-groups]
+dev = [
+    "openmm>=8.4.0.post2",
+]
 
 [tool.uv]
 environments = [

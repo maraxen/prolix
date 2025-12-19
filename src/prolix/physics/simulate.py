@@ -2,19 +2,22 @@
 
 from __future__ import annotations
 
-from typing import Callable
+import dataclasses
+from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 import jax
 import jax.numpy as jnp
-from jax import random, jit
-from jax_md import minimize, simulate, space, util, quantity
-import dataclasses
-from dataclasses import dataclass
-from functools import partial
+from jax import random
+from jax_md import minimize, quantity, simulate, space, util
+from proxide.physics.constants import BOLTZMANN_KCAL
 
 from prolix.physics import system
-from proxide.physics.constants import BOLTZMANN_KCAL
-from proxide.md import SystemParams
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
+
+    from proxide.md import SystemParams
 
 Array = util.Array
 
@@ -22,6 +25,7 @@ Array = util.Array
 @dataclass
 class SimulationSpec:
     """Configuration for running a simulation."""
+
     total_time_ns: float
     step_size_fs: float = 2.0
     ensemble: str = "nvt_langevin"  # "nve", "nvt_nose_hoover", "nvt_langevin", "brownian"
@@ -77,58 +81,58 @@ def rattle_langevin(
 ):
   """Langevin dynamics with RATTLE constraints."""
   force_fn = quantity.canonicalize_force(energy_or_force_fn)
-  dt_2 = dt / 2
+  dt / 2
 
   def init_fn(key, R, mass=mass, **kwargs):
-    _kT = kwargs.pop('kT', kT)
+    _kT = kwargs.pop("kT", kT)
     key, split = random.split(key)
     force = force_fn(R, **kwargs)
-    
+
     # Handle mass - keep as 1D for state, expand for broadcasting in calculations
     mass_arr = jnp.array(mass, dtype=R.dtype)
     if mass_arr.ndim == 0:
         mass_arr = jnp.ones((R.shape[0],), dtype=R.dtype) * mass_arr
-    
+
     # Initialize momenta manually to avoid jax_md shape issues
     # p = sqrt(m * kT) * N(0,1)
     # Use mass_arr[:, None] for broadcasting with shape (N, 3)
     momenta = jnp.sqrt(mass_arr[:, jnp.newaxis] * _kT) * random.normal(split, R.shape, dtype=R.dtype)
-    
+
     # Store mass as (N, 1) for broadcasting in apply_fn
     mass_for_state = mass_arr[:, jnp.newaxis]
-    
+
     return NVTLangevinState(R, momenta, force, mass_for_state, key)
 
   def apply_fn(state, **kwargs):
-    _dt = kwargs.pop('dt', dt)
-    _kT = kwargs.pop('kT', kT)
-    dt_2 = _dt / 2
-    
+    _dt = kwargs.pop("dt", dt)
+    _kT = kwargs.pop("kT", kT)
+    _dt / 2
+
     # 1. B (Velocity Update 1)
     # v = v + 0.5 * dt * F/m
     momentum = state.momentum + 0.5 * _dt * state.force
-    
+
     # 2. A (Position Update 1)
     # r = r + 0.5 * dt * v/m
     velocity = momentum / state.mass
     position = shift_fn(state.position, 0.5 * _dt * velocity)
-    
+
     # 3. O (Stochastic Update)
     # v = c1 * v + c2 * noise
     # c1 = exp(-gamma * dt)
     # c2 = sqrt(1 - c1^2) * sqrt(m * kT)
     c1 = jnp.exp(-gamma * _dt)
     c2 = jnp.sqrt(1 - c1**2)
-    
+
     key, split = random.split(state.rng)
     noise = random.normal(split, state.momentum.shape)
     momentum = c1 * momentum + c2 * jnp.sqrt(state.mass * _kT) * noise
-    
+
     # 4. A (Position Update 2)
     # r = r + 0.5 * dt * v/m
     velocity = momentum / state.mass
     position = shift_fn(position, 0.5 * _dt * velocity)
-    
+
     # --- SHAKE (Position Constraint) ---
     if constraints is not None:
         pairs, lengths = constraints
@@ -145,16 +149,16 @@ def rattle_langevin(
         # V_new = (R_new - R_old) / dt? No, that's Verlet.
         # For Langevin, we just project R.
         # And usually we project V at the end (RATTLE).
-        
+
         position = project_positions(position, pairs, lengths, state.mass, shift_fn)
-    
+
     # 5. Force Update
     force = force_fn(position, **kwargs)
-    
+
     # 6. B (Velocity Update 2)
     # v = v + 0.5 * dt * F/m
     momentum = momentum + 0.5 * _dt * force
-    
+
     # --- RATTLE (Velocity Constraint) ---
     if constraints is not None:
         pairs, lengths = constraints
@@ -170,13 +174,13 @@ def project_positions(R, pairs, lengths, mass, shift_fn, tol=1e-5, max_iter=10):
     # pairs: (M, 2) indices
     # lengths: (M,) target lengths
     # mass: (N, 1)
-    
+
     # Pre-compute inverse mass for pairs
     # inv_mass = 1.0 / mass
     # w1 = inv_mass[pairs[:, 0]]
     # w2 = inv_mass[pairs[:, 1]]
     # w_sum = w1 + w2
-    
+
     def body_fn(i, R_curr):
         # Compute deviations
         r1 = R_curr[pairs[:, 0]]
@@ -197,11 +201,11 @@ def project_positions(R, pairs, lengths, mass, shift_fn, tol=1e-5, max_iter=10):
         # But we need displacement for constraints.
         # We should pass displacement_fn.
         # For now, assume simple difference (no PBC).
-        
+
         d_vec = r1 - r2
         d2 = jnp.sum(d_vec**2, axis=-1)
         diff = d2 - lengths**2
-        
+
         # Correction scalar
         # g = diff / (2 * d_vec . d_vec_old * (1/m1 + 1/m2)) ?
         # Approximation: d_vec . d_vec_old ~ d^2 ~ lengths^2
@@ -210,11 +214,11 @@ def project_positions(R, pairs, lengths, mass, shift_fn, tol=1e-5, max_iter=10):
         # Standard SHAKE: delta = (d^2 - L^2) / (4 * d . r_ij) ?
         # Let's use: correction = diff / (2 * (1/m1 + 1/m2) * d . d) ?
         # Actually, d . d is d2.
-        
+
         inv_m1 = 1.0 / mass[pairs[:, 0], 0]
         inv_m2 = 1.0 / mass[pairs[:, 1], 0]
         w_sum = inv_m1 + inv_m2
-        
+
         # g = diff / (2 * w_sum * d_vec . d_vec) ??
         # No, linearization: |r + dr|^2 = L^2
         # |r|^2 + 2 r.dr = L^2
@@ -232,28 +236,27 @@ def project_positions(R, pairs, lengths, mass, shift_fn, tol=1e-5, max_iter=10):
         # d2 + 2 g w_sum d2 = L^2
         # 2 g w_sum d2 = L^2 - d2 = -diff
         # g = -diff / (2 * w_sum * d2)
-        
+
         g = -diff / (2.0 * w_sum * d2 + 1e-8)
-        
+
         # Apply
         delta = d_vec * g[:, None] # (M, 3)
-        
+
         # Update R
         # We need to scatter add.
         # R[p1] += w1 * delta
         # R[p2] -= w2 * delta
-        
+
         # Use index_add
         d1 = delta * inv_m1[:, None]
         d2 = -delta * inv_m2[:, None]
-        
+
         R_curr = R_curr.at[pairs[:, 0]].add(d1)
-        R_curr = R_curr.at[pairs[:, 1]].add(d2)
-        
-        return R_curr
+        return R_curr.at[pairs[:, 1]].add(d2)
+
 
         return R_curr
-    
+
     # Use more iterations for stability
     return jax.lax.fori_loop(0, 100, lambda i, r: body_fn(i, r), R)
 
@@ -262,23 +265,23 @@ def project_momenta(P, R, pairs, mass, shift_fn, tol=1e-6, max_iter=100):
     # Project P such that v . r_ij = 0
     # v1 = P1/m1, v2 = P2/m2
     # (v1 - v2) . r12 = 0
-    
+
     inv_m1 = 1.0 / mass[pairs[:, 0], 0]
     inv_m2 = 1.0 / mass[pairs[:, 1], 0]
     w_sum = inv_m1 + inv_m2
-    
+
     r1 = R[pairs[:, 0]]
     r2 = R[pairs[:, 1]]
     r12 = r1 - r2 # Assume free space
-    
+
     def body_fn(i, P_curr):
         v1 = P_curr[pairs[:, 0]] * inv_m1[:, None]
         v2 = P_curr[pairs[:, 1]] * inv_m2[:, None]
         v12 = v1 - v2
-        
+
         # dot = v12 . r12
         dot = jnp.sum(v12 * r12, axis=-1)
-        
+
         # We want (v12 + dv12) . r12 = 0
         # v12.r12 + dv12.r12 = 0
         # dv1 = k * r12 / m1
@@ -287,20 +290,19 @@ def project_momenta(P, R, pairs, mass, shift_fn, tol=1e-6, max_iter=100):
         # dv12 . r12 = k * w_sum * r12.r12
         # k * w_sum * d2 = -dot
         # k = -dot / (w_sum * d2)
-        
+
         d2 = jnp.sum(r12**2, axis=-1)
         k = -dot / (w_sum * d2 + 1e-8)
-        
+
         impulse = r12 * k[:, None] # (M, 3)
-        
+
         # Update P (Momentum)
         # P1 += impulse
         # P2 -= impulse
-        
+
         P_curr = P_curr.at[pairs[:, 0]].add(impulse)
-        P_curr = P_curr.at[pairs[:, 1]].add(-impulse)
-        
-        return P_curr
+        return P_curr.at[pairs[:, 1]].add(-impulse)
+
 
         return P_curr
 
@@ -341,50 +343,46 @@ def run_minimization(
   # -------------------------------------------------------------------------
   # Stage 1: Steepest Descent Pre-conditioning (always run, fully JITted)
   # -------------------------------------------------------------------------
-  
+
   @jax.jit
   def steepest_descent_step(r, _):
     """Single steepest descent step with adaptive step size."""
     forces = -jax.grad(energy_fn)(r)
     force_magnitudes = jnp.linalg.norm(forces, axis=-1)
     max_force = jnp.max(force_magnitudes) + 1e-8
-    
+
     # Adaptive step size: limit maximum displacement
     adaptive_dt = max_displacement_per_step / max_force
     adaptive_dt = jnp.minimum(adaptive_dt, dt_max)
-    
+
     # Simple steepest descent: r_new = r + dt * F (move along force direction)
     r_new = r + adaptive_dt * forces
-    
+
     return r_new, max_force
-  
+
   # Run steepest descent (always, to warm up structure)
-  print("Minimization: Running steepest descent pre-conditioning...")
   r_after_sd, _ = jax.lax.scan(steepest_descent_step, r_init, jnp.arange(sd_steps))
   jax.block_until_ready(r_after_sd)
-  print("Minimization: Steepest descent complete, starting FIRE...")
-  
+
   # -------------------------------------------------------------------------
   # Stage 2: FIRE Optimization (fully JITted)
   # -------------------------------------------------------------------------
-  
+
   init_fn, apply_fn = minimize.fire_descent(
-    energy_fn, 
-    shift_fn=space.free()[1], 
-    dt_start=dt_start, 
+    energy_fn,
+    shift_fn=space.free()[1],
+    dt_start=dt_start,
     dt_max=dt_max
   )
   state = init_fn(r_after_sd)
 
   @jax.jit
-  def fire_step_fn(i, state):  # noqa: ARG001
+  def fire_step_fn(i, state):
     return apply_fn(state)
 
-  print("Minimization: Running FIRE optimization...")
   state = jax.lax.fori_loop(0, steps, fire_step_fn, state)
   jax.block_until_ready(state.position)
-  print("Minimization: FIRE complete!")
-  
+
   return state.position
 
 
@@ -422,7 +420,7 @@ def run_thermalization(
     key = jax.random.PRNGKey(0)
 
   kT = BOLTZMANN_KCAL * temperature
-  
+
   if use_shake and constraints is not None:
       init_fn, apply_fn = rattle_langevin(
         energy_fn,
@@ -442,11 +440,11 @@ def run_thermalization(
         gamma=gamma,
         mass=mass
       )
-  
+
   state = init_fn(key, r_init)
 
   @jax.jit
-  def step_fn(i, state):  # noqa: ARG001
+  def step_fn(i, state):
     return apply_fn(state)
 
   state = jax.lax.fori_loop(0, steps, step_fn, state)
@@ -471,12 +469,12 @@ def run_nve(
             energy_fn,
             shift_fn=space.free()[1],
             dt=dt,
-            kT=0.0, 
+            kT=0.0,
             gamma=0.0,
             mass=mass,
             constraints=constraints
          )
-         key = jax.random.PRNGKey(0) 
+         key = jax.random.PRNGKey(0)
          state = init_fn(key, r_init, kT=0.0)
     else:
         init_fn, apply_fn = simulate.nve(
@@ -509,7 +507,7 @@ def run_nvt_nose_hoover(
 ) -> Array:
     """Run NVT simulation using Nose-Hoover chain."""
     kT = BOLTZMANN_KCAL * temperature
-    
+
     init_fn, apply_fn = simulate.nvt_nose_hoover(
         energy_fn,
         shift_fn=space.free()[1],
@@ -519,7 +517,7 @@ def run_nvt_nose_hoover(
         chain_length=chain_length,
         chain_steps=chain_steps
     )
-    
+
     key = jax.random.PRNGKey(0)
     state = init_fn(key, r_init, mass=mass)
 
@@ -542,7 +540,7 @@ def run_brownian(
 ) -> Array:
     """Run Brownian dynamics simulation."""
     kT = BOLTZMANN_KCAL * temperature
-    
+
     # jax_md.simulate.brownian(energy_or_force, shift, dt, kT, gamma=0.1)
     init_fn, apply_fn = simulate.brownian(
         energy_fn,
@@ -551,7 +549,7 @@ def run_brownian(
         kT=kT,
         gamma=gamma
     )
-    
+
     key = jax.random.PRNGKey(0)
     state = init_fn(key, r_init)
 
@@ -597,7 +595,7 @@ def run_simulation(
   """
   dt_production = 2e-3 # Default
   steps_production = 0
-  
+
   # Resolve Configuration
   if sim_spec is not None:
       # Use spec values for production defaults
@@ -606,11 +604,11 @@ def run_simulation(
       steps_production = sim_spec.steps
       # Note: min/therm steps might not be in spec efficiently yet,
       # but we use args for those stages or defaults.
-  
+
   displacement_fn, _ = space.free()
   energy_fn = system.make_energy_fn(
-      displacement_fn, 
-      system_params, 
+      displacement_fn,
+      system_params,
       dielectric_constant=dielectric_constant,
       implicit_solvent=implicit_solvent,
       solvent_dielectric=solvent_dielectric,
@@ -627,14 +625,12 @@ def run_simulation(
   # Conversion factor is 418.4.
   # m_internal = m_amu / 418.4
   masses = system_params.get("masses", 1.0)
-  if not isinstance(masses, float):
-      masses = masses / 418.4
-  elif masses != 1.0:
+  if not isinstance(masses, float) or masses != 1.0:
       masses = masses / 418.4
   # Extract constraints
   constrained_bonds = system_params.get("constrained_bonds")
   constrained_lengths = system_params.get("constrained_bond_lengths")
-  
+
   use_shake = False
   constraints = None
   if constrained_bonds is not None and constrained_lengths is not None:
@@ -657,16 +653,15 @@ def run_simulation(
 
   # 3. Production (if spec provided)
   if sim_spec is not None and steps_production > 0:
-      print(f"Running Production: {sim_spec.ensemble} for {sim_spec.total_time_ns} ns ({steps_production} steps)")
-      
+
       if sim_spec.ensemble == "nve":
           return run_nve(
-              energy_fn, r_therm, steps_production, 
-              dt=dt_production, mass=masses, 
+              energy_fn, r_therm, steps_production,
+              dt=dt_production, mass=masses,
               use_shake=sim_spec.use_shake or use_shake, # Use spec shake or system implied shake
               constraints=constraints
           )
-      elif sim_spec.ensemble == "nvt_nose_hoover":
+      if sim_spec.ensemble == "nvt_nose_hoover":
           return run_nvt_nose_hoover(
               energy_fn, r_therm, steps_production,
               dt=dt_production, temperature=temperature,
@@ -675,7 +670,7 @@ def run_simulation(
               chain_steps=sim_spec.chain_steps,
               mass=masses
           )
-      elif sim_spec.ensemble == "nvt_langevin":
+      if sim_spec.ensemble == "nvt_langevin":
           # Use existing thermalization/langevin runner but purely for production steps
            return run_thermalization(
                 energy_fn,
@@ -689,14 +684,14 @@ def run_simulation(
                 constraints=constraints,
                 key=key # Re-use key? Ideally split.
           )
-      elif sim_spec.ensemble == "brownian":
+      if sim_spec.ensemble == "brownian":
           return run_brownian(
               energy_fn, r_therm, steps_production,
               dt=dt_production, temperature=temperature,
               gamma=sim_spec.gamma,
               mass=masses
           )
-      else:
-          raise ValueError(f"Unknown ensemble: {sim_spec.ensemble}")
-  
+      msg = f"Unknown ensemble: {sim_spec.ensemble}"
+      raise ValueError(msg)
+
   return r_therm

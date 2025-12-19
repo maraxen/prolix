@@ -1,22 +1,25 @@
 """Diagnostic script to compare Born Radius calculation step-by-step with OpenMM."""
 
+import sys
+
 import jax.numpy as jnp
 import numpy as np
-import sys
-sys.path.insert(0, 'src')
+
+sys.path.insert(0, "src")
 
 # Load structure and get positions
 from pathlib import Path
-import openmm.app as app
-import openmm.unit as unit
+
 import openmm
+from openmm import app, unit
 
 # Load PDB
 pdb_path = Path("data/pdb/1UAO.pdb")
 pdb = app.PDBFile(str(pdb_path))
 import os
+
 ff19sb_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "../openmmforcefields/openmmforcefields/ffxml/amber/protein.ff19SB.xml"))
-ff = app.ForceField(ff19sb_path, 'implicit/obc2.xml')
+ff = app.ForceField(ff19sb_path, "implicit/obc2.xml")
 omm_system = ff.createSystem(pdb.topology, nonbondedMethod=app.NoCutoff)
 
 # Get positions in Angstroms
@@ -35,7 +38,7 @@ for force in omm_system.getForces():
             # params = [charge, offset_radius (nm), scaled_radius (nm)]
             offset_radius_a = params[1] * 10.0  # nm -> Å
             scaled_radius_a = params[2] * 10.0  # nm -> Å
-            
+
             omm_offset_radii.append(offset_radius_a)
             omm_scaled_radii.append(scaled_radius_a)
 
@@ -43,7 +46,7 @@ omm_offset_radii = np.array(omm_offset_radii)
 omm_scaled_radii = np.array(omm_scaled_radii)
 n_atoms = len(positions)
 
-print(f"\nOpenMM Parameters (first 5 atoms):")
+print("\nOpenMM Parameters (first 5 atoms):")
 for i in range(5):
     intrinsic_r = omm_offset_radii[i] + 0.09
     print(f"  Atom {i}: intrinsic_r={intrinsic_r:.4f} Å, offset_r={omm_offset_radii[i]:.4f} Å, scaled_r={omm_scaled_radii[i]:.4f} Å")
@@ -56,18 +59,18 @@ def compute_pair_integral_omm(r, or_i, sr_j):
     D = abs(r - sr_j)
     L = max(or_i, D)
     U = r + sr_j
-    
+
     if (r + sr_j) <= or_i:
         return 0.0
-    
+
     inv_L = 1.0 / L
     inv_U = 1.0 / U
-    
+
     # OpenMM: 0.5*(1/L-1/U+0.25*(r-sr2^2/r)*(1/(U^2)-1/(L^2))+0.5*log(L/U)/r)
     term1 = 0.5 * (inv_L - inv_U)
     term2 = 0.5 * np.log(L / U) / r  # OpenMM uses 0.5*log/r INSIDE the outer 0.5
     term3 = 0.25 * (r - sr_j**2 / r) * (inv_U**2 - inv_L**2)  # OpenMM uses 0.25 INSIDE
-    
+
     return 0.5 * (inv_L - inv_U + term3 / 0.5 + term2 / 0.5)  # Wait, let me simplify
 
 def compute_pair_integral_omm_v2(r, or_i, sr_j):
@@ -75,50 +78,50 @@ def compute_pair_integral_omm_v2(r, or_i, sr_j):
     D = abs(r - sr_j)
     L = max(or_i, D)
     U = r + sr_j
-    
+
     if (r + sr_j) <= or_i:
         return 0.0
-    
+
     # OpenMM formula: 0.5*(1/L-1/U+0.25*(r-sr2^2/r)*(1/(U^2)-1/(L^2))+0.5*log(L/U)/r)
     # = 0.5/L - 0.5/U + 0.125*(r-sr2^2/r)*(1/U^2-1/L^2) + 0.25*log(L/U)/r
     inv_L = 1.0 / L
     inv_U = 1.0 / U
-    
+
     term1 = 0.5 * (inv_L - inv_U)
     term2 = 0.25 * np.log(L / U) / r
     term3 = 0.125 * (r - sr_j**2 / r) * (inv_U**2 - inv_L**2)
-    
+
     return term1 + term2 + term3
 
 def compute_born_radii_omm(positions, offset_radii, scaled_radii):
     """Compute Born radii using OpenMM OBC2 formula."""
     n = len(positions)
     born_radii = np.zeros(n)
-    
+
     for i in range(n):
         or_i = offset_radii[i]
         I_sum = 0.0
-        
+
         for j in range(n):
             if i == j:
                 continue
             r = np.sqrt(np.sum((positions[i] - positions[j])**2))
             sr_j = scaled_radii[j]
             I_sum += compute_pair_integral_omm_v2(r, or_i, sr_j)
-        
+
         # psi = I * or
         psi = I_sum * or_i
-        
+
         # tanh argument: psi - 0.8*psi^2 + 4.85*psi^3 (OBC2)
         tanh_arg = psi - 0.8 * psi**2 + 4.85 * psi**3
         tanh_val = np.tanh(tanh_arg)
-        
+
         # B = 1 / (1/or - tanh(...)/radius)
         # radius = or + offset = or + 0.09
         full_radius = or_i + 0.09
         inv_B = 1.0 / or_i - tanh_val / full_radius
         born_radii[i] = 1.0 / inv_B
-    
+
     return born_radii
 
 print("\n" + "="*60)
@@ -195,9 +198,9 @@ print("="*60)
 for force in omm_system.getForces():
     if isinstance(force, openmm.CustomGBForce):
         force.setForceGroup(5)
-        
+
 integrator = openmm.VerletIntegrator(0.001*unit.picoseconds)
-platform = openmm.Platform.getPlatformByName('Reference')
+platform = openmm.Platform.getPlatformByName("Reference")
 simulation = app.Simulation(pdb.topology, omm_system, integrator, platform)
 simulation.context.setPositions(pdb.getPositions())
 
@@ -205,8 +208,9 @@ omm_gbsa_energy = simulation.context.getState(getEnergy=True, groups=1<<5).getPo
 print(f"OpenMM GBSA Energy: {omm_gbsa_energy:.4f} kcal/mol")
 
 # Compute JAX GBSA Energy
-from prolix.physics import generalized_born
 from proxide.physics import constants
+
+from prolix.physics import generalized_born
 
 jax_positions = jnp.array(positions)
 jax_radii = jnp.array(omm_offset_radii + 0.09)  # Intrinsic radii
@@ -236,7 +240,7 @@ print(f"JAX MD GBSA Energy: {jax_gb_energy:.4f} kcal/mol")
 print(f"Difference: {abs(omm_gbsa_energy - jax_gb_energy):.4f} kcal/mol")
 
 # Check constants
-print(f"\nConstants Check:")
+print("\nConstants Check:")
 print(f"  JAX COULOMB_CONSTANT: {constants.COULOMB_CONSTANT:.4f} kcal*A/(mol*e^2)")
 print(f"  OpenMM uses 138.935485 kJ*nm/(mol*e^2) = {138.935485 * 0.239006:.4f} kcal*nm/(mol*e^2)")
 print(f"  Converted to Angstroms: {138.935485 * 0.239006 * 10:.4f} kcal*A/(mol*e^2)")
@@ -272,14 +276,14 @@ for i in range(n_atoms):
     for j in range(i+1, n_atoms):  # Only count each pair once
         q_i, q_j = jax_charges_np[i], jax_charges_np[j]
         B_i, B_j = jax_born_radii[i], jax_born_radii[j]
-        
+
         r = np.sqrt(np.sum((positions_np[i] - positions_np[j])**2))
-        
+
         # f_gb = sqrt(r^2 + B_i*B_j*exp(-r^2/(4*B_i*B_j)))
         r_sq = r**2
         prod = B_i * B_j
         f_gb = np.sqrt(r_sq + prod * np.exp(-r_sq / (4 * prod)))
-        
+
         pairwise_energy += q_i * q_j / f_gb
 
 pairwise_energy *= -k * tau  # No 0.5 factor for pairwise
@@ -294,7 +298,7 @@ print(f"Manual - OpenMM: {total_manual - omm_gbsa_energy:.4f} kcal/mol")
 # What if OpenMM uses different Born Radii?
 # Let's reverse-engineer OpenMM's Born Radii from the energy.
 # E_self = -0.5 * k * tau * sum(q^2 / B)
-# If we know E_total and can compute E_pairwise with our B, 
+# If we know E_total and can compute E_pairwise with our B,
 # we can get implied E_self and compare.
 
 # Or: Let's see what the energy SHOULD be with OpenMM's documented formula
@@ -327,7 +331,7 @@ for i in range(n_atoms):
     or_nm = omm_offset_radii[i] / 10.0  # Convert Å to nm
     radius_nm = or_nm + 0.009  # Add offset (in nm)
     B_nm = jax_born_radii[i] / 10.0  # Convert Å to nm
-    
+
     # ACE formula in kJ/mol
     ace_term_kj = 28.3919551 * (radius_nm + 0.14)**2 * (radius_nm / B_nm)**6
     ace_energy += ace_term_kj

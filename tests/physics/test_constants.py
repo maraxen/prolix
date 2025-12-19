@@ -1,7 +1,6 @@
 """Tests for physical constants."""
 
 import pytest
-
 from proxide.physics.constants import (
     ANGSTROM_TO_NM,
     COULOMB_CONSTANT,

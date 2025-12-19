@@ -1,16 +1,18 @@
 
 import os
+
 import numpy as np
+
 
 def convert_pdb_to_npz(pdb_path: str, output_path: str):
     print(f"Converting {pdb_path} to {output_path}...")
-    
+
     positions = []
     box_size = np.array([0.0, 0.0, 0.0])
-    
-    with open(pdb_path, "r") as f:
+
+    with open(pdb_path) as f:
         lines = f.readlines()
-        
+
     for line in lines:
         if line.startswith("CRYST1"):
             # CRYST1   30.000   30.000   30.000 ...
@@ -26,7 +28,7 @@ def convert_pdb_to_npz(pdb_path: str, output_path: str):
 
     positions_array = np.array(positions, dtype=np.float32)
     box_size_array = np.array(box_size, dtype=np.float32)
-    
+
     np.savez(output_path, positions=positions_array, box_size=box_size_array)
     print(f"Saved {len(positions_array)} atoms with box {box_size_array}")
 
@@ -34,7 +36,7 @@ if __name__ == "__main__":
     base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     pdb_path = os.path.join(base_dir, "data", "water_boxes", "tip3p.pdb")
     output_path = os.path.join(base_dir, "data", "water_boxes", "tip3p.npz")
-    
+
     if not os.path.exists(pdb_path):
         print(f"Error: {pdb_path} not found.")
     else:
