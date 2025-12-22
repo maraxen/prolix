@@ -123,8 +123,8 @@ reportMissingTypeStubs = false
 reportImportCycles = false
 
 [tool.uv.sources]
-proxide = { path = "proxide", editable = true }
-oxidize = { path = "proxide/oxidize", editable = true }
+proxide = { git = "https://github.com/maraxen/proxide.git", rev = "fbf00b9485c1d90ec3bbcccf678d4f053057a3c3" }
+oxidize = { git = "https://github.com/maraxen/proxide.git", rev = "fbf00b9485c1d90ec3bbcccf678d4f053057a3c3", subdirectory = "oxidize" }
 
 [dependency-groups]
 dev = [

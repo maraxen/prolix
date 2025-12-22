@@ -116,7 +116,7 @@ def main():
 
   # 4. Export GIF
   print("Generating GIF animation...")
-  output_gif = "chignolin_movie.gif"
+  output_gif = "outputs/chignolin_movie.gif"
 
   animate_trajectory(
       trajectory_path=spec.save_path,

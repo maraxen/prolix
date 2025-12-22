@@ -2123,7 +2123,8 @@ wheels = [
 
 [[package]]
 name = "oxidize"
-source = { editable = "proxide/oxidize" }
+version = "0.1.0"
+source = { git = "https://github.com/maraxen/proxide.git?subdirectory=oxidize&rev=fbf00b9485c1d90ec3bbcccf678d4f053057a3c3#fbf00b9485c1d90ec3bbcccf678d4f053057a3c3" }
 
 [[package]]
 name = "packaging"
@@ -2377,8 +2378,8 @@ requires-dist = [
     { name = "myst-nb", marker = "extra == 'docs'" },
     { name = "numpy" },
     { name = "openmm", marker = "extra == 'dev'", specifier = ">=8.4.0" },
-    { name = "oxidize", editable = "proxide/oxidize" },
-    { name = "proxide", editable = "proxide" },
+    { name = "oxidize", git = "https://github.com/maraxen/proxide.git?subdirectory=oxidize&rev=fbf00b9485c1d90ec3bbcccf678d4f053057a3c3" },
+    { name = "proxide", git = "https://github.com/maraxen/proxide.git?rev=fbf00b9485c1d90ec3bbcccf678d4f053057a3c3" },
     { name = "py2dmol", specifier = ">=1.5.1" },
     { name = "py2dmol", marker = "extra == 'viz'", specifier = ">=1.5.0" },
     { name = "pyright", marker = "extra == 'dev'" },
@@ -2427,7 +2428,7 @@ wheels = [
 [[package]]
 name = "proxide"
 version = "0.1.0"
-source = { editable = "proxide" }
+source = { git = "https://github.com/maraxen/proxide.git?rev=fbf00b9485c1d90ec3bbcccf678d4f053057a3c3#fbf00b9485c1d90ec3bbcccf678d4f053057a3c3" }
 dependencies = [
     { name = "array-record", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
     { name = "biotite", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
@@ -2447,42 +2448,6 @@ dependencies = [
     { name = "rdkit", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
     { name = "tables", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
 ]
-
-[package.metadata]
-requires-dist = [
-    { name = "array-record" },
-    { name = "biotite" },
-    { name = "chex" },
-    { name = "equinox" },
-    { name = "foldcomp" },
-    { name = "grain" },
-    { name = "h5py" },
-    { name = "huggingface-hub", marker = "extra == 'ml'" },
-    { name = "hydride" },
-    { name = "jax" },
-    { name = "jax-md" },
-    { name = "jaxtyping" },
-    { name = "maturin", marker = "extra == 'dev'" },
-    { name = "mdtraj" },
-    { name = "msgpack" },
-    { name = "msgpack-numpy" },
-    { name = "myst-nb", marker = "extra == 'dev'" },
-    { name = "numpy" },
-    { name = "optax", marker = "extra == 'ml'" },
-    { name = "pytest", marker = "extra == 'dev'" },
-    { name = "pytest-cov", marker = "extra == 'dev'" },
-    { name = "rdkit" },
-    { name = "ruff", marker = "extra == 'dev'" },
-    { name = "sphinx", marker = "extra == 'dev'" },
-    { name = "sphinx-autodoc-typehints", marker = "extra == 'dev'" },
-    { name = "sphinx-book-theme", marker = "extra == 'dev'" },
-    { name = "sphinx-copybutton", marker = "extra == 'dev'" },
-    { name = "sphinx-design", marker = "extra == 'dev'" },
-    { name = "sphinxext-rediraffe", marker = "extra == 'dev'" },
-    { name = "tables" },
-    { name = "ty", marker = "extra == 'dev'" },
-]
-provides-extras = ["ml", "dev"]
 
 [[package]]
 name = "psutil"

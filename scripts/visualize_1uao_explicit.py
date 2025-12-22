@@ -83,7 +83,7 @@ def main():
     # Actually, applying cartoon to water might be weird if py2Dmol tries to trace it.
     # But usually it ignores non-protein.
 
-    output_html = "1uao_explicit_viz.html"
+    output_html = "outputs/1uao_explicit_viz.html"
     save_trajectory_html(
         trajectory=traj_path,
         pdb_path=pdb_path,
@@ -97,7 +97,7 @@ def main():
     # 2. GIF Visualization (Matplotlib)
     # -----------------------------------------------
     print("\nGenerating GIF visualization...")
-    output_gif = "1uao_explicit_movie.gif"
+    output_gif = "outputs/1uao_explicit_movie.gif"
 
     reader = TrajectoryReader(traj_path)
     full_positions = reader.get_positions()

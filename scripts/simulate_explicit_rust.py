@@ -294,7 +294,7 @@ def main():
     print("\nGenerating GIF...")
     generate_enhanced_gif(
         traj_path,
-        "1crn_explicit_movie.gif",
+        "outputs/1crn_explicit_movie.gif",
         bonds=bonds,
         elements=elements,
         box_size=np.array(box_size),
