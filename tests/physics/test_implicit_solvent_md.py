@@ -21,10 +21,11 @@ def parameterized_protein():
     """Load and parameterize a small protein for MD testing."""
     pdb_path = DATA_DIR / "1CRN.pdb"
 
-    spec = OutputSpec()
-    spec.parameterize_md = True
-    spec.force_field = str(FF_PATH)
-    spec.add_hydrogens = True
+    spec = OutputSpec(
+        parameterize_md=True,
+        force_field=str(FF_PATH),
+        add_hydrogens=True,
+    )
 
     return parse_structure(str(pdb_path), spec)
 

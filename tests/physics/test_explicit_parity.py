@@ -52,13 +52,14 @@ def parameterized_protein():
     if not pdb_path.exists():
         pytest.skip("1CRN.pdb not found")
 
-    spec = OutputSpec()
-    spec.coord_format = CoordFormat.Full  # Full flat coords, not Atom37
-    spec.parameterize_md = True
-    spec.force_field = str(FF_PATH)
     # NOTE: add_hydrogens=True currently broken in proxide - adds H to params but not coords
     # TODO: Enable once proxide fixes coordinate/param alignment for hydrogens
-    spec.add_hydrogens = False
+    spec = OutputSpec(
+        coord_format=CoordFormat.Full,  # Full flat coords, not Atom37
+        parameterize_md=True,
+        force_field=str(FF_PATH),
+        add_hydrogens=False,
+    )
 
     return parse_structure(str(pdb_path), spec)
 
