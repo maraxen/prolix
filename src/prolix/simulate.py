@@ -6,14 +6,14 @@ import dataclasses
 import logging
 import math
 import time
-from typing import TYPE_CHECKING, Any, Union
+from typing import TYPE_CHECKING, Any
 
 import equinox as eqx
 import jax
 import jax.numpy as jnp
 import msgpack_numpy as m
 import numpy as np
-from jax_md import partition, space, util
+from jax_md import space, util
 
 from prolix.physics import neighbor_list as nl
 
@@ -227,14 +227,14 @@ class TrajectoryWriter:
 
 
 def run_simulation(
-  system: "AtomicSystem | SystemParams | None" = None,
+  system: AtomicSystem | SystemParams | None = None,
   r_init: Array | None = None,
   spec: SimulationSpec | None = None,
   key: Array | None = None,
   # Hierarchical PyTree arguments (preferred for vmap efficiency)
-  topology: "MolecularTopology | None" = None,
-  state: "AtomicState | None" = None,
-  constants: "AtomicConstants | None" = None,
+  topology: MolecularTopology | None = None,
+  state: AtomicState | None = None,
+  constants: AtomicConstants | None = None,
   # Deprecated: kept for backward compatibility
   system_params: SystemParams | None = None,
 ) -> SimulationState:
@@ -498,7 +498,7 @@ def run_simulation(
       return jax.lax.fori_loop(0, n_steps, body_fn, (pos, nbr))
 
     r_min = r_init
-    for batch in range(10):  # 10 batches of 500 = 5000 steps
+    for _batch in range(10):  # 10 batches of 500 = 5000 steps
       r_min, neighbor = minimize_batch(r_min, neighbor, 500)
     neighbor = neighbor.update(r_min)
     e_minimized = energy_fn(r_min, neighbor=neighbor)

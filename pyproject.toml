@@ -29,6 +29,9 @@ dependencies = [
 where = ["src"]
 
 [project.optional-dependencies]
+cuda = ["jax[cuda12]"]
+tpu = ["jax[tpu]"]
+cpu = ["jax"]
 dev = [
     "ruff",
     "pytest",

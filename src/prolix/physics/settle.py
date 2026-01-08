@@ -17,8 +17,7 @@ from typing import TYPE_CHECKING
 import jax
 import jax.numpy as jnp
 from jax import random
-from jax_md import quantity, simulate, space, util
-from proxide.physics.constants import BOLTZMANN_KCAL
+from jax_md import quantity, simulate, util
 
 if TYPE_CHECKING:
   from collections.abc import Callable
@@ -158,8 +157,6 @@ def _settle_water_batch(
 
   # Step 2: Get unconstrained positions relative to COM
   d_O = r_O_new - com_new  # (N_waters, 3)
-  d_H1 = r_H1_new - com_new
-  d_H2 = r_H2_new - com_new
 
   # Step 3: Build rotation frame from the old geometry
   # This defines how we orient the ideal triangle
@@ -218,7 +215,6 @@ def _settle_water_batch(
   # Where does O want to be?
   O_proj_x = jnp.sum(d_O * axis_x, axis=-1)  # (N_waters,)
   O_proj_y = jnp.sum(d_O * axis_y, axis=-1)
-  O_proj_z = jnp.sum(d_O * axis_z, axis=-1)
 
   # Determine in-plane rotation angle from O position
   # O should be at (0, ra) in unrotated frame
@@ -365,13 +361,10 @@ def settle_velocities(
     V_new = V_curr.at[O_idx].add(dv_O)
     V_new = V_new.at[H1_idx].add(dv_H1)
     V_new = V_new.at[H2_idx].add(dv_H2)
-
     return V_new
 
   # Iterate a few times for convergence
-  V_corrected = jax.lax.fori_loop(0, 5, lambda i, v: correct_velocities(v), V)
-
-  return V_corrected
+  return jax.lax.fori_loop(0, 5, lambda _i, v: correct_velocities(v), V)
 
 
 def get_water_indices(n_protein_atoms: int, n_waters: int) -> Array:
