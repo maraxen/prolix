@@ -37,6 +37,11 @@ from proxide.physics.vdw import (
   compute_lj_forces_at_backbone,
 )
 
+from prolix.physics.noising import (
+  compute_thermal_sigma,
+  thermal_noise_fn,
+)
+
 __all__ = [
   "ANGSTROM_TO_NM",
   # Constants
@@ -63,10 +68,12 @@ __all__ = [
   "compute_lj_force_magnitude_pairwise",
   "compute_lj_forces",
   "compute_lj_forces_at_backbone",
+  "compute_thermal_sigma",
   # Electrostatics
   "compute_pairwise_displacements",
   "list_available_force_fields",
   "load_force_field",
   "project_forces_onto_backbone",
   "project_forces_onto_backbone_per_atom",
+  "thermal_noise_fn",
 ]

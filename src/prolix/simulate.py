@@ -401,7 +401,7 @@ def run_simulation(
       "improper_params": jnp.array(atomic_sys.improper_params)
       if atomic_sys.improper_params is not None
       else jnp.zeros((0, 3)),
-      "gb_radii": jnp.array(atomic_sys.radii) if atomic_sys.radii is not None else None,
+      "gb_radii": jnp.array(atomic_sys.radii) if atomic_sys.radii is not None else None,  # type: ignore[possibly-missing-attribute]
     }
     system_params = system_params_dict
   elif system is not None:
@@ -413,14 +413,21 @@ def run_simulation(
   else:
     msg = "Either system or (topology, state) must be provided"
     raise ValueError(msg)
+
   # Import jax_md components here to avoid circular imports
   from jax_md import quantity as jax_md_quantity
   from jax_md import simulate as jax_md_simulate
+
+  if spec is None:
+    raise ValueError("spec must be provided")
 
   if key is None:
     key = jax.random.PRNGKey(int(time.time()))
 
   # 1. Setup Physics
+  displacement_fn: Any
+  shift_fn: Any
+
   if spec.use_pbc:
     if spec.box is None:
       msg = "Must specify box when use_pbc=True"
@@ -445,7 +452,7 @@ def run_simulation(
       len(exclusion_spec.idx_14),
     )
 
-  energy_fn = physics_system.make_energy_fn(
+  energy_fn: Any = physics_system.make_energy_fn(
     displacement_fn,
     system_params,
     exclusion_spec=exclusion_spec,
@@ -457,11 +464,11 @@ def run_simulation(
   )
 
   # Create neighbor list if requested
-  neighbor = None
-  neighbor_fn = None
+  neighbor: Any = None
+  neighbor_fn: Any = None
   if spec.use_neighbor_list and spec.box is not None:
     neighbor_fn = nl.make_neighbor_list_fn(
-      displacement_fn, np.array(spec.box), spec.neighbor_cutoff
+      displacement_fn, jnp.array(spec.box), spec.neighbor_cutoff
     )
     neighbor = neighbor_fn.allocate(r_init)
     logger.info("Neighbor list allocated: shape %s", neighbor.idx.shape)
@@ -480,12 +487,13 @@ def run_simulation(
     # Neighbor-list-aware minimization using fori_loop
     def minimize_step(pos, nbr):
       nbr = nbr.update(pos)
-      grad_fn = jax.grad(lambda r: energy_fn(r, neighbor=nbr))
+      grad_fn = jax.grad(lambda r: energy_fn(r, neighbor=nbr))  # type: ignore[unknown-argument]
       g = grad_fn(pos)
       g_norm = jnp.linalg.norm(g)
       g = jnp.where(g_norm > 100.0, g * 100.0 / g_norm, g)
       new_pos = pos - 0.001 * g
-      new_pos = jnp.mod(new_pos, jnp.array(spec.box))
+      if spec.use_pbc and spec.box is not None:
+        new_pos = jnp.mod(new_pos, jnp.array(spec.box))
       return new_pos, nbr
 
     @jax.jit
@@ -501,7 +509,7 @@ def run_simulation(
     for _batch in range(10):  # 10 batches of 500 = 5000 steps
       r_min, neighbor = minimize_batch(r_min, neighbor, 500)
     neighbor = neighbor.update(r_min)
-    e_minimized = energy_fn(r_min, neighbor=neighbor)
+    e_minimized = energy_fn(r_min, neighbor=neighbor)  # type: ignore[unknown-argument]
   else:
     r_min = physics_simulate.run_minimization(energy_fn, r_init, steps=5000)
     e_minimized = energy_fn(r_min)
@@ -540,7 +548,7 @@ def run_simulation(
       dt=dt,
       kT=kT,
       gamma=gamma,
-      constraints=(constrained_bonds, constrained_lengths),
+      constraints=(jnp.array(constrained_bonds), jnp.array(constrained_lengths)),
     )
   else:
     init_fn, apply_fn = jax_md_simulate.nvt_langevin(
@@ -561,7 +569,7 @@ def run_simulation(
   @jax.jit
   def jit_apply_fn(s, nbr=None):
     if nbr is not None:
-      return apply_fn(s, neighbor=nbr)
+      return apply_fn(s, neighbor=nbr)  # type: ignore[unknown-argument]
     return apply_fn(s)
 
   # Force compilation by running one step (with neighbor if available)
@@ -630,7 +638,7 @@ def run_simulation(
     )
 
     # Calculate Energy for saving
-    E = energy_fn(curr_state.position, neighbor=nbrs)
+    E = energy_fn(curr_state.position, neighbor=nbrs)  # type: ignore[unknown-argument]
     K = jax_md_quantity.kinetic_energy(momentum=curr_state.momentum, mass=curr_state.mass)
 
     sim_state = SimulationState(
@@ -702,7 +710,7 @@ def run_simulation(
       # Check for neighbor list overflow - reallocate and update for next epoch
       if neighbor.did_buffer_overflow:
         logger.warning("Neighbor list overflow detected, reallocating for next epoch...")
-        neighbor = neighbor_fn.allocate(new_state.position)
+        neighbor = neighbor_fn.allocate(new_state.position)  # type: ignore[possibly-missing-attribute]
         # CRITICAL: Update the newly allocated neighbor list with actual neighbors
         neighbor = neighbor.update(new_state.position)
       state = new_state
@@ -759,7 +767,7 @@ def run_simulation(
   # Return final SimulationState (unpacked)
   # We construct one last state
   if neighbor is not None:
-    E = energy_fn(state.position, neighbor=neighbor)
+    E = energy_fn(state.position, neighbor=neighbor)  # type: ignore[unknown-argument]
   else:
     E = energy_fn(state.position)
   return SimulationState(

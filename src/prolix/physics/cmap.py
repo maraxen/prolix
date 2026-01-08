@@ -18,7 +18,7 @@ from typing import TYPE_CHECKING
 
 import jax
 import jax.numpy as jnp
-from jaxtyping import Float, Int
+from jaxtyping import Float
 
 if TYPE_CHECKING:
   from prolix.types import (
@@ -26,7 +26,10 @@ if TYPE_CHECKING:
     CmapCoeffs,
     CmapEnergyGrids,
     CmapGrid,
+    CmapPoints,
     ScalarFloat,
+    TorsionAngles,
+    TorsionIndices,
   )
 
 
@@ -57,9 +60,9 @@ WT = jnp.array(
 
 
 def create_periodic_spline(
-  x: Float[ArrayLike, num_points],
-  y: Float[ArrayLike, num_points],
-) -> Float[ArrayLike, num_points]:
+  x: CmapPoints,
+  y: CmapPoints,
+) -> CmapPoints:
   """Fit a periodic natural cubic spline through (x, y) data points.
 
   This matches OpenMM's SplineFitter::createPeriodicSpline().
@@ -122,10 +125,10 @@ def create_periodic_spline(
 
 
 def evaluate_spline_derivative(
-  x: Float[ArrayLike, num_points],
-  y: Float[ArrayLike, num_points],
-  deriv: Float[ArrayLike, num_points],
-  t: float,
+  x: CmapPoints,
+  y: CmapPoints,
+  deriv: CmapPoints,
+  t: ScalarFloat,
 ) -> ScalarFloat:
   """Evaluate the first derivative of a cubic spline at point t.
 
@@ -326,9 +329,9 @@ def eval_bicubic_patch(coeffs: Float[ArrayLike, 16], da: float, db: float) -> Sc
 
 
 def compute_cmap_energy(
-  phi_angles: Float[ArrayLike, num_torsions],
-  psi_angles: Float[ArrayLike, num_torsions],
-  map_indices: Int[ArrayLike, num_torsions],
+  phi_angles: TorsionAngles,
+  psi_angles: TorsionAngles,
+  map_indices: TorsionIndices,
   cmap_coeffs: CmapCoeffs | CmapEnergyGrids,
 ) -> ScalarFloat:
   """Compute CMAP energy using OpenMM-compatible bicubic spline interpolation.

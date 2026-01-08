@@ -12,7 +12,7 @@ if TYPE_CHECKING:
 
 def generate_temperature_ladder(
   n_replicas: int, min_temp: float, max_temp: float, geometric: bool = True
-) -> Float[ArrayLike, "n_replicas"]:  # noqa: F821, UP037
+) -> Float[ArrayLike, "n_replicas"]:  # noqa: UP037
   """Generate a temperature ladder for replica exchange.
 
   Args:

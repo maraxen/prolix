@@ -12,7 +12,7 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 from jax_md import space
-from oxidize import CoordFormat
+from proxide import CoordFormat
 from proxide.io.parsing.rust import OutputSpec, parse_structure
 
 from prolix.physics import bonded, pbc, pme, system

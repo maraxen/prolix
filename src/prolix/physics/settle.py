@@ -432,7 +432,7 @@ def settle_langevin(
 
   # If no water indices, fall back to standard Langevin
   if water_indices is None or water_indices.shape[0] == 0:
-    return simulate.nvt_langevin(energy_or_force_fn, shift_fn, dt, kT, gamma, mass)
+    return simulate.nvt_langevin(energy_or_force_fn, shift_fn, dt, kT, gamma=gamma, mass=mass)
 
   def init_fn(key, R, mass=mass, **kwargs):
     _kT = kwargs.pop("kT", kT)

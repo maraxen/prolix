@@ -226,9 +226,13 @@ def solvate(
 
   final_waters = tiled_waters[final_water_indices]
 
+  n_solute = centered_solute.shape[0]
+  n_waters = final_waters.shape[0]
+  water_indices = jnp.arange(n_solute, n_solute + n_waters)
+
   combined_pos = jnp.concatenate([centered_solute, jnp.array(final_waters)])
 
-  return combined_pos, target_box_size
+  return combined_pos, water_indices, target_box_size
 
 
 def add_ions(

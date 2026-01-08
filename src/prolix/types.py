@@ -19,6 +19,9 @@ Energy = Float[ArrayLike, ""]
 CmapGrid = Float[ArrayLike, "grid_size grid_size"]
 CmapCoeffs = Float[ArrayLike, "num_maps grid_size grid_size 16"]
 CmapEnergyGrids = Float[ArrayLike, "num_maps grid_size grid_size"]
+CmapPoints = Float[ArrayLike, "num_points"]
+TorsionAngles = Float[ArrayLike, "num_torsions"]
+TorsionIndices = Int[ArrayLike, "num_torsions"]
 
 # aliases
 PRNGKey = PRNGKeyArray

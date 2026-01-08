@@ -98,7 +98,17 @@ ignore = [
     "C901", "PLR0915", "PLR0912", "PLR2004",
     "FIX002", "TD002", "TD003",
     "E501", "E741", "E701",
-    "PD", "COM812", "ISC001", "ARG003"
+    "PD", "COM812", "ISC001", "ARG003",
+    "F722", # jaxtyping strings
+    "RUF002", # greek sigma in docstrings
+    "RET504", # unnecessary assignment before return
+    "F841", # unused variables
+    "RUF059", # unused unpacked variables
+    "F821", # undefined name (often jaxtyping dims)
+    "RUF022", # sorting __all__
+    "TC002", # move jaxtyping into type-checking block
+    "W293", # blank line whitespace
+    "C414", # unnecessary list() in sorted()
 ]
 pylint.max-args = 15
 
@@ -118,6 +128,9 @@ pylint.max-args = 15
     "T201",    # print allowed in scripts
     "INP001",  # implicit namespace package
 ]
+
+[tool.ty.src]
+exclude = ["**/viewer.py"]
 
 [tool.ty.environment]
 root = ["src/prolix"]

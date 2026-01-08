@@ -1,7 +1,7 @@
 """Tests for Parallel Tempering."""
 import jax.numpy as jnp
 import pytest
-from proxide.md.jax_md_bridge import SystemParams
+from proxide.md import SystemParams
 
 from prolix.pt import replica_exchange, temperature
 

@@ -112,33 +112,33 @@ def make_energy_fn(
   # 1. Bonded Terms
   bond_energy_fn = bonded.make_bond_energy_fn(
     displacement_fn,
-    system_params["bonds"],
-    system_params["bond_params"],
+    jnp.asarray(system_params["bonds"]),
+    jnp.asarray(system_params["bond_params"]),
   )
 
   angle_energy_fn = bonded.make_angle_energy_fn(
     displacement_fn,
-    system_params["angles"],
-    system_params["angle_params"],
+    jnp.asarray(system_params["angles"]),
+    jnp.asarray(system_params["angle_params"]),
   )
 
   dihedral_energy_fn = bonded.make_dihedral_energy_fn(
     displacement_fn,
-    system_params["dihedrals"],
-    system_params["dihedral_params"],
+    jnp.asarray(system_params["dihedrals"]),
+    jnp.asarray(system_params["dihedral_params"]),
   )
 
   improper_energy_fn = bonded.make_dihedral_energy_fn(
     displacement_fn,
-    system_params["impropers"],
-    system_params["improper_params"],
+    jnp.asarray(system_params["impropers"]),
+    jnp.asarray(system_params["improper_params"]),
   )
 
   # Urey-Bradley Terms (Harmonic Bond between 1-3 pairs)
   ub_energy_fn = bonded.make_bond_energy_fn(
     displacement_fn,
-    system_params.get("urey_bradley_bonds", jnp.zeros((0, 2), dtype=jnp.int32)),
-    system_params.get("urey_bradley_params", jnp.zeros((0, 2), dtype=jnp.float32)),
+    jnp.asarray(system_params.get("urey_bradley_bonds", jnp.zeros((0, 2), dtype=jnp.int32))),
+    jnp.asarray(system_params.get("urey_bradley_params", jnp.zeros((0, 2), dtype=jnp.float32))),
   )
 
   # Virtual Sites
@@ -223,7 +223,7 @@ def make_energy_fn(
   # This prevents recompilation on every energy evaluation
   if use_pbc and box is not None:
     pme_recip_fn = pme.make_pme_energy_fn(
-      charges, box, grid_points=pme_grid_points, alpha=pme_alpha
+      jnp.asarray(charges), box, grid_points=pme_grid_points, alpha=pme_alpha
     )
   else:
     pme_recip_fn = None
@@ -273,14 +273,14 @@ def make_energy_fn(
       if neighbor_idx is None:
         e_gb, born_radii = generalized_born.compute_gb_energy(
           r,
-          charges,
-          radii,
+          jnp.asarray(charges),
+          jnp.asarray(radii),
           solvent_dielectric=solvent_dielectric,
           solute_dielectric=solute_dielectric,
           dielectric_offset=dielectric_offset,
           mask=gb_mask,  # Radii: Scale 1-4 (0.5)
           energy_mask=gb_energy_mask,  # Energy: Full (1.0)
-          scaled_radii=scaled_radii,
+          scaled_radii=jnp.asarray(scaled_radii) if scaled_radii is not None else None,
         )
       else:
         # TODO: Update neighbor list version of GBSA to accept mask
@@ -290,8 +290,8 @@ def make_energy_fn(
         # Since validation script uses N^2 (neighbor_idx=None), this is fine for now.
         e_gb, born_radii = generalized_born.compute_gb_energy_neighbor_list(
           r,
-          charges,
-          radii,
+          jnp.asarray(charges),
+          jnp.asarray(radii),
           neighbor_idx,
           solvent_dielectric=solvent_dielectric,
           solute_dielectric=solute_dielectric,
@@ -304,6 +304,7 @@ def make_energy_fn(
     if use_pbc and box is not None:
       # PME Electrostatics (Explicit Solvent / Periodic)
       # Use pre-computed PME function (captured from outer scope)
+      assert pme_recip_fn is not None
       e_recip = pme_recip_fn(r)
       # NOTE: Direct space (erfc term) is computed in the neighbor block below
 
@@ -331,7 +332,7 @@ def make_energy_fn(
     if neighbor_idx is None:
       # Dense
       dr = space.map_product(displacement_fn)(r, r)
-      dist = space.distance(dr)
+      dist = space.distance(jnp.asarray(dr))
       q_ij = charges[:, None] * charges[None, :]
 
       dist_safe = dist + 1e-6
@@ -364,7 +365,7 @@ def make_energy_fn(
       # Use jax_md's map_neighbor for correct displacement
       map_neighbor_disp = space.map_neighbor(displacement_fn)
       dr = map_neighbor_disp(r, r_neighbors)  # (N, K, 3)
-      dist = space.distance(dr)  # (N, K)
+      dist = space.distance(jnp.asarray(dr))  # (N, K)
 
       q_neighbors = charges[idx]
       q_central = charges[:, None]
@@ -387,6 +388,9 @@ def make_energy_fn(
       # Apply scaling using sparse exclusion lookups (O(N*K)) or dense matrix (O(N^2))
       if use_sparse_exclusions and excl_indices is not None:
         # Sparse exclusion lookup - efficient for large systems
+        assert excl_indices is not None
+        assert excl_scales_vdw is not None
+        assert excl_scales_elec is not None
         _, scale_elec = nl.get_neighbor_exclusion_scales(
           excl_indices, excl_scales_vdw, excl_scales_elec, idx
         )
@@ -422,12 +426,12 @@ def make_energy_fn(
     if neighbor_idx is None:
       # Dense
       dr = space.map_product(displacement_fn)(r, r)
-      dist = space.distance(dr)
+      dist = space.distance(jnp.asarray(dr))
 
       sig_ij = 0.5 * (sigmas[:, None] + sigmas[None, :])
       eps_ij = jnp.sqrt(epsilons[:, None] * epsilons[None, :])
 
-      e_lj = energy.lennard_jones(dist, sig_ij, eps_ij)
+      e_lj = energy.lennard_jones(jnp.asarray(dist), sig_ij, eps_ij)
 
       # Apply scaling/masking
       if scale_matrix_vdw is not None:
@@ -443,7 +447,7 @@ def make_energy_fn(
     # Use jax_md's map_neighbor for correct displacement over neighbor list
     map_neighbor_disp = space.map_neighbor(displacement_fn)
     dr = map_neighbor_disp(r, r_neighbors)  # (N, K, 3)
-    dist = space.distance(dr)  # (N, K)
+    dist = space.distance(jnp.asarray(dr))  # (N, K)
 
     sig_neighbors = sigmas[idx]
     eps_neighbors = epsilons[idx]
@@ -461,6 +465,9 @@ def make_energy_fn(
     # Apply scaling using sparse exclusion lookups (O(N*K)) or dense matrix (O(N^2))
     if use_sparse_exclusions and excl_indices is not None:
       # Sparse exclusion lookup - efficient for large systems
+      assert excl_indices is not None
+      assert excl_scales_vdw is not None
+      assert excl_scales_elec is not None
       scale_vdw, _ = nl.get_neighbor_exclusion_scales(
         excl_indices, excl_scales_vdw, excl_scales_elec, idx
       )
@@ -494,7 +501,10 @@ def make_energy_fn(
 
     # Use ACE approximation (matches OpenMM CustomGBForce)
     return generalized_born.compute_ace_nonpolar_energy(
-      radii, born_radii, surface_tension=surface_tension, probe_radius=constants.PROBE_RADIUS
+      jnp.asarray(radii),
+      born_radii,
+      surface_tension=surface_tension,
+      probe_radius=constants.PROBE_RADIUS,
     )
 
   def compute_cmap_term(r):
@@ -515,8 +525,8 @@ def make_energy_fn(
     phi_indices = cmap_torsions[:, 0:4]
     psi_indices = cmap_torsions[:, 1:5]
 
-    phi = compute_dihedral_angles(r, phi_indices, displacement_fn)
-    psi = compute_dihedral_angles(r, psi_indices, displacement_fn)
+    phi = compute_dihedral_angles(r, jnp.asarray(phi_indices), displacement_fn)
+    psi = compute_dihedral_angles(r, jnp.asarray(psi_indices), displacement_fn)
 
     # Swapped to (psi, phi) based on validation results matching OpenMM
     # Use pre-computed coefficients if available (captured from outer scope)
@@ -647,7 +657,7 @@ def make_energy_fn(
 
   def compute_lj_tail_correction(
     box: Array, sigma: Array, epsilon: Array, cutoff: float, N_atoms: int
-  ) -> float:
+  ) -> Array:
     """Computes the Lennard-Jones long-range dispersion correction.
 
     Standard homogenous correction:
@@ -729,10 +739,10 @@ def make_energy_fn(
 
     return (8.0 * jnp.pi * (N_atoms**2) / volume) * avg_eps * term
 
-  def compute_pme_exceptions(r: Array) -> float:
+  def compute_pme_exceptions(r: Array) -> Array:
     """Computes the reciprocal space correction for excluded/scaled pairs."""
     if not use_pbc or box is None:
-      return 0.0
+      return jnp.array(0.0)
 
     # Correction Formula: E_corr = - (1.0 - scale) * q_i * q_j * erf(alpha * r) / r
     # For 1-2 and 1-3: scale = 0.0 => E_corr = -1.0 * Recip
@@ -808,7 +818,11 @@ def make_energy_fn(
 
       # Long-Range LJ Correction
       e_lj_lrc = compute_lj_tail_correction(
-        box=box, sigma=sigmas, epsilon=epsilons, cutoff=cutoff_distance, N_atoms=r.shape[0]
+        box=box,
+        sigma=jnp.asarray(sigmas),
+        epsilon=jnp.asarray(epsilons),
+        cutoff=cutoff_distance,
+        N_atoms=r.shape[0],
       )
       e_lj += e_lj_lrc
 

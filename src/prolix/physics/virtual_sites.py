@@ -4,6 +4,9 @@ from typing import TYPE_CHECKING
 
 import jax
 import jax.numpy as jnp
+from jax_md import util
+
+Array = util.Array
 
 if TYPE_CHECKING:
   from jaxtyping import Float, Int
@@ -13,9 +16,9 @@ if TYPE_CHECKING:
 
 def reconstruct_virtual_sites(
   positions: Coordinates,  # (N, 3)
-  vs_def: Int[ArrayLike, "N_vs 4"],  # noqa: F722 # (N_vs, 4) [vs_idx, p1, p2, p3]
-  vs_params: Float[ArrayLike, "N_vs 12"],  # noqa: F722 # (N_vs, 12)
-) -> Coordinates:
+  vs_def: Int[ArrayLike, "N_vs 4"],  # (N_vs, 4) [vs_idx, p1, p2, p3]
+  vs_params: Float[ArrayLike, "N_vs 12"],  # (N_vs, 12)
+) -> Array:
   """Reconstruct virtual site positions from parent atoms.
 
   Args:
@@ -29,6 +32,7 @@ def reconstruct_virtual_sites(
       Updated positions array where virtual site coordinates are computed.
 
   """
+  positions = jnp.asarray(positions)
 
   def _compute_single_vs(def_row, param_row, all_pos):
     vs_idx = def_row[0]
