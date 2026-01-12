@@ -3,11 +3,9 @@
 import chex
 import jax
 import jax.numpy as jnp
-import pytest
-from jaxtyping import Array, Float
+from proxide.physics.constants import BOLTZMANN_KCAL
 
 from prolix.physics.noising import compute_thermal_sigma, thermal_noise_fn
-from proxide.physics.constants import BOLTZMANN_KCAL
 
 
 class TestComputeThermalSigma:
@@ -27,7 +25,7 @@ class TestComputeThermalSigma:
   def test_negative_temperature_clamps_to_zero(self):
     """Negative temperature should produce sigma=0."""
     sigma = compute_thermal_sigma(-100.0)
-    # Use jax.numpy.array to handle potential scalar conversion during comparison if needed, 
+    # Use jax.numpy.array to handle potential scalar conversion during comparison if needed,
     # but check expects like types.
     chex.assert_trees_all_close(sigma, 0.0, atol=1e-7)
 
@@ -49,7 +47,7 @@ class TestThermalNoiseFn:
     coords = jnp.ones((10, 37, 3), dtype=jnp.float32)
     noised, _ = thermal_noise_fn(key, coords, 300.0)
     assert noised.dtype == jnp.float32
-    
+
     # Test float64 if enabled or just different precision if not
     # coords64 = jnp.ones((10, 37, 3), dtype=jnp.float64) # Don't assume x64 enabled
 
@@ -83,14 +81,14 @@ class TestThermalNoiseFn:
     """Noise should have correct standard deviation."""
     key = jax.random.PRNGKey(42)
     # Use large sample for stats
-    coords = jnp.zeros((1000, 37, 3)) 
+    coords = jnp.zeros((1000, 37, 3))
     temperature = 300.0
     noised, _ = thermal_noise_fn(key, coords, temperature)
-    
+
     # Noised coords should have mean ~0 and std ~sigma
     expected_sigma = jnp.sqrt(0.5 * BOLTZMANN_KCAL * temperature)
     measured_std = jnp.std(noised)
-    
+
     # Allow 5% tolerance for sampling variance
     chex.assert_trees_all_close(measured_std, expected_sigma, rtol=0.05)
 
@@ -100,7 +98,7 @@ class TestThermalNoiseFn:
     jitted_fn = jax.jit(thermal_noise_fn)
     key = jax.random.PRNGKey(42)
     coords = jnp.ones((10, 37, 3))
-    
+
     # Should not raise compilation error
     noised, _ = jitted_fn(key, coords, 300.0)
     chex.assert_shape(noised, (10, 37, 3))

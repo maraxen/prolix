@@ -304,7 +304,8 @@ def make_energy_fn(
     if use_pbc and box is not None:
       # PME Electrostatics (Explicit Solvent / Periodic)
       # Use pre-computed PME function (captured from outer scope)
-      assert pme_recip_fn is not None
+      if pme_recip_fn is None:
+        raise RuntimeError("PME reciprocal function not initialized.")
       e_recip = pme_recip_fn(r)
       # NOTE: Direct space (erfc term) is computed in the neighbor block below
 
@@ -388,9 +389,8 @@ def make_energy_fn(
       # Apply scaling using sparse exclusion lookups (O(N*K)) or dense matrix (O(N^2))
       if use_sparse_exclusions and excl_indices is not None:
         # Sparse exclusion lookup - efficient for large systems
-        assert excl_indices is not None
-        assert excl_scales_vdw is not None
-        assert excl_scales_elec is not None
+        if excl_indices is None or excl_scales_vdw is None or excl_scales_elec is None:
+          raise RuntimeError("Sparse exclusions requested but not initialized.")
         _, scale_elec = nl.get_neighbor_exclusion_scales(
           excl_indices, excl_scales_vdw, excl_scales_elec, idx
         )
@@ -465,9 +465,8 @@ def make_energy_fn(
     # Apply scaling using sparse exclusion lookups (O(N*K)) or dense matrix (O(N^2))
     if use_sparse_exclusions and excl_indices is not None:
       # Sparse exclusion lookup - efficient for large systems
-      assert excl_indices is not None
-      assert excl_scales_vdw is not None
-      assert excl_scales_elec is not None
+      if excl_indices is None or excl_scales_vdw is None or excl_scales_elec is None:
+        raise RuntimeError("Sparse exclusions requested but not initialized.")
       scale_vdw, _ = nl.get_neighbor_exclusion_scales(
         excl_indices, excl_scales_vdw, excl_scales_elec, idx
       )

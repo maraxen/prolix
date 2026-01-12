@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import dataclasses
-from collections.abc import Callable
 from typing import TYPE_CHECKING
 
 import jax.numpy as jnp
@@ -11,6 +10,8 @@ import numpy as np
 from jax_md import partition, space, util
 
 if TYPE_CHECKING:
+  from collections.abc import Callable
+
   from proxide.md import SystemParams
 
 Array = util.Array

@@ -33,7 +33,7 @@ class MockArrayRecordReader:
     self._records = MockArrayRecordReader._stored_records.get(path, [])
     self.closed = False
 
-  _stored_records: dict[str, list[bytes]] = {}
+  _stored_records: ClassVar[dict[str, list[bytes]]] = {}
 
   def num_records(self) -> int:
     return len(self._records)
@@ -69,9 +69,10 @@ def sample_trajectory(mock_array_record):
   # Create sample states and serialize them
   records = []
   for i in range(5):
+    rng = np.random.default_rng()
     state = SimulationState(
-      positions=np.random.randn(10, 3).astype(np.float32) + i * 10,
-      velocities=np.random.randn(10, 3).astype(np.float32),
+      positions=rng.standard_normal((10, 3)).astype(np.float32) + i * 10,
+      velocities=rng.standard_normal((10, 3)).astype(np.float32),
       step=np.array(i * 100),
       time_ns=np.array(i * 0.001),
       potential_energy=np.array(-100.0 + i),
@@ -147,9 +148,7 @@ class TestVisualizationFunctions:
     # This will be True or False depending on whether py2Dmol is installed
     assert isinstance(HAS_PY2DMOL, bool)
 
-  def test_visualize_trajectory_import_error_without_py2dmol(
-    self, sample_trajectory, monkeypatch
-  ):
+  def test_visualize_trajectory_import_error_without_py2dmol(self, sample_trajectory, monkeypatch):
     import prolix.visualization as viz_module
 
     # Mock HAS_PY2DMOL to False

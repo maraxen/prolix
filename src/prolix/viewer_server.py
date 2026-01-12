@@ -26,6 +26,7 @@ import numpy as np
 # Try importing Flask
 try:
   from flask import Flask, jsonify, send_from_directory
+
   HAS_FLASK = True
 except ImportError:
   HAS_FLASK = False
@@ -33,6 +34,7 @@ except ImportError:
 # Try importing visualization module for TrajectoryReader
 try:
   from prolix.visualization import TrajectoryReader
+
   HAS_READER = True
 except ImportError:
   HAS_READER = False
@@ -84,10 +86,12 @@ def create_app(
   @app.route("/api/config")
   def get_config():
     """Return the configured file paths."""
-    return jsonify({
-      "trajectoryPath": app.config["TRAJECTORY_PATH"],
-      "pdbPath": app.config["PDB_PATH"],
-    })
+    return jsonify(
+      {
+        "trajectoryPath": app.config["TRAJECTORY_PATH"],
+        "pdbPath": app.config["PDB_PATH"],
+      }
+    )
 
   @app.route("/api/pdb")
   def get_pdb():
@@ -157,13 +161,26 @@ def create_app(
         # Filter to CA only if we have indices
         ca_positions = positions[ca_indices].tolist() if ca_indices else positions.tolist()
 
-        frames.append({
-          "positions": ca_positions,
-          "time_ns": float(np.asarray(state.time_ns)) if state.time_ns is not None else None,
-          "potential_energy": float(np.asarray(state.potential_energy)) if state.potential_energy is not None else None,
-        })
+        frames.append(
+          {
+            "positions": ca_positions,
+            "time_ns": float(np.asarray(state.time_ns)) if state.time_ns is not None else None,
+            "potential_energy": float(np.asarray(state.potential_energy))
+            if state.potential_energy is not None
+            else None,
+          }
+        )
 
-      return jsonify({"frames": frames, "num_ca_atoms": len(ca_indices) if ca_indices else len(frames[0]["positions"]) if frames else 0})
+      return jsonify(
+        {
+          "frames": frames,
+          "num_ca_atoms": len(ca_indices)
+          if ca_indices
+          else len(frames[0]["positions"])
+          if frames
+          else 0,
+        }
+      )
     except Exception as e:
       logger.exception("Error reading trajectory")
       return jsonify({"error": str(e)}), 500
@@ -184,11 +201,15 @@ def create_app(
           return jsonify({"error": "Frame index out of range"}), 400
 
         state = reader[frame_idx]
-        return jsonify({
-          "positions": np.asarray(state.positions).tolist(),
-          "time_ns": float(np.asarray(state.time_ns)) if state.time_ns is not None else None,
-          "potential_energy": float(np.asarray(state.potential_energy)) if state.potential_energy is not None else None,
-        })
+        return jsonify(
+          {
+            "positions": np.asarray(state.positions).tolist(),
+            "time_ns": float(np.asarray(state.time_ns)) if state.time_ns is not None else None,
+            "potential_energy": float(np.asarray(state.potential_energy))
+            if state.potential_energy is not None
+            else None,
+          }
+        )
     except Exception as e:
       logger.exception("Error reading frame")
       return jsonify({"error": str(e)}), 500
@@ -205,10 +226,12 @@ def create_app(
 
     try:
       with TrajectoryReader(traj_path) as reader:
-        return jsonify({
-          "numFrames": len(reader),
-          "path": traj_path,
-        })
+        return jsonify(
+          {
+            "numFrames": len(reader),
+            "path": traj_path,
+          }
+        )
     except Exception as e:
       return jsonify({"error": str(e)}), 500
 
@@ -244,9 +267,7 @@ def launch_viewer(
 
 def main() -> None:
   """CLI entry point."""
-  parser = argparse.ArgumentParser(
-    description="Launch the Prolix Trajectory Viewer"
-  )
+  parser = argparse.ArgumentParser(description="Launch the Prolix Trajectory Viewer")
   parser.add_argument(
     "trajectory",
     nargs="?",

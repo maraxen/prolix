@@ -16,7 +16,7 @@ try:
 except ImportError:
   ArrayRecordReader = None
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Self
 
 from prolix.simulate import SimulationState
 
@@ -85,7 +85,7 @@ class TrajectoryReader:
       times[i] = state["time_ns"]
     return times
 
-  def __enter__(self) -> TrajectoryReader:
+  def __enter__(self) -> Self:
     return self
 
   def __exit__(self, exc_type, exc_val, exc_tb) -> None:
