@@ -111,19 +111,14 @@ def rattle_langevin(
     _kT = kwargs.pop("kT", kT)
     _dt / 2
 
-    # 1. B (Velocity Update 1)
-    # v = v + 0.5 * dt * F/m
+    # Velocity Update 1
     momentum = state.momentum + 0.5 * _dt * state.force
 
-    # 2. A (Position Update 1)
-    # r = r + 0.5 * dt * v/m
+    # Position Update 1
     velocity = momentum / state.mass
     position = shift_fn(state.position, 0.5 * _dt * velocity)
 
-    # 3. O (Stochastic Update)
-    # v = c1 * v + c2 * noise
-    # c1 = exp(-gamma * dt)
-    # c2 = sqrt(1 - c1^2) * sqrt(m * kT)
+    # Stochastic Update
     c1 = jnp.exp(-gamma * _dt)
     c2 = jnp.sqrt(1 - c1**2)
 
@@ -131,8 +126,7 @@ def rattle_langevin(
     noise = random.normal(split, state.momentum.shape)
     momentum = c1 * momentum + c2 * jnp.sqrt(state.mass * _kT) * noise
 
-    # 4. A (Position Update 2)
-    # r = r + 0.5 * dt * v/m
+    # Position Update 2
     velocity = momentum / state.mass
     position = shift_fn(position, 0.5 * _dt * velocity)
 
@@ -155,11 +149,10 @@ def rattle_langevin(
 
       position = project_positions(position, pairs, lengths, state.mass, shift_fn)
 
-    # 5. Force Update
+    # Force Update
     force = force_fn(position, **kwargs)
 
-    # 6. B (Velocity Update 2)
-    # v = v + 0.5 * dt * F/m
+    # Velocity Update 2
     momentum = momentum + 0.5 * _dt * force
 
     # --- RATTLE (Velocity Constraint) ---
@@ -314,7 +307,7 @@ def project_momenta(P, R, pairs, mass, shift_fn, tol=1e-6, max_iter=100):
 
 def run_minimization(
   energy_fn: Callable[[Array], Array],
-  r_init: Array,
+  initial_positions: Array,
   steps: int = 500,
   dt_start: float = 2e-3,  # 2 fs - typical for MD
   dt_max: float = 4e-3,  # 4 fs max
@@ -332,7 +325,7 @@ def run_minimization(
 
   Args:
       energy_fn: Energy function E(R).
-      r_init: Initial positions (N, 3).
+      initial_positions: Initial positions (N, 3).
       steps: Number of FIRE minimization steps.
       dt_start: Initial time step for FIRE.
       dt_max: Maximum time step for FIRE.
@@ -364,7 +357,7 @@ def run_minimization(
     return r_new, max_force
 
   # Run steepest descent (always, to warm up structure)
-  r_after_sd, _ = jax.lax.scan(steepest_descent_step, r_init, jnp.arange(sd_steps))
+  r_after_sd, _ = jax.lax.scan(steepest_descent_step, initial_positions, jnp.arange(sd_steps))
   jax.block_until_ready(r_after_sd)
 
   # -------------------------------------------------------------------------
@@ -388,7 +381,7 @@ def run_minimization(
 
 def run_thermalization(
   energy_fn: Callable[[Array], Array],
-  r_init: Array,
+  initial_positions: Array,
   temperature: float = 300.0,
   steps: int = 1000,
   dt: float = 2e-3,  # 2 fs - standard with SHAKE
@@ -402,7 +395,7 @@ def run_thermalization(
 
   Args:
       energy_fn: Energy function E(R).
-      r_init: Initial positions (N, 3).
+      initial_positions: Initial positions (N, 3).
       temperature: Temperature in Kelvin.
       steps: Number of simulation steps.
       dt: Time step (ps).
@@ -436,7 +429,7 @@ def run_thermalization(
       energy_fn, shift_fn=space.free()[1], dt=dt, kT=kT, gamma=gamma, mass=mass
     )
 
-  state = init_fn(key, r_init)
+  state = init_fn(key, initial_positions)
 
   @jax.jit
   def step_fn(i, state):
@@ -448,7 +441,7 @@ def run_thermalization(
 
 def run_nve(
   energy_fn: Callable[[Array], Array],
-  r_init: Array,
+  initial_positions: Array,
   steps: int,
   dt: float = 2e-3,
   mass: Array | float = 1.0,
@@ -468,12 +461,12 @@ def run_nve(
       constraints=constraints,
     )
     key = jax.random.PRNGKey(0)
-    state = init_fn(key, r_init, kT=0.0)
+    state = init_fn(key, initial_positions, kT=0.0)
   else:
     init_fn, apply_fn = simulate.nve(energy_fn, shift_fn=space.free()[1], dt=dt)
     kT = BOLTZMANN_KCAL * 300.0  # Default assumption if not passed
     key = jax.random.PRNGKey(0)
-    state = init_fn(key, r_init, mass=mass, kT=kT)
+    state = init_fn(key, initial_positions, mass=mass, kT=kT)
 
   @jax.jit
   def step_fn(i, state):
@@ -485,7 +478,7 @@ def run_nve(
 
 def run_nvt_nose_hoover(
   energy_fn: Callable[[Array], Array],
-  r_init: Array,
+  initial_positions: Array,
   steps: int,
   dt: float = 2e-3,
   temperature: float = 300.0,
@@ -508,7 +501,7 @@ def run_nvt_nose_hoover(
   )
 
   key = jax.random.PRNGKey(0)
-  state = init_fn(key, r_init, mass=mass)
+  state = init_fn(key, initial_positions, mass=mass)
 
   @jax.jit
   def step_fn(i, state):
@@ -520,7 +513,7 @@ def run_nvt_nose_hoover(
 
 def run_brownian(
   energy_fn: Callable[[Array], Array],
-  r_init: Array,
+  initial_positions: Array,
   steps: int,
   dt: float = 2e-3,
   temperature: float = 300.0,
@@ -534,7 +527,7 @@ def run_brownian(
   init_fn, apply_fn = simulate.brownian(energy_fn, shift=space.free()[1], dt=dt, kT=kT, gamma=gamma)
 
   key = jax.random.PRNGKey(0)
-  state = init_fn(key, r_init)
+  state = init_fn(key, initial_positions)
 
   @jax.jit
   def step_fn(i, state):
@@ -546,7 +539,7 @@ def run_brownian(
 
 def run_simulation(
   system_params: SystemParams,
-  r_init: Array,
+  initial_positions: Array,
   temperature: float = 300.0,
   min_steps: int = 500,
   therm_steps: int = 1000,
@@ -561,7 +554,7 @@ def run_simulation(
 
   Args:
       system_params: System parameters.
-      r_init: Initial positions.
+      initial_positions: Initial positions.
       temperature: Temperature in Kelvin.
       min_steps: Minimization steps.
       therm_steps: Thermalization steps.
@@ -599,7 +592,7 @@ def run_simulation(
   )
 
   # 1. Minimize
-  r_min = run_minimization(energy_fn, r_init, steps=min_steps)
+  positions_minimized = run_minimization(energy_fn, initial_positions, steps=min_steps)
 
   # Extract masses if available, else default to 1.0
   # Convert amu to internal units (kcal/mol/A^2 * ps^2)^-1 ?
@@ -627,7 +620,7 @@ def run_simulation(
   # Always use NVT Langevin for thermalization for stability
   r_therm = run_thermalization(
     energy_fn,
-    r_min,
+    positions_minimized,
     temperature=temperature,
     steps=therm_steps,
     mass=masses,

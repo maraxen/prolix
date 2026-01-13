@@ -17,7 +17,6 @@ from jax_md import space, util
 
 from prolix.physics import neighbor_list as nl
 
-# Import AtomicSystem for type checking
 if TYPE_CHECKING:
   from proxide.core.atomic_system import (
     AtomicConstants,
@@ -26,11 +25,9 @@ if TYPE_CHECKING:
     MolecularTopology,
   )
 
-# Try importing ArrayRecordWriter
 try:
   from array_record.python.array_record_module import ArrayRecordWriter
 except ImportError:
-  # Fallback or mock for environments without array_record (dev/test)
   ArrayRecordWriter = None  # type: ignore
 
 
@@ -104,7 +101,6 @@ class SimulationState(eqx.Module):
   def numpy(self) -> dict[str, Any]:
     """Convert state to a dictionary of numpy arrays (on CPU)."""
 
-    # Use jax.device_put to ensure CPU
     def to_cpu(x):
       if x is None:
         return None
@@ -134,19 +130,24 @@ class SimulationState(eqx.Module):
 
   @classmethod
   def from_array_record(cls, packed: bytes) -> SimulationState:
-    """Deserialize from msgpack bytes."""
+    """Deserialize a SimulationState from msgpack bytes.
+
+    Args:
+        packed: Msgpack-encoded bytes from ArrayRecord.
+
+    Returns:
+        SimulationState with JAX arrays.
+    """
     data = m.unpackb(packed)
 
-    # helper to convert numpy to jax array
     def to_jax(x):
       return jnp.array(x) if x is not None else None
 
-    # Handle potentially missing keys gracefully if schema evolves
     return cls(
       positions=to_jax(data["positions"]),
       velocities=to_jax(data["velocities"]),
       forces=to_jax(data.get("forces")),
-      mass=to_jax(data.get("mass")),  # Might not be saved every frame
+      mass=to_jax(data.get("mass")),
       step=to_jax(data["step"]),
       time_ns=to_jax(data["time_ns"]),
       potential_energy=to_jax(data.get("potential_energy")),
@@ -165,7 +166,16 @@ class TrajectoryWriter:
     self.closed = False
 
   def write(self, states: SimulationState | Sequence[SimulationState]) -> None:
-    """Write one or more states to the trajectory."""
+    """Append one or more states to the trajectory file.
+
+    Process:
+    1.  **Iterate**: Loop over the provided states.
+    2.  **Serialize**: Convert each state to msgpack bytes.
+    3.  **Append**: Write bytes to the underlying ArrayRecord.
+
+    Args:
+        states: Single state or sequence of states to write.
+    """
     if self.closed:
       msg = "Writer is closed"
       raise RuntimeError(msg)
@@ -173,48 +183,25 @@ class TrajectoryWriter:
     if isinstance(states, SimulationState):
       states = [states]
 
-    # If states is a PyTree (e.g. from scan), we might need to unzip it?
-    # Usually run_simulation returns a stack of states.
-    # Which is a SimulationState where each leaf has an extra leading dimension.
-    # We need to iterate over that dimension.
-
-    # Check if positions has extra dimension
-    # This logic depends on how 'states' is passed.
-    # If passed as a list of objects, simple iteration.
-    # If passed as a single object with stacked arrays, we need to unstack.
-
-    # Let's assume the user handles unstacking OR we handle it here.
-    # For efficiency from JAX, we likely get a stacked PyTree on CPU.
-
-    # Let's support both.
-    # Actually, let's keep it simple: `write_batch` takes a stacked SimulationState.
-    # But `write` declared above takes Sequence.
-
-    # Implementation for stacked state (PyTree with leading dim):
-
-    # But first, let's implement the loop.
     for state in states:
       self.writer.write(state.to_array_record())
 
   def write_batch(self, stacked_state: SimulationState) -> None:
-    """Write a batch of states (stacked PyTree) to trajectory."""
-    # We need to slice the PyTree.
-    # Number of items is len(stacked_state.positions)
-    n_items = stacked_state.positions.shape[0]
+    """Write a batch of states (stacked PyTree) to trajectory.
 
-    # Convert to numpy once efficiently
-    cpu_data = stacked_state.numpy()  # Dict of arrays with leading dim
+    NOTES:
+        Extracts slices from a stacked SimulationState and writes each frame
+        individually to the ArrayRecord trajectory.
+    """
+    n_items = stacked_state.positions.shape[0]
+    cpu_data = stacked_state.numpy()
 
     for i in range(n_items):
-      # Extract slice
       slice_data = {
-        k: v[i]
-        if v is not None and getattr(v, "ndim", 0) > 0
-        else v  # Handle scalars if broadcasted?
+        k: v[i] if v is not None and getattr(v, "ndim", 0) > 0 else v
         for k, v in cpu_data.items()
         if v is not None
       }
-      # Pack and write
       self.writer.write(m.packb(slice_data))
 
   def close(self) -> None:
@@ -228,7 +215,7 @@ class TrajectoryWriter:
 
 def run_simulation(
   system: AtomicSystem | SystemParams | None = None,
-  r_init: Array | None = None,
+  initial_positions: Array | None = None,
   spec: SimulationSpec | None = None,
   key: Array | None = None,
   # Hierarchical PyTree arguments (preferred for vmap efficiency)
@@ -238,35 +225,41 @@ def run_simulation(
   # Deprecated: kept for backward compatibility
   system_params: SystemParams | None = None,
 ) -> SimulationState:
-  """Run full production simulation with trajectory saving.
+  r"""Run a full production simulation with periodic trajectory saving.
 
-  This function:
-  1. Creates energy function from system parameters
-  2. Runs energy minimization (CRITICAL for stability)
-  3. Initializes NVT Langevin dynamics
-  4. Runs production simulation with trajectory saving
+  Process:
+  1.  **Initialize**: Setup energy function, displacement functions, and random keys.
+  2.  **Exclusions**: Build `ExclusionSpec` to handle 1-2, 1-3, and 1-4 scaling.
+  3.  **Minimize**: Perform local energy minimization (L-BFGS or Gradient Descent).
+  4.  **Dynamics**: Initialize NVT Langevin integrator with RATTLE constraints if needed.
+  5.  **Simulate**: Execute production epochs using `jax.lax.scan` for efficiency.
+  6.  **Validate**: Check for numerical instability (NaN/Inf) at each archive interval.
+  7.  **Store**: Serialize batches of states to `ArrayRecord` trajectory.
+
+  Notes:
+  This function is the primary entry point for Prolix production MD. It supports
+  both implicit solvent (GBSA) and explicit solvent (PME/PBC) modes.
+
+  When using the hierarchical interface (`topology`, `state`, `constants`),
+  the function can be efficiently `vmap`-ed for parallel ensemble simulations:
+
+  ```python
+  batched_sim = jax.vmap(run_simulation, in_axes=(None, 0, None, 0, None, 0, None))
+  final_states = batched_sim(None, initial_positions_samples, spec, keys, ...)
+  ```
 
   Args:
-      system: Either an AtomicSystem from proxide, or a SystemParams dict.
-              AtomicSystem is preferred as it contains positions directly.
-              Can be None if using hierarchical args.
-      r_init: Initial positions. If None, uses system.coordinates or state.coordinates.
-      spec: SimulationSpec with simulation parameters.
-      key: Random key for reproducibility.
-      topology: MolecularTopology for hierarchical interface (vmap-friendly).
-      state: AtomicState with coordinates for hierarchical interface.
-      constants: AtomicConstants with physics params for hierarchical interface.
-      system_params: DEPRECATED. Use system= instead.
+      system: `AtomicSystem` object or `SystemParams` dictionary.
+      initial_positions: Initial coordinates (N, 3). Defaults to system coordinates.
+      spec: Configuration parameters for the run.
+      key: JAX random PRNG key.
+      topology: `MolecularTopology` for hierarchical setup.
+      state: `AtomicState` with coordinates for hierarchical setup.
+      constants: `AtomicConstants` for hierarchical setup.
+      system_params: [DEPRECATED] Dictionary of parameters.
 
-  Note:
-      When using hierarchical args (topology, state, constants), efficient vmap is possible:
-
-      >>> batched_simulate = jax.vmap(
-      ...     run_simulation,
-      ...     in_axes=(None, 0, None, 0, None, 0, None)
-      ... )
-
-      This vmaps over state replicates while keeping topology/constants static.
+  Returns:
+      Final `SimulationState` after the specified total time.
   """
   # Handle backward compatibility: system_params= kwarg
   if system_params is not None:
@@ -282,10 +275,10 @@ def run_simulation(
   # Handle hierarchical args: construct AtomicSystem-like interface
   if topology is not None and state is not None:
     # Using hierarchical interface - construct system parameters directly
-    if r_init is None:
-      r_init = jnp.array(state.coordinates).reshape(-1, 3)
+    if initial_positions is None:
+      initial_positions = jnp.array(state.coordinates).reshape(-1, 3)
 
-    n_atoms = r_init.shape[0]
+    n_atoms = initial_positions.shape[0]
 
     # Extract constants if available
     charges = None
@@ -362,11 +355,11 @@ def run_simulation(
   elif system is not None and hasattr(system, "coordinates") and hasattr(system, "charges"):
     # This is an AtomicSystem - extract fields
     atomic_sys = system
-    if r_init is None:
-      r_init = jnp.array(atomic_sys.coordinates).reshape(-1, 3)
+    if initial_positions is None:
+      initial_positions = jnp.array(atomic_sys.coordinates).reshape(-1, 3)
 
     # Build system_params dict from AtomicSystem fields
-    n_atoms = r_init.shape[0]
+    n_atoms = initial_positions.shape[0]
     system_params_dict: SystemParams = {
       "charges": jnp.array(atomic_sys.charges)
       if atomic_sys.charges is not None
@@ -407,8 +400,8 @@ def run_simulation(
   elif system is not None:
     # Already a dict
     system_params = system
-    if r_init is None:
-      msg = "r_init is required when using system_params dict"
+    if initial_positions is None:
+      msg = "initial_positions is required when using system_params dict"
       raise ValueError(msg)
   else:
     msg = "Either system or (topology, state) must be provided"
@@ -424,7 +417,6 @@ def run_simulation(
   if key is None:
     key = jax.random.PRNGKey(int(time.time()))
 
-  # 1. Setup Physics
   displacement_fn: Any
   shift_fn: Any
 
@@ -470,16 +462,17 @@ def run_simulation(
     neighbor_fn = nl.make_neighbor_list_fn(
       displacement_fn, jnp.array(spec.box), spec.neighbor_cutoff
     )
-    neighbor = neighbor_fn.allocate(r_init)
+    neighbor = neighbor_fn.allocate(initial_positions)
+    neighbor = neighbor_fn.allocate(initial_positions)
     logger.info("Neighbor list allocated: shape %s", neighbor.idx.shape)
 
-  # 2. CRITICAL: Energy Minimization before dynamics
+  # Energy Minimization
   logger.info("Running energy minimization...")
   if neighbor is not None:
-    neighbor = neighbor.update(r_init)
-    e_initial = energy_fn(r_init, neighbor=neighbor)
+    neighbor = neighbor.update(initial_positions)
+    e_initial = energy_fn(initial_positions, neighbor=neighbor)
   else:
-    e_initial = energy_fn(r_init)
+    e_initial = energy_fn(initial_positions)
   logger.info("  Initial energy: %.2f kcal/mol", e_initial)
 
   # Run minimization with neighbor list support
@@ -505,17 +498,19 @@ def run_simulation(
 
       return jax.lax.fori_loop(0, n_steps, body_fn, (pos, nbr))
 
-    r_min = r_init
+    positions_minimized = initial_positions
     for _batch in range(10):  # 10 batches of 500 = 5000 steps
-      r_min, neighbor = minimize_batch(r_min, neighbor, 500)
-    neighbor = neighbor.update(r_min)
-    e_minimized = energy_fn(r_min, neighbor=neighbor)  # type: ignore[unknown-argument]
+      positions_minimized, neighbor = minimize_batch(positions_minimized, neighbor, 500)
+    neighbor = neighbor.update(positions_minimized)
+    e_minimized = energy_fn(positions_minimized, neighbor=neighbor)  # type: ignore[unknown-argument]
   else:
-    r_min = physics_simulate.run_minimization(energy_fn, r_init, steps=5000)
-    e_minimized = energy_fn(r_min)
+    positions_minimized = physics_simulate.run_minimization(
+      energy_fn, initial_positions, steps=5000
+    )
+    e_minimized = energy_fn(positions_minimized)
   logger.info("  Minimized energy: %.2f kcal/mol", e_minimized)
 
-  # 3. Setup NVT Langevin dynamics
+  # NVT Langevin dynamics setup
   # IMPORTANT: jax_md uses reduced units, not physical time
   # dt=2e-3 in reduced units is standard (like stress_test_stability.py)
   # Converting from fs to jax_md reduced units: dt = step_size_fs * 1e-3 * 0.0488 (if using AKMA units)
@@ -558,13 +553,9 @@ def run_simulation(
   # Initialize state from minimized positions
   # Pass neighbor= to init_fn if using neighbor lists (jax_md native support)
   if neighbor is not None:
-    state = init_fn(key, r_min, neighbor=neighbor)
+    state = init_fn(key, positions_minimized, neighbor=neighbor)
   else:
-    state = init_fn(key, r_min)
-
-  # PRE-COMPILE the step function to avoid expensive tracing during scan
-  # This forces JIT compilation upfront, making subsequent steps fast
-  logger.info("Pre-compiling step function (this may take 1-2 minutes)...")
+    state = init_fn(key, positions_minimized)
 
   @jax.jit
   def jit_apply_fn(s, nbr=None):
@@ -572,7 +563,6 @@ def run_simulation(
       return apply_fn(s, neighbor=nbr)  # type: ignore[unknown-argument]
     return apply_fn(s)
 
-  # Force compilation by running one step (with neighbor if available)
   if neighbor is not None:
     _test_state = jit_apply_fn(state, nbr=neighbor)
   else:
@@ -580,7 +570,7 @@ def run_simulation(
   jax.block_until_ready(_test_state.position)
   logger.info("Step function compiled!")
 
-  # 4. Setup trajectory saving
+  # Trajectory saving
   steps_per_save = round(spec.save_interval_ns * 1000000 / spec.step_size_fs)
   logger.info("Steps per save: %d", steps_per_save)
 
