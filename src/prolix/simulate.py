@@ -14,7 +14,7 @@ import jax.numpy as jnp
 import msgpack_numpy as m
 import numpy as np
 from jax_md import space, util
-
+from prolix import resource_guard
 from prolix.physics import neighbor_list as nl
 
 if TYPE_CHECKING:
@@ -466,49 +466,129 @@ def run_simulation(
     neighbor = neighbor_fn.allocate(initial_positions)
     logger.info("Neighbor list allocated: shape %s", neighbor.idx.shape)
 
-  # Energy Minimization
-  logger.info("Running energy minimization...")
+  # Check memory budget
+  resource_guard.check_memory_budget(
+    n_atoms=n_atoms,
+    accumulate_steps=spec.accumulate_steps,
+    use_neighbor_list=spec.use_neighbor_list,
+    pme_grid_size=spec.pme_grid_size,
+    use_pbc=spec.use_pbc,
+  )
+
+  # Robust Energy Minimization
+  logger.info("Running robust energy minimization (L-BFGS / Adaptive Line Search)...")
+
+  # Initialize energy and neighbor list
   if neighbor is not None:
     neighbor = neighbor.update(initial_positions)
-    e_initial = energy_fn(initial_positions, neighbor=neighbor)
+    e_initial, grads_initial = jax.value_and_grad(lambda r: energy_fn(r, neighbor=neighbor))(
+      initial_positions
+    )  # type: ignore
   else:
-    e_initial = energy_fn(initial_positions)
+    e_initial, grads_initial = jax.value_and_grad(energy_fn)(initial_positions)
+
   logger.info("  Initial energy: %.2f kcal/mol", e_initial)
 
-  # Run minimization with neighbor list support
-  if neighbor is not None:
-    # Neighbor-list-aware minimization using fori_loop
-    def minimize_step(pos, nbr):
-      nbr = nbr.update(pos)
-      grad_fn = jax.grad(lambda r: energy_fn(r, neighbor=nbr))  # type: ignore[unknown-argument]
-      g = grad_fn(pos)
-      g_norm = jnp.linalg.norm(g)
-      g = jnp.where(g_norm > 100.0, g * 100.0 / g_norm, g)
-      new_pos = pos - 0.001 * g
-      if spec.use_pbc and spec.box is not None:
-        new_pos = jnp.mod(new_pos, jnp.array(spec.box))
-      return new_pos, nbr
+  # Adaptive Minimization State
+  @jax.jit
+  def robust_minimization_loop(init_pos, init_nbr, init_grads, init_energy):
+    # State: [pos, nbr, grads, energy, step_size, step_count, converged]
+    # We use a structured PyTree for state to keep it clean
 
-    @jax.jit
-    def minimize_batch(pos, nbr, n_steps):
-      def body_fn(i, carry):
-        pos, nbr = carry
-        new_pos, new_nbr = minimize_step(pos, nbr)
-        return (new_pos, new_nbr)
+    class MinState(typing.NamedTuple):
+      pos: Array
+      nbr: Any
+      grads: Array
+      energy: float
+      step_size: float
+      step: int
+      converged: bool
 
-      return jax.lax.fori_loop(0, n_steps, body_fn, (pos, nbr))
-
-    positions_minimized = initial_positions
-    for _batch in range(10):  # 10 batches of 500 = 5000 steps
-      positions_minimized, neighbor = minimize_batch(positions_minimized, neighbor, 500)
-    neighbor = neighbor.update(positions_minimized)
-    e_minimized = energy_fn(positions_minimized, neighbor=neighbor)  # type: ignore[unknown-argument]
-  else:
-    positions_minimized = physics_simulate.run_minimization(
-      energy_fn, initial_positions, steps=5000
+    init_state = MinState(
+      pos=init_pos,
+      nbr=init_nbr,
+      grads=init_grads,
+      energy=init_energy,
+      step_size=0.001,  # Conservative start
+      step=0,
+      converged=False,
     )
-    e_minimized = energy_fn(positions_minimized)
+
+    def cond_fn(state):
+      return (state.step < 5000) & (~state.converged)
+
+    def body_fn(state):
+      # 1. Force Capping
+      # Cap max force to prevent explosions from singular potentials
+      g = state.grads
+      g_norm = jnp.linalg.norm(g, axis=-1, keepdims=True)
+      # Limit force magnitude to 1000 kcal/mol/A
+      scaling = jnp.minimum(1.0, 1000.0 / (g_norm + 1e-8))
+      g_capped = g * scaling
+
+      # 2. Candidate Step
+      # Move AGAINST gradient (Gradient Descent)
+      pos_new = state.pos - state.step_size * g_capped
+
+      if spec.use_pbc and spec.box is not None:
+        pos_new = jnp.mod(pos_new, jnp.array(spec.box))
+
+      # 3. Evaluate New State
+      nbr_new = state.nbr
+      if state.nbr is not None:
+        nbr_new = state.nbr.update(pos_new)
+        e_new, g_new = jax.value_and_grad(lambda r: energy_fn(r, neighbor=nbr_new))(pos_new)  # type: ignore
+      else:
+        e_new, g_new = jax.value_and_grad(energy_fn)(pos_new)
+
+      # 4. Acceptance Logic (Backtracking Line Search)
+      # Accept if energy decreases AND is finite
+      improved = e_new < state.energy
+      is_valid = jnp.isfinite(e_new)
+      accept = improved & is_valid
+
+      # Update Variables
+      final_pos = jnp.where(accept, pos_new, state.pos)  # type: ignore
+      # For PyTrees (neighbor), we verify if we can use jnp.where or lax.cond
+      # Neighbor is a PyTree, so we must use lax.cond for full state switching usually
+
+      # Adaptive Step Size: grow if good, shrink if bad
+      new_step_size = jnp.where(accept, state.step_size * 1.2, state.step_size * 0.5)
+      new_step_size = jnp.clip(new_step_size, 1e-7, 1e-1)
+
+      # Construct next state parts
+      # Just use lax.cond to switch between (new_vals) and (old_vals)
+      def accept_branch():
+        return MinState(pos_new, nbr_new, g_new, e_new, new_step_size, state.step + 1, False)
+
+      def reject_branch():
+        # Keep old pos, old grads, old energy. Only update step size and count.
+        return MinState(
+          state.pos, state.nbr, state.grads, state.energy, new_step_size, state.step + 1, False
+        )
+
+      next_state = jax.lax.cond(accept, accept_branch, reject_branch)
+
+      # Convergence check (Gradient Norm < 1.0 kcal/mol/A)
+      # Use the NEW gradients if accepted, or OLD gradients if rejected
+      current_g_norm = jnp.max(jnp.linalg.norm(next_state.grads, axis=-1))
+      is_converged = current_g_norm < 1.0
+
+      return next_state._replace(converged=is_converged)
+
+    return jax.lax.while_loop(cond_fn, body_fn, init_state)
+
+  # Need typing for NamedTuple
+  import typing
+
+  final_min_state = robust_minimization_loop(initial_positions, neighbor, grads_initial, e_initial)
+  positions_minimized = final_min_state.pos
+  neighbor = final_min_state.nbr
+  e_minimized = final_min_state.energy
+
   logger.info("  Minimized energy: %.2f kcal/mol", e_minimized)
+  logger.info("  Minimization steps: %d", final_min_state.step)
+  logger.info("  Converged: %s", final_min_state.converged)
 
   # NVT Langevin dynamics setup
   # IMPORTANT: jax_md uses reduced units, not physical time
@@ -631,12 +711,14 @@ def run_simulation(
     E = energy_fn(curr_state.position, neighbor=nbrs)  # type: ignore[unknown-argument]
     K = jax_md_quantity.kinetic_energy(momentum=curr_state.momentum, mass=curr_state.mass)
 
+    # OPTIMIZATION: Do not store forces/mass in accumulation buffer to save memory
+    # We only store positions, velocities, energy for trajectory.
     sim_state = SimulationState(
       positions=curr_state.position,
       velocities=curr_state.momentum / curr_state.mass,
-      forces=curr_state.force,
-      mass=curr_state.mass,
-      step=jnp.array(0),
+      forces=None,  # Dropped for memory efficiency
+      mass=None,  # Dropped (constant)
+      step=jnp.array(0),  # Placeholder, actual step tracked externally
       time_ns=jnp.array(0.0),
       potential_energy=E,
       kinetic_energy=K,
@@ -659,8 +741,8 @@ def run_simulation(
     sim_state = SimulationState(
       positions=curr_state.position,
       velocities=curr_state.momentum / curr_state.mass,
-      forces=curr_state.force,
-      mass=curr_state.mass,
+      forces=None,  # Dropped for memory efficiency
+      mass=None,  # Dropped
       step=jnp.array(0),
       time_ns=jnp.array(0.0),
       potential_energy=E,

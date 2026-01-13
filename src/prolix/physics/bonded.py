@@ -8,8 +8,10 @@ from jax_md import energy, space, util
 
 from prolix.types import (
   AngleIndices,
+  AngleParams,
   AngleParamsPacked,
   BondIndices,
+  BondParams,
   BondParamsPacked,
   DihedralParams,
 )

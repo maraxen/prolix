@@ -66,10 +66,10 @@ def load_tip3p_box() -> WaterBox:
   # Data is in data/water_boxes/tip3p.npz (relative to project root)
 
   current_dir = os.path.dirname(os.path.abspath(__file__))
-  # Go up: physics -> prolix -> src -> project_root
-  project_root = os.path.abspath(os.path.join(current_dir, "../../../../"))
+  # Go up: physics -> prolix -> src -> package_root
+  package_root = os.path.abspath(os.path.join(current_dir, "../../../"))
 
-  path = os.path.join(project_root, "data", "water_boxes", "tip3p.npz")
+  path = os.path.join(package_root, "data", "water_boxes", "tip3p.npz")
 
   if not os.path.exists(path):
     # Fallback for when installed as package?

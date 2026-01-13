@@ -13,7 +13,7 @@ import numpy as np
 import pytest
 from jax_md import space
 from proxide import CoordFormat
-from proxide.io.parsing.rust import OutputSpec, parse_structure
+from proxide.io.parsing.backend import OutputSpec, parse_structure
 
 from prolix.physics import bonded, pbc, pme, system
 
@@ -23,7 +23,7 @@ jax.config.update("jax_enable_x64", True)
 # Paths
 DATA_DIR = Path(__file__).parent.parent.parent / "data" / "pdb"
 FF_PATH = (
-  Path(__file__).parent.parent.parent
+  Path(__file__).parent.parent.parent.parent
   / "proxide"
   / "src"
   / "proxide"

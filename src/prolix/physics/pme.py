@@ -33,11 +33,14 @@ def make_pme_energy_fn(
 
   """
   # grid_points should be an Array (usually 3 integers)
-  # TODO: double check this logic makes a lick of sense
+  # grid_points should be a sequence of ints for static FFT size in JAX
   if isinstance(grid_points, int):
-    grid_dim = jnp.array([grid_points, grid_points, grid_points], dtype=jnp.int32)
+    grid_dim = (grid_points, grid_points, grid_points)
+  elif hasattr(grid_points, "tolist"):  # JAX/Numpy array
+    val = grid_points.tolist()  # type: ignore
+    grid_dim = tuple(val)
   else:
-    grid_dim = jnp.array(grid_points, dtype=jnp.int32)
+    grid_dim = tuple(grid_points)  # type: ignore
 
   # jax_md.energy.coulomb_recip_pme expects box as (3,3) matrix for det() if not scalar
   # If box is (3,), convert to diagonal matrix

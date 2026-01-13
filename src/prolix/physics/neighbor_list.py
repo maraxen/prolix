@@ -5,6 +5,7 @@ from __future__ import annotations
 import dataclasses
 from typing import TYPE_CHECKING
 
+import jax
 import jax.numpy as jnp
 import numpy as np
 from jax_md import partition, space, util
@@ -217,39 +218,45 @@ def get_neighbor_exclusion_scales(
   N, K = neighbor_idx.shape
   M = excl_indices.shape[1]
 
-  # Broadcast to (N, K, M)
-  # neighbor_idx: (N, K, 1)
-  # excl_indices: (N, 1, M)
+  # Optimization: Avoid creating (N, K, M) tensor which is huge (O(N^2) effectively).
+  # Instead, use a loop over M (exclusions) to update masks.
+  # Since M is small (32), this is efficient and memory scaling is O(N*K).
 
-  n_idx_broad = neighbor_idx[:, :, None]
-  excl_idx_broad = excl_indices[:, None, :]  # (N, 1, M)
+  final_vdw = jnp.ones((N, K), dtype=jnp.float32)
+  final_elec = jnp.ones((N, K), dtype=jnp.float32)
 
-  # Check for matches
-  # match: (N, K, M) boolean
-  # neighbor index == excluded index
-  match = (n_idx_broad == excl_idx_broad) & (excl_idx_broad != -1)
+  # Prepare exclusion data (N, M)
+  # broadcasting to (N, K) per iteration
 
-  # If any match is found for a neighbor (k), we take the scale.
-  # Since an atom appears at most once in exclusion list, max() works.
+  def loop_body(i, carrier):
+    curr_vdw, curr_elec = carrier
 
-  # However, if NO match, scale should be 1.0.
-  # Current arrays have scales, but we need to select them.
+    # Get i-th exclusion data for all atoms
+    excl_idx_i = excl_indices[:, i]  # (N,)
+    scale_v_i = excl_scales_vdw[:, i]  # (N,)
+    scale_e_i = excl_scales_elec[:, i]  # (N,)
 
-  # Extract scales where match is True
-  # (N, K, M)
-  vdw_matches = match * excl_scales_vdw[:, None, :]
-  elec_matches = match * excl_scales_elec[:, None, :]
+    # Broadcast to neighbors (N, K)
+    # Check if neighbor_idx matches this exclusion
+    # excl_idx_i[:, None] -> (N, 1)
+    is_match = (neighbor_idx == excl_idx_i[:, None]) & (excl_idx_i[:, None] != -1)
 
-  # Sum over M (should be at most one match)
-  # If no match, sum is 0.0. But we want 1.0 for non-excluded.
-  # So we need to detect IF there was a match.
+    # Update scales where match found
+    # If match, take the scale. Else keep current value.
+    # Note: An atom appears only once in exclusion set for a given pair,
+    # so we can just overwrite or multiply (since default is 1.0 and collisions only happen on 1.0)
+    curr_vdw = jnp.where(is_match, scale_v_i[:, None], curr_vdw)
+    curr_elec = jnp.where(is_match, scale_e_i[:, None], curr_elec)
 
-  has_match = jnp.any(match, axis=2)  # (N, K)
+    return curr_vdw, curr_elec
 
-  sum_vdw = jnp.sum(vdw_matches, axis=2)  # (N, K)
-  sum_elec = jnp.sum(elec_matches, axis=2)  # (N, K)
+  # We can unroll this loop if M is small constant, or use fori_loop.
+  # Since M is padded to 32, fori_loop is good to keep graph small?
+  # Or simple range loop which unrolls in Python (better for constant folding if M small).
+  # Let's use jax.lax.fori_loop for strictly static graph size,
+  # or standard python loop if we suspect it helps.
+  # For 32 iters, fori_loop is cleaner.
 
-  final_vdw = jnp.where(has_match, sum_vdw, 1.0)
-  final_elec = jnp.where(has_match, sum_elec, 1.0)
+  final_vdw, final_elec = jax.lax.fori_loop(0, M, loop_body, (final_vdw, final_elec))
 
   return final_vdw, final_elec

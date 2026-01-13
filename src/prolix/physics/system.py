@@ -230,6 +230,7 @@ def make_energy_fn(
 
   # Electrostatics
   # -------------------------------------------------------------------------
+  @jax.checkpoint
   def compute_electrostatics(r, neighbor_idx=None):
     if "gb_radii" in system_params and system_params["gb_radii"] is not None:
       radii = system_params["gb_radii"]
@@ -407,6 +408,7 @@ def make_energy_fn(
 
   # Combine Non-Bonded
   # -------------------------------------------------------------------------
+  @jax.checkpoint
   def compute_lj(r, neighbor_idx=None):
     if neighbor_idx is None:
       dr = space.map_product(displacement_fn)(r, r)
