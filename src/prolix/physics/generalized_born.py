@@ -57,10 +57,9 @@ def compute_born_radii(
       Born radii (N,).
 
   """
-  delta_positions = positions[:, None, :] - positions[None, :, :]  # (N, N, 3)
-  distances = safe_norm(delta_positions, axis=-1)  # (N, N)
+  delta_positions = positions[:, None, :] - positions[None, :, :]
+  distances = safe_norm(delta_positions, axis=-1)
 
-  # Add large value to diagonal to avoid self-interaction singularities
   distances_safe = distances + jnp.eye(distances.shape[0]) * 10.0
 
   offset_radii = radii - dielectric_offset
@@ -70,38 +69,24 @@ def compute_born_radii(
   radii_i_broadcast = offset_radii[:, None]  # (N, 1)
   radii_j_broadcast = radii_j[None, :]  # (1, N)
 
-  # Default mask excludes self
   if mask is None:
     mask = 1.0 - jnp.eye(distances.shape[0])
   else:
-    # Ensure self is excluded even if mask allows it (though mask usually handles it)
     mask = mask * (1.0 - jnp.eye(distances.shape[0]))
 
-  pair_integrals = compute_pair_integral(
-    distances_safe, radii_i_broadcast, radii_j_broadcast
-  )  # (N, N)
+  pair_integrals = compute_pair_integral(distances_safe, radii_i_broadcast, radii_j_broadcast)
 
   if mask is not None:
     pair_integrals = pair_integrals * mask
-  else:
-    # Default excludes self (handled by mask usually, but if mask is None, we assume all pairs included except self)
-    # Actually, compute_born_radii logic above:
-    # if mask is None: mask = 1.0 - eye
-    # else: mask = mask * (1.0 - eye)
-    # So mask is NEVER None here because of lines 77-81.
-    pass
 
   # pair_integrals = jnp.where(mask > 0.9, pair_integrals, 0.0)
 
-  born_radius_inverse_term = jnp.sum(pair_integrals, axis=1)  # (N,)
+  born_radius_inverse_term = jnp.sum(pair_integrals, axis=1)
 
   scaled_integral = offset_radii * born_radius_inverse_term
   tanh_argument = (
     ALPHA_OBC * scaled_integral - BETA_OBC * scaled_integral**2 + GAMMA_OBC * scaled_integral**3
   )
-  # OpenMM Formula: B = 1 / (1/or - tanh(psi - ...)/radius)
-  # inv_B = 1/or - tanh(...)/radius
-  # Note: OpenMM uses full radius in the tanh term denominator, and no 0.99 factor.
   inv_born_radii = 1.0 / offset_radii - jnp.tanh(tanh_argument) / radii
 
   return 1.0 / inv_born_radii
@@ -162,28 +147,22 @@ def compute_gb_energy(
       Tuple of (Total GB energy, Born Radii).
 
   """
-  # DEBUG: Check if mask is being used
-  # if mask is not None:
-  #     pass
   born_radii = compute_born_radii(
     positions, radii, dielectric_offset=dielectric_offset, mask=mask, scaled_radii=scaled_radii
   )
 
-  # DEBUG: Print Born Radii Stats
-  # print(f"DEBUG: Born Radii Min={jnp.min(born_radii)}, Max={jnp.max(born_radii)}, Mean={jnp.mean(born_radii)}")
+  delta_positions = positions[:, None, :] - positions[None, :, :]
+  distances = safe_norm(delta_positions, axis=-1)
 
-  delta_positions = positions[:, None, :] - positions[None, :, :]  # (N, N, 3)
-  distances = safe_norm(delta_positions, axis=-1)  # (N, N)
-
-  born_radii_i = born_radii[:, None]  # (N, 1)
-  born_radii_j = born_radii[None, :]  # (1, N)
+  born_radii_i = born_radii[:, None]
+  born_radii_j = born_radii[None, :]
 
   effective_distances = f_gb(distances, born_radii_i, born_radii_j)
 
   tau = (1.0 / solute_dielectric) - (1.0 / solvent_dielectric)
   prefactor = -0.5 * constants.COULOMB_CONSTANT * tau
 
-  charge_products = charges[:, None] * charges[None, :]  # (N, N)
+  charge_products = charges[:, None] * charges[None, :]
   energy_terms = charge_products / effective_distances
 
   if energy_mask is not None:
@@ -248,6 +227,11 @@ def compute_pair_integral(distance: Array, radius_i: Array, radius_j: Array) -> 
   Returns:
       The integral value $I_{ij}$.
 
+  NOTES:
+      The pair integral represents the descreening contribution from
+      atom $j$ to atom $i$. The implementation follows OpenMM's
+      CustomGBForce logic for OBC II.
+
   """
   # L = max(or1, abs(r - sr2))
   D = jnp.abs(distance - radius_j)
@@ -263,38 +247,14 @@ def compute_pair_integral(distance: Array, radius_i: Array, radius_j: Array) -> 
   inv_L = 1.0 / L
   inv_U = 1.0 / U
 
-  # Term 1: 0.5 * (1/L - 1/U)
   term1 = 0.5 * (inv_L - inv_U)
-
-  # Term 2: 0.5 * log(L/U) / r => BUT log(L/U) = -log(U/L), so this is negative
-  # OpenMM uses: 0.5*log(L/U)/r which is NEGATIVE when L < U (normal case)
-  # HOWEVER, the original code had 0.25 not 0.5. Let's check OpenMM again.
-  # OpenMM: "0.5*(1/L-1/U+0.25*(r-sr2^2/r)*(1/(U^2)-1/(L^2))+0.5*log(L/U)/r)"
-  # Wait - OpenMM does have 0.5*log(L/U)/r. But original code had 0.25.
-  # Let me re-check the math. The difference in Born Radii is huge.
-  # Original had term2 = 0.25 * log(L/U) / r => now 0.5 * log(L/U) / r
-  # This DOUBLES the log term contribution.
-  # Since log(L/U) is NEGATIVE (L < U), this makes the integral MORE negative.
-  # More negative integral => larger psi => larger tanh => smaller Born Radius
-  # That matches what we see (0.70 < 1.45).
-  # So the ORIGINAL 0.25 coefficient was WRONG? Or OpenMM formula is different?
-  # Let me check if the 0.5 in OpenMM is inside the outer 0.5 factor or not.
-  # OpenMM: 0.5 * (1/L - 1/U + 0.25*(r-sr2^2/r)*(1/U^2 - 1/L^2) + 0.5*log(L/U)/r)
-  # = 0.5/L - 0.5/U + 0.125*(r-sr2^2/r)*(1/U^2 - 1/L^2) + 0.25*log(L/U)/r
-  # So the EFFECTIVE coefficient for log term is 0.25! Original was correct!
   term2 = 0.25 * jnp.log(L / U) / r_safe
 
-  # Term 3: 0.25 * (r - sr2^2/r) * (1/U^2 - 1/L^2)
-  # NOTE: Outer 0.5 factor => effective coefficient is 0.125
-  # OpenMM: 0.5 * (...+ 0.25*(r-sr2^2/r)*(1/U^2 - 1/L^2) + ...)
-  # = 0.125 * (r - sr2^2/r) * (1/U^2 - 1/L^2)
   sr2_sq = radius_j**2
   term3 = 0.125 * (distance - sr2_sq / r_safe) * (inv_U**2 - inv_L**2)
 
   total = term1 + term2 + term3
 
-  # Condition: step(r + sr2 - or1) => Only compute if r + sr2 > or1
-  # This means: atom j is not completely inside atom i
   condition = (distance + radius_j) > radius_i
   return jnp.where(condition, total, 0.0)
 

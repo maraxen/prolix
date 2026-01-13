@@ -90,29 +90,37 @@ class ReplicaExchangeState(eqx.Module):
 
 
 def attempt_exchange(
-  state: ReplicaExchangeState, temperatures: Array, key: Array, energy_fn: Callable[[Array], Array]
+  state: ReplicaExchangeState,
+  temperatures: Array,
+  key: Array,
+  energy_fn: Callable[[Array], Array],
 ) -> tuple[ReplicaExchangeState, dict]:
-  """Attempt swaps between adjacent replicas.
+  r"""Attempt neighbor replica swaps using the Metropolis criterion.
 
-  We alternate between swapping (0,1), (2,3)... and (1,2), (3,4)...
-  based on the step count or a random choice?
-  Usually deterministic even/odd phases to ensure detailed balance over 2 steps
-  or just random pairs.
-  Standard: odd/even phases.
+  Process:
+  1.  **Phase selection**: Randomly choose between even $(0,1), (2,3)...$ or odd $(1,2), (3,4)...$ neighbor pairs.
+  2.   proposer**: Calculate swap acceptance probability $\alpha = \min(1, \exp(\Delta))$.
+  3.  **Shuffle**: Update coordinates and walker indices for accepted swaps.
 
-  Metropolis Criterion:
-  Delta = (beta_i - beta_j) * (E_j - E_i)  <-- Wait, checking derivation.
-  P(acc) = min(1, exp(Delta))
+  Notes:
+  The Metropolis acceptance probability for swapping configurations $i$ and $j$
+  at temperatures $T_i$ and $T_j$ with potential energies $E_i$ and $E_j$ is:
+
+  $$ \Delta = (\beta_i - \beta_j) \cdot (E_i - E_j) $$
 
   Derivation:
-  P(old) ~ exp(-beta_i E_i) * exp(-beta_j E_j)
-  P(new) ~ exp(-beta_i E_j) * exp(-beta_j E_i)   <-- config j at temp i, config i at temp j
-  Ratio = P(new)/P(old) = exp( -beta_i E_j - beta_j E_i + beta_i E_i + beta_j E_j )
-                        = exp( -beta_i(E_j - E_i) - beta_j(E_i - E_j) )
-                        = exp( beta_i(E_i - E_j) + beta_j(E_j - E_i) )
-                        = exp( (beta_i - beta_j) * (E_i - E_j) )
+  $$ \frac{P(\text{new})}{P(\text{old})} = \frac{e^{-\beta_i E_j} e^{-\beta_j E_i}}{e^{-\beta_i E_i} e^{-\beta_j E_j}} $$
+  $$ = e^{-\beta_i(E_j - E_i) - \beta_j(E_i - E_j)} $$
+  $$ = e^{(\beta_i - \beta_j)(E_i - E_j)} $$
 
-  If Delta > 0, exp > 1, accept.
+  Args:
+      state: Current stacked state of all replicas.
+      temperatures: Temperature ladder (K).
+      key: JAX random key.
+      energy_fn: Potential energy function.
+
+  Returns:
+      Updated `ReplicaExchangeState` with swapped configurations.
   """
   n = temperatures.shape[0]
   betas = 1.0 / (BOLTZMANN_KCAL * temperatures)
@@ -236,11 +244,27 @@ def attempt_exchange(
 
 def run_replica_exchange(
   system_params: SystemParams,
-  r_init: Array,  # (N_atoms, 3) or (N_replicas, N_atoms, 3)
+  r_init: Array,
   spec: ReplicaExchangeSpec,
   key: Array | None = None,
 ) -> ReplicaExchangeState:
-  """Run Replica Exchange Simulation."""
+  r"""Run a multi-replica Parallel Tempering (REMD) simulation.
+
+  Process:
+  1.  **Initialize**: Setup temperature ladder and energy functions.
+  2.  **State**: vmap initialization across all replicas at target temperatures.
+  3.  **Loop**: Interleave local dynamics epochs with global exchange attempts.
+  4.  **Log**: Monitor acceptance rates and walker mixing.
+
+  Args:
+      system_params: Physics parameters for the system.
+      r_init: Initial coordinates (N_atoms, 3) or (N_replicas, N_atoms, 3).
+      spec: REMD configuration (temps, times, intervals).
+      key: Optional PRNG key.
+
+  Returns:
+      Final `ReplicaExchangeState`.
+  """
   if key is None:
     key = random.PRNGKey(int(time.time()))
 

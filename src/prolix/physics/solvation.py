@@ -7,6 +7,7 @@ from dataclasses import dataclass
 
 import jax.numpy as jnp
 import numpy as np
+from scipy.spatial.distance import cdist
 from jax_md import util
 
 Array = util.Array
@@ -20,8 +21,31 @@ TIP3P_WATER_RADIUS = 1.768  # Angstroms
 
 @dataclass
 class WaterBox:
-  positions: Array  # (N_waters * 3, 3)
-  box_size: Array  # (3,)
+  """Container for a pre-equilibrated water box.
+
+  Fields:
+      positions: Cartesian coordinates (N_atoms, 3).
+      box_size: Box vectors (3,).
+  """
+
+  positions: Array
+  box_size: Array
+
+  def get_oxygens(self) -> Array:
+    """Return oxygen coordinates (N_waters, 3)."""
+    return self.positions[0::3]
+
+  def get_hydrogens_1(self) -> Array:
+    """Return first hydrogen coordinates (N_waters, 3)."""
+    return self.positions[1::3]
+
+  def get_hydrogens_2(self) -> Array:
+    """Return second hydrogen coordinates (N_waters, 3)."""
+    return self.positions[2::3]
+
+  def n_waters(self) -> int:
+    """Return number of water molecules."""
+    return len(self.positions) // 3
 
 
 def _load_water_npz(path: str) -> WaterBox:
@@ -56,86 +80,56 @@ def load_tip3p_box() -> WaterBox:
       msg = f"Could not find TIP3P water box at {path} or relative to CWD"
       raise FileNotFoundError(msg)
 
-  return _load_water_npz(path)
+  box = _load_water_npz(path)
+
+  # Unwrap waters to ensure they are whole before tiling
+  pos = np.array(box.positions)
+  size = np.array(box.box_size)
+  n_waters = len(pos) // 3
+
+  for i in range(n_waters):
+    o = pos[3 * i]
+    h1 = pos[3 * i + 1]
+    h2 = pos[3 * i + 2]
+
+    # MIC unwrap H1 and H2 relative to O
+    d1 = h1 - o
+    h1 = o + (d1 - size * np.round(d1 / size))
+    d2 = h2 - o
+    h2 = o + (d2 - size * np.round(d2 / size))
+
+    pos[3 * i + 1] = h1
+    pos[3 * i + 2] = h2
+
+  box.positions = jnp.array(pos)
+  return box
 
 
-def solvate(
-  solute_positions: Array,
-  solute_radii: Array,  # VDW radii for exclusion
-  padding: float = 10.0,
-  water_box: WaterBox | None = None,
-  target_box_shape: Array | None = None,
-) -> tuple[Array, Array, Array]:
-  """Adds solvent around solute.
+def _tile_water_box(water_box: WaterBox, target_box_size: np.ndarray) -> np.ndarray:
+  """Replicates a water box to fill the target volume.
 
   Args:
-      solute_positions: (N_solute, 3)
-      solute_radii: (N_solute,) VDW radii for exclusion
-      padding: Padding in Angstroms
-      water_box: Optional pre-loaded water box. If None, loads TIP3P.
-      target_box_shape: Optional explicit box size (3,). If None, computed from padding.
+      water_box: Prototype water box.
+      target_box_size: Dimensions of the target volume (3,).
 
   Returns:
-      (combined_positions, water_indices, box_size)
-      water_indices is simple range starting after solute
-
+      Numpy array of tiled water positions (N_atoms, 3).
   """
-  if water_box is None:
-    water_box = load_tip3p_box()
-
-  # 1. Determine box size
-  min_coords = jnp.min(solute_positions, axis=0)
-  max_coords = jnp.max(solute_positions, axis=0)
-
-  if target_box_shape is not None:
-    target_box_size = jnp.array(target_box_shape)
-  else:
-    # Initial box size based on solute + padding
-    # OpenMM: max(2*radius+padding, 2*padding) logic or just bounds + padding
-    # Let's use simple bounds + padding for now
-    target_box_size = (max_coords - min_coords) + 2 * padding
-
-  # 2. Re-center solute
-  center = (max_coords + min_coords) / 2
-  box_center = target_box_size / 2
-  shift = box_center - center
-  centered_solute = solute_positions + shift
-
-  # 3. Tile water box
-  # We need to fill target_box_size with water_box
-  # Replicate water_box symmetrically around the center
-
-  # Generate replicas
-  # We need to loop or vectorize. Since this is setup code (not JIT), numpy is fine/better.
   wb_pos = np.array(water_box.positions)
   wb_size = np.array(water_box.box_size)
-  target_box_np = np.array(target_box_size)
 
-  # Calculate number of replicas needed in each direction from center
-  # We need enough replicas to cover from 0 to target_box_size
-  # Add +1 to ensure complete coverage at boundaries
-  n_reps_per_dim = np.ceil(target_box_np / wb_size).astype(int) + 1
+  # Determine repetitions needed to cover the box plus buffer for partials
+  n_reps_per_dim = np.ceil(target_box_size / wb_size).astype(int) + 1
 
   all_waters = []
-
-  # Water box contains complete molecules (O, H1, H2) in order
-  # N_waters_in_box = len(wb_pos) // 3
-
-  # Tile symmetrically: go from -n to +n in each dimension to ensure coverage
   for i in range(-1, n_reps_per_dim[0] + 1):
     for j in range(-1, n_reps_per_dim[1] + 1):
       for k in range(-1, n_reps_per_dim[2] + 1):
         offset = np.array([i, j, k]) * wb_size
         pos = wb_pos + offset
-        # Filter waters that are outside the target box
-        # Check if oxygen is inside [0, target_box_size) in all dimensions
         oxygens = pos[0::3]
-
-        # Check BOTH lower and upper bounds
-        valid_mask = np.all((oxygens >= 0) & (oxygens < target_box_np), axis=1)
-
-        # If valid, keep the whole molecule
-        # Expand mask (N_waters) -> (N_atoms)
+        # Keep waters whose Oxygen is within [0, target_box_size)
+        valid_mask = np.all((oxygens >= 0) & (oxygens < target_box_size), axis=1)
         valid_atoms_mask = np.repeat(valid_mask, 3)
         all_waters.append(pos[valid_atoms_mask])
 
@@ -143,128 +137,171 @@ def solvate(
     msg = "No waters generated! Check box sizes."
     raise ValueError(msg)
 
-  tiled_waters = np.concatenate(all_waters, axis=0)
-  # Shape (N_total_water_atoms, 3)
+  return np.concatenate(all_waters, axis=0)
 
-  # 4a. Deduplicate waters at periodic boundaries
-  # Waters at x=0 and x=box_size are duplicates under PBC
-  # Use minimum image convention to detect duplicates
+
+def _deduplicate_waters(tiled_waters: np.ndarray, box_size: np.ndarray) -> np.ndarray:
+  """Removes overlapping waters at periodic boundaries using minimum image convention.
+
+  Args:
+      tiled_waters: Candidate water positions.
+      box_size: Periodic box dimensions.
+
+  Returns:
+      Deduplicated water positions.
+  """
   tile_oxygens_pre = tiled_waters[0::3]
   n_waters_pre = len(tile_oxygens_pre)
 
-  # Find duplicate water pairs (O-O distance < 0.5 Å under PBC)
-  from scipy.spatial.distance import cdist
-
-  # Apply PBC to oxygen positions for comparison
-  oxy_pbc = tile_oxygens_pre % target_box_np
-  oxy_dists = cdist(oxy_pbc, oxy_pbc)
-  np.fill_diagonal(oxy_dists, 100.0)  # Exclude self
-
-  # Also check minimum image distances for edge cases
-  # For waters near boundaries, check if they're duplicates
   keep_water_mask = np.ones(n_waters_pre, dtype=bool)
   for wi in range(n_waters_pre):
     if not keep_water_mask[wi]:
       continue
+    # O(N^2) but typically small set of candidates for solvation setup
     for wj in range(wi + 1, n_waters_pre):
       if not keep_water_mask[wj]:
         continue
-      # Minimum image distance
+      # Minimum image distance check (O-O clash)
       delta = tile_oxygens_pre[wi] - tile_oxygens_pre[wj]
-      delta = delta - target_box_np * np.round(delta / target_box_np)
+      delta = delta - box_size * np.round(delta / box_size)
       dist_pbc = np.linalg.norm(delta)
-      if dist_pbc < 2.0:  # Remove overlapping waters (O-O clash)
+      if dist_pbc < 2.0:
         keep_water_mask[wj] = False
 
-  n_removed = n_waters_pre - np.sum(keep_water_mask)
-  if n_removed > 0:
-    # Filter out duplicates
-    keep_indices_dedup = np.where(keep_water_mask)[0]
-    dedup_atom_indices = []
-    for idx in keep_indices_dedup:
-      dedup_atom_indices.extend([3 * idx, 3 * idx + 1, 3 * idx + 2])
-    tiled_waters = tiled_waters[dedup_atom_indices]
+  # Filter and return
+  keep_indices_dedup = np.where(keep_water_mask)[0]
+  dedup_atom_indices = []
+  for idx in keep_indices_dedup:
+    dedup_atom_indices.extend([3 * idx, 3 * idx + 1, 3 * idx + 2])
+  return tiled_waters[dedup_atom_indices]
 
-  # 4b. Prune waters overlapping with solute
-  # Check distances from each Oxygen to all solute atoms
 
+def _prune_solute_clashes(
+  tiled_waters: np.ndarray, solute_positions: np.ndarray, solute_radii: np.ndarray
+) -> np.ndarray:
+  """Removes waters that clash with solute atoms based on VDW radii.
+
+  Args:
+      tiled_waters: (3*N_w, 3) water atom positions.
+      solute_positions: (N_s, 3) solute positions.
+      solute_radii: (N_s,) atom radii.
+
+  Returns:
+      Pruned water positions.
+  """
   tile_oxygens = tiled_waters[0::3]
-  # tiled_waters is [O1, H1, H2, O2, H1, H2 ...]
+  dists = cdist(tile_oxygens, solute_positions)  # (N_w, N_s)
 
-  # We need to check distance(O_water, Atom_solute) < (R_water + R_solute)
-  # R_water = TIP3P_WATER_RADIUS
-
-  # Using JAX for distance check might be faster if large
-  # But for setup stability, standard numpy/scipy cdist is fine.
-  # brute force (N_water * N_solute) can be large.
-  # Use simple blocking or kd-tree if needed. For 1UAO (138 atoms) it's fast.
-
-  from scipy.spatial.distance import cdist
-
-  dists = cdist(tile_oxygens, np.array(centered_solute))  # (N_w, N_s)
-
-  # Solute radii broadcasting
-  # condition: dist < (r_solute + r_water)
-  # dist - r_solute < r_water
-
-  radii_matrix = np.array(solute_radii)[None, :]  # (1, N_s)
-  # Check if any solute atom clashes
+  # Check condition: dist < (r_solute + r_water)
+  radii_matrix = solute_radii[None, :]
   clashes = dists < (radii_matrix + TIP3P_WATER_RADIUS)
-  clash_mask = np.any(clashes, axis=1)  # (N_w,) True if clash
+  clash_mask = np.any(clashes, axis=1)  # (N_w,)
 
-  # Keep non-clashing
-  keep_mask = ~clash_mask
-  keep_indices = np.where(keep_mask)[0]
-
-  # Reconstruct atoms
-  # keep_indices refers to oxygens (0, 1, 2...)
-  # We need atom indices: 3*i, 3*i+1, 3*i+2
-
-  final_water_indices = []
+  # Reconstruct atomic indices for non-clashing waters
+  keep_indices = np.where(~clash_mask)[0]
+  final_atom_indices = []
   for idx in keep_indices:
-    final_water_indices.extend([3 * idx, 3 * idx + 1, 3 * idx + 2])
+    final_atom_indices.extend([3 * idx, 3 * idx + 1, 3 * idx + 2])
 
-  final_waters = tiled_waters[final_water_indices]
+  return tiled_waters[final_atom_indices]
 
+
+def solvate(
+  solute_positions: Array,
+  solute_radii: Array,
+  padding: float = 10.0,
+  water_box: WaterBox | None = None,
+  target_box_shape: Array | None = None,
+) -> tuple[Array, Array]:
+  r"""Add solvent molecules around a solute.
+
+  Process:
+  1.  **Box Size**: Determine target dimensions from solute bounds and padding.
+  2.  **Center**: Re-center solute at $(\frac{1}{2} L, \frac{1}{2} L, \frac{1}{2} L)$.
+  3.  **Tile**: Replicate `water_box` to fill the target volume.
+  4.  **Deduplicate**: Remove overlapping waters at periodic boundaries (O-O distance < 2.0 Å).
+  5.  **Prune**: Remove waters within exclusion radius of any solute atom.
+  6.  **Combine**: Merge solute and remaining solvent coordinates.
+
+  Args:
+      solute_positions: (N_solute, 3) coordinates.
+      solute_radii: (N_solute,) VDW radii for overlap check.
+      padding: Buffer distance (Å).
+      water_box: Prototype water box. Loads TIP3P if None.
+      target_box_shape: Explicit box size override (3,).
+
+  Returns:
+      (positions, water_indices, box_size).
+  """
+  if water_box is None:
+    water_box = load_tip3p_box()
+
+  # 1. Box Size Determination
+  min_coords = jnp.min(solute_positions, axis=0)
+  max_coords = jnp.max(solute_positions, axis=0)
+
+  if target_box_shape is not None:
+    target_box_size = jnp.array(target_box_shape)
+  else:
+    target_box_size = (max_coords - min_coords) + 2 * padding
+
+  # 2. Re-center Solute
+  center = (max_coords + min_coords) / 2
+  box_center = target_box_size / 2
+  shift = box_center - center
+  centered_solute = solute_positions + shift
+
+  # 3. Solvent Placement Pipeline (using Numpy for setup logic)
+  solute_np = np.array(centered_solute)
+  radii_np = np.array(solute_radii)
+  box_np = np.array(target_box_size)
+
+  tiled_waters = _tile_water_box(water_box, box_np)
+  deduped_waters = _deduplicate_waters(tiled_waters, box_np)
+  final_waters = _prune_solute_clashes(deduped_waters, solute_np, radii_np)
+
+  # 4. Integrate results
   n_solute = centered_solute.shape[0]
-  n_waters = final_waters.shape[0]
-  water_indices = jnp.arange(n_solute, n_solute + n_waters)
+  n_waters_mol = final_waters.shape[0] // 3
 
   combined_pos = jnp.concatenate([centered_solute, jnp.array(final_waters)])
 
-  return combined_pos, water_indices, target_box_size
+  # 5. Final wrap to ensure everything is within [0, L) and whole
+  wrapped_pos = fix_water_geometry(combined_pos, target_box_size, n_solute, n_waters_mol)
+
+  return wrapped_pos, target_box_size
 
 
 def add_ions(
-  positions: Array,  # (N_atoms, 3)
-  water_indices: Array,  # Indices of water ATOMS (N_waters * 3)
+  positions: Array,
+  water_indices: Array,
   solute_charge: float,
   positive_ion_name: str = "NA",
   negative_ion_name: str = "CL",
-  ionic_strength: float = 0.0,  # Molar
+  ionic_strength: float = 0.0,
   neutralize: bool = True,
   box_size: Array | None = None,
 ) -> tuple[Array, list[str], list[str]]:
-  """Replaces waters with ions to neutralize and/or reach ionic strength.
+  r"""Replace water molecules with ions to reach target concentration.
+
+  Process:
+  1.  **Count**: Determine $N_{pos}$ and $N_{neg}$ needed for neutralization and concentration.
+  2.  **Select**: Randomly pick water molecules to replace.
+  3.  **Place**: Replace water Oxygen with Ion and remove Hydrogens.
+  4.  **Rename**: Generate residue and atom names for the solvent block.
 
   Args:
-      positions: JAX Array of positions
-      water_indices: Array of indices of water atoms. Assumes waters are 3-atom molecules (O,H,H).
-      solute_charge: Total charge of solute to neutralize.
-      positive_ion_name: Residue/Atom name for positive ion.
-      negative_ion_name: Residue/Atom name for negative ion.
-      ionic_strength: Target ionic strength in Molar (mol/L).
-      neutralize: Whether to add ions to neutralize solute charge.
-      box_size: Box size in Angstroms (required for concentration calc).
+      positions: (N, 3) coordinates.
+      water_indices: Absolute indices of water atoms.
+      solute_charge: Total net charge of protein/solute.
+      positive_ion_name: Label for cation (e.g., "NA").
+      negative_ion_name: Label for anion (e.g., "CL").
+      ionic_strength: Target concentration (Molar).
+      neutralize: Whether to zero out net charge.
+      box_size: (3,) dimensions (A).
 
   Returns:
-      (new_positions, new_atom_names, new_res_names)
-      Note: The returned arrays contain ONLY the modified water/ion part?
-      No, we should probably return the Full arrays?
-      But we don't have input names.
-      We return (new_positions, ion_atom_names, ion_res_names) corresponding to the water/ion region.
-      Caller must handle merging with solute topology.
-
+      (new_positions, atom_names, res_names).
   """
   if box_size is None and ionic_strength > 0:
     msg = "box_size required for ionic_strength"
@@ -421,18 +458,24 @@ def fix_water_geometry(
   n_solute: int,
   n_waters: int,
 ) -> Array:
-  """Unwraps water hydrogens relative to oxygens to fix broken molecules.
+  r"""Fix broken water molecules by unwrapping hydrogens relative to oxygen.
 
-  And then re-wraps the whole molecule into the box.
+  Process:
+  1.  **Extract**: Identify O, H1, H2 for each water molecule.
+  2.  **Unwrap**: $\vec{r}_{H, unwrapped} = \vec{r}_O + \text{MIC}(\vec{r}_H - \vec{r}_O)$.
+  3.  **Wrap**: Map the whole molecule back into the box using $\text{mod}(\vec{r}_O, L)$.
+
+  Notes:
+  Ensures all H atoms are within bonding distance of their parent Oxygen across PBC.
 
   Args:
-      positions: (N_atoms, 3)
-      box_size: (3,)
-      n_solute: Number of solute atoms
-      n_waters: Number of waters (following solute)
+      positions: (N, 3) coordinates.
+      box_size: (3,) dimensions.
+      n_solute: Number of solute atoms.
+      n_waters: Number of water molecules.
 
   Returns:
-      Fixed positions.
+      Corrected positions array.
   """
   box_arr = jnp.array(box_size)
 

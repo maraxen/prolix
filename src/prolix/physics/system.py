@@ -2,16 +2,17 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import jax
 import jax.numpy as jnp
-import numpy as np
 from jax_md import energy, partition, space, util
 from proxide.physics import constants
 
 from prolix.physics import bonded, cmap, generalized_born, pme, virtual_sites
 from prolix.physics import neighbor_list as nl
+from prolix.types import CmapTorsionIndices
+from prolix.utils import topology
 
 if TYPE_CHECKING:
   from collections.abc import Callable
@@ -91,25 +92,27 @@ def make_energy_fn(
   Returns:
       A function energy(R, neighbor=None) -> float.
 
+  NOTES:
+      The energy function includes several terms:
+      * Bonded: bonds, angles, dihedrals, impropers, urey-bradley.
+      * Non-Bonded: Lennard-Jones and Electrostatics (Coulomb or PME).
+      * Solvation: Generalized Born (if implicit_solvent=True).
+      * Other: CMAP corrections, SASA non-polar terms.
+
+      CMAP coefficients are pre-computed during function creation to avoid
+      spline fitting overhead during runtime. Sparse exclusion lookups are
+      also pre-computed if an ExclusionSpec is provided.
+
   """
-  # Pre-compute CMAP coefficients
-  # This moves the spline fitting cost from JIT/runtime to setup time
   cmap_grids = system_params.get("cmap_energy_grids")
   cmap_coeffs_precomputed = None
 
   if cmap_grids is not None and cmap_grids.shape[0] > 0:
-    # We compute them eagerly here
-    # Check if already 4D (pre-computed externally) or 3D (raw grids)
     if cmap_grids.ndim == 3:
-      # Compute!
-      # We need to make sure we don't accidentally trace this if make_energy_fn
-      # is somehow called inside a transform, but typically it is not.
-      # Even if it is, this is efficient.
       cmap_coeffs_precomputed = cmap.precompute_cmap_coefficients(cmap_grids)
     elif cmap_grids.ndim == 4:
       cmap_coeffs_precomputed = cmap_grids
 
-  # 1. Bonded Terms
   bond_energy_fn = bonded.make_bond_energy_fn(
     displacement_fn,
     jnp.asarray(system_params["bonds"]),
@@ -134,32 +137,24 @@ def make_energy_fn(
     jnp.asarray(system_params["improper_params"]),
   )
 
-  # Urey-Bradley Terms (Harmonic Bond between 1-3 pairs)
   ub_energy_fn = bonded.make_bond_energy_fn(
     displacement_fn,
     jnp.asarray(system_params.get("urey_bradley_bonds", jnp.zeros((0, 2), dtype=jnp.int32))),
     jnp.asarray(system_params.get("urey_bradley_params", jnp.zeros((0, 2), dtype=jnp.float32))),
   )
 
-  # Virtual Sites
   vs_def = system_params.get("virtual_site_def", jnp.zeros((0, 4), dtype=jnp.int32))
   vs_params = system_params.get("virtual_site_params", jnp.zeros((0, 12), dtype=jnp.float32))
   has_virtual_sites = vs_params.shape[0] > 0
 
-  # 2. Non-Bonded Terms
   charges = system_params["charges"]
   sigmas = system_params["sigmas"]
   epsilons = system_params["epsilons"]
 
-  # Use scaling matrices if available, otherwise fallback to exclusion_mask
   scale_matrix_vdw = system_params.get("scale_matrix_vdw")
   scale_matrix_elec = system_params.get("scale_matrix_elec")
   exclusion_mask = system_params.get("exclusion_mask")
 
-  # Pre-compute sparse exclusion lookup arrays if ExclusionSpec provided
-  # This allows O(N x K) exclusion handling instead of O(N^2)
-  # Pre-compute sparse exclusion lookup arrays if ExclusionSpec provided
-  # This allows O(N x K) exclusion handling instead of O(N^2)
   if exclusion_spec is not None:
     excl_indices, excl_scales_vdw, excl_scales_elec = nl.map_exclusions_to_dense_padded(
       exclusion_spec
@@ -212,10 +207,10 @@ def make_energy_fn(
     kappa = 0.0
   else:
     eff_dielectric = dielectric_constant
-    kappa = 0.0  # Use standard Coulomb (kappa=0) for explicit/vacuum
+    kappa = 0.0
     if use_pbc:
-      kappa = 0.0  # No screening for PME direct space (uses erfc independently)
-      eff_dielectric = 1.0  # PME assumes vacuum permittivity units usually (332.06...)
+      kappa = 0.0
+      eff_dielectric = 1.0
 
   COULOMB_CONSTANT = 332.0637 / eff_dielectric
 
@@ -236,8 +231,6 @@ def make_energy_fn(
   # Electrostatics
   # -------------------------------------------------------------------------
   def compute_electrostatics(r, neighbor_idx=None):
-    # Prepare parameters
-    # Prepare parameters
     if "gb_radii" in system_params and system_params["gb_radii"] is not None:
       radii = system_params["gb_radii"]
     else:
@@ -320,14 +313,9 @@ def make_energy_fn(
     if use_pbc and box is not None:
       e_recip = e_recip * COULOMB_CONSTANT
 
-      # PME Self Energy Correction
-      # Re-enabling manual subtraction as it yields physically plausible results (-18k vs +30k)
-      # Suggesting JAX MD does not fully subtract the Gaussian Self Energy in the way we calculate it.
-
       q_sq_sum = jnp.sum(charges**2)
       e_self = COULOMB_CONSTANT * (pme_alpha / jnp.sqrt(jnp.pi)) * q_sq_sum
 
-      # Standard Ewald: Total = Real + Recip - Self
       e_recip = e_recip - e_self
 
     if neighbor_idx is None:
@@ -415,16 +403,12 @@ def make_energy_fn(
 
     if implicit_solvent:
       return e_gb, e_direct, born_radii
-    # Return total electrostatics (Recip + Direct)
-    # Note return signature is (GB_Energy, Elec_Energy, BornRadii)
-    # We treat PME total as e_direct here for signature compatibility
     return 0.0, e_direct + e_recip, None
 
   # Combine Non-Bonded
   # -------------------------------------------------------------------------
   def compute_lj(r, neighbor_idx=None):
     if neighbor_idx is None:
-      # Dense
       dr = space.map_product(displacement_fn)(r, r)
       dist = space.distance(jnp.asarray(dr))
 
@@ -433,7 +417,6 @@ def make_energy_fn(
 
       e_lj = energy.lennard_jones(jnp.asarray(dist), sig_ij, eps_ij)
 
-      # Apply scaling/masking
       if scale_matrix_vdw is not None:
         e_lj = e_lj * scale_matrix_vdw
       else:
@@ -441,13 +424,12 @@ def make_energy_fn(
         e_lj = jnp.where(mask, e_lj, 0.0)
 
       return 0.5 * jnp.sum(e_lj)
-    # Neighbor List
+
     idx = neighbor_idx
-    r_neighbors = r[idx]  # (N, K, 3)
-    # Use jax_md's map_neighbor for correct displacement over neighbor list
+    r_neighbors = r[idx]
     map_neighbor_disp = space.map_neighbor(displacement_fn)
-    dr = map_neighbor_disp(r, r_neighbors)  # (N, K, 3)
-    dist = space.distance(jnp.asarray(dr))  # (N, K)
+    dr = map_neighbor_disp(r, r_neighbors)
+    dist = space.distance(jnp.asarray(dr))
 
     sig_neighbors = sigmas[idx]
     eps_neighbors = epsilons[idx]
@@ -459,12 +441,9 @@ def make_energy_fn(
 
     e_lj = energy.lennard_jones(dist, sig_ij, eps_ij)
 
-    # Mask padding
     mask_neighbors = idx < r.shape[0]
 
-    # Apply scaling using sparse exclusion lookups (O(N*K)) or dense matrix (O(N^2))
     if use_sparse_exclusions and excl_indices is not None:
-      # Sparse exclusion lookup - efficient for large systems
       if excl_indices is None or excl_scales_vdw is None or excl_scales_elec is None:
         raise RuntimeError("Sparse exclusions requested but not initialized.")
       scale_vdw, _ = nl.get_neighbor_exclusion_scales(
@@ -472,13 +451,11 @@ def make_energy_fn(
       )
       e_lj = e_lj * scale_vdw
     elif scale_matrix_vdw is not None:
-      # Dense scaling matrix (legacy path)
       i_idx = jnp.arange(r.shape[0])[:, None]
       safe_idx = jnp.minimum(idx, r.shape[0] - 1)
       scale = scale_matrix_vdw[i_idx, safe_idx]
       e_lj = e_lj * scale
     elif exclusion_mask is not None:
-      # Dense binary mask (legacy path)
       i_idx = jnp.arange(r.shape[0])[:, None]
       safe_idx = jnp.minimum(idx, r.shape[0] - 1)
       interaction_allowed = exclusion_mask[i_idx, safe_idx]
@@ -498,7 +475,6 @@ def make_energy_fn(
     else:
       radii = sigmas * 0.5
 
-    # Use ACE approximation (matches OpenMM CustomGBForce)
     return generalized_born.compute_ace_nonpolar_energy(
       jnp.asarray(radii),
       born_radii,
@@ -515,21 +491,13 @@ def make_energy_fn(
       return 0.0
 
     cmap_indices = system_params["cmap_indices"]
-    # Use raw energy grids - new CMAP computes periodic spline coefficients
     cmap_grids = system_params["cmap_energy_grids"]
 
-    # Phi: i-j-k-l
-    # Psi: j-k-l-m
+    torsion_indices = jax.vmap(CmapTorsionIndices.from_row)(cmap_torsions)
 
-    phi_indices = cmap_torsions[:, 0:4]
-    psi_indices = cmap_torsions[:, 1:5]
+    phi = compute_dihedral_angles(r, jnp.asarray(torsion_indices.phi_indices), displacement_fn)
+    psi = compute_dihedral_angles(r, jnp.asarray(torsion_indices.psi_indices), displacement_fn)
 
-    phi = compute_dihedral_angles(r, jnp.asarray(phi_indices), displacement_fn)
-    psi = compute_dihedral_angles(r, jnp.asarray(psi_indices), displacement_fn)
-
-    # Swapped to (psi, phi) based on validation results matching OpenMM
-    # Use pre-computed coefficients if available (captured from outer scope)
-    # Otherwise fall back to grid (should be None if we did our job)
     coeffs_to_use = cmap_coeffs_precomputed if cmap_coeffs_precomputed is not None else cmap_grids
 
     return cmap.compute_cmap_energy(psi, phi, cmap_indices, coeffs_to_use)
@@ -538,118 +506,17 @@ def make_energy_fn(
   # -------------------------------------------------------------------------
 
   # Robust Topological Search for Exclusions
-  # We cannot rely solely on 'angles' and 'dihedrals' arrays because they might correspond
-  # only to defined force field terms, not necessarily all topological pairs.
-  # We rebuild the connectivity graph from bonds to find all 1-2, 1-3, and 1-4 pairs.
-
   pme_bonds = system_params.get("bonds")
   n_atoms = charges.shape[0]
 
-  # Python-side Graph Search (Fast enough for <10k atoms)
-  # using numpy for input, lists for output
-
   if pme_bonds is not None and pme_bonds.shape[0] > 0:
-    import collections
-
-    # Build Adjacency
-    adj = collections.defaultdict(list)
-    # Ensure bonds are on CPU (numpy) for iteration
-    bonds_np = np.array(pme_bonds)
-    for b in bonds_np:
-      adj[b[0]].append(b[1])
-      adj[b[1]].append(b[0])
-
-    excl_12 = []
-    excl_13 = []
-    excl_14 = []
-
-    # Iterate all atoms
-    for i in range(n_atoms):
-      # 1-2
-      for j in adj[i]:
-        if j > i:
-          excl_12.append([i, j])
-
-        # 1-3
-        for k in adj[j]:
-          if k == i:
-            continue
-          if k > i:
-            excl_13.append([i, k])
-
-          # 1-4
-          for l in adj[k]:
-            if l == j:
-              continue
-            if l == i:
-              continue  # Ring of 3?
-            if l > i:
-              excl_14.append([i, l])
-
-    # Convert to JAX arrays and Unique-ify
-    if len(excl_12) > 0:
-      pme_idx_12 = jnp.array(excl_12, dtype=jnp.int32)
-      # 1-2 pairs from adjacency are unique if we enforced j > i and graph is undirected
-      # and bonds input was unique. Bonds input is usually unique.
-    else:
-      pme_idx_12 = jnp.zeros((0, 2), dtype=jnp.int32)
-
-    if len(excl_13) > 0:
-      # 1-3 pairs: (i, k).
-      # Graph search might find (i, k) via multiple paths (rings).
-      # We must unique-ify.
-      pme_idx_13 = jnp.unique(jnp.array(excl_13, dtype=jnp.int32), axis=0)
-    else:
-      pme_idx_13 = jnp.zeros((0, 2), dtype=jnp.int32)
-
-    if len(excl_14) > 0:
-      # 1-4 pairs: (i, l). Must unique-ify.
-      pme_idx_14 = jnp.unique(jnp.array(excl_14, dtype=jnp.int32), axis=0)
-    else:
-      pme_idx_14 = jnp.zeros((0, 2), dtype=jnp.int32)
-
-    # Filter overlaps:
-    # If a pair is 1-2, it cannot be 1-3 or 1-4.
-    # If a pair is 1-3, it cannot be 1-4.
-    # (Important for rings).
-    # PME exclusions logic: 1-2 takes precedence (Scale 0). 1-3 takes next (Scale 0).
-    # 1-4 is scaled.
-    # Our search logic: (i, l) is 1-4. If (i, l) is also 1-2 (ring of 3), it was added to excl_12.
-    # We just process lists sequentially?
-    # No, compute_pme_exceptions calculates them independently.
-    # If I include (i,j) in both 1-2 and 1-4 lists:
-    # 1-2: sub Recip.
-    # 1-4: sub (1-sc)*Recip.
-    # Total sub: Recip + (1-sc)*Recip = (2-sc)*Recip. Too much!
-    # We must ensure disjoint sets.
-
-    # Since we use JDE/XLA, sets are hard.
-    # But at setup time (here), we can use python sets of tuples.
-
-    set_12 = {tuple(x) for x in excl_12}
-    set_13 = {tuple(x) for x in excl_13}
-    set_14 = {tuple(x) for x in excl_14}
-
-    # 1-2 are definitely 1-2.
-    # Remove 1-2 from 1-3
-    set_13 = set_13 - set_12
-    # Remove 1-2 and 1-3 from 1-4
-    set_14 = set_14 - set_12 - set_13
-
-    if len(set_13) > 0:
-      pme_idx_13 = jnp.array(list(set_13), dtype=jnp.int32)
-    else:
-      pme_idx_13 = jnp.zeros((0, 2), dtype=jnp.int32)
-
-    if len(set_14) > 0:
-      pme_idx_14 = jnp.array(list(set_14), dtype=jnp.int32)
-    else:
-      pme_idx_14 = jnp.zeros((0, 2), dtype=jnp.int32)
-
+    excl = topology.find_bonded_exclusions(pme_bonds, n_atoms)
+    pme_idx_12 = excl.idx_12
+    pme_idx_13 = excl.idx_13
+    pme_idx_14 = excl.idx_14
   else:
-    pme_idx_12 = jnp.zeros((0, 2), dtype=jnp.int32)
-    pme_idx_13 = jnp.zeros((0, 2), dtype=jnp.int32)
-    pme_idx_14 = jnp.zeros((0, 2), dtype=jnp.int32)
+    empty = jnp.zeros((0, 2), dtype=jnp.int32)
+    pme_idx_12 = pme_idx_13 = pme_idx_14 = empty
 
   # Scaling for 1-4
   coul_14_scale = system_params.get("coulomb14scale", 0.83333333)
@@ -657,86 +524,39 @@ def make_energy_fn(
   def compute_lj_tail_correction(
     box: Array, sigma: Array, epsilon: Array, cutoff: float, N_atoms: int
   ) -> Array:
-    """Computes the Lennard-Jones long-range dispersion correction.
+    r"""Compute the long-range dispersion correction for Lennard-Jones.
 
-    Standard homogenous correction:
-    E_LRC = (8 * pi * N^2) / (3 * V) * <epsilon * sigma^6> * (1/(3 * Rc^3)) ?
+    Process:
+    1.  **Volume**: Compute box volume from lattice vectors.
+    2.  **Average**: Determine mean $\sigma$ and $\epsilon$.
+    3.  **Integral**: Evaluate tail integral from cutoff to $\infty$.
 
-    Analytical integral of 4*eps*((sigma/r)^12 - (sigma/r)^6) from Rc to infinity.
-    U_tail = 8 * pi * rho * epsilon * sigma^6 * [ (sigma^6)/(9*Rc^9) - 1/(3*Rc^3) ] ???
+    Notes:
+    $$ E_{LRC} = \frac{8 \pi N^2}{3 V} \langle \epsilon \sigma^6 \rangle \left[ \frac{1}{3} \frac{\sigma^6}{R_c^9} - \frac{1}{R_c^3} \right] \text{ (approx)} $$
 
-    Standard formula for ONE pair type:
-    U_tail = (8/3) * pi * rho * N * epsilon * sigma^3 * [ (1/3)*(sigma/Rc)^9 - (sigma/Rc)^3 ]
+    Args:
+        box: Box dimensions.
+        sigma: Atomic sigmas.
+        epsilon: Atomic epsilons.
+        cutoff: Potential cutoff.
+        N_atoms: Total atoms.
 
-    Wait.
-    Rho = N/V.
-    Total Energy U_total = (1/2) * N * U_tail_per_particle
-    U_total = (N/2) * (8 * pi * rho) * epsilon * sigma^3 ...
-    U_total = (8 * pi * N^2) / (2 * V) * ...
-
-    For a mixture, we use average parameters <sigma^3> and <epsilon> is an approximation?
-    Better approximation: <epsilon * sigma^6> and <epsilon * sigma^12>.
-
-    Let's use the average coefficient <C6> and <C12>.
-    C6_ij = 4 * eps_ij * sigma_ij^6
-    C12_ij = 4 * eps_ij * sigma_ij^12
-
-    U_LRC = (2 * pi * N^2 / V) * ( <C12>/(9 * Rc^9) - <C6>/(3 * Rc^3) )
-
-    This is exact if the radial distribution function g(r) = 1 beyond cutoff.
-
-    We compute <C6> and <C12> by averaging over all pairs?
-    Sum over all pairs N*(N-1)/2 is O(N^2). Too slow to do dynamically if types change (they don't).
-
-    We can compute Mean C6 and Mean C12 from the arrays.
-    sigma_ij = (sigma_i + sigma_j)/2
-    eps_ij = sqrt(eps_i * eps_j)
-
-    This is still O(N^2) to compute exact average.
-
-    Approximation for large systems (mostly solvent):
-    Use average sigma and average epsilon of the ATOMS.
-    sigma_bar = mean(sigma)
-    epsilon_bar = mean(epsilon)
-
-    Then use those in the formula.
+    Returns:
+        Tail correction scalar.
     """
-    # Volume
     volume = box[0] * box[1] * box[2] if box.ndim == 1 else jnp.linalg.det(box)
-
-    N_atoms / volume
-
-    # Compute average parameters (approximation)
-    # OR, assume dominant solvent properties?
-    # For now, simple average of parameters.
-    # Note: openmm uses exact counts of pairs.
 
     avg_sig = jnp.mean(sigma)
     avg_eps = jnp.mean(epsilon)
 
-    # Combined parameters (Lorentz-Berthelot self-interaction effectively)
-    # sigma_mix = avg_sig
-    # eps_mix = avg_eps
-
-    # Formula using these averages:
-    # E = 8 * pi * N_atoms * rho * avg_eps * avg_sig^3 * [ (1/9)*(avg_sig/cutoff)^9 - (1/3)*(avg_sig/cutoff)^3 ]
-    # Factor of 1/2 for double counting pairs included in N * rho
-
-    # Let's check sign. Dispersion is attractive (-).
-    # - (sigma/Rc)^3 term dominates at large Rc.
-
-    sig3 = avg_sig**3
-    sig9 = avg_sig**9
     rc3 = cutoff**3
-    rc9 = cutoff**9
+    rc9 = rc3**3
+    sig3 = avg_sig**3
+    sig6 = sig3**2
+    sig9 = sig3**3
 
     term = (1.0 / 9.0) * (sig9 / rc9) - (1.0 / 3.0) * (sig3 / rc3)
-
-    # 8 * pi * avg_eps * term
-    # Multiply by N^2 / V?
-    # Total energy.
-
-    return (8.0 * jnp.pi * (N_atoms**2) / volume) * avg_eps * term
+    return (8.0 * jnp.pi * (N_atoms**2) / volume) * avg_eps * sig6 * term
 
   def compute_pme_exceptions(r: Array) -> Array:
     """Computes the reciprocal space correction for excluded/scaled pairs."""
@@ -790,10 +610,6 @@ def make_energy_fn(
   # Total Energy Function
   # -------------------------------------------------------------------------
   def total_energy(r: Array, neighbor: partition.NeighborList | None = None, **kwargs) -> Array:
-    # 0. Update Virtual Sites
-    # We do this first so all energy terms seeing VS see correct positions.
-    # Bonded terms involving VS (if any) and Non-bonded terms will use updated R.
-    # Note: Gradients will backprop through this reconstruction to parent atoms/params.
     if has_virtual_sites:
       r = virtual_sites.reconstruct_virtual_sites(r, vs_def, vs_params)
 

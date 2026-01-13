@@ -12,13 +12,23 @@ References:
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING, Any, Callable, NamedTuple
+
+import jax
+import jax.numpy as jnp
+from jax import random
+from jax_md import quantity, util
+
 from prolix.types import WaterIndices, WaterIndicesArray
 
-Array = util.Array
+if TYPE_CHECKING:
+  from jax_md.util import Array
+
+Array = Any
 
 # TIP3P water geometry constants
-TIP3P_BOND_LENGTH_OH = 0.9572  # O-H bond length (Å)
-TIP3P_DIST_HH = 1.5139  # H-H distance (Å)
+TIP3P_ROH = 0.9572  # O-H bond length (Å)
+TIP3P_RHH = 1.5139  # H-H distance (Å)
 TIP3P_THETA = 104.52 * jnp.pi / 180.0  # H-O-H angle (rad)
 
 
@@ -26,8 +36,8 @@ def settle_positions(
   positions_unconstrained: Array,
   positions_old: Array,
   water_indices: WaterIndicesArray,
-  target_bond_length_oh: float = TIP3P_BOND_LENGTH_OH,
-  target_dist_hh: float = TIP3P_DIST_HH,
+  r_OH: float = TIP3P_ROH,
+  r_HH: float = TIP3P_RHH,
   mass_oxygen: float = 15.999,
   mass_hydrogen: float = 1.008,
   box: Array | None = None,
@@ -44,8 +54,8 @@ def settle_positions(
       positions_unconstrained: Unconstrained positions after integrator step (N, 3).
       positions_old: Positions before the integrator step (N, 3).
       water_indices: (N_waters, 3) atom indices [O, H1, H2].
-      target_bond_length_oh: Target O-H bond length (Å).
-      target_dist_hh: Target H-H distance (Å).
+      r_OH: Target O-H bond length (Å).
+      r_HH: Target H-H distance (Å).
       mass_oxygen: Mass of oxygen (amu).
       mass_hydrogen: Mass of hydrogen (amu).
       box: Optional box dimensions for PBC (3,).
@@ -77,8 +87,8 @@ def settle_positions(
     pos_oxygen_new,
     pos_h1_new,
     pos_h2_new,
-    target_bond_length_oh,
-    target_dist_hh,
+    r_OH,
+    r_HH,
     mass_oxygen,
     mass_hydrogen,
     box,
@@ -94,7 +104,6 @@ def settle_positions(
     # Apply same displacement to H atoms
     r_h1_wrapped = pos_h1_c + wrap_displacement
     r_h2_wrapped = pos_h2_c + wrap_displacement
-
     pos_oxygen_c = r_oxygen_wrapped
     pos_h1_c = r_h1_wrapped
     pos_h2_c = r_h2_wrapped
@@ -114,8 +123,8 @@ def _settle_water_batch(
   pos_oxygen_new: Array,
   pos_h1_new: Array,
   pos_h2_new: Array,
-  target_bond_length_oh: float,
-  target_dist_hh: float,
+  r_OH: float,
+  r_HH: float,
   mass_oxygen: float,
   mass_hydrogen: float,
   box: Array | None = None,
@@ -175,12 +184,12 @@ def _settle_water_batch(
   delta_h2_old = pos_h2_old - com_old
 
   # The ideal TIP3P water geometry:
-  dist_oh_mid = jnp.sqrt(target_bond_length_oh**2 - (target_dist_hh / 2) ** 2)
+  dist_oh_mid = jnp.sqrt(r_OH**2 - (r_HH / 2) ** 2)
 
   # In COM frame, O is at (0, dist_O_to_COM) and H midpoint is at (0, -dist_H_mid_to_COM)
   dist_O_to_COM = 2 * mass_hydrogen * dist_oh_mid / mass_total
   dist_H_mid_to_COM = mass_oxygen * dist_oh_mid / mass_total
-  half_dist_hh = target_dist_hh / 2
+  half_dist_hh = r_HH / 2
 
   # Y axis: from H-midpoint toward O (in old geometry)
   midpoint_old = 0.5 * (delta_h1_old + delta_h2_old)
@@ -188,8 +197,8 @@ def _settle_water_batch(
   len_y = jnp.linalg.norm(axis_y, axis=-1, keepdims=True) + 1e-12
   axis_y = axis_y / len_y  # (N_waters, 3)
 
-  # X axis: from H2 toward H1 (in old geometry)
-  axis_x = d_H1_old - d_H2_old
+  # X axis: from H1 toward H2 (in old geometry)
+  axis_x = delta_h1_old - delta_h2_old
   len_x = jnp.linalg.norm(axis_x, axis=-1, keepdims=True) + 1e-12
   axis_x = axis_x / len_x
 
@@ -240,6 +249,77 @@ def _settle_water_batch(
   return pos_oxygen_c, pos_h1_c, pos_h2_c
 
 
+def _get_settle_bond_vectors(
+  pos_oxygen: Array, pos_h1: Array, pos_h2: Array
+) -> tuple[Array, Array, Array]:
+  """Compute normalized bond vectors for SETTLE."""
+  vec_oh1 = pos_h1 - pos_oxygen  # (N_waters, 3)
+  vec_oh2 = pos_h2 - pos_oxygen
+  vec_h1h2 = pos_h2 - pos_h1
+
+  # Normalize bond vectors
+  dist_oh1 = jnp.linalg.norm(vec_oh1, axis=-1, keepdims=True) + 1e-10
+  dist_oh2 = jnp.linalg.norm(vec_oh2, axis=-1, keepdims=True) + 1e-10
+  dist_h1h2 = jnp.linalg.norm(vec_h1h2, axis=-1, keepdims=True) + 1e-10
+
+  norm_vec_oh1 = vec_oh1 / dist_oh1
+  norm_vec_oh2 = vec_oh2 / dist_oh2
+  norm_vec_h1h2 = vec_h1h2 / dist_h1h2
+
+  return norm_vec_oh1, norm_vec_oh2, norm_vec_h1h2
+
+
+def _apply_rattle_velocity_correction(
+  vel_curr: Array,
+  indices: WaterIndices,
+  norm_vec_oh1: Array,
+  norm_vec_oh2: Array,
+  norm_vec_h1h2: Array,
+  inv_mass_oxygen: float,
+  inv_mass_hydrogen: float,
+) -> Array:
+  """Single iteration of velocity corrections (RATTLE)."""
+  vel_oxygen = vel_curr[indices.oxygen]
+  vel_h1 = vel_curr[indices.hydrogen1]
+  vel_h2 = vel_curr[indices.hydrogen2]
+
+  # Relative velocities along bonds
+  rel_vel_oh1 = vel_h1 - vel_oxygen
+  rel_vel_oh2 = vel_h2 - vel_oxygen
+  rel_vel_h1h2 = vel_h2 - vel_h1
+
+  # Velocity components along bonds (should be zero)
+  dot_oh1 = jnp.sum(rel_vel_oh1 * norm_vec_oh1, axis=-1)
+  dot_oh2 = jnp.sum(rel_vel_oh2 * norm_vec_oh2, axis=-1)
+  dot_h1h2 = jnp.sum(rel_vel_h1h2 * norm_vec_h1h2, axis=-1)
+
+  # Compute Lagrange multipliers
+  lambda_oh1 = -dot_oh1 / (inv_mass_oxygen + inv_mass_hydrogen)
+  lambda_oh2 = -dot_oh2 / (inv_mass_oxygen + inv_mass_hydrogen)
+  lambda_h1h2 = -dot_h1h2 / (2 * inv_mass_hydrogen)
+
+  # Velocity corrections
+  dv_oxygen_from_oh1 = -lambda_oh1[:, None] * norm_vec_oh1 * inv_mass_oxygen
+  dv_h1_from_oh1 = lambda_oh1[:, None] * norm_vec_oh1 * inv_mass_hydrogen
+
+  dv_oxygen_from_oh2 = -lambda_oh2[:, None] * norm_vec_oh2 * inv_mass_oxygen
+  dv_h2_from_oh2 = lambda_oh2[:, None] * norm_vec_oh2 * inv_mass_hydrogen
+
+  dv_h1_from_h1h2 = -lambda_h1h2[:, None] * norm_vec_h1h2 * inv_mass_hydrogen
+  dv_h2_from_h1h2 = lambda_h1h2[:, None] * norm_vec_h1h2 * inv_mass_hydrogen
+
+  # Accumulate corrections
+  dv_oxygen = dv_oxygen_from_oh1 + dv_oxygen_from_oh2
+  dv_h1 = dv_h1_from_oh1 + dv_h1_from_h1h2
+  dv_h2 = dv_h2_from_oh2 + dv_h2_from_h1h2
+
+  # Apply corrections
+  vel_new = vel_curr.at[indices.oxygen].add(dv_oxygen)
+  vel_new = vel_new.at[indices.hydrogen1].add(dv_h1)
+  vel_new = vel_new.at[indices.hydrogen2].add(dv_h2)
+  return vel_new
+
+
 def settle_velocities(
   velocities: Array,
   positions_old: Array,
@@ -275,73 +355,32 @@ def settle_velocities(
 
   indices = WaterIndices.from_row(water_indices.T)
 
-  # Get constrained positions
-  pos_oxygen = positions_constrained[indices.oxygen]
-  pos_h1 = positions_constrained[indices.hydrogen1]
-  pos_h2 = positions_constrained[indices.hydrogen2]
-
-  # Bond vectors
-  vec_oh1 = pos_h1 - pos_oxygen  # (N_waters, 3)
-  vec_oh2 = pos_h2 - pos_oxygen
-  vec_h1h2 = pos_h2 - pos_h1
-
-  # Normalize bond vectors
-  dist_oh1 = jnp.linalg.norm(vec_oh1, axis=-1, keepdims=True) + 1e-10
-  dist_oh2 = jnp.linalg.norm(vec_oh2, axis=-1, keepdims=True) + 1e-10
-  dist_h1h2 = jnp.linalg.norm(vec_h1h2, axis=-1, keepdims=True) + 1e-10
-
-  norm_vec_oh1 = vec_oh1 / dist_oh1
-  norm_vec_oh2 = vec_oh2 / dist_oh2
-  norm_vec_h1h2 = vec_h1h2 / dist_h1h2
+  # Get normalized bond vectors from constrained positions
+  norm_vec_oh1, norm_vec_oh2, norm_vec_h1h2 = _get_settle_bond_vectors(
+    positions_constrained[indices.oxygen],
+    positions_constrained[indices.hydrogen1],
+    positions_constrained[indices.hydrogen2],
+  )
 
   # Inverse masses
   inv_mass_oxygen = 1.0 / mass_oxygen
   inv_mass_hydrogen = 1.0 / mass_hydrogen
 
-  def correct_velocities(vel_curr):
-    """Single iteration of velocity corrections."""
-    vel_oxygen = vel_curr[indices.oxygen]
-    vel_h1 = vel_curr[indices.hydrogen1]
-    vel_h2 = vel_curr[indices.hydrogen2]
-
-    # Relative velocities along bonds
-    rel_vel_oh1 = vel_h1 - vel_oxygen
-    rel_vel_oh2 = vel_h2 - vel_oxygen
-    rel_vel_h1h2 = vel_h2 - vel_h1
-
-    # Velocity components along bonds (should be zero)
-    dot_oh1 = jnp.sum(rel_vel_oh1 * norm_vec_oh1, axis=-1)
-    dot_oh2 = jnp.sum(rel_vel_oh2 * norm_vec_oh2, axis=-1)
-    dot_h1h2 = jnp.sum(rel_vel_h1h2 * norm_vec_h1h2, axis=-1)
-
-    # Compute Lagrange multipliers
-    lambda_oh1 = -dot_oh1 / (inv_mass_oxygen + inv_mass_hydrogen)
-    lambda_oh2 = -dot_oh2 / (inv_mass_oxygen + inv_mass_hydrogen)
-    lambda_h1h2 = -dot_h1h2 / (2 * inv_mass_hydrogen)
-
-    # Velocity corrections
-    dv_oxygen_from_oh1 = -lambda_oh1[:, None] * norm_vec_oh1 * inv_mass_oxygen
-    dv_h1_from_oh1 = lambda_oh1[:, None] * norm_vec_oh1 * inv_mass_hydrogen
-
-    dv_oxygen_from_oh2 = -lambda_oh2[:, None] * norm_vec_oh2 * inv_mass_oxygen
-    dv_h2_from_oh2 = lambda_oh2[:, None] * norm_vec_oh2 * inv_mass_hydrogen
-
-    dv_h1_from_h1h2 = -lambda_h1h2[:, None] * norm_vec_h1h2 * inv_mass_hydrogen
-    dv_h2_from_h1h2 = lambda_h1h2[:, None] * norm_vec_h1h2 * inv_mass_hydrogen
-
-    # Accumulate corrections
-    dv_oxygen = dv_oxygen_from_oh1 + dv_oxygen_from_oh2
-    dv_h1 = dv_h1_from_oh1 + dv_h1_from_h1h2
-    dv_h2 = dv_h2_from_oh2 + dv_h2_from_h1h2
-
-    # Apply corrections
-    vel_new = vel_curr.at[indices.oxygen].add(dv_oxygen)
-    vel_new = vel_new.at[indices.hydrogen1].add(dv_h1)
-    vel_new = vel_new.at[indices.hydrogen2].add(dv_h2)
-    return vel_new
-
   # Iterate a few times for convergence
-  return jax.lax.fori_loop(0, 5, lambda _i, v: correct_velocities(v), velocities)
+  return jax.lax.fori_loop(
+    0,
+    10,
+    lambda _i, v: _apply_rattle_velocity_correction(
+      v,
+      indices,
+      norm_vec_oh1,
+      norm_vec_oh2,
+      norm_vec_h1h2,
+      inv_mass_oxygen,
+      inv_mass_hydrogen,
+    ),
+    velocities,
+  )
 
 
 def get_water_indices(n_protein_atoms: int, n_waters: int) -> Array:
@@ -376,8 +415,8 @@ def settle_langevin(
   gamma: float = 1.0,
   mass: float | Array = 1.0,
   water_indices: Array | None = None,
-  target_bond_length_oh: float = TIP3P_BOND_LENGTH_OH,
-  target_dist_hh: float = TIP3P_DIST_HH,
+  r_OH: float = TIP3P_ROH,
+  r_HH: float = TIP3P_RHH,
   mass_oxygen: float = 15.999,
   mass_hydrogen: float = 1.008,
   box: Array | None = None,
@@ -459,8 +498,8 @@ def settle_langevin(
       position,
       positions_old,
       water_indices,
-      target_bond_length_oh,
-      target_dist_hh,
+      r_OH,
+      r_HH,
       mass_oxygen,
       mass_hydrogen,
       box,

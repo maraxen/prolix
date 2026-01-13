@@ -9,6 +9,8 @@ import jax.numpy as jnp
 import numpy as np
 from jax_md import partition, space, util
 
+from prolix.utils import topology
+
 if TYPE_CHECKING:
   from collections.abc import Callable
 
@@ -41,9 +43,6 @@ class ExclusionSpec:
     cls, system_params: SystemParams, coulomb14scale: float = 0.83333333, lj14scale: float = 0.5
   ) -> ExclusionSpec:
     """Build ExclusionSpec from standard system parameters."""
-    # Use existing graph search logic from system.py (refactored here or copied)
-    # For now, we'll re-implement the graph search efficiently using numpy
-
     charges = system_params["charges"]
     n_atoms = len(charges)
     bonds = system_params.get("bonds")
@@ -57,59 +56,14 @@ class ExclusionSpec:
         n_atoms=n_atoms,
       )
 
-    import collections
-
-    adj = collections.defaultdict(list)
-    bonds_np = np.array(bonds)
-
-    for b in bonds_np:
-      adj[b[0]].append(b[1])
-      adj[b[1]].append(b[0])
-
-    excl_12 = set()
-    excl_13 = set()
-    excl_14 = set()
-
-    # Iterate all atoms
-    for i in range(n_atoms):
-      # 1-2
-      for j in adj[i]:
-        if j > i:
-          excl_12.add((i, j))
-
-        # 1-3
-        for k in adj[j]:
-          if k == i:
-            continue
-          if k > i:
-            excl_13.add((i, k))
-
-          # 1-4
-          for l in adj[k]:
-            if l == j:
-              continue
-            if l == i:
-              continue
-            if l > i:
-              excl_14.add((i, l))
-
-    # Clean up overlaps
-    # 1-2 takes precedence over 1-3 and 1-4
-    excl_13 = excl_13 - excl_12
-    excl_14 = excl_14 - excl_12 - excl_13
+    excl = topology.find_bonded_exclusions(bonds, n_atoms)
 
     # Combine 1-2 and 1-3 (both fully excluded usually)
-    # Note: In some FFs 1-3 might be scaled differently, but standard AMBER is 0.0 for both.
-    full_exclusions = sorted(list(excl_12 | excl_13))
-    scaled_exclusions = sorted(list(excl_14))
+    idx_12_13 = jnp.concatenate([excl.idx_12, excl.idx_13], axis=0)
 
     return cls(
-      idx_12_13=jnp.array(full_exclusions, dtype=jnp.int32)
-      if full_exclusions
-      else jnp.zeros((0, 2), dtype=jnp.int32),
-      idx_14=jnp.array(scaled_exclusions, dtype=jnp.int32)
-      if scaled_exclusions
-      else jnp.zeros((0, 2), dtype=jnp.int32),
+      idx_12_13=idx_12_13,
+      idx_14=excl.idx_14,
       scale_14_elec=coulomb14scale,
       scale_14_vdw=lj14scale,
       n_atoms=n_atoms,
@@ -138,15 +92,23 @@ def make_neighbor_list_fn(
 
 def compute_exclusion_mask_neighbor_list(
   exclusion_spec: ExclusionSpec,
-  neighbor_idx: Array,  # (N, K)
+  neighbor_idx: Array,
   n_atoms: int,
 ) -> tuple[Array, Array, Array]:
-  """Computes exclusion masks for a neighbor list.
+  r"""Compute exclusion masks for a neighbor list.
+
+  Process:
+  1.  **Map**: Transform sparse `ExclusionSpec` to per-atom padded arrays.
+  2.  **Lookup**: Retrieve scale factors for each neighbor in the list.
+  3.  **Hard Mask**: Identify neighbors that are not fully excluded (1-2/1-3).
+
+  Args:
+      exclusion_spec: Sparse specification of excluded pairs.
+      neighbor_idx: (N, K) neighbor indices.
+      n_atoms: Total atomic count.
 
   Returns:
-      mask_vdw: (N, K) - 1.0 if interacting, 0.0 if excluded, scale if 1-4
-      mask_elec: (N, K) - 1.0 if interacting, 0.0 if excluded, scale if 1-4
-      mask_hard: (N, K) - 0.0 if excluded (1-2, 1-3), 1.0 otherwise (used for non-scaled terms)
+      (mask_vdw, mask_elec, mask_hard) arrays of shape (N, K).
   """
   excl_indices, excl_scales_vdw, excl_scales_elec = map_exclusions_to_dense_padded(exclusion_spec)
 
@@ -162,9 +124,23 @@ def compute_exclusion_mask_neighbor_list(
 
 
 def map_exclusions_to_dense_padded(
-  exclusion_spec: ExclusionSpec, max_exclusions: int = 32
+  exclusion_spec: ExclusionSpec,
+  max_exclusions: int = 32,
 ) -> tuple[Array, Array, Array]:
-  """Maps pair exclusions to per-atom padded arrays for efficient lookup."""
+  r"""Map pair exclusions to per-atom padded arrays for efficient lookup.
+
+  Process:
+  1.  **Allocate**: Create (N, max_exclusions) arrays for indices and scales.
+  2.  **Collect**: Group exclusions by the first atom in each pair.
+  3.  **Populate**: Scatter entries into the padded arrays.
+
+  Args:
+      exclusion_spec: Sparse exclusion data.
+      max_exclusions: Capacity per atom for excluded neighbors.
+
+  Returns:
+      (excl_indices, excl_scales_vdw, excl_scales_elec) arrays.
+  """
   N = exclusion_spec.n_atoms
 
   # Initialize with -1 (invalid index)
@@ -217,16 +193,26 @@ def map_exclusions_to_dense_padded(
 
 
 def get_neighbor_exclusion_scales(
-  excl_indices: Array,  # (N, MaxExcl)
-  excl_scales_vdw: Array,  # (N, MaxExcl)
-  excl_scales_elec: Array,  # (N, MaxExcl)
-  neighbor_idx: Array,  # (N, K)
+  excl_indices: Array,
+  excl_scales_vdw: Array,
+  excl_scales_elec: Array,
+  neighbor_idx: Array,
 ) -> tuple[Array, Array]:
-  """Computes scale factors for neighbors based on exclusion lists.
+  r"""Compute scale factors for neighbors based on exclusion lists.
+
+  Process:
+  1.  **Broadcast**: Align neighbor and exclusion indices for comparison.
+  2.  **Compare**: Identify matches between neighbor list and exclusion list.
+  3.  **Select**: Extract the associated scale factors where matches exist.
+  4.  **Default**: Return 1.0 for neighbors not found in the exclusion list.
+
+  Args:
+      excl_indices: (N, M) padded exclusion indices.
+      excl_scales_vdw, excl_scales_elec: (N, M) padded scales.
+      neighbor_idx: (N, K) neighbor indices.
 
   Returns:
-      scale_vdw: (N, K)
-      scale_elec: (N, K)
+      (scale_vdw, scale_elec) arrays of shape (N, K).
   """
   N, K = neighbor_idx.shape
   M = excl_indices.shape[1]
