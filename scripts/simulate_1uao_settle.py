@@ -12,8 +12,8 @@ from jax import random
 import matplotlib.pyplot as plt
 from matplotlib import animation
 
-from proxide.io.parsing.rust import parse_structure
-from oxidize import OutputSpec, CoordFormat
+from proxide.io.parsing.backend import parse_structure
+from proxide import OutputSpec, CoordFormat
 
 # Prolix imports
 from prolix.physics import system, solvation, settle

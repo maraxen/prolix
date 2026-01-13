@@ -5,14 +5,14 @@ import os
 from jax import random
 import jax.numpy as jnp
 import argparse
-import oxidize
-from oxidize import CoordFormat, OutputSpec
+import proxide
+from proxide import CoordFormat, OutputSpec
 
 
 # Prolix imports
 from prolix import simulate
 from prolix.visualization import animate_trajectory
-from proxide.io.parsing.rust import parse_structure
+from proxide.io.parsing.backend import parse_structure
 import logging
 
 logging.basicConfig(level=logging.INFO)
@@ -51,7 +51,7 @@ def main():
         print("Assigning MBONDI2 radii manually...")
         # Need to convert JAX/numpy arrays to python lists for Rust
         # atom_names is already a list of strings
-        radii_list = oxidize.assign_mbondi2_radii(protein.atom_names, protein.bonds.tolist())
+        radii_list = proxide.assign_mbondi2_radii(protein.atom_names, protein.bonds.tolist())
         protein = protein.replace(radii=jnp.array(radii_list))
 
     n_atoms = protein.coordinates.shape[0] if protein.coordinates.ndim == 2 else len(protein.coordinates) // 3

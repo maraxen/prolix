@@ -17,8 +17,8 @@ import openmm
 from openmm import app, unit
 
 # Prolix imports
-from proxide.io.parsing.rust import parse_structure, OutputSpec
-from oxidize import CoordFormat
+from proxide.io.parsing.backend import parse_structure, OutputSpec
+from proxide import CoordFormat
 from prolix.physics import system, solvation
 from prolix.physics.neighbor_list import ExclusionSpec, make_neighbor_list_fn
 

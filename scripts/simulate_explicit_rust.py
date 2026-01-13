@@ -1,6 +1,6 @@
 """Run 1CRN simulation in explicit solvent and generate GIF.
 
-Uses the new Rust-based parsing and parameterization via oxidize.
+Uses the new Rust-based parsing and parameterization via proxide backend.
 Includes energy minimization and molecule-type visualization.
 """
 
@@ -13,8 +13,8 @@ from jax import random
 from matplotlib import animation
 import matplotlib.pyplot as plt
 
-from proxide.io.parsing.rust import parse_structure
-from oxidize import OutputSpec, CoordFormat
+from proxide.io.parsing.backend import parse_structure
+from proxide import OutputSpec, CoordFormat
 
 # Prolix imports
 from prolix import simulate
