@@ -12,187 +12,179 @@ References:
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
-
-import jax
-import jax.numpy as jnp
-from jax import random
-from jax_md import quantity, simulate, util
-
-if TYPE_CHECKING:
-  from collections.abc import Callable
+from prolix.types import WaterIndices, WaterIndicesArray
 
 Array = util.Array
 
 # TIP3P water geometry constants
-TIP3P_ROH = 0.9572  # O-H bond length (Å)
-TIP3P_RHH = 1.5139  # H-H distance (Å)
+TIP3P_BOND_LENGTH_OH = 0.9572  # O-H bond length (Å)
+TIP3P_DIST_HH = 1.5139  # H-H distance (Å)
 TIP3P_THETA = 104.52 * jnp.pi / 180.0  # H-O-H angle (rad)
 
 
 def settle_positions(
-  R_unconstrained: Array,
-  R_old: Array,
-  water_indices: Array,
-  r_OH: float = TIP3P_ROH,
-  r_HH: float = TIP3P_RHH,
-  m_O: float = 15.999,
-  m_H: float = 1.008,
+  positions_unconstrained: Array,
+  positions_old: Array,
+  water_indices: WaterIndicesArray,
+  target_bond_length_oh: float = TIP3P_BOND_LENGTH_OH,
+  target_dist_hh: float = TIP3P_DIST_HH,
+  mass_oxygen: float = 15.999,
+  mass_hydrogen: float = 1.008,
   box: Array | None = None,
 ) -> Array:
-  """Apply SETTLE position constraints to water molecules.
+  r"""Apply SETTLE position constraints to water molecules.
 
-  This function corrects unconstrained positions to satisfy the rigid
-  water geometry constraints: O-H1, O-H2, and H1-H2 distances.
+  Process:
+  1.  **Extract Indices**: Use `WaterIndices` to identify O, H1, H2.
+  2.  **Batch SETTLE**: Call `_settle_water_batch` for analytical reconstruction.
+  3.  **PBC Handling**: Correct for periodic boundary crossings if `box` provided.
+  4.  **Scatter Update**: Place constrained coordinates back into the global array.
 
   Args:
-      R_unconstrained: Unconstrained positions after integrator step (N, 3).
-      R_old: Positions before the integrator step (N, 3).
-      water_indices: Array of shape (N_waters, 3) containing atom indices
-          for each water molecule [O_idx, H1_idx, H2_idx].
-      r_OH: Target O-H bond length (Å).
-      r_HH: Target H-H distance (Å).
-      m_O: Mass of oxygen atom (amu).
-      m_H: Mass of hydrogen atom (amu).
-      box: Optional box dimensions for PBC (3,). If provided, applies
-          minimum image convention to handle periodic boundary crossings.
+      positions_unconstrained: Unconstrained positions after integrator step (N, 3).
+      positions_old: Positions before the integrator step (N, 3).
+      water_indices: (N_waters, 3) atom indices [O, H1, H2].
+      target_bond_length_oh: Target O-H bond length (Å).
+      target_dist_hh: Target H-H distance (Å).
+      mass_oxygen: Mass of oxygen (amu).
+      mass_hydrogen: Mass of hydrogen (amu).
+      box: Optional box dimensions for PBC (3,).
 
   Returns:
-      Constrained positions with correct water geometry.
+      Constrained positions array.
   """
   if water_indices.shape[0] == 0:
-    return R_unconstrained
+    return positions_unconstrained
 
-  # Total mass and inverse masses
-  m_total = m_O + 2 * m_H
-  inv_m_O = 1.0 / m_O
-  inv_m_H = 1.0 / m_H
-
-  # Extract water atom positions (N_waters, 3, 3) = (waters, atoms, xyz)
-  O_idx = water_indices[:, 0]
-  H1_idx = water_indices[:, 1]
-  H2_idx = water_indices[:, 2]
+  # Extract water atom positions
+  indices = WaterIndices.from_row(water_indices.T)
 
   # Old positions
-  r_O_old = R_old[O_idx]  # (N_waters, 3)
-  r_H1_old = R_old[H1_idx]
-  r_H2_old = R_old[H2_idx]
+  pos_oxygen_old = positions_old[indices.oxygen]
+  pos_h1_old = positions_old[indices.hydrogen1]
+  pos_h2_old = positions_old[indices.hydrogen2]
 
   # Unconstrained positions
-  r_O_new = R_unconstrained[O_idx]
-  r_H1_new = R_unconstrained[H1_idx]
-  r_H2_new = R_unconstrained[H2_idx]
+  pos_oxygen_new = positions_unconstrained[indices.oxygen]
+  pos_h1_new = positions_unconstrained[indices.hydrogen1]
+  pos_h2_new = positions_unconstrained[indices.hydrogen2]
 
   # Compute constrained positions using SETTLE algorithm
-  r_O_c, r_H1_c, r_H2_c = _settle_water_batch(
-    r_O_old, r_H1_old, r_H2_old, r_O_new, r_H1_new, r_H2_new, r_OH, r_HH, m_O, m_H, box
+  pos_oxygen_c, pos_h1_c, pos_h2_c = _settle_water_batch(
+    pos_oxygen_old,
+    pos_h1_old,
+    pos_h2_old,
+    pos_oxygen_new,
+    pos_h1_new,
+    pos_h2_new,
+    target_bond_length_oh,
+    target_dist_hh,
+    mass_oxygen,
+    mass_hydrogen,
+    box,
   )
 
   # Re-wrap constrained positions back into the periodic box
   # Use MOLECULE-CENTERED wrapping: wrap based on O position,
   # then apply same displacement to H atoms to preserve geometry
   if box is not None:
-    # Compute how to wrap O atoms
-    r_O_wrapped = jnp.mod(r_O_c, box)
-    wrap_displacement = r_O_wrapped - r_O_c  # (N_waters, 3)
+    r_oxygen_wrapped = jnp.mod(pos_oxygen_c, box)
+    wrap_displacement = r_oxygen_wrapped - pos_oxygen_c  # (N_waters, 3)
 
     # Apply same displacement to H atoms
-    r_H1_wrapped = r_H1_c + wrap_displacement
-    r_H2_wrapped = r_H2_c + wrap_displacement
+    r_h1_wrapped = pos_h1_c + wrap_displacement
+    r_h2_wrapped = pos_h2_c + wrap_displacement
 
-    r_O_c = r_O_wrapped
-    r_H1_c = r_H1_wrapped
-    r_H2_c = r_H2_wrapped
+    pos_oxygen_c = r_oxygen_wrapped
+    pos_h1_c = r_h1_wrapped
+    pos_h2_c = r_h2_wrapped
 
   # Update positions in result array
-  R_constrained = R_unconstrained.at[O_idx].set(r_O_c)
-  R_constrained = R_constrained.at[H1_idx].set(r_H1_c)
-  R_constrained = R_constrained.at[H2_idx].set(r_H2_c)
+  positions_constrained = positions_unconstrained.at[indices.oxygen].set(pos_oxygen_c)
+  positions_constrained = positions_constrained.at[indices.hydrogen1].set(pos_h1_c)
+  positions_constrained = positions_constrained.at[indices.hydrogen2].set(pos_h2_c)
 
-  return R_constrained
+  return positions_constrained
 
 
 def _settle_water_batch(
-  r_O_old: Array,
-  r_H1_old: Array,
-  r_H2_old: Array,
-  r_O_new: Array,
-  r_H1_new: Array,
-  r_H2_new: Array,
-  r_OH: float,
-  r_HH: float,
-  m_O: float,
-  m_H: float,
+  pos_oxygen_old: Array,
+  pos_h1_old: Array,
+  pos_h2_old: Array,
+  pos_oxygen_new: Array,
+  pos_h1_new: Array,
+  pos_h2_new: Array,
+  target_bond_length_oh: float,
+  target_dist_hh: float,
+  mass_oxygen: float,
+  mass_hydrogen: float,
   box: Array | None = None,
 ) -> tuple[Array, Array, Array]:
-  """SETTLE algorithm for a batch of water molecules.
+  r"""Analytical SETTLE algorithm for a batch of water molecules.
 
-  This implements a simplified but robust version of SETTLE that:
-  1. Moves to center of mass frame
-  2. Reconstructs the ideal water geometry
-  3. Aligns it with the unconstrained motion direction
+  Process:
+  1.  **Unwrap**: Apply minimum image convention to handle PBC crossings.
+  2.  **COM Frame**: Move to center of mass of unconstrained configuration.
+  3.  **Local Frame**: Construct orthonormal axes $(\hat{x}, \hat{y}, \hat{z})$ from old positions.
+  4.  **Ideal Geometry**: Define ideal $C_{2v}$ water triangle in local COM frame.
+  5.  **Rotation**: Project unconstrained motion onto local axes to find optimal in-plane rotation $\phi$.
+  6.  **Transform**: Reconstruct positions and transform back to global frame.
 
-  For numerical stability, we use iterative refinement after the analytical step.
+  Notes:
+  Preserves COM position while correcting internal bond lengths and angles.
+  Implemented according to Miyamoto & Kollman (1992).
 
-  If box is provided, applies minimum image convention to handle positions
-  that have wrapped across periodic boundaries.
+  Args:
+      r_O_old, r_H1_old, r_H2_old: Old positions.
+      r_O_new, r_H1_new, r_H2_new: Unconstrained new positions.
+      r_OH: Target O-H distance.
+      r_HH: Target H-H distance.
+      m_O, m_H: Masses.
+      box: Periodic box dimensions.
+
+  Returns:
+      Tuple of constrained positions (r_O_c, r_H1_c, r_H2_c).
   """
   # Apply minimum image convention if box is provided
   # This unwraps R_new relative to R_old to handle PBC crossings
   if box is not None:
 
-    def unwrap(r_new, r_old):
-      delta = r_new - r_old
+    def unwrap(pos_new, pos_old):
+      delta = pos_new - pos_old
       delta = delta - box * jnp.round(delta / box)
-      return r_old + delta
+      return pos_old + delta
 
-    r_O_new = unwrap(r_O_new, r_O_old)
-    r_H1_new = unwrap(r_H1_new, r_H1_old)
-    r_H2_new = unwrap(r_H2_new, r_H2_old)
-  m_total = m_O + 2 * m_H
+    pos_oxygen_new = unwrap(pos_oxygen_new, pos_oxygen_old)
+    pos_h1_new = unwrap(pos_h1_new, pos_h1_old)
+    pos_h2_new = unwrap(pos_h2_new, pos_h2_old)
+  mass_total = mass_oxygen + 2 * mass_hydrogen
 
-  # Step 1: Compute center of mass of new (unconstrained) configuration
-  # The COM motion is preserved - only internal geometry is corrected
-  com_new = (m_O * r_O_new + m_H * r_H1_new + m_H * r_H2_new) / m_total
+  # COM motion is preserved - only internal geometry is corrected
+  com_new = (
+    mass_oxygen * pos_oxygen_new + mass_hydrogen * pos_h1_new + mass_hydrogen * pos_h2_new
+  ) / mass_total
 
-  # Step 2: Get unconstrained positions relative to COM
-  d_O = r_O_new - com_new  # (N_waters, 3)
+  delta_oxygen = pos_oxygen_new - com_new  # (N_waters, 3)
 
-  # Step 3: Build rotation frame from the old geometry
-  # This defines how we orient the ideal triangle
-  com_old = (m_O * r_O_old + m_H * r_H1_old + m_H * r_H2_old) / m_total
+  com_old = (
+    mass_oxygen * pos_oxygen_old + mass_hydrogen * pos_h1_old + mass_hydrogen * pos_h2_old
+  ) / mass_total
 
-  d_O_old = r_O_old - com_old
-  d_H1_old = r_H1_old - com_old
-  d_H2_old = r_H2_old - com_old
+  delta_oxygen_old = pos_oxygen_old - com_old
+  delta_h1_old = pos_h1_old - com_old
+  delta_h2_old = pos_h2_old - com_old
 
-  # Step 4: Build ideal water geometry in local frame
-  # The ideal TIP3P water has:
-  # - O at distance ra from COM along +Y axis
-  # - H1 at distance rb from COM, offset in +X
-  # - H2 at distance rb from COM, offset in -X
+  # The ideal TIP3P water geometry:
+  dist_oh_mid = jnp.sqrt(target_bond_length_oh**2 - (target_dist_hh / 2) ** 2)
 
-  # Distance from O to midpoint of H-H
-  # In isoceles triangle: cos(theta/2) = (r_HH/2) / r_OH gives the geometry
-  # Actually: r_om = sqrt(r_OH^2 - (r_HH/2)^2)
-  r_om = jnp.sqrt(r_OH**2 - (r_HH / 2) ** 2)
-
-  # In COM frame, O is at (0, ra) and H midpoint is at (0, -rb)
-  # where m_O * ra = m_H * (2 * rb) / (m_O + 2*m_H) ... mass weighting
-  # ra = 2 * m_H * r_om / m_total
-  # rb = m_O * r_om / m_total
-  ra = 2 * m_H * r_om / m_total  # O to COM distance
-  rb = m_O * r_om / m_total  # H-midpoint to COM distance
-
-  # rc = half of H-H distance
-  rc = r_HH / 2
-
-  # Step 5: Determine rotation using weighted average of unconstrained directions
-  # We use the old geometry to define axes and project unconstrained motion
+  # In COM frame, O is at (0, dist_O_to_COM) and H midpoint is at (0, -dist_H_mid_to_COM)
+  dist_O_to_COM = 2 * mass_hydrogen * dist_oh_mid / mass_total
+  dist_H_mid_to_COM = mass_oxygen * dist_oh_mid / mass_total
+  half_dist_hh = target_dist_hh / 2
 
   # Y axis: from H-midpoint toward O (in old geometry)
-  midpoint_old = 0.5 * (d_H1_old + d_H2_old)
-  axis_y = d_O_old - midpoint_old
+  midpoint_old = 0.5 * (delta_h1_old + delta_h2_old)
+  axis_y = delta_oxygen_old - midpoint_old
   len_y = jnp.linalg.norm(axis_y, axis=-1, keepdims=True) + 1e-12
   axis_y = axis_y / len_y  # (N_waters, 3)
 
@@ -209,162 +201,147 @@ def _settle_water_batch(
   # Recompute y to ensure orthonormality
   axis_y = jnp.cross(axis_z, axis_x)
 
-  # Step 6: Project unconstrained positions onto local axes
-  # to get the rotation implied by the unconstrained motion
-
   # Where does O want to be?
-  O_proj_x = jnp.sum(d_O * axis_x, axis=-1)  # (N_waters,)
-  O_proj_y = jnp.sum(d_O * axis_y, axis=-1)
+  pos_O_proj_x = jnp.sum(delta_oxygen * axis_x, axis=-1)  # (N_waters,)
+  pos_O_proj_y = jnp.sum(delta_oxygen * axis_y, axis=-1)
 
   # Determine in-plane rotation angle from O position
-  # O should be at (0, ra) in unrotated frame
-  # If unconstrained O is at (x, y) in local frame, rotation ~ atan2(x, y)
-  phi = jnp.arctan2(O_proj_x, O_proj_y + 1e-12)
+  # O should be at (0, dist_O_to_COM) in unrotated frame
+  phi = jnp.arctan2(pos_O_proj_x, pos_O_proj_y + 1e-12)
 
   # Out-of-plane tilt from z component
   # For small tilts, we can include this effect
   # But for simplicity, we project to xy plane (ignore tilt for now)
-
-  # Step 7: Construct ideal positions with rotation phi
   cos_phi = jnp.cos(phi)
   sin_phi = jnp.sin(phi)
 
-  # O: (0, ra) rotated by phi -> (-ra*sin, ra*cos)
-  O_x = -ra * sin_phi
-  O_y = ra * cos_phi
-  O_z = jnp.zeros_like(O_x)
+  # O: (0, dist_O_to_COM) rotated by phi -> (-dist_O_to_COM*sin, dist_O_to_COM*cos)
+  oxygen_x = -dist_O_to_COM * sin_phi
+  oxygen_y = dist_O_to_COM * cos_phi
+  oxygen_z = jnp.zeros_like(oxygen_x)
 
-  # H1: (rc, -rb) rotated by phi
-  H1_x = rc * cos_phi - (-rb) * sin_phi
-  H1_y = rc * sin_phi + (-rb) * cos_phi
-  H1_z = jnp.zeros_like(H1_x)
+  # H1: (half_dist_hh, -dist_H_mid_to_COM) rotated by phi
+  h1_x = half_dist_hh * cos_phi - (-dist_H_mid_to_COM) * sin_phi
+  h1_y = half_dist_hh * sin_phi + (-dist_H_mid_to_COM) * cos_phi
+  h1_z = jnp.zeros_like(h1_x)
 
-  # H2: (-rc, -rb) rotated by phi
-  H2_x = -rc * cos_phi - (-rb) * sin_phi
-  H2_y = -rc * sin_phi + (-rb) * cos_phi
-  H2_z = jnp.zeros_like(H2_x)
+  # H2: (-half_dist_hh, -dist_H_mid_to_COM) rotated by phi
+  h2_x = -half_dist_hh * cos_phi - (-dist_H_mid_to_COM) * sin_phi
+  h2_y = -half_dist_hh * sin_phi + (-dist_H_mid_to_COM) * cos_phi
+  h2_z = jnp.zeros_like(h2_x)
+  pos_oxygen_c = (
+    com_new + oxygen_x[:, None] * axis_x + oxygen_y[:, None] * axis_y + oxygen_z[:, None] * axis_z
+  )
 
-  # Step 8: Transform back to global coordinates
-  r_O_c = com_new + O_x[:, None] * axis_x + O_y[:, None] * axis_y + O_z[:, None] * axis_z
+  pos_h1_c = com_new + h1_x[:, None] * axis_x + h1_y[:, None] * axis_y + h1_z[:, None] * axis_z
 
-  r_H1_c = com_new + H1_x[:, None] * axis_x + H1_y[:, None] * axis_y + H1_z[:, None] * axis_z
+  pos_h2_c = com_new + h2_x[:, None] * axis_x + h2_y[:, None] * axis_y + h2_z[:, None] * axis_z
 
-  r_H2_c = com_new + H2_x[:, None] * axis_x + H2_y[:, None] * axis_y + H2_z[:, None] * axis_z
-
-  return r_O_c, r_H1_c, r_H2_c
+  return pos_oxygen_c, pos_h1_c, pos_h2_c
 
 
 def settle_velocities(
-  V: Array,
-  R_old: Array,
-  R_new: Array,
-  water_indices: Array,
+  velocities: Array,
+  positions_old: Array,
+  positions_constrained: Array,
+  water_indices: WaterIndicesArray,
   dt: float,
-  m_O: float = 15.999,
-  m_H: float = 1.008,
+  mass_oxygen: float = 15.999,
+  mass_hydrogen: float = 1.008,
 ) -> Array:
-  """Apply velocity constraints after position SETTLE.
+  r"""Apply velocity constraints after position SETTLE.
 
-  After SETTLE corrects positions, the velocities need to be corrected
-  to be consistent with the constrained motion. This is the RATTLE-like
-  velocity correction for SETTLE.
+  Process:
+  1.  **Extract Indices**: Use `WaterIndices` for O, H1, H2.
+  2.  **Bond Vectors**: Compute normalized bond vectors $\hat{n}_{ij}$ from constrained positions.
+  3.  **RATTLE Loop**: Iterate velocity corrections to satisfy $\vec{v}_{ij} \cdot \hat{n}_{ij} = 0$.
+
+  Notes:
+  This ensures velocities are consistent with the rigid constraints.
+  Typically converges in 1-5 iterations.
 
   Args:
       V: Unconstrained velocities (N, 3).
-      R_old: Positions before integration step (N, 3).
-      R_new: Constrained positions after SETTLE (N, 3).
-      water_indices: Water molecule indices (N_waters, 3).
+      R_old, R_new: Old and constrained new positions.
+      water_indices: (N_waters, 3).
       dt: Timestep.
-      m_O: Oxygen mass (amu).
-      m_H: Hydrogen mass (amu).
+      m_O, m_H: Masses.
 
   Returns:
-      Velocities consistent with constrained motion.
+      Constrained velocities array.
   """
   if water_indices.shape[0] == 0:
-    return V
+    return velocities
 
-  # Compute the implicit velocity from position change
-  # v_implied = (R_new - R_old) / dt
-
-  # The velocity constraint requires dot(v_ij, r_ij) = 0 for all bonds
-  # We use iterative RATTLE for velocity correction
-
-  O_idx = water_indices[:, 0]
-  H1_idx = water_indices[:, 1]
-  H2_idx = water_indices[:, 2]
+  indices = WaterIndices.from_row(water_indices.T)
 
   # Get constrained positions
-  r_O = R_new[O_idx]
-  r_H1 = R_new[H1_idx]
-  r_H2 = R_new[H2_idx]
+  pos_oxygen = positions_constrained[indices.oxygen]
+  pos_h1 = positions_constrained[indices.hydrogen1]
+  pos_h2 = positions_constrained[indices.hydrogen2]
 
   # Bond vectors
-  r_OH1 = r_H1 - r_O  # (N_waters, 3)
-  r_OH2 = r_H2 - r_O
-  r_H1H2 = r_H2 - r_H1
+  vec_oh1 = pos_h1 - pos_oxygen  # (N_waters, 3)
+  vec_oh2 = pos_h2 - pos_oxygen
+  vec_h1h2 = pos_h2 - pos_h1
 
   # Normalize bond vectors
-  d_OH1 = jnp.linalg.norm(r_OH1, axis=-1, keepdims=True) + 1e-10
-  d_OH2 = jnp.linalg.norm(r_OH2, axis=-1, keepdims=True) + 1e-10
-  d_H1H2 = jnp.linalg.norm(r_H1H2, axis=-1, keepdims=True) + 1e-10
+  dist_oh1 = jnp.linalg.norm(vec_oh1, axis=-1, keepdims=True) + 1e-10
+  dist_oh2 = jnp.linalg.norm(vec_oh2, axis=-1, keepdims=True) + 1e-10
+  dist_h1h2 = jnp.linalg.norm(vec_h1h2, axis=-1, keepdims=True) + 1e-10
 
-  n_OH1 = r_OH1 / d_OH1
-  n_OH2 = r_OH2 / d_OH2
-  n_H1H2 = r_H1H2 / d_H1H2
+  norm_vec_oh1 = vec_oh1 / dist_oh1
+  norm_vec_oh2 = vec_oh2 / dist_oh2
+  norm_vec_h1h2 = vec_h1h2 / dist_h1h2
 
   # Inverse masses
-  inv_m_O = 1.0 / m_O
-  inv_m_H = 1.0 / m_H
+  inv_mass_oxygen = 1.0 / mass_oxygen
+  inv_mass_hydrogen = 1.0 / mass_hydrogen
 
-  def correct_velocities(V_curr):
+  def correct_velocities(vel_curr):
     """Single iteration of velocity corrections."""
-    v_O = V_curr[O_idx]
-    v_H1 = V_curr[H1_idx]
-    v_H2 = V_curr[H2_idx]
+    vel_oxygen = vel_curr[indices.oxygen]
+    vel_h1 = vel_curr[indices.hydrogen1]
+    vel_h2 = vel_curr[indices.hydrogen2]
 
     # Relative velocities along bonds
-    v_OH1 = v_H1 - v_O
-    v_OH2 = v_H2 - v_O
-    v_H1H2 = v_H2 - v_H1
+    rel_vel_oh1 = vel_h1 - vel_oxygen
+    rel_vel_oh2 = vel_h2 - vel_oxygen
+    rel_vel_h1h2 = vel_h2 - vel_h1
 
     # Velocity components along bonds (should be zero)
-    dot_OH1 = jnp.sum(v_OH1 * n_OH1, axis=-1)
-    dot_OH2 = jnp.sum(v_OH2 * n_OH2, axis=-1)
-    dot_H1H2 = jnp.sum(v_H1H2 * n_H1H2, axis=-1)
+    dot_oh1 = jnp.sum(rel_vel_oh1 * norm_vec_oh1, axis=-1)
+    dot_oh2 = jnp.sum(rel_vel_oh2 * norm_vec_oh2, axis=-1)
+    dot_h1h2 = jnp.sum(rel_vel_h1h2 * norm_vec_h1h2, axis=-1)
 
     # Compute Lagrange multipliers
-    # For bond i-j: lambda = -dot(v_ij, n_ij) / (1/m_i + 1/m_j)
-    lambda_OH1 = -dot_OH1 / (inv_m_O + inv_m_H)
-    lambda_OH2 = -dot_OH2 / (inv_m_O + inv_m_H)
-    lambda_H1H2 = -dot_H1H2 / (2 * inv_m_H)
+    lambda_oh1 = -dot_oh1 / (inv_mass_oxygen + inv_mass_hydrogen)
+    lambda_oh2 = -dot_oh2 / (inv_mass_oxygen + inv_mass_hydrogen)
+    lambda_h1h2 = -dot_h1h2 / (2 * inv_mass_hydrogen)
 
     # Velocity corrections
-    # dv_i = lambda * n_ij / m_i
-    # dv_j = -lambda * n_ij / m_j
+    dv_oxygen_from_oh1 = -lambda_oh1[:, None] * norm_vec_oh1 * inv_mass_oxygen
+    dv_h1_from_oh1 = lambda_oh1[:, None] * norm_vec_oh1 * inv_mass_hydrogen
 
-    dv_O_from_OH1 = -lambda_OH1[:, None] * n_OH1 * inv_m_O
-    dv_H1_from_OH1 = lambda_OH1[:, None] * n_OH1 * inv_m_H
+    dv_oxygen_from_oh2 = -lambda_oh2[:, None] * norm_vec_oh2 * inv_mass_oxygen
+    dv_h2_from_oh2 = lambda_oh2[:, None] * norm_vec_oh2 * inv_mass_hydrogen
 
-    dv_O_from_OH2 = -lambda_OH2[:, None] * n_OH2 * inv_m_O
-    dv_H2_from_OH2 = lambda_OH2[:, None] * n_OH2 * inv_m_H
-
-    dv_H1_from_H1H2 = -lambda_H1H2[:, None] * n_H1H2 * inv_m_H
-    dv_H2_from_H1H2 = lambda_H1H2[:, None] * n_H1H2 * inv_m_H
+    dv_h1_from_h1h2 = -lambda_h1h2[:, None] * norm_vec_h1h2 * inv_mass_hydrogen
+    dv_h2_from_h1h2 = lambda_h1h2[:, None] * norm_vec_h1h2 * inv_mass_hydrogen
 
     # Accumulate corrections
-    dv_O = dv_O_from_OH1 + dv_O_from_OH2
-    dv_H1 = dv_H1_from_OH1 + dv_H1_from_H1H2
-    dv_H2 = dv_H2_from_OH2 + dv_H2_from_H1H2
+    dv_oxygen = dv_oxygen_from_oh1 + dv_oxygen_from_oh2
+    dv_h1 = dv_h1_from_oh1 + dv_h1_from_h1h2
+    dv_h2 = dv_h2_from_oh2 + dv_h2_from_h1h2
 
     # Apply corrections
-    V_new = V_curr.at[O_idx].add(dv_O)
-    V_new = V_new.at[H1_idx].add(dv_H1)
-    V_new = V_new.at[H2_idx].add(dv_H2)
-    return V_new
+    vel_new = vel_curr.at[indices.oxygen].add(dv_oxygen)
+    vel_new = vel_new.at[indices.hydrogen1].add(dv_h1)
+    vel_new = vel_new.at[indices.hydrogen2].add(dv_h2)
+    return vel_new
 
   # Iterate a few times for convergence
-  return jax.lax.fori_loop(0, 5, lambda _i, v: correct_velocities(v), V)
+  return jax.lax.fori_loop(0, 5, lambda _i, v: correct_velocities(v), velocities)
 
 
 def get_water_indices(n_protein_atoms: int, n_waters: int) -> Array:
@@ -399,34 +376,41 @@ def settle_langevin(
   gamma: float = 1.0,
   mass: float | Array = 1.0,
   water_indices: Array | None = None,
-  r_OH: float = TIP3P_ROH,
-  r_HH: float = TIP3P_RHH,
-  m_O: float = 15.999,
-  m_H: float = 1.008,
+  target_bond_length_oh: float = TIP3P_BOND_LENGTH_OH,
+  target_dist_hh: float = TIP3P_DIST_HH,
+  mass_oxygen: float = 15.999,
+  mass_hydrogen: float = 1.008,
   box: Array | None = None,
 ):
-  """Langevin dynamics integrator with SETTLE constraints for water.
+  r"""Langevin dynamics integrator with SETTLE constraints for water.
 
-  This combines the BAOAB Langevin integrator with SETTLE position
-  constraints and velocity corrections for rigid water molecules.
+  Process:
+  1.  **Half-B**: Update momenta by half timestep.
+  2.  **Half-A**: Update positions by half timestep.
+  3.  **O**: Stochastic velocity update (Ornstein-Uhlenbeck pulse).
+  4.  **Half-A**: Second half position update.
+  5.  **SETTLE-Pos**: Correct water positions analytically.
+  6.  **Force**: Recompute forces at constrained positions.
+  7.  **Half-B**: Final half velocity update.
+  8.  **SETTLE-Vel**: Final velocity constraint correction.
+
+  Notes:
+  Combines BAOAB Langevin integrator with analytical rigid water constraints.
 
   Args:
-      energy_or_force_fn: Energy or force function.
-      shift_fn: Position shift function (for PBC).
-      dt: Timestep (ps).
-      kT: Thermal energy (temperature * Boltzmann constant).
-      gamma: Friction coefficient (1/ps).
-      mass: Mass array or scalar.
-      water_indices: Array of shape (N_waters, 3) with water atom indices.
-      r_OH: Target O-H bond length (Å).
-      r_HH: Target H-H distance (Å).
-      m_O: Oxygen mass (amu).
-      m_H: Hydrogen mass (amu).
-      box: Optional box dimensions for PBC (3,). If provided, applies
-          minimum image convention to handle periodic boundary crossings.
+      energy_or_force_fn: System force definition.
+      shift_fn: Displacement function.
+      dt: Timestep.
+      kT: Thermal energy target.
+      gamma: Friction coefficient.
+      mass: Atomic masses.
+      water_indices: (N_waters, 3) indices.
+      r_OH, r_HH: Target water geometry.
+      m_O, m_H: Solvent masses.
+      box: Periodic box dimensions.
 
   Returns:
-      (init_fn, apply_fn) tuple for JAX-MD style integration.
+      (init_fn, apply_fn) pair.
   """
   force_fn = quantity.canonicalize_force(energy_or_force_fn)
 
@@ -459,44 +443,90 @@ def settle_langevin(
     _dt = kwargs.pop("dt", dt)
     _kT = kwargs.pop("kT", kT)
 
-    from prolix.physics.simulate import NVTLangevinState
-
     # Store old positions for SETTLE
-    R_old = state.position
+    positions_old = state.position
 
-    # Step 1: B (half velocity update)
-    momentum = state.momentum + 0.5 * _dt * state.force
+    momentum = _langevin_step_b(state.momentum, state.force, _dt)
+    position = _langevin_step_a(state.position, momentum, state.mass, _dt, shift_fn)
 
-    # Step 2: A (half position update)
-    velocity = momentum / state.mass
-    position = shift_fn(state.position, 0.5 * _dt * velocity)
+    # Stochastic update (BAOAB "O" step)
+    momentum, key = _langevin_step_o(momentum, state.mass, gamma, _dt, _kT, state.rng)
 
-    # Step 3: O (stochastic update)
-    c1 = jnp.exp(-gamma * _dt)
-    c2 = jnp.sqrt(1 - c1**2)
+    position = _langevin_step_a(position, momentum, state.mass, _dt, shift_fn)
 
-    key, split = random.split(state.rng)
-    noise = random.normal(split, state.momentum.shape)
-    momentum = c1 * momentum + c2 * jnp.sqrt(state.mass * _kT) * noise
+    # SETTLE position constraints
+    position = settle_positions(
+      position,
+      positions_old,
+      water_indices,
+      target_bond_length_oh,
+      target_dist_hh,
+      mass_oxygen,
+      mass_hydrogen,
+      box,
+    )
 
-    # Step 4: A (second half position update)
-    velocity = momentum / state.mass
-    position = shift_fn(position, 0.5 * _dt * velocity)
-
-    # Step 5: SETTLE position constraints (with PBC handling if box provided)
-    position = settle_positions(position, R_old, water_indices, r_OH, r_HH, m_O, m_H, box)
-
-    # Step 6: Force update with constrained positions
     force = force_fn(position, **kwargs)
+    momentum = _langevin_step_b(momentum, force, _dt)
 
-    # Step 7: B (second half velocity update)
-    momentum = momentum + 0.5 * _dt * force
+    # SETTLE velocity constraints
+    momentum = _langevin_settle_vel(
+      momentum,
+      positions_old,
+      position,
+      state.mass,
+      water_indices,
+      _dt,
+      mass_oxygen,
+      mass_hydrogen,
+    )
 
-    # Step 8: SETTLE velocity constraints
-    velocity = momentum / state.mass
-    velocity = settle_velocities(velocity, R_old, position, water_indices, _dt, m_O, m_H)
-    momentum = velocity * state.mass
+    from prolix.physics.simulate import NVTLangevinState
 
     return NVTLangevinState(position, momentum, force, state.mass, key)
 
   return init_fn, apply_fn
+
+
+def _langevin_step_b(momentum: Array, force: Array, dt: float) -> Array:
+  """Half-step velocity update (B step in BAOAB)."""
+  return momentum + 0.5 * dt * force
+
+
+def _langevin_step_a(
+  position: Array, momentum: Array, mass: Array, dt: float, shift_fn: Callable
+) -> Array:
+  """Half-step position update (A step in BAOAB)."""
+  velocity = momentum / mass
+  return shift_fn(position, 0.5 * dt * velocity)
+
+
+def _langevin_step_o(
+  momentum: Array, mass: Array, gamma: float, dt: float, kT: float, rng: Array
+) -> tuple[Array, Array]:
+  """Stochastic velocity update (O step in BAOAB)."""
+  c1 = jnp.exp(-gamma * dt)
+  c2 = jnp.sqrt(1 - c1**2)
+
+  key, split = jax.random.split(rng)
+  noise = jax.random.normal(split, momentum.shape)
+  momentum_new = c1 * momentum + c2 * jnp.sqrt(mass * kT) * noise
+  return momentum_new, key
+
+
+def _langevin_settle_vel(
+  momentum: Array,
+  positions_old: Array,
+  positions_new: Array,
+  mass: Array,
+  water_indices: WaterIndicesArray,
+  dt: float,
+  mass_oxygen: float,
+  mass_hydrogen: float,
+) -> Array:
+  """Apply SETTLE velocity constraints and update momentum."""
+  velocity = momentum / mass
+  velocity = settle_velocities(
+    velocity, positions_old, positions_new, water_indices, dt, mass_oxygen, mass_hydrogen
+  )
+  return velocity * mass
