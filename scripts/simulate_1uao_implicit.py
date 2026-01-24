@@ -36,7 +36,7 @@ def main():
     print(f"Loading {pdb_path}...")
     
     # Parse structure with Rust parser (handles H-addition and parameterization)
-    # Using proxide.io.parsing.rust.parse_structure which returns a Protein (AtomicSystem)
+    # Using proxide.io.parsing.backend.parse_structure which returns a Protein (AtomicSystem)
     spec = OutputSpec(
         coord_format=CoordFormat.Full,
         force_field=ff_path,

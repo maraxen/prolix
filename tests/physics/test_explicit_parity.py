@@ -1,7 +1,7 @@
 """Explicit solvent parity tests between Prolix and OpenMM.
 
 This module tests the explicit solvent (PBC/PME) physics implementation
-by comparing energy values against OpenMM. Uses proxide.io.parsing.rust
+by comparing energy values against OpenMM. Uses proxide.io.parsing.backend
 for structure loading and parameterization.
 """
 

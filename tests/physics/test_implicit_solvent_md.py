@@ -9,7 +9,7 @@ from pathlib import Path
 import jax.numpy as jnp
 import pytest
 from jax_md import space
-from proxide.io.parsing.rust import OutputSpec, parse_structure
+from proxide.io.parsing.backend import OutputSpec, parse_structure
 
 # Paths
 DATA_DIR = Path(__file__).parent.parent.parent / "data" / "pdb"

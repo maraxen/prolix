@@ -10,7 +10,7 @@ import jax
 import jax.numpy as jnp
 import pytest
 from jax_md import space
-from proxide.io.parsing.rust import OutputSpec, parse_structure
+from proxide.io.parsing.backend import OutputSpec, parse_structure
 
 from prolix.physics import bonded
 

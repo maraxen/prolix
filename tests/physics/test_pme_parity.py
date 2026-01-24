@@ -10,7 +10,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
-from proxide.io.parsing.rust import OutputSpec, parse_structure
+from proxide.io.parsing.backend import OutputSpec, parse_structure
 
 # Enable x64 for physics
 jax.config.update("jax_enable_x64", True)

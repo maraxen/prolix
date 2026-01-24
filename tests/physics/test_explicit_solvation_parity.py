@@ -204,7 +204,7 @@ class TestProlixSolvation:
   def test_prolix_solvation_basic(self):
     """Test that Prolix solvation runs without errors."""
     from proxide import CoordFormat, OutputSpec
-    from proxide.io.parsing.rust import parse_structure
+    from proxide.io.parsing.backend import parse_structure
 
     pdb_path = DATA_DIR / "1UAO.pdb"
     if not pdb_path.exists():
@@ -271,7 +271,7 @@ class TestProlixSolvation:
   def test_water_geometry_after_solvation(self):
     """Test that solvated waters have correct O-H and H-H distances."""
     from proxide import CoordFormat, OutputSpec
-    from proxide.io.parsing.rust import parse_structure
+    from proxide.io.parsing.backend import parse_structure
 
     pdb_path = DATA_DIR / "1UAO.pdb"
     if not pdb_path.exists():
