@@ -16,8 +16,7 @@ from prolix.utils import topology
 
 if TYPE_CHECKING:
   from collections.abc import Callable
-
-  from proxide.md import SystemParams
+  from proxide.core.containers import Protein
 
 Array = util.Array
 
@@ -49,7 +48,7 @@ def compute_dihedral_angles(
 
 def make_energy_fn(
   displacement_fn: space.DisplacementFn,
-  system_params: SystemParams,
+  system: Protein,
   neighbor_list: partition.NeighborList | None = None,
   exclusion_spec: nl.ExclusionSpec | None = None,
   dielectric_constant: float = 1.0,
@@ -71,7 +70,7 @@ def make_energy_fn(
 
   Args:
       displacement_fn: JAX MD displacement function.
-      system_params: System parameters from `proxide.md`.
+      system: Protein structure container.
       neighbor_list: Optional neighbor list. If provided, non-bonded terms
                      will use it. If None, they will be N^2 (slow).
                      NOTE: For proteins, N^2 is often acceptable for small systems,
@@ -104,7 +103,7 @@ def make_energy_fn(
       also pre-computed if an ExclusionSpec is provided.
 
   """
-  cmap_grids = system_params.get("cmap_energy_grids")
+  cmap_grids = system.cmap_energy_grids
   cmap_coeffs_precomputed = None
 
   if cmap_grids is not None and cmap_grids.shape[0] > 0:
@@ -115,45 +114,47 @@ def make_energy_fn(
 
   bond_energy_fn = bonded.make_bond_energy_fn(
     displacement_fn,
-    jnp.asarray(system_params["bonds"]),
-    jnp.asarray(system_params["bond_params"]),
+    jnp.asarray(system.bonds if system.bonds is not None else jnp.zeros((0, 2), dtype=jnp.int32)),
+    jnp.asarray(system.bond_params if system.bond_params is not None else jnp.zeros((0, 2), dtype=jnp.float32)),
   )
 
   angle_energy_fn = bonded.make_angle_energy_fn(
     displacement_fn,
-    jnp.asarray(system_params["angles"]),
-    jnp.asarray(system_params["angle_params"]),
+    jnp.asarray(system.angles if system.angles is not None else jnp.zeros((0, 3), dtype=jnp.int32)),
+    jnp.asarray(system.angle_params if system.angle_params is not None else jnp.zeros((0, 2), dtype=jnp.float32)),
   )
 
   dihedral_energy_fn = bonded.make_dihedral_energy_fn(
     displacement_fn,
-    jnp.asarray(system_params["dihedrals"]),
-    jnp.asarray(system_params["dihedral_params"]),
+    jnp.asarray(system.proper_dihedrals if system.proper_dihedrals is not None else jnp.zeros((0, 4), dtype=jnp.int32)),
+    jnp.asarray(system.dihedral_params if system.dihedral_params is not None else jnp.zeros((0, 3), dtype=jnp.float32)),
   )
 
   improper_energy_fn = bonded.make_dihedral_energy_fn(
     displacement_fn,
-    jnp.asarray(system_params["impropers"]),
-    jnp.asarray(system_params["improper_params"]),
+    jnp.asarray(system.impropers if system.impropers is not None else jnp.zeros((0, 4), dtype=jnp.int32)),
+    jnp.asarray(system.improper_params if system.improper_params is not None else jnp.zeros((0, 3), dtype=jnp.float32)),
   )
 
   ub_energy_fn = bonded.make_bond_energy_fn(
     displacement_fn,
-    jnp.asarray(system_params.get("urey_bradley_bonds", jnp.zeros((0, 2), dtype=jnp.int32))),
-    jnp.asarray(system_params.get("urey_bradley_params", jnp.zeros((0, 2), dtype=jnp.float32))),
+    jnp.asarray(system.urey_bradley_bonds if system.urey_bradley_bonds is not None else jnp.zeros((0, 2), dtype=jnp.int32)),
+    jnp.asarray(system.urey_bradley_params if system.urey_bradley_params is not None else jnp.zeros((0, 2), dtype=jnp.float32)),
   )
 
-  vs_def = system_params.get("virtual_site_def", jnp.zeros((0, 4), dtype=jnp.int32))
-  vs_params = system_params.get("virtual_site_params", jnp.zeros((0, 12), dtype=jnp.float32))
+  vs_def = system.virtual_site_def if system.virtual_site_def is not None else jnp.zeros((0, 4), dtype=jnp.int32)
+  vs_params = system.virtual_site_params if system.virtual_site_params is not None else jnp.zeros((0, 12), dtype=jnp.float32)
   has_virtual_sites = vs_params.shape[0] > 0
 
-  charges = system_params["charges"]
-  sigmas = system_params["sigmas"]
-  epsilons = system_params["epsilons"]
+  charges = system.charges
+  sigmas = system.sigmas
+  epsilons = system.epsilons
 
-  scale_matrix_vdw = system_params.get("scale_matrix_vdw")
-  scale_matrix_elec = system_params.get("scale_matrix_elec")
-  exclusion_mask = system_params.get("exclusion_mask")
+  assert sigmas.shape[0] == charges.shape[0], f"Sigmas shape mismatch: {sigmas.shape} vs {charges.shape}"
+
+  scale_matrix_vdw = system.scale_matrix_vdw if hasattr(system, "scale_matrix_vdw") else None
+  scale_matrix_elec = system.scale_matrix_elec if hasattr(system, "scale_matrix_elec") else None
+  exclusion_mask = system.exclusion_mask
 
   if exclusion_spec is not None:
     excl_indices, excl_scales_vdw, excl_scales_elec = nl.map_exclusions_to_dense_padded(
@@ -232,8 +233,8 @@ def make_energy_fn(
   # -------------------------------------------------------------------------
   @jax.checkpoint
   def compute_electrostatics(r, neighbor_idx=None):
-    if "gb_radii" in system_params and system_params["gb_radii"] is not None:
-      radii = system_params["gb_radii"]
+    if system.radii is not None:
+      radii = system.radii
     else:
       radii = sigmas * 0.5
 
@@ -262,7 +263,7 @@ def make_energy_fn(
         gb_mask = exclusion_mask
         gb_energy_mask = None
 
-      scaled_radii = system_params.get("scaled_radii")
+      scaled_radii = system.scaled_radii
 
       if neighbor_idx is None:
         e_gb, born_radii = generalized_born.compute_gb_energy(
@@ -472,8 +473,8 @@ def make_energy_fn(
     if not implicit_solvent or born_radii is None:
       return 0.0
 
-    if "gb_radii" in system_params and system_params["gb_radii"] is not None:
-      radii = system_params["gb_radii"]
+    if system.radii is not None:
+      radii = system.radii
     else:
       radii = sigmas * 0.5
 
@@ -485,15 +486,15 @@ def make_energy_fn(
     )
 
   def compute_cmap_term(r):
-    if "cmap_torsions" not in system_params or "cmap_energy_grids" not in system_params:
+    if system.cmap_torsions is None or system.cmap_energy_grids is None:
       return 0.0
 
-    cmap_torsions = system_params["cmap_torsions"]
+    cmap_torsions = system.cmap_torsions
     if cmap_torsions.shape[0] == 0:
       return 0.0
 
-    cmap_indices = system_params["cmap_indices"]
-    cmap_grids = system_params["cmap_energy_grids"]
+    cmap_indices = system.cmap_indices
+    cmap_grids = system.cmap_energy_grids
 
     torsion_indices = jax.vmap(CmapTorsionIndices.from_row)(cmap_torsions)
 
@@ -508,7 +509,7 @@ def make_energy_fn(
   # -------------------------------------------------------------------------
 
   # Robust Topological Search for Exclusions
-  pme_bonds = system_params.get("bonds")
+  pme_bonds = system.bonds
   n_atoms = charges.shape[0]
 
   if pme_bonds is not None and pme_bonds.shape[0] > 0:
@@ -521,7 +522,7 @@ def make_energy_fn(
     pme_idx_12 = pme_idx_13 = pme_idx_14 = empty
 
   # Scaling for 1-4
-  coul_14_scale = system_params.get("coulomb14scale", 0.83333333)
+  coul_14_scale = system.coulomb14scale if system.coulomb14scale is not None else 0.83333333
 
   def compute_lj_tail_correction(
     box: Array, sigma: Array, epsilon: Array, cutoff: float, N_atoms: int

@@ -24,6 +24,7 @@ if TYPE_CHECKING:
     AtomicSystem,
     MolecularTopology,
   )
+  from proxide.core.containers import Protein
 
 try:
   from array_record.python.array_record_module import ArrayRecordWriter
@@ -37,7 +38,7 @@ from prolix.physics import system as physics_system
 if TYPE_CHECKING:
   from collections.abc import Sequence
 
-  from proxide.md import SystemParams
+  from proxide.types import SystemParams
 
 m.patch()
 
@@ -214,7 +215,7 @@ class TrajectoryWriter:
 
 
 def run_simulation(
-  system: AtomicSystem | SystemParams | None = None,
+  system: AtomicSystem | Protein | SystemParams | None = None,
   initial_positions: Array | None = None,
   spec: SimulationSpec | None = None,
   key: Array | None = None,
@@ -249,7 +250,7 @@ def run_simulation(
   ```
 
   Args:
-      system: `AtomicSystem` object or `SystemParams` dictionary.
+      system: `AtomicSystem`, `Protein`, or `SystemParams` dictionary.
       initial_positions: Initial coordinates (N, 3). Defaults to system coordinates.
       spec: Configuration parameters for the run.
       key: JAX random PRNG key.
@@ -261,6 +262,9 @@ def run_simulation(
   Returns:
       Final `SimulationState` after the specified total time.
   """
+  from prolix.compat import system_params_to_protein
+  from proxide.core.containers import Protein as ProteinCls
+
   # Handle backward compatibility: system_params= kwarg
   if system_params is not None:
     import warnings
@@ -272,9 +276,18 @@ def run_simulation(
     )
     system = system_params
 
-  # Handle hierarchical args: construct AtomicSystem-like interface
-  if topology is not None and state is not None:
-    # Using hierarchical interface - construct system parameters directly
+  # === Input Path Resolution: All paths converge on a Protein object ===
+  protein_system: ProteinCls | None = None
+
+  # Path 0: Already a Protein (new OutputSpec path) — pass through directly
+  if isinstance(system, ProteinCls):
+    protein_system = system
+    if initial_positions is None:
+      initial_positions = jnp.array(protein_system.coordinates).reshape(-1, 3)
+    n_atoms = initial_positions.shape[0]
+
+  # Path 1: Hierarchical PyTree args
+  elif topology is not None and state is not None:
     if initial_positions is None:
       initial_positions = jnp.array(state.coordinates).reshape(-1, 3)
 
@@ -349,16 +362,14 @@ def run_simulation(
       "improper_params": improper_params,
       "gb_radii": radii,
     }
-    system_params = system_params_dict
+    protein_system = system_params_to_protein(system_params_dict)
 
-  # Convert AtomicSystem to SystemParams dict if needed
+  # Path 2: AtomicSystem — extract fields and wrap
   elif system is not None and hasattr(system, "coordinates") and hasattr(system, "charges"):
-    # This is an AtomicSystem - extract fields
     atomic_sys = system
     if initial_positions is None:
       initial_positions = jnp.array(atomic_sys.coordinates).reshape(-1, 3)
 
-    # Build system_params dict from AtomicSystem fields
     n_atoms = initial_positions.shape[0]
     system_params_dict: SystemParams = {
       "charges": jnp.array(atomic_sys.charges)
@@ -396,16 +407,21 @@ def run_simulation(
       else jnp.zeros((0, 3)),
       "gb_radii": jnp.array(atomic_sys.radii) if atomic_sys.radii is not None else None,  # type: ignore[possibly-missing-attribute]
     }
-    system_params = system_params_dict
+    protein_system = system_params_to_protein(system_params_dict)
+
+  # Path 3: Raw dict
   elif system is not None:
-    # Already a dict
-    system_params = system
     if initial_positions is None:
       msg = "initial_positions is required when using system_params dict"
       raise ValueError(msg)
+    n_atoms = initial_positions.shape[0]
+    protein_system = system_params_to_protein(system)
+
   else:
     msg = "Either system or (topology, state) must be provided"
     raise ValueError(msg)
+
+  assert protein_system is not None
 
   # Import jax_md components here to avoid circular imports
   from jax_md import quantity as jax_md_quantity
@@ -437,7 +453,7 @@ def run_simulation(
   # This is required for BOTH neighbor list and N^2 paths to work correctly
   exclusion_spec = spec.exclusion_spec
   if exclusion_spec is None:
-    exclusion_spec = nl.ExclusionSpec.from_system_params(system_params)
+    exclusion_spec = nl.ExclusionSpec.from_protein(protein_system)
     logger.info(
       "Built ExclusionSpec: %d 1-2/1-3 pairs, %d 1-4 pairs",
       len(exclusion_spec.idx_12_13),
@@ -446,7 +462,7 @@ def run_simulation(
 
   energy_fn: Any = physics_system.make_energy_fn(
     displacement_fn,
-    system_params,
+    protein_system,
     exclusion_spec=exclusion_spec,
     implicit_solvent=implicit_solvent,
     box=spec.box,
@@ -611,8 +627,8 @@ def run_simulation(
 
   # Don't pass mass to jax_md (it handles masses internally)
   # The stress_test_stability.py doesn't pass mass and works fine
-  constrained_bonds = system_params.get("constrained_bonds")
-  constrained_lengths = system_params.get("constrained_bond_lengths")
+  constrained_bonds = protein_system.constrained_bonds
+  constrained_lengths = protein_system.constrained_bond_lengths
 
   if (
     constrained_bonds is not None and constrained_lengths is not None and len(constrained_bonds) > 0

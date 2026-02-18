@@ -1,8 +1,14 @@
 """Tests for Parallel Tempering."""
 
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
 import jax.numpy as jnp
 import pytest
-from proxide.md import SystemParams
+
+if TYPE_CHECKING:
+  from proxide.types import SystemParams
 
 from prolix.pt import replica_exchange, temperature
 

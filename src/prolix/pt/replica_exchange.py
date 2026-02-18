@@ -22,7 +22,7 @@ from prolix.pt import temperature
 if TYPE_CHECKING:
   from collections.abc import Callable
 
-  from proxide.md import SystemParams
+  from proxide.types import SystemParams
 
 logger = logging.getLogger(__name__)
 

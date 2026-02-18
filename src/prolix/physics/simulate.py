@@ -17,7 +17,8 @@ from prolix.physics import system
 if TYPE_CHECKING:
   from collections.abc import Callable
 
-  from proxide.md import SystemParams
+  from proxide.core.containers import Protein
+  from proxide.types import SystemParams
 
 Array = util.Array
 
@@ -538,7 +539,7 @@ def run_brownian(
 
 
 def run_simulation(
-  system_params: SystemParams,
+  system_params: SystemParams | Protein,
   initial_positions: Array,
   temperature: float = 300.0,
   min_steps: int = 500,
@@ -580,11 +581,18 @@ def run_simulation(
     steps_production = sim_spec.steps
     # Note: min/therm steps might not be in spec efficiently yet,
     # but we use args for those stages or defaults.
+ 
+  # Handle Migration Shim (P1.3)
+  if not isinstance(system_params, Protein):
+    from prolix.compat import system_params_to_protein
+    protein = system_params_to_protein(system_params)
+  else:
+    protein = system_params
 
   displacement_fn, _ = space.free()
   energy_fn = system.make_energy_fn(
     displacement_fn,
-    system_params,
+    protein,
     dielectric_constant=dielectric_constant,
     implicit_solvent=implicit_solvent,
     solvent_dielectric=solvent_dielectric,
@@ -600,14 +608,15 @@ def run_simulation(
   # F in kcal/mol/A. m in amu.
   # Conversion factor is 418.4.
   # m_internal = m_amu / 418.4
-  masses_raw = system_params.get("masses", 1.0)
-  if not isinstance(masses_raw, float) or masses_raw != 1.0:
+  masses_raw = protein.masses
+  if masses_raw is not None:
     masses = jnp.asarray(masses_raw) / 418.4
   else:
     masses = 1.0
+
   # Extract constraints
-  constrained_bonds = system_params.get("constrained_bonds")
-  constrained_lengths = system_params.get("constrained_bond_lengths")
+  constrained_bonds = protein.constrained_bonds
+  constrained_lengths = protein.constrained_bond_lengths
 
   use_shake = False
   constraints = None

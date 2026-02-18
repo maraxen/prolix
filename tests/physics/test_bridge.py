@@ -9,12 +9,12 @@ from pathlib import Path
 import jax.numpy as jnp
 import pytest
 from proxide.core.containers import Protein
-from proxide.io.parsing.backend import OutputSpec, parse_structure
+from proxide import OutputSpec, parse_structure
 
 # Path to test data and force field
 DATA_DIR = Path(__file__).parent.parent.parent / "data" / "pdb"
 FF_PATH = (
-  Path(__file__).parent.parent.parent
+  Path(__file__).parent.parent.parent.parent
   / "proxide"
   / "src"
   / "proxide"

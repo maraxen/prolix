@@ -15,7 +15,8 @@ from prolix.utils import topology
 if TYPE_CHECKING:
   from collections.abc import Callable
 
-  from proxide.md import SystemParams
+  from proxide.core.containers import Protein
+  from proxide.types import SystemParams
 
 Array = util.Array
 
@@ -40,20 +41,34 @@ class ExclusionSpec:
   n_atoms: int
 
   @classmethod
-  def from_system_params(
-    cls, system_params: SystemParams, coulomb14scale: float = 0.83333333, lj14scale: float = 0.5
+  def from_protein(
+    cls,
+    protein: Protein,
+    coulomb14scale: float | None = None,
+    lj14scale: float | None = None,
   ) -> ExclusionSpec:
-    """Build ExclusionSpec from standard system parameters."""
-    charges = system_params["charges"]
+    """Build ExclusionSpec from standard protein structure."""
+    charges = protein.charges
+    if charges is None:
+      raise ValueError("Protein must have charges to build ExclusionSpec")
+
     n_atoms = len(charges)
-    bonds = system_params.get("bonds")
+    bonds = protein.bonds
+
+    # Static scales from protein if not provided
+    c14 = coulomb14scale if coulomb14scale is not None else (
+        protein.coulomb14scale if protein.coulomb14scale is not None else 0.83333333
+    )
+    l14 = lj14scale if lj14scale is not None else (
+        protein.lj14scale if protein.lj14scale is not None else 0.5
+    )
 
     if bonds is None or len(bonds) == 0:
       return cls(
         idx_12_13=jnp.zeros((0, 2), dtype=jnp.int32),
         idx_14=jnp.zeros((0, 2), dtype=jnp.int32),
-        scale_14_elec=coulomb14scale,
-        scale_14_vdw=lj14scale,
+        scale_14_elec=c14,
+        scale_14_vdw=l14,
         n_atoms=n_atoms,
       )
 
@@ -65,10 +80,20 @@ class ExclusionSpec:
     return cls(
       idx_12_13=idx_12_13,
       idx_14=excl.idx_14,
-      scale_14_elec=coulomb14scale,
-      scale_14_vdw=lj14scale,
+      scale_14_elec=c14,
+      scale_14_vdw=l14,
       n_atoms=n_atoms,
     )
+
+  @classmethod
+  def from_system_params(
+    cls, system_params: SystemParams, coulomb14scale: float = 0.83333333, lj14scale: float = 0.5
+  ) -> ExclusionSpec:
+    """Build ExclusionSpec from standard system parameters (deprecated)."""
+    from prolix.compat import system_params_to_protein
+
+    protein = system_params_to_protein(system_params)
+    return cls.from_protein(protein, coulomb14scale=coulomb14scale, lj14scale=lj14scale)
 
 
 def make_neighbor_list_fn(
