@@ -71,7 +71,8 @@ def mock_dependencies():
     import os
 
     # Assume running from repo root
-    file_path = os.path.abspath("src/prolix/visualization/viewer.py")
+    file_path = os.path.join(os.path.dirname(__file__), "..", "src", "prolix", "visualization", "viewer.py")
+    file_path = os.path.abspath(file_path)
     spec = importlib.util.spec_from_file_location("prolix.visualization.viewer", file_path)
     if spec is None:
       raise ImportError(f"Could not find viewer.py at {file_path}")

@@ -1,5 +1,7 @@
 """Tests for the visualization module."""
 
+from typing import ClassVar
+
 import numpy as np
 import pytest
 
