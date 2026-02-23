@@ -144,7 +144,7 @@ def build_prolix_params(protein):
       ],
       axis=1,
     ),
-    "dihedrals": protein.proper_dihedrals,
+    "proper_dihedrals": protein.proper_dihedrals,
     "dihedral_params": jnp.stack(
       [
         protein.dihedral_params[:, 0],  # periodicity
@@ -254,7 +254,7 @@ class TestBondedEnergies:
 
     displacement_fn, _ = space.free()
     dihedral_fn = bonded.make_dihedral_energy_fn(
-      displacement_fn, params["dihedrals"], params["dihedral_params"]
+      displacement_fn, params["proper_dihedrals"], params["dihedral_params"]
     )
 
     e_dihed = dihedral_fn(coords)
