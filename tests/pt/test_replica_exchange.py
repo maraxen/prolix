@@ -2,13 +2,8 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
-
 import jax.numpy as jnp
 import pytest
-
-if TYPE_CHECKING:
-  from proxide.types import SystemParams
 
 from prolix.pt import replica_exchange, temperature
 
@@ -25,25 +20,8 @@ def test_temperature_ladder():
 
 
 def test_replica_exchange_run():
-  # Mock system
-  # 2 particles, harmonic bond
+  # Mock system: 2 particles, harmonic bond
   # R: (2, 3)
-
-  system_params = SystemParams(
-    masses=1.0,  # Simple mass
-    charges=None,
-    atom_names=["A", "B"],
-    bonds=[[0, 1]],
-    bond_params={"k": jnp.array([100.0]), "length": jnp.array([1.0])},
-  )
-
-  # We need to ensure system.make_energy_fn works with this dummy params
-  # Or strict checks might fail if it expects more fields.
-  # prolix.physics.system usually handles sparse params.
-  # But wait, system.make_energy_fn constructs ALL terms including nonbonded.
-  # If charges are None, it might fail in electrostatics.
-  # Let's mock a simpler energy function by mocking system.make_energy_fn?
-  # Or just provide minimal valid params.
 
   params = {
     "masses": 1.0,
