@@ -21,6 +21,46 @@ if TYPE_CHECKING:
 Array = util.Array
 
 
+class _DictSystemWrapper:
+  """Wraps a plain dict to provide attribute access with defaults for optional fields.
+
+  This allows make_energy_fn to accept both Protein objects and plain dicts
+  (used in unit tests for simple particle systems).
+  """
+
+  # Optional attributes with their defaults
+  _DEFAULTS = {
+    "cmap_energy_grids": None,
+    "cmap_torsions": None,
+    "cmap_indices": None,
+    "proper_dihedrals": None,
+    "impropers": None,
+    "improper_params": None,
+    "urey_bradley_bonds": None,
+    "urey_bradley_params": None,
+    "virtual_site_def": None,
+    "virtual_site_params": None,
+    "radii": None,
+    "scaled_radii": None,
+    "scale_matrix_vdw": None,
+    "scale_matrix_elec": None,
+    "coulomb14scale": None,
+  }
+
+  def __init__(self, d: dict):
+    self._d = d
+
+  def __getattr__(self, name: str):
+    if name.startswith("_"):
+      raise AttributeError(name)
+    try:
+      return self._d[name]
+    except KeyError:
+      if name in self._DEFAULTS:
+        return self._DEFAULTS[name]
+      raise AttributeError(f"System dict has no key '{name}' and no default is defined")
+
+
 def compute_dihedral_angles(
   r: Array, indices: Array, displacement_fn: space.DisplacementFn
 ) -> Array:
@@ -48,7 +88,7 @@ def compute_dihedral_angles(
 
 def make_energy_fn(
   displacement_fn: space.DisplacementFn,
-  system: Protein,
+  system: Protein | dict[str, Any],
   neighbor_list: partition.NeighborList | None = None,
   exclusion_spec: nl.ExclusionSpec | None = None,
   dielectric_constant: float = 1.0,
@@ -63,7 +103,8 @@ def make_energy_fn(
   cutoff_distance: float = 9.0,
   pme_grid_points: int | Array = 64,
   pme_alpha: float = 0.34,
-) -> Callable[[Array], Array]:
+  return_decomposed: bool = False,
+) -> Callable[[Array], Array] | dict[str, Callable]:
   """Creates the total potential energy function.
 
   U(R) = U_bond + U_angle + U_vdw + U_elec + U_cmap + U_sasa
@@ -103,6 +144,10 @@ def make_energy_fn(
       also pre-computed if an ExclusionSpec is provided.
 
   """
+  # Wrap plain dicts for attribute access with defaults
+  if isinstance(system, dict):
+    system = _DictSystemWrapper(system)
+
   cmap_grids = system.cmap_energy_grids
   cmap_coeffs_precomputed = None
 
@@ -150,11 +195,39 @@ def make_energy_fn(
   sigmas = system.sigmas
   epsilons = system.epsilons
 
+  # Defensive: clamp sigmas to prevent singular LJ from unparameterized atoms (sigma=0.0).
+  # This can happen when oxidize/ff parameterization skips atoms it can't match.
+  n_zero_sigma = int(jnp.sum(sigmas <= 0.0))
+  if n_zero_sigma > 0:
+    import logging as _logging
+    _log = _logging.getLogger("prolix.physics.system")
+    _log.warning(
+      "Found %d atoms with sigma <= 0.0 (unparameterized). "
+      "Clamping to 1e-6 to prevent singular LJ. "
+      "Fix root cause in force field parameterization.",
+      n_zero_sigma,
+    )
+    sigmas = jnp.maximum(sigmas, 1e-6)
+
   assert sigmas.shape[0] == charges.shape[0], f"Sigmas shape mismatch: {sigmas.shape} vs {charges.shape}"
 
   scale_matrix_vdw = system.scale_matrix_vdw if hasattr(system, "scale_matrix_vdw") else None
   scale_matrix_elec = system.scale_matrix_elec if hasattr(system, "scale_matrix_elec") else None
   exclusion_mask = system.exclusion_mask
+
+  # Auto-build ExclusionSpec from bonds when neither explicit spec nor
+  # pre-built exclusion_mask is available (e.g. CoordFormat.Full proteins).
+  if exclusion_spec is None and exclusion_mask is None:
+    _bonds = system.bonds
+    if _bonds is not None and _bonds.shape[0] > 0:
+      import logging as _logging_excl
+      _log_excl = _logging_excl.getLogger("prolix.physics.system")
+      exclusion_spec = nl.ExclusionSpec.from_protein(system)
+      _log_excl.info(
+        "Auto-built ExclusionSpec from bonds: %d 1-2/1-3 pairs, %d 1-4 pairs",
+        len(exclusion_spec.idx_12_13),
+        len(exclusion_spec.idx_14),
+      )
 
   if exclusion_spec is not None:
     excl_indices, excl_scales_vdw, excl_scales_elec = nl.map_exclusions_to_dense_padded(
@@ -236,6 +309,12 @@ def make_energy_fn(
     if system.radii is not None:
       radii = system.radii
     else:
+      import logging as _log_gb
+      _log_gb.getLogger("prolix.physics.system").warning(
+        "No GB radii found — using sigma/2 fallback. "
+        "This is physically incorrect for implicit solvent. "
+        "Call assign_mbondi2_radii() or use CoordFormat.Full with parse_structure."
+      )
       radii = sigmas * 0.5
 
     e_gb = 0.0
@@ -476,7 +555,7 @@ def make_energy_fn(
     if system.radii is not None:
       radii = system.radii
     else:
-      radii = sigmas * 0.5
+      radii = sigmas * 0.5  # Fallback (warning already emitted in compute_electrostatics)
 
     return generalized_born.compute_ace_nonpolar_energy(
       jnp.asarray(radii),
@@ -645,5 +724,19 @@ def make_energy_fn(
       e_lj += e_lj_lrc
 
     return e_bond + e_angle + e_ub + e_dihedral + e_improper + e_cmap + e_lj + e_elec + e_np
+
+  if return_decomposed:
+    return {
+      "bond": bond_energy_fn,
+      "angle": angle_energy_fn,
+      "urey_bradley": ub_energy_fn,
+      "dihedral": dihedral_energy_fn,
+      "improper": improper_energy_fn,
+      "cmap": compute_cmap_term,
+      "lj": lambda r: compute_lj(r),
+      "electrostatics": lambda r: compute_electrostatics(r),
+      "nonpolar": lambda r, born_radii: compute_nonpolar(r, born_radii),
+      "total": total_energy,
+    }
 
   return total_energy
