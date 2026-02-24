@@ -13,7 +13,7 @@ from proxide import OutputSpec, parse_structure
 # Paths
 DATA_DIR = Path(__file__).parent.parent.parent / "data" / "pdb"
 FF_PATH = (
-  Path(__file__).parent.parent.parent
+  Path(__file__).parent.parent.parent.parent
   / "proxide"
   / "src"
   / "proxide"
@@ -31,6 +31,8 @@ def parameterized_protein():
   spec.parameterize_md = True
   spec.force_field = str(FF_PATH)
   spec.add_hydrogens = True
+  from proxide import _oxidize
+  spec.coord_format = _oxidize.CoordFormat.Full
 
   return parse_structure(str(pdb_path), spec)
 
@@ -104,7 +106,30 @@ def test_epsilons_non_negative(parameterized_protein):
   assert jnp.all(protein.epsilons >= 0), "Negative epsilon found"
 
 
-def test_sigmas_non_negative(parameterized_protein):
-  """Test that LJ sigma values are non-negative."""
+def test_sigmas_positive(parameterized_protein):
+  """Test that LJ sigma values are strictly positive (sigma=0 causes LJ singularity)."""
   protein = parameterized_protein
-  assert jnp.all(protein.sigmas >= 0), "Negative sigma found"
+  assert jnp.all(protein.sigmas > 0), (
+    f"Zero sigma found: min={float(protein.sigmas.min()):.6f}. "
+    f"This causes inf LJ energy. Check force field parameterization."
+  )
+
+
+def test_total_energy_finite(parameterized_protein):
+  """Test that total energy is finite (not inf/NaN) for parameterized protein."""
+  from jax_md import space
+
+  from prolix.physics import neighbor_list as nl
+  from prolix.physics import system as physics_system
+
+  protein = parameterized_protein
+  coords = jnp.array(protein.coordinates)
+    
+  displacement_fn, _ = space.free()
+  exclusion_spec = nl.ExclusionSpec.from_protein(protein)
+  energy_fn = physics_system.make_energy_fn(
+    displacement_fn, protein, exclusion_spec=exclusion_spec,
+    implicit_solvent=True, use_pbc=False,
+  )
+  e = float(energy_fn(coords))
+  assert jnp.isfinite(e), f"Energy is non-finite: {e}"

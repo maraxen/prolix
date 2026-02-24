@@ -148,6 +148,36 @@ def make_energy_fn(
   if isinstance(system, dict):
     system = _DictSystemWrapper(system)
 
+  import logging as _logging_setup
+  _log_setup = _logging_setup.getLogger("prolix.physics.system")
+
+  def _safe_bonded_arrays(
+    indices, params, term_name: str, idx_cols: int, param_cols: int,
+  ) -> tuple[Array, Array]:
+    """Validate index-param consistency for bonded terms.
+
+    Returns safe (indices, params) arrays. If indices exist but params are
+    None or have incompatible row count, logs a warning and returns empty
+    arrays for both to prevent shape-mismatch crashes.
+    """
+    idx = jnp.asarray(indices if indices is not None else jnp.zeros((0, idx_cols), dtype=jnp.int32))
+    prm = jnp.asarray(params if params is not None else jnp.zeros((0, param_cols), dtype=jnp.float32))
+    if idx.shape[0] > 0 and prm.shape[0] == 0:
+      _log_setup.warning(
+        "%s: %d indices but no parameters — skipping term. "
+        "Fix root cause in proxide parameterization.",
+        term_name, idx.shape[0],
+      )
+      idx = jnp.zeros((0, idx_cols), dtype=jnp.int32)
+    elif idx.shape[0] != prm.shape[0] and idx.shape[0] > 0:
+      _log_setup.warning(
+        "%s: index/param row mismatch (%d vs %d) — skipping term.",
+        term_name, idx.shape[0], prm.shape[0],
+      )
+      idx = jnp.zeros((0, idx_cols), dtype=jnp.int32)
+      prm = jnp.zeros((0, param_cols), dtype=jnp.float32)
+    return idx, prm
+
   cmap_grids = system.cmap_energy_grids
   cmap_coeffs_precomputed = None
 
@@ -157,35 +187,20 @@ def make_energy_fn(
     elif cmap_grids.ndim == 4:
       cmap_coeffs_precomputed = cmap_grids
 
-  bond_energy_fn = bonded.make_bond_energy_fn(
-    displacement_fn,
-    jnp.asarray(system.bonds if system.bonds is not None else jnp.zeros((0, 2), dtype=jnp.int32)),
-    jnp.asarray(system.bond_params if system.bond_params is not None else jnp.zeros((0, 2), dtype=jnp.float32)),
-  )
+  bond_idx, bond_prm = _safe_bonded_arrays(system.bonds, system.bond_params, "bonds", 2, 2)
+  bond_energy_fn = bonded.make_bond_energy_fn(displacement_fn, bond_idx, bond_prm)
 
-  angle_energy_fn = bonded.make_angle_energy_fn(
-    displacement_fn,
-    jnp.asarray(system.angles if system.angles is not None else jnp.zeros((0, 3), dtype=jnp.int32)),
-    jnp.asarray(system.angle_params if system.angle_params is not None else jnp.zeros((0, 2), dtype=jnp.float32)),
-  )
+  angle_idx, angle_prm = _safe_bonded_arrays(system.angles, system.angle_params, "angles", 3, 2)
+  angle_energy_fn = bonded.make_angle_energy_fn(displacement_fn, angle_idx, angle_prm)
 
-  dihedral_energy_fn = bonded.make_dihedral_energy_fn(
-    displacement_fn,
-    jnp.asarray(system.proper_dihedrals if system.proper_dihedrals is not None else jnp.zeros((0, 4), dtype=jnp.int32)),
-    jnp.asarray(system.dihedral_params if system.dihedral_params is not None else jnp.zeros((0, 3), dtype=jnp.float32)),
-  )
+  dih_idx, dih_prm = _safe_bonded_arrays(system.proper_dihedrals, system.dihedral_params, "proper_dihedrals", 4, 3)
+  dihedral_energy_fn = bonded.make_dihedral_energy_fn(displacement_fn, dih_idx, dih_prm)
 
-  improper_energy_fn = bonded.make_dihedral_energy_fn(
-    displacement_fn,
-    jnp.asarray(system.impropers if system.impropers is not None else jnp.zeros((0, 4), dtype=jnp.int32)),
-    jnp.asarray(system.improper_params if system.improper_params is not None else jnp.zeros((0, 3), dtype=jnp.float32)),
-  )
+  imp_idx, imp_prm = _safe_bonded_arrays(system.impropers, system.improper_params, "impropers", 4, 3)
+  improper_energy_fn = bonded.make_dihedral_energy_fn(displacement_fn, imp_idx, imp_prm)
 
-  ub_energy_fn = bonded.make_bond_energy_fn(
-    displacement_fn,
-    jnp.asarray(system.urey_bradley_bonds if system.urey_bradley_bonds is not None else jnp.zeros((0, 2), dtype=jnp.int32)),
-    jnp.asarray(system.urey_bradley_params if system.urey_bradley_params is not None else jnp.zeros((0, 2), dtype=jnp.float32)),
-  )
+  ub_idx, ub_prm = _safe_bonded_arrays(system.urey_bradley_bonds, system.urey_bradley_params, "urey_bradley", 2, 2)
+  ub_energy_fn = bonded.make_bond_energy_fn(displacement_fn, ub_idx, ub_prm)
 
   vs_def = system.virtual_site_def if system.virtual_site_def is not None else jnp.zeros((0, 4), dtype=jnp.int32)
   vs_params = system.virtual_site_params if system.virtual_site_params is not None else jnp.zeros((0, 12), dtype=jnp.float32)
@@ -304,7 +319,6 @@ def make_energy_fn(
 
   # Electrostatics
   # -------------------------------------------------------------------------
-  @jax.checkpoint
   def compute_electrostatics(r, neighbor_idx=None):
     if system.radii is not None:
       radii = system.radii
@@ -488,7 +502,6 @@ def make_energy_fn(
 
   # Combine Non-Bonded
   # -------------------------------------------------------------------------
-  @jax.checkpoint
   def compute_lj(r, neighbor_idx=None):
     if neighbor_idx is None:
       dr = space.map_product(displacement_fn)(r, r)
