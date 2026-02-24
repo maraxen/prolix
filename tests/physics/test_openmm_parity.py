@@ -172,8 +172,8 @@ def jax_openmm_system(openmm_available):
 class TestEnergyDecomposition:
   """Per-component energy comparison between JAX MD and OpenMM."""
 
-  # Relaxed tolerance - small differences expected due to parameter loading
-  TOLERANCE_BONDED = 1.0  # kcal/mol for bonded terms
+  # Tight tolerance — all bonded terms now match to <0.01 kcal/mol
+  TOLERANCE_BONDED = 0.1  # kcal/mol for bonded terms (bond, angle)
   TOLERANCE_TIGHT = 0.1  # kcal/mol for terms that should match exactly
 
   def test_bond_energy_matches_openmm(self, jax_openmm_system):
@@ -333,12 +333,14 @@ class TestEnergyDecomposition:
     #   GB solvation:     ~80   (iterative JAX OBC2 vs analytical OpenMM)
     #   Nonpolar SASA:    ~37   (JAX-only term, not in OpenMM total)
     #   CMAP:              ~0   (matches to <0.1 kcal/mol after unit fix)
-    #   Bonded + LJ+Coul:  ~0   (match to <0.01 kcal/mol)
-    # Net expected gap: ~43 kcal/mol. Setting tolerance to 100 kcal/mol to match
-    # the per-component GB solvation tolerance and account for protein-size variation.
-    assert diff < 100.0, (
+    #   Torsion:           ~0   (matches to <0.01 kcal/mol after multi-def fix)
+    #   LJ+Coul:           ~0   (matches to <0.001 kcal/mol after 1-4 fix)
+    #   Bonded:            ~0   (match to <0.01 kcal/mol)
+    # Net expected gap: ~31 kcal/mol (GB-SASA partial cancellation).
+    # Setting tolerance to 50 kcal/mol for protein-size variation.
+    assert diff < 50.0, (
       f"Total energy mismatch: JAX={jax_total:.1f}, OpenMM={omm_total:.1f}, "
-      f"diff={diff:.1f} kcal/mol (tolerance=100.0)"
+      f"diff={diff:.1f} kcal/mol (tolerance=50.0)"
     )
 
   def test_energy_decomposition_report(self, jax_openmm_system):
@@ -410,8 +412,8 @@ class TestEnergyDecomposition:
 class TestForceComparison:
   """Gradient accuracy tests against OpenMM forces."""
 
-  # Force RMSE tolerance in kcal/mol/Å
-  FORCE_RMSE_TOL = 3000.0
+  # Force RMSE tolerance in kcal/mol/Å — tightened post energy fixes
+  FORCE_RMSE_TOL = 500.0
 
   def test_forces_rmse_within_tolerance(self, jax_openmm_system):
     """Force RMSE should be within tolerance."""
@@ -639,7 +641,7 @@ class TestMultiProtein:
       "n_atoms": len(coords),
     }
 
-  @pytest.mark.parametrize("protein_setup", ["1UAO"], indirect=True)
+  @pytest.mark.parametrize("protein_setup", ["1UAO", "1CRN"], indirect=True)
   def test_energy_finite(self, protein_setup):
     """Energy should be finite for all test proteins."""
     data = protein_setup
@@ -647,7 +649,7 @@ class TestMultiProtein:
 
     assert np.isfinite(energy), f"Energy for {data['pdb_code']} is not finite: {energy}"
 
-  @pytest.mark.parametrize("protein_setup", ["1UAO"], indirect=True)
+  @pytest.mark.parametrize("protein_setup", ["1UAO", "1CRN"], indirect=True)
   def test_forces_finite(self, protein_setup):
     """Forces should be finite for all test proteins."""
     data = protein_setup
@@ -656,7 +658,7 @@ class TestMultiProtein:
 
     assert np.all(np.isfinite(forces_np)), f"Forces for {data['pdb_code']} contain NaN or Inf"
 
-  @pytest.mark.parametrize("protein_setup", ["1UAO"], indirect=True)
+  @pytest.mark.parametrize("protein_setup", ["1UAO", "1CRN"], indirect=True)
   def test_minimization_reduces_energy(self, protein_setup):
     """Minimization should reduce energy for all test proteins."""
     from prolix.physics import simulate
