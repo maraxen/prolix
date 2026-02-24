@@ -15,20 +15,17 @@ from jax_md import space
 from prolix.physics import settle, solvation
 
 # Enable x64 for physics precision
-jax.config.update("jax_enable_x64", True)
 
 # Paths
 DATA_DIR = Path(__file__).parent.parent.parent / "data" / "pdb"
 FF_PATH = (
-  Path(__file__).parent.parent.parent
+  Path(__file__).parent.parent.parent.parent
   / "proxide"
   / "src"
   / "proxide"
   / "assets"
   / "protein.ff19SB.xml"
 )
-
-
 def openmm_available():
   """Check if OpenMM is available."""
   try:
@@ -37,8 +34,6 @@ def openmm_available():
     return True
   except ImportError:
     return False
-
-
 @pytest.mark.skipif(not openmm_available(), reason="OpenMM not installed")
 class TestOpenMMSolvationParity:
   """Tests comparing Prolix solvation to OpenMM."""
@@ -196,8 +191,6 @@ class TestOpenMMSolvationParity:
     # All energies should be finite
     for name, energy in energies.items():
       assert np.isfinite(energy), f"{name} energy is not finite"
-
-
 class TestProlixSolvation:
   """Tests for Prolix's solvation implementation."""
 
@@ -329,8 +322,6 @@ class TestProlixSolvation:
 
     print(f"  Bad water geometries: {bad_waters}/{min(100, n_waters)}")
     assert bad_waters < 10, f"Too many bad water geometries: {bad_waters}"
-
-
 class TestSETTLEIntegration:
   """Tests for SETTLE integration with simulation."""
 
@@ -407,7 +398,5 @@ class TestSETTLEIntegration:
     # Tolerance: 0.02 Å for O-H, 0.05 Å for H-H
     assert max_oh_error < 0.02, f"O-H constraint violated: {max_oh_error}"
     assert max_hh_error < 0.05, f"H-H constraint violated: {max_hh_error}"
-
-
 if __name__ == "__main__":
   pytest.main([__file__, "-v"])

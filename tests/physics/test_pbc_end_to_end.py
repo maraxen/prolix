@@ -10,7 +10,6 @@ import numpy as np
 import pytest
 
 # Enable x64 for precision
-jax.config.update("jax_enable_x64", True)
 
 try:
   import openmm
@@ -21,8 +20,6 @@ except ImportError:
   HAS_OPENMM = False
 
 from prolix.physics import pbc, system
-
-
 class TestPBCEndToEnd:
   """End-to-end tests for PBC/PME physics."""
 
@@ -297,8 +294,6 @@ class TestPBCEndToEnd:
 
     assert jnp.isclose(e1, e2), "JIT results inconsistent"
     assert jnp.isfinite(e1), "JIT result not finite"
-
-
 class TestPBCWithLJ:
   """Test PBC/PME with Lennard-Jones interactions."""
 

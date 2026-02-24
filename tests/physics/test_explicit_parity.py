@@ -18,7 +18,6 @@ from proxide.io.parsing.backend import OutputSpec, parse_structure
 from prolix.physics import bonded, pbc, pme, system
 
 # Enable x64 for physics
-jax.config.update("jax_enable_x64", True)
 
 # Paths
 DATA_DIR = Path(__file__).parent.parent.parent / "data" / "pdb"
@@ -41,8 +40,6 @@ PME_GRID = 32  # Grid points per dimension
 TOL_BONDED = 0.5  # kcal/mol for individual bonded terms
 TOL_NONBONDED = 2.0  # kcal/mol for nonbonded (PME has inherent approximations)
 TOL_TOTAL = 1.0  # kcal/mol total energy
-
-
 def openmm_available():
   """Check if OpenMM is available."""
   try:
@@ -51,8 +48,6 @@ def openmm_available():
     return True
   except ImportError:
     return False
-
-
 @pytest.fixture
 def parameterized_protein():
   """Load and parameterize 1CRN for testing."""
@@ -60,18 +55,16 @@ def parameterized_protein():
   if not pdb_path.exists():
     pytest.skip("1CRN.pdb not found")
 
-  # NOTE: add_hydrogens=True currently broken in proxide - adds H to params but not coords
-  # TODO: Enable once proxide fixes coordinate/param alignment for hydrogens
+  # Rust parser (oxidize) outputs all values in Å/kcal/mol units.
+  # add_hydrogens=True: coord/param alignment is now correct.
   spec = OutputSpec(
     coord_format=CoordFormat.Full,  # Full flat coords, not Atom37
     parameterize_md=True,
     force_field=str(FF_PATH),
-    add_hydrogens=False,
+    add_hydrogens=True,
   )
 
   return parse_structure(str(pdb_path), spec)
-
-
 def get_valid_coords(protein):
   """Get valid (non-padded) coordinates from Full format.
 
@@ -84,8 +77,6 @@ def get_valid_coords(protein):
   # Filter by mask (select atoms where mask > 0.5)
   valid_indices = jnp.where(mask > 0.5)[0]
   return coords[valid_indices]
-
-
 def setup_periodic_box(positions):
   """Create a periodic box with padding."""
   min_coords = jnp.min(positions, axis=0)
@@ -98,14 +89,13 @@ def setup_periodic_box(positions):
   centered = positions + shift
 
   return centered, box_size
-
-
 def build_prolix_params(protein):
-  """Build prolix system params from protein object."""
-  n_atoms = len(protein.charges)
+  """Build prolix system params from protein object.
 
-  # Note: proxide returns params in OpenMM units (nm/kJ)
-  # Need to convert to prolix units (Angstrom/kcal)
+  Note: The Rust parser (oxidize) outputs all values in prolix-native
+  units (Angstroms, kcal/mol, radians). No unit conversion needed.
+  """
+  n_atoms = len(protein.charges)
 
   # Build exclusion mask from bonds
   bonds = np.array(protein.bonds)
@@ -123,24 +113,24 @@ def build_prolix_params(protein):
     exclusion_mask[a[0], a[2]] = False
     exclusion_mask[a[2], a[0]] = False
 
-  # Build params dict
+  # Build params dict — all values already in Å/kcal/mol from Rust parser
   params = {
     "charges": protein.charges,
-    "sigmas": protein.sigmas * 10.0,  # nm -> Angstroms
-    "epsilons": protein.epsilons / 4.184,  # kJ/mol -> kcal/mol
+    "sigmas": protein.sigmas,  # Angstroms
+    "epsilons": protein.epsilons,  # kcal/mol
     "bonds": protein.bonds,
     "bond_params": jnp.stack(
       [
-        protein.bond_params[:, 0] * 10.0,  # nm -> Angstroms (r0)
-        protein.bond_params[:, 1] / 4.184 / 100.0,  # kJ/mol/nm^2 -> kcal/mol/A^2
+        protein.bond_params[:, 0],  # r0 in Angstroms
+        protein.bond_params[:, 1],  # k in kcal/mol/A^2
       ],
       axis=1,
     ),
     "angles": protein.angles,
     "angle_params": jnp.stack(
       [
-        protein.angle_params[:, 0],  # rad (unchanged)
-        protein.angle_params[:, 1] / 4.184,  # kJ/mol -> kcal/mol
+        protein.angle_params[:, 0],  # theta0 in radians
+        protein.angle_params[:, 1],  # k in kcal/mol/rad^2
       ],
       axis=1,
     ),
@@ -148,8 +138,8 @@ def build_prolix_params(protein):
     "dihedral_params": jnp.stack(
       [
         protein.dihedral_params[:, 0],  # periodicity
-        protein.dihedral_params[:, 1],  # phase (rad)
-        protein.dihedral_params[:, 2] / 4.184,  # kJ/mol -> kcal/mol
+        protein.dihedral_params[:, 1],  # phase in radians
+        protein.dihedral_params[:, 2],  # k in kcal/mol
       ],
       axis=1,
     ),
@@ -159,8 +149,6 @@ def build_prolix_params(protein):
   }
 
   return params
-
-
 class TestPositionPlausibility:
   """Tests that protein positions are physically reasonable."""
 
@@ -213,8 +201,6 @@ class TestPositionPlausibility:
     assert min_len > 0.8, f"Bond too short: {min_len:.3f} A"
     assert max_len < 6.0, f"Bond too long: {max_len:.3f} A"
     print(f"Bond lengths: {min_len:.2f} - {max_len:.2f} A")
-
-
 class TestBondedEnergies:
   """Tests for bonded energy components."""
 
@@ -260,8 +246,6 @@ class TestBondedEnergies:
     e_dihed = dihedral_fn(coords)
     assert jnp.isfinite(e_dihed), f"Non-finite dihedral energy: {e_dihed}"
     print(f"Dihedral energy: {e_dihed:.2f} kcal/mol")
-
-
 class TestNonbondedEnergies:
   """Tests for non-bonded energy components."""
 
@@ -300,8 +284,6 @@ class TestNonbondedEnergies:
     e_total = energy_fn(centered)
     assert jnp.isfinite(e_total), f"Non-finite total energy: {e_total}"
     print(f"Total PBC energy: {e_total:.2f} kcal/mol")
-
-
 @pytest.mark.skipif(not openmm_available(), reason="OpenMM not installed")
 class TestOpenMMParity:
   """Parity tests comparing Prolix energies to OpenMM.
@@ -672,7 +654,5 @@ class TestOpenMMParity:
 
     assert np.isfinite(e_omm), "OpenMM energy is not finite"
     assert np.isfinite(e_coulomb), "Prolix Coulomb energy is not finite"
-
-
 if __name__ == "__main__":
   pytest.main([__file__, "-v"])

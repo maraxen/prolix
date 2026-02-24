@@ -166,5 +166,5 @@ def test_simulation_spec_dispatch():
   sig = inspect.signature(simulate.run_simulation)
   params = list(sig.parameters.keys())
   assert params[0] == "system_params"
-  assert params[1] == "r_init"
+  assert params[1] == "initial_positions"
   assert "sim_spec" in params

@@ -7,7 +7,6 @@ Uses the new parse_structure API (Rust parser) instead of the removed
 biotite/hydride path.
 """
 
-import os
 from pathlib import Path
 
 import jax
@@ -15,12 +14,11 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 from jax_md import space
-from proxide import OutputSpec, parse_structure
+from proxide import CoordFormat, OutputSpec, parse_structure
 
 from prolix.physics import system
 
 # Enable x64 for physics
-jax.config.update("jax_enable_x64", True)
 
 # Paths
 DATA_DIR = Path(__file__).parent.parent.parent / "data" / "pdb"
@@ -33,7 +31,27 @@ FF_PATH = (
   / "protein.ff19SB.xml"
 )
 
-
+# OpenMM bundled force field paths (from proxide assets)
+OMM_FF_PATH = (
+  Path(__file__).parent.parent.parent.parent
+  / "proxide"
+  / "src"
+  / "proxide"
+  / "assets"
+  / "openmm_bundled"
+  / "amber19"
+  / "protein.ff19SB.xml"
+)
+OMM_IMPLICIT_PATH = (
+  Path(__file__).parent.parent.parent.parent
+  / "proxide"
+  / "src"
+  / "proxide"
+  / "assets"
+  / "openmm_bundled"
+  / "implicit"
+  / "obc2.xml"
+)
 def _load_parameterized_protein(pdb_name: str = "1UAO.pdb"):
   """Load and parameterize a protein via the Rust parser."""
   pdb_path = DATA_DIR / pdb_name
@@ -44,23 +62,24 @@ def _load_parameterized_protein(pdb_name: str = "1UAO.pdb"):
     parameterize_md=True,
     force_field=str(FF_PATH),
     add_hydrogens=True,
+    coord_format=CoordFormat.Full,
   )
   return parse_structure(str(pdb_path), spec)
-
-
 def _get_flat_coords(protein):
-  """Extract flat (N, 3) coordinates from a Protein's Atom37 format."""
+  """Extract flat (N, 3) coordinates from a Protein.
+
+  With CoordFormat.Full, coordinates are already (N_atoms, 3).
+  Falls back to Atom37 mask extraction for legacy format.
+  """
   coords = protein.coordinates
+  if coords.ndim == 2:
+    return coords
+  # Legacy Atom37 fallback
   mask = protein.atom_mask
-
-  if coords.ndim == 3:
-    flat_coords = coords.reshape(-1, 3)
-    flat_mask = mask.reshape(-1)
-    valid_indices = jnp.where(flat_mask > 0.5)[0]
-    return flat_coords[valid_indices]
-  return coords
-
-
+  flat_coords = coords.reshape(-1, 3)
+  flat_mask = mask.reshape(-1)
+  valid_indices = jnp.where(flat_mask > 0.5)[0]
+  return flat_coords[valid_indices]
 class TestPositionPlausibility:
   """Test that physics computations produce plausible positions matching OpenMM."""
 
@@ -174,8 +193,6 @@ class TestPositionPlausibility:
     assert len(unbonded_indices) == 0, (
       f"Found {len(unbonded_indices)} unbonded atoms that will float away: {unbonded_indices[:10]}"
     )
-
-
 def openmm_available():
   """Check if OpenMM is available."""
   try:
@@ -185,8 +202,6 @@ def openmm_available():
     return True
   except ImportError:
     return False
-
-
 @pytest.mark.skipif(not openmm_available(), reason="OpenMM not installed")
 class TestOpenMMComparison:
   """Compare minimization results with OpenMM as ground truth."""
@@ -194,8 +209,6 @@ class TestOpenMMComparison:
   @pytest.fixture
   def setup_both_systems(self):
     """Setup both JAX MD and OpenMM systems on same structure."""
-    import tempfile
-
     from openmm import app
 
     # Load and parameterize via Rust parser
@@ -211,15 +224,13 @@ class TestOpenMMComparison:
     pdb_file = app.PDBFile(str(pdb_path))
     topology = pdb_file.topology
 
-    # Use OpenMM's built-in force field for a fair comparison
-    ff_xml_path = os.path.abspath(
-      os.path.join(
-        os.path.dirname(__file__),
-        "../../openmmforcefields/openmmforcefields/ffxml/amber/protein.ff19SB.xml",
-      )
-    )
+    # Use bundled force field XMLs from proxide assets
+    if not OMM_FF_PATH.exists():
+      pytest.skip(f"OpenMM FF not found: {OMM_FF_PATH}")
+    if not OMM_IMPLICIT_PATH.exists():
+      pytest.skip(f"OpenMM implicit solvent FF not found: {OMM_IMPLICIT_PATH}")
 
-    omm_ff = app.ForceField(ff_xml_path, "implicit/obc2.xml")
+    omm_ff = app.ForceField(str(OMM_FF_PATH), str(OMM_IMPLICIT_PATH))
     omm_system = omm_ff.createSystem(
       topology,
       nonbondedMethod=app.NoCutoff,
@@ -367,8 +378,6 @@ class TestOpenMMComparison:
     # Both should indicate compact molecular structure (< 50 Å for small proteins)
     assert jax_range < 50.0, f"JAX structure too extended: {jax_range:.2f} Å"
     assert omm_range < 50.0, f"OpenMM structure too extended: {omm_range:.2f} Å"
-
-
 class TestTrajectoryPositions:
   """Test that trajectory frames have reasonable positions."""
 

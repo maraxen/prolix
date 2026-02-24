@@ -8,7 +8,16 @@ import jax
 import jax.numpy as jnp
 import pytest
 from proxide.core.containers import Protein
-from proxide.io.parsing.dispatch import load_structure as parse_input
+from proxide import OutputSpec, parse_structure
+
+
+@pytest.fixture(autouse=True)
+def _enable_x64():
+  """Enable float64 for physics tests via a proper fixture, avoiding global contamination."""
+  jax.config.update("jax_enable_x64", True)
+  yield
+  # Note: JAX x64 flag is global and cannot be easily reverted once set.
+  # We leave it True here; tests that require float32 should set it explicitly.
 
 
 @pytest.fixture
@@ -114,8 +123,53 @@ def temp_ff_dir(tmp_path: Path) -> Path:
   return ff_dir
 
 
+# Force field path for parse_structure (needed to get Atom37 format)
+_FF_PATH = (
+  Path(__file__).parent.parent.parent.parent
+  / "proxide"
+  / "src"
+  / "proxide"
+  / "assets"
+  / "protein.ff19SB.xml"
+)
+
+# Test PDB data directory
+_DATA_DIR = Path(__file__).parent / "data"
+
+
 @pytest.fixture(scope="session")
 def pqr_protein() -> Protein:
-  """Load a sample protein structure from a PQR file."""
-  pqr_path = Path(__file__).parent / "data" / "1a00.pqr"
-  return next(parse_input(str(pqr_path)))
+  """Load a protein with mock charges for physics feature tests.
+
+  Uses parse_structure with parameterize_md=True to get Atom37 format
+  (required by compute_backbone_coordinates), then overrides charges
+  to match full_coordinates length for correct broadcasting.
+  """
+  pdb_path = _DATA_DIR / "1uao.pdb"
+
+  spec = OutputSpec()
+  spec.parameterize_md = True
+  spec.add_hydrogens = False
+  spec.force_field = str(_FF_PATH)
+
+  protein = parse_structure(str(pdb_path), spec)
+  assert protein.full_coordinates is not None, "Protein must have full_coordinates"
+  assert protein.coordinates.ndim == 3, "Must be Atom37 format (N_res, 37, 3)"
+
+  # Override charges to match full_coordinates count (N_res * 37)
+  # Needed because parameterization assigns charges to real atoms only,
+  # but full_coordinates includes Atom37 padding slots.
+  # Also clear non-JIT-safe string/list fields to prevent tracer errors.
+  n_atoms = protein.full_coordinates.reshape(-1, 3).shape[0]
+  mock_charges = jnp.linspace(-0.5, 0.5, n_atoms)
+  protein = protein.replace(
+    charges=mock_charges,
+    source=None,
+    format=None,
+    atom_names=None,
+    atom_types=None,
+    res_names=None,
+    chain_ids=None,
+    elements=None,
+  )
+  return protein

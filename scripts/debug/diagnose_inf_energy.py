@@ -308,27 +308,71 @@ def load_old_api(pdb_path: str, ff_path: str = FF_PATH):
         logger.warning("Old API load_structure_with_hydride failed: %s", e)
         return None
 
-    # Need to convert to system_params and then to Protein via compat
+    # Parameterize via old bridge path and convert to Protein
     try:
-        from prolix.compat import system_params_to_protein
-
-        # Extract residue info and parameterize
         from proxide.io.parsing import biotite as pb
+        from proxide.io.parsing.backend import load_forcefield_rust
+        from proxide.md.bridge import core as jax_md_bridge
+        from prolix.compat import system_params_to_protein
 
         residues = pb.extract_residues(atom_array)
         atom_names_per_res = pb.extract_atom_names(atom_array, residues)
         atom_counts = [len(names) for names in atom_names_per_res]
         res_names = [str(r.res_name) for r in residues]
 
-        from proxide.io.parsing.backend import load_forcefield_rust
+        # Flatten atom names for parameterize_system
+        flat_atom_names = [name for names in atom_names_per_res for name in names]
 
         ff = load_forcefield_rust(ff_path)
+        system_params = jax_md_bridge.parameterize_system(
+            ff, res_names, flat_atom_names, atom_counts=atom_counts
+        )
 
-        # This is complex and may not work cleanly — log and skip if it fails
-        logger.warning("Old API parameterization is complex — using reduced comparison")
-        return None
+        # Extract coordinates from biotite atom_array
+        coords = atom_array.coord
+        system_params["coordinates"] = coords
+
+        import warnings
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", DeprecationWarning)
+            protein = system_params_to_protein(system_params)
+
+        # Override sentinel coordinates with actual coordinates
+        from proxide.core.containers import Protein as ProteinCls
+        protein = ProteinCls(
+            coordinates=jnp.array(coords),
+            aatype=protein.aatype,
+            residue_index=protein.residue_index,
+            chain_index=protein.chain_index,
+            charges=protein.charges,
+            masses=protein.masses,
+            bonds=protein.bonds,
+            bond_params=protein.bond_params,
+            constrained_bonds=protein.constrained_bonds,
+            constrained_bond_lengths=protein.constrained_bond_lengths,
+            angles=protein.angles,
+            angle_params=protein.angle_params,
+            proper_dihedrals=protein.proper_dihedrals,
+            dihedral_params=protein.dihedral_params,
+            impropers=protein.impropers,
+            improper_params=protein.improper_params,
+            sigmas=protein.sigmas,
+            epsilons=protein.epsilons,
+            radii=protein.radii,
+            gbsa_scales=protein.gbsa_scales,
+            scaled_radii=protein.scaled_radii,
+            exclusion_mask=protein.exclusion_mask,
+            scale_matrix_vdw=protein.scale_matrix_vdw,
+            scale_matrix_elec=protein.scale_matrix_elec,
+            coulomb14scale=protein.coulomb14scale,
+            lj14scale=protein.lj14scale,
+            backbone_indices=protein.backbone_indices,
+        )
+        return protein
     except Exception as e:
         logger.warning("Old API parameterization failed: %s", e)
+        import traceback
+        traceback.print_exc()
         return None
 
 
@@ -500,6 +544,25 @@ def main():
     )
 
     # =========================================================================
+    # Path 4: Old API (biotite/HYDRIDE) — KNOWN WORKING
+    # =========================================================================
+    protein_old = None
+    if not args.skip_old_api:
+        t0 = time.time()
+        try:
+            protein_old = load_old_api(pdb_path, ff_path=ff_path)
+        except Exception as e:
+            logger.error("Path 4 (old API) load failed: %s", e)
+            protein_old = None
+        logger.info("Path 4 load: %.1fs", time.time() - t0)
+
+        analyze_structure(
+            "Path 4: Old API (biotite/HYDRIDE) — KNOWN WORKING",
+            protein_old,
+            pdb_path,
+        )
+
+    # =========================================================================
     # Summary
     # =========================================================================
     print(f"\n{'='*70}")
@@ -510,6 +573,7 @@ def main():
         ("Path 1 (H raw)", protein_h_raw),
         ("Path 2 (H relaxed)", protein_h_relax),
         ("Path 3 (no H)", protein_no_h),
+        ("Path 4 (old API)", protein_old),
     ]:
         if p is None:
             print(f"  {label:25s}: SKIPPED")

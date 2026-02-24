@@ -15,7 +15,6 @@ from proxide import OutputSpec, parse_structure
 from prolix.physics import bonded
 
 # Enable x64 for physics
-jax.config.update("jax_enable_x64", True)
 
 # Paths
 DATA_DIR = Path(__file__).parent.parent.parent / "data" / "pdb"
@@ -27,8 +26,6 @@ FF_PATH = (
   / "assets"
   / "protein.ff19SB.xml"
 )
-
-
 def openmm_available():
   """Check if OpenMM is available."""
   try:
@@ -38,8 +35,6 @@ def openmm_available():
     return True
   except ImportError:
     return False
-
-
 @pytest.fixture
 def parameterized_protein():
   """Load protein using proxide parse_structure with MD parameterization."""
@@ -53,8 +48,6 @@ def parameterized_protein():
     add_hydrogens=True,
   )
   return parse_structure(str(pdb_path), spec)
-
-
 class TestJaxMDEnergy:
   """Tests that JAX MD energy functions produce reasonable values."""
 
@@ -88,8 +81,6 @@ class TestJaxMDEnergy:
     assert jnp.abs(total_charge - jnp.round(total_charge)) < 0.5, (
       f"Non-integer total charge: {total_charge}"
     )
-
-
 @pytest.mark.skipif(not openmm_available(), reason="OpenMM not installed")
 class TestOpenMMParity:
   """Tests comparing JAX MD energy to OpenMM as ground truth."""
@@ -129,8 +120,6 @@ class TestOpenMMParity:
       e_angle = float(angle_fn(coords_flat))
       print(f"JAX Angle Energy: {e_angle:.4f}")
       assert jnp.isfinite(e_angle), "Angle energy is not finite"
-
-
 @pytest.mark.skipif(not openmm_available(), reason="OpenMM not installed")
 class TestOpenMMSystemConversion:
   """Tests for AtomicSystem.to_openmm_system() conversion."""
@@ -149,7 +138,5 @@ class TestOpenMMSystemConversion:
         pytest.skip("OpenMM required for to_openmm_system()")
     else:
       pytest.skip("to_openmm_system not implemented on Protein")
-
-
 if __name__ == "__main__":
   pytest.main([__file__, "-v"])

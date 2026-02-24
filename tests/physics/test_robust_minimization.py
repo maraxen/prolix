@@ -9,7 +9,6 @@ from prolix import simulate
 from prolix.physics import system
 
 # Enable x64 for physics
-jax.config.update("jax_enable_x64", True)
 
 @pytest.fixture
 def clash_system():
@@ -73,8 +72,6 @@ def test_clash_minimization_survives(clash_system):
     # We expect this to likely be unstable or result in huge jumps.
     # The real test is running the NEW code in simulate.py.
     pass
-
-
 @pytest.fixture
 def minimal_lj_system():
     """Create a minimal 2-particle system params dict."""
@@ -179,4 +176,3 @@ def test_standard_minimization_trajectory(minimal_lj_system):
     
     # Expected min is 2^(1/6) * sigma = 1.122
     assert jnp.abs(dist - 1.122) < 0.05
-

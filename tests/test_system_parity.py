@@ -81,11 +81,18 @@ class TestOutputSpecProteinPipeline:
 
     def test_energy_with_implicit_solvent(self, crambin_protein):
         """Energy computation with implicit solvent (GBSA)."""
+        import dataclasses
+        from proxide import assign_mbondi2_radii, assign_obc2_scaling_factors
+
         protein = crambin_protein
 
-        # Implicit solvent requires radii — skip if not available
+        # Assign radii if not present (parse_structure doesn't populate them yet)
         if protein.radii is None:
-            pytest.skip("Protein does not have radii for implicit solvent")
+            radii = assign_mbondi2_radii(list(protein.atom_names), protein.bonds)
+            scaled = assign_obc2_scaling_factors(list(protein.atom_names))
+            protein = dataclasses.replace(
+                protein, radii=jnp.asarray(radii), scaled_radii=jnp.asarray(scaled)
+            )
 
         displacement_fn, _ = space.free()
         exclusion_spec = nl.ExclusionSpec.from_protein(protein)

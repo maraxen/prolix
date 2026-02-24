@@ -32,21 +32,23 @@ def make_pme_energy_fn(
       Energy function E(R) -> float
 
   """
-  # grid_points should be an Array (usually 3 integers)
-  # grid_points should be a sequence of ints for static FFT size in JAX
+  # jax_md.energy.coulomb_recip_pme internally does:
+  #   grid_dimensions = onp.array((grid_points,) * dim)
+  # So grid_points MUST be a scalar int. If a tuple/array is passed,
+  # the broadcast creates a (3,3) array which fails as a shape argument.
   if isinstance(grid_points, int):
-    grid_dim = (grid_points, grid_points, grid_points)
-  elif hasattr(grid_points, "tolist"):  # JAX/Numpy array
-    val = grid_points.tolist()  # type: ignore
-    grid_dim = tuple(val)
+    grid_scalar = grid_points
+  elif hasattr(grid_points, "__len__"):
+    # Extract first element from array/tuple/list (assumes isotropic grid)
+    grid_scalar = int(grid_points[0])
   else:
-    grid_dim = tuple(grid_points)  # type: ignore
+    grid_scalar = int(grid_points)
 
   # jax_md.energy.coulomb_recip_pme expects box as (3,3) matrix for det() if not scalar
   # If box is (3,), convert to diagonal matrix
   box_matrix = jnp.diag(box) if box.ndim == 1 and box.shape[0] == 3 else box
 
-  pme_fn = energy.coulomb_recip_pme(charges, box_matrix, grid_dim, alpha=alpha)
+  pme_fn = energy.coulomb_recip_pme(charges, box_matrix, grid_scalar, alpha=alpha)
 
   def energy_fn(r: Array, **kwargs) -> Array:
     # pme_fn returns total energy

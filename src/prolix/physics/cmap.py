@@ -224,10 +224,6 @@ def compute_map_derivatives(energy: CmapGrid, size: int) -> tuple[CmapGrid, Cmap
 
   return d1, d2, d12
 
-  d12 = jax.vmap(compute_d12_col)(jnp.arange(size)).T
-
-  return d1, d2, d12
-
 
 def precompute_cmap_coefficients(cmap_grids: CmapEnergyGrids) -> CmapCoeffs:
   """Precompute bicubic spline coefficients for a batch of CMAP grids.
@@ -246,16 +242,15 @@ def precompute_cmap_coefficients(cmap_grids: CmapEnergyGrids) -> CmapCoeffs:
   n_maps = cmap_grids.shape[0]
   grid_size = cmap_grids.shape[1]
 
-  # Transpose grids: OpenMM stores energy[i+size*j] (column-major) but XML
-  # parsing with Python default reshape uses C-order, transposing phi/psi axes.
-  # We transpose each grid to match OpenMM convention: grid[phi_idx, psi_idx]
+  # Transpose grids to match OpenMM's calcMapDerivatives() axis convention.
+  # Combined with the (psi, phi) call order in system.py, this ensures
+  # correct axis assignment.
   cmap_grids_transposed = jnp.transpose(cmap_grids, (0, 2, 1))
 
   # Compute coefficients for each map
   def compute_map_coeffs(m):
     return compute_bicubic_coefficients(cmap_grids_transposed[m], grid_size)
 
-  # We use vmap to compute efficienty
   return jax.vmap(compute_map_coeffs)(jnp.arange(n_maps))
 
 
@@ -277,6 +272,11 @@ def compute_bicubic_coefficients(energy: CmapGrid, size: int) -> CmapCoeffs:
   delta = 2 * jnp.pi / size
 
   def compute_patch_coeffs(idx):
+    # OpenMM populates c[i + j*size] where i=phi, j=psi.
+    # Our jnp.arange(size*size) iterates 0..575.
+    # If we want idx to map such that idx = i + j*size, then:
+    # j = idx // size (slow varying, psi)
+    # i = idx % size (fast varying, phi)
     i = idx // size
     j = idx % size
     nexti = (i + 1) % size
@@ -294,7 +294,7 @@ def compute_bicubic_coefficients(energy: CmapGrid, size: int) -> CmapCoeffs:
     # Build RHS vector (scaled by delta as in OpenMM)
     rhs = jnp.concatenate([e, e1 * delta, e2 * delta, e12 * delta * delta])
 
-    # Apply weight matrix (transposed because OpenMM stores wt in column-major order)
+    # Apply weight matrix
     return jnp.dot(WT.T, rhs)
 
   coeffs = jax.vmap(compute_patch_coeffs)(jnp.arange(size * size))
@@ -354,14 +354,12 @@ def compute_cmap_energy(
     n_maps = cmap_coeffs.shape[0]
     grid_size = cmap_coeffs.shape[1]
 
-    # Transpose grids: OpenMM stores energy[i+size*j] (column-major) but XML
-    # parsing with Python default reshape uses C-order, transposing phi/psi axes.
-    # We transpose each grid to match OpenMM convention: grid[phi_idx, psi_idx]
-    cmap_grids_transposed = jnp.transpose(cmap_coeffs, (0, 2, 1))
+    # Transpose raw grids (batch dimension is 0)
+    cmap_coeffs_transposed = jnp.transpose(cmap_coeffs, (0, 2, 1))
 
     # Compute coefficients for each map
     def compute_map_coeffs(m):
-      return compute_bicubic_coefficients(cmap_grids_transposed[m], grid_size)
+      return compute_bicubic_coefficients(cmap_coeffs_transposed[m], grid_size)
 
     coeffs = jax.vmap(compute_map_coeffs)(jnp.arange(n_maps))
     # Shape: (N_maps, Grid, Grid, 16)

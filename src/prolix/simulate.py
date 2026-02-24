@@ -45,6 +45,13 @@ m.patch()
 Array = util.Array
 logger = logging.getLogger(__name__)
 
+# AKMA unit system constants for JAX-MD
+# JAX-MD is unitless. We operate in AMBER/AKMA units:
+#   distance: Å, energy: kcal/mol, mass: g/mol (Daltons)
+# Derived time unit: τ = sqrt(Da · Å² / (kcal/mol)) ≈ 48.888 fs
+AKMA_TIME_UNIT_FS = 48.88821291839  # 1 AKMA time unit in femtoseconds
+BOLTZMANN_KCAL = 0.0019872041       # kB in kcal/(mol·K)
+
 
 @dataclasses.dataclass
 class SimulationSpec:
@@ -283,7 +290,21 @@ def run_simulation(
   if isinstance(system, ProteinCls):
     protein_system = system
     if initial_positions is None:
-      initial_positions = jnp.array(protein_system.coordinates).reshape(-1, 3)
+      coords = protein_system.coordinates
+      if coords.ndim == 2:
+        # Flat format (CoordFormat.Full) — coordinates match parameter arrays
+        initial_positions = jnp.array(coords)
+      else:
+        # Atom37 format — extract valid atoms via mask
+        logger.warning(
+          "Protein has Atom37 coordinates (ndim=3). For MD, use "
+          "CoordFormat.Full to ensure coordinates match parameter arrays. "
+          "Extracting valid atoms from mask, but this may mismatch parameter counts."
+        )
+        mask = protein_system.atom_mask
+        flat_coords = coords.reshape(-1, 3)
+        flat_mask = mask.reshape(-1) if mask.ndim > 1 else mask
+        initial_positions = jnp.array(flat_coords[flat_mask > 0.5])
     n_atoms = initial_positions.shape[0]
 
   # Path 1: Hierarchical PyTree args
@@ -449,6 +470,31 @@ def run_simulation(
   # Check for implicit solvent or vacuum
   implicit_solvent = not spec.use_pbc
 
+  # Assign GB radii if implicit solvent is requested but radii are missing.
+  # This happens when parse_structure(OutputSpec(parameterize_md=True)) is used,
+  # which populates charges/sigmas/epsilons but not radii/scaled_radii.
+  if implicit_solvent and protein_system.radii is None:
+    _atom_names = getattr(protein_system, "atom_names", None)
+    _bonds = getattr(protein_system, "bonds", None)
+    if _atom_names is not None and _bonds is not None and len(_atom_names) > 0:
+      from proxide import assign_mbondi2_radii, assign_obc2_scaling_factors
+
+      _radii = assign_mbondi2_radii(list(_atom_names), _bonds)
+      _scaled = assign_obc2_scaling_factors(list(_atom_names))
+      protein_system = dataclasses.replace(
+        protein_system, radii=jnp.asarray(_radii), scaled_radii=jnp.asarray(_scaled)
+      )
+      logger.info(
+        "Assigned mbondi2 radii to %d atoms (implicit solvent fallback)", len(_radii)
+      )
+    else:
+      logger.warning(
+        "Implicit solvent requested but cannot assign GB radii "
+        "(atom_names=%s, bonds=%s). GB energy will use sigma/2 fallback.",
+        _atom_names is not None,
+        _bonds is not None,
+      )
+
   # Build ExclusionSpec for proper 1-2/1-3/1-4 scaling in non-bonded terms
   # This is required for BOTH neighbor list and N^2 paths to work correctly
   exclusion_spec = spec.exclusion_spec
@@ -504,6 +550,19 @@ def run_simulation(
     e_initial, grads_initial = jax.value_and_grad(energy_fn)(initial_positions)
 
   logger.info("  Initial energy: %.2f kcal/mol", e_initial)
+
+  # Validate initial energy is finite before proceeding
+  if not jnp.isfinite(e_initial):
+    msg = (
+      f"Initial energy is non-finite ({float(e_initial):.2f} kcal/mol). "
+      f"This typically indicates severe steric clashes or unparameterized atoms. "
+      f"Common causes:\n"
+      f"  - Hydrogen addition placed H on top of existing atoms (use add_hydrogens=False)\n"
+      f"  - Unparameterized atoms have sigma=0.0 (check force field coverage)\n"
+      f"  - Crystal structure has severe clashes requiring preprocessing\n"
+      f"Run diagnose_inf_energy.py for detailed energy decomposition."
+    )
+    raise RuntimeError(msg)
 
   # Adaptive Minimization State
   @jax.jit
@@ -607,26 +666,52 @@ def run_simulation(
   logger.info("  Converged: %s", final_min_state.converged)
 
   # NVT Langevin dynamics setup
-  # IMPORTANT: jax_md uses reduced units, not physical time
-  # dt=2e-3 in reduced units is standard (like stress_test_stability.py)
-  # Converting from fs to jax_md reduced units: dt = step_size_fs * 1e-3 * 0.0488 (if using AKMA units)
-  # However, stress_test uses dt=2e-3 directly which is known to work.
-  # For simplicity and stability, use the known-working value.
-
-  kT = spec.temperature_k * 0.0019872041  # Boltzmann in kcal/mol/K
-  dt = 2e-3  # Reduced units (known to work from stress_test_stability.py)
-  gamma = spec.gamma if spec.gamma <= 1.0 else 0.1  # Use lower friction for stability
+  # Convert physical quantities to AKMA reduced units for JAX-MD.
+  # JAX-MD integrators are unitless — they see dt, kT, gamma as plain floats.
+  # Our energy function outputs kcal/mol and positions are in Å,
+  # so we must use AKMA unit conversions to keep everything consistent.
+  kT = spec.temperature_k * BOLTZMANN_KCAL               # kcal/mol
+  dt = spec.step_size_fs / AKMA_TIME_UNIT_FS              # reduced time units
+  gamma_reduced = spec.gamma * AKMA_TIME_UNIT_FS * 1e-3   # convert 1/ps → 1/τ
 
   logger.info(
-    "NVT Langevin setup: T=%.1f K, kT=%.4f, dt=%.4f, gamma=%.2f", spec.temperature_k, kT, dt, gamma
+    "NVT Langevin setup: T=%.1f K, kT=%.4f kcal/mol, "
+    "dt=%.6f τ (%.1f fs), gamma=%.5f /τ (%.1f /ps)",
+    spec.temperature_k, kT, dt, spec.step_size_fs,
+    gamma_reduced, spec.gamma,
   )
 
   # Use energy_fn directly - jax_md integrators support neighbor= kwarg natively
   # DO NOT wrap energy_fn with a captured neighbor list - that prevents updates!
   integrator_energy_fn = energy_fn
 
-  # Don't pass mass to jax_md (it handles masses internally)
-  # The stress_test_stability.py doesn't pass mass and works fine
+  # Extract per-atom masses from the protein system
+  # Must check for None BEFORE calling jnp.array (which raises on None input).
+  raw_masses = protein_system.masses
+  if raw_masses is not None:
+    masses = jnp.array(raw_masses)
+    if jnp.all(masses == 0):
+      logger.warning("All masses are zero, will derive from elements")
+      raw_masses = None  # trigger element-based derivation below
+
+  if raw_masses is None:
+    # Derive masses from element symbols if available
+    _ELEMENT_MASS = {
+      "H": 1.008, "C": 12.011, "N": 14.007, "O": 15.999, "S": 32.06,
+      "P": 30.974, "F": 18.998, "Cl": 35.45, "Br": 79.904, "I": 126.904,
+      "Fe": 55.845, "Zn": 65.38, "Ca": 40.078, "Mg": 24.305, "Na": 22.990,
+      "K": 39.098, "Se": 78.971, "Mn": 54.938, "Cu": 63.546, "Co": 58.933,
+    }
+    elements = getattr(protein_system, "elements", None)
+    if elements is not None and len(elements) == n_atoms:
+      mass_list = [_ELEMENT_MASS.get(e, _ELEMENT_MASS.get(e.capitalize(), 12.011)) for e in elements]
+      masses = jnp.array(mass_list, dtype=jnp.float32)
+      logger.info("Derived masses from %d element symbols (range: %.1f–%.1f Da)",
+                   n_atoms, float(jnp.min(masses)), float(jnp.max(masses)))
+    else:
+      logger.warning("No masses or elements found, defaulting to carbon mass (12.0 Da)")
+      masses = jnp.ones(n_atoms) * 12.0
+
   constrained_bonds = protein_system.constrained_bonds
   constrained_lengths = protein_system.constrained_bond_lengths
 
@@ -638,20 +723,20 @@ def run_simulation(
       shift_fn,
       dt=dt,
       kT=kT,
-      gamma=gamma,
+      gamma=gamma_reduced,
       constraints=(jnp.array(constrained_bonds), jnp.array(constrained_lengths)),
     )
   else:
     init_fn, apply_fn = jax_md_simulate.nvt_langevin(
-      integrator_energy_fn, shift_fn, dt=dt, kT=kT, gamma=gamma
+      integrator_energy_fn, shift_fn, dt=dt, kT=kT, gamma=gamma_reduced
     )
 
-  # Initialize state from minimized positions
+  # Initialize state from minimized positions with per-atom masses
   # Pass neighbor= to init_fn if using neighbor lists (jax_md native support)
   if neighbor is not None:
-    state = init_fn(key, positions_minimized, neighbor=neighbor)
+    state = init_fn(key, positions_minimized, mass=masses, neighbor=neighbor)
   else:
-    state = init_fn(key, positions_minimized)
+    state = init_fn(key, positions_minimized, mass=masses)
 
   @jax.jit
   def jit_apply_fn(s, nbr=None):
@@ -837,12 +922,20 @@ def run_simulation(
     # Update state for next epoch
     state = final_state
 
-    # Fixup step/time in saved states if needed (since we didn't track them in scan)
-    # Doing it on CPU is fast enough for trajectory metadata
-    # Or we could have tracked it in scan with a structured carrier.
+    # Fixup step/time in saved states (tracked externally, not in scan)
+    base_save_idx = epoch * accumulate
+    frame_steps = jnp.array(
+      [(base_save_idx + i + 1) * steps_per_save for i in range(batch_size)]
+    )
+    frame_times = frame_steps * spec.step_size_fs * 1e-6  # fs → ns
+    stacked_sim_states = eqx.tree_at(
+      lambda s: s.step, stacked_sim_states, frame_steps
+    )
+    stacked_sim_states = eqx.tree_at(
+      lambda s: s.time_ns, stacked_sim_states, frame_times
+    )
 
     # Write to disk
-    # Move to CPU
     writer.write_batch(stacked_sim_states)
 
     end_time = time.time()

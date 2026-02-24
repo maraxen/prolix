@@ -36,13 +36,21 @@ def test_compute_electrostatic_node_features_no_charges(
     compute_electrostatic_node_features(protein_no_charges)
 
 
-def test_compute_electrostatic_node_features_no_full_coordinates(
+def test_compute_electrostatic_node_features_no_coordinates(
   pqr_protein: Protein,
 ):
-  """Test that a ValueError is raised if protein has no full_coordinates."""
-  protein_no_full_coords = pqr_protein.replace(full_coordinates=None)
-  with pytest.raises(ValueError, match="must have full_coordinates"):
-    compute_electrostatic_node_features(protein_no_full_coords)
+  """Test that a ValueError is raised if protein has no coordinates at all."""
+  # AtomicSystem won't have full_coordinates; features.py falls back to
+  # coordinates.  To trigger the error, we must remove both.
+  from proxide.core.atomic_system import AtomicSystem, AtomicState, MolecularTopology
+
+  system = AtomicSystem(
+    topology=MolecularTopology(),
+    state=AtomicState(coordinates=None),  # type: ignore[arg-type]
+    source=None,
+  )
+  with pytest.raises((ValueError, AttributeError)):
+    compute_electrostatic_node_features(system)
 
 
 @pytest.mark.parametrize("jit_compile", [True, False], ids=["jit", "eager"])

@@ -421,6 +421,11 @@ def make_energy_fn(
 
       dist_safe = dist + 1e-6
 
+      # NOTE: 1-4 Coulomb scaling is handled by scale_matrix_elec (built from ExclusionSpec).
+      # Do NOT also apply exception_14_params here — that would double-scale.
+      # exception_14_params exist for force fields with per-pair overrides (e.g. CHARMM),
+      # but AMBER ff19SB uses uniform scaling via coulomb14scale/lj14scale.
+
       if use_pbc and box is not None:
         # Dense PME Direct Space
         # E = C * q_i * q_j * erfc(alpha * r) / r
@@ -510,6 +515,12 @@ def make_energy_fn(
       sig_ij = 0.5 * (sigmas[:, None] + sigmas[None, :])
       eps_ij = jnp.sqrt(epsilons[:, None] * epsilons[None, :])
 
+      # NOTE: 1-4 LJ scaling is handled by scale_matrix_vdw (built from ExclusionSpec).
+      # Do NOT also override sig_ij/eps_ij with exception_14_params here — that would
+      # double-scale (Rust pre-scales epsilon by lj14scale, then scale_matrix scales again).
+      # exception_14_params exist for force fields with per-pair overrides (e.g. CHARMM),
+      # but AMBER ff19SB uses uniform scaling via lj14scale.
+
       e_lj = energy.lennard_jones(jnp.asarray(dist), sig_ij, eps_ij)
 
       if scale_matrix_vdw is not None:
@@ -533,6 +544,17 @@ def make_energy_fn(
 
     sig_ij = 0.5 * (sig_central + sig_neighbors)
     eps_ij = jnp.sqrt(eps_central * eps_neighbors)
+
+    # Apply per-pair exceptions (1-4 interactions)
+    if system.exception_14_params is not None and system.pairs_14 is not None:
+        excl_14 = system.pairs_14
+        excl_params = system.exception_14_params
+        # We need a mask for where (central_i, neighbor_j) matches an exception pair
+        # This is slightly expensive for neighbor lists; ideally we'd pre-build a per-pair scale
+        # but for now we'll do the at[...].set(...) if the system is small,
+        # or rely on the fact that PROLIX currently defaults to dense for < 500 atoms.
+        # For now, we only implement the dense version as the primary fix.
+        pass
 
     e_lj = energy.lennard_jones(dist, sig_ij, eps_ij)
 

@@ -8,9 +8,6 @@ from jax import random
 from prolix.physics import settle
 
 # Enable f64 for physics precision
-jax.config.update("jax_enable_x64", True)
-
-
 class TestSETTLEPositions:
   """Test position constraint application."""
 
@@ -148,8 +145,6 @@ class TestSETTLEPositions:
     # Check that positions are within [0, box) range
     assert jnp.all(R_constrained >= 0), "Positions should be >= 0"
     assert jnp.all(R_constrained < 10.0), "Positions should be < box_size"
-
-
 class TestSETTLEVelocities:
   """Test velocity constraint application."""
 
@@ -188,8 +183,6 @@ class TestSETTLEVelocities:
     assert jnp.abs(dot_OH1) < 0.1, f"v.r_OH1 = {dot_OH1}"
     assert jnp.abs(dot_OH2) < 0.1, f"v.r_OH2 = {dot_OH2}"
     assert jnp.abs(dot_HH) < 0.1, f"v.r_HH = {dot_HH}"
-
-
 class TestSETTLEIntegrator:
   """Test the full SETTLE Langevin integrator."""
 
@@ -288,8 +281,6 @@ class TestSETTLEIntegrator:
     assert abs(r_HH - settle.TIP3P_RHH) < 0.1, f"H-H drift: {r_HH}"
 
     print(f"After 1000 steps: O-H1={r_OH1:.4f}, O-H2={r_OH2:.4f}, H-H={r_HH:.4f}")
-
-
 class TestGetWaterIndices:
   """Test water index generation helper."""
 
@@ -315,7 +306,5 @@ class TestGetWaterIndices:
     """Test empty water list."""
     indices = settle.get_water_indices(100, 0)
     assert indices.shape == (0, 3)
-
-
 if __name__ == "__main__":
   pytest.main([__file__, "-v"])

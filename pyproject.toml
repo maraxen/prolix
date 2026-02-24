@@ -59,6 +59,8 @@ viz = [
 [tool.pytest.ini_options]
 markers = [
     "smoke: marks tests as smoke tests (fast and critical)",
+    "slow: marks tests as slow (>30s, may be skipped in CI)",
+    "order: controls test execution order",
 ]
 testpaths = ["tests"]
 python_files = ["test_*.py"]

@@ -35,8 +35,13 @@ def system_params_to_protein(params: SystemParams) -> Protein:
     bond_params = jnp.asarray(params["bond_params"])
     angles = jnp.asarray(params["angles"])
     angle_params = jnp.asarray(params["angle_params"])
-    sigmas = jnp.asarray(params["sigmas"])
-    epsilons = jnp.asarray(params["epsilons"])
+
+    # LJ parameters — use _get for robustness (not all SystemParams dicts include these)
+    n_atoms = len(charges)
+    sigmas_raw = _get("sigmas")
+    sigmas = jnp.asarray(sigmas_raw) if sigmas_raw is not None else jnp.ones(n_atoms) * 3.0
+    epsilons_raw = _get("epsilons")
+    epsilons = jnp.asarray(epsilons_raw) if epsilons_raw is not None else jnp.ones(n_atoms) * 0.1
 
     # Renamed fields
     proper_dihedrals = jnp.asarray(params["dihedrals"]) if _get("dihedrals") is not None else None

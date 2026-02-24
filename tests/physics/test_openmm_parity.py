@@ -310,11 +310,11 @@ class TestEnergyDecomposition:
       f"OpenMM={omm_nonbonded:.4f}, diff={diff:.4f} kcal/mol"
     )
 
-    # LJ+Coulomb should match within 25 kcal/mol
-    # (1-4 scaling differences and Coulomb constant precision cause some gap)
-    assert diff < 25.0, (
+    # LJ+Coulomb should match within 1.0 kcal/mol
+    # (Fixes for sigma=0 and 1-4 exceptions implemented)
+    assert diff < 1.0, (
       f"Nonbonded energy mismatch: JAX={jax_nonbonded:.4f}, "
-      f"OpenMM={omm_nonbonded:.4f}, diff={diff:.4f} kcal/mol (tolerance=25.0)"
+      f"OpenMM={omm_nonbonded:.4f}, diff={diff:.4f} kcal/mol (tolerance=1.0)"
     )
 
   def test_total_energy_parity(self, jax_openmm_system):
@@ -332,9 +332,9 @@ class TestEnergyDecomposition:
     # Tolerance budget (kcal/mol) for total energy parity:
     #   GB solvation:     ~80   (iterative JAX OBC2 vs analytical OpenMM)
     #   Nonpolar SASA:    ~37   (JAX-only term, not in OpenMM total)
-    #   CMAP:             ~10   (not yet extracted by Rust parameterizer, tech debt #561)
+    #   CMAP:              ~0   (matches to <0.1 kcal/mol after unit fix)
     #   Bonded + LJ+Coul:  ~0   (match to <0.01 kcal/mol)
-    # Net expected gap: ~53 kcal/mol. Setting tolerance to 100 kcal/mol to match
+    # Net expected gap: ~43 kcal/mol. Setting tolerance to 100 kcal/mol to match
     # the per-component GB solvation tolerance and account for protein-size variation.
     assert diff < 100.0, (
       f"Total energy mismatch: JAX={jax_total:.1f}, OpenMM={omm_total:.1f}, "

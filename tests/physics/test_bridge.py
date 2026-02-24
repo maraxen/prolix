@@ -99,16 +99,16 @@ def test_bond_lengths_are_physical(parameterized_protein: Protein):
   """Test that predicted bond lengths are in a physical range."""
   bond_params = parameterized_protein.bond_params
   lengths = bond_params[:, 0]  # First column is equilibrium length
-  # Rust returns lengths in nm: 0.09-0.2 nm = 0.9-2.0 Angstroms
-  assert jnp.all(lengths > 0.05), "Bond length too short"
-  assert jnp.all(lengths < 0.3), "Bond length too long"
+  # proxide returns lengths in Angstroms: typical C-C ~1.5Å, C-H ~1.0Å
+  assert jnp.all(lengths > 0.5), "Bond length too short"
+  assert jnp.all(lengths < 3.0), "Bond length too long"
 
 
 def test_lj_sigmas_are_physical(parameterized_protein: Protein):
   """Test that LJ sigma values are in a physical range."""
   sigmas = parameterized_protein.sigmas
-  # Rust returns sigmas in nm: 0.1-0.4 nm = 1.0-4.0 Angstroms
+  # proxide returns sigmas in Angstroms: typical range 1.0-4.0Å
   # Hydrogens may have sigma=0 (they are virtual sites or excluded)
   heavy_sigmas = sigmas[sigmas > 0]
-  assert jnp.all(heavy_sigmas > 0.1), "Sigma too small for heavy atoms"
-  assert jnp.all(heavy_sigmas < 0.5), "Sigma too large"
+  assert jnp.all(heavy_sigmas > 1.0), "Sigma too small for heavy atoms"
+  assert jnp.all(heavy_sigmas < 12.0), "Sigma too large"

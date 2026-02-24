@@ -13,7 +13,7 @@ from proxide import OutputSpec, parse_structure
 # Paths
 DATA_DIR = Path(__file__).parent.parent.parent / "data"
 FF_PATH = (
-  Path(__file__).parent.parent.parent
+  Path(__file__).parent.parent.parent.parent
   / "proxide"
   / "src"
   / "proxide"
