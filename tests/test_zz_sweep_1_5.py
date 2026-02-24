@@ -1,17 +1,27 @@
 import os
 import jax
 import jax.numpy as jnp
+import pytest
 from jax.test_util import check_grads
 from proxide.io.parsing.backend import parse_structure, OutputSpec
 from proxide import CoordFormat
 from prolix.physics import system
 from jax_md import space
 
-jax.config.update("jax_enable_x64", True)
-jax.config.update("jax_debug_nans", True)
-jax.disable_jit()
+# NOTE: do NOT set jax_enable_x64, jax_debug_nans, or disable_jit at module
+# level — these are irreversible global state and contaminate all subsequent
+# tests in the pytest session.  Scoped inside the test function below.
 
+
+@pytest.mark.order("last")
 def test_sweep_1_5_masked_eager_gradients():
+    # Enable x64, NaN debugging and disable JIT for this test only.
+    # WARNING: these are irreversible within a pytest session —
+    # that is why this test is marked order("last").
+    jax.config.update("jax_enable_x64", True)
+    jax.config.update("jax_debug_nans", True)
+    jax.disable_jit()
+
     print("Testing Sweep 1.5 Protocol...")
     
     # 1. Parse a real protein
