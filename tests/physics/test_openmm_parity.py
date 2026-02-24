@@ -209,9 +209,9 @@ class TestEnergyDecomposition:
     omm_torsion = data["omm_components"].get("PeriodicTorsionForce", 0.0)
 
     diff = abs(jax_torsion - omm_torsion)
-    assert diff < 1.0, (  # Slightly relaxed tolerance for torsions
+    assert diff < self.TOLERANCE_TIGHT, (
       f"Torsion energy mismatch: JAX={jax_torsion:.4f}, OpenMM={omm_torsion:.4f}, "
-      f"diff={diff:.4f} kcal/mol"
+      f"diff={diff:.4f} kcal/mol (tolerance={self.TOLERANCE_TIGHT})"
     )
 
   def test_cmap_energy_matches_openmm(self, jax_openmm_system):
