@@ -105,6 +105,7 @@ def make_energy_fn(
   pme_grid_points: int | Array = 64,
   pme_alpha: float = 0.34,
   return_decomposed: bool = False,
+  strict_parameterization: bool = True,
 ) -> Callable[[Array], Array] | dict[str, Callable]:
   """Creates the total potential energy function.
 
@@ -211,19 +212,26 @@ def make_energy_fn(
   sigmas = system.sigmas
   epsilons = system.epsilons
 
-  # Defensive: clamp sigmas to prevent singular LJ from unparameterized atoms (sigma=0.0).
-  # This can happen when oxidize/ff parameterization skips atoms it can't match.
+  # Defensive check to prevent singular LJ from unparameterized atoms (sigma=0.0).
+  # This typically happens due to skipped non-standard residues or missing FF terms.
   n_zero_sigma = int(jnp.sum(sigmas <= 0.0))
   if n_zero_sigma > 0:
-    import logging as _logging
-    _log = _logging.getLogger("prolix.physics.system")
-    _log.warning(
-      "Found %d atoms with sigma <= 0.0 (unparameterized). "
-      "Clamping to 1e-6 to prevent singular LJ. "
-      "Fix root cause in force field parameterization.",
-      n_zero_sigma,
-    )
-    sigmas = jnp.maximum(sigmas, 1e-6)
+    if strict_parameterization:
+      raise ValueError(
+        f"Found {n_zero_sigma} atoms with sigma <= 0.0 (unparameterized). "
+        "Strict parameterization is enabled. Fix root cause in force field parameterization "
+        "or pass strict_parameterization=False to bypass this error."
+      )
+    else:
+      import logging as _logging
+      _log = _logging.getLogger("prolix.physics.system")
+      _log.warning(
+        "Found %d atoms with sigma <= 0.0 (unparameterized). "
+        "Clamping to 1e-6 to prevent singular LJ. "
+        "Fix root cause in force field parameterization.",
+        n_zero_sigma,
+      )
+      sigmas = jnp.maximum(sigmas, 1e-6)
 
   assert sigmas.shape[0] == charges.shape[0], f"Sigmas shape mismatch: {sigmas.shape} vs {charges.shape}"
 
