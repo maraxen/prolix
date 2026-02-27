@@ -288,6 +288,7 @@ def compute_born_radii_neighbor_list(
       Born radii (N,).
 
   """
+  radii = jnp.maximum(radii, 1e-6)
   N, _K = neighbor_idx.shape
 
   neighbor_positions = positions[neighbor_idx]  # (N, K, 3)

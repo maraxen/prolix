@@ -45,6 +45,7 @@ class _DictSystemWrapper:
     "scale_matrix_vdw": None,
     "scale_matrix_elec": None,
     "coulomb14scale": None,
+    "lj14scale": None,
   }
 
   def __init__(self, d: dict):
@@ -251,7 +252,8 @@ def make_energy_fn(
     use_sparse_exclusions = True
 
     # If dense scaling matrices are missing, build them from spec (required for N^2 path)
-    if scale_matrix_vdw is None and scale_matrix_elec is None:
+    # Optimization: Skip building dense matrices if we have a neighbor list and sparse exclusions.
+    if neighbor_list is None and scale_matrix_vdw is None and scale_matrix_elec is None:
       # Build dense scaling matrices
       N = charges.shape[0]
       mat_vdw = jnp.ones((N, N), dtype=jnp.float32)
