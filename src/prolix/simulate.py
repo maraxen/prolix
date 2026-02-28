@@ -1075,6 +1075,6 @@ def batched_simulate_frames(
   keys: Array,
 ) -> Array:
   """Vmapped version of simulate_frames for ensemble simulations."""
-  return jax.vmap(simulate_frames, in_axes=(None, None, None, None, 0))(
+  return jax.vmap(simulate_frames, in_axes=(None, 0, None, None, 0))(
     protein, r_init, n_steps, n_frames, keys
   )

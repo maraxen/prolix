@@ -42,7 +42,7 @@ jax.config.update("jax_enable_x64", True)
 class BenchmarkConfig:
     """Benchmark parameters."""
     n_repeats: int = 10
-    homo_batch_sizes: list[int] = field(default_factory=lambda: [2, 4, 8])
+    homo_batch_sizes: list[int] = field(default_factory=lambda: [2, 4])
     quick: bool = False
     profile: bool = False
     output_csv: str = "benchmark_batched_results.csv"
@@ -252,6 +252,11 @@ def benchmark_heterogeneous(proteins: dict, config: BenchmarkConfig) -> list[dic
         batch_size = len(padded_list)
         n_real = sum(int(s.n_real_atoms) for s in padded_list)
         n_padded = batch_size * bucket_size
+        
+        # Prevent OOM for large buckets
+        if bucket_size >= 8192 and batch_size > 4:
+            print(f"  Skipping Bucket {bucket_size} (B={batch_size}) to prevent OOM.")
+            continue
 
         batched_energy = make_batched_energy_fn(
             displacement_fn, implicit_solvent=True
@@ -285,6 +290,86 @@ def benchmark_heterogeneous(proteins: dict, config: BenchmarkConfig) -> list[dic
               f"waste: {waste:.1f}% (JIT: {jit_s:.2f}s)")
 
     jax.clear_caches()
+    return results
+
+
+# ---------------------------------------------------------------------------
+# Tier 3: MD Stepping (batched_simulate_frames vs simulate_frames)
+# ---------------------------------------------------------------------------
+def benchmark_simulation(proteins: dict, config: BenchmarkConfig) -> list[dict]:
+    """Benchmark MD stepping using simulate_frames and batched_simulate_frames."""
+    from prolix.simulate import simulate_frames, batched_simulate_frames
+    from prolix.padding import bucket_proteins, collate_batch
+    import dataclasses as dc
+
+    results = []
+    
+    n_steps = 50
+    n_frames = 1
+    
+    # Just use K-Ras for simulation benchmarking to save time
+    if "K-Ras" not in proteins:
+        return results
+        
+    name = "K-Ras"
+    protein = proteins[name]
+    positions = jnp.array(protein.coordinates).reshape(-1, 3)
+    
+    # 1. Sequential Simulation
+    key = jax.random.PRNGKey(0)
+    fn_seq = lambda: simulate_frames(protein, positions, n_steps, n_frames, key)
+    jit_s, mean_s, std_s = time_fn(fn_seq, max(1, config.n_repeats // 2))
+    
+    results.append({
+        "scenario": "sim_sequential",
+        "system": name,
+        "batch_size": 1,
+        "bucket_size": "",
+        "jit_compile_s": f"{jit_s:.4f}",
+        "exec_mean_s": f"{mean_s:.6f}",
+        "exec_std_s": f"{std_s:.6f}",
+        "n_real_atoms": positions.shape[0],
+        "n_padded_atoms": positions.shape[0],
+        "padding_waste_pct": "0.0",
+        "throughput_atoms_per_s": f"{positions.shape[0] * n_steps / mean_s:.0f}",
+    })
+    print(f"  Sim {name} (seq): {mean_s:.4f}s ± {std_s:.4f}s (JIT: {jit_s:.2f}s)")
+    jax.clear_caches()
+    
+    # 2. Batched Simulation
+    for batch_size in config.homo_batch_sizes[:1]: # only do one batch size to save time
+        protein_copies = []
+        for i in range(batch_size):
+            noisy_coords = np.array(protein.coordinates) + \
+                np.random.RandomState(i).randn(*protein.coordinates.shape) * 0.05
+            protein_copies.append(noisy_coords)
+
+        r_init_batch = jnp.stack([jnp.array(c).reshape(-1, 3) for c in protein_copies])
+        keys = jax.random.split(jax.random.PRNGKey(0), batch_size)
+        
+        fn_batch = lambda: batched_simulate_frames(protein, r_init_batch, n_steps, n_frames, keys)
+        jit_b, mean_b, std_b = time_fn(fn_batch, max(1, config.n_repeats // 2))
+        
+        n_real = positions.shape[0] * batch_size
+        n_padded = n_real
+        waste = 0.0
+        
+        results.append({
+            "scenario": "sim_batched",
+            "system": name,
+            "batch_size": batch_size,
+            "bucket_size": "",
+            "jit_compile_s": f"{jit_b:.4f}",
+            "exec_mean_s": f"{mean_b:.6f}",
+            "exec_std_s": f"{std_b:.6f}",
+            "n_real_atoms": n_real,
+            "n_padded_atoms": n_padded,
+            "padding_waste_pct": f"{waste:.1f}",
+            "throughput_atoms_per_s": f"{n_real * n_steps / mean_b:.0f}",
+        })
+        print(f"  Sim {name} × {batch_size} (batched): {mean_b:.4f}s ± {std_b:.4f}s (JIT: {jit_b:.2f}s)")
+        jax.clear_caches()
+
     return results
 
 
@@ -347,11 +432,26 @@ def print_summary(seq_results: list[dict], homo_results: list[dict],
         for r in hetero_results:
             mean = float(r["exec_mean_s"])
             std = float(r["exec_std_s"])
-            speedup = total_seq / mean if mean > 0 else 0
-            print(f"  Bucket {r['bucket_size']} ({r['system']}, B={r['batch_size']}): "
-                  f"{mean:.4f}s ± {std:.4f}s | "
-                  f"speedup vs seq sum: {speedup:.1f}x | waste: {r['padding_waste_pct']}%")
+            
+            # calculate baseline from seq_results for the included proteins
+            included_names = r["system"].split("+")
+            seq_sum = 0
+            for seq_r in seq_results:
+                if seq_r["system"] in included_names:
+                    seq_sum += float(seq_r["exec_mean_s"])
+            
+            speedup = seq_sum / mean if mean > 0 else 0
+            if r["batch_size"] > 1: # if we batched something
+                print(f"  Bucket {r['bucket_size']} ({r['system']}, B={r['batch_size']}): "
+                      f"{mean:.4f}s ± {std:.4f}s | "
+                      f"speedup vs seq sum: {speedup:.1f}x | waste: {r['padding_waste_pct']}%")
+            else:
+                print(f"  Bucket {r['bucket_size']} ({r['system']}, B={r['batch_size']}): "
+                      f"{mean:.4f}s ± {std:.4f}s | waste: {r['padding_waste_pct']}%")
 
+    # Simulation step
+    sim_results = [r for r in homo_results if r["scenario"].startswith("sim")] # just as placeholder check
+    # we will print it globally
     print("=" * 70)
 
 
@@ -432,9 +532,30 @@ def main():
     else:
         print(f"\n--- Tier 2A: Skipped (need ≥2 proteins) ---")
 
+    # Tier 3: Simulation Stepping
+    print(f"\n--- Tier 3: MD Stepping (50 steps) ---")
+    sim_results = benchmark_simulation(proteins, config)
+    all_results.extend(sim_results)
+
     # Output
     write_csv(all_results, config.output_csv)
     print_summary(seq_results, homo_results, hetero_results)
+    
+    if sim_results:
+        print(f"\n--- Tier 3: Simulation Summary ---")
+        seq_sim = [r for r in sim_results if r["scenario"] == "sim_sequential"]
+        batch_sim = [r for r in sim_results if r["scenario"] == "sim_batched"]
+        
+        if seq_sim and batch_sim:
+            s_mean = float(seq_sim[0]["exec_mean_s"])
+            b_mean = float(batch_sim[0]["exec_mean_s"])
+            b_size = batch_sim[0]["batch_size"]
+            speedup = (s_mean * b_size) / b_mean
+            print(f"  {seq_sim[0]['system']} Sequential (1 copy): {s_mean:.4f}s")
+            print(f"  {batch_sim[0]['system']} Batched ({b_size} copies): {b_mean:.4f}s")
+            print(f"  Speedup vs Sequential Sum: {speedup:.2f}x")
+            
+    print("=" * 70)
 
 
 if __name__ == "__main__":
