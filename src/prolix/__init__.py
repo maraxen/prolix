@@ -3,7 +3,7 @@
 __version__ = "0.1.0"
 
 from prolix.padding import pad_protein, bucket_proteins, collate_batch, PaddedSystem
-from prolix.batched_energy import make_batched_energy_fn
+from prolix.batched_energy import make_batched_energy_fn, single_padded_energy
 
 __all__ = [
     "pad_protein",
@@ -11,4 +11,5 @@ __all__ = [
     "collate_batch",
     "PaddedSystem",
     "make_batched_energy_fn",
+    "single_padded_energy",
 ]

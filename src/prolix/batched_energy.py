@@ -167,55 +167,55 @@ def _coulomb_energy_masked(r: Array, charges: Array, atom_mask: Array, displacem
 # BATCHED EVALUATION
 # ==============================================================================
 
+def single_padded_energy(sys: PaddedSystem, displacement_fn: space.DisplacementFn, implicit_solvent: bool = True) -> Array:
+    """Computes total potential energy for a single padded system."""
+    r = sys.positions
+    
+    # Bonded terms
+    e_bond = _bond_energy_masked(r, sys.bonds, sys.bond_params, sys.bond_mask, displacement_fn)
+    e_angle = _angle_energy_masked(r, sys.angles, sys.angle_params, sys.angle_mask, displacement_fn)
+    e_dih = _dihedral_energy_masked(r, sys.dihedrals, sys.dihedral_params, sys.dihedral_mask, displacement_fn)
+    e_imp = _dihedral_energy_masked(r, sys.impropers, sys.improper_params, sys.improper_mask, displacement_fn)
+    
+    e_cmap = _cmap_energy_masked(r, sys.cmap_torsions, sys.cmap_mask, sys.cmap_coeffs, displacement_fn)
+    
+    # Non-bonded
+    # NOTE: For phase 2 and simplicity in batched vmap (testing gradients), we use the N^2 path.
+    # N*K neighbor list paths require extra state/handling.
+    e_lj = _lj_energy_masked(r, sys.sigmas, sys.epsilons, sys.atom_mask, displacement_fn)
+    
+    if implicit_solvent:
+        mask_ij = sys.atom_mask[:, None] & sys.atom_mask[None, :]
+        n = len(sys.atom_mask)
+        energy_mask = mask_ij * (1.0 - jnp.eye(n))
+        e_gb, born_radii = compute_gb_energy(
+            positions=r,
+            charges=sys.charges,
+            radii=sys.radii,
+            scaled_radii=sys.scaled_radii,
+            mask=sys.atom_mask,
+            energy_mask=energy_mask,
+            dielectric_offset=0.09,
+        )
+        e_np = compute_ace_nonpolar_energy(sys.radii, born_radii)
+        # Mask out nonpolar energy for padding atoms (ACE is per-atom)
+        e_np = jnp.sum(e_np * sys.atom_mask)
+        e_elec = e_gb
+        e_solv = e_gb + e_np
+    else:
+        e_elec = _coulomb_energy_masked(r, sys.charges, sys.atom_mask, displacement_fn)
+        e_solv = 0.0
+
+    # We assume 1-4 scaling etc. are handled correctly via masking, but for simplicity
+    # we omit the full ExclusionSpec processing here. This is focused on batching overhead.
+    # In a real system you would add 1-4 exclusions here using map_product + masks.
+
+    return e_bond + e_angle + e_dih + e_imp + e_cmap + e_lj + e_elec + e_solv
+
 def make_batched_energy_fn(displacement_fn: space.DisplacementFn, implicit_solvent: bool = True) -> Callable[[PaddedSystem], Array]:
     """Create a vmap-compatible energy function for padded systems.
     
     Currently implements the full N^2 pairwise computation. Designed for batched
     execution of heterogeneous small systems.
     """
-    
-    def _single_padded_energy(sys: PaddedSystem) -> Array:
-        r = sys.positions
-        
-        # Bonded terms
-        e_bond = _bond_energy_masked(r, sys.bonds, sys.bond_params, sys.bond_mask, displacement_fn)
-        e_angle = _angle_energy_masked(r, sys.angles, sys.angle_params, sys.angle_mask, displacement_fn)
-        e_dih = _dihedral_energy_masked(r, sys.dihedrals, sys.dihedral_params, sys.dihedral_mask, displacement_fn)
-        e_imp = _dihedral_energy_masked(r, sys.impropers, sys.improper_params, sys.improper_mask, displacement_fn)
-        
-        e_cmap = _cmap_energy_masked(r, sys.cmap_torsions, sys.cmap_mask, sys.cmap_coeffs, displacement_fn)
-        
-        # Non-bonded
-        # NOTE: For phase 2 and simplicity in batched vmap (testing gradients), we use the N^2 path.
-        # N*K neighbor list paths require extra state/handling.
-        e_lj = _lj_energy_masked(r, sys.sigmas, sys.epsilons, sys.atom_mask, displacement_fn)
-        
-        if implicit_solvent:
-            mask_ij = sys.atom_mask[:, None] & sys.atom_mask[None, :]
-            n = len(sys.atom_mask)
-            energy_mask = mask_ij * (1.0 - jnp.eye(n))
-            e_gb, born_radii = compute_gb_energy(
-                positions=r,
-                charges=sys.charges,
-                radii=sys.radii,
-                scaled_radii=sys.scaled_radii,
-                mask=sys.atom_mask,
-                energy_mask=energy_mask,
-                dielectric_offset=0.09,
-            )
-            e_np = compute_ace_nonpolar_energy(sys.radii, born_radii)
-            # Mask out nonpolar energy for padding atoms (ACE is per-atom)
-            e_np = jnp.sum(e_np * sys.atom_mask)
-            e_elec = e_gb
-            e_solv = e_gb + e_np
-        else:
-            e_elec = _coulomb_energy_masked(r, sys.charges, sys.atom_mask, displacement_fn)
-            e_solv = 0.0
-
-        # We assume 1-4 scaling etc. are handled correctly via masking, but for simplicity
-        # we omit the full ExclusionSpec processing here. This is focused on batching overhead.
-        # In a real system you would add 1-4 exclusions here using map_product + masks.
-
-        return e_bond + e_angle + e_dih + e_imp + e_cmap + e_lj + e_elec + e_solv
-        
-    return jax.vmap(_single_padded_energy)
+    return jax.vmap(lambda sys: single_padded_energy(sys, displacement_fn, implicit_solvent))
