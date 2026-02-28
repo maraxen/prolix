@@ -961,5 +961,120 @@ def run_simulation(
     kinetic_energy=None,
   )
 
-
 # Note: jax_md imports are now inside run_simulation to avoid circular imports
+
+
+def simulate_frames(
+  protein: "Protein",
+  r_init: Array,
+  n_steps: int,
+  n_frames: int,
+  key: Array,
+) -> Array:
+  """Production simulation loop isolating the core integrator logic.
+
+  Process:
+  1.  **Initialize**: Setup energy function and random keys.
+  2.  **Integrator**: Initialize NVT Langevin integrator (with RATTLE if constrained).
+  3.  **Simulate**: Execute production loop using `jax.lax.scan`.
+
+  Args:
+    protein: Protein object with physical parameters.
+    r_init: Initial positions (N, 3).
+    n_steps: Number of integration steps per frame.
+    n_frames: Number of frames to generate.
+    key: JAX random PRNG key.
+
+  Returns:
+    (n_frames, n_atoms, 3) array of positions.
+  """
+  from jax_md import simulate as jax_md_simulate
+
+  # Physics parameters - use defaults consistent with run_simulation
+  temperature_k = 300.0
+  step_size_fs = 2.0
+  gamma = 1.0
+
+  kT = temperature_k * BOLTZMANN_KCAL
+  dt = step_size_fs / AKMA_TIME_UNIT_FS
+  gamma_reduced = gamma * AKMA_TIME_UNIT_FS * 1e-3
+
+  displacement_fn, shift_fn = space.free()
+
+  # Build ExclusionSpec if not present in protein
+  exclusion_spec = nl.ExclusionSpec.from_protein(protein)
+
+  # Energy function (implicit solvent by default for extracted loop)
+  energy_fn = physics_system.make_energy_fn(
+    displacement_fn,
+    protein,
+    exclusion_spec=exclusion_spec,
+    implicit_solvent=True,
+  )
+
+  # Derived masses (matches run_simulation logic)
+  n_atoms = r_init.shape[0]
+  raw_masses = protein.masses
+  if raw_masses is not None:
+    masses = jnp.array(raw_masses)
+    if jnp.all(masses == 0):
+      raw_masses = None
+
+  if raw_masses is None:
+    # Element-based derivation fallback
+    _ELEMENT_DATA = {
+      "H": 1.008, "C": 12.011, "N": 14.007, "O": 15.999, "S": 32.06,
+      "P": 30.974, "F": 18.998, "Cl": 35.45, "Br": 79.904,
+    }
+    elements = getattr(protein, "elements", None)
+    if elements is not None and len(elements) == n_atoms:
+      mass_list = [_ELEMENT_DATA.get(e, _ELEMENT_DATA.get(e.capitalize(), 12.011)) for e in elements]
+      masses = jnp.array(mass_list, dtype=jnp.float32)
+    else:
+      masses = jnp.ones(n_atoms) * 12.0
+
+  # Integrator setup (RATTLE support)
+  constrained_bonds = protein.constrained_bonds
+  constrained_lengths = protein.constrained_bond_lengths
+
+  if (
+    constrained_bonds is not None and constrained_lengths is not None and len(constrained_bonds) > 0
+  ):
+    init_fn, apply_fn = physics_simulate.rattle_langevin(
+      energy_fn,
+      shift_fn,
+      dt=dt,
+      kT=kT,
+      gamma=gamma_reduced,
+      constraints=(jnp.array(constrained_bonds), jnp.array(constrained_lengths)),
+    )
+  else:
+    init_fn, apply_fn = jax_md_simulate.nvt_langevin(
+      energy_fn, shift_fn, dt=dt, kT=kT, gamma=gamma_reduced
+    )
+
+  state = init_fn(key, r_init, mass=masses)
+
+  @jax.jit
+  def scan_fn(carrier, _):
+    def step_fn(i, s):
+      return apply_fn(s)
+
+    carrier = jax.lax.fori_loop(0, n_steps, step_fn, carrier)
+    return carrier, carrier.position
+
+  _, trajectory = jax.lax.scan(scan_fn, state, jnp.arange(n_frames))
+  return trajectory
+
+
+def batched_simulate_frames(
+  protein: "Protein",
+  r_init: Array,
+  n_steps: int,
+  n_frames: int,
+  keys: Array,
+) -> Array:
+  """Vmapped version of simulate_frames for ensemble simulations."""
+  return jax.vmap(simulate_frames, in_axes=(None, None, None, None, 0))(
+    protein, r_init, n_steps, n_frames, keys
+  )
