@@ -168,7 +168,11 @@ def _coulomb_energy_masked(r: Array, charges: Array, atom_mask: Array, displacem
 # ==============================================================================
 
 def single_padded_energy(sys: PaddedSystem, displacement_fn: space.DisplacementFn, implicit_solvent: bool = True) -> Array:
-    """Computes total potential energy for a single padded system."""
+    """Computes total potential energy for a single padded system.
+
+    This is the public API for computing energy of one PaddedSystem.
+    It can be used standalone with jax.grad, or batched via make_batched_energy_fn.
+    """
     r = sys.positions
     
     # Bonded terms
