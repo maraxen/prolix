@@ -253,18 +253,12 @@ def bucket_proteins(
     ready_buckets = {}
     for bucket_size, prot_list in groups.items():
       # find maximum terms across this bucket
-      def count_attr(attr):
-        def _get(prot):
-          val = getattr(prot, attr, None)
-          if val is None: return 0
-          return len(jnp.asarray(val))
-        return max([_get(p) for p in prot_list])
-        
-      max_bonds = count_attr("bonds")
-      max_angles = count_attr("angles")
-      max_dihedrals = count_attr("proper_dihedrals")
-      max_impropers = count_attr("impropers")
-      max_cmaps = count_attr("cmap_torsions")
+      # We use fixed multipliers to avoid JAX JIT recompiles for different molecules:
+      max_bonds = int(1.2 * bucket_size)
+      max_angles = int(2.2 * bucket_size)
+      max_dihedrals = int(3.5 * bucket_size)
+      max_impropers = int(0.5 * bucket_size)
+      max_cmaps = int(0.3 * bucket_size)
       
       padded_list = []
       for p in prot_list:
