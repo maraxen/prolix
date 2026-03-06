@@ -151,14 +151,6 @@ def batched_minimize(batch: PaddedSystem, max_steps: int = 5000, chunk_size: int
 
     displacement_fn, shift_fn = space.free()
 
-    # Stage definitions (consistent with simulate.py)
-    stages = [
-        {"lambda": 0.1, "force_cap": 10.0,   "steps": 500},
-        {"lambda": 0.5, "force_cap": 100.0,  "steps": 500},
-        {"lambda": 0.9, "force_cap": 1000.0, "steps": 1000},
-        {"lambda": None, "force_cap": None,   "steps": max(max_steps - 2000, 1000)},
-    ]
-
     def _make_capped_apply(fire_apply_fn, force_cap):
         """Create force-capped FIRE apply function."""
         def capped_apply(state, **kwargs):
@@ -180,20 +172,21 @@ def batched_minimize(batch: PaddedSystem, max_steps: int = 5000, chunk_size: int
             return fire_apply_fn(state, **kwargs)
         return nan_safe_apply
 
+    # Static dt per stage — fire_descent requires Python floats, not traced values.
+    # Under vmap, dynamic dt from gradient magnitude would create TracerArrayConversionError.
+    # Force capping in stages 1-3 provides the safety that dynamic dt would provide.
+    stage_defs = [
+        {"lambda": 0.1, "force_cap": 10.0,   "steps": 500,  "dt_start": 0.00001, "dt_max": 0.0001},
+        {"lambda": 0.5, "force_cap": 100.0,  "steps": 500,  "dt_start": 0.00005, "dt_max": 0.0005},
+        {"lambda": 0.9, "force_cap": 1000.0, "steps": 1000, "dt_start": 0.0001,  "dt_max": 0.001},
+        {"lambda": None, "force_cap": None,   "steps": max(max_steps - 2000, 1000),
+         "dt_start": 0.0001, "dt_max": 0.001},
+    ]
+
     def minimize_single(sys: PaddedSystem) -> Array:
-        # Dynamic dt_start from gradient magnitude
-        def base_energy_fn(r):
-            sys_with_r = dataclasses.replace(sys, positions=r)
-            return single_padded_energy(sys_with_r, displacement_fn)
-
-        initial_grads = jax.grad(base_energy_fn)(sys.positions)
-        max_grad = jnp.max(jnp.linalg.norm(initial_grads, axis=-1))
-        dt_start = jnp.clip(0.001 / (max_grad + 1e-8), 1e-7, 0.001)
-        dt_max = jnp.minimum(dt_start * 10.0, 0.01)
-
         current_positions = sys.positions
 
-        for stage in stages:
+        for stage in stage_defs:
             sc_lam = stage["lambda"]
             force_cap = stage["force_cap"]
             n_steps = stage["steps"]
@@ -203,9 +196,10 @@ def batched_minimize(batch: PaddedSystem, max_steps: int = 5000, chunk_size: int
                 sys_with_r = dataclasses.replace(sys, positions=r)
                 return single_padded_energy(sys_with_r, displacement_fn, soft_core_lambda=_lam)
 
-            # Create FIRE instance
+            # Create FIRE instance with static dt
             stage_init_fn, stage_apply_fn = jax_md_minimize.fire_descent(
-                stage_energy_fn, shift_fn, dt_start=dt_start, dt_max=dt_max,
+                stage_energy_fn, shift_fn,
+                dt_start=stage["dt_start"], dt_max=stage["dt_max"],
             )
 
             # Wrap with force capping or NaN sanitization
@@ -224,10 +218,6 @@ def batched_minimize(batch: PaddedSystem, max_steps: int = 5000, chunk_size: int
 
             final_state = _run_stage(fire_state)
             current_positions = final_state.position
-
-            # Ramp dt for next stage
-            dt_start = jnp.minimum(dt_start * 2.0, 0.001)
-            dt_max = jnp.minimum(dt_start * 10.0, 0.01)
 
         return current_positions
 
