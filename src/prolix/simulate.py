@@ -593,56 +593,117 @@ def run_simulation(
   # implicit solvent N² path (no neighbor list), this is fine. For future
   # PBC/explicit solvent support with neighbor lists, FIRE would need a
   # wrapper that calls nbr.update() every N steps.
-  fire_energy_fn = energy_fn
-  if neighbor is not None:
-    # Bind the neighbor list into the energy function for FIRE
-    fire_energy_fn = lambda r: energy_fn(r, neighbor=neighbor)
 
-  fire_init_fn, fire_apply_fn = jax_md_minimize.fire_descent(
-    fire_energy_fn,
-    shift_fn,
-    dt_start=0.0001,  # 0.1 fs in ps — conservative for extreme gradients
-    dt_max=0.001,     # 1.0 fs in ps
-  )
+  def _make_fire_energy(soft_core_lambda=None):
+    """Create energy function for FIRE, optionally with soft-core LJ."""
+    if neighbor is not None and soft_core_lambda is not None:
+      return lambda r: energy_fn(r, neighbor=neighbor, soft_core_lambda=soft_core_lambda)
+    elif neighbor is not None:
+      return lambda r: energy_fn(r, neighbor=neighbor)
+    elif soft_core_lambda is not None:
+      return lambda r: energy_fn(r, soft_core_lambda=soft_core_lambda)
+    else:
+      return energy_fn
 
-  # ── Per-atom force capping wrapper ──
-  # Caps per-atom force magnitude before FIRE's momentum update.
-  # This prevents extreme forces from steric clashes (|F| > 10¹⁷)
-  # from causing oversized displacements. Also sanitizes NaN forces to zero.
-  # Units: kcal/mol/Å
-  max_force = 1000.0  # Default cap; #2183 will ramp this per stage
+  def _make_capped_fire_apply(fire_apply_fn, force_cap):
+    """Create force-capped FIRE apply function."""
+    def capped_apply(state, **kwargs):
+      f = state.force
+      f_norm = jnp.linalg.norm(f, axis=-1, keepdims=True)
+      cap = jnp.minimum(1.0, force_cap / (f_norm + 1e-8))
+      f_capped = f * cap
+      f_safe = jnp.where(jnp.isfinite(f_capped), f_capped, 0.0)
+      state = state._replace(force=f_safe)
+      return fire_apply_fn(state, **kwargs)
+    return capped_apply
 
-  def capped_fire_apply(state, **kwargs):
-    """FIRE apply with per-atom force capping and NaN sanitization."""
-    # Cap force magnitudes
-    f = state.force
-    f_norm = jnp.linalg.norm(f, axis=-1, keepdims=True)
-    cap = jnp.minimum(1.0, max_force / (f_norm + 1e-8))
-    f_capped = f * cap
-    # Sanitize any NaN forces to zero
-    f_safe = jnp.where(jnp.isfinite(f_capped), f_capped, 0.0)
-    state = state._replace(force=f_safe)
-    return fire_apply_fn(state, **kwargs)
+  # ── Dynamic step-size initialization (#2179) ──
+  # Set dt_start based on initial gradient magnitude so that
+  # max_grad * dt_start < 0.001 Å displacement.
+  initial_grads = jax.grad(_make_fire_energy())(initial_positions)
+  max_grad = float(jnp.max(jnp.linalg.norm(initial_grads, axis=-1)))
+  dt_start = float(jnp.clip(0.001 / (max_grad + 1e-8), 1e-7, 0.001))
+  dt_max = min(dt_start * 10.0, 0.01)
+  logger.info("  Dynamic FIRE dt: dt_start=%.2e ps, dt_max=%.2e ps (max_grad=%.2e)",
+              dt_start, dt_max, max_grad)
 
-  # Initialize FIRE state with per-atom masses
-  fire_state = fire_init_fn(initial_positions, mass=masses)
+  # ── Staged Minimization (#2183) ──
+  # Progressive softening resolves extreme steric clashes from crystal structures.
+  # Stage 1: Soft-core λ=0.1, cap=10 kcal/mol/Å (500 steps) — gentle decompression
+  # Stage 2: Soft-core λ=0.5, cap=100 (500 steps) — half-strength LJ
+  # Stage 3: Soft-core λ=0.9, cap=1000 (1000 steps) — near-full LJ
+  # Stage 4: Standard energy (NOT soft-core), no cap (≤3000 steps) — convergence
+  #
+  # IMPORTANT: Stage 4 uses the standard energy_fn, not soft-core with λ=1,
+  # because soft-core with λ=1 recovers the singularity at r=0.
 
-  # Run FIRE for up to 5000 steps
-  max_fire_steps = 5000
+  stages = [
+    {"name": "Stage 1 (λ=0.1)", "lambda": 0.1, "force_cap": 10.0,   "steps": 500},
+    {"name": "Stage 2 (λ=0.5)", "lambda": 0.5, "force_cap": 100.0,  "steps": 500},
+    {"name": "Stage 3 (λ=0.9)", "lambda": 0.9, "force_cap": 1000.0, "steps": 1000},
+    {"name": "Stage 4 (full)",  "lambda": None, "force_cap": None,   "steps": 3000},
+  ]
 
-  @jax.jit
-  def fire_loop(state):
-    def body_fn(i, s):
-      return capped_fire_apply(s)
-    return jax.lax.fori_loop(0, max_fire_steps, body_fn, state)
+  current_positions = initial_positions
 
-  final_fire_state = fire_loop(fire_state)
-  positions_minimized = final_fire_state.position
+  for stage in stages:
+    sc_lam = stage["lambda"]
+    force_cap = stage["force_cap"]
+    n_steps = stage["steps"]
 
-  # Evaluate final energy
+    # Create energy function for this stage
+    stage_energy_fn = _make_fire_energy(soft_core_lambda=sc_lam)
+
+    # Create FIRE instance for this stage
+    stage_init_fn, stage_apply_fn = jax_md_minimize.fire_descent(
+      stage_energy_fn,
+      shift_fn,
+      dt_start=dt_start,
+      dt_max=dt_max,
+    )
+
+    # Wrap with force capping if specified
+    if force_cap is not None:
+      stage_step_fn = _make_capped_fire_apply(stage_apply_fn, force_cap)
+    else:
+      # Stage 4: no cap, but still sanitize NaN
+      def _nan_safe_apply(state, _apply=stage_apply_fn, **kwargs):
+        f = state.force
+        f_safe = jnp.where(jnp.isfinite(f), f, 0.0)
+        state = state._replace(force=f_safe)
+        return _apply(state, **kwargs)
+      stage_step_fn = _nan_safe_apply
+
+    # Initialize FIRE from current positions
+    stage_state = stage_init_fn(current_positions, mass=masses)
+
+    # Run FIRE loop
+    @jax.jit
+    def _run_stage(state, _step=stage_step_fn, _n=n_steps):
+      def body_fn(i, s):
+        return _step(s)
+      return jax.lax.fori_loop(0, _n, body_fn, state)
+
+    final_state = _run_stage(stage_state)
+    current_positions = final_state.position
+
+    # Log stage results
+    stage_e = float(stage_energy_fn(current_positions))
+    logger.info("  %s: E=%.2f kcal/mol (%d steps, cap=%s)",
+                stage["name"], stage_e, n_steps,
+                f"{force_cap:.0f}" if force_cap is not None else "none")
+
+    # After stages with soft-core, ramp dt_start up for next stage
+    dt_start = min(dt_start * 2.0, 0.001)
+    dt_max = min(dt_start * 10.0, 0.01)
+
+  positions_minimized = current_positions
+
+  # Evaluate final energy with standard (non-soft-core) energy function
+  fire_energy_fn = _make_fire_energy()  # standard, no soft-core
   e_minimized = fire_energy_fn(positions_minimized)
 
-  logger.info("  Minimized energy: %.2f kcal/mol", e_minimized)
+  logger.info("  Final minimized energy: %.2f kcal/mol", e_minimized)
 
   # NVT Langevin dynamics setup
   # Convert physical quantities to AKMA reduced units for JAX-MD.
@@ -698,6 +759,62 @@ def run_simulation(
       return apply_fn(s, neighbor=nbr)  # type: ignore[unknown-argument]
     return apply_fn(s)
 
+  # ── Gentle-start equilibration (#2184) ──
+  # Timestep ramping to catch residual instabilities from minimization.
+  # Phase 1: 100 steps at dt/20 (0.1 fs if production is 2 fs)
+  # Phase 2: 500 steps at dt/2 (1.0 fs)
+  # Phase 3: Production dt (2.0 fs) — starts the main loop
+  warmup_phases = [
+    {"name": "warmup dt/20", "dt_scale": 1.0/20.0, "steps": 100},
+    {"name": "warmup dt/2",  "dt_scale": 0.5,       "steps": 500},
+  ]
+
+  logger.info("Gentle-start equilibration...")
+  for phase in warmup_phases:
+    warmup_dt = dt * phase["dt_scale"]
+    warmup_kT = kT  # same temperature
+
+    # Create a temporary integrator at reduced timestep
+    warmup_init, warmup_apply = jax_md_simulate.nvt_langevin(
+      integrator_energy_fn, shift_fn, dt=warmup_dt, kT=warmup_kT, gamma=gamma_reduced
+    )
+
+    # Initialize from current state positions
+    warmup_key = jax.random.fold_in(key, hash(phase["name"]))
+    if neighbor is not None:
+      warmup_state = warmup_init(warmup_key, state.position, mass=masses, neighbor=neighbor)
+    else:
+      warmup_state = warmup_init(warmup_key, state.position, mass=masses)
+
+    # Run warmup phase
+    @jax.jit
+    def _warmup_loop(ws, _apply=warmup_apply, _n=phase["steps"]):
+      def body(i, s):
+        return _apply(s)
+      return jax.lax.fori_loop(0, _n, body, ws)
+
+    warmup_state = _warmup_loop(warmup_state)
+
+    # NaN check
+    has_nan = bool(jnp.any(~jnp.isfinite(warmup_state.position)))
+    if has_nan:
+      logger.warning("  %s: NaN detected after %d steps! Reverting to minimized positions.",
+                     phase["name"], phase["steps"])
+      # Revert to minimized positions — don't propagate NaN
+      if neighbor is not None:
+        state = init_fn(key, positions_minimized, mass=masses, neighbor=neighbor)
+      else:
+        state = init_fn(key, positions_minimized, mass=masses)
+      break
+    else:
+      # Update state with warmup results, reinitialize with production integrator
+      if neighbor is not None:
+        state = init_fn(key, warmup_state.position, mass=masses, neighbor=neighbor)
+      else:
+        state = init_fn(key, warmup_state.position, mass=masses)
+      logger.info("  %s: %d steps OK (dt=%.4e τ)", phase["name"], phase["steps"], warmup_dt)
+
+  # Compile and test the production step function
   if neighbor is not None:
     _test_state = jit_apply_fn(state, nbr=neighbor)
   else:
