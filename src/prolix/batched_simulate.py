@@ -169,7 +169,7 @@ def batched_minimize(batch: PaddedSystem, max_steps: int = 3000, chunk_size: int
             cap = jnp.minimum(1.0, max_force / (f_norm + 1e-8))
             f_capped = f * cap
             f_safe = jnp.where(jnp.isfinite(f_capped), f_capped, 0.0)
-            state = state._replace(force=f_safe)
+            state = dataclasses.replace(state, force=f_safe)
             return fire_apply_fn(state, **kwargs)
 
         # Initialize with per-atom masses from the padded system

@@ -613,7 +613,7 @@ def run_simulation(
       cap = jnp.minimum(1.0, force_cap / (f_norm + 1e-8))
       f_capped = f * cap
       f_safe = jnp.where(jnp.isfinite(f_capped), f_capped, 0.0)
-      state = state._replace(force=f_safe)
+      state = dataclasses.replace(state, force=f_safe)
       return fire_apply_fn(state, **kwargs)
     return capped_apply
 
@@ -670,7 +670,7 @@ def run_simulation(
       def _nan_safe_apply(state, _apply=stage_apply_fn, **kwargs):
         f = state.force
         f_safe = jnp.where(jnp.isfinite(f), f, 0.0)
-        state = state._replace(force=f_safe)
+        state = dataclasses.replace(state, force=f_safe)
         return _apply(state, **kwargs)
       stage_step_fn = _nan_safe_apply
 
