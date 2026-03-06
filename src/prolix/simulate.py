@@ -13,7 +13,7 @@ import jax
 import jax.numpy as jnp
 import msgpack_numpy as m
 import numpy as np
-from jax_md import space, util
+from jax_md import minimize as jax_md_minimize, space, util
 from prolix import resource_guard
 from prolix.physics import neighbor_list as nl
 
@@ -537,17 +537,41 @@ def run_simulation(
     use_pbc=spec.use_pbc,
   )
 
-  # Robust Energy Minimization
-  logger.info("Running robust energy minimization (L-BFGS / Adaptive Line Search)...")
+  # ── Per-atom masses (needed for both FIRE minimizer and NVT integrator) ──
+  # Must be computed BEFORE minimization so FIRE can use them.
+  raw_masses = protein_system.masses
+  if raw_masses is not None:
+    masses = jnp.array(raw_masses)
+    if jnp.all(masses == 0):
+      logger.warning("All masses are zero, will derive from elements")
+      raw_masses = None  # trigger element-based derivation below
+
+  if raw_masses is None:
+    # Derive masses from element symbols if available
+    from prolix.constants import masses_from_elements, DEFAULT_MASS
+    elements = getattr(protein_system, "elements", None)
+    if elements is not None and len(elements) == n_atoms:
+      mass_list = masses_from_elements(list(elements))
+      masses = jnp.array(mass_list, dtype=jnp.float32)
+      logger.info("Derived masses from %d element symbols (range: %.1f–%.1f Da)",
+                   n_atoms, float(jnp.min(masses)), float(jnp.max(masses)))
+    else:
+      logger.warning("No masses or elements found, defaulting to carbon mass (%.1f Da)", DEFAULT_MASS)
+      masses = jnp.ones(n_atoms) * DEFAULT_MASS
+
+  # ── Energy Minimization (FIRE) ──
+  # Uses jax-md's built-in FIRE (Fast Inertial Relaxation Engine).
+  # AMBER units: energy kcal/mol, distance Å, mass amu, time ps.
+  # dt_start=0.0001 ps (0.1 fs), dt_max=0.001 ps (1.0 fs) — conservative
+  # for systems with potentially extreme initial gradients.
+  logger.info("Running FIRE energy minimization...")
 
   # Initialize energy and neighbor list
   if neighbor is not None:
     neighbor = neighbor.update(initial_positions)
-    e_initial, grads_initial = jax.value_and_grad(lambda r: energy_fn(r, neighbor=neighbor))(
-      initial_positions
-    )  # type: ignore
+    e_initial = energy_fn(initial_positions, neighbor=neighbor)
   else:
-    e_initial, grads_initial = jax.value_and_grad(energy_fn)(initial_positions)
+    e_initial = energy_fn(initial_positions)
 
   logger.info("  Initial energy: %.2f kcal/mol", e_initial)
 
@@ -564,106 +588,42 @@ def run_simulation(
     )
     raise RuntimeError(msg)
 
-  # Adaptive Minimization State
+  # FIRE minimizer setup
+  # NOTE: FIRE does NOT internally update neighbor lists. For our current
+  # implicit solvent N² path (no neighbor list), this is fine. For future
+  # PBC/explicit solvent support with neighbor lists, FIRE would need a
+  # wrapper that calls nbr.update() every N steps.
+  fire_energy_fn = energy_fn
+  if neighbor is not None:
+    # Bind the neighbor list into the energy function for FIRE
+    fire_energy_fn = lambda r: energy_fn(r, neighbor=neighbor)
+
+  fire_init_fn, fire_apply_fn = jax_md_minimize.fire_descent(
+    fire_energy_fn,
+    shift_fn,
+    dt_start=0.0001,  # 0.1 fs in ps — conservative for extreme gradients
+    dt_max=0.001,     # 1.0 fs in ps
+  )
+
+  # Initialize FIRE state with per-atom masses
+  fire_state = fire_init_fn(initial_positions, mass=masses)
+
+  # Run FIRE for up to 5000 steps
+  max_fire_steps = 5000
+
   @jax.jit
-  def robust_minimization_loop(init_pos, init_nbr, init_grads, init_energy):
-    # State: [pos, nbr, grads, energy, step_size, step_count, converged]
-    # We use a structured PyTree for state to keep it clean
+  def fire_loop(state):
+    def body_fn(i, s):
+      return fire_apply_fn(s)
+    return jax.lax.fori_loop(0, max_fire_steps, body_fn, state)
 
-    class MinState(typing.NamedTuple):
-      pos: Array
-      nbr: Any
-      grads: Array
-      energy: float
-      step_size: float
-      step: int
-      converged: bool
+  final_fire_state = fire_loop(fire_state)
+  positions_minimized = final_fire_state.position
 
-    init_state = MinState(
-      pos=init_pos,
-      nbr=init_nbr,
-      grads=init_grads,
-      energy=init_energy,
-      step_size=0.001,  # Conservative start
-      step=0,
-      converged=False,
-    )
-
-    def cond_fn(state):
-      return (state.step < 5000) & (~state.converged)
-
-    def body_fn(state):
-      # 1. Force Capping
-      # Cap max force to prevent explosions from singular potentials
-      g = state.grads
-      g_norm = jnp.linalg.norm(g, axis=-1, keepdims=True)
-      # Limit force magnitude to 1000 kcal/mol/A
-      scaling = jnp.minimum(1.0, 1000.0 / (g_norm + 1e-8))
-      g_capped = g * scaling
-
-      # 2. Candidate Step
-      # Move AGAINST gradient (Gradient Descent)
-      pos_new = state.pos - state.step_size * g_capped
-
-      if spec.use_pbc and spec.box is not None:
-        pos_new = jnp.mod(pos_new, jnp.array(spec.box))
-
-      # 3. Evaluate New State
-      nbr_new = state.nbr
-      if state.nbr is not None:
-        nbr_new = state.nbr.update(pos_new)
-        e_new, g_new = jax.value_and_grad(lambda r: energy_fn(r, neighbor=nbr_new))(pos_new)  # type: ignore
-      else:
-        e_new, g_new = jax.value_and_grad(energy_fn)(pos_new)
-
-      # 4. Acceptance Logic (Backtracking Line Search)
-      # Accept if energy decreases AND is finite
-      improved = e_new < state.energy
-      is_valid = jnp.isfinite(e_new)
-      accept = improved & is_valid
-
-      # Update Variables
-      final_pos = jnp.where(accept, pos_new, state.pos)  # type: ignore
-      # For PyTrees (neighbor), we verify if we can use jnp.where or lax.cond
-      # Neighbor is a PyTree, so we must use lax.cond for full state switching usually
-
-      # Adaptive Step Size: grow if good, shrink if bad
-      new_step_size = jnp.where(accept, state.step_size * 1.2, state.step_size * 0.5)
-      new_step_size = jnp.clip(new_step_size, 1e-7, 1e-1)
-
-      # Construct next state parts
-      # Just use lax.cond to switch between (new_vals) and (old_vals)
-      def accept_branch():
-        return MinState(pos_new, nbr_new, g_new, e_new, new_step_size, state.step + 1, False)
-
-      def reject_branch():
-        # Keep old pos, old grads, old energy. Only update step size and count.
-        return MinState(
-          state.pos, state.nbr, state.grads, state.energy, new_step_size, state.step + 1, False
-        )
-
-      next_state = jax.lax.cond(accept, accept_branch, reject_branch)
-
-      # Convergence check (Gradient Norm < 1.0 kcal/mol/A)
-      # Use the NEW gradients if accepted, or OLD gradients if rejected
-      current_g_norm = jnp.max(jnp.linalg.norm(next_state.grads, axis=-1))
-      is_converged = current_g_norm < 1.0
-
-      return next_state._replace(converged=is_converged)
-
-    return jax.lax.while_loop(cond_fn, body_fn, init_state)
-
-  # Need typing for NamedTuple
-  import typing
-
-  final_min_state = robust_minimization_loop(initial_positions, neighbor, grads_initial, e_initial)
-  positions_minimized = final_min_state.pos
-  neighbor = final_min_state.nbr
-  e_minimized = final_min_state.energy
+  # Evaluate final energy
+  e_minimized = fire_energy_fn(positions_minimized)
 
   logger.info("  Minimized energy: %.2f kcal/mol", e_minimized)
-  logger.info("  Minimization steps: %d", final_min_state.step)
-  logger.info("  Converged: %s", final_min_state.converged)
 
   # NVT Langevin dynamics setup
   # Convert physical quantities to AKMA reduced units for JAX-MD.
@@ -685,27 +645,7 @@ def run_simulation(
   # DO NOT wrap energy_fn with a captured neighbor list - that prevents updates!
   integrator_energy_fn = energy_fn
 
-  # Extract per-atom masses from the protein system
-  # Must check for None BEFORE calling jnp.array (which raises on None input).
-  raw_masses = protein_system.masses
-  if raw_masses is not None:
-    masses = jnp.array(raw_masses)
-    if jnp.all(masses == 0):
-      logger.warning("All masses are zero, will derive from elements")
-      raw_masses = None  # trigger element-based derivation below
-
-  if raw_masses is None:
-    # Derive masses from element symbols if available
-    from prolix.constants import masses_from_elements, DEFAULT_MASS
-    elements = getattr(protein_system, "elements", None)
-    if elements is not None and len(elements) == n_atoms:
-      mass_list = masses_from_elements(list(elements))
-      masses = jnp.array(mass_list, dtype=jnp.float32)
-      logger.info("Derived masses from %d element symbols (range: %.1f–%.1f Da)",
-                   n_atoms, float(jnp.min(masses)), float(jnp.max(masses)))
-    else:
-      logger.warning("No masses or elements found, defaulting to carbon mass (%.1f Da)", DEFAULT_MASS)
-      masses = jnp.ones(n_atoms) * DEFAULT_MASS
+  # (Masses already computed above, before FIRE minimization)
 
   constrained_bonds = protein_system.constrained_bonds
   constrained_lengths = protein_system.constrained_bond_lengths

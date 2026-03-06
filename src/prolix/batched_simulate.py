@@ -133,53 +133,43 @@ def safe_map(fn: Callable[[T], Any], batch: T, chunk_size: int | None = 1) -> An
     return jax.tree_util.tree_map(unchunk, results)
 
 def batched_minimize(batch: PaddedSystem, max_steps: int = 3000, chunk_size: int | None = 1) -> Array:
-    """Minimizes a batch of PaddedSystems.
-    
+    """Minimizes a batch of PaddedSystems using FIRE.
+
+    Uses jax-md's built-in FIRE (Fast Inertial Relaxation Engine) minimizer
+    with AMBER-unit-calibrated timesteps: dt_start=0.0001 ps (0.1 fs),
+    dt_max=0.001 ps (1.0 fs).
+
     Returns:
         minimized_positions: (B, N, 3)
     """
+    from jax_md import minimize as jax_md_minimize
     from prolix.batched_energy import single_padded_energy
-    
-    displacement_fn, _ = space.free()
-    
+
+    displacement_fn, shift_fn = space.free()
+
     def minimize_single(sys: PaddedSystem) -> Array:
         def energy_fn(r):
             sys_with_r = dataclasses.replace(sys, positions=r)
             return single_padded_energy(sys_with_r, displacement_fn)
-            
-        e_initial, grads = jax.value_and_grad(energy_fn)(sys.positions)
-        
-        # MinState
-        init = (sys.positions, grads, e_initial, 0.001, 0, False)
-        
-        def cond(s):
-            pos, grads, energy, step_size, step, converged = s
-            return (step < max_steps) & (~converged)
-            
-        def body(s):
-            pos, grads, energy, step_size, step, converged = s
-            
-            g_norm = jnp.linalg.norm(grads, axis=-1, keepdims=True)
-            g_capped = grads * jnp.minimum(1.0, 1000.0 / (g_norm + 1e-8))
-            
-            pos_new = pos - step_size * g_capped
-            e_new, g_new = jax.value_and_grad(energy_fn)(pos_new)
-            
-            accept = (e_new < energy) & jnp.isfinite(e_new)
-            new_ss = jnp.where(accept, step_size * 1.2, step_size * 0.5)
-            new_ss = jnp.clip(new_ss, 1e-7, 1e-1)
-            
-            final_pos = jnp.where(accept, pos_new, pos)
-            final_e = jnp.where(accept, e_new, energy)
-            final_g = jnp.where(accept, g_new, grads)
-            
-            converged = jnp.max(jnp.linalg.norm(final_g, axis=-1)) < 1.0
-            
-            return (final_pos, final_g, final_e, new_ss, step + 1, converged)
-            
-        final_state = lax.while_loop(cond, body, init)
-        return final_state[0] # minimized positions
-        
+
+        # FIRE minimizer with AMBER-calibrated timesteps
+        fire_init_fn, fire_apply_fn = jax_md_minimize.fire_descent(
+            energy_fn,
+            shift_fn,
+            dt_start=0.0001,  # 0.1 fs in ps
+            dt_max=0.001,     # 1.0 fs in ps
+        )
+
+        # Initialize with per-atom masses from the padded system
+        fire_state = fire_init_fn(sys.positions, mass=sys.masses)
+
+        # Run FIRE for max_steps
+        def body_fn(i, s):
+            return fire_apply_fn(s)
+        final_state = jax.lax.fori_loop(0, max_steps, body_fn, fire_state)
+
+        return final_state.position  # minimized positions
+
     return safe_map(minimize_single, batch, chunk_size=chunk_size)
 
 def batched_equilibrate(
