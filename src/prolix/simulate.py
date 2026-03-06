@@ -605,6 +605,25 @@ def run_simulation(
     dt_max=0.001,     # 1.0 fs in ps
   )
 
+  # ── Per-atom force capping wrapper ──
+  # Caps per-atom force magnitude before FIRE's momentum update.
+  # This prevents extreme forces from steric clashes (|F| > 10¹⁷)
+  # from causing oversized displacements. Also sanitizes NaN forces to zero.
+  # Units: kcal/mol/Å
+  max_force = 1000.0  # Default cap; #2183 will ramp this per stage
+
+  def capped_fire_apply(state, **kwargs):
+    """FIRE apply with per-atom force capping and NaN sanitization."""
+    # Cap force magnitudes
+    f = state.force
+    f_norm = jnp.linalg.norm(f, axis=-1, keepdims=True)
+    cap = jnp.minimum(1.0, max_force / (f_norm + 1e-8))
+    f_capped = f * cap
+    # Sanitize any NaN forces to zero
+    f_safe = jnp.where(jnp.isfinite(f_capped), f_capped, 0.0)
+    state = state._replace(force=f_safe)
+    return fire_apply_fn(state, **kwargs)
+
   # Initialize FIRE state with per-atom masses
   fire_state = fire_init_fn(initial_positions, mass=masses)
 
@@ -614,7 +633,7 @@ def run_simulation(
   @jax.jit
   def fire_loop(state):
     def body_fn(i, s):
-      return fire_apply_fn(s)
+      return capped_fire_apply(s)
     return jax.lax.fori_loop(0, max_fire_steps, body_fn, state)
 
   final_fire_state = fire_loop(fire_state)

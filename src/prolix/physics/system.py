@@ -322,6 +322,46 @@ def make_energy_fn(
   else:
     pme_recip_fn = None
 
+  def soft_core_lj(
+    dr: Array,
+    sigma_ij: Array,
+    epsilon_ij: Array,
+    lam: float = 1.0,
+    alpha: float = 0.5,
+  ) -> Array:
+    """Soft-core Lennard-Jones potential for staged minimization.
+
+    Standard FEP formulation from Beutler et al. (1994):
+      U(r,λ) = 4ελ [ 1/(α(1-λ) + (r/σ)⁶)² - 1/(α(1-λ) + (r/σ)⁶) ]
+
+    Args:
+      dr: Pairwise distances (Å). Shape: (...).
+      sigma_ij: Combined LJ sigma (Å). Shape: (...).
+      epsilon_ij: Combined LJ epsilon (kcal/mol). Shape: (...).
+      lam: Coupling parameter λ ∈ [0, 1]. λ=0 → fully soft (no interaction),
+           λ=1 → full hard-core (recovers standard LJ).
+           IMPORTANT: For the final minimization stage, use standard LJ
+           (not soft-core with λ=1) to avoid gradient issues.
+      alpha: Soft-core parameter (default 0.5, statistically optimal).
+
+    Returns:
+      Soft-core LJ energy. Shape: (...).
+
+    Units: kcal/mol, Å (AMBER convention).
+    """
+    # Floor to prevent exact zero in denominator during differentiation
+    soft_term = alpha * jnp.maximum(1.0 - lam, 1e-6)
+
+    # (r/σ)⁶ with safe division (σ=0 handled by earlier clamping)
+    r_over_sig = dr / jnp.maximum(sigma_ij, 1e-8)
+    r6 = r_over_sig ** 6
+
+    # Denominator: α(1-λ) + (r/σ)⁶
+    denom = soft_term + r6
+
+    # U = 4ε λ [1/denom² - 1/denom]
+    return 4.0 * epsilon_ij * lam * (1.0 / (denom * denom) - 1.0 / denom)
+
   def lj_pair(dr, sigma_i, sigma_j, eps_i, eps_j, **kwargs):
     sigma = 0.5 * (sigma_i + sigma_j)
     epsilon = jnp.sqrt(eps_i * eps_j)
@@ -517,7 +557,7 @@ def make_energy_fn(
 
   # Combine Non-Bonded
   # -------------------------------------------------------------------------
-  def compute_lj(r, neighbor_idx=None):
+  def compute_lj(r, neighbor_idx=None, soft_core_lambda=None):
     if neighbor_idx is None:
       dr = space.map_product(displacement_fn)(r, r)
       dist = space.distance(jnp.asarray(dr))
@@ -531,7 +571,11 @@ def make_energy_fn(
       # exception_14_params exist for force fields with per-pair overrides (e.g. CHARMM),
       # but AMBER ff19SB uses uniform scaling via lj14scale.
 
-      e_lj = energy.lennard_jones(jnp.asarray(dist), sig_ij, eps_ij)
+      if soft_core_lambda is not None:
+        # Use soft-core LJ during staged minimization
+        e_lj = soft_core_lj(jnp.asarray(dist), sig_ij, eps_ij, lam=soft_core_lambda)
+      else:
+        e_lj = energy.lennard_jones(jnp.asarray(dist), sig_ij, eps_ij)
 
       if scale_matrix_vdw is not None:
         e_lj = e_lj * scale_matrix_vdw
@@ -737,6 +781,7 @@ def make_energy_fn(
   # Total Energy Function
   # -------------------------------------------------------------------------
   def total_energy(r: Array, neighbor: partition.NeighborList | None = None, **kwargs) -> Array:
+    """Total potential energy. Pass soft_core_lambda=<float> in kwargs for staged minimization."""
     if has_virtual_sites:
       r = virtual_sites.reconstruct_virtual_sites(r, vs_def, vs_params)
 
@@ -748,8 +793,9 @@ def make_energy_fn(
     e_cmap = compute_cmap_term(r)
 
     neighbor_idx = neighbor.idx if neighbor is not None else None
+    sc_lambda = kwargs.get("soft_core_lambda", None)
 
-    e_lj = compute_lj(r, neighbor_idx)
+    e_lj = compute_lj(r, neighbor_idx, soft_core_lambda=sc_lambda)
     e_gb, e_direct, born_radii = compute_electrostatics(r, neighbor_idx)
     e_elec = e_gb + e_direct
     e_np = compute_nonpolar(r, born_radii, neighbor_idx)

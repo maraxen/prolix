@@ -160,12 +160,24 @@ def batched_minimize(batch: PaddedSystem, max_steps: int = 3000, chunk_size: int
             dt_max=0.001,     # 1.0 fs in ps
         )
 
+        # Per-atom force capping wrapper (consistent with simulate.py)
+        max_force = 1000.0  # kcal/mol/Å
+
+        def capped_fire_apply(state, **kwargs):
+            f = state.force
+            f_norm = jnp.linalg.norm(f, axis=-1, keepdims=True)
+            cap = jnp.minimum(1.0, max_force / (f_norm + 1e-8))
+            f_capped = f * cap
+            f_safe = jnp.where(jnp.isfinite(f_capped), f_capped, 0.0)
+            state = state._replace(force=f_safe)
+            return fire_apply_fn(state, **kwargs)
+
         # Initialize with per-atom masses from the padded system
         fire_state = fire_init_fn(sys.positions, mass=sys.masses)
 
         # Run FIRE for max_steps
         def body_fn(i, s):
-            return fire_apply_fn(s)
+            return capped_fire_apply(s)
         final_state = jax.lax.fori_loop(0, max_steps, body_fn, fire_state)
 
         return final_state.position  # minimized positions
