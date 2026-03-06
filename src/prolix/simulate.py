@@ -696,21 +696,16 @@ def run_simulation(
 
   if raw_masses is None:
     # Derive masses from element symbols if available
-    _ELEMENT_MASS = {
-      "H": 1.008, "C": 12.011, "N": 14.007, "O": 15.999, "S": 32.06,
-      "P": 30.974, "F": 18.998, "Cl": 35.45, "Br": 79.904, "I": 126.904,
-      "Fe": 55.845, "Zn": 65.38, "Ca": 40.078, "Mg": 24.305, "Na": 22.990,
-      "K": 39.098, "Se": 78.971, "Mn": 54.938, "Cu": 63.546, "Co": 58.933,
-    }
+    from prolix.constants import masses_from_elements, DEFAULT_MASS
     elements = getattr(protein_system, "elements", None)
     if elements is not None and len(elements) == n_atoms:
-      mass_list = [_ELEMENT_MASS.get(e, _ELEMENT_MASS.get(e.capitalize(), 12.011)) for e in elements]
+      mass_list = masses_from_elements(list(elements))
       masses = jnp.array(mass_list, dtype=jnp.float32)
       logger.info("Derived masses from %d element symbols (range: %.1f–%.1f Da)",
                    n_atoms, float(jnp.min(masses)), float(jnp.max(masses)))
     else:
-      logger.warning("No masses or elements found, defaulting to carbon mass (12.0 Da)")
-      masses = jnp.ones(n_atoms) * 12.0
+      logger.warning("No masses or elements found, defaulting to carbon mass (%.1f Da)", DEFAULT_MASS)
+      masses = jnp.ones(n_atoms) * DEFAULT_MASS
 
   constrained_bonds = protein_system.constrained_bonds
   constrained_lengths = protein_system.constrained_bond_lengths
@@ -1022,16 +1017,12 @@ def simulate_frames(
 
   if raw_masses is None:
     # Element-based derivation fallback
-    _ELEMENT_DATA = {
-      "H": 1.008, "C": 12.011, "N": 14.007, "O": 15.999, "S": 32.06,
-      "P": 30.974, "F": 18.998, "Cl": 35.45, "Br": 79.904,
-    }
+    from prolix.constants import masses_from_elements, DEFAULT_MASS
     elements = getattr(protein, "elements", None)
     if elements is not None and len(elements) == n_atoms:
-      mass_list = [_ELEMENT_DATA.get(e, _ELEMENT_DATA.get(e.capitalize(), 12.011)) for e in elements]
-      masses = jnp.array(mass_list, dtype=jnp.float32)
+      masses = jnp.array(masses_from_elements(list(elements)), dtype=jnp.float32)
     else:
-      masses = jnp.ones(n_atoms) * 12.0
+      masses = jnp.ones(n_atoms) * DEFAULT_MASS
 
   # Integrator setup (RATTLE support)
   constrained_bonds = protein.constrained_bonds

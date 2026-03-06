@@ -137,22 +137,18 @@ def pad_protein(
       scaled_radii = jnp.ones(n_real)*0.8
   padded_scaled_radii = pad_array(jnp.asarray(scaled_radii), target_atoms, 0.8) # Standard OBC2 default
   
-  # Derive masses if none 
-  _ELEMENT_MASS = {
-      "H": 1.008, "C": 12.011, "N": 14.007, "O": 15.999, "S": 32.06,
-      "P": 30.974, "F": 18.998, "Cl": 35.45, "Br": 79.904, "I": 126.904,
-      "Fe": 55.845, "Zn": 65.38, "Ca": 40.078, "Mg": 24.305, "Na": 22.990,
-      "K": 39.098, "Se": 78.971, "Mn": 54.938, "Cu": 63.546, "Co": 58.933,
-  }
+  # Derive masses if none
+  from prolix.constants import masses_from_elements, DEFAULT_MASS
+
   masses = protein.masses
   if masses is None or jnp.all(jnp.asarray(masses) == 0):
       elements = getattr(protein, "elements", None)
       if elements is not None and len(elements) == n_real:
-          mass_list = [_ELEMENT_MASS.get(e, _ELEMENT_MASS.get(e.capitalize(), 12.011)) for e in elements]
-          masses = jnp.array(mass_list, dtype=jnp.float32)
+          masses = jnp.array(masses_from_elements(list(elements)), dtype=jnp.float32)
       else:
-          masses = jnp.ones(n_real) * 12.0
-  padded_masses = pad_array(masses, target_atoms, 1.0)
+          masses = jnp.ones(n_real) * DEFAULT_MASS
+  # Pad with DEFAULT_MASS so ghost atoms have safe non-zero mass for Langevin p/m
+  padded_masses = pad_array(masses, target_atoms, DEFAULT_MASS)
   
   atom_mask = create_mask(n_real, target_atoms)
 
