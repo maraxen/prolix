@@ -132,12 +132,16 @@ def safe_map(fn: Callable[[T], Any], batch: T, chunk_size: int | None = 1) -> An
         
     return jax.tree_util.tree_map(unchunk, results)
 
-def batched_minimize(batch: PaddedSystem, max_steps: int = 3000, chunk_size: int | None = 1) -> Array:
-    """Minimizes a batch of PaddedSystems using FIRE.
+def batched_minimize(batch: PaddedSystem, max_steps: int = 5000, chunk_size: int | None = 1) -> Array:
+    """Minimizes a batch of PaddedSystems using staged FIRE.
 
-    Uses jax-md's built-in FIRE (Fast Inertial Relaxation Engine) minimizer
-    with AMBER-unit-calibrated timesteps: dt_start=0.0001 ps (0.1 fs),
-    dt_max=0.001 ps (1.0 fs).
+    Uses 4-stage progressive minimization consistent with simulate.py:
+      Stage 1: Soft-core λ=0.1, cap=10 kcal/mol/Å (500 steps)
+      Stage 2: Soft-core λ=0.5, cap=100 (500 steps)
+      Stage 3: Soft-core λ=0.9, cap=1000 (1000 steps)
+      Stage 4: Standard energy, NaN-sanitize only (remaining steps)
+
+    Dynamic dt_start is computed from initial gradient magnitude.
 
     Returns:
         minimized_positions: (B, N, 3)
@@ -147,40 +151,85 @@ def batched_minimize(batch: PaddedSystem, max_steps: int = 3000, chunk_size: int
 
     displacement_fn, shift_fn = space.free()
 
-    def minimize_single(sys: PaddedSystem) -> Array:
-        def energy_fn(r):
-            sys_with_r = dataclasses.replace(sys, positions=r)
-            return single_padded_energy(sys_with_r, displacement_fn)
+    # Stage definitions (consistent with simulate.py)
+    stages = [
+        {"lambda": 0.1, "force_cap": 10.0,   "steps": 500},
+        {"lambda": 0.5, "force_cap": 100.0,  "steps": 500},
+        {"lambda": 0.9, "force_cap": 1000.0, "steps": 1000},
+        {"lambda": None, "force_cap": None,   "steps": max(max_steps - 2000, 1000)},
+    ]
 
-        # FIRE minimizer with AMBER-calibrated timesteps
-        fire_init_fn, fire_apply_fn = jax_md_minimize.fire_descent(
-            energy_fn,
-            shift_fn,
-            dt_start=0.0001,  # 0.1 fs in ps
-            dt_max=0.001,     # 1.0 fs in ps
-        )
-
-        # Per-atom force capping wrapper (consistent with simulate.py)
-        max_force = 1000.0  # kcal/mol/Å
-
-        def capped_fire_apply(state, **kwargs):
+    def _make_capped_apply(fire_apply_fn, force_cap):
+        """Create force-capped FIRE apply function."""
+        def capped_apply(state, **kwargs):
             f = state.force
             f_norm = jnp.linalg.norm(f, axis=-1, keepdims=True)
-            cap = jnp.minimum(1.0, max_force / (f_norm + 1e-8))
+            cap = jnp.minimum(1.0, force_cap / (f_norm + 1e-8))
             f_capped = f * cap
             f_safe = jnp.where(jnp.isfinite(f_capped), f_capped, 0.0)
             state = dataclasses.replace(state, force=f_safe)
             return fire_apply_fn(state, **kwargs)
+        return capped_apply
 
-        # Initialize with per-atom masses from the padded system
-        fire_state = fire_init_fn(sys.positions, mass=sys.masses)
+    def _make_nan_safe_apply(fire_apply_fn):
+        """NaN-sanitize only (no force cap)."""
+        def nan_safe_apply(state, **kwargs):
+            f = state.force
+            f_safe = jnp.where(jnp.isfinite(f), f, 0.0)
+            state = dataclasses.replace(state, force=f_safe)
+            return fire_apply_fn(state, **kwargs)
+        return nan_safe_apply
 
-        # Run FIRE for max_steps
-        def body_fn(i, s):
-            return capped_fire_apply(s)
-        final_state = jax.lax.fori_loop(0, max_steps, body_fn, fire_state)
+    def minimize_single(sys: PaddedSystem) -> Array:
+        # Dynamic dt_start from gradient magnitude
+        def base_energy_fn(r):
+            sys_with_r = dataclasses.replace(sys, positions=r)
+            return single_padded_energy(sys_with_r, displacement_fn)
 
-        return final_state.position  # minimized positions
+        initial_grads = jax.grad(base_energy_fn)(sys.positions)
+        max_grad = jnp.max(jnp.linalg.norm(initial_grads, axis=-1))
+        dt_start = jnp.clip(0.001 / (max_grad + 1e-8), 1e-7, 0.001)
+        dt_max = jnp.minimum(dt_start * 10.0, 0.01)
+
+        current_positions = sys.positions
+
+        for stage in stages:
+            sc_lam = stage["lambda"]
+            force_cap = stage["force_cap"]
+            n_steps = stage["steps"]
+
+            # Create energy function for this stage
+            def stage_energy_fn(r, _lam=sc_lam):
+                sys_with_r = dataclasses.replace(sys, positions=r)
+                return single_padded_energy(sys_with_r, displacement_fn, soft_core_lambda=_lam)
+
+            # Create FIRE instance
+            stage_init_fn, stage_apply_fn = jax_md_minimize.fire_descent(
+                stage_energy_fn, shift_fn, dt_start=dt_start, dt_max=dt_max,
+            )
+
+            # Wrap with force capping or NaN sanitization
+            if force_cap is not None:
+                step_fn = _make_capped_apply(stage_apply_fn, force_cap)
+            else:
+                step_fn = _make_nan_safe_apply(stage_apply_fn)
+
+            # Initialize and run
+            fire_state = stage_init_fn(current_positions, mass=sys.masses)
+
+            def _run_stage(state, _step=step_fn, _n=n_steps):
+                def body_fn(i, s):
+                    return _step(s)
+                return jax.lax.fori_loop(0, _n, body_fn, state)
+
+            final_state = _run_stage(fire_state)
+            current_positions = final_state.position
+
+            # Ramp dt for next stage
+            dt_start = jnp.minimum(dt_start * 2.0, 0.001)
+            dt_max = jnp.minimum(dt_start * 10.0, 0.01)
+
+        return current_positions
 
     return safe_map(minimize_single, batch, chunk_size=chunk_size)
 

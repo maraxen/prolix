@@ -112,8 +112,12 @@ def _cmap_energy_masked(r: Array, indices: Array, mask: Array, coeffs: Array | N
 # MASKED NON-BONDED TERMS (N^2 path only for now)
 # ==============================================================================
 
-def _lj_energy_masked(r: Array, sigmas: Array, epsilons: Array, atom_mask: Array, displacement_fn: space.DisplacementFn) -> Array:
-    """Computes Lennard-Jones energy with atom masking."""
+def _lj_energy_masked(r: Array, sigmas: Array, epsilons: Array, atom_mask: Array, displacement_fn: space.DisplacementFn, soft_core_lambda: float | None = None) -> Array:
+    """Computes Lennard-Jones energy with atom masking.
+    
+    When soft_core_lambda is provided, uses the Beutler (1994) soft-core
+    formulation for staged minimization.
+    """
     from jax_md import energy
     
     # Create N x N masks
@@ -127,14 +131,22 @@ def _lj_energy_masked(r: Array, sigmas: Array, epsilons: Array, atom_mask: Array
     sigma_ij = 0.5 * (sigmas[:, None] + sigmas[None, :])
     epsilon_ij = jnp.sqrt(epsilons[:, None] * epsilons[None, :])
     
-    # Prevent singularities for self-interactions or ghost atoms when mask is False
-    dist = jnp.where(dist < 1e-4, 1.0, dist)
-    
-    ratio = sigma_ij / dist
-    ratio6 = ratio ** 6
-    ratio12 = ratio6 ** 2
-    
-    e_pair = 4.0 * epsilon_ij * (ratio12 - ratio6)
+    if soft_core_lambda is not None:
+        # Soft-core LJ: U(r,λ) = 4ελ[1/(α(1-λ)+(r/σ)⁶)² - 1/(α(1-λ)+(r/σ)⁶)]
+        alpha = 0.5
+        lam = soft_core_lambda
+        soft_term = alpha * jnp.maximum(1.0 - lam, 1e-6)
+        r_over_sig = dist / jnp.maximum(sigma_ij, 1e-8)
+        r6 = r_over_sig ** 6
+        denom = soft_term + r6
+        e_pair = 4.0 * epsilon_ij * lam * (1.0 / (denom * denom) - 1.0 / denom)
+    else:
+        # Standard LJ with safe distance for self/ghost atoms
+        dist = jnp.where(dist < 1e-4, 1.0, dist)
+        ratio = sigma_ij / dist
+        ratio6 = ratio ** 6
+        ratio12 = ratio6 ** 2
+        e_pair = 4.0 * epsilon_ij * (ratio12 - ratio6)
     
     # Remove self interaction
     n = len(sigmas)
@@ -167,11 +179,15 @@ def _coulomb_energy_masked(r: Array, charges: Array, atom_mask: Array, displacem
 # BATCHED EVALUATION
 # ==============================================================================
 
-def single_padded_energy(sys: PaddedSystem, displacement_fn: space.DisplacementFn, implicit_solvent: bool = True) -> Array:
+def single_padded_energy(sys: PaddedSystem, displacement_fn: space.DisplacementFn, implicit_solvent: bool = True, soft_core_lambda: float | None = None) -> Array:
     """Computes total potential energy for a single padded system.
 
     This is the public API for computing energy of one PaddedSystem.
     It can be used standalone with jax.grad, or batched via make_batched_energy_fn.
+    
+    Args:
+        soft_core_lambda: If provided, use soft-core LJ with this coupling parameter.
+            Used during staged minimization. λ=0 → no LJ, λ=1 → full LJ.
     """
     r = sys.positions
     
@@ -186,7 +202,7 @@ def single_padded_energy(sys: PaddedSystem, displacement_fn: space.DisplacementF
     # Non-bonded
     # NOTE: For phase 2 and simplicity in batched vmap (testing gradients), we use the N^2 path.
     # N*K neighbor list paths require extra state/handling.
-    e_lj = _lj_energy_masked(r, sys.sigmas, sys.epsilons, sys.atom_mask, displacement_fn)
+    e_lj = _lj_energy_masked(r, sys.sigmas, sys.epsilons, sys.atom_mask, displacement_fn, soft_core_lambda=soft_core_lambda)
     
     if implicit_solvent:
         mask_ij = sys.atom_mask[:, None] & sys.atom_mask[None, :]
