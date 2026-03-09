@@ -139,9 +139,10 @@ def batched_minimize(batch: PaddedSystem, max_steps: int = 5000, chunk_size: int
       Stage 1: Soft-core λ=0.1, cap=10 kcal/mol/Å (500 steps)
       Stage 2: Soft-core λ=0.5, cap=100 (500 steps)
       Stage 3: Soft-core λ=0.9, cap=1000 (1000 steps)
-      Stage 4: Standard energy, NaN-sanitize only (remaining steps)
+      Stage 4: Standard energy (λ=1.0), NaN-sanitize only (remaining steps)
 
-    Dynamic dt_start is computed from initial gradient magnitude.
+    Single JIT compilation: the energy function takes soft_core_lambda as a
+    JAX array, so all stages trace through the same computation graph.
 
     Returns:
         minimized_positions: (B, N, 3)
@@ -151,75 +152,72 @@ def batched_minimize(batch: PaddedSystem, max_steps: int = 5000, chunk_size: int
 
     displacement_fn, shift_fn = space.free()
 
-    def _make_capped_apply(fire_apply_fn, force_cap):
-        """Create force-capped FIRE apply function."""
-        def capped_apply(state, **kwargs):
-            f = state.force
-            f_norm = jnp.linalg.norm(f, axis=-1, keepdims=True)
-            cap = jnp.minimum(1.0, force_cap / (f_norm + 1e-8))
-            f_capped = f * cap
-            f_safe = jnp.where(jnp.isfinite(f_capped), f_capped, 0.0)
-            state = dataclasses.replace(state, force=f_safe)
-            return fire_apply_fn(state, **kwargs)
-        return capped_apply
+    # Stage definitions: (lambda, force_cap, n_steps)
+    # force_cap=0.0 means NaN-sanitize only (no capping)
+    stage_lambdas = jnp.array([0.1, 0.5, 0.9, 1.0], dtype=jnp.float32)
+    stage_caps = jnp.array([10.0, 100.0, 1000.0, 0.0], dtype=jnp.float32)
+    stage_steps = jnp.array([500, 500, 1000, max(max_steps - 2000, 1000)])
 
-    def _make_nan_safe_apply(fire_apply_fn):
-        """NaN-sanitize only (no force cap)."""
-        def nan_safe_apply(state, **kwargs):
-            f = state.force
-            f_safe = jnp.where(jnp.isfinite(f), f, 0.0)
-            state = dataclasses.replace(state, force=f_safe)
-            return fire_apply_fn(state, **kwargs)
-        return nan_safe_apply
-
-    # Static dt per stage — fire_descent requires Python floats, not traced values.
-    # Under vmap, dynamic dt from gradient magnitude would create TracerArrayConversionError.
-    # Force capping in stages 1-3 provides the safety that dynamic dt would provide.
-    stage_defs = [
-        {"lambda": 0.1, "force_cap": 10.0,   "steps": 500,  "dt_start": 0.00001, "dt_max": 0.0001},
-        {"lambda": 0.5, "force_cap": 100.0,  "steps": 500,  "dt_start": 0.00005, "dt_max": 0.0005},
-        {"lambda": 0.9, "force_cap": 1000.0, "steps": 1000, "dt_start": 0.0001,  "dt_max": 0.001},
-        {"lambda": None, "force_cap": None,   "steps": max(max_steps - 2000, 1000),
-         "dt_start": 0.0001, "dt_max": 0.001},
-    ]
+    # Fixed dt for all stages — avoids per-stage recompilation
+    dt_start = 0.00005
+    dt_max = 0.0005
 
     def minimize_single(sys: PaddedSystem) -> Array:
-        current_positions = sys.positions
-
-        for stage in stage_defs:
-            sc_lam = stage["lambda"]
-            force_cap = stage["force_cap"]
-            n_steps = stage["steps"]
-
-            # Create energy function for this stage
-            def stage_energy_fn(r, _lam=sc_lam):
-                sys_with_r = dataclasses.replace(sys, positions=r)
-                return single_padded_energy(sys_with_r, displacement_fn, soft_core_lambda=_lam)
-
-            # Create FIRE instance with static dt
-            stage_init_fn, stage_apply_fn = jax_md_minimize.fire_descent(
-                stage_energy_fn, shift_fn,
-                dt_start=stage["dt_start"], dt_max=stage["dt_max"],
+        # Parameterized energy function — lambda is a JAX array,
+        # NOT a Python float, so this traces once for all stages.
+        def energy_fn(r, soft_core_lambda=jnp.float32(1.0)):
+            sys_with_r = dataclasses.replace(sys, positions=r)
+            return single_padded_energy(
+                sys_with_r, displacement_fn,
+                soft_core_lambda=soft_core_lambda,
             )
 
-            # Wrap with force capping or NaN sanitization
-            if force_cap is not None:
-                step_fn = _make_capped_apply(stage_apply_fn, force_cap)
-            else:
-                step_fn = _make_nan_safe_apply(stage_apply_fn)
+        # Single FIRE instance — compiled once
+        fire_init_fn, fire_apply_fn = jax_md_minimize.fire_descent(
+            energy_fn, shift_fn,
+            dt_start=dt_start, dt_max=dt_max,
+        )
 
-            # Initialize and run
-            fire_state = stage_init_fn(current_positions, mass=sys.masses)
+        def capped_apply(state, force_cap, sc_lam):
+            """Apply FIRE step with runtime force capping."""
+            f = state.force
+            f_norm = jnp.linalg.norm(f, axis=-1, keepdims=True)
+            # When force_cap=0, cap_ratio=1 (no capping, just NaN sanitize)
+            use_cap = force_cap > 0.0
+            cap_ratio = jnp.where(
+                use_cap,
+                jnp.minimum(1.0, force_cap / (f_norm + 1e-8)),
+                1.0,
+            )
+            f_capped = f * cap_ratio
+            f_safe = jnp.where(jnp.isfinite(f_capped), f_capped, 0.0)
+            state = dataclasses.replace(state, force=f_safe)
+            return fire_apply_fn(state, soft_core_lambda=sc_lam)
 
-            def _run_stage(state, _step=step_fn, _n=n_steps):
-                def body_fn(i, s):
-                    return _step(s)
-                return jax.lax.fori_loop(0, _n, body_fn, state)
+        def run_stage(carry, stage_params):
+            """Run one minimization stage (called via lax.scan)."""
+            positions = carry
+            sc_lam, force_cap, n_steps = stage_params
 
-            final_state = _run_stage(fire_state)
-            current_positions = final_state.position
+            # Re-init FIRE state from current positions with this lambda
+            fire_state = fire_init_fn(
+                positions, mass=sys.masses,
+                soft_core_lambda=sc_lam,
+            )
 
-        return current_positions
+            def body_fn(i, s):
+                return capped_apply(s, force_cap, sc_lam)
+
+            final_state = jax.lax.fori_loop(0, n_steps, body_fn, fire_state)
+            return final_state.position, None
+
+        # Run all 4 stages via scan — single compiled graph
+        stage_params = (stage_lambdas, stage_caps, stage_steps)
+        final_positions, _ = lax.scan(
+            run_stage, sys.positions, stage_params,
+        )
+
+        return final_positions
 
     return safe_map(minimize_single, batch, chunk_size=chunk_size)
 
@@ -299,3 +297,128 @@ def batched_produce(
         return final_s, traj
         
     return safe_map(produce_single, (batch, state), chunk_size=chunk_size)
+
+
+def safe_map_no_output(
+    fn: Callable[[T], Any], batch: T, chunk_size: int | None = 1
+) -> Any:
+    """Map a function over a batch, discarding scan outputs.
+
+    Like safe_map, but for side-effect-only functions (e.g., streaming IO).
+    Returns only the final carry (function results), not accumulated outputs.
+    """
+    if chunk_size is None:
+        return jax.vmap(fn)(batch)
+
+    leaves, treedef = jax.tree_util.tree_flatten(batch)
+    if not leaves:
+        return jax.vmap(fn)(batch)
+
+    B = leaves[0].shape[0]
+
+    if B % chunk_size != 0:
+        chunk_size = 1
+
+    num_chunks = max(1, B // chunk_size)
+
+    def map_fn(chunk_leaves):
+        chunk_batch = jax.tree_util.tree_unflatten(treedef, chunk_leaves)
+        return jax.vmap(fn)(chunk_batch)
+
+    chunked_leaves = [
+        l.reshape((num_chunks, chunk_size) + l.shape[1:]) for l in leaves
+    ]
+
+    def scan_fn(carry, chunk_leaf):
+        result = map_fn(chunk_leaf)
+        return carry, result
+
+    _, results = lax.scan(scan_fn, None, chunked_leaves)
+
+    def unchunk(x):
+        return x.reshape((B,) + x.shape[2:])
+
+    return jax.tree_util.tree_map(unchunk, results)
+
+
+def batched_produce_streaming(
+    batch: PaddedSystem,
+    state: LangevinState,
+    n_saves: int,
+    steps_per_save: int,
+    write_fn: Callable,
+    temperature_k: float = 310.15,
+    chunk_size: int | None = None,
+) -> LangevinState:
+    """Produce trajectory with streaming IO — no GPU trajectory accumulation.
+
+    Instead of accumulating a (n_saves, N, 3) trajectory tensor on GPU,
+    this function uses jax.experimental.io_callback to stream each frame
+    to the host as it's produced. The host-side write_fn handles serialization
+    and disk IO asynchronously while the GPU continues computing.
+
+    Args:
+        batch: Batched padded systems (B, N, 3).
+        state: Initial Langevin state from equilibration.
+        n_saves: Number of trajectory frames to save.
+        steps_per_save: MD steps between saves.
+        write_fn: Host callback with signature (positions, batch_idx, save_idx) -> None.
+            positions: (N, 3) array for one system at one save point.
+            batch_idx: int, index into the batch dimension.
+            save_idx: int, which save frame this is.
+        temperature_k: Temperature in Kelvin.
+        chunk_size: Chunk size for safe_map. None = full vmap.
+
+    Returns:
+        Final LangevinState (no trajectory — it was streamed to disk).
+    """
+    from jax.experimental import io_callback
+    from prolix.simulate import AKMA_TIME_UNIT_FS, BOLTZMANN_KCAL
+
+    dt = 2.0 / AKMA_TIME_UNIT_FS
+    kT = temperature_k * BOLTZMANN_KCAL
+    gamma = 1.0 * AKMA_TIME_UNIT_FS * 1e-3
+
+    step_fn = make_langevin_step(dt, kT, gamma)
+
+    # Get batch size for index computation
+    leaves, _ = jax.tree_util.tree_flatten(batch)
+    B = leaves[0].shape[0]
+
+    def produce_single_streaming(
+        args: tuple[PaddedSystem, LangevinState, Any],
+    ) -> LangevinState:
+        sys, s, batch_idx = args
+
+        def save_step(s, save_idx):
+            # Run steps_per_save MD steps
+            def single_step(s_inner, _):
+                return step_fn(sys, s_inner), None
+
+            s_next, _ = lax.scan(single_step, s, None, length=steps_per_save)
+
+            # Stream frame to host — fires async when buffer is ready
+            io_callback(
+                write_fn,
+                None,  # void return (no data back to GPU)
+                s_next.positions,
+                batch_idx,
+                save_idx,
+                # Note: ordered=True is incompatible with vmap.
+                # Frame ordering within each system is guaranteed by lax.scan.
+            )
+
+            # Return state only — NO trajectory accumulation
+            return s_next, None
+
+        final_s, _ = lax.scan(save_step, s, jnp.arange(n_saves))
+        return final_s
+
+    # Build batch indices for the callback
+    batch_indices = jnp.arange(B)
+
+    return safe_map_no_output(
+        produce_single_streaming,
+        (batch, state, batch_indices),
+        chunk_size=chunk_size,
+    )
