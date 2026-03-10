@@ -168,6 +168,71 @@ def _coulomb_energy_masked(r: Array, charges: Array, atom_mask: Array, displacem
     return 0.5 * jnp.sum(e_pair)
 
 
+def _lj_energy_neighbor_list(
+    r: 'Array',
+    sigmas: 'Array',
+    epsilons: 'Array',
+    neighbor_idx: 'Array',
+    soft_core_lambda: 'Array | None' = None,
+) -> 'Array':
+    """Computes Lennard-Jones energy using neighbor list indices.
+
+    O(N*K) scaling instead of O(N^2). Each atom i has K neighbor slots.
+    Padding neighbors (idx >= N) contribute zero energy.
+
+    Uses the same soft-core Beutler (1994) formulation as _lj_energy_masked.
+
+    Args:
+        r: Positions (N, 3).
+        sigmas: LJ sigma params (N,).
+        epsilons: LJ epsilon params (N,).
+        neighbor_idx: Neighbor indices (N, K). Padding sentinel = N.
+        soft_core_lambda: Soft-core coupling parameter. 1.0 = standard LJ.
+    """
+    N = r.shape[0]
+    # _K = neighbor_idx.shape[1]
+
+    # Gather neighbor data: (N, K, 3) and (N, K)
+    # Clamp indices to [0, N-1] for safe gather; mask handles OOB
+    safe_idx = jnp.minimum(neighbor_idx, N - 1)
+    r_j = r[safe_idx]                    # (N, K, 3)
+    sigma_j = sigmas[safe_idx]           # (N, K)
+    epsilon_j = epsilons[safe_idx]       # (N, K)
+
+    # Central atom data broadcast: (N, 1, ...)
+    r_i = r[:, None, :]                  # (N, 1, 3)
+    sigma_i = sigmas[:, None]            # (N, 1)
+    epsilon_i = epsilons[:, None]        # (N, 1)
+
+    # Pairwise distances
+    dr = r_i - r_j                       # (N, K, 3)
+    dist = jnp.sqrt(jnp.sum(dr ** 2, axis=-1) + 1e-12)  # (N, K)
+
+    # Mixing rules
+    sigma_ij = 0.5 * (sigma_i + sigma_j)
+    epsilon_ij = jnp.sqrt(epsilon_i * epsilon_j)
+
+    # Soft-core LJ (same formula as _lj_energy_masked)
+    lam = jnp.float32(soft_core_lambda) if soft_core_lambda is not None else jnp.float32(1.0)
+    alpha = jnp.float32(0.5)
+    soft_term = alpha * jnp.maximum(jnp.float32(1.0) - lam, jnp.float32(1e-8))
+    r_over_sig = dist / jnp.maximum(sigma_ij, jnp.float32(1e-8))
+    r6 = r_over_sig ** 6
+    denom = soft_term + r6 + jnp.float32(1e-12)
+    e_pair = jnp.float32(4.0) * epsilon_ij * lam * (
+        jnp.float32(1.0) / (denom * denom) - jnp.float32(1.0) / denom
+    )
+
+    # Mask out padding neighbors (sentinel = N)
+    mask = neighbor_idx < N  # (N, K) bool
+    e_pair = jnp.where(mask, e_pair, 0.0)
+
+    # Sum. No 0.5 factor: neighbor list is directional (i->j only once
+    # per pair IF the NL is symmetric). JAX-MD NLs are symmetric,
+    # meaning both (i,j) and (j,i) appear, so we need 0.5.
+    return 0.5 * jnp.sum(e_pair)
+
+
 # ==============================================================================
 # BATCHED EVALUATION
 # ==============================================================================

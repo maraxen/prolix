@@ -264,6 +264,7 @@ def compute_born_radii_neighbor_list(
   radii: Array,
   neighbor_idx: Array,
   dielectric_offset: float = 0.09,
+  scaled_radii: Array | None = None,
 ) -> Array:
   r"""Computes effective Born radii using neighbor lists.
 
@@ -300,7 +301,12 @@ def compute_born_radii_neighbor_list(
   mask_neighbors = neighbor_idx < N  # Mask padding
 
   offset_radii = radii - dielectric_offset
-  radii_j = radii[neighbor_idx]  # (N, K)
+
+  # Use scaled_radii for descreening if provided (matches dense path)
+  radii_j_raw = scaled_radii if scaled_radii is not None else radii
+  # Clamp neighbor indices for safe gather
+  safe_idx = jnp.minimum(neighbor_idx, N - 1)
+  radii_j = radii_j_raw[safe_idx]  # (N, K)
 
   radii_i_broadcast = offset_radii[:, None]  # (N, 1)
 
@@ -313,7 +319,8 @@ def compute_born_radii_neighbor_list(
   tanh_argument = (
     ALPHA_OBC * scaled_integral - BETA_OBC * scaled_integral**2 + GAMMA_OBC * scaled_integral**3
   )
-  inv_born_radii = (1.0 / offset_radii) * (1.0 - jnp.tanh(tanh_argument))
+  # Match dense path formula exactly: 1/or - tanh(arg)/radii
+  inv_born_radii = 1.0 / offset_radii - jnp.tanh(tanh_argument) / radii
 
   return 1.0 / inv_born_radii
 
