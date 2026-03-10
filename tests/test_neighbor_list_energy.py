@@ -270,3 +270,79 @@ class TestIntegratedNLEnergy:
         hvp = jax.grad(lambda r: jnp.sum(grad_fn(r) ** 2))
         h = hvp(sys["positions"])
         assert jnp.all(jnp.isfinite(h)), "Second-order gradients must be finite"
+
+
+# ── Simulation step tests ──────────────────────────────────────────────────
+
+
+class TestNLLangevinStep:
+    """Tests that make_langevin_step_nl works correctly."""
+
+    def test_nl_step_produces_finite_state(self):
+        """A single NL Langevin step should produce finite positions/momenta."""
+        from prolix.batched_simulate import make_langevin_step_nl, LangevinState
+        from prolix.padding import PaddedSystem
+
+        n = 16
+
+        # Build a minimal PaddedSystem with required fields
+        sys_data = _make_toy_system(n)
+        rng = np.random.RandomState(99)
+
+        # Create a minimal PaddedSystem (just the fields needed for energy)
+        padded = PaddedSystem(
+            positions=sys_data["positions"],
+            charges=sys_data["charges"],
+            sigmas=sys_data["sigmas"],
+            epsilons=sys_data["epsilons"],
+            radii=sys_data["radii"],
+            scaled_radii=sys_data["scaled_radii"],
+            masses=jnp.ones(n) * 12.0,
+            atom_mask=sys_data["atom_mask"],
+            bonds=jnp.zeros((0, 2), dtype=jnp.int32),
+            bond_params=jnp.zeros((0, 2)),
+            bond_mask=jnp.zeros(0, dtype=jnp.bool_),
+            angles=jnp.zeros((0, 3), dtype=jnp.int32),
+            angle_params=jnp.zeros((0, 2)),
+            angle_mask=jnp.zeros(0, dtype=jnp.bool_),
+            dihedrals=jnp.zeros((0, 4), dtype=jnp.int32),
+            dihedral_params=jnp.zeros((0, 3)),
+            dihedral_mask=jnp.zeros(0, dtype=jnp.bool_),
+            impropers=jnp.zeros((0, 4), dtype=jnp.int32),
+            improper_params=jnp.zeros((0, 3)),
+            improper_mask=jnp.zeros(0, dtype=jnp.bool_),
+            cmap_torsions=None,
+            cmap_mask=None,
+            cmap_coeffs=None,
+            n_real_atoms=jnp.array(n),
+            n_padded_atoms=n,
+            bucket_size=n,
+        )
+
+        neighbor_idx = _build_dense_neighbor_idx(n)
+
+        # Create initial state
+        key = jax.random.PRNGKey(0)
+        state = LangevinState(
+            positions=sys_data["positions"],
+            momentum=jnp.zeros((n, 3)),
+            force=jnp.zeros((n, 3)),
+            mass=jnp.ones(n) * 12.0,
+            key=key,
+        )
+
+        # Create step function with typical params
+        dt = 0.001
+        kT = 0.6  # ~300K in kcal/mol
+        gamma = 1.0
+        step_fn = make_langevin_step_nl(dt, kT, gamma)
+
+        # Take one step
+        new_state = step_fn(padded, state, neighbor_idx)
+
+        assert jnp.all(jnp.isfinite(new_state.positions)), \
+            "NL step positions must be finite"
+        assert jnp.all(jnp.isfinite(new_state.momentum)), \
+            "NL step momenta must be finite"
+        assert jnp.all(jnp.isfinite(new_state.force)), \
+            "NL step forces must be finite"
