@@ -298,3 +298,83 @@ def make_batched_energy_fn(displacement_fn: space.DisplacementFn, implicit_solve
     execution of heterogeneous small systems.
     """
     return jax.vmap(lambda sys: single_padded_energy(sys, displacement_fn, implicit_solvent))
+
+
+def single_padded_energy_nl(
+    sys: PaddedSystem,
+    neighbor_idx: 'Array',
+    displacement_fn: space.DisplacementFn,
+    implicit_solvent: bool = True,
+    soft_core_lambda: 'Array' = jnp.array(1.0),
+) -> 'Array':
+    """Computes total potential energy using neighbor lists for non-bonded terms.
+
+    O(N*K) scaling for LJ and GB instead of O(N^2).
+    Bonded terms remain identical to single_padded_energy.
+
+    Args:
+        sys: Padded protein system.
+        neighbor_idx: Neighbor indices (N, K). Padding sentinel = N.
+        displacement_fn: JAX-MD displacement function.
+        implicit_solvent: Whether to use GB/SA implicit solvent.
+        soft_core_lambda: Soft-core LJ coupling (1.0 = standard).
+
+    Returns:
+        Total potential energy (scalar).
+    """
+    r = sys.positions
+
+    # Bonded terms (unchanged — already O(N))
+    e_bond = _bond_energy_masked(r, sys.bonds, sys.bond_params, sys.bond_mask, displacement_fn)
+    e_angle = _angle_energy_masked(r, sys.angles, sys.angle_params, sys.angle_mask, displacement_fn)
+    e_dih = _dihedral_energy_masked(r, sys.dihedrals, sys.dihedral_params, sys.dihedral_mask, displacement_fn)
+    e_imp = _dihedral_energy_masked(r, sys.impropers, sys.improper_params, sys.improper_mask, displacement_fn)
+    e_cmap = _cmap_energy_masked(r, sys.cmap_torsions, sys.cmap_mask, sys.cmap_coeffs, displacement_fn)
+
+    # Non-bonded: O(N*K) via neighbor list
+    e_lj = _lj_energy_neighbor_list(
+        r, sys.sigmas, sys.epsilons, neighbor_idx,
+        soft_core_lambda=soft_core_lambda,
+    )
+
+    if implicit_solvent:
+        from prolix.physics.generalized_born import (
+            compute_gb_energy_neighbor_list,
+            compute_ace_nonpolar_energy,
+        )
+        e_gb, born_radii = compute_gb_energy_neighbor_list(
+            positions=r,
+            charges=sys.charges,
+            radii=sys.radii,
+            neighbor_idx=neighbor_idx,
+            dielectric_offset=0.09,
+        )
+        e_np = compute_ace_nonpolar_energy(sys.radii, born_radii)
+        e_np = jnp.sum(e_np * sys.atom_mask)
+        e_elec = e_gb
+        e_solv = e_gb + e_np
+    else:
+        # For explicit solvent without GB, use direct Coulomb with NL
+        # (PME would be added here for periodic systems)
+        e_elec = _coulomb_energy_masked(r, sys.charges, sys.atom_mask, displacement_fn)
+        e_solv = 0.0
+
+    return e_bond + e_angle + e_dih + e_imp + e_cmap + e_lj + e_elec + e_solv
+
+
+def make_batched_energy_fn_nl(
+    displacement_fn: space.DisplacementFn,
+    implicit_solvent: bool = True,
+) -> Callable:
+    """Create a vmap-compatible energy function using neighbor lists.
+
+    Unlike make_batched_energy_fn, this takes neighbor_idx as a separate
+    argument (shape [B, N, K]) since it's updated dynamically during simulation.
+
+    Returns:
+        Function(sys_batch: PaddedSystem, neighbor_idx: Array) -> Array[B]
+    """
+    def _energy_single(sys, nbr_idx):
+        return single_padded_energy_nl(sys, nbr_idx, displacement_fn, implicit_solvent)
+
+    return jax.vmap(_energy_single)
