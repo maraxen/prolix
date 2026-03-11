@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING, Callable, Any, TypeVar
 import jax
 import jax.numpy as jnp
 from jax import lax
-from jax_md import space
+from jax_md import space, partition
 
 from prolix.padding import PaddedSystem
 
@@ -599,6 +599,184 @@ def batched_produce_streaming(
 # Neighbor-list aware variants
 # ---------------------------------------------------------------------------
 
+def build_neighbor_list_jaxmd(
+    positions: 'Array',
+    cutoff: float = 20.0,
+    capacity_multiplier: float = 1.25,
+    dr_threshold: float = 1.0,
+) -> tuple[Any, Any]:
+    """Build a dynamic neighbor list using JAX-MD's native spatial partitioning.
+
+    This produces a NeighborList object whose `update()` method is fully
+    JIT-compatible and runs on GPU inside lax.scan / lax.fori_loop.
+
+    Only the initial `allocate()` runs on CPU (uses Python int for sizing).
+    Subsequent `update()` calls use fixed shapes and stay on-device.
+
+    Args:
+        positions: (N, 3) atom positions.
+        cutoff: Neighbor cutoff in Angstroms.
+        capacity_multiplier: Extra buffer for neighbor count fluctuations.
+        dr_threshold: Rebuild neighbors only when atoms move > this distance.
+
+    Returns:
+        nbrs: JAX-MD NeighborList object.
+        neighbor_fn: NeighborListFns for potential reallocation.
+    """
+    displacement_fn, _ = space.free()
+    neighbor_fn = partition.neighbor_list(
+        displacement_fn,
+        box=1000.0,  # Large virtual box for free-space (implicit solvent)
+        r_cutoff=cutoff,
+        disable_cell_list=True,  # Brute-force O(N^2) build — fine for proteins
+        format=partition.Dense,
+        capacity_multiplier=capacity_multiplier,
+        dr_threshold=dr_threshold,
+    )
+    nbrs = neighbor_fn.allocate(positions)
+    return nbrs, neighbor_fn
+
+
+def build_batched_neighbor_list_jaxmd(
+    batch_positions: 'Array',
+    cutoff: float = 20.0,
+    capacity_multiplier: float = 1.25,
+    dr_threshold: float = 1.0,
+) -> tuple[Any, Any]:
+    """Build batched neighbor lists for heterogeneous protein systems.
+
+    Allocates per-system on CPU, finds global max K, pads all to the same K,
+    and stacks into a single batched NeighborList PyTree compatible with vmap.
+
+    Args:
+        batch_positions: (B, N, 3) batched positions.
+        cutoff: Neighbor cutoff in Angstroms.
+        capacity_multiplier: Extra buffer for neighbor count fluctuations.
+        dr_threshold: Rebuild neighbors only when atoms move > this distance.
+
+    Returns:
+        batched_nbrs: Stacked NeighborList PyTree with shapes (B, N, K).
+        neighbor_fn: NeighborListFns for potential reallocation.
+    """
+    import jax.tree_util as tu
+
+    B = batch_positions.shape[0]
+    displacement_fn, _ = space.free()
+    neighbor_fn = partition.neighbor_list(
+        displacement_fn,
+        box=1000.0,
+        r_cutoff=cutoff,
+        disable_cell_list=True,
+        format=partition.Dense,
+        capacity_multiplier=capacity_multiplier,
+        dr_threshold=dr_threshold,
+    )
+
+    # Allocate per-system, find global max K
+    nbrs_list = []
+    max_k = 0
+    for i in range(B):
+        nbrs = neighbor_fn.allocate(batch_positions[i])
+        nbrs_list.append(nbrs)
+        max_k = max(max_k, nbrs.idx.shape[1])
+
+    # Re-allocate with enough capacity for the densest system,
+    # then trim all to exactly max_k for uniform shapes
+    padded_nbrs_list = []
+    for i in range(B):
+        nbrs = neighbor_fn.allocate(batch_positions[i], extra_capacity=max_k)
+        padded_idx = nbrs.idx[:, :max_k]
+        padded_nbrs = dataclasses.replace(nbrs, idx=padded_idx, max_occupancy=max_k)
+        padded_nbrs_list.append(padded_nbrs)
+
+    # Stack array leaves, share static fields (update_fn, format, etc.)
+    batched_nbrs = tu.tree_map(lambda *x: jnp.stack(x), *padded_nbrs_list)
+    return batched_nbrs, neighbor_fn
+
+
+def make_langevin_step_nl_dynamic(
+    dt: float, kT: float, gamma: float,
+    energy_fn: Callable | None = None,
+) -> Callable:
+    """Create a BAOAB Langevin step with dynamic JAX-MD neighbor list updates.
+
+    Unlike make_langevin_step_nl which takes a static neighbor_idx array,
+    this version takes a full JAX-MD NeighborList object, calls nbrs.update()
+    after the position update, and returns the updated NeighborList.
+
+    The neighbor list update runs fully on GPU inside JIT/lax.scan.
+
+    Args:
+        energy_fn: Energy function taking (sys, neighbor_idx, displacement_fn).
+            Defaults to single_padded_energy_nl_cvjp.
+
+    Returns:
+        step_fn(padded_sys, state, nbrs) -> (LangevinState, NeighborList)
+    """
+    if energy_fn is None:
+        from prolix.batched_energy import single_padded_energy_nl_cvjp
+        energy_fn = single_padded_energy_nl_cvjp
+
+    c1 = jnp.exp(-gamma * dt)
+    c2 = jnp.sqrt(1.0 - jnp.exp(-2.0 * gamma * dt))
+
+    displacement_fn, _ = space.free()
+
+    def step_fn(
+        padded_sys: PaddedSystem,
+        state: LangevinState,
+        nbrs: Any,
+    ) -> tuple[LangevinState, Any]:
+        # Extract raw idx for energy functions (they don't need the full object)
+        neighbor_idx = nbrs.idx
+
+        def _energy_of_r(r):
+            sys_with_r = dataclasses.replace(padded_sys, positions=r)
+            return energy_fn(sys_with_r, neighbor_idx, displacement_fn)
+
+        force_fn = jax.grad(lambda r: _energy_of_r(r))
+
+        r, p, f, m, key = (
+            state.positions, state.momentum, state.force,
+            state.mass, state.key,
+        )
+
+        # B
+        p = p - 0.5 * dt * f
+        # A
+        r = r + 0.5 * dt * p / m[:, None]
+        # O
+        key, subkey = jax.random.split(key)
+        noise = jax.random.normal(subkey, p.shape)
+        p = c1 * p + jnp.sqrt(m[:, None] * kT) * c2 * noise
+        # A
+        r = r + 0.5 * dt * p / m[:, None]
+
+        # Update neighbor list with new positions (GPU, inside JIT)
+        new_nbrs = nbrs.update(r)
+        # Re-extract idx for force calculation with updated neighbors
+        new_neighbor_idx = new_nbrs.idx
+
+        def _energy_of_r_updated(r_inner):
+            sys_with_r = dataclasses.replace(padded_sys, positions=r_inner)
+            return energy_fn(sys_with_r, new_neighbor_idx, displacement_fn)
+
+        force_fn_updated = jax.grad(lambda r_inner: _energy_of_r_updated(r_inner))
+
+        # B
+        f = force_fn_updated(r)
+        p = p - 0.5 * dt * f
+
+        r = r.astype(state.positions.dtype)
+        p = p.astype(state.momentum.dtype)
+        f = f.astype(state.force.dtype)
+
+        new_state = LangevinState(r, p, f, m, key)
+        return new_state, new_nbrs
+
+    return step_fn
+
+
 def build_neighbor_list(
     positions,
     n_real: int,
@@ -787,6 +965,180 @@ def batched_produce_streaming_nl(
     return safe_map_no_output(
         produce_single_streaming_nl,
         (batch, neighbor_idx, state, batch_indices),
+        chunk_size=chunk_size,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Dynamic (JAX-MD native) neighbor list variants
+# ---------------------------------------------------------------------------
+
+def batched_equilibrate_nl_dynamic(
+    batch: PaddedSystem,
+    batched_nbrs: Any,
+    key: 'Array',
+    n_steps: int,
+    temperature_k: float = 310.15,
+    chunk_size: int | None = 1,
+    energy_fn: Callable | None = None,
+) -> tuple[LangevinState, Any]:
+    """Equilibrate using dynamic JAX-MD neighbor lists (GPU-native updates).
+
+    Unlike batched_equilibrate_nl which uses a static neighbor_idx array,
+    this version carries the full NeighborList PyTree through lax.scan
+    and calls nbrs.update() every step on the GPU.
+
+    Args:
+        batch: Batched padded systems (B, N, 3).
+        batched_nbrs: Batched JAX-MD NeighborList PyTree (B, N, K).
+        key: PRNG key for Langevin noise.
+        n_steps: Number of equilibration steps.
+        temperature_k: Temperature in Kelvin.
+        chunk_size: Chunk size for safe_map.
+        energy_fn: Custom energy function (default: cvjp variant).
+
+    Returns:
+        Tuple of (final LangevinState, updated NeighborList).
+    """
+    from prolix.simulate import AKMA_TIME_UNIT_FS, BOLTZMANN_KCAL
+
+    if energy_fn is None:
+        from prolix.batched_energy import single_padded_energy_nl_cvjp
+        energy_fn = single_padded_energy_nl_cvjp
+
+    dt = 2.0 / AKMA_TIME_UNIT_FS
+    kT = temperature_k * BOLTZMANN_KCAL
+    gamma = 1.0 * AKMA_TIME_UNIT_FS * 1e-3
+
+    step_fn = make_langevin_step_nl_dynamic(dt, kT, gamma, energy_fn=energy_fn)
+
+    leaves, _ = jax.tree_util.tree_flatten(batch)
+    B = leaves[0].shape[0]
+    keys = jax.random.split(key, B)
+
+    displacement_fn, _ = space.free()
+
+    def equilibrate_single(
+        args: tuple[PaddedSystem, Any, 'Array'],
+    ) -> tuple[LangevinState, Any]:
+        sys, nbrs, k = args
+
+        neighbor_idx = nbrs.idx
+
+        def _energy_of_r(r):
+            sys_with_r = dataclasses.replace(sys, positions=r)
+            return energy_fn(sys_with_r, neighbor_idx, displacement_fn)
+
+        initial_f = jax.grad(_energy_of_r)(sys.positions)
+
+        state = LangevinState(
+            positions=sys.positions,
+            momentum=jnp.zeros_like(sys.positions),
+            force=initial_f,
+            mass=sys.masses,
+            key=k,
+        )
+
+        def scan_step(carry, _):
+            s, nbrs = carry
+            new_s, new_nbrs = step_fn(sys, s, nbrs)
+            return (new_s, new_nbrs), None
+
+        (final_s, final_nbrs), _ = lax.scan(
+            scan_step, (state, nbrs), None, length=n_steps,
+        )
+        return final_s, final_nbrs
+
+    results = safe_map(
+        equilibrate_single, (batch, batched_nbrs, keys),
+        chunk_size=chunk_size,
+    )
+    return results  # (batched LangevinState, batched NeighborList)
+
+
+def batched_produce_streaming_nl_dynamic(
+    batch: PaddedSystem,
+    batched_nbrs: Any,
+    state: LangevinState,
+    n_saves: int,
+    steps_per_save: int,
+    write_fn: Callable,
+    temperature_k: float = 310.15,
+    chunk_size: int | None = None,
+    energy_fn: Callable | None = None,
+) -> tuple[LangevinState, Any]:
+    """Produce trajectory with streaming IO using dynamic JAX-MD neighbor lists.
+
+    Same as batched_produce_streaming_nl but uses native GPU-updated neighbor
+    lists via nbrs.update() inside lax.scan.
+
+    Args:
+        batch: Batched padded systems (B, N, 3).
+        batched_nbrs: Batched JAX-MD NeighborList PyTree (B, N, K).
+        state: Initial Langevin state from equilibration.
+        n_saves: Number of trajectory frames to save.
+        steps_per_save: MD steps between saves.
+        write_fn: Host callback (positions, batch_idx, save_idx) -> None.
+        temperature_k: Temperature in Kelvin.
+        chunk_size: Chunk size for safe_map.
+        energy_fn: Custom energy function (default: cvjp variant).
+
+    Returns:
+        Tuple of (final LangevinState, updated NeighborList).
+    """
+    from jax.experimental import io_callback
+    from prolix.simulate import AKMA_TIME_UNIT_FS, BOLTZMANN_KCAL
+
+    if energy_fn is None:
+        from prolix.batched_energy import single_padded_energy_nl_cvjp
+        energy_fn = single_padded_energy_nl_cvjp
+
+    dt = 2.0 / AKMA_TIME_UNIT_FS
+    kT = temperature_k * BOLTZMANN_KCAL
+    gamma = 1.0 * AKMA_TIME_UNIT_FS * 1e-3
+
+    step_fn = make_langevin_step_nl_dynamic(dt, kT, gamma, energy_fn=energy_fn)
+
+    leaves, _ = jax.tree_util.tree_flatten(batch)
+    B = leaves[0].shape[0]
+
+    def produce_single_streaming_nl_dynamic(
+        args: tuple[PaddedSystem, Any, LangevinState, Any],
+    ) -> tuple[LangevinState, Any]:
+        sys, nbrs, s, batch_idx = args
+
+        def save_step(carry, save_idx):
+            s, nbrs = carry
+
+            def single_step(carry_inner, _):
+                s_inner, nbrs_inner = carry_inner
+                new_s, new_nbrs = step_fn(sys, s_inner, nbrs_inner)
+                return (new_s, new_nbrs), None
+
+            (s_next, nbrs_next), _ = lax.scan(
+                single_step, (s, nbrs), None, length=steps_per_save,
+            )
+
+            io_callback(
+                write_fn,
+                None,
+                s_next.positions,
+                batch_idx,
+                save_idx,
+            )
+
+            return (s_next, nbrs_next), None
+
+        (final_s, final_nbrs), _ = lax.scan(
+            save_step, (s, nbrs), jnp.arange(n_saves),
+        )
+        return final_s, final_nbrs
+
+    batch_indices = jnp.arange(B)
+
+    return safe_map_no_output(
+        produce_single_streaming_nl_dynamic,
+        (batch, batched_nbrs, state, batch_indices),
         chunk_size=chunk_size,
     )
 
