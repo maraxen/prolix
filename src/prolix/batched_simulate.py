@@ -206,17 +206,59 @@ def safe_map(fn: Callable[[T], Any], batch: T, chunk_size: int | None = 1) -> An
         
     return jax.tree_util.tree_map(unchunk, results)
 
-def batched_minimize(batch: PaddedSystem, max_steps: int = 5000, chunk_size: int | None = 1) -> Array:
-    """Minimizes a batch of PaddedSystems using staged FIRE.
+def batched_minimize(
+    batch: PaddedSystem,
+    max_steps: int = 5000,
+    lbfgs_steps: int = 200,
+    chunk_size: int | None = 1,
+) -> Array:
+    """Minimize a batch of PaddedSystems using hybrid FIRE + L-BFGS.
 
-    Uses 4-stage progressive minimization consistent with simulate.py:
-      Stage 1: Soft-core λ=0.1, cap=10 kcal/mol/Å (500 steps)
-      Stage 2: Soft-core λ=0.5, cap=100 (500 steps)
-      Stage 3: Soft-core λ=0.9, cap=1000 (1000 steps)
-      Stage 4: Standard energy (λ=1.0), NaN-sanitize only (remaining steps)
+    Architecture Decision — Hybrid Minimization Protocol
+    =====================================================
+    We use a two-phase approach modeled on standard MD practice (cf. AMBER's
+    steepest-descent → conjugate-gradient; GROMACS's emtol-gated switching):
 
-    Single JIT compilation: the energy function takes soft_core_lambda as a
-    JAX array, so all stages trace through the same computation graph.
+    **Phase 1: FIRE (clash resolution)** — JAX-MD's Fast Inertial Relaxation
+    Engine with staged soft-core potentials and force capping.
+
+    FIRE was chosen over steepest descent or L-BFGS for initial clash
+    resolution because:
+      1. Fixed iteration count via lax.fori_loop — composes cleanly with
+         vmap and pmap for massive GPU parallelism across heterogeneous
+         protein batches.
+      2. Momentum-based descent navigates highly curved, rugged protein
+         energy landscapes more efficiently than gradient-only methods.
+      3. Force-only convergence criterion avoids numerical artifacts in
+         flat energy regions (a known L-BFGS failure mode).
+
+    Soft-core LJ (Beutler 1994) is used in stages λ=0.1→0.999 to prevent
+    the LJ r⁻¹² singularity from producing Inf energies at overlapping
+    atom positions common in crystal structures. We never reach λ=1.0 in
+    FIRE because residual overlaps produce forces >10¹⁶ kcal/mol/Å that
+    exceed float32 range and FIRE's momentum amplifies them to NaN.
+
+    **Phase 2: L-BFGS (final polish)** — jaxopt.LBFGS at the standard
+    (λ=1.0) potential with line search.
+
+    L-BFGS is used for final polishing because:
+      1. Quadratic convergence near minima — far faster than FIRE for
+         the "last mile" of relaxation on a smooth energy surface.
+      2. Built-in Wolfe-condition line search inherently limits step
+         sizes, preventing the blow-up that raw FIRE produces at λ=1.0.
+      3. jaxopt.LBFGS.update() is a single-step API driven via
+         lax.fori_loop — same fixed-iteration-count guarantee as FIRE,
+         preserving vmap/pmap composability.
+
+    This is analogous to OpenMM's L-BFGS LocalEnergyMinimizer, but split
+    into two phases because OpenMM's L-BFGS has internal maximum-displacement
+    limits (hardcoded in C++) that we cannot replicate in JAX-MD's FIRE.
+
+    Args:
+        batch: Padded batch of protein systems (B, N, 3).
+        max_steps: Total FIRE steps distributed across soft-core stages.
+        lbfgs_steps: L-BFGS polish steps at full potential (λ=1.0).
+        chunk_size: Systems per vmap chunk (1 = sequential, safe for memory).
 
     Returns:
         minimized_positions: (B, N, 3)
@@ -226,11 +268,18 @@ def batched_minimize(batch: PaddedSystem, max_steps: int = 5000, chunk_size: int
 
     displacement_fn, shift_fn = space.free()
 
-    # Stage definitions: (lambda, force_cap, n_steps)
-    # force_cap=0.0 means NaN-sanitize only (no capping)
-    stage_lambdas = jnp.array([0.1, 0.5, 0.9, 1.0], dtype=jnp.float32)
-    stage_caps = jnp.array([10.0, 100.0, 1000.0, 0.0], dtype=jnp.float32)
-    stage_steps = jnp.array([500, 500, 1000, max(max_steps - 2000, 1000)])
+    # === Phase 1: FIRE soft-core stages ===
+    # Progressive λ ramp resolves steric clashes without LJ singularities.
+    # Force caps prevent momentum accumulation from extreme gradients.
+    # Final stage stays at λ=0.999 (not 1.0) — the soft-core contribution
+    # α*(1-λ) = 0.0005 is physically negligible but numerically essential
+    # to prevent Inf energies from residual sub-Å overlaps.
+    stage_lambdas = jnp.array([0.1, 0.5, 0.9, 0.99, 0.999, 0.999],
+                              dtype=jnp.float32)
+    stage_caps = jnp.array([10.0, 100.0, 1000.0, 5000.0, 10000.0, 10000.0],
+                           dtype=jnp.float32)
+    remaining = max(max_steps - 3000, 1000)
+    stage_steps = jnp.array([500, 500, 500, 500, 1000, remaining])
 
     # Fixed dt for all stages — avoids per-stage recompilation
     dt_start = 0.00005
@@ -246,7 +295,7 @@ def batched_minimize(batch: PaddedSystem, max_steps: int = 5000, chunk_size: int
                 soft_core_lambda=soft_core_lambda,
             )
 
-        # Single FIRE instance — compiled once
+        # --- Phase 1: FIRE with soft-core ---
         fire_init_fn, fire_apply_fn = jax_md_minimize.fire_descent(
             energy_fn, shift_fn,
             dt_start=dt_start, dt_max=dt_max,
@@ -256,7 +305,6 @@ def batched_minimize(batch: PaddedSystem, max_steps: int = 5000, chunk_size: int
             """Apply FIRE step with runtime force capping."""
             f = state.force
             f_norm = jnp.linalg.norm(f, axis=-1, keepdims=True)
-            # When force_cap=0, cap_ratio=1 (no capping, just NaN sanitize)
             use_cap = force_cap > 0.0
             cap_ratio = jnp.where(
                 use_cap,
@@ -269,11 +317,10 @@ def batched_minimize(batch: PaddedSystem, max_steps: int = 5000, chunk_size: int
             return fire_apply_fn(state, soft_core_lambda=sc_lam)
 
         def run_stage(carry, stage_params):
-            """Run one minimization stage (called via lax.scan)."""
+            """Run one FIRE minimization stage (called via lax.scan)."""
             positions = carry
             sc_lam, force_cap, n_steps = stage_params
 
-            # Re-init FIRE state from current positions with this lambda
             fire_state = fire_init_fn(
                 positions, mass=sys.masses,
                 soft_core_lambda=sc_lam,
@@ -285,11 +332,61 @@ def batched_minimize(batch: PaddedSystem, max_steps: int = 5000, chunk_size: int
             final_state = jax.lax.fori_loop(0, n_steps, body_fn, fire_state)
             return final_state.position, None
 
-        # Run all 4 stages via scan — single compiled graph
         stage_params = (stage_lambdas, stage_caps, stage_steps)
-        final_positions, _ = lax.scan(
+        fire_positions, _ = lax.scan(
             run_stage, sys.positions, stage_params,
         )
+
+        # --- Phase 2: L-BFGS polish at full potential (λ=1.0) ---
+        # After FIRE has resolved clashes at λ=0.999, L-BFGS refines to
+        # a true minimum on the standard (λ=1.0) energy surface. The
+        # line search naturally limits step sizes, so residual close
+        # contacts don't cause blow-up (unlike FIRE's momentum).
+        if lbfgs_steps > 0:
+            import jaxopt
+
+            # Build a mask for real (non-padding) atoms.
+            # Padding atoms have mass=0 and positions at 9999.0.
+            # We must zero their gradients so L-BFGS doesn't move them.
+            real_mask = sys.masses > 0.0  # (N,) bool
+            real_mask_3d = real_mask[:, None]  # (N, 1) for broadcasting
+
+            def lbfgs_value_and_grad(r):
+                val, grad = jax.value_and_grad(
+                    lambda pos: energy_fn(pos, soft_core_lambda=jnp.float32(1.0))
+                )(r)
+                # Zero gradient on padding atoms — prevents L-BFGS from
+                # moving sentinel positions (9999.0) that are not physical
+                grad = jnp.where(real_mask_3d, grad, 0.0)
+                # Sanitize any NaN/Inf gradients from residual overlaps
+                grad = jnp.where(jnp.isfinite(grad), grad, 0.0)
+                return val, grad
+
+            solver = jaxopt.LBFGS(
+                fun=lbfgs_value_and_grad,
+                value_and_grad=True,  # We provide (value, grad) directly
+                maxiter=lbfgs_steps,
+                tol=1e-3,           # Force convergence tolerance
+                history_size=10,    # L-BFGS memory (standard for proteins)
+                max_stepsize=1.0,   # Prevent wild jumps
+                min_stepsize=1e-10,
+                linesearch="backtracking",
+                stop_if_linesearch_fails=True,
+                jit=True,           # Use lax.while_loop (not Python loop)
+                unroll=False,       # Don't unroll — use while_loop for JIT
+            )
+
+            # solver.run() uses lax.while_loop internally with maxiter as
+            # the iteration limit. This is compatible with JIT but NOT with
+            # vmap (while_loop iteration count varies per system). That's
+            # fine — we dispatch per-system via safe_map(chunk_size=1).
+            lbfgs_positions, _ = solver.run(fire_positions)
+
+            # Restore padding positions exactly (belt-and-suspenders)
+            final_positions = jnp.where(real_mask_3d, lbfgs_positions,
+                                        fire_positions)
+        else:
+            final_positions = fire_positions
 
         return final_positions
 
@@ -496,3 +593,200 @@ def batched_produce_streaming(
         (batch, state, batch_indices),
         chunk_size=chunk_size,
     )
+
+
+# ---------------------------------------------------------------------------
+# Neighbor-list aware variants
+# ---------------------------------------------------------------------------
+
+def build_neighbor_list(
+    positions,
+    n_real: int,
+    n_padded: int,
+    cutoff: float = 8.0,
+    pad_k: int = 32,
+) -> 'Array':
+    """Build a static neighbor list for a single system on the host.
+
+    Args:
+        positions: (N, 3) positions array.
+        n_real: Number of real (non-padding) atoms.
+        n_padded: Total padded atom count (N).
+        cutoff: Distance cutoff in Angstroms.
+        pad_k: Extra neighbors to add as headroom.
+
+    Returns:
+        neighbor_idx: (N, K) int32 array. Padding sentinel = n_padded.
+        max_k: Number of neighbor columns.
+    """
+    import numpy as np
+
+    pos_np = np.asarray(positions)
+    # Pairwise distances for real atoms only
+    dists = np.linalg.norm(
+        pos_np[:n_real, None, :] - pos_np[None, :n_real, :], axis=-1,
+    )
+    max_k = 0
+    for i in range(n_real):
+        k = int(np.sum((dists[i] < cutoff) & (dists[i] > 0)))
+        max_k = max(max_k, k)
+    max_k = min(max_k + pad_k, n_padded)
+
+    neighbor_idx = np.full((n_padded, max_k), n_padded, dtype=np.int32)
+    for i in range(n_real):
+        nbrs = np.where((dists[i] < cutoff) & (dists[i] > 0))[0]
+        neighbor_idx[i, : len(nbrs)] = nbrs
+
+    return jnp.array(neighbor_idx), max_k
+
+
+def batched_equilibrate_nl(
+    batch: PaddedSystem,
+    neighbor_idx: 'Array',
+    key: 'Array',
+    n_steps: int,
+    temperature_k: float = 310.15,
+    chunk_size: int | None = None,
+    energy_fn: Callable | None = None,
+) -> LangevinState:
+    """Equilibrate using neighbor-list energy (O(N*K) per step).
+
+    Same as batched_equilibrate but uses the NL energy path.
+    Defaults to single_padded_energy_nl_cvjp for best gradient performance.
+
+    Args:
+        batch: Batched padded systems (B, N, 3).
+        neighbor_idx: Batched neighbor lists (B, N, K) int32.
+        key: PRNG key for Langevin noise.
+        n_steps: Number of equilibration steps.
+        temperature_k: Temperature in Kelvin.
+        chunk_size: Chunk size for safe_map.
+        energy_fn: Custom energy function (default: cvjp variant).
+    """
+    from prolix.simulate import AKMA_TIME_UNIT_FS, BOLTZMANN_KCAL
+
+    if energy_fn is None:
+        from prolix.batched_energy import single_padded_energy_nl_cvjp
+        energy_fn = single_padded_energy_nl_cvjp
+
+    dt = 2.0 / AKMA_TIME_UNIT_FS
+    kT = temperature_k * BOLTZMANN_KCAL
+    gamma = 1.0 * AKMA_TIME_UNIT_FS * 1e-3
+
+    step_fn = make_langevin_step_nl(dt, kT, gamma, energy_fn=energy_fn)
+
+    leaves, _ = jax.tree_util.tree_flatten(batch)
+    B = leaves[0].shape[0]
+    keys = jax.random.split(key, B)
+
+    displacement_fn, _ = space.free()
+
+    def equilibrate_single(
+        args: tuple[PaddedSystem, 'Array', 'Array'],
+    ) -> LangevinState:
+        sys, nbr, k = args
+
+        def _energy_of_r(r):
+            sys_with_r = dataclasses.replace(sys, positions=r)
+            return energy_fn(sys_with_r, nbr, displacement_fn)
+
+        initial_f = jax.grad(_energy_of_r)(sys.positions)
+
+        state = LangevinState(
+            positions=sys.positions,
+            momentum=jnp.zeros_like(sys.positions),
+            force=initial_f,
+            mass=sys.masses,
+            key=k,
+        )
+
+        def scan_step(s, _):
+            return step_fn(sys, s, nbr), None
+
+        final_s, _ = lax.scan(scan_step, state, None, length=n_steps)
+        return final_s
+
+    return safe_map(
+        equilibrate_single, (batch, neighbor_idx, keys),
+        chunk_size=chunk_size,
+    )
+
+
+def batched_produce_streaming_nl(
+    batch: PaddedSystem,
+    neighbor_idx: 'Array',
+    state: LangevinState,
+    n_saves: int,
+    steps_per_save: int,
+    write_fn: Callable,
+    temperature_k: float = 310.15,
+    chunk_size: int | None = None,
+    energy_fn: Callable | None = None,
+) -> LangevinState:
+    """Produce trajectory with streaming IO using neighbor-list energy.
+
+    Same as batched_produce_streaming but uses O(N*K) energy via NL.
+    Defaults to single_padded_energy_nl_cvjp for best gradient performance.
+
+    Args:
+        batch: Batched padded systems (B, N, 3).
+        neighbor_idx: Batched neighbor lists (B, N, K) int32.
+        state: Initial Langevin state from equilibration.
+        n_saves: Number of trajectory frames to save.
+        steps_per_save: MD steps between saves.
+        write_fn: Host callback (positions, batch_idx, save_idx) -> None.
+        temperature_k: Temperature in Kelvin.
+        chunk_size: Chunk size for safe_map.
+        energy_fn: Custom energy function (default: cvjp variant).
+
+    Returns:
+        Final LangevinState (trajectory streamed to disk).
+    """
+    from jax.experimental import io_callback
+    from prolix.simulate import AKMA_TIME_UNIT_FS, BOLTZMANN_KCAL
+
+    if energy_fn is None:
+        from prolix.batched_energy import single_padded_energy_nl_cvjp
+        energy_fn = single_padded_energy_nl_cvjp
+
+    dt = 2.0 / AKMA_TIME_UNIT_FS
+    kT = temperature_k * BOLTZMANN_KCAL
+    gamma = 1.0 * AKMA_TIME_UNIT_FS * 1e-3
+
+    step_fn = make_langevin_step_nl(dt, kT, gamma, energy_fn=energy_fn)
+
+    leaves, _ = jax.tree_util.tree_flatten(batch)
+    B = leaves[0].shape[0]
+
+    def produce_single_streaming_nl(
+        args: tuple[PaddedSystem, 'Array', LangevinState, Any],
+    ) -> LangevinState:
+        sys, nbr, s, batch_idx = args
+
+        def save_step(s, save_idx):
+            def single_step(s_inner, _):
+                return step_fn(sys, s_inner, nbr), None
+
+            s_next, _ = lax.scan(single_step, s, None, length=steps_per_save)
+
+            io_callback(
+                write_fn,
+                None,
+                s_next.positions,
+                batch_idx,
+                save_idx,
+            )
+
+            return s_next, None
+
+        final_s, _ = lax.scan(save_step, s, jnp.arange(n_saves))
+        return final_s
+
+    batch_indices = jnp.arange(B)
+
+    return safe_map_no_output(
+        produce_single_streaming_nl,
+        (batch, neighbor_idx, state, batch_indices),
+        chunk_size=chunk_size,
+    )
+

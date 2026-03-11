@@ -22,6 +22,7 @@ dependencies = [
     "py2Dmol>=1.5.1",
     "matplotlib>=3.10.7",
     "imageio>=2.37.2",
+    "jaxopt",
 ]
 
 [tool.setuptools.packages.find]
