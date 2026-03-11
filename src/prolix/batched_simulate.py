@@ -98,6 +98,7 @@ def make_langevin_step(dt: float, kT: float, gamma: float) -> Callable[[PaddedSy
 
 def make_langevin_step_nl(
     dt: float, kT: float, gamma: float,
+    energy_fn: Callable | None = None,
 ) -> Callable:
     """Create a BAOAB Langevin step using neighbor-list energy.
 
@@ -107,10 +108,16 @@ def make_langevin_step_nl(
     The neighbor_idx is passed as a separate argument (not in LangevinState)
     since it's updated less frequently than the dynamics state.
 
+    Args:
+        energy_fn: Optional custom energy function. If provided, used instead
+            of single_padded_energy_nl. Useful for jax.checkpoint wrapping.
+
     Returns:
         step_fn(padded_sys, state, neighbor_idx) -> LangevinState
     """
-    from prolix.batched_energy import single_padded_energy_nl
+    if energy_fn is None:
+        from prolix.batched_energy import single_padded_energy_nl
+        energy_fn = single_padded_energy_nl
 
     # Precompute constants
     c1 = jnp.exp(-gamma * dt)
@@ -123,13 +130,13 @@ def make_langevin_step_nl(
         state: LangevinState,
         neighbor_idx: 'Array',
     ) -> LangevinState:
-        def energy_fn(r):
+        def _energy_of_r(r):
             sys_with_r = dataclasses.replace(padded_sys, positions=r)
-            return single_padded_energy_nl(
+            return energy_fn(
                 sys_with_r, neighbor_idx, displacement_fn,
             )
 
-        force_fn = jax.grad(lambda r: energy_fn(r))
+        force_fn = jax.grad(lambda r: _energy_of_r(r))
 
         r, p, f, m, key = (
             state.positions, state.momentum, state.force,
