@@ -346,3 +346,94 @@ class TestNLLangevinStep:
             "NL step momenta must be finite"
         assert jnp.all(jnp.isfinite(new_state.force)), \
             "NL step forces must be finite"
+
+
+# ── Custom VJP tests ────────────────────────────────────────────────────────
+
+
+class TestCustomVJP:
+    """Tests that custom VJP LJ matches autodiff gradients."""
+
+    def test_cvjp_gradient_matches_autodiff(self):
+        """Custom VJP LJ gradient should match autodiff LJ gradient."""
+        from prolix.batched_energy import (
+            _lj_energy_neighbor_list,
+            _make_lj_energy_nl_cvjp,
+        )
+
+        sys = _make_toy_system(n_atoms=32)
+        neighbor_idx = _build_dense_neighbor_idx(32)
+
+        # Autodiff gradient
+        grad_auto = jax.grad(
+            lambda r: _lj_energy_neighbor_list(
+                r, sys["sigmas"], sys["epsilons"], neighbor_idx,
+            )
+        )(sys["positions"])
+
+        # Custom VJP gradient
+        lj_cvjp = _make_lj_energy_nl_cvjp(neighbor_idx)
+        grad_cvjp = jax.grad(
+            lambda r: lj_cvjp(r, sys["sigmas"], sys["epsilons"])
+        )(sys["positions"])
+
+        np.testing.assert_allclose(
+            np.array(grad_auto), np.array(grad_cvjp), rtol=1e-4,
+            err_msg="Custom VJP gradient must match autodiff gradient",
+        )
+
+    def test_cvjp_energy_fn_produces_finite_step(self):
+        """single_padded_energy_nl_cvjp should produce a finite Langevin step."""
+        from prolix.batched_energy import single_padded_energy_nl_cvjp
+        from prolix.batched_simulate import make_langevin_step_nl, LangevinState
+        from prolix.padding import PaddedSystem
+
+        n = 16
+        sys_data = _make_toy_system(n)
+
+        padded = PaddedSystem(
+            positions=sys_data["positions"],
+            charges=sys_data["charges"],
+            sigmas=sys_data["sigmas"],
+            epsilons=sys_data["epsilons"],
+            radii=sys_data["radii"],
+            scaled_radii=sys_data["scaled_radii"],
+            masses=jnp.ones(n) * 12.0,
+            atom_mask=sys_data["atom_mask"],
+            bonds=jnp.zeros((0, 2), dtype=jnp.int32),
+            bond_params=jnp.zeros((0, 2)),
+            bond_mask=jnp.zeros(0, dtype=jnp.bool_),
+            angles=jnp.zeros((0, 3), dtype=jnp.int32),
+            angle_params=jnp.zeros((0, 2)),
+            angle_mask=jnp.zeros(0, dtype=jnp.bool_),
+            dihedrals=jnp.zeros((0, 4), dtype=jnp.int32),
+            dihedral_params=jnp.zeros((0, 3)),
+            dihedral_mask=jnp.zeros(0, dtype=jnp.bool_),
+            impropers=jnp.zeros((0, 4), dtype=jnp.int32),
+            improper_params=jnp.zeros((0, 3)),
+            improper_mask=jnp.zeros(0, dtype=jnp.bool_),
+            cmap_torsions=None, cmap_mask=None, cmap_coeffs=None,
+            n_real_atoms=jnp.array(n), n_padded_atoms=n, bucket_size=n,
+        )
+
+        neighbor_idx = _build_dense_neighbor_idx(n)
+        key = jax.random.PRNGKey(0)
+        state = LangevinState(
+            positions=sys_data["positions"],
+            momentum=jnp.zeros((n, 3)),
+            force=jnp.zeros((n, 3)),
+            mass=jnp.ones(n) * 12.0,
+            key=key,
+        )
+
+        step_fn = make_langevin_step_nl(
+            0.001, 0.6, 1.0,
+            energy_fn=single_padded_energy_nl_cvjp,
+        )
+        new_state = step_fn(padded, state, neighbor_idx)
+
+        assert jnp.all(jnp.isfinite(new_state.positions)), \
+            "CVJP step positions must be finite"
+        assert jnp.all(jnp.isfinite(new_state.force)), \
+            "CVJP step forces must be finite"
+

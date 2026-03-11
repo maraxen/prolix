@@ -300,6 +300,150 @@ def make_batched_energy_fn(displacement_fn: space.DisplacementFn, implicit_solve
     return jax.vmap(lambda sys: single_padded_energy(sys, displacement_fn, implicit_solvent))
 
 
+# ==============================================================================
+# CUSTOM VJP LJ ENERGY — avoids scatter-add in backward pass
+# ==============================================================================
+
+def _make_lj_energy_nl_cvjp(neighbor_idx, soft_core_lambda=jnp.float32(1.0)):
+    """Factory creating a custom-VJP LJ energy function.
+
+    Captures neighbor_idx via closure (integer, non-differentiable).
+    Returns a function f(r, sigmas, epsilons) → scalar energy.
+
+    Key insight: with a symmetric NL and the 0.5 factor in the forward pass,
+    the gradient w.r.t. r_i is simply the sum of pair-force vectors from
+    row i of the NL. No scatter-add to other atoms is needed because the
+    (j,i) pair in the NL already contributes the reverse force.
+
+    This eliminates the expensive gather→scatter-add pattern that standard
+    JAX autodiff generates for r[safe_idx] operations.
+    """
+    N_sentinel = neighbor_idx.shape[0]  # = N (padded atom count)
+
+    def _compute_intermediates(r, sigmas, epsilons):
+        """Shared forward computation for both energy and gradient."""
+        safe_idx = jnp.minimum(neighbor_idx, N_sentinel - 1)
+        r_j = r[safe_idx]                    # (N, K, 3)
+        r_i = r[:, None, :]                  # (N, 1, 3)
+        dr = r_i - r_j                       # (N, K, 3)
+        dist = jnp.sqrt(jnp.sum(dr ** 2, axis=-1) + 1e-12)  # (N, K)
+
+        sigma_ij = 0.5 * (sigmas[:, None] + sigmas[safe_idx])
+        epsilon_ij = jnp.sqrt(epsilons[:, None] * epsilons[safe_idx])
+
+        lam = jnp.float32(soft_core_lambda)
+        alpha = jnp.float32(0.5)
+        soft_term = alpha * jnp.maximum(jnp.float32(1.0) - lam, jnp.float32(1e-8))
+        r_over_sig = dist / jnp.maximum(sigma_ij, jnp.float32(1e-8))
+        r6 = r_over_sig ** 6
+        denom = soft_term + r6 + jnp.float32(1e-12)
+
+        mask = neighbor_idx < N_sentinel  # (N, K)
+        return dr, dist, sigma_ij, epsilon_ij, lam, denom, mask
+
+    @jax.custom_vjp
+    def lj_energy_cvjp(r, sigmas, epsilons):
+        dr, dist, sigma_ij, epsilon_ij, lam, denom, mask = \
+            _compute_intermediates(r, sigmas, epsilons)
+        e_pair = jnp.float32(4.0) * epsilon_ij * lam * (
+            jnp.float32(1.0) / (denom * denom)
+            - jnp.float32(1.0) / denom
+        )
+        e_pair = jnp.where(mask, e_pair, 0.0)
+        return 0.5 * jnp.sum(e_pair)
+
+    def _fwd(r, sigmas, epsilons):
+        energy = lj_energy_cvjp(r, sigmas, epsilons)
+        # Save minimal residuals for backward (recompute intermediates)
+        return energy, (r, sigmas, epsilons)
+
+    def _bwd(res, g):
+        r, sigmas, epsilons = res
+        dr, dist, sigma_ij, epsilon_ij, lam, denom, mask = \
+            _compute_intermediates(r, sigmas, epsilons)
+
+        # Analytical derivative: de_pair/d(dist)
+        # e_pair = 4ελ(1/denom² - 1/denom)
+        # d(denom)/d(dist) = 6·dist⁵/σ_ij⁶
+        sigma_ij6 = jnp.maximum(sigma_ij ** 6, jnp.float32(1e-48))
+        ddenom_ddist = jnp.float32(6.0) * dist ** 5 / sigma_ij6
+        de_ddist = jnp.float32(4.0) * epsilon_ij * lam * (
+            jnp.float32(1.0) / (denom ** 2)
+            - jnp.float32(2.0) / (denom ** 3)
+        ) * ddenom_ddist
+
+        de_ddist = jnp.where(mask, de_ddist, 0.0)
+
+        # Gradient: de/d(r_i) = de/d(dist) · (r_i - r_j) / dist
+        # Sum over K neighbors. No 0.5 factor needed because the
+        # symmetric NL doubles the contribution, cancelling the 0.5.
+        unit_dr = dr / (dist[..., None] + 1e-12)  # (N, K, 3)
+        pair_grad = de_ddist[..., None] * unit_dr   # (N, K, 3)
+        grad_r = jnp.sum(pair_grad, axis=1)         # (N, 3)
+
+        return (g * grad_r, jnp.zeros_like(sigmas), jnp.zeros_like(epsilons))
+
+    lj_energy_cvjp.defvjp(_fwd, _bwd)
+    return lj_energy_cvjp
+
+
+def single_padded_energy_nl_cvjp(
+    sys: PaddedSystem,
+    neighbor_idx: 'Array',
+    displacement_fn: space.DisplacementFn,
+    implicit_solvent: bool = True,
+    soft_core_lambda: 'Array' = jnp.array(1.0),
+) -> 'Array':
+    """Like single_padded_energy_nl but with custom VJP for LJ + checkpoint for GB.
+
+    This variant:
+    1. Uses analytical LJ forces via custom_vjp (no scatter-add)
+    2. Wraps GB in jax.checkpoint (recompute forward during backward)
+
+    Together this minimizes both compute and memory in the gradient pass.
+    """
+    r = sys.positions
+
+    # Bonded terms (unchanged — already O(N))
+    e_bond = _bond_energy_masked(r, sys.bonds, sys.bond_params, sys.bond_mask, displacement_fn)
+    e_angle = _angle_energy_masked(r, sys.angles, sys.angle_params, sys.angle_mask, displacement_fn)
+    e_dih = _dihedral_energy_masked(r, sys.dihedrals, sys.dihedral_params, sys.dihedral_mask, displacement_fn)
+    e_imp = _dihedral_energy_masked(r, sys.impropers, sys.improper_params, sys.improper_mask, displacement_fn)
+    e_cmap = _cmap_energy_masked(r, sys.cmap_torsions, sys.cmap_mask, sys.cmap_coeffs, displacement_fn)
+
+    # LJ with custom VJP (analytical forces, no scatter-add)
+    lj_fn = _make_lj_energy_nl_cvjp(neighbor_idx, soft_core_lambda)
+    e_lj = lj_fn(r, sys.sigmas, sys.epsilons)
+
+    if implicit_solvent:
+        from prolix.physics.generalized_born import (
+            compute_gb_energy_neighbor_list,
+            compute_ace_nonpolar_energy,
+        )
+        # Checkpoint GB to save memory (recompute forward during backward)
+        @jax.checkpoint
+        def _gb_energy(positions, charges, radii):
+            e_gb, born_radii = compute_gb_energy_neighbor_list(
+                positions=positions,
+                charges=charges,
+                radii=radii,
+                neighbor_idx=neighbor_idx,
+                dielectric_offset=0.09,
+            )
+            e_np = compute_ace_nonpolar_energy(radii, born_radii)
+            e_np = jnp.sum(e_np * sys.atom_mask)
+            return e_gb + e_np
+
+        e_solv = _gb_energy(r, sys.charges, sys.radii)
+        e_elec = e_solv  # GB includes electrostatics
+    else:
+        e_elec = _coulomb_energy_masked(r, sys.charges, sys.atom_mask, displacement_fn)
+        e_solv = 0.0
+
+    return e_bond + e_angle + e_dih + e_imp + e_cmap + e_lj + e_elec + e_solv
+
+
+
 def single_padded_energy_nl(
     sys: PaddedSystem,
     neighbor_idx: 'Array',
