@@ -753,7 +753,8 @@ def make_langevin_step_nl_dynamic(
         r = r + 0.5 * dt * p / m[:, None]
 
         # Update neighbor list with new positions (GPU, inside JIT)
-        new_nbrs = nbrs.update(r)
+        # Cast to float32 to match JAX-MD's internal lax.cond branch types
+        new_nbrs = nbrs.update(r.astype(jnp.float32))
         # Re-extract idx for force calculation with updated neighbors
         new_neighbor_idx = new_nbrs.idx
 
