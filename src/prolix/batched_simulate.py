@@ -169,6 +169,65 @@ def make_langevin_step_nl(
 
     return step_fn
 
+def make_langevin_step_nl_fused(
+    dt: float, kT: float, gamma: float,
+) -> Callable:
+    """Create a BAOAB Langevin step using the fused analytical energy+force kernel.
+
+    Bypasses jax.grad entirely for the dominant non-bonded terms, 
+    reducing VRAM bandwidth and yielding massive speedups.
+    """
+    from prolix.fused_energy import fused_energy_and_forces_nl
+
+    # Precompute constants
+    c1 = jnp.exp(-gamma * dt)
+    c2 = jnp.sqrt(1.0 - jnp.exp(-2.0 * gamma * dt))
+
+    displacement_fn, _ = space.free()
+
+    def step_fn(
+        padded_sys: PaddedSystem,
+        state: LangevinState,
+        neighbor_idx: 'Array',
+    ) -> LangevinState:
+        def force_fn(r):
+            sys_with_r = dataclasses.replace(padded_sys, positions=r)
+            _e, f = fused_energy_and_forces_nl(
+                sys_with_r, neighbor_idx, displacement_fn,
+            )
+            return f
+
+        r, p, f, m, key = (
+            state.positions, state.momentum, state.force,
+            state.mass, state.key,
+        )
+
+        # B
+        p = p - 0.5 * dt * f
+
+        # A
+        r = r + 0.5 * dt * p / m[:, None]
+
+        # O
+        key, subkey = jax.random.split(key)
+        noise = jax.random.normal(subkey, p.shape)
+        p = c1 * p + jnp.sqrt(m[:, None] * kT) * c2 * noise
+
+        # A
+        r = r + 0.5 * dt * p / m[:, None]
+
+        # B
+        f = force_fn(r)
+        p = p - 0.5 * dt * f
+
+        r = r.astype(state.positions.dtype)
+        p = p.astype(state.momentum.dtype)
+        f = f.astype(state.force.dtype)
+
+        return LangevinState(r, p, f, m, key)
+
+    return step_fn
+
 def safe_map(fn: Callable[[T], Any], batch: T, chunk_size: int | None = 1) -> Any:
     """Safely map a function over a batch, falling back to sequential execution for memory.
     

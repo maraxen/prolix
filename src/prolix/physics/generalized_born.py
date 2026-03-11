@@ -236,19 +236,21 @@ def compute_pair_integral(distance: Array, radius_i: Array, radius_j: Array) -> 
   # L = max(or1, abs(r - sr2))
   D = jnp.abs(distance - radius_j)
   L = jnp.maximum(radius_i, D)
+  L_safe = jnp.maximum(L, 1e-4)  # prevent log(0) and 1/0
 
   # U = r + sr2
   U = distance + radius_j
+  U_safe = jnp.maximum(U, 1e-4)  # prevent log(0) and 1/0
 
   # Safe distance for division
-  r_safe = jnp.maximum(distance, 1e-8)
+  r_safe = jnp.maximum(distance, 1e-4)
 
   # OpenMM formula: 0.5*(1/L-1/U+0.25*(r-sr2^2/r)*(1/(U^2)-1/(L^2))+0.5*log(L/U)/r)
-  inv_L = 1.0 / L
-  inv_U = 1.0 / U
+  inv_L = 1.0 / L_safe
+  inv_U = 1.0 / U_safe
 
   term1 = 0.5 * (inv_L - inv_U)
-  term2 = 0.25 * jnp.log(L / U) / r_safe
+  term2 = 0.25 * jnp.log(L_safe / U_safe) / r_safe
 
   sr2_sq = radius_j**2
   term3 = 0.125 * (distance - sr2_sq / r_safe) * (inv_U**2 - inv_L**2)
@@ -300,7 +302,7 @@ def compute_born_radii_neighbor_list(
 
   mask_neighbors = neighbor_idx < N  # Mask padding
 
-  offset_radii = radii - dielectric_offset
+  offset_radii = jnp.maximum(radii - dielectric_offset, 1e-4)
 
   # Use scaled_radii for descreening if provided (matches dense path)
   radii_j_raw = scaled_radii if scaled_radii is not None else radii
@@ -320,9 +322,11 @@ def compute_born_radii_neighbor_list(
     ALPHA_OBC * scaled_integral - BETA_OBC * scaled_integral**2 + GAMMA_OBC * scaled_integral**3
   )
   # Match dense path formula exactly: 1/or - tanh(arg)/radii
-  inv_born_radii = 1.0 / offset_radii - jnp.tanh(tanh_argument) / radii
+  inv_born_radii = 1.0 / offset_radii - jnp.tanh(tanh_argument) / jnp.maximum(radii, 1e-4)
 
-  return 1.0 / inv_born_radii
+  # Prevent negative born radii or division by zero
+  inv_born_radii_safe = jnp.maximum(inv_born_radii, 1e-4)
+  return 1.0 / inv_born_radii_safe
 
 
 def compute_gb_energy_neighbor_list(

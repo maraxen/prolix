@@ -70,7 +70,7 @@ def _dihedral_energy_masked(r: Array, indices: Array, params: Array, mask: Array
     b1 = jax.vmap(displacement_fn)(r_k, r_j)
     b2 = jax.vmap(displacement_fn)(r_l, r_k)
 
-    b1_norm = jnp.linalg.norm(b1, axis=-1, keepdims=True) + 1e-8
+    b1_norm = jnp.sqrt(jnp.sum(b1**2, axis=-1, keepdims=True) + 1e-12)
     b1_unit = b1 / b1_norm
 
     v = b0 - jnp.sum(b0 * b1_unit, axis=-1, keepdims=True) * b1_unit
@@ -78,7 +78,12 @@ def _dihedral_energy_masked(r: Array, indices: Array, params: Array, mask: Array
 
     x = jnp.sum(v * w, axis=-1)
     y = jnp.sum(jnp.cross(b1_unit, v) * w, axis=-1)
-    phi = jnp.arctan2(y, x)
+    
+    # Pad safe: Prevent arctan2(0,0) which has a NaN gradient
+    safe_x = jnp.where(mask == 0, 1.0, x)
+    safe_y = jnp.where(mask == 0, 0.0, y)
+    
+    phi = jnp.arctan2(safe_y, safe_x)
     phi = phi - jnp.pi
     
     periodicity = params[:, 0]
