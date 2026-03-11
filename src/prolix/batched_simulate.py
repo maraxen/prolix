@@ -116,8 +116,8 @@ def make_langevin_step_nl(
         step_fn(padded_sys, state, neighbor_idx) -> LangevinState
     """
     if energy_fn is None:
-        from prolix.batched_energy import single_padded_energy_nl
-        energy_fn = single_padded_energy_nl
+        from prolix.batched_energy import single_padded_energy_nl_cvjp
+        energy_fn = single_padded_energy_nl_cvjp
 
     # Precompute constants
     c1 = jnp.exp(-gamma * dt)
