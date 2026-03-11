@@ -727,7 +727,7 @@ def make_langevin_step_nl_dynamic(
         state: LangevinState,
         nbrs: Any,
     ) -> tuple[LangevinState, Any]:
-        # Extract raw idx for energy functions (they don't need the full object)
+        # Use current neighbor list for this step's energy/forces
         neighbor_idx = nbrs.idx
 
         def _energy_of_r(r):
@@ -752,25 +752,18 @@ def make_langevin_step_nl_dynamic(
         # A
         r = r + 0.5 * dt * p / m[:, None]
 
-        # Update neighbor list with new positions (GPU, inside JIT)
-        # Cast to float32 to match JAX-MD's internal lax.cond branch types
-        new_nbrs = nbrs.update(r.astype(jnp.float32))
-        # Re-extract idx for force calculation with updated neighbors
-        new_neighbor_idx = new_nbrs.idx
-
-        def _energy_of_r_updated(r_inner):
-            sys_with_r = dataclasses.replace(padded_sys, positions=r_inner)
-            return energy_fn(sys_with_r, new_neighbor_idx, displacement_fn)
-
-        force_fn_updated = jax.grad(lambda r_inner: _energy_of_r_updated(r_inner))
-
-        # B
-        f = force_fn_updated(r)
+        # B — compute forces with CURRENT neighbor list
+        f = force_fn(r)
         p = p - 0.5 * dt * f
 
         r = r.astype(state.positions.dtype)
         p = p.astype(state.momentum.dtype)
         f = f.astype(state.force.dtype)
+
+        # Update neighbor list AFTER force computation.
+        # The updated NL will be used by the NEXT step.
+        # Cast to float32 to match JAX-MD's internal lax.cond branch types.
+        new_nbrs = nbrs.update(r.astype(jnp.float32))
 
         new_state = LangevinState(r, p, f, m, key)
         return new_state, new_nbrs
