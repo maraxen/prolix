@@ -244,7 +244,19 @@ def safe_map(fn: Callable[[T], Any], batch: T, chunk_size: int | None = 1) -> An
     B = leaves[0].shape[0]
     
     if B % chunk_size != 0:
-        chunk_size = 1  # Fallback
+        # Find largest divisor of B that is <= chunk_size
+        import logging
+        _log = logging.getLogger("batched_simulate")
+        original = chunk_size
+        for cs in range(chunk_size, 0, -1):
+            if B % cs == 0:
+                chunk_size = cs
+                break
+        _log.warning(
+            "safe_map: B=%d not divisible by chunk_size=%d, "
+            "using largest divisor %d instead",
+            B, original, chunk_size,
+        )
         
     num_chunks = max(1, B // chunk_size)
     
@@ -547,7 +559,18 @@ def safe_map_no_output(
     B = leaves[0].shape[0]
 
     if B % chunk_size != 0:
-        chunk_size = 1
+        import logging
+        _log = logging.getLogger("batched_simulate")
+        original = chunk_size
+        for cs in range(chunk_size, 0, -1):
+            if B % cs == 0:
+                chunk_size = cs
+                break
+        _log.warning(
+            "safe_map_no_output: B=%d not divisible by chunk_size=%d, "
+            "using largest divisor %d instead",
+            B, original, chunk_size,
+        )
 
     num_chunks = max(1, B // chunk_size)
 
