@@ -778,6 +778,14 @@ def make_energy_fn(
     # We subtract this correction
     return -e_corr
 
+  def position_restraint_energy(
+    r: Array, r_ref: Array, k_restraint: Array, mask: Array
+  ) -> Array:
+    """Harmonic position restraint: 0.5 * k * |r - r_ref|^2."""
+    dr = r - r_ref
+    dist_sq = jnp.sum(dr**2, axis=-1)
+    return 0.5 * k_restraint * jnp.sum(dist_sq * mask)
+
   # Total Energy Function
   # -------------------------------------------------------------------------
   def total_energy(r: Array, neighbor: partition.NeighborList | None = None, **kwargs) -> Array:
@@ -800,6 +808,14 @@ def make_energy_fn(
     e_elec = e_gb + e_direct
     e_np = compute_nonpolar(r, born_radii, neighbor_idx)
 
+    # Optional position restraints (used during minimization Stage 0)
+    e_restraint = 0.0
+    r_ref = kwargs.get("restraint_ref", None)
+    k_res = kwargs.get("k_restraint", None)
+    res_mask = kwargs.get("restraint_mask", None)
+    if r_ref is not None and k_res is not None and res_mask is not None:
+      e_restraint = position_restraint_energy(r, r_ref, k_res, res_mask)
+
     if use_pbc and box is not None:
       e_pme_corr = compute_pme_exceptions(r)
       e_elec += e_pme_corr
@@ -814,7 +830,18 @@ def make_energy_fn(
       )
       e_lj += e_lj_lrc
 
-    return e_bond + e_angle + e_ub + e_dihedral + e_improper + e_cmap + e_lj + e_elec + e_np
+    return (
+      e_bond
+      + e_angle
+      + e_ub
+      + e_dihedral
+      + e_improper
+      + e_cmap
+      + e_lj
+      + e_elec
+      + e_np
+      + e_restraint
+    )
 
   if return_decomposed:
     return {

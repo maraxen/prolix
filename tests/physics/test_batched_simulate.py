@@ -21,8 +21,8 @@ DATA_DIR = Path(__file__).parent.parent.parent / "data" / "pdb"
 FF_PATH = Path(__file__).parent.parent.parent.parent / "proxide" / "src" / "proxide" / "assets" / "protein.ff19SB.xml"
 
 def pytest_configure():
-    # enable x64 just in case
-    jax.config.update("jax_enable_x64", True)
+    # Production runs at float32 (JAX_ENABLE_X64=False)
+    pass
 
 @pytest.fixture
 def fake_padded_batch():

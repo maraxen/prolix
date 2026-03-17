@@ -29,6 +29,7 @@ class PaddedSystem(eqx.Module):
   radii: Array            # (N_padded,)   — GB radii
   scaled_radii: Array     # (N_padded,)   — OBC scaling factors
   masses: Array           # (N_padded,)
+  element_ids: Array      # (N_padded,) int — atomic number (1=H, 6=C, 7=N, 8=O, 16=S)
   atom_mask: Array        # (N_padded,) bool — True for real atoms
   
   # Bonded term arrays (padded to max per bucket)
@@ -52,6 +53,17 @@ class PaddedSystem(eqx.Module):
   cmap_torsions: Array | None   # (N_cmap_padded, 5) int
   cmap_mask: Array | None       # (N_cmap_padded,) bool
   cmap_coeffs: Array | None     # (N_maps, G, G, 16) — shared across batch
+
+  # Non-bonded exclusions — sparse per-atom arrays
+  # Used for 1-2/1-3 (fully excluded) and 1-4 (scaled) interactions.
+  excl_indices: Array       # (N_padded, max_excl) int32 — excluded atom indices, -1 = unused
+  excl_scales_vdw: Array    # (N_padded, max_excl) float32 — LJ scale (0.0 or 0.5 or 1.0)
+  excl_scales_elec: Array   # (N_padded, max_excl) float32 — elec scale (0.0 or 1/1.2 or 1.0)
+
+  # RATTLE/SHAKE constraints — X-H bond pairs with target lengths
+  constraint_pairs: Array     # (N_constr_padded, 2) int — atom indices for constrained bonds
+  constraint_lengths: Array   # (N_constr_padded,) float — equilibrium bond lengths (Å)
+  constraint_mask: Array      # (N_constr_padded,) bool — True for real constraints
 
   # Metadata
   n_real_atoms: Array
@@ -106,6 +118,7 @@ def pad_protein(
   target_dihedrals: int | None = None,
   target_impropers: int | None = None,
   target_cmaps: int | None = None,
+  target_constraints: int | None = None,
 ) -> PaddedSystem:
   """Pad a protein to specific array sizes."""
   
@@ -138,19 +151,51 @@ def pad_protein(
   padded_scaled_radii = pad_array(jnp.asarray(scaled_radii), target_atoms, 0.8) # Standard OBC2 default
   
   # Derive masses if none
-  from prolix.constants import masses_from_elements, DEFAULT_MASS
+  from prolix.constants import masses_from_elements, atomic_numbers_from_elements, DEFAULT_MASS
 
   masses = protein.masses
+  elements_list = getattr(protein, "elements", None)
   if masses is None or jnp.all(jnp.asarray(masses) == 0):
-      elements = getattr(protein, "elements", None)
-      if elements is not None and len(elements) == n_real:
-          masses = jnp.array(masses_from_elements(list(elements)), dtype=jnp.float32)
+      if elements_list is not None and len(elements_list) == n_real:
+          masses = jnp.array(masses_from_elements(list(elements_list)), dtype=jnp.float32)
       else:
           masses = jnp.ones(n_real) * DEFAULT_MASS
   # Pad with DEFAULT_MASS so ghost atoms have safe non-zero mass for Langevin p/m
   padded_masses = pad_array(masses, target_atoms, DEFAULT_MASS)
+
+  # Element IDs (atomic numbers) — used for element-based constraint detection.
+  # This is HMR-safe: hydrogen identity is determined by element, not mass.
+  if elements_list is not None and len(elements_list) == n_real:
+      element_ids = jnp.array(
+          atomic_numbers_from_elements(list(elements_list)), dtype=jnp.int32)
+  else:
+      # Fallback: infer from atom names (H-prefixed → hydrogen)
+      atom_names = getattr(protein, "atom_names", None)
+      if atom_names is not None and len(atom_names) == n_real:
+          element_ids = jnp.array(
+              [1 if str(n).strip().startswith("H") else 6 for n in atom_names],
+              dtype=jnp.int32)
+      else:
+          element_ids = jnp.ones(n_real, dtype=jnp.int32) * 6  # default carbon
+  padded_element_ids = pad_array(element_ids, target_atoms, 0)  # 0 = null element for ghosts
   
   atom_mask = create_mask(n_real, target_atoms)
+
+  # Exclusion data — sparse (N, max_excl) arrays
+  from prolix.physics.neighbor_list import ExclusionSpec, map_exclusions_to_dense_padded
+  MAX_EXCL = 32
+  try:
+    excl_spec = ExclusionSpec.from_protein(protein)
+    ei, sv, se = map_exclusions_to_dense_padded(excl_spec, max_exclusions=MAX_EXCL)
+    # ei: (n_real, MAX_EXCL) int32, sv/se: (n_real, MAX_EXCL) float32
+    padded_excl_indices = pad_array(ei, target_atoms, -1)
+    padded_excl_scales_vdw = pad_array(sv, target_atoms, 1.0)
+    padded_excl_scales_elec = pad_array(se, target_atoms, 1.0)
+  except (ValueError, AttributeError):
+    # Fallback: if protein has no bonds/charges, create empty exclusions
+    padded_excl_indices = jnp.full((target_atoms, MAX_EXCL), -1, dtype=jnp.int32)
+    padded_excl_scales_vdw = jnp.ones((target_atoms, MAX_EXCL), dtype=jnp.float32)
+    padded_excl_scales_elec = jnp.ones((target_atoms, MAX_EXCL), dtype=jnp.float32)
 
   # Target logic
   bonds = jnp.asarray(protein.bonds) if protein.bonds is not None else jnp.zeros((0, 2), dtype=jnp.int32)
@@ -199,7 +244,45 @@ def pad_protein(
     padded_cmaps = None
     cmap_mask = None
     cmap_coeffs = None
-    
+
+  # -------------------------------------------------------------------
+  # RATTLE constraints: identify X-H bonds by element identity (not mass).
+  # Element-based check is HMR-safe — if hydrogen masses are repartitioned,
+  # constraints are still correctly identified by atomic number == 1.
+  # -------------------------------------------------------------------
+  elem_np = np.asarray(element_ids)  # (n_real,) int — atomic numbers
+  bonds_np = np.asarray(bonds)
+  bond_params_np = np.asarray(protein.bond_params) if protein.bond_params is not None else np.zeros((0, 2))
+
+  constr_pairs_list = []
+  constr_lengths_list = []
+  if len(bonds_np) > 0 and len(bond_params_np) > 0:
+    for i in range(len(bonds_np)):
+      a1, a2 = int(bonds_np[i, 0]), int(bonds_np[i, 1])
+      # Check bounds (padding indices point to atom 0)
+      if a1 >= n_real or a2 >= n_real:
+        continue
+      # Hydrogen has atomic number 1
+      if int(elem_np[a1]) == 1 or int(elem_np[a2]) == 1:
+        constr_pairs_list.append([a1, a2])
+        # Equilibrium bond length from bond_params[:, 0] (r0)
+        constr_lengths_list.append(float(bond_params_np[i, 0]))
+
+  if constr_pairs_list:
+    constr_pairs = jnp.array(constr_pairs_list, dtype=jnp.int32)
+    constr_lengths = jnp.array(constr_lengths_list, dtype=jnp.float32)
+  else:
+    constr_pairs = jnp.zeros((0, 2), dtype=jnp.int32)
+    constr_lengths = jnp.zeros((0,), dtype=jnp.float32)
+
+  n_constraints = len(constr_pairs)
+  if target_constraints is None:
+    target_constraints = n_constraints
+
+  padded_constr_pairs = pad_bonded_indices(constr_pairs, target_constraints, 2)
+  padded_constr_lengths = pad_array(constr_lengths, target_constraints, 0.0) if n_constraints > 0 else jnp.zeros(target_constraints, dtype=jnp.float32)
+  constr_mask = create_mask(n_constraints, target_constraints)
+
   return PaddedSystem(
       positions=padded_pos,
       charges=padded_charges,
@@ -208,6 +291,7 @@ def pad_protein(
       radii=padded_radii,
       scaled_radii=padded_scaled_radii,
       masses=padded_masses,
+      element_ids=padded_element_ids,
       atom_mask=atom_mask,
       bonds=padded_bonds,
       bond_params=padded_bond_params,
@@ -224,6 +308,12 @@ def pad_protein(
       cmap_torsions=padded_cmaps,
       cmap_mask=cmap_mask,
       cmap_coeffs=cmap_coeffs,
+      excl_indices=padded_excl_indices,
+      excl_scales_vdw=padded_excl_scales_vdw,
+      excl_scales_elec=padded_excl_scales_elec,
+      constraint_pairs=padded_constr_pairs,
+      constraint_lengths=padded_constr_lengths,
+      constraint_mask=constr_mask,
       n_real_atoms=jnp.array(n_real, dtype=jnp.int32),
       n_padded_atoms=target_atoms,
       bucket_size=target_atoms,
@@ -255,6 +345,8 @@ def bucket_proteins(
       max_dihedrals = int(3.5 * bucket_size)
       max_impropers = int(0.5 * bucket_size)
       max_cmaps = int(0.3 * bucket_size)
+      # Constraints: ~1 H-bond per heavy atom → ~0.6 × bucket_size
+      max_constraints = int(0.7 * bucket_size)
       
       padded_list = []
       for p in prot_list:
@@ -264,7 +356,8 @@ def bucket_proteins(
             target_angles=max_angles,
             target_dihedrals=max_dihedrals,
             target_impropers=max_impropers,
-            target_cmaps=max_cmaps
+            target_cmaps=max_cmaps,
+            target_constraints=max_constraints,
         )
         padded_list.append(padded)
       ready_buckets[bucket_size] = padded_list
@@ -286,6 +379,7 @@ def collate_batch(systems: list[PaddedSystem]) -> PaddedSystem:
     n_dih = count(systems[0], "dihedrals")
     n_imp = count(systems[0], "impropers")
     n_cmap = count(systems[0], "cmap_torsions")
+    n_constr = count(systems[0], "constraint_pairs")
     
     for s in systems:
       assert s.bucket_size == b_size, "Systems must belong to identical ATOM bucket."
@@ -294,6 +388,7 @@ def collate_batch(systems: list[PaddedSystem]) -> PaddedSystem:
       assert count(s, "dihedrals") == n_dih, "Systems must belong to identical DIHEDRALS length."
       assert count(s, "impropers") == n_imp, "Systems must belong to identical IMPROPERS length."
       assert count(s, "cmap_torsions") == n_cmap, "Systems must belong to identical CMAPS length."
+      assert count(s, "constraint_pairs") == n_constr, "Systems must belong to identical CONSTRAINTS length."
       
     # Equinox modules are PyTrees, so tree_map stacks their arrays naturally
     return jax.tree_util.tree_map(lambda *args: jnp.stack(args), *systems)

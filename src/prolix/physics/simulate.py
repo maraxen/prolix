@@ -167,102 +167,81 @@ def rattle_langevin(
   return init_fn, apply_fn
 
 
-def project_positions(R, pairs, lengths, mass, shift_fn, tol=1e-5, max_iter=10):
-  """Iterative SHAKE projection for positions."""
-  # pairs: (M, 2) indices
-  # lengths: (M,) target lengths
-  # mass: (N, 1)
+def project_positions(R, pairs, lengths, mass, shift_fn, constraint_mask=None, tol=1e-5, max_iter=20):
+  """Iterative SHAKE projection for positions.
 
-  # Pre-compute inverse mass for pairs
-  # inv_mass = 1.0 / mass
-  # w1 = inv_mass[pairs[:, 0]]
-  # w2 = inv_mass[pairs[:, 1]]
-  # w_sum = w1 + w2
+  Constrains bond lengths to their target values by iteratively
+  adjusting atom positions. Uses the standard SHAKE algorithm
+  with mass-weighted corrections.
+
+  Args:
+      R: Positions (N, 3).
+      pairs: (M, 2) int — atom index pairs for constrained bonds.
+      lengths: (M,) float — target bond lengths.
+      mass: (N, 1) float — per-atom masses.
+      shift_fn: JAX-MD shift function (unused for free space).
+      constraint_mask: (M,) bool — True for real constraints. If None, all active.
+      tol: Convergence tolerance (unused — fixed iteration count for JIT).
+      max_iter: Number of SHAKE iterations.
+
+  Returns:
+      Projected positions (N, 3).
+  """
+  if constraint_mask is None:
+    constraint_mask = jnp.ones(len(pairs), dtype=jnp.float32)
+  else:
+    constraint_mask = constraint_mask.astype(jnp.float32)
 
   def body_fn(i, R_curr):
-    # Compute deviations
     r1 = R_curr[pairs[:, 0]]
     r2 = R_curr[pairs[:, 1]]
-    d_vec = space.map_product(shift_fn)(r1, r2)  # r1 - r2
-    # Actually shift_fn(r1, r2) -> r1 - r2? Check docs.
-    # Usually displacement(R1, R2). shift_fn(R, dR) -> R+dR.
-    # We need displacement_fn.
-    # But we only have shift_fn passed to integrator.
-    # Usually integrator gets displacement_fn? No, shift_fn.
-    # Wait, force_fn usually needs displacement.
-    # But here we need it for constraints.
-    # If we don't have displacement_fn, we can't compute distances in PBC.
-    # But for 'free' space, d = r1 - r2.
-    # We'll assume free space for now (as in run_simulation).
-    # Or we can pass displacement_fn to rattle_langevin?
-    # Standard nvt_langevin only takes shift_fn.
-    # But we need displacement for constraints.
-    # We should pass displacement_fn.
-    # For now, assume simple difference (no PBC).
-
-    d_vec = r1 - r2
+    d_vec = r1 - r2  # Free space displacement
     d2 = jnp.sum(d_vec**2, axis=-1)
     diff = d2 - lengths**2
-
-    # Correction scalar
-    # g = diff / (2 * d_vec . d_vec_old * (1/m1 + 1/m2)) ?
-    # Approximation: d_vec . d_vec_old ~ d^2 ~ lengths^2
-    # g = diff / (2 * lengths^2 * (1/m1 + 1/m2))?
-    # Better: g = (lengths^2 - d2) / (2 * (r1-r2) . (r1-r2) * ...)
-    # Standard SHAKE: delta = (d^2 - L^2) / (4 * d . r_ij) ?
-    # Let's use: correction = diff / (2 * (1/m1 + 1/m2) * d . d) ?
-    # Actually, d . d is d2.
 
     inv_m1 = 1.0 / mass[pairs[:, 0], 0]
     inv_m2 = 1.0 / mass[pairs[:, 1], 0]
     w_sum = inv_m1 + inv_m2
 
-    # g = diff / (2 * w_sum * d_vec . d_vec) ??
-    # No, linearization: |r + dr|^2 = L^2
-    # |r|^2 + 2 r.dr = L^2
-    # 2 r.dr = L^2 - |r|^2 = -diff
-    # dr = g * r
-    # 2 r . (g * r) = 2 g |r|^2 = -diff
-    # g = -diff / (2 |r|^2)
-    # But we have masses.
-    # dr1 = g * w1 * r12
-    # dr2 = -g * w2 * r12
-    # dr12 = g * (w1+w2) * r12
-    # |r12 + dr12|^2 = L^2
-    # |r12|^2 + 2 r12 . dr12 = L^2
-    # d2 + 2 r12 . (g * w_sum * r12) = L^2
-    # d2 + 2 g w_sum d2 = L^2
-    # 2 g w_sum d2 = L^2 - d2 = -diff
-    # g = -diff / (2 * w_sum * d2)
-
+    # g = -diff / (2 * w_sum * d2) — standard SHAKE correction scalar
     g = -diff / (2.0 * w_sum * d2 + 1e-8)
+    # Zero correction for padded constraints
+    g = g * constraint_mask
 
-    # Apply
     delta = d_vec * g[:, None]  # (M, 3)
-
-    # Update R
-    # We need to scatter add.
-    # R[p1] += w1 * delta
-    # R[p2] -= w2 * delta
-
-    # Use index_add
     d1 = delta * inv_m1[:, None]
-    d2 = -delta * inv_m2[:, None]
+    d2_corr = -delta * inv_m2[:, None]
 
     R_curr = R_curr.at[pairs[:, 0]].add(d1)
-    return R_curr.at[pairs[:, 1]].add(d2)
-
+    R_curr = R_curr.at[pairs[:, 1]].add(d2_corr)
     return R_curr
 
-  # Use more iterations for stability
-  return jax.lax.fori_loop(0, 100, lambda i, r: body_fn(i, r), R)
+  return jax.lax.fori_loop(0, max_iter, lambda i, r: body_fn(i, r), R)
 
 
-def project_momenta(P, R, pairs, mass, shift_fn, tol=1e-6, max_iter=100):
-  """Iterative RATTLE projection for momenta."""
-  # Project P such that v . r_ij = 0
-  # v1 = P1/m1, v2 = P2/m2
-  # (v1 - v2) . r12 = 0
+def project_momenta(P, R, pairs, mass, shift_fn, constraint_mask=None, tol=1e-6, max_iter=20):
+  """Iterative RATTLE projection for momenta.
+
+  Projects momenta so that velocities are orthogonal to constrained bonds,
+  ensuring time-reversal symmetry and energy conservation.
+
+  Args:
+      P: Momenta (N, 3).
+      R: Current positions (N, 3) — after SHAKE projection.
+      pairs: (M, 2) int — constrained bond pairs.
+      mass: (N, 1) float — per-atom masses.
+      shift_fn: JAX-MD shift function (unused for free space).
+      constraint_mask: (M,) bool — True for real constraints.
+      tol: Convergence tolerance (unused — fixed iteration).
+      max_iter: Number of RATTLE iterations.
+
+  Returns:
+      Projected momenta (N, 3).
+  """
+  if constraint_mask is None:
+    constraint_mask = jnp.ones(len(pairs), dtype=jnp.float32)
+  else:
+    constraint_mask = constraint_mask.astype(jnp.float32)
 
   inv_m1 = 1.0 / mass[pairs[:, 0], 0]
   inv_m2 = 1.0 / mass[pairs[:, 1], 0]
@@ -270,40 +249,25 @@ def project_momenta(P, R, pairs, mass, shift_fn, tol=1e-6, max_iter=100):
 
   r1 = R[pairs[:, 0]]
   r2 = R[pairs[:, 1]]
-  r12 = r1 - r2  # Assume free space
+  r12 = r1 - r2  # Free space displacement
 
   def body_fn(i, P_curr):
     v1 = P_curr[pairs[:, 0]] * inv_m1[:, None]
     v2 = P_curr[pairs[:, 1]] * inv_m2[:, None]
     v12 = v1 - v2
 
-    # dot = v12 . r12
     dot = jnp.sum(v12 * r12, axis=-1)
-
-    # We want (v12 + dv12) . r12 = 0
-    # v12.r12 + dv12.r12 = 0
-    # dv1 = k * r12 / m1
-    # dv2 = -k * r12 / m2
-    # dv12 = k * (1/m1 + 1/m2) * r12
-    # dv12 . r12 = k * w_sum * r12.r12
-    # k * w_sum * d2 = -dot
-    # k = -dot / (w_sum * d2)
-
     d2 = jnp.sum(r12**2, axis=-1)
     k = -dot / (w_sum * d2 + 1e-8)
+    # Zero impulse for padded constraints
+    k = k * constraint_mask
 
     impulse = r12 * k[:, None]  # (M, 3)
-
-    # Update P (Momentum)
-    # P1 += impulse
-    # P2 -= impulse
-
     P_curr = P_curr.at[pairs[:, 0]].add(impulse)
-    return P_curr.at[pairs[:, 1]].add(-impulse)
-
+    P_curr = P_curr.at[pairs[:, 1]].add(-impulse)
     return P_curr
 
-  return jax.lax.fori_loop(0, 100, lambda i, p: body_fn(i, p), P)
+  return jax.lax.fori_loop(0, max_iter, lambda i, p: body_fn(i, p), P)
 
 
 def run_minimization(

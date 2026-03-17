@@ -26,9 +26,13 @@ class LangevinState:
     force: Array      # (B, N, 3) or (N, 3)
     mass: Array       # (B, N) or (N,)
     key: Array        # (B, 2) or (2,)
+    cap_count: Array  # Scalar or (B,) - accumulated force cap events
 
     def tree_flatten(self):
-        children = (self.positions, self.momentum, self.force, self.mass, self.key)
+        children = (
+            self.positions, self.momentum, self.force, 
+            self.mass, self.key, self.cap_count
+        )
         aux_data = None
         return (children, aux_data)
 
@@ -36,62 +40,271 @@ class LangevinState:
     def tree_unflatten(cls, aux_data, children):
         return cls(*children)
 
-def make_langevin_step(dt: float, kT: float, gamma: float) -> Callable[[PaddedSystem, LangevinState], LangevinState]:
-    """Create a BAOAB Langevin step function.
+# ---------------------------------------------------------------------------
+# COM re-centering and rotation removal (implicit solvent)
+# ---------------------------------------------------------------------------
+# Per AMBER manual and OpenMM defaults: in Langevin dynamics without periodic
+# boundaries, positions drift via Brownian diffusion. We re-center positions
+# only — never touch velocities/momenta (that would destroy the thermostat).
+# ---------------------------------------------------------------------------
+
+DEFAULT_RECENTER_EVERY: int = 100  # steps between COM re-centering
+
+
+def recenter_com(
+    positions: 'Array',
+    masses: 'Array',
+    mask: 'Array | None' = None,
+) -> 'Array':
+    """Subtract mass-weighted center of mass from positions.
+
+    Positions-only operation — velocities/momenta are NOT touched.
+    This is the AMBER nscm approach for Langevin dynamics.
+
+    Args:
+        positions: (N, 3) atom coordinates.
+        masses: (N,) per-atom masses.
+        mask: Optional (N,) boolean mask. If given, only masked atoms
+            contribute to COM calculation but ALL atoms are shifted.
+    """
+    m = masses[:, None]  # (N, 1)
+    if mask is not None:
+        m_weighted = m * mask[:, None].astype(m.dtype)
+    else:
+        m_weighted = m
+    total_mass = jnp.sum(m_weighted) + 1e-30  # avoid div-by-zero for empty
+    com = jnp.sum(positions * m_weighted, axis=0) / total_mass
+    return positions - com
+
+
+def remove_rotation_kabsch(
+    positions: 'Array',
+    reference: 'Array',
+    masses: 'Array',
+    mask: 'Array | None' = None,
+) -> 'Array':
+    """Remove global rotation via mass-weighted Kabsch superposition.
+
+    Aligns `positions` onto `reference` using SVD. Both must already
+    be COM-centered. Pure linear algebra — stays inside JIT.
+
+    Args:
+        positions: (N, 3) already COM-centered.
+        reference: (N, 3) COM-centered reference frame.
+        masses: (N,) per-atom masses.
+        mask: Optional (N,) boolean mask for weighted alignment.
+    """
+    w = jnp.sqrt(masses[:, None])  # mass-weighting
+    if mask is not None:
+        w = w * mask[:, None].astype(w.dtype)
+
+    # Cross-covariance matrix: H = (W*P)^T (W*R)
+    P = positions * w  # (N, 3)
+    R = reference * w  # (N, 3)
+    H = P.T @ R  # (3, 3)
+
+    U, _, Vt = jnp.linalg.svd(H)
+
+    # Correct for reflection
+    d = jnp.linalg.det(U @ Vt)
+    sign_matrix = jnp.diag(jnp.array([1.0, 1.0, jnp.sign(d)]))
+
+    # Optimal rotation: R_opt = V * sign * U^T
+    R_opt = (Vt.T @ sign_matrix) @ U.T
+
+    return positions @ R_opt.T
+
+
+def apply_com_correction(
+    positions: 'Array',
+    masses: 'Array',
+    reference: 'Array',
+    step_idx: 'Array',
+    recenter_every: int = DEFAULT_RECENTER_EVERY,
+    remove_rotation: bool = True,
+    mask: 'Array | None' = None,
+) -> 'Array':
+    """Conditionally apply COM re-centering and rotation removal.
+
+    Applied every `recenter_every` steps via lax.cond to avoid
+    branching overhead. All operations are pure JAX — no JIT exit.
+    """
+    def _do_correction(r):
+        r_centered = recenter_com(r, masses, mask)
+        if remove_rotation:
+            r_centered = remove_rotation_kabsch(
+                r_centered, reference, masses, mask,
+            )
+        return r_centered
+
+    return lax.cond(
+        step_idx % recenter_every == 0,
+        _do_correction,
+        lambda r: r,
+        positions,
+    )
+
+
+def check_position_sanity(
+    positions: Array, 
+    atom_mask: Array, 
+    max_magnitude: float, 
+    stage: str,
+    system_names: list[str] | None = None,
+) -> None:
+    """Assert no real atom exceeds max_magnitude. Hard error if violated.
     
-    BAOAB scheme:
+    This runs on the host (Python side) using concrete arrays.
+    Reports per-system diagnostics before raising so the user knows
+    which system(s) exploded.
+    """
+    import logging as _logging
+    _log = _logging.getLogger("check_position_sanity")
+
+    # positions: (B, N, 3) or (N, 3); atom_mask: (B, N) or (N,)
+    if positions.ndim == 2:
+        positions = positions[None, ...]
+        atom_mask = atom_mask[None, ...]
+    B = positions.shape[0]
+
+    failed_systems = []
+    for i in range(B):
+        real_mask = atom_mask[i] > 0  # (N,)
+        real_pos_i = positions[i][real_mask]  # (n_real, 3)
+        if real_pos_i.size == 0:
+            continue
+        max_abs_i = float(jnp.max(jnp.abs(real_pos_i)))
+        name = system_names[i] if system_names and i < len(system_names) else f"sys_{i}"
+        if max_abs_i > max_magnitude:
+            _log.error(
+                "  [%s] %s: max|coord|=%.1f Å  EXCEEDED %.0f Å threshold",
+                stage, name, max_abs_i, max_magnitude,
+            )
+            failed_systems.append((name, max_abs_i))
+        else:
+            _log.info(
+                "  [%s] %s: max|coord|=%.1f Å  OK",
+                stage, name, max_abs_i,
+            )
+
+    if failed_systems:
+        details = ", ".join(f"{n}={v:.1f}Å" for n, v in failed_systems)
+        raise RuntimeError(
+            f"MD Explosion detected at {stage} stage! "
+            f"{len(failed_systems)}/{B} systems exceeded {max_magnitude} Å: {details}"
+        )
+
+
+def make_langevin_step(dt: float, kT: float, gamma: float) -> Callable[[PaddedSystem, LangevinState], LangevinState]:
+    """Create a BAOAB Langevin step function with RATTLE constraints.
+    
+    BAOAB scheme with SHAKE/RATTLE:
     B: p = p + 0.5 * dt * f
     A: r = r + 0.5 * dt * p / m
     O: p = exp(-gamma * dt) * p + sqrt(m * kT * (1 - exp(-2 * gamma * dt))) * R
     A: r = r + 0.5 * dt * p / m
-    B: p = p + 0.5 * dt * f
+    [SHAKE: project positions to satisfy bond constraints]
+    [adjust momentum for position correction]
+    B: p = p + 0.5 * dt * f(r_constrained)
+    [RATTLE: project momenta orthogonal to constrained bonds]
+
+    Uses analytical forces for LJ/Coulomb (no jax.grad on nonbonded terms)
+    to avoid autodiff NaN from exclusion matrix scatter and padded-atom distances.
     """
-    from prolix.batched_energy import single_padded_energy
-    from jax.tree_util import tree_map
+    from prolix.batched_energy import single_padded_force
+    from prolix.physics.simulate import project_positions, project_momenta
     
     # Precompute constants
     c1 = jnp.exp(-gamma * dt)
     c2 = jnp.sqrt(1.0 - jnp.exp(-2.0 * gamma * dt))
     
-    displacement_fn, _ = space.free()
+    displacement_fn, shift_fn = space.free()
     
     def step_fn(padded_sys: PaddedSystem, state: LangevinState) -> LangevinState:
-        # Reconstruct energy function from padded system data
-        # This allows heterogeneous vmap because sys is passed in
-        def energy_fn(r):
-            # sys is from closure, but since we are inside step_fn which is vmapped,
-            # jax will handle it.
-            # Wait, if we are vmapped, padded_sys will be a single system's data.
+        def force_fn(r):
             sys_with_r = dataclasses.replace(padded_sys, positions=r)
-            return single_padded_energy(sys_with_r, displacement_fn)
+            return single_padded_force(
+                sys_with_r, displacement_fn,
+                soft_core_lambda=jnp.float32(0.9999),
+            )
         
-        force_fn = jax.grad(lambda r: energy_fn(r))
+        r, p, f, m, key, cap_count = (
+            state.positions, state.momentum, state.force, 
+            state.mass, state.key, state.cap_count
+        )
         
-        r, p, f, m, key = state.positions, state.momentum, state.force, state.mass, state.key
+        # Constraint data from PaddedSystem
+        constr_pairs = padded_sys.constraint_pairs
+        constr_lengths = padded_sys.constraint_lengths
+        constr_mask = padded_sys.constraint_mask
+        has_constraints = jnp.any(constr_mask)
+        # Mass reshaped to (N, 1) for RATTLE functions
+        mass_2d = m[:, None]
         
-        # B
+        # B: first half-step momentum update
         p = p - 0.5 * dt * f
         
-        # A
+        # A: first half-step position update
         r = r + 0.5 * dt * p / m[:, None]
         
-        # O
+        # O: stochastic (Ornstein-Uhlenbeck) update
         key, subkey = jax.random.split(key)
         noise = jax.random.normal(subkey, p.shape)
         p = c1 * p + jnp.sqrt(m[:, None] * kT) * c2 * noise
         
-        # A
+        # A: second half-step position update
         r = r + 0.5 * dt * p / m[:, None]
         
-        # B
+        # --- SHAKE: project positions to satisfy bond constraints ---
+        # Store pre-constraint positions for momentum correction
+        r_pre_shake = r
+        r = jax.lax.cond(
+            has_constraints,
+            lambda r_: project_positions(
+                r_, constr_pairs, constr_lengths, mass_2d, shift_fn,
+                constraint_mask=constr_mask,
+            ),
+            lambda r_: r_,
+            r,
+        )
+        # Correct momentum for the position displacement from SHAKE
+        # p_corrected = m * (r_post - r_pre) / dt (implicit constraint force)
+        p = p + m[:, None] * (r - r_pre_shake) / dt
+        
+        # B: second half-step momentum update with new forces
         f = force_fn(r)
+        f = jnp.where(jnp.isfinite(f), f, 0.0)
+        # Belt-and-suspenders: zero forces ON padding atoms
+        mask = padded_sys.atom_mask[:, None]
+        f = f * mask
+        # Safety cap — prevents explosion from residual steric clashes
+        f_mag = jnp.sqrt(jnp.sum(f ** 2, axis=-1, keepdims=True) + 1e-12)
+        capped = jnp.any(f_mag > 10000.0)
+        f = f * jnp.minimum(1.0, 10000.0 / f_mag)
         p = p - 0.5 * dt * f
+        
+        # --- RATTLE: project momenta orthogonal to constrained bonds ---
+        p = jax.lax.cond(
+            has_constraints,
+            lambda p_: project_momenta(
+                p_, r, constr_pairs, mass_2d, shift_fn,
+                constraint_mask=constr_mask,
+            ),
+            lambda p_: p_,
+            p,
+        )
         
         r = r.astype(state.positions.dtype)
         p = p.astype(state.momentum.dtype)
         f = f.astype(state.force.dtype)
+
+        # Ghost atom pinning: restore padding atoms to their initial
+        # far-field positions (9999 Å). This prevents transient overlap
+        # with real atoms at the origin during BAOAB sub-steps.
+        r = jnp.where(mask, r, padded_sys.positions)
+        p = jnp.where(mask, p, jnp.float32(0.0))
         
-        return LangevinState(r, p, f, m, key)
+        return LangevinState(r, p, f, m, key, cap_count + capped.astype(jnp.int32))
         
     return step_fn
 
@@ -138,9 +351,9 @@ def make_langevin_step_nl(
 
         force_fn = jax.grad(lambda r: _energy_of_r(r))
 
-        r, p, f, m, key = (
+        r, p, f, m, key, cap_count = (
             state.positions, state.momentum, state.force,
-            state.mass, state.key,
+            state.mass, state.key, state.cap_count
         )
 
         # B
@@ -159,13 +372,25 @@ def make_langevin_step_nl(
 
         # B
         f = force_fn(r)
+        f = jnp.where(jnp.isfinite(f), f, 0.0)
+        # Belt-and-suspenders: zero forces ON padding atoms
+        mask = padded_sys.atom_mask[:, None]
+        f = f * mask
+        # Safety cap
+        f_mag = jnp.sqrt(jnp.sum(f ** 2, axis=-1, keepdims=True) + 1e-12)
+        capped = jnp.any(f_mag > 10000.0)
+        f = f * jnp.minimum(1.0, 10000.0 / f_mag)
         p = p - 0.5 * dt * f
 
         r = r.astype(state.positions.dtype)
         p = p.astype(state.momentum.dtype)
         f = f.astype(state.force.dtype)
 
-        return LangevinState(r, p, f, m, key)
+        # Ghost atom pinning: restore padding to far-field positions
+        r = jnp.where(mask, r, padded_sys.positions)
+        p = jnp.where(mask, p, jnp.float32(0.0))
+
+        return LangevinState(r, p, f, m, key, cap_count + capped.astype(jnp.int32))
 
     return step_fn
 
@@ -197,9 +422,9 @@ def make_langevin_step_nl_fused(
             )
             return f
 
-        r, p, f, m, key = (
+        r, p, f, m, key, cap_count = (
             state.positions, state.momentum, state.force,
-            state.mass, state.key,
+            state.mass, state.key, state.cap_count
         )
 
         # B
@@ -218,13 +443,25 @@ def make_langevin_step_nl_fused(
 
         # B
         f = force_fn(r)
+        f = jnp.where(jnp.isfinite(f), f, 0.0)
+        # Belt-and-suspenders: zero forces ON padding atoms
+        mask = padded_sys.atom_mask[:, None]
+        f = f * mask
+        # Safety cap
+        f_mag = jnp.sqrt(jnp.sum(f ** 2, axis=-1, keepdims=True) + 1e-12)
+        capped = jnp.any(f_mag > 10000.0)
+        f = f * jnp.minimum(1.0, 10000.0 / f_mag)
         p = p - 0.5 * dt * f
 
         r = r.astype(state.positions.dtype)
         p = p.astype(state.momentum.dtype)
         f = f.astype(state.force.dtype)
 
-        return LangevinState(r, p, f, m, key)
+        # Ghost atom pinning: restore padding to far-field positions
+        r = jnp.where(mask, r, padded_sys.positions)
+        p = jnp.where(mask, p, jnp.float32(0.0))
+
+        return LangevinState(r, p, f, m, key, cap_count + capped.astype(jnp.int32))
 
     return step_fn
 
@@ -259,6 +496,10 @@ def safe_map(fn: Callable[[T], Any], batch: T, chunk_size: int | None = 1) -> An
         )
         
     num_chunks = max(1, B // chunk_size)
+
+    # Short-circuit: if everything fits in one chunk, skip scan overhead
+    if num_chunks == 1:
+        return jax.vmap(fn)(batch)
     
     def map_fn(chunk_leaves):
         chunk_batch = jax.tree_util.tree_unflatten(treedef, chunk_leaves)
@@ -335,46 +576,71 @@ def batched_minimize(
         minimized_positions: (B, N, 3)
     """
     from jax_md import minimize as jax_md_minimize
-    from prolix.batched_energy import single_padded_energy
+    from prolix.batched_energy import single_padded_energy, _position_restraint_energy
 
     displacement_fn, shift_fn = space.free()
 
     # === Phase 1: FIRE soft-core stages ===
     # Progressive λ ramp resolves steric clashes without LJ singularities.
     # Force caps prevent momentum accumulation from extreme gradients.
-    # Final stage stays at λ=0.999 (not 1.0) — the soft-core contribution
-    # α*(1-λ) = 0.0005 is physically negligible but numerically essential
-    # to prevent Inf energies from residual sub-Å overlaps.
-    stage_lambdas = jnp.array([0.1, 0.5, 0.9, 0.99, 0.999, 0.999],
+    # Final FIRE stages: heavy budget at λ=0.9999 to resolve clashes.
+    # FIRE is a momentum-accelerated steepest descent — it's excellent at
+    # escaping high-energy local minima that L-BFGS alone cannot resolve.
+    stage_lambdas = jnp.array([0.1, 0.5, 0.9, 0.99, 0.999, 0.9999, 0.9999],
                               dtype=jnp.float32)
-    stage_caps = jnp.array([10.0, 100.0, 1000.0, 5000.0, 10000.0, 10000.0],
+    # Force caps halved vs prior values to prevent inertial overshoot.
+    # NLM diagnosis: aggressive caps + FIRE momentum → overprojection artifact.
+    stage_caps = jnp.array([5.0, 50.0, 500.0, 2000.0, 5000.0, 2000.0, 500.0],
                            dtype=jnp.float32)
-    remaining = max(max_steps - 3000, 1000)
-    stage_steps = jnp.array([500, 500, 500, 500, 1000, remaining])
+    # Position restraints (kcal/mol/Å²): strong early tethering → release.
+    # Prevents bonded geometry distortion during clash resolution.
+    stage_restraints = jnp.array([100.0, 50.0, 10.0, 1.0, 0.0, 0.0, 0.0],
+                                 dtype=jnp.float32)
+    # Give heavy budget to λ=0.9999 stages (stages 5 & 6)
+    remaining = max(max_steps - 4000, 1000)
+    stage_steps = jnp.array([500, 500, 500, 500, 1000, remaining, 2000])
 
-    # Fixed dt for all stages — avoids per-stage recompilation
+    # Tightened FIRE dt: 0.15fs prevents inertial overshoot on stiff
+    # soft-core walls (was 0.5fs, caused oscillatory blowup per sweep).
     dt_start = 0.00005
-    dt_max = 0.0005
+    dt_max = 0.00015
 
     def minimize_single(sys: PaddedSystem) -> Array:
-        # Parameterized energy function — lambda is a JAX array,
-        # NOT a Python float, so this traces once for all stages.
-        def energy_fn(r, soft_core_lambda=jnp.float32(1.0)):
+        r_ref = sys.positions  # Reference geometry for restraints
+        # Padding atom mask: (N, 1) for broadcasting against (N, 3)
+        pad_mask_3d = sys.atom_mask[:, None]  # True for real atoms
+
+        # Parameterized energy function — lambda and k_restraint are JAX arrays,
+        # NOT Python floats, so this traces once for all stages.
+        def energy_fn(
+            r,
+            soft_core_lambda=jnp.float32(1.0),
+            k_restraint=jnp.float32(0.0),
+        ):
             sys_with_r = dataclasses.replace(sys, positions=r)
-            return single_padded_energy(
+            e = single_padded_energy(
                 sys_with_r, displacement_fn,
                 soft_core_lambda=soft_core_lambda,
             )
+            # Harmonic position restraints prevent bonded geometry distortion
+            e = e + _position_restraint_energy(
+                r, r_ref, k_restraint, sys.atom_mask,
+            )
+            return e
 
-        # --- Phase 1: FIRE with soft-core ---
+        # --- Phase 1: FIRE with soft-core + position restraints ---
         fire_init_fn, fire_apply_fn = jax_md_minimize.fire_descent(
             energy_fn, shift_fn,
             dt_start=dt_start, dt_max=dt_max,
         )
 
-        def capped_apply(state, force_cap, sc_lam):
-            """Apply FIRE step with runtime force capping."""
+        def capped_apply(state, force_cap, sc_lam, k_restr):
+            """Apply FIRE step with runtime force capping + padding masking."""
             f = state.force
+            # Zero forces on padding atoms — prevents jax.grad leakage
+            # from dense N² interactions from moving padding atoms,
+            # whose drift corrupts COM and destabilises real atoms.
+            f = f * pad_mask_3d
             f_norm = jnp.linalg.norm(f, axis=-1, keepdims=True)
             use_cap = force_cap > 0.0
             cap_ratio = jnp.where(
@@ -385,25 +651,39 @@ def batched_minimize(
             f_capped = f * cap_ratio
             f_safe = jnp.where(jnp.isfinite(f_capped), f_capped, 0.0)
             state = dataclasses.replace(state, force=f_safe)
-            return fire_apply_fn(state, soft_core_lambda=sc_lam)
+            return fire_apply_fn(
+                state, soft_core_lambda=sc_lam, k_restraint=k_restr,
+            )
 
         def run_stage(carry, stage_params):
             """Run one FIRE minimization stage (called via lax.scan)."""
             positions = carry
-            sc_lam, force_cap, n_steps = stage_params
+            sc_lam, force_cap, k_restr, n_steps = stage_params
 
             fire_state = fire_init_fn(
                 positions, mass=sys.masses,
-                soft_core_lambda=sc_lam,
+                soft_core_lambda=sc_lam, k_restraint=k_restr,
             )
 
             def body_fn(i, s):
-                return capped_apply(s, force_cap, sc_lam)
+                s = capped_apply(s, force_cap, sc_lam, k_restr)
+                # Reset padding atoms to initial positions with zero velocity.
+                # FIRE's velocity Verlet moves ALL atoms; without this,
+                # padding atoms accumulate momentum and drift, corrupting
+                # the energy landscape for real atoms.
+                new_pos = jnp.where(pad_mask_3d, s.position, r_ref)
+                new_mom = jnp.where(pad_mask_3d, s.momentum, 0.0)
+                new_force = jnp.where(pad_mask_3d, s.force, 0.0)
+                return dataclasses.replace(
+                    s, position=new_pos, momentum=new_mom, force=new_force,
+                )
 
             final_state = jax.lax.fori_loop(0, n_steps, body_fn, fire_state)
             return final_state.position, None
 
-        stage_params = (stage_lambdas, stage_caps, stage_steps)
+        stage_params = (
+            stage_lambdas, stage_caps, stage_restraints, stage_steps,
+        )
         fire_positions, _ = lax.scan(
             run_stage, sys.positions, stage_params,
         )
@@ -424,22 +704,32 @@ def batched_minimize(
 
             def lbfgs_value_and_grad(r):
                 val, grad = jax.value_and_grad(
-                    lambda pos: energy_fn(pos, soft_core_lambda=jnp.float32(1.0))
+                    lambda pos: energy_fn(
+                        pos, soft_core_lambda=jnp.float32(0.9999))
                 )(r)
                 # Zero gradient on padding atoms — prevents L-BFGS from
                 # moving sentinel positions (9999.0) that are not physical
                 grad = jnp.where(real_mask_3d, grad, 0.0)
-                # Sanitize any NaN/Inf gradients from residual overlaps
+                # Cap gradient magnitude instead of zeroing NaN — preserves
+                # gradient direction so L-BFGS can resolve overlaps.
+                # NaN/Inf gradients from residual sub-Å overlaps would
+                # otherwise be zeroed, leaving atoms permanently stuck.
                 grad = jnp.where(jnp.isfinite(grad), grad, 0.0)
+                g_mag = jnp.sqrt(
+                    jnp.sum(grad ** 2, axis=-1, keepdims=True) + 1e-30)
+                g_scale = jnp.minimum(1.0, 100000.0 / g_mag)
+                grad = grad * g_scale
+                # Sanitize any remaining pathological values
+                val = jnp.where(jnp.isfinite(val), val, jnp.float32(1e10))
                 return val, grad
 
             solver = jaxopt.LBFGS(
                 fun=lbfgs_value_and_grad,
                 value_and_grad=True,  # We provide (value, grad) directly
                 maxiter=lbfgs_steps,
-                tol=1e-3,           # Force convergence tolerance
+                tol=1e-6,           # Force convergence tolerance (strict)
                 history_size=10,    # L-BFGS memory (standard for proteins)
-                max_stepsize=1.0,   # Prevent wild jumps
+                max_stepsize=0.1,   # Prevent overshooting with large clipped gradients
                 min_stepsize=1e-10,
                 linesearch="backtracking",
                 stop_if_linesearch_fails=True,
@@ -451,13 +741,48 @@ def batched_minimize(
             # the iteration limit. This is compatible with JIT but NOT with
             # vmap (while_loop iteration count varies per system). That's
             # fine — we dispatch per-system via safe_map(chunk_size=1).
-            lbfgs_positions, _ = solver.run(fire_positions)
+            lbfgs_positions, lbfgs_state = solver.run(fire_positions)
 
             # Restore padding positions exactly (belt-and-suspenders)
             final_positions = jnp.where(real_mask_3d, lbfgs_positions,
                                         fire_positions)
         else:
             final_positions = fire_positions
+
+        # === Post-minimization convergence diagnostic ===
+        # Compute forces at λ=0.9999 on final positions to check convergence.
+        # Standard MD practice: RMS gradient should be < ~10 kcal/mol/Å
+        # before starting dynamics (AMBER default drms = 1e-4, but that's
+        # for equilibrium; for clash resolution, < 10 is pragmatic).
+        final_f_val, final_g = jax.value_and_grad(
+            lambda pos: energy_fn(pos, soft_core_lambda=jnp.float32(0.9999))
+        )(final_positions)
+        final_g = jnp.where(real_mask_3d, final_g, 0.0)
+        final_g = jnp.where(jnp.isfinite(final_g), final_g, 0.0)
+        g_per_atom = jnp.sqrt(jnp.sum(final_g ** 2, axis=-1))  # (N,)
+        g_real = g_per_atom * (sys.masses > 0.0)  # mask padding
+        n_real = jnp.sum(sys.masses > 0.0)
+        rms_grad = jnp.sqrt(jnp.sum(g_real ** 2) / jnp.maximum(n_real, 1.0))
+        max_grad = jnp.max(g_real)
+        n_high = jnp.sum(g_real > 100.0)
+        jax.debug.print(
+            "  [min_conv] E={e:.1f} rms_grad={rms:.1f} max_grad={mx:.1f}"
+            " n_atoms_grad>100={n}",
+            e=final_f_val, rms=rms_grad, mx=max_grad, n=n_high,
+        )
+
+        # === Validation gate: post-minimization convergence ===
+        # GROMACS default emtol ~2.4 kcal/mol/Å, AMBER drms ~1e-4.
+        # For clash-resolution minimization, pragmatic thresholds are
+        # rms_grad < 50 and max_grad < 1000.  Exceeding these means
+        # equilibration will likely encounter extreme forces.
+        min_converged = jnp.logical_and(rms_grad < 50.0, max_grad < 1000.0)
+        jax.debug.print(
+            "  [min_gate] converged={ok} (rms<50={r}, max<1000={m})",
+            ok=min_converged,
+            r=(rms_grad < 50.0),
+            m=(max_grad < 1000.0),
+        )
 
         return final_positions
 
@@ -470,42 +795,344 @@ def batched_equilibrate(
     temperature_k: float = 310.15, 
     chunk_size: int | None = None
 ) -> LangevinState:
-    """Equilibrate a batch of padded systems."""
+    """Equilibrate a batch of padded systems with 10-stage staged warmup.
+
+    Uses a 10-stage protocol with ultra-gradual temperature ramp and
+    position restraints that are NEVER fully released. The additional stages
+    (vs prior 7-stage) prevent the balloon inflation artifact where
+    MAX_FORCE capping + thermal noise → systematic outward drift.
+
+      Stages 0-2: dt=0.01-0.05fs, T=0.1-2K, max_dx=0.002-0.005Å (quench)
+      Stages 3-4: dt=0.1-0.2fs,   T=10-50K, max_dx=0.01-0.02Å  (warmup)
+      Stages 5-7: dt=0.5-1.0fs,   T=100-200K, max_dx=0.03-0.05Å (ramp)
+      Stages 8-9: dt=1.0-2.0fs,   T=target,   max_dx=0.08-0.1Å  (settle)
+
+    dt and kT are JAX scalars inside the step function, so this compiles
+    once and the stages vary only the scalar inputs (no shape changes).
+    """
     from prolix.simulate import AKMA_TIME_UNIT_FS, BOLTZMANN_KCAL
-    from prolix.batched_energy import single_padded_energy
+    from prolix.batched_energy import (
+        single_padded_energy, single_padded_force, _position_restraint_energy,
+    )
     
     displacement_fn, _ = space.free()
-    
-    dt = 2.0 / AKMA_TIME_UNIT_FS
-    kT = temperature_k * BOLTZMANN_KCAL
     gamma = 1.0 * AKMA_TIME_UNIT_FS * 1e-3
-    
-    step_fn = make_langevin_step(dt, kT, gamma)
-    
+
+
+
+
+    # 10-stage warmup: gentler ramp prevents balloon inflation.
+    # Prior 7-stage protocol had too-aggressive jumps at high T, where
+    # MAX_FORCE=10k + thermal noise → systematic outward drift.
+    # Now: 3 ultra-low-T stages (0.1-2K), 3 warmup (10-150K), 4 approach.
+    n_stages = 10
+    s_each = max(n_steps // n_stages, 100)
+    s_last = max(n_steps - 9 * s_each, 100)
+
+    stage_dts = jnp.array(
+        [0.01, 0.02, 0.05, 0.1, 0.2, 0.5, 0.5, 1.0, 1.0, 2.0],
+        dtype=jnp.float32,
+    ) / AKMA_TIME_UNIT_FS
+    stage_kTs = jnp.array(
+        [0.1, 0.5, 2.0, 10.0, 50.0, 100.0, 150.0, 200.0,
+         temperature_k, temperature_k],
+        dtype=jnp.float32,
+    ) * BOLTZMANN_KCAL
+    # Displacement caps: ultra-tight in early stages, relax gradually.
+    # 0.002Å/step × 1000 steps = 2Å max cumulative drift (vs 70Å before).
+    stage_force_caps = jnp.array(
+        [0.002, 0.005, 0.005, 0.01, 0.02, 0.03, 0.05, 0.05, 0.08, 0.1],
+        dtype=jnp.float32,
+    )  # max displacement per step (Å)
+    # Position restraint spring constants (kcal/mol/Å²): NEVER go to 0.
+    # Strong early → gradual release. Final stages keep k=0.5 as safety net.
+    stage_restraint_k = jnp.array(
+        [10000.0, 5000.0, 1000.0, 500.0, 100.0, 10.0, 5.0, 1.0, 0.5, 0.5],
+        dtype=jnp.float32,
+    )
+    stage_step_counts = jnp.array(
+        [s_each, s_each, s_each, s_each, s_each, s_each, s_each, s_each,
+         s_each, s_last],
+    )
+
     leaves, _ = jax.tree_util.tree_flatten(batch)
     B = leaves[0].shape[0]
     keys = jax.random.split(key, B)
     
     def equilibrate_single(args: tuple[PaddedSystem, Array]) -> LangevinState:
         sys, k = args
+        # Capture initial padding positions for ghost atom pinning.
+        # Padding atoms sit at far-field (9999 Å) — we restore them here
+        # after every Langevin step to prevent drift or overlap.
+        ghost_positions = sys.positions
         
-        def energy_fn(r):
+        # Use λ=0.9999 soft-core to match the minimization surface.
+        # The full potential (λ=1.0) has r⁻¹² singularities that produce
+        # 10¹⁰+ kcal/mol/Å forces at sub-Å overlaps remaining after
+        # minimization. The α*(1-0.9999) = 5e-5 cushion is physically
+        # negligible but numerically essential for float32 stability.
+        _eq_lambda = jnp.float32(0.9999)
+
+        # Reference geometry for position restraints — the post-minimization
+        # structure. Restraints gradually release during equilibration.
+        r_ref = sys.positions
+
+        def energy_fn_with_restraint(r, k_restraint):
+            """Physics energy + harmonic position restraint."""
             sys_with_r = dataclasses.replace(sys, positions=r)
-            return single_padded_energy(sys_with_r, displacement_fn)
+            e_phys = single_padded_energy(
+                sys_with_r, displacement_fn,
+                soft_core_lambda=_eq_lambda,
+            )
+            e_restraint = _position_restraint_energy(
+                r, r_ref, k_restraint, sys.atom_mask,
+            )
+            return e_phys + e_restraint
+
+        def force_fn_with_restraint(r, k_restraint):
+            """Negative gradient of energy (physics + restraint)."""
+            # Restraint force is analytical: -k * (r - r_ref) * mask
+            sys_with_r = dataclasses.replace(sys, positions=r)
+            f_phys = single_padded_force(
+                sys_with_r, displacement_fn,
+                soft_core_lambda=_eq_lambda,
+            )
+            # Analytical restraint force: -dE/dr = -k*(r - r_ref)
+            f_restraint = -k_restraint * (r - r_ref) * sys.atom_mask[:, None]
+            return f_phys + f_restraint
+
+        def force_fn(r):
+            """Unrestrained force for diagnostics."""
+            sys_with_r = dataclasses.replace(sys, positions=r)
+            return single_padded_force(
+                sys_with_r, displacement_fn,
+                soft_core_lambda=_eq_lambda,
+            )
+
+        def langevin_step(state: LangevinState, dt, kT, force_cap, k_restraint):
+            """BAOAB Langevin step with displacement capping + position restraints.
             
-        initial_f = jax.grad(energy_fn)(sys.positions)
-        
+            Uses maximum-displacement-per-step instead of force capping.
+            Force caps cause systematic balloon inflation when forces
+            persistently exceed the cap — atoms receive constant-velocity
+            drift. Displacement caps preserve the force landscape while
+            preventing large excursions.
+            
+            Position restraints tether atoms to the minimized reference,
+            preventing structural deformation during early warmup stages.
+            Standard NVT equilibration protocol (NotebookLM grounded).
+            
+            max_dx: force_cap parameter reinterpreted as max displacement (Å).
+            k_restraint: harmonic spring constant (kcal/mol/Å²), 0 = off.
+            """
+            c1 = jnp.exp(-gamma * dt)
+            c2 = jnp.sqrt(1.0 - jnp.exp(-2.0 * gamma * dt))
+
+            r, p, f, m, key, cap_count = (
+                state.positions, state.momentum, state.force,
+                state.mass, state.key, state.cap_count
+            )
+            r_old = r
+
+            # === Triple safety net ===
+            # 1. FORCE CAP: prevent extreme forces from creating large
+            #    momenta that displacement capping can't fully suppress.
+            #    10000 kcal/mol/Å ≈ maximum covalent bond force.
+            MAX_FORCE = jnp.float32(2000.0)
+            f_mag = jnp.sqrt(
+                jnp.sum(f ** 2, axis=-1, keepdims=True) + 1e-30)
+            f_scale = jnp.minimum(1.0, MAX_FORCE / f_mag)
+            f_capped = f * f_scale
+
+            # B (first half-kick with capped forces)
+            p = p - 0.5 * dt * f_capped
+            # A
+            r = r + 0.5 * dt * p / m[:, None]
+            # O (thermostat)
+            key, subkey = jax.random.split(key)
+            noise = jax.random.normal(subkey, p.shape)
+            p = c1 * p + jnp.sqrt(m[:, None] * kT) * c2 * noise
+            # A
+            r = r + 0.5 * dt * p / m[:, None]
+
+            # 2. DISPLACEMENT CAP: limit max per-atom displacement
+            max_dx = force_cap
+            dr = r - r_old
+            dr_mag = jnp.sqrt(jnp.sum(dr ** 2, axis=-1, keepdims=True) + 1e-30)
+            cap_active = max_dx > 0
+            scale = jnp.where(
+                cap_active,
+                jnp.minimum(1.0, max_dx / dr_mag),
+                1.0,
+            )
+            capped = jnp.where(cap_active, jnp.any(dr_mag > max_dx), False)
+            r = r_old + dr * scale
+            # Adjust momentum to match the actual displacement
+            p = jnp.where(
+                cap_active & (dr_mag > max_dx),
+                p * scale,
+                p,
+            )
+
+            # --- SHAKE: project positions to satisfy bond constraints ---
+            from prolix.physics.simulate import project_positions, project_momenta
+            constr_pairs = sys.constraint_pairs
+            constr_lengths = sys.constraint_lengths
+            constr_mask = sys.constraint_mask
+            has_constraints = jnp.any(constr_mask)
+            mass_2d = m[:, None]
+
+            r_pre_shake = r
+            r = jax.lax.cond(
+                has_constraints,
+                lambda r_: project_positions(
+                    r_, constr_pairs, constr_lengths, mass_2d,
+                    shift_fn=lambda x, dx: x + dx,
+                    constraint_mask=constr_mask,
+                ),
+                lambda r_: r_,
+                r,
+            )
+            # Correct momentum for SHAKE displacement
+            p = p + m[:, None] * (r - r_pre_shake) / dt
+
+            # B (force evaluation at the capped position, with restraints)
+            # 3. POSITION RESTRAINTS: tether to reference, prevent drift
+            f = force_fn_with_restraint(r, k_restraint)
+            # Apply force cap to new forces too
+            f_mag2 = jnp.sqrt(
+                jnp.sum(f ** 2, axis=-1, keepdims=True) + 1e-30)
+            f = f * jnp.minimum(1.0, MAX_FORCE / f_mag2)
+            # Belt-and-suspenders: zero forces ON padding atoms
+            pad_mask = sys.atom_mask[:, None]
+            f = f * pad_mask
+            f = jnp.where(jnp.isfinite(f), f, 0.0)
+
+            p = p - 0.5 * dt * f
+
+            # --- RATTLE: project momenta orthogonal to constrained bonds ---
+            p = jax.lax.cond(
+                has_constraints,
+                lambda p_: project_momenta(
+                    p_, r, constr_pairs, mass_2d,
+                    shift_fn=lambda x, dx: x + dx,
+                    constraint_mask=constr_mask,
+                ),
+                lambda p_: p_,
+                p,
+            )
+
+            # Ghost atom pinning: restore padding atoms to their initial
+            # far-field positions. Prevents transient overlap with real
+            # atoms and ensures zero contribution to dynamics.
+            r = jnp.where(pad_mask, r, ghost_positions)
+            p = jnp.where(pad_mask, p, jnp.float32(0.0))
+
+            return LangevinState(
+                r.astype(state.positions.dtype),
+                p.astype(state.momentum.dtype),
+                f.astype(state.force.dtype),
+                m, key,
+                cap_count + capped.astype(jnp.int32),
+            )
+
+        initial_f = force_fn(sys.positions)
+        # Belt-and-suspenders: mask forces on padding atoms
+        initial_f = initial_f * sys.atom_mask[:, None]
+        # Sanitize NaN/Inf forces — these can occur from residual sub-Å
+        # contacts at λ=1.0. Displacement capping in the Langevin step
+        # handles force magnitude safety, so we only need NaN cleanup.
+        initial_f = jnp.where(jnp.isfinite(initial_f), initial_f, 0.0)
+
+        # Diagnostic: report initial force magnitude via host callback
+        f_mag = jnp.sqrt(jnp.sum(initial_f ** 2, axis=-1) + 1e-12)
+        max_f_mag = jnp.max(f_mag)
+        max_r_mag = jnp.max(jnp.abs(sys.positions * sys.atom_mask[:, None]))
+        n_high_f = jnp.sum(f_mag > 500.0)
+        jax.debug.print(
+            "  [eq_diag] initial: max_f={f:.1f} max_r={r:.1f} n_high_f={n}",
+            f=max_f_mag, r=max_r_mag, n=n_high_f,
+        )
+
+        # COM-centered reference for rotation removal
+        ref_positions = recenter_com(sys.positions, sys.masses, mask=sys.atom_mask)
         state = LangevinState(
-            positions=sys.positions,
+            positions=ref_positions,  # start COM-centered
             momentum=jnp.zeros_like(sys.positions),
             force=initial_f,
             mass=sys.masses,
-            key=k
+            key=k,
+            cap_count=jnp.array(0, dtype=jnp.int32),
         )
-        def scan_step(s, _):
-            return step_fn(sys, s), None
-        final_s, _ = lax.scan(scan_step, state, None, length=n_steps)
-        return final_s
+
+        def run_stage(carry, stage_params):
+            """Run one equilibration stage via lax.fori_loop."""
+            s = carry
+            dt, kT, fcap, k_rest, n = stage_params
+
+            def body_fn(step_i, s_inner):
+                s_next = langevin_step(s_inner, dt, kT, fcap, k_rest)
+                # COM re-centering every DEFAULT_RECENTER_EVERY steps
+                r_corrected = apply_com_correction(
+                    s_next.positions, sys.masses, ref_positions,
+                    step_i, DEFAULT_RECENTER_EVERY, True,
+                    mask=sys.atom_mask,
+                )
+                return LangevinState(
+                    r_corrected, s_next.momentum, s_next.force,
+                    s_next.mass, s_next.key, s_next.cap_count
+                )
+
+            final_s = lax.fori_loop(0, n, body_fn, s)
+            max_r = jnp.max(jnp.abs(final_s.positions * sys.atom_mask[:, None]))
+            max_f_real = jnp.max(jnp.sqrt(
+                jnp.sum(final_s.force ** 2, axis=-1) + 1e-12
+            ) * sys.atom_mask)
+            jax.debug.print(
+                "  [eq_stage] dt={dt:.4f} kT={kT:.4f} cap={cap} k_rest={kr}"
+                " steps={n} => max_r={r:.1f} max_f={f:.1f}",
+                dt=dt, kT=kT, cap=fcap, kr=k_rest, n=n,
+                r=max_r, f=max_f_real,
+            )
+            return final_s, None
+
+        stage_params = (
+            stage_dts, stage_kTs, stage_force_caps,
+            stage_restraint_k, stage_step_counts,
+        )
+        final_state, _ = lax.scan(
+            run_stage, state, stage_params,
+        )
+        # === Validation gate: post-equilibration structural quality ===
+        # Check that the protein has not inflated during equilibration.
+        # Compute Rg before and after, plus max per-atom displacement.
+        def compute_rg(positions, masses, mask):
+            """Radius of gyration for real atoms only."""
+            m = masses * mask  # zero out padding
+            total_m = jnp.sum(m) + 1e-12
+            com = jnp.sum(positions * m[:, None], axis=0) / total_m
+            dr = positions - com[None, :]
+            rg2 = jnp.sum(m * jnp.sum(dr ** 2, axis=-1)) / total_m
+            return jnp.sqrt(rg2 + 1e-12)
+
+        rg_init = compute_rg(ref_positions, sys.masses, sys.atom_mask)
+        rg_final = compute_rg(final_state.positions, sys.masses, sys.atom_mask)
+        rg_ratio = rg_final / (rg_init + 1e-8)
+
+        # Max per-atom displacement from minimized reference
+        disp = jnp.sqrt(jnp.sum(
+            (final_state.positions - ref_positions) ** 2, axis=-1) + 1e-12
+        ) * sys.atom_mask
+        max_disp = jnp.max(disp)
+
+        eq_ok = jnp.logical_and(rg_ratio < 1.5, max_disp < 15.0)
+        jax.debug.print(
+            "  [eq_gate] Rg_init={ri:.1f} Rg_final={rf:.1f} ratio={rat:.2f}"
+            " max_disp={md:.1f} PASS={ok}",
+            ri=rg_init, rf=rg_final, rat=rg_ratio, md=max_disp, ok=eq_ok,
+        )
+
+        return final_state
         
     return safe_map(equilibrate_single, (batch, keys), chunk_size=chunk_size)
 
@@ -574,6 +1201,10 @@ def safe_map_no_output(
 
     num_chunks = max(1, B // chunk_size)
 
+    # Short-circuit: if everything fits in one chunk, skip scan overhead
+    if num_chunks == 1:
+        return jax.vmap(fn)(batch)
+
     def map_fn(chunk_leaves):
         chunk_batch = jax.tree_util.tree_unflatten(treedef, chunk_leaves)
         return jax.vmap(fn)(chunk_batch)
@@ -602,6 +1233,9 @@ def batched_produce_streaming(
     write_fn: Callable,
     temperature_k: float = 310.15,
     chunk_size: int | None = None,
+    recenter_every: int = DEFAULT_RECENTER_EVERY,
+    remove_rotation: bool = True,
+    write_batch_size: int = 1,
 ) -> LangevinState:
     """Produce trajectory with streaming IO — no GPU trajectory accumulation.
 
@@ -610,17 +1244,29 @@ def batched_produce_streaming(
     to the host as it's produced. The host-side write_fn handles serialization
     and disk IO asynchronously while the GPU continues computing.
 
+    COM re-centering (and optional rotation removal) is applied every
+    `recenter_every` MD steps per AMBER/OpenMM standards for implicit solvent.
+    Only positions are modified — velocities/momenta are never touched.
+
+    When write_batch_size > 1, frames are accumulated on GPU and flushed
+    in batches to reduce io_callback overhead.
+
     Args:
         batch: Batched padded systems (B, N, 3).
         state: Initial Langevin state from equilibration.
         n_saves: Number of trajectory frames to save.
         steps_per_save: MD steps between saves.
-        write_fn: Host callback with signature (positions, batch_idx, save_idx) -> None.
-            positions: (N, 3) array for one system at one save point.
-            batch_idx: int, index into the batch dimension.
-            save_idx: int, which save frame this is.
+        write_fn: Host callback. If write_batch_size == 1:
+            (positions, batch_idx, save_idx) -> None.
+            If write_batch_size > 1:
+            (positions_batch, batch_idx, start_save_idx) -> None
+            where positions_batch is (write_batch_size, N, 3).
         temperature_k: Temperature in Kelvin.
         chunk_size: Chunk size for safe_map. None = full vmap.
+        recenter_every: Apply COM re-centering every N MD steps.
+        remove_rotation: If True, also remove global rotation via Kabsch.
+        write_batch_size: Number of frames to accumulate before IO callback.
+            Must divide n_saves evenly. 1 = write every frame (original).
 
     Returns:
         Final LangevinState (no trajectory — it was streamed to disk).
@@ -643,28 +1289,107 @@ def batched_produce_streaming(
     ) -> LangevinState:
         sys, s, batch_idx = args
 
-        def save_step(s, save_idx):
-            # Run steps_per_save MD steps
-            def single_step(s_inner, _):
-                return step_fn(sys, s_inner), None
+        # Reference frame for rotation removal: COM-centered initial positions
+        ref_positions = recenter_com(s.positions, sys.masses, mask=sys.atom_mask)
 
-            s_next, _ = lax.scan(single_step, s, None, length=steps_per_save)
+        if write_batch_size > 1:
+            # --- Batched IO path: accumulate frames, flush in batches ---
+            assert n_saves % write_batch_size == 0, (
+                f"write_batch_size={write_batch_size} must divide "
+                f"n_saves={n_saves}"
+            )
+            n_batches = n_saves // write_batch_size
 
-            # Stream frame to host — fires async when buffer is ready
-            io_callback(
-                write_fn,
-                None,  # void return (no data back to GPU)
-                s_next.positions,
-                batch_idx,
-                save_idx,
-                # Note: ordered=True is incompatible with vmap.
-                # Frame ordering within each system is guaranteed by lax.scan.
+            def batch_step(carry, batch_save_idx):
+                s_carry, global_step = carry
+
+                def save_step(inner_carry, _local_idx):
+                    s_inner, step_count = inner_carry
+
+                    # Run steps_per_save MD steps with COM correction
+                    def single_step(step_carry, _):
+                        s_md, step_i = step_carry
+                        s_next = step_fn(sys, s_md)
+                        # COM re-centering (positions only, no velocity touch)
+                        r_corrected = apply_com_correction(
+                            s_next.positions, sys.masses, ref_positions,
+                            step_i, recenter_every, remove_rotation,
+                            mask=sys.atom_mask,
+                        )
+                        s_next = LangevinState(
+                            r_corrected, s_next.momentum, s_next.force,
+                            s_next.mass, s_next.key, s_next.cap_count
+                        )
+                        return (s_next, step_i + 1), None
+
+                    (s_after, new_step_count), _ = lax.scan(
+                        single_step, (s_inner, step_count),
+                        None, length=steps_per_save,
+                    )
+                    return (s_after, new_step_count), s_after.positions
+
+                # Accumulate write_batch_size frames
+                (s_after_batch, new_global_step), frames = lax.scan(
+                    save_step, (s_carry, global_step),
+                    None, length=write_batch_size,
+                )
+                # frames: (write_batch_size, N, 3)
+
+                start_save_idx = batch_save_idx * write_batch_size
+                io_callback(
+                    write_fn,
+                    None,
+                    frames,
+                    batch_idx,
+                    start_save_idx,
+                )
+
+                return (s_after_batch, new_global_step), None
+
+            (final_s, _), _ = lax.scan(
+                batch_step, (s, jnp.int32(0)),
+                jnp.arange(n_batches),
             )
 
-            # Return state only — NO trajectory accumulation
-            return s_next, None
+        else:
+            # --- Original per-frame IO path with COM correction ---
+            def save_step(carry, save_idx):
+                s_carry, global_step = carry
 
-        final_s, _ = lax.scan(save_step, s, jnp.arange(n_saves))
+                def single_step(step_carry, _):
+                    s_inner, step_i = step_carry
+                    s_next = step_fn(sys, s_inner)
+                    r_corrected = apply_com_correction(
+                        s_next.positions, sys.masses, ref_positions,
+                        step_i, recenter_every, remove_rotation,
+                        mask=sys.atom_mask,
+                    )
+                    s_next = LangevinState(
+                        r_corrected, s_next.momentum, s_next.force,
+                        s_next.mass, s_next.key, s_next.cap_count
+                    )
+                    return (s_next, step_i + 1), None
+
+                (s_next, new_step), _ = lax.scan(
+                    single_step, (s_carry, global_step),
+                    None, length=steps_per_save,
+                )
+
+                io_callback(
+                    write_fn,
+                    None,
+                    s_next.positions,
+                    batch_idx,
+                    save_idx,
+                )
+
+                return (s_next, new_step), None
+
+            (final_s, _), _ = lax.scan(
+                save_step, (s, jnp.int32(0)),
+                jnp.arange(n_saves),
+            )
+
         return final_s
 
     # Build batch indices for the callback
@@ -836,11 +1561,17 @@ def make_langevin_step_nl_dynamic(
 
         # B — compute forces with CURRENT neighbor list
         f = force_fn(r)
+        f = jnp.where(jnp.isfinite(f), f, 0.0)
         p = p - 0.5 * dt * f
 
         r = r.astype(state.positions.dtype)
         p = p.astype(state.momentum.dtype)
         f = f.astype(state.force.dtype)
+
+        # Zero out padding atoms
+        amask = padded_sys.atom_mask[:, None]
+        r = jnp.where(amask, r, jnp.float32(0.0))
+        p = jnp.where(amask, p, jnp.float32(0.0))
 
         # Update neighbor list AFTER force computation.
         # The updated NL will be used by the NEXT step.

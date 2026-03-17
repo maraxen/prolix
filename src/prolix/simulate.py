@@ -594,27 +594,60 @@ def run_simulation(
   # PBC/explicit solvent support with neighbor lists, FIRE would need a
   # wrapper that calls nbr.update() every N steps.
 
-  def _make_fire_energy(soft_core_lambda=None):
-    """Create energy function for FIRE, optionally with soft-core LJ."""
-    if neighbor is not None and soft_core_lambda is not None:
-      return lambda r: energy_fn(r, neighbor=neighbor, soft_core_lambda=soft_core_lambda)
-    elif neighbor is not None:
-      return lambda r: energy_fn(r, neighbor=neighbor)
-    elif soft_core_lambda is not None:
-      return lambda r: energy_fn(r, soft_core_lambda=soft_core_lambda)
-    else:
-      return energy_fn
+  # ── Position Restraints Setup ──
+  # Apply restraints to all heavy atoms (element_id > 1) to prevent inflation.
+  element_ids = getattr(protein_system, "element_ids", None)
+  if element_ids is not None:
+    restraint_mask = jnp.where(element_ids > 1, 1.0, 0.0)
+    logger.info("  Position restraints: active on %d heavy atoms", int(jnp.sum(restraint_mask)))
+  else:
+    # Fallback to mass-based check if element_ids missing
+    restraint_mask = jnp.where(masses > 1.1, 1.0, 0.0)
+    logger.warning("  Using mass-based restraint mask (element_ids not found)")
 
-  def _make_capped_fire_apply(fire_apply_fn, force_cap):
-    """Create force-capped FIRE apply function."""
+  def _make_fire_energy(soft_core_lambda=None, use_restraints=False):
+    """Create energy function for FIRE, optionally with soft-core LJ and restraints."""
+    kwargs = {}
+    if soft_core_lambda is not None:
+      kwargs["soft_core_lambda"] = soft_core_lambda
+    
+    if use_restraints:
+      kwargs["restraint_ref"] = initial_positions
+      kwargs["k_restraint"] = 50.0
+      kwargs["restraint_mask"] = restraint_mask
+
+    if neighbor is not None:
+      return lambda r: energy_fn(r, neighbor=neighbor, **kwargs)
+    else:
+      def _energy_wrapper(r):
+        return energy_fn(r, **kwargs)
+      return _energy_wrapper
+
+  def _make_capped_fire_apply(fire_apply_fn, force_cap, disp_cap=0.1):
+    """Create force-capped and displacement-capped FIRE apply function."""
     def capped_apply(state, **kwargs):
+      # 1. Force capping
       f = state.force
       f_norm = jnp.linalg.norm(f, axis=-1, keepdims=True)
       cap = jnp.minimum(1.0, force_cap / (f_norm + 1e-8))
       f_capped = f * cap
       f_safe = jnp.where(jnp.isfinite(f_capped), f_capped, 0.0)
       state = dataclasses.replace(state, force=f_safe)
-      return fire_apply_fn(state, **kwargs)
+      
+      # 2. Apply FIRE step
+      new_state = fire_apply_fn(state, **kwargs)
+      
+      # 3. Displacement capping (limit |dr| to disp_cap Å)
+      dr = new_state.position - state.position
+      dr_norm = jnp.linalg.norm(dr, axis=-1, keepdims=True)
+      scale = jnp.minimum(1.0, disp_cap / (dr_norm + 1e-8))
+      
+      # If capped, we also scale down velocity to maintain some consistency
+      new_pos = state.position + dr * scale
+      new_vel = new_state.velocity * scale
+      
+      return dataclasses.replace(new_state, position=new_pos, velocity=new_vel)
+      
     return capped_apply
 
   # ── Dynamic step-size initialization (#2179) ──
@@ -638,10 +671,11 @@ def run_simulation(
   # because soft-core with λ=1 recovers the singularity at r=0.
 
   stages = [
-    {"name": "Stage 1 (λ=0.1)", "lambda": 0.1, "force_cap": 10.0,   "steps": 500},
-    {"name": "Stage 2 (λ=0.5)", "lambda": 0.5, "force_cap": 100.0,  "steps": 500},
-    {"name": "Stage 3 (λ=0.9)", "lambda": 0.9, "force_cap": 1000.0, "steps": 1000},
-    {"name": "Stage 4 (full)",  "lambda": None, "force_cap": None,   "steps": 3000},
+    {"name": "Stage 0 (Restrained)", "lambda": 0.1, "force_cap": 10.0,   "steps": 500,  "restrain": True},
+    {"name": "Stage 1 (λ=0.1)",     "lambda": 0.1, "force_cap": 10.0,   "steps": 500,  "restrain": False},
+    {"name": "Stage 2 (λ=0.5)",     "lambda": 0.5, "force_cap": 100.0,  "steps": 500,  "restrain": False},
+    {"name": "Stage 3 (λ=0.9)",     "lambda": 0.9, "force_cap": 1000.0, "steps": 1000, "restrain": False},
+    {"name": "Stage 4 (full)",      "lambda": None, "force_cap": None,   "steps": 3000, "restrain": False},
   ]
 
   current_positions = initial_positions
@@ -652,7 +686,7 @@ def run_simulation(
     n_steps = stage["steps"]
 
     # Create energy function for this stage
-    stage_energy_fn = _make_fire_energy(soft_core_lambda=sc_lam)
+    stage_energy_fn = _make_fire_energy(soft_core_lambda=sc_lam, use_restraints=use_restraints)
 
     # Create FIRE instance for this stage
     stage_init_fn, stage_apply_fn = jax_md_minimize.fire_descent(
