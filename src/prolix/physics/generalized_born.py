@@ -585,7 +585,7 @@ def compute_ace_nonpolar_energy(
   """Computes non-polar solvation energy using the ACE approximation.
 
   OpenMM Formula (from CustomGBForce):
-  E = 28.3919551 * (radius + 0.14)^2 * (radius / B)^6  [kJ/mol, radius in nm]
+  E_i = 28.3919551 * (radius + 0.14)^2 * (radius / B)^6  [kJ/mol, radius in nm]
 
   where:
   - radius = offset_radius + offset = (intrinsic_radius - dielectric_offset) + 0.009
@@ -599,20 +599,12 @@ def compute_ace_nonpolar_energy(
       dielectric_offset: Dielectric offset (default 0.09 Å).
 
   Returns:
-      Total non-polar energy (scalar) in kcal/mol.
+      Per-atom non-polar energy (N,) in kcal/mol. Callers must mask
+      padding atoms and sum to get the total.
 
   """
   # OpenMM coefficient: 28.3919551 kJ/mol/nm^2
   ACE_COEFF_KJ_NM = 28.3919551
-
-  # Convert to kcal/mol/Å^2 for our units
-  # 28.3919551 kJ/mol/nm^2 * (1 nm / 10 Å)^2 * 0.239006 kcal/kJ
-  # = 28.3919551 * 0.239006 / 100 kcal/mol/Å^2
-  # = 0.006787 kcal/mol/Å^2
-  # But OpenMM formula also has +0.14 nm = 1.4 Å for radius term
-
-  # OpenMM uses: (or + 0.009 nm) = (or_A / 10 + 0.009) nm for radius
-  # Let's stay in nm for this calculation then convert energy to kcal
 
   # offset_radius in nm
   offset_radii_nm = (radii - dielectric_offset) / 10.0  # Convert Å to nm
@@ -628,11 +620,10 @@ def compute_ace_nonpolar_energy(
   term2 = (radius_nm / born_radii_nm) ** 6
 
   energy_per_atom_kj = ACE_COEFF_KJ_NM * term1 * term2
-  total_energy_kj = jnp.sum(energy_per_atom_kj)
 
-  # Convert to kcal/mol
+  # Convert to kcal/mol — return per-atom, NOT summed
   KJ_TO_KCAL = 0.239006
-  return total_energy_kj * KJ_TO_KCAL
+  return energy_per_atom_kj * KJ_TO_KCAL
 
 
 # =============================================================================

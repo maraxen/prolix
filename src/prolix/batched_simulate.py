@@ -689,7 +689,7 @@ def batched_minimize(
         # NLM: "SD should NOT release restraints — FIRE handles the full
         # release schedule."
         def sd_step(carry, _):
-            r, k_rest, sel_mask, max_dx = carry
+            i, r, k_rest, sel_mask, max_dx = carry
             sys_with_r = dataclasses.replace(sys, positions=r)
             f_phys = single_padded_force(sys_with_r, displacement_fn, soft_core_lambda=jnp.float32(1.0))
             f_rest = -k_rest * (r - r_ref) * atom_mask[:, None] * sel_mask[:, None]
@@ -699,16 +699,33 @@ def batched_minimize(
             forces = forces * pad_mask_3d
             forces = jnp.where(jnp.isfinite(forces), forces, 0.0)
 
+            # Calculate rms inside JIT
+            f_mag = jnp.sqrt(jnp.sum(forces**2, axis=-1))
+            rms = jnp.sqrt(jnp.sum(f_mag**2 * atom_mask) / jnp.maximum(jnp.sum(atom_mask), 1.0))
+
+            # Also compute energy for diagnostics
+            sys_diag = dataclasses.replace(sys, positions=r)
+            e_diag = single_padded_energy(sys_diag, displacement_fn, soft_core_lambda=jnp.float32(1.0))
+
+            def _log_sd(rms_val, step_val, e_val):
+                import logging
+                logging.getLogger("batched_simulate").info(
+                    "      [SD step %d] rms_grad = %.4f  energy = %.2f",
+                    int(step_val), float(rms_val), float(e_val),
+                )
+
+            jax.lax.cond(i % 1000 == 0, lambda: jax.debug.callback(_log_sd, rms, i, e_diag), lambda: None)
+
             # Per-atom displacement capping (AMBER dx0 = 0.01Å)
             dt = jnp.float32(0.002)
             dr = forces * dt
             dr_mag = jnp.sqrt(jnp.sum(dr**2, axis=-1, keepdims=True) + 1e-30)
             dr = dr * jnp.minimum(1.0, max_dx / dr_mag)
 
-            return (r + dr, k_rest, sel_mask, max_dx), None
+            return (i + 1, r + dr, k_rest, sel_mask, max_dx), None
 
-        sd_carry = (r_ref, jnp.float32(500.0), sys.is_heavy, jnp.float32(0.01))
-        (r_after_sd, _, _, _), _ = lax.scan(sd_step, sd_carry, None, length=max_steps)
+        sd_carry = (jnp.int32(0), r_ref, jnp.float32(500.0), sys.is_heavy, jnp.float32(0.01))
+        (sd_iters, r_after_sd, _, _, _), _ = lax.scan(sd_step, sd_carry, None, length=max_steps)
 
         # NaN rollback
         sd_failed = jnp.any(~jnp.isfinite(r_after_sd))
@@ -746,15 +763,31 @@ def batched_minimize(
             )
 
             # Per-step displacement cap (0.1Å), NO force capping
+            # Carry: (step, state, best_r, best_rms)
             def _make_fire_body(apply_fn, r_start):
                 def fire_body_fn(carry):
-                    i, state = carry
+                    i, state, best_r, best_rms = carry
                     r_before = state.position
 
                     # NaN guard on forces (but no magnitude cap)
                     f = state.force * pad_mask_3d
                     f = jnp.where(jnp.isfinite(f), f, 0.0)
                     state = dataclasses.replace(state, force=f)
+
+                    # Calculate rms inside JIT
+                    f_mag = jnp.sqrt(jnp.sum(f**2, axis=-1))
+                    rms = jnp.sqrt(jnp.sum(f_mag**2 * atom_mask) / jnp.maximum(jnp.sum(atom_mask), 1.0))
+
+                    # Update best snapshot if current is lower
+                    is_better = rms < best_rms
+                    new_best_r = jnp.where(is_better, state.position, best_r)
+                    new_best_rms = jnp.where(is_better, rms, best_rms)
+
+                    def _log_fire(rms_val, step_val, best_val):
+                        import logging
+                        logging.getLogger("batched_simulate").info("      [FIRE stage %d step %d] rms_grad = %.6f  (best = %.6f)", stage_idx, int(step_val), float(rms_val), float(best_val))
+
+                    jax.lax.cond(i % 2000 == 0, lambda: jax.debug.callback(_log_fire, rms, i, new_best_rms), lambda: None)
 
                     # FIRE step (unmodified algorithm)
                     state = apply_fn(state)
@@ -771,7 +804,7 @@ def batched_minimize(
                     # Pin padding atoms
                     new_r = jnp.where(pad_mask_3d, new_r, r_ref)
                     new_v = new_v * pad_mask_3d
-                    return (i + 1, dataclasses.replace(state, position=new_r, momentum=new_v))
+                    return (i + 1, dataclasses.replace(state, position=new_r, momentum=new_v), new_best_r, new_best_rms)
                 return fire_body_fn
 
             # Init FIRE with zero velocity (reinit between stages)
@@ -779,12 +812,13 @@ def batched_minimize(
             body_fn = _make_fire_body(fire_apply_fn, r_current)
             # while_loop instead of fori_loop: no reverse-mode AD needed,
             # so avoid scan's O(N) intermediate storage.
-            _, fire_final = lax.while_loop(
+            _, fire_final, best_r_stage, best_rms_stage = lax.while_loop(
                 lambda carry: carry[0] < n_fire_steps,
                 body_fn,
-                (jnp.int32(0), fire_state),
+                (jnp.int32(0), fire_state, r_current, jnp.float32(1e10)),
             )
-            r_current = fire_final.position
+            # Use best-seen position instead of final (FIRE oscillates)
+            r_current = best_r_stage
 
         r_after_fire = r_current
 
@@ -816,11 +850,29 @@ def batched_minimize(
                 e = jnp.where(jnp.isfinite(e), e, jnp.float32(1e10))
                 return e
 
+            _lbfgs_counter = [0]
             def l_val_and_grad(r):
                 e, g = jax.value_and_grad(_lbfgs_objective)(r)
                 # Zero out padded atom gradients and sanitize NaN
                 g = g * pad_mask_3d
                 g = jnp.where(jnp.isfinite(g), g, jnp.float32(0.0))
+                
+                # Calculate rms inside JIT
+                g_mag = jnp.sqrt(jnp.sum(g**2, axis=-1))
+                rms = jnp.sqrt(jnp.sum(g_mag**2 * atom_mask) / jnp.maximum(jnp.sum(atom_mask), 1.0))
+                
+                def _log_lbfgs(rms_val, e_val):
+                    import logging
+                    c = _lbfgs_counter[0]
+                    _lbfgs_counter[0] += 1
+                    # Log first 20 evals to catch onset, then every 200
+                    if c < 20 or c % 200 == 0:
+                        logging.getLogger("batched_simulate").info(
+                            "      [L-BFGS eval %d] energy = %.2f  rms_grad = %.4f",
+                            c, float(e_val), float(rms_val),
+                        )
+                
+                jax.debug.callback(_log_lbfgs, rms, e)
                 return e, g
 
             solver = jaxopt.LBFGS(
@@ -849,12 +901,12 @@ def batched_minimize(
         rms_grad = jnp.sqrt(jnp.sum(f_mag**2 * atom_mask) / jnp.maximum(jnp.sum(atom_mask), 1.0))
         converged = rms_grad < min_convergence
 
-        return r_final, converged
+        return r_final, converged, rms_grad
 
-    # Force chunk_size=1 for L-BFGS to avoid vmap+while_loop issues
-    effective_chunk_size = 1 if lbfgs_steps > 0 else chunk_size
-    results = safe_map(minimize_single, batch, chunk_size=effective_chunk_size)
-    return results[0], results[1]
+    # L-BFGS is vmap-compatible (jaxopt uses lax.while_loop internally).
+    # Previous chunk_size=1 restriction was removed after verifying vmap works.
+    results = safe_map(minimize_single, batch, chunk_size=chunk_size)
+    return results[0], results[1], results[2]
 
 def batched_equilibrate(
     batch: PaddedSystem,
@@ -1006,7 +1058,6 @@ def batched_equilibrate(
     B = batch.positions.shape[0]
     keys = jax.random.split(key, B)
     
-    from prolix.utils import safe_map
     results = safe_map(equilibrate_single, batch, keys, chunk_size=chunk_size)
     return results
 

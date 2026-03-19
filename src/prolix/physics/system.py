@@ -646,12 +646,12 @@ def make_energy_fn(
     else:
       radii = sigmas * 0.5  # Fallback (warning already emitted in compute_electrostatics)
 
-    return generalized_born.compute_ace_nonpolar_energy(
+    return jnp.sum(generalized_born.compute_ace_nonpolar_energy(
       jnp.asarray(radii),
       born_radii,
       surface_tension=surface_tension,
       probe_radius=constants.PROBE_RADIUS,
-    )
+    ))
 
   def compute_cmap_term(r):
     if system.cmap_torsions is None or system.cmap_energy_grids is None:
