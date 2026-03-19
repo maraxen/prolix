@@ -16,7 +16,7 @@ if TYPE_CHECKING:
 
 Array = util.Array
 
-ATOM_BUCKETS = (4096, 8192, 16384, 32768, 65536)
+ATOM_BUCKETS = (1024, 2048, 4096, 8192, 16384, 32768, 65536)
 
 class PaddedSystem(eqx.Module):
   """A protein system padded to a fixed atom count for vmap compatibility."""
@@ -31,6 +31,9 @@ class PaddedSystem(eqx.Module):
   masses: Array           # (N_padded,)
   element_ids: Array      # (N_padded,) int — atomic number (1=H, 6=C, 7=N, 8=O, 16=S)
   atom_mask: Array        # (N_padded,) bool — True for real atoms
+  is_hydrogen: Array      # (N_padded,) bool — True for hydrogen atoms
+  is_backbone: Array      # (N_padded,) bool — True for backbone atoms (N, CA, C, O)
+  is_heavy: Array         # (N_padded,) bool — True for real non-hydrogen atoms
   
   # Bonded term arrays (padded to max per bucket)
   bonds: Array            # (N_bonds_padded, 2) int
@@ -180,6 +183,20 @@ def pad_protein(
   padded_element_ids = pad_array(element_ids, target_atoms, 0)  # 0 = null element for ghosts
   
   atom_mask = create_mask(n_real, target_atoms)
+  
+  # Derive additional masks for selective restraints
+  atom_names = getattr(protein, "atom_names", None)
+  if atom_names is not None and len(atom_names) == n_real:
+      is_h = jnp.array([str(n).strip().startswith("H") for n in atom_names], dtype=jnp.bool_)
+      is_bb = jnp.array([str(n).strip() in {"N", "CA", "C", "O"} for n in atom_names], dtype=jnp.bool_)
+  else:
+      # Fallback: if no names, hydrogen defined by element_id==1
+      is_h = (element_ids == 1)
+      is_bb = jnp.zeros(n_real, dtype=jnp.bool_) # Cannot infer backbone without names
+  
+  padded_is_hydrogen = pad_array(is_h, target_atoms, False)
+  padded_is_backbone = pad_array(is_bb, target_atoms, False)
+  padded_is_heavy = atom_mask & ~padded_is_hydrogen
 
   # Exclusion data — sparse (N, max_excl) arrays
   from prolix.physics.neighbor_list import ExclusionSpec, map_exclusions_to_dense_padded
@@ -293,6 +310,9 @@ def pad_protein(
       masses=padded_masses,
       element_ids=padded_element_ids,
       atom_mask=atom_mask,
+      is_hydrogen=padded_is_hydrogen,
+      is_backbone=padded_is_backbone,
+      is_heavy=padded_is_heavy,
       bonds=padded_bonds,
       bond_params=padded_bond_params,
       bond_mask=bond_mask,
