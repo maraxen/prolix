@@ -947,7 +947,8 @@ def batched_equilibrate(
     # Caps: 0.1 -> 0.5 -> None (vlimit=20.0 handles safety)
     caps = jnp.array([0.1, 0.1, 0.2, 0.2, 0.5, 0.5, 10.0, 10.0, 10.0, 10.0], dtype=jnp.float32)
 
-    def equilibrate_single(sys: PaddedSystem, key: jax.Array) -> PaddedSystem:
+    def equilibrate_single(args: tuple[PaddedSystem, jax.Array]) -> PaddedSystem:
+        sys, key = args
         r_init = sys.positions
         atom_mask = sys.atom_mask
         pad_mask_3d = sys.atom_mask[:, None]
@@ -1058,7 +1059,7 @@ def batched_equilibrate(
     B = batch.positions.shape[0]
     keys = jax.random.split(key, B)
     
-    results = safe_map(equilibrate_single, batch, keys, chunk_size=chunk_size)
+    results = safe_map(equilibrate_single, (batch, keys), chunk_size=chunk_size)
     return results
 
 def batched_produce(
