@@ -11,6 +11,7 @@ from jax import lax
 from jax_md import space, partition
 
 from prolix.padding import PaddedSystem
+from prolix.simulate import AKMA_TIME_UNIT_FS, BOLTZMANN_KCAL
 
 if TYPE_CHECKING:
     from jax_md.util import Array
