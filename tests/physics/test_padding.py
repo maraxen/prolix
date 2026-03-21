@@ -55,9 +55,13 @@ def dummy_protein_large() -> Protein:
 
 def test_select_bucket():
     assert select_bucket(10) == ATOM_BUCKETS[0]
-    assert select_bucket(4000) == ATOM_BUCKETS[0]
-    assert select_bucket(4096) == ATOM_BUCKETS[0]
-    assert select_bucket(4097) == ATOM_BUCKETS[1]  # 8192
+    assert select_bucket(2048) == 2048
+    assert select_bucket(2049) == 2816  # new tighter bucket
+    assert select_bucket(2816) == 2816
+    assert select_bucket(2817) == 3072
+    assert select_bucket(4000) == 4096
+    assert select_bucket(4096) == 4096
+    assert select_bucket(4097) == 5120  # was 8192, now 5120
     
     with pytest.raises(ValueError, match="exceeds maximum bucket size"):
         select_bucket(1000000)

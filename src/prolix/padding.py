@@ -16,7 +16,7 @@ if TYPE_CHECKING:
 
 Array = util.Array
 
-ATOM_BUCKETS = (1024, 2048, 4096, 8192, 16384, 32768, 65536)
+ATOM_BUCKETS = (1024, 2048, 2816, 3072, 4096, 5120, 6144, 7168, 8192, 16384, 32768, 65536)
 
 class PaddedSystem(eqx.Module):
   """A protein system padded to a fixed atom count for vmap compatibility."""
