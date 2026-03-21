@@ -10,7 +10,7 @@ import jax.numpy as jnp
 from jax import lax
 from jax_md import space, partition
 
-from prolix.padding import PaddedSystem
+from prolix.padding import PaddedSystem, precompute_dense_exclusions
 from prolix.simulate import AKMA_TIME_UNIT_FS, BOLTZMANN_KCAL
 
 if TYPE_CHECKING:
@@ -672,6 +672,7 @@ def batched_minimize(
         raise ValueError(f"fire_stage_steps must have 4 values, got {len(fire_stage_steps)}")
 
     def minimize_single(sys: PaddedSystem) -> tuple[Array, Array]:
+        sys = precompute_dense_exclusions(sys)
         r_ref = sys.positions  # Reference geometry for restraints
         atom_mask = sys.atom_mask
         pad_mask_3d = sys.atom_mask[:, None]  # (N, 1)
@@ -910,13 +911,15 @@ def batched_minimize(
     return results[0], results[1], results[2]
 
 def batched_equilibrate(
-    batch: PaddedSystem,
+    unique_batch: PaddedSystem,
+    system_index: jax.Array,
+    positions: jax.Array,
     key: jax.Array,
     duration_ps: float = 100.0,
     temp: float = 300.0,
     chunk_size: int | None = 1,
-) -> PaddedSystem:
-    """Run a 10-stage NVT equilibration warmup for a batch of systems.
+) -> LangevinState:
+    """Run a 10-stage NVT equilibration warmup using indexed shared topology.
 
     Implements a 100ps production-grade protocol:
     1. 10 stages of 10ps each.
@@ -926,14 +929,16 @@ def batched_equilibrate(
     5. All stages at λ=1.0.
 
     Args:
-        batch: Padded batch of protein systems.
+        unique_batch: Padded batch of unique protein systems.
+        system_index: (B,) array mapping replica to unique system index.
+        positions: (B, N, 3) initial positions (usually from batched_minimize).
         key: PRNG key for Langevin noise.
         duration_ps: Total equilibration time in ps (default 100).
         temp: Final target temperature in K (default 300).
         chunk_size: Systems per vmap chunk.
 
     Returns:
-        equilibrated_batch: Final PaddedSystem with updated positions.
+        equilibrated_state: Final LangevinState.
     """
     from prolix.batched_energy import single_padded_force
     
@@ -948,8 +953,16 @@ def batched_equilibrate(
     # Caps: 0.1 -> 0.5 -> None (vlimit=20.0 handles safety)
     caps = jnp.array([0.1, 0.1, 0.2, 0.2, 0.5, 0.5, 10.0, 10.0, 10.0, 10.0], dtype=jnp.float32)
 
-    def equilibrate_single(args: tuple[PaddedSystem, jax.Array]) -> PaddedSystem:
-        sys, key = args
+    def equilibrate_single(args: tuple[int, jax.Array, jax.Array]) -> LangevinState:
+        sys_idx, pos, key = args
+        
+        # 0. Reconstruct PaddedSystem from unique shared topology + dynamic pos
+        sys = jax.tree_util.tree_map(lambda x: x[sys_idx], unique_batch)
+        sys = dataclasses.replace(sys, positions=pos)
+        # Note: exclusions should ideally be precomputed on unique_batch before calling this
+        if not hasattr(sys, 'dense_excl_scale_vdw') or sys.dense_excl_scale_vdw is None:
+            sys = precompute_dense_exclusions(sys)
+
         r_init = sys.positions
         atom_mask = sys.atom_mask
         pad_mask_3d = sys.atom_mask[:, None]
@@ -1054,13 +1067,20 @@ def batched_equilibrate(
         final_carry, _ = jax.lax.scan(stage_body_fn, init_carry, stage_params)
         final_r, _, _ = final_carry
         
-        return dataclasses.replace(sys, positions=final_r)
+        return LangevinState(
+            positions=final_r,
+            momentum=jnp.zeros_like(final_r), # Start prod with zero momenta or thermalized
+            force=jnp.zeros_like(final_r),
+            mass=sys.masses,
+            key=key,
+            cap_count=jnp.array(0, dtype=jnp.int32)
+        )
 
     # Shard key for replicas
-    B = batch.positions.shape[0]
+    B = positions.shape[0]
     keys = jax.random.split(key, B)
     
-    results = safe_map(equilibrate_single, (batch, keys), chunk_size=chunk_size)
+    results = safe_map(equilibrate_single, (system_index, positions, keys), chunk_size=chunk_size)
     return results
 
 def batched_produce(
@@ -1082,6 +1102,7 @@ def batched_produce(
     
     def produce_single(args: tuple[PaddedSystem, LangevinState]) -> tuple[LangevinState, Array]:
         sys, s = args
+        sys = precompute_dense_exclusions(sys)
         
         def save_step(s, _):
             def single_step(s_inner, _):
@@ -1153,7 +1174,8 @@ def safe_map_no_output(
 
 
 def batched_produce_streaming(
-    batch: PaddedSystem,
+    unique_batch: PaddedSystem,
+    system_index: jax.Array,
     state: LangevinState,
     n_saves: int,
     steps_per_save: int,
@@ -1163,6 +1185,8 @@ def batched_produce_streaming(
     recenter_every: int = DEFAULT_RECENTER_EVERY,
     remove_rotation: bool = False,
     write_batch_size: int = 1,
+    start_frame: int = 0,
+    device_offset: int = 0,
 ) -> LangevinState:
     """Produce trajectory with streaming IO — no GPU trajectory accumulation.
 
@@ -1179,7 +1203,8 @@ def batched_produce_streaming(
     in batches to reduce io_callback overhead.
 
     Args:
-        batch: Batched padded systems (B, N, 3).
+        unique_batch: Batched padded systems (unique only) (B_unique, N, 3).
+        system_index: (B,) array mapping replica to unique system index.
         state: Initial Langevin state from equilibration.
         n_saves: Number of trajectory frames to save.
         steps_per_save: MD steps between saves.
@@ -1194,6 +1219,7 @@ def batched_produce_streaming(
         remove_rotation: If True, also remove global rotation via Kabsch.
         write_batch_size: Number of frames to accumulate before IO callback.
             Must divide n_saves evenly. 1 = write every frame (original).
+        device_offset: Global offset for batch_idx in distributed runs.
 
     Returns:
         Final LangevinState (no trajectory — it was streamed to disk).
@@ -1208,24 +1234,33 @@ def batched_produce_streaming(
     step_fn = make_langevin_step(dt, kT, gamma)
 
     # Get batch size for index computation
-    leaves, _ = jax.tree_util.tree_flatten(batch)
-    B = leaves[0].shape[0]
+    B = state.positions.shape[0]
 
     def produce_single_streaming(
-        args: tuple[PaddedSystem, LangevinState, Any],
+        args: tuple[int, LangevinState, Any],
     ) -> LangevinState:
-        sys, s, batch_idx = args
+        sys_idx, s, local_batch_idx = args
+        batch_idx = local_batch_idx + device_offset
+        
+        # 0. Reconstruct PaddedSystem from unique shared topology + dynamic pos
+        sys = jax.tree_util.tree_map(lambda x: x[sys_idx], unique_batch)
+        sys = dataclasses.replace(sys, positions=s.positions)
+        if not hasattr(sys, 'dense_excl_scale_vdw') or sys.dense_excl_scale_vdw is None:
+            sys = precompute_dense_exclusions(sys)
 
         # Reference frame for rotation removal: COM-centered initial positions
         ref_positions = recenter_com(s.positions, sys.masses, mask=sys.atom_mask)
 
+        # Adjust for resumed production
+        remaining_saves = n_saves - start_frame
+
         if write_batch_size > 1:
             # --- Batched IO path: accumulate frames, flush in batches ---
-            assert n_saves % write_batch_size == 0, (
+            assert remaining_saves % write_batch_size == 0, (
                 f"write_batch_size={write_batch_size} must divide "
-                f"n_saves={n_saves}"
+                f"remaining_saves={remaining_saves}"
             )
-            n_batches = n_saves // write_batch_size
+            n_batches = remaining_saves // write_batch_size
 
             def batch_step(carry, batch_save_idx):
                 s_carry, global_step = carry
@@ -1262,7 +1297,8 @@ def batched_produce_streaming(
                 )
                 # frames: (write_batch_size, N, 3)
 
-                start_save_idx = batch_save_idx * write_batch_size
+                # Write trajectory frames (offset by start_frame)
+                start_save_idx = batch_save_idx * write_batch_size + start_frame
                 io_callback(
                     write_fn,
                     None,

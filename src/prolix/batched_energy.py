@@ -361,18 +361,26 @@ def single_padded_energy(sys: PaddedSystem, displacement_fn: space.DisplacementF
     
     e_cmap = _cmap_energy_masked(r, sys.cmap_torsions, sys.cmap_mask, sys.cmap_coeffs, displacement_fn)
     
-    # Non-bonded — build dense exclusion scale matrices from sparse arrays.
+    # Non-bonded — use precomputed dense exclusion scale matrices if available.
+    # These are topology constants (independent of r). Precomputing once
+    # avoids the costly fori_loop+scatter rebuild every step.
     # stop_gradient is critical: the fori_loop+scatter backward pass in
     # _build_dense_exclusion_scales produces NaN due to overlapping scatter
     # indices. These matrices are topology constants (independent of r),
     # so cutting the gradient is both correct and necessary.
     N = len(sys.atom_mask)
-    excl_scale_vdw = jax.lax.stop_gradient(_build_dense_exclusion_scales(
-        sys.excl_indices, sys.excl_scales_vdw, N,
-    ))
-    excl_scale_elec = jax.lax.stop_gradient(_build_dense_exclusion_scales(
-        sys.excl_indices, sys.excl_scales_elec, N,
-    ))
+    if sys.dense_excl_scale_vdw is not None:
+        excl_scale_vdw = sys.dense_excl_scale_vdw
+    else:
+        excl_scale_vdw = jax.lax.stop_gradient(_build_dense_exclusion_scales(
+            sys.excl_indices, sys.excl_scales_vdw, N,
+        ))
+    if sys.dense_excl_scale_elec is not None:
+        excl_scale_elec = sys.dense_excl_scale_elec
+    else:
+        excl_scale_elec = jax.lax.stop_gradient(_build_dense_exclusion_scales(
+            sys.excl_indices, sys.excl_scales_elec, N,
+        ))
 
     e_lj = _lj_energy_masked(
         r, sys.sigmas, sys.epsilons, sys.atom_mask, displacement_fn,
@@ -469,13 +477,19 @@ def single_padded_force(
     bonded_force = -jax.grad(bonded_energy)(r)
 
     # --- Nonbonded forces (analytical) ---
-    # Build exclusion scale matrices (topology constants, stop_gradient)
-    excl_scale_vdw = jax.lax.stop_gradient(_build_dense_exclusion_scales(
-        sys.excl_indices, sys.excl_scales_vdw, N,
-    ))
-    excl_scale_elec = jax.lax.stop_gradient(_build_dense_exclusion_scales(
-        sys.excl_indices, sys.excl_scales_elec, N,
-    ))
+    # Use precomputed dense exclusion matrices when available (topology constants).
+    if sys.dense_excl_scale_vdw is not None:
+        excl_scale_vdw = sys.dense_excl_scale_vdw
+    else:
+        excl_scale_vdw = jax.lax.stop_gradient(_build_dense_exclusion_scales(
+            sys.excl_indices, sys.excl_scales_vdw, N,
+        ))
+    if sys.dense_excl_scale_elec is not None:
+        excl_scale_elec = sys.dense_excl_scale_elec
+    else:
+        excl_scale_elec = jax.lax.stop_gradient(_build_dense_exclusion_scales(
+            sys.excl_indices, sys.excl_scales_elec, N,
+        ))
 
     f_lj = lj_forces_dense(
         r, sys.sigmas, sys.epsilons, sys.atom_mask,
