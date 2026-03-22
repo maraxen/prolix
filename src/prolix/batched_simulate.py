@@ -959,9 +959,7 @@ def batched_equilibrate(
         # 0. Reconstruct PaddedSystem from unique shared topology + dynamic pos
         sys = jax.tree_util.tree_map(lambda x: x[sys_idx], unique_batch)
         sys = dataclasses.replace(sys, positions=pos)
-        # Note: exclusions should ideally be precomputed on unique_batch before calling this
-        if not hasattr(sys, 'dense_excl_scale_vdw') or sys.dense_excl_scale_vdw is None:
-            sys = precompute_dense_exclusions(sys)
+        # FlashMD uses sparse exclusions — no dense precomputation needed
 
         r_init = sys.positions
         atom_mask = sys.atom_mask
@@ -1102,7 +1100,7 @@ def batched_produce(
     
     def produce_single(args: tuple[PaddedSystem, LangevinState]) -> tuple[LangevinState, Array]:
         sys, s = args
-        sys = precompute_dense_exclusions(sys)
+        # FlashMD uses sparse exclusions — no dense precomputation needed
         
         def save_step(s, _):
             def single_step(s_inner, _):
@@ -1245,8 +1243,7 @@ def batched_produce_streaming(
         # 0. Reconstruct PaddedSystem from unique shared topology + dynamic pos
         sys = jax.tree_util.tree_map(lambda x: x[sys_idx], unique_batch)
         sys = dataclasses.replace(sys, positions=s.positions)
-        if not hasattr(sys, 'dense_excl_scale_vdw') or sys.dense_excl_scale_vdw is None:
-            sys = precompute_dense_exclusions(sys)
+        # FlashMD uses sparse exclusions — no dense precomputation needed
 
         # Reference frame for rotation removal: COM-centered initial positions
         ref_positions = recenter_com(s.positions, sys.masses, mask=sys.atom_mask)

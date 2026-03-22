@@ -421,32 +421,31 @@ def single_padded_force(
     displacement_fn: space.DisplacementFn,
     implicit_solvent: bool = True,
     soft_core_lambda: Array = jnp.array(1.0),
+    use_flash: bool = True,
 ) -> Array:
-    """Compute forces for a padded system using analytical nonbonded forces.
+    """Compute forces for a padded system.
 
-    Strategy:
-      - Bonded terms (bonds, angles, dihedrals, impropers, CMAP):
-        computed via jax.grad (safe — indexed gathers, no N² pathologies)
-      - LJ and Coulomb: computed analytically (avoids autodiff NaN from
-        exclusion matrix scatter and padded-atom 0-distance gradients)
-      - GB + ACE solvation: computed via decomposed VJP (3 targeted vjp
-        calls instead of one giant jax.grad — avoids 14 GiB OOM)
+    Two paths:
+      - FlashMD (use_flash=True, default): Chunked+checkpointed nonbonded
+        energy via tiled O(N²) with sparse exclusion correction. No dense
+        (N,N) exclusion matrices needed — memory is O(N) per replica.
+      - Legacy (use_flash=False): Separate analytical LJ, Coulomb, GB
+        force functions using dense (N,N) exclusion matrices.
+
+    Bonded terms (bonds, angles, dihedrals, impropers, CMAP) are always
+    computed via jax.grad — safe because they use indexed gathers (no N²).
 
     Args:
         sys: A PaddedSystem with all force field parameters.
         displacement_fn: JAX-MD displacement function.
         implicit_solvent: Whether to include GB solvation.
         soft_core_lambda: Soft-core coupling for LJ. 1.0 = standard.
+        use_flash: Use FlashMD architecture (default True). Set False to
+            use legacy dense-matrix path (requires dense_excl_scale_* fields).
 
     Returns:
         Forces (N, 3) in kcal/mol/Å. F = -dE/dr.
     """
-    from prolix.physics.analytical_forces import (
-        lj_forces_dense,
-        coulomb_forces_dense,
-        gb_ace_forces_dense,
-    )
-
     r = sys.positions
     N = len(sys.atom_mask)
 
@@ -476,42 +475,54 @@ def single_padded_force(
     # Bonded forces via autodiff (safe path — no N² operations)
     bonded_force = -jax.grad(bonded_energy)(r)
 
-    # --- Nonbonded forces (analytical) ---
-    # Use precomputed dense exclusion matrices when available (topology constants).
-    if sys.dense_excl_scale_vdw is not None:
-        excl_scale_vdw = sys.dense_excl_scale_vdw
+    if use_flash:
+        # --- FlashMD path: O(N) memory, sparse exclusions ---
+        from prolix.physics.flash_nonbonded import flash_nonbonded_forces
+        f_nonbonded = flash_nonbonded_forces(
+            sys,
+            soft_core_lambda=soft_core_lambda,
+        )
+        total_force = bonded_force + f_nonbonded
     else:
-        excl_scale_vdw = jax.lax.stop_gradient(_build_dense_exclusion_scales(
-            sys.excl_indices, sys.excl_scales_vdw, N,
-        ))
-    if sys.dense_excl_scale_elec is not None:
-        excl_scale_elec = sys.dense_excl_scale_elec
-    else:
-        excl_scale_elec = jax.lax.stop_gradient(_build_dense_exclusion_scales(
-            sys.excl_indices, sys.excl_scales_elec, N,
-        ))
-
-    f_lj = lj_forces_dense(
-        r, sys.sigmas, sys.epsilons, sys.atom_mask,
-        soft_core_lambda=soft_core_lambda,
-        excl_scale_vdw=excl_scale_vdw,
-    )
-    f_coulomb = coulomb_forces_dense(
-        r, sys.charges, sys.atom_mask,
-        excl_scale_elec=excl_scale_elec,
-    )
-
-    # --- Solvation forces (decomposed VJP — avoids OOM) ---
-    f_solv = jnp.zeros_like(r)
-    if implicit_solvent:
-        f_solv = gb_ace_forces_dense(
-            r, sys.charges, sys.radii, sys.scaled_radii, sys.atom_mask,
+        # --- Legacy path: dense (N,N) exclusion matrices required ---
+        from prolix.physics.analytical_forces import (
+            lj_forces_dense,
+            coulomb_forces_dense,
+            gb_ace_forces_dense,
         )
 
-    total_force = bonded_force + f_lj + f_coulomb + f_solv
+        if sys.dense_excl_scale_vdw is not None:
+            excl_scale_vdw = sys.dense_excl_scale_vdw
+        else:
+            excl_scale_vdw = jax.lax.stop_gradient(_build_dense_exclusion_scales(
+                sys.excl_indices, sys.excl_scales_vdw, N,
+            ))
+        if sys.dense_excl_scale_elec is not None:
+            excl_scale_elec = sys.dense_excl_scale_elec
+        else:
+            excl_scale_elec = jax.lax.stop_gradient(_build_dense_exclusion_scales(
+                sys.excl_indices, sys.excl_scales_elec, N,
+            ))
+
+        f_lj = lj_forces_dense(
+            r, sys.sigmas, sys.epsilons, sys.atom_mask,
+            soft_core_lambda=soft_core_lambda,
+            excl_scale_vdw=excl_scale_vdw,
+        )
+        f_coulomb = coulomb_forces_dense(
+            r, sys.charges, sys.atom_mask,
+            excl_scale_elec=excl_scale_elec,
+        )
+
+        f_solv = jnp.zeros_like(r)
+        if implicit_solvent:
+            f_solv = gb_ace_forces_dense(
+                r, sys.charges, sys.radii, sys.scaled_radii, sys.atom_mask,
+            )
+
+        total_force = bonded_force + f_lj + f_coulomb + f_solv
+
     # Belt-and-suspenders: zero forces on padding atoms.
-    # Individual terms already mask internally, but bonded jax.grad
-    # may leak gradients to atom 0 via aliased padding indices.
     total_force = total_force * sys.atom_mask[:, None]
     return total_force.astype(r.dtype)
 
