@@ -1300,6 +1300,10 @@ def batched_produce_streaming(
                     write_fn,
                     None,
                     frames,
+                    s_after_batch.positions,
+                    s_after_batch.momentum,
+                    s_after_batch.force,
+                    s_after_batch.key,
                     batch_idx,
                     start_save_idx,
                 )
@@ -1339,6 +1343,10 @@ def batched_produce_streaming(
                     write_fn,
                     None,
                     s_next.positions,
+                    s_next.positions,
+                    s_next.momentum,
+                    s_next.force,
+                    s_next.key,
                     batch_idx,
                     save_idx,
                 )
@@ -1357,7 +1365,7 @@ def batched_produce_streaming(
 
     return safe_map_no_output(
         produce_single_streaming,
-        (batch, state, batch_indices),
+        (system_index, state, batch_indices),
         chunk_size=chunk_size,
     )
 
@@ -1718,6 +1726,10 @@ def batched_produce_streaming_nl(
                 write_fn,
                 None,
                 s_next.positions,
+                s_next.positions,
+                s_next.momentum,
+                s_next.force,
+                s_next.key,
                 batch_idx,
                 save_idx,
             )
@@ -1890,6 +1902,10 @@ def batched_produce_streaming_nl_dynamic(
                 write_fn,
                 None,
                 s_next.positions,
+                s_next.positions,
+                s_next.momentum,
+                s_next.force,
+                s_next.key,
                 batch_idx,
                 save_idx,
             )
