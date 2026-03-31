@@ -99,7 +99,7 @@ def _cmap_energy_masked(r: Array, indices: Array, mask: Array, coeffs: Array | N
         return jnp.array(0.0)
         
     from prolix.physics.cmap import compute_cmap_energy
-    from prolix.physics.bonded import compute_dihedral_angles
+    from prolix.physics.system import compute_dihedral_angles
     
     torsion_indices = jax.vmap(CmapTorsionIndices.from_row)(indices)
     

@@ -13,6 +13,7 @@ from jax_md import util
 
 if TYPE_CHECKING:
   from proxide.core.containers import Protein
+  from prolix.physics.topology_merger import MergedTopology
 
 Array = util.Array
 
@@ -34,6 +35,8 @@ class PaddedSystem(eqx.Module):
   is_hydrogen: Array      # (N_padded,) bool — True for hydrogen atoms
   is_backbone: Array      # (N_padded,) bool — True for backbone atoms (N, CA, C, O)
   is_heavy: Array         # (N_padded,) bool — True for real non-hydrogen atoms
+  protein_atom_mask: Array # (N_padded,) bool — True for protein atoms
+  water_atom_mask: Array   # (N_padded,) bool — True for water atoms
   
   # Bonded term arrays (padded to max per bucket)
   bonds: Array            # (N_bonds_padded, 2) int
@@ -72,6 +75,10 @@ class PaddedSystem(eqx.Module):
   n_real_atoms: Array
   n_padded_atoms: int | Array = eqx.field(static=True)
   bucket_size: int | Array = eqx.field(static=True)
+
+  # Water molecule indices for SETTLE
+  water_indices: Array | None = None  # (N_waters_padded, 3) int
+  water_mask: Array | None = None      # (N_waters_padded,) bool
 
   # Precomputed dense exclusion matrices (N_padded, N_padded).
   # These are topology constants — they never change during simulation.
@@ -340,11 +347,183 @@ def pad_protein(
       constraint_pairs=padded_constr_pairs,
       constraint_lengths=padded_constr_lengths,
       constraint_mask=constr_mask,
-      n_real_atoms=jnp.array(n_real, dtype=jnp.int32),
-      n_padded_atoms=target_atoms,
-      bucket_size=target_atoms,
   )
   return sys
+
+
+def pad_solvated_system(
+    topology: MergedTopology,
+    target_atoms: int,
+    target_bonds: int | None = None,
+    target_angles: int | None = None,
+    target_dihedrals: int | None = None,
+    target_impropers: int | None = None,
+    target_cmaps: int | None = None,
+    target_constraints: int | None = None,
+    target_waters: int | None = None,
+) -> PaddedSystem:
+    """Pad a merged solvated topology to specific array sizes."""
+    n_real = len(topology.positions)
+    if n_real > target_atoms:
+        raise ValueError(f"System has {n_real} atoms, exceeds target padding {target_atoms}")
+
+    # 1. Base parameters
+    padded_pos = pad_array(topology.positions, target_atoms, 9999.0)
+    padded_charges = pad_array(topology.charges, target_atoms, 0.0)
+    padded_sigmas = pad_array(topology.sigmas, target_atoms, 1e-6)
+    padded_epsilons = pad_array(topology.epsilons, target_atoms, 0.0)
+    padded_masses = pad_array(topology.masses, target_atoms, 12.0) # default mass
+    
+    padded_radii = pad_array(topology.radii, target_atoms, 1.5)
+    padded_scaled_radii = pad_array(topology.scaled_radii, target_atoms, 0.8)
+    
+    atom_mask = create_mask(n_real, target_atoms)
+    padded_protein_mask = pad_array(topology.protein_atom_mask, target_atoms, False)
+    padded_water_mask = pad_array(topology.water_atom_mask, target_atoms, False)
+    
+    padded_element_ids = pad_array(topology.element_ids, target_atoms, 0)
+    
+    # Calculate is_hydrogen based on element_ids knowing Hydrogen == 1
+    # Water atoms in our element_ids array are defined appropriately (O=8, H=1)
+    is_h = (topology.element_ids == 1)
+    padded_is_hydrogen = pad_array(is_h, target_atoms, False)
+    # Just set backbone false since we don't have enough metadata. (Solvated runs usually don't need it specifically)
+    padded_is_backbone = jnp.zeros(target_atoms, dtype=jnp.bool_)
+    padded_is_heavy = atom_mask & ~padded_is_hydrogen
+
+    # 2. Exclusions
+    from prolix.physics.neighbor_list import map_exclusions_to_dense_padded
+    MAX_EXCL = 32
+    ei, sv, se = map_exclusions_to_dense_padded(topology.exclusion_spec, max_exclusions=MAX_EXCL)
+    padded_excl_indices = pad_array(ei, target_atoms, -1)
+    padded_excl_scales_vdw = pad_array(sv, target_atoms, 1.0)
+    padded_excl_scales_elec = pad_array(se, target_atoms, 1.0)
+
+    # 3. Bonded terms
+    if target_bonds is None: target_bonds = len(topology.bonds)
+    if target_angles is None: target_angles = len(topology.angles)
+    
+    dihedrals = topology.proper_dihedrals if topology.proper_dihedrals is not None else jnp.zeros((0, 4), dtype=jnp.int32)
+    dihedral_params = topology.dihedral_params if topology.dihedral_params is not None else jnp.zeros((0, 3), dtype=jnp.float32)
+    if target_dihedrals is None: target_dihedrals = len(dihedrals)
+    
+    impropers = topology.impropers if topology.impropers is not None else jnp.zeros((0, 4), dtype=jnp.int32)
+    improper_params = topology.improper_params if topology.improper_params is not None else jnp.zeros((0, 3), dtype=jnp.float32)
+    if target_impropers is None: target_impropers = len(impropers)
+
+    cmaps = topology.cmap_torsions if topology.cmap_torsions is not None else jnp.zeros((0, 5), dtype=jnp.int32)
+    if target_cmaps is None: target_cmaps = len(cmaps)
+    
+    padded_bonds = pad_bonded_indices(topology.bonds, target_bonds, 2)
+    padded_bond_params = pad_bonded_params(topology.bond_params, target_bonds, 2)
+    bond_mask = create_mask(len(topology.bonds), target_bonds)
+
+    padded_angles = pad_bonded_indices(topology.angles, target_angles, 3)
+    padded_angle_params = pad_bonded_params(topology.angle_params, target_angles, 2)
+    angle_mask = create_mask(len(topology.angles), target_angles)
+    
+    padded_dihedrals = pad_bonded_indices(dihedrals, target_dihedrals, 4)
+    padded_dih_params = pad_bonded_params(dihedral_params, target_dihedrals, 3)
+    dih_mask = create_mask(len(dihedrals), target_dihedrals)
+
+    padded_impropers = pad_bonded_indices(impropers, target_impropers, 4)
+    padded_imp_params = pad_bonded_params(improper_params, target_impropers, 3)
+    imp_mask = create_mask(len(impropers), target_impropers)
+
+    if target_cmaps > 0:
+        padded_cmaps = pad_bonded_indices(cmaps, target_cmaps, 5)
+        cmap_mask = create_mask(len(cmaps), target_cmaps)
+        cmap_coeffs = topology.cmap_energy_grids
+    else:
+        padded_cmaps = None
+        cmap_mask = None
+        cmap_coeffs = None
+
+    # 4. Constraints
+    # Protein X-H constraints
+    elem_np = np.asarray(topology.element_ids)
+    bonds_np = np.asarray(topology.bonds)
+    bond_params_np = np.asarray(topology.bond_params)
+    
+    constr_pairs_list = []
+    constr_lengths_list = []
+    if len(bonds_np) > 0 and len(bond_params_np) > 0:
+        for i in range(len(bonds_np)):
+            # We only build constraints for the protein part (X-H), water relies on SETTLE
+            # which does not use constraint_pairs
+            a1, a2 = int(bonds_np[i, 0]), int(bonds_np[i, 1])
+            if a1 >= topology.n_protein_atoms and a2 >= topology.n_protein_atoms:
+                continue # Water-water bonds are skipped (handled by SETTLE)
+            if a1 >= n_real or a2 >= n_real:
+                continue
+            if int(elem_np[a1]) == 1 or int(elem_np[a2]) == 1:
+                constr_pairs_list.append([a1, a2])
+                constr_lengths_list.append(float(bond_params_np[i, 0]))
+
+    if constr_pairs_list:
+        constr_pairs = jnp.array(constr_pairs_list, dtype=jnp.int32)
+        constr_lengths = jnp.array(constr_lengths_list, dtype=jnp.float32)
+    else:
+        constr_pairs = jnp.zeros((0, 2), dtype=jnp.int32)
+        constr_lengths = jnp.zeros((0,), dtype=jnp.float32)
+
+    n_constraints = len(constr_pairs)
+    if target_constraints is None:
+        target_constraints = n_constraints
+
+    padded_constr_pairs = pad_bonded_indices(constr_pairs, target_constraints, 2)
+    padded_constr_lengths = pad_array(constr_lengths, target_constraints, 0.0) if n_constraints > 0 else jnp.zeros(target_constraints, dtype=jnp.float32)
+    constr_mask = create_mask(n_constraints, target_constraints)
+
+    # 5. Water-specific indices for SETTLE
+    n_waters = len(topology.water_indices)
+    if target_waters is None: target_waters = n_waters
+    
+    padded_water_indices = pad_bonded_indices(topology.water_indices, target_waters, 3)
+    water_molecule_mask = create_mask(n_waters, target_waters)
+
+    return PaddedSystem(
+        positions=padded_pos,
+        charges=padded_charges,
+        sigmas=padded_sigmas,
+        epsilons=padded_epsilons,
+        radii=padded_radii,
+        scaled_radii=padded_scaled_radii,
+        masses=padded_masses,
+        element_ids=padded_element_ids,
+        atom_mask=atom_mask,
+        is_hydrogen=padded_is_hydrogen,
+        is_backbone=padded_is_backbone,
+        is_heavy=padded_is_heavy,
+        protein_atom_mask=padded_protein_mask,
+        water_atom_mask=padded_water_mask,
+        bonds=padded_bonds,
+        bond_params=padded_bond_params,
+        bond_mask=bond_mask,
+        angles=padded_angles,
+        angle_params=padded_angle_params,
+        angle_mask=angle_mask,
+        dihedrals=padded_dihedrals,
+        dihedral_params=padded_dih_params,
+        dihedral_mask=dih_mask,
+        impropers=padded_impropers,
+        improper_params=padded_imp_params,
+        improper_mask=imp_mask,
+        cmap_torsions=padded_cmaps,
+        cmap_mask=cmap_mask,
+        cmap_coeffs=cmap_coeffs,
+        excl_indices=padded_excl_indices,
+        excl_scales_vdw=padded_excl_scales_vdw,
+        excl_scales_elec=padded_excl_scales_elec,
+        constraint_pairs=padded_constr_pairs,
+        constraint_lengths=padded_constr_lengths,
+        constraint_mask=constr_mask,
+        water_indices=padded_water_indices,
+        water_mask=water_molecule_mask,
+        n_real_atoms=jnp.array(n_real, dtype=jnp.int32),
+        n_padded_atoms=target_atoms,
+        bucket_size=target_atoms,
+    )
 
 
 def precompute_dense_exclusions(sys: PaddedSystem) -> PaddedSystem:

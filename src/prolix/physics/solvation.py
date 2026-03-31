@@ -9,13 +9,16 @@ import jax.numpy as jnp
 import numpy as np
 from scipy.spatial.distance import cdist
 from jax_md import util
+from prolix.physics.water_models import WaterModelType, get_water_params
+from prolix.physics.ion_params import get_ion_params
+from prolix.physics.topology_merger import MergedTopology, merge_solvated_topology
+
+if TYPE_CHECKING:
+    from proxide.core.containers import Protein
 
 Array = util.Array
 
-# Constants from OpenMM (converted to Angstroms where appropriate)
-# vdwRadiusPerSigma = 0.56123...
-# tip3p waterRadius (sigma*0.56...) = 0.315... nm * 10 = 3.15 A (approx? No, sigma is ~3.15A)
-# OpenMM: waterRadius = 0.315075 * 0.56123 = 0.1768 nm = 1.768 Angstroms
+# Default water radius if model not specified (TIP3P)
 TIP3P_WATER_RADIUS = 1.768  # Angstroms
 
 
@@ -59,25 +62,24 @@ def _load_water_npz(path: str) -> WaterBox:
 # For now, assuming it's only used by load_tip3p_box and will be removed if not needed.
 
 
-def load_tip3p_box() -> WaterBox:
-  """Loads the pre-equilibrated TIP3P water box from .npz."""
+def load_water_box(model_type: WaterModelType | str = WaterModelType.TIP3P) -> WaterBox:
+  """Loads the pre-equilibrated water box for a specific model."""
+  if isinstance(model_type, str):
+      model_type = WaterModelType(model_type.lower())
+  
   # Look for .npz relative to this file
-  # File is in src/prolix/physics/solvation.py
-  # Data is in data/water_boxes/tip3p.npz (relative to project root)
-
   current_dir = os.path.dirname(os.path.abspath(__file__))
-  # Go up: physics -> prolix -> src -> package_root
   package_root = os.path.abspath(os.path.join(current_dir, "../../../"))
 
-  path = os.path.join(package_root, "data", "water_boxes", "tip3p.npz")
+  filename = f"{model_type.value}.npz"
+  path = os.path.join(package_root, "data", "water_boxes", filename)
 
   if not os.path.exists(path):
     # Fallback for when installed as package?
-    # Or checking if running from script in root
-    if os.path.exists("data/water_boxes/tip3p.npz"):
-      path = "data/water_boxes/tip3p.npz"
+    if os.path.exists(f"data/water_boxes/{filename}"):
+      path = f"data/water_boxes/{filename}"
     else:
-      msg = f"Could not find TIP3P water box at {path} or relative to CWD"
+      msg = f"Could not find {model_type.value} water box at {path} or relative to CWD"
       raise FileNotFoundError(msg)
 
   box = _load_water_npz(path)
@@ -177,7 +179,8 @@ def _deduplicate_waters(tiled_waters: np.ndarray, box_size: np.ndarray) -> np.nd
 
 
 def _prune_solute_clashes(
-  tiled_waters: np.ndarray, solute_positions: np.ndarray, solute_radii: np.ndarray
+  tiled_waters: np.ndarray, solute_positions: np.ndarray, solute_radii: np.ndarray,
+  water_radius: float = TIP3P_WATER_RADIUS
 ) -> np.ndarray:
   """Removes waters that clash with solute atoms based on VDW radii.
 
@@ -194,7 +197,7 @@ def _prune_solute_clashes(
 
   # Check condition: dist < (r_solute + r_water)
   radii_matrix = solute_radii[None, :]
-  clashes = dists < (radii_matrix + TIP3P_WATER_RADIUS)
+  clashes = dists < (radii_matrix + water_radius)
   clash_mask = np.any(clashes, axis=1)  # (N_w,)
 
   # Reconstruct atomic indices for non-clashing waters
@@ -212,6 +215,7 @@ def solvate(
   padding: float = 10.0,
   water_box: WaterBox | None = None,
   target_box_shape: Array | None = None,
+  model_type: WaterModelType = WaterModelType.TIP3P,
 ) -> tuple[Array, Array]:
   r"""Add solvent molecules around a solute.
 
@@ -227,14 +231,18 @@ def solvate(
       solute_positions: (N_solute, 3) coordinates.
       solute_radii: (N_solute,) VDW radii for overlap check.
       padding: Buffer distance (Å).
-      water_box: Prototype water box. Loads TIP3P if None.
+      water_box: Prototype water box. Loads according to model_type if None.
       target_box_shape: Explicit box size override (3,).
+      model_type: Supported water model (TIP3P, OPC3).
 
   Returns:
       (positions, water_indices, box_size).
   """
   if water_box is None:
-    water_box = load_tip3p_box()
+    water_box = load_water_box(model_type)
+
+  model_params = get_water_params(model_type)
+  water_radius = model_params.water_radius
 
   # 1. Box Size Determination
   min_coords = jnp.min(solute_positions, axis=0)
@@ -258,7 +266,7 @@ def solvate(
 
   tiled_waters = _tile_water_box(water_box, box_np)
   deduped_waters = _deduplicate_waters(tiled_waters, box_np)
-  final_waters = _prune_solute_clashes(deduped_waters, solute_np, radii_np)
+  final_waters = _prune_solute_clashes(deduped_waters, solute_np, radii_np, water_radius)
 
   # 4. Integrate results
   n_solute = centered_solute.shape[0]
@@ -281,6 +289,7 @@ def add_ions(
   ionic_strength: float = 0.0,
   neutralize: bool = True,
   box_size: Array | None = None,
+  model_type: WaterModelType = WaterModelType.TIP3P,
 ) -> tuple[Array, list[str], list[str]]:
   r"""Replace water molecules with ions to reach target concentration.
 
@@ -299,6 +308,7 @@ def add_ions(
       ionic_strength: Target concentration (Molar).
       neutralize: Whether to zero out net charge.
       box_size: (3,) dimensions (A).
+      model_type: Selects ion parameter set (e.g. Li/Merz for OPC3).
 
   Returns:
       (new_positions, atom_names, res_names).
@@ -524,3 +534,69 @@ def wrap_solvated_molecules(
   Assumes molecules are already whole (hydrogens close to oxygens).
   """
   return fix_water_geometry(positions, box_size, n_solute, n_waters)
+
+
+def solvate_protein(
+    protein: Protein,
+    padding: float = 10.0,
+    model_type: WaterModelType = WaterModelType.TIP3P,
+    ionic_strength: float = 0.15,
+    neutralize: bool = True,
+    target_box_size: Array | None = None,
+) -> MergedTopology:
+    """High-level solvation pipeline for Protein objects.
+    
+    1. Solvate positions.
+    2. Add ions.
+    3. Merge topologies into a unified MergedTopology.
+    """
+    # 1. Solvate positions
+    # Use protein.physics.radii if available, else default to some placeholder
+    radii = getattr(protein.physics, "radii", jnp.ones(len(protein.positions)) * 1.5)
+    
+    pos_solv, box_size = solvate(
+        protein.positions,
+        radii,
+        padding=padding,
+        target_box_shape=target_box_size,
+        model_type=model_type
+    )
+    
+    n_solute = len(protein.positions)
+    # Positions are joined [protein, waters]
+    # We need to find the water atom indices for add_ions
+    # In solvate(), waters are appended at the end.
+    water_indices = jnp.arange(n_solute, len(pos_solv))
+    
+    # 2. Add ions (replaces some waters)
+    # We need total charge of protein
+    total_charge = float(jnp.sum(protein.physics.charges))
+    
+    pos_ionized, ion_atom_names, ion_res_names = add_ions(
+        pos_solv,
+        water_indices,
+        total_charge,
+        ionic_strength=ionic_strength,
+        neutralize=neutralize,
+        box_size=box_size,
+        model_type=model_type
+    )
+    
+    # 3. Re-calculate how many waters we have now
+    # add_ions returns (new_pos, solvent_atom_names, solvent_res_names)
+    # where solvent part includes waters and ions.
+    n_solvent_atoms = len(pos_ionized) - n_solute
+    # Find oxygen indices in the solvent block
+    solvent_atom_names = np.array(ion_atom_names)
+    ion_mask = (solvent_atom_names != "O") & (solvent_atom_names != "H1") & (solvent_atom_names != "H2")
+    n_ions = int(np.sum(ion_mask))
+    n_waters = (n_solvent_atoms - n_ions) // 3
+    
+    # 4. Merge topologies
+    return merge_solvated_topology(
+        protein,
+        pos_ionized[n_solute:],
+        model_type,
+        ion_names=ion_atom_names,
+        box_size=box_size
+    )
