@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
+from dataclasses import dataclass
 
 import jax
 import jax.numpy as jnp
@@ -45,6 +46,7 @@ class _DictSystemWrapper:
     "scale_matrix_vdw": None,
     "scale_matrix_elec": None,
     "coulomb14scale": None,
+    "lj14scale": None,
   }
 
   def __init__(self, d: dict):
@@ -83,7 +85,13 @@ def compute_dihedral_angles(
   x = jnp.sum(v * w, axis=-1)
   y = jnp.sum(jnp.cross(b1_unit, v) * w, axis=-1)
 
-  return jnp.arctan2(y, x)
+  # Pad safe: Prevent arctan2(0,0) which has a NaN gradient
+  # If atoms perfectly overlap, x and y become 0. We add a tiny epsilon to x if both are exactly 0.
+  overlap_mask = (x == 0.0) & (y == 0.0)
+  safe_x = jnp.where(overlap_mask, 1.0, x)
+  safe_y = jnp.where(overlap_mask, 0.0, y)
+
+  return jnp.arctan2(safe_y, safe_x)
 
 
 def make_energy_fn(
@@ -104,6 +112,7 @@ def make_energy_fn(
   pme_grid_points: int | Array = 64,
   pme_alpha: float = 0.34,
   return_decomposed: bool = False,
+  strict_parameterization: bool = True,
 ) -> Callable[[Array], Array] | dict[str, Callable]:
   """Creates the total potential energy function.
 
@@ -210,19 +219,26 @@ def make_energy_fn(
   sigmas = system.sigmas
   epsilons = system.epsilons
 
-  # Defensive: clamp sigmas to prevent singular LJ from unparameterized atoms (sigma=0.0).
-  # This can happen when oxidize/ff parameterization skips atoms it can't match.
+  # Defensive check to prevent singular LJ from unparameterized atoms (sigma=0.0).
+  # This typically happens due to skipped non-standard residues or missing FF terms.
   n_zero_sigma = int(jnp.sum(sigmas <= 0.0))
   if n_zero_sigma > 0:
-    import logging as _logging
-    _log = _logging.getLogger("prolix.physics.system")
-    _log.warning(
-      "Found %d atoms with sigma <= 0.0 (unparameterized). "
-      "Clamping to 1e-6 to prevent singular LJ. "
-      "Fix root cause in force field parameterization.",
-      n_zero_sigma,
-    )
-    sigmas = jnp.maximum(sigmas, 1e-6)
+    if strict_parameterization:
+      raise ValueError(
+        f"Found {n_zero_sigma} atoms with sigma <= 0.0 (unparameterized). "
+        "Strict parameterization is enabled. Fix root cause in force field parameterization "
+        "or pass strict_parameterization=False to bypass this error."
+      )
+    else:
+      import logging as _logging
+      _log = _logging.getLogger("prolix.physics.system")
+      _log.warning(
+        "Found %d atoms with sigma <= 0.0 (unparameterized). "
+        "Clamping to 1e-6 to prevent singular LJ. "
+        "Fix root cause in force field parameterization.",
+        n_zero_sigma,
+      )
+      sigmas = jnp.maximum(sigmas, 1e-6)
 
   assert sigmas.shape[0] == charges.shape[0], f"Sigmas shape mismatch: {sigmas.shape} vs {charges.shape}"
 
@@ -251,7 +267,8 @@ def make_energy_fn(
     use_sparse_exclusions = True
 
     # If dense scaling matrices are missing, build them from spec (required for N^2 path)
-    if scale_matrix_vdw is None and scale_matrix_elec is None:
+    # Optimization: Skip building dense matrices if we have a neighbor list and sparse exclusions.
+    if neighbor_list is None and scale_matrix_vdw is None and scale_matrix_elec is None:
       # Build dense scaling matrices
       N = charges.shape[0]
       mat_vdw = jnp.ones((N, N), dtype=jnp.float32)
@@ -311,6 +328,46 @@ def make_energy_fn(
     )
   else:
     pme_recip_fn = None
+
+  def soft_core_lj(
+    dr: Array,
+    sigma_ij: Array,
+    epsilon_ij: Array,
+    lam: float = 1.0,
+    alpha: float = 0.5,
+  ) -> Array:
+    """Soft-core Lennard-Jones potential for staged minimization.
+
+    Standard FEP formulation from Beutler et al. (1994):
+      U(r,λ) = 4ελ [ 1/(α(1-λ) + (r/σ)⁶)² - 1/(α(1-λ) + (r/σ)⁶) ]
+
+    Args:
+      dr: Pairwise distances (Å). Shape: (...).
+      sigma_ij: Combined LJ sigma (Å). Shape: (...).
+      epsilon_ij: Combined LJ epsilon (kcal/mol). Shape: (...).
+      lam: Coupling parameter λ ∈ [0, 1]. λ=0 → fully soft (no interaction),
+           λ=1 → full hard-core (recovers standard LJ).
+           IMPORTANT: For the final minimization stage, use standard LJ
+           (not soft-core with λ=1) to avoid gradient issues.
+      alpha: Soft-core parameter (default 0.5, statistically optimal).
+
+    Returns:
+      Soft-core LJ energy. Shape: (...).
+
+    Units: kcal/mol, Å (AMBER convention).
+    """
+    # Floor to prevent exact zero in denominator during differentiation
+    soft_term = alpha * jnp.maximum(1.0 - lam, 1e-6)
+
+    # (r/σ)⁶ with safe division (σ=0 handled by earlier clamping)
+    r_over_sig = dr / jnp.maximum(sigma_ij, 1e-8)
+    r6 = r_over_sig ** 6
+
+    # Denominator: α(1-λ) + (r/σ)⁶
+    denom = soft_term + r6
+
+    # U = 4ε λ [1/denom² - 1/denom]
+    return 4.0 * epsilon_ij * lam * (1.0 / (denom * denom) - 1.0 / denom)
 
   def lj_pair(dr, sigma_i, sigma_j, eps_i, eps_j, **kwargs):
     sigma = 0.5 * (sigma_i + sigma_j)
@@ -507,7 +564,7 @@ def make_energy_fn(
 
   # Combine Non-Bonded
   # -------------------------------------------------------------------------
-  def compute_lj(r, neighbor_idx=None):
+  def compute_lj(r, neighbor_idx=None, soft_core_lambda=None):
     if neighbor_idx is None:
       dr = space.map_product(displacement_fn)(r, r)
       dist = space.distance(jnp.asarray(dr))
@@ -521,7 +578,11 @@ def make_energy_fn(
       # exception_14_params exist for force fields with per-pair overrides (e.g. CHARMM),
       # but AMBER ff19SB uses uniform scaling via lj14scale.
 
-      e_lj = energy.lennard_jones(jnp.asarray(dist), sig_ij, eps_ij)
+      if soft_core_lambda is not None:
+        # Use soft-core LJ during staged minimization
+        e_lj = soft_core_lj(jnp.asarray(dist), sig_ij, eps_ij, lam=soft_core_lambda)
+      else:
+        e_lj = energy.lennard_jones(jnp.asarray(dist), sig_ij, eps_ij)
 
       if scale_matrix_vdw is not None:
         e_lj = e_lj * scale_matrix_vdw
@@ -592,12 +653,12 @@ def make_energy_fn(
     else:
       radii = sigmas * 0.5  # Fallback (warning already emitted in compute_electrostatics)
 
-    return generalized_born.compute_ace_nonpolar_energy(
+    return jnp.sum(generalized_born.compute_ace_nonpolar_energy(
       jnp.asarray(radii),
       born_radii,
       surface_tension=surface_tension,
       probe_radius=constants.PROBE_RADIUS,
-    )
+    ))
 
   def compute_cmap_term(r):
     if system.cmap_torsions is None or system.cmap_energy_grids is None:
@@ -724,9 +785,18 @@ def make_energy_fn(
     # We subtract this correction
     return -e_corr
 
+  def position_restraint_energy(
+    r: Array, r_ref: Array, k_restraint: Array, mask: Array
+  ) -> Array:
+    """Harmonic position restraint: 0.5 * k * |r - r_ref|^2."""
+    dr = r - r_ref
+    dist_sq = jnp.sum(dr**2, axis=-1)
+    return 0.5 * k_restraint * jnp.sum(dist_sq * mask)
+
   # Total Energy Function
   # -------------------------------------------------------------------------
   def total_energy(r: Array, neighbor: partition.NeighborList | None = None, **kwargs) -> Array:
+    """Total potential energy. Pass soft_core_lambda=<float> in kwargs for staged minimization."""
     if has_virtual_sites:
       r = virtual_sites.reconstruct_virtual_sites(r, vs_def, vs_params)
 
@@ -738,11 +808,20 @@ def make_energy_fn(
     e_cmap = compute_cmap_term(r)
 
     neighbor_idx = neighbor.idx if neighbor is not None else None
+    sc_lambda = kwargs.get("soft_core_lambda", None)
 
-    e_lj = compute_lj(r, neighbor_idx)
+    e_lj = compute_lj(r, neighbor_idx, soft_core_lambda=sc_lambda)
     e_gb, e_direct, born_radii = compute_electrostatics(r, neighbor_idx)
     e_elec = e_gb + e_direct
     e_np = compute_nonpolar(r, born_radii, neighbor_idx)
+
+    # Optional position restraints (used during minimization Stage 0)
+    e_restraint = 0.0
+    r_ref = kwargs.get("restraint_ref", None)
+    k_res = kwargs.get("k_restraint", None)
+    res_mask = kwargs.get("restraint_mask", None)
+    if r_ref is not None and k_res is not None and res_mask is not None:
+      e_restraint = position_restraint_energy(r, r_ref, k_res, res_mask)
 
     if use_pbc and box is not None:
       e_pme_corr = compute_pme_exceptions(r)
@@ -758,7 +837,18 @@ def make_energy_fn(
       )
       e_lj += e_lj_lrc
 
-    return e_bond + e_angle + e_ub + e_dihedral + e_improper + e_cmap + e_lj + e_elec + e_np
+    return (
+      e_bond
+      + e_angle
+      + e_ub
+      + e_dihedral
+      + e_improper
+      + e_cmap
+      + e_lj
+      + e_elec
+      + e_np
+      + e_restraint
+    )
 
   if return_decomposed:
     return {
@@ -775,3 +865,75 @@ def make_energy_fn(
     }
 
   return total_energy
+
+
+@dataclass(frozen=True)
+class PaddedSystem:
+  """Container for a fully parameterized system with explicit solvent.
+
+  Attributes:
+      positions: (N, 3) coordinates.
+      charges: (N,) partial charges.
+      sigmas: (N,) LJ sigma.
+      epsilons: (N,) LJ epsilon.
+      masses: (N,) masses in amu.
+      box_size: (3,) box dimensions.
+      water_indices: indices of water oxygen atoms.
+      energy_fn: Potential energy function.
+      topology: The MergedTopology metadata.
+  """
+  positions: Array
+  charges: Array
+  sigmas: Array
+  epsilons: Array
+  masses: Array
+  box_size: Array
+  water_indices: Array
+  energy_fn: Callable[[Array], float]
+  topology: Any
+  # Constraints and masks
+  constraint_pairs: Array | None = None
+  constraint_mask: Array | None = None
+  constraint_lengths: Array | None = None
+  atom_mask: Array | None = None
+
+  @classmethod
+  def from_merged_topology(
+    cls,
+    topology: Any,
+    temperature: float = 300.0,
+    cutoff_distance: float = 9.0,
+  ) -> PaddedSystem:
+    """Creates a PaddedSystem from a MergedTopology."""
+    from jax_md import space
+    
+    # 1. Setup space
+    displacement_fn, shift_fn = space.periodic_general(topology.box_size)
+    
+    # 2. Setup energy function
+    energy_fn = make_energy_fn(
+        displacement_fn,
+        topology,
+        use_pbc=True,
+        box=topology.box_size,
+        cutoff_distance=cutoff_distance,
+        implicit_solvent=False # Explicit solvent run
+    )
+    
+    # 3. Aggregate masses
+    # Note: masses are available in topology
+    return cls(
+        positions=topology.positions,
+        charges=topology.charges,
+        sigmas=topology.sigmas,
+        epsilons=topology.epsilons,
+        masses=topology.masses,
+        box_size=topology.box_size,
+        water_indices=topology.water_indices,
+        energy_fn=energy_fn,
+        topology=topology,
+        constraint_pairs=getattr(topology, "constraint_pairs", None),
+        constraint_mask=getattr(topology, "constraint_mask", None),
+        constraint_lengths=getattr(topology, "constraint_lengths", None),
+        atom_mask=getattr(topology, "atom_mask", None)
+    )

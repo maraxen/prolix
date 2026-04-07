@@ -13,7 +13,7 @@ import jax
 import jax.numpy as jnp
 import msgpack_numpy as m
 import numpy as np
-from jax_md import space, util
+from jax_md import minimize as jax_md_minimize, space, util
 from prolix import resource_guard
 from prolix.physics import neighbor_list as nl
 
@@ -537,17 +537,41 @@ def run_simulation(
     use_pbc=spec.use_pbc,
   )
 
-  # Robust Energy Minimization
-  logger.info("Running robust energy minimization (L-BFGS / Adaptive Line Search)...")
+  # ── Per-atom masses (needed for both FIRE minimizer and NVT integrator) ──
+  # Must be computed BEFORE minimization so FIRE can use them.
+  raw_masses = protein_system.masses
+  if raw_masses is not None:
+    masses = jnp.array(raw_masses)
+    if jnp.all(masses == 0):
+      logger.warning("All masses are zero, will derive from elements")
+      raw_masses = None  # trigger element-based derivation below
+
+  if raw_masses is None:
+    # Derive masses from element symbols if available
+    from prolix.constants import masses_from_elements, DEFAULT_MASS
+    elements = getattr(protein_system, "elements", None)
+    if elements is not None and len(elements) == n_atoms:
+      mass_list = masses_from_elements(list(elements))
+      masses = jnp.array(mass_list, dtype=jnp.float32)
+      logger.info("Derived masses from %d element symbols (range: %.1f–%.1f Da)",
+                   n_atoms, float(jnp.min(masses)), float(jnp.max(masses)))
+    else:
+      logger.warning("No masses or elements found, defaulting to carbon mass (%.1f Da)", DEFAULT_MASS)
+      masses = jnp.ones(n_atoms) * DEFAULT_MASS
+
+  # ── Energy Minimization (FIRE) ──
+  # Uses jax-md's built-in FIRE (Fast Inertial Relaxation Engine).
+  # AMBER units: energy kcal/mol, distance Å, mass amu, time ps.
+  # dt_start=0.0001 ps (0.1 fs), dt_max=0.001 ps (1.0 fs) — conservative
+  # for systems with potentially extreme initial gradients.
+  logger.info("Running FIRE energy minimization...")
 
   # Initialize energy and neighbor list
   if neighbor is not None:
     neighbor = neighbor.update(initial_positions)
-    e_initial, grads_initial = jax.value_and_grad(lambda r: energy_fn(r, neighbor=neighbor))(
-      initial_positions
-    )  # type: ignore
+    e_initial = energy_fn(initial_positions, neighbor=neighbor)
   else:
-    e_initial, grads_initial = jax.value_and_grad(energy_fn)(initial_positions)
+    e_initial = energy_fn(initial_positions)
 
   logger.info("  Initial energy: %.2f kcal/mol", e_initial)
 
@@ -564,106 +588,156 @@ def run_simulation(
     )
     raise RuntimeError(msg)
 
-  # Adaptive Minimization State
-  @jax.jit
-  def robust_minimization_loop(init_pos, init_nbr, init_grads, init_energy):
-    # State: [pos, nbr, grads, energy, step_size, step_count, converged]
-    # We use a structured PyTree for state to keep it clean
+  # FIRE minimizer setup
+  # NOTE: FIRE does NOT internally update neighbor lists. For our current
+  # implicit solvent N² path (no neighbor list), this is fine. For future
+  # PBC/explicit solvent support with neighbor lists, FIRE would need a
+  # wrapper that calls nbr.update() every N steps.
 
-    class MinState(typing.NamedTuple):
-      pos: Array
-      nbr: Any
-      grads: Array
-      energy: float
-      step_size: float
-      step: int
-      converged: bool
+  # ── Position Restraints Setup ──
+  # Apply restraints to all heavy atoms (element_id > 1) to prevent inflation.
+  element_ids = getattr(protein_system, "element_ids", None)
+  if element_ids is not None:
+    restraint_mask = jnp.where(element_ids > 1, 1.0, 0.0)
+    logger.info("  Position restraints: active on %d heavy atoms", int(jnp.sum(restraint_mask)))
+  else:
+    # Fallback to mass-based check if element_ids missing
+    restraint_mask = jnp.where(masses > 1.1, 1.0, 0.0)
+    logger.warning("  Using mass-based restraint mask (element_ids not found)")
 
-    init_state = MinState(
-      pos=init_pos,
-      nbr=init_nbr,
-      grads=init_grads,
-      energy=init_energy,
-      step_size=0.001,  # Conservative start
-      step=0,
-      converged=False,
+  def _make_fire_energy(soft_core_lambda=None, use_restraints=False):
+    """Create energy function for FIRE, optionally with soft-core LJ and restraints."""
+    kwargs = {}
+    if soft_core_lambda is not None:
+      kwargs["soft_core_lambda"] = soft_core_lambda
+    
+    if use_restraints:
+      kwargs["restraint_ref"] = initial_positions
+      kwargs["k_restraint"] = 50.0
+      kwargs["restraint_mask"] = restraint_mask
+
+    if neighbor is not None:
+      return lambda r: energy_fn(r, neighbor=neighbor, **kwargs)
+    else:
+      def _energy_wrapper(r):
+        return energy_fn(r, **kwargs)
+      return _energy_wrapper
+
+  def _make_capped_fire_apply(fire_apply_fn, force_cap, disp_cap=0.1):
+    """Create force-capped and displacement-capped FIRE apply function."""
+    def capped_apply(state, **kwargs):
+      # 1. Force capping
+      f = state.force
+      f_norm = jnp.linalg.norm(f, axis=-1, keepdims=True)
+      cap = jnp.minimum(1.0, force_cap / (f_norm + 1e-8))
+      f_capped = f * cap
+      f_safe = jnp.where(jnp.isfinite(f_capped), f_capped, 0.0)
+      state = dataclasses.replace(state, force=f_safe)
+      
+      # 2. Apply FIRE step
+      new_state = fire_apply_fn(state, **kwargs)
+      
+      # 3. Displacement capping (limit |dr| to disp_cap Å)
+      dr = new_state.position - state.position
+      dr_norm = jnp.linalg.norm(dr, axis=-1, keepdims=True)
+      scale = jnp.minimum(1.0, disp_cap / (dr_norm + 1e-8))
+      
+      # If capped, we also scale down velocity to maintain some consistency
+      new_pos = state.position + dr * scale
+      new_vel = new_state.velocity * scale
+      
+      return dataclasses.replace(new_state, position=new_pos, velocity=new_vel)
+      
+    return capped_apply
+
+  # ── Dynamic step-size initialization (#2179) ──
+  # Set dt_start based on initial gradient magnitude so that
+  # max_grad * dt_start < 0.001 Å displacement.
+  initial_grads = jax.grad(_make_fire_energy())(initial_positions)
+  max_grad = float(jnp.max(jnp.linalg.norm(initial_grads, axis=-1)))
+  dt_start = float(jnp.clip(0.001 / (max_grad + 1e-8), 1e-7, 0.001))
+  dt_max = min(dt_start * 10.0, 0.01)
+  logger.info("  Dynamic FIRE dt: dt_start=%.2e ps, dt_max=%.2e ps (max_grad=%.2e)",
+              dt_start, dt_max, max_grad)
+
+  # ── Staged Minimization (#2183) ──
+  # Progressive softening resolves extreme steric clashes from crystal structures.
+  # Stage 1: Soft-core λ=0.1, cap=10 kcal/mol/Å (500 steps) — gentle decompression
+  # Stage 2: Soft-core λ=0.5, cap=100 (500 steps) — half-strength LJ
+  # Stage 3: Soft-core λ=0.9, cap=1000 (1000 steps) — near-full LJ
+  # Stage 4: Standard energy (NOT soft-core), no cap (≤3000 steps) — convergence
+  #
+  # IMPORTANT: Stage 4 uses the standard energy_fn, not soft-core with λ=1,
+  # because soft-core with λ=1 recovers the singularity at r=0.
+
+  stages = [
+    {"name": "Stage 0 (Restrained)", "lambda": 0.1, "force_cap": 10.0,   "steps": 500,  "restrain": True},
+    {"name": "Stage 1 (λ=0.1)",     "lambda": 0.1, "force_cap": 10.0,   "steps": 500,  "restrain": False},
+    {"name": "Stage 2 (λ=0.5)",     "lambda": 0.5, "force_cap": 100.0,  "steps": 500,  "restrain": False},
+    {"name": "Stage 3 (λ=0.9)",     "lambda": 0.9, "force_cap": 1000.0, "steps": 1000, "restrain": False},
+    {"name": "Stage 4 (full)",      "lambda": None, "force_cap": None,   "steps": 3000, "restrain": False},
+  ]
+
+  current_positions = initial_positions
+
+  for stage in stages:
+    sc_lam = stage["lambda"]
+    force_cap = stage["force_cap"]
+    n_steps = stage["steps"]
+
+    # Create energy function for this stage
+    stage_energy_fn = _make_fire_energy(soft_core_lambda=sc_lam, use_restraints=use_restraints)
+
+    # Create FIRE instance for this stage
+    stage_init_fn, stage_apply_fn = jax_md_minimize.fire_descent(
+      stage_energy_fn,
+      shift_fn,
+      dt_start=dt_start,
+      dt_max=dt_max,
     )
 
-    def cond_fn(state):
-      return (state.step < 5000) & (~state.converged)
+    # Wrap with force capping if specified
+    if force_cap is not None:
+      stage_step_fn = _make_capped_fire_apply(stage_apply_fn, force_cap)
+    else:
+      # Stage 4: no cap, but still sanitize NaN
+      def _nan_safe_apply(state, _apply=stage_apply_fn, **kwargs):
+        f = state.force
+        f_safe = jnp.where(jnp.isfinite(f), f, 0.0)
+        state = dataclasses.replace(state, force=f_safe)
+        return _apply(state, **kwargs)
+      stage_step_fn = _nan_safe_apply
 
-    def body_fn(state):
-      # 1. Force Capping
-      # Cap max force to prevent explosions from singular potentials
-      g = state.grads
-      g_norm = jnp.linalg.norm(g, axis=-1, keepdims=True)
-      # Limit force magnitude to 1000 kcal/mol/A
-      scaling = jnp.minimum(1.0, 1000.0 / (g_norm + 1e-8))
-      g_capped = g * scaling
+    # Initialize FIRE from current positions
+    stage_state = stage_init_fn(current_positions, mass=masses)
 
-      # 2. Candidate Step
-      # Move AGAINST gradient (Gradient Descent)
-      pos_new = state.pos - state.step_size * g_capped
+    # Run FIRE loop
+    @jax.jit
+    def _run_stage(state, _step=stage_step_fn, _n=n_steps):
+      def body_fn(i, s):
+        return _step(s)
+      return jax.lax.fori_loop(0, _n, body_fn, state)
 
-      if spec.use_pbc and spec.box is not None:
-        pos_new = jnp.mod(pos_new, jnp.array(spec.box))
+    final_state = _run_stage(stage_state)
+    current_positions = final_state.position
 
-      # 3. Evaluate New State
-      nbr_new = state.nbr
-      if state.nbr is not None:
-        nbr_new = state.nbr.update(pos_new)
-        e_new, g_new = jax.value_and_grad(lambda r: energy_fn(r, neighbor=nbr_new))(pos_new)  # type: ignore
-      else:
-        e_new, g_new = jax.value_and_grad(energy_fn)(pos_new)
+    # Log stage results
+    stage_e = float(stage_energy_fn(current_positions))
+    logger.info("  %s: E=%.2f kcal/mol (%d steps, cap=%s)",
+                stage["name"], stage_e, n_steps,
+                f"{force_cap:.0f}" if force_cap is not None else "none")
 
-      # 4. Acceptance Logic (Backtracking Line Search)
-      # Accept if energy decreases AND is finite
-      improved = e_new < state.energy
-      is_valid = jnp.isfinite(e_new)
-      accept = improved & is_valid
+    # After stages with soft-core, ramp dt_start up for next stage
+    dt_start = min(dt_start * 2.0, 0.001)
+    dt_max = min(dt_start * 10.0, 0.01)
 
-      # Update Variables
-      final_pos = jnp.where(accept, pos_new, state.pos)  # type: ignore
-      # For PyTrees (neighbor), we verify if we can use jnp.where or lax.cond
-      # Neighbor is a PyTree, so we must use lax.cond for full state switching usually
+  positions_minimized = current_positions
 
-      # Adaptive Step Size: grow if good, shrink if bad
-      new_step_size = jnp.where(accept, state.step_size * 1.2, state.step_size * 0.5)
-      new_step_size = jnp.clip(new_step_size, 1e-7, 1e-1)
+  # Evaluate final energy with standard (non-soft-core) energy function
+  fire_energy_fn = _make_fire_energy()  # standard, no soft-core
+  e_minimized = fire_energy_fn(positions_minimized)
 
-      # Construct next state parts
-      # Just use lax.cond to switch between (new_vals) and (old_vals)
-      def accept_branch():
-        return MinState(pos_new, nbr_new, g_new, e_new, new_step_size, state.step + 1, False)
-
-      def reject_branch():
-        # Keep old pos, old grads, old energy. Only update step size and count.
-        return MinState(
-          state.pos, state.nbr, state.grads, state.energy, new_step_size, state.step + 1, False
-        )
-
-      next_state = jax.lax.cond(accept, accept_branch, reject_branch)
-
-      # Convergence check (Gradient Norm < 1.0 kcal/mol/A)
-      # Use the NEW gradients if accepted, or OLD gradients if rejected
-      current_g_norm = jnp.max(jnp.linalg.norm(next_state.grads, axis=-1))
-      is_converged = current_g_norm < 1.0
-
-      return next_state._replace(converged=is_converged)
-
-    return jax.lax.while_loop(cond_fn, body_fn, init_state)
-
-  # Need typing for NamedTuple
-  import typing
-
-  final_min_state = robust_minimization_loop(initial_positions, neighbor, grads_initial, e_initial)
-  positions_minimized = final_min_state.pos
-  neighbor = final_min_state.nbr
-  e_minimized = final_min_state.energy
-
-  logger.info("  Minimized energy: %.2f kcal/mol", e_minimized)
-  logger.info("  Minimization steps: %d", final_min_state.step)
-  logger.info("  Converged: %s", final_min_state.converged)
+  logger.info("  Final minimized energy: %.2f kcal/mol", e_minimized)
 
   # NVT Langevin dynamics setup
   # Convert physical quantities to AKMA reduced units for JAX-MD.
@@ -685,32 +759,7 @@ def run_simulation(
   # DO NOT wrap energy_fn with a captured neighbor list - that prevents updates!
   integrator_energy_fn = energy_fn
 
-  # Extract per-atom masses from the protein system
-  # Must check for None BEFORE calling jnp.array (which raises on None input).
-  raw_masses = protein_system.masses
-  if raw_masses is not None:
-    masses = jnp.array(raw_masses)
-    if jnp.all(masses == 0):
-      logger.warning("All masses are zero, will derive from elements")
-      raw_masses = None  # trigger element-based derivation below
-
-  if raw_masses is None:
-    # Derive masses from element symbols if available
-    _ELEMENT_MASS = {
-      "H": 1.008, "C": 12.011, "N": 14.007, "O": 15.999, "S": 32.06,
-      "P": 30.974, "F": 18.998, "Cl": 35.45, "Br": 79.904, "I": 126.904,
-      "Fe": 55.845, "Zn": 65.38, "Ca": 40.078, "Mg": 24.305, "Na": 22.990,
-      "K": 39.098, "Se": 78.971, "Mn": 54.938, "Cu": 63.546, "Co": 58.933,
-    }
-    elements = getattr(protein_system, "elements", None)
-    if elements is not None and len(elements) == n_atoms:
-      mass_list = [_ELEMENT_MASS.get(e, _ELEMENT_MASS.get(e.capitalize(), 12.011)) for e in elements]
-      masses = jnp.array(mass_list, dtype=jnp.float32)
-      logger.info("Derived masses from %d element symbols (range: %.1f–%.1f Da)",
-                   n_atoms, float(jnp.min(masses)), float(jnp.max(masses)))
-    else:
-      logger.warning("No masses or elements found, defaulting to carbon mass (12.0 Da)")
-      masses = jnp.ones(n_atoms) * 12.0
+  # (Masses already computed above, before FIRE minimization)
 
   constrained_bonds = protein_system.constrained_bonds
   constrained_lengths = protein_system.constrained_bond_lengths
@@ -744,6 +793,62 @@ def run_simulation(
       return apply_fn(s, neighbor=nbr)  # type: ignore[unknown-argument]
     return apply_fn(s)
 
+  # ── Gentle-start equilibration (#2184) ──
+  # Timestep ramping to catch residual instabilities from minimization.
+  # Phase 1: 100 steps at dt/20 (0.1 fs if production is 2 fs)
+  # Phase 2: 500 steps at dt/2 (1.0 fs)
+  # Phase 3: Production dt (2.0 fs) — starts the main loop
+  warmup_phases = [
+    {"name": "warmup dt/20", "dt_scale": 1.0/20.0, "steps": 100},
+    {"name": "warmup dt/2",  "dt_scale": 0.5,       "steps": 500},
+  ]
+
+  logger.info("Gentle-start equilibration...")
+  for phase in warmup_phases:
+    warmup_dt = dt * phase["dt_scale"]
+    warmup_kT = kT  # same temperature
+
+    # Create a temporary integrator at reduced timestep
+    warmup_init, warmup_apply = jax_md_simulate.nvt_langevin(
+      integrator_energy_fn, shift_fn, dt=warmup_dt, kT=warmup_kT, gamma=gamma_reduced
+    )
+
+    # Initialize from current state positions
+    warmup_key = jax.random.fold_in(key, hash(phase["name"]))
+    if neighbor is not None:
+      warmup_state = warmup_init(warmup_key, state.position, mass=masses, neighbor=neighbor)
+    else:
+      warmup_state = warmup_init(warmup_key, state.position, mass=masses)
+
+    # Run warmup phase
+    @jax.jit
+    def _warmup_loop(ws, _apply=warmup_apply, _n=phase["steps"]):
+      def body(i, s):
+        return _apply(s)
+      return jax.lax.fori_loop(0, _n, body, ws)
+
+    warmup_state = _warmup_loop(warmup_state)
+
+    # NaN check
+    has_nan = bool(jnp.any(~jnp.isfinite(warmup_state.position)))
+    if has_nan:
+      logger.warning("  %s: NaN detected after %d steps! Reverting to minimized positions.",
+                     phase["name"], phase["steps"])
+      # Revert to minimized positions — don't propagate NaN
+      if neighbor is not None:
+        state = init_fn(key, positions_minimized, mass=masses, neighbor=neighbor)
+      else:
+        state = init_fn(key, positions_minimized, mass=masses)
+      break
+    else:
+      # Update state with warmup results, reinitialize with production integrator
+      if neighbor is not None:
+        state = init_fn(key, warmup_state.position, mass=masses, neighbor=neighbor)
+      else:
+        state = init_fn(key, warmup_state.position, mass=masses)
+      logger.info("  %s: %d steps OK (dt=%.4e τ)", phase["name"], phase["steps"], warmup_dt)
+
+  # Compile and test the production step function
   if neighbor is not None:
     _test_state = jit_apply_fn(state, nbr=neighbor)
   else:
@@ -961,5 +1066,116 @@ def run_simulation(
     kinetic_energy=None,
   )
 
-
 # Note: jax_md imports are now inside run_simulation to avoid circular imports
+
+
+def simulate_frames(
+  protein: "Protein",
+  r_init: Array,
+  n_steps: int,
+  n_frames: int,
+  key: Array,
+) -> Array:
+  """Production simulation loop isolating the core integrator logic.
+
+  Process:
+  1.  **Initialize**: Setup energy function and random keys.
+  2.  **Integrator**: Initialize NVT Langevin integrator (with RATTLE if constrained).
+  3.  **Simulate**: Execute production loop using `jax.lax.scan`.
+
+  Args:
+    protein: Protein object with physical parameters.
+    r_init: Initial positions (N, 3).
+    n_steps: Number of integration steps per frame.
+    n_frames: Number of frames to generate.
+    key: JAX random PRNG key.
+
+  Returns:
+    (n_frames, n_atoms, 3) array of positions.
+  """
+  from jax_md import simulate as jax_md_simulate
+
+  # Physics parameters - use defaults consistent with run_simulation
+  temperature_k = 300.0
+  step_size_fs = 2.0
+  gamma = 1.0
+
+  kT = temperature_k * BOLTZMANN_KCAL
+  dt = step_size_fs / AKMA_TIME_UNIT_FS
+  gamma_reduced = gamma * AKMA_TIME_UNIT_FS * 1e-3
+
+  displacement_fn, shift_fn = space.free()
+
+  # Build ExclusionSpec if not present in protein
+  exclusion_spec = nl.ExclusionSpec.from_protein(protein)
+
+  # Energy function (implicit solvent by default for extracted loop)
+  energy_fn = physics_system.make_energy_fn(
+    displacement_fn,
+    protein,
+    exclusion_spec=exclusion_spec,
+    implicit_solvent=True,
+  )
+
+  # Derived masses (matches run_simulation logic)
+  n_atoms = r_init.shape[0]
+  raw_masses = protein.masses
+  if raw_masses is not None:
+    masses = jnp.array(raw_masses)
+    if jnp.all(masses == 0):
+      raw_masses = None
+
+  if raw_masses is None:
+    # Element-based derivation fallback
+    from prolix.constants import masses_from_elements, DEFAULT_MASS
+    elements = getattr(protein, "elements", None)
+    if elements is not None and len(elements) == n_atoms:
+      masses = jnp.array(masses_from_elements(list(elements)), dtype=jnp.float32)
+    else:
+      masses = jnp.ones(n_atoms) * DEFAULT_MASS
+
+  # Integrator setup (RATTLE support)
+  constrained_bonds = protein.constrained_bonds
+  constrained_lengths = protein.constrained_bond_lengths
+
+  if (
+    constrained_bonds is not None and constrained_lengths is not None and len(constrained_bonds) > 0
+  ):
+    init_fn, apply_fn = physics_simulate.rattle_langevin(
+      energy_fn,
+      shift_fn,
+      dt=dt,
+      kT=kT,
+      gamma=gamma_reduced,
+      constraints=(jnp.array(constrained_bonds), jnp.array(constrained_lengths)),
+    )
+  else:
+    init_fn, apply_fn = jax_md_simulate.nvt_langevin(
+      energy_fn, shift_fn, dt=dt, kT=kT, gamma=gamma_reduced
+    )
+
+  state = init_fn(key, r_init, mass=masses)
+
+  @jax.jit
+  def scan_fn(carrier, _):
+    def step_fn(i, s):
+      return apply_fn(s)
+
+    carrier = jax.lax.fori_loop(0, n_steps, step_fn, carrier)
+    return carrier, carrier.position
+
+  _, trajectory = jax.lax.scan(scan_fn, state, jnp.arange(n_frames))
+  return trajectory
+
+
+def batched_simulate_frames(
+  protein: "Protein",
+  r_init: Array,
+  n_steps: int,
+  n_frames: int,
+  keys: Array,
+) -> Array:
+  """Vmapped version of simulate_frames for ensemble simulations."""
+  return jax.vmap(simulate_frames, in_axes=(None, 0, None, None, 0))(
+    protein, r_init, n_steps, n_frames, keys
+  )
