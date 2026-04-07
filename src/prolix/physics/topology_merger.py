@@ -7,13 +7,16 @@ intramolecular exclusions and bonded terms for water.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, TYPE_CHECKING
 
 import jax.numpy as jnp
 from flax import struct
 from proxide.core.containers import Protein
 from prolix.physics.water_models import WaterModelParams, WaterModelType, get_water_params
 from prolix.physics.neighbor_list import ExclusionSpec
+
+if TYPE_CHECKING:
+    from prolix.physics.solvation import SolventTopology
 
 @struct.dataclass
 class MergedTopology:
@@ -34,13 +37,19 @@ class MergedTopology:
     cmap_torsions: jnp.ndarray | None
     cmap_indices: jnp.ndarray | None
     cmap_energy_grids: jnp.ndarray | None
+    urey_bradley_bonds: jnp.ndarray | None
+    urey_bradley_params: jnp.ndarray | None
     radii: jnp.ndarray
     scaled_radii: jnp.ndarray
     element_ids: jnp.ndarray
+    is_backbone: jnp.ndarray
+    is_heavy: jnp.ndarray
+    is_hydrogen: jnp.ndarray
     box_size: jnp.ndarray | None
     exclusion_spec: ExclusionSpec
     water_indices: jnp.ndarray  # (N_waters, 3)
     water_model: WaterModelType
+    atom_mask: jnp.ndarray
     protein_atom_mask: jnp.ndarray
     water_atom_mask: jnp.ndarray
     n_protein_atoms: int
@@ -49,16 +58,17 @@ class MergedTopology:
 
 def merge_solvated_topology(
     protein: Protein,
-    water_positions: jnp.ndarray,
+    solvent_topo: SolventTopology,
     model_type: WaterModelType | str = WaterModelType.OPC3,
-    box_size: jnp.ndarray | None = None,
+    box_size: Array | None = None,
+    merged_positions: jnp.ndarray | None = None,
 ) -> MergedTopology:
     """Merge protein and solvent into a single system topology.
 
     Args:
         protein: The protein structure and its parameters.
-        water_positions: (N_waters * 3, 3) matrix of water coordinates.
-        model_type: The water model to use (TIP3P or OPC3).
+        solvent_topo: Structured SolventTopology containing pre-parameterized waters and ions.
+        model_type: The water model being used.
         box_size: Optional (3,) array defining the periodic simulation box.
 
     Returns:
@@ -69,44 +79,67 @@ def merge_solvated_topology(
 
     params = get_water_params(model_type)
     n_protein = len(protein.full_coordinates)
-    n_waters = len(water_positions) // 3
+    
+    # Real atom mask from protein (handles missing atoms in PDB)
+    # Use full_atom_mask (flat, matches full_coordinates) not atom_mask (N_res, 37)
+    p_mask = getattr(protein, 'full_atom_mask', None)
+    if p_mask is None:
+        p_mask = getattr(protein, 'atom_mask', None)
+    if p_mask is None:
+        p_mask = jnp.ones(n_protein, dtype=bool)
+    else:
+        p_mask = jnp.asarray(p_mask, dtype=bool).ravel()
 
     # 1. Merge basic parameters
     charges = jnp.concatenate([
         jnp.asarray(protein.charges) if protein.charges is not None else jnp.zeros(n_protein),
-        jnp.tile(jnp.array([params.charge_O, params.charge_H, params.charge_H]), n_waters)
+        solvent_topo.charges
     ])
 
     masses = jnp.concatenate([
         jnp.asarray(protein.masses) if protein.masses is not None else jnp.ones(n_protein) * 12.011,
-        jnp.tile(jnp.array([15.999, 1.008, 1.008]), n_waters)
+        solvent_topo.masses
     ])
 
     sigmas = jnp.concatenate([
         jnp.asarray(protein.sigmas) if protein.sigmas is not None else jnp.ones(n_protein) * 3.0,
-        jnp.tile(jnp.array([params.sigma_O, 1.0e-6, 1.0e-6]), n_waters)
+        solvent_topo.sigmas
     ])
 
     epsilons = jnp.concatenate([
         jnp.asarray(protein.epsilons) if protein.epsilons is not None else jnp.zeros(n_protein),
-        jnp.tile(jnp.array([params.epsilon_O, 0.0, 0.0]), n_waters)
+        solvent_topo.epsilons
     ])
 
     elem_ids = getattr(protein, 'element_ids', None)
-    # Water has default element IDs (O: 8, H: 1)
     element_ids = jnp.concatenate([
         jnp.asarray(elem_ids) if elem_ids is not None else jnp.zeros(n_protein, dtype=jnp.int32),
-        jnp.tile(jnp.array([8, 1, 1], dtype=jnp.int32), n_waters)
+        solvent_topo.element_ids
     ])
 
     radii = jnp.concatenate([
-        protein.radii if hasattr(protein, 'radii') else jnp.zeros(n_protein),
-        jnp.tile(jnp.array([0.15, 0.12, 0.12]), n_waters)  # Default approximate VdW radii for water
+        protein.radii if getattr(protein, 'radii', None) is not None else jnp.zeros(n_protein),
+        jnp.where(solvent_topo.is_hydrogen, 0.12, 0.15)  # Heuristic for implicit radii in solvent
     ])
 
     scaled_radii = jnp.concatenate([
-        protein.scaled_radii if hasattr(protein, 'scaled_radii') else jnp.zeros(n_protein),
-        jnp.tile(jnp.array([0.15, 0.12, 0.12]), n_waters)
+        protein.scaled_radii if getattr(protein, 'scaled_radii', None) is not None else jnp.zeros(n_protein),
+        jnp.where(solvent_topo.is_hydrogen, 0.12, 0.15)
+    ])
+
+    is_backbone = jnp.concatenate([
+        jnp.asarray(protein.is_backbone) if getattr(protein, 'is_backbone', None) is not None else jnp.zeros(n_protein, dtype=bool),
+        jnp.zeros(len(solvent_topo.charges), dtype=bool)
+    ])
+
+    is_hydrogen = jnp.concatenate([
+        jnp.asarray(protein.is_hydrogen) if getattr(protein, 'is_hydrogen', None) is not None else jnp.zeros(n_protein, dtype=bool),
+        solvent_topo.is_hydrogen
+    ])
+
+    is_heavy = jnp.concatenate([
+        jnp.asarray(protein.is_heavy) if getattr(protein, 'is_heavy', None) is not None else jnp.zeros(n_protein, dtype=bool),
+        ~solvent_topo.is_hydrogen
     ])
 
     # 2. Extract protein bonded terms
@@ -123,9 +156,12 @@ def merge_solvated_topology(
     cmap_torsions = getattr(protein, 'cmap_torsions', None)
     cmap_indices = getattr(protein, 'cmap_indices', None)
     cmap_energy_grids = getattr(protein, 'cmap_energy', getattr(protein, 'cmap_energy_grids', None))
+    urey_bradley_bonds = getattr(protein, 'urey_bradley_bonds', None)
+    urey_bradley_params = getattr(protein, 'urey_bradley_params', None)
 
     # 3. Add water bonded terms
-    water_indices = jnp.arange(n_waters * 3).reshape(n_waters, 3) + n_protein
+    water_indices = solvent_topo.water_indices + n_protein
+    n_waters = solvent_topo.n_waters
     
     # O-H1 and O-H2 bonds
     water_bonds = jnp.stack([
@@ -137,7 +173,7 @@ def merge_solvated_topology(
         jnp.array([params.r_OH, params.k_bond]), (n_waters * 2, 1)
     )
 
-    # H-O-H angles
+    # H1-O-H2 angle
     water_angles = water_indices[:, [1, 0, 2]]
     water_angle_params = jnp.tile(
         jnp.array([params.theta_HOH, params.k_angle]), (n_waters, 1)
@@ -152,14 +188,14 @@ def merge_solvated_topology(
 
     # 4. Exclusions
     from prolix.utils.topology import find_bonded_exclusions
-    n_total = n_protein + n_waters * 3
+    n_total = n_protein + len(solvent_topo.charges)
     exclusions = find_bonded_exclusions(merged_bonds, n_total)
     
     # 1-4 scaling (water has none, so we reuse protein scales)
     c14 = protein.coulomb14scale if protein.coulomb14scale is not None else 0.83333333
     l14 = protein.lj14scale if protein.lj14scale is not None else 0.5
     
-    exclusion_spec = ExclusionSpec(
+    merged_excl = ExclusionSpec(
         idx_12_13=jnp.concatenate([exclusions.idx_12, exclusions.idx_13], axis=0),
         idx_14=exclusions.idx_14,
         scale_14_elec=c14,
@@ -167,8 +203,10 @@ def merge_solvated_topology(
         n_atoms=n_total
     )
 
+    solvent_mask = jnp.ones(len(solvent_topo.charges), dtype=bool)
+
     return MergedTopology(
-        positions=jnp.concatenate([protein.full_coordinates, water_positions]),
+        positions=merged_positions if merged_positions is not None else jnp.concatenate([protein.full_coordinates, solvent_topo.positions]),
         charges=charges,
         masses=masses,
         sigmas=sigmas,
@@ -184,15 +222,24 @@ def merge_solvated_topology(
         cmap_torsions=cmap_torsions,
         cmap_indices=cmap_indices,
         cmap_energy_grids=cmap_energy_grids,
+        urey_bradley_bonds=urey_bradley_bonds,
+        urey_bradley_params=urey_bradley_params,
         radii=radii,
         scaled_radii=scaled_radii,
         element_ids=element_ids,
-        box_size=box_size,
-        exclusion_spec=exclusion_spec,
+        is_backbone=is_backbone,
+        is_heavy=is_heavy,
+        is_hydrogen=is_hydrogen,
+        box_size=jnp.asarray(box_size) if box_size is not None else None,
+        exclusion_spec=merged_excl if merged_excl is not None else protein.exclusion_spec,
         water_indices=water_indices,
         water_model=model_type,
-        protein_atom_mask=jnp.concatenate([jnp.ones(n_protein, dtype=bool), jnp.zeros(n_waters * 3, dtype=bool)]),
-        water_atom_mask=jnp.concatenate([jnp.zeros(n_protein, dtype=bool), jnp.ones(n_waters * 3, dtype=bool)]),
+        atom_mask=jnp.concatenate([p_mask, solvent_mask]),
+        protein_atom_mask=jnp.concatenate([p_mask, jnp.zeros(len(solvent_topo.charges), dtype=bool)]),
+        water_atom_mask=jnp.concatenate([
+            jnp.zeros(n_protein, dtype=bool),
+            jnp.zeros(len(solvent_topo.charges), dtype=bool).at[solvent_topo.water_indices.flatten()].set(True)
+        ]),
         n_protein_atoms=n_protein,
-        n_water_atoms=n_waters * 3,
+        n_water_atoms=len(solvent_topo.charges),
     )

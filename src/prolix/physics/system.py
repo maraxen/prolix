@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
+from dataclasses import dataclass
 
 import jax
 import jax.numpy as jnp
@@ -84,7 +85,13 @@ def compute_dihedral_angles(
   x = jnp.sum(v * w, axis=-1)
   y = jnp.sum(jnp.cross(b1_unit, v) * w, axis=-1)
 
-  return jnp.arctan2(y, x)
+  # Pad safe: Prevent arctan2(0,0) which has a NaN gradient
+  # If atoms perfectly overlap, x and y become 0. We add a tiny epsilon to x if both are exactly 0.
+  overlap_mask = (x == 0.0) & (y == 0.0)
+  safe_x = jnp.where(overlap_mask, 1.0, x)
+  safe_y = jnp.where(overlap_mask, 0.0, y)
+
+  return jnp.arctan2(safe_y, safe_x)
 
 
 def make_energy_fn(
@@ -858,3 +865,75 @@ def make_energy_fn(
     }
 
   return total_energy
+
+
+@dataclass(frozen=True)
+class PaddedSystem:
+  """Container for a fully parameterized system with explicit solvent.
+
+  Attributes:
+      positions: (N, 3) coordinates.
+      charges: (N,) partial charges.
+      sigmas: (N,) LJ sigma.
+      epsilons: (N,) LJ epsilon.
+      masses: (N,) masses in amu.
+      box_size: (3,) box dimensions.
+      water_indices: indices of water oxygen atoms.
+      energy_fn: Potential energy function.
+      topology: The MergedTopology metadata.
+  """
+  positions: Array
+  charges: Array
+  sigmas: Array
+  epsilons: Array
+  masses: Array
+  box_size: Array
+  water_indices: Array
+  energy_fn: Callable[[Array], float]
+  topology: Any
+  # Constraints and masks
+  constraint_pairs: Array | None = None
+  constraint_mask: Array | None = None
+  constraint_lengths: Array | None = None
+  atom_mask: Array | None = None
+
+  @classmethod
+  def from_merged_topology(
+    cls,
+    topology: Any,
+    temperature: float = 300.0,
+    cutoff_distance: float = 9.0,
+  ) -> PaddedSystem:
+    """Creates a PaddedSystem from a MergedTopology."""
+    from jax_md import space
+    
+    # 1. Setup space
+    displacement_fn, shift_fn = space.periodic_general(topology.box_size)
+    
+    # 2. Setup energy function
+    energy_fn = make_energy_fn(
+        displacement_fn,
+        topology,
+        use_pbc=True,
+        box=topology.box_size,
+        cutoff_distance=cutoff_distance,
+        implicit_solvent=False # Explicit solvent run
+    )
+    
+    # 3. Aggregate masses
+    # Note: masses are available in topology
+    return cls(
+        positions=topology.positions,
+        charges=topology.charges,
+        sigmas=topology.sigmas,
+        epsilons=topology.epsilons,
+        masses=topology.masses,
+        box_size=topology.box_size,
+        water_indices=topology.water_indices,
+        energy_fn=energy_fn,
+        topology=topology,
+        constraint_pairs=getattr(topology, "constraint_pairs", None),
+        constraint_mask=getattr(topology, "constraint_mask", None),
+        constraint_lengths=getattr(topology, "constraint_lengths", None),
+        atom_mask=getattr(topology, "atom_mask", None)
+    )

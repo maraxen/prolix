@@ -14,11 +14,15 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+import equinox as eqx
 import jax
 import jax.numpy as jnp
 from jax.scipy.special import erfc
+from jaxtyping import Array, Float, Int, Bool
 
 from proxide.physics.constants import COULOMB_CONSTANT
+from prolix.padding import PaddedSystem
+from prolix.physics.pme import make_spme_energy_fn, spme_self_energy, spme_background_energy
 
 if TYPE_CHECKING:
     from jax_md.util import Array
@@ -36,8 +40,7 @@ def chunked_explicit_nonbonded_energy(
     sigmas: Array,
     epsilons: Array,
     atom_mask: Array,
-    dense_excl_scale_vdw: Array,
-    dense_excl_scale_elec: Array,
+    sys: PaddedSystem, # Pass whole sys for sparse exclusions
     T: int = 256,
     soft_core_lambda: float = 1.0,
     pme_alpha: float = 0.0,
@@ -80,98 +83,200 @@ def chunked_explicit_nonbonded_energy(
             e_j = jax.lax.dynamic_slice(epsilons, (start_idx,), (T,))
             m_j = jax.lax.dynamic_slice(atom_mask, (start_idx,), (T,))
 
-            # Slice the dense exclusion matrices for this tile
-            vdw_scale_tile = jax.lax.dynamic_slice(dense_excl_scale_vdw, (0, start_idx), (N, T))
-            elec_scale_tile = jax.lax.dynamic_slice(dense_excl_scale_elec, (0, start_idx), (N, T))
-
             # Shared distances (N, T)
             dr = pos[:, None, :] - r_j[None, :, :]
             dist_sq = jnp.sum(dr ** 2, axis=-1) + 1e-10
             dist = jnp.sqrt(dist_sq)
 
-            # Self-exclusion
+            # --- Sparse Exclusion Processing ---
+            # Instead of a dense (N, N) matrix, we compute the (N, T) exclusion block
+            # on the fly from sys.excl_indices and sys.excl_scales.
+            # Base scales are 1.0 (everything included)
+            vdw_scale_tile = jnp.ones((N, T), dtype=jnp.float32)
+            elec_scale_tile = jnp.ones((N, T), dtype=jnp.float32)
+            
+            # Slice the sparse exclusion data for these T atoms
+            t_excl_idx = jax.lax.dynamic_slice(sys.excl_indices, (start_idx, 0), (T, sys.excl_indices.shape[1]))
+            t_vdw_scale = jax.lax.dynamic_slice(sys.excl_scales_vdw, (start_idx, 0), (T, sys.excl_scales_vdw.shape[1]))
+            t_elec_scale = jax.lax.dynamic_slice(sys.excl_scales_elec, (start_idx, 0), (T, sys.excl_scales_elec.shape[1]))
+
+            # Scatter scales into the (N, T) block
+            j_local = jnp.arange(T)
+            flat_ii = t_excl_idx.reshape(-1) # (T * max_excl)
+            flat_jj = jnp.repeat(j_local, t_excl_idx.shape[1])
+            
+            vdw_scale_tile = vdw_scale_tile.at[flat_ii, flat_jj].set(t_vdw_scale.reshape(-1))
+            elec_scale_tile = elec_scale_tile.at[flat_ii, flat_jj].set(t_elec_scale.reshape(-1))
+
+            # Pair mask (atoms exist and it's not a self-interaction)
             i_indices = jnp.arange(N)[:, None]
             j_indices = jnp.arange(T)[None, :] + start_idx
             not_self = (i_indices != j_indices).astype(jnp.float32)
-
-            # Pair mask
             pair_mask = (atom_mask[:, None] & m_j[None, :]).astype(jnp.float32) * not_self
 
-            # --- LJ ---
             sig_ij = 0.5 * (sigmas[:, None] + s_j[None, :])
-            sig_ij_safe = jnp.where(
-                pair_mask > 0, jnp.maximum(sig_ij, 1e-4), 1.0
-            )
-            eps_ij = jnp.sqrt(jnp.maximum(
-                epsilons[:, None] * e_j[None, :], 0.0
-            ))
+            sig_ij_safe = jnp.where(pair_mask > 0, jnp.maximum(sig_ij, 1e-4), 1.0)
+            eps_ij = jnp.sqrt(jnp.maximum(epsilons[:, None] * e_j[None, :], 0.0))
+
+            # --- LJ Soft Core (Beutler formulation) ---
+            soft_alpha_lj = jnp.float32(0.5) * (1.0 - lam)
             r_over_sig = dist / sig_ij_safe
-            r6 = r_over_sig ** 6
-            D = soft_term + r6 + 1e-12
-            e_lj = 4.0 * eps_ij * lam * (1.0 / (D * D) - 1.0 / D)
+            r_over_sig_6 = r_over_sig ** 6
+            denom_lj = soft_alpha_lj + r_over_sig_6
+            
+            x_inv6_soft = 1.0 / jnp.maximum(denom_lj, 1e-6)
+            e_lj = 4.0 * eps_ij * lam * (x_inv6_soft * x_inv6_soft - x_inv6_soft)
             e_lj = jnp.where(pair_mask > 0, e_lj * vdw_scale_tile, 0.0)
 
-            # --- Coulomb ---
-            qq = charges[:, None] * q_j[None, :] * COULOMB_CONSTANT
+            # --- Coulomb Soft Core ---
+            soft_alpha_coul = jnp.float32(2.0) * (1.0 - lam)
+            dist_coul = jnp.sqrt(dist_sq + soft_alpha_coul)
             
-            # PME Direct Space damping: erfc(alpha * r) / r
-            # Standard Coulomb: 1 / r
+            qq = charges[:, None] * q_j[None, :] * COULOMB_CONSTANT
             if pme_alpha > 0.0:
-                coulomb_term = qq * erfc(pme_alpha * dist) / dist
+                coulomb_term = qq * erfc(pme_alpha * dist_coul) / dist_coul
             else:
-                coulomb_term = qq / dist
-                
+                coulomb_term = qq / dist_coul
             e_coul = jnp.where(pair_mask > 0, coulomb_term * elec_scale_tile, 0.0)
 
-            # 0.5× for LJ/Coulomb double-count (since we loop over all pairs N x N)
             return 0.5 * jnp.sum(e_lj) + 0.5 * jnp.sum(e_coul)
 
+        # Body function for the scan loop (one tile)
+        # We explicitly wrap this with unroll=1 to prevent XLA from bloating the graph
+        # for a 195-iteration loop with massive intermediates.
         tile_e = _compute_tile_inner(positions, start)
         return carry + tile_e, None
 
     total_energy, _ = jax.lax.scan(
         tile_energy_outer,
-        jnp.float32(0.0),
+        jnp.array(0.0, dtype=positions.dtype),
         jnp.arange(n_tiles),
+        unroll=1,
     )
 
     return total_energy
+
+
+def _total_energy_fn(
+    sys: PaddedSystem,
+    T: int = 256,
+    soft_core_lambda: float = 1.0,
+) -> Array:
+    """Internal energy implementation for gradients."""
+    pos = sys.positions
+    safe_charges = jnp.where(sys.atom_mask, sys.charges, jnp.float32(0.0))
+    safe_sigmas = jnp.where(sys.atom_mask, sys.sigmas, jnp.float32(1.0))
+    safe_epsilons = jnp.where(sys.atom_mask, sys.epsilons, jnp.float32(0.0))
+    
+    # Reciprocal space PME and corrections
+    recip_energy_fn = None
+    if sys.box_size is not None and sys.pme_alpha > 0:
+        recip_energy_fn = make_spme_energy_fn(
+            box_size=sys.box_size,
+            alpha=sys.pme_alpha
+        )
+
+    # Direct space (LJ + damped Coulomb)
+    # Passed sys directly to allow sparse exclusion extraction
+    e_total = chunked_explicit_nonbonded_energy(
+        pos,
+        safe_charges,
+        safe_sigmas,
+        safe_epsilons,
+        sys.atom_mask,
+        sys, # Pass whole sys for sparse exclusions
+        pme_alpha=sys.pme_alpha,
+        T=T,
+        soft_core_lambda=soft_core_lambda,
+    )
+    # Add PME reciprocal and corrections
+    if recip_energy_fn is not None:
+        e_total += recip_energy_fn(pos, safe_charges, sys.atom_mask)
+        e_bg = spme_background_energy(safe_charges, sys.atom_mask, sys.pme_alpha, sys.box_size)
+        e_total += e_bg
+        
+    return e_total
+
+
+def flash_explicit_total_energy(
+    sys: PaddedSystem,
+    T: int = 256,
+    soft_core_lambda: float = 1.0,
+) -> Array:
+    """Complete explicit solvent energy: bonded + FlashMD nonbonded + PME.
+
+    This is the correct energy function for minimization. Unlike
+    flash_explicit_energy (nonbonded only), this includes all bonded
+    terms needed for structural integrity during energy minimization.
+    """
+    from prolix.batched_energy import (
+        _bond_energy_masked, _angle_energy_masked,
+        _dihedral_energy_masked, _cmap_energy_masked,
+    )
+    from jax_md import space
+    
+    pos = sys.positions
+    # Simple Euclidean displacement — bonds never cross PBC boundaries.
+    # OpenMM uses the same default (setUsesPeriodicBoundaryConditions=False).
+    displacement_fn, _ = space.free()
+    
+    # --- Bonded terms (O(N), no N² operations) ---
+    e_bond = _bond_energy_masked(
+        pos, sys.bonds, sys.bond_params, sys.bond_mask, displacement_fn)
+    e_ub = _bond_energy_masked(
+        pos, sys.urey_bradley_bonds, sys.urey_bradley_params,
+        sys.urey_bradley_mask, displacement_fn)
+    e_angle = _angle_energy_masked(
+        pos, sys.angles, sys.angle_params, sys.angle_mask, displacement_fn)
+    e_dih = _dihedral_energy_masked(
+        pos, sys.dihedrals, sys.dihedral_params,
+        sys.dihedral_mask, displacement_fn)
+    e_imp = _dihedral_energy_masked(
+        pos, sys.impropers, sys.improper_params,
+        sys.improper_mask, displacement_fn)
+    e_cmap = _cmap_energy_masked(
+        pos, sys.cmap_torsions, sys.cmap_indices,
+        sys.cmap_mask, sys.cmap_coeffs, displacement_fn)
+    
+    e_bonded = e_bond + e_ub + e_angle + e_dih + e_imp + e_cmap
+    
+    # --- Nonbonded terms (FlashMD tiled O(N²/T)) ---
+    e_nonbonded = _total_energy_fn(sys, T=T, soft_core_lambda=soft_core_lambda)
+    
+    return e_bonded + e_nonbonded
+
+
+def flash_explicit_energy(
+    sys: PaddedSystem,
+    T: int = 256,
+    soft_core_lambda: float = 1.0,
+) -> Array:
+    """Compute explicit solvent nonbonded energy via FlashMD architecture."""
+    return _total_energy_fn(sys, T=T, soft_core_lambda=soft_core_lambda)
 
 
 def flash_explicit_forces(
     sys: PaddedSystem,
     T: int = 256,
     soft_core_lambda: float = 1.0,
-    pme_alpha: float = 0.0,
 ) -> Array:
     """Compute explicit solvent nonbonded forces via FlashMD architecture.
+
+    Includes PME reciprocal-space contributions if box_size and pme_alpha
+    are present in the system.
 
     Returns:
         Forces (N, 3) in kcal/mol/Å. Zero for padded atoms.
     """
-    safe_charges = jnp.where(sys.atom_mask, sys.charges, jnp.float32(0.0))
-    safe_sigmas = jnp.where(sys.atom_mask, sys.sigmas, jnp.float32(1.0))
-    safe_epsilons = jnp.where(sys.atom_mask, sys.epsilons, jnp.float32(0.0))
+    # Use eqx.filter_grad instead of jax.grad to respect static fields (like box_size).
+    # This prevents Tracer Errors in the PME reciprocal kernel.
+    @eqx.filter_grad
+    def _grad_fn(s: PaddedSystem):
+        return _total_energy_fn(s, T=T, soft_core_lambda=soft_core_lambda)
+        
+    grad_at_sys = _grad_fn(sys)
     
-    # Ensure exclusion matrices are precomputed
-    if sys.dense_excl_scale_vdw is None or sys.dense_excl_scale_elec is None:
-        raise ValueError(
-            "Dense exclusion matrices not found. Call precompute_dense_exclusions(sys) first."
-        )
-
-    def _total_energy(positions):
-        return chunked_explicit_nonbonded_energy(
-            positions,
-            safe_charges,
-            safe_sigmas,
-            safe_epsilons,
-            sys.atom_mask,
-            sys.dense_excl_scale_vdw,
-            sys.dense_excl_scale_elec,
-            T=T,
-            soft_core_lambda=soft_core_lambda,
-            pme_alpha=pme_alpha,
-        )
-
-    forces = -jax.grad(_total_energy)(sys.positions)
+    # We want the forces on positions: F = -dE/dr
+    # eqx.filter_grad returns a PyTree of gradients for all dynamic leaves.
+    forces = -grad_at_sys.positions
     return forces * sys.atom_mask[:, None]

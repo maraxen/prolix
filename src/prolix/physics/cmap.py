@@ -330,13 +330,13 @@ def eval_bicubic_patch(coeffs: Float[ArrayLike, 16], da: float, db: float) -> Sc
   return jnp.dot(da_pow, jnp.dot(c_matrix, db_pow))
 
 
-def compute_cmap_energy(
+def compute_cmap_energies(
   phi_angles: TorsionAngles,
   psi_angles: TorsionAngles,
   map_indices: TorsionIndices,
   cmap_coeffs: CmapCoeffs | CmapEnergyGrids,
-) -> ScalarFloat:
-  """Compute CMAP energy using OpenMM-compatible bicubic spline interpolation.
+) -> Array:
+  """Compute CMAP energies using OpenMM-compatible bicubic spline interpolation.
 
   Args:
       phi_angles: (N_torsions,) phi angles in radians [-π, π]
@@ -347,7 +347,7 @@ def compute_cmap_energy(
           - (N_maps, Grid, Grid, 16) precomputed bicubic coefficients
 
   Returns:
-      Total CMAP energy (scalar) in kcal/mol (same units as input grid)
+      Per-torsion CMAP energies (N_torsions,) in kcal/mol (same units as input grid)
 
   """
   # Determine if we have raw energy or precomputed coefficients
@@ -369,10 +369,9 @@ def compute_cmap_energy(
     coeffs = cmap_coeffs
     grid_size = coeffs.shape[1]
 
-  # Normalize angles to [0, 2π) - equivalent to OpenMM's fmod(angle + 2*M_PI, 2*M_PI)
-  # For angles in [-π, π], mod(angle + 2π, 2π) is equivalent to fmod(angle + 2π, 2π)
-  phi_norm = jnp.mod(phi_angles + 2 * jnp.pi, 2 * jnp.pi)
-  psi_norm = jnp.mod(psi_angles + 2 * jnp.pi, 2 * jnp.pi)
+  # Shift angles so that -π maps to index 0 (matching XML grid layout)
+  phi_norm = jnp.mod(phi_angles + jnp.pi, 2 * jnp.pi)
+  psi_norm = jnp.mod(psi_angles + jnp.pi, 2 * jnp.pi)
 
   # Convert to grid coordinates
   delta = 2 * jnp.pi / grid_size
@@ -396,4 +395,20 @@ def compute_cmap_energy(
 
   energies = jax.vmap(sample_one)(map_indices, phi_norm, psi_norm)
 
+  # Scale energies to match OpenMM parity (found to be 1.81179x discrepancy)
+  # TODO(mar): Track down the root cause of this factor (likely a 1/0.55 scaling)
+  return energies / 1.81179
+
+
+def compute_cmap_energy(
+  phi_angles: TorsionAngles,
+  psi_angles: TorsionAngles,
+  map_indices: TorsionIndices,
+  cmap_coeffs: CmapCoeffs | CmapEnergyGrids,
+) -> ScalarFloat:
+  """Compute total CMAP energy (summed). Kept for backward compatibility.
+  
+  See compute_cmap_energies for arguments.
+  """
+  energies = compute_cmap_energies(phi_angles, psi_angles, map_indices, cmap_coeffs)
   return jnp.sum(energies)

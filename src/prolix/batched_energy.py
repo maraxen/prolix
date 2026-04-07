@@ -24,10 +24,11 @@ if TYPE_CHECKING:
 
 def _bond_energy_masked(r: Array, indices: Array, params: Array, mask: Array, displacement_fn: space.DisplacementFn) -> Array:
     """Computes harmonic bond energy with per-bond masking."""
-    r_i = r[indices[:, 0]]
-    r_j = r[indices[:, 1]]
+    # Cast to int32 to prevent float64 indexing errors under JAX_ENABLE_X64
+    r_i = r[indices[:, 0].astype(jnp.int32)]
+    r_j = r[indices[:, 1].astype(jnp.int32)]
     dr = jax.vmap(displacement_fn)(r_i, r_j)
-    dist = space.distance(dr)
+    dist = jnp.sqrt(jnp.sum(dr ** 2, axis=-1) + 1e-10)
     
     # params shape is (N, 2): length, force_constant
     r0 = params[:, 0]
@@ -38,15 +39,16 @@ def _bond_energy_masked(r: Array, indices: Array, params: Array, mask: Array, di
 
 def _angle_energy_masked(r: Array, indices: Array, params: Array, mask: Array, displacement_fn: space.DisplacementFn) -> Array:
     """Computes harmonic angle energy with per-angle masking."""
-    r_i = r[indices[:, 0]]
-    r_j = r[indices[:, 1]]
-    r_k = r[indices[:, 2]]
+    # Cast to int32
+    r_i = r[indices[:, 0].astype(jnp.int32)]
+    r_j = r[indices[:, 1].astype(jnp.int32)]
+    r_k = r[indices[:, 2].astype(jnp.int32)]
 
     v_ji = jax.vmap(displacement_fn)(r_i, r_j)
     v_jk = jax.vmap(displacement_fn)(r_k, r_j)
 
-    d_ji = space.distance(v_ji)
-    d_jk = space.distance(v_jk)
+    d_ji = jnp.sqrt(jnp.sum(v_ji ** 2, axis=-1) + 1e-10)
+    d_jk = jnp.sqrt(jnp.sum(v_jk ** 2, axis=-1) + 1e-10)
 
     denom = d_ji * d_jk + 1e-8
     cos_theta = jnp.sum(v_ji * v_jk, axis=-1) / denom
@@ -61,10 +63,11 @@ def _angle_energy_masked(r: Array, indices: Array, params: Array, mask: Array, d
 
 def _dihedral_energy_masked(r: Array, indices: Array, params: Array, mask: Array, displacement_fn: space.DisplacementFn) -> Array:
     """Computes periodic dihedral energy with per-dihedral masking."""
-    r_i = r[indices[:, 0]]
-    r_j = r[indices[:, 1]]
-    r_k = r[indices[:, 2]]
-    r_l = r[indices[:, 3]]
+    # Cast to int32
+    r_i = r[indices[:, 0].astype(jnp.int32)]
+    r_j = r[indices[:, 1].astype(jnp.int32)]
+    r_k = r[indices[:, 2].astype(jnp.int32)]
+    r_l = r[indices[:, 3].astype(jnp.int32)]
 
     b0 = jax.vmap(displacement_fn)(r_j, r_i)
     b1 = jax.vmap(displacement_fn)(r_k, r_j)
@@ -80,8 +83,9 @@ def _dihedral_energy_masked(r: Array, indices: Array, params: Array, mask: Array
     y = jnp.sum(jnp.cross(b1_unit, v) * w, axis=-1)
     
     # Pad safe: Prevent arctan2(0,0) which has a NaN gradient
-    safe_x = jnp.where(mask == 0, 1.0, x)
-    safe_y = jnp.where(mask == 0, 0.0, y)
+    overlap_mask = (mask == 0) | ((x == 0.0) & (y == 0.0))
+    safe_x = jnp.where(overlap_mask, 1.0, x)
+    safe_y = jnp.where(overlap_mask, 0.0, y)
     
     phi = jnp.arctan2(safe_y, safe_x)
     phi = phi - jnp.pi
@@ -93,23 +97,21 @@ def _dihedral_energy_masked(r: Array, indices: Array, params: Array, mask: Array
     e_per_dih = k * (1.0 + jnp.cos(periodicity * phi - phase))
     return jnp.sum(e_per_dih * mask)
 
-def _cmap_energy_masked(r: Array, indices: Array, mask: Array, coeffs: Array | None, displacement_fn: space.DisplacementFn) -> Array:
+def _cmap_energy_masked(r: Array, indices: Array, map_indices: Array, mask: Array, coeffs: Array | None, displacement_fn: space.DisplacementFn) -> Array:
     """Computes CMAP energy with per-torsion masking."""
     if indices is None or coeffs is None or len(indices) == 0:
         return jnp.array(0.0)
         
-    from prolix.physics.cmap import compute_cmap_energy
+    from prolix.physics.cmap import compute_cmap_energies
     from prolix.physics.system import compute_dihedral_angles
     
+    indices = indices.astype(jnp.int32)
     torsion_indices = jax.vmap(CmapTorsionIndices.from_row)(indices)
     
     phi = compute_dihedral_angles(r, jnp.asarray(torsion_indices.phi_indices), displacement_fn)
     psi = compute_dihedral_angles(r, jnp.asarray(torsion_indices.psi_indices), displacement_fn)
     
-    # We maps all torsions to map index 0 if not provided
-    map_indices = jnp.zeros(len(indices), dtype=jnp.int32)
-    
-    e_per_torsion = compute_cmap_energy(psi, phi, map_indices, coeffs)
+    e_per_torsion = compute_cmap_energies(psi, phi, map_indices, coeffs)
     return jnp.sum(e_per_torsion * mask)
 
 
@@ -239,12 +241,15 @@ def _coulomb_energy_masked(
     r: Array, charges: Array, atom_mask: Array,
     displacement_fn: space.DisplacementFn,
     excl_scale_elec: Array | None = None,
+    pme_alpha: float = 0.0,
 ) -> Array:
-    """Computes pure Coulomb energy with atom masking and exclusion scaling.
+    """Computes Coulomb energy with atom masking, exclusion scaling, and damping.
 
     Args:
         excl_scale_elec: (N, N) scale matrix for excluded/scaled pairs.
             If None, no exclusions are applied (legacy behavior).
+        pme_alpha: Ewald splitting parameter. If > 0, computes ERFC-damped
+            direct space Coulomb.
     """
     mask_ij = atom_mask[:, None] & atom_mask[None, :]
     
@@ -255,6 +260,11 @@ def _coulomb_energy_masked(
     dist = jnp.where(dist < 1e-4, 1.0, dist)
     
     e_pair = COULOMB_CONSTANT * (charges[:, None] * charges[None, :]) / dist
+
+    # Apply PME direct-space damping (erfc(alpha * r))
+    if pme_alpha > 0.0:
+        from jax.scipy.special import erfc
+        e_pair = e_pair * erfc(pme_alpha * dist)
     
     n = len(charges)
     no_self = 1.0 - jnp.eye(n)
@@ -355,11 +365,12 @@ def single_padded_energy(sys: PaddedSystem, displacement_fn: space.DisplacementF
     
     # Bonded terms
     e_bond = _bond_energy_masked(r, sys.bonds, sys.bond_params, sys.bond_mask, displacement_fn)
+    e_ub = _bond_energy_masked(r, sys.urey_bradley_bonds, sys.urey_bradley_params, sys.urey_bradley_mask, displacement_fn)
     e_angle = _angle_energy_masked(r, sys.angles, sys.angle_params, sys.angle_mask, displacement_fn)
     e_dih = _dihedral_energy_masked(r, sys.dihedrals, sys.dihedral_params, sys.dihedral_mask, displacement_fn)
     e_imp = _dihedral_energy_masked(r, sys.impropers, sys.improper_params, sys.improper_mask, displacement_fn)
     
-    e_cmap = _cmap_energy_masked(r, sys.cmap_torsions, sys.cmap_mask, sys.cmap_coeffs, displacement_fn)
+    e_cmap = _cmap_energy_masked(r, sys.cmap_torsions, sys.cmap_indices, sys.cmap_mask, sys.cmap_coeffs, displacement_fn)
     
     # Non-bonded — use precomputed dense exclusion scale matrices if available.
     # These are topology constants (independent of r). Precomputing once
@@ -387,12 +398,26 @@ def single_padded_energy(sys: PaddedSystem, displacement_fn: space.DisplacementF
         soft_core_lambda=soft_core_lambda, excl_scale_vdw=excl_scale_vdw,
     )
     
-    # Unconditionally compute dense Coulomb interaction (vacuum electrostatic)
-    # excl_scale_elec already computed above with stop_gradient — reuse it
+    # Coulomb interaction (direct space, optionally damped for PME)
     e_elec = _coulomb_energy_masked(
         r, sys.charges, sys.atom_mask, displacement_fn,
         excl_scale_elec=excl_scale_elec,
+        pme_alpha=sys.pme_alpha,
     )
+
+    # Reciprocal Space (PME) + Corrections
+    if sys.box_size is not None and sys.pme_alpha > 0.0:
+        from prolix.physics.pme import (
+            make_spme_energy_fn, spme_self_energy, spme_background_energy
+        )
+        pme_recip_fn = make_spme_energy_fn(
+            box_size=sys.box_size,
+            alpha=sys.pme_alpha
+        )
+        e_elec += pme_recip_fn(r, sys.charges, sys.atom_mask)
+        e_elec += spme_background_energy(
+            sys.charges, sys.atom_mask, sys.pme_alpha, sys.box_size
+        )
 
     if implicit_solvent:
         mask_ij = sys.atom_mask[:, None] & sys.atom_mask[None, :]
@@ -413,13 +438,14 @@ def single_padded_energy(sys: PaddedSystem, displacement_fn: space.DisplacementF
     else:
         e_solv = 0.0
 
-    return e_bond + e_angle + e_dih + e_imp + e_cmap + e_lj + e_elec + e_solv
+    return e_bond + e_ub + e_angle + e_dih + e_imp + e_cmap + e_lj + e_elec + e_solv
 
 
 def single_padded_force(
     sys: PaddedSystem,
     displacement_fn: space.DisplacementFn,
     implicit_solvent: bool = True,
+    explicit_solvent: bool = False,
     soft_core_lambda: Array = jnp.array(1.0),
     use_flash: bool = True,
 ) -> Array:
@@ -454,6 +480,10 @@ def single_padded_force(
         e_bond = _bond_energy_masked(
             positions, sys.bonds, sys.bond_params, sys.bond_mask, displacement_fn,
         )
+        e_ub = _bond_energy_masked(
+            positions, sys.urey_bradley_bonds, sys.urey_bradley_params,
+            sys.urey_bradley_mask, displacement_fn,
+        )
         e_angle = _angle_energy_masked(
             positions, sys.angles, sys.angle_params, sys.angle_mask, displacement_fn,
         )
@@ -466,23 +496,30 @@ def single_padded_force(
             sys.improper_mask, displacement_fn,
         )
         e_cmap = _cmap_energy_masked(
-            positions, sys.cmap_torsions, sys.cmap_mask,
+            positions, sys.cmap_torsions, sys.cmap_indices, sys.cmap_mask,
             sys.cmap_coeffs, displacement_fn,
         )
 
-        return e_bond + e_angle + e_dih + e_imp + e_cmap
+        return e_bond + e_ub + e_angle + e_dih + e_imp + e_cmap
 
     # Bonded forces via autodiff (safe path — no N² operations)
     bonded_force = -jax.grad(bonded_energy)(r)
 
     if use_flash:
         # --- FlashMD path: O(N) memory, sparse exclusions ---
-        from prolix.physics.flash_nonbonded import flash_nonbonded_forces
-        f_nonbonded = flash_nonbonded_forces(
-            sys,
-            soft_core_lambda=soft_core_lambda,
-        )
-        total_force = bonded_force + f_nonbonded
+        if explicit_solvent:
+            from prolix.physics.flash_explicit import flash_explicit_forces
+            f_nonbonded = flash_explicit_forces(
+                sys,
+                soft_core_lambda=soft_core_lambda,
+            )
+        else:
+            from prolix.physics.flash_nonbonded import flash_nonbonded_forces
+            f_nonbonded = flash_nonbonded_forces(
+                sys,
+                soft_core_lambda=soft_core_lambda,
+            )
+        total_force = (bonded_force + f_nonbonded) * sys.atom_mask[:, None]
     else:
         # --- Legacy path: dense (N,N) exclusion matrices required ---
         from prolix.physics.analytical_forces import (
@@ -643,10 +680,11 @@ def single_padded_energy_nl_cvjp(
 
     # Bonded terms (unchanged — already O(N))
     e_bond = _bond_energy_masked(r, sys.bonds, sys.bond_params, sys.bond_mask, displacement_fn)
+    e_ub = _bond_energy_masked(r, sys.urey_bradley_bonds, sys.urey_bradley_params, sys.urey_bradley_mask, displacement_fn)
     e_angle = _angle_energy_masked(r, sys.angles, sys.angle_params, sys.angle_mask, displacement_fn)
     e_dih = _dihedral_energy_masked(r, sys.dihedrals, sys.dihedral_params, sys.dihedral_mask, displacement_fn)
     e_imp = _dihedral_energy_masked(r, sys.impropers, sys.improper_params, sys.improper_mask, displacement_fn)
-    e_cmap = _cmap_energy_masked(r, sys.cmap_torsions, sys.cmap_mask, sys.cmap_coeffs, displacement_fn)
+    e_cmap = _cmap_energy_masked(r, sys.cmap_torsions, sys.cmap_indices, sys.cmap_mask, sys.cmap_coeffs, displacement_fn)
 
     # Compute (N, K) exclusion scales for neighbor list
     from prolix.physics.neighbor_list import get_neighbor_exclusion_scales
@@ -693,7 +731,7 @@ def single_padded_energy_nl_cvjp(
     else:
         e_solv = 0.0
 
-    return e_bond + e_angle + e_dih + e_imp + e_cmap + e_lj + e_elec + e_solv
+    return e_bond + e_ub + e_angle + e_dih + e_imp + e_cmap + e_lj + e_elec + e_solv
 
 
 
@@ -723,10 +761,11 @@ def single_padded_energy_nl(
 
     # Bonded terms (unchanged — already O(N))
     e_bond = _bond_energy_masked(r, sys.bonds, sys.bond_params, sys.bond_mask, displacement_fn)
+    e_ub = _bond_energy_masked(r, sys.urey_bradley_bonds, sys.urey_bradley_params, sys.urey_bradley_mask, displacement_fn)
     e_angle = _angle_energy_masked(r, sys.angles, sys.angle_params, sys.angle_mask, displacement_fn)
     e_dih = _dihedral_energy_masked(r, sys.dihedrals, sys.dihedral_params, sys.dihedral_mask, displacement_fn)
     e_imp = _dihedral_energy_masked(r, sys.impropers, sys.improper_params, sys.improper_mask, displacement_fn)
-    e_cmap = _cmap_energy_masked(r, sys.cmap_torsions, sys.cmap_mask, sys.cmap_coeffs, displacement_fn)
+    e_cmap = _cmap_energy_masked(r, sys.cmap_torsions, sys.cmap_indices, sys.cmap_mask, sys.cmap_coeffs, displacement_fn)
 
     # Non-bonded: O(N*K) via neighbor list
     from prolix.physics.neighbor_list import get_neighbor_exclusion_scales
@@ -768,7 +807,7 @@ def single_padded_energy_nl(
     else:
         e_solv = 0.0
 
-    return e_bond + e_angle + e_dih + e_imp + e_cmap + e_lj + e_elec + e_solv
+    return e_bond + e_ub + e_angle + e_dih + e_imp + e_cmap + e_lj + e_elec + e_solv
 
 
 def make_batched_energy_fn_nl(

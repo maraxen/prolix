@@ -397,7 +397,10 @@ def spme_reciprocal_energy(
 
     # Step 6: Energy via convolution theorem
     # E_recip = 0.5 * COULOMB_CONSTANT * sum(Q * θ)
-    energy = 0.5 * COULOMB_CONSTANT * jnp.sum(Q * theta)
+    # Factor N_grid (Kx*Ky*Kz) is required because jnp.fft.irfftn scales by 1/N,
+    # but the discrete convolution sum requires the physical potential (unscaled).
+    N_grid = grid_dims[0] * grid_dims[1] * grid_dims[2]
+    energy = 0.5 * COULOMB_CONSTANT * jnp.sum(Q * theta) * N_grid
 
     return energy
 
@@ -426,11 +429,37 @@ def spme_self_energy(
     return -alpha / jnp.sqrt(jnp.pi) * COULOMB_CONSTANT * q_sq_sum
 
 
+def spme_background_energy(
+    charges: jnp.ndarray,     # (N,)
+    atom_mask: jnp.ndarray,   # (N,) bool
+    alpha: float,
+    box_size: jnp.ndarray,    # (3,)
+) -> jnp.ndarray:
+    """Neutralizing background correction: E_bg = -π Q² / (2α² V).
+
+    Required for systems with a net charge Q != 0 to prevent divergent
+    reciprocal space term at k=0. Standard Ewald convention.
+
+    Args:
+        charges: (N,) partial charges
+        atom_mask: (N,) boolean mask
+        alpha: Ewald splitting parameter (1/Å)
+        box_size: (3,) simulation box dimensions (Å)
+
+    Returns:
+        Scalar neutralizing background energy correction.
+    """
+    q_masked = charges * atom_mask.astype(jnp.float32)
+    Q = jnp.sum(q_masked)
+    V = jnp.prod(box_size)
+    return -jnp.pi * Q**2 / (2.0 * alpha**2 * V) * COULOMB_CONSTANT
+
+
 # ===========================================================================
 # Custom VJP wrapper for analytical forces
 # ===========================================================================
 
-@functools.partial(jax.custom_vjp, nondiff_argnums=(2, 3, 4, 5, 6))
+@functools.partial(jax.custom_vjp, nondiff_argnums=(4, 5, 6))
 def spme_energy_with_forces(
     positions: jnp.ndarray,
     charges: jnp.ndarray,
@@ -457,6 +486,8 @@ def spme_energy_with_forces(
     Returns:
         Scalar total reciprocal energy (recip + self correction).
     """
+    # NOTE: We call spme_reciprocal_energy directly here to avoid
+    # infinite recursion with the custom_vjp decoration.
     e_recip = spme_reciprocal_energy(
         positions, charges, atom_mask, box_size, grid_dims, alpha, order
     )
@@ -466,13 +497,13 @@ def spme_energy_with_forces(
 
 def _spme_fwd(positions, charges, atom_mask, box_size, grid_dims, alpha, order):
     """Forward pass: compute energy and save residuals for backward."""
-    energy = spme_energy_with_forces(
+    # We call the functions directly to avoid recursion with the decorated 
+    # spme_energy_with_forces.
+    e_recip = spme_reciprocal_energy(
         positions, charges, atom_mask, box_size, grid_dims, alpha, order
     )
-
-    # Save what the backward pass needs:
-    # - The potential grid θ (from the convolution) for force computation
-    # - The fractional coordinates and B-spline weights
+    e_self = spme_self_energy(charges, atom_mask, alpha)
+    energy = e_recip + e_self
 
     # Recompute charge grid and potential for residuals
     Q = spread_charges(positions, charges, atom_mask, box_size, grid_dims, order)
@@ -481,11 +512,15 @@ def _spme_fwd(positions, charges, atom_mask, box_size, grid_dims, alpha, order):
     theta_hat = Q_hat * G
     theta = jnp.fft.irfftn(theta_hat, s=grid_dims)
 
+    # Scale potential by grid size so it is physical potential (not scaled by 1/N_grid)
+    N_grid = grid_dims[0] * grid_dims[1] * grid_dims[2]
+    theta = theta * N_grid
+    
     residuals = (positions, charges, atom_mask, box_size, theta)
     return energy, residuals
 
 
-def _spme_bwd(atom_mask, box_size, grid_dims, alpha, order, residuals, g):
+def _spme_bwd(grid_dims, alpha, order, residuals, g):
     """Backward pass: analytical forces from the potential grid.
 
     Force on atom i = -q_i * ∇θ(r_i) * COULOMB_CONSTANT
@@ -493,7 +528,7 @@ def _spme_bwd(atom_mask, box_size, grid_dims, alpha, order, residuals, g):
     where θ is the potential grid, and ∇θ is computed via B-spline
     derivative interpolation from the grid.
     """
-    positions, charges, _, _, theta = residuals
+    positions, charges, atom_mask, box_size, theta = residuals
     Kx, Ky, Kz = grid_dims
 
     # Fractional coordinates
@@ -540,12 +575,14 @@ def _spme_bwd(atom_mask, box_size, grid_dims, alpha, order, residuals, g):
                 forces = forces + jnp.stack([fx, fy, fz], axis=-1)
 
     # Scale by COULOMB_CONSTANT and upstream gradient
-    grad_positions = -COULOMB_CONSTANT * forces * g
+    grad_positions = COULOMB_CONSTANT * forces * g
 
-    # Gradient w.r.t. charges (for completeness, rarely needed)
+    # Gradient w.r.t. mask, box, and charges (zero)
     grad_charges = jnp.zeros_like(charges)
+    grad_mask = jnp.zeros_like(atom_mask, dtype=jnp.float32)
+    grad_box = jnp.zeros_like(box_size, dtype=jnp.float32)
 
-    return grad_positions, grad_charges
+    return grad_positions, grad_charges, grad_mask, grad_box
 
 
 spme_energy_with_forces.defvjp(_spme_fwd, _spme_bwd)
@@ -584,4 +621,4 @@ def make_spme_energy_fn(
             grid_dims, alpha, order,
         )
 
-    return energy_fn, grid_dims
+    return energy_fn

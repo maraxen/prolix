@@ -208,6 +208,16 @@ def check_position_sanity(
         )
 
 
+def _temperature_schedule(start: float, end: float, n_steps: int) -> Array:
+    """Create a linear temperature ramp (K)."""
+    return jnp.linspace(start, end, n_steps)
+
+
+def _restraint_schedule(k_start: float, k_end: float, n_steps: int) -> Array:
+    """Create a linear restraint schedule (kcal/mol/Å²)."""
+    return jnp.linspace(k_start, k_end, n_steps)
+
+
 def make_langevin_step(dt: float, kT: float, gamma: float) -> Callable[[PaddedSystem, LangevinState], LangevinState]:
     """Create a BAOAB Langevin step function with RATTLE constraints.
     
@@ -632,7 +642,8 @@ def batched_minimize(
     chunk_size: int | None = 1,
     min_convergence: float = 1e-4,
     fire_stage_steps: tuple[int, ...] = (500, 500, 500, 500),
-) -> tuple[Array, Array]:
+    explicit_solvent: bool = False,
+) -> tuple[Array, Array, Array]:
     """Minimize a batch of PaddedSystems using 6-stage SD → FIRE(×4) → L-BFGS.
 
     NLM-audited protocol (notebook 9230d5f7). All stages at λ=1.0.
@@ -680,7 +691,7 @@ def batched_minimize(
         def energy_fn(r, k_restraint=jnp.float32(0.0), selection_mask=None):
             if selection_mask is None: selection_mask = atom_mask
             sys_with_r = dataclasses.replace(sys, positions=r)
-            e = single_padded_energy(sys_with_r, displacement_fn, soft_core_lambda=jnp.float32(1.0))
+            e = single_padded_energy(sys_with_r, displacement_fn, soft_core_lambda=jnp.float32(1.0), implicit_solvent=not explicit_solvent)
             e = e + _selective_restraint_energy(r, r_ref, k_restraint, atom_mask, selection_mask)
             return e
 
@@ -693,7 +704,7 @@ def batched_minimize(
         def sd_step(carry, _):
             i, r, k_rest, sel_mask, max_dx = carry
             sys_with_r = dataclasses.replace(sys, positions=r)
-            f_phys = single_padded_force(sys_with_r, displacement_fn, soft_core_lambda=jnp.float32(1.0))
+            f_phys = single_padded_force(sys_with_r, displacement_fn, soft_core_lambda=jnp.float32(1.0), explicit_solvent=explicit_solvent)
             f_rest = -k_rest * (r - r_ref) * atom_mask[:, None] * sel_mask[:, None]
             forces = f_phys + f_rest
 
@@ -707,7 +718,7 @@ def batched_minimize(
 
             # Also compute energy for diagnostics
             sys_diag = dataclasses.replace(sys, positions=r)
-            e_diag = single_padded_energy(sys_diag, displacement_fn, soft_core_lambda=jnp.float32(1.0))
+            e_diag = single_padded_energy(sys_diag, displacement_fn, soft_core_lambda=jnp.float32(1.0), implicit_solvent=not explicit_solvent)
 
             def _log_sd(rms_val, step_val, e_val):
                 import logging
@@ -844,10 +855,10 @@ def batched_minimize(
             # Fix: use jax.value_and_grad on the energy function directly.
             # This mathematically guarantees grad = d(energy)/d(positions).
             def _lbfgs_objective(r):
-                sys_with_r = dataclasses.replace(sys, positions=r)
+                sys_curr = dataclasses.replace(sys, positions=r)
                 e = single_padded_energy(
-                    sys_with_r, displacement_fn,
-                    soft_core_lambda=jnp.float32(1.0),
+                    sys_curr, displacement_fn,
+                    soft_core_lambda=jnp.float32(1.0), implicit_solvent=not explicit_solvent
                 )
                 e = jnp.where(jnp.isfinite(e), e, jnp.float32(1e10))
                 return e
@@ -897,7 +908,7 @@ def batched_minimize(
         # Convergence Gate
         # =================================================================
         sys_final = dataclasses.replace(sys, positions=r_final)
-        final_f = single_padded_force(sys_final, displacement_fn, soft_core_lambda=jnp.float32(1.0))
+        final_f = single_padded_force(sys_final, displacement_fn, soft_core_lambda=jnp.float32(1.0), explicit_solvent=explicit_solvent)
         final_f = final_f * pad_mask_3d
         f_mag = jnp.sqrt(jnp.sum(final_f**2, axis=-1) + 1e-30)
         rms_grad = jnp.sqrt(jnp.sum(f_mag**2 * atom_mask) / jnp.maximum(jnp.sum(atom_mask), 1.0))
@@ -1924,4 +1935,162 @@ def batched_produce_streaming_nl_dynamic(
         (batch, batched_nbrs, state, batch_indices),
         chunk_size=chunk_size,
     )
+
+
+def make_langevin_step_explicit(
+    dt: float,
+    kT: float,
+    gamma: float,
+) -> Callable[[PaddedSystem, LangevinState], LangevinState]:
+    """Create a BAOAB Langevin step function for explicit solvent (SETTLE + rigid water).
+    
+    Includes:
+    - BAOAB integration (O-step Langevin thermostat)
+    - Protein X-H RATTLE constraints
+    - Water SETTLE rigid geometry
+    - PBC box wrapping for whole water molecules
+    - Force dispatch to flash_explicit_forces (dense LJ/Coulomb, no GB)
+    """
+    from prolix.batched_energy import single_padded_force
+    from prolix.physics.simulate import project_positions, project_momenta
+    from prolix.physics.settle import settle_positions, settle_velocities
+    from prolix.physics.solvation import fix_water_geometry
+    
+    c1 = jnp.exp(-gamma * dt)
+    c2 = jnp.sqrt(1.0 - jnp.exp(-2.0 * gamma * dt))
+    
+    displacement_fn, shift_fn = space.free()
+    
+    def step_fn(padded_sys: PaddedSystem, state: LangevinState) -> LangevinState:
+        def force_fn(r):
+            sys_with_r = dataclasses.replace(padded_sys, positions=r)
+            return single_padded_force(
+                sys_with_r,
+                displacement_fn,
+                explicit_solvent=True,
+                soft_core_lambda=jnp.float32(1.0),
+            )
+        
+        r, p, f, m, key, cap_count = (
+            state.positions, state.momentum, state.force, 
+            state.mass, state.key, state.cap_count
+        )
+        
+        box = padded_sys.box_size
+        water_indices = padded_sys.water_indices
+        constr_pairs = padded_sys.constraint_pairs
+        constr_lengths = padded_sys.constraint_lengths
+        constr_mask = padded_sys.constraint_mask
+        has_constraints = jnp.any(constr_mask) if constr_mask is not None else False
+        mass_2d = m[:, None]
+        mask = padded_sys.atom_mask[:, None]
+
+        # B: p = p + 0.5 * dt * f
+        p = p + 0.5 * dt * f
+
+        # Velocity limit
+        VLIMIT = jnp.float32(20.0)
+        v_per_atom = jnp.sqrt(jnp.sum((p / mass_2d) ** 2, axis=-1) + 1e-30)
+        v_exceeded = jnp.any((v_per_atom > VLIMIT) & padded_sys.atom_mask)
+        p = jnp.where((v_per_atom[:, None] > VLIMIT) & padded_sys.atom_mask[:, None], p * (VLIMIT / (v_per_atom[:, None] + 1e-30)), p)
+
+        # A: r_old = r; r = r + 0.5 * dt * p / m
+        r_old = r
+        r = r + 0.5 * dt * p / mass_2d
+
+        # O: p = c1*p + sqrt(m*kT)*c2*noise
+        key, subkey = jax.random.split(key)
+        noise = jax.random.normal(subkey, p.shape)
+        p = c1 * p + jnp.sqrt(mass_2d * kT) * c2 * noise
+
+        # A: r = r + 0.5 * dt * p / m
+        r = r + 0.5 * dt * p / mass_2d
+
+        # Displacement cap
+        MAX_DX_PROD = jnp.float32(0.5)
+        dr = r - r_old
+        dr_mag = jnp.sqrt(jnp.sum(dr ** 2, axis=-1, keepdims=True) + 1e-30)
+        dx_capped = jnp.any(dr_mag > MAX_DX_PROD)
+        dx_scale = jnp.minimum(1.0, MAX_DX_PROD / dr_mag)
+        r = r_old + dr * dx_scale
+        p = jnp.where(dr_mag > MAX_DX_PROD, p * dx_scale, p)
+
+        # --- Constraints & PBC ---
+        r_pre_shake = r
+        
+        # 1. Protein X-H (SHAKE)
+        r = jax.lax.cond(
+            has_constraints,
+            lambda r_: project_positions(
+                r_, constr_pairs, constr_lengths, mass_2d, shift_fn,
+                constraint_mask=constr_mask,
+            ),
+            lambda r_: r_,
+            r,
+        )
+
+        # 2. Water (SETTLE)
+        if water_indices is not None:
+            r = settle_positions(r, r_old, water_indices, box=box)
+        
+        # 3. PBC wrap (keep molecules whole)
+        if box is not None:
+             from prolix.physics.solvation import fix_water_geometry_padded
+             r = fix_water_geometry_padded(r, water_indices, box)
+
+        # --- Momentum correction for SHAKE/Settling ---
+        p = p + mass_2d * (r - r_pre_shake) / dt
+
+        # B: f = force_fn(r)
+        f = force_fn(r)
+        f = jnp.where(jnp.isfinite(f), f, 0.0)
+        f = f * mask
+        f_mag = jnp.sqrt(jnp.sum(f ** 2, axis=-1, keepdims=True) + 1e-12)
+        force_capped = jnp.any(f_mag > 10000.0)
+        f = f * jnp.minimum(1.0, 10000.0 / f_mag)
+        p = p + 0.5 * dt * f
+
+        # --- Velocity Constraints ---
+        # 4. Protein RATTLE
+        p = jax.lax.cond(
+            has_constraints,
+            lambda p_: project_momenta(
+                p_, r, constr_pairs, mass_2d, shift_fn,
+                constraint_mask=constr_mask,
+            ),
+            lambda p_: p_,
+            p,
+        )
+
+        # 5. Water SETTLE (Velocities)
+        if water_indices is not None:
+            v = p / mass_2d
+            v = settle_velocities(v, r_old, r, water_indices, dt)
+            p = v * mass_2d
+
+        # Quality gates
+        constr_violated = jnp.any(jnp.sqrt(jnp.sum((r - r_pre_shake)**2, axis=-1) + 1e-30) > 1e-4)
+        
+        # Ghost pinning
+        r = jnp.where(mask, r, padded_sys.positions)
+        p = jnp.where(mask, p, jnp.float32(0.0))
+
+        # --- Quality gate accumulation ---
+        wc = state.warn_counts if state.warn_counts is not None else jnp.zeros(LangevinState.NUM_WARN_TYPES, dtype=jnp.int32)
+        wc = wc.at[LangevinState.WARN_VLIMIT].add(v_exceeded.astype(jnp.int32))
+        wc = wc.at[LangevinState.WARN_FORCE_CAP].add(force_capped.astype(jnp.int32))
+        wc = wc.at[LangevinState.WARN_CONSTR_VIOL].add(constr_violated.astype(jnp.int32))
+        wc = wc.at[LangevinState.WARN_DX_CAP].add(dx_capped.astype(jnp.int32))
+
+        return LangevinState(
+            positions=r.astype(state.positions.dtype),
+            momentum=p.astype(state.momentum.dtype),
+            force=f.astype(state.force.dtype),
+            mass=m,
+            key=key,
+            cap_count=cap_count,
+            warn_counts=wc
+        )
+
+    return step_fn
 
