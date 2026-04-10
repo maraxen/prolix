@@ -74,7 +74,12 @@ class SimulationSpec:
   use_neighbor_list: bool = False
   neighbor_cutoff: float = 9.0  # Angstroms
   neighbor_update_interval_fs: float = 20.0  # Update neighbor list every N fs (20-50 fs typical)
+  fire_neighbor_update_interval: int = 1  # FIRE: refresh neighbor list every N steps (explicit PBC)
   exclusion_spec: nl.ExclusionSpec | None = None  # Optional pre-built spec
+
+  # PME (explicit solvent)
+  pme_alpha: float = 0.34  # Ewald splitting parameter (1/Å), matches physics.system.make_energy_fn
+  pme_grid_spacing: float | None = None  # If set, overrides grid sizing from pme_grid_size (Å)
 
   def __post_init__(self):
     if self.save_interval_ns <= 0:
@@ -506,6 +511,8 @@ def run_simulation(
       len(exclusion_spec.idx_14),
     )
 
+  # PME grid spacing: optional override from spec (else derived from box / pme_grid_size in make_energy_fn)
+  pme_grid_pts = spec.pme_grid_size
   energy_fn: Any = physics_system.make_energy_fn(
     displacement_fn,
     protein_system,
@@ -513,7 +520,9 @@ def run_simulation(
     implicit_solvent=implicit_solvent,
     box=spec.box,
     use_pbc=spec.use_pbc,
-    pme_grid_points=spec.pme_grid_size,
+    pme_grid_points=pme_grid_pts,
+    pme_alpha=spec.pme_alpha,
+    pme_grid_spacing=spec.pme_grid_spacing,
     cutoff_distance=spec.neighbor_cutoff if spec.use_neighbor_list else 9.0,
   )
 
@@ -524,7 +533,6 @@ def run_simulation(
     neighbor_fn = nl.make_neighbor_list_fn(
       displacement_fn, jnp.array(spec.box), spec.neighbor_cutoff
     )
-    neighbor = neighbor_fn.allocate(initial_positions)
     neighbor = neighbor_fn.allocate(initial_positions)
     logger.info("Neighbor list allocated: shape %s", neighbor.idx.shape)
 
@@ -589,10 +597,8 @@ def run_simulation(
     raise RuntimeError(msg)
 
   # FIRE minimizer setup
-  # NOTE: FIRE does NOT internally update neighbor lists. For our current
-  # implicit solvent N² path (no neighbor list), this is fine. For future
-  # PBC/explicit solvent support with neighbor lists, FIRE would need a
-  # wrapper that calls nbr.update() every N steps.
+  # With neighbor lists, pass ``neighbor=`` into the energy each FIRE step and
+  # refresh the list every ``fire_neighbor_update_interval`` steps (Python loop).
 
   # ── Position Restraints Setup ──
   # Apply restraints to all heavy atoms (element_id > 1) to prevent inflation.
@@ -610,18 +616,16 @@ def run_simulation(
     kwargs = {}
     if soft_core_lambda is not None:
       kwargs["soft_core_lambda"] = soft_core_lambda
-    
+
     if use_restraints:
       kwargs["restraint_ref"] = initial_positions
       kwargs["k_restraint"] = 50.0
       kwargs["restraint_mask"] = restraint_mask
 
-    if neighbor is not None:
-      return lambda r: energy_fn(r, neighbor=neighbor, **kwargs)
-    else:
-      def _energy_wrapper(r):
-        return energy_fn(r, **kwargs)
-      return _energy_wrapper
+    def _energy_wrapper(r, **ekw):
+      return energy_fn(r, **kwargs, **ekw)
+
+    return _energy_wrapper
 
   def _make_capped_fire_apply(fire_apply_fn, force_cap, disp_cap=0.1):
     """Create force-capped and displacement-capped FIRE apply function."""
@@ -653,7 +657,13 @@ def run_simulation(
   # ── Dynamic step-size initialization (#2179) ──
   # Set dt_start based on initial gradient magnitude so that
   # max_grad * dt_start < 0.001 Å displacement.
-  initial_grads = jax.grad(_make_fire_energy())(initial_positions)
+  if neighbor is not None:
+    _nbr_init = neighbor.update(initial_positions)
+    initial_grads = jax.grad(
+      lambda r: _make_fire_energy()(r, neighbor=_nbr_init)
+    )(initial_positions)
+  else:
+    initial_grads = jax.grad(_make_fire_energy())(initial_positions)
   max_grad = float(jnp.max(jnp.linalg.norm(initial_grads, axis=-1)))
   dt_start = float(jnp.clip(0.001 / (max_grad + 1e-8), 1e-7, 0.001))
   dt_max = min(dt_start * 10.0, 0.01)
@@ -686,7 +696,9 @@ def run_simulation(
     n_steps = stage["steps"]
 
     # Create energy function for this stage
-    stage_energy_fn = _make_fire_energy(soft_core_lambda=sc_lam, use_restraints=use_restraints)
+    stage_energy_fn = _make_fire_energy(
+      soft_core_lambda=sc_lam, use_restraints=stage["restrain"]
+    )
 
     # Create FIRE instance for this stage
     stage_init_fn, stage_apply_fn = jax_md_minimize.fire_descent(
@@ -709,20 +721,42 @@ def run_simulation(
       stage_step_fn = _nan_safe_apply
 
     # Initialize FIRE from current positions
-    stage_state = stage_init_fn(current_positions, mass=masses)
+    if neighbor_fn is not None:
+      nbr = neighbor_fn.update(current_positions)
+      stage_state = stage_init_fn(current_positions, mass=masses, neighbor=nbr)
+    else:
+      stage_state = stage_init_fn(current_positions, mass=masses)
 
     # Run FIRE loop
-    @jax.jit
-    def _run_stage(state, _step=stage_step_fn, _n=n_steps):
-      def body_fn(i, s):
-        return _step(s)
-      return jax.lax.fori_loop(0, _n, body_fn, state)
+    if neighbor_fn is not None:
+      interval = max(1, int(spec.fire_neighbor_update_interval))
+      for i in range(int(n_steps)):
+        if i % interval == 0:
+          nbr = neighbor_fn.update(stage_state.position)
+          if nbr.did_buffer_overflow:
+            nbr = neighbor_fn.allocate(stage_state.position)
+            nbr = neighbor_fn.update(stage_state.position)
+        stage_state = stage_step_fn(stage_state, neighbor=nbr)
+      final_state = stage_state
+      neighbor = nbr
+    else:
 
-    final_state = _run_stage(stage_state)
+      @jax.jit
+      def _run_stage(state, _step=stage_step_fn, _n=n_steps):
+        def body_fn(i, s):
+          return _step(s)
+
+        return jax.lax.fori_loop(0, _n, body_fn, state)
+
+      final_state = _run_stage(stage_state)
     current_positions = final_state.position
 
     # Log stage results
-    stage_e = float(stage_energy_fn(current_positions))
+    if neighbor_fn is not None:
+      _nbr_log = neighbor_fn.update(current_positions)
+      stage_e = float(stage_energy_fn(current_positions, neighbor=_nbr_log))
+    else:
+      stage_e = float(stage_energy_fn(current_positions))
     logger.info("  %s: E=%.2f kcal/mol (%d steps, cap=%s)",
                 stage["name"], stage_e, n_steps,
                 f"{force_cap:.0f}" if force_cap is not None else "none")
@@ -735,7 +769,11 @@ def run_simulation(
 
   # Evaluate final energy with standard (non-soft-core) energy function
   fire_energy_fn = _make_fire_energy()  # standard, no soft-core
-  e_minimized = fire_energy_fn(positions_minimized)
+  if neighbor_fn is not None:
+    neighbor = neighbor_fn.update(positions_minimized)
+    e_minimized = fire_energy_fn(positions_minimized, neighbor=neighbor)
+  else:
+    e_minimized = fire_energy_fn(positions_minimized)
 
   logger.info("  Final minimized energy: %.2f kcal/mol", e_minimized)
 

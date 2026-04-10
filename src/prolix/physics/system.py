@@ -10,7 +10,7 @@ import jax.numpy as jnp
 from jax_md import energy, partition, space, util
 from proxide.physics import constants
 
-from prolix.physics import bonded, cmap, generalized_born, pme, virtual_sites
+from prolix.physics import bonded, cmap, explicit_corrections, generalized_born, pme, virtual_sites
 from prolix.physics import neighbor_list as nl
 from prolix.types import CmapTorsionIndices
 from prolix.utils import topology
@@ -47,6 +47,8 @@ class _DictSystemWrapper:
     "scale_matrix_elec": None,
     "coulomb14scale": None,
     "lj14scale": None,
+    "exception_14_params": None,
+    "pairs_14": None,
   }
 
   def __init__(self, d: dict):
@@ -111,6 +113,7 @@ def make_energy_fn(
   cutoff_distance: float = 9.0,
   pme_grid_points: int | Array = 64,
   pme_alpha: float = 0.34,
+  pme_grid_spacing: float | None = None,
   return_decomposed: bool = False,
   strict_parameterization: bool = True,
 ) -> Callable[[Array], Array] | dict[str, Callable]:
@@ -137,6 +140,7 @@ def make_energy_fn(
       cutoff_distance: Cutoff for non-bonded interactions (Angstroms).
       pme_grid_points: Grid points for PME (e.g. 64).
       pme_alpha: Ewald splitting parameter.
+      pme_grid_spacing: If set (Å), overrides spacing derived from ``pme_grid_points``.
 
   Returns:
       A function energy(R, neighbor=None) -> float.
@@ -320,14 +324,19 @@ def make_energy_fn(
 
   COULOMB_CONSTANT = 332.0637 / eff_dielectric
 
-  # Pre-create PME function at setup time (NOT inside compute_electrostatics)
-  # This prevents recompilation on every energy evaluation
+  # Pre-create SPME reciprocal (+ self) at setup time (NOT inside compute_electrostatics)
   if use_pbc and box is not None:
-    pme_recip_fn = pme.make_pme_energy_fn(
-      jnp.asarray(charges), box, grid_points=pme_grid_points, alpha=pme_alpha
+    box_arr = jnp.asarray(box)
+    if pme_grid_spacing is not None:
+      grid_spacing = float(pme_grid_spacing)
+    else:
+      mean_l = jnp.mean(box_arr.astype(jnp.float64))
+      grid_spacing = float(mean_l) / float(max(int(pme_grid_points), 1))
+    _spme_energy_fn = pme.make_spme_energy_fn(
+      box_arr, alpha=float(pme_alpha), grid_spacing=grid_spacing
     )
   else:
-    pme_recip_fn = None
+    _spme_energy_fn = None
 
   def soft_core_lj(
     dr: Array,
@@ -428,11 +437,10 @@ def make_energy_fn(
           scaled_radii=jnp.asarray(scaled_radii) if scaled_radii is not None else None,
         )
       else:
-        # TODO: Update neighbor list version of GBSA to accept mask
-        # For now, we assume neighbor list version handles exclusions via neighbor list construction?
-        # No, neighbor list usually includes everything within cutoff.
-        # But we don't have mask support in compute_gb_energy_neighbor_list yet.
-        # Since validation script uses N^2 (neighbor_idx=None), this is fine for now.
+        # TODO(implicit_GB_NL): Wire exclusion / scale masks into compute_gb_energy_neighbor_list
+        # to match dense compute_gb_energy (OpenMM-style GB pair policy). Explicit-solvent NL vs
+        # dense coverage lives in tests/physics/test_protein_nl_explicit_parity.py; do not use
+        # implicit GB + neighbor_list parity until this path is fixed.
         e_gb, born_radii = generalized_born.compute_gb_energy_neighbor_list(
           r,
           jnp.asarray(charges),
@@ -446,29 +454,24 @@ def make_energy_fn(
       # Non-polar Solvation (SASA) - Now computed separately using ACE
 
     # Direct Coulomb / Screened Coulomb / PME
+    charges_arr = jnp.asarray(charges)
+    if getattr(system, "atom_mask", None) is not None:
+      atom_mask_elec = jnp.asarray(system.atom_mask).astype(jnp.float32) > 0.5
+    else:
+      atom_mask_elec = jnp.ones((charges_arr.shape[0],), dtype=bool)
+
     if use_pbc and box is not None:
-      # PME Electrostatics (Explicit Solvent / Periodic)
-      # Use pre-computed PME function (captured from outer scope)
-      if pme_recip_fn is None:
-        raise RuntimeError("PME reciprocal function not initialized.")
-      e_recip = pme_recip_fn(r)
+      if _spme_energy_fn is None:
+        raise RuntimeError("SPME energy function not initialized for PBC.")
+      # Reciprocal + analytic self term (kcal/mol); see spme_energy_with_forces
+      e_recip = _spme_energy_fn(r, charges_arr, atom_mask_elec)
+      e_recip = e_recip + pme.spme_background_energy(
+        charges_arr, atom_mask_elec, float(pme_alpha), jnp.asarray(box)
+      )
       # NOTE: Direct space (erfc term) is computed in the neighbor block below
 
     else:
       e_recip = 0.0
-
-    # COULOMB_CONSTANT is defined in outer scope
-
-    # Apply scaling to PME Reciprocal
-    # jax_md PME returns energy in internal units (assuming q in e, r in A -> V ~ e^2/A)
-    # We need to scale by COULOMB_CONSTANT to get kcal/mol
-    if use_pbc and box is not None:
-      e_recip = e_recip * COULOMB_CONSTANT
-
-      q_sq_sum = jnp.sum(charges**2)
-      e_self = COULOMB_CONSTANT * (pme_alpha / jnp.sqrt(jnp.pi)) * q_sq_sum
-
-      e_recip = e_recip - e_self
 
     if neighbor_idx is None:
       # Dense
@@ -699,92 +702,6 @@ def make_energy_fn(
   # Scaling for 1-4
   coul_14_scale = system.coulomb14scale if system.coulomb14scale is not None else 0.83333333
 
-  def compute_lj_tail_correction(
-    box: Array, sigma: Array, epsilon: Array, cutoff: float, N_atoms: int
-  ) -> Array:
-    r"""Compute the long-range dispersion correction for Lennard-Jones.
-
-    Process:
-    1.  **Volume**: Compute box volume from lattice vectors.
-    2.  **Average**: Determine mean $\sigma$ and $\epsilon$.
-    3.  **Integral**: Evaluate tail integral from cutoff to $\infty$.
-
-    Notes:
-    $$ E_{LRC} = \frac{8 \pi N^2}{3 V} \langle \epsilon \sigma^6 \rangle \left[ \frac{1}{3} \frac{\sigma^6}{R_c^9} - \frac{1}{R_c^3} \right] \text{ (approx)} $$
-
-    Args:
-        box: Box dimensions.
-        sigma: Atomic sigmas.
-        epsilon: Atomic epsilons.
-        cutoff: Potential cutoff.
-        N_atoms: Total atoms.
-
-    Returns:
-        Tail correction scalar.
-    """
-    volume = box[0] * box[1] * box[2] if box.ndim == 1 else jnp.linalg.det(box)
-
-    avg_sig = jnp.mean(sigma)
-    avg_eps = jnp.mean(epsilon)
-
-    rc3 = cutoff**3
-    rc9 = rc3**3
-    sig3 = avg_sig**3
-    sig6 = sig3**2
-    sig9 = sig3**3
-
-    term = (1.0 / 9.0) * (sig9 / rc9) - (1.0 / 3.0) * (sig3 / rc3)
-    return (8.0 * jnp.pi * (N_atoms**2) / volume) * avg_eps * sig6 * term
-
-  def compute_pme_exceptions(r: Array) -> Array:
-    """Computes the reciprocal space correction for excluded/scaled pairs."""
-    if not use_pbc or box is None:
-      return jnp.array(0.0)
-
-    # Correction Formula: E_corr = - (1.0 - scale) * q_i * q_j * erf(alpha * r) / r
-    # For 1-2 and 1-3: scale = 0.0 => E_corr = -1.0 * Recip
-    # For 1-4: scale = sc => E_corr = -(1.0 - sc) * Recip
-
-    def calc_correction_term(indices, scale_factor):
-      if indices.shape[0] == 0:
-        return 0.0
-
-      r_i = r[indices[:, 0]]
-      r_j = r[indices[:, 1]]
-
-      # Displacement
-      dr = jax.vmap(displacement_fn)(r_i, r_j)
-      dist = space.distance(dr)
-
-      # Charges
-      q_i = charges[indices[:, 0]]
-      q_j = charges[indices[:, 1]]
-
-      # Reciprocal Part of Energy (what we want to remove)
-      # E_recip_pair = q_i * q_j * erf(alpha * r) / r
-      # We use COULOMB_CONSTANT for units
-
-      # Avoid singularity
-      dist_safe = dist + 1e-6
-      erf_term = jax.scipy.special.erf(pme_alpha * dist)
-
-      e_pair_recip = COULOMB_CONSTANT * (q_i * q_j / dist_safe) * erf_term
-
-      # We subtract (1 - scale) * E_recip_pair
-      factor = 1.0 - scale_factor
-      return jnp.sum(e_pair_recip * factor)
-
-    e_corr = 0.0
-    # 1-2 (Scale 0.0)
-    e_corr += calc_correction_term(pme_idx_12, 0.0)
-    # 1-3 (Scale 0.0)
-    e_corr += calc_correction_term(pme_idx_13, 0.0)
-    # 1-4 (Scale coul_14_scale)
-    e_corr += calc_correction_term(pme_idx_14, coul_14_scale)
-
-    # We subtract this correction
-    return -e_corr
-
   def position_restraint_energy(
     r: Array, r_ref: Array, k_restraint: Array, mask: Array
   ) -> Array:
@@ -824,16 +741,24 @@ def make_energy_fn(
       e_restraint = position_restraint_energy(r, r_ref, k_res, res_mask)
 
     if use_pbc and box is not None:
-      e_pme_corr = compute_pme_exceptions(r)
+      e_pme_corr = explicit_corrections.pme_exclusion_correction_energy(
+        r,
+        displacement_fn,
+        pme_idx_12,
+        pme_idx_13,
+        pme_idx_14,
+        jnp.asarray(charges),
+        float(pme_alpha),
+        float(coul_14_scale),
+      )
       e_elec += e_pme_corr
 
-      # Long-Range LJ Correction
-      e_lj_lrc = compute_lj_tail_correction(
-        box=box,
-        sigma=jnp.asarray(sigmas),
-        epsilon=jnp.asarray(epsilons),
-        cutoff=cutoff_distance,
-        N_atoms=r.shape[0],
+      e_lj_lrc = explicit_corrections.lj_dispersion_tail_energy(
+        jnp.asarray(box),
+        jnp.asarray(sigmas),
+        jnp.asarray(epsilons),
+        float(cutoff_distance),
+        r.shape[0],
       )
       e_lj += e_lj_lrc
 

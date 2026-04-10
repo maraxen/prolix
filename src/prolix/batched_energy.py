@@ -355,6 +355,12 @@ def single_padded_energy(sys: PaddedSystem, displacement_fn: space.DisplacementF
 
     This is the public API for computing energy of one PaddedSystem.
     It can be used standalone with jax.grad, or batched via make_batched_energy_fn.
+
+    With periodic boundaries (``box_size`` + positive ``pme_alpha``) and
+    ``implicit_solvent=False``, reciprocal PME uses the same grid-spacing policy
+    as ``physics.system.make_energy_fn`` and ``physics.flash_explicit`` (mean box
+    edge / ``pme_grid_points``), and adds the same PME exclusion correction and
+    isotropic LJ dispersion tail as those paths (see ``explicit_corrections``).
     
     Args:
         soft_core_lambda: JAX array for soft-core LJ coupling.
@@ -405,19 +411,55 @@ def single_padded_energy(sys: PaddedSystem, displacement_fn: space.DisplacementF
         pme_alpha=sys.pme_alpha,
     )
 
-    # Reciprocal Space (PME) + Corrections
+    # Reciprocal Space (PME) + explicit-solvent corrections (aligned with system / Flash)
     if sys.box_size is not None and sys.pme_alpha > 0.0:
-        from prolix.physics.pme import (
-            make_spme_energy_fn, spme_self_energy, spme_background_energy
-        )
+        from prolix.physics.pme import make_spme_energy_fn, spme_background_energy
+        from prolix.physics import explicit_corrections
+        from prolix.utils import topology
+
+        box_arr = jnp.asarray(sys.box_size)
+        mean_l = jnp.mean(box_arr.astype(jnp.float64))
+        grid_points = int(sys.pme_grid_points)
+        grid_spacing = float(mean_l) / float(max(grid_points, 1))
         pme_recip_fn = make_spme_energy_fn(
-            box_size=sys.box_size,
-            alpha=sys.pme_alpha
+            box_size=box_arr,
+            alpha=float(sys.pme_alpha),
+            grid_spacing=grid_spacing,
         )
         e_elec += pme_recip_fn(r, sys.charges, sys.atom_mask)
         e_elec += spme_background_energy(
             sys.charges, sys.atom_mask, sys.pme_alpha, sys.box_size
         )
+
+        if not implicit_solvent:
+            if sys.bonds is not None and sys.bonds.shape[0] > 0:
+                excl = topology.find_bonded_exclusions(sys.bonds, N)
+                idx_12, idx_13, idx_14 = excl.idx_12, excl.idx_13, excl.idx_14
+            else:
+                z = jnp.zeros((0, 2), dtype=jnp.int32)
+                idx_12 = idx_13 = idx_14 = z
+            coul_14 = 0.83333333
+            safe_charges = jnp.where(sys.atom_mask, sys.charges, jnp.float32(0.0))
+            e_elec += explicit_corrections.pme_exclusion_correction_energy(
+                r,
+                displacement_fn,
+                idx_12,
+                idx_13,
+                idx_14,
+                safe_charges,
+                float(sys.pme_alpha),
+                float(coul_14),
+            )
+            safe_sigmas = jnp.where(sys.atom_mask, sys.sigmas, jnp.float32(1.0))
+            safe_epsilons = jnp.where(sys.atom_mask, sys.epsilons, jnp.float32(0.0))
+            n_tail = sys.n_real_atoms if sys.n_real_atoms is not None else N
+            e_lj += explicit_corrections.lj_dispersion_tail_energy(
+                box_arr,
+                safe_sigmas,
+                safe_epsilons,
+                float(sys.nonbonded_cutoff),
+                n_tail,
+            )
 
     if implicit_solvent:
         mask_ij = sys.atom_mask[:, None] & sys.atom_mask[None, :]

@@ -22,7 +22,9 @@ from jaxtyping import Array, Float, Int, Bool
 
 from proxide.physics.constants import COULOMB_CONSTANT
 from prolix.padding import PaddedSystem
-from prolix.physics.pme import make_spme_energy_fn, spme_self_energy, spme_background_energy
+from prolix.physics import explicit_corrections, pbc
+from prolix.physics.pme import make_spme_energy_fn, spme_background_energy
+from prolix.utils import topology
 
 if TYPE_CHECKING:
     from jax_md.util import Array
@@ -171,9 +173,13 @@ def _total_energy_fn(
     # Reciprocal space PME and corrections
     recip_energy_fn = None
     if sys.box_size is not None and sys.pme_alpha > 0:
+        mean_l = jnp.mean(jnp.asarray(sys.box_size, dtype=jnp.float64))
+        grid_points = int(sys.pme_grid_points)
+        grid_spacing = float(mean_l) / float(max(grid_points, 1))
         recip_energy_fn = make_spme_energy_fn(
             box_size=sys.box_size,
-            alpha=sys.pme_alpha
+            alpha=float(sys.pme_alpha),
+            grid_spacing=grid_spacing,
         )
 
     # Direct space (LJ + damped Coulomb)
@@ -192,9 +198,37 @@ def _total_energy_fn(
     # Add PME reciprocal and corrections
     if recip_energy_fn is not None:
         e_total += recip_energy_fn(pos, safe_charges, sys.atom_mask)
-        e_bg = spme_background_energy(safe_charges, sys.atom_mask, sys.pme_alpha, sys.box_size)
-        e_total += e_bg
-        
+        e_total += spme_background_energy(
+            safe_charges, sys.atom_mask, sys.pme_alpha, sys.box_size
+        )
+        displacement_fn, _ = pbc.create_periodic_space(sys.box_size)
+        n_atoms = pos.shape[0]
+        if sys.bonds is not None and sys.bonds.shape[0] > 0:
+            excl = topology.find_bonded_exclusions(sys.bonds, n_atoms)
+            idx_12, idx_13, idx_14 = excl.idx_12, excl.idx_13, excl.idx_14
+        else:
+            z = jnp.zeros((0, 2), dtype=jnp.int32)
+            idx_12 = idx_13 = idx_14 = z
+        coul_14 = jnp.float32(0.83333333)
+        e_total += explicit_corrections.pme_exclusion_correction_energy(
+            pos,
+            displacement_fn,
+            idx_12,
+            idx_13,
+            idx_14,
+            safe_charges,
+            float(sys.pme_alpha),
+            float(coul_14),
+        )
+        n_tail = sys.n_real_atoms if sys.n_real_atoms is not None else n_atoms
+        e_total += explicit_corrections.lj_dispersion_tail_energy(
+            sys.box_size,
+            safe_sigmas,
+            safe_epsilons,
+            float(sys.nonbonded_cutoff),
+            n_tail,
+        )
+
     return e_total
 
 
@@ -214,11 +248,12 @@ def flash_explicit_total_energy(
         _dihedral_energy_masked, _cmap_energy_masked,
     )
     from jax_md import space
-    
+
     pos = sys.positions
-    # Simple Euclidean displacement — bonds never cross PBC boundaries.
-    # OpenMM uses the same default (setUsesPeriodicBoundaryConditions=False).
-    displacement_fn, _ = space.free()
+    if sys.box_size is not None:
+        displacement_fn, _ = pbc.create_periodic_space(sys.box_size)
+    else:
+        displacement_fn, _ = space.free()
     
     # --- Bonded terms (O(N), no N² operations) ---
     e_bond = _bond_energy_masked(

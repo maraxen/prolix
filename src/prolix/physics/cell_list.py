@@ -1,5 +1,12 @@
 """Cell-list decomposition for explicit solvent MD.
 
+**Production path:** prefer JAX-MD neighbor lists + ``physics.system`` /
+``simulate.py`` (see ``neighbor_list.py`` / ``NEIGHBOR_LIST_MD_INTEGRATION``).
+This module remains an **optional accelerator / benchmark** for tiled kernels
+(``cell_nonbonded``): fixed per-cell capacity can **overflow** if local density
+exceeds ``max_atoms_per_cell`` — treat ``CellList.overflow`` as a hard signal,
+not a soft hint.
+
 Assigns atoms to 3D spatial cells for O(N) neighbor finding.
 Each cell has a fixed capacity M (max_atoms_per_cell). Atoms
 beyond capacity are silently dropped (must be monitored via

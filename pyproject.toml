@@ -58,9 +58,12 @@ viz = [
 ]
 
 [tool.pytest.ini_options]
+# Default fast CI: pytest -m "not slow"
+# OpenMM parity (optional dep): pytest -m "openmm"
 markers = [
     "smoke: marks tests as smoke tests (fast and critical)",
     "slow: marks tests as slow (>30s, may be skipped in CI)",
+    "openmm: marks tests that require OpenMM (optional dependency)",
     "order: controls test execution order",
 ]
 testpaths = ["tests"]
@@ -147,8 +150,5 @@ dev = [
     "openmm>=8.4.0.post2",
 ]
 
-[tool.uv]
-environments = [
-    "sys_platform == 'darwin'",
-    "sys_platform == 'linux'",
-]
+[tool.uv.sources]
+proxide = { path = "../proxide", editable = true }

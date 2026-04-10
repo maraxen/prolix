@@ -1,0 +1,44 @@
+{
+    "verdict": "REVISE",
+    "confidence": "high",
+    "strategic_assessment": "The plan is architecturally sound with correct dependency identification and principled energy drift strategy. Two critical gaps will cause implementation failures: PaddedSystem backward-compat break and exclusion architecture mismatch for cell-list decomposition. Four warnings are tractable. Strong points include stencil benchmark decision, 3-level validation targets, and Flash architecture leverage.",
+    "concerns": [
+        {
+            "area": "Phase 1 + Phase 4 — PaddedSystem extensions",
+            "severity": "critical",
+            "issue": "Adding required fields to PaddedSystem (eqx.Module) will break all existing callers and serialized checkpoints. collate_batch() relies on identical PyTree structures.",
+            "recommendation": "Use None-default fields for all explicit-solvent additions (box_size, cell_occupancy, cell_offsets). Same pattern as existing dense_excl_scale_vdw."
+        },
+        {
+            "area": "Phase 1 — cell_nonbonded.py exclusion corrections",
+            "severity": "critical",
+            "issue": "Current _sparse_exclusion_energy uses global indices for plain Coulomb correction. Cell-list architecture needs: (1) cell-local exclusion masking within stencil kernel, (2) Ewald-specific erfc exclusion correction separate from the cell kernel.",
+            "recommendation": "Design two-layer exclusion: cell-local boolean mask for stencil kernel + standalone _ewald_exclusion_correction() computing q_i*q_j*[1/r - erfc(α*r)/r] for bonded pairs."
+        },
+        {
+            "area": "Phase 1 — cell_list.py ghost atom padding",
+            "severity": "warning",
+            "issue": "Current pad_protein() uses position=9999.0 and sigma=1e-6 for ghosts. These cause cell-index overflow and LJ overflow in cell-list architecture.",
+            "recommendation": "Sanitize at cell-assignment time: safe_positions = where(mask, positions, box_center), safe_sigmas = where(mask, sigmas, 1.0). Document as API contract."
+        },
+        {
+            "area": "Phase 2 — PME rewrite effort",
+            "severity": "warning",
+            "issue": "400 LOC estimate undercounts. custom_vjp for PME forces through B-spline spreading/interpolation is algorithmically complex.",
+            "recommendation": "Budget 500-600 LOC + 200 LOC tests. Implement via jax.grad first; add custom_vjp as Phase 6 optimization."
+        },
+        {
+            "area": "Phase 9 — NPT barostat missing",
+            "severity": "warning",
+            "issue": "Plan mentions NPT density equilibration but no barostat implementation exists in any phase. Box rescaling affects cell-list grid dimensions and PME influence function.",
+            "recommendation": "Add Phase 5b: Monte Carlo Barostat (~150 LOC). MC barostat simplest — propose ΔV, accept/reject, rescale positions + PME influence function."
+        },
+        {
+            "area": "Open Questions — Kahan verification",
+            "severity": "suggestion",
+            "issue": "No concrete verification methodology specified for checking XLA Kahan compilation on explicit solvent path.",
+            "recommendation": "Add to Phase 7 Level 2: 10k-step NVE drift comparison between float32/Kahan/int64. Inspect XLA HLO for compensated summation patterns."
+        }
+    ],
+    "approved_for_execution": false
+}

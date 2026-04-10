@@ -622,3 +622,47 @@ def make_spme_energy_fn(
         )
 
     return energy_fn
+
+
+def make_pme_energy_fn(
+    charges: jnp.ndarray,
+    box_size: jnp.ndarray,
+    *,
+    grid_points: int = 64,
+    alpha: float = 0.34,
+    order: int = 4,
+):
+    """Bind charges and box; return ``energy(positions)`` for SPME + background.
+
+    Reciprocal + self term uses :func:`spme_energy_with_forces` (kcal/mol).
+    Adds neutralizing background :func:`spme_background_energy` for net charge.
+
+    This is the API expected by ``tests/physics/test_explicit_parity`` and
+    callers that only pass positions each evaluation.
+
+    Args:
+        charges: (N,) partial charges (fixed for the lifetime of the closure).
+        box_size: (3,) orthorhombic box lengths in Å.
+        grid_points: Target mesh size per axis (spacing = mean(box)/grid_points).
+        alpha: Ewald splitting parameter (1/Å).
+        order: B-spline order (4 = cubic).
+
+    Returns:
+        Callable ``energy_fn(positions) -> scalar`` in kcal/mol.
+    """
+    charges = jnp.asarray(charges)
+    box_size = jnp.asarray(box_size)
+    n = int(charges.shape[0])
+    mask = jnp.ones((n,), dtype=bool)
+    mean_l = jnp.mean(box_size.astype(jnp.float64))
+    grid_spacing = float(mean_l) / float(max(grid_points, 1))
+    inner = make_spme_energy_fn(
+        box_size, alpha=alpha, grid_spacing=grid_spacing, order=order
+    )
+
+    def energy_fn(positions: jnp.ndarray) -> jnp.ndarray:
+        e = inner(positions, charges, mask)
+        e = e + spme_background_energy(charges, mask, alpha, box_size)
+        return e
+
+    return energy_fn

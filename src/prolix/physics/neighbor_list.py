@@ -149,6 +149,34 @@ def compute_exclusion_mask_neighbor_list(
   return mask_vdw, mask_elec, mask_hard
 
 
+def max_exclusion_slots_needed(exclusion_spec: ExclusionSpec) -> int:
+  """Maximum exclusion list length required for any single atom (before padding cap).
+
+  ``map_exclusions_to_dense_padded`` truncates to ``max_exclusions`` (default 32). If
+  this function returns a value greater than that cap, exclusion data will be
+  silently dropped for that atom — call sites should assert or raise.
+
+  Args:
+      exclusion_spec: Sparse 1–2 / 1–3 / 1–4 pair lists from ``ExclusionSpec``.
+
+  Returns:
+      Maximum number of exclusion slots any atom needs.
+  """
+  n = exclusion_spec.n_atoms
+  counts = np.zeros(n, dtype=np.int32)
+  for i, j in np.asarray(exclusion_spec.idx_12_13):
+    if 0 <= i < n:
+      counts[i] += 1
+    if 0 <= j < n:
+      counts[j] += 1
+  for i, j in np.asarray(exclusion_spec.idx_14):
+    if 0 <= i < n:
+      counts[i] += 1
+    if 0 <= j < n:
+      counts[j] += 1
+  return int(np.max(counts)) if n > 0 else 0
+
+
 def map_exclusions_to_dense_padded(
   exclusion_spec: ExclusionSpec,
   max_exclusions: int = 32,
@@ -162,7 +190,8 @@ def map_exclusions_to_dense_padded(
 
   Args:
       exclusion_spec: Sparse exclusion data.
-      max_exclusions: Capacity per atom for excluded neighbors.
+      max_exclusions: Capacity per atom for excluded neighbors. If too small,
+          entries are truncated — compare :func:`max_exclusion_slots_needed` first.
 
   Returns:
       (excl_indices, excl_scales_vdw, excl_scales_elec) arrays.

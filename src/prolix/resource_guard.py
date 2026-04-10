@@ -1,4 +1,9 @@
-"""Resource management and memory estimation for Prolix simulations."""
+"""Resource management and memory estimation for Prolix simulations.
+
+Benchmarking note: for accurate GPU timings, synchronize with
+``jax.block_until_ready(result)`` before reading values back to the host
+(see JAX-MD benchmarking discussions); otherwise dispatch overlap skews numbers.
+"""
 
 import logging
 import psutil
@@ -38,6 +43,7 @@ def estimate_simulation_memory(
   pme_grid_size: int = 64,
   use_pbc: bool = False,
   double_precision: bool = False,
+  flashmd_tile_size: int = 256,
 ) -> dict[str, int]:
   """Estimate memory usage for a simulation run.
 
@@ -74,17 +80,25 @@ def estimate_simulation_memory(
     # Complex grid (N, N, N)
     pme_grid = (pme_grid_size**3) * (float_size * 2)  # Complex number
 
-  # 5. JIT / Overhead buffer
+  # 5. FlashMD-style chunked dense nonbonded (tile T): rough working-set bound
+  flashmd_tile = 0
+  if use_pbc:
+    flashmd_tile = n_atoms * flashmd_tile_size * 3 * float_size * 6
+
+  # 6. JIT / Overhead buffer
   # Rough heuristic: 2x state size for intermediate gradients + some constant
   jit_overhead = state_size * 3 + 500 * 1024**2  # 500MB baseline overhead
 
-  total = state_size + accumulation_buffer + neighbor_list + pme_grid + jit_overhead
+  total = (
+    state_size + accumulation_buffer + neighbor_list + pme_grid + flashmd_tile + jit_overhead
+  )
 
   return {
     "state_static": state_size,
     "accumulation": accumulation_buffer,
     "neighbor_list": neighbor_list,
     "pme_grid": pme_grid,
+    "flashmd_tile": flashmd_tile,
     "jit_overhead": jit_overhead,
     "total": total,
   }

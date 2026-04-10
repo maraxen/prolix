@@ -279,6 +279,7 @@ class TestNonbondedEnergies:
       cutoff_distance=PME_CUTOFF,
       pme_grid_points=PME_GRID,
       pme_alpha=PME_ALPHA,
+      strict_parameterization=False,
     )
 
     e_total = energy_fn(centered)

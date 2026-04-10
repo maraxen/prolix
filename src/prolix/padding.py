@@ -87,6 +87,8 @@ class PaddedSystem(eqx.Module):
   water_mask: Array | None = None      # (N_waters_padded,) bool
   box_size: Array | None = eqx.field(static=True, default=None) # (3,) static for PME grid shapes
   pme_alpha: float = eqx.field(static=True, default=0.0)
+  pme_grid_points: int = eqx.field(static=True, default=64)
+  nonbonded_cutoff: float = eqx.field(static=True, default=9.0)
 
 
   # Precomputed dense exclusion matrices (N_padded, N_padded).
