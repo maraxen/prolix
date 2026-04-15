@@ -1,0 +1,34 @@
+# Optional OpenMM parity + benchmark smoke (may fail on runners without a compatible wheel).
+name: OpenMM optional
+
+on:
+  workflow_dispatch:
+  schedule:
+    # Weekly Sunday 06:00 UTC
+    - cron: "0 6 * * 0"
+
+jobs:
+  openmm:
+    runs-on: ubuntu-24.04
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install with OpenMM extra
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev,openmm]"
+
+      - name: Pytest openmm-marked tests
+        run: |
+          pytest -q -m openmm
+
+      - name: T0 benchmark JSON (Prolix only if OpenMM platforms missing)
+        run: |
+          python scripts/benchmarks/prolix_vs_openmm_speed.py --skip-reference --json /tmp/t0.json || true
+          test -f /tmp/t0.json && python -c "import json; json.load(open('/tmp/t0.json'))"
