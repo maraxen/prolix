@@ -13,9 +13,12 @@ import jax
 import jax.numpy as jnp
 import msgpack_numpy as m
 import numpy as np
-from jax_md import minimize as jax_md_minimize, space, util
+from jax_md import minimize as jax_md_minimize
+from jax_md import space, util
+
 from prolix import resource_guard
 from prolix.physics import neighbor_list as nl
+from prolix.physics.electrostatic_methods import ElectrostaticMethod
 
 if TYPE_CHECKING:
   from proxide.core.atomic_system import (
@@ -80,6 +83,11 @@ class SimulationSpec:
   # PME (explicit solvent)
   pme_alpha: float = 0.34  # Ewald splitting parameter (1/Å), matches physics.system.make_energy_fn
   pme_grid_spacing: float | None = None  # If set, overrides grid sizing from pme_grid_size (Å)
+
+  # Optional non-PME electrostatics (explicit solvent only; default PME)
+  electrostatic_method: ElectrostaticMethod | str = ElectrostaticMethod.PME
+  reaction_field_dielectric: float = 78.3
+  dsf_alpha: float | None = None  # Damped shifted force damping (1/Å); None uses internal default
 
   def __post_init__(self):
     if self.save_interval_ns <= 0:
@@ -274,8 +282,9 @@ def run_simulation(
   Returns:
       Final `SimulationState` after the specified total time.
   """
-  from prolix.compat import system_params_to_protein
   from proxide.core.containers import Protein as ProteinCls
+
+  from prolix.compat import system_params_to_protein
 
   # Handle backward compatibility: system_params= kwarg
   if system_params is not None:
@@ -524,6 +533,9 @@ def run_simulation(
     pme_alpha=spec.pme_alpha,
     pme_grid_spacing=spec.pme_grid_spacing,
     cutoff_distance=spec.neighbor_cutoff if spec.use_neighbor_list else 9.0,
+    electrostatic_method=spec.electrostatic_method,
+    reaction_field_dielectric=spec.reaction_field_dielectric,
+    dsf_alpha=spec.dsf_alpha,
   )
 
   # Create neighbor list if requested
@@ -556,7 +568,7 @@ def run_simulation(
 
   if raw_masses is None:
     # Derive masses from element symbols if available
-    from prolix.constants import masses_from_elements, DEFAULT_MASS
+    from prolix.constants import DEFAULT_MASS, masses_from_elements
     elements = getattr(protein_system, "elements", None)
     if elements is not None and len(elements) == n_atoms:
       mass_list = masses_from_elements(list(elements))
@@ -878,13 +890,12 @@ def run_simulation(
       else:
         state = init_fn(key, positions_minimized, mass=masses)
       break
+    # Update state with warmup results, reinitialize with production integrator
+    if neighbor is not None:
+      state = init_fn(key, warmup_state.position, mass=masses, neighbor=neighbor)
     else:
-      # Update state with warmup results, reinitialize with production integrator
-      if neighbor is not None:
-        state = init_fn(key, warmup_state.position, mass=masses, neighbor=neighbor)
-      else:
-        state = init_fn(key, warmup_state.position, mass=masses)
-      logger.info("  %s: %d steps OK (dt=%.4e τ)", phase["name"], phase["steps"], warmup_dt)
+      state = init_fn(key, warmup_state.position, mass=masses)
+    logger.info("  %s: %d steps OK (dt=%.4e τ)", phase["name"], phase["steps"], warmup_dt)
 
   # Compile and test the production step function
   if neighbor is not None:
@@ -1094,6 +1105,7 @@ def run_simulation(
     E = energy_fn(state.position, neighbor=neighbor)  # type: ignore[unknown-argument]
   else:
     E = energy_fn(state.position)
+  K_final = jax_md_quantity.kinetic_energy(momentum=state.momentum, mass=state.mass)
   return SimulationState(
     positions=state.position,
     velocities=state.momentum / state.mass,
@@ -1101,14 +1113,14 @@ def run_simulation(
     step=jnp.array(total_saves * steps_per_save),
     time_ns=jnp.array(spec.total_time_ns),
     potential_energy=E,
-    kinetic_energy=None,
+    kinetic_energy=K_final,
   )
 
 # Note: jax_md imports are now inside run_simulation to avoid circular imports
 
 
 def simulate_frames(
-  protein: "Protein",
+  protein: Protein,
   r_init: Array,
   n_steps: int,
   n_frames: int,
@@ -1165,7 +1177,7 @@ def simulate_frames(
 
   if raw_masses is None:
     # Element-based derivation fallback
-    from prolix.constants import masses_from_elements, DEFAULT_MASS
+    from prolix.constants import DEFAULT_MASS, masses_from_elements
     elements = getattr(protein, "elements", None)
     if elements is not None and len(elements) == n_atoms:
       masses = jnp.array(masses_from_elements(list(elements)), dtype=jnp.float32)
@@ -1207,7 +1219,7 @@ def simulate_frames(
 
 
 def batched_simulate_frames(
-  protein: "Protein",
+  protein: Protein,
   r_init: Array,
   n_steps: int,
   n_frames: int,

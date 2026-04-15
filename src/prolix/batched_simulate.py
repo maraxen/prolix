@@ -1287,8 +1287,13 @@ def batched_produce_streaming(
                             mask=sys.atom_mask,
                         )
                         s_next = LangevinState(
-                            r_corrected, s_next.momentum, s_next.force,
-                            s_next.mass, s_next.key, s_next.cap_count
+                            r_corrected,
+                            s_next.momentum,
+                            s_next.force,
+                            s_next.mass,
+                            s_next.key,
+                            s_next.cap_count,
+                            s_next.warn_counts,
                         )
                         return (s_next, step_i + 1), None
 
@@ -1340,8 +1345,13 @@ def batched_produce_streaming(
                         mask=sys.atom_mask,
                     )
                     s_next = LangevinState(
-                        r_corrected, s_next.momentum, s_next.force,
-                        s_next.mass, s_next.key, s_next.cap_count
+                        r_corrected,
+                        s_next.momentum,
+                        s_next.force,
+                        s_next.mass,
+                        s_next.key,
+                        s_next.cap_count,
+                        s_next.warn_counts,
                     )
                     return (s_next, step_i + 1), None
 
@@ -1522,9 +1532,9 @@ def make_langevin_step_nl_dynamic(
 
         force_fn = jax.grad(lambda r: _energy_of_r(r))
 
-        r, p, f, m, key = (
+        r, p, f, m, key, cap_count = (
             state.positions, state.momentum, state.force,
-            state.mass, state.key,
+            state.mass, state.key, state.cap_count,
         )
 
         # B
@@ -1557,7 +1567,9 @@ def make_langevin_step_nl_dynamic(
         # Cast to float32 to match JAX-MD's internal lax.cond branch types.
         new_nbrs = nbrs.update(r.astype(jnp.float32))
 
-        new_state = LangevinState(r, p, f, m, key)
+        new_state = LangevinState(
+            r, p, f, m, key, cap_count, state.warn_counts,
+        )
         return new_state, new_nbrs
 
     return step_fn
@@ -1662,6 +1674,7 @@ def batched_equilibrate_nl(
             force=initial_f,
             mass=sys.masses,
             key=k,
+            cap_count=jnp.array(0, dtype=jnp.int32),
         )
 
         def scan_step(s, _):
@@ -1827,6 +1840,7 @@ def batched_equilibrate_nl_dynamic(
             force=initial_f,
             mass=sys.masses,
             key=k,
+            cap_count=jnp.array(0, dtype=jnp.int32),
         )
 
         def scan_step(carry, _):

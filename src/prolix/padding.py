@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import dataclasses
 from typing import TYPE_CHECKING, Any
 
 import equinox as eqx
@@ -13,6 +12,7 @@ from jax_md import util
 
 if TYPE_CHECKING:
   from proxide.core.containers import Protein
+
   from prolix.physics.topology_merger import MergedTopology
 
 Array = util.Array
@@ -169,7 +169,7 @@ def pad_protein(
   padded_charges = pad_array(charges, target_atoms, 0.0)
   
   sigmas = jnp.asarray(protein.sigmas) if protein.sigmas is not None else jnp.ones(n_real)*3.0
-  padded_sigmas = pad_array(sigmas, target_atoms, 1e-6)  # non-zero to avoid singularities 
+  padded_sigmas = pad_array(sigmas, target_atoms, 1e-6)  # non-zero to avoid singularities
   
   epsilons = jnp.asarray(protein.epsilons) if protein.epsilons is not None else jnp.zeros(n_real)
   padded_epsilons = pad_array(epsilons, target_atoms, 0.0)
@@ -177,13 +177,13 @@ def pad_protein(
   radii = jnp.asarray(protein.radii) if protein.radii is not None else jnp.ones(n_real)
   padded_radii = pad_array(radii, target_atoms, 1.5)  # Safe GB radii
   
-  scaled_radii = getattr(protein, 'scaled_radii', None)
+  scaled_radii = getattr(protein, "scaled_radii", None)
   if scaled_radii is None:
       scaled_radii = jnp.ones(n_real)*0.8
   padded_scaled_radii = pad_array(jnp.asarray(scaled_radii), target_atoms, 0.8) # Standard OBC2 default
   
   # Derive masses if none
-  from prolix.constants import masses_from_elements, atomic_numbers_from_elements, DEFAULT_MASS
+  from prolix.constants import DEFAULT_MASS, masses_from_elements
 
   masses = protein.masses
   elements_list = getattr(protein, "elements", None)
@@ -195,8 +195,20 @@ def pad_protein(
   # Pad with DEFAULT_MASS so ghost atoms have safe non-zero mass for Langevin p/m
   padded_masses = pad_array(masses, target_atoms, DEFAULT_MASS)
 
+  # Per-atom atomic numbers (constraints, hydrogen masks).
+  element_ids_raw = getattr(protein, "element_ids", None)
+  if element_ids_raw is not None:
+    element_ids = jnp.asarray(element_ids_raw, dtype=jnp.int32).reshape(-1)
+  elif elements_list is not None and len(elements_list) == n_real:
+    from prolix.constants import atomic_numbers_from_elements
+
+    element_ids = jnp.array(atomic_numbers_from_elements(list(elements_list)), dtype=jnp.int32)
+  else:
+    element_ids = jnp.ones(n_real, dtype=jnp.int32) * 6
+  padded_element_ids = pad_array(element_ids, target_atoms, 0)
+
   # Real atom mask from protein (handles missing atoms in PDB)
-  p_mask = getattr(protein, 'atom_mask', None)
+  p_mask = getattr(protein, "atom_mask", None)
   if p_mask is None:
     p_mask = jnp.ones(n_real, dtype=bool)
   else:
@@ -241,7 +253,7 @@ def pad_protein(
   angles = jnp.asarray(protein.angles) if protein.angles is not None else jnp.zeros((0, 3), dtype=jnp.int32)
   if target_angles is None: target_angles = len(angles)
   
-  proper_dihedrals = getattr(protein, 'proper_dihedrals', None)
+  proper_dihedrals = getattr(protein, "proper_dihedrals", None)
   dihedrals = jnp.asarray(proper_dihedrals) if proper_dihedrals is not None else jnp.zeros((0, 4), dtype=jnp.int32)
   if target_dihedrals is None: target_dihedrals = len(dihedrals)
   impropers = jnp.asarray(protein.impropers) if protein.impropers is not None else jnp.zeros((0, 4), dtype=jnp.int32)
@@ -250,9 +262,9 @@ def pad_protein(
   improper_mask = create_mask(len(impropers), target_impropers)
   
   # Urey-Bradley
-  ub_bonds = getattr(protein, 'urey_bradley_bonds', None)
+  ub_bonds = getattr(protein, "urey_bradley_bonds", None)
   if ub_bonds is None: ub_bonds = jnp.zeros((0, 2), dtype=jnp.int32)
-  ub_params = getattr(protein, 'urey_bradley_params', None)
+  ub_params = getattr(protein, "urey_bradley_params", None)
   if ub_params is None: ub_params = jnp.zeros((0, 2), dtype=jnp.float32)
   if target_ub is None: target_ub = len(ub_bonds)
   
@@ -260,7 +272,7 @@ def pad_protein(
   padded_ub_params = pad_bonded_params(ub_params, target_ub, 2)
   padded_ub_mask = create_mask(len(ub_bonds), target_ub)
 
-  cmaps = getattr(protein, 'cmap_torsions', None)
+  cmaps = getattr(protein, "cmap_torsions", None)
   if cmaps is not None:
     cmaps = jnp.asarray(cmaps)
   else:
@@ -298,7 +310,7 @@ def pad_protein(
     # CMAP is real only if all five atoms are in the mask
     real_cmap = p_mask[cmaps].all(axis=-1) if len(cmaps) > 0 else jnp.zeros(0, dtype=bool)
     cmap_mask = pad_array(real_cmap, target_cmaps, False)
-    cmap_coeffs = jnp.asarray(protein.cmap_coeffs) if getattr(protein, 'cmap_coeffs', None) is not None else None
+    cmap_coeffs = jnp.asarray(protein.cmap_coeffs) if getattr(protein, "cmap_coeffs", None) is not None else None
   else:
     padded_cmaps = None
     cmap_mask = None
@@ -426,7 +438,7 @@ def pad_solvated_system(
     padded_masses = pad_array(topology.masses, target_atoms, 12.0) # default mass
     
     # Real atom mask from topology
-    t_mask = getattr(topology, 'atom_mask', None)
+    t_mask = getattr(topology, "atom_mask", None)
     if t_mask is None:
         t_mask = jnp.ones(n_real, dtype=bool)
     
@@ -466,14 +478,16 @@ def pad_solvated_system(
     cmaps = topology.cmap_torsions if topology.cmap_torsions is not None else jnp.zeros((0, 5), dtype=jnp.int32)
     if target_cmaps is None: target_cmaps = len(cmaps)
     
-    padded_bonds = pad_bonded_indices(topology.bonds, target_bonds, 2)
+    bonds_arr = jnp.asarray(topology.bonds, dtype=jnp.int32)
+    padded_bonds = pad_bonded_indices(bonds_arr, target_bonds, 2)
     padded_bond_params = pad_bonded_params(topology.bond_params, target_bonds, 2)
-    real_bonds = t_mask[topology.bonds].all(axis=-1) if len(topology.bonds) > 0 else jnp.zeros(0, dtype=bool)
+    real_bonds = t_mask[bonds_arr].all(axis=-1) if len(bonds_arr) > 0 else jnp.zeros(0, dtype=bool)
     bond_mask = pad_array(real_bonds, target_bonds, False)
 
-    padded_angles = pad_bonded_indices(topology.angles, target_angles, 3)
+    angles_arr = jnp.asarray(topology.angles, dtype=jnp.int32)
+    padded_angles = pad_bonded_indices(angles_arr, target_angles, 3)
     padded_angle_params = pad_bonded_params(topology.angle_params, target_angles, 2)
-    real_angles = t_mask[topology.angles].all(axis=-1) if len(topology.angles) > 0 else jnp.zeros(0, dtype=bool)
+    real_angles = t_mask[angles_arr].all(axis=-1) if len(angles_arr) > 0 else jnp.zeros(0, dtype=bool)
     angle_mask = pad_array(real_angles, target_angles, False)
     
     padded_dihedrals = pad_bonded_indices(dihedrals, target_dihedrals, 4)
@@ -498,7 +512,7 @@ def pad_solvated_system(
 
     if target_cmaps > 0:
         padded_cmaps = pad_bonded_indices(cmaps, target_cmaps, 5)
-        cmap_idx = topology.cmap_indices if getattr(topology, 'cmap_indices', None) is not None else jnp.zeros(len(cmaps), dtype=jnp.int32)
+        cmap_idx = topology.cmap_indices if getattr(topology, "cmap_indices", None) is not None else jnp.zeros(len(cmaps), dtype=jnp.int32)
         padded_cmap_indices = pad_bonded_indices(jnp.expand_dims(cmap_idx, -1), target_cmaps, 1).squeeze(-1)
         real_cmap = t_mask[cmaps].all(axis=-1) if len(cmaps) > 0 else jnp.zeros(0, dtype=bool)
         cmap_mask = pad_array(real_cmap, target_cmaps, False)
