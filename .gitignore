@@ -21,7 +21,9 @@ scripts/openmmforcefields/
 openmmforcefields/
 
 # Generated force field files
+# Legacy path from pre-proxide local layout (safe to delete if unused)
 src/priox.physics.force_fields/
 outputs/
 
 .agent/skills
+*.lock
