@@ -420,6 +420,7 @@ def settle_langevin(
   mass_oxygen: float = 15.999,
   mass_hydrogen: float = 1.008,
   box: Array | None = None,
+  constraints: tuple[Array, Array] | None = None,
 ):
   r"""Langevin dynamics integrator with SETTLE constraints for water.
 
@@ -447,6 +448,7 @@ def settle_langevin(
       r_OH, r_HH: Target water geometry.
       m_O, m_H: Solvent masses.
       box: Periodic box dimensions.
+      constraints: Optional (pairs, lengths) tuple for solute RATTLE.
 
   Returns:
       (init_fn, apply_fn) pair.
@@ -473,7 +475,7 @@ def settle_langevin(
     # Store mass for broadcasting
     mass_state = mass_arr[:, None]
 
-    # Import NVTLangevinState from simulate module
+    # Import required components from simulate module
     from prolix.physics.simulate import NVTLangevinState
 
     return NVTLangevinState(R, momenta, force, mass_state, key)
@@ -493,6 +495,12 @@ def settle_langevin(
 
     position = _langevin_step_a(position, momentum, state.mass, _dt, shift_fn)
 
+    # Solute RATTLE (SHAKE) - applied BEFORE SETTLE per batched_simulate convention
+    if constraints is not None:
+      from prolix.physics.simulate import project_positions
+      pairs, lengths = constraints
+      position = project_positions(position, pairs, lengths, state.mass, shift_fn)
+
     # SETTLE position constraints
     position = settle_positions(
       position,
@@ -507,6 +515,12 @@ def settle_langevin(
 
     force = force_fn(position, **kwargs)
     momentum = _langevin_step_b(momentum, force, _dt)
+
+    # Solute RATTLE (Velocity)
+    if constraints is not None:
+      from prolix.physics.simulate import project_momenta
+      pairs, _ = constraints
+      momentum = project_momenta(momentum, position, pairs, state.mass, shift_fn)
 
     # SETTLE velocity constraints
     momentum = _langevin_settle_vel(

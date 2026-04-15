@@ -1,0 +1,20 @@
+{
+  "verdict": "REVISE",
+  "confidence": "high",
+  "strategic_assessment": "The plan correctly identifies the need for SETTLE integration and the GB mask scaling issue. However, the exact mapping of `mask_hard` and `mask_elec` to GB components needs precise alignment with existing `system.py` logic to preserve validation parity.",
+  "concerns": [
+    {
+      "area": "GB Pair Mask Mapping",
+      "severity": "critical",
+      "issue": "The plan states 'Map pair_mask_born and pair_mask_energy using mask_hard (and/or mask_elec based on existing logic)'. This is vague. `system.py` currently maps `gb_mask = exclusion_mask` and `gb_energy_mask = None` for standard `Protein` structures, meaning both Radii and Energy inherit the full exclusion mask (0 for 1-2/1-3, scaled for 1-4).",
+      "recommendation": "Specify exactly that `pair_mask_born = mask_elec` and `pair_mask_energy = mask_elec` should be used when `gb_mask` defaults to `exclusion_mask`. `mask_elec` (from `compute_exclusion_mask_neighbor_list`) embodies both the hard exclusions (0.0) and 1-4 electrical scaling, perfectly matching the original `exclusion_mask`."
+    },
+    {
+      "area": "SETTLE API usage in simulate.py",
+      "severity": "warning",
+      "issue": "The plan suggests passing `water_indices` and `box` to `settle_rattle_langevin`. But `water_indices` might be shaped differently or padded. Also, `make_langevin_step_explicit` limits velocities and forces for numerical stability in the batched path. Will the non-batched path also need those caps?",
+      "recommendation": "Explicitly state that `settle_rattle_langevin` should mirror the safe bounding/capping (e.g., `VLIMIT`) from `batched_simulate.py`'s `make_langevin_step_explicit` to guarantee equal stability on the unbatched explicitly solvated path."
+    }
+  ],
+  "approved_for_execution": false
+}

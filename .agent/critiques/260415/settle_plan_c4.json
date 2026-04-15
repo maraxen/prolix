@@ -1,0 +1,20 @@
+{
+  "verdict": "APPROVE",
+  "confidence": "high",
+  "strategic_assessment": "The Cycle 4 plan correctly addresses all critical findings from Cycle 3. The mask_hard → exclusion_mask parity is now provably correct (both are binary: 0.0 for 1-2/1-3, 1.0 for 1-4 and normal, verified against code). The duck-typing via getattr is the minimal-impact path for water_indices access. Extending settle_langevin avoids code duplication. The verification plan now includes settle-specific tests. One minor note: MergedTopology lacks constrained_bonds, so when constraints=None the integrator correctly falls through to SETTLE-only, which is appropriate for the explicit solvent initial integration.",
+  "concerns": [
+    {
+      "area": "MergedTopology Missing constrained_bonds",
+      "severity": "suggestion",
+      "issue": "MergedTopology does not carry constrained_bonds/constrained_bond_lengths fields (verified by grep). When run_simulation receives a MergedTopology, protein_system.constrained_bonds will raise AttributeError. The current plan's settle_langevin extension handles constraints=None gracefully (SETTLE-only), but the getattr probe at line 814 may crash before reaching the new dispatch.",
+      "recommendation": "Add getattr guarding at the existing constrained_bonds extraction point (line 814): `constrained_bonds = getattr(protein_system, 'constrained_bonds', None)`. This is a 1-line fix and is already consistent with the duck-typing pattern used for water_indices. Consider adding constrained_bonds/constrained_bond_lengths to MergedTopology in a follow-up if solute RATTLE is needed for explicit solvent."
+    },
+    {
+      "area": "settle_langevin Constraint Ordering",
+      "severity": "suggestion",
+      "issue": "The batched path (batched_simulate.py:2036-2048) applies SHAKE before SETTLE for positions. The plan says to apply SETTLE then RATTLE. While either ordering converges for disjoint constraint sets (water vs protein), matching the batched path's ordering (RATTLE then SETTLE) would maximize consistency between the two code paths.",
+      "recommendation": "Apply project_positions BEFORE settle_positions in the extended settle_langevin, matching the batched path's SHAKE → SETTLE ordering. Similarly, apply project_momenta BEFORE settle_velocities for velocity constraints."
+    }
+  ],
+  "approved_for_execution": true
+}

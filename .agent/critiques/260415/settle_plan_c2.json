@@ -1,0 +1,20 @@
+{
+  "verdict": "REVISE",
+  "confidence": "high",
+  "strategic_assessment": "The mapping of `mask_elec` correctly handles 1-4 bounds constraints on the non-batched GB neighbor path. The SETTLE design successfully considers VLIMIT. However, implementing limits on the unbatched scalar path (simulate.py / physics_simulate.py) fundamentally runs counter to the clean, mathematically pure `simulate.py` runner which usually does NOT apply these heavy batched-specific gradient clamps.",
+  "concerns": [
+    {
+      "area": "Velocity/Force Limiters in Standard Runner",
+      "severity": "critical",
+      "issue": "The plan says `MAX_DX_PROD = 0.5`, `VLIMIT = 20.0`, force clamping to `10000.0` will be added to the standard unbatched `physics/simulate.py`. This is extremely undesirable. The unbatched API should remain pure and un-clamped unless absolutely explicitly toggled, because capping breaks detailed balance and should only be a desperate batched stability fallback. For standard runs, standard RATTLE/SETTLE is unconditionally stable for a stable system.",
+      "recommendation": "Remove the mandatory velocity/force limiters from the proposed `settle_rattle_langevin` in `physics/simulate.py`. Only implement the pure constraints (BAOAB: V_half -> SETTLE -> R -> F -> V_half -> SETTLE). If the user specifically configures force capping in `SimulationSpec`, it should be generic, not hardcoded into the integrator."
+    },
+    {
+      "area": "Water Box Masking",
+      "severity": "warning",
+      "issue": "The `mask_elec` will map 1-2/1-3 to 0.0. The water molecules (H-O-H) have 1-2 and 1-3 pairs perfectly. Do water pairs normally get excluded? Yes, but usually SETTLE requires water intra-molecular forces to be strictly 0 to avoid exploding constraints. If `mask_elec` handles the water pairs via `exclusion_spec`, everything is fine.",
+      "recommendation": "Verify that `exclusion_spec` inherently covers water intramolecular pairs. If it's built from `system.bonds`, waters won't automatically have 1-3 exclusion unless explicit angle bonds are listed. This has broader FF implications but is acceptable for the solver."
+    }
+  ],
+  "approved_for_execution": false
+}

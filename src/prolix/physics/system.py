@@ -474,19 +474,25 @@ def make_energy_fn(
         ii = jnp.arange(N)[:, None]
         valid = idx_nl < N
 
-        if gb_mask is not None:
+        if gb_mask is not None and exclusion_spec is not None:
+          # Optimization: If we have sparse exclusions, avoid gathering from dense gb_mask (exclusion_mask).
+          # mask_hard is binary (0.0 for 1-2/1-3, 1.0 for everything else) which matches exclusion_mask.
+          _, _, mask_hard = nl.compute_exclusion_mask_neighbor_list(
+            exclusion_spec, neighbor_idx, N
+          )
+          pair_mask_born = mask_hard
+          pair_mask_energy = mask_hard
+        elif gb_mask is not None:
           pair_mask_born = gb_mask[ii, safe_j]
           pair_mask_born = jnp.where(valid, pair_mask_born, 0.0)
+
+          if gb_energy_mask is not None:
+            pair_mask_energy = gb_energy_mask[ii, safe_j]
+            pair_mask_energy = jnp.where(valid, pair_mask_energy, 0.0)
+          else:
+            pair_mask_energy = pair_mask_born
         else:
           pair_mask_born = None
-
-        if gb_energy_mask is not None:
-          pair_mask_energy = gb_energy_mask[ii, safe_j]
-          pair_mask_energy = jnp.where(valid, pair_mask_energy, 0.0)
-        elif gb_mask is not None:
-          pair_mask_energy = gb_mask[ii, safe_j]
-          pair_mask_energy = jnp.where(valid, pair_mask_energy, 0.0)
-        else:
           pair_mask_energy = None
 
         e_gb, born_radii = generalized_born.compute_gb_energy_neighbor_list(

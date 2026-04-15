@@ -88,6 +88,9 @@ class SimulationSpec:
   electrostatic_method: ElectrostaticMethod | str = ElectrostaticMethod.PME
   reaction_field_dielectric: float = 78.3
   dsf_alpha: float | None = None  # Damped shifted force damping (1/Å); None uses internal default
+  
+  # Rigid Water (SETTLE)
+  rigid_water: bool = False
 
   def __post_init__(self):
     if self.save_interval_ns <= 0:
@@ -811,10 +814,34 @@ def run_simulation(
 
   # (Masses already computed above, before FIRE minimization)
 
-  constrained_bonds = protein_system.constrained_bonds
-  constrained_lengths = protein_system.constrained_bond_lengths
+  # Extract water indices if available (MergedTopology)
+  water_indices = getattr(protein_system, "water_indices", None)
 
-  if (
+  # Guards for constrained bonds (MergedTopology lacks these by default)
+  constrained_bonds = getattr(protein_system, "constrained_bonds", None)
+  constrained_lengths = getattr(protein_system, "constrained_bond_lengths", None)
+
+  if spec.rigid_water and water_indices is not None:
+    from prolix.physics.settle import settle_langevin
+
+    constraints = None
+    if (
+      constrained_bonds is not None and constrained_lengths is not None and len(constrained_bonds) > 0
+    ):
+      constraints = (jnp.array(constrained_bonds), jnp.array(constrained_lengths))
+
+    init_fn, apply_fn = settle_langevin(
+      integrator_energy_fn,
+      shift_fn,
+      dt=dt,
+      kT=kT,
+      gamma=gamma_reduced,
+      mass=masses,
+      water_indices=water_indices,
+      box=spec.box,
+      constraints=constraints,
+    )
+  elif (
     constrained_bonds is not None and constrained_lengths is not None and len(constrained_bonds) > 0
   ):
     init_fn, apply_fn = physics_simulate.rattle_langevin(
