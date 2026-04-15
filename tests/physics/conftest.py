@@ -136,6 +136,21 @@ _FF_PATH = (
 # Test PDB data directory
 _DATA_DIR = Path(__file__).parent / "data"
 
+# Standard explicit solvent PME parameters for regression tests
+REGRESSION_EXPLICIT_PME = {
+  "pme_alpha_per_angstrom": 0.34,
+  "pme_grid_points": 32,  # cubic grid nx=ny=nz
+  "cutoff_angstrom": 9.0,  # two-particle tests; protein tests may use 10–12
+  "use_dispersion_correction": False,
+  "openmm_platform": "Reference",  # deterministic CPU parity
+}
+
+
+@pytest.fixture
+def regression_pme_params():
+  """Standard explicit solvent PME parameters for regression tests."""
+  return REGRESSION_EXPLICIT_PME
+
 
 @pytest.fixture(scope="session")
 def pqr_protein() -> Protein:

@@ -82,7 +82,8 @@ def test_langevin_step_finite(fake_padded_batch):
         momentum=jnp.zeros_like(sys.positions),
         force=jnp.zeros_like(sys.positions),
         mass=sys.masses,
-        key=keys
+        key=keys,
+        cap_count=jnp.zeros(B, dtype=jnp.int32),
     )
     
     def single_step(args):
@@ -171,6 +172,7 @@ def test_batched_produce_streaming(fake_padded_batch):
         force=initial_forces,
         mass=batch.masses,
         key=keys,
+        cap_count=jnp.zeros(B, dtype=jnp.int32),
     )
 
     # Collect frames in a list via the callback

@@ -226,9 +226,22 @@ class TestGBNeighborList:
             energy_mask=energy_mask,
             scaled_radii=sys["scaled_radii"],
         )
+        idx = neighbor_idx
+        ii = jnp.arange(n)[:, None]
+        sj = jnp.minimum(idx, n - 1)
+        valid = idx < n
+        pair_e = energy_mask[ii, sj]
+        pair_e = jnp.where(valid, pair_e, 0.0)
+        born_m = mask_ij.astype(jnp.float32)
+        pair_b = born_m[ii, sj]
+        pair_b = jnp.where(valid, pair_b, 0.0)
+
         e_nl, _ = compute_gb_energy_neighbor_list(
             sys["positions"], sys["charges"], sys["radii"],
             neighbor_idx,
+            scaled_radii=sys["scaled_radii"],
+            pair_mask_born=pair_b,
+            pair_mask_energy=pair_e,
         )
 
         np.testing.assert_allclose(
@@ -329,6 +342,7 @@ class TestNLLangevinStep:
             force=jnp.zeros((n, 3)),
             mass=jnp.ones(n) * 12.0,
             key=key,
+            cap_count=jnp.array(0, dtype=jnp.int32),
         )
 
         # Create step function with typical params
@@ -424,6 +438,7 @@ class TestCustomVJP:
             force=jnp.zeros((n, 3)),
             mass=jnp.ones(n) * 12.0,
             key=key,
+            cap_count=jnp.array(0, dtype=jnp.int32),
         )
 
         step_fn = make_langevin_step_nl(

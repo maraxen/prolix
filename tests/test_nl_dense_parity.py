@@ -201,6 +201,7 @@ def main():
         force=-g_dense,
         mass=padded.masses,
         key=key,
+        cap_count=jnp.array(0, dtype=jnp.int32),
     )
 
     # Run 100 steps with dense, collect energies

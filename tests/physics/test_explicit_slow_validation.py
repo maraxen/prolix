@@ -21,6 +21,7 @@ except ImportError:
     HAS_OPENMM = False
 
 from prolix.physics import pbc, system
+from prolix.simulate import AKMA_TIME_UNIT_FS, BOLTZMANN_KCAL
 
 
 def _mock_periodic(n: int, charges: list[float]) -> dict:
@@ -89,7 +90,72 @@ def test_explicit_pbc_nve_short_run_finite():
     assert jnp.all(jnp.isfinite(final.position))
     assert jnp.all(jnp.isfinite(final.momentum))
     assert jnp.isfinite(e0) and jnp.isfinite(e1)
-    assert float(jnp.abs(e1 - e0)) < 80.0, "Unexpected energy drift in short explicit NVE test"
+    # Symplectic Verlet should keep |ΔE| small over a handful of steps; bound is
+    # loose enough for PME/cutoff noise but tighter than an unconstrained smoke test.
+    assert float(jnp.abs(e1 - e0)) < 15.0, "Unexpected energy drift in short explicit NVE test"
+
+
+@pytest.mark.slow
+def test_explicit_pbc_nvt_mean_temperature_targets_spec():
+  """NVT Langevin: mean instantaneous T from KE should approach ``temperature_k`` (statistical gate)."""
+  jax.config.update("jax_enable_x64", True)
+  n = 4
+  box_size = 45.0
+  temperature_k = 300.0
+  box = jnp.array([box_size, box_size, box_size], dtype=jnp.float64)
+  positions = jnp.array(
+    [
+      [15.0, 15.0, 15.0],
+      [32.0, 15.0, 15.0],
+      [15.0, 32.0, 15.0],
+      [32.0, 32.0, 15.0],
+    ],
+    dtype=jnp.float64,
+  )
+  sys_dict = _mock_periodic(n, [1.0, -1.0, 0.2, -0.2])
+  displacement_fn, shift_fn = pbc.create_periodic_space(box)
+  energy_fn = system.make_energy_fn(
+    displacement_fn,
+    sys_dict,
+    box=box,
+    use_pbc=True,
+    implicit_solvent=False,
+    pme_grid_points=32,
+    pme_alpha=0.34,
+    cutoff_distance=12.0,
+    strict_parameterization=False,
+  )
+
+  kT = temperature_k * BOLTZMANN_KCAL
+  # Match ``test_explicit_pbc_nve_short_run_finite`` time step in JAX-MD reduced units.
+  dt = 1e-3
+  gamma_reduced = 1.0 * AKMA_TIME_UNIT_FS * 1e-3
+
+  init_fn, apply_fn = jmd_simulate.nvt_langevin(
+    energy_fn, shift_fn, dt=dt, kT=kT, gamma=gamma_reduced
+  )
+  key = jax.random.PRNGKey(7)
+  mass = jnp.ones(n, dtype=jnp.float64) * 12.0
+  state = init_fn(key, positions, mass=mass)
+
+  @jax.jit
+  def _run():
+    def _step(s, _):
+      ns = apply_fn(s)
+      ke = quantity.kinetic_energy(momentum=ns.momentum, mass=ns.mass)
+      return ns, ke
+
+    return jax.lax.scan(_step, state, None, length=5000)
+
+  _, kes = _run()
+  dof = float(3 * n)
+  k_b = BOLTZMANN_KCAL
+  t_inst = 2.0 * kes / (dof * k_b)
+  burn = 1500
+  mean_t = float(jnp.mean(t_inst[burn:]))
+  assert abs(mean_t - temperature_k) < 0.22 * temperature_k, (
+    f"Mean T={mean_t:.1f} K vs target {temperature_k} K (NVT statistical gate)"
+  )
 
 
 @pytest.mark.slow
