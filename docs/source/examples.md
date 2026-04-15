@@ -2,96 +2,78 @@
 
 ## Basic MD Simulation
 
-A simple example showing how to run a molecular dynamics simulation with prolix:
+This mirrors the flow in `scripts/simulate_chignolin_stable.py`: load a structure with **proxide**, parameterize with **`parameterize_system`**, then build a **prolix** energy function and run minimization or full MD.
 
 ```python
 import jax.numpy as jnp
+import biotite.structure as struc
 from jax_md import space
-from prolix.physics import system, simulate
-from priox.physics import force_fields
-from priox.io.parsing import biotite as bio
 
-# Load structure
-structure = bio.load_structure_with_hydride("protein.pdb", add_hydrogens=True)
+from proxide.io.parsing import biotite as parsing_biotite
+from proxide.md.bridge.core import parameterize_system
+from proxide.physics.force_fields.loader import load_force_field
+from prolix.physics import system
+from prolix.physics.simulate import run_minimization, run_simulation
 
-# Load force field
-ff = force_fields.load_force_field("ff19SB.eqx")
+# 1) Load coordinates (Biotite AtomArray)
+atom_array = parsing_biotite.load_structure_with_hydride("protein.pdb", model=1)
 
-# Parameterize system
-params = system.parameterize_system(ff, structure)
+# 2) Build residue / atom-name lists (see simulate_chignolin_stable.py for terminal renaming)
+residues: list[str] = []
+atom_names: list[str] = []
+atom_counts: list[int] = []
+res_starts = struc.get_residue_starts(atom_array)
+for i, start_idx in enumerate(res_starts):
+    end_idx = res_starts[i + 1] if i + 1 < len(res_starts) else len(atom_array)
+    res_atoms = atom_array[start_idx:end_idx]
+    residues.append(res_atoms.res_name[0])
+    names = res_atoms.atom_name.tolist()
+    atom_names.extend(names)
+    atom_counts.append(len(names))
 
-# Create energy function
+ff = load_force_field("ff19SB.eqx")
+system_params = parameterize_system(ff, residues, atom_names, atom_counts)
+
+# 3) Energy + dynamics
 displacement_fn, _ = space.free()
 energy_fn = system.make_energy_fn(
-    displacement_fn=displacement_fn,
-    system_params=params,
+    displacement_fn,
+    system_params,
     implicit_solvent=True,
     solvent_dielectric=78.5,
 )
-
-# Run minimization
-from prolix.physics import simulate
-minimized_coords = simulate.minimize_energy(
-    structure.coord,
-    energy_fn,
-    max_iterations=1000
-)
-
-# Run MD
-trajectory = simulate.run_md(
-    minimized_coords,
-    params,
-    temperature=300.0,
-    steps=10000,
-    dt=0.002  # 2 fs timestep
-)
+coords = jnp.asarray(atom_array.coord)
+coords = run_minimization(energy_fn, coords, steps=500)
+# Optional full pipeline (minimize → thermalize → production):
+# coords = run_simulation(system_params, coords, temperature=300.0, min_steps=500, therm_steps=1000)
 ```
 
 ## Energy Calculation
 
-Computing energies for a protein structure:
+With `system_params` and positions `coords` from above:
 
 ```python
 from jax_md import space
 from prolix.physics import system
 
-# Create energy function
 displacement_fn, _ = space.free()
 energy_fn = system.make_energy_fn(
-    displacement_fn=displacement_fn,
-    system_params=params,
-    implicit_solvent=True
+    displacement_fn,
+    system_params,
+    implicit_solvent=True,
 )
-
-# Compute total energy
 total_energy = energy_fn(coords)
-
-# Compute energy components
-bond_energy = system.bonded.make_bond_energy_fn(
-    displacement_fn, params['bonds'], params['bond_params']
-)(coords)
-
-angle_energy = system.bonded.make_angle_energy_fn(
-    displacement_fn, params['angles'], params['angle_params']
-)(coords)
 ```
+
+For bonded/nonbonded breakdowns, use the helpers under `prolix.physics.bonded` and the same `system_params` fields your parameterization produced (see tests and `scripts/`).
 
 ## Working with Force Fields
 
-Loading and using different force fields:
-
 ```python
-from priox.physics import force_fields
+from proxide.physics.force_fields.loader import load_force_field
 
-# Load ff14SB
-ff14 = force_fields.load_force_field("path/to/ff14SB.eqx")
-
-# Load ff19SB
-ff19 = force_fields.load_force_field("path/to/ff19SB.eqx")
-
-# Get charge for specific atom
-charge = ff19.get_charge("ALA", "CA")
-
-# Get LJ parameters
-sigma, epsilon = ff19.get_lj_params("ALA", "CA")
+ff14 = load_force_field("path/to/ff14SB.eqx")
+ff19 = load_force_field("path/to/ff19SB.eqx")
+# Per-residue charges and LJ parameters are accessed via the loaded force-field object API
+# (see proxide docs and loader tests for details).
 ```

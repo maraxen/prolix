@@ -16,13 +16,14 @@
 
 ### From GitHub (Recommended)
 
-```bash
-# Install priox first (dependency)
-pip install git+https://github.com/maraxen/priox.git@main
+**Prolix** depends on **proxide** (protein I/O and force fields). Install `proxide` first, then `prolix`:
 
-# Then install prolix
-pip install git+https://github.com/maraxen/prolix.git@main
+```bash
+pip install "git+https://github.com/maraxen/proxide.git@main"
+pip install "git+https://github.com/maraxen/prolix.git@main"
 ```
+
+If `proxide` is already on PyPI for your platform, `pip install "git+https://github.com/maraxen/prolix.git@main"` may resolve it automatically; otherwise use the two-step order above (proxide uses a Rust/`maturin` build).
 
 ### From Source
 
@@ -34,33 +35,39 @@ cd prolix
 pip install .
 ```
 
-For development installation with test dependencies (including OpenMM):
+For development installation with test dependencies:
 
 ```bash
 pip install -e ".[dev]"
 ```
+
+Optional OpenMM parity tooling: `pip install -e ".[dev,openmm]"` (requires a compatible PyPI wheel for your platform; see `pyproject.toml`).
+
+### UV workspace (editable proxide)
+
+`proxide` is pinned for UV as a workspace member. With sibling checkouts `…/prolix` and `…/proxide`, install from their parent (see `workspace/README.md`):
+
+```bash
+# from the prolix repo root; ../proxide must exist
+bash scripts/sync_workspace_lock.sh
+cd .. && uv sync --extra cuda --extra dev --package prolix
+```
+
+After changing dependencies in `pyproject.toml`, run `bash scripts/sync_workspace_lock.sh` again and commit `workspace/uv.lock`.
 
 ## Usage
 
 ### Running a Simple MD Simulation
 
 ```python
-from prolix.physics import system, simulate
-from priox.physics import force_fields
-from priox.io.parsing import biotite as bio
+from proxide.io.parsing import load_structure
+from proxide.physics.force_fields import load_force_field
+from prolix.physics.simulate import run_simulation
 
-# Load structure and force field
-structure = bio.load_structure_with_hydride("protein.pdb")
-ff = force_fields.load_force_field("path/to/ff19SB.eqx")
-
-# Set up simulation
-params = system.parameterize_system(ff, structure)
-trajectory = simulate.run_md(
-    positions=structure.coord,
-    params=params,
-    temperature=300.0,
-    steps=10000
-)
+protein = load_structure("protein.pdb")
+ff = load_force_field("path/to/ff19SB.eqx")
+# Combine the structure and force field into system parameters (see docs / tutorials), then:
+# final_positions = run_simulation(system_params, protein.coord, temperature=300.0)
 ```
 
 ### Computing Energy
@@ -110,10 +117,10 @@ pyright
 
 Prolix depends on:
 
-- **priox**: For protein I/O and force field loading
-- **jax-md**: For molecular dynamics engine
-- **jax**: For automatic differentiation and GPU acceleration
-- **equinox**: For neural network modules and serialization
+- **proxide**: Protein I/O, parsing, and force field loading
+- **jax-md**: Molecular dynamics primitives
+- **jax**: Automatic differentiation and accelerators
+- **equinox**: Modules and serialization
 
 ## License
 

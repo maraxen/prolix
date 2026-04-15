@@ -6,19 +6,19 @@ This page is a **snapshot of what exists in the repository today**—modules, te
 
 **Explicit solvent** here means periodic boundary conditions (PBC), particle-mesh Ewald (PME) reciprocal electrostatics, erfc-damped direct space, Lennard-Jones with exclusions, and shared long-range corrections—not implicit Generalized Born (GB).
 
-**Implicit solvent** (GBSA, etc.) uses different code paths in `physics.system.make_energy_fn`; neighbor-list GB parity with dense GB is still incomplete (see Limitations).
+**Implicit solvent** (GBSA, etc.) uses different code paths in `physics.system.make_energy_fn`. The neighbor-list GB implementation applies the same dense Born/energy **masks** as the \(N^2\) path via per-neighbor gathers (`compute_gb_energy_neighbor_list`); long-range GB polarization is still **approximate** when the neighbor **cutoff** omits pairs that the dense sum would include (see Limitations).
 
 ## Implemented modules (as-built)
 
 | Area | Role | Key paths |
 |------|------|-----------|
 | SPME reciprocal + forces | Grid-based PME with `custom_vjp` | `src/prolix/physics/pme.py` |
-| Total energy / forces | Dense and JAX-MD neighbor-list nonbonded; PME wiring; `explicit_corrections` (PME exclusion + LJ tail) | `src/prolix/physics/system.py` |
+| Total energy / forces | Dense and JAX-MD neighbor-list nonbonded; PME wiring; optional **reaction-field** or **damped shifted** direct Coulomb (opt-in); `explicit_corrections` (PME exclusion + LJ tail) | `src/prolix/physics/system.py`, `src/prolix/physics/electrostatic_methods.py` |
 | Exclusions for NL | `ExclusionSpec`, sparse maps, `max_exclusion_slots_needed` | `src/prolix/physics/neighbor_list.py` |
 | Flash explicit | Tiled nonbonded + same PME/corrections as system | `src/prolix/physics/flash_explicit.py` |
 | Padded batch energy | `single_padded_energy` aligned with explicit PME + corrections when `implicit_solvent=False` | `src/prolix/batched_energy.py` |
 | Periodic space | Displacement / wrapping helpers | `src/prolix/physics/pbc.py` |
-| Simulation spec | `use_pbc`, PME params, optional neighbor list | `src/prolix/simulate.py` (`SimulationSpec`) |
+| Simulation spec | `use_pbc`, PME params, optional neighbor list, **`electrostatic_method`** | `src/prolix/simulate.py` (`SimulationSpec`) |
 | Solvation + merge | `solvate_protein`, `merge_solvated_topology`, `MergedTopology` | `src/prolix/physics/solvation.py`, `src/prolix/physics/topology_merger.py` |
 | Padding | `PaddedSystem`, `pad_protein`, `pad_solvated_system` | `src/prolix/padding.py` |
 | Cell-list (optional) | Spatial decomposition for tiled SR kernels; **not** the default production MD path | `src/prolix/physics/cell_list.py`, `src/prolix/physics/cell_nonbonded.py` |
@@ -34,81 +34,54 @@ The cell-list stack is documented in-module as secondary to **JAX-MD neighbor li
 | `tests/physics/test_explicit_validation_expansion.py` | Internal parity: NL vs dense, Flash vs system, `single_padded_energy` vs system |
 | `tests/physics/test_protein_nl_explicit_parity.py` | Protein `ExclusionSpec` + PBC + explicit PME: NL vs dense (slow tests); fast guard on exclusion slot counts |
 | `tests/physics/test_explicit_slow_validation.py` | Short explicit NVE sanity; optional OpenMM four-particle check (`slow` / `openmm`) |
+| `tests/physics/test_solvated_explicit_integration.py` | **Solvated** merged topology → `pad_solvated_system` → finite explicit NL energy (`slow`) |
+| `tests/physics/test_electrostatic_methods_openmm.py` | Optional reaction-field energy vs OpenMM Reference (`openmm`) |
 
-**CI:** Default fast runs use `pytest -m "not slow"` (see `pyproject.toml` `[tool.pytest.ini_options]`). Slow tests include full-protein NL/dense parity and solvated-PDB checks.
+**CI:** Default fast runs use `pytest -m "not slow"` (see `pyproject.toml` `[tool.pytest.ini_options]`). Slow tests include full-protein NL/dense parity and solvated integration. OpenMM-marked tests require `openmm` (optional dev extra).
+
+## Partial charges (Espaloma)
+
+- **Assignment lives in proxide:** Optional **Espaloma Charge** (AM1-BCC surrogate) is exposed from **proxide** (`proxide.chem.partial_charges`, optional dependency group `espaloma` in proxide’s `pyproject.toml`). Inference runs outside JAX; output is a NumPy charge vector in **atom order** matching the RDKit / `Molecule` pipeline. Golden regression vectors live under **proxide** `tests/data/espaloma_golden/` (see that README for bump policy).
+- **Prolix consumes arrays only:** `make_energy_fn` and `simulate` take `Protein.charges` (or hierarchical `AtomicConstants`) with no ML dependency. A lightweight consistency test is `tests/test_injected_charges_energy.py` (scaled charges change explicit energy).
 
 ## Known limitations
 
-- **Implicit GB + neighbor list:** Dense GB uses exclusion masks; the neighbor-list GB path does not yet mirror that policy. Tracked in-code as `TODO(implicit_GB_NL)` in `src/prolix/physics/system.py`. Do not assert implicit GB NL vs dense parity until fixed.
-- **Electrostatic alternatives:** No reaction-field (RF) or damped shifted force (DSF) module (`electrostatic_methods.py` not present)—Phase 3 of the design plan.
-- **Spatial sorting:** No Morton / Z-order reordering pass in `src/prolix` for PME scatter or cell lists—Phase 6 of the design plan.
-- **Design doc vs repo:** Phase 8 cluster benchmark matrix and `scripts/benchmarks/explicit_solvent_bench.py` are planning references; see “Interim benchmarks” below.
+- **Implicit GB + neighbor list:** The neighbor-list GB path applies the same `(N,N)` Born and energy masks as the dense path via gathers onto `(N,K)` neighbors (`compute_gb_energy_neighbor_list`). Coverage is still limited by the neighbor **cutoff** unless the list is built to be effectively complete.
+- **Electrostatic alternatives:** Reaction-field (OpenMM CutoffPeriodic-style) and damped shifted Coulomb are **opt-in** via `ElectrostaticMethod` in `physics/electrostatic_methods.py` and `make_energy_fn` / `SimulationSpec`. Default remains **PME**.
+- **Spatial sorting:** No Morton / Z-order reordering pass in `src/prolix` for PME scatter or cell lists by default — **profiling-first** policy is documented in [spatial_sorting_profile_gate](spatial_sorting_profile_gate.md).
+- **Water box assets:** `data/water_boxes/tip3p.npz` ships for TIP3P solvation. OPC3 parameters live in `physics/water_models.py`; a pre-equilibrated `opc3.npz` is **not** required for tests that use TIP3P only.
 
 ## Interim benchmarks (repository today)
 
-The design plan’s Phase 8 (SLURM GPU matrix, preemptable checkpointing) is **not** implemented as a single script. The repo does contain **ad hoc** verification and scaling scripts under `benchmarks/` (project root), including for example:
-
-- `benchmarks/verify_pbc_end_to_end.py` — PBC / electrostatics checks
-- `benchmarks/benchmark_scaling.py`, `benchmarks/benchmark_batched.py` — scaling experiments
-- `benchmarks/compare_jax_openmm_validity.py`, `benchmarks/verify_end_to_end_physics.py` — cross-engine or integration checks
-
-Treat these as **development utilities**, not the Phase 8 “production benchmark matrix” until documented and unified.
+The design plan’s Phase 8 (SLURM GPU matrix, preemptable checkpointing) is documented as **smoke vs cluster** in [explicit_solvent_benchmarks](explicit_solvent_benchmarks.md). For a **requirements matrix** (parity layers, heat tracking, OpenMM-comparable throughput), see [explicit_solvent_parity_and_benchmark_requirements](explicit_solvent_parity_and_benchmark_requirements.md). Ad hoc scripts remain under `benchmarks/` and `scripts/benchmark_*.py`. **Prolix vs OpenMM throughput** (explicit minimal PME, per-platform sweep): [`scripts/benchmarks/prolix_vs_openmm_speed.py`](../../../scripts/benchmarks/prolix_vs_openmm_speed.py) — throughput only, not physics validation.
 
 ---
 
 ## Roadmap follow-up: Phases 3, 4, 6, 8, 9
 
-This section tracks **remaining work** aligned with [explicit_solvent_implementation_plan](explicit_solvent_implementation_plan.md). It does not change phase status in `explicit_solvent_progress.md` unless that file is updated separately.
+Aligned with [explicit_solvent_implementation_plan](explicit_solvent_implementation_plan.md). Formal plan: `.agent/docs/plans/explicit_solvent_phases_3_4_6_8_9.md`.
 
 ### Phase 3 — RF + DSF alternatives
 
-**Status:** Not implemented.
-
-**Suggested approach:** Add `src/prolix/physics/electrostatic_methods.py` (or equivalent) with an enum `PME | RF | DSF` and pairwise direct-space models. **Wire first** into `make_energy_fn` / `system.py` (production path used by `simulate.py`); optionally extend `cell_nonbonded.py` if cell-list SR becomes primary.
-
-**Tests:** Small-system reference parity (OpenMM `CustomNonbondedForce` or analytic limits), consistent with the anchor test philosophy.
+**Status:** **Implemented (opt-in).** `ElectrostaticMethod` in `src/prolix/physics/electrostatic_methods.py`; `make_energy_fn` and `SimulationSpec` accept `electrostatic_method`, `reaction_field_dielectric`, `dsf_alpha`. RF is validated vs OpenMM Reference in `tests/physics/test_electrostatic_methods_openmm.py`. Default remains PME.
 
 ### Phase 4 — Solvation pipeline enhancement
 
-**Status:** Partial (`solvate_protein`, `merge_solvated_topology`, `pad_solvated_system` exist).
+**Status:** **Partial → integration test added.** `solvate_protein`, `merge_solvated_topology`, `pad_solvated_system` exist. **Integration test:** `tests/physics/test_solvated_explicit_integration.py` (small solvated box, `slow`). **SETTLE:** implemented on the batched explicit integrator path (`make_langevin_step_explicit` in `batched_simulate.py`); not a Phase 4 engineering blocker.
 
-**Follow-ups:**
-
-- [ ] OPC3 (or chosen model) water box assets and parameter parity vs design checklist
-- [ ] SETTLE / constraint integration completeness in `batched_simulate.py` (audit vs design)
-- [ ] **Integration test:** merged solvated topology → `PaddedSystem` → explicit `make_energy_fn` energy (suggested: dedicated pytest, optionally `slow`)
+**Water models:** TIP3P box asset present; OPC3/TIP3P parameters registered in `water_models.py` (fast registry test in same file).
 
 ### Phase 6 — Spatial sorting + tuning
 
-**Status:** Not implemented.
-
-**Decision point:** Optimize **PME charge spreading** (scatter order), **cell-list** assignment, or **both**—prefer profiling before large investment.
-
-**Follow-ups:**
-
-- [ ] Morton or cell-index sort for hot paths (if profiling warrants)
-- [ ] Cell overflow / resize policy for `cell_list` if used at scale
-- [ ] Benchmark sorted vs unsorted (design targets N ~ 40k–100k; cluster-oriented)
+**Status:** **Profile gate documented** — [spatial_sorting_profile_gate](spatial_sorting_profile_gate.md). No default Morton pass until profiling warrants it.
 
 ### Phase 8 — Benchmarking
 
-**Status:** Not completed per progress table; interim scripts exist (see above).
-
-**Follow-ups:**
-
-- [ ] Document cluster job template (partition, GPU type, preemptable checkpointing) as in the implementation plan
-- [ ] Optional: small **local** repeatable benchmark script for smoke throughput (subset of design matrix)
-- [ ] Optional: `scripts/benchmarks/explicit_solvent_bench.py` entry point when ready (name referenced in design doc)
+**Status:** **Documented** — [explicit_solvent_benchmarks](explicit_solvent_benchmarks.md) (local smoke vs cluster checklist, SLURM template, links to scripts).
 
 ### Phase 9 — Production integration
 
-**Status:** Not completed; `simulate.py` already exposes explicit PBC + PME + neighbor list.
-
-**Follow-ups:**
-
-- [ ] Documented end-to-end “happy path”: structure → solvate → minimize → MD (config / `SimulationSpec`)
-- [ ] Stable defaults and error messages for incompatible option combinations
-- [ ] Coordination with Phase 5/5b (RESPA, barostat) when those land—out of scope for this snapshot unless expanded
+**Status:** **Runbook** — [explicit_solvent_runbook](explicit_solvent_runbook.md) (`SimulationSpec`, explicit defaults, RF/DSF caveats, SETTLE pointer, failure modes).
 
 ---
 
@@ -116,9 +89,9 @@ This section tracks **remaining work** aligned with [explicit_solvent_implementa
 
 Multi-axis review of this roadmap (correctness, completeness, feasibility, risk, alignment) concluded:
 
-1. Phase 3 wiring must target **`system.py` / `make_energy_fn` first**, not only `cell_nonbonded.py`.
-2. Phase 4 closure (integration test) should precede claiming Phase 9 “production ready.”
-3. Phase 6 scope should stay **profiling-driven** unless a clear bottleneck is identified.
-4. Phase 8 should distinguish **local smoke** benchmarks from **cluster full matrix**.
+1. Phase 3 wiring targets **`system.py` / `make_energy_fn` first**; default PME unchanged for anchor tests.
+2. Phase 4 closure (integration test) precedes claiming full production hardening for arbitrary solvated systems.
+3. Phase 6 scope stays **profiling-driven** unless a clear bottleneck is identified.
+4. Phase 8 distinguishes **local smoke** benchmarks from **cluster full matrix**.
 
 **Verdict:** Approved for documentation and phased implementation; residual risk is environment-specific GPU benchmarking.

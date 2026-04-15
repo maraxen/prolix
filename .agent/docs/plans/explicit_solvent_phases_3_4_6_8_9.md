@@ -4,6 +4,8 @@
 **As-built snapshot:** [`docs/source/explicit_solvent/current_implementation.md`](../../../docs/source/explicit_solvent/current_implementation.md)  
 **Design reference:** [`docs/source/explicit_solvent/explicit_solvent_implementation_plan.md`](../../../docs/source/explicit_solvent/explicit_solvent_implementation_plan.md)
 
+**Note:** §2 “recon” rows for RF/DSF and `electrostatic_methods` reflected the repo **before** those modules landed. For current facts, use [`current_implementation.md`](../../../docs/source/explicit_solvent/current_implementation.md) and the gap/Espaloma plan [`explicit_solvent_gaps_and_espaloma_charges.md`](explicit_solvent_gaps_and_espaloma_charges.md).
+
 ---
 
 ## 1. Purpose
@@ -20,7 +22,7 @@ Sequence and scope implementation work for **reaction-field / DSF-style electros
 | Flash / padded path | Aligned PME + corrections | [`src/prolix/physics/flash_explicit.py`](../../../src/prolix/physics/flash_explicit.py); [`src/prolix/batched_energy.py`](../../../src/prolix/batched_energy.py) |
 | Solvation merge | `solvate_protein`, `MergedTopology`, `pad_solvated_system` | [`src/prolix/physics/solvation.py`](../../../src/prolix/physics/solvation.py); [`topology_merger.py`](../../../src/prolix/physics/topology_merger.py); [`padding.py`](../../../src/prolix/padding.py) |
 | Explicit Langevin + SETTLE | **Implemented** — BAOAB, constraints, SETTLE, `single_padded_force` / explicit | [`make_langevin_step_explicit`](../../../src/prolix/batched_simulate.py) (from ~L1940; docstring lists SETTLE + flash forces) |
-| RF / DSF module | **Not present** | No `electrostatic_methods.py` under `src/prolix/physics/` |
+| RF / DSF module | **Present (opt-in)** | [`src/prolix/physics/electrostatic_methods.py`](../../../src/prolix/physics/electrostatic_methods.py); default remains PME |
 | Morton / spatial sort | **Not present** in `src/prolix` | Grep has no morton hits |
 | Phase 8 matrix | Not unified | Ad hoc scripts in repo root [`benchmarks/`](../../../benchmarks/); design references `scripts/benchmarks/explicit_solvent_bench.py` (missing) |
 | Implicit GB + NL | Incomplete | `TODO(implicit_GB_NL)` in [`system.py`](../../../src/prolix/physics/system.py) |

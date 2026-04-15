@@ -379,7 +379,9 @@ asynchronously on the host while the GPU continues the next `lax.scan` iteration
 
 ## Phase 9: Production Integration
 
-Wire everything into `run_batched_pipeline.py`:
+**Scope note (2026):** The repository already contains a **benchmark loader** at `scripts/run_batched_pipeline.py` (PDB catalog, Amber parameterization via `parse_structure`, `prepare_batches` / `pad_protein`). That module supports **implicit-solvent-style** benchmark drivers and Engaging SLURM templates; it is **not** the full explicit-solvent production pipeline below.
+
+The following checkboxes describe **end-to-end explicit solvent** integration (solvation, equilibration, production), which remains future work:
 
 - [ ] Full config schema for explicit solvent (water model, ion conc, electrostatic tier, box padding, HMR, RESPA)
 - [ ] Solvation prep → `PaddedSystem` pipeline

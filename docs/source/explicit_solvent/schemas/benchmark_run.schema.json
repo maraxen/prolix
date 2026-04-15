@@ -1,0 +1,65 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://prolix.local/schemas/benchmark_run.schema.json",
+  "title": "Prolix explicit-solvent / OpenMM benchmark run",
+  "type": "object",
+  "required": ["schema_version", "timestamp", "tier", "prolix"],
+  "properties": {
+    "schema_version": { "type": "string", "const": "1.0" },
+    "timestamp": { "type": "string", "format": "date-time" },
+    "tier": {
+      "type": "string",
+      "description": "T0 = minimal PME box; T1 = solvated peptide; T2 = large system",
+      "enum": ["T0", "T1", "T2"]
+    },
+    "git_short_sha": { "type": "string" },
+    "seed": { "type": "integer" },
+    "box_angstrom": {
+      "type": "array",
+      "items": { "type": "number" },
+      "minItems": 3,
+      "maxItems": 3
+    },
+    "gamma_ps_inv": { "type": "number", "description": "Langevin friction 1/ps" },
+    "temperature_k": { "type": "number" },
+    "jax": {
+      "type": "object",
+      "properties": {
+        "devices": { "type": "array", "items": { "type": "string" } },
+        "jax_enable_x64": { "type": "boolean" },
+        "default_backend": { "type": "string" }
+      }
+    },
+    "openmm": {
+      "type": "object",
+      "properties": {
+        "version": { "type": ["string", "null"] },
+        "platform": { "type": ["string", "null"] },
+        "precision": { "type": ["string", "null"] }
+      }
+    },
+    "prolix": {
+      "type": "object",
+      "description": "Primary timed workload (energy+grad ms, etc.)",
+      "properties": {
+        "n_atoms": { "type": "integer" },
+        "cutoff_angstrom": { "type": "number" },
+        "pme_alpha": { "type": "number" },
+        "pme_grid": { "type": "integer" },
+        "mean_ms_energy_grad": { "type": "number" }
+      }
+    },
+    "trajectory_metrics": {
+      "type": "object",
+      "description": "Optional heat / thermostat logging",
+      "properties": {
+        "steps": { "type": "integer" },
+        "time_ps": { "type": "number" },
+        "mean_temperature_k": { "type": "number" },
+        "mean_kinetic_kcal_mol": { "type": "number" },
+        "mean_potential_kcal_mol": { "type": "number" }
+      }
+    }
+  },
+  "additionalProperties": true
+}

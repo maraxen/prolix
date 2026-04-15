@@ -1016,10 +1016,10 @@ Results written to `outputs/benchmarks/explicit_solvent_timing.json`.
 
 | File | Change | Rationale |
 |------|--------|-----------|
-| [run_batched_pipeline.py](file:///home/maarxaru/projects/noised_cb/scripts) (scripts/) | Add explicit solvent path: solvation → equilibration → production | End-to-end pipeline integration |
-| [frame_generation.py](file:///home/maarxaru/projects/noised_cb/src/noised_cb/frame_generation.py) | Add solvent stripping option for output frames | Downstream scoring doesn't need water coordinates |
-| [config.py](file:///home/maarxaru/projects/noised_cb/src/noised_cb/config.py) | Full config schema for explicit solvent: water model, ion concentration, electrostatic tier, box padding, HMR, RESPA | Config-driven pipeline |
-| [batched_simulate.py](file:///home/maarxaru/projects/noised_cb/../prolix/src/../prolix/batched_simulate.py) | Wire SETTLE into main BAOAB loop; add cell-list rebuild inside `lax.scan` | Production integrator needs water constraints + periodic rebuilds |
+| [`scripts/run_batched_pipeline.py`](../../../../scripts/run_batched_pipeline.py) | Benchmark/catalog loader today; **production** explicit path = solvation → equilibration → `PaddedSystem` (Phase 9 open items) | Shared entrypoint for batched padding benchmarks; extend for explicit pipeline |
+| `prolix/simulate.py` / trajectory writers | Optional solvent stripping for saved frames | Downstream scoring may omit water coordinates |
+| Config / `SimulationSpec` (TBD) | Full config schema for explicit solvent: water model, ion concentration, electrostatic tier, box padding, HMR, RESPA | Config-driven pipeline |
+| [`src/prolix/batched_simulate.py`](../../../../src/prolix/batched_simulate.py) | Wire SETTLE into BAOAB where applicable; cell-list rebuild inside stepped dynamics | Production integrator needs water constraints + periodic rebuilds |
 
 #### Tasks
 
