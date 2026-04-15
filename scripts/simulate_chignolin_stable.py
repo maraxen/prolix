@@ -19,7 +19,7 @@ from jax_md import simulate as jax_simulate
 from jax_md import space
 from proxide.io.parsing import biotite as parsing_biotite
 
-# Priox imports
+# proxide imports
 from proxide.md.bridge.core import parameterize_system
 from proxide.physics.force_fields.loader import load_force_field
 
@@ -34,7 +34,7 @@ def main():
     pdb_path = "data/pdb/1UAO.pdb"
     print(f"Loading {pdb_path}...")
 
-    # Load structure using Priox/Biotite tool
+    # Load structure using proxide/Biotite tool
     atom_array = parsing_biotite.load_structure_with_hydride(pdb_path, model=1)
 
     # Extract lists for parameterize_system

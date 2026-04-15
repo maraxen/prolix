@@ -189,7 +189,10 @@ def bench_nl_at_cutoff(sys0, n_real, N, cutoff, displacement_fn, dt, kT, gamma,
     state = LangevinState(
         positions=sys0.positions,
         momentum=jnp.zeros_like(sys0.positions),
-        force=init_f, mass=sys0.masses, key=key,
+        force=init_f,
+        mass=sys0.masses,
+        key=key,
+        cap_count=jnp.array(0, dtype=jnp.int32),
     )
     state = step_nl(sys0, state, neighbor_idx)
     jax.block_until_ready(state.positions)
@@ -309,7 +312,10 @@ def main():
         state_d = LangevinState(
             positions=sys0.positions,
             momentum=jnp.zeros_like(sys0.positions),
-            force=init_f, mass=sys0.masses, key=key,
+            force=init_f,
+            mass=sys0.masses,
+            key=key,
+            cap_count=jnp.array(0, dtype=jnp.int32),
         )
         state_d = step_dense(sys0, state_d)
         jax.block_until_ready(state_d.positions)

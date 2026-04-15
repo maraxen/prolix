@@ -8,7 +8,7 @@ import numpy as np
 from jax import random
 from proxide.io.parsing import biotite as parsing_biotite
 
-# Priox imports
+# proxide imports
 from proxide.md.bridge.core import parameterize_system
 from proxide.physics.force_fields.loader import load_force_field
 

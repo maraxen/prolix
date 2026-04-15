@@ -38,8 +38,13 @@ dev = [
     "pytest-cov",
     "pytest-xdist",
     "ty",
-    "openmm>=8.4.0",
     # "openff-toolkit>=0.14.0",  # TODO: Requires conda or special channel
+]
+
+# OpenMM wheels on PyPI target manylinux_2_34; older cluster nodes (e.g. manylinux_2_28)
+# cannot `uv sync` this extra — use conda OpenMM there, or install only on newer glibc.
+openmm = [
+    "openmm>=8.4.0",
 ]
 
 docs = [
@@ -58,12 +63,14 @@ viz = [
 ]
 
 [tool.pytest.ini_options]
-# Default fast CI: pytest -m "not slow"
+# Default fast CI: pytest -m "not slow" (matches .github/workflows/ci.yml test step)
 # OpenMM parity (optional dep): pytest -m "openmm"
 markers = [
     "smoke: marks tests as smoke tests (fast and critical)",
     "slow: marks tests as slow (>30s, may be skipped in CI)",
     "openmm: marks tests that require OpenMM (optional dependency)",
+    "integration: marks heavy parity or integration tests against other engines",
+    "dynamics: marks tests involving long MD trajectories or statistical checks",
     "order: controls test execution order",
 ]
 testpaths = ["tests"]
@@ -146,9 +153,14 @@ invalid-type-form = "ignore"
 
 
 [dependency-groups]
+# Keep in sync with [project.optional-dependencies] dev (no OpenMM here — see `openmm` extra).
 dev = [
-    "openmm>=8.4.0.post2",
+    "ruff",
+    "pytest",
+    "pytest-cov",
+    "pytest-xdist",
+    "ty",
 ]
 
 [tool.uv.sources]
-proxide = { path = "../proxide", editable = true }
+proxide = { workspace = true }

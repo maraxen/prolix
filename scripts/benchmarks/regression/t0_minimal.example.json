@@ -1,0 +1,24 @@
+{
+  "$comment": "Example T0 benchmark JSON shape (Phase 3 regression archive). Values are illustrative.",
+  "schema_version": "1.0",
+  "timestamp": "2026-04-10T12:00:00+00:00",
+  "tier": "T0",
+  "git_short_sha": "abcdef1",
+  "jax": {
+    "devices": ["/cpu:0"],
+    "jax_enable_x64": true,
+    "default_backend": "cpu"
+  },
+  "openmm": {
+    "version": "8.2.0",
+    "platforms": ["CPU", "CUDA", "Reference"]
+  },
+  "prolix": {
+    "n_atoms": 2,
+    "cutoff_angstrom": 9.0,
+    "pme_alpha": 0.34,
+    "pme_grid": 32,
+    "mean_ms_energy_grad": 0.85
+  },
+  "trajectory_metrics": null
+}
