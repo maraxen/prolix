@@ -764,6 +764,7 @@ def single_padded_energy_nl_cvjp(
                 radii=radii,
                 neighbor_idx=neighbor_idx,
                 dielectric_offset=0.09,
+                scaled_radii=sys.scaled_radii,
             )
             e_np = compute_ace_nonpolar_energy(radii, born_radii)
             e_np = jnp.sum(e_np * sys.atom_mask)
@@ -842,6 +843,7 @@ def single_padded_energy_nl(
             radii=sys.radii,
             neighbor_idx=neighbor_idx,
             dielectric_offset=0.09,
+            scaled_radii=sys.scaled_radii,
         )
         e_np = compute_ace_nonpolar_energy(sys.radii, born_radii)
         e_np = jnp.sum(e_np * sys.atom_mask)

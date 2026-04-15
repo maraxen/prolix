@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
 from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any
 
 import jax
 import jax.numpy as jnp
@@ -12,11 +12,16 @@ from proxide.physics import constants
 
 from prolix.physics import bonded, cmap, explicit_corrections, generalized_born, pme, virtual_sites
 from prolix.physics import neighbor_list as nl
+from prolix.physics.electrostatic_methods import (
+  ElectrostaticMethod,
+  openmm_reaction_field_coefficients,
+)
 from prolix.types import CmapTorsionIndices
 from prolix.utils import topology
 
 if TYPE_CHECKING:
   from collections.abc import Callable
+
   from proxide.core.containers import Protein
 
 Array = util.Array
@@ -116,6 +121,9 @@ def make_energy_fn(
   pme_grid_spacing: float | None = None,
   return_decomposed: bool = False,
   strict_parameterization: bool = True,
+  electrostatic_method: ElectrostaticMethod | str = ElectrostaticMethod.PME,
+  reaction_field_dielectric: float = 78.3,
+  dsf_alpha: float | None = None,
 ) -> Callable[[Array], Array] | dict[str, Callable]:
   """Creates the total potential energy function.
 
@@ -141,6 +149,10 @@ def make_energy_fn(
       pme_grid_points: Grid points for PME (e.g. 64).
       pme_alpha: Ewald splitting parameter.
       pme_grid_spacing: If set (Å), overrides spacing derived from ``pme_grid_points``.
+      electrostatic_method: ``PME`` (default), ``REACTION_FIELD`` (OpenMM CutoffPeriodic RF),
+        or ``DAMPED_SHIFTED_FORCE`` (shifted erfc Coulomb; explicit solvent only).
+      reaction_field_dielectric: Solvent dielectric ``ε`` in OpenMM RF formulas (default 78.3).
+      dsf_alpha: Damping parameter (1/Å) for ``DAMPED_SHIFTED_FORCE``; internal default if None.
 
   Returns:
       A function energy(R, neighbor=None) -> float.
@@ -157,6 +169,14 @@ def make_energy_fn(
       also pre-computed if an ExclusionSpec is provided.
 
   """
+  if isinstance(electrostatic_method, str):
+    electrostatic_method = ElectrostaticMethod(electrostatic_method)
+  if electrostatic_method != ElectrostaticMethod.PME and implicit_solvent:
+    raise ValueError(
+      f"electrostatic_method={electrostatic_method} requires implicit_solvent=False "
+      "(explicit solvent only)."
+    )
+
   # Wrap plain dicts for attribute access with defaults
   if isinstance(system, dict):
     system = _DictSystemWrapper(system)
@@ -233,16 +253,15 @@ def make_energy_fn(
         "Strict parameterization is enabled. Fix root cause in force field parameterization "
         "or pass strict_parameterization=False to bypass this error."
       )
-    else:
-      import logging as _logging
-      _log = _logging.getLogger("prolix.physics.system")
-      _log.warning(
-        "Found %d atoms with sigma <= 0.0 (unparameterized). "
-        "Clamping to 1e-6 to prevent singular LJ. "
-        "Fix root cause in force field parameterization.",
-        n_zero_sigma,
-      )
-      sigmas = jnp.maximum(sigmas, 1e-6)
+    import logging as _logging
+    _log = _logging.getLogger("prolix.physics.system")
+    _log.warning(
+      "Found %d atoms with sigma <= 0.0 (unparameterized). "
+      "Clamping to 1e-6 to prevent singular LJ. "
+      "Fix root cause in force field parameterization.",
+      n_zero_sigma,
+    )
+    sigmas = jnp.maximum(sigmas, 1e-6)
 
   assert sigmas.shape[0] == charges.shape[0], f"Sigmas shape mismatch: {sigmas.shape} vs {charges.shape}"
 
@@ -301,11 +320,14 @@ def make_energy_fn(
 
       scale_matrix_vdw = mat_vdw
       scale_matrix_elec = mat_elec
+      
+      print(f"DEBUG: mat_elec diag sum: {jnp.sum(jnp.diag(mat_elec))}")
 
       # Also set exclusion_mask for binary checks (though scale matrix path takes precedence)
       # We treat anything with non-zero scale as "allowed" for binary mask,
       # but really scale_matrix handles it all.
       exclusion_mask = (mat_vdw > 0.0).astype(jnp.float32)
+      # print(f"DEBUG: exclusion_mask zeros: {jnp.sum(exclusion_mask == 0.0)}")
 
   else:
     excl_indices = excl_scales_vdw = excl_scales_elec = None
@@ -325,7 +347,12 @@ def make_energy_fn(
   COULOMB_CONSTANT = 332.0637 / eff_dielectric
 
   # Pre-create SPME reciprocal (+ self) at setup time (NOT inside compute_electrostatics)
-  if use_pbc and box is not None:
+  _spme_energy_fn = None
+  if (
+    electrostatic_method == ElectrostaticMethod.PME
+    and use_pbc
+    and box is not None
+  ):
     box_arr = jnp.asarray(box)
     if pme_grid_spacing is not None:
       grid_spacing = float(pme_grid_spacing)
@@ -335,8 +362,11 @@ def make_energy_fn(
     _spme_energy_fn = pme.make_spme_energy_fn(
       box_arr, alpha=float(pme_alpha), grid_spacing=grid_spacing
     )
-  else:
-    _spme_energy_fn = None
+
+  _k_rf, _c_rf = openmm_reaction_field_coefficients(
+    float(cutoff_distance), solvent_dielectric=reaction_field_dielectric
+  )
+  _dsf_alpha = float(dsf_alpha) if dsf_alpha is not None else 0.2
 
   def soft_core_lj(
     dr: Array,
@@ -386,21 +416,21 @@ def make_energy_fn(
   # Electrostatics
   # -------------------------------------------------------------------------
   def compute_electrostatics(r, neighbor_idx=None):
-    if system.radii is not None:
-      radii = system.radii
-    else:
-      import logging as _log_gb
-      _log_gb.getLogger("prolix.physics.system").warning(
-        "No GB radii found — using sigma/2 fallback. "
-        "This is physically incorrect for implicit solvent. "
-        "Call assign_mbondi2_radii() or use CoordFormat.Full with parse_structure."
-      )
-      radii = sigmas * 0.5
-
     e_gb = 0.0
     born_radii = None
 
     if implicit_solvent:
+      if system.radii is not None:
+        radii = system.radii
+      else:
+        import logging as _log_gb
+        _log_gb.getLogger("prolix.physics.system").warning(
+          "No GB radii found — using sigma/2 fallback. "
+          "This is physically incorrect for implicit solvent. "
+          "Call assign_mbondi2_radii() or use CoordFormat.Full with parse_structure."
+        )
+        radii = sigmas * 0.5
+
       # Generalized Born (OBC) - Solvation Term
 
       if scale_matrix_vdw is not None:
@@ -437,10 +467,28 @@ def make_energy_fn(
           scaled_radii=jnp.asarray(scaled_radii) if scaled_radii is not None else None,
         )
       else:
-        # TODO(implicit_GB_NL): Wire exclusion / scale masks into compute_gb_energy_neighbor_list
-        # to match dense compute_gb_energy (OpenMM-style GB pair policy). Explicit-solvent NL vs
-        # dense coverage lives in tests/physics/test_protein_nl_explicit_parity.py; do not use
-        # implicit GB + neighbor_list parity until this path is fixed.
+        # Match dense compute_gb_energy: apply per-pair (N, N) masks on neighbor slots (N, K).
+        N = charges.shape[0]
+        idx_nl = neighbor_idx
+        safe_j = jnp.minimum(idx_nl, N - 1)
+        ii = jnp.arange(N)[:, None]
+        valid = idx_nl < N
+
+        if gb_mask is not None:
+          pair_mask_born = gb_mask[ii, safe_j]
+          pair_mask_born = jnp.where(valid, pair_mask_born, 0.0)
+        else:
+          pair_mask_born = None
+
+        if gb_energy_mask is not None:
+          pair_mask_energy = gb_energy_mask[ii, safe_j]
+          pair_mask_energy = jnp.where(valid, pair_mask_energy, 0.0)
+        elif gb_mask is not None:
+          pair_mask_energy = gb_mask[ii, safe_j]
+          pair_mask_energy = jnp.where(valid, pair_mask_energy, 0.0)
+        else:
+          pair_mask_energy = None
+
         e_gb, born_radii = generalized_born.compute_gb_energy_neighbor_list(
           r,
           jnp.asarray(charges),
@@ -449,6 +497,9 @@ def make_energy_fn(
           solvent_dielectric=solvent_dielectric,
           solute_dielectric=solute_dielectric,
           dielectric_offset=dielectric_offset,
+          scaled_radii=jnp.asarray(scaled_radii) if scaled_radii is not None else None,
+          pair_mask_born=pair_mask_born,
+          pair_mask_energy=pair_mask_energy,
         )
 
       # Non-polar Solvation (SASA) - Now computed separately using ACE
@@ -461,15 +512,23 @@ def make_energy_fn(
       atom_mask_elec = jnp.ones((charges_arr.shape[0],), dtype=bool)
 
     if use_pbc and box is not None:
-      if _spme_energy_fn is None:
-        raise RuntimeError("SPME energy function not initialized for PBC.")
-      # Reciprocal + analytic self term (kcal/mol); see spme_energy_with_forces
-      e_recip = _spme_energy_fn(r, charges_arr, atom_mask_elec)
-      e_recip = e_recip + pme.spme_background_energy(
-        charges_arr, atom_mask_elec, float(pme_alpha), jnp.asarray(box)
-      )
-      # NOTE: Direct space (erfc term) is computed in the neighbor block below
-
+      if electrostatic_method == ElectrostaticMethod.PME:
+        if _spme_energy_fn is None:
+          raise RuntimeError("SPME energy function not initialized for PBC.")
+        # Reciprocal + analytic self term (kcal/mol); see spme_energy_with_forces
+        e_recip = _spme_energy_fn(r, charges_arr, atom_mask_elec)
+        e_recip = e_recip + pme.spme_background_energy(
+          charges_arr, atom_mask_elec, float(pme_alpha), jnp.asarray(box)
+        )
+        # Reciprocal space correction for excluded/scaled pairs
+        if exclusion_spec is not None:
+          e_recip = e_recip + pme.excluded_pme_correction(
+              r, charges_arr, atom_mask_elec, 
+              exclusion_spec.idx_12_13, exclusion_spec.idx_14, 
+              exclusion_spec.scale_14_elec, float(pme_alpha), displacement_fn
+          )
+      else:
+        e_recip = 0.0
     else:
       e_recip = 0.0
 
@@ -487,22 +546,32 @@ def make_energy_fn(
       # but AMBER ff19SB uses uniform scaling via coulomb14scale/lj14scale.
 
       if use_pbc and box is not None:
-        # Dense PME Direct Space
-        # E = C * q_i * q_j * erfc(alpha * r) / r
-        erfc_term = jax.scipy.special.erfc(pme_alpha * dist)
-        e_coul = COULOMB_CONSTANT * (q_ij / dist_safe) * erfc_term
+        if electrostatic_method == ElectrostaticMethod.PME:
+          # Dense PME direct space: erfc-damped Coulomb
+          erfc_term = jax.scipy.special.erfc(pme_alpha * dist)
+          e_coul = COULOMB_CONSTANT * (q_ij / dist_safe) * erfc_term
+        elif electrostatic_method == ElectrostaticMethod.REACTION_FIELD:
+          e_coul = COULOMB_CONSTANT * q_ij * (1.0 / dist_safe + _k_rf * dist**2 - _c_rf)
+        else:
+          # Damped shifted force (energy zero at cutoff)
+          rc = float(cutoff_distance)
+          t1 = jax.scipy.special.erfc(_dsf_alpha * dist) / dist_safe
+          t2 = jax.scipy.special.erfc(_dsf_alpha * rc) / rc
+          e_coul = COULOMB_CONSTANT * q_ij * (t1 - t2)
       elif kappa > 0:
         e_coul = COULOMB_CONSTANT * (q_ij / dist_safe) * jnp.exp(-kappa * dist)
       else:
         e_coul = COULOMB_CONSTANT * (q_ij / dist_safe)
 
       # Apply scaling/masking
+      # CRITICAL: Always mask self-interactions (diagonal) in dense path
+      mask_diagonal = 1.0 - jnp.eye(charges.shape[0])
+      
       if scale_matrix_elec is not None:
-        e_coul = e_coul * scale_matrix_elec
+        e_coul = e_coul * scale_matrix_elec * mask_diagonal
       else:
         # Fallback to binary mask
-        mask = 1.0 - jnp.eye(charges.shape[0])
-        e_coul = jnp.where(mask, e_coul, 0.0)
+        e_coul = jnp.where(mask_diagonal, e_coul, 0.0)
         e_coul = jnp.where(exclusion_mask, e_coul, 0.0)
 
       e_direct = 0.5 * jnp.sum(e_coul)
@@ -523,9 +592,16 @@ def make_energy_fn(
       dist_safe = dist + 1e-6
 
       if use_pbc and box is not None:
-        # Neighbor List PME Direct Space
-        erfc_term = jax.scipy.special.erfc(pme_alpha * dist)
-        e_coul = COULOMB_CONSTANT * (q_ij / dist_safe) * erfc_term
+        if electrostatic_method == ElectrostaticMethod.PME:
+          erfc_term = jax.scipy.special.erfc(pme_alpha * dist)
+          e_coul = COULOMB_CONSTANT * (q_ij / dist_safe) * erfc_term
+        elif electrostatic_method == ElectrostaticMethod.REACTION_FIELD:
+          e_coul = COULOMB_CONSTANT * q_ij * (1.0 / dist_safe + _k_rf * dist**2 - _c_rf)
+        else:
+          rc = float(cutoff_distance)
+          t1 = jax.scipy.special.erfc(_dsf_alpha * dist) / dist_safe
+          t2 = jax.scipy.special.erfc(_dsf_alpha * rc) / rc
+          e_coul = COULOMB_CONSTANT * q_ij * (t1 - t2)
       elif kappa > 0:
         e_coul = COULOMB_CONSTANT * (q_ij / dist_safe) * jnp.exp(-kappa * dist)
       else:
@@ -539,9 +615,10 @@ def make_energy_fn(
         # Sparse exclusion lookup - efficient for large systems
         if excl_indices is None or excl_scales_vdw is None or excl_scales_elec is None:
           raise RuntimeError("Sparse exclusions requested but not initialized.")
-        _, scale_elec = nl.get_neighbor_exclusion_scales(
+        scale_vdw, scale_elec = nl.get_neighbor_exclusion_scales(
           excl_indices, excl_scales_vdw, excl_scales_elec, idx
         )
+        print(f"DEBUG NL: scale_elec min={jnp.min(scale_elec)}, max={jnp.max(scale_elec)}, mean={jnp.mean(scale_elec)}")
         e_coul = e_coul * scale_elec
       elif scale_matrix_elec is not None:
         # Dense scaling matrix (legacy path)
@@ -587,11 +664,15 @@ def make_energy_fn(
       else:
         e_lj = energy.lennard_jones(jnp.asarray(dist), sig_ij, eps_ij)
 
+      # CRITICAL: Always mask self-interactions (diagonal) in dense path
+      mask_diagonal = 1.0 - jnp.eye(charges.shape[0])
+
       if scale_matrix_vdw is not None:
-        e_lj = e_lj * scale_matrix_vdw
+        e_lj = e_lj * scale_matrix_vdw * mask_diagonal
       else:
-        mask = exclusion_mask
-        e_lj = jnp.where(mask, e_lj, 0.0)
+        # print(f"DEBUG: exclusion_mask sum: {jnp.sum(exclusion_mask)}")
+        e_lj = jnp.where(mask_diagonal, e_lj, 0.0)
+        e_lj = jnp.where(exclusion_mask, e_lj, 0.0)
 
       return 0.5 * jnp.sum(e_lj)
 
@@ -618,7 +699,6 @@ def make_energy_fn(
         # but for now we'll do the at[...].set(...) if the system is small,
         # or rely on the fact that PROLIX currently defaults to dense for < 500 atoms.
         # For now, we only implement the dense version as the primary fix.
-        pass
 
     e_lj = energy.lennard_jones(dist, sig_ij, eps_ij)
 
@@ -740,7 +820,7 @@ def make_energy_fn(
     if r_ref is not None and k_res is not None and res_mask is not None:
       e_restraint = position_restraint_energy(r, r_ref, k_res, res_mask)
 
-    if use_pbc and box is not None:
+    if use_pbc and box is not None and electrostatic_method == ElectrostaticMethod.PME:
       e_pme_corr = explicit_corrections.pme_exclusion_correction_energy(
         r,
         displacement_fn,
@@ -753,6 +833,7 @@ def make_energy_fn(
       )
       e_elec += e_pme_corr
 
+    if use_pbc and box is not None:
       e_lj_lrc = explicit_corrections.lj_dispersion_tail_energy(
         jnp.asarray(box),
         jnp.asarray(sigmas),
@@ -783,8 +864,8 @@ def make_energy_fn(
       "dihedral": dihedral_energy_fn,
       "improper": improper_energy_fn,
       "cmap": compute_cmap_term,
-      "lj": lambda r: compute_lj(r),
-      "electrostatics": lambda r: compute_electrostatics(r),
+      "lj": lambda r, neighbor=None: compute_lj(r, neighbor_idx=neighbor.idx if neighbor is not None else None),
+      "electrostatics": lambda r, neighbor=None: compute_electrostatics(r, neighbor_idx=neighbor.idx if neighbor is not None else None),
       "nonpolar": lambda r, born_radii: compute_nonpolar(r, born_radii),
       "total": total_energy,
     }

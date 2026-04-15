@@ -268,6 +268,7 @@ def compute_born_radii_neighbor_list(
   neighbor_idx: Array,
   dielectric_offset: float = 0.09,
   scaled_radii: Array | None = None,
+  pair_mask: Array | None = None,
 ) -> Array:
   r"""Computes effective Born radii using neighbor lists.
 
@@ -287,6 +288,9 @@ def compute_born_radii_neighbor_list(
       radii: Intrinsic atomic radii (N,).
       neighbor_idx: Neighbor list indices (N, K).
       dielectric_offset: Offset for Born radius calculation.
+      scaled_radii: Optional scaled radii for descreening (OBC), shape (N,).
+      pair_mask: Optional per-neighbor weights (N, K), aligned with ``neighbor_idx``,
+          matching dense ``compute_born_radii`` mask[i, j] for off-diagonal pairs.
 
   Returns:
       Born radii (N,).
@@ -315,6 +319,8 @@ def compute_born_radii_neighbor_list(
 
   pair_integrals = compute_pair_integral(distances, radii_i_broadcast, radii_j)
   pair_integrals = jnp.where(mask_neighbors, pair_integrals, 0.0)
+  if pair_mask is not None:
+    pair_integrals = pair_integrals * pair_mask
 
   born_radius_inverse_term = jnp.sum(pair_integrals, axis=1)
 
@@ -338,6 +344,9 @@ def compute_gb_energy_neighbor_list(
   solvent_dielectric: float = constants.DIELECTRIC_WATER,
   solute_dielectric: float = constants.DIELECTRIC_PROTEIN,
   dielectric_offset: float = 0.09,
+  scaled_radii: Array | None = None,
+  pair_mask_born: Array | None = None,
+  pair_mask_energy: Array | None = None,
 ) -> tuple[Array, Array]:
   r"""Computes GB energy using neighbor lists.
 
@@ -355,12 +364,22 @@ def compute_gb_energy_neighbor_list(
       solvent_dielectric: Solvent dielectric constant ($\\epsilon_{out}$).
       solute_dielectric: Solute dielectric constant ($\\epsilon_{in}$).
       dielectric_offset: Offset for Born radius calculation.
+      scaled_radii: Optional OBC scaled radii (N,), passed to Born radius build.
+      pair_mask_born: Optional (N, K) weights for descreening pairs (dense mask[i, j]).
+      pair_mask_energy: Optional (N, K) weights for GB polarization pair terms.
 
   Returns:
       Tuple of (Total GB energy, Born Radii).
 
   """
-  born_radii = compute_born_radii_neighbor_list(positions, radii, neighbor_idx, dielectric_offset)
+  born_radii = compute_born_radii_neighbor_list(
+    positions,
+    radii,
+    neighbor_idx,
+    dielectric_offset,
+    scaled_radii=scaled_radii,
+    pair_mask=pair_mask_born,
+  )
 
   neighbor_positions = positions[neighbor_idx]  # (N, K, 3)
   central_positions = positions[:, None, :]  # (N, 1, 3)
@@ -384,6 +403,8 @@ def compute_gb_energy_neighbor_list(
   N = positions.shape[0]
   mask_neighbors = neighbor_idx < N
   energy_terms = jnp.where(mask_neighbors, energy_terms, 0.0)
+  if pair_mask_energy is not None:
+    energy_terms = energy_terms * pair_mask_energy
 
   term_neighbors = jnp.sum(energy_terms)
   term_self = jnp.sum((charges**2) / born_radii)
