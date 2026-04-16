@@ -1,0 +1,42 @@
+# Publish sdist + wheel to PyPI (trusted publishing / OIDC).
+#
+# One-time:
+# 1. PyPI → Publishing → pending publisher: GitHub, repo maraxen/prolix, workflow publish.yml, environment pypi
+# 2. GitHub → Settings → Environments → create "pypi"
+#
+# Order: publish expaloma and proxide first (prolix depends on proxide>=0.1.0).
+#
+name: Publish
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  pypi:
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install build
+        run: pip install "build>=1.2.0"
+
+      - name: Build sdist and wheel
+        run: python -m build
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist/
+          skip-existing: true

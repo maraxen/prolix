@@ -7,12 +7,16 @@ name = "prolix"
 version = "0.1.0"
 description = "Protein Physics and Molecular Dynamics in JAX"
 readme = "README.md"
+license = "MIT"
+authors = [
+    { name = "Marielle Russo", email = "67157875+maraxen@users.noreply.github.com" },
+]
 requires-python = ">=3.11"
 dependencies = [
     "jax",
     "jax-md",
     "equinox",
-    "proxide",
+    "proxide>=0.1.0",
     "biotite",
     "mdtraj",
     "numpy",
@@ -24,6 +28,11 @@ dependencies = [
     "imageio>=2.37.2",
     "jaxopt",
 ]
+
+[project.urls]
+Homepage = "https://github.com/maraxen/prolix"
+Repository = "https://github.com/maraxen/prolix"
+Issues = "https://github.com/maraxen/prolix/issues"
 
 [tool.setuptools.packages.find]
 where = ["src"]
