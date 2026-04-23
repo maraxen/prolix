@@ -622,8 +622,41 @@ def settle_langevin(
     if mass_arr.ndim == 0:
       mass_arr = jnp.ones((R.shape[0],), dtype=R.dtype) * mass_arr
 
-    # Initialize momenta: p = sqrt(m * kT) * N(0, 1)
-    momenta = jnp.sqrt(mass_arr[:, None] * _kT) * random.normal(split, R.shape, dtype=R.dtype)
+    # Initialize momenta differently depending on whether we use constrained thermostat
+    if project_ou_momentum_rigid and water_indices is not None and water_indices.shape[0] > 0:
+      # Start with zero momenta, will fill in for water and non-water separately
+      momenta = jnp.zeros_like(R, dtype=R.dtype)
+
+      # Water atoms: sample from constrained distribution
+      idx = water_indices
+      mass_flat = mass_arr.reshape(-1)
+      r_water = jnp.stack([R[idx[:, 0]], R[idx[:, 1]], R[idx[:, 2]]], axis=1)
+      m_water = jnp.stack([mass_flat[idx[:, 0]], mass_flat[idx[:, 1]], mass_flat[idx[:, 2]]], axis=1)
+
+      def init_one_water(carry, inputs):
+        key_w = carry
+        r_w, m_w = inputs
+        p_w, key_w = _init_momentum_one_water_rigid(key_w, r_w, m_w, _kT)
+        return key_w, p_w
+
+      key, p_water = jax.lax.scan(init_one_water, key, (r_water, m_water))
+      idx_flat = idx.reshape(-1)
+      momenta = momenta.at[idx_flat].set(p_water.reshape(-1, 3))
+
+      # Non-water atoms (solute): standard unconstrained noise
+      # Create a mask for non-water atoms
+      all_indices = jnp.arange(R.shape[0])
+      is_water = jnp.isin(all_indices, idx_flat, assume_unique=False)
+      non_water_mask = ~is_water
+
+      if jnp.any(non_water_mask):
+        key, split = jax.random.split(key)
+        non_water_noise = jnp.sqrt(mass_arr[non_water_mask, None] * _kT) * jax.random.normal(split, (jnp.sum(non_water_mask), 3), dtype=R.dtype)
+        momenta = momenta.at[non_water_mask].set(non_water_noise)
+    else:
+      # Standard unconstrained initialization
+      key, split = jax.random.split(key)
+      momenta = jnp.sqrt(mass_arr[:, None] * _kT) * jax.random.normal(split, R.shape, dtype=R.dtype)
 
     # Store mass for broadcasting
     mass_state = mass_arr[:, None]
@@ -644,13 +677,14 @@ def settle_langevin(
     position = _langevin_step_a(state.position, momentum, state.mass, _dt, shift_fn)
 
     # Stochastic update (BAOAB "O" step)
-    momentum, key = _langevin_step_o(momentum, state.mass, gamma, _dt, _kT, state.rng)
-    # Always project after O when rigid OU control is on: skipping this (e.g. only projecting
-    # after settle_vel) leaves full Cartesian OU noise and biases rigid kinetic energy high.
+    # When project_ou_momentum_rigid=True, use constrained noise directly in rigid-body subspace.
+    # This provides correct covariance (kT * M * P_rigid) for equipartition across 6*N_w-3 DOF.
     if project_ou_momentum_rigid:
-      momentum = project_tip3p_waters_momentum_rigid(
-        momentum, position, state.mass, water_indices
+      momentum, key = _langevin_step_o_constrained(
+        momentum, position, state.mass, gamma, _dt, _kT, state.rng, water_indices
       )
+    else:
+      momentum, key = _langevin_step_o(momentum, state.mass, gamma, _dt, _kT, state.rng)
 
     position = _langevin_step_a(position, momentum, state.mass, _dt, shift_fn)
 
@@ -737,6 +771,128 @@ def _langevin_step_o(
   noise = jax.random.normal(split, momentum.shape)
   momentum_new = c1 * momentum + c2 * jnp.sqrt(mass * kT) * noise
   return momentum_new, key
+
+
+def _ou_noise_one_water_rigid(
+  key: Array,
+  r_stack: Array,
+  m_stack: Array,
+  kT: float,
+) -> tuple[Array, Array]:
+  r"""Sample OU noise in the 6D rigid-body subspace for one TIP3P water.
+
+  Returns mass-weighted noise (shape (3, 3)) and consumed key.
+  Covariance is kT * M * P_rigid — correct constrained Maxwell-Boltzmann.
+
+  Args:
+    key: JAX PRNGKey.
+    r_stack: (3, 3) array of O, H1, H2 positions.
+    m_stack: (3,) array of O, H1, H2 masses.
+    kT: Thermal energy.
+
+  Returns:
+    (p_noise, key_out) where p_noise is (3, 3) mass-weighted noise momenta.
+  """
+  msum = jnp.sum(m_stack)
+  com = jnp.sum(m_stack[:, None] * r_stack, axis=0) / msum
+  rrel = r_stack - com
+
+  rows = []
+  for i in range(3):
+    row = jnp.concatenate([jnp.eye(3, dtype=r_stack.dtype), -_skew_symmetric3(rrel[i])], axis=1)
+    rows.append(row)
+  jmat = jnp.vstack(rows)
+
+  m_rep = jnp.repeat(m_stack, 3)
+  g = (jmat.T * m_rep) @ jmat
+  reg = jnp.array(1e-12, dtype=g.dtype) * (jnp.trace(g) / 6.0 + 1.0)
+  g_reg = g + reg * jnp.eye(6, dtype=g.dtype)
+
+  key, split = jax.random.split(key)
+  z = jax.random.normal(split, (6,), dtype=r_stack.dtype)
+
+  L = jnp.linalg.cholesky(g_reg)
+  xi = jnp.linalg.solve(L.T, jnp.sqrt(kT) * z)
+
+  p_noise_flat = m_rep * (jmat @ xi)
+  return p_noise_flat.reshape(3, 3), key
+
+
+def _init_momentum_one_water_rigid(
+  key: Array,
+  r_stack: Array,
+  m_stack: Array,
+  kT: float,
+) -> tuple[Array, Array]:
+  r"""Sample initial momentum in rigid-body subspace for one TIP3P water.
+
+  For initialization (not OU step), we sample directly from the Maxwell-Boltzmann
+  distribution in the constrained subspace, i.e., `p ~ N(0, kT * M * P_rigid)`.
+
+  Returns:
+    (momentum, key_out) where momentum is (3, 3) mass-weighted momenta.
+  """
+  return _ou_noise_one_water_rigid(key, r_stack, m_stack, kT)
+
+
+def _langevin_step_o_constrained(
+  momentum: Array,
+  position: Array,
+  mass: Array,
+  gamma: float,
+  dt: float,
+  kT: float,
+  rng: Array,
+  water_indices: WaterIndicesArray,
+) -> tuple[Array, Array]:
+  r"""Constrained O-step: OU noise restricted to 6D rigid-body subspace per water.
+
+  For water molecules, noise is sampled in the rigid-body subspace via
+  ``_ou_noise_one_water_rigid``, ensuring correct equipartition. Non-water
+  atoms (if present) use standard isotropic OU noise.
+
+  Args:
+    momentum: (N_atoms, 3) momentum array.
+    position: (N_atoms, 3) position array.
+    mass: (N_atoms,) or (N_atoms, 1) mass array.
+    gamma: Friction coefficient.
+    dt: Timestep.
+    kT: Thermal energy.
+    rng: JAX PRNGKey.
+    water_indices: (N_waters, 3) array of O, H1, H2 indices.
+
+  Returns:
+    (momentum_new, key_out).
+  """
+  c1 = jnp.exp(-gamma * dt)
+  c2 = jnp.sqrt(1 - c1**2)
+
+  key, split = jax.random.split(rng)
+  noise_std = jax.random.normal(split, momentum.shape, dtype=momentum.dtype)
+  p_ou = c1 * momentum + c2 * jnp.sqrt(mass * kT) * noise_std
+
+  idx = water_indices
+  mass_flat = mass.reshape(-1)
+  p_water_in = jnp.stack([momentum[idx[:, 0]], momentum[idx[:, 1]], momentum[idx[:, 2]]], axis=1)
+  r_water = jnp.stack([position[idx[:, 0]], position[idx[:, 1]], position[idx[:, 2]]], axis=1)
+  m_water = jnp.stack([mass_flat[idx[:, 0]], mass_flat[idx[:, 1]], mass_flat[idx[:, 2]]], axis=1)
+
+  def step_one_water(carry, inputs):
+    key_w = carry
+    r_w, m_w, p_w = inputs
+    p_rigid = _project_one_water_momentum_rigid(p_w, r_w, m_w)
+    p_c1 = c1 * p_rigid
+    noise_w, key_w = _ou_noise_one_water_rigid(key_w, r_w, m_w, kT)
+    p_out = p_c1 + c2 * noise_w
+    return key_w, p_out
+
+  key, p_water_out = jax.lax.scan(
+    step_one_water, key, (r_water, m_water, p_water_in)
+  )
+
+  idx_flat = idx.reshape(-1)
+  p_out = p_ou.at[idx_flat].set(p_water_out.reshape(-1, 3))
+  return p_out, key
 
 
 def _langevin_settle_vel(

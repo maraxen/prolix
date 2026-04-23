@@ -1,8 +1,8 @@
 """Temperature control validation for SETTLE with Langevin dynamics.
 
-NOTE: These tests document an attempted approach (integrator reordering + post-O projection)
-that failed to control temperature at dt >= 1.0 fs. The tests are marked as skipped and
-remain as placeholders for future temperature control solutions. See Phase 2 report for details.
+Phase 2C: Constrained-subspace OU thermostat implementation.
+Tests validate that noise is sampled in the 6D rigid-body subspace, providing
+correct equipartition across the 6*N_w-3 translational and rotational DOF.
 """
 from __future__ import annotations
 import jax
@@ -46,17 +46,11 @@ def _mean_rigid_t_after_burn(*, dt_fs: float, n_waters: int, seed: int, steps: i
       temps.append(temp)
   return float(np.mean(temps)) if temps else float("nan")
 
-@pytest.mark.skip(
-  reason="Attempted approach failed: reordering + Gate 2 produced 20,000+ K temperature runaway. "
-         "Original integrator order restored. Temperature control requires alternative strategy."
-)
 def test_temperature_dt1fs_near_target() -> None:
   """dt=1.0 fs, 100 ps: mean T within 5K of 300K target.
 
-  SKIPPED: This test documents a failed approach. The integrator reordering (moving SETTLE_vel
-  before O-step) combined with post-O projection (Gate 2) produced catastrophic temperature
-  runaway (20,000+ K instead of 300 K). This test remains as documentation for why the
-  reordering approach doesn't work and to prevent future attempts along the same path.
+  Validates constrained-subspace OU thermostat: noise is sampled directly in
+  the 6D rigid-body subspace for each water, ensuring correct equipartition.
   """
   n_waters = 2
   dt_fs = 1.0
@@ -67,16 +61,11 @@ def test_temperature_dt1fs_near_target() -> None:
   mean_t = _mean_rigid_t_after_burn(dt_fs=dt_fs, n_waters=n_waters, seed=seed, steps=steps, burn=burn)
   assert abs(mean_t - 300.0) < 5.0, f"dt={dt_fs} fs: T={mean_t:.1f} K, expected 300 ± 5 K"
 
-@pytest.mark.skip(
-  reason="Attempted approach failed: reordering + Gate 2 produced 20,000+ K temperature runaway. "
-         "Original integrator order restored. Temperature control requires alternative strategy."
-)
 def test_temperature_dt2fs_near_target() -> None:
   """dt=2.0 fs, 100 ps: mean T within 5K of 300K target.
 
-  SKIPPED: See test_temperature_dt1fs_near_target for explanation. This test fails even more
-  severely at larger timesteps (20,000+ K), confirming the reordering approach is fundamentally
-  incompatible with SETTLE constraints in the BAOAB integrator.
+  Tests constrained-subspace thermostat at larger timestep (dt=2fs),
+  where temperature control failures would appear most dramatically.
   """
   n_waters = 2
   dt_fs = 2.0
@@ -87,15 +76,11 @@ def test_temperature_dt2fs_near_target() -> None:
   mean_t = _mean_rigid_t_after_burn(dt_fs=dt_fs, n_waters=n_waters, seed=seed, steps=steps, burn=burn)
   assert abs(mean_t - 300.0) < 5.0, f"dt={dt_fs} fs: T={mean_t:.1f} K, expected 300 ± 5 K"
 
-@pytest.mark.skip(
-  reason="Equipartition test cannot pass with broken temperature control. "
-         "Skipped until temperature control approach is fixed."
-)
 def test_equipartition_chi2() -> None:
   """Equipartition: velocity distribution matches Maxwell-Boltzmann (KS p > 0.05).
 
-  SKIPPED: Cannot validate equipartition when system temperature is 20,000+ K instead of 300 K.
-  This test will pass once a working temperature control approach is implemented.
+  Validates that the constrained OU noise produces a velocity distribution
+  consistent with the target Maxwell-Boltzmann ensemble.
   """
   jax.config.update("jax_enable_x64", True)
   n_waters = 2
