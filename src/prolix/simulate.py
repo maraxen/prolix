@@ -95,6 +95,9 @@ class SimulationSpec:
   remove_linear_com_momentum: bool = False
   # Adaptive RATTLE convergence tolerance (velocity units, Å/ps); None = fixed n_iters=10
   settle_velocity_tol: float | None = None
+  # Custom constraint algorithm (ConstraintAlgorithm instance). If set, overrides automatic
+  # constraint building from rigid_water and constrained bonds. Escape hatch for advanced use.
+  constraint_algorithm: object | None = None  # ConstraintAlgorithm type hint avoided to prevent circular import
 
   def __post_init__(self):
     if self.remove_linear_com_momentum and not self.rigid_water:
@@ -828,43 +831,41 @@ def run_simulation(
   constrained_bonds = getattr(protein_system, "constrained_bonds", None)
   constrained_lengths = getattr(protein_system, "constrained_bond_lengths", None)
 
-  if spec.rigid_water and water_indices is not None:
-    from prolix.physics.settle import settle_langevin
+  from prolix.physics.constraints import make_constraint
+  from prolix.physics.settle import langevin_with_constraints
 
-    constraints = None
-    if (
-      constrained_bonds is not None and constrained_lengths is not None and len(constrained_bonds) > 0
-    ):
-      constraints = (jnp.array(constrained_bonds), jnp.array(constrained_lengths))
-
-    init_fn, apply_fn = settle_langevin(
-      integrator_energy_fn,
-      shift_fn,
-      dt=dt,
-      kT=kT,
-      gamma=gamma_reduced,
-      mass=masses,
-      water_indices=water_indices,
-      box=spec.box,
-      constraints=constraints,
-      remove_linear_com_momentum=bool(spec.remove_linear_com_momentum),
+  # Build constraint algorithm from topology (returns NullConstraint if no constraints)
+  constraint = (
+    spec.constraint_algorithm or make_constraint(
+      water_indices=(water_indices if spec.rigid_water else None),
+      constraint_pairs=(
+        jnp.array(constrained_bonds)
+        if (constrained_bonds is not None and len(constrained_bonds) > 0)
+        else None
+      ),
+      constraint_lengths=(
+        jnp.array(constrained_lengths)
+        if (constrained_lengths is not None and len(constrained_lengths) > 0)
+        else None
+      ),
       settle_velocity_tol=spec.settle_velocity_tol,
     )
-  elif (
-    constrained_bonds is not None and constrained_lengths is not None and len(constrained_bonds) > 0
-  ):
-    init_fn, apply_fn = physics_simulate.rattle_langevin(
-      integrator_energy_fn,
-      shift_fn,
-      dt=dt,
-      kT=kT,
-      gamma=gamma_reduced,
-      constraints=(jnp.array(constrained_bonds), jnp.array(constrained_lengths)),
-    )
-  else:
-    init_fn, apply_fn = jax_md_simulate.nvt_langevin(
-      integrator_energy_fn, shift_fn, dt=dt, kT=kT, gamma=gamma_reduced
-    )
+  )
+
+  # Single integrator with injected constraints
+  init_fn, apply_fn = langevin_with_constraints(
+    integrator_energy_fn,
+    shift_fn,
+    dt=dt,
+    kT=kT,
+    gamma=gamma_reduced,
+    mass=masses,
+    constraint=constraint,
+    box=spec.box,
+    remove_linear_com_momentum=bool(spec.remove_linear_com_momentum),
+    project_ou_momentum_rigid=(spec.rigid_water and water_indices is not None),
+    water_indices=water_indices if spec.rigid_water else None,
+  )
 
   # Initialize state from minimized positions with per-atom masses
   # Pass neighbor= to init_fn if using neighbor lists (jax_md native support)

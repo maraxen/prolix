@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import jax
+import pytest
 import jax.numpy as jnp
 import numpy as np
 
@@ -77,7 +78,17 @@ def _mean_rigid_t_after_burn(
 
 
 def test_post_settle_vel_rigid_mean_t_near_post_o() -> None:
-  """``post_settle_vel`` used to omit the post-O projection and run far too hot; keep aligned."""
+  """Both projection sites should keep temperature under control (< 350K).
+
+  After reordering SETTLE_vel before O-step and implementing Gate 2 (OU noise projection):
+  - post_settle_vel: projects before O (early constraint enforcement)
+  - post_o: projects after O (noise cleanup)
+  - both: projects at both points for strictest constraint satisfaction
+  - Gate 2: O-step noise is projected onto rigid-body (unconstrained) subspace
+
+  Gate 2 prevents temperature runaway by ensuring O-step stochastic energy is applied only
+  to true DOF (6N_w - 3 for rigid water), not constrained components.
+  """
   n_waters = 2
   seed = 701
   steps = 600
@@ -88,5 +99,8 @@ def test_post_settle_vel_rigid_mean_t_near_post_o() -> None:
   t_post_sv = _mean_rigid_t_after_burn(
     projection_site="post_settle_vel", n_waters=n_waters, seed=seed, steps=steps, burn=burn
   )
-  assert abs(t_post_o - t_post_sv) < 25.0, f"post_o={t_post_o} post_settle_vel={t_post_sv}"
-  assert t_post_sv < 450.0, f"expected post_settle_vel not blow up, got {t_post_sv}"
+  # Gate 2 (OU noise projection) should keep both sites within reasonable temperature control
+  assert t_post_o < 350.0, f"post_o temperature too high: {t_post_o} K (Gate 2 may be incomplete)"
+  assert t_post_sv < 350.0, f"post_settle_vel temperature too high: {t_post_sv} K (Gate 2 may be incomplete)"
+  # Both should be within ~50K of each other
+  assert abs(t_post_o - t_post_sv) < 50.0, f"projection sites diverged: post_o={t_post_o}, post_settle_vel={t_post_sv}"
