@@ -880,13 +880,10 @@ def _langevin_step_o_constrained(
   def step_one_water(carry, inputs):
     key_w = carry
     r_w, m_w, p_w = inputs
-    # Standard OU: p_new = c1*p_old + c2*noise
-    # But only in the constrained subspace
-    noise_w, key_w = _ou_noise_one_water_rigid(key_w, r_w, m_w, kT)
-    # Project incoming momentum to constrained subspace for consistency
     p_rigid = _project_one_water_momentum_rigid(p_w, r_w, m_w)
-    # Apply OU update
-    p_out = c1 * p_rigid + c2 * noise_w
+    p_c1 = c1 * p_rigid
+    noise_w, key_w = _ou_noise_one_water_rigid(key_w, r_w, m_w, kT)
+    p_out = p_c1 + c2 * noise_w
     return key_w, p_out
 
   key, p_water_out = jax.lax.scan(
