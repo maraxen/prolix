@@ -529,8 +529,8 @@ def make_energy_fn(
         # Reciprocal space correction for excluded/scaled pairs
         if exclusion_spec is not None:
           e_recip = e_recip + pme.excluded_pme_correction(
-              r, charges_arr, atom_mask_elec, 
-              exclusion_spec.idx_12_13, exclusion_spec.idx_14, 
+              r, charges_arr, atom_mask_elec,
+              exclusion_spec.idx_12_13, exclusion_spec.idx_14,
               exclusion_spec.scale_14_elec, float(pme_alpha), displacement_fn
           )
       else:

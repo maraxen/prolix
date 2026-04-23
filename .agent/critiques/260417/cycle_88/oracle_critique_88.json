@@ -1,0 +1,30 @@
+{
+  "cycle": 88,
+  "date": "2026-04-17",
+  "target": "explicit_solvent_validation_comprehensive.md",
+  "target_version": "2.2",
+  "verdict": "APPROVE",
+  "confidence": "high",
+  "strategic_assessment": "v2.2 is a clean, evidence-grounded close-out of both prior REVISE cycles. Every Cycle 86 warning and every Cycle 87 concern — including the critical marker-mismatch blocker — is resolved against the source of truth. Internal consistency on critical path (5 weeks elapsed), tiered force-RMSE bounds (3.0 bulk / 0.5 protein subset / 0.1 anchor-informational), and DOF-aware temperature gates (±10% baseline / ±1.67% stretch) all hold up. No hallucinated nomenclature, no invented files, no physics-wrong invariances. Safe to dispatch.",
+  "concerns": [
+    {
+      "area": "P2a DOF count nuance",
+      "severity": "suggestion",
+      "issue": "P2a tolerance derivation states 'for N=4 atoms (≈9 DOF after COM removal)', but test_explicit_slow_validation.py:99-150 does not explicitly remove COM motion, and jax_md's nvt_langevin does not conserve COM. Strictly 3N = 12 DOF; per-sample σ ≈ √(2/12) ≈ 41% instead of √(2/9) ≈ 47%. ±10% gate still clears ~0.5σ either way.",
+      "recommendation": "Either add 'assuming COM-motion subtraction in the kinetic thermometer' caveat, or redo math with 12 DOF. Either resolution keeps the ±10% bound."
+    },
+    {
+      "area": "P2a integrator-equivalence phrasing",
+      "severity": "suggestion",
+      "issue": "P2a frames prolix jax_md.simulate.nvt_langevin as 'BAOAB-like' and OpenMM LangevinMiddleIntegrator as strict BAOAB. Slight noise-placement differences exist but don't threaten the ±10% gate.",
+      "recommendation": "Soften to 'both use middle-splitting-style stochastic Verlet with matched γ and T_target; small noise-placement differences are absorbed by the ±10% ensemble gate.'"
+    },
+    {
+      "area": "P1b openmm_comparison_protocol.md create vs update",
+      "severity": "suggestion",
+      "issue": "P1b says 'Document policy + procedure in docs/source/explicit_solvent/openmm_comparison_protocol.md' — but the file already exists and already documents PME α unit conversion.",
+      "recommendation": "Rephrase to 'Update the existing docs/source/explicit_solvent/openmm_comparison_protocol.md with the P1b change-management procedure'."
+    }
+  ],
+  "approved_for_execution": true
+}

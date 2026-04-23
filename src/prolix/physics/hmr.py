@@ -21,7 +21,6 @@ from typing import NamedTuple
 
 import jax.numpy as jnp
 
-
 # ===========================================================================
 # Configuration
 # ===========================================================================
@@ -44,21 +43,21 @@ class HMRConfig(NamedTuple):
 
 # Standard atomic masses (amu)
 STANDARD_MASSES = {
-    'H': 1.008,
-    'C': 12.011,
-    'N': 14.007,
-    'O': 15.999,
-    'S': 32.065,
-    'P': 30.974,
-    'F': 18.998,
-    'Cl': 35.453,
-    'Fe': 55.845,
-    'Zn': 65.38,
-    'Ca': 40.078,
-    'Mg': 24.305,
-    'Na': 22.990,
-    'K': 39.098,
-    'Se': 78.971,
+    "H": 1.008,
+    "C": 12.011,
+    "N": 14.007,
+    "O": 15.999,
+    "S": 32.065,
+    "P": 30.974,
+    "F": 18.998,
+    "Cl": 35.453,
+    "Fe": 55.845,
+    "Zn": 65.38,
+    "Ca": 40.078,
+    "Mg": 24.305,
+    "Na": 22.990,
+    "K": 39.098,
+    "Se": 78.971,
 }
 
 
@@ -76,11 +75,10 @@ def is_hydrogen(
         (N,) boolean array: True for hydrogens.
     """
     if elements is not None:
-        return jnp.array([e.strip().upper() in ('H', 'D') for e in elements])
-    elif masses is not None:
+        return jnp.array([e.strip().upper() in ("H", "D") for e in elements])
+    if masses is not None:
         return masses < 1.1
-    else:
-        raise ValueError("Must provide either elements or masses")
+    raise ValueError("Must provide either elements or masses")
 
 
 def repartition_masses(
@@ -190,10 +188,9 @@ def compute_hmr_timestep(config: HMRConfig | None = None) -> float:
 
     if config.target_h_mass >= 3.0:
         return 0.004  # 4 fs with 3× hydrogen mass
-    elif config.target_h_mass >= 2.0:
+    if config.target_h_mass >= 2.0:
         return 0.003  # 3 fs with 2× hydrogen mass
-    else:
-        return 0.002  # Conservative
+    return 0.002  # Conservative
 
 
 def report_hmr(
@@ -218,21 +215,21 @@ def report_hmr(
     heavy_real = (~h_mask & atom_mask).astype(jnp.float32)
 
     return {
-        'n_atoms': int(jnp.sum(real)),
-        'n_hydrogen': int(jnp.sum(h_real)),
-        'n_heavy': int(jnp.sum(heavy_real)),
-        'total_mass_original': float(jnp.sum(original_masses * real)),
-        'total_mass_new': float(jnp.sum(new_masses * real)),
-        'avg_h_mass_original': float(
+        "n_atoms": int(jnp.sum(real)),
+        "n_hydrogen": int(jnp.sum(h_real)),
+        "n_heavy": int(jnp.sum(heavy_real)),
+        "total_mass_original": float(jnp.sum(original_masses * real)),
+        "total_mass_new": float(jnp.sum(new_masses * real)),
+        "avg_h_mass_original": float(
             jnp.sum(original_masses * h_real) / jnp.maximum(jnp.sum(h_real), 1)
         ),
-        'avg_h_mass_new': float(
+        "avg_h_mass_new": float(
             jnp.sum(new_masses * h_real) / jnp.maximum(jnp.sum(h_real), 1)
         ),
-        'min_heavy_mass': float(
+        "min_heavy_mass": float(
             jnp.min(jnp.where(heavy_real > 0, new_masses, jnp.float32(1e6)))
         ),
-        'mass_conserved': bool(
+        "mass_conserved": bool(
             abs(float(jnp.sum(original_masses * real) - jnp.sum(new_masses * real))) < 1e-3
         ),
     }

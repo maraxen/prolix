@@ -1,0 +1,38 @@
+{
+  "schema": "tip3p_tightening_aggregate/v2",
+  "meta": {
+    "benchmark_policy": {
+      "temperature_k": 300.0
+    },
+    "profile_id": "openmm_ref_linear_com_on",
+    "run_metadata": {
+      "git_sha": null,
+      "jax_backend": null,
+      "profile_id": "openmm_ref_linear_com_on",
+      "gamma_ps": null,
+      "projection_site": null,
+      "settle_velocity_iters": null,
+      "diagnostics_level": null,
+      "diagnostics_decimation": null,
+      "effective_integrator_config": null
+    }
+  },
+  "aggregated": [
+    {
+      "engine": "openmm",
+      "n_replicas": 3,
+      "mean_T_K_mean": 300.0,
+      "mean_T_K_pstdev_across_replicas": 0.0,
+      "per_replica_mean_T_K": [300.0, 300.0, 300.0],
+      "per_replica_std_T_K": [1.0, 1.0, 1.0]
+    },
+    {
+      "engine": "prolix",
+      "n_replicas": 3,
+      "mean_T_K_mean": 318.0,
+      "mean_T_K_pstdev_across_replicas": 0.0,
+      "per_replica_mean_T_K": [318.0, 318.0, 318.0],
+      "per_replica_std_T_K": [1.0, 1.0, 1.0]
+    }
+  ]
+}

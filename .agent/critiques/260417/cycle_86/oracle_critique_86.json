@@ -1,0 +1,72 @@
+{
+  "cycle": 86,
+  "date": "2026-04-17",
+  "target": "explicit_solvent_validation_comprehensive.md",
+  "target_version": "2.0",
+  "verdict": "REVISE",
+  "confidence": "high",
+  "strategic_assessment": "The v2.0 plan is a sound, physics-respecting reset from the hallucinated v1.x cycles and correctly identifies the real gaps (1UAO CI integration, PME policy regression, Langevin distribution-level parity, Phase 6 profile gate, SLURM wiring). However, several factual claims drift from codebase reality: a named SLURM script does not exist, a tolerance figure in P1a Option B contradicts the existing 1UAO test's tolerance, the P3 decision tree quotes thresholds not present in the gate doc, and a CI workflow proposal overlaps an existing nightly workflow. Fix these grounding issues and the plan is safe to execute.",
+  "concerns": [
+    {
+      "area": "P4a — Nonexistent SLURM script name",
+      "severity": "warning",
+      "issue": "P4a Done Criteria references bench_chignolin_explicit.slurm which does not exist. Actual explicit-solvent SLURM templates under scripts/slurm/ are bench_explicit_openmm_pi_so3.slurm, bench_chignolin_pi_so3.slurm, bench_chignolin_speed_pi_so3.slurm, bench_chignolin_accuracy_pi_so3.slurm, bench_chignolin_preemptable.slurm, bench_dhfr_preemptable.slurm, and bench_array.slurm.",
+      "recommendation": "Replace the bench_chignolin_explicit.slurm reference with bench_explicit_openmm_pi_so3.slurm for the OpenMM-vs-prolix matrix and bench_chignolin_pi_so3.slurm for the Chignolin path."
+    },
+    {
+      "area": "P1a Option B — tolerance contradicts the existing 1UAO test",
+      "severity": "warning",
+      "issue": "P1a Option B mandates ATOL <= 0.5 kcal/mol energy for a fallback Ala10+500-water system. But the existing 1UAO test asserts atol=40.0 kcal/mol to absorb a PME background shift (~39 kcal/mol for this system). Anchor 0.5 kcal/mol only applies to the two-charge minimal case. Shipping a plan with an unachievable tolerance creates a silent failure risk.",
+      "recommendation": "Align Option B tolerances with scale reality. Use force RMSE as the primary parity metric (as the 1UAO test does). Document the PME background shift per system size."
+    },
+    {
+      "area": "P3 — Fabricated decision-tree thresholds",
+      "severity": "warning",
+      "issue": "P3a presents numeric gates (scatter > 15% for N >= 5000, Morton > 10% improvement, cell_list > 20% on N=10000) attributed to spatial_sorting_profile_gate.md. The gate doc contains none of these thresholds.",
+      "recommendation": "Label the thresholds as this plan's proposal with justification, and commit to updating the gate doc as part of P3. OR drop the specific numbers and state that thresholds will be chosen after the first profile run based on measured distribution."
+    },
+    {
+      "area": "P1a — Redundancy with existing openmm-nightly.yml",
+      "severity": "warning",
+      "issue": "P1a mandates creating .github/workflows/explicit-solvent-validation.yml, but .github/workflows/openmm-nightly.yml already runs pytest -q -m openmm weekly.",
+      "recommendation": "Extend openmm-nightly.yml: add a dedicated hard-gated step running pytest tests/physics/test_explicit_solvation_parity.py -m 'integration and openmm' without continue-on-error."
+    },
+    {
+      "area": "Two SimulationSpec classes, only one has rigid_water",
+      "severity": "warning",
+      "issue": "The plan asserts SimulationSpec(rigid_water=True) but two dataclasses exist: src/prolix/simulate.py:60 (has rigid_water at L93) and src/prolix/physics/simulate.py:27 (no rigid_water). P5a runbook doesn't disambiguate. Also, §1.1 says settle_langevin lives in simulate.py; it's actually in src/prolix/physics/settle.py.",
+      "recommendation": "Add §1.1a resolving canonical SimulationSpec (prolix.simulate.SimulationSpec) with explicit import path. Correct settle_langevin location reference."
+    },
+    {
+      "area": "P2a — System size claim misrepresents existing tests",
+      "severity": "warning",
+      "issue": "P2a describes the system as '4-charge PME solvated box (~100 atoms)' and §1.3 calls existing NVE/NVT tests '(~100 atom PBC box)'. Both tests at test_explicit_slow_validation.py L44, L99 use n=4 mock charges, not solvated, not ~100 atoms.",
+      "recommendation": "Either rewrite P2a to use a genuine ~100-atom solvated system (bumping effort), or accept the 4-atom scale and relabel honestly. Remove the ~100 atom claim from §1.3."
+    },
+    {
+      "area": "P1b / P4b — Artifact path mismatches",
+      "severity": "suggestion",
+      "issue": "P1b proposes docs/source/explicit_solvent/regression_pme_config.yaml, but REGRESSION_EXPLICIT_PME already exists in tests/physics/conftest.py L140 via regression_pme_params fixture. P4b proposes docs/schemas/benchmark_run.schema.json, actual location is docs/source/explicit_solvent/schemas/benchmark_run.schema.json.",
+      "recommendation": "Keep Python dict as source of truth for PME regression. Update P4b schema path to actual location; reframe as 'extend' not 'create'."
+    },
+    {
+      "area": "P2a — Tolerance table internal inconsistency",
+      "severity": "suggestion",
+      "issue": "P2a table says 295K <= measured <= 305K (±1.67%), but §4 Success Criteria says 'within 5% mean T'.",
+      "recommendation": "Pick one consistent tolerance; ±1.67% is tight but achievable, ±5% is loose."
+    },
+    {
+      "area": "Checklist 6b — Stale checkbox state",
+      "severity": "suggestion",
+      "issue": "Outer checkbox 'C1: P1a CI Integration Path' is unchecked though sub-item '1UAO.pdb exists' is marked verified.",
+      "recommendation": "Normalize checkbox state: separate pre-verified items into their own subsection."
+    },
+    {
+      "area": "Risk register — Missing risks",
+      "severity": "suggestion",
+      "issue": "§5 does not list SimulationSpec duplication or PME background shift risks.",
+      "recommendation": "Add: (i) API ambiguity from duplicate SimulationSpec classes; (ii) PME background shift masking total-energy parity signal."
+    }
+  ],
+  "approved_for_execution": false
+}

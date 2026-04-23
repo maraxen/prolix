@@ -21,17 +21,16 @@ All intermediate arrays are (N, T) or (T, T) — never (N, N).
 
 from __future__ import annotations
 
-from functools import partial
 from typing import TYPE_CHECKING
 
 import jax
 import jax.numpy as jnp
-
 from proxide.physics import constants
 from proxide.physics.constants import COULOMB_CONSTANT
 
 if TYPE_CHECKING:
     from jax_md.util import Array
+
     from prolix.padding import PaddedSystem
 
 

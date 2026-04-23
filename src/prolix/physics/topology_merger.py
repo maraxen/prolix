@@ -7,13 +7,14 @@ intramolecular exclusions and bonded terms for water.
 
 from __future__ import annotations
 
-from typing import Any, TYPE_CHECKING
+from typing import TYPE_CHECKING
 
 import jax.numpy as jnp
 from flax import struct
 from proxide.core.containers import Protein
-from prolix.physics.water_models import WaterModelParams, WaterModelType, get_water_params
+
 from prolix.physics.neighbor_list import ExclusionSpec
+from prolix.physics.water_models import WaterModelType, get_water_params
 
 if TYPE_CHECKING:
     from prolix.physics.solvation import SolventTopology
@@ -82,9 +83,9 @@ def merge_solvated_topology(
     
     # Real atom mask from protein (handles missing atoms in PDB)
     # Use full_atom_mask (flat, matches full_coordinates) not atom_mask (N_res, 37)
-    p_mask = getattr(protein, 'full_atom_mask', None)
+    p_mask = getattr(protein, "full_atom_mask", None)
     if p_mask is None:
-        p_mask = getattr(protein, 'atom_mask', None)
+        p_mask = getattr(protein, "atom_mask", None)
     if p_mask is None:
         p_mask = jnp.ones(n_protein, dtype=bool)
     else:
@@ -111,34 +112,34 @@ def merge_solvated_topology(
         solvent_topo.epsilons
     ])
 
-    elem_ids = getattr(protein, 'element_ids', None)
+    elem_ids = getattr(protein, "element_ids", None)
     element_ids = jnp.concatenate([
         jnp.asarray(elem_ids) if elem_ids is not None else jnp.zeros(n_protein, dtype=jnp.int32),
         solvent_topo.element_ids
     ])
 
     radii = jnp.concatenate([
-        protein.radii if getattr(protein, 'radii', None) is not None else jnp.zeros(n_protein),
+        protein.radii if getattr(protein, "radii", None) is not None else jnp.zeros(n_protein),
         jnp.where(solvent_topo.is_hydrogen, 0.12, 0.15)  # Heuristic for implicit radii in solvent
     ])
 
     scaled_radii = jnp.concatenate([
-        protein.scaled_radii if getattr(protein, 'scaled_radii', None) is not None else jnp.zeros(n_protein),
+        protein.scaled_radii if getattr(protein, "scaled_radii", None) is not None else jnp.zeros(n_protein),
         jnp.where(solvent_topo.is_hydrogen, 0.12, 0.15)
     ])
 
     is_backbone = jnp.concatenate([
-        jnp.asarray(protein.is_backbone) if getattr(protein, 'is_backbone', None) is not None else jnp.zeros(n_protein, dtype=bool),
+        jnp.asarray(protein.is_backbone) if getattr(protein, "is_backbone", None) is not None else jnp.zeros(n_protein, dtype=bool),
         jnp.zeros(len(solvent_topo.charges), dtype=bool)
     ])
 
     is_hydrogen = jnp.concatenate([
-        jnp.asarray(protein.is_hydrogen) if getattr(protein, 'is_hydrogen', None) is not None else jnp.zeros(n_protein, dtype=bool),
+        jnp.asarray(protein.is_hydrogen) if getattr(protein, "is_hydrogen", None) is not None else jnp.zeros(n_protein, dtype=bool),
         solvent_topo.is_hydrogen
     ])
 
     is_heavy = jnp.concatenate([
-        jnp.asarray(protein.is_heavy) if getattr(protein, 'is_heavy', None) is not None else jnp.zeros(n_protein, dtype=bool),
+        jnp.asarray(protein.is_heavy) if getattr(protein, "is_heavy", None) is not None else jnp.zeros(n_protein, dtype=bool),
         ~solvent_topo.is_hydrogen
     ])
 
@@ -149,15 +150,15 @@ def merge_solvated_topology(
     angle_params = protein.angle_params
     
     # New bonded terms
-    proper_dihedrals = getattr(protein, 'proper_dihedrals', getattr(protein, 'dihedrals', None))
-    dihedral_params = getattr(protein, 'dihedral_params', None)
-    impropers = getattr(protein, 'impropers', None)
-    improper_params = getattr(protein, 'improper_params', None)
-    cmap_torsions = getattr(protein, 'cmap_torsions', None)
-    cmap_indices = getattr(protein, 'cmap_indices', None)
-    cmap_energy_grids = getattr(protein, 'cmap_energy', getattr(protein, 'cmap_energy_grids', None))
-    urey_bradley_bonds = getattr(protein, 'urey_bradley_bonds', None)
-    urey_bradley_params = getattr(protein, 'urey_bradley_params', None)
+    proper_dihedrals = getattr(protein, "proper_dihedrals", getattr(protein, "dihedrals", None))
+    dihedral_params = getattr(protein, "dihedral_params", None)
+    impropers = getattr(protein, "impropers", None)
+    improper_params = getattr(protein, "improper_params", None)
+    cmap_torsions = getattr(protein, "cmap_torsions", None)
+    cmap_indices = getattr(protein, "cmap_indices", None)
+    cmap_energy_grids = getattr(protein, "cmap_energy", getattr(protein, "cmap_energy_grids", None))
+    urey_bradley_bonds = getattr(protein, "urey_bradley_bonds", None)
+    urey_bradley_params = getattr(protein, "urey_bradley_params", None)
 
     # 3. Add water bonded terms
     water_indices = solvent_topo.water_indices + n_protein
@@ -165,7 +166,7 @@ def merge_solvated_topology(
     
     # O-H1 and O-H2 bonds
     water_bonds = jnp.stack([
-        water_indices[:, [0, 1]], 
+        water_indices[:, [0, 1]],
         water_indices[:, [0, 2]]
     ], axis=1).reshape(-1, 2)
     

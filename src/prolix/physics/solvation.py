@@ -3,18 +3,17 @@
 from __future__ import annotations
 
 import os
-from typing import TYPE_CHECKING
 from dataclasses import dataclass
 
 import jax.numpy as jnp
 import numpy as np
-from scipy.spatial.distance import cdist
+from flax import struct
 from jax_md import util
-from prolix.physics.water_models import WaterModelType, get_water_params
+from scipy.spatial.distance import cdist
+
 from prolix.physics.ion_params import get_ion_params
 from prolix.physics.topology_merger import MergedTopology, merge_solvated_topology
-
-from flax import struct
+from prolix.physics.water_models import WaterModelType, get_water_params
 
 Array = util.Array
 
@@ -313,7 +312,6 @@ def add_ions(
     Returns:
         New positions and a SolventTopology containing ion/water parameters.
     """
-    from prolix.physics.ion_params import get_ion_params
 
     if box_size is None and ionic_strength > 0:
         raise ValueError("box_size required for ionic_strength")
@@ -527,9 +525,9 @@ def solvate_protein(
     tiled_waters = _tile_water_box(water_box_obj, np.array(box_size))
     deduped_waters = _deduplicate_waters(tiled_waters, np.array(box_size))
     final_waters = _prune_solute_clashes(
-        deduped_waters, 
-        np.array(pos_real_centered), 
-        np.array(radii_real), 
+        deduped_waters,
+        np.array(pos_real_centered),
+        np.array(radii_real),
         model_params.water_radius
     )
     

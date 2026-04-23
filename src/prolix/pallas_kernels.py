@@ -18,9 +18,6 @@ For 5088 atoms with CHUNK=256:
 
 from __future__ import annotations
 
-import functools
-from typing import NamedTuple
-
 import jax
 import jax.numpy as jnp
 from jax import custom_vjp
@@ -28,10 +25,10 @@ from proxide.physics import constants
 
 # Re-export original Pallas Born radii kernel
 from prolix.physics.generalized_born import (
-    ALPHA_OBC, BETA_OBC, GAMMA_OBC,
-    safe_norm, f_gb,
+    ALPHA_OBC,
+    BETA_OBC,
+    GAMMA_OBC,
 )
-
 
 # =============================================================================
 # Core: Tile-based Dense GB+Coulomb (forward pass, pure JAX, no N×N)

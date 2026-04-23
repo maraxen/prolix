@@ -10,7 +10,6 @@ import jax
 import jax.numpy as jnp
 from jax_md import space
 from jax_md.util import Array
-
 from proxide.physics.constants import COULOMB_CONSTANT
 
 

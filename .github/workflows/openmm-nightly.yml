@@ -8,6 +8,45 @@ on:
     - cron: "0 6 * * 0"
 
 jobs:
+  explicit_solvent_parity:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install with OpenMM extra
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev,openmm]"
+
+      - name: Integration selector collects 1UAO parity tests
+        run: |
+          pytest --collect-only -q tests/physics/test_explicit_solvation_parity.py -m integration
+
+      - name: 1UAO solvated explicit parity (hard gate)
+        run: |
+          pytest -xvs tests/physics/test_explicit_solvation_parity.py::TestOpenMMSolvationParity -m integration
+
+      - name: Collect TIP3P Langevin box parity tests
+        run: |
+          pytest --collect-only -q tests/physics/test_explicit_langevin_tip3p_parity.py
+
+      - name: TIP3P box Langevin smoke — OpenMM + Prolix SETTLE (hard gate)
+        run: |
+          pytest -qvs tests/physics/test_explicit_langevin_tip3p_parity.py
+
+      - name: REGRESSION_EXPLICIT_PME docs export is in sync
+        run: |
+          python scripts/export_regression_pme.py --check
+
+      - name: TIP3P P2a-B2 gate tests (compare + tightening aggregate fixtures)
+        run: |
+          pytest -q tests/physics/test_tip3p_ke_gates.py
+
   openmm:
     runs-on: ubuntu-24.04
     continue-on-error: true
@@ -24,9 +63,23 @@ jobs:
           python -m pip install --upgrade pip
           pip install -e ".[dev,openmm]"
 
-      - name: Pytest openmm-marked tests
+      - name: Pytest openmm-marked tests (TIP3P module runs in explicit_solvent_parity job)
         run: |
-          pytest -q -m openmm
+          mkdir -p artifacts/l2_parity
+          pytest -q -m openmm --ignore=tests/physics/test_explicit_langevin_tip3p_parity.py
+
+      - name: Prolix Langevin P2a baseline (slow; CSV artifact)
+        run: |
+          mkdir -p artifacts/l2_parity
+          pytest -q tests/physics/test_explicit_langevin_parity.py -m slow
+
+      - name: Upload Langevin parity CSV artifacts (if produced)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: l2-langevin-parity
+          path: artifacts/l2_parity/*.csv
+          if-no-files-found: ignore
 
       - name: T0 benchmark JSON (Prolix only if OpenMM platforms missing)
         run: |

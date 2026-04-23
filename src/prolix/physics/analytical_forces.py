@@ -13,7 +13,6 @@ from typing import TYPE_CHECKING
 
 import jax
 import jax.numpy as jnp
-
 from proxide.physics import constants
 from proxide.physics.constants import COULOMB_CONSTANT
 
@@ -206,8 +205,8 @@ def gb_ace_forces_dense(
         Forces (N, 3) in kcal/mol/Å. Zero for padded atoms.
     """
     from prolix.physics.generalized_born import (
-        compute_born_radii,
         compute_ace_nonpolar_energy,
+        compute_born_radii,
         f_gb,
         safe_norm,
     )

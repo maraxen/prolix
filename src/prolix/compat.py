@@ -4,8 +4,10 @@ Deprecated: Use proxide.io.parsing.backend.parse_structure with
 OutputSpec(parameterize_md=True) instead.
 """
 from __future__ import annotations
+
 import warnings
 from typing import TYPE_CHECKING
+
 import jax.numpy as jnp
 from proxide.core.containers import Protein
 

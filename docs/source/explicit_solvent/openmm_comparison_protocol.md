@@ -19,17 +19,29 @@ Shared conventions for **Prolix vs OpenMM Reference** parity tests and benchmark
 
 ## Regression config (reference defaults)
 
-These match the minimal anchor in `tests/physics/test_openmm_explicit_anchor.py` and `tests/physics/test_pbc_end_to_end.py`:
+**Single source of truth:** `REGRESSION_EXPLICIT_PME` in `src/prolix/physics/regression_explicit_pme.py` (re-exported via the `regression_pme_params` fixture in `tests/physics/conftest.py`). The block below is **auto-generated**; do not edit it by hand.
+
+**Change management:** After editing the dict in `regression_explicit_pme.py`, run from the repo root:
+
+```bash
+python scripts/export_regression_pme.py
+```
+
+Commit the updated `openmm_comparison_protocol.md` in the same PR. CI runs `python scripts/export_regression_pme.py --check` to fail if the docs drift.
+
+<!-- REGRESSION_PME:BEGIN (auto-generated from src/prolix/physics/regression_explicit_pme.py; do not edit) -->
 
 ```python
 REGRESSION_EXPLICIT_PME = {
-    "pme_alpha_per_angstrom": 0.34,
-    "pme_grid_points": 32,  # cubic grid nx=ny=nz
-    "cutoff_angstrom": 9.0,  # two-particle tests; protein tests may use 10–12
-    "use_dispersion_correction": False,
-    "openmm_platform": "Reference",  # deterministic CPU parity
+  "pme_alpha_per_angstrom": 0.34,
+  "pme_grid_points": 32,
+  "cutoff_angstrom": 9.0,
+  "use_dispersion_correction": False,
+  "openmm_platform": "Reference"
 }
 ```
+
+<!-- REGRESSION_PME:END -->
 
 Tighten tolerances only after locking grid-spacing policy in `make_energy_fn` / `single_padded_energy` (mesh-dependent SPME error).
 
@@ -57,3 +69,5 @@ Machine-readable runs should conform to [benchmark_run.schema.json](schemas/benc
 - `tests/physics/test_solvated_explicit_integration.py`
 - `tests/physics/test_solvated_openmm_explicit_parity.py`
 - `scripts/benchmarks/openmm_langevin_temperature_stats.py` (OpenMM-only thermostat **statistics**)
+- `scripts/benchmarks/tip3p_ke_compare.py` (TIP3P rigid-water KE / thermometer diagnostics; `--jax-x64`, `--remove-cmmotion`, `--dt-fs`, `--gamma-ps`, `--verbose-samples`, replicate stats; see [tip3p_ke_x64_rerun_decision](tip3p_ke_x64_rerun_decision.md))
+- [tip3p_ke_x64_rerun_decision](tip3p_ke_x64_rerun_decision.md) (local x64 rerun matrix + gate outcomes)

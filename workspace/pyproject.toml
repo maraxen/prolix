@@ -1,0 +1,13 @@
+# UV workspace: install **prolix** from the sibling checkout; **proxide** comes from PyPI (manylinux
+# wheels for x86_64 / aarch64). Optional local ``../proxide`` is only for proxide development.
+# Deployed to ~/projects/pyproject.toml by `just push-engaging`.
+# On Engaging: cd ~/projects && uv sync --extra cuda --extra dev --package prolix
+[project]
+name = "projects-workspace"
+version = "0.0.0"
+description = "Workspace root for sibling prolix + proxide editable installs"
+requires-python = ">=3.11,<3.14"
+dependencies = []
+
+[tool.uv.workspace]
+members = ["prolix"]

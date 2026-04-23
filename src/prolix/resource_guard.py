@@ -6,9 +6,9 @@ Benchmarking note: for accurate GPU timings, synchronize with
 """
 
 import logging
-import psutil
+
 import jax
-import jax.numpy as jnp
+import psutil
 
 logger = logging.getLogger(__name__)
 

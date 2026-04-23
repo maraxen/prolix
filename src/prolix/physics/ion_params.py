@@ -9,6 +9,7 @@ All constants are in AMBER reduced units:
 from __future__ import annotations
 
 from typing import NamedTuple
+
 from prolix.physics.water_models import WaterModelType
 
 

@@ -5,11 +5,13 @@ Tests:
 2. vmap update inside lax.scan (the actual production pattern)
 3. Overflow detection across batch
 """
+import time
+
 import jax
 import jax.numpy as jnp
 import jax.tree_util as tu
-from jax_md import space, partition
-import time
+from jax_md import partition, space
+
 
 def test_batched_nl():
     B = 4

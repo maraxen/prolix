@@ -12,12 +12,13 @@ References:
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, Callable, NamedTuple
+from collections.abc import Callable
+from typing import TYPE_CHECKING, Any
 
 import jax
 import jax.numpy as jnp
 from jax import random
-from jax_md import quantity, util
+from jax_md import quantity
 
 from prolix.types import WaterIndices, WaterIndicesArray
 
@@ -114,6 +115,64 @@ def settle_positions(
   positions_constrained = positions_constrained.at[indices.hydrogen2].set(pos_h2_c)
 
   return positions_constrained
+
+
+def _skew_symmetric3(r: Array) -> Array:
+  """3×3 skew matrix ``[r]_×`` with ``[r]_× @ \\omega = r \\times \\omega``."""
+  x, y, z = r[0], r[1], r[2]
+  return jnp.array(
+    [[0.0, -z, y], [z, 0.0, -x], [-y, x, 0.0]],
+    dtype=r.dtype,
+  )
+
+
+def _project_one_water_momentum_rigid(
+  p_stack: Array,
+  r_stack: Array,
+  m_stack: Array,
+) -> Array:
+  """Mass-weighted LS fit of atomic momenta to rigid motion for one TIP3P-like triplet.
+
+  Finds ``v_com``, ``\\omega`` minimizing ``\\sum_i m_i |v_i - v_com - \\omega\\times r_{i,rel}|^2``,
+  then returns projected atomic momenta ``m_i v_i``.
+  """
+  msum = jnp.sum(m_stack)
+  eps = jnp.array(1e-30, dtype=msum.dtype)
+  com = jnp.sum(m_stack[:, None] * r_stack, axis=0) / jnp.maximum(msum, eps)
+  rrel = r_stack - com
+  v = p_stack / m_stack[:, None]
+  v_flat = v.reshape(9)
+  rows = []
+  for i in range(3):
+    rows.append(jnp.concatenate([jnp.eye(3, dtype=r_stack.dtype), -_skew_symmetric3(rrel[i])], axis=1))
+  jmat = jnp.vstack(rows)
+  m_rep = jnp.repeat(m_stack, 3)
+  g = (jmat.T * m_rep) @ jmat
+  rhs = jmat.T @ (m_rep * v_flat)
+  reg = jnp.array(1e-12, dtype=g.dtype) * (jnp.trace(g) / 6.0 + 1.0)
+  g_reg = g + reg * jnp.eye(6, dtype=g.dtype)
+  x6 = jnp.linalg.solve(g_reg, rhs)
+  v_proj = (jmat @ x6).reshape(3, 3)
+  return v_proj * m_stack[:, None]
+
+
+def project_tip3p_waters_momentum_rigid(
+  momentum: Array,
+  position: Array,
+  mass: Array,
+  water_indices: WaterIndicesArray,
+) -> Array:
+  """Project atomic momenta onto rigid-body subspace for each water (shape ``(N_w,3)`` indices)."""
+  if water_indices.shape[0] == 0:
+    return momentum
+  mass_flat = mass.reshape(-1)
+  idx = water_indices
+  p_stack = jnp.stack([momentum[idx[:, 0]], momentum[idx[:, 1]], momentum[idx[:, 2]]], axis=1)
+  r_stack = jnp.stack([position[idx[:, 0]], position[idx[:, 1]], position[idx[:, 2]]], axis=1)
+  m_stack = jnp.stack([mass_flat[idx[:, 0]], mass_flat[idx[:, 1]], mass_flat[idx[:, 2]]], axis=1)
+  p_proj = jax.vmap(_project_one_water_momentum_rigid)(p_stack, r_stack, m_stack)
+  idx_flat = idx.reshape(-1)
+  return momentum.at[idx_flat].set(p_proj.reshape(-1, 3))
 
 
 def _settle_water_batch(
@@ -320,6 +379,44 @@ def _apply_rattle_velocity_correction(
   return vel_new
 
 
+def _apply_rattle_velocity_correction_with_residual(
+  vel_curr: Array,
+  indices: WaterIndices,
+  norm_vec_oh1: Array,
+  norm_vec_oh2: Array,
+  norm_vec_h1h2: Array,
+  inv_mass_oxygen: float,
+  inv_mass_hydrogen: float,
+) -> tuple[Array, Array]:
+  """Single iteration of velocity corrections (RATTLE) with residual tracking."""
+  vel_oxygen = vel_curr[indices.oxygen]
+  vel_h1 = vel_curr[indices.hydrogen1]
+  vel_h2 = vel_curr[indices.hydrogen2]
+  rel_vel_oh1 = vel_h1 - vel_oxygen
+  rel_vel_oh2 = vel_h2 - vel_oxygen
+  rel_vel_h1h2 = vel_h2 - vel_h1
+  dot_oh1 = jnp.sum(rel_vel_oh1 * norm_vec_oh1, axis=-1)
+  dot_oh2 = jnp.sum(rel_vel_oh2 * norm_vec_oh2, axis=-1)
+  dot_h1h2 = jnp.sum(rel_vel_h1h2 * norm_vec_h1h2, axis=-1)
+  lambda_oh1 = -dot_oh1 / (inv_mass_oxygen + inv_mass_hydrogen)
+  lambda_oh2 = -dot_oh2 / (inv_mass_oxygen + inv_mass_hydrogen)
+  lambda_h1h2 = -dot_h1h2 / (2 * inv_mass_hydrogen)
+  dv_oxygen_from_oh1 = -lambda_oh1[:, None] * norm_vec_oh1 * inv_mass_oxygen
+  dv_h1_from_oh1 = lambda_oh1[:, None] * norm_vec_oh1 * inv_mass_hydrogen
+  dv_oxygen_from_oh2 = -lambda_oh2[:, None] * norm_vec_oh2 * inv_mass_oxygen
+  dv_h2_from_oh2 = lambda_oh2[:, None] * norm_vec_oh2 * inv_mass_hydrogen
+  dv_h1_from_h1h2 = -lambda_h1h2[:, None] * norm_vec_h1h2 * inv_mass_hydrogen
+  dv_h2_from_h1h2 = lambda_h1h2[:, None] * norm_vec_h1h2 * inv_mass_hydrogen
+  dv_oxygen = dv_oxygen_from_oh1 + dv_oxygen_from_oh2
+  dv_h1 = dv_h1_from_oh1 + dv_h1_from_h1h2
+  dv_h2 = dv_h2_from_oh2 + dv_h2_from_h1h2
+  vel_new = vel_curr.at[indices.oxygen].add(dv_oxygen)
+  vel_new = vel_new.at[indices.hydrogen1].add(dv_h1)
+  vel_new = vel_new.at[indices.hydrogen2].add(dv_h2)
+  residual = jnp.max(jnp.abs(jnp.stack([dot_oh1, dot_oh2, dot_h1h2])))
+  return vel_new, residual
+
+
 def settle_velocities(
   velocities: Array,
   positions_old: Array,
@@ -328,6 +425,8 @@ def settle_velocities(
   dt: float,
   mass_oxygen: float = 15.999,
   mass_hydrogen: float = 1.008,
+  n_iters: int = 10,
+  adaptive_tol: float | None = None,
 ) -> Array:
   r"""Apply velocity constraints after position SETTLE.
 
@@ -366,21 +465,43 @@ def settle_velocities(
   inv_mass_oxygen = 1.0 / mass_oxygen
   inv_mass_hydrogen = 1.0 / mass_hydrogen
 
-  # Iterate a few times for convergence
-  return jax.lax.fori_loop(
-    0,
-    10,
-    lambda _i, v: _apply_rattle_velocity_correction(
-      v,
-      indices,
-      norm_vec_oh1,
-      norm_vec_oh2,
-      norm_vec_h1h2,
-      inv_mass_oxygen,
-      inv_mass_hydrogen,
-    ),
-    velocities,
-  )
+  # Iterate a few times for convergence.
+  n_iters = max(int(n_iters), 0)
+  if adaptive_tol is None:
+    return jax.lax.fori_loop(
+      0,
+      n_iters,
+      lambda _i, v: _apply_rattle_velocity_correction(
+        v,
+        indices,
+        norm_vec_oh1,
+        norm_vec_oh2,
+        norm_vec_h1h2,
+        inv_mass_oxygen,
+        inv_mass_hydrogen,
+      ),
+      velocities,
+    )
+  else:
+    def body(carry):
+      i, vel, residual = carry
+      vel_new, res = _apply_rattle_velocity_correction_with_residual(
+        vel,
+        indices,
+        norm_vec_oh1,
+        norm_vec_oh2,
+        norm_vec_h1h2,
+        inv_mass_oxygen,
+        inv_mass_hydrogen,
+      )
+      return (i + jnp.int32(1), vel_new, res)
+    initial = (jnp.int32(0), velocities, jnp.array(jnp.inf, dtype=velocities.dtype))
+    cond = lambda carry: jnp.logical_and(
+      carry[0] < jnp.int32(n_iters),
+      carry[2] > jnp.array(adaptive_tol, dtype=velocities.dtype)
+    )
+    _, final_vel, _ = jax.lax.while_loop(cond, body, initial)
+    return final_vel
 
 
 def get_water_indices(n_protein_atoms: int, n_waters: int) -> Array:
@@ -421,6 +542,11 @@ def settle_langevin(
   mass_hydrogen: float = 1.008,
   box: Array | None = None,
   constraints: tuple[Array, Array] | None = None,
+  remove_linear_com_momentum: bool = False,
+  project_ou_momentum_rigid: bool = True,
+  projection_site: str = "post_o",
+  settle_velocity_iters: int = 10,
+  settle_velocity_tol: float | None = None,
 ):
   r"""Langevin dynamics integrator with SETTLE constraints for water.
 
@@ -436,6 +562,9 @@ def settle_langevin(
 
   Notes:
   Combines BAOAB Langevin integrator with analytical rigid water constraints.
+  After the Ornstein–Uhlenbeck step, atomic momenta are **mass-weighted projected** onto each
+  water’s rigid-body subspace (unless ``project_ou_momentum_rigid=False``), so isotropic
+  Cartesian noise does not over-drive ``6 N_w-3`` kinetic degrees of freedom.
 
   Args:
       energy_or_force_fn: System force definition.
@@ -449,11 +578,35 @@ def settle_langevin(
       m_O, m_H: Solvent masses.
       box: Periodic box dimensions.
       constraints: Optional (pairs, lengths) tuple for solute RATTLE.
+      remove_linear_com_momentum: If True, after SETTLE velocity projection subtract the
+          total center-of-mass velocity from every atom: ``p <- p - m * v_com`` with
+          ``v_com = sum(p) / sum(m)``. This matches the **linear** part of OpenMM's
+          ``CMMotionRemover`` (default frequency 1: subtract uniform ``v_com`` from all
+          velocities), but occurs at a **different** point in the BAOAB+SETTLE timestep
+          than OpenMM's integrator schedule. Use for production-style COM drift control,
+          not for claiming bitwise phase-space parity with OpenMM.
+    project_ou_momentum_rigid: If True (default), apply rigid momentum projection at the location
+      selected by ``projection_site``.
+    projection_site: Where to apply rigid momentum projection when
+      ``project_ou_momentum_rigid=True``:
+      ``post_o`` (legacy default), ``post_settle_vel``, or ``both``.
+      Isotropic OU noise is applied in Cartesian atomic space; **always** projecting once
+      immediately after the ``O`` step (using the mid-step positions) is required so rigid
+      water degrees of freedom are not over-driven. ``post_settle_vel`` / ``both`` add an
+      optional second projection after ``settle_velocities`` at the final constrained geometry.
+    settle_velocity_iters: Number of RATTLE-like velocity correction iterations in
+      ``settle_velocities``.
 
   Returns:
       (init_fn, apply_fn) pair.
   """
   force_fn = quantity.canonicalize_force(energy_or_force_fn)
+  if projection_site not in ("post_o", "post_settle_vel", "both"):
+    msg = f"invalid projection_site={projection_site!r}; expected post_o|post_settle_vel|both"
+    raise ValueError(msg)
+  if not project_ou_momentum_rigid and projection_site == "both":
+    msg = "projection_site='both' requires project_ou_momentum_rigid=True"
+    raise ValueError(msg)
 
   # If no water indices, fall back to standard Langevin
   if water_indices is None or water_indices.shape[0] == 0:
@@ -492,6 +645,12 @@ def settle_langevin(
 
     # Stochastic update (BAOAB "O" step)
     momentum, key = _langevin_step_o(momentum, state.mass, gamma, _dt, _kT, state.rng)
+    # Always project after O when rigid OU control is on: skipping this (e.g. only projecting
+    # after settle_vel) leaves full Cartesian OU noise and biases rigid kinetic energy high.
+    if project_ou_momentum_rigid:
+      momentum = project_tip3p_waters_momentum_rigid(
+        momentum, position, state.mass, water_indices
+      )
 
     position = _langevin_step_a(position, momentum, state.mass, _dt, shift_fn)
 
@@ -532,7 +691,20 @@ def settle_langevin(
       _dt,
       mass_oxygen,
       mass_hydrogen,
+      n_iters=settle_velocity_iters,
+      settle_velocity_tol=settle_velocity_tol,
     )
+    if project_ou_momentum_rigid and projection_site in ("post_settle_vel", "both"):
+      momentum = project_tip3p_waters_momentum_rigid(
+        momentum, position, state.mass, water_indices
+      )
+
+    if remove_linear_com_momentum:
+      mass_col = state.mass
+      p_tot = jnp.sum(momentum, axis=0)
+      m_tot = jnp.sum(mass_col)
+      v_com = p_tot / jnp.maximum(m_tot, jnp.array(1e-30, dtype=m_tot.dtype))
+      momentum = momentum - mass_col * v_com
 
     from prolix.physics.simulate import NVTLangevinState
 
@@ -576,10 +748,20 @@ def _langevin_settle_vel(
   dt: float,
   mass_oxygen: float,
   mass_hydrogen: float,
+  n_iters: int = 10,
+  settle_velocity_tol: float | None = None,
 ) -> Array:
   """Apply SETTLE velocity constraints and update momentum."""
   velocity = momentum / mass
   velocity = settle_velocities(
-    velocity, positions_old, positions_new, water_indices, dt, mass_oxygen, mass_hydrogen
+    velocity,
+    positions_old,
+    positions_new,
+    water_indices,
+    dt,
+    mass_oxygen,
+    mass_hydrogen,
+    n_iters=n_iters,
+    adaptive_tol=settle_velocity_tol,
   )
   return velocity * mass

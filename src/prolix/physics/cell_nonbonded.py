@@ -14,18 +14,11 @@ and contribute zero energy by construction.
 
 from __future__ import annotations
 
-from functools import partial
-from typing import TYPE_CHECKING
-
 import jax
 import jax.numpy as jnp
-import jax.lax as lax
+from jax import lax
 
-from prolix.physics.cell_list import CellList, HALF_SHELL_SHIFTS
-
-if TYPE_CHECKING:
-    pass
-
+from prolix.physics.cell_list import HALF_SHELL_SHIFTS, CellList
 
 # ===========================================================================
 # Core pair energy computation (shared by both strategies)

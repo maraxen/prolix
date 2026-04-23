@@ -18,9 +18,9 @@ import equinox as eqx
 import jax
 import jax.numpy as jnp
 from jax.scipy.special import erfc
-from jaxtyping import Array, Float, Int, Bool
-
+from jaxtyping import Array
 from proxide.physics.constants import COULOMB_CONSTANT
+
 from prolix.padding import PaddedSystem
 from prolix.physics import explicit_corrections, pbc
 from prolix.physics.pme import make_spme_energy_fn, spme_background_energy
@@ -28,6 +28,7 @@ from prolix.utils import topology
 
 if TYPE_CHECKING:
     from jax_md.util import Array
+
     from prolix.padding import PaddedSystem
 
 
@@ -243,11 +244,14 @@ def flash_explicit_total_energy(
     flash_explicit_energy (nonbonded only), this includes all bonded
     terms needed for structural integrity during energy minimization.
     """
-    from prolix.batched_energy import (
-        _bond_energy_masked, _angle_energy_masked,
-        _dihedral_energy_masked, _cmap_energy_masked,
-    )
     from jax_md import space
+
+    from prolix.batched_energy import (
+        _angle_energy_masked,
+        _bond_energy_masked,
+        _cmap_energy_masked,
+        _dihedral_energy_masked,
+    )
 
     pos = sys.positions
     if sys.box_size is not None:

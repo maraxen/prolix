@@ -66,8 +66,10 @@ def _openmm_pme_energy_forces(
   cutoff_angstrom: float,
   alpha_per_angstrom: float,
   grid: int,
+  platform_name: str,
+  use_dispersion_correction: bool,
 ) -> tuple[float, np.ndarray]:
-  """OpenMM Reference platform: energy (kcal/mol) and forces (kcal/mol/Å)."""
+  """OpenMM: energy (kcal/mol) and forces (kcal/mol/Å) on the named platform."""
   box_nm = box_angstrom / 10.0
   omm_system = openmm.System()
   omm_system.setDefaultPeriodicBoxVectors(
@@ -82,14 +84,14 @@ def _openmm_pme_energy_forces(
   nonbonded.setNonbondedMethod(openmm.NonbondedForce.PME)
   nonbonded.setCutoffDistance(cutoff_angstrom / 10.0)
   nonbonded.setPMEParameters(alpha_per_angstrom * 10.0, grid, grid, grid)
-  nonbonded.setUseDispersionCorrection(False)
+  nonbonded.setUseDispersionCorrection(bool(use_dispersion_correction))
   nonbonded.setUseSwitchingFunction(False)
   for q in charges:
     nonbonded.addParticle(q, 0.1, 0.0)
 
   omm_system.addForce(nonbonded)
   integrator = openmm.VerletIntegrator(0.001)
-  context = openmm.Context(omm_system, integrator, openmm.Platform.getPlatformByName("Reference"))
+  context = openmm.Context(omm_system, integrator, openmm.Platform.getPlatformByName(platform_name))
   pos_nm = [
     openmm.Vec3(p[0] / 10.0, p[1] / 10.0, p[2] / 10.0) for p in positions_angstrom
   ]
@@ -136,14 +138,16 @@ MAX_RMSE_FORCE = 0.1  # kcal/mol/Å
 
 
 @pytest.mark.skipif(not HAS_OPENMM, reason="OpenMM not installed")
-def test_anchor_two_particle_pme_energy_and_forces():
+def test_anchor_two_particle_pme_energy_and_forces(regression_pme_params):
   """Minimal periodic two-charge system: energy and forces vs OpenMM."""
   box_size = 30.0
   charges = [1.0, -1.0]
   positions = np.array([[5.0, 5.0, 5.0], [20.0, 5.0, 5.0]], dtype=np.float64)
-  alpha = 0.34
-  grid = 32
-  cutoff = 9.0
+  alpha = float(regression_pme_params["pme_alpha_per_angstrom"])
+  grid = int(regression_pme_params["pme_grid_points"])
+  cutoff = float(regression_pme_params["cutoff_angstrom"])
+  platform_name = str(regression_pme_params["openmm_platform"])
+  use_dispersion_correction = bool(regression_pme_params["use_dispersion_correction"])
 
   box_vec = jnp.array([box_size, box_size, box_size], dtype=jnp.float64)
 
@@ -154,6 +158,8 @@ def test_anchor_two_particle_pme_energy_and_forces():
     cutoff_angstrom=cutoff,
     alpha_per_angstrom=alpha,
     grid=grid,
+    platform_name=platform_name,
+    use_dispersion_correction=use_dispersion_correction,
   )
   jax_e, jax_f = _prolix_pme_energy_forces(
     positions_angstrom=jnp.asarray(positions),

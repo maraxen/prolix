@@ -1,7 +1,22 @@
 """Explicit solvent parity test using OpenMM for solvation.
 
-This test solvates 1UAO using OpenMM's Modeller, then compares
-energy and force values between OpenMM and Prolix for the solvated system.
+This test solvates **1UAO** (~52 residues) with TIP3P water using OpenMM's
+``Modeller``, then compares energy and forces against Prolix on the same
+geometry and parameters.
+
+**Acceptance (primary):** force RMSE ``< 3.0`` kcal/mol/Å (whole system), per
+``test_force_parity``. This is the main parity signal for large explicit-solvent
+cells where PME discretization and mesh self-terms matter.
+
+**Total potential energy:** compared with ``numpy.isclose(..., atol=40.0)`` kcal/mol.
+The absolute tolerance absorbs a **system-size-dependent PME background / mesh
+self-term shift** (order ~39 kcal/mol at the 1UAO + ~5000-water scale used here).
+Do not interpret the total-energy ATOL as a per-atom accuracy target; use the
+decomposed terms printed in ``test_energy_parity`` and the force RMSE gate for
+diagnostics.
+
+PME regression knobs are taken from ``REGRESSION_EXPLICIT_PME`` / the
+``regression_pme_params`` fixture (see ``tests/physics/conftest.py``).
 """
 
 import tempfile
@@ -45,7 +60,12 @@ def openmm_available():
 @pytest.mark.integration
 @pytest.mark.skipif(not openmm_available(), reason="OpenMM not installed")
 class TestOpenMMSolvationParity:
-  """Tests comparing Prolix explicit solvent to OpenMM Reference."""
+  """Prolix vs OpenMM explicit-solvent parity on a solvated 1UAO cell.
+
+  Uses ``regression_pme_params`` for PME grid, α, cutoff, dispersion-correction
+  flag, and OpenMM platform name. Primary gate: **force RMSE**; total energy uses
+  a wide ATOL to absorb the known PME background shift (see module docstring).
+  """
 
   def _get_prolix_params_from_omm(self, omm_system):
     """Extract physics parameters from OpenMM System into Prolix-compatible dict."""
@@ -155,6 +175,7 @@ class TestOpenMMSolvationParity:
       "alpha": alpha,
       "grid": grid,
       "cutoff": cutoff,
+      "platform": regression_pme_params["openmm_platform"],
       "protein_prolix": protein_prolix,
     }
 
@@ -170,7 +191,9 @@ class TestOpenMMSolvationParity:
     # 1. OpenMM Energy
     integrator = openmm.VerletIntegrator(0.001 * unit.picoseconds)
     context = openmm.Context(
-      data["system"], integrator, openmm.Platform.getPlatformByName("Reference")
+      data["system"],
+      integrator,
+      openmm.Platform.getPlatformByName(str(data["platform"])),
     )
     context.setPositions((data["positions"] * 0.1) * unit.nanometer)
     
@@ -252,8 +275,8 @@ class TestOpenMMSolvationParity:
     print(f"  ----------|--------|--------|-----")
     print(f"  Total     | {omm_energy:8.2f} | {jax_total:8.2f} | {jax_total-omm_energy:8.2f}")
 
-    # Allow for constant PME background shift (approx 39 kcal/mol for this system)
-    # The key is that the forces must match exactly.
+    # Allow for constant PME background shift (≈39 kcal/mol at this system size).
+    # Primary diagnostic is force RMSE in ``test_force_parity``; see module docstring.
     assert np.isclose(omm_energy, jax_total, atol=40.0)
     
   def test_force_parity(self, solvated_system_openmm):
@@ -268,7 +291,9 @@ class TestOpenMMSolvationParity:
     # 1. OpenMM Forces
     integrator = openmm.VerletIntegrator(0.001 * unit.picoseconds)
     context = openmm.Context(
-      data["system"], integrator, openmm.Platform.getPlatformByName("Reference")
+      data["system"],
+      integrator,
+      openmm.Platform.getPlatformByName(str(data["platform"])),
     )
     context.setPositions((data["positions"] * 0.1) * unit.nanometer)
     state = context.getState(getForces=True)

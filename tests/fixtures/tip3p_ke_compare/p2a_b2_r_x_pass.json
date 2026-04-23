@@ -1,0 +1,30 @@
+{
+  "schema": "tip3p_ke_compare/v1",
+  "meta": {
+    "profile_id": "openmm_ref_linear_com_on",
+    "benchmark_policy": {
+      "temperature_k": 300.0
+    }
+  },
+  "config": {
+    "temperature_k": 300.0
+  },
+  "diagnostics": [
+    {
+      "engine": "openmm",
+      "replicate_temperature": {
+        "mean": 300.0,
+        "sem": 0.5,
+        "n": 5
+      }
+    },
+    {
+      "engine": "prolix",
+      "replicate_temperature": {
+        "mean": 300.5,
+        "sem": 0.5,
+        "n": 5
+      }
+    }
+  ]
+}

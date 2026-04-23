@@ -57,6 +57,10 @@ jobs:
       - name: Install dependencies
         run: |
           uv sync --extra dev
+
+      - name: REGRESSION_EXPLICIT_PME docs export is in sync
+        run: |
+          uv run python scripts/export_regression_pme.py --check
       
       # Skip slow, integration (OpenMM-dependent), and dynamics tests in CI
       - name: Run tests

@@ -1,6 +1,6 @@
 import jax
-import jax.numpy as jnp
-from jax_md import space, partition
+from jax_md import partition, space
+
 
 def test_nl():
     N = 100
@@ -18,7 +18,7 @@ def test_nl():
             disable_cell_list=True,
             format=partition.Dense,
             capacity_multiplier=1.25,
-            dr_threshold=1.0, 
+            dr_threshold=1.0,
         )
         nbrs = neighbor_fn.allocate(R)
         print("Success! Shape:", nbrs.idx.shape)
@@ -35,7 +35,7 @@ def test_nl():
             disable_cell_list=False,
             format=partition.Dense,
             capacity_multiplier=1.25,
-            dr_threshold=1.0, 
+            dr_threshold=1.0,
         )
         nbrs = neighbor_fn.allocate(R)
         print("Success! Shape:", nbrs.idx.shape)

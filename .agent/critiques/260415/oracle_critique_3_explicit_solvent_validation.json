@@ -1,0 +1,286 @@
+{
+  "metadata": {
+    "date": "2026-04-16",
+    "cycle": 3,
+    "cycle_type": "FINAL",
+    "artifact": ".agent/docs/plans/explicit_solvent_validation_comprehensive.md",
+    "cycle_1_verdict": "REVISE",
+    "cycle_2_verdict": "ACCEPT_WITH_CONDITIONS",
+    "oracle": "Oracle (strategic technical advisor)"
+  },
+  "verdict": "APPROVE",
+  "confidence": 0.92,
+  "summary": "The explicit solvent validation plan has evolved from REVISE (Cycle 1) → ACCEPT_WITH_CONDITIONS (Cycle 2) → APPROVE (Cycle 3). All critical concerns from Cycle 1 are resolved: (1) P1a is now explicit with Option A verified (1UAO.pdb exists; test file present with @pytest.mark.integration), (2) SETTLE scalar path confirmed complete (commit 6a47281, settle_langevin function exists), (3) P2a metrics are detailed and realistic with distribution-level approach. All four Cycle 2 conditions have been incorporated into the plan: pre-execution checklist is concrete (§6b), P3/P4a decoupling is explicit in dependency graph, P2a CPU/GPU scope is bounded with <2% variance acceptance, and P5a timing granularity is documented. The revised comprehensive plan is execution-ready. Timeline is credible (5–6 weeks, 3–4 week critical path) with grounded effort estimates and clear fallback paths. No new gaps introduced by revisions. Plan maintains full alignment with Phase 3/4/6/8/9 and SETTLE integration plans. Pre-execution checklist is sufficient de-risking (4 items, all checkboxes provided).",
+  "cycle_progression": {
+    "cycle_1_findings": [
+      "P1a solvated protein test vague — existing test unclear; reuse vs new creation undefined",
+      "SETTLE scalar path status ambiguous — effort estimate hides scope",
+      "P2a metrics incomplete — tolerance policy not specified; RNG/platform handling unclear"
+    ],
+    "cycle_1_resolution": [
+      "✓ P1a clarified to Option A (existing 1UAO test, 1 week) vs Option B (new minimal test, +1 week)",
+      "✓ SETTLE status confirmed complete (commit 6a47281, settle_langevin); P1b is documentation-only",
+      "✓ P2a metrics table added (mean T 295–305K, 10 ps duration, 5 ps window, float64, distribution-level)"
+    ],
+    "cycle_2_conditions": [
+      "C1: P1a CI Integration Path — Verify 1UAO test runs locally before execution",
+      "C2: P3 Profiling vs P4a Start — Decouple profiling gate from benchmarking start",
+      "C3: P2a CPU/GPU Scope — Bound acceptable platform variance (<2% float64)",
+      "C4: P5a Start Granularity — Clarify runbook can draft once P1a direction chosen"
+    ],
+    "cycle_2_incorporation_status": [
+      "✓ C1 incorporated: §6b Pre-Execution Checklist added; 1UAO.pdb verified (found at data/pdb/1UAO.pdb)",
+      "✓ C2 incorporated: Dependency graph and timeline section rewrote P3 as independent (not blocking P4a)",
+      "✓ C3 incorporated: P2a metrics table now specifies GPU required for CI, CPU optional; <2% variance bound documented",
+      "✓ C4 incorporated: §3 Dependencies section clarifies P5a can draft Week 2 once P1a choice made"
+    ]
+  },
+  "cycle_3_verification": {
+    "codebase_fact_checks": [
+      {
+        "fact": "1UAO.pdb exists in data/pdb/",
+        "verified": true,
+        "evidence": "ls -la data/pdb/1UAO*.pdb returns -rw-r--r-- 1 marielle marielle 217080 Feb 26 07:23 data/pdb/1UAO.pdb"
+      },
+      {
+        "fact": "test_explicit_solvation_parity.py exists with 1UAO + 5000 waters",
+        "verified": true,
+        "evidence": "File found at tests/physics/test_explicit_solvation_parity.py; test class TestOpenMMSolvationParity marked with @pytest.mark.integration"
+      },
+      {
+        "fact": "SETTLE scalar path is complete (commit 6a47281)",
+        "verified": true,
+        "evidence": "git log shows commit 6a47281 'feat: Integrate SETTLE for rigid water and optimize GB NL mask gathering'; settle_langevin function exists in src/prolix/physics/settle.py:410"
+      },
+      {
+        "fact": "REGRESSION_EXPLICIT_PME fixture exists in conftest.py",
+        "verified": true,
+        "evidence": "tests/physics/conftest.py lines 140–152 define REGRESSION_EXPLICIT_PME dict with pme_alpha_per_angstrom=0.34, pme_grid_points=32, cutoff_angstrom=9.0"
+      },
+      {
+        "fact": "P1b already has extractable regression config",
+        "verified": true,
+        "evidence": "conftest.py REGRESSION_EXPLICIT_PME is centralized and reusable; P1b work is creating YAML wrapper and CI gate (2–3 days realistic)"
+      }
+    ],
+    "execution_readiness_assessment": {
+      "pre_execution_checklist": {
+        "status": "CONCRETE AND SUFFICIENT",
+        "location": "§6b Pre-Execution Validation Checklist",
+        "items": [
+          {
+            "id": "C1",
+            "title": "P1a CI Integration Path",
+            "criteria": [
+              "data/pdb/1UAO.pdb file exists (VERIFIED: ✅)",
+              "Local test run: pytest tests/physics/test_explicit_solvation_parity.py::test_energy_parity -m openmm",
+              "Confirm markers: @pytest.mark.integration @pytest.mark.openmm present",
+              "Go decision: If test passes → P1a Option A ready (1 week); if fails → debug or fallback to Option B"
+            ],
+            "assessment": "Concrete. Developer can execute immediately. 1UAO.pdb is verified; test file exists. OpenMM optional dep installation is the only variable (should be straightforward on target platform)."
+          },
+          {
+            "id": "C2",
+            "title": "Decouple P3 & P4a",
+            "criteria": [
+              "Updated plan reflects decoupling (yes, done in §3 Dependencies & Sequencing)",
+              "Team agrees: Benchmarking is independent of optimization gate",
+              "P3 outcome may trigger future optimization work (Phase 6+); does not block P4a"
+            ],
+            "assessment": "Concrete. P3/P4a independence is explicitly shown in mermaid graph (Section 3). Timeline updated to show P4a starting Week 3 regardless of P3 outcome. No ambiguity."
+          },
+          {
+            "id": "C3",
+            "title": "P2a CPU/GPU Scope",
+            "criteria": [
+              "Decision: GPU required for CI; CPU optional for local dev",
+              "Variance bound: Accept <2% float64 platform differences",
+              "Document in test docstring if GPU vs. CPU shows variance"
+            ],
+            "assessment": "Concrete. Metrics table (§2 Phase P2, P2a subsection) specifies GPU required for CI, CPU optional. <2% tolerance is documented. Clear acceptance criteria."
+          },
+          {
+            "id": "C4",
+            "title": "P5a Start Condition",
+            "criteria": [
+              "Updated plan shows P5a can draft by Week 2 (parallel with P1a execution)",
+              "Runbook will reference 1UAO or Ala10 example based on P1a outcome"
+            ],
+            "assessment": "Concrete. §3 Dependencies section clarifies P5a drafting timeline. Runbook example choice is deferred to P1a outcome (Option A → 1UAO; Option B → Ala10). No ambiguity."
+          }
+        ],
+        "de_risking_sufficiency": "HIGH. Checklist covers all four Cycle 2 conditional items. Each item has concrete acceptance criteria. Developer can pick up checklist and begin execution. 1UAO availability is verified; test infrastructure is in place. OpenMM CI integration is the only execution risk (unknown effort), but plan accommodates fallback (Option B) if OpenMM setup is slower than expected."
+      },
+      "timeline_credibility": {
+        "verdict": "REALISTIC and GROUNDED",
+        "critical_path": "P1a (1 wk) → P1b (3 days overlap) → P5a (1 wk) → P5b (1 wk) = 3.4 weeks elapsed + buffer = 4–5 weeks realistic",
+        "total_project_time": "5–6 weeks (P2a 2–3 weeks, P3 1 week run in parallel; non-blocking)",
+        "fallback_scenario": "If P1a CI setup + 1UAO test execution requires debugging (Option B pathway): +1 week → 6–7 weeks total. Plan accommodates this; not a surprise.",
+        "effort_estimates_assessment": [
+          {
+            "phase": "P1a",
+            "estimate": "1 week (existing test); +1 week (new test fallback)",
+            "assessment": "GROUNDED. Test file and PDB exist. Work is verification + documentation + CI gating. Fallback (Ala10 + 500 waters minimal test) is straightforward (scaffold + fixture). Both 1-week estimates are credible."
+          },
+          {
+            "phase": "P1b",
+            "estimate": "2–3 days",
+            "assessment": "REALISTIC. Regression config already exists (REGRESSION_EXPLICIT_PME in conftest.py). Work is: (1) create regression_pme_config.yaml wrapper, (2) update tests to load it, (3) add CI gate. Low implementation risk."
+          },
+          {
+            "phase": "P2a",
+            "estimate": "2–3 weeks",
+            "assessment": "CREDIBLE. Metrics table is specific and realistic (10 ps duration, 5 ps sampling window, mean T tolerance ±1.67%). Test infrastructure exists (NVE/NVT tests already in repo). New work is integrating Langevin integrator, logging, and statistical comparison. Distribution-level approach avoids RNG matching complexity. 2–3 weeks is appropriate; could slip 1 week if platform testing diverges."
+          },
+          {
+            "phase": "P3",
+            "estimate": "1 week",
+            "assessment": "GROUNDED. Profiling gate doc already exists (spatial_sorting_profile_gate.md). Work is executing profiling artifact (1–2 days), generating JSON report (1 day), executing decision tree (2–3 days). No code implementation required. 1 week is realistic."
+          },
+          {
+            "phase": "P4a",
+            "estimate": "1–2 weeks",
+            "assessment": "CREDIBLE. SLURM templates exist (scripts/slurm/bench_*.slurm). Work is parameterization (1 day), CI integration (2–3 days), documentation (2–3 days). Templates are straightforward; not a new implementation effort."
+          },
+          {
+            "phase": "P5a",
+            "estimate": "1 week",
+            "assessment": "REALISTIC. Runbook is text document. Work is drafting happy path (2–3 days), adding code examples (2 days), local validation (2 days). Examples can reuse existing test fixtures (low implementation risk)."
+          }
+        ],
+        "parallelization_realism": "CORRECT. P1/P2/P3 can overlap (P1a 1–2 weeks, P2a 2–3 weeks run in parallel). P4a independent (no P3 outcome dependency). P5a sequential after P1 (correct; must know which test was used for example). Dependency graph is accurate."
+      }
+    }
+  },
+  "cycle_1_concerns_final_resolution": {
+    "concern_p1a_solvated_protein_clarity": {
+      "cycle_1_status": "VAGUE",
+      "cycle_1_issue": "Plan mentioned creating new solvated protein test but was unclear whether to reuse existing test or write new artifact.",
+      "cycle_2_clarification": "Distinguished Option A (existing 1UAO test, 1 week) vs Option B (new minimal test, +1 week). Pre-execution validation checklist added to verify 1UAO.pdb availability.",
+      "cycle_3_verification": "1UAO.pdb confirmed in repo (data/pdb/1UAO.pdb, 217KB, committed Feb 26). Test file exists (test_explicit_solvation_parity.py, 1UAO + 5000 waters). @pytest.mark.integration present. Plan now EXPLICIT: pursue Option A (1 week) as primary path; fallback to Option B if 1UAO test fails locally.",
+      "final_status": "✅ RESOLVED and VERIFIED"
+    },
+    "concern_settle_scalar_path_status": {
+      "cycle_1_status": "AMBIGUOUS",
+      "cycle_1_issue": "Unclear whether settle_rattle_langevin is merged; P1b effort estimate (2–3 days) may be hiding broader scope.",
+      "cycle_2_clarification": "Verified: SETTLE scalar path is complete (commit 6a47281, 'feat: Integrate SETTLE for rigid water and optimize GB NL mask gathering'). Function is settle_langevin (not settle_rattle_langevin). P1b is purely documentation (extract PME config, create CI gate).",
+      "cycle_3_verification": "settle_langevin function confirmed in src/prolix/physics/settle.py:410. REGRESSION_EXPLICIT_PME fixture confirmed in tests/physics/conftest.py. P1b work scope is: (1) create regression_pme_config.yaml, (2) update tests to load it, (3) add CI gate. 2–3 days estimate is REALISTIC. No implementation blocker; pure documentation/tooling work.",
+      "final_status": "✅ RESOLVED and VERIFIED"
+    },
+    "concern_p2a_metric_incompleteness": {
+      "cycle_1_status": "INCOMPLETE",
+      "cycle_1_issue": "Plan says 'mean T within 5%' without specifying: system size, duration, precision, sampling window, platform coverage, RNG strategy.",
+      "cycle_2_clarification": "Detailed metrics table added (§2 Phase P2, P2a subsection): 4-charge PME solvated box (~100 atoms), 10 ps total, 5 ps sampling window (post-equilibration), temperature tolerance 295–305K (±1.67% at 300K), float64 precision, GPU required for CI (CPU optional), distribution-level comparison (mean T, variance) NOT trajectory matching.",
+      "cycle_3_verification": "Metrics table is comprehensive and realistic. System size (~100 atoms) is representative but CI-friendly. Duration (10 ps = 500 steps × 20 fs) is reasonable for CI runtime (~2–3 min per run). Sampling window (5 ps) is standard for thermostat equilibration. Temperature tolerance (±1.67%) is well-calibrated for Langevin integrators. Distribution-level approach avoids RNG matching complexity while ensuring integrator correctness. CPU/GPU scope is bounded (GPU required for CI, CPU optional for dev; <2% variance acceptable).",
+      "final_status": "✅ RESOLVED and VERIFIED"
+    }
+  },
+  "cycle_2_conditions_final_incorporation": {
+    "c1_p1a_ci_integration_path": {
+      "cycle_2_issue": "Plan assumes 'add test to CI gate: weekly run with OpenMM dep' but does not specify CI workflow type, OpenMM installation, or 1UAO.pdb commit strategy.",
+      "cycle_2_recommendation": "Create CI integration checklist before execution.",
+      "cycle_3_status": "✅ INCORPORATED",
+      "evidence": "§6b Pre-Execution Validation Checklist, item C1, specifies: (1) Verify 1UAO.pdb exists (VERIFIED: found), (2) Run test locally with pytest -m openmm, (3) Confirm markers (@pytest.mark.integration @pytest.mark.openmm), (4) Go/No-Go decision. If test passes locally → Option A ready (1 week); if fails → debug or fallback to Option B.",
+      "residual_risk": "LOW. Checklist is concrete. 1UAO.pdb is verified. OpenMM optional dep installation is the only variable; straightforward on standard environments. If OpenMM setup is complex on target platform, fallback (Option B) adds 1 week, which plan accommodates."
+    },
+    "c2_p3_profiling_incorrectly_gated": {
+      "cycle_2_issue": "Timeline shows 'P4a (if P3 gates optimization)' implying P4a waits for P3, but profiling is a *measurement tool* for optimization decisions, not a *prerequisite for benchmarking*. Artificial sequencing delays P4a.",
+      "cycle_2_recommendation": "Decouple P3 and P4a. P3 runs independently (weeks 2–3), produces recommendation. P4a starts week 3 *regardless* of P3 outcome.",
+      "cycle_3_status": "✅ INCORPORATED",
+      "evidence": "§3 Dependencies & Sequencing (mermaid graph and text) now clearly shows: P3 outputs a decision ('Morton needed? Yes/No'); P4a (SLURM wiring, smoke test, schema) is independent and starts Week 3 regardless. Timeline Section 6 (Table and Critical Path Analysis) explicitly states: 'P3 (profiling gate; decision only) informs whether Morton is needed, NOT whether benchmarking is needed. P4a should proceed regardless.'",
+      "residual_risk": "NONE. Decoupling is explicit in updated plan. No ambiguity."
+    },
+    "c3_p2a_cpu_gpu_scope_vague": {
+      "cycle_2_issue": "Plan says 'CPU + GPU (validate on both if feasible)' without specifying: what 'feasible' means, expected variance, acceptance criteria if CPU/GPU diverge.",
+      "cycle_2_recommendation": "Add clarification: GPU required for CI; CPU optional for dev. Bound variance <2% in float64. If diverge >5%, investigate and document.",
+      "cycle_3_status": "✅ INCORPORATED",
+      "evidence": "P2a metrics table (§2 Phase P2, P2a subsection) now specifies: 'GPU (NVIDIA) required for CI; CPU testing optional (local dev sandbox). Expect <2% platform variance in float64. If diverge >5%, investigate precision/scheduler differences; document as known variance in protocol.' Clear, bounded, executable criteria.",
+      "residual_risk": "NONE. Scope is explicit. Acceptable variance is bounded. Decision criteria for failure cases are documented."
+    },
+    "c4_p5a_start_granularity": {
+      "cycle_2_issue": "Plan says P5a requires 'P1a + P1b complete' but P5a could start once P1a *direction* is chosen (Option A/B), even if test still executing.",
+      "cycle_2_recommendation": "Optional refinement: Document P5a can begin once P1a direction chosen, with final sign-off after P1a test passing + P1b complete.",
+      "cycle_3_status": "✅ INCORPORATED (low priority, but clarified)",
+      "evidence": "§3 Dependencies & Sequencing now states: 'P5a (runbook update): Start Condition — Can begin once P1a choice is made (not blocked by P1a completion). Drafting can start Week 2. Final P5a completion requires P1a test passing + P1b config file.' This is a minor optimization but correctly documented.",
+      "residual_risk": "NONE. Timing is now explicit. No impact on critical path (overlap is <1 week)."
+    }
+  },
+  "plan_consistency_and_alignment": {
+    "vs_phase_3_4_6_8_9_approved_plan": {
+      "status": "ALIGNED (no contradictions)",
+      "notes": "Plan correctly references prior Phase 3/4/6/8/9 plan as superseded by this comprehensive plan. Phase 6 profiling gate is integrated into P3 (with decision tree inlined). Phase 8 benchmarking is reflected in P4a/P4b. Phase 9 runbook updates are P5a. No new constraints introduced; inheritance is clean."
+    },
+    "vs_settle_integration_plan": {
+      "status": "ALIGNED (no contradictions)",
+      "notes": "SETTLE scalar path (commit 6a47281) is correctly marked as complete. Plan does not propose reimplementing SETTLE. P1b is correctly identified as documentation-only (extract PME config, CI gate). No scope creep."
+    },
+    "vs_current_implementation_snapshot": {
+      "status": "ALIGNED (no contradictions)",
+      "notes": "Plan correctly reflects current state: PME + NL + SETTLE + RATTLE integrated; RF/DSF opt-in; cell-list not default; no Morton ordering yet. All claims match codebase facts verified in Cycle 3."
+    }
+  },
+  "risk_assessment_final": {
+    "risks_closed_by_cycle_revisions": [
+      "P1a clarity — Option A/B fork is now explicit with decision point (verify 1UAO.pdb)",
+      "SETTLE implementation scope — Verified complete; P1b is documentation-only (no hidden work)",
+      "P2a metric underspecification — Detailed tolerance table + distribution-level approach eliminates RNG matching complexity",
+      "P3/P4a artificial coupling — Decoupled in timeline; P4a independent (profiling informs optimization, not benchmarking)",
+      "P2a CPU/GPU ambiguity — Bounded platform variance <2% float64; GPU required for CI, CPU optional for dev"
+    ],
+    "remaining_execution_risks": [
+      {
+        "risk": "OpenMM optional dep installation in CI (platform-specific builds)",
+        "severity": "MEDIUM",
+        "mitigation": "Pre-execution checklist includes local test run (pytest -m openmm) to verify OpenMM is functional. If OpenMM setup is complex, fallback to Option B (new minimal test without OpenMM dependency) adds 1 week.",
+        "likelihood": "MEDIUM (OpenMM is well-tested library, but build can be finicky on some CI runners)",
+        "impact_if_occurs": "Delays P1a by 1–2 days for debugging; option B reduces scope to self-contained test."
+      },
+      {
+        "risk": "Langevin parity test platform variance >5% on CPU vs GPU",
+        "severity": "LOW",
+        "mitigation": "Plan explicitly documents acceptable variance <2%; if diverge >5%, investigate precision/scheduler differences and document as known variance. Does not block release (variance is acceptable for float64 systems).",
+        "likelihood": "LOW (both use float64 precision; scheduler differences are typically <2%)",
+        "impact_if_occurs": "No blocking impact; documented as platform note in release."
+      },
+      {
+        "risk": "SLURM cluster site-specific configuration delays P4a",
+        "severity": "LOW",
+        "mitigation": "Plan explicitly states cluster setup is 'nice-to-have for scale'. Smoke tests run locally and suffice for CI gate. Can deploy without full cluster results.",
+        "likelihood": "MEDIUM (SLURM setup is site-dependent; Engaging cluster may require user configuration)",
+        "impact_if_occurs": "P4a automation delayed; smoke tests still provide release-gate quality."
+      }
+    ],
+    "contingency_paths": [
+      "If P1a Option A (1UAO test) fails locally → fallback to Option B (minimal test, +1 week)",
+      "If P2a platform variance >5% → document as known variance, proceed with release",
+      "If SLURM cluster setup stalls → use smoke tests for CI gate; defer full cluster matrix to Phase 6+",
+      "If P3 profiling reveals scatter bottleneck (>15% time) → estimate Morton implementation (2–4 weeks) as separate backlog; does not block P4a"
+    ]
+  },
+  "final_assessment": {
+    "plan_quality": "HIGH. Comprehensive, well-structured, detailed metrics, explicit dependencies, realistic effort estimates, clear fallback paths.",
+    "execution_readiness": "EXECUTION-READY. All Cycle 1 critical concerns resolved. All Cycle 2 conditions incorporated. Pre-execution checklist is concrete and checkable. Developer can pick up plan and begin execution.",
+    "pre_execution_checklist_sufficiency": "HIGH. §6b checklist covers all de-risking items: (1) 1UAO.pdb verification (✅ done), (2) local test run (executable), (3) P3/P4a decoupling agreement (done in plan), (4) P2a GPU/CPU scope (documented), (5) P5a timing granularity (documented). Checklist is not aspirational; it is a concrete set of executable items that de-risk the plan.",
+    "timeline_realism": "CREDIBLE. 5–6 week total (3–4 week critical path) is achievable if: (1) 1UAO.pdb CI integration is straightforward (verified; OpenMM optional dep is the variable), (2) test execution + CI gating complete quickly (low risk; test infrastructure exists), (3) P2a distribution-level approach avoids RNG complexity (plan specifies this). Fallback +1 week for Option B is reasonable. Contingencies are identified; no surprises.",
+    "release_blocker_status": "CLEAR. P1a (solvated protein parity) + P1b (PME regression config) + P5a (runbook) + P5b (release notes) are blocking. All have clear acceptance criteria. P2a/P3/P4 are high-quality assurance but not blocking release. This is correct prioritization.",
+    "hidden_dependencies": "NONE IDENTIFIED. P1a and P1b are independent (both start Week 1). P2a/P3/P4 are parallel to critical path. P5a depends on P1 (correct; needs to know test/example). Mermaid graph is accurate.",
+    "recommendation": "✅ APPROVE. Plan is sound, execution-ready, and de-risked. Proceed with execution. Notify team: (1) start pre-execution checklist immediately (C1–C4 items), (2) verify 1UAO test runs locally before committing to 1-week estimate for P1a, (3) decouple P3/P4a understanding (profiling informs optimization, not benchmarking), (4) parallel P1/P2/P3 starting Week 1."
+  },
+  "post_approval_follow_up": [
+    "Execute pre-execution checklist (§6b, items C1–C4) before Week 1 starts. Gate on C1 local test run: if test passes → P1a Option A ready; if fails → investigate OpenMM setup or fallback to Option B.",
+    "Notify team: P3 profiling gate (decision tree output) does NOT block P4a start. P4a should begin Week 3 regardless of profiling outcome. Profiling may inform *future* optimization work; it does not gate benchmarking infrastructure.",
+    "Once P1a direction is chosen (Option A or B), P5a runbook drafting can begin (Week 2 parallel with P1a execution). Final sign-off of P5a requires P1a test passing + P1b complete.",
+    "Monitor P2a RNG/platform testing: if CPU vs GPU diverge >5%, document as known variance and proceed (variance is acceptable for float64 systems). Do not over-optimize for platform convergence.",
+    "If P3 profiling reveals scatter bottleneck (scatter_time_ms / total > 15% for N ≥ 5000): estimate Morton implementation cost (2–4 weeks) and add as separate Phase 6+ backlog item. Does not block release or P4a automation."
+  ],
+  "approval_gates_satisfied": [
+    "✅ Cycle 1 concerns resolved: P1a explicit, SETTLE complete, P2a metrics specified",
+    "✅ Cycle 2 conditions incorporated: C1–C4 all addressed in plan",
+    "✅ Pre-execution checklist is concrete and executable",
+    "✅ Timeline is credible (5–6 weeks) with grounded effort estimates",
+    "✅ No new gaps introduced by revisions",
+    "✅ Plan maintains alignment with Phase 3/4/6/8/9 and SETTLE integration plans",
+    "✅ Fallback paths are explicit (P1a Option B, P3 closure, P4a independence)",
+    "✅ Critical path is clear and unambiguous (P1a → P1b → P5a → P5b)"
+  ]
+}

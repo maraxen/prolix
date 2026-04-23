@@ -1,0 +1,66 @@
+{
+  "cycle": 87,
+  "date": "2026-04-17",
+  "target": "explicit_solvent_validation_comprehensive.md",
+  "target_version": "2.1",
+  "verdict": "REVISE",
+  "confidence": "high",
+  "strategic_assessment": "v2.1 is a substantial improvement over v2.0: it correctly addresses all six Cycle-86 warnings and four suggestions. However, v2.1 retains one execution-blocking grounding error (plan drives P1a CI gate off @pytest.mark.openmm that does NOT exist on TestOpenMMSolvationParity) plus three real inconsistencies (P2a integrator-class vs baseline-system row, Option-B force RMSE bound tighter than the existing 1UAO test's 3.0 kcal/mol/Å, critical-path duration 3-4 wk vs 5 wk triple-valued). Editorial-scale fixes but blocking.",
+  "concerns": [
+    {
+      "area": "P1a — Pytest Marker Mismatch (execution blocker)",
+      "severity": "critical",
+      "issue": "Plan claims TestOpenMMSolvationParity has @pytest.mark.openmm and drives CI gate off that assumption. Evidence: tests/physics/test_explicit_solvation_parity.py:45 has ONLY @pytest.mark.integration plus @pytest.mark.skipif(not openmm_available()); no @pytest.mark.openmm. Plan §1.3 L88, §P1a Option A L134, §6b.1 L498, §P1a Done Criteria L138 (pytest -m 'integration and openmm'), §7 L522 (-m openmm -xvs) all assume the marker exists. Both selectors match zero tests against actual code.",
+      "recommendation": "Two options: (1) Add a checklist prerequisite 'Add @pytest.mark.openmm to TestOpenMMSolvationParity' and update §6b.1 accordingly. (2) Change CI selector to -m integration (class already has that marker + skipif guard). Pick one and apply everywhere."
+    },
+    {
+      "area": "P2a — Integrator/Baseline-System Row Inconsistency",
+      "severity": "warning",
+      "issue": "§P2a table (L197-208): baseline row says 'n=4 mock-charge PME PBC box' (no water); integrator row says 'settle_langevin'. But settle_langevin (src/prolix/physics/settle.py:410) requires water_indices. The n=4 NVT test uses jmd_simulate.nvt_langevin (test_explicit_slow_validation.py:134), not settle_langevin.",
+      "recommendation": "For baseline, use 'Prolix: jax_md.simulate.nvt_langevin (BAOAB-like); settle_langevin coverage deferred to P2a-ext stretch'. Reserve settle_langevin claims for runs with water_indices."
+    },
+    {
+      "area": "P1a Option B — Force RMSE Bound Defensibility",
+      "severity": "warning",
+      "issue": "§P1a Option B L148 prescribes 'Force RMSE ≤ 0.1 kcal/mol/Å' — this is the 2-charge anchor bound (test_openmm_explicit_anchor.py:135 MAX_RMSE_FORCE = 0.1). Existing 1UAO+5000-water test asserts rmse < 3.0 kcal/mol/Å (test_explicit_solvation_parity.py:331). Ala10+500-water at ~2000 atoms with real LJ and bonds won't plausibly hit 0.1.",
+      "recommendation": "Tier: 'Force RMSE ≤ 3.0 kcal/mol/Å (matching empirically validated 1UAO bound) for bulk parity; ≤ 0.5 kcal/mol/Å on protein subset as secondary tightness check.'"
+    },
+    {
+      "area": "Executive-Summary vs §6 Timeline — Critical-Path Duration",
+      "severity": "warning",
+      "issue": "Three values for same quantity: Exec Summary '~5 weeks elapsed', §3 L409 '3-4 weeks elapsed', §6 L478 '3-4 weeks elapsed', §6 L485 'Total: 5 weeks (critical path)'.",
+      "recommendation": "Pick one convention. Suggest: '5 weeks elapsed' globally with parenthetical '(≈3 weeks work content; P5a drafts in parallel per §P5a Start Condition)'."
+    },
+    {
+      "area": "P1b — Regression-PME Field Enumeration Drift",
+      "severity": "suggestion",
+      "issue": "§P1b L172 lists 'dispersion_correction (bool)'; actual key in conftest.py:144 is 'use_dispersion_correction'. Missing: 'openmm_platform: Reference' (L145).",
+      "recommendation": "Update §P1b field enumeration to verbatim: pme_alpha_per_angstrom, pme_grid_points, cutoff_angstrom, use_dispersion_correction, openmm_platform."
+    },
+    {
+      "area": "§7 Implementation Checklist — Missing CSV Logging",
+      "severity": "suggestion",
+      "issue": "§P2a Done Criteria L213 requires CSV logging; §7 Checklist P2a bullets don't mention it.",
+      "recommendation": "Add: '- [ ] Emit per-step trajectory CSV (step, time_ps, T_inst, K, U, E_tot) from both Prolix and OpenMM; attach as CI artifact.'"
+    },
+    {
+      "area": "§P2a — 1.67% Tolerance Statistical Justification",
+      "severity": "suggestion",
+      "issue": "§P2a claims 'window-mean σ ≈ 0.03·T with 250 samples for N=4'. For N=4 Langevin (γ=1/ps, τ=1 ps), 20-fs samples are NOT independent — effective sample count ≈5 not 250; effective σ ≈ 0.47/√5 ≈ 21%, not 3%.",
+      "recommendation": "Either (a) loosen to ±5-10% for N=4 baseline and keep ±1.67% as stretch-fixture target where ~300 DOF gives achievable per-sample σ ≈ 8%, or (b) derive from autocorrelation in a footnote."
+    },
+    {
+      "area": "P3 — 10% Morton Threshold in Done Criteria",
+      "severity": "suggestion",
+      "issue": "§P3a correctly attributes thresholds as 'proposed'; §P3 Done Criteria L299 says 'If Morton > 10% improvement' without that attribution.",
+      "recommendation": "Rephrase L299 as 'If Morton improvement > *plan-proposed-gate threshold* (currently 10%; ratify or revise in gate doc before phase-6 trigger).'"
+    },
+    {
+      "area": "Risk Register — Missing CI-Marker Risk",
+      "severity": "suggestion",
+      "issue": "§5 Risk Register doesn't include 'CI selector mismatch with test markers', exactly the risk materialized by concern 1.",
+      "recommendation": "Add: 'CI marker selector does not match test markers in tree (silent zero-gate) | Medium | On each CI-selector change, run `pytest --collect-only -q -m <selector>` locally; fail PR if 0 matches.'"
+    }
+  ],
+  "approved_for_execution": false
+}

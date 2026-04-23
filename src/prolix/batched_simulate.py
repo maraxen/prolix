@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 import dataclasses
-from typing import TYPE_CHECKING, Callable, Any, TypeVar
+from collections.abc import Callable
+from typing import TYPE_CHECKING, Any, TypeVar
 
 import jax
 import jax.numpy as jnp
 from jax import lax
-from jax_md import space, partition
+from jax_md import partition, space
 
 from prolix.padding import PaddedSystem, precompute_dense_exclusions
 from prolix.simulate import AKMA_TIME_UNIT_FS, BOLTZMANN_KCAL
@@ -65,10 +66,10 @@ DEFAULT_RECENTER_EVERY: int = 100  # steps between COM re-centering
 
 
 def recenter_com(
-    positions: 'Array',
-    masses: 'Array',
-    mask: 'Array | None' = None,
-) -> 'Array':
+    positions: Array,
+    masses: Array,
+    mask: Array | None = None,
+) -> Array:
     """Subtract mass-weighted center of mass from positions.
 
     Positions-only operation — velocities/momenta are NOT touched.
@@ -91,11 +92,11 @@ def recenter_com(
 
 
 def remove_rotation_kabsch(
-    positions: 'Array',
-    reference: 'Array',
-    masses: 'Array',
-    mask: 'Array | None' = None,
-) -> 'Array':
+    positions: Array,
+    reference: Array,
+    masses: Array,
+    mask: Array | None = None,
+) -> Array:
     """Remove global rotation via mass-weighted Kabsch superposition.
 
     Aligns `positions` onto `reference` using SVD. Both must already
@@ -129,14 +130,14 @@ def remove_rotation_kabsch(
 
 
 def apply_com_correction(
-    positions: 'Array',
-    masses: 'Array',
-    reference: 'Array',
-    step_idx: 'Array',
+    positions: Array,
+    masses: Array,
+    reference: Array,
+    step_idx: Array,
     recenter_every: int = DEFAULT_RECENTER_EVERY,
     remove_rotation: bool = True,
-    mask: 'Array | None' = None,
-) -> 'Array':
+    mask: Array | None = None,
+) -> Array:
     """Conditionally apply COM re-centering and rotation removal.
 
     Applied every `recenter_every` steps via lax.cond to avoid
@@ -159,9 +160,9 @@ def apply_com_correction(
 
 
 def check_position_sanity(
-    positions: Array, 
-    atom_mask: Array, 
-    max_magnitude: float, 
+    positions: Array,
+    atom_mask: Array,
+    max_magnitude: float,
     stage: str,
     system_names: list[str] | None = None,
 ) -> None:
@@ -235,7 +236,7 @@ def make_langevin_step(dt: float, kT: float, gamma: float) -> Callable[[PaddedSy
     to avoid autodiff NaN from exclusion matrix scatter and padded-atom distances.
     """
     from prolix.batched_energy import single_padded_force
-    from prolix.physics.simulate import project_positions, project_momenta
+    from prolix.physics.simulate import project_momenta, project_positions
     
     # Precompute constants
     c1 = jnp.exp(-gamma * dt)
@@ -252,7 +253,7 @@ def make_langevin_step(dt: float, kT: float, gamma: float) -> Callable[[PaddedSy
             )
         
         r, p, f, m, key, cap_count = (
-            state.positions, state.momentum, state.force, 
+            state.positions, state.momentum, state.force,
             state.mass, state.key, state.cap_count
         )
         
@@ -410,7 +411,7 @@ def make_langevin_step_nl(
     def step_fn(
         padded_sys: PaddedSystem,
         state: LangevinState,
-        neighbor_idx: 'Array',
+        neighbor_idx: Array,
     ) -> LangevinState:
         def _energy_of_r(r):
             sys_with_r = dataclasses.replace(padded_sys, positions=r)
@@ -503,7 +504,7 @@ def make_langevin_step_nl_fused(
     def step_fn(
         padded_sys: PaddedSystem,
         state: LangevinState,
-        neighbor_idx: 'Array',
+        neighbor_idx: Array,
     ) -> LangevinState:
         def force_fn(r):
             sys_with_r = dataclasses.replace(padded_sys, positions=r)
@@ -672,9 +673,8 @@ def batched_minimize(
         converged_mask: (B,) bool
     """
     from jax_md import minimize as jax_md_minimize
-    from prolix.batched_energy import (
-        single_padded_energy, single_padded_force
-    )
+
+    from prolix.batched_energy import single_padded_energy, single_padded_force
 
     displacement_fn, shift_fn = space.free()
 
@@ -1093,15 +1093,15 @@ def batched_equilibrate(
     return results
 
 def batched_produce(
-    batch: PaddedSystem, 
-    state: LangevinState, 
-    n_saves: int, 
-    steps_per_save: int, 
+    batch: PaddedSystem,
+    state: LangevinState,
+    n_saves: int,
+    steps_per_save: int,
     temperature_k: float = 310.15,
     chunk_size: int | None = None
 ) -> tuple[LangevinState, Array]:
     """Produces trajectory for a batch of padded systems."""
-    from prolix.simulate import AKMA_TIME_UNIT_FS, BOLTZMANN_KCAL
+    from prolix.simulate import BOLTZMANN_KCAL
     
     dt = 2.0 / AKMA_TIME_UNIT_FS
     kT = temperature_k * BOLTZMANN_KCAL
@@ -1234,7 +1234,8 @@ def batched_produce_streaming(
         Final LangevinState (no trajectory — it was streamed to disk).
     """
     from jax.experimental import io_callback
-    from prolix.simulate import AKMA_TIME_UNIT_FS, BOLTZMANN_KCAL
+
+    from prolix.simulate import BOLTZMANN_KCAL
 
     dt = 2.0 / AKMA_TIME_UNIT_FS
     kT = temperature_k * BOLTZMANN_KCAL
@@ -1396,7 +1397,7 @@ def batched_produce_streaming(
 # ---------------------------------------------------------------------------
 
 def build_neighbor_list_jaxmd(
-    positions: 'Array',
+    positions: Array,
     cutoff: float = 20.0,
     capacity_multiplier: float = 1.25,
     dr_threshold: float = 1.0,
@@ -1434,7 +1435,7 @@ def build_neighbor_list_jaxmd(
 
 
 def build_batched_neighbor_list_jaxmd(
-    batch_positions: 'Array',
+    batch_positions: Array,
     cutoff: float = 20.0,
     capacity_multiplier: float = 1.25,
     dr_threshold: float = 1.0,
@@ -1581,7 +1582,7 @@ def build_neighbor_list(
     n_padded: int,
     cutoff: float = 8.0,
     pad_k: int = 32,
-) -> 'Array':
+) -> Array:
     """Build a static neighbor list for a single system on the host.
 
     Args:
@@ -1618,8 +1619,8 @@ def build_neighbor_list(
 
 def batched_equilibrate_nl(
     batch: PaddedSystem,
-    neighbor_idx: 'Array',
-    key: 'Array',
+    neighbor_idx: Array,
+    key: Array,
     n_steps: int,
     temperature_k: float = 310.15,
     chunk_size: int | None = None,
@@ -1639,7 +1640,7 @@ def batched_equilibrate_nl(
         chunk_size: Chunk size for safe_map.
         energy_fn: Custom energy function (default: cvjp variant).
     """
-    from prolix.simulate import AKMA_TIME_UNIT_FS, BOLTZMANN_KCAL
+    from prolix.simulate import BOLTZMANN_KCAL
 
     if energy_fn is None:
         from prolix.batched_energy import single_padded_energy_nl_cvjp
@@ -1658,7 +1659,7 @@ def batched_equilibrate_nl(
     displacement_fn, _ = space.free()
 
     def equilibrate_single(
-        args: tuple[PaddedSystem, 'Array', 'Array'],
+        args: tuple[PaddedSystem, Array, Array],
     ) -> LangevinState:
         sys, nbr, k = args
 
@@ -1691,7 +1692,7 @@ def batched_equilibrate_nl(
 
 def batched_produce_streaming_nl(
     batch: PaddedSystem,
-    neighbor_idx: 'Array',
+    neighbor_idx: Array,
     state: LangevinState,
     n_saves: int,
     steps_per_save: int,
@@ -1720,7 +1721,8 @@ def batched_produce_streaming_nl(
         Final LangevinState (trajectory streamed to disk).
     """
     from jax.experimental import io_callback
-    from prolix.simulate import AKMA_TIME_UNIT_FS, BOLTZMANN_KCAL
+
+    from prolix.simulate import BOLTZMANN_KCAL
 
     if energy_fn is None:
         from prolix.batched_energy import single_padded_energy_nl_cvjp
@@ -1736,7 +1738,7 @@ def batched_produce_streaming_nl(
     B = leaves[0].shape[0]
 
     def produce_single_streaming_nl(
-        args: tuple[PaddedSystem, 'Array', LangevinState, Any],
+        args: tuple[PaddedSystem, Array, LangevinState, Any],
     ) -> LangevinState:
         sys, nbr, s, batch_idx = args
 
@@ -1779,7 +1781,7 @@ def batched_produce_streaming_nl(
 def batched_equilibrate_nl_dynamic(
     batch: PaddedSystem,
     batched_nbrs: Any,
-    key: 'Array',
+    key: Array,
     n_steps: int,
     temperature_k: float = 310.15,
     chunk_size: int | None = 1,
@@ -1803,7 +1805,7 @@ def batched_equilibrate_nl_dynamic(
     Returns:
         Tuple of (final LangevinState, updated NeighborList).
     """
-    from prolix.simulate import AKMA_TIME_UNIT_FS, BOLTZMANN_KCAL
+    from prolix.simulate import BOLTZMANN_KCAL
 
     if energy_fn is None:
         from prolix.batched_energy import single_padded_energy_nl_cvjp
@@ -1822,7 +1824,7 @@ def batched_equilibrate_nl_dynamic(
     displacement_fn, _ = space.free()
 
     def equilibrate_single(
-        args: tuple[PaddedSystem, Any, 'Array'],
+        args: tuple[PaddedSystem, Any, Array],
     ) -> tuple[LangevinState, Any]:
         sys, nbrs, k = args
 
@@ -1891,7 +1893,8 @@ def batched_produce_streaming_nl_dynamic(
         Tuple of (final LangevinState, updated NeighborList).
     """
     from jax.experimental import io_callback
-    from prolix.simulate import AKMA_TIME_UNIT_FS, BOLTZMANN_KCAL
+
+    from prolix.simulate import BOLTZMANN_KCAL
 
     if energy_fn is None:
         from prolix.batched_energy import single_padded_energy_nl_cvjp
@@ -1966,9 +1969,8 @@ def make_langevin_step_explicit(
     - Force dispatch to flash_explicit_forces (dense LJ/Coulomb, no GB)
     """
     from prolix.batched_energy import single_padded_force
-    from prolix.physics.simulate import project_positions, project_momenta
     from prolix.physics.settle import settle_positions, settle_velocities
-    from prolix.physics.solvation import fix_water_geometry
+    from prolix.physics.simulate import project_momenta, project_positions
     
     c1 = jnp.exp(-gamma * dt)
     c2 = jnp.sqrt(1.0 - jnp.exp(-2.0 * gamma * dt))
@@ -1986,7 +1988,7 @@ def make_langevin_step_explicit(
             )
         
         r, p, f, m, key, cap_count = (
-            state.positions, state.momentum, state.force, 
+            state.positions, state.momentum, state.force,
             state.mass, state.key, state.cap_count
         )
         

@@ -1,0 +1,40 @@
+{
+  "critique_number": 42,
+  "date": "2026-04-16",
+  "plan_version": "1.44",
+  "verdict": "Changes Requested",
+  "previous_recommendations_status": {
+    "Kernel-Level Instruction-Reuse Audit (>4.0)": "Met",
+    "System GPU-Performance Counter State (nvidia-smi) in manifest": "Met",
+    "B-Spline Grid-Padding Invariance validation": "Met",
+    "Pressure Tensor Kurtosis Temporal Map in Validation Certificate": "Met"
+  },
+  "new_focus_evaluation": {
+    "Computational Resource Efficiency (Part 26)": {
+      "focus": "Kernel-Level Instruction-Dependency Audit (<15% dependency-stall rate)",
+      "status": "Missing",
+      "details": "The plan specifies multiple instruction-level audits (reuse, latency, parallelism, throughput, mix), but fails to include the specific Instruction-Dependency Audit required to verify dependency-stall rates (<15%) for H100 pipeline optimization."
+    },
+    "Metadata Integrity (Part 27)": {
+      "focus": "System GPU-Compute Cap Version",
+      "status": "Missing",
+      "details": "While the manifest includes extensive GPU state data (performance counters, ECC, throttle, etc.), it lacks the specific 'System GPU-Compute Cap Version' (nvidia-smi --query-gpu=compute_cap), which is critical for verifying Tensor Core and FFT hardware acceleration compatibility."
+    },
+    "PME implementation specificity (Part 27)": {
+      "focus": "B-Spline Grid-Boundary Aliasing Invariance (Nyquist frequency zero within 1e-12 at L/2)",
+      "status": "Missing",
+      "details": "The plan covers B-Spline Grid-Padding Invariance and various grid symmetries, but does not address Grid-Boundary Aliasing Invariance or the specific verification of zero Fourier components at the Nyquist frequency for a particle at L/2."
+    },
+    "Finality Evidence (Part 25)": {
+      "focus": "Force Vector Divergence Kurtosis Map",
+      "status": "Missing",
+      "details": "The Validation Certificate includes Pressure Tensor Kurtosis maps and various Force Vector Divergence maps (angular, magnitude, temporal), but omits the 'Force Vector Divergence Kurtosis Map' (2D histogram of MAE fourth moments) required to detect heavy-tailed outliers that impact integration stability."
+    }
+  },
+  "recommendations": [
+    "Update Section 2.4 to include a 'Kernel-Level Instruction-Dependency Audit' with a target dependency-stall rate of <15% using jax.profiler.",
+    "Update Section 2.1 (P1h) to include 'System GPU-Compute Cap Version' in the reference manifest.",
+    "Update Section 2.1 (P1b) to include validation of 'B-Spline Grid-Boundary Aliasing Invariance', verifying zero Fourier components at the Nyquist frequency for a particle at L/2.",
+    "Update Section 2.4 (Final Artifact) to include a 'Force Vector Divergence Kurtosis Map' in the Validation Certificate."
+  ]
+}

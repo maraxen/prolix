@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import dataclasses
 import math
-from typing import Any
 
 import jax.numpy as jnp
 from jax_md import util
@@ -262,8 +261,9 @@ def unshard_from_pmap(
     return arr.reshape(num_devices * shard_size, *arr.shape[2:])
 
 
-import jax
 from functools import partial
+
+import jax
 
 COULOMB_CONSTANT = 332.0637  # kcal*A/(mol*e^2), vacuum dielectric
 

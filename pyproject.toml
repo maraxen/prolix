@@ -11,12 +11,12 @@ license = "MIT"
 authors = [
     { name = "Marielle Russo", email = "67157875+maraxen@users.noreply.github.com" },
 ]
-requires-python = ">=3.11"
+requires-python = ">=3.11,<3.14"
 dependencies = [
     "jax",
     "jax-md",
     "equinox",
-    "proxide>=0.1.0",
+    "proxide>=0.1.0a3",
     "biotite",
     "mdtraj",
     "numpy",
@@ -50,10 +50,11 @@ dev = [
     # "openff-toolkit>=0.14.0",  # TODO: Requires conda or special channel
 ]
 
-# OpenMM wheels on PyPI target manylinux_2_34; older cluster nodes (e.g. manylinux_2_28)
-# cannot `uv sync` this extra — use conda OpenMM there, or install only on newer glibc.
+# Linux x86_64: OpenMM 8.4+ is manylinux_2_34-only (no sdist) — pin 8.3.x for older glibc HPC nodes.
+# Other platforms: latest 8.4+ wheels. See also ``[tool.uv].required-environments``.
 openmm = [
-    "openmm>=8.4.0",
+    "openmm>=8.3.1,<8.4.0 ; sys_platform == 'linux' and platform_machine == 'x86_64'",
+    "openmm>=8.4.0 ; sys_platform != 'linux' or platform_machine != 'x86_64'",
 ]
 
 docs = [
@@ -159,7 +160,14 @@ root = ["src/prolix"]
 [tool.ty.rules]
 invalid-type-form = "ignore"
 
-
+[tool.uv]
+# OpenMM 8.4+ ships manylinux_2_34 wheels only (no sdist). Older Linux (e.g. glibc/manylinux_2_28
+# HPC nodes) must resolve to 8.3.x, which still publishes manylinux_2_28 x86_64 wheels. Requiring
+# this environment forces the universal lock to retain a compatible fork for Linux x86_64 while
+# allowing newer OpenMM on other platforms.
+required-environments = [
+    "sys_platform == 'linux' and platform_machine == 'x86_64'",
+]
 
 [dependency-groups]
 # Keep in sync with [project.optional-dependencies] dev (no OpenMM here — see `openmm` extra).
@@ -171,5 +179,3 @@ dev = [
     "ty",
 ]
 
-[tool.uv.sources]
-proxide = { workspace = true }

@@ -91,8 +91,15 @@ class SimulationSpec:
   
   # Rigid Water (SETTLE)
   rigid_water: bool = False
+  # Subtract total linear COM momentum each step after SETTLE (OpenMM CMMotionRemover analogue).
+  remove_linear_com_momentum: bool = False
+  # Adaptive RATTLE convergence tolerance (velocity units, Å/ps); None = fixed n_iters=10
+  settle_velocity_tol: float | None = None
 
   def __post_init__(self):
+    if self.remove_linear_com_momentum and not self.rigid_water:
+      msg = "remove_linear_com_momentum requires rigid_water=True"
+      raise ValueError(msg)
     if self.save_interval_ns <= 0:
       msg = "save_interval_ns must be positive"
       raise ValueError(msg)
@@ -840,6 +847,8 @@ def run_simulation(
       water_indices=water_indices,
       box=spec.box,
       constraints=constraints,
+      remove_linear_com_momentum=bool(spec.remove_linear_com_momentum),
+      settle_velocity_tol=spec.settle_velocity_tol,
     )
   elif (
     constrained_bonds is not None and constrained_lengths is not None and len(constrained_bonds) > 0

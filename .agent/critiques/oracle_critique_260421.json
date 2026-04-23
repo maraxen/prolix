@@ -1,0 +1,26 @@
+{
+  "verdict": "APPROVE",
+  "confidence": "high",
+  "strategic_assessment": "v4 closes PME triplication via a single module, forces a binary CI contract for aggregate/adapter gates, versions tightening aggregates, and aligns release language with P2a-B2-R vs cross-engine X. Pointer table matches openmm-nightly; remaining work is implementation detail.",
+  "concerns": [
+    {
+      "area": "PME module placement",
+      "severity": "suggestion",
+      "issue": "Package module vs tests-local is a packaging preference.",
+      "recommendation": "Using src/prolix/physics/regression_explicit_pme.py keeps benchmarks and pytest on one import path; document in export script header."
+    },
+    {
+      "area": "Adapter CI",
+      "severity": "suggestion",
+      "issue": "Pin exact pytest node IDs and golden fixture paths when W3 lands.",
+      "recommendation": "Add workflow comment with measured runtime once aggregate tests exist."
+    },
+    {
+      "area": "Docs drift",
+      "severity": "suggestion",
+      "issue": "Runbook/protocol may still mention conftest-only SSOT.",
+      "recommendation": "Sweep after W2/W3 merges."
+    }
+  ],
+  "approved_for_execution": true
+}

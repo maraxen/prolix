@@ -22,9 +22,7 @@ from typing import NamedTuple
 
 import jax
 import jax.numpy as jnp
-
 from proxide.physics.constants import COULOMB_CONSTANT
-
 
 # ===========================================================================
 # Configuration
@@ -72,10 +70,9 @@ def _bspline_coeffs(order: int, u: jnp.ndarray) -> jnp.ndarray:
     # Direct formula for order 4 (most common, avoids recurrence overhead):
     if order == 4:
         return _bspline4(u)
-    elif order == 6:
+    if order == 6:
         return _bspline6(u)
-    else:
-        raise ValueError(f"B-spline order {order} not implemented. Use 4 or 6.")
+    raise ValueError(f"B-spline order {order} not implemented. Use 4 or 6.")
 
 
 def _bspline4(u: jnp.ndarray) -> jnp.ndarray:
@@ -154,8 +151,8 @@ def spread_charges(
     wy = _bspline4(u[:, 1])
     wz = _bspline4(u[:, 2])
 
-    q = charges * atom_mask.astype(jnp.float32)
     Q = jnp.zeros((Kx, Ky, Kz), dtype=jnp.float32)
+    q = (charges * atom_mask.astype(jnp.float32)).astype(Q.dtype)
 
     for dx in range(order):
         for dy in range(order):
@@ -163,7 +160,7 @@ def spread_charges(
                 ix = (grid_idx[:, 0] + dx - 1) % Kx
                 iy = (grid_idx[:, 1] + dy - 1) % Ky
                 iz = (grid_idx[:, 2] + dz - 1) % Kz
-                w = wx[dx] * wy[dy] * wz[dz] * q
+                w = (wx[dx] * wy[dy] * wz[dz] * q).astype(Q.dtype)
                 Q = Q.at[ix, iy, iz].add(w)
     return Q
 

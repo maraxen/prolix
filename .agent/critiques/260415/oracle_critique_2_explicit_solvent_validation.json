@@ -1,0 +1,218 @@
+{
+  "metadata": {
+    "date": "2026-04-16",
+    "cycle": 2,
+    "artifact": ".agent/docs/plans/explicit_solvent_validation_comprehensive.md",
+    "recon_document": ".agent/recon/explicit_solvent_validation_recon_260416.md",
+    "oracle": "Oracle (strategic technical advisor)"
+  },
+  "verdict": "ACCEPT_WITH_CONDITIONS",
+  "confidence": 0.88,
+  "summary": "The revised plan is substantially improved from Cycle 1 and addresses all three critical concerns. Feasibility is realistic, P1a Option A/B sequencing is now clear, and parallelization is carefully bounded. However, four conditional items must be verified before execution to maintain credibility: (1) confirm 1UAO.pdb CI integration path, (2) decouple P3 profiling from P4a start gate, (3) explicitly bound P2a RNG/platform testing scope, (4) document P5a start condition granularity.",
+  "strengths": [
+    "P1a-Option A/B fork is now explicit with decision criteria (1 week existing test vs +1 week new minimal test).",
+    "SETTLE status correctly resolved: scalar path is complete (commit 6a47281); P1b is documentation-only, not implementation blocker.",
+    "PME regression config already exists in conftest.py (REGRESSION_EXPLICIT_PME fixture); plan correctly identifies P1b as config file creation + CI gate, which is 2-3 days of straightforward work.",
+    "P2a metrics table is specific and realistic (mean T tolerance 295-305K, 5 ps window, float64, 10 ps total duration).",
+    "Timeline revised to 5-6 weeks critical path (vs 6-7 in draft), which is credible given P1a reuse of existing test.",
+    "Risk assessment updated to address distribution-level Langevin strategy instead of RNG matching.",
+    "P2b correctly downgraded to skeleton doc + post-release implementation (reduces from 2-3 weeks to documentation effort).",
+    "Dependencies and parallelization clearly charted (mermaid graph, P3/P4 independent, P2 can run alongside P1).",
+    "Fallback paths explicitly defined (P1a Option B, P3 'current NL sufficient' closure).",
+    "Alignment with prior Phase 3/4/6/8/9 plan confirmed (no contradictions found)."
+  ],
+  "concerns": [
+    {
+      "id": "C1_P1a_ci_integration",
+      "title": "P1a CI Integration Path Implicit",
+      "description": "Plan says to 'add test to CI gate: weekly run with OpenMM dep' but does not specify: (1) which CI workflow (nightly job, weekly cron, or pull request gate?), (2) how OpenMM optional dep is installed in CI, (3) whether 1UAO.pdb is committed to repo or fetched dynamically. This ambiguity could cause P1a to stall at implementation if CI setup is harder than assumed (e.g., OpenMM build issues on GPU runners).",
+      "severity": "MEDIUM",
+      "affected_phases": ["P1a"],
+      "recommendation": "Before starting P1a, create a brief CI integration checklist: (1) confirm 1UAO.pdb is in data/pdb/ (VERIFIED: found in codebase), (2) test locally with 'pytest tests/physics/test_explicit_solvation_parity.py::test_energy_parity -m openmm' to verify it runs, (3) document CI job trigger (e.g., 'weekly via gh-actions cron' or 'on-demand trigger'), (4) estimate OpenMM dependency build time in CI. If CI setup adds >1 day, revise timeline.",
+      "resolution_status": "unresolved_low_risk"
+    },
+    {
+      "id": "C2_P3_P4a_coupling",
+      "title": "P3 Profiling Incorrectly Gated to P4a Start",
+      "description": "Plan timeline shows 'P4a (if P3 gates optimization)' but the profiling gate doc makes clear that P3 is a *measurement tool to decide whether Morton is needed*, not a *prerequisite for benchmarking automation*. Current wording implies P4a waits for P3 profiling to complete, but cluster benchmarks are valuable regardless of whether Morton is implemented. This creates artificial sequencing that could delay P4a.",
+      "severity": "MEDIUM",
+      "affected_phases": ["P3", "P4a"],
+      "recommendation": "Decouple P3 and P4a: (1) P3 profiling should run independently (Week 2-3) and produce a recommendation (e.g., 'current NL sufficient' or 'Morton implementation estimate: 2-4 weeks'). (2) P4a (SLURM wiring, smoke test, schema) should start Week 3 *regardless* of P3 outcome. (3) If P3 recommends Morton, that becomes a separate backlog item, not a blocker to P4a. Rewrite timeline Section 6 to make this explicit.",
+      "resolution_status": "unresolved_low_risk"
+    },
+    {
+      "id": "C3_P2a_platform_scope",
+      "title": "P2a CPU/GPU Testing Scope Vague",
+      "description": "Plan says 'CPU + GPU (validate on both if feasible; GPU required for CI)' but does not specify: (1) what 'if feasible' means (dev machine availability? CI costs?), (2) how CPU results differ from GPU (expected; variance in float64?), (3) acceptance criteria if CPU and GPU show >5% divergence in mean T. This underspecifies the validation and could lead to scope creep if platform differences emerge during testing.",
+      "severity": "MEDIUM",
+      "affected_phases": ["P2a"],
+      "recommendation": "Add clarification to P2a metrics table or docstring: (1) 'GPU (NVIDIA) required for CI; CPU testing optional (local dev sandbox). Expect <2% platform variance in mean T (float64 both).' (2) 'If CPU vs GPU diverge >5%, investigate precision or scheduler differences; document as known variance in protocol.' (3) 'CI gate accepts GPU result only; CPU results are supplementary for debugging.' This bound interpretation and prevents false-positive failures.",
+      "resolution_status": "unresolved_low_risk"
+    },
+    {
+      "id": "C4_P5a_start_granularity",
+      "title": "P5a Start Condition Could Be Tightened",
+      "description": "Plan says P5a (runbook update) requires 'P1a + P1b complete' but P1a is binary (pass or fail) and P1b is documentation-only (config file creation). In practice, P5a could start as soon as P1a *decision is made* (Option A or B chosen), even if test execution is still pending. Plan does not account for this parallelization opportunity.",
+      "severity": "LOW",
+      "affected_phases": ["P5a"],
+      "recommendation": "Optional refinement (does not block execution): Clarify in mermaid graph or Section 3 Dependencies that P5a has a soft dependency: 'Runbook draft can begin once P1a direction (Option A/B) is chosen, using draft PME params. Final P5a sign-off requires P1a test passing and P1b config file in place.' This is low-priority since P1a/P1b are 1-2 weeks, and P5a is 1 week; overlap is small. Only pursue if timeline pressure emerges.",
+      "resolution_status": "unresolved_very_low_risk"
+    }
+  ],
+  "feasibility_analysis": {
+    "timeline_realism": {
+      "verdict": "CREDIBLE",
+      "reasoning": "5-6 week critical path is achievable if: (1) 1UAO.pdb is available (verified in codebase ✓), (2) test_explicit_solvation_parity.py can be adapted to CI gate with regression config (low risk; fixture already exists ✓), (3) P2a uses statistical metrics (distribution comparison) rather than RNG matching (plan specifies this ✓). Fallback +1 week for Option B (new minimal test) is reasonable (small system, embedded geometry, ~3 days drafting + 2-3 days debugging).",
+      "risk_factors": [
+        "OpenMM CI setup (platform-specific build; mitigated by existing test infrastructure)",
+        "RNG/float64 precision issues in Langevin parity (mitigated by distribution-level approach)",
+        "Cluster SLURM delays (mitigated by smoke tests being sufficient for release)"
+      ]
+    },
+    "effort_credibility": {
+      "p1a": {
+        "estimate": "1 week (existing test); +1 week (new test)",
+        "assessment": "REALISTIC. Test file exists with 1UAO + 5000 waters. Work is verifying it runs, documenting tolerances, and CI gating. New test fallback (Ala10 + 500 waters) is straightforward."
+      },
+      "p1b": {
+        "estimate": "2-3 days",
+        "assessment": "OPTIMISTIC but achievable. Regression config exists in conftest.py (REGRESSION_EXPLICIT_PME). Work is: (1) create regression_pme_config.yaml (1 day), (2) update test to load it (1 day), (3) add CI gate (1 day). Could slip to 1 week if config requires extraction from multiple test files."
+      },
+      "p2a": {
+        "estimate": "2-3 weeks",
+        "assessment": "CREDIBLE. Metrics table is specific (10 ps, 5 ps window, mean T 295-305K). Test infrastructure exists (NVE/NVT tests already in repo). New work: wire Langevin integrator, logging, statistical comparison. Platform testing (CPU/GPU) could add 1 week if both required; plan sensibly gates GPU as CI requirement."
+      },
+      "p3": {
+        "estimate": "1 week",
+        "assessment": "CREDIBLE. Profiling gate doc already written; work is executing profiling artifact (1-2 days), JSON report (1 day), decision tree (2-3 days). Does not require code implementation."
+      },
+      "p4a": {
+        "estimate": "1-2 weeks",
+        "assessment": "CREDIBLE. SLURM templates exist in repo; work is parameterization (1 day), CI integration (2-3 days), documentation (2-3 days). Can parallelize with P2."
+      },
+      "p5a": {
+        "estimate": "1 week",
+        "assessment": "CREDIBLE. Runbook is text document; examples can reuse existing test fixtures. Work is drafting (2-3 days), examples (2 days), validation (2 days)."
+      }
+    },
+    "parallelization_realism": {
+      "claimed": "P1/P2/P3 can run in parallel; P4 independent; P5 sequential at end.",
+      "assessment": "CORRECT with minor caveats. P1a (1-2 weeks) and P2a (2-3 weeks) can overlap, but P2a likely finishes later. P3 can run independently in weeks 2-3. P4a/P4b can start week 3 without waiting for P3 outcome (as per C2 recommendation). P5a must wait for P1 (decision + test passing) but could overlap with P2/P3."
+    }
+  },
+  "alignment_check": {
+    "vs_phase_3_4_6_8_9_plan": {
+      "status": "ALIGNED",
+      "notes": "Comprehensive plan correctly refers to Phase 3/4/6/8/9 plan as 'archive; superseded by this' in Section 9. No contradictions found. Phase 6 profiling gate is correctly integrated into P3; Phase 8 benchmarking structure is correctly reflected in P4a/P4b; Phase 9 runbook is correctly placed as P5a."
+    },
+    "vs_settle_integration_plan": {
+      "status": "ALIGNED",
+      "notes": "SETTLE scalar path status is correctly stated as complete (commit 6a47281). Plan does not propose reimplementing SETTLE. P1b correctly identified as documentation-only (no 'SETTLE wiring' in current plan, unlike early draft which mistakenly suggested pending work)."
+    },
+    "vs_current_implementation_snapshot": {
+      "status": "ALIGNED",
+      "notes": "Plan correctly reflects current state: PME + NL + SETTLE + RATTLE integrated; RF/DSF opt-in; cell-list not default; no Morton ordering yet. No claims contradict codebase facts verified in recon document."
+    }
+  },
+  "critical_path_analysis": {
+    "path": "P1a (1 wk) → P1b (3 days, ~0.4 wk overlap) → P5a (1 wk) → P5b (1 wk)",
+    "total_elapsed": "3.4 weeks + buffer = 4-5 weeks realistic",
+    "plan_claimed": "3-4 weeks elapsed",
+    "discrepancy": "Plan uses '5-6 weeks total' but critical path is 3-4 weeks. Difference explained by: (1) P5a can start week 4 once P1a passes (not after P1b fully complete), (2) P2a/P3 run in parallel (not on critical path). Total project time is 5-6 weeks because P2a (2-3 weeks) runs alongside P1 and finishes near the end. This is accurate.",
+    "assessment": "SOUND. Plan correctly identifies blocking vs non-blocking work."
+  },
+  "decision_points_clarity": {
+    "p1a_option_a_vs_b": {
+      "status": "EXPLICIT",
+      "details": "Plan clearly states: (1) Option A: use existing test (1 week effort), verifies 1UAO available, (2) Option B: create new minimal test (adds 1 week). Decision point is before P1a starts: verify 1UAO.pdb presence (done ✓). Recommendation: pursue A first; fallback to B if needed."
+    },
+    "p3_profiling_decision_tree": {
+      "status": "DOCUMENTED but not INLINED",
+      "details": "Plan references spatial_sorting_profile_gate.md for decision tree, but does not inline the thresholds (scatter_time_ms > 15%, cell_list > 20% improvement). For executors, inlining would be clearer. Recommendation: add brief inline summary in Section 3 (P3) with thresholds and action items."
+    },
+    "p2b_rdf_deferral": {
+      "status": "EXPLICIT",
+      "details": "Plan clearly states P2b is 'skeleton doc + post-release impl' (not 2-3 weeks). This is a deliberate scope reduction to fit timeline. Decision is defensible: RDF is nice-to-have for methodology, not blocking for validation claim."
+    }
+  },
+  "risk_updated_assessment": {
+    "p1a_solvated_protein_mismatch": {
+      "status": "LOW RISK (unchanged from Cycle 1)",
+      "reasoning": "Solvation pipeline is mature; component tests pass. Risk of energy mismatch is low. Mitigation: if found, roll back to component tests to isolate."
+    },
+    "pme_grid_sensitivity": {
+      "status": "LOW RISK (reduced from Cycle 1)",
+      "reasoning": "Regression config is already in conftest.py (REGRESSION_EXPLICIT_PME); plan correctly identifies P1b as enforcing it in CI. No risk of silent drift."
+    },
+    "langevin_rng_complexity": {
+      "status": "LOW RISK (reduced from Cycle 1)",
+      "reasoning": "Plan explicitly uses distribution-level metrics (mean T, variance) instead of RNG matching. This avoids complexity and is sufficient for validation."
+    },
+    "cluster_slurm_setup_delay": {
+      "status": "MEDIUM RISK (mitigated)",
+      "reasoning": "SLURM setup can be site-specific, but smoke tests run locally. Plan correctly states cluster is 'nice-to-have'; can deploy without full cluster results."
+    },
+    "p2a_rng_handling_on_different_platforms": {
+      "status": "MEDIUM RISK (not explicitly mitigated)",
+      "reasoning": "Plan says 'test on CPU + GPU if feasible' but does not specify how to handle CPU vs GPU variance. If they diverge >5%, unclear what to do. Recommendation: document acceptable variance upfront (e.g., <2% in float64)."
+    },
+    "1uao_pdb_ci_integration_friction": {
+      "status": "MEDIUM RISK (not yet verified)",
+      "reasoning": "Plan assumes 1UAO.pdb CI integration is straightforward, but OpenMM optional dep setup in CI can be finicky. Should verify locally before committing to 1-week estimate."
+    }
+  },
+  "questions_for_user": [
+    {
+      "q": "P1a CI Integration: Will OpenMM be installed as optional dep in the CI environment, or only in nightly/weekly runs? This affects whether P1a test runs on every PR (gating quality) or weekly (less strict).",
+      "impact": "If CI gating is expensive (slow), might want to run P1a test only weekly, not on every merge. Plan should clarify this tradeoff."
+    },
+    {
+      "q": "P3 Profiling: Should P3 profiling *block* the start of P4a (cluster benchmarks), or are they independent? Recommend decoupling them (see C2), but want to confirm intent.",
+      "impact": "If decoupled, revise timeline Section 6 to show P4a starting week 3 regardless of P3 outcome."
+    },
+    {
+      "q": "P2a CPU vs GPU: For Langevin parity test, is GPU testing required in CI, or is CPU sufficient? This affects scope (1-2 week vs 2-3 weeks) and resource cost.",
+      "impact": "Plan correctly says 'GPU required for CI', but should bound CPU testing as optional (dev sandbox only)."
+    },
+    {
+      "q": "P5a Runbook: Can runbook drafting start once P1a *decision* is made (Option A/B chosen), or must it wait for P1a test to pass? This is a minor parallelization.",
+      "impact": "If runbook can start earlier, could save 1 week in critical path. Low priority since total is already 5-6 weeks."
+    }
+  ],
+  "gaps_introduced_by_cycle_2_revisions": [
+    "P3/P4a coupling: Plan implies P4a waits for P3, but this is not necessary. Recommendation C2 should be adopted to avoid artificial sequencing."
+  ],
+  "gaps_closed_from_cycle_1": [
+    "✓ P1a vagueness: Now distinguishes Option A (1 week, existing test) vs Option B (+1 week, new minimal test).",
+    "✓ SETTLE scalar path status: Confirmed complete (commit 6a47281); P1b is documentation-only.",
+    "✓ P2a metric tolerances: Now includes explicit tolerance table (mean T 295-305K, 5 ps window, float64, 10 ps total)."
+  ],
+  "recommendations_priority": [
+    {
+      "priority": "P0_BLOCKING",
+      "item": "Before starting execution: Verify 1UAO.pdb CI integration locally. Run 'pytest tests/physics/test_explicit_solvation_parity.py::test_energy_parity -m openmm' with OpenMM installed. If this takes >5 minutes or fails, add 1 day to P1a estimate and document CI setup."
+    },
+    {
+      "priority": "P1_MUST_HAVE",
+      "item": "Decouple P3 profiling from P4a start gate. Profiling informs whether Morton is *needed*, not whether benchmarking automation is *needed*. Revise timeline Section 6 to show P4a starting week 3 independently."
+    },
+    {
+      "priority": "P1_MUST_HAVE",
+      "item": "Clarify P2a CPU vs GPU testing scope in metrics table. Document expected variance (<2% in float64), and state that GPU is required for CI, CPU optional for dev."
+    },
+    {
+      "priority": "P2_SHOULD_HAVE",
+      "item": "Inline P3 profiling decision tree thresholds in Section 3 (scatter_time_ms > 15% → Morton candidate; cell_list > 20% improvement → switchover candidate). Executors should not need to reference external doc."
+    },
+    {
+      "priority": "P2_SHOULD_HAVE",
+      "item": "Optional: Document P5a start condition granularity ('can begin once P1a direction chosen, but sign-off requires P1a test passing + P1b complete'). Low priority; total overlap is small."
+    }
+  ],
+  "final_assessment": {
+    "plan_quality": "HIGH. Comprehensive, well-structured, with explicit fallbacks and realistic effort estimates.",
+    "execution_readiness": "MEDIUM-HIGH. All major gaps from Cycle 1 are addressed. Four conditional items (C1-C4) should be resolved before execution to de-risk timeline and clarify CI/profiling coupling.",
+    "release_blockers": "None identified. P1a/P1b/P5a can unblock release on 4-5 week schedule if 1UAO CI integration is straightforward.",
+    "recommendation_next_step": "Review recommendations C1-C4 (especially C2: decouple P3/P4a). If addressed, plan is ready for execution. If not addressed, risk medium timeline slip (1-2 weeks) due to misaligned expectations about profiling gating."
+  }
+}

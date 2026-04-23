@@ -2,18 +2,23 @@
 
 from __future__ import annotations
 
-import dataclasses
-from typing import TYPE_CHECKING, Callable
+from collections.abc import Callable
+from typing import TYPE_CHECKING
 
 import jax
 import jax.numpy as jnp
-from jax_md import space, energy
+from jax_md import space
+from proxide.physics.constants import COULOMB_CONSTANT
 
 from prolix.padding import PaddedSystem
-from prolix.types import BondParams, AngleParams, DihedralParams, CmapTorsionIndices
-from proxide.physics.constants import COULOMB_CONSTANT
-from prolix.physics.generalized_born import compute_ace_nonpolar_energy, compute_born_radii, compute_gb_energy
-from prolix.physics.neighbor_list import compute_exclusion_mask_neighbor_list, get_neighbor_exclusion_scales
+from prolix.physics.generalized_born import (
+    compute_ace_nonpolar_energy,
+    compute_gb_energy,
+)
+from prolix.physics.neighbor_list import (
+    get_neighbor_exclusion_scales,
+)
+from prolix.types import CmapTorsionIndices
 
 if TYPE_CHECKING:
     from jax_md.util import Array
@@ -147,10 +152,10 @@ def _position_restraint_energy(
 # ==============================================================================
 
 def _build_dense_exclusion_scales(
-    excl_indices: 'Array',
-    excl_scales: 'Array',
+    excl_indices: Array,
+    excl_scales: Array,
     N: int,
-) -> 'Array':
+) -> Array:
     """Convert sparse (N, M) exclusion arrays to dense (N, N) scale matrix.
 
     Uses fori_loop over M (typically 32) exclusion slots. Each iteration
@@ -279,13 +284,13 @@ def _coulomb_energy_masked(
 
 
 def _lj_energy_neighbor_list(
-    r: 'Array',
-    sigmas: 'Array',
-    epsilons: 'Array',
-    neighbor_idx: 'Array',
-    soft_core_lambda: 'Array | None' = None,
-    excl_scales_vdw: 'Array | None' = None,
-) -> 'Array':
+    r: Array,
+    sigmas: Array,
+    epsilons: Array,
+    neighbor_idx: Array,
+    soft_core_lambda: Array | None = None,
+    excl_scales_vdw: Array | None = None,
+) -> Array:
     """Computes Lennard-Jones energy using neighbor list indices.
 
     O(N*K) scaling instead of O(N^2). Each atom i has K neighbor slots.
@@ -413,8 +418,8 @@ def single_padded_energy(sys: PaddedSystem, displacement_fn: space.DisplacementF
 
     # Reciprocal Space (PME) + explicit-solvent corrections (aligned with system / Flash)
     if sys.box_size is not None and sys.pme_alpha > 0.0:
-        from prolix.physics.pme import make_spme_energy_fn, spme_background_energy
         from prolix.physics import explicit_corrections
+        from prolix.physics.pme import make_spme_energy_fn, spme_background_energy
         from prolix.utils import topology
 
         box_arr = jnp.asarray(sys.box_size)
@@ -565,9 +570,9 @@ def single_padded_force(
     else:
         # --- Legacy path: dense (N,N) exclusion matrices required ---
         from prolix.physics.analytical_forces import (
-            lj_forces_dense,
             coulomb_forces_dense,
             gb_ace_forces_dense,
+            lj_forces_dense,
         )
 
         if sys.dense_excl_scale_vdw is not None:
@@ -705,11 +710,11 @@ def _make_lj_energy_nl_cvjp(neighbor_idx, soft_core_lambda=jnp.float32(1.0), exc
 
 def single_padded_energy_nl_cvjp(
     sys: PaddedSystem,
-    neighbor_idx: 'Array',
+    neighbor_idx: Array,
     displacement_fn: space.DisplacementFn,
     implicit_solvent: bool = True,
-    soft_core_lambda: 'Array' = jnp.array(1.0),
-) -> 'Array':
+    soft_core_lambda: Array = jnp.array(1.0),
+) -> Array:
     """Like single_padded_energy_nl but with custom VJP for LJ + checkpoint for GB.
 
     This variant:
@@ -729,7 +734,6 @@ def single_padded_energy_nl_cvjp(
     e_cmap = _cmap_energy_masked(r, sys.cmap_torsions, sys.cmap_indices, sys.cmap_mask, sys.cmap_coeffs, displacement_fn)
 
     # Compute (N, K) exclusion scales for neighbor list
-    from prolix.physics.neighbor_list import get_neighbor_exclusion_scales
     excl_scales_vdw_nl, _excl_scales_elec_nl = get_neighbor_exclusion_scales(
         sys.excl_indices, sys.excl_scales_vdw, sys.excl_scales_elec, neighbor_idx,
     )
@@ -752,8 +756,8 @@ def single_padded_energy_nl_cvjp(
 
     if implicit_solvent:
         from prolix.physics.generalized_born import (
-            compute_gb_energy_neighbor_list,
             compute_ace_nonpolar_energy,
+            compute_gb_energy_neighbor_list,
         )
         # Checkpoint GB to save memory (recompute forward during backward)
         @jax.checkpoint
@@ -780,11 +784,11 @@ def single_padded_energy_nl_cvjp(
 
 def single_padded_energy_nl(
     sys: PaddedSystem,
-    neighbor_idx: 'Array',
+    neighbor_idx: Array,
     displacement_fn: space.DisplacementFn,
     implicit_solvent: bool = True,
-    soft_core_lambda: 'Array' = jnp.array(1.0),
-) -> 'Array':
+    soft_core_lambda: Array = jnp.array(1.0),
+) -> Array:
     """Computes total potential energy using neighbor lists for non-bonded terms.
 
     O(N*K) scaling for LJ and GB instead of O(N^2).
@@ -811,7 +815,6 @@ def single_padded_energy_nl(
     e_cmap = _cmap_energy_masked(r, sys.cmap_torsions, sys.cmap_indices, sys.cmap_mask, sys.cmap_coeffs, displacement_fn)
 
     # Non-bonded: O(N*K) via neighbor list
-    from prolix.physics.neighbor_list import get_neighbor_exclusion_scales
     excl_scales_vdw_nl, _excl_scales_elec_nl = get_neighbor_exclusion_scales(
         sys.excl_indices, sys.excl_scales_vdw, sys.excl_scales_elec, neighbor_idx,
     )
@@ -834,8 +837,8 @@ def single_padded_energy_nl(
 
     if implicit_solvent:
         from prolix.physics.generalized_born import (
-            compute_gb_energy_neighbor_list,
             compute_ace_nonpolar_energy,
+            compute_gb_energy_neighbor_list,
         )
         e_gb, born_radii = compute_gb_energy_neighbor_list(
             positions=r,
