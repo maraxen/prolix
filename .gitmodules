@@ -1,0 +1,3 @@
+[submodule "third_party/euclidean_fast_attention"]
+	path = third_party/euclidean_fast_attention
+	url = https://github.com/thorben-frank/euclidean_fast_attention
