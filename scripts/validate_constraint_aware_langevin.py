@@ -121,7 +121,7 @@ def run_validation_test(dt_fs: float, duration_ps: float = 100.0, n_waters: int 
 
     try:
         init_fn, apply_fn = settle_langevin(
-            energy_fn=mock_energy_fn,
+            energy_or_force_fn=mock_energy_fn,  # Correct parameter name
             shift_fn=mock_shift_fn,
             dt=dt_akma,
             kT=kT,
