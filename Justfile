@@ -156,6 +156,10 @@ submit-tip3p-ke-compare: push-engaging
 submit-tip3p-dt-gamma-matrix: push-engaging
     ssh {{ssh_opts}} {{engaging_login}} 'cd {{engaging_remote_dir}} && export ENGAGING_LOG_DATE=$(date +%Y%m%d) && mkdir -p outputs/logs/engaging/$ENGAGING_LOG_DATE/slurm outputs/logs/engaging/$ENGAGING_LOG_DATE/app && o=outputs/logs/engaging/$ENGAGING_LOG_DATE/slurm && sbatch --parsable --partition={{engaging_partition_preemptable}} -o $o/tip3p_dt_gamma_%j.out -e $o/tip3p_dt_gamma_%j.err scripts/slurm/bench_tip3p_dt_gamma_matrix.slurm'
 
+# Sprint 3: CSVR thermostat temperature + equipartition validation (CPU, f64, 4h).
+submit-csvr-validate: push-engaging
+    ssh {{ssh_opts}} {{engaging_login}} 'cd {{engaging_remote_dir}} && export ENGAGING_LOG_DATE=$(date +%Y%m%d) && mkdir -p outputs/logs/engaging/$ENGAGING_LOG_DATE/slurm outputs/logs/engaging/$ENGAGING_LOG_DATE/app && o=outputs/logs/engaging/$ENGAGING_LOG_DATE/slurm && sbatch --parsable --partition={{engaging_partition_preemptable}} -o $o/%x_%j.out -e $o/%x_%j.err scripts/slurm/validate_csvr_temperature.slurm'
+
 submit-bench-array: push-engaging
     ssh {{ssh_opts}} {{engaging_login}} 'cd {{engaging_remote_dir}} && export ENGAGING_LOG_DATE=$(date +%Y%m%d) && mkdir -p outputs/logs/engaging/$ENGAGING_LOG_DATE/slurm && sbatch -o outputs/logs/engaging/$ENGAGING_LOG_DATE/slurm/%x_%A_%a.out -e outputs/logs/engaging/$ENGAGING_LOG_DATE/slurm/%x_%A_%a.err scripts/slurm/bench_array.slurm'
 
