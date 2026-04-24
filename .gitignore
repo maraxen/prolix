@@ -19,11 +19,13 @@ batch_physics_results.csv
 # External dependencies (cloned repos)
 scripts/openmmforcefields/
 openmmforcefields/
+references/kups/
 
 # Generated force field files
 # Legacy path from pre-proxide local layout (safe to delete if unused)
 src/priox.physics.force_fields/
 outputs/
+results/
 
 .agent/skills
 *.lock
