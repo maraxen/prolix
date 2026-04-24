@@ -147,17 +147,20 @@ def run_validation_test(dt_fs: float, duration_ps: float = 100.0, n_waters: int 
         rng=rng_key,
     )
 
+    # JIT-compile the integrator step (critical for performance)
+    apply_fn_jit = jax.jit(apply_fn)
+
     # Storage for metrics
     temperatures = []
     energies = []
     checkpoint_every = max(1, n_steps // 100)  # 100 checkpoints over simulation
 
-    print(f"\nRunning {n_steps} steps...")
+    print(f"\nRunning {n_steps} steps (JIT compiling first step)...")
 
     # Run simulation
     for step in range(n_steps):
         # Apply integrator
-        state = apply_fn(state)
+        state = apply_fn_jit(state)
 
         # Checkpoint every checkpoint_every steps
         if step % checkpoint_every == 0:
