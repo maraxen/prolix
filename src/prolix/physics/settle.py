@@ -566,6 +566,12 @@ def settle_langevin(
   water’s rigid-body subspace (unless ``project_ou_momentum_rigid=False``), so isotropic
   Cartesian noise does not over-drive ``6 N_w-3`` kinetic degrees of freedom.
 
+  **IMPORTANT**: For stable temperature control with SETTLE constraints, use **dt ≤ 0.5 fs**.
+  Larger timesteps couple SETTLE constraint impulses with Langevin thermostat feedback,
+  creating oscillations that compromise temperature stability. The reduced timestep constraint
+  is a known limitation in v1.0; future versions will implement constraint-aware thermostats
+  to eliminate this restriction.
+
   Args:
       energy_or_force_fn: System force definition.
       shift_fn: Displacement function.
