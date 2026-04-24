@@ -40,6 +40,15 @@ class ElectrostaticMethod(StrEnum):
   See references/notes/rff_erfc_derivation.md for derivation.
   """
 
+  EFA_LEBEDEV = "efa_lebedev"
+  """Euclidean Fast Attention-style Coulomb via Lebedev quadrature (deterministic).
+
+  Like EFA but uses deterministic Lebedev quadrature on S² instead of stochastic RFF
+  sampling. O(N*K*G) where K=n_freqs (typically 32) and G=26 (Lebedev grid size).
+  Zero variance, good for validation. Requires soft_core_lambda=1.0.
+  See efa_coulomb.py and references/notes/frank2024_efa_notes.md.
+  """
+
 
 def openmm_reaction_field_coefficients(
   cutoff: float,

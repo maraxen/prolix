@@ -25,6 +25,10 @@ from prolix.padding import PaddedSystem
 from prolix.physics import explicit_corrections, pbc
 from prolix.physics.electrostatic_methods import ElectrostaticMethod
 from prolix.physics.pme import make_spme_energy_fn, spme_background_energy
+from prolix.physics.efa_coulomb import (
+    efa_lebedev_coulomb_energy,
+    efa_lebedev_params,
+)
 from prolix.physics.rff_coulomb import (
     efa_exclusion_correction,
     efa_short_range_erfc_energy,
@@ -349,6 +353,73 @@ def _total_energy_fn(
         e_total = e_lj + e_coul_rff + e_short_range + e_excl
 
         # Dispersion tail correction (still needed for consistency)
+        n_tail = sys.n_real_atoms if sys.n_real_atoms is not None else n_atoms
+        e_total += explicit_corrections.lj_dispersion_tail_energy(
+            sys.box_size,
+            safe_sigmas,
+            safe_epsilons,
+            float(sys.nonbonded_cutoff),
+            n_tail,
+        )
+
+        return e_total
+
+    # EFA_LEBEDEV path: deterministic Lebedev quadrature instead of RFF sampling
+    if electrostatic_method == ElectrostaticMethod.EFA_LEBEDEV:
+        if soft_core_lambda != 1.0:
+            raise ValueError(
+                "EFA_LEBEDEV electrostatics require soft_core_lambda=1.0 "
+                "(no alchemical perturbation)."
+            )
+
+        # Compute LJ only via chunked loop
+        e_lj = _chunked_lj_only_energy(
+            pos, safe_sigmas, safe_epsilons, sys.atom_mask, sys, T=T
+        )
+
+        # EFA-Lebedev global Coulomb (deterministic, no seed)
+        pme_alpha_float = float(sys.pme_alpha)
+        params = efa_lebedev_params(pme_alpha_float, n_freqs=n_rff_features, n_lebedev_pts=26)
+        e_coul_efa = efa_lebedev_coulomb_energy(pos, safe_charges, sys.atom_mask, params)
+
+        # Exclusion correction for bonded pairs (same as EFA)
+        displacement_fn, _ = pbc.create_periodic_space(sys.box_size)
+        n_atoms = pos.shape[0]
+        if sys.bonds is not None and sys.bonds.shape[0] > 0:
+            excl = topology.find_bonded_exclusions(sys.bonds, n_atoms)
+            idx_12, idx_13, idx_14 = excl.idx_12, excl.idx_13, excl.idx_14
+        else:
+            z = jnp.zeros((0, 2), dtype=jnp.int32)
+            idx_12 = idx_13 = idx_14 = z
+
+        idx_12_13 = jnp.concatenate(
+            [idx_12, idx_13] if idx_12.shape[0] > 0 or idx_13.shape[0] > 0
+            else [jnp.zeros((0, 2), dtype=jnp.int32), jnp.zeros((0, 2), dtype=jnp.int32)]
+        )
+        e_excl = efa_exclusion_correction(
+            pos,
+            safe_charges,
+            sys.atom_mask,
+            displacement_fn,
+            idx_12_13,
+            idx_14,
+            jnp.float32(0.83333333),
+            pme_alpha_float,
+        )
+
+        # Short-range erfc(αr)/r for hybrid decomposition
+        e_short_range = efa_short_range_erfc_energy(
+            pos,
+            safe_charges,
+            sys.atom_mask,
+            displacement_fn,
+            float(sys.nonbonded_cutoff),
+            pme_alpha_float,
+        )
+
+        e_total = e_lj + e_coul_efa + e_short_range + e_excl
+
+        # Dispersion tail correction
         n_tail = sys.n_real_atoms if sys.n_real_atoms is not None else n_atoms
         e_total += explicit_corrections.lj_dispersion_tail_energy(
             sys.box_size,
