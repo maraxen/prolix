@@ -115,9 +115,9 @@ def run_validation_test(dt_fs: float, duration_ps: float = 100.0, n_waters: int 
         """Dummy energy function (no interactions for this test)."""
         return 0.0
 
-    def mock_shift_fn(r):
-        """Dummy shift function."""
-        return r
+    def mock_shift_fn(r, displacement):
+        """Dummy shift function - applies displacement to positions."""
+        return r + displacement
 
     try:
         init_fn, apply_fn = settle_langevin(
@@ -166,7 +166,7 @@ def run_validation_test(dt_fs: float, duration_ps: float = 100.0, n_waters: int 
                 state.position,
                 state.momentum,
                 masses,
-                water_indices
+                n_waters
             )
 
             # Temperature from rigid-body KE
