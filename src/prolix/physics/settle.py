@@ -747,6 +747,130 @@ def settle_langevin(
   return init_fn, apply_fn
 
 
+def settle_with_nhc(
+  energy_or_force_fn: Callable,
+  shift_fn: Callable,
+  dt: float,
+  kT: float,
+  mass: Array | float = 1.0,
+  water_indices: WaterIndicesArray | None = None,
+  box: Array | None = None,
+  r_OH: float = TIP3P_ROH,
+  r_HH: float = TIP3P_RHH,
+  mass_oxygen: float = 15.999,
+  mass_hydrogen: float = 1.008,
+  settle_velocity_iters: int = 10,
+  settle_velocity_tol: float | None = None,
+  constraints: tuple | None = None,
+  remove_linear_com_momentum: bool = True,
+  chain_length: int = 5,
+  chain_steps: int = 2,
+  sy_steps: int = 3,
+  tau: float | None = None,
+) -> tuple[Callable, Callable]:
+  r"""SETTLE constraints with JAX MD's Nosé-Hoover Chain thermostat.
+
+  Wraps JAX MD's proven `nvt_nose_hoover()` with SETTLE rigid water
+  constraint enforcement. Uses a Nosé-Hoover Chain (NHC) thermostat
+  (chain_length=5 by default, more stable than single thermostat).
+
+  Integrator Order:
+  ```
+  Base: JAX MD's nvt_nose_hoover (NHC thermostat)
+  Wrapped with: SETTLE position constraints → SETTLE velocity constraints
+  ```
+
+  Args:
+      energy_or_force_fn: Callable returning force (or energy).
+      shift_fn: PBC shift function from `jax_md.space`.
+      dt: Timestep (AKMA units).
+      kT: Thermal energy (k_B * T in AKMA units).
+      mass: Atomic masses.
+      water_indices: (N_waters, 3) indices [O, H1, H2] for SETTLE waters.
+      box: Optional PBC box dimensions (3,).
+      r_OH, r_HH: Bond lengths for SETTLE.
+      mass_oxygen, mass_hydrogen: TIP3P masses.
+      settle_velocity_iters: SETTLE velocity correction iterations.
+      settle_velocity_tol: SETTLE velocity tolerance.
+      constraints: Optional (pairs, lengths) for solute RATTLE.
+      remove_linear_com_momentum: Subtract COM velocity after SETTLE_vel.
+      chain_length: NHC chain length (default 5).
+      chain_steps: NHC outer substeps (default 2).
+      sy_steps: Suzuki-Yoshida steps (default 3, must be 1/3/5/7).
+      tau: NHC coupling timescale (in units of dt).
+
+  Returns:
+      (init_fn, apply_fn) tuple for NVT dynamics with NHC + SETTLE.
+  """
+  from jax_md import simulate as jax_md_simulate
+
+  # Get JAX MD's proven Nosé-Hoover Chain integrator
+  nhc_init, nhc_apply = jax_md_simulate.nvt_nose_hoover(
+    energy_or_force_fn,
+    shift_fn,
+    dt,
+    kT,
+    chain_length=chain_length,
+    chain_steps=chain_steps,
+    sy_steps=sy_steps,
+    tau=tau,
+  )
+
+  # If no water indices, return the NHC integrator as-is
+  if water_indices is None or water_indices.shape[0] == 0:
+    return nhc_init, nhc_apply
+
+  # Wrap NHC apply function with SETTLE constraints
+  def apply_with_settle(state, **kwargs):
+    """Apply one NHC step, then enforce SETTLE constraints."""
+    # Store old positions for SETTLE velocity correction
+    positions_old = state.position
+
+    # Apply one step of JAX MD's NHC integrator
+    state = nhc_apply(state, **kwargs)
+
+    # Enforce SETTLE position constraints
+    position = settle_positions(
+      state.position,
+      positions_old,
+      water_indices,
+      r_OH,
+      r_HH,
+      mass_oxygen,
+      mass_hydrogen,
+      box,
+    )
+
+    # Recompute forces after constraining positions
+    force = quantity.canonicalize_force(energy_or_force_fn)(position, **kwargs)
+
+    # Enforce SETTLE velocity constraints
+    momentum = _langevin_settle_vel(
+      state.momentum,
+      positions_old,
+      position,
+      state.mass,
+      water_indices,
+      kwargs.pop("dt", dt),
+      mass_oxygen,
+      mass_hydrogen,
+      n_iters=settle_velocity_iters,
+      settle_velocity_tol=settle_velocity_tol,
+    )
+
+    if remove_linear_com_momentum:
+      mass_col = state.mass
+      p_tot = jnp.sum(momentum, axis=0)
+      m_tot = jnp.sum(mass_col)
+      v_com = p_tot / jnp.maximum(m_tot, jnp.array(1e-30, dtype=m_tot.dtype))
+      momentum = momentum - mass_col * v_com
+
+    # Return updated state with constrained position and momentum
+    return state.set(position=position, momentum=momentum, force=force)
+
+  return nhc_init, apply_with_settle
+
+
 def _langevin_step_b(momentum: Array, force: Array, dt: float) -> Array:
   """Half-step velocity update (B step in BAOAB)."""
   return momentum + 0.5 * dt * force
