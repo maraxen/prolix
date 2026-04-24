@@ -12,6 +12,8 @@ from proxide import OutputSpec, parse_structure
 
 from prolix.physics.regression_explicit_pme import REGRESSION_EXPLICIT_PME
 
+# Sprint 2 EFA regression knobs: populate from first calibration run of test_efa_pme_force_rmse_relative
+
 
 @pytest.fixture(autouse=True)
 def _enable_x64():
@@ -142,6 +144,14 @@ _DATA_DIR = Path(__file__).parent / "data"
 def regression_pme_params():
   """Standard explicit solvent PME parameters for regression tests."""
   return REGRESSION_EXPLICIT_PME
+
+
+def pytest_configure(config):
+    """Register custom markers."""
+    config.addinivalue_line(
+        "markers",
+        "electrostatic_comparison: marks tests comparing EFA vs PME (may be slow)",
+    )
 
 
 @pytest.fixture(scope="session")
