@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "prolix"
-version = "0.1.0"
+version = "1.0.0"
 description = "Protein Physics and Molecular Dynamics in JAX"
 readme = "README.md"
 license = "MIT"
