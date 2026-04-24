@@ -1167,8 +1167,7 @@ def settle_csvr(
   4.  **Force eval**: Recompute forces at constrained positions.
   5.  **B-step**: Final half-kick.
   6.  **SETTLE-Vel**: Velocity constraint correction.
-  7.  **COM removal**: Remove system COM momentum (if remove_com=True).
-  8.  **CSVR-Rescale**: Global scalar velocity rescaling via chi-squared sampling.
+  7.  **CSVR-Rescale**: Global scalar velocity rescaling via chi-squared sampling.
 
   CSVR replaces the per-DOF Langevin O-step with a single chi-squared sample that
   drives a scalar rescaling of all momenta. This scalar operation preserves SETTLE
@@ -1189,7 +1188,7 @@ def settle_csvr(
       mass_oxygen: Mass of oxygen (amu).
       mass_hydrogen: Mass of hydrogen (amu).
       n_constraint_pairs: Number of solute SHAKE/RATTLE bond pairs (for DOF count).
-      remove_com: If True, remove system COM momentum each step and exclude 3 COM DOF from thermostat target.
+      remove_com: If True, exclude COM translation from DOF count.
       box: Periodic box dimensions or None.
       **kwargs: Additional arguments (energy_fn kwargs).
 
@@ -1270,12 +1269,6 @@ def settle_csvr(
         n_iters=10,
         settle_velocity_tol=None,
       )
-
-    # === Remove COM momentum if requested ===
-    if remove_com:
-      total_mass = jnp.sum(state.mass)
-      com_momentum = jnp.sum(momentum, axis=0) / total_mass
-      momentum = momentum - state.mass * com_momentum[jnp.newaxis, :]
 
     # === CSVR velocity rescaling ===
     # Compute total kinetic energy in the constrained system
