@@ -145,3 +145,74 @@ This gives a different importance distribution that may have better variance pro
 - Sprint 2 Phase 2/3 EFA validation: **BLOCKED**
 - MTT Phase 2 (depends on EFA validation): **further deferred**
 - v0.3.0 release scope: PME path unaffected; EFA is experimental and can ship as `alpha` with known limitation.
+
+---
+
+## Correction: Sprint 3 Fix Attempt — Unsound (2026-04-24, same day)
+
+A fixer was deployed to implement the sampler fix, guided by an oracle plan that proposed replacing the `t²-α²~Exp(1)` sampler with a Gaussian direction + half-normal magnitude scheme. **The oracle plan contained a critical mathematical error.**
+
+### Oracle/Planner Error: erf vs erfc Fourier transform pairs
+
+The oracle stated that `FT[erfc(αr)/r] = (4π/k²)·exp(-k²/(4α²))`, which it used to justify sampling frequencies from a Gaussian `p(k) ∝ k² exp(-k²/(4α²))`. **This is wrong.** The correct FT pairs are:
+
+| Kernel | Fourier Transform |
+|--------|------------------|
+| `erf(αr)/r` | `(4π/k²)·exp(-k²/(4α²))` |
+| `erfc(αr)/r` | `(4π/k²)·(1 − exp(-k²/(4α²)))` |
+
+The oracle swapped `erf` and `erfc`.
+
+### Consequence: erfc(αr)/r Cannot Be Approximated by Standard RFF
+
+The radial spectral density of `erfc(αr)/r` is:
+
+```
+p_rad(k) ∝ 1 − exp(−k²/(4α²))
+```
+
+This **diverges as k→∞** and is non-integrable. Bochner's theorem requires a normalizable spectral measure. No standard RFF sampler exists for `erfc(αr)/r`.
+
+### What the Fixer's Code Actually Approximated
+
+The fixer's half-normal magnitude sampler draws `|k| ~ |g|·α·√2` (i.e., `|k|² ~ χ²(1)·2α²`), which is the radial spectral density of `erf(αr)/r`. Combined with `[cos, sin]` features at scale `√(2α)` (wrong — fixer used `√(2α)` instead of `√(2α/√π)`), the estimator converges to:
+
+```
+φᵢᵀ φⱼ  →  (2α/√π) · E_ω[cos(ω·r)]  =  (2α/√π) · (√π/(2α)) · erf(αr)/r  =  erf(αr)/r
+```
+
+or rather `√π · erf(αr)/r` due to the wrong prefactor.
+
+### False Validation Pass
+
+The fixer's validation script only checked `r=1.0 Å` at `D=2048`. At that point:
+
+```
+√π · erf(0.34)/1 ≈ 0.654   vs   erfc(0.34)/1 ≈ 0.631   →  3.7% error (below 5% threshold)
+```
+
+At `r=2.0 Å`: `√π · erf(0.68)/2 ≈ 0.582` vs `erfc(0.68)/2 ≈ 0.161` → **261% error**. The validation script never checked this distance.
+
+### Revert
+
+All fixer changes were reverted:
+- `src/prolix/physics/rff_coulomb.py` restored to the original `t²-α²~Exp(1)` sampler
+- xfail markers restored to all 7 tests in `test_efa_vs_pme_forces.py` (5) and `test_efa_energy_consistency.py` (2)
+- `tests/validation/validate_rff_kernel.py` deleted (misleading false-positive validation)
+
+### Sprint 3 Revised Recommendation
+
+**Options A and C from above are also unsound** because they assume a normalizable spectral density for `erfc(αr)/r`, which does not exist.
+
+The only architecturally sound path is **Option B (Hybrid)**:
+
+- Short-range (`r < r_cut`): exact pair `erfc(αr)/r` Coulomb (O(N·k_nn))
+- Long-range: RFF approximation of `erf(αr)/r` = `1/r − erfc(αr)/r`
+
+`erf(αr)/r` has the normalizable spectral density `p_rad(k) ∝ k² exp(-k²/(4α²))`, so standard RFF applies. The hybrid recovers:
+
+```
+1/r = erfc(αr)/r + erf(αr)/r
+```
+
+with exact short-range and approximate long-range — the standard PME decomposition, but replacing k-space with RFF. Sprint 3 should be framed as implementing this hybrid, not fixing the sampler.
