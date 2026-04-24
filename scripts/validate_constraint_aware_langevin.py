@@ -174,7 +174,7 @@ def run_validation_test(dt_fs: float, duration_ps: float = 100.0, n_waters: int 
 
             # Temperature from rigid-body KE
             dof_rigid = 6 * n_waters - 3
-            boltzmann_kcal = 1.987e-3 / 1000.0  # kcal/(mol*K)
+            boltzmann_kcal = 1.987e-3  # kcal/(mol*K)
             t_instant = 2.0 * ke_rigid / (dof_rigid * boltzmann_kcal)
 
             temperatures.append(float(t_instant))
