@@ -27,6 +27,7 @@ from prolix.physics.electrostatic_methods import ElectrostaticMethod
 from prolix.physics.pme import make_spme_energy_fn, spme_background_energy
 from prolix.physics.rff_coulomb import (
     efa_exclusion_correction,
+    efa_short_range_erfc_energy,
     erfc_rff_coulomb_energy_diff,
     rff_frequency_sample,
 )
@@ -334,7 +335,18 @@ def _total_energy_fn(
             pme_alpha_float,
         )
 
-        e_total = e_lj + e_coul_rff + e_excl
+        # Short-range erfc(αr)/r for hybrid decomposition:
+        # 1/r = erfc(αr)/r [short-range] + erf(αr)/r [long-range RFF]
+        e_short_range = efa_short_range_erfc_energy(
+            pos,
+            safe_charges,
+            sys.atom_mask,
+            displacement_fn,
+            float(sys.nonbonded_cutoff),
+            pme_alpha_float,
+        )
+
+        e_total = e_lj + e_coul_rff + e_short_range + e_excl
 
         # Dispersion tail correction (still needed for consistency)
         n_tail = sys.n_real_atoms if sys.n_real_atoms is not None else n_atoms

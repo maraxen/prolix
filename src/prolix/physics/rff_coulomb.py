@@ -19,40 +19,39 @@ def rff_frequency_sample(
     key: Array,
     antithetic: bool = True,
 ) -> Float[Array, "n_half_features 3"]:
-  """Sample RFF frequencies for erfc(a*r)/r kernel approximation.
+  """Sample RFF frequencies for erf(a*r)/r kernel approximation.
 
-  Uses Gaussian mixture representation: erfc(α*r)/r = (2/√π) ∫_α^∞ exp(−t²r²) dt.
-  Samples t from the shifted exponential distribution t² − α² ~ Exp(1), which ensures
-  t ≥ α. Then samples ω | t ~ N(0, 2t²*I₃).
+  erf(αr)/r has Fourier transform K̂(k) = (4π/k²)exp(-k²/(4α²)).
+  Normalized spectral density (PDF): p(ω) ∝ (1/|ω|²)exp(-|ω|²/(4α²)).
+  Radial marginal: p_rad(t) ∝ exp(-t²/(4α²)) — half-normal with scale α√2.
+  Direction: uniform on S².
 
-  This is an approximate importance sampling scheme that biases toward the
-  dominant contributions in the integral. With antithetic=True, returns D/2 unique
-  frequencies; the paired −ω variates are implicit in the cos/sin feature construction.
+  With the [cos, sin] feature construction and prefactor sqrt(2α/sqrt(π)),
+  the dot product phi(xᵢ)ᵀphi(xⱼ) ≈ erf(αr)/r.
+  The full Coulomb 1/r is recovered by adding exact short-range erfc(αr)/r.
 
   Args:
     alpha: Ewald damping parameter (1/Angstrom). Typical: 0.34.
     n_features: Total number of features D. Returns D/2 unique frequencies.
     key: JAX PRNG key.
-    antithetic: If True (default), pair each ω_d with −ω_d to halve variance.
+    antithetic: Kept for API compatibility; [cos,sin] construction is antithetic.
 
   Returns:
-    Frequencies array of shape (D/2, 3) sampled from N(0, 2t_d² I₃) where t ≥ α.
+    Frequencies array of shape (D/2, 3).
   """
   d_half = n_features // 2
-  key_t, key_omega = jax.random.split(key)
+  key_dir, key_mag = jax.random.split(key)
 
-  # Sample t^2 - alpha^2 ~ Exp(1), so t^2 >= alpha^2 and t >= alpha (guaranteed).
-  # This ensures support is [alpha, inf) as required by the integral bounds.
-  exp_samples = jax.random.exponential(key_t, shape=(d_half,))
-  t_sq = alpha**2 + exp_samples
-  t_samples = jnp.sqrt(t_sq)  # shape (D/2,), support [alpha, inf)
+  # Sample direction uniformly on S²
+  u = jax.random.normal(key_dir, shape=(d_half, 3))
+  u = u / jnp.linalg.norm(u, axis=-1, keepdims=True)
 
-  # Sample omega | t ~ N(0, 2t² I₃) for each t
-  # Covariance: 2t_d² along each dimension
-  normal_samples = jax.random.normal(key_omega, shape=(d_half, 3))
-  omega = normal_samples * jnp.sqrt(2.0 * t_sq)[:, None]
+  # Sample magnitude from half-normal with scale α√2
+  # This matches p_rad(t) ∝ exp(-t²/(4α²))
+  g = jax.random.normal(key_mag, shape=(d_half,))
+  magnitude = jnp.abs(g) * alpha * jnp.sqrt(2.0)
 
-  return omega
+  return magnitude[:, None] * u
 
 
 def erfc_rff_features(
@@ -60,18 +59,19 @@ def erfc_rff_features(
     omega: Float[Array, "D2 3"],
     alpha: float,
 ) -> Float[Array, "N n_features"]:
-  """Compute RFF feature vectors phi(x_i) for erfc(a*r)/r kernel.
+  """Compute RFF feature vectors phi(x_i) for erf(a*r)/r kernel.
 
   Output shape: (N, n_features) = (N, 2*D2).
-  Kernel approximation: K(r_ij) ~ (2/sqrt(pi)) * phi(x_i)^T phi(x_j)
+  Kernel approximation: phi(x_i)^T phi(x_j) ≈ erf(αr)/r.
+  Full Coulomb 1/r requires adding exact short-range erfc(αr)/r separately.
 
   Args:
     positions: (N, 3) atom positions.
-    omega: (D2, 3) = (n_features//2, 3) RFF frequencies.
+    omega: (D2, 3) = (n_features//2, 3) RFF frequencies from rff_frequency_sample.
     alpha: Ewald damping parameter.
 
   Returns:
-    Features (N, 2*D2) with cos and sin terms normalized by sqrt(D2).
+    Features (N, 2*D2) normalized so dot product approximates erf(αr)/r.
   """
   d2 = omega.shape[0]
   n_atoms = positions.shape[0]
@@ -86,8 +86,8 @@ def erfc_rff_features(
   # or stack: [[cos], [sin]]
   features = jnp.stack([cos_feat, sin_feat], axis=-1).reshape(n_atoms, 2 * d2)
 
-  # Apply (2/sqrt(pi)) prefactor
-  prefactor = 2.0 / jnp.sqrt(jnp.pi)
+  # Apply prefactor sqrt(2α/sqrt(π)) for correct kernel normalization
+  prefactor = jnp.sqrt(2.0 * alpha / jnp.sqrt(jnp.pi))
   return features * prefactor
 
 
@@ -195,7 +195,7 @@ def _erfc_rff_bwd(residuals, g):
 
   proj = jnp.dot(positions, omega.T)  # (N, D/2)
   norm = 1.0 / jnp.sqrt(d2)
-  norm_pref = 2.0 / jnp.sqrt(jnp.pi)
+  norm_pref = jnp.sqrt(2.0 * alpha / jnp.sqrt(jnp.pi))
 
   # dcos(proj) / dx = -omega sin(proj)
   # dsin(proj) / dx = omega cos(proj)
@@ -234,14 +234,17 @@ def efa_exclusion_correction(
     coul_14_scale: float,
     alpha: float,
 ) -> Float[Array, ""]:
-  """Sparse exclusion correction for EFA Coulomb.
+  """Sparse exclusion correction for EFA Coulomb (hybrid decomposition).
 
-  Subtracts erfc(a*r)/r contribution for bonded pairs that RFF includes
-  but should be excluded or scaled. Mirrors pme_exclusion_correction_energy
-  in explicit_corrections.py.
+  The RFF approximates erf(αr)/r (long-range). This function subtracts the
+  erf(αr)/r contribution for bonded pairs that RFF includes but should be
+  excluded or scaled. Mirrors pme_exclusion_correction_energy in explicit_corrections.py.
 
-  For 1-2/1-3: subtract full erfc(a*r)/r * q_i q_j * k_e
-  For 1-4: subtract (1 - coul_14_scale) * erfc(a*r)/r * q_i q_j * k_e
+  Decomposition: 1/r = erfc(αr)/r [short-range, exact] + erf(αr)/r [long-range, RFF]
+  The RFF includes ALL bonded pairs in erf(αr)/r; this correction removes them.
+
+  For 1-2/1-3: subtract full erf(a*r)/r * q_i q_j * k_e
+  For 1-4: subtract (1 - coul_14_scale) * erf(a*r)/r * q_i q_j * k_e
 
   Args:
     positions: (N, 3) atom positions.
@@ -254,7 +257,7 @@ def efa_exclusion_correction(
     alpha: Ewald damping parameter.
 
   Returns:
-    Scalar correction energy (negative, since we subtract).
+    Scalar correction energy (negative, since we subtract erf(αr)/r for bonded pairs).
   """
   charges = jnp.asarray(charges)
 
@@ -272,8 +275,8 @@ def efa_exclusion_correction(
 
     # Avoid division by zero
     dist_safe = dist + 1e-6
-    erfc_term = jax.scipy.special.erfc(alpha * dist)
-    e_pair = COULOMB_CONSTANT * (q_i * q_j / dist_safe) * erfc_term
+    erf_term = jax.scipy.special.erf(alpha * dist)
+    e_pair = COULOMB_CONSTANT * (q_i * q_j / dist_safe) * erf_term
 
     # Scale and sum
     factor = 1.0 - scale_factor
@@ -284,3 +287,51 @@ def efa_exclusion_correction(
   e_excl = e_excl + calc_exclusion_term(idx_14, coul_14_scale)
 
   return -e_excl
+
+
+def efa_short_range_erfc_energy(
+    positions: Float[Array, "N 3"],
+    charges: Float[Array, N],
+    atom_mask: Float[Array, N],
+    displacement_fn,
+    cutoff: float,
+    alpha: float,
+) -> Float[Array, ""]:
+  """Exact short-range erfc(αr)/r Coulomb for r < cutoff (hybrid decomposition).
+
+  Computes the short-range component of the Coulomb decomposition:
+    1/r = erfc(αr)/r [short-range, this fn] + erf(αr)/r [long-range, RFF]
+
+  O(N²) implementation — correct for validation; use neighbor lists in production.
+
+  Args:
+    positions: (N, 3) atom positions.
+    charges: (N,) partial charges.
+    atom_mask: (N,) boolean mask; False for ghost atoms.
+    displacement_fn: jax_md DisplacementFn for minimum-image convention.
+    cutoff: Short-range cutoff in Angstrom (matches nonbonded_cutoff).
+    alpha: Ewald damping parameter.
+
+  Returns:
+    Scalar short-range erfc energy in kcal/mol.
+  """
+  charges = jnp.asarray(charges)
+  charges_masked = charges * jnp.asarray(atom_mask)
+  n = positions.shape[0]
+
+  # Compute all pairwise displacements
+  dr = jax.vmap(jax.vmap(displacement_fn, (None, 0)), (0, None))(positions, positions)
+  dist = space.distance(dr)  # (N, N)
+
+  q_outer = charges_masked[:, None] * charges_masked[None, :]  # (N, N)
+
+  dist_safe = dist + 1e-8
+  erfc_val = jax.scipy.special.erfc(alpha * dist)
+  pair_energy = COULOMB_CONSTANT * q_outer * erfc_val / dist_safe
+
+  # Mask: within cutoff, off-diagonal, both atoms real
+  within_cutoff = dist < cutoff
+  off_diag = ~jnp.eye(n, dtype=bool)
+  valid = within_cutoff & off_diag
+
+  return jnp.sum(jnp.where(valid, pair_energy, 0.0)) / 2.0

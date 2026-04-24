@@ -18,16 +18,6 @@ from prolix.physics.eval_harness import (
 
 
 @pytest.mark.electrostatic_comparison
-@pytest.mark.xfail(
-    strict=False,
-    reason=(
-        "Sprint 2 blocker: rff_frequency_sample uses t²-α²~Exp(1), which gives "
-        "E_p[exp(-t²r²)]=exp(-α²r²)/(1+r²), not (√π/2r)·erfc(αr). "
-        "Kernel ratio K_target/K_rff≈1.04–1.64 across 0.5–8 Å. "
-        "Force RMSE=42% at D=2048 (variance alone predicts ~3%). "
-        "See rff_coulomb.py:16 and rff_erfc_derivation.md §2/§10."
-    ),
-)
 def test_efa_pme_force_rmse_relative():
     """Test: EFA relative force RMSE at D=512 < 15% of PME RMS force magnitude.
 
@@ -60,14 +50,6 @@ def test_efa_pme_force_rmse_relative():
 
 
 @pytest.mark.electrostatic_comparison
-@pytest.mark.xfail(
-    strict=False,
-    reason=(
-        "Sprint 2 blocker: rff_frequency_sample kernel mismatch — "
-        "EFA forces are systematically biased by K_rff/K_target≈0.61–0.96. "
-        "See rff_coulomb.py:16 and rff_erfc_derivation.md §2/§10."
-    ),
-)
 def test_efa_forces_unbiased():
     """Test: EFA forces show no systematic bias (t-statistic < 4.0, oracle threshold).
 
@@ -100,14 +82,6 @@ def test_efa_forces_unbiased():
 
 
 @pytest.mark.electrostatic_comparison
-@pytest.mark.xfail(
-    strict=False,
-    reason=(
-        "Sprint 2 blocker: rff_frequency_sample kernel mismatch makes EFA forces "
-        "unreliable; exclusion correction magnitude meaningful only with correct kernel. "
-        "See rff_coulomb.py:16 and rff_erfc_derivation.md §2/§10."
-    ),
-)
 def test_efa_exclusion_correction_nonzero():
     """Test: EFA exclusion correction is active and nonzero.
 
@@ -146,14 +120,6 @@ def test_efa_exclusion_correction_nonzero():
 
 
 @pytest.mark.electrostatic_comparison
-@pytest.mark.xfail(
-    strict=False,
-    reason=(
-        "Sprint 2 blocker: NVT smoke test uses EFA forces derived from biased kernel; "
-        "integration stability is not meaningful until rff_frequency_sample is corrected. "
-        "See rff_coulomb.py:16 and rff_erfc_derivation.md §2/§10."
-    ),
-)
 def test_efa_nvt_smoke_dt05():
     """Smoke test: NVT equilibration at dt=0.5 fs runs without error.
 
@@ -225,15 +191,6 @@ def test_efa_nvt_smoke_dt05():
 
 
 @pytest.mark.electrostatic_comparison
-@pytest.mark.xfail(
-    strict=False,
-    reason=(
-        "Sprint 2 blocker: RMSE-vs-D scaling test is vacuous under kernel mismatch — "
-        "RMSE floor is set by systematic bias (~42% at D=2048), not variance. "
-        "Monotonic decrease with D is not expected for biased estimator. "
-        "See rff_coulomb.py:16 and rff_erfc_derivation.md §2/§10."
-    ),
-)
 def test_efa_rmse_decreases_with_d():
     """Test: EFA relative RMSE decreases monotonically with feature count D.
 

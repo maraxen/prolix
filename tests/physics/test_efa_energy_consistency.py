@@ -45,14 +45,6 @@ def test_pme_energy_reproducibility_frozen():
 
 
 @pytest.mark.electrostatic_comparison
-@pytest.mark.xfail(
-    strict=False,
-    reason=(
-        "Sprint 2 blocker: EFA energy reproducibility test valid only if kernel is correct; "
-        "fixed-ω determinism holds, but energies are biased vs PME reference. "
-        "See rff_coulomb.py:16 and rff_erfc_derivation.md §2/§10."
-    ),
-)
 def test_efa_fixed_omega_energy_reproducibility():
     """Test: EFA energy with SAME seed (fixed omega) is reproducible.
 
@@ -84,15 +76,6 @@ def test_efa_fixed_omega_energy_reproducibility():
 
 
 @pytest.mark.electrostatic_comparison
-@pytest.mark.xfail(
-    strict=False,
-    reason=(
-        "Sprint 2 blocker: resampling variance test is spurious under kernel mismatch — "
-        "fixed-ω variance is machine-zero (deterministic biased energies), making the "
-        "ratio trivially large (observed 1.3M×). Not a meaningful EFA validation. "
-        "See rff_coulomb.py:16 and rff_erfc_derivation.md §2/§10."
-    ),
-)
 def test_efa_omega_resampling_increases_variance():
     """Test: EFA energy variance increases with omega resampling.
 
