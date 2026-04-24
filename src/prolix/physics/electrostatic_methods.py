@@ -6,10 +6,10 @@ methods are **opt-in** and intended for comparison or legacy workflows.
 
 from __future__ import annotations
 
-from enum import Enum
+from enum import StrEnum
 
 
-class ElectrostaticMethod(str, Enum):
+class ElectrostaticMethod(StrEnum):
   """Nonbonded electrostatic treatment for explicit periodic systems."""
 
   PME = "pme"
@@ -29,6 +29,15 @@ class ElectrostaticMethod(str, Enum):
   ``V_ij(r) = C * q_i q_j * (erfc(alpha*r)/r - erfc(alpha*r_c)/r_c)`` for ``r <= r_c``,
   zero beyond. Continuity of the *energy* at ``r_c`` is enforced; forces are not
   guaranteed to vanish at ``r_c`` (use RF for OpenMM CutoffPeriodic parity).
+  """
+
+  EFA = "efa"
+  """Euclidean Fast Attention-style Coulomb via Random Fourier Features (RFF).
+
+  Replaces full PME (direct + reciprocal) with an O(N*D) global kernel
+  approximation of erfc(a*r)/r. Experimental; valid for large-box or non-periodic
+  systems. Requires soft_core_lambda=1.0 (no alchemical perturbation). D=512 default.
+  See references/notes/rff_erfc_derivation.md for derivation.
   """
 
 

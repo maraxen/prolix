@@ -23,7 +23,13 @@ from proxide.physics.constants import COULOMB_CONSTANT
 
 from prolix.padding import PaddedSystem
 from prolix.physics import explicit_corrections, pbc
+from prolix.physics.electrostatic_methods import ElectrostaticMethod
 from prolix.physics.pme import make_spme_energy_fn, spme_background_energy
+from prolix.physics.rff_coulomb import (
+    efa_exclusion_correction,
+    erfc_rff_coulomb_energy_diff,
+    rff_frequency_sample,
+)
 from prolix.utils import topology
 
 if TYPE_CHECKING:
@@ -50,7 +56,7 @@ def chunked_explicit_nonbonded_energy(
 ) -> Array:
     """Fused LJ + Direct-space Coulomb energy in one tiled O(N²) pass.
 
-    Uses dense exclusion matrices. jax.checkpoint ensures intermediates 
+    Uses dense exclusion matrices. jax.checkpoint ensures intermediates
     stay in L2 cache.
 
     Args:
@@ -160,18 +166,189 @@ def chunked_explicit_nonbonded_energy(
     return total_energy
 
 
-def _total_energy_fn(
+def _chunked_lj_only_energy(
+    positions: Array,
+    sigmas: Array,
+    epsilons: Array,
+    atom_mask: Array,
     sys: PaddedSystem,
     T: int = 256,
     soft_core_lambda: float = 1.0,
 ) -> Array:
-    """Internal energy implementation for gradients."""
+  """Compute LJ energy only, skipping Coulomb (for EFA integration).
+
+  Uses the same tiling strategy as chunked_explicit_nonbonded_energy but
+  excludes the Coulomb term.
+
+  Args:
+      positions: (N, 3) atom positions.
+      sigmas: (N,) LJ sigma.
+      epsilons: (N,) LJ epsilon.
+      atom_mask: (N,) boolean mask.
+      sys: PaddedSystem with exclusion info.
+      T: Tile size.
+      soft_core_lambda: Soft-core coupling (1.0 = standard).
+
+  Returns:
+      Scalar LJ energy.
+  """
+  N = positions.shape[0]
+  n_tiles = N // T
+  lam = jnp.float32(soft_core_lambda)
+
+  def tile_energy_outer(carry, j_idx):
+    start = j_idx * T
+
+    @jax.checkpoint
+    def _compute_tile_lj_only(pos, start_idx):
+      r_j = jax.lax.dynamic_slice(pos, (start_idx, 0), (T, 3))
+      s_j = jax.lax.dynamic_slice(sigmas, (start_idx,), (T,))
+      e_j = jax.lax.dynamic_slice(epsilons, (start_idx,), (T,))
+      m_j = jax.lax.dynamic_slice(atom_mask, (start_idx,), (T,))
+
+      dr = pos[:, None, :] - r_j[None, :, :]
+      dist_sq = jnp.sum(dr ** 2, axis=-1) + 1e-10
+      dist = jnp.sqrt(dist_sq)
+
+      # Sparse exclusion scales
+      vdw_scale_tile = jnp.ones((N, T), dtype=jnp.float32)
+      t_excl_idx = jax.lax.dynamic_slice(sys.excl_indices, (start_idx, 0), (T, sys.excl_indices.shape[1]))
+      t_vdw_scale = jax.lax.dynamic_slice(sys.excl_scales_vdw, (start_idx, 0), (T, sys.excl_scales_vdw.shape[1]))
+      j_local = jnp.arange(T)
+      flat_ii = t_excl_idx.reshape(-1)
+      flat_jj = jnp.repeat(j_local, t_excl_idx.shape[1])
+      vdw_scale_tile = vdw_scale_tile.at[flat_ii, flat_jj].set(t_vdw_scale.reshape(-1))
+
+      # Pair mask
+      i_indices = jnp.arange(N)[:, None]
+      j_indices = jnp.arange(T)[None, :] + start_idx
+      not_self = (i_indices != j_indices).astype(jnp.float32)
+      pair_mask = (atom_mask[:, None] & m_j[None, :]).astype(jnp.float32) * not_self
+
+      sig_ij = 0.5 * (sigmas[:, None] + s_j[None, :])
+      sig_ij_safe = jnp.where(pair_mask > 0, jnp.maximum(sig_ij, 1e-4), 1.0)
+      eps_ij = jnp.sqrt(jnp.maximum(epsilons[:, None] * e_j[None, :], 0.0))
+
+      # LJ Soft Core (Beutler)
+      soft_alpha_lj = jnp.float32(0.5) * (1.0 - lam)
+      r_over_sig = dist / sig_ij_safe
+      r_over_sig_6 = r_over_sig ** 6
+      denom_lj = soft_alpha_lj + r_over_sig_6
+      x_inv6_soft = 1.0 / jnp.maximum(denom_lj, 1e-6)
+      e_lj = 4.0 * eps_ij * lam * (x_inv6_soft * x_inv6_soft - x_inv6_soft)
+      e_lj = jnp.where(pair_mask > 0, e_lj * vdw_scale_tile, 0.0)
+
+      return 0.5 * jnp.sum(e_lj)
+
+    tile_e = _compute_tile_lj_only(positions, start)
+    return carry + tile_e, None
+
+  total_energy, _ = jax.lax.scan(
+      tile_energy_outer,
+      jnp.array(0.0, dtype=positions.dtype),
+      jnp.arange(n_tiles),
+      unroll=1,
+  )
+
+  return total_energy
+
+
+def _total_energy_fn(
+    sys: PaddedSystem,
+    T: int = 256,
+    soft_core_lambda: float = 1.0,
+    electrostatic_method: ElectrostaticMethod | str = ElectrostaticMethod.PME,
+    n_rff_features: int = 512,
+    rff_seed: int = 0,
+) -> Array:
+    """Internal energy implementation for gradients.
+
+    Args:
+        sys: PaddedSystem with topology and parameters.
+        T: Tile size for FlashMD.
+        soft_core_lambda: Soft-core coupling (1.0 = standard).
+        electrostatic_method: EFA or PME (default).
+        n_rff_features: Number of RFF features for EFA (default 512).
+        rff_seed: PRNG seed for RFF frequency sampling (default 0).
+
+    Returns:
+        Scalar energy in kcal/mol.
+    """
+    if isinstance(electrostatic_method, str):
+        electrostatic_method = ElectrostaticMethod(electrostatic_method)
+
     pos = sys.positions
     safe_charges = jnp.where(sys.atom_mask, sys.charges, jnp.float32(0.0))
     safe_sigmas = jnp.where(sys.atom_mask, sys.sigmas, jnp.float32(1.0))
     safe_epsilons = jnp.where(sys.atom_mask, sys.epsilons, jnp.float32(0.0))
-    
-    # Reciprocal space PME and corrections
+
+    # EFA path: replace PME with RFF approximation
+    if electrostatic_method == ElectrostaticMethod.EFA:
+        if soft_core_lambda != 1.0:
+            raise ValueError(
+                "EFA electrostatics require soft_core_lambda=1.0 "
+                "(no alchemical perturbation)."
+            )
+
+        # Compute LJ only via chunked loop (modify to skip Coulomb)
+        e_lj = _chunked_lj_only_energy(
+            pos, safe_sigmas, safe_epsilons, sys.atom_mask, sys, T=T
+        )
+
+        # RFF global Coulomb with threaded seed
+        rng_key = jax.random.PRNGKey(rff_seed)
+        pme_alpha_float = float(sys.pme_alpha)
+        omega = rff_frequency_sample(
+            alpha=pme_alpha_float,
+            n_features=n_rff_features,
+            key=rng_key,
+        )
+        e_coul_rff = erfc_rff_coulomb_energy_diff(
+            pos, safe_charges, sys.atom_mask, omega, pme_alpha_float
+        )
+
+        # Exclusion correction for bonded pairs
+        displacement_fn, _ = pbc.create_periodic_space(sys.box_size)
+        n_atoms = pos.shape[0]
+        if sys.bonds is not None and sys.bonds.shape[0] > 0:
+            excl = topology.find_bonded_exclusions(sys.bonds, n_atoms)
+            idx_12, idx_13, idx_14 = excl.idx_12, excl.idx_13, excl.idx_14
+        else:
+            z = jnp.zeros((0, 2), dtype=jnp.int32)
+            idx_12 = idx_13 = idx_14 = z
+
+        # Single exclusion correction call: 1-2/1-3 are fully excluded (scale=0.0),
+        # 1-4 are scaled (scale=0.833). Avoids double-subtraction.
+        idx_12_13 = jnp.concatenate(
+            [idx_12, idx_13] if idx_12.shape[0] > 0 or idx_13.shape[0] > 0
+            else [jnp.zeros((0, 2), dtype=jnp.int32), jnp.zeros((0, 2), dtype=jnp.int32)]
+        )
+        e_excl = efa_exclusion_correction(
+            pos,
+            safe_charges,
+            sys.atom_mask,
+            displacement_fn,
+            idx_12_13,
+            idx_14,
+            jnp.float32(0.83333333),
+            pme_alpha_float,
+        )
+
+        e_total = e_lj + e_coul_rff + e_excl
+
+        # Dispersion tail correction (still needed for consistency)
+        n_tail = sys.n_real_atoms if sys.n_real_atoms is not None else n_atoms
+        e_total += explicit_corrections.lj_dispersion_tail_energy(
+            sys.box_size,
+            safe_sigmas,
+            safe_epsilons,
+            float(sys.nonbonded_cutoff),
+            n_tail,
+        )
+
+        return e_total
+
+    # Default PME path (unchanged)
     recip_energy_fn = None
     if sys.box_size is not None and sys.pme_alpha > 0:
         mean_l = jnp.mean(jnp.asarray(sys.box_size, dtype=jnp.float64))
@@ -191,7 +368,7 @@ def _total_energy_fn(
         safe_sigmas,
         safe_epsilons,
         sys.atom_mask,
-        sys, # Pass whole sys for sparse exclusions
+        sys,
         pme_alpha=sys.pme_alpha,
         T=T,
         soft_core_lambda=soft_core_lambda,
@@ -237,6 +414,7 @@ def flash_explicit_total_energy(
     sys: PaddedSystem,
     T: int = 256,
     soft_core_lambda: float = 1.0,
+    rff_seed: int = 0,
 ) -> Array:
     """Complete explicit solvent energy: bonded + FlashMD nonbonded + PME.
 
@@ -258,7 +436,7 @@ def flash_explicit_total_energy(
         displacement_fn, _ = pbc.create_periodic_space(sys.box_size)
     else:
         displacement_fn, _ = space.free()
-    
+
     # --- Bonded terms (O(N), no N² operations) ---
     e_bond = _bond_energy_masked(
         pos, sys.bonds, sys.bond_params, sys.bond_mask, displacement_fn)
@@ -276,12 +454,13 @@ def flash_explicit_total_energy(
     e_cmap = _cmap_energy_masked(
         pos, sys.cmap_torsions, sys.cmap_indices,
         sys.cmap_mask, sys.cmap_coeffs, displacement_fn)
-    
+
     e_bonded = e_bond + e_ub + e_angle + e_dih + e_imp + e_cmap
-    
+
     # --- Nonbonded terms (FlashMD tiled O(N²/T)) ---
-    e_nonbonded = _total_energy_fn(sys, T=T, soft_core_lambda=soft_core_lambda)
-    
+    e_nonbonded = _total_energy_fn(sys, T=T, soft_core_lambda=soft_core_lambda,
+                                   rff_seed=rff_seed)
+
     return e_bonded + e_nonbonded
 
 
@@ -289,15 +468,18 @@ def flash_explicit_energy(
     sys: PaddedSystem,
     T: int = 256,
     soft_core_lambda: float = 1.0,
+    rff_seed: int = 0,
 ) -> Array:
     """Compute explicit solvent nonbonded energy via FlashMD architecture."""
-    return _total_energy_fn(sys, T=T, soft_core_lambda=soft_core_lambda)
+    return _total_energy_fn(sys, T=T, soft_core_lambda=soft_core_lambda,
+                            rff_seed=rff_seed)
 
 
 def flash_explicit_forces(
     sys: PaddedSystem,
     T: int = 256,
     soft_core_lambda: float = 1.0,
+    rff_seed: int = 0,
 ) -> Array:
     """Compute explicit solvent nonbonded forces via FlashMD architecture.
 
@@ -311,7 +493,8 @@ def flash_explicit_forces(
     # This prevents Tracer Errors in the PME reciprocal kernel.
     @eqx.filter_grad
     def _grad_fn(s: PaddedSystem):
-        return _total_energy_fn(s, T=T, soft_core_lambda=soft_core_lambda)
+        return _total_energy_fn(s, T=T, soft_core_lambda=soft_core_lambda,
+                                rff_seed=rff_seed)
         
     grad_at_sys = _grad_fn(sys)
     
