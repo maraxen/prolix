@@ -865,8 +865,22 @@ def settle_with_nhc(
       v_com = p_tot / jnp.maximum(m_tot, jnp.array(1e-30, dtype=m_tot.dtype))
       momentum = momentum - mass_col * v_com
 
-    # Return updated state with constrained position and momentum
-    return state.set(position=position, momentum=momentum, force=force)
+    # Re-synchronize NHC chain state after SETTLE constraints modify momentum.
+    # SETTLE removes kinetic energy from constrained DOF, so the NHC chain state
+    # (position, momentum of fictitious particles) becomes desynchronized. Reset
+    # to zero to allow thermostat to re-equilibrate smoothly on the next step.
+    new_chain = state.chain.set(
+      position=jnp.zeros_like(state.chain.position),
+      momentum=jnp.zeros_like(state.chain.momentum),
+    )
+
+    # Return updated state with constrained position, momentum, force, AND chain state
+    return state.set(
+      position=position,
+      momentum=momentum,
+      force=force,
+      chain=new_chain,
+    )
 
   return nhc_init, apply_with_settle
 
