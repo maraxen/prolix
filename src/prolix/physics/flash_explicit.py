@@ -414,6 +414,8 @@ def flash_explicit_total_energy(
     sys: PaddedSystem,
     T: int = 256,
     soft_core_lambda: float = 1.0,
+    electrostatic_method: ElectrostaticMethod | str = ElectrostaticMethod.PME,
+    n_rff_features: int = 512,
     rff_seed: int = 0,
 ) -> Array:
     """Complete explicit solvent energy: bonded + FlashMD nonbonded + PME.
@@ -459,6 +461,8 @@ def flash_explicit_total_energy(
 
     # --- Nonbonded terms (FlashMD tiled O(N²/T)) ---
     e_nonbonded = _total_energy_fn(sys, T=T, soft_core_lambda=soft_core_lambda,
+                                   electrostatic_method=electrostatic_method,
+                                   n_rff_features=n_rff_features,
                                    rff_seed=rff_seed)
 
     return e_bonded + e_nonbonded
@@ -468,10 +472,14 @@ def flash_explicit_energy(
     sys: PaddedSystem,
     T: int = 256,
     soft_core_lambda: float = 1.0,
+    electrostatic_method: ElectrostaticMethod | str = ElectrostaticMethod.PME,
+    n_rff_features: int = 512,
     rff_seed: int = 0,
 ) -> Array:
     """Compute explicit solvent nonbonded energy via FlashMD architecture."""
     return _total_energy_fn(sys, T=T, soft_core_lambda=soft_core_lambda,
+                            electrostatic_method=electrostatic_method,
+                            n_rff_features=n_rff_features,
                             rff_seed=rff_seed)
 
 
@@ -479,6 +487,8 @@ def flash_explicit_forces(
     sys: PaddedSystem,
     T: int = 256,
     soft_core_lambda: float = 1.0,
+    electrostatic_method: ElectrostaticMethod | str = ElectrostaticMethod.PME,
+    n_rff_features: int = 512,
     rff_seed: int = 0,
 ) -> Array:
     """Compute explicit solvent nonbonded forces via FlashMD architecture.
@@ -494,10 +504,12 @@ def flash_explicit_forces(
     @eqx.filter_grad
     def _grad_fn(s: PaddedSystem):
         return _total_energy_fn(s, T=T, soft_core_lambda=soft_core_lambda,
+                                electrostatic_method=electrostatic_method,
+                                n_rff_features=n_rff_features,
                                 rff_seed=rff_seed)
-        
+
     grad_at_sys = _grad_fn(sys)
-    
+
     # We want the forces on positions: F = -dE/dr
     # eqx.filter_grad returns a PyTree of gradients for all dynamic leaves.
     forces = -grad_at_sys.positions
