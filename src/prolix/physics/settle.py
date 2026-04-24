@@ -32,6 +32,9 @@ TIP3P_ROH = 0.9572  # O-H bond length (Å)
 TIP3P_RHH = 1.5139  # H-H distance (Å)
 TIP3P_THETA = 104.52 * jnp.pi / 180.0  # H-O-H angle (rad)
 
+# Default CSVR relaxation time: 0.1 ps in AKMA units (1 AKMA ≈ 48.888 fs)
+_DEFAULT_CSVR_TAU_AKMA: float = 100.0 / 48.88821291839
+
 
 def settle_positions(
   positions_unconstrained: Array,
@@ -889,6 +892,422 @@ def settle_with_nhc(
     )
 
   return nhc_init, apply_with_settle
+
+
+def langevin_with_constraints(
+  energy_or_force_fn: Callable[..., Array],
+  shift_fn: Callable[..., Array],
+  dt: float,
+  kT: float,
+  gamma: float = 1.0,
+  mass: float | Array = 1.0,
+  constraint: Any | None = None,
+  box: Array | None = None,
+  remove_linear_com_momentum: bool = False,
+  project_ou_momentum_rigid: bool = True,
+  water_indices: Array | None = None,
+  **kwargs,
+) -> tuple[Callable, Callable]:
+  r"""Langevin integrator with injected constraint algorithm.
+
+  Wraps settle_langevin with a constraint plugin system. The constraint object
+  provides apply_positions() and apply_velocities() methods, allowing flexible
+  constraint composition (NullConstraint, SETTLEConstraint, ShakeRattleConstraint, etc.).
+
+  Args:
+      energy_or_force_fn: System force definition.
+      shift_fn: Displacement function.
+      dt: Timestep (AKMA units).
+      kT: Thermal energy target (kcal/mol).
+      gamma: Langevin friction coefficient (1/ps, reduced to AKMA units by caller).
+      mass: Atomic masses (scalar or (N,) array).
+      constraint: ConstraintAlgorithm instance (or None for no constraints).
+      box: Periodic box dimensions or None.
+      remove_linear_com_momentum: If True, remove COM momentum each step.
+      project_ou_momentum_rigid: If True, project OU noise to rigid-body subspace for water.
+      water_indices: (N_waters, 3) array of water atom indices for rigid-body projection.
+      **kwargs: Additional arguments passed to energy_fn.
+
+  Returns:
+      (init_fn, apply_fn) following JAX-MD convention.
+  """
+  force_fn = quantity.canonicalize_force(energy_or_force_fn)
+
+  def init_fn(key, R, mass=mass, **init_kwargs):
+    _kT = init_kwargs.pop("kT", kT)
+    key, split = jax.random.split(key)
+    force = force_fn(R, **init_kwargs)
+
+    # Handle mass - keep as 1D for indexing, expand to (N, 1) for broadcasting
+    mass_arr = jnp.asarray(mass, dtype=R.dtype)
+    if mass_arr.ndim == 0:
+      mass_arr = jnp.ones((R.shape[0],), dtype=R.dtype) * mass_arr
+    elif mass_arr.ndim == 2:
+      mass_arr = mass_arr.reshape(-1)
+
+    # Initialize momenta from Maxwell-Boltzmann
+    momenta = jnp.sqrt(mass_arr[:, jnp.newaxis] * _kT) * jax.random.normal(
+      split, R.shape, dtype=R.dtype
+    )
+
+    # Store mass as (N, 1) for broadcasting
+    mass_for_state = mass_arr[:, jnp.newaxis]
+
+    from prolix.physics.simulate import NVTLangevinState
+    return NVTLangevinState(R, momenta, force, mass_for_state, key)
+
+  def apply_fn(state, **step_kwargs):
+    _dt = step_kwargs.pop("dt", dt)
+    _kT = step_kwargs.pop("kT", kT)
+
+    # Store old positions for constraints
+    positions_old = state.position
+
+    # === B-step (half-kick) ===
+    momentum = _langevin_step_b(state.momentum, state.force, _dt)
+
+    # === A-step (half-move) ===
+    position = _langevin_step_a(state.position, momentum, state.mass, _dt, shift_fn)
+
+    # === O-step (stochastic update) ===
+    if project_ou_momentum_rigid and water_indices is not None:
+      momentum, key_out = _langevin_step_o_constrained(
+        momentum, position, state.mass, gamma, _dt, _kT, state.rng, water_indices
+      )
+    else:
+      momentum, key_out = _langevin_step_o(momentum, state.mass, gamma, _dt, _kT, state.rng)
+
+    # === A-step (second half-move) ===
+    position = _langevin_step_a(position, momentum, state.mass, _dt, shift_fn)
+
+    # === Apply position constraints ===
+    if constraint is not None:
+      position = constraint.apply_positions(positions_old, position, state.mass, box)
+
+    # === Force eval (at constrained positions) ===
+    force = force_fn(position, **step_kwargs)
+
+    # === B-step (final half-kick) ===
+    momentum = _langevin_step_b(momentum, force, _dt)
+
+    # === Apply velocity constraints ===
+    if constraint is not None:
+      momentum = constraint.apply_velocities(
+        positions_old, position, momentum, state.mass, _dt, shift_fn
+      )
+
+    # === Remove COM momentum if requested ===
+    if remove_linear_com_momentum:
+      total_mass = jnp.sum(state.mass)
+      com_momentum = jnp.sum(momentum, axis=0) / total_mass
+      momentum = momentum - state.mass * com_momentum[jnp.newaxis, :]
+
+    from prolix.physics.simulate import NVTLangevinState
+    return NVTLangevinState(position, momentum, force, state.mass, key_out)
+
+  return init_fn, apply_fn
+
+
+def _csvr_compute_lambda(
+  key: Array,
+  ke_current: Array,
+  n_dof: int,
+  kT: float,
+  dt: float,
+  tau: float = None,
+) -> tuple[Array, Array]:
+  r"""Compute CSVR (Bussi velocity-rescaling) lambda factor.
+
+  Implements Bussi et al. 2007 velocity rescaling thermostat.
+  Draws random samples from chi-squared distribution to stochastically
+  rescale velocities toward the target kinetic energy.
+
+  Args:
+    key: JAX PRNGKey for random sampling.
+    ke_current: Current total kinetic energy (kcal/mol).
+    n_dof: Number of thermostated degrees of freedom.
+    kT: Target thermal energy (kcal/mol).
+    dt: Timestep in AKMA units.
+    tau: Relaxation time in AKMA units. Default ~0.1ps equivalent.
+
+  Returns:
+    (lambda_factor, new_key) where lambda_factor rescales all momenta.
+  """
+  if tau is None:
+    tau = _DEFAULT_CSVR_TAU_AKMA
+
+  n_dof = max(int(n_dof), 1)
+
+  # Coupling strength: exp(-dt/tau)
+  c1 = jnp.exp(-dt / tau)
+  c2_sq = 1.0 - c1  # Note: this is (1 - c1), not sqrt(1 - c1^2)
+
+  # Draw random numbers: one gaussian + (n_dof - 1) chi-squared components
+  key, split = jax.random.split(key)
+  r_gaussian = jax.random.normal(split, dtype=ke_current.dtype)
+
+  key, split = jax.random.split(key)
+  # Sum of (n_dof - 1) chi-squared components = sum of squares of (n_dof-1) gaussians
+  s_chi_squared = jnp.sum(
+    jax.random.normal(split, (n_dof - 1,), dtype=ke_current.dtype) ** 2
+  )
+
+  target_ke = 0.5 * n_dof * kT
+  ke_safe = jnp.maximum(ke_current, 1e-10)
+
+  # Bussi et al. 2007 eq. A7:
+  # lambda^2 = c1 + c2*(R^2 + S) + 2*R*sqrt(c1*c2)
+  # where c1 = exp(-dt/tau), c2 = (1-c1)*(target_ke)/(ke_current*n_dof)
+  # R ~ N(0,1), S ~ chi^2(n_dof - 1)
+  # The n_dof in target_ke = 0.5*n_dof*kT partially cancels, but we need n_dof in denominator of c2.
+
+  # Compute the corrected c2 factor: (1-c1) * K_target / (K_current * n_dof)
+  # where K_target = 0.5 * n_dof * kT, so this gives (1-c1) * 0.5 * kT / K_current
+  n_dof_f = float(n_dof)
+  c2_corrected = c2_sq * (target_ke / ke_safe) / n_dof_f
+
+  # Full Bussi formula with cross term
+  lambda_sq = (
+    c1
+    + c2_corrected * (r_gaussian**2 + s_chi_squared)
+    + 2.0 * r_gaussian * jnp.sqrt(c1 * c2_corrected)
+  )
+  lambda_sq_safe = jnp.maximum(lambda_sq, 0.0)
+
+  # Edge case: if ke_current <= 0, return lambda=1.0 (no rescaling)
+  lambda_factor = jnp.where(ke_current <= 0.0, 1.0, jnp.sqrt(lambda_sq_safe))
+
+  return lambda_factor, key
+
+
+def _csvr_rescale_momenta(momentum: Array, lambda_factor: Array) -> Array:
+  r"""Apply scalar rescaling to momenta.
+
+  Since rescaling is a scalar operation, it preserves constraint subspaces:
+  if v is in the tangent space of SETTLE constraints, so is alpha*v.
+
+  Args:
+    momentum: Atomic momenta (N, 3).
+    lambda_factor: Scalar rescaling factor.
+
+  Returns:
+    Rescaled momenta.
+  """
+  return lambda_factor * momentum
+
+
+def _n_dof_thermostated(
+  n_atoms: int,
+  n_waters: int,
+  n_constraint_pairs: int = 0,
+  remove_com: bool = True,
+) -> int:
+  r"""Compute degrees of freedom for CSVR thermostat.
+
+  For a system with rigid water (SETTLE) + optional solute bonds (SHAKE/RATTLE):
+  DOF = 3*N_atoms - 3*N_waters (SETTLE removes 3 DOF per water) - n_constraint_pairs (solute bonds)
+
+  Then subtract 3 for COM motion removal if requested.
+
+  For pure-water system (all atoms are water):
+  - n_atoms = 3*N_waters
+  - DOF = 3*(3*N_waters) - 3*N_waters = 9*N_waters - 3*N_waters = 6*N_waters
+  - With remove_com=True: DOF = 6*N_waters - 3
+
+  Args:
+    n_atoms: Total number of atoms.
+    n_waters: Number of water molecules.
+    n_constraint_pairs: Number of constrained bond pairs (solute).
+    remove_com: If True, subtract 3 for COM motion removal.
+
+  Returns:
+    Number of thermostated degrees of freedom.
+  """
+  # Start with 3N (all translational DOF)
+  dof = 3 * n_atoms
+
+  # Subtract 3 DOF per water molecule (SETTLE removes 3 constraints per water)
+  dof -= 3 * n_waters
+
+  # Subtract additional solute bond constraints
+  dof -= n_constraint_pairs
+
+  # Subtract 3 for COM motion if requested
+  if remove_com:
+    dof -= 3
+
+  return dof
+
+
+def settle_csvr(
+  energy_or_force_fn: Callable[..., Array],
+  shift_fn: Callable[..., Array],
+  dt: float,
+  kT: float,
+  tau: float = None,
+  mass: float | Array = 1.0,
+  water_indices: Array | None = None,
+  r_OH: float = TIP3P_ROH,
+  r_HH: float = TIP3P_RHH,
+  mass_oxygen: float = 15.999,
+  mass_hydrogen: float = 1.008,
+  n_constraint_pairs: int = 0,
+  remove_com: bool = True,
+  box: Array | None = None,
+  **kwargs,
+) -> tuple[Callable, Callable]:
+  r"""CSVR (Bussi velocity-rescaling) thermostat integrator with SETTLE constraints.
+
+  Uses velocity-Verlet (B-A-A-B) rather than BAOAB — no O-step; CSVR replaces it.
+
+  Process:
+  1.  **B-step**: Half-kick momenta.
+  2.  **A-step × 2**: Full position advance (two half-moves at fixed momentum).
+  3.  **SETTLE-Pos**: Correct water positions analytically.
+  4.  **Force eval**: Recompute forces at constrained positions.
+  5.  **B-step**: Final half-kick.
+  6.  **SETTLE-Vel**: Velocity constraint correction.
+  7.  **COM removal**: Remove system COM momentum (if remove_com=True).
+  8.  **CSVR-Rescale**: Global scalar velocity rescaling via chi-squared sampling.
+
+  CSVR replaces the per-DOF Langevin O-step with a single chi-squared sample that
+  drives a scalar rescaling of all momenta. This scalar operation preserves SETTLE
+  constraint subspaces by construction: if v is in tangent space, so is alpha*v.
+
+  **Allows dt=2.0fs (or larger)** without temperature oscillations.
+
+  Args:
+      energy_or_force_fn: System force definition.
+      shift_fn: Displacement function.
+      dt: Timestep (AKMA units).
+      kT: Thermal energy target (kcal/mol).
+      tau: Velocity rescaling time constant (AKMA units); default ~0.1ps. Require tau >> dt.
+      mass: Atomic masses (scalar or (N,) array).
+      water_indices: (N_waters, 3) array of water atom indices, or None.
+      r_OH: Target O-H bond length (Å).
+      r_HH: Target H-H distance (Å).
+      mass_oxygen: Mass of oxygen (amu).
+      mass_hydrogen: Mass of hydrogen (amu).
+      n_constraint_pairs: Number of solute SHAKE/RATTLE bond pairs (for DOF count).
+      remove_com: If True, remove system COM momentum each step and exclude 3 COM DOF from thermostat target.
+      box: Periodic box dimensions or None.
+      **kwargs: Additional arguments (energy_fn kwargs).
+
+  Returns:
+      (init_fn, apply_fn) following JAX-MD convention.
+  """
+  force_fn = quantity.canonicalize_force(energy_or_force_fn)
+  if tau is None:
+    tau = _DEFAULT_CSVR_TAU_AKMA
+
+  def init_fn(key, R, mass=mass, **init_kwargs):
+    _kT = init_kwargs.pop("kT", kT)
+    key, split = jax.random.split(key)
+    force = force_fn(R, **init_kwargs)
+
+    # Handle mass - keep as 1D for indexing, expand to (N, 1) for broadcasting
+    mass_arr = jnp.asarray(mass, dtype=R.dtype)
+    if mass_arr.ndim == 0:
+      mass_arr = jnp.ones((R.shape[0],), dtype=R.dtype) * mass_arr
+    elif mass_arr.ndim == 2:
+      mass_arr = mass_arr.reshape(-1)
+
+    # Initialize momenta from Maxwell-Boltzmann
+    momenta = jnp.sqrt(mass_arr[:, jnp.newaxis] * _kT) * jax.random.normal(
+      split, R.shape, dtype=R.dtype
+    )
+
+    # Store mass as (N, 1) for broadcasting
+    mass_for_state = mass_arr[:, jnp.newaxis]
+
+    from prolix.physics.simulate import NVTLangevinState
+    return NVTLangevinState(R, momenta, force, mass_for_state, key)
+
+  def apply_fn(state, **step_kwargs):
+    _dt = step_kwargs.pop("dt", dt)
+    _kT = step_kwargs.pop("kT", kT)
+
+    # Store old positions for SETTLE
+    positions_old = state.position
+
+    # === B-step (half-kick) ===
+    momentum = _langevin_step_b(state.momentum, state.force, _dt)
+
+    # === A-step (full position advance via two half-steps) ===
+    position = _langevin_step_a(state.position, momentum, state.mass, _dt, shift_fn)
+    position = _langevin_step_a(position, momentum, state.mass, _dt, shift_fn)
+
+    # === SETTLE position constraints ===
+    if water_indices is not None:
+      position = settle_positions(
+        position,
+        positions_old,
+        water_indices,
+        r_OH,
+        r_HH,
+        mass_oxygen,
+        mass_hydrogen,
+        box,
+      )
+
+    # === Force eval (at constrained positions) ===
+    force = force_fn(position, **step_kwargs)
+
+    # === B-step (final half-kick) ===
+    momentum = _langevin_step_b(momentum, force, _dt)
+
+    # === SETTLE velocity constraints ===
+    if water_indices is not None:
+      momentum = _langevin_settle_vel(
+        momentum,
+        positions_old,
+        position,
+        state.mass,
+        water_indices,
+        _dt,
+        mass_oxygen,
+        mass_hydrogen,
+        n_iters=10,
+        settle_velocity_tol=None,
+      )
+
+    # === Remove COM momentum if requested ===
+    if remove_com:
+      total_mass = jnp.sum(state.mass)
+      com_momentum = jnp.sum(momentum, axis=0) / total_mass
+      momentum = momentum - state.mass * com_momentum[jnp.newaxis, :]
+
+    # === CSVR velocity rescaling ===
+    # Compute total kinetic energy in the constrained system
+    if water_indices is not None and water_indices.shape[0] > 0:
+      from prolix.physics.rigid_water_ke import rigid_tip3p_box_ke_kcal
+      n_waters = water_indices.shape[0]
+      ke_total = rigid_tip3p_box_ke_kcal(position, momentum, state.mass, n_waters)
+    else:
+      # No water: standard KE formula
+      velocity = momentum / state.mass
+      ke_total = 0.5 * jnp.sum(state.mass * velocity**2)
+
+    # Compute DOF for this system
+    n_atoms = state.position.shape[0]
+    n_waters = water_indices.shape[0] if water_indices is not None else 0
+    n_dof = _n_dof_thermostated(
+      n_atoms, n_waters, n_constraint_pairs=n_constraint_pairs, remove_com=remove_com
+    )
+
+    # Draw chi-squared and compute lambda
+    lambda_factor, key_out = _csvr_compute_lambda(
+      state.rng, ke_total, n_dof, _kT, _dt, tau
+    )
+
+    # Apply rescaling
+    momentum = _csvr_rescale_momenta(momentum, lambda_factor)
+
+    # Return updated state
+    from prolix.physics.simulate import NVTLangevinState
+    return NVTLangevinState(position, momentum, force, state.mass, key_out)
+
+  return init_fn, apply_fn
 
 
 def _langevin_step_b(momentum: Array, force: Array, dt: float) -> Array:
