@@ -136,15 +136,15 @@ def run_validation_test(dt_fs: float, duration_ps: float = 100.0, n_waters: int 
         return {"error": str(e)}
 
     # Initialize state
-    from prolix.physics.settle import LangevinState
+    from prolix.physics.simulate import NVTLangevinState
     rng_key = jax.random.PRNGKey(42)
 
-    state = LangevinState(
-        positions=jnp.asarray(positions),
+    state = NVTLangevinState(
+        position=jnp.asarray(positions),
         momentum=jnp.asarray(momentum),
         force=jnp.zeros_like(positions),
-        mass=jnp.asarray(masses),
-        key=rng_key,
+        mass=jnp.asarray(masses)[:, None],  # mass is stored with extra dimension
+        rng=rng_key,
     )
 
     # Storage for metrics
@@ -163,7 +163,7 @@ def run_validation_test(dt_fs: float, duration_ps: float = 100.0, n_waters: int 
         if step % checkpoint_every == 0:
             # Compute rigid-body kinetic energy
             ke_rigid = rigid_tip3p_box_ke_kcal(
-                state.positions,
+                state.position,
                 state.momentum,
                 masses,
                 water_indices
@@ -198,7 +198,7 @@ def run_validation_test(dt_fs: float, duration_ps: float = 100.0, n_waters: int 
     e_drift = abs(e_final - e_initial) / abs(e_initial) * 100 if e_initial != 0 else 0
 
     # Equipartition test: KS test on normalized velocities
-    velocities_3d = state.momentum / masses[:, None]
+    velocities_3d = np.asarray(state.momentum) / masses[:, None]
     sigma_v = np.sqrt(kT / masses)
     velocities_normalized = velocities_3d.flatten() / np.repeat(sigma_v, 3)
 
