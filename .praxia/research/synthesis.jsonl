@@ -1,0 +1,12 @@
+{
+  "timestamp": "2026-04-23T20:15:00Z",
+  "research_id": "260423_constraint_aware_thermostat",
+  "query": "Validate constraint-aware (Jacobian-projected) Langevin thermostats for JAX-based MD",
+  "confidence": "high",
+  "status": "complete",
+  "key_finding": "Constraint-aware Langevin has strong mathematical precedent (Zhang et al. 2019, Peters & Goga 2014). No documented failure modes. Prolix's observed dt≤0.5fs limitation is validated by recent literature (Asthagiri & Beck 2023, 2025).",
+  "recommendation": "Proceed with Phase 1 theory derivation. Risk is implementation complexity, not theory validity.",
+  "sources_count": 25,
+  "sources_archive": "260423_constraint_thermostat_sources.tar.zst",
+  "summary_file": "260423_constraint_thermostat_summary.md"
+}
