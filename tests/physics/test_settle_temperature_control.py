@@ -156,7 +156,7 @@ def _mean_rigid_t_csvr_after_burn(*, dt_fs: float, n_waters: int, seed: int, ste
   return float(np.mean(temps)) if temps else float("nan")
 
 
-@pytest.mark.xfail(strict=True, reason="CSVR+SETTLE shows τ-dependent ~+8K bias at dt>=1fs; known VV discretization artifact, not a release blocker")
+@pytest.mark.xfail(strict=True, reason="CSVR+SETTLE shows tau-dependent ~+8K bias at dt>=1fs (VV discretization artifact); runtime warning emitted in settle_csvr; see settle.py settle_csvr docstring for details")
 def test_temperature_csvr_dt1fs_near_target() -> None:
   """CSVR: dt=1.0 fs, 100 ps: mean T within 15K of 300K target.
 
@@ -174,7 +174,7 @@ def test_temperature_csvr_dt1fs_near_target() -> None:
   assert abs(mean_t - 300.0) < 15.0, f"CSVR dt={dt_fs} fs: T={mean_t:.1f} K, expected 300 ± 15 K"
 
 
-@pytest.mark.xfail(strict=True, reason="CSVR+SETTLE shows τ-dependent ~+8K bias at dt>=1fs; known VV discretization artifact, not a release blocker")
+@pytest.mark.xfail(strict=True, reason="CSVR+SETTLE shows tau-dependent ~+8K bias at dt>=1fs (VV discretization artifact); runtime warning emitted in settle_csvr; see settle.py settle_csvr docstring for details")
 def test_temperature_csvr_dt2fs_near_target() -> None:
   """CSVR: dt=2.0 fs, 100 ps: mean T within 5K of 300K target.
 
@@ -304,3 +304,109 @@ def test_langevin_with_constraints_null_constraint() -> None:
   assert not jnp.allclose(state.position, pos_init), "Position should advance"
   assert jnp.all(jnp.isfinite(state.position)), "Position must be finite"
   assert jnp.all(jnp.isfinite(state.momentum)), "Momentum must be finite"
+
+
+@pytest.mark.slow
+def test_temperature_langevin_dt0_5fs_green() -> None:
+  """dt=0.5 fs (production constraint), 100 ps total: mean T within 10K of 300K target.
+
+  Canonical validation that settle_langevin is stable at the documented
+  production operating point (dt ≤ 0.5 fs per CLAUDE.md). This is the
+  green test that proves the Phase 2 constraint works in practice.
+
+  Parameters match production usage: dt=0.5 fs, n_waters=8, gamma=1.0 ps⁻¹.
+  After 33 ps burn-in, 67 ps of production data.
+  """
+  n_waters = 8
+  dt_fs = 0.5
+  steps = 200_000
+  burn = 66_667
+  seed = 7
+  mean_t = _mean_rigid_t_after_burn(dt_fs=dt_fs, n_waters=n_waters, seed=seed, steps=steps, burn=burn)
+  assert abs(mean_t - 300.0) < 10.0, f"dt={dt_fs} fs: T={mean_t:.1f} K, expected 300 ± 10 K"
+
+
+@pytest.mark.slow
+def test_equipartition_per_molecule_com_dt0_5fs() -> None:
+  """Equipartition: per-molecule COM velocity distribution at dt=0.5 fs (KS p > 0.05).
+
+  Validates that center-of-mass (COM) velocities of rigid water molecules
+  follow Maxwell-Boltzmann distribution under SETTLE constraints at the
+  production timestep. COM motion is preserved by SETTLE, so this test
+  is structurally valid (unlike per-atom tests which fail due to SETTLE
+  velocity correlations).
+
+  Subsampling: Langevin with gamma=1 ps⁻¹ has autocorrelation ~1 ps = 2000 steps
+  at dt=0.5 fs. Collects 120 independent snapshots by sampling every 2000 steps.
+  After 50k step burn-in, total simulation: 290k steps (145 ps).
+  Final sample pool: 120 snapshots × 8 waters × 3 components = 2880 samples (well-sized for KS).
+  """
+  jax.config.update("jax_enable_x64", True)
+  n_waters = 8
+  dt_fs = 0.5
+  seed = 13
+  temperature_k = 300.0
+  gamma_ps = 1.0
+  positions_a, box_edge = _grid_water_positions(n_waters, spacing_angstrom=10.0)
+  box_vec = jnp.array([box_edge, box_edge, box_edge], dtype=jnp.float64)
+  dt_akma = float(dt_fs) / float(AKMA_TIME_UNIT_FS)
+  kT = float(temperature_k) * BOLTZMANN_KCAL
+  gamma_reduced = float(gamma_ps) * float(AKMA_TIME_UNIT_FS) * 1e-3
+  sys_dict = _prolix_params_pure_water(n_waters)
+  displacement_fn, shift_fn = pbc.create_periodic_space(box_vec)
+  energy_fn = system.make_energy_fn(displacement_fn, sys_dict, box=box_vec, use_pbc=True, implicit_solvent=False, pme_grid_points=32, pme_alpha=0.34, cutoff_distance=9.0, strict_parameterization=False)
+  n_atoms = n_waters * 3
+  mass = jnp.array([[15.999], [1.008], [1.008]] * n_waters).reshape(n_atoms)
+  water_indices = settle.get_water_indices(0, n_waters)
+  init_s, apply_s = settle.settle_langevin(energy_fn, shift_fn, dt=dt_akma, kT=kT, gamma=gamma_reduced, mass=mass, water_indices=water_indices, box=box_vec, remove_linear_com_momentum=False, project_ou_momentum_rigid=True, projection_site="post_o", settle_velocity_iters=10)
+  apply_j = jax.jit(apply_s)
+  state = init_s(jax.random.PRNGKey(seed), jnp.array(positions_a), mass=mass)
+
+  # Subsampling parameters
+  burn_steps = 50_000  # 25 ps burn-in
+  decorr_steps = 2000  # Sample every ~1 ps (decorrelation time at gamma=1 ps^-1)
+  n_snapshots = 120  # Collect 120 independent snapshots
+  total_steps = burn_steps + n_snapshots * decorr_steps  # 290k total steps
+
+  m_oxygen = 15.999
+  m_hydrogen = 1.008
+  m_water = m_oxygen + 2 * m_hydrogen
+
+  com_velocities: list[np.ndarray] = []  # Store (water, 3) arrays per snapshot
+
+  step = 0
+
+  # Burn-in phase
+  for _ in range(burn_steps):
+    state = apply_j(state)
+    step += 1
+
+  # Production phase: collect every decorr_steps
+  for snap in range(n_snapshots):
+    for _ in range(decorr_steps):
+      state = apply_j(state)
+      step += 1
+
+    # Extract COM velocity for each water molecule
+    # Momentum is p_i = m_i * v_i, so v_com = sum(p_i) / sum(m_i)
+    snapshot_com = []
+    for w in range(n_waters):
+      o_idx = 3 * w
+      h1_idx = 3 * w + 1
+      h2_idx = 3 * w + 2
+      p_o = state.momentum[o_idx]
+      p_h1 = state.momentum[h1_idx]
+      p_h2 = state.momentum[h2_idx]
+      # CORRECT: sum of momenta divided by total mass gives v_com
+      v_com = (p_o + p_h1 + p_h2) / m_water
+      snapshot_com.append(v_com)
+    com_velocities.append(np.array(snapshot_com))
+
+  # Flatten to (n_snapshots * n_waters, 3)
+  com_arr = np.concatenate(com_velocities, axis=0)  # shape (n_snapshots * n_waters, 3)
+  components = com_arr.flatten()  # shape (n_snapshots * n_waters * 3,)
+
+  sigma = np.sqrt(kT / m_water)
+  v_norm = components / sigma
+  ks_stat, ks_pval = stats.kstest(v_norm, 'norm')
+  assert ks_pval > 0.05, f"COM equipartition KS test failed at dt=0.5fs: p={ks_pval:.4f}, expected > 0.05"
