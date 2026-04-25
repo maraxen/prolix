@@ -12,6 +12,7 @@ References:
 
 from __future__ import annotations
 
+import warnings
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
@@ -1192,9 +1193,32 @@ def settle_csvr(
       box: Periodic box dimensions or None.
       **kwargs: Additional arguments (energy_fn kwargs).
 
+  Note:
+      **Known limitation — temperature bias at dt >= 1 fs**: CSVR+SETTLE exhibits a
+      tau-dependent mean temperature bias of approximately +8 K at dt >= 1 fs (e.g.,
+      +8 K at tau=0.1 ps, dt=1 fs). Root cause: velocity-Verlet (B-A-A-B) operator
+      splitting introduces a leading-order discretization error in the Bussi 2007
+      rescaling step when dt is comparable to the thermostat relaxation time tau.
+      At dt < 1 fs, the bias drops below ~1 K and is not practically significant.
+      For simulations requiring tight temperature control (|T - T_target| < 5 K),
+      use dt <= 0.5 fs or increase tau (weaker coupling reduces per-step bias).
+      A runtime warning is emitted when dt >= 1 fs / 48.888 AKMA units.
+
   Returns:
       (init_fn, apply_fn) following JAX-MD convention.
   """
+  # AKMA time unit = 48.888 fs; 1 fs ≈ 0.02046 AKMA
+  _ONE_FS_AKMA = 1.0 / 48.88821291839
+  if dt >= _ONE_FS_AKMA:
+    warnings.warn(
+      f"settle_csvr: dt={dt:.4f} AKMA ({dt * 48.88821291839:.1f} fs) >= 1 fs. "
+      "CSVR+SETTLE shows a tau-dependent ~+8K mean temperature bias at dt>=1 fs "
+      "due to velocity-Verlet discretization. This is a known limitation; see "
+      "settle_csvr docstring for details. For tight temperature control, use dt<1 fs.",
+      UserWarning,
+      stacklevel=2,
+    )
+
   force_fn = quantity.canonicalize_force(energy_or_force_fn)
   if tau is None:
     tau = _DEFAULT_CSVR_TAU_AKMA
