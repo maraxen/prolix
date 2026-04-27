@@ -42,6 +42,20 @@ from prolix.physics.noising import (
   thermal_noise_fn,
 )
 
+# NPT integrators and supporting functions (Sprint 6)
+from prolix.physics.settle import settle_csvr_npt
+from prolix.physics.simulate import NPTState
+from prolix.physics.pressure import instantaneous_pressure_akma
+from prolix.physics.stress import virial_trace
+from prolix.physics.pbc import box_volume, isotropic_box_scale
+from prolix.physics.units import (
+  BAR_PER_AKMA_PRESSURE,
+  AKMA_PRESSURE_PER_BAR,
+  WATER_COMPRESSIBILITY_300K_BAR_INV,
+  WATER_COMPRESSIBILITY_300K_AKMA_INV,
+  AKMA_TIME_UNIT_FS,
+)
+
 __all__ = [
   "ANGSTROM_TO_NM",
   # Constants
@@ -76,4 +90,16 @@ __all__ = [
   "project_forces_onto_backbone",
   "project_forces_onto_backbone_per_atom",
   "thermal_noise_fn",
+  # NPT ensemble (Sprint 6)
+  "settle_csvr_npt",
+  "NPTState",
+  "instantaneous_pressure_akma",
+  "virial_trace",
+  "box_volume",
+  "isotropic_box_scale",
+  "BAR_PER_AKMA_PRESSURE",
+  "AKMA_PRESSURE_PER_BAR",
+  "WATER_COMPRESSIBILITY_300K_BAR_INV",
+  "WATER_COMPRESSIBILITY_300K_AKMA_INV",
+  "AKMA_TIME_UNIT_FS",
 ]
