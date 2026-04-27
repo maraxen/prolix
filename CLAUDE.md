@@ -2,6 +2,10 @@
 
 Prolix is a JAX-based molecular dynamics engine for protein folding and dynamics.
 
+## Research Ideas & Roadmap
+
+Exploratory ideas for future sprints (electrostatics, allostery, spectral analysis) are logged in `.praxia/ideas.jsonl`. Current focus: stabilize core MD engine (Phase 2 constraints, NPT stability).
+
 ## Phase 2: Explicit Solvent Integration
 
 **Status**: v1.0 Release with known constraint  
