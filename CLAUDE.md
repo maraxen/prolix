@@ -29,6 +29,8 @@ At smaller timesteps (dt ≤ 0.5fs), the per-step constraint impulse magnitude i
 
 ### Production Usage
 
+#### NVT (Constant Volume, Temperature Control)
+
 ```python
 from prolix.physics import settle
 
@@ -49,12 +51,61 @@ init_fn, apply_fn = settle.settle_langevin(
 - `project_ou_momentum_rigid=True`: Samples noise in 6D rigid-body subspace per water
 - `projection_site="post_o"`: Apply projection after O-step (Ornstein-Uhlenbeck stochastic update)
 
+#### NPT (Pressure Control + Isobaric Barostat)
+
+```python
+from prolix.physics import settle
+
+init_fn, apply_fn = settle.settle_csvr_npt(
+    energy_fn, shift_fn,
+    dt=0.5,  # AKMA units — do NOT exceed 0.5 fs
+    kT=kT,
+    target_pressure_bar=1.0,  # 1 atm
+    tau_barostat_akma=2000.0,  # 0.1 ps time constant
+    tau_thermostat_akma=2000.0,  # 0.1 ps time constant
+    mass=masses,
+    water_indices=water_indices,
+    box_init=box_vec,
+)
+
+state = init_fn(key, positions, mass=masses, box=box_vec)
+for step in range(n_steps):
+    state = apply_fn(state, box=state.box)
+```
+
+**Status**: NPT validated to 20ps at dt=0.5fs, T=300±5K, P=1±50 bar (Sprint 7, v1.0)
+
 ### Temperature Control
 
 With this configuration:
 - Target temperature: 300 K
 - Achieved stability: ±5 K over 50+ ps simulations
 - No divergence or runaway heating observed
+
+### Batched Production Simulations
+
+For production batched runs using `batched_produce` or `batched_equilibrate`:
+
+**Safe Pattern (v1.0)**:
+Use cold-start state initialization directly rather than `batched_equilibrate`. A known NaN issue in `batched_equilibrate` during batched initialization is scheduled for Sprint 8 fix.
+
+```python
+# Instead of: equilibrated_batch = batched_equilibrate(...)
+# Use: initialize states directly with explicit warn_counts
+from prolix.batched_simulate import LangevinState
+import jax.numpy as jnp
+
+state = LangevinState(
+    positions=batch.positions,
+    momentum=jnp.zeros_like(batch.positions),
+    force=initial_forces,   # compute with energy_fn(batch.positions, box) first
+    mass=batch.masses,
+    key=jax.random.PRNGKey(0),
+    cap_count=jnp.int32(0),
+    warn_counts=None,        # auto-initialized by __post_init__
+)
+result = batched_produce(batch, state, steps=n_steps, chunk_size=1)
+```
 
 ### Future Improvements (v2.0+)
 
@@ -66,8 +117,17 @@ A constraint-aware thermostat that only couples to unconstrained DOF could elimi
 - `src/prolix/physics/simulate.py`: Langevin integrator components
 - `tests/physics/test_settle_temperature_control.py`: Validation tests
 
+### Sprint 7: Batching + NPT Validation (v1.0)
+
+**Safe_map fix**: Fixed reshape bug in `safe_map` that failed on heterogeneous pytrees (different leaf shapes). Added validation to require all pytree leaves have consistent batch dimension. (Step 2)
+
+**LangevinState batching**: Updated `LangevinState.tree_flatten` to properly batch `warn_counts` field, ensuring consistent batched tree structure. (Step 2)
+
+**Regression test**: Added `test_safe_map_heterogeneous_pytree()` to validate error handling for incompatible batched structures. (Step 3)
+
 ### References
 
 - Miyamoto, S., & Kollman, P. A. (1992). SETTLE: An analytical version of the SHAKE and RATTLE algorithm for rigid water models. *Journal of Computational Chemistry*, 13(8), 952-962.
+- Bernetti, M., & Bussi, G. (2020). Pressure control using stochastic cell rescaling. *Journal of Chemical Physics*, 153(11), 114107.
 - Phase 2 investigation summary: `.agent/docs/RELEASE_DECISION_v1.0.md`
 - Phase 2 failure analysis: `.agent/docs/daily/P2_FINAL_REPORT.txt`
