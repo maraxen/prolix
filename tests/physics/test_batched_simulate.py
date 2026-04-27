@@ -171,7 +171,7 @@ def test_langevin_step_finite(fake_padded_batch):
 
 
 def test_batched_minimize(fake_padded_batch):
-    minimized_pos = batched_minimize(fake_padded_batch, max_steps=10, chunk_size=1)
+    minimized_pos, converged, rms_grad = batched_minimize(fake_padded_batch, max_steps=10, chunk_size=1)
     assert jnp.all(jnp.isfinite(minimized_pos))
     assert minimized_pos.shape == fake_padded_batch.positions.shape
     
@@ -183,7 +183,12 @@ def test_batched_minimize(fake_padded_batch):
 
 
 def test_batched_equilibrate(fake_padded_batch):
-    state = batched_equilibrate(fake_padded_batch, key=random.PRNGKey(0), n_steps=5, chunk_size=1)
+    B = fake_padded_batch.positions.shape[0]
+    system_index = jnp.arange(B)
+    state = batched_equilibrate(
+        fake_padded_batch, system_index, fake_padded_batch.positions,
+        key=random.PRNGKey(0), duration_ps=0.02, temp=300.0, chunk_size=1
+    )
     
     assert jnp.all(jnp.isfinite(state.positions))
     assert jnp.all(jnp.isfinite(state.force))
@@ -257,8 +262,9 @@ def test_batched_produce_streaming(fake_padded_batch):
     n_saves = 3
     steps_per_save = 1  # minimal steps to keep physics from diverging
 
+    system_index = jnp.arange(B)
     final_state_stream = batched_produce_streaming(
-        batch, state,
+        batch, system_index, state,
         n_saves=n_saves,
         steps_per_save=steps_per_save,
         write_fn=write_fn,
