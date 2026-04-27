@@ -1510,7 +1510,7 @@ def settle_csvr_npt(
   kT: float,
   target_pressure_bar: float,
   tau_barostat_akma: float,
-  tau_thermostat_akma: float = None,
+  tau_thermostat_akma: float | None = None,
   mass: float | Array = 1.0,
   water_indices: Array | None = None,
   r_OH: float = TIP3P_ROH,
@@ -1521,7 +1521,7 @@ def settle_csvr_npt(
   remove_com: bool = True,
   box_init: Array | None = None,
   compressibility_bar_inv: float = 4.5e-5,
-  mu_min: float = 0.98,
+  mu_min: float = 0.999,
   project_ou_momentum_rigid: bool = True,
   projection_site: str = "post_o",
   **kwargs,
@@ -1535,18 +1535,18 @@ def settle_csvr_npt(
   3. **SETTLE constraints** for rigid water molecules
 
   Algorithm sequence per timestep:
-  1. CSVR velocity rescaling (global chi-squared-based rescaling)
+  1. Compute instantaneous pressure from pre-step config (virial + kinetic energy)
   2. B-step: Half-kick momentum from current forces
   3. A-step × 2: Full position update with constant momentum
   4. SETTLE position projection (re-satisfy water geometry)
   5. Stochastic cell rescaling:
-     a. Compute instantaneous pressure from virial + kinetic energy
-     b. Apply stochastic scaling: μ = exp(dε/3) where dε includes pressure deviation + noise
-     c. Scale box and positions by μ
+     a. Apply stochastic scaling: μ = exp(dε/3) where dε includes pressure deviation + noise
+     b. Scale box and positions by μ
   6. SETTLE position re-projection (re-satisfy constraints after box scaling)
   7. Force recompute with new box (MANDATORY for energy consistency)
   8. B-step: Final half-kick from new forces
   9. SETTLE velocity projection
+  10. CSVR velocity rescaling (global chi-squared-based rescaling)
 
   **Key differences from NVT CSVR**:
   - Box rescaling occurs AFTER position SETTLE but BEFORE force recomputation
@@ -1572,7 +1572,7 @@ def settle_csvr_npt(
       remove_com: If True, exclude COM translation from thermostat DOF.
       box_init: Initial box dimensions for PME grid validation (optional).
       compressibility_bar_inv: Isothermal compressibility in bar⁻¹ (default TIP3P 4.5e-5).
-      mu_min: Minimum scaling factor (clipping lower bound; default 0.98).
+      mu_min: Minimum scaling factor (clipping lower bound; default 0.999 ≈ 0.1% max volume change per step).
       project_ou_momentum_rigid: If True (default), project OU noise to rigid-body subspace
           for water molecules (not used in velocity-Verlet CSVR, kept for API consistency).
       projection_site: Placement for optional rigid momentum projection (not used here,
@@ -1615,6 +1615,14 @@ def settle_csvr_npt(
     """Initialize NPT state."""
     _kT = init_kwargs.pop("kT", kT)
     _box = init_kwargs.pop("box", box)
+
+    # Validate box_init for PME grid validation
+    if box_init is None:
+      raise ValueError(
+        "box_init must be provided for settle_csvr_npt; "
+        "pass the initial box dimensions for PME grid drift validation"
+      )
+
     key, split = jax.random.split(key)
     force = force_fn(R, **init_kwargs)
 
@@ -1650,6 +1658,21 @@ def settle_csvr_npt(
     # Store old positions for SETTLE
     positions_old = state.position
 
+    # === Compute instantaneous pressure for barostat (from pre-step config) ===
+    # Use positions and forces from the same configuration (start of step)
+    # Kinetic energy (using rigid-body KE if water is present)
+    if water_indices is not None and water_indices.shape[0] > 0:
+      from prolix.physics.rigid_water_ke import rigid_tip3p_box_ke_kcal
+      n_waters = water_indices.shape[0]
+      ke_total = rigid_tip3p_box_ke_kcal(positions_old, state.momentum, state.mass, n_waters)
+    else:
+      # Standard KE: 0.5 * sum(p² / m)
+      velocity = state.momentum / state.mass
+      ke_total = 0.5 * jnp.sum(state.mass * velocity**2)
+
+    # Virial trace (use forces from current state, positions before A-step)
+    virial = stress_module.virial_trace(positions_old, state.force)
+
     # === B-step (half-kick) ===
     momentum = _langevin_step_b(state.momentum, state.force, _dt)
 
@@ -1670,20 +1693,6 @@ def settle_csvr_npt(
         _box,
       )
 
-    # === Compute instantaneous pressure for barostat ===
-    # Kinetic energy (using rigid-body KE if water is present)
-    if water_indices is not None and water_indices.shape[0] > 0:
-      from prolix.physics.rigid_water_ke import rigid_tip3p_box_ke_kcal
-      n_waters = water_indices.shape[0]
-      ke_total = rigid_tip3p_box_ke_kcal(position, momentum, state.mass, n_waters)
-    else:
-      # Standard KE: 0.5 * sum(p² / m)
-      velocity = momentum / state.mass
-      ke_total = 0.5 * jnp.sum(state.mass * velocity**2)
-
-    # Virial trace
-    virial = stress_module.virial_trace(position, state.force)
-
     # Box volume
     volume = pbc_module.box_volume(_box)
 
@@ -1694,7 +1703,7 @@ def settle_csvr_npt(
     # dε = -(dt/tau_P) * β * (P - P_0) + sqrt(2*kT*β*dt / (tau_P*V)) * noise
     pressure_deviation = pressure - target_pressure_akma
 
-    key, split = jax.random.split(state.rng)
+    key, split = jax.random.split(state.rng)  # key: for CSVR, split: for barostat noise
     random_noise = jax.random.normal(split, dtype=_box.dtype)
 
     # Deterministic term
@@ -1719,20 +1728,22 @@ def settle_csvr_npt(
     new_box = pbc_module.isotropic_box_scale(_box, mu)
 
     # Scale positions
-    position = position * mu
+    scaled_positions = position * mu
 
     # === SETTLE position re-projection (after box scaling) ===
     if water_indices is not None and water_indices.shape[0] > 0:
       position = settle_positions(
-        position,
-        positions_old,  # Use old positions as reference (may not be perfect, but necessary)
-        water_indices,
-        r_OH,
-        r_HH,
-        mass_oxygen,
-        mass_hydrogen,
-        new_box,
+        positions_unconstrained=scaled_positions,
+        positions_old=scaled_positions,  # Use scaled positions as reference: fix geometry around correctly-placed O
+        water_indices=water_indices,
+        r_OH=r_OH,
+        r_HH=r_HH,
+        mass_oxygen=mass_oxygen,
+        mass_hydrogen=mass_hydrogen,
+        box=new_box,
       )
+    else:
+      position = scaled_positions
 
     # === PME grid validation (option B: fixed grid at init-time) ===
     if box_init is not None:
@@ -1741,13 +1752,14 @@ def settle_csvr_npt(
       volume_ratio = volume_new / volume_init
       # Guard: warn if box drifted >10% from init (PME grid may become invalid)
       _ = jax.lax.cond(
-        volume_ratio > 1.1,
+        jnp.abs(volume_ratio - 1.0) > 0.10,
         lambda: jax.debug.print(
-          "NPT WARNING: box volume drifted >10%% from init; PME grid may be invalid. "
-          "V_new/V_init = {ratio}",
+          "NPT WARNING: box volume drifted from init by {drift:.2%}; PME grid may be invalid. "
+          "V_new/V_init = {ratio:.4f}",
+          drift=jnp.abs(volume_ratio - 1.0),
           ratio=volume_ratio
-        ),
-        lambda: None
+        ) or jnp.array(0),
+        lambda: jnp.array(0),  # no-op that returns an array
       )
 
     # === Force eval (at new box) ===
@@ -1787,9 +1799,9 @@ def settle_csvr_npt(
       n_atoms, n_waters, n_constraint_pairs=n_constraint_pairs, remove_com=remove_com
     )
 
-    # Draw chi-squared and compute lambda
+    # Draw chi-squared and compute lambda (use 'key' from barostat split, not state.rng)
     lambda_factor, key_out = _csvr_compute_lambda(
-      state.rng, ke_total, n_dof, _kT, _dt, tau_thermostat_akma
+      key, ke_total, n_dof, _kT, _dt, tau_thermostat_akma
     )
 
     # Apply rescaling

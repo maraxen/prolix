@@ -15,7 +15,7 @@ def virial_trace(positions: Array, forces: Array) -> Array:
   r"""Compute the virial trace for pressure calculation.
 
   The virial W is defined as:
-    W = -Σᵢ rᵢ · Fᵢ
+    W = Σᵢ rᵢ · Fᵢ
 
   where rᵢ are atomic positions and Fᵢ are forces (Fᵢ = -∂U/∂rᵢ).
 
@@ -29,7 +29,7 @@ def virial_trace(positions: Array, forces: Array) -> Array:
       forces: Atomic forces (N, 3) in kcal/mol/Å.
 
   Returns:
-      Scalar virial W in kcal/mol (sum of position-force dot products with negative sign).
+      Scalar virial W in kcal/mol (sum of position-force dot products).
   """
-  # W = -Σᵢ rᵢ · Fᵢ (negative sign: forces are -∂U/∂r)
-  return -jnp.sum(positions * forces)
+  # W = Σᵢ rᵢ · Fᵢ (forces are -∂U/∂r, so W < 0 for bound systems)
+  return jnp.sum(positions * forces)

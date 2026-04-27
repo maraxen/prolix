@@ -17,7 +17,7 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
-from prolix.physics import pbc, settle, system
+from prolix.physics import pbc, settle, system, pressure, stress
 from prolix.physics.rigid_water_ke import rigid_tip3p_box_ke_kcal
 from prolix.physics.units import BAR_PER_AKMA_PRESSURE, AKMA_PRESSURE_PER_BAR
 from prolix.simulate import AKMA_TIME_UNIT_FS, BOLTZMANN_KCAL
@@ -218,14 +218,24 @@ def test_npt_pressure_sanity() -> None:
     state = apply_j(state, box=state.box)
 
     if step >= burn:
-      # Convert AKMA pressure to bar and record
-      # (pressure is not directly accessible from state, so this is a simplified check)
-      pass
+      # Compute pressure diagnostically: virial + kinetic energy
+      n_w = water_indices.shape[0]
+      ke_total = rigid_tip3p_box_ke_kcal(state.position, state.momentum, state.mass, n_w)
+      virial = stress.virial_trace(state.position, state.force)
+      volume = jnp.prod(state.box)
+      pressure_akma = pressure.instantaneous_pressure_akma(ke_total, virial, volume, ndim=3)
+      pressure_bar_val = float(pressure_akma * BAR_PER_AKMA_PRESSURE)
+      pressures_bar.append(pressure_bar_val)
 
-  # TODO: Full pressure monitoring would require instrumenting apply_fn to return pressure.
-  # For now, just verify the run completes without NaN.
+  # Verify run completes without NaN
   assert jnp.all(jnp.isfinite(state.position)), "Final position contains NaN"
   assert jnp.all(jnp.isfinite(state.box)), "Final box contains NaN"
+
+  # Verify pressure control (within ±200 bar of target)
+  pressures_array = np.array(pressures_bar)
+  mean_p = float(np.mean(pressures_array))
+  assert abs(mean_p - pressure_bar) < 200.0, \
+    f"Mean pressure {mean_p:.1f} bar is >200 bar from target {pressure_bar:.1f} bar"
 
 
 @pytest.mark.slow
