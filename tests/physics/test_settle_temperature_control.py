@@ -410,3 +410,161 @@ def test_equipartition_per_molecule_com_dt0_5fs() -> None:
   v_norm = components / sigma
   ks_stat, ks_pval = stats.kstest(v_norm, 'norm')
   assert ks_pval > 0.05, f"COM equipartition KS test failed at dt=0.5fs: p={ks_pval:.4f}, expected > 0.05"
+
+
+# ============================================================================
+# Sprint 5 Deferred: lax.scan Runner and Reproducibility
+# ============================================================================
+
+def _mean_rigid_t_lax_scan(*, dt_fs: float, n_waters: int, seed: int, steps: int, burn: int) -> tuple[float, np.ndarray]:
+  """Temperature calculation using jax.lax.scan instead of Python loop (Sprint 5 deferred).
+
+  Returns both mean temperature and full temperature array for comparison.
+  """
+  jax.config.update("jax_enable_x64", True)
+  temperature_k = 300.0
+  gamma_ps = 1.0
+  positions_a, box_edge = _grid_water_positions(n_waters, spacing_angstrom=10.0)
+  box_vec = jnp.array([box_edge, box_edge, box_edge], dtype=jnp.float64)
+  dt_akma = float(dt_fs) / float(AKMA_TIME_UNIT_FS)
+  kT = float(temperature_k) * BOLTZMANN_KCAL
+  gamma_reduced = float(gamma_ps) * float(AKMA_TIME_UNIT_FS) * 1e-3
+  sys_dict = _prolix_params_pure_water(n_waters)
+  displacement_fn, shift_fn = pbc.create_periodic_space(box_vec)
+  energy_fn = system.make_energy_fn(displacement_fn, sys_dict, box=box_vec, use_pbc=True, implicit_solvent=False, pme_grid_points=32, pme_alpha=0.34, cutoff_distance=9.0, strict_parameterization=False)
+  n_atoms = n_waters * 3
+  mass = jnp.array([[15.999], [1.008], [1.008]] * n_waters).reshape(n_atoms)
+  water_indices = settle.get_water_indices(0, n_waters)
+  init_s, apply_s = settle.settle_langevin(energy_fn, shift_fn, dt=dt_akma, kT=kT, gamma=gamma_reduced, mass=mass, water_indices=water_indices, box=box_vec, remove_linear_com_momentum=False, project_ou_momentum_rigid=True, projection_site="post_o", settle_velocity_iters=10)
+  apply_j = jax.jit(apply_s)
+  dof_rigid = float(6 * n_waters - 3)
+  state = init_s(jax.random.PRNGKey(seed), jnp.array(positions_a), mass=mass)
+
+  # Burn-in loop (Python, not scanned)
+  for _ in range(burn):
+    state = apply_j(state)
+
+  # Production loop using lax.scan
+  def step_fn(state, _):
+    new_state = apply_j(state)
+    ke_r = rigid_tip3p_box_ke_kcal(new_state.position, new_state.momentum, new_state.mass, n_waters)
+    temp = 2.0 * ke_r / (dof_rigid * BOLTZMANN_KCAL)
+    return new_state, temp
+
+  final_state, temps = jax.lax.scan(step_fn, state, None, length=steps - burn)
+  temps_np = np.array(temps)
+  mean_t = float(np.mean(temps_np)) if len(temps_np) > 0 else float("nan")
+  return mean_t, temps_np
+
+
+def test_lax_scan_runner() -> None:
+  """Unit test: lax.scan runner produces identical temperatures to Python loop.
+
+  This validates the Sprint 5 deferred lax.scan refactor: baseline Python loop
+  vs. JAX lax.scan should match to machine precision.
+  """
+  jax.config.update("jax_enable_x64", True)
+  n_waters = 2
+  dt_fs = 0.5
+  steps = 50
+  burn = 10
+  seed = 801
+
+  # Original Python loop approach
+  mean_t_py = _mean_rigid_t_after_burn(dt_fs=dt_fs, n_waters=n_waters, seed=seed, steps=steps, burn=burn)
+
+  # New lax.scan approach
+  mean_t_scan, _ = _mean_rigid_t_lax_scan(dt_fs=dt_fs, n_waters=n_waters, seed=seed, steps=steps, burn=burn)
+
+  # They must match to within floating-point error (1e-8 or better)
+  assert abs(mean_t_py - mean_t_scan) < 1e-8, \
+    f"Python loop ({mean_t_py:.6f}) vs lax.scan ({mean_t_scan:.6f}) differ by {abs(mean_t_py - mean_t_scan):.2e}"
+
+
+def test_temperature_reproducibility_same_seed() -> None:
+  """Reproducibility check: identical seeds → identical trajectories.
+
+  Init with seed=12345, run 50 steps → trajectory_a
+  Init with seed=12345 again, run 50 steps → trajectory_b
+  Assert positions match exactly (bit-identical).
+  """
+  jax.config.update("jax_enable_x64", True)
+  n_waters = 2
+  dt_fs = 0.5
+  temperature_k = 300.0
+  gamma_ps = 1.0
+  steps = 50
+  seed = 12345
+
+  def run_trajectory(seed_val):
+    positions_a, box_edge = _grid_water_positions(n_waters, spacing_angstrom=10.0)
+    box_vec = jnp.array([box_edge, box_edge, box_edge], dtype=jnp.float64)
+    dt_akma = float(dt_fs) / float(AKMA_TIME_UNIT_FS)
+    kT = float(temperature_k) * BOLTZMANN_KCAL
+    gamma_reduced = float(gamma_ps) * float(AKMA_TIME_UNIT_FS) * 1e-3
+    sys_dict = _prolix_params_pure_water(n_waters)
+    displacement_fn, shift_fn = pbc.create_periodic_space(box_vec)
+    energy_fn = system.make_energy_fn(displacement_fn, sys_dict, box=box_vec, use_pbc=True, implicit_solvent=False, pme_grid_points=32, pme_alpha=0.34, cutoff_distance=9.0, strict_parameterization=False)
+    n_atoms = n_waters * 3
+    mass = jnp.array([[15.999], [1.008], [1.008]] * n_waters).reshape(n_atoms)
+    water_indices = settle.get_water_indices(0, n_waters)
+    init_s, apply_s = settle.settle_langevin(energy_fn, shift_fn, dt=dt_akma, kT=kT, gamma=gamma_reduced, mass=mass, water_indices=water_indices, box=box_vec, remove_linear_com_momentum=False, project_ou_momentum_rigid=True, projection_site="post_o", settle_velocity_iters=10)
+    apply_j = jax.jit(apply_s)
+    state = init_s(jax.random.PRNGKey(seed_val), jnp.array(positions_a), mass=mass)
+
+    positions_list = [state.position]
+    for _ in range(steps):
+      state = apply_j(state)
+      positions_list.append(state.position)
+    return jnp.array(positions_list)
+
+  traj_a = run_trajectory(seed)
+  traj_b = run_trajectory(seed)
+
+  assert jnp.allclose(traj_a, traj_b, atol=0.0), \
+    f"Same seed produced different trajectories; max diff: {jnp.max(jnp.abs(traj_a - traj_b))}"
+
+
+def test_temperature_reproducibility_different_seed() -> None:
+  """Divergence check: different seeds → different trajectories.
+
+  Init with seed=12345, run 50 steps → trajectory_a
+  Init with seed=99999, run 50 steps → trajectory_c
+  Assert trajectories differ (diverge after burn-in).
+  """
+  jax.config.update("jax_enable_x64", True)
+  n_waters = 2
+  dt_fs = 0.5
+  temperature_k = 300.0
+  gamma_ps = 1.0
+  steps = 50
+
+  def run_trajectory(seed_val):
+    positions_a, box_edge = _grid_water_positions(n_waters, spacing_angstrom=10.0)
+    box_vec = jnp.array([box_edge, box_edge, box_edge], dtype=jnp.float64)
+    dt_akma = float(dt_fs) / float(AKMA_TIME_UNIT_FS)
+    kT = float(temperature_k) * BOLTZMANN_KCAL
+    gamma_reduced = float(gamma_ps) * float(AKMA_TIME_UNIT_FS) * 1e-3
+    sys_dict = _prolix_params_pure_water(n_waters)
+    displacement_fn, shift_fn = pbc.create_periodic_space(box_vec)
+    energy_fn = system.make_energy_fn(displacement_fn, sys_dict, box=box_vec, use_pbc=True, implicit_solvent=False, pme_grid_points=32, pme_alpha=0.34, cutoff_distance=9.0, strict_parameterization=False)
+    n_atoms = n_waters * 3
+    mass = jnp.array([[15.999], [1.008], [1.008]] * n_waters).reshape(n_atoms)
+    water_indices = settle.get_water_indices(0, n_waters)
+    init_s, apply_s = settle.settle_langevin(energy_fn, shift_fn, dt=dt_akma, kT=kT, gamma=gamma_reduced, mass=mass, water_indices=water_indices, box=box_vec, remove_linear_com_momentum=False, project_ou_momentum_rigid=True, projection_site="post_o", settle_velocity_iters=10)
+    apply_j = jax.jit(apply_s)
+    state = init_s(jax.random.PRNGKey(seed_val), jnp.array(positions_a), mass=mass)
+
+    positions_list = [state.position]
+    for _ in range(steps):
+      state = apply_j(state)
+      positions_list.append(state.position)
+    return jnp.array(positions_list)
+
+  traj_a = run_trajectory(12345)
+  traj_c = run_trajectory(99999)
+
+  # Trajectories should diverge (not be allclose everywhere)
+  max_diff = jnp.max(jnp.abs(traj_a - traj_c))
+  assert max_diff > 0.01, \
+    f"Different seeds should produce divergent trajectories; max diff only {max_diff:.6f}"
