@@ -1,0 +1,30 @@
+{
+  "recon_id": "260426_mtt_backlog",
+  "date": "2026-04-26",
+  "domain": "mtt_backlog",
+  "question": "MTT Log-Det Estimator backlog readiness and implementation starting point",
+  "findings": [
+    "MTT backlog entry (mtt_phase2): status='ready', blocker=null, unblocked 2026-04-26, estimated 4 days",
+    "Milestone: 256-atom water box demo, <5% error vs dense Laplacian eigendecomposition",
+    "Algorithm: Hutchinson probing + Lanczos/Chebyshev polynomial approximation, O(N*K*M) cost",
+    "mtt_theory.md MISSING at references/notes/ — referenced in backlog as 'to be written'; must be authored before implementation decision",
+    "references/notes/ contains frank2024_efa_notes.md (EFA theory, unrelated to MTT)",
+    "NO existing MTT code anywhere in src/prolix/physics — comprehensive search: mtt, log_det, log-det, hutchinson, lanczos, chebyshev all return zero results. Greenfield.",
+    "EFA kernel API (src/prolix/physics/efa_coulomb.py:209): efa_lebedev_coulomb_energy(positions, charges, atom_mask, params) -> scalar",
+    "EFA parameter factory (efa_coulomb.py:135): efa_lebedev_params(alpha, n_freqs=32, n_lebedev_pts=26, ...) -> EFAParams [LRU-cached]",
+    "EFAParams (efa_coulomb.py:25): frozen dataclass with omegas (K,), weights (K,), nodes (G,3), quad_weights (G,) — all numpy, not JAX-traceable",
+    "EFA feature extraction (efa_coulomb.py:170): efa_erf_features(positions, params) -> (N, 2*K*G) feature matrix",
+    "JIT pattern for EFA: functools.partial(efa_lebedev_coulomb_energy, params=params) — EFAParams numpy fields not hashable, cannot use static_argnames",
+    "EFA production wiring: flash_explicit.py:383 is the sole caller in src/",
+    "EFA test suite: tests/physics/test_efa_coulomb.py, 9/9 tests pass — gating condition for MTT met",
+    "Only mtt_phase2 has status='ready' in .praxia/backlog.jsonl",
+    "RFF Coulomb (src/prolix/physics/rff_coulomb.py) provides architectural pattern precedent for Coulomb kernel approximations"
+  ],
+  "open_questions": [
+    "Should MTT wrap efa_lebedev_coulomb_energy directly or build on efa_erf_features for Laplacian construction?",
+    "Expected K (Hutchinson probes) and M (polynomial degree) for <5% error on 256-atom system?",
+    "Should MTT integrate into flash_explicit.py (like EFA) or remain standalone kernel initially?",
+    "Algorithm choice: Lanczos vs Chebyshev polynomial approximation — needs mtt_theory.md to decide"
+  ],
+  "confidence": 0.92
+}

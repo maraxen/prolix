@@ -1,0 +1,14 @@
+{
+  "plan_id": "260426_sprint9",
+  "date": "2026-04-26",
+  "title": "Sprint 9: Float64 Compatibility + NPT 20ps Gate + MTT Theory Foundation",
+  "oracle_verdict": "APPROVED",
+  "oracle_verdict_date": "2026-04-26",
+  "oracle_notes": {
+    "R1": "Satisfied. Step 7 specifies 4000 steps at dt=0.5fs (2 ps) with explicit 'MUST be at least 4000 steps' language.",
+    "R2": "Satisfied. Step 8 gate is [-99, 101] bar on 10ps mean with rationale documented.",
+    "R3": "Satisfied. Step 10 has N=64 REQUIRED accuracy gate and N=256 explicitly deferred to Sprint 10 with skip marker.",
+    "R4": "Satisfied. Steps 1-4 all include grep guard for dtype=jnp.float32 arguments.",
+    "final_verdict": "APPROVED. Sprint 9 plan cleared for implementation."
+  }
+}

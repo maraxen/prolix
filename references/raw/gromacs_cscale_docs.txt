@@ -1,0 +1,45 @@
+Sprint 6 NPT Research: GROMACS c-rescale Documentation + SETTLE Joint Validation
+Fetched: 2026-04-26
+
+== GROMACS mdp-options: c-rescale entry ==
+Source: https://manual.gromacs.org/current/user-guide/mdp-options.html
+
+"C-rescale: Exponential relaxation pressure coupling with time constant tau-p, including
+a stochastic term to enforce correct volume fluctuations. The algorithm is described in
+Bernetti & Bussi (2020)."
+
+== GROMACS reference manual: SCR SDE ==
+Source: https://github.com/gromacs/gromacs/blob/main/docs/reference-manual/algorithms/molecular-dynamics.rst
+
+SDE (isotropic form):
+  dε = -(β/τP)(P₀ − P)dt + √(2kBTβ/VτP) dW
+
+== Parrinello-Rahman large-deviation WARNING (for contrast with c-rescale) ==
+"If your pressure is very far from equilibrium...may result in very large box oscillations"
+C-rescale has NO equivalent warning — suitable for both equilibration and production.
+
+== SETTLE + c-rescale joint use ==
+Source: https://github.com/bussilab/crescale-gromacs
+
+"the isotropic and semi-isotropic versions are included in the official GROMACS repository
+starting with GROMACS 2021."
+
+GROMACS uses SETTLE for TIP3P by default. GROMACS 2021+ ships both SETTLE and c-rescale
+in production with no documented incompatibility.
+
+== Standard ordering (GROMACS implementation) ==
+1. Integrate forces (velocity Verlet)
+2. Apply pressure coupling (c-rescale: scale box and atom positions uniformly)
+3. Apply SETTLE constraints on scaled positions (re-project H to correct O-H-H geometry)
+
+No additional correction needed: SETTLE's geometric constraint is scale-invariant for the
+water triangle — it projects H onto correct bond lengths regardless of how O was moved.
+
+== GROMACS settle.cpp note ==
+Source: https://github.com/gromacs/gromacs/blob/main/src/gromacs/mdlib/settle.cpp
+"Note that we completely avoid computing the center of mass and only use distances."
+No barostat-specific correction logic in SETTLE source.
+
+== dt recommendation ==
+NONE documented for c-rescale + SETTLE. GROMACS only notes "box is scaled every nstpcouple steps."
+No dt-specific stability threshold published for SCR with rigid water constraints.

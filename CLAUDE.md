@@ -73,14 +73,21 @@ for step in range(n_steps):
     state = apply_fn(state, box=state.box)
 ```
 
-**Status**: NPT validated to 20ps at dt=0.5fs, T=300±5K, P=1±50 bar (Sprint 7, v1.0)
+**Status**: NPT short-trajectory mode validated (NVT-like tests pass; long-trajectory stability under investigation)
 
-### Temperature Control
+### Known Limitation: NPT Long-Trajectory Instability
 
-With this configuration:
+The CSVR thermostat coupling with rigid-body water kinetic energy produces temperature divergence (→ 10^115 K) at timescales beyond ~10 ps. Root cause: CSVR + SETTLE + rigid-water KE interaction feedback. **Short NPT tests pass** (pressure sanity, dt sweep, 4-step validation). **Long trajectories (≥20 ps)** fail with thermal runaway.
+
+**Impact**: Use NPT for short equilibrations only (< ~10 ps). For longer production runs, use NVT ensemble or defer to Sprint 11 fix.
+
+### Temperature Control (NVT Mode)
+
+With NVT configuration:
 - Target temperature: 300 K
 - Achieved stability: ±5 K over 50+ ps simulations
 - No divergence or runaway heating observed
+- *Note: This is NVT (constant volume). NPT long-trajectory use is not recommended in v1.0.*
 
 ### Batched Production Simulations
 
@@ -107,9 +114,15 @@ state = LangevinState(
 result = batched_produce(batch, state, steps=n_steps, chunk_size=1)
 ```
 
+### Known Limitations (v1.0)
+
+1. **NVT timestep cap**: dt ≤ 0.5 fs (rigid body + thermostat feedback coupling)
+2. **NPT long-trajectory divergence**: Temperature runaway (→ 10^115 K) beyond ~10 ps due to CSVR + rigid-water KE coupling. Use NVT for longer production runs or wait for Sprint 11 fix. See `tests/physics/test_npt_barostat.py::test_npt_20ps_liquid_water` (marked xfail).
+3. **Batched initialization**: `batched_equilibrate` has a known NaN issue; use cold-start initialization instead (see Safe Pattern above).
+
 ### Future Improvements (v2.0+)
 
-A constraint-aware thermostat that only couples to unconstrained DOF could eliminate this limitation. This would allow dt ≥ 1.0fs while maintaining temperature control. See `.agent/docs/RELEASE_DECISION_v1.0.md` for detailed analysis and roadmap.
+A constraint-aware thermostat that only couples to unconstrained DOF could eliminate the NVT dt limitation, allowing dt ≥ 1.0fs. A decoupled CSVR implementation may fix the NPT long-trajectory divergence by avoiding rigid-body KE feedback loops. See `.agent/docs/RELEASE_DECISION_v1.0.md` for detailed analysis and roadmap.
 
 ### Files Affected
 

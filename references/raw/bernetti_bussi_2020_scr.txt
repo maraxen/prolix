@@ -1,0 +1,36 @@
+Sprint 6 NPT Research: Bernetti & Bussi 2020 Stochastic Cell Rescaling
+Fetched: 2026-04-26
+
+== KEY FINDING: Exponential form only ==
+
+All primary-source implementations use exp(Δε/3) exclusively.
+No linearized form (1 + Δε/3) appears in any code or documentation.
+
+== crescale/simplemd.cpp (Bussi's reference implementation) ==
+Source: https://github.com/bussilab/crescale/blob/master/simplemd/simplemd.cpp
+
+Key lines (both 'R' and 'E' barostat variants):
+  double scaling = exp(depsilon / 3.0);
+
+SDE formula (from Bernetti & Bussi 2020, J. Chem. Phys. 153, 114107):
+  dε = -(β/τP)(P₀ − P)dt + √(2kBTβ/VτP) dW
+
+== GROMACS coupling.cpp (production implementation) ==
+Source: https://raw.githubusercontent.com/gromacs/gromacs/main/src/gromacs/mdlib/coupling.cpp
+
+Key function: calculateScalingMatrixImplDetail<PressureCoupling::CRescale>
+  (*mu)(d, d) = std::exp(-factor * (pressureCouplingOptions.ref_p[d][d] - scalar_pressure) / DIM
+                         + std::sqrt(2.0 * kt * factor * gmx::c_presfac / vol) * gauss / DIM);
+
+== Linearization accuracy analysis ==
+Taylor: exp(x) - (1+x) = x²/2 + O(x³)
+1% relative error threshold: |x| ≈ 0.14 (≈ 5% volume change per step)
+At dt=0.5fs, τP=1ps, |ΔP|=200 bar, β=4.5e-5 bar⁻¹:
+  Δε ≈ (β/τP)·|ΔP|·dt ≈ (4.5e-5/1000)·200·0.5 ≈ 4.5e-6 per step
+  Linearization error: ~10⁻¹¹ — completely negligible at operating conditions.
+Conclusion: exponential is canonical and should be used regardless.
+
+== Stability with large P - P₀ ==
+GROMACS reference manual warns about Parrinello-Rahman large-deviation instability:
+  "If your pressure is very far from equilibrium...may result in very large box oscillations"
+C-rescale carries NO equivalent warning — SCR's first-order SDE is inherently more robust.

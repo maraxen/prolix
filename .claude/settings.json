@@ -1,0 +1,12 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(cargo check *)",
+      "Bash(uv run ruff check *)",
+      "Bash(rclone lsd *)",
+      "Bash(uv lock --check)",
+      "Bash(uv sync)",
+      "Bash(uv lock)"
+    ]
+  }
+}

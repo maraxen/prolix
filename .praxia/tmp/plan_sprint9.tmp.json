@@ -1,0 +1,82 @@
+{
+  "plan_id": "260426_sprint9",
+  "date": "2026-04-26",
+  "title": "Sprint 9: Float64 Compatibility + NPT 20ps Gate + MTT Theory Foundation",
+  "problem_statement": "Three blocking issues prevent v1.0 progression: (1) flash_nonbonded.py has four clusters of jnp.float32() literals that force computation into float32, breaking float64 simulations; (2) NPT 20ps gate still lacks a validated two-phase NVT→NPT protocol at liquid water density; (3) MTT log-det estimator is unblocked but mtt_theory.md design doc is missing, blocking implementation.",
+  "steps": [
+    {
+      "step_id": 1,
+      "description": "Fix float32 literal in Born radii padding sanitization at flash_nonbonded.py:187. Replace `jnp.float32(1.5)` with plain Python float `1.5` (auto-promotes to positions.dtype). Also scan lines 180-195 for any other float32 literals in chunked_born_radii.",
+      "agent": "fixer",
+      "rationale": "Surgical single-site fix. Fixer specializes in precision-aware code changes.",
+      "gate": "grep -n 'jnp.float32' src/prolix/physics/flash_nonbonded.py shows no matches in lines 180-195"
+    },
+    {
+      "step_id": 2,
+      "description": "Fix float32 literals in soft-core + GB prefactor calculation at flash_nonbonded.py:231-236. Replace `jnp.float32(soft_core_lambda)`, `jnp.float32(0.5)`, `jnp.float32(-0.5)`, `jnp.float32(COULOMB_CONSTANT)`, `jnp.float32(tau)`, `jnp.float32(1e-8)` with plain Python literals. GB energy must accumulate in positions.dtype.",
+      "agent": "fixer",
+      "rationale": "HIGH severity: GB energy forced to float32 breaks physics fidelity. chunked_fused_energy is the core energy accumulator.",
+      "gate": "grep -n 'jnp.float32' src/prolix/physics/flash_nonbonded.py shows no matches in lines 225-245"
+    },
+    {
+      "step_id": 3,
+      "description": "Fix float32 literals in _sparse_exclusion_energy at flash_nonbonded.py:366-368. Replace `jnp.float32(soft_core_lambda)` and `jnp.float32(0.5)` with plain Python floats.",
+      "agent": "fixer",
+      "rationale": "Exclusion correction computed in float32, then subtracted from float64 total — precision loss at each correction.",
+      "gate": "grep -n 'jnp.float32' src/prolix/physics/flash_nonbonded.py shows no matches in lines 360-375"
+    },
+    {
+      "step_id": 4,
+      "description": "Fix float32 literals in parameter sanitization at flash_nonbonded.py:456-462 (flash_nonbonded_forces). Replace jnp.float32(1.5), jnp.float32(1.2), jnp.float32(0.0), jnp.float32(1.0) with plain Python floats. These sanitize padded atom parameters — forcing float32 here poisons all downstream energy computation.",
+      "agent": "fixer",
+      "rationale": "HIGH severity: sanitized parameters passed to energy_fn; float32 at this entry point propagates through entire nonbonded pipeline.",
+      "gate": "grep -n 'jnp.float32' src/prolix/physics/flash_nonbonded.py shows no matches in lines 450-470"
+    },
+    {
+      "step_id": 5,
+      "description": "Write regression test tests/physics/test_flash_nonbonded_dtype.py. Test parametrized over [jnp.float32, jnp.float64]: (a) construct 8-atom water positions at target dtype, (b) call flash_nonbonded_forces, (c) assert output dtype == input dtype, (d) assert energy is finite. Also test that float32→float64 gives consistent energy values (within 1e-4 relative tolerance). Mark float64 tests as slow.",
+      "agent": "fixer",
+      "rationale": "Regression gate to prevent future float32 regressions. Written by fixer immediately after fixes.",
+      "gate": "pytest tests/physics/test_flash_nonbonded_dtype.py -v exits 0; all parametrized variants pass"
+    },
+    {
+      "step_id": 6,
+      "description": "Run existing flash_nonbonded test suite after fixes: `pytest tests/physics/test_flash_nonbonded*.py -v`. Verify zero regressions from float32→plain-float replacement.",
+      "agent": "fixer",
+      "rationale": "Confirm fixes do not alter float32 behavior — plain Python floats auto-promote to float32 when array is float32.",
+      "gate": "pytest exit code 0; all previously-passing tests still pass"
+    },
+    {
+      "step_id": 7,
+      "description": "Implement two-phase NVT→NPT protocol test at tests/physics/test_npt_barostat.py (add test_npt_20ps_liquid_water, marked slow): (1) _grid_water_positions(n_waters=64, spacing_angstrom=3.1) for liquid TIP3P density (~42 Å box), (2) settle.get_water_indices(0, 64), (3) NVT phase: settle_langevin init_fn+apply_fn for 1500 steps at dt=0.5fs, T=300K to relax grid bad contacts, (4) construct NPTState from NVT final state + box, (5) settle_csvr_npt for 40000 steps (20ps) at P=1 bar. Record (T, P, box_volume) every 200 steps.",
+      "agent": "general-purpose",
+      "rationale": "Complex integration test requiring careful state management across two integrators. General-purpose for multi-step JAX numerical code.",
+      "gate": "40000 NPT steps complete without NaN/exception; timeseries arrays have shape (200, 3)"
+    },
+    {
+      "step_id": 8,
+      "description": "Validate NPT 20ps trajectory thermodynamics: (a) T_mean over last 10ps (steps 20000-40000) in [295, 305] K, (b) P_mean over last 10ps in [-49, 51] bar, (c) no NaN in timeseries, (d) box volume varies smoothly (no sudden jumps >5%). Encode acceptance assertions directly in the test. Use rigid_tip3p_box_ke_kcal for temperature and pressure.instantaneous_pressure_akma for pressure (both confirmed exist from Sprint 8).",
+      "agent": "auditor",
+      "rationale": "Oracle-mandated thermodynamic gate. Auditor verifies assertions are physically correct and complete.",
+      "gate": "test_npt_20ps_liquid_water PASSES all 4 assertions; audit confirms assertions are correctly derived"
+    },
+    {
+      "step_id": 9,
+      "description": "Write references/notes/mtt_theory.md algorithm design document covering: (1) Problem statement: stochastic log-det of Coulomb-weighted graph Laplacian, (2) Hutchinson trace estimator: E[z^T M^{-1} z] = tr(M^{-1}) for z~N(0,I), (3) Lanczos tridiagonalization: JAX lax.while_loop implementation sketch, (4) Chebyshev polynomial approximation of log via spectral density, (5) Connection to EFA kernel (efa_lebedev_coulomb_energy as kernel function), (6) Error bounds and convergence: expected K probes and M polynomial degree for <5% error on 256-atom box, (7) Dense eigendecomposition baseline for validation. This doc gates Step 10.",
+      "agent": "general-purpose",
+      "rationale": "Theory synthesis from algorithm design literature. General-purpose can research and draft algorithm documents.",
+      "gate": "File exists at references/notes/mtt_theory.md with all 7 sections present; Hutchinson and Lanczos pseudocode present"
+    },
+    {
+      "step_id": 10,
+      "description": "Implement MTT log-det estimator skeleton at src/prolix/physics/mtt_logdet.py. Following mtt_theory.md design: (1) mtt_params = mtt_logdet_params(efa_params, n_probes, n_lanczos) [offline], (2) log_det_est = mtt_estimate_log_det(positions, charges, atom_mask, mtt_params) [online, JIT-able], (3) Lanczos via lax.while_loop, (4) Chebyshev approx of log eigenvalues, (5) Hutchinson averaging. Create tests/physics/test_mtt_logdet.py: JIT compiles; deterministic with same seed; <5% error vs numpy.linalg.slogdet on 8-atom test case.",
+      "agent": "general-purpose",
+      "rationale": "Greenfield JAX numerical implementation. General-purpose for novel algorithm code requiring iterative design.",
+      "gate": "test_mtt_logdet.py passes: JIT compile, determinism, <5% error on 8-atom Coulomb matrix"
+    }
+  ],
+  "subagents_used": ["fixer", "auditor", "general-purpose"],
+  "tags": ["float64_compatibility", "flash_nonbonded", "npt_validation", "npt_20ps_gate", "mtt_implementation", "mtt_theory", "liquid_water"],
+  "confidence_initial": 0.72,
+  "oracle_verdict": null
+}

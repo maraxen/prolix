@@ -1,0 +1,25 @@
+{
+  "recon_id": "260426_npt_protocol",
+  "date": "2026-04-26",
+  "domain": "npt_protocol",
+  "question": "Two-phase NVT→NPT initialization protocol requirements for 20ps gate",
+  "findings": [
+    "_grid_water_positions at tests/physics/test_explicit_langevin_tip3p_parity.py:50 accepts spacing_angstrom parameter; current tests use 10.0 Å (gas phase ~600× below liquid density)",
+    "TIP3P liquid O-O spacing ~3.1 Å; at spacing_angstrom=3.1, n_waters=64 gives ~42 Å box satisfying PME ≥18 Å requirement",
+    "16 waters at spacing_angstrom=3.1 gives ~25 Å box — also satisfies PME, but small box gives large pressure fluctuations",
+    "settle_langevin init_fn (settle.py:625): returns NVTLangevinState(position, momentum, force, mass, rng) — NO box field",
+    "settle_csvr_npt init_fn (settle.py:1614): requires NPTState(position, momentum, force, mass, rng, box) — enforces box_init at construction",
+    "Two-phase protocol is feasible: Phase1=NVT equilibration, Phase2=construct NPTState from NVT output + target_box, run settle_csvr_npt",
+    "NPTState constructor: NPTState(position=nvt_state.position, momentum=nvt_state.momentum, force=nvt_state.force, mass=nvt_state.mass, rng=nvt_state.rng, box=target_box)",
+    "Current longest NPT test: test_npt_pressure_sanity at test_npt_barostat.py:169 — only 500 steps (0.25 ps); ALL current NPT tests skip NVT phase",
+    "No existing two-phase NVT→NPT example in the codebase",
+    "Phase1 NVT recommended: 1000-2000 steps at dt=0.5fs (0.5-1 ps) to remove grid bad contacts before NPT",
+    "water_indices convention for pure water: settle.get_water_indices(n_protein_atoms=0, n_waters=N)"
+  ],
+  "open_questions": [
+    "Optimal water count: 16 (fast, noisy) vs 64 (medium, better stats) vs 128+ (slow, tight stats)?",
+    "Minimum NVT equilibration steps needed to relax grid-initialized bad contacts?",
+    "Should NPT start from NVT momentum (recommended) or zero momentum?"
+  ],
+  "confidence": 0.95
+}

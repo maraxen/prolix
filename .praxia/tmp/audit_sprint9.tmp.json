@@ -1,0 +1,34 @@
+{
+  "audit_id": "260426_sprint9",
+  "plan_id": "260426_sprint9",
+  "date": "2026-04-26",
+  "findings": [
+    {
+      "severity": "MEDIUM",
+      "description": "test_mtt_logdet_n64_accuracy used n_probes=5 — Hutchinson variance ~45% std error, risk of >5% gate failure on bad seeds",
+      "remediated": true
+    },
+    {
+      "severity": "MEDIUM",
+      "description": "jax.config.update('jax_enable_x64', True) called inside test function bodies in test_flash_nonbonded_dtype.py — global state leakage to subsequent tests",
+      "remediated": true
+    },
+    {
+      "severity": "LOW",
+      "description": "MTTParams docstring does not state spectral-range assumption (n_lanczos must scale with κ(L_reg))",
+      "remediated": false
+    },
+    {
+      "severity": "LOW",
+      "description": "1e-14 breakdown threshold and 1e-10 eigenvalue floor in mtt_logdet.py are undocumented magic values",
+      "remediated": false
+    },
+    {
+      "severity": "LOW",
+      "description": "No MTT test for non-trivial atom_mask (ghost atoms zeroed) or Lanczos breakdown edge case",
+      "remediated": false
+    }
+  ],
+  "verdict": "PASS",
+  "score": 8.5
+}

@@ -1,0 +1,22 @@
+{
+  "recon_id": "260426_flash_dtype",
+  "date": "2026-04-26",
+  "domain": "flash_dtype_carry",
+  "question": "lax.scan carry dtype mismatches in flash_*.py files",
+  "findings": [
+    "flash_nonbonded.py:175 (chunked_born_radii): lax.scan carry ALREADY SAFE — jnp.zeros(N, dtype=positions.dtype) — the 'known unfixed mismatch' was fixed before this recon",
+    "flash_nonbonded.py:300 (chunked_fused_energy): lax.scan carry SAFE — jnp.zeros((), dtype=positions.dtype) — confirmed fixed in Sprint 7",
+    "ONLY flash_*.py file: src/prolix/physics/flash_nonbonded.py — no flash_coulomb.py, flash_gb.py, flash_lj.py exist",
+    "NEW MEDIUM: flash_nonbonded.py:187 — jnp.float32(1.5) hardcoded in padding atom sanitization after Born radii computation; float64 arrays get float32 fill value",
+    "NEW HIGH: flash_nonbonded.py:231-236 — jnp.float32(soft_core_lambda), jnp.float32(0.5), jnp.float32(-0.5), jnp.float32(COULOMB_CONSTANT), jnp.float32(tau) in soft-core + GB prefactor calculation; entire energy accumulation done in float32",
+    "NEW MEDIUM: flash_nonbonded.py:366-368 (_sparse_exclusion_energy) — jnp.float32(soft_core_lambda), jnp.float32(0.5) force exclusion correction to float32",
+    "NEW HIGH: flash_nonbonded.py:456-462 (flash_nonbonded_forces) — jnp.float32(1.5), jnp.float32(1.2), jnp.float32(0.0), jnp.float32(1.0) in parameter sanitization; all sanitized params forced to float32 before energy_fn calls",
+    "Pattern: jnp.float32(x) literals should be replaced with plain Python floats (auto-promote) or jnp.array(x, dtype=positions.dtype)"
+  ],
+  "open_questions": [
+    "Are hardcoded jnp.float32 literals in non-scan contexts intentional (performance) or unintended bugs?",
+    "Does prolix have a float64/x64 CI mode that would catch these?",
+    "Are there other files outside flash_nonbonded.py with similar jnp.float32(...) literal patterns?"
+  ],
+  "confidence": 0.95
+}
