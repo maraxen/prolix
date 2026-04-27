@@ -201,7 +201,12 @@ def test_batched_equilibrate(fake_padded_batch):
 
 
 def test_batched_produce(fake_padded_batch):
-    state = batched_equilibrate(fake_padded_batch, key=random.PRNGKey(0), n_steps=5, chunk_size=1)
+    B = fake_padded_batch.positions.shape[0]
+    system_index = jnp.arange(B)
+    state = batched_equilibrate(
+        fake_padded_batch, system_index, fake_padded_batch.positions,
+        key=random.PRNGKey(0), duration_ps=0.02, temp=300.0, chunk_size=1
+    )
     
     final_state, traj = batched_produce(fake_padded_batch, state, n_saves=2, steps_per_save=3, chunk_size=1)
     

@@ -101,11 +101,10 @@ def run_npt_20ps():
             T_hist.append(T_inst)
 
             # Compute pressure from virial + kinetic energy
-            # P = (2*KE + W) / (3*V) in AKMA units; convert to bar
             volume = float(jnp.prod(state.box))
             virial_w = float(stress.virial_trace(state.position, state.force))
-            pressure_akma = float((2.0 * ke + virial_w) / (3.0 * volume))
-            P_inst = pressure_akma * BAR_PER_AKMA_PRESSURE
+            pressure_akma = pressure.instantaneous_pressure_akma(ke, virial_w, volume, ndim=3)
+            P_inst = float(pressure_akma * BAR_PER_AKMA_PRESSURE)
             P_hist.append(P_inst)
 
             # Store box volume
