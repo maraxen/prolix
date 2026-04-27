@@ -20,6 +20,7 @@ import pytest
 from prolix.physics import pbc, settle, system, pressure, stress
 from prolix.physics.rigid_water_ke import rigid_tip3p_box_ke_kcal
 from prolix.physics.units import BAR_PER_AKMA_PRESSURE, AKMA_PRESSURE_PER_BAR
+from prolix.physics.simulate import NPTState
 from prolix.simulate import AKMA_TIME_UNIT_FS, BOLTZMANN_KCAL
 from .test_explicit_langevin_tip3p_parity import _grid_water_positions, _prolix_params_pure_water
 
@@ -302,3 +303,164 @@ def test_npt_dt_sweep(dt_fs: float) -> None:
     # Check box volume is positive
     volume = jnp.prod(state.box)
     assert volume > 0, f"dt={dt_fs} fs, step {step}: negative or zero volume"
+
+
+@pytest.mark.slow
+def test_npt_20ps_liquid_water() -> None:
+  """Two-phase NVT→NPT protocol for 64 TIP3P waters over 20 ps at liquid density.
+
+  Phase 1 — NVT equilibration (4000 steps × 0.5 fs = 2 ps):
+    Relax grid bad contacts with settle_langevin at 300 K, gamma=1.0 ps⁻¹.
+
+  Phase 2 — NPT production (40000 steps × 0.5 fs = 20 ps):
+    Run settle_csvr_npt at P=1 bar, T=300 K. Record (T, P, V) every 200 steps
+    → 200 trajectory records total.
+
+  Thermodynamic assertions on the last 10 ps (last 100 records):
+    - T_mean ∈ [295, 305] K
+    - P_mean ∈ [-99, 101] bar  (±100 bar around P=1; 64-water σ_P ≈ 500–800 bar
+      instantaneous, ≈80–130 bar on a 10 ps mean — loose tolerance is physically
+      justified for this system size)
+    - No NaN anywhere in the timeseries
+    - Box volume varies smoothly (no step-to-step jump > 5%)
+
+  DOF convention: ndof = 6 * N_w - 3 (rigid TIP3P, 6 DOF/water, minus 3 COM
+  translations). Temperature: T = 2*KE / (kB * ndof). Pressure uses virial theorem.
+  """
+  jax.config.update("jax_enable_x64", True)
+
+  # ── Constants ──────────────────────────────────────────────────────────────
+  n_waters = 64
+  dt_fs = 0.5
+  temperature_k = 300.0
+  pressure_bar = 1.0
+  gamma_ps = 1.0  # ps⁻¹
+  tau_baro_akma = 2000.0
+  tau_thermo_akma = 2000.0
+  nvt_steps = 4000
+  npt_steps = 40000
+  record_every = 200
+
+  dt_akma = float(dt_fs) / float(AKMA_TIME_UNIT_FS)
+  kT = float(temperature_k) * BOLTZMANN_KCAL
+  ndof = float(6 * n_waters - 3)  # 381 for 64 waters
+  n_atoms = n_waters * 3
+
+  # ── System setup ───────────────────────────────────────────────────────────
+  positions_a, box_edge = _grid_water_positions(n_waters, spacing_angstrom=3.1)
+  box_vec = jnp.array([box_edge, box_edge, box_edge], dtype=jnp.float64)
+
+  sys_dict = _prolix_params_pure_water(n_waters)
+  displacement_fn, shift_fn = pbc.create_periodic_space(box_vec)
+  energy_fn = system.make_energy_fn(
+    displacement_fn, sys_dict, box=box_vec, use_pbc=True, implicit_solvent=False,
+    pme_grid_points=32, pme_alpha=0.34, cutoff_distance=9.0, strict_parameterization=False
+  )
+
+  mass = jnp.array([[15.999], [1.008], [1.008]] * n_waters).reshape(n_atoms)
+  water_indices = settle.get_water_indices(n_protein_atoms=0, n_waters=n_waters)
+
+  # ── Phase 1: NVT equilibration ─────────────────────────────────────────────
+  init_nvt, apply_nvt = settle.settle_langevin(
+    energy_fn, shift_fn,
+    dt=dt_akma,
+    kT=kT,
+    gamma=gamma_ps,
+    mass=mass,
+    water_indices=water_indices,
+    project_ou_momentum_rigid=True,
+    projection_site="post_o",
+  )
+
+  apply_nvt_j = jax.jit(apply_nvt)
+  nvt_state = init_nvt(jax.random.PRNGKey(7), jnp.array(positions_a), mass=mass, box=box_vec)
+
+  for _ in range(nvt_steps):
+    nvt_state = apply_nvt_j(nvt_state, box=box_vec)
+
+  assert jnp.all(jnp.isfinite(nvt_state.position)), "NVT phase: positions contain NaN/Inf"
+
+  # ── Phase 2: NPT production ────────────────────────────────────────────────
+  # Construct NPTState from NVT final state + original box
+  npt_state = NPTState(
+    position=nvt_state.position,
+    momentum=nvt_state.momentum,
+    force=nvt_state.force,
+    mass=nvt_state.mass,
+    rng=nvt_state.rng,
+    box=box_vec,
+  )
+
+  init_npt, apply_npt = settle.settle_csvr_npt(
+    energy_fn, shift_fn,
+    dt=dt_akma,
+    kT=kT,
+    target_pressure_bar=pressure_bar,
+    tau_barostat_akma=tau_baro_akma,
+    tau_thermostat_akma=tau_thermo_akma,
+    mass=mass,
+    water_indices=water_indices,
+    box_init=box_vec,
+  )
+
+  apply_npt_j = jax.jit(apply_npt)
+
+  # Re-initialize NPT state via init_fn (computes force at current positions)
+  npt_state = init_npt(npt_state.rng, npt_state.position, mass=mass, box=box_vec)
+
+  # Trajectory arrays: shape (n_records, 3) → columns: (T_K, P_bar, V_A3)
+  temperatures: list[float] = []
+  pressures_bar_list: list[float] = []
+  volumes: list[float] = []
+
+  for step in range(npt_steps):
+    npt_state = apply_npt_j(npt_state, box=npt_state.box)
+
+    if (step + 1) % record_every == 0:
+      ke_total = rigid_tip3p_box_ke_kcal(
+        npt_state.position, npt_state.momentum, npt_state.mass, n_waters
+      )
+      virial = stress.virial_trace(npt_state.position, npt_state.force)
+      volume = float(jnp.prod(npt_state.box))
+      pressure_akma = pressure.instantaneous_pressure_akma(
+        ke_total, virial, volume, ndim=3
+      )
+      T_k = float(2.0 * ke_total / (BOLTZMANN_KCAL * ndof))
+      P_bar = float(pressure_akma * BAR_PER_AKMA_PRESSURE)
+
+      temperatures.append(T_k)
+      pressures_bar_list.append(P_bar)
+      volumes.append(volume)
+
+  # ── Assertions ─────────────────────────────────────────────────────────────
+  T_arr = np.array(temperatures)    # shape (200,)
+  P_arr = np.array(pressures_bar_list)
+  V_arr = np.array(volumes)
+
+  # 1. No NaN in timeseries
+  assert np.all(np.isfinite(T_arr)), "Temperature timeseries contains NaN/Inf"
+  assert np.all(np.isfinite(P_arr)), "Pressure timeseries contains NaN/Inf"
+  assert np.all(np.isfinite(V_arr)), "Volume timeseries contains NaN/Inf"
+
+  # 2. T_mean over last 10 ps (last 100 records, steps 20000–40000)
+  T_last = T_arr[-100:]
+  T_mean = float(np.mean(T_last))
+  assert 295.0 <= T_mean <= 305.0, (
+    f"Mean T over last 10 ps = {T_mean:.2f} K, expected 295–305 K"
+  )
+
+  # 3. P_mean over last 10 ps in [-99, 101] bar
+  #    64-water σ_P ≈ 500–800 bar instantaneous; ≈80–130 bar on 10 ps mean
+  P_last = P_arr[-100:]
+  P_mean = float(np.mean(P_last))
+  assert -99.0 <= P_mean <= 101.0, (
+    f"Mean P over last 10 ps = {P_mean:.1f} bar, expected within [-99, 101] bar of "
+    f"target {pressure_bar:.1f} bar"
+  )
+
+  # 4. Box volume varies smoothly (no step-to-step jump > 5%)
+  max_jump_frac = float(np.max(np.abs(np.diff(V_arr)) / V_arr[:-1]))
+  assert max_jump_frac < 0.05, (
+    f"Box volume has a sudden jump of {max_jump_frac*100:.2f}% between records "
+    f"(threshold: 5%)"
+  )
