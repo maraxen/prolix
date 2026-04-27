@@ -58,12 +58,80 @@ def test_safe_map():
     def fn(a): return a * 2
     res_none = safe_map(fn, x, chunk_size=None)
     assert jnp.allclose(res_none, x * 2)
-    
+
     res_chunk_2 = safe_map(fn, x, chunk_size=2)
     assert jnp.allclose(res_chunk_2, x * 2)
-    
+
     res_chunk_1 = safe_map(fn, x, chunk_size=1)
     assert jnp.allclose(res_chunk_1, x * 2)
+
+def test_safe_map_heterogeneous_pytree():
+    """Test safe_map with compound pytrees containing heterogeneous leaf shapes.
+
+    Regression test for Sprint 7 Step 3: safe_map must validate that all leaves
+    have the same leading (batch) dimension. Heterogeneous pytrees where one leaf
+    lacks a batch dimension should raise ValueError.
+    """
+    import jax.tree_util
+    import dataclasses
+
+    # Case (a): Homogeneous compound pytree — all leaves have batch dim B=3
+    @jax.tree_util.register_pytree_node_class
+    @dataclasses.dataclass(frozen=True)
+    class HomogeneousNode:
+        x: jnp.ndarray  # (B, 5)
+        y: jnp.ndarray  # (B, 3)
+        def tree_flatten(self):
+            return (self.x, self.y), None
+        @classmethod
+        def tree_unflatten(cls, aux, children):
+            x, y = children
+            return cls(x, y)
+
+    B = 3
+    homog = HomogeneousNode(
+        x=jnp.ones((B, 5)),
+        y=jnp.ones((B, 3)) * 2.0,
+    )
+    def fn_homog(node):
+        return HomogeneousNode(node.x * 2, node.y * 3)
+    result = safe_map(fn_homog, homog, chunk_size=1)
+    assert result.x.shape == (B, 5)
+    assert jnp.allclose(result.x, 2.0)
+    assert jnp.allclose(result.y, 6.0)
+
+    # Case (b): Heterogeneous compound pytree — one leaf has no batch dim
+    @jax.tree_util.register_pytree_node_class
+    @dataclasses.dataclass(frozen=True)
+    class HeterogeneousNode:
+        positions: jnp.ndarray  # (B, 3) — batch leading dim
+        warn_counts: jnp.ndarray  # (4,) — NO batch dim (scalar config)
+        def tree_flatten(self):
+            return (self.positions, self.warn_counts), None
+        @classmethod
+        def tree_unflatten(cls, aux, children):
+            pos, wc = children
+            return cls(pos, wc)
+
+    hetero = HeterogeneousNode(
+        positions=jnp.ones((B, 3)),
+        warn_counts=jnp.zeros(4, dtype=jnp.int32),  # No batch dim
+    )
+    def fn_hetero(node):
+        return HeterogeneousNode(node.positions * 2, node.warn_counts)
+
+    # Should raise ValueError due to heterogeneous leaf shapes
+    try:
+        result = safe_map(fn_hetero, hetero, chunk_size=1)
+        assert False, "Expected ValueError for heterogeneous pytree, but got none"
+    except ValueError as e:
+        assert "same leading (batch) dimension" in str(e)
+
+    # Case (c): Existing test_safe_map still passes (simple array case)
+    x = jnp.array([1, 2, 3, 4, 5, 6])
+    def fn(a): return a * 2
+    res = safe_map(fn, x, chunk_size=2)
+    assert jnp.allclose(res, x * 2)
 
 def test_langevin_step_finite(fake_padded_batch):
     sys = fake_padded_batch

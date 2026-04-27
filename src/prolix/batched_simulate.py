@@ -32,7 +32,7 @@ class LangevinState:
     # Quality gate counters — accumulated per-step, zero-sync.
     # Layout: [0]=vlimit_exceeded  [1]=force_capped
     #         [2]=constr_violated  [3]=dx_capped
-    warn_counts: Array = None  # (4,) int32, default None for backward compat
+    warn_counts: Array = None  # (NUM_WARN_TYPES,) or (B, NUM_WARN_TYPES) int32; initialized in __post_init__ if None
 
     # Named indices for warn_counts
     WARN_VLIMIT = 0
@@ -41,11 +41,21 @@ class LangevinState:
     WARN_DX_CAP = 3
     NUM_WARN_TYPES = 4
 
+    def __post_init__(self):
+        """Initialize warn_counts if None, respecting batch dimension of positions."""
+        if self.warn_counts is None:
+            if len(self.positions.shape) == 3:  # (B, N, 3) batched
+                B = self.positions.shape[0]
+                wc = jnp.zeros((B, self.NUM_WARN_TYPES), dtype=jnp.int32)
+            else:  # (N, 3) unbatched
+                wc = jnp.zeros(self.NUM_WARN_TYPES, dtype=jnp.int32)
+            object.__setattr__(self, 'warn_counts', wc)
+
     def tree_flatten(self):
-        wc = self.warn_counts if self.warn_counts is not None else jnp.zeros(self.NUM_WARN_TYPES, dtype=jnp.int32)
+        """Flatten to pytree leaves. warn_counts is always initialized by __post_init__."""
         children = (
             self.positions, self.momentum, self.force,
-            self.mass, self.key, self.cap_count, wc,
+            self.mass, self.key, self.cap_count, self.warn_counts,
         )
         aux_data = None
         return (children, aux_data)
@@ -579,19 +589,34 @@ def make_langevin_step_nl_fused(
 
 def safe_map(fn: Callable[[T], Any], batch: T, chunk_size: int | None = 1) -> Any:
     """Safely map a function over a batch, falling back to sequential execution for memory.
-    
+
     If chunk_size is None, uses jax.vmap directly.
     Otherwise, chunks the batch along the leading dimension and uses lax.scan.
+
+    Note: All pytree leaves MUST have the same leading (batch) dimension B.
+    Static fields (e.g., scalar configs) should be marked static before calling safe_map.
     """
     if chunk_size is None:
         return jax.vmap(fn)(batch)
-    
+
     leaves, treedef = jax.tree_util.tree_flatten(batch)
     if not leaves:
         return jax.vmap(fn)(batch)
-        
-    B = leaves[0].shape[0]
-    
+
+    B = leaves[0].shape[0] if len(leaves[0].shape) > 0 else 1
+
+    # Validate that all leaves have the same leading dimension.
+    # Note: all non-scalar leaves must have the same leading dimension B.
+    # Pytree leaves with static/non-batched data should be extracted as aux_data
+    # in their pytree registration to avoid false rejections here.
+    for i, leaf in enumerate(leaves[1:], start=1):
+        if len(leaf.shape) > 0 and leaf.shape[0] != B:
+            raise ValueError(
+                f"safe_map: all pytree leaves must have the same leading (batch) dimension. "
+                f"Leaf 0 has B={B}, but leaf {i} has shape {leaf.shape} (leading dim {leaf.shape[0]}). "
+                f"Static fields should not be vmapped — check tree structure."
+            )
+
     if B % chunk_size != 0:
         # Find largest divisor of B that is <= chunk_size
         import logging
@@ -606,28 +631,28 @@ def safe_map(fn: Callable[[T], Any], batch: T, chunk_size: int | None = 1) -> An
             "using largest divisor %d instead",
             B, original, chunk_size,
         )
-        
+
     num_chunks = max(1, B // chunk_size)
 
     # Short-circuit: if everything fits in one chunk, skip scan overhead
     if num_chunks == 1:
         return jax.vmap(fn)(batch)
-    
+
     def map_fn(chunk_leaves):
         chunk_batch = jax.tree_util.tree_unflatten(treedef, chunk_leaves)
         return jax.vmap(fn)(chunk_batch)
-        
+
     chunked_leaves = [l.reshape((num_chunks, chunk_size) + l.shape[1:]) for l in leaves]
-    
+
     # We use lax.scan over the leading dimension (num_chunks) to avoid unrolling memory
     def scan_fn(carry, chunk_leaf):
         return carry, map_fn(chunk_leaf)
-        
+
     _, results = lax.scan(scan_fn, None, chunked_leaves)
-    
+
     def unchunk(x):
         return x.reshape((B,) + x.shape[2:])
-        
+
     return jax.tree_util.tree_map(unchunk, results)
 
 def _selective_restraint_energy(r, r_ref, k, atom_mask, selection_mask):
