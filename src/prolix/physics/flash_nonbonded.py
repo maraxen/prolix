@@ -184,7 +184,7 @@ def chunked_born_radii(
     born_radii = 1.0 / inv_born
 
     # Sanitize padding atoms
-    born_radii = jnp.where(atom_mask, born_radii, jnp.float32(1.5))
+    born_radii = jnp.where(atom_mask, born_radii, 1.5)
 
     return born_radii
 
@@ -228,12 +228,12 @@ def chunked_fused_energy(
     N = positions.shape[0]
     n_tiles = N // T
 
-    lam = jnp.float32(soft_core_lambda)
-    alpha = jnp.float32(0.5)
-    soft_term = alpha * jnp.maximum(1.0 - lam, jnp.float32(1e-8))
+    lam = soft_core_lambda
+    alpha = 0.5
+    soft_term = alpha * jnp.maximum(1.0 - lam, 1e-8)
 
     tau = (1.0 / solute_dielectric) - (1.0 / solvent_dielectric)
-    gb_prefactor = jnp.float32(-0.5) * jnp.float32(COULOMB_CONSTANT) * jnp.float32(tau)
+    gb_prefactor = -0.5 * float(COULOMB_CONSTANT) * float(tau)
 
     def tile_energy_outer(carry, j_idx):
         start = j_idx * T
@@ -363,8 +363,8 @@ def _sparse_exclusion_energy(
     N = positions.shape[0]
     max_excl = excl_indices.shape[1]
 
-    lam = jnp.float32(soft_core_lambda)
-    alpha = jnp.float32(0.5)
+    lam = soft_core_lambda
+    alpha = 0.5
     soft_term = alpha * jnp.maximum(1.0 - lam, 1e-8)
 
     # Gather excluded partner positions and params
@@ -453,13 +453,13 @@ def flash_nonbonded_forces(
         Forces (N, 3) in kcal/mol/Å. Zero for padded atoms.
     """
     # Sanitize inputs for padding safety
-    safe_radii = jnp.where(sys.atom_mask, sys.radii, jnp.float32(1.5))
+    safe_radii = jnp.where(sys.atom_mask, sys.radii, 1.5)
     safe_scaled = jnp.where(
-        sys.atom_mask, sys.scaled_radii, jnp.float32(1.2)
+        sys.atom_mask, sys.scaled_radii, 1.2
     )
-    safe_charges = jnp.where(sys.atom_mask, sys.charges, jnp.float32(0.0))
-    safe_sigmas = jnp.where(sys.atom_mask, sys.sigmas, jnp.float32(1.0))
-    safe_epsilons = jnp.where(sys.atom_mask, sys.epsilons, jnp.float32(0.0))
+    safe_charges = jnp.where(sys.atom_mask, sys.charges, 0.0)
+    safe_sigmas = jnp.where(sys.atom_mask, sys.sigmas, 1.0)
+    safe_epsilons = jnp.where(sys.atom_mask, sys.epsilons, 0.0)
 
     def _total_energy(positions):
         # Pass 1: Born radii
