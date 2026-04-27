@@ -299,7 +299,7 @@ def chunked_fused_energy(
 
     total_energy, _ = jax.lax.scan(
         tile_energy_outer,
-        jnp.float32(0.0),
+        jnp.zeros((), dtype=positions.dtype),
         jnp.arange(n_tiles),
     )
 
