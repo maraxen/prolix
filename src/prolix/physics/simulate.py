@@ -72,6 +72,32 @@ class NVTLangevinState:
     return cls(*children)
 
 
+@jax.tree_util.register_pytree_node_class
+@dataclasses.dataclass
+class NPTState:
+  """State for NPT (isothermal-isobaric) ensemble integrators.
+
+  Extends NVTLangevinState with box dimensions for pressure control.
+  """
+
+  position: Array
+  momentum: Array
+  force: Array
+  mass: Array
+  rng: Array
+  box: Array  # Current box dimensions (3,) for orthogonal or (3,3) for triclinic
+
+  def set(self, **kwargs):
+    return dataclasses.replace(self, **kwargs)
+
+  def tree_flatten(self):
+    return ((self.position, self.momentum, self.force, self.mass, self.rng, self.box), None)
+
+  @classmethod
+  def tree_unflatten(cls, aux_data, children):
+    return cls(*children)
+
+
 def rattle_langevin(
   energy_or_force_fn: Callable[..., Array],
   shift_fn: Callable[..., Array],

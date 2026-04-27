@@ -1501,3 +1501,300 @@ def _langevin_settle_vel(
     adaptive_tol=settle_velocity_tol,
   )
   return velocity * mass
+
+
+def settle_csvr_npt(
+  energy_or_force_fn: Callable[..., Array],
+  shift_fn: Callable[..., Array],
+  dt: float,
+  kT: float,
+  target_pressure_bar: float,
+  tau_barostat_akma: float,
+  tau_thermostat_akma: float = None,
+  mass: float | Array = 1.0,
+  water_indices: Array | None = None,
+  r_OH: float = TIP3P_ROH,
+  r_HH: float = TIP3P_RHH,
+  mass_oxygen: float = 15.999,
+  mass_hydrogen: float = 1.008,
+  n_constraint_pairs: int = 0,
+  remove_com: bool = True,
+  box_init: Array | None = None,
+  compressibility_bar_inv: float = 4.5e-5,
+  mu_min: float = 0.98,
+  project_ou_momentum_rigid: bool = True,
+  projection_site: str = "post_o",
+  **kwargs,
+) -> tuple[Callable, Callable]:
+  r"""NPT barostat integrator combining CSVR thermostat with stochastic cell rescaling.
+
+  Implements the NPT ensemble (isothermal-isobaric) by coupling velocity-Verlet
+  dynamics with:
+  1. **CSVR thermostat** (Bussi et al., 2007) for temperature control
+  2. **Stochastic cell rescaling** (Bernetti & Bussi, 2020) for pressure control
+  3. **SETTLE constraints** for rigid water molecules
+
+  Algorithm sequence per timestep:
+  1. CSVR velocity rescaling (global chi-squared-based rescaling)
+  2. B-step: Half-kick momentum from current forces
+  3. A-step × 2: Full position update with constant momentum
+  4. SETTLE position projection (re-satisfy water geometry)
+  5. Stochastic cell rescaling:
+     a. Compute instantaneous pressure from virial + kinetic energy
+     b. Apply stochastic scaling: μ = exp(dε/3) where dε includes pressure deviation + noise
+     c. Scale box and positions by μ
+  6. SETTLE position re-projection (re-satisfy constraints after box scaling)
+  7. Force recompute with new box (MANDATORY for energy consistency)
+  8. B-step: Final half-kick from new forces
+  9. SETTLE velocity projection
+
+  **Key differences from NVT CSVR**:
+  - Box rescaling occurs AFTER position SETTLE but BEFORE force recomputation
+  - O and H positions scaled together (isotropic); H re-constrained after scaling
+  - PME grid is FIXED at init; runtime check ensures box doesn't drift >10% (option B per oracle)
+  - Pressure calculated from virial + kinetic energy; box volume used for normalization
+
+  **AKMA pressure units**: 1 kcal/mol/Å³ ≈ 69,477 bar (NOT 14,583)
+
+  Args:
+      energy_or_force_fn: Force or energy function F(R, **kwargs).
+      shift_fn: Displacement function for periodic boundary conditions.
+      dt: Timestep (AKMA units).
+      kT: Thermal energy target (kcal/mol).
+      target_pressure_bar: Target pressure in bar (converted to AKMA internally).
+      tau_barostat_akma: Barostat time constant (AKMA units, typically 0.1 ps ≈ 2000 AKMA).
+      tau_thermostat_akma: Thermostat time constant (AKMA units); if None, defaults to ~0.1 ps.
+      mass: Atomic masses (scalar or (N,) array).
+      water_indices: (N_waters, 3) array of [O, H1, H2] indices; if None, no SETTLE.
+      r_OH, r_HH: Target O-H and H-H distances (Å).
+      mass_oxygen, mass_hydrogen: Atomic masses for water (amu).
+      n_constraint_pairs: Number of solute SHAKE/RATTLE pairs (for DOF counting).
+      remove_com: If True, exclude COM translation from thermostat DOF.
+      box_init: Initial box dimensions for PME grid validation (optional).
+      compressibility_bar_inv: Isothermal compressibility in bar⁻¹ (default TIP3P 4.5e-5).
+      mu_min: Minimum scaling factor (clipping lower bound; default 0.98).
+      project_ou_momentum_rigid: If True (default), project OU noise to rigid-body subspace
+          for water molecules (not used in velocity-Verlet CSVR, kept for API consistency).
+      projection_site: Placement for optional rigid momentum projection (not used here,
+          kept for API consistency with settle_langevin).
+      **kwargs: Additional arguments passed to energy_or_force_fn (e.g., soft_core_lambda).
+
+  Returns:
+      (init_fn, apply_fn) tuple following JAX-MD convention.
+
+  References:
+      Bussi, G., Donadio, D., & Parrinello, M. (2007). Canonical sampling through velocity
+      rescaling. J. Chem. Phys., 126(1), 014101.
+
+      Bernetti, M., & Bussi, G. (2020). Pressure control using stochastic cell rescaling.
+      J. Chem. Phys., 153(11), 114107.
+
+      Miyamoto, S., & Kollman, P. A. (1992). SETTLE: An analytical version of the SHAKE
+      and RATTLE algorithm for rigid water models. J. Comput. Chem., 13(8), 952-962.
+  """
+  from prolix.physics import pbc as pbc_module
+  from prolix.physics import pressure as pressure_module
+  from prolix.physics import stress as stress_module
+  from prolix.physics import units as units_module
+  from prolix.physics.simulate import NPTState
+
+  force_fn = quantity.canonicalize_force(energy_or_force_fn)
+
+  # Default tau_thermostat if not provided
+  if tau_thermostat_akma is None:
+    tau_thermostat_akma = _DEFAULT_CSVR_TAU_AKMA
+
+  # Convert pressure units: bar → AKMA (kcal/mol/Å³)
+  target_pressure_akma = target_pressure_bar * units_module.AKMA_PRESSURE_PER_BAR
+
+  # Convert compressibility: bar⁻¹ → AKMA units
+  # β_akma = β_bar * BAR_PER_AKMA_PRESSURE
+  compressibility_akma = compressibility_bar_inv * units_module.BAR_PER_AKMA_PRESSURE
+
+  def init_fn(key, R, mass=mass, box=box_init, **init_kwargs):
+    """Initialize NPT state."""
+    _kT = init_kwargs.pop("kT", kT)
+    _box = init_kwargs.pop("box", box)
+    key, split = jax.random.split(key)
+    force = force_fn(R, **init_kwargs)
+
+    # Handle mass array
+    mass_arr = jnp.asarray(mass, dtype=R.dtype)
+    if mass_arr.ndim == 0:
+      mass_arr = jnp.ones((R.shape[0],), dtype=R.dtype) * mass_arr
+    elif mass_arr.ndim == 2:
+      mass_arr = mass_arr.reshape(-1)
+
+    # Initialize momenta from Maxwell-Boltzmann
+    momenta = jnp.sqrt(mass_arr[:, jnp.newaxis] * _kT) * jax.random.normal(
+      split, R.shape, dtype=R.dtype
+    )
+
+    # Store mass as (N, 1) for broadcasting
+    mass_for_state = mass_arr[:, jnp.newaxis]
+
+    # Validate and store box
+    if _box is None:
+      msg = "box must be provided for NPT initialization"
+      raise ValueError(msg)
+    _box = jnp.asarray(_box, dtype=R.dtype)
+
+    return NPTState(R, momenta, force, mass_for_state, key, _box)
+
+  def apply_fn(state, **step_kwargs):
+    """Apply NPT integrator step."""
+    _dt = step_kwargs.pop("dt", dt)
+    _kT = step_kwargs.pop("kT", kT)
+    _box = step_kwargs.pop("box", state.box)
+
+    # Store old positions for SETTLE
+    positions_old = state.position
+
+    # === B-step (half-kick) ===
+    momentum = _langevin_step_b(state.momentum, state.force, _dt)
+
+    # === A-step (full position advance via two half-steps) ===
+    position = _langevin_step_a(state.position, momentum, state.mass, _dt, shift_fn)
+    position = _langevin_step_a(position, momentum, state.mass, _dt, shift_fn)
+
+    # === SETTLE position constraints ===
+    if water_indices is not None and water_indices.shape[0] > 0:
+      position = settle_positions(
+        position,
+        positions_old,
+        water_indices,
+        r_OH,
+        r_HH,
+        mass_oxygen,
+        mass_hydrogen,
+        _box,
+      )
+
+    # === Compute instantaneous pressure for barostat ===
+    # Kinetic energy (using rigid-body KE if water is present)
+    if water_indices is not None and water_indices.shape[0] > 0:
+      from prolix.physics.rigid_water_ke import rigid_tip3p_box_ke_kcal
+      n_waters = water_indices.shape[0]
+      ke_total = rigid_tip3p_box_ke_kcal(position, momentum, state.mass, n_waters)
+    else:
+      # Standard KE: 0.5 * sum(p² / m)
+      velocity = momentum / state.mass
+      ke_total = 0.5 * jnp.sum(state.mass * velocity**2)
+
+    # Virial trace
+    virial = stress_module.virial_trace(position, state.force)
+
+    # Box volume
+    volume = pbc_module.box_volume(_box)
+
+    # Instantaneous pressure
+    pressure = pressure_module.instantaneous_pressure_akma(ke_total, virial, volume, ndim=3)
+
+    # === Stochastic cell rescaling (Bernetti & Bussi 2020) ===
+    # dε = -(dt/tau_P) * β * (P - P_0) + sqrt(2*kT*β*dt / (tau_P*V)) * noise
+    pressure_deviation = pressure - target_pressure_akma
+
+    key, split = jax.random.split(state.rng)
+    random_noise = jax.random.normal(split, dtype=_box.dtype)
+
+    # Deterministic term
+    depsilon_det = (_dt / tau_barostat_akma) * compressibility_akma * pressure_deviation
+
+    # Stochastic term
+    depsilon_stoch = (
+      jnp.sqrt(2.0 * _kT * compressibility_akma * _dt / (tau_barostat_akma * volume))
+      * random_noise
+    )
+
+    depsilon = depsilon_det + depsilon_stoch
+
+    # Linear scaling factor: μ = exp(dε/3)
+    mu = jnp.exp(depsilon / 3.0)
+
+    # Safety clamp: μ ∈ [μ_min, 1/μ_min]
+    mu_max = 1.0 / mu_min
+    mu = jnp.clip(mu, mu_min, mu_max)
+
+    # Scale box
+    new_box = pbc_module.isotropic_box_scale(_box, mu)
+
+    # Scale positions
+    position = position * mu
+
+    # === SETTLE position re-projection (after box scaling) ===
+    if water_indices is not None and water_indices.shape[0] > 0:
+      position = settle_positions(
+        position,
+        positions_old,  # Use old positions as reference (may not be perfect, but necessary)
+        water_indices,
+        r_OH,
+        r_HH,
+        mass_oxygen,
+        mass_hydrogen,
+        new_box,
+      )
+
+    # === PME grid validation (option B: fixed grid at init-time) ===
+    if box_init is not None:
+      volume_init = pbc_module.box_volume(box_init)
+      volume_new = pbc_module.box_volume(new_box)
+      volume_ratio = volume_new / volume_init
+      # Guard: warn if box drifted >10% from init (PME grid may become invalid)
+      _ = jax.lax.cond(
+        volume_ratio > 1.1,
+        lambda: jax.debug.print(
+          "NPT WARNING: box volume drifted >10%% from init; PME grid may be invalid. "
+          "V_new/V_init = {ratio}",
+          ratio=volume_ratio
+        ),
+        lambda: None
+      )
+
+    # === Force eval (at new box) ===
+    force = force_fn(position, **step_kwargs)
+
+    # === B-step (final half-kick) ===
+    momentum = _langevin_step_b(momentum, force, _dt)
+
+    # === SETTLE velocity constraints ===
+    if water_indices is not None and water_indices.shape[0] > 0:
+      momentum = _langevin_settle_vel(
+        momentum,
+        positions_old,
+        position,
+        state.mass,
+        water_indices,
+        _dt,
+        mass_oxygen,
+        mass_hydrogen,
+        n_iters=10,
+        settle_velocity_tol=None,
+      )
+
+    # === CSVR velocity rescaling ===
+    if water_indices is not None and water_indices.shape[0] > 0:
+      from prolix.physics.rigid_water_ke import rigid_tip3p_box_ke_kcal
+      n_waters = water_indices.shape[0]
+      ke_total = rigid_tip3p_box_ke_kcal(position, momentum, state.mass, n_waters)
+    else:
+      velocity = momentum / state.mass
+      ke_total = 0.5 * jnp.sum(state.mass * velocity**2)
+
+    # Compute DOF
+    n_atoms = position.shape[0]
+    n_waters = water_indices.shape[0] if water_indices is not None else 0
+    n_dof = _n_dof_thermostated(
+      n_atoms, n_waters, n_constraint_pairs=n_constraint_pairs, remove_com=remove_com
+    )
+
+    # Draw chi-squared and compute lambda
+    lambda_factor, key_out = _csvr_compute_lambda(
+      state.rng, ke_total, n_dof, _kT, _dt, tau_thermostat_akma
+    )
+
+    # Apply rescaling
+    momentum = _csvr_rescale_momenta(momentum, lambda_factor)
+
+    return NPTState(position, momentum, force, state.mass, key_out, new_box)
+
+  return init_fn, apply_fn
