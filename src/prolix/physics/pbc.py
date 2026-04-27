@@ -63,3 +63,39 @@ def wrap_positions(positions: Array, box: Array) -> Array:
 
   """
   return positions % box
+
+
+def box_volume(box: Array) -> Array:
+  """Compute volume of simulation box.
+
+  Args:
+      box: (3,) array (orthogonal box with side lengths) or (3, 3) array (triclinic box vectors).
+
+  Returns:
+      Volume as scalar in Å³.
+      For orthogonal box: product of side lengths.
+      For triclinic box: absolute value of determinant of box vectors.
+  """
+  box = jnp.asarray(box)
+  if box.ndim == 1:
+    # Orthogonal box: volume = Lx * Ly * Lz
+    return jnp.prod(box)
+  elif box.ndim == 2:
+    # Triclinic box: volume = |det(box vectors)|
+    return jnp.abs(jnp.linalg.det(box))
+  else:
+    msg = f"box must be 1D or 2D, got shape {box.shape}"
+    raise ValueError(msg)
+
+
+def isotropic_box_scale(box: Array, scaling_factor: Array) -> Array:
+  """Scale box isotropically by a uniform factor.
+
+  Args:
+      box: (3,) or (3, 3) array representing box dimensions.
+      scaling_factor: Scalar or array to multiply box by (typically μ in barostat).
+
+  Returns:
+      Scaled box with same shape as input.
+  """
+  return box * scaling_factor
