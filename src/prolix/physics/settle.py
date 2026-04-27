@@ -19,7 +19,7 @@ from typing import TYPE_CHECKING, Any
 import jax
 import jax.numpy as jnp
 from jax import random
-from jax_md import quantity
+from jax_md import quantity, simulate
 
 from prolix.types import WaterIndices, WaterIndicesArray
 
