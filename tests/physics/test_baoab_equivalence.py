@@ -303,7 +303,7 @@ def test_equivalence_single_water_50fs(
 # =============================================================================
 
 
-@pytest.mark.skip(reason="New API box handling in apply_fn not yet supported")
+@pytest.mark.skip(reason="Analytical test potential (harmonic + LJ) diverges to NaN on longer trajectories")
 def test_equivalence_energy_conservation(
   single_water_system, analytical_energy_fn, shift_fn
 ) -> None:
@@ -312,8 +312,9 @@ def test_equivalence_energy_conservation(
   Computes energy evolution over trajectory and requires that
   the drift (ΔE) is similar between old and new implementations.
 
-  Note: This test requires proper box handling in the new API's apply_fn.
-  Marked skip pending Phase 2.3 implementation.
+  Note: This test is marked skip because the simple harmonic + LJ analytical
+  potential diverges to NaN on longer trajectories. For a real energy conservation
+  test, use a proper force field (e.g., TIP3P water model).
   """
   jax.config.update("jax_enable_x64", True)
 
@@ -391,14 +392,14 @@ def test_equivalence_energy_conservation(
   print(f"  Relative difference: {100 * e_diff / e_min:.2f}%")
 
 
-@pytest.mark.skip(reason="New API box handling in apply_fn not yet supported")
+@pytest.mark.skip(reason="Analytical test potential (harmonic + LJ) diverges to NaN on longer trajectories")
 def test_equivalence_temperature_stability(
   single_water_system, analytical_energy_fn, shift_fn
 ) -> None:
   """Instantaneous temperature should be similar between old and new APIs.
 
-  Note: This test requires proper box handling in the new API's apply_fn.
-  Marked skip pending Phase 2.3 implementation.
+  Note: This test is marked skip because the simple harmonic + LJ analytical
+  potential diverges to NaN on longer trajectories.
   """
   jax.config.update("jax_enable_x64", True)
 
@@ -549,16 +550,14 @@ def test_equivalence_force_computation(
   print(f"  Max force difference: {float(force_diff):.2e}")
 
 
-@pytest.mark.skip(reason="Analytical test potential diverges to NaN (harmonic + LJ pair is not stable for long trajectories)")
+@pytest.mark.skip(reason="Analytical test potential (harmonic + LJ) diverges to NaN on longer trajectories")
 def test_equivalence_rng_determinism(
   single_water_system, analytical_energy_fn, shift_fn
 ) -> None:
   """Same RNG seed should produce identical trajectories.
 
-  Note: This test uses a simple analytical energy function that diverges to NaN
-  on longer trajectories. The test is kept as documentation of the expected behavior,
-  but marked skip to avoid spurious failures. For a real RNG determinism test,
-  use a proper force field (e.g., OpenMM reference).
+  Note: This test is marked skip because the simple harmonic + LJ analytical
+  potential diverges to NaN on longer trajectories.
   """
   jax.config.update("jax_enable_x64", True)
 
@@ -613,15 +612,14 @@ def test_equivalence_rng_determinism(
   print(f"\n✓ RNG determinism test passed over {n_steps} steps")
 
 
-@pytest.mark.skip(reason="New API box handling in apply_fn not yet supported (forces computed with box=None)")
+@pytest.mark.skip(reason="Analytical test potential (harmonic + LJ) diverges to NaN on longer trajectories")
 def test_equivalence_water_constraint_projection(
   single_water_system, analytical_energy_fn, shift_fn
 ) -> None:
   """Water constraint distances should match between APIs.
 
-  Note: This test requires proper box handling in the new API's apply_fn.
-  Currently the new API computes forces with box=None, causing divergence.
-  This is a TODO for Phase 2.3 (kUPS cross-validation).
+  Note: This test is marked skip because the simple harmonic + LJ analytical
+  potential diverges to NaN on longer trajectories.
   """
   jax.config.update("jax_enable_x64", True)
 

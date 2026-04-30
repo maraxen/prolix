@@ -1,0 +1,798 @@
+"""Step system: reusable integrator primitives for composition into custom integrators.
+
+This module provides a three-layer architecture for building integrators:
+
+**Layer 1: Constraint Kinematics (ConstraintDOFMask)**
+Formal constraint model and DOF decomposition for rigid bodies (SETTLE water molecules).
+Reference: constraints.py, Phase 1.1.
+
+**Layer 2: Step Primitives (V_Step, A_Step, O_Step, CSVR_Step, etc.)**
+Pure, JIT-safe integrator steps that operate on system state (IntegratorState).
+Each step is a class with an `apply` method implementing a single integration operation.
+Reference: Phase 1.2.
+
+**Layer 3: Integrator Sequences (StepSequence, step_sequences registry)**
+Ordered lists of steps composing integrator variants (BAOAB_LANGEVIN, BAOAB_CSVR_NPT, etc.).
+Each sequence captures the integrator structure and shared parameters.
+Reference: Phase 1.3, ADR-005 v2.0.
+
+**Design Principles**:
+- Each step is a class with an `apply` method
+- `apply` is pure: no side effects, no state mutation, no control flow
+- Steps work with free DOF subspace: constraint projection handled externally or within
+- Steps are JIT-compiled without branches or Python loops (JAX lax.* loops OK)
+- Sequences are immutable (frozen dataclasses) and validated at module load
+
+**Why Three Layers?**
+1. Orthogonal design: Constraints (Layer 1) are independent from steps (Layer 2) and sequences (Layer 3)
+2. Composability: Sequences compose steps; steps can be reused in different sequences
+3. Clarity: Each layer has one responsibility (kinematics, primitives, orchestration)
+4. Extensibility: New constraints, steps, or sequences can be added without modifying others
+5. Testing: Each layer validated independently, then composed
+
+**Example: Building a Custom Integrator**
+```python
+# Get a sequence
+sequence = make_sequence('baoab_langevin', dt=0.5, gamma=1.0, kT=2.479)
+
+# Compose steps
+for step_name in sequence.steps:
+    step = make_step(step_name, **sequence.parameters)
+    state = step.apply(state, constraint_dofs=constraint_dofs, **sequence.parameters)
+```
+
+**Reference**:
+- Leimkuhler, B., & Shang, X. (2015). Adaptive thermostats for noisy gradient systems.
+  SIAM Journal on Numerical Analysis, 54(2), 721-743.
+- Bussi, G., Donadio, D., & Parrinello, M. (2007). Canonical sampling through velocity rescaling.
+  The Journal of Chemical Physics, 126(1), 014101.
+- ADR-005 v2.0: Integrator Builder Architecture (Prolix internal reference)
+"""
+
+from __future__ import annotations
+
+from abc import ABC, abstractmethod
+from dataclasses import dataclass
+from typing import Any, Callable, Dict, List, Optional
+
+import jax
+import jax.numpy as jnp
+from jaxtyping import Array as ArrayType
+from jaxtyping import PRNGKeyArray
+
+from prolix.physics.constraints import ConstraintDOFMask
+from prolix.physics.settle import (
+    _DEFAULT_CSVR_TAU_AKMA,
+    _csvr_rescale_momenta,
+    _langevin_step_a,
+    _langevin_step_b,
+    _langevin_step_o,
+    _langevin_step_o_constrained,
+    settle_velocities,
+)
+from prolix.types import Array, WaterIndicesArray
+
+
+def _csvr_compute_lambda_jit_safe(
+    key: PRNGKeyArray,
+    ke_current: ArrayType,
+    n_dof: int | ArrayType,
+    kT: float | ArrayType,
+    dt: float | ArrayType,
+    tau: float | ArrayType | None = None,
+) -> tuple[ArrayType, PRNGKeyArray]:
+  r"""JIT-safe CSVR lambda computation (Bussi et al. 2007).
+
+  Implements stochastic velocity rescaling for canonical ensemble sampling.
+  This version is designed to be JIT-safe, unlike the original in settle.py.
+
+  Args:
+      key: JAX PRNGKey.
+      ke_current: Current kinetic energy.
+      n_dof: Number of thermostated degrees of freedom.
+      kT: Target thermal energy.
+      dt: Timestep.
+      tau: Relaxation time. Default ~0.1 ps.
+
+  Returns:
+      (lambda_factor, new_key).
+  """
+  if tau is None:
+    tau = _DEFAULT_CSVR_TAU_AKMA
+
+  # Convert n_dof to array for JIT compatibility
+  n_dof = jnp.asarray(n_dof)
+  n_dof = jnp.maximum(n_dof, 1)
+
+  # Coupling strength
+  c1 = jnp.exp(-dt / tau)
+  c2_sq = 1.0 - c1
+
+  # Random numbers
+  key, split = jax.random.split(key)
+  r_gaussian = jax.random.normal(split, dtype=ke_current.dtype)
+
+  key, split = jax.random.split(key)
+  # Sample (n_dof - 1) chi-squared components as sum of squares of standard normals
+  n_chi = jnp.asarray(jnp.maximum(n_dof - 1, 1), dtype=jnp.int32)
+  # To avoid dynamic shape issues, we use a sufficiently large fixed shape
+  # and mask the excess samples
+  max_chi = 512
+  chi_samples = jax.random.normal(split, (max_chi,), dtype=ke_current.dtype)
+  chi_mask = jnp.arange(max_chi) < n_chi
+  s_chi_squared = jnp.sum(jnp.where(chi_mask, chi_samples**2, 0.0))
+
+  target_ke = 0.5 * n_dof * kT
+  ke_safe = jnp.maximum(ke_current, 1e-10)
+
+  # Bussi formula (Eq. A7)
+  n_dof_f = jnp.asarray(n_dof, dtype=ke_current.dtype)
+  c2_corrected = c2_sq * (target_ke / ke_safe) / n_dof_f
+
+  lambda_sq = (
+      c1
+      + c2_corrected * (r_gaussian**2 + s_chi_squared)
+      + 2.0 * r_gaussian * jnp.sqrt(c1 * c2_corrected)
+  )
+  lambda_sq_safe = jnp.maximum(lambda_sq, 0.0)
+
+  # Return 1.0 if kinetic energy is too small
+  lambda_factor = jnp.where(ke_current <= 0.0, 1.0, jnp.sqrt(lambda_sq_safe))
+
+  return lambda_factor, key
+
+
+@jax.tree_util.register_pytree_node_class
+@dataclass
+class IntegratorState:
+  """Minimal integrator state for step composition.
+
+  Attributes:
+      position: (N, 3) atomic positions.
+      momentum: (N, 3) atomic momenta (mass-weighted velocities).
+      force: (N, 3) atomic forces (from energy_fn gradient).
+      mass: (N,) or (N, 1) atomic masses.
+      rng: JAX PRNGKey for stochastic steps.
+      box: Optional (3,) box dimensions for periodic boundary conditions.
+          Used during force recomputation in apply_fn.
+  """
+
+  position: ArrayType
+  momentum: ArrayType
+  force: ArrayType
+  mass: ArrayType
+  rng: PRNGKeyArray
+  box: Optional[ArrayType] = None
+
+  def tree_flatten(self):
+    """Flatten state into children and aux_data for JAX pytree."""
+    return (self.position, self.momentum, self.force, self.mass, self.rng, self.box), None
+
+  @classmethod
+  def tree_unflatten(cls, aux_data, children):
+    """Reconstruct state from flattened pytree."""
+    position, momentum, force, mass, rng, box = children
+    return cls(position=position, momentum=momentum, force=force, mass=mass, rng=rng, box=box)
+
+  def __replace__(self, **kwargs):
+    """Return a copy with specified fields replaced (like dataclass.replace)."""
+    from dataclasses import replace
+    return replace(self, **kwargs)
+
+
+class Step(ABC):
+  """Abstract base class for integrator steps.
+
+  All steps implement a pure `apply` method that takes an IntegratorState
+  and optional constraint/parameter info, and returns an updated state.
+  Steps may also return an updated RNG key.
+
+  Purity Guarantee:
+  - No side effects (no global state mutation)
+  - No Python control flow (use jax.lax.cond, jax.lax.scan, etc.)
+  - Output deterministic given input state and seed
+  """
+
+  @abstractmethod
+  def apply(
+      self,
+      state: IntegratorState,
+      constraint_dofs: ConstraintDOFMask | None = None,
+      **params,
+  ) -> IntegratorState | tuple[IntegratorState, ArrayType]:
+    """Apply one step of the integrator.
+
+    Args:
+        state: Current integrator state.
+        constraint_dofs: Optional constraint mask for projection.
+        **params: Step-specific parameters (dt, kT, gamma, etc.).
+
+    Returns:
+        Updated state, or (updated_state, new_rng_key) if step uses RNG.
+    """
+    raise NotImplementedError
+
+
+class O_Step(Step):
+  r"""Ornstein-Uhlenbeck stochastic velocity update (O in BAOAB).
+
+  Implements the stochastic friction step from Langevin dynamics:
+
+  .. math::
+      p_{new} = c_1 p_{old} + c_2 \sqrt{M \cdot k_T} \cdot \mathcal{N}(0, 1)
+
+  where:
+  - $c_1 = \exp(-\gamma \cdot dt)$ (friction damping)
+  - $c_2 = \sqrt{1 - c_1^2}$ (noise amplitude)
+
+  When constraint_dofs is provided and project_rigid=True, OU noise is sampled
+  in the rigid-body subspace of water molecules (6D per water), preserving
+  equipartition under constraints.
+
+  **Reference**:
+  Leimkuhler, B., & Shang, X. (2015). Adaptive thermostats for noisy gradient
+  systems. SIAM Journal on Numerical Analysis, 54(2), 721-743.
+
+  Attributes:
+      fraction: Fraction of full step (default 1.0, or 0.5 for full step in BAOAB).
+      project_rigid: If True and constraint_dofs provided, sample noise in rigid subspace.
+  """
+
+  def __init__(self, fraction: float = 1.0, project_rigid: bool = True):
+    """Initialize O_Step.
+
+    Args:
+        fraction: Fraction of full step to apply (0.5 for BAOAB).
+        project_rigid: If True, project noise to rigid-body subspace.
+    """
+    self.fraction = fraction
+    self.project_rigid = project_rigid
+
+  def apply(
+      self,
+      state: IntegratorState,
+      constraint_dofs: ConstraintDOFMask | None = None,
+      **params,
+  ) -> tuple[IntegratorState, PRNGKeyArray]:
+    """Apply O-step with optional constraint-aware noise sampling.
+
+    Args:
+        state: IntegratorState with momentum and RNG.
+        constraint_dofs: Optional ConstraintDOFMask for rigid-body projection.
+        **params: Required: 'dt', 'gamma', 'kT'. Optional: 'water_indices'.
+
+    Returns:
+        (updated_state, new_rng_key).
+    """
+    dt = params["dt"] * self.fraction
+    gamma = params["gamma"]
+    kT = params["kT"]
+
+    # Check if we should use constrained OU step
+    use_constrained = (
+        self.project_rigid
+        and constraint_dofs is not None
+        and "water_indices" in params
+    )
+
+    if use_constrained:
+      water_indices = params["water_indices"]
+      momentum_new, key_out = _langevin_step_o_constrained(
+          state.momentum,
+          state.position,
+          state.mass,
+          gamma,
+          dt,
+          kT,
+          state.rng,
+          water_indices,
+      )
+    else:
+      momentum_new, key_out = _langevin_step_o(
+          state.momentum, state.mass, gamma, dt, kT, state.rng
+      )
+
+    return IntegratorState(
+        position=state.position,
+        momentum=momentum_new,
+        force=state.force,
+        mass=state.mass,
+        rng=key_out,
+    ), key_out
+
+
+class V_Step(Step):
+  r"""Velocity update (V in BAOAB, also called B-step or momentum step).
+
+  Updates momenta via forces:
+
+  .. math::
+      p_{new} = p_{old} + fraction \cdot dt \cdot F
+
+  Pure position-independent velocity update.
+
+  Attributes:
+      fraction: Fraction of timestep to apply (0.5 for BAOAB half-steps).
+  """
+
+  def __init__(self, fraction: float = 0.5):
+    """Initialize V_Step.
+
+    Args:
+        fraction: Fraction of full timestep (0.5 for BAOAB).
+    """
+    self.fraction = fraction
+
+  def apply(
+      self,
+      state: IntegratorState,
+      constraint_dofs: ConstraintDOFMask | None = None,
+      **params,
+  ) -> IntegratorState:
+    """Apply velocity update.
+
+    Args:
+        state: IntegratorState with momentum and force.
+        constraint_dofs: Unused (velocity update is unconstrained).
+        **params: Required: 'dt'.
+
+    Returns:
+        Updated state with new momentum.
+    """
+    dt = params["dt"]
+    momentum_new = state.momentum + self.fraction * dt * state.force
+    return IntegratorState(
+        position=state.position,
+        momentum=momentum_new,
+        force=state.force,
+        mass=state.mass,
+        rng=state.rng,
+    )
+
+
+class A_Step(Step):
+  r"""Position update step (A in BAOAB).
+
+  Updates positions via momenta:
+
+  .. math::
+      r_{new} = r_{old} + fraction \cdot dt \cdot \frac{p_{new}}{m}
+
+  Attributes:
+      fraction: Fraction of timestep (1.0 for full step).
+  """
+
+  def __init__(self, fraction: float = 1.0, shift_fn: Callable | None = None):
+    """Initialize A_Step.
+
+    Args:
+        fraction: Fraction of full timestep (0.5 for BAOAB half-steps).
+        shift_fn: Optional shift function for PBC (jax_md.space.periodic_shift or similar).
+    """
+    self.fraction = fraction
+    self.shift_fn = shift_fn
+
+  def apply(
+      self,
+      state: IntegratorState,
+      constraint_dofs: ConstraintDOFMask | None = None,
+      **params,
+  ) -> IntegratorState:
+    """Apply position update.
+
+    Args:
+        state: IntegratorState with momentum and mass.
+        constraint_dofs: Unused (position update is unconstrained).
+        **params: Required: 'dt'. Optional: 'shift_fn' (overrides constructor).
+
+    Returns:
+        Updated state with new position.
+    """
+    dt = params["dt"] * self.fraction
+    shift_fn = params.get("shift_fn", self.shift_fn)
+
+    # If no shift_fn, use simple addition (no PBC wrapping)
+    if shift_fn is None:
+      velocity = state.momentum / state.mass
+      position_new = state.position + dt * velocity
+    else:
+      position_new = _langevin_step_a(
+          state.position, state.momentum, state.mass, dt, shift_fn
+      )
+
+    return IntegratorState(
+        position=position_new,
+        momentum=state.momentum,
+        force=state.force,
+        mass=state.mass,
+        rng=state.rng,
+    )
+
+
+class SETTLE_Velocity_Step(Step):
+  r"""Constraint-aware velocity projection (RATTLE for SETTLE).
+
+  Applies velocity constraints to remove kinetic energy from constrained
+  degrees of freedom, ensuring velocities are consistent with rigid water bonds.
+
+  Calls settle_velocities() iteratively to project velocities onto the
+  constraint-tangent subspace.
+
+  Attributes:
+      water_indices: Optional water indices. If None, must be provided in apply params.
+      n_iters: Number of RATTLE iterations (default 10).
+  """
+
+  def __init__(
+      self,
+      water_indices: WaterIndicesArray | None = None,
+      n_iters: int = 10,
+      mass_oxygen: float = 15.999,
+      mass_hydrogen: float = 1.008,
+  ):
+    """Initialize SETTLE_Velocity_Step.
+
+    Args:
+        water_indices: (n_waters, 3) array of [O, H1, H2] indices.
+        n_iters: Number of RATTLE iterations.
+        mass_oxygen: Oxygen mass (amu).
+        mass_hydrogen: Hydrogen mass (amu).
+    """
+    self.water_indices = water_indices
+    self.n_iters = n_iters
+    self.mass_oxygen = mass_oxygen
+    self.mass_hydrogen = mass_hydrogen
+
+  def apply(
+      self,
+      state: IntegratorState,
+      constraint_dofs: ConstraintDOFMask | None = None,
+      **params,
+  ) -> IntegratorState:
+    """Apply velocity constraint projection.
+
+    Args:
+        state: IntegratorState with momentum, position (constrained).
+        constraint_dofs: Unused (constraint structure comes from water_indices).
+        **params: Required: 'positions_old', 'positions_constrained', 'dt', 'water_indices' (if not in constructor).
+
+    Returns:
+        Updated state with constrained velocity.
+    """
+    water_indices = params.get("water_indices", self.water_indices)
+    if water_indices is None:
+      # No water molecules, velocity constraint is no-op
+      return state
+
+    positions_old = params["positions_old"]
+    positions_constrained = params.get("positions_constrained", state.position)
+    dt = params["dt"]
+
+    # Convert momentum to velocity for settle_velocities
+    velocity = state.momentum / state.mass
+
+    velocity_constrained = settle_velocities(
+        velocity,
+        positions_old,
+        positions_constrained,
+        water_indices,
+        dt,
+        mass_oxygen=self.mass_oxygen,
+        mass_hydrogen=self.mass_hydrogen,
+        n_iters=self.n_iters,
+    )
+
+    # Convert back to momentum
+    momentum_constrained = velocity_constrained * state.mass
+
+    return IntegratorState(
+        position=state.position,
+        momentum=momentum_constrained,
+        force=state.force,
+        mass=state.mass,
+        rng=state.rng,
+    )
+
+
+class CSVR_Step(Step):
+  r"""Canonical sampling via velocity rescaling (CSVR, Bussi thermostat).
+
+  Stochastically rescales all momenta by a Langevin-coupled factor to
+  drive kinetic energy toward a target value. Preserves constraint subspaces
+  (scalar rescaling preserves linear subspaces).
+
+  .. math::
+      \lambda = \sqrt{
+          c_1 + c_2 (R^2 + S) + 2 R \sqrt{c_1 c_2}
+      }
+
+  where $c_1 = \exp(-dt/\tau)$, $R \sim N(0,1)$, $S \sim \chi^2(n_{dof}-1)$.
+
+  **Reference**:
+  Bussi, G., Donadio, D., & Parrinello, M. (2007). Canonical sampling through
+  velocity rescaling. The Journal of Chemical Physics, 126(1), 014101.
+
+  Attributes:
+      n_dof: Number of thermostated degrees of freedom (auto-computed if None).
+  """
+
+  def __init__(self, n_dof: int | None = None):
+    """Initialize CSVR_Step.
+
+    Args:
+        n_dof: Degrees of freedom for thermostat. If None, must be in apply params.
+    """
+    self.n_dof = n_dof
+
+  def apply(
+      self,
+      state: IntegratorState,
+      constraint_dofs: ConstraintDOFMask | None = None,
+      **params,
+  ) -> tuple[IntegratorState, PRNGKeyArray]:
+    """Apply CSVR velocity rescaling.
+
+    Args:
+        state: IntegratorState with momentum and RNG.
+        constraint_dofs: Unused (scalar rescaling preserves constraints).
+        **params: Required: 'dt', 'kT', 'n_dof' (if not in constructor). Optional: 'tau'.
+
+    Returns:
+        (updated_state, new_rng_key).
+    """
+    dt = params["dt"]
+    kT = params["kT"]
+    n_dof = params.get("n_dof", self.n_dof)
+    tau = params.get("tau", None)
+
+    if n_dof is None:
+      raise ValueError("CSVR_Step requires n_dof (in params or constructor)")
+
+    # Convert n_dof to int if needed (for JIT safety)
+    n_dof_int = int(n_dof) if not isinstance(n_dof, int) else n_dof
+
+    # Compute kinetic energy
+    velocity = state.momentum / state.mass
+    ke = 0.5 * jnp.sum(state.mass * velocity**2)
+
+    # Compute rescaling factor and new RNG using JIT-safe version
+    lambda_factor, key_out = _csvr_compute_lambda_jit_safe(
+        state.rng, ke, n_dof_int, kT, dt, tau=tau
+    )
+
+    # Rescale momenta
+    momentum_new = _csvr_rescale_momenta(state.momentum, lambda_factor)
+
+    return IntegratorState(
+        position=state.position,
+        momentum=momentum_new,
+        force=state.force,
+        mass=state.mass,
+        rng=key_out,
+    ), key_out
+
+
+class NHC_Step(Step):
+  r"""Nosé-Hoover Chain thermostat step (placeholder for future use).
+
+  Currently a no-op stub. Full implementation requires tracking chain state
+  (xi_i, Q_i variables) outside the IntegratorState. Will be implemented
+  when a full ChainState class is available.
+
+  TODO: Implement once ChainState is available.
+  """
+
+  def __init__(self):
+    """Initialize NHC_Step."""
+    pass
+
+  def apply(
+      self,
+      state: IntegratorState,
+      constraint_dofs: ConstraintDOFMask | None = None,
+      **params,
+  ) -> IntegratorState:
+    """No-op placeholder for NHC.
+
+    Args:
+        state: IntegratorState.
+        constraint_dofs: Unused.
+        **params: Unused.
+
+    Returns:
+        Unchanged state (placeholder).
+    """
+    # TODO: Implement NHC chain coupling when ChainState available
+    return state
+
+
+# Step registry: map step names to step class constructors
+step_registry: dict[str, type[Step]] = {
+    "o_step": O_Step,
+    "v_step": V_Step,
+    "a_step": A_Step,
+    "settle_velocity_step": SETTLE_Velocity_Step,
+    "csvr_step": CSVR_Step,
+    "nhc_step": NHC_Step,
+}
+
+
+def make_step(name: str, **kwargs) -> Step:
+  """Construct a step instance from registry.
+
+  Args:
+      name: Step name (key in step_registry).
+      **kwargs: Constructor arguments for the step class.
+
+  Returns:
+      Instantiated step.
+
+  Raises:
+      KeyError: If step name not found in registry.
+  """
+  if name not in step_registry:
+    raise KeyError(f"Unknown step '{name}'. Available: {list(step_registry.keys())}")
+  return step_registry[name](**kwargs)
+
+
+@dataclass(frozen=True)
+class StepSequence:
+  """Ordered composition of steps defining an integrator variant.
+
+  A StepSequence defines a complete integrator by specifying:
+  1. An ordered list of step names (from step_registry)
+  2. Shared parameters (dt, kT, gamma, etc.) for all steps
+  3. Optional constraint DOF mask for projection operators
+  4. Documentation string
+
+  Immutable (frozen=True) to prevent accidental mutation and allow use as
+  dict keys if needed.
+
+  **Example**:
+  ```python
+  baoab_langevin = StepSequence(
+      name='baoab_langevin',
+      steps=['v_step', 'a_step', 'o_step', 'a_step', 'v_step'],
+      parameters={'dt': 0.5, 'gamma': 1.0, 'kT': 2.479},
+      description='BAOAB integrator with Langevin thermostat'
+  )
+  ```
+
+  Attributes:
+      name: Unique name for this integrator variant (e.g., 'baoab_langevin').
+      steps: Ordered list of step names (keys in step_registry).
+      parameters: Common parameters passed to all steps (dt, kT, etc.).
+      constraint_dofs: Optional ConstraintDOFMask for shared projection operators.
+      description: Human-readable description of integrator structure and use.
+  """
+
+  name: str
+  steps: List[str]
+  parameters: Dict[str, Any]
+  constraint_dofs: Optional[ConstraintDOFMask] = None
+  description: str = ""
+
+
+# Step sequences registry: integrator variants and their step compositions
+# Populated after step_registry is defined and validated
+step_sequences: Dict[str, StepSequence] = {}
+
+
+def _initialize_step_sequences() -> None:
+  """Initialize step_sequences registry with validated sequences.
+
+  This function is called at module load time to populate step_sequences
+  and validate that all step names in each sequence exist in step_registry.
+
+  Raises:
+      KeyError: If any step name in a sequence is not in step_registry.
+  """
+  global step_sequences
+
+  sequences = {
+      "baoab_langevin": StepSequence(
+          name="baoab_langevin",
+          steps=["v_step", "a_step", "o_step", "a_step", "v_step"],
+          parameters={
+              "dt": 0.5,
+              "gamma": 1.0,
+              "kT": 2.479,
+          },
+          description=(
+              "BAOAB integrator with Ornstein-Uhlenbeck (Langevin) thermostat. "
+              "Structure: V(0.5) → A(0.5) → O(1.0) → A(0.5) → V(0.5). "
+              "Symplectic, second-order accurate, preserves measures. "
+              "Recommended for NVT (constant volume, temperature) ensemble. "
+              "dt ≤ 0.5 fs required for stable rigid-body + thermostat coupling. "
+              "Reference: Leimkuhler & Shang (2015)."
+          ),
+      ),
+      "baoab_csvr_npt": StepSequence(
+          name="baoab_csvr_npt",
+          steps=["v_step", "a_step", "csvr_step", "a_step", "v_step"],
+          parameters={
+              "dt": 0.5,
+              "kT": 2.479,
+              "n_dof": 27,
+              "tau": 2000.0,  # AKMA units, ~0.1 ps
+          },
+          description=(
+              "BAOAB integrator with CSVR (Canonical Sampling via Velocity Rescaling) thermostat "
+              "and isobaric barostat. Structure: V(0.5) → A(0.5) → CSVR → A(0.5) → V(0.5). "
+              "For short equilibrations (< 10 ps). "
+              "Long-trajectory stability under investigation (v1.0 known issue). "
+              "Suitable for NPT (constant pressure, temperature) short runs. "
+              "Reference: Bussi et al. (2007), Bernetti & Bussi (2020)."
+          ),
+      ),
+      "settle_with_nhc": StepSequence(
+          name="settle_with_nhc",
+          steps=["v_step", "a_step", "o_step", "a_step", "nhc_step", "v_step"],
+          parameters={
+              "dt": 0.5,
+              "gamma": 1.0,
+              "kT": 2.479,
+          },
+          description=(
+              "BAOAB integrator with Nosé-Hoover Chain (NHC) thermostat. "
+              "Structure: V(0.5) → A(0.5) → O(1.0) → A(0.5) → NHC → V(0.5). "
+              "NHC allows longer correlation times than simple Langevin. "
+              "Full implementation requires ChainState (Phase 2 future work). "
+              "Reference: Nosé (1984), Hoover (1985), Martyna et al. (1992)."
+          ),
+      ),
+  }
+
+  # Validate: all step names must exist in step_registry
+  for seq_name, seq in sequences.items():
+    for step_name in seq.steps:
+      if step_name not in step_registry:
+        raise KeyError(
+            f"Sequence '{seq_name}' references unknown step '{step_name}'. "
+            f"Available steps: {list(step_registry.keys())}"
+        )
+
+  step_sequences = sequences
+
+
+def make_sequence(name: str, **kwargs) -> StepSequence:
+  """Construct a StepSequence from the registry, with parameter overrides.
+
+  Creates a copy of the named sequence with custom parameters merged in.
+  Custom kwargs override sequence.parameters.
+
+  Args:
+      name: Sequence name (key in step_sequences).
+      **kwargs: Parameters to override or add (e.g., dt=0.5, kT=2.479).
+
+  Returns:
+      A new StepSequence with merged parameters.
+
+  Raises:
+      KeyError: If sequence name not found in step_sequences.
+
+  Example:
+      ```python
+      seq = make_sequence('baoab_langevin', dt=0.5, gamma=1.5)
+      # seq.parameters now has dt=0.5, gamma=1.5, plus original kT=2.479
+      ```
+  """
+  if name not in step_sequences:
+    raise KeyError(
+        f"Unknown sequence '{name}'. Available: {list(step_sequences.keys())}"
+    )
+
+  base_seq = step_sequences[name]
+  merged_params = {**base_seq.parameters, **kwargs}
+
+  return StepSequence(
+      name=base_seq.name,
+      steps=base_seq.steps,
+      parameters=merged_params,
+      constraint_dofs=base_seq.constraint_dofs,
+      description=base_seq.description,
+  )
+
+
+# Initialize sequences at module load time
+_initialize_step_sequences()
