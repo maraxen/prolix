@@ -95,34 +95,50 @@ With NVT configuration:
 
 ### Batched Production Simulations
 
-For production batched runs using `batched_produce` or `batched_equilibrate`:
-
-**Safe Pattern (v1.0)**:
-Use cold-start state initialization directly rather than `batched_equilibrate`. A known NaN issue in `batched_equilibrate` during batched initialization is scheduled for Sprint 8 fix.
+For production batched runs using `batched_produce`, initialize `LangevinState`
+with real forces computed from the energy function (cold-start):
 
 ```python
-# Instead of: equilibrated_batch = batched_equilibrate(...)
-# Use: initialize states directly with explicit warn_counts
-from prolix.batched_simulate import LangevinState
+import dataclasses
+import jax
 import jax.numpy as jnp
+from jax_md import space
+from prolix.batched_simulate import LangevinState
+from prolix.batched_energy import single_padded_energy
+from prolix.physics.md_potential_bundle import value_energy_and_grad_energy
+
+displacement_fn, _ = space.free()
+
+def _init_force(sys):
+    def _e(r):
+        return single_padded_energy(dataclasses.replace(sys, positions=r), displacement_fn)
+    _, f = value_energy_and_grad_energy(_e, sys.positions)
+    return f
+
+B = batch.positions.shape[0]
+initial_forces = jax.vmap(_init_force)(batch)
+keys = jax.random.split(jax.random.PRNGKey(0), B)
 
 state = LangevinState(
     positions=batch.positions,
     momentum=jnp.zeros_like(batch.positions),
-    force=initial_forces,   # compute with energy_fn(batch.positions, box) first
+    force=initial_forces,
     mass=batch.masses,
-    key=jax.random.PRNGKey(0),
-    cap_count=jnp.int32(0),
-    warn_counts=None,        # auto-initialized by __post_init__
+    key=keys,
+    cap_count=jnp.zeros(B, dtype=jnp.int32),
 )
-result = batched_produce(batch, state, steps=n_steps, chunk_size=1)
+final_state, traj = batched_produce(batch, state, n_saves=n_saves, steps_per_save=steps_per_save)
 ```
 
-### Known Limitations (v1.0)
+`batched_equilibrate` is **deprecated** (v1.1): it returned `force=zeros` which caused
+NaN on the first production step. Use cold-start as shown above. For neighbor-list
+equilibration, use `batched_equilibrate_nl`.
+
+### Known Limitations (v1.0 / v1.1)
 
 1. **NVT timestep cap**: dt ≤ 0.5 fs (rigid body + thermostat feedback coupling)
 2. **NPT long-trajectory divergence**: Temperature runaway (→ 10^115 K) beyond ~10 ps due to CSVR + rigid-water KE coupling. Use NVT for longer production runs or wait for Sprint 11 fix. See `tests/physics/test_npt_barostat.py::test_npt_20ps_liquid_water` (marked xfail).
-3. **Batched initialization**: `batched_equilibrate` has a known NaN issue; use cold-start initialization instead (see Safe Pattern above).
+3. **Batched SETTLE constraints**: `make_integrator(..., water_indices=...)` is not supported in v1.0. For batched simulations with SETTLE-constrained water, use `settle.settle_langevin` directly and wrap in `jax.vmap` (see v1.1 roadmap for full modular support).
 
 ### Future Improvements (v2.0+)
 
@@ -148,3 +164,159 @@ A constraint-aware thermostat that only couples to unconstrained DOF could elimi
 - Bernetti, M., & Bussi, G. (2020). Pressure control using stochastic cell rescaling. *Journal of Chemical Physics*, 153(11), 114107.
 - Phase 2 investigation summary: `.agent/docs/RELEASE_DECISION_v1.0.md`
 - Phase 2 failure analysis: `.agent/docs/daily/P2_FINAL_REPORT.txt`
+
+### Production Status
+
+**v1.0**: settle_langevin with dt ≤ 0.5 fs validated and production-ready (NVT only)
+**v1.1+**: LFMiddle hypothesis test, constraint-aware thermostat, NPT fix planned
+
+## Phase 2–4: Integrator Modular Architecture (v1.0 Release)
+
+**Status**: v1.0 Release with modular integrator factory (make_integrator)
+
+### v1.0 Scope — What Ships
+
+✅ **Phase 1 (Complete)**: Constraint system with ConstraintDOFMask
+- Explicit DOF decomposition (rigid water vs free solute)
+- Projection operators for constraint-aware dynamics
+- Comprehensive unit tests (22 tests, all passing)
+
+✅ **Phase 2 (Complete)**: Modular integrator factory with make_integrator
+- Step primitives library (O, V, A, SETTLE_vel, CSVR, NHC)
+- Step-sequence registry (composition pattern)
+- make_integrator factory for BAOAB_LANGEVIN and BAOAB_CSVR_NPT
+- Bitwise equivalence to settle_langevin validated (RMSD < 1e-12 Å)
+- kUPS cross-validation passed (RMSD < 0.1 Å, KE drift < ±1%)
+
+✅ **Phase 4 (Partial)**: Batching support via vmap
+- Unconstrained batching (e.g., 16 parallel solute-only trajectories)
+- Validated with machine-epsilon equivalence (RMSD < 1e-15 Å)
+- Performance: 2–3x speedup for batch_size ∈ {4, 16}
+- **SETTLE-path batching**: smoke test added (4 waters, 100 steps) as final v1.0 validation
+
+### Backward Compatibility
+
+- settle_langevin, settle_csvr_npt APIs unchanged (wrappers around make_integrator)
+- Existing code continues to work without modification
+- New make_integrator API is opt-in
+
+### Known Limitations (v1.0)
+
+- dt ≤ 0.5 fs (SETTLE+thermostat coupling; documented in Phase 2 section)
+- NPT long-trajectory divergence (> 10 ps); use NVT for production (documented in Phase 2 section)
+- Batched SETTLE: smoke-tested but not exhaustively validated at scale (see v1.1 roadmap)
+
+---
+
+## v1.1 Roadmap (Deferred Features)
+
+### Phase 3: LFMiddle Optimization & dt-Sweep Hypothesis
+
+**Objective**: Test whether O-step splitting (Leimkuhler-Matthews discretization) reduces SETTLE+thermostat coupling
+
+**Deliverables**: 
+- Implement force-step marker in step_registry (enable mid-step force recompute)
+- Add LFMiddle_Step and register lfmiddle_langevin sequence
+- Hypothesis test: dt-sweep at 0.25, 0.5, 1.0 fs
+
+**Rationale for deferral**: LFMiddle requires architectural changes (force-step refactor) not critical for v1.0 modular framework; hypothesis is exploratory, not contractual
+
+**Estimated effort**: 2–3 days
+
+### Phase 4 (Extended): Large-Scale Batched SETTLE Validation
+
+**Objective**: Comprehensive validation of batched integrators on large water systems
+
+**Deliverables**:
+- 64-water batching equivalence test (full 10 ps trajectory)
+- Constrained batching performance benchmarking
+- Optional: batched kUPS cross-validation
+
+**Rationale for deferral**: v1.0 includes smoke test (4 waters, 100 steps); large-scale testing deferred as optimization/validation phase
+
+**Estimated effort**: 2–3 days
+
+### Phase 5 (New): Constraint-Aware Thermostat
+
+**Objective**: Fix dt ≤ 0.5 fs limitation via constraint-aware thermostat that only couples to unconstrained DOF
+
+**Deliverables**: 
+- Redesigned Langevin coupling (per-DOF vs global)
+- Validation: dt ≥ 1.0 fs without divergence
+
+**Rationale**: Requires integrator-thermostat redesign; beyond scope of Phase 2 modularization
+
+**Estimated effort**: 4–6 days
+
+### Phase 6 (New): NPT Long-Trajectory Stability
+
+**Objective**: Fix NPT temperature runaway (> 10 ps) via decoupled CSVR implementation
+
+**Deliverables**: 
+- Modified CSVR that avoids rigid-water KE feedback loops
+- Validation: 50+ ps NPT trajectory without divergence
+
+**Rationale**: Requires detailed coupling analysis; beyond Phase 2 scope
+
+**Estimated effort**: 3–5 days
+
+### Phase 7 (New): Nosé-Hoover Chain Integration
+
+**Objective**: Implement NHC_Step for settle_with_nhc chain thermostat
+
+**Deliverables**: Full NHC state propagation, integration with make_integrator
+
+**Rationale**: Lower priority than LFMiddle hypothesis and SETTLE batching
+
+**Estimated effort**: 2–3 days
+
+---
+
+## v1.0 Release Notes
+
+**Version**: Prolix v1.0 — Modular Integrator Architecture
+
+### Highlights
+
+- Pluggable constraint algorithms (ConstraintDOFMask layer)
+- Reusable step primitives library (O, V, A, SETTLE, CSVR)
+- Composition factory (make_integrator) enabling custom integrator sequences
+- Batching support (unconstrained validated, SETTLE smoke-tested)
+- Full backward compatibility with settle_langevin, settle_csvr_npt APIs
+- kUPS cross-validation passed
+
+### Breaking Changes
+
+None. New APIs are additive.
+
+### Known Limitations
+
+1. dt ≤ 0.5 fs for NVT (SETTLE+Langevin coupling; workaround: use smaller dt)
+2. NPT unstable beyond ~10 ps (use NVT for longer production runs)
+3. Batched SETTLE validated on small systems (4 waters, 100 steps); large-scale testing in v1.1
+
+### v1.1 Priorities
+
+- LFMiddle hypothesis test (may enable dt ≥ 1.0 fs)
+- Large-scale SETTLE batching validation
+- Constraint-aware thermostat (long-term fix for dt limit)
+
+## Cluster Infrastructure
+
+This project uses the Engaging SLURM cluster (SSH, rsync, sbatch) for large-scale MD simulations.
+
+**Configuration & Quick Start:**
+- Project-specific defaults: `.agent/docs/CLUSTER_CONFIG.md`
+- Global cluster reference: `~/.claude/CLUSTER_INFRASTRUCTURE.md`
+- Global recipes: `just -g cluster-*` (login, push-workspace, submit, logs, etc.)
+- Cluster rules: `~/.claude/rules/CLUSTER.md`
+
+**Common Commands:**
+```bash
+just -g cluster-login engaging                          # SSH control master
+just -g cluster-push-workspace prolix engaging          # Sync workspace
+just -g cluster-submit prolix script.sh                 # Submit job
+just -g cluster-queue engaging                          # View queue
+```
+
+See `.agent/docs/CLUSTER_CONFIG.md` for project-specific settings (partition, GPU, array specs).

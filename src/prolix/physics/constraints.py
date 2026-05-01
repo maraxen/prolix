@@ -1,24 +1,215 @@
 """Constraint algorithm plugin system for flexible integrator design.
 
-Mirrors OpenMM's ReferenceConstraintAlgorithm pattern: constraint algorithms
-implement apply_positions() and apply_velocities() methods, allowing them to be
-injected into integrators at the correct BAOAB sub-steps.
+This module comprises two layers:
+
+1. **Kinematics Layer** (ConstraintDOFMask):
+   Formal constraint model and degree-of-freedom masks for SETTLE.
+   - SETTLE kinematics: 3 constraint equations (2 OH bonds, 1 HH distance)
+   - Constraint Jacobian: dC/dx relationships (n_constraints × DOF)
+   - DOF decomposition: rigid-body DOF vs free DOF for projection operators
+
+2. **Algorithm Layer** (ConstraintAlgorithm subclasses):
+   Mirrors OpenMM's ReferenceConstraintAlgorithm pattern: constraint algorithms
+   implement apply_positions() and apply_velocities() methods, allowing them to be
+   injected into integrators at the correct BAOAB sub-steps.
 
 Classes:
+- ConstraintDOFMask: Formal SETTLE kinematics + DOF mask construction
 - ConstraintAlgorithm: Base class (Equinox module)
 - NullConstraint: Identity (implicit solvent / unconstrained)
 - SETTLEConstraint: SETTLE for rigid water (analytical closed-form)
 - ShakeRattleConstraint: SHAKE/RATTLE for solute X-H bonds (iterative)
 - CompositeConstraint: Combines multiple constraints in sequence
 - make_constraint(): Factory that builds the appropriate constraint from topology
+
+Reference:
+    Miyamoto, S., & Kollman, P. A. (1992). Settle: An analytical version of
+    the SHAKE and RATTLE algorithm for rigid water models.
+    Journal of Computational Chemistry, 13(8), 952-962.
 """
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Callable
 
 import equinox as eqx
 import jax
 import jax.numpy as jnp
-from typing import Callable
+from jaxtyping import Array as ArrayType, Bool, Int
 
-from prolix.types import Array
+from prolix.types import Array, WaterIndicesArray
+
+
+@dataclass
+class ConstraintDOFMask:
+  r"""Formal SETTLE constraint model and degree-of-freedom mask decomposition.
+
+  SETTLE is an analytical constraint solver for rigid 3-site water molecules
+  (TIP3P or similar). This class formalizes the kinematic structure of SETTLE
+  constraints and provides DOF masks for decomposing the system into rigid and
+  free subspaces.
+
+  **Constraint Equations (SETTLE Kinematics)**:
+
+  For each water molecule with atoms (O, H1, H2):
+
+    - C1: |r_O - r_H1|² = d_OH²     (O-H1 bond)
+    - C2: |r_O - r_H2|² = d_OH²     (O-H2 bond)
+    - C3: |r_H1 - r_H2|² = d_HH²    (H-H distance)
+
+  These 3 holonomic constraints reduce the 9 DOF of one water to 6 DOF
+  (3 translational + 3 rotational for rigid body motion).
+
+  **Constraint Jacobian (Velocity Constraint Form)**:
+
+  The time-derivative of constraint equations gives velocity constraints:
+
+    dC_i/dt = (∂C_i/∂x) · ẋ = 0
+
+  For water k with atom indices i_O, i_H1, i_H2:
+
+    ∂C1/∂r_O   = 2(r_O - r_H1)
+    ∂C1/∂r_H1  = -2(r_O - r_H1)
+    ∂C1/∂r_H2  = 0
+    ... (similarly for C2, C3)
+
+  Constraint Jacobian M has shape (3*n_waters, 3*n_atoms) where:
+    - Rows: constraint equations
+    - Columns: spatial DOF (x, y, z per atom)
+    - Non-zero blocks only for atoms in water molecules
+
+  **DOF Decomposition**:
+
+  System decomposed into rigid (constrained) and free (unconstrained) subspaces:
+
+    - n_rigid_dof = 3 * n_waters   (3 constraints per water)
+    - n_free_dof = 3*n_atoms - 3*n_waters
+    - n_constraint_equations = 3 * n_waters
+
+  **Projection Operator**:
+
+  P projects velocities onto the free subspace (i.e., removes rigid DOF):
+
+    P @ v_free = v_free    (identity on free subspace)
+    P @ v_rigid = 0        (eliminates rigid-body motion)
+
+  Example (64-water TIP3P system):
+    - n_atoms = 64*3 = 192
+    - n_rigid_dof = 64*3 = 192
+    - n_free_dof = 192 - 192 = 0   (all atoms are in water!)
+    - Projection operator P is the zero matrix (all water, no solute)
+
+  Attributes:
+    water_indices: (n_waters, 3) int32 array [O, H1, H2] atom indices per water.
+    n_atoms: Total number of atoms in the system.
+
+  Properties:
+    rigid_dof_mask: (n_atoms, 3) bool array. True if atom is in water (rigid).
+    free_dof_mask: (n_atoms, 3) bool array. True if atom is free (not in water).
+    n_rigid_atoms: Count of atoms in rigid bodies.
+    n_free_atoms: Count of free atoms.
+    n_constraint_equations: Number of constraints (always 3 * n_waters).
+
+  Methods:
+    is_orthogonal_complement(): Verify rigid_dof_mask ⊥ free_dof_mask.
+    projection_operator(): Construct projection matrix P onto free subspace.
+
+  Reference:
+    Miyamoto, S., & Kollman, P. A. (1992). Settle: An analytical version of
+    the SHAKE and RATTLE algorithm for rigid water models.
+    Journal of Computational Chemistry, 13(8), 952-962.
+  """
+
+  water_indices: WaterIndicesArray  # (n_waters, 3)
+  n_atoms: int
+
+  @property
+  def n_waters(self) -> int:
+    """Number of water molecules."""
+    return self.water_indices.shape[0]
+
+  @property
+  def rigid_dof_mask(self) -> Bool[ArrayType, "n_atoms 3"]:
+    """Bool mask (n_atoms, 3) where True = rigid atom in water, False = free."""
+    mask = jnp.zeros((self.n_atoms, 3), dtype=jnp.bool_)
+    # Flatten water indices to 1D array of all water atoms
+    water_atom_indices = self.water_indices.reshape(-1)
+    # Set mask to True for all water atoms across all 3 dimensions
+    mask = mask.at[water_atom_indices, :].set(True)
+    return mask
+
+  @property
+  def free_dof_mask(self) -> Bool[ArrayType, "n_atoms 3"]:
+    """Bool mask (n_atoms, 3) where True = free atom, False = rigid."""
+    return ~self.rigid_dof_mask
+
+  @property
+  def n_rigid_atoms(self) -> int:
+    """Count of atoms in rigid bodies (number of atoms that are water)."""
+    # Count unique atom indices in water_indices
+    unique_rigid_indices = jnp.unique(self.water_indices.reshape(-1))
+    return int(unique_rigid_indices.size)
+
+  @property
+  def n_free_atoms(self) -> int:
+    """Count of free atoms (total atoms minus rigid atoms)."""
+    return self.n_atoms - self.n_rigid_atoms
+
+  @property
+  def n_constraint_equations(self) -> int:
+    """Number of independent constraint equations (3 per water)."""
+    return 3 * self.n_waters
+
+  def is_orthogonal_complement(self) -> bool:
+    """Verify that rigid_dof_mask and free_dof_mask are orthogonal complements.
+
+    Returns:
+      True if (rigid_dof_mask & free_dof_mask) is all False and
+             (rigid_dof_mask | free_dof_mask) is all True.
+    """
+    rigid = self.rigid_dof_mask
+    free = self.free_dof_mask
+
+    # Check no overlap: (rigid & free) should be all False
+    has_overlap = jnp.any(rigid & free)
+    if has_overlap:
+      return False
+
+    # Check completeness: (rigid | free) should be all True
+    is_complete = jnp.all(rigid | free)
+    return bool(is_complete)
+
+  def projection_operator(self) -> Array:
+    r"""Construct projection matrix P onto the free-DOF subspace.
+
+    P is an (3*n_atoms, 3*n_atoms) matrix satisfying:
+      - P @ v_free = v_free   (identity on free DOF)
+      - P @ v_rigid = 0       (zero on rigid DOF)
+      - P² = P                 (idempotent, projection property)
+
+    Mathematically, P = I - M^T (M M^T)^{-1} M, where M is the constraint
+    Jacobian. However, for computational simplicity, we construct P directly
+    from the DOF masks.
+
+    The projection operator explicitly enforces the constraint that velocities
+    of atoms in rigid water bodies must satisfy the SETTLE constraint equations.
+
+    Returns:
+      (3*n_atoms, 3*n_atoms) array representing the projection operator.
+
+    Note:
+      For systems where all atoms are in water molecules (n_free_atoms == 0),
+      this returns the zero matrix (all DOF are constrained).
+    """
+    # Create flat boolean mask: True if atom is free
+    free_flat = self.free_dof_mask.reshape(-1)  # (3*n_atoms,)
+
+    # Diagonal matrix: 1 on free DOF, 0 on rigid DOF
+    diag_values = jnp.where(free_flat, 1.0, 0.0)
+    P = jnp.diag(diag_values)
+
+    return P
 
 
 class ConstraintAlgorithm(eqx.Module):

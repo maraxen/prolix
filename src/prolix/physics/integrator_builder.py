@@ -1,7 +1,8 @@
 """Integrator builder: factory for composing step sequences into working integrators.
 
 This module implements Phase 2.1 of ADR-005: the composition layer that converts
-step sequences (from step_system.py) into actual integrator functions.
+step sequences (from step_system.py) into actual integrator functions. Phase 4
+extends this with batched integrators via vmap for ensemble simulations.
 
 **Architecture**:
 
@@ -11,6 +12,15 @@ The make_integrator factory is the critical composition layer:
 2. Eagerly initializes state (forces, chain_state, barostat_state)
 3. Returns (init_fn, apply_fn) tuple for time-stepping
 
+**Batching** (Phase 4):
+
+The make_integrator_batched factory creates batched integrators:
+
+1. Wraps unbatched integrator with jax.vmap over batch dimension
+2. Enables parallel simulation of B independent trajectories
+3. Shares mass, box, water_indices across batch; trajectories are independent
+4. Numerically equivalent to looping unbatched integrator (machine-epsilon equivalence)
+
 **Design Principles**:
 
 - **Eager initialization**: All state (forces, chain state, barostat state) computed
@@ -18,11 +28,12 @@ The make_integrator factory is the critical composition layer:
 - **Step composition**: apply_fn loops over step sequence; each step receives full
   state and returns modified state
 - **RNG management**: Split key between stochastic steps (O_Step, CSVR_Step)
+- **Batching transparency**: vmap(apply_fn) produces identical results to looping
 - **No breaking changes**: settle_langevin remains available as thin wrapper
 
-**Reference**: ADR-005 v2.0, Phase 2.1
+**Reference**: ADR-005 v2.0, Phase 2.1; Phase 4 Batching Support
 
-**Author**: Fixer Agent (Phase 2.1 implementation)
+**Author**: Fixer Agent (Phase 2.1 implementation, Phase 4 batching extension)
 """
 
 from __future__ import annotations
@@ -84,6 +95,184 @@ def _initialize_constraint_dofs(
   return ConstraintDOFMask(water_indices=water_indices, n_atoms=n_atoms)
 
 
+def make_integrator_batched(
+    energy_fn: Callable,
+    shift_fn: Callable,
+    mass: Array,
+    batch_size: int = 1,
+    sequence_name: str = "baoab_langevin",
+    dt: float = 0.5,
+    kT: float = 1.0,
+    gamma: float = 1.0,
+    water_indices: Optional[Array] = None,
+    target_pressure_bar: Optional[float] = None,
+    tau_barostat_akma: Optional[float] = 2000.0,
+    tau_thermostat_akma: Optional[float] = 2000.0,
+    **kwargs,
+) -> Tuple[Callable, Callable]:
+  r"""Create a batched integrator via vmap composition over independent trajectories.
+
+  This factory creates a batched integrator where multiple independent trajectories
+  (shape [B, N, 3] for positions, B independent RNG keys, etc.) are integrated
+  in parallel via JAX vmap.
+
+  **Design**:
+  - First creates unbatched integrator via make_integrator
+  - Wraps apply_fn with jax.vmap over batch dimension
+  - init_fn_batched handles batch initialization with per-trajectory RNG keys
+  - All batch elements share mass, water_indices, energy_fn parameters
+
+  **Batching Strategy**:
+  - Batched fields: position [B, N, 3], momentum [B, N, 3], force [B, N, 3], rng [B, 2]
+  - Shared fields: mass [N], water_indices [n_waters, 3], box [3]
+  - Each trajectory evolves independently; no inter-batch communication
+
+  Args:
+      energy_fn: Callable(positions, box) → energy (scalar).
+      shift_fn: Callable(positions, box) → positions_shifted.
+      mass: Mass array [n_atoms] (shared across batch).
+      batch_size: Number of independent trajectories (B).
+      sequence_name: Name in step_sequences registry (default: 'baoab_langevin').
+      dt: Timestep in AKMA units (default: 0.5).
+      kT: Temperature in kT (default: 1.0).
+      gamma: Langevin friction coefficient (default: 1.0).
+      water_indices: Optional (n_waters, 3) array of [O, H1, H2] indices.
+      target_pressure_bar: Target pressure in bar (required for NPT).
+      tau_barostat_akma: Barostat time constant (default: 2000.0).
+      tau_thermostat_akma: Thermostat time constant (default: 2000.0).
+      **kwargs: Additional step-specific parameters.
+
+  Returns:
+      (init_fn_batched, apply_fn_batched): Initialization and integration functions.
+          - init_fn_batched(key, positions_batch, box=None) → IntegratorState
+          - apply_fn_batched(state) → IntegratorState
+
+  Example:
+      >>> init_fn_batched, apply_fn_batched = make_integrator_batched(
+      ...     energy_fn, shift_fn,
+      ...     batch_size=16,
+      ...     sequence_name='baoab_langevin',
+      ...     dt=0.5, kT=2.479, gamma=1.0,
+      ...     mass=masses,
+      ...     water_indices=water_indices
+      ... )
+      >>> key = jax.random.PRNGKey(0)
+      >>> keys = jax.random.split(key, 16)
+      >>> positions_batch = jnp.stack([perturb_trajectory(positions, k) for k in keys])
+      >>> state_batch = init_fn_batched(keys[0], positions_batch, box=box_vec)
+      >>> for step in range(100):
+      ...     state_batch = apply_fn_batched(state_batch)
+  """
+  # Create unbatched integrator first
+  init_fn_unbatched, apply_fn_unbatched = make_integrator(
+      energy_fn=energy_fn,
+      shift_fn=shift_fn,
+      mass=mass,
+      sequence_name=sequence_name,
+      dt=dt,
+      kT=kT,
+      gamma=gamma,
+      water_indices=water_indices,
+      target_pressure_bar=target_pressure_bar,
+      tau_barostat_akma=tau_barostat_akma,
+      tau_thermostat_akma=tau_thermostat_akma,
+      **kwargs,
+  )
+
+  def init_fn_batched(
+      key: PRNGKeyArray,
+      positions_batch: ArrayType,
+      box: Optional[ArrayType] = None,
+  ) -> IntegratorState:
+    r"""Initialize batched integrator state for B independent trajectories.
+
+    Args:
+        key: JAX PRNGKey.
+        positions_batch: (B, N, 3) batch of initial positions.
+        box: Optional (3,) box dimensions (shared across batch).
+
+    Returns:
+        IntegratorState with batched fields: position [B, N, 3], momentum [B, N, 3],
+        force [B, N, 3], rng [B, 2], and shared fields mass [N], box [3].
+    """
+    B = positions_batch.shape[0]
+
+    # Split RNG key into B independent keys for each trajectory
+    keys_batch = jax.random.split(key, B)
+
+    # Initialize each trajectory independently via vmap
+    def init_single(key_i, pos_i):
+      return init_fn_unbatched(key_i, pos_i, box=box)
+
+    # vmap over batch dimension with explicit out_axes structure
+    # We want to batch position, momentum, force, rng (all at axis 0)
+    # but keep mass and box shared (not batched at all)
+    # Since IntegratorState is a pytree, we can specify per-field batching
+    # using a tree of out_axes values matching the state structure
+    out_axes_spec = IntegratorState(
+        position=0,      # batch at axis 0
+        momentum=0,      # batch at axis 0
+        force=0,         # batch at axis 0
+        mass=None,       # do NOT batch (broadcast)
+        rng=0,           # batch at axis 0
+        box=None,        # do NOT batch (broadcast)
+    )
+
+    state_list = jax.vmap(init_single, in_axes=(0, 0), out_axes=out_axes_spec)(
+        keys_batch, positions_batch
+    )
+
+    return state_list
+
+  # Create batched apply_fn via vmap
+  # The unbatched apply_fn takes a single (unbatched) IntegratorState
+  # We vmap over the batch dimension (axis 0) for batched fields only
+  def apply_fn_batched(state_batch: IntegratorState) -> IntegratorState:
+    r"""Apply one timestep of batched integrator on all B trajectories.
+
+    Args:
+        state_batch: IntegratorState with batched dimensions [B, ...].
+
+    Returns:
+        Updated IntegratorState (still batched, axis 0 preserved).
+    """
+    # vmap the unbatched apply_fn over the batch dimension
+    # Since apply_fn_unbatched takes a single IntegratorState argument,
+    # we need to specify in_axes as a tuple matching the flattened state.
+    # IntegratorState has fields: position, momentum, force, mass, rng, box
+    # Flattened order: (position, momentum, force, mass, rng, box)
+    in_axes_spec = (0, 0, 0, None, 0, None)  # tuple of ints/Nones for each field
+    out_axes_spec = (0, 0, 0, None, 0, None)
+
+    # Create a wrapper that takes flattened arguments
+    def apply_fn_flat(position, momentum, force, mass, rng, box):
+      state = IntegratorState(position=position, momentum=momentum, force=force,
+                             mass=mass, rng=rng, box=box)
+      result = apply_fn_unbatched(state)
+      return result.position, result.momentum, result.force, result.mass, result.rng, result.box
+
+    # Apply vmap over the flattened function
+    apply_fn_flat_vmapped = jax.vmap(apply_fn_flat, in_axes=in_axes_spec, out_axes=out_axes_spec)
+
+    # Call with flattened state
+    pos_out, mom_out, force_out, mass_out, rng_out, box_out = apply_fn_flat_vmapped(
+        state_batch.position, state_batch.momentum, state_batch.force,
+        state_batch.mass, state_batch.rng, state_batch.box
+    )
+
+    # Reconstruct state
+    return IntegratorState(
+        position=pos_out,
+        momentum=mom_out,
+        force=force_out,
+        mass=mass_out,
+        rng=rng_out,
+        box=box_out,
+    )
+
+  return init_fn_batched, apply_fn_batched
+
+
 def make_integrator(
     energy_fn: Callable,
     shift_fn: Callable,
@@ -128,7 +317,8 @@ def make_integrator(
           for position updates with PBC.
       mass: Mass array [n_atoms] or [n_atoms, 1] in AKMA units.
       sequence_name: Name in step_sequences registry (default: 'baoab_langevin').
-          Valid options: 'baoab_langevin', 'baoab_csvr_npt', 'settle_with_nhc'.
+          Valid options: 'baoab_langevin', 'baoab_csvr_npt' (v1.0 scope).
+          Note: 'settle_with_nhc' and 'lfmiddle_langevin' deferred to v1.1.
       dt: Timestep in AKMA units (default: 0.5, which is ~0.5 fs).
       kT: Temperature in kT (default: 1.0).
       gamma: Langevin friction coefficient in ps^-1 (default: 1.0). Used by O_Step.

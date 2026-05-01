@@ -56,6 +56,23 @@ from prolix.physics.units import (
   AKMA_TIME_UNIT_FS,
 )
 
+# Explicit-params energy API for jax.export / StableHLO (v1.1 Item 1)
+from prolix.physics.system import EnergyParams, make_energy_fn_pure
+
+# kUPS cross-validation unit conversion adapter (v1.1 Item 3)
+from prolix.physics import kups_adapter
+
+# Modular integrator builder (Phase 2.1, ADR-005; Phase 4 batching)
+from prolix.physics.integrator_builder import make_integrator, make_integrator_batched
+from prolix.physics.step_system import (
+  IntegratorState,
+  Step,
+  StepSequence,
+  step_sequences,
+  make_step,
+  make_sequence,
+)
+
 __all__ = [
   "ANGSTROM_TO_NM",
   # Constants
@@ -102,4 +119,18 @@ __all__ = [
   "WATER_COMPRESSIBILITY_300K_BAR_INV",
   "WATER_COMPRESSIBILITY_300K_AKMA_INV",
   "AKMA_TIME_UNIT_FS",
+  # Explicit-params energy API (v1.1 Item 1)
+  "EnergyParams",
+  "make_energy_fn_pure",
+  # kUPS adapter (v1.1 Item 3)
+  "kups_adapter",
+  # Modular integrator builder (Phase 2.1, Phase 4 batching)
+  "make_integrator",
+  "make_integrator_batched",
+  "IntegratorState",
+  "Step",
+  "StepSequence",
+  "step_sequences",
+  "make_step",
+  "make_sequence",
 ]

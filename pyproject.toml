@@ -79,6 +79,7 @@ markers = [
     "smoke: marks tests as smoke tests (fast and critical)",
     "slow: marks tests as slow (>30s, may be skipped in CI)",
     "openmm: marks tests that require OpenMM (optional dependency)",
+    "kups: optional third-party kups package for thermostat cross-validation (pytest -m \"not kups\" to skip)",
     "integration: marks heavy parity or integration tests against other engines",
     "dynamics: marks tests involving long MD trajectories or statistical checks",
     "order: controls test execution order",

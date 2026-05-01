@@ -1,4 +1,13 @@
-"""Batched simulation core for Prolix."""
+"""Batched simulation core for Prolix.
+
+Neighbor-list Langevin steps (:func:`make_langevin_step_nl`,
+:func:`make_langevin_step_nl_dynamic`) evaluate potential energy and its
+position gradient in one reverse-mode pass via
+:func:`prolix.physics.md_potential_bundle.value_energy_and_grad_energy`, caching
+the scalar on :class:`LangevinState` (``potential_energy``). For fused nonbonded
+throughput where applicable, use :func:`make_langevin_step_nl_fused` — it still
+fills ``potential_energy`` from the fused kernel.
+"""
 
 from __future__ import annotations
 
@@ -33,6 +42,12 @@ class LangevinState:
     # Layout: [0]=vlimit_exceeded  [1]=force_capped
     #         [2]=constr_violated  [3]=dx_capped
     warn_counts: Array = None  # (NUM_WARN_TYPES,) or (B, NUM_WARN_TYPES) int32; initialized in __post_init__ if None
+    # Total potential energy from the last force evaluation when available (optional cache slot).
+    # Scalar ``()`` for unbatched ``(N, 3)`` trajectories; ``(B,)`` when ``positions`` is ``(B, N, 3)``.
+    # Initialized to NaN when not computed (e.g. implicit ``single_padded_force`` path).
+    potential_energy: Array = dataclasses.field(
+        default_factory=lambda: jnp.asarray(jnp.nan, dtype=jnp.float64)
+    )
 
     # Named indices for warn_counts
     WARN_VLIMIT = 0
@@ -50,12 +65,18 @@ class LangevinState:
             else:  # (N, 3) unbatched
                 wc = jnp.zeros(self.NUM_WARN_TYPES, dtype=jnp.int32)
             object.__setattr__(self, 'warn_counts', wc)
+        pe = jnp.asarray(self.potential_energy, dtype=self.positions.dtype)
+        if len(self.positions.shape) == 3 and pe.ndim == 0:
+            B = self.positions.shape[0]
+            pe = jnp.full((B,), jnp.nan, dtype=self.positions.dtype)
+        object.__setattr__(self, 'potential_energy', pe)
 
     def tree_flatten(self):
         """Flatten to pytree leaves. warn_counts is always initialized by __post_init__."""
         children = (
             self.positions, self.momentum, self.force,
             self.mass, self.key, self.cap_count, self.warn_counts,
+            self.potential_energy,
         )
         aux_data = None
         return (children, aux_data)
@@ -161,8 +182,14 @@ def apply_com_correction(
             )
         return r_centered
 
-    return lax.cond(
+    # Skip step 0 so streaming + non-streaming batched paths match on cold start
+    # (first MD sub-step should not alter positions before dynamics differs).
+    do_recenter = jnp.logical_and(
+        step_idx > 0,
         step_idx % recenter_every == 0,
+    )
+    return lax.cond(
+        do_recenter,
         _do_correction,
         lambda r: r,
         positions,
@@ -384,6 +411,7 @@ def make_langevin_step(dt: float, kT: float, gamma: float) -> Callable[[PaddedSy
             r, p, f, m, key,
             cap_count + force_capped.astype(jnp.int32),
             wc,
+            state.potential_energy,
         )
         
     return step_fn
@@ -412,6 +440,8 @@ def make_langevin_step_nl(
         from prolix.batched_energy import single_padded_energy_nl_cvjp
         energy_fn = single_padded_energy_nl_cvjp
 
+    from prolix.physics.md_potential_bundle import value_energy_and_grad_energy
+
     # Precompute constants
     c1 = jnp.exp(-gamma * dt)
     c2 = jnp.sqrt(1.0 - jnp.exp(-2.0 * gamma * dt))
@@ -428,8 +458,6 @@ def make_langevin_step_nl(
             return energy_fn(
                 sys_with_r, neighbor_idx, displacement_fn,
             )
-
-        force_fn = jax.grad(lambda r: _energy_of_r(r))
 
         r, p, f, m, key, cap_count = (
             state.positions, state.momentum, state.force,
@@ -460,8 +488,9 @@ def make_langevin_step_nl(
         # A
         r = r + 0.5 * dt * p / m[:, None]
 
-        # B
-        f = force_fn(r)
+        # B — one ``value_and_grad`` (same AD as prior ``jax.grad``; also caches scalar energy).
+        e_r, grad_E = value_energy_and_grad_energy(_energy_of_r, r)
+        f = grad_E
         f = jnp.where(jnp.isfinite(f), f, 0.0)
         # Belt-and-suspenders: zero forces ON padding atoms
         mask = padded_sys.atom_mask[:, None]
@@ -491,6 +520,7 @@ def make_langevin_step_nl(
             r, p, f, m, key,
             cap_count + force_capped.astype(jnp.int32),
             wc,
+            jnp.asarray(e_r, dtype=r.dtype),
         )
 
     return step_fn
@@ -516,12 +546,11 @@ def make_langevin_step_nl_fused(
         state: LangevinState,
         neighbor_idx: Array,
     ) -> LangevinState:
-        def force_fn(r):
+        def energy_and_forces_nl(r):
             sys_with_r = dataclasses.replace(padded_sys, positions=r)
-            _e, f = fused_energy_and_forces_nl(
+            return fused_energy_and_forces_nl(
                 sys_with_r, neighbor_idx, displacement_fn,
             )
-            return f
 
         r, p, f, m, key, cap_count = (
             state.positions, state.momentum, state.force,
@@ -552,8 +581,8 @@ def make_langevin_step_nl_fused(
         # A
         r = r + 0.5 * dt * p / m[:, None]
 
-        # B
-        f = force_fn(r)
+        # B — fused scalar energy + physical forces ``F = -∇U`` in one kernel call.
+        e_r, f = energy_and_forces_nl(r)
         f = jnp.where(jnp.isfinite(f), f, 0.0)
         # Belt-and-suspenders: zero forces ON padding atoms
         mask = padded_sys.atom_mask[:, None]
@@ -583,6 +612,7 @@ def make_langevin_step_nl_fused(
             r, p, f, m, key,
             cap_count + force_capped.astype(jnp.int32),
             wc,
+            jnp.asarray(e_r, dtype=r.dtype),
         )
 
     return step_fn
@@ -955,39 +985,72 @@ def batched_equilibrate(
     temp: float = 300.0,
     chunk_size: int | None = 1,
 ) -> LangevinState:
-    """Run a 10-stage NVT equilibration warmup using indexed shared topology.
+    """DEPRECATED: Use cold-start initialization instead.
 
-    Implements a 100ps production-grade protocol:
-    1. 10 stages of 10ps each.
-    2. Temperature ramp 10K -> 300K.
-    3. Harmonic restraints 50.0 -> 0.0 (heavy then backbone).
-    4. Displacement caps relax 0.1 -> 0.5 -> remove (vlimit active).
-    5. All stages at λ=1.0.
+    This function has a known bug: it returns force=zeros in the LangevinState,
+    which causes NaN on the first production step when batched_produce reuses
+    the stale zero-force field. The inline BAOAB also bypasses the modular
+    integrator, making behaviour inconsistent with batched_produce.
 
-    Args:
-        unique_batch: Padded batch of unique protein systems.
-        system_index: (B,) array mapping replica to unique system index.
-        positions: (B, N, 3) initial positions (usually from batched_minimize).
-        key: PRNG key for Langevin noise.
-        duration_ps: Total equilibration time in ps (default 100).
-        temp: Final target temperature in K (default 300).
-        chunk_size: Systems per vmap chunk.
+    Replacement pattern (cold-start)::
 
-    Returns:
-        equilibrated_state: Final LangevinState.
+        import dataclasses
+        from jax_md import space
+        from prolix.batched_energy import single_padded_energy
+        from prolix.physics.md_potential_bundle import value_energy_and_grad_energy
+
+        displacement_fn, _ = space.free()
+
+        def _init_force(sys):
+            def _e(r):
+                return single_padded_energy(
+                    dataclasses.replace(sys, positions=r), displacement_fn
+                )
+            _, f = value_energy_and_grad_energy(_e, sys.positions)
+            return f
+
+        initial_forces = jax.vmap(_init_force)(batch)
+        keys = jax.random.split(key, B)
+        state = LangevinState(
+            positions=batch.positions,
+            momentum=jnp.zeros_like(batch.positions),
+            force=initial_forces,
+            mass=batch.masses,
+            key=keys,
+            cap_count=jnp.zeros(B, dtype=jnp.int32),
+        )
+
+    See also: batched_equilibrate_nl for neighbor-list equilibration.
     """
+    import warnings
+    warnings.warn(
+        "batched_equilibrate is deprecated and will be removed in v1.2. "
+        "It returns force=zeros which causes NaN on the first production step. "
+        "Use cold-start LangevinState initialization instead — see docstring or "
+        "CLAUDE.md 'Safe Pattern' section. For NL-based equilibration use "
+        "batched_equilibrate_nl.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
     from prolix.batched_energy import single_padded_force
     
     n_stages = 10
     dt = 0.002 # 2 fs
     steps_per_stage = int((duration_ps / n_stages) / dt)
-    
-    # Temperature schedule: ramp 10K -> Target
-    temps = jnp.linspace(10.0, temp, n_stages)
+    pos_dtype = positions.dtype
+
+    # Temperature schedule: ramp 10K -> Target (match positions dtype for while_loop stability)
+    temps = jnp.linspace(10.0, temp, n_stages, dtype=pos_dtype)
     # Restraint k-values: step down 50 -> 0 (AMBER standard)
-    k_vals = jnp.array([50.0, 50.0, 25.0, 10.0, 5.0, 2.0, 1.0, 0.5, 0.1, 0.0], dtype=jnp.float32)
+    k_vals = jnp.array(
+        [50.0, 50.0, 25.0, 10.0, 5.0, 2.0, 1.0, 0.5, 0.1, 0.0],
+        dtype=pos_dtype,
+    )
     # Caps: 0.1 -> 0.5 -> None (vlimit=20.0 handles safety)
-    caps = jnp.array([0.1, 0.1, 0.2, 0.2, 0.5, 0.5, 10.0, 10.0, 10.0, 10.0], dtype=jnp.float32)
+    caps = jnp.array(
+        [0.1, 0.1, 0.2, 0.2, 0.5, 0.5, 10.0, 10.0, 10.0, 10.0],
+        dtype=pos_dtype,
+    )
 
     def equilibrate_single(args: tuple[int, jax.Array, jax.Array]) -> LangevinState:
         sys_idx, pos, key = args
@@ -1014,7 +1077,11 @@ def batched_equilibrate(
 
         # Initialize velocities at 10K
         key, v_key = jax.random.split(key)
-        v = jax.random.normal(v_key, sys.positions.shape) * jnp.sqrt(10.0 * BOLTZMANN_KCAL / (mass_3d + 1e-12))
+        eq_dtype = pos.dtype
+        kT0 = jnp.asarray(10.0 * BOLTZMANN_KCAL, dtype=eq_dtype)
+        v = jax.random.normal(v_key, sys.positions.shape, dtype=eq_dtype) * jnp.sqrt(
+            kT0 / (mass_3d + 1e-12)
+        )
         v = v * pad_mask_3d # Zero padding velocities
         
         displacement_fn, _ = space.free()
@@ -1044,7 +1111,7 @@ def batched_equilibrate(
                 # 3. BAOAB - Stochastic O: v = c1*v + c2*sqrt(kT/m)*R
                 c1 = jnp.exp(-gamma * dt)
                 c2 = jnp.sqrt(1.0 - jnp.exp(-2.0 * gamma * dt))
-                kT = t_target * BOLTZMANN_KCAL
+                kT = t_target * jnp.asarray(BOLTZMANN_KCAL, dtype=t_target.dtype)
                 key_curr, subkey = jax.random.split(key_curr)
                 noise = jax.random.normal(subkey, v_curr.shape)
                 v_curr = c1 * v_curr + c2 * jnp.sqrt(kT / (mass_3d + 1e-12)) * noise
@@ -1077,8 +1144,8 @@ def batched_equilibrate(
                 # Final Safety: Ghost pinning
                 r_curr = jnp.where(pad_mask_3d, r_curr, ghost_positions)
                 v_curr = jnp.where(pad_mask_3d, v_curr, 0.0)
-                
-                return (r_curr, v_curr, key_curr)
+
+                return (r_curr.astype(eq_dtype), v_curr.astype(eq_dtype), key_curr)
             
             # while_loop instead of fori_loop: no reverse-mode AD needed,
             # so avoid scan's O(N) intermediate storage.
@@ -1320,6 +1387,7 @@ def batched_produce_streaming(
                             s_next.key,
                             s_next.cap_count,
                             s_next.warn_counts,
+                            s_next.potential_energy,
                         )
                         return (s_next, step_i + 1), None
 
@@ -1338,17 +1406,8 @@ def batched_produce_streaming(
 
                 # Write trajectory frames (offset by start_frame)
                 start_save_idx = batch_save_idx * write_batch_size + start_frame
-                io_callback(
-                    write_fn,
-                    None,
-                    frames,
-                    s_after_batch.positions,
-                    s_after_batch.momentum,
-                    s_after_batch.force,
-                    s_after_batch.key,
-                    batch_idx,
-                    start_save_idx,
-                )
+                # Same host contract as write_batch_size==1: (positions, batch_idx, index)
+                io_callback(write_fn, None, frames, batch_idx, start_save_idx)
 
                 return (s_after_batch, new_global_step), None
 
@@ -1378,6 +1437,7 @@ def batched_produce_streaming(
                         s_next.key,
                         s_next.cap_count,
                         s_next.warn_counts,
+                        s_next.potential_energy,
                     )
                     return (s_next, step_i + 1), None
 
@@ -1390,10 +1450,6 @@ def batched_produce_streaming(
                     write_fn,
                     None,
                     s_next.positions,
-                    s_next.positions,
-                    s_next.momentum,
-                    s_next.force,
-                    s_next.key,
                     batch_idx,
                     save_idx,
                 )
@@ -1539,6 +1595,8 @@ def make_langevin_step_nl_dynamic(
         from prolix.batched_energy import single_padded_energy_nl_cvjp
         energy_fn = single_padded_energy_nl_cvjp
 
+    from prolix.physics.md_potential_bundle import value_energy_and_grad_energy
+
     c1 = jnp.exp(-gamma * dt)
     c2 = jnp.sqrt(1.0 - jnp.exp(-2.0 * gamma * dt))
 
@@ -1556,8 +1614,6 @@ def make_langevin_step_nl_dynamic(
             sys_with_r = dataclasses.replace(padded_sys, positions=r)
             return energy_fn(sys_with_r, neighbor_idx, displacement_fn)
 
-        force_fn = jax.grad(lambda r: _energy_of_r(r))
-
         r, p, f, m, key, cap_count = (
             state.positions, state.momentum, state.force,
             state.mass, state.key, state.cap_count,
@@ -1574,8 +1630,9 @@ def make_langevin_step_nl_dynamic(
         # A
         r = r + 0.5 * dt * p / m[:, None]
 
-        # B — compute forces with CURRENT neighbor list
-        f = force_fn(r)
+        # B — compute energy + ∇E with CURRENT neighbor list (one reverse-mode).
+        e_r, grad_E = value_energy_and_grad_energy(_energy_of_r, r)
+        f = grad_E
         f = jnp.where(jnp.isfinite(f), f, 0.0)
         p = p - 0.5 * dt * f
 
@@ -1595,6 +1652,7 @@ def make_langevin_step_nl_dynamic(
 
         new_state = LangevinState(
             r, p, f, m, key, cap_count, state.warn_counts,
+            jnp.asarray(e_r, dtype=r.dtype),
         )
         return new_state, new_nbrs
 
@@ -1692,7 +1750,9 @@ def batched_equilibrate_nl(
             sys_with_r = dataclasses.replace(sys, positions=r)
             return energy_fn(sys_with_r, nbr, displacement_fn)
 
-        initial_f = jax.grad(_energy_of_r)(sys.positions)
+        from prolix.physics.md_potential_bundle import value_energy_and_grad_energy
+
+        e0, initial_f = value_energy_and_grad_energy(_energy_of_r, sys.positions)
 
         state = LangevinState(
             positions=sys.positions,
@@ -1701,6 +1761,7 @@ def batched_equilibrate_nl(
             mass=sys.masses,
             key=k,
             cap_count=jnp.array(0, dtype=jnp.int32),
+            potential_energy=jnp.asarray(e0, dtype=sys.positions.dtype),
         )
 
         def scan_step(s, _):
@@ -1773,17 +1834,7 @@ def batched_produce_streaming_nl(
 
             s_next, _ = lax.scan(single_step, s, None, length=steps_per_save)
 
-            io_callback(
-                write_fn,
-                None,
-                s_next.positions,
-                s_next.positions,
-                s_next.momentum,
-                s_next.force,
-                s_next.key,
-                batch_idx,
-                save_idx,
-            )
+            io_callback(write_fn, None, s_next.positions, batch_idx, save_idx)
 
             return s_next, None
 
@@ -1859,7 +1910,9 @@ def batched_equilibrate_nl_dynamic(
             sys_with_r = dataclasses.replace(sys, positions=r)
             return energy_fn(sys_with_r, neighbor_idx, displacement_fn)
 
-        initial_f = jax.grad(_energy_of_r)(sys.positions)
+        from prolix.physics.md_potential_bundle import value_energy_and_grad_energy
+
+        e0, initial_f = value_energy_and_grad_energy(_energy_of_r, sys.positions)
 
         state = LangevinState(
             positions=sys.positions,
@@ -1868,6 +1921,7 @@ def batched_equilibrate_nl_dynamic(
             mass=sys.masses,
             key=k,
             cap_count=jnp.array(0, dtype=jnp.int32),
+            potential_energy=jnp.asarray(e0, dtype=sys.positions.dtype),
         )
 
         def scan_step(carry, _):
@@ -1951,17 +2005,7 @@ def batched_produce_streaming_nl_dynamic(
                 single_step, (s, nbrs), None, length=steps_per_save,
             )
 
-            io_callback(
-                write_fn,
-                None,
-                s_next.positions,
-                s_next.positions,
-                s_next.momentum,
-                s_next.force,
-                s_next.key,
-                batch_idx,
-                save_idx,
-            )
+            io_callback(write_fn, None, s_next.positions, batch_idx, save_idx)
 
             return (s_next, nbrs_next), None
 
@@ -2130,7 +2174,8 @@ def make_langevin_step_explicit(
             mass=m,
             key=key,
             cap_count=cap_count,
-            warn_counts=wc
+            warn_counts=wc,
+            potential_energy=state.potential_energy,
         )
 
     return step_fn

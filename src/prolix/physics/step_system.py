@@ -16,6 +16,10 @@ Ordered lists of steps composing integrator variants (BAOAB_LANGEVIN, BAOAB_CSVR
 Each sequence captures the integrator structure and shared parameters.
 Reference: Phase 1.3, ADR-005 v2.0.
 
+**v1.0 Scope**: This release ships with BAOAB_LANGEVIN and BAOAB_CSVR_NPT integrators.
+LFMiddle (Phase 3) and NHC thermostat (future work) are deferred to v1.1 pending
+architectural changes. See oracle recommendation Path B and `.agent/docs/RELEASE_DECISION_v1.0.md`.
+
 **Design Principles**:
 - Each step is a class with an `apply` method
 - `apply` is pure: no side effects, no state mutation, no control flow
@@ -147,14 +151,31 @@ def _csvr_compute_lambda_jit_safe(
 class IntegratorState:
   """Minimal integrator state for step composition.
 
+  Supports both unbatched and batched (vmap) modes seamlessly.
+
+  **Unbatched Mode**:
+  - position: (N, 3) atomic positions
+  - momentum: (N, 3) atomic momenta (mass-weighted velocities)
+  - force: (N, 3) atomic forces (from energy_fn gradient)
+  - mass: (N,) or (N, 1) atomic masses
+  - rng: JAX PRNGKey for stochastic steps
+  - box: Optional (3,) box dimensions for periodic boundary conditions
+
+  **Batched Mode** (via jax.vmap):
+  - position: (B, N, 3) where B=batch_size (multiple independent trajectories)
+  - momentum: (B, N, 3)
+  - force: (B, N, 3)
+  - mass: (N,) or (N, 1) (broadcast across batch; same for all trajectories)
+  - rng: (B, 2) (independent key per trajectory)
+  - box: Optional (3,) (broadcast; same box for all trajectories)
+
   Attributes:
-      position: (N, 3) atomic positions.
-      momentum: (N, 3) atomic momenta (mass-weighted velocities).
-      force: (N, 3) atomic forces (from energy_fn gradient).
-      mass: (N,) or (N, 1) atomic masses.
-      rng: JAX PRNGKey for stochastic steps.
-      box: Optional (3,) box dimensions for periodic boundary conditions.
-          Used during force recomputation in apply_fn.
+      position: Atomic positions. Shape (N, 3) unbatched or (B, N, 3) batched.
+      momentum: Atomic momenta. Shape (N, 3) unbatched or (B, N, 3) batched.
+      force: Atomic forces. Shape (N, 3) unbatched or (B, N, 3) batched.
+      mass: Atomic masses. Shape (N,) or (N, 1), shared across batch.
+      rng: JAX PRNGKey. Shape (2,) unbatched or (B, 2) batched.
+      box: Optional box dimensions. Shape (3,) if provided, shared across batch.
   """
 
   position: ArrayType
@@ -301,6 +322,7 @@ class O_Step(Step):
     ), key_out
 
 
+
 class V_Step(Step):
   r"""Velocity update (V in BAOAB, also called B-step or momentum step).
 
@@ -348,6 +370,7 @@ class V_Step(Step):
         mass=state.mass,
         rng=state.rng,
     )
+
 
 
 class A_Step(Step):
@@ -573,13 +596,13 @@ class CSVR_Step(Step):
 
 
 class NHC_Step(Step):
-  r"""Nosé-Hoover Chain thermostat step (placeholder for future use).
+  r"""Nosé-Hoover Chain thermostat step (deferred to v1.1).
 
-  Currently a no-op stub. Full implementation requires tracking chain state
-  (xi_i, Q_i variables) outside the IntegratorState. Will be implemented
-  when a full ChainState class is available.
+  Not implemented in v1.0. Full implementation requires tracking chain state
+  (xi_i, Q_i variables) outside the IntegratorState and architectural changes
+  to the integrator builder.
 
-  TODO: Implement once ChainState is available.
+  Deferred to v1.1 pending design completion. See oracle recommendation Path B.
   """
 
   def __init__(self):
@@ -592,21 +615,26 @@ class NHC_Step(Step):
       constraint_dofs: ConstraintDOFMask | None = None,
       **params,
   ) -> IntegratorState:
-    """No-op placeholder for NHC.
+    """NHC integration not implemented in v1.0.
 
     Args:
         state: IntegratorState.
         constraint_dofs: Unused.
         **params: Unused.
 
-    Returns:
-        Unchanged state (placeholder).
+    Raises:
+        NotImplementedError: NHC thermostat deferred to v1.1.
     """
-    # TODO: Implement NHC chain coupling when ChainState available
-    return state
+    raise NotImplementedError(
+        "NHC (Nosé-Hoover Chain) thermostat integration is deferred to v1.1. "
+        "Use O_Step (Langevin) or CSVR_Step for temperature control in v1.0. "
+        "See oracle recommendation Path B and .agent/docs/RELEASE_DECISION_v1.0.md."
+    )
 
 
 # Step registry: map step names to step class constructors
+# v1.0 contains O_Step, V_Step, A_Step, SETTLE_Velocity_Step, CSVR_Step.
+# LFMiddle_Step, VV_Step (Phase 3) and NHC_Step deferred to v1.1.
 step_registry: dict[str, type[Step]] = {
     "o_step": O_Step,
     "v_step": V_Step,
@@ -723,22 +751,6 @@ def _initialize_step_sequences() -> None:
               "Long-trajectory stability under investigation (v1.0 known issue). "
               "Suitable for NPT (constant pressure, temperature) short runs. "
               "Reference: Bussi et al. (2007), Bernetti & Bussi (2020)."
-          ),
-      ),
-      "settle_with_nhc": StepSequence(
-          name="settle_with_nhc",
-          steps=["v_step", "a_step", "o_step", "a_step", "nhc_step", "v_step"],
-          parameters={
-              "dt": 0.5,
-              "gamma": 1.0,
-              "kT": 2.479,
-          },
-          description=(
-              "BAOAB integrator with Nosé-Hoover Chain (NHC) thermostat. "
-              "Structure: V(0.5) → A(0.5) → O(1.0) → A(0.5) → NHC → V(0.5). "
-              "NHC allows longer correlation times than simple Langevin. "
-              "Full implementation requires ChainState (Phase 2 future work). "
-              "Reference: Nosé (1984), Hoover (1985), Martyna et al. (1992)."
           ),
       ),
   }

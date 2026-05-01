@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, NamedTuple
 
 import jax
 import jax.numpy as jnp
@@ -320,8 +320,6 @@ def make_energy_fn(
 
       scale_matrix_vdw = mat_vdw
       scale_matrix_elec = mat_elec
-      
-      print(f"DEBUG: mat_elec diag sum: {jnp.sum(jnp.diag(mat_elec))}")
 
       # Also set exclusion_mask for binary checks (though scale matrix path takes precedence)
       # We treat anything with non-zero scale as "allowed" for binary mask,
@@ -877,6 +875,223 @@ def make_energy_fn(
     }
 
   return total_energy
+
+
+class EnergyParams(NamedTuple):
+  """Explicit per-atom force-field parameters for make_energy_fn_pure.
+
+  Carrying charges/sigmas/epsilons as named tuple fields makes the energy
+  function a pure JAX function with no Python closures over trainable data,
+  which is required for jax.export (StableHLO) and enables differentiating
+  through force-field parameters.
+  """
+  charges: Array    # (N,) partial charges (elementary charge units)
+  sigmas: Array     # (N,) LJ sigma (Å)
+  epsilons: Array   # (N,) LJ well depth (kcal/mol)
+
+
+def make_energy_fn_pure(
+  displacement_fn: space.DisplacementFn,
+  system: Any,
+  box: Array,
+  cutoff_distance: float = 9.0,
+  pme_grid_points: int | Array = 64,
+  pme_alpha: float = 0.34,
+  pme_grid_spacing: float | None = None,
+  strict_parameterization: bool = True,
+) -> tuple[EnergyParams, Any]:
+  """Explicit-params energy factory for jax.export / StableHLO compatibility.
+
+  Parallel to make_energy_fn but charges, sigmas, and epsilons are runtime
+  inputs rather than closed-over Python objects. Box is fixed at factory time
+  (NVT only). No soft-core, restraints, implicit solvent, virtual sites, or
+  CMAP — production TIP3P explicit-solvent scope.
+
+  Args:
+      displacement_fn: JAX MD periodic displacement function.
+      system: Protein or plain dict with charges/sigmas/epsilons/bonds/etc.
+      box: (3,) simulation box lengths (Å). Fixed for the lifetime of fn.
+      cutoff_distance: Non-bonded cutoff (Å).
+      pme_grid_points: Grid points along each axis for PME.
+      pme_alpha: Ewald splitting parameter (1/Å).
+      pme_grid_spacing: If set, overrides grid_points-derived spacing.
+      strict_parameterization: Raise if any sigma <= 0.
+
+  Returns:
+      (params, fn) where params is an EnergyParams extracted from system, and
+      fn(params, positions) -> float is a pure function suitable for jax.jit
+      and jax.export.
+  """
+  if isinstance(system, dict):
+    system = _DictSystemWrapper(system)
+
+  # ── Static topology ────────────────────────────────────────────────────────
+  import logging as _log_mod
+  _log = _log_mod.getLogger("prolix.physics.system")
+
+  def _safe_ba(indices, params_arr, term, ic, pc):
+    idx = jnp.asarray(indices if indices is not None else jnp.zeros((0, ic), dtype=jnp.int32))
+    prm = jnp.asarray(params_arr if params_arr is not None else jnp.zeros((0, pc), dtype=jnp.float32))
+    if idx.shape[0] > 0 and prm.shape[0] == 0:
+      _log.warning("%s: %d indices but no params — skipping.", term, idx.shape[0])
+      idx = jnp.zeros((0, ic), dtype=jnp.int32)
+    elif idx.shape[0] != prm.shape[0] and idx.shape[0] > 0:
+      _log.warning("%s: index/param mismatch (%d vs %d) — skipping.", term, idx.shape[0], prm.shape[0])
+      idx = jnp.zeros((0, ic), dtype=jnp.int32)
+      prm = jnp.zeros((0, pc), dtype=jnp.float32)
+    return idx, prm
+
+  bond_idx, bond_prm = _safe_ba(system.bonds, system.bond_params, "bonds", 2, 2)
+  bond_energy_fn = bonded.make_bond_energy_fn(displacement_fn, bond_idx, bond_prm)
+
+  angle_idx, angle_prm = _safe_ba(system.angles, system.angle_params, "angles", 3, 2)
+  angle_energy_fn = bonded.make_angle_energy_fn(displacement_fn, angle_idx, angle_prm)
+
+  dih_idx, dih_prm = _safe_ba(system.proper_dihedrals, system.dihedral_params, "dihedrals", 4, 3)
+  dihedral_energy_fn = bonded.make_dihedral_energy_fn(displacement_fn, dih_idx, dih_prm)
+
+  imp_idx, imp_prm = _safe_ba(system.impropers, system.improper_params, "impropers", 4, 3)
+  improper_energy_fn = bonded.make_dihedral_energy_fn(displacement_fn, imp_idx, imp_prm)
+
+  ub_idx, ub_prm = _safe_ba(system.urey_bradley_bonds, system.urey_bradley_params, "urey_bradley", 2, 2)
+  ub_energy_fn = bonded.make_bond_energy_fn(displacement_fn, ub_idx, ub_prm)
+
+  # ── Initial params (extracted from system) ─────────────────────────────────
+  charges_init = jnp.asarray(system.charges)
+  sigmas_init = jnp.asarray(system.sigmas)
+  epsilons_init = jnp.asarray(system.epsilons)
+
+  n_zero = int(jnp.sum(sigmas_init <= 0.0))
+  if n_zero > 0:
+    if strict_parameterization:
+      raise ValueError(
+        f"Found {n_zero} atoms with sigma <= 0.0. Pass strict_parameterization=False to bypass."
+      )
+    _log.warning("Found %d atoms with sigma <= 0.0; clamping to 1e-6.", n_zero)
+  sigmas_init = jnp.maximum(sigmas_init, 1e-6)
+
+  # ── Exclusion matrices (static, captured at factory time) ──────────────────
+  exclusion_spec = None
+  exclusion_mask_static = system.exclusion_mask
+  scale_matrix_vdw_static = system.scale_matrix_vdw if hasattr(system, "scale_matrix_vdw") else None
+  scale_matrix_elec_static = system.scale_matrix_elec if hasattr(system, "scale_matrix_elec") else None
+
+  if exclusion_mask_static is None:
+    _bonds = system.bonds
+    if _bonds is not None and _bonds.shape[0] > 0:
+      exclusion_spec = nl.ExclusionSpec.from_protein(system)
+
+  if exclusion_spec is not None and scale_matrix_vdw_static is None:
+    N = charges_init.shape[0]
+    mat_vdw = jnp.ones((N, N), dtype=jnp.float32)
+    mat_elec = jnp.ones((N, N), dtype=jnp.float32)
+    idx_d = jnp.arange(N)
+    mat_vdw = mat_vdw.at[idx_d, idx_d].set(0.0)
+    mat_elec = mat_elec.at[idx_d, idx_d].set(0.0)
+    idx1213 = exclusion_spec.idx_12_13
+    if idx1213.shape[0] > 0:
+      mat_vdw = mat_vdw.at[idx1213[:, 0], idx1213[:, 1]].set(0.0)
+      mat_vdw = mat_vdw.at[idx1213[:, 1], idx1213[:, 0]].set(0.0)
+      mat_elec = mat_elec.at[idx1213[:, 0], idx1213[:, 1]].set(0.0)
+      mat_elec = mat_elec.at[idx1213[:, 1], idx1213[:, 0]].set(0.0)
+    idx14 = exclusion_spec.idx_14
+    if idx14.shape[0] > 0:
+      mat_vdw = mat_vdw.at[idx14[:, 0], idx14[:, 1]].set(exclusion_spec.scale_14_vdw)
+      mat_vdw = mat_vdw.at[idx14[:, 1], idx14[:, 0]].set(exclusion_spec.scale_14_vdw)
+      mat_elec = mat_elec.at[idx14[:, 0], idx14[:, 1]].set(exclusion_spec.scale_14_elec)
+      mat_elec = mat_elec.at[idx14[:, 1], idx14[:, 0]].set(exclusion_spec.scale_14_elec)
+    scale_matrix_vdw_static = mat_vdw
+    scale_matrix_elec_static = mat_elec
+    exclusion_mask_static = (mat_vdw > 0.0).astype(jnp.float32)
+
+  # ── PME setup (box fixed) ──────────────────────────────────────────────────
+  box_arr = jnp.asarray(box)
+  if pme_grid_spacing is not None:
+    grid_spacing = float(pme_grid_spacing)
+  else:
+    mean_l = float(jnp.mean(box_arr.astype(jnp.float64)))
+    grid_spacing = mean_l / float(max(int(pme_grid_points), 1))
+  _spme_fn = pme.make_spme_energy_fn(box_arr, alpha=float(pme_alpha), grid_spacing=grid_spacing)
+
+  # PME exclusion correction indices (static topology)
+  pme_bonds = system.bonds
+  n_atoms = charges_init.shape[0]
+  if pme_bonds is not None and pme_bonds.shape[0] > 0:
+    excl = topology.find_bonded_exclusions(pme_bonds, n_atoms)
+    pme_idx_12_s = excl.idx_12
+    pme_idx_13_s = excl.idx_13
+    pme_idx_14_s = excl.idx_14
+  else:
+    empty = jnp.zeros((0, 2), dtype=jnp.int32)
+    pme_idx_12_s = pme_idx_13_s = pme_idx_14_s = empty
+  coul_14_scale = system.coulomb14scale if system.coulomb14scale is not None else 0.83333333
+
+  COULOMB_CONSTANT = 332.0637  # explicit solvent, ε=1
+
+  # ── Pure energy function ───────────────────────────────────────────────────
+  def total_energy_pure(params: EnergyParams, r: Array) -> Array:
+    charges_p = jnp.asarray(params.charges)
+    sigmas_p = jnp.maximum(jnp.asarray(params.sigmas), 1e-6)
+    epsilons_p = jnp.asarray(params.epsilons)
+
+    # Bonded terms (topology-static, captured above)
+    e_bond = bond_energy_fn(r)
+    e_angle = angle_energy_fn(r)
+    e_ub = ub_energy_fn(r)
+    e_dihedral = dihedral_energy_fn(r)
+    e_improper = improper_energy_fn(r)
+
+    # Shared pairwise distances
+    dr_mat = space.map_product(displacement_fn)(r, r)
+    dist = space.distance(jnp.asarray(dr_mat))
+    mask_diag = 1.0 - jnp.eye(charges_p.shape[0])
+    dist_safe = dist + 1e-6
+
+    # Lennard-Jones (explicit sigmas/epsilons)
+    sig_ij = 0.5 * (sigmas_p[:, None] + sigmas_p[None, :])
+    eps_ij = jnp.sqrt(epsilons_p[:, None] * epsilons_p[None, :])
+    e_lj_mat = energy.lennard_jones(dist, sig_ij, eps_ij)
+    if scale_matrix_vdw_static is not None:
+      e_lj_mat = e_lj_mat * scale_matrix_vdw_static * mask_diag
+    else:
+      e_lj_mat = jnp.where(mask_diag, e_lj_mat, 0.0)
+      if exclusion_mask_static is not None:
+        e_lj_mat = jnp.where(exclusion_mask_static, e_lj_mat, 0.0)
+    e_lj = 0.5 * jnp.sum(e_lj_mat)
+    e_lj += explicit_corrections.lj_dispersion_tail_energy(
+      box_arr, sigmas_p, epsilons_p, float(cutoff_distance), r.shape[0]
+    )
+
+    # Electrostatics — PME reciprocal (explicit charges)
+    atom_mask = jnp.ones(charges_p.shape[0], dtype=bool)
+    e_recip = _spme_fn(r, charges_p, atom_mask)
+    e_recip += pme.spme_background_energy(charges_p, atom_mask, float(pme_alpha), box_arr)
+
+    # Direct-space erfc-damped Coulomb
+    erfc_term = jax.scipy.special.erfc(pme_alpha * dist)
+    q_ij = charges_p[:, None] * charges_p[None, :]
+    e_coul = COULOMB_CONSTANT * (q_ij / dist_safe) * erfc_term
+    if scale_matrix_elec_static is not None:
+      e_coul = e_coul * scale_matrix_elec_static * mask_diag
+    else:
+      e_coul = jnp.where(mask_diag, e_coul, 0.0)
+      if exclusion_mask_static is not None:
+        e_coul = jnp.where(exclusion_mask_static, e_coul, 0.0)
+    e_direct = 0.5 * jnp.sum(e_coul)
+
+    # PME exclusion correction
+    e_pme_corr = explicit_corrections.pme_exclusion_correction_energy(
+      r, displacement_fn,
+      pme_idx_12_s, pme_idx_13_s, pme_idx_14_s,
+      charges_p, float(pme_alpha), float(coul_14_scale),
+    )
+
+    e_elec = e_direct + e_recip + e_pme_corr
+
+    return e_bond + e_angle + e_ub + e_dihedral + e_improper + e_lj + e_elec
+
+  params = EnergyParams(charges=charges_init, sigmas=sigmas_init, epsilons=epsilons_init)
+  return params, total_energy_pure
 
 
 @dataclass(frozen=True)

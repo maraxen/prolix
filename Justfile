@@ -160,6 +160,14 @@ submit-tip3p-dt-gamma-matrix: push-engaging
 submit-csvr-validate: push-engaging
     ssh {{ssh_opts}} {{engaging_login}} 'cd {{engaging_remote_dir}} && export ENGAGING_LOG_DATE=$(date +%Y%m%d) && mkdir -p outputs/logs/engaging/$ENGAGING_LOG_DATE/slurm outputs/logs/engaging/$ENGAGING_LOG_DATE/app && o=outputs/logs/engaging/$ENGAGING_LOG_DATE/slurm && sbatch --parsable --partition={{engaging_partition_preemptable}} -o $o/%x_%j.out -e $o/%x_%j.err scripts/slurm/validate_csvr_temperature.slurm'
 
+# Batched pipeline smoke (CPU, ~few minutes compile+run). Logs under outputs/logs/engaging/<date>/app/.
+submit-batched-smoke: push-engaging
+    ssh {{ssh_opts}} {{engaging_login}} 'cd {{engaging_remote_dir}} && export ENGAGING_LOG_DATE=$(date +%Y%m%d) && mkdir -p outputs/logs/engaging/$ENGAGING_LOG_DATE/slurm outputs/logs/engaging/$ENGAGING_LOG_DATE/app && o=outputs/logs/engaging/$ENGAGING_LOG_DATE/slurm && sbatch --parsable --partition=mit_quicktest -o $o/%x_%j.out -e $o/%x_%j.err scripts/slurm/smoke_batched_simulate_cpu.slurm'
+
+# Same tests, mit_preemptable, 1h wall (for slow compile / load spikes).
+submit-batched-smoke-preemptable: push-engaging
+    ssh {{ssh_opts}} {{engaging_login}} 'cd {{engaging_remote_dir}} && export ENGAGING_LOG_DATE=$(date +%Y%m%d) && mkdir -p outputs/logs/engaging/$ENGAGING_LOG_DATE/slurm outputs/logs/engaging/$ENGAGING_LOG_DATE/app && o=outputs/logs/engaging/$ENGAGING_LOG_DATE/slurm && sbatch --parsable --partition={{engaging_partition_preemptable}} -o $o/%x_%j.out -e $o/%x_%j.err scripts/slurm/smoke_batched_simulate_cpu_preemptable.slurm'
+
 submit-bench-array: push-engaging
     ssh {{ssh_opts}} {{engaging_login}} 'cd {{engaging_remote_dir}} && export ENGAGING_LOG_DATE=$(date +%Y%m%d) && mkdir -p outputs/logs/engaging/$ENGAGING_LOG_DATE/slurm && sbatch -o outputs/logs/engaging/$ENGAGING_LOG_DATE/slurm/%x_%A_%a.out -e outputs/logs/engaging/$ENGAGING_LOG_DATE/slurm/%x_%A_%a.err scripts/slurm/bench_array.slurm'
 

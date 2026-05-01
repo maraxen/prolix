@@ -47,6 +47,36 @@ def _tip3p_local_frame() -> tuple[np.ndarray, np.ndarray, np.ndarray]:
   return o, h1, h2
 
 
+def _equil_water_positions(n_waters: int, seed: int = 0) -> tuple[np.ndarray, float]:
+  """Return positions subsampled from the pre-equilibrated TIP3P water box.
+
+  Loads data/water_boxes/tip3p.npz (30 Å cube, ~895 waters at liquid density).
+  Randomly selects n_waters molecules and returns their Cartesian coordinates
+  along with the original 30 Å box edge.
+
+  Use this instead of _grid_water_positions for temperature-control tests:
+  the gas-phase 10 Å grid requires >200 ps to thermalize at γ=1/ps whereas
+  the equilibrated box converges in ~10 ps.
+
+  # TODO: add a high-γ thermalization option (γ≈50/ps for ~5 ps) for callers
+  #       that need a custom n_waters / box size not covered by the 30 Å asset.
+  """
+  from prolix.physics.solvation import load_water_box
+  box = load_water_box()
+  positions = np.array(box.positions)
+  box_edge = float(np.array(box.box_size)[0])
+  n_total = len(positions) // 3
+  if n_waters > n_total:
+    raise ValueError(
+      f"n_waters={n_waters} exceeds asset size ({n_total}); "
+      "tile the box first or use _grid_water_positions."
+    )
+  rng = np.random.default_rng(seed)
+  chosen = np.sort(rng.choice(n_total, size=n_waters, replace=False))
+  atom_idx = np.concatenate([np.array([3*i, 3*i + 1, 3*i + 2]) for i in chosen])
+  return positions[atom_idx], box_edge
+
+
 def _grid_water_positions(n_waters: int, spacing_angstrom: float) -> tuple[np.ndarray, float]:
   o0, h1l, h2l = _tip3p_local_frame()
   sites: list[tuple[int, int, int]] = []

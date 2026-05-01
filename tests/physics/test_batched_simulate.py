@@ -5,20 +5,22 @@ import pytest
 
 from prolix.padding import bucket_proteins, collate_batch
 from prolix.batched_simulate import (
-    LangevinState, 
-    make_langevin_step, 
-    safe_map, 
+    LangevinState,
+    make_langevin_step,
+    safe_map,
     batched_minimize,
-    batched_equilibrate,
+    batched_equilibrate,  # imported to test deprecation warning only
     batched_produce,
     batched_produce_streaming,
 )
+import proxide
 from proxide import OutputSpec, CoordFormat
 from proxide.io.parsing.backend import parse_structure
 from pathlib import Path
 
 DATA_DIR = Path(__file__).parent.parent.parent / "data" / "pdb"
-FF_PATH = Path(__file__).parent.parent.parent.parent / "proxide" / "src" / "proxide" / "assets" / "protein.ff19SB.xml"
+# Resolve packaged ff19SB (works for venv/pip installs; sibling-repo paths break in CI).
+FF_PATH = Path(proxide.__file__).resolve().parent / "assets" / "protein.ff19SB.xml"
 
 def pytest_configure():
     # Production runs at float32 (JAX_ENABLE_X64=False)
@@ -171,7 +173,14 @@ def test_langevin_step_finite(fake_padded_batch):
 
 
 def test_batched_minimize(fake_padded_batch):
-    minimized_pos, converged, rms_grad = batched_minimize(fake_padded_batch, max_steps=10, chunk_size=1)
+    # Short schedules keep first-JIT compile tractable in CI (defaults are 500×4 FIRE + L-BFGS).
+    minimized_pos, converged, rms_grad = batched_minimize(
+        fake_padded_batch,
+        max_steps=10,
+        chunk_size=1,
+        fire_stage_steps=(2, 2, 2, 2),
+        lbfgs_steps=0,
+    )
     assert jnp.all(jnp.isfinite(minimized_pos))
     assert minimized_pos.shape == fake_padded_batch.positions.shape
     
@@ -182,17 +191,58 @@ def test_batched_minimize(fake_padded_batch):
         assert jnp.allclose(ghost_pos, 9999.0, atol=1e-1)
 
 
-def test_batched_equilibrate(fake_padded_batch):
+def _cold_start_state(batch) -> LangevinState:
+    """Build a valid LangevinState from a batch using cold-start initialization.
+
+    Computes initial forces from the energy function so that the first
+    production step does not start from stale zero-force fields (the root
+    cause of the batched_equilibrate NaN bug).
+    """
+    import dataclasses as _dc
+    from jax_md import space as _space
+    from prolix.batched_energy import single_padded_energy
+    from prolix.physics.md_potential_bundle import value_energy_and_grad_energy
+
+    displacement_fn, _ = _space.free()
+    B = batch.positions.shape[0]
+
+    def _init_force(sys):
+        def _e(r):
+            return single_padded_energy(_dc.replace(sys, positions=r), displacement_fn)
+        _, f = value_energy_and_grad_energy(_e, sys.positions)
+        return f
+
+    initial_forces = jax.vmap(_init_force)(batch)
+    keys = random.split(random.PRNGKey(0), B)
+    return LangevinState(
+        positions=batch.positions,
+        momentum=jnp.zeros_like(batch.positions),
+        force=initial_forces,
+        mass=batch.masses,
+        key=keys,
+        cap_count=jnp.zeros(B, dtype=jnp.int32),
+    )
+
+
+def test_batched_equilibrate_deprecated(fake_padded_batch):
+    """batched_equilibrate must emit DeprecationWarning."""
+    import pytest
     B = fake_padded_batch.positions.shape[0]
     system_index = jnp.arange(B)
-    state = batched_equilibrate(
-        fake_padded_batch, system_index, fake_padded_batch.positions,
-        key=random.PRNGKey(0), duration_ps=0.02, temp=300.0, chunk_size=1
-    )
-    
+    with pytest.warns(DeprecationWarning, match="batched_equilibrate is deprecated"):
+        batched_equilibrate(
+            fake_padded_batch, system_index, fake_padded_batch.positions,
+            key=random.PRNGKey(0), duration_ps=0.02, temp=300.0, chunk_size=1
+        )
+
+
+def test_cold_start_state_finite(fake_padded_batch):
+    """Cold-start LangevinState has finite positions and forces (replaces test_batched_equilibrate)."""
+    state = _cold_start_state(fake_padded_batch)
+
     assert jnp.all(jnp.isfinite(state.positions))
     assert jnp.all(jnp.isfinite(state.force))
-    
+
     B = state.positions.shape[0]
     for b in range(B):
         n_real = int(fake_padded_batch.n_real_atoms[b])
@@ -201,15 +251,9 @@ def test_batched_equilibrate(fake_padded_batch):
 
 
 def test_batched_produce(fake_padded_batch):
-    B = fake_padded_batch.positions.shape[0]
-    system_index = jnp.arange(B)
-    state = batched_equilibrate(
-        fake_padded_batch, system_index, fake_padded_batch.positions,
-        key=random.PRNGKey(0), duration_ps=0.02, temp=300.0, chunk_size=1
-    )
-    
+    state = _cold_start_state(fake_padded_batch)
     final_state, traj = batched_produce(fake_padded_batch, state, n_saves=2, steps_per_save=3, chunk_size=1)
-    
+
     assert jnp.all(jnp.isfinite(final_state.positions))
     assert jnp.all(jnp.isfinite(traj))
     assert traj.shape == (2, 2, fake_padded_batch.positions.shape[1], 3)
@@ -224,8 +268,11 @@ def test_batched_produce_streaming(fake_padded_batch):
     in the equilibration path.
     """
     import numpy as np
-    from prolix.batched_energy import single_padded_energy
+    import dataclasses
+
     from jax_md import space
+    from prolix.batched_energy import single_padded_energy
+    from prolix.physics.md_potential_bundle import value_energy_and_grad_energy
 
     batch = fake_padded_batch
     B = batch.positions.shape[0]
@@ -236,10 +283,11 @@ def test_batched_produce_streaming(fake_padded_batch):
 
     def compute_initial_force(sys):
         def energy_fn(r):
-            import dataclasses
             sys_with_r = dataclasses.replace(sys, positions=r)
             return single_padded_energy(sys_with_r, displacement_fn)
-        return jax.grad(energy_fn)(sys.positions)
+
+        _, grad_e = value_energy_and_grad_energy(energy_fn, sys.positions)
+        return grad_e
 
     initial_forces = jax.vmap(compute_initial_force)(batch)
     keys = random.split(random.PRNGKey(42), B)
@@ -325,4 +373,70 @@ def test_batched_produce_streaming(fake_padded_batch):
             rtol=0, atol=0,
             err_msg=f"Frame mismatch at batch={b}, save={s}",
         )
+
+
+def test_batched_produce_streaming_write_batch_size(fake_padded_batch):
+    """``write_batch_size>1`` passes (W,N,3) once per batch of saves; matches ``batched_produce``."""
+    import numpy as np
+    import dataclasses
+
+    from jax_md import space
+    from prolix.batched_energy import single_padded_energy
+    from prolix.physics.md_potential_bundle import value_energy_and_grad_energy
+
+    batch = fake_padded_batch
+    B = batch.positions.shape[0]
+    N = batch.positions.shape[1]
+
+    displacement_fn, _ = space.free()
+
+    def compute_initial_force(sys):
+        def energy_fn(r):
+            sys_with_r = dataclasses.replace(sys, positions=r)
+            return single_padded_energy(sys_with_r, displacement_fn)
+
+        _, grad_e = value_energy_and_grad_energy(energy_fn, sys.positions)
+        return grad_e
+
+    initial_forces = jax.vmap(compute_initial_force)(batch)
+    state = LangevinState(
+        positions=batch.positions,
+        momentum=jnp.zeros_like(batch.positions),
+        force=initial_forces,
+        mass=batch.masses,
+        key=random.split(random.PRNGKey(1), B),
+        cap_count=jnp.zeros(B, dtype=jnp.int32),
+    )
+
+    _, traj_accum = batched_produce(
+        batch, state, n_saves=2, steps_per_save=1, chunk_size=1,
+    )
+
+    chunks: dict[int, list] = {b: [] for b in range(B)}
+
+    def write_fn(positions, batch_idx, start_save_idx):
+        arr = np.array(positions)
+        b = int(batch_idx)
+        chunks[b].append((int(start_save_idx), arr))
+
+    wbatch = 2
+    system_index = jnp.arange(B)
+    _ = batched_produce_streaming(
+        batch,
+        system_index,
+        state,
+        n_saves=2,
+        steps_per_save=1,
+        write_fn=write_fn,
+        chunk_size=1,
+        write_batch_size=wbatch,
+    )
+
+    for b in range(B):
+        assert len(chunks[b]) == 1
+        sidx, pos_chunk = chunks[b][0]
+        assert sidx == 0
+        assert pos_chunk.shape == (wbatch, N, 3)
+        np.testing.assert_array_equal(pos_chunk[0], np.asarray(traj_accum[b, 0]))
+        np.testing.assert_array_equal(pos_chunk[1], np.asarray(traj_accum[b, 1]))
 

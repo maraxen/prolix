@@ -532,6 +532,35 @@ def get_water_indices(n_protein_atoms: int, n_waters: int) -> Array:
   return jnp.array(water_indices, dtype=jnp.int32)
 
 
+def _make_settle_compatible_force_fn(
+  energy_or_force_fn: Callable[..., Array],
+  mass: float | Array,
+  box_template: Array | None,
+) -> Callable[..., Array]:
+  """``jax_md.quantity.canonicalize_force``-compatible force fn using one ``value_and_grad`` when safe.
+
+  If ``mass`` is a scalar, the atom count is unknown at integrator construction time;
+  we fall back to ``canonicalize_force`` only.
+  """
+  from jax_md import quantity
+
+  mass_arr = jnp.asarray(mass)
+  if mass_arr.ndim == 0:
+    return quantity.canonicalize_force(energy_or_force_fn)
+  n_atoms = int(mass_arr.reshape(-1).shape[0])
+  template_R = jnp.zeros((n_atoms, 3), dtype=jnp.float64)
+  kw: dict[str, Any] = {}
+  if box_template is not None:
+    kw["box"] = box_template
+  from prolix.physics.md_potential_bundle import make_force_fn_like_canonicalize
+
+  return make_force_fn_like_canonicalize(
+    energy_or_force_fn,
+    template_R=template_R,
+    template_kwargs=kw if kw else None,
+  )
+
+
 def settle_langevin(
   energy_or_force_fn: Callable[..., Array],
   shift_fn: Callable[..., Array],
@@ -610,7 +639,7 @@ def settle_langevin(
   Returns:
       (init_fn, apply_fn) pair.
   """
-  force_fn = quantity.canonicalize_force(energy_or_force_fn)
+  force_fn = _make_settle_compatible_force_fn(energy_or_force_fn, mass, box)
   if projection_site not in ("post_o", "post_settle_vel", "both"):
     msg = f"invalid projection_site={projection_site!r}; expected post_o|post_settle_vel|both"
     raise ValueError(msg)
@@ -830,6 +859,8 @@ def settle_with_nhc(
   if water_indices is None or water_indices.shape[0] == 0:
     return nhc_init, nhc_apply
 
+  force_fn_after_settle = _make_settle_compatible_force_fn(energy_or_force_fn, mass, box)
+
   # Wrap NHC apply function with SETTLE constraints
   def apply_with_settle(state, **kwargs):
     """Apply one NHC step, then enforce SETTLE constraints."""
@@ -852,7 +883,7 @@ def settle_with_nhc(
     )
 
     # Recompute forces after constraining positions
-    force = quantity.canonicalize_force(energy_or_force_fn)(position, **kwargs)
+    force = force_fn_after_settle(position, **kwargs)
 
     # Enforce SETTLE velocity constraints
     momentum = _langevin_settle_vel(
@@ -932,7 +963,7 @@ def langevin_with_constraints(
   Returns:
       (init_fn, apply_fn) following JAX-MD convention.
   """
-  force_fn = quantity.canonicalize_force(energy_or_force_fn)
+  force_fn = _make_settle_compatible_force_fn(energy_or_force_fn, mass, box)
 
   def init_fn(key, R, mass=mass, **init_kwargs):
     _kT = init_kwargs.pop("kT", kT)
@@ -1219,7 +1250,7 @@ def settle_csvr(
       stacklevel=2,
     )
 
-  force_fn = quantity.canonicalize_force(energy_or_force_fn)
+  force_fn = _make_settle_compatible_force_fn(energy_or_force_fn, mass, box)
   if tau is None:
     tau = _DEFAULT_CSVR_TAU_AKMA
 
@@ -1598,7 +1629,7 @@ def settle_csvr_npt(
   from prolix.physics import units as units_module
   from prolix.physics.simulate import NPTState
 
-  force_fn = quantity.canonicalize_force(energy_or_force_fn)
+  force_fn = _make_settle_compatible_force_fn(energy_or_force_fn, mass, box_init)
 
   # Default tau_thermostat if not provided
   if tau_thermostat_akma is None:

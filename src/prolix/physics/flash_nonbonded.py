@@ -170,7 +170,8 @@ def chunked_born_radii(
             return jnp.sum(pair_int, axis=1)  # (N,)
 
         tile_I = _compute_tile(positions, start)
-        return I_sum + tile_I, None
+        # Keep scan carry dtype-stable (Python float literals can promote to f64).
+        return I_sum + tile_I.astype(I_sum.dtype), None
 
     I_total, _ = jax.lax.scan(
         _tile_descreening, jnp.zeros(N, dtype=positions.dtype),
@@ -295,7 +296,7 @@ def chunked_fused_energy(
             return 0.5 * jnp.sum(e_lj) + 0.5 * jnp.sum(e_coul) + gb_prefactor * jnp.sum(e_gb)
 
         tile_e = _compute_tile_inner(positions, start)
-        return carry + tile_e, None
+        return carry + jnp.asarray(tile_e, dtype=carry.dtype), None
 
     total_energy, _ = jax.lax.scan(
         tile_energy_outer,

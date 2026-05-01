@@ -34,22 +34,20 @@ from kups.md.integrators import (
 )
 from kups.md.observables import particle_kinetic_energy
 
+pytestmark = pytest.mark.kups
+
 from jax_md import space
 from prolix.physics import settle
+from prolix.physics import kups_adapter
 from prolix.simulate import AKMA_TIME_UNIT_FS, BOLTZMANN_KCAL
 
 # ============================================================================
 # Unit Conversion Constants
 # ============================================================================
 
-# 1 eV = 23.0605 kcal/mol (from CODATA 2018)
-EV_TO_KCAL = 23.060549
-
-# prolix AKMA time unit in femtoseconds (imported from prolix.simulate)
-
 # Validate conversion consistency
 assert abs(AKMA_TIME_UNIT_FS - 48.88821291839) < 1e-6, "AKMA time unit mismatch"
-assert abs(EV_TO_KCAL - 23.060549) < 1e-6, "eV→kcal/mol conversion mismatch"
+assert abs(kups_adapter.EV_TO_KCAL_MOL - 23.060549) < 1e-6, "eV→kcal/mol conversion mismatch"
 
 # ============================================================================
 # Test System Parameters
@@ -57,7 +55,7 @@ assert abs(EV_TO_KCAL - 23.060549) < 1e-6, "eV→kcal/mol conversion mismatch"
 
 N_PARTICLES = 64  # Harmonic oscillator particles
 K_EV = 0.01  # Spring constant in eV/Å² (kUPs)
-K_KCAL = K_EV * EV_TO_KCAL  # Spring constant in kcal/mol/Å² (prolix)
+K_KCAL = kups_adapter.spring_constant_ev_per_angstrom_sq_to_kcal_mol(K_EV)  # kcal/mol/Å² (prolix)
 M_AMU = 1.0  # Mass in amu (both engines)
 T_TARGET_K = 300.0  # Target temperature in Kelvin
 KT_EV = T_TARGET_K * KUPS_KB  # kUPs thermal energy in eV
@@ -217,11 +215,9 @@ def _run_prolix_harmonic_baoab(
     jax.config.update("jax_enable_x64", True)
     key = jax.random.PRNGKey(seed)
 
-    # Convert units: fs → AKMA; ps⁻¹ → AKMA⁻¹
-    # 1 AKMA = AKMA_TIME_UNIT_FS fs = AKMA_TIME_UNIT_FS/1000 ps
-    # => gamma [AKMA^-1] = gamma_ps * (AKMA_TIME_UNIT_FS / 1000)
-    dt_akma = dt_fs / AKMA_TIME_UNIT_FS
-    gamma_akma = gamma_ps * AKMA_TIME_UNIT_FS / 1000  # ps⁻¹ → AKMA⁻¹ (~0.0489 at gamma=1)
+    # Convert units via kups_adapter
+    dt_akma = kups_adapter.dt_fs_to_akma(dt_fs)
+    gamma_akma = kups_adapter.gamma_ps_to_akma(gamma_ps)
 
     # Harmonic energy: E = 0.5 * k * sum(r_i^2)
     def energy_fn(R, **kwargs):
@@ -275,9 +271,9 @@ def _run_prolix_harmonic_csvr(
     jax.config.update("jax_enable_x64", True)
     key = jax.random.PRNGKey(seed)
 
-    # Convert units
-    dt_akma = dt_fs / AKMA_TIME_UNIT_FS
-    tau_akma = tau_ps * 1000 / AKMA_TIME_UNIT_FS  # Convert ps → AKMA
+    # Convert units via kups_adapter
+    dt_akma = kups_adapter.dt_fs_to_akma(dt_fs)
+    tau_akma = kups_adapter.tau_ps_to_akma(tau_ps)
 
     # Harmonic energy
     def energy_fn(R, **kwargs):
