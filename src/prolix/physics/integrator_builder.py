@@ -40,6 +40,7 @@ from __future__ import annotations
 
 from typing import Any, Callable, Optional, Tuple
 
+import equinox as eqx
 import jax
 import jax.numpy as jnp
 from jaxtyping import Array as ArrayType, PRNGKeyArray
@@ -52,6 +53,7 @@ from prolix.physics.step_system import (
     make_step,
     step_sequences,
 )
+from prolix.physics.types import IntegratorParams, EnergyParams
 from prolix.types import Array, WaterIndicesArray
 
 
@@ -59,18 +61,22 @@ def _compute_forces(
     positions: ArrayType,
     box: Optional[ArrayType],
     energy_fn: Callable,
+    energy_params: Any = None,
 ) -> ArrayType:
   r"""Compute forces via autodiff of energy function.
 
   Args:
       positions: (N, 3) atomic positions.
       box: Optional (3,) box dimensions for periodic boundary.
-      energy_fn: Energy function(positions, box) → scalar energy.
+      energy_fn: Energy function(positions, box, params) → scalar energy.
+      energy_params: Optional parameters for energy_fn.
 
   Returns:
       (N, 3) force array F = -∇E.
   """
   def energy_wrapper(R):
+    if energy_params is not None:
+      return energy_fn(R, box, energy_params) if box is not None else energy_fn(R, energy_params)
     return energy_fn(R, box) if box is not None else energy_fn(R)
 
   forces = -jax.grad(energy_wrapper)(positions)
@@ -285,6 +291,7 @@ def make_integrator(
     target_pressure_bar: Optional[float] = None,
     tau_barostat_akma: Optional[float] = 2000.0,
     tau_thermostat_akma: Optional[float] = 2000.0,
+    energy_params: Any = None,
     **kwargs,
 ) -> Tuple[Callable, Callable]:
   r"""Create a modular integrator from a sequence registry entry.
@@ -417,6 +424,44 @@ def make_integrator(
   # Merge any additional kwargs
   merged_params.update(kwargs)
 
+  # Instantiate steps outside apply_fn for efficiency
+  steps = []
+  for step_name in sequence.steps:
+    step_constructor_params = {}
+    if step_name == "settle_velocity_step":
+      if "water_indices" in merged_params:
+        step_constructor_params["water_indices"] = merged_params["water_indices"]
+      if "n_iters" in merged_params:
+        step_constructor_params["n_iters"] = merged_params["n_iters"]
+    elif step_name == "csvr_step":
+      if "n_dof" in merged_params:
+        step_constructor_params["n_dof"] = merged_params["n_dof"]
+    elif step_name == "a_step":
+      if "shift_fn" in merged_params:
+        step_constructor_params["shift_fn"] = merged_params["shift_fn"]
+    elif step_name == "o_step":
+      if "fraction" in merged_params:
+        step_constructor_params["fraction"] = merged_params["fraction"]
+    elif step_name == "v_step":
+      if "fraction" in merged_params:
+        step_constructor_params["fraction"] = merged_params["fraction"]
+
+    steps.append(make_step(step_name, **step_constructor_params))
+
+  # Prepare base parameters PyTree
+  base_integrator_params = IntegratorParams(
+      dt=merged_params.get("dt", 0.5),
+      kT=merged_params.get("kT", 1.0),
+      gamma=merged_params.get("gamma", 1.0),
+      energy_params=EnergyParams(params=energy_params),
+      water_indices=merged_params.get("water_indices"),
+      constraint_dofs=_initialize_constraint_dofs(
+          merged_params.get("water_indices"), n_atoms_mass
+      ),
+      positions_old=None,  # Will be updated in apply_fn
+      box=None,           # Will be updated in apply_fn
+  )
+
   # ========== INITIALIZATION FUNCTION ==========
 
   def init_fn(
@@ -442,7 +487,7 @@ def make_integrator(
         IntegratorState with all fields initialized, including box.
     """
     # Compute forces at initial positions
-    forces = _compute_forces(positions, box, energy_fn)
+    forces = _compute_forces(positions, box, energy_fn, energy_params)
 
     # Initialize momentum (cold start: all zeros)
     momentum = jnp.zeros_like(positions)
@@ -464,76 +509,34 @@ def make_integrator(
   def apply_fn(state: IntegratorState) -> IntegratorState:
     r"""Apply one timestep of integrator sequence.
 
-    This function loops through the step sequence. Each step is applied in order.
-    Some steps (O_Step, CSVR_Step) return (state, new_key) tuples; we handle
-    both return types.
-
-    Forces are recomputed once at the end of the full timestep, after all
-    position updates are complete, using the box stored in the state.
-
     Args:
         state: Current IntegratorState (including box for PBC).
 
     Returns:
         Updated IntegratorState after one timestep.
     """
-    current_state = state
-    current_key = state.rng
-    box = state.box  # Retrieve box from state for force recomputation
-
-    # Initialize constraint DOFs if needed
-    constraint_dofs = _initialize_constraint_dofs(
-        merged_params.get("water_indices"), n_atoms_mass
+    # Update params with current box and positions_old
+    params = eqx.tree_at(
+        lambda p: (p.box, p.positions_old),
+        base_integrator_params,
+        (state.box, state.position)
     )
 
-    # Loop through steps in sequence
-    for step_name in sequence.steps:
-      # Create step instance with only the constructor parameters it needs
-      # Most steps have minimal constructors; filter out runtime params
-      step_constructor_params = {}
-      if step_name == "settle_velocity_step":
-        # SETTLE_Velocity_Step accepts: water_indices, n_iters, mass_oxygen, mass_hydrogen
-        if "water_indices" in merged_params:
-          step_constructor_params["water_indices"] = merged_params["water_indices"]
-        if "n_iters" in merged_params:
-          step_constructor_params["n_iters"] = merged_params["n_iters"]
-      elif step_name == "csvr_step":
-        # CSVR_Step accepts: n_dof (optional)
-        if "n_dof" in merged_params:
-          step_constructor_params["n_dof"] = merged_params["n_dof"]
-      elif step_name == "a_step":
-        # A_Step accepts: fraction, shift_fn
-        if "shift_fn" in merged_params:
-          step_constructor_params["shift_fn"] = merged_params["shift_fn"]
-      elif step_name == "o_step":
-        # O_Step accepts: fraction, project_rigid
-        pass  # Defaults are fine
-      elif step_name == "v_step":
-        # V_Step accepts: fraction
-        pass  # Defaults are fine
-      elif step_name == "nhc_step":
-        # NHC_Step accepts: nothing
-        pass
+    current_state = state
 
-      step = make_step(step_name, **step_constructor_params)
+    # Use jax.lax.fori_loop with switch to avoid Python unrolling of sub-steps
+    def body_fn(i, val):
+      return jax.lax.switch(
+          i,
+          [lambda s, st=step: st.apply(s, params) for step in steps],
+          val
+      )
 
-      # Apply step with merged params
-      result = step.apply(current_state, constraint_dofs=constraint_dofs, **merged_params)
-
-      # Handle return type: (state, key) or state
-      if isinstance(result, tuple):
-        current_state, current_key = result
-        current_state = current_state.__replace__(rng=current_key)
-      else:
-        current_state = result
+    current_state = jax.lax.fori_loop(0, len(steps), body_fn, current_state)
 
     # Recompute forces at the end of the timestep
-    # (after all position changes are complete, using box from state)
-    new_forces = _compute_forces(current_state.position, box, energy_fn)
+    new_forces = _compute_forces(current_state.position, state.box, energy_fn, energy_params)
     current_state = current_state.__replace__(force=new_forces)
-
-    # Update RNG key in final state
-    current_state = current_state.__replace__(rng=current_key)
 
     return current_state
 

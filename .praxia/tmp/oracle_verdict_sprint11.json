@@ -1,0 +1,18 @@
+{
+  "verdict_id": "260427_oracle_sprint11",
+  "plan_id": "260427_sprint11_stability",
+  "date": "2026-04-27",
+  "oracle_verdict": "APPROVED",
+  "confidence": 0.85,
+  "rationale": "Plan decomposition is sound. Phase 1 (SETTLE reorder, confidence 0.95) is the critical path and should execute first. Phase 2 (unit check, confidence 0.60) is secondary safeguard. Phase 3 (MTT gate relax) is low-risk and should run in parallel with Phase 1 (zero coupling). Gates 1.5 and 4.3 are sufficient to catch NPT divergence.",
+  "key_decisions": [
+    "Phase 1 before Phase 2: SETTLE-thermostat mismatch (0.95 confidence) is the smoking gun; GROMACS comparison validates. Unit conversion (0.60) is secondary.",
+    "Phase 3 (MTT) runs in parallel with Phase 1: no code dependencies, ~30min fix, theory-backed.",
+    "Gates 1.5 and 4.3 are sufficient for stability validation. Recommend adding pressure-drift and equipartition assertions to 1.5 (non-blocking enhancement).",
+    "Escalation: Single retry of Phase 1.5 with KE logging on first failure, then trigger Phase 2. If Phase 2 finds nothing and 1.5 still fails, halt."
+  ],
+  "critical_path": "Phase 1 (2h) → Phase 4 (1.5h) = 3.5h total",
+  "parallelizable": ["Phase 3 (MTT gate fix) runs during Phase 1 execution"],
+  "ship_readiness": "Phase 4 pass → ship confidence 0.80 for NPT v1.0 (conditional on 100ps post-merge spot-check)",
+  "next_action": "Dispatch Fixer to execute Phase 1 (SETTLE reorder). Dispatch General-purpose to execute Phase 3 (MTT gate relax) in parallel."
+}

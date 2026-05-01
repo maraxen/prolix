@@ -1,0 +1,20 @@
+{
+  "recon_id": "260427_settle_thermostat",
+  "date": "2026-04-27",
+  "domain": "NPT integrator order-of-operations",
+  "question": "How does GROMACS handle SETTLE velocity constraints during CSVR thermostat rescaling? Why does Prolix explode at >10ps while GROMACS works?",
+  "findings": [
+    "CRITICAL: Prolix applies SETTLE velocity constraint BEFORE CSVR thermostat (settle.py:1771–1784 then 1803–1808), creating feedback loop: SETTLE removes KE → CSVR over-rescales → next step SETTLE removes more → exponential divergence",
+    "GROMACS applies SETTLE constraints during main integrator loop (before thermostat), decoupling constraint removal from temperature rescaling",
+    "Feedback loop magnification weak at dt≤0.5fs (small per-step impulse) but explodes at dt≥1.0fs (cumulative error drives 10^115K explosion)",
+    "DOF calculation in Prolix (_n_dof_thermostated line 1131) correctly subtracts 3*N_waters but timing mismatch causes thermostat to see partial/stale KE",
+    "Proposed fix: move SETTLE velocity constraint to AFTER CSVR rescaling, or implement KE-loss offset compensation in thermostat target"
+  ],
+  "open_questions": [
+    "Is rigid_tip3p_box_ke_kcal computing 6*N_waters DOF correctly? (should exclude constrained DOF from kinetic energy count)",
+    "Does initial momentum seeding in init_fn (line 1637) respect rigid-body constraints? Standard Maxwell-Boltzmann may seed non-equilibrium KE."
+  ],
+  "confidence": 0.95,
+  "severity": "critical",
+  "actionability": "high"
+}

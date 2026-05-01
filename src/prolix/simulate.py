@@ -37,6 +37,7 @@ except ImportError:
 
 from prolix.physics import simulate as physics_simulate
 from prolix.physics import system as physics_system
+from prolix.physics.spec import PhysicsSpec
 
 if TYPE_CHECKING:
   from collections.abc import Sequence
@@ -58,15 +59,18 @@ BOLTZMANN_KCAL = 0.0019872041       # kB in kcal/(mol·K)
 
 @dataclasses.dataclass
 class SimulationSpec:
-  """Configuration for a production simulation run."""
+  """Configuration for a production simulation run.
+
+  TODO: Prolix requires pre-equilibrated water boxes for stability. 
+  This engine is currently not intended for solvent equilibration. 
+  Future versions will automate pre-equilibration setup.
+  """
 
   total_time_ns: float
-  step_size_fs: float = 2.0
+  physics: PhysicsSpec = dataclasses.field(default_factory=PhysicsSpec)
   save_interval_ns: float = 0.001  # 1 ps
   accumulate_steps: int = 500  # Number of frames to accumulate before writing to disk
   save_path: str = "trajectory.array_record"
-  temperature_k: float = 300.0
-  gamma: float = 1.0  # friction coefficient (1/ps)
 
   # PBC / Explicit Solvent
   box: Array | None = None
@@ -75,13 +79,11 @@ class SimulationSpec:
 
   # Neighbor list for O(N*K) non-bonded (vs O(N^2))
   use_neighbor_list: bool = False
-  neighbor_cutoff: float = 9.0  # Angstroms
   neighbor_update_interval_fs: float = 20.0  # Update neighbor list every N fs (20-50 fs typical)
   fire_neighbor_update_interval: int = 1  # FIRE: refresh neighbor list every N steps (explicit PBC)
   exclusion_spec: nl.ExclusionSpec | None = None  # Optional pre-built spec
 
   # PME (explicit solvent)
-  pme_alpha: float = 0.34  # Ewald splitting parameter (1/Å), matches physics.system.make_energy_fn
   pme_grid_spacing: float | None = None  # If set, overrides grid sizing from pme_grid_size (Å)
 
   # Optional non-PME electrostatics (explicit solvent only; default PME)
@@ -89,15 +91,41 @@ class SimulationSpec:
   reaction_field_dielectric: float = 78.3
   dsf_alpha: float | None = None  # Damped shifted force damping (1/Å); None uses internal default
   
-  # Rigid Water (SETTLE)
-  rigid_water: bool = False
-  # Subtract total linear COM momentum each step after SETTLE (OpenMM CMMotionRemover analogue).
-  remove_linear_com_momentum: bool = False
-  # Adaptive RATTLE convergence tolerance (velocity units, Å/ps); None = fixed n_iters=10
-  settle_velocity_tol: float | None = None
   # Custom constraint algorithm (ConstraintAlgorithm instance). If set, overrides automatic
   # constraint building from rigid_water and constrained bonds. Escape hatch for advanced use.
   constraint_algorithm: object | None = None  # ConstraintAlgorithm type hint avoided to prevent circular import
+
+  @property
+  def step_size_fs(self) -> float:
+    return self.physics.dt
+  
+  @property
+  def temperature_k(self) -> float:
+    return self.physics.temperature_k
+
+  @property
+  def gamma(self) -> float:
+    return self.physics.gamma
+  
+  @property
+  def rigid_water(self) -> bool:
+    return self.physics.rigid_water
+    
+  @property
+  def remove_linear_com_momentum(self) -> bool:
+    return self.physics.remove_linear_com_momentum
+    
+  @property
+  def settle_velocity_tol(self) -> float | None:
+    return self.physics.settle_velocity_tol
+
+  @property
+  def pme_alpha(self) -> float:
+    return self.physics.pme_alpha
+
+  @property
+  def neighbor_cutoff(self) -> float:
+    return self.physics.neighbor_cutoff
 
   def __post_init__(self):
     if self.remove_linear_com_momentum and not self.rigid_water:
@@ -106,7 +134,7 @@ class SimulationSpec:
     if self.save_interval_ns <= 0:
       msg = "save_interval_ns must be positive"
       raise ValueError(msg)
-    if self.step_size_fs <= 0:
+    if self.physics.dt <= 0:
       msg = "step_size_fs must be positive"
       raise ValueError(msg)
     if self.accumulate_steps <= 0:
@@ -260,6 +288,10 @@ def run_simulation(
   system_params: SystemParams | None = None,
 ) -> SimulationState:
   r"""Run a full production simulation with periodic trajectory saving.
+
+  TODO: Prolix requires pre-equilibrated water boxes for stability. 
+  This engine is currently not intended for solvent equilibration. 
+  Future versions will automate pre-equilibration setup.
 
   Process:
   1.  **Initialize**: Setup energy function, displacement functions, and random keys.

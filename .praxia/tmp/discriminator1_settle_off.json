@@ -1,0 +1,41 @@
+{
+  "experiment": "discriminator1_settle_off",
+  "results": [
+    {
+      "n_waters": 16,
+      "dt_fs": 1.0,
+      "settle_enabled": false,
+      "steps": 100000,
+      "burn": 33333,
+      "t_target_k": 300.0,
+      "t_mean_k": 67819.25437457091,
+      "t_std_k": 266049.6040282619,
+      "dof": 141,
+      "elapsed_s": 34.477115747053176
+    },
+    {
+      "n_waters": 16,
+      "dt_fs": 0.5,
+      "settle_enabled": false,
+      "steps": 200000,
+      "burn": 66666,
+      "t_target_k": 300.0,
+      "t_mean_k": 24135.324487580943,
+      "t_std_k": 51254.59045219654,
+      "dof": 141,
+      "elapsed_s": 82.69298800290562
+    },
+    {
+      "n_waters": 16,
+      "dt_fs": 0.25,
+      "settle_enabled": false,
+      "steps": 400000,
+      "burn": 133333,
+      "t_target_k": 300.0,
+      "t_mean_k": 32913.40744047392,
+      "t_std_k": 61731.84053607157,
+      "dof": 141,
+      "elapsed_s": 180.6716270960169
+    }
+  ]
+}

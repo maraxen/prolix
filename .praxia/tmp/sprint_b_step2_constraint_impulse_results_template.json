@@ -1,0 +1,30 @@
+{
+  "experiment": "sprint_b_step2_constraint_impulse_scaling",
+  "seed": 7,
+  "sim_ps": 100.0,
+  "burn_fraction": 0.3333333333,
+  "acceptance_criteria": [
+    "Constraint-impulse metrics rise with n_waters and/or effective step frequency.",
+    "Constraint-impulse metrics track temperature drift slope (K/ps) across conditions.",
+    "If no tracking is observed, branch to PME-force variance investigations."
+  ],
+  "conditions": [
+    {
+      "n_waters": 8,
+      "dt_fs": 0.5,
+      "project_ou_momentum_rigid": true,
+      "steps": "TBD",
+      "burn": "TBD",
+      "t_target_k": 300.0,
+      "t_mean_k": "TBD",
+      "t_std_k": "TBD",
+      "drift_k_per_ps": "TBD",
+      "settle_impulse_mean": "TBD",
+      "settle_impulse_rms": "TBD",
+      "settle_impulse_p95": "TBD",
+      "settle_impulse_p99": "TBD",
+      "settle_impulse_per_water_mean": "TBD",
+      "settle_impulse_per_dof_mean": "TBD"
+    }
+  ]
+}

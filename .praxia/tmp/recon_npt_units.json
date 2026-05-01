@@ -1,0 +1,20 @@
+{
+  "recon_id": "260427_npt_units",
+  "date": "2026-04-27",
+  "domain": "NPT unit conversion and pressure calculation",
+  "question": "Are AKMA pressure unit conversions correct? Could unit conversion errors inflate forces/energies by huge factors, causing 10^115K explosion?",
+  "findings": [
+    "Unit conversion chain: bar → AKMA (line 1608: AKMA_PRESSURE_PER_BAR = 69477), compressibility (line 1612: compressibility_akma = β_bar * BAR_PER_AKMA_PRESSURE)",
+    "Pressure calculation uses rigid_tip3p_box_ke_kcal (line 1667) which is JAX-traced and returns KE in kcal/mol, fed into instantaneous_pressure_akma (line 1700)",
+    "No obvious unit conversion errors detected in order-of-operations, but magnitude of explosion (10^115) suggests squared factor or exponent error lurking in helper functions",
+    "Force recomputation occurs after box rescaling (line 1766), which is correct for energy consistency. Forces are NOT evaluated with stale box."
+  ],
+  "open_questions": [
+    "Is rigid_tip3p_box_ke_kcal returning energy in correct units (kcal/mol)? If returning eV or other unit, all downstream pressure calculations are wrong by huge factor.",
+    "Does instantaneous_pressure_akma (pressure.py) correctly convert between KE units and pressure units? Missing /2 or × 2 somewhere?",
+    "Are AKMA_PRESSURE_PER_BAR (69477) and BAR_PER_AKMA_PRESSURE inverted somewhere? 10^5 factor would explain temperature explosion."
+  ],
+  "confidence": 0.60,
+  "severity": "high",
+  "actionability": "medium"
+}

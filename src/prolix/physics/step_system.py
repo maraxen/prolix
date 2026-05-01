@@ -58,13 +58,16 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional
+import numpy as np
 
+import equinox as eqx
 import jax
 import jax.numpy as jnp
 from jaxtyping import Array as ArrayType
 from jaxtyping import PRNGKeyArray
 
 from prolix.physics.constraints import ConstraintDOFMask
+from prolix.physics.types import IntegratorParams
 from prolix.physics.settle import (
     _DEFAULT_CSVR_TAU_AKMA,
     _csvr_rescale_momenta,
@@ -201,35 +204,32 @@ class IntegratorState:
     return replace(self, **kwargs)
 
 
-class Step(ABC):
+class Step(eqx.Module, ABC):
   """Abstract base class for integrator steps.
 
-  All steps implement a pure `apply` method that takes an IntegratorState
-  and optional constraint/parameter info, and returns an updated state.
-  Steps may also return an updated RNG key.
+  All steps are Equinox Modules that implement a pure `apply` method.
+  This ensures they are valid JAX PyTrees and can capture static configuration.
 
   Purity Guarantee:
   - No side effects (no global state mutation)
   - No Python control flow (use jax.lax.cond, jax.lax.scan, etc.)
-  - Output deterministic given input state and seed
+  - Output deterministic given input state
   """
 
   @abstractmethod
   def apply(
       self,
       state: IntegratorState,
-      constraint_dofs: ConstraintDOFMask | None = None,
-      **params,
-  ) -> IntegratorState | tuple[IntegratorState, ArrayType]:
+      params: IntegratorParams,
+  ) -> IntegratorState:
     """Apply one step of the integrator.
 
     Args:
         state: Current integrator state.
-        constraint_dofs: Optional constraint mask for projection.
-        **params: Step-specific parameters (dt, kT, gamma, etc.).
+        params: Standardized integrator parameters (dt, kT, etc.).
 
     Returns:
-        Updated state, or (updated_state, new_rng_key) if step uses RNG.
+        Updated state (including updated PRNGKey if stochastic).
     """
     raise NotImplementedError
 
@@ -258,6 +258,8 @@ class O_Step(Step):
       fraction: Fraction of full step (default 1.0, or 0.5 for full step in BAOAB).
       project_rigid: If True and constraint_dofs provided, sample noise in rigid subspace.
   """
+  fraction: float = eqx.field(static=True)
+  project_rigid: bool = eqx.field(static=True)
 
   def __init__(self, fraction: float = 1.0, project_rigid: bool = True):
     """Initialize O_Step.
@@ -272,32 +274,29 @@ class O_Step(Step):
   def apply(
       self,
       state: IntegratorState,
-      constraint_dofs: ConstraintDOFMask | None = None,
-      **params,
-  ) -> tuple[IntegratorState, PRNGKeyArray]:
+      params: IntegratorParams,
+  ) -> IntegratorState:
     """Apply O-step with optional constraint-aware noise sampling.
 
     Args:
         state: IntegratorState with momentum and RNG.
-        constraint_dofs: Optional ConstraintDOFMask for rigid-body projection.
-        **params: Required: 'dt', 'gamma', 'kT'. Optional: 'water_indices'.
+        params: Standardized parameters including dt, gamma, kT, and water_indices.
 
     Returns:
-        (updated_state, new_rng_key).
+        Updated IntegratorState.
     """
-    dt = params["dt"] * self.fraction
-    gamma = params["gamma"]
-    kT = params["kT"]
+    dt = params.dt * self.fraction
+    gamma = params.gamma
+    kT = params.kT
 
     # Check if we should use constrained OU step
     use_constrained = (
         self.project_rigid
-        and constraint_dofs is not None
-        and "water_indices" in params
+        and params.constraint_dofs is not None
+        and params.water_indices is not None
     )
 
     if use_constrained:
-      water_indices = params["water_indices"]
       momentum_new, key_out = _langevin_step_o_constrained(
           state.momentum,
           state.position,
@@ -306,20 +305,14 @@ class O_Step(Step):
           dt,
           kT,
           state.rng,
-          water_indices,
+          params.water_indices,
       )
     else:
       momentum_new, key_out = _langevin_step_o(
           state.momentum, state.mass, gamma, dt, kT, state.rng
       )
 
-    return IntegratorState(
-        position=state.position,
-        momentum=momentum_new,
-        force=state.force,
-        mass=state.mass,
-        rng=key_out,
-    ), key_out
+    return state.__replace__(momentum=momentum_new, rng=key_out)
 
 
 
@@ -336,6 +329,7 @@ class V_Step(Step):
   Attributes:
       fraction: Fraction of timestep to apply (0.5 for BAOAB half-steps).
   """
+  fraction: float = eqx.field(static=True)
 
   def __init__(self, fraction: float = 0.5):
     """Initialize V_Step.
@@ -348,28 +342,20 @@ class V_Step(Step):
   def apply(
       self,
       state: IntegratorState,
-      constraint_dofs: ConstraintDOFMask | None = None,
-      **params,
+      params: IntegratorParams,
   ) -> IntegratorState:
     """Apply velocity update.
 
     Args:
         state: IntegratorState with momentum and force.
-        constraint_dofs: Unused (velocity update is unconstrained).
-        **params: Required: 'dt'.
+        params: Standardized parameters including dt.
 
     Returns:
         Updated state with new momentum.
     """
-    dt = params["dt"]
+    dt = params.dt
     momentum_new = state.momentum + self.fraction * dt * state.force
-    return IntegratorState(
-        position=state.position,
-        momentum=momentum_new,
-        force=state.force,
-        mass=state.mass,
-        rng=state.rng,
-    )
+    return state.__replace__(momentum=momentum_new)
 
 
 
@@ -384,6 +370,8 @@ class A_Step(Step):
   Attributes:
       fraction: Fraction of timestep (1.0 for full step).
   """
+  fraction: float = eqx.field(static=True)
+  shift_fn: Optional[Callable] = eqx.field(static=True)
 
   def __init__(self, fraction: float = 1.0, shift_fn: Callable | None = None):
     """Initialize A_Step.
@@ -398,38 +386,29 @@ class A_Step(Step):
   def apply(
       self,
       state: IntegratorState,
-      constraint_dofs: ConstraintDOFMask | None = None,
-      **params,
+      params: IntegratorParams,
   ) -> IntegratorState:
     """Apply position update.
 
     Args:
         state: IntegratorState with momentum and mass.
-        constraint_dofs: Unused (position update is unconstrained).
-        **params: Required: 'dt'. Optional: 'shift_fn' (overrides constructor).
+        params: Standardized parameters including dt.
 
     Returns:
         Updated state with new position.
     """
-    dt = params["dt"] * self.fraction
-    shift_fn = params.get("shift_fn", self.shift_fn)
-
+    dt = params.dt * self.fraction
+    
     # If no shift_fn, use simple addition (no PBC wrapping)
-    if shift_fn is None:
+    if self.shift_fn is None:
       velocity = state.momentum / state.mass
       position_new = state.position + dt * velocity
     else:
       position_new = _langevin_step_a(
-          state.position, state.momentum, state.mass, dt, shift_fn
+          state.position, state.momentum, state.mass, dt, self.shift_fn
       )
 
-    return IntegratorState(
-        position=position_new,
-        momentum=state.momentum,
-        force=state.force,
-        mass=state.mass,
-        rng=state.rng,
-    )
+    return state.__replace__(position=position_new)
 
 
 class SETTLE_Velocity_Step(Step):
@@ -445,10 +424,14 @@ class SETTLE_Velocity_Step(Step):
       water_indices: Optional water indices. If None, must be provided in apply params.
       n_iters: Number of RATTLE iterations (default 10).
   """
+  water_indices: Optional[tuple[tuple[int, ...], ...]] = eqx.field(static=True)
+  n_iters: int = eqx.field(static=True)
+  mass_oxygen: float = eqx.field(static=True)
+  mass_hydrogen: float = eqx.field(static=True)
 
   def __init__(
       self,
-      water_indices: WaterIndicesArray | None = None,
+      water_indices: Array | None = None,
       n_iters: int = 10,
       mass_oxygen: float = 15.999,
       mass_hydrogen: float = 1.008,
@@ -461,7 +444,10 @@ class SETTLE_Velocity_Step(Step):
         mass_oxygen: Oxygen mass (amu).
         mass_hydrogen: Hydrogen mass (amu).
     """
-    self.water_indices = water_indices
+    if water_indices is not None:
+        self.water_indices = tuple(tuple(int(x) for x in row) for row in np.asarray(water_indices))
+    else:
+        self.water_indices = None
     self.n_iters = n_iters
     self.mass_oxygen = mass_oxygen
     self.mass_hydrogen = mass_hydrogen
@@ -469,27 +455,28 @@ class SETTLE_Velocity_Step(Step):
   def apply(
       self,
       state: IntegratorState,
-      constraint_dofs: ConstraintDOFMask | None = None,
-      **params,
+      params: IntegratorParams,
   ) -> IntegratorState:
     """Apply velocity constraint projection.
 
     Args:
         state: IntegratorState with momentum, position (constrained).
-        constraint_dofs: Unused (constraint structure comes from water_indices).
-        **params: Required: 'positions_old', 'positions_constrained', 'dt', 'water_indices' (if not in constructor).
+        params: Standardized parameters including dt and positions_old.
 
     Returns:
         Updated state with constrained velocity.
     """
-    water_indices = params.get("water_indices", self.water_indices)
+    water_indices = params.water_indices if params.water_indices is not None else self.water_indices
     if water_indices is None:
       # No water molecules, velocity constraint is no-op
       return state
 
-    positions_old = params["positions_old"]
-    positions_constrained = params.get("positions_constrained", state.position)
-    dt = params["dt"]
+    positions_old = params.positions_old
+    if positions_old is None:
+      # If positions_old not provided, assume positions haven't moved yet
+      positions_old = state.position
+
+    dt = params.dt
 
     # Convert momentum to velocity for settle_velocities
     velocity = state.momentum / state.mass
@@ -497,8 +484,8 @@ class SETTLE_Velocity_Step(Step):
     velocity_constrained = settle_velocities(
         velocity,
         positions_old,
-        positions_constrained,
-        water_indices,
+        state.position,
+        jnp.asarray(water_indices),
         dt,
         mass_oxygen=self.mass_oxygen,
         mass_hydrogen=self.mass_hydrogen,
@@ -508,13 +495,7 @@ class SETTLE_Velocity_Step(Step):
     # Convert back to momentum
     momentum_constrained = velocity_constrained * state.mass
 
-    return IntegratorState(
-        position=state.position,
-        momentum=momentum_constrained,
-        force=state.force,
-        mass=state.mass,
-        rng=state.rng,
-    )
+    return state.__replace__(momentum=momentum_constrained)
 
 
 class CSVR_Step(Step):
@@ -536,43 +517,34 @@ class CSVR_Step(Step):
   velocity rescaling. The Journal of Chemical Physics, 126(1), 014101.
 
   Attributes:
-      n_dof: Number of thermostated degrees of freedom (auto-computed if None).
+      tau: Relaxation time (default ~0.1 ps in AKMA).
   """
+  tau: float = eqx.field(static=True)
 
-  def __init__(self, n_dof: int | None = None):
-    """Initialize CSVR_Step.
-
-    Args:
-        n_dof: Degrees of freedom for thermostat. If None, must be in apply params.
-    """
-    self.n_dof = n_dof
+  def __init__(self, tau: float = _DEFAULT_CSVR_TAU_AKMA):
+    """Initialize CSVR_Step."""
+    self.tau = tau
 
   def apply(
       self,
       state: IntegratorState,
-      constraint_dofs: ConstraintDOFMask | None = None,
-      **params,
-  ) -> tuple[IntegratorState, PRNGKeyArray]:
+      params: IntegratorParams,
+  ) -> IntegratorState:
     """Apply CSVR velocity rescaling.
 
     Args:
         state: IntegratorState with momentum and RNG.
-        constraint_dofs: Unused (scalar rescaling preserves constraints).
-        **params: Required: 'dt', 'kT', 'n_dof' (if not in constructor). Optional: 'tau'.
+        params: Standardized parameters including dt, kT, and n_dof.
 
     Returns:
-        (updated_state, new_rng_key).
+        Updated IntegratorState.
     """
-    dt = params["dt"]
-    kT = params["kT"]
-    n_dof = params.get("n_dof", self.n_dof)
-    tau = params.get("tau", None)
-
+    dt = params.dt
+    kT = params.kT
+    n_dof = params.n_dof
+    
     if n_dof is None:
-      raise ValueError("CSVR_Step requires n_dof (in params or constructor)")
-
-    # Convert n_dof to int if needed (for JIT safety)
-    n_dof_int = int(n_dof) if not isinstance(n_dof, int) else n_dof
+      raise ValueError("CSVR_Step requires n_dof in IntegratorParams")
 
     # Compute kinetic energy
     velocity = state.momentum / state.mass
@@ -580,19 +552,13 @@ class CSVR_Step(Step):
 
     # Compute rescaling factor and new RNG using JIT-safe version
     lambda_factor, key_out = _csvr_compute_lambda_jit_safe(
-        state.rng, ke, n_dof_int, kT, dt, tau=tau
+        state.rng, ke, n_dof, kT, dt, tau=self.tau
     )
 
     # Rescale momenta
     momentum_new = _csvr_rescale_momenta(state.momentum, lambda_factor)
 
-    return IntegratorState(
-        position=state.position,
-        momentum=momentum_new,
-        force=state.force,
-        mass=state.mass,
-        rng=key_out,
-    ), key_out
+    return state.__replace__(momentum=momentum_new, rng=key_out)
 
 
 class NHC_Step(Step):

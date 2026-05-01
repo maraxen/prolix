@@ -1,0 +1,27 @@
+{
+  "experiment": "sprint_b_step2_constraint_impulse_scaling",
+  "seed": 7,
+  "sim_ps": 100.0,
+  "burn_fraction": 0.3333333333,
+  "conditions": [
+    {
+      "n_waters": 8,
+      "dt_fs": 0.5,
+      "project_ou_momentum_rigid": true,
+      "steps": 200000,
+      "burn": 66666,
+      "t_target_k": 300.0,
+      "t_mean_k": 342.4233298332134,
+      "t_std_k": 174.60526827132796,
+      "drift_k_per_ps": 1.7234968297813356,
+      "settle_impulse_mean": 0.11954016483603139,
+      "settle_impulse_rms": 0.15018575381714136,
+      "settle_impulse_p95": 0.17686252406168915,
+      "settle_impulse_p99": 0.36976900102253296,
+      "settle_impulse_per_water_mean": 0.014942520604503923,
+      "settle_impulse_per_dof_mean": 0.002656448107467364,
+      "potential_mean_kcal": -522.0851818639258,
+      "potential_std_kcal": 0.23000596980343296
+    }
+  ]
+}

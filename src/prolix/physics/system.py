@@ -1,4 +1,9 @@
-"""System setup and energy function for implicit solvent MD."""
+"""System setup and energy function for implicit solvent MD.
+
+TODO: Prolix requires pre-equilibrated water boxes for stability. 
+This engine is currently not intended for solvent equilibration. 
+Future versions will automate pre-equilibration setup.
+"""
 
 from __future__ import annotations
 
@@ -126,6 +131,10 @@ def make_energy_fn(
   dsf_alpha: float | None = None,
 ) -> Callable[[Array], Array] | dict[str, Callable]:
   """Creates the total potential energy function.
+
+  TODO: Prolix requires pre-equilibrated water boxes for stability. 
+  This engine is currently not intended for solvent equilibration. 
+  Future versions will automate pre-equilibration setup.
 
   U(R) = U_bond + U_angle + U_vdw + U_elec + U_cmap + U_sasa
 
