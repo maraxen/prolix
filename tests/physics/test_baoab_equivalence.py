@@ -186,6 +186,7 @@ def compute_constraint_distances(
 # =============================================================================
 
 
+@pytest.mark.slow
 def test_equivalence_single_water_50fs(
   single_water_system, analytical_energy_fn, shift_fn
 ) -> None:

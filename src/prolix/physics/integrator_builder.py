@@ -54,6 +54,7 @@ from prolix.physics.step_system import (
     step_sequences,
 )
 from prolix.physics.types import IntegratorParams, EnergyParams
+from prolix.physics.virtual_sites_step import redistribute_forces
 from prolix.types import Array, WaterIndicesArray
 
 
@@ -62,6 +63,8 @@ def _compute_forces(
     box: Optional[ArrayType],
     energy_fn: Callable,
     energy_params: Any = None,
+    vs_def: Optional[ArrayType] = None,
+    vs_params: Optional[ArrayType] = None,
 ) -> ArrayType:
   r"""Compute forces via autodiff of energy function.
 
@@ -70,9 +73,11 @@ def _compute_forces(
       box: Optional (3,) box dimensions for periodic boundary.
       energy_fn: Energy function(positions, box, params) → scalar energy.
       energy_params: Optional parameters for energy_fn.
+      vs_def: Optional virtual site definitions.
+      vs_params: Optional virtual site parameters.
 
   Returns:
-      (N, 3) force array F = -∇E.
+      (N, 3) force array F = -∇E, with virtual site forces redistributed.
   """
   def energy_wrapper(R):
     if energy_params is not None:
@@ -80,6 +85,10 @@ def _compute_forces(
     return energy_fn(R, box) if box is not None else energy_fn(R)
 
   forces = -jax.grad(energy_wrapper)(positions)
+  
+  if vs_def is not None and vs_params is not None:
+    forces = redistribute_forces(forces, vs_def, vs_params)
+    
   return forces
 
 
@@ -210,11 +219,9 @@ def make_integrator_batched(
     def init_single(key_i, pos_i):
       return init_fn_unbatched(key_i, pos_i, box=box)
 
-    # vmap over batch dimension with explicit out_axes structure
-    # We want to batch position, momentum, force, rng (all at axis 0)
+  # vmap over batch dimension with explicit out_axes structure
+    # We want to batch position, momentum, force, rng, and step_count (all at axis 0)
     # but keep mass and box shared (not batched at all)
-    # Since IntegratorState is a pytree, we can specify per-field batching
-    # using a tree of out_axes values matching the state structure
     out_axes_spec = IntegratorState(
         position=0,      # batch at axis 0
         momentum=0,      # batch at axis 0
@@ -222,6 +229,7 @@ def make_integrator_batched(
         mass=None,       # do NOT batch (broadcast)
         rng=0,           # batch at axis 0
         box=None,        # do NOT batch (broadcast)
+        step_count=0,    # batch at axis 0
     )
 
     state_list = jax.vmap(init_single, in_axes=(0, 0), out_axes=out_axes_spec)(
@@ -231,8 +239,6 @@ def make_integrator_batched(
     return state_list
 
   # Create batched apply_fn via vmap
-  # The unbatched apply_fn takes a single (unbatched) IntegratorState
-  # We vmap over the batch dimension (axis 0) for batched fields only
   def apply_fn_batched(state_batch: IntegratorState) -> IntegratorState:
     r"""Apply one timestep of batched integrator on all B trajectories.
 
@@ -242,28 +248,27 @@ def make_integrator_batched(
     Returns:
         Updated IntegratorState (still batched, axis 0 preserved).
     """
-    # vmap the unbatched apply_fn over the batch dimension
-    # Since apply_fn_unbatched takes a single IntegratorState argument,
-    # we need to specify in_axes as a tuple matching the flattened state.
-    # IntegratorState has fields: position, momentum, force, mass, rng, box
-    # Flattened order: (position, momentum, force, mass, rng, box)
-    in_axes_spec = (0, 0, 0, None, 0, None)  # tuple of ints/Nones for each field
-    out_axes_spec = (0, 0, 0, None, 0, None)
+    # vmap over the batch dimension (axis 0) for batched fields
+    # IntegratorState has fields: position, momentum, force, mass, rng, box, step_count
+    # Flattened order: (position, momentum, force, mass, rng, box, step_count)
+    in_axes_spec = (0, 0, 0, None, 0, None, 0)
+    out_axes_spec = (0, 0, 0, None, 0, None, 0)
 
     # Create a wrapper that takes flattened arguments
-    def apply_fn_flat(position, momentum, force, mass, rng, box):
+    def apply_fn_flat(position, momentum, force, mass, rng, box, step_count):
       state = IntegratorState(position=position, momentum=momentum, force=force,
-                             mass=mass, rng=rng, box=box)
+                             mass=mass, rng=rng, box=box, step_count=step_count)
       result = apply_fn_unbatched(state)
-      return result.position, result.momentum, result.force, result.mass, result.rng, result.box
+      return (result.position, result.momentum, result.force, result.mass, 
+              result.rng, result.box, result.step_count)
 
     # Apply vmap over the flattened function
     apply_fn_flat_vmapped = jax.vmap(apply_fn_flat, in_axes=in_axes_spec, out_axes=out_axes_spec)
 
     # Call with flattened state
-    pos_out, mom_out, force_out, mass_out, rng_out, box_out = apply_fn_flat_vmapped(
+    pos_out, mom_out, force_out, mass_out, rng_out, box_out, step_out = apply_fn_flat_vmapped(
         state_batch.position, state_batch.momentum, state_batch.force,
-        state_batch.mass, state_batch.rng, state_batch.box
+        state_batch.mass, state_batch.rng, state_batch.box, state_batch.step_count
     )
 
     # Reconstruct state
@@ -274,6 +279,7 @@ def make_integrator_batched(
         mass=mass_out,
         rng=rng_out,
         box=box_out,
+        step_count=step_out,
     )
 
   return init_fn_batched, apply_fn_batched
@@ -292,6 +298,9 @@ def make_integrator(
     tau_barostat_akma: Optional[float] = 2000.0,
     tau_thermostat_akma: Optional[float] = 2000.0,
     energy_params: Any = None,
+    vs_def: Optional[Array] = None,
+    vs_params: Optional[Array] = None,
+    n_molecules: Optional[int] = None,
     **kwargs,
 ) -> Tuple[Callable, Callable]:
   r"""Create a modular integrator from a sequence registry entry.
@@ -429,13 +438,18 @@ def make_integrator(
   for step_name in sequence.steps:
     step_constructor_params = {}
     if step_name == "settle_velocity_step":
-      if "water_indices" in merged_params:
-        step_constructor_params["water_indices"] = merged_params["water_indices"]
       if "n_iters" in merged_params:
         step_constructor_params["n_iters"] = merged_params["n_iters"]
     elif step_name == "csvr_step":
-      if "n_dof" in merged_params:
-        step_constructor_params["n_dof"] = merged_params["n_dof"]
+      # n_dof is now passed via IntegratorParams
+      pass
+    elif step_name == "mc_barostat_step":
+      step_constructor_params["n_molecules"] = n_molecules
+      step_constructor_params["pressure"] = target_pressure_bar
+      step_constructor_params["energy_fn"] = energy_fn
+    elif step_name == "virtual_site_reconstruction_step":
+      step_constructor_params["vs_def"] = vs_def
+      step_constructor_params["vs_params"] = vs_params
     elif step_name == "a_step":
       if "shift_fn" in merged_params:
         step_constructor_params["shift_fn"] = merged_params["shift_fn"]
@@ -487,7 +501,14 @@ def make_integrator(
         IntegratorState with all fields initialized, including box.
     """
     # Compute forces at initial positions
-    forces = _compute_forces(positions, box, energy_fn, energy_params)
+    forces = _compute_forces(
+        positions, 
+        box, 
+        energy_fn, 
+        energy_params,
+        vs_def=vs_def,
+        vs_params=vs_params
+    )
 
     # Initialize momentum (cold start: all zeros)
     momentum = jnp.zeros_like(positions)
@@ -519,24 +540,29 @@ def make_integrator(
     params = eqx.tree_at(
         lambda p: (p.box, p.positions_old),
         base_integrator_params,
-        (state.box, state.position)
+        (state.box, state.position),
+        is_leaf=lambda x: x is None
     )
 
     current_state = state
 
-    # Use jax.lax.fori_loop with switch to avoid Python unrolling of sub-steps
-    def body_fn(i, val):
-      return jax.lax.switch(
-          i,
-          [lambda s, st=step: st.apply(s, params) for step in steps],
-          val
-      )
+    # Simple Python loop allows JAX to unroll computation graph at trace-time
+    for step in steps:
+      current_state = step.apply(current_state, params)
 
-    current_state = jax.lax.fori_loop(0, len(steps), body_fn, current_state)
-
-    # Recompute forces at the end of the timestep
-    new_forces = _compute_forces(current_state.position, state.box, energy_fn, energy_params)
-    current_state = current_state.__replace__(force=new_forces)
+    # Recompute forces at the end of the timestep (with virtual site redistribution)
+    new_forces = _compute_forces(
+        current_state.position, 
+        current_state.box, 
+        energy_fn, 
+        energy_params,
+        vs_def=vs_def,
+        vs_params=vs_params
+    )
+    current_state = current_state.__replace__(
+        force=new_forces,
+        step_count=current_state.step_count + 1
+    )
 
     return current_state
 

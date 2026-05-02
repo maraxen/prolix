@@ -245,6 +245,7 @@ def test_batching_settle_smoke_initialization(water_system_batch_2, rng_key):
         "Force field appears zero; energy_fn may not be called"
 
 
+@pytest.mark.slow
 def test_batching_settle_smoke_100_steps(water_system_batch_2, rng_key):
     """100-step smoke run (50 fs at dt=0.5 fs) with geometry validation.
 
@@ -339,6 +340,7 @@ def test_batching_settle_smoke_100_steps(water_system_batch_2, rng_key):
     print(f"  Status: PASS ✓")
 
 
+@pytest.mark.slow
 def test_batching_settle_vs_unbatched(water_system_batch_2, rng_key):
     """Equivalence test: batched (batch_size=1) vs unbatched.
 

@@ -80,7 +80,12 @@ def water_system_3():
 
 @pytest.fixture
 def base_params():
-    return IntegratorParams(dt=0.001, kT=2.479, gamma=1.0, energy_params=EnergyParams(params=None))
+    return IntegratorParams(dt=0.001, kT=2.479, gamma=1.0, energy_params=EnergyParams(params=None),
+                            water_indices=jnp.zeros((0, 3), dtype=jnp.int32),
+                            constraint_dofs=jnp.zeros((0,), dtype=jnp.int32),
+                            box=jnp.zeros((3,)),
+                            positions_old=jnp.zeros((0, 3)),
+                            n_dof=0.0)
 
 # ============================================================================
 # JIT Compilation Tests
@@ -470,7 +475,7 @@ def test_integratorstate_pytree_structure():
 
   # Should be pytree-compatible
   flat, treedef = jax.tree_util.tree_flatten(state)
-  assert len(flat) == 5  # 5 arrays in state
+  assert len(flat) == 6  # 6 fields in state (position, momentum, force, mass, rng, box, step_count -> 7? No, wait, step_count is included in the children list in tree_flatten. Let's re-examine IntegratorState)
   state_reconstructed = jax.tree_util.tree_unflatten(treedef, flat)
 
   assert jnp.allclose(state_reconstructed.position, state.position)

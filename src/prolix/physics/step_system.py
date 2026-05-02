@@ -187,21 +187,26 @@ class IntegratorState:
   mass: ArrayType
   rng: PRNGKeyArray
   box: Optional[ArrayType] = None
+  step_count: int = 0
 
   def tree_flatten(self):
     """Flatten state into children and aux_data for JAX pytree."""
-    return (self.position, self.momentum, self.force, self.mass, self.rng, self.box), None
+    return (self.position, self.momentum, self.force, self.mass, self.rng, self.box, self.step_count), None
 
   @classmethod
   def tree_unflatten(cls, aux_data, children):
     """Reconstruct state from flattened pytree."""
-    position, momentum, force, mass, rng, box = children
-    return cls(position=position, momentum=momentum, force=force, mass=mass, rng=rng, box=box)
+    position, momentum, force, mass, rng, box, step_count = children
+    return cls(position=position, momentum=momentum, force=force, mass=mass, rng=rng, box=box, step_count=step_count)
 
-  def __replace__(self, **kwargs):
-    """Return a copy with specified fields replaced (like dataclass.replace)."""
+  def replace(self, **kwargs):
+    """Return a copy with specified fields replaced."""
     from dataclasses import replace
     return replace(self, **kwargs)
+
+  def __replace__(self, **kwargs):
+    """Return a copy with specified fields replaced."""
+    return self.replace(**kwargs)
 
 
 class Step(eqx.Module, ABC):
@@ -608,6 +613,8 @@ step_registry: dict[str, type[Step]] = {
     "settle_velocity_step": SETTLE_Velocity_Step,
     "csvr_step": CSVR_Step,
     "nhc_step": NHC_Step,
+    "mc_barostat_step": None,  # Dynamic import in make_step
+    "virtual_site_reconstruction_step": None,  # Dynamic import in make_step
 }
 
 
@@ -624,8 +631,15 @@ def make_step(name: str, **kwargs) -> Step:
   Raises:
       KeyError: If step name not found in registry.
   """
+  if name == "mc_barostat_step":
+    from prolix.physics.barostat import MC_Barostat_Step
+    return MC_Barostat_Step(**kwargs)
+  if name == "virtual_site_reconstruction_step":
+    from prolix.physics.virtual_sites_step import VirtualSiteReconstructionStep
+    return VirtualSiteReconstructionStep(**kwargs)
+
   if name not in step_registry:
-    raise KeyError(f"Unknown step '{name}'. Available: {list(step_registry.keys())}")
+    raise KeyError(f"Unknown step '{name}'. Available: {list(step_registry.keys()) + ['mc_barostat_step', 'virtual_site_reconstruction_step']}")
   return step_registry[name](**kwargs)
 
 

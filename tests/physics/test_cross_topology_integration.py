@@ -15,9 +15,7 @@ def test_protein():
     from pathlib import Path
     pdb_path = Path(__file__).parent.parent.parent.parent / "proxide" / "tests" / "data" / "1uao.pdb"
     ff_path = Path(__file__).parent.parent.parent.parent / "proxide" / "src" / "proxide" / "assets" / "protein.ff19SB.xml"
-    spec = OutputSpec()
-    spec.parameterize_md = True
-    spec.force_field = str(ff_path)
+    spec = OutputSpec(parameterize_md=True, force_field=str(ff_path))
     # 1uao is a simple valid test structure
     protein = parse_structure(str(pdb_path), spec)
     return protein

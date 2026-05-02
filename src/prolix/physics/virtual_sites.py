@@ -1,18 +1,14 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
-
 import jax
 import jax.numpy as jnp
 from jax_md import util
 
-from prolix.types import VirtualSiteParams
+from prolix.types import VirtualSiteParams, VirtualSiteParamsPacked
 
 Array = util.Array
-
-if TYPE_CHECKING:
-  from prolix.types import Coordinates, VirtualSiteDef, VirtualSiteParamsPacked
-
+Coordinates = Array
+VirtualSiteDef = Array
 
 def reconstruct_virtual_sites(
   positions: Coordinates,
@@ -20,28 +16,6 @@ def reconstruct_virtual_sites(
   vs_params: VirtualSiteParamsPacked,
 ) -> Array:
   r"""Reconstruct virtual site positions from parent atoms.
-
-  Process:
-  1.  **Gather Parents**: Extract coordinates $\vec{r}_i, \vec{r}_j, \vec{r}_k$ for each site.
-  2.  **Origin**: Compute frame origin as weighted sum: $\vec{O} = \sum w_a \vec{r}_a$.
-  3.  **Basis**: Compute reference vectors $\vec{v}_1, \vec{v}_2$ from weights.
-  4.  **Orthonormalize**:
-      -   $\hat{z} = \text{norm}(\vec{v}_1 \times \vec{v}_2)$
-      -   $\hat{x} = \text{norm}(\vec{v}_1)$
-      -   $\hat{y} = \hat{z} \times \hat{x}$
-  5.  **Project**: $\vec{r}_{vs} = \vec{O} + x_{loc} \hat{x} + y_{loc} \hat{y} + z_{loc} \hat{z}$.
-
-  Notes:
-  Virtual sites defined by OpenMM `LocalCoordinatesSite` logic.
-  Small epsilon ($10^{-12}$) added to norms to avoid division by zero.
-
-  Args:
-      positions: Atomic positions (N, 3).
-      vs_def: Virtual site definitions (N_vs, 4) as [vs_idx, p1, p2, p3].
-      vs_params: Packed parameters (N_vs, 12).
-
-  Returns:
-      Updated positions array with reconstructed virtual sites.
   """
   positions = jnp.asarray(positions)
 

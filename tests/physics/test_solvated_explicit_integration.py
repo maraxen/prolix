@@ -41,10 +41,9 @@ def _load_1vii():
     pdb_path = DATA_DIR / "1VII.pdb"
     if not pdb_path.is_file():
         pytest.skip(f"Missing test PDB: {pdb_path}")
-    spec = OutputSpec()
-    spec.parameterize_md = True
-    spec.force_field = str(FF_PATH)
-    spec.coord_format = CoordFormat.Full
+    spec = OutputSpec(
+        parameterize_md=True, force_field=str(FF_PATH), coord_format=CoordFormat.Full
+    )
     return parse_structure(str(pdb_path), spec)
 
 

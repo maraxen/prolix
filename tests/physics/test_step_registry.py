@@ -200,8 +200,12 @@ class TestStepComposition:
     rng = jax.random.PRNGKey(0)
 
     state = IntegratorState(position=positions, momentum=momentum, force=force, mass=mass, rng=rng)
-    params = IntegratorParams(dt=0.001, kT=2.479, gamma=1.0, energy_params=EnergyParams(params=None))
-
+    params = IntegratorParams(dt=0.001, kT=2.479, gamma=1.0, energy_params=EnergyParams(params=None),
+                              water_indices=jnp.zeros((0, 3), dtype=jnp.int32),
+                              constraint_dofs=jnp.zeros((0,), dtype=jnp.int32),
+                              box=jnp.zeros((3,)),
+                              positions_old=jnp.zeros((0, 3)),
+                              n_dof=0.0)
     # V-A-V cycle
     state = v_step.apply(state, params)
     state = a_step.apply(state, params)
@@ -223,8 +227,12 @@ class TestStepComposition:
     rng = jax.random.PRNGKey(0)
 
     state = IntegratorState(position=positions, momentum=momentum, force=force, mass=mass, rng=rng)
-    params = IntegratorParams(dt=0.001, kT=2.479, gamma=1.0, energy_params=EnergyParams(params=None))
-
+    params = IntegratorParams(dt=0.001, kT=2.479, gamma=1.0, energy_params=EnergyParams(params=None),
+                              water_indices=jnp.zeros((0, 3), dtype=jnp.int32),
+                              constraint_dofs=jnp.zeros((0,), dtype=jnp.int32),
+                              box=jnp.zeros((3,)),
+                              positions_old=jnp.zeros((0, 3)),
+                              n_dof=0.0)
     # V-O-A cycle
     state = v_step.apply(state, params)
     state = o_step.apply(state, params)
@@ -246,8 +254,11 @@ class TestStepComposition:
     rng = jax.random.PRNGKey(0)
 
     state = IntegratorState(position=positions, momentum=momentum, force=force, mass=mass, rng=rng)
-    params = IntegratorParams(dt=0.001, kT=2.479, gamma=1.0, n_dof=27, energy_params=EnergyParams(params=None))
-
+    params = IntegratorParams(dt=0.001, kT=2.479, gamma=1.0, n_dof=27, energy_params=EnergyParams(params=None),
+                              water_indices=jnp.zeros((0, 3), dtype=jnp.int32),
+                              constraint_dofs=jnp.zeros((0,), dtype=jnp.int32),
+                              box=jnp.zeros((3,)),
+                              positions_old=jnp.zeros((0, 3)))
     # V-A-CSVR sequence
     state = v_step.apply(state, params)
     state = a_step.apply(state, params)
@@ -385,9 +396,13 @@ class TestStepSequenceComposition:
         dt=seq.parameters["dt"],
         gamma=seq.parameters["gamma"],
         kT=seq.parameters["kT"],
-        energy_params=EnergyParams(params=None)
+        energy_params=EnergyParams(params=None),
+        water_indices=jnp.zeros((0, 3), dtype=jnp.int32),
+        constraint_dofs=jnp.zeros((0,), dtype=jnp.int32),
+        box=jnp.zeros((3,)),
+        positions_old=jnp.zeros((0, 3)),
+        n_dof=0.0
     )
-
     # Manually compose steps
     v_step = make_step("v_step", fraction=0.5)
     a_step = make_step("a_step", fraction=1.0)
@@ -423,6 +438,10 @@ class TestStepSequenceComposition:
         n_dof=seq.parameters["n_dof"],
         energy_params=EnergyParams(params=None),
         gamma=0.0,
+        water_indices=jnp.zeros((0, 3), dtype=jnp.int32),
+        constraint_dofs=jnp.zeros((0,), dtype=jnp.int32),
+        box=jnp.zeros((3,)),
+        positions_old=jnp.zeros((0, 3))
     )
 
     v_step = make_step("v_step", fraction=0.5)
@@ -454,9 +473,13 @@ class TestStepSequenceComposition:
         dt=seq.parameters["dt"],
         gamma=seq.parameters["gamma"],
         kT=seq.parameters["kT"],
-        energy_params=EnergyParams(params=None)
+        energy_params=EnergyParams(params=None),
+        water_indices=jnp.zeros((0, 3), dtype=jnp.int32),
+        constraint_dofs=jnp.zeros((0,), dtype=jnp.int32),
+        box=jnp.zeros((3,)),
+        positions_old=jnp.zeros((0, 3)),
+        n_dof=0.0
     )
-
     # Each step should receive these parameters
     v_step = make_step("v_step", fraction=0.5)
     o_step = make_step("o_step", fraction=1.0)

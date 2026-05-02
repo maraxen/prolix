@@ -27,10 +27,9 @@ FF_PATH = (
 @pytest.fixture
 def crambin_protein():
   pdb_path = DATA_DIR / "1CRN.pdb"
-  spec = OutputSpec()
-  spec.parameterize_md = True
-  spec.force_field = str(FF_PATH)
-  spec.coord_format = CoordFormat.Full
+  spec = OutputSpec(
+      parameterize_md=True, force_field=str(FF_PATH), coord_format=CoordFormat.Full
+  )
   return parse_structure(str(pdb_path), spec)
 
 
