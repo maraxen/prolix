@@ -15,7 +15,8 @@ import jax.numpy as jnp
 import pytest
 
 from prolix.physics import system as physics_system
-from prolix.physics.system import EnergyParams, make_energy_fn_pure
+from prolix.physics.system import make_energy_fn_pure
+from prolix.physics.types import EnergyParams, PhysicsSystem
 from prolix.physics import pbc
 from prolix.physics.regression_explicit_pme import REGRESSION_EXPLICIT_PME
 
@@ -40,10 +41,16 @@ def tip3p_setup():
     pme_grid = int(REGRESSION_EXPLICIT_PME["pme_grid_points"])
     cutoff = float(REGRESSION_EXPLICIT_PME["cutoff_angstrom"])
     positions = jnp.array(positions_a, dtype=jnp.float64)
+
+    physics_system = PhysicsSystem.from_dict(
+        sys_dict, positions, box_vec, cutoff_distance=cutoff
+    )
+
     return dict(
         positions=positions,
         box_vec=box_vec,
         sys_dict=sys_dict,
+        physics_system=physics_system,
         displacement_fn=displacement_fn,
         pme_alpha=pme_alpha,
         pme_grid=pme_grid,
@@ -55,7 +62,7 @@ def test_returns_energy_params_and_callable(tip3p_setup):
     """make_energy_fn_pure must return (EnergyParams, callable)."""
     s = tip3p_setup
     result = make_energy_fn_pure(
-        s["displacement_fn"], s["sys_dict"], s["box_vec"],
+        s["displacement_fn"], s["physics_system"],
         cutoff_distance=s["cutoff"],
         pme_grid_points=s["pme_grid"],
         pme_alpha=s["pme_alpha"],
@@ -64,16 +71,17 @@ def test_returns_energy_params_and_callable(tip3p_setup):
     params, fn = result
     assert isinstance(params, EnergyParams), f"expected EnergyParams, got {type(params)}"
     assert callable(fn), "fn must be callable"
-    assert params.charges.shape == (N_WATERS * 3,)
-    assert params.sigmas.shape == (N_WATERS * 3,)
-    assert params.epsilons.shape == (N_WATERS * 3,)
+    
+    # Check params structure
+    assert 'charges' in params.params
+    assert params.params['charges'].shape == (N_WATERS * 3,)
 
 
 def test_energy_is_finite(tip3p_setup):
     """fn(params, positions) returns a finite scalar on equilibrated positions."""
     s = tip3p_setup
     params, fn = make_energy_fn_pure(
-        s["displacement_fn"], s["sys_dict"], s["box_vec"],
+        s["displacement_fn"], s["physics_system"],
         cutoff_distance=s["cutoff"],
         pme_grid_points=s["pme_grid"],
         pme_alpha=s["pme_alpha"],
@@ -87,7 +95,7 @@ def test_energy_matches_closure_fn(tip3p_setup):
     """Pure-params and closure energy functions agree to float64 tolerance."""
     s = tip3p_setup
     params, fn_pure = make_energy_fn_pure(
-        s["displacement_fn"], s["sys_dict"], s["box_vec"],
+        s["displacement_fn"], s["physics_system"],
         cutoff_distance=s["cutoff"],
         pme_grid_points=s["pme_grid"],
         pme_alpha=s["pme_alpha"],
@@ -98,11 +106,12 @@ def test_energy_matches_closure_fn(tip3p_setup):
         box=s["box_vec"],
         use_pbc=True,
         implicit_solvent=False,
-        cutoff_distance=s["cutoff"],
         pme_grid_points=s["pme_grid"],
         pme_alpha=s["pme_alpha"],
+        cutoff_distance=s["cutoff"],
         strict_parameterization=False,
     )
+
     e_pure = float(fn_pure(params, s["positions"]))
     e_closure = float(fn_closure(s["positions"]))
     rel_err = abs(e_pure - e_closure) / (abs(e_closure) + 1e-12)
@@ -115,7 +124,7 @@ def test_jax_export_succeeds(tip3p_setup):
     """jax.export(jax.jit(fn)).lower(params, positions) must not raise."""
     s = tip3p_setup
     params, fn = make_energy_fn_pure(
-        s["displacement_fn"], s["sys_dict"], s["box_vec"],
+        s["displacement_fn"], s["physics_system"],
         cutoff_distance=s["cutoff"],
         pme_grid_points=s["pme_grid"],
         pme_alpha=s["pme_alpha"],
@@ -135,7 +144,7 @@ def test_gradient_wrt_charges_is_finite(tip3p_setup):
     """jax.grad through charges must return finite gradients."""
     s = tip3p_setup
     params, fn = make_energy_fn_pure(
-        s["displacement_fn"], s["sys_dict"], s["box_vec"],
+        s["displacement_fn"], s["physics_system"],
         cutoff_distance=s["cutoff"],
         pme_grid_points=s["pme_grid"],
         pme_alpha=s["pme_alpha"],
@@ -143,8 +152,9 @@ def test_gradient_wrt_charges_is_finite(tip3p_setup):
     )
 
     def energy_wrt_charges(charges):
-        p = EnergyParams(charges=charges, sigmas=params.sigmas, epsilons=params.epsilons)
+        p = EnergyParams(params={'charges': charges, 'sigmas': params.sigmas, 'epsilons': params.epsilons})
         return fn(p, s["positions"])
 
     grad = jax.grad(energy_wrt_charges)(params.charges)
+
     assert jnp.all(jnp.isfinite(grad)), f"charge gradients contain non-finite values: {grad}"

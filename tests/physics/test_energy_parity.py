@@ -2,7 +2,7 @@ import jax
 import jax.numpy as jnp
 import pytest
 import equinox as eqx
-from prolix.physics.pure_utils import make_energy_fn_pure
+from prolix.physics.pure_utils import wrap_energy_fn_pure
 from prolix.physics.types import EnergyParams
 
 def test_energy_parity():
@@ -12,7 +12,7 @@ def test_energy_parity():
         return 0.5 * k * jnp.sum((positions - x0)**2)
 
     # Pure energy function creation
-    pure_energy_fn = make_energy_fn_pure(legacy_harmonic_energy)
+    pure_energy_fn = wrap_energy_fn_pure(legacy_harmonic_energy)
 
     # Test parameters
     k = 10.0

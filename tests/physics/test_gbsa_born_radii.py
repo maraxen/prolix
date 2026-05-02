@@ -91,7 +91,7 @@ class TestGBSABornRadiiParity:
 
     # 2. Prolix Calculation
     # Parse 1UAO
-    spec = OutputSpec(parameterize_md=True, coord_format=CoordFormat.Full)
+    spec = OutputSpec(parameterize_md=True, coord_format=CoordFormat.Full, force_field="amber14-all.xml")
     protein = parse_structure(str(pdb_path), spec)
     
     # Use exact same input radii/scales as OpenMM to isolate the Born integration logic

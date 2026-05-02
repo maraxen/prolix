@@ -1,15 +1,41 @@
 """Tests for physics-based node features."""
 
+import pytest
 import chex
 import jax
 import jax.numpy as jnp
-import pytest
 from proxide.core.containers import Protein
 from proxide.physics.features import (
   compute_electrostatic_features_batch,
   compute_electrostatic_node_features,
 )
 
+@pytest.fixture
+def pqr_protein() -> Protein:
+  """Minimal mock fixture for PQR protein using Atom37 format."""
+  import numpy as np
+  n_res = 10
+  # Use non-zero coordinates to avoid division by zero in electrostatic features
+  coords = np.random.normal(size=(n_res, 37, 3)).astype(np.float32)
+  charges = np.random.normal(size=(n_res, 37)).astype(np.float32)
+  return Protein(
+      coordinates=jnp.array(coords),
+      charges=jnp.array(charges),
+      aatype=jnp.zeros(n_res, dtype=jnp.int32),
+      residue_index=jnp.arange(n_res, dtype=jnp.int32),
+      chain_index=jnp.zeros(n_res, dtype=jnp.int32),
+      atom_names=None,  # type: ignore
+      bonds=None,
+      bond_params=None,
+      angles=None,
+      angle_params=None,
+      proper_dihedrals=None,
+      dihedral_params=None,
+      sigmas=jnp.ones((n_res, 37)),
+      epsilons=jnp.ones((n_res, 37)),
+      full_coordinates=jnp.array(coords),
+      full_atom_mask=jnp.ones((n_res, 37), dtype=jnp.float32),
+  )
 
 @pytest.mark.parametrize("jit_compile", [True, False], ids=["jit", "eager"])
 def test_compute_electrostatic_node_features_shape(
