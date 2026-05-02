@@ -57,8 +57,6 @@ def tile_reduction(
     f_tile: Callable[[Array, Array, Array, Bool[Array, T], int], Array],  # noqa: F821
     init_state: Any,
     tile_size: int,
-    *,
-    rematerialize: bool = True,
 ) -> Any:
     """Execute a tiled O(N^2) reduction using the FlashMD pattern.
 
@@ -70,7 +68,6 @@ def tile_reduction(
         f_tile: Kernel function (pos_i, pos_j, mask_i, mask_j, start_idx) -> tile_result.
         init_state: Initial accumulation state (usually zeros).
         tile_size: Hyperparameter for chunking (T).
-        rematerialize: Whether to wrap the tile in `jax.checkpoint`.
 
     Returns:
         The accumulated reduction result.
@@ -81,17 +78,11 @@ def tile_reduction(
     def _tile_step(carry, j_idx):
         start_idx = j_idx * tile_size
 
-        def _compute_tile(pos, m, start):
-            pos_j = jax.lax.dynamic_slice(pos, (start, 0), (tile_size, pos.shape[-1]))
-            mask_j = jax.lax.dynamic_slice(m, (start,), (tile_size,))
+        pos_j = jax.lax.dynamic_slice(positions, (start_idx, 0), (tile_size, positions.shape[-1]))
+        mask_j = jax.lax.dynamic_slice(atom_mask, (start_idx,), (tile_size,))
 
-            # Execute kernel
-            return f_tile(pos, pos_j, atom_mask, mask_j, start)
-
-        if rematerialize:
-            _compute_tile = jax.checkpoint(_compute_tile)
-
-        tile_res = _compute_tile(positions, atom_mask, start_idx)
+        # Execute kernel
+        tile_res = f_tile(positions, pos_j, atom_mask, mask_j, start_idx)
         return carry + tile_res, None
 
     final_state, _ = jax.lax.scan(_tile_step, init_state, jnp.arange(n_tiles))

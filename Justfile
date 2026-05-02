@@ -33,6 +33,10 @@ test-grep pattern:
 
 # --- Benchmarks ---
 
+# Run Sprint 6 memory/performance benchmarks
+benchmark-sprint6:
+    uv run scripts/benchmark_sprint6.py --output outputs/benchmark_sprint6.csv
+
 # GB solvation forces benchmark
 benchmark-gb:
     uv run scripts/benchmark_gb_forces.py
@@ -95,32 +99,32 @@ push-engaging: push-engaging-workspace
         --include='/outputs/inputs/***'
 
 # Like ``push-engaging`` but ``rsync --delete`` so the remote tree matches (excluded paths untouched).
-push-engaging-clean: login-engaging
-    @echo "Syncing UV workspace root (clean) to {{engaging_login}}:{{engaging_workspace_remote_dir}}/"
-    rsync -azP --delete {{justfile_directory()}}/workspace/pyproject.toml {{justfile_directory()}}/workspace/uv.lock \
-        {{justfile_directory()}}/workspace/.python-version {{justfile_directory()}}/workspace/.gitignore \
-        {{engaging_login}}:{{engaging_workspace_remote_dir}}/
-    @if [ -d "{{justfile_directory()}}/../proxide" ]; then \
-        echo "Optional: syncing sibling proxide (clean) for co-development."; \
-        rsync -azP --delete {{justfile_directory()}}/../proxide/ {{engaging_login}}:{{engaging_workspace_remote_dir}}/proxide/ \
-            --filter=':- .gitignore' \
-            --exclude='.venv' \
-            --exclude='.git' \
-            --exclude='__pycache__' \
-            --exclude='*.pyc' \
-            --exclude='target' \
-        ; \
-    fi
-    @echo "Syncing repo (clean) to {{engaging_login}}:{{engaging_remote_dir}}"
-    rsync -azP --delete {{justfile_directory()}}/ {{engaging_login}}:{{engaging_remote_dir}}/ \
-        --filter=':- .gitignore' \
-        --exclude='.venv' \
-        --exclude='.git' \
-        --exclude='.agent' \
-        --exclude='__pycache__' \
-        --exclude='*.pyc' \
-        --exclude='/outputs/*' \
-        --include='/outputs/inputs/***'
+# push-engaging-clean: login-engaging
+#     @echo "Syncing UV workspace root (clean) to {{engaging_login}}:{{engaging_workspace_remote_dir}}/"
+#     rsync -azP --delete {{justfile_directory()}}/workspace/pyproject.toml {{justfile_directory()}}/workspace/uv.lock \
+#         {{justfile_directory()}}/workspace/.python-version {{justfile_directory()}}/workspace/.gitignore \
+#         {{engaging_login}}:{{engaging_workspace_remote_dir}}/
+#     @if [ -d "{{justfile_directory()}}/../proxide" ]; then \
+#         echo "Optional: syncing sibling proxide (clean) for co-development."; \
+#         rsync -azP --delete {{justfile_directory()}}/../proxide/ {{engaging_login}}:{{engaging_workspace_remote_dir}}/proxide/ \
+#             --filter=':- .gitignore' \
+#             --exclude='.venv' \
+#             --exclude='.git' \
+#             --exclude='__pycache__' \
+#             --exclude='*.pyc' \
+#             --exclude='target' \
+#         ; \
+#     fi
+#     @echo "Syncing repo (clean) to {{engaging_login}}:{{engaging_remote_dir}}"
+#     rsync -azP --delete {{justfile_directory()}}/ {{engaging_login}}:{{engaging_remote_dir}}/ \
+#         --filter=':- .gitignore' \
+#         --exclude='.venv' \
+#         --exclude='.git' \
+#         --exclude='.agent' \
+#         --exclude='__pycache__' \
+#         --exclude='*.pyc' \
+#         --exclude='/outputs/*' \
+#         --include='/outputs/inputs/***'
 
 # Chignolin benchmark on {{engaging_partition}} (override ENGAGING_REMOTE_DIR / ENGAGING_LOGIN as needed)
 submit-bench-chignolin: push-engaging

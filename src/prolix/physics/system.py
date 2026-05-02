@@ -18,7 +18,7 @@ from prolix.physics.electrostatic_methods import (
 from prolix.types import CmapTorsionIndices
 from prolix.utils import topology
 
-from .optimization import StaticBakingWrapper, chunked_lj_energy, chunked_coulomb_energy
+from .optimization import chunked_lj_energy, chunked_coulomb_energy
 from .types import PhysicsSystem, EnergyParams
 
 if TYPE_CHECKING:
@@ -95,7 +95,14 @@ def make_energy_fn(displacement_fn, system, neighbor_list=None, exclusion_spec=N
     # This legacy path is kept for parity; it uses full N^2 direct space if no neighbor list
     dr = space.map_product(displacement_fn)(r, r); dist = space.distance(dr); ds = dist + 1e-6
     mask = 1.0 - jnp.eye(r.shape[0])
-    if hasattr(system, "exclusion_mask") and system.exclusion_mask is not None: mask *= system.exclusion_mask
+    
+    # Check for exclusions in both legacy and modern formats
+    excl_mask = getattr(system, "exclusion_mask", None)
+    if excl_mask is None:
+        excl_mask = getattr(system, "dense_excl_scale_vdw", None)
+    
+    if excl_mask is not None:
+        mask *= excl_mask
     
     e_lj = 0.5 * jnp.sum(energy.lennard_jones(dist, 0.5*(sigmas[:,None]+sigmas[None,:]), jnp.sqrt(epsilons[:,None]*epsilons[None,:])) * mask)
     e_elec = 0.5 * jnp.sum(332.0637 * (charges[:,None]*charges[None,:]) / ds * jax.scipy.special.erfc(pme_alpha * dist) * mask)
@@ -173,6 +180,12 @@ def make_energy_fn_pure(
 
     return e_total + (e_lj - e_corr_vdw) + (e_direct - e_corr_elec_direct) + (e_recip - e_corr_elec_recip)
 
-  baked = StaticBakingWrapper(total_energy_pure_impl, physics_system, ("positions", "charges", "sigmas", "epsilons"))
-  def fn(p: EnergyParams, r: Array) -> Array: return baked(p, physics_system.replace(positions=r))
-  return EnergyParams(params={'charges': physics_system.charges, 'sigmas': jnp.maximum(physics_system.sigmas, 1e-6), 'epsilons': physics_system.epsilons}), fn
+  def fn(p: EnergyParams, r: Array) -> Array:
+    return total_energy_pure_impl(p, physics_system.replace(positions=r))
+
+  params = EnergyParams(params={
+      'charges': physics_system.charges,
+      'sigmas': jnp.maximum(physics_system.sigmas, 1e-6),
+      'epsilons': physics_system.epsilons
+  })
+  return params, fn

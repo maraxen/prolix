@@ -985,54 +985,16 @@ def batched_equilibrate(
     temp: float = 300.0,
     chunk_size: int | None = 1,
 ) -> LangevinState:
-    """DEPRECATED: Use cold-start initialization instead.
+    """Equilibrate a batch of systems using a staged ramp protocol.
 
-    This function has a known bug: it returns force=zeros in the LangevinState,
-    which causes NaN on the first production step when batched_produce reuses
-    the stale zero-force field. The inline BAOAB also bypasses the modular
-    integrator, making behaviour inconsistent with batched_produce.
+    Performs 10 stages of equilibration:
+    - Ramps temperature from 10K to target.
+    - Steps down harmonic restraints from 50 to 0 kcal/mol/A^2.
+    - Uses BAOAB integrator with displacement and velocity capping for stability.
 
-    Replacement pattern (cold-start)::
-
-        import dataclasses
-        from jax_md import space
-        from prolix.batched_energy import single_padded_energy
-        from prolix.physics.md_potential_bundle import value_energy_and_grad_energy
-
-        displacement_fn, _ = space.free()
-
-        def _init_force(sys):
-            def _e(r):
-                return single_padded_energy(
-                    dataclasses.replace(sys, positions=r), displacement_fn
-                )
-            _, f = value_energy_and_grad_energy(_e, sys.positions)
-            return f
-
-        initial_forces = jax.vmap(_init_force)(batch)
-        keys = jax.random.split(key, B)
-        state = LangevinState(
-            positions=batch.positions,
-            momentum=jnp.zeros_like(batch.positions),
-            force=initial_forces,
-            mass=batch.masses,
-            key=keys,
-            cap_count=jnp.zeros(B, dtype=jnp.int32),
-        )
-
-    See also: batched_equilibrate_nl for neighbor-list equilibration.
+    Returns a thermalized LangevinState ready for production.
     """
-    import warnings
-    warnings.warn(
-        "batched_equilibrate is deprecated and will be removed in v1.2. "
-        "It returns force=zeros which causes NaN on the first production step. "
-        "Use cold-start LangevinState initialization instead — see docstring or "
-        "CLAUDE.md 'Safe Pattern' section. For NL-based equilibration use "
-        "batched_equilibrate_nl.",
-        DeprecationWarning,
-        stacklevel=2,
-    )
-    from prolix.batched_energy import single_padded_force
+    from prolix.batched_energy import single_padded_force, single_padded_energy
     
     n_stages = 10
     dt = 0.002 # 2 fs
@@ -1058,10 +1020,8 @@ def batched_equilibrate(
         # 0. Reconstruct PaddedSystem from unique shared topology + dynamic pos
         sys = jax.tree_util.tree_map(lambda x: x[sys_idx], unique_batch)
         sys = dataclasses.replace(sys, positions=pos)
-        # FlashMD uses sparse exclusions — no dense precomputation needed
 
         r_init = sys.positions
-        atom_mask = sys.atom_mask
         pad_mask_3d = sys.atom_mask[:, None]
         ghost_positions = sys.positions
         mass = sys.masses
@@ -1088,27 +1048,20 @@ def batched_equilibrate(
         gamma = 1.0 # 1/ps
         
         def stage_body_fn(carry, stage_params):
-            # params: (r, v, key)
             t_target, k_rest, mask, d_cap = stage_params
             
             def step_fn(i, c):
                 r_curr, v_curr, key_curr = c
-                
-                # 1. BAOAB - Half-step B: v = v + (dt/2) * (Force/m)
                 sys_curr = dataclasses.replace(sys, positions=r_curr)
                 f_phys = single_padded_force(sys_curr, displacement_fn, soft_core_lambda=jnp.float32(1.0))
                 f_rest = -k_rest * (r_curr - r_ref) * mask[:, None]
-                
                 forces = (f_phys + f_rest) * pad_mask_3d
                 forces = jnp.where(jnp.isfinite(forces), forces, 0.0)
-                
                 v_curr = v_curr + 0.5 * dt * (forces / (mass_3d + 1e-12))
                 
-                # 2. BAOAB - Half-step A: r = r + (dt/2) * v
                 r_old = r_curr
                 r_curr = r_curr + 0.5 * dt * v_curr
                 
-                # 3. BAOAB - Stochastic O: v = c1*v + c2*sqrt(kT/m)*R
                 c1 = jnp.exp(-gamma * dt)
                 c2 = jnp.sqrt(1.0 - jnp.exp(-2.0 * gamma * dt))
                 kT = t_target * jnp.asarray(BOLTZMANN_KCAL, dtype=t_target.dtype)
@@ -1116,39 +1069,30 @@ def batched_equilibrate(
                 noise = jax.random.normal(subkey, v_curr.shape)
                 v_curr = c1 * v_curr + c2 * jnp.sqrt(kT / (mass_3d + 1e-12)) * noise
                 
-                # 4. BAOAB - Second half-step A: r = r + (dt/2) * v
                 r_curr = r_curr + 0.5 * dt * v_curr
                 
-                # --- DISPLACEMENT CAP + vlimit (Safety) ---
                 dr = r_curr - r_old
                 dr_mag = jnp.sqrt(jnp.sum(dr**2, axis=-1, keepdims=True) + 1e-12)
                 dx_scale = jnp.minimum(1.0, d_cap / dr_mag)
                 r_curr = r_old + dr * dx_scale
-                v_curr = v_curr * dx_scale # Scale velocity to match displacement
+                v_curr = v_curr * dx_scale
                 
-                # vlimit 20.0 A/ps
                 VLIMIT = jnp.float32(20.0)
                 v_mag = jnp.sqrt(jnp.sum(v_curr**2, axis=-1, keepdims=True) + 1e-12)
                 v_scale = jnp.minimum(1.0, VLIMIT / v_mag)
                 v_curr = v_curr * v_scale
                 
-                # 5. Second half-step B
                 sys_new = dataclasses.replace(sys, positions=r_curr)
                 f_phys_new = single_padded_force(sys_new, displacement_fn, soft_core_lambda=jnp.float32(1.0))
                 f_rest_new = -k_rest * (r_curr - r_ref) * mask[:, None]
                 forces_new = (f_phys_new + f_rest_new) * pad_mask_3d
                 forces_new = jnp.where(jnp.isfinite(forces_new), forces_new, 0.0)
-                
                 v_curr = v_curr + 0.5 * dt * (forces_new / (mass_3d + 1e-12))
                 
-                # Final Safety: Ghost pinning
                 r_curr = jnp.where(pad_mask_3d, r_curr, ghost_positions)
                 v_curr = jnp.where(pad_mask_3d, v_curr, 0.0)
-
                 return (r_curr.astype(eq_dtype), v_curr.astype(eq_dtype), key_curr)
-            
-            # while_loop instead of fori_loop: no reverse-mode AD needed,
-            # so avoid scan's O(N) intermediate storage.
+
             def _eq_body(wl_carry):
                 i, inner_carry = wl_carry
                 next_carry = step_fn(i, inner_carry)
@@ -1161,20 +1105,24 @@ def batched_equilibrate(
             )
             return carry_final, None
 
-        # Pack stage params
         stage_params = (temps, k_vals, masks, caps)
         init_carry = (r_init, v, key)
-        
         final_carry, _ = jax.lax.scan(stage_body_fn, init_carry, stage_params)
-        final_r, _, _ = final_carry
+        final_r, final_v, final_key = final_carry
+        
+        # Calculate final force for valid cold-start in production
+        final_sys = dataclasses.replace(sys, positions=final_r)
+        f_final = single_padded_force(final_sys, displacement_fn) * pad_mask_3d
+        e_final = single_padded_energy(final_sys, displacement_fn)
         
         return LangevinState(
             positions=final_r,
-            momentum=jnp.zeros_like(final_r), # Start prod with zero momenta or thermalized
-            force=jnp.zeros_like(final_r),
+            momentum=final_v * mass_3d,
+            force=f_final,
             mass=sys.masses,
-            key=key,
-            cap_count=jnp.array(0, dtype=jnp.int32)
+            key=final_key,
+            cap_count=jnp.array(0, dtype=jnp.int32),
+            potential_energy=jnp.asarray(e_final, dtype=jnp.float64)
         )
 
     # Shard key for replicas

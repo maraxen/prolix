@@ -8,36 +8,6 @@ from .tiling import tile_reduction, pad_to_tile
 
 T = TypeVar("T")
 
-def bake_static_fields(
-    fn: Callable[[EnergyParams, PhysicsSystem], jax.Array],
-    system: PhysicsSystem,
-    dynamic_field_names: Tuple[str, ...] = ("positions", "charges", "sigmas", "epsilons")
-) -> Callable[[EnergyParams, PhysicsSystem], jax.Array]:
-    """Wraps an energy function to bake static PhysicsSystem fields into constants."""
-    _, static_struct = eqx.partition(
-        system,
-        lambda leaf: any(leaf is getattr(system, name) for name in dynamic_field_names)
-    )
-    @eqx.filter_jit
-    def optimized_fn(params: EnergyParams, dynamic_system: PhysicsSystem):
-        full_system = eqx.combine(dynamic_system, static_struct)
-        return fn(params, full_system)
-    return optimized_fn
-
-class StaticBakingWrapper(eqx.Module):
-    """Equinox-compatible wrapper for static field baking."""
-    fn: Callable = eqx.field(static=True)
-    static_struct: PhysicsSystem = eqx.field(static=True)
-    def __init__(self, fn: Callable, system: PhysicsSystem, dynamic_field_names: Tuple[str, ...]):
-        self.fn = fn
-        _, self.static_struct = eqx.partition(
-            system,
-            lambda leaf: any(leaf is getattr(system, name) for name in dynamic_field_names)
-        )
-    def __call__(self, params: EnergyParams, dynamic_system: PhysicsSystem) -> jax.Array:
-        full_system = eqx.combine(self.static_struct, dynamic_system)
-        return self.fn(params, full_system)
-
 @functools.partial(jax.custom_vjp, nondiff_argnums=(3, 4))
 def chunked_lj_energy(
     r: jnp.ndarray,
