@@ -6,7 +6,7 @@ import jax
 from prolix.physics.types import EnergyParams
 
 
-def make_energy_fn_pure(
+def wrap_energy_fn_pure(
     energy_fn: Callable[..., jax.Array]
 ) -> Callable[[EnergyParams, jax.Array, jax.Array | None], jax.Array]:
     """

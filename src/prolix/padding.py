@@ -9,94 +9,18 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 from jax_md import util
+from prolix.physics.types import PhysicsSystem
 
 if TYPE_CHECKING:
   from proxide.core.containers import Protein
-
   from prolix.physics.topology_merger import MergedTopology
 
 Array = util.Array
 
 ATOM_BUCKETS = (1024, 2048, 2816, 3072, 4096, 5120, 6144, 7168, 8192, 16384, 32768, 65536)
 
-class PaddedSystem(eqx.Module):
-  """A protein system padded to a fixed atom count for vmap compatibility."""
-  
-  # Per-atom arrays (all shape: (N_padded, ...))
-  positions: Array        # (N_padded, 3)
-  charges: Array          # (N_padded,)
-  sigmas: Array           # (N_padded,)
-  epsilons: Array         # (N_padded,)
-  radii: Array            # (N_padded,)   — GB radii
-  scaled_radii: Array     # (N_padded,)   — OBC scaling factors
-  masses: Array           # (N_padded,)
-  element_ids: Array      # (N_padded,) int — atomic number (1=H, 6=C, 7=N, 8=O, 16=S)
-  atom_mask: Array        # (N_padded,) bool — True for real atoms
-  is_hydrogen: Array      # (N_padded,) bool — True for hydrogen atoms
-  is_backbone: Array      # (N_padded,) bool — True for backbone atoms (N, CA, C, O)
-  is_heavy: Array         # (N_padded,) bool — True for real non-hydrogen atoms
-  protein_atom_mask: Array # (N_padded,) bool — True for protein atoms
-  water_atom_mask: Array   # (N_padded,) bool — True for water atoms
-  
-  # Bonded term arrays (padded to max per bucket)
-  bonds: Array                                     # (N_bonds_padded, 2) int
-  bond_params: Array      # (N_bonds_padded, 2) float
-  bond_mask: Array        # (N_bonds_padded,) bool
-  
-  angles: Array                                    # (N_angles_padded, 3) int
-  angle_params: Array     # (N_angles_padded, 2) float
-  angle_mask: Array       # (N_angles_padded,) bool
-  
-  dihedrals: Array                                 # (N_dih_padded, 4) int
-  dihedral_params: Array  # (N_dih_padded, 3) float
-  dihedral_mask: Array    # (N_dih_padded,) bool
-  
-  impropers: Array                                 # (N_imp_padded, 4) int
-  improper_params: Array  # (N_imp_padded, 3) float
-  improper_mask: Array    # (N_imp_padded,) bool
-
-  # Urey-Bradley
-  urey_bradley_bonds: Array | None  # (N_ub_padded, 2) int
-  urey_bradley_params: Array | None # (N_ub_padded, 2) float
-  urey_bradley_mask: Array | None   # (N_ub_padded,) bool
-
-  # CMAP (optional)
-  cmap_torsions: Array | None = None               # (N_cmap_padded, 5) int
-  cmap_indices: Array | None = None                # (N_cmap_padded,) int
-  cmap_mask: Array | None = None       # (N_cmap_padded,) bool
-  cmap_coeffs: Array | None = None     # (N_maps, G, G, 16) — shared across batch
-
-  # Non-bonded exclusions — sparse per-atom arrays
-  # Used for 1-2/1-3 (fully excluded) and 1-4 (scaled) interactions.
-  excl_indices: Array = None                       # (N_padded, max_excl) int32 — excluded atom indices, -1 = unused
-  excl_scales_vdw: Array | None = None    # (N_padded, max_excl) float32 — LJ scale (0.0 or 0.5 or 1.0)
-  excl_scales_elec: Array | None = None   # (N_padded, max_excl) float32 — elec scale (0.0 or 1/1.2 or 1.0)
-
-  # RATTLE/SHAKE constraints — X-H bond pairs with target lengths
-  constraint_pairs: Array = None                   # (N_constr_padded, 2) int — atom indices for constrained bonds
-  constraint_lengths: Array | None = None   # (N_constr_padded,) float — equilibrium bond lengths (Å)
-  constraint_mask: Array | None = None      # (N_constr_padded,) bool — True for real constraints
-
-  # Metadata
-  n_real_atoms: Array | None = None
-  n_padded_atoms: int | Array = eqx.field(static=True, default=0)
-  bucket_size: int | Array = eqx.field(static=True, default=0)
-
-  # Water molecule indices for SETTLE
-  water_indices: Array | None = None               # (N_waters_padded, 3) int
-  water_mask: Array | None = None      # (N_waters_padded,) bool
-  box_size: Array | None = eqx.field(static=True, default=None) # (3,) static for PME grid shapes
-  pme_alpha: float = eqx.field(static=True, default=0.0)
-  pme_grid_points: int = eqx.field(static=True, default=64)
-  nonbonded_cutoff: float = eqx.field(static=True, default=9.0)
-
-
-  # Precomputed dense exclusion matrices (N_padded, N_padded).
-  # These are topology constants — they never change during simulation.
-  # Precomputing once avoids the costly fori_loop+scatter rebuild every step.
-  dense_excl_scale_vdw: Array | None = None   # (N_padded, N_padded) float32
-  dense_excl_scale_elec: Array | None = None  # (N_padded, N_padded) float32
-
+# Deprecated alias
+PaddedSystem = PhysicsSystem
 
 def select_bucket(n_atoms: int, buckets: tuple[int, ...] = ATOM_BUCKETS) -> int:
   """Select the smallest bucket that fits n_atoms."""
@@ -148,7 +72,7 @@ def pad_protein(
   target_ub: int | None = None,
   target_constraints: int | None = None,
   pme_alpha: float = 0.0,
-) -> PaddedSystem:
+) -> PhysicsSystem:
   """Pad a protein to specific array sizes."""
   
   pos = jnp.asarray(protein.coordinates).reshape(-1, 3)
@@ -356,7 +280,7 @@ def pad_protein(
   real_constr = p_mask[constr_pairs].all(axis=-1) if n_constraints > 0 else jnp.zeros(0, dtype=bool)
   constr_mask = pad_array(real_constr, target_constraints, False)
 
-  sys = PaddedSystem(
+  sys = PhysicsSystem(
       positions=padded_pos,
       charges=padded_charges,
       sigmas=padded_sigmas,
@@ -416,7 +340,7 @@ def pad_solvated_system(
     target_constraints: int | None = None,
     target_waters: int | None = None,
     pme_alpha: float | None = None,
-) -> PaddedSystem:
+) -> PhysicsSystem:
     """Pad a merged solvated topology to specific array sizes."""
     n_real = len(topology.positions)
     if target_atoms is None:
@@ -567,7 +491,7 @@ def pad_solvated_system(
     padded_water_indices = pad_bonded_indices(topology.water_indices, target_waters, 3)
     water_molecule_mask = create_mask(n_waters, target_waters)
 
-    return PaddedSystem(
+    return PhysicsSystem(
         box_size=np.array(topology.box_size) if topology.box_size is not None else None,
         positions=padded_pos,
         charges=padded_charges,
@@ -617,12 +541,12 @@ def pad_solvated_system(
     )
 
 
-def precompute_dense_exclusions(sys: PaddedSystem) -> PaddedSystem:
+def precompute_dense_exclusions(sys: PhysicsSystem) -> PhysicsSystem:
     """Precompute dense (N, N) exclusion scale matrices from sparse arrays.
 
     These matrices are pure topology constants — they depend only on bond
     connectivity, never on positions. Computing them once and caching on the
-    PaddedSystem eliminates a costly fori_loop+scatter from every MD step.
+    PhysicsSystem eliminates a costly fori_loop+scatter from every MD step.
 
     This gave a measured ~4x speedup in per-step force evaluation
     (0.437ms → 0ms for exclusion construction).
@@ -636,17 +560,12 @@ def precompute_dense_exclusions(sys: PaddedSystem) -> PaddedSystem:
     dense_elec = _build_dense_exclusion_scales(
         sys.excl_indices, sys.excl_scales_elec, N,
     )
-    return eqx.tree_at(
-        lambda s: (s.dense_excl_scale_vdw, s.dense_excl_scale_elec),
-        sys,
-        (dense_vdw, dense_elec),
-        is_leaf=lambda x: x is None,
-    )
+    return sys.replace(dense_excl_scale_vdw=dense_vdw, dense_excl_scale_elec=dense_elec)
 
 def bucket_proteins(
     proteins: list[Protein],
     buckets: tuple[int, ...] = ATOM_BUCKETS,
-) -> dict[int, list[PaddedSystem]]:
+) -> dict[int, list[PhysicsSystem]]:
     """Group proteins into buckets and pad each to its bucket size and max bonded terms."""
     
     # First, separate by target bucket
@@ -688,8 +607,8 @@ def bucket_proteins(
       
     return ready_buckets
 
-def collate_batch(systems: list[PaddedSystem]) -> PaddedSystem:
-    """Stack multiple PaddedSystems into a batched PaddedSystem."""
+def collate_batch(systems: list[PhysicsSystem]) -> PhysicsSystem:
+    """Stack multiple PhysicsSystems into a batched PhysicsSystem."""
     if not systems:
         raise ValueError("Cannot collate empty list.")
     
