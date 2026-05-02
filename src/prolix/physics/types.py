@@ -145,6 +145,11 @@ class PhysicsSystem(eqx.Module):
             angle_mask=d.get("angle_mask"),
             dihedral_mask=d.get("dihedral_mask"),
             improper_mask=d.get("improper_mask"),
+            excl_indices=d.get("excl_indices"),
+            excl_scales_vdw=d.get("excl_scales_vdw"),
+            excl_scales_elec=d.get("excl_scales_elec"),
+            dense_excl_scale_vdw=d.get("exclusion_mask"),
+            dense_excl_scale_elec=d.get("exclusion_mask"),
             nonbonded_cutoff=cutoff_distance,
         )
 
