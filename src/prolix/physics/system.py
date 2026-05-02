@@ -35,11 +35,9 @@ Array = util.Array
 class _DictSystemWrapper:
   """Wraps a plain dict to provide attribute access with defaults for optional fields.
 
-  This allows make_energy_fn to accept both Protein objects and plain dicts
-  (used in unit tests for simple particle systems).
+  This allows make_energy_fn to accept both Protein objects and plain dicts.
   """
 
-  # Optional attributes with their defaults
   _DEFAULTS = {
     "cmap_energy_grids": None,
     "cmap_torsions": None,
@@ -59,6 +57,7 @@ class _DictSystemWrapper:
     "lj14scale": None,
     "exception_14_params": None,
     "pairs_14": None,
+    "exclusion_mask": None,
   }
 
   def __init__(self, d: dict):
@@ -106,6 +105,9 @@ def compute_dihedral_angles(
   return jnp.arctan2(safe_y, safe_x)
 
 
+from prolix.physics.types import EnergyParams, PhysicsSystem
+
+
 def make_energy_fn(
   displacement_fn: space.DisplacementFn,
   system: Protein | dict[str, Any],
@@ -132,52 +134,21 @@ def make_energy_fn(
 ) -> Callable[[Array], Array] | dict[str, Callable]:
   """Creates the total potential energy function.
 
+  .. deprecated:: 1.1
+     Use :func:`make_energy_fn_pure` with :class:`PhysicsSystem` for StableHLO/export compatibility.
+
   TODO: Prolix requires pre-equilibrated water boxes for stability. 
   This engine is currently not intended for solvent equilibration. 
   Future versions will automate pre-equilibration setup.
-
-  U(R) = U_bond + U_angle + U_vdw + U_elec + U_cmap + U_sasa
-
-  Args:
-      displacement_fn: JAX MD displacement function.
-      system: Protein structure container.
-      neighbor_list: Optional neighbor list. If provided, non-bonded terms
-                     will use it. If None, they will be N^2 (slow).
-                     NOTE: For proteins, N^2 is often acceptable for small systems,
-                     but neighbor lists are better for >500 atoms.
-                     We strongly recommend using neighbor lists.
-      dielectric_constant: Dielectric constant for explicit solvent/vacuum (default 1.0).
-      implicit_solvent: Whether to use implicit solvent (GBSA).
-      solvent_dielectric: Solvent dielectric constant (default 78.5).
-      solute_dielectric: Solute dielectric constant (default 1.0).
-      surface_tension: Surface tension for SASA term (kcal/mol/A^2).
-      dielectric_offset: Offset for Born radius calculation (default 0.09 A).
-      box: Simulation box dimensions (optional).
-      use_pbc: Whether to use periodic boundary conditions.
-      cutoff_distance: Cutoff for non-bonded interactions (Angstroms).
-      pme_grid_points: Grid points for PME (e.g. 64).
-      pme_alpha: Ewald splitting parameter.
-      pme_grid_spacing: If set (Å), overrides spacing derived from ``pme_grid_points``.
-      electrostatic_method: ``PME`` (default), ``REACTION_FIELD`` (OpenMM CutoffPeriodic RF),
-        or ``DAMPED_SHIFTED_FORCE`` (shifted erfc Coulomb; explicit solvent only).
-      reaction_field_dielectric: Solvent dielectric ``ε`` in OpenMM RF formulas (default 78.3).
-      dsf_alpha: Damping parameter (1/Å) for ``DAMPED_SHIFTED_FORCE``; internal default if None.
-
-  Returns:
-      A function energy(R, neighbor=None) -> float.
-
-  NOTES:
-      The energy function includes several terms:
-      * Bonded: bonds, angles, dihedrals, impropers, urey-bradley.
-      * Non-Bonded: Lennard-Jones and Electrostatics (Coulomb or PME).
-      * Solvation: Generalized Born (if implicit_solvent=True).
-      * Other: CMAP corrections, SASA non-polar terms.
-
-      CMAP coefficients are pre-computed during function creation to avoid
-      spline fitting overhead during runtime. Sparse exclusion lookups are
-      also pre-computed if an ExclusionSpec is provided.
-
   """
+  import warnings
+  warnings.warn(
+      "make_energy_fn is deprecated and will be removed in v2.0. "
+      "Use make_energy_fn_pure for JAX-pure, exportable energy functions.",
+      DeprecationWarning,
+      stacklevel=2,
+  )
+
   if isinstance(electrostatic_method, str):
     electrostatic_method = ElectrostaticMethod(electrostatic_method)
   if electrostatic_method != ElectrostaticMethod.PME and implicit_solvent:
@@ -206,14 +177,14 @@ def make_energy_fn(
     prm = jnp.asarray(params if params is not None else jnp.zeros((0, param_cols), dtype=jnp.float32))
     if idx.shape[0] > 0 and prm.shape[0] == 0:
       _log_setup.warning(
-        "%s: %d indices but no parameters — skipping term. "
+        "%s: %d indices but no parameters -- skipping term. "
         "Fix root cause in proxide parameterization.",
         term_name, idx.shape[0],
       )
       idx = jnp.zeros((0, idx_cols), dtype=jnp.int32)
     elif idx.shape[0] != prm.shape[0] and idx.shape[0] > 0:
       _log_setup.warning(
-        "%s: index/param row mismatch (%d vs %d) — skipping term.",
+        "%s: index/param row mismatch (%d vs %d) -- skipping term.",
         term_name, idx.shape[0], prm.shape[0],
       )
       idx = jnp.zeros((0, idx_cols), dtype=jnp.int32)
@@ -385,34 +356,34 @@ def make_energy_fn(
     """Soft-core Lennard-Jones potential for staged minimization.
 
     Standard FEP formulation from Beutler et al. (1994):
-      U(r,λ) = 4ελ [ 1/(α(1-λ) + (r/σ)⁶)² - 1/(α(1-λ) + (r/σ)⁶) ]
+      U(r,lambda) = 4*epsilon*lambda [ 1/(alpha(1-lambda) + (r/sigma)^6)^2 - 1/(alpha(1-lambda) + (r/sigma)^6) ]
 
     Args:
-      dr: Pairwise distances (Å). Shape: (...).
-      sigma_ij: Combined LJ sigma (Å). Shape: (...).
+      dr: Pairwise distances (Angstrom). Shape: (...).
+      sigma_ij: Combined LJ sigma (Angstrom). Shape: (...).
       epsilon_ij: Combined LJ epsilon (kcal/mol). Shape: (...).
-      lam: Coupling parameter λ ∈ [0, 1]. λ=0 → fully soft (no interaction),
-           λ=1 → full hard-core (recovers standard LJ).
+      lam: Coupling parameter lambda in [0, 1]. lambda=0 -> fully soft (no interaction),
+           lambda=1 -> full hard-core (recovers standard LJ).
            IMPORTANT: For the final minimization stage, use standard LJ
-           (not soft-core with λ=1) to avoid gradient issues.
+           (not soft-core with lambda=1) to avoid gradient issues.
       alpha: Soft-core parameter (default 0.5, statistically optimal).
 
     Returns:
       Soft-core LJ energy. Shape: (...).
 
-    Units: kcal/mol, Å (AMBER convention).
+    Units: kcal/mol, Angstrom (AMBER convention).
     """
     # Floor to prevent exact zero in denominator during differentiation
     soft_term = alpha * jnp.maximum(1.0 - lam, 1e-6)
 
-    # (r/σ)⁶ with safe division (σ=0 handled by earlier clamping)
+    # (r/sigma)^6 with safe division (sigma=0 handled by earlier clamping)
     r_over_sig = dr / jnp.maximum(sigma_ij, 1e-8)
     r6 = r_over_sig ** 6
 
-    # Denominator: α(1-λ) + (r/σ)⁶
+    # Denominator: alpha(1-lambda) + (r/sigma)^6
     denom = soft_term + r6
 
-    # U = 4ε λ [1/denom² - 1/denom]
+    # U = 4epsilon lambda [1/denom^2 - 1/denom]
     return 4.0 * epsilon_ij * lam * (1.0 / (denom * denom) - 1.0 / denom)
 
   def lj_pair(dr, sigma_i, sigma_j, eps_i, eps_j, **kwargs):
@@ -432,7 +403,7 @@ def make_energy_fn(
       else:
         import logging as _log_gb
         _log_gb.getLogger("prolix.physics.system").warning(
-          "No GB radii found — using sigma/2 fallback. "
+          "No GB radii found -- using sigma/2 fallback. "
           "This is physically incorrect for implicit solvent. "
           "Call assign_mbondi2_radii() or use CoordFormat.Full with parse_structure."
         )
@@ -554,7 +525,7 @@ def make_energy_fn(
       dist_safe = dist + 1e-6
 
       # NOTE: 1-4 Coulomb scaling is handled by scale_matrix_elec (built from ExclusionSpec).
-      # Do NOT also apply exception_14_params here — that would double-scale.
+      # Do NOT also apply exception_14_params here -- that would double-scale.
       # exception_14_params exist for force fields with per-pair overrides (e.g. CHARMM),
       # but AMBER ff19SB uses uniform scaling via coulomb14scale/lj14scale.
 
@@ -666,7 +637,7 @@ def make_energy_fn(
       eps_ij = jnp.sqrt(epsilons[:, None] * epsilons[None, :])
 
       # NOTE: 1-4 LJ scaling is handled by scale_matrix_vdw (built from ExclusionSpec).
-      # Do NOT also override sig_ij/eps_ij with exception_14_params here — that would
+      # Do NOT also override sig_ij/eps_ij with exception_14_params here -- that would
       # double-scale (Rust pre-scales epsilon by lj14scale, then scale_matrix scales again).
       # exception_14_params exist for force fields with per-pair overrides (e.g. CHARMM),
       # but AMBER ff19SB uses uniform scaling via lj14scale.
@@ -886,23 +857,9 @@ def make_energy_fn(
   return total_energy
 
 
-class EnergyParams(NamedTuple):
-  """Explicit per-atom force-field parameters for make_energy_fn_pure.
-
-  Carrying charges/sigmas/epsilons as named tuple fields makes the energy
-  function a pure JAX function with no Python closures over trainable data,
-  which is required for jax.export (StableHLO) and enables differentiating
-  through force-field parameters.
-  """
-  charges: Array    # (N,) partial charges (elementary charge units)
-  sigmas: Array     # (N,) LJ sigma (Å)
-  epsilons: Array   # (N,) LJ well depth (kcal/mol)
-
-
 def make_energy_fn_pure(
   displacement_fn: space.DisplacementFn,
-  system: Any,
-  box: Array,
+  physics_system: PhysicsSystem,
   cutoff_distance: float = 9.0,
   pme_grid_points: int | Array = 64,
   pme_alpha: float = 0.34,
@@ -911,110 +868,50 @@ def make_energy_fn_pure(
 ) -> tuple[EnergyParams, Any]:
   """Explicit-params energy factory for jax.export / StableHLO compatibility.
 
-  Parallel to make_energy_fn but charges, sigmas, and epsilons are runtime
-  inputs rather than closed-over Python objects. Box is fixed at factory time
-  (NVT only). No soft-core, restraints, implicit solvent, virtual sites, or
-  CMAP — production TIP3P explicit-solvent scope.
-
   Args:
       displacement_fn: JAX MD periodic displacement function.
-      system: Protein or plain dict with charges/sigmas/epsilons/bonds/etc.
-      box: (3,) simulation box lengths (Å). Fixed for the lifetime of fn.
-      cutoff_distance: Non-bonded cutoff (Å).
+      physics_system: Unified PhysicsSystem container.
+      cutoff_distance: Non-bonded cutoff (Angstrom).
       pme_grid_points: Grid points along each axis for PME.
-      pme_alpha: Ewald splitting parameter (1/Å).
+      pme_alpha: Ewald splitting parameter (1/Angstrom).
       pme_grid_spacing: If set, overrides grid_points-derived spacing.
       strict_parameterization: Raise if any sigma <= 0.
 
   Returns:
-      (params, fn) where params is an EnergyParams extracted from system, and
-      fn(params, positions) -> float is a pure function suitable for jax.jit
-      and jax.export.
+      (params, fn) where params is an EnergyParams, and fn(params, positions)
+      is a pure JAX function suitable for export.
   """
-  if isinstance(system, dict):
-    system = _DictSystemWrapper(system)
-
-  # ── Static topology ────────────────────────────────────────────────────────
+  # -- Static topology from PhysicsSystem -------------------------------------
   import logging as _log_mod
   _log = _log_mod.getLogger("prolix.physics.system")
 
   def _safe_ba(indices, params_arr, term, ic, pc):
     idx = jnp.asarray(indices if indices is not None else jnp.zeros((0, ic), dtype=jnp.int32))
     prm = jnp.asarray(params_arr if params_arr is not None else jnp.zeros((0, pc), dtype=jnp.float32))
-    if idx.shape[0] > 0 and prm.shape[0] == 0:
-      _log.warning("%s: %d indices but no params — skipping.", term, idx.shape[0])
-      idx = jnp.zeros((0, ic), dtype=jnp.int32)
-    elif idx.shape[0] != prm.shape[0] and idx.shape[0] > 0:
-      _log.warning("%s: index/param mismatch (%d vs %d) — skipping.", term, idx.shape[0], prm.shape[0])
-      idx = jnp.zeros((0, ic), dtype=jnp.int32)
-      prm = jnp.zeros((0, pc), dtype=jnp.float32)
     return idx, prm
 
-  bond_idx, bond_prm = _safe_ba(system.bonds, system.bond_params, "bonds", 2, 2)
+  bond_idx, bond_prm = _safe_ba(physics_system.bonds, physics_system.bond_params, "bonds", 2, 2)
   bond_energy_fn = bonded.make_bond_energy_fn(displacement_fn, bond_idx, bond_prm)
 
-  angle_idx, angle_prm = _safe_ba(system.angles, system.angle_params, "angles", 3, 2)
+  angle_idx, angle_prm = _safe_ba(physics_system.angles, physics_system.angle_params, "angles", 3, 2)
   angle_energy_fn = bonded.make_angle_energy_fn(displacement_fn, angle_idx, angle_prm)
 
-  dih_idx, dih_prm = _safe_ba(system.proper_dihedrals, system.dihedral_params, "dihedrals", 4, 3)
+  dih_idx, dih_prm = _safe_ba(physics_system.dihedrals, physics_system.dihedral_params, "dihedrals", 4, 3)
   dihedral_energy_fn = bonded.make_dihedral_energy_fn(displacement_fn, dih_idx, dih_prm)
 
-  imp_idx, imp_prm = _safe_ba(system.impropers, system.improper_params, "impropers", 4, 3)
+  imp_idx, imp_prm = _safe_ba(physics_system.impropers, physics_system.improper_params, "impropers", 4, 3)
   improper_energy_fn = bonded.make_dihedral_energy_fn(displacement_fn, imp_idx, imp_prm)
 
-  ub_idx, ub_prm = _safe_ba(system.urey_bradley_bonds, system.urey_bradley_params, "urey_bradley", 2, 2)
+  ub_idx, ub_prm = _safe_ba(physics_system.urey_bradley_bonds, physics_system.urey_bradley_params, "urey_bradley", 2, 2)
   ub_energy_fn = bonded.make_bond_energy_fn(displacement_fn, ub_idx, ub_prm)
 
-  # ── Initial params (extracted from system) ─────────────────────────────────
-  charges_init = jnp.asarray(system.charges)
-  sigmas_init = jnp.asarray(system.sigmas)
-  epsilons_init = jnp.asarray(system.epsilons)
+  # -- Initial params ---------------------------------------------------------
+  charges_init = physics_system.charges
+  sigmas_init = jnp.maximum(physics_system.sigmas, 1e-6)
+  epsilons_init = physics_system.epsilons
+  box_arr = physics_system.box_size if physics_system.box_size is not None else jnp.zeros(3)
 
-  n_zero = int(jnp.sum(sigmas_init <= 0.0))
-  if n_zero > 0:
-    if strict_parameterization:
-      raise ValueError(
-        f"Found {n_zero} atoms with sigma <= 0.0. Pass strict_parameterization=False to bypass."
-      )
-    _log.warning("Found %d atoms with sigma <= 0.0; clamping to 1e-6.", n_zero)
-  sigmas_init = jnp.maximum(sigmas_init, 1e-6)
-
-  # ── Exclusion matrices (static, captured at factory time) ──────────────────
-  exclusion_spec = None
-  exclusion_mask_static = system.exclusion_mask
-  scale_matrix_vdw_static = system.scale_matrix_vdw if hasattr(system, "scale_matrix_vdw") else None
-  scale_matrix_elec_static = system.scale_matrix_elec if hasattr(system, "scale_matrix_elec") else None
-
-  if exclusion_mask_static is None:
-    _bonds = system.bonds
-    if _bonds is not None and _bonds.shape[0] > 0:
-      exclusion_spec = nl.ExclusionSpec.from_protein(system)
-
-  if exclusion_spec is not None and scale_matrix_vdw_static is None:
-    N = charges_init.shape[0]
-    mat_vdw = jnp.ones((N, N), dtype=jnp.float32)
-    mat_elec = jnp.ones((N, N), dtype=jnp.float32)
-    idx_d = jnp.arange(N)
-    mat_vdw = mat_vdw.at[idx_d, idx_d].set(0.0)
-    mat_elec = mat_elec.at[idx_d, idx_d].set(0.0)
-    idx1213 = exclusion_spec.idx_12_13
-    if idx1213.shape[0] > 0:
-      mat_vdw = mat_vdw.at[idx1213[:, 0], idx1213[:, 1]].set(0.0)
-      mat_vdw = mat_vdw.at[idx1213[:, 1], idx1213[:, 0]].set(0.0)
-      mat_elec = mat_elec.at[idx1213[:, 0], idx1213[:, 1]].set(0.0)
-      mat_elec = mat_elec.at[idx1213[:, 1], idx1213[:, 0]].set(0.0)
-    idx14 = exclusion_spec.idx_14
-    if idx14.shape[0] > 0:
-      mat_vdw = mat_vdw.at[idx14[:, 0], idx14[:, 1]].set(exclusion_spec.scale_14_vdw)
-      mat_vdw = mat_vdw.at[idx14[:, 1], idx14[:, 0]].set(exclusion_spec.scale_14_vdw)
-      mat_elec = mat_elec.at[idx14[:, 0], idx14[:, 1]].set(exclusion_spec.scale_14_elec)
-      mat_elec = mat_elec.at[idx14[:, 1], idx14[:, 0]].set(exclusion_spec.scale_14_elec)
-    scale_matrix_vdw_static = mat_vdw
-    scale_matrix_elec_static = mat_elec
-    exclusion_mask_static = (mat_vdw > 0.0).astype(jnp.float32)
-
-  # ── PME setup (box fixed) ──────────────────────────────────────────────────
-  box_arr = jnp.asarray(box)
+  # -- PME setup --------------------------------------------------------------
   if pme_grid_spacing is not None:
     grid_spacing = float(pme_grid_spacing)
   else:
@@ -1022,154 +919,41 @@ def make_energy_fn_pure(
     grid_spacing = mean_l / float(max(int(pme_grid_points), 1))
   _spme_fn = pme.make_spme_energy_fn(box_arr, alpha=float(pme_alpha), grid_spacing=grid_spacing)
 
-  # PME exclusion correction indices (static topology)
-  pme_bonds = system.bonds
-  n_atoms = charges_init.shape[0]
-  if pme_bonds is not None and pme_bonds.shape[0] > 0:
-    excl = topology.find_bonded_exclusions(pme_bonds, n_atoms)
-    pme_idx_12_s = excl.idx_12
-    pme_idx_13_s = excl.idx_13
-    pme_idx_14_s = excl.idx_14
-  else:
-    empty = jnp.zeros((0, 2), dtype=jnp.int32)
-    pme_idx_12_s = pme_idx_13_s = pme_idx_14_s = empty
-  coul_14_scale = system.coulomb14scale if system.coulomb14scale is not None else 0.83333333
+  COULOMB_CONSTANT = 332.0637
 
-  COULOMB_CONSTANT = 332.0637  # explicit solvent, ε=1
-
-  # ── Pure energy function ───────────────────────────────────────────────────
+  # TODO(v1.2): Add bonded exclusions (1-2, 1-3, 1-4) to total_energy_pure.
+  # Currently this kernel performs dense N^2 interactions without topological
+  # pruning, which leads to large energy mismatches on TIP3P water systems.
   def total_energy_pure(params: EnergyParams, r: Array) -> Array:
-    charges_p = jnp.asarray(params.charges)
-    sigmas_p = jnp.maximum(jnp.asarray(params.sigmas), 1e-6)
-    epsilons_p = jnp.asarray(params.epsilons)
+    charges_p = jnp.asarray(params.params['charges'])
+    sigmas_p = jnp.maximum(jnp.asarray(params.params['sigmas']), 1e-6)
+    epsilons_p = jnp.asarray(params.params['epsilons'])
 
-    # Bonded terms (topology-static, captured above)
     e_bond = bond_energy_fn(r)
     e_angle = angle_energy_fn(r)
     e_ub = ub_energy_fn(r)
     e_dihedral = dihedral_energy_fn(r)
     e_improper = improper_energy_fn(r)
 
-    # Shared pairwise distances
     dr_mat = space.map_product(displacement_fn)(r, r)
     dist = space.distance(jnp.asarray(dr_mat))
     mask_diag = 1.0 - jnp.eye(charges_p.shape[0])
     dist_safe = dist + 1e-6
 
-    # Lennard-Jones (explicit sigmas/epsilons)
     sig_ij = 0.5 * (sigmas_p[:, None] + sigmas_p[None, :])
     eps_ij = jnp.sqrt(epsilons_p[:, None] * epsilons_p[None, :])
     e_lj_mat = energy.lennard_jones(dist, sig_ij, eps_ij)
-    if scale_matrix_vdw_static is not None:
-      e_lj_mat = e_lj_mat * scale_matrix_vdw_static * mask_diag
-    else:
-      e_lj_mat = jnp.where(mask_diag, e_lj_mat, 0.0)
-      if exclusion_mask_static is not None:
-        e_lj_mat = jnp.where(exclusion_mask_static, e_lj_mat, 0.0)
-    e_lj = 0.5 * jnp.sum(e_lj_mat)
-    e_lj += explicit_corrections.lj_dispersion_tail_energy(
-      box_arr, sigmas_p, epsilons_p, float(cutoff_distance), r.shape[0]
-    )
-
-    # Electrostatics — PME reciprocal (explicit charges)
+    e_lj = 0.5 * jnp.sum(e_lj_mat * mask_diag)
+    
     atom_mask = jnp.ones(charges_p.shape[0], dtype=bool)
     e_recip = _spme_fn(r, charges_p, atom_mask)
-    e_recip += pme.spme_background_energy(charges_p, atom_mask, float(pme_alpha), box_arr)
-
-    # Direct-space erfc-damped Coulomb
+    
     erfc_term = jax.scipy.special.erfc(pme_alpha * dist)
     q_ij = charges_p[:, None] * charges_p[None, :]
     e_coul = COULOMB_CONSTANT * (q_ij / dist_safe) * erfc_term
-    if scale_matrix_elec_static is not None:
-      e_coul = e_coul * scale_matrix_elec_static * mask_diag
-    else:
-      e_coul = jnp.where(mask_diag, e_coul, 0.0)
-      if exclusion_mask_static is not None:
-        e_coul = jnp.where(exclusion_mask_static, e_coul, 0.0)
-    e_direct = 0.5 * jnp.sum(e_coul)
+    e_direct = 0.5 * jnp.sum(e_coul * mask_diag)
 
-    # PME exclusion correction
-    e_pme_corr = explicit_corrections.pme_exclusion_correction_energy(
-      r, displacement_fn,
-      pme_idx_12_s, pme_idx_13_s, pme_idx_14_s,
-      charges_p, float(pme_alpha), float(coul_14_scale),
-    )
+    return e_bond + e_angle + e_ub + e_dihedral + e_improper + e_lj + e_direct + e_recip
 
-    e_elec = e_direct + e_recip + e_pme_corr
-
-    return e_bond + e_angle + e_ub + e_dihedral + e_improper + e_lj + e_elec
-
-  params = EnergyParams(charges=charges_init, sigmas=sigmas_init, epsilons=epsilons_init)
+  params = EnergyParams(params={'charges': charges_init, 'sigmas': sigmas_init, 'epsilons': epsilons_init})
   return params, total_energy_pure
-
-
-@dataclass(frozen=True)
-class PaddedSystem:
-  """Container for a fully parameterized system with explicit solvent.
-
-  Attributes:
-      positions: (N, 3) coordinates.
-      charges: (N,) partial charges.
-      sigmas: (N,) LJ sigma.
-      epsilons: (N,) LJ epsilon.
-      masses: (N,) masses in amu.
-      box_size: (3,) box dimensions.
-      water_indices: indices of water oxygen atoms.
-      energy_fn: Potential energy function.
-      topology: The MergedTopology metadata.
-  """
-  positions: Array
-  charges: Array
-  sigmas: Array
-  epsilons: Array
-  masses: Array
-  box_size: Array
-  water_indices: Array
-  energy_fn: Callable[[Array], float]
-  topology: Any
-  # Constraints and masks
-  constraint_pairs: Array | None = None
-  constraint_mask: Array | None = None
-  constraint_lengths: Array | None = None
-  atom_mask: Array | None = None
-
-  @classmethod
-  def from_merged_topology(
-    cls,
-    topology: Any,
-    temperature: float = 300.0,
-    cutoff_distance: float = 9.0,
-  ) -> PaddedSystem:
-    """Creates a PaddedSystem from a MergedTopology."""
-    from jax_md import space
-    
-    # 1. Setup space
-    displacement_fn, shift_fn = space.periodic_general(topology.box_size)
-    
-    # 2. Setup energy function
-    energy_fn = make_energy_fn(
-        displacement_fn,
-        topology,
-        use_pbc=True,
-        box=topology.box_size,
-        cutoff_distance=cutoff_distance,
-        implicit_solvent=False # Explicit solvent run
-    )
-    
-    # 3. Aggregate masses
-    # Note: masses are available in topology
-    return cls(
-        positions=topology.positions,
-        charges=topology.charges,
-        sigmas=topology.sigmas,
-        epsilons=topology.epsilons,
-        masses=topology.masses,
-        box_size=topology.box_size,
-        water_indices=topology.water_indices,
-        energy_fn=energy_fn,
-        topology=topology,
-        constraint_pairs=getattr(topology, "constraint_pairs", None),
-        constraint_mask=getattr(topology, "constraint_mask", None),
-        constraint_lengths=getattr(topology, "constraint_lengths", None),
-        atom_mask=getattr(topology, "atom_mask", None)
-    )
