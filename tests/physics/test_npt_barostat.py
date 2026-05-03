@@ -224,7 +224,7 @@ def test_npt_pressure_sanity() -> None:
       ke_total = rigid_tip3p_box_ke_kcal(state.position, state.momentum, state.mass, n_w)
       virial = stress.virial_trace(state.position, state.force)
       volume = jnp.prod(state.box)
-      pressure_akma = pressure.instantaneous_pressure_akma(ke_total, virial, volume, ndim=3)
+      pressure_akma = pressure.instantaneous_pressure_akma(ke_total, virial, physics_system, params, ndim=3)
       pressure_bar_val = float(pressure_akma * BAR_PER_AKMA_PRESSURE)
       pressures_bar.append(pressure_bar_val)
 

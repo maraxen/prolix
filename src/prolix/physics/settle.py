@@ -1728,7 +1728,7 @@ def settle_csvr_npt(
     volume = pbc_module.box_volume(_box)
 
     # Instantaneous pressure
-    pressure = pressure_module.instantaneous_pressure_akma(ke_total, virial, volume, ndim=3)
+    pressure = pressure_module.instantaneous_pressure_akma(ke_total, virial, physics_system, params, ndim=3)
 
     # === Stochastic cell rescaling (Bernetti & Bussi 2020) ===
     # dε = -(dt/tau_P) * β * (P - P_0) + sqrt(2*kT*β*dt / (tau_P*V)) * noise

@@ -92,6 +92,7 @@ class PhysicsSystem(eqx.Module):
             lambda s: tuple(getattr(s, k) for k in kwargs.keys()),
             self,
             tuple(kwargs.values()),
+            is_leaf=lambda x: x is None
         )
 
     def __replace__(self: T, **kwargs) -> T:

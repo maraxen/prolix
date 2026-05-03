@@ -103,7 +103,7 @@ def run_npt_20ps():
             # Compute pressure from virial + kinetic energy
             volume = float(jnp.prod(state.box))
             virial_w = float(stress.virial_trace(state.position, state.force))
-            pressure_akma = pressure.instantaneous_pressure_akma(ke, virial_w, volume, ndim=3)
+            pressure_akma = pressure.instantaneous_pressure_akma(ke, virial_w, physics_system, params, ndim=3)
             P_inst = float(pressure_akma * BAR_PER_AKMA_PRESSURE)
             P_hist.append(P_inst)
 

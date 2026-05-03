@@ -58,32 +58,74 @@ def pme_exclusion_correction_energy(
 
 
 def lj_dispersion_tail_energy(
-  box: Array,
-  sigma: Array,
-  epsilon: Array,
-  cutoff: float,
-  n_atoms_for_tail: int | Array,
+    box: Array,
+    sigma: Array,
+    epsilon: Array,
+    cutoff: float,
+    atom_mask: Array,
 ) -> Array:
-  """Isotropic long-range Lennard-Jones dispersion correction beyond the cutoff.
+    """Isotropic long-range Lennard-Jones dispersion correction beyond the cutoff.
 
-  Matches `compute_lj_tail_correction` in system.py. Uses mean sigma/epsilon
-  and N^2 scaling; `n_atoms_for_tail` should be the real atom count for
-  padded systems.
-  """
-  box = jnp.asarray(box)
-  sigma = jnp.asarray(sigma)
-  epsilon = jnp.asarray(epsilon)
-  volume = box[0] * box[1] * box[2] if box.ndim == 1 else jnp.linalg.det(box)
+    Formula based on heterogenous sum-of-sqrt approximation:
+    E_tail = (4 * pi / V) * [ C12_sum / (9 * r_c^9) - C6_sum / (3 * r_c^3) ]
+    where C12_sum = (sum_i sqrt(eps_i) * sig_i^6)^2
+          C6_sum  = (sum_i sqrt(eps_i) * sig_i^3)^2
+    """
+    box = jnp.asarray(box)
+    sigma = jnp.asarray(sigma)
+    epsilon = jnp.asarray(epsilon)
+    atom_mask = jnp.asarray(atom_mask).astype(jnp.float32)
+    volume = box[0] * box[1] * box[2] if box.ndim == 1 else jnp.linalg.det(box)
 
-  avg_sig = jnp.mean(sigma)
-  avg_eps = jnp.mean(epsilon)
-  n_sq = jnp.asarray(n_atoms_for_tail, dtype=jnp.float32) ** 2
+    sum_c6 = jnp.sum(jnp.sqrt(epsilon) * (sigma**3) * atom_mask)
+    sum_c12 = jnp.sum(jnp.sqrt(epsilon) * (sigma**6) * atom_mask)
 
-  rc3 = cutoff**3
-  rc9 = rc3**3
-  sig3 = avg_sig**3
-  sig6 = sig3**2
-  sig9 = sig3**3
+    inv_vol = 1.0 / volume
+    e_c12 = (8.0 * jnp.pi / 9.0) * (sum_c12**2) * inv_vol * (cutoff**-9)
+    e_c6 = (8.0 * jnp.pi / 3.0) * (sum_c6**2) * inv_vol * (cutoff**-3)
+    return e_c12 - e_c6
 
-  term = (1.0 / 9.0) * (sig9 / rc9) - (1.0 / 3.0) * (sig3 / rc3)
-  return (8.0 * jnp.pi * n_sq / volume) * avg_eps * sig6 * term
+
+def lj_dispersion_tail_pressure(
+    box: Array,
+    sigma: Array,
+    epsilon: Array,
+    cutoff: float,
+    atom_mask: Array,
+) -> Array:
+    """Isotropic long-range Lennard-Jones dispersion pressure correction.
+
+    P_tail = E_tail / V.
+    """
+    volume = box[0] * box[1] * box[2] if box.ndim == 1 else jnp.linalg.det(box)
+    e_tail = lj_dispersion_tail_energy(box, sigma, epsilon, cutoff, atom_mask)
+    return e_tail / volume
+
+
+def lj_dispersion_tail_impulsive_pressure(
+    box: Array,
+    sigma: Array,
+    epsilon: Array,
+    cutoff: float,
+    atom_mask: Array,
+) -> Array:
+    """Isotropic impulsive pressure correction for unshifted potentials."""
+    box = jnp.asarray(box)
+    sigma = jnp.asarray(sigma)
+    epsilon = jnp.asarray(epsilon)
+    atom_mask = jnp.asarray(atom_mask).astype(jnp.float32)
+    volume = box[0] * box[1] * box[2] if box.ndim == 1 else jnp.linalg.det(box)
+
+    sum_c6 = jnp.sum(jnp.sqrt(epsilon) * (sigma**3) * atom_mask)
+    sum_c12 = jnp.sum(jnp.sqrt(epsilon) * (sigma**6) * atom_mask)
+
+    # u(rc) = 4 * eps * ((sig/rc)^12 - (sig/rc)^6)
+    # Impulsive term: -(2/3) * pi * rho^2 * rc^3 * u(rc)
+    # rho = N / V
+    # For mixture: -(2/3) * pi * (1/V^2) * rc^3 * sum_{i,j} u_{ij}(rc)
+    # sum_{i,j} u_{ij}(rc) = 4 * [ (sum_c12^2) * rc^-12 - (sum_c6^2) * rc^-6 ]
+    
+    inv_vol2 = 1.0 / (volume**2)
+    sum_u = 4.0 * ( (sum_c12**2) * (cutoff**-12) - (sum_c6**2) * (cutoff**-6) )
+    
+    return - (2.0 * jnp.pi / 3.0) * inv_vol2 * (cutoff**3) * sum_u
