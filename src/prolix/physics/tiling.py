@@ -1,4 +1,4 @@
-"""FlashMD tiling and padding primitives for O(N^2) kernels.
+"""FlashMD tiling and padding primitives for O(N^2) and O(N*K) kernels.
 
 Adapted from jaxbeans.
 """
@@ -83,6 +83,61 @@ def tile_reduction(
 
         # Execute kernel
         tile_res = f_tile(positions, pos_j, atom_mask, mask_j, start_idx)
+        return carry + tile_res, None
+
+    final_state, _ = jax.lax.scan(_tile_step, init_state, jnp.arange(n_tiles))
+    return final_state
+
+
+def tile_reduction_nl(
+    positions: Array,
+    neighbor_idx: Array,
+    atom_mask: Bool[Array, N],  # noqa: F821
+    f_tile: Callable[[Array, Array, Array, Array, Array, int], Array],  # noqa: F821
+    init_state: Any,
+    tile_size: int,
+) -> Any:
+    """Execute a tiled O(N*K) reduction over neighbor lists.
+
+    Args:
+        positions: (N, 3) coordinate array.
+        neighbor_idx: (N, K) neighbor indices.
+        atom_mask: (N,) boolean mask for real atoms.
+        f_tile: Kernel function (pos_i, pos_j, mask_i, mask_j, nb_idx_tile, start_idx) -> tile_result.
+        init_state: Initial accumulation state.
+        tile_size: Hyperparameter for chunking the K dimension.
+
+    Returns:
+        The accumulated reduction result.
+    """
+    n, k = neighbor_idx.shape
+    
+    # Ensure k is divisible by tile_size
+    remainder = k % tile_size
+    if remainder != 0:
+        padding_needed = tile_size - remainder
+        neighbor_idx = jnp.pad(neighbor_idx, ((0, 0), (0, padding_needed)), constant_values=-1)
+        k = k + padding_needed
+        
+    n_tiles = k // tile_size
+
+    def _tile_step(carry, j_idx):
+        start_idx = j_idx * tile_size
+
+        # Slice neighbors for this tile
+        nb_idx_tile = jax.lax.dynamic_slice(neighbor_idx, (0, start_idx), (n, tile_size)) # (N, T)
+        
+        # In JAX_MD, neighbor_idx == N represents a padded/empty neighbor.
+        # We also support -1 as a sentinel from our own padding.
+        # mask_j: (N, T)
+        mask_j = (nb_idx_tile < n) & (nb_idx_tile >= 0)
+
+        # Gather neighbor positions
+        # pos_j: (N, T, 3)
+        pos_j = jnp.where(mask_j[..., None], positions[nb_idx_tile], 0.0)
+
+        # Execute kernel
+        tile_res = f_tile(positions, pos_j, atom_mask, mask_j, nb_idx_tile, start_idx)
         return carry + tile_res, None
 
     final_state, _ = jax.lax.scan(_tile_step, init_state, jnp.arange(n_tiles))
