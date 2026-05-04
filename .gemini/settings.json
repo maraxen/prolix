@@ -1,0 +1,20 @@
+{
+  "general": {
+    "enableNotifications": true
+  },
+  "ui": {
+    "showCitations": true,
+    "showModelInfoInChat": true,
+    "terminalBuffer": false
+  },
+  "model": {
+    "name": ""
+  },
+  "tools": {
+    "truncateToolOutputThreshold": 2000
+  },
+  "experimental": {
+    "worktrees": true,
+    "contextManagement": true
+  }
+}

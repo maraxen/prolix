@@ -1,82 +1,33 @@
 from __future__ import annotations
 
-import functools
-from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, NamedTuple
-
 import jax
 import jax.numpy as jnp
-from jax_md import energy, partition, space, util
-from proxide.physics import constants
+import equinox as eqx
+from typing import Any, Callable, Tuple, Optional
+from jaxtyping import Array, Float
+from jax_md import space
 
-from prolix.physics import bonded, cmap, explicit_corrections, generalized_born, pme, virtual_sites
-from prolix.physics import neighbor_list as nl
-from prolix.physics.electrostatic_methods import (
-  ElectrostaticMethod,
-  openmm_reaction_field_coefficients,
-)
-from prolix.types import CmapTorsionIndices
-from prolix.utils import topology
+from prolix.physics.types import PhysicsSystem, DifferentiableParams
 
-from .optimization import (
-  chunked_lj_energy, 
-  chunked_lj_energy_nl,
-  chunked_coulomb_energy,
-  chunked_coulomb_energy_nl
-)
-from .types import PhysicsSystem, EnergyParams
-
-if TYPE_CHECKING:
-  from collections.abc import Callable
-  from proxide.core.containers import Protein
-
-Array = util.Array
-
-class _DictSystemWrapper:
-  """Wraps a plain dict to provide attribute access with defaults for optional fields."""
-  _DEFAULTS = {
-    "cmap_energy_grids": None, "cmap_torsions": None, "cmap_indices": None,
-    "proper_dihedrals": None, "impropers": None, "improper_params": None,
-    "urey_bradley_bonds": None, "urey_bradley_params": None, "virtual_site_def": None,
-    "virtual_site_params": None, "radii": None, "scaled_radii": None,
-    "scale_matrix_vdw": None, "scale_matrix_elec": None, "coulomb14scale": None,
-    "lj14scale": None, "exception_14_params": None, "pairs_14": None,
-    "exclusion_mask": None, "excl_indices": None, "excl_scales_vdw": None,
-    "excl_scales_elec": None, "dense_excl_scale_vdw": None, "dense_excl_scale_elec": None,
-  }
-  def __init__(self, d: dict): self._d = d
-  def __getattr__(self, name: str):
-    if name.startswith("_"): raise AttributeError(name)
-    try: return self._d[name]
-    except KeyError:
-      if name in self._DEFAULTS: return self._DEFAULTS[name]
-      raise AttributeError(f"System dict has no key '{name}' and no default is defined")
-
-def compute_dihedral_angles(r: Array, indices: Array, displacement_fn: space.DisplacementFn) -> Array:
-  r_i, r_j, r_k, r_l = r[indices[:, 0]], r[indices[:, 1]], r[indices[:, 2]], r[indices[:, 3]]
-  b0, b1, b2 = jax.vmap(displacement_fn)(r_i, r_j), jax.vmap(displacement_fn)(r_k, r_j), jax.vmap(displacement_fn)(r_l, r_k)
-  b1_unit = b1 / (jnp.linalg.norm(b1, axis=-1, keepdims=True) + 1e-8)
-  v = b0 - jnp.sum(b0 * b1_unit, axis=-1, keepdims=True) * b1_unit
-  w = b2 - jnp.sum(b2 * b1_unit, axis=-1, keepdims=True) * b1_unit
-  x, y = jnp.sum(v * w, axis=-1), jnp.sum(jnp.cross(b1_unit, v) * w, axis=-1)
-  m = (x == 0.0) & (y == 0.0); return jnp.arctan2(jnp.where(m, 0.0, y), jnp.where(m, 1.0, x))
-
-def make_energy_fn(displacement_fn, system, neighbor_list=None, exclusion_spec=None, **kwargs):
-  """Legacy closure-based energy factory."""
-  import warnings
-  warnings.warn("make_energy_fn is deprecated. Use make_energy_fn_pure.", DeprecationWarning, stacklevel=2)
-  if isinstance(system, dict): system = _DictSystemWrapper(system)
+def make_energy_fn(
+  displacement_fn: space.DisplacementFn,
+  system: PhysicsSystem,
+  cutoff_distance: float = 9.0,
+  **kwargs
+) -> Callable:
+  """Standard factory for non-pure energy functions."""
+  from prolix.physics import bonded, pme, optimization
   
   def _sba(idx, prm, ic, pc):
-    i = jnp.asarray(idx if idx is not None else jnp.zeros((0, ic), dtype=jnp.int32))
-    p = jnp.asarray(prm if prm is not None else jnp.zeros((0, pc), dtype=jnp.float32))
-    return i, p
+    idx = jnp.asarray(idx if idx is not None else jnp.zeros((0, ic), dtype=jnp.int32))
+    prm = jnp.asarray(prm if prm is not None else jnp.zeros((0, pc), dtype=jnp.float32))
+    return idx, prm
 
   bond_idx, bond_prm = _sba(system.bonds, system.bond_params, 2, 2)
   bond_energy_fn = bonded.make_bond_energy_fn(displacement_fn, bond_idx, bond_prm)
   angle_idx, angle_prm = _sba(system.angles, system.angle_params, 3, 2)
   angle_energy_fn = bonded.make_angle_energy_fn(displacement_fn, angle_idx, angle_prm)
-  dih_idx, dih_prm = _sba(system.proper_dihedrals, system.dihedral_params, 4, 3)
+  dih_idx, dih_prm = _sba(system.dihedrals, system.dihedral_params, 4, 3)
   dihedral_energy_fn = bonded.make_dihedral_energy_fn(displacement_fn, dih_idx, dih_prm)
   imp_idx, imp_prm = _sba(system.impropers, system.improper_params, 4, 3)
   improper_energy_fn = bonded.make_dihedral_energy_fn(displacement_fn, imp_idx, imp_prm)
@@ -107,7 +58,7 @@ def make_energy_fn(displacement_fn, system, neighbor_list=None, exclusion_spec=N
     if excl_mask is not None:
         mask *= excl_mask
     
-    e_lj = 0.5 * jnp.sum(energy.lennard_jones(dist, 0.5*(sigmas[:,None]+sigmas[None,:]), jnp.sqrt(epsilons[:,None]*epsilons[None,:])) * mask)
+    e_lj = 0.5 * jnp.sum(optimization.energy.lennard_jones(dist, 0.5*(sigmas[:,None]+sigmas[None,:]), jnp.sqrt(epsilons[:,None]*epsilons[None,:])) * mask)
     e_elec = 0.5 * jnp.sum(332.0637 * (charges[:,None]*charges[None,:]) / ds * jax.scipy.special.erfc(pme_alpha * dist) * mask)
     if _spme:
       e_elec += _spme(r, charges, jnp.ones(r.shape[0], bool)) + pme.spme_background_energy(charges, jnp.ones(r.shape[0], bool), pme_alpha, jnp.asarray(box))
@@ -119,53 +70,65 @@ def make_energy_fn_pure(
   displacement_fn: space.DisplacementFn,
   physics_system: PhysicsSystem,
   cutoff_distance: float = 9.0,
-  pme_grid_points: int | Array = 64,
-  pme_alpha: float = 0.34,
-  pme_grid_spacing: float | None = None,
-  strict_parameterization: bool = True,
   tile_size: int = 128,
-) -> tuple[EnergyParams, Any]:
+  pme_grid_points: int = 64
+) -> tuple[DifferentiableParams, Callable]:
   """Exportable energy factory with memory-efficient kernels."""
-  def _sba(idx, prm, ic, pc):
-    i = jnp.asarray(idx if idx is not None else jnp.zeros((0, ic), dtype=jnp.int32))
-    p = jnp.asarray(prm if prm is not None else jnp.zeros((0, pc), dtype=jnp.float32))
-    return i, p
+  from prolix.physics import bonded, pme, optimization, explicit_corrections
+  from prolix.physics.optimization import chunked_lj_energy, chunked_lj_energy_nl, chunked_coulomb_energy, chunked_coulomb_energy_nl
 
-  bond_idx, bond_prm = _sba(physics_system.bonds, physics_system.bond_params, 2, 2)
-  bond_energy_fn = bonded.make_bond_energy_fn(displacement_fn, bond_idx, bond_prm)
-  angle_idx, angle_prm = _sba(physics_system.angles, physics_system.angle_params, 3, 2)
-  angle_energy_fn = bonded.make_angle_energy_fn(displacement_fn, angle_idx, angle_prm)
-  dih_idx, dih_prm = _sba(physics_system.dihedrals, physics_system.dihedral_params, 4, 3)
-  dihedral_energy_fn = bonded.make_dihedral_energy_fn(displacement_fn, dih_idx, dih_prm)
-  imp_idx, imp_prm = _sba(physics_system.impropers, physics_system.improper_params, 4, 3)
-  improper_energy_fn = bonded.make_dihedral_energy_fn(displacement_fn, imp_idx, imp_prm)
-  ub_idx, ub_prm = _sba(physics_system.urey_bradley_bonds, physics_system.urey_bradley_params, 2, 2)
-  ub_energy_fn = bonded.make_bond_energy_fn(displacement_fn, ub_idx, ub_prm)
+  def _sba(idx, ic):
+    return jnp.asarray(idx if idx is not None else jnp.zeros((0, ic), dtype=jnp.int32))
 
-  box_arr = physics_system.box_size if physics_system.box_size is not None else jnp.zeros(3)
-  gs = float(pme_grid_spacing) if pme_grid_spacing is not None else float(jnp.mean(box_arr.astype(jnp.float64))) / float(max(int(pme_grid_points), 1))
-  _spme_fn = pme.make_spme_energy_fn(box_arr, alpha=float(pme_alpha), grid_spacing=gs)
-  COULOMB_CONSTANT = 332.0636
+  bond_idx = _sba(physics_system.bonds, 2)
+  angle_idx = _sba(physics_system.angles, 3)
+  dih_idx = _sba(physics_system.dihedrals, 4)
+  imp_idx = _sba(physics_system.impropers, 4)
+  ub_idx = _sba(physics_system.urey_bradley_bonds, 2)
 
-  def total_energy_pure_impl(params: EnergyParams, system: PhysicsSystem, neighbor: Any = None) -> Array:
-    r, charges_p = system.positions, jnp.asarray(params.params['charges'])
-    sigmas_p, epsilons_p = jnp.maximum(jnp.asarray(params.params['sigmas']), 1e-6), jnp.asarray(params.params['epsilons'])
+  bond_energy_fn = bonded.make_bond_energy_fn(displacement_fn, bond_idx)
+  angle_energy_fn = bonded.make_angle_energy_fn(displacement_fn, angle_idx)
+  dihedral_energy_fn = bonded.make_dihedral_energy_fn(displacement_fn, dih_idx)
+  improper_energy_fn = bonded.make_dihedral_energy_fn(displacement_fn, imp_idx)
+  ub_energy_fn = bonded.make_bond_energy_fn(displacement_fn, ub_idx)
+
+  COULOMB_CONSTANT = 332.0637
+
+  # SPME Setup - Precompute grid dims from initial box
+  initial_box = physics_system.box_size
+  grid_dims = pme.compute_pme_grid_dims(initial_box, jnp.mean(initial_box) / float(max(pme_grid_points, 1)))
+
+  def total_energy_pure_impl(params: DifferentiableParams, r: Array, neighbor: Any = None) -> Array:
+    charges_p = params.charges
+    sigmas_p, epsilons_p = jnp.maximum(params.sigmas, 1e-6), params.epsilons
+    pme_alpha = params.pme_alpha
+    box_arr = params.box_size
     
-    e_total = bond_energy_fn(r) + angle_energy_fn(r) + ub_energy_fn(r) + dihedral_energy_fn(r) + improper_energy_fn(r)
+    # Bonded terms
+    e_total = (
+        bond_energy_fn(r, params.bond_params) +
+        angle_energy_fn(r, params.angle_params) +
+        ub_energy_fn(r, params.urey_bradley_params) +
+        dihedral_energy_fn(r, params.dihedral_params) +
+        improper_energy_fn(r, params.improper_params)
+    )
     
+    # Non-bonded terms
     if neighbor is not None:
       nb_idx = getattr(neighbor, "idx", neighbor)
       e_lj = chunked_lj_energy_nl(r, sigmas_p, epsilons_p, nb_idx, displacement_fn, cutoff_distance, tile_size)
-      e_direct = chunked_coulomb_energy_nl(r, charges_p, nb_idx, displacement_fn, float(pme_alpha), COULOMB_CONSTANT, cutoff_distance, tile_size)
+      e_direct = chunked_coulomb_energy_nl(r, charges_p, nb_idx, displacement_fn, pme_alpha, COULOMB_CONSTANT, cutoff_distance, tile_size)
     else:
       e_lj = chunked_lj_energy(r, sigmas_p, epsilons_p, displacement_fn, cutoff_distance, tile_size)
-      e_direct = chunked_coulomb_energy(r, charges_p, displacement_fn, float(pme_alpha), COULOMB_CONSTANT, cutoff_distance, tile_size)
+      e_direct = chunked_coulomb_energy(r, charges_p, displacement_fn, pme_alpha, COULOMB_CONSTANT, cutoff_distance, tile_size)
       
-    e_recip = _spme_fn(r, charges_p, jnp.ones(charges_p.shape[0], bool)) + pme.spme_background_energy(charges_p, jnp.ones(charges_p.shape[0], bool), float(pme_alpha), jnp.asarray(system.box_size))
+    # PME Reciprocal
+    spme_fn = lambda pos, q, m: pme.spme_energy_with_forces(pos, q, m, box_arr, grid_dims, pme_alpha, 4)
+    e_recip = spme_fn(r, charges_p, physics_system.atom_mask) + pme.spme_background_energy(charges_p, physics_system.atom_mask, pme_alpha, box_arr)
     
-    # Topological Corrections (Subtract-Reciprocal-Add-Scaled-Direct protocol)
+    # Topological Corrections
     e_corr_vdw = e_corr_elec_direct = e_corr_elec_recip = 0.0
-    excl_idx, excl_sv, excl_se = system.excl_indices, system.excl_scales_vdw, system.excl_scales_elec
+    excl_idx, excl_sv, excl_se = physics_system.excl_indices, physics_system.excl_scales_vdw, physics_system.excl_scales_elec
     if excl_idx is not None and excl_idx.shape[0] > 0:
       def pair_corr(ri, rj, si, sj, ei, ej, qi, qj, sv, se):
         dr = displacement_fn(ri, rj); d = jnp.sqrt(jnp.sum(dr**2) + 1e-12); ds = d + 1e-6
@@ -173,42 +136,26 @@ def make_energy_fn_pure(
         ev = 4.0*e*((s/ds)**12-(s/ds)**6)
         ed = COULOMB_CONSTANT*(qi*qj/ds)*jax.scipy.special.erfc(pme_alpha*ds)
         er = COULOMB_CONSTANT*(qi*qj/ds)*jax.scipy.special.erf(pme_alpha*ds)
-        
-        # Apply direct cutoff to correction terms for parity with PME splitting
         if cutoff_distance > 0:
             ev = jnp.where(ds < cutoff_distance, ev, 0.0)
             ed = jnp.where(ds < cutoff_distance, ed, 0.0)
-            
-        # To get final interaction = se * (direct + recip), we must subtract (1-se)*direct and (1-se)*recip
         return (1.0-sv)*ev, (1.0-se)*ed, (1.0-se)*er
       v_corr = jax.vmap(jax.vmap(pair_corr, (None,0,None,0,None,0,None,0,0,0)), (0,0,0,0,0,0,0,0,0,0))
       ev, ed, er = v_corr(r, r[jnp.where(excl_idx>=0, excl_idx, 0)], sigmas_p, sigmas_p[jnp.where(excl_idx>=0, excl_idx, 0)], epsilons_p, epsilons_p[jnp.where(excl_idx>=0, excl_idx, 0)], charges_p, charges_p[jnp.where(excl_idx>=0, excl_idx, 0)], excl_sv, excl_se)
       m = excl_idx >= 0; e_corr_vdw += 0.5*jnp.sum(jnp.where(m, ev, 0.0)); e_corr_elec_direct += 0.5*jnp.sum(jnp.where(m, ed, 0.0)); e_corr_elec_recip += 0.5*jnp.sum(jnp.where(m, er, 0.0))
 
-    if system.dense_excl_scale_vdw is not None or system.dense_excl_scale_elec is not None:
-      dmv, dme = system.dense_excl_scale_vdw, system.dense_excl_scale_elec
+    if physics_system.dense_excl_scale_vdw is not None or physics_system.dense_excl_scale_elec is not None:
+      dmv, dme = physics_system.dense_excl_scale_vdw, physics_system.dense_excl_scale_elec
       dr_m = jax.vmap(jax.vmap(displacement_fn, (None,0)), (0,None))(r, r); dist = jnp.sqrt(jnp.sum(dr_m**2, axis=-1)+1e-12); ds = dist+1e-6
       q_ij, sig_ij, eps_ij = charges_p[:,None]*charges_p[None,:], 0.5*(sigmas_p[:,None]+sigmas_p[None,:]), jnp.sqrt(epsilons_p[:,None]*epsilons_p[None,:]); md = 1.0-jnp.eye(r.shape[0])
-      
-      # Cutoff mask for dense corrections
       c_mask = (ds < cutoff_distance) if cutoff_distance > 0 else jnp.ones_like(ds, dtype=bool)
-      
       if dmv is not None: e_corr_vdw += 0.5*jnp.sum(4.0*eps_ij*((sig_ij/ds)**12-(sig_ij/ds)**6)*(1.0-dmv)*md*c_mask)
       if dme is not None:
         e_corr_elec_direct += 0.5*jnp.sum(COULOMB_CONSTANT*(q_ij/ds)*jax.scipy.special.erfc(pme_alpha*ds)*(1.0-dme)*md*c_mask)
         e_corr_elec_recip += 0.5*jnp.sum(COULOMB_CONSTANT*(q_ij/ds)*jax.scipy.special.erf(pme_alpha*ds)*(1.0-dme)*md)
 
-    e_tail = explicit_corrections.lj_dispersion_tail_energy(
-        system.box_size, sigmas_p, epsilons_p, cutoff_distance, system.atom_mask
-    )
+    e_tail = explicit_corrections.lj_dispersion_tail_energy(box_arr, sigmas_p, epsilons_p, cutoff_distance, physics_system.atom_mask)
     return e_total + (e_lj - e_corr_vdw) + (e_direct - e_corr_elec_direct) + (e_recip - e_corr_elec_recip) + e_tail
 
-  def fn(p: EnergyParams, r: Array, neighbor: Any = None) -> Array:
-    return total_energy_pure_impl(p, physics_system.replace(positions=r), neighbor=neighbor)
-
-  params = EnergyParams(params={
-      'charges': physics_system.charges,
-      'sigmas': jnp.maximum(physics_system.sigmas, 1e-6),
-      'epsilons': physics_system.epsilons
-  })
-  return params, fn
+  params = DifferentiableParams.from_system(physics_system)
+  return params, total_energy_pure_impl

@@ -44,10 +44,17 @@ class LangevinState:
     warn_counts: Array = None  # (NUM_WARN_TYPES,) or (B, NUM_WARN_TYPES) int32; initialized in __post_init__ if None
     # Total potential energy from the last force evaluation when available (optional cache slot).
     # Scalar ``()`` for unbatched ``(N, 3)`` trajectories; ``(B,)`` when ``positions`` is ``(B, N, 3)``.
-    # Initialized to NaN when not computed (e.g. implicit ``single_padded_force`` path).
+    # Initialized to NaN when not computed (e.g. implicit ``single_padded_forcepath).
     potential_energy: Array = dataclasses.field(
         default_factory=lambda: jnp.asarray(jnp.nan, dtype=jnp.float64)
     )
+    # Neighbor list overflow flag.
+    did_overflow: Array = dataclasses.field(
+        default_factory=lambda: jnp.asarray(False, dtype=jnp.bool_)
+    )
+    # Positions at which the neighbor list was last updated.
+    # Used for buffer-aware conditional updates.
+    last_update_positions: Array = None # (B, N, 3) or (N, 3)
 
     # Named indices for warn_counts
     WARN_VLIMIT = 0
@@ -57,7 +64,7 @@ class LangevinState:
     NUM_WARN_TYPES = 4
 
     def __post_init__(self):
-        """Initialize warn_counts if None, respecting batch dimension of positions."""
+        """Initialize warn_counts and last_update_positions if None."""
         if self.warn_counts is None:
             if len(self.positions.shape) == 3:  # (B, N, 3) batched
                 B = self.positions.shape[0]
@@ -65,18 +72,28 @@ class LangevinState:
             else:  # (N, 3) unbatched
                 wc = jnp.zeros(self.NUM_WARN_TYPES, dtype=jnp.int32)
             object.__setattr__(self, 'warn_counts', wc)
+        
         pe = jnp.asarray(self.potential_energy, dtype=self.positions.dtype)
         if len(self.positions.shape) == 3 and pe.ndim == 0:
             B = self.positions.shape[0]
             pe = jnp.full((B,), jnp.nan, dtype=self.positions.dtype)
         object.__setattr__(self, 'potential_energy', pe)
 
+        overflow = jnp.asarray(self.did_overflow, dtype=jnp.bool_)
+        if len(self.positions.shape) == 3 and overflow.ndim == 0:
+            B = self.positions.shape[0]
+            overflow = jnp.full((B,), False, dtype=jnp.bool_)
+        object.__setattr__(self, 'did_overflow', overflow)
+
+        if self.last_update_positions is None:
+            object.__setattr__(self, 'last_update_positions', self.positions)
+
     def tree_flatten(self):
-        """Flatten to pytree leaves. warn_counts is always initialized by __post_init__."""
+        """Flatten to pytree leaves."""
         children = (
             self.positions, self.momentum, self.force,
             self.mass, self.key, self.cap_count, self.warn_counts,
-            self.potential_energy,
+            self.potential_energy, self.did_overflow, self.last_update_positions
         )
         aux_data = None
         return (children, aux_data)
@@ -84,6 +101,10 @@ class LangevinState:
     @classmethod
     def tree_unflatten(cls, aux_data, children):
         return cls(*children)
+
+    def replace(self, **kwargs):
+        """Return a copy with specified fields replaced."""
+        return dataclasses.replace(self, **kwargs)
 
 # ---------------------------------------------------------------------------
 # COM re-centering and rotation removal (implicit solvent)
@@ -412,6 +433,7 @@ def make_langevin_step(dt: float, kT: float, gamma: float) -> Callable[[PaddedSy
             cap_count + force_capped.astype(jnp.int32),
             wc,
             state.potential_energy,
+            did_overflow=state.did_overflow
         )
         
     return step_fn
@@ -521,6 +543,7 @@ def make_langevin_step_nl(
             cap_count + force_capped.astype(jnp.int32),
             wc,
             jnp.asarray(e_r, dtype=r.dtype),
+            did_overflow=state.did_overflow
         )
 
     return step_fn
@@ -613,6 +636,7 @@ def make_langevin_step_nl_fused(
             cap_count + force_capped.astype(jnp.int32),
             wc,
             jnp.asarray(e_r, dtype=r.dtype),
+            did_overflow=state.did_overflow
         )
 
     return step_fn
@@ -1523,18 +1547,20 @@ def build_batched_neighbor_list_jaxmd(
 def make_langevin_step_nl_dynamic(
     dt: float, kT: float, gamma: float,
     energy_fn: Callable | None = None,
+    dr_threshold: float = 0.5,
 ) -> Callable:
     """Create a BAOAB Langevin step with dynamic JAX-MD neighbor list updates.
 
     Unlike make_langevin_step_nl which takes a static neighbor_idx array,
     this version takes a full JAX-MD NeighborList object, calls nbrs.update()
-    after the position update, and returns the updated NeighborList.
+    conditionally based on atom displacement, and returns the updated NeighborList.
 
     The neighbor list update runs fully on GPU inside JIT/lax.scan.
 
     Args:
         energy_fn: Energy function taking (sys, neighbor_idx, displacement_fn).
             Defaults to single_padded_energy_nl_cvjp.
+        dr_threshold: Buffer distance for neighbor list updates.
 
     Returns:
         step_fn(padded_sys, state, nbrs) -> (LangevinState, NeighborList)
@@ -1595,12 +1621,36 @@ def make_langevin_step_nl_dynamic(
 
         # Update neighbor list AFTER force computation.
         # The updated NL will be used by the NEXT step.
-        # Cast to float32 to match JAX-MD's internal lax.cond branch types.
-        new_nbrs = nbrs.update(r.astype(jnp.float32))
+        # Buffer-aware conditional update: only call update() if max displacement
+        # exceeds half the threshold.
+        d_pos = r - state.last_update_positions
+        max_dr_sq = jnp.max(jnp.sum(d_pos**2, axis=-1))
+        
+        # JAX-MD update logic: rebuild if max_dr > dr_threshold / 2
+        update_threshold_sq = (dr_threshold / 2.0)**2
+        should_update = max_dr_sq > update_threshold_sq
+        
+        def _perform_update(args):
+            r_val, nbrs_val = args
+            return nbrs_val.update(r_val.astype(jnp.float32))
+            
+        def _skip_update(args):
+            _, nbrs_val = args
+            return nbrs_val
+            
+        new_nbrs = jax.lax.cond(should_update, _perform_update, _skip_update, (r, nbrs))
+        
+        # Update last_update_positions if we updated
+        new_last_update_positions = jnp.where(should_update, r, state.last_update_positions)
+
+        # Accumulate overflow flag
+        did_overflow = state.did_overflow | new_nbrs.did_buffer_overflow
 
         new_state = LangevinState(
             r, p, f, m, key, cap_count, state.warn_counts,
             jnp.asarray(e_r, dtype=r.dtype),
+            did_overflow=did_overflow,
+            last_update_positions=new_last_update_positions
         )
         return new_state, new_nbrs
 
@@ -1955,6 +2005,9 @@ def batched_produce_streaming_nl_dynamic(
 
             io_callback(write_fn, None, s_next.positions, batch_idx, save_idx)
 
+            # Check for overflow and signal if needed
+            # (In a real implementation we might want to stop, 
+            # but for now we just propagate the flag)
             return (s_next, nbrs_next), None
 
         (final_s, final_nbrs), _ = lax.scan(

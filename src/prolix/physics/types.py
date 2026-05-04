@@ -156,20 +156,58 @@ class PhysicsSystem(eqx.Module):
         )
 
 
+class DifferentiableParams(eqx.Module):
+    """Parameters for energy functions, structured for easy autodiff."""
+    charges: ArrayType
+    sigmas: ArrayType
+    epsilons: ArrayType
+    bond_params: ArrayType
+    angle_params: ArrayType
+    dihedral_params: ArrayType
+    improper_params: ArrayType
+    urey_bradley_params: ArrayType
+    pme_alpha: ArrayType
+    box_size: ArrayType
+
+    @classmethod
+    def from_system(cls, system: PhysicsSystem) -> "DifferentiableParams":
+        """Initialize from a PhysicsSystem."""
+        return cls(
+            charges=system.charges,
+            sigmas=system.sigmas,
+            epsilons=system.epsilons,
+            bond_params=system.bond_params,
+            angle_params=system.angle_params,
+            dihedral_params=system.dihedral_params,
+            improper_params=system.improper_params,
+            urey_bradley_params=system.urey_bradley_params
+            if system.urey_bradley_params is not None
+            else jnp.zeros((0, 2)),
+            pme_alpha=jnp.array(system.pme_alpha),
+            box_size=system.box_size if system.box_size is not None else jnp.zeros((3,)),
+        )
+
+
 class EnergyParams(eqx.Module):
     """Container for energy function parameters."""
-    params: dict[str, Any]
+    params: dict[str, Any] | DifferentiableParams
 
     @property
     def charges(self) -> ArrayType:
+        if isinstance(self.params, DifferentiableParams):
+            return self.params.charges
         return self.params["charges"]
 
     @property
     def sigmas(self) -> ArrayType:
+        if isinstance(self.params, DifferentiableParams):
+            return self.params.sigmas
         return self.params["sigmas"]
 
     @property
     def epsilons(self) -> ArrayType:
+        if isinstance(self.params, DifferentiableParams):
+            return self.params.epsilons
         return self.params["epsilons"]
 
 
@@ -187,4 +225,6 @@ class IntegratorParams(eqx.Module):
     n_dof: float | ArrayType = 0.0
     target_pressure_bar: float = 0.0
     barostat_interval: int = 1
+    compressibility: float = 4.5e-5  # bar^-1 (isothermal compressibility of water)
+    tau_barostat: float = 2000.0     # AKMA (~0.1 ps)
     virtual_site_params: Any = None

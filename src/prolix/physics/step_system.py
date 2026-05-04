@@ -76,6 +76,7 @@ from prolix.physics.settle import (
     _langevin_step_o,
     _langevin_step_o_constrained,
     settle_velocities,
+    settle_positions,
 )
 from prolix.types import Array, WaterIndicesArray
 
@@ -503,6 +504,68 @@ class SETTLE_Velocity_Step(Step):
     return state.__replace__(momentum=momentum_constrained)
 
 
+class SETTLE_Position_Step(Step):
+  """Position constraint projection using SETTLE.
+
+  Ensures water molecules maintain rigid geometry (O-H and H-H distances).
+  Calls the iterative SETTLE algorithm to project unconstrained positions
+  back onto the constraint manifold.
+  """
+
+  mass_oxygen: float = eqx.field(static=True)
+  mass_hydrogen: float = eqx.field(static=True)
+  r_OH: float = eqx.field(static=True)
+  r_HH: float = eqx.field(static=True)
+
+  def __init__(
+      self,
+      mass_oxygen: float = 15.999,
+      mass_hydrogen: float = 1.008,
+      r_OH: float = 0.9572,
+      r_HH: float = 1.5139,
+  ):
+    """Initialize SETTLE_Position_Step."""
+    self.mass_oxygen = mass_oxygen
+    self.mass_hydrogen = mass_hydrogen
+    self.r_OH = r_OH
+    self.r_HH = r_HH
+
+  def apply(
+      self,
+      state: IntegratorState,
+      params: IntegratorParams,
+  ) -> IntegratorState:
+    """Apply SETTLE position constraints.
+
+    Args:
+        state: IntegratorState with unconstrained positions and box.
+        params: IntegratorParams with water_indices and positions_old.
+
+    Returns:
+        Updated IntegratorState with constrained positions.
+    """
+    if params.water_indices is None or params.water_indices.shape[0] == 0:
+      return state
+
+    # Reference positions for SETTLE (used to fix orientation)
+    r_old = jnp.where(
+        params.positions_old is not None, params.positions_old, state.position
+    )
+
+    position_constrained = settle_positions(
+        state.position,
+        r_old,
+        params.water_indices,
+        self.r_OH,
+        self.r_HH,
+        self.mass_oxygen,
+        self.mass_hydrogen,
+        state.box,
+    )
+
+    return state.__replace__(position=position_constrained)
+
+
 class CSVR_Step(Step):
   r"""Canonical sampling via velocity rescaling (CSVR, Bussi thermostat).
 
@@ -614,6 +677,8 @@ step_registry: dict[str, type[Step]] = {
     "csvr_step": CSVR_Step,
     "nhc_step": NHC_Step,
     "mc_barostat_step": None,  # Dynamic import in make_step
+    "scr_barostat_step": None, # Dynamic import in make_step
+    "settle_position_step": SETTLE_Position_Step,
     "virtual_site_reconstruction_step": None,  # Dynamic import in make_step
 }
 
@@ -634,6 +699,9 @@ def make_step(name: str, **kwargs) -> Step:
   if name == "mc_barostat_step":
     from prolix.physics.barostat import MC_Barostat_Step
     return MC_Barostat_Step(**kwargs)
+  if name == "scr_barostat_step":
+    from prolix.physics.barostat import SCR_Barostat_Step
+    return SCR_Barostat_Step(**kwargs)
   if name == "virtual_site_reconstruction_step":
     from prolix.physics.virtual_sites_step import VirtualSiteReconstructionStep
     return VirtualSiteReconstructionStep(**kwargs)
@@ -717,20 +785,21 @@ def _initialize_step_sequences() -> None:
       ),
       "baoab_csvr_npt": StepSequence(
           name="baoab_csvr_npt",
-          steps=["v_step", "a_step", "csvr_step", "a_step", "v_step"],
+          steps=["v_step", "a_step", "settle_position_step", "scr_barostat_step", "settle_position_step", "a_step", "v_step", "settle_velocity_step", "csvr_step"],
           parameters={
               "dt": 0.5,
               "kT": 2.479,
               "n_dof": 27,
               "tau": 2000.0,  # AKMA units, ~0.1 ps
+              "target_pressure_bar": 1.0,
+              "compressibility": 4.5e-5,
+              "tau_barostat": 2000.0,
           },
           description=(
-              "BAOAB integrator with CSVR (Canonical Sampling via Velocity Rescaling) thermostat "
-              "and isobaric barostat. Structure: V(0.5) → A(0.5) → CSVR → A(0.5) → V(0.5). "
-              "For short equilibrations (< 10 ps). "
-              "Long-trajectory stability under investigation (v1.0 known issue). "
-              "Suitable for NPT (constant pressure, temperature) short runs. "
-              "Reference: Bussi et al. (2007), Bernetti & Bussi (2020)."
+              "BAOAB integrator with CSVR thermostat and SCR barostat. "
+              "Structure: V(0.5) → A(0.5) → SETTLE_pos → SCR → SETTLE_pos → A(0.5) → V(0.5) → SETTLE_vel → CSVR. "
+              "Suitable for production NPT ensemble simulations. "
+              "Reference: Bernetti & Bussi (2020)."
           ),
       ),
   }

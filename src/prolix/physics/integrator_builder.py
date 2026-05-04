@@ -447,6 +447,14 @@ def make_integrator(
       step_constructor_params["n_molecules"] = n_molecules
       step_constructor_params["pressure"] = target_pressure_bar
       step_constructor_params["energy_fn"] = energy_fn
+    elif step_name == "scr_barostat_step":
+      step_constructor_params["atom_mask"] = kwargs.get("atom_mask")
+      step_constructor_params["cutoff"] = kwargs.get("nonbonded_cutoff", 9.0)
+    elif step_name == "settle_position_step":
+      if "mass_oxygen" in merged_params:
+        step_constructor_params["mass_oxygen"] = merged_params["mass_oxygen"]
+      if "mass_hydrogen" in merged_params:
+        step_constructor_params["mass_hydrogen"] = merged_params["mass_hydrogen"]
     elif step_name == "virtual_site_reconstruction_step":
       step_constructor_params["vs_def"] = vs_def
       step_constructor_params["vs_params"] = vs_params
@@ -474,6 +482,10 @@ def make_integrator(
       ),
       positions_old=None,  # Will be updated in apply_fn
       box=None,           # Will be updated in apply_fn
+      target_pressure_bar=merged_params.get("target_pressure_bar", 0.0),
+      barostat_interval=merged_params.get("barostat_interval", 1),
+      compressibility=merged_params.get("compressibility", 4.5e-5),
+      tau_barostat=merged_params.get("tau_barostat_akma", 2000.0),
   )
 
   # ========== INITIALIZATION FUNCTION ==========

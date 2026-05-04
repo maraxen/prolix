@@ -1,19 +1,4 @@
-"""Smooth Particle Mesh Ewald (SPME) electrostatics.
-
-Custom implementation using jnp.fft.rfftn/irfftn for ~50% FFT speedup
-over the full complex FFT. Analytical forces via jax.custom_vjp to avoid
-checkpointing massive 3D grids through jax.grad.
-
-Key design decisions (see implementation plan Phase 2):
-- R2C FFTs (rfftn) halve the Z-dimension → ~50% memory + compute savings
-- Grid dims factorize into {2,3,5,7} to prevent Bluestein fallback
-- jax.custom_vjp wraps forward energy + analytical force for gradient
-- B-spline order 4 (cubic) matches AMBER/GROMACS defaults
-
-References:
-- Essmann et al., J. Chem. Phys. 103(19), 8577-8593, 1995
-- Darden, York, Pedersen, J. Chem. Phys. 98(12), 10089-10092, 1993
-"""
+"""PME (Particle Mesh Ewald) implementation in JAX."""
 
 from __future__ import annotations
 
@@ -22,7 +7,8 @@ from typing import NamedTuple
 
 import jax
 import jax.numpy as jnp
-from proxide.physics.constants import COULOMB_CONSTANT
+# kcal*A/(mol*e^2)
+COULOMB_CONSTANT = 332.0637 
 
 # ===========================================================================
 # Configuration
@@ -40,55 +26,54 @@ class SPMEParams(NamedTuple):
 # ===========================================================================
 
 def _bspline4(u: jnp.ndarray) -> jnp.ndarray:
-    """Order-4 (cubic) B-spline values and derivatives."""
-    w0 = (1.0 - u) ** 3 / 6.0
-    w1 = (3.0 * u**3 - 6.0 * u**2 + 4.0) / 6.0
-    w2 = (-3.0 * u**3 + 3.0 * u**2 + 3.0 * u + 1.0) / 6.0
-    w3 = u**3 / 6.0
-    return jnp.stack([w0, w1, w2, w3], axis=0)
+    """Evaluate 4th order B-spline basis at fractional offsets u in [0, 1)."""
+    u2 = u * u
+    u3 = u2 * u
+    
+    w0 = (1.0 - 3.0*u + 3.0*u2 - u3) / 6.0
+    w1 = (4.0 - 6.0*u2 + 3.0*u3) / 6.0
+    w2 = (1.0 + 3.0*u + 3.0*u2 - 3.0*u3) / 6.0
+    w3 = u3 / 6.0
+    return jnp.stack([w0, w1, w2, w3])
+
 
 def _bspline4_deriv(u: jnp.ndarray) -> jnp.ndarray:
-    """Order-4 B-spline derivative dM_4/du."""
-    dw0 = -0.5 * (1.0 - u) ** 2
-    dw1 = (9.0 * u**2 - 12.0 * u) / 6.0
-    dw2 = (-9.0 * u**2 + 6.0 * u + 3.0) / 6.0
-    dw3 = 0.5 * u**2
-    return jnp.stack([dw0, dw1, dw2, dw3], axis=0)
+    """Evaluate derivative of 4th order B-spline basis."""
+    u2 = u * u
+    
+    dw0 = (-3.0 + 6.0*u - 3.0*u2) / 6.0
+    dw1 = (-12.0*u + 9.0*u2) / 6.0
+    dw2 = (3.0 + 6.0*u - 9.0*u2) / 6.0
+    dw3 = (3.0*u2) / 6.0
+    return jnp.stack([dw0, dw1, dw2, dw3])
+
+
+def compute_pme_grid_dims(box_size: jnp.ndarray, grid_spacing: float = 1.0) -> tuple[int, int, int]:
+    """Determine FFT grid dimensions based on box size and target spacing."""
+    dims = jnp.ceil(box_size / grid_spacing).astype(jnp.int32)
+    # Ensure even/optimal FFT dimensions? For now just cast.
+    return (int(dims[0]), int(dims[1]), int(dims[2]))
 
 
 # ===========================================================================
-# Grid dimension selection
-# ===========================================================================
-
-def _factorizable(n: int, factors: tuple[int, ...] = (2, 3, 5, 7)) -> bool:
-    if n <= 0: return False
-    for f in factors:
-        while n % f == 0: n //= f
-    return n == 1
-
-def compute_pme_grid_dims(box_size: jnp.ndarray, grid_spacing: float = 1.0, min_dim: int = 8) -> tuple[int, int, int]:
-    dims = []
-    for L in box_size:
-        target = max(int(float(L) / grid_spacing + 0.5), min_dim)
-        n = target
-        while not _factorizable(n): n += 1
-        dims.append(n)
-    return tuple(dims)
-
-
-# ===========================================================================
-# SPME core
+# SPME Kernels
 # ===========================================================================
 
 def spread_charges(positions: jnp.ndarray, charges: jnp.ndarray, atom_mask: jnp.ndarray, box_size: jnp.ndarray, grid_dims: tuple[int, int, int], order: int = 4) -> jnp.ndarray:
+    """Spread charges onto FFT grid using B-spline interpolation."""
     Kx, Ky, Kz = grid_dims
-    frac = (positions / box_size) * jnp.array([Kx, Ky, Kz], dtype=jnp.float32)
+    K_arr = jnp.array([Kx, Ky, Kz], dtype=jnp.float32)
+    
+    # Fractional coordinates in [0, K)
+    frac = (positions / box_size) * K_arr
     grid_idx = jnp.floor(frac).astype(jnp.int32)
     u = frac - grid_idx.astype(jnp.float32)
 
+    # w shape: (order, N_atoms)
     wx = _bspline4(u[:, 0]); wy = _bspline4(u[:, 1]); wz = _bspline4(u[:, 2])
-    Q = jnp.zeros((Kx, Ky, Kz), dtype=jnp.float32)
-    q = (charges * atom_mask.astype(jnp.float32)).astype(Q.dtype)
+    
+    Q = jnp.zeros(grid_dims, dtype=jnp.float32)
+    q = charges * atom_mask.astype(jnp.float32)
 
     for dx in range(order):
         for dy in range(order):
@@ -138,10 +123,6 @@ def spme_reciprocal_energy(positions: jnp.ndarray, charges: jnp.ndarray, atom_ma
     Q_hat = jnp.fft.rfftn(Q)
     G = influence_function(grid_dims, box_size, alpha, order)
     theta = jnp.fft.irfftn(Q_hat * G, s=grid_dims)
-    
-    # Normalization Fix: JAX irfftn divides by N_grid.
-    # Parseval's theorem for discrete sum requires multiplying by N_grid 
-    # if we want the sum over reciprocal space S(m)^2 G(m) to match.
     N_grid = float(grid_dims[0] * grid_dims[1] * grid_dims[2])
     return 0.5 * COULOMB_CONSTANT * jnp.sum(Q * theta) * N_grid
 
@@ -157,27 +138,51 @@ def spme_background_energy(charges: jnp.ndarray, atom_mask: jnp.ndarray, alpha: 
     return -jnp.pi * Q**2 / (2.0 * alpha**2 * V) * COULOMB_CONSTANT
 
 
-@functools.partial(jax.custom_vjp, nondiff_argnums=(4, 5, 6))
+@functools.partial(jax.custom_vjp, nondiff_argnums=(4, 6))
 def spme_energy_with_forces(positions: jnp.ndarray, charges: jnp.ndarray, atom_mask: jnp.ndarray, box_size: jnp.ndarray, grid_dims: tuple[int, int, int], alpha: float, order: int) -> jnp.ndarray:
     return spme_reciprocal_energy(positions, charges, atom_mask, box_size, grid_dims, alpha, order) + spme_self_energy(charges, atom_mask, alpha)
 
 
 def _spme_fwd(positions, charges, atom_mask, box_size, grid_dims, alpha, order):
-    e_recip = spme_reciprocal_energy(positions, charges, atom_mask, box_size, grid_dims, alpha, order)
-    e_self = spme_self_energy(charges, atom_mask, alpha)
-    
+    Kx, Ky, Kz = grid_dims
     Q = spread_charges(positions, charges, atom_mask, box_size, grid_dims, order)
     Q_hat = jnp.fft.rfftn(Q)
-    G = influence_function(grid_dims, box_size, alpha, order)
+    
+    # Precompute G and m_sq for both energy and alpha-gradient
+    mx = jnp.fft.fftfreq(Kx) * Kx / box_size[0]
+    my = jnp.fft.fftfreq(Ky) * Ky / box_size[1]
+    mz = jnp.fft.rfftfreq(Kz) * Kz / box_size[2]
+    m_sq = mx[:, None, None] ** 2 + my[None, :, None] ** 2 + mz[None, None, :] ** 2
+    
+    V = jnp.prod(box_size)
+    gauss = jnp.exp(-jnp.pi**2 * m_sq / alpha**2)
+    m_sq_safe = jnp.where(m_sq > 0, m_sq, jnp.float32(1.0))
+    denom = jnp.pi * m_sq_safe * V
+
+    bx = _bspline_modulation(jnp.fft.fftfreq(Kx), Kx, order)
+    by = _bspline_modulation(jnp.fft.fftfreq(Ky), Ky, order)
+    bz = _bspline_modulation(jnp.fft.rfftfreq(Kz), Kz, order)
+    b_sq = (bx[:, None, None] * by[None, :, None] * bz[None, None, :]) ** 2
+    b_sq_safe = jnp.maximum(b_sq, jnp.float32(1e-10))
+
+    G = gauss / (denom * b_sq_safe)
+    G = G.at[0, 0, 0].set(0.0)
+    
+    Q_hat_sq = jnp.abs(Q_hat) ** 2
+    
+    # irfftn normalization
     theta = jnp.fft.irfftn(Q_hat * G, s=grid_dims)
-    # Store theta with the N_grid factor for force calculation consistency
-    N_grid = float(grid_dims[0] * grid_dims[1] * grid_dims[2])
-    return e_recip + e_self, (positions, charges, atom_mask, box_size, theta * N_grid)
+    N_grid = float(Kx * Ky * Kz)
+    theta_norm = theta * N_grid
+    
+    e_recip = 0.5 * COULOMB_CONSTANT * jnp.sum(Q * theta_norm)
+    e_self = spme_self_energy(charges, atom_mask, alpha)
+    
+    return e_recip + e_self, (positions, charges, atom_mask, box_size, theta_norm, m_sq, Q_hat_sq, G, alpha, mx, my, mz, Kx, Ky, Kz)
 
 
-def _spme_bwd(grid_dims, alpha, order, residuals, g):
-    positions, charges, atom_mask, box_size, theta_norm = residuals
-    Kx, Ky, Kz = grid_dims
+def _spme_bwd(grid_dims, order, residuals, g):
+    positions, charges, atom_mask, box_size, theta_norm, m_sq, Q_hat_sq, G, alpha, mx, my, mz, Kx, Ky, Kz = residuals
     K_arr = jnp.array([Kx, Ky, Kz], dtype=jnp.float32)
     frac = positions / box_size * K_arr
     grid_idx = jnp.floor(frac).astype(jnp.int32)
@@ -188,6 +193,7 @@ def _spme_bwd(grid_dims, alpha, order, residuals, g):
 
     q_masked = charges * atom_mask.astype(jnp.float32)
     forces = jnp.zeros((positions.shape[0], 3), dtype=jnp.float32)
+    potentials = jnp.zeros(positions.shape[0], dtype=jnp.float32)
 
     for dx in range(order):
         for dy in range(order):
@@ -196,15 +202,51 @@ def _spme_bwd(grid_dims, alpha, order, residuals, g):
                 iy = (grid_idx[:, 1] + dy - 1) % Ky
                 iz = (grid_idx[:, 2] + dz - 1) % Kz
                 t_val = theta_norm[ix, iy, iz]
+                
+                # Potential for charge gradient
+                w = wx[dx] * wy[dy] * wz[dz]
+                potentials = potentials + w * t_val
+                
+                # Forces for position gradient
                 fx = q_masked * (K_arr[0] / box_size[0]) * dwx[dx] * wy[dy] * wz[dz] * t_val
                 fy = q_masked * (K_arr[1] / box_size[1]) * wx[dx] * dwy[dy] * wz[dz] * t_val
                 fz = q_masked * (K_arr[2] / box_size[2]) * wx[dx] * wy[dy] * dwz[dz] * t_val
                 forces = forces + jnp.stack([fx, fy, fz], axis=-1)
 
-    # Return gradient w.r.t positions = dE/dr.
-    # E = 0.5 * sum(q_i * phi_i). dE/dr_i = q_i * dphi/dr_i.
-    # forces variable computes q_i * dphi/dr_i.
-    return COULOMB_CONSTANT * forces * g, jnp.zeros_like(charges), jnp.zeros_like(atom_mask, dtype=jnp.float32), jnp.zeros_like(box_size, dtype=jnp.float32)
+    # 1. Position gradient
+    dE_dpos = COULOMB_CONSTANT * forces * g
+
+    # 2. Charge gradient
+    dE_dq = COULOMB_CONSTANT * potentials
+    dE_dq += -2.0 * alpha / jnp.sqrt(jnp.pi) * COULOMB_CONSTANT * charges
+    dE_dq = dE_dq * atom_mask.astype(jnp.float32) * g
+
+    # 3. Alpha gradient
+    dG_dalpha = G * (2.0 * jnp.pi**2 * m_sq / alpha**3)
+    weights = jnp.ones_like(G) * 2.0
+    weights = weights.at[:, :, 0].set(1.0)
+    if Kz % 2 == 0:
+        weights = weights.at[:, :, -1].set(1.0)
+    
+    dE_dalpha_recip = 0.5 * COULOMB_CONSTANT * jnp.sum(Q_hat_sq * dG_dalpha * weights)
+    dE_dalpha_self = -1.0 / jnp.sqrt(jnp.pi) * COULOMB_CONSTANT * jnp.sum(q_masked**2)
+    dE_dalpha = (dE_dalpha_recip + dE_dalpha_self) * g
+
+    # 4. Box size gradient
+    virial_term = -1.0 / box_size * jnp.sum(positions * dE_dpos, axis=0)
+    Kz_rfft = Kz // 2 + 1
+    m_x_sq = mx[:, None, None]**2 * jnp.ones((1, Ky, Kz_rfft), dtype=jnp.float32)
+    m_y_sq = my[None, :, None]**2 * jnp.ones((Kx, 1, Kz_rfft), dtype=jnp.float32)
+    m_z_sq = mz[None, None, :]**2 * jnp.ones((Kx, Ky, 1), dtype=jnp.float32)
+    m_i_sq = jnp.stack([m_x_sq, m_y_sq, m_z_sq], axis=-1)
+    
+    term_alpha = 2.0 * jnp.pi**2 * m_i_sq / alpha**2
+    term_msq = 2.0 * m_i_sq / jnp.where(m_sq[:, :, :, None] > 0, m_sq[:, :, :, None], 1.0)
+    dG_dL = G[:, :, :, None] * (term_alpha + term_msq - 1.0) / box_size
+    dE_dL_recip = 0.5 * COULOMB_CONSTANT * jnp.sum(Q_hat_sq[:, :, :, None] * dG_dL * weights[:, :, :, None], axis=(0, 1, 2))
+    dE_dL = (virial_term + dE_dL_recip) * g
+
+    return dE_dpos, dE_dq, jnp.zeros_like(atom_mask, dtype=jnp.float32), dE_dL, dE_dalpha
 
 spme_energy_with_forces.defvjp(_spme_fwd, _spme_bwd)
 

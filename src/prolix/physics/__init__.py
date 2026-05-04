@@ -57,7 +57,7 @@ from prolix.physics.units import (
 )
 
 # Explicit-params energy API for jax.export / StableHLO (v1.1 Item 1)
-from prolix.physics.system import EnergyParams, make_energy_fn_pure
+from prolix.physics.system import DifferentiableParams, make_energy_fn_pure
 
 # kUPS cross-validation unit conversion adapter (v1.1 Item 3)
 from prolix.physics import kups_adapter
@@ -120,7 +120,7 @@ __all__ = [
   "WATER_COMPRESSIBILITY_300K_AKMA_INV",
   "AKMA_TIME_UNIT_FS",
   # Explicit-params energy API (v1.1 Item 1)
-  "EnergyParams",
+  "DifferentiableParams",
   "make_energy_fn_pure",
   # kUPS adapter (v1.1 Item 3)
   "kups_adapter",

@@ -123,3 +123,108 @@ class MC_Barostat_Step(Step):
             rng=final_rng,
             step_count=new_step_count
         )
+
+class SCR_Barostat_Step(Step):
+    """Stochastic Cell Rescaling barostat step (Bernetti & Bussi 2020).
+
+    Modular implementation of the SCR barostat for NPT ensemble.
+    Scales box and positions to maintain constant pressure via a 
+    Langevin-like update on the log-volume.
+
+    Attributes:
+        mu_min: Safety clamp for the scaling factor mu (default 0.99).
+        atom_mask: Optional mask for real atoms (for tail corrections).
+        cutoff: Cutoff distance for tail corrections.
+    """
+    mu_min: float = eqx.field(static=True, default=0.99)
+    atom_mask: Optional[jnp.ndarray] = eqx.field(static=True, default=None)
+    cutoff: float = eqx.field(static=True, default=9.0)
+
+    def apply(
+        self,
+        state: IntegratorState,
+        params: IntegratorParams,
+    ) -> IntegratorState:
+        """Apply stochastic cell rescaling.
+
+        Args:
+            state: IntegratorState with position, momentum, force, box, and RNG.
+            params: IntegratorParams with dt, kT, target_pressure_bar, compressibility, 
+                    tau_barostat, and energy_params.
+
+        Returns:
+            Updated IntegratorState with scaled box and positions.
+        """
+        # 1. Physical Parameters
+        dt = params.dt
+        kT = params.kT
+        tau = params.tau_barostat
+        compressibility = params.compressibility
+        target_pressure_bar = params.target_pressure_bar
+        
+        # AKMA pressure unit: kcal/mol/Å³
+        from prolix.physics.units import AKMA_PRESSURE_PER_BAR
+        target_pressure_akma = target_pressure_bar * AKMA_PRESSURE_PER_BAR
+        
+        # 2. Kinetic Energy (kcal/mol)
+        velocity = state.momentum / state.mass
+        ke_total = 0.5 * jnp.sum(state.mass * velocity**2)
+        
+        # 3. Virial Trace (kcal/mol)
+        # Use positions_old if available (consistent with force eval), else current positions
+        r_for_virial = jnp.where(params.positions_old is not None, params.positions_old, state.position)
+        virial = jnp.sum(r_for_virial * state.force)
+        
+        # 4. Instantaneous Pressure (AKMA)
+        volume = state.box[0] * state.box[1] * state.box[2]
+        
+        # Optional tail corrections
+        from prolix.physics import explicit_corrections
+        sigmas = jnp.maximum(params.energy_params.sigmas, 1e-6)
+        epsilons = params.energy_params.epsilons
+        
+        if self.atom_mask is not None:
+            p_tail = explicit_corrections.lj_dispersion_tail_pressure(
+                state.box, sigmas, epsilons, self.cutoff, self.atom_mask
+            )
+            p_imp = explicit_corrections.lj_dispersion_tail_impulsive_pressure(
+                state.box, sigmas, epsilons, self.cutoff, self.atom_mask
+            )
+        else:
+            p_tail = 0.0
+            p_imp = 0.0
+            
+        total_virial = virial + (p_tail + p_imp) * volume * 3.0
+        pressure = (2.0 * ke_total + total_virial) / (3.0 * volume)
+        
+        # SCR Stochastic Dynamics
+        # dε = (dt/τ) * β * (P - P_0) + sqrt(2*kT*β*dt / (τ*V)) * noise
+        pressure_deviation = pressure - target_pressure_akma
+        
+        # Convert compressibility from bar^-1 to AKMA^-1
+        from prolix.physics.units import BAR_PER_AKMA_PRESSURE
+        compressibility_akma = compressibility * BAR_PER_AKMA_PRESSURE
+        
+        key, split = jax.random.split(state.rng)
+        random_noise = jax.random.normal(split, dtype=state.box.dtype)
+        
+        depsilon_det = (dt / tau) * compressibility_akma * pressure_deviation
+        depsilon_stoch = jnp.sqrt(2.0 * kT * compressibility_akma * dt / (tau * volume)) * random_noise
+        depsilon = depsilon_det + depsilon_stoch
+        
+        # mu = exp(dε/3)
+        mu = jnp.exp(depsilon / 3.0)
+        
+        # Safety clamp: μ ∈ [μ_min, 1/μ_min]
+        mu_max = 1.0 / self.mu_min
+        mu = jnp.clip(mu, self.mu_min, mu_max)
+        
+        # 6. Apply Scaling
+        new_box = state.box * mu
+        new_position = state.position * mu
+        
+        return state.__replace__(
+            position=new_position,
+            box=new_box,
+            rng=key
+        )

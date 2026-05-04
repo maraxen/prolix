@@ -20,16 +20,16 @@ def test_bond_energy():
   bond_indices = jnp.array([[0, 1]])
   bond_params = jnp.array([[1.0, 100.0]])
 
-  energy_fn = bonded.make_bond_energy_fn(displacement_fn, bond_indices, bond_params)
+  energy_fn = bonded.make_bond_energy_fn(displacement_fn, bond_indices)
 
-  e = energy_fn(r)
+  e = energy_fn(r, bond_params)
   assert jnp.isclose(e, 0.5)
 
   # Check forces
   # F = -dE/dr
   # Force on atom 1 should be pulling back (-x direction)
-  grad_fn = jax.grad(energy_fn)
-  forces = -grad_fn(r)
+  grad_fn = jax.grad(energy_fn, argnums=0)
+  forces = -grad_fn(r, bond_params)
 
   # F_spring = -k * x = -100 * 0.1 = -10
   # Atom 1 is at 1.1, should be pulled left (-10)
@@ -52,8 +52,8 @@ def test_angle_energy():
   angle_indices = jnp.array([[0, 1, 2]])  # 1 is central
   angle_params = jnp.array([[jnp.pi, 100.0]])
 
-  energy_fn = bonded.make_angle_energy_fn(displacement_fn, angle_indices, angle_params)
+  energy_fn = bonded.make_angle_energy_fn(displacement_fn, angle_indices)
 
-  e = energy_fn(r)
+  e = energy_fn(r, angle_params)
   expected = 0.5 * 100.0 * (jnp.pi / 2.0) ** 2
   assert jnp.isclose(e, expected, rtol=1e-4)
