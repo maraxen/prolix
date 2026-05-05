@@ -18,7 +18,7 @@ if TYPE_CHECKING:
   from collections.abc import Callable
 
   from proxide.core.containers import Protein
-  from proxide.types import SystemParams
+  from prolix.typing import SystemParams
 
 Array = util.Array
 
@@ -52,53 +52,11 @@ class SimulationSpec:
     return int(self.total_time_ns * 1000.0 / self.dt)
 
 
-@jax.tree_util.register_pytree_node_class
-@dataclasses.dataclass
-class NVTLangevinState:
-  position: Array
-  momentum: Array
-  force: Array
-  mass: Array
-  rng: Array
-
-  def set(self, **kwargs):
-    return dataclasses.replace(self, **kwargs)
-
-  def tree_flatten(self):
-    return ((self.position, self.momentum, self.force, self.mass, self.rng), None)
-
-  @classmethod
-  def tree_unflatten(cls, aux_data, children):
-    return cls(*children)
-
-
-@jax.tree_util.register_pytree_node_class
-@dataclasses.dataclass
-class NPTState:
-  """State for NPT (isothermal-isobaric) ensemble integrators.
-
-  Extends NVTLangevinState with box dimensions for pressure control.
-  """
-
-  position: Array
-  momentum: Array
-  force: Array
-  mass: Array
-  rng: Array
-  box: Array  # Current box dimensions (3,) for orthogonal or (3,3) for triclinic
-
-  def set(self, **kwargs):
-    return dataclasses.replace(self, **kwargs)
-
-  def tree_flatten(self):
-    return ((self.position, self.momentum, self.force, self.mass, self.rng, self.box), None)
-
-  @classmethod
-  def tree_unflatten(cls, aux_data, children):
-    return cls(*children)
+from prolix.typing import NPTState, NVTLangevinState
 
 
 def rattle_langevin(
+
   energy_or_force_fn: Callable[..., Array],
   shift_fn: Callable[..., Array],
   dt: float,
@@ -109,7 +67,6 @@ def rattle_langevin(
 ):
   """Langevin dynamics with RATTLE constraints."""
   force_fn = quantity.canonicalize_force(energy_or_force_fn)
-  dt / 2
 
   def init_fn(key, R, mass=mass, **kwargs):
     _kT = kwargs.pop("kT", kT)
@@ -136,7 +93,6 @@ def rattle_langevin(
   def apply_fn(state, **kwargs):
     _dt = kwargs.pop("dt", dt)
     _kT = kwargs.pop("kT", kT)
-    _dt / 2
 
     # Velocity Update 1
     momentum = state.momentum + 0.5 * _dt * state.force
@@ -149,7 +105,7 @@ def rattle_langevin(
     c1 = jnp.exp(-gamma * _dt)
     c2 = jnp.sqrt(1 - c1**2)
 
-    key, split = random.split(state.rng)
+    key, split = random.split(state.key)
     noise = random.normal(split, state.momentum.shape)
     momentum = c1 * momentum + c2 * jnp.sqrt(state.mass * _kT) * noise
 
@@ -160,19 +116,7 @@ def rattle_langevin(
     # --- SHAKE (Position Constraint) ---
     if constraints is not None:
       pairs, lengths = constraints
-      # Project position to satisfy bond lengths
-      # Iterative SHAKE
-      # We need to update position AND momentum (to be consistent r(t+dt) - r(t))?
-      # Standard RATTLE updates r(t+dt) and v(t+dt/2).
-      # Here we are at step 4 (end of position update).
-      # We should project position.
-      # And correct momentum?
-      # In BAOAB with RATTLE, usually:
-      # R_new = R_old + ...
-      # Project R_new.
-      # V_new = (R_new - R_old) / dt? No, that's Verlet.
-      # For Langevin, we just project R.
-      # And usually we project V at the end (RATTLE).
+      from prolix.physics.constraints import project_positions, project_momenta
 
       position = project_positions(position, pairs, lengths, state.mass, shift_fn)
 
@@ -185,115 +129,13 @@ def rattle_langevin(
     # --- RATTLE (Velocity Constraint) ---
     if constraints is not None:
       pairs, lengths = constraints
+      from prolix.physics.constraints import project_momenta
       # Project momentum to be orthogonal to bonds
       momentum = project_momenta(momentum, position, pairs, state.mass, shift_fn)
 
     return NVTLangevinState(position, momentum, force, state.mass, key)
 
   return init_fn, apply_fn
-
-
-def project_positions(R, pairs, lengths, mass, shift_fn, constraint_mask=None, tol=1e-5, max_iter=20):
-  """Iterative SHAKE projection for positions.
-
-  Constrains bond lengths to their target values by iteratively
-  adjusting atom positions. Uses the standard SHAKE algorithm
-  with mass-weighted corrections.
-
-  Args:
-      R: Positions (N, 3).
-      pairs: (M, 2) int — atom index pairs for constrained bonds.
-      lengths: (M,) float — target bond lengths.
-      mass: (N, 1) float — per-atom masses.
-      shift_fn: JAX-MD shift function (unused for free space).
-      constraint_mask: (M,) bool — True for real constraints. If None, all active.
-      tol: Convergence tolerance (unused — fixed iteration count for JIT).
-      max_iter: Number of SHAKE iterations.
-
-  Returns:
-      Projected positions (N, 3).
-  """
-  if constraint_mask is None:
-    constraint_mask = jnp.ones(len(pairs), dtype=jnp.float32)
-  else:
-    constraint_mask = constraint_mask.astype(jnp.float32)
-
-  def body_fn(i, R_curr):
-    r1 = R_curr[pairs[:, 0]]
-    r2 = R_curr[pairs[:, 1]]
-    d_vec = r1 - r2  # Free space displacement
-    d2 = jnp.sum(d_vec**2, axis=-1)
-    diff = d2 - lengths**2
-
-    inv_m1 = 1.0 / mass[pairs[:, 0], 0]
-    inv_m2 = 1.0 / mass[pairs[:, 1], 0]
-    w_sum = inv_m1 + inv_m2
-
-    # g = -diff / (2 * w_sum * d2) — standard SHAKE correction scalar
-    g = -diff / (2.0 * w_sum * d2 + 1e-8)
-    # Zero correction for padded constraints
-    g = g * constraint_mask
-
-    delta = d_vec * g[:, None]  # (M, 3)
-    d1 = delta * inv_m1[:, None]
-    d2_corr = -delta * inv_m2[:, None]
-
-    R_curr = R_curr.at[pairs[:, 0]].add(d1)
-    R_curr = R_curr.at[pairs[:, 1]].add(d2_corr)
-    return R_curr
-
-  return jax.lax.fori_loop(0, max_iter, lambda i, r: body_fn(i, r), R)
-
-
-def project_momenta(P, R, pairs, mass, shift_fn, constraint_mask=None, tol=1e-6, max_iter=20):
-  """Iterative RATTLE projection for momenta.
-
-  Projects momenta so that velocities are orthogonal to constrained bonds,
-  ensuring time-reversal symmetry and energy conservation.
-
-  Args:
-      P: Momenta (N, 3).
-      R: Current positions (N, 3) — after SHAKE projection.
-      pairs: (M, 2) int — constrained bond pairs.
-      mass: (N, 1) float — per-atom masses.
-      shift_fn: JAX-MD shift function (unused for free space).
-      constraint_mask: (M,) bool — True for real constraints.
-      tol: Convergence tolerance (unused — fixed iteration).
-      max_iter: Number of RATTLE iterations.
-
-  Returns:
-      Projected momenta (N, 3).
-  """
-  if constraint_mask is None:
-    constraint_mask = jnp.ones(len(pairs), dtype=jnp.float32)
-  else:
-    constraint_mask = constraint_mask.astype(jnp.float32)
-
-  inv_m1 = 1.0 / mass[pairs[:, 0], 0]
-  inv_m2 = 1.0 / mass[pairs[:, 1], 0]
-  w_sum = inv_m1 + inv_m2
-
-  r1 = R[pairs[:, 0]]
-  r2 = R[pairs[:, 1]]
-  r12 = r1 - r2  # Free space displacement
-
-  def body_fn(i, P_curr):
-    v1 = P_curr[pairs[:, 0]] * inv_m1[:, None]
-    v2 = P_curr[pairs[:, 1]] * inv_m2[:, None]
-    v12 = v1 - v2
-
-    dot = jnp.sum(v12 * r12, axis=-1)
-    d2 = jnp.sum(r12**2, axis=-1)
-    k = -dot / (w_sum * d2 + 1e-8)
-    # Zero impulse for padded constraints
-    k = k * constraint_mask
-
-    impulse = r12 * k[:, None]  # (M, 3)
-    P_curr = P_curr.at[pairs[:, 0]].add(impulse)
-    P_curr = P_curr.at[pairs[:, 1]].add(-impulse)
-    return P_curr
-
-  return jax.lax.fori_loop(0, max_iter, lambda i, p: body_fn(i, p), P)
 
 
 def run_minimization(
@@ -499,7 +341,7 @@ def run_nvt_nose_hoover(
     return apply_fn(state)
 
   state = jax.lax.fori_loop(0, steps, step_fn, state)
-  return state.position
+  return state.positions
 
 
 def run_brownian(
@@ -525,7 +367,7 @@ def run_brownian(
     return apply_fn(state)
 
   state = jax.lax.fori_loop(0, steps, step_fn, state)
-  return state.position
+  return state.positions
 
 
 def run_simulation(

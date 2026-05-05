@@ -48,9 +48,23 @@ def _bspline4_deriv(u: jnp.ndarray) -> jnp.ndarray:
     return jnp.stack([dw0, dw1, dw2, dw3])
 
 
-def compute_pme_grid_dims(box_size: jnp.ndarray, grid_spacing: float = 1.0) -> tuple[int, int, int]:
+def _factorizable(n: int) -> bool:
+    """True if n is a product of small primes {2, 3, 5, 7} for efficient FFT."""
+    if n <= 1: return True
+    for p in [2, 3, 5, 7]:
+        while n % p == 0:
+            n //= p
+    return n == 1
+
+
+def compute_pme_grid_dims(
+    box_size: jnp.ndarray, 
+    grid_spacing: float = 1.0, 
+    min_dim: int = 8
+) -> tuple[int, int, int]:
     """Determine FFT grid dimensions based on box size and target spacing."""
     dims = jnp.ceil(box_size / grid_spacing).astype(jnp.int32)
+    dims = jnp.maximum(dims, min_dim)
     # Ensure even/optimal FFT dimensions? For now just cast.
     return (int(dims[0]), int(dims[1]), int(dims[2]))
 

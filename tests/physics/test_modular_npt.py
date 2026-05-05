@@ -47,7 +47,7 @@ def test_modular_scr_barostat_smoke():
     # Check that box has changed
     assert not jnp.allclose(curr_state.box, box, atol=1e-5)
     assert jnp.all(curr_state.box > 0)
-    assert not jnp.any(jnp.isnan(curr_state.position))
+    assert not jnp.any(jnp.isnan(curr_state.positions))
     assert curr_state.step_count == 5
 
 def test_modular_npt_with_settle():
@@ -87,14 +87,14 @@ def test_modular_npt_with_settle():
     def get_dist(p, i, j):
         return jnp.sqrt(jnp.sum((p[i]-p[j])**2))
     
-    d_OH1 = get_dist(state.position, 0, 1)
+    d_OH1 = get_dist(state.positions, 0, 1)
     assert jnp.allclose(d_OH1, 0.9572, atol=1e-3)
     
     # Run 1 step (includes SCR and SETTLE)
     state_new = apply_fn(state)
     
     # After scaling, check constraints are still preserved
-    d_OH1_new = get_dist(state_new.position, 0, 1)
+    d_OH1_new = get_dist(state_new.positions, 0, 1)
     assert jnp.allclose(d_OH1_new, 0.9572, atol=1e-3)
 
 if __name__ == "__main__":

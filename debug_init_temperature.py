@@ -81,7 +81,7 @@ def check_init_temperature():
     temps_const = []
     for i, s in enumerate(range(seed, seed + 3)):
         state = init_s_const(jax.random.PRNGKey(s), jnp.array(positions_a), mass=mass)
-        ke_r = float(rigid_tip3p_box_ke_kcal(state.position, state.momentum, state.mass, n_waters))
+        ke_r = float(rigid_tip3p_box_ke_kcal(state.positions, state.momentum, state.mass, n_waters))
         t = 2.0 * ke_r / (dof_rigid * BOLTZMANN_KCAL)
         temps_const.append(t)
         print(f"  Seed {s}: KE={ke_r:.6f}, T={t:.1f} K")
@@ -106,7 +106,7 @@ def check_init_temperature():
     temps_unconst = []
     for i, s in enumerate(range(seed, seed + 3)):
         state = init_s_unconst(jax.random.PRNGKey(s), jnp.array(positions_a), mass=mass)
-        ke_r = float(rigid_tip3p_box_ke_kcal(state.position, state.momentum, state.mass, n_waters))
+        ke_r = float(rigid_tip3p_box_ke_kcal(state.positions, state.momentum, state.mass, n_waters))
         t = 2.0 * ke_r / (dof_rigid * BOLTZMANN_KCAL)
         temps_unconst.append(t)
         print(f"  Seed {s}: KE={ke_r:.6f}, T={t:.1f} K")

@@ -27,7 +27,7 @@ from prolix.physics.simulate import NPTState
 from prolix.simulate import AKMA_TIME_UNIT_FS, BOLTZMANN_KCAL
 from .test_explicit_langevin_tip3p_parity import (
     _grid_water_positions,
-    _prolix_params_pure_water,
+    _proxide_params_pure_water,
 )
 
 
@@ -146,7 +146,7 @@ def test_settle_nvt_100ps_constraint_satisfaction() -> None:
     gamma_ps = 1.0
     gamma_reduced = float(gamma_ps) * float(AKMA_TIME_UNIT_FS) * 1e-3
 
-    sys_dict = _prolix_params_pure_water(n_waters)
+    sys_dict = _proxide_params_pure_water(n_waters)
     displacement_fn, shift_fn = pbc.create_periodic_space(box_vec)
     energy_fn = system.make_energy_fn(
         displacement_fn,
@@ -190,13 +190,13 @@ def test_settle_nvt_100ps_constraint_satisfaction() -> None:
 
         if step >= burn and step % measurement_interval == 0:
             rmsd = _constraint_rmsd_angstrom(
-                state.position, water_indices, settle.TIP3P_ROH, box=box_vec
+                state.positions, water_indices, settle.TIP3P_ROH, box=box_vec
             )
             rmsds.append(rmsd)
 
             # Track maximum per-bond deviation
             roh_actual = _compute_oh_bond_distances(
-                state.position, water_indices, box=box_vec
+                state.positions, water_indices, box=box_vec
             )
             roh_error = jnp.abs(roh_actual - settle.TIP3P_ROH)
             max_deviation = max(max_deviation, float(jnp.max(roh_error)))
@@ -242,7 +242,7 @@ def test_settle_npt_10ps_constraint_satisfaction() -> None:
     tau_baro_akma = 2000.0
     tau_thermo_akma = 2000.0
 
-    sys_dict = _prolix_params_pure_water(n_waters)
+    sys_dict = _proxide_params_pure_water(n_waters)
     displacement_fn, shift_fn = pbc.create_periodic_space(box_vec)
     energy_fn = system.make_energy_fn(
         displacement_fn,
@@ -284,13 +284,13 @@ def test_settle_npt_10ps_constraint_satisfaction() -> None:
 
         if step >= burn and step % measurement_interval == 0:
             rmsd = _constraint_rmsd_angstrom(
-                state.position, water_indices, settle.TIP3P_ROH, box=state.box
+                state.positions, water_indices, settle.TIP3P_ROH, box=state.box
             )
             rmsds.append(rmsd)
 
             # Track maximum per-bond deviation
             roh_actual = _compute_oh_bond_distances(
-                state.position, water_indices, box=state.box
+                state.positions, water_indices, box=state.box
             )
             roh_error = jnp.abs(roh_actual - settle.TIP3P_ROH)
             max_deviation = max(max_deviation, float(jnp.max(roh_error)))

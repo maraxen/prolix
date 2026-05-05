@@ -21,9 +21,20 @@ import jax.numpy as jnp
 from jax import random
 from jax_md import quantity, simulate
 
-from prolix.types import WaterIndices, WaterIndicesArray
+from prolix.physics import (
+    md_potential_bundle,
+    pbc as pbc_module,
+    pressure as pressure_module,
+    rigid_water_ke,
+    stress as stress_module,
+    units as units_module,
+)
+from prolix.physics.constraints import project_momenta, project_positions
+from prolix.typing import NPTState, NVTLangevinState, WaterIndices, WaterIndicesArray
+
 
 if TYPE_CHECKING:
+
   from jax_md.util import Array
 
 Array = Any
@@ -542,8 +553,6 @@ def _make_settle_compatible_force_fn(
   If ``mass`` is a scalar, the atom count is unknown at integrator construction time;
   we fall back to ``canonicalize_force`` only.
   """
-  from jax_md import quantity
-
   mass_arr = jnp.asarray(mass)
   if mass_arr.ndim == 0:
     return quantity.canonicalize_force(energy_or_force_fn)
@@ -552,9 +561,7 @@ def _make_settle_compatible_force_fn(
   kw: dict[str, Any] = {}
   if box_template is not None:
     kw["box"] = box_template
-  from prolix.physics.md_potential_bundle import make_force_fn_like_canonicalize
-
-  return make_force_fn_like_canonicalize(
+  return md_potential_bundle.make_force_fn_like_canonicalize(
     energy_or_force_fn,
     template_R=template_R,
     template_kwargs=kw if kw else None,
@@ -700,9 +707,6 @@ def settle_langevin(
     # Store mass for broadcasting
     mass_state = mass_arr[:, None]
 
-    # Import required components from simulate module
-    from prolix.physics.simulate import NVTLangevinState
-
     return NVTLangevinState(R, momenta, force, mass_state, key)
 
   def apply_fn(state, **kwargs):
@@ -710,26 +714,25 @@ def settle_langevin(
     _kT = kwargs.pop("kT", kT)
 
     # Store old positions for SETTLE
-    positions_old = state.position
+    positions_old = state.positions
 
     momentum = _langevin_step_b(state.momentum, state.force, _dt)
-    position = _langevin_step_a(state.position, momentum, state.mass, _dt, shift_fn)
+    position = _langevin_step_a(state.positions, momentum, state.mass, _dt, shift_fn)
 
     # Stochastic update (BAOAB "O" step)
     # When project_ou_momentum_rigid=True, use constrained noise directly in rigid-body subspace.
     # This provides correct covariance (kT * M * P_rigid) for equipartition across 6*N_w-3 DOF.
     if project_ou_momentum_rigid:
       momentum, key = _langevin_step_o_constrained(
-        momentum, position, state.mass, gamma, _dt, _kT, state.rng, water_indices
+        momentum, position, state.mass, gamma, _dt, _kT, state.key, water_indices
       )
     else:
-      momentum, key = _langevin_step_o(momentum, state.mass, gamma, _dt, _kT, state.rng)
+      momentum, key = _langevin_step_o(momentum, state.mass, gamma, _dt, _kT, state.key)
 
     position = _langevin_step_a(position, momentum, state.mass, _dt, shift_fn)
 
     # Solute RATTLE (SHAKE) - applied BEFORE SETTLE per batched_simulate convention
     if constraints is not None:
-      from prolix.physics.simulate import project_positions
       pairs, lengths = constraints
       position = project_positions(position, pairs, lengths, state.mass, shift_fn)
 
@@ -750,7 +753,6 @@ def settle_langevin(
 
     # Solute RATTLE (Velocity)
     if constraints is not None:
-      from prolix.physics.simulate import project_momenta
       pairs, _ = constraints
       momentum = project_momenta(momentum, position, pairs, state.mass, shift_fn)
 
@@ -778,8 +780,6 @@ def settle_langevin(
       m_tot = jnp.sum(mass_col)
       v_com = p_tot / jnp.maximum(m_tot, jnp.array(1e-30, dtype=m_tot.dtype))
       momentum = momentum - mass_col * v_com
-
-    from prolix.physics.simulate import NVTLangevinState
 
     return NVTLangevinState(position, momentum, force, state.mass, key)
 
@@ -841,10 +841,9 @@ def settle_with_nhc(
   Returns:
       (init_fn, apply_fn) tuple for NVT dynamics with NHC + SETTLE.
   """
-  from jax_md import simulate as jax_md_simulate
-
   # Get JAX MD's proven Nosé-Hoover Chain integrator
-  nhc_init, nhc_apply = jax_md_simulate.nvt_nose_hoover(
+  init_fn_nhc, apply_fn_nhc = simulate.nvt_nose_hoover(
+
     energy_or_force_fn,
     shift_fn,
     dt,
@@ -865,14 +864,14 @@ def settle_with_nhc(
   def apply_with_settle(state, **kwargs):
     """Apply one NHC step, then enforce SETTLE constraints."""
     # Store old positions for SETTLE velocity correction
-    positions_old = state.position
+    positions_old = state.positions
 
     # Apply one step of JAX MD's NHC integrator
     state = nhc_apply(state, **kwargs)
 
     # Enforce SETTLE position constraints
     position = settle_positions(
-      state.position,
+      state.positions,
       positions_old,
       water_indices,
       r_OH,
@@ -911,13 +910,13 @@ def settle_with_nhc(
     # (position, momentum of fictitious particles) becomes desynchronized. Reset
     # to zero to allow thermostat to re-equilibrate smoothly on the next step.
     new_chain = state.chain.set(
-      position=jnp.zeros_like(state.chain.position),
+      positions=jnp.zeros_like(state.chain.positions),
       momentum=jnp.zeros_like(state.chain.momentum),
     )
 
     # Return updated state with constrained position, momentum, force, AND chain state
     return state.set(
-      position=position,
+      positions=position,
       momentum=momentum,
       force=force,
       chain=new_chain,
@@ -985,7 +984,6 @@ def langevin_with_constraints(
     # Store mass as (N, 1) for broadcasting
     mass_for_state = mass_arr[:, jnp.newaxis]
 
-    from prolix.physics.simulate import NVTLangevinState
     return NVTLangevinState(R, momenta, force, mass_for_state, key)
 
   def apply_fn(state, **step_kwargs):
@@ -993,21 +991,21 @@ def langevin_with_constraints(
     _kT = step_kwargs.pop("kT", kT)
 
     # Store old positions for constraints
-    positions_old = state.position
+    positions_old = state.positions
 
     # === B-step (half-kick) ===
     momentum = _langevin_step_b(state.momentum, state.force, _dt)
 
     # === A-step (half-move) ===
-    position = _langevin_step_a(state.position, momentum, state.mass, _dt, shift_fn)
+    position = _langevin_step_a(state.positions, momentum, state.mass, _dt, shift_fn)
 
     # === O-step (stochastic update) ===
     if project_ou_momentum_rigid and water_indices is not None:
       momentum, key_out = _langevin_step_o_constrained(
-        momentum, position, state.mass, gamma, _dt, _kT, state.rng, water_indices
+        momentum, position, state.mass, gamma, _dt, _kT, state.key, water_indices
       )
     else:
-      momentum, key_out = _langevin_step_o(momentum, state.mass, gamma, _dt, _kT, state.rng)
+      momentum, key_out = _langevin_step_o(momentum, state.mass, gamma, _dt, _kT, state.key)
 
     # === A-step (second half-move) ===
     position = _langevin_step_a(position, momentum, state.mass, _dt, shift_fn)
@@ -1034,7 +1032,6 @@ def langevin_with_constraints(
       com_momentum = jnp.sum(momentum, axis=0) / total_mass
       momentum = momentum - state.mass * com_momentum[jnp.newaxis, :]
 
-    from prolix.physics.simulate import NVTLangevinState
     return NVTLangevinState(position, momentum, force, state.mass, key_out)
 
   return init_fn, apply_fn
@@ -1274,7 +1271,6 @@ def settle_csvr(
     # Store mass as (N, 1) for broadcasting
     mass_for_state = mass_arr[:, jnp.newaxis]
 
-    from prolix.physics.simulate import NVTLangevinState
     return NVTLangevinState(R, momenta, force, mass_for_state, key)
 
   def apply_fn(state, **step_kwargs):
@@ -1282,13 +1278,13 @@ def settle_csvr(
     _kT = step_kwargs.pop("kT", kT)
 
     # Store old positions for SETTLE
-    positions_old = state.position
+    positions_old = state.positions
 
     # === B-step (half-kick) ===
     momentum = _langevin_step_b(state.momentum, state.force, _dt)
 
     # === A-step (full position advance via two half-steps) ===
-    position = _langevin_step_a(state.position, momentum, state.mass, _dt, shift_fn)
+    position = _langevin_step_a(state.positions, momentum, state.mass, _dt, shift_fn)
     position = _langevin_step_a(position, momentum, state.mass, _dt, shift_fn)
 
     # === SETTLE position constraints ===
@@ -1328,16 +1324,15 @@ def settle_csvr(
     # === CSVR velocity rescaling ===
     # Compute total kinetic energy in the constrained system
     if water_indices is not None and water_indices.shape[0] > 0:
-      from prolix.physics.rigid_water_ke import rigid_tip3p_box_ke_kcal
       n_waters = water_indices.shape[0]
-      ke_total = rigid_tip3p_box_ke_kcal(position, momentum, state.mass, n_waters)
+      ke_total = rigid_water_ke.rigid_tip3p_box_ke_kcal(position, momentum, state.mass, n_waters)
     else:
       # No water: standard KE formula
       velocity = momentum / state.mass
       ke_total = 0.5 * jnp.sum(state.mass * velocity**2)
 
     # Compute DOF for this system
-    n_atoms = state.position.shape[0]
+    n_atoms = state.positions.shape[0]
     n_waters = water_indices.shape[0] if water_indices is not None else 0
     n_dof = _n_dof_thermostated(
       n_atoms, n_waters, n_constraint_pairs=n_constraint_pairs, remove_com=remove_com
@@ -1345,14 +1340,13 @@ def settle_csvr(
 
     # Draw chi-squared and compute lambda
     lambda_factor, key_out = _csvr_compute_lambda(
-      state.rng, ke_total, n_dof, _kT, _dt, tau
+      state.key, ke_total, n_dof, _kT, _dt, tau
     )
 
     # Apply rescaling
     momentum = _csvr_rescale_momenta(momentum, lambda_factor)
 
     # Return updated state
-    from prolix.physics.simulate import NVTLangevinState
     return NVTLangevinState(position, momentum, force, state.mass, key_out)
 
   return init_fn, apply_fn
@@ -1623,11 +1617,6 @@ def settle_csvr_npt(
       Miyamoto, S., & Kollman, P. A. (1992). SETTLE: An analytical version of the SHAKE
       and RATTLE algorithm for rigid water models. J. Comput. Chem., 13(8), 952-962.
   """
-  from prolix.physics import pbc as pbc_module
-  from prolix.physics import pressure as pressure_module
-  from prolix.physics import stress as stress_module
-  from prolix.physics import units as units_module
-  from prolix.physics.simulate import NPTState
 
   force_fn = _make_settle_compatible_force_fn(energy_or_force_fn, mass, box_init)
 
@@ -1687,15 +1676,14 @@ def settle_csvr_npt(
     _box = step_kwargs.pop("box", state.box)
 
     # Store old positions for SETTLE
-    positions_old = state.position
+    positions_old = state.positions
 
     # === Compute instantaneous pressure for barostat (from pre-step config) ===
     # Use positions and forces from the same configuration (start of step)
     # Kinetic energy (using rigid-body KE if water is present)
     if water_indices is not None and water_indices.shape[0] > 0:
-      from prolix.physics.rigid_water_ke import rigid_tip3p_box_ke_kcal
       n_waters = water_indices.shape[0]
-      ke_total = rigid_tip3p_box_ke_kcal(positions_old, state.momentum, state.mass, n_waters)
+      ke_total = rigid_water_ke.rigid_tip3p_box_ke_kcal(positions_old, state.momentum, state.mass, n_waters)
     else:
       # Standard KE: 0.5 * sum(p² / m)
       velocity = state.momentum / state.mass
@@ -1708,7 +1696,7 @@ def settle_csvr_npt(
     momentum = _langevin_step_b(state.momentum, state.force, _dt)
 
     # === A-step (full position advance via two half-steps) ===
-    position = _langevin_step_a(state.position, momentum, state.mass, _dt, shift_fn)
+    position = _langevin_step_a(state.positions, momentum, state.mass, _dt, shift_fn)
     position = _langevin_step_a(position, momentum, state.mass, _dt, shift_fn)
 
     # === SETTLE position constraints ===
@@ -1734,7 +1722,7 @@ def settle_csvr_npt(
     # dε = -(dt/tau_P) * β * (P - P_0) + sqrt(2*kT*β*dt / (tau_P*V)) * noise
     pressure_deviation = pressure - target_pressure_akma
 
-    key, split = jax.random.split(state.rng)  # key: for CSVR, split: for barostat noise
+    key, split = jax.random.split(state.key)  # key: for CSVR, split: for barostat noise
     random_noise = jax.random.normal(split, dtype=_box.dtype)
 
     # Deterministic term
@@ -1816,9 +1804,8 @@ def settle_csvr_npt(
 
     # === CSVR velocity rescaling ===
     if water_indices is not None and water_indices.shape[0] > 0:
-      from prolix.physics.rigid_water_ke import rigid_tip3p_box_ke_kcal
       n_waters = water_indices.shape[0]
-      ke_total = rigid_tip3p_box_ke_kcal(position, momentum, state.mass, n_waters)
+      ke_total = rigid_water_ke.rigid_tip3p_box_ke_kcal(position, momentum, state.mass, n_waters)
     else:
       velocity = momentum / state.mass
       ke_total = 0.5 * jnp.sum(state.mass * velocity**2)
@@ -1830,7 +1817,7 @@ def settle_csvr_npt(
       n_atoms, n_waters, n_constraint_pairs=n_constraint_pairs, remove_com=remove_com
     )
 
-    # Draw chi-squared and compute lambda (use 'key' from barostat split, not state.rng)
+    # Draw chi-squared and compute lambda (use 'key' from barostat split, not state.key)
     lambda_factor, key_out = _csvr_compute_lambda(
       key, ke_total, n_dof, _kT, _dt, tau_thermostat_akma
     )

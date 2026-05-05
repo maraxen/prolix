@@ -2,7 +2,7 @@ import jax
 import jax.numpy as jnp
 from jax_md import space
 from prolix.physics import system, pressure, explicit_corrections
-from prolix.physics.types import PhysicsSystem, EnergyParams
+from prolix.typing import PhysicsSystem, EnergyParams
 import pytest
 
 def test_tail_pressure_derivative():

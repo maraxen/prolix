@@ -33,7 +33,7 @@ import sys
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 from prolix.physics import settle
-from prolix.types import WaterIndicesArray
+from prolix.typing import WaterIndicesArray
 
 jax.config.update("jax_enable_x64", True)
 
@@ -210,9 +210,9 @@ def run_trajectory_replica(
 
     for step in range(n_steps):
         T = compute_instantaneous_temperature(state.momentum, mass, water_indices)
-        KE_rigid = compute_rigid_kinetic_energy(state.momentum, state.position, mass, water_indices)
+        KE_rigid = compute_rigid_kinetic_energy(state.momentum, state.positions, mass, water_indices)
         KE_total = float(jax_md_quantity.kinetic_energy(momentum=state.momentum, mass=mass[:, None]))
-        residual = compute_settle_residual_norm(state.position, water_indices)
+        residual = compute_settle_residual_norm(state.positions, water_indices)
 
         T_list.append(T)
         KE_rigid_list.append(KE_rigid)

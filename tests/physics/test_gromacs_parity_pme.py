@@ -2,7 +2,7 @@
 
 Gate 1B: Diagnostic test for PME implementation parity.
 
-Validates prolix PME forces against OpenMM on a frozen 64-water system.
+Validates proxide PME forces against OpenMM on a frozen 64-water system.
 This is a diagnostic gate; failure does not block Sprint B release.
 
 Success criteria:
@@ -21,17 +21,17 @@ from prolix.physics import pbc, settle, system
 from prolix.simulate import AKMA_TIME_UNIT_FS, BOLTZMANN_KCAL
 from .test_explicit_langevin_tip3p_parity import (
     _grid_water_positions,
-    _prolix_params_pure_water,
+    _proxide_params_pure_water,
 )
 
 
-def _force_rmsd_relative(f_prolix: jnp.ndarray, f_ref: jnp.ndarray) -> float:
+def _force_rmsd_relative(f_proxide: jnp.ndarray, f_ref: jnp.ndarray) -> float:
     """Compute relative RMSD of forces.
 
-    RMSD = sqrt(mean((f_prolix - f_ref)^2))
+    RMSD = sqrt(mean((f_proxide - f_ref)^2))
     Relative = RMSD / mean(|f_ref|)
     """
-    rmsd = float(jnp.sqrt(jnp.mean((f_prolix - f_ref) ** 2)))
+    rmsd = float(jnp.sqrt(jnp.mean((f_proxide - f_ref) ** 2)))
     ref_norm = float(jnp.mean(jnp.abs(f_ref)))
     if ref_norm < 1e-10:
         return 0.0 if rmsd < 1e-10 else float("inf")
@@ -41,7 +41,7 @@ def _force_rmsd_relative(f_prolix: jnp.ndarray, f_ref: jnp.ndarray) -> float:
 def test_pme_frozen_64water_forces() -> None:
     """Gate 1B: PME forces on frozen 64-water system.
 
-    Validates prolix PME implementation against reference (OpenMM if available).
+    Validates proxide PME implementation against reference (OpenMM if available).
     Frozen snapshot: no dynamics, just force computation.
 
     Success: Force RMSD (relative) < 5e-3 (if OpenMM available)
@@ -53,7 +53,7 @@ def test_pme_frozen_64water_forces() -> None:
     positions_a = jnp.array(positions_a, dtype=jnp.float64)
     box_vec = jnp.array([box_edge, box_edge, box_edge], dtype=jnp.float64)
 
-    sys_dict = _prolix_params_pure_water(n_waters)
+    sys_dict = _proxide_params_pure_water(n_waters)
     displacement_fn, shift_fn = pbc.create_periodic_space(box_vec)
 
     # Standard PME parameters for explicit solvent
@@ -73,14 +73,14 @@ def test_pme_frozen_64water_forces() -> None:
         strict_parameterization=False,
     )
 
-    # Compute prolix forces
+    # Compute proxide forces
     def energy_and_forces(positions: jnp.ndarray) -> tuple[float, jnp.ndarray]:
         """Compute energy and forces for PME system."""
         energy = energy_fn(positions, box=box_vec)
         forces = -jax.grad(energy_fn)(positions)
         return float(energy), forces
 
-    energy_prolix, forces_prolix = energy_and_forces(positions_a)
+    energy_proxide, forces_proxide = energy_and_forces(positions_a)
 
     # Optionally compare to OpenMM if available
     try:
@@ -95,7 +95,7 @@ def test_pme_frozen_64water_forces() -> None:
         )  # Minimal topology for water-only system
 
         # Note: This is a simplified baseline; full OpenMM parity would require
-        # proper topology construction. For diagnostic purposes, we log the prolix
+        # proper topology construction. For diagnostic purposes, we log the proxide
         # force magnitude as baseline.
 
         has_openmm = True
@@ -111,14 +111,14 @@ def test_pme_frozen_64water_forces() -> None:
             "OpenMM parity test requires proper topology construction (not implemented in diagnostic gate)"
         )
     else:
-        # Diagnostic baseline: just log prolix force statistics
-        force_magnitude = jnp.linalg.norm(forces_prolix)
-        per_atom_magnitude = jnp.linalg.norm(forces_prolix, axis=1)
+        # Diagnostic baseline: just log proxide force statistics
+        force_magnitude = jnp.linalg.norm(forces_proxide)
+        per_atom_magnitude = jnp.linalg.norm(forces_proxide, axis=1)
         mean_per_atom = float(jnp.mean(per_atom_magnitude))
         max_per_atom = float(jnp.max(per_atom_magnitude))
 
-        # Simple sanity checks on prolix forces
-        assert jnp.all(jnp.isfinite(forces_prolix)), "PME forces contain NaN"
+        # Simple sanity checks on proxide forces
+        assert jnp.all(jnp.isfinite(forces_proxide)), "PME forces contain NaN"
         assert (
             mean_per_atom > 0.0
         ), "Mean force magnitude is zero (energy function not working)"
@@ -142,7 +142,7 @@ def test_pme_frozen_64water_ewald_parameter_sweep() -> None:
     positions_a = jnp.array(positions_a, dtype=jnp.float64)
     box_vec = jnp.array([box_edge, box_edge, box_edge], dtype=jnp.float64)
 
-    sys_dict = _prolix_params_pure_water(n_waters)
+    sys_dict = _proxide_params_pure_water(n_waters)
     displacement_fn, shift_fn = pbc.create_periodic_space(box_vec)
 
     pme_grid_points = 32

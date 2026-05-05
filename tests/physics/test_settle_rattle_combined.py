@@ -54,7 +54,7 @@ def test_settle_rattle_combined_integrator():
   for _ in range(500):
     state = apply_fn_jit(state)
     
-  R_final = state.position
+  R_final = state.positions
   
   # 1. Check water geometry
   r_OH1 = jnp.linalg.norm(R_final[1] - R_final[0])

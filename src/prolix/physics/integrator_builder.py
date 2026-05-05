@@ -53,9 +53,9 @@ from prolix.physics.step_system import (
     make_step,
     step_sequences,
 )
-from prolix.physics.types import IntegratorParams, EnergyParams
+from prolix.typing import IntegratorParams, EnergyParams
 from prolix.physics.virtual_sites_step import redistribute_forces
-from prolix.types import Array, WaterIndicesArray
+from prolix.typing import Array, WaterIndicesArray
 
 
 def _compute_forces(
@@ -223,7 +223,7 @@ def make_integrator_batched(
     # We want to batch position, momentum, force, rng, and step_count (all at axis 0)
     # but keep mass and box shared (not batched at all)
     out_axes_spec = IntegratorState(
-        position=0,      # batch at axis 0
+        positions=0,      # batch at axis 0
         momentum=0,      # batch at axis 0
         force=0,         # batch at axis 0
         mass=None,       # do NOT batch (broadcast)
@@ -256,10 +256,10 @@ def make_integrator_batched(
 
     # Create a wrapper that takes flattened arguments
     def apply_fn_flat(position, momentum, force, mass, rng, box, step_count):
-      state = IntegratorState(position=position, momentum=momentum, force=force,
+      state = IntegratorState(positions=position, momentum=momentum, force=force,
                              mass=mass, rng=rng, box=box, step_count=step_count)
       result = apply_fn_unbatched(state)
-      return (result.position, result.momentum, result.force, result.mass, 
+      return (result.positions, result.momentum, result.force, result.mass, 
               result.rng, result.box, result.step_count)
 
     # Apply vmap over the flattened function
@@ -267,13 +267,13 @@ def make_integrator_batched(
 
     # Call with flattened state
     pos_out, mom_out, force_out, mass_out, rng_out, box_out, step_out = apply_fn_flat_vmapped(
-        state_batch.position, state_batch.momentum, state_batch.force,
+        state_batch.positions, state_batch.momentum, state_batch.force,
         state_batch.mass, state_batch.rng, state_batch.box, state_batch.step_count
     )
 
     # Reconstruct state
     return IntegratorState(
-        position=pos_out,
+        positions=pos_out,
         momentum=mom_out,
         force=force_out,
         mass=mass_out,
@@ -527,7 +527,7 @@ def make_integrator(
 
     # Create initial state with all fields, including box for PBC
     state = IntegratorState(
-        position=positions,
+        positions=positions,
         momentum=momentum,
         force=forces,
         mass=mass,
@@ -552,7 +552,7 @@ def make_integrator(
     params = eqx.tree_at(
         lambda p: (p.box, p.positions_old),
         base_integrator_params,
-        (state.box, state.position),
+        (state.box, state.positions),
         is_leaf=lambda x: x is None
     )
 
@@ -564,7 +564,7 @@ def make_integrator(
 
     # Recompute forces at the end of the timestep (with virtual site redistribution)
     new_forces = _compute_forces(
-        current_state.position, 
+        current_state.positions, 
         current_state.box, 
         energy_fn, 
         energy_params,

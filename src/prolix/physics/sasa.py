@@ -6,7 +6,7 @@ import jax
 import jax.numpy as jnp
 
 if TYPE_CHECKING:
-  from prolix.types import Coordinates, Energy, Radii
+  from prolix.typing import Coordinates, Energy, Radii
 
 
 def _compute_spherical_cap_overlaps(dists: Array, radii: Radii, probe_radius: float) -> Array:

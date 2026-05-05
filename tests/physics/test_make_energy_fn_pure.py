@@ -12,11 +12,12 @@ from __future__ import annotations
 
 import jax
 import jax.numpy as jnp
+import equinox as eqx
 import pytest
 
 from prolix.physics import system as physics_system
 from prolix.physics.system import make_energy_fn_pure
-from prolix.physics.types import EnergyParams, PhysicsSystem
+from prolix.typing import DifferentiableParams, PhysicsSystem
 from prolix.physics import pbc
 from prolix.physics.regression_explicit_pme import REGRESSION_EXPLICIT_PME
 
@@ -24,7 +25,7 @@ from .test_explicit_langevin_tip3p_parity import (
     _equil_water_positions,
 )
 
-def _prolix_params_pure_water(n_waters):
+def _proxide_params_pure_water(n_waters):
     """Modern TIP3P parameters with sparse exclusions."""
     n = n_waters * 3
     charges = jnp.tile(jnp.array([-0.834, 0.417, 0.417]), n_waters)
@@ -70,7 +71,7 @@ def tip3p_setup():
     jax.config.update("jax_enable_x64", True)
     positions_a, box_edge = _equil_water_positions(N_WATERS, seed=42)
     box_vec = jnp.array([box_edge, box_edge, box_edge], dtype=jnp.float64)
-    sys_dict = _prolix_params_pure_water(N_WATERS)
+    sys_dict = _proxide_params_pure_water(N_WATERS)
     displacement_fn, _ = pbc.create_periodic_space(box_vec)
     pme_alpha = float(REGRESSION_EXPLICIT_PME["pme_alpha_per_angstrom"])
     pme_grid = int(REGRESSION_EXPLICIT_PME["pme_grid_points"])
@@ -94,7 +95,7 @@ def tip3p_setup():
 
 
 def test_returns_energy_params_and_callable(tip3p_setup):
-    """make_energy_fn_pure must return (EnergyParams, callable)."""
+    """make_energy_fn_pure must return (DifferentiableParams, callable)."""
     s = tip3p_setup
     result = make_energy_fn_pure(
         s["displacement_fn"], s["physics_system"],
@@ -104,12 +105,12 @@ def test_returns_energy_params_and_callable(tip3p_setup):
         strict_parameterization=False,
     )
     params, fn = result
-    assert isinstance(params, EnergyParams), f"expected EnergyParams, got {type(params)}"
+    assert isinstance(params, DifferentiableParams), f"expected DifferentiableParams, got {type(params)}"
     assert callable(fn), "fn must be callable"
     
     # Check params structure
-    assert 'charges' in params.params
-    assert params.params['charges'].shape == (N_WATERS * 3,)
+    assert hasattr(params, 'charges')
+    assert params.charges.shape == (N_WATERS * 3,)
 
 
 def test_energy_is_finite(tip3p_setup):
@@ -126,7 +127,7 @@ def test_energy_is_finite(tip3p_setup):
     assert jnp.isfinite(e), f"energy is not finite: {e}"
 
 
-def _prolix_params_argon(n_atoms):
+def _proxide_params_argon(n_atoms):
     """Argon parameters (no exclusions)."""
     charges = jnp.zeros(n_atoms)
     sigmas = jnp.full(n_atoms, 3.405) # Argon sigma
@@ -151,7 +152,7 @@ def argon_setup():
     n_atoms = 8
     positions = jax.random.uniform(jax.random.PRNGKey(42), (n_atoms, 3)) * 10.0
     box_vec = jnp.array([15.0, 15.0, 15.0])
-    sys_dict = _prolix_params_argon(n_atoms)
+    sys_dict = _proxide_params_argon(n_atoms)
     displacement_fn, _ = pbc.create_periodic_space(box_vec)
     cutoff = 9.0
     physics_system = PhysicsSystem.from_dict(sys_dict, positions, box_vec, cutoff_distance=cutoff)
@@ -214,7 +215,7 @@ def test_gradient_wrt_charges_is_finite(tip3p_setup):
     )
 
     def energy_wrt_charges(charges):
-        p = EnergyParams(params={'charges': charges, 'sigmas': params.sigmas, 'epsilons': params.epsilons})
+        p = eqx.tree_at(lambda x: x.charges, params, charges)
         return fn(p, s["positions"])
 
     grad = jax.grad(energy_wrt_charges)(params.charges)

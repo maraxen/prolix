@@ -73,7 +73,7 @@ def test_full_100ps():
 
     state = init_s(jax.random.PRNGKey(seed), jnp.array(positions_a), mass=mass)
 
-    ke_init = float(rigid_tip3p_box_ke_kcal(state.position, state.momentum, state.mass, n_waters))
+    ke_init = float(rigid_tip3p_box_ke_kcal(state.positions, state.momentum, state.mass, n_waters))
     t_init = 2.0 * ke_init / (dof_rigid * BOLTZMANN_KCAL)
 
     print(f"Testing FIXED O-STEP (100ps, dt=1fs, seed={seed})")
@@ -84,7 +84,7 @@ def test_full_100ps():
     for step in range(steps):
         state = apply_j(state)
         if step >= burn:
-            ke_r = float(rigid_tip3p_box_ke_kcal(state.position, state.momentum, state.mass, n_waters))
+            ke_r = float(rigid_tip3p_box_ke_kcal(state.positions, state.momentum, state.mass, n_waters))
             temp = 2.0 * ke_r / (dof_rigid * BOLTZMANN_KCAL)
             temps.append(temp)
             if step % 10000 == 0 and step > burn:

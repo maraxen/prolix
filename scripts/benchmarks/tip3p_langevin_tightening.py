@@ -558,7 +558,7 @@ def run_prolix(
     state = apply_s(state)
     if step >= burn_in and (step - burn_in) % sample_every == 0:
       ke_r = float(
-        rigid_tip3p_box_ke_kcal(state.position, state.momentum, state.mass, n_waters)
+        rigid_tip3p_box_ke_kcal(state.positions, state.momentum, state.mass, n_waters)
       )
       ke_a = float(quantity.kinetic_energy(momentum=state.momentum, mass=state.mass))
       temps_rigid.append(2.0 * ke_r / (dof_rigid * BOLTZMANN_KCAL))
@@ -568,12 +568,12 @@ def run_prolix(
         decim = max(int(diagnostics_decimation), 1)
         if sample_idx % decim == 0:
           p_proj = settle.project_tip3p_waters_momentum_rigid(
-            state.momentum, state.position, state.mass, water_indices
+            state.momentum, state.positions, state.mass, water_indices
           )
           num = float(jnp.linalg.norm(state.momentum - p_proj))
           den = float(jnp.linalg.norm(state.momentum))
           diag_projection_residual.append(num / max(den, 1e-12))
-          diag_bond_residual_max_abs.append(_bond_residual_max_abs(state.position, water_indices))
+          diag_bond_residual_max_abs.append(_bond_residual_max_abs(state.positions, water_indices))
           p_tot = jnp.sum(state.momentum, axis=0)
           m_tot = jnp.sum(state.mass)
           diag_com_metric.append(float(jnp.linalg.norm(p_tot) / jnp.maximum(m_tot, 1e-12)))
@@ -581,7 +581,7 @@ def run_prolix(
     if checkpoint_every > 0 and (step + 1) % checkpoint_every == 0:
       np.savez_compressed(
         state_path,
-        position=np.asarray(state.position),
+        position=np.asarray(state.positions),
         momentum=np.asarray(state.momentum),
         force=np.asarray(state.force),
         mass=np.asarray(state.mass),
@@ -613,7 +613,7 @@ def run_prolix(
 
   np.savez_compressed(
     state_path,
-    position=np.asarray(state.position),
+    position=np.asarray(state.positions),
     momentum=np.asarray(state.momentum),
     force=np.asarray(state.force),
     mass=np.asarray(state.mass),

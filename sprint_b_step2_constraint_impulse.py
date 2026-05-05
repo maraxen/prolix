@@ -258,7 +258,7 @@ def _run_condition_eager_loop(
     )
 
     if step_idx >= burn:
-      ke_r = float(rigid_tip3p_box_ke_kcal(state.position, state.momentum, state.mass, n_waters))
+      ke_r = float(rigid_tip3p_box_ke_kcal(state.positions, state.momentum, state.mass, n_waters))
       temp = 2.0 * ke_r / (dof_rigid * BOLTZMANN_KCAL)
       temps.append(float(temp))
       impulses.append(float(metrics.settle_impulse))

@@ -141,7 +141,7 @@ def _run_nvt_langevin_trajectory(
     state = init_fn(key, positions)
 
     # Storage lists (accumulated during loop)
-    energies = [energy_fn(state.position)]
+    energies = [energy_fn(state.positions)]
     temperatures = []
     kinetic_energies = []
 
@@ -153,9 +153,9 @@ def _run_nvt_langevin_trajectory(
         state = apply_fn(state)
 
         # Measure energy and temperature
-        E = energy_fn(state.position)
+        E = energy_fn(state.positions)
         KE = 0.5 * jnp.sum(M[:, None] * state.momentum**2)
-        T = 2.0 * KE / (3.0 * state.position.shape[0] * BOLTZMANN_KCAL)
+        T = 2.0 * KE / (3.0 * state.positions.shape[0] * BOLTZMANN_KCAL)
 
         return state, (E, KE, T)
 
@@ -171,7 +171,7 @@ def _run_nvt_langevin_trajectory(
     all_temperatures = Ts
     all_kinetic_energies = KEs
 
-    return final_state.position, all_energies, all_temperatures, all_kinetic_energies
+    return final_state.positions, all_energies, all_temperatures, all_kinetic_energies
 
 
 def _measure_energy_drift(energies: jnp.ndarray, dt_fs: float = 0.5) -> dict:

@@ -6,7 +6,7 @@ from typing import NamedTuple
 import jax.numpy as jnp
 import numpy as np
 
-from prolix import types
+from prolix import typing as types
 
 
 class TopologyExclusions(NamedTuple):

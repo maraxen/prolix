@@ -30,3 +30,6 @@ results/
 .agent/skills
 *.lock
 .env
+
+# Cluster configuration (local, per-user)
+cluster-config.toml

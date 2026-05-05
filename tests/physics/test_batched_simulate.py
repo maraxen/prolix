@@ -4,8 +4,8 @@ from jax import random
 import pytest
 
 from prolix.padding import bucket_proteins, collate_batch
+from prolix.typing import IntegratorState as LangevinState
 from prolix.batched_simulate import (
-    LangevinState,
     make_langevin_step,
     safe_map,
     batched_minimize,
@@ -122,12 +122,12 @@ def test_safe_map_heterogeneous_pytree():
     def fn_hetero(node):
         return HeterogeneousNode(node.positions * 2, node.warn_counts)
 
-    # Should raise ValueError due to heterogeneous leaf shapes
-    try:
-        result = safe_map(fn_hetero, hetero, chunk_size=1)
-        assert False, "Expected ValueError for heterogeneous pytree, but got none"
-    except ValueError as e:
-        assert "same leading (batch) dimension" in str(e)
+    # Now handles heterogeneous leaf shapes by broadcasting
+    result = safe_map(fn_hetero, hetero, chunk_size=1)
+    assert result.positions.shape == (B, 3)
+    assert jnp.allclose(result.positions, 2.0)
+    assert result.warn_counts.shape == (B, 4) # Broadcasted by safe_map
+    assert jnp.all(result.warn_counts == 0)
 
     # Case (c): Existing test_safe_map still passes (simple array case)
     x = jnp.array([1, 2, 3, 4, 5, 6])
@@ -152,7 +152,7 @@ def test_langevin_step_finite(fake_padded_batch):
         momentum=jnp.zeros_like(sys.positions),
         force=jnp.zeros_like(sys.positions),
         mass=sys.masses,
-        key=keys,
+        rng=keys,
         cap_count=jnp.zeros(B, dtype=jnp.int32),
     )
     
@@ -192,7 +192,7 @@ def test_batched_minimize(fake_padded_batch):
 
 
 def _cold_start_state(batch) -> LangevinState:
-    """Build a valid LangevinState from a batch using cold-start initialization.
+    """Build a valid from a batch using cold-start initialization.
 
     Computes initial forces from the energy function so that the first
     production step does not start from stale zero-force fields (the root
@@ -219,7 +219,7 @@ def _cold_start_state(batch) -> LangevinState:
         momentum=jnp.zeros_like(batch.positions),
         force=initial_forces,
         mass=batch.masses,
-        key=keys,
+        rng=keys,
         cap_count=jnp.zeros(B, dtype=jnp.int32),
     )
 
@@ -232,12 +232,13 @@ def test_batched_equilibrate_deprecated(fake_padded_batch):
     with pytest.warns(DeprecationWarning, match="batched_equilibrate is deprecated"):
         batched_equilibrate(
             fake_padded_batch, system_index, fake_padded_batch.positions,
-            key=random.PRNGKey(0), duration_ps=0.02, temp=300.0, chunk_size=1
+            rng=random.PRNGKey(0), duration_ps=0.02, temp=300.0, chunk_size=1
         )
 
 
+
 def test_cold_start_state_finite(fake_padded_batch):
-    """Cold-start LangevinState has finite positions and forces (replaces test_batched_equilibrate)."""
+    """Cold-start has finite positions and forces (replaces test_batched_equilibrate)."""
     state = _cold_start_state(fake_padded_batch)
 
     assert jnp.all(jnp.isfinite(state.positions))
@@ -278,7 +279,7 @@ def test_batched_produce_streaming(fake_padded_batch):
     B = batch.positions.shape[0]
     N = batch.positions.shape[1]
 
-    # Build a cold-start LangevinState directly (no equilibration)
+    # Build a cold-start directly (no equilibration)
     displacement_fn, _ = space.free()
 
     def compute_initial_force(sys):
@@ -297,7 +298,7 @@ def test_batched_produce_streaming(fake_padded_batch):
         momentum=jnp.zeros_like(batch.positions),
         force=initial_forces,
         mass=batch.masses,
-        key=keys,
+        rng=keys,
         cap_count=jnp.zeros(B, dtype=jnp.int32),
     )
 
@@ -404,7 +405,7 @@ def test_batched_produce_streaming_write_batch_size(fake_padded_batch):
         momentum=jnp.zeros_like(batch.positions),
         force=initial_forces,
         mass=batch.masses,
-        key=random.split(random.PRNGKey(1), B),
+        rng=random.split(random.PRNGKey(1), B),
         cap_count=jnp.zeros(B, dtype=jnp.int32),
     )
 

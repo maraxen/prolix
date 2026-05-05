@@ -22,7 +22,7 @@ from prolix.physics.rigid_water_ke import rigid_tip3p_box_ke_kcal
 from prolix.physics.units import BAR_PER_AKMA_PRESSURE, AKMA_PRESSURE_PER_BAR
 from prolix.physics.simulate import NPTState
 from prolix.simulate import AKMA_TIME_UNIT_FS, BOLTZMANN_KCAL
-from .test_explicit_langevin_tip3p_parity import _grid_water_positions, _prolix_params_pure_water
+from .test_explicit_langevin_tip3p_parity import _grid_water_positions, _proxide_params_pure_water
 
 
 def _dof_rigid_tip3p_waters(n_waters: int) -> float:
@@ -67,7 +67,7 @@ def test_npt_compiles_and_runs() -> None:
   tau_baro_akma = 2000.0  # 0.1 ps barostat time constant
   tau_thermo_akma = 2000.0  # 0.1 ps thermostat time constant
 
-  sys_dict = _prolix_params_pure_water(n_waters)
+  sys_dict = _proxide_params_pure_water(n_waters)
   displacement_fn, shift_fn = pbc.create_periodic_space(box_vec)
   energy_fn = system.make_energy_fn(
     displacement_fn, sys_dict, box=box_vec, use_pbc=True, implicit_solvent=False,
@@ -97,7 +97,7 @@ def test_npt_compiles_and_runs() -> None:
     state = apply_j(state, box=state.box)
 
     # Check for NaN
-    assert jnp.all(jnp.isfinite(state.position)), f"Step {step}: position contains NaN"
+    assert jnp.all(jnp.isfinite(state.positions)), f"Step {step}: position contains NaN"
     assert jnp.all(jnp.isfinite(state.momentum)), f"Step {step}: momentum contains NaN"
     assert jnp.all(jnp.isfinite(state.box)), f"Step {step}: box contains NaN"
 
@@ -123,7 +123,7 @@ def test_npt_box_scaling_isotropic() -> None:
   tau_baro_akma = 2000.0
   tau_thermo_akma = 2000.0
 
-  sys_dict = _prolix_params_pure_water(n_waters)
+  sys_dict = _proxide_params_pure_water(n_waters)
   displacement_fn, shift_fn = pbc.create_periodic_space(box_vec)
   energy_fn = system.make_energy_fn(
     displacement_fn, sys_dict, box=box_vec, use_pbc=True, implicit_solvent=False,
@@ -188,7 +188,7 @@ def test_npt_pressure_sanity() -> None:
   tau_baro_akma = 2000.0
   tau_thermo_akma = 2000.0
 
-  sys_dict = _prolix_params_pure_water(n_waters)
+  sys_dict = _proxide_params_pure_water(n_waters)
   displacement_fn, shift_fn = pbc.create_periodic_space(box_vec)
   energy_fn = system.make_energy_fn(
     displacement_fn, sys_dict, box=box_vec, use_pbc=True, implicit_solvent=False,
@@ -221,15 +221,15 @@ def test_npt_pressure_sanity() -> None:
     if step >= burn:
       # Compute pressure diagnostically: virial + kinetic energy
       n_w = water_indices.shape[0]
-      ke_total = rigid_tip3p_box_ke_kcal(state.position, state.momentum, state.mass, n_w)
-      virial = stress.virial_trace(state.position, state.force)
+      ke_total = rigid_tip3p_box_ke_kcal(state.positions, state.momentum, state.mass, n_w)
+      virial = stress.virial_trace(state.positions, state.force)
       volume = jnp.prod(state.box)
       pressure_akma = pressure.instantaneous_pressure_akma(ke_total, virial, physics_system, params, ndim=3)
       pressure_bar_val = float(pressure_akma * BAR_PER_AKMA_PRESSURE)
       pressures_bar.append(pressure_bar_val)
 
   # Verify run completes without NaN
-  assert jnp.all(jnp.isfinite(state.position)), "Final position contains NaN"
+  assert jnp.all(jnp.isfinite(state.positions)), "Final position contains NaN"
   assert jnp.all(jnp.isfinite(state.box)), "Final box contains NaN"
 
   # Verify pressure control (within ±200 bar of target)
@@ -264,7 +264,7 @@ def test_npt_dt_sweep(dt_fs: float) -> None:
   tau_baro_akma = 2000.0
   tau_thermo_akma = 2000.0
 
-  sys_dict = _prolix_params_pure_water(n_waters)
+  sys_dict = _proxide_params_pure_water(n_waters)
   displacement_fn, shift_fn = pbc.create_periodic_space(box_vec)
   energy_fn = system.make_energy_fn(
     displacement_fn, sys_dict, box=box_vec, use_pbc=True, implicit_solvent=False,
@@ -293,7 +293,7 @@ def test_npt_dt_sweep(dt_fs: float) -> None:
     state = apply_j(state, box=state.box)
 
     # Check for NaN
-    assert jnp.all(jnp.isfinite(state.position)), \
+    assert jnp.all(jnp.isfinite(state.positions)), \
       f"dt={dt_fs} fs, step {step}: position contains NaN"
     assert jnp.all(jnp.isfinite(state.momentum)), \
       f"dt={dt_fs} fs, step {step}: momentum contains NaN"
@@ -354,7 +354,7 @@ def test_npt_20ps_liquid_water() -> None:
   positions_a, box_edge = _grid_water_positions(n_waters, spacing_angstrom=3.1)
   box_vec = jnp.array([box_edge, box_edge, box_edge], dtype=jnp.float64)
 
-  sys_dict = _prolix_params_pure_water(n_waters)
+  sys_dict = _proxide_params_pure_water(n_waters)
   displacement_fn, shift_fn = pbc.create_periodic_space(box_vec)
   energy_fn = system.make_energy_fn(
     displacement_fn, sys_dict, box=box_vec, use_pbc=True, implicit_solvent=False,
@@ -382,12 +382,12 @@ def test_npt_20ps_liquid_water() -> None:
   for _ in range(nvt_steps):
     nvt_state = apply_nvt_j(nvt_state, box=box_vec)
 
-  assert jnp.all(jnp.isfinite(nvt_state.position)), "NVT phase: positions contain NaN/Inf"
+  assert jnp.all(jnp.isfinite(nvt_state.positions)), "NVT phase: positions contain NaN/Inf"
 
   # ── Phase 2: NPT production ────────────────────────────────────────────────
   # Construct NPTState from NVT final state + original box
   npt_state = NPTState(
-    position=nvt_state.position,
+    positions=nvt_state.positions,
     momentum=nvt_state.momentum,
     force=nvt_state.force,
     mass=nvt_state.mass,
@@ -410,7 +410,7 @@ def test_npt_20ps_liquid_water() -> None:
   apply_npt_j = jax.jit(apply_npt)
 
   # Re-initialize NPT state via init_fn (computes force at current positions)
-  npt_state = init_npt(npt_state.rng, npt_state.position, mass=mass, box=box_vec)
+  npt_state = init_npt(npt_state.rng, npt_state.positions, mass=mass, box=box_vec)
 
   # Trajectory arrays: shape (n_records, 3) → columns: (T_K, P_bar, V_A3)
   temperatures: list[float] = []
@@ -422,9 +422,9 @@ def test_npt_20ps_liquid_water() -> None:
 
     if (step + 1) % record_every == 0:
       ke_total = rigid_tip3p_box_ke_kcal(
-        npt_state.position, npt_state.momentum, npt_state.mass, n_waters
+        npt_state.positions, npt_state.momentum, npt_state.mass, n_waters
       )
-      virial = stress.virial_trace(npt_state.position, npt_state.force)
+      virial = stress.virial_trace(npt_state.positions, npt_state.force)
       volume = float(jnp.prod(npt_state.box))
       pressure_akma = pressure.instantaneous_pressure_akma(
         ke_total, virial, volume, ndim=3

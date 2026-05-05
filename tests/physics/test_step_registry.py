@@ -1,4 +1,4 @@
-"""Tests for step_registry: instantiation, lookup, and composition.
+"""Tests for step_registry: instantiation, lookup, and compositions.
 
 This module validates:
 1. All step names resolvable in step_registry
@@ -27,7 +27,7 @@ from prolix.physics.step_system import (
     step_registry,
     step_sequences,
 )
-from prolix.physics.types import IntegratorParams, EnergyParams
+from prolix.typing import IntegratorParams, EnergyParams
 
 
 class TestStepRegistry:
@@ -43,7 +43,7 @@ class TestStepRegistry:
         "csvr_step",
         "nhc_step",
     }
-    assert expected_names == set(step_registry.keys())
+    assert expected_names == set(step_registry.rngs())
 
   def test_registry_maps_to_step_classes(self):
     """All registry entries map to Step subclasses."""
@@ -185,7 +185,7 @@ class TestStepInstantiation:
     assert step.tau == 100.0
 
 
-class TestStepComposition:
+class TestStepCompositions:
   """Tests for composing steps in a simple integrator loop."""
 
   def test_compose_v_a_v_from_registry(self):
@@ -199,19 +199,19 @@ class TestStepComposition:
     mass = jnp.ones((9, 1))
     rng = jax.random.PRNGKey(0)
 
-    state = IntegratorState(position=positions, momentum=momentum, force=force, mass=mass, rng=rng)
+    state = IntegratorState(positions=positions, momentum=momentum, force=force, mass=mass, rng=rng)
     params = IntegratorParams(dt=0.001, kT=2.479, gamma=1.0, energy_params=EnergyParams(params=None),
                               water_indices=jnp.zeros((0, 3), dtype=jnp.int32),
                               constraint_dofs=jnp.zeros((0,), dtype=jnp.int32),
                               box=jnp.zeros((3,)),
-                              positions_old=jnp.zeros((0, 3)),
+                              position_old=jnp.zeros((0, 3)),
                               n_dof=0.0)
     # V-A-V cycle
     state = v_step.apply(state, params)
     state = a_step.apply(state, params)
     state = v_step.apply(state, params)
 
-    assert state.position is not None
+    assert state.positions is not None
     assert state.momentum is not None
 
   def test_compose_v_o_a_from_registry(self):
@@ -226,19 +226,19 @@ class TestStepComposition:
     mass = jnp.ones((9, 1))
     rng = jax.random.PRNGKey(0)
 
-    state = IntegratorState(position=positions, momentum=momentum, force=force, mass=mass, rng=rng)
+    state = IntegratorState(positions=positions, momentum=momentum, force=force, mass=mass, rng=rng)
     params = IntegratorParams(dt=0.001, kT=2.479, gamma=1.0, energy_params=EnergyParams(params=None),
                               water_indices=jnp.zeros((0, 3), dtype=jnp.int32),
                               constraint_dofs=jnp.zeros((0,), dtype=jnp.int32),
                               box=jnp.zeros((3,)),
-                              positions_old=jnp.zeros((0, 3)),
+                              position_old=jnp.zeros((0, 3)),
                               n_dof=0.0)
     # V-O-A cycle
     state = v_step.apply(state, params)
     state = o_step.apply(state, params)
     state = a_step.apply(state, params)
 
-    assert state.position is not None
+    assert state.positions is not None
     assert state.momentum is not None
 
   def test_compose_with_csvr_from_registry(self):
@@ -253,18 +253,18 @@ class TestStepComposition:
     mass = jnp.ones((9, 1))
     rng = jax.random.PRNGKey(0)
 
-    state = IntegratorState(position=positions, momentum=momentum, force=force, mass=mass, rng=rng)
+    state = IntegratorState(positions=positions, momentum=momentum, force=force, mass=mass, rng=rng)
     params = IntegratorParams(dt=0.001, kT=2.479, gamma=1.0, n_dof=27, energy_params=EnergyParams(params=None),
                               water_indices=jnp.zeros((0, 3), dtype=jnp.int32),
                               constraint_dofs=jnp.zeros((0,), dtype=jnp.int32),
                               box=jnp.zeros((3,)),
-                              positions_old=jnp.zeros((0, 3)))
+                              position_old=jnp.zeros((0, 3)))
     # V-A-CSVR sequence
     state = v_step.apply(state, params)
     state = a_step.apply(state, params)
     state = csvr_step.apply(state, params)
 
-    assert state.position is not None
+    assert state.positions is not None
     assert state.momentum is not None
 
 
@@ -282,7 +282,7 @@ class TestStepSequences:
         "baoab_langevin",
         "baoab_csvr_npt",
     }
-    assert expected_names == set(step_sequences.keys())
+    assert expected_names == set(step_sequences.rngs())
 
   def test_step_sequence_frozen_dataclass(self):
     """StepSequence is immutable (frozen dataclass)."""
@@ -386,7 +386,7 @@ class TestStepSequences:
       assert "integrator" in seq.description.lower() or "BAOAB" in seq.description
 
 
-class TestStepSequenceComposition:
+class TestStepSequenceCompositions:
   """Tests for composing mini-integrator sequences from registry."""
 
   def test_compose_baoab_langevin_minimal(self):
@@ -400,7 +400,7 @@ class TestStepSequenceComposition:
         water_indices=jnp.zeros((0, 3), dtype=jnp.int32),
         constraint_dofs=jnp.zeros((0,), dtype=jnp.int32),
         box=jnp.zeros((3,)),
-        positions_old=jnp.zeros((0, 3)),
+        position_old=jnp.zeros((0, 3)),
         n_dof=0.0
     )
     # Manually compose steps
@@ -415,7 +415,7 @@ class TestStepSequenceComposition:
     mass = jnp.ones((9, 1))
     rng = jax.random.PRNGKey(0)
 
-    state = IntegratorState(position=positions, momentum=momentum, force=force, mass=mass, rng=rng)
+    state = IntegratorState(positions=positions, momentum=momentum, force=force, mass=mass, rng=rng)
 
     # Apply sequence steps (V-A-O-A-V)
     state = v_step.apply(state, params)
@@ -424,9 +424,9 @@ class TestStepSequenceComposition:
     state = a_step.apply(state, params)
     state = v_step.apply(state, params)
 
-    assert state.position is not None
+    assert state.positions is not None
     assert state.momentum is not None
-    assert not jnp.any(jnp.isnan(state.position))
+    assert not jnp.any(jnp.isnan(state.positions))
     assert not jnp.any(jnp.isnan(state.momentum))
 
   def test_compose_baoab_csvr_npt_minimal(self):
@@ -441,7 +441,7 @@ class TestStepSequenceComposition:
         water_indices=jnp.zeros((0, 3), dtype=jnp.int32),
         constraint_dofs=jnp.zeros((0,), dtype=jnp.int32),
         box=jnp.zeros((3,)),
-        positions_old=jnp.zeros((0, 3))
+        position_old=jnp.zeros((0, 3))
     )
 
     v_step = make_step("v_step", fraction=0.5)
@@ -454,7 +454,7 @@ class TestStepSequenceComposition:
     mass = jnp.ones((9, 1))
     rng = jax.random.PRNGKey(0)
 
-    state = IntegratorState(position=positions, momentum=momentum, force=force, mass=mass, rng=rng)
+    state = IntegratorState(positions=positions, momentum=momentum, force=force, mass=mass, rng=rng)
 
     # V-A-CSVR-A-V
     state = v_step.apply(state, params)
@@ -463,7 +463,7 @@ class TestStepSequenceComposition:
     state = a_step.apply(state, params)
     state = v_step.apply(state, params)
 
-    assert state.position is not None
+    assert state.positions is not None
     assert state.momentum is not None
 
   def test_sequence_parameter_propagation_across_steps(self):
@@ -477,7 +477,7 @@ class TestStepSequenceComposition:
         water_indices=jnp.zeros((0, 3), dtype=jnp.int32),
         constraint_dofs=jnp.zeros((0,), dtype=jnp.int32),
         box=jnp.zeros((3,)),
-        positions_old=jnp.zeros((0, 3)),
+        position_old=jnp.zeros((0, 3)),
         n_dof=0.0
     )
     # Each step should receive these parameters
@@ -490,7 +490,7 @@ class TestStepSequenceComposition:
     mass = jnp.ones((3, 1))
     rng = jax.random.PRNGKey(0)
 
-    state = IntegratorState(position=positions, momentum=momentum, force=force, mass=mass, rng=rng)
+    state = IntegratorState(positions=positions, momentum=momentum, force=force, mass=mass, rng=rng)
 
     # Apply with sequence parameters
     state = v_step.apply(state, params)

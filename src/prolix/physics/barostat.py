@@ -7,7 +7,7 @@ import jax.numpy as jnp
 from jaxtyping import PRNGKeyArray
 
 from prolix.physics.step_system import Step, IntegratorState
-from prolix.physics.types import IntegratorParams
+from prolix.typing import IntegratorParams
 
 class MC_Barostat_Step(Step):
     """Monte Carlo Barostat step for NPT ensemble.
@@ -50,7 +50,7 @@ class MC_Barostat_Step(Step):
         
         should_attempt = (new_step_count % self.barostat_interval == 0)
         
-        current_pos = state.position
+        current_pos = state.positions
         current_box = state.box
         if current_box is None:
             raise ValueError("MC Barostat requires a box dimension in state.")
@@ -118,7 +118,7 @@ class MC_Barostat_Step(Step):
         )
         
         return state.__replace__(
-            position=final_pos,
+            positions=final_pos,
             box=final_box,
             rng=final_rng,
             step_count=new_step_count
@@ -172,7 +172,7 @@ class SCR_Barostat_Step(Step):
         
         # 3. Virial Trace (kcal/mol)
         # Use positions_old if available (consistent with force eval), else current positions
-        r_for_virial = jnp.where(params.positions_old is not None, params.positions_old, state.position)
+        r_for_virial = jnp.where(params.positions_old is not None, params.positions_old, state.positions)
         virial = jnp.sum(r_for_virial * state.force)
         
         # 4. Instantaneous Pressure (AKMA)
@@ -221,10 +221,10 @@ class SCR_Barostat_Step(Step):
         
         # 6. Apply Scaling
         new_box = state.box * mu
-        new_position = state.position * mu
+        new_position = state.positions * mu
         
         return state.__replace__(
-            position=new_position,
+            positions=new_position,
             box=new_box,
             rng=key
         )

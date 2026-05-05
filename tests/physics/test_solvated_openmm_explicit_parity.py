@@ -47,7 +47,7 @@ def _tip3p_two_waters_positions() -> np.ndarray:
   return np.array([w1_o, w1_h1, w1_h2, w2_o, w2_h1, w2_h2], dtype=np.float64)
 
 
-def _prolix_params_two_waters() -> dict:
+def _proxide_params_two_waters() -> dict:
   tip = get_water_params(WaterModelType.TIP3P)
   q_o = float(tip.charge_O)
   q_h = float(tip.charge_H)
@@ -149,7 +149,7 @@ def test_two_water_tip3p_explicit_pme_matches_openmm_reference():
   )
 
   box_vec = jnp.array([box_size, box_size, box_size], dtype=jnp.float64)
-  sys_dict = _prolix_params_two_waters()
+  sys_dict = _proxide_params_two_waters()
   displacement_fn, _ = pbc.create_periodic_space(box_vec)
   energy_fn = system.make_energy_fn(
     displacement_fn,

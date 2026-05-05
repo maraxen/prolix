@@ -10,7 +10,7 @@ import sys
 sys.path.append(os.path.abspath("src"))
 
 from prolix.physics.system import make_energy_fn_pure
-from prolix.physics.types import PhysicsSystem, DifferentiableParams
+from prolix.typing import DifferentiableParams, PhysicsSystem
 from prolix.export import export_energy_fn
 from prolix.physics import pme
 from jax_md import space

@@ -102,7 +102,7 @@ def _openmm_pme_energy_forces(
   return float(e), np.asarray(f, dtype=np.float64)
 
 
-def _prolix_pme_energy_forces(
+def _proxide_pme_energy_forces(
   *,
   positions_angstrom: jnp.ndarray,
   box_vec: jnp.ndarray,
@@ -161,7 +161,7 @@ def test_anchor_two_particle_pme_energy_and_forces(regression_pme_params):
     platform_name=platform_name,
     use_dispersion_correction=use_dispersion_correction,
   )
-  jax_e, jax_f = _prolix_pme_energy_forces(
+  jax_e, jax_f = _proxide_pme_energy_forces(
     positions_angstrom=jnp.asarray(positions),
     box_vec=box_vec,
     charges=charges,

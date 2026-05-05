@@ -54,7 +54,7 @@ def test_p2a_b2_r_fail_openmm_fixture() -> None:
   g = _gates()
   out = g.evaluate_payload(_load("p2a_b2_r_fail_openmm.json"))
   assert out["openmm"]["p2a_b2_r_pass"] is False
-  assert out["prolix"]["p2a_b2_r_pass"] is True
+  assert out["proxide"]["p2a_b2_r_pass"] is True
 
 
 def test_skip_error_row_before_success() -> None:
@@ -92,11 +92,11 @@ def test_evaluate_tightening_aggregate_pass_fixture() -> None:
   assert out["schema"] == g.TIGHTENING_AGGREGATE_SCHEMA
 
 
-def test_evaluate_tightening_aggregate_fail_r_prolix() -> None:
+def test_evaluate_tightening_aggregate_fail_r_proxide() -> None:
   g = _gates()
-  out = g.evaluate_tightening_aggregate(_load_agg("fail_r_prolix.json"))
+  out = g.evaluate_tightening_aggregate(_load_agg("fail_r_proxide.json"))
   assert out["openmm"]["p2a_b2_r_pass"] is True
-  assert out["prolix"]["p2a_b2_r_pass"] is False
+  assert out["proxide"]["p2a_b2_r_pass"] is False
   assert out["p2a_b2_r_both_pass"] is False
 
 
@@ -119,7 +119,7 @@ def test_evaluate_tightening_aggregate_v2_missing_optional_diag() -> None:
   g = _gates()
   out = g.evaluate_tightening_aggregate(_load_agg("v2_missing_optional_diag.json"))
   assert out["p2a_b2_r_both_pass"] is False
-  assert out["prolix"]["p2a_b2_r_pass"] is False
+  assert out["proxide"]["p2a_b2_r_pass"] is False
 
 
 def test_evaluate_tightening_mean_mismatch_raises() -> None:
@@ -131,7 +131,7 @@ def test_evaluate_tightening_mean_mismatch_raises() -> None:
 def test_main_tightening_aggregate_exit_codes() -> None:
   g = _gates()
   assert g.main([str(_FIXTURES_AGG / "pass_r_both_x.json")]) == 0
-  assert g.main([str(_FIXTURES_AGG / "fail_r_prolix.json")]) == 1
+  assert g.main([str(_FIXTURES_AGG / "fail_r_proxide.json")]) == 1
 
 
 def test_main_compare_fixture_exit_code() -> None:
@@ -151,7 +151,7 @@ def test_aggregate_script_outputs_schema_and_gates(tmp_path: Path, capsys: pytes
         "profile_id": "openmm_ref_linear_com_on",
       },
       {
-        "engine": "prolix",
+        "engine": "proxide",
         "mean_T_K": 300.0,
         "std_T_K": 0.1,
         "target_T_K": 300.0,
@@ -177,14 +177,14 @@ def test_aggregate_inconsistent_target_exits_nonzero(tmp_path: Path, capsys: pyt
     "replica_id": 0,
     "runs": [
       {"engine": "openmm", "mean_T_K": 300.0, "std_T_K": 0.1, "target_T_K": 300.0, "profile_id": "x"},
-      {"engine": "prolix", "mean_T_K": 300.0, "std_T_K": 0.1, "target_T_K": 300.0, "profile_id": "x"},
+      {"engine": "proxide", "mean_T_K": 300.0, "std_T_K": 0.1, "target_T_K": 300.0, "profile_id": "x"},
     ],
   }
   b1 = {
     "replica_id": 1,
     "runs": [
       {"engine": "openmm", "mean_T_K": 300.0, "std_T_K": 0.1, "target_T_K": 310.0, "profile_id": "x"},
-      {"engine": "prolix", "mean_T_K": 300.0, "std_T_K": 0.1, "target_T_K": 310.0, "profile_id": "x"},
+      {"engine": "proxide", "mean_T_K": 300.0, "std_T_K": 0.1, "target_T_K": 310.0, "profile_id": "x"},
     ],
   }
   p0 = tmp_path / "tip3p_tightening_r0_a.log"

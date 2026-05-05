@@ -1,7 +1,7 @@
 """End-to-end equivalency tests between JAX MD and OpenMM.
 
 Uses proxide parse_structure for loading and parameterization, then compares
-energy values between the JAX-based prolix physics and OpenMM as ground truth.
+energy values between the JAX-based proxide physics and OpenMM as ground truth.
 """
 
 from pathlib import Path
@@ -109,15 +109,15 @@ class TestOpenMMParity:
 
     # Bond energy
     if protein.bonds is not None and protein.bond_params is not None:
-      bond_fn = bonded.make_bond_energy_fn(displacement_fn, protein.bonds, protein.bond_params)
-      e_bond = float(bond_fn(coords_flat))
+      bond_fn = bonded.make_bond_energy_fn(displacement_fn, protein.bonds)
+      e_bond = float(bond_fn(coords_flat, protein.bond_params))
       print(f"JAX Bond Energy: {e_bond:.4f}")
       assert jnp.isfinite(e_bond), "Bond energy is not finite"
 
     # Angle energy
     if protein.angles is not None and protein.angle_params is not None:
-      angle_fn = bonded.make_angle_energy_fn(displacement_fn, protein.angles, protein.angle_params)
-      e_angle = float(angle_fn(coords_flat))
+      angle_fn = bonded.make_angle_energy_fn(displacement_fn, protein.angles)
+      e_angle = float(angle_fn(coords_flat, protein.angle_params))
       print(f"JAX Angle Energy: {e_angle:.4f}")
       assert jnp.isfinite(e_angle), "Angle energy is not finite"
 @pytest.mark.skipif(not openmm_available(), reason="OpenMM not installed")

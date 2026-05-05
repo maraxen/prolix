@@ -12,7 +12,7 @@ import jax.numpy as jnp
 from proxide.core.containers import Protein
 
 if TYPE_CHECKING:
-    from proxide.types import SystemParams
+    from prolix.typing import SystemParams
 
 
 def system_params_to_protein(params: SystemParams) -> Protein:

@@ -42,7 +42,7 @@ from prolix.physics.spec import PhysicsSpec
 if TYPE_CHECKING:
   from collections.abc import Sequence
 
-  from proxide.types import SystemParams
+  from prolix.typing import SystemParams
 
 m.patch()
 
@@ -142,79 +142,7 @@ class SimulationSpec:
       raise ValueError(msg)
 
 
-class SimulationState(eqx.Module):
-  """State of the simulation at a specific timepoint."""
-
-  positions: Array
-  velocities: Array
-
-  # Scalar state (required)
-  step: int | Array
-  time_ns: float | Array
-
-  # Optional fields (must come after required)
-  forces: Array | None = None
-  mass: Array | None = None
-
-  # Energies (optional)
-  potential_energy: float | Array | None = None
-  kinetic_energy: float | Array | None = None
-
-  def numpy(self) -> dict[str, Any]:
-    """Convert state to a dictionary of numpy arrays (on CPU)."""
-
-    def to_cpu(x):
-      if x is None:
-        return None
-      if isinstance(x, (int, float)):
-        return x
-      return np.asarray(jax.device_put(x, jax.devices("cpu")[0]))
-
-    cpu_state = jax.tree_util.tree_map(to_cpu, self)
-
-    return {
-      "positions": cpu_state.positions,
-      "velocities": cpu_state.velocities,
-      "forces": cpu_state.forces,
-      "mass": cpu_state.mass,
-      "step": cpu_state.step,
-      "time_ns": cpu_state.time_ns,
-      "potential_energy": cpu_state.potential_energy,
-      "kinetic_energy": cpu_state.kinetic_energy,
-    }
-
-  def to_array_record(self) -> bytes:
-    """Serialize the state to msgpack bytes for ArrayRecord."""
-    data = self.numpy()
-    # Filter None values to save space
-    data = {k: v for k, v in data.items() if v is not None}
-    return m.packb(data)
-
-  @classmethod
-  def from_array_record(cls, packed: bytes) -> SimulationState:
-    """Deserialize a SimulationState from msgpack bytes.
-
-    Args:
-        packed: Msgpack-encoded bytes from ArrayRecord.
-
-    Returns:
-        SimulationState with JAX arrays.
-    """
-    data = m.unpackb(packed)
-
-    def to_jax(x):
-      return jnp.array(x) if x is not None else None
-
-    return cls(
-      positions=to_jax(data["positions"]),
-      velocities=to_jax(data["velocities"]),
-      forces=to_jax(data.get("forces")),
-      mass=to_jax(data.get("mass")),
-      step=to_jax(data["step"]),
-      time_ns=to_jax(data["time_ns"]),
-      potential_energy=to_jax(data.get("potential_energy")),
-      kinetic_energy=to_jax(data.get("kinetic_energy")),
-    )
+from prolix.typing import SimulationState
 
 
 class TrajectoryWriter:
@@ -699,15 +627,15 @@ def run_simulation(
       new_state = fire_apply_fn(state, **kwargs)
       
       # 3. Displacement capping (limit |dr| to disp_cap Å)
-      dr = new_state.position - state.position
+      dr = new_state.positions - state.positions
       dr_norm = jnp.linalg.norm(dr, axis=-1, keepdims=True)
       scale = jnp.minimum(1.0, disp_cap / (dr_norm + 1e-8))
       
       # If capped, we also scale down velocity to maintain some consistency
-      new_pos = state.position + dr * scale
+      new_pos = state.positions + dr * scale
       new_vel = new_state.velocity * scale
       
-      return dataclasses.replace(new_state, position=new_pos, velocity=new_vel)
+      return dataclasses.replace(new_state, positions=new_pos, velocity=new_vel)
       
     return capped_apply
 
@@ -789,10 +717,10 @@ def run_simulation(
       interval = max(1, int(spec.fire_neighbor_update_interval))
       for i in range(int(n_steps)):
         if i % interval == 0:
-          nbr = neighbor_fn.update(stage_state.position)
+          nbr = neighbor_fn.update(stage_state.positions)
           if nbr.did_buffer_overflow:
-            nbr = neighbor_fn.allocate(stage_state.position)
-            nbr = neighbor_fn.update(stage_state.position)
+            nbr = neighbor_fn.allocate(stage_state.positions)
+            nbr = neighbor_fn.update(stage_state.positions)
         stage_state = stage_step_fn(stage_state, neighbor=nbr)
       final_state = stage_state
       neighbor = nbr
@@ -806,7 +734,7 @@ def run_simulation(
         return jax.lax.fori_loop(0, _n, body_fn, state)
 
       final_state = _run_stage(stage_state)
-    current_positions = final_state.position
+    current_positions = final_state.positions
 
     # Log stage results
     if neighbor_fn is not None:
@@ -932,12 +860,12 @@ def run_simulation(
       integrator_energy_fn, shift_fn, dt=warmup_dt, kT=warmup_kT, gamma=gamma_reduced
     )
 
-    # Initialize from current state positions
+    # Initialize from current state.positions
     warmup_key = jax.random.fold_in(key, hash(phase["name"]))
     if neighbor is not None:
-      warmup_state = warmup_init(warmup_key, state.position, mass=masses, neighbor=neighbor)
+      warmup_state = warmup_init(warmup_key, state.positions, mass=masses, neighbor=neighbor)
     else:
-      warmup_state = warmup_init(warmup_key, state.position, mass=masses)
+      warmup_state = warmup_init(warmup_key, state.positions, mass=masses)
 
     # Run warmup phase
     @jax.jit
@@ -949,7 +877,7 @@ def run_simulation(
     warmup_state = _warmup_loop(warmup_state)
 
     # NaN check
-    has_nan = bool(jnp.any(~jnp.isfinite(warmup_state.position)))
+    has_nan = bool(jnp.any(~jnp.isfinite(warmup_state.positions)))
     if has_nan:
       logger.warning("  %s: NaN detected after %d steps! Reverting to minimized positions.",
                      phase["name"], phase["steps"])
@@ -961,9 +889,9 @@ def run_simulation(
       break
     # Update state with warmup results, reinitialize with production integrator
     if neighbor is not None:
-      state = init_fn(key, warmup_state.position, mass=masses, neighbor=neighbor)
+      state = init_fn(key, warmup_state.positions, mass=masses, neighbor=neighbor)
     else:
-      state = init_fn(key, warmup_state.position, mass=masses)
+      state = init_fn(key, warmup_state.positions, mass=masses)
     logger.info("  %s: %d steps OK (dt=%.4e τ)", phase["name"], phase["steps"], warmup_dt)
 
   # Compile and test the production step function
@@ -971,7 +899,7 @@ def run_simulation(
     _test_state = jit_apply_fn(state, nbr=neighbor)
   else:
     _test_state = jit_apply_fn(state)
-  jax.block_until_ready(_test_state.position)
+  jax.block_until_ready(_test_state.positions)
   logger.info("Step function compiled!")
 
   # Trajectory saving
@@ -1018,7 +946,7 @@ def run_simulation(
       """Update neighbor list and run steps_per_update_actual MD steps."""
       state, nbrs = state_nbrs
       # Update neighbor list
-      nbrs = nbrs.update(state.position)
+      nbrs = nbrs.update(state.positions)
 
       def inner_step(i, s):
         # Run integrator with fixed neighbor list
@@ -1032,13 +960,13 @@ def run_simulation(
     )
 
     # Calculate Energy for saving
-    E = energy_fn(curr_state.position, neighbor=nbrs)  # type: ignore[unknown-argument]
+    E = energy_fn(curr_state.positions, neighbor=nbrs)  # type: ignore[unknown-argument]
     K = jax_md_quantity.kinetic_energy(momentum=curr_state.momentum, mass=curr_state.mass)
 
     # OPTIMIZATION: Do not store forces/mass in accumulation buffer to save memory
     # We only store positions, velocities, energy for trajectory.
     sim_state = SimulationState(
-      positions=curr_state.position,
+      positions=curr_state.positions,
       velocities=curr_state.momentum / curr_state.mass,
       forces=None,  # Dropped for memory efficiency
       mass=None,  # Dropped (constant)
@@ -1059,11 +987,11 @@ def run_simulation(
 
     curr_state = jax.lax.fori_loop(0, steps_per_save, step_fn, curr_state)
 
-    E = energy_fn(curr_state.position)
+    E = energy_fn(curr_state.positions)
     K = jax_md_quantity.kinetic_energy(momentum=curr_state.momentum, mass=curr_state.mass)
 
     sim_state = SimulationState(
-      positions=curr_state.position,
+      positions=curr_state.positions,
       velocities=curr_state.momentum / curr_state.mass,
       forces=None,  # Dropped for memory efficiency
       mass=None,  # Dropped
@@ -1106,9 +1034,9 @@ def run_simulation(
       # Check for neighbor list overflow - reallocate and update for next epoch
       if neighbor.did_buffer_overflow:
         logger.warning("Neighbor list overflow detected, reallocating for next epoch...")
-        neighbor = neighbor_fn.allocate(new_state.position)  # type: ignore[possibly-missing-attribute]
+        neighbor = neighbor_fn.allocate(new_state.positions)  # type: ignore[possibly-missing-attribute]
         # CRITICAL: Update the newly allocated neighbor list with actual neighbors
-        neighbor = neighbor.update(new_state.position)
+        neighbor = neighbor.update(new_state.positions)
       state = new_state
       final_state = new_state
     else:
@@ -1171,12 +1099,12 @@ def run_simulation(
   # Return final SimulationState (unpacked)
   # We construct one last state
   if neighbor is not None:
-    E = energy_fn(state.position, neighbor=neighbor)  # type: ignore[unknown-argument]
+    E = energy_fn(state.positions, neighbor=neighbor)  # type: ignore[unknown-argument]
   else:
-    E = energy_fn(state.position)
+    E = energy_fn(state.positions)
   K_final = jax_md_quantity.kinetic_energy(momentum=state.momentum, mass=state.mass)
   return SimulationState(
-    positions=state.position,
+    positions=state.positions,
     velocities=state.momentum / state.mass,
     forces=state.force,
     step=jnp.array(total_saves * steps_per_save),
@@ -1281,7 +1209,7 @@ def simulate_frames(
       return apply_fn(s)
 
     carrier = jax.lax.fori_loop(0, n_steps, step_fn, carrier)
-    return carrier, carrier.position
+    return carrier, carrier.positions
 
   _, trajectory = jax.lax.scan(scan_fn, state, jnp.arange(n_frames))
   return trajectory

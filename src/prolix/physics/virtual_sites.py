@@ -4,7 +4,7 @@ import jax
 import jax.numpy as jnp
 from jax_md import util
 
-from prolix.types import VirtualSiteParams, VirtualSiteParamsPacked
+from prolix.typing import VirtualSiteParams, VirtualSiteParamsPacked
 
 Array = util.Array
 Coordinates = Array

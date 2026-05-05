@@ -3,7 +3,7 @@ from collections.abc import Callable
 
 import jax
 
-from prolix.physics.types import EnergyParams
+from prolix.typing import EnergyParams
 
 
 def wrap_energy_fn_pure(

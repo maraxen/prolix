@@ -79,7 +79,7 @@ def run_npt_20ps():
         state = apply_j(state, box=state.box)
 
         # NaN check
-        if not jnp.all(jnp.isfinite(state.position)):
+        if not jnp.all(jnp.isfinite(state.positions)):
             print(f"ERROR: NaN in positions at step {step}")
             nan_detected = True
             break
@@ -95,14 +95,14 @@ def run_npt_20ps():
         # Record every 100 steps
         if (step + 1) % record_interval == 0:
             # Compute temperature from kinetic energy
-            ke = rigid_tip3p_box_ke_kcal(state.position, state.momentum, mass, n_waters)
+            ke = rigid_tip3p_box_ke_kcal(state.positions, state.momentum, mass, n_waters)
             dof = 6.0 * n_waters - 3.0
             T_inst = float(2.0 * ke / (dof * BOLTZMANN_KCAL))
             T_hist.append(T_inst)
 
             # Compute pressure from virial + kinetic energy
             volume = float(jnp.prod(state.box))
-            virial_w = float(stress.virial_trace(state.position, state.force))
+            virial_w = float(stress.virial_trace(state.positions, state.force))
             pressure_akma = pressure.instantaneous_pressure_akma(ke, virial_w, physics_system, params, ndim=3)
             P_inst = float(pressure_akma * BAR_PER_AKMA_PRESSURE)
             P_hist.append(P_inst)
@@ -116,7 +116,7 @@ def run_npt_20ps():
 
         # Health check at 10K steps
         if step == health_check_step:
-            ke = rigid_tip3p_box_ke_kcal(state.position, state.momentum, mass, n_waters)
+            ke = rigid_tip3p_box_ke_kcal(state.positions, state.momentum, mass, n_waters)
             dof = 6.0 * n_waters - 3.0
             T_check = float(2.0 * ke / (dof * BOLTZMANN_KCAL))
             volume_check = float(jnp.prod(state.box))

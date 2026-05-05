@@ -20,7 +20,7 @@ from prolix.physics import pbc, system
 
 jax.config.update("jax_enable_x64", True)
 
-# Repo layout: ``prolix/data/pdb`` and sibling ``proxide/`` (see ``tests/physics/conftest.py``).
+# Repo layout: ``proxide/data/pdb`` and sibling ``proxide/`` (see ``tests/physics/conftest.py``).
 _DATA_ROOT = Path(__file__).resolve().parents[2]
 DATA_DIR = _DATA_ROOT / "data" / "pdb"
 FF_PATH = (

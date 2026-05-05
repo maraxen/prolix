@@ -125,14 +125,14 @@ def test_explicit_langevin_baseline_parity_csv(tmp_path, regression_pme_params):
   mass = jnp.ones(n, dtype=jnp.float64) * 12.0
 
   @jax.jit
-  def _prolix_chain(k: jax.Array) -> tuple[jax.Array, jax.Array]:
+  def _proxide_chain(k: jax.Array) -> tuple[jax.Array, jax.Array]:
     state = init_fn(k, positions, mass=mass)
 
     def _body(carry, _i):
       s = carry
       ns = apply_fn(s)
       ke = quantity.kinetic_energy(momentum=ns.momentum, mass=ns.mass)
-      pe = energy_fn(ns.position)
+      pe = energy_fn(ns.positions)
       return ns, jnp.stack([ke, pe])
 
     _final, out = jax.lax.scan(_body, state, None, length=n_steps)
@@ -140,18 +140,18 @@ def test_explicit_langevin_baseline_parity_csv(tmp_path, regression_pme_params):
     pes = out[:, 1]
     return kes, pes
 
-  kes, pes = _prolix_chain(key)
+  kes, pes = _proxide_chain(key)
   kes_np = np.asarray(kes)
   pes_np = np.asarray(pes)
   t_inst_np = 2.0 * kes_np / (dof * BOLTZMANN_KCAL)
 
-  prolix_rows: list[dict[str, float | int]] = []
+  proxide_rows: list[dict[str, float | int]] = []
   for step in range(n_steps):
     ke = float(kes_np[step])
     pe = float(pes_np[step])
     t_inst = float(t_inst_np[step])
     time_ps = (step + 1) * dt_fs / 1000.0
-    prolix_rows.append(
+    proxide_rows.append(
       {
         "step": step + 1,
         "time_ps": time_ps,
@@ -163,21 +163,21 @@ def test_explicit_langevin_baseline_parity_csv(tmp_path, regression_pme_params):
     )
 
   t_samples = t_inst_np[burn:].astype(np.float64)
-  mean_t_prolix = float(np.mean(t_samples))
-  assert abs(mean_t_prolix - temperature_k) <= 0.10 * temperature_k, (
-    f"Prolix mean T={mean_t_prolix:.2f} K vs target {temperature_k} K (baseline ±10% gate)"
+  mean_t_proxide = float(np.mean(t_samples))
+  assert abs(mean_t_proxide - temperature_k) <= 0.10 * temperature_k, (
+    f"Prolix mean T={mean_t_proxide:.2f} K vs target {temperature_k} K (baseline ±10% gate)"
   )
   assert float(np.std(t_samples)) > 1e-6
 
   init_nve, apply_nve = jmd_simulate.nve(energy_fn, shift_fn=shift_fn, dt=dt_akma)
   key_nve = jax.random.PRNGKey(456)
   st0 = init_nve(key_nve, positions, mass=mass, kT=kT)
-  e0 = float(energy_fn(st0.position) + quantity.kinetic_energy(momentum=st0.momentum, mass=st0.mass))
+  e0 = float(energy_fn(st0.positions) + quantity.kinetic_energy(momentum=st0.momentum, mass=st0.mass))
   st = st0
   nve_steps = 800
   for _ in range(nve_steps):
     st = apply_nve(st)
-  e1 = float(energy_fn(st.position) + quantity.kinetic_energy(momentum=st.momentum, mass=st.mass))
+  e1 = float(energy_fn(st.positions) + quantity.kinetic_energy(momentum=st.momentum, mass=st.mass))
   dt_ps_nve = nve_steps * dt_fs / 1000.0
   rel = abs(e1 - e0) / max(abs(e0), 1e-12)
   assert rel <= 0.01 * max(dt_ps_nve, 1e-6), (
@@ -185,4 +185,4 @@ def test_explicit_langevin_baseline_parity_csv(tmp_path, regression_pme_params):
   )
 
   out_dir = _output_dir(tmp_path)
-  _write_csv(out_dir / "prolix_langevin_parity.csv", prolix_rows)
+  _write_csv(out_dir / "proxide_langevin_parity.csv", proxide_rows)

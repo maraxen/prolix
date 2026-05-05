@@ -209,10 +209,10 @@ def run_temperature_validation_experiment(
     ts: list[float] = []
     for step in range(n_steps):
         state = apply_s(state)
-        assert jnp.all(jnp.isfinite(state.position)), f"NaN/Inf at step {step}"
+        assert jnp.all(jnp.isfinite(state.positions)), f"NaN/Inf at step {step}"
 
         # Measure temperature
-        ke = float(rigid_tip3p_box_ke_kcal(state.position, state.momentum, state.mass, n_waters))
+        ke = float(rigid_tip3p_box_ke_kcal(state.positions, state.momentum, state.mass, n_waters))
         T_inst = 2.0 * ke / (dof * BOLTZMANN_KCAL)
         ts.append(T_inst)
 
@@ -225,7 +225,7 @@ def run_temperature_validation_experiment(
     T_error = abs(T_mean - T_target)
 
     # Kinetic energies for reference
-    ke_array = np.array([rigid_tip3p_box_ke_kcal(state.position, state.momentum, state.mass, n_waters)
+    ke_array = np.array([rigid_tip3p_box_ke_kcal(state.positions, state.momentum, state.mass, n_waters)
                          for _ in range(1)])  # Just final state for simplicity
     KE_mean = float(np.mean(ke_array)) if len(ke_array) > 0 else 0.0
     KE_std = float(np.std(ke_array)) if len(ke_array) > 0 else 0.0

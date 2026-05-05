@@ -20,6 +20,6 @@ def test_efa_minimal_energy():
   positions = jax.random.normal(key, (N, 3)) * 3.0
   charges = jnp.array([-0.834, 0.417, 0.417] * 5 + [0.0])
   atom_mask = jnp.array([1.0] * 15 + [0.0])
-  omega = rff_frequency_sample(alpha=0.34, n_features=64, key=key)
+  omega = rff_frequency_sample(alpha=0.34, n_features=64, rng=key)
   E = erfc_rff_coulomb_energy(positions, charges, atom_mask, omega, alpha=0.34)
   assert jnp.isfinite(E), f"EFA energy not finite: {E}"

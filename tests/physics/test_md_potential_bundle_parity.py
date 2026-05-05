@@ -13,7 +13,7 @@ from prolix.physics.md_potential_bundle import (
   sum_real_atoms_per_batch,
   value_energy_and_forces,
 )
-from .test_explicit_langevin_tip3p_parity import _grid_water_positions, _prolix_params_pure_water
+from .test_explicit_langevin_tip3p_parity import _grid_water_positions, _proxide_params_pure_water
 
 
 @pytest.fixture(scope="module")
@@ -27,7 +27,7 @@ def test_value_energy_matches_canonicalize_force(_float64):
   positions_a, box_edge = _grid_water_positions(n_waters, spacing_angstrom=10.0)
   box_vec = jnp.array([box_edge, box_edge, box_edge], dtype=jnp.float64)
   displacement_fn, _ = pbc.create_periodic_space(box_vec)
-  sys_dict = _prolix_params_pure_water(n_waters)
+  sys_dict = _proxide_params_pure_water(n_waters)
   energy_fn = system.make_energy_fn(
     displacement_fn,
     sys_dict,
@@ -51,7 +51,7 @@ def test_make_force_fn_like_canonicalize_matches(_float64):
   positions_a, box_edge = _grid_water_positions(n_waters, spacing_angstrom=10.0)
   box_vec = jnp.array([box_edge, box_edge, box_edge], dtype=jnp.float64)
   displacement_fn, _ = pbc.create_periodic_space(box_vec)
-  sys_dict = _prolix_params_pure_water(n_waters)
+  sys_dict = _proxide_params_pure_water(n_waters)
   energy_fn = system.make_energy_fn(
     displacement_fn,
     sys_dict,

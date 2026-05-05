@@ -22,7 +22,7 @@ from prolix.pt import temperature
 if TYPE_CHECKING:
   from collections.abc import Callable
 
-  from proxide.types import SystemParams
+  from prolix.typing import SystemParams
 
 logger = logging.getLogger(__name__)
 
@@ -339,7 +339,7 @@ def run_replica_exchange(
 
   # Convert to ReplicaExchangeState
   # sub_states is NVTLangevinState with stacked arrays
-  E_init = jax.vmap(energy_fn)(sub_states.position)
+  E_init = jax.vmap(energy_fn)(sub_states.positions)
 
   def compute_ke(p, m):
     return quantity.kinetic_energy(momentum=p, mass=m)
@@ -352,7 +352,7 @@ def run_replica_exchange(
     m_init = m_init[..., None]
 
   state = ReplicaExchangeState(
-    positions=sub_states.position,
+    positions=sub_states.positions,
     velocities=sub_states.momentum / m_init,
     forces=sub_states.force,
     mass=m_init,
@@ -390,7 +390,7 @@ def run_replica_exchange(
     step_rngs = random.split(step_rng, n_replicas)
 
     langevin_state = physics_simulate.NVTLangevinState(
-      position=curr_state.positions,
+      positions=curr_state(positions,
       momentum=curr_state.velocities * curr_state.mass,
       force=curr_state.forces,
       mass=curr_state.mass,
@@ -403,7 +403,7 @@ def run_replica_exchange(
     final_langevin = jax.lax.fori_loop(0, steps_per_exchange, inner_step, langevin_state)
 
     # Update ReplicaExchangeState
-    PE = jax.vmap(energy_fn)(final_langevin.position)
+    PE = jax.vmap(energy_fn)(final_langevin.positions)
 
     # Re-use compute_ke from outer scope or redefine
     def compute_ke_step(p, m):
@@ -416,7 +416,7 @@ def run_replica_exchange(
       m_step = m_step[..., None]
 
     updated_state = curr_state.replace(
-      positions=final_langevin.position,
+      positions=final_langevin.positions,
       velocities=final_langevin.momentum / m_step,  # velocity
       forces=final_langevin.force,
       step=curr_state.step + steps_per_exchange,

@@ -200,7 +200,7 @@ def main():
         momentum=jnp.zeros_like(padded.positions),
         force=-g_dense,
         mass=padded.masses,
-        key=key,
+        rng=key,
         cap_count=jnp.array(0, dtype=jnp.int32),
     )
 

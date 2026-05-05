@@ -67,7 +67,7 @@ from jaxtyping import Array as ArrayType
 from jaxtyping import PRNGKeyArray
 
 from prolix.physics.constraints import ConstraintDOFMask
-from prolix.physics.types import IntegratorParams
+from prolix.typing import IntegratorParams, IntegratorState
 from prolix.physics.settle import (
     _DEFAULT_CSVR_TAU_AKMA,
     _csvr_rescale_momenta,
@@ -78,7 +78,7 @@ from prolix.physics.settle import (
     settle_velocities,
     settle_positions,
 )
-from prolix.types import Array, WaterIndicesArray
+from prolix.typing import Array, WaterIndicesArray
 
 
 def _csvr_compute_lambda_jit_safe(
@@ -150,67 +150,8 @@ def _csvr_compute_lambda_jit_safe(
   return lambda_factor, key
 
 
-@jax.tree_util.register_pytree_node_class
-@dataclass
-class IntegratorState:
-  """Minimal integrator state for step composition.
-
-  Supports both unbatched and batched (vmap) modes seamlessly.
-
-  **Unbatched Mode**:
-  - position: (N, 3) atomic positions
-  - momentum: (N, 3) atomic momenta (mass-weighted velocities)
-  - force: (N, 3) atomic forces (from energy_fn gradient)
-  - mass: (N,) or (N, 1) atomic masses
-  - rng: JAX PRNGKey for stochastic steps
-  - box: Optional (3,) box dimensions for periodic boundary conditions
-
-  **Batched Mode** (via jax.vmap):
-  - position: (B, N, 3) where B=batch_size (multiple independent trajectories)
-  - momentum: (B, N, 3)
-  - force: (B, N, 3)
-  - mass: (N,) or (N, 1) (broadcast across batch; same for all trajectories)
-  - rng: (B, 2) (independent key per trajectory)
-  - box: Optional (3,) (broadcast; same box for all trajectories)
-
-  Attributes:
-      position: Atomic positions. Shape (N, 3) unbatched or (B, N, 3) batched.
-      momentum: Atomic momenta. Shape (N, 3) unbatched or (B, N, 3) batched.
-      force: Atomic forces. Shape (N, 3) unbatched or (B, N, 3) batched.
-      mass: Atomic masses. Shape (N,) or (N, 1), shared across batch.
-      rng: JAX PRNGKey. Shape (2,) unbatched or (B, 2) batched.
-      box: Optional box dimensions. Shape (3,) if provided, shared across batch.
-  """
-
-  position: ArrayType
-  momentum: ArrayType
-  force: ArrayType
-  mass: ArrayType
-  rng: PRNGKeyArray
-  box: Optional[ArrayType] = None
-  step_count: int = 0
-
-  def tree_flatten(self):
-    """Flatten state into children and aux_data for JAX pytree."""
-    return (self.position, self.momentum, self.force, self.mass, self.rng, self.box, self.step_count), None
-
-  @classmethod
-  def tree_unflatten(cls, aux_data, children):
-    """Reconstruct state from flattened pytree."""
-    position, momentum, force, mass, rng, box, step_count = children
-    return cls(position=position, momentum=momentum, force=force, mass=mass, rng=rng, box=box, step_count=step_count)
-
-  def replace(self, **kwargs):
-    """Return a copy with specified fields replaced."""
-    from dataclasses import replace
-    return replace(self, **kwargs)
-
-  def __replace__(self, **kwargs):
-    """Return a copy with specified fields replaced."""
-    return self.replace(**kwargs)
-
-
 class Step(eqx.Module, ABC):
+
   """Abstract base class for integrator steps.
 
   All steps are Equinox Modules that implement a pure `apply` method.
@@ -305,17 +246,17 @@ class O_Step(Step):
     if use_constrained:
       momentum_new, key_out = _langevin_step_o_constrained(
           state.momentum,
-          state.position,
+          state.positions,
           state.mass,
           gamma,
           dt,
           kT,
-          state.rng,
+          state.key,
           params.water_indices,
       )
     else:
       momentum_new, key_out = _langevin_step_o(
-          state.momentum, state.mass, gamma, dt, kT, state.rng
+          state.momentum, state.mass, gamma, dt, kT, state.key
       )
 
     return state.__replace__(momentum=momentum_new, rng=key_out)
@@ -408,13 +349,13 @@ class A_Step(Step):
     # If no shift_fn, use simple addition (no PBC wrapping)
     if self.shift_fn is None:
       velocity = state.momentum / state.mass
-      position_new = state.position + dt * velocity
+      position_new = state.positions + dt * velocity
     else:
       position_new = _langevin_step_a(
-          state.position, state.momentum, state.mass, dt, self.shift_fn
+          state.positions, state.momentum, state.mass, dt, self.shift_fn
       )
 
-    return state.__replace__(position=position_new)
+    return state.__replace__(positions=position_new)
 
 
 class SETTLE_Velocity_Step(Step):
@@ -480,7 +421,7 @@ class SETTLE_Velocity_Step(Step):
     positions_old = params.positions_old
     if positions_old is None:
       # If positions_old not provided, assume positions haven't moved yet
-      positions_old = state.position
+      positions_old = state.positions
 
     dt = params.dt
 
@@ -490,7 +431,7 @@ class SETTLE_Velocity_Step(Step):
     velocity_constrained = settle_velocities(
         velocity,
         positions_old,
-        state.position,
+        state.positions,
         jnp.asarray(water_indices),
         dt,
         mass_oxygen=self.mass_oxygen,
@@ -549,11 +490,11 @@ class SETTLE_Position_Step(Step):
 
     # Reference positions for SETTLE (used to fix orientation)
     r_old = jnp.where(
-        params.positions_old is not None, params.positions_old, state.position
+        params.positions_old is not None, params.positions_old, state.positions
     )
 
     position_constrained = settle_positions(
-        state.position,
+        state.positions,
         r_old,
         params.water_indices,
         self.r_OH,
@@ -563,7 +504,7 @@ class SETTLE_Position_Step(Step):
         state.box,
     )
 
-    return state.__replace__(position=position_constrained)
+    return state.__replace__(positions=position_constrained)
 
 
 class CSVR_Step(Step):
@@ -620,7 +561,7 @@ class CSVR_Step(Step):
 
     # Compute rescaling factor and new RNG using JIT-safe version
     lambda_factor, key_out = _csvr_compute_lambda_jit_safe(
-        state.rng, ke, n_dof, kT, dt, tau=self.tau
+        state.key, ke, n_dof, kT, dt, tau=self.tau
     )
 
     # Rescale momenta

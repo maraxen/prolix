@@ -220,17 +220,17 @@ class TestSETTLEIntegrator:
     state = init_fn(key, R_init, kT=kT)
 
     # Run a few steps
-    E_initial = energy_fn(state.position)
+    E_initial = energy_fn(state.positions)
 
     for _ in range(100):
       state = apply_fn(state, kT=kT)
 
-    E_final = energy_fn(state.position)
+    E_final = energy_fn(state.positions)
 
     # Energy should not explode (within 50% for simple test)
     assert E_final < E_initial * 2.0, f"Energy exploded: {E_initial} -> {E_final}"
     # Positions should be finite
-    assert jnp.all(jnp.isfinite(state.position)), "Positions contain NaN/Inf"
+    assert jnp.all(jnp.isfinite(state.positions)), "Positions contain NaN/Inf"
 
   def test_water_geometry_preserved(self):
     """Test that integrator maintains water geometry over 1000 steps."""
@@ -268,7 +268,7 @@ class TestSETTLEIntegrator:
     for _ in range(1000):
       state = apply_fn_jit(state)
 
-    R_final = state.position
+    R_final = state.positions
 
     # Check geometry is maintained
     r_OH1 = float(jnp.linalg.norm(R_final[1] - R_final[0]))

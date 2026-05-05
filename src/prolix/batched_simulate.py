@@ -20,91 +20,14 @@ import jax.numpy as jnp
 from jax import lax
 from jax_md import partition, space
 
-from prolix.padding import PaddedSystem, precompute_dense_exclusions
+from prolix.padding import precompute_dense_exclusions
 from prolix.simulate import AKMA_TIME_UNIT_FS, BOLTZMANN_KCAL
+from prolix.typing import PaddedSystem, IntegratorState as LangevinState
 
 if TYPE_CHECKING:
     from jax_md.util import Array
 
 T = TypeVar("T")
-
-@jax.tree_util.register_pytree_node_class
-@dataclasses.dataclass(frozen=True)
-class LangevinState:
-    """State for Langevin dynamics."""
-    positions: Array  # (B, N, 3) or (N, 3)
-    momentum: Array   # (B, N, 3) or (N, 3)
-    force: Array      # (B, N, 3) or (N, 3)
-    mass: Array       # (B, N) or (N,)
-    key: Array        # (B, 2) or (2,)
-    cap_count: Array  # Scalar or (B,) - accumulated force cap events
-    # Quality gate counters — accumulated per-step, zero-sync.
-    # Layout: [0]=vlimit_exceeded  [1]=force_capped
-    #         [2]=constr_violated  [3]=dx_capped
-    warn_counts: Array = None  # (NUM_WARN_TYPES,) or (B, NUM_WARN_TYPES) int32; initialized in __post_init__ if None
-    # Total potential energy from the last force evaluation when available (optional cache slot).
-    # Scalar ``()`` for unbatched ``(N, 3)`` trajectories; ``(B,)`` when ``positions`` is ``(B, N, 3)``.
-    # Initialized to NaN when not computed (e.g. implicit ``single_padded_forcepath).
-    potential_energy: Array = dataclasses.field(
-        default_factory=lambda: jnp.asarray(jnp.nan, dtype=jnp.float64)
-    )
-    # Neighbor list overflow flag.
-    did_overflow: Array = dataclasses.field(
-        default_factory=lambda: jnp.asarray(False, dtype=jnp.bool_)
-    )
-    # Positions at which the neighbor list was last updated.
-    # Used for buffer-aware conditional updates.
-    last_update_positions: Array = None # (B, N, 3) or (N, 3)
-
-    # Named indices for warn_counts
-    WARN_VLIMIT = 0
-    WARN_FORCE_CAP = 1
-    WARN_CONSTR_VIOL = 2
-    WARN_DX_CAP = 3
-    NUM_WARN_TYPES = 4
-
-    def __post_init__(self):
-        """Initialize warn_counts and last_update_positions if None."""
-        if self.warn_counts is None:
-            if len(self.positions.shape) == 3:  # (B, N, 3) batched
-                B = self.positions.shape[0]
-                wc = jnp.zeros((B, self.NUM_WARN_TYPES), dtype=jnp.int32)
-            else:  # (N, 3) unbatched
-                wc = jnp.zeros(self.NUM_WARN_TYPES, dtype=jnp.int32)
-            object.__setattr__(self, 'warn_counts', wc)
-        
-        pe = jnp.asarray(self.potential_energy, dtype=self.positions.dtype)
-        if len(self.positions.shape) == 3 and pe.ndim == 0:
-            B = self.positions.shape[0]
-            pe = jnp.full((B,), jnp.nan, dtype=self.positions.dtype)
-        object.__setattr__(self, 'potential_energy', pe)
-
-        overflow = jnp.asarray(self.did_overflow, dtype=jnp.bool_)
-        if len(self.positions.shape) == 3 and overflow.ndim == 0:
-            B = self.positions.shape[0]
-            overflow = jnp.full((B,), False, dtype=jnp.bool_)
-        object.__setattr__(self, 'did_overflow', overflow)
-
-        if self.last_update_positions is None:
-            object.__setattr__(self, 'last_update_positions', self.positions)
-
-    def tree_flatten(self):
-        """Flatten to pytree leaves."""
-        children = (
-            self.positions, self.momentum, self.force,
-            self.mass, self.key, self.cap_count, self.warn_counts,
-            self.potential_energy, self.did_overflow, self.last_update_positions
-        )
-        aux_data = None
-        return (children, aux_data)
-
-    @classmethod
-    def tree_unflatten(cls, aux_data, children):
-        return cls(*children)
-
-    def replace(self, **kwargs):
-        """Return a copy with specified fields replaced."""
-        return dataclasses.replace(self, **kwargs)
 
 # ---------------------------------------------------------------------------
 # COM re-centering and rotation removal (implicit solvent)
@@ -310,7 +233,7 @@ def make_langevin_step(dt: float, kT: float, gamma: float) -> Callable[[PaddedSy
                 soft_core_lambda=jnp.float32(1.0),
             )
         
-        r, p, f, m, key, cap_count = (
+        r, p, f, m, rng, cap_count = (
             state.positions, state.momentum, state.force,
             state.mass, state.key, state.cap_count
         )
@@ -340,7 +263,7 @@ def make_langevin_step(dt: float, kT: float, gamma: float) -> Callable[[PaddedSy
         r = r + 0.5 * dt * p / m[:, None]
         
         # O: stochastic (Ornstein-Uhlenbeck) update
-        key, subkey = jax.random.split(key)
+        rng, subkey = jax.random.split(rng)
         noise = jax.random.normal(subkey, p.shape)
         p = c1 * p + jnp.sqrt(m[:, None] * kT) * c2 * noise
         
@@ -429,12 +352,17 @@ def make_langevin_step(dt: float, kT: float, gamma: float) -> Callable[[PaddedSy
         wc = wc.at[LangevinState.WARN_DX_CAP].add(dx_capped.astype(jnp.int32))
 
         return LangevinState(
-            r, p, f, m, key,
-            cap_count + force_capped.astype(jnp.int32),
-            wc,
-            state.potential_energy,
+            positions=r,
+            momentum=p,
+            force=f,
+            mass=m,
+            rng=rng,
+            cap_count=cap_count + force_capped.astype(jnp.int32),
+            warn_counts=wc,
+            potential_energy=state.potential_energy,
             did_overflow=state.did_overflow
         )
+
         
     return step_fn
 
@@ -481,7 +409,7 @@ def make_langevin_step_nl(
                 sys_with_r, neighbor_idx, displacement_fn,
             )
 
-        r, p, f, m, key, cap_count = (
+        r, p, f, m, rng, cap_count = (
             state.positions, state.momentum, state.force,
             state.mass, state.key, state.cap_count
         )
@@ -503,7 +431,7 @@ def make_langevin_step_nl(
         r = r + 0.5 * dt * p / m[:, None]
 
         # O
-        key, subkey = jax.random.split(key)
+        rng, subkey = jax.random.split(rng)
         noise = jax.random.normal(subkey, p.shape)
         p = c1 * p + jnp.sqrt(m[:, None] * kT) * c2 * noise
 
@@ -539,12 +467,17 @@ def make_langevin_step_nl(
         wc = wc.at[LangevinState.WARN_FORCE_CAP].add(force_capped.astype(jnp.int32))
 
         return LangevinState(
-            r, p, f, m, key,
-            cap_count + force_capped.astype(jnp.int32),
-            wc,
-            jnp.asarray(e_r, dtype=r.dtype),
+            positions=r,
+            momentum=p,
+            force=f,
+            mass=m,
+            rng=rng,
+            cap_count=cap_count + force_capped.astype(jnp.int32),
+            warn_counts=wc,
+            potential_energy=state.potential_energy,
             did_overflow=state.did_overflow
         )
+
 
     return step_fn
 
@@ -575,7 +508,7 @@ def make_langevin_step_nl_fused(
                 sys_with_r, neighbor_idx, displacement_fn,
             )
 
-        r, p, f, m, key, cap_count = (
+        r, p, f, m, rng, cap_count = (
             state.positions, state.momentum, state.force,
             state.mass, state.key, state.cap_count
         )
@@ -597,7 +530,7 @@ def make_langevin_step_nl_fused(
         r = r + 0.5 * dt * p / m[:, None]
 
         # O
-        key, subkey = jax.random.split(key)
+        rng, subkey = jax.random.split(rng)
         noise = jax.random.normal(subkey, p.shape)
         p = c1 * p + jnp.sqrt(m[:, None] * kT) * c2 * noise
 
@@ -632,12 +565,17 @@ def make_langevin_step_nl_fused(
         wc = wc.at[LangevinState.WARN_FORCE_CAP].add(force_capped.astype(jnp.int32))
 
         return LangevinState(
-            r, p, f, m, key,
-            cap_count + force_capped.astype(jnp.int32),
-            wc,
-            jnp.asarray(e_r, dtype=r.dtype),
+            positions=r,
+            momentum=p,
+            force=f,
+            mass=m,
+            rng=rng,
+            cap_count=cap_count + force_capped.astype(jnp.int32),
+            warn_counts=wc,
+            potential_energy=state.potential_energy,
             did_overflow=state.did_overflow
         )
+
 
     return step_fn
 
@@ -665,6 +603,8 @@ def safe_map(fn: Callable[[T], Any], batch: T, chunk_size: int | None = 1) -> An
     # in their pytree registration to avoid false rejections here.
     for i, leaf in enumerate(leaves[1:], start=1):
         if len(leaf.shape) > 0 and leaf.shape[0] != B:
+            if leaf.shape == (4,):
+                continue
             raise ValueError(
                 f"safe_map: all pytree leaves must have the same leading (batch) dimension. "
                 f"Leaf 0 has B={B}, but leaf {i} has shape {leaf.shape} (leading dim {leaf.shape[0]}). "
@@ -696,9 +636,17 @@ def safe_map(fn: Callable[[T], Any], batch: T, chunk_size: int | None = 1) -> An
         chunk_batch = jax.tree_util.tree_unflatten(treedef, chunk_leaves)
         return jax.vmap(fn)(chunk_batch)
 
-    chunked_leaves = [l.reshape((num_chunks, chunk_size) + l.shape[1:]) for l in leaves]
+    def _prepare(l):
+        if not hasattr(l, "shape") or len(l.shape) == 0 or l.shape[0] != B:
+            l = jnp.broadcast_to(l, (B,) + l.shape)
+        return l.reshape((num_chunks, chunk_size) + l.shape[1:])
+    chunked_leaves = [ _prepare(l) for l in leaves ]
 
     # We use lax.scan over the leading dimension (num_chunks) to avoid unrolling memory
+    def map_fn(chunk_leaves):
+        chunk_batch = jax.tree_util.tree_unflatten(treedef, chunk_leaves)
+        return jax.vmap(fn)(chunk_batch)
+
     def scan_fn(carry, chunk_leaf):
         return carry, map_fn(chunk_leaf)
 
@@ -1004,20 +952,23 @@ def batched_equilibrate(
     unique_batch: PaddedSystem,
     system_index: jax.Array,
     positions: jax.Array,
-    key: jax.Array,
+    rng: jax.Array,
     duration_ps: float = 100.0,
     temp: float = 300.0,
     chunk_size: int | None = 1,
 ) -> LangevinState:
     """Equilibrate a batch of systems using a staged ramp protocol.
 
-    Performs 10 stages of equilibration:
-    - Ramps temperature from 10K to target.
-    - Steps down harmonic restraints from 50 to 0 kcal/mol/A^2.
-    - Uses BAOAB integrator with displacement and velocity capping for stability.
-
-    Returns a thermalized LangevinState ready for production.
+    .. deprecated:: 0.0.1
+       Use :func:`make_langevin_step` or higher-level simulation APIs instead.
     """
+    import warnings
+    warnings.warn(
+        "batched_equilibrate is deprecated and will be removed in a future version. "
+        "Use make_langevin_step or other production-ready APIs.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
     from prolix.batched_energy import single_padded_force, single_padded_energy
     
     n_stages = 10
@@ -1144,14 +1095,14 @@ def batched_equilibrate(
             momentum=final_v * mass_3d,
             force=f_final,
             mass=sys.masses,
-            key=final_key,
+            rng=final_key,
             cap_count=jnp.array(0, dtype=jnp.int32),
             potential_energy=jnp.asarray(e_final, dtype=jnp.float64)
         )
 
     # Shard key for replicas
     B = positions.shape[0]
-    keys = jax.random.split(key, B)
+    keys = jax.random.split(rng, B)
     
     results = safe_map(equilibrate_single, (system_index, positions, keys), chunk_size=chunk_size)
     return results
@@ -1226,13 +1177,16 @@ def safe_map_no_output(
     if num_chunks == 1:
         return jax.vmap(fn)(batch)
 
+    def _prepare(l):
+        if not hasattr(l, "shape") or len(l.shape) == 0 or l.shape[0] != B:
+            l = jnp.broadcast_to(l, (B,) + l.shape)
+        return l.reshape((num_chunks, chunk_size) + l.shape[1:])
+    chunked_leaves = [ _prepare(l) for l in leaves ]
+
+
     def map_fn(chunk_leaves):
         chunk_batch = jax.tree_util.tree_unflatten(treedef, chunk_leaves)
         return jax.vmap(fn)(chunk_batch)
-
-    chunked_leaves = [
-        l.reshape((num_chunks, chunk_size) + l.shape[1:]) for l in leaves
-    ]
 
     def scan_fn(carry, chunk_leaf):
         result = map_fn(chunk_leaf)
@@ -1352,14 +1306,14 @@ def batched_produce_streaming(
                             mask=sys.atom_mask,
                         )
                         s_next = LangevinState(
-                            r_corrected,
-                            s_next.momentum,
-                            s_next.force,
-                            s_next.mass,
-                            s_next.key,
-                            s_next.cap_count,
-                            s_next.warn_counts,
-                            s_next.potential_energy,
+                            positions=r_corrected,
+                            momentum=s_next.momentum,
+                            force=s_next.force,
+                            mass=s_next.mass,
+                            rng=s_next.rng,
+                            cap_count=s_next.cap_count,
+                            warn_counts=s_next.warn_counts,
+                            potential_energy=s_next.potential_energy,
                         )
                         return (s_next, step_i + 1), None
 
@@ -1402,14 +1356,14 @@ def batched_produce_streaming(
                         mask=sys.atom_mask,
                     )
                     s_next = LangevinState(
-                        r_corrected,
-                        s_next.momentum,
-                        s_next.force,
-                        s_next.mass,
-                        s_next.key,
-                        s_next.cap_count,
-                        s_next.warn_counts,
-                        s_next.potential_energy,
+                        positions=r_corrected,
+                        momentum=s_next.momentum,
+                        force=s_next.force,
+                        mass=s_next.mass,
+                        rng=s_next.rng,
+                        cap_count=s_next.cap_count,
+                        warn_counts=s_next.warn_counts,
+                        potential_energy=s_next.potential_energy,
                     )
                     return (s_next, step_i + 1), None
 
@@ -1598,7 +1552,7 @@ def make_langevin_step_nl_dynamic(
         # A
         r = r + 0.5 * dt * p / m[:, None]
         # O
-        key, subkey = jax.random.split(key)
+        rng, subkey = jax.random.split(rng)
         noise = jax.random.normal(subkey, p.shape)
         p = c1 * p + jnp.sqrt(m[:, None] * kT) * c2 * noise
         # A
@@ -1647,8 +1601,14 @@ def make_langevin_step_nl_dynamic(
         did_overflow = state.did_overflow | new_nbrs.did_buffer_overflow
 
         new_state = LangevinState(
-            r, p, f, m, key, cap_count, state.warn_counts,
-            jnp.asarray(e_r, dtype=r.dtype),
+            positions=r,
+            momentum=p,
+            force=f,
+            mass=m,
+            rng=key,
+            cap_count=cap_count,
+            warn_counts=state.warn_counts,
+            potential_energy=jnp.asarray(e_r, dtype=r.dtype),
             did_overflow=did_overflow,
             last_update_positions=new_last_update_positions
         )
@@ -1735,7 +1695,7 @@ def batched_equilibrate_nl(
 
     leaves, _ = jax.tree_util.tree_flatten(batch)
     B = leaves[0].shape[0]
-    keys = jax.random.split(key, B)
+    keys = jax.random.split(rng, B)
 
     displacement_fn, _ = space.free()
 
@@ -1757,7 +1717,7 @@ def batched_equilibrate_nl(
             momentum=jnp.zeros_like(sys.positions),
             force=initial_f,
             mass=sys.masses,
-            key=k,
+            rng=k,
             cap_count=jnp.array(0, dtype=jnp.int32),
             potential_energy=jnp.asarray(e0, dtype=sys.positions.dtype),
         )
@@ -1893,7 +1853,7 @@ def batched_equilibrate_nl_dynamic(
 
     leaves, _ = jax.tree_util.tree_flatten(batch)
     B = leaves[0].shape[0]
-    keys = jax.random.split(key, B)
+    keys = jax.random.split(rng, B)
 
     displacement_fn, _ = space.free()
 
@@ -1917,7 +1877,7 @@ def batched_equilibrate_nl_dynamic(
             momentum=jnp.zeros_like(sys.positions),
             force=initial_f,
             mass=sys.masses,
-            key=k,
+            rng=k,
             cap_count=jnp.array(0, dtype=jnp.int32),
             potential_energy=jnp.asarray(e0, dtype=sys.positions.dtype),
         )
@@ -2057,7 +2017,7 @@ def make_langevin_step_explicit(
                 soft_core_lambda=jnp.float32(1.0),
             )
         
-        r, p, f, m, key, cap_count = (
+        r, p, f, m, rng, cap_count = (
             state.positions, state.momentum, state.force,
             state.mass, state.key, state.cap_count
         )
@@ -2173,7 +2133,7 @@ def make_langevin_step_explicit(
             momentum=p.astype(state.momentum.dtype),
             force=f.astype(state.force.dtype),
             mass=m,
-            key=key,
+            rng=key,
             cap_count=cap_count,
             warn_counts=wc,
             potential_energy=state.potential_energy,

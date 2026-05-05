@@ -365,7 +365,7 @@ def main():
         for step in range(1, n_steps + 1):
             # Update neighbor list every 10 steps
             if step % 10 == 0:
-                neighbor = neighbor.update(state.position)
+                neighbor = neighbor.update(state.positions)
             
             try:
                 state = apply_jit(state, neighbor)
@@ -374,9 +374,9 @@ def main():
                 break
             
             if step % 25 == 0 or step == n_steps:
-                neighbor = neighbor.update(state.position)
+                neighbor = neighbor.update(state.positions)
                 # Compute Energy using Dynamics function (K=0)
-                e = float(energy_fn_dyn(state.position, neighbor=neighbor))
+                e = float(energy_fn_dyn(state.positions, neighbor=neighbor))
                 
                 # Compute instantaneous temperature
                 ke = 0.5 * jnp.sum(state.momentum**2 / state.mass)
@@ -388,7 +388,7 @@ def main():
                 temperatures.append(inst_temp)
                 
                 # Check for problems
-                if not jnp.all(jnp.isfinite(state.position)):
+                if not jnp.all(jnp.isfinite(state.positions)):
                     print(f"  Step {step}: NaN/Inf detected!")
                     break
                 
@@ -399,10 +399,10 @@ def main():
                 print(f"  Step {step}: E={e:.2f} kcal/mol, T={inst_temp:.1f}K")
         
         # Save trajectory frame
-        trajectory.append(np.array(state.position))
+        trajectory.append(np.array(state.positions))
         
         # Check for simulation failure
-        if not jnp.all(jnp.isfinite(state.position)) or (len(energies) > 0 and energies[-1] > 1e10):
+        if not jnp.all(jnp.isfinite(state.positions)) or (len(energies) > 0 and energies[-1] > 1e10):
             print("Simulation failed - stopping.")
             break
     
@@ -410,7 +410,7 @@ def main():
     
     # Check final water geometry
     print("\n--- Water Geometry Check ---")
-    final_pos = state.position
+    final_pos = state.positions
     n_check = min(10, n_waters)
     max_oh_err = 0.0
     max_hh_err = 0.0

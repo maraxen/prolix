@@ -61,7 +61,7 @@ def test_nve_energy_conservation():
   key = jax.random.PRNGKey(0)
   state = init_fn(key, R_init, mass=1.0, kT=0.5)  # Initialize with some T
 
-  E_initial = energy_fn(state.position) + quantity.kinetic_energy(
+  E_initial = energy_fn(state.positions) + quantity.kinetic_energy(
     momentum=state.momentum, mass=state.mass
   )
 
@@ -70,7 +70,7 @@ def test_nve_energy_conservation():
 
   final_state = jax.lax.fori_loop(0, steps, step, state)
 
-  E_final = energy_fn(final_state.position) + quantity.kinetic_energy(
+  E_final = energy_fn(final_state.positions) + quantity.kinetic_energy(
     momentum=final_state.momentum, mass=final_state.mass
   )
 
@@ -81,7 +81,7 @@ def test_nvt_nose_hoover_temperature():
   # 100 Particles, target T=1.0 (LJ units ~ 100K-ish depending on epsilon)
   # Actually explicit units:
   # Let's say T=300K.
-  # prolix constants imply kcal/mol.
+  # proxide constants imply kcal/mol.
   # Let's use simple units for test.
 
   displacement_fn, shift_fn = space.free()

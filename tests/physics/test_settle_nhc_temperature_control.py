@@ -13,7 +13,7 @@ import pytest
 from prolix.physics import pbc, settle, system
 from prolix.physics.rigid_water_ke import rigid_tip3p_box_ke_kcal
 from prolix.simulate import AKMA_TIME_UNIT_FS, BOLTZMANN_KCAL
-from .test_explicit_langevin_tip3p_parity import _grid_water_positions, _prolix_params_pure_water
+from .test_explicit_langevin_tip3p_parity import _grid_water_positions, _proxide_params_pure_water
 
 
 def _dof_rigid_tip3p_waters(n_waters: int) -> float:
@@ -32,7 +32,7 @@ def _mean_rigid_t_nhc_after_burn(
   dt_akma = float(dt_fs) / float(AKMA_TIME_UNIT_FS)
   kT = float(temperature_k) * BOLTZMANN_KCAL
 
-  sys_dict = _prolix_params_pure_water(n_waters)
+  sys_dict = _proxide_params_pure_water(n_waters)
   displacement_fn, shift_fn = pbc.create_periodic_space(box_vec)
   energy_fn = system.make_energy_fn(
       displacement_fn,
@@ -71,7 +71,7 @@ def _mean_rigid_t_nhc_after_burn(
   for step in range(steps):
     state = apply_j(state)
     if step >= burn:
-      ke_r = float(rigid_tip3p_box_ke_kcal(state.position, state.momentum, state.mass, n_waters))
+      ke_r = float(rigid_tip3p_box_ke_kcal(state.positions, state.momentum, state.mass, n_waters))
       temp = 2.0 * ke_r / (dof_rigid * BOLTZMANN_KCAL)
       temps.append(temp)
 

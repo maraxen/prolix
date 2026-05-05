@@ -1,4 +1,4 @@
-"""Flask-based server for the prolix trajectory viewer.
+"""Flask-based server for the proxide trajectory viewer.
 
 This server:
 1. Serves the built webapp (from viewer/dist)
@@ -6,10 +6,10 @@ This server:
 3. Converts array_record trajectories to JSON for browser consumption
 
 Usage:
-    python -m prolix.viewer_server trajectory.array_record --pdb protein.pdb
+    python -m proxide.viewer_server trajectory.array_record --pdb protein.pdb
 
 Or programmatically:
-    from prolix.viewer_server import launch_viewer
+    from proxide.viewer_server import launch_viewer
     launch_viewer(trajectory_path="traj.array_record", pdb_path="protein.pdb")
 """
 
@@ -42,7 +42,7 @@ except ImportError:
 logger = logging.getLogger(__name__)
 
 # Find the viewer dist directory
-# Path is: src/prolix/viewer_server.py -> ../../.. -> project root -> viewer/dist
+# Path is: src/proxide/viewer_server.py -> ../../.. -> project root -> viewer/dist
 VIEWER_DIST = Path(__file__).parent.parent.parent / "viewer" / "dist"
 if not VIEWER_DIST.exists():
   # Fallback: Try from installed package location (editable install)

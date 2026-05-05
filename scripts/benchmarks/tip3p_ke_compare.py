@@ -479,7 +479,7 @@ def _prolix_run_once(
     state = apply_s(state)
     if step >= burn and (step - burn) % sample_every == 0:
       ke_a = float(quantity.kinetic_energy(momentum=state.momentum, mass=state.mass))
-      ke_r = float(rigid_tip3p_box_ke_kcal(state.position, state.momentum, state.mass, n_waters))
+      ke_r = float(rigid_tip3p_box_ke_kcal(state.positions, state.momentum, state.mass, n_waters))
       ratios.append(ke_a / max(ke_r, 1e-12))
       t_rigid.append(2.0 * ke_r / (dof * BOLTZMANN_KCAL))
       if verbose_samples:

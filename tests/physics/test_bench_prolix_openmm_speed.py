@@ -1,4 +1,4 @@
-"""Smoke tests for ``scripts/benchmarks/prolix_vs_openmm_speed.py`` (import + helpers)."""
+"""Smoke tests for ``scripts/benchmarks/proxide_vs_openmm_speed.py`` (import + helpers)."""
 
 from __future__ import annotations
 
@@ -7,15 +7,15 @@ import sys
 from pathlib import Path
 
 _ROOT = Path(__file__).resolve().parents[2]
-_BENCH = _ROOT / "scripts" / "benchmarks" / "prolix_vs_openmm_speed.py"
+_BENCH = _ROOT / "scripts" / "benchmarks" / "proxide_vs_openmm_speed.py"
 
 
 def _load_bench():
-  spec = importlib.util.spec_from_file_location("prolix_vs_openmm_speed", _BENCH)
+  spec = importlib.util.spec_from_file_location("proxide_vs_openmm_speed", _BENCH)
   assert spec and spec.loader
   mod = importlib.util.module_from_spec(spec)
   # Required so dataclasses can resolve TimingRow.__module__ during import.
-  sys.modules["prolix_vs_openmm_speed"] = mod
+  sys.modules["proxide_vs_openmm_speed"] = mod
   spec.loader.exec_module(mod)
   return mod
 

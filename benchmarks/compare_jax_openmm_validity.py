@@ -273,7 +273,7 @@ def run_jax_simulation(coords, params, n_idx, ca_idx, c_idx):
             current_key, subkey = jax.random.split(current_key)
             current_state = step_fn(current_state, subkey)
 
-        pos = current_state.position
+        pos = current_state.positions
 
         # Compute Energy/Temp
         pe = float(energy_fn(pos))

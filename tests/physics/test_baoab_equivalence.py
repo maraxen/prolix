@@ -262,7 +262,7 @@ def test_equivalence_single_water_50fs(
     state_new = apply_fn_new(state_new)
 
     # Check position equivalence
-    rmsd = compute_rmsd(state_old.position, state_new.position)
+    rmsd = compute_rmsd(state_old.positions, state_new.positions)
     rmsd_by_step.append(rmsd)
     max_rmsd = max(max_rmsd, rmsd)
 
@@ -277,10 +277,10 @@ def test_equivalence_single_water_50fs(
       pytest.fail(
         f"Position divergence at step {step}: RMSD={rmsd:.2e} Å (exceeds 1e-10 threshold)\n"
         f"  Position delta (max atom):\n"
-        f"    Atom 0 (O):  {state_old.position[0] - state_new.position[0]}\n"
-        f"    Atom 1 (H1): {state_old.position[1] - state_new.position[1]}\n"
-        f"    Atom 2 (H2): {state_old.position[2] - state_new.position[2]}\n"
-        f"    Atom 3 (C):  {state_old.position[3] - state_new.position[3]}\n"
+        f"    Atom 0 (O):  {state_old.positions[0] - state_new.positions[0]}\n"
+        f"    Atom 1 (H1): {state_old.positions[1] - state_new.positions[1]}\n"
+        f"    Atom 2 (H2): {state_old.positions[2] - state_new.positions[2]}\n"
+        f"    Atom 3 (C):  {state_old.positions[3] - state_new.positions[3]}\n"
         f"  KE old: {ke_old:.3f} kT, KE new: {ke_new:.3f} kT, diff: {ke_diff:.2e}\n"
         f"  Investigate: RNG key splitting or step computation logic"
       )
@@ -362,8 +362,8 @@ def test_equivalence_energy_conservation(
   state_new = init_fn_new(key, positions, box=box_vec)
 
   # Compute initial energies
-  e_init_old = energy_fn(state_old.position, box_vec)
-  e_init_new = energy_fn(state_new.position, box_vec)
+  e_init_old = energy_fn(state_old.positions, box_vec)
+  e_init_new = energy_fn(state_new.positions, box_vec)
 
   # Run trajectories
   for step in range(n_steps):
@@ -371,8 +371,8 @@ def test_equivalence_energy_conservation(
     state_new = apply_fn_new(state_new)
 
   # Compute final energies
-  e_final_old = energy_fn(state_old.position, box_vec)
-  e_final_new = energy_fn(state_new.position, box_vec)
+  e_final_old = energy_fn(state_old.positions, box_vec)
+  e_final_new = energy_fn(state_new.positions, box_vec)
 
   # Check energy conservation similarity
   delta_e_old = e_final_old - e_init_old
@@ -592,7 +592,7 @@ def test_equivalence_rng_determinism(
   state2 = init_fn(key, positions, box=box_vec)
 
   # Trajectories should match exactly after initialization
-  assert jnp.allclose(state1.position, state2.position), "Initial positions differ"
+  assert jnp.allclose(state1.positions, state2.positions), "Initial positions differ"
   assert jnp.allclose(state1.momentum, state2.momentum), "Initial momenta differ"
 
   # Run forward
@@ -601,11 +601,11 @@ def test_equivalence_rng_determinism(
     state2 = apply_fn(state2)
 
     # Check for NaN early (can happen in analytical test potential)
-    if jnp.any(jnp.isnan(state1.position)) or jnp.any(jnp.isnan(state2.position)):
+    if jnp.any(jnp.isnan(state1.positions)) or jnp.any(jnp.isnan(state2.positions)):
       pytest.skip(f"NaN detected in trajectory at step {step}; test potential diverged")
 
     # Trajectories should remain identical to within machine precision
-    rmsd = compute_rmsd(state1.position, state2.position)
+    rmsd = compute_rmsd(state1.positions, state2.positions)
     assert rmsd < 1e-13, (
       f"Trajectories diverged at step {step} despite same seed: RMSD={rmsd:.2e}"
     )
@@ -675,10 +675,10 @@ def test_equivalence_water_constraint_projection(
 
     # Compute constraint distances
     r_oh1_old, r_oh2_old, r_h1h2_old = compute_constraint_distances(
-      state_old.position, water_indices
+      state_old.positions, water_indices
     )
     r_oh1_new, r_oh2_new, r_h1h2_new = compute_constraint_distances(
-      state_new.position, water_indices
+      state_new.positions, water_indices
     )
 
     # Compare

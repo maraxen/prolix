@@ -395,10 +395,9 @@ def compute_cmap_energies(
 
   energies = jax.vmap(sample_one)(map_indices, phi_norm, psi_norm)
 
-  # Scale energies to match OpenMM parity (found to be 1.81179x discrepancy)
+  # Scale energies to match OpenMM parity
   # TODO(mar): Track down the root cause of this factor (likely a 1/0.55 scaling)
-  return energies / 1.81179
-
+  return energies
 
 def compute_cmap_energy(
   phi_angles: TorsionAngles,

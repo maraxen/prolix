@@ -44,14 +44,14 @@ def _mean_rigid_t_after_burn(*, dt_fs: float, n_waters: int, seed: int, steps: i
     dof_rigid = _dof_rigid_tip3p_waters(n_waters)
     state = init_s(jax.random.PRNGKey(seed), jnp.array(positions_a), mass=mass)
 
-    ke_init = float(rigid_tip3p_box_ke_kcal(state.position, state.momentum, state.mass, n_waters))
+    ke_init = float(rigid_tip3p_box_ke_kcal(state.positions, state.momentum, state.mass, n_waters))
     t_init = 2.0 * ke_init / (dof_rigid * BOLTZMANN_KCAL)
 
     temps: list[float] = []
     for step in range(steps):
         state = apply_j(state)
         if step >= burn:
-            ke_r = float(rigid_tip3p_box_ke_kcal(state.position, state.momentum, state.mass, n_waters))
+            ke_r = float(rigid_tip3p_box_ke_kcal(state.positions, state.momentum, state.mass, n_waters))
             temp = 2.0 * ke_r / (dof_rigid * BOLTZMANN_KCAL)
             temps.append(temp)
 

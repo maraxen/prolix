@@ -433,7 +433,7 @@ def run_nvt(
     temps = []
     for step in range(n_steps):
         state = apply_j(state)
-        ke_r = float(rigid_tip3p_box_ke_kcal(state.position, state.momentum, state.mass, n_waters))
+        ke_r = float(rigid_tip3p_box_ke_kcal(state.positions, state.momentum, state.mass, n_waters))
         temp = 2.0 * ke_r / (dof_rigid * 0.001987204)  # BOLTZMANN_KCAL
         temps.append(temp)
 

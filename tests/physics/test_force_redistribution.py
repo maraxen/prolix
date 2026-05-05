@@ -3,7 +3,7 @@ from __future__ import annotations
 import jax
 import jax.numpy as jnp
 from prolix.physics.virtual_sites_step import redistribute_forces
-from prolix.types import VirtualSiteDef, VirtualSiteParamsPacked, VirtualSiteParams
+from prolix.typing import VirtualSiteDef, VirtualSiteParamsPacked, VirtualSiteParams
 
 def test_force_redistribution_conservation():
     """Verify that forces on virtual sites are redistributed, not lost."""

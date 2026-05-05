@@ -136,7 +136,7 @@ def run_stress_test(pdb_id=DEFAULT_PDB_ID, force_field_path="proxide/src/proxide
         state = step_block(state)
 
         # Compute Metrics
-        curr_coords = state.position
+        curr_coords = state.positions
 
         # Energy
         e = energy_fn(curr_coords)

@@ -166,7 +166,7 @@ def run_validation_test(dt_fs: float, duration_ps: float = 100.0, n_waters: int 
         if step % checkpoint_every == 0:
             # Compute rigid-body kinetic energy
             ke_rigid = rigid_tip3p_box_ke_kcal(
-                state.position,
+                state.positions,
                 state.momentum,
                 masses,
                 n_waters

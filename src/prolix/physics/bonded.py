@@ -2,30 +2,19 @@
 
 from __future__ import annotations
 
-from typing import Callable
+from collections.abc import Callable
 
 import jax
 import jax.numpy as jnp
-from jax_md import energy, space, util
+from jax_md import energy, space
 
-from prolix.types import (
+from prolix.typing import (
     AngleIndices,
     AngleParams,
     BondIndices,
     BondParams,
     DihedralParams,
 )
-
-Array = util.Array
-
-
-class DifferentiableParams:
-    """Container for parameters that are differentiable with respect to force fields."""
-
-    def __init__(self, bond_params: Array, angle_params: Array, dihedral_params: Array):
-        self.bond_params = bond_params  # (N_bonds, 2)
-        self.angle_params = angle_params  # (N_angles, 2)
-        self.dihedral_params = dihedral_params  # (N_dihedrals, 3)
 
 
 def make_bond_energy_fn(
@@ -92,6 +81,33 @@ def make_angle_energy_fn(
     return energy_fn
 
 
+def compute_dihedral_angles(
+    r: Array,
+    indices: Array,
+    displacement_fn: space.DisplacementFn,
+) -> Array:
+    """Compute dihedral angles."""
+    r_i = r[indices[:, 0]]
+    r_j = r[indices[:, 1]]
+    r_k = r[indices[:, 2]]
+    r_l = r[indices[:, 3]]
+
+    b0 = jax.vmap(displacement_fn)(r_j, r_i)
+    b1 = jax.vmap(displacement_fn)(r_k, r_j)
+    b2 = jax.vmap(displacement_fn)(r_l, r_k)
+
+    b1_norm = jnp.linalg.norm(b1, axis=-1, keepdims=True) + 1e-8
+    b1_unit = b1 / b1_norm
+
+    v = b0 - jnp.sum(b0 * b1_unit, axis=-1, keepdims=True) * b1_unit
+    w = b2 - jnp.sum(b2 * b1_unit, axis=-1, keepdims=True) * b1_unit
+
+    x = jnp.sum(v * w, axis=-1)
+    y = jnp.sum(jnp.cross(b1_unit, v) * w, axis=-1)
+    phi = jnp.arctan2(y, x)
+    return phi
+
+
 def make_dihedral_energy_fn(
     displacement_fn: space.DisplacementFn,
     dihedral_indices: Array,
@@ -108,27 +124,10 @@ def make_dihedral_energy_fn(
 
     def energy_fn(r: Array, dihedral_params: Array, **kwargs) -> Array:
         # dihedral_params: (N_dihedrals, 3)
+        if dihedral_indices.shape[0] == 0:
+            return 0.0
         p = DihedralParams.from_row(dihedral_params.T)
-        r_i = r[dihedral_indices[:, 0]]
-        r_j = r[dihedral_indices[:, 1]]
-        r_k = r[dihedral_indices[:, 2]]
-        r_l = r[dihedral_indices[:, 3]]
-
-        b0 = jax.vmap(displacement_fn)(r_j, r_i)
-        b1 = jax.vmap(displacement_fn)(r_k, r_j)
-        b2 = jax.vmap(displacement_fn)(r_l, r_k)
-
-        b1_norm = jnp.linalg.norm(b1, axis=-1, keepdims=True) + 1e-8
-        b1_unit = b1 / b1_norm
-
-        v = b0 - jnp.sum(b0 * b1_unit, axis=-1, keepdims=True) * b1_unit
-        w = b2 - jnp.sum(b2 * b1_unit, axis=-1, keepdims=True) * b1_unit
-
-        x = jnp.sum(v * w, axis=-1)
-        y = jnp.sum(jnp.cross(b1_unit, v) * w, axis=-1)
-        phi = jnp.arctan2(y, x)
-        phi = phi - jnp.pi
-
-        return jnp.sum(p.k * (1.0 + jnp.cos(p.periodicity * phi - p.phase)))
+        phi = compute_dihedral_angles(r, dihedral_indices, displacement_fn)
+        return jnp.sum(0.5 * p.k * (1.0 + jnp.cos(p.periodicity * phi - p.phase)))
 
     return energy_fn

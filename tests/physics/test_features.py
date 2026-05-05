@@ -153,7 +153,7 @@ def test_compute_electrostatic_node_features_thermal_mode(
 ):
   """Test that thermal mode works correctly."""
   # Use a dummy key for noise
-  key = jax.random.key(0)
+  key = jax.random.PRNGKey(0)
 
   # Mode: direct
   sigma_direct = 1.0
@@ -161,7 +161,7 @@ def test_compute_electrostatic_node_features_thermal_mode(
     pqr_protein,
     noise_scale=sigma_direct,
     noise_mode="direct",
-    key=key,
+    rng=key,
   )
 
   # Mode: thermal
@@ -175,7 +175,7 @@ def test_compute_electrostatic_node_features_thermal_mode(
     pqr_protein,
     noise_scale=t,
     noise_mode="thermal",
-    key=key,
+    rng=key,
   )
 
   # The values should be close (floating point differences)

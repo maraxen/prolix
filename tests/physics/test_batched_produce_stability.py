@@ -20,7 +20,7 @@ from prolix.physics import pbc, settle, system
 from prolix.physics.rigid_water_ke import rigid_tip3p_box_ke_kcal
 from prolix.simulate import AKMA_TIME_UNIT_FS, BOLTZMANN_KCAL
 from prolix.batched_simulate import LangevinState
-from .test_explicit_langevin_tip3p_parity import _grid_water_positions, _prolix_params_pure_water
+from .test_explicit_langevin_tip3p_parity import _grid_water_positions, _proxide_params_pure_water
 
 
 def _dof_rigid_tip3p_waters(n_waters: int) -> float:
@@ -118,7 +118,7 @@ def test_batched_produce_nvt_temperature_control() -> None:
     # Create energy function
     box_vec = box[0]
     displacement_fn, _ = pbc.create_periodic_space(box_vec)
-    sys_dict = _prolix_params_pure_water(n_waters)
+    sys_dict = _proxide_params_pure_water(n_waters)
     energy_fn_unbatched = system.make_energy_fn(
         displacement_fn, sys_dict, box=box_vec, use_pbc=True, implicit_solvent=False,
         pme_grid_points=32, pme_alpha=0.34, cutoff_distance=9.0, strict_parameterization=False
@@ -136,7 +136,7 @@ def test_batched_produce_nvt_temperature_control() -> None:
         momentum=jnp.zeros_like(positions),
         force=initial_forces,
         mass=mass,
-        key=key,
+        rng=key,
         cap_count=jnp.zeros(n_systems, dtype=jnp.int32),
         warn_counts=None,
     )
@@ -177,7 +177,7 @@ def test_batched_produce_energy_conservation() -> None:
     # Create energy function
     box_vec = box[0]
     displacement_fn, _ = pbc.create_periodic_space(box_vec)
-    sys_dict = _prolix_params_pure_water(n_waters)
+    sys_dict = _proxide_params_pure_water(n_waters)
     energy_fn_unbatched = system.make_energy_fn(
         displacement_fn, sys_dict, box=box_vec, use_pbc=True, implicit_solvent=False,
         pme_grid_points=32, pme_alpha=0.34, cutoff_distance=9.0, strict_parameterization=False
@@ -206,7 +206,7 @@ def test_batched_produce_energy_conservation() -> None:
         momentum=jnp.zeros_like(positions),
         force=initial_forces,
         mass=mass,
-        key=key,
+        rng=key,
         cap_count=jnp.zeros(n_systems, dtype=jnp.int32),
         warn_counts=None,
     )
@@ -258,7 +258,7 @@ def test_batched_vmap_pytree_consistency() -> None:
         momentum=jnp.zeros_like(positions),
         force=initial_forces,
         mass=mass,
-        key=key,
+        rng=key,
         cap_count=jnp.zeros(n_systems, dtype=jnp.int32),
         warn_counts=None,  # Auto-initialized to (B, 4)
     )
@@ -320,7 +320,7 @@ def test_batched_state_gradient_consistency() -> None:
     # Create energy function
     box_vec = box[0]
     displacement_fn, _ = pbc.create_periodic_space(box_vec)
-    sys_dict = _prolix_params_pure_water(n_waters)
+    sys_dict = _proxide_params_pure_water(n_waters)
     energy_fn_unbatched = system.make_energy_fn(
         displacement_fn, sys_dict, box=box_vec, use_pbc=True, implicit_solvent=False,
         pme_grid_points=32, pme_alpha=0.34, cutoff_distance=9.0, strict_parameterization=False

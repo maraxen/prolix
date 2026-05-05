@@ -157,7 +157,7 @@ def main(_):
 
         # Compute temperature from rigid-body kinetic energy
         dof_rigid = float(6 * n_waters - 3)
-        ke_r = float(rigid_tip3p_box_ke_kcal(state.position, state.momentum, state.mass, n_waters))
+        ke_r = float(rigid_tip3p_box_ke_kcal(state.positions, state.momentum, state.mass, n_waters))
         T_inst = 2.0 * ke_r / (dof_rigid * BOLTZMANN_KCAL)
         temperatures.append(T_inst)
 

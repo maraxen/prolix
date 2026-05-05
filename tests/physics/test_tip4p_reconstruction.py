@@ -3,10 +3,10 @@ from __future__ import annotations
 import jax
 import jax.numpy as jnp
 import pytest
-from prolix.physics.step_system import IntegratorState
-from prolix.physics.types import IntegratorParams, EnergyParams
+from prolix.typing import IntegratorState
+from prolix.typing import IntegratorParams, EnergyParams
 from prolix.physics.virtual_sites_step import VirtualSiteReconstructionStep
-from prolix.types import VirtualSiteDef, VirtualSiteParamsPacked
+from prolix.typing import VirtualSiteDef, VirtualSiteParamsPacked
 
 def test_tip4p_reconstruction():
     """Verify TIP4P M-site reconstruction."""
@@ -41,7 +41,7 @@ def test_tip4p_reconstruction():
     
     # Initial state
     state = IntegratorState(
-        position=pos,
+        positions=pos,
         momentum=jnp.zeros_like(pos),
         force=jnp.zeros_like(pos),
         mass=jnp.ones((4, 1)),
@@ -63,7 +63,7 @@ def test_tip4p_reconstruction():
     # Let's change parents to make it more obvious
     
     new_pos = pos.at[0].set([1.0, 2.0, 3.0])
-    state_new = state.__replace__(position=new_pos)
+    state_new = state.__replace__(positions=new_pos)
     
     new_state = step.apply(state_new, params)
     
@@ -89,7 +89,7 @@ def test_tip4p_reconstruction():
     # So M = (1, 2, 3) + (1, 0, 0) * 0.15 = (1.15, 2, 3)
     
     expected_m = jnp.array([1.15, 2.0, 3.0])
-    assert jnp.allclose(new_state.position[3], expected_m)
+    assert jnp.allclose(new_state.positions[3], expected_m)
     
     print("TIP4P reconstruction passed!")
 

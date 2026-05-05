@@ -9,7 +9,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 from jax_md import util
-from prolix.physics.types import PhysicsSystem
+from prolix.typing import PhysicsSystem
 
 if TYPE_CHECKING:
   from proxide.core.containers import Protein

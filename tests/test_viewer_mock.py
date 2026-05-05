@@ -40,7 +40,7 @@ def mock_dependencies():
   # Mock other deps
   mock_numpy = types.ModuleType("numpy")
   mock_jax = types.ModuleType("jax")
-  mock_traj_mod = types.ModuleType("prolix.visualization.trajectory")
+  mock_traj_mod = types.ModuleType("proxide.visualization.trajectory")
   mock_traj_mod.TrajectoryReader = MagicMock()
 
   # Setup sys.modules
@@ -50,12 +50,12 @@ def mock_dependencies():
       "py2Dmol": mock_py2dmol,
       "numpy": mock_numpy,
       "jax": mock_jax,
-      "prolix.visualization.trajectory": mock_traj_mod,
-      "prolix.visualization": types.ModuleType("prolix.visualization"),  # Ensure parent exists
+      "proxide.visualization.trajectory": mock_traj_mod,
+      "proxide.visualization": types.ModuleType("proxide.visualization"),  # Ensure parent exists
     },
   ):
-    # We need to make sure prolix.visualization.trajectory is importable as that
-    sys.modules["prolix.visualization"].trajectory = mock_traj_mod
+    # We need to make sure proxide.visualization.trajectory is importable as that
+    sys.modules["proxide.visualization"].trajectory = mock_traj_mod
 
     # Now import/reload viewer
     # If it was already imported, we need to reload it to use the new mocks?
@@ -71,15 +71,15 @@ def mock_dependencies():
     import os
 
     # Assume running from repo root
-    file_path = os.path.join(os.path.dirname(__file__), "..", "src", "prolix", "visualization", "viewer.py")
+    file_path = os.path.join(os.path.dirname(__file__), "..", "src", "proxide", "visualization", "viewer.py")
     file_path = os.path.abspath(file_path)
-    spec = importlib.util.spec_from_file_location("prolix.visualization.viewer", file_path)
+    spec = importlib.util.spec_from_file_location("proxide.visualization.viewer", file_path)
     if spec is None:
       raise ImportError(f"Could not find viewer.py at {file_path}")
     viewer = importlib.util.module_from_spec(spec)
 
     # Helper to allow relative imports within the loaded module if needed
-    # We mocked prolix.visualization in sys.modules, so it should be fine.
+    # We mocked proxide.visualization in sys.modules, so it should be fine.
     spec.loader.exec_module(viewer)
 
     yield viewer

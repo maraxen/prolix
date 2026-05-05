@@ -72,7 +72,7 @@ if jnp.isfinite(E_init) and E_init < 1e10:  # Reasonable energy
     # Run a few steps manually to monitor
     for i in range(20):
         state = apply_fn(state)
-        E = energy_fn(state.position)
+        E = energy_fn(state.positions)
         if i % 5 == 0:
             print(f"Step {i}: E = {E:.2e}, finite = {jnp.isfinite(E)}")
         if not jnp.isfinite(E):

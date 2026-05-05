@@ -78,7 +78,7 @@ def debug_temperature_evolution():
     state = init_s(jax.random.PRNGKey(seed), jnp.array(positions_a), mass=mass)
 
     # Check initial temperature
-    ke_r_init = float(rigid_tip3p_box_ke_kcal(state.position, state.momentum, state.mass, n_waters))
+    ke_r_init = float(rigid_tip3p_box_ke_kcal(state.positions, state.momentum, state.mass, n_waters))
     t_init = 2.0 * ke_r_init / (dof_rigid * BOLTZMANN_KCAL)
     print(f"Initial KE: {ke_r_init:.6f} kcal/mol, T: {t_init:.1f} K")
     print(f"Expected KE for T=300K: {0.5 * dof_rigid * BOLTZMANN_KCAL:.6f} kcal/mol")
@@ -86,7 +86,7 @@ def debug_temperature_evolution():
     temps_constrained = [t_init]
     for step in range(steps):
         state = apply_j(state)
-        ke_r = float(rigid_tip3p_box_ke_kcal(state.position, state.momentum, state.mass, n_waters))
+        ke_r = float(rigid_tip3p_box_ke_kcal(state.positions, state.momentum, state.mass, n_waters))
         temp = 2.0 * ke_r / (dof_rigid * BOLTZMANN_KCAL)
         temps_constrained.append(temp)
 

@@ -128,21 +128,21 @@ def test_openmm_energy_force_parity(openmm_1uao_system):
     neighbor_fn = partition.neighbor_list(disp_fn, box_A, r_cutoff=9.5, dr_threshold=1.0)
     nb = neighbor_fn.allocate(jnp.array(pos_A))
     
-    prolix_e = float(energy_fn(e_params, jnp.array(pos_A), neighbor=nb))
-    prolix_f = -jax.grad(energy_fn, argnums=1)(e_params, jnp.array(pos_A), neighbor=nb)
+    proxide_e = float(energy_fn(e_params, jnp.array(pos_A), neighbor=nb))
+    proxide_f = -jax.grad(energy_fn, argnums=1)(e_params, jnp.array(pos_A), neighbor=nb)
     
     print(f"\nOpenMM Energy: {omm_e:.4f}")
-    print(f"Prolix Energy: {prolix_e:.4f}")
-    print(f"Energy Diff: {prolix_e - omm_e:.4f}")
+    print(f"Prolix Energy: {proxide_e:.4f}")
+    print(f"Energy Diff: {proxide_e - omm_e:.4f}")
     
     # Energy Parity Gate
-    assert abs(prolix_e - omm_e) < 5.0, f"Energy discrepancy too large: {prolix_e - omm_e:.4f}"
+    assert abs(proxide_e - omm_e) < 5.0, f"Energy discrepancy too large: {proxide_e - omm_e:.4f}"
     
     # Force Parity Gate: RMSE < 1.0 kcal/mol/A
-    f_rmse = np.sqrt(np.mean((np.array(prolix_f) - omm_f)**2))
+    f_rmse = np.sqrt(np.mean((np.array(proxide_f) - omm_f)**2))
     print(f"Force RMSE: {f_rmse:.4e}")
     assert f_rmse < 1.0, f"Force RMSE too large: {f_rmse:.4e}"
     
     # Verify NL vs Dense internal consistency
-    prolix_e_dense = float(energy_fn(e_params, jnp.array(pos_A), neighbor=None))
-    assert abs(prolix_e - prolix_e_dense) < 1e-5, "NL and Dense energies inconsistent"
+    proxide_e_dense = float(energy_fn(e_params, jnp.array(pos_A), neighbor=None))
+    assert abs(proxide_e - proxide_e_dense) < 1e-5, "NL and Dense energies inconsistent"

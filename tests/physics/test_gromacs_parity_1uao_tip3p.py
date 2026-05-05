@@ -2,7 +2,7 @@
 
 Gate 1C: Diagnostic test for protein-water coupling in explicit solvent.
 
-Validates prolix forces against reference (OpenMM) on 1UAO + TIP3P system.
+Validates proxide forces against reference (OpenMM) on 1UAO + TIP3P system.
 100 ps NVT trajectory, sampled at t=0, 10, 50, 100 ps for force comparison.
 
 This is a diagnostic gate; failure does not block Sprint B release.
@@ -21,16 +21,16 @@ import pytest
 
 from prolix.physics import pbc, settle, system
 from prolix.simulate import AKMA_TIME_UNIT_FS, BOLTZMANN_KCAL
-from .test_explicit_langevin_tip3p_parity import _prolix_params_pure_water
+from .test_explicit_langevin_tip3p_parity import _proxide_params_pure_water
 
 
-def _force_rmsd_relative(f_prolix: jnp.ndarray, f_ref: jnp.ndarray) -> float:
+def _force_rmsd_relative(f_proxide: jnp.ndarray, f_ref: jnp.ndarray) -> float:
     """Compute relative RMSD of forces.
 
-    RMSD = sqrt(mean((f_prolix - f_ref)^2))
+    RMSD = sqrt(mean((f_proxide - f_ref)^2))
     Relative = RMSD / mean(|f_ref|)
     """
-    rmsd = float(jnp.sqrt(jnp.mean((f_prolix - f_ref) ** 2)))
+    rmsd = float(jnp.sqrt(jnp.mean((f_proxide - f_ref) ** 2)))
     ref_norm = float(jnp.mean(jnp.abs(f_ref)))
     if ref_norm < 1e-10:
         return 0.0 if rmsd < 1e-10 else float("inf")
@@ -41,7 +41,7 @@ def _force_rmsd_relative(f_prolix: jnp.ndarray, f_ref: jnp.ndarray) -> float:
 def test_protein_water_1uao_force_consistency() -> None:
     """Gate 1C: 1UAO + TIP3P, 100 ps NVT, force validation at key frames.
 
-    Validates that prolix forces remain consistent over a protein-water
+    Validates that proxide forces remain consistent over a protein-water
     trajectory. Protein-water coupling may expose nonlocal issues that
     pure-water tests miss.
 
@@ -96,7 +96,7 @@ def test_protein_water_force_baseline_diagnostic() -> None:
     positions_a = jnp.array(positions_a, dtype=jnp.float64)
     box_vec = jnp.array([box_edge, box_edge, box_edge], dtype=jnp.float64)
 
-    sys_dict = _prolix_params_pure_water(n_waters)
+    sys_dict = _proxide_params_pure_water(n_waters)
     displacement_fn, shift_fn = pbc.create_periodic_space(box_vec)
 
     energy_fn = system.make_energy_fn(

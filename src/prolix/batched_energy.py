@@ -18,7 +18,7 @@ from prolix.physics.generalized_born import (
 from prolix.physics.neighbor_list import (
     get_neighbor_exclusion_scales,
 )
-from prolix.types import CmapTorsionIndices
+from prolix.typing import CmapTorsionIndices
 
 if TYPE_CHECKING:
     from jax_md.util import Array

@@ -165,7 +165,7 @@ def _run_prolix_short(
   for step in range(steps):
     state = apply_j(state)
     if step >= burn and (step - burn) % sample_every == 0:
-      ke_r = float(rigid_tip3p_box_ke_kcal(state.position, state.momentum, state.mass, n_waters))
+      ke_r = float(rigid_tip3p_box_ke_kcal(state.positions, state.momentum, state.mass, n_waters))
       temps.append(2.0 * ke_r / (dof_rigid * BOLTZMANN_KCAL))
   arr = np.asarray(temps, dtype=np.float64)
   return {

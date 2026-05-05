@@ -1,6 +1,6 @@
 """Prolix StableHLO export utilities for WASM/WebGPU deployment.
 
-Wraps jax.jit lowering to produce portable StableHLO artifacts from prolix
+Wraps jax.jit lowering to produce portable StableHLO artifacts from proxide
 energy functions built with the explicit-params API (make_energy_fn_pure).
 
 v1.1 Item 4: unblocked by EnergyParams / make_energy_fn_pure (Item 1).

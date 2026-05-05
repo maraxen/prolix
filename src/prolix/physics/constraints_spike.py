@@ -19,7 +19,7 @@ import jax
 import jax.numpy as jnp
 
 from prolix.physics import settle
-from prolix.types import WaterIndicesArray
+from prolix.typing import WaterIndicesArray
 
 
 class ConstraintState(NamedTuple):

@@ -4,7 +4,7 @@ This module validates:
 1. All step types JIT-compile without error
 2. Individual step behavior (O, V, A, SETTLE_Velocity, CSVR, NHC)
 3. Constraint orthogonality: steps applied to free DOF only
-4. Composition: V-A-V cycle and energy stability
+4. Compositions: V-A-V cycle and energy stability
 """
 
 from __future__ import annotations
@@ -24,8 +24,8 @@ from prolix.physics.step_system import (
     SETTLE_Velocity_Step,
     V_Step,
 )
-from prolix.physics.types import IntegratorParams, EnergyParams
-from prolix.types import WaterIndicesArray
+from prolix.typing import IntegratorParams, EnergyParams
+from prolix.typing import WaterIndicesArray
 
 
 # ============================================================================
@@ -67,7 +67,7 @@ def water_system_3():
   rng = jax.random.PRNGKey(42)
 
   state = IntegratorState(
-      position=positions,
+      positions=positions,
       momentum=momentum,
       force=force,
       mass=masses,
@@ -101,7 +101,7 @@ def test_o_step_jit_compiles(base_params):
   mass = jnp.ones((9, 1))
   rng = jax.random.PRNGKey(0)
 
-  state = IntegratorState(position=positions, momentum=momentum, force=force, mass=mass, rng=rng)
+  state = IntegratorState(positions=positions, momentum=momentum, force=force, mass=mass, rng=rng)
 
   # Test raw apply
   result = step.apply(state, base_params)
@@ -122,7 +122,7 @@ def test_v_step_jit_compiles(base_params):
   mass = jnp.ones((9, 1))
   rng = jax.random.PRNGKey(0)
 
-  state = IntegratorState(position=positions, momentum=momentum, force=force, mass=mass, rng=rng)
+  state = IntegratorState(positions=positions, momentum=momentum, force=force, mass=mass, rng=rng)
 
   result = step.apply(state, base_params)
   assert result is not None
@@ -141,7 +141,7 @@ def test_a_step_jit_compiles(base_params):
   mass = jnp.ones((9, 1))
   rng = jax.random.PRNGKey(0)
 
-  state = IntegratorState(position=positions, momentum=momentum, force=force, mass=mass, rng=rng)
+  state = IntegratorState(positions=positions, momentum=momentum, force=force, mass=mass, rng=rng)
 
   result = step.apply(state, base_params)
   assert result is not None
@@ -155,7 +155,7 @@ def test_settle_velocity_step_jit_compiles(water_system_3, base_params):
   """SETTLE_Velocity_Step applies and JIT-compiles."""
   state, constraint_dofs, water_indices = water_system_3
   step = SETTLE_Velocity_Step(water_indices=water_indices)
-  params = base_params.__replace__(water_indices=water_indices, positions_old=state.position)
+  params = base_params.__replace__(water_indices=water_indices, positions_old=state.positions)
 
   result = step.apply(state, params)
   assert result is not None
@@ -174,7 +174,7 @@ def test_csvr_step_jit_compiles(base_params):
   mass = jnp.ones((9, 1))
   rng = jax.random.PRNGKey(0)
 
-  state = IntegratorState(position=positions, momentum=momentum, force=force, mass=mass, rng=rng)
+  state = IntegratorState(positions=positions, momentum=momentum, force=force, mass=mass, rng=rng)
   params = base_params.__replace__(n_dof=27)
 
   result = step.apply(state, params)
@@ -194,7 +194,7 @@ def test_nhc_step_jit_compiles(base_params):
   mass = jnp.ones((9, 1))
   rng = jax.random.PRNGKey(0)
 
-  state = IntegratorState(position=positions, momentum=momentum, force=force, mass=mass, rng=rng)
+  state = IntegratorState(positions=positions, momentum=momentum, force=force, mass=mass, rng=rng)
 
   with pytest.raises(NotImplementedError):
       step.apply(state, base_params)
@@ -213,8 +213,8 @@ def test_o_step_stochastic(base_params):
   force = jnp.zeros((9, 3))
   mass = jnp.ones((9, 1))
 
-  state1 = IntegratorState(position=positions, momentum=momentum, force=force, mass=mass, rng=jax.random.PRNGKey(0))
-  state2 = IntegratorState(position=positions, momentum=momentum, force=force, mass=mass, rng=jax.random.PRNGKey(1))
+  state1 = IntegratorState(positions=positions, momentum=momentum, force=force, mass=mass, rng=jax.random.PRNGKey(0))
+  state2 = IntegratorState(positions=positions, momentum=momentum, force=force, mass=mass, rng=jax.random.PRNGKey(1))
 
   result1 = step.apply(state1, base_params)
   result2 = step.apply(state2, base_params)
@@ -232,7 +232,7 @@ def test_v_step_momentum_update(base_params):
   mass = jnp.ones((3, 1))
   rng = jax.random.PRNGKey(0)
 
-  state = IntegratorState(position=positions, momentum=momentum, force=force, mass=mass, rng=rng)
+  state = IntegratorState(positions=positions, momentum=momentum, force=force, mass=mass, rng=rng)
   dt = 0.001
   params = base_params.__replace__(dt=dt)
 
@@ -244,7 +244,7 @@ def test_v_step_momentum_update(base_params):
 
 
 def test_a_step_position_update(base_params):
-  """A_Step correctly updates position from momentum."""
+  """A_Step correctly updates positions from momentum."""
   step = A_Step(fraction=1.0)
   positions = jnp.zeros((3, 3))
   momentum = jnp.ones((3, 3))
@@ -252,15 +252,15 @@ def test_a_step_position_update(base_params):
   mass = jnp.ones(3)
   rng = jax.random.PRNGKey(0)
 
-  state = IntegratorState(position=positions, momentum=momentum, force=force, mass=mass, rng=rng)
+  state = IntegratorState(positions=positions, momentum=momentum, force=force, mass=mass, rng=rng)
   dt = 0.001
   params = base_params.__replace__(dt=dt)
 
   result = step.apply(state, params)
 
   # Expected: r += dt * (p / m) = 0 + 0.001 * (1.0 / 1.0) = 0.001
-  expected_position = positions + dt * (momentum / mass[:, None])
-  assert jnp.allclose(result.position, expected_position)
+  expected_positions = positions + dt * (momentum / mass[:, None])
+  assert jnp.allclose(result.positions, expected_positions)
 
 
 def test_a_step_with_variable_mass(base_params):
@@ -272,7 +272,7 @@ def test_a_step_with_variable_mass(base_params):
   mass = jnp.array([[1.0], [2.0], [4.0]])
   rng = jax.random.PRNGKey(0)
 
-  state = IntegratorState(position=positions, momentum=momentum, force=force, mass=mass, rng=rng)
+  state = IntegratorState(positions=positions, momentum=momentum, force=force, mass=mass, rng=rng)
   dt = 0.001
   params = base_params.__replace__(dt=dt)
 
@@ -282,8 +282,8 @@ def test_a_step_with_variable_mass(base_params):
   # atom 0: 0 + 0.001 * 1.0 = 0.001
   # atom 1: 0 + 0.001 * 0.5 = 0.0005
   # atom 2: 0 + 0.001 * 0.25 = 0.00025
-  expected_position = positions + dt * (momentum / mass)
-  assert jnp.allclose(result.position, expected_position)
+  expected_positions = positions + dt * (momentum / mass)
+  assert jnp.allclose(result.positions, expected_positions)
 
 
 def test_csvr_step_rescales_momentum(base_params):
@@ -295,7 +295,7 @@ def test_csvr_step_rescales_momentum(base_params):
   mass = jnp.ones((9, 1))
   rng = jax.random.PRNGKey(0)
 
-  state = IntegratorState(position=positions, momentum=momentum, force=force, mass=mass, rng=rng)
+  state = IntegratorState(positions=positions, momentum=momentum, force=force, mass=mass, rng=rng)
   params = base_params.__replace__(n_dof=27)
 
   result = step.apply(state, params)
@@ -319,7 +319,7 @@ def test_csvr_step_preserves_direction(base_params):
   mass = jnp.ones((3, 1))
   rng = jax.random.PRNGKey(0)
 
-  state = IntegratorState(position=positions, momentum=momentum, force=force, mass=mass, rng=rng)
+  state = IntegratorState(positions=positions, momentum=momentum, force=force, mass=mass, rng=rng)
   params = base_params.__replace__(n_dof=9)
 
   result = step.apply(state, params)
@@ -341,7 +341,7 @@ def test_settle_velocity_step_with_no_water(base_params):
   mass = jnp.ones((9, 1))
   rng = jax.random.PRNGKey(0)
 
-  state = IntegratorState(position=positions, momentum=momentum, force=force, mass=mass, rng=rng)
+  state = IntegratorState(positions=positions, momentum=momentum, force=force, mass=mass, rng=rng)
 
   result = step.apply(state, base_params)
 
@@ -358,7 +358,7 @@ def test_nhc_step_is_noop(base_params):
   mass = jnp.ones((9, 1))
   rng = jax.random.PRNGKey(0)
 
-  state = IntegratorState(position=positions, momentum=momentum, force=force, mass=mass, rng=rng)
+  state = IntegratorState(positions=positions, momentum=momentum, force=force, mass=mass, rng=rng)
 
   with pytest.raises(NotImplementedError):
       step.apply(state, base_params)
@@ -375,7 +375,7 @@ def test_v_step_unconstrained(water_system_3, base_params):
   step = V_Step(fraction=1.0)
 
   # All force on water atoms
-  force = state.force.at[:].set(jnp.ones_like(state.position))
+  force = state.force.at[:].set(jnp.ones_like(state.positions))
   state_with_force = state.__replace__(force=force)
 
   result = step.apply(state_with_force, base_params)
@@ -390,22 +390,22 @@ def test_a_step_unconstrained(water_system_3, base_params):
   step = A_Step(fraction=1.0)
 
   # All momentum on water atoms
-  momentum = state.momentum.at[:].set(jnp.ones_like(state.position))
+  momentum = state.momentum.at[:].set(jnp.ones_like(state.positions))
   state_with_momentum = state.__replace__(momentum=momentum)
 
   result = step.apply(state_with_momentum, base_params)
 
-  # All atoms should have position change
-  assert jnp.any(result.position != state.position)
+  # All atoms should have positions change
+  assert jnp.any(result.positions != state.positions)
 
 
 # ============================================================================
-# Composition Tests
+# Compositions Tests
 # ============================================================================
 
 
-def test_v_a_v_composition(base_params):
-  """V-A-V composition over 5 steps produces smooth trajectory."""
+def test_v_a_v_compositions(base_params):
+  """V-A-V compositions over 5 steps produces smooth trajectory."""
   v_step = V_Step(fraction=0.5)
   a_step = A_Step(fraction=1.0)
 
@@ -415,7 +415,7 @@ def test_v_a_v_composition(base_params):
   mass = jnp.ones((9, 1))
   rng = jax.random.PRNGKey(0)
 
-  state = IntegratorState(position=positions, momentum=momentum, force=force, mass=mass, rng=rng)
+  state = IntegratorState(positions=positions, momentum=momentum, force=force, mass=mass, rng=rng)
   params = base_params.__replace__(dt=0.001)
 
   # Apply V-A-V cycle 5 times
@@ -424,12 +424,12 @@ def test_v_a_v_composition(base_params):
     state = a_step.apply(state, params)
     state = v_step.apply(state, params)
 
-  # Trajectory should show increasing position and momentum (constant force)
-  assert jnp.any(state.position > 0)
+  # Trajectory should show increasing positions and momentum (constant force)
+  assert jnp.any(state.positions > 0)
   assert jnp.any(state.momentum > 0)
 
 
-def test_langevin_v_o_a_composition(base_params):
+def test_langevin_v_o_a_compositions(base_params):
   """V-O-A cycle with stochastic O-step.
 
   This tests that we can compose steps with different RNG handling:
@@ -445,7 +445,7 @@ def test_langevin_v_o_a_composition(base_params):
   mass = jnp.ones((9, 1))
   rng = jax.random.PRNGKey(0)
 
-  state = IntegratorState(position=positions, momentum=momentum, force=force, mass=mass, rng=rng)
+  state = IntegratorState(positions=positions, momentum=momentum, force=force, mass=mass, rng=rng)
   params = base_params.__replace__(dt=0.001)
 
   # Apply V-O-A cycle once
@@ -454,7 +454,7 @@ def test_langevin_v_o_a_composition(base_params):
   state = a_step.apply(state, params)
 
   # State should be updated
-  assert state.position is not None
+  assert state.positions is not None
   assert state.momentum is not None
 
 
@@ -471,14 +471,14 @@ def test_integratorstate_pytree_structure():
   mass = jnp.ones((9, 1))
   rng = jax.random.PRNGKey(0)
 
-  state = IntegratorState(position=positions, momentum=momentum, force=force, mass=mass, rng=rng)
+  state = IntegratorState(positions=positions, momentum=momentum, force=force, mass=mass, rng=rng)
 
   # Should be pytree-compatible
   flat, treedef = jax.tree_util.tree_flatten(state)
-  assert len(flat) == 6  # 6 fields in state (position, momentum, force, mass, rng, box, step_count -> 7? No, wait, step_count is included in the children list in tree_flatten. Let's re-examine IntegratorState)
+  assert len(flat) == 9  # 9 fields in state
   state_reconstructed = jax.tree_util.tree_unflatten(treedef, flat)
 
-  assert jnp.allclose(state_reconstructed.position, state.position)
+  assert jnp.allclose(state_reconstructed.positions, state.positions)
   assert jnp.allclose(state_reconstructed.momentum, state.momentum)
 
 
@@ -491,7 +491,7 @@ def test_step_apply_returns_state(base_params):
   mass = jnp.ones((9, 1))
   rng = jax.random.PRNGKey(0)
 
-  state = IntegratorState(position=positions, momentum=momentum, force=force, mass=mass, rng=rng)
+  state = IntegratorState(positions=positions, momentum=momentum, force=force, mass=mass, rng=rng)
 
   result = v_step.apply(state, base_params)
   assert isinstance(result, IntegratorState)

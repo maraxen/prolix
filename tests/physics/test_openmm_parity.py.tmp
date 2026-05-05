@@ -1,0 +1,6 @@
+    params = data["system_params"]
+    print(f"JAX sigmas[:3]={params.sigmas[:3]}, eps[:3]={params.epsilons[:3]}")
+    jax_lj = float(fns["lj"](pos))
+    _, e_direct, _ = fns["electrostatics"](pos)
+    print(f"JAX LJ={jax_lj}, Elec={float(e_direct)}")
+    jax_nonbonded = jax_lj + float(e_direct)

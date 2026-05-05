@@ -25,7 +25,7 @@ import jax.numpy as jnp
 import numpy as np
 
 from prolix.physics.integrator_builder import make_integrator, make_integrator_batched
-from prolix.physics.step_system import IntegratorState
+from prolix.typing import IntegratorState
 
 
 # ========== FIXTURES ==========
@@ -111,7 +111,7 @@ def test_batching_initialization_shape(simple_lj_system, key):
   state_batch = init_fn_batched(key, positions_batch)
 
   # Check batched shapes
-  assert state_batch.position.shape == (batch_size, n_atoms, 3)
+  assert state_batch.positions.shape == (batch_size, n_atoms, 3)
   assert state_batch.momentum.shape == (batch_size, n_atoms, 3)
   assert state_batch.force.shape == (batch_size, n_atoms, 3)
   assert state_batch.rng.shape == (batch_size, 2)
@@ -193,7 +193,7 @@ def test_batching_equivalence_single_step(simple_lj_system, key):
     states_unbatched.append(state)
 
   # Create batched positions and initialize
-  positions_batch = jnp.stack([s.position for s in states_unbatched])
+  positions_batch = jnp.stack([s.positions for s in states_unbatched])
   state_batch = init_fn_batched(key, positions_batch)
 
   # Apply one step to unbatched
@@ -204,7 +204,7 @@ def test_batching_equivalence_single_step(simple_lj_system, key):
 
   # Compare: bitwise equivalence within 1e-12 (machine epsilon for float64)
   for i in range(batch_size):
-    rmsd = jnp.sqrt(jnp.mean((states_unbatched_next[i].position - state_batch_next.position[i])**2))
+    rmsd = jnp.sqrt(jnp.mean((states_unbatched_next[i].positions - state_batch_next.positions[i])**2))
     assert rmsd < 1e-12, f"Batch element {i}: RMSD {rmsd:.2e} exceeds 1e-12"
 
     # Also check KE equivalence
@@ -244,7 +244,7 @@ def test_batching_equivalence_100_steps(simple_lj_system, key):
   # Initialize both unbatched and batched
   keys = jax.random.split(key, batch_size)
   states_unbatched = [init_fn_unbatched(keys[i], simple_lj_system["positions"]) for i in range(batch_size)]
-  positions_batch = jnp.stack([s.position for s in states_unbatched])
+  positions_batch = jnp.stack([s.positions for s in states_unbatched])
   state_batch = init_fn_batched(key, positions_batch)
 
   # Run 100 steps for both
@@ -261,7 +261,7 @@ def test_batching_equivalence_100_steps(simple_lj_system, key):
     # Sample at specific steps
     if step in sample_steps:
       for i in range(batch_size):
-        rmsd = jnp.sqrt(jnp.mean((states_unbatched[i].position - state_batch.position[i])**2))
+        rmsd = jnp.sqrt(jnp.mean((states_unbatched[i].positions - state_batch.positions[i])**2))
         max_rmsd = max(max_rmsd, float(rmsd))
 
   assert max_rmsd < 1e-12, f"Max RMSD over 100 steps: {max_rmsd:.2e} exceeds 1e-12"
@@ -348,7 +348,7 @@ def test_batching_performance(simple_lj_system, key):
   keys = jax.random.split(key, batch_size)
   states_unbatched = [init_fn_unbatched(keys[i], simple_lj_system["positions"]) for i in range(batch_size)]
 
-  positions_batch = jnp.stack([s.position for s in states_unbatched])
+  positions_batch = jnp.stack([s.positions for s in states_unbatched])
   state_batch = init_fn_batched(key, positions_batch)
 
   # Warm up JIT
@@ -405,11 +405,11 @@ def test_batching_vmap_composition_chain(simple_lj_system, key):
   state_2 = apply_fn_batched(state_1)
 
   # Verify no NaN/Inf
-  assert not jnp.isnan(state_2.position).any()
-  assert not jnp.isinf(state_2.position).any()
+  assert not jnp.isnan(state_2.positions).any()
+  assert not jnp.isinf(state_2.positions).any()
 
   # Verify shapes preserved
-  assert state_2.position.shape == state_batch.position.shape
+  assert state_2.positions.shape == state_batch.positions.shape
   assert state_2.momentum.shape == state_batch.momentum.shape
 
 

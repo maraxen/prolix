@@ -1,6 +1,6 @@
 """Utility functions for manipulating atomic coordinates.
 
-prolix.utils.coordinates
+proxide.utils.coordinates
 """
 
 import jax

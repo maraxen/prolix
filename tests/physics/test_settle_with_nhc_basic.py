@@ -89,7 +89,7 @@ def test_settle_with_nhc_basic_step():
   state = nhc_init(jax.random.PRNGKey(602), positions, mass=mass)
 
   # Verify initial state is finite
-  assert jnp.all(jnp.isfinite(state.position)), "Initial position has NaN"
+  assert jnp.all(jnp.isfinite(state.positions)), "Initial position has NaN"
   assert jnp.all(jnp.isfinite(state.momentum)), "Initial momentum has NaN"
   assert jnp.all(jnp.isfinite(state.force)), "Initial force has NaN"
 
@@ -97,7 +97,7 @@ def test_settle_with_nhc_basic_step():
   state = nhc_apply(state)
 
   # Verify final state is finite
-  assert jnp.all(jnp.isfinite(state.position)), "Step 1: NaN in position"
+  assert jnp.all(jnp.isfinite(state.positions)), "Step 1: NaN in position"
   assert jnp.all(jnp.isfinite(state.momentum)), "Step 1: NaN in momentum"
   assert jnp.all(jnp.isfinite(state.force)), "Step 1: NaN in force"
 
@@ -148,6 +148,6 @@ def test_settle_with_nhc_jit_compatible():
 
   # Apply one step (should not raise)
   state = nhc_apply_jit(state)
-  assert jnp.all(jnp.isfinite(state.position)), "NaN in position after JIT step"
+  assert jnp.all(jnp.isfinite(state.positions)), "NaN in position after JIT step"
   assert jnp.all(jnp.isfinite(state.momentum)), "NaN in momentum after JIT step"
   print("✓ JIT compilation successful")

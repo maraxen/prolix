@@ -14,7 +14,7 @@ from prolix.physics import pbc, settle, system
 from prolix.physics.rigid_water_ke import rigid_tip3p_box_ke_kcal
 from prolix.simulate import AKMA_TIME_UNIT_FS, BOLTZMANN_KCAL
 
-from .test_explicit_langevin_tip3p_parity import _grid_water_positions, _prolix_params_pure_water, _write_wat_pdb
+from .test_explicit_langevin_tip3p_parity import _grid_water_positions, _proxide_params_pure_water, _write_wat_pdb
 
 try:
   import openmm
@@ -30,7 +30,7 @@ def _dof_rigid_tip3p_waters(n_waters: int) -> float:
   return float(6 * n_waters - 3)
 
 
-def test_prolix_settle_langevin_remove_linear_suppresses_total_momentum() -> None:
+def test_proxide_settle_langevin_remove_linear_suppresses_total_momentum() -> None:
   """With ``remove_linear_com_momentum=True``, ``|sum p|/sum(m)`` stays small (``tip3p_benchmark_policy.md``)."""
   n_waters = 4
   temperature_k = 300.0
@@ -44,7 +44,7 @@ def test_prolix_settle_langevin_remove_linear_suppresses_total_momentum() -> Non
   dt_akma = float(dt_fs) / float(AKMA_TIME_UNIT_FS)
   kT = float(temperature_k) * BOLTZMANN_KCAL
   gamma_reduced = float(gamma_ps) * float(AKMA_TIME_UNIT_FS) * 1e-3
-  sys_dict = _prolix_params_pure_water(n_waters)
+  sys_dict = _proxide_params_pure_water(n_waters)
   displacement_fn, shift_fn = pbc.create_periodic_space(box_vec)
   energy_fn = system.make_energy_fn(
     displacement_fn,
@@ -88,7 +88,7 @@ def test_prolix_settle_langevin_remove_linear_suppresses_total_momentum() -> Non
 
 @pytest.mark.openmm
 @pytest.mark.skipif(not HAS_OPENMM, reason="OpenMM not installed")
-def test_openmm_prolix_short_window_mean_t_primary_profile(tmp_path: Path) -> None:
+def test_openmm_proxide_short_window_mean_t_primary_profile(tmp_path: Path) -> None:
   """Paired short slice: ``openmm_ref_linear_com_on`` tolerances in ``tip3p_benchmark_policy.md``."""
   n_waters = 2
   temperature_k = 300.0
@@ -145,7 +145,7 @@ def test_openmm_prolix_short_window_mean_t_primary_profile(tmp_path: Path) -> No
   dt_akma = float(dt_fs) / float(AKMA_TIME_UNIT_FS)
   kT = float(temperature_k) * BOLTZMANN_KCAL
   gamma_reduced = float(gamma_ps) * float(AKMA_TIME_UNIT_FS) * 1e-3
-  sys_dict = _prolix_params_pure_water(n_waters)
+  sys_dict = _proxide_params_pure_water(n_waters)
   displacement_fn, shift_fn = pbc.create_periodic_space(box_vec)
   energy_fn = system.make_energy_fn(
     displacement_fn,
@@ -179,7 +179,7 @@ def test_openmm_prolix_short_window_mean_t_primary_profile(tmp_path: Path) -> No
   for step in range(burn + n_prod):
     state = apply_j(state)
     if step >= burn:
-      ke_r = float(rigid_tip3p_box_ke_kcal(state.position, state.momentum, state.mass, n_waters))
+      ke_r = float(rigid_tip3p_box_ke_kcal(state.positions, state.momentum, state.mass, n_waters))
       temps_plx.append(2.0 * ke_r / (dof * BOLTZMANN_KCAL))
       p_tot = jnp.sum(state.momentum, axis=0)
       m_tot = jnp.sum(state.mass)

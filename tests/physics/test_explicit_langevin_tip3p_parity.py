@@ -109,7 +109,7 @@ def _grid_water_positions(n_waters: int, spacing_angstrom: float) -> tuple[np.nd
   return arr, box_edge
 
 
-def _prolix_params_pure_water(n_waters: int) -> dict:
+def _proxide_params_pure_water(n_waters: int) -> dict:
   tip = get_water_params(WaterModelType.TIP3P)
   qo, qh = float(tip.charge_O), float(tip.charge_H)
   sig_o = float(tip.sigma_O)
@@ -260,7 +260,7 @@ def test_openmm_tip3p_water_box_langevin_mean_temperature(regression_pme_params,
 
 
 @pytest.mark.slow
-def test_prolix_settle_langevin_water_box_smoke(regression_pme_params):
+def test_proxide_settle_langevin_water_box_smoke(regression_pme_params):
   """Prolix: finite SETTLE+Langevin on shared grid; loose T band (150–400 K)."""
   jax.config.update("jax_enable_x64", True)
 
@@ -279,7 +279,7 @@ def test_prolix_settle_langevin_water_box_smoke(regression_pme_params):
   n_steps = 220
   burn = 70
 
-  sys_dict = _prolix_params_pure_water(n_waters)
+  sys_dict = _proxide_params_pure_water(n_waters)
   displacement_fn, shift_fn = pbc.create_periodic_space(box_vec)
   energy_fn = system.make_energy_fn(
     displacement_fn,
@@ -315,8 +315,8 @@ def test_prolix_settle_langevin_water_box_smoke(regression_pme_params):
   ts: list[float] = []
   for _ in range(n_steps):
     state = apply_s(state)
-    assert jnp.all(jnp.isfinite(state.position))
-    ke = float(rigid_tip3p_box_ke_kcal(state.position, state.momentum, state.mass, n_waters))
+    assert jnp.all(jnp.isfinite(state.positions))
+    ke = float(rigid_tip3p_box_ke_kcal(state.positions, state.momentum, state.mass, n_waters))
     ts.append(2.0 * ke / (dof * BOLTZMANN_KCAL))
 
   arr = np.array(ts[burn:], dtype=np.float64)
@@ -328,7 +328,7 @@ def test_prolix_settle_langevin_water_box_smoke(regression_pme_params):
 @pytest.mark.slow
 @pytest.mark.openmm
 @pytest.mark.skipif(not HAS_OPENMM, reason="OpenMM not installed")
-def test_openmm_prolix_tip3p_force_rmse_one_step(regression_pme_params, tmp_path) -> None:
+def test_openmm_proxide_tip3p_force_rmse_one_step(regression_pme_params, tmp_path) -> None:
   """Static forces on the shared TIP3P grid: OpenMM Reference vs Prolix ``make_energy_fn`` PME."""
   jax.config.update("jax_enable_x64", True)
 
@@ -371,7 +371,7 @@ def test_openmm_prolix_tip3p_force_rmse_one_step(regression_pme_params, tmp_path
   f_omm = st.getForces(asNumpy=True).value_in_unit(omm_unit.kilocalories_per_mole / omm_unit.angstrom)
 
   box_vec = jnp.array([box_edge, box_edge, box_edge], dtype=jnp.float64)
-  sys_dict = _prolix_params_pure_water(n_waters)
+  sys_dict = _proxide_params_pure_water(n_waters)
   displacement_fn, _shift = pbc.create_periodic_space(box_vec)
   energy_fn = system.make_energy_fn(
     displacement_fn,
@@ -398,7 +398,7 @@ def test_openmm_prolix_tip3p_force_rmse_one_step(regression_pme_params, tmp_path
     "openmm_platform": platform_name,
     "openmm_constraints": "HBonds",
     "openmm_rigid_water": True,
-    "prolix_path": "make_energy_fn PBC explicit PME",
+    "proxide_path": "make_energy_fn PBC explicit PME",
     "force_rmse_kcal_mol_A": rmse,
   }
   (tmp_path / "tip3p_parity_params.json").write_text(json.dumps(equiv, indent=2, sort_keys=True) + "\n", encoding="utf-8")

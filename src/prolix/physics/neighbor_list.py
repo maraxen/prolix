@@ -16,7 +16,7 @@ if TYPE_CHECKING:
   from collections.abc import Callable
 
   from proxide.core.containers import Protein
-  from proxide.types import SystemParams
+  from prolix.typing import SystemParams
 
 Array = util.Array
 

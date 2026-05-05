@@ -13,7 +13,7 @@ from scipy import stats
 from prolix.physics import pbc, settle, system
 from prolix.physics.rigid_water_ke import rigid_tip3p_box_ke_kcal
 from prolix.simulate import AKMA_TIME_UNIT_FS, BOLTZMANN_KCAL
-from .test_explicit_langevin_tip3p_parity import _equil_water_positions, _grid_water_positions, _prolix_params_pure_water
+from .test_explicit_langevin_tip3p_parity import _equil_water_positions, _grid_water_positions, _proxide_params_pure_water
 
 def _dof_rigid_tip3p_waters(n_waters: int) -> float:
   return float(6 * n_waters - 3)
@@ -33,7 +33,7 @@ def _mean_rigid_t_after_burn(*, dt_fs: float, n_waters: int, seed: int, steps: i
   dt_akma = float(dt_fs) / float(AKMA_TIME_UNIT_FS)
   kT = float(temperature_k) * BOLTZMANN_KCAL
   gamma_reduced = float(gamma_ps) * float(AKMA_TIME_UNIT_FS) * 1e-3
-  sys_dict = _prolix_params_pure_water(n_waters)
+  sys_dict = _proxide_params_pure_water(n_waters)
   displacement_fn, shift_fn = pbc.create_periodic_space(box_vec)
   pme_grid = max(16, round(box_edge / 1.0))
   energy_fn = system.make_energy_fn(displacement_fn, sys_dict, box=box_vec, use_pbc=True, implicit_solvent=False, pme_grid_points=pme_grid, pme_alpha=0.34, cutoff_distance=9.0, strict_parameterization=False)
@@ -48,7 +48,7 @@ def _mean_rigid_t_after_burn(*, dt_fs: float, n_waters: int, seed: int, steps: i
   for step in range(steps):
     state = apply_j(state)
     if step >= burn:
-      ke_r = float(rigid_tip3p_box_ke_kcal(state.position, state.momentum, state.mass, n_waters))
+      ke_r = float(rigid_tip3p_box_ke_kcal(state.positions, state.momentum, state.mass, n_waters))
       temp = 2.0 * ke_r / (dof_rigid * BOLTZMANN_KCAL)
       temps.append(temp)
   mean_t_observable = float(np.mean(temps)) if temps else float("nan")
@@ -113,7 +113,7 @@ def test_equipartition_chi2() -> None:
   dt_akma = float(dt_fs) / float(AKMA_TIME_UNIT_FS)
   kT = float(temperature_k) * BOLTZMANN_KCAL
   gamma_reduced = float(gamma_ps) * float(AKMA_TIME_UNIT_FS) * 1e-3
-  sys_dict = _prolix_params_pure_water(n_waters)
+  sys_dict = _proxide_params_pure_water(n_waters)
   displacement_fn, shift_fn = pbc.create_periodic_space(box_vec)
   energy_fn = system.make_energy_fn(displacement_fn, sys_dict, box=box_vec, use_pbc=True, implicit_solvent=False, pme_grid_points=32, pme_alpha=0.34, cutoff_distance=9.0, strict_parameterization=False)
   n_atoms = n_waters * 3
@@ -145,7 +145,7 @@ def _mean_rigid_t_csvr_after_burn(*, dt_fs: float, n_waters: int, seed: int, ste
   box_vec = jnp.array([box_edge, box_edge, box_edge], dtype=jnp.float64)
   dt_akma = float(dt_fs) / float(AKMA_TIME_UNIT_FS)
   kT = float(temperature_k) * BOLTZMANN_KCAL
-  sys_dict = _prolix_params_pure_water(n_waters)
+  sys_dict = _proxide_params_pure_water(n_waters)
   displacement_fn, shift_fn = pbc.create_periodic_space(box_vec)
   pme_grid = max(16, round(box_edge / 1.0))
   energy_fn = system.make_energy_fn(displacement_fn, sys_dict, box=box_vec, use_pbc=True, implicit_solvent=False, pme_grid_points=pme_grid, pme_alpha=0.34, cutoff_distance=9.0, strict_parameterization=False)
@@ -160,7 +160,7 @@ def _mean_rigid_t_csvr_after_burn(*, dt_fs: float, n_waters: int, seed: int, ste
   for step in range(steps):
     state = apply_j(state)
     if step >= burn:
-      ke_r = float(rigid_tip3p_box_ke_kcal(state.position, state.momentum, state.mass, n_waters))
+      ke_r = float(rigid_tip3p_box_ke_kcal(state.positions, state.momentum, state.mass, n_waters))
       temp = 2.0 * ke_r / (dof_rigid * BOLTZMANN_KCAL)
       temps.append(temp)
   return float(np.mean(temps)) if temps else float("nan")
@@ -221,7 +221,7 @@ def test_equipartition_csvr_dt2fs_chi2() -> None:
   box_vec = jnp.array([box_edge, box_edge, box_edge], dtype=jnp.float64)
   dt_akma = float(dt_fs) / float(AKMA_TIME_UNIT_FS)
   kT = float(temperature_k) * BOLTZMANN_KCAL
-  sys_dict = _prolix_params_pure_water(n_waters)
+  sys_dict = _proxide_params_pure_water(n_waters)
   displacement_fn, shift_fn = pbc.create_periodic_space(box_vec)
   energy_fn = system.make_energy_fn(displacement_fn, sys_dict, box=box_vec, use_pbc=True, implicit_solvent=False, pme_grid_points=32, pme_alpha=0.34, cutoff_distance=9.0, strict_parameterization=False)
   n_atoms = n_waters * 3
@@ -308,11 +308,11 @@ def test_langevin_with_constraints_null_constraint() -> None:
   apply_j = jax.jit(apply_s)
   R0 = jnp.zeros((n_atoms, 3), dtype=jnp.float64) + 0.1
   state = init_s(jax.random.PRNGKey(99), R0, mass=mass)
-  pos_init = state.position
+  pos_init = state.positions
   for _ in range(100):
     state = apply_j(state)
-  assert not jnp.allclose(state.position, pos_init), "Position should advance"
-  assert jnp.all(jnp.isfinite(state.position)), "Position must be finite"
+  assert not jnp.allclose(state.positions, pos_init), "Position should advance"
+  assert jnp.all(jnp.isfinite(state.positions)), "Position must be finite"
   assert jnp.all(jnp.isfinite(state.momentum)), "Momentum must be finite"
 
 
@@ -363,7 +363,7 @@ def test_equipartition_per_molecule_com_dt0_5fs() -> None:
   dt_akma = float(dt_fs) / float(AKMA_TIME_UNIT_FS)
   kT = float(temperature_k) * BOLTZMANN_KCAL
   gamma_reduced = float(gamma_ps) * float(AKMA_TIME_UNIT_FS) * 1e-3
-  sys_dict = _prolix_params_pure_water(n_waters)
+  sys_dict = _proxide_params_pure_water(n_waters)
   displacement_fn, shift_fn = pbc.create_periodic_space(box_vec)
   energy_fn = system.make_energy_fn(displacement_fn, sys_dict, box=box_vec, use_pbc=True, implicit_solvent=False, pme_grid_points=32, pme_alpha=0.34, cutoff_distance=9.0, strict_parameterization=False)
   n_atoms = n_waters * 3
@@ -440,7 +440,7 @@ def _mean_rigid_t_lax_scan(*, dt_fs: float, n_waters: int, seed: int, steps: int
   dt_akma = float(dt_fs) / float(AKMA_TIME_UNIT_FS)
   kT = float(temperature_k) * BOLTZMANN_KCAL
   gamma_reduced = float(gamma_ps) * float(AKMA_TIME_UNIT_FS) * 1e-3
-  sys_dict = _prolix_params_pure_water(n_waters)
+  sys_dict = _proxide_params_pure_water(n_waters)
   displacement_fn, shift_fn = pbc.create_periodic_space(box_vec)
   energy_fn = system.make_energy_fn(displacement_fn, sys_dict, box=box_vec, use_pbc=True, implicit_solvent=False, pme_grid_points=32, pme_alpha=0.34, cutoff_distance=9.0, strict_parameterization=False)
   n_atoms = n_waters * 3
@@ -458,7 +458,7 @@ def _mean_rigid_t_lax_scan(*, dt_fs: float, n_waters: int, seed: int, steps: int
   # Production loop using lax.scan
   def step_fn(state, _):
     new_state = apply_j(state)
-    ke_r = rigid_tip3p_box_ke_kcal(new_state.position, new_state.momentum, new_state.mass, n_waters)
+    ke_r = rigid_tip3p_box_ke_kcal(new_state.positions, new_state.momentum, new_state.mass, n_waters)
     temp = 2.0 * ke_r / (dof_rigid * BOLTZMANN_KCAL)
     return new_state, temp
 
@@ -513,7 +513,7 @@ def test_temperature_reproducibility_same_seed() -> None:
     dt_akma = float(dt_fs) / float(AKMA_TIME_UNIT_FS)
     kT = float(temperature_k) * BOLTZMANN_KCAL
     gamma_reduced = float(gamma_ps) * float(AKMA_TIME_UNIT_FS) * 1e-3
-    sys_dict = _prolix_params_pure_water(n_waters)
+    sys_dict = _proxide_params_pure_water(n_waters)
     displacement_fn, shift_fn = pbc.create_periodic_space(box_vec)
     energy_fn = system.make_energy_fn(displacement_fn, sys_dict, box=box_vec, use_pbc=True, implicit_solvent=False, pme_grid_points=32, pme_alpha=0.34, cutoff_distance=9.0, strict_parameterization=False)
     n_atoms = n_waters * 3
@@ -523,10 +523,10 @@ def test_temperature_reproducibility_same_seed() -> None:
     apply_j = jax.jit(apply_s)
     state = init_s(jax.random.PRNGKey(seed_val), jnp.array(positions_a), mass=mass)
 
-    positions_list = [state.position]
+    positions_list = [state.positions]
     for _ in range(steps):
       state = apply_j(state)
-      positions_list.append(state.position)
+      positions_list.append(state.positions)
     return jnp.array(positions_list)
 
   traj_a = run_trajectory(seed)
@@ -556,7 +556,7 @@ def test_temperature_reproducibility_different_seed() -> None:
     dt_akma = float(dt_fs) / float(AKMA_TIME_UNIT_FS)
     kT = float(temperature_k) * BOLTZMANN_KCAL
     gamma_reduced = float(gamma_ps) * float(AKMA_TIME_UNIT_FS) * 1e-3
-    sys_dict = _prolix_params_pure_water(n_waters)
+    sys_dict = _proxide_params_pure_water(n_waters)
     displacement_fn, shift_fn = pbc.create_periodic_space(box_vec)
     energy_fn = system.make_energy_fn(displacement_fn, sys_dict, box=box_vec, use_pbc=True, implicit_solvent=False, pme_grid_points=32, pme_alpha=0.34, cutoff_distance=9.0, strict_parameterization=False)
     n_atoms = n_waters * 3
@@ -566,10 +566,10 @@ def test_temperature_reproducibility_different_seed() -> None:
     apply_j = jax.jit(apply_s)
     state = init_s(jax.random.PRNGKey(seed_val), jnp.array(positions_a), mass=mass)
 
-    positions_list = [state.position]
+    positions_list = [state.positions]
     for _ in range(steps):
       state = apply_j(state)
-      positions_list.append(state.position)
+      positions_list.append(state.positions)
     return jnp.array(positions_list)
 
   traj_a = run_trajectory(12345)
@@ -641,7 +641,7 @@ def test_ke_measurement_ablation() -> None:
   kT = float(temperature_k) * BOLTZMANN_KCAL
   gamma_reduced = float(gamma_ps) * float(AKMA_TIME_UNIT_FS) * 1e-3
 
-  sys_dict = _prolix_params_pure_water(n_waters)
+  sys_dict = _proxide_params_pure_water(n_waters)
   displacement_fn, shift_fn = pbc.create_periodic_space(box_vec)
   energy_fn = system.make_energy_fn(
     displacement_fn, sys_dict, box=box_vec, use_pbc=True,
@@ -681,7 +681,7 @@ def test_ke_measurement_ablation() -> None:
     if step % log_interval == 0:
       # Compute KE using BOTH methods
       ke_rigid = float(rigid_tip3p_box_ke_kcal(
-        state.position, state.momentum, state.mass, n_waters
+        state.positions, state.momentum, state.mass, n_waters
       ))
       ke_atomic = float(_compute_atomic_ke_kcal(state.momentum, state.mass))
 

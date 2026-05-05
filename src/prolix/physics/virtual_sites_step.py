@@ -6,9 +6,9 @@ import jax.numpy as jnp
 from jaxtyping import Array as ArrayType
 
 from prolix.physics.step_system import Step, IntegratorState
-from prolix.physics.types import IntegratorParams
+from prolix.typing import IntegratorParams
 from prolix.physics.virtual_sites import reconstruct_virtual_sites
-from prolix.types import VirtualSiteDef, VirtualSiteParamsPacked, VirtualSiteParams
+from prolix.typing import VirtualSiteDef, VirtualSiteParamsPacked, VirtualSiteParams
 
 class VirtualSiteReconstructionStep(Step):
   """Virtual site position reconstruction step."""
@@ -26,9 +26,9 @@ class VirtualSiteReconstructionStep(Step):
   ) -> IntegratorState:
     """Reconstruct virtual site positions."""
     new_positions = reconstruct_virtual_sites(
-        state.position, self.vs_def, self.vs_params
+        state.positions, self.vs_def, self.vs_params
     )
-    return state.__replace__(position=new_positions)
+    return state.__replace__(positions=new_positions)
 
 def redistribute_forces(
     forces: ArrayType,

@@ -39,9 +39,10 @@ pytestmark = pytest.mark.xfail(
 
 from prolix.physics import pbc, settle, system
 from prolix.physics.rigid_water_ke import rigid_tip3p_box_ke_kcal
-from prolix.physics.step_system import IntegratorState, make_sequence
+from prolix.typing import IntegratorState
+from prolix.physics.step_system import make_sequence
 from prolix.simulate import AKMA_TIME_UNIT_FS, BOLTZMANN_KCAL
-from .test_explicit_langevin_tip3p_parity import _grid_water_positions, _prolix_params_pure_water
+from .test_explicit_langevin_tip3p_parity import _grid_water_positions, _proxide_params_pure_water
 
 
 def _dof_rigid_tip3p_waters(n_waters: int) -> float:
@@ -82,7 +83,7 @@ def _mean_rigid_t_langevin_after_burn(
   kT = float(temperature_k) * BOLTZMANN_KCAL
   gamma_reduced = float(gamma_ps) * float(AKMA_TIME_UNIT_FS) * 1e-3
 
-  sys_dict = _prolix_params_pure_water(n_waters)
+  sys_dict = _proxide_params_pure_water(n_waters)
   displacement_fn, shift_fn = pbc.create_periodic_space(box_vec)
   energy_fn = system.make_energy_fn(
       displacement_fn, sys_dict, box=box_vec, use_pbc=True, implicit_solvent=False,
@@ -122,7 +123,7 @@ def _mean_rigid_t_langevin_after_burn(
   for step in range(steps):
     state = apply_j(state)
     if step >= burn:
-      ke_r = float(rigid_tip3p_box_ke_kcal(state.position, state.momentum, state.mass, n_waters))
+      ke_r = float(rigid_tip3p_box_ke_kcal(state.positions, state.momentum, state.mass, n_waters))
       temp = 2.0 * ke_r / (dof_rigid * BOLTZMANN_KCAL)
       temps.append(temp)
 

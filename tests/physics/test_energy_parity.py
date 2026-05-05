@@ -3,7 +3,7 @@ import jax.numpy as jnp
 import pytest
 import equinox as eqx
 from prolix.physics.pure_utils import wrap_energy_fn_pure
-from prolix.physics.types import EnergyParams
+from prolix.typing import EnergyParams
 
 def test_energy_parity():
     # Simple harmonic potential: 0.5 * k * (x - x0)^2

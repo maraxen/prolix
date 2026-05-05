@@ -37,18 +37,18 @@ from proxide.physics.vdw import (
   compute_lj_forces_at_backbone,
 )
 
-from prolix.physics.noising import (
+from .noising import (
   compute_thermal_sigma,
   thermal_noise_fn,
 )
 
 # NPT integrators and supporting functions (Sprint 6)
-from prolix.physics.settle import settle_csvr_npt
-from prolix.physics.simulate import NPTState
-from prolix.physics.pressure import instantaneous_pressure_akma
-from prolix.physics.stress import virial_trace
-from prolix.physics.pbc import box_volume, isotropic_box_scale
-from prolix.physics.units import (
+from .settle import settle_csvr_npt
+from .simulate import NPTState
+from .pressure import instantaneous_pressure_akma
+from .stress import virial_trace
+from .pbc import box_volume, isotropic_box_scale
+from .units import (
   BAR_PER_AKMA_PRESSURE,
   AKMA_PRESSURE_PER_BAR,
   WATER_COMPRESSIBILITY_300K_BAR_INV,
@@ -57,14 +57,14 @@ from prolix.physics.units import (
 )
 
 # Explicit-params energy API for jax.export / StableHLO (v1.1 Item 1)
-from prolix.physics.system import DifferentiableParams, make_energy_fn_pure
+from .system import DifferentiableParams, make_energy_fn_pure
 
 # kUPS cross-validation unit conversion adapter (v1.1 Item 3)
 from prolix.physics import kups_adapter
 
 # Modular integrator builder (Phase 2.1, ADR-005; Phase 4 batching)
-from prolix.physics.integrator_builder import make_integrator, make_integrator_batched
-from prolix.physics.step_system import (
+from .integrator_builder import make_integrator, make_integrator_batched
+from .step_system import (
   IntegratorState,
   Step,
   StepSequence,

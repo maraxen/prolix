@@ -3,7 +3,7 @@ import jax.numpy as jnp
 import equinox as eqx
 import functools
 from typing import Any, Callable, TypeVar, Tuple
-from .types import PhysicsSystem, DifferentiableParams
+from prolix.typing import PhysicsSystem, DifferentiableParams
 from .tiling import tile_reduction, tile_reduction_nl, pad_to_tile
 
 T = TypeVar("T")
@@ -30,7 +30,7 @@ def chunked_lj_energy(
 
     def f_tile(pos_i, pos_j, mask_i, mask_j, start_i, start_j):
         dr = jax.vmap(jax.vmap(displacement_fn, (None, 0)), (0, None))(pos_i, pos_j)
-        dist = jnp.sqrt(jnp.sum(dr**2, axis=-1) + 1e-12); ds = dist + 1e-6
+        dist = jnp.sqrt(jnp.sum(dr**2, axis=-1)); ds = dist
         sig_i = jax.lax.dynamic_slice(sig_pad, (start_i,), (inner_tile_size,))
         eps_i = jax.lax.dynamic_slice(eps_pad, (start_i,), (inner_tile_size,))
         sig_j = jax.lax.dynamic_slice(sig_pad, (start_j,), (tile_size,))
@@ -68,11 +68,13 @@ def _chunked_lj_bwd(disp_fn, cutoff, tile_size, res, g):
         eps_j = jax.lax.dynamic_slice(eps_pad, (start_j,), (tile_size,))
         
         def pair_vals(ri, rj, si, sj, ei, ej):
-            dr = disp_fn(ri, rj); d2 = jnp.sum(dr**2) + 1e-12; d = jnp.sqrt(d2); inv_r = 1.0/d
+            dr = disp_fn(ri, rj); d2 = jnp.sum(dr**2) + 1e-12; d = jnp.sqrt(d2); inv_d = 1.0/d
             s = 0.5*(si+sj); e = jnp.sqrt(ei*ej); inv_r6 = (s/d)**6
             dE_de = 4.0 * (inv_r6**2 - inv_r6)
             dE_ds = 4.0 * e / s * (12.0 * inv_r6**2 - 6.0 * inv_r6)
-            f_mag = dE_ds * inv_r
+            # f = -dE/dr = -dE/dd * dr/d. 
+            # dE/dd = -dE/ds * (s/d) => f = dE/ds * (s/d) * dr/d = dE/ds * s / d^2 * dr
+            f_mag = dE_ds * s * inv_d**2
             g_ei = dE_de * 0.5 * jnp.sqrt(ej/(ei+1e-12))
             g_si = dE_ds * 0.5
             return f_mag * dr, g_si, g_ei
@@ -118,7 +120,7 @@ def chunked_lj_energy_nl(
     
     def f_tile(pos_i, pos_j, mask_i, mask_j, nb_idx_tile, start_i, start_j):
         dr = jax.vmap(jax.vmap(displacement_fn, (None, 0)), (0, 0))(pos_i, pos_j)
-        dist = jnp.sqrt(jnp.sum(dr**2, axis=-1) + 1e-12); ds = dist + 1e-6
+        dist = jnp.sqrt(jnp.sum(dr**2, axis=-1)); ds = dist
         sig_i = jax.lax.dynamic_slice(sig_pad, (start_i,), (inner_tile_size,))
         eps_i = jax.lax.dynamic_slice(eps_pad, (start_i,), (inner_tile_size,))
         sig_j = sig_pad[nb_idx_tile]
@@ -163,7 +165,7 @@ def chunked_coulomb_energy(
 
     def f_tile(pos_i, pos_j, mask_i, mask_j, start_i, start_j):
         dr = jax.vmap(jax.vmap(displacement_fn, (None, 0)), (0, None))(pos_i, pos_j)
-        dist = jnp.sqrt(jnp.sum(dr**2, axis=-1) + 1e-12); ds = dist + 1e-6
+        dist = jnp.sqrt(jnp.sum(dr**2, axis=-1)); ds = dist
         q_i = jax.lax.dynamic_slice(q_pad, (start_i,), (inner_tile_size,))
         q_j = jax.lax.dynamic_slice(q_pad, (start_j,), (tile_size,))
         q_ij = q_j[None, :] * q_i[:, None]
@@ -235,7 +237,7 @@ def chunked_coulomb_energy_nl(
     
     def f_tile(pos_i, pos_j, mask_i, mask_j, nb_idx_tile, start_i, start_j):
         dr = jax.vmap(jax.vmap(displacement_fn, (None, 0)), (0, 0))(pos_i, pos_j)
-        dist = jnp.sqrt(jnp.sum(dr**2, axis=-1) + 1e-12); ds = dist + 1e-6
+        dist = jnp.sqrt(jnp.sum(dr**2, axis=-1)); ds = dist
         q_i = jax.lax.dynamic_slice(q_pad, (start_i,), (inner_tile_size,))
         q_j = q_pad[nb_idx_tile]
         q_ij = q_i[:, None] * q_j

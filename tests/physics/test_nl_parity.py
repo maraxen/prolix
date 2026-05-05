@@ -3,7 +3,7 @@ import jax.numpy as jnp
 import numpy as np
 from jax_md import space, partition
 from prolix.physics.system import make_energy_fn_pure
-from prolix.physics.types import PhysicsSystem, EnergyParams
+from prolix.typing import PhysicsSystem, EnergyParams
 import pytest
 
 def test_nl_dense_parity():
@@ -98,7 +98,7 @@ def test_nl_overflow_detection():
         momentum=jnp.zeros_like(pos),
         force=jnp.zeros_like(pos),
         mass=jnp.ones(N),
-        key=jax.random.PRNGKey(0),
+        rng=jax.random.PRNGKey(0),
         cap_count=jnp.array(0)
     )
     

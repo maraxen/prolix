@@ -9,7 +9,7 @@ For a SETTLE+Langevin step that writes these forces into
 :class:`~prolix.physics.simulate.NVTLangevinState` at the same AD site, see
 :mod:`prolix.physics.settle_langevin_potential_propagator`.
 
-Design notes: :doc:`/.agent/docs/adr/ADR_001_kups_prolix_potential_eval` (historical filename).
+Design notes: :doc:`/.agent/docs/adr/ADR_001_kups_proxide_potential_eval` (historical filename).
 """
 
 from __future__ import annotations

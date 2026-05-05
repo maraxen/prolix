@@ -122,26 +122,28 @@ def jax_openmm_system(openmm_available):
   )
 
   # ---- JAX MD Energy Components ----
-  e_bond_fn = bonded.make_bond_energy_fn(
+  e_bond_fn_raw = bonded.make_bond_energy_fn(
     displacement_fn,
-    jnp.asarray(protein_system.bonds if protein_system.bonds is not None else jnp.zeros((0, 2), dtype=jnp.int32)),
-    jnp.asarray(protein_system.bond_params if protein_system.bond_params is not None else jnp.zeros((0, 2), dtype=jnp.float32))
+    jnp.asarray(protein_system.bonds if protein_system.bonds is not None else jnp.zeros((0, 2), dtype=jnp.int32))
   )
-  e_angle_fn = bonded.make_angle_energy_fn(
+  e_bond_fn = lambda r, n=None: e_bond_fn_raw(r, jnp.asarray(protein_system.bond_params if protein_system.bond_params is not None else jnp.zeros((0, 2), dtype=jnp.float32)))
+
+  e_angle_fn_raw = bonded.make_angle_energy_fn(
     displacement_fn,
-    jnp.asarray(protein_system.angles if protein_system.angles is not None else jnp.zeros((0, 3), dtype=jnp.int32)),
-    jnp.asarray(protein_system.angle_params if protein_system.angle_params is not None else jnp.zeros((0, 2), dtype=jnp.float32))
+    jnp.asarray(protein_system.angles if protein_system.angles is not None else jnp.zeros((0, 3), dtype=jnp.int32))
   )
-  e_dih_fn = bonded.make_dihedral_energy_fn(
+  e_angle_fn = lambda r, n=None: e_angle_fn_raw(r, jnp.asarray(protein_system.angle_params if protein_system.angle_params is not None else jnp.zeros((0, 2), dtype=jnp.float32)))
+  e_dih_fn_raw = bonded.make_dihedral_energy_fn(
     displacement_fn,
-    jnp.asarray(protein_system.proper_dihedrals if protein_system.proper_dihedrals is not None else jnp.zeros((0, 4), dtype=jnp.int32)),
-    jnp.asarray(protein_system.dihedral_params if protein_system.dihedral_params is not None else jnp.zeros((0, 3), dtype=jnp.float32))
+    jnp.asarray(protein_system.proper_dihedrals if protein_system.proper_dihedrals is not None else jnp.zeros((0, 4), dtype=jnp.int32))
   )
-  e_imp_fn = bonded.make_dihedral_energy_fn(
+  e_dih_fn = lambda r, n=None: e_dih_fn_raw(r, jnp.asarray(protein_system.dihedral_params if protein_system.dihedral_params is not None else jnp.zeros((0, 3), dtype=jnp.float32)))
+  
+  e_imp_fn_raw = bonded.make_dihedral_energy_fn(
     displacement_fn,
-    jnp.asarray(protein_system.impropers if protein_system.impropers is not None else jnp.zeros((0, 4), dtype=jnp.int32)),
-    jnp.asarray(protein_system.improper_params if protein_system.improper_params is not None else jnp.zeros((0, 3), dtype=jnp.float32))
+    jnp.asarray(protein_system.impropers if protein_system.impropers is not None else jnp.zeros((0, 4), dtype=jnp.int32))
   )
+  e_imp_fn = lambda r, n=None: e_imp_fn_raw(r, jnp.asarray(protein_system.improper_params if protein_system.improper_params is not None else jnp.zeros((0, 3), dtype=jnp.float32)))
 
   return {
     # Positions
@@ -301,6 +303,15 @@ class TestEnergyDecomposition:
     jax_lj = float(fns["lj"](pos))
     _, e_direct, _ = fns["electrostatics"](pos)
     jax_nonbonded = jax_lj + float(e_direct)
+    
+    params = data["system_params"]
+    print(f"JAX params[88]: q={params.charges[88]}, s={params.sigmas[88]}, e={params.epsilons[88]}")
+    print(f"JAX params[93]: q={params.charges[93]}, s={params.sigmas[93]}, e={params.epsilons[93]}")
+    print(f"JAX LJ={jax_lj}, Elec={float(e_direct)}")
+
+    import openmm
+    nb_force = [f for f in data["omm_system"].getForces() if isinstance(f, openmm.NonbondedForce)][0]
+    print(f"OMM Exception 500: {nb_force.getExceptionParameters(500)}")
 
     omm_nonbonded = data["omm_components"].get("NonbondedForce", 0.0)
 

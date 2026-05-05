@@ -186,7 +186,7 @@ def test_efa_nvt_smoke_dt05():
     for step in range(n_steps):
         state = apply_j(state)
 
-    assert jnp.all(jnp.isfinite(state.position)), "NVT integration produced NaN/inf"
+    assert jnp.all(jnp.isfinite(state.positions)), "NVT integration produced NaN/inf"
     print(f"NVT smoke test passed: {n_steps} steps at dt={dt_fs} fs")
 
 

@@ -93,7 +93,7 @@ def debug_momenta_values():
 
     # Rigid-body KE
     dof_rigid = 6 * n_waters - 3
-    ke_rigid = float(rigid_tip3p_box_ke_kcal(state.position, state.momentum, state.mass, n_waters))
+    ke_rigid = float(rigid_tip3p_box_ke_kcal(state.positions, state.momentum, state.mass, n_waters))
     t_rigid = 2.0 * ke_rigid / (dof_rigid * BOLTZMANN_KCAL)
 
     print(f"\nRigid-body decomposition:")
@@ -105,7 +105,7 @@ def debug_momenta_values():
     # Per-water analysis
     print(f"\nPer-water decomposition:")
     mom_w = state.momentum.reshape(n_waters, 3, 3)
-    pos_w = state.position.reshape(n_waters, 3, 3)
+    pos_w = state.positions.reshape(n_waters, 3, 3)
     for w in range(n_waters):
         ke_w = float(rigid_tip3p_box_ke_kcal(pos_w[w:w+1].reshape(1, 3, 3),
                                              mom_w[w:w+1].reshape(1, 3, 3),

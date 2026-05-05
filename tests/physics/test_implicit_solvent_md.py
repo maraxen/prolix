@@ -56,7 +56,7 @@ def test_implicit_solvent_md_stability(parameterized_protein):
     coords = flat_coords[valid_indices]
 
   # Build system params dict from protein attributes
-  # Note: The Rust backend returns params in nm/kJ units, prolix.physics expects Angstroms/kcal
+  # Note: The Rust backend returns params in nm/kJ units, proxide.physics expects Angstroms/kcal
   # For now, we test that the structure can be loaded - full physics tests need unit conversion
   params = {
     "charges": protein.charges,
@@ -92,7 +92,7 @@ def test_implicit_solvent_md_stability(parameterized_protein):
   print(f"Total charge: {total_charge:.3f}")
 
 
-@pytest.mark.skip(reason="Requires unit conversion between Rust (nm/kJ) and prolix (A/kcal)")
+@pytest.mark.skip(reason="Requires unit conversion between Rust (nm/kJ) and proxide (A/kcal)")
 def test_implicit_solvent_energy_finite(parameterized_protein):
   """Test that energy function returns finite values."""
   protein = parameterized_protein

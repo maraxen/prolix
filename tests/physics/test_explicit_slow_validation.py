@@ -75,7 +75,7 @@ def test_explicit_pbc_nve_short_run_finite():
     mass = jnp.ones(n, dtype=jnp.float64) * 12.0
     state = init_fn(key, positions, mass=mass, kT=0.5)
 
-    e0 = energy_fn(state.position) + quantity.kinetic_energy(
+    e0 = energy_fn(state.positions) + quantity.kinetic_energy(
         momentum=state.momentum, mass=state.mass
     )
 
@@ -83,11 +83,11 @@ def test_explicit_pbc_nve_short_run_finite():
         return apply_fn(s)
 
     final = jax.lax.fori_loop(0, 8, step, state)
-    e1 = energy_fn(final.position) + quantity.kinetic_energy(
+    e1 = energy_fn(final.positions) + quantity.kinetic_energy(
         momentum=final.momentum, mass=final.mass
     )
 
-    assert jnp.all(jnp.isfinite(final.position))
+    assert jnp.all(jnp.isfinite(final.positions))
     assert jnp.all(jnp.isfinite(final.momentum))
     assert jnp.isfinite(e0) and jnp.isfinite(e1)
     # Symplectic Verlet should keep |ΔE| small over a handful of steps; bound is

@@ -40,9 +40,9 @@ def settle_langevin_potential_cached_step(
   project_ou_momentum_rigid: bool,
 ) -> tuple[NVTLangevinState, SettleLangevinPotentialStepMetrics]:
   """One BAOAB-style SETTLE+Langevin step; forces and logged energy share one ``value_and_grad``."""
-  positions_old = state.position
+  positions_old = state.positions
   momentum = settle._langevin_step_b(state.momentum, state.force, dt_akma)
-  position = settle._langevin_step_a(state.position, momentum, state.mass, dt_akma, shift_fn)
+  position = settle._langevin_step_a(state.positions, momentum, state.mass, dt_akma, shift_fn)
 
   if project_ou_momentum_rigid:
     momentum, key = settle._langevin_step_o_constrained(

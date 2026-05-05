@@ -99,32 +99,32 @@ push-engaging: push-engaging-workspace
         --include='/outputs/inputs/***'
 
 # Like ``push-engaging`` but ``rsync --delete`` so the remote tree matches (excluded paths untouched).
-# push-engaging-clean: login-engaging
-#     @echo "Syncing UV workspace root (clean) to {{engaging_login}}:{{engaging_workspace_remote_dir}}/"
-#     rsync -azP --delete {{justfile_directory()}}/workspace/pyproject.toml {{justfile_directory()}}/workspace/uv.lock \
-#         {{justfile_directory()}}/workspace/.python-version {{justfile_directory()}}/workspace/.gitignore \
-#         {{engaging_login}}:{{engaging_workspace_remote_dir}}/
-#     @if [ -d "{{justfile_directory()}}/../proxide" ]; then \
-#         echo "Optional: syncing sibling proxide (clean) for co-development."; \
-#         rsync -azP --delete {{justfile_directory()}}/../proxide/ {{engaging_login}}:{{engaging_workspace_remote_dir}}/proxide/ \
-#             --filter=':- .gitignore' \
-#             --exclude='.venv' \
-#             --exclude='.git' \
-#             --exclude='__pycache__' \
-#             --exclude='*.pyc' \
-#             --exclude='target' \
-#         ; \
-#     fi
-#     @echo "Syncing repo (clean) to {{engaging_login}}:{{engaging_remote_dir}}"
-#     rsync -azP --delete {{justfile_directory()}}/ {{engaging_login}}:{{engaging_remote_dir}}/ \
-#         --filter=':- .gitignore' \
-#         --exclude='.venv' \
-#         --exclude='.git' \
-#         --exclude='.agent' \
-#         --exclude='__pycache__' \
-#         --exclude='*.pyc' \
-#         --exclude='/outputs/*' \
-#         --include='/outputs/inputs/***'
+push-engaging-clean: login-engaging
+    @echo "Syncing UV workspace root (clean) to {{engaging_login}}:{{engaging_workspace_remote_dir}}/"
+    rsync -azP --delete {{justfile_directory()}}/workspace/pyproject.toml {{justfile_directory()}}/workspace/uv.lock \
+        {{justfile_directory()}}/workspace/.python-version {{justfile_directory()}}/workspace/.gitignore \
+        {{engaging_login}}:{{engaging_workspace_remote_dir}}/
+    @if [ -d "{{justfile_directory()}}/../proxide" ]; then \
+        echo "Optional: syncing sibling proxide (clean) for co-development."; \
+        rsync -azP --delete {{justfile_directory()}}/../proxide/ {{engaging_login}}:{{engaging_workspace_remote_dir}}/proxide/ \
+            --filter=':- .gitignore' \
+            --exclude='.venv' \
+            --exclude='.git' \
+            --exclude='__pycache__' \
+            --exclude='*.pyc' \
+            --exclude='target' \
+        ; \
+    fi
+    @echo "Syncing repo (clean) to {{engaging_login}}:{{engaging_remote_dir}}"
+    rsync -azP --delete {{justfile_directory()}}/ {{engaging_login}}:{{engaging_remote_dir}}/ \
+        --filter=':- .gitignore' \
+        --exclude='.venv' \
+        --exclude='.git' \
+        --exclude='.agent' \
+        --exclude='__pycache__' \
+        --exclude='*.pyc' \
+        --exclude='/outputs/*' \
+        --include='/outputs/inputs/***'
 
 # Chignolin benchmark on {{engaging_partition}} (override ENGAGING_REMOTE_DIR / ENGAGING_LOGIN as needed)
 submit-bench-chignolin: push-engaging
@@ -178,6 +178,19 @@ submit-bench-array: push-engaging
 # Chained accuracy → speed jobs (same partition as ENGAGING_PARTITION)
 submit-bench-chignolin-split: push-engaging
     ssh {{ssh_opts}} {{engaging_login}} 'cd {{engaging_remote_dir}} && export ENGAGING_LOG_DATE=$(date +%Y%m%d) && export ENGAGING_PARTITION={{engaging_partition}} && bash scripts/slurm/submit_chignolin_split_pi_so3.sh'
+
+# --- NGC Container Benchmarking ---
+
+# Alias for push-engaging
+push: push-engaging
+
+# Pull OpenMM NGC image on cluster
+pull-openmm-ngc: push-engaging
+    ssh {{ssh_opts}} {{engaging_login}} 'cd {{engaging_remote_dir}} && sbatch scripts/slurm/pull_openmm_ngc.slurm'
+
+# Submit GPU speed benchmark (JAX native vs OpenMM container)
+submit-bench-gpu sweep="1000,5000,10000": push-engaging
+    ssh {{ssh_opts}} {{engaging_login}} 'cd {{engaging_remote_dir}} && export ENGAGING_LOG_DATE=$(date +%Y%m%d) && export PLX_BENCH_SWEEP="{{sweep}}" && sbatch scripts/slurm/bench_prolix_vs_openmm_gpu.slurm'
 
 # Follow the newest SLURM log under outputs/logs/engaging/
 logs-engaging: login-engaging

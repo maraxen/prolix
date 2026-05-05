@@ -30,7 +30,7 @@ except ImportError:
   HAS_OPENMM = False
 
 
-def _openmm_velocity_nmps_to_prolix_momentum(
+def _openmm_velocity_nmps_to_proxide_momentum(
   velocities_nmps: np.ndarray,
   mass_dalton_per_atom: np.ndarray,
 ) -> np.ndarray:
@@ -48,7 +48,7 @@ def _openmm_velocity_nmps_to_prolix_momentum(
 
 @pytest.mark.openmm
 @pytest.mark.skipif(not HAS_OPENMM, reason="OpenMM not installed")
-def test_openmm_snapshot_rigid_ke_matches_prolix_rigid_functional(tmp_path: Path) -> None:
+def test_openmm_snapshot_rigid_ke_matches_proxide_rigid_functional(tmp_path: Path) -> None:
   jax.config.update("jax_enable_x64", True)
 
   n_waters = 4
@@ -108,9 +108,9 @@ def test_openmm_snapshot_rigid_ke_matches_prolix_rigid_functional(tmp_path: Path
     [float(omm_system.getParticleMass(i).value_in_unit(omm_unit.dalton)) for i in range(n_atoms)],
     dtype=np.float64,
   )
-  p_np = _openmm_velocity_nmps_to_prolix_momentum(v_np, mass_np)
+  p_np = _openmm_velocity_nmps_to_proxide_momentum(v_np, mass_np)
   mass_j = jnp.array([[mass_np[i]] for i in range(n_atoms)], dtype=jnp.float64)
   ke_r = float(rigid_tip3p_box_ke_kcal(jnp.asarray(positions_a), jnp.asarray(p_np), mass_j, n_waters))
 
   rel = abs(ke_omm - ke_r) / max(abs(ke_omm), 1e-12)
-  assert rel < 1e-6, f"rigid KE mismatch: openmm={ke_omm} prolix_rigid_fn={ke_r} rel_err={rel}"
+  assert rel < 1e-6, f"rigid KE mismatch: openmm={ke_omm} proxide_rigid_fn={ke_r} rel_err={rel}"

@@ -29,7 +29,7 @@ from prolix.physics.units import BAR_PER_AKMA_PRESSURE
 from prolix.simulate import AKMA_TIME_UNIT_FS, BOLTZMANN_KCAL
 from .test_explicit_langevin_tip3p_parity import (
     _grid_water_positions,
-    _prolix_params_pure_water,
+    _proxide_params_pure_water,
 )
 
 
@@ -109,7 +109,7 @@ def test_npt_5ps_energy_conservation() -> None:
     tau_baro_akma = 2000.0
     tau_thermo_akma = 2000.0
 
-    sys_dict = _prolix_params_pure_water(n_waters)
+    sys_dict = _proxide_params_pure_water(n_waters)
     displacement_fn, shift_fn = pbc.create_periodic_space(box_vec)
     energy_fn = system.make_energy_fn(
         displacement_fn,
@@ -145,7 +145,7 @@ def test_npt_5ps_energy_conservation() -> None:
 
     # Initial Hamiltonian
     h_init = _hamiltonian_npt(
-        state.position, state.momentum, state.box, mass, n_waters, energy_fn, pressure_bar
+        state.positions, state.momentum, state.box, mass, n_waters, energy_fn, pressure_bar
     )
 
     pressures_bar: list[float] = []
@@ -156,16 +156,16 @@ def test_npt_5ps_energy_conservation() -> None:
         state = apply_j(state, box=state.box)
 
         # Check for NaN
-        assert jnp.all(jnp.isfinite(state.position)), f"Step {step}: position NaN"
+        assert jnp.all(jnp.isfinite(state.positions)), f"Step {step}: position NaN"
         assert jnp.all(jnp.isfinite(state.momentum)), f"Step {step}: momentum NaN"
         assert jnp.all(jnp.isfinite(state.box)), f"Step {step}: box NaN"
 
         if step >= burn and step % measurement_interval == 0:
             # Compute pressure
             ke_total = rigid_tip3p_box_ke_kcal(
-                state.position, state.momentum, state.mass, n_waters
+                state.positions, state.momentum, state.mass, n_waters
             )
-            virial = stress.virial_trace(state.position, state.force)
+            virial = stress.virial_trace(state.positions, state.force)
             volume = jnp.prod(state.box)
             pressure_akma = pressure.instantaneous_pressure_akma(ke_total, virial, physics_system, params, ndim=3)
             pressure_bar_val = float(pressure_akma * BAR_PER_AKMA_PRESSURE)
@@ -178,7 +178,7 @@ def test_npt_5ps_energy_conservation() -> None:
 
             # Compute Hamiltonian
             h_npt = _hamiltonian_npt(
-                state.position, state.momentum, state.box, mass, n_waters, energy_fn, pressure_bar
+                state.positions, state.momentum, state.box, mass, n_waters, energy_fn, pressure_bar
             )
             hamiltonians_kcal.append(h_npt)
 
@@ -246,7 +246,7 @@ def test_npt_5ps_pressure_stability() -> None:
     tau_baro_akma = 2000.0
     tau_thermo_akma = 2000.0
 
-    sys_dict = _prolix_params_pure_water(n_waters)
+    sys_dict = _proxide_params_pure_water(n_waters)
     displacement_fn, shift_fn = pbc.create_periodic_space(box_vec)
     energy_fn = system.make_energy_fn(
         displacement_fn,
@@ -287,9 +287,9 @@ def test_npt_5ps_pressure_stability() -> None:
 
         if step >= burn and step % measurement_interval == 0:
             ke_total = rigid_tip3p_box_ke_kcal(
-                state.position, state.momentum, state.mass, n_waters
+                state.positions, state.momentum, state.mass, n_waters
             )
-            virial = stress.virial_trace(state.position, state.force)
+            virial = stress.virial_trace(state.positions, state.force)
             volume = jnp.prod(state.box)
             pressure_akma = pressure.instantaneous_pressure_akma(ke_total, virial, physics_system, params, ndim=3)
             pressure_bar_val = float(pressure_akma * BAR_PER_AKMA_PRESSURE)

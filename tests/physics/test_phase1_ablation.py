@@ -28,7 +28,7 @@ import pytest
 from jax_md import partition, space, quantity as jax_md_quantity
 
 from prolix.physics import settle
-from prolix.types import WaterIndicesArray
+from prolix.typing import WaterIndicesArray
 
 jax.config.update("jax_enable_x64", True)
 
@@ -60,7 +60,7 @@ class DiagnosticMetrics:
 def make_tip3p_water_box(
     n_waters: int = 200,
     target_density: float = 1.0,  # g/cm^3, TIP3P at 298K ~ 1.0
-    rng_key=None,
+    rng_rng=None,
 ) -> tuple[jax.Array, jax.Array, jax.Array, WaterIndicesArray]:
     """Create TIP3P water box with random initial velocities.
 
@@ -252,7 +252,7 @@ def run_settle_langevin_trajectory(
     dt: float,
     water_indices: WaterIndicesArray,
     T_target: float = 300.0,
-    key=None,
+    rng=None,
 ) -> DiagnosticMetrics:
     """Run single trajectory replica and collect diagnostics.
 
@@ -288,15 +288,15 @@ def run_settle_langevin_trajectory(
     for step in range(n_steps):
         # Compute diagnostics before step
         T = compute_instantaneous_temperature(state.momentum, state.mass, water_indices)
-        KE_rigid = compute_rigid_kinetic_energy(state.momentum, state.position, state.mass, water_indices)
+        KE_rigid = compute_rigid_kinetic_energy(state.momentum, state.positions, state.mass, water_indices)
         KE_total = jax_md_quantity.kinetic_energy(momentum=state.momentum, mass=state.mass)
-        residual = compute_settle_residual_norm(state.position, water_indices)
+        residual = compute_settle_residual_norm(state.positions, water_indices)
 
         T_inst_list.append(T)
         KE_rigid_list.append(KE_rigid)
         KE_total_list.append(KE_total)
         residual_list.append(residual)
-        pos_list.append(state.position)
+        pos_list.append(state.positions)
         mom_list.append(state.momentum)
 
         # Apply integrator step

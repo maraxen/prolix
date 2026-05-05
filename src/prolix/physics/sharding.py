@@ -15,33 +15,7 @@ from jax_md import util
 Array = util.Array
 
 
-@dataclasses.dataclass(frozen=True)
-class PaddedSystem:
-    """System padded to pmap-compatible size.
-
-    Attributes:
-        positions: Padded positions (N_padded, 3).
-        charges: Padded charges (N_padded,). Ghost atoms have charge 0.
-        atom_mask: Boolean mask (N_padded,). True for real atoms, False for ghosts.
-        sigmas: Padded LJ sigma (N_padded,). Ghost atoms have sigma 1e-6.
-        epsilons: Padded LJ epsilon (N_padded,). Ghost atoms have epsilon 0.
-        radii: Padded Born radii (N_padded,) or None.
-        scaled_radii: Padded scaled Born radii (N_padded,) or None.
-        exclusion_mask: Padded exclusion mask (N_padded, N_padded) or None.
-        n_real: Number of real atoms.
-        n_padded: Number of atoms after padding.
-    """
-
-    positions: Array
-    charges: Array
-    atom_mask: Array
-    sigmas: Array | None = None
-    epsilons: Array | None = None
-    radii: Array | None = None
-    scaled_radii: Array | None = None
-    exclusion_mask: Array | None = None
-    n_real: int = 0
-    n_padded: int = 0
+from prolix.typing import PaddedSystem
 
 
 @dataclasses.dataclass(frozen=True)

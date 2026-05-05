@@ -29,7 +29,7 @@ def _load(name: str) -> dict:
 
 def test_paired_analysis_schema_and_advancement_flag() -> None:
   m = _mod()
-  incumbent = _load("fail_r_prolix.json")
+  incumbent = _load("fail_r_proxide.json")
   candidate = _load("pass_r_both_x.json")
   for row in candidate["aggregated"]:
     row["per_replica_mean_T_K"] = row["per_replica_mean_T_K"][:3]
@@ -41,7 +41,7 @@ def test_paired_analysis_schema_and_advancement_flag() -> None:
   assert out["schema"] == "tip3p_tightening_paired_analysis/v1"
   assert out["source"]["n_pairs"] == 3
   assert out["advancement"]["passes"] is True
-  assert out["metrics"]["M1_prolix_r_relative_error_reduction"]["summary"]["lower_95_one_sided"] > 0.0
+  assert out["metrics"]["M1_proxide_r_relative_error_reduction"]["summary"]["lower_95_one_sided"] > 0.0
 
 
 def test_paired_analysis_includes_m3_m4_m5_when_present() -> None:
@@ -49,12 +49,12 @@ def test_paired_analysis_includes_m3_m4_m5_when_present() -> None:
   incumbent = _load("pass_r_both_x.json")
   candidate = _load("pass_r_both_x.json")
   for row in incumbent["aggregated"]:
-    if row["engine"] == "prolix":
+    if row["engine"] == "proxide":
       row["per_replica_diag_projection_residual_p95"] = [0.20, 0.22, 0.21, 0.20, 0.19]
       row["per_replica_diag_bond_residual_max_abs_p95"] = [0.010, 0.011, 0.010, 0.009, 0.010]
       row["per_replica_diag_com_metric_p95"] = [0.030, 0.029, 0.031, 0.030, 0.030]
   for row in candidate["aggregated"]:
-    if row["engine"] == "prolix":
+    if row["engine"] == "proxide":
       row["per_replica_diag_projection_residual_p95"] = [0.15, 0.16, 0.15, 0.16, 0.15]
       row["per_replica_diag_bond_residual_max_abs_p95"] = [0.008, 0.008, 0.009, 0.008, 0.008]
       row["per_replica_diag_com_metric_p95"] = [0.020, 0.021, 0.020, 0.021, 0.020]

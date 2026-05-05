@@ -48,7 +48,7 @@ def test_clash_minimization_survives(clash_system):
     # We invoke the robust minimization logic directly if possible, or via run_simulation
     # Since we are testing internal logic, we might need to expose it or run a minimal simulation loop
     
-    # But prolix's minimize is inside run_simulation currently.
+    # But proxide's minimize is inside run_simulation currently.
     # We will test using run_simulation with a mock system if possible, 
     # but run_simulation requires a SystemParams or AtomicSystem.
     

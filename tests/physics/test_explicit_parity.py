@@ -89,10 +89,10 @@ def setup_periodic_box(positions):
   centered = positions + shift
 
   return centered, box_size
-def build_prolix_params(protein):
-  """Build prolix system params from protein object.
+def build_proxide_params(protein):
+  """Build proxide system params from protein object.
 
-  Note: The Rust parser (oxidize) outputs all values in prolix-native
+  Note: The Rust parser (oxidize) outputs all values in proxide-native
   units (Angstroms, kcal/mol, radians). No unit conversion needed.
   """
   n_atoms = len(protein.charges)
@@ -208,12 +208,12 @@ class TestBondedEnergies:
     """Test that bond energy is finite."""
     protein = parameterized_protein
     coords = get_valid_coords(protein)
-    params = build_prolix_params(protein)
+    params = build_proxide_params(protein)
 
     displacement_fn, _ = space.free()
-    bond_fn = bonded.make_bond_energy_fn(displacement_fn, params["bonds"], params["bond_params"])
+    bond_fn = bonded.make_bond_energy_fn(displacement_fn, params["bonds"])
 
-    e_bond = bond_fn(coords)
+    e_bond = bond_fn(coords, params["bond_params"])
     assert jnp.isfinite(e_bond), f"Non-finite bond energy: {e_bond}"
     print(f"Bond energy: {e_bond:.2f} kcal/mol")
 
@@ -221,14 +221,14 @@ class TestBondedEnergies:
     """Test that angle energy is finite."""
     protein = parameterized_protein
     coords = get_valid_coords(protein)
-    params = build_prolix_params(protein)
+    params = build_proxide_params(protein)
 
     displacement_fn, _ = space.free()
     angle_fn = bonded.make_angle_energy_fn(
-      displacement_fn, params["angles"], params["angle_params"]
+      displacement_fn, params["angles"]
     )
 
-    e_angle = angle_fn(coords)
+    e_angle = angle_fn(coords, params["angle_params"])
     assert jnp.isfinite(e_angle), f"Non-finite angle energy: {e_angle}"
     print(f"Angle energy: {e_angle:.2f} kcal/mol")
 
@@ -236,14 +236,14 @@ class TestBondedEnergies:
     """Test that dihedral energy is finite."""
     protein = parameterized_protein
     coords = get_valid_coords(protein)
-    params = build_prolix_params(protein)
+    params = build_proxide_params(protein)
 
     displacement_fn, _ = space.free()
     dihedral_fn = bonded.make_dihedral_energy_fn(
-      displacement_fn, params["proper_dihedrals"], params["dihedral_params"]
+      displacement_fn, params["proper_dihedrals"]
     )
 
-    e_dihed = dihedral_fn(coords)
+    e_dihed = dihedral_fn(coords, params["dihedral_params"])
     assert jnp.isfinite(e_dihed), f"Non-finite dihedral energy: {e_dihed}"
     print(f"Dihedral energy: {e_dihed:.2f} kcal/mol")
 class TestNonbondedEnergies:
@@ -266,7 +266,7 @@ class TestNonbondedEnergies:
     protein = parameterized_protein
     coords = get_valid_coords(protein)
     centered, box = setup_periodic_box(coords)
-    params = build_prolix_params(protein)
+    params = build_proxide_params(protein)
 
     displacement_fn, _ = pbc.create_periodic_space(box)
 

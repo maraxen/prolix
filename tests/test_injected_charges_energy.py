@@ -1,4 +1,4 @@
-"""Charge injection self-consistency: prolix consumes arrays; assignment lives in proxide."""
+"""Charge injection self-consistency: proxide consumes arrays; assignment lives in proxide."""
 
 from __future__ import annotations
 

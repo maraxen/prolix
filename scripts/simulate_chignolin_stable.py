@@ -148,7 +148,7 @@ def main():
         state = step_block(state)
 
         # Compute energy for logging
-        e = energy_fn(state.position)
+        e = energy_fn(state.positions)
         step_num = (block + 1) * save_interval
 
         if block % 10 == 0 or block == n_saves - 1:
@@ -156,7 +156,7 @@ def main():
 
         # Save state
         sim_state = SimulationState(
-            positions=state.position,
+            positions=state.positions,
             velocities=state.momentum / state.mass if hasattr(state, "mass") and state.mass is not None else state.momentum,
             step=step_num,
             time_ns=step_num * dt * 1e-3,  # Approximate

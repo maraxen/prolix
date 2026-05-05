@@ -61,7 +61,7 @@ class TestSHAKEGeometry:
     for _ in range(1000):
         state = apply_fn(state)
         
-    final_pos = state.position
+    final_pos = state.positions
     
     # Check bond lengths
     def get_length(idx1, idx2):

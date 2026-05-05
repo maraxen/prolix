@@ -1,10 +1,10 @@
-"""Sprint 5: Cross-validation of prolix thermostats against kUPs.
+"""Sprint 5: Cross-validation of proxide thermostats against kUPs.
 
-This test suite runs identical harmonic oscillator systems in both prolix (AKMA units)
+This test suite runs identical harmonic oscillator systems in both proxide (AKMA units)
 and kUPs (eV/Å/amu units) to determine whether temperature biases are VV discretization
-artifacts (present in both engines) or prolix-specific bugs.
+artifacts (present in both engines) or proxide-specific bugs.
 
-Key question: Does prolix's +8K CSVR temperature bias at dt>=1fs appear in kUPs too?
+Key question: Does proxide's +8K CSVR temperature bias at dt>=1fs appear in kUPs too?
 """
 
 from __future__ import annotations
@@ -55,11 +55,11 @@ assert abs(kups_adapter.EV_TO_KCAL_MOL - 23.060549) < 1e-6, "eV→kcal/mol conve
 
 N_PARTICLES = 64  # Harmonic oscillator particles
 K_EV = 0.01  # Spring constant in eV/Å² (kUPs)
-K_KCAL = kups_adapter.spring_constant_ev_per_angstrom_sq_to_kcal_mol(K_EV)  # kcal/mol/Å² (prolix)
+K_KCAL = kups_adapter.spring_constant_ev_per_angstrom_sq_to_kcal_mol(K_EV)  # kcal/mol/Å² (proxide)
 M_AMU = 1.0  # Mass in amu (both engines)
 T_TARGET_K = 300.0  # Target temperature in Kelvin
 KT_EV = T_TARGET_K * KUPS_KB  # kUPs thermal energy in eV
-KT_KCAL = T_TARGET_K * BOLTZMANN_KCAL  # prolix thermal energy in kcal/mol
+KT_KCAL = T_TARGET_K * BOLTZMANN_KCAL  # proxide thermal energy in kcal/mol
 GAMMA_PS = 10.0  # Langevin friction in ps⁻¹; chosen so τ≈100 fs to match kUPs effective τ (γ=FEMTO_SECOND kUPs-time⁻¹)
 TAU_PS = 0.1  # CSVR time constant in ps
 N_EQUIL_STEPS = 40_000  # Equilibration steps (at dt=0.5fs: 40k*0.5fs = 20ps)
@@ -136,14 +136,14 @@ def run_simulation(integrator, state, key, n_equil, n_sample, extract_fn):
 
 
 def create_harmonic_system(
-    n_particles=10, k=1.0, m=1.0, kT=1.0, dt=0.01, tau=0.1, gamma=1.0, key=None
+    n_particles=10, k=1.0, m=1.0, kT=1.0, dt=0.01, tau=0.1, gamma=1.0, rng=None
 ):
     """Create harmonic oscillator system for testing (kUPs).
 
     Copied verbatim from /tmp/kups/test/md/test_integrators.py.
     """
     if key is None:
-        key = jax.random.key(42)
+        key = jax.random.PRNGKey(42)
     key1, key2 = jax.random.split(key)
 
     positions = jax.random.normal(key1, (n_particles, 3)) * 0.1
@@ -179,7 +179,7 @@ def create_harmonic_system(
     def compute_forces_fn(s):
         forces = -k * s.particles.data.positions
         return Table(
-            s.particles.keys,
+            s.particles.rngs,
             ParticleData(
                 positions=s.particles.data.positions,
                 momenta=s.particles.data.momenta,
@@ -205,10 +205,10 @@ def create_harmonic_system(
 # ============================================================================
 
 
-def _run_prolix_harmonic_baoab(
+def _run_proxide_harmonic_baoab(
     n_particles, k_kcal, m_amu, kT_kcal, dt_fs, gamma_ps, n_equil, n_sample, seed
 ):
-    """Run prolix settle_langevin (water_indices=None) on harmonic oscillator.
+    """Run proxide settle_langevin (water_indices=None) on harmonic oscillator.
 
     Falls back to jax_md BAOAB when no water constraints are specified.
     """
@@ -261,10 +261,10 @@ def _run_prolix_harmonic_baoab(
     return np.mean(temps)
 
 
-def _run_prolix_harmonic_csvr(
+def _run_proxide_harmonic_csvr(
     n_particles, k_kcal, m_amu, kT_kcal, dt_fs, tau_ps, n_equil, n_sample, seed
 ):
-    """Run prolix settle_csvr (water_indices=None) on harmonic oscillator.
+    """Run proxide settle_csvr (water_indices=None) on harmonic oscillator.
 
     Falls back to jax_md CSVR when no water constraints are specified.
     """
@@ -334,14 +334,14 @@ def _run_prolix_harmonic_csvr(
         ("CSVR", 1.0, 10.0),  # CSVR at dt>=1fs: allow ±8K bias; test consistency
     ],
 )
-def test_kups_prolix_temperature_crossval(integrator_name, dt_fs, T_tolerance_K):
-    """Cross-validate prolix thermostats against kUPs on harmonic oscillator.
+def test_kups_proxide_temperature_crossval(integrator_name, dt_fs, T_tolerance_K):
+    """Cross-validate proxide thermostats against kUPs on harmonic oscillator.
 
-    Determines whether prolix's +8K CSVR temperature bias at dt>=1fs is a
-    velocity-Verlet discretization artifact (present in kUPs too) or prolix-specific.
+    Determines whether proxide's +8K CSVR temperature bias at dt>=1fs is a
+    velocity-Verlet discretization artifact (present in kUPs too) or proxide-specific.
 
     For CSVR at dt=1.0fs, if both engines show similar bias (e.g., both +7K to +9K),
-    the bias is a VV artifact; if prolix is +8K and kUPs is ~300K, it's prolix-specific.
+    the bias is a VV artifact; if proxide is +8K and kUPs is ~300K, it's proxide-specific.
     """
     jax.config.update("jax_enable_x64", True)
 
@@ -358,7 +358,7 @@ def test_kups_prolix_temperature_crossval(integrator_name, dt_fs, T_tolerance_K)
             dt=dt_kups,
             gamma=GAMMA_PS * FEMTO_SECOND,
             tau=TAU_PS * FEMTO_SECOND,
-            key=jax.random.key(42),
+            rng=jax.random.PRNGKey(42),
         )
         integrator = make_baoab_langevin_step(
             particles=SimpleState.particles,
@@ -375,7 +375,7 @@ def test_kups_prolix_temperature_crossval(integrator_name, dt_fs, T_tolerance_K)
             dt=dt_kups,
             tau=TAU_PS * FEMTO_SECOND,
             gamma=GAMMA_PS * FEMTO_SECOND,
-            key=jax.random.key(42),
+            rng=jax.random.PRNGKey(42),
         )
         integrator = make_csvr_step(
             particles=SimpleState.particles,
@@ -390,7 +390,7 @@ def test_kups_prolix_temperature_crossval(integrator_name, dt_fs, T_tolerance_K)
     final_state, temps_kups = run_simulation(
         integrator,
         state,
-        jax.random.key(42),
+        jax.random.PRNGKey(42),
         n_equil=N_EQUIL_STEPS,
         n_sample=N_SAMPLE_STEPS,
         extract_fn=lambda s: compute_temperature(s, DOF),
@@ -399,9 +399,9 @@ def test_kups_prolix_temperature_crossval(integrator_name, dt_fs, T_tolerance_K)
     # Convert kUPs temperature (eV) to Kelvin
     T_kups_K = float(np.mean(temps_kups)) / KUPS_KB
 
-    # Run prolix equivalent
+    # Run proxide equivalent
     if integrator_name == "BAOAB":
-        T_prolix_K = _run_prolix_harmonic_baoab(
+        T_proxide_K = _run_proxide_harmonic_baoab(
             n_particles=N_PARTICLES,
             k_kcal=K_KCAL,
             m_amu=M_AMU,
@@ -413,7 +413,7 @@ def test_kups_prolix_temperature_crossval(integrator_name, dt_fs, T_tolerance_K)
             seed=42,
         )
     elif integrator_name == "CSVR":
-        T_prolix_K = _run_prolix_harmonic_csvr(
+        T_proxide_K = _run_proxide_harmonic_csvr(
             n_particles=N_PARTICLES,
             k_kcal=K_KCAL,
             m_amu=M_AMU,
@@ -425,33 +425,33 @@ def test_kups_prolix_temperature_crossval(integrator_name, dt_fs, T_tolerance_K)
             seed=42,
         )
     else:
-        raise ValueError(f"Unknown integrator for prolix runner: {integrator_name}")
+        raise ValueError(f"Unknown integrator for proxide runner: {integrator_name}")
 
     # Check cross-engine agreement
-    T_diff = T_prolix_K - T_kups_K
+    T_diff = T_proxide_K - T_kups_K
     assert (
         abs(T_diff) < T_tolerance_K
-    ), f"[CROSSVAL {integrator_name} dt={dt_fs}fs] T_prolix={T_prolix_K:.1f}K != T_kUPs={T_kups_K:.1f}K (diff={T_diff:+.1f}K, tolerance={T_tolerance_K}K)"
+    ), f"[CROSSVAL {integrator_name} dt={dt_fs}fs] T_proxide={T_proxide_K:.1f}K != T_kUPs={T_kups_K:.1f}K (diff={T_diff:+.1f}K, tolerance={T_tolerance_K}K)"
 
     # Emit diagnostic message
     print(
         f"\n[CROSSVAL {integrator_name} dt={dt_fs}fs] "
-        f"T_prolix={T_prolix_K:.1f}K  T_kUPs={T_kups_K:.1f}K  "
+        f"T_proxide={T_proxide_K:.1f}K  T_kUPs={T_kups_K:.1f}K  "
         f"diff={T_diff:+.1f}K (tolerance={T_tolerance_K}K)"
     )
 
     # For CSVR at dt=1.0fs, assert that any bias is consistent across engines.
     # The VV-artifact hypothesis: if the bias is discretization-driven, both engines
-    # must show similar bias directions and magnitudes. If prolix diverges by >5K from
-    # kUPs bias, the bias is prolix-specific (a bug), not a shared VV artifact.
+    # must show similar bias directions and magnitudes. If proxide diverges by >5K from
+    # kUPs bias, the bias is proxide-specific (a bug), not a shared VV artifact.
     if integrator_name == "CSVR" and dt_fs >= 1.0:
-        prolix_bias = T_prolix_K - T_TARGET_K
+        proxide_bias = T_proxide_K - T_TARGET_K
         kups_bias = T_kups_K - T_TARGET_K
         print(
-            f"[CSVR BIAS CHECK] T_prolix-{T_TARGET_K}K={prolix_bias:+.1f}K, "
+            f"[CSVR BIAS CHECK] T_proxide-{T_TARGET_K}K={proxide_bias:+.1f}K, "
             f"T_kUPs-{T_TARGET_K}K={kups_bias:+.1f}K"
         )
-        assert abs(prolix_bias - kups_bias) < 5.0, (
-            f"CSVR dt={dt_fs}fs bias mismatch: prolix={prolix_bias:+.1f}K vs kUPs={kups_bias:+.1f}K — "
-            f"diff={prolix_bias - kups_bias:+.1f}K exceeds 5K; bias may be prolix-specific, not a VV artifact"
+        assert abs(proxide_bias - kups_bias) < 5.0, (
+            f"CSVR dt={dt_fs}fs bias mismatch: proxide={proxide_bias:+.1f}K vs kUPs={kups_bias:+.1f}K — "
+            f"diff={proxide_bias - kups_bias:+.1f}K exceeds 5K; bias may be proxide-specific, not a VV artifact"
         )

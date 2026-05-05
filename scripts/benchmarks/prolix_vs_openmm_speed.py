@@ -26,9 +26,14 @@ from datetime import datetime, timezone
 from dataclasses import asdict, dataclass
 from typing import Any
 
-import jax
-import jax.numpy as jnp
 import numpy as np
+
+try:
+    import jax
+    import jax.numpy as jnp
+except ImportError:
+    jax = None
+    jnp = None
 
 # ---------------------------------------------------------------------------
 # Defaults
@@ -144,6 +149,7 @@ def run_prolix_bench(n_atoms: int, box: float, warmup: int, repeats: int) -> tup
   energy_fn = system.make_energy_fn(
     displacement_fn,
     params,
+    positions=positions,
     neighbor_list=nbr,
     box=box_vec,
     use_pbc=True,
@@ -151,7 +157,6 @@ def run_prolix_bench(n_atoms: int, box: float, warmup: int, repeats: int) -> tup
     pme_grid_points=DEFAULT_GRID,
     pme_alpha=DEFAULT_ALPHA,
     cutoff_distance=DEFAULT_CUTOFF_A,
-    strict_parameterization=False,
   )
 
   val_and_grad = jax.jit(jax.value_and_grad(energy_fn))
@@ -160,19 +165,16 @@ def run_prolix_bench(n_atoms: int, box: float, warmup: int, repeats: int) -> tup
   _ = val_and_grad(positions, neighbor=nbr)
   for _ in range(warmup):
     _ = val_and_grad(positions, neighbor=nbr)
-  
-  jax.block_until_ready(val_and_grad(positions, neighbor=nbr))
-  
+    
   samples = []
   for _ in range(repeats):
     t0 = time.perf_counter()
-    out = val_and_grad(positions, neighbor=nbr)
-    jax.block_until_ready(out)
+    val, grad = val_and_grad(positions, neighbor=nbr)
+    val.block_until_ready()
     samples.append((time.perf_counter() - t0) * 1000.0)
     
-  vram = get_vram_usage_gb()
   arr = np.array(samples)
-  return float(arr.mean()), float(arr.std()), vram
+  return float(arr.mean()), float(arr.std()), get_vram_usage_gb()
 
 
 def run_openmm_bench(n_atoms: int, box: float, warmup: int, repeats: int) -> tuple[float, float]:
@@ -180,17 +182,25 @@ def run_openmm_bench(n_atoms: int, box: float, warmup: int, repeats: int) -> tup
     from openmm import app, unit
     
     omm_system = build_openmm_system(n_atoms, box)
-    rng = np.random.default_rng(42)
-    positions = rng.uniform(0, box/10.0, (n_atoms, 3)) * unit.nanometers
-    
     integrator = openmm.VerletIntegrator(0.001)
-    # Enforce CUDA if possible for fair comparison
-    try:
-        platform = openmm.Platform.getPlatformByName("CUDA")
-    except:
-        platform = openmm.Platform.getPlatformByName("Reference")
+    
+    # Select best platform
+    platform = None
+    for pname in OPENMM_PLATFORM_ORDER:
+        try:
+            platform = openmm.Platform.getPlatformByName(pname)
+            break
+        except:
+            continue
+            
+    if platform is None:
+        raise RuntimeError("No OpenMM platform found")
         
     context = openmm.Context(omm_system, integrator, platform)
+    
+    # Set positions
+    rng = np.random.default_rng(42)
+    positions = rng.uniform(0, box/10.0, (n_atoms, 3))
     context.setPositions(positions)
     
     # Warmup
@@ -213,6 +223,8 @@ def main():
   parser.add_argument("--warmup", type=int, default=5)
   parser.add_argument("--repeats", type=int, default=20)
   parser.add_argument("--json", type=str, default="", help="Save results to JSON.")
+  parser.add_argument("--skip-prolix", action="store_true", help="Skip Prolix (JAX) benchmarks.")
+  parser.add_argument("--skip-openmm", action="store_true", help="Skip OpenMM benchmarks.")
   args = parser.parse_args()
 
   n_list = [int(x) for x in args.sweep.split(",")]
@@ -225,17 +237,19 @@ def main():
 
   for n in n_list:
     # Prolix
-    m_p, s_p, v_p = run_prolix_bench(n, DEFAULT_BOX_A, args.warmup, args.repeats)
-    print(f"{n:8d} | {'Prolix':>8} | {m_p:10.3f} | {s_p:10.3f} | {v_p:8.3f}")
-    results.append(TimingRow("Prolix", "jax", n, m_p, s_p, 1000.0/m_p, v_p))
+    if not args.skip_prolix:
+      m_p, s_p, v_p = run_prolix_bench(n, DEFAULT_BOX_A, args.warmup, args.repeats)
+      print(f"{n:8d} | {'Prolix':>8} | {m_p:10.3f} | {s_p:10.3f} | {v_p:8.3f}")
+      results.append(TimingRow("Prolix", "jax", n, m_p, s_p, 1000.0/m_p, v_p))
     
     # OpenMM
-    try:
-        m_o, s_o = run_openmm_bench(n, DEFAULT_BOX_A, args.warmup, args.repeats)
-        print(f"{n:8d} | {'OpenMM':>8} | {m_o:10.3f} | {s_o:10.3f} | {'n/a':>8}")
-        results.append(TimingRow("OpenMM", "cuda", n, m_o, s_o, 1000.0/m_o, 0.0))
-    except Exception as e:
-        print(f"{n:8d} | {'OpenMM':>8} | {'FAILED':>10} | {'-':>10} | {'-':>8}")
+    if not args.skip_openmm:
+      try:
+          m_o, s_o = run_openmm_bench(n, DEFAULT_BOX_A, args.warmup, args.repeats)
+          print(f"{n:8d} | {'OpenMM':>8} | {m_o:10.3f} | {s_o:10.3f} | {'n/a':>8}")
+          results.append(TimingRow("OpenMM", "cuda", n, m_o, s_o, 1000.0/m_o, 0.0))
+      except Exception as e:
+          print(f"{n:8d} | {'OpenMM':>8} | {'FAILED':>10} | {'-':>10} | {'-':>8}")
 
   if args.json:
     out = {

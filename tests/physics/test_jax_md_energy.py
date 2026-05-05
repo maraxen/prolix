@@ -27,12 +27,12 @@ def parameterized_protein():
   """Load a parameterized protein."""
   pdb_path = DATA_DIR / "1CRN.pdb"
 
-  from proxide import _oxidize
+  from proxide import CoordFormat
   spec = OutputSpec(
       parameterize_md=True,
       force_field=str(FF_PATH),
       add_hydrogens=True,
-      coord_format=_oxidize.CoordFormat.Full,
+      coord_format=CoordFormat.Full,
   )
 
   return parse_structure(str(pdb_path), spec)

@@ -245,7 +245,7 @@ def run_prolix_stats(n_steps=10000, target_temp=300.0, dt_fs=2.0):
         
         ke = jnp.sum(0.5 * jnp.sum(state.momentum**2, axis=-1) / state.mass.squeeze())
         temp = (2.0 * ke) / (n_degrees * 0.0019872041)
-        pe = energy_fn(state.position)
+        pe = energy_fn(state.positions)
         
         temps.append(float(temp))
         energies.append(float(pe + ke))

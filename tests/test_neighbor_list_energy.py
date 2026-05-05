@@ -341,7 +341,7 @@ class TestNLLangevinStep:
             momentum=jnp.zeros((n, 3)),
             force=jnp.zeros((n, 3)),
             mass=jnp.ones(n) * 12.0,
-            key=key,
+            rng=key,
             cap_count=jnp.array(0, dtype=jnp.int32),
         )
 
@@ -354,7 +354,7 @@ class TestNLLangevinStep:
         # Take one step
         new_state = step_fn(padded, state, neighbor_idx)
 
-        assert jnp.all(jnp.isfinite(new_state.positions)), \
+        assert jnp.all(jnp.isfinite(new_state(positions)), \
             "NL step positions must be finite"
         assert jnp.all(jnp.isfinite(new_state.momentum)), \
             "NL step momenta must be finite"
@@ -437,7 +437,7 @@ class TestCustomVJP:
             momentum=jnp.zeros((n, 3)),
             force=jnp.zeros((n, 3)),
             mass=jnp.ones(n) * 12.0,
-            key=key,
+            rng=key,
             cap_count=jnp.array(0, dtype=jnp.int32),
         )
 
@@ -447,7 +447,7 @@ class TestCustomVJP:
         )
         new_state = step_fn(padded, state, neighbor_idx)
 
-        assert jnp.all(jnp.isfinite(new_state.positions)), \
+        assert jnp.all(jnp.isfinite(new_state(positions)), \
             "CVJP step positions must be finite"
         assert jnp.all(jnp.isfinite(new_state.force)), \
             "CVJP step forces must be finite"

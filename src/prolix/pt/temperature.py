@@ -7,7 +7,7 @@ import jax.numpy as jnp
 if TYPE_CHECKING:
   from jaxtyping import Float
 
-  from prolix.types import ArrayLike
+  from prolix.typing import ArrayLike
 
 
 def generate_temperature_ladder(

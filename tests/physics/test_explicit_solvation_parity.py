@@ -67,7 +67,7 @@ class TestOpenMMSolvationParity:
   a wide ATOL to absorb the known PME background shift (see module docstring).
   """
 
-  def _get_prolix_params_from_omm(self, omm_system):
+  def _get_proxide_params_from_omm(self, omm_system):
     """Extract physics parameters from OpenMM System into Prolix-compatible dict."""
     import openmm
     from openmm import unit
@@ -165,7 +165,7 @@ class TestOpenMMSolvationParity:
         
         # Parse with Prolix
         spec = OutputSpec(parameterize_md=True, coord_format=CoordFormat.Full, force_field=str(FF_PATH))
-        protein_prolix = parse_structure(tmp.name, spec)
+        protein_proxide = parse_structure(tmp.name, spec)
 
     return {
       "positions": positions_A,
@@ -176,7 +176,7 @@ class TestOpenMMSolvationParity:
       "grid": grid,
       "cutoff": cutoff,
       "platform": regression_pme_params["openmm_platform"],
-      "protein_prolix": protein_prolix,
+      "protein_proxide": protein_proxide,
     }
 
   def test_energy_parity(self, solvated_system_openmm):
@@ -185,7 +185,7 @@ class TestOpenMMSolvationParity:
     from openmm import unit
 
     data = solvated_system_openmm
-    protein = data["protein_prolix"]
+    protein = data["protein_proxide"]
     topology = data["topology"]
     
     # 1. OpenMM Energy
@@ -213,7 +213,7 @@ class TestOpenMMSolvationParity:
     displacement_fn, _ = pbc.create_periodic_space(box_vec)
     
     # Manually extract the charges from the OpenMM system to ensure 1-1 match
-    omm_params = self._get_prolix_params_from_omm(data["system"])
+    omm_params = self._get_proxide_params_from_omm(data["system"])
     protein = protein.replace(
         charges=omm_params["charges"],
         sigmas=omm_params["sigmas"],
@@ -285,7 +285,7 @@ class TestOpenMMSolvationParity:
     from openmm import unit
 
     data = solvated_system_openmm
-    protein = data["protein_prolix"]
+    protein = data["protein_proxide"]
     topology = data["topology"]
     
     # 1. OpenMM Forces
@@ -304,7 +304,7 @@ class TestOpenMMSolvationParity:
     displacement_fn, _ = pbc.create_periodic_space(box_vec)
     
     # Sync params
-    omm_params = self._get_prolix_params_from_omm(data["system"])
+    omm_params = self._get_proxide_params_from_omm(data["system"])
     protein = protein.replace(
         charges=omm_params["charges"],
         sigmas=omm_params["sigmas"],
@@ -408,7 +408,7 @@ class TestSETTLEIntegration:
     for _ in range(1000):
       state = apply_fn(state)
 
-    R_final = state.position
+    R_final = state.positions
 
     # Check all water geometries
     max_oh_error = 0.0

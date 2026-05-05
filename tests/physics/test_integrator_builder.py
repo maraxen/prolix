@@ -220,8 +220,8 @@ def test_init_fn_position_shape(simple_lj_system, key):
   )
   state = init_fn(key, simple_lj_system["positions"])
 
-  assert state.position.shape == simple_lj_system["positions"].shape
-  np.testing.assert_allclose(state.position, simple_lj_system["positions"])
+  assert state.positions.shape == simple_lj_system["positions"].shape
+  np.testing.assert_allclose(state.positions, simple_lj_system["positions"])
 
 
 def test_init_fn_momentum_zero(simple_lj_system, key):
@@ -233,7 +233,7 @@ def test_init_fn_momentum_zero(simple_lj_system, key):
   )
   state = init_fn(key, simple_lj_system["positions"])
 
-  np.testing.assert_allclose(state.momentum, jnp.zeros_like(state.position), atol=1e-10)
+  np.testing.assert_allclose(state.momentum, jnp.zeros_like(state.positions), atol=1e-10)
 
 
 def test_init_fn_force_computation(simple_lj_system, key):
@@ -279,7 +279,7 @@ def test_apply_fn_single_step_no_nan(simple_lj_system, key):
   state = init_fn(key, simple_lj_system["positions"])
   state_next = apply_fn(state)
 
-  assert not jnp.isnan(state_next.position).any()
+  assert not jnp.isnan(state_next.positions).any()
   assert not jnp.isnan(state_next.momentum).any()
   assert not jnp.isnan(state_next.force).any()
 
@@ -296,7 +296,7 @@ def test_apply_fn_ten_steps_stable(simple_lj_system, key):
 
   for _ in range(10):
     state = apply_fn(state)
-    assert not jnp.isnan(state.position).any()
+    assert not jnp.isnan(state.positions).any()
     assert not jnp.isnan(state.force).any()
 
 
@@ -312,7 +312,7 @@ def test_apply_fn_hundred_steps_stable(simple_lj_system, key):
 
   for step in range(100):
     state = apply_fn(state)
-    if jnp.isnan(state.position).any() or jnp.isinf(state.position).any():
+    if jnp.isnan(state.positions).any() or jnp.isinf(state.positions).any():
       pytest.fail(f"NaN/Inf detected at step {step}")
 
 
@@ -364,7 +364,7 @@ def test_apply_fn_deterministic_given_rng(simple_lj_system, key):
   state1 = apply_fn(state1)
   state2 = apply_fn(state2)
 
-  np.testing.assert_allclose(state1.position, state2.position, rtol=1e-14)
+  np.testing.assert_allclose(state1.positions, state2.positions, rtol=1e-14)
 
 
 def test_apply_fn_energy_conservation_nve(simple_lj_system, key):
@@ -384,7 +384,7 @@ def test_apply_fn_energy_conservation_nve(simple_lj_system, key):
   # Compute initial total energy
   velocity = state.momentum / state.mass
   ke_initial = 0.5 * jnp.sum(state.mass * velocity**2)
-  pe_initial = simple_lj_system["energy_fn"](state.position, box=None)
+  pe_initial = simple_lj_system["energy_fn"](state.positions, box=None)
   e_initial = ke_initial + pe_initial
 
   # Run 10 steps (small number due to stochastic forcing)
@@ -394,7 +394,7 @@ def test_apply_fn_energy_conservation_nve(simple_lj_system, key):
   # Compute final energy
   velocity = state.momentum / state.mass
   ke_final = 0.5 * jnp.sum(state.mass * velocity**2)
-  pe_final = simple_lj_system["energy_fn"](state.position, box=None)
+  pe_final = simple_lj_system["energy_fn"](state.positions, box=None)
   e_final = ke_final + pe_final
 
   # Check energy doesn't blow up: drift < 50% (very loose for stochastic integrator)
@@ -446,4 +446,4 @@ def test_integrator_water_indices_passed(water_system, key):
 
   # Just verify init succeeds and returns a valid state
   assert hasattr(state, "position")
-  assert state.position.shape == water_system["positions"].shape
+  assert state.positions.shape == water_system["positions"].shape

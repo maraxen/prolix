@@ -29,7 +29,7 @@ import numpy as np
 import pytest
 
 from prolix.physics.integrator_builder import make_integrator, make_integrator_batched
-from prolix.physics.step_system import IntegratorState
+from prolix.typing import IntegratorState
 
 
 # ========== FIXTURES ==========
@@ -228,15 +228,15 @@ def test_batching_settle_smoke_initialization(water_system_batch_2, rng_key):
 
     # Check shapes
     n_atoms = positions_unbatched.shape[0]
-    assert state_batch.position.shape == (batch_size, n_atoms, 3), \
-        f"Expected position shape ({batch_size}, {n_atoms}, 3), got {state_batch.position.shape}"
+    assert state_batch.positions.shape == (batch_size, n_atoms, 3), \
+        f"Expected position shape ({batch_size}, {n_atoms}, 3), got {state_batch.positions.shape}"
     assert state_batch.momentum.shape == (batch_size, n_atoms, 3)
     assert state_batch.force.shape == (batch_size, n_atoms, 3)
     assert state_batch.rng.shape == (batch_size, 2)
 
     # Check no NaN/Inf
-    assert not jnp.isnan(state_batch.position).any(), "NaN in position"
-    assert not jnp.isinf(state_batch.position).any(), "Inf in position"
+    assert not jnp.isnan(state_batch.positions).any(), "NaN in position"
+    assert not jnp.isinf(state_batch.positions).any(), "Inf in position"
     assert not jnp.isnan(state_batch.force).any(), "NaN in force"
     assert not jnp.isinf(state_batch.force).any(), "Inf in force"
 
@@ -295,13 +295,13 @@ def test_batching_settle_smoke_100_steps(water_system_batch_2, rng_key):
         state_batch = apply_fn_batched(state_batch)
 
         # Check for NaN/Inf
-        if jnp.isnan(state_batch.position).any() or jnp.isinf(state_batch.position).any():
+        if jnp.isnan(state_batch.positions).any() or jnp.isinf(state_batch.positions).any():
             nan_step = step
             break
 
         # Compute geometry
         oh1_dists, oh2_dists, hh_dists = compute_water_geometry(
-            state_batch.position, water_indices
+            state_batch.positions, water_indices
         )
 
         # Track max error (across all batch elements and waters)
@@ -402,16 +402,16 @@ def test_batching_settle_vs_unbatched(water_system_batch_2, rng_key):
         # Sample at specific steps
         if step in [0, 10, 50, 99]:
             # RMSD
-            pos_diff = state_unbatched.position - state_batched.position[0]
+            pos_diff = state_unbatched.positions - state_batched.positions[0]
             rmsd = jnp.sqrt(jnp.mean(pos_diff**2))
             max_rmsd = max(max_rmsd, float(rmsd))
 
             # Check constraint geometry in both
             oh1_u, oh2_u, hh_u = compute_water_geometry(
-                state_unbatched.position, water_indices
+                state_unbatched.positions, water_indices
             )
             oh1_b, oh2_b, hh_b = compute_water_geometry(
-                state_batched.position[0], water_indices
+                state_batched.positions[0], water_indices
             )
 
             oh_error_u = jnp.maximum(

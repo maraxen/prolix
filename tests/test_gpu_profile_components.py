@@ -309,7 +309,7 @@ def main():
                 nl, K = nls[c]
                 step_fn = make_langevin_step_nl(sys0, nl, displacement_fn)
                 @jax.jit
-                def lang_step(key=key, step_fn=step_fn):
+                def lang_step(rng=key, step_fn=step_fn):
                     return step_fn(sys0.positions, sys0.velocities, key)
                 results[f"langevin_{c}"] = bench(
                     lang_step, f"Langevin step (NL {c}Å, K={K})", **bkw

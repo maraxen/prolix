@@ -1,4 +1,4 @@
-"""Integration tests for prolix.export — StableHLO round-trip.
+"""Integration tests for proxide.export — StableHLO round-trip.
 
 Validates:
 1. export_energy_fn returns a lowered artifact with expected methods
@@ -26,7 +26,7 @@ _parity = _ilu.spec_from_file_location(
 _parity_mod = _ilu.module_from_spec(_parity)
 _parity.loader.exec_module(_parity_mod)
 _equil_water_positions = _parity_mod._equil_water_positions
-_prolix_params_pure_water = _parity_mod._prolix_params_pure_water
+_proxide_params_pure_water = _parity_mod._proxide_params_pure_water
 
 N_WATERS = 8
 
@@ -37,7 +37,7 @@ def tip3p_setup():
     jax.config.update("jax_enable_x64", True)
     positions_a, box_edge = _equil_water_positions(N_WATERS, seed=42)
     box_vec = jnp.array([box_edge, box_edge, box_edge], dtype=jnp.float64)
-    sys_dict = _prolix_params_pure_water(N_WATERS)
+    sys_dict = _proxide_params_pure_water(N_WATERS)
     displacement_fn, _ = pbc.create_periodic_space(box_vec)
     return dict(
         positions=jnp.array(positions_a, dtype=jnp.float64),

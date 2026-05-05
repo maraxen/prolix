@@ -23,7 +23,7 @@ from prolix.physics import pbc, settle, system
 from prolix.simulate import AKMA_TIME_UNIT_FS, BOLTZMANN_KCAL
 from prolix.batched_simulate import LangevinState, batched_produce
 from prolix.padding import PaddedSystem
-from .test_explicit_langevin_tip3p_parity import _grid_water_positions, _prolix_params_pure_water
+from .test_explicit_langevin_tip3p_parity import _grid_water_positions, _proxide_params_pure_water
 
 
 def _create_batched_water_system(
@@ -104,7 +104,7 @@ def _create_cold_start_langevin_state(
         momentum=jnp.zeros_like(positions),
         force=initial_forces,
         mass=mass,
-        key=key,
+        rng=key,
         cap_count=jnp.int32(0) if len(positions.shape) == 2 else jnp.zeros(positions.shape[0], dtype=jnp.int32),
         warn_counts=None,  # Auto-initialized by __post_init__ respecting batch dimension
     )
@@ -165,7 +165,7 @@ def test_cold_start_pattern_docstring_example() -> None:
             momentum=jnp.zeros_like(batch.positions),
             force=initial_forces,
             mass=batch.masses,
-            key=jax.random.PRNGKey(0),
+            rng=jax.random.PRNGKey(0),
             cap_count=jnp.int32(0),
             warn_counts=None,  # auto-initialized by __post_init__
         )
@@ -181,7 +181,7 @@ def test_cold_start_pattern_docstring_example() -> None:
         momentum=jnp.zeros_like(positions),
         force=initial_forces,
         mass=masses,
-        key=jax.random.PRNGKey(0),
+        rng=jax.random.PRNGKey(0),
         cap_count=jnp.int32(0),
         warn_counts=None,  # auto-initialized by __post_init__
     )
@@ -235,7 +235,7 @@ def test_cold_start_batch_2water_1ps(
     # Create energy function (one per system; we'll use the first box for all)
     box_vec = box[0]  # Use first system's box (identical in all)
     displacement_fn, _ = pbc.create_periodic_space(box_vec)
-    sys_dict = _prolix_params_pure_water(n_waters)
+    sys_dict = _proxide_params_pure_water(n_waters)
     energy_fn_unbatched = system.make_energy_fn(
         displacement_fn, sys_dict, box=box_vec, use_pbc=True, implicit_solvent=False,
         pme_grid_points=32, pme_alpha=0.34, cutoff_distance=9.0, strict_parameterization=False
@@ -254,7 +254,7 @@ def test_cold_start_batch_2water_1ps(
         momentum=jnp.zeros_like(positions),
         force=initial_forces,
         mass=mass,
-        key=key,
+        rng=key,
         cap_count=jnp.zeros(n_systems, dtype=jnp.int32),
         warn_counts=None,
     )
@@ -303,7 +303,7 @@ def test_cold_start_batch_10water_50ps() -> None:
     # Create energy function
     box_vec = box[0]
     displacement_fn, _ = pbc.create_periodic_space(box_vec)
-    sys_dict = _prolix_params_pure_water(n_waters)
+    sys_dict = _proxide_params_pure_water(n_waters)
     energy_fn_unbatched = system.make_energy_fn(
         displacement_fn, sys_dict, box=box_vec, use_pbc=True, implicit_solvent=False,
         pme_grid_points=32, pme_alpha=0.34, cutoff_distance=9.0, strict_parameterization=False
@@ -321,7 +321,7 @@ def test_cold_start_batch_10water_50ps() -> None:
         momentum=jnp.zeros_like(positions),
         force=initial_forces,
         mass=mass,
-        key=key,
+        rng=key,
         cap_count=jnp.zeros(n_systems, dtype=jnp.int32),
         warn_counts=None,  # Auto-initialized by __post_init__
     )

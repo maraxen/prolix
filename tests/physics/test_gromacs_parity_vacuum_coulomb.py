@@ -1,9 +1,9 @@
 """Gate 1A: Vacuum-Coulomb force parity validation (frozen snapshot).
 
-Validates prolix TIP3P SETTLE forces against analytical vacuum-Coulomb expectations
+Validates proxide TIP3P SETTLE forces against analytical vacuum-Coulomb expectations
 on a frozen 64-water snapshot. No PME grid, no LJ, pure Coulomb interactions.
 
-This is the hard gate: relative RMSD must be <1e-3 for prolix force implementation.
+This is the hard gate: relative RMSD must be <1e-3 for proxide force implementation.
 If this gate fails, the SETTLE + energy_fn force pipeline has a critical bug.
 
 Note: No GROMACS reference trajectories are available in the repo; this test validates
@@ -25,7 +25,7 @@ from jax_md import space
 from prolix.physics import pbc, system
 from prolix.physics.water_models import WaterModelType, get_water_params
 from prolix.simulate import BOLTZMANN_KCAL
-from .test_explicit_langevin_tip3p_parity import _grid_water_positions, _prolix_params_pure_water
+from .test_explicit_langevin_tip3p_parity import _grid_water_positions, _proxide_params_pure_water
 
 
 def _analytical_coulomb_force(
@@ -108,7 +108,7 @@ def test_frozen_64w_vacuum_coulomb_forces_relative_rmsd() -> None:
     positions_a, box_edge = _grid_water_positions(n_waters, spacing_angstrom=5.0)
 
     # For pure vacuum (no PBC), use free space
-    sys_dict = _prolix_params_pure_water(n_waters)
+    sys_dict = _proxide_params_pure_water(n_waters)
 
     # Override exclusion_mask to allow all interactions (pure water has no bonded topology)
     # Note: exclusion_mask in the analytical function is boolean (True=exclude),
@@ -134,11 +134,11 @@ def test_frozen_64w_vacuum_coulomb_forces_relative_rmsd() -> None:
         strict_parameterization=False,
     )
 
-    # Compute prolix forces via gradient
+    # Compute proxide forces via gradient
     pos_jax = jnp.array(positions_a, dtype=jnp.float64)
-    energy_prolix = float(energy_fn_vacuum(pos_jax))
-    f_prolix = -jax.grad(energy_fn_vacuum)(pos_jax)
-    f_prolix_arr = np.asarray(f_prolix, dtype=np.float64)
+    energy_proxide = float(energy_fn_vacuum(pos_jax))
+    f_proxide = -jax.grad(energy_fn_vacuum)(pos_jax)
+    f_proxide_arr = np.asarray(f_proxide, dtype=np.float64)
 
     # Compute analytical Coulomb forces
     charges_a = np.array(sys_dict["charges"], dtype=np.float64)
@@ -152,7 +152,7 @@ def test_frozen_64w_vacuum_coulomb_forces_relative_rmsd() -> None:
     )
 
     # Compute relative RMSD
-    diff = f_prolix_arr - f_analytical
+    diff = f_proxide_arr - f_analytical
     rmse_absolute = float(np.sqrt(np.mean(diff ** 2)))
 
     # Relative RMSD: normalize by RMS force magnitude
@@ -161,7 +161,7 @@ def test_frozen_64w_vacuum_coulomb_forces_relative_rmsd() -> None:
 
     # Log details for debugging
     print(f"\n64-water vacuum Coulomb force validation:")
-    print(f"  Prolix energy: {energy_prolix:.6f} kcal/mol")
+    print(f"  Prolix energy: {energy_proxide:.6f} kcal/mol")
     print(f"  Analytical force RMS: {f_rms_analytical:.6f} kcal/mol/Å")
     print(f"  Absolute RMSE: {rmse_absolute:.8f} kcal/mol/Å")
     print(f"  Relative RMSE: {rmse_relative:.8e}")
@@ -184,7 +184,7 @@ def test_frozen_64w_vacuum_coulomb_forces_per_atom_magnitude() -> None:
     n_waters = 64
     positions_a, box_edge = _grid_water_positions(n_waters, spacing_angstrom=5.0)
 
-    sys_dict = _prolix_params_pure_water(n_waters)
+    sys_dict = _proxide_params_pure_water(n_waters)
 
     # Override exclusion_mask to allow all interactions
     n_atoms = n_waters * 3
@@ -208,11 +208,11 @@ def test_frozen_64w_vacuum_coulomb_forces_per_atom_magnitude() -> None:
     )
 
     pos_jax = jnp.array(positions_a, dtype=jnp.float64)
-    f_prolix = -jax.grad(energy_fn)(pos_jax)
-    f_prolix_arr = np.asarray(f_prolix, dtype=np.float64)
+    f_proxide = -jax.grad(energy_fn)(pos_jax)
+    f_proxide_arr = np.asarray(f_proxide, dtype=np.float64)
 
     # Compute per-atom force magnitudes
-    f_mags = np.linalg.norm(f_prolix_arr, axis=1)
+    f_mags = np.linalg.norm(f_proxide_arr, axis=1)
 
     # Sanity checks
     assert np.all(np.isfinite(f_mags)), "Some forces are NaN or Inf"
@@ -242,7 +242,7 @@ def test_frozen_4w_vacuum_coulomb_vs_analytical() -> None:
     n_waters = 4
     positions_a, box_edge = _grid_water_positions(n_waters, spacing_angstrom=10.0)
 
-    sys_dict = _prolix_params_pure_water(n_waters)
+    sys_dict = _proxide_params_pure_water(n_waters)
 
     # Override exclusion_mask to allow all interactions
     n_atoms = n_waters * 3
@@ -266,8 +266,8 @@ def test_frozen_4w_vacuum_coulomb_vs_analytical() -> None:
     )
 
     pos_jax = jnp.array(positions_a, dtype=jnp.float64)
-    f_prolix = -jax.grad(energy_fn)(pos_jax)
-    f_prolix_arr = np.asarray(f_prolix, dtype=np.float64)
+    f_proxide = -jax.grad(energy_fn)(pos_jax)
+    f_proxide_arr = np.asarray(f_proxide, dtype=np.float64)
 
     charges_a = np.array(sys_dict["charges"], dtype=np.float64)
     # Note: make_energy_fn uses exclusion_mask as binary (0=exclude, 1=allow),
@@ -279,7 +279,7 @@ def test_frozen_4w_vacuum_coulomb_vs_analytical() -> None:
         positions_a, charges_a, coulomb_constant=332.0, exclusion_mask=exclusion_mask_inverted
     )
 
-    diff = f_prolix_arr - f_analytical
+    diff = f_proxide_arr - f_analytical
     rmse_absolute = float(np.sqrt(np.mean(diff ** 2)))
     f_rms_analytical = float(np.sqrt(np.mean(f_analytical ** 2)))
     rmse_relative = rmse_absolute / max(f_rms_analytical, 1e-10)
@@ -288,7 +288,7 @@ def test_frozen_4w_vacuum_coulomb_vs_analytical() -> None:
     print(f"  Relative RMSE: {rmse_relative:.8e}")
     print(f"  Prolix vs analytical forces (per-atom):")
     for i in range(n_waters * 3):
-        print(f"    Atom {i}: prolix={np.linalg.norm(f_prolix_arr[i]):.6f}, "
+        print(f"    Atom {i}: proxide={np.linalg.norm(f_proxide_arr[i]):.6f}, "
               f"analytical={np.linalg.norm(f_analytical[i]):.6f}")
 
     assert rmse_relative < 1e-3, (
