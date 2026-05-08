@@ -93,7 +93,7 @@ def compute_dihedral_angles(
     r_k = r[indices[:, 2]]
     r_l = r[indices[:, 3]]
 
-    b0 = jax.vmap(displacement_fn)(r_j, r_i)
+    b0 = jax.vmap(displacement_fn)(r_i, r_j)
     b1 = jax.vmap(displacement_fn)(r_k, r_j)
     b2 = jax.vmap(displacement_fn)(r_l, r_k)
 
@@ -134,8 +134,8 @@ def make_dihedral_energy_fn(
         # phi is (N_dih,) -> broadcast to (N_dih, 1)
         phi = phi[:, jnp.newaxis]
 
-        # E = sum_i sum_j 0.5 * k_ij * (1 + cos(n_ij * phi_i - phase_ij))
-        e_total = jnp.sum(0.5 * k * (1.0 + jnp.cos(n * phi - phase)))
+        # E = sum_i sum_j k_ij * (1 + cos(n_ij * phi_i - phase_ij))
+        e_total = jnp.sum(k * (1.0 + jnp.cos(n * phi - phase)))
         # jax.debug.print("DEBUG dihedral_fn: e_total={e}", e=e_total)
         return e_total
 
@@ -173,7 +173,7 @@ def make_harmonic_improper_energy_fn(
             k = improper_params[:, :, 2]
             phi = compute_dihedral_angles(r, improper_indices, displacement_fn)
             phi = phi[:, jnp.newaxis]
-            return jnp.sum(0.5 * k * (1.0 + jnp.cos(n * phi - phase)))
+            return jnp.sum(k * (1.0 + jnp.cos(n * phi - phase)))
         else:
             # Harmonic-style impropers: [k, phi0]
             k = improper_params[:, :, 0]

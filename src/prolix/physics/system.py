@@ -107,7 +107,7 @@ def make_energy_fn(
   box, use_pbc = kwargs.get("box"), kwargs.get("use_pbc", False)
   default_pme_alpha = 0.34 if use_pbc else 0.0
   pme_alpha = kwargs.get("pme_alpha", default_pme_alpha)
-  cutoff = kwargs.get("cutoff_distance", 9.0)
+  cutoff = kwargs.get("cutoff_distance", kwargs.get("cutoff", 9.0))
   COULOMB_CONSTANT = 332.0637
 
   # Sparse Non-bonded Setup
