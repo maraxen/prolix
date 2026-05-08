@@ -44,28 +44,36 @@ def make_energy_fn(
   angle_energy_fn_bound = lambda r, n=None: _angle_energy_fn(r, angle_prm)
   
   dih_idx = getattr(system, "dihedrals", None)
-  if dih_idx is None:
+  if dih_idx is None or dih_idx.size == 0:
       dih_idx = getattr(system, "proper_dihedrals", None)
       
   dih_prm = getattr(system, "dihedral_params", None)
-  if dih_prm is None:
+  if dih_prm is None or dih_prm.size == 0:
       dih_prm = getattr(system, "proper_dihedral_params", None)
   
-  if dih_idx is not None and dih_prm is not None:
-      dih_idx, dih_prm = _sba(dih_idx, dih_prm, 4, 3)
-      _dihedral_energy_fn = bonded.make_dihedral_energy_fn(displacement_fn, dih_idx)
-      dihedral_energy_fn_bound = lambda r, n=None: _dihedral_energy_fn(r, dih_prm)
-  else:
-      dihedral_energy_fn_bound = lambda r, n=None: 0.0
-
   imp_idx = getattr(system, "impropers", None)
+  if imp_idx is None or imp_idx.size == 0:
+      imp_idx = getattr(system, "improper_dihedrals", None)
+
   imp_prm = getattr(system, "improper_params", None)
-  if imp_idx is not None:
-      imp_idx, imp_prm = _sba(imp_idx, imp_prm, 4, 3)
-      _improper_energy_fn = bonded.make_dihedral_energy_fn(displacement_fn, imp_idx)
-      improper_energy_fn_bound = lambda r, n=None: _improper_energy_fn(r, imp_prm)
-  else:
-      improper_energy_fn_bound = lambda r, n=None: 0.0
+  if imp_prm is None or imp_prm.size == 0:
+      imp_prm = getattr(system, "improper_dihedral_params", None)
+  
+  _dihedral_energy_fn = None
+  if dih_idx is not None and dih_idx.size > 0:
+      _dihedral_energy_fn = bonded.make_dihedral_energy_fn(displacement_fn, dih_idx)
+  
+  _improper_energy_fn = None
+  if imp_idx is not None and imp_idx.size > 0:
+      # Selection logic for harmonic vs periodic impropers
+      # With 3D params, we check the last dimension
+      if imp_prm is not None and imp_prm.shape[-1] == 2:
+          _improper_energy_fn = bonded.make_harmonic_improper_energy_fn(displacement_fn, imp_idx)
+      else:
+          _improper_energy_fn = bonded.make_dihedral_energy_fn(displacement_fn, imp_idx)
+          
+  dihedral_energy_fn_bound = lambda r, n=None: _dihedral_energy_fn(r, dih_prm) if _dihedral_energy_fn is not None else 0.0
+  improper_energy_fn_bound = lambda r, n=None: _improper_energy_fn(r, imp_prm) if _improper_energy_fn is not None else 0.0
   
   ub_idx, ub_prm = _sba(getattr(system, "urey_bradley_bonds", None), getattr(system, "urey_bradley_params", None), 2, 2)
   _ub_energy_fn = bonded.make_bond_energy_fn(displacement_fn, ub_idx)
@@ -82,6 +90,20 @@ def make_energy_fn(
       cmap_energy_fn_bound = lambda r, n=None: 0.0
 
   charges, sigmas, epsilons = system.charges, jnp.maximum(system.sigmas, 1e-6), system.epsilons
+
+  # Radii handling
+  radii = getattr(system, "radii", None)
+  scaled_radii = getattr(system, "scaled_radii", None)
+
+  if radii is None or radii.size == 0:
+      from proxide import assign_mbondi2_radii, assign_obc2_scaling_factors
+      # Ensure we have atom names available
+      atom_names = getattr(system, "atom_names", None)
+      if atom_names is not None:
+           radii = jnp.array(assign_mbondi2_radii(list(atom_names), system.bonds))
+           scaled_radii = jnp.array(assign_obc2_scaling_factors(list(atom_names)))
+
+  if radii is None: radii = jnp.ones_like(charges)
   box, use_pbc = kwargs.get("box"), kwargs.get("use_pbc", False)
   default_pme_alpha = 0.34 if use_pbc else 0.0
   pme_alpha = kwargs.get("pme_alpha", default_pme_alpha)
@@ -89,12 +111,44 @@ def make_energy_fn(
   COULOMB_CONSTANT = 332.0637
 
   # Sparse Non-bonded Setup
+  from prolix.physics import neighbor_list
   from prolix.physics.optimization import (
     chunked_coulomb_energy,
     chunked_coulomb_energy_nl,
+    chunked_lj_energy,
     chunked_lj_energy_nl,
   )
-  
+
+  excl_idx = getattr(system, "excl_indices", None)
+  n_atoms = system.charges.shape[0]
+
+  # Build exception pair energy fn from ExclusionSpec (explicit AMBER 1-4 overrides)
+  _exception_energy_fn = None
+  if exclusion_spec is not None and exclusion_spec.exception_pairs.shape[0] > 0:
+      _exception_energy_fn = bonded.make_exception_pair_energy_fn(
+          displacement_fn,
+          exclusion_spec.exception_pairs,
+          exclusion_spec.exception_sigmas,
+          exclusion_spec.exception_epsilons,
+          exclusion_spec.exception_chargeprods,
+      )
+  exception_energy_fn_bound = lambda r, n=None: _exception_energy_fn(r) if _exception_energy_fn is not None else 0.0
+
+  if exclusion_spec is not None and (excl_idx is None or excl_idx.size == 0):
+      excl_idx, excl_sv, excl_se = neighbor_list.map_exclusions_to_dense_padded(exclusion_spec, max_exclusions=32)
+  else:
+      excl_sv = getattr(system, "excl_scales_vdw", None)
+      excl_se = getattr(system, "excl_scales_elec", None)
+      if excl_idx is None:
+          excl_idx = jnp.zeros((n_atoms, 0), dtype=jnp.int32)
+      if excl_sv is None:
+          excl_sv = jnp.zeros_like(excl_idx, dtype=jnp.float32)
+      if excl_se is None:
+          excl_se = jnp.zeros_like(excl_idx, dtype=jnp.float32)
+
+  # jax.debug.print("DEBUG exclusions: excl_idx shape={s}", s=excl_idx.shape)
+  # if excl_idx.size > 0:
+  #     jax.debug.print("DEBUG min/max scales_vdw: {min}, {max}", min=jnp.min(excl_sv), max=jnp.max(excl_sv))
   # SPME Setup
   _spme = None
   if use_pbc and box is not None:
@@ -103,128 +157,12 @@ def make_energy_fn(
     gs = kwargs.get("pme_grid_spacing") or float(jnp.mean(box_arr.astype(jnp.float64))) / float(max(int(pme_grid), 1))
     _spme = pme.make_spme_energy_fn(box_arr, alpha=float(pme_alpha), grid_spacing=gs)
 
-  # Sparse Correction Function
-  def _compute_sparse_corrections(r, qi, si, ei, excl_indices=None, excl_scales_vdw=None, excl_scales_elec=None, exclusion_spec=None):
-    total_ev = total_ed = total_er = 0.0
-
-    def pair_corr(i, j, sv, se):
-      dr = displacement_fn(r[i], r[j])
-      d = jnp.sqrt(jnp.sum(dr**2) + 1e-12)
-      ds = jnp.where(d < 1e-10, 1.0, d)
-      si_j, ei_j = 0.5*(si[i]+si[j]), jnp.sqrt(ei[i]*ei[j])
-      
-      inv_ds = 1.0 / ds
-      
-      # DEBUG 1-4
-      # jax.debug.print("DEBUG pair_corr: i={i} j={j} qi={qi} qj={qj} ds={ds}", i=i, j=j, qi=qi[i], qj=qi[j], ds=ds)
-
-      inv_r6 = (si_j * inv_ds)**6
-      ev = 4.0 * ei_j * (inv_r6**2 - inv_r6)
-      
-      erfc_val = jax.scipy.special.erfc(pme_alpha * ds)
-      erf_val = jax.scipy.special.erf(pme_alpha * ds)
-      
-      ed = COULOMB_CONSTANT * (qi[i] * qi[j] * inv_ds) * erfc_val
-      er = COULOMB_CONSTANT * (qi[i] * qi[j] * inv_ds) * erf_val
-      
-      # Mask out i=j case and apply cutoff
-      mask = (i != j) & (d > 1e-10)
-      if cutoff > 0:
-          mask &= (ds < cutoff)
-          
-      ev = jnp.where(mask, ev, 0.0)
-      # DEBUG: print first few ev values if they are suspiciously large
-      # jax.debug.print("DEBUG pair_corr: i={i} j={j} ev={ev} ed={ed}", i=i, j=j, ev=ev, ed=ed)
-      jax.debug.print("DEBUG pair_corr: COULOMB_CONSTANT={c}", c=COULOMB_CONSTANT)
-      
-      ed = jnp.where(mask, ed, 0.0)
-      er = jnp.where(mask, er, 0.0)
-      
-      return (1.0-sv)*ev, (1.0-se)*ed, (1.0-se)*er
-
-    # 1. Base corrections from system.excl_indices (N, max_excl)
-    if excl_indices is not None and excl_indices.shape[0] > 0:
-        def _compute_excl(i, j_idx, sv, se):
-            return jnp.where(j_idx >= 0, pair_corr(i, j_idx, sv, se)[0], 0.0), \
-                   jnp.where(j_idx >= 0, pair_corr(i, j_idx, sv, se)[1], 0.0), \
-                   jnp.where(j_idx >= 0, pair_corr(i, j_idx, sv, se)[2], 0.0)
-
-        v_corr = jax.vmap(jax.vmap(_compute_excl, (None, 0, None, None)), (0, 0, 0, 0))
-        ev, ed, er = v_corr(jnp.arange(r.shape[0]), excl_indices, excl_scales_vdw, excl_scales_elec)
-        total_ev += 0.5 * jnp.sum(ev)
-        total_ed += 0.5 * jnp.sum(ed)
-        total_er += 0.5 * jnp.sum(er)
-
-    # 2. Pair-list exclusions (M, 2)
-    if exclusion_spec is not None:
-        def _compute_pairs(pairs, sv, se):
-            if pairs is None or pairs.shape[0] == 0:
-                return 0.0, 0.0, 0.0
-            ev, ed, er = jax.vmap(lambda p: pair_corr(p[0], p[1], sv, se))(pairs)
-            return jnp.sum(ev), jnp.sum(ed), jnp.sum(er)
-        
-        ev1, ed1, er1 = _compute_pairs(getattr(exclusion_spec, "idx_12_13", None), 0.0, 0.0)
-        jax.debug.print("DEBUG: 12_13 VdW={v} Elec={e}", v=ev1, e=ed1)
-        total_ev += ev1; total_ed += ed1; total_er += er1
-        
-        scale_14_vdw = getattr(exclusion_spec, "scale_14_vdw", 0.0)
-        scale_14_elec = getattr(exclusion_spec, "scale_14_elec", 0.0)
-        jax.debug.print("DEBUG: 1-4 Scales: VdW={v} Elec={e}", v=scale_14_vdw, e=scale_14_elec)
-        ev2, ed2, er2 = _compute_pairs(getattr(exclusion_spec, "idx_14", None),
-                                       scale_14_vdw,
-                                       scale_14_elec)
-        jax.debug.print("DEBUG: 14 VdW={v} Elec={e}", v=ev2, e=ed2)
-        total_ev += ev2; total_ed += ed2; total_er += er2
-
-    # 3. Dense fallback
-    if getattr(system, "dense_excl_scale_vdw", None) is not None:
-        dmv, dme = system.dense_excl_scale_vdw, system.dense_excl_scale_elec
-        dr_m = jax.vmap(jax.vmap(displacement_fn, (None, 0)), (0, None))(r, r)
-        ds = jnp.sqrt(jnp.sum(dr_m**2, axis=-1) + 1e-12)
-        q_ij = qi[:, None] * qi[None, :]
-        sig_ij = 0.5 * (si[:, None] + si[None, :])
-        eps_ij = jnp.sqrt(ei[:, None] * ei[None, :])
-        md = 1.0 - jnp.eye(r.shape[0])
-        c_mask = (ds < cutoff) if cutoff > 0 else jnp.ones_like(ds, dtype=bool)
-        if dmv is not None:
-            total_ev += 0.5 * jnp.sum(4.0 * eps_ij * ((sig_ij/ds)**12 - (sig_ij/ds)**6) * (1.0 - dmv) * md * c_mask)
-        if dme is not None:
-            total_ed += 0.5 * jnp.sum(COULOMB_CONSTANT * (q_ij/ds) * jax.scipy.special.erfc(pme_alpha * ds) * (1.0 - dme) * md * c_mask)
-            total_er += 0.5 * jnp.sum(COULOMB_CONSTANT * (q_ij/ds) * jax.scipy.special.erf(pme_alpha * ds) * (1.0 - dme) * md)
-            
-    return total_ev, total_ed, total_er
-
   def lj_energy_fn_bound(r, neighbor=None):
     if neighbor is not None:
         nb_idx = getattr(neighbor, "idx", neighbor)
-        e_lj = chunked_lj_energy_nl(r, sigmas, epsilons, nb_idx, displacement_fn, cutoff)
+        e_lj = chunked_lj_energy_nl(r, sigmas, epsilons, excl_idx, excl_sv, nb_idx, displacement_fn, cutoff, 128)
     else:
-        dr = space.map_product(displacement_fn)(r, r)
-        dist = jnp.sqrt(jnp.sum(dr**2, axis=-1) + 1e-12)
-        
-        # Mask out diagonal
-        mask = (1.0 - jnp.eye(r.shape[0]))
-        # Use a safe distance for powers
-        dist_safe = jnp.where(dist < 1e-10, 1.0, dist)
-        
-        if cutoff > 0: mask = mask * (dist < cutoff)
-        
-        sig_ij = 0.5 * (sigmas[:, None] + sigmas[None, :])
-        eps_ij = jnp.sqrt(epsilons[:, None] * epsilons[None, :])
-        
-        inv_r6 = jnp.where(mask > 0, (sig_ij / dist_safe)**6, 0.0)
-        # Mask the energy where distance was zero (diagonal)
-        e_lj_vals = 4.0 * eps_ij * (inv_r6**2 - inv_r6)
-        e_lj = 0.5 * jnp.sum(e_lj_vals * mask)
-    
-    # Apply Sparse Corrections
-    c_vdw, c_elec_d, _ = _compute_sparse_corrections(r, charges, sigmas, epsilons,
-                                             excl_indices=getattr(system, "excl_indices", None),
-                                             excl_scales_vdw=getattr(system, "excl_scales_vdw", None),
-                                             excl_scales_elec=getattr(system, "excl_scales_elec", None),
-                                             exclusion_spec=exclusion_spec)
-    jax.debug.print("DEBUG: LJ={lj} Corr={c}", lj=e_lj, c=c_vdw)
-    e_lj -= c_vdw
+        e_lj = chunked_lj_energy(r, sigmas, epsilons, excl_idx, excl_sv, displacement_fn, cutoff, 128)
     
     if use_pbc and box is not None:
         mask = getattr(system, "atom_mask", jnp.ones(r.shape[0], bool))
@@ -233,51 +171,44 @@ def make_energy_fn(
 
   def electrostatics_energy_fn_bound(r, neighbor=None):
     if implicit_solvent:
-        radii = getattr(system, "radii", None)
-        if radii is None: radii = jnp.ones_like(charges)
+        # OBC2 descreening MUST include 1-2 and 1-3 neighbors.
+        # Currently we use a dense self-interaction mask (1.0 - eye).
+        # TODO: Move to sparse neighbor-list based descreening for large systems.
+        n_atoms = r.shape[0]
+        gb_mask = 1.0 - jnp.eye(n_atoms)
+            
         e_gb, born_radii = generalized_born.compute_gb_energy(
             r, charges, radii,
-            mask=None,
+            mask=gb_mask,
             energy_mask=None,
-            scaled_radii=getattr(system, "scaled_radii", None)
+            scaled_radii=scaled_radii
         )
         if neighbor is not None:
             nb_idx = getattr(neighbor, "idx", neighbor)
-            e_direct = chunked_coulomb_energy_nl(r, charges, nb_idx, displacement_fn, pme_alpha, COULOMB_CONSTANT, cutoff)
+            e_direct = chunked_coulomb_energy_nl(r, charges, excl_idx, excl_se, nb_idx, displacement_fn, pme_alpha, COULOMB_CONSTANT, cutoff, 128)
         else:
-            e_direct = chunked_coulomb_energy(r, charges, displacement_fn, pme_alpha, COULOMB_CONSTANT, cutoff)
+            e_direct = chunked_coulomb_energy(r, charges, excl_idx, excl_se, displacement_fn, pme_alpha, COULOMB_CONSTANT, cutoff, 128)
             
-        _, c_elec_d, _ = _compute_sparse_corrections(r, charges, sigmas, epsilons,
-                                                    excl_indices=getattr(system, "excl_indices", None),
-                                                    excl_scales_vdw=getattr(system, "excl_scales_vdw", None),
-                                                    excl_scales_elec=getattr(system, "excl_scales_elec", None),
-                                                    exclusion_spec=exclusion_spec)
-        e_direct -= c_elec_d
         return e_gb, e_direct, born_radii
+
     if neighbor is not None:
         nb_idx = getattr(neighbor, "idx", neighbor)
-        e_direct = chunked_coulomb_energy_nl(r, charges, nb_idx, displacement_fn, pme_alpha, COULOMB_CONSTANT, cutoff)
+        e_direct = chunked_coulomb_energy_nl(r, charges, excl_idx, excl_se, nb_idx, displacement_fn, pme_alpha, COULOMB_CONSTANT, cutoff, 128)
     else:
-        e_direct = chunked_coulomb_energy(r, charges, displacement_fn, pme_alpha, COULOMB_CONSTANT, cutoff)
-
-    _, c_elec_d, _ = _compute_sparse_corrections(r, charges, sigmas, epsilons,
-                                                excl_indices=getattr(system, "excl_indices", None),
-                                                excl_scales_vdw=getattr(system, "excl_scales_vdw", None),
-                                                excl_scales_elec=getattr(system, "excl_scales_elec", None),
-                                                exclusion_spec=exclusion_spec)
-    e_direct -= c_elec_d
+        e_direct = chunked_coulomb_energy(r, charges, excl_idx, excl_se, displacement_fn, pme_alpha, COULOMB_CONSTANT, cutoff, 128)
 
     if _spme:
       mask = getattr(system, "atom_mask", jnp.ones(r.shape[0], bool))
       e_direct += _spme(r, charges, mask) + pme.spme_background_energy(charges, mask, pme_alpha, jnp.asarray(box))
     return e_direct
 
-
-
   def total_energy(r, neighbor=None, **kwargs_run):
     elec = electrostatics_energy_fn_bound(r, neighbor)
     if implicit_solvent:
         e_elec = elec[0] + elec[1]
+        born_radii = elec[2]
+        e_ace = jnp.sum(jnp.where(getattr(system, "atom_mask", jnp.ones(r.shape[0], bool)), generalized_born.compute_ace_nonpolar_energy(radii, born_radii), 0.0))
+        e_elec += e_ace
     else:
         e_elec = elec
     return (
@@ -288,6 +219,7 @@ def make_energy_fn(
         improper_energy_fn_bound(r, neighbor) +
         cmap_energy_fn_bound(r, neighbor) +
         lj_energy_fn_bound(r, neighbor) +
+        exception_energy_fn_bound(r, neighbor) +
         e_elec
     )
 
@@ -306,6 +238,7 @@ def make_energy_fn(
           "urey_bradley": ub_energy_fn_bound,
           "cmap": cmap_energy_fn_bound,
           "lj": lj_energy_fn_bound,
+          "exception": exception_energy_fn_bound,
           "electrostatics": electrostatics_energy_fn_bound,
           "nonpolar": _nonpolar_fn,
           "total": total_energy,
@@ -346,8 +279,17 @@ def make_energy_fn_pure(
 
   bond_energy_fn = bonded.make_bond_energy_fn(displacement_fn, bond_idx)
   angle_energy_fn = bonded.make_angle_energy_fn(displacement_fn, angle_idx)
-  dihedral_energy_fn = bonded.make_dihedral_energy_fn(displacement_fn, dih_idx)
-  improper_energy_fn = bonded.make_dihedral_energy_fn(displacement_fn, imp_idx)
+  
+  _dihedral_energy_fn = None
+  if physics_system.dihedrals is not None:
+      _dihedral_energy_fn = bonded.make_dihedral_energy_fn(displacement_fn, dih_idx)
+  dihedral_energy_fn = lambda r, p: _dihedral_energy_fn(r, p) if _dihedral_energy_fn is not None else 0.0
+      
+  _improper_energy_fn = None
+  if physics_system.impropers is not None:
+      _improper_energy_fn = bonded.make_dihedral_energy_fn(displacement_fn, imp_idx)
+  improper_energy_fn = lambda r, p: _improper_energy_fn(r, p) if _improper_energy_fn is not None else 0.0
+
   ub_energy_fn = bonded.make_bond_energy_fn(displacement_fn, ub_idx)
 
   COULOMB_CONSTANT = 332.0637
@@ -372,48 +314,31 @@ def make_energy_fn_pure(
     )
     
     # Non-bonded terms
+    excl_idx = physics_system.excl_indices
+    excl_sv, excl_se = physics_system.excl_scales_vdw, physics_system.excl_scales_elec
+    
     if neighbor is not None:
       nb_idx = getattr(neighbor, "idx", neighbor)
-      e_lj = chunked_lj_energy_nl(r, sigmas_p, epsilons_p, nb_idx, displacement_fn, cutoff_distance, tile_size)
-      e_direct = chunked_coulomb_energy_nl(r, charges_p, nb_idx, displacement_fn, pme_alpha, COULOMB_CONSTANT, cutoff_distance, tile_size)
+      e_lj = chunked_lj_energy_nl(r, sigmas_p, epsilons_p, excl_idx, excl_sv, nb_idx, displacement_fn, cutoff_distance, tile_size)
+      e_direct = chunked_coulomb_energy_nl(r, charges_p, excl_idx, excl_se, nb_idx, displacement_fn, pme_alpha, COULOMB_CONSTANT, cutoff_distance, tile_size)
     else:
-      e_lj = chunked_lj_energy(r, sigmas_p, epsilons_p, displacement_fn, cutoff_distance, tile_size)
-      e_direct = chunked_coulomb_energy(r, charges_p, displacement_fn, pme_alpha, COULOMB_CONSTANT, cutoff_distance, tile_size)
+      e_lj = chunked_lj_energy(r, sigmas_p, epsilons_p, excl_idx, excl_sv, displacement_fn, cutoff_distance, tile_size)
+      e_direct = chunked_coulomb_energy(r, charges_p, excl_idx, excl_se, displacement_fn, pme_alpha, COULOMB_CONSTANT, cutoff_distance, tile_size)
       
     # PME Reciprocal
     spme_fn = lambda pos, q, m: pme.spme_energy_with_forces(pos, q, m, box_arr, grid_dims, pme_alpha, 4)
     e_recip = spme_fn(r, charges_p, physics_system.atom_mask) + pme.spme_background_energy(charges_p, physics_system.atom_mask, pme_alpha, box_arr)
     
-    # Topological Corrections
-    e_corr_vdw = e_corr_elec_direct = e_corr_elec_recip = 0.0
-    excl_idx, excl_sv, excl_se = physics_system.excl_indices, physics_system.excl_scales_vdw, physics_system.excl_scales_elec
-    if excl_idx is not None and excl_idx.shape[0] > 0:
-      def pair_corr(ri, rj, si, sj, ei, ej, qi, qj, sv, se):
-        dr = displacement_fn(ri, rj); d = jnp.sqrt(jnp.sum(dr**2) + 1e-12); ds = d + 1e-6
-        s, e = 0.5*(si+sj), jnp.sqrt(ei*ej)
-        ev = 4.0*e*((s/ds)**12-(s/ds)**6)
-        ed = COULOMB_CONSTANT*(qi*qj/ds)*jax.scipy.special.erfc(pme_alpha*ds)
-        er = COULOMB_CONSTANT*(qi*qj/ds)*jax.scipy.special.erf(pme_alpha*ds)
-        if cutoff_distance > 0:
-            ev = jnp.where(ds < cutoff_distance, ev, 0.0)
-            ed = jnp.where(ds < cutoff_distance, ed, 0.0)
-        return (1.0-sv)*ev, (1.0-se)*ed, (1.0-se)*er
-      v_corr = jax.vmap(jax.vmap(pair_corr, (None,0,None,0,None,0,None,0,0,0)), (0,0,0,0,0,0,0,0,0,0))
-      ev, ed, er = v_corr(r, r[jnp.where(excl_idx>=0, excl_idx, 0)], sigmas_p, sigmas_p[jnp.where(excl_idx>=0, excl_idx, 0)], epsilons_p, epsilons_p[jnp.where(excl_idx>=0, excl_idx, 0)], charges_p, charges_p[jnp.where(excl_idx>=0, excl_idx, 0)], excl_sv, excl_se)
-      m = excl_idx >= 0; e_corr_vdw += 0.5*jnp.sum(jnp.where(m, ev, 0.0)); e_corr_elec_direct += 0.5*jnp.sum(jnp.where(m, ed, 0.0)); e_corr_elec_recip += 0.5*jnp.sum(jnp.where(m, er, 0.0))
-
-    if physics_system.dense_excl_scale_vdw is not None or physics_system.dense_excl_scale_elec is not None:
-      dmv, dme = physics_system.dense_excl_scale_vdw, physics_system.dense_excl_scale_elec
-      dr_m = jax.vmap(jax.vmap(displacement_fn, (None,0)), (0,None))(r, r); dist = jnp.sqrt(jnp.sum(dr_m**2, axis=-1)+1e-12); ds = dist+1e-6
-      q_ij, sig_ij, eps_ij = charges_p[:,None]*charges_p[None,:], 0.5*(sigmas_p[:,None]+sigmas_p[None,:]), jnp.sqrt(epsilons_p[:,None]*epsilons_p[None,:]); md = 1.0-jnp.eye(r.shape[0])
-      c_mask = (ds < cutoff_distance) if cutoff_distance > 0 else jnp.ones_like(ds, dtype=bool)
-      if dmv is not None: e_corr_vdw += 0.5*jnp.sum(4.0*eps_ij*((sig_ij/ds)**12-(sig_ij/ds)**6)*(1.0-dmv)*md*c_mask)
-      if dme is not None:
-        e_corr_elec_direct += 0.5*jnp.sum(COULOMB_CONSTANT*(q_ij/ds)*jax.scipy.special.erfc(pme_alpha*ds)*(1.0-dme)*md*c_mask)
-        e_corr_elec_recip += 0.5*jnp.sum(COULOMB_CONSTANT*(q_ij/ds)*jax.scipy.special.erf(pme_alpha*ds)*(1.0-dme)*md)
+    # ACE nonpolar term if implicit solvent
+    e_ace = 0.0
+    if hasattr(physics_system, "implicit_solvent") and physics_system.implicit_solvent:
+        # We need born radii which require GB, but here we are in a simplified pure impl.
+        # Assuming for pure implementation GB calculation is handled or ACE uses a placeholder.
+        # Based on current structure, might need to call GB energy here or pass it if precomputed.
+        pass
 
     e_tail = explicit_corrections.lj_dispersion_tail_energy(box_arr, sigmas_p, epsilons_p, cutoff_distance, physics_system.atom_mask)
-    return e_total + (e_lj - e_corr_vdw) + (e_direct - e_corr_elec_direct) + (e_recip - e_corr_elec_recip) + e_tail
+    return e_total + e_lj + e_direct + e_recip + e_tail + e_ace
 
   params = DifferentiableParams.from_system(physics_system)
   if pme_alpha is not None:

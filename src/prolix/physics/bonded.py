@@ -7,6 +7,7 @@ from collections.abc import Callable
 import jax
 import jax.numpy as jnp
 from jax_md import energy, space
+from jaxtyping import Array
 
 from prolix.typing import (
     AngleIndices,
@@ -104,8 +105,7 @@ def compute_dihedral_angles(
 
     x = jnp.sum(v * w, axis=-1)
     y = jnp.sum(jnp.cross(b1_unit, v) * w, axis=-1)
-    phi = jnp.arctan2(y, x)
-    return phi
+    return jnp.arctan2(y, x)
 
 
 def make_dihedral_energy_fn(
@@ -121,13 +121,112 @@ def make_dihedral_energy_fn(
     Returns:
         A function energy(R, dihedral_params) -> energy_scalar.
     """
-
     def energy_fn(r: Array, dihedral_params: Array, **kwargs) -> Array:
-        # dihedral_params: (N_dihedrals, 3)
         if dihedral_indices.shape[0] == 0:
             return 0.0
-        p = DihedralParams.from_row(dihedral_params.T)
+
+        # components: periodicity (0), phase (1), k (2)
+        n = dihedral_params[:, :, 0]
+        phase = dihedral_params[:, :, 1]
+        k = dihedral_params[:, :, 2]
+
         phi = compute_dihedral_angles(r, dihedral_indices, displacement_fn)
-        return jnp.sum(0.5 * p.k * (1.0 + jnp.cos(p.periodicity * phi - p.phase)))
+        # phi is (N_dih,) -> broadcast to (N_dih, 1)
+        phi = phi[:, jnp.newaxis]
+
+        # E = sum_i sum_j 0.5 * k_ij * (1 + cos(n_ij * phi_i - phase_ij))
+        e_total = jnp.sum(0.5 * k * (1.0 + jnp.cos(n * phi - phase)))
+        # jax.debug.print("DEBUG dihedral_fn: e_total={e}", e=e_total)
+        return e_total
+
+    return energy_fn
+
+
+def make_harmonic_improper_energy_fn(
+    displacement_fn: space.DisplacementFn,
+    improper_indices: Array,
+) -> Callable[[Array, Array], Array]:
+    r"""Create a function to compute harmonic improper energy.
+
+    Args:
+        displacement_fn: JAX MD displacement function.
+        improper_indices: (N_impropers, 4) array of atom indices.
+
+    Returns:
+        A function energy(R, improper_params) -> energy_scalar.
+    """
+
+    def energy_fn(r: Array, improper_params: Array, **kwargs) -> Array:
+        if improper_indices.shape[0] == 0:
+            return 0.0
+
+        # improper_params: (N_imp, N_terms, 3) or (N_imp, N_terms, 2)
+        # Note: Usually impropers are single-term harmonic, but proxide might pad them.
+        # If they are harmonic, we expect [k, phi0] in the last dimension.
+        # If they are periodic (from a force field like Amber), they might have [n, phase, k].
+
+        # Let's check the last dimension size.
+        if improper_params.shape[-1] == 3:
+            # Periodic-style impropers (Amber)
+            n = improper_params[:, :, 0]
+            phase = improper_params[:, :, 1]
+            k = improper_params[:, :, 2]
+            phi = compute_dihedral_angles(r, improper_indices, displacement_fn)
+            phi = phi[:, jnp.newaxis]
+            return jnp.sum(0.5 * k * (1.0 + jnp.cos(n * phi - phase)))
+        else:
+            # Harmonic-style impropers: [k, phi0]
+            k = improper_params[:, :, 0]
+            phi0 = improper_params[:, :, 1]
+            phi = compute_dihedral_angles(r, improper_indices, displacement_fn)
+            phi = phi[:, jnp.newaxis]
+            diff = phi - phi0
+            diff = (diff + jnp.pi) % (2 * jnp.pi) - jnp.pi
+            return jnp.sum(k * diff**2)
+
+    return energy_fn
+
+
+def make_exception_pair_energy_fn(
+    displacement_fn: space.DisplacementFn,
+    exception_pairs: Array,
+    exception_sigmas: Array,
+    exception_epsilons: Array,
+    exception_chargeprods: Array,
+    coulomb_constant: float = 332.0637,
+) -> Callable[[Array], Array]:
+    """Create energy function for explicit per-pair 1-4 exception interactions.
+
+    Parameters are pre-scaled (already contain lj14scale / coulomb14scale).
+
+    Args:
+        displacement_fn: JAX MD displacement function.
+        exception_pairs: (E, 2) int32 array of atom index pairs.
+        exception_sigmas: (E,) float32 array of pre-scaled LJ sigmas.
+        exception_epsilons: (E,) float32 array of pre-scaled LJ epsilons.
+        exception_chargeprods: (E,) float32 array of pre-scaled charge products.
+        coulomb_constant: Coulomb constant (default: 332.0637 for AKMA units).
+
+    Returns:
+        A function energy(r) -> energy_scalar computing 1-4 exception pair energies.
+    """
+    def energy_fn(r: Array, **kwargs) -> Array:
+        if exception_pairs.shape[0] == 0:
+            return jnp.array(0.0)
+
+        ri = r[exception_pairs[:, 0]]   # (E, 3)
+        rj = r[exception_pairs[:, 1]]   # (E, 3)
+        dr = jax.vmap(displacement_fn)(ri, rj)
+        dist = jnp.sqrt(jnp.sum(dr**2, axis=-1) + 1e-12)  # (E,)
+
+        # LJ 12-6
+        inv_r = exception_sigmas / dist
+        inv_r6 = inv_r**6
+        e_lj = 4.0 * exception_epsilons * (inv_r6**2 - inv_r6)
+
+        # Coulomb
+        e_coul = coulomb_constant * exception_chargeprods / dist
+
+        return jnp.sum(e_lj + e_coul)
 
     return energy_fn

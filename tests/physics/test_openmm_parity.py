@@ -76,7 +76,7 @@ def jax_openmm_system(openmm_available):
   exclusion_spec = nl.ExclusionSpec.from_protein(protein_system)
   
   displacement_fn, shift_fn = space.free()
-  energy_fn = system.make_energy_fn(displacement_fn, protein_system, implicit_solvent=True, exclusion_spec=exclusion_spec)
+  energy_fn = system.make_energy_fn(displacement_fn, protein_system, implicit_solvent=True, exclusion_spec=exclusion_spec, cutoff=0)
   decomposed_fns = system.make_energy_fn(displacement_fn, protein_system, implicit_solvent=True, exclusion_spec=exclusion_spec, return_decomposed=True)
 
   coords = protein_system.coordinates
@@ -280,9 +280,11 @@ class TestEnergyDecomposition:
     fns = data["decomposed_fns"]
 
     e_gb, e_direct, born_radii = fns["electrostatics"](pos)
-    jax_gb = float(e_gb)
+    # JAX e_gb is polar only; OpenMM CustomGBForce includes ACE nonpolar
+    # Get ACE energy from the 'nonpolar' fn, passing precomputed born_radii
+    jax_ace = float(fns["nonpolar"](pos, born_radii=born_radii))
+    jax_gb = float(e_gb) + jax_ace
     omm_gb = data["omm_components"].get("CustomGBForce", 0.0)
-
     diff = abs(jax_gb - omm_gb)
     print(f"GB energy: JAX={jax_gb:.4f}, OpenMM={omm_gb:.4f}, diff={diff:.4f} kcal/mol")
 
@@ -641,7 +643,7 @@ class TestMultiProtein:
     exclusion_spec = nl.ExclusionSpec.from_protein(protein_system)
     
     displacement_fn, shift_fn = space.free()
-    energy_fn = system.make_energy_fn(displacement_fn, protein_system, implicit_solvent=True, exclusion_spec=exclusion_spec)
+    energy_fn = system.make_energy_fn(displacement_fn, protein_system, implicit_solvent=True, exclusion_spec=exclusion_spec, cutoff=0)
 
     coords = protein_system.coordinates
 

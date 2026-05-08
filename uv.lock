@@ -1327,6 +1327,15 @@ wheels = [
 ]
 
 [[package]]
+name = "legacy-cgi"
+version = "2.6.4"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/f4/9c/91c7d2c5ebbdf0a1a510bfa0ddeaa2fbb5b78677df5ac0a0aa51cf7125b0/legacy_cgi-2.6.4.tar.gz", hash = "sha256:abb9dfc7835772f7c9317977c63253fd22a7484b5c9bbcdca60a29dcce97c577", size = 24603, upload-time = "2025-10-27T05:20:05.395Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/8c/7e/e7394eeb49a41cc514b3eb49020223666cbf40d86f5721c2f07871e6d84a/legacy_cgi-2.6.4-py3-none-any.whl", hash = "sha256:7e235ce58bf1e25d1fc9b2d299015e4e2cd37305eccafec1e6bac3fc04b878cd", size = 20035, upload-time = "2025-10-27T05:20:04.289Z" },
+]
+
+[[package]]
 name = "libtpu"
 version = "0.0.30"
 source = { registry = "https://pypi.org/simple" }
@@ -2132,6 +2141,18 @@ wheels = [
 ]
 
 [[package]]
+name = "pdbfixer"
+version = "1.12.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "legacy-cgi", marker = "python_full_version >= '3.13'" },
+    { name = "numpy" },
+    { name = "openmm", version = "8.3.1", source = { registry = "https://pypi.org/simple" }, marker = "platform_machine == 'x86_64' and sys_platform == 'linux'" },
+    { name = "openmm", version = "8.4.0.post2", source = { registry = "https://pypi.org/simple" }, marker = "platform_machine != 'x86_64' or sys_platform != 'linux'" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/da/bd/394c3185e4b9fbacf803651a374e99e597d3411d316784f8ea6d8fc17af5/pdbfixer-1.12.0.tar.gz", hash = "sha256:82e54074b33eb00270e9a439c8633fcf82cd3ab7a36561b01425a260c0fc4143", size = 665893, upload-time = "2026-02-06T19:11:22.323Z" }
+
+[[package]]
 name = "pexpect"
 version = "4.9.0"
 source = { registry = "https://pypi.org/simple" }
@@ -2294,11 +2315,13 @@ viz = [
 
 [package.dev-dependencies]
 dev = [
+    { name = "pdbfixer" },
     { name = "pytest" },
     { name = "pytest-cov" },
     { name = "pytest-timeout" },
     { name = "pytest-xdist" },
     { name = "ruff" },
+    { name = "termcolor" },
     { name = "ty" },
 ]
 
@@ -2322,7 +2345,7 @@ requires-dist = [
     { name = "numpy" },
     { name = "openmm", marker = "platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'openmm'", specifier = ">=8.3.1,<8.4.0" },
     { name = "openmm", marker = "(platform_machine != 'x86_64' and extra == 'openmm') or (sys_platform != 'linux' and extra == 'openmm')", specifier = ">=8.4.0" },
-    { name = "proxide", specifier = ">=0.1.0a3" },
+    { name = "proxide", specifier = "==0.1.0a7" },
     { name = "py2dmol", specifier = ">=1.5.1" },
     { name = "py2dmol", marker = "extra == 'viz'", specifier = ">=1.5.0" },
     { name = "pytest", marker = "extra == 'dev'" },
@@ -2342,11 +2365,13 @@ provides-extras = ["cuda", "tpu", "cpu", "dev", "openmm", "docs", "viz"]
 
 [package.metadata.requires-dev]
 dev = [
+    { name = "pdbfixer", specifier = ">=1.12.0" },
     { name = "pytest" },
     { name = "pytest-cov" },
     { name = "pytest-timeout" },
     { name = "pytest-xdist" },
     { name = "ruff" },
+    { name = "termcolor", specifier = ">=3.3.0" },
     { name = "ty" },
 ]
 
@@ -2379,7 +2404,7 @@ wheels = [
 
 [[package]]
 name = "proxide"
-version = "0.1.0a3"
+version = "0.1.0a7"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "array-record" },
@@ -2396,13 +2421,13 @@ dependencies = [
     { name = "tqdm" },
     { name = "typer" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/88/10/7b22789dc9b4415e0eef6ee6829e344dc0d29b35d852fdecd1eae5a77737/proxide-0.1.0a3.tar.gz", hash = "sha256:8434ff231766df25221320ba1cd6cf7b0cec8fe48167749240ccee547f199365", size = 7114796, upload-time = "2026-04-17T19:39:57.764Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/e8/db/0a1c25f1df2cc4bca92da572d437c498c22f6d79fb1196a9e138aecaac33/proxide-0.1.0a7.tar.gz", hash = "sha256:7231c2905be1a9673ff960f256efa083225a3d9a74555f40dad722956d6a14c2", size = 7152072, upload-time = "2026-05-08T05:40:17.826Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/c8/df/45f2297586923bcbab5cf0df6bb647a68bad9cec4009360d38648c069027/proxide-0.1.0a3-cp311-abi3-macosx_10_12_x86_64.whl", hash = "sha256:0dfe2b717a8fd62b8ce12f311e5a7e6e5018ded9a0c0b5b240d568cb3cbd16cd", size = 10755850, upload-time = "2026-04-17T19:39:43.424Z" },
-    { url = "https://files.pythonhosted.org/packages/3c/02/f13dd0b14574891d75554866bb9b3199eb78cf588f4c6766cd4a906351c9/proxide-0.1.0a3-cp311-abi3-macosx_11_0_arm64.whl", hash = "sha256:e86d71af2063e0bd9d394940c3b0777eb548e4a584098cd7ebaee3903bd7c6a8", size = 10475035, upload-time = "2026-04-17T19:39:46.306Z" },
-    { url = "https://files.pythonhosted.org/packages/1c/64/5298ad8828a8f892f4e8d5add35ab766c93b11eb54b9e97fe03ab8b488b1/proxide-0.1.0a3-cp311-abi3-manylinux_2_17_aarch64.manylinux2014_aarch64.whl", hash = "sha256:e9dc02b6b8fc5926d1da1dc2b7451aac30379a3f81e71585825881b267f5f5d0", size = 10932444, upload-time = "2026-04-17T19:39:49.251Z" },
-    { url = "https://files.pythonhosted.org/packages/4c/f9/21ce9af53877c448ce08de5c9537bdb080eeec77af9ecb6daca91ac87371/proxide-0.1.0a3-cp311-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:a50fac1e014b4c8a68a87ad4f694249fd7d118cf6954904cf2be197f84a4e705", size = 11079787, upload-time = "2026-04-17T19:39:52.021Z" },
-    { url = "https://files.pythonhosted.org/packages/c1/49/85f9e3cf22a8d1ef2a8c2611ffda934f98dc3caa1dd6b18a7074c9e799ed/proxide-0.1.0a3-cp311-abi3-win_amd64.whl", hash = "sha256:acabf8e892bcc2c4acb1641576e7768a92c4e7e813c8581aa122405fab15ab26", size = 12005922, upload-time = "2026-04-17T19:39:55.048Z" },
+    { url = "https://files.pythonhosted.org/packages/89/92/8e4d634092e82d79525c204f1ba43651a74685a0e684526dd8580d27c24c/proxide-0.1.0a7-cp311-abi3-macosx_10_12_x86_64.whl", hash = "sha256:9d10d67463ae950a5d96631716efc1c3704083100a2a39a022a96d1bd899d459", size = 10801485, upload-time = "2026-05-08T05:40:02.267Z" },
+    { url = "https://files.pythonhosted.org/packages/a2/19/e66942a0cb7f4d6d025d0b9b4a61e60b9f8021ae710854682ca61843e20c/proxide-0.1.0a7-cp311-abi3-macosx_11_0_arm64.whl", hash = "sha256:74549e3acae7e7eb8aa7ebcd73130c4fd7040de7334128ede67e5d7760e017e3", size = 10537792, upload-time = "2026-05-08T05:40:05.256Z" },
+    { url = "https://files.pythonhosted.org/packages/25/6f/195033c0ff61f1046975c6f113efec174891c3e1f16d36ae7c41d81f2682/proxide-0.1.0a7-cp311-abi3-manylinux_2_17_aarch64.manylinux2014_aarch64.whl", hash = "sha256:72a13b5f931da24d1156ee377a805a054e40c28b5eaf672f51a9bafd295d8a7b", size = 11032176, upload-time = "2026-05-08T05:40:09.25Z" },
+    { url = "https://files.pythonhosted.org/packages/6b/59/9b2f3949b182a2695505c3fe2d29b929af2f734f0ee5db037503d3cd2ae9/proxide-0.1.0a7-cp311-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:014520d1b1a96e299cd4ac33f6ff1422bb0622ac6596e762a5ccd8ceb6870604", size = 11175810, upload-time = "2026-05-08T05:40:12.094Z" },
+    { url = "https://files.pythonhosted.org/packages/8b/ce/e21fd739fb7e67a812d769616f8d249e4c88884d48058e6d87e4e77a1af3/proxide-0.1.0a7-cp311-abi3-win_amd64.whl", hash = "sha256:166aa23cae73fdcb3b06b6256e70549051863f86acfc71ee24d90096414c6133", size = 12060809, upload-time = "2026-05-08T05:40:14.993Z" },
 ]
 
 [[package]]
@@ -3318,6 +3343,15 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/e6/cb/3647bdd03c7692882ebc10c19df9ede49f290c216b2906f785edbdb53ef1/tensorstore-0.1.79-cp313-cp313-manylinux_2_27_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:94d8fc9df1721b0287046aca7209fd5040889cad4202e7b73a1fdb77cd9b71c6", size = 18949307, upload-time = "2025-11-11T22:04:53.145Z" },
     { url = "https://files.pythonhosted.org/packages/20/a0/f91ac492cf2ee9f7541aefaaed4ad1258e73e33f3cd3e06cdce5859431db/tensorstore-0.1.79-cp313-cp313-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:c9f2dc3342e4686af98f6e259dc9fb377f1bf657b649c247bf6647bbe4f98090", size = 20930427, upload-time = "2025-11-11T22:04:55.353Z" },
     { url = "https://files.pythonhosted.org/packages/69/a6/752fd11747eb9fead715b02d389da7fb180a56172b885de0b48b20237d1e/tensorstore-0.1.79-cp313-cp313-win_amd64.whl", hash = "sha256:0fd6165f3df49abc7c9de029b2b72d74bebd2ff2481a5ced003607eb61c56d3e", size = 13212196, upload-time = "2025-11-11T22:05:00.451Z" },
+]
+
+[[package]]
+name = "termcolor"
+version = "3.3.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/46/79/cf31d7a93a8fdc6aa0fbb665be84426a8c5a557d9240b6239e9e11e35fc5/termcolor-3.3.0.tar.gz", hash = "sha256:348871ca648ec6a9a983a13ab626c0acce02f515b9e1983332b17af7979521c5", size = 14434, upload-time = "2025-12-29T12:55:21.882Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/33/d1/8bb87d21e9aeb323cc03034f5eaf2c8f69841e40e4853c2627edf8111ed3/termcolor-3.3.0-py3-none-any.whl", hash = "sha256:cf642efadaf0a8ebbbf4bc7a31cec2f9b5f21a9f726f4ccbb08192c9c26f43a5", size = 7734, upload-time = "2025-12-29T12:55:20.718Z" },
 ]
 
 [[package]]

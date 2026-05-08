@@ -278,11 +278,11 @@ class PhysicsSystem(eqx.Module):
     angle_mask: Array  # (N_angles_padded,) bool
 
     dihedrals: Array  # (N_dih_padded, 4) int
-    dihedral_params: Array  # (N_dih_padded, 3) float
-    dihedral_mask: Array  # (N_dih_padded,) bool
+    dihedral_params: Array  # (N_dih_padded, N_terms, 3) float
+    dihedral_mask: Array  # (N_padded,) bool
 
     impropers: Array  # (N_imp_padded, 4) int
-    improper_params: Array  # (N_imp_padded, 3) float
+    improper_params: Array  # (N_imp_padded, N_terms, 3) float
     improper_mask: Array  # (N_imp_padded,) bool
 
     # Urey-Bradley

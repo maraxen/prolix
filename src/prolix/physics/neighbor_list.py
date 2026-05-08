@@ -40,6 +40,14 @@ class ExclusionSpec:
   # Total number of atoms (for validation/creation)
   n_atoms: int
 
+  # Per-pair explicit exception data (from AMBER FF XML, row-aligned with pairs_14).
+  # ALL pairs_14 are excluded from the main kernel (in idx_12_13).
+  # These arrays hold only the nonzero-epsilon subset for the separate exception energy term.
+  exception_pairs: Array        # (E, 2) int32
+  exception_sigmas: Array       # (E,)   float32
+  exception_epsilons: Array     # (E,)   float32
+  exception_chargeprods: Array  # (E,)   float32
+
   @classmethod
   def from_protein(
     cls,
@@ -47,7 +55,11 @@ class ExclusionSpec:
     coulomb14scale: float | None = None,
     lj14scale: float | None = None,
   ) -> ExclusionSpec:
-    """Build ExclusionSpec from standard protein structure."""
+    """Build ExclusionSpec from standard protein structure.
+
+    Handles explicit 1-4 exceptions from AMBER FF (e.g., Proline rings)
+    by reading protein.pairs_14 and protein.exception_14_params if available.
+    """
     charges = protein.charges
     if charges is None:
       raise ValueError("Protein must have charges to build ExclusionSpec")
@@ -70,6 +82,10 @@ class ExclusionSpec:
         scale_14_elec=c14,
         scale_14_vdw=l14,
         n_atoms=n_atoms,
+        exception_pairs=jnp.zeros((0, 2), dtype=jnp.int32),
+        exception_sigmas=jnp.zeros((0,), dtype=jnp.float32),
+        exception_epsilons=jnp.zeros((0,), dtype=jnp.float32),
+        exception_chargeprods=jnp.zeros((0,), dtype=jnp.float32),
       )
 
     excl = topology.find_bonded_exclusions(bonds, n_atoms)
@@ -77,12 +93,51 @@ class ExclusionSpec:
     # Combine 1-2 and 1-3 (both fully excluded usually)
     idx_12_13 = jnp.concatenate([excl.idx_12, excl.idx_13], axis=0)
 
+    exc_pairs = jnp.zeros((0, 2), dtype=jnp.int32)
+    exc_sigmas = jnp.zeros((0,), dtype=jnp.float32)
+    exc_epsilons = jnp.zeros((0,), dtype=jnp.float32)
+    exc_chargeprods = jnp.zeros((0,), dtype=jnp.float32)
+
+    # When proxide supplies resolved per-pair 1-4 params, use them exclusively.
+    # All pairs_14 are excluded (scale=0) from the main LJ/Coulomb kernels, and
+    # their energy is computed by make_exception_pair_energy_fn instead.
+    # We also clear idx_14 so the same pairs don't get re-added with the global
+    # scale factors and cause double-counting.
+    use_explicit_14 = (
+      hasattr(protein, 'pairs_14') and protein.pairs_14 is not None
+      and len(protein.pairs_14) > 0
+      and hasattr(protein, 'exception_14_params') and protein.exception_14_params is not None
+      and len(protein.exception_14_params) > 0
+    )
+
+    if use_explicit_14:
+      pairs_np = np.asarray(protein.pairs_14, dtype=np.int32)       # (N, 2)
+      params_np = np.asarray(protein.exception_14_params, dtype=np.float32)  # (N, 3)
+
+      # All pairs_14 → fully excluded from main LJ/Coulomb kernels
+      idx_12_13 = jnp.concatenate([idx_12_13, jnp.asarray(pairs_np, dtype=jnp.int32)], axis=0)
+
+      # ALL pairs_14 → exception energy (handles both LJ and Coulomb per-pair)
+      exc_pairs = jnp.asarray(pairs_np, dtype=jnp.int32)
+      exc_chargeprods = jnp.asarray(params_np[:, 0], dtype=jnp.float32)
+      exc_sigmas = jnp.asarray(params_np[:, 1], dtype=jnp.float32)
+      exc_epsilons = jnp.asarray(params_np[:, 2], dtype=jnp.float32)
+
+    # When explicit pairs_14 are available, clear idx_14 to avoid double-counting:
+    # the topology-derived 1-4 pairs are the same set as pairs_14 and their energy
+    # is now fully handled by the exception energy function.
+    idx_14_out = jnp.zeros((0, 2), dtype=jnp.int32) if use_explicit_14 else excl.idx_14
+
     return cls(
       idx_12_13=idx_12_13,
-      idx_14=excl.idx_14,
+      idx_14=idx_14_out,
       scale_14_elec=c14,
       scale_14_vdw=l14,
       n_atoms=n_atoms,
+      exception_pairs=exc_pairs,
+      exception_sigmas=exc_sigmas,
+      exception_epsilons=exc_epsilons,
+      exception_chargeprods=exc_chargeprods,
     )
 
   @classmethod

@@ -45,14 +45,14 @@ class Test14NonbondedParity:
     # Nonbonded
     nb = openmm.NonbondedForce()
     nb.setNonbondedMethod(openmm.NonbondedForce.NoCutoff)
-    
+
     # Standard parameters (Carbon-like)
     q = 0.5
     sig = 3.4
     eps = 0.15
     for _ in range(n_atoms):
         nb.addParticle(q, sig / 10.0, eps * 4.184) # nm, kJ/mol
-    
+
     # Exclusions & 1-4 scaling
     # 1-2: (0,1), (1,2), (2,3) -> Scale 0
     # 1-3: (0,2), (1,3) -> Scale 0
@@ -62,13 +62,13 @@ class Test14NonbondedParity:
     nb.addException(2, 3, 0.0, 1.0, 0.0)
     nb.addException(0, 2, 0.0, 1.0, 0.0)
     nb.addException(1, 3, 0.0, 1.0, 0.0)
-    
+
     scale_elec = 0.8333333333333334 # Amber 1/1.2
     scale_vdw = 0.5 # Amber 1/2.0
     nb.addException(0, 3, (q*q)*scale_elec, (sig/10.0), (eps*4.184)*scale_vdw)
-    
+
     omm_system.addForce(nb)
-    
+
     # Positions: 1-2-3-4 zig-zag
     pos = np.array([
         [0.0, 0.0, 0.0],
@@ -76,7 +76,7 @@ class Test14NonbondedParity:
         [1.5, 1.5, 0.0],
         [0.0, 1.5, 0.0]
     ]) # Å
-    
+
     return {
         "system": omm_system,
         "positions": pos,
@@ -95,7 +95,7 @@ class Test14NonbondedParity:
     from openmm import unit
 
     data = simple_14_system
-    
+
     # 1. OpenMM Energy
     integrator = openmm.VerletIntegrator(0.001 * unit.picoseconds)
     context = openmm.Context(data["system"], integrator, openmm.Platform.getPlatformByName("Reference"))
@@ -104,15 +104,19 @@ class Test14NonbondedParity:
 
     # 2. Prolix Energy
     displacement_fn, _ = space.free()
-    
+
     exclusion_spec = nl.ExclusionSpec(
         n_atoms=4,
         idx_12_13=jnp.array(data["idx_12_13"]),
         idx_14=jnp.array(data["idx_14"]),
         scale_14_elec=data["scale_elec"],
-        scale_14_vdw=data["scale_vdw"]
+        scale_14_vdw=data["scale_vdw"],
+        exception_pairs=jnp.zeros((0, 2), dtype=jnp.int32),
+        exception_sigmas=jnp.zeros((0,), dtype=jnp.float32),
+        exception_epsilons=jnp.zeros((0,), dtype=jnp.float32),
+        exception_chargeprods=jnp.zeros((0,), dtype=jnp.float32),
     )
-    
+
     params = {
         "charges": jnp.array(data["charges"]),
         "sigmas": jnp.array(data["sigmas"]),
@@ -127,7 +131,7 @@ class Test14NonbondedParity:
         "impropers": jnp.zeros((0, 4), dtype=jnp.int32),
         "improper_params": jnp.zeros((0, 3)),
     }
-    
+
     energy_fn = system.make_energy_fn(
         displacement_fn,
         params,
@@ -136,12 +140,12 @@ class Test14NonbondedParity:
         use_pbc=False,
         strict_parameterization=False
     )
-    
+
     jax_energy = float(energy_fn(jnp.array(data["positions"])))
-    
+
     print(f"\nOpenMM Energy: {omm_energy:.6f}")
     print(f"Prolix Energy: {jax_energy:.6f}")
-    
+
     assert np.isclose(omm_energy, jax_energy, atol=1e-4)
 
   def test_14_neighbor_list_parity(self, simple_14_system):
@@ -150,7 +154,7 @@ class Test14NonbondedParity:
     from openmm import unit
 
     data = simple_14_system
-    
+
     # 1. OpenMM Energy
     integrator = openmm.VerletIntegrator(0.001 * unit.picoseconds)
     context = openmm.Context(data["system"], integrator, openmm.Platform.getPlatformByName("Reference"))
@@ -159,15 +163,19 @@ class Test14NonbondedParity:
 
     # 2. Prolix Energy
     displacement_fn, _ = space.free()
-    
+
     exclusion_spec = nl.ExclusionSpec(
         n_atoms=4,
         idx_12_13=jnp.array(data["idx_12_13"]),
         idx_14=jnp.array(data["idx_14"]),
         scale_14_elec=data["scale_elec"],
-        scale_14_vdw=data["scale_vdw"]
+        scale_14_vdw=data["scale_vdw"],
+        exception_pairs=jnp.zeros((0, 2), dtype=jnp.int32),
+        exception_sigmas=jnp.zeros((0,), dtype=jnp.float32),
+        exception_epsilons=jnp.zeros((0,), dtype=jnp.float32),
+        exception_chargeprods=jnp.zeros((0,), dtype=jnp.float32),
     )
-    
+
     params = {
         "charges": jnp.array(data["charges"]),
         "sigmas": jnp.array(data["sigmas"]),
@@ -182,11 +190,11 @@ class Test14NonbondedParity:
         "impropers": jnp.zeros((0, 4), dtype=jnp.int32),
         "improper_params": jnp.zeros((0, 3)),
     }
-    
+
     # Force Prolix to use sparse exclusions by providing a neighbor list
     neighbor_list_fn = partition.neighbor_list(displacement_fn, box=100.0, r_cutoff=5.0)
     nbr = neighbor_list_fn.allocate(jnp.array(data["positions"]))
-    
+
     energy_fn = system.make_energy_fn(
         displacement_fn,
         params,
@@ -196,12 +204,12 @@ class Test14NonbondedParity:
         use_pbc=False,
         strict_parameterization=False
     )
-    
+
     jax_energy = float(energy_fn(jnp.array(data["positions"]), neighbor=nbr))
-    
+
     print(f"\nOpenMM Energy: {omm_energy:.6f}")
     print(f"Prolix Energy (NL): {jax_energy:.6f}")
-    
+
     assert np.isclose(omm_energy, jax_energy, atol=1e-4)
 
 if __name__ == "__main__":
