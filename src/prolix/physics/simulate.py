@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING
 import jax
 import jax.numpy as jnp
 from jax import random
-from jax_md import minimize, quantity, simulate, space, util
+from jax_md import quantity, simulate, space, util
 from proxide.physics.constants import BOLTZMANN_KCAL
 
 from prolix.physics import system
@@ -169,47 +169,31 @@ def run_minimization(
       Minimized positions.
 
   """
-  # -------------------------------------------------------------------------
-  # Stage 1: Steepest Descent Pre-conditioning (always run, fully JITted)
-  # -------------------------------------------------------------------------
+  # Steepest descent with backtracking line search — robust against sharp LJ walls
+  # (FIRE is avoided: its velocity accumulation diverges on 1-4 exception pairs at close range)
 
   @jax.jit
-  def steepest_descent_step(r, _):
-    """Single steepest descent step with adaptive step size."""
-    forces = -jax.grad(energy_fn)(r)
-    force_magnitudes = jnp.linalg.norm(forces, axis=-1)
-    max_force = jnp.max(force_magnitudes) + 1e-8
+  def sd_backtrack_step(r, _):
+    E0, g = jax.value_and_grad(energy_fn)(r)
+    forces = -g
+    max_force = jnp.max(jnp.linalg.norm(forces, axis=-1)) + 1e-8
+    dt = jnp.minimum(max_displacement_per_step / max_force, dt_max)
 
-    # Adaptive step size: limit maximum displacement
-    adaptive_dt = max_displacement_per_step / max_force
-    adaptive_dt = jnp.minimum(adaptive_dt, dt_max)
+    r1 = r + 1.00 * dt * forces;  E1 = energy_fn(r1)
+    r2 = r + 0.50 * dt * forces;  E2 = energy_fn(r2)
+    r3 = r + 0.25 * dt * forces;  E3 = energy_fn(r3)
+    r4 = r + 0.10 * dt * forces;  E4 = energy_fn(r4)
 
-    # Simple steepest descent: r_new = r + dt * F (move along force direction)
-    r_new = r + adaptive_dt * forces
+    best_r, best_E = r4, E4
+    best_r = jnp.where(E3 < best_E, r3, best_r); best_E = jnp.where(E3 < best_E, E3, best_E)
+    best_r = jnp.where(E2 < best_E, r2, best_r); best_E = jnp.where(E2 < best_E, E2, best_E)
+    best_r = jnp.where(E1 < best_E, r1, best_r); best_E = jnp.where(E1 < best_E, E1, best_E)
 
-    return r_new, max_force
+    return jnp.where(best_E < E0, best_r, r), max_force
 
-  # Run steepest descent (always, to warm up structure)
-  r_after_sd, _ = jax.lax.scan(steepest_descent_step, initial_positions, jnp.arange(sd_steps))
-  jax.block_until_ready(r_after_sd)
-
-  # -------------------------------------------------------------------------
-  # Stage 2: FIRE Optimization (fully JITted)
-  # -------------------------------------------------------------------------
-
-  init_fn, apply_fn = minimize.fire_descent(
-    energy_fn, shift_fn=space.free()[1], dt_start=dt_start, dt_max=dt_max
-  )
-  state = init_fn(r_after_sd)
-
-  @jax.jit
-  def fire_step_fn(i, state):
-    return apply_fn(state)
-
-  state = jax.lax.fori_loop(0, steps, fire_step_fn, state)
-  jax.block_until_ready(state.position)
-
-  return state.position
+  r_final, _ = jax.lax.scan(sd_backtrack_step, initial_positions, jnp.arange(sd_steps))
+  jax.block_until_ready(r_final)
+  return r_final
 
 
 def run_thermalization(

@@ -304,7 +304,8 @@ class TestEnergyDecomposition:
 
     jax_lj = float(fns["lj"](pos))
     _, e_direct, _ = fns["electrostatics"](pos)
-    jax_nonbonded = jax_lj + float(e_direct)
+    jax_exception = float(fns["exception"](pos)) if "exception" in fns else 0.0
+    jax_nonbonded = jax_lj + float(e_direct) + jax_exception
     
     params = data["system_params"]
     print(f"JAX params[88]: q={params.charges[88]}, s={params.sigmas[88]}, e={params.epsilons[88]}")
