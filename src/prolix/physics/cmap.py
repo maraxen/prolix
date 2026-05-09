@@ -166,63 +166,54 @@ def evaluate_spline_derivative(
 
 
 def compute_map_derivatives(energy: CmapGrid, size: int) -> tuple[CmapGrid, CmapGrid, CmapGrid]:
-  """Compute CMAP derivatives using periodic cubic spline fitting.
+  """Compute CMAP derivatives using OpenMM's periodic cubic spline method.
 
-  This matches OpenMM's CMAPTorsionForceImpl::calcMapDerivatives().
-
-  Grid convention: energy[i, j] where i indexes first angle (phi), j indexes second angle (psi)
-  - Index i corresponds to angle i * 2π/size
-  - Index j corresponds to angle j * 2π/size
+  Matches OpenMM's CMAPTorsionForceImpl::calcMapDerivatives() exactly.
+  Uses SplineFitter::createPeriodicSpline and evaluateSplineDerivative,
+  NOT finite differences.
 
   Args:
-      energy: (size, size) energy grid values where energy[i,j] = E(phi_i, psi_j)
+      energy: (size, size) energy grid where energy[i,j] = E(phi_i, psi_j),
+              i.e. axis 0 = phi, axis 1 = psi (caller must transpose from proxide layout)
       size: Grid size (typically 24)
 
   Returns:
-      d1: Derivatives with respect to first angle (dE/dphi) at each grid point
-      d2: Derivatives with respect to second angle (dE/dpsi) at each grid point
-      d12: Cross derivatives (d²E/dphi dpsi)
+      d1: phi derivatives at each grid point (kcal/mol/rad), shape (size, size)
+      d2: psi derivatives at each grid point (kcal/mol/rad), shape (size, size)
+      d12: cross derivatives d²E/dphi/dpsi (kcal/mol/rad²), shape (size, size)
 
   """
-  # Create x-coordinates for [0, 2π] range (size+1 points for periodicity)
   x = jnp.linspace(0, 2 * jnp.pi, size + 1)
 
-  # Compute d1: derivatives with respect to first angle (phi, axis 0)
-  # For fixed psi (column j), compute dE/dphi by fitting spline along phi (rows)
-  def compute_d1_col(j):
-    # Extract column: energy[:, j] = E(phi_0..phi_n-1, psi_j)
+  def d1_at_psi_j(j):
+    # phi-derivative: spline along phi (axis 0) for fixed psi index j
     col = energy[:, j]
-    y = jnp.concatenate([col, col[0:1]])  # Make periodic
+    y = jnp.concatenate([col, col[0:1]])
     deriv = create_periodic_spline(x, y)
-    # Evaluate first derivative at each phi grid point
     return jax.vmap(lambda i: evaluate_spline_derivative(x, y, deriv, x[i]))(jnp.arange(size))
 
-  # d1[i, j] = dE/dphi at (phi_i, psi_j)
-  d1 = jax.vmap(compute_d1_col)(jnp.arange(size)).T  # Transpose: (size, size)
-
-  # Compute d2: derivatives with respect to second angle (psi, axis 1)
-  # For fixed phi (row i), compute dE/dpsi by fitting spline along psi (columns)
-  def compute_d2_row(i):
-    # Extract row: energy[i, :] = E(phi_i, psi_0..psi_n-1)
+  def d2_at_phi_i(i):
+    # psi-derivative: spline along psi (axis 1) for fixed phi index i
     row = energy[i, :]
-    y = jnp.concatenate([row, row[0:1]])  # Make periodic
+    y = jnp.concatenate([row, row[0:1]])
     deriv = create_periodic_spline(x, y)
-    # Evaluate first derivative at each psi grid point
     return jax.vmap(lambda j: evaluate_spline_derivative(x, y, deriv, x[j]))(jnp.arange(size))
 
-  # d2[i, j] = dE/dpsi at (phi_i, psi_j)
-  d2 = jax.vmap(compute_d2_row)(jnp.arange(size))  # Shape: (size, size)
+  # d1: vmap over psi (j), result shape (size_j, size_i) -> transpose to (phi, psi)
+  d1 = jax.vmap(d1_at_psi_j)(jnp.arange(size)).T
 
-  # Compute d12: cross derivative d/dphi(dE/dpsi) = d²E/(dphi dpsi)
-  # Use d2 values and compute derivative along phi direction (columns)
-  def compute_d12_col(j):
-    # d2[:, j] = dE/dpsi at (phi_0..phi_n-1, psi_j)
+  # d2: vmap over phi (i), result shape (size_i, size_j) = (phi, psi)
+  d2 = jax.vmap(d2_at_phi_i)(jnp.arange(size))
+
+  def d12_at_psi_j(j):
+    # cross derivative: spline d1 along phi for fixed psi index j
     col = d2[:, j]
     y = jnp.concatenate([col, col[0:1]])
     deriv = create_periodic_spline(x, y)
     return jax.vmap(lambda i: evaluate_spline_derivative(x, y, deriv, x[i]))(jnp.arange(size))
 
-  d12 = jax.vmap(compute_d12_col)(jnp.arange(size)).T
+  # d12: vmap over psi (j), result shape (size_j, size_i) -> transpose to (phi, psi)
+  d12 = jax.vmap(d12_at_psi_j)(jnp.arange(size)).T
 
   return d1, d2, d12
 
@@ -231,7 +222,7 @@ def precompute_cmap_coefficients(cmap_grids: CmapEnergyGrids) -> CmapCoeffs:
   """Precompute bicubic spline coefficients for a batch of CMAP grids.
 
   Args:
-      cmap_grids: (N_maps, Grid, Grid) raw energy grids
+      cmap_grids: (N_maps, Grid, Grid) raw energy grids where axis 0 = phi, axis 1 = psi
 
   Returns:
       coeffs: (N_maps, Grid, Grid, 16) precomputed coefficients
@@ -244,14 +235,8 @@ def precompute_cmap_coefficients(cmap_grids: CmapEnergyGrids) -> CmapCoeffs:
   n_maps = cmap_grids.shape[0]
   grid_size = cmap_grids.shape[1]
 
-  # Transpose grids to match OpenMM's calcMapDerivatives() axis convention.
-  # Combined with the (psi, phi) call order in system.py, this ensures
-  # correct axis assignment.
-  cmap_grids_transposed = jnp.transpose(cmap_grids, (0, 2, 1))
-
-  # Compute coefficients for each map
   def compute_map_coeffs(m):
-    return compute_bicubic_coefficients(cmap_grids_transposed[m], grid_size)
+    return compute_bicubic_coefficients(cmap_grids[m], grid_size)
 
   return jax.vmap(compute_map_coeffs)(jnp.arange(n_maps))
 
@@ -262,41 +247,41 @@ def compute_bicubic_coefficients(energy: CmapGrid, size: int) -> CmapCoeffs:
   This matches OpenMM's coefficient computation in calcMapDerivatives().
 
   Args:
-      energy: (size, size) energy grid
+      energy: (size, size) energy grid from proxide, stored as (psi, phi) — i.e.
+              energy[psi_i, phi_j]. Transposed internally to (phi, psi) convention.
       size: Grid size
 
   Returns:
-      coeffs: (size*size, 16) bicubic coefficients for each patch
+      coeffs: (size, size, 16) bicubic coefficients, indexed as coeffs[phi_i, psi_j]
 
   """
+  # Proxide stores grids as (psi, phi) because OpenMM's flat F-order array
+  # energy[phi + psi*size] becomes grid[psi, phi] after C-order reshape.
+  # Transpose to (phi, psi) so axis 0 = phi throughout.
+  energy = energy.T
+
   d1, d2, d12 = compute_map_derivatives(energy, size)
 
+  # delta = grid spacing in radians; used to scale spline derivatives to [0,1] local coords
   delta = 2 * jnp.pi / size
 
   def compute_patch_coeffs(idx):
-    # OpenMM populates c[i + j*size] where i=phi, j=psi.
-    # Our jnp.arange(size*size) iterates 0..575.
-    # If we want idx to map such that idx = i + j*size, then:
-    # j = idx // size (slow varying, psi)
-    # i = idx % size (fast varying, phi)
+    # i = phi index (axis 0 after transpose), j = psi index (axis 1)
     i = idx // size
     j = idx % size
     nexti = (i + 1) % size
     nextj = (j + 1) % size
 
-    # Corner values: energy
+    # Corner values
     e = jnp.array([energy[i, j], energy[nexti, j], energy[nexti, nextj], energy[i, nextj]])
-    # First derivatives wrt phi
     e1 = jnp.array([d1[i, j], d1[nexti, j], d1[nexti, nextj], d1[i, nextj]])
-    # First derivatives wrt psi
     e2 = jnp.array([d2[i, j], d2[nexti, j], d2[nexti, nextj], d2[i, nextj]])
-    # Cross derivatives
     e12 = jnp.array([d12[i, j], d12[nexti, j], d12[nexti, nextj], d12[i, nextj]])
 
-    # Build RHS vector (scaled by delta as in OpenMM)
+    # Scale derivatives by delta to match OpenMM's rhs convention:
+    # rhs[k+4] = e1[k]*delta, rhs[k+8] = e2[k]*delta, rhs[k+12] = e12[k]*delta^2
     rhs = jnp.concatenate([e, e1 * delta, e2 * delta, e12 * delta * delta])
 
-    # Apply weight matrix
     return jnp.dot(WT.T, rhs)
 
   coeffs = jax.vmap(compute_patch_coeffs)(jnp.arange(size * size))
@@ -356,12 +341,9 @@ def compute_cmap_energies(
     n_maps = cmap_coeffs.shape[0]
     grid_size = cmap_coeffs.shape[1]
 
-    # Transpose raw grids (batch dimension is 0)
-    cmap_coeffs_transposed = jnp.transpose(cmap_coeffs, (0, 2, 1))
-
     # Compute coefficients for each map
     def compute_map_coeffs(m):
-      return compute_bicubic_coefficients(cmap_coeffs_transposed[m], grid_size)
+      return compute_bicubic_coefficients(cmap_coeffs[m], grid_size)
 
     coeffs = jax.vmap(compute_map_coeffs)(jnp.arange(n_maps))
     # Shape: (N_maps, Grid, Grid, 16)
@@ -369,9 +351,9 @@ def compute_cmap_energies(
     coeffs = cmap_coeffs
     grid_size = coeffs.shape[1]
 
-  # Shift angles so that -π maps to index 0 (matching XML grid layout)
-  phi_norm = jnp.mod(phi_angles + jnp.pi, 2 * jnp.pi)
-  psi_norm = jnp.mod(psi_angles + jnp.pi, 2 * jnp.pi)
+  # Map angles from [-pi, pi] to [0, 2*pi) to match OpenMM's fmod(angle+2pi, 2pi).
+  phi_norm = jnp.mod(phi_angles + 2 * jnp.pi, 2 * jnp.pi)
+  psi_norm = jnp.mod(psi_angles + 2 * jnp.pi, 2 * jnp.pi)
 
   # Convert to grid coordinates
   delta = 2 * jnp.pi / grid_size

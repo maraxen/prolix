@@ -90,7 +90,8 @@ def compute_born_radii(
   )
   inv_born_radii = 1.0 / offset_radii - jnp.tanh(tanh_argument) / radii
 
-  return 1.0 / inv_born_radii
+  born_radii = 1.0 / inv_born_radii
+  return born_radii
 
 
 def f_gb(distance: Array, born_radii_i: Array, born_radii_j: Array) -> Array:

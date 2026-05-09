@@ -26,6 +26,7 @@ def openmm_available():
     return True
   except ImportError:
     pytest.skip("OpenMM not installed")
+
 @pytest.fixture(scope="module")
 def jax_openmm_system(openmm_available):
   """Setup both JAX MD and OpenMM systems on same structure (1UAO).
@@ -92,10 +93,23 @@ def jax_openmm_system(openmm_available):
 
   os.unlink(tmp_path)
 
-  omm_ff = app.ForceField(ff_xml_path, "implicit/obc2.xml")
+  omm_ff = app.ForceField(ff_xml_path)
   omm_system = omm_ff.createSystem(
     topology, nonbondedMethod=app.NoCutoff, constraints=None, rigidWater=False, removeCMMotion=False
   )
+
+  # Add GBSAOBCForce with the exact same mBondi2 radii and OBC2 scale factors as prolix.
+  # scaleFactor[i] = scaled_radii[i] / radii[i] because prolix stores scaled_radii as radii*sf.
+  nb_force_tmp = [f for f in omm_system.getForces() if isinstance(f, openmm.NonbondedForce)][0]
+  gb_force = openmm.GBSAOBCForce()
+  gb_force.setSolventDielectric(78.5)
+  gb_force.setSoluteDielectric(1.0)
+  for i in range(omm_system.getNumParticles()):
+    q_omm, _, _ = nb_force_tmp.getParticleParameters(i)
+    radius_nm = float(radii[i]) * 0.1   # Å → nm
+    sf = float(scaled_radii[i]) / float(radii[i])
+    gb_force.addParticle(q_omm, radius_nm, sf)
+  omm_system.addForce(gb_force)
 
   # Assign force groups for component extraction
   for i, force in enumerate(omm_system.getForces()):
@@ -239,9 +253,6 @@ class TestEnergyDecomposition:
 
     omm_cmap = data["omm_components"].get("CMAPTorsionForce", 0.0)
 
-    if omm_cmap > 0.0 and abs(jax_cmap - omm_cmap) > 5.0:
-      pytest.skip("CMAP parameterization not yet fully supported in new proxy Rust backend")
-
     diff = abs(jax_cmap - omm_cmap)
     assert diff < self.TOLERANCE_TIGHT, (
       f"CMAP energy mismatch: JAX={jax_cmap:.4f}, OpenMM={omm_cmap:.4f}, diff={diff:.4f} kcal/mol"
@@ -274,26 +285,22 @@ class TestEnergyDecomposition:
     print(f"JAX LJ energy: {jax_lj:.4f} kcal/mol")
 
   def test_gb_energy_matches_openmm(self, jax_openmm_system):
-    """GB solvation energy should match OpenMM CustomGBForce."""
+    """GB polar solvation energy should match OpenMM GBSAOBCForce."""
     data = jax_openmm_system
     pos = data["jax_positions"]
     fns = data["decomposed_fns"]
 
     e_gb, e_direct, born_radii = fns["electrostatics"](pos)
-    # JAX e_gb is polar only; OpenMM CustomGBForce includes ACE nonpolar
-    # Get ACE energy from the 'nonpolar' fn, passing precomputed born_radii
-    jax_ace = float(fns["nonpolar"](pos, born_radii=born_radii))
-    jax_gb = float(e_gb) + jax_ace
-    omm_gb = data["omm_components"].get("CustomGBForce", 0.0)
+    jax_gb = float(e_gb)
+    # GBSAOBCForce includes ACE nonpolar surface area term; compare polar only to polar
+    omm_gb = data["omm_components"].get("GBSAOBCForce", 0.0)
     diff = abs(jax_gb - omm_gb)
     print(f"GB energy: JAX={jax_gb:.4f}, OpenMM={omm_gb:.4f}, diff={diff:.4f} kcal/mol")
 
-    # GB should match within 100 kcal/mol — JAX OBC2 uses iterative Born radius
-    # computation with slightly different numerics than OpenMM's analytical path.
-    # A 76 kcal/mol gap on Chignolin is expected; the sign and magnitude match.
-    assert diff < 100.0, (
+    # GBSAOBCForce uses identical OBC2 radii — expect <50 kcal/mol with matched params.
+    assert diff < 50.0, (
       f"GB energy mismatch: JAX={jax_gb:.4f}, OpenMM={omm_gb:.4f}, "
-      f"diff={diff:.4f} kcal/mol (tolerance=100.0)"
+      f"diff={diff:.4f} kcal/mol (tolerance=50.0)"
     )
 
   def test_nonbonded_combined_matches_openmm(self, jax_openmm_system):
@@ -306,15 +313,6 @@ class TestEnergyDecomposition:
     _, e_direct, _ = fns["electrostatics"](pos)
     jax_exception = float(fns["exception"](pos)) if "exception" in fns else 0.0
     jax_nonbonded = jax_lj + float(e_direct) + jax_exception
-    
-    params = data["system_params"]
-    print(f"JAX params[88]: q={params.charges[88]}, s={params.sigmas[88]}, e={params.epsilons[88]}")
-    print(f"JAX params[93]: q={params.charges[93]}, s={params.sigmas[93]}, e={params.epsilons[93]}")
-    print(f"JAX LJ={jax_lj}, Elec={float(e_direct)}")
-
-    import openmm
-    nb_force = [f for f in data["omm_system"].getForces() if isinstance(f, openmm.NonbondedForce)][0]
-    print(f"OMM Exception 500: {nb_force.getExceptionParameters(500)}")
 
     omm_nonbonded = data["omm_components"].get("NonbondedForce", 0.0)
 
@@ -373,6 +371,7 @@ class TestEnergyDecomposition:
     e_gb, e_direct, born_radii = fns["electrostatics"](pos)
     jax_gb = float(e_gb)
     jax_coul = float(e_direct)
+    jax_exception = float(fns["exception"](pos)) if "exception" in fns else 0.0
     jax_np = float(fns["nonpolar"](pos, born_radii)) if born_radii is not None else 0.0
     jax_total = float(fns["total"](pos))
 
@@ -383,7 +382,7 @@ class TestEnergyDecomposition:
     omm_torsion = omm.get("PeriodicTorsionForce", 0.0)
     omm_cmap = omm.get("CMAPTorsionForce", 0.0)
     omm_nonbonded = omm.get("NonbondedForce", 0.0)
-    omm_gb = omm.get("CustomGBForce", 0.0)
+    omm_gb = omm.get("GBSAOBCForce", 0.0)
     omm_total = data["omm_total_energy"]
 
     # Print table
@@ -403,7 +402,8 @@ class TestEnergyDecomposition:
       ("CMAP", jax_cmap, omm_cmap),
       ("LJ", jax_lj, None),
       ("Coulomb", jax_coul, None),
-      ("LJ+Coulomb", jax_lj + jax_coul, omm_nonbonded),
+      ("1-4 Exceptions", jax_exception, None),
+      ("LJ+Coul+1-4", jax_lj + jax_coul + jax_exception, omm_nonbonded),
       ("GB Solvation", jax_gb, omm_gb),
       ("Nonpolar SASA", jax_np, None),
     ]

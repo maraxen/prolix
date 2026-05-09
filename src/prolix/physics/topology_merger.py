@@ -10,6 +10,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 import jax.numpy as jnp
+import numpy as np
 from flax import struct
 from proxide.core.containers import Protein
 
@@ -80,7 +81,7 @@ def merge_solvated_topology(
 
     params = get_water_params(model_type)
     n_protein = len(protein.full_coordinates)
-    
+
     # Real atom mask from protein (handles missing atoms in PDB)
     # Use full_atom_mask (flat, matches full_coordinates) not atom_mask (N_res, 37)
     p_mask = getattr(protein, "full_atom_mask", None)
@@ -148,7 +149,7 @@ def merge_solvated_topology(
     bond_params = protein.bond_params
     angles = protein.angles
     angle_params = protein.angle_params
-    
+
     # New bonded terms
     proper_dihedrals = getattr(protein, "proper_dihedrals", getattr(protein, "dihedrals", None))
     dihedral_params = getattr(protein, "dihedral_params", None)
@@ -163,13 +164,13 @@ def merge_solvated_topology(
     # 3. Add water bonded terms
     water_indices = solvent_topo.water_indices + n_protein
     n_waters = solvent_topo.n_waters
-    
+
     # O-H1 and O-H2 bonds
     water_bonds = jnp.stack([
         water_indices[:, [0, 1]],
         water_indices[:, [0, 2]]
     ], axis=1).reshape(-1, 2)
-    
+
     water_bond_params = jnp.tile(
         jnp.array([params.r_OH, params.k_bond]), (n_waters * 2, 1)
     )
@@ -183,7 +184,7 @@ def merge_solvated_topology(
     # Combine bonded terms
     merged_bonds = jnp.concatenate([bonds, water_bonds]) if bonds is not None else water_bonds
     merged_bond_params = jnp.concatenate([bond_params, water_bond_params]) if bonds is not None else water_bond_params
-    
+
     merged_angles = jnp.concatenate([angles, water_angles]) if angles is not None else water_angles
     merged_angle_params = jnp.concatenate([angle_params, water_angle_params]) if angles is not None else water_angle_params
 
@@ -191,17 +192,35 @@ def merge_solvated_topology(
     from prolix.utils.topology import find_bonded_exclusions
     n_total = n_protein + len(solvent_topo.charges)
     exclusions = find_bonded_exclusions(merged_bonds, n_total)
-    
+
     # 1-4 scaling (water has none, so we reuse protein scales)
     c14 = protein.coulomb14scale if protein.coulomb14scale is not None else 0.83333333
     l14 = protein.lj14scale if protein.lj14scale is not None else 0.5
-    
+
+    # Initialize exception fields (protein-only; water has none)
+    exc_pairs = jnp.zeros((0, 2), dtype=jnp.int32)
+    exc_sigmas = jnp.zeros((0,), dtype=jnp.float32)
+    exc_epsilons = jnp.zeros((0,), dtype=jnp.float32)
+    exc_chargeprods = jnp.zeros((0,), dtype=jnp.float32)
+
+    # Propagate protein exception data if available
+    if (hasattr(protein, 'exception_pairs') and protein.exception_pairs is not None
+            and len(protein.exception_pairs) > 0):
+      exc_pairs = jnp.asarray(protein.exception_pairs, dtype=jnp.int32)
+      exc_sigmas = jnp.asarray(protein.exception_sigmas, dtype=jnp.float32)
+      exc_epsilons = jnp.asarray(protein.exception_epsilons, dtype=jnp.float32)
+      exc_chargeprods = jnp.asarray(protein.exception_chargeprods, dtype=jnp.float32)
+
     merged_excl = ExclusionSpec(
         idx_12_13=jnp.concatenate([exclusions.idx_12, exclusions.idx_13], axis=0),
         idx_14=exclusions.idx_14,
         scale_14_elec=c14,
         scale_14_vdw=l14,
-        n_atoms=n_total
+        n_atoms=n_total,
+        exception_pairs=exc_pairs,
+        exception_sigmas=exc_sigmas,
+        exception_epsilons=exc_epsilons,
+        exception_chargeprods=exc_chargeprods,
     )
 
     solvent_mask = jnp.ones(len(solvent_topo.charges), dtype=bool)

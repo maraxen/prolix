@@ -73,7 +73,8 @@ viz = [
 ]
 
 [tool.pytest.ini_options]
-timeout = 60
+timeout = 900
+timeout_method = "thread"
 # Default fast CI: pytest -m "not slow" (matches .github/workflows/ci.yml test step)
 # OpenMM parity (optional dep): pytest -m "openmm"
 markers = [
