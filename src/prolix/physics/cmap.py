@@ -1,4 +1,4 @@
-# File: src/prolix.physics/cmap.py
+# File: src/prolix/physics/cmap.py
 """CMAP torsion energy using OpenMM-compatible periodic cubic spline interpolation.
 
 This module implements CMAP energy calculation using the same algorithm as OpenMM's
@@ -362,8 +362,8 @@ def compute_cmap_energies(
     # Grid indices
     i = jnp.floor(phi / delta).astype(jnp.int32)
     j = jnp.floor(psi / delta).astype(jnp.int32)
-    i = jnp.clip(i, 0, grid_size - 1)
-    j = jnp.clip(j, 0, grid_size - 1)
+    i = i % grid_size
+    j = j % grid_size
 
     # Local coordinates [0, 1)
     da = phi / delta - i
@@ -375,11 +375,7 @@ def compute_cmap_energies(
     # Evaluate
     return eval_bicubic_patch(patch_coeffs, da, db)
 
-  energies = jax.vmap(sample_one)(map_indices, phi_norm, psi_norm)
-
-  # Scale energies to match OpenMM parity
-  # TODO(mar): Track down the root cause of this factor (likely a 1/0.55 scaling)
-  return energies
+  return jax.vmap(sample_one)(map_indices, phi_norm, psi_norm)
 
 def compute_cmap_energy(
   phi_angles: TorsionAngles,
