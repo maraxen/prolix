@@ -71,12 +71,12 @@ class TestOpenMMSolvationParity:
     """Extract physics parameters from OpenMM System into Prolix-compatible dict."""
     import openmm
     from openmm import unit
-    
+
     n_particles = omm_system.getNumParticles()
     charges = np.zeros(n_particles)
     sigmas = np.zeros(n_particles)
     epsilons = np.zeros(n_particles)
-    
+
     # Nonbonded
     for i in range(omm_system.getNumForces()):
         force = omm_system.getForce(i)
@@ -93,7 +93,7 @@ class TestOpenMMSolvationParity:
         "epsilons": jnp.array(epsilons),
         "exclusion_mask": None, # make_energy_fn requires this key
     }
-    
+
     return params
 
   @pytest.fixture
@@ -128,7 +128,7 @@ class TestOpenMMSolvationParity:
       nonbondedCutoff=(cutoff / 10.0) * unit.nanometer,
       constraints=None,  # Static parity needs no constraints
     )
-    
+
     # Configure PME precisely
     for i in range(omm_system.getNumForces()):
         force = omm_system.getForce(i)
@@ -162,7 +162,7 @@ class TestOpenMMSolvationParity:
     with tempfile.NamedTemporaryFile(suffix=".pdb", mode="w") as tmp:
         app.PDBFile.writeFile(modeller.topology, modeller.positions, tmp)
         tmp.flush()
-        
+
         # Parse with Prolix
         spec = OutputSpec(parameterize_md=True, coord_format=CoordFormat.Full, force_field=str(FF_PATH))
         protein_proxide = parse_structure(tmp.name, spec)
@@ -187,7 +187,7 @@ class TestOpenMMSolvationParity:
     data = solvated_system_openmm
     protein = data["protein_proxide"]
     topology = data["topology"]
-    
+
     # 1. OpenMM Energy
     integrator = openmm.VerletIntegrator(0.001 * unit.picoseconds)
     context = openmm.Context(
@@ -196,11 +196,11 @@ class TestOpenMMSolvationParity:
       openmm.Platform.getPlatformByName(str(data["platform"])),
     )
     context.setPositions((data["positions"] * 0.1) * unit.nanometer)
-    
+
     # Total
     state = context.getState(getEnergy=True)
     omm_energy = state.getPotentialEnergy().value_in_unit(unit.kilocalories_per_mole)
-    
+
     # Decomposed
     omm_nonbonded = context.getState(getEnergy=True, groups={1}).getPotentialEnergy().value_in_unit(unit.kilocalories_per_mole)
     omm_bonds = context.getState(getEnergy=True, groups={2}).getPotentialEnergy().value_in_unit(unit.kilocalories_per_mole)
@@ -211,7 +211,7 @@ class TestOpenMMSolvationParity:
     # Use the Prolix-parsed protein for perfect topology mapping
     box_vec = jnp.array(data["box"])
     displacement_fn, _ = pbc.create_periodic_space(box_vec)
-    
+
     # Manually extract the charges from the OpenMM system to ensure 1-1 match
     omm_params = self._get_proxide_params_from_omm(data["system"])
     protein = protein.replace(
@@ -219,7 +219,7 @@ class TestOpenMMSolvationParity:
         sigmas=omm_params["sigmas"],
         epsilons=omm_params["epsilons"]
     )
-    
+
     # MANUAL WATER EXCLUSIONS (O-H1, O-H2, H1-H2)
     water_excl = []
     for atom in topology.atoms():
@@ -229,18 +229,22 @@ class TestOpenMMSolvationParity:
                 h1_idx = o_idx + 1
                 h2_idx = o_idx + 2
                 water_excl.extend([[o_idx, h1_idx], [o_idx, h2_idx], [h1_idx, h2_idx]])
-    
+
     exclusion_spec = nl.ExclusionSpec.from_protein(protein)
     all_excl = jnp.concatenate([exclusion_spec.idx_12_13, jnp.array(water_excl, dtype=jnp.int32)], axis=0)
-    
+
     exclusion_spec = nl.ExclusionSpec(
         n_atoms=exclusion_spec.n_atoms,
         idx_12_13=all_excl,
         idx_14=exclusion_spec.idx_14,
         scale_14_elec=exclusion_spec.scale_14_elec,
-        scale_14_vdw=exclusion_spec.scale_14_vdw
+        scale_14_vdw=exclusion_spec.scale_14_vdw,
+        exception_pairs=exclusion_spec.exception_pairs,
+        exception_sigmas=exclusion_spec.exception_sigmas,
+        exception_epsilons=exclusion_spec.exception_epsilons,
+        exception_chargeprods=exclusion_spec.exception_chargeprods,
     )
-    
+
     energy_fns = system.make_energy_fn(
         displacement_fn,
         protein,
@@ -254,15 +258,15 @@ class TestOpenMMSolvationParity:
         strict_parameterization=False,
         return_decomposed=True
     )
-    
+
     r = jnp.array(data["positions"])
-    
+
     jax_bonds = float(energy_fns["bond"](r))
     jax_angles = float(energy_fns["angle"](r))
     jax_dihedrals = float(energy_fns["dihedral"](r))
-    jax_elec = float(energy_fns["electrostatics"](r)[1]) 
+    jax_elec = float(energy_fns["electrostatics"](r)[1])
     jax_vdw = float(energy_fns["lj"](r))
-    
+
     jax_total = jax_bonds + jax_angles + jax_dihedrals + jax_elec + jax_vdw
 
     print(f"\nEnergy Decomposition (kcal/mol):")
@@ -278,7 +282,7 @@ class TestOpenMMSolvationParity:
     # Allow for constant PME background shift (≈39 kcal/mol at this system size).
     # Primary diagnostic is force RMSE in ``test_force_parity``; see module docstring.
     assert np.isclose(omm_energy, jax_total, atol=40.0)
-    
+
   def test_force_parity(self, solvated_system_openmm):
     """Rigorous force vector parity vs OpenMM Reference."""
     import openmm
@@ -287,7 +291,7 @@ class TestOpenMMSolvationParity:
     data = solvated_system_openmm
     protein = data["protein_proxide"]
     topology = data["topology"]
-    
+
     # 1. OpenMM Forces
     integrator = openmm.VerletIntegrator(0.001 * unit.picoseconds)
     context = openmm.Context(
@@ -298,11 +302,11 @@ class TestOpenMMSolvationParity:
     context.setPositions((data["positions"] * 0.1) * unit.nanometer)
     state = context.getState(getForces=True)
     omm_forces = state.getForces(asNumpy=True).value_in_unit(unit.kilocalories_per_mole / unit.angstrom)
-    
+
     # 2. Prolix Forces
     box_vec = jnp.array(data["box"])
     displacement_fn, _ = pbc.create_periodic_space(box_vec)
-    
+
     # Sync params
     omm_params = self._get_proxide_params_from_omm(data["system"])
     protein = protein.replace(
@@ -310,7 +314,7 @@ class TestOpenMMSolvationParity:
         sigmas=omm_params["sigmas"],
         epsilons=omm_params["epsilons"]
     )
-    
+
     # MANUAL WATER EXCLUSIONS
     water_excl = []
     for atom in topology.atoms():
@@ -323,15 +327,19 @@ class TestOpenMMSolvationParity:
 
     exclusion_spec = nl.ExclusionSpec.from_protein(protein)
     all_excl = jnp.concatenate([exclusion_spec.idx_12_13, jnp.array(water_excl, dtype=jnp.int32)], axis=0)
-    
+
     exclusion_spec = nl.ExclusionSpec(
         n_atoms=exclusion_spec.n_atoms,
         idx_12_13=all_excl,
         idx_14=exclusion_spec.idx_14,
         scale_14_elec=exclusion_spec.scale_14_elec,
-        scale_14_vdw=exclusion_spec.scale_14_vdw
+        scale_14_vdw=exclusion_spec.scale_14_vdw,
+        exception_pairs=exclusion_spec.exception_pairs,
+        exception_sigmas=exclusion_spec.exception_sigmas,
+        exception_epsilons=exclusion_spec.exception_epsilons,
+        exception_chargeprods=exclusion_spec.exception_chargeprods,
     )
-    
+
     energy_fn = system.make_energy_fn(
         displacement_fn,
         protein,
@@ -344,14 +352,14 @@ class TestOpenMMSolvationParity:
         cutoff_distance=data["cutoff"],
         strict_parameterization=False,
     )
-    
+
     r = jnp.array(data["positions"])
     grad_fn = jax.grad(energy_fn)
     jax_forces = -np.array(grad_fn(r))
-    
+
     rmse = float(np.sqrt(np.mean((omm_forces - jax_forces)**2)))
     print(f"\nForce RMSE: {rmse:.6f} kcal/mol/Å")
-    
+
     # Target RMSE < 3.0 kcal/mol/Å (allowing for PME mesh/precision differences)
     assert rmse < 3.0, f"Force RMSE too high: {rmse}"
 

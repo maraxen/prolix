@@ -59,6 +59,10 @@ def _padded_from_periodic_dict(
         scale_14_elec=0.83333333,
         scale_14_vdw=0.5,
         n_atoms=n,
+        exception_pairs=jnp.zeros((0, 2), dtype=jnp.int32),
+        exception_sigmas=jnp.zeros((0,), dtype=jnp.float32),
+        exception_epsilons=jnp.zeros((0,), dtype=jnp.float32),
+        exception_chargeprods=jnp.zeros((0,), dtype=jnp.float32),
     )
     ei, sv, se = nl.map_exclusions_to_dense_padded(spec, max_exclusions=32)
 

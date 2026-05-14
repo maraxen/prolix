@@ -44,12 +44,12 @@ def _get_prolix_params_from_omm(omm_system):
     """Extract physics parameters from OpenMM System into Prolix-compatible dict."""
     import openmm
     from openmm import unit
-    
+
     n_particles = omm_system.getNumParticles()
     charges = np.zeros(n_particles)
     sigmas = np.zeros(n_particles)
     epsilons = np.zeros(n_particles)
-    
+
     # Nonbonded
     for i in range(omm_system.getNumForces()):
         force = omm_system.getForce(i)
@@ -69,17 +69,17 @@ def _get_prolix_params_from_omm(omm_system):
 def run_openmm_stats(n_steps=10000, target_temp=300.0, dt_fs=2.0):
     """Run OpenMM and collect T statistics."""
     from openmm import app, unit, openmm
-    
+
     pdb_path = DATA_DIR / "1UAO.pdb"
     pdb = app.PDBFile(str(pdb_path))
     ff = app.ForceField(str(FF_PATH), "amber14/tip3p.xml")
-    
+
     modeller = app.Modeller(pdb.topology, pdb.positions)
     modeller.addHydrogens(ff)
     modeller.addSolvent(ff, padding=0.8 * unit.nanometer, model="tip3p")
-    
+
     cutoff = REGRESSION_PME["cutoff_distance"]
-    
+
     omm_system = ff.createSystem(
         modeller.topology,
         nonbondedMethod=app.PME,
@@ -88,14 +88,14 @@ def run_openmm_stats(n_steps=10000, target_temp=300.0, dt_fs=2.0):
         rigidWater=True,
         removeCMMotion=True
     )
-    
+
     # Precise PME
     for i in range(omm_system.getNumForces()):
         force = omm_system.getForce(i)
         if isinstance(force, openmm.NonbondedForce):
-            force.setPMEParameters(REGRESSION_PME["pme_alpha"] * 10.0, 
-                                 REGRESSION_PME["pme_grid_points"], 
-                                 REGRESSION_PME["pme_grid_points"], 
+            force.setPMEParameters(REGRESSION_PME["pme_alpha"] * 10.0,
+                                 REGRESSION_PME["pme_grid_points"],
+                                 REGRESSION_PME["pme_grid_points"],
                                  REGRESSION_PME["pme_grid_points"])
             force.setUseDispersionCorrection(False)
 
@@ -104,17 +104,17 @@ def run_openmm_stats(n_steps=10000, target_temp=300.0, dt_fs=2.0):
         1.0 / unit.picosecond,
         dt_fs * unit.femtoseconds
     )
-    
+
     platform = openmm.Platform.getPlatformByName("Reference")
     simulation = app.Simulation(modeller.topology, omm_system, integrator, platform)
     simulation.context.setPositions(modeller.positions)
-    
+
     # Thermalize briefly
     simulation.step(500)
-    
+
     temps = []
     energies = []
-    
+
     for i in range(n_steps // 100):
         simulation.step(100)
         state = simulation.context.getState(getEnergy=True)
@@ -123,13 +123,13 @@ def run_openmm_stats(n_steps=10000, target_temp=300.0, dt_fs=2.0):
         temp = (2.0 * ke) / (n_degrees * 0.0019872041)
         temps.append(temp)
         energies.append(state.getPotentialEnergy().value_in_unit(unit.kilocalories_per_mole) + ke)
-        
+
     return np.array(temps), np.array(energies)
 
 def run_prolix_stats(n_steps=10000, target_temp=300.0, dt_fs=2.0):
     """Run Prolix and collect T statistics."""
     from openmm import app, unit
-    
+
     # 1. Setup solvated system via OpenMM Modeller
     pdb_path = DATA_DIR / "1UAO.pdb"
     pdb = app.PDBFile(str(pdb_path))
@@ -137,7 +137,7 @@ def run_prolix_stats(n_steps=10000, target_temp=300.0, dt_fs=2.0):
     modeller = app.Modeller(pdb.topology, pdb.positions)
     modeller.addHydrogens(ff)
     modeller.addSolvent(ff, padding=0.8 * unit.nanometer, model="tip3p")
-    
+
     positions_nm = modeller.positions.value_in_unit(unit.nanometer)
     positions_A = np.array([[p[0] * 10, p[1] * 10, p[2] * 10] for p in positions_nm])
 
@@ -162,7 +162,7 @@ def run_prolix_stats(n_steps=10000, target_temp=300.0, dt_fs=2.0):
         box_vecs[2][2].value_in_unit(unit.angstrom),
     ])
     displacement_fn, shift_fn = pbc.create_periodic_space(box)
-    
+
     # MANUAL WATER EXCLUSIONS (O-H1, O-H2, H1-H2)
     water_excl = []
     water_indices_list = []
@@ -174,7 +174,7 @@ def run_prolix_stats(n_steps=10000, target_temp=300.0, dt_fs=2.0):
                 h2_idx = o_idx + 2
                 water_excl.extend([[o_idx, h1_idx], [o_idx, h2_idx], [h1_idx, h2_idx]])
                 water_indices_list.append([o_idx, h1_idx, h2_idx])
-    
+
     # Sync charges/sigmas/epsilons with OpenMM to ensure 1-1 match
     omm_params = _get_prolix_params_from_omm(omm_system)
     protein = protein.replace(
@@ -185,7 +185,7 @@ def run_prolix_stats(n_steps=10000, target_temp=300.0, dt_fs=2.0):
 
     n_atoms = protein.charges.shape[0]
     self_excl = jnp.stack([jnp.arange(n_atoms), jnp.arange(n_atoms)], axis=1)
-    
+
     exclusion_spec = nl.ExclusionSpec.from_protein(protein)
     all_1213 = jnp.concatenate([exclusion_spec.idx_12_13, self_excl, jnp.array(water_excl, dtype=jnp.int32)], axis=0)
     exclusion_spec = nl.ExclusionSpec(
@@ -193,9 +193,13 @@ def run_prolix_stats(n_steps=10000, target_temp=300.0, dt_fs=2.0):
         idx_12_13=all_1213,
         idx_14=exclusion_spec.idx_14,
         scale_14_elec=exclusion_spec.scale_14_elec,
-        scale_14_vdw=exclusion_spec.scale_14_vdw
+        scale_14_vdw=exclusion_spec.scale_14_vdw,
+        exception_pairs=exclusion_spec.exception_pairs,
+        exception_sigmas=exclusion_spec.exception_sigmas,
+        exception_epsilons=exclusion_spec.exception_epsilons,
+        exception_chargeprods=exclusion_spec.exception_chargeprods,
     )
-    
+
     energy_fn = system.make_energy_fn(
         displacement_fn,
         protein,
@@ -208,13 +212,13 @@ def run_prolix_stats(n_steps=10000, target_temp=300.0, dt_fs=2.0):
         cutoff_distance=REGRESSION_PME["cutoff_distance"],
         strict_parameterization=False
     )
-    
+
     # 3. Setup Langevin + SETTLE
     dt = dt_fs / 1000.0
     kT = 0.0019872041 * target_temp
-    
+
     water_indices = jnp.array(water_indices_list, dtype=jnp.int32)
-    
+
     init_fn, apply_fn = settle.settle_langevin(
         energy_fn,
         shift_fn=shift_fn,
@@ -223,33 +227,33 @@ def run_prolix_stats(n_steps=10000, target_temp=300.0, dt_fs=2.0):
         gamma=1.0,
         water_indices=water_indices
     )
-    
+
     key = jax.random.PRNGKey(42)
     state = init_fn(key, jnp.array(positions_A))
-    
+
     # Thermalize
     print("  Prolix thermalization (500 steps)...")
     for _ in range(500):
         state = apply_fn(state)
-        
+
     temps = []
     energies = []
-    
+
     n_constraints = len(water_indices_list) * 3 # SETTLE removes 3 DOF per water
     n_degrees = 3 * n_atoms - n_constraints
-    
+
     print(f"  Prolix production ({n_steps} steps)...")
     for i in range(n_steps // 100):
         for _ in range(100):
             state = apply_fn(state)
-        
+
         ke = jnp.sum(0.5 * jnp.sum(state.momentum**2, axis=-1) / state.mass.squeeze())
         temp = (2.0 * ke) / (n_degrees * 0.0019872041)
         pe = energy_fn(state.positions)
-        
+
         temps.append(float(temp))
         energies.append(float(pe + ke))
-        
+
     return np.array(temps), np.array(energies)
 
 def main():
@@ -259,26 +263,26 @@ def main():
 
     n_steps = 1000 # Short run for smoke test
     target_temp = 300.0
-    
+
     print(f"Running OpenMM ({n_steps} steps)...")
     omm_t, omm_e = run_openmm_stats(n_steps, target_temp)
-    
+
     print(f"Running Prolix ({n_steps} steps)...")
     jax_t, jax_e = run_prolix_stats(n_steps, target_temp)
-    
+
     print(f"\nResults (Target T = {target_temp} K):")
     print(f"  Integrator | Mean T (K) | Std T (K) | Drift (kcal/mol/step)")
     print(f"  -----------|------------|-----------|----------------------")
-    
+
     omm_drift = (omm_e[-1] - omm_e[0]) / n_steps
     jax_drift = (jax_e[-1] - jax_e[0]) / n_steps
-    
+
     print(f"  OpenMM     | {np.mean(omm_t):10.2f} | {np.std(omm_t):9.2f} | {omm_drift:10.6f}")
     print(f"  Prolix     | {np.mean(jax_t):10.2f} | {np.std(jax_t):9.2f} | {jax_drift:10.6f}")
-    
+
     t_diff = abs(np.mean(omm_t) - np.mean(jax_t))
     print(f"\nTemperature difference: {t_diff:.2f} K")
-    
+
     if np.isnan(t_diff):
         print("\033[91mFAIL: NaNs detected in dynamics.\033[0m")
     elif t_diff < 15.0: # Allow larger margin for short smoke run

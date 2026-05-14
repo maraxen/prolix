@@ -73,11 +73,15 @@ def verify_torsions():
         if dihs is not None:
             for i in range(len(dihs)):
                 p1, p2, p3, p4 = map(int, dihs[i])
-                period, phase, k = map(float, params[i])
                 t = tuple(sorted((p1, p2, p3, p4)))
                 
-                if t not in jax_torsions: jax_torsions[t] = []
-                jax_torsions[t].append({"period": int(period), "k": k})
+                # params[i] is (N_terms, 3)
+                for term in params[i]:
+                    period, phase, k = map(float, term)
+                    if k == 0.0: continue # Skip zero-padded terms
+                    
+                    if t not in jax_torsions: jax_torsions[t] = []
+                    jax_torsions[t].append({"period": int(period), "k": k})
 
     process_dihs(protein.proper_dihedrals, protein.dihedral_params)
     process_dihs(protein.impropers, protein.improper_params)
