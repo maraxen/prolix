@@ -1500,6 +1500,51 @@ def _langevin_step_o_constrained(
   return p_out, key
 
 
+def _langevin_step_o_free_dof(
+    momentum: Array,
+    mass: Array,
+    gamma: float,
+    dt: float,
+    kT: float,
+    rng: Array,
+    free_dof_mask: Array,
+) -> tuple[Array, Array]:
+    r"""Ornstein-Uhlenbeck noise applied ONLY to free (non-water) atoms.
+
+    Constrained (water) atoms receive NO thermostat noise, breaking the
+    SETTLE+thermostat KE feedback loop. Free atoms get standard isotropic OU.
+
+    Args:
+        momentum: (N_atoms, 3) momentum array.
+        mass: (N_atoms,) or (N_atoms, 1) mass array.
+        gamma: Friction coefficient (ps^-1 in AKMA).
+        dt: Timestep (AKMA).
+        kT: Thermal energy (kcal/mol).
+        rng: JAX PRNGKey.
+        free_dof_mask: (N_atoms,) bool — True = free atom, False = constrained.
+            Must not be all-False (pure-water systems not supported).
+
+    Returns:
+        (momentum_new, key_out) tuple.
+    """
+    # NOTE: Do NOT add a jnp.all(~free_dof_mask) guard here — this function is
+    # JIT-traced and jnp.all returns a traced value. Python `if` on a traced bool
+    # causes a concretization error. Caller must validate free_dof_mask at
+    # construction time (before JIT), e.g. in O_Step.__init__ or settle_langevin.
+
+    c1 = jnp.exp(-gamma * dt)
+    c2 = jnp.sqrt(1 - c1**2)
+
+    key, split = jax.random.split(rng)
+    noise = jax.random.normal(split, momentum.shape, dtype=momentum.dtype)
+    p_ou = c1 * momentum + c2 * jnp.sqrt(mass * kT) * noise
+
+    # Apply only to free atoms; constrained atoms keep original momentum
+    mask = free_dof_mask[:, None] if free_dof_mask.ndim == 1 else free_dof_mask
+    momentum_new = jnp.where(mask, p_ou, momentum)
+    return momentum_new, key
+
+
 def _langevin_settle_vel(
   momentum: Array,
   positions_old: Array,
