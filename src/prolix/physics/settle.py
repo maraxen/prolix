@@ -1532,6 +1532,11 @@ def _langevin_step_o_free_dof(
     # causes a concretization error. Caller must validate free_dof_mask at
     # construction time (before JIT), e.g. in O_Step.__init__ or settle_langevin.
 
+    # Canonicalize mass to (N,1) so jnp.sqrt(mass*kT)*noise broadcasts correctly
+    # against noise.shape=(N,3). Without this, (N,) mass would broadcast as (1,N),
+    # applying mass[j] to spatial dim j rather than mass[i] to atom i.
+    mass = mass.reshape(-1, 1) if mass.ndim == 1 else mass
+
     c1 = jnp.exp(-gamma * dt)
     c2 = jnp.sqrt(1 - c1**2)
 

@@ -180,6 +180,26 @@ def test_langevin_o_step_masked_no_friction_decay() -> None:
   assert jnp.allclose(p_new[2], momentum[2])
   assert jnp.allclose(p_new[3], momentum[3])
 
+def test_langevin_o_step_1d_mass_same_as_2d() -> None:
+  """mass.shape=(N,) and mass.shape=(N,1) must produce identical output.
+
+  Regression guard for the mass-shape canonicalization in _langevin_step_o_free_dof:
+  without reshape, (N,) mass would broadcast as (1,N) against (N,3) noise, applying
+  mass[j] to spatial dimension j instead of mass[i] to atom i — silent wrong physics.
+  """
+  from prolix.physics.settle import _langevin_step_o_free_dof
+  key = jax.random.PRNGKey(42)
+  momentum = jnp.ones((4, 3))
+  mass_1d = jnp.array([1.0, 2.0, 3.0, 4.0])          # shape (4,)
+  mass_2d = mass_1d.reshape(-1, 1)                     # shape (4,1)
+  free_mask = jnp.array([True, True, False, False])
+
+  p_1d, _ = _langevin_step_o_free_dof(momentum, mass_1d, 1.0, 0.001, 1.0, key, free_mask)
+  p_2d, _ = _langevin_step_o_free_dof(momentum, mass_2d, 1.0, 0.001, 1.0, key, free_mask)
+  assert jnp.allclose(p_1d, p_2d), (
+      "1D and 2D mass shapes produce different outputs — mass reshape canonicalization broken"
+  )
+
 
 def _mean_rigid_t_csvr_after_burn(*, dt_fs: float, n_waters: int, seed: int, steps: int, burn: int) -> float:
   """Helper for CSVR temperature tests. Same as Langevin version but uses settle_csvr."""
