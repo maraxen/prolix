@@ -1,4 +1,5 @@
 import pytest
+import jax
 import jax.numpy as jnp
 import numpy as np
 
@@ -41,3 +42,19 @@ def backbone_positions_multi_residue():
     res2 = res1 + np.array([3.8, 0.0, 0.0])
     res3 = res1 + np.array([7.6, 0.0, 0.0])
     return jnp.array(np.stack([res1, res2, res3]), dtype=jnp.float32)
+
+@pytest.fixture(params=[jnp.float32, jnp.float64])
+def dtype_mode(request):
+    """Function-scoped dtype mode fixture.
+    Parametrizes tests over f32 and f64. Saves/restores jax_enable_x64."""
+    dtype = request.param
+    x64_before = jax.config.jax_enable_x64
+    jax.config.update("jax_enable_x64", dtype == jnp.float64)
+    yield dtype
+    jax.config.update("jax_enable_x64", x64_before)
+
+@pytest.fixture(scope="session", autouse=True)
+def _session_x64_guard():
+    """Session-wide guard: ensure x64 is not left enabled by any test."""
+    yield
+    jax.config.update("jax_enable_x64", False)
