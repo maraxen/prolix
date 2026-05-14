@@ -75,6 +75,7 @@ from prolix.physics.settle import (
     _langevin_step_b,
     _langevin_step_o,
     _langevin_step_o_constrained,
+    _langevin_step_o_free_dof,
     settle_velocities,
     settle_positions,
 )
@@ -236,14 +237,33 @@ class O_Step(Step):
     gamma = params.gamma
     kT = params.kT
 
+    # Check if we should use free-DOF OU step
+    use_free_dof = (
+        self.project_rigid
+        and params.constraint_dofs is not None
+        and hasattr(params.constraint_dofs, "free_dof_mask")
+        and params.constraint_dofs.free_dof_mask is not None
+    )
+
     # Check if we should use constrained OU step
     use_constrained = (
-        self.project_rigid
+        not use_free_dof
+        and self.project_rigid
         and params.constraint_dofs is not None
         and params.water_indices is not None
     )
 
-    if use_constrained:
+    if use_free_dof:
+      momentum_new, key_out = _langevin_step_o_free_dof(
+          state.momentum,
+          state.mass,
+          gamma,
+          dt,
+          kT,
+          state.rng,
+          params.constraint_dofs.free_dof_mask,
+      )
+    elif use_constrained:
       momentum_new, key_out = _langevin_step_o_constrained(
           state.momentum,
           state.positions,
@@ -251,12 +271,12 @@ class O_Step(Step):
           gamma,
           dt,
           kT,
-          state.key,
+          state.rng,
           params.water_indices,
       )
     else:
       momentum_new, key_out = _langevin_step_o(
-          state.momentum, state.mass, gamma, dt, kT, state.key
+          state.momentum, state.mass, gamma, dt, kT, state.rng
       )
 
     return state.__replace__(momentum=momentum_new, rng=key_out)
@@ -345,7 +365,7 @@ class A_Step(Step):
         Updated state with new position.
     """
     dt = params.dt * self.fraction
-    
+
     # If no shift_fn, use simple addition (no PBC wrapping)
     if self.shift_fn is None:
       velocity = state.momentum / state.mass
@@ -551,7 +571,7 @@ class CSVR_Step(Step):
     dt = params.dt
     kT = params.kT
     n_dof = params.n_dof
-    
+
     if n_dof is None:
       raise ValueError("CSVR_Step requires n_dof in IntegratorParams")
 
@@ -561,7 +581,7 @@ class CSVR_Step(Step):
 
     # Compute rescaling factor and new RNG using JIT-safe version
     lambda_factor, key_out = _csvr_compute_lambda_jit_safe(
-        state.key, ke, n_dof, kT, dt, tau=self.tau
+        state.rng, ke, n_dof, kT, dt, tau=self.tau
     )
 
     # Rescale momenta
