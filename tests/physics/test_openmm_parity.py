@@ -12,6 +12,14 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
+# NOTE on OpenMM per-term force API:
+# OpenMM's Context.getState() supports per-group force extraction via groups=1<<i parameter
+# (where i is the force group index). This allows extracting forces for individual energy terms.
+# The jax_openmm_system fixture sets force groups for each OpenMM force (line 115-116) to enable
+# per-component energy extraction. Per-group FORCES are not tested in Sprint 12; our gradient
+# consistency validation (TestGradientConsistency) uses JAX autodiff vs finite-difference on
+# individual energy functions extracted from the system, not per-group OpenMM forces.
+
 # Enable x64 for physics
 # =============================================================================
 # Shared Fixtures
@@ -37,14 +45,14 @@ def jax_openmm_system(openmm_available):
   from jax_md import space
   from pdbfixer import PDBFixer
   from proxide.io.parsing.backend import parse_structure, OutputSpec
-  
+
   from prolix.physics import bonded, system
 
   pdb_path = "data/pdb/1UAO.pdb"
-  
+
   import proxide
   ff_xml_path = os.path.join(os.path.dirname(proxide.__file__), "assets", "protein.ff19SB.xml")
-  
+
   # ---- Standardize PDB with PDBFixer for OpenMM ----
   fixer = PDBFixer(filename=pdb_path)
   fixer.removeHeterogens(keepWater=False)
@@ -53,12 +61,12 @@ def jax_openmm_system(openmm_available):
   fixer.findMissingAtoms()
   fixer.addMissingAtoms()
   fixer.addMissingHydrogens(7.0)
-  
+
   # Write fixed structure to temp file so JAX uses the EXACT same file
   with tempfile.NamedTemporaryFile(suffix=".pdb", mode="w", delete=False) as tmp:
     app.PDBFile.writeFile(fixer.topology, fixer.positions, tmp)
     tmp_path = tmp.name
-    
+
   # ---- JAX MD Setup ----
   # Tell rust to NOT add any more hydrogens, just parameterize what's there
   from proxide import CoordFormat
@@ -72,10 +80,10 @@ def jax_openmm_system(openmm_available):
   # Protein is a frozen dataclass — use object.__setattr__
   object.__setattr__(protein_system, 'radii', np.array(radii, dtype=np.float32))
   object.__setattr__(protein_system, 'scaled_radii', np.array(scaled_radii, dtype=np.float32))
-  
+
   from prolix.physics import neighbor_list as nl
   exclusion_spec = nl.ExclusionSpec.from_protein(protein_system)
-  
+
   displacement_fn, shift_fn = space.free()
   energy_fn = system.make_energy_fn(displacement_fn, protein_system, implicit_solvent=True, exclusion_spec=exclusion_spec, cutoff=0)
   decomposed_fns = system.make_energy_fn(displacement_fn, protein_system, implicit_solvent=True, exclusion_spec=exclusion_spec, return_decomposed=True, cutoff=0)
@@ -152,7 +160,7 @@ def jax_openmm_system(openmm_available):
     jnp.asarray(protein_system.proper_dihedrals if protein_system.proper_dihedrals is not None else jnp.zeros((0, 4), dtype=jnp.int32))
   )
   e_dih_fn = lambda r, n=None: e_dih_fn_raw(r, jnp.asarray(protein_system.dihedral_params if protein_system.dihedral_params is not None else jnp.zeros((0, 3), dtype=jnp.float32)))
-  
+
   e_imp_fn_raw = bonded.make_dihedral_energy_fn(
     displacement_fn,
     jnp.asarray(protein_system.impropers if protein_system.impropers is not None else jnp.zeros((0, 4), dtype=jnp.int32))
@@ -422,6 +430,128 @@ class TestEnergyDecomposition:
 
     # This test never fails — purely diagnostic
     assert True
+
+class TestDtypeConsistency:
+  """Output dtype must match input dtype."""
+
+  def test_energy_output_dtype_matches_input_f32(self, jax_openmm_system):
+    """Energy dtype should be float32 when input is float32."""
+    x64_before = jax.config.jax_enable_x64
+    try:
+      jax.config.update("jax_enable_x64", False)
+      data = jax_openmm_system
+      pos_f32 = data["jax_positions"].astype(jnp.float32)
+      e = data["energy_fn"](pos_f32)
+      assert e.dtype == jnp.float32, f"Expected float32 energy, got {e.dtype}"
+    finally:
+      jax.config.update("jax_enable_x64", x64_before)
+
+  def test_energy_output_dtype_matches_input_f64(self, jax_openmm_system):
+    """Energy dtype should be float64 when input is float64."""
+    x64_before = jax.config.jax_enable_x64
+    try:
+      jax.config.update("jax_enable_x64", True)
+      data = jax_openmm_system
+      pos_f64 = data["jax_positions"].astype(jnp.float64)
+      e = data["energy_fn"](pos_f64)
+      assert e.dtype == jnp.float64, f"Expected float64 energy, got {e.dtype}"
+    finally:
+      jax.config.update("jax_enable_x64", x64_before)
+
+  def test_forces_output_dtype_matches_input_f32(self, jax_openmm_system):
+    """Force dtype should be float32 when input is float32."""
+    x64_before = jax.config.jax_enable_x64
+    try:
+      jax.config.update("jax_enable_x64", False)
+      data = jax_openmm_system
+      pos_f32 = data["jax_positions"].astype(jnp.float32)
+      forces = jax.grad(data["energy_fn"])(pos_f32)
+      assert forces.dtype == jnp.float32, f"Expected float32 forces, got {forces.dtype}"
+    finally:
+      jax.config.update("jax_enable_x64", x64_before)
+
+  def test_forces_output_dtype_matches_input_f64(self, jax_openmm_system):
+    """Force dtype should be float64 when input is float64."""
+    x64_before = jax.config.jax_enable_x64
+    try:
+      jax.config.update("jax_enable_x64", True)
+      data = jax_openmm_system
+      pos_f64 = data["jax_positions"].astype(jnp.float64)
+      forces = jax.grad(data["energy_fn"])(pos_f64)
+      assert forces.dtype == jnp.float64, f"Expected float64 forces, got {forces.dtype}"
+    finally:
+      jax.config.update("jax_enable_x64", x64_before)
+
+class TestGradientConsistency:
+  """Gradient consistency: autodiff vs finite-difference for per-term forces."""
+  FD_EPS = 1e-5
+  TOL_RELATIVE = 1e-3
+
+  def _fd_gradient(self, energy_fn, positions, eps=1e-5):
+    """Compute finite-difference gradient."""
+    grad_fd = jnp.zeros_like(positions)
+    for i in range(positions.shape[0]):
+      for j in range(3):
+        p_plus = positions.at[i, j].add(eps)
+        p_minus = positions.at[i, j].add(-eps)
+        grad_fd = grad_fd.at[i, j].set(
+            (energy_fn(p_plus) - energy_fn(p_minus)) / (2 * eps)
+        )
+    return grad_fd
+
+  def _relative_error(self, autodiff, finitediff, tol=1e-8):
+    """Compute relative error between autodiff and finite-diff."""
+    diff = jnp.linalg.norm(autodiff - finitediff)
+    return diff / (jnp.linalg.norm(finitediff) + tol)
+
+  def test_bond_gradient_consistency(self, jax_openmm_system):
+    """Bond gradient: autodiff vs finite-difference."""
+    data = jax_openmm_system
+    pos = data["jax_positions"]
+    e_fn = data["e_bond_fn"]
+
+    # Autodiff
+    grad_auto = jax.grad(e_fn)(pos)
+
+    # Finite-difference (mark slow if N_atoms > 20)
+    if len(pos) > 20:
+      pytest.mark.slow
+    grad_fd = self._fd_gradient(e_fn, pos, self.FD_EPS)
+
+    rel_err = self._relative_error(grad_auto, grad_fd)
+    assert rel_err < self.TOL_RELATIVE, f"Bond gradient relative error {rel_err:.4f}"
+
+  def test_angle_gradient_consistency(self, jax_openmm_system):
+    """Angle gradient: autodiff vs finite-difference."""
+    data = jax_openmm_system
+    pos = data["jax_positions"]
+    e_fn = data["e_angle_fn"]
+
+    grad_auto = jax.grad(e_fn)(pos)
+    if len(pos) > 20:
+      pytest.mark.slow
+    grad_fd = self._fd_gradient(e_fn, pos, self.FD_EPS)
+
+    rel_err = self._relative_error(grad_auto, grad_fd)
+    assert rel_err < self.TOL_RELATIVE, f"Angle gradient relative error {rel_err:.4f}"
+
+  def test_torsion_gradient_consistency(self, jax_openmm_system):
+    """Torsion gradient: autodiff vs finite-difference."""
+    data = jax_openmm_system
+    pos = data["jax_positions"]
+    e_fn_dih = data["e_dih_fn"]
+    e_fn_imp = data["e_imp_fn"]
+    def combined_fn(r):
+      return e_fn_dih(r) + e_fn_imp(r)
+
+    grad_auto = jax.grad(combined_fn)(pos)
+    if len(pos) > 20:
+      pytest.mark.slow
+    grad_fd = self._fd_gradient(combined_fn, pos, self.FD_EPS)
+
+    rel_err = self._relative_error(grad_auto, grad_fd)
+    assert rel_err < self.TOL_RELATIVE, f"Torsion gradient relative error {rel_err:.4f}"
+
 class TestForceComparison:
   """Gradient accuracy tests against OpenMM forces."""
 
@@ -440,9 +570,21 @@ class TestForceComparison:
     diff_sq = np.sum((jax_forces_np - omm_forces_np) ** 2, axis=1)
     rmse = np.sqrt(np.mean(diff_sq))
 
+    per_atom_rmse = np.sqrt(np.sum((jax_forces_np - omm_forces_np)**2, axis=1))
+    print(f"\nForce RMSE: {rmse:.4f}, max per-atom: {per_atom_rmse.max():.4f}, p95: {np.percentile(per_atom_rmse, 95):.4f}")
+
     assert rmse < self.FORCE_RMSE_TOL, (
       f"Force RMSE {rmse:.4f} kcal/mol/Å exceeds tolerance {self.FORCE_RMSE_TOL}"
     )
+
+  def test_per_atom_force_rmse_max(self, jax_openmm_system):
+    """Max per-atom force RMSE < 20 kcal/mol/Å."""
+    data = jax_openmm_system
+    pos = data["jax_positions"]
+    jax_forces = np.asarray(-jax.grad(data["energy_fn"])(pos))
+    omm_forces = np.asarray(data["omm_forces"])
+    per_atom_rmse = np.sqrt(np.sum((jax_forces - omm_forces)**2, axis=1))
+    assert per_atom_rmse.max() < 20.0
 
   def test_forces_finite(self, jax_openmm_system):
     """All forces should be finite (no NaN or Inf)."""
@@ -474,6 +616,26 @@ class TestForceComparison:
     assert mean_cosine > 0.5, (
       f"Mean force cosine similarity {mean_cosine:.3f} indicates misaligned forces"
     )
+
+  def test_per_term_force_rmse_diagnostic(self, jax_openmm_system):
+    """Diagnostic: log per-term force RMSE vs OpenMM (never fails)."""
+    data = jax_openmm_system
+    pos = data["jax_positions"]
+    omm_forces = np.asarray(data["omm_forces"])
+    try:
+      for term in ["e_bond_fn", "e_angle_fn", "e_dih_fn", "e_imp_fn"]:
+        if term in data:
+          f = np.asarray(-jax.grad(data[term])(pos))
+          rmse = np.sqrt(np.mean(np.sum((f - omm_forces)**2, axis=1)))
+          print(f"  {term:15s}: {rmse:8.4f} kcal/mol/Å")
+      total_f = np.asarray(-jax.grad(data["energy_fn"])(pos))
+      total_rmse = np.sqrt(np.mean(np.sum((total_f - omm_forces)**2, axis=1)))
+      print(f"  {'total':15s}: {total_rmse:8.4f} kcal/mol/Å")
+    except Exception as e:
+      print(f"Diagnostic failed: {e}")
+    # Always pass
+    assert True
+
 class TestTrajectoryStability:
   """Long-time dynamics stability tests."""
 
@@ -521,6 +683,7 @@ class TestTrajectoryStability:
 
     assert np.isfinite(e_min), f"Minimized energy is not finite: {e_min}"
     assert e_min < 0, f"Minimized energy should be negative (stable): {e_min:.1f}"
+
 class TestEnsembleProperties:
   """Statistical mechanics and ensemble property tests."""
 
@@ -589,6 +752,7 @@ class TestEnsembleProperties:
     # If simulation completes without explosion, temperature control is working
     assert final_R.shape == R.shape
     assert np.all(np.isfinite(final_R))
+
 class TestMultiProtein:
   """Test energy decomposition across multiple proteins."""
 
@@ -630,18 +794,18 @@ class TestMultiProtein:
     from proxide.io.parsing.backend import parse_structure, OutputSpec
     from proxide import CoordFormat
     import tempfile
-    
+
     with tempfile.NamedTemporaryFile(suffix=".pdb", mode="w", delete=False) as tmp:
       app.PDBFile.writeFile(fixer.topology, fixer.positions, tmp)
       tmp_path = tmp.name
-      
+
     spec = OutputSpec(coord_format=CoordFormat.Full, add_hydrogens=False, parameterize_md=True, force_field=ff_xml_path)
     protein_system = parse_structure(tmp_path, spec=spec)
     os.unlink(tmp_path)
-    
+
     from prolix.physics import neighbor_list as nl
     exclusion_spec = nl.ExclusionSpec.from_protein(protein_system)
-    
+
     displacement_fn, shift_fn = space.free()
     energy_fn = system.make_energy_fn(displacement_fn, protein_system, implicit_solvent=True, exclusion_spec=exclusion_spec, cutoff=0)
 
