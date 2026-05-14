@@ -24,12 +24,15 @@ def make_energy_fn(
   **kwargs
 ) -> Callable | dict:
   """Standard factory for non-pure energy functions."""
-  
+
   if isinstance(system, dict):
-      positions = kwargs.get("positions", jnp.zeros((0, 3)))
+      n_atoms = int(jnp.asarray(system["charges"]).shape[0])
+      if n_atoms == 0:
+          raise ValueError("make_energy_fn: system['charges'] is empty — cannot infer n_atoms")
+      positions = kwargs.get("positions", jnp.zeros((n_atoms, 3)))
       box = kwargs.get("box")
       system = PhysicsSystem.from_dict(system, positions, box_size=box, cutoff_distance=cutoff_distance)
-  
+
   def _sba(idx, prm, ic, pc):
     idx = jnp.asarray(idx if idx is not None else jnp.zeros((0, ic), dtype=jnp.int32))
     prm = jnp.asarray(prm if prm is not None else jnp.zeros((0, pc), dtype=jnp.float32))
@@ -38,19 +41,19 @@ def make_energy_fn(
   bond_idx, bond_prm = _sba(getattr(system, "bonds", None), getattr(system, "bond_params", None), 2, 2)
   _bond_energy_fn = bonded.make_bond_energy_fn(displacement_fn, bond_idx)
   bond_energy_fn_bound = lambda r, n=None: _bond_energy_fn(r, bond_prm)
-  
+
   angle_idx, angle_prm = _sba(getattr(system, "angles", None), getattr(system, "angle_params", None), 3, 2)
   _angle_energy_fn = bonded.make_angle_energy_fn(displacement_fn, angle_idx)
   angle_energy_fn_bound = lambda r, n=None: _angle_energy_fn(r, angle_prm)
-  
+
   dih_idx = getattr(system, "dihedrals", None)
   if dih_idx is None or dih_idx.size == 0:
       dih_idx = getattr(system, "proper_dihedrals", None)
-      
+
   dih_prm = getattr(system, "dihedral_params", None)
   if dih_prm is None or dih_prm.size == 0:
       dih_prm = getattr(system, "proper_dihedral_params", None)
-  
+
   imp_idx = getattr(system, "impropers", None)
   if imp_idx is None or imp_idx.size == 0:
       imp_idx = getattr(system, "improper_dihedrals", None)
@@ -58,11 +61,11 @@ def make_energy_fn(
   imp_prm = getattr(system, "improper_params", None)
   if imp_prm is None or imp_prm.size == 0:
       imp_prm = getattr(system, "improper_dihedral_params", None)
-  
+
   _dihedral_energy_fn = None
   if dih_idx is not None and dih_idx.size > 0:
       _dihedral_energy_fn = bonded.make_dihedral_energy_fn(displacement_fn, dih_idx)
-  
+
   _improper_energy_fn = None
   if imp_idx is not None and imp_idx.size > 0:
       # Selection logic for harmonic vs periodic impropers
@@ -71,10 +74,10 @@ def make_energy_fn(
           _improper_energy_fn = bonded.make_harmonic_improper_energy_fn(displacement_fn, imp_idx)
       else:
           _improper_energy_fn = bonded.make_dihedral_energy_fn(displacement_fn, imp_idx)
-          
+
   dihedral_energy_fn_bound = lambda r, n=None: _dihedral_energy_fn(r, dih_prm) if _dihedral_energy_fn is not None else 0.0
   improper_energy_fn_bound = lambda r, n=None: _improper_energy_fn(r, imp_prm) if _improper_energy_fn is not None else 0.0
-  
+
   ub_idx, ub_prm = _sba(getattr(system, "urey_bradley_bonds", None), getattr(system, "urey_bradley_params", None), 2, 2)
   _ub_energy_fn = bonded.make_bond_energy_fn(displacement_fn, ub_idx)
   ub_energy_fn_bound = lambda r, n=None: _ub_energy_fn(r, ub_prm)
@@ -163,7 +166,7 @@ def make_energy_fn(
         e_lj = chunked_lj_energy_nl(r, sigmas, epsilons, excl_idx, excl_sv, nb_idx, displacement_fn, cutoff, 128)
     else:
         e_lj = chunked_lj_energy(r, sigmas, epsilons, excl_idx, excl_sv, displacement_fn, cutoff, 128)
-    
+
     if use_pbc and box is not None:
         mask = getattr(system, "atom_mask", jnp.ones(r.shape[0], bool))
         e_lj += explicit_corrections.lj_dispersion_tail_energy(jnp.asarray(box), sigmas, epsilons, cutoff, mask)
@@ -176,7 +179,7 @@ def make_energy_fn(
         # TODO: Move to sparse neighbor-list based descreening for large systems.
         n_atoms = r.shape[0]
         gb_mask = 1.0 - jnp.eye(n_atoms)
-            
+
         e_gb, born_radii = generalized_born.compute_gb_energy(
             r, charges, radii,
             mask=gb_mask,
@@ -188,7 +191,7 @@ def make_energy_fn(
             e_direct = chunked_coulomb_energy_nl(r, charges, excl_idx, excl_se, nb_idx, displacement_fn, pme_alpha, COULOMB_CONSTANT, cutoff, 128)
         else:
             e_direct = chunked_coulomb_energy(r, charges, excl_idx, excl_se, displacement_fn, pme_alpha, COULOMB_CONSTANT, cutoff, 128)
-            
+
         return e_gb, e_direct, born_radii
 
     if neighbor is not None:
@@ -279,12 +282,12 @@ def make_energy_fn_pure(
 
   bond_energy_fn = bonded.make_bond_energy_fn(displacement_fn, bond_idx)
   angle_energy_fn = bonded.make_angle_energy_fn(displacement_fn, angle_idx)
-  
+
   _dihedral_energy_fn = None
   if physics_system.dihedrals is not None:
       _dihedral_energy_fn = bonded.make_dihedral_energy_fn(displacement_fn, dih_idx)
   dihedral_energy_fn = lambda r, p: _dihedral_energy_fn(r, p) if _dihedral_energy_fn is not None else 0.0
-      
+
   _improper_energy_fn = None
   if physics_system.impropers is not None:
       _improper_energy_fn = bonded.make_dihedral_energy_fn(displacement_fn, imp_idx)
@@ -303,7 +306,7 @@ def make_energy_fn_pure(
     sigmas_p, epsilons_p = jnp.maximum(params.sigmas, 1e-6), params.epsilons
     pme_alpha = params.pme_alpha
     box_arr = params.box_size
-    
+
     # Bonded terms
     e_total = (
         bond_energy_fn(r, params.bond_params) +
@@ -312,11 +315,11 @@ def make_energy_fn_pure(
         dihedral_energy_fn(r, params.dihedral_params) +
         improper_energy_fn(r, params.improper_params)
     )
-    
+
     # Non-bonded terms
     excl_idx = physics_system.excl_indices
     excl_sv, excl_se = physics_system.excl_scales_vdw, physics_system.excl_scales_elec
-    
+
     if neighbor is not None:
       nb_idx = getattr(neighbor, "idx", neighbor)
       e_lj = chunked_lj_energy_nl(r, sigmas_p, epsilons_p, excl_idx, excl_sv, nb_idx, displacement_fn, cutoff_distance, tile_size)
@@ -324,11 +327,11 @@ def make_energy_fn_pure(
     else:
       e_lj = chunked_lj_energy(r, sigmas_p, epsilons_p, excl_idx, excl_sv, displacement_fn, cutoff_distance, tile_size)
       e_direct = chunked_coulomb_energy(r, charges_p, excl_idx, excl_se, displacement_fn, pme_alpha, COULOMB_CONSTANT, cutoff_distance, tile_size)
-      
+
     # PME Reciprocal
     spme_fn = lambda pos, q, m: pme.spme_energy_with_forces(pos, q, m, box_arr, grid_dims, pme_alpha, 4)
     e_recip = spme_fn(r, charges_p, physics_system.atom_mask) + pme.spme_background_energy(charges_p, physics_system.atom_mask, pme_alpha, box_arr)
-    
+
     # ACE nonpolar term if implicit solvent
     e_ace = 0.0
     if hasattr(physics_system, "implicit_solvent") and physics_system.implicit_solvent:
