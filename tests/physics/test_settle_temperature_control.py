@@ -55,7 +55,6 @@ def _mean_rigid_t_after_burn(*, dt_fs: float, n_waters: int, seed: int, steps: i
   t_thermostat_target = temperature_k  # The target temperature in Kelvin
   return mean_t_observable, t_thermostat_target
 
-@pytest.mark.xfail(strict=True, reason="dt > 0.5fs exceeds documented SETTLE+Langevin constraint per CLAUDE.md")
 def test_temperature_dt1fs_near_target() -> None:
   """dt=1.0 fs, 100 ps: mean T within 15K of 300K target.
 
@@ -75,7 +74,6 @@ def test_temperature_dt1fs_near_target() -> None:
   mean_t_observable, t_thermostat_target = _mean_rigid_t_after_burn(dt_fs=dt_fs, n_waters=n_waters, seed=seed, steps=steps, burn=burn)
   assert abs(mean_t_observable - 300.0) < 15.0, f"dt={dt_fs} fs: T_obs={mean_t_observable:.1f} K (thermostat target {t_thermostat_target:.1f} K), expected 300 ± 15 K"
 
-@pytest.mark.xfail(strict=True, reason="dt > 0.5fs exceeds documented SETTLE+Langevin constraint per CLAUDE.md")
 def test_temperature_dt2fs_near_target() -> None:
   """dt=2.0 fs, 100 ps: mean T within 5K of 300K target.
 
@@ -92,7 +90,6 @@ def test_temperature_dt2fs_near_target() -> None:
   mean_t_observable, t_thermostat_target = _mean_rigid_t_after_burn(dt_fs=dt_fs, n_waters=n_waters, seed=seed, steps=steps, burn=burn)
   assert abs(mean_t_observable - 300.0) < 5.0, f"dt={dt_fs} fs: T_obs={mean_t_observable:.1f} K (thermostat target {t_thermostat_target:.1f} K), expected 300 ± 5 K"
 
-@pytest.mark.xfail(strict=True, reason="dt > 0.5fs exceeds documented SETTLE+Langevin constraint per CLAUDE.md")
 def test_equipartition_chi2() -> None:
   """Equipartition: velocity distribution matches Maxwell-Boltzmann (KS p > 0.05).
 
@@ -135,6 +132,53 @@ def test_equipartition_chi2() -> None:
   v_norm_arr = np.array(v_norm)
   ks_stat, ks_pval = stats.kstest(v_norm_arr, 'norm')
   assert ks_pval > 0.05, f"Equipartition KS test failed: p={ks_pval:.4f}, expected > 0.05"
+
+
+def test_langevin_o_step_masked_atoms_unchanged() -> None:
+  """Constrained atoms must be unchanged after _langevin_step_o_free_dof."""
+  from prolix.physics.settle import _langevin_step_o_free_dof
+  key = jax.random.PRNGKey(0)
+  momentum = jnp.ones((4, 3))
+  mass = jnp.ones((4, 1))
+  free_mask = jnp.array([True, True, False, False])
+  p_new, _ = _langevin_step_o_free_dof(momentum, mass, 1.0, 0.001, 1.0, key, free_mask)
+  assert jnp.allclose(p_new[2], momentum[2]), "Constrained atom 2 should be unchanged"
+  assert jnp.allclose(p_new[3], momentum[3]), "Constrained atom 3 should be unchanged"
+
+def test_langevin_o_step_free_atoms_changed() -> None:
+  """Free atoms must receive OU noise."""
+  from prolix.physics.settle import _langevin_step_o_free_dof
+  key = jax.random.PRNGKey(0)
+  momentum = jnp.ones((4, 3))
+  mass = jnp.ones((4, 1))
+  free_mask = jnp.array([True, True, False, False])
+  p_new, _ = _langevin_step_o_free_dof(momentum, mass, 1.0, 0.001, 1.0, key, free_mask)
+  assert not jnp.allclose(p_new[0], momentum[0]), "Free atom 0 should have received noise"
+  assert not jnp.allclose(p_new[1], momentum[1]), "Free atom 1 should have received noise"
+
+def test_langevin_o_step_c1_applied_once() -> None:
+  """c1 decay factor applied exactly once — no double-decay."""
+  from prolix.physics.settle import _langevin_step_o_free_dof
+  key = jax.random.PRNGKey(0)
+  momentum = jnp.ones((4, 3)) * 100.0
+  mass = jnp.ones((4, 1))
+  free_mask = jnp.array([True, True, False, False])
+  # gamma=100.0, dt=1.0 → c1 = exp(-100) ≈ 0; free atoms momentum ≈ noise term only
+  p_new, _ = _langevin_step_o_free_dof(momentum, mass, 100.0, 1.0, 0.001, key, free_mask)
+  # With c1 ≈ 0, original momentum term is suppressed → |p_new[0]| << 100
+  assert jnp.abs(p_new[0]).max() < 10.0, "c1 double-applied would keep momentum high"
+
+def test_langevin_o_step_masked_no_friction_decay() -> None:
+  """Constrained atoms retain full original momentum (no friction applied)."""
+  from prolix.physics.settle import _langevin_step_o_free_dof
+  key = jax.random.PRNGKey(0)
+  momentum = jnp.ones((4, 3)) * 100.0
+  mass = jnp.ones((4, 1))
+  free_mask = jnp.array([True, True, False, False])
+  p_new, _ = _langevin_step_o_free_dof(momentum, mass, 100.0, 1.0, 0.001, key, free_mask)
+  # Constrained atoms should still be 100.0 (no friction applied)
+  assert jnp.allclose(p_new[2], momentum[2])
+  assert jnp.allclose(p_new[3], momentum[3])
 
 
 def _mean_rigid_t_csvr_after_burn(*, dt_fs: float, n_waters: int, seed: int, steps: int, burn: int) -> float:
@@ -585,7 +629,7 @@ def test_temperature_reproducibility_different_seed() -> None:
 # Ablation Test: Rigid-Body KE Decomposition vs Atomic Simple KE
 # ============================================================================
 
-def _compute_atomic_ke_kcal(momentum: Array, mass: Array) -> Array:
+def _compute_atomic_ke_kcal(momentum: jax.Array, mass: jax.Array) -> jax.Array:
   """Compute simple atomic KE: 0.5 * sum(p_i^2 / m_i).
 
   This is the most basic KE formula without any rigid-body structure.
