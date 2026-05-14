@@ -45,7 +45,7 @@ def instantaneous_pressure_akma(
       Instantaneous pressure in kcal/mol/Å³ (AKMA pressure units).
   """
   volume = physics_system.box_size[0] * physics_system.box_size[1] * physics_system.box_size[2]
-  
+
   p_tail = explicit_corrections.lj_dispersion_tail_pressure(
       physics_system.box_size,
       jnp.maximum(params.params['sigmas'], 1e-6),
@@ -60,8 +60,39 @@ def instantaneous_pressure_akma(
       cutoff_distance,
       physics_system.atom_mask,
   )
-  
+
   # Total virial includes tail contribution
   total_virial = virial + (p_tail + p_imp) * volume * ndim
-  
+
   return (2.0 * kinetic_energy + total_virial) / (ndim * volume)
+
+
+def compute_pressure_akma(
+  kinetic_energy: Array,
+  virial: Array,
+  volume: Array,
+  ndim: int = 3,
+) -> Array:
+  r"""Compute instantaneous pressure without tail corrections.
+
+  Uses the bare pressure equation: P = (2K + W) / (d·V)
+
+  where:
+    K = kinetic energy (kcal/mol)
+    W = virial trace = -Σᵢ rᵢ · Fᵢ (kcal/mol)
+    V = volume (Å³)
+    d = spatial dimensions
+
+  Suitable for integrator diagnostics and test code where physics_system/params
+  are unavailable. Does not include LJ dispersion tail corrections.
+
+  Args:
+      kinetic_energy: Total kinetic energy (kcal/mol).
+      virial: Virial trace W = -Σᵢ rᵢ · Fᵢ (kcal/mol).
+      volume: Box volume (Å³).
+      ndim: Number of spatial dimensions (default 3).
+
+  Returns:
+      Instantaneous pressure in kcal/mol/Å³ (AKMA pressure units).
+  """
+  return (2.0 * kinetic_energy + virial) / (ndim * volume)
