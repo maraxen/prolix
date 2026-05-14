@@ -85,10 +85,10 @@ def _compute_forces(
     return energy_fn(R, box) if box is not None else energy_fn(R)
 
   forces = -jax.grad(energy_wrapper)(positions)
-  
+
   if vs_def is not None and vs_params is not None:
     forces = redistribute_forces(forces, vs_def, vs_params)
-    
+
   return forces
 
 
@@ -259,7 +259,7 @@ def make_integrator_batched(
       state = IntegratorState(positions=position, momentum=momentum, force=force,
                              mass=mass, rng=rng, box=box, step_count=step_count)
       result = apply_fn_unbatched(state)
-      return (result.positions, result.momentum, result.force, result.mass, 
+      return (result.positions, result.momentum, result.force, result.mass,
               result.rng, result.box, result.step_count)
 
     # Apply vmap over the flattened function
@@ -514,9 +514,9 @@ def make_integrator(
     """
     # Compute forces at initial positions
     forces = _compute_forces(
-        positions, 
-        box, 
-        energy_fn, 
+        positions,
+        box,
+        energy_fn,
         energy_params,
         vs_def=vs_def,
         vs_params=vs_params
@@ -558,15 +558,19 @@ def make_integrator(
 
     current_state = state
 
-    # Simple Python loop allows JAX to unroll computation graph at trace-time
+    # Python for-loop is intentional — DO NOT convert to lax.scan.
+    # Step pytrees are heterogeneous (O_Step, V_Step, SETTLE_Velocity_Step all have
+    # different field sets), so scan's requirement for homogeneous carry pytrees
+    # would fail. JAX unrolls static Python loops at trace time without emitting
+    # custom_call ops, so this is fully StableHLO-compatible.
     for step in steps:
       current_state = step.apply(current_state, params)
 
     # Recompute forces at the end of the timestep (with virtual site redistribution)
     new_forces = _compute_forces(
-        current_state.positions, 
-        current_state.box, 
-        energy_fn, 
+        current_state.positions,
+        current_state.box,
+        energy_fn,
         energy_params,
         vs_def=vs_def,
         vs_params=vs_params
