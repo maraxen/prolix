@@ -224,7 +224,7 @@ def test_npt_pressure_sanity() -> None:
       ke_total = rigid_tip3p_box_ke_kcal(state.positions, state.momentum, state.mass, n_w)
       virial = stress.virial_trace(state.positions, state.force)
       volume = jnp.prod(state.box)
-      pressure_akma = pressure.instantaneous_pressure_akma(ke_total, virial, physics_system, params, ndim=3)
+      pressure_akma = pressure.compute_pressure_akma(ke_total, virial, volume, ndim=3)
       pressure_bar_val = float(pressure_akma * BAR_PER_AKMA_PRESSURE)
       pressures_bar.append(pressure_bar_val)
 
@@ -305,10 +305,6 @@ def test_npt_dt_sweep(dt_fs: float) -> None:
     assert volume > 0, f"dt={dt_fs} fs, step {step}: negative or zero volume"
 
 
-@pytest.mark.xfail(
-  reason="NPT temperature divergence at long timescales (>~10ps) due to CSVR+rigid-water KE coupling. "
-         "Short NPT tests pass (sanity, dt_sweep). Structural issue under investigation in Sprint 11."
-)
 @pytest.mark.slow
 def test_npt_20ps_liquid_water() -> None:
   """Two-phase NVT→NPT protocol for 64 TIP3P waters over 20 ps at liquid density.
@@ -426,7 +422,7 @@ def test_npt_20ps_liquid_water() -> None:
       )
       virial = stress.virial_trace(npt_state.positions, npt_state.force)
       volume = float(jnp.prod(npt_state.box))
-      pressure_akma = pressure.instantaneous_pressure_akma(
+      pressure_akma = pressure.compute_pressure_akma(
         ke_total, virial, volume, ndim=3
       )
       T_k = float(2.0 * ke_total / (BOLTZMANN_KCAL * ndof))
@@ -453,7 +449,19 @@ def test_npt_20ps_liquid_water() -> None:
     f"Mean T over last 10 ps = {T_mean:.2f} K, expected 295–305 K"
   )
 
-  # 3. P_mean over last 10 ps in [-99, 101] bar
+  # 3. Slope-based drift gate: temperature must not be trending up or down
+  # Accept only if |slope| < 0.2 K/ps (≡ < 2 K per 10 ps)
+  from scipy.stats import linregress
+  time_ps = np.arange(len(T_last)) * 0.1
+  slope, intercept, r_value, p_value, std_err = linregress(time_ps, T_last)
+  assert abs(slope) < 0.2, (
+      f"Temperature drift slope {slope:.4f} K/ps exceeds limit 0.2 K/ps "
+      f"(≡ 2 K per 10 ps). r²={r_value**2:.4f}. "
+      f"This indicates systematic thermal runaway or cooling — "
+      f"momentum inverse-scaling fix may not be sufficient."
+  )
+
+  # 4. P_mean over last 10 ps in [-99, 101] bar
   #    64-water σ_P ≈ 500–800 bar instantaneous; ≈80–130 bar on 10 ps mean
   P_last = P_arr[-100:]
   P_mean = float(np.mean(P_last))
@@ -462,9 +470,107 @@ def test_npt_20ps_liquid_water() -> None:
     f"target {pressure_bar:.1f} bar"
   )
 
-  # 4. Box volume varies smoothly (no step-to-step jump > 5%)
+  # 5. Box volume varies smoothly (no step-to-step jump > 5%)
   max_jump_frac = float(np.max(np.abs(np.diff(V_arr)) / V_arr[:-1]))
   assert max_jump_frac < 0.05, (
     f"Box volume has a sudden jump of {max_jump_frac*100:.2f}% between records "
     f"(threshold: 5%)"
   )
+
+
+@pytest.mark.slow
+@pytest.mark.parametrize("dt_fs,expected_stable", [
+    (0.5, True),
+    (1.0, True),  # May now pass with Parrinello-Rahman momentum scaling
+    pytest.param(
+        2.0,
+        False,
+        marks=pytest.mark.xfail(
+            strict=True,
+            reason="dt=2.0fs exceeds SETTLE constraint stability; expected to diverge"
+        ),
+    ),
+])
+def test_npt_dt_sweep_stability(
+    dt_fs: float,
+    expected_stable: bool,
+    n_waters: int = 16,
+    temperature_k: float = 300.0,
+    pressure_bar: float = 1.0,
+) -> None:
+    """NPT stability across dt in {0.5, 1.0, 2.0} fs over 5 ps.
+
+    dt=0.5 fs: baseline (always pass)
+    dt=1.0 fs: test Parrinello-Rahman fix enables larger timestep
+    dt=2.0 fs: exceeds SETTLE limit — expected to diverge (xfail strict=True)
+    """
+    import scipy.stats
+    jax.config.update("jax_enable_x64", True)
+
+    npt_steps = 10_000   # 5 ps at dt=0.5 fs
+    record_every = 100
+    dt_akma = float(dt_fs) / AKMA_TIME_UNIT_FS
+    kT = float(temperature_k) * BOLTZMANN_KCAL
+    tau_baro_akma = 2000.0
+    tau_thermo_akma = 2000.0
+
+    positions_a, box_edge = _grid_water_positions(n_waters, spacing_angstrom=10.0)
+    box_vec = jnp.array([box_edge, box_edge, box_edge], dtype=jnp.float64)
+
+    sys_dict = _proxide_params_pure_water(n_waters)
+    displacement_fn, shift_fn = pbc.create_periodic_space(box_vec)
+    energy_fn = system.make_energy_fn(
+        displacement_fn, sys_dict, box=box_vec, use_pbc=True, implicit_solvent=False,
+        pme_grid_points=32, pme_alpha=0.34, cutoff_distance=9.0,
+        strict_parameterization=False,
+    )
+
+    n_atoms = n_waters * 3
+    mass = jnp.array([[15.999], [1.008], [1.008]] * n_waters, dtype=jnp.float64).reshape(n_atoms)
+    water_indices = settle.get_water_indices(0, n_waters)
+
+    init_npt, apply_npt = settle.settle_csvr_npt(
+        energy_fn, shift_fn,
+        dt=dt_akma, kT=kT,
+        target_pressure_bar=pressure_bar,
+        tau_barostat_akma=tau_baro_akma,
+        tau_thermostat_akma=tau_thermo_akma,
+        mass=mass,
+        water_indices=water_indices,
+        box_init=box_vec,
+    )
+
+    apply_npt_j = jax.jit(apply_npt)
+    npt_state = init_npt(
+        jax.random.PRNGKey(42),
+        jnp.array(positions_a, dtype=jnp.float64),
+        mass=mass,
+        box=box_vec,
+    )
+
+    temperatures = []
+    for step in range(npt_steps):
+        npt_state = apply_npt_j(npt_state, box=npt_state.box)
+        if (step + 1) % record_every == 0:
+            ke_total = rigid_tip3p_box_ke_kcal(
+                npt_state.positions, npt_state.momentum, npt_state.mass, n_waters
+            )
+            ndof = float(6 * n_waters - 3)
+            T_k = float(2.0 * ke_total / (BOLTZMANN_KCAL * ndof))
+            temperatures.append(T_k)
+
+    T_arr = np.array(temperatures)
+    assert np.all(np.isfinite(T_arr)), f"dt={dt_fs}fs: temperature contains NaN/Inf"
+
+    T_mean = float(np.mean(T_arr))
+    assert abs(T_mean - temperature_k) < 20.0, (
+        f"dt={dt_fs}fs: mean T {T_mean:.1f}K is >20K from target {temperature_k}K"
+    )
+
+    # Slope check: temperature should not drift (< 0.5 K/ps over 5ps)
+    time_ps = np.arange(len(T_arr)) * 0.1
+    slope, _, r_value, _, _ = scipy.stats.linregress(time_ps, T_arr)
+    assert abs(slope) < 0.5, (
+        f"dt={dt_fs}fs: temperature drift slope {slope:.4f} K/ps exceeds 0.5 K/ps, "
+        f"r²={r_value**2:.4f}"
+    )
