@@ -55,9 +55,7 @@ WT = jnp.array(
     [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, -1, 0, 0, -1, 1],
     [0, 0, 0, 0, 0, 0, -1, 1, 0, 0, 2, -2, 0, 0, -1, 1],
   ],
-  # TODO(mar): float64 may be needed for explicit solvent CMAP accuracy.
-  # For implicit solvent (f32 GPU), JAX silently downcasts this when x64=False.
-  dtype=jnp.float64,
+  dtype=jnp.float64 if jax.config.jax_enable_x64 else jnp.float32,
 )
 
 
