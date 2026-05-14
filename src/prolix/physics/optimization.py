@@ -268,7 +268,7 @@ def _chunked_coulomb_bwd(excl_indices, displacement_fn, pme_alpha, coulomb_const
         return f_on_i
 
     f_res = tile_reduction(r_pad, mask_pad, f_tile_grad, jnp.zeros_like(r_pad), tile_size, inner_tile_size=inner_tile_size)
-    return (-g * f_res[:N], g * jnp.zeros_like(charges), g * jnp.zeros_like(excl_scales))
+    return (g * f_res[:N], g * jnp.zeros_like(charges), g * jnp.zeros_like(excl_scales))
 
 chunked_coulomb_energy.defvjp(_chunked_coulomb_fwd, _chunked_coulomb_bwd)
 

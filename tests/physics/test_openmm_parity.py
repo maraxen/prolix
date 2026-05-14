@@ -555,10 +555,9 @@ class TestGradientConsistency:
 class TestForceComparison:
   """Gradient accuracy tests against OpenMM forces."""
 
-  # Force RMSE tolerance in kcal/mol/Å — target 5.0, current empirical ~15.3
+  # Force RMSE tolerance in kcal/mol/Å
   FORCE_RMSE_TOL = 5.0
 
-  @pytest.mark.xfail(strict=False, reason="Force RMSE ~15.3 kcal/mol/Å; 5.0 target not yet achieved — use test_per_term_force_rmse_diagnostic to investigate contributing terms")
   def test_forces_rmse_within_tolerance(self, jax_openmm_system):
     """Force RMSE should be within tolerance."""
     data = jax_openmm_system
