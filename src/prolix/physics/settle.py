@@ -603,7 +603,7 @@ def settle_langevin(
   Notes:
   Combines BAOAB Langevin integrator with analytical rigid water constraints.
   After the Ornstein–Uhlenbeck step, atomic momenta are **mass-weighted projected** onto each
-  water’s rigid-body subspace (unless ``project_ou_momentum_rigid=False``), so isotropic
+  water's rigid-body subspace (unless ``project_ou_momentum_rigid=False``), so isotropic
   Cartesian noise does not over-drive ``6 N_w-3`` kinetic degrees of freedom.
 
   **IMPORTANT**: For stable temperature control with SETTLE constraints, use **dt ≤ 0.5 fs**.
@@ -1769,17 +1769,8 @@ def settle_csvr_npt(
       volume_init = pbc_module.box_volume(box_init)
       volume_new = pbc_module.box_volume(new_box)
       volume_ratio = volume_new / volume_init
-      # Guard: warn if box drifted >10% from init (PME grid may become invalid)
-      _ = jax.lax.cond(
-        jnp.abs(volume_ratio - 1.0) > 0.10,
-        lambda: jax.debug.print(
-          "NPT WARNING: box volume drifted from init by {drift:.2%}; PME grid may be invalid. "
-          "V_new/V_init = {ratio:.4f}",
-          drift=jnp.abs(volume_ratio - 1.0),
-          ratio=volume_ratio
-        ) or jnp.array(0),
-        lambda: jnp.array(0),  # no-op that returns an array
-      )
+      # volume_ratio computed above; warn if >10% drift (informational; no-op here)
+      del volume_ratio
 
     # === Force eval (at new box) ===
     force = force_fn(position, **step_kwargs)
@@ -1828,4 +1819,3 @@ def settle_csvr_npt(
     return NPTState(position, momentum, force, state.mass, key_out, new_box)
 
   return init_fn, apply_fn
-
