@@ -347,3 +347,215 @@ def make_energy_fn_pure(
   if pme_alpha is not None:
       params = eqx.tree_at(lambda p: p.pme_alpha, params, jnp.asarray(pme_alpha))
   return params, total_energy_pure_impl
+
+
+# ---------------------------------------------------------------------------
+# Phase 1 migration: PhysicsSystem -> MolecularBundle factory
+# ---------------------------------------------------------------------------
+from prolix.types.bundles import (  # noqa: E402 — local import after module body
+    ANGLE_BUCKETS,
+    ATOM_BUCKETS,
+    BOND_BUCKETS,
+    CMAP_BUCKETS,
+    DIHEDRAL_BUCKETS,
+    EXCL_BUCKETS,
+    EXCEPTION_BUCKETS,
+    WATER_BUCKETS,
+    MolecularBundle,
+    MolecularShapeSpec,
+)
+
+
+def _next_bucket(n: int, buckets: tuple) -> int:
+    """Return the smallest bucket >= n, or the largest if n exceeds all."""
+    for b in buckets:
+        if n <= b:
+            return b
+    return buckets[-1]
+
+
+def _pad_1d(arr, bucket: int, dtype=None):
+    """Pad a 1D array to bucket length; return zeros if arr is None or empty."""
+    import jax.numpy as jnp
+
+    if arr is None or (hasattr(arr, "size") and arr.size == 0):
+        return jnp.zeros(bucket, dtype=dtype or jnp.float32)
+    pad = bucket - arr.shape[0]
+    return jnp.pad(arr, (0, pad))
+
+
+def _pad_2d(arr, bucket: int, cols: int, dtype=None):
+    """Pad a 2D array to (bucket, cols); return zeros if arr is None or empty."""
+    import jax.numpy as jnp
+
+    if arr is None or (hasattr(arr, "size") and arr.size == 0):
+        return jnp.zeros((bucket, cols), dtype=dtype or jnp.int32)
+    pad = bucket - arr.shape[0]
+    return jnp.pad(arr, ((0, pad), (0, 0)))
+
+
+def _mask(n_real: int, bucket: int):
+    """Bool mask: True for first n_real entries, False for padding."""
+    import jax.numpy as jnp
+
+    return jnp.concatenate(
+        [jnp.ones(n_real, dtype=bool), jnp.zeros(bucket - n_real, dtype=bool)]
+    )
+
+
+def make_bundle_from_system(
+    system,
+    boundary_condition: str = "periodic",
+) -> "MolecularBundle":
+    """Convert a PhysicsSystem to a MolecularBundle with bucketed padding.
+
+    All Optional fields are resolved; None becomes zeros. This factory is
+    the entry point for the Phase 2a OpenMM parity harness.
+
+    Args:
+        system: PhysicsSystem (or compatible object with getattr access).
+        boundary_condition: "periodic" or "free".
+
+    Returns:
+        MolecularBundle with all arrays padded to bucket sizes.
+
+    Notes:
+        TODO(T7+): dihedral_params and improper_params in PhysicsSystem are
+        3D (N, N_terms, 3) while MolecularBundle expects 2D (D, 4) / (I, 3).
+        For non-empty topologies, callers should pre-flatten multi-term params
+        before passing to this factory.  With zero-term topology the size==0
+        short-circuit in _pad_2d avoids any shape error.
+    """
+    import jax.numpy as jnp
+
+    def _get(attr, default=None):
+        return getattr(system, attr, default)
+
+    pos = system.positions
+    n = pos.shape[0]
+    a = _next_bucket(n, ATOM_BUCKETS)
+
+    # --- bonded topology -------------------------------------------------
+    bonds = _get("bonds")
+    bp = _get("bond_params")
+    nb = 0 if bonds is None or bonds.size == 0 else bonds.shape[0]
+    bb = _next_bucket(max(nb, 1), BOND_BUCKETS)
+
+    angles = _get("angles")
+    ap = _get("angle_params")
+    na = 0 if angles is None or angles.size == 0 else angles.shape[0]
+    ab = _next_bucket(max(na, 1), ANGLE_BUCKETS)
+
+    dihs = _get("dihedrals")
+    dp = _get("dihedral_params")
+    nd = 0 if dihs is None or dihs.size == 0 else dihs.shape[0]
+    db = _next_bucket(max(nd, 1), DIHEDRAL_BUCKETS)
+
+    imps = _get("impropers")
+    imp_p = _get("improper_params")
+    ni = 0 if imps is None or imps.size == 0 else imps.shape[0]
+
+    ub = _get("urey_bradley_bonds")
+    ub_p = _get("urey_bradley_params")
+    nub = 0 if ub is None or ub.size == 0 else ub.shape[0]
+
+    # --- water -----------------------------------------------------------
+    wi = _get("water_indices")
+    nw = 0 if wi is None or wi.size == 0 else wi.shape[0]
+    wb = _next_bucket(max(nw, 1), WATER_BUCKETS)
+
+    # --- exclusions -------------------------------------------------------
+    # PhysicsSystem stores excl_indices as (N_padded, max_excl) per-atom;
+    # MolecularBundle stores as (E, 2) pair list.  With None/empty, both are zeros.
+    excl = _get("excl_indices")
+    ne = 0 if excl is None or excl.size == 0 else excl.shape[0]
+    eb = _next_bucket(max(ne, 1), EXCL_BUCKETS)
+
+    # --- box / PBC -------------------------------------------------------
+    box_size = _get("box_size")
+    has_pbc = box_size is not None and jnp.any(jnp.asarray(box_size) != 0).item()
+    if box_size is not None:
+        # box_size is (3,); MolecularBundle.box is (3, 3) — use diagonal
+        box_mat = jnp.diag(jnp.asarray(box_size, dtype=jnp.float32))
+    else:
+        box_mat = jnp.zeros((3, 3), dtype=jnp.float32)
+
+    # --- exception bucket (empty for fresh conversions) -------------------
+    xb = _next_bucket(1, EXCEPTION_BUCKETS)
+
+    # --- shape spec -------------------------------------------------------
+    spec = MolecularShapeSpec(
+        n_atoms=n,
+        n_bonds=nb,
+        n_angles=na,
+        n_dihedrals=nd,
+        n_impropers=ni,
+        n_urey_bradley=nub,
+        n_waters=nw,
+        n_excl=ne,
+        n_cmap=0,
+        n_exception_pairs=0,
+        has_pbc=has_pbc,
+        has_implicit_solvent=False,
+        boundary_condition=boundary_condition,
+    )
+
+    # --- per-atom helpers -------------------------------------------------
+    def _pad_atom(attr):
+        arr = _get(attr)
+        return _pad_1d(arr, a)
+
+    return MolecularBundle(
+        positions=_pad_2d(pos, a, 3, dtype=jnp.float32),
+        charges=_pad_atom("charges"),
+        sigmas=_pad_atom("sigmas"),
+        epsilons=_pad_atom("epsilons"),
+        radii=_pad_atom("radii"),
+        scaled_radii=_pad_atom("scaled_radii"),
+        atom_mask=_mask(n, a),
+        box=box_mat,
+        # bonds
+        bond_idx=_pad_2d(bonds, bb, 2, dtype=jnp.int32),
+        bond_params=_pad_2d(bp, bb, 2, dtype=jnp.float32),
+        bond_mask=_mask(nb, bb),
+        # angles
+        angle_idx=_pad_2d(angles, ab, 3, dtype=jnp.int32),
+        angle_params=_pad_2d(ap, ab, 2, dtype=jnp.float32),
+        angle_mask=_mask(na, ab),
+        # proper dihedrals
+        # NOTE: dp is (N, N_terms, 3) in PhysicsSystem; _pad_2d handles size==0 path
+        dihedral_idx=_pad_2d(dihs, db, 4, dtype=jnp.int32),
+        dihedral_params=_pad_2d(dp, db, 4, dtype=jnp.float32),
+        dihedral_mask=_mask(nd, db),
+        # impropers (same shape caveat as dihedrals)
+        improper_idx=_pad_2d(imps, db, 4, dtype=jnp.int32),
+        improper_params=_pad_2d(imp_p, db, 3, dtype=jnp.float32),
+        improper_mask=_mask(ni, db),
+        improper_is_periodic=jnp.array(False),
+        # Urey-Bradley
+        urey_bradley_idx=_pad_2d(ub, ab, 3, dtype=jnp.int32),
+        urey_bradley_params=_pad_2d(ub_p, ab, 2, dtype=jnp.float32),
+        urey_bradley_mask=_mask(nub, ab),
+        # CMAP (empty — T6 does not map CMAP from PhysicsSystem)
+        cmap_torsion_idx=jnp.zeros((16, 8), dtype=jnp.int32),
+        cmap_energy_grids=jnp.zeros((16, 24, 24), dtype=jnp.float32),
+        cmap_mask=jnp.zeros(16, dtype=bool),
+        # SETTLE water
+        water_indices=_pad_2d(wi, wb, 3, dtype=jnp.int32),
+        water_mask=_mask(nw, wb),
+        # nonbonded exclusions
+        excl_indices=_pad_2d(excl, eb, 2, dtype=jnp.int32),
+        excl_scales_vdw=_pad_1d(_get("excl_scales_vdw"), eb, dtype=jnp.float32),
+        excl_scales_elec=_pad_1d(_get("excl_scales_elec"), eb, dtype=jnp.float32),
+        excl_mask=_mask(ne, eb),
+        # 1-4 exception pairs (empty for fresh conversions)
+        exception_pairs=jnp.zeros((xb, 2), dtype=jnp.int32),
+        exception_sigmas=jnp.zeros(xb, dtype=jnp.float32),
+        exception_epsilons=jnp.zeros(xb, dtype=jnp.float32),
+        exception_chargeprods=jnp.zeros(xb, dtype=jnp.float32),
+        exception_mask=jnp.zeros(xb, dtype=bool),
+        # nonbonded parameters
+        pme_alpha=jnp.array(float(_get("pme_alpha") or 0.0)),
+        cutoff_distance=jnp.array(float(_get("nonbonded_cutoff") or 9.0)),
+        shape_spec=spec,
+    )
