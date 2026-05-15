@@ -290,3 +290,76 @@ def gb_ace_forces_dense(
     forces = -total_grad * atom_mask[:, None]
 
     return forces
+
+
+# ---------------------------------------------------------------------------
+# Bonded analytical forces for ShimMode.ANALYTICAL
+# ---------------------------------------------------------------------------
+
+
+def bond_forces(
+    positions: Array,
+    bond_idx: Array,
+    bond_params: Array,
+    bond_mask: Array,
+    displacement_fn,
+) -> Array:
+    """Analytical harmonic bond forces: -dE/dr for V = k*(r-r0)^2.
+
+    Computes forces from harmonic bond potential using analytical
+    differentiation. For each bond (i, j):
+        V = k * (|r_ij| - r0)^2
+        F_i = -dV/dr_i
+
+    This function is designed to be called by energy_with_analytical_shim
+    in place of jax.grad(energy) for the bonded contribution.
+
+    Args:
+        positions: Atom positions (N, 3).
+        bond_idx: Bond pairs (B, 2) — integer indices into positions.
+        bond_params: Bond parameters (B, 2) — [k, r0] per bond.
+            k: Force constant (kcal/mol/Å²).
+            r0: Equilibrium distance (Å).
+        bond_mask: Bool mask (B,) — True for real bonds, False for padding.
+        displacement_fn: PBC-aware displacement function from jax_md.space.
+
+    Returns:
+        Force array (N, 3) in kcal/mol/Å.
+        Forces on padded atoms (where atom_mask is False) are zero.
+
+    Note:
+        Uses analytical computation of force magnitude and direction:
+          F_mag = 2 * k * (r - r0)
+          F_i = -F_mag * r̂_ij
+          F_j = +F_mag * r̂_ij
+    """
+    i_idx = bond_idx[:, 0]
+    j_idx = bond_idx[:, 1]
+    k_bond = bond_params[:, 0]
+    r0 = bond_params[:, 1]
+
+    # Displacement vectors: r_ij = r_i - r_j (accounts for PBC)
+    r_vec = jax.vmap(displacement_fn)(positions[i_idx], positions[j_idx])
+
+    # Distance and unit vector
+    r_mag = jnp.linalg.norm(r_vec, axis=-1)
+    # Avoid division by zero: use safe unit vector for r_mag ≈ 0
+    r_unit = r_vec / jnp.where(
+        r_mag[:, None] > jnp.float32(1e-8),
+        r_mag[:, None],
+        jnp.float32(1.0),
+    )
+
+    # Force magnitude: F = 2 * k * (r - r0)
+    # (Negative sign included below in F_ij = -F_mag * r̂)
+    scale = bond_mask * jnp.float32(2.0) * k_bond * (r_mag - r0)
+
+    # Force vector on atom i from bond (i, j): F_ij = -scale * r̂_ij
+    f_ij = scale[:, None] * r_unit
+
+    # Accumulate forces: F_i -= f_ij, F_j += f_ij
+    forces = jnp.zeros_like(positions)
+    forces = forces.at[i_idx].add(-f_ij)
+    forces = forces.at[j_idx].add(f_ij)
+
+    return forces
