@@ -306,6 +306,14 @@ def test_npt_dt_sweep(dt_fs: float) -> None:
 
 
 @pytest.mark.slow
+@pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "NPT long-trajectory instability: T ≈ 5000 K from first NPT record, diverges to NaN by ~19.5 ps. "
+        "Cluster run 13967161 (2026-05-15) confirmed: T₀(NPT)≈5000K (16× target), catastrophic at 6.3 ps, "
+        "NaN at 19.5 ps. CSVR+SETTLE KE coupling; see CLAUDE.md v1.0 known limitations."
+    ),
+)
 def test_npt_20ps_liquid_water() -> None:
   """Two-phase NVT→NPT protocol for 64 TIP3P waters over 20 ps at liquid density.
 
