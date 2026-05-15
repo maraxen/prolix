@@ -89,7 +89,7 @@ def energy_with_analytical_shim(
 
         # Tangent: dot product of analytical forces with bundle tangent
         f_bonded = analytical_forces_bonded(bundle)
-        jvp_val = jnp.sum(f_bonded * bundle_dot.positions)
+        jvp_val = -jnp.sum(f_bonded * bundle_dot.positions)
 
         return e, jvp_val
 

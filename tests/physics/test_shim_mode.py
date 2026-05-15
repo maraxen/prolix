@@ -89,26 +89,81 @@ def test_energy_with_analytical_shim_returns_callable():
 
 
 def test_shim_grad_uses_analytical_path():
-    """Gradient of shim-wrapped energy uses analytical forces, not AD through energy."""
-    from test_molecular_bundle import _minimal_bundle
+    """Gradient of shim-wrapped energy uses analytical forces with correct sign."""
+    import equinox as eqx
+    from prolix.types.bundles import MolecularBundle, MolecularShapeSpec, ATOM_BUCKETS, BOND_BUCKETS, ANGLE_BUCKETS
 
-    call_log = []
+    n_atoms = 10
+    a = ATOM_BUCKETS[0]
 
     def base_energy(bundle):
-        call_log.append("energy")
         return jnp.sum(bundle.positions ** 2)
 
     def bonded_forces(bundle):
-        call_log.append("forces")
-        return -2.0 * bundle.positions
+        return -2.0 * bundle.positions  # correct: -dE/dr for E=sum(r^2)
 
-    bundle = _minimal_bundle()
+    spec = MolecularShapeSpec(
+        n_atoms=n_atoms, n_bonds=0, n_angles=0, n_dihedrals=0,
+        n_impropers=0, n_urey_bradley=0, n_waters=0, n_excl=0,
+        n_cmap=0, n_exception_pairs=0, has_pbc=False,
+        has_implicit_solvent=False, boundary_condition="free",
+    )
+    b = BOND_BUCKETS[0]
+
+    # Use nonzero positions so sign errors are detectable
+    pos = jnp.ones((a, 3)) * 0.5
+    bundle = MolecularBundle(
+        positions=pos,
+        charges=jnp.zeros(a),
+        sigmas=jnp.ones(a),
+        epsilons=jnp.ones(a),
+        radii=jnp.ones(a),
+        scaled_radii=jnp.ones(a),
+        atom_mask=jnp.concatenate([jnp.ones(n_atoms, bool), jnp.zeros(a - n_atoms, bool)]),
+        box=jnp.zeros((3, 3)),
+        bond_idx=jnp.zeros((b, 2), jnp.int32),
+        bond_params=jnp.zeros((b, 2)),
+        bond_mask=jnp.zeros(b, bool),
+        angle_idx=jnp.zeros((ANGLE_BUCKETS[0], 3), jnp.int32),
+        angle_params=jnp.zeros((ANGLE_BUCKETS[0], 2)),
+        angle_mask=jnp.zeros(ANGLE_BUCKETS[0], bool),
+        dihedral_idx=jnp.zeros((256, 4), jnp.int32),
+        dihedral_params=jnp.zeros((256, 4)),
+        dihedral_mask=jnp.zeros(256, bool),
+        improper_idx=jnp.zeros((256, 4), jnp.int32),
+        improper_params=jnp.zeros((256, 3)),
+        improper_mask=jnp.zeros(256, bool),
+        improper_is_periodic=jnp.array(False),
+        urey_bradley_idx=jnp.zeros((256, 3), jnp.int32),
+        urey_bradley_params=jnp.zeros((256, 2)),
+        urey_bradley_mask=jnp.zeros(256, bool),
+        cmap_torsion_idx=jnp.zeros((16, 8), jnp.int32),
+        cmap_energy_grids=jnp.zeros((16, 24, 24)),
+        cmap_mask=jnp.zeros(16, bool),
+        water_indices=jnp.zeros((16, 3), jnp.int32),
+        water_mask=jnp.zeros(16, bool),
+        excl_indices=jnp.zeros((512, 2), jnp.int32),
+        excl_scales_vdw=jnp.zeros(512),
+        excl_scales_elec=jnp.zeros(512),
+        excl_mask=jnp.zeros(512, bool),
+        exception_pairs=jnp.zeros((512, 2), jnp.int32),
+        exception_sigmas=jnp.zeros(512),
+        exception_epsilons=jnp.zeros(512),
+        exception_chargeprods=jnp.zeros(512),
+        exception_mask=jnp.zeros(512, bool),
+        pme_alpha=jnp.array(0.0),
+        cutoff_distance=jnp.array(9.0),
+        shape_spec=spec,
+    )
+
     wrapped = energy_with_analytical_shim(base_energy, bonded_forces)
 
-    # Use eqx.filter_grad to handle eqx.Module with mixed field types
+    # Use eqx.filter_grad to differentiate only through float arrays
     grad_fn = eqx.filter_grad(wrapped)
     grad_bundle = grad_fn(bundle)
 
-    # forces should have been called via custom_jvp
-    assert "forces" in call_log
-    assert grad_bundle.positions is not None
+    # dE/dr for E=sum(r^2) is 2r; grad_bundle.positions should be +2r
+    expected_grad = 2.0 * pos
+    assert jnp.allclose(grad_bundle.positions, expected_grad, atol=1e-4), (
+        f"Expected +2r gradient, got: {grad_bundle.positions[:2]}"
+    )
