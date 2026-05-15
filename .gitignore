@@ -33,3 +33,6 @@ results/
 
 # Cluster configuration (local, per-user)
 cluster-config.toml
+
+# Test artifacts and reports
+tmp/
