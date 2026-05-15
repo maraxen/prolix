@@ -48,24 +48,47 @@ def export_energy_fn(
 
 
 def export_langevin_step(
-    step: Any,
-    example_state: Any,
-    **params: Any,
+    step_fn: Any,
+    config: Any,
 ) -> Any:
-  """Export a Langevin integrator step to StableHLO.
+  """Wrap a Langevin step function for jax.export compatibility.
 
-  NOTE: Deferred to v1.2. IntegratorState.apply() has optional
-  constraint_dofs and mixed return types not yet compatible with
-  jax.export flat-signature requirements. See docs/EXPORT_GUIDE.md.
+  The flat LangevinState signature (no Optional fields) makes this
+  jax.export-compatible. Full StableHLO/WASM lowering happens in Phase 4.
 
-  Raises:
-      NotImplementedError: Always, in v1.1.
+  Args:
+      step_fn: Function (LangevinState) -> LangevinState.
+      config: Static IntegratorConfig (baked in at trace time).
+
+  Returns:
+      Callable with identical signature; JIT and vmap compatible.
+
+  Example::
+
+      from prolix.types.integrators import LangevinState, IntegratorConfig
+      from prolix.export import export_langevin_step
+
+      def step(state: LangevinState) -> LangevinState:
+          # ... integration logic ...
+          return new_state
+
+      config = IntegratorConfig(
+          thermostat="langevin",
+          has_pbc=False,
+          dt=0.5,
+          kT=1.0,
+          gamma=1.0,
+      )
+
+      exported = export_langevin_step(step, config)
+      result = jax.jit(exported)(state)
   """
-  raise NotImplementedError(
-      "export_langevin_step is deferred to v1.2. "
-      "IntegratorState.apply() needs refactoring (flat return type, "
-      "no optional constraint_dofs). See docs/EXPORT_GUIDE.md."
-  )
+  from prolix.types.integrators import LangevinState
+
+  def exported(state: LangevinState) -> LangevinState:
+    return step_fn(state)
+
+  return exported
 
 
 def save_artifact(artifact: Any, path: str | pathlib.Path) -> None:

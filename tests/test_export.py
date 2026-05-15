@@ -103,7 +103,3 @@ def test_load_artifact_roundtrip(tip3p_setup, tmp_path):
     assert len(loaded) > 0
 
 
-def test_export_langevin_step_raises_not_implemented():
-    """export_langevin_step must raise NotImplementedError in v1.1."""
-    with pytest.raises(NotImplementedError, match="v1.2"):
-        export.export_langevin_step(None, None)
