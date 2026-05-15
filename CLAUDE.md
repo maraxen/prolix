@@ -2,6 +2,26 @@
 
 Prolix is a JAX-based molecular dynamics engine for protein folding and dynamics.
 
+## Testing & Validation
+
+For detailed testing instructions and CI-safe JSON report querying, see `.copilot/instructions.md`.
+
+Quick reference (use `uv run` to ensure correct environment):
+```bash
+uv run pytest -m "not slow"              # Fast CI mode (smoke tests only)
+uv run pytest                            # Full suite
+uv run pytest tests/physics/test_settle.py  # Specific test file
+jq '.summary' tmp/pytest.json            # Get pass/fail counts
+jq '.tests[] | select(.outcome=="failed") | .nodeid' tmp/pytest.json  # List failures
+```
+
+Results are written to `tmp/pytest.json` (added to .gitignore) for grepping and CI integration.
+
+## Project Documentation
+
+Extended docs, sprint notes, and architectural decisions live in `.praxia/docs/`:
+- `v1.1_next_steps.md` — prioritized candidate work items for v1.1 (LFMiddle, NPT init bug, batching)
+
 ## Research Ideas & Roadmap
 
 Exploratory ideas for future sprints (electrostatics, allostery, spectral analysis) are logged in `.praxia/ideas.jsonl`. Current focus: stabilize core MD engine (Phase 2 constraints, NPT stability).
