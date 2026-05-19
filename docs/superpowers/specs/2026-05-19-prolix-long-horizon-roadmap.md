@@ -559,53 +559,67 @@ These apply to ALL claims uniformly.
 
 ## §10 Praxia Backlog Schema
 
-### 10.1 Required fields
+The backlog DAG is owned by the **praxia MCP server** (`mcp__praxia__backlog`), not a hand-maintained `.jsonl`. This section documents the actual praxia native schema plus the mapping from the conceptual roadmap fields to praxia's storage.
+
+### 10.1 Praxia native schema (what the tool stores)
 
 ```json
 {
-  "id": "string (kebab-case)",
-  "title": "string (≤80 chars)",
-  "claim_id": "claim1 | claim2 | claim3 | S1 | S2 | LBfig | LB1 | LB2 | LB3 | LB4 | infra | paper",
-  "capability_axis": "batching | api | export | integrators | thermostats | electrostatics | sampling | observables | constraints | docs | ci | bench",
-  "ring": "core | capability | speculative",
-  "status": "ideabin | ready | in_progress | blocked | done | abandoned"
+  "id": "int (auto-assigned)",
+  "title": "string",
+  "description": "string (multi-line markdown OK)",
+  "category": "feature | bug | task | research | doc",
+  "priority": "P0 | P1 | P2 | P3",
+  "status": "open | in_progress | blocked | done | archived",
+  "target_sprint": "string (e.g., 'v1.2', 'paper-submit', 'v2.0')",
+  "depends_on": "list[int] — integer IDs of items this depends on",
+  "blocks": "list[int] — integer IDs of items this blocks",
+  "metadata": "free-form dict — used for all conceptual fields without a native slot",
+  "planning_tier": "tactical | strategic",
+  "autonomy_level": "L0 | L1 | L2 | L3",
+  "difficulty": "trivial | standard | hard | research"
 }
 ```
 
-### 10.2 Optional fields (populated as item moves through lifecycle)
+### 10.2 Conceptual → praxia mapping (locked from 2026-05-19 seeding probe)
 
-```json
-{
-  "depends_on": ["other-item-id", ...],
-  "blocks": ["other-item-id", ...],
-  "deep_research_ids": ["DR-claim1-1", ...],
-  "triggered_by_dr": "DR-claim1-1 | ... | null",
-  "validation_tests": ["tests/path/test_x.py::test_y", ...],
-  "success_criterion": "concrete measurable condition",
-  "exit_criterion": "how we know it's done",
-  "falsification_trigger": "concrete measurable condition that, if breached, invalidates the item or its claim",
-  "risk_id": "R1 | R2 | R3 | R4 | WR1 | WR2 | WR3 | AR1 | AR2 | AR3 | null",
-  "rebuttal_table_id": "RR1 | RR2 | ... | null",
-  "target_milestone": "v1.2 | paper-submit | v1.3 | v2.0",
-  "paper_section": "string or null",
-  "estimated_days": int,
-  "owner": "marielle",
-  "created": "YYYY-MM-DD",
-  "promoted_from": "speculative | capability | null",
-  "promoted_on": "YYYY-MM-DD",
-  "notes": "..."
-}
-```
+| Conceptual field | Praxia slot | Notes |
+|---|---|---|
+| `claim_id` | `metadata.claim_id` | enum: `claim1 \| claim2 \| claim3 \| S1 \| S2 \| LBfig \| LB1 \| LB2 \| LB3 \| LB4 \| infra \| paper` |
+| `ring` | `priority` **AND** `metadata.ring` | `core` → `P1`, `capability` → `P2`, `speculative` → `P3`. Mirror in metadata for grep |
+| `capability_axis` | `metadata.capability_axis` | enum: `batching \| api \| export \| integrators \| thermostats \| electrostatics \| sampling \| observables \| constraints \| docs \| ci \| bench \| research \| infra` |
+| `target_milestone` | `target_sprint` | enum: `v1.2 \| paper-submit \| v1.3 \| v2.0` |
+| `depends_on` / `blocks` | native (integer IDs) | resolved after items exist |
+| `success_criterion` + `exit_criterion` | `description` | concatenated with `**Success:**` / `**Exit:**` headers |
+| `falsification_trigger` | `metadata.falsification_trigger` | concrete measurable condition that invalidates the item/claim |
+| `risk_id` | `metadata.risk_id` | link to spec §2.6/§3.4/§4.6/§5.3 risks (R1, R2, R3, R4, WR1, WR2, WR3, AR1, AR2, AR3) |
+| `rebuttal_table_id` | `metadata.rebuttal_table_id` | RR1–RR7 from §1.5 |
+| `triggered_by_dr` | `metadata.triggered_by_dr` | for items spawned from a deep-research synthesis |
+| `paper_section` | `metadata.paper_section` | section the item produces evidence for |
+| `spec_ref` | `metadata.spec_ref` | anchor in spec, e.g., `docs/superpowers/specs/2026-05-19-prolix-long-horizon-roadmap.md#2.7` |
+| `hard_prereq` | `metadata.hard_prereq` | boolean; true for HP1–HP4 |
+| `estimated_days` | `metadata.estimated_days` | integer |
+| `validation_tests` | `metadata.validation_tests` | list of pytest node IDs |
+| `notes` | `description` (trailing block) | use a `**Notes:**` header in description |
 
-### 10.3 Lifecycle
+### 10.3 Status lifecycle (praxia native)
 
 ```
-ideabin (in ideas.jsonl) ──promotion──► ready (in backlog.jsonl)
-ready ──assign──► in_progress
+open ──assign──► in_progress
 in_progress ──block──► blocked ──unblock──► in_progress
 in_progress ──complete──► done
-ready | in_progress ──defer──► abandoned (kept in record, deletes nothing)
+open | in_progress ──defer──► archived (preserved; never deleted)
 ```
+
+(The conceptual `ideabin` ↔ `ready` distinction collapses into `open` in praxia. Items in the "ideabin" sense are `open` with `priority=P3` and `metadata.ring=speculative`.)
+
+### 10.4 Validators (recommended at backlog-add time)
+
+- If `priority=P1` (`ring=core`): require `metadata.rebuttal_table_id` OR `metadata.risk_id` OR `metadata.validation_tests` to be non-null (prevents capability-creep into core).
+- If `metadata.falsification_trigger` is set: `metadata.risk_id` should also be set (the trigger should tie to a named risk).
+- `target_sprint` should be one of the four documented milestones, not freeform.
+
+These are enforced at review time (humans), not by the tool today.
 
 ---
 
