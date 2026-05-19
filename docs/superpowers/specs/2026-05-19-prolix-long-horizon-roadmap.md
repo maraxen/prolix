@@ -20,7 +20,7 @@ Lanes share the engine foundation but have distinct success criteria. Lane B is 
 
 ### Engine paper thesis (final)
 
-> Prolix runs ensembles of *short, structurally-varied* trajectories as single SIMD batches under the hood, dominating wall-clock for init-bound workloads (umbrella sampling, FEP intermediates, NEB images, MTT samples), and ships portably via IREE-WASM to environments where heavy MD typically can't run.
+> Prolix runs ensembles of *short, structurally-varied* trajectories as single SIMD batches under the hood, dominating wall-clock for init-bound workloads (umbrella sampling, FEP intermediates, NEB images, MTT samples) — and ships portably to lightweight environments where heavy MD typically can't run.
 
 **What is and isn't a headline:**
 - **Headlines:** heterogeneous batching of varied systems (the differentiator); portability via WASM (the deploy claim).
@@ -73,7 +73,7 @@ Every roadmap item and praxia backlog entry carries a `ring` field. Promotions a
 |---|---|---|---|---|
 | RR1 | "How is this different from kUPS / OpenMM swarm / GROMACS multi-sim?" | DR-claim1-1; §Claim 1 §Claim 3 comparison narrative | core | TODO |
 | RR2 | "Show me a real scientific result, not just an engine" | §7.1 paper-gating figure | core | TODO |
-| RR3 | "AOT compile time invalidates the init-bound win" | §Claim 1 B1 protocol: AOT segment line-itemized; cold-start enforced | core | TODO |
+| RR3 | "AOT compile time invalidates the init-bound win" | §Claim 1 B1 protocol: AOT segment line-itemized; **B1-AOT-ratio guard with falsification trigger** (R4) | core | TODO |
 | RR4 | "Why these bucket boundaries and not log-uniform / quantile-derived?" | §Claim 1 R3 mitigation: DR-claim1-3 + B4 ±25% sensitivity sweep + configurable per-deployment | core | TODO |
 | RR5 | "Throughput at scale loses to OpenMM custom CUDA" | §S2 defensive benchmark; show ≥0.7× at GPU saturation, regime irrelevant to thesis | core | TODO |
 | RR6 | "Browser MD is a toy; nothing real runs in WASM" | §Claim 2 W4 + WB1 informational benchmark | core | TODO |
@@ -91,7 +91,7 @@ Update the **Status** column as evidence lands. Adding an objection mid-developm
 
 - `BatchPlanner` integration at `EnsemblePlan.from_bundles` construction site → `BatchPlan` pre-computed before JIT (current location: `src/prolix/tiling/planner.py`)
 - `safe_map` heterogeneous dispatch across varying `MolecularShapeSpec` (current location: needs work — V8 day-1 smoke test gates this)
-- Bucket ladder (default; derived from DR-claim1-3 in §8):
+- Bucket ladder (**provisional**; final values pending DR-claim1-3 in §8):
   ```
   ATOM_BUCKETS    = (256, 1_024, 5_000, 25_000, 60_000)
   BOND_BUCKETS    = (256, 1_024, 5_000, 25_000)
@@ -110,17 +110,23 @@ Update the **Status** column as evidence lands. Adding an objection mid-developm
 | V1 | `EnsemblePlan(B=1).run` parity vs `settle_langevin` | Solvated AKE, 1k steps | RMSD < 1e-12 Å | yes |
 | V3 | Homogeneous (same-size) parity vs B independent runs | DHFR ×4 | RMSD < 1e-10 Å | yes |
 | **V4** | **Heterogeneous parity** vs N independent runs | {1ake, 1ubq, 2gb1, 4-water} | Per-system RMSD < 1e-10 Å | **yes (headline)** |
-| **V4-HLO** | **HLO-fingerprint assertion: hetero-batch run produced a single safe_map (not N traces)** | Same as V4 | `jax.make_jaxpr` count of `safe_map`/`scan` primitives = 1 | **yes** |
+| **V4-HLO** | **Compile-once assertion: hetero-batch run compiles once for a given BatchPlan, not B times** | Same as V4 | JIT cache-miss delta = 1 across ensemble dispatch; secondary jaxpr outer-dispatch check | **yes** |
 | V5 | Observable parity (single vs batched) | Energy, KE, T, RMSD, Pressure | < 1e-6 relative | yes |
 | V6 | `jax.grad` finite-diff parity (composes with S1) | Force-matching loss | < 1e-4 RMS | nightly |
 | V7 | BatchPlanner decision correctness | Synthetic axis workloads | Plan output = expected vmap/safe_map split | yes |
-| **V8** | **Day-1 smoke: safe_map across varying `shape_spec`** | 2 bundles, different bucket | No retrace; `make_jaxpr` trace-count = 1 | **yes (day-1)** |
+| **V8** | **Day-1 smoke: safe_map across varying `shape_spec`** | 2 bundles, different bucket | JIT cache-miss delta = 1 (no per-element retrace) | **yes (day-1)** |
 
-**V4-HLO note (oracle-added):** per-system RMSD parity alone is consistent with a naive implementation that runs N independent traces under the hood. The HLO-fingerprint assertion is what proves the batched mechanism is actually batching. Implementation: use `jax.make_jaxpr` on the compiled `EnsemblePlan.run`, parse the resulting jaxpr, and assert the count of `safe_map`/`scan` primitives is exactly 1 (or whatever the canonical hetero-dispatch primitive is).
+**V4-HLO note (oracle-revised):** per-system RMSD parity alone is consistent with a naive implementation that runs N independent traces under the hood. The compile-once assertion proves the batched mechanism is actually batching. **Primary check:** assert that `EnsemblePlan.run` produces exactly one JIT cache miss for a given `BatchPlan` across a heterogeneous-bundle ensemble (not B misses). Use `jax._src.compilation_cache` introspection or process-level cache-miss counter; assert `delta == 1`. **Secondary check (defense in depth):** `jax.make_jaxpr(EnsemblePlan.run)` returns a jaxpr where the outer-level dispatch primitive (`scan` or `pjit`) shows a single batched call rather than B per-element calls. The cache-miss check is more robust than primitive-count counting because it directly measures the property the thesis claims; the jaxpr check guards against XLA folding away tracing differences.
 
 ### 2.3 Benchmark matrix
 
 **B1 — Pre-registered protocol (paper headline plot).** Pre-registration is binding; deviations require an explicit spec amendment.
+
+**B1 is split into two cadences** (resolves the bathos vs pytest leak; oracle round 2):
+- **B1-smoke** (B=4 mixed bundles; pytest; nightly CI on cluster runners; regression detection + AOT-ratio alerting)
+- **B1-full** (B=64; bathos; manual cluster submission via `mcp__bathos__run`; produces the paper-headline number)
+
+**Headline number for the paper:** median `t_total` across 3 seeds of **B1-full**, reported with min/max envelope. Sub-headline breakdown: `t_aot_compile` (compile-time accounting), `t_first_step` (init-dominated regime), `t_steady_state` (per-step throughput).
 
 | Field | Pinned value |
 |---|---|
@@ -148,8 +154,11 @@ Update the **Status** column as evidence lands. Adding an objection mid-developm
 
 - ✅ V1, V3, V4, V4-HLO, V5, V7, V8 green in CI on every PR
 - ✅ V6 green in nightly CI
-- ✅ B1 reproduced 3-seed on cluster; full CSV in `outputs/bench/b1_init_exec.csv`
-- ✅ B3, B4, B5 reproducible; ±25% bucket sensitivity sweep satisfied
+- ✅ B1-smoke green in nightly CI; B1-full reproduced 3-seed on cluster; full CSVs at `outputs/bench/b1_smoke.csv` and `outputs/bench/b1_full.csv`
+- ✅ B3 reproducible: memory at each bucket step within ±15% of theoretical prediction
+- ✅ B4 reproducible: hetero-batch shows ≥2× memory reduction vs naive-pad-to-max at largest bucket; ±25% bucket-boundary sensitivity sweep satisfied
+- ✅ B5 reproducible: planner picks expected vmap/safe_map split across budgets {2×, 0.5×, 0.1×} of device limit
+- ✅ **B1-AOT-ratio guard:** `t_aot_compile / t_total < 0.5` on B1-full; breach escalates to R4 sub-spec
 - ✅ R1 closed: large-scale (64-water mixed-system) SETTLE batching validated end-to-end (escalated from v1.1 capability → core)
 
 ### 2.5 Capability axes touched + ring tagging
@@ -165,17 +174,19 @@ Update the **Status** column as evidence lands. Adding an objection mid-developm
 | Sampling | PT-as-EnsemblePlan composition | capability |
 | Integrators | Mixed-integrator ensembles | capability (deferred per user) |
 
-### 2.6 Risks (top 3 inline; full register in §12)
+### 2.6 Risks (top 4 inline; full register in §13)
 
 - **R1 — Hetero SETTLE only smoke-tested.** 4-water × 100 steps today; V4 demands 64-water mixed-system parity. **Mitigation:** existing v1.1 backlog item "Large-Scale SETTLE Batching" escalated capability → core; hard prerequisite for V4.
 - **R2 — Trajectory in-memory blowup.** T×N×3 floats for long trajectories on large systems exceeds HBM. **Mitigation:** `save_every` + streaming-to-host with optional checkpoint protocol; designed-in to `Trajectory` shape, tested in capability ring (HDF5/Zarr decision sub-spec).
 - **R3 — Bucket policy looks ad-hoc to reviewer.** If the reviewer picks system sizes that fall in awkward buckets, B3/B4 plots look worse than they are. **Mitigation:** (a) DR-claim1-3 derives buckets from PDB scan with stated criterion ("95% of PDB chains fit ≤ 5k atoms"); (b) B4 ±25% sensitivity sweep; (c) `MolecularShapeSpec.bucket_overrides` makes buckets configurable per-deployment.
+- **R4 — AOT compile time as fraction of `t_total` (oracle round 2).** If `t_aot_compile / t_total > 0.5` on B1-full, the regime pin (100 ps short trajectories) is invalidated — the wall-clock win goes to OpenMM's amortized Context creation. **Falsification trigger:** explicit ratio gate in B1-full. **Mitigation:** (a) B1-smoke nightly CI tracks AOT ratio with alert threshold; (b) if B1-full breaches 0.5, escalate to AOT-budget sub-spec *before paper-submit*. Candidate sub-spec content: pre-compiled HLO artifact caching, persistent JIT cache across runs, separate compile-time-vs-runtime accounting in the paper. (RR3 evidence binding.)
 
 ### 2.7 Hard prerequisites (oracle-escalated, locked)
 
 - **HP1 — Migration policy decided** for legacy entry-points (`batched_produce`, `LangevinState`, `pad_protein`, `PaddedSystem`, `collate_batch`) before Claim 1 implementation starts. Sub-spec required. *Not* an open question.
 - **HP2 — `make_bundle_from_system` feature parity audit** vs `make_energy_fn` (CMAP, exceptions, GB-aware electrostatics, dispersion tail per existing roadmap Open Question #9). V1 risks silently passing on a degraded force field if this is skipped.
 - **HP3 — V8 (safe_map across varying `shape_spec`) green** before any other Claim 1 implementation work. If `shape_spec` is `eqx.field(static=True)` and varies per element, the thesis collapses to per-element retrace.
+- **HP4 — ANI-1x DFT-forces subset curated for §7.1 figure** (oracle round 2). Select ~16 system types from ANI-1x's DFT-forces subset (organic small molecules at dipeptide scale; ωB97X-D/6-31G* reference); precompute training and held-out test sets; document selection criteria and dataset version in a sub-spec at `docs/superpowers/specs/2026-XX-XX-ani1x-subset-curation.md`. Replaces the previous "water clusters / sugar units" candidate (those move to extension hooks in §7.1).
 
 ### 2.8 Key open questions (full list in §13)
 
@@ -232,7 +243,8 @@ Full query list in §8.
 
 - ✅ W1–W4 pass; static demo page reproducible from clean clone
 - ✅ WB2 under target (< 5 s cold-start)
-- ✅ Demo URL live (capability — post-paper)
+
+**Post-paper capability (not v1.2 gate):** Demo URL live on prolix-org domain.
 
 ### 3.6 Cross-claim edges
 
@@ -262,6 +274,9 @@ ensemble = EnsemblePlan.from_bundles(
     batch_budget_bytes=None,  # default to device limit
 )
 trajectories = ensemble.run(n_steps=10_000, save_every=100, keys=keys)
+
+# Single-system convenience (functionally equivalent to from_bundles([bundle]))
+ensemble = EnsemblePlan.from_bundle(bundle, integrator=..., observables=...)
 # trajectories[i] is a Trajectory(positions, momenta?, observables, final_state)
 
 # Gradient composes with S1
@@ -340,7 +355,7 @@ class Trajectory(eqx.Module):
 |---|---|
 | D1 | Per-term `ANALYTICAL` vs `AUTOGRAD` force agreement, each bonded term separately (< 1e-6 kcal/mol/Å per term) |
 | D2 | `jax.grad` through trajectory finite-diff parity — cross-references V6 |
-| D3 | Performance gap: `ANALYTICAL` faster than `AUTOGRAD` for bonded-dominated systems (relative; specific number reported, not gated) |
+| D3 | Performance gap: `ANALYTICAL` faster than `AUTOGRAD` for bonded-dominated systems — **reported metric, not a gate** |
 
 ### 5.3 Exit
 
@@ -387,8 +402,8 @@ Lane B has TWO scopes in this roadmap:
 **Differentiable bonded-parameter fitting on a heterogeneous ensemble.** Lowest-risk option; combines Claim 1 × S1 multiplicatively.
 
 **Setup:**
-- 16 small varied systems (mix of dipeptides, water clusters, sugar units)
-- Ground-truth ab initio forces precomputed (DFT or MP2 reference); stored as static dataset
+- **16 system types from ANI-1x DFT-forces subset** (organic small molecules at dipeptide scale; ωB97X-D/6-31G* reference; see **HP4** for selection criteria and curation sub-spec)
+- Ground-truth forces precomputed and stored as a static dataset at `data/ani1x_subset/`
 - Objective: optimize bonded force-field parameters (`bond_k`, `bond_r0`, `angle_k`, `angle_θ0`) to minimize `MSE(predicted_forces, reference_forces)` via `jax.grad` through `EnsemblePlan.run(n_steps=0).gradient(...)`
 - Baseline: naive loop-over-systems gradient
 - Expected story: 50–100× speedup via hetero-batched gradient
@@ -417,6 +432,7 @@ Lane B has TWO scopes in this roadmap:
 - Extend to a 64-system ensemble (more compelling speedup numbers)
 - Add an angle/dihedral round and report final RMSD on held-out systems
 - Run convergence as a function of ensemble heterogeneity (homogeneous → fully varied)
+- Add water clusters and small sugars via a real QM compute run (originally considered for v1.2 figure scope; now extension)
 
 ### §7.2 Future-work items (paper "Outlook" subsection only)
 
@@ -499,9 +515,9 @@ These apply to ALL claims uniformly.
 ### 9.2 CI structure
 
 - Every PR: V1, V3, V4, V4-HLO, V5, V7, V8 + A1, A3, A4 + W1, W2
-- Weekly: V6, V4 (full system inventory), W4, A2 tutorial
-- Nightly: W3 (artifact size), B1 smoke (B=4 sub-protocol), full mypy/ruff sweep
-- On-demand (manual): full B1 (B=64) cluster run; S2 throughput
+- Weekly: V6, V4 (full system inventory), W4, A2 tutorial, B1-smoke (B=4)
+- Nightly: W3 (artifact size), B1-smoke (B=4) re-run if any Claim 1 mechanism changed (with **AOT-ratio alert** per R4), full mypy/ruff sweep
+- On-demand (manual): **B1-full (B=64) cluster run via bathos**; S2 throughput; B4 sensitivity sweep
 
 ### 9.3 Documentation standards
 
@@ -519,8 +535,8 @@ These apply to ALL claims uniformly.
 
 ### 9.5 Bathos (experiment infrastructure)
 
-- **Use bathos for:** genuine experiments (B1 sweeps, §7.1 figure runs, S2 throughput, B4 sensitivity, Lane B exploration)
-- **Do NOT use bathos for:** CI tests, core code development, validation matrix tests V1–V8 (those are pytest)
+- **Use bathos for:** **B1-full (B=64)**, §7.1 figure runs, S2 throughput, B4 sensitivity sweeps, Lane B exploration
+- **Do NOT use bathos for:** CI tests, core code development, validation matrix tests V1–V8, A1–A4 contract tests, **B1-smoke (B=4 is pytest/nightly-CI)**
 - **Required bathos remotes:** `engaging` (primary cluster), local development workstation, optional H100 cloud burst
 - **Bathos run convention:** all experiment runs tagged with `claim_id` and `ring`; results stored in `outputs/bath/<run_id>/`
 - Bathos init lives in `.bth.toml` (already exists per commit `4f811f0`)
@@ -563,11 +579,15 @@ These apply to ALL claims uniformly.
   "depends_on": ["other-item-id", ...],
   "blocks": ["other-item-id", ...],
   "deep_research_ids": ["DR-claim1-1", ...],
+  "triggered_by_dr": "DR-claim1-1 | ... | null",
   "validation_tests": ["tests/path/test_x.py::test_y", ...],
   "success_criterion": "concrete measurable condition",
   "exit_criterion": "how we know it's done",
-  "paper_section": "string or null",
+  "falsification_trigger": "concrete measurable condition that, if breached, invalidates the item or its claim",
+  "risk_id": "R1 | R2 | R3 | R4 | WR1 | WR2 | WR3 | AR1 | AR2 | AR3 | null",
   "rebuttal_table_id": "RR1 | RR2 | ... | null",
+  "target_milestone": "v1.2 | paper-submit | v1.3 | v2.0",
+  "paper_section": "string or null",
   "estimated_days": int,
   "owner": "marielle",
   "created": "YYYY-MM-DD",
@@ -592,30 +612,48 @@ ready | in_progress ──defer──► abandoned (kept in record, deletes noth
 ## §11 Dependency DAG
 
 ```
-HP1 migration policy decided         ─────────────────────────┐
-HP2 bundle field audit (Open Q #9)    ─────────────────────┐  │
-HP3 V8 safe_map varying shape_spec    ─────────────────┐    │  │
-                                                        │    │  │
-                                                        ▼    ▼  ▼
-P0 NPT-KE bug fix          ──────►   S2 throughput      Claim 1 (V1, V3-V8, B1, B3, B4, B5)
-P0 large-scale SETTLE       ──────►   Claim 1 V4 (R1)       │
-                                                            │
-                                                            ├─► Claim 3 (A1-A4, public API freeze)
-                                                            │       │
-                                                            │       └─► §7.1 Lane-B figure
-                                                            │                │
-                                                            ├─► Claim 2 (W1-W4, demo)            │
-                                                            │       (needs flat Plan state)     │
-                                                            │                                    │
-                                                            └─► S1 (D1-D3 differentiability)    │
-                                                                       │                         │
-                                                                       └─────────────────────────┤
-                                                                                                  │
-                                                                                                  ▼
-                                                                                Paper-submit gate
-                                                                                  + Reviewer rebuttal table green
-                                                                                  + §7.1 figure reproducible <30 min
-                                                                                  + v1.2 tag
+                  Hard prereqs:
+                    HP1  Migration policy decided
+                    HP2  make_bundle_from_system feature audit  ─────────┐
+                    HP3  V8 safe_map varying shape_spec smoke           │
+                    HP4  ANI-1x DFT-forces subset curated  ──────────┐  │
+                                                                      │  │
+  P0 large-scale SETTLE  ──────► Claim 1 V4 (R1)                      │  │
+  P0 NPT-KE bug fix      ──────► S2 (NPT coverage; deferred to S2)    │  │
+                                                                      │  │
+                          ┌─── Claim 1 mechanism (V1, V3, V4, V4-HLO,│  │
+  HP1, HP3 ──────────────►│      V5, V7, V8, B1-smoke, B3, B4, B5)   │  │
+                          │                  │                        │  │
+                          │                  ├─► Claim 3 (A1-A4, API freeze) ◄── HP1
+                          │                  │       │                │  │
+                          │                  ├─► Claim 2 (W1-W4)      │  │
+                          │                  │     (needs flat Plan state)
+                          │                  │                        │  │
+                          │                  └─► S1 (D1-D3)           │  │
+                          │                          │                │  │
+                          │                          ▼                ▼  ▼
+                          │             §7.1 Lane-B figure (Claim 1 × S1, uses HP4) ◄── HP2
+                          │                          │
+                          ▼                          │
+                  ┌────────────────────────────────────────┐
+                  │  v1.2 ship gate                        │
+                  │    + Claims 1-3 exit criteria green    │
+                  │    + S1 D1-D3 passing                  │
+                  │    + §7.1 figure reproducible <30 min  │
+                  │    (S2 NOT a v1.2 gate)                │
+                  └────────────────────────────────────────┘
+                          │
+                          ▼
+                  ┌────────────────────────────────────────────────────┐
+                  │  Paper-submit gate                                 │
+                  │    + v1.2 shipped                                  │
+                  │    + S2 envelope within 0.7×–1.3× of OpenMM        │
+                  │    + B1-full headline number locked (3 seeds)      │
+                  │    + B1-AOT-ratio < 0.5 (R4 falsification not fired)│
+                  │    + RR1–RR7 all "green" status                    │
+                  │    + Venue selected (DR-paper-1, DR-paper-2)       │
+                  │    + Co-authors aligned                            │
+                  └────────────────────────────────────────────────────┘
 ```
 
 ---
@@ -624,8 +662,8 @@ P0 large-scale SETTLE       ──────►   Claim 1 V4 (R1)       │
 
 | Gate | Definition of done | Output |
 |---|---|---|
-| **v1.2 ship** | Claims 1–3 exit criteria all green; S1 & S2 validation passing; §7.1 figure reproducible from clean clone <30 min | tagged release; public API stable; migration table in CHANGELOG |
-| **Paper-submit** | v1.2 shipped + RR1–RR7 all "green" status + venue selected (DR-paper-1) + co-authors aligned | preprint to arXiv + venue submission |
+| **v1.2 ship** | Claims 1–3 exit criteria green; S1 D1–D3 passing; §7.1 figure reproducible from clean clone <30 min. **S2 is NOT a v1.2 gate** — it gates paper-submit only | tagged release; public API stable; migration table in CHANGELOG |
+| **Paper-submit** | v1.2 shipped + **S2 envelope within 0.7×–1.3×** + **B1-full headline number locked** + **B1-AOT-ratio < 0.5** (R4 not fired) + RR1–RR7 all "green" + venue selected (DR-paper-1, DR-paper-2) + co-authors aligned | preprint to arXiv + venue submission |
 | **Post-paper hardening** | Community feedback reviewed; bug-fix sprint; tutorial expansion based on reader confusion points | v1.2.x patch releases |
 | **First lane-B publishable result** | LB1 (MTT) or LB2 (allostery) figure-complete + draft writeup | lane-B paper-1 draft |
 | **v2.0** | Constraint-aware thermostat (dt ≥ 1.0 fs) + NPT long-traj fix + `physics/` subpackaging + legacy API removal + first lane-B paper submitted | tagged v2.0 |
@@ -636,18 +674,25 @@ No wall-clock budgets are pinned. Capability-gated only. Capability-creep risk a
 
 ## §13 Open Questions Carried Forward
 
+### 13.1 Open
+
 | # | Question | Affects | Decision deadline | Resolution path |
 |---|---|---|---|---|
 | OQ1 | Mixed-integrator ensembles support timeline | Claim 1 + Claim 3 API | v2.0 planning | Capability ring; defer |
 | OQ2 | Trajectory checkpoint format (HDF5 / Zarr / pytree) | Claim 1 R2; Claim 3 Trajectory shape | Before §7.1 figure if long trajectories needed | Sub-spec; capability ring |
 | OQ3 | Bucket override API ergonomics (positional vs dict) | Claim 3 A1 | Claim 3 implementation start | Sub-spec |
 | OQ4 | Whether §7.1 figure extension to 64-system ensemble is in scope of v1.2 | §7.1 deliverable | After §7.1 base figure lands | Decide based on remaining budget |
-| OQ5 | Specific reference quantum-chemistry dataset for §7.1 ab initio forces | §7.1 dataset | Before §7.1 starts | Sub-spec; likely small Tinker/Psi4 or curated ANI-1x subset |
 | OQ6 | Paper venue selection | Paper-submit gate | After DR-paper-1 + DR-paper-2 | Single-author or with co-authors? |
-| OQ7 | Whether `EnsemblePlan` is the published name vs `run_ensemble` function form | Claim 3 public API | Before Claim 3 implementation | Sub-spec; default = `EnsemblePlan` class |
-| OQ8 | Threefry vs RBG default for export path | Claim 2 W1-W3 | Before Claim 2 implementation | Smoke gate decides |
 | OQ9 | Bathos remote topology — engaging-only or also cloud burst | §9.5 | Pre-§7.1 figure | Configure both; default to engaging |
 | OQ10 | When/whether to introduce `Observable` tensor return (RDF, etc.) — capability ring trigger | Claim 3 capability promotions | When first lane-B project asks | Promotion criterion |
+
+### 13.2 Closed (oracle round 2)
+
+| # | Question | Resolution | Closed |
+|---|---|---|---|
+| OQ5 | Specific reference quantum-chemistry dataset for §7.1 | ANI-1x DFT-forces subset (organic small molecules; ωB97X-D/6-31G*); curation tracked as HP4 | 2026-05-19 |
+| OQ7 | `EnsemblePlan` class vs `run_ensemble` function form | `EnsemblePlan` class (as used throughout this spec); `from_bundle(bundle)` and `from_bundles([bundles])` factory methods | 2026-05-19 |
+| OQ8 | Threefry vs RBG default for WASM export | Threefry primary; RBG fallback if IREE-WASM coverage incomplete (WR1 mitigation pre-decides this) | 2026-05-19 |
 
 ---
 
