@@ -1,0 +1,7 @@
+[project]
+slug = "prolix"
+root = "/home/marielle/projects/prolix"
+
+[remote]
+host = "engaging"
+path = "~/projects/prolix"

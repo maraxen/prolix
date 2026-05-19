@@ -1,0 +1,11 @@
+[benchmark]
+baseline_ref = ""
+metric = "temp_std"
+regression_threshold = 0.10
+target = "temp_std < 5 K over 50ps NVT with dt=0.5fs"
+
+[result_schema]
+temp_mean = "float"
+temp_std = "float"
+n_steps = "int"
+dt_fs = "float"
