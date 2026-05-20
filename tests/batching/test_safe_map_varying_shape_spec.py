@@ -447,14 +447,14 @@ def test_real_world_same_bucket_bundles_hash_identically():
 
     This is the property required for Claim 1 (heterogeneous batch substrate) to hold.
 
-    Real-world systems of different sizes (e.g., 50 atoms, 100 atoms) that bucket
-    to the same size (e.g., ATOM_BUCKETS[0] = 256) must produce byte-identical
+    Real-world systems of different sizes (e.g., 70 atoms, 120 atoms) that bucket
+    to the same size (e.g., ATOM_BUCKETS[1] = 128) must produce byte-identical
     shape_spec static fields. This test validates that the coarsenining refactor
     achieves this property by using _bucket_idx to replace raw counts with indices.
 
     Method:
-    1. Create two bundles with different real atom counts (50 and 150) that both
-       bucket to the same size (256).
+    1. Create two bundles with different real atom counts (70 and 120) that both
+       bucket to the same size (128).
     2. Verify shape_spec.atom_bucket_idx is identical.
     3. Build jax.vmap(observable) wrapped in jax.jit over stacked bundles.
     4. Run twice; trace_count must stay at 1 (cache hit on second run).
@@ -462,13 +462,13 @@ def test_real_world_same_bucket_bundles_hash_identically():
     Expected: trace_count == 1 (successful cache hit, validating Claim 1).
     """
     # Create two bundles with different real counts, same bucket
-    bundle_1 = _make_minimal_bundle(n_atoms=50)
-    bundle_2 = _make_minimal_bundle(n_atoms=150)
+    bundle_1 = _make_minimal_bundle(n_atoms=70)
+    bundle_2 = _make_minimal_bundle(n_atoms=120)
 
-    # Both should bucket to ATOM_BUCKETS[0] (256) since 50 < 256 and 150 < 256
-    atom_bucket_threshold = ATOM_BUCKETS[_bucket_idx(50, ATOM_BUCKETS)]
-    assert 50 <= atom_bucket_threshold and 150 <= atom_bucket_threshold, (
-        f"Test setup: atoms 50 and 150 should bucket to same threshold. Got {atom_bucket_threshold}"
+    # Both should bucket to ATOM_BUCKETS[1] (128) since 64 < 70,120 <= 128
+    atom_bucket_threshold = ATOM_BUCKETS[_bucket_idx(70, ATOM_BUCKETS)]
+    assert 70 <= atom_bucket_threshold and 120 <= atom_bucket_threshold, (
+        f"Test setup: atoms 70 and 120 should bucket to same threshold. Got {atom_bucket_threshold}"
     )
 
     # CRITICAL: shape_spec must be identical for Claim 1 to hold
