@@ -56,6 +56,8 @@ def test_select_16_with_synthetic_hdf5():
     runs SELECT_16, verifies deterministic selection with seed=42.
 
     Per spec §4.2 and §8 exit criterion 12 (visual inspection).
+
+    Note: ANI-1x groups are keyed by molecular formula (e.g., C9H9N3O2), not SMILES.
     """
     from fetch_ani1x_subset import select_16_lane_a
 
@@ -63,33 +65,37 @@ def test_select_16_with_synthetic_hdf5():
         tmpdir_path = Path(tmpdir)
         synthetic_h5 = tmpdir_path / "synthetic_ani1x.h5"
 
-        # Build synthetic HDF5 with 20 molecules, all with valid unique SMILES
+        # Build synthetic HDF5 with 20 molecules keyed by formula
         with h5py.File(synthetic_h5, "w") as f:
-            # Create 20 unique SMILES by varying chain/branch lengths
-            smiles_list = []
+            # Create 20 molecules with formula-based group names
+            formula_list = []
             for n_atoms in range(16, 26):
                 # Create simple alkane chains
-                smiles = "C" * n_atoms
-                smiles_list.append((smiles, n_atoms))
+                formula = f"C{n_atoms}H{2*n_atoms + 2}"
+                formula_list.append((formula, n_atoms))
 
-            # Create additional variations with different elements
+            # Create additional variations with N
             for n_atoms in range(16, 22):
-                smiles = "C" * (n_atoms - 1) + "N"
-                smiles_list.append((smiles, n_atoms))
+                formula = f"C{n_atoms-1}H{2*n_atoms}N"
+                formula_list.append((formula, n_atoms))
 
-            for i, (smiles, expected_n_atoms) in enumerate(smiles_list[:20]):
+            for i, (formula, expected_n_atoms) in enumerate(formula_list[:20]):
                 n_atoms = expected_n_atoms
                 n_conf = 20 + (i % 6)  # Ensure ≥20 conformers per F3
 
-                mol_group = f.create_group(smiles)
+                mol_group = f.create_group(formula)
 
                 # Minimal synthetic data
-                mol_group.create_dataset(
-                    "coordinates",
-                    data=np.random.randn(n_conf, n_atoms, 3).astype(np.float32),
-                )
-                # atomic_numbers: derived from SMILES
-                atomic_nums = [6 if c == 'C' else 7 if c == 'N' else 8 for c in smiles]
+                # Positions: use realistic spacing (Å)
+                positions = np.random.randn(n_conf, n_atoms, 3).astype(np.float32) * 0.5 + 1.5
+                mol_group.create_dataset("coordinates", data=positions)
+
+                # atomic_numbers: derived from formula
+                # For simplicity: alternate C and N atoms to match n_atoms
+                atomic_nums = []
+                n_c = (n_atoms * 6) // 7 if 'N' in formula else n_atoms
+                atomic_nums = [6] * min(n_c, n_atoms) + [7] * max(0, n_atoms - n_c)
+                atomic_nums = atomic_nums[:n_atoms]
                 mol_group.create_dataset(
                     "atomic_numbers",
                     data=np.array(atomic_nums, dtype=np.uint8),
@@ -112,20 +118,20 @@ def test_select_16_with_synthetic_hdf5():
 
         # Verify each molecule has required fields
         for mol in selected:
-            assert "smiles" in mol
+            assert "formula" in mol
             assert "n_atoms" in mol
             assert "n_conf_with_forces" in mol
             assert "rarity_score" in mol
             assert "env_hashes" in mol
 
-            # Atom count should be in range (F2: 15-30, or 16-22 for our synthetic data)
-            assert mol["n_atoms"] >= 15
+            # Atom count should be in range (F2: 15-30)
+            assert 15 <= mol["n_atoms"] <= 30
 
         # Verify determinism: run again with same seed, should get identical result
         selected2 = select_16_lane_a(synthetic_h5, seed=42)
         assert len(selected) == len(selected2)
         for m1, m2 in zip(selected, selected2):
-            assert m1["smiles"] == m2["smiles"]
+            assert m1["formula"] == m2["formula"]
 
 
 @pytest.mark.fast
@@ -184,6 +190,44 @@ def test_missing_archive_exits_nonzero():
     )
 
     assert not success, "Should fail with missing archive"
+
+
+@pytest.mark.fast
+def test_local_env_hash_from_xyz():
+    """Test AIMNet2-style local-environment hash from xyz + atomic numbers (no RDKit Mol).
+
+    Verifies that the function correctly identifies bonded neighbors via distance threshold
+    and computes hash tuples for non-H atoms.
+
+    Per spec §4.2: hash(a) = (Z_a, n_H_neighbors, n_total_neighbors, sorted(Z_non_H_neighbors))
+    """
+    from fetch_ani1x_subset import compute_local_env_hash
+
+    # Simple 2-atom molecule: C bonded to O
+    # C: bonded to 1 O → (6, 0, 1, (8,))
+    # O: bonded to 1 C → (8, 0, 1, (6,))
+
+    atomic_numbers = np.array([6, 8], dtype=int)  # C, O
+    positions = np.array([
+        [0.0, 0.0, 0.0],      # C (left)
+        [0.7, 0.0, 0.0],      # O (right, bonded to C via C-O bond at ~0.66 Å)
+    ], dtype=np.float32)
+
+    env_hashes = compute_local_env_hash(atomic_numbers, positions)
+
+    # Should have 2 hashes (C and O)
+    # C: 0 H neighbors, 1 total neighbor (O) → (6, 0, 1, (8,))
+    # O: 0 H neighbors, 1 total neighbor (C) → (8, 0, 1, (6,))
+
+    assert len(env_hashes) == 2, f"Expected 2 unique hashes (C and O), got {len(env_hashes)}"
+
+    # C hash: (6, 0, 1, (8,))
+    c_hash = (6, 0, 1, (8,))
+    assert c_hash in env_hashes, f"Missing C hash {c_hash}. Got: {env_hashes}"
+
+    # O hash: (8, 0, 1, (6,))
+    o_hash = (8, 0, 1, (6,))
+    assert o_hash in env_hashes, f"Missing O hash {o_hash}. Got: {env_hashes}"
 
 
 @pytest.mark.fast

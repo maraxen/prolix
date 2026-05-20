@@ -13,6 +13,10 @@ Responsibilities:
   7. Emit manifest.json per spec §4.4.
   8. Print summary table.
 
+Note: ANI-1x HDF5 groups are keyed by molecular formula (e.g., C9H9N3O2), NOT by SMILES.
+Bonds are derived from xyz via covalent-radius distance threshold (no SMILES parsing at curation).
+The downstream §7.1 toolchain (openff-toolkit) will derive SMILES from positions+species.
+
 Exit code 0 on success; non-zero with error message on failure.
 """
 
@@ -63,6 +67,18 @@ LANE_A_N_ATOMS_MAX = 30
 LANE_A_N_ATOMS_MIN_CONF = 20
 LANE_A_SELECT_COUNT = 16
 LANE_A_SEED = 42
+
+# Covalent radii in Angstroms (Cordero et al., 2008; H, C, N, O only — ANI-1x scope)
+# Used for bond perception from xyz via distance threshold
+COVALENT_RADII = {
+    1: 0.31,  # H
+    6: 0.76,  # C
+    7: 0.71,  # N
+    8: 0.66,  # O
+}
+
+# Bond distance threshold multiplier (soft cutoff per Jensen 2018 / xyz2mol)
+BOND_DISTANCE_THRESHOLD_MULTIPLIER = 1.20
 
 # Lane B fixed molecules (spec §4.3).
 # IMPORTANT: COMP6v2 HDF5 is organized by atom-count, NOT by subset name.
@@ -151,71 +167,70 @@ def iter_data_buckets(hdf5_path: str, data_keys: list[str]):
                 yield smiles, data_dict
 
 
-def parse_smiles_to_mol(smiles: str) -> Optional[object]:
-    """Parse SMILES to RDKit molecule.
+
+
+def compute_local_env_hash(
+    atomic_numbers: np.ndarray,
+    positions: np.ndarray,
+) -> set[tuple]:
+    """Compute AIMNet2-style local-environment hashes from xyz + species (no RDKit Mol).
+
+    Per spec §4.2, for each non-H atom a:
+      1. Determine bonded neighbors by distance threshold:
+         bond exists between atoms i, j iff
+         |r_i - r_j| < (covalent_radius[Z_i] + covalent_radius[Z_j]) * BOND_DISTANCE_THRESHOLD_MULTIPLIER
+      2. Compute hash tuple:
+         (Z_a, n_H_neighbors, n_total_neighbors, sorted_tuple(Z_neighbor for neighbor in non-H neighbors))
 
     Args:
-        smiles: SMILES string.
+        atomic_numbers: (Na,) int array of atomic numbers.
+        positions: (Na, 3) float32 array of positions in Angstroms.
 
     Returns:
-        RDKit Mol object or None if parsing fails.
+        set of hash tuples (Z, n_H, n_total, sorted_neighbor_Z_tuple) for non-H atoms.
     """
-    try:
-        mol = Chem.MolFromSmiles(smiles)
-        if mol is None:
-            return None
-        return mol
-    except Exception as e:
-        logger.debug(f"SMILES parsing failed for {smiles}: {e}")
-        return None
+    atomic_numbers = np.asarray(atomic_numbers, dtype=int)
+    positions = np.asarray(positions, dtype=np.float32)
 
+    n_atoms = len(atomic_numbers)
+    env_hashes = set()
 
-def get_canonical_smiles(smiles: str) -> Optional[str]:
-    """Get canonical SMILES from input SMILES (spec §4.1 F5).
+    for a in range(n_atoms):
+        z_a = atomic_numbers[a]
 
-    Args:
-        smiles: Input SMILES string.
-
-    Returns:
-        Canonical SMILES or None if parsing fails.
-    """
-    mol = parse_smiles_to_mol(smiles)
-    if mol is None:
-        return None
-    return Chem.MolToSmiles(mol, canonical=True)
-
-
-def compute_local_env_hash(mol: object) -> dict[str, int]:
-    """Compute AIMNet2-style local-environment hashes for a molecule.
-
-    Per spec §4.2, for each non-H atom:
-      hash(a) := (Z_a, n_H_connected, n_neighbors, sorted(Z_b for b in neighbors(a)))
-
-    Args:
-        mol: RDKit Mol object.
-
-    Returns:
-        Dict mapping hash values (as frozenset) to count. Use frozenset for hashability.
-    """
-    env_hashes = {}
-    for atom in mol.GetAtoms():
-        z = atom.GetAtomicNum()
-        if z == 1:  # Skip hydrogens
+        # Skip hydrogens
+        if z_a == 1:
             continue
 
-        # Count connected hydrogens
-        n_h = sum(1 for neighbor in atom.GetNeighbors() if neighbor.GetAtomicNum() == 1)
-        n_neighbors = atom.GetDegree()
+        # Determine bonded neighbors via distance threshold
+        neighbors = []
+        n_h_neighbors = 0
 
-        # Get neighbor atomic numbers (sorted, excluding H)
-        neighbor_zs = tuple(sorted(
-            n.GetAtomicNum() for n in atom.GetNeighbors()
-            if n.GetAtomicNum() != 1
-        ))
+        for b in range(n_atoms):
+            if a == b:
+                continue
+
+            z_b = atomic_numbers[b]
+            r_ab = np.linalg.norm(positions[a] - positions[b])
+
+            # Bond threshold
+            r_cov_a = COVALENT_RADII.get(z_a, 0.76)  # Default to C if unknown
+            r_cov_b = COVALENT_RADII.get(z_b, 0.76)
+            threshold = (r_cov_a + r_cov_b) * BOND_DISTANCE_THRESHOLD_MULTIPLIER
+
+            if r_ab < threshold:
+                neighbors.append(z_b)
+                if z_b == 1:
+                    n_h_neighbors += 1
+
+        # Count non-H neighbors
+        non_h_neighbors = [z for z in neighbors if z != 1]
+        n_total_neighbors = len(neighbors)
 
         # Create hash tuple
-        env_hash = (z, n_h, n_neighbors, neighbor_zs)
-        env_hashes[env_hash] = env_hashes.get(env_hash, 0) + 1
+        sorted_neighbor_z = tuple(sorted(non_h_neighbors))
+        env_hash = (z_a, n_h_neighbors, n_total_neighbors, sorted_neighbor_z)
+        env_hashes.add(env_hash)
 
     return env_hashes
 
@@ -227,76 +242,80 @@ def select_16_lane_a(
     """Select 16 Lane A molecules via AIMNet2-style local-environment hashing diversity.
 
     Implements spec §4.2 SELECT_16 algorithm.
+    ANI-1x group keys are molecular formulas (e.g., C9H9N3O2), not SMILES.
 
     Args:
         ani1x_path: Path to ANI-1x HDF5 archive.
         seed: Random seed for greedy selection.
 
     Returns:
-        List of dicts with keys: smiles, n_total_atoms, n_conf_with_forces, env_hashes, rarity_score.
+        List of dicts with keys: formula, n_atoms, n_conf_with_forces, env_hashes, rarity_score.
     """
-    logger.info("Loading ANI-1x molecules and filtering F1–F5...")
+    logger.info("Loading ANI-1x molecules and filtering F1–F4 (formula-keyed groups)...")
 
-    # Apply filters F1–F5
+    # Apply filters F1–F4 (F5 SMILES parsing removed; ANI-1x keys are formulae)
     passing_molecules = []
-    for smiles, data in iter_data_buckets(
-        str(ani1x_path),
-        ["atomic_numbers", "wb97x_dz.energy", "wb97x_dz.forces", "coordinates"]
-    ):
-        atomic_numbers = data["atomic_numbers"]
-        forces = data["wb97x_dz.forces"]
+    with h5py.File(ani1x_path, "r") as f:
+        for formula in f.keys():
+            group = f[formula]
 
-        # F1: Elements subset
-        if not all(z in ALLOWED_ELEMENTS for z in atomic_numbers):
-            continue
+            # Check if all required keys exist
+            required_keys = ["atomic_numbers", "wb97x_dz.energy", "wb97x_dz.forces", "coordinates"]
+            if not all(key in group for key in required_keys):
+                continue
 
-        # F2: Atom count range
-        n_atoms = len(atomic_numbers)
-        if not (LANE_A_N_ATOMS_MIN <= n_atoms <= LANE_A_N_ATOMS_MAX):
-            continue
+            atomic_numbers = np.array(group["atomic_numbers"], dtype=int)
+            forces = np.array(group["wb97x_dz.forces"], dtype=np.float32)
+            coordinates = np.array(group["coordinates"], dtype=np.float32)
 
-        # F3: Conformer count with non-NaN forces
-        n_conf_with_forces = np.sum(~np.isnan(forces[:, 0, 0]))
-        if n_conf_with_forces < LANE_A_N_ATOMS_MIN_CONF:
-            continue
+            # F1: Elements subset
+            if not all(z in ALLOWED_ELEMENTS for z in atomic_numbers):
+                continue
 
-        # F4: Forces non-NaN (defensive, redundant for ωB97X/6-31G*)
-        if np.isnan(forces).any():
-            continue
+            # F2: Atom count range
+            n_atoms = len(atomic_numbers)
+            if not (LANE_A_N_ATOMS_MIN <= n_atoms <= LANE_A_N_ATOMS_MAX):
+                continue
 
-        # F5: SMILES parseable
-        canonical_smiles = get_canonical_smiles(smiles)
-        if canonical_smiles is None:
-            continue
+            # F3: Conformer count with non-NaN forces
+            n_conf_with_forces = np.sum(~np.isnan(forces[:, 0, 0]))
+            if n_conf_with_forces < LANE_A_N_ATOMS_MIN_CONF:
+                continue
 
-        passing_molecules.append({
-            "smiles": canonical_smiles,
-            "n_atoms": n_atoms,
-            "n_conf_with_forces": int(n_conf_with_forces),
-            "mol_object": parse_smiles_to_mol(canonical_smiles),
-        })
+            # F4: Forces non-NaN (defensive, redundant for ωB97X/6-31G*)
+            if np.isnan(forces).any():
+                continue
 
-    logger.info(f"Passing molecules (F1–F5): {len(passing_molecules)}")
+            passing_molecules.append({
+                "formula": formula,
+                "n_atoms": n_atoms,
+                "n_conf_with_forces": int(n_conf_with_forces),
+                "atomic_numbers": atomic_numbers,
+                "positions": coordinates[0],  # First conformer for env hash
+            })
+
+    logger.info(f"Passing molecules (F1–F4): {len(passing_molecules)}")
 
     if len(passing_molecules) == 0:
-        logger.warning("No molecules passed F1–F5 filters (this may be expected if keys are formulae, not SMILES)")
+        logger.warning("No molecules passed F1–F4 filters")
         return []
 
     # Compute environment hashes for each molecule
     for mol_dict in passing_molecules:
-        if mol_dict["mol_object"] is not None:
-            env_hashes = compute_local_env_hash(mol_dict["mol_object"])
-            mol_dict["env_hash_set"] = set(env_hashes.keys())
+        env_hash_set = compute_local_env_hash(
+            mol_dict["atomic_numbers"],
+            mol_dict["positions"],
+        )
+        mol_dict["env_hash_set"] = env_hash_set
 
     # Compute global hash frequency
     global_hash_freq = Counter()
     for mol_dict in passing_molecules:
-        if "env_hash_set" in mol_dict:
-            global_hash_freq.update(mol_dict["env_hash_set"])
+        global_hash_freq.update(mol_dict["env_hash_set"])
 
     # Compute rarity scores
     for mol_dict in passing_molecules:
-        if "env_hash_set" in mol_dict and len(mol_dict["env_hash_set"]) > 0:
+        if len(mol_dict["env_hash_set"]) > 0:
             rarity_scores = [1.0 / global_hash_freq[h] for h in mol_dict["env_hash_set"]]
             mol_dict["rarity_score"] = float(np.mean(rarity_scores))
         else:
@@ -309,9 +328,6 @@ def select_16_lane_a(
     selected = []
     picked_hashes = set()
     for mol_dict in passing_molecules:
-        if "env_hash_set" not in mol_dict:
-            continue
-
         # Check if this molecule has novel hashes
         if not mol_dict["env_hash_set"].issubset(picked_hashes):
             selected.append(mol_dict)
@@ -329,12 +345,13 @@ def select_16_lane_a(
             f"Consider relaxing F3 filter or expanding ANI-1x search."
         )
 
-    # Sort output by n_atoms ascending, then SMILES ascending
-    selected.sort(key=lambda m: (m["n_atoms"], m["smiles"]))
+    # Sort output by n_atoms ascending, then formula ascending
+    selected.sort(key=lambda m: (m["n_atoms"], m["formula"]))
 
-    # Remove mol_object and env_hash_set (not part of output)
+    # Remove intermediate fields (not part of output)
     for mol_dict in selected:
-        mol_dict.pop("mol_object", None)
+        mol_dict.pop("atomic_numbers", None)
+        mol_dict.pop("positions", None)
         env_hashes_set = mol_dict.pop("env_hash_set", set())
         mol_dict["env_hashes"] = list(map(str, env_hashes_set))
 
@@ -343,23 +360,23 @@ def select_16_lane_a(
 
 def load_molecule_from_ani1x(
     ani1x_path: Path,
-    smiles: str,
+    formula: str,
 ) -> Optional[dict]:
-    """Load a single molecule from ANI-1x HDF5 by SMILES.
+    """Load a single molecule from ANI-1x HDF5 by formula (group key).
 
     Args:
         ani1x_path: Path to ANI-1x archive.
-        smiles: SMILES string (key in HDF5).
+        formula: Molecular formula (group key in HDF5, e.g., "C9H9N3O2").
 
     Returns:
         Dict with positions, forces (kcal/mol/Å), energy, species, or None if not found.
     """
     try:
         with h5py.File(ani1x_path, "r") as f:
-            if smiles not in f:
+            if formula not in f:
                 return None
 
-            group = f[smiles]
+            group = f[formula]
             positions = np.array(group["coordinates"], dtype=np.float32)
             forces_raw = np.array(group["wb97x_dz.forces"], dtype=np.float32)
             energy = np.array(group["wb97x_dz.energy"], dtype=np.float64)
@@ -375,7 +392,7 @@ def load_molecule_from_ani1x(
                 "species": species,
             }
     except Exception as e:
-        logger.debug(f"Failed to load {smiles} from ANI-1x: {e}")
+        logger.debug(f"Failed to load {formula} from ANI-1x: {e}")
         return None
 
 
@@ -576,7 +593,7 @@ def select_lane_b_from_comp6v2(
 
 def write_molecule_h5(
     output_path: Path,
-    smiles: str,
+    identifier: str,
     lane: str,
     molecule_id: int,
     bucket_idx: int,
@@ -589,9 +606,9 @@ def write_molecule_h5(
 
     Args:
         output_path: Output file path.
-        smiles: SMILES string (or PDB ID for Lane B).
+        identifier: Formula (Lane A) or PDB ID (Lane B).
         lane: "a" or "b".
-        molecule_id: Molecule index.
+        molecule_id: Molecule index or identifier.
         bucket_idx: Precomputed bucket index.
         positions: [N_conf, N_atoms, 3] float32 in Å.
         forces: [N_conf, N_atoms, 3] float32 in kcal/mol/Å.
@@ -610,11 +627,11 @@ def write_molecule_h5(
             f.create_dataset("energy", data=energy, dtype=np.float64)
             f.create_dataset("species", data=species, dtype=np.int8)
 
-            # Store SMILES as string
-            f.create_dataset("smiles", data=smiles, dtype=h5py.string_dtype())
+            # Store identifier (formula for Lane A, PDB ID for Lane B) as string
+            f.create_dataset("formula", data=identifier, dtype=h5py.string_dtype())
 
             # Store molecule_id
-            f.create_dataset("molecule_id", data=molecule_id, dtype=np.int64)
+            f.create_dataset("molecule_id", data=molecule_id, dtype=h5py.string_dtype())
 
             # Attributes (per spec §5)
             f.attrs["lane"] = lane
@@ -682,12 +699,12 @@ def fetch_ani1x_subset(
     if dry_run:
         logger.info("\n=== DRY RUN ===")
         if not lane_a_molecules:
-            logger.warning("Lane A selection returned 0 molecules (expected if ANI-1x uses formulae keys)")
+            logger.warning("Lane A selection returned 0 molecules (check F1–F4 filters)")
         else:
             logger.info(f"Lane A candidates ({len(lane_a_molecules)}):")
             for i, mol in enumerate(lane_a_molecules):
                 logger.info(
-                    f"  {i}: {mol['smiles'][:40]} ... "
+                    f"  {i}: {mol['formula'][:40]} "
                     f"(n_atoms={mol['n_atoms']}, n_conf={mol['n_conf_with_forces']})"
                 )
 
@@ -723,13 +740,13 @@ def fetch_ani1x_subset(
 
     lane_a_manifest = []
     for idx, mol_dict in enumerate(lane_a_molecules):
-        smiles = mol_dict["smiles"]
+        formula = mol_dict["formula"]
         n_atoms = mol_dict["n_atoms"]
 
         # Load from ANI-1x
-        data = load_molecule_from_ani1x(ani1x_archive, smiles)
+        data = load_molecule_from_ani1x(ani1x_archive, formula)
         if data is None:
-            logger.warning(f"Failed to load {smiles} from ANI-1x")
+            logger.warning(f"Failed to load {formula} from ANI-1x")
             continue
 
         # Write HDF5
@@ -738,9 +755,9 @@ def fetch_ani1x_subset(
 
         write_molecule_h5(
             output_file,
-            smiles=smiles,
+            identifier=formula,
             lane="a",
-            molecule_id=idx,
+            molecule_id=formula,
             bucket_idx=bucket_idx,
             positions=data["positions"],
             forces=data["forces"],
@@ -753,7 +770,7 @@ def fetch_ani1x_subset(
 
         lane_a_manifest.append({
             "idx": idx,
-            "smiles": smiles,
+            "formula": formula,
             "n_total_atoms": n_atoms,
             "n_heavy_atoms": int(np.sum(data["species"] != 1)),
             "n_conf_with_forces": mol_dict["n_conf_with_forces"],
@@ -764,7 +781,7 @@ def fetch_ani1x_subset(
             "rarity_score": mol_dict.get("rarity_score", 0.0),
         })
 
-        logger.info(f"  {idx:2d}. {smiles[:40]:40s} → {output_file.name}")
+        logger.info(f"  {idx:2d}. {formula:40s} → {output_file.name}")
 
     # Step 4: Lane B (COMP6v2)
     logger.info("\n=== Lane B Selection (COMP6v2) ===")
@@ -791,9 +808,9 @@ def fetch_ani1x_subset(
 
         write_molecule_h5(
             output_file,
-            smiles=sel["pdb_id"] or f"comp6v2_{group_name}",
+            identifier=sel["pdb_id"] or f"comp6v2_{group_name}",
             lane="b",
-            molecule_id=data["molecule_id"],
+            molecule_id=sel["pdb_id"],
             bucket_idx=bucket_idx,
             positions=data["positions"],
             forces=data["forces"],
@@ -845,11 +862,11 @@ def fetch_ani1x_subset(
 
     # Step 6: Summary table
     logger.info("\n=== Summary Table (Lane A) ===")
-    logger.info(f"{'Idx':<3} {'SMILES':<40} {'n_atoms':<8} {'bucket':<7} {'n_conf':<8} {'File':<20}")
+    logger.info(f"{'Idx':<3} {'Formula':<40} {'n_atoms':<8} {'bucket':<7} {'n_conf':<8} {'File':<20}")
     logger.info("─" * 90)
     for entry in lane_a_manifest:
         logger.info(
-            f"{entry['idx']:<3d} {entry['smiles'][:40]:<40} "
+            f"{entry['idx']:<3d} {entry['formula'][:40]:<40} "
             f"{entry['n_total_atoms']:<8d} {entry.get('bucket_idx', bucket_idx_from_atom_count(entry['n_total_atoms'])):<7d} "
             f"{entry['n_conf_with_forces']:<8d} {entry['file'].split('/')[-1]:<20}"
         )
