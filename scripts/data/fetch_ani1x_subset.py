@@ -38,9 +38,18 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# SHA-256 constants — filled at first download (see spec §7.1)
-ANI1X_EXPECTED_SHA256 = "PLACEHOLDER_FILL_AT_FIRST_DOWNLOAD"
-COMP6_EXPECTED_SHA256 = "PLACEHOLDER_FILL_AT_FIRST_DOWNLOAD"
+# SHA-256 constants — pinned 2026-05-20 from local downloads.
+# ANI-1x: ndownloader.figshare.com/files/18112775 (Figshare 10.6084/m9.figshare.10047041.v1)
+#   Figshare-published MD5: 98090dd6679106da861f52bed825ffb7
+# COMP6v2 wB97X-631Gd: zenodo.org/records/10126157 (DOI 10.5281/zenodo.10126157)
+#   Zenodo-published MD5 (tarball): 0a417148966022e72f54c135d8f3d4e7
+#   Inner HDF5: comp6v2_final_h5/COMP6v2_wB97X-631Gd.h5 (extracted from tarball)
+ANI1X_EXPECTED_SHA256 = "fe0ba06198ee72cf1003deebab2652097f6ab518337784dc811fa7da0c3bf5ac"
+COMP6V2_HDF5_EXPECTED_SHA256 = (
+    "e7c3e3e5db9fb7a64d00f86fb6b843323fae9dac8736a56c5875ef38051c81d0"
+)
+# Back-compat alias (script body still uses COMP6_EXPECTED_SHA256)
+COMP6_EXPECTED_SHA256 = COMP6V2_HDF5_EXPECTED_SHA256
 
 # Force unit conversion constant (spec §3 critical correction: Ha/Å → kcal/mol/Å)
 FORCE_HA_TO_KCAL_PER_MOL_PER_ANGSTROM = 627.5094740631
@@ -55,11 +64,23 @@ LANE_A_N_ATOMS_MIN_CONF = 20
 LANE_A_SELECT_COUNT = 16
 LANE_A_SEED = 42
 
-# Lane B fixed molecules (spec §4.3, COMP6 source)
+# Lane B fixed molecules (spec §4.3).
+# IMPORTANT: COMP6v2 HDF5 is organized by atom-count, NOT by subset name.
+# Group keys are 3-digit zero-padded atom counts ("006", "007", ..., "312").
+# Each group has subkeys: coordinates, forces, energies, species,
+# cm5_atomic_charges, hirshfeld_atomic_charges, hirshfeld_atomic_dipoles.
+# Note: COMP6v2 uses bare keys ("forces") — NOT the ANI-1x dot-notation
+# ("wb97x_dz.forces"). Each tarball is one DFT level, so no prefix needed.
 LANE_B_FIXED_MOLECULES = {
-    "trp_cage": {"pdb_id": "1L2Y", "subset": "ANI-MD", "expected_atoms": 312},
-    "chignolin": {"pdb_id": "1UAO", "subset": "ANI-MD", "expected_atoms": 138},
+    "trp_cage":  {"pdb_id": "1L2Y", "comp6v2_group": "312", "expected_atoms": 312},
+    "chignolin": {"pdb_id": "1UAO", "comp6v2_group": "138", "expected_atoms": 138},
 }
+
+# COMP6v2 schema (differs from ANI-1x — see spec §3 schema notes).
+COMP6V2_FORCES_KEY = "forces"          # bare, no "wb97x_dz." prefix
+COMP6V2_ENERGY_KEY = "energies"        # plural in COMP6v2 vs singular "energy" in ANI-1x
+COMP6V2_COORD_KEY = "coordinates"
+COMP6V2_SPECIES_KEY = "species"
 
 
 def compute_sha256(file_path: Path) -> str:

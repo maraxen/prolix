@@ -124,6 +124,33 @@ A previous draft of this spec incorrectly included a `/0.5291772109` Bohr factor
 
 **Implication for filter F4:** Since `wb97x_dz.forces` is universally populated, the previous-draft "F4 force-completeness ≥ 20 conformers" filter is effectively a no-op for ωB97X/6-31G* targets. Keep F4 as a defensive assertion (NaN-check), not as a gating filter.
 
+### 3.5 COMP6v2 HDF5 schema (discovered 2026-05-20 from local download)
+
+**COMP6v2's HDF5 layout differs from ANI-1x.** Documented here because the fetch script must navigate both schemas.
+
+| Aspect | ANI-1x | COMP6v2 (wB97X-631Gd) |
+|---|---|---|
+| Top-level groups | by isomer formula (`C10H10`, `C10H10N2`, ...) — 63,865 groups | **by atom count (zero-padded 3-digit string: `006`, `007`, …, `149`, `312`)** — 102 groups |
+| Forces key | `wb97x_dz.forces` (dot-notation, all DFT levels in one file) | `forces` (bare — tarball already segments by DFT level) |
+| Energy key | `wb97x_dz.energy` | `energies` (note plural) |
+| Coordinates | `coordinates` | `coordinates` |
+| Species | `atomic_numbers` (per-atom int, `(Na,)`) | `species` (per-conformer-and-atom int, `(Nc, Na)`) |
+| Forces shape | `(Nc, Na, 3)` float32, **Ha/Å** | `(Nc, Na, 3)` float32, **Ha/Å** (same units) |
+| Coordinates shape | `(Nc, Na, 3)` float32, Å | `(Nc, Na, 3)` float32, Å |
+| Extra fields | dipole, MBIS multipoles, CCSD(T) variants | cm5_atomic_charges, hirshfeld_atomic_charges, hirshfeld_atomic_dipoles |
+| One group represents | one molecule, many conformers | **all molecules of size N**, where each "conformer" along the leading axis may be a different molecule (varied species) |
+
+**Trp-cage retrieval (verified):** Trp-cage 1L2Y is `/312` in COMP6v2's HDF5, with 128 conformers stacked along the leading axis. Coordinates shape `(128, 312, 3)`. The 128-conformer count matches the COMP6 paper's "128 frames per 1ns ANI-MD trajectory" [NB:65aa232f].
+
+**Chignolin (1UAO):** `/138` (verified — 138 atoms = chignolin in vacuum).
+
+**Implication for fetch script:** The "one group = one molecule" assumption from ANI-1x does NOT hold for COMP6v2's small-atom groups (`/006`-`/100`-ish) — those bucket multiple distinct molecules together. For Lane B, we want only the large groups (`/132`, `/138`, `/140`, `/149`, `/312`) which by construction are unique structures (no two different proteins fit identically into 312 atoms). For mid-tier Lane B picks (bucket 1, 65–128 atoms), inspect the candidate group's `species` array along the leading axis: rows that share an identical species pattern come from the same molecular formula and can be treated as conformers of one molecule.
+
+**Local verification (2026-05-20):**
+- Source archive SHA-256: `fe0ba06198ee72cf1003deebab2652097f6ab518337784dc811fa7da0c3bf5ac` (ANI-1x)
+- COMP6v2 HDF5 SHA-256 (post-tar-extraction): `e7c3e3e5db9fb7a64d00f86fb6b843323fae9dac8736a56c5875ef38051c81d0`
+- Both pinned in `scripts/data/fetch_ani1x_subset.py` as `ANI1X_EXPECTED_SHA256` and `COMP6V2_HDF5_EXPECTED_SHA256`.
+
 ---
 
 ## §4 Selection Criteria
