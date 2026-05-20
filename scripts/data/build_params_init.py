@@ -176,13 +176,47 @@ def build_params_dict(
     molecule_id: str,
     lane: str,
     species: np.ndarray,
-    positions: np.ndarray,
+    positions_all: np.ndarray,
+    energies: np.ndarray | None,
 ) -> dict:
-    """Compute bonded params for one molecule. Pure function — no I/O."""
-    mol = perceive_mol_from_xyz(species, positions)
-    n = mol.GetNumAtoms()
-    if n != positions.shape[0]:
-        raise RuntimeError(f"Atom count mismatch: mol={n} positions={positions.shape[0]}")
+    """Compute bonded params for one molecule. Pure function — no I/O.
+
+    Args:
+        molecule_id: human-readable identifier (formula for Lane A, PDB id for Lane B).
+        lane: "a" or "b" — derived from filesystem path by the caller (oracle W1 fix).
+        species: shape (N_atoms,) atomic numbers.
+        positions_all: shape (N_conf, N_atoms, 3) — all conformers in Å.
+        energies: shape (N_conf,) Hartree energies (Lane A/B both have this in their HDF5).
+            If provided, r₀/θ₀ are computed from the MIN-ENERGY conformer (closest to
+            equilibrium). If None, fall back to conformer 0.
+
+    Why min-energy conformer (oracle W3, revised 2026-05-20):
+        ANI-1x conformers are active-learning samples that DELIBERATELY include
+        strained geometries to expand training-set coverage. A naive mean over all
+        conformers had a long-tail bias (mol_009 C-C bond r₀ came out 2.28 Å instead
+        of ~1.52 Å). The minimum-energy conformer is the closest available proxy
+        for the equilibrium geometry without solving the geometry-optimization
+        problem we're trying to fit later.
+    """
+    if positions_all.ndim != 3:
+        raise RuntimeError(f"Expected (N_conf, N_atoms, 3), got shape {positions_all.shape}")
+    n_conf, n, _ = positions_all.shape
+    if n != species.shape[0]:
+        raise RuntimeError(f"Atom count mismatch: positions {n} vs species {species.shape[0]}")
+
+    # Select equilibrium-proxy conformer.
+    if energies is not None and len(energies) == n_conf:
+        eq_idx = int(np.argmin(energies))
+    else:
+        log.warning("No energies provided; using conformer 0 for r₀/θ₀ (geometry may be strained)")
+        eq_idx = 0
+    positions_eq = positions_all[eq_idx]
+
+    # Bond perception from the equilibrium-proxy conformer — connectivity is identical
+    # across conformers for ANI-1x (same molecule, different geometries).
+    mol = perceive_mol_from_xyz(species, positions_eq)
+    if mol.GetNumAtoms() != n:
+        raise RuntimeError(f"Mol atom count mismatch: mol={mol.GetNumAtoms()} positions={n}")
 
     mmff_types = mmff_atom_types(mol)
     atom_types = [
@@ -194,42 +228,54 @@ def build_params_dict(
         for i in range(n)
     ]
 
-    # Bonds
+    # Helper: fallback to Z when MMFF type is None or 0 (unrecognized).
+    def _type_key(idx: int) -> int:
+        m = atom_types[idx]["mmff_type"]
+        return m if m else atom_types[idx]["Z"]
+
+    # Bonds — r₀ from the equilibrium-proxy (min-energy) conformer.
     bonds_out = []
     for bond in mol.GetBonds():
         i, j = bond.GetBeginAtomIdx(), bond.GetEndAtomIdx()
-        r0 = float(np.linalg.norm(positions[i] - positions[j]))
-        type_pair = sorted([atom_types[i]["mmff_type"] or atom_types[i]["Z"],
-                            atom_types[j]["mmff_type"] or atom_types[j]["Z"]])
-        bonds_out.append(
-            {"i": i, "j": j, "k": DEFAULT_K_BOND, "r0": r0, "type_pair": type_pair},
-        )
+        r0 = float(np.linalg.norm(positions_eq[i] - positions_eq[j]))
+        bonds_out.append({
+            "i": i, "j": j,
+            "k": DEFAULT_K_BOND,
+            "r0": r0,
+            "type_pair": sorted([_type_key(i), _type_key(j)]),
+        })
 
-    # Angles
+    # Angles — θ₀ from the equilibrium-proxy conformer.
     angles_out = []
     for i, j, k in find_angles(mol):
-        theta0 = vec_angle_deg(positions[i], positions[j], positions[k])
-        type_triple = [
-            atom_types[i]["mmff_type"] or atom_types[i]["Z"],
-            atom_types[j]["mmff_type"] or atom_types[j]["Z"],
-            atom_types[k]["mmff_type"] or atom_types[k]["Z"],
-        ]
-        angles_out.append(
-            {
-                "i": i, "j": j, "k": k,
-                "k_theta": DEFAULT_K_ANGLE,
-                "theta0_deg": theta0,
-                "type_triple": type_triple,
-            },
-        )
+        theta0 = vec_angle_deg(positions_eq[i], positions_eq[j], positions_eq[k])
+        angles_out.append({
+            "i": i, "j": j, "k": k,
+            "k_theta": DEFAULT_K_ANGLE,
+            "theta0_deg": theta0,
+            "type_triple": [_type_key(i), _type_key(j), _type_key(k)],
+        })
 
-    # Proper torsions — uniform zero for v0; Phase C gradient descent learns them.
+    # Proper torsions — one Fourier term per torsion (oracle W2 fix).
+    # AMBER/GAFF convention: periodicity=3, phase=0°, k_phi=0 (gradient learns k_phi).
+    # Phase C may add periodicity 1 and 2 terms during training (cosine-series fit).
     proper_torsions = find_proper_torsions(mol)
+    torsions_out = [
+        {
+            "i": i, "j": j, "k": k, "l": l_idx,
+            "periodicity": [3],
+            "phase_deg": [0.0],
+            "k_phi": [0.0],
+        }
+        for (i, j, k, l_idx) in proper_torsions
+    ]
 
     params = {
         "molecule_id": molecule_id,
         "lane": lane,
         "n_atoms": n,
+        "n_conformers_available": int(n_conf),
+        "equilibrium_conformer_idx": int(eq_idx),
         "atom_bucket_idx": bucket_idx_from_atom_count(n),
         "param_source": PARAM_SOURCE_TAG,
         "force_constants_default": {
@@ -238,14 +284,12 @@ def build_params_dict(
         },
         "n_bonds": len(bonds_out),
         "n_angles": len(angles_out),
-        "n_proper_torsions": len(proper_torsions),
+        "n_proper_torsions": len(torsions_out),
+        "n_atom_mmff_typed": sum(1 for a in atom_types if a["mmff_type"]),
         "atom_types": atom_types,
         "bonds": bonds_out,
         "angles": angles_out,
-        "proper_torsions": [
-            {"i": i, "j": j, "k": k, "l": l_idx, "periodicity": [], "phase_deg": [], "k_phi": []}
-            for (i, j, k, l_idx) in proper_torsions
-        ],
+        "proper_torsions": torsions_out,
         "improper_torsions": [],
     }
 
@@ -264,21 +308,28 @@ def build_params_dict(
 
 def process_one(h5_path: Path, dry_run: bool, fail_fast: bool) -> tuple[bool, str]:
     """Process one per-molecule HDF5 file. Returns (success, message)."""
+    # Lane is derived from the FILESYSTEM PATH (oracle W1 fix).
+    # The HDF5 'formula' vs 'molecule_id' heuristic was unreliable —
+    # Lane B HDF5s wrote 'formula' too, mis-tagging them as Lane A and
+    # breaking exit criterion 14 (held-out enforcement).
+    parent = h5_path.parent.name  # "lane_a" or "lane_b"
+    lane = parent.replace("lane_", "") if parent.startswith("lane_") else "unknown"
+    energies = None
     try:
         with h5py.File(h5_path) as f:
-            positions = np.asarray(f["positions"][0], dtype=np.float32)
+            positions_all = np.asarray(f["positions"][:], dtype=np.float32)
             species = np.asarray(f["species"][:], dtype=np.int32)
-            # Lane A: 'formula' dataset (e.g., "C2H5N5O3").
-            # Lane B: 'molecule_id' dataset (e.g., "trp_cage").
+            if "energy" in f:
+                energies = np.asarray(f["energy"][:], dtype=np.float64)
+            # Identifier: prefer 'formula' (Lane A) or 'molecule_id' (Lane B); else stem.
             if "formula" in f:
-                molecule_id = f["formula"][()].decode() if hasattr(f["formula"][()], "decode") else str(f["formula"][()])
-                lane = "a"
+                raw = f["formula"][()]
+                molecule_id = raw.decode() if hasattr(raw, "decode") else str(raw)
             elif "molecule_id" in f:
-                molecule_id = f["molecule_id"][()].decode() if hasattr(f["molecule_id"][()], "decode") else str(f["molecule_id"][()])
-                lane = "b"
+                raw = f["molecule_id"][()]
+                molecule_id = raw.decode() if hasattr(raw, "decode") else str(raw)
             else:
                 molecule_id = h5_path.stem
-                lane = h5_path.parent.name.replace("lane_", "")
     except (OSError, KeyError) as e:
         msg = f"Failed to read {h5_path.name}: {e}"
         log.error(msg)
@@ -287,7 +338,7 @@ def process_one(h5_path: Path, dry_run: bool, fail_fast: bool) -> tuple[bool, st
         return False, msg
 
     try:
-        params = build_params_dict(molecule_id, lane, species, positions)
+        params = build_params_dict(molecule_id, lane, species, positions_all, energies)
     except (RuntimeError, ValueError) as e:
         msg = f"{h5_path.name}: parameterization failed ({e})"
         log.error(msg)
@@ -296,10 +347,13 @@ def process_one(h5_path: Path, dry_run: bool, fail_fast: bool) -> tuple[bool, st
         return False, msg
 
     log.info(
-        "%s: id=%s n_atoms=%d bonds=%d angles=%d torsions=%d bucket=%d",
-        h5_path.name, molecule_id, params["n_atoms"],
+        "%s: lane=%s id=%s n_atoms=%d bonds=%d angles=%d torsions=%d "
+        "bucket=%d eq_conf=%d/%d mmff_typed=%d/%d",
+        h5_path.name, params["lane"], molecule_id, params["n_atoms"],
         params["n_bonds"], params["n_angles"], params["n_proper_torsions"],
-        params["atom_bucket_idx"],
+        params["atom_bucket_idx"], params["equilibrium_conformer_idx"],
+        params["n_conformers_available"],
+        params["n_atom_mmff_typed"], params["n_atoms"],
     )
 
     if not dry_run:

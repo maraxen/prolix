@@ -448,6 +448,43 @@ OpenFF Toolkit + openmmforcefields pipeline pinned in §10.2. Lane B Trp-cage (3
 
 §10.4 designates Lane B as held-out. §7.1 primary metric becomes Lane B force RMSE; Lane A training RMSE is sanity only. This pre-empts the "in-distribution overfitting" referee objection.
 
+### R10 — Lane attribution bug (oracle 2026-05-20 review, fixed)
+
+**Status:** Closed.
+
+Phase A's `build_params_init.py` v0 derived `lane` from HDF5 dataset presence (`formula` → "a", `molecule_id` → "b"). Curation script wrote `formula` for Lane B too, so all 4 Lane B JSONs reported `lane: "a"` — would have broken exit criterion 14 (held-out enforcement) and R8 train/test defense.
+
+**Fix:** lane derived from filesystem path (`h5_path.parent.name`), not from HDF5 schema.
+
+### R11 — Empty torsion term arrays (oracle review, fixed)
+
+**Status:** Closed.
+
+v0 emitted `proper_torsions[*] = {periodicity: [], phase_deg: [], k_phi: []}`. Phase B's harmonic prior over torsions would have zero learnable DOF — gradient descent has nothing to do for torsion parameters.
+
+**Fix:** One Fourier term per torsion: `periodicity=[3]`, `phase_deg=[0.0]`, `k_phi=[0.0]`. AMBER/GAFF convention; Phase C may extend to multi-term cosine series.
+
+### R12 — MMFF-untypable molecules collapse bonded-type diversity (resolved by min-energy fix)
+
+**Status:** Closed (incidentally).
+
+When `MMFFGetMoleculeProperties` failed for an entire molecule (originally true for mol_012 and midsize_mol_99 with the first-conformer geometry), all atoms got `mmff_type=null` and type_pair fell back to (Z_i, Z_j) — collapsing distinct hybridization states to a single type.
+
+**Resolution:** Switching from first-conformer to min-energy-conformer (R13 below) gave clean enough geometry that MMFF perceived both molecules: all 27/27 + 99/99 atoms now typed. The original concern is moot.
+
+### R13 — First-conformer r₀/θ₀ pulled toward strained geometries (oracle review, fixed via min-energy selection)
+
+**Status:** Closed.
+
+Initial v0 used `positions[0]` for r₀/θ₀; oracle predicted ~0.05-0.10 Å bias. A first attempted fix averaged across all conformers — strictly WORSE because ANI-1x conformers include AL-strained samples with bond stretches up to 2.3 Å (mol_009's first C-C came out 2.28 Å vs expected 1.52 Å).
+
+**Final fix:** select the **minimum-energy conformer** for r₀/θ₀ extraction. Each per-molecule HDF5 ships `energy` (Ha) alongside positions; `argmin(energies)` picks the closest available proxy for equilibrium geometry without solving the optimization problem we're trying to fit.
+
+**Empirical verification (2026-05-20):**
+- mol_009 (C7H8N2O1, 2862 conformers): eq_idx=380. r₀ range 0.99-1.55 Å (chemical).
+- trp_cage 1L2Y (312 atoms, 128 conformers): eq_idx=88. r₀ range 0.93-1.61 Å (covers NH, peptide, aromatic).
+- mol_006 (C4H7N1O5, 343 conformers): eq_idx=134. r₀ range 0.97-1.54 Å.
+
 ### R9 — AIMNet2 hashing optimizes atomic environments, not bonded-type coverage
 
 **Status:** Open; mitigated by quantitative exit criterion 15.
