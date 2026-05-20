@@ -27,6 +27,8 @@ dependencies = [
     "matplotlib>=3.10.7",
     "imageio>=2.37.2",
     "jaxopt",
+    "h5py>=3.16.0",
+    "rdkit>=2024.3.0",
 ]
 
 [project.urls]
