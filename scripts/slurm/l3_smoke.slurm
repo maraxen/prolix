@@ -49,16 +49,13 @@ if [[ ! -f "${DATA_PATH}" ]]; then
     exit 1
 fi
 
-OUT_JSON="outputs/results/l3_smoke_${SLURM_JOB_ID:-local}.json"
-
-# bath run captures: git state, command, argv, exit_code, duration, SLURM_JOB_ID.
-# Outcome evaluated by sidecar at compact time.
+# bath run sets BTH_RESULTS_PATH env var for the subprocess; the Python script
+# defaults --out-json to that path, enabling sidecar outcome evaluation.
+# Don't pass --out-json explicitly — that would override BTH_RESULTS_PATH.
 uv run bth run python scripts/validation/l3_smoke_load_bundle.py \
     --tag cluster --tag hp4 --tag l3 \
-    --out "${OUT_JSON}" \
     -- \
-    --data-path "${DATA_PATH}" \
-    --out-json "${OUT_JSON}"
+    --data-path "${DATA_PATH}"
 
 EXIT=$?
 echo "=== L3 smoke exit=${EXIT} ==="

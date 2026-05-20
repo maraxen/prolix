@@ -25,6 +25,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import os
 import sys
 from pathlib import Path
 
@@ -129,6 +130,13 @@ def main() -> int:
     p.add_argument("--n-atoms", type=int, default=30, help="(synthetic mode) atoms per bundle")
     p.add_argument("--out-json", type=Path, default=None, help="Write summary JSON here")
     args = p.parse_args()
+
+    # bath outcome-eval contract: prefer $BTH_RESULTS_PATH (set by `bth run`) over
+    # explicit --out-json if both are unset; explicit --out-json always wins if given.
+    if args.out_json is None:
+        bth_path = os.environ.get("BTH_RESULTS_PATH")
+        if bth_path:
+            args.out_json = Path(bth_path)
 
     log.info("JAX backend: %s", jax.default_backend())
     log.info("JAX devices: %s", jax.devices())

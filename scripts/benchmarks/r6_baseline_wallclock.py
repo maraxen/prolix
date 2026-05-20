@@ -34,6 +34,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import os
 import statistics
 import sys
 import time
@@ -194,6 +195,13 @@ def main() -> int:
     p.add_argument("--seed", type=int, default=0, help="(synthetic only)")
     p.add_argument("--out-json", type=Path, default=None)
     args = p.parse_args()
+
+    # bath outcome-eval contract: prefer $BTH_RESULTS_PATH (set by `bth run`) over
+    # explicit --out-json if both are unset; explicit --out-json always wins if given.
+    if args.out_json is None:
+        bth_path = os.environ.get("BTH_RESULTS_PATH")
+        if bth_path:
+            args.out_json = Path(bth_path)
 
     log.info("JAX backend=%s devices=%s", jax.default_backend(), jax.devices())
 
