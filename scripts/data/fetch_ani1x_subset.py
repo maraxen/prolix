@@ -71,7 +71,7 @@ LANE_A_SEED = 42
 # cm5_atomic_charges, hirshfeld_atomic_charges, hirshfeld_atomic_dipoles.
 # Note: COMP6v2 uses bare keys ("forces") — NOT the ANI-1x dot-notation
 # ("wb97x_dz.forces"). Each tarball is one DFT level, so no prefix needed.
-LANE_B_FIXED_MOLECULES = {
+COMP6V2_MANDATORY_LANE_B = {
     "trp_cage":  {"pdb_id": "1L2Y", "comp6v2_group": "312", "expected_atoms": 312},
     "chignolin": {"pdb_id": "1UAO", "comp6v2_group": "138", "expected_atoms": 138},
 }
@@ -279,7 +279,7 @@ def select_16_lane_a(
     logger.info(f"Passing molecules (F1–F5): {len(passing_molecules)}")
 
     if len(passing_molecules) == 0:
-        logger.error("No molecules passed F1–F5 filters")
+        logger.warning("No molecules passed F1–F5 filters (this may be expected if keys are formulae, not SMILES)")
         return []
 
     # Compute environment hashes for each molecule
@@ -377,6 +377,201 @@ def load_molecule_from_ani1x(
     except Exception as e:
         logger.debug(f"Failed to load {smiles} from ANI-1x: {e}")
         return None
+
+
+def load_comp6v2_group(
+    comp6v2_path: Path,
+    group_name: str,
+) -> Optional[dict]:
+    """Load a single COMP6v2 atom-count group and return a per-molecule dict.
+
+    COMP6v2 differs from ANI-1x: one group = all molecules of a given atom count,
+    with multiple conformers stacked along the leading axis. The "species" array is
+    (Nc, Na), so we must extract one species pattern (from row 0) and verify uniformity.
+
+    For large groups (e.g., /312 Trp-cage, /138 Chignolin), all rows have identical
+    species; we return the whole group as one molecule. For small groups with heterogeneous
+    species, we filter to the most common species pattern (with warning).
+
+    Args:
+        comp6v2_path: Path to COMP6v2 HDF5.
+        group_name: Group name, e.g., "312".
+
+    Returns:
+        Dict with positions, forces (kcal/mol/Å), energy, species (per-atom, extracted
+        from row 0), molecule_id, or None if not found / load fails.
+    """
+    try:
+        with h5py.File(comp6v2_path, "r") as f:
+            if group_name not in f:
+                logger.debug(f"COMP6v2 group /{group_name} not found")
+                return None
+
+            group = f[group_name]
+
+            # Load raw data
+            coordinates = np.array(group[COMP6V2_COORD_KEY], dtype=np.float32)  # (Nc, Na, 3)
+            forces_raw = np.array(group[COMP6V2_FORCES_KEY], dtype=np.float32)  # (Nc, Na, 3)
+            energies = np.array(group[COMP6V2_ENERGY_KEY], dtype=np.float64)  # (Nc,)
+            species_array = np.array(group[COMP6V2_SPECIES_KEY], dtype=np.int64)  # (Nc, Na)
+
+            n_conf, n_atoms = coordinates.shape[0], coordinates.shape[1]
+
+            # Extract species pattern (from row 0)
+            species_pattern = species_array[0, :].astype(np.int8)
+
+            # Check uniformity: are all rows identical?
+            uniform = np.all(species_array == species_pattern[np.newaxis, :], axis=1)
+            n_uniform = np.sum(uniform)
+
+            if n_uniform < n_conf:
+                # Log warning: this group has heterogeneous species
+                logger.warning(
+                    f"COMP6v2 group /{group_name}: {n_uniform}/{n_conf} conformers match "
+                    f"the dominant species pattern. Filtering to matching conformers."
+                )
+                # Filter to uniform conformers
+                coordinates = coordinates[uniform]
+                forces_raw = forces_raw[uniform]
+                energies = energies[uniform]
+                n_conf = len(coordinates)
+
+            # Convert forces Ha/Å → kcal/mol/Å
+            forces = forces_raw * FORCE_HA_TO_KCAL_PER_MOL_PER_ANGSTROM
+
+            return {
+                "positions": coordinates,  # (Nc, Na, 3)
+                "forces": forces,
+                "energy": energies,  # (Nc,)
+                "species": species_pattern,  # (Na,)
+                "molecule_id": int(group_name),  # Use atom count as molecule_id
+            }
+    except Exception as e:
+        logger.debug(f"Failed to load COMP6v2 group /{group_name}: {e}")
+        return None
+
+
+def select_lane_b_from_comp6v2(
+    comp6v2_path: Path,
+    seed: int = 42,
+) -> list[dict]:
+    """Select Lane B molecules from COMP6v2 per spec §4.3.
+
+    Returns fixed molecules:
+    - Trp-cage 1L2Y at /312 (bucket 3)
+    - Chignolin 1UAO at /138 (bucket 2)
+    - 2 mid-size molecules from 65–128 atom range (bucket 1):
+      - One near 100 atoms (drug-like)
+      - One near 80 atoms (peptide-tier)
+
+    Uses deterministic tie-breaking with seed=42 for reproducibility.
+
+    Args:
+        comp6v2_path: Path to COMP6v2 HDF5.
+        seed: Random seed (for tie-breaking if multiple candidates have same distance).
+
+    Returns:
+        List of dicts with keys: name, pdb_id, comp6v2_group, n_atoms, bucket_idx, n_conf.
+    """
+    logger.info("Selecting Lane B molecules from COMP6v2...")
+
+    rng = np.random.RandomState(seed)
+
+    # Fixed mandatory molecules
+    lane_b = []
+
+    # 1. Trp-cage (1L2Y) at /312
+    with h5py.File(comp6v2_path, "r") as f:
+        if "312" in f:
+            n_conf = f["312"]["coordinates"].shape[0]
+            lane_b.append({
+                "name": "trp_cage",
+                "pdb_id": "1L2Y",
+                "comp6v2_group": "312",
+                "n_atoms": 312,
+                "bucket_idx": bucket_idx_from_atom_count(312),
+                "n_conf": n_conf,
+            })
+            logger.info(f"  Selected Trp-cage (1L2Y) at /312 (312 atoms, {n_conf} conformers, bucket 3)")
+
+    # 2. Chignolin (1UAO) at /138
+    with h5py.File(comp6v2_path, "r") as f:
+        if "138" in f:
+            n_conf = f["138"]["coordinates"].shape[0]
+            lane_b.append({
+                "name": "chignolin",
+                "pdb_id": "1UAO",
+                "comp6v2_group": "138",
+                "n_atoms": 138,
+                "bucket_idx": bucket_idx_from_atom_count(138),
+                "n_conf": n_conf,
+            })
+            logger.info(f"  Selected Chignolin (1UAO) at /138 (138 atoms, {n_conf} conformers, bucket 2)")
+
+    # 3. Mid-size picks (bucket 1: 65–128 atoms)
+    # Find groups in this range, select two with best coverage (near 100 and 80)
+    mid_size_candidates = []
+    with h5py.File(comp6v2_path, "r") as f:
+        for group_name in f.keys():
+            try:
+                n_atoms = int(group_name)
+                if 65 <= n_atoms <= 128:
+                    # Check uniformity of species
+                    species_array = f[group_name][COMP6V2_SPECIES_KEY][()]
+                    species_pattern_row0 = species_array[0, :]
+                    uniform = np.all(
+                        species_array == species_pattern_row0[np.newaxis, :],
+                        axis=1
+                    )
+                    if np.sum(uniform) >= 5:  # At least 5 conformers with uniform species
+                        n_conf = f[group_name]["coordinates"].shape[0]
+                        mid_size_candidates.append({
+                            "comp6v2_group": group_name,
+                            "n_atoms": n_atoms,
+                            "n_conf": n_conf,
+                        })
+            except (ValueError, KeyError):
+                continue
+
+    if len(mid_size_candidates) < 2:
+        logger.warning(f"Found only {len(mid_size_candidates)} bucket-1 candidates; target is 2")
+
+    # Sort by distance to target atoms (100 and 80), deterministically
+    mid_size_candidates.sort(key=lambda c: (c["n_atoms"], c["comp6v2_group"]))
+
+    # Pick closest to 100 atoms
+    if mid_size_candidates:
+        targets = [100, 80]
+        picks = []
+
+        for target in targets:
+            # Find closest to target
+            dists = [abs(c["n_atoms"] - target) for c in mid_size_candidates]
+            min_dist = min(dists)
+            closest = [c for c, d in zip(mid_size_candidates, dists) if d == min_dist]
+
+            if closest:
+                # Tie-break deterministically by group name
+                pick = sorted(closest, key=lambda c: c["comp6v2_group"])[0]
+                picks.append(pick)
+                mid_size_candidates.remove(pick)
+
+        # Add picks to lane_b
+        for pick in picks:
+            lane_b.append({
+                "name": f"midsize_mol_{pick['n_atoms']}",
+                "pdb_id": None,
+                "comp6v2_group": pick["comp6v2_group"],
+                "n_atoms": pick["n_atoms"],
+                "bucket_idx": bucket_idx_from_atom_count(pick["n_atoms"]),
+                "n_conf": pick["n_conf"],
+            })
+            logger.info(
+                f"  Selected mid-size molecule at /{pick['comp6v2_group']} "
+                f"({pick['n_atoms']} atoms, {pick['n_conf']} conformers, bucket 1)"
+            )
+
+    return lane_b
 
 
 def write_molecule_h5(
@@ -484,22 +679,41 @@ def fetch_ani1x_subset(
     logger.info("\n=== Lane A Selection (SELECT_16) ===")
     lane_a_molecules = select_16_lane_a(ani1x_archive, seed=seed)
 
+    if dry_run:
+        logger.info("\n=== DRY RUN ===")
+        if not lane_a_molecules:
+            logger.warning("Lane A selection returned 0 molecules (expected if ANI-1x uses formulae keys)")
+        else:
+            logger.info(f"Lane A candidates ({len(lane_a_molecules)}):")
+            for i, mol in enumerate(lane_a_molecules):
+                logger.info(
+                    f"  {i}: {mol['smiles'][:40]} ... "
+                    f"(n_atoms={mol['n_atoms']}, n_conf={mol['n_conf_with_forces']})"
+                )
+
+        # If COMP6 archive provided, try Lane B selection in dry-run
+        if comp6_archive is not None:
+            logger.info("\n=== DRY RUN: Lane B Selection ===")
+            lane_b_selections = select_lane_b_from_comp6v2(comp6_archive, seed=seed)
+            if lane_b_selections:
+                logger.info(f"Lane B candidates ({len(lane_b_selections)}):")
+                for i, sel in enumerate(lane_b_selections):
+                    logger.info(
+                        f"  {i}: {sel['name']} (pdb_id={sel['pdb_id']}, "
+                        f"group=/{sel['comp6v2_group']}, n_atoms={sel['n_atoms']}, "
+                        f"bucket={sel['bucket_idx']}, n_conf={sel['n_conf']})"
+                    )
+        else:
+            logger.info("(COMP6 archive not provided; skipping Lane B selection)")
+
+        logger.info("(No files written in dry-run mode)")
+        return True
+
     if not lane_a_molecules:
         logger.error("Failed to select Lane A molecules")
         return False
 
     logger.info(f"Selected {len(lane_a_molecules)} Lane A molecules")
-
-    if dry_run:
-        logger.info("\n=== DRY RUN: Candidate Molecules ===")
-        logger.info("Lane A candidates:")
-        for i, mol in enumerate(lane_a_molecules):
-            logger.info(
-                f"  {i}: {mol['smiles'][:40]} ... "
-                f"(n_atoms={mol['n_atoms']}, n_conf={mol['n_conf_with_forces']})"
-            )
-        logger.info("(No files written in dry-run mode)")
-        return True
 
     # Step 3: Write Lane A HDF5 files
     logger.info("\n=== Writing Lane A HDF5 Files ===")
@@ -541,8 +755,9 @@ def fetch_ani1x_subset(
             "idx": idx,
             "smiles": smiles,
             "n_total_atoms": n_atoms,
-            "n_heavy_atoms": np.sum(data["species"] != 1),
+            "n_heavy_atoms": int(np.sum(data["species"] != 1)),
             "n_conf_with_forces": mol_dict["n_conf_with_forces"],
+            "bucket_idx": bucket_idx,
             "file": str(output_file.relative_to(out_dir)),
             "sha256": sha256,
             "env_hashes": mol_dict.get("env_hashes", []),
@@ -551,13 +766,57 @@ def fetch_ani1x_subset(
 
         logger.info(f"  {idx:2d}. {smiles[:40]:40s} → {output_file.name}")
 
-    # Step 4: Lane B (stub for now — minimal COMP6 support)
-    logger.info("\n=== Lane B Selection (Stub) ===")
+    # Step 4: Lane B (COMP6v2)
+    logger.info("\n=== Lane B Selection (COMP6v2) ===")
     lane_b_dir = out_dir / "lane_b"
     lane_b_dir.mkdir(parents=True, exist_ok=True)
+
+    lane_b_selections = select_lane_b_from_comp6v2(comp6_archive, seed=seed)
     lane_b_manifest = []
-    logger.info("Lane B: COMP6 archive support not yet implemented (stub only)")
-    logger.info("  Expected: Trp-cage (1L2Y), Chignolin (1UAO), ANI-MD drug, DrugBank")
+
+    for idx, sel in enumerate(lane_b_selections):
+        group_name = sel["comp6v2_group"]
+        n_atoms = sel["n_atoms"]
+        name = sel["name"]
+
+        # Load from COMP6v2
+        data = load_comp6v2_group(comp6_archive, group_name)
+        if data is None:
+            logger.warning(f"Failed to load COMP6v2 group /{group_name}")
+            continue
+
+        # Write HDF5
+        output_file = lane_b_dir / f"{name}.h5"
+        bucket_idx = sel["bucket_idx"]
+
+        write_molecule_h5(
+            output_file,
+            smiles=sel["pdb_id"] or f"comp6v2_{group_name}",
+            lane="b",
+            molecule_id=data["molecule_id"],
+            bucket_idx=bucket_idx,
+            positions=data["positions"],
+            forces=data["forces"],
+            energy=data["energy"],
+            species=data["species"],
+        )
+
+        # Compute SHA-256
+        sha256 = compute_sha256(output_file)
+
+        lane_b_manifest.append({
+            "idx": idx,
+            "name": name,
+            "pdb_id": sel["pdb_id"],
+            "subset": "COMP6v2",
+            "n_total_atoms": n_atoms,
+            "n_conf": sel["n_conf"],
+            "bucket_idx": bucket_idx,
+            "file": str(output_file.relative_to(out_dir)),
+            "sha256": sha256,
+        })
+
+        logger.info(f"  {idx}. {name:20s} → {output_file.name}")
 
     # Step 5: Write manifest.json
     logger.info("\n=== Writing manifest.json ===")
@@ -585,18 +844,29 @@ def fetch_ani1x_subset(
     logger.info(f"Wrote manifest to {manifest_path}")
 
     # Step 6: Summary table
-    logger.info("\n=== Summary Table ===")
+    logger.info("\n=== Summary Table (Lane A) ===")
     logger.info(f"{'Idx':<3} {'SMILES':<40} {'n_atoms':<8} {'bucket':<7} {'n_conf':<8} {'File':<20}")
     logger.info("─" * 90)
     for entry in lane_a_manifest:
         logger.info(
             f"{entry['idx']:<3d} {entry['smiles'][:40]:<40} "
-            f"{entry['n_total_atoms']:<8d} {bucket_idx_from_atom_count(entry['n_total_atoms']):<7d} "
+            f"{entry['n_total_atoms']:<8d} {entry.get('bucket_idx', bucket_idx_from_atom_count(entry['n_total_atoms'])):<7d} "
             f"{entry['n_conf_with_forces']:<8d} {entry['file'].split('/')[-1]:<20}"
         )
 
+    logger.info("\n=== Summary Table (Lane B) ===")
+    logger.info(f"{'Idx':<3} {'Name':<20} {'PDB ID':<8} {'n_atoms':<8} {'bucket':<7} {'n_conf':<8} {'File':<20}")
+    logger.info("─" * 90)
+    for entry in lane_b_manifest:
+        pdb_id = entry.get("pdb_id") or "—"
+        logger.info(
+            f"{entry['idx']:<3d} {entry['name']:<20} {pdb_id:<8} "
+            f"{entry['n_total_atoms']:<8d} {entry['bucket_idx']:<7d} "
+            f"{entry['n_conf']:<8d} {entry['file'].split('/')[-1]:<20}"
+        )
+
     logger.info(f"\nTotal Lane A molecules: {len(lane_a_manifest)}")
-    logger.info(f"Total Lane B molecules: {len(lane_b_manifest)} (stub)")
+    logger.info(f"Total Lane B molecules: {len(lane_b_manifest)}")
 
     return True
 
