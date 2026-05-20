@@ -57,8 +57,14 @@ fi
 
 OUT_JSON="outputs/results/r6_baseline_${SLURM_JOB_ID:-local}.json"
 
+# Campaign association: hp4-r6-baseline (exploration mode, created 2026-05-20).
+# Auto-attaches this run to the campaign so `bth campaign review` aggregates
+# outcome distribution across seeds.
+HP4_R6_CAMPAIGN_ID="845d1407-fc82-460c-892b-12d514f6382e"
+
 uv run bth run python scripts/benchmarks/r6_baseline_wallclock.py \
     --tag cluster --tag hp4 --tag r6 --tag benchmark \
+    --campaign "${HP4_R6_CAMPAIGN_ID}" \
     --out "${OUT_JSON}" \
     -- \
     --data-dir "${DATA_DIR}" \
