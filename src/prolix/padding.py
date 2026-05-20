@@ -74,7 +74,14 @@ def pad_protein(
   pme_alpha: float = 0.0,
 ) -> PhysicsSystem:
   """Pad a protein to specific array sizes."""
-  
+  import warnings
+  warnings.warn(
+    "pad_protein is deprecated as of v1.1 and will be removed in v2.0. "
+    "Use MolecularBundle.from_protein() once available (v1.2). See migration guide.",
+    DeprecationWarning,
+    stacklevel=2,
+  )
+
   pos = jnp.asarray(protein.coordinates).reshape(-1, 3)
   n_real = len(pos)
 
@@ -609,6 +616,15 @@ def bucket_proteins(
 
 def collate_batch(systems: list[PhysicsSystem]) -> PhysicsSystem:
     """Stack multiple PhysicsSystems into a batched PhysicsSystem."""
+    import warnings
+    warnings.warn(
+        "collate_batch is deprecated as of v1.1 and will be removed in v1.2. "
+        "It only handles homogeneous topologies (same-bucket same-bond-count stacking). "
+        "Use EnsemblePlan.from_bundles(bundles) for heterogeneous support.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
+
     if not systems:
         raise ValueError("Cannot collate empty list.")
     

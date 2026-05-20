@@ -48,7 +48,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - None
 
 ### Deprecated
-- None
+
+## v1.1.x — Deprecations
+
+### Deprecated
+
+- **`batched_produce`** (`src/prolix/batched_simulate.py`): Issues `DeprecationWarning` on call.
+  Replacement: `EnsemblePlan.from_bundles(...).run(...)` (available v1.2).
+  Removal target: v2.0.
+
+- **`LangevinState` re-export from `prolix.batched_simulate`**: Issues `DeprecationWarning` on import.
+  Replacement: `from prolix.types.integrators import LangevinState`.
+  Removal target: v2.0.
+
+- **`pad_protein`** (`src/prolix/padding.py`): Issues `DeprecationWarning` on call.
+  Replacement: `MolecularBundle.from_protein()` (available v1.2).
+  Removal target: v2.0.
+
+- **`PaddedSystem`** (`src/prolix/__init__.py`, `src/prolix/typing.py`): Docstring-level deprecation note + single `DeprecationWarning` in `__init__.py` re-export.
+  Replacement: `MolecularBundle` (`prolix.types.bundles`).
+  Removal target: v2.0.
+
+- **`collate_batch`** (`src/prolix/padding.py`): Issues `DeprecationWarning` on call.
+  Replacement: `EnsemblePlan.from_bundles(bundles)` (available v1.2).
+  **Removal target: v1.2** (hard-deprecate, one cycle only).
 
 ### Security
 - None

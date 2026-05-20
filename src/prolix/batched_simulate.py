@@ -22,12 +22,31 @@ from jax_md import partition, space
 
 from prolix.padding import precompute_dense_exclusions
 from prolix.simulate import AKMA_TIME_UNIT_FS, BOLTZMANN_KCAL
-from prolix.typing import PaddedSystem, IntegratorState as LangevinState
+from prolix.typing import PaddedSystem, IntegratorState as _LangevinState
 
 if TYPE_CHECKING:
     from jax_md.util import Array
 
 T = TypeVar("T")
+
+# Internal alias: _LangevinState is the canonical type from prolix.typing.
+# It's re-exported as LangevinState for backward compatibility.
+# The module-level __getattr__ below warns on external import of LangevinState.
+LangevinState = _LangevinState
+
+
+def __getattr__(name: str):
+    """Emit deprecation warning for legacy LangevinState import path."""
+    if name == "LangevinState":
+        import warnings
+        warnings.warn(
+            "Importing LangevinState from prolix.batched_simulate is deprecated as of v1.1. "
+            "Import from prolix.types.integrators instead.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        return _LangevinState
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 # ---------------------------------------------------------------------------
 # COM re-centering and rotation removal (implicit solvent)
@@ -1116,6 +1135,14 @@ def batched_produce(
     chunk_size: int | None = None
 ) -> tuple[LangevinState, Array]:
     """Produces trajectory for a batch of padded systems."""
+    import warnings
+    warnings.warn(
+        "batched_produce is deprecated as of v1.1 and will be removed in v2.0. "
+        "Use EnsemblePlan.from_bundles(...).run(...) instead. "
+        "See docs/superpowers/specs/2026-05-20-legacy-api-migration.md.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
     from prolix.simulate import BOLTZMANN_KCAL
     
     dt = 2.0 / AKMA_TIME_UNIT_FS
