@@ -50,8 +50,9 @@ def fake_padded_batch():
     
     bucket_size = list(buckets.keys())[0]
     padded_list = buckets[bucket_size]
-    
-    return collate_batch(padded_list)
+
+    with pytest.warns(DeprecationWarning):
+        return collate_batch(padded_list)
 
 
 def test_safe_map():
@@ -253,7 +254,8 @@ def test_cold_start_state_finite(fake_padded_batch):
 
 def test_batched_produce(fake_padded_batch):
     state = _cold_start_state(fake_padded_batch)
-    final_state, traj = batched_produce(fake_padded_batch, state, n_saves=2, steps_per_save=3, chunk_size=1)
+    with pytest.warns(DeprecationWarning):
+        final_state, traj = batched_produce(fake_padded_batch, state, n_saves=2, steps_per_save=3, chunk_size=1)
 
     assert jnp.all(jnp.isfinite(final_state.positions))
     assert jnp.all(jnp.isfinite(traj))
@@ -351,10 +353,11 @@ def test_batched_produce_streaming(fake_padded_batch):
 
     # --- Verify numerical equivalence with accumulation path ---
 
-    final_state_accum, traj_accum = batched_produce(
-        batch, state,
-        n_saves=n_saves, steps_per_save=steps_per_save, chunk_size=1,
-    )
+    with pytest.warns(DeprecationWarning):
+        final_state_accum, traj_accum = batched_produce(
+            batch, state,
+            n_saves=n_saves, steps_per_save=steps_per_save, chunk_size=1,
+        )
 
     # Final states must be bitwise identical (same computation graph)
     pos_stream = np.asarray(final_state_stream.positions)
@@ -409,9 +412,10 @@ def test_batched_produce_streaming_write_batch_size(fake_padded_batch):
         cap_count=jnp.zeros(B, dtype=jnp.int32),
     )
 
-    _, traj_accum = batched_produce(
-        batch, state, n_saves=2, steps_per_save=1, chunk_size=1,
-    )
+    with pytest.warns(DeprecationWarning):
+        _, traj_accum = batched_produce(
+            batch, state, n_saves=2, steps_per_save=1, chunk_size=1,
+        )
 
     chunks: dict[int, list] = {b: [] for b in range(B)}
 

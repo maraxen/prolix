@@ -70,16 +70,17 @@ def test_select_bucket():
 def test_pad_protein_shapes_and_masks(dummy_protein_small: Protein):
     target_atoms = 100
     target_bonds = 5
-    
-    padded = pad_protein(
-        dummy_protein_small, 
-        target_atoms=target_atoms, 
-        target_bonds=target_bonds,
-        target_angles=5,
-        target_dihedrals=5,
-        target_impropers=5,
-        target_cmaps=0
-    )
+
+    with pytest.warns(DeprecationWarning):
+        padded = pad_protein(
+            dummy_protein_small,
+            target_atoms=target_atoms,
+            target_bonds=target_bonds,
+            target_angles=5,
+            target_dihedrals=5,
+            target_impropers=5,
+            target_cmaps=0
+        )
     
     assert padded.positions.shape == (target_atoms, 3)
     assert padded.charges.shape == (target_atoms,)
@@ -99,7 +100,8 @@ def test_pad_protein_shapes_and_masks(dummy_protein_small: Protein):
 
 
 def test_ghost_atom_values(dummy_protein_small: Protein):
-    padded = pad_protein(dummy_protein_small, target_atoms=20)
+    with pytest.warns(DeprecationWarning):
+        padded = pad_protein(dummy_protein_small, target_atoms=20)
     
     # Check ghost items (index 10-19)
     ghost_pos = padded.positions[10:]
@@ -119,12 +121,13 @@ def test_ghost_atom_values(dummy_protein_small: Protein):
 
 
 def test_bonded_padding_zero_energy(dummy_protein_small: Protein):
-    padded = pad_protein(
-        dummy_protein_small, 
-        target_atoms=20, 
-        target_bonds=10,
-        target_angles=10
-    )
+    with pytest.warns(DeprecationWarning):
+        padded = pad_protein(
+            dummy_protein_small,
+            target_atoms=20,
+            target_bonds=10,
+            target_angles=10
+        )
     
     # Real bonds
     assert padded.bonds[0, 0] == 0
@@ -163,10 +166,12 @@ def test_bucket_proteins_grouping(dummy_protein_small: Protein, dummy_protein_la
 
 def test_collate_batch(dummy_protein_small: Protein):
     # Two identical proteins
-    p1 = pad_protein(dummy_protein_small, 50, target_bonds=10)
-    p2 = pad_protein(dummy_protein_small, 50, target_bonds=10)
-    
-    batch = collate_batch([p1, p2])
+    with pytest.warns(DeprecationWarning):
+        p1 = pad_protein(dummy_protein_small, 50, target_bonds=10)
+        p2 = pad_protein(dummy_protein_small, 50, target_bonds=10)
+
+    with pytest.warns(DeprecationWarning):
+        batch = collate_batch([p1, p2])
     
     # Check leading batch dimension
     assert batch.positions.shape == (2, 50, 3)

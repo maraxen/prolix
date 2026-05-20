@@ -46,12 +46,14 @@ def test_batched_bonded_parity(test_protein):
     
     # 2. Batched Energy
     # Setup padding
-    padded = pad_protein(
-        test_protein,
-        target_atoms=7000,
-    )
-    
-    batch = collate_batch([padded])  # batch size 1
+    with pytest.warns(DeprecationWarning):
+        padded = pad_protein(
+            test_protein,
+            target_atoms=7000,
+        )
+
+    with pytest.warns(DeprecationWarning):
+        batch = collate_batch([padded])  # batch size 1
     
     # In batched_energy.py, _single_padded_energy is private but we can
     # test its bonded components directly or just test the full energy 

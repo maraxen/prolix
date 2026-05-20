@@ -19,6 +19,7 @@ import sys
 import jax
 import jax.numpy as jnp
 import numpy as np
+import pytest
 from jax_md import space
 
 logging.basicConfig(
@@ -69,7 +70,8 @@ def main():
 
     # Pad to power of 2
     from prolix.padding import pad_protein
-    padded = pad_protein(protein, target_atoms=8192)
+    with pytest.warns(DeprecationWarning):
+        padded = pad_protein(protein, target_atoms=8192)
     N = padded.positions.shape[0]
     log.info(f"Padded to {N} atoms")
 

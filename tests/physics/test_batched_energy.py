@@ -45,11 +45,12 @@ def test_make_batched_energy_fn(fake_proteins):
     # 1. Bucket and pad
     buckets = bucket_proteins(fake_proteins, buckets=(32, 64))
     padded_list = buckets[32]  # All 3 fit in 32
-    
+
     assert len(padded_list) == 3
-    
+
     # 2. Collate
-    batch = collate_batch(padded_list)
+    with pytest.warns(DeprecationWarning):
+        batch = collate_batch(padded_list)
     assert batch.positions.shape == (3, 32, 3)
     
     # 3. Define fn
@@ -70,7 +71,8 @@ def test_make_batched_energy_fn(fake_proteins):
 def test_grad_batched_energy_fn(fake_proteins):
     """Verify that taking gradient of the batched energy is numerically safe for padded elements."""
     buckets = bucket_proteins(fake_proteins, buckets=(32, 64))
-    batch = collate_batch(buckets[32])
+    with pytest.warns(DeprecationWarning):
+        batch = collate_batch(buckets[32])
     
     displacement_fn, _ = space.free()
     batched_energy = make_batched_energy_fn(displacement_fn, implicit_solvent=True)
