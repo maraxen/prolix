@@ -437,3 +437,64 @@ def test_safe_map_stacked_bundles_same_bucket():
             f"HP3: Cannot stack bundles with different shape_specs (equinox pytree structure). "
             f"Error: {type(e).__name__}: {e}"
         )
+
+
+@pytest.mark.fast
+def test_vmap_stacked_identical_shape_spec():
+    """HP3 LOAD-BEARING gating test.
+
+    Two MolecularBundles with identical shape_spec content (same bucket, same fields),
+    stacked into one batched pytree, vmapped through an observable.
+    Asserts trace_count == 1 — this is the property Claim 1 requires.
+
+    If this fails, Claim 1 needs a real redesign.
+    If this passes, the path forward is to coarsen MolecularShapeSpec so two real-world
+    bundles in the same bucket end up with identical shape_spec content.
+    """
+    # Use the _make_minimal_bundle helper.
+    # Two MolecularShapeSpec instances with IDENTICAL field values.
+    # n_atoms_real differs (e.g., 10 and 20) — encoded in atom_mask, NOT in shape_spec —
+    # so the dataclass instances compare equal (== and hash both match).
+
+    spec_shared = MolecularShapeSpec(
+        n_atoms=256,          # store BUCKET size, not real count
+        n_bonds=0, n_angles=0, n_dihedrals=0, n_impropers=0,
+        n_urey_bradley=0, n_waters=0, n_excl=0, n_cmap=0, n_exception_pairs=0,
+        has_pbc=False, has_implicit_solvent=False, boundary_condition="free",
+    )
+
+    # Bundles with the SAME spec but different *real* atom counts encoded only in atom_mask.
+    # We're simulating what the post-coarsening world would look like.
+    bundle_1 = _make_minimal_bundle(10, spec_shared)
+    bundle_2 = _make_minimal_bundle(20, spec_shared)
+
+    # Sanity: both should compare equal-instance for static field
+    assert bundle_1.shape_spec == bundle_2.shape_spec
+    assert bundle_1.positions.shape == bundle_2.positions.shape
+
+    # Stack into a batched pytree
+    stacked = jax.tree_util.tree_map(lambda *xs: jnp.stack(xs, axis=0), bundle_1, bundle_2)
+
+    # Sanity: stacked leading dim is 2 on dynamic arrays, static shape_spec unchanged
+    assert stacked.positions.shape[0] == 2
+    assert stacked.shape_spec == spec_shared
+
+    trace_count = [0]
+    def observable(bundle):
+        trace_count[0] += 1
+        return jnp.sum(bundle.positions, axis=-1).sum()
+
+    # vmap over the batch axis
+    batched_obs = jax.vmap(observable)
+
+    # Run twice to make sure cache hit on second invocation
+    out = batched_obs(stacked)
+    out2 = batched_obs(stacked)
+
+    assert trace_count[0] == 1, (
+        f"HP3 GATING FAILURE: stacked vmap with identical shape_spec retraced; "
+        f"trace_count={trace_count[0]}"
+    )
+
+    # Bonus: also assert vmap leading axis preserved
+    assert out.shape == (2,)
