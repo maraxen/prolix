@@ -20,14 +20,26 @@ from jaxtyping import Array, Bool, Float, Int
 # Bucketed array size thresholds: systems are padded to the smallest bucket
 # that fits their actual count. This enables XLA to cache on bucket size,
 # not distinct topology.
-ATOM_BUCKETS = (256, 1_024, 5_000, 25_000, 60_000)
-BOND_BUCKETS = (256, 1_024, 5_000, 25_000)
-ANGLE_BUCKETS = (256, 1_024, 5_000, 25_000)
-DIHEDRAL_BUCKETS = (512, 2_048, 10_000, 50_000)
-WATER_BUCKETS = (16, 128, 1_024, 8_000)
-EXCL_BUCKETS = (512, 2_048, 10_000, 50_000)
-CMAP_BUCKETS = (16, 128, 512)
-EXCEPTION_BUCKETS = (512, 2_048, 10_000, 50_000)
+#
+# HP4 (260520) — Refined ATOM_BUCKETS ladder to enable cross-bucket evidence for §7.1 figure.
+# Previously (256, 1024, ...) all ANI-1x + most COMP6 molecules fit in bucket[0].
+# New ladder (64, 128, 256, 1024, ...) allows:
+# - Small molecules (10–64 atoms) → bucket 0
+# - Dipeptides (65–128 atoms) → bucket 1
+# - Larger peptides (129–256 atoms) → bucket 2
+# - Large proteins (257–1024 atoms, e.g. Trp-cage 312) → bucket 3
+# - Allows Lane B ensemble to span 4 distinct buckets (cross-bucket heterogeneity).
+# Bonded ladders also refined to small-molecule scale; same proportional principle.
+ATOM_BUCKETS = (64, 128, 256, 1_024, 5_000, 25_000, 60_000)
+# Bonded ladders refined: prepend small-molecule entries (HP3 design forward-compatible)
+BOND_BUCKETS = (16, 64, 256, 1_024, 5_000, 25_000)
+ANGLE_BUCKETS = (32, 128, 256, 1_024, 5_000, 25_000)
+DIHEDRAL_BUCKETS = (32, 128, 512, 2_048, 10_000, 50_000)
+# Water / exclusion / exception: proportionally finer, capped at original scale
+WATER_BUCKETS = (8, 16, 128, 1_024, 8_000)
+EXCL_BUCKETS = (32, 128, 512, 2_048, 10_000, 50_000)
+CMAP_BUCKETS = (8, 16, 128, 512)
+EXCEPTION_BUCKETS = (32, 128, 512, 2_048, 10_000, 50_000)
 
 
 def _bucket_idx(n: int, ladder: tuple[int, ...]) -> int:
