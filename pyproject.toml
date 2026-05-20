@@ -78,6 +78,7 @@ timeout_method = "thread"
 # Default fast CI: pytest -m "not slow" (matches .github/workflows/ci.yml test step)
 # OpenMM parity (optional dep): pytest -m "openmm"
 markers = [
+    "fast: marks tests as fast (< 30s, CI gating)",
     "smoke: marks tests as smoke tests (fast and critical)",
     "slow: marks tests as slow (>30s, may be skipped in CI)",
     "openmm: marks tests that require OpenMM (optional dependency)",
