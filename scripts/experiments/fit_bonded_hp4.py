@@ -39,6 +39,10 @@ import jax.numpy as jnp
 import numpy as np
 import optax
 
+# Enable float64 BEFORE importing prolix (if requested)
+# This must happen before any JAX operations or imports that create arrays
+# Will be set based on command-line flag below
+
 from prolix.fitting import (
     BondedParams,
     TrainState,
@@ -145,12 +149,24 @@ def main():
         help="Random seed",
     )
     parser.add_argument(
+        "--float64",
+        action="store_true",
+        help="Enable JAX float64 precision (jax_enable_x64=True). Kills GPU throughput; for correctness testing only.",
+    )
+    parser.add_argument(
         "--out-json",
         type=Path,
         default=None,
         help="Output JSON file (default: BTH_RESULTS_PATH env var)",
     )
     args = parser.parse_args()
+
+    # Enable float64 if requested (MUST happen before JAX array creation)
+    if args.float64:
+        jax.config.update("jax_enable_x64", True)
+        print("Float64 enabled (jax_enable_x64=True)")
+    else:
+        print("Float32 precision (default)")
 
     # Determine output path
     if args.out_json is None:
@@ -240,6 +256,7 @@ def main():
             final_losses_test.append(float(final_states[-n_test:][i].params.k_bond[0]))
 
     # Build output
+    precision_str = "float64" if args.float64 else "float32"
     output = {
         "mode": args.mode,
         "n_steps": args.n_steps,
@@ -258,6 +275,7 @@ def main():
         "alpha": args.alpha,
         "w_reg": args.w_reg,
         "seed": args.seed,
+        "precision": precision_str,
     }
 
     # Write output

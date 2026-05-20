@@ -4,7 +4,7 @@ Implements single-molecule training step, scan-based training loop,
 and both looped and batched orchestration strategies.
 """
 
-from typing import Callable, NamedTuple, Optional, Tuple
+from typing import TYPE_CHECKING, Callable, NamedTuple, Optional, Tuple
 
 import equinox as eqx
 import jax
@@ -17,6 +17,9 @@ from prolix.fitting.params import BondedParams
 from prolix.fitting.scheduler import sample_one_conformer
 from prolix.fitting.state import TrainState
 from prolix.fitting.topology import BondedTopology
+
+if TYPE_CHECKING:
+    from prolix.fitting.batched import BatchedBondedParams, BatchedBondedTopology
 
 
 class TrainMetrics(NamedTuple):
@@ -296,42 +299,261 @@ def train_loop_looped_baseline(
 
 
 def train_loop_batched(
-    stacked_state: TrainState,
+    batched_state: TrainState,
     n_steps: int,
     *,
-    stacked_data: dict,
-    params_init_list: list[BondedParams],
-    topology_list: list[BondedTopology],
+    batched_data: dict,
+    batched_params_init: "BatchedBondedParams",
+    batched_topology: "BatchedBondedTopology",
     optimizer: optax.GradientTransformation,
     alpha: float = 0.25,
     w_reg: float = 0.01,
-    io_callback_fn: Optional[Callable[[TrainMetrics], None]] = None,
+    io_callback_fn: Optional[Callable[[int, list], None]] = None,
 ) -> dict:
-    """Batched training via jit(vmap(train_loop_one_mol)) over molecule axis.
+    """Batched training via jit(vmap(train_step)) over molecule axis.
 
-    Claim 1 substrate path: single batched scan.
+    Implements single batched scan where each step vmap's over molecules.
+    Positions/forces/energies are pre-padded and stacked by caller.
+    Per-molecule masking gates which bonds/angles/torsions contribute to loss.
 
     Args:
-        stacked_state: TrainState with params/opt_state stacked over molecules.
+        batched_state: TrainState with params/opt_state shape (B, ...) over molecules.
         n_steps: Training steps.
-        stacked_data: Dict with 'positions_all', 'forces_all', 'energies_all'
-                      stacked over molecules (B molecules).
-        params_init_list: List of BondedParams (one per molecule, for regularization).
-        topology_list: List of BondedTopology.
+        batched_data: Dict with arrays stacked over B molecules:
+                      - 'positions_all': (B, N_conf_max, N_atoms_padded, 3)
+                      - 'forces_all': (B, N_conf_max, N_atoms_padded, 3)
+                      - 'energies_all': (B, N_conf_max)
+                      - 'n_real_conf': (B,) number of real conformers per mol
+        batched_params_init: BatchedBondedParams (B, max_bonds, ...).
+        batched_topology: BatchedBondedTopology with masks.
         optimizer: optax optimizer.
         alpha, w_reg: Loss weights.
-        io_callback_fn: Optional logging callback.
+        io_callback_fn: Optional function(step, per_mol_losses_list) for logging.
 
     Returns:
         dict with keys:
-            'final_state': final stacked TrainState
-            'final_losses': [B] array of per-mol final losses
-            'all_metrics': list of metrics across all steps and molecules
+            'final_state': final batched TrainState (shape over B)
+            'final_losses': [B] array of per-molecule final loss values
+            'wallclock_s': wall-clock time (JAX block_until_ready)
     """
-    # For now, fall back to looped baseline internally
-    # (vmap of train_loop_one_mol is complex due to different array shapes per molecule)
-    # This will be optimized in v1.1 with padded batching.
-    raise NotImplementedError(
-        "Batched training loop requires padded-array infrastructure (v1.1). "
-        "Use looped_baseline for v0."
+    from prolix.fitting.batched import BatchedBondedParams, BatchedBondedTopology
+    from prolix.fitting.energy import bonded_energy
+    from prolix.fitting.loss import default_sigma
+
+    B = batched_state.params.k_bond.shape[0]
+    positions_all = batched_data["positions_all"]  # (B, N_conf_max, N_atoms_padded, 3)
+    forces_all = batched_data["forces_all"]
+    energies_all = batched_data["energies_all"]
+    n_real_conf = batched_data["n_real_conf"]  # (B,) per-mol real conformer count
+
+    def step_fn_one_mol(
+        mol_state: TrainState,
+        mol_rng_key,
+        mol_positions_all,
+        mol_forces_all,
+        mol_energies_all,
+        mol_n_real_conf,
+        mol_params_init,
+        mol_topology,
+        mol_bond_mask,
+        mol_angle_mask,
+        mol_torsion_mask,
+    ):
+        """One training step for one molecule inside vmap."""
+        # Sample a conformer index
+        conf_idx = jax.random.randint(
+            mol_rng_key, shape=(), minval=0, maxval=mol_n_real_conf
+        )
+
+        # Extract single conformer
+        positions = mol_positions_all[conf_idx]  # (N_atoms_padded, 3)
+        forces_ref = mol_forces_all[conf_idx]  # (N_atoms_padded, 3)
+        energy_ref = mol_energies_all[conf_idx]  # scalar
+
+        # Stack for loss function
+        positions_batch = jnp.expand_dims(positions, axis=0)  # (1, N_atoms_padded, 3)
+        forces_batch = jnp.expand_dims(forces_ref, axis=0)
+        energies_batch = jnp.expand_dims(energy_ref, axis=0)
+
+        def loss_fn(params):
+            # Compute loss similar to bonded_loss but with masks
+            pos = positions_batch[0]  # Single conformer (already expanded)
+            f_ref = forces_batch[0]
+            e_ref = energies_batch[0]
+
+            sigma = default_sigma(mol_params_init)
+
+            # Predicted energy
+            energy_pred = bonded_energy(
+                pos,
+                params,
+                BondedTopology(
+                    bond_idx=mol_topology.bond_idx,
+                    angle_idx=mol_topology.angle_idx,
+                    torsion_idx=mol_topology.torsion_idx,
+                    torsion_periodicity=mol_topology.torsion_periodicity,
+                    torsion_phase_rad=mol_topology.torsion_phase_rad,
+                ),
+                bond_mask=mol_bond_mask,
+                angle_mask=mol_angle_mask,
+                torsion_mask=mol_torsion_mask,
+            )
+
+            # Predicted forces
+            def energy_fn_for_forces(p):
+                return bonded_energy(
+                    p,
+                    params,
+                    BondedTopology(
+                        bond_idx=mol_topology.bond_idx,
+                        angle_idx=mol_topology.angle_idx,
+                        torsion_idx=mol_topology.torsion_idx,
+                        torsion_periodicity=mol_topology.torsion_periodicity,
+                        torsion_phase_rad=mol_topology.torsion_phase_rad,
+                    ),
+                    bond_mask=mol_bond_mask,
+                    angle_mask=mol_angle_mask,
+                    torsion_mask=mol_torsion_mask,
+                )
+
+            forces_pred = jax.grad(energy_fn_for_forces)(pos)
+
+            # Force loss (per-atom MSE)
+            force_diff = forces_pred - f_ref
+            loss_f = jnp.mean(force_diff**2) / pos.shape[0]
+
+            # Energy loss (per-conformer MSE, shifted)
+            shift = jnp.mean(energy_pred) - jnp.mean(e_ref) * 627.5094740631
+            energy_diff = energy_pred - (e_ref * 627.5094740631 - shift)
+            loss_e = jnp.mean(energy_diff**2)
+
+            # Regularization (per-parameter)
+            reg_bond = jnp.sum(
+                ((params.k_bond - mol_params_init.k_bond) / sigma.k_bond) ** 2
+                * mol_bond_mask
+            )
+            reg_r0 = jnp.sum(
+                ((params.r0 - mol_params_init.r0) / sigma.r0) ** 2
+                * mol_bond_mask
+            )
+            reg_theta = jnp.sum(
+                ((params.k_theta - mol_params_init.k_theta) / sigma.k_theta) ** 2
+                * mol_angle_mask
+            )
+            reg_theta0 = jnp.sum(
+                ((params.theta0_rad - mol_params_init.theta0_rad)
+                 / sigma.theta0_rad) ** 2
+                * mol_angle_mask
+            )
+            reg_phi = jnp.sum(
+                ((params.k_phi - mol_params_init.k_phi) / sigma.k_phi) ** 2
+                * jnp.expand_dims(mol_torsion_mask, axis=-1)
+            )
+            loss_reg = w_reg * (reg_bond + reg_r0 + reg_theta + reg_theta0 + reg_phi)
+
+            return loss_f + alpha * loss_e + loss_reg
+
+        # Compute loss and gradients
+        loss_val, grads = eqx.filter_value_and_grad(loss_fn)(mol_state.params)
+
+        # Update parameters via optimizer
+        updates, new_opt_state = optimizer.update(grads, mol_state.opt_state, mol_state.params)
+        new_params = eqx.apply_updates(mol_state.params, updates)
+
+        # Build new state
+        new_state = eqx.tree_at(
+            lambda s: (s.params, s.opt_state, s.step),
+            mol_state,
+            (new_params, new_opt_state, mol_state.step + 1),
+        )
+
+        return new_state, loss_val
+
+    # vmap step_fn_one_mol over molecules (axis 0)
+    step_fn_batched = jax.vmap(
+        step_fn_one_mol,
+        in_axes=(
+            0,  # mol_state (batch over params/opt_state/step/rng)
+            0,  # mol_rng_key
+            0,  # mol_positions_all
+            0,  # mol_forces_all
+            0,  # mol_energies_all
+            0,  # mol_n_real_conf
+            0,  # mol_params_init (B, max_bonds, ...)
+            0,  # mol_topology (B, max_bonds, ...)
+            0,  # mol_bond_mask (B, max_bonds)
+            0,  # mol_angle_mask (B, max_angles)
+            0,  # mol_torsion_mask (B, max_torsions)
+        ),
     )
+
+    def scan_body(state, step_idx):
+        """Scan body: split RNG per molecule, call vmapped step, callback."""
+        # state.rng has shape (B, 2) — one key per molecule
+        # Split each molecule's RNG into two parts: new state key + step key
+        def split_rng_fn(rng_key):
+            key1, key2 = jax.random.split(rng_key)
+            return key1, key2
+
+        # vmap split_rng_fn over the B molecules
+        new_rngs, mol_keys = jax.vmap(split_rng_fn)(state.rng)  # (B, 2), (B, 2)
+
+        # Update state with new RNGs
+        state = eqx.tree_at(lambda s: s.rng, state, new_rngs)
+
+        # Call vmapped step (step_fn_batched already vmaps over B molecules)
+        new_state, losses = step_fn_batched(
+            state,
+            mol_keys,
+            positions_all,
+            forces_all,
+            energies_all,
+            n_real_conf,
+            batched_params_init,
+            batched_topology,
+            batched_topology.bond_mask,
+            batched_topology.angle_mask,
+            batched_topology.torsion_mask,
+        )
+
+        # Callback (non-blocking)
+        if io_callback_fn is not None:
+            losses_list = [float(losses[b]) for b in range(B)]
+            jax.experimental.io_callback(
+                io_callback_fn,
+                None,
+                int(step_idx),
+                losses_list,
+                ordered=False,
+            )
+
+        return new_state, losses
+
+    # JIT compile the scan
+    @eqx.filter_jit
+    def run_scan():
+        final_state, all_losses = jax.lax.scan(
+            scan_body,
+            batched_state,
+            jnp.arange(n_steps),
+            unroll=8,
+        )
+        return final_state, all_losses
+
+    # Time the execution
+    import time
+
+    start_wall = time.time()
+    final_state, all_losses = run_scan()
+    # Force JAX to complete
+    jax.effects_barrier()
+    wallclock_s = time.time() - start_wall
+
+    # Extract final losses per molecule
+    final_losses = all_losses[-1]  # Last step's losses, shape (B,)
+
+    return {
+        "final_state": final_state,
+        "final_losses": final_losses,
+        "wallclock_s": wallclock_s,
+    }

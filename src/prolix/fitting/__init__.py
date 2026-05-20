@@ -3,6 +3,7 @@
 Provides:
   - BondedTopology: static bonded connectivity
   - BondedParams: trainable bonded parameters (equinox Module)
+  - BatchedBondedParams, BatchedBondedTopology: stacked params/topology for vmap
   - bonded_energy: JAX-pure energy computation
   - bonded_loss: per-molecule loss with energy + force + regularization
   - load_params_init_json: load Phase A parameterization from JSON
@@ -11,6 +12,12 @@ Provides:
   - train: training loops (step, scan, looped, batched)
 """
 
+from prolix.fitting.batched import (
+    BatchedBondedParams,
+    BatchedBondedTopology,
+    stack_molecules,
+    unbatch_params,
+)
 from prolix.fitting.energy import bonded_energy
 from prolix.fitting.init import load_params_init_json
 from prolix.fitting.loss import bonded_loss, default_sigma
@@ -29,6 +36,10 @@ from prolix.fitting.train import (
 __all__ = [
     "BondedTopology",
     "BondedParams",
+    "BatchedBondedParams",
+    "BatchedBondedTopology",
+    "stack_molecules",
+    "unbatch_params",
     "bonded_energy",
     "bonded_loss",
     "default_sigma",

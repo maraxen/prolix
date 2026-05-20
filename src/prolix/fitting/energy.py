@@ -19,19 +19,26 @@ def bonded_energy(
     positions: Float[Array, "N_atoms 3"],
     params: BondedParams,
     topology: BondedTopology,
+    *,
+    bond_mask: Optional[Float[Array, "N_bonds"]] = None,
+    angle_mask: Optional[Float[Array, "N_angles"]] = None,
+    torsion_mask: Optional[Float[Array, "N_torsions"]] = None,
 ) -> Float[Array, ""]:
-    """Compute total bonded energy.
+    """Compute total bonded energy with optional per-term masking.
 
     Energy decomposition:
-        E_bond = sum_b k_b * (r_b - r0_b)^2
-        E_angle = sum_a k_theta_a * (theta_a - theta0_a)^2
-        E_torsion = sum_t sum_term k_phi_term * (1 + cos(periodicity_term * phi_t - phase_term))
+        E_bond = sum_b mask_b * k_b * (r_b - r0_b)^2
+        E_angle = sum_a mask_a * k_theta_a * (theta_a - theta0_a)^2
+        E_torsion = sum_t mask_t * sum_term k_phi_term * (1 + cos(periodicity_term * phi_t - phase_term))
         E_total = E_bond + E_angle + E_torsion
 
     Args:
         positions: (N_atoms, 3) Cartesian coordinates in Å.
         params: BondedParams holding k_bond, r0, k_theta, theta0_rad, k_phi.
         topology: BondedTopology holding static atom indices and periodicity.
+        bond_mask: Optional (N_bonds,) boolean mask; when provided, multiply per-bond energy by mask.
+        angle_mask: Optional (N_angles,) boolean mask; when provided, multiply per-angle energy by mask.
+        torsion_mask: Optional (N_torsions,) boolean mask; when provided, multiply per-torsion energy by mask.
 
     Returns:
         Scalar energy in kcal/mol.
@@ -40,15 +47,15 @@ def bonded_energy(
 
     # ===== BOND ENERGY =====
     if topology.n_bonds > 0:
-        energy = energy + _bond_energy(positions, params, topology)
+        energy = energy + _bond_energy(positions, params, topology, bond_mask=bond_mask)
 
     # ===== ANGLE ENERGY =====
     if topology.n_angles > 0:
-        energy = energy + _angle_energy(positions, params, topology)
+        energy = energy + _angle_energy(positions, params, topology, angle_mask=angle_mask)
 
     # ===== TORSION ENERGY =====
     if topology.n_torsions > 0:
-        energy = energy + _torsion_energy(positions, params, topology)
+        energy = energy + _torsion_energy(positions, params, topology, torsion_mask=torsion_mask)
 
     return energy
 
@@ -57,8 +64,9 @@ def _bond_energy(
     positions: Float[Array, "N_atoms 3"],
     params: BondedParams,
     topology: BondedTopology,
+    bond_mask: Optional[Float[Array, "N_bonds"]] = None,
 ) -> Float[Array, ""]:
-    """Harmonic bond energy: sum_b k_b * (r_b - r0_b)^2."""
+    """Harmonic bond energy: sum_b mask_b * k_b * (r_b - r0_b)^2."""
     i_idx = topology.bond_idx[:, 0].astype(jnp.int32)
     j_idx = topology.bond_idx[:, 1].astype(jnp.int32)
 
@@ -69,6 +77,11 @@ def _bond_energy(
     dist = jnp.linalg.norm(dr, axis=-1)  # (N_bonds,)
 
     energy_per_bond = params.k_bond * (dist - params.r0) ** 2
+
+    # Apply mask if provided
+    if bond_mask is not None:
+        energy_per_bond = energy_per_bond * bond_mask
+
     return jnp.sum(energy_per_bond)
 
 
@@ -76,8 +89,9 @@ def _angle_energy(
     positions: Float[Array, "N_atoms 3"],
     params: BondedParams,
     topology: BondedTopology,
+    angle_mask: Optional[Float[Array, "N_angles"]] = None,
 ) -> Float[Array, ""]:
-    """Harmonic angle energy: sum_a k_theta_a * (theta_a - theta0_a)^2."""
+    """Harmonic angle energy: sum_a mask_a * k_theta_a * (theta_a - theta0_a)^2."""
     i_idx = topology.angle_idx[:, 0].astype(jnp.int32)
     j_idx = topology.angle_idx[:, 1].astype(jnp.int32)
     k_idx = topology.angle_idx[:, 2].astype(jnp.int32)
@@ -103,6 +117,11 @@ def _angle_energy(
     theta = jnp.arccos(cos_theta)  # (N_angles,)
 
     energy_per_angle = params.k_theta * (theta - params.theta0_rad) ** 2
+
+    # Apply mask if provided
+    if angle_mask is not None:
+        energy_per_angle = energy_per_angle * angle_mask
+
     return jnp.sum(energy_per_angle)
 
 
@@ -110,8 +129,9 @@ def _torsion_energy(
     positions: Float[Array, "N_atoms 3"],
     params: BondedParams,
     topology: BondedTopology,
+    torsion_mask: Optional[Float[Array, "N_torsions"]] = None,
 ) -> Float[Array, ""]:
-    """Periodic torsion energy: sum_t sum_term k_phi_term * (1 + cos(periodicity_term * phi_t - phase_term))."""
+    """Periodic torsion energy: sum_t mask_t * sum_term k_phi_term * (1 + cos(periodicity_term * phi_t - phase_term))."""
     i_idx = topology.torsion_idx[:, 0].astype(jnp.int32)
     j_idx = topology.torsion_idx[:, 1].astype(jnp.int32)
     k_idx = topology.torsion_idx[:, 2].astype(jnp.int32)
@@ -171,5 +191,11 @@ def _torsion_energy(
 
     cos_term = jnp.cos(periodicity * phi_expanded - phase)
     energy_per_term = k_phi * (1.0 + cos_term)  # (N_torsions, n_terms)
+
+    # Apply mask if provided
+    if torsion_mask is not None:
+        # Expand mask to match (N_torsions, n_terms) shape
+        torsion_mask_expanded = jnp.expand_dims(torsion_mask, axis=-1)
+        energy_per_term = energy_per_term * torsion_mask_expanded
 
     return jnp.sum(energy_per_term)

@@ -289,7 +289,120 @@ def test_looped_baseline_runs(water_conformers, water_params, water_topology):
     assert final_loss < float('inf'), "Loss should be finite"
 
 
-@pytest.mark.skip(reason="Batched loop not implemented in v0; defer to v1.1")
-def test_batched_matches_looped_endpoint():
-    """Batched and looped training should give similar final loss (Claim 1 correctness gate)."""
-    pass
+def test_batched_matches_looped_endpoint(water_conformers, water_params, water_topology):
+    """Batched and looped training should give similar final losses (Claim 1 correctness gate).
+
+    Uses IDENTICAL molecules (same topology) to avoid shape-mismatch issues.
+    Tests correctness of the vmap'd training loop.
+    """
+    from prolix.fitting import (
+        BatchedBondedParams,
+        BatchedBondedTopology,
+        stack_molecules,
+        train_loop_batched,
+    )
+
+    positions_all = water_conformers
+    forces_all = water_reference_forces(positions_all, water_params, water_topology)
+    energies_all = water_reference_energies(positions_all, water_params, water_topology)
+
+    # Use 4 copies of the same molecule (different init seeds only) to avoid shape issues
+    B = 4
+    params_init_list = [water_params for _ in range(B)]
+    topology_list = [water_topology for _ in range(B)]
+    per_mol_data = [
+        {
+            "positions_all": positions_all,
+            "forces_all": forces_all,
+            "energies_all": energies_all,
+        }
+        for _ in range(B)
+    ]
+
+    # Configure training
+    optimizer = optax.adam(learning_rate=0.05)
+    n_steps = 30
+
+    # ===== LOOPED BASELINE =====
+    per_mol_states_looped = [
+        TrainState.init(params_init, optimizer, rng_seed=42 + i)
+        for i, params_init in enumerate(params_init_list)
+    ]
+
+    result_looped = train_loop_looped_baseline(
+        per_mol_states_looped,
+        n_steps,
+        per_mol_data=per_mol_data,
+        params_init_list=params_init_list,
+        topology_list=topology_list,
+        optimizer=optimizer,
+        w_reg=0.01,
+    )
+
+    final_losses_looped = np.array(result_looped["final_losses"])
+
+    # ===== BATCHED =====
+    batched_params_init, batched_topology = stack_molecules(
+        params_init_list, topology_list
+    )
+
+    # Create per-molecule states
+    per_mol_states_for_batching = [
+        TrainState.init(params_init, optimizer, rng_seed=42 + i)
+        for i, params_init in enumerate(params_init_list)
+    ]
+
+    # Manually stack the TrainState objects
+    stacked_params = jax.tree_util.tree_map(
+        lambda *leaves: jnp.stack(leaves, axis=0),
+        *[state.params for state in per_mol_states_for_batching],
+    )
+    stacked_opt_state = jax.tree_util.tree_map(
+        lambda *leaves: jnp.stack(leaves, axis=0),
+        *[state.opt_state for state in per_mol_states_for_batching],
+    )
+    stacked_step = jnp.stack([state.step for state in per_mol_states_for_batching], axis=0)
+    stacked_rng = jnp.stack([state.rng for state in per_mol_states_for_batching], axis=0)
+
+    batched_state_init = TrainState(
+        params=stacked_params,
+        opt_state=stacked_opt_state,
+        step=stacked_step,
+        rng=stacked_rng,
+    )
+
+    # Prepare batched data (all molecules have same positions/forces/energies)
+    batched_data = {
+        "positions_all": jnp.stack([d["positions_all"] for d in per_mol_data], axis=0),
+        "forces_all": jnp.stack([d["forces_all"] for d in per_mol_data], axis=0),
+        "energies_all": jnp.stack([d["energies_all"] for d in per_mol_data], axis=0),
+        "n_real_conf": jnp.array([d["positions_all"].shape[0] for d in per_mol_data], dtype=jnp.int32),
+    }
+
+    # Run batched training
+    result_batched = train_loop_batched(
+        batched_state_init,
+        n_steps,
+        batched_data=batched_data,
+        batched_params_init=batched_params_init,
+        batched_topology=batched_topology,
+        optimizer=optimizer,
+        w_reg=0.01,
+    )
+
+    final_losses_batched = np.array(result_batched["final_losses"])
+
+    # ===== COMPARISON =====
+    print(f"\nLooped final losses:  {final_losses_looped}")
+    print(f"Batched final losses: {final_losses_batched}")
+
+    # Check that per-molecule losses are close (rtol=1e-2 for float32 numerical noise)
+    np.testing.assert_allclose(
+        final_losses_looped,
+        final_losses_batched,
+        rtol=1e-2,
+        atol=1e-4,
+        err_msg="Per-molecule final losses diverged between looped and batched modes",
+    )
+
+    print("PASS: looped/batched per-molecule final losses match within rtol=1e-2")
