@@ -474,13 +474,35 @@ for mol_path in glob('data/ani1x_subset/lane_*/*.h5'):
     bundle = make_bundle_from_system(system, boundary_condition='free')
 ```
 
-### 10.2 Toolchain for `build_system_from_smiles` (pinned)
+### 10.2 Toolchain for bonded-param initialization (pinned)
 
-**Lane A (Python, cluster-side; §7.1 figure):**
-- `openff-toolkit >= 0.16` — SMILES parse, canonical atom typing, GAFF2/OpenFF-2.x bonded parameter resolution
-- `openmmforcefields >= 0.13` — GAFF2 + OpenFF-2.x force-field libraries
-- `rdkit >= 2024.x` — molecule normalization, canonical SMILES
-- For peptide molecules (Trp-cage, Chignolin, Tripeptides): use OpenFF Toolkit's PDB-reading path; SMILES alone is insufficient for the peptide-bond connectivity.
+**2026-05-20 PIVOT — OpenFF replaced with RDKit MMFF94 + geometry-derived inits:**
+
+The original spec pinned `openff-toolkit >= 0.16` + `openmmforcefields >= 0.13`. Empirical attempt to install:
+- PyPI has only the **yanked** 0.18.0 (non-maintainer upload). No other versions on PyPI; conda-forge is the only distribution channel.
+- `micromamba create -c conda-forge openff-toolkit openmmforcefields` was OOM-killed during dep resolution on local hardware. Verified via two attempts.
+
+**Pivot decision:** use **RDKit MMFF94** (already a project dep, pip-installable) for atom typing + bond perception via `rdDetermineBonds`, plus geometry-derived r₀/θ₀ and uniform default force constants. Implemented in `scripts/data/build_params_init.py`.
+
+The §7.1 figure's load-bearing claim is "batched-vmap converges faster than the looped baseline," NOT "initial-parameter accuracy is publication-grade." Gradient descent (Phase C) updates k/r₀/θ₀ from these inits during training. The MMFF94 pivot does not invalidate any §7.1 falsification trigger.
+
+**v0 implementation specifics:**
+- Bond perception: `rdDetermineBonds.DetermineBonds(mol, charge=0)` with fallback to `DetermineConnectivity` for high-charge species (e.g., COMP6v2 midsize_mol_99 returned charge=2 at charge=0 perception).
+- Ring perception: `Chem.GetSSSR(mol)` after bond perception (required to avoid "RingInfo not initialized" downstream errors).
+- Atom typing: MMFF94 via `AllChem.MMFFGetMoleculeProperties(mol).GetMMFFAtomType(i)`. Stored alongside Z in the manifest.
+- Bond k: uniform 400 kcal/mol/Å²; r₀: from `||r_i - r_j||` on first conformer.
+- Angle k: uniform 50 kcal/mol/rad²; θ₀: from geometry on first conformer.
+- Proper torsions: identified topologically; k_φ initialized to 0 (Phase C learns them).
+- Improper torsions: not yet computed (low priority for v0; current bonded fit covers backbone + sidechain geometry).
+
+**Verified 2026-05-20 on the HP4 curated subset:**
+- 20/20 molecules parameterize (16 Lane A + 4 Lane B).
+- **Trp-cage 1L2Y (312 atoms, bucket 3): 318 bonds, 576 angles, 857 proper torsions.** Hardest case clears.
+- Output: per-molecule `<name>.params_init.json` sibling to each HDF5; `params_init_sha256` reproducibility hash.
+
+**v1 follow-up (post-paper or pre-paper-extension):** Install OpenFF-2.x via conda env on a workstation with sufficient RAM for the dep resolve; regenerate params_init.json files with OpenFF; verify Phase C convergence is qualitatively similar (sanity check that the v0 uniform-k inits aren't a load-bearing crutch).
+
+**Lane B (Rust-native, WASM-compilable; Claim 2 portability — FUTURE):**
 
 **Exit criterion (must be added to §8):** All 20-21 ensemble molecules parameterize successfully via this toolchain; each molecule's initial bonded parameters are written to `data/ani1x_subset/lane_*/mol_NNN.params_init.json` as part of the manifest. **Trp-cage parameterization is the hardest case; verify it works before HP4 closes.**
 
