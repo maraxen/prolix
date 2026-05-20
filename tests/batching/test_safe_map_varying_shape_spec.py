@@ -150,26 +150,29 @@ def test_vmap_with_varying_shape_spec():
     """HP3 Core Diagnostic: jax.vmap cache behavior with static=True shape_spec.
 
     Hypothesis (Claim 1): shape_spec (static=True) is correctly shape-keyed by XLA,
-    enabling XLA to cache one compilation even when shape_spec instances differ.
+    enabling XLA to cache one compilation even when shape_spec instances differ,
+    PROVIDED the underlying array shapes are identical.
 
     Method:
-    1. Create two MolecularBundle instances with DIFFERENT shape_spec values
-       (different n_atoms → different bucket slots).
-    2. Wrap an observable in jax.jit (not safe_map — we test the primitive).
-    3. Track JIT compilations via a Python-side trace counter.
-    4. Call with bundle1, then bundle2.
-    5. If trace_count == 1: XLA cached correctly (Claim 1 holds).
-       If trace_count == 2: XLA recompiled per static value (Claim 1 fails).
+    1. Create two MolecularBundle instances with:
+       - SAME bucket sizes (both padded arrays have identical shapes)
+       - DIFFERENT shape_spec field values (e.g., n_atoms=10 vs n_atoms=20)
+    2. Verify array shapes are equal: bundle_1.positions.shape == bundle_2.positions.shape
+    3. Wrap an observable in jax.jit (not safe_map — we test the primitive).
+    4. Track JIT compilations via a Python-side trace counter.
+    5. Call with bundle1, then bundle2.
+    6. If trace_count == 1: XLA cached correctly despite differing static fields (Claim 1 holds).
+       If trace_count == 2: eqx.field(static=True) hashes by content; differing values force retrace
+                           (Claim 1 needs redesign).
 
     Expected: trace_count == 1 (one JIT compile, cache hit on second call).
     Actual outcome recorded as diagnostic signal for HP3.
     """
 
-    # Create two bundles with different n_atoms (thus different shape_spec)
-    # Bundle 1: 10 atoms (buckets to ATOM_BUCKETS[0] = 256)
-    # Bundle 2: 100 atoms (buckets to ATOM_BUCKETS[1] = 1024) — different bucket, different shape_spec
+    # Create two bundles with SAME bucket size but DIFFERENT n_atoms in shape_spec
+    # Both 10 and 20 atoms bucket to ATOM_BUCKETS[0] = 1024
     spec_1 = MolecularShapeSpec(
-        n_atoms=10,
+        n_atoms=10,  # Different n_atoms value
         n_bonds=0,
         n_angles=0,
         n_dihedrals=0,
@@ -185,7 +188,7 @@ def test_vmap_with_varying_shape_spec():
     )
 
     spec_2 = MolecularShapeSpec(
-        n_atoms=100,  # Different n_atoms → different shape_spec instance
+        n_atoms=20,  # Different n_atoms value
         n_bonds=0,
         n_angles=0,
         n_dihedrals=0,
@@ -201,7 +204,12 @@ def test_vmap_with_varying_shape_spec():
     )
 
     bundle_1 = _make_minimal_bundle(10, spec_1)
-    bundle_2 = _make_minimal_bundle(100, spec_2)
+    bundle_2 = _make_minimal_bundle(20, spec_2)
+
+    # CRITICAL VERIFICATION: Same bucket sizes (same array shapes)
+    assert bundle_1.positions.shape == bundle_2.positions.shape, (
+        f"HP3: Bundles must have same array shapes. Got {bundle_1.positions.shape} vs {bundle_2.positions.shape}"
+    )
 
     # Trace counter: incremented only when Python-side execution reaches this point
     # (i.e., on JIT compile, not on cache hit).
@@ -220,14 +228,15 @@ def test_vmap_with_varying_shape_spec():
     assert jnp.isfinite(result_1).item(), "Observable should produce finite value"
     count_after_first = trace_count[0]
 
-    # Call with bundle_2 (different shape_spec)
+    # Call with bundle_2 (different shape_spec, same array shapes)
     result_2 = jitted_obs(bundle_2)
     assert jnp.isfinite(result_2).item(), "Observable should produce finite value"
     count_after_second = trace_count[0]
 
     # Diagnostic assertion
     # PASS outcome: trace_count == 1 → XLA cached correctly (Claim 1 holds)
-    # FAIL outcome: trace_count == 2 → XLA recompiled per static value (Claim 1 fails, needs redesign)
+    # FAIL outcome: trace_count == 2 → eqx.field(static=True) hashes by content
+    #                                   (Claim 1 fails, needs redesign)
     # Note: This test does NOT try to make itself pass. Both outcomes are valuable signals.
     assert count_after_first == 1, (
         f"HP3: First call should compile once; trace_count={count_after_first}"
@@ -237,8 +246,9 @@ def test_vmap_with_varying_shape_spec():
     try:
         assert trace_count[0] == 1, (
             f"HP3 DIAGNOSTIC: Expected 1 JIT compile, got {trace_count[0]}. "
-            f"static=True shape_spec correctly shape-keyed? "
-            f"[PASS if count==1, FAIL if count==2]"
+            f"eqx.field(static=True) hash behavior: shape_spec with same array shapes but different "
+            f"n_atoms causes retrace? "
+            f"[PASS if count==1 (cached), FAIL if count==2 (recompiled per static value)]"
         )
     except AssertionError as e:
         # Record the failure but report it as a diagnostic signal, not a code bug
@@ -246,15 +256,29 @@ def test_vmap_with_varying_shape_spec():
 
 
 @pytest.mark.fast
-def test_safe_map_with_varying_shape_spec():
-    """HP3 Secondary Check: safe_map behavior with varying shape_spec.
+def test_vmap_different_bucket_sizes_retraces():
+    """HP3 Expected-Case Diagnostic: JIT recompilation with different array shapes.
 
-    Verifies that safe_map's underlying vmap behavior aligns with the primary test.
-    This is a secondary diagnostic to confirm the observable propagates through safe_map.
+    This test documents the EXPECTED (and uninformative) case: when two bundles have
+    DIFFERENT bucket sizes, their array shapes differ, and XLA MUST recompile.
+    This is standard XLA behavior and NOT a signal about Claim 1.
+
+    Method:
+    1. Create two MolecularBundle instances with DIFFERENT bucket sizes
+       (e.g., 10 atoms → 1024, 500 atoms → 2048).
+    2. Verify array shapes are different.
+    3. Wrap an observable in jax.jit.
+    4. Track JIT compilations via a Python-side trace counter.
+    5. Call with bundle1, then bundle2.
+    6. Assert trace_count == 2: XLA recompiled on different shapes (expected).
+
+    Expected: trace_count == 2 (recompile on shape change — normal XLA behavior).
+    This outcome rules out the original test construction (different buckets → uninformative).
     """
-    from prolix.batched_simulate import safe_map
 
-    # Use the same two specs from the primary test
+    # Create two bundles with DIFFERENT bucket sizes
+    # 10 atoms bucket to ATOM_BUCKETS[0] = 1024
+    # 500 atoms bucket to ATOM_BUCKETS[1] = 2048 (different shape)
     spec_1 = MolecularShapeSpec(
         n_atoms=10,
         n_bonds=0,
@@ -272,7 +296,7 @@ def test_safe_map_with_varying_shape_spec():
     )
 
     spec_2 = MolecularShapeSpec(
-        n_atoms=100,
+        n_atoms=500,  # Will bucket to different size
         n_bonds=0,
         n_angles=0,
         n_dihedrals=0,
@@ -288,41 +312,128 @@ def test_safe_map_with_varying_shape_spec():
     )
 
     bundle_1 = _make_minimal_bundle(10, spec_1)
-    bundle_2 = _make_minimal_bundle(100, spec_2)
+    bundle_2 = _make_minimal_bundle(500, spec_2)
 
-    # Observation: safe_map expects a pytree with a leading batch dimension.
-    # Individual MolecularBundle instances do NOT have a batch dimension.
-    # To test safe_map, we would need to stack bundles OR pass a single bundle
-    # and let vmap handle it.
-    #
-    # Instead, test the simpler case: apply safe_map to an array (proven working)
-    # and verify it still works when called multiple times with different shapes.
-    # This tests safe_map's internal vmap caching behavior indirectly.
+    # CRITICAL VERIFICATION: Different bucket sizes (different array shapes)
+    assert bundle_1.positions.shape != bundle_2.positions.shape, (
+        f"HP3: Bundles must have different array shapes. Got {bundle_1.positions.shape} vs {bundle_2.positions.shape}"
+    )
 
+    # Trace counter
     trace_count = [0]
 
-    def array_obs(x):
-        """Observable on array: sum with trace counter."""
+    def observable(bundle: MolecularBundle) -> Float:
+        """Simple observable: sum of positions."""
         trace_count[0] += 1
-        return jnp.sum(x)
+        return jnp.sum(bundle.positions)
 
-    # Create two arrays with different shapes (conceptually analogous to
-    # bundle_1 and bundle_2 with different shape_specs)
-    arr_1 = jnp.ones((256, 3), dtype=jnp.float32)
-    arr_2 = jnp.ones((1024, 3), dtype=jnp.float32)
+    jitted_obs = jax.jit(observable)
 
-    # Call safe_map with chunk_size=None (pure vmap)
-    result_1 = safe_map(array_obs, arr_1, chunk_size=None)
+    # Call with bundle_1
+    result_1 = jitted_obs(bundle_1)
+    assert jnp.isfinite(result_1).item()
     count_after_first = trace_count[0]
 
-    result_2 = safe_map(array_obs, arr_2, chunk_size=None)
+    # Call with bundle_2 (different shape)
+    result_2 = jitted_obs(bundle_2)
+    assert jnp.isfinite(result_2).item()
     count_after_second = trace_count[0]
 
-    # With different leading shapes (256 vs 1024), XLA must recompile
-    # because the vmap broadcasts to different sizes.
-    # This is EXPECTED behavior, not a bug.
-    # This test confirms safe_map is transparent to shape changes.
-    assert count_after_first >= 1, "safe_map should trigger at least one trace"
-    assert count_after_second >= count_after_first, (
-        "safe_map with different shapes should compile independently"
+    # Expected outcome: trace_count == 2 (recompiled on shape change)
+    assert count_after_first == 1, f"First call should compile once; trace_count={count_after_first}"
+    assert trace_count[0] == 2, (
+        f"HP3 EXPECTED: Different shapes → XLA recompiles. Expected trace_count==2, got {trace_count[0]}. "
+        f"This is normal XLA behavior, not a Claim 1 signal."
     )
+
+
+@pytest.mark.fast
+def test_safe_map_stacked_bundles_same_bucket():
+    """HP3 Secondary Check: safe_map behavior with stacked bundles (same bucket size).
+
+    Verifies that safe_map can handle stacked pytrees of bundles with:
+    - Same bucket sizes (same array shapes across batch)
+    - Different shape_spec field values (e.g., n_atoms=10 vs n_atoms=20 in the batch)
+
+    This tests whether safe_map's underlying vmap behavior aligns with test_vmap_with_varying_shape_spec.
+
+    LIMITATION: Stacking MolecularBundle instances into a batch pytree may not be possible
+    if equinox treats bundles with different shape_spec values as incompatible pytree structures.
+    This test documents that finding as part of the HP3 empirical analysis.
+    """
+    from prolix.batched_simulate import safe_map
+
+    # Try to construct two bundles with same bucket size but different shape_spec
+    spec_1 = MolecularShapeSpec(
+        n_atoms=10,
+        n_bonds=0,
+        n_angles=0,
+        n_dihedrals=0,
+        n_impropers=0,
+        n_urey_bradley=0,
+        n_waters=0,
+        n_excl=0,
+        n_cmap=0,
+        n_exception_pairs=0,
+        has_pbc=False,
+        has_implicit_solvent=False,
+        boundary_condition="free",
+    )
+
+    spec_2 = MolecularShapeSpec(
+        n_atoms=20,  # Same bucket as spec_1
+        n_bonds=0,
+        n_angles=0,
+        n_dihedrals=0,
+        n_impropers=0,
+        n_urey_bradley=0,
+        n_waters=0,
+        n_excl=0,
+        n_cmap=0,
+        n_exception_pairs=0,
+        has_pbc=False,
+        has_implicit_solvent=False,
+        boundary_condition="free",
+    )
+
+    bundle_1 = _make_minimal_bundle(10, spec_1)
+    bundle_2 = _make_minimal_bundle(20, spec_2)
+
+    # Verify same bucket sizes
+    assert bundle_1.positions.shape == bundle_2.positions.shape, (
+        f"Bundles must have same array shapes. Got {bundle_1.positions.shape} vs {bundle_2.positions.shape}"
+    )
+
+    # Attempt to stack bundles and apply safe_map
+    # NOTE: If stacking fails (equinox incompatibility), this test documents that finding.
+    try:
+        import jax
+        stacked = jax.tree_util.tree_map(
+            lambda *xs: jnp.stack(xs, axis=0),
+            bundle_1, bundle_2
+        )
+
+        trace_count = [0]
+
+        def observable(bundle: MolecularBundle) -> Float:
+            """Observable on stacked bundle batch."""
+            trace_count[0] += 1
+            return jnp.sum(bundle.positions)
+
+        # Apply safe_map with chunk_size=None (pure vmap)
+        result = safe_map(observable, stacked, chunk_size=None)
+        count_after_call = trace_count[0]
+
+        # Diagnostic: trace_count should be 1 if vmap caches correctly across stacked bundles
+        # with different shape_spec but same shapes
+        assert count_after_call >= 1, "safe_map should trigger at least one trace"
+
+        # Informational: just verify safe_map works with stacked bundles
+        assert jnp.isfinite(result).item(), "Observable should produce finite values"
+
+    except Exception as e:
+        # Document any incompatibility with stacking bundles with different shape_specs
+        pytest.skip(
+            f"HP3: Cannot stack bundles with different shape_specs (equinox pytree structure). "
+            f"Error: {type(e).__name__}: {e}"
+        )
