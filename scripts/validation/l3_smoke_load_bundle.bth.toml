@@ -1,0 +1,41 @@
+[experiment]
+hypothesis = """
+A single HP4 curated molecule (loaded from data/ani1x_subset/lane_*/mol_NNN.h5,
+unit-converted forces in kcal/mol/Å, post-rsync to cluster) can be assembled
+into a MolecularBundle via make_bundle_from_system under the HP4-revised
+ATOM_BUCKETS ladder (64, 128, 256, 1024, ...), and a forward jax.grad
+computation produces finite forces with no NaN/Inf.
+"""
+
+[outcomes.pass]
+condition = "force_norm_l2 IS NOT NULL AND force_max_abs IS NOT NULL AND atom_bucket_idx >= 0"
+decision = "Cluster pipeline validated end-to-end. Proceed to R6 baseline benchmark (scripts/benchmarks/r6_baseline_wallclock.py). Lane B Trp-cage at /312 should land in atom_bucket_idx=3 under the finer ladder."
+reasoning = """
+L3 is the post-rsync sanity gate per CLUSTER.md §7. Three properties
+must hold simultaneously: (1) HDF5 reads without error after rsync,
+(2) make_bundle_from_system produces a well-formed bundle (HP3
+coarsened spec satisfies the gating contract from test_safe_map_varying_shape_spec.py),
+(3) jax.grad propagates without NaN. Bundle's atom_bucket_idx >= 0
+catches the HP4 ladder being correctly applied (if the index assignment
+is broken, bucket_idx returns -1).
+"""
+
+[outcomes.fail]
+condition = "force_norm_l2 IS NULL OR force_max_abs IS NULL OR atom_bucket_idx < 0"
+decision = "Block §7.1 work. Either the rsync produced a corrupt HDF5, the HP4 ladder is mis-registered in src/prolix/types/bundles.py, or the make_bundle_from_system factory has a regression. Diagnostic: re-run scripts/validation/l3_smoke_load_bundle.py --synthetic locally; compare to cluster failure mode."
+reasoning = """
+L3 has no marginal: either the bundle loads and computes, or the
+cluster pipeline is broken. There is no 'partially loaded bundle'
+state in JAX — the gradient is finite or not. A failure here means
+something downstream (the bundle factory, HP4 ladder, rsync integrity)
+is wrong and must be fixed before any §7.1 dispatch.
+"""
+is_residual = true
+
+[result_schema]
+n_atoms = "int"
+atom_bucket_idx = "int"
+force_norm_l2 = "float"
+force_max_abs = "float"
+backend = "str"
+device = "str"

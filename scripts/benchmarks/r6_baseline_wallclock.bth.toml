@@ -1,0 +1,60 @@
+[benchmark]
+baseline_ref = ""  # No prior baseline run yet — R6 ESTABLISHES the baseline
+metric = "speedup_ratio"
+regression_threshold = 0.20  # 20% trial-to-trial variation tolerated
+target = "speedup_ratio >= 10x on a 16-bundle same-bucket ensemble; baseline for §7.1 ensemble sizing"
+
+[experiment]
+hypothesis = """
+The prolix heterogeneous-batch substrate (HP3 coarsened MolecularShapeSpec +
+jax.jit(jax.vmap(jax.grad(energy_fn))) over a stacked pytree of same-bucket
+MolecularBundles) achieves a wall-clock speedup of at least 10x over the
+naive loop-over-systems baseline (sequential jax.grad calls per bundle),
+on a 16-bundle ensemble of same-bucket molecules using an O(N_atoms^2)
+harmonic pairwise energy stub.
+"""
+
+[outcomes.pass]
+condition = "speedup_ratio >= 10"
+decision = "Proceed to §7.1 with the current 20-21-molecule ensemble. R6 cleared the falsification floor; the heterogeneous-batch dispatch story holds at this scale."
+reasoning = """
+Roadmap §2.7 RR7 (falsification trigger): 'Speedup < 10x collapses the
+Claim 1 × S1 multiplicativity story.' A 10x speedup is the minimum
+headroom needed to plausibly demonstrate the 50-100x headline speedup
+on real DFT-forces-loss compute (which has higher per-bundle work and
+GPU dispatch overhead than the harmonic stub). Citation: prolix
+long-horizon roadmap docs/superpowers/specs/2026-05-19-prolix-long-horizon-roadmap.md.
+"""
+
+[outcomes.marginal]
+condition = "speedup_ratio >= 5 AND speedup_ratio < 10"
+decision = "Scale ensemble to N=64 before §7.1 implementation begins. The 20-molecule ensemble is too small for dispatch-overhead-amortized speedup; the §7.1 figure target of 50-100x will not hold without scaling. Re-register the R6 baseline on the 64-molecule ensemble."
+reasoning = """
+At 5-10x, JIT-dispatch + vmap overhead dominates per-bundle work. CPU local
+smoke showed 5.04x for trivial workload on 16 small bundles — strictly the
+dispatch floor. On GPU with real molecules + GAFF2/OpenFF bonded compute,
+this should improve but not reach 10x without ensemble scaling. The §7.1
+extension hook in roadmap §7.1 already anticipates the 64-molecule path.
+"""
+
+[outcomes.fail]
+condition = "speedup_ratio < 5"
+decision = "Re-think Claim 1 dispatch strategy. The heterogeneous-batch substrate is not providing meaningful speedup at the smoke scale, which suggests either (a) the HP3 coarsening did not fully unblock cache hits, or (b) the stub workload is too trivial to expose the real bottleneck. Investigate jaxpr-level dispatch cost; consider XLA flags or alternate batching strategy."
+reasoning = """
+A sub-5x ratio on a same-bucket vmap-able ensemble is a red flag for the
+core Claim 1 mechanism. Either JIT compilation cost is being included in
+timing (warmup insufficient), or the dispatch path has unexpected
+overhead. This is BLOCKING for §7.1 — no scaling will fix a fundamentally
+unsuccessful dispatch story.
+"""
+is_residual = true
+
+[result_schema]
+n_molecules = "int"
+atom_bucket_idx = "int"
+n_trials = "int"
+n_warmup = "int"
+speedup_ratio = "float"
+passes_falsification_trigger = "bool"
+backend = "str"
+device = "str"

@@ -10,15 +10,18 @@
 #SBATCH --error=outputs/logs/slurm/%j.l3_smoke.err
 
 # L3 cluster smoke for HP4 curated subset (CLUSTER.md §7 Gate L3).
+# bath-tracked: provenance via `bth run`; sidecar at
+#   scripts/validation/l3_smoke_load_bundle.bth.toml
 #
-# Prereqs (must be done before this job is submitted):
-#   1. Local L1 + L2 of fetch_ani1x_subset.py (with --dry-run + real run)
+# Prereqs:
+#   1. Local L1 + L2 of fetch_ani1x_subset.py
 #   2. data/ani1x_subset/ rsync'd to ~/projects/prolix/data/ani1x_subset/
 #   3. outputs/logs/slurm/ exists on remote
+#   4. bath catalog accessible (defaults to ~/.bth/catalog/)
 #
 # Submission (from local prolix dir, transparent SSH per CLUSTER.md §0):
 #   mkdir -p outputs/logs/slurm
-#   sbatch scripts/cluster/l3_smoke.sbatch
+#   sbatch scripts/slurm/l3_smoke.slurm
 #
 # Expected wallclock: ~30 seconds on mit_quicktest CPU.
 
@@ -26,15 +29,18 @@ set -euo pipefail
 
 cd "${SLURM_SUBMIT_DIR:-${HOME}/projects/prolix}"
 
+# Load bath + cluster environment (BTH_PROJECT_SLUG, LOG_ROOT, etc.)
+source scripts/slurm/_bth_env.sh
+
 echo "=== L3 smoke ==="
 echo "Host: $(hostname)"
 echo "CWD: $(pwd)"
 echo "Job: ${SLURM_JOB_ID:-local}"
+echo "bath project: ${BTH_PROJECT_SLUG}"
 echo "Date: $(date -Is)"
 
 mkdir -p outputs/results
 
-# Run smoke on Lane A first molecule (deterministic from SELECT_16 seed=42).
 DATA_PATH="data/ani1x_subset/lane_a/mol_000.h5"
 
 if [[ ! -f "${DATA_PATH}" ]]; then
@@ -43,9 +49,16 @@ if [[ ! -f "${DATA_PATH}" ]]; then
     exit 1
 fi
 
-uv run python scripts/cluster/l3_smoke_load_bundle.py \
+OUT_JSON="outputs/results/l3_smoke_${SLURM_JOB_ID:-local}.json"
+
+# bath run captures: git state, command, argv, exit_code, duration, SLURM_JOB_ID.
+# Outcome evaluated by sidecar at compact time.
+uv run bth run python scripts/validation/l3_smoke_load_bundle.py \
+    --tag cluster --tag hp4 --tag l3 \
+    --out "${OUT_JSON}" \
+    -- \
     --data-path "${DATA_PATH}" \
-    --out-json "outputs/results/l3_smoke_${SLURM_JOB_ID:-local}.json"
+    --out-json "${OUT_JSON}"
 
 EXIT=$?
 echo "=== L3 smoke exit=${EXIT} ==="
