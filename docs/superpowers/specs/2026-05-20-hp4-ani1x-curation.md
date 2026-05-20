@@ -35,15 +35,22 @@ The §7.1 paper-gating figure demonstrates Claim 1 (heterogeneous-batch substrat
 | **Atom-count range** | Mean 15 total (8 heavy), σ=5; **max 63 atoms** [NB:c0ac4c69; qchem/dataset.py] |
 | **Support code** | https://github.com/aiqm/ANI1x_datasets [NB:74c012cd] |
 
-**Supplement (mandatory for cross-bucket §7.1 evidence):** COMP6 benchmark suite (Smith et al. 2018 LANL).
+**Supplement (mandatory for cross-bucket §7.1 evidence):** **COMP6v2 release** (formally-versioned re-release of the original Smith et al. 2018 COMP6 benchmark, Zenodo 2023).
 
 | Field | Value |
 |---|---|
-| **Repository** | https://github.com/isayev/COMP6 [NB:65aa232f] |
+| **Title** | COMP6v2 Release (Zenodo) |
+| **Dataset DOI** | [10.5281/zenodo.10126157](https://doi.org/10.5281/zenodo.10126157) |
+| **Concept DOI** | [10.5281/zenodo.10126156](https://doi.org/10.5281/zenodo.10126156) (cite this for version-independent reference) |
+| **Required file** | `COMP6v2_wB97X-631Gd.tar.gz` (167 MB) — there are 4 DFT-level variants; we use only the wB97X/6-31G(d) one to match ANI-1x exactly |
+| **MD5** | `0a417148966022e72f54c135d8f3d4e7` (Zenodo-published) |
 | **QM level** | **ωB97X/6-31G* (Gaussian 09)** — same as ANI-1x; zero reference-baseline mixing [NB:65aa232f] |
-| **File format** | HDF5 with the same `wb97x_dz.forces` / `wb97x_dz.energy` keys [NB:74c012cd] [NB:65aa232f] |
+| **File format** | HDF5 (after untar) with the same `wb97x_dz.forces` / `wb97x_dz.energy` keys [NB:74c012cd] [NB:65aa232f] |
 | **Forces** | Energies + atomic forces available for all non-equilibrium conformations [NB:65aa232f] |
 | **Subsets relevant to §7.1** | DrugBank (837 mols, 44 atoms mean ±20), Tripeptides (248 mols, 53 atoms mean ±7), ANI-MD (14 mols, 75 atoms mean, **max 312 = Trp-cage 1L2Y**) [NB:65aa232f] |
+| **Companion files (also download)** | `sample_data_loader.py` (loader reference), `supplementary_information.pdf` (subset breakdowns) |
+
+**Why COMP6v2 (Zenodo) instead of the github.com/isayev/COMP6 repo:** COMP6v2 is the formally-versioned, DOI-citable release with explicit DFT-level packaging and Zenodo-pinned MD5 checksums — strictly better for reproducibility than the original git repo. The four-DFT-level packaging makes it explicit which baseline you're using (ωB97X/6-31G(d) for ANI-1x compatibility); the original git repo did not separate these.
 
 **Why COMP6 (not SPICE) as supplement:** SPICE uses ωB97M-D3(BJ)/def2-TZVPPD, a different functional + dispersion correction → reference-baseline mixing penalty if combined with ANI-1x [NB:73f75bd6; arXiv 2209.10702]. COMP6 uses the **exact same** ωB97X/6-31G* level and same HDF5 schema → seamless [NB:65aa232f]. SPICE is the right *replacement* if we pivot off ANI-1x entirely; COMP6 is the right *supplement* for cross-bucket evidence.
 
@@ -76,6 +83,15 @@ The §7.1 paper-gating figure demonstrates Claim 1 (heterogeneous-batch substrat
              Isayev, Olexandr and Roitberg, Adrian E.},
   journal = {The Journal of Chemical Physics}, volume = {148}, number = {24},
   pages   = {241733}, year = {2018}, doi = {10.1063/1.5023802}
+}
+
+@dataset{comp6v2_2023,
+  title     = {{COMP6v2 Release}},
+  author    = {Smith, Justin S. and others},
+  year      = {2023},
+  publisher = {Zenodo},
+  doi       = {10.5281/zenodo.10126157},
+  note      = {Use file COMP6v2\_wB97X-631Gd.tar.gz for ANI-1x reference-level compatibility}
 }
 ```
 

@@ -36,3 +36,9 @@ cluster-config.toml
 
 # Test artifacts and reports
 tmp/
+
+# HP4 downloaded archives (5.6 GB ANI-1x + COMP6v2 tarballs) — never commit
+data/downloads/
+
+# HP4 curated subset (regenerated from archives via fetch_ani1x_subset.py)
+data/ani1x_subset/
