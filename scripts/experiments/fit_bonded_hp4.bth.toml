@@ -1,0 +1,90 @@
+[experiment]
+hypothesis = """
+For the HP4 16-molecule Lane A ensemble of CHNO organic molecules, the
+looped (sequential per-molecule) training loop converges bonded force-field
+parameters (k_bond, r0, k_theta, theta0, k_phi) toward minimizing the
+differentiable loss (force MSE + energy MSE + harmonic prior) over 500 Adam
+steps with lr=1e-3. Phase C baseline. Phase D will demonstrate cross-bucket
+scaling and batched vmap speedup (Claim 1 substrate).
+"""
+description = """
+Phase C implements the training loop infrastructure for §7.1 paper-gating
+figure. This phase establishes the baseline convergence behavior and loss
+trajectory for Lane A. Lane B held-out evaluation and speedup comparison
+(looped vs batched) are deferred to Phase D cluster runs.
+"""
+
+[outcomes.pass]
+condition = "looped_final_loss_max < 2.0 AND mean_final_loss < 1.0"
+decision = """
+Proceed to Phase D: submit batched training on cluster, measure speedup,
+evaluate held-out Lane B, render §7.1 convergence figure.
+"""
+reasoning = """
+Loss convergence to sub-2.0 max per-molecule indicates training is stable
+and parameters are learning. Mean < 1.0 confirms the optimization is making
+progress from initial MMFF94 geometry-derived parameters.
+"""
+
+[outcomes.marginal]
+condition = "looped_final_loss_max BETWEEN 2.0 AND 3.0"
+decision = """
+Investigate loss landscape: (1) increase learning_rate to 5e-3, re-run.
+(2) If still marginal, inspect force/energy loss breakdown to identify
+bottleneck (force overfitting vs energy underfitting). Adjust alpha (energy
+weight) and repeat.
+"""
+reasoning = """
+Loss in 2.0-3.0 range suggests slower convergence but not divergence. May
+be due to conservative LR or high regularization. Tuning hyperparameters
+before scaling is appropriate.
+"""
+
+[outcomes.fail]
+condition = "looped_final_loss_max > 3.0 OR any(isnan(final_loss))"
+decision = """
+BLOCK Phase D submission. Diagnose: (1) gradient explosion — check
+force RMSE and energy RMSE components separately via metrics breakdown.
+(2) parameter divergence — inspect per-mol k_bond/r0 trajectories.
+(3) data loading — verify forces_all shapes match positions_all.
+Fix root cause and rerun Phase C before scaling.
+"""
+reasoning = """
+High final loss or NaN indicates a fundamental training failure, not
+hyperparameter tuning. Must be resolved before continuing.
+"""
+
+[outcomes.nodata]
+condition = "Exception during data loading OR data path not found"
+decision = """
+Abort: Verify --subset-dir path points to valid data/ani1x_subset/
+with lane_a/ and lane_b/ subdirectories populated with *.h5 files
+and *.params_init.json alongside. Re-run local smoke test gate.
+"""
+reasoning = """
+Data integrity is a prerequisite; cannot proceed without it.
+"""
+
+[result_schema]
+mode = "str"  # 'looped' or 'batched'
+n_steps = "int"
+n_molecules = "int"
+n_molecules_lane_a = "int"
+n_molecules_lane_b = "int"
+wallclock_s = "float"
+speedup_ratio = "float | null"  # null if mode=looped
+batched_final_loss_max = "float | null"
+looped_final_loss_max = "float"
+per_mol_final_losses_lane_a = "list[float]"
+per_mol_final_losses_lane_b = "list[float]"
+backend = "str"  # 'cpu' or 'gpu'
+device = "str"
+learning_rate = "float"
+alpha = "float"
+w_reg = "float"
+seed = "int"
+
+[metadata]
+campaign_id = "hp4-s71-fit"
+campaign_mode = "confirmation"
+tags = ["cluster", "hp4", "s71", "fit", "phase_c"]
