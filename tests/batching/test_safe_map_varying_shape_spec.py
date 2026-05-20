@@ -484,10 +484,11 @@ def test_vmap_stacked_identical_shape_spec():
         trace_count[0] += 1
         return jnp.sum(bundle.positions, axis=-1).sum()
 
-    # vmap over the batch axis
-    batched_obs = jax.vmap(observable)
+    # vmap over the batch axis, wrapped in jit so cache hits are observable
+    # (jax.vmap alone is a transform; it re-runs the Python body each call)
+    batched_obs = jax.jit(jax.vmap(observable))
 
-    # Run twice to make sure cache hit on second invocation
+    # Run twice — second call should hit JIT cache (trace_count stays at 1)
     out = batched_obs(stacked)
     out2 = batched_obs(stacked)
 
