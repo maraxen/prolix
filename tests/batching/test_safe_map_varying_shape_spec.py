@@ -382,7 +382,7 @@ def test_safe_map_stacked_bundles_same_bucket():
         assert count_after_call >= 1, "safe_map should trigger at least one trace"
 
         # Verify safe_map works with stacked bundles
-        assert jnp.isfinite(result).item(), "Observable should produce finite values"
+        assert bool(jnp.all(jnp.isfinite(result))), "Observable should produce finite values"
 
     except Exception as e:
         # Document any unexpected incompatibility
@@ -494,14 +494,14 @@ def test_real_world_same_bucket_bundles_hash_identically():
 
     # First call: compiles
     out_1 = batched_obs(stacked)
-    assert jnp.isfinite(out_1).item(), "Observable should produce finite value"
+    assert bool(jnp.all(jnp.isfinite(out_1))), "Observable should produce finite value"
 
     count_after_first = trace_count[0]
     assert count_after_first == 1, f"First call should compile once; got {count_after_first}"
 
     # Second call: should hit cache (trace_count stays at 1)
     out_2 = batched_obs(stacked)
-    assert jnp.isfinite(out_2).item(), "Second observable call should produce finite value"
+    assert bool(jnp.all(jnp.isfinite(out_2))), "Second observable call should produce finite value"
 
     # THE CRITICAL ASSERTION: trace_count must stay at 1 (proof of Claim 1)
     assert trace_count[0] == 1, (
