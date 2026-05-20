@@ -91,7 +91,11 @@ def test_energy_with_analytical_shim_returns_callable():
 def test_shim_grad_uses_analytical_path():
     """Gradient of shim-wrapped energy uses analytical forces with correct sign."""
     import equinox as eqx
-    from prolix.types.bundles import MolecularBundle, MolecularShapeSpec, ATOM_BUCKETS, BOND_BUCKETS, ANGLE_BUCKETS
+    from prolix.types.bundles import (
+        MolecularBundle, MolecularShapeSpec, _bucket_idx,
+        ATOM_BUCKETS, BOND_BUCKETS, ANGLE_BUCKETS, DIHEDRAL_BUCKETS,
+        WATER_BUCKETS, EXCL_BUCKETS, CMAP_BUCKETS, EXCEPTION_BUCKETS,
+    )
 
     n_atoms = 10
     a = ATOM_BUCKETS[0]
@@ -102,11 +106,13 @@ def test_shim_grad_uses_analytical_path():
     def bonded_forces(bundle):
         return -2.0 * bundle.positions  # correct: -dE/dr for E=sum(r^2)
 
+    # Build shape_spec with bucket indices
+    atom_bucket_idx = _bucket_idx(n_atoms, ATOM_BUCKETS)
     spec = MolecularShapeSpec(
-        n_atoms=n_atoms, n_bonds=0, n_angles=0, n_dihedrals=0,
-        n_impropers=0, n_urey_bradley=0, n_waters=0, n_excl=0,
-        n_cmap=0, n_exception_pairs=0, has_pbc=False,
-        has_implicit_solvent=False, boundary_condition="free",
+        atom_bucket_idx=atom_bucket_idx, bond_bucket_idx=0, angle_bucket_idx=0,
+        dihedral_bucket_idx=0, water_bucket_idx=0, excl_bucket_idx=0,
+        cmap_bucket_idx=0, exception_bucket_idx=0,
+        has_pbc=False, has_implicit_solvent=False, boundary_condition="free",
     )
     b = BOND_BUCKETS[0]
 
@@ -120,37 +126,47 @@ def test_shim_grad_uses_analytical_path():
         radii=jnp.ones(a),
         scaled_radii=jnp.ones(a),
         atom_mask=jnp.concatenate([jnp.ones(n_atoms, bool), jnp.zeros(a - n_atoms, bool)]),
+        n_atoms=jnp.array(n_atoms, dtype=jnp.int32),
         box=jnp.zeros((3, 3)),
         bond_idx=jnp.zeros((b, 2), jnp.int32),
         bond_params=jnp.zeros((b, 2)),
         bond_mask=jnp.zeros(b, bool),
+        n_bonds=jnp.array(0, dtype=jnp.int32),
         angle_idx=jnp.zeros((ANGLE_BUCKETS[0], 3), jnp.int32),
         angle_params=jnp.zeros((ANGLE_BUCKETS[0], 2)),
         angle_mask=jnp.zeros(ANGLE_BUCKETS[0], bool),
+        n_angles=jnp.array(0, dtype=jnp.int32),
         dihedral_idx=jnp.zeros((256, 4), jnp.int32),
         dihedral_params=jnp.zeros((256, 4)),
         dihedral_mask=jnp.zeros(256, bool),
+        n_dihedrals=jnp.array(0, dtype=jnp.int32),
         improper_idx=jnp.zeros((256, 4), jnp.int32),
         improper_params=jnp.zeros((256, 3)),
         improper_mask=jnp.zeros(256, bool),
         improper_is_periodic=jnp.array(False),
+        n_impropers=jnp.array(0, dtype=jnp.int32),
         urey_bradley_idx=jnp.zeros((256, 3), jnp.int32),
         urey_bradley_params=jnp.zeros((256, 2)),
         urey_bradley_mask=jnp.zeros(256, bool),
+        n_urey_bradley=jnp.array(0, dtype=jnp.int32),
         cmap_torsion_idx=jnp.zeros((16, 8), jnp.int32),
         cmap_energy_grids=jnp.zeros((16, 24, 24)),
         cmap_mask=jnp.zeros(16, bool),
+        n_cmap=jnp.array(0, dtype=jnp.int32),
         water_indices=jnp.zeros((16, 3), jnp.int32),
         water_mask=jnp.zeros(16, bool),
+        n_waters=jnp.array(0, dtype=jnp.int32),
         excl_indices=jnp.zeros((512, 2), jnp.int32),
         excl_scales_vdw=jnp.zeros(512),
         excl_scales_elec=jnp.zeros(512),
         excl_mask=jnp.zeros(512, bool),
+        n_excl=jnp.array(0, dtype=jnp.int32),
         exception_pairs=jnp.zeros((512, 2), jnp.int32),
         exception_sigmas=jnp.zeros(512),
         exception_epsilons=jnp.zeros(512),
         exception_chargeprods=jnp.zeros(512),
         exception_mask=jnp.zeros(512, bool),
+        n_exception_pairs=jnp.array(0, dtype=jnp.int32),
         pme_alpha=jnp.array(0.0),
         cutoff_distance=jnp.array(9.0),
         shape_spec=spec,

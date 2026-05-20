@@ -30,40 +30,57 @@ CMAP_BUCKETS = (16, 128, 512)
 EXCEPTION_BUCKETS = (512, 2_048, 10_000, 50_000)
 
 
+def _bucket_idx(n: int, ladder: tuple[int, ...]) -> int:
+    """Return the index of the smallest bucket >= n.
+
+    Args:
+        n: Actual count (e.g., number of atoms)
+        ladder: Sorted tuple of bucket thresholds (e.g., ATOM_BUCKETS)
+
+    Returns:
+        Index of smallest bucket containing n. Asserts if n exceeds all buckets.
+
+    Example:
+        _bucket_idx(100, (256, 1024, 5000)) -> 0  (256 is at index 0)
+        _bucket_idx(500, (256, 1024, 5000)) -> 1  (1024 is at index 1)
+    """
+    for i, bucket in enumerate(ladder):
+        if n <= bucket:
+            return i
+    # Overflow: n exceeds largest bucket
+    assert False, f"Count {n} exceeds all buckets {ladder}"
+
+
 @dataclass(frozen=True)
 class MolecularShapeSpec:
     """Hashable static descriptor — the JIT cache key for MolecularBundle.
 
-    All fields are plain Python scalars, enabling deterministic hashing.
-    boundary_condition is used by factories to reconstruct displacement_fn
-    without closure capture.
+    All fields are plain Python scalars. CRITICAL: bucket indices (not real counts)
+    enable identical hashing for two systems with different real counts but same
+    bucket sizes. This is required for Claim 1 (heterogeneous batch substrate).
 
     Attributes:
-        n_atoms: True count of atoms (real entries in padded arrays)
-        n_bonds: True count of bond terms
-        n_angles: True count of angle terms
-        n_dihedrals: True count of proper dihedral terms
-        n_impropers: True count of improper dihedral terms
-        n_urey_bradley: True count of Urey-Bradley 1-3 terms
-        n_waters: True count of SETTLE water molecules
-        n_excl: True count of nonbonded exclusion pairs
-        n_cmap: True count of CMAP cross-terms
-        n_exception_pairs: True count of 1-4 exception pairs
+        atom_bucket_idx: Index into ATOM_BUCKETS (all systems in same bucket share key)
+        bond_bucket_idx: Index into BOND_BUCKETS
+        angle_bucket_idx: Index into ANGLE_BUCKETS
+        dihedral_bucket_idx: Index into DIHEDRAL_BUCKETS
+        water_bucket_idx: Index into WATER_BUCKETS
+        excl_bucket_idx: Index into EXCL_BUCKETS
+        cmap_bucket_idx: Index into CMAP_BUCKETS
+        exception_bucket_idx: Index into EXCEPTION_BUCKETS
         has_pbc: Whether periodic boundary conditions are enabled
         has_implicit_solvent: Whether implicit solvent is present
         boundary_condition: "free" or "periodic" — used to reconstruct displacement_fn
     """
 
-    n_atoms: int
-    n_bonds: int
-    n_angles: int
-    n_dihedrals: int
-    n_impropers: int
-    n_urey_bradley: int
-    n_waters: int
-    n_excl: int
-    n_cmap: int
-    n_exception_pairs: int
+    atom_bucket_idx: int
+    bond_bucket_idx: int
+    angle_bucket_idx: int
+    dihedral_bucket_idx: int
+    water_bucket_idx: int
+    excl_bucket_idx: int
+    cmap_bucket_idx: int
+    exception_bucket_idx: int
     has_pbc: bool
     has_implicit_solvent: bool
     boundary_condition: Literal["free", "periodic"] = "periodic"
@@ -78,8 +95,12 @@ class MolecularBundle(eqx.Module):
     Design constraints:
     - All topology arrays are DYNAMIC (not static=True) to avoid XLA recompilation
       per distinct topology. Instead, XLA caches on bucketed size.
-    - shape_spec is the ONLY eqx.field(static=True) — it carries bucketed shapes
-      as plain Python ints, serving as the JIT cache key.
+    - shape_spec is the ONLY eqx.field(static=True) — it carries bucket indices
+      (coarse) as plain Python ints, serving as the JIT cache key. Two systems with
+      different real counts but same bucket size produce identical shape_spec (enabling
+      Claim 1: heterogeneous batch substrate).
+    - Real per-system counts are stored as dynamic fields (n_atoms, n_bonds, etc.)
+      using atom_mask, bond_mask, etc. to identify real vs padded entries.
     - displacement_fn is NOT stored — it's reconstructed from shape_spec.boundary_condition
       inside energy and integrator factories.
     - No Optional fields: all arrays are concrete and pre-allocated.
@@ -93,6 +114,7 @@ class MolecularBundle(eqx.Module):
     radii: Float[Array, "N"]
     scaled_radii: Float[Array, "N"]
     atom_mask: Bool[Array, "N"]
+    n_atoms: Int[Array, ""]  # Real count (derived from atom_mask.sum())
 
     # Periodic boundary condition box (zero array when has_pbc=False)
     box: Float[Array, "3 3"]
@@ -101,42 +123,50 @@ class MolecularBundle(eqx.Module):
     bond_idx: Int[Array, "B 2"]
     bond_params: Float[Array, "B 2"]
     bond_mask: Bool[Array, "B"]
+    n_bonds: Int[Array, ""]  # Real count (derived from bond_mask.sum())
 
     # Angle terms (padded to ANGLE_BUCKETS)
     angle_idx: Int[Array, "A 3"]
     angle_params: Float[Array, "A 2"]
     angle_mask: Bool[Array, "A"]
+    n_angles: Int[Array, ""]  # Real count
 
     # Proper dihedral terms (padded to DIHEDRAL_BUCKETS)
     dihedral_idx: Int[Array, "D 4"]
     dihedral_params: Float[Array, "D 4"]
     dihedral_mask: Bool[Array, "D"]
+    n_dihedrals: Int[Array, ""]  # Real count
 
     # Improper dihedral terms (padded to DIHEDRAL_BUCKETS)
     improper_idx: Int[Array, "I 4"]
     improper_params: Float[Array, "I 3"]
     improper_mask: Bool[Array, "I"]
     improper_is_periodic: Bool[Array, ""]
+    n_impropers: Int[Array, ""]  # Real count
 
     # Urey-Bradley 1-3 interaction terms (padded to ANGLE_BUCKETS)
     urey_bradley_idx: Int[Array, "U 3"]
     urey_bradley_params: Float[Array, "U 2"]
     urey_bradley_mask: Bool[Array, "U"]
+    n_urey_bradley: Int[Array, ""]  # Real count
 
     # CMAP cross-term tables (padded to CMAP_BUCKETS)
     cmap_torsion_idx: Int[Array, "CM 8"]
     cmap_energy_grids: Float[Array, "CM G G"]
     cmap_mask: Bool[Array, "CM"]
+    n_cmap: Int[Array, ""]  # Real count
 
     # SETTLE rigid water molecules (padded to WATER_BUCKETS)
     water_indices: Int[Array, "W 3"]
     water_mask: Bool[Array, "W"]
+    n_waters: Int[Array, ""]  # Real count
 
     # Nonbonded exclusion pairs (padded to EXCL_BUCKETS)
     excl_indices: Int[Array, "E 2"]
     excl_scales_vdw: Float[Array, "E"]
     excl_scales_elec: Float[Array, "E"]
     excl_mask: Bool[Array, "E"]
+    n_excl: Int[Array, ""]  # Real count
 
     # 1-4 exception pairs (special LJ/Coulomb scaling, padded to EXCEPTION_BUCKETS)
     exception_pairs: Int[Array, "X 2"]
@@ -144,6 +174,7 @@ class MolecularBundle(eqx.Module):
     exception_epsilons: Float[Array, "X"]
     exception_chargeprods: Float[Array, "X"]
     exception_mask: Bool[Array, "X"]
+    n_exception_pairs: Int[Array, ""]  # Real count
 
     # Nonbonded computation parameters
     pme_alpha: Float[Array, ""]

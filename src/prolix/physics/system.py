@@ -11,6 +11,19 @@ from jaxtyping import Array
 
 from prolix.physics import bonded, cmap, explicit_corrections, generalized_born, pme
 from prolix.physics.bonded import compute_dihedral_angles
+from prolix.types.bundles import (
+    MolecularBundle,
+    MolecularShapeSpec,
+    _bucket_idx,
+    ATOM_BUCKETS,
+    BOND_BUCKETS,
+    ANGLE_BUCKETS,
+    DIHEDRAL_BUCKETS,
+    WATER_BUCKETS,
+    EXCL_BUCKETS,
+    CMAP_BUCKETS,
+    EXCEPTION_BUCKETS,
+)
 from prolix.typing import DifferentiableParams, PhysicsSystem
 
 
@@ -484,17 +497,25 @@ def make_bundle_from_system(
     xb = _next_bucket(1, EXCEPTION_BUCKETS)
 
     # --- shape spec -------------------------------------------------------
+    # Compute bucket indices (coarse; enables identical static hashing for same-bucket systems)
+    atom_bucket_idx = _bucket_idx(n, ATOM_BUCKETS)
+    bond_bucket_idx = _bucket_idx(max(nb, 1), BOND_BUCKETS)
+    angle_bucket_idx = _bucket_idx(max(na, 1), ANGLE_BUCKETS)
+    dihedral_bucket_idx = _bucket_idx(max(nd, 1), DIHEDRAL_BUCKETS)
+    water_bucket_idx = _bucket_idx(max(nw, 1), WATER_BUCKETS)
+    excl_bucket_idx = _bucket_idx(max(ne, 1), EXCL_BUCKETS)
+    cmap_bucket_idx = _bucket_idx(0 + 1, CMAP_BUCKETS)  # CMAP is always 0 in v1.0
+    exception_bucket_idx = _bucket_idx(1, EXCEPTION_BUCKETS)  # Empty for fresh conversions
+
     spec = MolecularShapeSpec(
-        n_atoms=n,
-        n_bonds=nb,
-        n_angles=na,
-        n_dihedrals=nd,
-        n_impropers=ni,
-        n_urey_bradley=nub,
-        n_waters=nw,
-        n_excl=ne,
-        n_cmap=0,
-        n_exception_pairs=0,
+        atom_bucket_idx=atom_bucket_idx,
+        bond_bucket_idx=bond_bucket_idx,
+        angle_bucket_idx=angle_bucket_idx,
+        dihedral_bucket_idx=dihedral_bucket_idx,
+        water_bucket_idx=water_bucket_idx,
+        excl_bucket_idx=excl_bucket_idx,
+        cmap_bucket_idx=cmap_bucket_idx,
+        exception_bucket_idx=exception_bucket_idx,
         has_pbc=has_pbc,
         has_implicit_solvent=False,
         boundary_condition=boundary_condition,
@@ -513,47 +534,57 @@ def make_bundle_from_system(
         radii=_pad_atom("radii"),
         scaled_radii=_pad_atom("scaled_radii"),
         atom_mask=_mask(n, a),
+        n_atoms=jnp.array(n, dtype=jnp.int32),
         box=box_mat,
         # bonds
         bond_idx=_pad_2d(bonds, bb, 2, dtype=jnp.int32),
         bond_params=_pad_2d(bp, bb, 2, dtype=jnp.float32),
         bond_mask=_mask(nb, bb),
+        n_bonds=jnp.array(nb, dtype=jnp.int32),
         # angles
         angle_idx=_pad_2d(angles, ab, 3, dtype=jnp.int32),
         angle_params=_pad_2d(ap, ab, 2, dtype=jnp.float32),
         angle_mask=_mask(na, ab),
+        n_angles=jnp.array(na, dtype=jnp.int32),
         # proper dihedrals
         # NOTE: dp is (N, N_terms, 3) in PhysicsSystem; _pad_2d handles size==0 path
         dihedral_idx=_pad_2d(dihs, db, 4, dtype=jnp.int32),
         dihedral_params=_pad_2d(dp, db, 4, dtype=jnp.float32),
         dihedral_mask=_mask(nd, db),
+        n_dihedrals=jnp.array(nd, dtype=jnp.int32),
         # impropers (same shape caveat as dihedrals)
         improper_idx=_pad_2d(imps, db, 4, dtype=jnp.int32),
         improper_params=_pad_2d(imp_p, db, 3, dtype=jnp.float32),
         improper_mask=_mask(ni, db),
         improper_is_periodic=jnp.array(False),
+        n_impropers=jnp.array(ni, dtype=jnp.int32),
         # Urey-Bradley
         urey_bradley_idx=_pad_2d(ub, ab, 3, dtype=jnp.int32),
         urey_bradley_params=_pad_2d(ub_p, ab, 2, dtype=jnp.float32),
         urey_bradley_mask=_mask(nub, ab),
+        n_urey_bradley=jnp.array(nub, dtype=jnp.int32),
         # CMAP (empty — T6 does not map CMAP from PhysicsSystem)
         cmap_torsion_idx=jnp.zeros((16, 8), dtype=jnp.int32),
         cmap_energy_grids=jnp.zeros((16, 24, 24), dtype=jnp.float32),
         cmap_mask=jnp.zeros(16, dtype=bool),
+        n_cmap=jnp.array(0, dtype=jnp.int32),
         # SETTLE water
         water_indices=_pad_2d(wi, wb, 3, dtype=jnp.int32),
         water_mask=_mask(nw, wb),
+        n_waters=jnp.array(nw, dtype=jnp.int32),
         # nonbonded exclusions
         excl_indices=_pad_2d(excl, eb, 2, dtype=jnp.int32),
         excl_scales_vdw=_pad_1d(_get("excl_scales_vdw"), eb, dtype=jnp.float32),
         excl_scales_elec=_pad_1d(_get("excl_scales_elec"), eb, dtype=jnp.float32),
         excl_mask=_mask(ne, eb),
+        n_excl=jnp.array(ne, dtype=jnp.int32),
         # 1-4 exception pairs (empty for fresh conversions)
         exception_pairs=jnp.zeros((xb, 2), dtype=jnp.int32),
         exception_sigmas=jnp.zeros(xb, dtype=jnp.float32),
         exception_epsilons=jnp.zeros(xb, dtype=jnp.float32),
         exception_chargeprods=jnp.zeros(xb, dtype=jnp.float32),
         exception_mask=jnp.zeros(xb, dtype=bool),
+        n_exception_pairs=jnp.array(0, dtype=jnp.int32),
         # nonbonded parameters
         pme_alpha=jnp.array(float(_get("pme_alpha") or 0.0)),
         cutoff_distance=jnp.array(float(_get("nonbonded_cutoff") or 9.0)),

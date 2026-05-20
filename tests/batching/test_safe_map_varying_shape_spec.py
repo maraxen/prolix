@@ -16,18 +16,38 @@ import jax
 import jax.numpy as jnp
 from jaxtyping import Array, Float, Int, Bool
 
-from prolix.types.bundles import MolecularBundle, MolecularShapeSpec, ATOM_BUCKETS
+from prolix.types.bundles import (
+    MolecularBundle,
+    MolecularShapeSpec,
+    _bucket_idx,
+    ATOM_BUCKETS,
+    BOND_BUCKETS,
+    ANGLE_BUCKETS,
+    DIHEDRAL_BUCKETS,
+    WATER_BUCKETS,
+    EXCL_BUCKETS,
+    CMAP_BUCKETS,
+    EXCEPTION_BUCKETS,
+)
 
 
-def _make_minimal_bundle(n_atoms: int, shape_spec: MolecularShapeSpec) -> MolecularBundle:
-    """Construct a minimal MolecularBundle with the given n_atoms and shape_spec.
+def _make_minimal_bundle(n_atoms: int, atom_bucket: int | None = None) -> MolecularBundle:
+    """Construct a minimal MolecularBundle with the given n_atoms.
 
     All arrays are padded to the bucket size determined by n_atoms.
     Real entries are masked; padding entries are zeros/False.
     This is a diagnostic fixture — not a realistic system.
+
+    Args:
+        n_atoms: Actual number of atoms.
+        atom_bucket: If provided, use this bucket size. Otherwise, compute from n_atoms.
     """
     # Determine atom bucket size based on actual n_atoms
-    atom_bucket = min([b for b in ATOM_BUCKETS if b >= n_atoms])
+    if atom_bucket is None:
+        atom_bucket = ATOM_BUCKETS[_bucket_idx(n_atoms, ATOM_BUCKETS)]
+    else:
+        # Verify bucket_size >= n_atoms
+        assert atom_bucket >= n_atoms, f"bucket {atom_bucket} < n_atoms {n_atoms}"
 
     def _make_mask(n_real: int, bucket_size: int) -> Array:
         """Create a mask: [True]*n_real + [False]*(bucket_size - n_real)."""
@@ -100,6 +120,30 @@ def _make_minimal_bundle(n_atoms: int, shape_spec: MolecularShapeSpec) -> Molecu
     pme_alpha = jnp.array(0.3, dtype=jnp.float32)
     cutoff_distance = jnp.array(12.0, dtype=jnp.float32)
 
+    # Build shape_spec with bucket indices
+    atom_bucket_idx = _bucket_idx(n_atoms, ATOM_BUCKETS)
+    bond_bucket_idx = 0  # Default to index 0 for empty
+    angle_bucket_idx = 0
+    dihedral_bucket_idx = 0
+    water_bucket_idx = 0
+    excl_bucket_idx = 0
+    cmap_bucket_idx = 0
+    exception_bucket_idx = 0
+
+    shape_spec = MolecularShapeSpec(
+        atom_bucket_idx=atom_bucket_idx,
+        bond_bucket_idx=bond_bucket_idx,
+        angle_bucket_idx=angle_bucket_idx,
+        dihedral_bucket_idx=dihedral_bucket_idx,
+        water_bucket_idx=water_bucket_idx,
+        excl_bucket_idx=excl_bucket_idx,
+        cmap_bucket_idx=cmap_bucket_idx,
+        exception_bucket_idx=exception_bucket_idx,
+        has_pbc=False,
+        has_implicit_solvent=False,
+        boundary_condition="free",
+    )
+
     return MolecularBundle(
         positions=positions,
         charges=charges,
@@ -108,37 +152,47 @@ def _make_minimal_bundle(n_atoms: int, shape_spec: MolecularShapeSpec) -> Molecu
         radii=radii,
         scaled_radii=scaled_radii,
         atom_mask=atom_mask,
+        n_atoms=jnp.array(n_atoms, dtype=jnp.int32),
         box=box,
         bond_idx=bond_idx,
         bond_params=bond_params,
         bond_mask=bond_mask,
+        n_bonds=jnp.array(0, dtype=jnp.int32),
         angle_idx=angle_idx,
         angle_params=angle_params,
         angle_mask=angle_mask,
+        n_angles=jnp.array(0, dtype=jnp.int32),
         dihedral_idx=dihedral_idx,
         dihedral_params=dihedral_params,
         dihedral_mask=dihedral_mask,
+        n_dihedrals=jnp.array(0, dtype=jnp.int32),
         improper_idx=improper_idx,
         improper_params=improper_params,
         improper_mask=improper_mask,
         improper_is_periodic=improper_is_periodic,
+        n_impropers=jnp.array(0, dtype=jnp.int32),
         urey_bradley_idx=urey_bradley_idx,
         urey_bradley_params=urey_bradley_params,
         urey_bradley_mask=urey_bradley_mask,
+        n_urey_bradley=jnp.array(0, dtype=jnp.int32),
         cmap_torsion_idx=cmap_torsion_idx,
         cmap_energy_grids=cmap_energy_grids,
         cmap_mask=cmap_mask,
+        n_cmap=jnp.array(0, dtype=jnp.int32),
         water_indices=water_indices,
         water_mask=water_mask,
+        n_waters=jnp.array(0, dtype=jnp.int32),
         excl_indices=excl_indices,
         excl_scales_vdw=excl_scales_vdw,
         excl_scales_elec=excl_scales_elec,
         excl_mask=excl_mask,
+        n_excl=jnp.array(0, dtype=jnp.int32),
         exception_pairs=exception_pairs,
         exception_sigmas=exception_sigmas,
         exception_epsilons=exception_epsilons,
         exception_chargeprods=exception_chargeprods,
         exception_mask=exception_mask,
+        n_exception_pairs=jnp.array(0, dtype=jnp.int32),
         pme_alpha=pme_alpha,
         cutoff_distance=cutoff_distance,
         shape_spec=shape_spec,
@@ -146,69 +200,40 @@ def _make_minimal_bundle(n_atoms: int, shape_spec: MolecularShapeSpec) -> Molecu
 
 
 @pytest.mark.fast
-def test_vmap_with_varying_shape_spec():
-    """HP3 Core Diagnostic: jax.vmap cache behavior with static=True shape_spec.
+def test_vmap_with_coarsened_shape_spec():
+    """HP3 Core Test: Coarsened shape_spec enables cache hits for same-bucket bundles.
 
-    Hypothesis (Claim 1): shape_spec (static=True) is correctly shape-keyed by XLA,
-    enabling XLA to cache one compilation even when shape_spec instances differ,
-    PROVIDED the underlying array shapes are identical.
+    With the coarsenining refactor, MolecularShapeSpec now contains bucket indices
+    (not raw counts). Two systems with different real atom counts but same bucket
+    will have IDENTICAL shape_spec, enabling XLA cache hits.
 
     Method:
     1. Create two MolecularBundle instances with:
        - SAME bucket sizes (both padded arrays have identical shapes)
-       - DIFFERENT shape_spec field values (e.g., n_atoms=10 vs n_atoms=20)
-    2. Verify array shapes are equal: bundle_1.positions.shape == bundle_2.positions.shape
-    3. Wrap an observable in jax.jit (not safe_map — we test the primitive).
-    4. Track JIT compilations via a Python-side trace counter.
-    5. Call with bundle1, then bundle2.
-    6. If trace_count == 1: XLA cached correctly despite differing static fields (Claim 1 holds).
-       If trace_count == 2: eqx.field(static=True) hashes by content; differing values force retrace
-                           (Claim 1 needs redesign).
+       - SAME shape_spec (because bucket indices are identical)
+       - DIFFERENT real n_atoms (but encoded only in atom_mask, not shape_spec)
+    2. Wrap an observable in jax.jit.
+    3. Track JIT compilations via a Python-side trace counter.
+    4. Call with bundle1, then bundle2.
+    5. Assert trace_count == 1: both calls hit the same cached compilation.
 
     Expected: trace_count == 1 (one JIT compile, cache hit on second call).
-    Actual outcome recorded as diagnostic signal for HP3.
     """
 
-    # Create two bundles with SAME bucket size but DIFFERENT n_atoms in shape_spec
-    # Both 10 and 20 atoms bucket to ATOM_BUCKETS[0] = 1024
-    spec_1 = MolecularShapeSpec(
-        n_atoms=10,  # Different n_atoms value
-        n_bonds=0,
-        n_angles=0,
-        n_dihedrals=0,
-        n_impropers=0,
-        n_urey_bradley=0,
-        n_waters=0,
-        n_excl=0,
-        n_cmap=0,
-        n_exception_pairs=0,
-        has_pbc=False,
-        has_implicit_solvent=False,
-        boundary_condition="free",
-    )
-
-    spec_2 = MolecularShapeSpec(
-        n_atoms=20,  # Different n_atoms value
-        n_bonds=0,
-        n_angles=0,
-        n_dihedrals=0,
-        n_impropers=0,
-        n_urey_bradley=0,
-        n_waters=0,
-        n_excl=0,
-        n_cmap=0,
-        n_exception_pairs=0,
-        has_pbc=False,
-        has_implicit_solvent=False,
-        boundary_condition="free",
-    )
-
-    bundle_1 = _make_minimal_bundle(10, spec_1)
-    bundle_2 = _make_minimal_bundle(20, spec_2)
+    # Both 10 and 20 atoms bucket to ATOM_BUCKETS[0] (256 or higher)
+    # Now they will have IDENTICAL shape_spec.atom_bucket_idx, enabling cache hits.
+    bundle_1 = _make_minimal_bundle(n_atoms=10)
+    bundle_2 = _make_minimal_bundle(n_atoms=20)
 
     # CRITICAL VERIFICATION: Same bucket sizes (same array shapes)
     assert bundle_1.positions.shape == bundle_2.positions.shape, (
         f"HP3: Bundles must have same array shapes. Got {bundle_1.positions.shape} vs {bundle_2.positions.shape}"
+    )
+
+    # CRITICAL: With coarsenining, shape_spec must be identical for same bucket
+    assert bundle_1.shape_spec == bundle_2.shape_spec, (
+        f"HP3: Coarsened shape_spec must be identical for same-bucket bundles. "
+        f"Got {bundle_1.shape_spec} vs {bundle_2.shape_spec}"
     )
 
     # Trace counter: incremented only when Python-side execution reaches this point
@@ -228,95 +253,52 @@ def test_vmap_with_varying_shape_spec():
     assert jnp.isfinite(result_1).item(), "Observable should produce finite value"
     count_after_first = trace_count[0]
 
-    # Call with bundle_2 (different shape_spec, same array shapes)
+    # Call with bundle_2 (same shape_spec, same array shapes)
     result_2 = jitted_obs(bundle_2)
     assert jnp.isfinite(result_2).item(), "Observable should produce finite value"
     count_after_second = trace_count[0]
 
-    # Diagnostic assertion
-    # PASS outcome: trace_count == 1 → XLA cached correctly (Claim 1 holds)
-    # FAIL outcome: trace_count == 2 → eqx.field(static=True) hashes by content
-    #                                   (Claim 1 fails, needs redesign)
-    # Note: This test does NOT try to make itself pass. Both outcomes are valuable signals.
+    # With coarsenining, both calls should hit the same cached compilation
     assert count_after_first == 1, (
         f"HP3: First call should compile once; trace_count={count_after_first}"
     )
 
-    # The critical assertion — this is what we're testing
-    try:
-        assert trace_count[0] == 1, (
-            f"HP3 DIAGNOSTIC: Expected 1 JIT compile, got {trace_count[0]}. "
-            f"eqx.field(static=True) hash behavior: shape_spec with same array shapes but different "
-            f"n_atoms causes retrace? "
-            f"[PASS if count==1 (cached), FAIL if count==2 (recompiled per static value)]"
-        )
-    except AssertionError as e:
-        # Record the failure but report it as a diagnostic signal, not a code bug
-        pytest.fail(str(e), pytrace=False)
+    assert trace_count[0] == 1, (
+        f"HP3 GATING: Expected 1 JIT compile (cache hit on same shape_spec), "
+        f"got {trace_count[0]}. Coarsening refactor successful?"
+    )
 
 
 @pytest.mark.fast
 def test_vmap_different_bucket_sizes_retraces():
-    """HP3 Expected-Case Diagnostic: JIT recompilation with different array shapes.
+    """HP3 Expected-Case Test: JIT recompilation with different bucket indices.
 
-    This test documents the EXPECTED (and uninformative) case: when two bundles have
-    DIFFERENT bucket sizes, their array shapes differ, and XLA MUST recompile.
-    This is standard XLA behavior and NOT a signal about Claim 1.
+    This test documents the EXPECTED case: when two bundles have DIFFERENT bucket
+    sizes, their shape_spec differs, and XLA MUST recompile. This is standard
+    XLA behavior and validates that coarsenining properly separates different buckets.
 
     Method:
     1. Create two MolecularBundle instances with DIFFERENT bucket sizes
-       (e.g., 10 atoms → 1024, 500 atoms → 2048).
-    2. Verify array shapes are different.
+       (e.g., 10 atoms → bucket 0, 1000 atoms → bucket 1+).
+    2. Verify shape_specs are different (different bucket indices).
     3. Wrap an observable in jax.jit.
     4. Track JIT compilations via a Python-side trace counter.
     5. Call with bundle1, then bundle2.
-    6. Assert trace_count == 2: XLA recompiled on different shapes (expected).
+    6. Assert trace_count == 2: XLA recompiled on different shape_specs (expected).
 
-    Expected: trace_count == 2 (recompile on shape change — normal XLA behavior).
-    This outcome rules out the original test construction (different buckets → uninformative).
+    Expected: trace_count == 2 (recompile on shape_spec change — normal XLA behavior).
     """
 
     # Create two bundles with DIFFERENT bucket sizes
-    # 10 atoms bucket to ATOM_BUCKETS[0] = 1024
-    # 500 atoms bucket to ATOM_BUCKETS[1] = 2048 (different shape)
-    spec_1 = MolecularShapeSpec(
-        n_atoms=10,
-        n_bonds=0,
-        n_angles=0,
-        n_dihedrals=0,
-        n_impropers=0,
-        n_urey_bradley=0,
-        n_waters=0,
-        n_excl=0,
-        n_cmap=0,
-        n_exception_pairs=0,
-        has_pbc=False,
-        has_implicit_solvent=False,
-        boundary_condition="free",
-    )
+    # 10 atoms bucket to ATOM_BUCKETS[0] (256)
+    # 1000 atoms bucket to ATOM_BUCKETS[1] (1024) — different bucket index
+    bundle_1 = _make_minimal_bundle(n_atoms=10)
+    bundle_2 = _make_minimal_bundle(n_atoms=1000)
 
-    spec_2 = MolecularShapeSpec(
-        n_atoms=500,  # Will bucket to different size
-        n_bonds=0,
-        n_angles=0,
-        n_dihedrals=0,
-        n_impropers=0,
-        n_urey_bradley=0,
-        n_waters=0,
-        n_excl=0,
-        n_cmap=0,
-        n_exception_pairs=0,
-        has_pbc=False,
-        has_implicit_solvent=False,
-        boundary_condition="free",
-    )
-
-    bundle_1 = _make_minimal_bundle(10, spec_1)
-    bundle_2 = _make_minimal_bundle(500, spec_2)
-
-    # CRITICAL VERIFICATION: Different bucket sizes (different array shapes)
-    assert bundle_1.positions.shape != bundle_2.positions.shape, (
-        f"HP3: Bundles must have different array shapes. Got {bundle_1.positions.shape} vs {bundle_2.positions.shape}"
+    # CRITICAL VERIFICATION: Different bucket indices (different shape_specs)
+    assert bundle_1.shape_spec != bundle_2.shape_spec, (
+        f"HP3: Bundles with different buckets must have different shape_specs. "
+        f"Got {bundle_1.shape_spec} vs {bundle_2.shape_spec}"
     )
 
     # Trace counter
@@ -334,16 +316,15 @@ def test_vmap_different_bucket_sizes_retraces():
     assert jnp.isfinite(result_1).item()
     count_after_first = trace_count[0]
 
-    # Call with bundle_2 (different shape)
+    # Call with bundle_2 (different shape_spec, different bucket)
     result_2 = jitted_obs(bundle_2)
     assert jnp.isfinite(result_2).item()
     count_after_second = trace_count[0]
 
-    # Expected outcome: trace_count == 2 (recompiled on shape change)
+    # Expected outcome: trace_count == 2 (recompiled on shape_spec change)
     assert count_after_first == 1, f"First call should compile once; trace_count={count_after_first}"
     assert trace_count[0] == 2, (
-        f"HP3 EXPECTED: Different shapes → XLA recompiles. Expected trace_count==2, got {trace_count[0]}. "
-        f"This is normal XLA behavior, not a Claim 1 signal."
+        f"HP3: Different buckets → XLA recompiles. Expected trace_count==2, got {trace_count[0]}."
     )
 
 
@@ -351,61 +332,34 @@ def test_vmap_different_bucket_sizes_retraces():
 def test_safe_map_stacked_bundles_same_bucket():
     """HP3 Secondary Check: safe_map behavior with stacked bundles (same bucket size).
 
+    With coarsenining, bundles in the same bucket have IDENTICAL shape_spec,
+    so stacking should work and vmap should cache correctly.
+
     Verifies that safe_map can handle stacked pytrees of bundles with:
     - Same bucket sizes (same array shapes across batch)
-    - Different shape_spec field values (e.g., n_atoms=10 vs n_atoms=20 in the batch)
+    - Identical shape_spec (because bucket indices match)
+    - Different real n_atoms (encoded only in masks)
 
-    This tests whether safe_map's underlying vmap behavior aligns with test_vmap_with_varying_shape_spec.
-
-    LIMITATION: Stacking MolecularBundle instances into a batch pytree may not be possible
-    if equinox treats bundles with different shape_spec values as incompatible pytree structures.
-    This test documents that finding as part of the HP3 empirical analysis.
+    This tests whether safe_map's underlying vmap behavior aligns with test_vmap_with_coarsened_shape_spec.
     """
     from prolix.batched_simulate import safe_map
 
-    # Try to construct two bundles with same bucket size but different shape_spec
-    spec_1 = MolecularShapeSpec(
-        n_atoms=10,
-        n_bonds=0,
-        n_angles=0,
-        n_dihedrals=0,
-        n_impropers=0,
-        n_urey_bradley=0,
-        n_waters=0,
-        n_excl=0,
-        n_cmap=0,
-        n_exception_pairs=0,
-        has_pbc=False,
-        has_implicit_solvent=False,
-        boundary_condition="free",
-    )
+    # Construct two bundles with same bucket size and now-identical shape_spec
+    bundle_1 = _make_minimal_bundle(n_atoms=10)
+    bundle_2 = _make_minimal_bundle(n_atoms=20)
 
-    spec_2 = MolecularShapeSpec(
-        n_atoms=20,  # Same bucket as spec_1
-        n_bonds=0,
-        n_angles=0,
-        n_dihedrals=0,
-        n_impropers=0,
-        n_urey_bradley=0,
-        n_waters=0,
-        n_excl=0,
-        n_cmap=0,
-        n_exception_pairs=0,
-        has_pbc=False,
-        has_implicit_solvent=False,
-        boundary_condition="free",
-    )
-
-    bundle_1 = _make_minimal_bundle(10, spec_1)
-    bundle_2 = _make_minimal_bundle(20, spec_2)
-
-    # Verify same bucket sizes
+    # Verify same bucket sizes AND identical shape_spec
     assert bundle_1.positions.shape == bundle_2.positions.shape, (
         f"Bundles must have same array shapes. Got {bundle_1.positions.shape} vs {bundle_2.positions.shape}"
     )
 
+    assert bundle_1.shape_spec == bundle_2.shape_spec, (
+        f"Coarsened shape_spec must be identical for same bucket. "
+        f"Got {bundle_1.shape_spec} vs {bundle_2.shape_spec}"
+    )
+
     # Attempt to stack bundles and apply safe_map
-    # NOTE: If stacking fails (equinox incompatibility), this test documents that finding.
+    # With identical shape_spec, stacking should succeed.
     try:
         import jax
         stacked = jax.tree_util.tree_map(
@@ -418,23 +372,22 @@ def test_safe_map_stacked_bundles_same_bucket():
         def observable(bundle: MolecularBundle) -> Float:
             """Observable on stacked bundle batch."""
             trace_count[0] += 1
-            return jnp.sum(bundle.positions)
+            return jnp.sum(bundle.positions, axis=-1).sum()
 
         # Apply safe_map with chunk_size=None (pure vmap)
         result = safe_map(observable, stacked, chunk_size=None)
         count_after_call = trace_count[0]
 
-        # Diagnostic: trace_count should be 1 if vmap caches correctly across stacked bundles
-        # with different shape_spec but same shapes
+        # With identical shape_spec, vmap should cache correctly
         assert count_after_call >= 1, "safe_map should trigger at least one trace"
 
-        # Informational: just verify safe_map works with stacked bundles
+        # Verify safe_map works with stacked bundles
         assert jnp.isfinite(result).item(), "Observable should produce finite values"
 
     except Exception as e:
-        # Document any incompatibility with stacking bundles with different shape_specs
-        pytest.skip(
-            f"HP3: Cannot stack bundles with different shape_specs (equinox pytree structure). "
+        # Document any unexpected incompatibility
+        pytest.fail(
+            f"HP3: Failed to stack bundles with identical shape_spec. "
             f"Error: {type(e).__name__}: {e}"
         )
 
@@ -443,32 +396,19 @@ def test_safe_map_stacked_bundles_same_bucket():
 def test_vmap_stacked_identical_shape_spec():
     """HP3 LOAD-BEARING gating test.
 
-    Two MolecularBundles with identical shape_spec content (same bucket, same fields),
+    Two MolecularBundles with identical shape_spec (coarsened to bucket indices),
     stacked into one batched pytree, vmapped through an observable.
     Asserts trace_count == 1 — this is the property Claim 1 requires.
 
-    If this fails, Claim 1 needs a real redesign.
-    If this passes, the path forward is to coarsen MolecularShapeSpec so two real-world
-    bundles in the same bucket end up with identical shape_spec content.
+    With the coarsenining refactor, this test validates that same-bucket bundles
+    share cache entries when stacked and vmapped.
     """
-    # Use the _make_minimal_bundle helper.
-    # Two MolecularShapeSpec instances with IDENTICAL field values.
-    # n_atoms_real differs (e.g., 10 and 20) — encoded in atom_mask, NOT in shape_spec —
-    # so the dataclass instances compare equal (== and hash both match).
+    # Create two bundles in the same bucket with identical shape_spec
+    # (because coarsenining replaced raw counts with bucket indices)
+    bundle_1 = _make_minimal_bundle(n_atoms=10)
+    bundle_2 = _make_minimal_bundle(n_atoms=20)
 
-    spec_shared = MolecularShapeSpec(
-        n_atoms=256,          # store BUCKET size, not real count
-        n_bonds=0, n_angles=0, n_dihedrals=0, n_impropers=0,
-        n_urey_bradley=0, n_waters=0, n_excl=0, n_cmap=0, n_exception_pairs=0,
-        has_pbc=False, has_implicit_solvent=False, boundary_condition="free",
-    )
-
-    # Bundles with the SAME spec but different *real* atom counts encoded only in atom_mask.
-    # We're simulating what the post-coarsening world would look like.
-    bundle_1 = _make_minimal_bundle(10, spec_shared)
-    bundle_2 = _make_minimal_bundle(20, spec_shared)
-
-    # Sanity: both should compare equal-instance for static field
+    # Sanity: both should have identical shape_spec (same bucket index)
     assert bundle_1.shape_spec == bundle_2.shape_spec
     assert bundle_1.positions.shape == bundle_2.positions.shape
 
@@ -477,7 +417,7 @@ def test_vmap_stacked_identical_shape_spec():
 
     # Sanity: stacked leading dim is 2 on dynamic arrays, static shape_spec unchanged
     assert stacked.positions.shape[0] == 2
-    assert stacked.shape_spec == spec_shared
+    assert stacked.shape_spec == bundle_1.shape_spec
 
     trace_count = [0]
     def observable(bundle):
@@ -493,9 +433,80 @@ def test_vmap_stacked_identical_shape_spec():
     out2 = batched_obs(stacked)
 
     assert trace_count[0] == 1, (
-        f"HP3 GATING FAILURE: stacked vmap with identical shape_spec retraced; "
+        f"HP3 GATING: stacked vmap with identical shape_spec should compile once; "
         f"trace_count={trace_count[0]}"
     )
 
     # Bonus: also assert vmap leading axis preserved
     assert out.shape == (2,)
+
+
+@pytest.mark.fast
+def test_real_world_same_bucket_bundles_hash_identically():
+    """HP3 Real-World Validation: Two systems with same bucket produce identical static keys.
+
+    This is the property required for Claim 1 (heterogeneous batch substrate) to hold.
+
+    Real-world systems of different sizes (e.g., 50 atoms, 100 atoms) that bucket
+    to the same size (e.g., ATOM_BUCKETS[0] = 256) must produce byte-identical
+    shape_spec static fields. This test validates that the coarsenining refactor
+    achieves this property by using _bucket_idx to replace raw counts with indices.
+
+    Method:
+    1. Create two bundles with different real atom counts (50 and 150) that both
+       bucket to the same size (256).
+    2. Verify shape_spec.atom_bucket_idx is identical.
+    3. Build jax.vmap(observable) wrapped in jax.jit over stacked bundles.
+    4. Run twice; trace_count must stay at 1 (cache hit on second run).
+
+    Expected: trace_count == 1 (successful cache hit, validating Claim 1).
+    """
+    # Create two bundles with different real counts, same bucket
+    bundle_1 = _make_minimal_bundle(n_atoms=50)
+    bundle_2 = _make_minimal_bundle(n_atoms=150)
+
+    # Both should bucket to ATOM_BUCKETS[0] (256) since 50 < 256 and 150 < 256
+    atom_bucket_threshold = ATOM_BUCKETS[_bucket_idx(50, ATOM_BUCKETS)]
+    assert 50 <= atom_bucket_threshold and 150 <= atom_bucket_threshold, (
+        f"Test setup: atoms 50 and 150 should bucket to same threshold. Got {atom_bucket_threshold}"
+    )
+
+    # CRITICAL: shape_spec must be identical for Claim 1 to hold
+    assert bundle_1.shape_spec == bundle_2.shape_spec, (
+        f"HP3 VALIDATION: Bundles in same bucket must have identical shape_spec. "
+        f"Got {bundle_1.shape_spec} vs {bundle_2.shape_spec}"
+    )
+
+    # Stack the bundles
+    stacked = jax.tree_util.tree_map(lambda *xs: jnp.stack(xs, axis=0), bundle_1, bundle_2)
+
+    # Trace counter
+    trace_count = [0]
+
+    def observable(bundle: MolecularBundle) -> Float:
+        """Real observable: sum positions (axis=-1 for batch elem, sum scalar results)."""
+        trace_count[0] += 1
+        return jnp.sum(bundle.positions, axis=-1).sum()
+
+    # vmap(observable) wrapped in jit
+    # With identical shape_spec, second call should cache-hit
+    batched_obs = jax.jit(jax.vmap(observable))
+
+    # First call: compiles
+    out_1 = batched_obs(stacked)
+    assert jnp.isfinite(out_1).item(), "Observable should produce finite value"
+
+    count_after_first = trace_count[0]
+    assert count_after_first == 1, f"First call should compile once; got {count_after_first}"
+
+    # Second call: should hit cache (trace_count stays at 1)
+    out_2 = batched_obs(stacked)
+    assert jnp.isfinite(out_2).item(), "Second observable call should produce finite value"
+
+    # THE CRITICAL ASSERTION: trace_count must stay at 1 (proof of Claim 1)
+    assert trace_count[0] == 1, (
+        f"HP3 REAL-WORLD GATING: jit(vmap(observable)) over two same-bucket bundles "
+        f"must cache-hit on second call. "
+        f"trace_count={trace_count[0]} (expected 1). "
+        f"This validates Claim 1 (heterogeneous batch substrate)."
+    )
