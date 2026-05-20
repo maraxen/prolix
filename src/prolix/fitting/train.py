@@ -354,7 +354,11 @@ def train_loop_batched(
         mol_energies_all,
         mol_n_real_conf,
         mol_params_init,
-        mol_topology,
+        mol_topology_bond_idx,
+        mol_topology_angle_idx,
+        mol_topology_torsion_idx,
+        mol_topology_torsion_periodicity,
+        mol_topology_torsion_phase_rad,
         mol_bond_mask,
         mol_angle_mask,
         mol_torsion_mask,
@@ -383,17 +387,20 @@ def train_loop_batched(
 
             sigma = default_sigma(mol_params_init)
 
+            # Build topology for this molecule (unbatched)
+            mol_topology = BondedTopology(
+                bond_idx=mol_topology_bond_idx,
+                angle_idx=mol_topology_angle_idx,
+                torsion_idx=mol_topology_torsion_idx,
+                torsion_periodicity=mol_topology_torsion_periodicity,
+                torsion_phase_rad=mol_topology_torsion_phase_rad,
+            )
+
             # Predicted energy
             energy_pred = bonded_energy(
                 pos,
                 params,
-                BondedTopology(
-                    bond_idx=mol_topology.bond_idx,
-                    angle_idx=mol_topology.angle_idx,
-                    torsion_idx=mol_topology.torsion_idx,
-                    torsion_periodicity=mol_topology.torsion_periodicity,
-                    torsion_phase_rad=mol_topology.torsion_phase_rad,
-                ),
+                mol_topology,
                 bond_mask=mol_bond_mask,
                 angle_mask=mol_angle_mask,
                 torsion_mask=mol_torsion_mask,
@@ -404,13 +411,7 @@ def train_loop_batched(
                 return bonded_energy(
                     p,
                     params,
-                    BondedTopology(
-                        bond_idx=mol_topology.bond_idx,
-                        angle_idx=mol_topology.angle_idx,
-                        torsion_idx=mol_topology.torsion_idx,
-                        torsion_periodicity=mol_topology.torsion_periodicity,
-                        torsion_phase_rad=mol_topology.torsion_phase_rad,
-                    ),
+                    mol_topology,
                     bond_mask=mol_bond_mask,
                     angle_mask=mol_angle_mask,
                     torsion_mask=mol_torsion_mask,
@@ -480,7 +481,11 @@ def train_loop_batched(
             0,  # mol_energies_all
             0,  # mol_n_real_conf
             0,  # mol_params_init (B, max_bonds, ...)
-            0,  # mol_topology (B, max_bonds, ...)
+            0,  # mol_topology_bond_idx
+            0,  # mol_topology_angle_idx
+            0,  # mol_topology_torsion_idx
+            0,  # mol_topology_torsion_periodicity
+            0,  # mol_topology_torsion_phase_rad
             0,  # mol_bond_mask (B, max_bonds)
             0,  # mol_angle_mask (B, max_angles)
             0,  # mol_torsion_mask (B, max_torsions)
@@ -510,7 +515,11 @@ def train_loop_batched(
             energies_all,
             n_real_conf,
             batched_params_init,
-            batched_topology,
+            batched_topology.bond_idx,
+            batched_topology.angle_idx,
+            batched_topology.torsion_idx,
+            batched_topology.torsion_periodicity,
+            batched_topology.torsion_phase_rad,
             batched_topology.bond_mask,
             batched_topology.angle_mask,
             batched_topology.torsion_mask,
