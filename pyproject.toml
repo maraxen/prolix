@@ -49,7 +49,8 @@ dev = [
     "pytest-cov",
     "pytest-xdist",
     "ty",
-    # "openff-toolkit>=0.14.0",  # TODO: Requires conda or special channel
+    # openff-toolkit: install separately via conda if needed for HP4 work
+    # see scripts/data/build_params_init.py §10.2 for details
 ]
 
 # Linux x86_64: OpenMM 8.4+ is manylinux_2_34-only (no sdist) — pin 8.3.x for older glibc HPC nodes.
