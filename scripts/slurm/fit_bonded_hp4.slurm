@@ -1,67 +1,86 @@
 #!/bin/bash
 #SBATCH --job-name=prolix_fit_hp4
+#SBATCH --partition=pi_so3
+#SBATCH --nodelist=node4007,node4008
 #SBATCH --gres=gpu:1
 #SBATCH --time=2:00:00
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=16G
-#SBATCH --output=outputs/logs/slurm/%j.fit_bonded_hp4.out
-#SBATCH --error=outputs/logs/slurm/%j.fit_bonded_hp4.err
-# Partition NOT pinned here — set per-submission via:
-#   sbatch --partition=mit_preemptable ...
-#   sbatch --partition=pi_so3 ...
-# (Avoid mit_normal_gpu — 6h walltime cap and weaker GPUs per CLUSTER.md §1.)
+#SBATCH --output=outputs/logs/slurm/%A_%a.fit_bonded_hp4.out
+#SBATCH --error=outputs/logs/slurm/%A_%a.fit_bonded_hp4.err
 
-# §7.1 Phase C cluster submission: bonded-parameter fitting on the HP4
-# 16-molecule Lane A ensemble (4 Lane B held out per spec §10.4).
+# §7.1 ensemble scaling sweep — job array on pinned hardware.
 #
-# Parameterized via sbatch --export:
-#   MODE     : "looped" | "batched"   (default: batched)
-#   PRECISION: "float32" | "float64"  (default: float32)
-#   N_STEPS  : integer                 (default: 500)
-#   CAMPAIGN_ID: optional bath campaign UUID for outcome attribution
+# Hardware pin: pi_so3, node4007/node4008 ONLY (4× RTX Pro 6000 Blackwell).
+# Exclude node4009 (H200) — different GPU class would confound the comparison.
 #
-# Submission examples:
-#   sbatch --export=MODE=looped,PRECISION=float32  scripts/slurm/fit_bonded_hp4.slurm
-#   sbatch --export=MODE=batched,PRECISION=float64 scripts/slurm/fit_bonded_hp4.slurm
+# Array indexing (0..23):
+#   N_VALUES   = (16 32 64 128 256 512)  → 6 values
+#   MODES      = (looped batched)         → 2 values
+#   PRECISIONS = (float32 float64)        → 2 values
+#   Index = (N_idx * 4) + (mode_idx * 2) + prec_idx
 #
-# Expected wallclock: ~5-15 min for n_steps=500 on a single GPU (looped
-# scales with 16 sequential per-mol scans; batched is single vmap'd scan).
+# Submission:
+#   sbatch --array=0-23%4 \
+#          --export=ALL,CAMPAIGN_ID=<uuid>,N_CONF_CAP=100 \
+#          scripts/slurm/fit_bonded_hp4.slurm
+#   (%4 = max 4 concurrent tasks, matching 4 GPUs across the two nodes)
+#
+# Single-cell submission (legacy, no array — set MODE/PRECISION/etc via --export):
+#   sbatch --export=ALL,MODE=batched,PRECISION=float32,N_MOLS_TARGET=128,... \
+#       scripts/slurm/fit_bonded_hp4.slurm
 
 set -euo pipefail
 
 cd "${SLURM_SUBMIT_DIR:-${HOME}/projects/prolix}"
 
-# Defaults if not provided via --export.
+# ===== Decode array task ID into (N, MODE, PRECISION) =====
+N_VALUES=(16 32 64 128 256 512)
+MODES=(looped batched)
+PRECISIONS=(float32 float64)
+
+if [[ -n "${SLURM_ARRAY_TASK_ID:-}" ]]; then
+    T=${SLURM_ARRAY_TASK_ID}
+    N_IDX=$(( T / 4 ))
+    MODE_IDX=$(( (T % 4) / 2 ))
+    PREC_IDX=$(( T % 2 ))
+    if [[ $N_IDX -ge ${#N_VALUES[@]} ]]; then
+        echo "ERROR: SLURM_ARRAY_TASK_ID=$T out of range (max 23)"
+        exit 1
+    fi
+    N_MOLS_TARGET="${N_VALUES[$N_IDX]}"
+    MODE="${MODES[$MODE_IDX]}"
+    PRECISION="${PRECISIONS[$PREC_IDX]}"
+fi
+
+# ===== Defaults (legacy single-cell path; also fallback for env-set values) =====
 MODE="${MODE:-batched}"
 PRECISION="${PRECISION:-float32}"
 N_STEPS="${N_STEPS:-500}"
 LEARNING_RATE="${LEARNING_RATE:-1e-3}"
 SEED="${SEED:-42}"
 CAMPAIGN_ID="${CAMPAIGN_ID:-}"
-# Ensemble scaling sweep params (default off: use whatever was curated)
 N_MOLS_TARGET="${N_MOLS_TARGET:-}"
 N_CONF_CAP="${N_CONF_CAP:-}"
 
 # Validate
 if [[ "${MODE}" != "looped" && "${MODE}" != "batched" ]]; then
-    echo "ERROR: MODE must be 'looped' or 'batched' (got ${MODE})"
-    exit 1
+    echo "ERROR: MODE must be 'looped' or 'batched' (got ${MODE})"; exit 1
 fi
 if [[ "${PRECISION}" != "float32" && "${PRECISION}" != "float64" ]]; then
-    echo "ERROR: PRECISION must be 'float32' or 'float64' (got ${PRECISION})"
-    exit 1
+    echo "ERROR: PRECISION must be 'float32' or 'float64' (got ${PRECISION})"; exit 1
 fi
 
-# bath + cluster env (BTH_PROJECT_SLUG, LOG_ROOT, etc.)
 source scripts/slurm/_bth_env.sh
 
 echo "=== §7.1 fit_bonded_hp4 ==="
 echo "Host: $(hostname)"
+echo "Array job: ${SLURM_ARRAY_JOB_ID:-N/A}  task: ${SLURM_ARRAY_TASK_ID:-N/A}"
 echo "Job: ${SLURM_JOB_ID:-local}"
 echo "GPU: $(nvidia-smi --query-gpu=name,memory.total --format=csv,noheader 2>&1 | head -1)"
-echo "Mode: ${MODE}  Precision: ${PRECISION}  N_steps: ${N_STEPS}  Seed: ${SEED}"
+echo "Mode: ${MODE}  Precision: ${PRECISION}  N_mols: ${N_MOLS_TARGET:-<none>}  N_conf_cap: ${N_CONF_CAP:-<none>}  N_steps: ${N_STEPS}"
 echo "Campaign: ${CAMPAIGN_ID:-<none>}"
 echo "Date: $(date -Is)"
 
@@ -69,35 +88,26 @@ mkdir -p outputs/results outputs/logs/slurm
 
 DATA_DIR="data/ani1x_subset"
 if [[ ! -d "${DATA_DIR}" ]]; then
-    echo "ERROR: ${DATA_DIR} not found on cluster."
-    exit 1
+    echo "ERROR: ${DATA_DIR} not found"; exit 1
 fi
 
-# Build the --float64 flag conditional.
+# Build flags
 PRECISION_FLAG=""
-if [[ "${PRECISION}" == "float64" ]]; then
-    PRECISION_FLAG="--float64"
-fi
+[[ "${PRECISION}" == "float64" ]] && PRECISION_FLAG="--float64"
 
-# Build the --campaign flag conditional.
 CAMPAIGN_FLAG=""
-if [[ -n "${CAMPAIGN_ID}" ]]; then
-    CAMPAIGN_FLAG="--campaign ${CAMPAIGN_ID}"
-fi
+[[ -n "${CAMPAIGN_ID}" ]] && CAMPAIGN_FLAG="--campaign ${CAMPAIGN_ID}"
 
-# bath run sets BTH_RESULTS_PATH; the Python script defaults --out-json to
-# that path. Outcomes get sidecar-evaluated at compact time.
-# Use tags so post-hoc filtering can group the 4-way matrix.
-# shellcheck disable=SC2086
 SWEEP_FLAGS=""
-if [[ -n "${N_MOLS_TARGET}" ]]; then SWEEP_FLAGS+=" --n-mols-target ${N_MOLS_TARGET}"; fi
-if [[ -n "${N_CONF_CAP}" ]]; then SWEEP_FLAGS+=" --n-conf-cap ${N_CONF_CAP}"; fi
+[[ -n "${N_MOLS_TARGET}" ]] && SWEEP_FLAGS+=" --n-mols-target ${N_MOLS_TARGET}"
+[[ -n "${N_CONF_CAP}" ]] && SWEEP_FLAGS+=" --n-conf-cap ${N_CONF_CAP}"
 
 # shellcheck disable=SC2086
 uv run bth run python scripts/experiments/fit_bonded_hp4.py \
     --tag cluster --tag hp4 --tag s71 --tag fit \
     --tag "mode:${MODE}" --tag "precision:${PRECISION}" \
     ${N_MOLS_TARGET:+--tag "N:${N_MOLS_TARGET}"} \
+    ${SLURM_ARRAY_TASK_ID:+--tag "array_task:${SLURM_ARRAY_TASK_ID}"} \
     ${CAMPAIGN_FLAG} \
     -- \
     --subset-dir "${DATA_DIR}" \
@@ -109,5 +119,5 @@ uv run bth run python scripts/experiments/fit_bonded_hp4.py \
     ${SWEEP_FLAGS}
 
 EXIT=$?
-echo "=== fit_bonded_hp4 exit=${EXIT} ==="
+echo "=== exit=${EXIT} ==="
 exit ${EXIT}
