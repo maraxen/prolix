@@ -146,8 +146,8 @@ class BatchedFittingBundle(eqx.Module):
     def stack(bundles: list[FittingBundle]) -> "BatchedFittingBundle":
         """Typed constructor: stack N FittingBundle instances into batched form.
 
-        Calls existing stack_molecules() internally (Phase 5). This method
-        declaration is type-only in Phase 3; implementation lands in Phase 5.
+        Calls existing stack_molecules() internally to batch parameters and topology.
+        Pads conformer data across molecules to maximum sizes.
 
         Args:
             bundles: List of N FittingBundle (one per molecule).
@@ -156,44 +156,87 @@ class BatchedFittingBundle(eqx.Module):
             BatchedFittingBundle with B=N and all shapes padded appropriately.
 
         Raises:
-            NotImplementedError: Full implementation in Phase 5.
+            ValueError: If bundles list is empty.
         """
-        raise NotImplementedError("BatchedFittingBundle.stack lands in Phase 5")
+        from prolix.fitting.batched import stack_molecules
 
-    def step(self, state: "TrainState", conformer_idx: int):
-        """JIT-compiled training step for this batch.
+        if not bundles:
+            raise ValueError("Cannot stack zero bundles")
 
-        This method is type-only in Phase 3. Full implementation (delegating to
-        train_loop_batched internals) lands in Phase 5.
+        B = len(bundles)
 
-        Args:
-            state: TrainState bundling params, opt_state, key, step_count.
-            conformer_idx: Index into the conformer axis (0..max_n_conf-1).
+        # Extract per-mol params and topology
+        params_list = [b.params for b in bundles]
+        topology_list = [b.topology for b in bundles]
+        params_batched, topology_batched = stack_molecules(params_list, topology_list)
 
-        Returns:
-            (updated_state, metrics)
+        # Pad conformer data across mols (max N_conf, max n_atoms)
+        max_n_conf = max(b.conformers.n_conf for b in bundles)
+        max_n_atoms = max(b.conformers.n_atoms for b in bundles)
 
-        Raises:
-            NotImplementedError: Full implementation in Phase 5.
+        # Initialize padded arrays
+        positions_padded = jnp.zeros((B, max_n_conf, max_n_atoms, 3), dtype=jnp.float32)
+        forces_padded = jnp.zeros((B, max_n_conf, max_n_atoms, 3), dtype=jnp.float32)
+        energies_padded = jnp.zeros((B, max_n_conf), dtype=jnp.float32)
+        atom_mask_padded = jnp.zeros((B, max_n_atoms), dtype=jnp.bool_)
+        box_padded = jnp.zeros((B, 3, 3), dtype=jnp.float32)
+        n_conf_real = jnp.zeros((B,), dtype=jnp.int32)
+        n_atoms_real = jnp.zeros((B,), dtype=jnp.int32)
+
+        # Fill in per-bundle data
+        for b_idx, bundle in enumerate(bundles):
+            c = bundle.conformers
+            n_c = c.n_conf
+            n_a = c.n_atoms
+
+            positions_padded = positions_padded.at[b_idx, :n_c, :n_a].set(c.positions)
+            forces_padded = forces_padded.at[b_idx, :n_c, :n_a].set(c.forces_ref)
+            energies_padded = energies_padded.at[b_idx, :n_c].set(c.energies_ref)
+            atom_mask_padded = atom_mask_padded.at[b_idx, :n_a].set(c.atom_mask)
+            box_padded = box_padded.at[b_idx].set(bundle.box)
+            n_conf_real = n_conf_real.at[b_idx].set(n_c)
+            n_atoms_real = n_atoms_real.at[b_idx].set(n_a)
+
+        # Build BatchedConformerBundle
+        conformers_batched = BatchedConformerBundle(
+            positions=positions_padded,
+            forces_ref=forces_padded,
+            energies_ref=energies_padded,
+            atom_mask=atom_mask_padded,
+            n_conf_real=n_conf_real,
+            n_atoms_real=n_atoms_real,
+            n_mols=B,
+            max_n_atoms=max_n_atoms,
+            max_n_conf=max_n_conf,
+        )
+
+        return BatchedFittingBundle(
+            conformers_batched=conformers_batched,
+            params_batched=params_batched,
+            topology_batched=topology_batched,
+            box_batched=box_padded,
+            n_mols_real=B,
+        )
+
+    def step(self, *args, **kwargs):
+        """BatchedFittingBundle.step is not directly callable.
+
+        Use FittingPlan.step(bundle, state, conformer_idx) instead.
         """
-        raise NotImplementedError("BatchedFittingBundle.step lands in Phase 5")
+        raise RuntimeError(
+            "BatchedFittingBundle.step is not directly callable. "
+            "Use FittingPlan.step(bundle, state, conformer_idx) instead."
+        )
 
-    def evaluate(self, state: "TrainState"):
-        """JIT-compiled evaluation over the batch.
+    def evaluate(self, *args, **kwargs):
+        """BatchedFittingBundle.evaluate is not directly callable.
 
-        This method is type-only in Phase 3. Full implementation (computing loss,
-        metrics without parameter updates) lands in Phase 5.
-
-        Args:
-            state: TrainState bundling params, opt_state, key, step_count.
-
-        Returns:
-            metrics (TrainMetrics or equivalent)
-
-        Raises:
-            NotImplementedError: Full implementation in Phase 5.
+        Use FittingPlan.evaluate(bundle, state) instead.
         """
-        raise NotImplementedError("BatchedFittingBundle.evaluate lands in Phase 5")
+        raise RuntimeError(
+            "BatchedFittingBundle.evaluate is not directly callable. "
+            "Use FittingPlan.evaluate(bundle, state) instead."
+        )
 
 
 class TrainState(eqx.Module):

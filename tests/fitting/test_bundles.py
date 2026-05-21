@@ -211,27 +211,25 @@ def test_fitting_bundle_pytree_round_trip(fitting_bundle):
 # ===== BATCHED FITTING BUNDLE TESTS =====
 
 
-def test_batched_fitting_bundle_stack_is_phase5(fitting_bundle):
-    """BatchedFittingBundle.stack should raise NotImplementedError with Phase 5 message."""
-    with pytest.raises(NotImplementedError, match="Phase 5"):
-        BatchedFittingBundle.stack([fitting_bundle])
+def test_batched_fitting_bundle_stack_works(fitting_bundle):
+    """BatchedFittingBundle.stack should work in Phase 5 (now implemented)."""
+    batched = BatchedFittingBundle.stack([fitting_bundle])
+    assert batched.n_mols_real == 1
 
 
-def test_batched_fitting_bundle_step_is_phase5(fitting_bundle, train_state):
-    """BatchedFittingBundle.step should raise NotImplementedError with Phase 5 message."""
-    # First we need to construct a minimal BatchedFittingBundle manually
-    # (since .stack is not implemented)
+def test_batched_fitting_bundle_step_raises_error(fitting_bundle, train_state):
+    """BatchedFittingBundle.step should raise RuntimeError directing to FittingPlan."""
     batched_bundle = _make_minimal_batched_fitting_bundle()
 
-    with pytest.raises(NotImplementedError, match="Phase 5"):
+    with pytest.raises(RuntimeError, match="FittingPlan"):
         batched_bundle.step(train_state, conformer_idx=0)
 
 
-def test_batched_fitting_bundle_evaluate_is_phase5(fitting_bundle, train_state):
-    """BatchedFittingBundle.evaluate should raise NotImplementedError with Phase 5 message."""
+def test_batched_fitting_bundle_evaluate_raises_error(fitting_bundle, train_state):
+    """BatchedFittingBundle.evaluate should raise RuntimeError directing to FittingPlan."""
     batched_bundle = _make_minimal_batched_fitting_bundle()
 
-    with pytest.raises(NotImplementedError, match="Phase 5"):
+    with pytest.raises(RuntimeError, match="FittingPlan"):
         batched_bundle.evaluate(train_state)
 
 
