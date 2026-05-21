@@ -251,7 +251,10 @@ def main():
             train_loop_batched,
         )
         from prolix.fitting.params import BondedParams
-        import jax
+        # jax already imported at module top; re-importing here would make
+        # `jax` a local-only name inside main() and break the early
+        # `jax.config.update("jax_enable_x64", True)` for --float64
+        # (Python "name bound later" scoping rule).
         from jax import tree_util
 
         train_pi_list = params_init_list[:n_train]
