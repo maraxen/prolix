@@ -151,6 +151,18 @@ def main():
         help="Random seed",
     )
     parser.add_argument(
+        "--n-warmup",
+        type=int,
+        default=1,
+        help="Warmup trainings (first run compiles JIT; discarded from timing).",
+    )
+    parser.add_argument(
+        "--n-trials",
+        type=int,
+        default=3,
+        help="Replica trainings for execution-time statistics (after warmup).",
+    )
+    parser.add_argument(
         "--float64",
         action="store_true",
         help="Enable JAX float64 precision (jax_enable_x64=True). Kills GPU throughput; for correctness testing only.",
@@ -225,25 +237,37 @@ def main():
         for i, params_init in enumerate(params_init_list)
     ]
 
-    # Run training (only Lane A, Lane B is held out)
-    print(f"Starting training ({args.mode} mode, {args.n_steps} steps per molecule)...")
-    start_time = time.time()
+    # === Build training closures (separates "build inputs" from "execute") ===
+    train_pi_list = params_init_list[:n_train]
+    train_topo_list = topology_list[:n_train]
+    train_data_list = per_mol_data[:n_train]
 
     if args.mode == "looped":
-        result = train_loop_looped_baseline(
-            per_mol_states[:n_train],  # Only Lane A for training
-            args.n_steps,
-            per_mol_data=per_mol_data[:n_train],
-            params_init_list=params_init_list[:n_train],
-            topology_list=topology_list[:n_train],
-            optimizer=optimizer,
-            alpha=args.alpha,
-            w_reg=args.w_reg,
-        )
-        final_states = result["final_states"]
-        final_losses_train = result["final_losses"]
+        def build_initial_state():
+            """Re-init per-mol TrainStates from scratch (deterministic from seed)."""
+            return [
+                TrainState.init(p, optimizer, rng_seed=args.seed + i)
+                for i, p in enumerate(train_pi_list)
+            ]
+
+        def run_training(state):
+            return train_loop_looped_baseline(
+                state, args.n_steps,
+                per_mol_data=train_data_list,
+                params_init_list=train_pi_list,
+                topology_list=train_topo_list,
+                optimizer=optimizer,
+                alpha=args.alpha, w_reg=args.w_reg,
+            )
+
+        def block_on_result(result):
+            # Block on the first per-mol final state's first leaf — forces
+            # the whole pytree's computation to complete.
+            jax.block_until_ready(result["final_states"][0].params.k_bond)
+
+        def extract_final_state(result):
+            return result["final_states"], result["final_losses"]
     elif args.mode == "batched":
-        # Stack Lane A molecules into batched containers (Phase C v3+).
         from prolix.fitting import (
             BatchedBondedParams,
             BatchedBondedTopology,
@@ -251,53 +275,12 @@ def main():
             train_loop_batched,
         )
         from prolix.fitting.params import BondedParams
-        # jax already imported at module top; re-importing here would make
-        # `jax` a local-only name inside main() and break the early
-        # `jax.config.update("jax_enable_x64", True)` for --float64
-        # (Python "name bound later" scoping rule).
         from jax import tree_util
-
-        train_pi_list = params_init_list[:n_train]
-        train_topo_list = topology_list[:n_train]
-        train_data_list = per_mol_data[:n_train]
 
         batched_params_init, batched_topology = stack_molecules(
             train_pi_list, train_topo_list,
         )
-        # batched_params_init.k_bond has shape (B, max_n_bonds), etc.
-        # Use it directly as the initial trainable params (clone via tree_map).
-        # The vmap'd step_fn_one_mol receives per-lane slices which are
-        # BondedParams-shaped (max_n_bonds,) thanks to the BatchedBondedParams
-        # pytree structure.
-        batched_params_trainable = jax.tree_util.tree_map(
-            lambda x: jnp.array(x), batched_params_init,
-        )
 
-        # Initialize optimizer state PER-LANE via vmap. If we called
-        # optimizer.init(batched_params) directly, the optax state would
-        # have a scalar `count` field (rank 0) that vmap(in_axes=0) cannot
-        # slice. vmapping the init promotes count to shape (B,) along with
-        # the rest of the state tree.
-        batched_opt_state = jax.vmap(optimizer.init)(batched_params_trainable)
-
-        # Per-mol RNG keys via fold_in (jax.random idiom for parallel seeds).
-        master_key = jax.random.PRNGKey(args.seed)
-        per_mol_rngs = jax.vmap(lambda i: jax.random.fold_in(master_key, i))(
-            jnp.arange(n_train, dtype=jnp.int32),
-        )
-
-        batched_state = TrainState(
-            params=batched_params_trainable,
-            opt_state=batched_opt_state,
-            step=jnp.zeros((n_train,), dtype=jnp.int32),
-            rng=per_mol_rngs,
-        )
-
-        # Pad per-mol conformer arrays to common (max_N_conf, max_N_atoms).
-        # Lane A is all bucket 0, but n_atoms varies (15..30); n_conf varies
-        # heavily (39..2862). Bond/angle/torsion atom indices only reference
-        # real atoms, so appending zero-positions is safe — they never get
-        # read by the bonded energy.
         n_real_conf = jnp.array(
             [d["positions_all"].shape[0] for d in train_data_list], dtype=jnp.int32,
         )
@@ -305,7 +288,6 @@ def main():
         max_n_atoms = max(d["positions_all"].shape[1] for d in train_data_list)
 
         def _pad(arr, target_n_conf, target_n_atoms=None):
-            """Pad along conformer axis; optionally also along atom axis."""
             pad_width = [(0, target_n_conf - arr.shape[0])]
             if arr.ndim >= 2 and target_n_atoms is not None:
                 pad_width.append((0, target_n_atoms - arr.shape[1]))
@@ -321,33 +303,84 @@ def main():
             "n_real_conf": n_real_conf,
         }
 
-        result = train_loop_batched(
-            batched_state,
-            args.n_steps,
-            batched_data=batched_data,
-            batched_params_init=batched_params_init,
-            batched_topology=batched_topology,
-            optimizer=optimizer,
-            alpha=args.alpha,
-            w_reg=args.w_reg,
-        )
-        # train_loop_batched returns a dict with 'final_state' (stacked) and
-        # 'final_losses' (B,). Unpack final_losses per molecule.
-        batched_final_state = result["final_state"]
-        final_losses_train = [float(x) for x in result["final_losses"]]
-        # Expose per-mol final states for Lane B eval below — split stacked.
-        final_states = [
-            TrainState(
-                params=tree_util.tree_map(lambda x, i=i: x[i], batched_final_state.params),
-                opt_state=tree_util.tree_map(lambda x, i=i: x[i], batched_final_state.opt_state),
-                step=batched_final_state.step[i],
-                rng=batched_final_state.rng[i],
+        def build_initial_state():
+            batched_params_trainable = jax.tree_util.tree_map(
+                lambda x: jnp.array(x), batched_params_init,
             )
-            for i in range(n_train)
-        ]
+            batched_opt_state = jax.vmap(optimizer.init)(batched_params_trainable)
+            master_key = jax.random.PRNGKey(args.seed)
+            per_mol_rngs = jax.vmap(lambda i: jax.random.fold_in(master_key, i))(
+                jnp.arange(n_train, dtype=jnp.int32),
+            )
+            return TrainState(
+                params=batched_params_trainable,
+                opt_state=batched_opt_state,
+                step=jnp.zeros((n_train,), dtype=jnp.int32),
+                rng=per_mol_rngs,
+            )
 
-    wallclock_s = time.time() - start_time
-    print(f"Training complete in {wallclock_s:.2f} seconds")
+        def run_training(state):
+            return train_loop_batched(
+                state, args.n_steps,
+                batched_data=batched_data,
+                batched_params_init=batched_params_init,
+                batched_topology=batched_topology,
+                optimizer=optimizer,
+                alpha=args.alpha, w_reg=args.w_reg,
+            )
+
+        def block_on_result(result):
+            jax.block_until_ready(result["final_state"].params.k_bond)
+
+        def extract_final_state(result):
+            batched_final_state = result["final_state"]
+            final_states = [
+                TrainState(
+                    params=tree_util.tree_map(lambda x, i=i: x[i], batched_final_state.params),
+                    opt_state=tree_util.tree_map(lambda x, i=i: x[i], batched_final_state.opt_state),
+                    step=batched_final_state.step[i],
+                    rng=batched_final_state.rng[i],
+                )
+                for i in range(n_train)
+            ]
+            return final_states, [float(x) for x in result["final_losses"]]
+
+    # === Benchmark: warmup (compile + first run, discarded), then n_trials cached runs ===
+    import statistics
+    print(f"Warmup: {args.n_warmup} run(s) of {args.n_steps} steps ({args.mode} mode) — first compile gets discarded...")
+    warmup_times = []
+    for w in range(args.n_warmup):
+        state_w = build_initial_state()
+        t0 = time.perf_counter()
+        result_w = run_training(state_w)
+        block_on_result(result_w)
+        dt = time.perf_counter() - t0
+        warmup_times.append(dt)
+        print(f"  warmup[{w}]: {dt:.3f}s")
+
+    print(f"Timed trials: {args.n_trials} replica run(s)...")
+    trial_times = []
+    final_result = None
+    for t in range(args.n_trials):
+        state_t = build_initial_state()
+        t0 = time.perf_counter()
+        result_t = run_training(state_t)
+        block_on_result(result_t)
+        dt = time.perf_counter() - t0
+        trial_times.append(dt)
+        final_result = result_t
+        print(f"  trial[{t}]: {dt:.3f}s")
+
+    final_states, final_losses_train = extract_final_state(final_result)
+    execution_median_s = statistics.median(trial_times)
+    compile_time_estimate_s = warmup_times[0] - execution_median_s if warmup_times else None
+    # Back-compat field: report the median trial wallclock.
+    wallclock_s = execution_median_s
+    print(
+        f"Training complete. compile≈{compile_time_estimate_s:.2f}s  "
+        f"execution_median={execution_median_s:.3f}s  "
+        f"(min={min(trial_times):.3f}, max={max(trial_times):.3f})"
+    )
 
     # Evaluate on Lane B (held-out)
     final_losses_test = []
@@ -366,7 +399,16 @@ def main():
         "n_molecules": len(per_mol_states),
         "n_molecules_lane_a": n_train,
         "n_molecules_lane_b": n_test,
-        "wallclock_s": wallclock_s,
+        "wallclock_s": wallclock_s,  # median trial execution time (excludes compile)
+        # JAX benchmark decomposition:
+        "n_warmup": args.n_warmup,
+        "n_trials": args.n_trials,
+        "warmup_times_s": warmup_times,
+        "trial_times_s": trial_times,
+        "execution_median_s": execution_median_s,
+        "execution_min_s": min(trial_times),
+        "execution_max_s": max(trial_times),
+        "compile_time_estimate_s": compile_time_estimate_s,
         "speedup_ratio": None,  # Placeholder for batched vs looped comparison
         "batched_final_loss_max": None,
         "looped_final_loss_max": max(final_losses_train) if final_losses_train else None,
