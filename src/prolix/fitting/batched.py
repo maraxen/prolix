@@ -38,27 +38,22 @@ class BatchedBondedParams(eqx.Module):
 class BatchedBondedTopology(eqx.Module):
     """Stacked topology for B molecules. Indices into per-mol atom arrays.
 
-    Topology fields are eqx.field(static=True) — content-hashable.
-
-    Attributes:
-        bond_idx: Int[Array, "B max_bonds 2"] (static)
-        angle_idx: Int[Array, "B max_angles 3"] (static)
-        torsion_idx: Int[Array, "B max_torsions 4"] (static)
-        torsion_periodicity: Int[Array, "B max_torsions n_terms"] (static)
-        torsion_phase_rad: Float[Array, "B max_torsions n_terms"] (static)
-        bond_mask: Bool[Array, "B max_bonds"] (static)
-        angle_mask: Bool[Array, "B max_angles"] (static)
-        torsion_mask: Bool[Array, "B max_torsions"] (static)
+    Fields are regular pytree leaves (NOT eqx.field(static=True)) — they
+    are jnp arrays populated by stack_molecules, and JAX arrays in static
+    fields trigger "A JAX array is being set as static" warnings and
+    cause subtle tracing bugs (verified 2026-05-20). The arrays are
+    constant across vmap, but that doesn't make them static in the
+    pytree sense.
     """
 
-    bond_idx: Int[Array, "B max_bonds 2"] = eqx.field(static=True)
-    angle_idx: Int[Array, "B max_angles 3"] = eqx.field(static=True)
-    torsion_idx: Int[Array, "B max_torsions 4"] = eqx.field(static=True)
-    torsion_periodicity: Int[Array, "B max_torsions n_terms"] = eqx.field(static=True)
-    torsion_phase_rad: Float[Array, "B max_torsions n_terms"] = eqx.field(static=True)
-    bond_mask: Bool[Array, "B max_bonds"] = eqx.field(static=True)
-    angle_mask: Bool[Array, "B max_angles"] = eqx.field(static=True)
-    torsion_mask: Bool[Array, "B max_torsions"] = eqx.field(static=True)
+    bond_idx: Int[Array, "B max_bonds 2"]
+    angle_idx: Int[Array, "B max_angles 3"]
+    torsion_idx: Int[Array, "B max_torsions 4"]
+    torsion_periodicity: Int[Array, "B max_torsions n_terms"]
+    torsion_phase_rad: Float[Array, "B max_torsions n_terms"]
+    bond_mask: Bool[Array, "B max_bonds"]
+    angle_mask: Bool[Array, "B max_angles"]
+    torsion_mask: Bool[Array, "B max_torsions"]
 
 
 def stack_molecules(

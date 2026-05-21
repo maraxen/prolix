@@ -52,6 +52,9 @@ def bonded_loss(
     alpha: float = 0.25,
     w_reg: float = 0.01,
     sigma: Optional[BondedParams] = None,
+    bond_mask: Optional[Array] = None,
+    angle_mask: Optional[Array] = None,
+    torsion_mask: Optional[Array] = None,
 ) -> Float[Array, ""]:
     """Per-molecule bonded loss with energy + force + regularization.
 
@@ -80,7 +83,12 @@ def bonded_loss(
     # Define loss_fn that computes energy (so we can take grad w.r.t. positions)
     def energy_fn(positions_single):
         """Energy for a single conformer (will be vmapped)."""
-        return bonded_energy(positions_single, params, topology)
+        return bonded_energy(
+            positions_single, params, topology,
+            bond_mask=bond_mask,
+            angle_mask=angle_mask,
+            torsion_mask=torsion_mask,
+        )
 
     # Compute forces via gradient: F = -dE/dr
     forces_fn = jax.grad(energy_fn)
@@ -112,11 +120,25 @@ def bonded_loss(
 
     # ===== REGULARIZATION (harmonic prior) =====
     # sum[(p - p_init)^2 / sigma^2] across all parameters
-    reg_bond = jnp.sum(((params.k_bond - params_init.k_bond) / sigma.k_bond) ** 2)
-    reg_r0 = jnp.sum(((params.r0 - params_init.r0) / sigma.r0) ** 2)
-    reg_theta = jnp.sum(((params.k_theta - params_init.k_theta) / sigma.k_theta) ** 2)
-    reg_theta0 = jnp.sum(((params.theta0_rad - params_init.theta0_rad) / sigma.theta0_rad) ** 2)
-    reg_phi = jnp.sum(((params.k_phi - params_init.k_phi) / sigma.k_phi) ** 2)
+    # When masks are provided, zero out padded-slot contributions so the prior
+    # doesn't pull padded-zero params toward zero (which they already are).
+    def _maybe_mask(arr, mask):
+        return arr if mask is None else arr * mask
+
+    reg_bond = jnp.sum(_maybe_mask(
+        ((params.k_bond - params_init.k_bond) / sigma.k_bond) ** 2, bond_mask))
+    reg_r0 = jnp.sum(_maybe_mask(
+        ((params.r0 - params_init.r0) / sigma.r0) ** 2, bond_mask))
+    reg_theta = jnp.sum(_maybe_mask(
+        ((params.k_theta - params_init.k_theta) / sigma.k_theta) ** 2, angle_mask))
+    reg_theta0 = jnp.sum(_maybe_mask(
+        ((params.theta0_rad - params_init.theta0_rad) / sigma.theta0_rad) ** 2, angle_mask))
+    # k_phi has an extra trailing dim (n_terms); broadcast mask if provided
+    if torsion_mask is not None:
+        reg_phi_terms = ((params.k_phi - params_init.k_phi) / sigma.k_phi) ** 2
+        reg_phi = jnp.sum(reg_phi_terms * jnp.expand_dims(torsion_mask, axis=-1))
+    else:
+        reg_phi = jnp.sum(((params.k_phi - params_init.k_phi) / sigma.k_phi) ** 2)
 
     reg_loss = w_reg * (reg_bond + reg_r0 + reg_theta + reg_theta0 + reg_phi)
 

@@ -374,85 +374,39 @@ def train_loop_batched(
         forces_ref = mol_forces_all[conf_idx]  # (N_atoms_padded, 3)
         energy_ref = mol_energies_all[conf_idx]  # scalar
 
-        # Stack for loss function
-        positions_batch = jnp.expand_dims(positions, axis=0)  # (1, N_atoms_padded, 3)
+        # Stack for loss function: bonded_loss expects (N_conf, N_atoms, 3).
+        # Phase C uses 1-conformer-per-step SGD; same convention as the looped path.
+        positions_batch = jnp.expand_dims(positions, axis=0)
         forces_batch = jnp.expand_dims(forces_ref, axis=0)
         energies_batch = jnp.expand_dims(energy_ref, axis=0)
 
+        # Build topology for this molecule (unbatched) from per-mol slices.
+        mol_topology = BondedTopology(
+            bond_idx=mol_topology_bond_idx,
+            angle_idx=mol_topology_angle_idx,
+            torsion_idx=mol_topology_torsion_idx,
+            torsion_periodicity=mol_topology_torsion_periodicity,
+            torsion_phase_rad=mol_topology_torsion_phase_rad,
+        )
+
         def loss_fn(params):
-            # Compute loss similar to bonded_loss but with masks
-            pos = positions_batch[0]  # Single conformer (already expanded)
-            f_ref = forces_batch[0]
-            e_ref = energies_batch[0]
-
-            sigma = default_sigma(mol_params_init)
-
-            # Build topology for this molecule (unbatched)
-            mol_topology = BondedTopology(
-                bond_idx=mol_topology_bond_idx,
-                angle_idx=mol_topology_angle_idx,
-                torsion_idx=mol_topology_torsion_idx,
-                torsion_periodicity=mol_topology_torsion_periodicity,
-                torsion_phase_rad=mol_topology_torsion_phase_rad,
-            )
-
-            # Predicted energy
-            energy_pred = bonded_energy(
-                pos,
+            # Single source of truth: bonded_loss with masks. The previous
+            # inline implementation diverged from the looped path's loss
+            # formula (wrong sign on energy shift) — verified bug
+            # 2026-05-20, fixed by routing through bonded_loss.
+            return bonded_loss(
+                positions_batch,
+                forces_batch,
+                energies_batch,
                 params,
+                mol_params_init,
                 mol_topology,
+                alpha=alpha,
+                w_reg=w_reg,
                 bond_mask=mol_bond_mask,
                 angle_mask=mol_angle_mask,
                 torsion_mask=mol_torsion_mask,
             )
-
-            # Predicted forces
-            def energy_fn_for_forces(p):
-                return bonded_energy(
-                    p,
-                    params,
-                    mol_topology,
-                    bond_mask=mol_bond_mask,
-                    angle_mask=mol_angle_mask,
-                    torsion_mask=mol_torsion_mask,
-                )
-
-            forces_pred = jax.grad(energy_fn_for_forces)(pos)
-
-            # Force loss (per-atom MSE)
-            force_diff = forces_pred - f_ref
-            loss_f = jnp.mean(force_diff**2) / pos.shape[0]
-
-            # Energy loss (per-conformer MSE, shifted)
-            shift = jnp.mean(energy_pred) - jnp.mean(e_ref) * 627.5094740631
-            energy_diff = energy_pred - (e_ref * 627.5094740631 - shift)
-            loss_e = jnp.mean(energy_diff**2)
-
-            # Regularization (per-parameter)
-            reg_bond = jnp.sum(
-                ((params.k_bond - mol_params_init.k_bond) / sigma.k_bond) ** 2
-                * mol_bond_mask
-            )
-            reg_r0 = jnp.sum(
-                ((params.r0 - mol_params_init.r0) / sigma.r0) ** 2
-                * mol_bond_mask
-            )
-            reg_theta = jnp.sum(
-                ((params.k_theta - mol_params_init.k_theta) / sigma.k_theta) ** 2
-                * mol_angle_mask
-            )
-            reg_theta0 = jnp.sum(
-                ((params.theta0_rad - mol_params_init.theta0_rad)
-                 / sigma.theta0_rad) ** 2
-                * mol_angle_mask
-            )
-            reg_phi = jnp.sum(
-                ((params.k_phi - mol_params_init.k_phi) / sigma.k_phi) ** 2
-                * jnp.expand_dims(mol_torsion_mask, axis=-1)
-            )
-            loss_reg = w_reg * (reg_bond + reg_r0 + reg_theta + reg_theta0 + reg_phi)
-
-            return loss_f + alpha * loss_e + loss_reg
 
         # Compute loss and gradients
         loss_val, grads = eqx.filter_value_and_grad(loss_fn)(mol_state.params)

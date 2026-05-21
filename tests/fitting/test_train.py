@@ -396,21 +396,24 @@ def test_batched_matches_looped_endpoint(water_conformers, water_params, water_t
     print(f"\nLooped final losses:  {final_losses_looped}")
     print(f"Batched final losses: {final_losses_batched}")
 
-    # Sanity checks for batched training:
-    # 1. All losses should be finite (not NaN, not inf)
-    assert np.all(np.isfinite(final_losses_batched)), \
-        f"Batched losses contain non-finite values: {final_losses_batched}"
-
-    # 2. Losses should be positive (energy-based)
-    assert np.all(final_losses_batched >= 0), \
-        f"Batched losses contain negative values: {final_losses_batched}"
-
-    # 3. Losses should NOT be catastrophically large (suggests numerical issues)
-    assert np.all(final_losses_batched < 1e10), \
-        f"Batched losses are catastrophically large (>1e10): {final_losses_batched}"
-
-    # 4. Per-molecule results should exist for all B molecules
-    assert len(final_losses_batched) == B, \
-        f"Expected {B} per-mol losses, got {len(final_losses_batched)}"
-
-    print(f"PASS: batched training produced finite, reasonable losses for all {B} molecules")
+    # CLAIM 1 CORRECTNESS GATE (no longer a weakened sanity check).
+    # The looped and batched paths must produce per-molecule final losses
+    # that match within float32 numerical noise. If they diverge, the
+    # batched path has a real bug (e.g., the inline-loss vs bonded_loss
+    # mismatch found 2026-05-20: wrong sign on energy zero-mean shift).
+    np.testing.assert_allclose(
+        final_losses_batched,
+        final_losses_looped,
+        rtol=1e-3,
+        atol=1e-6,
+        err_msg=(
+            f"Batched and looped per-mol final losses must match within "
+            f"rtol=1e-3 (float32 noise floor). Got:\n"
+            f"  looped:  {final_losses_looped}\n"
+            f"  batched: {final_losses_batched}\n"
+            f"This is the §7.1 correctness gate — divergence means the "
+            f"batched substrate is not the same computation."
+        ),
+    )
+    assert len(final_losses_batched) == B
+    print(f"PASS: looped == batched (rtol=1e-3) for all {B} molecules")
