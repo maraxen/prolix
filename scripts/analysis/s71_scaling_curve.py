@@ -41,7 +41,7 @@ RE_HEADER = re.compile(
     r"N_mols:\s*(?P<n>\S+)\s+N_conf_cap:\s*(?P<n_conf_cap>\S+)"
 )
 RE_COMPILE = re.compile(
-    r"compile≈(?P<compile_s>[\d.]+)s\s+"
+    r"compile≈(?P<compile_s>-?[\d.]+)s\s+"
     r"execution_median=(?P<execution_median_s>[\d.]+)s\s+"
     r"\(min=(?P<execution_min_s>[\d.]+),\s*max=(?P<execution_max_s>[\d.]+)\)"
 )
