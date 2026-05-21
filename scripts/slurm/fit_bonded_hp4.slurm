@@ -1,6 +1,5 @@
 #!/bin/bash
 #SBATCH --job-name=prolix_fit_hp4
-#SBATCH --partition=mit_normal_gpu
 #SBATCH --gres=gpu:1
 #SBATCH --time=2:00:00
 #SBATCH --nodes=1
@@ -9,6 +8,10 @@
 #SBATCH --mem=16G
 #SBATCH --output=outputs/logs/slurm/%j.fit_bonded_hp4.out
 #SBATCH --error=outputs/logs/slurm/%j.fit_bonded_hp4.err
+# Partition NOT pinned here — set per-submission via:
+#   sbatch --partition=mit_preemptable ...
+#   sbatch --partition=pi_so3 ...
+# (Avoid mit_normal_gpu — 6h walltime cap and weaker GPUs per CLUSTER.md §1.)
 
 # §7.1 Phase C cluster submission: bonded-parameter fitting on the HP4
 # 16-molecule Lane A ensemble (4 Lane B held out per spec §10.4).
