@@ -28,6 +28,11 @@ outputs/
 results/
 
 .agent/skills
+
+# Praxia agent infrastructure (ephemeral per-session state)
+.praxia/cache/
+.praxia/nlm.jsonl
+.praxia/tools/
 *.lock
 .env
 
