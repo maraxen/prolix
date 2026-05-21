@@ -243,7 +243,105 @@ def main():
         final_states = result["final_states"]
         final_losses_train = result["final_losses"]
     elif args.mode == "batched":
-        raise NotImplementedError("Batched mode requires padded-array infrastructure (v1.1)")
+        # Stack Lane A molecules into batched containers (Phase C v3+).
+        from prolix.fitting import (
+            BatchedBondedParams,
+            BatchedBondedTopology,
+            stack_molecules,
+            train_loop_batched,
+        )
+        from prolix.fitting.params import BondedParams
+        import jax
+        from jax import tree_util
+
+        train_pi_list = params_init_list[:n_train]
+        train_topo_list = topology_list[:n_train]
+        train_data_list = per_mol_data[:n_train]
+
+        batched_params_init, batched_topology = stack_molecules(
+            train_pi_list, train_topo_list,
+        )
+        # batched_params_init.k_bond has shape (B, max_n_bonds), etc.
+        # Use it directly as the initial trainable params (clone via tree_map).
+        # The vmap'd step_fn_one_mol receives per-lane slices which are
+        # BondedParams-shaped (max_n_bonds,) thanks to the BatchedBondedParams
+        # pytree structure.
+        batched_params_trainable = jax.tree_util.tree_map(
+            lambda x: jnp.array(x), batched_params_init,
+        )
+
+        # Initialize optimizer state PER-LANE via vmap. If we called
+        # optimizer.init(batched_params) directly, the optax state would
+        # have a scalar `count` field (rank 0) that vmap(in_axes=0) cannot
+        # slice. vmapping the init promotes count to shape (B,) along with
+        # the rest of the state tree.
+        batched_opt_state = jax.vmap(optimizer.init)(batched_params_trainable)
+
+        # Per-mol RNG keys via fold_in (jax.random idiom for parallel seeds).
+        master_key = jax.random.PRNGKey(args.seed)
+        per_mol_rngs = jax.vmap(lambda i: jax.random.fold_in(master_key, i))(
+            jnp.arange(n_train, dtype=jnp.int32),
+        )
+
+        batched_state = TrainState(
+            params=batched_params_trainable,
+            opt_state=batched_opt_state,
+            step=jnp.zeros((n_train,), dtype=jnp.int32),
+            rng=per_mol_rngs,
+        )
+
+        # Pad per-mol conformer arrays to common (max_N_conf, max_N_atoms).
+        # Lane A is all bucket 0, but n_atoms varies (15..30); n_conf varies
+        # heavily (39..2862). Bond/angle/torsion atom indices only reference
+        # real atoms, so appending zero-positions is safe — they never get
+        # read by the bonded energy.
+        n_real_conf = jnp.array(
+            [d["positions_all"].shape[0] for d in train_data_list], dtype=jnp.int32,
+        )
+        max_n_conf = int(n_real_conf.max())
+        max_n_atoms = max(d["positions_all"].shape[1] for d in train_data_list)
+
+        def _pad(arr, target_n_conf, target_n_atoms=None):
+            """Pad along conformer axis; optionally also along atom axis."""
+            pad_width = [(0, target_n_conf - arr.shape[0])]
+            if arr.ndim >= 2 and target_n_atoms is not None:
+                pad_width.append((0, target_n_atoms - arr.shape[1]))
+                pad_width.extend([(0, 0)] * (arr.ndim - 2))
+            else:
+                pad_width.extend([(0, 0)] * (arr.ndim - 1))
+            return jnp.pad(arr, pad_width)
+
+        batched_data = {
+            "positions_all": jnp.stack([_pad(d["positions_all"], max_n_conf, max_n_atoms) for d in train_data_list]),
+            "forces_all": jnp.stack([_pad(d["forces_all"], max_n_conf, max_n_atoms) for d in train_data_list]),
+            "energies_all": jnp.stack([_pad(d["energies_all"], max_n_conf) for d in train_data_list]),
+            "n_real_conf": n_real_conf,
+        }
+
+        result = train_loop_batched(
+            batched_state,
+            args.n_steps,
+            batched_data=batched_data,
+            batched_params_init=batched_params_init,
+            batched_topology=batched_topology,
+            optimizer=optimizer,
+            alpha=args.alpha,
+            w_reg=args.w_reg,
+        )
+        # train_loop_batched returns a dict with 'final_state' (stacked) and
+        # 'final_losses' (B,). Unpack final_losses per molecule.
+        batched_final_state = result["final_state"]
+        final_losses_train = [float(x) for x in result["final_losses"]]
+        # Expose per-mol final states for Lane B eval below — split stacked.
+        final_states = [
+            TrainState(
+                params=tree_util.tree_map(lambda x, i=i: x[i], batched_final_state.params),
+                opt_state=tree_util.tree_map(lambda x, i=i: x[i], batched_final_state.opt_state),
+                step=batched_final_state.step[i],
+                rng=batched_final_state.rng[i],
+            )
+            for i in range(n_train)
+        ]
 
     wallclock_s = time.time() - start_time
     print(f"Training complete in {wallclock_s:.2f} seconds")

@@ -93,9 +93,14 @@ def stack_molecules(
     theta0_rad_stacked = jnp.zeros((B, max_n_angles), dtype=jnp.float32)
     k_phi_stacked = jnp.zeros((B, max_n_torsions, n_torsion_terms), dtype=jnp.float32)
 
-    bond_idx_stacked = jnp.zeros((B, max_n_bonds, 2), dtype=jnp.int32)
-    angle_idx_stacked = jnp.zeros((B, max_n_angles, 3), dtype=jnp.int32)
-    torsion_idx_stacked = jnp.zeros((B, max_n_torsions, 4), dtype=jnp.int32)
+    # Padded indices: use DISTINCT atom indices so r_ij != 0 for padded bonds.
+    # If padded bonds use (0,0), the gradient ∂‖r‖/∂r = r/‖r‖ → 0/0 NaN even
+    # though the mask zeroes the per-term energy — multiplying mask*NaN gives
+    # NaN (IEEE 754). Using (0,1) keeps the vector non-degenerate; the mask
+    # still gates the energy contribution to zero.
+    bond_idx_stacked = jnp.tile(jnp.array([0, 1], dtype=jnp.int32), (B, max_n_bonds, 1))
+    angle_idx_stacked = jnp.tile(jnp.array([0, 1, 2], dtype=jnp.int32), (B, max_n_angles, 1))
+    torsion_idx_stacked = jnp.tile(jnp.array([0, 1, 2, 3], dtype=jnp.int32), (B, max_n_torsions, 1))
     torsion_periodicity_stacked = jnp.zeros((B, max_n_torsions, n_torsion_terms), dtype=jnp.int32)
     torsion_phase_rad_stacked = jnp.zeros((B, max_n_torsions, n_torsion_terms), dtype=jnp.float32)
 
