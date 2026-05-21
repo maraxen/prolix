@@ -163,6 +163,17 @@ def main():
         help="Replica trainings for execution-time statistics (after warmup).",
     )
     parser.add_argument(
+        "--grad-clip-norm",
+        type=float,
+        default=None,
+        help=(
+            "If set, prepend optax.clip_by_global_norm(value) before adam. "
+            "Recommended for paper-grade stability with strained ANI-1x conformers "
+            "(initial gradients can be huge). Default off to preserve simplicity; "
+            "1.0 is a sensible value when enabled."
+        ),
+    )
+    parser.add_argument(
         "--float64",
         action="store_true",
         help="Enable JAX float64 precision (jax_enable_x64=True). Kills GPU throughput; for correctness testing only.",
@@ -231,7 +242,19 @@ def main():
 
     # Initialize training states
     print(f"Initializing training states...")
-    optimizer = optax.adam(learning_rate=args.learning_rate)
+    # Optax chain rule (per using-optax skill): transformations like
+    # gradient clipping precede the main optimizer. clip_by_global_norm
+    # scales the entire gradient pytree to have global L2 norm ≤ threshold;
+    # inside vmap each per-mol lane computes its own per-lane norm.
+    if args.grad_clip_norm is not None:
+        optimizer = optax.chain(
+            optax.clip_by_global_norm(args.grad_clip_norm),
+            optax.adam(learning_rate=args.learning_rate),
+        )
+        print(f"  Optimizer: chain(clip_by_global_norm({args.grad_clip_norm}), adam(lr={args.learning_rate}))")
+    else:
+        optimizer = optax.adam(learning_rate=args.learning_rate)
+        print(f"  Optimizer: adam(lr={args.learning_rate})  [no gradient clipping]")
     per_mol_states = [
         TrainState.init(params_init, optimizer, rng_seed=args.seed + i)
         for i, params_init in enumerate(params_init_list)
@@ -418,6 +441,7 @@ def main():
         "device": str(jax.devices()[0]),
         "learning_rate": args.learning_rate,
         "alpha": args.alpha,
+        "grad_clip_norm": args.grad_clip_norm,
         "w_reg": args.w_reg,
         "seed": args.seed,
         "precision": precision_str,
