@@ -42,12 +42,12 @@ def load_params_init_json(path: Path) -> Tuple[BondedParams, BondedTopology]:
         r0_list = [b["r0"] for b in bonds]
 
         bond_idx = np.array(bond_idx_list, dtype=np.int32)
-        k_bond = jnp.array(k_bond_list, dtype=jnp.float32)
-        r0 = jnp.array(r0_list, dtype=jnp.float32)
+        k_bond = jnp.array(k_bond_list)
+        r0 = jnp.array(r0_list)
     else:
         bond_idx = np.zeros((0, 2), dtype=np.int32)
-        k_bond = jnp.array([], dtype=jnp.float32)
-        r0 = jnp.array([], dtype=jnp.float32)
+        k_bond = jnp.array([])
+        r0 = jnp.array([])
 
     # ===== ANGLES =====
     angles = data["angles"]
@@ -57,12 +57,12 @@ def load_params_init_json(path: Path) -> Tuple[BondedParams, BondedTopology]:
         theta0_deg_list = [a["theta0_deg"] for a in angles]
 
         angle_idx = np.array(angle_idx_list, dtype=np.int32)
-        k_theta = jnp.array(k_theta_list, dtype=jnp.float32)
-        theta0_rad = jnp.array(theta0_deg_list, dtype=jnp.float32) * jnp.pi / 180.0
+        k_theta = jnp.array(k_theta_list)
+        theta0_rad = jnp.array(theta0_deg_list) * jnp.pi / 180.0
     else:
         angle_idx = np.zeros((0, 3), dtype=np.int32)
-        k_theta = jnp.array([], dtype=jnp.float32)
-        theta0_rad = jnp.array([], dtype=jnp.float32)
+        k_theta = jnp.array([])
+        theta0_rad = jnp.array([])
 
     # ===== PROPER TORSIONS =====
     torsions = data["proper_torsions"]
@@ -83,8 +83,8 @@ def load_params_init_json(path: Path) -> Tuple[BondedParams, BondedTopology]:
             k_phi_list = [t["k_phi"] for t in torsions]
 
             torsion_periodicity = np.array(periodicity_list, dtype=np.int32)  # (N_torsions, n_terms)
-            torsion_phase_rad = np.array(phase_deg_list, dtype=np.float32) * np.pi / 180.0  # (N_torsions, n_terms)
-            k_phi = jnp.array(k_phi_list, dtype=jnp.float32)  # (N_torsions, n_terms)
+            torsion_phase_rad = np.array(phase_deg_list, dtype=np.float64) * np.pi / 180.0  # (N_torsions, n_terms)
+            k_phi = jnp.array(k_phi_list)  # (N_torsions, n_terms)
         else:
             # Torsions have varying number of terms (not expected in v0, but handle it)
             # Pad to max
@@ -104,13 +104,13 @@ def load_params_init_json(path: Path) -> Tuple[BondedParams, BondedTopology]:
                 k_phi_padded.append(kphi)
 
             torsion_periodicity = np.array(periodicity_padded, dtype=np.int32)
-            torsion_phase_rad = np.array(phase_deg_padded, dtype=np.float32) * np.pi / 180.0
-            k_phi = jnp.array(k_phi_padded, dtype=jnp.float32)
+            torsion_phase_rad = np.array(phase_deg_padded, dtype=np.float64) * np.pi / 180.0
+            k_phi = jnp.array(k_phi_padded)
     else:
         torsion_idx = np.zeros((0, 4), dtype=np.int32)
         torsion_periodicity = np.zeros((0, 1), dtype=np.int32)
-        torsion_phase_rad = np.zeros((0, 1), dtype=np.float32)
-        k_phi = jnp.zeros((0, 1), dtype=jnp.float32)
+        torsion_phase_rad = np.zeros((0, 1), dtype=np.float64)
+        k_phi = jnp.zeros((0, 1))
 
     # ===== BUILD TOPOLOGY AND PARAMS =====
     topology = BondedTopology(
