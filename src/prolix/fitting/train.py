@@ -19,7 +19,7 @@ from prolix.fitting.state import TrainState
 from prolix.fitting.topology import BondedTopology
 
 if TYPE_CHECKING:
-    from prolix.fitting.batched import BatchedBondedParams, BatchedBondedTopology
+    from prolix.fitting.batched import BondedParamsBundle, BondedTopologyBundle
 
 
 class TrainMetrics(NamedTuple):
@@ -303,8 +303,8 @@ def train_loop_batched(
     n_steps: int,
     *,
     batched_data: dict,
-    batched_params_init: "BatchedBondedParams",
-    batched_topology: "BatchedBondedTopology",
+    batched_params_init: "BondedParamsBundle",
+    batched_topology: "BondedTopologyBundle",
     optimizer: optax.GradientTransformation,
     alpha: float = 0.25,
     w_reg: float = 0.01,
@@ -324,8 +324,8 @@ def train_loop_batched(
                       - 'forces_all': (B, N_conf_max, N_atoms_padded, 3)
                       - 'energies_all': (B, N_conf_max)
                       - 'n_real_conf': (B,) number of real conformers per mol
-        batched_params_init: BatchedBondedParams (B, max_bonds, ...).
-        batched_topology: BatchedBondedTopology with masks.
+        batched_params_init: BondedParamsBundle (B, max_bonds, ...).
+        batched_topology: BondedTopologyBundle with masks.
         optimizer: optax optimizer.
         alpha, w_reg: Loss weights.
         io_callback_fn: Optional function(step, per_mol_losses_list) for logging.
@@ -336,7 +336,7 @@ def train_loop_batched(
             'final_losses': [B] array of per-molecule final loss values
             'wallclock_s': wall-clock time (JAX block_until_ready)
     """
-    from prolix.fitting.batched import BatchedBondedParams, BatchedBondedTopology
+    from prolix.fitting.batched import BondedParamsBundle, BondedTopologyBundle
     from prolix.fitting.energy import bonded_energy
     from prolix.fitting.loss import default_sigma
 

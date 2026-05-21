@@ -296,8 +296,8 @@ def test_batched_matches_looped_endpoint(water_conformers, water_params, water_t
     Tests correctness of the vmap'd training loop.
     """
     from prolix.fitting import (
-        BatchedBondedParams,
-        BatchedBondedTopology,
+        BondedParamsBundle,
+        BondedTopologyBundle,
         stack_molecules,
         train_loop_batched,
     )

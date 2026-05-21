@@ -14,7 +14,7 @@ from prolix.fitting.params import BondedParams
 from prolix.fitting.topology import BondedTopology
 
 
-class BatchedBondedParams(eqx.Module):
+class BondedParamsBundle(eqx.Module):
     """Stacked params for B molecules in the SAME atom_bucket.
 
     Per-tensor shape: (B, max_n_<term>, ...). All arrays padded to the
@@ -35,7 +35,7 @@ class BatchedBondedParams(eqx.Module):
     k_phi: Float[Array, "B max_torsions n_terms"]
 
 
-class BatchedBondedTopology(eqx.Module):
+class BondedTopologyBundle(eqx.Module):
     """Stacked topology for B molecules. Indices into per-mol atom arrays.
 
     Fields are regular pytree leaves (NOT eqx.field(static=True)) — they
@@ -59,7 +59,7 @@ class BatchedBondedTopology(eqx.Module):
 def stack_molecules(
     params_list: list[BondedParams],
     topology_list: list[BondedTopology],
-) -> Tuple[BatchedBondedParams, BatchedBondedTopology]:
+) -> Tuple[BondedParamsBundle, BondedTopologyBundle]:
     """Stack multiple molecules' parameters and topology into batched containers.
 
     Pads each per-molecule array to the max size across the batch. Padding rows
@@ -71,7 +71,7 @@ def stack_molecules(
         topology_list: List of BondedTopology (one per molecule).
 
     Returns:
-        (BatchedBondedParams, BatchedBondedTopology) stacked over the batch axis.
+        (BondedParamsBundle, BondedTopologyBundle) stacked over the batch axis.
     """
     B = len(params_list)
 
@@ -144,7 +144,7 @@ def stack_molecules(
             )
             torsion_mask_stacked = torsion_mask_stacked.at[b, :n_t].set(True)
 
-    batched_params = BatchedBondedParams(
+    batched_params = BondedParamsBundle(
         k_bond=k_bond_stacked,
         r0=r0_stacked,
         k_theta=k_theta_stacked,
@@ -152,7 +152,7 @@ def stack_molecules(
         k_phi=k_phi_stacked,
     )
 
-    batched_topology = BatchedBondedTopology(
+    batched_topology = BondedTopologyBundle(
         bond_idx=bond_idx_stacked,
         angle_idx=angle_idx_stacked,
         torsion_idx=torsion_idx_stacked,
@@ -167,13 +167,13 @@ def stack_molecules(
 
 
 def unbatch_params(
-    batched_params: BatchedBondedParams,
+    batched_params: BondedParamsBundle,
     batch_idx: int,
 ) -> BondedParams:
     """Extract per-molecule parameters from batched container.
 
     Args:
-        batched_params: BatchedBondedParams.
+        batched_params: BondedParamsBundle.
         batch_idx: Index within the batch (0 to B-1).
 
     Returns:

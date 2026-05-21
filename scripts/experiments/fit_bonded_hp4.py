@@ -341,8 +341,8 @@ def main():
             return result["final_states"], result["final_losses"]
     elif args.mode == "batched":
         from prolix.fitting import (
-            BatchedBondedParams,
-            BatchedBondedTopology,
+            BondedParamsBundle,
+            BondedTopologyBundle,
             stack_molecules,
             train_loop_batched,
         )
