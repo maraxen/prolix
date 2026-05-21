@@ -88,13 +88,13 @@ def batched_bundle_single(fitting_bundle_3atom):
 
 
 @pytest.fixture
-def train_state_init(fitting_bundle_3atom):
-    """Initial TrainState for testing."""
+def train_state_init(batched_bundle_single):
+    """Initial TrainState — params must be batched form (matches step() vmap shape)."""
     config = FittingConfig(lr=1e-3, n_steps=1)
     plan = make_fitting_plan(config)
-    opt_state = plan.optimizer.init(fitting_bundle_3atom.params)
+    opt_state = plan.optimizer.init(batched_bundle_single.params_batched)
     return TrainState(
-        params=fitting_bundle_3atom.params,
+        params=batched_bundle_single.params_batched,
         opt_state=opt_state,
         key=jax.random.PRNGKey(0),
         step_count=jnp.array(0, dtype=jnp.int32),

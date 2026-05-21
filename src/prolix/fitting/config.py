@@ -150,79 +150,41 @@ class FittingPlan:
             Vmaps loss computation over molecules, then masks padded entries and reduces.
             Matches train_loop_batched reduction semantics exactly.
             """
-            def loss_per_mol(
-                pos_mol,
-                forces_mol,
-                energies_mol,
-                bond_idx,
-                angle_idx,
-                torsion_idx,
-                torsion_periodicity,
-                torsion_phase_rad,
-                bond_mask,
-                angle_mask,
-                torsion_mask,
-            ):
-                """Per-molecule loss computation (vmapped).
+            def loss_per_mol(mol_params, mol_topology_bundle, pos_mol, forces_mol, energies_mol):
+                """Per-molecule loss (vmapped over batch axis, step path).
 
-                pos_mol, forces_mol, energies_mol are single-conformer shapes:
-                  pos_mol: (1, n_atoms_max, 3)
-                  forces_mol: (1, n_atoms_max, 3)
-                  energies_mol: (1,)
+                Each arg is a vmap'd slice with the leading B dim stripped:
+                  mol_params: BondedParamsBundle pytree (per-mol leaf shapes)
+                  mol_topology_bundle: BondedTopologyBundle pytree
+                  pos_mol, forces_mol, energies_mol: single-conformer arrays
                 """
-                # Reconstruct topology in-trace
                 mol_topology = BondedTopology(
-                    bond_idx=bond_idx,
-                    angle_idx=angle_idx,
-                    torsion_idx=torsion_idx,
-                    torsion_periodicity=torsion_periodicity,
-                    torsion_phase_rad=torsion_phase_rad,
+                    bond_idx=mol_topology_bundle.bond_idx,
+                    angle_idx=mol_topology_bundle.angle_idx,
+                    torsion_idx=mol_topology_bundle.torsion_idx,
+                    torsion_periodicity=mol_topology_bundle.torsion_periodicity,
+                    torsion_phase_rad=mol_topology_bundle.torsion_phase_rad,
                 )
-
-                # Compute loss (bonded_loss handles single conformer)
-                loss_mol = self.loss_fn(
-                    pos_mol,
-                    forces_mol,
-                    energies_mol,
-                    params,
-                    params,  # No prior in v1.2; use same params
+                return self.loss_fn(
+                    pos_mol, forces_mol, energies_mol,
+                    mol_params, mol_params,
                     mol_topology,
-                    alpha=self.config.alpha,
-                    w_reg=self.config.w_reg,
-                    bond_mask=bond_mask,
-                    angle_mask=angle_mask,
-                    torsion_mask=torsion_mask,
+                    alpha=self.config.alpha, w_reg=self.config.w_reg,
+                    bond_mask=mol_topology_bundle.bond_mask,
+                    angle_mask=mol_topology_bundle.angle_mask,
+                    torsion_mask=mol_topology_bundle.torsion_mask,
                 )
-                return loss_mol
 
-            # Vmap over molecules: in_axes specify which args are batched (all have batch dim 0)
+            # Vmap over molecules: bundles passed as pytrees, in_axes=0 slices each leaf
             per_mol_losses = jax.vmap(
                 loss_per_mol,
-                in_axes=(
-                    0,  # pos_mol: (B, 1, n_atoms_max, 3)
-                    0,  # forces_mol: (B, 1, n_atoms_max, 3)
-                    0,  # energies_mol: (B, 1)
-                    0,  # bond_idx: (B, max_bonds, 2)
-                    0,  # angle_idx: (B, max_angles, 3)
-                    0,  # torsion_idx: (B, max_torsions, 4)
-                    0,  # torsion_periodicity: (B, max_torsions)
-                    0,  # torsion_phase_rad: (B, max_torsions)
-                    0,  # bond_mask: (B, max_bonds)
-                    0,  # angle_mask: (B, max_angles)
-                    0,  # torsion_mask: (B, max_torsions)
-                ),
+                in_axes=(0, 0, 0, 0, 0),
             )(
-                positions_t,  # (B, 1, n_atoms_max, 3)
-                forces_t,  # (B, 1, n_atoms_max, 3)
-                energies_t,  # (B, 1)
-                bundle.topology_batched.bond_idx,  # (B, max_bonds, 2)
-                bundle.topology_batched.angle_idx,  # (B, max_angles, 3)
-                bundle.topology_batched.torsion_idx,  # (B, max_torsions, 4)
-                bundle.topology_batched.torsion_periodicity,  # (B, max_torsions)
-                bundle.topology_batched.torsion_phase_rad,  # (B, max_torsions)
-                bundle.topology_batched.bond_mask,  # (B, max_bonds)
-                bundle.topology_batched.angle_mask,  # (B, max_angles)
-                bundle.topology_batched.torsion_mask,  # (B, max_torsions)
+                params,                       # BondedParamsBundle (B-leading)
+                bundle.topology_batched,      # BondedTopologyBundle (B-leading)
+                positions_t,
+                forces_t,
+                energies_t,
             )  # per_mol_losses: (B,)
 
             # Mask padded molecules and reduce
@@ -289,78 +251,34 @@ class FittingPlan:
             bundle.conformers_batched.energies_ref[:, 0], axis=1
         )  # (B, 1)
 
-        def loss_per_mol(
-            pos_mol,
-            forces_mol,
-            energies_mol,
-            bond_idx,
-            angle_idx,
-            torsion_idx,
-            torsion_periodicity,
-            torsion_phase_rad,
-            bond_mask,
-            angle_mask,
-            torsion_mask,
-        ):
-            """Per-molecule loss computation (vmapped).
-
-            pos_mol, forces_mol, energies_mol are single-conformer shapes:
-              pos_mol: (1, n_atoms_max, 3)
-              forces_mol: (1, n_atoms_max, 3)
-              energies_mol: (1,)
-            """
-            # Reconstruct topology in-trace
+        def loss_per_mol(mol_params, mol_topology_bundle, pos_mol, forces_mol, energies_mol):
+            """Per-molecule loss (vmapped over batch axis, evaluate path)."""
             mol_topology = BondedTopology(
-                bond_idx=bond_idx,
-                angle_idx=angle_idx,
-                torsion_idx=torsion_idx,
-                torsion_periodicity=torsion_periodicity,
-                torsion_phase_rad=torsion_phase_rad,
+                bond_idx=mol_topology_bundle.bond_idx,
+                angle_idx=mol_topology_bundle.angle_idx,
+                torsion_idx=mol_topology_bundle.torsion_idx,
+                torsion_periodicity=mol_topology_bundle.torsion_periodicity,
+                torsion_phase_rad=mol_topology_bundle.torsion_phase_rad,
             )
-
-            loss_mol = self.loss_fn(
-                pos_mol,
-                forces_mol,
-                energies_mol,
-                state.params,
-                state.params,
+            return self.loss_fn(
+                pos_mol, forces_mol, energies_mol,
+                mol_params, mol_params,
                 mol_topology,
-                alpha=self.config.alpha,
-                w_reg=self.config.w_reg,
-                bond_mask=bond_mask,
-                angle_mask=angle_mask,
-                torsion_mask=torsion_mask,
+                alpha=self.config.alpha, w_reg=self.config.w_reg,
+                bond_mask=mol_topology_bundle.bond_mask,
+                angle_mask=mol_topology_bundle.angle_mask,
+                torsion_mask=mol_topology_bundle.torsion_mask,
             )
-            return loss_mol
 
-        # Vmap over molecules: in_axes specify which args are batched (all have batch dim 0)
         per_mol_losses = jax.vmap(
             loss_per_mol,
-            in_axes=(
-                0,  # pos_mol: (B, 1, n_atoms_max, 3)
-                0,  # forces_mol: (B, 1, n_atoms_max, 3)
-                0,  # energies_mol: (B, 1)
-                0,  # bond_idx: (B, max_bonds, 2)
-                0,  # angle_idx: (B, max_angles, 3)
-                0,  # torsion_idx: (B, max_torsions, 4)
-                0,  # torsion_periodicity: (B, max_torsions)
-                0,  # torsion_phase_rad: (B, max_torsions)
-                0,  # bond_mask: (B, max_bonds)
-                0,  # angle_mask: (B, max_angles)
-                0,  # torsion_mask: (B, max_torsions)
-            ),
+            in_axes=(0, 0, 0, 0, 0),
         )(
-            positions_t,  # (B, 1, n_atoms_max, 3)
-            forces_t,  # (B, 1, n_atoms_max, 3)
-            energies_t,  # (B, 1)
-            bundle.topology_batched.bond_idx,  # (B, max_bonds, 2)
-            bundle.topology_batched.angle_idx,  # (B, max_angles, 3)
-            bundle.topology_batched.torsion_idx,  # (B, max_torsions, 4)
-            bundle.topology_batched.torsion_periodicity,  # (B, max_torsions)
-            bundle.topology_batched.torsion_phase_rad,  # (B, max_torsions)
-            bundle.topology_batched.bond_mask,  # (B, max_bonds)
-            bundle.topology_batched.angle_mask,  # (B, max_angles)
-            bundle.topology_batched.torsion_mask,  # (B, max_torsions)
+            state.params,
+            bundle.topology_batched,
+            positions_t,
+            forces_t,
+            energies_t,
         )  # per_mol_losses: (B,)
 
         # Mask padded molecules and reduce
