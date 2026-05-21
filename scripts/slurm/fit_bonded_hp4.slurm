@@ -40,6 +40,9 @@ N_STEPS="${N_STEPS:-500}"
 LEARNING_RATE="${LEARNING_RATE:-1e-3}"
 SEED="${SEED:-42}"
 CAMPAIGN_ID="${CAMPAIGN_ID:-}"
+# Ensemble scaling sweep params (default off: use whatever was curated)
+N_MOLS_TARGET="${N_MOLS_TARGET:-}"
+N_CONF_CAP="${N_CONF_CAP:-}"
 
 # Validate
 if [[ "${MODE}" != "looped" && "${MODE}" != "batched" ]]; then
@@ -86,9 +89,15 @@ fi
 # that path. Outcomes get sidecar-evaluated at compact time.
 # Use tags so post-hoc filtering can group the 4-way matrix.
 # shellcheck disable=SC2086
+SWEEP_FLAGS=""
+if [[ -n "${N_MOLS_TARGET}" ]]; then SWEEP_FLAGS+=" --n-mols-target ${N_MOLS_TARGET}"; fi
+if [[ -n "${N_CONF_CAP}" ]]; then SWEEP_FLAGS+=" --n-conf-cap ${N_CONF_CAP}"; fi
+
+# shellcheck disable=SC2086
 uv run bth run python scripts/experiments/fit_bonded_hp4.py \
     --tag cluster --tag hp4 --tag s71 --tag fit \
     --tag "mode:${MODE}" --tag "precision:${PRECISION}" \
+    ${N_MOLS_TARGET:+--tag "N:${N_MOLS_TARGET}"} \
     ${CAMPAIGN_FLAG} \
     -- \
     --subset-dir "${DATA_DIR}" \
@@ -96,7 +105,8 @@ uv run bth run python scripts/experiments/fit_bonded_hp4.py \
     --n-steps "${N_STEPS}" \
     --learning-rate "${LEARNING_RATE}" \
     --seed "${SEED}" \
-    ${PRECISION_FLAG}
+    ${PRECISION_FLAG} \
+    ${SWEEP_FLAGS}
 
 EXIT=$?
 echo "=== fit_bonded_hp4 exit=${EXIT} ==="
