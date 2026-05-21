@@ -61,9 +61,11 @@ def load_molecule_data(h5_path: Path) -> dict:
         dict with 'positions_all', 'forces_all', 'energies_all', 'lane', 'bucket_idx'
     """
     with h5py.File(h5_path, "r") as f:
-        positions_all = jnp.array(f["positions"][:], dtype=jnp.float32)
-        forces_all = jnp.array(f["forces"][:], dtype=jnp.float32)
-        energies_all = jnp.array(f["energy"][:], dtype=jnp.float32)
+        # Respect global JAX precision (jax_enable_x64=True → float64; else float32).
+        # The HDF5 stores float32; jnp.asarray promotes to float64 when x64 is on.
+        positions_all = jnp.asarray(f["positions"][:])
+        forces_all = jnp.asarray(f["forces"][:])
+        energies_all = jnp.asarray(f["energy"][:])
         lane = f.attrs.get("lane", "a").decode() if isinstance(
             f.attrs.get("lane"), bytes
         ) else f.attrs.get("lane", "a")

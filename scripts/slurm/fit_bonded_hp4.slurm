@@ -1,82 +1,100 @@
 #!/bin/bash
-#SBATCH --job-name=prolix-fit-hp4-s71
+#SBATCH --job-name=prolix_fit_hp4
 #SBATCH --partition=mit_normal_gpu
+#SBATCH --gres=gpu:1
 #SBATCH --time=2:00:00
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
-#SBATCH --cpus-per-task=8
-#SBATCH --gpus-per-node=1
-#SBATCH --mem=32G
-#SBATCH --output=outputs/logs/slurm/%j.out
-#SBATCH --error=outputs/logs/slurm/%j.err
-#SBATCH --mail-type=END,FAIL
-#SBATCH --mail-user=${USER}@mit.edu
+#SBATCH --cpus-per-task=4
+#SBATCH --mem=16G
+#SBATCH --output=outputs/logs/slurm/%j.fit_bonded_hp4.out
+#SBATCH --error=outputs/logs/slurm/%j.fit_bonded_hp4.err
+
+# §7.1 Phase C cluster submission: bonded-parameter fitting on the HP4
+# 16-molecule Lane A ensemble (4 Lane B held out per spec §10.4).
+#
+# Parameterized via sbatch --export:
+#   MODE     : "looped" | "batched"   (default: batched)
+#   PRECISION: "float32" | "float64"  (default: float32)
+#   N_STEPS  : integer                 (default: 500)
+#   CAMPAIGN_ID: optional bath campaign UUID for outcome attribution
+#
+# Submission examples:
+#   sbatch --export=MODE=looped,PRECISION=float32  scripts/slurm/fit_bonded_hp4.slurm
+#   sbatch --export=MODE=batched,PRECISION=float64 scripts/slurm/fit_bonded_hp4.slurm
+#
+# Expected wallclock: ~5-15 min for n_steps=500 on a single GPU (looped
+# scales with 16 sequential per-mol scans; batched is single vmap'd scan).
 
 set -euo pipefail
 
-# Configuration
-export PROJECT_ROOT="${PWD}"
-export SUBSET_DIR="${PROJECT_ROOT}/data/ani1x_subset"
-export N_STEPS=500
-export LEARNING_RATE=1e-3
-export SEED=42
-export OUTPUT_JSON="${PROJECT_ROOT}/outputs/results/fit_bonded_hp4_looped_${SEED}.json"
+cd "${SLURM_SUBMIT_DIR:-${HOME}/projects/prolix}"
 
-# Create output directories
-mkdir -p "${PROJECT_ROOT}/outputs/logs/slurm"
-mkdir -p "${PROJECT_ROOT}/outputs/results"
+# Defaults if not provided via --export.
+MODE="${MODE:-batched}"
+PRECISION="${PRECISION:-float32}"
+N_STEPS="${N_STEPS:-500}"
+LEARNING_RATE="${LEARNING_RATE:-1e-3}"
+SEED="${SEED:-42}"
+CAMPAIGN_ID="${CAMPAIGN_ID:-}"
 
-echo "Job: $SLURM_JOB_ID"
-echo "Node: $(hostname)"
-echo "GPU: $(nvidia-smi -L 2>/dev/null || echo 'N/A')"
-echo "Start time: $(date)"
+# Validate
+if [[ "${MODE}" != "looped" && "${MODE}" != "batched" ]]; then
+    echo "ERROR: MODE must be 'looped' or 'batched' (got ${MODE})"
+    exit 1
+fi
+if [[ "${PRECISION}" != "float32" && "${PRECISION}" != "float64" ]]; then
+    echo "ERROR: PRECISION must be 'float32' or 'float64' (got ${PRECISION})"
+    exit 1
+fi
 
-# Load environment
-source "${PROJECT_ROOT}/_bth_env.sh" 2>/dev/null || echo "Warning: _bth_env.sh not found"
+# bath + cluster env (BTH_PROJECT_SLUG, LOG_ROOT, etc.)
+source scripts/slurm/_bth_env.sh
 
-# Gate L1: Dry-run (verify imports + paths)
-echo ""
-echo "=== Gate L1: Dry-run (imports + paths) ==="
-cd "${PROJECT_ROOT}"
-uv run python3 -c "
-from prolix.fitting import train_loop_looped_baseline
-from pathlib import Path
-import h5py
+echo "=== §7.1 fit_bonded_hp4 ==="
+echo "Host: $(hostname)"
+echo "Job: ${SLURM_JOB_ID:-local}"
+echo "GPU: $(nvidia-smi --query-gpu=name,memory.total --format=csv,noheader 2>&1 | head -1)"
+echo "Mode: ${MODE}  Precision: ${PRECISION}  N_steps: ${N_STEPS}  Seed: ${SEED}"
+echo "Campaign: ${CAMPAIGN_ID:-<none>}"
+echo "Date: $(date -Is)"
 
-subset_dir = Path('${SUBSET_DIR}')
-lane_a = list((subset_dir / 'lane_a').glob('*.h5'))
-lane_b = list((subset_dir / 'lane_b').glob('*.h5'))
-print(f'Lane A: {len(lane_a)} molecules')
-print(f'Lane B: {len(lane_b)} molecules')
-print('Imports OK')
-"
+mkdir -p outputs/results outputs/logs/slurm
 
-# Gate L2: Smoke test (n_steps=5 on CPU)
-echo ""
-echo "=== Gate L2: Smoke test (5 steps, CPU, 1 molecule) ==="
-uv run python3 scripts/experiments/fit_bonded_hp4.py \
-    --subset-dir "${SUBSET_DIR}" \
-    --mode looped \
-    --n-steps 5 \
-    --learning-rate "${LEARNING_RATE}" \
-    --seed "${SEED}" \
-    --out-json /tmp/smoke_test.json
+DATA_DIR="data/ani1x_subset"
+if [[ ! -d "${DATA_DIR}" ]]; then
+    echo "ERROR: ${DATA_DIR} not found on cluster."
+    exit 1
+fi
 
-echo "Smoke test output:"
-cat /tmp/smoke_test.json
+# Build the --float64 flag conditional.
+PRECISION_FLAG=""
+if [[ "${PRECISION}" == "float64" ]]; then
+    PRECISION_FLAG="--float64"
+fi
 
-# Gate L3: Production run (500 steps)
-echo ""
-echo "=== Gate L3: Production run (${N_STEPS} steps) ==="
-uv run python3 scripts/experiments/fit_bonded_hp4.py \
-    --subset-dir "${SUBSET_DIR}" \
-    --mode looped \
+# Build the --campaign flag conditional.
+CAMPAIGN_FLAG=""
+if [[ -n "${CAMPAIGN_ID}" ]]; then
+    CAMPAIGN_FLAG="--campaign ${CAMPAIGN_ID}"
+fi
+
+# bath run sets BTH_RESULTS_PATH; the Python script defaults --out-json to
+# that path. Outcomes get sidecar-evaluated at compact time.
+# Use tags so post-hoc filtering can group the 4-way matrix.
+# shellcheck disable=SC2086
+uv run bth run python scripts/experiments/fit_bonded_hp4.py \
+    --tag cluster --tag hp4 --tag s71 --tag fit \
+    --tag "mode:${MODE}" --tag "precision:${PRECISION}" \
+    ${CAMPAIGN_FLAG} \
+    -- \
+    --subset-dir "${DATA_DIR}" \
+    --mode "${MODE}" \
     --n-steps "${N_STEPS}" \
     --learning-rate "${LEARNING_RATE}" \
     --seed "${SEED}" \
-    --out-json "${OUTPUT_JSON}"
+    ${PRECISION_FLAG}
 
-echo "Results: ${OUTPUT_JSON}"
-echo "End time: $(date)"
-
-exit 0
+EXIT=$?
+echo "=== fit_bonded_hp4 exit=${EXIT} ==="
+exit ${EXIT}
