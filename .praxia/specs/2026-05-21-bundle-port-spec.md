@@ -137,6 +137,8 @@ class FittingPlan:
 
 Oracle Q3 resolution: **internal `@eqx.filter_jit`** is correct — callers don't need to know about JIT (composability claim demands this). Static signature: `(n_mols_real, max_atoms_bucket, n_steps, lr)`. All non-array Bundle fields must be `eqx.field(static=True)` and hashable. Phase 7 gate test asserts JIT compile count == 1 on second call.
 
+**Logging policy (prolix override):** Any in-step diagnostics use `jax.experimental.io_callback(ordered=False)`. `jax.debug.print` is **prohibited** project-wide per persistent feedback memory. Applies to `FittingPlan.step`, `evaluate`, and any nested kernel.
+
 ### `build_fitting_bundle()`
 
 ```python
@@ -218,12 +220,15 @@ Phase 1 (DONE, commit 5b2e1ce): rename to `BondedParamsBundle` / `BondedTopology
 - `test_evaluate_deterministic`
 - `test_step_decreases_loss_over_10_steps`
 
-**Numerical equivalence (Phase 7):** new `BatchedFittingBundle.step` path vs `train_loop_batched` direct path on 3-mol, 50-step fixture:
-- Per-step loss: `jnp.allclose(new, old, atol=1e-6, rtol=1e-5)`
-- Per-step gradients: `jnp.allclose(new, old, atol=1e-6, rtol=1e-5)`
-- Final params: `jnp.allclose(new, old, atol=1e-5, rtol=1e-4)`
+**Numerical equivalence (Phase 7, BOTH precisions):** equivalence fixture runs under both `jax_enable_x64=False` (f32) and `=True` (f64), per persistent feedback memory.
 
-Tolerances chosen to detect non-trivial divergence while permitting floating-point reordering.
+| Quantity | f64 tolerance | f32 tolerance |
+|---|---|---|
+| Per-step loss | `atol=1e-6, rtol=1e-5` | `atol=1e-4, rtol=1e-3` |
+| Per-step gradients | `atol=1e-6, rtol=1e-5` | `atol=1e-4, rtol=1e-3` |
+| Final params | `atol=1e-5, rtol=1e-4` | `atol=1e-3, rtol=1e-2` |
+
+Tolerances chosen to detect non-trivial divergence while permitting floating-point reordering. f32 tolerances are looser because reduction-order differences compound at single precision.
 
 **Compile-count gate (Phase 7):** `test_step_compile_count_one` — call `.step()` twice with identical static signature, assert JIT cache hit (no re-trace).
 
