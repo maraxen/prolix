@@ -174,6 +174,28 @@ def main():
         ),
     )
     parser.add_argument(
+        "--n-mols-target",
+        type=int,
+        default=None,
+        help=(
+            "If set, REPLICATE the loaded Lane A molecules by tiling to reach this "
+            "ensemble size N. Used for substrate scaling-curve sweeps. Topology "
+            "distribution stays constant — isolates vmap/dispatch behavior from "
+            "chemistry-diversity confounds. Default: use whatever was curated."
+        ),
+    )
+    parser.add_argument(
+        "--n-conf-cap",
+        type=int,
+        default=None,
+        help=(
+            "If set, subset each molecule's conformer pool to the first C entries. "
+            "Used to bound GPU memory at large N (positions_all is "
+            "(B, N_conf, N_atoms, 3) — scales with C). The N_conf=2862 of mol_009 "
+            "would blow GPU memory at N>=128. Sensible default: 100."
+        ),
+    )
+    parser.add_argument(
         "--float64",
         action="store_true",
         help="Enable JAX float64 precision (jax_enable_x64=True). Kills GPU throughput; for correctness testing only.",
@@ -239,6 +261,33 @@ def main():
         params_init, topology = load_params_init_json(json_path)
         params_init_list.append(params_init)
         topology_list.append(topology)
+
+    # Conformer-cap subsetting (--n-conf-cap): bound GPU memory at large N.
+    # Applied to BOTH training and held-out molecules; held-out doesn't care
+    # about conformer count for the placeholder eval anyway.
+    if args.n_conf_cap is not None:
+        for d in per_mol_data:
+            d["positions_all"] = d["positions_all"][: args.n_conf_cap]
+            d["forces_all"] = d["forces_all"][: args.n_conf_cap]
+            d["energies_all"] = d["energies_all"][: args.n_conf_cap]
+        print(f"  Conformer cap applied: each mol → first {args.n_conf_cap} conf")
+
+    # Ensemble replication (--n-mols-target): tile Lane A list to reach N.
+    # The 4 Lane B mols are NOT replicated. This is the substrate scaling-curve
+    # control: same chemistry distribution at every N, isolates vmap behavior.
+    if args.n_mols_target is not None and args.n_mols_target > n_train:
+        base_n = n_train
+        target_n = args.n_mols_target
+        tile_idx = [i % base_n for i in range(target_n)]
+        # Replicate Lane A entries; preserve Lane B as-is at the tail
+        params_init_list = [params_init_list[i] for i in tile_idx] + params_init_list[base_n:]
+        topology_list = [topology_list[i] for i in tile_idx] + topology_list[base_n:]
+        per_mol_data = [per_mol_data[i] for i in tile_idx] + per_mol_data[base_n:]
+        # Rng seeds for replicated mols also need to be unique enough to
+        # vary the conformer sampling. fold_in via index handles this in
+        # the batched path; the looped path uses rng_seed=args.seed+i below.
+        n_train = target_n
+        print(f"  Lane A replicated: {base_n} base mols → N={n_train} (tiled)")
 
     # Initialize training states
     print(f"Initializing training states...")
@@ -442,6 +491,8 @@ def main():
         "learning_rate": args.learning_rate,
         "alpha": args.alpha,
         "grad_clip_norm": args.grad_clip_norm,
+        "n_mols_target": args.n_mols_target,
+        "n_conf_cap": args.n_conf_cap,
         "w_reg": args.w_reg,
         "seed": args.seed,
         "precision": precision_str,

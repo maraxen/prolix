@@ -1,12 +1,19 @@
 [experiment]
 hypothesis = """
-The HP4 16-molecule Lane A ensemble converges bonded force-field parameters
-under Phase C's training loop (force MSE + α·energy MSE + harmonic prior) over
-500 Adam steps. The looped and batched paths are computationally equivalent
-within float32 numerical noise (Phase C v3 correctness gate cleared at
-rtol=1e-3). Float64 should produce a similar loss trajectory at higher
-precision cost on the accelerator. This experiment characterizes the 4-way
-matrix {looped,batched} × {float32,float64} for the §7.1 paper figure.
+The HP4 Lane A ensemble (≥16 mols, replicated to ensemble size N) converges
+bonded force-field parameters under Phase C's training loop (force MSE +
+α·energy MSE + harmonic prior) over 500 Adam steps. Both looped and batched
+paths are correctness-equivalent (Phase C v3 gate, rtol=1e-3). The §7.1
+ensemble-scaling sweep characterizes substrate throughput across
+N ∈ {16, 32, 64, 128, 256, 512} × {looped, batched} × {float32, float64}
+on pi_so3 — the speedup curve, not just a single data point.
+
+Pre-registration: this campaign uses REPLICATED Lane A (16 base mols tiled
+to N) so chemistry distribution stays constant at every N — isolates vmap
+substrate behavior from chemistry-diversity confounds. A separate
+follow-up campaign (hp4-s71-distinct-N512) will repeat the sweep with
+distinct molecules drawn from a 512-curated subset to validate
+chemistry-independence.
 """
 
 [outcomes.pass]
@@ -27,10 +34,19 @@ n_steps = "int"
 n_molecules = "int"
 n_molecules_lane_a = "int"
 n_molecules_lane_b = "int"
+n_mols_target = "int"
+n_conf_cap = "int"
+n_warmup = "int"
+n_trials = "int"
 wallclock_s = "float"
+execution_median_s = "float"
+execution_min_s = "float"
+execution_max_s = "float"
+compile_time_estimate_s = "float"
 speedup_ratio = "float"
 batched_final_loss_max = "float"
 looped_final_loss_max = "float"
+grad_clip_norm = "float"
 backend = "str"
 device = "str"
 learning_rate = "float"
