@@ -7,7 +7,7 @@ and TrainMetrics (step-wise metrics collection).
 from __future__ import annotations
 
 import dataclasses
-from typing import TYPE_CHECKING, Callable, NamedTuple
+from typing import TYPE_CHECKING, Any, Callable, NamedTuple
 
 import equinox as eqx
 import jax
@@ -21,6 +21,32 @@ from prolix.fitting.bundles import TrainState
 
 if TYPE_CHECKING:
     from prolix.fitting.bundles import BatchedFittingBundle
+
+
+# Sentinel wrapper to make BatchPlan hashable by identity
+class _BatchPlanWrapper:
+    """Wrapper to make BatchPlan hashable by identity (id-based) for use with eqx.filter_jit."""
+    __slots__ = ('_plan', '_id')
+
+    def __init__(self, plan):
+        self._plan = plan
+        self._id = id(plan) if plan is not None else None
+
+    def __hash__(self):
+        return hash(self._id)
+
+    def __eq__(self, other):
+        if not isinstance(other, _BatchPlanWrapper):
+            return False
+        return self._id == other._id
+
+    def __getattr__(self, name):
+        if name in ('_plan', '_id'):
+            return object.__getattribute__(self, name)
+        return getattr(self._plan, name)
+
+    def __repr__(self):
+        return f"_BatchPlanWrapper({self._plan!r})"
 
 
 # ===== CONFIGURATION =====
@@ -104,11 +130,119 @@ class FittingPlan:
         loss_fn: Callable with signature (params, positions, forces, energies,
             topology, atom_mask, alpha, w_reg) -> (loss, aux).
         config: FittingConfig with hyperparameters.
+        plan: Optional BatchPlan for chunked vmap dispatch. None → full vmap (current behavior).
+            Not part of JIT signature; consulted at runtime in _dispatch_batched_loss.
     """
 
     optimizer: optax.GradientTransformation
     loss_fn: Callable
     config: FittingConfig
+    plan: Any = eqx.field(static=True, default=None)  # _BatchPlanWrapper | None, hashable by identity
+
+    def _dispatch_batched_loss(
+        self,
+        loss_per_mol: Callable,
+        params: Any,
+        bundle: BatchedFittingBundle,
+        positions_t: jnp.ndarray,
+        forces_t: jnp.ndarray,
+        energies_t: jnp.ndarray,
+    ) -> jnp.ndarray:
+        """Dispatch batched per-mol loss via full vmap or chunked vmap.
+
+        If self.plan is None or doesn't specify N_MOLS, use full jax.vmap.
+        Otherwise, consult the plan's AxisDecision for N_MOLS and:
+        - If batch_size == 0 or >= B: use full vmap
+        - If batch_size > 0 and < B: use chunked vmap via lax.scan
+
+        Args:
+            loss_per_mol: Function that takes (mol_params, mol_topology_bundle, pos, forces, energies).
+            params: BondedParamsBundle with leading batch dim.
+            bundle: BatchedFittingBundle (carries topology_batched and n_mols_real).
+            positions_t, forces_t, energies_t: Pre-shaped data with batch dim.
+
+        Returns:
+            per_mol_losses: (B,) array of per-molecule losses.
+        """
+        in_axes_spec = (0, 0, 0, 0, 0)
+
+        if self.plan is None:
+            # No plan: use full vmap (current behavior)
+            return jax.vmap(loss_per_mol, in_axes=in_axes_spec)(
+                params,
+                bundle.topology_batched,
+                positions_t,
+                forces_t,
+                energies_t,
+            )
+
+        # Unwrap the plan from _BatchPlanWrapper
+        plan = self.plan._plan if isinstance(self.plan, _BatchPlanWrapper) else self.plan
+
+        # Look up N_MOLS decision from plan
+        from prolix.run.spec import FittingAxisNames
+        try:
+            decision = plan.decision_for(FittingAxisNames.N_MOLS)
+        except (KeyError, AttributeError):
+            # Plan doesn't have N_MOLS axis → fall back to full vmap
+            return jax.vmap(loss_per_mol, in_axes=in_axes_spec)(
+                params,
+                bundle.topology_batched,
+                positions_t,
+                forces_t,
+                energies_t,
+            )
+
+        batch_size = decision.batch_size
+        B = bundle.n_mols_real  # static int
+
+        if batch_size == 0 or batch_size >= B:
+            # Decision says "full vmap" (batch_size=0 sentinel) OR chunk size >= batch
+            return jax.vmap(loss_per_mol, in_axes=in_axes_spec)(
+                params,
+                bundle.topology_batched,
+                positions_t,
+                forces_t,
+                energies_t,
+            )
+
+        # Chunked vmap via lax.scan
+        if B % batch_size != 0:
+            raise ValueError(
+                f"N_MOLS batch (B={B}) not divisible by batch_size={batch_size}. "
+                f"Pad batch to multiple of batch_size or adjust plan."
+            )
+
+        n_chunks = B // batch_size
+
+        def _chunk(carry, chunk_idx):
+            start = chunk_idx * batch_size
+            # Slice each pytree leaf along the batch axis
+            chunk_params = jax.tree.map(
+                lambda x: jax.lax.dynamic_slice_in_dim(x, start, batch_size, axis=0),
+                params,
+            )
+            chunk_topo = jax.tree.map(
+                lambda x: jax.lax.dynamic_slice_in_dim(x, start, batch_size, axis=0),
+                bundle.topology_batched,
+            )
+            chunk_pos = jax.lax.dynamic_slice_in_dim(positions_t, start, batch_size, axis=0)
+            chunk_forces = jax.lax.dynamic_slice_in_dim(forces_t, start, batch_size, axis=0)
+            chunk_energies = jax.lax.dynamic_slice_in_dim(energies_t, start, batch_size, axis=0)
+
+            # Apply vmap to this chunk
+            chunk_losses = jax.vmap(loss_per_mol, in_axes=in_axes_spec)(
+                chunk_params,
+                chunk_topo,
+                chunk_pos,
+                chunk_forces,
+                chunk_energies,
+            )
+            return carry, chunk_losses
+
+        _, all_losses = jax.lax.scan(_chunk, None, jnp.arange(n_chunks))
+        # all_losses shape: (n_chunks, batch_size) → flatten to (B,)
+        return all_losses.reshape(B)
 
     @eqx.filter_jit
     def step(
@@ -175,13 +309,11 @@ class FittingPlan:
                     torsion_mask=mol_topology_bundle.torsion_mask,
                 )
 
-            # Vmap over molecules: bundles passed as pytrees, in_axes=0 slices each leaf
-            per_mol_losses = jax.vmap(
+            # Dispatch batched loss: full vmap or chunked vmap based on plan
+            per_mol_losses = self._dispatch_batched_loss(
                 loss_per_mol,
-                in_axes=(0, 0, 0, 0, 0),
-            )(
-                params,                       # BondedParamsBundle (B-leading)
-                bundle.topology_batched,      # BondedTopologyBundle (B-leading)
+                params,
+                bundle,
                 positions_t,
                 forces_t,
                 energies_t,
@@ -270,12 +402,11 @@ class FittingPlan:
                 torsion_mask=mol_topology_bundle.torsion_mask,
             )
 
-        per_mol_losses = jax.vmap(
+        # Dispatch batched loss: full vmap or chunked vmap based on plan
+        per_mol_losses = self._dispatch_batched_loss(
             loss_per_mol,
-            in_axes=(0, 0, 0, 0, 0),
-        )(
             state.params,
-            bundle.topology_batched,
+            bundle,
             positions_t,
             forces_t,
             energies_t,
@@ -304,8 +435,9 @@ class FittingPlan:
 def make_fitting_plan(
     config: FittingConfig,
     loss_fn: Callable | None = None,
+    plan: Any = None,  # BatchPlan | None
 ) -> FittingPlan:
-    """Compose FittingPlan from config with optional custom loss function.
+    """Compose FittingPlan from config with optional custom loss function and batch plan.
 
     Builds optimizer from config (Adam with optional clipping).
     Uses bonded_loss as default loss function if not provided.
@@ -313,6 +445,7 @@ def make_fitting_plan(
     Args:
         config: FittingConfig with lr, n_steps, and loss hyperparameters.
         loss_fn: Optional custom loss function. If None, uses bonded_loss.
+        plan: Optional BatchPlan for chunked vmap dispatch. If None, uses full vmap.
 
     Returns:
         FittingPlan ready to drive training via .step() / .evaluate().
@@ -322,8 +455,12 @@ def make_fitting_plan(
 
     optimizer = _build_optimizer(config)
 
+    # Wrap plan in _BatchPlanWrapper to make it hashable for eqx.filter_jit
+    wrapped_plan = _BatchPlanWrapper(plan) if plan is not None else None
+
     return FittingPlan(
         optimizer=optimizer,
         loss_fn=loss_fn,
         config=config,
+        plan=wrapped_plan,
     )
