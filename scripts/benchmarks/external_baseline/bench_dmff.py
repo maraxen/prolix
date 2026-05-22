@@ -114,7 +114,7 @@ def _build_dmff_potential(mol_data: dict):
         pairs   : NoCutoffNeighborList pairs array
     """
     from dmff import Hamiltonian
-    from dmff.neighborlist import NoCutoffNeighborList
+    from dmff.common.nblist import NoCutoffNeighborList
     from openmm import app
 
     xml_path_str = str(mol_data["xml_path"])
@@ -163,19 +163,29 @@ def bench_one_step(args) -> dict:
     # Generate (or use provided) XML directory
     if args.xml_dir is not None:
         xml_dir = Path(args.xml_dir)
-        xml_paths = sorted(xml_dir.glob("*.xml"))
     else:
         _tmpdir = tempfile.mkdtemp(prefix="bench_dmff_xml_")
         xml_dir = Path(_tmpdir)
-        xml_paths = generate_xml_dir(subset_dir, xml_dir, lane="lane_a")
+        generate_xml_dir(subset_dir, xml_dir, lane="lane_a")
 
     json_paths = sorted(lane_a.glob("mol_*.params_init.json"))
     h5_paths = [lane_a / p.name.replace(".params_init.json", ".h5") for p in json_paths]
 
-    # Pair JSON → XML (by mol index order)
+    # Pair JSON → XML by molecule_id (not by sort order — XMLs are named by mol_id)
     n_base = len(json_paths)
     if n_base == 0:
         raise RuntimeError(f"No mol_*.params_init.json found in {lane_a}")
+
+    import json as _json_mod
+    mol_ids = []
+    for jp in json_paths:
+        with open(jp) as f:
+            mol_ids.append(_json_mod.load(f)["molecule_id"])
+    xml_paths = [xml_dir / f"{mid}.xml" for mid in mol_ids]
+    missing = [p for p in xml_paths if not p.exists()]
+    if missing:
+        raise RuntimeError(f"Missing XMLs for {len(missing)} mols (e.g. {missing[0]}). "
+                           f"Re-run without --xml-dir to regenerate.")
 
     print(f"found {n_base} base mols, {len(xml_paths)} XMLs")
 

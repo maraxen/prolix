@@ -50,6 +50,11 @@ def generate_xml_for_mol(json_path: Path, xml_path: Path) -> None:
     for atom in mol["atom_types"]:
         idx = atom["idx"]
         ET.SubElement(residue_el, "Atom", {"name": f"A{idx}", "type": f"A{idx}"})
+    for bond in mol["bonds"]:
+        ET.SubElement(residue_el, "Bond", {
+            "atomName1": f"A{bond['i']}",
+            "atomName2": f"A{bond['j']}",
+        })
 
     bond_force_el = ET.SubElement(ff, "HarmonicBondForce")
     for bond in mol["bonds"]:
