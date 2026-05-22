@@ -1,0 +1,101 @@
+# §7.1 External Baseline Campaign — pre-registration sidecar (DRAFT)
+#
+# Status: DRAFT, thresholds NOT YET ANCHORED.
+# Per using-bathos "Research Before Finalizing": run smoke at N=64 for each
+# comparator first, anchor thresholds from those numbers, then submit full sweep.
+#
+# Campaign: hp4-s71-external-baseline
+# Scope: external comparators (prolix vs DMFF, TorchMD, espaloma, PyTorch-from-scratch, ForceBalance)
+# Hardware: pi_so3 (RTX Pro 6000 Blackwell), node4007/node4008 only
+
+[benchmark]
+baseline_ref = "fit_bonded_hp4"  # internal sweep is the same-machine baseline
+metric = "per_mol_step_seconds"
+regression_threshold = 0.05
+target = "Validate prolix v1.2 substrate is competitive with or faster than published comparators on identical hardware for force-field bonded parameter fitting"
+
+[experiment]
+# Three-property substrate claim:
+#   1. Portability (StableHLO export to any accelerator)
+#   2. Heterogeneous batched fitting (N mols mixed sizes, one autograd graph)
+#   3. Composability (host/device discipline via Bundle + BatchPlan auto-budgeting)
+#
+# §7.1 hypothesis (falsifiable):
+hypothesis = """
+On pinned hardware (RTX Pro 6000 Blackwell, node4007/4008), prolix v1.2's batched
+bonded-energy forward+backward at N=128 mixed-size molecules achieves per-mol-step
+wall-clock strictly less than every comparator that lacks heterogeneous batching
+(DMFF, TorchMD, PyTorch-from-scratch). Against espaloma (which has DGL-batched
+heterograph) prolix achieves <= 1.5× per-mol-step on the same primitive.
+
+Scope A primitive: identical params, positions, topology fed to each tool;
+single Adam step computed for each.
+"""
+
+[outcomes.pass]
+# TODO: anchor 0.5× after smoke round. Current value is a research-pass anchor:
+# DMFF single-mol fitting (no batching) expected to require N separate forward+backward
+# passes; per-mol-step on RTX Pro 6000 should sit around 50-200ms based on
+# JAX-MD reference benchmarks. Prolix batched at N=128 measured at ~13.4s/500 steps
+# = ~27ms/step on the same hardware (≈ 27/128 mols = 0.2ms/mol-step). So prolix
+# per-mol-step ~ 200µs, DMFF ~ 50-200ms = ratio 250-1000×.
+# 0.5× is conservative (allows for DMFF being faster than my estimate by 500×).
+condition = "tool = 'prolix' AND per_mol_step_seconds < 0.5 * (SELECT MIN(per_mol_step_seconds) FROM results WHERE tool IN ('dmff', 'torchmd', 'pytorch_scratch') AND n_mols = 128)"
+decision = "Substrate claim defended. Proceed to figure rendering with all three properties as paper-quotable."
+reasoning = """
+Threshold 0.5× anchored to:
+(1) DMFF recon found single-molecule fitting only (dmff/api/hamiltonian.py:38-59).
+(2) TorchMD recon found Python for-loop over systems (torchmd/forces.py:102-116).
+(3) PyTorch-from-scratch will be eager + torch.compile; even with compile, no
+    heterogeneous batching → at best matches a naive vmap.
+Prolix's combined heterogeneous-batch + JIT + Bundle composability should produce
+≥2× over the best of these on N=128. The 0.5× condition (prolix < 0.5× their min)
+is the same constraint with explicit margin for measurement variance.
+
+WILL BE UPDATED post-smoke-round: target rewritten with empirical baseline once
+each comparator has run at N=64.
+"""
+
+[outcomes.marginal]
+condition = "tool = 'prolix' AND per_mol_step_seconds < 1.0 * (SELECT MIN(per_mol_step_seconds) FROM results WHERE tool IN ('dmff', 'torchmd', 'pytorch_scratch') AND n_mols = 128)"
+decision = "Substrate competitive but no headline speedup. Claim narrows to 'no slower than fastest published comparator'; portability + composability remain as primary differentiators (no throughput claim)."
+reasoning = """
+A 0.5×–1.0× window means prolix is in the same regime as the fastest non-batched
+comparator. This is plausible if XLA fusion gives a major boost to the comparator
+but prolix's substrate doesn't extract its full advantage on the bonded primitive
+(bonded is O(N), not the O(N²) where flashMD-style tiling really matters).
+
+In this case, the paper claim leads with PORTABILITY (the unique differentiator
+even DMFF lacks — it's CUDA-built-from-source) and COMPOSABILITY (Bundle +
+BatchPlan auto-budgeting), with throughput as supporting rather than load-bearing.
+"""
+
+[outcomes.fail]
+is_residual = true
+condition = "TRUE"  # default catch-all
+decision = "Substrate claim collapses on Scope A primitive. Fall back to direct-fit narrative (Scope B from earlier planning): paper claims only that prolix fits FF params correctly and is exportable to WASM/WebGPU; throughput vs comparators is no longer claimed. Open R&D campaign to investigate why."
+reasoning = """
+If prolix is slower than the fastest comparator (DMFF/TorchMD/PyTorch-scratch),
+the heterogeneous-batched-substrate argument fails empirically. Honest fallback:
+the substrate exists and is correct (Phase 7 equivalence + 99.89× over our own
+loop), but external positioning needs a different framing.
+"""
+
+[result_schema]
+# Per-row fields. The harness emits one row per (tool, n_mols, precision, trial) cell.
+tool = "str"  # 'prolix' | 'dmff' | 'torchmd' | 'espaloma' | 'pytorch_scratch' | 'forcebalance'
+scope = "str"  # 'A' (primitive) | 'C' (native)
+n_mols = "int"
+n_conformers_per_mol = "int"  # capped, matching internal sweep methodology
+n_atoms_max = "int"  # padding bucket
+precision = "str"  # 'float32' | 'float64'
+device = "str"  # 'cuda:rtx-pro-6000' (pinned to node4007/4008)
+hardware_tag = "str"
+trial_seconds = "float"  # wall-clock for one trial (500 steps for Scope C, 1 step for Scope A)
+per_mol_step_seconds = "float"  # trial_seconds / (n_mols * n_steps)
+peak_memory_mib = "float"
+compile_seconds = "float"
+final_loss_mean = "float"
+final_loss_max = "float"
+git_hash = "str"  # which prolix HEAD produced this
+comparator_version = "str"  # version of the comparator package
