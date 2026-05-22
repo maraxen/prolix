@@ -47,6 +47,30 @@ if [[ ! -f "${BENCH_SCRIPT}" ]]; then
     exit 1
 fi
 
+# Each external tool has its own isolated venv; route to the correct interpreter.
+# The prolix comparator uses the project uv venv.
+BENCH_DIR="scripts/benchmarks/external_baseline"
+case "${TOOL}" in
+    prolix)
+        PYTHON_INTERP="uv run python"
+        ;;
+    dmff)
+        PYTHON_INTERP="${BENCH_DIR}/.venv-dmff/bin/python"
+        ;;
+    torchmd)
+        PYTHON_INTERP="${BENCH_DIR}/.venv-torchmd/bin/python"
+        ;;
+    espaloma)
+        PYTHON_INTERP="micromamba run -n espaloma-bench python"
+        ;;
+    *)
+        echo "ERROR: unknown tool '${TOOL}' — expected prolix|dmff|torchmd|espaloma"
+        exit 1
+        ;;
+esac
+
+echo "Python: ${PYTHON_INTERP}"
+
 # bath provenance: per-script sidecar at scripts/benchmarks/external_baseline/bench_${TOOL}.bth.toml
 # Campaign tagging: --campaign edbd0b84 (hp4-s71-external-baseline)
 source scripts/slurm/_bth_env.sh
@@ -54,12 +78,11 @@ source scripts/slurm/_bth_env.sh
 CAMPAIGN_FLAG=""
 [[ -n "${CAMPAIGN_ID:-}" ]] && CAMPAIGN_FLAG="--campaign ${CAMPAIGN_ID}"
 
-uv run bth run python "${BENCH_SCRIPT}" \
+uv run bth run ${PYTHON_INTERP} "${BENCH_SCRIPT}" \
     --tag s71 --tag external-baseline --tag scope-a \
     --tag "tool:${TOOL}" --tag "n_mols:${N_MOLS}" --tag "precision:${PRECISION}" \
     ${CAMPAIGN_FLAG} \
     --out "${OUT}" \
-    -- \
     --n-mols "${N_MOLS}" \
     --n-conf-cap "${N_CONF_CAP}" \
     --precision "${PRECISION}" \
