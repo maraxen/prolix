@@ -83,6 +83,7 @@ uv run bth run ${PYTHON_INTERP} "${BENCH_SCRIPT}" \
     --tag "tool:${TOOL}" --tag "n_mols:${N_MOLS}" --tag "precision:${PRECISION}" \
     ${CAMPAIGN_FLAG} \
     --out "${OUT}" \
+    -- \
     --n-mols "${N_MOLS}" \
     --n-conf-cap "${N_CONF_CAP}" \
     --precision "${PRECISION}" \
