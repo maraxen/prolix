@@ -7,7 +7,8 @@ emits a JSON row with the same schema, and the campaign analysis joins on
 (tool, n_mols, precision) to produce the comparison table.
 
 Usage:
-    uv run python scripts/benchmarks/external_baseline/bench_espaloma.py \\
+    # requires micromamba env set up via setup_espaloma_env.sh
+    micromamba run -n espaloma-bench python scripts/benchmarks/external_baseline/bench_espaloma.py \\
         --n-mols 64 --n-conf-cap 100 --precision float32 \\
         --n-warmup 1 --n-trials 3 --out results.json
 
@@ -301,7 +302,7 @@ def bench_one_step(args) -> dict:
 
     row = {
         "tool": "espaloma",
-        "tool_version": "0.3.2",
+        "tool_version": "0.4.0",
         "scope": "A",
         "n_mols": args.n_mols,
         "n_conformers_per_mol": 1,
