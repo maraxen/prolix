@@ -1,0 +1,57 @@
+{
+  "mode": "batched",
+  "n_steps": 10,
+  "n_molecules": 20,
+  "n_molecules_lane_a": 16,
+  "n_molecules_lane_b": 4,
+  "wallclock_s": 0.008614064194262028,
+  "n_warmup": 1,
+  "n_trials": 1,
+  "warmup_times_s": [
+    0.9445751733146608
+  ],
+  "trial_times_s": [
+    0.008614064194262028
+  ],
+  "execution_median_s": 0.008614064194262028,
+  "execution_min_s": 0.008614064194262028,
+  "execution_max_s": 0.008614064194262028,
+  "compile_time_estimate_s": 0.9359611091203988,
+  "speedup_ratio": null,
+  "batched_final_loss_max": null,
+  "looped_final_loss_max": 0.0,
+  "per_mol_final_losses_lane_a": [
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0
+  ],
+  "per_mol_final_losses_lane_b": [
+    399.9912414550781,
+    399.9953308105469,
+    399.9901123046875,
+    399.9900817871094
+  ],
+  "backend": "cpu",
+  "device": "TFRT_CPU_0",
+  "learning_rate": 0.001,
+  "alpha": 0.25,
+  "grad_clip_norm": null,
+  "n_mols_target": 2,
+  "n_conf_cap": 3,
+  "w_reg": 0.01,
+  "seed": 42,
+  "precision": "float32"
+}

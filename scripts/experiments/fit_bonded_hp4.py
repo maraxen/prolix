@@ -386,10 +386,15 @@ def main():
             )
 
         def run_training(state):
-            # Run n_steps, cycling through conformers via modulo
+            # Run n_steps, cycling through conformers via modulo.
+            # CRITICAL: conformer_idx MUST be a traced jnp.array (not Python int).
+            # Python ints are static under @eqx.filter_jit → recompile per unique
+            # value → catastrophic for n_steps=500. Tracing as int32 array gives
+            # ONE compile and N executions.
+            max_n_conf = batched_bundle.conformers_batched.max_n_conf
             current_state = state
             for step_idx in range(args.n_steps):
-                conformer_idx = step_idx % batched_bundle.conformers_batched.max_n_conf
+                conformer_idx = jnp.asarray(step_idx % max_n_conf, dtype=jnp.int32)
                 current_state, metrics = plan.step(batched_bundle, current_state, conformer_idx)
             return {"final_state": current_state, "final_losses": None}
 
