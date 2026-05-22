@@ -71,6 +71,14 @@ esac
 
 echo "Python: ${PYTHON_INTERP}"
 
+# External comparators run on CPU: torch 2.1.0+cu121 (torchmd/espaloma) does not
+# support CUDA capability sm_120 (Blackwell RTX Pro 6000); JAX 0.4.25 (dmff) is
+# CPU-only. Setting CUDA_VISIBLE_DEVICES="" forces CPU for all external tools.
+# prolix uses uv run python and will use whatever JAX detects.
+if [[ "${TOOL}" != "prolix" ]]; then
+    export CUDA_VISIBLE_DEVICES=""
+fi
+
 # espaloma: conda env lib/ has a stale conda-installed libtorch (pulled in by
 # openff-nagl → torch) that conflicts with the pip-installed torch 2.1.0+cu121.
 # Fix: put the pip torch lib first in LD_LIBRARY_PATH so the right libtorch loads,
