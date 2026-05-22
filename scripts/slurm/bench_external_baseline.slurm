@@ -71,6 +71,16 @@ esac
 
 echo "Python: ${PYTHON_INTERP}"
 
+# espaloma: conda env lib/ has a stale conda-installed libtorch (pulled in by
+# openff-nagl → torch) that conflicts with the pip-installed torch 2.1.0+cu121.
+# Fix: put the pip torch lib first in LD_LIBRARY_PATH so the right libtorch loads,
+# then the conda lib/ for libstdcxx-ng (GLIBCXX_3.4.29 needed by pip numpy).
+if [[ "${TOOL}" == "espaloma" ]]; then
+    _MAMBA_ENV="${HOME}/.local/share/mamba/envs/espaloma-bench"
+    _TORCH_LIB="${_MAMBA_ENV}/lib/python3.11/site-packages/torch/lib"
+    export LD_LIBRARY_PATH="${_TORCH_LIB}:${_MAMBA_ENV}/lib${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
+fi
+
 # bath provenance: per-script sidecar at scripts/benchmarks/external_baseline/bench_${TOOL}.bth.toml
 # Campaign tagging: --campaign edbd0b84 (hp4-s71-external-baseline)
 source scripts/slurm/_bth_env.sh

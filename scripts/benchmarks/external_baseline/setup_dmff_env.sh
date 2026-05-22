@@ -7,10 +7,11 @@
 #   - Run from the prolix project root or scripts/benchmarks/external_baseline/
 #
 # Tested environment (2026-05-22):
-#   JAX 0.10.1, jaxlib 0.10.1, DMFF 1.0.1.dev (GitHub main), OpenMM 8.1.1
-#   NumPy 2.4.6 (JAX 0.10.1 requires numpy>=2.0)
+#   JAX 0.4.25, jaxlib 0.4.25, DMFF 1.0.1.dev (GitHub main), OpenMM 8.1.1
+#   NumPy 1.26.x (JAX 0.4.25 supports numpy 1.x; OpenMM 8.1.1 compiled against 1.x)
 #   OpenMM 8.1.1 required on Rocky 8 / glibc 2.28; 8.5.1+ requires glibc 2.34
 #   No v0.2.7 tag exists in DMFF repo (went v0.2.0 → v1.0.0)
+#   On glibc 2.34+ (local/Ubuntu): jax[cpu]==0.10.1 + numpy>=2.0 + openmm==8.5.1 works
 #
 # Known venv patches applied after install (documented below):
 #   1. dmff/settings.py: jax.config.config was removed in JAX 0.4.7+;
@@ -32,10 +33,15 @@ echo "==> Creating DMFF venv at $VENV_DIR"
 uv venv --python 3.11 "$VENV_DIR"
 
 echo "==> Installing JAX (CPU) + core scientific stack"
+# On Rocky 8 / glibc 2.28: pin JAX 0.4.25 + numpy 1.26.x.
+# JAX 0.10.1 requires numpy>=2.0, but OpenMM 8.x PyPI wheels available for
+# glibc 2.28 (8.1.1, 8.2.0, 8.3.0) were compiled against numpy 1.x and fail
+# with NumPy 2.x ABI. On newer systems (glibc 2.34+) with OpenMM 8.5.1,
+# upgrading to jax[cpu]==0.10.1 + numpy>=2.0 is safe.
 uv pip install --python "$VENV_DIR/bin/python" \
-    "jax[cpu]==0.10.1" \
-    "jaxlib==0.10.1" \
-    "numpy>=2.0" \
+    "jax[cpu]==0.4.25" \
+    "jaxlib==0.4.25" \
+    "numpy>=1.26,<2.0" \
     "optax>=0.1.4" \
     "h5py>=3.0"
 
@@ -59,7 +65,7 @@ SETTINGS_FILE="$VENV_DIR/lib/python3.11/site-packages/dmff/settings.py"
 if [ -f "$SETTINGS_FILE" ]; then
     # Replace: from jax.config import config
     # With:    import jax; config = jax.config  # compat shim
-    python3 - <<'PY'
+    python3 - "$SETTINGS_FILE" <<'PY'
 import sys
 path = sys.argv[1]
 with open(path) as f:
@@ -75,13 +81,12 @@ if 'from jax.config import config' in text:
 else:
     print(f"  {path}: no patch needed (already updated or different version)")
 PY
-"$SETTINGS_FILE"
 fi
 
 # Patch 2: dmff/common/nblist.py — np.fromiter tuple dtype broken in NumPy 2.x
 NBLIST_FILE="$VENV_DIR/lib/python3.11/site-packages/dmff/common/nblist.py"
 if [ -f "$NBLIST_FILE" ]; then
-    python3 - <<'PY'
+    python3 - "$NBLIST_FILE" <<'PY'
 import sys
 path = sys.argv[1]
 with open(path) as f:
@@ -96,7 +101,6 @@ if old in text:
 else:
     print(f"  {path}: no patch needed")
 PY
-"$NBLIST_FILE"
 fi
 
 echo "==> Smoke test"

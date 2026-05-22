@@ -19,6 +19,17 @@
 #   This env pins torch to 2.1.x for DGL 2.1.0 compatibility.
 #   When DGL releases wheels for newer torch, update TORCH_VERSION below.
 #
+# Known numpy/conda conflict:
+#   openff-toolkit from conda-forge has a transitive dep on openff-nagl which
+#   pulls in pytorch (2.6.x) and numpy >= 2.x via conda. DGL 2.1.0 C extensions
+#   were compiled against numpy 1.x and fail with numpy 2.x. Fix: force-install
+#   numpy<2 via pip after conda setup (see below).
+#   Additionally, the conda-installed libtorch files in $CONDA_PREFIX/lib/
+#   conflict with the pip-installed torch 2.1.0+cu121. Fix: set LD_LIBRARY_PATH
+#   so that site-packages/torch/lib/ comes BEFORE $CONDA_PREFIX/lib/:
+#     export LD_LIBRARY_PATH="${MAMBA_ENV}/lib/python3.11/site-packages/torch/lib:${MAMBA_ENV}/lib:${LD_LIBRARY_PATH}"
+#   This is done automatically in bench_external_baseline.slurm for the espaloma case.
+#
 # Tested environment (smoke-tested 2026-05-22):
 #   micromamba 2.6.2, Python 3.11, torch 2.1.0+cu121, torchdata 0.7.0,
 #   DGL 2.1.0 (dglteam/label/cu121), espaloma 0.4.0+1.g413eb55,
@@ -61,7 +72,10 @@ micromamba install -n "$ENV_NAME" -y \
 echo "==> Installing PyTorch $TORCH_VERSION + torchdata $TORCHDATA_VERSION"
 # torchdata must be pinned together with torch; DGL 2.1.0 graphbolt imports
 # torchdata.datapipes which was removed in torchdata 0.9.0+ (torch 2.3+).
+# numpy must be pinned to <2 before torch: openff-nagl (transitive dep of
+# openff-toolkit) conda-installs numpy 2.x, but DGL 2.1.0 requires numpy 1.x.
 micromamba run -n "$ENV_NAME" pip install \
+    "numpy>=1.24,<2" \
     "torch==${TORCH_VERSION}" \
     "torchdata==${TORCHDATA_VERSION}" \
     --extra-index-url "https://download.pytorch.org/whl/${CUDA_TAG}"
