@@ -191,3 +191,43 @@ dev = [
     "pytest-json-report>=1.5.0",
 ]
 
+# §7.1 external-baseline comparator envs — install per-tool, not all together.
+# Each group is isolated; DMFF and espaloma have incompatible dep trees.
+# Usage: uv sync --group benchmark-dmff   (or torchmd / espaloma)
+#
+# DMFF: not on PyPI — pinned to repo HEAD at time of external-baseline campaign.
+# Commit 809f656 = deepmodeling/DMFF main branch, 2026-05-22.
+# Also requires openmm (via `openmm` extra: uv sync --group benchmark-dmff --extra openmm)
+# and freud-analysis (conda-forge preferred: `mamba install -c conda-forge freud`).
+benchmark-dmff = [
+    "dmff @ git+https://github.com/deepmodeling/DMFF.git@809f656153018498e3260e07162197139ba103d6",
+    "networkx>=3.0",
+    "pymbar>=4.0.0",
+    "optax>=0.1.4",
+    "jaxopt>=0.8.0",
+    # freud-analysis: conda-forge only (no PyPI wheel for linux x86_64)
+    # openmm: use `--extra openmm` alongside this group
+]
+
+# TorchMD: on PyPI as `torchmd`. Requires moleculekit (also on PyPI).
+# Commit 0948418 = torchmd/torchmd main branch, 2026-05-22 (reference only; PyPI version used).
+# torch itself must be installed in the venv with CUDA support separately:
+#   uv pip install torch --index-url https://download.pytorch.org/whl/cu126
+benchmark-torchmd = [
+    "torchmd>=1.1.2",
+    "moleculekit",
+]
+
+# espaloma: not on PyPI — pinned to repo HEAD at time of external-baseline campaign.
+# Commit 413eb55 = choderalab/espaloma main branch, 2026-05-22.
+# DGL is NOT on PyPI (CUDA-specific wheels); install separately:
+#   mamba install -c dglteam/label/cu124 dgl
+# openff-toolkit required for heterograph construction:
+#   mamba install -c conda-forge openff-toolkit
+# torch: same as benchmark-torchmd (cu126 index).
+benchmark-espaloma = [
+    "espaloma @ git+https://github.com/choderalab/espaloma.git@413eb55074037540e1414eb365da7304bd5d72be",
+    # dgl: conda only (see comment above)
+    # openff-toolkit: conda only (see comment above)
+]
+
