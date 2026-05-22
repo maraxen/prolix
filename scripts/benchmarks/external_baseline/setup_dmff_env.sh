@@ -6,9 +6,11 @@
 #   - Python 3.11 reachable by uv (uv python install 3.11 if needed)
 #   - Run from the prolix project root or scripts/benchmarks/external_baseline/
 #
-# Tested environment:
-#   JAX 0.10.1, jaxlib 0.10.1, DMFF 0.2.7, OpenMM 8.5.1
+# Tested environment (2026-05-22):
+#   JAX 0.10.1, jaxlib 0.10.1, DMFF 1.0.1.dev (GitHub main), OpenMM 8.1.1
 #   NumPy 2.4.6 (JAX 0.10.1 requires numpy>=2.0)
+#   OpenMM 8.1.1 required on Rocky 8 / glibc 2.28; 8.5.1+ requires glibc 2.34
+#   No v0.2.7 tag exists in DMFF repo (went v0.2.0 → v1.0.0)
 #
 # Known venv patches applied after install (documented below):
 #   1. dmff/settings.py: jax.config.config was removed in JAX 0.4.7+;
@@ -38,13 +40,17 @@ uv pip install --python "$VENV_DIR/bin/python" \
     "h5py>=3.0"
 
 echo "==> Installing OpenMM"
+# openmm 8.5.1+ requires glibc 2.34 (manylinux_2_34). Rocky 8 / CentOS 8 has
+# glibc 2.28, so we pin 8.1.1 which ships manylinux_2_17 wheels (compatible).
+# On newer systems (glibc 2.34+) upgrading to 8.5.1 is safe.
 uv pip install --python "$VENV_DIR/bin/python" \
-    "openmm==8.5.1"
+    "openmm>=8.1.1,<8.2.0"
 
-echo "==> Installing DMFF 0.2.7"
-# DMFF is not on PyPI; install from the GitHub release tag
+echo "==> Installing DMFF (GitHub main HEAD)"
+# DMFF is not on PyPI; there is no 0.2.7 tag — the repo jumped v0.2.0 → v1.0.0.
+# main HEAD (1.0.x dev) is what was smoke-tested locally.
 uv pip install --python "$VENV_DIR/bin/python" \
-    "git+https://github.com/deepmodeling/DMFF.git@v0.2.7"
+    "git+https://github.com/deepmodeling/DMFF.git"
 
 echo "==> Applying venv patches for JAX/NumPy compatibility"
 

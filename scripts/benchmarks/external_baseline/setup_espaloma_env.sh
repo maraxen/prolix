@@ -22,7 +22,9 @@
 # Tested environment (smoke-tested 2026-05-22):
 #   micromamba 2.6.2, Python 3.11, torch 2.1.0+cu121, torchdata 0.7.0,
 #   DGL 2.1.0 (dglteam/label/cu121), espaloma 0.4.0+1.g413eb55,
-#   openff-toolkit 0.16.x (conda-forge)
+#   openff-toolkit 0.16.x (conda-forge), libstdcxx-ng (conda-forge)
+#   libstdcxx-ng required on Rocky 8 / CentOS 8: system GCC 8 lacks GLIBCXX_3.4.29
+#   which numpy 2.x and torch need
 
 set -euo pipefail
 
@@ -41,9 +43,12 @@ if ! command -v micromamba &>/dev/null; then
 fi
 
 echo "==> Creating micromamba env: $ENV_NAME"
+# libstdcxx-ng provides a newer libstdc++ from conda-forge, required on Rocky 8 /
+# CentOS 8 (GLIBCXX_3.4.29 is missing from system GCC 8; numpy 2.x needs GCC 12+).
 micromamba create -n "$ENV_NAME" -y \
     -c conda-forge \
     python=3.11 \
+    libstdcxx-ng \
     rdkit \
     "openmm>=7.6" \
     h5py
