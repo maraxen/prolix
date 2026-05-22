@@ -47,7 +47,19 @@ if [[ ! -f "${BENCH_SCRIPT}" ]]; then
     exit 1
 fi
 
-uv run python "${BENCH_SCRIPT}" \
+# bath provenance: per-script sidecar at scripts/benchmarks/external_baseline/bench_${TOOL}.bth.toml
+# Campaign tagging: --campaign edbd0b84 (hp4-s71-external-baseline)
+source scripts/slurm/_bth_env.sh
+
+CAMPAIGN_FLAG=""
+[[ -n "${CAMPAIGN_ID:-}" ]] && CAMPAIGN_FLAG="--campaign ${CAMPAIGN_ID}"
+
+uv run bth run python "${BENCH_SCRIPT}" \
+    --tag s71 --tag external-baseline --tag scope-a \
+    --tag "tool:${TOOL}" --tag "n_mols:${N_MOLS}" --tag "precision:${PRECISION}" \
+    ${CAMPAIGN_FLAG} \
+    --out "${OUT}" \
+    -- \
     --n-mols "${N_MOLS}" \
     --n-conf-cap "${N_CONF_CAP}" \
     --precision "${PRECISION}" \

@@ -1,0 +1,80 @@
+# bath sidecar for bench_prolix.py — Scope A primitive smoke
+#
+# Per-tool sidecar. Campaign-level design + comparator thresholds live in
+# campaign_design.toml + research_notes.md.
+#
+# This sidecar's outcomes are PROCESS-level (does the harness emit valid data)
+# because smoke-round thresholds are not yet anchored. After all comparators
+# smoke at N=64, a separate confirmation-mode sidecar with empirical thresholds
+# will be added (and this sidecar's hypothesis revisited).
+
+[experiment]
+hypothesis = """
+Prolix v1.2 Bundle-code (post-Phase 8 cutover, commit a633de1+) emits a valid
+Scope A primitive measurement on RTX Pro 6000 Blackwell: forward+backward of
+bonded energy across N mols mixed-size, one Adam step, with non-zero loss
+(confirming real compute, no XLA dead-code elimination) and positive timing.
+
+The number this run produces becomes the prolix anchor for the §7.1
+external-baseline campaign threshold setting. No relative-to-comparator
+claim is made yet — those thresholds get anchored AFTER each comparator
+(DMFF, TorchMD, espaloma, PyTorch-from-scratch) smokes at the same N=64
+on the same hardware.
+"""
+
+[outcomes.pass]
+condition = "per_mol_step_seconds > 0 AND final_loss > 0 AND final_loss < 1e10"
+decision = "Anchor recorded. Use this row's per_mol_step_seconds as the prolix reference number for sidecar threshold anchoring once all comparator smokes complete."
+reasoning = """
+Pass = harness emits valid metrics:
+  - per_mol_step_seconds > 0: timing actually measured, not negative clock skew
+  - final_loss > 0: real compute happened; non-zero loss confirms no XLA fold
+    (the exact failure mode caught in 2026-05-21 debugging)
+  - final_loss < 1e10: not NaN/Inf, not runaway gradient
+
+Reference: prolix internal sweep at N=512 batched f32 = 14.14s / 500 steps
+(commit 704037f, job 14191171_22) → per-mol-step ~55µs at 500-step amortized
+cost. Scope A's ONE-step measurement at N=64 is expected in 5-50μs range —
+well above zero, well below 1e10.
+"""
+
+[outcomes.fail]
+is_residual = true
+condition = "per_mol_step_seconds IS NULL OR per_mol_step_seconds <= 0 OR final_loss IS NULL OR final_loss <= 0 OR final_loss >= 1e10"
+decision = "Harness broken or computation suspect. Investigate before treating this row as a threshold anchor: zero/NaN loss → XLA fold or fixture bug; missing fields → script crash; runaway loss → gradient blow-up."
+reasoning = """
+Residual catch-all per bath gate requirements. Covers:
+- Script exit non-zero or output JSON malformed (fields IS NULL)
+- per_mol_step_seconds <= 0: negative clock skew, immediate exit, or invalid timing
+- final_loss <= 0: XLA constant-folded gradient (zero-by-construction fixture bug
+  exact pattern caught on 2026-05-21 before params-vmap was understood)
+- final_loss >= 1e10: NaN/Inf or runaway gradient (e.g., learning rate too high)
+
+Any of these → anchor cannot be established. Fix the harness, re-run.
+"""
+
+[result_schema]
+tool = "str"
+tool_version = "str"
+scope = "str"
+n_mols = "int"
+n_conformers_per_mol = "int"
+n_atoms_max = "int"
+precision = "str"
+device = "str"
+hardware_tag = "str"
+trial_seconds = "float"
+trial_min_seconds = "float"
+trial_max_seconds = "float"
+per_mol_step_seconds = "float"
+peak_memory_mib = "float"
+compile_seconds = "float"
+final_loss = "float"
+git_hash = "str"
+n_warmup = "int"
+n_trials = "int"
+
+[metadata]
+campaign_id = "hp4-s71-external-baseline"
+campaign_mode = "exploration"
+tags = ["cluster", "s71", "external-baseline", "scope-a", "smoke"]
