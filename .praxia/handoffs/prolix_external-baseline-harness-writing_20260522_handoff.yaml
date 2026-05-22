@@ -1,0 +1,206 @@
+---
+workspace: prolix
+session_id: 260522-external-baseline-api-verification
+status: in_progress
+phase: external-baseline-harness-writing
+task_id: 261522_external-baseline-smoke
+goal_statement: >
+  Complete the §7.1 external-baseline campaign smoke round. 3 comparator harnesses
+  remain (DMFF, TorchMD, espaloma). Concrete first actions: (1) write shared
+  _generate_xml.py utility (prolix JSON → OpenMM XML, unified input front), (2) extend
+  bench_prolix.py with --xml-dir flag, (3) write all three harnesses using real APIs
+  source-verified from cloned repos. Campaign edbd0b84. §7.1 figure = PROLIX vs
+  EXTERNAL COMPARATORS.
+
+immediately_relevant:
+  - file: scripts/benchmarks/external_baseline/research_notes.md
+    lines: []
+    reason: >
+      READ FIRST. Source-verified API facts for DMFF/TorchMD/espaloma (2026-05-22
+      from cloned repos), unit conversion table (AKMA→OpenMM), unified XML
+      architecture plan, and updated smoke plan.
+  - file: scripts/benchmarks/external_baseline/bench_prolix.py
+    lines: []
+    reason: >
+      Canonical harness. All comparators must mirror its CLI flags, JSON output
+      schema (19 fields), and timing discipline (warmup→compile_seconds, trials→median).
+  - file: scripts/benchmarks/external_baseline/bench_prolix.bth.toml
+    lines: []
+    reason: >
+      Canonical sidecar. Use [experiment] schema (NOT [benchmark] — gate rejects it).
+      Exactly one outcome must have is_residual=true. Every outcome needs condition +
+      decision + reasoning.
+  - file: pyproject.toml
+    lines: [181, 240]
+    reason: >
+      benchmark-dmff (git+URL@809f656), benchmark-torchmd (PyPI torchmd>=1.1.2),
+      benchmark-espaloma (git+URL@413eb55) dep groups added. DGL and freud-analysis
+      require conda — see inline comments.
+  - file: scripts/slurm/bench_external_baseline.slurm
+    lines: []
+    reason: >
+      Dispatches bench_${TOOL}.py via bth run + campaign edbd0b84 + tags. Do NOT
+      modify. Pass TOOL=dmff|torchmd|espaloma via sbatch --export.
+  - file: scripts/benchmarks/external_baseline/campaign_design.toml
+    lines: []
+    reason: >
+      Campaign hypothesis + outcome conditions. pytorch_scratch removed. Thresholds
+      are still TODO placeholders until all 4 tools smoke at N=64.
+  - file: data/ani1x_subset/lane_a/mol_000.params_init.json
+    lines: []
+    reason: >
+      Confirmed prolix JSON schema. bonds={i,j,k[kcal/mol/Å²],r0[Å],type_pair}.
+      angles={i,j,k[center],k_theta[kcal/mol/rad²],theta0_deg,type_triple}.
+      proper_torsions={i,j,k,l,periodicity[list],phase_deg[list],k_phi[list kcal/mol]}.
+
+active_dispatches: []
+
+context_refs:
+  - phase: bundle-port-complete
+    task_id: 261521_bundle-port-complete
+    summary: >
+      8/8 Bundle composability phases shipped. BatchPlan dispatch wired (commit a633de1).
+      110+ tests pass. Three-property substrate (portability + heterogeneous batching +
+      composability) validated.
+  - phase: external-baseline-prolix-smoke
+    task_id: 261522_external-baseline-smoke
+    summary: >
+      Campaign edbd0b84 created. prolix N=64 f32 → 14.9µs/mol-step on RTX Pro 6000
+      Blackwell (run 6ce95e65, job 14263023, final_loss=32759.87 confirming real
+      compute). bench_prolix.py canonical and committed.
+  - phase: external-baseline-api-verification
+    task_id: 261522_external-baseline-smoke
+    summary: >
+      Repos cloned to /tmp (dmff-repo@809f656, torchmd-repo@0948418,
+      espaloma-repo@413eb55). All three APIs source-verified from actual source files
+      (not web docs). pytorch_scratch cut as strawman. JAX-proxy bench_dmff.py deleted
+      (commits 51c0ec5→05fdc8d). Dep groups pinned in pyproject.toml (commit 6450fea).
+      Unified OpenMM XML input architecture designed. research_notes.md updated with
+      full source-cited API details and unit conversions.
+
+failed_attempts:
+  - attempt_id: 260522-pytorch-scratch-comparator
+    description: Planned bench_pytorch_scratch.py as a §7.1 headline comparator.
+    outcome: >
+      Cut 2026-05-22. TorchMD is the real PyTorch comparator; a hand-written
+      torch.gather loop is a strawman.
+    reason_failed: >
+      Beating a naive impl does not support the heterogeneous-batching substrate
+      claim. TorchMD is citable; a from-scratch impl is not.
+    do_not_retry: true
+    evidence_ref: null
+
+  - attempt_id: 260522-jax-proxy-dmff
+    description: >
+      bench_dmff.py (commit 51c0ec5) used direct JAX harmonic bond+angle energy as a
+      DMFF proxy because DMFF's Hamiltonian requires OpenMM XML files.
+    outcome: >
+      Deleted at commit 05fdc8d. Not a fair comparison — misrepresents DMFF.
+    reason_failed: >
+      Real DMFF uses Hamiltonian.createPotential + NoCutoffNeighborList + ParamSet
+      pytree. Fairness requires using the actual DMFF API with proper XML input.
+    do_not_retry: true
+    evidence_ref: null
+
+  - attempt_id: 260522-benchmark-schema
+    description: Sidecar used [benchmark] not [experiment] schema.
+    outcome: Bath gate rejected with "No [outcomes] section found".
+    reason_failed: >
+      [benchmark] schema lacks the [outcomes.*] blocks required by the bath gate.
+      Always use [experiment].
+    do_not_retry: true
+    evidence_ref: null
+
+  - attempt_id: 260522-pre-bath-workflow
+    description: First slurm wrapper called uv run python directly, bypassing bth run.
+    outcome: Lost provenance for job 14262527.
+    reason_failed: Did not carry bth-wrapper pattern from fit_bonded_hp4.slurm.
+    do_not_retry: true
+    evidence_ref: null
+
+open_questions:
+  - >
+    DMFF HarmonicAngleGenerator equilibrium parameter key name: likely 'angle' (by
+    analogy with bond generator 'length') but unconfirmed past classical.py:150.
+    Read /tmp/dmff-repo/dmff/generators/classical.py L150-250 before writing bench_dmff.py.
+  - >
+    TorchMD YamlForcefield: does it require lj/electrostatics sections even for
+    bonded-only runs? Unconfirmed. If yes, add zero-value stubs. Check ff_yaml.py
+    source when lj section absent.
+  - >
+    espaloma torsion 'periodicity' node feature dtype: int or float tensor? Read
+    /tmp/espaloma-repo/espaloma/mm/torsion.py (or energy.py apply_torsion) before
+    writing bench_espaloma.py.
+  - >
+    Threshold values for campaign_design.toml outcomes.pass/marginal: TODO until all
+    4 tools have N=64 smoke numbers (T_d, T_t, T_e measured).
+
+deferred:
+  - description: ForceBalance Scope C harness (bench_forcebalance.py)
+    rationale: >
+      Scope C only (ecological floor, FD convergence vs autograd). Different
+      methodology — not comparable to Scope A primitive. Not needed for smoke round.
+    recommended_phase: post-smoke-round
+
+  - description: Distinct-N=512 follow-up sweep (campaign d521fd53)
+    rationale: >
+      Draft pre-reg exists. Tests chemistry-distribution independence. Lower priority
+      than external-baseline smoke round.
+    recommended_phase: post-v1.2
+
+  - description: Ensemble-domain axes (N_SEEDS, N_TEMPERATURES, N_REPLICAS)
+    rationale: Not load-bearing for §7.1. Logged at .praxia/debt.jsonl 260522-001.
+    recommended_phase: v1.3
+
+# ── Key API facts for next session (source-verified from /tmp repos) ──────────
+#
+# DMFF (/tmp/dmff-repo@809f656):
+#   Hamiltonian(*xml_files)  # NonbondedForce section optional — prints warning, no throw
+#   pot = h.createPotential(topo, nonbondedMethod=app.NoCutoff)
+#   pairs = NoCutoffNeighborList(cov_map=pot.meta['cov_map']).allocate(positions)
+#     # pairs shape (N,3) — third column is bond order, MANDATORY
+#   efunc = pot.getPotentialFunc()  # efunc(pos[natoms,3], box[3,3], pairs[N,3], prms)
+#   params = h.getParameters()      # ParamSet pytree
+#     params['HarmonicBondForce']['k']       # kJ/mol/nm²
+#     params['HarmonicBondForce']['length']  # nm
+#     params['HarmonicAngleForce']['k']      # kJ/mol/rad² (key 'angle' for eq — VERIFY)
+#   loss = sum_i efunc_i(pos_i, box, pairs_i, params)
+#   val, grads = jax.value_and_grad(loss)(params)  # then optax step
+#   Unit conversions (AKMA → OpenMM):
+#     r0_nm = r0_Å * 0.1
+#     k_kJ_nm2 = k_kcal_A2 * 4.184 * 100 * 2   # half-spring convention
+#     angle_rad = theta0_deg * π/180
+#     k_kJ_rad2 = k_theta_kcal_rad2 * 4.184 * 2
+#     k_tors_kJ = k_phi_kcal * 4.184
+#
+# TorchMD (/tmp/torchmd-repo@0948418, PyPI torchmd>=1.1.2):
+#   Strictly file-based Parameters (no raw-array constructor)
+#   YamlForcefield(mol, yaml_path) — YAML format:
+#     bonds: (AT1, AT2): {k0: <kcal/mol/Å²>, req: <Å>}   ← same units as prolix JSON
+#     angles: (AT1, AT2, AT3): {k0: <kcal/mol/rad²>, theta0: <degrees>}
+#   Forces(parameters, terms=['bonds','angles','dihedrals'])
+#   forces.compute(pos[nreplicas,natoms,3], box, system.forces)  # loop at L104-320
+#   No cross-topology batching. torch.vmap = same topology only.
+#
+# espaloma (/tmp/espaloma-repo@413eb55):
+#   EnergyInGraph node feature keys (energy.py:18-19):
+#     n2 (bonds):    'k' [force const], 'eq' [equil distance, Å]
+#     n3 (angles):   'k', 'eq' [radians]
+#     n4 (torsions): 'k', 'phases', 'periodicity'
+#   GeometryInGraph: reads 'xyz' from n1 → writes 'x' to n2/n3/n4
+#   Graph construction requires openff-toolkit (no workaround)
+#   dgl.batch works for N-mol batching (NOT used in espaloma codebase but valid)
+#   energy in g.nodes['g'].data['u'], then loss.backward()
+#
+# Unified XML input:
+#   _generate_xml.py: prolix JSON → OpenMM XML per molecule
+#   bench_prolix.py: add --xml-dir flag (parses XML → internal repr)
+#   bench_dmff.py: feeds XML directly to Hamiltonian
+#   bench_torchmd.py: XML → YAML (unit-passthrough for bonds/angles)
+#   bench_espaloma.py: XML → DGL heterograph via openff-toolkit
+
+lessons_refs:
+  - feedback_s71_figure_is_external_comparator
+  - feedback_bath_preregistration_discipline
+  - feedback_fixer_auto_commit
+  - feedback_jax_logging_and_precision
