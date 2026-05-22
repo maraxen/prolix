@@ -1,0 +1,98 @@
+---
+workspace: prolix
+session_id: 260522-external-baseline-smoke
+status: in_progress
+immediately_relevant:
+- file: CLAUDE.md
+  lines: []
+  reason: Read first. Includes Experiment Tracking (bathos) section with six hard rules + anti-patterns.
+- file: scripts/benchmarks/external_baseline/README.md
+  lines: []
+  reason: Slate + scope + per-tool harness plan
+- file: scripts/benchmarks/external_baseline/bench_prolix.py
+  lines: []
+  reason: Canonical Scope A harness to mirror for bench_pytorch_scratch/dmff/torchmd/espaloma
+- file: scripts/benchmarks/external_baseline/bench_prolix.bth.toml
+  lines: []
+  reason: Canonical per-script sidecar with [experiment] schema
+- file: scripts/slurm/bench_external_baseline.slurm
+  lines: []
+  reason: Slurm wrapper. Uses bth run + tags + --campaign edbd0b84
+- file: .praxia/specs/2026-05-21-bundle-port-spec.md
+  lines: []
+  reason: Bundle port spec - all 8 phases complete
+- file: scripts/benchmarks/external_baseline/campaign_design.toml
+  lines: []
+  reason: Campaign threshold reasoning. TODO until smoke round.
+- file: scripts/benchmarks/external_baseline/research_notes.md
+  lines: []
+  reason: Smoke plan + anchoring math. prolix=14.9us anchored; 4 comparators TODO.
+- file: .praxia/debt.jsonl
+  lines: []
+  reason: Tech debt log. Entry 260522-001 = v1.3 ensemble axes deferred.
+active_dispatches: []
+task_id: 261522_external-baseline-smoke
+phase: external-baseline-smoke-round
+goal_statement: Complete the §7.1 external-baseline campaign smoke round. Build 3 remaining comparator harnesses (DMFF, TorchMD, espaloma), smoke each at N=64 on RTX Pro 6000 Blackwell via bth run + campaign edbd0b84, anchor sidecar thresholds with empirical numbers, then submit the full sweep. PyTorch-from-scratch was cut (2026-05-22) as a strawman — TorchMD is the real PyTorch comparator. §7.1 paper figure is PROLIX vs EXTERNAL COMPARATORS, not internal looped-vs-batched (see memory feedback-s71-figure-is-external-comparator).
+context_refs:
+- phase: bundle-port
+  task_id: 261521_bundle-port-complete
+  summary: 8/8 phases of Bundle composability port shipped 2026-05-21 + BatchPlan dispatch 2026-05-22. Commits 5b2e1ce..a633de1. Three-property substrate (portability + heterogeneous batching + composability) real. 110+ tests pass.
+- phase: campaign-internal-sweep
+  task_id: 261520_s71_internal_sweep
+  summary: 'Campaign 0275e1fa concluded exploration_complete: 99.89x speedup at N=512 with OLD code. NOT the paper figure - that comparison is internal-vs-internal.'
+- phase: external-baseline-prolix-smoke
+  task_id: 261522_external-baseline-smoke
+  summary: 'Campaign edbd0b84 created. Run 6ce95e65-87bb-40a7-931a-fe37cb733e51 (job 14263023): prolix N=64 f32 -> 14.9us per_mol_step on RTX Pro 6000. final_loss=32759.87 (non-zero, real compute).'
+failed_attempts:
+- attempt_id: 260522-pre-bath-workflow
+  description: First bench_external_baseline.slurm bypassed bath - direct uv run python.
+  outcome: Lost provenance for job 14262527; user caught via /using-bathos.
+  reason_failed: Did not carry over bath-wrapper pattern from fit_bonded_hp4.slurm.
+  do_not_retry: true
+  evidence_ref: null
+- attempt_id: 260522-benchmark-schema
+  description: Sidecar used [benchmark] not [experiment] schema.
+  outcome: 'Bath gate rejected on job 14262901: ''No [outcomes] section found''.'
+  reason_failed: '[benchmark] schema in skill docs lacks [outcomes] but bath gate is strict about [experiment].'
+  do_not_retry: true
+  evidence_ref: null
+- attempt_id: 260522-pytorch-scratch-comparator
+  description: Planned bench_pytorch_scratch.py as a §7.1 headline comparator alongside DMFF/TorchMD/espaloma.
+  outcome: Cut 2026-05-22 after user + advisor review. TorchMD is the real PyTorch comparator; a from-scratch naive impl is a strawman that undercuts the heterogeneous-batching claim.
+  reason_failed: Strawman risk — a hand-written torch.gather loop loses to anything; beating it does not support the portability/heterogeneous-batching claim.
+  do_not_retry: true
+  evidence_ref: null
+- attempt_id: 260521-internal-speedup-claim
+  description: Framed 99.89x internal speedup as §7.1 paper headline.
+  outcome: 'User pushback: external comparators are the actual claim.'
+  reason_failed: Tunnel vision on internal benchmarks; internal is scaffolding, not paper figure.
+  do_not_retry: true
+  evidence_ref: null
+- attempt_id: 260521-phase5-vmap-params-closure
+  description: Phase 5 loss_per_mol closure-captured params.
+  outcome: B=2 loss 4x wrong; B=1 tests passed, undetected until Phase 7 equivalence gate.
+  reason_failed: Missing params from vmap in_axes; closure broadcasts full B-shaped pytree.
+  do_not_retry: true
+  evidence_ref: null
+open_questions:
+- Threshold values for campaign_design.toml outcomes.pass - TODO until all 4 tools smoke at N=64
+- 'Per-comparator uv env management: separate .venv-{tool}/ vs uv overlays?'
+- 'Scope C harness shape: separate scripts or shared with Scope A?'
+deferred:
+- description: Ensemble-domain axes (N_SEEDS, N_TEMPERATURES, N_NOISES, N_REPLICAS)
+  rationale: Not load-bearing for §7.1. Useful for replica exchange / parallel tempering. Logged at .praxia/debt.jsonl 260522-001.
+  recommended_phase: v1.3
+- description: Pallas deprecation policy
+  rationale: 'Pallas may still be beneficial as opt-in NVIDIA kernels but must NOT be reachable from default portable path. Task #34.'
+  recommended_phase: v1.2-polish
+- description: Distinct-N=512 follow-up sweep (campaign d521fd53)
+  rationale: Draft pre-reg exists; not submitted. Tests chemistry-distribution independence. Lower priority than external-baseline.
+  recommended_phase: post-v1.2
+lessons_refs:
+- feedback_s71_figure_is_external_comparator
+- feedback_fixer_auto_commit
+- feedback_bath_preregistration_discipline
+- feedback_jax_logging_and_precision
+- feedback_optimizer_recipe_deferred_to_v1
+---

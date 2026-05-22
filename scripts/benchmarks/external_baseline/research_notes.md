@@ -27,12 +27,7 @@ research is still needed before the campaign can run for real.
    - We want JUST the energy forward+backward, NOT the full GNN training step.
    - Action: `bench_espaloma.py`, drive `energy_in_graph` directly with pre-built batched heterograph.
 
-5. **What is PyTorch-from-scratch's per-mol-step?**
-   - Build a minimal naive implementation: tensor of (B, n_atoms_max, 3), per-bond force via `torch.gather`, eager loss.
-   - Compare with and without `torch.compile`.
-   - Action: `bench_pytorch_scratch.py`, eager smoke first.
-
-6. **Does ForceBalance even fit a 500-step Adam-equivalent comparison?**
+5. **Does ForceBalance even fit a 500-step Adam-equivalent comparison?**
    - ForceBalance uses Newton-Raphson + FD Hessian; converges in ~10 iterations.
    - Each iteration cost is much higher than an Adam step.
    - Action: skip Scope A (no autograd). For Scope C: measure wall-clock to converge to a fixed residual on a 16-mol target. Different methodology, report as ecological floor.
@@ -46,30 +41,29 @@ research is still needed before the campaign can run for real.
 | 3 | Write `bench_dmff.py` (single-mol Adam loop using DMFF Hamiltonian) | 2h |
 | 4 | Write `bench_torchmd.py` (per-system Adam loop) | 2h |
 | 5 | Write `bench_espaloma.py` (drive `energy_in_graph` + per-mol Adam) | 2h |
-| 6 | Write `bench_pytorch_scratch.py` (naive eager + torch.compile variants) | 1h |
-| 7 | Smoke each at N=16 locally (CPU, just confirms it runs) | 1h |
-| 8 | Cluster smoke at N=64 (one cell per tool, pinned node4007/4008) | 30min wait |
-| 9 | Anchor thresholds in sidecar based on N=64 numbers | 30min |
+| 6 | Smoke each at N=16 locally (CPU, just confirms it runs) | 1h |
+| 7 | Cluster smoke at N=64 (one cell per tool, pinned node4007/4008) | 30min wait |
+| 8 | Anchor thresholds in sidecar based on N=64 numbers | 30min |
 
-After step 9: full campaign sweep at N ∈ {16, 32, 64, 128, 256, 512} × {f32, f64}
-for the autograd-capable tools (5 tools × 12 cells = 60 cells per Scope A).
+After step 8: full campaign sweep at N ∈ {16, 32, 64, 128, 256, 512} × {f32, f64}
+for the autograd-capable tools (4 tools × 12 cells = 48 cells per Scope A).
 
 ## Threshold-anchoring math (placeholder)
 
 Once smoke numbers land, plug into:
 
 ```
-prolix_n64 = T_p  # measured
-dmff_n64 = T_d
-torchmd_n64 = T_t
-espaloma_n64 = T_e
-pytorch_n64 = T_y
+prolix_n64 = T_p  # measured: 14.9 µs/mol-step (run 6ce95e65, job 14263023)
+dmff_n64 = T_d    # TODO: smoke bench_dmff.py
+torchmd_n64 = T_t # TODO: smoke bench_torchmd.py
+espaloma_n64 = T_e # TODO: smoke bench_espaloma.py
 
 # Conservative pass threshold (50% better than fastest non-batched competitor)
-pass_threshold = 0.5 * min(T_d, T_t, T_y)  # exclude espaloma (it has batching)
+# PyTorch-from-scratch removed (2026-05-22): not a citable comparator; TorchMD covers PyTorch slot
+pass_threshold = 0.5 * min(T_d, T_t)  # exclude espaloma (it has DGL batching)
 
 # Marginal: between 0.5× and 1.0×
-marginal_threshold = 1.0 * min(T_d, T_t, T_y)
+marginal_threshold = 1.0 * min(T_d, T_t)
 ```
 
 If actual prolix < pass_threshold → claim succeeds.

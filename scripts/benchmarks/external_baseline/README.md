@@ -7,12 +7,15 @@ All scripts share the campaign tag `hp4-s71-external-baseline`.
 
 | Tool | Framework | Harness file | Status |
 |---|---|---|---|
-| prolix (v1.2 Bundle code) | JAX/Equinox | `bench_prolix.py` | TODO |
+| prolix (v1.2 Bundle code) | JAX/Equinox | `bench_prolix.py` | ✅ smoke done (14.9 µs/mol-step, N=64 f32) |
 | DMFF | JAX | `bench_dmff.py` | TODO |
 | TorchMD | PyTorch (eager) | `bench_torchmd.py` | TODO |
 | espaloma | PyTorch + DGL | `bench_espaloma.py` | TODO |
-| PyTorch-from-scratch | PyTorch + torch.compile | `bench_pytorch_scratch.py` | TODO |
 | ForceBalance | Newton-Raphson + FD | `bench_forcebalance.py` | TODO (Scope C only) |
+
+Note: PyTorch-from-scratch was removed (2026-05-22). It is a strawman — TorchMD is the
+real, citable PyTorch comparator. A from-scratch impl would only demonstrate we wrote
+it carelessly; it does not support the heterogeneous-batching substrate claim.
 
 Captioned-only (not benchmarked, just referenced):
 - TorchANI (NN potential, different objective)
