@@ -13,7 +13,7 @@ goal_statement: >
   EXTERNAL COMPARATORS.
 
 immediately_relevant:
-  - file: scripts/benchmarks/external_baseline/research_notes.md
+  - file: .praxia/docs/notes/260522_s71-external-baseline-api-verification.md
     lines: []
     reason: >
       READ FIRST. Source-verified API facts for DMFF/TorchMD/espaloma (2026-05-22
