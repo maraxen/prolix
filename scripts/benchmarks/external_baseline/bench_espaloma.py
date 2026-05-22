@@ -78,6 +78,10 @@ def build_graph_from_json(mol_json: dict):
     for b in bonds:
         rw.AddBond(b["i"], b["j"], Chem.BondType.SINGLE)
     mol_rd = rw.GetMol()
+    # UpdatePropertyCache computes implicit valences so openff-toolkit's
+    # from_rdkit can call getNumImplicitHs() without a pre-condition violation.
+    # strict=False allows unusual valences (N+, S4, etc.) without raising.
+    mol_rd.UpdatePropertyCache(strict=False)
 
     # Build openff molecule from rdkit mol
     off_mol = OFFMolecule.from_rdkit(mol_rd, allow_undefined_stereo=True)
@@ -247,14 +251,18 @@ def bench_one_step(args) -> dict:
 
     def step_fn():
         optimizer.zero_grad()
-        # Inject positions into n1.xyz for each mol in the batch
+        # Inject positions into n1.xyz for each mol in the batch.
+        # n1 nodes include H atoms added by openff-toolkit; pos_i contains only
+        # heavy atoms. Pad with zeros for the extra H-atom nodes — positions need
+        # to be valid tensors for timing but don't need physical accuracy.
         n1_start = 0
         for g_i, pos_i in zip(graphs, positions_list):
             n1_i = g_i.number_of_nodes("n1")
-            pos_tensor = torch.tensor(
-                pos_i[:n1_i], dtype=dtype, device=device
-            )
-            batched_g.nodes["n1"].data["xyz"][n1_start : n1_start + n1_i] = pos_tensor
+            n_heavy = min(pos_i.shape[0], n1_i)
+            # Shape (n1_i, 1, 3) — espaloma geometry uses (n_atoms, n_confs, 3)
+            pos_full = torch.zeros(n1_i, 1, 3, dtype=dtype, device=device)
+            pos_full[:n_heavy, 0, :] = torch.tensor(pos_i[:n_heavy], dtype=dtype, device=device)
+            batched_g.nodes["n1"].data["xyz"][n1_start : n1_start + n1_i] = pos_full
             n1_start += n1_i
 
         geometry_in_graph(batched_g)
@@ -268,7 +276,7 @@ def bench_one_step(args) -> dict:
     if "xyz" not in batched_g.nodes["n1"].data:
         n1_total = batched_g.number_of_nodes("n1")
         batched_g.nodes["n1"].data["xyz"] = torch.zeros(
-            n1_total, 3, dtype=dtype, device=device
+            n1_total, 1, 3, dtype=dtype, device=device
         )
 
     # Warmup: compiles + discarded for timing

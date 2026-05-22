@@ -19,16 +19,19 @@
 #   This env pins torch to 2.1.x for DGL 2.1.0 compatibility.
 #   When DGL releases wheels for newer torch, update TORCH_VERSION below.
 #
-# Tested environment (target — not yet smoke-tested on current hardware due
-#   to disk constraints):
-#   micromamba 2.6.2, Python 3.11, torch 2.1.2, DGL 2.1.0 (dglteam/label/cu121),
-#   espaloma 0.4.0 (GitHub HEAD), openff-toolkit 0.16.x (conda-forge)
+# Tested environment (smoke-tested 2026-05-22):
+#   micromamba 2.6.2, Python 3.11, torch 2.1.0+cu121, torchdata 0.7.0,
+#   DGL 2.1.0 (dglteam/label/cu121), espaloma 0.4.0+1.g413eb55,
+#   openff-toolkit 0.16.x (conda-forge)
 
 set -euo pipefail
 
 ENV_NAME="${1:-espaloma-bench}"
-TORCH_VERSION="2.1.2"
+TORCH_VERSION="2.1.0"
 CUDA_TAG="cu121"        # match to your CUDA installation; options: cpu, cu118, cu121
+# torchdata 0.7.0 is the torch-2.1.x matched release that still ships datapipes
+# (DGL 2.1.0 graphbolt imports torchdata.datapipes; removed in torchdata 0.9.0+)
+TORCHDATA_VERSION="0.7.0"
 
 echo "==> Checking micromamba"
 if ! command -v micromamba &>/dev/null; then
@@ -50,9 +53,12 @@ micromamba install -n "$ENV_NAME" -y \
     -c conda-forge \
     openff-toolkit
 
-echo "==> Installing PyTorch $TORCH_VERSION"
+echo "==> Installing PyTorch $TORCH_VERSION + torchdata $TORCHDATA_VERSION"
+# torchdata must be pinned together with torch; DGL 2.1.0 graphbolt imports
+# torchdata.datapipes which was removed in torchdata 0.9.0+ (torch 2.3+).
 micromamba run -n "$ENV_NAME" pip install \
     "torch==${TORCH_VERSION}" \
+    "torchdata==${TORCHDATA_VERSION}" \
     --extra-index-url "https://download.pytorch.org/whl/${CUDA_TAG}"
 
 echo "==> Installing DGL 2.1.0 (dglteam channel, matched to torch ${TORCH_VERSION}/${CUDA_TAG})"
