@@ -221,13 +221,18 @@ def bench_one_step(args) -> dict:
         "Built %d DGL graphs (n_atoms_max=%d)", n_mols_actual, n_atoms_max
     )
 
-    # Move graphs to device and cast parameter tensors
-    for g in graphs:
-        for ntype in g.ntypes:
-            for key in list(g.nodes[ntype].data.keys()):
-                g.nodes[ntype].data[key] = g.nodes[ntype].data[key].to(device=device, dtype=dtype)
+    # Move each graph to device first, THEN batch — if we batch CPU graphs and
+    # call .to(device) on the result, internal DGL edge lists stay on CPU and
+    # cause device-mismatch errors when espaloma assigns GPU-computed features.
+    for i in range(len(graphs)):
+        graphs[i] = graphs[i].to(device)
+        for ntype in graphs[i].ntypes:
+            for key in list(graphs[i].nodes[ntype].data.keys()):
+                graphs[i].nodes[ntype].data[key] = (
+                    graphs[i].nodes[ntype].data[key].to(device=device, dtype=dtype)
+                )
 
-    # Build optimizer over all parameter tensors
+    # Build optimizer over all parameter tensors (already on device)
     param_tensors = []
     for g in graphs:
         for key in ["k", "eq"]:
@@ -246,8 +251,8 @@ def bench_one_step(args) -> dict:
 
     optimizer = torch.optim.Adam(param_tensors, lr=1e-4)
 
-    # Batch all graphs for a single forward pass
-    batched_g = dgl.batch(graphs).to(device)
+    # Batch already-on-device graphs
+    batched_g = dgl.batch(graphs)
 
     def step_fn():
         optimizer.zero_grad()

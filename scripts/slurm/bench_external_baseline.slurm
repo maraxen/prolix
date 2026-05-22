@@ -1,7 +1,6 @@
 #!/bin/bash
 #SBATCH --job-name=prolix_bench_ext
 #SBATCH --partition=pi_so3
-#SBATCH --nodelist=node4007,node4008
 #SBATCH --gres=gpu:1
 #SBATCH --time=0:30:00
 #SBATCH --nodes=1
@@ -12,9 +11,17 @@
 #SBATCH --error=outputs/logs/slurm/%j.bench_external_baseline.err
 
 # §7.1 external-baseline single-tool smoke runner.
-# Pinned to node4007/4008 (RTX Pro 6000 Blackwell) — same as fit_bonded_hp4.
+# Default partition: pi_so3 (RTX Pro 6000 Blackwell, sm_120).
+# For tools locked to CUDA 12.1 / torch 2.1.0 (espaloma, DMFF):
+#   override partition + gres at sbatch time to target A100 (sm_80):
+#     sbatch --partition=mit_preemptable --nodelist=<a100-node> --gres=gpu:a100:1 \
+#            --export=ALL,TOOL=espaloma,...,HARDWARE_TAG=a100-sm80 \
+#            scripts/slurm/bench_external_baseline.slurm
+# Hardware compatibility:
+#   prolix/TorchMD  → Blackwell sm_120 (CUDA 13, torch 2.12.0+cu130 / JAX 0.8.1)
+#   DMFF/espaloma   → A100 sm_80 (CUDA 12.1, JAX 0.4.25+cu121 / torch 2.1.0+cu121)
 #
-# Submission (per-tool smoke):
+# Submission (per-tool smoke, Blackwell default):
 #   sbatch --export=ALL,TOOL=prolix,N_MOLS=64,N_CONF_CAP=100,PRECISION=float32 \
 #          scripts/slurm/bench_external_baseline.slurm
 
@@ -71,22 +78,27 @@ esac
 
 echo "Python: ${PYTHON_INTERP}"
 
-# External comparators run on CPU: torch 2.1.0+cu121 (torchmd/espaloma) does not
-# support CUDA capability sm_120 (Blackwell RTX Pro 6000); JAX 0.4.25 (dmff) is
-# CPU-only. Setting CUDA_VISIBLE_DEVICES="" forces CPU for all external tools.
-# prolix uses uv run python and will use whatever JAX detects.
-if [[ "${TOOL}" != "prolix" ]]; then
+# FORCE_CPU=1: hide the GPU for all tools (for apples-to-apples CPU comparison).
+# Default (0): each tool uses its native device detection.
+FORCE_CPU="${FORCE_CPU:-0}"
+if [[ "${FORCE_CPU}" == "1" ]]; then
     export CUDA_VISIBLE_DEVICES=""
+    echo "FORCE_CPU=1: GPU hidden for all tools"
 fi
 
-# espaloma: conda env lib/ has a stale conda-installed libtorch (pulled in by
-# openff-nagl → torch) that conflicts with the pip-installed torch 2.1.0+cu121.
-# Fix: put the pip torch lib first in LD_LIBRARY_PATH so the right libtorch loads,
-# then the conda lib/ for libstdcxx-ng (GLIBCXX_3.4.29 needed by pip numpy).
+# espaloma: three LD_LIBRARY_PATH layers required in priority order:
+#   1. pip torch lib — pip-installed torch 2.1.0+cu121 bundles some CUDA libs;
+#      must come BEFORE conda lib/ to prevent the stale conda-installed libtorch
+#      (from openff-nagl → torch 2.6.x via conda) from being loaded instead.
+#   2. nvidia cuda pip packages — DGL 2.1.0+cu121 links against libcusparse.so.12
+#      etc. which live in site-packages/nvidia/*/lib/ (installed as nvidia-*-cu12).
+#   3. conda lib/ — provides libstdcxx-ng (GLIBCXX_3.4.29 required by pip numpy).
 if [[ "${TOOL}" == "espaloma" ]]; then
     _MAMBA_ENV="${HOME}/.local/share/mamba/envs/espaloma-bench"
-    _TORCH_LIB="${_MAMBA_ENV}/lib/python3.11/site-packages/torch/lib"
-    export LD_LIBRARY_PATH="${_TORCH_LIB}:${_MAMBA_ENV}/lib${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
+    _SP="${_MAMBA_ENV}/lib/python3.11/site-packages"
+    _TORCH_LIB="${_SP}/torch/lib"
+    _NV_LIBS="${_SP}/nvidia/cusparse/lib:${_SP}/nvidia/cublas/lib:${_SP}/nvidia/cuda_runtime/lib:${_SP}/nvidia/cufft/lib:${_SP}/nvidia/curand/lib:${_SP}/nvidia/cusolver/lib:${_SP}/nvidia/nvjitlink/lib"
+    export LD_LIBRARY_PATH="${_TORCH_LIB}:${_NV_LIBS}:${_MAMBA_ENV}/lib${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
 fi
 
 # bath provenance: per-script sidecar at scripts/benchmarks/external_baseline/bench_${TOOL}.bth.toml

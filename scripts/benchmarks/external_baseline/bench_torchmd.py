@@ -244,13 +244,23 @@ def bench_one_step(args) -> dict:
     if n_mols_actual == 0:
         raise RuntimeError("No molecules could be loaded — check subset_dir and JSON schema.")
 
-    # Collect differentiable FF parameter tensors from each mol's Parameters object
+    # Move ALL tensors in each params dict to device (floating → dtype cast,
+    # integer index tensors → device only). This covers "params" (force constants)
+    # AND "idx" (atom pair/triple/quad indices) that forces.compute passes to
+    # index_add_ — a cpu/cuda mismatch on index tensors is the most common failure.
     all_params: list[torch.Tensor] = []
     for forces_obj, _, _ in mol_data_list:
         par = forces_obj.par
         for attr in ("bond_params", "angle_params", "dihedral_params"):
             d = getattr(par, attr)
             if d is not None:
+                for key in list(d.keys()):
+                    if not isinstance(d[key], torch.Tensor):
+                        continue
+                    if d[key].is_floating_point():
+                        d[key] = d[key].to(device=device, dtype=dtype)
+                    else:
+                        d[key] = d[key].to(device=device)
                 d["params"].requires_grad_(True)
                 all_params.append(d["params"])
 
