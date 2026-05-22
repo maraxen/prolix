@@ -1,0 +1,84 @@
+# bath sidecar for bench_espaloma.py — Scope A primitive smoke
+#
+# Per-tool sidecar. Campaign-level design + comparator thresholds live in
+# campaign_design.toml + research_notes.md.
+#
+# This sidecar's outcomes are PROCESS-level (does the harness emit valid data)
+# because smoke-round thresholds are not yet anchored. After all comparators
+# smoke at N=64, a separate confirmation-mode sidecar with empirical thresholds
+# will be added (and this sidecar's hypothesis revisited).
+
+[experiment]
+hypothesis = """
+espaloma 0.3.2 (DGL heterograph + dgl.batch batched forward pass) emits a valid
+Scope A primitive measurement on RTX Pro 6000 Blackwell: forward+backward of
+bonded energy across N mols mixed-size via dgl.batch, one Adam step, with non-zero
+loss (confirming real compute, no torch dead-code elimination) and positive timing.
+
+Graph construction uses openff-toolkit + rdkit to build DGL heterographs from
+prolix JSON mol specs, injecting prolix FF parameters into n2/n3/n4 node data.
+This is maximally generous to espaloma: dgl.batch provides a single batched
+forward pass rather than per-mol sequential execution.
+
+The number this run produces becomes the espaloma anchor for the §7.1
+external-baseline campaign threshold setting. No relative-to-comparator
+claim is made yet — those thresholds get anchored AFTER each comparator
+(DMFF, TorchMD, prolix) smokes at the same N=64 on the same hardware.
+"""
+
+[outcomes.pass]
+condition = "per_mol_step_seconds > 0 AND final_loss > 0 AND final_loss < 1e10"
+decision = "Anchor recorded. Use this row's per_mol_step_seconds as the espaloma reference number for sidecar threshold anchoring once all comparator smokes complete."
+reasoning = """
+Pass = harness emits valid metrics:
+  - per_mol_step_seconds > 0: timing actually measured, not negative clock skew
+  - final_loss > 0: real compute happened; non-zero loss confirms bonded energy
+    terms are wired correctly through geometry_in_graph + energy_in_graph
+  - final_loss < 1e10: not NaN/Inf, not runaway gradient
+
+Expected range: espaloma DGL batched forward is ~O(1) Python overhead + DGL
+scatter ops. At N=64, per-mol-step in the 10µs–10ms range is plausible depending
+on whether CUDA kernels are warm. Any positive finite value establishes the anchor.
+"""
+
+[outcomes.fail]
+is_residual = true
+condition = "per_mol_step_seconds IS NULL OR per_mol_step_seconds <= 0 OR final_loss IS NULL OR final_loss <= 0 OR final_loss >= 1e10"
+decision = "Harness broken or computation suspect. Investigate before treating this row as a threshold anchor: zero/NaN loss → graph parameter injection bug or DGL constant-fold; missing fields → script crash; runaway loss → gradient blow-up or wrong units."
+reasoning = """
+Residual catch-all per bath gate requirements. Covers:
+- Script exit non-zero or output JSON malformed (fields IS NULL)
+- per_mol_step_seconds <= 0: negative clock skew, immediate exit, or invalid timing
+- final_loss <= 0: graph parameters not wired for grad, or DGL energy_in_graph
+  returned zero (e.g., n4 torsion terms all zeroed, no bonded contribution)
+- final_loss >= 1e10: NaN/Inf or runaway gradient (wrong units — e.g., AKMA vs SI
+  energy mismatch on k_bond or r0 injection)
+
+Any of these → anchor cannot be established. Fix the harness, re-run.
+"""
+
+[result_schema]
+tool = "str"
+tool_version = "str"
+scope = "str"
+n_mols = "int"
+n_conformers_per_mol = "int"
+n_atoms_max = "int"
+precision = "str"
+device = "str"
+hardware_tag = "str"
+trial_seconds = "float"
+trial_min_seconds = "float"
+trial_max_seconds = "float"
+per_mol_step_seconds = "float"
+peak_memory_mib = "float"
+compile_seconds = "float"
+final_loss = "float"
+git_hash = "str"
+n_warmup = "int"
+n_trials = "int"
+
+[metadata]
+campaign_id = "hp4-s71-external-baseline"
+campaign_mode = "exploration"
+tags = ["cluster", "s71", "external-baseline", "scope-a", "smoke", "espaloma"]
