@@ -97,11 +97,11 @@ def _build_yaml_forcefield(mol_data: dict, mol_id: str, tmp_dir: str) -> str:
             t["periodicity"], t["phase_deg"], t["k_phi"]
         ):
             terms.append({
-                "k0": float(k_phi),
-                "phi0": float(phase),
-                "period": int(period),
+                "phi_k": float(k_phi),
+                "phase": float(phase),
+                "per": int(period),
             })
-        dihedrals_yaml[key] = terms
+        dihedrals_yaml[key] = {"terms": terms}
 
     ff_dict: dict = {}
     if bonds_yaml:
@@ -130,16 +130,18 @@ def _build_torchmd_objects(
     molecule (e.g. no supported terms).
     """
     from torchmd.forcefields.forcefield import ForceField
-    from torchmd.molecule import Molecule
+    from moleculekit.molecule import Molecule
     from torchmd.parameters import Parameters
     from torchmd.forces import Forces
 
     n_atoms = len(mol_data["atom_types"])
     atomtypes = [f"A{i}" for i in range(n_atoms)]
 
+    _ATOMIC_MASS = {1:1.008,6:12.011,7:14.007,8:15.999,9:18.998,15:30.974,16:32.06,17:35.45,35:79.904,53:126.904}
     mol = Molecule()
-    mol.numAtoms = n_atoms
-    mol.atomtype = np.array(atomtypes)
+    mol.empty(n_atoms)
+    mol.atomtype[:] = atomtypes
+    mol.masses = np.array([_ATOMIC_MASS.get(a["Z"], 12.0) for a in mol_data["atom_types"]], dtype=np.float32)
 
     bonds_list = mol_data.get("bonds", [])
     if bonds_list:
@@ -166,7 +168,6 @@ def _build_torchmd_objects(
 
     yaml_path = _build_yaml_forcefield(mol_data, mol_id, tmp_dir)
     ff = ForceField.create(mol, yaml_path)
-    parameters = Parameters(ff, mol, precision=dtype)
     terms = []
     if bonds_list:
         terms.append("bonds")
@@ -177,6 +178,7 @@ def _build_torchmd_objects(
     if not terms:
         raise ValueError(f"mol {mol_id}: no bonded terms — skipping")
 
+    parameters = Parameters(ff, mol, terms=terms, precision=dtype)
     forces_obj = Forces(parameters, terms=terms)
 
     # Use first conformer only (n_conf_cap=1 for timing)
@@ -242,10 +244,15 @@ def bench_one_step(args) -> dict:
     if n_mols_actual == 0:
         raise RuntimeError("No molecules could be loaded — check subset_dir and JSON schema.")
 
-    # Collect all Parameters objects for the optimizer
-    all_params: list[torch.nn.Parameter] = []
+    # Collect differentiable FF parameter tensors from each mol's Parameters object
+    all_params: list[torch.Tensor] = []
     for forces_obj, _, _ in mol_data_list:
-        all_params.extend(forces_obj.parameters.parameters())
+        par = forces_obj.par
+        for attr in ("bond_params", "angle_params", "dihedral_params"):
+            d = getattr(par, attr)
+            if d is not None:
+                d["params"].requires_grad_(True)
+                all_params.append(d["params"])
 
     optimizer = torch.optim.Adam(all_params, lr=1e-4)
 
@@ -253,8 +260,16 @@ def bench_one_step(args) -> dict:
         optimizer.zero_grad()
         total_loss = torch.zeros(1, dtype=dtype, device=device)
         for forces_obj, pos_tensor, _ in mol_data_list:
-            # pos shape for Forces.compute: (nreplicas, natoms, 3)
-            e = forces_obj.compute(pos_tensor.unsqueeze(0), None, forces_obj)
+            n_atoms_i = pos_tensor.shape[0]
+            # box: (nreplicas, 3, 3) — large vacuum box (bonded terms don't use PBC)
+            box = torch.eye(3, dtype=dtype, device=device).unsqueeze(0) * 1000.0
+            # forces_buf: (nreplicas, natoms, 3) — output buffer for explicit forces
+            forces_buf = torch.zeros(1, n_atoms_i, 3, dtype=dtype, device=device)
+            # toNumpy=False → returns tensor (differentiable through FF params)
+            e = forces_obj.compute(
+                pos_tensor.unsqueeze(0), box, forces_buf,
+                explicit_forces=True, toNumpy=False,
+            )
             total_loss = total_loss + e.sum()
         total_loss.backward()
         optimizer.step()
