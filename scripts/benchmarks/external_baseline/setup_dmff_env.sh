@@ -49,6 +49,10 @@ uv pip install --python "$VENV_DIR/bin/python" \
     "numpy>=1.26,<2.0" \
     "optax>=0.1.4" \
     "h5py>=3.0"
+# jaxlib 0.4.25+cuda12.cudnn89 does NOT bundle cuDNN — it expects libcudnn.so.8
+# to be available at runtime. Install via pip to avoid a system cuDNN dependency.
+# bench_external_baseline.slurm adds nvidia/cudnn/lib to LD_LIBRARY_PATH for DMFF.
+uv pip install --python "$VENV_DIR/bin/python" "nvidia-cudnn-cu12>=8.9,<9"
 
 echo "==> Installing OpenMM"
 # openmm 8.5.1+ requires glibc 2.34 (manylinux_2_34). Rocky 8 / CentOS 8 has

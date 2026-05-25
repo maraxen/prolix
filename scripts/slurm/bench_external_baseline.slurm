@@ -86,6 +86,15 @@ if [[ "${FORCE_CPU}" == "1" ]]; then
     echo "FORCE_CPU=1: GPU hidden for all tools"
 fi
 
+# dmff: jaxlib 0.4.25+cuda12.cudnn89 does not bundle cuDNN; requires libcudnn.so.8
+#   from the nvidia-cudnn-cu12 pip package installed in .venv-dmff.
+#   libcuda.so.1 is available on A100 compute nodes at /usr/lib64/ (no extra path).
+if [[ "${TOOL}" == "dmff" ]]; then
+    _DMFF_SP="${BENCH_DIR}/.venv-dmff/lib/python3.11/site-packages"
+    _CUDNN_LIB="${_DMFF_SP}/nvidia/cudnn/lib"
+    export LD_LIBRARY_PATH="${_CUDNN_LIB}${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
+fi
+
 # espaloma: three LD_LIBRARY_PATH layers required in priority order:
 #   1. pip torch lib — pip-installed torch 2.1.0+cu121 bundles some CUDA libs;
 #      must come BEFORE conda lib/ to prevent the stale conda-installed libtorch
