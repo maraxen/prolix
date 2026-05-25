@@ -32,15 +32,20 @@ VENV_DIR="$SCRIPT_DIR/.venv-dmff"
 echo "==> Creating DMFF venv at $VENV_DIR"
 uv venv --python 3.11 "$VENV_DIR"
 
-echo "==> Installing JAX (CPU) + core scientific stack"
-# On Rocky 8 / glibc 2.28: pin JAX 0.4.25 + numpy 1.26.x.
-# JAX 0.10.1 requires numpy>=2.0, but OpenMM 8.x PyPI wheels available for
-# glibc 2.28 (8.1.1, 8.2.0, 8.3.0) were compiled against numpy 1.x and fail
-# with NumPy 2.x ABI. On newer systems (glibc 2.34+) with OpenMM 8.5.1,
-# upgrading to jax[cpu]==0.10.1 + numpy>=2.0 is safe.
+echo "==> Installing JAX (CUDA 12) + core scientific stack"
+# Pin JAX 0.4.25 + numpy 1.26.x.
+# JAX 0.4.25 predates numpy 2.0 (released June 2024) so cuda12 build is
+# compatible with numpy 1.26.x and DMFF C extensions.
+# JAX >=0.4.28 / 0.10.x requires numpy>=2.0 which breaks DMFF; don't upgrade.
+# CUDA 12.1 supports A100 (sm_80) and earlier; Blackwell sm_120 requires
+# CUDA 13 / JAX >= 0.8 which breaks DMFF — use A100 for DMFF GPU runs.
+# jax[cuda12_pip] installs jaxlib+cuda12.cudnn89; requires libcuda.so.1 at
+# runtime (from host GPU driver — available on compute nodes, not login node).
+# Note: if rebuilding on a CPU-only system, replace cuda12_pip with cpu.
 uv pip install --python "$VENV_DIR/bin/python" \
-    "jax[cpu]==0.4.25" \
-    "jaxlib==0.4.25" \
+    "jax[cuda12_pip]==0.4.25" \
+    --find-links https://storage.googleapis.com/jax-releases/jax_cuda_releases.html
+uv pip install --python "$VENV_DIR/bin/python" \
     "numpy>=1.26,<2.0" \
     "optax>=0.1.4" \
     "h5py>=3.0"
