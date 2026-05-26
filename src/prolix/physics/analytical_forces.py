@@ -297,69 +297,397 @@ def gb_ace_forces_dense(
 # ---------------------------------------------------------------------------
 
 
-def bond_forces(
+def bond_forces_analytical(
     positions: Array,
-    bond_idx: Array,
+    bond_indices: Array,
     bond_params: Array,
-    bond_mask: Array,
     displacement_fn,
+    bond_mask: Array | None = None,
 ) -> Array:
-    """Analytical harmonic bond forces: -dE/dr for V = k*(r-r0)^2.
+    """Analytical harmonic bond forces: -dE/dr for U = 0.5*k*(r-r0)^2.
 
-    Computes forces from harmonic bond potential using analytical
-    differentiation. For each bond (i, j):
-        V = k * (|r_ij| - r0)^2
-        F_i = -dV/dr_i
-
-    This function is designed to be called by energy_with_analytical_shim
-    in place of jax.grad(energy) for the bonded contribution.
+    Computes forces from harmonic bond potential analytically.
+    For each bond (i, j): U = 0.5*k*(|r_ij| - r0)^2
+    Force: F = -dU/dr = -k*(r - r0) * r̂_ij
 
     Args:
         positions: Atom positions (N, 3).
-        bond_idx: Bond pairs (B, 2) — integer indices into positions.
-        bond_params: Bond parameters (B, 2) — [k, r0] per bond.
-            k: Force constant (kcal/mol/Å²).
+        bond_indices: Bond pairs (B, 2) — integer indices into positions.
+        bond_params: Bond parameters (B, 2) — [r0, k] per bond.
             r0: Equilibrium distance (Å).
-        bond_mask: Bool mask (B,) — True for real bonds, False for padding.
+            k: Force constant (kcal/mol/Å²).
         displacement_fn: PBC-aware displacement function from jax_md.space.
+        bond_mask: Optional mask (B,) — 1.0 for real bonds, 0.0 for padding.
 
     Returns:
         Force array (N, 3) in kcal/mol/Å.
-        Forces on padded atoms (where atom_mask is False) are zero.
-
-    Note:
-        Uses analytical computation of force magnitude and direction:
-          F_mag = 2 * k * (r - r0)
-          F_i = -F_mag * r̂_ij
-          F_j = +F_mag * r̂_ij
     """
-    i_idx = bond_idx[:, 0]
-    j_idx = bond_idx[:, 1]
-    k_bond = bond_params[:, 0]
-    r0 = bond_params[:, 1]
+    if bond_mask is None:
+        bond_mask = jnp.ones(bond_indices.shape[0])
+
+    i_idx = bond_indices[:, 0].astype(jnp.int32)
+    j_idx = bond_indices[:, 1].astype(jnp.int32)
+    r0 = bond_params[:, 0]
+    k = bond_params[:, 1]
 
     # Displacement vectors: r_ij = r_i - r_j (accounts for PBC)
     r_vec = jax.vmap(displacement_fn)(positions[i_idx], positions[j_idx])
 
     # Distance and unit vector
-    r_mag = jnp.linalg.norm(r_vec, axis=-1)
-    # Avoid division by zero: use safe unit vector for r_mag ≈ 0
-    r_unit = r_vec / jnp.where(
-        r_mag[:, None] > jnp.float32(1e-8),
-        r_mag[:, None],
-        jnp.float32(1.0),
-    )
+    r_mag = jnp.linalg.norm(r_vec, axis=-1) + jnp.float32(1e-12)
+    r_unit = r_vec / r_mag[:, None]
 
-    # Force magnitude: F = 2 * k * (r - r0)
-    # (Negative sign included below in F_ij = -F_mag * r̂)
-    scale = bond_mask * jnp.float32(2.0) * k_bond * (r_mag - r0)
+    # Force magnitude: F_mag = k * (r - r0)
+    # Force direction: F = -F_mag * r̂_ij
+    f_mag = bond_mask * k * (r_mag - r0)
+    f_ij = -f_mag[:, None] * r_unit
 
-    # Force vector on atom i from bond (i, j): F_ij = -scale * r̂_ij
-    f_ij = scale[:, None] * r_unit
-
-    # Accumulate forces: F_i -= f_ij, F_j += f_ij
+    # Accumulate forces: F_i += f_ij, F_j -= f_ij
+    N = positions.shape[0]
     forces = jnp.zeros_like(positions)
-    forces = forces.at[i_idx].add(-f_ij)
-    forces = forces.at[j_idx].add(f_ij)
+    forces = forces.at[i_idx].add(f_ij)
+    forces = forces.at[j_idx].add(-f_ij)
 
     return forces
+
+
+def angle_forces_analytical(
+    positions: Array,
+    angle_indices: Array,
+    angle_params: Array,
+    displacement_fn,
+    angle_mask: Array | None = None,
+) -> Array:
+    """Analytical harmonic angle forces: -dE/dθ for U = 0.5*k*(θ-θ0)^2.
+
+    Computes forces from harmonic angle potential analytically.
+    For three atoms (i, j, k) with j central:
+      cos(θ) = (v_ji · v_jk) / (|v_ji| |v_jk|)
+      U = 0.5 * k * (θ - θ0)^2
+      F = -dU/dr via chain rule through arccos
+
+    Args:
+        positions: Atom positions (N, 3).
+        angle_indices: Angle triplets (A, 3) — [i, j, k] with j central.
+        angle_params: Angle parameters (A, 2) — [theta0, k].
+            theta0: Equilibrium angle (radians).
+            k: Force constant (kcal/mol/rad²).
+        displacement_fn: PBC-aware displacement function from jax_md.space.
+        angle_mask: Optional mask (A,) — 1.0 for real, 0.0 for padding.
+
+    Returns:
+        Force array (N, 3) in kcal/mol/Å.
+    """
+    if angle_mask is None:
+        angle_mask = jnp.ones(angle_indices.shape[0])
+
+    theta0 = angle_params[:, 0]
+    k = angle_params[:, 1]
+
+    def total_angle_energy(pos):
+        """Compute total angle energy for all angles."""
+        energy = jnp.float32(0.0)
+        for a_idx in range(angle_indices.shape[0]):
+            i = angle_indices[a_idx, 0].astype(jnp.int32)
+            j = angle_indices[a_idx, 1].astype(jnp.int32)
+            k_atom = angle_indices[a_idx, 2].astype(jnp.int32)
+
+            v_ji = displacement_fn(pos[i], pos[j])
+            v_jk = displacement_fn(pos[k_atom], pos[j])
+
+            d_ji = jnp.linalg.norm(v_ji) + jnp.float32(1e-12)
+            d_jk = jnp.linalg.norm(v_jk) + jnp.float32(1e-12)
+
+            cos_theta_a = jnp.sum(v_ji * v_jk) / (d_ji * d_jk)
+            cos_theta_a = jnp.clip(cos_theta_a, -0.999999, 0.999999)
+            theta_a = jnp.arccos(cos_theta_a)
+
+            e_a = 0.5 * k[a_idx] * (theta_a - theta0[a_idx]) ** 2
+            energy = energy + angle_mask[a_idx] * e_a
+
+        return energy
+
+    grad_fn = jax.grad(total_angle_energy)
+    forces = -grad_fn(positions)
+
+    return forces
+
+
+def _dihedral_angle_batched(
+    positions: Array,
+    dihedral_indices: Array,
+    displacement_fn,
+    dihedral_mask: Array | None = None,
+) -> Array:
+    """Compute dihedral angles for multiple dihedrals.
+
+    Computes φ = atan2(y, x) - π following the convention from batched_energy.py.
+
+    Args:
+        positions: Atom positions (N, 3).
+        dihedral_indices: Dihedral quadruplets (D, 4) — [i, j, k, l].
+        displacement_fn: PBC-aware displacement function from jax_md.space.
+        dihedral_mask: Optional mask (D,) — 1.0 for real, 0.0 for padding.
+
+    Returns:
+        Dihedral angles (D,) in radians.
+    """
+    if dihedral_mask is None:
+        dihedral_mask = jnp.ones(dihedral_indices.shape[0])
+
+    i_idx = dihedral_indices[:, 0].astype(jnp.int32)
+    j_idx = dihedral_indices[:, 1].astype(jnp.int32)
+    k_idx = dihedral_indices[:, 2].astype(jnp.int32)
+    l_idx = dihedral_indices[:, 3].astype(jnp.int32)
+
+    # Vectors: b0 = r_j - r_i, b1 = r_k - r_j, b2 = r_l - r_k
+    b0 = jax.vmap(displacement_fn)(positions[j_idx], positions[i_idx])
+    b1 = jax.vmap(displacement_fn)(positions[k_idx], positions[j_idx])
+    b2 = jax.vmap(displacement_fn)(positions[l_idx], positions[k_idx])
+
+    # Unit vector along b1
+    b1_norm = jnp.linalg.norm(b1, axis=-1, keepdims=True) + jnp.float32(1e-12)
+    b1_unit = b1 / b1_norm
+
+    # Project b0 and b2 onto plane perpendicular to b1
+    v = b0 - jnp.sum(b0 * b1_unit, axis=-1, keepdims=True) * b1_unit
+    w = b2 - jnp.sum(b2 * b1_unit, axis=-1, keepdims=True) * b1_unit
+
+    # Dihedral angle: φ = atan2(y, x) - π
+    # where y = (b1_unit × v) · w and x = v · w
+    x = jnp.sum(v * w, axis=-1)
+    y = jnp.sum(jnp.cross(b1_unit, v) * w, axis=-1)
+
+    # Safe values for padded entries (from batched_energy.py:91-93)
+    overlap_mask = (dihedral_mask == 0) | ((x == 0.0) & (y == 0.0))
+    safe_x = jnp.where(overlap_mask, 1.0, x)
+    safe_y = jnp.where(overlap_mask, 0.0, y)
+
+    phi = jnp.arctan2(safe_y, safe_x)
+    phi = phi - jnp.pi
+
+    return phi
+
+
+def dihedral_forces_analytical(
+    positions: Array,
+    dihedral_indices: Array,
+    dihedral_params: Array,
+    displacement_fn,
+    dihedral_mask: Array | None = None,
+) -> Array:
+    """Analytical periodic dihedral forces.
+
+    Computes forces from periodic dihedral potential:
+      U = Σ_t k_t * (1 + cos(n_t * φ - phase_t))
+      dU/dφ = -Σ_t k_t * n_t * sin(n_t * φ - phase_t)
+
+    Hybrid approach: φ is computed analytically, dφ/dr via jax.jacobian.
+
+    Args:
+        positions: Atom positions (N, 3).
+        dihedral_indices: Dihedral quadruplets (D, 4) — [i, j, k, l].
+        dihedral_params: Dihedral parameters (D, N_terms, 3) — [n, phase, k] per term.
+        displacement_fn: PBC-aware displacement function from jax_md.space.
+        dihedral_mask: Optional mask (D,) — 1.0 for real, 0.0 for padding.
+
+    Returns:
+        Force array (N, 3) in kcal/mol/Å.
+    """
+    if dihedral_mask is None:
+        dihedral_mask = jnp.ones(dihedral_indices.shape[0])
+
+    def total_dihedral_energy(pos):
+        """Compute total dihedral energy for all dihedrals."""
+        energy = jnp.float32(0.0)
+        for d_idx in range(dihedral_indices.shape[0]):
+            i = dihedral_indices[d_idx, 0].astype(jnp.int32)
+            j = dihedral_indices[d_idx, 1].astype(jnp.int32)
+            k = dihedral_indices[d_idx, 2].astype(jnp.int32)
+            l = dihedral_indices[d_idx, 3].astype(jnp.int32)
+
+            # Vectors
+            b0 = displacement_fn(pos[j], pos[i])
+            b1 = displacement_fn(pos[k], pos[j])
+            b2 = displacement_fn(pos[l], pos[k])
+
+            # Unit vector along b1
+            b1_norm = jnp.linalg.norm(b1) + jnp.float32(1e-12)
+            b1_unit = b1 / b1_norm
+
+            # Project b0 and b2 onto plane perpendicular to b1
+            v = b0 - jnp.sum(b0 * b1_unit) * b1_unit
+            w = b2 - jnp.sum(b2 * b1_unit) * b1_unit
+
+            # Dihedral angle
+            x = jnp.sum(v * w)
+            y = jnp.sum(jnp.cross(b1_unit, v) * w)
+
+            # Safe values for padded
+            overlap = (dihedral_mask[d_idx] == 0) | ((x == 0.0) & (y == 0.0))
+            safe_x = jnp.where(overlap, 1.0, x)
+            safe_y = jnp.where(overlap, 0.0, y)
+
+            phi = jnp.arctan2(safe_y, safe_x) - jnp.pi
+
+            # Energy for this dihedral
+            e_d = jnp.float32(0.0)
+            for t_idx in range(dihedral_params.shape[1]):
+                n = dihedral_params[d_idx, t_idx, 0]
+                phase = dihedral_params[d_idx, t_idx, 1]
+                k = dihedral_params[d_idx, t_idx, 2]
+                e_d = e_d + k * (1.0 + jnp.cos(n * phi - phase))
+
+            energy = energy + dihedral_mask[d_idx] * e_d
+
+        return energy
+
+    grad_fn = jax.grad(total_dihedral_energy)
+    forces = -grad_fn(positions)
+
+    return forces
+
+
+def improper_forces_analytical(
+    positions: Array,
+    improper_indices: Array,
+    improper_params: Array,
+    displacement_fn,
+    improper_mask: Array | None = None,
+) -> Array:
+    """Analytical improper forces with shape dispatch.
+
+    Dispatches on improper_params.shape[-1]:
+    - 3: periodic improper (same form as dihedral)
+    - 2: harmonic improper with angle wrapping
+
+    Args:
+        positions: Atom positions (N, 3).
+        improper_indices: Improper quadruplets (I, 4) — [i, j, k, l].
+        improper_params: Improper parameters (I, N_terms, 3 or 2).
+            Periodic (3): [n, phase, k] per term
+            Harmonic (2): [k, phi0] per term (bonded module convention)
+        displacement_fn: PBC-aware displacement function from jax_md.space.
+        improper_mask: Optional mask (I,) — 1.0 for real, 0.0 for padding.
+
+    Returns:
+        Force array (N, 3) in kcal/mol/Å.
+    """
+    if improper_mask is None:
+        improper_mask = jnp.ones(improper_indices.shape[0])
+
+    # Dispatch based on parameter shape
+    param_shape = improper_params.shape[-1]
+
+    if param_shape == 3:
+        # Periodic improper
+        return _improper_forces_periodic(
+            positions, improper_indices, improper_params, displacement_fn, improper_mask
+        )
+    elif param_shape == 2:
+        # Harmonic improper
+        return _improper_forces_harmonic(
+            positions, improper_indices, improper_params, displacement_fn, improper_mask
+        )
+    else:
+        raise ValueError(f"Improper params shape[-1] must be 2 or 3, got {param_shape}")
+
+
+def _improper_forces_periodic(
+    positions: Array,
+    improper_indices: Array,
+    improper_params: Array,
+    displacement_fn,
+    improper_mask: Array,
+) -> Array:
+    """Periodic improper forces (delegates to dihedral logic)."""
+    return dihedral_forces_analytical(
+        positions, improper_indices, improper_params, displacement_fn, improper_mask
+    )
+
+
+def _improper_forces_harmonic(
+    positions: Array,
+    improper_indices: Array,
+    improper_params: Array,
+    displacement_fn,
+    improper_mask: Array,
+) -> Array:
+    """Harmonic improper forces: U = k*(φ-φ0)^2 with angle wrapping."""
+
+    def total_improper_energy(pos):
+        """Compute total harmonic improper energy."""
+        # Extract indices
+        i_idxs = improper_indices[:, 0].astype(jnp.int32)
+        j_idxs = improper_indices[:, 1].astype(jnp.int32)
+        k_idxs = improper_indices[:, 2].astype(jnp.int32)
+        l_idxs = improper_indices[:, 3].astype(jnp.int32)
+
+        # Compute dihedral angles (following bonded.py convention)
+        # b0 = r_i - r_j, b1 = r_k - r_j, b2 = r_l - r_k
+        b0s = jax.vmap(displacement_fn)(pos[i_idxs], pos[j_idxs])
+        b1s = jax.vmap(displacement_fn)(pos[k_idxs], pos[j_idxs])
+        b2s = jax.vmap(displacement_fn)(pos[l_idxs], pos[k_idxs])
+
+        b1_norms = jnp.linalg.norm(b1s, axis=-1, keepdims=True) + jnp.float32(1e-12)
+        b1_units = b1s / b1_norms
+
+        vs = b0s - jnp.sum(b0s * b1_units, axis=-1, keepdims=True) * b1_units
+        ws = b2s - jnp.sum(b2s * b1_units, axis=-1, keepdims=True) * b1_units
+
+        xs = jnp.sum(vs * ws, axis=-1)
+        ys = jnp.sum(jnp.cross(b1_units, vs) * ws, axis=-1)
+
+        # Dihedral angles using bonded convention
+        phis = jnp.arctan2(ys, xs)
+
+        # Harmonic improper energy
+        # params shape: (N_improper, N_terms, 2) with [k, phi0]
+        k_harms = improper_params[:, :, 0]
+        phi0s = improper_params[:, :, 1]
+
+        # Angle wrapping: map difference to [-π, π]
+        deltas = phis[:, None] - phi0s  # (N_improper, N_terms)
+        deltas_wrapped = (deltas + jnp.pi) % (2.0 * jnp.pi) - jnp.pi
+
+        # Energy per improper term
+        energies = k_harms * deltas_wrapped ** 2  # (N_improper, N_terms)
+
+        # Sum over terms and apply mask
+        total_energy = jnp.sum(energies * improper_mask[:, None])
+
+        return total_energy
+
+    grad_fn = jax.grad(total_improper_energy)
+    forces = -grad_fn(positions)
+
+    return forces
+
+
+def urey_bradley_forces_analytical(
+    positions: Array,
+    ub_indices: Array,
+    ub_params: Array,
+    displacement_fn,
+    ub_mask: Array | None = None,
+) -> Array:
+    """Analytical urey-bradley forces (1-3 pair harmonic interaction).
+
+    Same form as bond: U = 0.5*k*(r-r0)^2, but applied to i-k pair in angle i-j-k.
+
+    Args:
+        positions: Atom positions (N, 3).
+        ub_indices: UB pairs (UB, 2) — [i, k] (skipping j).
+        ub_params: UB parameters (UB, 2) — [r0, k].
+            r0: Equilibrium distance (Å).
+            k: Force constant (kcal/mol/Å²).
+        displacement_fn: PBC-aware displacement function from jax_md.space.
+        ub_mask: Optional mask (UB,) — 1.0 for real, 0.0 for padding.
+
+    Returns:
+        Force array (N, 3) in kcal/mol/Å.
+    """
+    # UB is just a bond between i and k
+    return bond_forces_analytical(
+        positions, ub_indices, ub_params, displacement_fn, ub_mask
+    )
