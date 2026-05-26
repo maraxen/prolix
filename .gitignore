@@ -36,6 +36,9 @@ results/
 *.lock
 .env
 
+# Claude Code worktrees (ephemeral per-session)
+.claude/worktrees/
+
 # Cluster configuration (local, per-user)
 cluster-config.toml
 
