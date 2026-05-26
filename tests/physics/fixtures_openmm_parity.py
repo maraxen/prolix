@@ -20,7 +20,7 @@ try:
 except ImportError:
     HAS_OPENMM = False
 
-from prolix.physics.types import PhysicsSystem
+from prolix.typing import PhysicsSystem
 from prolix.physics import bonded
 from jax_md import space
 import jax.numpy as jnp
@@ -289,9 +289,9 @@ def build_prolix_bonded_system(bonded_params, positions_ang):
         angles=jnp.array(bonded_params['angles'], dtype=jnp.int32),
         angle_params=jnp.array(bonded_params['angle_params'], dtype=jnp.float64),
         dihedrals=jnp.array(bonded_params['dihedrals'], dtype=jnp.int32),
-        dihedral_params=jnp.array(bonded_params['dihedral_params'], dtype=jnp.float64),
+        dihedral_params=jnp.expand_dims(jnp.array(bonded_params['dihedral_params'], dtype=jnp.float64), axis=1),
         impropers=jnp.array(bonded_params.get('impropers', np.zeros((0, 4))), dtype=jnp.int32),
-        improper_params=jnp.array(bonded_params.get('improper_params', np.zeros((0, 3))), dtype=jnp.float64),
+        improper_params=jnp.expand_dims(jnp.array(bonded_params.get('improper_params', np.zeros((0, 3))), dtype=jnp.float64), axis=1),
         # Mandatory fields
         radii=jnp.ones(n_atoms, dtype=jnp.float64),
         scaled_radii=jnp.ones(n_atoms, dtype=jnp.float64),

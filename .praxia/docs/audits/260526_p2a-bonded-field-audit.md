@@ -33,7 +33,7 @@ addition, 21 bonds, 36 angles, 42 dihedrals.
 | `angles` | (N_angles, 3) int32 indices | `prolix.physics.bonded.make_angle_energy_fn()` factory param |
 | `angle_params` | (N_angles, 2) float64 params [theta0, k] | `make_angle_energy_fn()` call-time param |
 | `dihedrals` | (N_dihedrals, 4) int32 indices | `prolix.physics.bonded.make_dihedral_energy_fn()` factory param |
-| `dihedral_params` | (N_dihedrals, 3) float64 params [periodicity, phase, k] | `make_dihedral_energy_fn()` call-time param |
+| `dihedral_params` | (N_dihedrals, N_terms, 3) float64 params [periodicity, phase, k] | `make_dihedral_energy_fn()` call-time param |
 | `impropers` | (N_impropers, 4) int32 indices | `make_dihedral_energy_fn()` (shared kernel with proper dihedrals) |
 
 ---
