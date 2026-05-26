@@ -244,8 +244,7 @@ def test_improper_harmonic_vs_grad():
     grad_fn = jax.grad(lambda pos: energy_fn(pos, improper_params))
     f_grad = -grad_fn(positions)
 
-    # Compare (tolerance slightly relaxed due to nested autodiff in harmonic improper)
-    assert jnp.allclose(f_analytical, f_grad, atol=5e-7), \
+    assert jnp.allclose(f_analytical, f_grad, atol=1e-10), \
         f"Improper harmonic forces mismatch:\nAnalytical:\n{f_analytical}\nGrad:\n{f_grad}"
 
 

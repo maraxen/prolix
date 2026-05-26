@@ -629,7 +629,9 @@ def _improper_forces_harmonic(
         b1s = jax.vmap(displacement_fn)(pos[k_idxs], pos[j_idxs])
         b2s = jax.vmap(displacement_fn)(pos[l_idxs], pos[k_idxs])
 
-        b1_norms = jnp.linalg.norm(b1s, axis=-1, keepdims=True) + jnp.float32(1e-12)
+        # epsilon must match compute_dihedral_angles in bonded.py to keep this
+        # analytical path's gradient bit-equivalent to the reference energy's gradient
+        b1_norms = jnp.linalg.norm(b1s, axis=-1, keepdims=True) + 1e-8
         b1_units = b1s / b1_norms
 
         vs = b0s - jnp.sum(b0s * b1_units, axis=-1, keepdims=True) * b1_units
