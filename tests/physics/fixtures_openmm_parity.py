@@ -21,8 +21,10 @@ except ImportError:
     HAS_OPENMM = False
 
 from prolix.physics.types import PhysicsSystem
+from prolix.physics import bonded
 from jax_md import space
 import jax.numpy as jnp
+import jax
 
 
 def _kj_to_kcal(x):
@@ -84,11 +86,12 @@ END
         removeCMMotion=False,
     )
 
-    # Assign ForceGroups: 0=bonds, 1=angles, 2=proper dihedrals, 3=improper dihedrals
+    # Assign ForceGroups: 0=bonds, 1=angles, 2=dihedrals, 3+=other (nonbonded)
     force_group_map = {
         openmm.HarmonicBondForce: 0,
         openmm.HarmonicAngleForce: 1,
         openmm.PeriodicTorsionForce: 2,  # Both proper and improper for v1
+        openmm.NonbondedForce: 3,  # Isolate LJ + Coulomb
     }
 
     for force in omm_system.getForces():
@@ -137,8 +140,11 @@ def extract_bonded_params(omm_system):
                 p1, p2, l, k = force.getBondParameters(i)
                 data['bonds'].append([p1, p2])
                 # length: nm -> Å, k: kJ/mol/nm² -> kcal/mol/Å²
+                # Unit conversion: 1 nm = 10 Å, so 1 nm² = 100 Å²
+                # X kJ/mol/nm² = X / (4.184 * 100) kcal/mol/Å² = X / 418.4
                 l_ang = _nm_to_ang(l.value_in_unit(unit.nanometer))
-                k_kcal_ang2 = _kj_to_kcal(k.value_in_unit(unit.kilojoule_per_mole / unit.nanometer**2))
+                k_kj_nm2 = k.value_in_unit(unit.kilojoule_per_mole / unit.nanometer**2)
+                k_kcal_ang2 = k_kj_nm2 / 418.4
                 data['bond_params'].append([l_ang, k_kcal_ang2])
 
         elif isinstance(force, openmm.HarmonicAngleForce):
@@ -147,7 +153,8 @@ def extract_bonded_params(omm_system):
                 data['angles'].append([p1, p2, p3])
                 # angle: rad (no conversion), k: kJ/mol/rad² -> kcal/mol/rad²
                 a_rad = a.value_in_unit(unit.radian)
-                k_kcal_rad2 = _kj_to_kcal(k.value_in_unit(unit.kilojoule_per_mole / unit.radian**2))
+                k_kj_rad2 = k.value_in_unit(unit.kilojoule_per_mole / unit.radian**2)
+                k_kcal_rad2 = _kj_to_kcal(k_kj_rad2)
                 data['angle_params'].append([a_rad, k_kcal_rad2])
 
         elif isinstance(force, openmm.PeriodicTorsionForce):
@@ -263,7 +270,8 @@ def build_prolix_bonded_system(bonded_params, positions_ang):
     # Create displacement function for free boundary
     displacement_fn, _ = space.free()
 
-    # Convert positions to JAX array
+    # Convert positions to JAX array (enable x64 for float64)
+    jax.config.update("jax_enable_x64", True)
     positions = jnp.array(positions_ang, dtype=jnp.float64)
 
     # Create system with bonded terms, nonbonded zeroed
@@ -300,6 +308,47 @@ def build_prolix_bonded_system(bonded_params, positions_ang):
     )
 
     return system, displacement_fn
+
+
+def get_prolix_per_term_energies(system, displacement_fn, positions_ang):
+    """Get per-term prolix bonded energies.
+
+    Uses the direct-path bonded energy factories (params at call time).
+
+    Returns dict with keys: 'bonds', 'angles', 'dihedrals', 'impropers'.
+    Values in kcal/mol.
+    """
+    # Enable x64 for float64 support
+    jax.config.update("jax_enable_x64", True)
+
+    positions = jnp.array(positions_ang, dtype=jnp.float64)
+    energies = {}
+
+    # Bonds
+    if system.bonds is not None and system.bonds.shape[0] > 0:
+        bond_fn = bonded.make_bond_energy_fn(displacement_fn, system.bonds)
+        energies['bonds'] = float(bond_fn(positions, system.bond_params))
+    else:
+        energies['bonds'] = 0.0
+
+    # Angles
+    if system.angles is not None and system.angles.shape[0] > 0:
+        angle_fn = bonded.make_angle_energy_fn(displacement_fn, system.angles)
+        energies['angles'] = float(angle_fn(positions, system.angle_params))
+    else:
+        energies['angles'] = 0.0
+
+    # Dihedrals (proper + improper for v1)
+    if system.dihedrals is not None and system.dihedrals.shape[0] > 0:
+        dih_fn = bonded.make_dihedral_energy_fn(displacement_fn, system.dihedrals)
+        energies['dihedrals'] = float(dih_fn(positions, system.dihedral_params))
+    else:
+        energies['dihedrals'] = 0.0
+
+    # Impropers (v1: all in dihedrals)
+    energies['impropers'] = 0.0
+
+    return energies
 
 
 @pytest.fixture(scope="module")
