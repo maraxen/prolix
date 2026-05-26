@@ -8,5 +8,8 @@
       "Bash(uv sync)",
       "Bash(uv lock)"
     ]
+  },
+  "worktree": {
+    "baseRef": "head"
   }
 }
