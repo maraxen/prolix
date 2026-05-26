@@ -153,11 +153,11 @@ class TestForceParity:
 
             return e_bonds + e_angles + e_dihedrals
 
-        # Compute forces via jax.grad
+        # Compute forces via jax.grad (note: F = -dE/dr)
         grad_fn = jax.grad(total_bonded_energy)
-        prolix_forces = grad_fn(positions)
+        prolix_forces = -grad_fn(positions)
 
-        # FD sanity check: verify jax.grad matches finite difference
+        # FD sanity check: verify jax.grad matches finite difference (F = -dE/dr)
         eps = 1e-4
         fd_forces = np.zeros_like(positions_ang)
         for i in range(positions.shape[0]):
@@ -166,7 +166,8 @@ class TestForceParity:
                 r_minus = positions.at[i, j].add(-eps)
                 e_plus = total_bonded_energy(r_plus)
                 e_minus = total_bonded_energy(r_minus)
-                fd_forces[i, j] = (float(e_plus) - float(e_minus)) / (2.0 * eps)
+                # F = -dE/dr, so negate the gradient
+                fd_forces[i, j] = -(float(e_plus) - float(e_minus)) / (2.0 * eps)
 
         # Check FD vs jax.grad agreement
         fd_grad_delta = np.linalg.norm(np.array(prolix_forces) - fd_forces)

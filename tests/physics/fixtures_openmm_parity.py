@@ -231,9 +231,10 @@ def get_openmm_per_term_energies(omm_system, positions_ang):
 
 
 def get_openmm_forces(omm_system, positions_ang):
-    """Get per-atom forces from OpenMM.
+    """Get per-atom forces from OpenMM (bonded terms only).
 
-    Returns (N, 3) array in kcal/mol/Å.
+    Returns (N, 3) array in kcal/mol/Å. Only includes forces from ForceGroups
+    0 (bonds), 1 (angles), and 2 (dihedrals), excluding nonbonded interactions.
     """
     if not HAS_OPENMM:
         raise ImportError("OpenMM not available")
@@ -244,7 +245,8 @@ def get_openmm_forces(omm_system, positions_ang):
     # Set positions in nm
     context.setPositions(positions_ang / 10.0 * unit.nanometer)
 
-    state = context.getState(getForces=True)
+    # Get forces from bonded ForceGroups only (0, 1, 2)
+    state = context.getState(getForces=True, groups={0, 1, 2})
     forces_omm = state.getForces()
 
     # Convert from kJ/mol/nm to kcal/mol/Å
