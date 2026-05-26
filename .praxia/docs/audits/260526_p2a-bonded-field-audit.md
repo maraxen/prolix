@@ -38,10 +38,11 @@ addition, 21 bonds, 36 angles, 42 dihedrals.
 
 ---
 
-## Fields NOT Exercised by Bonded Path
+## Fields NOT exercised by bonded path
 
 | PhysicsSystem Field | Reason |
 |---|---|
+| `improper_params` | Conditionally accessed: `impropers.shape[0] == 0` in AMBER14SB ala-dip short-circuits the branch before `improper_params` is read. Would be exercised on a system with non-empty impropers. |
 | `positions` | Not accessed directly; passed to energy functions as argument |
 | `charges`, `sigmas`, `epsilons` | Nonbonded LJ/Coulomb; bonded path disabled |
 | `masses` | Used in dynamics (integrators); not in energy path |
