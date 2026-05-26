@@ -1,7 +1,22 @@
+import sys
+from pathlib import Path
+
 import pytest
 import jax
 import jax.numpy as jnp
 import numpy as np
+
+# Enable x64 for bonded parity tests
+jax.config.update("jax_enable_x64", True)
+
+# Make fixtures_openmm_parity importable
+sys.path.insert(0, str(Path(__file__).parent))
+
+# Import fixtures from fixtures_openmm_parity for automatic discovery
+try:
+    from fixtures_openmm_parity import ala_dip_reference
+except ImportError:
+    pass
 
 @pytest.fixture
 def simple_positions():
