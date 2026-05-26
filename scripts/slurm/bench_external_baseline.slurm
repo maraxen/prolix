@@ -111,15 +111,17 @@ if [[ "${TOOL}" == "espaloma" ]]; then
 fi
 
 # bath provenance: per-script sidecar at scripts/benchmarks/external_baseline/bench_${TOOL}.bth.toml
-# Campaign tagging: --campaign edbd0b84 (hp4-s71-external-baseline)
+# Campaign: hp4-s71-external-baseline (edbd0b84-c0e2-4d2d-a89f-5f9fe8ae3aff)
+# CAMPAIGN_ID can be overridden via --export=ALL,CAMPAIGN_ID=<id> at sbatch time.
 source scripts/slurm/_bth_env.sh
 
-CAMPAIGN_FLAG=""
-[[ -n "${CAMPAIGN_ID:-}" ]] && CAMPAIGN_FLAG="--campaign ${CAMPAIGN_ID}"
+CAMPAIGN_ID="${CAMPAIGN_ID:-edbd0b84-c0e2-4d2d-a89f-5f9fe8ae3aff}"
+CAMPAIGN_FLAG="--campaign ${CAMPAIGN_ID}"
 
 uv run bth run ${PYTHON_INTERP} "${BENCH_SCRIPT}" \
     --tag s71 --tag external-baseline --tag scope-a \
     --tag "tool:${TOOL}" --tag "n_mols:${N_MOLS}" --tag "precision:${PRECISION}" \
+    --tag "hardware:${HARDWARE_TAG}" \
     ${CAMPAIGN_FLAG} \
     --out "${OUT}" \
     -- \
