@@ -19,6 +19,8 @@
 - [260426_sprint6-npt-barostat](daily/260426_sprint6-npt-barostat.md)
 
 ## Plans
+- [260526_p2a-openmm-parity-bonded](plans/260526_p2a-openmm-parity-bonded.md) — OpenMM parity harness for bonded-only terms on alanine dipeptide
+- [260526_p1a-1d-bonded-analytical-forces](plans/260526_p1a-1d-bonded-analytical-forces.md) — expand analytical_forces.py with 5 bonded force functions
 - [260410_explicit-solvent-phases-3-4-6-8-9](plans/260410_explicit-solvent-phases-3-4-6-8-9.md)
 - [260410_explicit-solvent-implementation-plan](plans/260410_explicit-solvent-implementation-plan.md)
 - [260410_phase4-solvation-implementation-plan](plans/260410_phase4-solvation-implementation-plan.md)
@@ -44,10 +46,13 @@
 - [260501_kups-decouple-cluster-smoke](handoffs/260501_kups-decouple-cluster-smoke.md)
 
 ## Specs
+- [260526_p2a-openmm-parity-bonded](specs/260526_p2a-openmm-parity-bonded.md) — Fixer-executable spec with task decomposition and gates
+- [260526_p1a-1d-bonded-analytical-forces](specs/260526_p1a-1d-bonded-analytical-forces.md) — Fixer-executable spec for 5 bonded analytical force functions
 - [260423_v030-phase2-validation-spec](specs/260423_v030-phase2-validation-spec.md)
 - [260521_bundle-port-spec](specs/260521_bundle-port-spec.md)
 
 ## Audits
+- [260526_p2a-bonded-field-audit](audits/260526_p2a-bonded-field-audit.md) — PhysicsSystem field-access audit for bonded energy path
 
 ## Research
 - [260124_agent-collaboration](research/260124_agent-collaboration.md)
