@@ -84,3 +84,58 @@ autodiff, or does this mask a math bug?
 - Audit doc: `.praxia/docs/audits/260526_p2a-bonded-field-audit.md`
 - 1d plan: `.praxia/docs/plans/260526_p1a-1d-bonded-analytical-forces.md`
 - 1d spec: `.praxia/docs/specs/260526_p1a-1d-bonded-analytical-forces.md`
+
+---
+
+## Follow-up session (260526-bis)
+
+Both Defect 1 (P2a impl) and Defect 2 (atol drift) closed. NLM remains user-action.
+
+### Commits added on branch `worktree-sprint-260526-followup` (off `main` HEAD `e330612`)
+
+| Commit | Subject | Notes |
+|---|---|---|
+| `948d232` | chore: gitignore worktrees and untrack analyzer.db | `.claude/worktrees/` added to `.gitignore`; `.praxia/cache/analyzer.db` `git rm --cached` (22 MB, already in ignore by pattern). |
+| `7d38de3` | fix(p2a): update fixture for current PhysicsSystem dihedral shape | 4 mechanical edits per handoff §Defect 1. `tests/physics/test_openmm_parity_bonded.py` now 5/5 PASS. |
+| `297c72e` | fix(p1a-1d): align improper-harmonic analytical epsilon to bonded reference | 1-line epsilon fix in `analytical_forces.py:632` + atol restored to 1e-10 + misleading test comment removed. `test_analytical_forces.py` 9/9 PASS at atol=1e-10. |
+
+### Defect 2 root-cause (auditor finding)
+
+The fixer's "nested autodiff" rationale was **technically false**. `_improper_forces_harmonic` (`analytical_forces.py:609`) and the reference `make_harmonic_improper_energy_fn` (`bonded.py:145`) compute the same energy via different code paths. Both use single-order `jax.grad`. The drift came from an **epsilon mismatch** in their inlined `compute_dihedral_angles` work:
+
+- `bonded.py:100`: `b1_norm = norm(b1) + 1e-8`
+- `analytical_forces.py:632` (before fix): `b1_norms = norm(b1s) + jnp.float32(1e-12)`
+
+Auditor predicted force-difference scale `~k·δ·ε ≈ 20·(π/4)·1e-8 ≈ 3e-7` — empirically matched observed ≤5e-7. The companion `test_improper_periodic_vs_grad` only passed at 1e-10 because its planar test geometry sits at a `sin(n·φ − phase) = 0` stationary point where the gradient is zero, masking the same mismatch in that test.
+
+Minimal fix chosen (vs. auditor's "Preferred" composition refactor): aligning the analytical-side epsilon to bonded.py's `1e-8` has the smallest blast radius — bonded.py is the hot production energy path. The compose-the-bonded-energy refactor is filed as a deferred follow-up (see §Deferred follow-ups below).
+
+### Verification
+
+```
+uv run pytest tests/physics/test_openmm_parity_bonded.py -m openmm -v  → 5/5 PASS
+uv run pytest tests/physics/test_analytical_forces.py -v               → 9/9 PASS
+```
+
+### Updated sprint scope status
+
+- ✅ **P2a docs**: plan, spec, audit-doc on main
+- ✅ **P2a impl**: 5/5 PASS, commit `7d38de3`
+- ✅ **P1a-1d impl + tests**: 9/9 PASS at atol=1e-10, commit `297c72e`
+- ⏸️ **NLM**: still blocked on user `! nlm login`
+
+### Deferred follow-ups
+
+1. **Compose `_improper_forces_harmonic` from `make_harmonic_improper_energy_fn`** — eliminates the duplicated dihedral-angle math in `analytical_forces.py:609-664`. Auditor's "Preferred" path. Requires plumbing `improper_mask` through the composed energy. Estimated ≤30 min if added to a future cleanup sprint.
+2. **Old worktree cleanup**: `.claude/worktrees/sprint-260526-p2a` (branch `worktree-sprint-260526-p2a`) is the stale-baseline worktree from the prior session; `git worktree remove` when convenient.
+3. **NLM 3-paper notebook**: needs user `! nlm login` from the main session, then create from the 3 reference docs.
+
+### Branch landing
+
+The 3 commits live on `worktree-sprint-260526-followup`. They linearly extend `main` HEAD (`e330612`), so the parent session can `git merge --ff-only worktree-sprint-260526-followup` from `main` to land them. No conflicts expected.
+
+### Lessons captured
+
+- **Auditor over reviewer for "is this numerical bound right" questions** — reviewer ran tests and saw green; auditor traced two energy implementations, computed sensitivity, and located the actual mismatch. This worked because the auditor was given the bounded chunk explicitly (which function, which test, which spec). A blanket "audit the test file" would have been weaker.
+- **`baseRef: head` setting in `.claude/settings.json`** — set this once; new worktrees branch from local HEAD instead of (possibly stale) `origin/main`. Last session's whole P2a-broken-on-main story was a `baseRef: fresh` (default) failure mode.
+- **"Nested autodiff" as an excuse phrase**: when a justification is hand-wavy and the math says it shouldn't be that bad, dig. Single-order grad of two slightly-different energies looks the same as nested grad of one energy from the outside, but they aren't.
