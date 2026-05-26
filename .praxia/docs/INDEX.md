@@ -85,6 +85,9 @@
 
 ## Reference
 - [260415_explicit-solvent-runbook](reference/260415_explicit-solvent-runbook.md)
+- [210401_torchmd](reference/210401_torchmd.md) — TorchMD paper (Doerr et al., JCTC 2021): ~60× slower than ACEMD3, full classical FF, no neighbor lists, Titan V GPU
+- [221107_espaloma](reference/221107_espaloma.md) — espaloma paper (Wang et al., Chem Sci 2022 + Takaba 2024): GNN FF parameterization, bonded-only in v0.2, no per-step MD throughput claim
+- [230912_dmff](reference/230912_dmff.md) — DMFF paper (Wang et al., JCTC 2023): JAX differentiable FF, explicitly slower than OpenMM, recommends OpenMM export for production
 
 ## Roadmaps
 
