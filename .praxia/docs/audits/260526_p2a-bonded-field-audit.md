@@ -44,7 +44,7 @@ addition, 21 bonds, 36 angles, 42 dihedrals.
 |---|---|
 | `improper_params` | Conditionally accessed: `impropers.shape[0] == 0` in AMBER14SB ala-dip short-circuits the branch before `improper_params` is read. Would be exercised on a system with non-empty impropers. |
 | `positions` | Not accessed directly; passed to energy functions as argument |
-| `charges`, `sigmas`, `epsilons` | Nonbonded LJ/Coulomb; bonded path disabled |
+| `charges`, `sigmas`, `epsilons` | Nonbonded LJ/Coulomb; exercised by P2b path (see below) |
 | `masses` | Used in dynamics (integrators); not in energy path |
 | `radii`, `scaled_radii` | Generalized Born implicit solvent; not in bonded path |
 | `element_ids` | Metadata; not accessed in bonded energy computation |
@@ -97,3 +97,28 @@ The audit doc lists all bonded-exercised fields with role descriptions. No
 mandatory PhysicsSystem fields remain undocumented for this path.
 
 **Gate status:** PASS
+
+---
+
+## Nonbonded fields exercised by P2b path
+
+Audit conducted via `get_prolix_nonbonded_energies` using `build_prolix_nonbonded_system` output
+(which calls `make_energy_fn` with `return_decomposed=True, exclusion_spec=...`).
+
+| Field | Role |
+|---|---|
+| `charges` | Per-atom charge array (e) fed to `chunked_coulomb_energy` |
+| `sigmas` | Per-atom LJ sigma (Å) fed to `chunked_lj_energy` |
+| `epsilons` | Per-atom LJ epsilon (kcal/mol) fed to `chunked_lj_energy` |
+| `excl_indices` | Sparse exclusion index (N, 32) built via `ExclusionSpec` path when `excl_indices=None`; covers 1-2, 1-3, and 1-4 exception pairs |
+| `excl_scales_vdw` | Per-pair LJ scale (0.0 for excluded pairs); built via `map_exclusions_to_dense_padded(ExclusionSpec)` |
+| `excl_scales_elec` | Per-pair Coulomb scale (0.0 for excluded pairs); built via `map_exclusions_to_dense_padded(ExclusionSpec)` |
+
+**Key design note:** 1-4 exception pairs must be included in `ExclusionSpec.idx_12_13`
+(in addition to `exception_pairs`) so they are zeroed out of the main pairwise sum
+(`chunked_lj_energy`, `chunked_coulomb_energy`) before being re-added by
+`make_exception_pair_energy_fn`. Omitting them from `idx_12_13` causes double-counting.
+See fix in `tests/physics/fixtures_openmm_parity.py::build_exclusion_spec`.
+
+**Gate:** Energy parity tests (f4) PASS at `|dE(LJ)| < 1e-4 kcal/mol`, `|dE(Coul)| < 1e-4 kcal/mol`.
+Force RMS (f5) PASS at `5e-6 kcal/mol/Å` (gate: 0.5). Extended for P2b nonbonded fields (260527).

@@ -53,7 +53,7 @@
 - [260521_bundle-port-spec](specs/260521_bundle-port-spec.md)
 
 ## Audits
-- [260526_p2a-bonded-field-audit](audits/260526_p2a-bonded-field-audit.md) — PhysicsSystem field-access audit for bonded energy path
+- [260526_p2a-bonded-field-audit](audits/260526_p2a-bonded-field-audit.md) — PhysicsSystem field-access audit for bonded energy path; extended for P2b nonbonded fields (260527)
 
 ## Research
 - [260124_agent-collaboration](research/260124_agent-collaboration.md)
