@@ -19,6 +19,7 @@
 - [260426_sprint6-npt-barostat](daily/260426_sprint6-npt-barostat.md)
 
 ## Plans
+- [260527_s71-external-comparator-plan](plans/260527_s71-external-comparator-plan.md) — Sprint 4 Track C: §7.1 external comparator figure decomposition (C1–C7) with user decisions locked
 - [260526_p2a-openmm-parity-bonded](plans/260526_p2a-openmm-parity-bonded.md) — OpenMM parity harness for bonded-only terms on alanine dipeptide
 - [260526_p1a-1d-bonded-analytical-forces](plans/260526_p1a-1d-bonded-analytical-forces.md) — expand analytical_forces.py with 5 bonded force functions
 - [260410_explicit-solvent-phases-3-4-6-8-9](plans/260410_explicit-solvent-phases-3-4-6-8-9.md)
