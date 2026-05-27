@@ -567,8 +567,17 @@ def build_exclusion_spec(omm_system, n_atoms):
     max_excl = max(atom_excl_count) if atom_excl_count else 0
     assert max_excl < 32, f"Atom has {max_excl} exclusions, limit is 32"
 
+    # CRITICAL: exception_pairs (1-4 pairs) must be excluded from the main pairwise
+    # sum in chunked_lj_energy / chunked_coulomb_energy, because map_exclusions_to_dense_padded
+    # only processes idx_12_13 and idx_14 — not exception_pairs.  If we omit 1-4 pairs
+    # from idx_12_13, they appear in both the main pairwise sum AND the exception energy
+    # function, causing double-counting.  The fix is to include ALL exception pairs
+    # (regardless of epsilon/chargeProd) in idx_12_13 so they are zeroed out from the
+    # main sum, then added back with correct parameters via exception_pairs.
+    all_idx_12_13 = idx_12_13 + exception_pairs  # type: list[list[int]]
+
     return ExclusionSpec(
-        idx_12_13=jnp.array(idx_12_13, dtype=jnp.int32) if idx_12_13 else jnp.zeros((0, 2), dtype=jnp.int32),
+        idx_12_13=jnp.array(all_idx_12_13, dtype=jnp.int32) if all_idx_12_13 else jnp.zeros((0, 2), dtype=jnp.int32),
         idx_14=jnp.zeros((0, 2), dtype=jnp.int32),
         scale_14_elec=0.0,
         scale_14_vdw=0.0,
@@ -639,11 +648,20 @@ def get_prolix_nonbonded_energies(system, displacement_fn, positions_ang, exclus
         exclusion_spec=exclusion_spec,
     )
 
-    # Evaluate each term
+    # Evaluate each term.
+    # NOTE: 'lj' here is the COMBINED LJ + exception_14 energy, matching OpenMM's
+    # charge-zeroed E_LJ decomposition which includes both 1-5+ LJ and all exception
+    # pair contributions (1-4 LJ + 1-4 Coulomb from exception_chargeprods).
+    # 'coulomb' is the 1-5+ Coulomb only (bare pairwise, excluding exception pairs),
+    # matching OpenMM's E_Coul = E_nb - E_LJ_zeroed.
+    # 'exception_14' is the raw exception pair energy (1-4 LJ + 1-4 Coulomb), returned
+    # separately for the self-consistency gate in test_exception_14_energy_parity.
+    e_lj_1_5plus = float(energy_fns['lj'](positions))
+    e_exception_14 = float(energy_fns['exception'](positions))
     return {
-        'lj': float(energy_fns['lj'](positions)),
+        'lj': e_lj_1_5plus + e_exception_14,  # combined: matches OpenMM charge-zeroed E_LJ
         'coulomb': float(energy_fns['electrostatics'](positions)),
-        'exception_14': float(energy_fns['exception'](positions)),
+        'exception_14': e_exception_14,
     }
 
 
