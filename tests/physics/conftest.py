@@ -1,20 +1,11 @@
-import sys
-from pathlib import Path
-
 import pytest
 import jax
 import jax.numpy as jnp
 import numpy as np
 
-# Enable x64 for bonded parity tests
-jax.config.update("jax_enable_x64", True)
-
-# Make fixtures_openmm_parity importable
-sys.path.insert(0, str(Path(__file__).parent))
-
 # Import fixtures from fixtures_openmm_parity for automatic discovery
 try:
-    from fixtures_openmm_parity import ala_dip_reference
+    from .fixtures_openmm_parity import ala_dip_reference
 except ImportError:
     pass
 
@@ -69,7 +60,12 @@ def dtype_mode(request):
     jax.config.update("jax_enable_x64", x64_before)
 
 @pytest.fixture(scope="session", autouse=True)
-def _session_x64_guard():
-    """Session-wide guard: ensure x64 is not left enabled by any test."""
+def _enable_x64_for_physics_tests():
+    """Session-scoped fixture to enable x64 precision for physics tests.
+
+    This allows all fixtures and tests in this package to use float64 without
+    per-function configuration. Avoids repetition of jax.config.update() calls.
+    """
+    jax.config.update("jax_enable_x64", True)
     yield
     jax.config.update("jax_enable_x64", False)

@@ -12,13 +12,10 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
-# Enable x64 for float64 support
-jax.config.update("jax_enable_x64", True)
-
 # Register openmm marker
 pytestmark = pytest.mark.openmm
 
-from fixtures_openmm_parity import (
+from .fixtures_openmm_parity import (
     ala_dip_reference,
     get_prolix_per_term_energies,
 )

@@ -272,8 +272,7 @@ def build_prolix_bonded_system(bonded_params, positions_ang):
     # Create displacement function for free boundary
     displacement_fn, _ = space.free()
 
-    # Convert positions to JAX array (enable x64 for float64)
-    jax.config.update("jax_enable_x64", True)
+    # Convert positions to JAX array
     positions = jnp.array(positions_ang, dtype=jnp.float64)
 
     # Create system with bonded terms, nonbonded zeroed
@@ -320,9 +319,6 @@ def get_prolix_per_term_energies(system, displacement_fn, positions_ang):
     Returns dict with keys: 'bonds', 'angles', 'dihedrals', 'impropers'.
     Values in kcal/mol.
     """
-    # Enable x64 for float64 support
-    jax.config.update("jax_enable_x64", True)
-
     positions = jnp.array(positions_ang, dtype=jnp.float64)
     energies = {}
 
@@ -518,9 +514,6 @@ def build_exclusion_spec(omm_system, n_atoms):
     """
     from prolix.physics.neighbor_list import ExclusionSpec
 
-    # Enable x64 for float64 support if needed
-    jax.config.update("jax_enable_x64", True)
-
     idx_12_13 = []
     exception_pairs = []
     exception_sigmas = []
@@ -607,9 +600,6 @@ def build_prolix_nonbonded_system(nb_params, bonded_params, positions_ang):
     # Build bonded system first (handles positions, displacement_fn, bonds, angles, dihedrals, impropers)
     bonded_sys, displacement_fn = build_prolix_bonded_system(bonded_params, positions_ang)
 
-    # Enable x64 for float64 support
-    jax.config.update("jax_enable_x64", True)
-
     # Add nonbonded fields using dataclasses.replace
     import dataclasses
     system = dataclasses.replace(
@@ -631,9 +621,6 @@ def get_prolix_nonbonded_energies(system, displacement_fn, positions_ang, exclus
     Returns dict with keys: 'lj', 'coulomb', 'exception_14' (all in kcal/mol).
     """
     from prolix.physics.system import make_energy_fn
-
-    # Enable x64 for float64 support
-    jax.config.update("jax_enable_x64", True)
 
     positions = jnp.array(positions_ang, dtype=jnp.float64)
 
@@ -883,9 +870,6 @@ def build_prolix_periodic_system(nb_params, bonded_params, positions_ang, box_ve
     # Build bonded system first
     bonded_sys, _ = build_prolix_bonded_system(bonded_params, positions_ang)
 
-    # Enable x64 for float64 support
-    jax.config.update("jax_enable_x64", True)
-
     # Create periodic displacement function (cubic box)
     # The displacement_fn computes relative positions with PBC
     displacement_fn, _ = space.periodic(box_vec)
@@ -920,8 +904,6 @@ def get_prolix_pme_coulomb_energy(system, displacement_fn, positions_ang, box_ve
         dict with keys 'coulomb' (1-5+ only), 'exception_14', 'lj', 'total'
     """
     from prolix.physics.system import make_energy_fn
-
-    jax.config.update("jax_enable_x64", True)
 
     positions = jnp.array(positions_ang, dtype=jnp.float64)
     box = jnp.array(box_vec, dtype=jnp.float64)

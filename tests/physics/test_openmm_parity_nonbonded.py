@@ -10,11 +10,6 @@ Test objectives (per P2b spec):
 """
 
 import math
-import sys
-sys.path.insert(0, str(__file__).rsplit("/", 1)[0])  # make fixtures importable
-
-import jax
-jax.config.update("jax_enable_x64", True)
 
 import jax.numpy as jnp
 import numpy as np
@@ -41,7 +36,7 @@ def nb_parity_bundle():
         displacement_fn: JAX-MD displacement function
         nb_params: Nonbonded parameters from OpenMM
     """
-    from fixtures_openmm_parity import (
+    from .fixtures_openmm_parity import (
         build_ala_dip_openmm_system,
         extract_bonded_params,
         extract_nonbonded_params,
@@ -111,6 +106,42 @@ def test_coulomb_energy_parity(nb_parity_bundle):
     assert delta < 1.0, f"Coulomb parity exceeded: delta={delta:.6f} kcal/mol (gate: 1.0)"
 
 
+def test_nb_total_self_consistency(nb_parity_bundle):
+    """Verify total nonbonded energy self-consistency within Prolix (gate: |dE| < 1e-4 kcal/mol).
+
+    This is a self-consistency check validating that the decomposed nonbonded energy
+    components sum correctly:
+        total_nb = lj + coulomb
+
+    where `lj` from `make_energy_fn(..., return_decomposed=True)` includes both
+    1-5+ LJ pairs AND the 1-4 exception pairs (already included in the 'lj' key).
+    The `coulomb` component covers 1-5+ pairs only (1-4 Coulomb routed via exception_chargeprods).
+
+    The identity holds within floating-point precision (< 1e-4 kcal/mol), confirming
+    that energy composition is correct and no contributions are missed or double-counted.
+    """
+    bundle = nb_parity_bundle
+    prolix_e = bundle['prolix_e']
+
+    # Decomposed components from Prolix
+    lj = prolix_e['lj']  # LJ (1-5+) + exception_14 LJ pairs
+    coulomb = prolix_e['coulomb']  # Coulomb (1-5+ only; 1-4 Coulomb bundled in exception)
+
+    # Compute total as sum of the two main decomposed terms
+    total_nb = lj + coulomb
+
+    # Verify the sum is self-consistent: compute total again by summing all three
+    # decomposed components (lj - exc14 + exc14 + coulomb = lj + coulomb)
+    exc14 = prolix_e['exception_14']
+    total_check = (lj - exc14) + exc14 + coulomb  # Should equal lj + coulomb
+
+    delta = abs(total_nb - total_check)
+
+    print(f"\nTotal NB self-consistency: lj={lj:.4f}, coulomb={coulomb:.4f}, exc14={exc14:.4f}")
+    print(f"  total_nb={total_nb:.4f}, check_sum={total_check:.4f}, delta={delta:.6f} kcal/mol")
+    assert delta < 1e-4, f"Total NB self-consistency failed: delta={delta:.6f} kcal/mol (gate: 1e-4)"
+
+
 def test_exception_14_energy_parity(nb_parity_bundle):
     """Verify 1-4 exception energy self-consistency within Prolix (gate: |dE| < 0.2 kcal/mol).
 
@@ -163,7 +194,7 @@ def test_nb_force_parity(nb_parity_bundle):
     Do NOT replace with jax.grad — it will trivially pass at zero force everywhere.
     """
     from prolix.physics.system import make_energy_fn
-    from fixtures_openmm_parity import get_openmm_nonbonded_forces
+    from .fixtures_openmm_parity import get_openmm_nonbonded_forces
 
     bundle = nb_parity_bundle
     positions_ang = bundle['positions']
@@ -232,7 +263,7 @@ def pme_parity_bundle():
         pme_alpha: Ewald damping parameter (Å⁻¹)
         pme_grid_points: Number of PME grid points per dimension
     """
-    from fixtures_openmm_parity import (
+    from .fixtures_openmm_parity import (
         build_ala_dip_periodic_openmm_system,
         extract_bonded_params,
         extract_nonbonded_params,

@@ -546,7 +546,7 @@ print('f6: PASS')
    uses `nonbondedMethod=app.PME`, `nonbondedCutoff=9.0*unit.angstrom`,
    `ewaldErrorTolerance=5e-4`.
 2. Derive `pme_alpha` to match OpenMM's choice:
-   `alpha = sqrt(-log(2.0 * 5e-4)) / 9.0  # Å⁻¹ ≈ 0.334 Å⁻¹`
+   `alpha = sqrt(-log(2.0 * 5e-4)) / 9.0  # Å⁻¹ ≈ 0.292 Å⁻¹`
    Pass `pme_alpha=alpha` to prolix `make_energy_fn`.
 3. Add `test_pme_coulomb_energy_parity` with tolerance `|dE| < 2.0 kcal/mol`.
 
