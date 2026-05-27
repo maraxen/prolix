@@ -353,6 +353,300 @@ def get_prolix_per_term_energies(system, displacement_fn, positions_ang):
     return energies
 
 
+def extract_nonbonded_params(omm_system):
+    """Extract nonbonded parameters from OpenMM System.
+
+    Iterates over all forces, finds NonbondedForce, and extracts:
+    - Per-atom: charges (e), sigmas (Å), epsilons (kcal/mol)
+    - Exception data: pairs, sigmas (Å), epsilons (kcal/mol), charge products (e²)
+
+    Returns dict with keys:
+        charges, sigmas, epsilons, exception_pairs, exception_sigmas,
+        exception_epsilons, exception_chargeprods
+    All parameters converted to AKMA-like units (Å, kcal/mol, e).
+    """
+    if not HAS_OPENMM:
+        raise ImportError("OpenMM not available")
+
+    charges = []
+    sigmas = []
+    epsilons = []
+    exception_pairs = []
+    exception_sigmas = []
+    exception_epsilons = []
+    exception_chargeprods = []
+
+    for force in omm_system.getForces():
+        if isinstance(force, openmm.NonbondedForce):
+            # Extract per-atom parameters
+            for i in range(force.getNumParticles()):
+                charge, sigma_nm, epsilon_kj = force.getParticleParameters(i)
+                charges.append(charge.value_in_unit(unit.elementary_charge))
+                sigmas.append(_nm_to_ang(sigma_nm.value_in_unit(unit.nanometer)))
+                epsilons.append(_kj_to_kcal(epsilon_kj.value_in_unit(unit.kilojoule_per_mole)))
+
+            # Extract exception data
+            for k in range(force.getNumExceptions()):
+                i, j, chargeProd_kj, sigma_nm, epsilon_kj = force.getExceptionParameters(k)
+                exception_pairs.append([i, j])
+                exception_sigmas.append(_nm_to_ang(sigma_nm.value_in_unit(unit.nanometer)))
+                exception_epsilons.append(_kj_to_kcal(epsilon_kj.value_in_unit(unit.kilojoule_per_mole)))
+                exception_chargeprods.append(chargeProd_kj.value_in_unit(unit.elementary_charge**2))
+
+    # Convert to numpy arrays
+    data = {
+        'charges': np.array(charges, dtype=np.float64) if charges else np.zeros(0, dtype=np.float64),
+        'sigmas': np.array(sigmas, dtype=np.float64) if sigmas else np.zeros(0, dtype=np.float64),
+        'epsilons': np.array(epsilons, dtype=np.float64) if epsilons else np.zeros(0, dtype=np.float64),
+        'exception_pairs': np.array(exception_pairs, dtype=np.int32) if exception_pairs else np.zeros((0, 2), dtype=np.int32),
+        'exception_sigmas': np.array(exception_sigmas, dtype=np.float64) if exception_sigmas else np.zeros(0, dtype=np.float64),
+        'exception_epsilons': np.array(exception_epsilons, dtype=np.float64) if exception_epsilons else np.zeros(0, dtype=np.float64),
+        'exception_chargeprods': np.array(exception_chargeprods, dtype=np.float64) if exception_chargeprods else np.zeros(0, dtype=np.float64),
+    }
+
+    return data
+
+
+def get_openmm_nonbonded_energies(omm_system, positions_ang):
+    """Get nonbonded energies from OpenMM (LJ + Coulomb) via charge zeroing.
+
+    Two-pass approach:
+    1. Full nonbonded energy (LJ + Coulomb)
+    2. Zero all per-atom charges, get LJ-only energy
+    3. Restore charges
+    4. E_Coulomb = E_nb - E_LJ
+
+    NOTE: `setParticleParameters` only zeroes per-atom charges; exception entries
+    (getException) are NOT modified. Therefore E_LJ (from the zeroed-charge pass)
+    includes both 1-4 LJ AND 1-4 Coulomb contributions carried via exception_chargeprods.
+    E_Coul = E_nb - E_LJ is therefore 1-5+ Coulomb only (no 1-4 contribution).
+    This matches prolix's chunked_coulomb_energy semantics where 1-4 Coulomb is
+    routed separately through exception_chargeprods.
+
+    Returns dict with keys: 'total_nb', 'lj', 'coulomb' (all in kcal/mol).
+    """
+    if not HAS_OPENMM:
+        raise ImportError("OpenMM not available")
+
+    integrator = openmm.VerletIntegrator(0.001 * unit.picoseconds)
+    context = openmm.Context(omm_system, integrator, openmm.Platform.getPlatformByName("Reference"))
+
+    # Set positions in nm
+    context.setPositions(positions_ang / 10.0 * unit.nanometer)
+
+    # Find NonbondedForce
+    nonbonded_force = None
+    for force in omm_system.getForces():
+        if isinstance(force, openmm.NonbondedForce):
+            nonbonded_force = force
+            break
+
+    if nonbonded_force is None:
+        raise ValueError("No NonbondedForce found in system")
+
+    # Pass 1: Get full nonbonded energy (ForceGroup 3)
+    state = context.getState(getEnergy=True, groups={3})
+    e_nb_kj = state.getPotentialEnergy().value_in_unit(unit.kilojoule_per_mole)
+    e_nb = _kj_to_kcal(e_nb_kj)
+
+    # Save original charges
+    original_charges = []
+    for i in range(nonbonded_force.getNumParticles()):
+        charge, sigma, epsilon = nonbonded_force.getParticleParameters(i)
+        original_charges.append(charge)
+
+    # Pass 2: Zero all charges and get LJ-only energy
+    for i in range(nonbonded_force.getNumParticles()):
+        charge, sigma, epsilon = nonbonded_force.getParticleParameters(i)
+        nonbonded_force.setParticleParameters(i, 0.0 * unit.elementary_charge, sigma, epsilon)
+
+    context.reinitialize(preserveState=True)
+    state = context.getState(getEnergy=True, groups={3})
+    e_lj_kj = state.getPotentialEnergy().value_in_unit(unit.kilojoule_per_mole)
+    e_lj = _kj_to_kcal(e_lj_kj)
+
+    # Pass 3: Restore original charges
+    for i in range(nonbonded_force.getNumParticles()):
+        charge, sigma, epsilon = nonbonded_force.getParticleParameters(i)
+        nonbonded_force.setParticleParameters(i, original_charges[i], sigma, epsilon)
+
+    context.reinitialize(preserveState=True)
+
+    # Compute Coulomb energy as difference
+    e_coulomb = e_nb - e_lj
+
+    return {
+        'total_nb': e_nb,
+        'lj': e_lj,
+        'coulomb': e_coulomb,
+    }
+
+
+def get_openmm_nonbonded_forces(omm_system, positions_ang):
+    """Get per-atom nonbonded forces from OpenMM (ForceGroup 3 only).
+
+    Returns (N, 3) array in kcal/mol/Å.
+    """
+    if not HAS_OPENMM:
+        raise ImportError("OpenMM not available")
+
+    integrator = openmm.VerletIntegrator(0.001 * unit.picoseconds)
+    context = openmm.Context(omm_system, integrator, openmm.Platform.getPlatformByName("Reference"))
+
+    # Set positions in nm
+    context.setPositions(positions_ang / 10.0 * unit.nanometer)
+
+    # Get forces from nonbonded ForceGroup only (3)
+    state = context.getState(getForces=True, groups={3})
+    forces_omm = state.getForces()
+
+    # Convert from kJ/mol/nm to kcal/mol/Å
+    forces_kj_nm = np.array(forces_omm.value_in_unit(unit.kilojoule_per_mole / unit.nanometer))
+    forces_kcal_ang = forces_kj_nm * 0.1 / 4.184  # nm^-1 -> Å^-1, kJ -> kcal
+
+    return forces_kcal_ang
+
+
+def build_exclusion_spec(omm_system, n_atoms):
+    """Build ExclusionSpec from OpenMM NonbondedForce exceptions.
+
+    Classifies exceptions:
+    - If epsilon ≈ 0 AND chargeProd ≈ 0: add to idx_12_13 (fully excluded)
+    - Else: add to exception arrays (scaled 1-4 pairs)
+
+    Returns ExclusionSpec with prolix.physics.neighbor_list.ExclusionSpec structure.
+    """
+    from prolix.physics.neighbor_list import ExclusionSpec
+
+    # Enable x64 for float64 support if needed
+    jax.config.update("jax_enable_x64", True)
+
+    idx_12_13 = []
+    exception_pairs = []
+    exception_sigmas = []
+    exception_epsilons = []
+    exception_chargeprods = []
+
+    # Find NonbondedForce
+    nonbonded_force = None
+    for force in omm_system.getForces():
+        if isinstance(force, openmm.NonbondedForce):
+            nonbonded_force = force
+            break
+
+    if nonbonded_force is None:
+        raise ValueError("No NonbondedForce found in system")
+
+    # Process exceptions
+    for k in range(nonbonded_force.getNumExceptions()):
+        i, j, chargeProd_kj, sigma_nm, epsilon_kj = nonbonded_force.getExceptionParameters(k)
+
+        # Strip units
+        chargeProd_val = chargeProd_kj.value_in_unit(unit.elementary_charge**2)
+        sigma_val = sigma_nm.value_in_unit(unit.nanometer)
+        epsilon_val = epsilon_kj.value_in_unit(unit.kilojoule_per_mole)
+
+        # Classify: fully excluded (1-2/1-3) or scaled (1-4)
+        if abs(epsilon_val) < 1e-12 and abs(chargeProd_val) < 1e-12:
+            idx_12_13.append([i, j])
+        else:
+            exception_pairs.append([i, j])
+            exception_sigmas.append(_nm_to_ang(sigma_val))
+            exception_epsilons.append(_kj_to_kcal(epsilon_val))
+            exception_chargeprods.append(chargeProd_val)
+
+    # Validate: no atom should have >=32 exclusions
+    atom_excl_count = [0] * n_atoms
+    for i, j in idx_12_13:
+        atom_excl_count[i] += 1
+        atom_excl_count[j] += 1
+    for i, j in exception_pairs:
+        atom_excl_count[i] += 1
+        atom_excl_count[j] += 1
+
+    max_excl = max(atom_excl_count) if atom_excl_count else 0
+    assert max_excl < 32, f"Atom has {max_excl} exclusions, limit is 32"
+
+    return ExclusionSpec(
+        idx_12_13=jnp.array(idx_12_13, dtype=jnp.int32) if idx_12_13 else jnp.zeros((0, 2), dtype=jnp.int32),
+        idx_14=jnp.zeros((0, 2), dtype=jnp.int32),
+        scale_14_elec=0.0,
+        scale_14_vdw=0.0,
+        n_atoms=n_atoms,
+        exception_pairs=jnp.array(exception_pairs, dtype=jnp.int32) if exception_pairs else jnp.zeros((0, 2), dtype=jnp.int32),
+        exception_sigmas=jnp.array(exception_sigmas, dtype=jnp.float32) if exception_sigmas else jnp.zeros(0, dtype=jnp.float32),
+        exception_epsilons=jnp.array(exception_epsilons, dtype=jnp.float32) if exception_epsilons else jnp.zeros(0, dtype=jnp.float32),
+        exception_chargeprods=jnp.array(exception_chargeprods, dtype=jnp.float32) if exception_chargeprods else jnp.zeros(0, dtype=jnp.float32),
+    )
+
+
+def build_prolix_nonbonded_system(nb_params, bonded_params, positions_ang):
+    """Build prolix PhysicsSystem with nonbonded parameters added to bonded system.
+
+    Uses build_prolix_bonded_system to create the base system, then augments with
+    nonbonded fields (charges, sigmas, epsilons). Reuses dihedral expand_dims logic.
+
+    Args:
+        nb_params: dict from extract_nonbonded_params()
+        bonded_params: dict from extract_bonded_params()
+        positions_ang: (N, 3) float64 array in Angstroms
+
+    Returns:
+        system: PhysicsSystem with bonded and nonbonded fields
+        displacement_fn: jax_md displacement function
+    """
+    # Build bonded system first (handles positions, displacement_fn, bonds, angles, dihedrals, impropers)
+    bonded_sys, displacement_fn = build_prolix_bonded_system(bonded_params, positions_ang)
+
+    # Enable x64 for float64 support
+    jax.config.update("jax_enable_x64", True)
+
+    # Add nonbonded fields using dataclasses.replace
+    import dataclasses
+    system = dataclasses.replace(
+        bonded_sys,
+        charges=jnp.array(nb_params['charges'], dtype=jnp.float64),
+        sigmas=jnp.array(nb_params['sigmas'], dtype=jnp.float64),
+        epsilons=jnp.array(nb_params['epsilons'], dtype=jnp.float64),
+    )
+
+    return system, displacement_fn
+
+
+def get_prolix_nonbonded_energies(system, displacement_fn, positions_ang, exclusion_spec):
+    """Get per-term prolix nonbonded energies (LJ, Coulomb, 1-4 exceptions).
+
+    Uses make_energy_fn with return_decomposed=True and exclusion_spec to
+    separate LJ, Coulomb, and exception pair contributions.
+
+    Returns dict with keys: 'lj', 'coulomb', 'exception_14' (all in kcal/mol).
+    """
+    from prolix.physics.system import make_energy_fn
+
+    # Enable x64 for float64 support
+    jax.config.update("jax_enable_x64", True)
+
+    positions = jnp.array(positions_ang, dtype=jnp.float64)
+
+    # Build decomposed energy functions
+    energy_fns = make_energy_fn(
+        displacement_fn,
+        system,
+        cutoff_distance=0,  # No cutoff for parity test
+        pme_alpha=0.0,
+        use_pbc=False,
+        return_decomposed=True,
+        exclusion_spec=exclusion_spec,
+    )
+
+    # Evaluate each term
+    return {
+        'lj': float(energy_fns['lj'](positions)),
+        'coulomb': float(energy_fns['electrostatics'](positions)),
+        'exception_14': float(energy_fns['exception'](positions)),
+    }
+
+
 @pytest.fixture(scope="module")
 def ala_dip_reference():
     """Module-scoped fixture: OpenMM alanine dipeptide reference.
