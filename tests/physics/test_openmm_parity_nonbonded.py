@@ -212,3 +212,105 @@ def test_nb_force_parity(nb_parity_bundle):
 
     print(f"\nNB force parity: RMS={rms:.6f} kcal/mol/Å, max|delta|={max_abs:.6f} kcal/mol/Å")
     assert rms < 0.5, f"Force RMS exceeded gate: RMS={rms:.6f} kcal/mol/Å (gate: 0.5)"
+
+
+@pytest.fixture(scope="module")
+def pme_parity_bundle():
+    """Build OpenMM and prolix periodic PME energy evaluations for parity comparison.
+
+    Constructs an alanine dipeptide system in a cubic periodic box with PME
+    electrostatics. Derives pme_alpha from PME settings and evaluates both
+    OpenMM and Prolix PME Coulomb energies for parity comparison.
+
+    Returns dict with keys:
+        omm_e_coulomb: OpenMM PME Coulomb energy (1-5+ only)
+        prolix_e: dict from get_prolix_pme_coulomb_energy
+        positions: (N, 3) positions in Angstroms
+        box_vec: (3,) box side lengths in Angstroms
+        omm_system: OpenMM System with PME
+        exclusion_spec: ExclusionSpec for Prolix
+        pme_alpha: Ewald damping parameter (Å⁻¹)
+        pme_grid_points: Number of PME grid points per dimension
+    """
+    from fixtures_openmm_parity import (
+        build_ala_dip_periodic_openmm_system,
+        extract_bonded_params,
+        extract_nonbonded_params,
+        build_exclusion_spec,
+        build_prolix_periodic_system,
+        get_prolix_pme_coulomb_energy,
+        get_openmm_pme_coulomb_energy,
+    )
+    import math
+
+    # Build periodic system
+    omm_system, positions_ang, _, box_vec = build_ala_dip_periodic_openmm_system(box_side_ang=30.0)
+    bonded_params = extract_bonded_params(omm_system)
+    nb_params = extract_nonbonded_params(omm_system)
+    exclusion_spec = build_exclusion_spec(omm_system, positions_ang.shape[0])
+
+    # Build prolix periodic system
+    prolix_system, displacement_fn, box = build_prolix_periodic_system(nb_params, bonded_params, positions_ang, box_vec)
+
+    # Derive PME parameters
+    # PME alpha is chosen to achieve the Ewald error tolerance.
+    # For OpenMM's default tolerance of 5e-4 and cutoff of 9.0 Å:
+    # alpha = sqrt(-log(2 * tolerance)) / cutoff_A
+    ewald_tol = 5e-4
+    cutoff_ang = 9.0
+    pme_alpha = math.sqrt(-math.log(2.0 * ewald_tol)) / cutoff_ang
+    pme_grid_points = 32  # Match OpenMM's typical choice for 30 Å box
+
+    # Evaluate OpenMM PME Coulomb
+    omm_e_coulomb = get_openmm_pme_coulomb_energy(omm_system, positions_ang, box_vec)
+
+    # Evaluate Prolix PME Coulomb
+    prolix_e = get_prolix_pme_coulomb_energy(
+        prolix_system,
+        displacement_fn,
+        positions_ang,
+        box_vec,
+        exclusion_spec,
+        pme_alpha,
+        pme_grid_points,
+    )
+
+    return {
+        'omm_e_coulomb': omm_e_coulomb,
+        'prolix_e': prolix_e,
+        'positions': positions_ang,
+        'box_vec': box_vec,
+        'omm_system': omm_system,
+        'exclusion_spec': exclusion_spec,
+        'pme_alpha': pme_alpha,
+        'pme_grid_points': pme_grid_points,
+    }
+
+
+def test_pme_coulomb_energy_parity(pme_parity_bundle):
+    """Verify PME Coulomb energy parity between Prolix and OpenMM (gate: |dE| < 2.0 kcal/mol).
+
+    Compares PME Coulomb energies (1-5+ pairs only) on a 30 Å cubic periodic box.
+    This test validates that Prolix's PME implementation (via jax-md SPME) matches
+    OpenMM's PME for the Coulomb term at the precision required for molecular dynamics.
+
+    Gate tolerance is 2.0 kcal/mol (wider than vacuum case) to account for PME
+    approximation errors from grid discretization and reciprocal-space cutoff.
+
+    PME parameters are derived from OpenMM's default Ewald error tolerance (5e-4):
+    - pme_alpha = sqrt(-log(2 * tol)) / cutoff_A ≈ 0.334 Å⁻¹
+    - pme_grid_points = 32 (standard for 30 Å boxes)
+    """
+    bundle = pme_parity_bundle
+
+    prolix_coulomb = bundle['prolix_e']['coulomb']
+    omm_coulomb = bundle['omm_e_coulomb']
+    delta = abs(prolix_coulomb - omm_coulomb)
+
+    # Log diagnostic info
+    print(f"\nPME Coulomb parity (30 Å box):")
+    print(f"  PME alpha: {bundle['pme_alpha']:.6f} Å⁻¹")
+    print(f"  PME grid: {bundle['pme_grid_points']} points/dimension")
+    print(f"  prolix={prolix_coulomb:.4f}, omm={omm_coulomb:.4f}, delta={delta:.6f} kcal/mol")
+
+    assert delta < 2.0, f"PME Coulomb parity exceeded: delta={delta:.6f} kcal/mol (gate: 2.0)"

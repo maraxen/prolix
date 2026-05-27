@@ -695,3 +695,258 @@ def ala_dip_reference():
         'prolix_system': prolix_system,
         'displacement_fn': displacement_fn,
     }
+
+
+def build_ala_dip_periodic_openmm_system(box_side_ang=30.0):
+    """Build periodic OpenMM system for alanine dipeptide with PME Coulomb.
+
+    Constructs the same system as build_ala_dip_openmm_system, but with:
+    - Periodic boundary conditions (cubic box of size box_side_ang Å)
+    - PME for electrostatics
+    - Nonbonded cutoff of 9.0 Å (standard PME cutoff)
+    - Ewald error tolerance of 5e-4 (typical for MD)
+
+    Args:
+        box_side_ang: Cubic box side length in Angstroms (default 30 Å)
+
+    Returns:
+        omm_system: OpenMM System object with PME and periodic BCs
+        positions_ang: (N, 3) float64 array in Angstroms
+        topology: OpenMM Topology
+        box_vec: (3,) array of box side lengths in Angstroms
+    """
+    if not HAS_OPENMM:
+        raise ImportError("OpenMM not available")
+
+    # Create the same alanine dipeptide as before
+    pdb_content = """HEADER
+REMARK Alanine dipeptide (ACE-ALA-NME) - periodic
+ATOM      1  C   ACE A   1       0.000   0.000   0.000  1.00  0.00           C
+ATOM      2  O   ACE A   1       1.200   0.000   0.000  1.00  0.00           O
+ATOM      3  CH3 ACE A   1      -0.600   1.200   0.000  1.00  0.00           C
+ATOM      4  N   ALA A   2      -0.600  -1.200   0.000  1.00  0.00           N
+ATOM      5  CA  ALA A   2      -2.000  -1.200   0.000  1.00  0.00           C
+ATOM      6  C   ALA A   2      -2.600  -2.400   0.000  1.00  0.00           C
+ATOM      7  O   ALA A   2      -3.800  -2.400   0.000  1.00  0.00           O
+ATOM      8  CB  ALA A   2      -2.600  -0.000   0.000  1.00  0.00           C
+ATOM      9  N   NME A   3      -1.800  -3.600   0.000  1.00  0.00           N
+ATOM     10  CH3 NME A   3      -2.400  -4.800   0.000  1.00  0.00           C
+END
+"""
+
+    from io import StringIO
+    pdb_file = app.PDBFile(StringIO(pdb_content))
+    ff = app.ForceField('amber14-all.xml')
+    modeller = app.Modeller(pdb_file.topology, pdb_file.positions)
+
+    # Add hydrogens
+    modeller.addHydrogens(ff)
+
+    # Set periodic box dimensions on topology BEFORE creating system
+    # OpenMM requires this for PME systems
+    box_side_nm = box_side_ang / 10.0
+    modeller.topology.setPeriodicBoxVectors(
+        [openmm.Vec3(box_side_nm, 0, 0), openmm.Vec3(0, box_side_nm, 0), openmm.Vec3(0, 0, box_side_nm)]
+    )
+
+    # Create system with PME and periodic boundaries
+    # nonbondedMethod=app.PME enables PME for electrostatics
+    # nonbondedCutoff sets the real-space cutoff for PME
+    omm_system = ff.createSystem(
+        modeller.topology,
+        nonbondedMethod=app.PME,
+        nonbondedCutoff=9.0 * unit.angstrom,
+        ewaldErrorTolerance=5e-4,
+        constraints=None,
+        rigidWater=False,
+        removeCMMotion=False,
+    )
+
+    # Set periodic box vectors on system as well
+    box_vectors = openmm.Vec3(box_side_nm, 0, 0), openmm.Vec3(0, box_side_nm, 0), openmm.Vec3(0, 0, box_side_nm)
+    omm_system.setDefaultPeriodicBoxVectors(*box_vectors)
+
+    # Assign ForceGroups
+    force_group_map = {
+        openmm.HarmonicBondForce: 0,
+        openmm.HarmonicAngleForce: 1,
+        openmm.PeriodicTorsionForce: 2,
+        openmm.NonbondedForce: 3,
+    }
+    for force in omm_system.getForces():
+        force_type = type(force)
+        if force_type in force_group_map:
+            force.setForceGroup(force_group_map[force_type])
+
+    # Minimize to sensible geometry
+    integrator = openmm.VerletIntegrator(0.001 * unit.picoseconds)
+    context = openmm.Context(omm_system, integrator, openmm.Platform.getPlatformByName("Reference"))
+    context.setPositions(modeller.positions)
+    openmm.LocalEnergyMinimizer.minimize(context, maxIterations=100, tolerance=1.0)
+
+    state = context.getState(getPositions=True)
+    positions_omm = state.getPositions()
+    positions_ang = np.array(positions_omm.value_in_unit(unit.angstrom), dtype=np.float64)
+
+    # Box vector as array in Angstroms
+    box_vec = np.array([box_side_ang, box_side_ang, box_side_ang], dtype=np.float64)
+
+    return omm_system, positions_ang, modeller.topology, box_vec
+
+
+def get_openmm_pme_coulomb_energy(omm_system, positions_ang, box_vec):
+    """Get Coulomb energy from OpenMM with PME (ForceGroup 3 only).
+
+    For PME systems, the total nonbonded energy includes both LJ and Coulomb
+    contributions. Since there is no charge-zeroing option that preserves the
+    PME reciprocal space calculations, we compute the total energy and subtract
+    LJ (via the standard charge-zeroing trick) to isolate Coulomb.
+
+    Returns float in kcal/mol.
+    """
+    if not HAS_OPENMM:
+        raise ImportError("OpenMM not available")
+
+    integrator = openmm.VerletIntegrator(0.001 * unit.picoseconds)
+    context = openmm.Context(omm_system, integrator, openmm.Platform.getPlatformByName("Reference"))
+
+    # Set positions and box vectors
+    context.setPositions(positions_ang / 10.0 * unit.nanometer)
+    box_side_nm = box_vec[0] / 10.0
+    box_vectors = openmm.Vec3(box_side_nm, 0, 0), openmm.Vec3(0, box_side_nm, 0), openmm.Vec3(0, 0, box_side_nm)
+    context.setPeriodicBoxVectors(*box_vectors)
+
+    # Find NonbondedForce
+    nonbonded_force = None
+    for force in omm_system.getForces():
+        if isinstance(force, openmm.NonbondedForce):
+            nonbonded_force = force
+            break
+
+    if nonbonded_force is None:
+        raise ValueError("No NonbondedForce found in system")
+
+    # Pass 1: Get full nonbonded energy
+    state = context.getState(getEnergy=True, groups={3})
+    e_nb_kj = state.getPotentialEnergy().value_in_unit(unit.kilojoule_per_mole)
+    e_nb = _kj_to_kcal(e_nb_kj)
+
+    # Save original charges
+    original_charges = []
+    for i in range(nonbonded_force.getNumParticles()):
+        charge, sigma, epsilon = nonbonded_force.getParticleParameters(i)
+        original_charges.append(charge)
+
+    # Pass 2: Zero all charges and get LJ-only energy
+    for i in range(nonbonded_force.getNumParticles()):
+        charge, sigma, epsilon = nonbonded_force.getParticleParameters(i)
+        nonbonded_force.setParticleParameters(i, 0.0 * unit.elementary_charge, sigma, epsilon)
+
+    context.reinitialize(preserveState=True)
+    state = context.getState(getEnergy=True, groups={3})
+    e_lj_kj = state.getPotentialEnergy().value_in_unit(unit.kilojoule_per_mole)
+    e_lj = _kj_to_kcal(e_lj_kj)
+
+    # Pass 3: Restore original charges
+    for i in range(nonbonded_force.getNumParticles()):
+        charge, sigma, epsilon = nonbonded_force.getParticleParameters(i)
+        nonbonded_force.setParticleParameters(i, original_charges[i], sigma, epsilon)
+
+    context.reinitialize(preserveState=True)
+
+    # Coulomb energy is the difference
+    e_coulomb = e_nb - e_lj
+
+    return e_coulomb
+
+
+def build_prolix_periodic_system(nb_params, bonded_params, positions_ang, box_vec):
+    """Build prolix PhysicsSystem with periodic box and nonbonded parameters.
+
+    Uses build_prolix_bonded_system to create the base system, then augments with
+    nonbonded fields and box information.
+
+    Args:
+        nb_params: dict from extract_nonbonded_params()
+        bonded_params: dict from extract_bonded_params()
+        positions_ang: (N, 3) float64 array in Angstroms
+        box_vec: (3,) array of box side lengths in Angstroms
+
+    Returns:
+        system: PhysicsSystem with bonded, nonbonded, and box fields
+        displacement_fn: jax_md displacement function for periodic box
+        box: jnp array of box vectors (3,) in Angstroms
+    """
+    import dataclasses
+    from jax_md import space
+
+    # Build bonded system first
+    bonded_sys, _ = build_prolix_bonded_system(bonded_params, positions_ang)
+
+    # Enable x64 for float64 support
+    jax.config.update("jax_enable_x64", True)
+
+    # Create periodic displacement function (cubic box)
+    # The displacement_fn computes relative positions with PBC
+    displacement_fn, _ = space.periodic(box_vec)
+
+    # Add nonbonded fields using dataclasses.replace
+    system = dataclasses.replace(
+        bonded_sys,
+        charges=jnp.array(nb_params['charges'], dtype=jnp.float64),
+        sigmas=jnp.array(nb_params['sigmas'], dtype=jnp.float64),
+        epsilons=jnp.array(nb_params['epsilons'], dtype=jnp.float64),
+    )
+
+    return system, displacement_fn, jnp.array(box_vec, dtype=jnp.float64)
+
+
+def get_prolix_pme_coulomb_energy(system, displacement_fn, positions_ang, box_vec, exclusion_spec, pme_alpha, pme_grid_points):
+    """Get Coulomb energy from prolix with PME on a periodic box.
+
+    Uses make_energy_fn with use_pbc=True, pme_alpha, and pme_grid_points to
+    compute PME Coulomb energy (1-5+ pairs only; exceptions handled separately).
+
+    Args:
+        system: PhysicsSystem
+        displacement_fn: jax_md periodic displacement function
+        positions_ang: (N, 3) positions in Angstroms
+        box_vec: (3,) box side lengths in Angstroms
+        exclusion_spec: ExclusionSpec for nonbonded interactions
+        pme_alpha: PME damping parameter (Å⁻¹)
+        pme_grid_points: Number of grid points per dimension
+
+    Returns:
+        dict with keys 'coulomb' (1-5+ only), 'exception_14', 'lj', 'total'
+    """
+    from prolix.physics.system import make_energy_fn
+
+    jax.config.update("jax_enable_x64", True)
+
+    positions = jnp.array(positions_ang, dtype=jnp.float64)
+    box = jnp.array(box_vec, dtype=jnp.float64)
+
+    # Build PME energy functions
+    energy_fns = make_energy_fn(
+        displacement_fn,
+        system,
+        cutoff_distance=9.0,  # Standard PME cutoff
+        pme_alpha=pme_alpha,
+        pme_grid_points=pme_grid_points,
+        use_pbc=True,
+        box=box,
+        return_decomposed=True,
+        exclusion_spec=exclusion_spec,
+    )
+
+    # Evaluate each term
+    e_lj = float(energy_fns['lj'](positions))
+    e_coulomb = float(energy_fns['electrostatics'](positions))
+    e_exception_14 = float(energy_fns['exception'](positions))
+
+    return {
+        'coulomb': e_coulomb,
+        'exception_14': e_exception_14,
+        'lj': e_lj,
+        'total': e_lj + e_coulomb + e_exception_14,
+    }
