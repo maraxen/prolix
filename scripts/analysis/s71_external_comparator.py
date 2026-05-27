@@ -13,6 +13,13 @@ Locked decisions (260527):
   - Hardware policy: "what doesn't run IS data" — failures plot as ✗ markers
   - Pass threshold: prolix per_mol_step_seconds < 0.5 × min(dmff, torchmd) per hardware
                     (espaloma excluded from gate; reported separately as batched comparator)
+
+Filtering:
+  --campaign-id    Bath campaign UUID (full or 8-char prefix)
+  --tag-required   Repeatable tag filter (default: external-baseline)
+  --git-hash       Repeatable git_hash filter (default: include all). Use to pin
+                   to a known-good harness; e.g., --git-hash 78f5f5b after C1-fix.
+  --since          ISO timestamp lower bound on run timestamp.
 """
 
 import argparse
@@ -55,6 +62,8 @@ def load_runs(
     campaign_id: str,
     tag_required: list[str],
     tag_exclude: list[str],
+    git_hashes: list[str] = None,
+    since: str = None,
 ) -> pd.DataFrame:
     """Load runs from bath catalog matching campaign and tag filters.
 
@@ -74,6 +83,32 @@ def load_runs(
     for tag in tag_exclude:
         tag_exclude_sql += f" AND NOT list_contains(tags, '{tag}')"
 
+    # Build git_hash filter
+    git_hash_sql = ""
+    if git_hashes:
+        prefix_clauses = " OR ".join([f"git_hash LIKE '{h}%'" for h in git_hashes])
+        git_hash_sql = f" AND ({prefix_clauses})"
+
+    # Build timestamp filter
+    timestamp_sql = ""
+    if since:
+        # Validate ISO timestamp format
+        try:
+            datetime.fromisoformat(since)
+            timestamp_sql = f" AND timestamp >= TIMESTAMP '{since}'"
+        except ValueError:
+            logger.error(f"Invalid ISO timestamp format: {since}")
+            raise ValueError(f"--since must be a valid ISO timestamp, got: {since}")
+
+    # Log active filters
+    logger.info(
+        f"Filters: campaign=%s, tags_required=%s, git_hashes=%s, since=%s",
+        campaign_id,
+        tag_required,
+        git_hashes,
+        since,
+    )
+
     # Query the catalog
     try:
         query = f"""
@@ -81,7 +116,7 @@ def load_runs(
             FROM read_parquet('{catalog_glob}')
             WHERE ({tag_filter_sql})
               AND (campaign_id LIKE '{campaign_id[:8]}%' OR campaign_id = '{campaign_id}')
-              {tag_exclude_sql}
+              {tag_exclude_sql}{git_hash_sql}{timestamp_sql}
             ORDER BY timestamp DESC
         """
         logger.info(f"Querying catalog with: {query[:100]}...")
@@ -575,6 +610,17 @@ def main():
         default=150,
         help="DPI for PNG output.",
     )
+    parser.add_argument(
+        "--git-hash",
+        action="append",
+        default=None,
+        help="Filter to rows with these git_hash values (repeatable). Each value can be a full hash or 7+ char prefix. Default: include all hashes.",
+    )
+    parser.add_argument(
+        "--since",
+        default=None,
+        help="ISO timestamp; only include rows with timestamp >= this value (e.g. '2026-05-27T12:00:00').",
+    )
 
     args = parser.parse_args()
 
@@ -588,6 +634,8 @@ def main():
         args.campaign_id,
         args.tag_required,
         args.tag_exclude,
+        git_hashes=args.git_hash,
+        since=args.since,
     )
 
     logger.info("Deriving compatibility matrix...")
