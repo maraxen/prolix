@@ -120,5 +120,6 @@ Audit conducted via `get_prolix_nonbonded_energies` using `build_prolix_nonbonde
 `make_exception_pair_energy_fn`. Omitting them from `idx_12_13` causes double-counting.
 See fix in `tests/physics/fixtures_openmm_parity.py::build_exclusion_spec`.
 
-**Gate:** Energy parity tests (f4) PASS at `|dE(LJ)| < 1e-4 kcal/mol`, `|dE(Coul)| < 1e-4 kcal/mol`.
-Force RMS (f5) PASS at `5e-6 kcal/mol/Å` (gate: 0.5). Extended for P2b nonbonded fields (260527).
+**Required gates:** `|dE(LJ)| < 1.0 kcal/mol`, `|dE(Coul)| < 1.0 kcal/mol`, force RMS < 0.5 kcal/mol/Å.
+**Observed (float64):** `|dE(LJ)| ≈ 1e-6 kcal/mol`, `|dE(Coul)| ≈ 3e-6 kcal/mol`, force RMS ≈ 5e-6 kcal/mol/Å.
+All gates: PASS. Extended for P2b nonbonded fields (260527).
