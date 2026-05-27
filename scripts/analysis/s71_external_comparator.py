@@ -57,6 +57,19 @@ TOOL_MARKERS = {
 }
 
 
+def _extract_tag_value(tags, prefix: str) -> str | None:
+    """Extract a tag value from a tag list given a prefix.
+
+    Example: _extract_tag_value(['tool:torchmd', 'hardware:a100'], 'tool') -> 'torchmd'
+    """
+    if not tags:
+        return None
+    for tag in tags:
+        if isinstance(tag, str) and tag.startswith(prefix + ":"):
+            return tag.split(":", 1)[1]
+    return None
+
+
 def load_runs(
     catalog_glob: str,
     campaign_id: str,
@@ -68,8 +81,8 @@ def load_runs(
     """Load runs from bath catalog matching campaign and tag filters.
 
     Returns a DataFrame with columns: id, status, output_paths, tags, campaign_id,
-    plus extracted fields from the JSON output files: tool, hardware_tag, n_mols,
-    precision, per_mol_step_seconds, final_loss, etc.
+    plus extracted fields from tags (tool, hardware_tag, n_mols, precision) and
+    from JSON output files: per_mol_step_seconds, final_loss, etc.
     """
     con = duckdb.connect()
 
@@ -135,21 +148,40 @@ def load_runs(
 
     # Load JSON results from output_paths
     results = []
+    n_payload = 0
+    n_tag_json = 0
+
     for idx, row in df_catalog.iterrows():
+        # Extract metadata from tags first
+        tags_list = row["tags"] if isinstance(row["tags"], list) else (row["tags"].tolist() if isinstance(row["tags"], np.ndarray) else [])
+        tool_from_tags = _extract_tag_value(tags_list, "tool")
+        hardware_from_tags = _extract_tag_value(tags_list, "hardware")
+        precision_from_tags = _extract_tag_value(tags_list, "precision")
+        n_mols_from_tags = _extract_tag_value(tags_list, "n_mols")
+
+        try:
+            n_mols_from_tags = int(n_mols_from_tags) if n_mols_from_tags else None
+        except (ValueError, TypeError):
+            n_mols_from_tags = None
+
         if row["status"] == "failed":
-            # Record as a failure cell
+            # Record as a failure cell with tag-extracted metadata
             results.append({
                 "id": row["id"],
                 "status": "failed",
                 "campaign_id": row["campaign_id"],
                 "timestamp": row["timestamp"],
                 "git_hash": row["git_hash"],
-                "tool": None,
-                "hardware_tag": None,
-                "n_mols": None,
-                "precision": None,
+                "tool": tool_from_tags,
+                "hardware_tag": hardware_from_tags,
+                "n_mols": n_mols_from_tags,
+                "precision": precision_from_tags,
                 "per_mol_step_seconds": None,
                 "final_loss": None,
+                "compile_seconds": None,
+                "peak_memory_mib": None,
+                "trial_seconds": None,
+                "device": None,
                 "failure_reason": "catalog status=failed",
             })
             continue
@@ -157,7 +189,7 @@ def load_runs(
         # Try to load from output_paths
         output_paths = row["output_paths"]
         if not isinstance(output_paths, (list, np.ndarray)) or len(output_paths) == 0:
-            logger.debug(f"Row {row['id']}: no output_paths")
+            logger.debug(f"Row {row['id']}: no output_paths, skipping")
             continue
 
         # Handle numpy array
@@ -173,6 +205,20 @@ def load_runs(
             with open(out_path) as f:
                 payload = json.load(f)
 
+            # Extract metrics from JSON payload
+            per_mol_step_seconds = payload.get("per_mol_step_seconds")
+            final_loss = payload.get("final_loss")
+            compile_seconds = payload.get("compile_seconds")
+            peak_memory_mib = payload.get("peak_memory_mib")
+            trial_seconds = payload.get("trial_seconds")
+            device = payload.get("device")
+
+            # Prefer tag-extracted values, fall back to payload for backward compat
+            tool = tool_from_tags or payload.get("tool")
+            hardware_tag = hardware_from_tags or payload.get("hardware_tag")
+            n_mols = n_mols_from_tags or payload.get("n_mols")
+            precision = precision_from_tags or payload.get("precision")
+
             # Extract required fields
             result = {
                 "id": row["id"],
@@ -180,21 +226,30 @@ def load_runs(
                 "campaign_id": row["campaign_id"],
                 "timestamp": row["timestamp"],
                 "git_hash": row["git_hash"],
-                "tool": payload.get("tool"),
-                "hardware_tag": payload.get("hardware_tag"),
-                "n_mols": payload.get("n_mols"),
-                "precision": payload.get("precision"),
-                "per_mol_step_seconds": payload.get("per_mol_step_seconds"),
-                "final_loss": payload.get("final_loss"),
+                "tool": tool,
+                "hardware_tag": hardware_tag,
+                "n_mols": n_mols,
+                "precision": precision,
+                "per_mol_step_seconds": per_mol_step_seconds,
+                "final_loss": final_loss,
+                "compile_seconds": compile_seconds,
+                "peak_memory_mib": peak_memory_mib,
+                "trial_seconds": trial_seconds,
+                "device": device,
                 "failure_reason": None,
             }
             results.append(result)
+            # Track source
+            if tool_from_tags is not None:
+                n_tag_json += 1
+            if payload.get("tool") is not None:
+                n_payload += 1
         except Exception as e:
             logger.debug(f"Row {row['id']}: failed to load JSON: {e}")
             continue
 
     df_results = pd.DataFrame(results)
-    logger.info(f"Loaded {len(df_results)} results with valid output")
+    logger.info(f"Loaded {len(df_results)} results: {n_payload} via payload, {n_tag_json} via tags+json")
 
     return df_results
 
