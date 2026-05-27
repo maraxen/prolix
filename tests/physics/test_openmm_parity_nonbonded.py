@@ -149,3 +149,66 @@ def test_exception_14_energy_parity(nb_parity_bundle):
 
     print(f"\nException-14 self-consistency: direct={direct_exc14:.4f}, composed={composed_exc14:.4f}, delta={delta:.6f} kcal/mol")
     assert delta < 0.2, f"Exception-14 self-consistency exceeded: delta={delta:.6f} kcal/mol (gate: 0.2)"
+
+
+def test_nb_force_parity(nb_parity_bundle):
+    """Verify nonbonded force parity via central finite differences (gate: RMS < 0.5 kcal/mol/Å).
+
+    Forces are computed by central finite differences (eps=1e-3 Å) and compared
+    against OpenMM ForceGroup 3 forces (in kcal/mol/Å).
+
+    NOTE: jax.grad(chunked_lj_energy) returns zeros due to custom VJP stub.
+    (src/prolix/physics/optimization.py:68-71 — known limitation.)
+    Forces are computed here via central finite differences (eps=1e-3 Å).
+    Do NOT replace with jax.grad — it will trivially pass at zero force everywhere.
+    """
+    from prolix.physics.system import make_energy_fn
+    from fixtures_openmm_parity import get_openmm_nonbonded_forces
+
+    bundle = nb_parity_bundle
+    positions_ang = bundle['positions']
+    omm_system = bundle['omm_system']
+    exc_spec = bundle['exclusion_spec']
+    prolix_system = bundle['prolix_system']
+    displacement_fn = bundle['displacement_fn']
+
+    # Build decomposed energy fns (same settings as fixture)
+    energy_fns = make_energy_fn(
+        displacement_fn,
+        prolix_system,
+        cutoff_distance=0,
+        pme_alpha=0.0,
+        use_pbc=False,
+        return_decomposed=True,
+        exclusion_spec=exc_spec,
+    )
+
+    def nb_energy_scalar(r_np: np.ndarray) -> float:
+        """Total nonbonded energy: LJ (1-5+) + Coulomb (1-5+) + exception-14."""
+        r = jnp.array(r_np, dtype=jnp.float64)
+        e_lj = float(energy_fns['lj'](r))
+        e_coul = float(energy_fns['electrostatics'](r))
+        e_exc = float(energy_fns['exception'](r))
+        return e_lj + e_coul + e_exc
+
+    # Central finite differences: F_i = -(E(r+eps) - E(r-eps)) / (2*eps)
+    eps = 1e-3  # Angstrom
+    n_atoms = positions_ang.shape[0]
+    forces_fd = np.zeros_like(positions_ang)
+    for i in range(n_atoms):
+        for j in range(3):
+            r_plus = positions_ang.copy()
+            r_plus[i, j] += eps
+            r_minus = positions_ang.copy()
+            r_minus[i, j] -= eps
+            forces_fd[i, j] = -(nb_energy_scalar(r_plus) - nb_energy_scalar(r_minus)) / (2.0 * eps)
+
+    # OpenMM reference forces (ForceGroup 3, kcal/mol/Å)
+    forces_omm = get_openmm_nonbonded_forces(omm_system, positions_ang)
+
+    delta = forces_fd - forces_omm
+    rms = float(np.sqrt(np.mean(delta ** 2)))
+    max_abs = float(np.max(np.abs(delta)))
+
+    print(f"\nNB force parity: RMS={rms:.6f} kcal/mol/Å, max|delta|={max_abs:.6f} kcal/mol/Å")
+    assert rms < 0.5, f"Force RMS exceeded gate: RMS={rms:.6f} kcal/mol/Å (gate: 0.5)"
