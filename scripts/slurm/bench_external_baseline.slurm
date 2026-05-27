@@ -36,6 +36,7 @@ PRECISION="${PRECISION:-float32}"
 N_WARMUP="${N_WARMUP:-1}"
 N_TRIALS="${N_TRIALS:-3}"
 SEED="${SEED:-42}"
+HARDWARE_TAG="${HARDWARE_TAG:-rtx-pro-6000-blackwell}"
 
 echo "=== §7.1 external-baseline bench ==="
 echo "Host: $(hostname)"
@@ -59,7 +60,7 @@ fi
 BENCH_DIR="scripts/benchmarks/external_baseline"
 case "${TOOL}" in
     prolix)
-        PYTHON_INTERP="uv run python"
+        PYTHON_INTERP="python"  # project uv venv already active via outer 'uv run bth run'
         ;;
     dmff)
         PYTHON_INTERP="${BENCH_DIR}/.venv-dmff/bin/python"
@@ -124,13 +125,13 @@ uv run bth run ${PYTHON_INTERP} "${BENCH_SCRIPT}" \
     --tag "hardware:${HARDWARE_TAG}" \
     ${CAMPAIGN_FLAG} \
     --out "${OUT}" \
-    -- \
     --n-mols "${N_MOLS}" \
     --n-conf-cap "${N_CONF_CAP}" \
     --precision "${PRECISION}" \
     --n-warmup "${N_WARMUP}" \
     --n-trials "${N_TRIALS}" \
     --seed "${SEED}" \
+    --hardware-tag "${HARDWARE_TAG}" \
     --out "${OUT}"
 
 EXIT=$?

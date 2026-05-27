@@ -120,6 +120,7 @@ def _build_yaml_forcefield(mol_data: dict, mol_id: str, tmp_dir: str) -> str:
 def _build_torchmd_objects(
     mol_data: dict,
     mol_id: str,
+    json_file: Path,
     tmp_dir: str,
     dtype: torch.dtype,
     device: str,
@@ -181,10 +182,11 @@ def _build_torchmd_objects(
     parameters = Parameters(ff, mol, terms=terms, precision=dtype)
     forces_obj = Forces(parameters, terms=terms)
 
-    # Use first conformer only (n_conf_cap=1 for timing)
-    # positions from params_init JSON are not stored there — use random
-    # positions as placeholder (we are measuring compute cost, not accuracy)
-    pos_np = np.random.default_rng(42).random((n_atoms, 3)).astype(np.float32) * 5.0
+    # Load real positions from paired h5 file (first conformer)
+    import h5py
+    h5_path = json_file.parent / json_file.name.replace(".params_init.json", ".h5")
+    with h5py.File(h5_path, "r") as h:
+        pos_np = h["positions"][0]  # shape (n_atoms, 3), Å
     pos_tensor = torch.tensor(pos_np, dtype=dtype, device=device, requires_grad=True)
 
     return forces_obj, pos_tensor, mol_id
@@ -202,6 +204,7 @@ def load_base_mols(subset_dir: Path, n_conf_cap: int | None = None) -> list[dict
             "json_data": data,
             "mol_id": f.stem.replace(".params_init", ""),
             "n_atoms": n_atoms,
+            "json_file": f,
         })
     return mols
 
@@ -228,7 +231,7 @@ def bench_one_step(args) -> dict:
         m = base_mols[i]
         try:
             forces_obj, pos_tensor, mol_id = _build_torchmd_objects(
-                m["json_data"], m["mol_id"], tmp_dir, dtype, device
+                m["json_data"], m["mol_id"], m["json_file"], tmp_dir, dtype, device
             )
             mol_data_list.append((forces_obj, pos_tensor, mol_id))
             n_atoms_max = max(n_atoms_max, m["n_atoms"])
@@ -324,7 +327,7 @@ def bench_one_step(args) -> dict:
         "n_atoms_max": int(n_atoms_max),
         "precision": args.precision,
         "device": device,
-        "hardware_tag": os.environ.get("HARDWARE_TAG", "rtx-pro-6000-blackwell"),
+        "hardware_tag": args.hardware_tag,
         "trial_seconds": trial_median,
         "trial_min_seconds": float(min(trial_times)),
         "trial_max_seconds": float(max(trial_times)),
@@ -350,6 +353,7 @@ def main():
     parser.add_argument("--n-warmup", type=int, default=1)
     parser.add_argument("--n-trials", type=int, default=3)
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--hardware-tag", default=os.environ.get("HARDWARE_TAG", "rtx-pro-6000-blackwell"))
     parser.add_argument("--out", type=str, default=None, help="JSON output path; default stdout")
     args = parser.parse_args()
 

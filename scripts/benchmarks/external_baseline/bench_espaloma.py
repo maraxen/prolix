@@ -254,35 +254,35 @@ def bench_one_step(args) -> dict:
     # Batch already-on-device graphs
     batched_g = dgl.batch(graphs)
 
+    # Initialise xyz node data and inject positions once before warmup/trials
+    if "xyz" not in batched_g.nodes["n1"].data:
+        n1_total = batched_g.number_of_nodes("n1")
+        batched_g.nodes["n1"].data["xyz"] = torch.zeros(
+            n1_total, 1, 3, dtype=dtype, device=device
+        )
+
+    # Inject positions into n1.xyz for each mol in the batch (constant across trial).
+    # n1 nodes include H atoms added by openff-toolkit; pos_i contains only
+    # heavy atoms. Pad with zeros for the extra H-atom nodes — positions need
+    # to be valid tensors for timing but don't need physical accuracy.
+    n1_start = 0
+    for g_i, pos_i in zip(graphs, positions_list):
+        n1_i = g_i.number_of_nodes("n1")
+        n_heavy = min(pos_i.shape[0], n1_i)
+        # Shape (n1_i, 1, 3) — espaloma geometry uses (n_atoms, n_confs, 3)
+        pos_full = torch.zeros(n1_i, 1, 3, dtype=dtype, device=device)
+        pos_full[:n_heavy, 0, :] = torch.tensor(pos_i[:n_heavy], dtype=dtype, device=device)
+        batched_g.nodes["n1"].data["xyz"][n1_start : n1_start + n1_i] = pos_full
+        n1_start += n1_i
+
     def step_fn():
         optimizer.zero_grad()
-        # Inject positions into n1.xyz for each mol in the batch.
-        # n1 nodes include H atoms added by openff-toolkit; pos_i contains only
-        # heavy atoms. Pad with zeros for the extra H-atom nodes — positions need
-        # to be valid tensors for timing but don't need physical accuracy.
-        n1_start = 0
-        for g_i, pos_i in zip(graphs, positions_list):
-            n1_i = g_i.number_of_nodes("n1")
-            n_heavy = min(pos_i.shape[0], n1_i)
-            # Shape (n1_i, 1, 3) — espaloma geometry uses (n_atoms, n_confs, 3)
-            pos_full = torch.zeros(n1_i, 1, 3, dtype=dtype, device=device)
-            pos_full[:n_heavy, 0, :] = torch.tensor(pos_i[:n_heavy], dtype=dtype, device=device)
-            batched_g.nodes["n1"].data["xyz"][n1_start : n1_start + n1_i] = pos_full
-            n1_start += n1_i
-
         geometry_in_graph(batched_g)
         energy_in_graph(batched_g, terms=["n2", "n3", "n4"])
         loss = batched_g.nodes["g"].data["u"].sum()
         loss.backward()
         optimizer.step()
         return loss.item()
-
-    # Initialise xyz node data before warmup
-    if "xyz" not in batched_g.nodes["n1"].data:
-        n1_total = batched_g.number_of_nodes("n1")
-        batched_g.nodes["n1"].data["xyz"] = torch.zeros(
-            n1_total, 1, 3, dtype=dtype, device=device
-        )
 
     # Warmup: compiles + discarded for timing
     if torch.cuda.is_available():
@@ -322,7 +322,7 @@ def bench_one_step(args) -> dict:
         "n_atoms_max": int(n_atoms_max),
         "precision": args.precision,
         "device": device,
-        "hardware_tag": os.environ.get("HARDWARE_TAG", "rtx-pro-6000-blackwell"),
+        "hardware_tag": args.hardware_tag,
         "trial_seconds": trial_median,
         "trial_min_seconds": float(min(trial_times)),
         "trial_max_seconds": float(max(trial_times)),
@@ -349,6 +349,7 @@ def main():
     parser.add_argument("--n-warmup", type=int, default=1)
     parser.add_argument("--n-trials", type=int, default=3)
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--hardware-tag", default=os.environ.get("HARDWARE_TAG", "rtx-pro-6000-blackwell"))
     parser.add_argument("--out", type=str, default=None, help="JSON output path; default stdout")
     args = parser.parse_args()
 

@@ -173,7 +173,7 @@ def bench_one_step(args) -> dict:
         "n_atoms_max": int(n_atoms_max),
         "precision": args.precision,
         "device": _hardware_tag(),
-        "hardware_tag": os.environ.get("HARDWARE_TAG", "rtx-pro-6000-blackwell"),
+        "hardware_tag": args.hardware_tag,
         "trial_seconds": trial_median,
         "trial_min_seconds": float(min(trial_times)),
         "trial_max_seconds": float(max(trial_times)),
@@ -197,6 +197,7 @@ def main():
     parser.add_argument("--n-warmup", type=int, default=1)
     parser.add_argument("--n-trials", type=int, default=3)
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--hardware-tag", default=os.environ.get("HARDWARE_TAG", "rtx-pro-6000-blackwell"))
     parser.add_argument("--out", type=str, default=None, help="JSON output path; default stdout")
     args = parser.parse_args()
 
