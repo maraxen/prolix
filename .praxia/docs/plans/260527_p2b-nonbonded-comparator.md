@@ -29,7 +29,7 @@ Build OpenMM nonbonded extraction and prolix bridge.
 
 **1.1 f1-fixture-nonbonded-extension** — Add three functions to `tests/physics/fixtures_openmm_parity.py` (append after line 386):
 - `extract_nonbonded_params(omm_system)` → charges (Å), sigmas (Å), epsilons (kcal/mol), exception data
-- `get_openmm_nonbonded_energies(omm_system, positions_ang)` → two-pass charge-zeroing (E_nb, E_LJ via zeroed charges, E_Coul by subtraction)
+- `get_openmm_nonbonded_energies(omm_system, positions_ang)` → two-pass charge-zeroing (E_nb, E_LJ via zeroed charges, E_Coul by subtraction). **Docstring MUST state** that exception entries are NOT affected by `setParticleParameters`, so `E_LJ` includes 1-4 LJ + 1-4 Coulomb, and `E_Coul` is 1-5+-only — matching prolix's `chunked_coulomb_energy` semantics where 1-4 is routed through `exception_chargeprods`. (plan-auditor required fix)
 - `get_openmm_nonbonded_forces(omm_system, positions_ang)` → ForceGroup 3 forces in kcal/mol/Å
 
 Files: `tests/physics/fixtures_openmm_parity.py` (+85 lines). Verification: inline smoke test from spec (f1 section) checking charges shape, exceptions present, split consistency <1e-4.
@@ -111,7 +111,7 @@ Files: `.praxia/docs/audits/260526_p2a-bonded-field-audit.md` (extend), `.praxia
 
 **Deps:** f3. **Effort:** 20 min.
 
-**Phase 4 Verification**: Inline check from spec f6 section verifies audit extension present.
+**Phase 4 Verification**: Inline check from spec f6 section verifies audit extension present. **Then (plan-auditor required fix) re-run the P2a regression gate as the final f6 step:** `uv run pytest tests/physics/test_openmm_parity_bonded.py -m openmm -v` must still return 5/5 PASS. This catches any accidental edit to test infrastructure during the audit-doc extension before the auditor pass.
 
 ---
 

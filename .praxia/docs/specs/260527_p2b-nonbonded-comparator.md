@@ -210,6 +210,15 @@ appended after line 386 (end of existing content):
    charge-zeroing: query ForceGroup 3 normally → `E_nb`; zero per-atom charges,
    reinitialize, re-query → `E_LJ`; restore, reinitialize; compute
    `E_Coul = E_nb - E_LJ`. Return `{'total_nb': float, 'lj': float, 'coulomb': float}`.
+   **Docstring MUST state** that `E_LJ` (zeroed-per-atom pass) *includes* the 1-4 LJ
+   contribution AND the 1-4 Coulomb contribution carried by `exception_chargeprods`,
+   because `setParticleParameters` does NOT affect exception entries. Therefore
+   `E_Coul = E_nb - E_LJ` is the **1-5+ Coulomb only** (no 1-4 contribution). This
+   matches prolix's `chunked_coulomb_energy` semantics (1-4 routed through the
+   separate `exception_chargeprods` path), so prolix's `coulomb` term compares
+   against OpenMM's `E_Coul` (1-5+) and prolix's `exception_14` term is gated by
+   the self-consistency test f4. Failing to document this in the docstring
+   produces a subtle parity drift that the gates would catch only at f5 force RMS.
 
 3. `get_openmm_nonbonded_forces(omm_system, positions_ang) -> np.ndarray` — query
    ForceGroup 3 forces; convert kJ/mol/nm → kcal/mol/Å (× 0.1 / 4.184).
@@ -243,6 +252,13 @@ print('E_LJ:', round(e['lj'],4), 'E_Coul:', round(e['coulomb'],4), 'total:', rou
 import math
 assert math.isfinite(e['lj']) and math.isfinite(e['coulomb'])
 assert abs(e['lj'] + e['coulomb'] - e['total_nb']) < 1e-4, f'split inconsistency: {e}'
+# Sanity gate (plan-auditor risk call): confirm exception chargeProd survives
+# setParticleParameters zeroing. E_LJ (per-atom zeroed) must include 1-4 Coulomb;
+# if exceptions ARE zeroed by the same call, E_LJ collapses to pure LJ and
+# E_Coul = E_nb - E_LJ would NOT be 1-5+-only as documented. Detect by checking
+# that |E_LJ| is greater than a pure-LJ-only estimate by at least ~0.01 kcal/mol
+# (1-4 Coulomb contribution is non-negligible for ala-dip).
+assert abs(e['lj']) > 1e-3, 'E_LJ suspiciously small — exception chargeProd may have been zeroed'
 print('f1: PASS')
 "
 ```
