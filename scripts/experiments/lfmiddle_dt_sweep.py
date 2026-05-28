@@ -21,7 +21,7 @@ from prolix.physics.temperature_scan import make_jitted_temperature_scan
 from prolix.simulate import AKMA_TIME_UNIT_FS, BOLTZMANN_KCAL
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "tests", "physics"))
-from test_explicit_langevin_tip3p_parity import _grid_water_positions, _proxide_params_pure_water  # noqa: E402
+from test_explicit_langevin_tip3p_parity import _equil_water_positions, _proxide_params_pure_water  # noqa: E402
 
 
 def run_sweep(
@@ -37,7 +37,7 @@ def run_sweep(
   jax.config.update("jax_enable_x64", True)
   temperature_k = 300.0
   gamma_ps = 1.0
-  positions_a, box_edge = _grid_water_positions(n_waters, spacing_angstrom=10.0)
+  positions_a, box_edge = _equil_water_positions(n_waters, seed=seed)
   box_vec = jnp.array([box_edge, box_edge, box_edge], dtype=jnp.float64)
   dt_akma = float(dt_fs) / float(AKMA_TIME_UNIT_FS)
   kT = float(temperature_k) * BOLTZMANN_KCAL
