@@ -12,7 +12,7 @@ import numpy as np
 import pytest
 
 from prolix.physics import pbc, settle, system
-from prolix.physics.rigid_water_ke import rigid_tip3p_box_ke_kcal
+from prolix.physics.temperature_scan import make_jitted_temperature_scan
 from prolix.typing import IntegratorState
 from prolix.physics.step_system import make_sequence
 from prolix.simulate import AKMA_TIME_UNIT_FS, BOLTZMANN_KCAL
@@ -87,20 +87,13 @@ def _mean_rigid_t_langevin_after_burn(
   else:
     init_s, apply_s = settle.settle_langevin(**integrator_kw)
 
-  apply_j = jax.jit(apply_s)
-  dof_rigid = _dof_rigid_tip3p_waters(n_waters)
-
   state = init_s(jax.random.PRNGKey(seed), jnp.array(positions_a), mass=mass)
-  temps: list[float] = []
-
-  for step in range(steps):
-    state = apply_j(state)
-    if step >= burn:
-      ke_r = float(rigid_tip3p_box_ke_kcal(state.positions, state.momentum, state.mass, n_waters))
-      temp = 2.0 * ke_r / (dof_rigid * BOLTZMANN_KCAL)
-      temps.append(temp)
-
-  mean_t_observable = float(np.mean(temps)) if temps else float("nan")
+  collect_temps = make_jitted_temperature_scan(
+      apply_s, n_steps=steps, burn=burn, n_waters=n_waters
+  )
+  temps = collect_temps(state)
+  temps.block_until_ready()
+  mean_t_observable = float(np.mean(np.asarray(temps))) if steps > burn else float("nan")
   t_thermostat_target = temperature_k
 
   return mean_t_observable, t_thermostat_target

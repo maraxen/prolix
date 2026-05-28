@@ -3,7 +3,7 @@ task_id: 260528_s5_paper_gate
 sprint_id: 5
 date: 2026-05-28
 status: closed_local
-cluster_status: jobs_submitted_2026-05-28
+cluster_status: resubmit_after_scan_gpu_fix
 sync_tool: myxcel
 ---
 
@@ -15,8 +15,8 @@ sync_tool: myxcel
 
 | Job ID | Script | Notes |
 |--------|--------|-------|
-| **14644480** | `lfmiddle_dt_sweep.slurm` | Array 0–2 (dt 0.25 / 0.5 / 1.0 fs), campaign `89c9a900` |
-| **14644483** | `validate_npt_20ps.slurm` | Diagnostic; test still xfail locally |
+| ~~14644480~~ | `lfmiddle_dt_sweep.slurm` | **Cancelled** — was CPU + Python loop; resubmit on `pi_so3` GPU with `jax.lax.scan` |
+| **14644483** | `validate_npt_20ps.slurm` | COMPLETED — XFAIL as expected |
 
 **Sync:** `myxcel push engaging prolix -y` (code pushed; `.git` excluded — cluster `git log` may lag).  
 **Queue:** `ssh engaging 'squeue -u $USER -n plx-lfmiddle-dt,plx-npt-20ps'`  
@@ -49,13 +49,16 @@ sync_tool: myxcel
 ### 1. LFMiddle dt-sweep (priority — full falsification)
 
 ```bash
-# On engaging, from synced workspace:
+myxcel push engaging prolix -y
+# On engaging:
 cd ~/projects/prolix
 export CAMPAIGN_ID=89c9a900
-sbatch --array=0-2%1 \
+sbatch --array=0-2%3 \
   --export=ALL,CAMPAIGN_ID=${CAMPAIGN_ID},N_WATERS=2,SIM_PS=50,BURN_PS=10 \
   scripts/slurm/lfmiddle_dt_sweep.slurm
 ```
+
+Uses **`pi_so3` + GPU** (`JAX_PLATFORMS=cuda`) and **`jax.lax.scan`** in `temperature_scan.py` (no Python step loop).
 
 Array index → `dt_fs`: 0=0.25, 1=0.5, 2=1.0. Expect **fail** outcome on dt=1.0 if hypothesis holds; pass band ±5 K on 0.25/0.5.
 

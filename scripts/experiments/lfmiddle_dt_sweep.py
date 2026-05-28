@@ -2,6 +2,7 @@
 """LFMiddle dt-sweep experiment for bathos campaigns.
 
 Writes JSON to $BTH_RESULTS_PATH with mean_T_k and stability metrics.
+Production segment uses ``jax.lax.scan`` (no Python step loop).
 """
 
 from __future__ import annotations
@@ -15,18 +16,12 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-# Project imports
 from prolix.physics import pbc, settle, system
-from prolix.physics.rigid_water_ke import rigid_tip3p_box_ke_kcal
+from prolix.physics.temperature_scan import make_jitted_temperature_scan
 from prolix.simulate import AKMA_TIME_UNIT_FS, BOLTZMANN_KCAL
 
-# Reuse test helpers
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "tests", "physics"))
 from test_explicit_langevin_tip3p_parity import _grid_water_positions, _proxide_params_pure_water  # noqa: E402
-
-
-def _dof_rigid_tip3p_waters(n_waters: int) -> float:
-  return float(6 * n_waters - 3)
 
 
 def run_sweep(
@@ -38,6 +33,7 @@ def run_sweep(
     seed: int,
     burn_ps: float,
 ) -> dict:
+  """Run one dt/integrator cell; return bath result_schema fields."""
   jax.config.update("jax_enable_x64", True)
   temperature_k = 300.0
   gamma_ps = 1.0
@@ -82,24 +78,17 @@ def run_sweep(
   else:
     init_s, apply_s = settle.settle_langevin(**kw)
 
-  steps = int(sim_ps * 1000.0 / dt_fs)
+  n_steps = int(sim_ps * 1000.0 / dt_fs)
   burn = int(burn_ps * 1000.0 / dt_fs)
-  apply_j = jax.jit(apply_s)
-  dof_rigid = _dof_rigid_tip3p_waters(n_waters)
 
   state = init_s(jax.random.PRNGKey(seed), jnp.array(positions_a), mass=mass)
-  temps: list[float] = []
-  for step in range(steps):
-    state = apply_j(state)
-    if step >= burn:
-      ke_r = float(
-          rigid_tip3p_box_ke_kcal(
-              state.positions, state.momentum, state.mass, n_waters
-          )
-      )
-      temps.append(2.0 * ke_r / (dof_rigid * BOLTZMANN_KCAL))
+  collect_temps = make_jitted_temperature_scan(
+      apply_s, n_steps=n_steps, burn=burn, n_waters=n_waters
+  )
+  temps = collect_temps(state)
+  temps.block_until_ready()
 
-  arr = np.array(temps, dtype=np.float64) if temps else np.array([np.nan])
+  arr = np.asarray(temps, dtype=np.float64)
   return {
       "dt_fs": dt_fs,
       "integrator": integrator,
@@ -114,6 +103,7 @@ def run_sweep(
 
 
 def main() -> None:
+  """CLI entry: parse args, run sweep, write JSON to BTH_RESULTS_PATH or stdout."""
   p = argparse.ArgumentParser()
   p.add_argument("--dt-fs", type=float, required=True)
   p.add_argument("--integrator", choices=("lfmiddle", "baoab"), default="lfmiddle")

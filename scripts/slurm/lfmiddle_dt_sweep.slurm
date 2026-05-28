@@ -1,20 +1,21 @@
 #!/bin/bash
 #SBATCH --job-name=plx-lfmiddle-dt
-#SBATCH --partition=mit_preemptable
+#SBATCH --partition=pi_so3
+#SBATCH --gres=gpu:1
 #SBATCH --time=2:00:00
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=16G
-#SBATCH --array=0-2%1
+#SBATCH --array=0-2%3
 #SBATCH --output=outputs/logs/slurm/%A_%a.lfmiddle_dt_sweep.out
 #SBATCH --error=outputs/logs/slurm/%A_%a.lfmiddle_dt_sweep.err
 
 # LFMiddle dt falsification sweep (bathos campaign lfmiddle-dt-sweep).
+# GPU + jax.lax.scan production loop (no Python step driver).
 #
-# Array: 0 → 0.25 fs, 1 → 0.5 fs, 2 → 1.0 fs (hypothesis: 1.0 fs may fail gate).
+# Array: 0 → 0.25 fs, 1 → 0.5 fs, 2 → 1.0 fs
 #
-# Submission:
 #   export CAMPAIGN_ID=89c9a900
-#   sbatch --array=0-2%1 \
+#   sbatch --array=0-2%3 \
 #     --export=ALL,CAMPAIGN_ID=${CAMPAIGN_ID},N_WATERS=2,SIM_PS=50,BURN_PS=10,SEED=701 \
 #     scripts/slurm/lfmiddle_dt_sweep.slurm
 
@@ -42,8 +43,9 @@ SEED="${SEED:-701}"
 INTEGRATOR="${INTEGRATOR:-lfmiddle}"
 CAMPAIGN_ID="${CAMPAIGN_ID:-89c9a900}"
 
-export JAX_PLATFORMS="${JAX_PLATFORMS:-cpu}"
+export JAX_PLATFORMS="${JAX_PLATFORMS:-cuda}"
 export JAX_ENABLE_X64="${JAX_ENABLE_X64:-1}"
+export XLA_PYTHON_CLIENT_PREALLOCATE="${XLA_PYTHON_CLIENT_PREALLOCATE:-false}"
 
 source scripts/slurm/_bth_env.sh
 
@@ -54,6 +56,8 @@ OUT="${RESULTS_DIR}/lfmiddle_dt${DT_FS}_${SLURM_JOB_ID:-local}_${SLURM_ARRAY_TAS
 
 echo "=== LFMiddle dt sweep ==="
 echo "Host: $(hostname)  Job: ${SLURM_JOB_ID:-local}  Task: ${SLURM_ARRAY_TASK_ID:-N/A}"
+echo "GPU: $(nvidia-smi --query-gpu=name,memory.total --format=csv,noheader 2>&1 | head -1)"
+echo "JAX_PLATFORMS=${JAX_PLATFORMS}  JAX_ENABLE_X64=${JAX_ENABLE_X64}"
 echo "dt_fs=${DT_FS}  n_waters=${N_WATERS}  sim_ps=${SIM_PS}  burn_ps=${BURN_PS}"
 echo "Campaign: ${CAMPAIGN_ID}"
 echo "OUT: ${OUT}"
