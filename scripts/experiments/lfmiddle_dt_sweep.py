@@ -81,7 +81,7 @@ def run_sweep(
   n_steps = int(sim_ps * 1000.0 / dt_fs)
   burn = int(burn_ps * 1000.0 / dt_fs)
 
-  state = init_s(jax.random.PRNGKey(seed), jnp.array(positions_a), mass=mass)
+  state = init_s(jax.random.PRNGKey(seed), jnp.array(positions_a, dtype=jnp.float64), mass=mass)
   collect_temps = make_jitted_temperature_scan(
       apply_s, n_steps=n_steps, burn=burn, n_waters=n_waters
   )
