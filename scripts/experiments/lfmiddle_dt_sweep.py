@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """LFMiddle dt-sweep experiment for bathos campaigns.
 
-Writes JSON to $BTH_RESULTS_PATH with mean_T_k and stability metrics.
+Writes JSON to $BTH_RESULTS_PATH (bth temp) and optionally --out (persistent).
 Production segment uses ``jax.lax.scan`` (no Python step loop).
 """
 
@@ -103,7 +103,7 @@ def run_sweep(
 
 
 def main() -> None:
-  """CLI entry: parse args, run sweep, write JSON to BTH_RESULTS_PATH or stdout."""
+  """CLI entry: parse args, run sweep, write JSON to BTH_RESULTS_PATH and/or --out."""
   p = argparse.ArgumentParser()
   p.add_argument("--dt-fs", type=float, required=True)
   p.add_argument("--integrator", choices=("lfmiddle", "baoab"), default="lfmiddle")
@@ -111,6 +111,7 @@ def main() -> None:
   p.add_argument("--sim-ps", type=float, default=50.0)
   p.add_argument("--burn-ps", type=float, default=10.0)
   p.add_argument("--seed", type=int, default=701)
+  p.add_argument("--out", default=None, help="Persistent output path (written in addition to BTH_RESULTS_PATH)")
   args = p.parse_args()
 
   result = run_sweep(
@@ -121,13 +122,20 @@ def main() -> None:
       seed=args.seed,
       burn_ps=args.burn_ps,
   )
-  out = os.environ.get("BTH_RESULTS_PATH", "-")
   payload = json.dumps(result)
-  if out == "-":
-    print(payload)
-  else:
-    with open(out, "w", encoding="utf-8") as f:
+
+  bth_path = os.environ.get("BTH_RESULTS_PATH")
+  if bth_path:
+    with open(bth_path, "w", encoding="utf-8") as f:
       f.write(payload)
+
+  if args.out:
+    os.makedirs(os.path.dirname(args.out), exist_ok=True)
+    with open(args.out, "w", encoding="utf-8") as f:
+      f.write(payload)
+
+  if not bth_path and not args.out:
+    print(payload)
 
 
 if __name__ == "__main__":

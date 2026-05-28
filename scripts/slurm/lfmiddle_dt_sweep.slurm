@@ -62,21 +62,22 @@ echo "dt_fs=${DT_FS}  n_waters=${N_WATERS}  sim_ps=${SIM_PS}  burn_ps=${BURN_PS}
 echo "Campaign: ${CAMPAIGN_ID}"
 echo "OUT: ${OUT}"
 
-uv run bth run python scripts/experiments/lfmiddle_dt_sweep.py \
+uv run bth run \
   --tag cluster --tag lfmiddle-dt-sweep --tag sprint5 \
   --tag "dt_fs:${DT_FS}" --tag "integrator:${INTEGRATOR}" \
   --campaign "${CAMPAIGN_ID}" \
   --out "${OUT}" \
-  -- \
+  python scripts/experiments/lfmiddle_dt_sweep.py \
   --dt-fs "${DT_FS}" \
   --integrator "${INTEGRATOR}" \
   --n-waters "${N_WATERS}" \
   --sim-ps "${SIM_PS}" \
   --burn-ps "${BURN_PS}" \
-  --seed "${SEED}"
+  --seed "${SEED}" \
+  --out "${OUT}"
 
 EXIT=$?
 echo "=== output: ${OUT} ==="
-cat "${OUT}" 2>/dev/null || true
+cat "${OUT}" 2>/dev/null || echo "(result file not found)"
 echo "=== exit=${EXIT} ==="
 exit "${EXIT}"
