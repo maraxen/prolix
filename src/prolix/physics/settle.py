@@ -870,7 +870,7 @@ def settle_lfmiddle_langevin(
 
     force = force_fn(position, **kwargs)
 
-    position = _langevin_step_a(position, momentum, state.mass, half_dt, shift_fn)
+    position = _langevin_step_a(position, momentum, state.mass, _dt, shift_fn)
 
     if project_ou_momentum_rigid:
       momentum, key = _langevin_step_o_constrained(
