@@ -786,6 +786,126 @@ def settle_langevin(
   return init_fn, apply_fn
 
 
+def settle_lfmiddle_langevin(
+  energy_or_force_fn: Callable[..., Array],
+  shift_fn: Callable[..., Array],
+  dt: float,
+  kT: float,
+  gamma: float = 1.0,
+  mass: float | Array = 1.0,
+  water_indices: Array | None = None,
+  r_OH: float = TIP3P_ROH,
+  r_HH: float = TIP3P_RHH,
+  mass_oxygen: float = 15.999,
+  mass_hydrogen: float = 1.008,
+  box: Array | None = None,
+  constraints: tuple[Array, Array] | None = None,
+  remove_linear_com_momentum: bool = False,
+  project_ou_momentum_rigid: bool = True,
+  projection_site: str = "post_o",
+  settle_velocity_iters: int = 10,
+  settle_velocity_tol: float | None = None,
+):
+  r"""Langevin + SETTLE with Leimkuhler-Matthews O-step splitting (LFMiddle).
+
+  Same as :func:`settle_langevin` but splits the stochastic O-step into two
+  halves around the mid-step force recompute:
+
+  B(0.5) → A(0.5) → O(0.5) → A(0.5) → SETTLE_pos → Force → A(0.5) → O(0.5) → B(0.5) → SETTLE_vel
+  """
+  if projection_site not in ("post_o", "post_settle_vel", "both"):
+    msg = f"invalid projection_site={projection_site!r}; expected post_o|post_settle_vel|both"
+    raise ValueError(msg)
+
+  init_fn, _ = settle_langevin(
+      energy_or_force_fn,
+      shift_fn,
+      dt,
+      kT,
+      gamma=gamma,
+      mass=mass,
+      water_indices=water_indices,
+      r_OH=r_OH,
+      r_HH=r_HH,
+      mass_oxygen=mass_oxygen,
+      mass_hydrogen=mass_hydrogen,
+      box=box,
+      constraints=constraints,
+      remove_linear_com_momentum=remove_linear_com_momentum,
+      project_ou_momentum_rigid=project_ou_momentum_rigid,
+      projection_site=projection_site,
+      settle_velocity_iters=settle_velocity_iters,
+      settle_velocity_tol=settle_velocity_tol,
+  )
+  force_fn = _make_settle_compatible_force_fn(energy_or_force_fn, mass, box)
+  if water_indices is None or water_indices.shape[0] == 0:
+    return simulate.nvt_langevin(energy_or_force_fn, shift_fn, dt, kT, gamma=gamma, mass=mass)
+
+  def apply_fn(state, **kwargs):
+    _dt = kwargs.pop("dt", dt)
+    _kT = kwargs.pop("kT", kT)
+    half_dt = 0.5 * _dt
+    positions_old = state.positions
+
+    momentum = _langevin_step_b(state.momentum, state.force, _dt)
+    position = _langevin_step_a(state.positions, momentum, state.mass, _dt, shift_fn)
+
+    if project_ou_momentum_rigid:
+      momentum, key = _langevin_step_o_constrained(
+          momentum, position, state.mass, gamma, half_dt, _kT, state.key, water_indices
+      )
+    else:
+      momentum, key = _langevin_step_o(momentum, state.mass, gamma, half_dt, _kT, state.key)
+
+    position = _langevin_step_a(position, momentum, state.mass, _dt, shift_fn)
+
+    if constraints is not None:
+      pairs, lengths = constraints
+      position = project_positions(position, pairs, lengths, state.mass, shift_fn)
+
+    position = settle_positions(
+        position, positions_old, water_indices, r_OH, r_HH,
+        mass_oxygen, mass_hydrogen, box,
+    )
+
+    force = force_fn(position, **kwargs)
+
+    position = _langevin_step_a(position, momentum, state.mass, half_dt, shift_fn)
+
+    if project_ou_momentum_rigid:
+      momentum, key = _langevin_step_o_constrained(
+          momentum, position, state.mass, gamma, half_dt, _kT, key, water_indices
+      )
+    else:
+      momentum, key = _langevin_step_o(momentum, state.mass, gamma, half_dt, _kT, key)
+
+    momentum = _langevin_step_b(momentum, force, _dt)
+
+    if constraints is not None:
+      pairs, _ = constraints
+      momentum = project_momenta(momentum, position, pairs, state.mass, shift_fn)
+
+    momentum = _langevin_settle_vel(
+        momentum, positions_old, position, state.mass, water_indices, _dt,
+        mass_oxygen, mass_hydrogen, n_iters=settle_velocity_iters,
+        settle_velocity_tol=settle_velocity_tol,
+    )
+    if project_ou_momentum_rigid and projection_site in ("post_settle_vel", "both"):
+      momentum = project_tip3p_waters_momentum_rigid(
+          momentum, position, state.mass, water_indices
+      )
+    if remove_linear_com_momentum:
+      mass_col = state.mass
+      p_tot = jnp.sum(momentum, axis=0)
+      m_tot = jnp.sum(mass_col)
+      v_com = p_tot / jnp.maximum(m_tot, jnp.array(1e-30, dtype=m_tot.dtype))
+      momentum = momentum - mass_col * v_com
+
+    return NVTLangevinState(position, momentum, force, state.mass, key)
+
+  return init_fn, apply_fn
+
+
 def settle_with_nhc(
   energy_or_force_fn: Callable,
   shift_fn: Callable,
@@ -1681,8 +1801,22 @@ def settle_csvr_npt(
   # β_akma = β_bar * BAR_PER_AKMA_PRESSURE
   compressibility_akma = compressibility_bar_inv * units_module.BAR_PER_AKMA_PRESSURE
 
-  def init_fn(key, R, mass=mass, box=box_init, **init_kwargs):
-    """Initialize NPT state."""
+  def init_fn(
+      key,
+      R,
+      mass=mass,
+      box=box_init,
+      momentum: Array | None = None,
+      **init_kwargs,
+  ):
+    r"""Initialize NPT state (host-side; not part of the jitted step loop).
+
+    JAX-MD convention: call once from Python with concrete arrays, then
+    ``jax.jit(apply_fn)`` for production steps. The Maxwell-Boltzmann vs
+    warm-handoff choice uses ``momentum is None`` at Python trace time — do
+    not wrap ``init_fn`` in ``jax.jit`` (would require ``static_argnames`` or
+    ``jax.lax.cond`` for a traced optional momentum).
+    """
     _kT = init_kwargs.pop("kT", kT)
     _box = init_kwargs.pop("box", box)
 
@@ -1703,10 +1837,13 @@ def settle_csvr_npt(
     elif mass_arr.ndim == 2:
       mass_arr = mass_arr.reshape(-1)
 
-    # Initialize momenta from Maxwell-Boltzmann
-    momenta = jnp.sqrt(mass_arr[:, jnp.newaxis] * _kT) * jax.random.normal(
-      split, R.shape, dtype=R.dtype
-    )
+    # Host branch: sample MB (cold) or copy equilibrated NVT momenta (warm handoff).
+    if momentum is not None:
+      momenta = jnp.asarray(momentum, dtype=R.dtype)
+    else:
+      momenta = jnp.sqrt(mass_arr[:, jnp.newaxis] * _kT) * jax.random.normal(
+        split, R.shape, dtype=R.dtype
+      )
 
     # Store mass as (N, 1) for broadcasting
     mass_for_state = mass_arr[:, jnp.newaxis]
@@ -1793,8 +1930,7 @@ def settle_csvr_npt(
     mu_max = 1.0 / mu_min
     mu = jnp.clip(mu, mu_min, mu_max)
 
-    # Parrinello-Rahman convention: inverse-scale momenta to conserve kinetic energy
-    # when box volume changes. Without this, box expansion drains KE → thermal runaway.
+    # SCR isotropic scaling: momenta inverse-scale with mu (Sprint 14; Bernetti-Bussi convention).
     momentum = momentum / mu
 
     # Scale box

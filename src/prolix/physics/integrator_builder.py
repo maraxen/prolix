@@ -47,6 +47,7 @@ from jaxtyping import Array as ArrayType, PRNGKeyArray
 
 from prolix.physics.constraints import ConstraintDOFMask
 from prolix.physics.step_system import (
+    Force_Step,
     IntegratorState,
     Step,
     StepSequence,
@@ -334,7 +335,7 @@ def make_integrator(
       mass: Mass array [n_atoms] or [n_atoms, 1] in AKMA units.
       sequence_name: Name in step_sequences registry (default: 'baoab_langevin').
           Valid options: 'baoab_langevin', 'baoab_csvr_npt' (v1.0 scope).
-          Note: 'settle_with_nhc' and 'lfmiddle_langevin' deferred to v1.1.
+          Note: 'settle_with_nhc' deferred to v1.1; 'lfmiddle_langevin' for solute-only modular path.
       dt: Timestep in AKMA units (default: 0.5, which is ~0.5 fs).
       kT: Temperature in kT (default: 1.0).
       gamma: Langevin friction coefficient in ps^-1 (default: 1.0). Used by O_Step.
@@ -565,6 +566,16 @@ def make_integrator(
     # custom_call ops, so this is fully StableHLO-compatible.
     for step in steps:
       current_state = step.apply(current_state, params)
+      if isinstance(step, Force_Step):
+        new_forces = _compute_forces(
+            current_state.positions,
+            current_state.box,
+            energy_fn,
+            energy_params,
+            vs_def=vs_def,
+            vs_params=vs_params,
+        )
+        current_state = current_state.__replace__(force=new_forces)
 
     # Recompute forces at the end of the timestep (with virtual site redistribution)
     new_forces = _compute_forces(

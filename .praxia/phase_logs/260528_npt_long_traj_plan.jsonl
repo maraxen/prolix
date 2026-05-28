@@ -1,0 +1,1 @@
+{"task_id":"260528_npt_long_traj","phase":"plan","summary":"A/B: *mu worse than /mu; warm handoff only valid when NVT T~300K. Cold init OK at t=0 then step-1 spike. xfail retained; optional momentum API + SCR /mu parity shipped."}

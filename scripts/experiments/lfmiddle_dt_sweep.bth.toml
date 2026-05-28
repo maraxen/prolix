@@ -1,0 +1,29 @@
+[experiment]
+hypothesis = """
+LFMiddle O-step splitting (settle_lfmiddle_langevin) reduces SETTLE+Langevin
+thermostat coupling vs BAOAB (settle_langevin), enabling stable NVT at dt in
+{0.25, 0.5, 1.0} fs for rigid TIP3P water (300 K, gamma=1 ps^-1).
+Null: mean rigid-body T still diverges at dt=1.0 fs (coupling dominates).
+"""
+
+[outcomes.pass]
+condition = "mean_T_k IS NOT NULL AND abs(mean_T_k - 300.0) < 5.0 AND NOT is_nan"
+decision = "Record dt as stable; update v1.1 docs if dt=1.0 fs passes."
+reasoning = "±5 K over production segment matches v1.1_next_steps and test_settle_temperature_control parity band for equilibrated rigid water."
+
+[outcomes.fail]
+condition = "mean_T_k IS NULL OR is_nan OR abs(mean_T_k - 300.0) >= 5.0"
+decision = "Hypothesis refuted for this dt; keep production dt<=0.5 fs limit."
+reasoning = "Catch runaway, NaN, or failure to meet stability band; expected for dt=1.0 fs if coupling dominates."
+is_residual = true
+
+[result_schema]
+dt_fs = "float"
+integrator = "str"
+n_waters = "int"
+mean_T_k = "float"
+std_T_k = "float"
+max_T_k = "float"
+sim_ps = "float"
+is_nan = "bool"
+seed = "int"

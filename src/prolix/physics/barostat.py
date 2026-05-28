@@ -219,12 +219,14 @@ class SCR_Barostat_Step(Step):
         mu_max = 1.0 / self.mu_min
         mu = jnp.clip(mu, self.mu_min, mu_max)
         
-        # 6. Apply Scaling
+        # 6. Apply scaling (box, positions, momenta — match monolithic settle_csvr_npt)
         new_box = state.box * mu
         new_position = state.positions * mu
-        
+        new_momentum = state.momentum / mu
+
         return state.__replace__(
             positions=new_position,
+            momentum=new_momentum,
             box=new_box,
-            rng=key
+            rng=key,
         )

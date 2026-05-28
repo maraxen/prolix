@@ -18,7 +18,14 @@
 #SBATCH --error=outputs/logs/engaging/%x_%j.err
 
 set -euo pipefail
-cd "${SLURM_SUBMIT_DIR:-$PWD}"
+
+_SUBMIT_DIR="${SLURM_SUBMIT_DIR:-${PWD}}"
+if PROLIX_ROOT="$(git -C "${_SUBMIT_DIR}" rev-parse --show-toplevel 2>/dev/null)"; then
+  :
+else
+  PROLIX_ROOT="${HOME}/projects/prolix"
+fi
+cd "${PROLIX_ROOT}"
 
 # shellcheck source=/dev/null
 source scripts/slurm/_common_env.sh

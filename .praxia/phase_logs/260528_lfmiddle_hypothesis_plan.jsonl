@@ -1,0 +1,1 @@
+{"task_id":"260528_lfmiddle_hypothesis","phase":"plan","summary":"GO exploration: settle_lfmiddle_langevin, Force_Step, lfmiddle_langevin sequence, bath experiment script; dt-sweep tests un-xfail on CPU need long timeout"}

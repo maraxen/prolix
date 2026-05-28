@@ -309,9 +309,9 @@ def test_npt_dt_sweep(dt_fs: float) -> None:
 @pytest.mark.xfail(
     strict=True,
     reason=(
-        "NPT long-trajectory instability: T ≈ 5000 K from first NPT record, diverges to NaN by ~19.5 ps. "
-        "Cluster run 13967161 (2026-05-15) confirmed: T₀(NPT)≈5000K (16× target), catastrophic at 6.3 ps, "
-        "NaN at 19.5 ps. CSVR+SETTLE KE coupling; see CLAUDE.md v1.0 known limitations."
+        "NPT rigid-water T remains >>300K after Sprint 14 /mu scaling and warm handoff "
+        "(local probe: cold init ~260K then step-1 spike ~7e3K). CSVR+SETTLE+KE coupling; "
+        "see scripts/debug/npt_step0_diagnostic.py and .praxia/docs/npt_ke_bug_diagnosis.md."
     ),
 )
 def test_npt_20ps_liquid_water() -> None:
@@ -413,8 +413,14 @@ def test_npt_20ps_liquid_water() -> None:
 
   apply_npt_j = jax.jit(apply_npt)
 
-  # Re-initialize NPT state via init_fn (computes force at current positions)
-  npt_state = init_npt(npt_state.rng, npt_state.positions, mass=mass, box=box_vec)
+  # Warm handoff: preserve NVT-equilibrated momenta (do not re-sample Maxwell-Boltzmann)
+  npt_state = init_npt(
+    npt_state.rng,
+    npt_state.positions,
+    mass=mass,
+    box=box_vec,
+    momentum=nvt_state.momentum,
+  )
 
   # Trajectory arrays: shape (n_records, 3) → columns: (T_K, P_bar, V_A3)
   temperatures: list[float] = []

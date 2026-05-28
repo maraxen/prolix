@@ -27,7 +27,14 @@
 
 set -euo pipefail
 
-cd "${SLURM_SUBMIT_DIR:-${HOME}/projects/prolix}"
+# Resolve durable project root (survives transient worktree submit dirs).
+_SUBMIT_DIR="${SLURM_SUBMIT_DIR:-${PWD}}"
+if PROLIX_ROOT="$(git -C "${_SUBMIT_DIR}" rev-parse --show-toplevel 2>/dev/null)"; then
+  :
+else
+  PROLIX_ROOT="${HOME}/projects/prolix"
+fi
+cd "${PROLIX_ROOT}"
 
 TOOL="${TOOL:?TOOL env var required (prolix|dmff|torchmd|espaloma|pytorch_scratch)}"
 N_MOLS="${N_MOLS:-64}"
@@ -45,9 +52,11 @@ echo "GPU: $(nvidia-smi --query-gpu=name,memory.total --format=csv,noheader 2>&1
 echo "Tool: ${TOOL}  N_mols: ${N_MOLS}  N_conf_cap: ${N_CONF_CAP}  Precision: ${PRECISION}"
 echo "Date: $(date -Is)"
 
-mkdir -p outputs/results/external_baseline outputs/logs/slurm
+RESULTS_DIR="${PROLIX_ROOT}/outputs/results/external_baseline"
+LOGS_DIR="${PROLIX_ROOT}/outputs/logs/slurm"
+mkdir -p "${RESULTS_DIR}" "${LOGS_DIR}"
 
-OUT="outputs/results/external_baseline/${TOOL}_n${N_MOLS}_${PRECISION}_${SLURM_JOB_ID:-local}.json"
+OUT="${RESULTS_DIR}/${TOOL}_n${N_MOLS}_${PRECISION}_${SLURM_JOB_ID:-local}.json"
 
 BENCH_SCRIPT="scripts/benchmarks/external_baseline/bench_${TOOL}.py"
 if [[ ! -f "${BENCH_SCRIPT}" ]]; then
@@ -131,8 +140,7 @@ uv run bth run ${PYTHON_INTERP} "${BENCH_SCRIPT}" \
     --n-warmup "${N_WARMUP}" \
     --n-trials "${N_TRIALS}" \
     --seed "${SEED}" \
-    --hardware-tag "${HARDWARE_TAG}" \
-    --out "${OUT}"
+    --hardware-tag "${HARDWARE_TAG}"
 
 EXIT=$?
 echo "=== output: ${OUT} ==="

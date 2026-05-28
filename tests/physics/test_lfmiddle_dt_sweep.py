@@ -1,24 +1,7 @@
-"""Phase 3: LFMiddle dt-sweep hypothesis test (Deferred to v1.1).
+"""LFMiddle dt-sweep hypothesis test (v1.1).
 
-Tests the hypothesis that LFMiddle (Leimkuhler-Matthews) discretization, which
-splits the O-step around Force computation, reduces SETTLE+thermostat coupling
-and enables larger timesteps (dt >= 1.0 fs) without thermal runaway.
-
-**Status**: Deferred to v1.1 because LFMiddle requires architectural changes
-to the integrator builder (force-step marker, mid-step force recompute, step
-registry updates). See oracle recommendation Path B and
-`.agent/docs/RELEASE_DECISION_v1.0.md`.
-
-The hypothesis test framework is preserved below for v1.1 implementation.
-
-**Deliverables** (v1.1):
-1. Implement LFMiddle_Step and VV_Step classes
-2. Add lfmiddle_langevin and settle_with_nhc sequences to step_sequences registry
-3. Test baseline (dt=0.5 fs): Verify LFMiddle works at proven-stable timestep
-4. Test dt sweep (0.25, 0.5, 1.0 fs): Collect stability metrics for each
-5. Hypothesis test (dt=1.0 fs): Explicitly decorated @pytest.mark.xfail
-   - If passes: Hypothesis confirmed (remarkable discovery)
-   - If fails: Hypothesis refuted (expected outcome)
+Tests whether Leimkuhler-Matthews O-step splitting (settle_lfmiddle_langevin)
+reduces SETTLE+thermostat coupling enough to lift the dt <= 0.5 fs cap.
 """
 
 from __future__ import annotations
@@ -27,15 +10,6 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
-
-# Mark entire module as xfail: LFMiddle deferred to v1.1
-pytestmark = pytest.mark.xfail(
-    reason=(
-        "Phase 3: LFMiddle Hypothesis Test (Deferred to v1.1). "
-        "LFMiddle_Step and VV_Step classes removed from v1.0 registry. "
-        "See oracle recommendation Path B and .agent/docs/RELEASE_DECISION_v1.0.md."
-    )
-)
 
 from prolix.physics import pbc, settle, system
 from prolix.physics.rigid_water_ke import rigid_tip3p_box_ke_kcal
@@ -94,25 +68,24 @@ def _mean_rigid_t_langevin_after_burn(
   mass = jnp.array([[15.999], [1.008], [1.008]] * n_waters).reshape(n_atoms)
   water_indices = settle.get_water_indices(0, n_waters)
 
-  # Get the sequence and apply_fn
+  integrator_kw = dict(
+      energy_or_force_fn=energy_fn,
+      shift_fn=shift_fn,
+      dt=dt_akma,
+      kT=kT,
+      gamma=gamma_reduced,
+      mass=mass,
+      water_indices=water_indices,
+      box=box_vec,
+      remove_linear_com_momentum=False,
+      project_ou_momentum_rigid=True,
+      projection_site="post_o",
+      settle_velocity_iters=10,
+  )
   if sequence_name == "lfmiddle_langevin":
-    # For LFMiddle, we compose steps manually since settle_langevin doesn't support it yet
-    # Instead, we'll use baoab_langevin as a baseline for now
-    # Phase 3 integration: LFMiddle composition requires apply_fn builder
-    # For now, use BAOAB as proxy
-    init_s, apply_s = settle.settle_langevin(
-        energy_fn, shift_fn, dt=dt_akma, kT=kT, gamma=gamma_reduced,
-        mass=mass, water_indices=water_indices, box=box_vec,
-        remove_linear_com_momentum=False, project_ou_momentum_rigid=True,
-        projection_site="post_o", settle_velocity_iters=10
-    )
+    init_s, apply_s = settle.settle_lfmiddle_langevin(**integrator_kw)
   else:
-    init_s, apply_s = settle.settle_langevin(
-        energy_fn, shift_fn, dt=dt_akma, kT=kT, gamma=gamma_reduced,
-        mass=mass, water_indices=water_indices, box=box_vec,
-        remove_linear_com_momentum=False, project_ou_momentum_rigid=True,
-        projection_site="post_o", settle_velocity_iters=10
-    )
+    init_s, apply_s = settle.settle_langevin(**integrator_kw)
 
   apply_j = jax.jit(apply_s)
   dof_rigid = _dof_rigid_tip3p_waters(n_waters)
@@ -151,7 +124,7 @@ class TestLFMiddleBaseline:
 
     mean_t_observable, _ = _mean_rigid_t_langevin_after_burn(
         dt_fs=dt_fs, n_waters=n_waters, seed=seed, steps=steps,
-        burn=burn, sequence_name="baoab_langevin"
+        burn=burn, sequence_name="lfmiddle_langevin"
     )
 
     # Baseline: temperature should be finite and within reasonable bounds
@@ -176,7 +149,7 @@ class TestLFMiddleBaseline:
 
     mean_t_observable, target_t = _mean_rigid_t_langevin_after_burn(
         dt_fs=dt_fs, n_waters=n_waters, seed=seed, steps=steps,
-        burn=burn, sequence_name="baoab_langevin"
+        burn=burn, sequence_name="lfmiddle_langevin"
     )
 
     # At dt=0.5 fs, temperature should be within ±20 K of target
@@ -203,7 +176,7 @@ class TestLFMiddleDtSweep:
 
     mean_t_observable, target_t = _mean_rigid_t_langevin_after_burn(
         dt_fs=dt_fs, n_waters=n_waters, seed=seed, steps=steps,
-        burn=burn, sequence_name="baoab_langevin"
+        burn=burn, sequence_name="lfmiddle_langevin"
     )
 
     # At very small dt, expect excellent stability (±10 K)
@@ -243,7 +216,7 @@ class TestLFMiddleDtSweep:
 
     mean_t_observable, target_t = _mean_rigid_t_langevin_after_burn(
         dt_fs=dt_fs, n_waters=n_waters, seed=seed, steps=steps,
-        burn=burn, sequence_name="baoab_langevin"  # Using BAOAB as proxy for now
+        burn=burn, sequence_name="lfmiddle_langevin"
     )
 
     # If we reach here without NaN/Inf/crash, check temperature bounds

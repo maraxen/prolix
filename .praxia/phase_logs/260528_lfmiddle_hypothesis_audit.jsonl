@@ -1,0 +1,1 @@
+{"task_id":"260528_lfmiddle_hypothesis","phase":"audit","verdict":"pass_with_followup","summary":"GO scope locked; Force_Step + lfmiddle_langevin + settle_lfmiddle_langevin; registry tests pass; bath campaign 89c9a900 + smoke runs in catalog; post-force A uses half_dt; long dt-sweep pytest/bth need GPU or slow CI"}

@@ -283,6 +283,17 @@ class O_Step(Step):
 
 
 
+class Force_Step(Step):
+  """Marker step: integrator_builder recomputes forces after this step."""
+
+  def apply(
+      self,
+      state: IntegratorState,
+      params: IntegratorParams,
+  ) -> IntegratorState:
+    return state
+
+
 class V_Step(Step):
   r"""Velocity update (V in BAOAB, also called B-step or momentum step).
 
@@ -629,11 +640,13 @@ class NHC_Step(Step):
 
 # Step registry: map step names to step class constructors
 # v1.0 contains O_Step, V_Step, A_Step, SETTLE_Velocity_Step, CSVR_Step.
-# LFMiddle_Step, VV_Step (Phase 3) and NHC_Step deferred to v1.1.
+# LFMiddle uses O_Step/V_Step/A_Step with fraction=0.5 plus force_step marker.
 step_registry: dict[str, type[Step]] = {
     "o_step": O_Step,
+    "o_step_half": O_Step,
     "v_step": V_Step,
     "a_step": A_Step,
+    "force_step": Force_Step,
     "settle_velocity_step": SETTLE_Velocity_Step,
     "csvr_step": CSVR_Step,
     "nhc_step": NHC_Step,
@@ -666,6 +679,10 @@ def make_step(name: str, **kwargs) -> Step:
   if name == "virtual_site_reconstruction_step":
     from prolix.physics.virtual_sites_step import VirtualSiteReconstructionStep
     return VirtualSiteReconstructionStep(**kwargs)
+  if name == "o_step_half":
+    return O_Step(fraction=0.5, **kwargs)
+  if name == "force_step":
+    return Force_Step(**kwargs)
 
   if name not in step_registry:
     raise KeyError(f"Unknown step '{name}'. Available: {list(step_registry.keys()) + ['mc_barostat_step', 'virtual_site_reconstruction_step']}")
@@ -742,6 +759,29 @@ def _initialize_step_sequences() -> None:
               "Recommended for NVT (constant volume, temperature) ensemble. "
               "dt ≤ 0.5 fs required for stable rigid-body + thermostat coupling. "
               "Reference: Leimkuhler & Shang (2015)."
+          ),
+      ),
+      "lfmiddle_langevin": StepSequence(
+          name="lfmiddle_langevin",
+          steps=[
+              "v_step",
+              "a_step",
+              "o_step_half",
+              "a_step",
+              "force_step",
+              "a_step",
+              "o_step_half",
+              "v_step",
+          ],
+          parameters={
+              "dt": 0.5,
+              "gamma": 1.0,
+              "kT": 2.479,
+          },
+          description=(
+              "LFMiddle Langevin: O-step split around mid-step force. "
+              "V(0.5)→A(0.5)→O(0.5)→A(0.5)→Force→A(0.5)→O(0.5)→V(0.5). "
+              "For SETTLE water use settle_lfmiddle_langevin monolithic path."
           ),
       ),
       "baoab_csvr_npt": StepSequence(

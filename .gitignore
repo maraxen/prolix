@@ -33,6 +33,7 @@ results/
 .praxia/cache/
 .praxia/nlm.jsonl
 .praxia/tools/
+.praxia/workspace.id
 *.lock
 .env
 
