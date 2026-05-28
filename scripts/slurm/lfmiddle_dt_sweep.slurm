@@ -62,6 +62,9 @@ echo "dt_fs=${DT_FS}  n_waters=${N_WATERS}  sim_ps=${SIM_PS}  burn_ps=${BURN_PS}
 echo "Campaign: ${CAMPAIGN_ID}"
 echo "OUT: ${OUT}"
 
+# PROLIX_RESULT_PATH used instead of --out to avoid collision with bth's own --out flag
+export PROLIX_RESULT_PATH="${OUT}"
+
 uv run bth run \
   --tag cluster --tag lfmiddle-dt-sweep --tag sprint5 \
   --tag "dt_fs:${DT_FS}" --tag "integrator:${INTEGRATOR}" \
@@ -73,8 +76,7 @@ uv run bth run \
   --n-waters "${N_WATERS}" \
   --sim-ps "${SIM_PS}" \
   --burn-ps "${BURN_PS}" \
-  --seed "${SEED}" \
-  --out "${OUT}"
+  --seed "${SEED}"
 
 EXIT=$?
 echo "=== output: ${OUT} ==="

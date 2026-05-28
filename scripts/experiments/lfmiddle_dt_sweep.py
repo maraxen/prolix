@@ -103,7 +103,7 @@ def run_sweep(
 
 
 def main() -> None:
-  """CLI entry: parse args, run sweep, write JSON to BTH_RESULTS_PATH and/or --out."""
+  """CLI entry: parse args, run sweep, write JSON to BTH_RESULTS_PATH and PROLIX_RESULT_PATH."""
   p = argparse.ArgumentParser()
   p.add_argument("--dt-fs", type=float, required=True)
   p.add_argument("--integrator", choices=("lfmiddle", "baoab"), default="lfmiddle")
@@ -111,7 +111,6 @@ def main() -> None:
   p.add_argument("--sim-ps", type=float, default=50.0)
   p.add_argument("--burn-ps", type=float, default=10.0)
   p.add_argument("--seed", type=int, default=701)
-  p.add_argument("--out", default=None, help="Persistent output path (written in addition to BTH_RESULTS_PATH)")
   args = p.parse_args()
 
   result = run_sweep(
@@ -129,12 +128,14 @@ def main() -> None:
     with open(bth_path, "w", encoding="utf-8") as f:
       f.write(payload)
 
-  if args.out:
-    os.makedirs(os.path.dirname(args.out), exist_ok=True)
-    with open(args.out, "w", encoding="utf-8") as f:
+  # PROLIX_RESULT_PATH avoids collision with bth's own --out CLI flag
+  persist_path = os.environ.get("PROLIX_RESULT_PATH")
+  if persist_path:
+    os.makedirs(os.path.dirname(persist_path), exist_ok=True)
+    with open(persist_path, "w", encoding="utf-8") as f:
       f.write(payload)
 
-  if not bth_path and not args.out:
+  if not bth_path and not persist_path:
     print(payload)
 
 
