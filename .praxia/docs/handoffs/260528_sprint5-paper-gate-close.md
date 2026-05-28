@@ -3,12 +3,24 @@ task_id: 260528_s5_paper_gate
 sprint_id: 5
 date: 2026-05-28
 status: closed_local
-cluster_status: pending_full_runs
+cluster_status: jobs_submitted_2026-05-28
+sync_tool: myxcel
 ---
 
 # Sprint 5 Close: Paper Gate + v1.1 Tracks
 
 **Source of truth for cluster coordination.** Update this file when jobs complete or campaigns change.
+
+## Active SLURM jobs (2026-05-28)
+
+| Job ID | Script | Notes |
+|--------|--------|-------|
+| **14644480** | `lfmiddle_dt_sweep.slurm` | Array 0–2 (dt 0.25 / 0.5 / 1.0 fs), campaign `89c9a900` |
+| **14644483** | `validate_npt_20ps.slurm` | Diagnostic; test still xfail locally |
+
+**Sync:** `myxcel push engaging prolix -y` (code pushed; `.git` excluded — cluster `git log` may lag).  
+**Queue:** `ssh engaging 'squeue -u $USER -n plx-lfmiddle-dt,plx-npt-20ps'`  
+**Pull logs/results:** `myxcel pull engaging prolix` then `bth sync engaging --pull`
 
 ## Local deliverables (committed)
 
@@ -20,7 +32,7 @@ cluster_status: pending_full_runs
 | NPT 20 ps gate | **Not lifted** | `test_npt_20ps_liquid_water` strict xfail; handoff + `/mu` SCR parity shipped |
 | LFMiddle exploration | **GO** (implementation) | `settle_lfmiddle_langevin`, `Force_Step`, bath experiment |
 
-**Git:** push `main` to cluster before submitting (`just -g cluster-push-workspace prolix engaging`).
+**Git:** use `myxcel push engaging prolix -y` before submitting (rsync; `.git` not synced).
 
 ## Bathos campaigns
 
@@ -72,6 +84,9 @@ JSON lands under `${PROLIX_ROOT}/outputs/results/external_baseline/` (durable).
 
 ## Post-run checklist
 
+- [x] `myxcel push engaging prolix -y` (2026-05-28)
+- [x] Submit LFMiddle array + NPT diagnostic (jobs 14644480, 14644483)
+- [ ] `myxcel pull engaging prolix` when jobs complete
 - [ ] `bth sync engaging --pull`
 - [ ] `bth campaign review 89c9a900` — record pass/fail per `dt_fs` in this file
 - [ ] Re-run figure if new external cells: `uv run python scripts/analysis/s71_external_comparator.py --campaign-id edbd0b84`
@@ -93,4 +108,4 @@ JSON lands under `${PROLIX_ROOT}/outputs/results/external_baseline/` (durable).
 
 ## Last updated
 
-2026-05-28 — initial close handoff (local implementation + cluster dispatch spec).
+2026-05-28 — myxcel push + SLURM 14644480 (lfmiddle array), 14644483 (npt diagnostic).
