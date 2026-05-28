@@ -24,7 +24,7 @@ def chunked_lj_energy(
     tile_size: int = 128
 ) -> jnp.ndarray:
     """Computes dense LJ energy using FlashMD tiling O(N^2)."""
-    inner_tile_size = 1024
+    inner_tile_size = max(1024, int(excl_indices.shape[0]) + 128)
     pad_dim = max(tile_size, inner_tile_size)
     r_pad, mask_pad = pad_to_tile(r, pad_dim)
     sig_pad, _ = pad_to_tile(sigmas, pad_dim)
@@ -68,7 +68,7 @@ def _chunked_lj_fwd(r, sigmas, epsilons, excl_indices, excl_scales, displacement
 def _chunked_lj_bwd(excl_indices, displacement_fn, cutoff, tile_size, res, g):
     r, sigmas, epsilons, excl_scales = res
     N = r.shape[0]
-    inner_tile_size = 1024
+    inner_tile_size = max(1024, int(excl_indices.shape[0]) + 128)
     pad_dim = max(tile_size, inner_tile_size)
     r_pad, mask_pad = pad_to_tile(r, pad_dim)
     sig_pad, _ = pad_to_tile(sigmas, pad_dim)
@@ -134,8 +134,9 @@ def chunked_lj_energy_nl(
     r_pad, mask_pad = pad_to_tile(r, inner_tile_size)
     sig_pad, _ = pad_to_tile(sigmas, inner_tile_size)
     eps_pad, _ = pad_to_tile(epsilons, inner_tile_size)
-    excl_i_pad = jnp.pad(excl_indices, ((0, inner_tile_size - excl_indices.shape[0]), (0, 0)), constant_values=-1)
-    excl_s_pad = jnp.pad(excl_scales, ((0, inner_tile_size - excl_scales.shape[0]), (0, 0)), constant_values=1.0)
+    excl_pad_dim = r_pad.shape[0]
+    excl_i_pad = jnp.pad(excl_indices, ((0, excl_pad_dim - excl_indices.shape[0]), (0, 0)), constant_values=-1)
+    excl_s_pad = jnp.pad(excl_scales, ((0, excl_pad_dim - excl_scales.shape[0]), (0, 0)), constant_values=1.0)
     
     def f_tile(pos_i, pos_j, mask_i, mask_j, nb_idx_tile, start_i, start_j):
         dr = jax.vmap(jax.vmap(displacement_fn, (None, 0)), (0, 0))(pos_i, pos_j)
@@ -229,7 +230,7 @@ def _chunked_coulomb_fwd(r, charges, excl_indices, excl_scales, displacement_fn,
 def _chunked_coulomb_bwd(excl_indices, displacement_fn, pme_alpha, coulomb_constant, cutoff, tile_size, res, g):
     r, charges, excl_idx_orig, excl_scales, pme_alpha = res
     N = r.shape[0]
-    inner_tile_size = 1024
+    inner_tile_size = max(1024, int(excl_idx_orig.shape[0]) + 128)
     pad_dim = max(tile_size, inner_tile_size)
     r_pad, mask_pad = pad_to_tile(r, pad_dim)
     q_pad, _ = pad_to_tile(charges, pad_dim)
@@ -291,8 +292,9 @@ def chunked_coulomb_energy_nl(
     inner_tile_size = 1024
     r_pad, mask_pad = pad_to_tile(r, inner_tile_size)
     q_pad, _ = pad_to_tile(charges, inner_tile_size)
-    excl_i_pad = jnp.pad(excl_indices, ((0, inner_tile_size - excl_indices.shape[0]), (0, 0)), constant_values=-1)
-    excl_s_pad = jnp.pad(excl_scales, ((0, inner_tile_size - excl_scales.shape[0]), (0, 0)), constant_values=1.0)
+    excl_pad_dim = r_pad.shape[0]
+    excl_i_pad = jnp.pad(excl_indices, ((0, excl_pad_dim - excl_indices.shape[0]), (0, 0)), constant_values=-1)
+    excl_s_pad = jnp.pad(excl_scales, ((0, excl_pad_dim - excl_scales.shape[0]), (0, 0)), constant_values=1.0)
 
     def f_tile(pos_i, pos_j, mask_i, mask_j, nb_idx_tile, start_i, start_j):
         dr = jax.vmap(jax.vmap(displacement_fn, (None, 0)), (0, 0))(pos_i, pos_j)
