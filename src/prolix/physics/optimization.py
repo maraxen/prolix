@@ -189,7 +189,9 @@ def chunked_coulomb_energy(
     tile_size: int = 128
 ) -> jnp.ndarray:
     """Computes direct-space Coulomb energy using FlashMD tiling."""
-    inner_tile_size = 1024
+    # inner_tile_size must exceed the total number of exclusion pairs
+    # (n_waters × excl_per_mol). Bumped from 1024 to support ≤2048 waters.
+    inner_tile_size = max(1024, int(excl_indices.shape[0]) + 128)
     pad_dim = max(tile_size, inner_tile_size)
     r_pad, mask_pad = pad_to_tile(r, pad_dim)
     q_pad, _ = pad_to_tile(charges, pad_dim)
