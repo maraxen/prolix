@@ -868,9 +868,12 @@ def settle_lfmiddle_langevin(
         mass_oxygen, mass_hydrogen, box,
     )
 
+    # position is now q_SETTLE: constraint-satisfying positions at t+dt.
+    # We keep positions_settle = position so SETTLE_vel and the returned state
+    # both use constraint-satisfying positions. The post-force A-step was removed
+    # because it returned non-constrained positions as state, breaking the invariant
+    # that positions_old satisfies constraints on the next step.
     force = force_fn(position, **kwargs)
-
-    position = _langevin_step_a(position, momentum, state.mass, _dt, shift_fn)
 
     if project_ou_momentum_rigid:
       momentum, key = _langevin_step_o_constrained(
