@@ -378,15 +378,11 @@ class TestLFMiddleInvariants:
 
     state0 = init_s(jax.random.PRNGKey(42), jnp.array(positions_a), mass=mass)
 
-    apply_det = jax.jit(apply_s)
-    state_fwd = state0
-    for _ in range(20):
-      state_fwd = apply_det(state_fwd)
+    n_steps = 20
+    state_fwd = jax.lax.fori_loop(0, n_steps, lambda _, s: apply_s(s), state0)
 
-    # Negate momenta and run backward 20 steps
     state_rev = dataclasses.replace(state_fwd, momentum=-state_fwd.momentum)
-    for _ in range(20):
-      state_rev = apply_det(state_rev)
+    state_rev = jax.lax.fori_loop(0, n_steps, lambda _, s: apply_s(s), state_rev)
 
     pos_err = float(jnp.max(jnp.abs(state_rev.positions - state0.positions)))
     # Float64 NVE over 20 steps: expect near machine precision (~1e-10 Å).
