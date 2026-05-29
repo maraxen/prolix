@@ -24,7 +24,8 @@ def chunked_lj_energy(
     tile_size: int = 128
 ) -> jnp.ndarray:
     """Computes dense LJ energy using FlashMD tiling O(N^2)."""
-    inner_tile_size = max(1024, int(excl_indices.shape[0]) + 128)
+    _need = max(1024, int(excl_indices.shape[0]) + 128)
+    inner_tile_size = ((_need + tile_size - 1) // tile_size) * tile_size
     pad_dim = max(tile_size, inner_tile_size)
     r_pad, mask_pad = pad_to_tile(r, pad_dim)
     sig_pad, _ = pad_to_tile(sigmas, pad_dim)
@@ -68,7 +69,8 @@ def _chunked_lj_fwd(r, sigmas, epsilons, excl_indices, excl_scales, displacement
 def _chunked_lj_bwd(excl_indices, displacement_fn, cutoff, tile_size, res, g):
     r, sigmas, epsilons, excl_scales = res
     N = r.shape[0]
-    inner_tile_size = max(1024, int(excl_indices.shape[0]) + 128)
+    _need = max(1024, int(excl_indices.shape[0]) + 128)
+    inner_tile_size = ((_need + tile_size - 1) // tile_size) * tile_size
     pad_dim = max(tile_size, inner_tile_size)
     r_pad, mask_pad = pad_to_tile(r, pad_dim)
     sig_pad, _ = pad_to_tile(sigmas, pad_dim)
@@ -191,8 +193,10 @@ def chunked_coulomb_energy(
 ) -> jnp.ndarray:
     """Computes direct-space Coulomb energy using FlashMD tiling."""
     # inner_tile_size must exceed the total number of exclusion pairs
-    # (n_waters × excl_per_mol). Bumped from 1024 to support ≤2048 waters.
-    inner_tile_size = max(1024, int(excl_indices.shape[0]) + 128)
+    # (n_waters × excl_per_mol) AND be a multiple of tile_size so the
+    # tile_reduction loop range(inner//tile) covers every atom row.
+    _need = max(1024, int(excl_indices.shape[0]) + 128)
+    inner_tile_size = ((_need + tile_size - 1) // tile_size) * tile_size
     pad_dim = max(tile_size, inner_tile_size)
     r_pad, mask_pad = pad_to_tile(r, pad_dim)
     q_pad, _ = pad_to_tile(charges, pad_dim)
@@ -230,7 +234,8 @@ def _chunked_coulomb_fwd(r, charges, excl_indices, excl_scales, displacement_fn,
 def _chunked_coulomb_bwd(excl_indices, displacement_fn, pme_alpha, coulomb_constant, cutoff, tile_size, res, g):
     r, charges, excl_idx_orig, excl_scales, pme_alpha = res
     N = r.shape[0]
-    inner_tile_size = max(1024, int(excl_idx_orig.shape[0]) + 128)
+    _need = max(1024, int(excl_idx_orig.shape[0]) + 128)
+    inner_tile_size = ((_need + tile_size - 1) // tile_size) * tile_size
     pad_dim = max(tile_size, inner_tile_size)
     r_pad, mask_pad = pad_to_tile(r, pad_dim)
     q_pad, _ = pad_to_tile(charges, pad_dim)
