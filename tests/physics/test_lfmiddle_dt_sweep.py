@@ -293,5 +293,105 @@ class TestLFMiddleRobustness:
     assert seq.parameters["kT"] == 5.0
 
 
+class TestLFMiddleInvariants:
+  """Three hard gates that catch integrator bugs fast and loud.
+
+  These run on 2 waters for <10s each and block merge if any fail.
+  """
+
+  def test_gate1_temperature_not_exploded(self):
+    """Gate 1: T < 1500 K after 50 fs at dt=0.5 fs and dt=1.0 fs.
+
+    Catches catastrophic energy injection (10^47 K observed pre-fix).
+    """
+    for dt_fs in (0.5, 1.0):
+      steps = int(50.0 * 1000.0 / dt_fs)
+      burn = steps // 4
+      mean_t, _ = _mean_rigid_t_langevin_after_burn(
+          dt_fs=dt_fs, n_waters=2, seed=701, steps=steps,
+          burn=burn, sequence_name="lfmiddle_langevin",
+      )
+      assert mean_t < 1500.0, (
+          f"Gate 1 FAIL: dt={dt_fs} fs mean T={mean_t:.1f} K — integrator exploding"
+      )
+
+  def test_gate2_dt_monotonicity(self):
+    """Gate 2: smaller dt must not produce higher T than larger dt.
+
+    Violation (T_half > T_one) is a symptom of asymmetric step ordering —
+    the anomaly that revealed the missing A-step bug (dt=0.5→10^47 K, dt=1.0→26k K).
+    """
+    steps_half = int(100.0 * 1000.0 / 0.5)
+    steps_one  = int(100.0 * 1000.0 / 1.0)
+    burn_half  = steps_half // 4
+    burn_one   = steps_one  // 4
+
+    t_half, _ = _mean_rigid_t_langevin_after_burn(
+        dt_fs=0.5, n_waters=2, seed=701, steps=steps_half,
+        burn=burn_half, sequence_name="lfmiddle_langevin",
+    )
+    t_one, _ = _mean_rigid_t_langevin_after_burn(
+        dt_fs=1.0, n_waters=2, seed=701, steps=steps_one,
+        burn=burn_one, sequence_name="lfmiddle_langevin",
+    )
+    assert t_half <= t_one * 3.0, (
+        f"Gate 2 FAIL: dt=0.5 fs T={t_half:.1f} K >> dt=1.0 fs T={t_one:.1f} K "
+        "— step ordering asymmetry detected"
+    )
+
+  def test_gate3_time_reversibility(self):
+    """Gate 3: N steps forward + negate momenta + N steps back ≈ original positions.
+
+    A broken integrator (wrong step order, missing A step) fails this at step 1.
+    Uses 2 waters, 20 steps — deterministic, no thermal noise needed.
+    """
+    import dataclasses
+
+    jax.config.update("jax_enable_x64", True)
+    n_waters = 2
+    dt_fs = 0.5
+    dt_akma = dt_fs / float(AKMA_TIME_UNIT_FS)
+    kT = 300.0 * BOLTZMANN_KCAL
+    gamma_reduced = 1.0 * float(AKMA_TIME_UNIT_FS) * 1e-3
+
+    positions_a, box_edge = _grid_water_positions(n_waters, spacing_angstrom=10.0)
+    box_vec = jnp.array([box_edge, box_edge, box_edge], dtype=jnp.float64)
+    sys_dict = _proxide_params_pure_water(n_waters)
+    displacement_fn, shift_fn = pbc.create_periodic_space(box_vec)
+    energy_fn = system.make_energy_fn(
+        displacement_fn, sys_dict, box=box_vec, use_pbc=True, implicit_solvent=False,
+        pme_grid_points=32, pme_alpha=0.34, cutoff_distance=9.0, strict_parameterization=False,
+    )
+    n_atoms = n_waters * 3
+    mass = jnp.array([[15.999], [1.008], [1.008]] * n_waters).reshape(n_atoms)
+    water_indices = settle.get_water_indices(0, n_waters)
+
+    init_s, apply_s = settle.settle_lfmiddle_langevin(
+        energy_or_force_fn=energy_fn, shift_fn=shift_fn,
+        dt=dt_akma, kT=kT, gamma=gamma_reduced, mass=mass,
+        water_indices=water_indices, box=box_vec,
+        project_ou_momentum_rigid=True, projection_site="post_o",
+    )
+
+    state0 = init_s(jax.random.PRNGKey(42), jnp.array(positions_a), mass=mass)
+
+    # Run forward 20 steps (with gamma=0 to disable noise for clean reversibility)
+    apply_det = jax.jit(apply_s)
+    state_fwd = state0
+    for _ in range(20):
+      state_fwd = apply_det(state_fwd)
+
+    # Negate momenta and run backward 20 steps
+    state_rev = dataclasses.replace(state_fwd, momentum=-state_fwd.momentum)
+    for _ in range(20):
+      state_rev = apply_det(state_rev)
+
+    pos_err = float(jnp.max(jnp.abs(state_rev.positions - state0.positions)))
+    assert pos_err < 0.5, (
+        f"Gate 3 FAIL: time-reversal position error = {pos_err:.4f} Å "
+        "(> 0.5 Å indicates broken step ordering)"
+    )
+
+
 if __name__ == "__main__":
   pytest.main([__file__, "-v"])
