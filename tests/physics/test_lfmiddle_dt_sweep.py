@@ -366,16 +366,18 @@ class TestLFMiddleInvariants:
     mass = jnp.array([[15.999], [1.008], [1.008]] * n_waters).reshape(n_atoms)
     water_indices = settle.get_water_indices(0, n_waters)
 
+    # gamma=0: disables the stochastic O step (c1=1, c2=0 → identity).
+    # Langevin with nonzero gamma is dissipative by design — never time-reversible.
+    # NVE (gamma=0) IS time-reversible and catches wrong step ordering deterministically.
     init_s, apply_s = settle.settle_lfmiddle_langevin(
         energy_or_force_fn=energy_fn, shift_fn=shift_fn,
-        dt=dt_akma, kT=kT, gamma=gamma_reduced, mass=mass,
+        dt=dt_akma, kT=kT, gamma=0.0, mass=mass,
         water_indices=water_indices, box=box_vec,
         project_ou_momentum_rigid=True, projection_site="post_o",
     )
 
     state0 = init_s(jax.random.PRNGKey(42), jnp.array(positions_a), mass=mass)
 
-    # Run forward 20 steps (with gamma=0 to disable noise for clean reversibility)
     apply_det = jax.jit(apply_s)
     state_fwd = state0
     for _ in range(20):
@@ -387,9 +389,11 @@ class TestLFMiddleInvariants:
       state_rev = apply_det(state_rev)
 
     pos_err = float(jnp.max(jnp.abs(state_rev.positions - state0.positions)))
-    assert pos_err < 0.5, (
-        f"Gate 3 FAIL: time-reversal position error = {pos_err:.4f} Å "
-        "(> 0.5 Å indicates broken step ordering)"
+    # Float64 NVE over 20 steps: expect near machine precision (~1e-10 Å).
+    # A broken integrator (missing A step) will produce O(dt) error per step → >> 1e-4 Å.
+    assert pos_err < 1e-4, (
+        f"Gate 3 FAIL: time-reversal position error = {pos_err:.2e} Å "
+        "(> 1e-4 Å indicates broken step ordering)"
     )
 
 
