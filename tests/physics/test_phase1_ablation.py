@@ -73,7 +73,7 @@ def make_tip3p_water_box(
         (positions, velocities, mass, water_indices)
     """
     if rng_key is None:
-        rng_key = jax.random.PRNGKey(0)
+        rng_key = jax.random.key(0)
 
     # TIP3P masses (amu)
     mass_O = 15.999
@@ -269,7 +269,7 @@ def run_settle_langevin_trajectory(
         DiagnosticMetrics with per-step arrays
     """
     if key is None:
-        key = jax.random.PRNGKey(0)
+        key = jax.random.key(0)
 
     # Initialize state
     kT = BOLTZMANN_KCAL * T_target
@@ -597,7 +597,7 @@ class TestPhase1VmapEnsemble:
 
         # Create batch of initial conditions (different RNG seeds)
         def make_replica_state(seed):
-            key = jax.random.PRNGKey(seed)
+            key = jax.random.key(seed)
             key, split = jax.random.split(key)
             # Perturb positions slightly
             pert = jax.random.normal(split, positions.shape) * 0.01

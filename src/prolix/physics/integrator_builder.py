@@ -172,7 +172,7 @@ def make_integrator_batched(
       ...     mass=masses,
       ...     water_indices=water_indices
       ... )
-      >>> key = jax.random.PRNGKey(0)
+      >>> key = jax.random.key(0)
       >>> keys = jax.random.split(key, 16)
       >>> positions_batch = jnp.stack([perturb_trajectory(positions, k) for k in keys])
       >>> state_batch = init_fn_batched(keys[0], positions_batch, box=box_vec)

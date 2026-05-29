@@ -94,7 +94,7 @@ def test_approved_workaround_cold_start_pattern() -> None:
             momentum=jnp.zeros_like(batch.positions),
             force=initial_forces,   # compute with energy_fn(batch.positions) first
             mass=batch.masses,               # (B, N)
-            rng=jax.random.PRNGKey(0),
+            key=jax.random.key(0),
             cap_count=jnp.int32(0),
             warn_counts=None,        # auto-initialized by __post_init__
         )
@@ -139,7 +139,7 @@ def test_approved_workaround_cold_start_pattern() -> None:
         momentum=jnp.zeros_like(positions),
         force=initial_forces,
         mass=masses,
-        rng=jax.random.PRNGKey(0),
+        key=jax.random.key(0),
         cap_count=jnp.int32(0),
         warn_counts=None,  # auto-initialized by __post_init__
     )
@@ -220,7 +220,7 @@ def test_sprint_d_gate_validation() -> None:
         momentum=jnp.zeros((2, 24, 3)),
         force=jnp.zeros((2, 24, 3)),
         mass=jnp.ones((2, 24)),
-        rng=jax.random.PRNGKey(0),
+        key=jax.random.key(0),
         cap_count=jnp.int32(0),
         warn_counts=None,
     )

@@ -150,7 +150,7 @@ def _proxide_params_argon(n_atoms):
 def argon_setup():
     """8-atom Argon box."""
     n_atoms = 8
-    positions = jax.random.uniform(jax.random.PRNGKey(42), (n_atoms, 3)) * 10.0
+    positions = jax.random.uniform(jax.random.key(42), (n_atoms, 3)) * 10.0
     box_vec = jnp.array([15.0, 15.0, 15.0])
     sys_dict = _proxide_params_argon(n_atoms)
     displacement_fn, _ = pbc.create_periodic_space(box_vec)

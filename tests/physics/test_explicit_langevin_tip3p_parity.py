@@ -311,7 +311,7 @@ def test_proxide_settle_langevin_water_box_smoke(regression_pme_params):
     box=box_vec,
   )
 
-  state = init_s(jax.random.PRNGKey(2026), jnp.array(positions_a), mass=mass)
+  state = init_s(jax.random.key(2026), jnp.array(positions_a), mass=mass)
   ts: list[float] = []
   for _ in range(n_steps):
     state = apply_s(state)

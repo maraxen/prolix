@@ -34,7 +34,7 @@ def apply_noise_to_coordinates(
     Tuple of noisy coordinates and the updated JAX random key.
 
   Example:
-    >>> key = jax.random.PRNGKey(0)
+    >>> key = jax.random.key(0)
     >>> noisy_coords, new_key = apply_noise_to_coordinates(coords, key, 0.1)
 
   """

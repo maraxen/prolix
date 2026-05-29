@@ -197,7 +197,7 @@ class TestStepCompositions:
     momentum = jnp.zeros((9, 3))
     force = jnp.ones((9, 3))
     mass = jnp.ones((9, 1))
-    rng = jax.random.PRNGKey(0)
+    rng = jax.random.key(0)
 
     state = IntegratorState(positions=positions, momentum=momentum, force=force, mass=mass, rng=rng)
     params = IntegratorParams(dt=0.001, kT=2.479, gamma=1.0, energy_params=EnergyParams(params=None),
@@ -224,7 +224,7 @@ class TestStepCompositions:
     momentum = jnp.zeros((9, 3))
     force = jnp.ones((9, 3))
     mass = jnp.ones((9, 1))
-    rng = jax.random.PRNGKey(0)
+    rng = jax.random.key(0)
 
     state = IntegratorState(positions=positions, momentum=momentum, force=force, mass=mass, rng=rng)
     params = IntegratorParams(dt=0.001, kT=2.479, gamma=1.0, energy_params=EnergyParams(params=None),
@@ -251,7 +251,7 @@ class TestStepCompositions:
     momentum = jnp.ones((9, 3))
     force = jnp.ones((9, 3))
     mass = jnp.ones((9, 1))
-    rng = jax.random.PRNGKey(0)
+    rng = jax.random.key(0)
 
     state = IntegratorState(positions=positions, momentum=momentum, force=force, mass=mass, rng=rng)
     params = IntegratorParams(dt=0.001, kT=2.479, gamma=1.0, n_dof=27, energy_params=EnergyParams(params=None),
@@ -413,7 +413,7 @@ class TestStepSequenceCompositions:
     momentum = jnp.ones((9, 3))
     force = jnp.ones((9, 3))
     mass = jnp.ones((9, 1))
-    rng = jax.random.PRNGKey(0)
+    rng = jax.random.key(0)
 
     state = IntegratorState(positions=positions, momentum=momentum, force=force, mass=mass, rng=rng)
 
@@ -452,7 +452,7 @@ class TestStepSequenceCompositions:
     momentum = jnp.ones((9, 3))
     force = jnp.ones((9, 3))
     mass = jnp.ones((9, 1))
-    rng = jax.random.PRNGKey(0)
+    rng = jax.random.key(0)
 
     state = IntegratorState(positions=positions, momentum=momentum, force=force, mass=mass, rng=rng)
 
@@ -488,7 +488,7 @@ class TestStepSequenceCompositions:
     momentum = jnp.ones((3, 3))
     force = jnp.ones((3, 3))
     mass = jnp.ones((3, 1))
-    rng = jax.random.PRNGKey(0)
+    rng = jax.random.key(0)
 
     state = IntegratorState(positions=positions, momentum=momentum, force=force, mass=mass, rng=rng)
 

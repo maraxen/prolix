@@ -124,7 +124,7 @@ def water_system_batch_2():
 @pytest.fixture
 def rng_key():
     """JAX PRNG key for deterministic tests."""
-    return jax.random.PRNGKey(999)
+    return jax.random.key(999)
 
 
 # ========== HELPER FUNCTIONS ==========

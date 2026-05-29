@@ -121,7 +121,7 @@ def test_explicit_langevin_baseline_parity_csv(tmp_path, regression_pme_params):
   init_fn, apply_fn = jmd_simulate.nvt_langevin(
     energy_fn, shift_fn, dt=dt_akma, kT=kT, gamma=gamma_reduced
   )
-  key = jax.random.PRNGKey(123)
+  key = jax.random.key(123)
   mass = jnp.ones(n, dtype=jnp.float64) * 12.0
 
   @jax.jit
@@ -170,7 +170,7 @@ def test_explicit_langevin_baseline_parity_csv(tmp_path, regression_pme_params):
   assert float(np.std(t_samples)) > 1e-6
 
   init_nve, apply_nve = jmd_simulate.nve(energy_fn, shift_fn=shift_fn, dt=dt_akma)
-  key_nve = jax.random.PRNGKey(456)
+  key_nve = jax.random.key(456)
   st0 = init_nve(key_nve, positions, mass=mass, kT=kT)
   e0 = float(energy_fn(st0.positions) + quantity.kinetic_energy(momentum=st0.momentum, mass=st0.mass))
   st = st0

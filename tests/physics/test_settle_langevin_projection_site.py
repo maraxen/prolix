@@ -67,7 +67,7 @@ def _mean_rigid_t_after_burn(
   )
   apply_j = jax.jit(apply_s)
   dof_rigid = _dof_rigid_tip3p_waters(n_waters)
-  state = init_s(jax.random.PRNGKey(seed), jnp.array(positions_a), mass=mass)
+  state = init_s(jax.random.key(seed), jnp.array(positions_a), mass=mass)
   acc: list[float] = []
   for step in range(steps):
     state = apply_j(state)

@@ -426,7 +426,7 @@ def run_nvt(
     pos = system.positions[: system.n_real_atoms]
 
     state = settle_langevin_init_fn(
-        jax.random.PRNGKey(0), pos, mass=mass
+        jax.random.key(0), pos, mass=mass
     )
     apply_j = jax.jit(settle_langevin_apply_fn)
 

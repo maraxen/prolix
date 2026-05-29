@@ -57,7 +57,7 @@ def estimate_rff_kernel(
     estimates = []
 
     for seed in range(n_seeds):
-        key = jax.random.PRNGKey(seed)
+        key = jax.random.key(seed)
         omega = rff_frequency_sample(alpha, d_features, key)
 
         # Create two points at distance r along the z-axis

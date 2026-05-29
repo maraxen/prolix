@@ -180,7 +180,7 @@ def test_efa_nvt_smoke_dt05():
     )
 
     pos_init = system_obj.positions[: system_obj.n_real_atoms]
-    state = init_s(jax.random.PRNGKey(42), pos_init, mass=mass)
+    state = init_s(jax.random.key(42), pos_init, mass=mass)
     apply_j = jax.jit(apply_s)
 
     for step in range(n_steps):

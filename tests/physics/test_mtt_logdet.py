@@ -86,7 +86,7 @@ def test_mtt_logdet_jit_and_determinism():
         functools.partial(mtt_estimate_log_det, params=params)
     )
 
-    key = jax.random.PRNGKey(7)
+    key = jax.random.key(7)
 
     # First call: triggers JIT compilation
     result_a = log_det_fn(positions, charges, atom_mask, key)
@@ -126,7 +126,7 @@ def test_mtt_logdet_n64_accuracy():
     efa_params = efa_lebedev_params(alpha=0.34, n_freqs=32, n_lebedev_pts=26)
     params = mtt_logdet_params(efa_params, n_probes=10, n_lanczos=20, eps=1e-4)
 
-    key = jax.random.PRNGKey(42)
+    key = jax.random.key(42)
     mtt_estimate = float(
         mtt_estimate_log_det(positions, charges, atom_mask, key, params=params)
     )
@@ -158,7 +158,7 @@ def test_mtt_logdet_n256_milestone():
     efa_params = efa_lebedev_params(alpha=0.34, n_freqs=32, n_lebedev_pts=26)
     params = mtt_logdet_params(efa_params, n_probes=20, n_lanczos=50, eps=1e-4)
 
-    key = jax.random.PRNGKey(99)
+    key = jax.random.key(99)
     mtt_estimate = float(
         mtt_estimate_log_det(positions, charges, atom_mask, key, params=params)
     )

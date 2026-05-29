@@ -64,7 +64,7 @@ def water_system_3():
 
   momentum = jnp.zeros_like(positions)
   force = jnp.zeros_like(positions)
-  rng = jax.random.PRNGKey(42)
+  rng = jax.random.key(42)
 
   state = IntegratorState(
       positions=positions,
@@ -99,7 +99,7 @@ def test_o_step_jit_compiles(base_params):
   momentum = jnp.ones((9, 3))
   force = jnp.zeros((9, 3))
   mass = jnp.ones((9, 1))
-  rng = jax.random.PRNGKey(0)
+  rng = jax.random.key(0)
 
   state = IntegratorState(positions=positions, momentum=momentum, force=force, mass=mass, rng=rng)
 
@@ -120,7 +120,7 @@ def test_v_step_jit_compiles(base_params):
   momentum = jnp.ones((9, 3))
   force = jnp.ones((9, 3))
   mass = jnp.ones((9, 1))
-  rng = jax.random.PRNGKey(0)
+  rng = jax.random.key(0)
 
   state = IntegratorState(positions=positions, momentum=momentum, force=force, mass=mass, rng=rng)
 
@@ -139,7 +139,7 @@ def test_a_step_jit_compiles(base_params):
   momentum = jnp.ones((9, 3))
   force = jnp.zeros((9, 3))
   mass = jnp.ones((9, 1))
-  rng = jax.random.PRNGKey(0)
+  rng = jax.random.key(0)
 
   state = IntegratorState(positions=positions, momentum=momentum, force=force, mass=mass, rng=rng)
 
@@ -172,7 +172,7 @@ def test_csvr_step_jit_compiles(base_params):
   momentum = jnp.ones((9, 3))
   force = jnp.zeros((9, 3))
   mass = jnp.ones((9, 1))
-  rng = jax.random.PRNGKey(0)
+  rng = jax.random.key(0)
 
   state = IntegratorState(positions=positions, momentum=momentum, force=force, mass=mass, rng=rng)
   params = base_params.__replace__(n_dof=27)
@@ -192,7 +192,7 @@ def test_nhc_step_jit_compiles(base_params):
   momentum = jnp.ones((9, 3))
   force = jnp.zeros((9, 3))
   mass = jnp.ones((9, 1))
-  rng = jax.random.PRNGKey(0)
+  rng = jax.random.key(0)
 
   state = IntegratorState(positions=positions, momentum=momentum, force=force, mass=mass, rng=rng)
 
@@ -213,8 +213,8 @@ def test_o_step_stochastic(base_params):
   force = jnp.zeros((9, 3))
   mass = jnp.ones((9, 1))
 
-  state1 = IntegratorState(positions=positions, momentum=momentum, force=force, mass=mass, rng=jax.random.PRNGKey(0))
-  state2 = IntegratorState(positions=positions, momentum=momentum, force=force, mass=mass, rng=jax.random.PRNGKey(1))
+  state1 = IntegratorState(position=positions, momentum=momentum, force=force, mass=mass, rng=jax.random.key(0))
+  state2 = IntegratorState(position=positions, momentum=momentum, force=force, mass=mass, rng=jax.random.key(1))
 
   result1 = step.apply(state1, base_params)
   result2 = step.apply(state2, base_params)
@@ -230,7 +230,7 @@ def test_v_step_momentum_update(base_params):
   momentum = jnp.zeros((3, 3))
   force = jnp.ones((3, 3))  # Uniform force
   mass = jnp.ones((3, 1))
-  rng = jax.random.PRNGKey(0)
+  rng = jax.random.key(0)
 
   state = IntegratorState(positions=positions, momentum=momentum, force=force, mass=mass, rng=rng)
   dt = 0.001
@@ -250,7 +250,7 @@ def test_a_step_position_update(base_params):
   momentum = jnp.ones((3, 3))
   force = jnp.zeros((3, 3))
   mass = jnp.ones(3)
-  rng = jax.random.PRNGKey(0)
+  rng = jax.random.key(0)
 
   state = IntegratorState(positions=positions, momentum=momentum, force=force, mass=mass, rng=rng)
   dt = 0.001
@@ -270,7 +270,7 @@ def test_a_step_with_variable_mass(base_params):
   momentum = jnp.ones((3, 3))
   force = jnp.zeros((3, 3))
   mass = jnp.array([[1.0], [2.0], [4.0]])
-  rng = jax.random.PRNGKey(0)
+  rng = jax.random.key(0)
 
   state = IntegratorState(positions=positions, momentum=momentum, force=force, mass=mass, rng=rng)
   dt = 0.001
@@ -293,7 +293,7 @@ def test_csvr_step_rescales_momentum(base_params):
   momentum = jnp.ones((9, 3))
   force = jnp.zeros((9, 3))
   mass = jnp.ones((9, 1))
-  rng = jax.random.PRNGKey(0)
+  rng = jax.random.key(0)
 
   state = IntegratorState(positions=positions, momentum=momentum, force=force, mass=mass, rng=rng)
   params = base_params.__replace__(n_dof=27)
@@ -317,7 +317,7 @@ def test_csvr_step_preserves_direction(base_params):
   momentum = jnp.array([[1.0, 0.0, 0.0], [0.0, 2.0, 0.0], [0.0, 0.0, 3.0]])
   force = jnp.zeros((3, 3))
   mass = jnp.ones((3, 1))
-  rng = jax.random.PRNGKey(0)
+  rng = jax.random.key(0)
 
   state = IntegratorState(positions=positions, momentum=momentum, force=force, mass=mass, rng=rng)
   params = base_params.__replace__(n_dof=9)
@@ -339,7 +339,7 @@ def test_settle_velocity_step_with_no_water(base_params):
   momentum = jnp.ones((9, 3))
   force = jnp.zeros((9, 3))
   mass = jnp.ones((9, 1))
-  rng = jax.random.PRNGKey(0)
+  rng = jax.random.key(0)
 
   state = IntegratorState(positions=positions, momentum=momentum, force=force, mass=mass, rng=rng)
 
@@ -356,7 +356,7 @@ def test_nhc_step_is_noop(base_params):
   momentum = jnp.ones((9, 3))
   force = jnp.zeros((9, 3))
   mass = jnp.ones((9, 1))
-  rng = jax.random.PRNGKey(0)
+  rng = jax.random.key(0)
 
   state = IntegratorState(positions=positions, momentum=momentum, force=force, mass=mass, rng=rng)
 
@@ -413,7 +413,7 @@ def test_v_a_v_compositions(base_params):
   momentum = jnp.zeros((9, 3))
   force = jnp.ones((9, 3))  # Constant force
   mass = jnp.ones((9, 1))
-  rng = jax.random.PRNGKey(0)
+  rng = jax.random.key(0)
 
   state = IntegratorState(positions=positions, momentum=momentum, force=force, mass=mass, rng=rng)
   params = base_params.__replace__(dt=0.001)
@@ -443,7 +443,7 @@ def test_langevin_v_o_a_compositions(base_params):
   momentum = jnp.zeros((9, 3))
   force = jnp.ones((9, 3))
   mass = jnp.ones((9, 1))
-  rng = jax.random.PRNGKey(0)
+  rng = jax.random.key(0)
 
   state = IntegratorState(positions=positions, momentum=momentum, force=force, mass=mass, rng=rng)
   params = base_params.__replace__(dt=0.001)
@@ -469,7 +469,7 @@ def test_integratorstate_pytree_structure():
   momentum = jnp.ones((9, 3))
   force = jnp.zeros((9, 3))
   mass = jnp.ones((9, 1))
-  rng = jax.random.PRNGKey(0)
+  rng = jax.random.key(0)
 
   state = IntegratorState(positions=positions, momentum=momentum, force=force, mass=mass, rng=rng)
 
@@ -489,7 +489,7 @@ def test_step_apply_returns_state(base_params):
   momentum = jnp.ones((9, 3))
   force = jnp.ones((9, 3))
   mass = jnp.ones((9, 1))
-  rng = jax.random.PRNGKey(0)
+  rng = jax.random.key(0)
 
   state = IntegratorState(positions=positions, momentum=momentum, force=force, mass=mass, rng=rng)
 

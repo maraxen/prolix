@@ -10,7 +10,7 @@ jax.config.update("jax_platform_name", "cpu")
 
 def _make_test_data(n_atoms=8, seed=42):
     """Create a minimal test system with known LJ/Coulomb parameters."""
-    key = jax.random.PRNGKey(seed)
+    key = jax.random.key(seed)
     k1, k2, k3, k4 = jax.random.split(key, 4)
 
     # Random positions spread out enough to avoid clashes
@@ -31,7 +31,7 @@ def _make_test_data(n_atoms=8, seed=42):
 
 def _make_padded_test_data(n_real=6, n_padded=3, seed=42):
     """Create test system WITH padding atoms."""
-    key = jax.random.PRNGKey(seed)
+    key = jax.random.key(seed)
     k1, k2, k3, k4 = jax.random.split(key, 4)
     n_total = n_real + n_padded
 
@@ -185,7 +185,7 @@ class TestCompositeForce:
 
 def _make_gb_test_data(n_real=6, n_padded=2, seed=42):
     """Create test system with radii/charges for GB testing."""
-    key = jax.random.PRNGKey(seed)
+    key = jax.random.key(seed)
     k1, k2, k3 = jax.random.split(key, 3)
     n_total = n_real + n_padded
 
@@ -225,7 +225,7 @@ class TestGBACEForces:
 
         # Use all-real atoms (no padding) for clean math comparison.
         # Padded-atom safety is tested separately.
-        key = jax.random.PRNGKey(42)
+        key = jax.random.key(42)
         k1, k2, k3 = jax.random.split(key, 3)
         n_atoms = 6
 

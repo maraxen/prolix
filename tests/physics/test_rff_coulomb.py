@@ -26,7 +26,7 @@ def _dense_erfc_coulomb(positions, charges, atom_mask, alpha):
 
 @pytest.mark.smoke
 def test_rff_feature_shape():
-  key = jax.random.PRNGKey(42)
+  key = jax.random.key(42)
   n_features = 64
   alpha = 0.34
   n_atoms = 16
@@ -38,7 +38,7 @@ def test_rff_feature_shape():
 
 @pytest.mark.smoke
 def test_rff_determinism():
-  key = jax.random.PRNGKey(0)
+  key = jax.random.key(0)
   omega1 = rff_frequency_sample(0.34, 64, key)
   omega2 = rff_frequency_sample(0.34, 64, key)
   np.testing.assert_array_equal(omega1, omega2)
@@ -47,7 +47,7 @@ def test_rff_determinism():
 @pytest.mark.smoke
 def test_rff_self_term_finite():
   """Overlapping atoms should not produce NaN/Inf."""
-  key = jax.random.PRNGKey(7)
+  key = jax.random.key(7)
   positions = jnp.zeros((4, 3))
   charges = jnp.array([0.417, 0.417, -0.834, 0.417])
   atom_mask = jnp.ones(4)
@@ -64,10 +64,10 @@ def test_rff_kernel_bias():
   alpha = 0.34
   M = 64
 
-  base_key = jax.random.PRNGKey(1234)
+  base_key = jax.random.key(1234)
   pos_key, keys = jax.random.split(base_key)
   positions = jax.random.normal(pos_key, (N, 3)) * 5.0
-  charges = jax.random.normal(jax.random.PRNGKey(42), (N,)) * 0.5
+  charges = jax.random.normal(jax.random.key(42), (N,)) * 0.5
   atom_mask = jnp.ones(N)
 
   E_dense = _dense_erfc_coulomb(positions, charges, atom_mask, alpha)
@@ -94,7 +94,7 @@ def test_rff_kernel_bias():
 @pytest.mark.slow
 def test_rff_gradient_check():
   """Analytical gradient (custom_vjp) should match numerical gradient."""
-  key = jax.random.PRNGKey(99)
+  key = jax.random.key(99)
   N = 8
   D = 128
   alpha = 0.34

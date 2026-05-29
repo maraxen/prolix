@@ -135,7 +135,7 @@ def _run_nvt_langevin_trajectory(
         mass=masses,
     )
 
-    key = jax.random.PRNGKey(seed)
+    key = jax.random.key(seed)
 
     # Initialize state
     state = init_fn(key, positions)

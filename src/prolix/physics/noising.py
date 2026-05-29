@@ -77,7 +77,7 @@ def thermal_noise_fn(
       The new key should be used for subsequent random operations.
 
   Example:
-      >>> key = jax.random.PRNGKey(0)
+      >>> key = jax.random.key(0)
       >>> coords = jnp.ones((100, 37, 3))
       >>> noised, key = thermal_noise_fn(key, coords, 300.0)
       >>> noised.shape

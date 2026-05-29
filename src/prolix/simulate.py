@@ -439,7 +439,7 @@ def run_simulation(
     raise ValueError("spec must be provided")
 
   if key is None:
-    key = jax.random.PRNGKey(int(time.time()))
+    key = jax.random.key(int(time.time()))
 
   displacement_fn: Any
   shift_fn: Any

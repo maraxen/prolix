@@ -43,7 +43,7 @@ def _mean_rigid_t_after_burn(*, dt_fs: float, n_waters: int, seed: int, steps: i
   init_s, apply_s = settle.settle_langevin(energy_fn, shift_fn, dt=dt_akma, kT=kT, gamma=gamma_reduced, mass=mass, water_indices=water_indices, box=box_vec, remove_linear_com_momentum=False, project_ou_momentum_rigid=True, projection_site="post_o", settle_velocity_iters=10)
   apply_j = jax.jit(apply_s)
   dof_rigid = _dof_rigid_tip3p_waters(n_waters)
-  state = init_s(jax.random.PRNGKey(seed), jnp.array(positions_a), mass=mass)
+  state = init_s(jax.random.key(seed), jnp.array(positions_a), mass=mass)
   temps: list[float] = []
   for step in range(steps):
     state = apply_j(state)
@@ -118,7 +118,7 @@ def test_equipartition_chi2() -> None:
   water_indices = settle.get_water_indices(0, n_waters)
   init_s, apply_s = settle.settle_langevin(energy_fn, shift_fn, dt=dt_akma, kT=kT, gamma=gamma_reduced, mass=mass, water_indices=water_indices, box=box_vec, remove_linear_com_momentum=False, project_ou_momentum_rigid=True, projection_site="post_o", settle_velocity_iters=10)
   apply_j = jax.jit(apply_s)
-  state = init_s(jax.random.PRNGKey(seed), jnp.array(positions_a), mass=mass)
+  state = init_s(jax.random.key(seed), jnp.array(positions_a), mass=mass)
   velocities: list[float] = []
   for step in range(steps):
     state = apply_j(state)
@@ -219,7 +219,7 @@ def _mean_rigid_t_csvr_after_burn(*, dt_fs: float, n_waters: int, seed: int, ste
   init_s, apply_s = settle.settle_csvr(energy_fn, shift_fn, dt=dt_akma, kT=kT, mass=mass, water_indices=water_indices, box=box_vec, remove_com=True)
   apply_j = jax.jit(apply_s)
   dof_rigid = _dof_rigid_tip3p_waters(n_waters)
-  state = init_s(jax.random.PRNGKey(seed), jnp.array(positions_a), mass=mass)
+  state = init_s(jax.random.key(seed), jnp.array(positions_a), mass=mass)
   temps: list[float] = []
   for step in range(steps):
     state = apply_j(state)
@@ -293,7 +293,7 @@ def test_equipartition_csvr_dt2fs_chi2() -> None:
   water_indices = settle.get_water_indices(0, n_waters)
   init_s, apply_s = settle.settle_csvr(energy_fn, shift_fn, dt=dt_akma, kT=kT, mass=mass, water_indices=water_indices, box=box_vec, remove_com=True)
   apply_j = jax.jit(apply_s)
-  state = init_s(jax.random.PRNGKey(seed), jnp.array(positions_a), mass=mass)
+  state = init_s(jax.random.key(seed), jnp.array(positions_a), mass=mass)
   velocities: list[float] = []
   for step in range(steps):
     state = apply_j(state)
@@ -333,7 +333,7 @@ def test_csvr_lambda_statistics() -> None:
   tau = 1.0  # → c1 = exp(-1)
 
   n_samples = 5000
-  key = jax.random.PRNGKey(42)
+  key = jax.random.key(42)
   lambdas = []
   for _ in range(n_samples):
     lam, key = _csvr_compute_lambda(key, ke_current, n_dof, kT, dt, tau)
@@ -371,8 +371,8 @@ def test_langevin_with_constraints_null_constraint() -> None:
   )
   apply_j = jax.jit(apply_s)
   R0 = jnp.zeros((n_atoms, 3), dtype=jnp.float64) + 0.1
-  state = init_s(jax.random.PRNGKey(99), R0, mass=mass)
-  pos_init = state.positions
+  state = init_s(jax.random.key(99), R0, mass=mass)
+  pos_init = state.position
   for _ in range(100):
     state = apply_j(state)
   assert not jnp.allclose(state.positions, pos_init), "Position should advance"
@@ -435,7 +435,7 @@ def test_equipartition_per_molecule_com_dt0_5fs() -> None:
   water_indices = settle.get_water_indices(0, n_waters)
   init_s, apply_s = settle.settle_langevin(energy_fn, shift_fn, dt=dt_akma, kT=kT, gamma=gamma_reduced, mass=mass, water_indices=water_indices, box=box_vec, remove_linear_com_momentum=False, project_ou_momentum_rigid=True, projection_site="post_o", settle_velocity_iters=10)
   apply_j = jax.jit(apply_s)
-  state = init_s(jax.random.PRNGKey(seed), jnp.array(positions_a), mass=mass)
+  state = init_s(jax.random.key(seed), jnp.array(positions_a), mass=mass)
 
   # Subsampling parameters
   burn_steps = 50_000  # 25 ps burn-in
@@ -513,7 +513,7 @@ def _mean_rigid_t_lax_scan(*, dt_fs: float, n_waters: int, seed: int, steps: int
   init_s, apply_s = settle.settle_langevin(energy_fn, shift_fn, dt=dt_akma, kT=kT, gamma=gamma_reduced, mass=mass, water_indices=water_indices, box=box_vec, remove_linear_com_momentum=False, project_ou_momentum_rigid=True, projection_site="post_o", settle_velocity_iters=10)
   apply_j = jax.jit(apply_s)
   dof_rigid = float(6 * n_waters - 3)
-  state = init_s(jax.random.PRNGKey(seed), jnp.array(positions_a), mass=mass)
+  state = init_s(jax.random.key(seed), jnp.array(positions_a), mass=mass)
 
   # Burn-in loop (Python, not scanned)
   for _ in range(burn):
@@ -586,7 +586,7 @@ def test_temperature_reproducibility_same_seed() -> None:
     water_indices = settle.get_water_indices(0, n_waters)
     init_s, apply_s = settle.settle_langevin(energy_fn, shift_fn, dt=dt_akma, kT=kT, gamma=gamma_reduced, mass=mass, water_indices=water_indices, box=box_vec, remove_linear_com_momentum=False, project_ou_momentum_rigid=True, projection_site="post_o", settle_velocity_iters=10)
     apply_j = jax.jit(apply_s)
-    state = init_s(jax.random.PRNGKey(seed_val), jnp.array(positions_a), mass=mass)
+    state = init_s(jax.random.key(seed_val), jnp.array(positions_a), mass=mass)
 
     positions_list = [state.positions]
     for _ in range(steps):
@@ -629,7 +629,7 @@ def test_temperature_reproducibility_different_seed() -> None:
     water_indices = settle.get_water_indices(0, n_waters)
     init_s, apply_s = settle.settle_langevin(energy_fn, shift_fn, dt=dt_akma, kT=kT, gamma=gamma_reduced, mass=mass, water_indices=water_indices, box=box_vec, remove_linear_com_momentum=False, project_ou_momentum_rigid=True, projection_site="post_o", settle_velocity_iters=10)
     apply_j = jax.jit(apply_s)
-    state = init_s(jax.random.PRNGKey(seed_val), jnp.array(positions_a), mass=mass)
+    state = init_s(jax.random.key(seed_val), jnp.array(positions_a), mass=mass)
 
     positions_list = [state.positions]
     for _ in range(steps):
@@ -730,7 +730,7 @@ def test_ke_measurement_ablation() -> None:
   # DOF for atomic formula: 3N (all atomic coordinates)
   dof_atomic_all = float(3 * n_atoms)
 
-  state = init_s(jax.random.PRNGKey(seed), jnp.array(positions_a), mass=mass)
+  state = init_s(jax.random.key(seed), jnp.array(positions_a), mass=mass)
 
   # Burn-in: discard first 'burn' steps
   for _ in range(burn):

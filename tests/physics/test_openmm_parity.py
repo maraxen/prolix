@@ -709,7 +709,7 @@ class TestEnsembleProperties:
     steps = 100
 
     init_fn, apply_fn = jax_simulate.nve(energy_fn, shift_fn, ts)
-    key = jax.random.PRNGKey(0)
+    key = jax.random.key(0)
     state = init_fn(key, R_init, mass=1.0, kT=0.5)
 
     E_initial = energy_fn(state.position) + quantity.kinetic_energy(
@@ -737,7 +737,7 @@ class TestEnsembleProperties:
 
     displacement_fn, shift_fn = space.free()
     N = 16
-    key = jax.random.PRNGKey(42)
+    key = jax.random.key(42)
     R = jax.random.uniform(key, (N, 3)) * 5.0
 
     def energy_fn(R):

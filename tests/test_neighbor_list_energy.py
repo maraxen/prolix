@@ -335,7 +335,7 @@ class TestNLLangevinStep:
         neighbor_idx = _build_dense_neighbor_idx(n)
 
         # Create initial state
-        key = jax.random.PRNGKey(0)
+        key = jax.random.key(0)
         state = LangevinState(
             positions=sys_data["positions"],
             momentum=jnp.zeros((n, 3)),
@@ -431,7 +431,7 @@ class TestCustomVJP:
         )
 
         neighbor_idx = _build_dense_neighbor_idx(n)
-        key = jax.random.PRNGKey(0)
+        key = jax.random.key(0)
         state = LangevinState(
             positions=sys_data["positions"],
             momentum=jnp.zeros((n, 3)),

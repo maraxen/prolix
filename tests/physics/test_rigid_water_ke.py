@@ -16,7 +16,7 @@ def test_project_tip3p_momentum_rigid_is_identity_for_synthetic_rigid_motion() -
   jax.config.update("jax_enable_x64", True)
   n_waters = 2
   n_atoms = n_waters * 3
-  key = jax.random.PRNGKey(4)
+  key = jax.random.key(4)
   mass = jnp.array([[15.999], [1.008], [1.008]] * n_waters, dtype=jnp.float64).reshape(n_atoms, 1)
   m_o, m_h = jnp.float64(15.999), jnp.float64(1.008)
   r = jax.random.uniform(key, (n_atoms, 3), dtype=jnp.float64, minval=0.0, maxval=5.0)
@@ -65,7 +65,7 @@ def test_atomic_ke_ge_rigid_ke_random_momenta(seed: int) -> None:
   """Atomic ``p^2/(2m)`` includes internal motion; rigid-body KE is a lower bound."""
   n_waters = 3
   n_atoms = n_waters * 3
-  key = jax.random.PRNGKey(seed)
+  key = jax.random.key(seed)
   k1, k2 = jax.random.split(key)
   mass = jnp.array([[15.999], [1.008], [1.008]] * n_waters, dtype=jnp.float32).reshape(n_atoms, 1)
   p = jax.random.normal(k1, (n_atoms, 3), dtype=jnp.float32) * jnp.sqrt(mass)

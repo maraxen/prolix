@@ -204,7 +204,7 @@ class TestShardedCoulomb:
 
     def test_parity_4_atoms(self):
         """Sharded 2-GPU Coulomb should match dense N^2 Coulomb."""
-        key = jax.random.PRNGKey(0)
+        key = jax.random.key(0)
         positions = jax.random.normal(key, (4, 3)) * 5.0
         charges = jnp.array([0.5, -0.3, 0.2, -0.4])
 

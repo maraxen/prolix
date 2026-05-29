@@ -130,7 +130,7 @@ def test_batched_produce_nvt_temperature_control() -> None:
     initial_forces = jnp.tile(initial_force_single[None, :, :], (n_systems, 1, 1))
 
     # Create batched state
-    key = jax.random.PRNGKey(42)
+    key = jax.random.key(42)
     state = LangevinState(
         positions=positions,
         momentum=jnp.zeros_like(positions),
@@ -200,7 +200,7 @@ def test_batched_produce_energy_conservation() -> None:
     initial_forces = jnp.stack(initial_forces, axis=0)
 
     # Create batched state
-    key = jax.random.PRNGKey(123)
+    key = jax.random.key(123)
     state = LangevinState(
         positions=positions,
         momentum=jnp.zeros_like(positions),
@@ -250,7 +250,7 @@ def test_batched_vmap_pytree_consistency() -> None:
     )
 
     # Create batched state
-    key = jax.random.PRNGKey(42)
+    key = jax.random.key(42)
     initial_forces = jnp.zeros_like(positions)
 
     state = LangevinState(

@@ -15,7 +15,7 @@ def test_efa_imports():
 @pytest.mark.smoke
 def test_efa_minimal_energy():
   """Run EFA on a tiny box; assert finite output."""
-  key = jax.random.PRNGKey(0)
+  key = jax.random.key(0)
   N = 16
   positions = jax.random.normal(key, (N, 3)) * 3.0
   charges = jnp.array([-0.834, 0.417, 0.417] * 5 + [0.0])

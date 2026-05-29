@@ -141,7 +141,7 @@ def test_npt_5ps_energy_conservation() -> None:
     )
 
     apply_j = jax.jit(apply_s)
-    state = init_s(jax.random.PRNGKey(42), jnp.array(positions_a), mass=mass, box=box_vec)
+    state = init_s(jax.random.key(42), jnp.array(positions_a), mass=mass, box=box_vec)
 
     # Initial Hamiltonian
     h_init = _hamiltonian_npt(
@@ -278,7 +278,7 @@ def test_npt_5ps_pressure_stability() -> None:
     )
 
     apply_j = jax.jit(apply_s)
-    state = init_s(jax.random.PRNGKey(42), jnp.array(positions_a), mass=mass, box=box_vec)
+    state = init_s(jax.random.key(42), jnp.array(positions_a), mass=mass, box=box_vec)
 
     pressures_bar: list[float] = []
 

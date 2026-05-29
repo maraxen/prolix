@@ -257,7 +257,7 @@ class TestGeneralizedBorn:
     F_init = -jax.grad(energy_fn)(positions)
 
     # Initialize with some velocity
-    key = jax.random.PRNGKey(0)
+    key = jax.random.key(0)
     v_init = jax.random.normal(key, positions.shape) * 0.1
 
     state = (positions, v_init, F_init)

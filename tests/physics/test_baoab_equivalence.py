@@ -245,11 +245,11 @@ def test_equivalence_single_water_50fs(
   )
 
   # Initialize both with the SAME RNG seed
-  key = jax.random.PRNGKey(42)
+  key = jax.random.key(42)
   state_old = init_fn_old(key, positions, mass=masses_1d, box=box_vec)
 
   # Reset key to same seed for new API
-  key = jax.random.PRNGKey(42)
+  key = jax.random.key(42)
   state_new = init_fn_new(key, positions, box=box_vec)
 
   # Run trajectory comparison
@@ -356,9 +356,9 @@ def test_equivalence_energy_conservation(
   )
 
   # Initialize
-  key = jax.random.PRNGKey(42)
+  key = jax.random.key(42)
   state_old = init_fn_old(key, positions, mass=masses_1d, box=box_vec)
-  key = jax.random.PRNGKey(42)
+  key = jax.random.key(42)
   state_new = init_fn_new(key, positions, box=box_vec)
 
   # Compute initial energies
@@ -442,9 +442,9 @@ def test_equivalence_temperature_stability(
   )
 
   # Initialize
-  key = jax.random.PRNGKey(42)
+  key = jax.random.key(42)
   state_old = init_fn_old(key, positions, mass=masses_1d, box=box_vec)
-  key = jax.random.PRNGKey(42)
+  key = jax.random.key(42)
   state_new = init_fn_new(key, positions, box=box_vec)
 
   # Collect temperatures
@@ -531,9 +531,9 @@ def test_equivalence_force_computation(
   )
 
   # Initialize states (which computes initial forces)
-  key = jax.random.PRNGKey(42)
+  key = jax.random.key(42)
   state_old = init_fn_old(key, positions, mass=masses_1d, box=box_vec)
-  key = jax.random.PRNGKey(42)
+  key = jax.random.key(42)
   state_new = init_fn_new(key, positions, box=box_vec)
 
   # Extract initial forces
@@ -585,10 +585,10 @@ def test_equivalence_rng_determinism(
   )
 
   # Run two trajectories with same seed
-  key = jax.random.PRNGKey(42)
+  key = jax.random.key(42)
   state1 = init_fn(key, positions, box=box_vec)
 
-  key = jax.random.PRNGKey(42)
+  key = jax.random.key(42)
   state2 = init_fn(key, positions, box=box_vec)
 
   # Trajectories should match exactly after initialization
@@ -661,9 +661,9 @@ def test_equivalence_water_constraint_projection(
   )
 
   # Initialize
-  key = jax.random.PRNGKey(42)
+  key = jax.random.key(42)
   state_old = init_fn_old(key, positions, mass=masses_1d, box=box_vec)
-  key = jax.random.PRNGKey(42)
+  key = jax.random.key(42)
   state_new = init_fn_new(key, positions, box=box_vec)
 
   # Run trajectories and check constraints

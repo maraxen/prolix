@@ -10,7 +10,7 @@ def test_nl_dense_parity():
     # Setup a small system
     box_size = jnp.array([30.0, 30.0, 30.0])
     N = 256
-    key = jax.random.PRNGKey(42)
+    key = jax.random.key(42)
     pos = jax.random.uniform(key, (N, 3)) * 25.0
     
     # Random parameters
@@ -98,7 +98,7 @@ def test_nl_overflow_detection():
         momentum=jnp.zeros_like(pos),
         force=jnp.zeros_like(pos),
         mass=jnp.ones(N),
-        rng=jax.random.PRNGKey(0),
+        key=jax.random.key(0),
         cap_count=jnp.array(0)
     )
     

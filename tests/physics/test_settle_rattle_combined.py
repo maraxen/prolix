@@ -46,7 +46,7 @@ def test_settle_rattle_combined_integrator():
     constraints=(solute_pairs, solute_lengths)
   )
   
-  key = random.PRNGKey(42)
+  key = random.key(42)
   state = init_fn(key, R_init)
   
   # Run 500 steps

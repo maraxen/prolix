@@ -145,7 +145,7 @@ def test_langevin_step_finite(fake_padded_batch):
     step_fn = make_langevin_step(dt, kT, gamma)
     
     B, N, _ = sys.positions.shape
-    key = random.PRNGKey(42)
+    key = random.key(42)
     keys = random.split(key, B)
     
     state = LangevinState(
@@ -214,7 +214,7 @@ def _cold_start_state(batch) -> LangevinState:
         return f
 
     initial_forces = jax.vmap(_init_force)(batch)
-    keys = random.split(random.PRNGKey(0), B)
+    keys = random.split(random.key(0), B)
     return LangevinState(
         positions=batch.positions,
         momentum=jnp.zeros_like(batch.positions),
@@ -233,7 +233,7 @@ def test_batched_equilibrate_deprecated(fake_padded_batch):
     with pytest.warns(DeprecationWarning, match="batched_equilibrate is deprecated"):
         batched_equilibrate(
             fake_padded_batch, system_index, fake_padded_batch.positions,
-            rng=random.PRNGKey(0), duration_ps=0.02, temp=300.0, chunk_size=1
+            key=random.key(0), duration_ps=0.02, temp=300.0, chunk_size=1
         )
 
 
@@ -293,7 +293,7 @@ def test_batched_produce_streaming(fake_padded_batch):
         return grad_e
 
     initial_forces = jax.vmap(compute_initial_force)(batch)
-    keys = random.split(random.PRNGKey(42), B)
+    keys = random.split(random.key(42), B)
 
     state = LangevinState(
         positions=batch.positions,
@@ -408,7 +408,7 @@ def test_batched_produce_streaming_write_batch_size(fake_padded_batch):
         momentum=jnp.zeros_like(batch.positions),
         force=initial_forces,
         mass=batch.masses,
-        rng=random.split(random.PRNGKey(1), B),
+        key=random.split(random.key(1), B),
         cap_count=jnp.zeros(B, dtype=jnp.int32),
     )
 

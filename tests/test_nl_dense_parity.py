@@ -196,7 +196,7 @@ def main():
     step_fn_dense = make_langevin_step(dt, kT, gamma)
     step_fn_nl = make_langevin_step_nl(dt, kT, gamma)
 
-    key = jax.random.PRNGKey(42)
+    key = jax.random.key(42)
     init_state = LangevinState(
         positions=padded.positions,
         momentum=jnp.zeros_like(padded.positions),

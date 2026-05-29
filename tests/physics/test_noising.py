@@ -35,7 +35,7 @@ class TestThermalNoiseFn:
 
   def test_output_shape_preserved(self):
     """Output shape should match input."""
-    key = jax.random.PRNGKey(42)
+    key = jax.random.key(42)
     coords = jnp.ones((10, 37, 3))
     noised, new_key = thermal_noise_fn(key, coords, 300.0)
     chex.assert_shape(noised, (10, 37, 3))
@@ -43,7 +43,7 @@ class TestThermalNoiseFn:
 
   def test_dtype_preserved(self):
     """Output dtype should match input."""
-    key = jax.random.PRNGKey(42)
+    key = jax.random.key(42)
     coords = jnp.ones((10, 37, 3), dtype=jnp.float32)
     noised, _ = thermal_noise_fn(key, coords, 300.0)
     assert noised.dtype == jnp.float32
@@ -53,14 +53,14 @@ class TestThermalNoiseFn:
 
   def test_zero_temperature_no_noise(self):
     """At T=0, output should equal input."""
-    key = jax.random.PRNGKey(42)
+    key = jax.random.key(42)
     coords = jnp.ones((10, 37, 3))
     noised, _ = thermal_noise_fn(key, coords, 0.0)
     chex.assert_trees_all_close(noised, coords, atol=1e-7)
 
   def test_reproducibility(self):
     """Same key should produce same noise."""
-    key = jax.random.PRNGKey(42)
+    key = jax.random.key(42)
     coords = jnp.ones((10, 37, 3))
     noised1, _ = thermal_noise_fn(key, coords, 300.0)
     noised2, _ = thermal_noise_fn(key, coords, 300.0)
@@ -68,8 +68,8 @@ class TestThermalNoiseFn:
 
   def test_different_keys_different_noise(self):
     """Different keys should produce different noise."""
-    key1 = jax.random.PRNGKey(42)
-    key2 = jax.random.PRNGKey(43)
+    key1 = jax.random.key(42)
+    key2 = jax.random.key(43)
     coords = jnp.ones((10, 37, 3))
     noised1, _ = thermal_noise_fn(key1, coords, 300.0)
     noised2, _ = thermal_noise_fn(key2, coords, 300.0)
@@ -79,7 +79,7 @@ class TestThermalNoiseFn:
 
   def test_noise_distribution_statistics(self):
     """Noise should have correct standard deviation."""
-    key = jax.random.PRNGKey(42)
+    key = jax.random.key(42)
     # Use large sample for stats
     coords = jnp.zeros((1000, 37, 3))
     temperature = 300.0
@@ -96,7 +96,7 @@ class TestThermalNoiseFn:
     """Function should be jit-compilable."""
     # We don't need static_argnums as shapes/temp are traceable
     jitted_fn = jax.jit(thermal_noise_fn)
-    key = jax.random.PRNGKey(42)
+    key = jax.random.key(42)
     coords = jnp.ones((10, 37, 3))
 
     # Should not raise compilation error

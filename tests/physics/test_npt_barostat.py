@@ -90,7 +90,7 @@ def test_npt_compiles_and_runs() -> None:
   )
 
   apply_j = jax.jit(apply_s)
-  state = init_s(jax.random.PRNGKey(42), jnp.array(positions_a), mass=mass, box=box_vec)
+  state = init_s(jax.random.key(42), jnp.array(positions_a), mass=mass, box=box_vec)
 
   # Run a few steps
   for step in range(steps):
@@ -146,7 +146,7 @@ def test_npt_box_scaling_isotropic() -> None:
   )
 
   apply_j = jax.jit(apply_s)
-  state = init_s(jax.random.PRNGKey(42), jnp.array(positions_a), mass=mass, box=box_vec)
+  state = init_s(jax.random.key(42), jnp.array(positions_a), mass=mass, box=box_vec)
 
   for step in range(steps):
     old_state = state
@@ -211,7 +211,7 @@ def test_npt_pressure_sanity() -> None:
   )
 
   apply_j = jax.jit(apply_s)
-  state = init_s(jax.random.PRNGKey(42), jnp.array(positions_a), mass=mass, box=box_vec)
+  state = init_s(jax.random.key(42), jnp.array(positions_a), mass=mass, box=box_vec)
 
   pressures_bar: list[float] = []
 
@@ -287,7 +287,7 @@ def test_npt_dt_sweep(dt_fs: float) -> None:
   )
 
   apply_j = jax.jit(apply_s)
-  state = init_s(jax.random.PRNGKey(42), jnp.array(positions_a), mass=mass, box=box_vec)
+  state = init_s(jax.random.key(42), jnp.array(positions_a), mass=mass, box=box_vec)
 
   for step in range(steps):
     state = apply_j(state, box=state.box)
@@ -381,7 +381,7 @@ def test_npt_20ps_liquid_water() -> None:
   )
 
   apply_nvt_j = jax.jit(apply_nvt)
-  nvt_state = init_nvt(jax.random.PRNGKey(7), jnp.array(positions_a), mass=mass, box=box_vec)
+  nvt_state = init_nvt(jax.random.key(7), jnp.array(positions_a), mass=mass, box=box_vec)
 
   for _ in range(nvt_steps):
     nvt_state = apply_nvt_j(nvt_state, box=box_vec)

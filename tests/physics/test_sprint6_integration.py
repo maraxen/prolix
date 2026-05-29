@@ -7,11 +7,11 @@ from prolix.physics.system import PhysicsSystem, make_energy_fn_pure
 def test_tiled_parity():
     """Verify bit-parity between tile_size=1 and tile_size=64."""
     n_atoms = 32
-    positions = jax.random.uniform(jax.random.PRNGKey(42), (n_atoms, 3)) * 10.0
+    positions = jax.random.uniform(jax.random.key(42), (n_atoms, 3)) * 10.0
     box = jnp.array([15.0, 15.0, 15.0])
     
     sys_dict = {
-        "charges": jax.random.normal(jax.random.PRNGKey(0), (n_atoms,)),
+        "charges": jax.random.normal(jax.random.key(0), (n_atoms,)),
         "sigmas": jnp.full(n_atoms, 3.4),
         "epsilons": jnp.full(n_atoms, 0.2),
         "bonds": jnp.zeros((0, 2), dtype=jnp.int32),

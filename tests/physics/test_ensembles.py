@@ -58,7 +58,7 @@ def test_nve_energy_conservation():
   )  # Access jax_md.simulate as imported in module
   # Actually simulate.nve is jax_md.simulate.nve
 
-  key = jax.random.PRNGKey(0)
+  key = jax.random.key(0)
   state = init_fn(key, R_init, mass=1.0, kT=0.5)  # Initialize with some T
 
   E_initial = energy_fn(state.positions) + quantity.kinetic_energy(
@@ -87,7 +87,7 @@ def test_nvt_nose_hoover_temperature():
   displacement_fn, shift_fn = space.free()
   N = 64
   box_size = 10.0
-  R = jax.random.uniform(jax.random.PRNGKey(0), (N, 3)) * box_size
+  R = jax.random.uniform(jax.random.key(0), (N, 3)) * box_size
 
   # Simple harmonic trap to keep them bounded
   def energy_fn(R):
@@ -120,7 +120,7 @@ def test_brownian_execution():
   # Simple Execution Test for Brownian
   displacement_fn, shift_fn = space.free()
   N = 10
-  R = jax.random.uniform(jax.random.PRNGKey(0), (N, 3))
+  R = jax.random.uniform(jax.random.key(0), (N, 3))
 
   def energy_fn(R):
     return 0.5 * jnp.sum(R**2)

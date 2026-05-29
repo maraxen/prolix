@@ -303,7 +303,7 @@ def main():
 
         try:
             from prolix.batched_simulate import make_langevin_step_nl
-            key = jax.random.PRNGKey(42)
+            key = jax.random.key(42)
 
             for c in [10.0, 12.0, 20.0]:
                 nl, K = nls[c]

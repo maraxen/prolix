@@ -266,7 +266,7 @@ def run_replica_exchange(
       Final `ReplicaExchangeState`.
   """
   if key is None:
-    key = random.PRNGKey(int(time.time()))
+    key = random.key(int(time.time()))
 
   n_replicas = spec.n_replicas
   temps = temperature.generate_temperature_ladder(n_replicas, spec.min_temp, spec.max_temp)

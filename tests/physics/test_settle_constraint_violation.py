@@ -180,7 +180,7 @@ def test_settle_nvt_100ps_constraint_satisfaction() -> None:
     )
 
     apply_j = jax.jit(apply_s)
-    state = init_s(jax.random.PRNGKey(42), jnp.array(positions_a), mass=mass)
+    state = init_s(jax.random.key(42), jnp.array(positions_a), mass=mass)
 
     rmsds: list[float] = []
     max_deviation = 0.0
@@ -274,7 +274,7 @@ def test_settle_npt_10ps_constraint_satisfaction() -> None:
     )
 
     apply_j = jax.jit(apply_s)
-    state = init_s(jax.random.PRNGKey(42), jnp.array(positions_a), mass=mass, box=box_vec)
+    state = init_s(jax.random.key(42), jnp.array(positions_a), mass=mass, box=box_vec)
 
     rmsds: list[float] = []
     max_deviation = 0.0

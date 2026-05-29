@@ -71,7 +71,7 @@ def test_explicit_pbc_nve_short_run_finite():
     )
 
     init_fn, apply_fn = jmd_simulate.nve(energy_fn, shift_fn=shift_fn, dt=1e-3)
-    key = jax.random.PRNGKey(42)
+    key = jax.random.key(42)
     mass = jnp.ones(n, dtype=jnp.float64) * 12.0
     state = init_fn(key, positions, mass=mass, kT=0.5)
 
@@ -134,7 +134,7 @@ def test_explicit_pbc_nvt_mean_temperature_targets_spec():
   init_fn, apply_fn = jmd_simulate.nvt_langevin(
     energy_fn, shift_fn, dt=dt, kT=kT, gamma=gamma_reduced
   )
-  key = jax.random.PRNGKey(7)
+  key = jax.random.key(7)
   mass = jnp.ones(n, dtype=jnp.float64) * 12.0
   state = init_fn(key, positions, mass=mass)
 

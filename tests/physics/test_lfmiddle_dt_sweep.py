@@ -87,7 +87,7 @@ def _mean_rigid_t_langevin_after_burn(
   else:
     init_s, apply_s = settle.settle_langevin(**integrator_kw)
 
-  state = init_s(jax.random.PRNGKey(seed), jnp.array(positions_a), mass=mass)
+  state = init_s(jax.random.key(seed), jnp.array(positions_a), mass=mass)
   collect_temps = make_jitted_temperature_scan(
       apply_s, n_steps=steps, burn=burn, n_waters=n_waters
   )
@@ -376,7 +376,7 @@ class TestLFMiddleInvariants:
         project_ou_momentum_rigid=True, projection_site="post_o",
     )
 
-    state0 = init_s(jax.random.PRNGKey(42), jnp.array(positions_a), mass=mass)
+    state0 = init_s(jax.random.key(42), jnp.array(positions_a), mass=mass)
 
     n_steps = 20
     state_fwd = jax.lax.fori_loop(0, n_steps, lambda _, s: apply_s(s), state0)

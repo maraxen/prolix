@@ -409,7 +409,7 @@ class TestSETTLEIntegration:
       water_indices=water_indices,
     )
 
-    key = jax.random.PRNGKey(0)
+    key = jax.random.key(0)
     state = init_fn(key, R)
 
     # Run 1000 steps (Extended from 500)

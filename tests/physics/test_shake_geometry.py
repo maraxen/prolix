@@ -54,7 +54,7 @@ class TestSHAKEGeometry:
         constraints=(pairs, lengths)
     )
     
-    key = jax.random.PRNGKey(42)
+    key = jax.random.key(42)
     state = init_fn(key, positions)
     
     # Run 1000 steps

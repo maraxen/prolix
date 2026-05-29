@@ -7,7 +7,7 @@ from prolix.physics.step_system import step_sequences
 def test_modular_scr_barostat_smoke():
     """Verify that baoab_csvr_npt instantiates and runs without errors."""
     n_atoms = 10
-    positions = jax.random.uniform(jax.random.PRNGKey(0), (n_atoms, 3)) * 10.0
+    positions = jax.random.uniform(jax.random.key(0), (n_atoms, 3)) * 10.0
     box = jnp.array([20.0, 20.0, 20.0])
     mass = jnp.ones((n_atoms, 1))
     
@@ -37,7 +37,7 @@ def test_modular_scr_barostat_smoke():
         tau_barostat_akma=50.0, # Very fast relaxation
     )
     
-    state = init_fn(jax.random.PRNGKey(42), positions, box=box)
+    state = init_fn(jax.random.key(42), positions, box=box)
     
     # Run a few steps
     curr_state = state
@@ -81,7 +81,7 @@ def test_modular_npt_with_settle():
         target_pressure_bar=1.0,
     )
     
-    state = init_fn(jax.random.PRNGKey(42), positions, box=box)
+    state = init_fn(jax.random.key(42), positions, box=box)
     
     # Before scaling, check constraints
     def get_dist(p, i, j):

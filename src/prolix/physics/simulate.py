@@ -227,7 +227,7 @@ def run_thermalization(
 
   """
   if key is None:
-    key = jax.random.PRNGKey(0)
+    key = jax.random.key(0)
 
   kT = BOLTZMANN_KCAL * temperature
 
@@ -277,12 +277,12 @@ def run_nve(
       mass=mass,
       constraints=constraints,
     )
-    key = jax.random.PRNGKey(0)
+    key = jax.random.key(0)
     state = init_fn(key, initial_positions, kT=0.0)
   else:
     init_fn, apply_fn = simulate.nve(energy_fn, shift_fn=space.free()[1], dt=dt)
     kT = BOLTZMANN_KCAL * 300.0  # Default assumption if not passed
-    key = jax.random.PRNGKey(0)
+    key = jax.random.key(0)
     state = init_fn(key, initial_positions, mass=mass, kT=kT)
 
   @jax.jit
@@ -317,7 +317,7 @@ def run_nvt_nose_hoover(
     chain_steps=chain_steps,
   )
 
-  key = jax.random.PRNGKey(0)
+  key = jax.random.key(0)
   state = init_fn(key, initial_positions, mass=mass)
 
   @jax.jit
@@ -343,7 +343,7 @@ def run_brownian(
   # jax_md.simulate.brownian(energy_or_force, shift, dt, kT, gamma=0.1)
   init_fn, apply_fn = simulate.brownian(energy_fn, shift=space.free()[1], dt=dt, kT=kT, gamma=gamma)
 
-  key = jax.random.PRNGKey(0)
+  key = jax.random.key(0)
   state = init_fn(key, initial_positions)
 
   @jax.jit

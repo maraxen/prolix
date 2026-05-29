@@ -71,7 +71,7 @@ def test_proxide_settle_langevin_remove_linear_suppresses_total_momentum() -> No
     remove_linear_com_momentum=True,
   )
   apply_j = jax.jit(apply_s)
-  key = jax.random.PRNGKey(991)
+  key = jax.random.key(991)
   state = init_s(key, jnp.array(positions_a), mass=mass)
   burn = 800
   for _ in range(burn):
@@ -172,7 +172,7 @@ def test_openmm_proxide_short_window_mean_t_primary_profile(tmp_path: Path) -> N
     remove_linear_com_momentum=True,
   )
   apply_j = jax.jit(apply_s)
-  key = jax.random.PRNGKey(seed)
+  key = jax.random.key(seed)
   state = init_s(key, jnp.array(positions_a), mass=mass)
   temps_plx: list[float] = []
   p_ratios: list[float] = []

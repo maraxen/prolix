@@ -86,7 +86,7 @@ def test_settle_with_nhc_basic_step():
   ], dtype=jnp.float64)
 
   # Initialize state
-  state = nhc_init(jax.random.PRNGKey(602), positions, mass=mass)
+  state = nhc_init(jax.random.key(602), positions, mass=mass)
 
   # Verify initial state is finite
   assert jnp.all(jnp.isfinite(state.positions)), "Initial position has NaN"
@@ -141,7 +141,7 @@ def test_settle_with_nhc_jit_compatible():
       [4.761, 5.927, 5.0],
   ], dtype=jnp.float64)
 
-  state = nhc_init(jax.random.PRNGKey(602), positions, mass=mass)
+  state = nhc_init(jax.random.key(602), positions, mass=mass)
 
   # JIT-compile the apply function
   nhc_apply_jit = jax.jit(nhc_apply)

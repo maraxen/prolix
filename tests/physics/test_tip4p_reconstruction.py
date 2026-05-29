@@ -45,7 +45,7 @@ def test_tip4p_reconstruction():
         momentum=jnp.zeros_like(pos),
         force=jnp.zeros_like(pos),
         mass=jnp.ones((4, 1)),
-        rng=jax.random.PRNGKey(0)
+        rng=jax.random.key(0)
     )
     
     params = IntegratorParams(

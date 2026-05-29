@@ -288,8 +288,8 @@ def test_settle_batched_initialization(
     )
 
     # Initialize two systems with different RNG seeds
-    key1 = jax.random.PRNGKey(42)
-    key2 = jax.random.PRNGKey(99)
+    key1 = jax.random.key(42)
+    key2 = jax.random.key(99)
 
     state1 = init_fn(key1, positions, box=box_vec)
     state2 = init_fn(key2, positions, box=box_vec)
@@ -366,8 +366,8 @@ def test_settle_batched_constraint_geometry(
     )
 
     # Initialize two systems with different RNG seeds
-    key1 = jax.random.PRNGKey(42)
-    key2 = jax.random.PRNGKey(99)
+    key1 = jax.random.key(42)
+    key2 = jax.random.key(99)
 
     state1 = init_fn(key1, positions, box=box_vec)
     state2 = init_fn(key2, positions, box=box_vec)
@@ -475,7 +475,7 @@ def test_settle_batched_vs_unbatched(
     )
 
     # Initialize unbatched state
-    key = jax.random.PRNGKey(42)
+    key = jax.random.key(42)
     unbatched_state = init_fn(key, positions, box=box_vec)
 
     # Create single-element batch
@@ -552,8 +552,8 @@ def test_settle_batched_temperature_stability(
     )
 
     # Initialize two systems
-    key1 = jax.random.PRNGKey(42)
-    key2 = jax.random.PRNGKey(99)
+    key1 = jax.random.key(42)
+    key2 = jax.random.key(99)
 
     state1 = init_fn(key1, positions, box=box_vec)
     state2 = init_fn(key2, positions, box=box_vec)

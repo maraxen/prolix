@@ -59,7 +59,7 @@ def simple_lj_system():
 @pytest.fixture
 def key():
   """JAX PRNG key."""
-  return jax.random.PRNGKey(42)
+  return jax.random.key(42)
 
 
 # ========== FACTORY TESTS ==========

@@ -129,7 +129,7 @@ def test_cold_start_batch_initialization(
     """
     positions, mass, box, _, _ = _create_batched_water_system(n_systems, n_waters)
 
-    key = jax.random.PRNGKey(42)
+    key = jax.random.key(42)
     state = _create_cold_start_langevin_state(positions, mass, box, key)
 
     # Validate batched shapes
@@ -165,7 +165,7 @@ def test_cold_start_pattern_docstring_example() -> None:
             momentum=jnp.zeros_like(batch.positions),
             force=initial_forces,
             mass=batch.masses,
-            rng=jax.random.PRNGKey(0),
+            key=jax.random.key(0),
             cap_count=jnp.int32(0),
             warn_counts=None,  # auto-initialized by __post_init__
         )
@@ -181,7 +181,7 @@ def test_cold_start_pattern_docstring_example() -> None:
         momentum=jnp.zeros_like(positions),
         force=initial_forces,
         mass=masses,
-        rng=jax.random.PRNGKey(0),
+        key=jax.random.key(0),
         cap_count=jnp.int32(0),
         warn_counts=None,  # auto-initialized by __post_init__
     )
@@ -248,7 +248,7 @@ def test_cold_start_batch_2water_1ps(
     initial_forces = jnp.tile(initial_force_single[None, :, :], (n_systems, 1, 1))
 
     # Create cold-start state
-    key = jax.random.PRNGKey(42)
+    key = jax.random.key(42)
     state = LangevinState(
         positions=positions,
         momentum=jnp.zeros_like(positions),
@@ -315,7 +315,7 @@ def test_cold_start_batch_10water_50ps() -> None:
     initial_forces = jnp.tile(initial_force_single[None, :, :], (n_systems, 1, 1))
 
     # Create cold-start state (approved v1.0 pattern)
-    key = jax.random.PRNGKey(123)
+    key = jax.random.key(123)
     state = LangevinState(
         positions=positions,
         momentum=jnp.zeros_like(positions),

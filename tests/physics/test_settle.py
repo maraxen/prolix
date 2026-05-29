@@ -23,7 +23,7 @@ class TestSETTLEPositions:
     )
 
     # Slightly perturb positions (as if from MD step)
-    R_new = R_old + 0.05 * random.normal(random.PRNGKey(42), R_old.shape)
+    R_new = R_old + 0.05 * random.normal(random.key(42), R_old.shape)
 
     water_indices = jnp.array([[0, 1, 2]])
 
@@ -48,7 +48,7 @@ class TestSETTLEPositions:
   def test_multiple_waters(self):
     """Test SETTLE works on multiple water molecules."""
     n_waters = 10
-    key = random.PRNGKey(123)
+    key = random.key(123)
 
     # Generate random water positions
     R_old = []
@@ -160,7 +160,7 @@ class TestSETTLEVelocities:
     )
 
     # Random velocities
-    V = random.normal(random.PRNGKey(77), R.shape)
+    V = random.normal(random.key(77), R.shape)
 
     water_indices = jnp.array([[0, 1, 2]])
 
@@ -216,7 +216,7 @@ class TestSETTLEIntegrator:
       water_indices=water_indices,
     )
 
-    key = random.PRNGKey(42)
+    key = random.key(42)
     state = init_fn(key, R_init, kT=kT)
 
     # Run a few steps
@@ -260,7 +260,7 @@ class TestSETTLEIntegrator:
       water_indices=water_indices,
     )
 
-    key = random.PRNGKey(0)
+    key = random.key(0)
     state = init_fn(key, R_init)
 
     # Run 1000 steps

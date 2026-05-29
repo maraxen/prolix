@@ -301,7 +301,7 @@ def _total_energy_fn(
         )
 
         # RFF global Coulomb with threaded seed
-        rng_key = jax.random.PRNGKey(rff_seed)
+        rng_key = jax.random.key(rff_seed)
         pme_alpha_float = float(sys.pme_alpha)
         omega = rff_frequency_sample(
             alpha=pme_alpha_float,

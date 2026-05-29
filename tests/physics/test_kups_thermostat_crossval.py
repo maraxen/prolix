@@ -213,7 +213,7 @@ def _run_proxide_harmonic_baoab(
     Falls back to jax_md BAOAB when no water constraints are specified.
     """
     jax.config.update("jax_enable_x64", True)
-    key = jax.random.PRNGKey(seed)
+    key = jax.random.key(seed)
 
     # Convert units via kups_adapter
     dt_akma = kups_adapter.dt_fs_to_akma(dt_fs)
@@ -269,7 +269,7 @@ def _run_proxide_harmonic_csvr(
     Falls back to jax_md CSVR when no water constraints are specified.
     """
     jax.config.update("jax_enable_x64", True)
-    key = jax.random.PRNGKey(seed)
+    key = jax.random.key(seed)
 
     # Convert units via kups_adapter
     dt_akma = kups_adapter.dt_fs_to_akma(dt_fs)

@@ -7,7 +7,7 @@ from prolix.typing import IntegratorParams, EnergyParams
 
 def test_mc_barostat_basic():
     # Setup state
-    rng = jax.random.PRNGKey(0)
+    key = jax.random.key(0)
     pos = jnp.array([[0.0, 0.0, 0.0], [1.0, 1.0, 1.0]])
     box = jnp.array([10.0, 10.0, 10.0])
     

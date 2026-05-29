@@ -20,7 +20,7 @@ def test_energy_parity():
     params = EnergyParams(params={'k': k, 'x0': x0})
 
     # Test over 10 geometries
-    key = jax.random.PRNGKey(42)
+    key = jax.random.key(42)
     for _ in range(10):
         key, subkey = jax.random.split(key)
         positions = jax.random.normal(subkey, (10, 3))

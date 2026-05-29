@@ -11,7 +11,7 @@ def test_export_roundtrip():
     """Verify that energy functions can be exported, saved, and re-loaded as MLIR."""
     # 1. Setup a simple Argon system
     n_atoms = 8
-    positions = jax.random.uniform(jax.random.PRNGKey(42), (n_atoms, 3)) * 10.0
+    positions = jax.random.uniform(jax.random.key(42), (n_atoms, 3)) * 10.0
     box_vec = jnp.array([15.0, 15.0, 15.0])
     
     sys_dict = {
