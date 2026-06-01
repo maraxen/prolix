@@ -2,6 +2,27 @@
 
 Prolix is a JAX-based molecular dynamics engine for protein folding and dynamics.
 
+## CURRENT STATE
+
+last-edit: 2026-05-29
+
+ongoing-work: LFMiddle dt-sweep falsification (campaign 89c9a900). Running 895-water
+TIP3P liquid-box temperature-control sweep on engaging (SLURM job 14718802, fast 2 ps
+check for dt=0.5/1.0 fs). Five-bug cascade fixed today — see
+`.claude/projects/.../memory/project_lfmiddle_debug.md` for full list. Awaiting
+confirmation that 895-water mean T lands near 300 K before declaring the LFMiddle
+hypothesis testable.
+
+notes:
+- Tiling bug found in `src/prolix/physics/optimization.py`: `inner_tile_size` for the
+  exclusion buffer must (a) exceed total exclusion-pair count AND (b) be a multiple of
+  `tile_size`, because `tile_reduction` loops `range(n // tile_size)` and silently drops
+  the remainder. A non-bucketed value dropped 125 atoms at 895 waters → 10^62 K blowup.
+  Current fix rounds up to the next `tile_size` multiple. PROPER FIX (bucketing, so tiling
+  invariants always hold by construction) is on the backlog — see `.praxia/ideas.jsonl`.
+- Always invoke scripts via `uv run python` on the cluster; HOME and ORCD prolix checkouts
+  are the same inode (worktree), so a single rsync updates both.
+
 ## Testing & Validation
 
 For detailed testing instructions and CI-safe JSON report querying, see `.copilot/instructions.md`.

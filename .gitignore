@@ -51,3 +51,7 @@ data/downloads/
 
 # HP4 curated subset (regenerated from archives via fetch_ani1x_subset.py)
 data/ani1x_subset/
+
+# SLURM output logs and simulation replica data (generated, never commit)
+logs/
+tip3p_tightening/
