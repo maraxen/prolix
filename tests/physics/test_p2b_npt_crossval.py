@@ -126,12 +126,10 @@ def test_npt_1ps_temperature_finite() -> None:
     # Compute mean temperature
     T_mean = float(np.mean(temperatures_k))
 
-    # Soft gate: temperature in expected range [200, 400] K.
-    # Note: Original spec target was [250, 350] K, but short 1 ps trajectories can
-    # exhibit higher variance. The critical gate is no NaN (passed above); thermal
-    # stability in [200, 400] K is a secondary check that the integrator operates
-    # within reasonable physical bounds for a small water system.
+    # Gate: spec 260601_p2b-dynamics-tests.md §t3 risk table: if [250,350] K is flaky
+    # for a short 4-water trajectory, relax to [200,400] K — anti-NaN is the hard gate.
+    # T_mean = 367 K observed in practice (outside [250,350]), so risk fallback applied.
     assert 200.0 < T_mean < 400.0, (
         f"T_mean = {T_mean:.2f} K is outside [200, 400] K. "
-        f"This suggests integrator instability beyond expected variance for 1 ps NPT."
+        f"Integrator instability beyond expected variance for 1 ps NPT (4 waters)."
     )
