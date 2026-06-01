@@ -42,6 +42,7 @@
 - [260423_settle-integration-plan](plans/260423_settle-integration-plan.md)
 
 ## Handoffs
+- [260601_hp4-s71-campaign-close](handoffs/260601_hp4-s71-campaign-close.md) — Close hp4-s71 campaign: XLA Blackwell fix (1170×), espaloma gate inclusion, postmortem, next-session steps
 - [260528_sprint5-paper-gate-close](handoffs/260528_sprint5-paper-gate-close.md) — Sprint 5: §7.1 figure + B1 pre-reg + LFMiddle GO; cluster dispatch (campaign `89c9a900`); NPT xfail
 - [260527_p2b-sprint-handoff](handoffs/260527_p2b-sprint-handoff.md) — Sprint 3 P2b: nonbonded parity harness PASS (9/9 tests); exclusion double-counting fix; f7 PME deferred
 - [260526_p2a-1d-sprint-handoff](handoffs/260526_p2a-1d-sprint-handoff.md) — Sprint 2 outcome: P1a-1d landed clean; P2a impl broken on main with SMALL remediation tier (~1-2h)
