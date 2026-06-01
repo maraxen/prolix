@@ -53,7 +53,6 @@ assert abs(kups_adapter.EV_TO_KCAL_MOL - 23.060549) < 1e-6, "eV→kcal/mol conve
 # Test System Parameters
 # ============================================================================
 
-N_PARTICLES = 64  # Harmonic oscillator particles
 K_EV = 0.01  # Spring constant in eV/Å² (kUPs)
 K_KCAL = kups_adapter.spring_constant_ev_per_angstrom_sq_to_kcal_mol(K_EV)  # kcal/mol/Å² (proxide)
 M_AMU = 1.0  # Mass in amu (both engines)
@@ -64,7 +63,6 @@ GAMMA_PS = 10.0  # Langevin friction in ps⁻¹; chosen so τ≈100 fs to match 
 TAU_PS = 0.1  # CSVR time constant in ps
 N_EQUIL_STEPS = 40_000  # Equilibration steps (at dt=0.5fs: 40k*0.5fs = 20ps)
 N_SAMPLE_STEPS = 60_000  # Production steps (at dt=0.5fs: 60k*0.5fs = 30ps)
-DOF = 3 * N_PARTICLES  # Unconstrained DOF (no COM removal)
 
 # ============================================================================
 # kUPs Data Classes (Copied from /tmp/kups/test/md/test_integrators.py)
@@ -136,7 +134,7 @@ def run_simulation(integrator, state, key, n_equil, n_sample, extract_fn):
 
 
 def create_harmonic_system(
-    n_particles=10, k=1.0, m=1.0, kT=1.0, dt=0.01, tau=0.1, gamma=1.0, rng=None
+    n_particles=10, k=1.0, m=1.0, kT=1.0, dt=0.01, tau=0.1, gamma=1.0, key=None
 ):
     """Create harmonic oscillator system for testing (kUPs).
 
@@ -251,12 +249,13 @@ def _run_proxide_harmonic_baoab(
         state = apply_j(state)
 
     # Production: collect temperature each step
+    dof = 3 * n_particles
     temps = []
     for _ in range(n_sample):
         state = apply_j(state)
         # KE = sum(p_i^2 / (2*m_i)); T = 2*KE / (dof * kB)
         ke = float(jnp.sum(state.momentum**2 / (2 * mass[:, None])))
-        temps.append(2.0 * ke / (DOF * BOLTZMANN_KCAL))
+        temps.append(2.0 * ke / (dof * BOLTZMANN_KCAL))
 
     return np.mean(temps)
 
@@ -309,13 +308,24 @@ def _run_proxide_harmonic_csvr(
         state = apply_j(state)
 
     # Production: collect temperature
+    dof = 3 * n_particles
     temps = []
     for _ in range(n_sample):
         state = apply_j(state)
         ke = float(jnp.sum(state.momentum**2 / (2 * mass[:, None])))
-        temps.append(2.0 * ke / (DOF * BOLTZMANN_KCAL))
+        temps.append(2.0 * ke / (dof * BOLTZMANN_KCAL))
 
     return np.mean(temps)
+
+
+# ============================================================================
+# Parametrize Fixture for System Sizes
+# ============================================================================
+
+
+@pytest.fixture(params=[64, 100, 500, 2000], ids=lambda n: f"n{n}")
+def n_particles(request):
+    return request.param
 
 
 # ============================================================================
@@ -334,7 +344,7 @@ def _run_proxide_harmonic_csvr(
         ("CSVR", 1.0, 10.0),  # CSVR at dt>=1fs: allow ±8K bias; test consistency
     ],
 )
-def test_kups_proxide_temperature_crossval(integrator_name, dt_fs, T_tolerance_K):
+def test_kups_proxide_temperature_crossval(integrator_name, dt_fs, T_tolerance_K, n_particles):
     """Cross-validate proxide thermostats against kUPs on harmonic oscillator.
 
     Determines whether proxide's +8K CSVR temperature bias at dt>=1fs is a
@@ -345,20 +355,27 @@ def test_kups_proxide_temperature_crossval(integrator_name, dt_fs, T_tolerance_K
     """
     jax.config.update("jax_enable_x64", True)
 
+    # Skip slow tests with parametrized sizes >= 500 when not explicitly running slow tests
+    if n_particles >= 500:
+        pytest.skip("slow — run with -m slow")
+
+    # Compute DOF for this system size
+    dof = 3 * n_particles
+
     # Convert dt_fs to kUPs time units
     dt_kups = dt_fs * FEMTO_SECOND
 
     # Create kUPs system and run
     if integrator_name == "BAOAB":
         state, deriv, _ = create_harmonic_system(
-            n_particles=N_PARTICLES,
+            n_particles=n_particles,
             k=K_EV,
             m=M_AMU,
             kT=KT_EV,
             dt=dt_kups,
             gamma=GAMMA_PS * FEMTO_SECOND,
             tau=TAU_PS * FEMTO_SECOND,
-            rng=jax.random.PRNGKey(42),
+            key=jax.random.PRNGKey(42),
         )
         integrator = make_baoab_langevin_step(
             particles=SimpleState.particles,
@@ -368,14 +385,14 @@ def test_kups_proxide_temperature_crossval(integrator_name, dt_fs, T_tolerance_K
         )
     elif integrator_name == "CSVR":
         state, deriv, _ = create_harmonic_system(
-            n_particles=N_PARTICLES,
+            n_particles=n_particles,
             k=K_EV,
             m=M_AMU,
             kT=KT_EV,
             dt=dt_kups,
             tau=TAU_PS * FEMTO_SECOND,
             gamma=GAMMA_PS * FEMTO_SECOND,
-            rng=jax.random.PRNGKey(42),
+            key=jax.random.PRNGKey(42),
         )
         integrator = make_csvr_step(
             particles=SimpleState.particles,
@@ -393,7 +410,7 @@ def test_kups_proxide_temperature_crossval(integrator_name, dt_fs, T_tolerance_K
         jax.random.PRNGKey(42),
         n_equil=N_EQUIL_STEPS,
         n_sample=N_SAMPLE_STEPS,
-        extract_fn=lambda s: compute_temperature(s, DOF),
+        extract_fn=lambda s: compute_temperature(s, dof),
     )
 
     # Convert kUPs temperature (eV) to Kelvin
@@ -402,7 +419,7 @@ def test_kups_proxide_temperature_crossval(integrator_name, dt_fs, T_tolerance_K
     # Run proxide equivalent
     if integrator_name == "BAOAB":
         T_proxide_K = _run_proxide_harmonic_baoab(
-            n_particles=N_PARTICLES,
+            n_particles=n_particles,
             k_kcal=K_KCAL,
             m_amu=M_AMU,
             kT_kcal=KT_KCAL,
@@ -414,7 +431,7 @@ def test_kups_proxide_temperature_crossval(integrator_name, dt_fs, T_tolerance_K
         )
     elif integrator_name == "CSVR":
         T_proxide_K = _run_proxide_harmonic_csvr(
-            n_particles=N_PARTICLES,
+            n_particles=n_particles,
             k_kcal=K_KCAL,
             m_amu=M_AMU,
             kT_kcal=KT_KCAL,
