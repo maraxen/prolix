@@ -47,6 +47,14 @@ export JAX_PLATFORMS="${JAX_PLATFORMS:-cuda}"
 export JAX_ENABLE_X64="${JAX_ENABLE_X64:-1}"
 export XLA_PYTHON_CLIENT_PREALLOCATE="${XLA_PYTHON_CLIENT_PREALLOCATE:-false}"
 
+# JAX Blackwell workaround — XLA autotuning hangs on SM120 (jaxlib 0.10.0, NVIDIA JAX 25.04)
+# See ~/.claude/rules/CLUSTER.md §6 and praxia lesson #41.
+_NODE="${SLURM_JOB_NODELIST:-$(hostname -s)}"
+if [[ "${_NODE}" == *node4007* ]] || [[ "${_NODE}" == *node4008* ]]; then
+    export XLA_FLAGS="${XLA_FLAGS:+${XLA_FLAGS} }--xla_gpu_shard_autotuning=false"
+    echo "Blackwell workaround active: XLA_FLAGS=${XLA_FLAGS}"
+fi
+
 source scripts/slurm/_bth_env.sh
 
 RESULTS_DIR="${PROLIX_ROOT}/outputs/results/lfmiddle_dt_sweep"
