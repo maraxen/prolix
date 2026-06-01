@@ -4,14 +4,13 @@ Prolix is a JAX-based molecular dynamics engine for protein folding and dynamics
 
 ## CURRENT STATE
 
-last-edit: 2026-05-29
+last-edit: 2026-06-01
 
-ongoing-work: LFMiddle dt-sweep falsification (campaign 89c9a900). Running 895-water
-TIP3P liquid-box temperature-control sweep on engaging (SLURM job 14718802, fast 2 ps
-check for dt=0.5/1.0 fs). Five-bug cascade fixed today — see
-`.claude/projects/.../memory/project_lfmiddle_debug.md` for full list. Awaiting
-confirmation that 895-water mean T lands near 300 K before declaring the LFMiddle
-hypothesis testable.
+ongoing-work: P1a MolecularBundle (bucketed JIT boundary). NPT KE init bug resolved
+(settle.py:1944 `/mu` → `*mu`, 2026-06-01, commit b6e5bb9). LFMiddle campaign 89c9a900
+concluded FALSIFIED (2026-06-01) — 46 runs, 0 passes, all dt values; see
+v1.1_next_steps.md. Phase 5 (constraint-aware thermostat) is now P1 candidate for
+lifting the dt ≤ 0.5 fs constraint.
 
 notes:
 - Tiling bug found in `src/prolix/physics/optimization.py`: `inner_tile_size` for the
@@ -178,7 +177,7 @@ equilibration, use `batched_equilibrate_nl`.
 ### Known Limitations (v1.0 / v1.1)
 
 1. **NVT timestep cap**: dt ≤ 0.5 fs (rigid body + thermostat feedback coupling)
-2. **NPT long-trajectory divergence**: Temperature runaway (→ 10^115 K) beyond ~10 ps due to CSVR + rigid-water KE coupling. Use NVT for longer production runs or wait for Sprint 11 fix. See `tests/physics/test_npt_barostat.py::test_npt_20ps_liquid_water` (marked xfail).
+2. **NPT long-trajectory divergence**: Temperature runaway (→ 10^115 K) beyond ~10 ps due to CSVR + rigid-water KE coupling. Use NVT for longer production runs. *KE init spike (T≈5000 K at step 0) fixed 2026-06-01: `settle.py:1944` `/ mu` → `* mu` (Bernetti-Bussi sign correction); `test_npt_20ps_liquid_water` xfail removed (commit b6e5bb9).* Long-trajectory divergence root cause (CSVR+SETTLE decoupling) addressed in Phase 6.
 3. **Batched SETTLE constraints**: `make_integrator(..., water_indices=...)` is not supported in v1.0. For batched simulations with SETTLE-constrained water, use `settle.settle_langevin` directly and wrap in `jax.vmap` (see v1.1 roadmap for full modular support).
 
 ### Future Improvements (v2.0+)
@@ -251,18 +250,17 @@ A constraint-aware thermostat that only couples to unconstrained DOF could elimi
 
 ## v1.1 Roadmap (Deferred Features)
 
-### Phase 3: LFMiddle Optimization & dt-Sweep Hypothesis
+### Phase 3: LFMiddle Optimization & dt-Sweep Hypothesis — ~~FALSIFIED~~ (2026-06-01)
 
-**Objective**: Test whether O-step splitting (Leimkuhler-Matthews discretization) reduces SETTLE+thermostat coupling
+**Result**: Hypothesis closed. Campaign 89c9a900 (46 runs, all dt ∈ {0.25, 0.5, 1.0} fs,
+both lfmiddle and baoab control, system sizes 2–895 waters) produced 0 passes. Mean T
+ranged from 13,818 K (dt=0.25) to 3.35×10⁵⁷ K (dt=1.0). LFMiddle O-step splitting does
+not resolve SETTLE+thermostat coupling. The dt ≤ 0.5 fs constraint stands. **Phase 5
+(constraint-aware thermostat) is the only known viable path to lifting it.**
 
-**Deliverables**: 
-- Implement force-step marker in step_registry (enable mid-step force recompute)
-- Add LFMiddle_Step and register lfmiddle_langevin sequence
-- Hypothesis test: dt-sweep at 0.25, 0.5, 1.0 fs
-
-**Rationale for deferral**: LFMiddle requires architectural changes (force-step refactor) not critical for v1.0 modular framework; hypothesis is exploratory, not contractual
-
-**Estimated effort**: 2–3 days
+*Note: small-system runs (n=2,64) were also confounded by the open tiling/exclusion-buffer
+bug (backlog #746), making those results doubly unreliable. The 895-water production runs
+show genuine thermal runaway independent of the tiling bug.*
 
 ### Phase 4 (Extended): Large-Scale Batched SETTLE Validation
 
@@ -277,15 +275,17 @@ A constraint-aware thermostat that only couples to unconstrained DOF could elimi
 
 **Estimated effort**: 2–3 days
 
-### Phase 5 (New): Constraint-Aware Thermostat
+### Phase 5 (New): Constraint-Aware Thermostat — **P1 candidate (promoted 2026-06-01)**
 
 **Objective**: Fix dt ≤ 0.5 fs limitation via constraint-aware thermostat that only couples to unconstrained DOF
+
+**Rationale for promotion**: LFMiddle (Phase 3) falsified on 2026-06-01. Phase 5 is now
+the *only known path* to lifting the dt constraint. Paper critical path depends on it
+starting no later than after P1a MolecularBundle.
 
 **Deliverables**: 
 - Redesigned Langevin coupling (per-DOF vs global)
 - Validation: dt ≥ 1.0 fs without divergence
-
-**Rationale**: Requires integrator-thermostat redesign; beyond scope of Phase 2 modularization
 
 **Estimated effort**: 4–6 days
 
@@ -332,15 +332,15 @@ None. New APIs are additive.
 
 ### Known Limitations
 
-1. dt ≤ 0.5 fs for NVT (SETTLE+Langevin coupling; workaround: use smaller dt)
-2. NPT unstable beyond ~10 ps (use NVT for longer production runs)
+1. dt ≤ 0.5 fs for NVT (SETTLE+Langevin coupling; workaround: use smaller dt). LFMiddle hypothesis falsified (campaign 89c9a900, 2026-06-01). Phase 5 is the only known path to lifting this.
+2. NPT long-trajectory divergence beyond ~10 ps (use NVT for production). *KE init spike fixed (commit b6e5bb9, 2026-06-01).*
 3. Batched SETTLE validated on small systems (4 waters, 100 steps); large-scale testing in v1.1
 
 ### v1.1 Priorities
 
-- LFMiddle hypothesis test (may enable dt ≥ 1.0 fs)
+- **Phase 5: Constraint-aware thermostat** (only remaining path to dt ≥ 1.0 fs; P1 after P1a)
 - Large-scale SETTLE batching validation
-- Constraint-aware thermostat (long-term fix for dt limit)
+- ~~LFMiddle hypothesis test~~ (falsified 2026-06-01)
 
 ## Experiment Tracking (bathos)
 
