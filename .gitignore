@@ -58,3 +58,6 @@ tip3p_tightening/
 
 # Root-level analysis output dir (generated; canonical path is outputs/analysis/)
 analysis/
+
+# fastembed model cache (downloaded at runtime, never commit — large blobs)
+.fastembed_cache/
