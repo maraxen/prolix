@@ -63,8 +63,11 @@ def test_nvt_216water_temperature_stability() -> None:
     gamma_ps = 1.0  # friction coefficient (ps^-1)
     gamma_reduced = float(gamma_ps) * float(AKMA_TIME_UNIT_FS) * 1e-3
 
-    # Load TIP3P forcefield parameters for pure water
-    sys_dict = _proxide_params_pure_water(n_waters)
+    # Load TIP3P forcefield parameters for pure water.
+    # Drop the dense N×N exclusion_mask — make_energy_fn uses excl_indices (sparse) not the
+    # dense mask. At 895 waters, building the 2685×2685 mask takes ~5-9 min (wasted).
+    # Exclusion correctness is not tested here; temperature stability is the gate.
+    sys_dict = {k: v for k, v in _proxide_params_pure_water(n_waters).items() if k != "exclusion_mask"}
 
     # Set up periodic space and energy function
     displacement_fn, shift_fn = pbc.create_periodic_space(box_vec)
