@@ -42,6 +42,7 @@
 - [260423_settle-integration-plan](plans/260423_settle-integration-plan.md)
 
 ## Handoffs
+- [260601_p0-parallel-close](handoffs/260601_p0-parallel-close.md) — P0 done: LFMiddle FALSIFIED (89c9a900), NPT KE fix landed (b6e5bb9); P1a MolecularBundle next
 - [260601_s71-close-complete](handoffs/260601_s71-close-complete.md) — §7.1 campaign edbd0b84 concluded (pass, all 6 hw); figure regenerated; gate updated; LFMiddle results pending analysis
 - [260601_hp4-s71-campaign-close](handoffs/260601_hp4-s71-campaign-close.md) — Close hp4-s71 campaign: XLA Blackwell fix (1170×), espaloma gate inclusion, postmortem, next-session steps
 - [260528_sprint5-paper-gate-close](handoffs/260528_sprint5-paper-gate-close.md) — Sprint 5: §7.1 figure + B1 pre-reg + LFMiddle GO; cluster dispatch (campaign `89c9a900`); NPT xfail
