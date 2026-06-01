@@ -693,3 +693,18 @@ def urey_bradley_forces_analytical(
     return bond_forces_analytical(
         positions, ub_indices, ub_params, displacement_fn, ub_mask
     )
+
+
+def bond_forces(
+    positions: "Array",
+    bond_indices: "Array",
+    bond_params: "Array",
+    bond_mask: "Array",
+    displacement_fn,
+) -> "Array":
+    """Public API: harmonic bond forces with (positions, idx, params, mask, disp_fn) signature.
+
+    Thin adapter over bond_forces_analytical with mask before displacement_fn.
+    This is the signature used by energy_with_analytical_shim callers.
+    """
+    return bond_forces_analytical(positions, bond_indices, bond_params, displacement_fn, bond_mask)
