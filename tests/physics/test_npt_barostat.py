@@ -306,14 +306,6 @@ def test_npt_dt_sweep(dt_fs: float) -> None:
 
 
 @pytest.mark.slow
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "NPT rigid-water T remains >>300K after Sprint 14 /mu scaling and warm handoff "
-        "(local probe: cold init ~260K then step-1 spike ~7e3K). CSVR+SETTLE+KE coupling; "
-        "see scripts/debug/npt_step0_diagnostic.py and .praxia/docs/npt_ke_bug_diagnosis.md."
-    ),
-)
 def test_npt_20ps_liquid_water() -> None:
   """Two-phase NVT→NPT protocol for 64 TIP3P waters over 20 ps at liquid density.
 

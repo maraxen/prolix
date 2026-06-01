@@ -1940,8 +1940,8 @@ def settle_csvr_npt(
     mu_max = 1.0 / mu_min
     mu = jnp.clip(mu, mu_min, mu_max)
 
-    # SCR isotropic scaling: momenta inverse-scale with mu (Sprint 14; Bernetti-Bussi convention).
-    momentum = momentum / mu
+    # SCR isotropic scaling: momenta scale with mu per Bernetti-Bussi 2020 / Parrinello-Rahman: p' = mu * p consistent with r' = mu * r
+    momentum = momentum * mu
 
     # Scale box
     new_box = pbc_module.isotropic_box_scale(_box, mu)
@@ -1982,7 +1982,7 @@ def settle_csvr_npt(
     if water_indices is not None and water_indices.shape[0] > 0:
       momentum = _langevin_settle_vel(
         momentum,
-        positions_old,
+        position,
         position,
         state.mass,
         water_indices,
