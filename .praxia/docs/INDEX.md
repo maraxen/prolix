@@ -53,6 +53,8 @@
 - [260501_kups-decouple-cluster-smoke](handoffs/260501_kups-decouple-cluster-smoke.md)
 
 ## Specs
+- [260601_p2b-dynamics-tests](specs/260601_p2b-dynamics-tests.md) — P2b remaining 5 tasks: NVE/NVT/NPT/shim/kUPS cross-validation (fixer-executable, t1–t5)
+- [260601_p2b-crossval-harness](specs/260601_p2b-crossval-harness.md) — P2b nonbonded parity leg (f1–f7, already implemented); scope + forward pointers
 - [260526_p2a-openmm-parity-bonded](specs/260526_p2a-openmm-parity-bonded.md) — Fixer-executable spec with task decomposition and gates
 - [260526_p1a-1d-bonded-analytical-forces](specs/260526_p1a-1d-bonded-analytical-forces.md) — Fixer-executable spec for 5 bonded analytical force functions
 - [260423_v030-phase2-validation-spec](specs/260423_v030-phase2-validation-spec.md)
