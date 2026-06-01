@@ -152,8 +152,20 @@ ssh engaging 'cd ~/projects/prolix && export XLA_FLAGS="--xla_gpu_shard_autotuni
   scripts/slurm/bench_external_baseline.slurm'
 """
 slurm_job_id = "15294138"
-status = "submitted — awaiting result"
-blocks = ["campaign-conclude"]
+status = "done"
+result_per_mol_step_seconds = 8.18e-07  # vs original 9.56e-04 — 1170x improvement
+result_compile_seconds = 2.29
+conclusion = """
+XLA autotuning was the entire cause of the Blackwell anomaly. With
+XLA_FLAGS=--xla_gpu_shard_autotuning=false and n_warmup=3, prolix on Blackwell
+measures 8.18e-07 s/mol-step — consistent with H200 (1.70e-06) and L40S (1.55e-06),
+and physically coherent (Blackwell is a newer generation). Prolix is now 228x faster
+than espaloma on Blackwell. The apparent espaloma 5x win was entirely the autotuning hang.
+
+The fix (XLA_FLAGS=--xla_gpu_shard_autotuning=false) should be added to the prolix
+bench slurm script as a permanent default for Blackwell nodes.
+"""
+blocks = ["campaign-conclude", "slurm-script-fix"]
 
 [[action_items.item]]
 id = "update-campaign-design-gate"
