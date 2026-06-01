@@ -58,6 +58,17 @@
 - [260423_v030-phase2-validation-spec](specs/260423_v030-phase2-validation-spec.md)
 - [260521_bundle-port-spec](specs/260521_bundle-port-spec.md)
 
+## Handoffs
+- [260601_p1a-close](handoffs/260601_p1a-close.md) — P1a MolecularBundle closed + NPT confirmed; next: P2b cross-val harness or Phase 5 thermostat
+- [260601_p0-parallel-close](handoffs/260601_p0-parallel-close.md) — P0 closed: LFMiddle FALSIFIED, NPT KE fix confirmed (b6e5bb9)
+- [260601_s71-close-complete](handoffs/260601_s71-close-complete.md) — S71 campaign close; LFMiddle next
+- [260601_hp4-s71-campaign-close](handoffs/260601_hp4-s71-campaign-close.md) — HP4 §7.1 campaign close
+- [260528_sprint5-paper-gate-close](handoffs/260528_sprint5-paper-gate-close.md) — Sprint 5 paper gate close
+- [260527_p2b-sprint-handoff](handoffs/260527_p2b-sprint-handoff.md) — P2b sprint handoff
+- [260526_p2a-1d-sprint-handoff](handoffs/260526_p2a-1d-sprint-handoff.md) — P2a-1d sprint handoff
+- [260501_kups-decouple-cluster-smoke](handoffs/260501_kups-decouple-cluster-smoke.md) — kUPS decouple + cluster smoke
+- [260423_oracle-critique-handoff-260417](handoffs/260423_oracle-critique-handoff-260417.md) — oracle critique handoff
+
 ## Audits
 - [260526_p2a-bonded-field-audit](audits/260526_p2a-bonded-field-audit.md) — PhysicsSystem field-access audit for bonded energy path; extended for P2b nonbonded fields (260527)
 
