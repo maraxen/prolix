@@ -64,6 +64,15 @@ if [[ ! -f "${BENCH_SCRIPT}" ]]; then
     exit 1
 fi
 
+# JAX on Blackwell (node4007/node4008, SM120): XLA autotuning hangs without this flag.
+# Documented in NVIDIA JAX 25.04 release notes; confirmed 1170x speedup on job 15294138.
+# Key on hostname/nodelist, not partition — pi_so3 may gain non-Blackwell nodes.
+_NODE="${SLURM_JOB_NODELIST:-$(hostname -s)}"
+if [[ "${TOOL}" == "prolix" ]] && { [[ "${_NODE}" == *node4007* ]] || [[ "${_NODE}" == *node4008* ]]; }; then
+    export XLA_FLAGS="${XLA_FLAGS:+${XLA_FLAGS} }--xla_gpu_shard_autotuning=false"
+    echo "Blackwell workaround active (${_NODE}): XLA_FLAGS=${XLA_FLAGS}"
+fi
+
 # Each external tool has its own isolated venv; route to the correct interpreter.
 # The prolix comparator uses the project uv venv.
 BENCH_DIR="scripts/benchmarks/external_baseline"

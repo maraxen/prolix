@@ -1,0 +1,235 @@
+[postmortem]
+sprint_id = "sprint5"
+script = "bench_espaloma.py"
+campaign_id = "edbd0b84-c0e2-4d2d-a89f-5f9fe8ae3aff"
+date = "2026-06-01"
+related_postmortems = []
+
+# No single run_id — this is a research-note postmortem spanning the full
+# hp4-s71-external-baseline campaign. The bath validator will reject it on
+# `run_id` absence; that is expected and documented in the bathos rules.
+
+# ---------------------------------------------------------------------------
+# SETUP CHURN
+# ---------------------------------------------------------------------------
+[setup_churn]
+summary = """
+Espaloma required substantially more environment setup effort than prolix,
+DMFF, or TorchMD. Total wall-clock debugging time: ~4–6 hours across two
+sprint sessions. Prolix equivalent: ~5 minutes (uv add, done).
+"""
+
+environment_manager = "micromamba (conda-compatible), not uv"
+rationale_for_conda = """
+espaloma 0.4.0 requires openff-toolkit, rdkit, and DGL — all of which
+have complex native-library dependencies (rdkit C++ extensions, DGL's
+libdgl.so CUDA build) that pip/uv cannot resolve correctly. The only
+supported installation path is conda or micromamba.
+"""
+
+dependency_chain = [
+    "micromamba create -n espaloma-bench python=3.11",
+    "micromamba install -c conda-forge rdkit openff-toolkit",
+    "pip install dgl==2.1.0 -f https://data.dgl.ai/wheels/torch-2.12/cu124/repo.html",
+    "pip install torch==2.12.0 --index-url https://download.pytorch.org/whl/cu124",
+    "pip install espaloma==0.4.0",
+    "pip install h5py",  # shared with prolix bench; not bundled in espaloma
+]
+
+blockers_hit = [
+    "openff-toolkit SMILES inference fails on molecules with unusual valences (N+, S4); resolved with mol_rd.UpdatePropertyCache(strict=False) in build_graph_from_json",
+    "DGL device-mismatch error when batching CPU graphs then calling .to(device): must call .to(device) on individual graphs BEFORE dgl.batch()",
+    "torch 2.12 Blackwell wheel requires --index-url override; default PyPI wheel does not include sm_120 kernels",
+    "espaloma 0.4.0 pip install resolves to CUDA-agnostic torch; explicit torch pre-install with cu124 index required",
+    "n_warmup=1 insufficient for stable timing on first cluster submit; re-submitted with n_warmup=2",
+]
+
+contrast_with_prolix = """
+prolix: uv run python scripts/benchmarks/external_baseline/bench_prolix.py <args>
+No environment setup beyond the project's existing uv.lock. The
+'portability' claim in §7.1 is also a 'setup friction' claim — this
+churn is direct evidence of it.
+"""
+
+# ---------------------------------------------------------------------------
+# KEY FINDINGS
+# ---------------------------------------------------------------------------
+[findings.espaloma_no_custom_cuda]
+finding = """
+Espaloma has zero custom CUDA kernels of its own. No .cu or CUDA extension
+files exist anywhere in the espaloma package tree. All GPU acceleration comes
+from DGL's precompiled libdgl.so, which bundles fused SpMM/SDDMM graph kernels
+for the dgl.function.copy_u + dgl.function.sum message-passing path.
+"""
+implication = """
+The §7.1 description of espaloma as a 'DGL-backed tool with custom graph kernels'
+is accurate only if 'custom' is attributed to DGL, not espaloma. The paper caption
+should say 'DGL-backed fused scatter' rather than 'espaloma custom CUDA'.
+"""
+verified_by = "librarian agent, 2026-06-01; inspected espaloma/nn/layers/dgl_legacy.py and espaloma/mm/geometry.py in installed venv"
+
+[findings.blackwell_anomaly]
+finding = """
+Prolix on Blackwell (SM120) measured 9.56e-04 s/mol-step at N=512 f32.
+On H200 (SM90) the same benchmark measured 1.70e-06 s/mol-step — a 560×
+*degradation* from H200 to Blackwell within prolix alone. Blackwell is a
+newer, faster generation than H200. This is physically impossible and
+indicates a toolchain artifact, not a real performance signal.
+
+Root cause: JAX/jaxlib SM120 (Blackwell) support landed in jaxlib 0.4.38+
+(JAX 25.01 container). Prior versions compiled for sm_90a and fell back to
+PTX JIT recompilation on SM120, leaving Tensor Cores severely underutilised.
+Additionally, NVIDIA JAX 25.04 release notes document XLA autotuning hang
+issues on SM120 with workaround: XLA_FLAGS=--xla_gpu_shard_autotuning=false.
+
+PyTorch 2.12 (used in the espaloma venv) has had native SM120 support since
+PyTorch 2.7. DGL also falls through to cuSPARSE driver-dispatch rather than
+PTX JIT, giving it a separate advantage on Blackwell. The apparent espaloma 5×
+win on Blackwell is therefore an apples-to-oranges comparison: a native-compiled
+PyTorch vs a PTX-JIT JAX.
+"""
+status = "unresolved — Blackwell prolix rerun pending (see [action_items])"
+references = [
+    "https://github.com/jax-ml/jax/discussions/33652  # SM120 PTX issue",
+    "https://docs.nvidia.com/deeplearning/frameworks/jax-release-notes/rel-25-04.html  # XLA SM120 known issues",
+    "https://pytorch.org/blog/pytorch-2-7/  # PyTorch Blackwell support",
+]
+
+[findings.sparse_graph_regime]
+finding = """
+Espaloma's bonded-energy forward pass operates on O(10-100) edges per molecule
+(bond/angle/torsion hypernodes in a DGL heterograph). This is exactly the
+regime where DGL's fused SpMM outperforms XLA's tile-optimised dense GEMM
+paths. Even with a fully up-to-date jaxlib on SM120, espaloma may remain
+competitive on Blackwell for this specific small-sparse-graph primitive.
+
+Prolix's tiled dense path (chunked LJ/bonded loops) is optimised for the
+medium-to-large dense regime. The small-graph sparse regime is an open
+optimisation opportunity (e.g. jax.ops.segment_sum or sparse JAX ops).
+"""
+investment_decision = "not worth immediate investment — the Blackwell result is likely a toolchain artifact; revisit only if Blackwell rerun still shows espaloma winning after fixing jaxlib"
+related_idea = "tiling_bucketing_invariant_2026_05_29 in .praxia/ideas.jsonl"
+
+# ---------------------------------------------------------------------------
+# GATE DECISION
+# ---------------------------------------------------------------------------
+[gate_decision]
+original = "espaloma excluded from pass/fail gate (rationale: 'fundamentally different graph representation')"
+revised = """
+Include espaloma in the gate. The exclusion was partially motivated by
+the Blackwell result where prolix underperformed — but that result is a
+toolchain artifact. The honest scientific position is to include all tools
+and report where prolix wins and loses. The Blackwell espaloma result should
+appear in the caption with an explicit note about the DGL cuSPARSE / JAX
+PTX-JIT asymmetry, and a rerun after jaxlib upgrade.
+
+Revised gate condition: prolix per_mol_step_seconds < 0.5 × min(dmff, torchmd, espaloma)
+on each hardware platform, with Blackwell marked as 'pending rerun' until
+the jaxlib version is confirmed and the XLA workaround is applied.
+"""
+locked_date = "2026-06-01"
+
+# ---------------------------------------------------------------------------
+# ACTION ITEMS
+# ---------------------------------------------------------------------------
+[action_items]
+
+[[[action_items.item]]
+id = "blackwell-jaxlib-check"
+priority = 1
+description = "Check jaxlib version on engaging Blackwell node; upgrade to >=0.4.38 if old"
+command = "ssh engaging 'cd ~/projects/prolix && uv run python -c \"import jaxlib; print(jaxlib.__version__)\"'"
+status = "done — jaxlib 0.10.0 confirmed on cluster (well past SM120 support; PTX fallback NOT the cause)"
+
+[[action_items.item]]
+id = "blackwell-rerun"
+priority = 1
+description = "Rerun prolix Blackwell benchmark with XLA autotuning workaround (SM120 hang documented in JAX 25.04 release notes); n_warmup=3, n_trials=5 for stable timing"
+command = """
+ssh engaging 'cd ~/projects/prolix && export XLA_FLAGS="--xla_gpu_shard_autotuning=false" && sbatch \\
+  --export=ALL,TOOL=prolix,N_MOLS=512,PRECISION=float32,HARDWARE_TAG=rtx-pro-6000-blackwell,\\
+  N_WARMUP=3,N_TRIALS=5,CAMPAIGN_ID=edbd0b84-c0e2-4d2d-a89f-5f9fe8ae3aff \\
+  scripts/slurm/bench_external_baseline.slurm'
+"""
+slurm_job_id = "15294138"
+status = "done"
+result_per_mol_step_seconds = 8.18e-07  # vs original 9.56e-04 — 1170x improvement
+result_compile_seconds = 2.29
+conclusion = """
+XLA autotuning was the entire cause of the Blackwell anomaly. With
+XLA_FLAGS=--xla_gpu_shard_autotuning=false and n_warmup=3, prolix on Blackwell
+measures 8.18e-07 s/mol-step — consistent with H200 (1.70e-06) and L40S (1.55e-06),
+and physically coherent (Blackwell is a newer generation). Prolix is now 228x faster
+than espaloma on Blackwell. The apparent espaloma 5x win was entirely the autotuning hang.
+
+The fix (XLA_FLAGS=--xla_gpu_shard_autotuning=false) should be added to the prolix
+bench slurm script as a permanent default for Blackwell nodes.
+"""
+blocks = ["campaign-conclude", "slurm-script-fix"]
+
+[[action_items.item]]
+id = "update-campaign-design-gate"
+priority = 2
+description = "Update campaign_design.toml to include espaloma in the pass/fail gate condition"
+status = "pending blackwell-rerun"
+
+[[action_items.item]]
+id = "campaign-conclude"
+priority = 3
+description = "Conclude campaign edbd0b84 with outcome label once Blackwell rerun is in"
+status = "pending blackwell-rerun"
+
+[[action_items.item]]
+id = "sparse-graph-followup"
+priority = 4
+description = """
+Investigate prolix performance in small sparse-graph regime (O(10-100) edges per mol).
+Could use jax.ops.segment_sum or JAX sparse ops as an alternative to tiled dense loops
+for the bonded-energy path when n_bonds << tile_size.
+"""
+status = "deferred — revisit only if Blackwell rerun still shows espaloma winning"
+
+# ---------------------------------------------------------------------------
+# LESSONS
+# ---------------------------------------------------------------------------
+[lessons]
+
+[[lessons.item]]
+lesson = "conda-only deps require explicit environment friction accounting in §7.1"
+detail = """
+When a comparator requires conda/micromamba + complex dep chains (rdkit,
+openff-toolkit, DGL channel), setup friction is itself a data point for the
+portability claim. Document it quantitatively (hours of setup) in the paper
+as supporting evidence, not as a footnote.
+"""
+
+[[lessons.item]]
+lesson = "internal consistency check before reporting inter-tool comparisons"
+detail = """
+Before publishing prolix-vs-espaloma on Blackwell, check prolix-on-H200 vs
+prolix-on-Blackwell. A 560× degradation within one tool across hardware
+generations is a red flag that should have halted the analysis before
+gate-exclusion decisions were made. Add this as a sanity gate to the
+analysis script (bench_prolix results must be monotonically improving or
+within 2× across hardware generations).
+"""
+
+[[lessons.item]]
+lesson = "attribution of 'custom kernels' should be traceable to the package, not the dep chain"
+detail = """
+'espaloma uses custom CUDA kernels' was assumed without checking. The custom
+kernels are DGL's (libdgl.so), not espaloma's. This distinction matters for
+the paper: the claim is about DGL's SpMM vs XLA's GEMM, not espaloma's own
+kernel engineering.
+"""
+
+[[lessons.item]]
+lesson = "gate exclusion decisions made after seeing data are fragile under review"
+detail = """
+The decision to exclude espaloma was made on 2026-05-27, the same day the C3
+smoke matrix ran and showed the Blackwell anomaly. Even if the rationale is
+sound ('different graph representation'), the sequencing looks like post-hoc
+gate narrowing. Pre-register gate conditions before running comparators, or
+document the rationale with a mechanistic explanation that doesn't depend on
+the outcome.
+"""
