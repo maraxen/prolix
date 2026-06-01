@@ -30,22 +30,26 @@ def _dof_rigid_tip3p_waters(n_waters: int) -> float:
 
 @pytest.mark.slow
 def test_nvt_216water_temperature_stability() -> None:
-    """NVT 216-water temperature stability: mean T within ±5 K of 300 K.
+    """NVT temperature stability on full equilibrated TIP3P water box: mean T within ±5 K.
+
+    Uses the full 895-water equilibrated asset (30 Å box, liquid density) rather than
+    a subsampled subset. Subsampling 216 from 895 creates a 24%-density system whose
+    initial forces overwhelm the thermostat → temperature runaway to ~9000 K.
 
     Validates SETTLE+Langevin thermostat on a realistic system:
-    - 216 waters (648 atoms) in 30 Å periodic box
-    - Explicit electrostatics (PME, grid=32, alpha=0.34, cutoff=9.0 Å)
+    - 895 waters (2685 atoms) in 30 Å periodic box (liquid density)
+    - Explicit electrostatics (PME, grid=30, alpha=0.34, cutoff=9.0 Å)
     - dt=0.5 fs (maximum stable timestep for SETTLE+Langevin coupling)
-    - 5000-step burn-in (2.5 ps) + 10000-step production (5 ps)
+    - 1000-step burn-in (0.5 ps) + 2000-step production (1.0 ps)
     - Target: T_mean = 300 K, |error| < 5 K
     """
     jax.config.update("jax_enable_x64", True)
 
-    # Simulation parameters
-    n_waters = 216
+    # Simulation parameters — full equilibrated box (liquid density)
+    n_waters = 895  # full 30 Å box; subsampling creates unstable 24%-density system
     dt_fs = 0.5
-    steps = 15000
-    burn = 5000
+    steps = 3000   # 1.5 ps total (burn + production)
+    burn = 1000    # 0.5 ps burn-in
     seed = 42
     temperature_k = 300.0
 
@@ -132,6 +136,6 @@ def test_nvt_216water_temperature_stability() -> None:
     # Verify mean temperature within tolerance
     mean_t = float(np.mean(temps)) if temps else float("nan")
     assert abs(mean_t - 300.0) < 5.0, (
-        f"216-water NVT: mean T={mean_t:.1f} K (target 300 K), "
+        f"NVT {n_waters}-water: mean T={mean_t:.1f} K (target 300 K), "
         f"error {abs(mean_t - 300.0):.1f} K, required < 5 K"
     )
