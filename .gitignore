@@ -55,3 +55,6 @@ data/ani1x_subset/
 # SLURM output logs and simulation replica data (generated, never commit)
 logs/
 tip3p_tightening/
+
+# Root-level analysis output dir (generated; canonical path is outputs/analysis/)
+analysis/
