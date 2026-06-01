@@ -44,23 +44,24 @@ def test_bond_forces_match_autograd():
     ])
 
     bond_idx = jnp.array([[0, 1], [1, 2]], dtype=jnp.int32)
+    # bond_params convention: [r0, k] — matches PhysicsSystem.bond_params and bond_forces_analytical
     bond_params = jnp.array([
-        [100.0, 1.0],
-        [100.0, 1.0],
+        [1.0, 100.0],  # [r0=1.0 Å, k=100 kcal/mol/Å²]
+        [1.0, 100.0],
     ])
     bond_mask = jnp.ones(2, dtype=bool)
 
     f_analytical = bond_forces(positions, bond_idx, bond_params, bond_mask, disp_fn)
 
-    # Compute AD forces using harmonic potential
+    # Compute AD forces using harmonic potential U = 0.5 * k * (r - r0)^2
     def e_bonds(r):
         dvec = jax.vmap(lambda i, j: disp_fn(r[i], r[j]))(
             bond_idx[:, 0], bond_idx[:, 1]
         )
         dist = jnp.linalg.norm(dvec, axis=1)
-        return jnp.sum(
-            bond_mask * bond_params[:, 0] * (dist - bond_params[:, 1]) ** 2
-        )
+        r0 = bond_params[:, 0]
+        k = bond_params[:, 1]
+        return jnp.sum(bond_mask * 0.5 * k * (dist - r0) ** 2)
 
     f_ad = -jax.grad(e_bonds)(positions)
 
