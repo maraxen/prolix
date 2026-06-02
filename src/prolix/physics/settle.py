@@ -712,33 +712,25 @@ def settle_langevin(
   def apply_fn(state, **kwargs):
     _dt = kwargs.pop("dt", dt)
     _kT = kwargs.pop("kT", kT)
+    half_dt = 0.5 * _dt
 
-    # Store old positions for SETTLE
+    # Store old positions for first R-step (reference for first SETTLE)
     positions_old = state.positions
 
+    # B: half force kick
     momentum = _langevin_step_b(state.momentum, state.force, _dt)
-    position = _langevin_step_a(state.positions, momentum, state.mass, _dt, shift_fn)
 
-    # Stochastic update (BAOAB "O" step)
-    # When project_ou_momentum_rigid=True, use constrained noise directly in rigid-body subspace.
-    # This provides correct covariance (kT * M * P_rigid) for equipartition across 6*N_w-3 DOF.
-    if project_ou_momentum_rigid:
-      momentum, key = _langevin_step_o_constrained(
-        momentum, position, state.mass, gamma, _dt, _kT, state.key, water_indices
-      )
-    else:
-      momentum, key = _langevin_step_o(momentum, state.mass, gamma, _dt, _kT, state.key)
+    # R1: first half-step (A + SETTLE + dp-correction + SETTLE_vel)
+    x_unc_1 = _langevin_step_a(state.positions, momentum, state.mass, half_dt, shift_fn)
 
-    position = _langevin_step_a(position, momentum, state.mass, _dt, shift_fn)
-
-    # Solute RATTLE (SHAKE) - applied BEFORE SETTLE per batched_simulate convention
+    # Solute RATTLE (SHAKE) before SETTLE
     if constraints is not None:
       pairs, lengths = constraints
-      position = project_positions(position, pairs, lengths, state.mass, shift_fn)
+      x_unc_1 = project_positions(x_unc_1, pairs, lengths, state.mass, shift_fn)
 
     # SETTLE position constraints
-    position = settle_positions(
-      position,
+    x_con_1 = settle_positions(
+      x_unc_1,
       positions_old,
       water_indices,
       r_OH,
@@ -748,18 +740,99 @@ def settle_langevin(
       box,
     )
 
-    force = force_fn(position, **kwargs)
-    momentum = _langevin_step_b(momentum, force, _dt)
+    # OpenMM R-step: momentum correction from constraint impulse
+    dp_1 = state.mass * (x_con_1 - x_unc_1) / half_dt
+    momentum = momentum + dp_1
 
     # Solute RATTLE (Velocity)
     if constraints is not None:
       pairs, _ = constraints
-      momentum = project_momenta(momentum, position, pairs, state.mass, shift_fn)
+      momentum = project_momenta(momentum, x_con_1, pairs, state.mass, shift_fn)
 
     # SETTLE velocity constraints
     momentum = _langevin_settle_vel(
       momentum,
       positions_old,
+      x_con_1,
+      state.mass,
+      water_indices,
+      half_dt,
+      mass_oxygen,
+      mass_hydrogen,
+      n_iters=settle_velocity_iters,
+      settle_velocity_tol=settle_velocity_tol,
+    )
+
+    position = x_con_1
+    positions_mid = x_con_1
+
+    # O: stochastic step (unchanged)
+    if project_ou_momentum_rigid:
+      momentum, key = _langevin_step_o_constrained(
+        momentum, position, state.mass, gamma, _dt, _kT, state.key, water_indices
+      )
+    else:
+      momentum, key = _langevin_step_o(momentum, state.mass, gamma, _dt, _kT, state.key)
+
+    # R2: second half-step (A + SETTLE + dp-correction + SETTLE_vel)
+    x_unc_2 = _langevin_step_a(position, momentum, state.mass, half_dt, shift_fn)
+
+    # Solute RATTLE (SHAKE) before SETTLE
+    if constraints is not None:
+      pairs, lengths = constraints
+      x_unc_2 = project_positions(x_unc_2, pairs, lengths, state.mass, shift_fn)
+
+    # SETTLE position constraints
+    x_con_2 = settle_positions(
+      x_unc_2,
+      positions_mid,
+      water_indices,
+      r_OH,
+      r_HH,
+      mass_oxygen,
+      mass_hydrogen,
+      box,
+    )
+
+    # OpenMM R-step: momentum correction from constraint impulse
+    dp_2 = state.mass * (x_con_2 - x_unc_2) / half_dt
+    momentum = momentum + dp_2
+
+    # Solute RATTLE (Velocity)
+    if constraints is not None:
+      pairs, _ = constraints
+      momentum = project_momenta(momentum, x_con_2, pairs, state.mass, shift_fn)
+
+    # SETTLE velocity constraints
+    momentum = _langevin_settle_vel(
+      momentum,
+      positions_mid,
+      x_con_2,
+      state.mass,
+      water_indices,
+      half_dt,
+      mass_oxygen,
+      mass_hydrogen,
+      n_iters=settle_velocity_iters,
+      settle_velocity_tol=settle_velocity_tol,
+    )
+
+    position = x_con_2
+
+    # Force at new constrained positions
+    force = force_fn(position, **kwargs)
+
+    # B: final half force kick
+    momentum = _langevin_step_b(momentum, force, _dt)
+
+    # Final velocity constraint (catches residual from force kick)
+    if constraints is not None:
+      pairs, _ = constraints
+      momentum = project_momenta(momentum, position, pairs, state.mass, shift_fn)
+
+    momentum = _langevin_settle_vel(
+      momentum,
+      positions_mid,
       position,
       state.mass,
       water_indices,
@@ -769,6 +842,7 @@ def settle_langevin(
       n_iters=settle_velocity_iters,
       settle_velocity_tol=settle_velocity_tol,
     )
+
     if project_ou_momentum_rigid and projection_site in ("post_settle_vel", "both"):
       momentum = project_tip3p_waters_momentum_rigid(
         momentum, position, state.mass, water_indices
@@ -782,6 +856,7 @@ def settle_langevin(
       momentum = momentum - mass_col * v_com
 
     return NVTLangevinState(position, momentum, force, state.mass, key)
+
 
   return init_fn, apply_fn
 
