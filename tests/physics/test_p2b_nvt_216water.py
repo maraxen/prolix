@@ -118,7 +118,8 @@ def test_nvt_dilute_temperature_smoke() -> None:
     positions_a, box_edge = _grid_water_positions(n_waters, spacing_angstrom=10.0)
 
     mean_t = _run_nvt_scan(n_waters, positions_a, box_edge,
-                           steps=500, burn=200, dt_fs=0.5, gamma_ps=10.0, pme_grid=16)
+                           steps=500, burn=200, dt_fs=0.5, gamma_ps=10.0, pme_grid=16,
+                           excl_indices=_make_tip3p_excl_indices(n_waters))
 
     assert 150.0 < mean_t < 450.0, (
         f"NVT dilute smoke: mean T={mean_t:.1f} K, expected [150, 450] K — "
