@@ -15,7 +15,6 @@ import numpy as np
 import pytest
 
 from prolix.physics import pbc, settle, system
-from prolix.physics.rigid_water_ke import rigid_tip3p_box_ke_kcal
 from prolix.simulate import AKMA_TIME_UNIT_FS, BOLTZMANN_KCAL
 from .test_explicit_langevin_tip3p_parity import (
     _equil_water_positions,
@@ -135,18 +134,19 @@ def test_nvt_216water_temperature_stability() -> None:
     )
 
     # Run simulation and collect temperatures during production phase
-    dof_rigid = _dof_rigid_tip3p_waters(n_waters)
+    # Use simple Cartesian KE: Σ p_i² / (2 m_i) — independent of positions and correct
+    # under PBC. rigid_tip3p_box_ke_kcal uses raw wrapped atom coordinates; once a water
+    # straddles a PBC boundary its inertia tensor and angular momentum are spuriously huge.
+    dof = _dof_rigid_tip3p_waters(n_waters)
     temps: list[float] = []
 
     for step in range(steps):
         state = apply_j(state)
 
         if step >= burn:
-            # Compute kinetic energy from rigid-body decomposition
-            ke_r = float(rigid_tip3p_box_ke_kcal(state.positions, state.momentum, state.mass, n_waters))
-
-            # Temperature from equipartition: T = 2 * KE / (k_B * DOF)
-            temp = 2.0 * ke_r / (dof_rigid * BOLTZMANN_KCAL)
+            m_flat = state.mass.reshape(-1)
+            ke = float(jnp.sum(jnp.sum(state.momentum**2, axis=-1) / (2.0 * m_flat)))
+            temp = 2.0 * ke / (dof * BOLTZMANN_KCAL)
             temps.append(temp)
 
     # Verify mean temperature within tolerance
