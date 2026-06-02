@@ -1,5 +1,5 @@
 #!/bin/bash
-# Diagnostic: NVT t2 temperature trajectory — prints T at every step for 300 steps.
+# Diagnostic: NVT t2 — sweep settle_velocity_iters={0,1,10} with gamma=10 to isolate RATTLE energy injection.
 # Usage: cd ~/projects/prolix && sbatch scripts/slurm/p2b_t2_diag.slurm
 
 #SBATCH --job-name=plx-p2b-t2diag
@@ -34,7 +34,7 @@ export JAX_ENABLE_X64=1
 export JAX_PLATFORMS="${JAX_PLATFORMS:-cuda}"
 mkdir -p tmp
 
-echo "=== T2 diagnostic: 300 steps, T at every step ==="
+echo "=== T2 diagnostic: settle_velocity_iters sweep (gamma=10, 300 steps) ==="
 uv run python - << 'PY'
 import jax
 jax.config.update("jax_enable_x64", True)
@@ -51,6 +51,7 @@ n_atoms = n_waters * 3
 dof = float(6 * n_waters - 3)
 kT = 300.0 * BOLTZMANN_KCAL
 dt_akma = 0.5 / AKMA_TIME_UNIT_FS
+gamma_reduced = 10.0 * AKMA_TIME_UNIT_FS * 1e-3
 
 excl = np.zeros((n_atoms, 2), dtype=np.int32)
 for w in range(n_waters):
@@ -68,12 +69,11 @@ energy_fn = system.make_energy_fn(displacement_fn, sys_dict, box=box_vec, use_pb
 mass = jnp.array([[15.999],[1.008],[1.008]]*n_waters, dtype=jnp.float64).reshape(n_atoms)
 water_indices = settle.get_water_indices(0, n_waters)
 
-for gamma_ps, label in [(1.0, "gamma=1"), (10.0, "gamma=10")]:
-    gamma_reduced = gamma_ps * AKMA_TIME_UNIT_FS * 1e-3
+for iters, label in [(10, "iters=10"), (1, "iters=1"), (0, "iters=0")]:
     init_s, apply_s = settle.settle_langevin(energy_fn, shift_fn, dt=dt_akma, kT=kT,
         gamma=gamma_reduced, mass=mass, water_indices=water_indices, box=box_vec,
         remove_linear_com_momentum=False, project_ou_momentum_rigid=True,
-        projection_site="post_o", settle_velocity_iters=10)
+        projection_site="post_o", settle_velocity_iters=iters)
 
     state = init_s(jax.random.key(42), jnp.array(positions_a, dtype=jnp.float64), mass=mass)
 
@@ -83,12 +83,11 @@ for gamma_ps, label in [(1.0, "gamma=1"), (10.0, "gamma=10")]:
         ke = jnp.sum(jnp.sum(state.momentum**2, axis=-1) / (2.0 * m_flat))
         return state, ke
 
-    print(f"\n--- {label} ---")
+    print(f"\n--- gamma=10, {label} ---")
     _, kes = jax.lax.scan(step_fn, state, None, length=300)
     temps = np.array(2.0 * kes / (dof * BOLTZMANN_KCAL))
-    for i in [0, 9, 49, 99, 149, 199, 249, 299]:
+    for i in [0, 9, 49, 99, 199, 299]:
         print(f"  step {i+1:3d}: T={temps[i]:.1f} K")
-    print(f"  mean steps 1-100: {temps[:100].mean():.1f} K")
     print(f"  mean steps 101-300: {temps[100:].mean():.1f} K")
 PY
 echo "=== Done ==="
