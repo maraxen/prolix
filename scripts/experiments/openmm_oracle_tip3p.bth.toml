@@ -1,0 +1,31 @@
+[experiment]
+hypothesis = "OpenMM LangevinMiddleIntegrator with SETTLE rigid water maintains T=300±5 K for 895-water TIP3P at liquid density (dt=0.5 fs, gamma=10 ps^-1). This validates OpenMM as a trustworthy oracle for prolix Phase 5 R-step validation."
+
+[outcomes.pass]
+condition = "gate_pass = 1 AND mean_t >= 295 AND mean_t <= 305 AND std_t < 10"
+decision = "Oracle validated. Proceed to prolix R-step gate (P5-B2) and trajectory comparison (P5-A2)."
+reasoning = "OpenMM stays within ±5 K — confirms the integrator is working correctly and can serve as reference."
+is_residual = false
+
+[outcomes.marginal]
+condition = "gate_pass = 0 AND mean_t >= 290 AND mean_t <= 310"
+decision = "Oracle borderline. Check DOF counting and KE measurement. May need longer burn-in."
+reasoning = "T slightly outside target but not wildly wrong — likely measurement or equilibration issue."
+is_residual = false
+
+[outcomes.fail]
+condition = "gate_pass = 0"
+decision = "Oracle failed. Do not proceed. Check SETTLE setup, PME parameters, or OpenMM installation."
+reasoning = "Catch-all for OpenMM divergence or large T offset — oracle is untrustworthy."
+is_residual = true
+
+[result_schema]
+mean_t = "float"
+std_t = "float"
+gate_pass = "int"
+n_steps = "int"
+
+[metadata]
+campaign = "phase5-settle-rstep"
+backlog_item = "#856"
+phase = "P5-A0"
