@@ -5,13 +5,15 @@
 # (and any other -m slow tests listed below).
 #
 # Partitions:
-#   mit_normal_gpu — 6h limit (GPU), default for this job
-#   pi_so3         — 48h limit, override: sbatch --partition=pi_so3 ...
+#   mit_preemptable — 48h limit, preemptable (default)
+#   pi_so3          — 48h limit, dedicated: sbatch --partition=pi_so3 ...
 #
 # Usage (from repo root after pushing to cluster):
 #   sbatch scripts/slurm/p2b_slow_gate.slurm
-#   # or with GPU override:
-#   sbatch --partition=pi_so3 --gres=gpu:1 scripts/slurm/p2b_slow_gate.slurm
+#   # or on dedicated partition:
+#   sbatch --partition=pi_so3 scripts/slurm/p2b_slow_gate.slurm
+#
+# Bathos campaign: d0c47bd8-3a3c-40c9-a070-55d3b621e199 (p2b-nvt-gate)
 #
 # Output: logs to outputs/logs/engaging/<date>/slurm/<jobid>.out
 
@@ -56,14 +58,21 @@ fi
 export JAX_ENABLE_X64=1
 export JAX_PLATFORMS="${JAX_PLATFORMS:-cuda}"
 
-# Create tmp/ for JSON report (required by addopts)
-mkdir -p tmp
+# shellcheck source=/dev/null
+source "scripts/slurm/_bth_env.sh"
 
-echo "=== P2b slow gates: NVT 216-water ==="
-uv run pytest tests/physics/test_p2b_nvt_216water.py \
-  -m slow \
-  -v \
-  --timeout=1800 \
+mkdir -p tmp outputs/p2b_nvt_gate
+
+CAMPAIGN_ID="${CAMPAIGN_ID:-d0c47bd8-3a3c-40c9-a070-55d3b621e199}"
+OUT="outputs/p2b_nvt_gate/result_${SLURM_JOB_ID:-local}.json"
+
+echo "=== P2b NVT gate (campaign=${CAMPAIGN_ID}) ==="
+uv run bth run python scripts/experiments/p2b_nvt_gate.py \
+  --tag p2b-nvt-gate \
+  --tag "slurm_job=${SLURM_JOB_ID:-local}" \
+  --campaign "${CAMPAIGN_ID}" \
+  --out "${OUT}" \
+  -- --out "${OUT}" \
   2>&1 | tee "${LOG_ROOT}/app/p2b_slow_gate_${SLURM_JOB_ID:-local}.log"
 
 echo "=== Done: exit $? ==="

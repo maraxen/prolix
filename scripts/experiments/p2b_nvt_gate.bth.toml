@@ -1,0 +1,36 @@
+[experiment]
+hypothesis = """
+settle_langevin with sparse excl_indices and simple KE measurement passes P2b t2:
+- test_nvt_dilute_temperature_smoke PASSES ([150,450] K on 8 dilute waters)
+- test_nvt_216water_temperature_stability XFAILS (liquid-density limitation documented)
+Pytest exit code = 0.
+"""
+
+[outcomes.pass]
+condition = "gate_pass = 1 AND n_failed = 0"
+decision = "P2b t2 gate closed. Proceed to oracle close and Phase 5."
+reasoning = "Exit 0 with 1 passed + 1 xfailed is the expected outcome given the documented BAOA-SETTLE-B integration limitation at liquid density."
+is_residual = false
+
+[outcomes.marginal]
+condition = "gate_pass = 0 AND n_xfailed = 1 AND n_failed = 1"
+decision = "Dilute smoke failed. Check excl_indices, thermostat params, or T gate bounds."
+reasoning = "Liquid-density xfail is expected; if the dilute smoke also fails the gate is broken."
+is_residual = false
+
+[outcomes.fail]
+condition = "gate_pass = 0"
+decision = "Investigate: check exit code, n_failed, cluster logs."
+reasoning = "Catch-all for unexpected failures (wrong xfail verdict, infrastructure error, etc.)."
+is_residual = true
+
+[result_schema]
+gate_pass = "int"
+n_passed = "int"
+n_xfailed = "int"
+n_failed = "int"
+exit_code = "int"
+
+[result_schema.provenance]
+script = "scripts/experiments/p2b_nvt_gate.py"
+test_file = "tests/physics/test_p2b_nvt_216water.py"
