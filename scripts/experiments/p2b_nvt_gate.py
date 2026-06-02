@@ -22,7 +22,7 @@ def main() -> None:
     p.add_argument("--smoke", action="store_true", help="Dry-run smoke (import check only)")
     args = p.parse_args()
 
-    out = Path(args.out)
+    out = Path(args.out).resolve()
     out.parent.mkdir(parents=True, exist_ok=True)
 
     if args.smoke:
