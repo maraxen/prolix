@@ -1,9 +1,9 @@
-"""NVT 216-water temperature stability test.
+"""NVT 895-water temperature stability test.
 
 Phase 2b cross-validation: t2 validates SETTLE+Langevin temperature control
-on a realistic 216-water TIP3P system (648 atoms) with periodic boundary conditions.
+on a full 895-water TIP3P box (2685 atoms, liquid density) with PBC.
 
-Production: 10000 steps (5 ps) at dt=0.5 fs after 5000-step burn-in.
+Production: 2000 steps (1 ps) at dt=0.5 fs after 1000-step burn-in.
 Mean temperature must remain within ±5 K of 300 K target.
 """
 
@@ -28,17 +28,31 @@ def _dof_rigid_tip3p_waters(n_waters: int) -> float:
     return float(6 * n_waters - 3)
 
 
+def _make_tip3p_excl_indices(n_waters: int) -> jnp.ndarray:
+    """Per-atom sparse exclusion list for TIP3P: shape (N_atoms, 2).
+
+    make_energy_fn reads excl_indices (N_atoms, max_excl), not the dense exclusion_mask.
+    Without this, all intramolecular O-H/H-H Coulomb interactions are included (~121
+    kcal/mol/Å per O-H pair), causing thermal runaway regardless of thermostat strength.
+    """
+    n_atoms = n_waters * 3
+    excl = np.zeros((n_atoms, 2), dtype=np.int32)
+    for w in range(n_waters):
+        o, h1, h2 = w * 3, w * 3 + 1, w * 3 + 2
+        excl[o] = [h1, h2]
+        excl[h1] = [o, h2]
+        excl[h2] = [o, h1]
+    return jnp.array(excl, dtype=jnp.int32)
+
+
 @pytest.mark.slow
 def test_nvt_216water_temperature_stability() -> None:
     """NVT temperature stability on full equilibrated TIP3P water box: mean T within ±5 K.
 
-    Uses the full 895-water equilibrated asset (30 Å box, liquid density) rather than
-    a subsampled subset. Subsampling 216 from 895 creates a 24%-density system whose
-    initial forces overwhelm the thermostat → temperature runaway to ~9000 K.
-
     Validates SETTLE+Langevin thermostat on a realistic system:
     - 895 waters (2685 atoms) in 30 Å periodic box (liquid density)
     - Explicit electrostatics (PME, grid=30, alpha=0.34, cutoff=9.0 Å)
+    - Sparse intramolecular exclusions via excl_indices (make_energy_fn format)
     - dt=0.5 fs (maximum stable timestep for SETTLE+Langevin coupling)
     - 1000-step burn-in (0.5 ps) + 2000-step production (1.0 ps)
     - Target: T_mean = 300 K, |error| < 5 K
@@ -46,7 +60,7 @@ def test_nvt_216water_temperature_stability() -> None:
     jax.config.update("jax_enable_x64", True)
 
     # Simulation parameters — full equilibrated box (liquid density)
-    n_waters = 895  # full 30 Å box; subsampling creates unstable 24%-density system
+    n_waters = 895  # full 30 Å box
     dt_fs = 0.5
     steps = 3000   # 1.5 ps total (burn + production)
     burn = 1000    # 0.5 ps burn-in
@@ -63,11 +77,10 @@ def test_nvt_216water_temperature_stability() -> None:
     gamma_ps = 1.0  # friction coefficient (ps^-1)
     gamma_reduced = float(gamma_ps) * float(AKMA_TIME_UNIT_FS) * 1e-3
 
-    # Load TIP3P forcefield parameters for pure water.
-    # Drop the dense N×N exclusion_mask — make_energy_fn uses excl_indices (sparse) not the
-    # dense mask. At 895 waters, building the 2685×2685 mask takes ~5-9 min (wasted).
-    # Exclusion correctness is not tested here; temperature stability is the gate.
+    # Build sys_dict: drop dense exclusion_mask (7.2 MB, 5-9 min to allocate at 895w),
+    # inject sparse excl_indices instead. make_energy_fn reads excl_indices, not the mask.
     sys_dict = {k: v for k, v in _proxide_params_pure_water(n_waters).items() if k != "exclusion_mask"}
+    sys_dict["excl_indices"] = _make_tip3p_excl_indices(n_waters)
 
     # Set up periodic space and energy function
     displacement_fn, shift_fn = pbc.create_periodic_space(box_vec)
