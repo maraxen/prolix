@@ -13,7 +13,7 @@
 #   # or on dedicated partition:
 #   sbatch --partition=pi_so3 scripts/slurm/p2b_slow_gate.slurm
 #
-# Bathos campaign: d0c47bd8-3a3c-40c9-a070-55d3b621e199 (p2b-nvt-gate)
+# Bathos campaign: 02361be2 (phase5-nvt-verify)
 #
 # Output: logs to outputs/logs/engaging/<date>/slurm/<jobid>.out
 
@@ -63,12 +63,12 @@ source "scripts/slurm/_bth_env.sh"
 
 mkdir -p tmp outputs/p2b_nvt_gate
 
-CAMPAIGN_ID="${CAMPAIGN_ID:-d0c47bd8-3a3c-40c9-a070-55d3b621e199}"
+CAMPAIGN_ID="${CAMPAIGN_ID:-ef45b8b4}"
 OUT="outputs/p2b_nvt_gate/result_${SLURM_JOB_ID:-local}.json"
 
-echo "=== P2b NVT gate (campaign=${CAMPAIGN_ID}) ==="
+echo "=== Phase 5 R-step gate (campaign=${CAMPAIGN_ID}) ==="
 uv run bth run python scripts/experiments/p2b_nvt_gate.py \
-  --tag p2b-nvt-gate \
+  --tag phase5-settle-rstep \
   --tag "slurm_job=${SLURM_JOB_ID:-local}" \
   --campaign "${CAMPAIGN_ID}" \
   --out "${OUT}" \
