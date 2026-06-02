@@ -98,25 +98,17 @@ def test_nve_energy_conservation():
     # Initialize state
     state = init_s(jax.random.key(0), positions, mass=mass)
 
-    # JIT the apply function for efficiency
-    apply_j = jax.jit(apply_s)
-
     # Compute initial energy
-    pe_0 = energy_fn(positions)
-    ke_0 = _harmonic_ke_kcal(state.momentum, mass)
-    e_total_0 = pe_0 + ke_0
+    e_total_0 = energy_fn(positions) + _harmonic_ke_kcal(state.momentum, mass)
 
-    # Run 1000 steps and record total energy at each step
-    e_total_trajectory = [e_total_0]
-    for step in range(1000):
-        state = apply_j(state)
-        pe = energy_fn(state.position)
-        ke = _harmonic_ke_kcal(state.momentum, mass)
-        e_total = pe + ke
-        e_total_trajectory.append(e_total)
+    # Run 1000 steps via scan: all on-device, single host transfer at end.
+    def step_fn(state, _):
+        state = apply_s(state)
+        e = energy_fn(state.position) + _harmonic_ke_kcal(state.momentum, mass)
+        return state, e
 
-    # Convert to array for analysis
-    e_total_trajectory = jnp.array(e_total_trajectory)
+    _, e_traj = jax.lax.scan(step_fn, state, None, length=1000)
+    e_total_trajectory = jnp.concatenate([jnp.array([e_total_0]), e_traj])
 
     # Compute max energy drift
     max_e_drift = jnp.max(jnp.abs(e_total_trajectory - e_total_0))

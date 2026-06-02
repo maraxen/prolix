@@ -16,11 +16,9 @@ from __future__ import annotations
 
 import jax
 import jax.numpy as jnp
-import numpy as np
 import pytest
 
 from prolix.physics import pbc, settle, system
-from prolix.physics.rigid_water_ke import rigid_tip3p_box_ke_kcal
 from prolix.simulate import AKMA_TIME_UNIT_FS, BOLTZMANN_KCAL
 from .test_explicit_langevin_tip3p_parity import (
     _grid_water_positions,
@@ -101,30 +99,26 @@ def test_npt_1ps_temperature_finite() -> None:
         box_init=box_vec,
     )
 
-    apply_j = jax.jit(apply_s)
     state = init_s(jax.random.key(42), jnp.array(positions_a), mass=mass, box=box_vec)
 
-    # Temperature samples (production steps only)
-    temperatures_k = []
+    # Run via scan: all on-device, single host transfer at end.
+    # Simple KE avoids the PBC wrapping bug in rigid_tip3p_box_ke_kcal.
+    dof = _dof_rigid_tip3p_waters(n_waters)
+    n_atoms_local = n_waters * 3
 
-    # Run trajectory
-    for step in range(steps):
-        state = apply_j(state, box=state.box)
+    def step_fn(state, _):
+        state = apply_s(state, box=state.box)
+        m_flat = state.mass.reshape(-1)
+        ke = jnp.sum(jnp.sum(state.momentum**2, axis=-1) / (2.0 * m_flat))
+        T_k = 2.0 * ke / (dof * BOLTZMANN_KCAL)
+        return state, (state.positions, T_k)
 
-        # Hard gate: no NaN in positions
-        assert jnp.all(jnp.isfinite(state.positions)), (
-            f"Step {step}: positions contain NaN"
-        )
+    final_state, (all_positions, T_ks) = jax.lax.scan(step_fn, state, None, length=steps)
 
-        # Collect temperature after burn-in
-        if step >= burn:
-            ke_kcal = rigid_tip3p_box_ke_kcal(state.positions, state.momentum, mass, n_waters)
-            dof = _dof_rigid_tip3p_waters(n_waters)
-            T_k = 2.0 * ke_kcal / (dof * BOLTZMANN_KCAL)
-            temperatures_k.append(float(T_k))
+    # Hard gate: no NaN in any positions across the trajectory
+    assert jnp.all(jnp.isfinite(all_positions)), "Positions contain NaN during trajectory"
 
-    # Compute mean temperature
-    T_mean = float(np.mean(temperatures_k))
+    T_mean = float(jnp.mean(T_ks[burn:]))
 
     # Gate: spec 260601_p2b-dynamics-tests.md §t3 risk table: if [250,350] K is flaky
     # for a short 4-water trajectory, relax to [200,400] K — anti-NaN is the hard gate.

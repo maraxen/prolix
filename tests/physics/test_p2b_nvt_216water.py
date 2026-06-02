@@ -124,8 +124,6 @@ def test_nvt_216water_temperature_stability() -> None:
         settle_velocity_iters=10,
     )
 
-    apply_j = jax.jit(apply_s)
-
     # Initialize state with equilibrated positions
     state = init_s(
         jax.random.key(seed),
@@ -133,24 +131,19 @@ def test_nvt_216water_temperature_stability() -> None:
         mass=mass,
     )
 
-    # Run simulation and collect temperatures during production phase
-    # Use simple Cartesian KE: Σ p_i² / (2 m_i) — independent of positions and correct
-    # under PBC. rigid_tip3p_box_ke_kcal uses raw wrapped atom coordinates; once a water
-    # straddles a PBC boundary its inertia tensor and angular momentum are spuriously huge.
+    # Run via scan: all steps on-device, single host transfer at end.
+    # Simple Cartesian KE (Σ p²/2m) is position-independent — correct under PBC.
     dof = _dof_rigid_tip3p_waters(n_waters)
-    temps: list[float] = []
 
-    for step in range(steps):
-        state = apply_j(state)
+    def step_fn(state, _):
+        state = apply_s(state)
+        m_flat = state.mass.reshape(-1)
+        ke = jnp.sum(jnp.sum(state.momentum**2, axis=-1) / (2.0 * m_flat))
+        return state, ke
 
-        if step >= burn:
-            m_flat = state.mass.reshape(-1)
-            ke = float(jnp.sum(jnp.sum(state.momentum**2, axis=-1) / (2.0 * m_flat)))
-            temp = 2.0 * ke / (dof * BOLTZMANN_KCAL)
-            temps.append(temp)
+    _, kes = jax.lax.scan(step_fn, state, None, length=steps)
+    mean_t = float(2.0 * jnp.mean(kes[burn:]) / (dof * BOLTZMANN_KCAL))
 
-    # Verify mean temperature within tolerance
-    mean_t = float(np.mean(temps)) if temps else float("nan")
     assert abs(mean_t - 300.0) < 5.0, (
         f"NVT {n_waters}-water: mean T={mean_t:.1f} K (target 300 K), "
         f"error {abs(mean_t - 300.0):.1f} K, required < 5 K"

@@ -231,3 +231,10 @@ benchmark-espaloma = [
     # openff-toolkit: conda only (see comment above)
 ]
 
+
+[tool.jaxlint]
+# JL010: float64 is required throughout for MD energy conservation
+# JD001/JD002: test functions don't need Parameters/Returns docstrings
+[tool.jaxlint.per_file_ignores]
+"tests/**" = ["JD001", "JD002"]
+"src/**" = ["JL010"]
