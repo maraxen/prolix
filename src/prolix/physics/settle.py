@@ -716,26 +716,8 @@ def settle_langevin(
     # Store old positions for SETTLE
     positions_old = state.positions
 
-    # B: half velocity kick
     momentum = _langevin_step_b(state.momentum, state.force, _dt)
-
-    # A: first half position step
     position = _langevin_step_a(state.positions, momentum, state.mass, _dt, shift_fn)
-
-    # SETTLE + RATTLE after first A-step
-    if constraints is not None:
-      pairs, lengths = constraints
-      position = project_positions(position, pairs, lengths, state.mass, shift_fn)
-    position = settle_positions(
-      position,
-      positions_old,
-      water_indices,
-      r_OH,
-      r_HH,
-      mass_oxygen,
-      mass_hydrogen,
-      box,
-    )
 
     # Stochastic update (BAOAB "O" step)
     # When project_ou_momentum_rigid=True, use constrained noise directly in rigid-body subspace.
@@ -747,13 +729,14 @@ def settle_langevin(
     else:
       momentum, key = _langevin_step_o(momentum, state.mass, gamma, _dt, _kT, state.key)
 
-    # A: second half position step
     position = _langevin_step_a(position, momentum, state.mass, _dt, shift_fn)
 
-    # SETTLE + RATTLE after second A-step
+    # Solute RATTLE (SHAKE) - applied BEFORE SETTLE per batched_simulate convention
     if constraints is not None:
       pairs, lengths = constraints
       position = project_positions(position, pairs, lengths, state.mass, shift_fn)
+
+    # SETTLE position constraints
     position = settle_positions(
       position,
       positions_old,
