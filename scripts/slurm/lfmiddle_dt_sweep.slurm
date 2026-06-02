@@ -21,8 +21,11 @@
 
 set -euo pipefail
 
-# Anchor paths to this script — safe from any submission cwd.
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# SLURM copies scripts to spool dir — BASH_SOURCE[0] points there, not the repo.
+# Use SLURM_SUBMIT_DIR (set by sbatch) when running as a job; BASH_SOURCE fallback for
+# direct execution. Must submit from project root: cd ~/projects/<proj> && sbatch ...
+_PROJ="${SLURM_SUBMIT_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
+cd "${_PROJ}"
 
 _SUBMIT_DIR="${SLURM_SUBMIT_DIR:-${PWD}}"
 if PROLIX_ROOT="$(git -C "${_SUBMIT_DIR}" rev-parse --show-toplevel 2>/dev/null)"; then
@@ -58,7 +61,7 @@ if [[ "${_NODE}" == *node4007* ]] || [[ "${_NODE}" == *node4008* ]]; then
     echo "Blackwell workaround active: XLA_FLAGS=${XLA_FLAGS}"
 fi
 
-source "${SCRIPT_DIR}/_bth_env.sh"
+source "scripts/slurm/_bth_env.sh"
 
 RESULTS_DIR="${PROLIX_ROOT}/outputs/results/lfmiddle_dt_sweep"
 mkdir -p "${RESULTS_DIR}" outputs/logs/slurm

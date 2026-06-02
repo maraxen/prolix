@@ -11,11 +11,14 @@
 
 set -euo pipefail
 
-# Anchor paths to this script — safe from any submission cwd.
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# SLURM copies scripts to spool dir — BASH_SOURCE[0] points there, not the repo.
+# Use SLURM_SUBMIT_DIR (set by sbatch) when running as a job; BASH_SOURCE fallback for
+# direct execution. Must submit from project root: cd ~/projects/<proj> && sbatch ...
+_PROJ="${SLURM_SUBMIT_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
+cd "${_PROJ}"
 
 # shellcheck source=/dev/null
-source "${SCRIPT_DIR}/_common_env.sh"
+source "scripts/slurm/_common_env.sh"
 
 export JAX_ENABLE_X64="${JAX_ENABLE_X64:-0}"
 export JAX_PLATFORMS="${JAX_PLATFORMS:-cpu}"

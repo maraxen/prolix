@@ -33,12 +33,15 @@
 
 set -euo pipefail
 
-# Anchor paths to this script — safe from any submission cwd.
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# SLURM copies scripts to spool dir — BASH_SOURCE[0] points there, not the repo.
+# Use SLURM_SUBMIT_DIR (set by sbatch) when running as a job; BASH_SOURCE fallback for
+# direct execution. Must submit from project root: cd ~/projects/<proj> && sbatch ...
+_PROJ="${SLURM_SUBMIT_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
+cd "${_PROJ}"
 
 cd "${SLURM_SUBMIT_DIR:-${HOME}/projects/prolix}"
 
-source "${SCRIPT_DIR}/_bth_env.sh"
+source "scripts/slurm/_bth_env.sh"
 
 echo "=== R6 baseline ==="
 echo "Host: $(hostname)"
