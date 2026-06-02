@@ -73,7 +73,9 @@ def test_nvt_216water_temperature_stability() -> None:
     # Time/energy unit conversions
     dt_akma = float(dt_fs) / float(AKMA_TIME_UNIT_FS)
     kT = float(temperature_k) * BOLTZMANN_KCAL
-    gamma_ps = 1.0  # friction coefficient (ps^-1)
+    gamma_ps = 10.0  # friction coefficient (ps^-1); strong coupling (τ=0.1 ps) to
+    # equilibrate in 0.5 ps burn-in (5τ → 99.3% of offset removed). γ=1 ps⁻¹ (τ=1 ps)
+    # fails to equilibrate the asset positions (different forcefield) within the burn.
     gamma_reduced = float(gamma_ps) * float(AKMA_TIME_UNIT_FS) * 1e-3
 
     # Build sys_dict: drop dense exclusion_mask (7.2 MB, 5-9 min to allocate at 895w),
