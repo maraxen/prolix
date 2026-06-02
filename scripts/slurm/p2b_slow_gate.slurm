@@ -16,7 +16,7 @@
 # Output: logs to outputs/logs/engaging/<date>/slurm/<jobid>.out
 
 #SBATCH --job-name=plx-p2b-slow
-#SBATCH --partition=mit_normal_gpu
+#SBATCH --partition=mit_preemptable
 #SBATCH --time=02:00:00
 #SBATCH --cpus-per-task=4
 #SBATCH --gres=gpu:1
