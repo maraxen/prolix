@@ -1,0 +1,65 @@
+---
+workspace: prolix
+session_id: 163de49e-4979-4fd8-a029-d2677cc72a95
+status: in_progress
+immediately_relevant:
+- file: tests/physics/test_p2b_nvt_216water.py
+  lines:
+  - 60
+  - 68
+  reason: gamma_ps=10 is the key change. Uses scan loop (not for-loop), simple KE (not rigid_tip3p_box_ke_kcal), sparse excl_indices via _make_tip3p_excl_indices.
+- file: scripts/slurm/p2b_slow_gate.slurm
+  lines:
+  - 18
+  - 35
+  reason: Now on mit_preemptable partition. Uses _PROJ=${SLURM_SUBMIT_DIR:-BASH_SOURCE/../..} hybrid — BASH_SOURCE alone breaks under sbatch spool.
+- file: src/prolix/physics/optimization.py
+  lines:
+  - 183
+  - 230
+  reason: 'chunked_coulomb_energy: excl_indices is (N_atoms, max_excl) per-atom, NOT (N_pairs,2). Dense exclusion_mask is never read here.'
+active_dispatches:
+- SLURM job 15333155 on engaging (mit_preemptable). Submitted 2026-06-02 ~11:30 local. γ=10, scan, simple KE, excl_indices, hybrid path. Expected ~10-15 min.
+task_id: 260601_p2b_crossval_harness
+phase: P2b t2 gate v2
+goal_statement: Get t2 NVT 895-water slow gate to pass on the cluster and close P2b
+context_refs:
+- phase: P2b sprint kickoff
+  task_id: 260601_p2b_crossval_harness
+  summary: t1/t3/t4/t5 pass locally; t2 sent to cluster; spec at .praxia/docs/specs/260601_p2b-dynamics-tests.md
+failed_attempts:
+- attempt_id: a1-density
+  description: Changed n_waters 216→895 to fix 24%-density hypothesis
+  outcome: 22381K — worse
+  reason_failed: Density was a red herring; both bugs present in both sizes
+  do_not_retry: false
+  evidence_ref: null
+- attempt_id: a2-excl-only
+  description: Added excl_indices without fixing KE measurement (job 15328446)
+  outcome: 20024K
+  reason_failed: rigid_tip3p_box_ke_kcal gives spurious huge KE once any water straddles PBC boundary
+  do_not_retry: false
+  evidence_ref: null
+- attempt_id: a3-pbc-fix-gamma1
+  description: Fixed both excl_indices and KE measurement; γ=1 ps⁻¹, 0.5 ps burn-in (job 15329172)
+  outcome: 20563K
+  reason_failed: τ=1ps thermostat with 0.5ps burn only removes 39% of T offset. Asset positions out of equilibrium under prolix forcefield.
+  do_not_retry: false
+  evidence_ref: null
+- attempt_id: a4-myxcel-submit
+  description: Used mcp__myxcel__submit_job to submit slurm scripts
+  outcome: Exit 126 (not executable) then exit 1 (wrong cwd)
+  reason_failed: myxcel submits from temp dir. Use ssh engaging 'cd ~/projects/prolix && sbatch ...' directly.
+  do_not_retry: true
+  evidence_ref: null
+- attempt_id: a5-bash-source-slurm
+  description: Used BASH_SOURCE[0] for path anchoring in sbatch scripts
+  outcome: 'Exit 1: /var/spool/slurmd/jobNNN/_common_env.sh not found'
+  reason_failed: sbatch copies scripts to spool dir; BASH_SOURCE[0] resolves to spool path. Fixed with _PROJ=${SLURM_SUBMIT_DIR:-BASH_SOURCE/../../} hybrid.
+  do_not_retry: true
+  evidence_ref: null
+open_questions:
+- Will γ=10 ps⁻¹ + 0.5ps burn-in (5τ) be enough to equilibrate? Or is the asset configuration too far from prolix equilibrium?
+deferred: []
+lessons_refs: []
+---

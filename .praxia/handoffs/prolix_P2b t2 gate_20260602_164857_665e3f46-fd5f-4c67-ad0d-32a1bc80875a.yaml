@@ -1,0 +1,55 @@
+---
+workspace: prolix
+session_id: 163de49e-4979-4fd8-a029-d2677cc72a95
+status: in_progress
+immediately_relevant:
+- file: tests/physics/test_p2b_nvt_216water.py
+  lines:
+  - 17
+  - 160
+  reason: 't2 gate. Key fixes: _make_tip3p_excl_indices() adds sparse excl_indices; simple KE replaces rigid_tip3p_box_ke_kcal; jax.lax.scan replaces Python for-loop'
+- file: src/prolix/physics/optimization.py
+  lines:
+  - 183
+  - 230
+  reason: chunked_coulomb_energy reads excl_indices as (N_atoms, max_excl) per-atom. Dense exclusion_mask is NEVER consulted — that was bug 1
+- file: src/prolix/physics/rigid_water_ke.py
+  lines:
+  - 1
+  - 45
+  reason: rigid_tip3p_box_ke_kcal uses raw wrapped positions for inertia/angular momentum. Broken under PBC. Do NOT use for temperature measurement
+- file: scripts/slurm/p2b_slow_gate.slurm
+  lines:
+  - 1
+  - 55
+  reason: Must submit via ssh engaging 'cd ~/projects/prolix && sbatch scripts/slurm/p2b_slow_gate.slurm' — myxcel submit_job uses wrong cwd and breaks relative paths
+active_dispatches:
+- SLURM job 15329172 on engaging (mit_normal_gpu, L40S). Code at d67f648. Expected ~10-15 min.
+task_id: 260601_p2b_crossval_harness
+phase: P2b t2 gate
+goal_statement: Close the P2b cross-validation suite by getting the t2 NVT 895-water slow test to pass on the cluster
+context_refs: []
+failed_attempts:
+- attempt_id: a1-density-hypothesis
+  description: Changed n_waters 216→895 to fix suspected low-density blowup
+  outcome: 22381 K — worse than 9014 K
+  reason_failed: Density was a red herring. Both bugs were present in both runs.
+  do_not_retry: false
+  evidence_ref: null
+- attempt_id: a2-excl-fix-only
+  description: Added excl_indices (job 15328446), no KE fix
+  outcome: 20024 K — physics fixed but measurement still broken
+  reason_failed: rigid_tip3p_box_ke_kcal gives spurious values once molecules straddle PBC boundaries after ~0.5 ps
+  do_not_retry: false
+  evidence_ref: null
+- attempt_id: a3-myxcel-submit
+  description: Used mcp__myxcel__submit_job to submit SLURM script
+  outcome: Exit 126 (not executable) then exit 1 (_common_env.sh not found)
+  reason_failed: myxcel submits from temp dir; relative path to _common_env.sh breaks. Use ssh+sbatch directly.
+  do_not_retry: true
+  evidence_ref: null
+open_questions:
+- Will job 15329172 (both physics fixes, pre-scan) pass the |T_mean - 300| < 5 K gate?
+deferred: []
+lessons_refs: []
+---
