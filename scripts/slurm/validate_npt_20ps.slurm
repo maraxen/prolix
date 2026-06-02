@@ -19,6 +19,9 @@
 
 set -euo pipefail
 
+# Anchor paths to this script — safe from any submission cwd.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
 _SUBMIT_DIR="${SLURM_SUBMIT_DIR:-${PWD}}"
 if PROLIX_ROOT="$(git -C "${_SUBMIT_DIR}" rev-parse --show-toplevel 2>/dev/null)"; then
   :
@@ -28,7 +31,7 @@ fi
 cd "${PROLIX_ROOT}"
 
 # shellcheck source=/dev/null
-source scripts/slurm/_common_env.sh
+source "${SCRIPT_DIR}/_common_env.sh"
 
 echo "npt_20ps job=${SLURM_JOB_ID:-local} host=$(hostname) workspace=${PROLIX_ROOT}"
 

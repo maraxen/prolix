@@ -33,9 +33,12 @@
 
 set -euo pipefail
 
+# Anchor paths to this script — safe from any submission cwd.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
 cd "${SLURM_SUBMIT_DIR:-${HOME}/projects/prolix}"
 
-source scripts/slurm/_bth_env.sh
+source "${SCRIPT_DIR}/_bth_env.sh"
 
 echo "=== R6 baseline ==="
 echo "Host: $(hostname)"

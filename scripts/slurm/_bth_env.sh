@@ -1,5 +1,5 @@
 # Source from SLURM scripts wanting bath provenance tracking:
-#   source scripts/slurm/_bth_env.sh
+#   source "${SCRIPT_DIR}/_bth_env.sh"
 # Expects: repository root as CWD (sbatch from repo root).
 #
 # Wraps the project's existing _common_env.sh (which sets up

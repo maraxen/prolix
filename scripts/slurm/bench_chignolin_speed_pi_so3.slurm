@@ -8,9 +8,8 @@
 #SBATCH --time=02:00:00
 #SBATCH --cpus-per-task=8
 
-cd "${SLURM_SUBMIT_DIR:-$PWD}"
 # shellcheck source=/dev/null
-source scripts/slurm/_common_env.sh
+source "${SCRIPT_DIR}/_common_env.sh"
 
 uv run python scripts/benchmarks/prolix_vs_openmm_speed.py --skip-reference \
   2>&1 | tee "${LOG_ROOT}/app/chignolin_speed_openmm_${SLURM_JOB_ID:-local}.log"

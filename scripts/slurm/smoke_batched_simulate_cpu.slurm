@@ -10,10 +10,12 @@
 #SBATCH --mem=16G
 
 set -euo pipefail
-cd "${SLURM_SUBMIT_DIR:-$PWD}"
+
+# Anchor paths to this script — safe from any submission cwd.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # shellcheck source=/dev/null
-source scripts/slurm/_common_env.sh
+source "${SCRIPT_DIR}/_common_env.sh"
 
 export JAX_ENABLE_X64="${JAX_ENABLE_X64:-0}"
 export JAX_PLATFORMS="${JAX_PLATFORMS:-cpu}"

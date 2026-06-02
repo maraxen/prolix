@@ -20,10 +20,12 @@
 #SBATCH --gres=gpu:1
 
 set -euo pipefail
-cd "${SLURM_SUBMIT_DIR:-$PWD}"
+
+# Anchor paths to this script — safe from any submission cwd.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # shellcheck source=/dev/null
-source scripts/slurm/_common_env.sh
+source "${SCRIPT_DIR}/_common_env.sh"
 
 WORKSPACE_ROOT="${ENGAGING_WORKSPACE_ROOT:-${HOME}/projects}"
 export UV_PROJECT="${WORKSPACE_ROOT}"

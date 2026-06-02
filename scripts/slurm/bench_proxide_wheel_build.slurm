@@ -15,12 +15,14 @@
 #SBATCH --mem=64G
 
 set -euo pipefail
-cd "${SLURM_SUBMIT_DIR:-$PWD}"
+
+# Anchor paths to this script — safe from any submission cwd.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # shellcheck source=/dev/null
-source scripts/slurm/_common_env.sh
+source "${SCRIPT_DIR}/_common_env.sh"
 # shellcheck source=/dev/null
-source scripts/slurm/_engaging_modules.sh
+source "${SCRIPT_DIR}/_engaging_modules.sh"
 
 engaging_load_modules
 

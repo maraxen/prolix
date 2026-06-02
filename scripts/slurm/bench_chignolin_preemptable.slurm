@@ -10,9 +10,8 @@
 #SBATCH --time=24:00:00
 #SBATCH --cpus-per-task=8
 
-cd "${SLURM_SUBMIT_DIR:-$PWD}"
 # shellcheck source=/dev/null
-source scripts/slurm/_common_env.sh
+source "${SCRIPT_DIR}/_common_env.sh"
 
 # Same workload as pi_so3 template; extend with sweeps or DHFR when Phase 2 is ready.
 JAX_PLATFORMS="${JAX_PLATFORMS:-cpu}" uv run pytest tests/physics/test_pbc_end_to_end.py -m "not slow" -q --tb=short \

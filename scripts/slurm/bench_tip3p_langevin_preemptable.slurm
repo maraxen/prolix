@@ -35,10 +35,12 @@
 #SBATCH --array=0-7%4
 
 set -euo pipefail
-cd "${SLURM_SUBMIT_DIR:-$PWD}"
+
+# Anchor paths to this script — safe from any submission cwd.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # shellcheck source=/dev/null
-source scripts/slurm/_common_env.sh
+source "${SCRIPT_DIR}/_common_env.sh"
 
 WORKSPACE_ROOT="${ENGAGING_WORKSPACE_ROOT:-${HOME}/projects}"
 export UV_PROJECT="${WORKSPACE_ROOT}"
@@ -46,7 +48,7 @@ echo "workspace_root=${WORKSPACE_ROOT} replica=${SLURM_ARRAY_TASK_ID:-0} job=${S
 
 if [[ "${TIP3P_SKIP_UV_SYNC:-0}" != "1" ]]; then
   # shellcheck source=/dev/null
-  source scripts/slurm/_workspace_uv_sync_inner.sh
+  source "${SCRIPT_DIR}/_workspace_uv_sync_inner.sh"
   _workspace_uv_sync_run
 else
   [[ -d "${WORKSPACE_ROOT}/.venv" ]] || {

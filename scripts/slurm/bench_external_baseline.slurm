@@ -27,6 +27,9 @@
 
 set -euo pipefail
 
+# Anchor paths to this script — safe from any submission cwd.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
 # Resolve durable project root (survives transient worktree submit dirs).
 _SUBMIT_DIR="${SLURM_SUBMIT_DIR:-${PWD}}"
 if PROLIX_ROOT="$(git -C "${_SUBMIT_DIR}" rev-parse --show-toplevel 2>/dev/null)"; then
@@ -132,7 +135,7 @@ fi
 # bath provenance: per-script sidecar at scripts/benchmarks/external_baseline/bench_${TOOL}.bth.toml
 # Campaign: hp4-s71-external-baseline (edbd0b84-c0e2-4d2d-a89f-5f9fe8ae3aff)
 # CAMPAIGN_ID can be overridden via --export=ALL,CAMPAIGN_ID=<id> at sbatch time.
-source scripts/slurm/_bth_env.sh
+source "${SCRIPT_DIR}/_bth_env.sh"
 
 CAMPAIGN_ID="${CAMPAIGN_ID:-edbd0b84-c0e2-4d2d-a89f-5f9fe8ae3aff}"
 CAMPAIGN_FLAG="--campaign ${CAMPAIGN_ID}"

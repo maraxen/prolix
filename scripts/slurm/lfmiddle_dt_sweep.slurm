@@ -21,6 +21,9 @@
 
 set -euo pipefail
 
+# Anchor paths to this script — safe from any submission cwd.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
 _SUBMIT_DIR="${SLURM_SUBMIT_DIR:-${PWD}}"
 if PROLIX_ROOT="$(git -C "${_SUBMIT_DIR}" rev-parse --show-toplevel 2>/dev/null)"; then
   :
@@ -55,7 +58,7 @@ if [[ "${_NODE}" == *node4007* ]] || [[ "${_NODE}" == *node4008* ]]; then
     echo "Blackwell workaround active: XLA_FLAGS=${XLA_FLAGS}"
 fi
 
-source scripts/slurm/_bth_env.sh
+source "${SCRIPT_DIR}/_bth_env.sh"
 
 RESULTS_DIR="${PROLIX_ROOT}/outputs/results/lfmiddle_dt_sweep"
 mkdir -p "${RESULTS_DIR}" outputs/logs/slurm

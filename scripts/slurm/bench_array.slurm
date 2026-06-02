@@ -16,9 +16,8 @@
 #SBATCH --cpus-per-task=8
 #SBATCH --array=0-7%4
 
-cd "${SLURM_SUBMIT_DIR:-$PWD}"
 # shellcheck source=/dev/null
-source scripts/slurm/_common_env.sh
+source "${SCRIPT_DIR}/_common_env.sh"
 
 TASK="${SLURM_ARRAY_TASK_ID:-0}"
 echo "array_task=${TASK} job=${SLURM_JOB_ID:-}"

@@ -9,12 +9,14 @@
 #SBATCH --mem=16G
 
 set -euo pipefail
-cd "${SLURM_SUBMIT_DIR:-$PWD}"
+
+# Anchor paths to this script — safe from any submission cwd.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # shellcheck source=/dev/null
-source scripts/slurm/_common_env.sh
+source "${SCRIPT_DIR}/_common_env.sh"
 # shellcheck source=/dev/null
-source scripts/slurm/_openmm_ngc_env.sh
+source "${SCRIPT_DIR}/_openmm_ngc_env.sh"
 
 openmm_load_container_module
 

@@ -34,6 +34,9 @@
 
 set -euo pipefail
 
+# Anchor paths to this script — safe from any submission cwd.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
 cd "${SLURM_SUBMIT_DIR:-${HOME}/projects/prolix}"
 
 # ===== Decode array task ID into (N, MODE, PRECISION) =====
@@ -73,7 +76,7 @@ if [[ "${PRECISION}" != "float32" && "${PRECISION}" != "float64" ]]; then
     echo "ERROR: PRECISION must be 'float32' or 'float64' (got ${PRECISION})"; exit 1
 fi
 
-source scripts/slurm/_bth_env.sh
+source "${SCRIPT_DIR}/_bth_env.sh"
 
 echo "=== §7.1 fit_bonded_hp4 ==="
 echo "Host: $(hostname)"

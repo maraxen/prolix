@@ -10,9 +10,8 @@
 #SBATCH --time=48:00:00
 #SBATCH --cpus-per-task=8
 
-cd "${SLURM_SUBMIT_DIR:-$PWD}"
 # shellcheck source=/dev/null
-source scripts/slurm/_common_env.sh
+source "${SCRIPT_DIR}/_common_env.sh"
 
 uv run python scripts/benchmark_nlvsdense.py --systems DHFR --replicas 1 --cutoffs 8.0 12.0 16.0 \
   2>&1 | tee "${LOG_ROOT}/app/dhfr_nlvsdense_${SLURM_JOB_ID:-local}.log"
