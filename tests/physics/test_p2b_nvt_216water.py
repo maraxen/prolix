@@ -128,23 +128,12 @@ def test_nvt_dilute_temperature_smoke() -> None:
 
 
 @pytest.mark.slow
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "settle_langevin uses BAOA-SETTLE_POS-B-SETTLE_VEL integration order. "
-        "SETTLE position constraint is applied only once after two unconstrained "
-        "A-steps (2×dt excursion), creating large constraint impulses that inject "
-        "energy at liquid density (~5000-8000 K equilibrium at γ=10 ps⁻¹). "
-        "Diagnostic: T=286 K at step 1 → 1698 K at step 50 → 4098 K at step 100. "
-        "Fix: apply SETTLE after each A-step (Phase 5 / constraint-aware thermostat). "
-        "See: scripts/slurm/p2b_t2_diag.slurm, job 15334709."
-    ),
-)
 def test_nvt_216water_temperature_stability() -> None:
     """NVT temperature stability: liquid-density 895-water, T_mean within ±5 K.
 
-    XFAIL: BAOA-SETTLE-B integration order injects energy at liquid density.
-    Phase 5 will fix this by applying SETTLE after each A-step.
+    Phase 5 R-step fix COMPLETE: B-R-O-R-F-B integration order with momentum
+    correction (dp = m * dx / (dt/2)) after SETTLE_pos resolves energy injection.
+    Test now expects to pass: T ≈ 300 K ±5 K without divergence.
     """
     jax.config.update("jax_enable_x64", True)
 
