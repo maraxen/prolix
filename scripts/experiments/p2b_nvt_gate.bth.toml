@@ -30,7 +30,3 @@ n_passed = "int"
 n_xfailed = "int"
 n_failed = "int"
 exit_code = "int"
-
-[result_schema.provenance]
-script = "scripts/experiments/p2b_nvt_gate.py"
-test_file = "tests/physics/test_p2b_nvt_216water.py"
