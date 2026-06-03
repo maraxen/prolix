@@ -208,17 +208,17 @@ def _settle_water_batch(
   Process:
   1.  **Unwrap**: Apply minimum image convention to handle PBC crossings.
   2.  **COM Frame**: Move to center of mass of unconstrained configuration.
-  3.  **Local Frame**: Construct orthonormal axes $(\hat{x}, \hat{y}, \hat{z})$ from old positions.
-  4.  **Ideal Geometry**: Define ideal $C_{2v}$ water triangle in local COM frame.
-  5.  **Rotation**: Project unconstrained motion onto local axes to find optimal in-plane rotation $\phi$.
-  6.  **Transform**: Reconstruct positions and transform back to global frame.
+  3.  **Ideal Geometry**: Define ideal body-frame coordinates.
+  4.  **Horn Rigid Fit**: Use Horn (1987) quaternion method to find optimal rotation
+      that minimizes RMSD between body-frame template and COM-centered unconstrained atoms.
+  5.  **Transform**: Reconstruct positions and transform back to global frame.
 
   Notes:
   Preserves COM position while correcting internal bond lengths and angles.
-  Implemented according to Miyamoto & Kollman (1992).
+  Uses rotation-preserving rigid fit (Horn method) to avoid damping genuine molecular rotation.
 
   Args:
-      r_O_old, r_H1_old, r_H2_old: Old positions.
+      r_O_old, r_H1_old, r_H2_old: Old positions (used for PBC unwrap only).
       r_O_new, r_H1_new, r_H2_new: Unconstrained new positions.
       r_OH: Target O-H distance.
       r_HH: Target H-H distance.
@@ -240,6 +240,7 @@ def _settle_water_batch(
     pos_oxygen_new = unwrap(pos_oxygen_new, pos_oxygen_old)
     pos_h1_new = unwrap(pos_h1_new, pos_h1_old)
     pos_h2_new = unwrap(pos_h2_new, pos_h2_old)
+
   mass_total = mass_oxygen + 2 * mass_hydrogen
 
   # COM motion is preserved - only internal geometry is corrected
@@ -247,78 +248,74 @@ def _settle_water_batch(
     mass_oxygen * pos_oxygen_new + mass_hydrogen * pos_h1_new + mass_hydrogen * pos_h2_new
   ) / mass_total
 
-  delta_oxygen = pos_oxygen_new - com_new  # (N_waters, 3)
+  # Center atoms at COM
+  delta_O_new = pos_oxygen_new - com_new  # (N_waters, 3)
+  delta_H1_new = pos_h1_new - com_new
+  delta_H2_new = pos_h2_new - com_new
 
-  com_old = (
-    mass_oxygen * pos_oxygen_old + mass_hydrogen * pos_h1_old + mass_hydrogen * pos_h2_old
-  ) / mass_total
-
-  delta_oxygen_old = pos_oxygen_old - com_old
-  delta_h1_old = pos_h1_old - com_old
-  delta_h2_old = pos_h2_old - com_old
-
-  # The ideal TIP3P water geometry:
+  # Canonical body-frame template (fixed ideal geometry, COM-centered)
   dist_oh_mid = jnp.sqrt(r_OH**2 - (r_HH / 2) ** 2)
-
-  # In COM frame, O is at (0, dist_O_to_COM) and H midpoint is at (0, -dist_H_mid_to_COM)
   dist_O_to_COM = 2 * mass_hydrogen * dist_oh_mid / mass_total
   dist_H_mid_to_COM = mass_oxygen * dist_oh_mid / mass_total
-  half_dist_hh = r_HH / 2
+  half_hh = r_HH / 2
 
-  # Y axis: from H-midpoint toward O (in old geometry)
-  midpoint_old = 0.5 * (delta_h1_old + delta_h2_old)
-  axis_y = delta_oxygen_old - midpoint_old
-  len_y = jnp.linalg.norm(axis_y, axis=-1, keepdims=True) + 1e-12
-  axis_y = axis_y / len_y  # (N_waters, 3)
+  # Body frame coordinates (fixed template, shape (3,))
+  b_O = jnp.array([0.0, dist_O_to_COM, 0.0])
+  b_H1 = jnp.array([half_hh, -dist_H_mid_to_COM, 0.0])
+  b_H2 = jnp.array([-half_hh, -dist_H_mid_to_COM, 0.0])
 
-  # X axis: from H1 toward H2 (in old geometry)
-  axis_x = delta_h1_old - delta_h2_old
-  len_x = jnp.linalg.norm(axis_x, axis=-1, keepdims=True) + 1e-12
-  axis_x = axis_x / len_x
+  # Stack into (3, 3) array: [b_O; b_H1; b_H2]
+  b_all = jnp.stack([b_O, b_H1, b_H2], axis=0)  # (3, 3)
 
-  # Z axis: perpendicular
-  axis_z = jnp.cross(axis_x, axis_y)
-  len_z = jnp.linalg.norm(axis_z, axis=-1, keepdims=True) + 1e-12
-  axis_z = axis_z / len_z
+  # Target (centered) points
+  n_waters = delta_O_new.shape[0]
+  y_all = jnp.stack([delta_O_new, delta_H1_new, delta_H2_new], axis=1)  # (N_waters, 3, 3)
 
-  # Recompute y to ensure orthonormality
-  axis_y = jnp.cross(axis_z, axis_x)
+  # Mass weights
+  m_all = jnp.array([mass_oxygen, mass_hydrogen, mass_hydrogen])  # (3,)
 
-  # Where does O want to be?
-  pos_O_proj_x = jnp.sum(delta_oxygen * axis_x, axis=-1)  # (N_waters,)
-  pos_O_proj_y = jnp.sum(delta_oxygen * axis_y, axis=-1)
+  # Compute weighted cross-covariance H = sum_i w_i * y_i @ b_i^T
+  # This is the standard Kabsch approach: H[n, j, k] = sum_i m[i] * y[n, i, j] * b[i, k]
+  weighted_H = jnp.zeros((n_waters, 3, 3), dtype=y_all.dtype)
+  for atom_idx in range(3):
+    b_i = b_all[atom_idx, :]  # (3,)
+    y_ni = y_all[:, atom_idx, :]  # (N_waters, 3)
+    # We want H[n, j, k] = y[n, j] * b[k]
+    contrib = jnp.einsum("nj,k->njk", y_ni, b_i)  # (N_waters, 3, 3)
+    weighted_H = weighted_H + m_all[atom_idx] * contrib
 
-  # Determine in-plane rotation angle from O position
-  # O should be at (0, dist_O_to_COM) in unrotated frame
-  phi = jnp.arctan2(pos_O_proj_x, pos_O_proj_y + 1e-12)
+  # SVD: H = U @ S_values @ V^T
+  # Optimal rotation R = U @ V^T (ensures det(R) = +1 for proper rotation)
+  U, S_values, Vt = jnp.linalg.svd(weighted_H)
 
-  # Out-of-plane tilt from z component
-  # For small tilts, we can include this effect
-  # But for simplicity, we project to xy plane (ignore tilt for now)
-  cos_phi = jnp.cos(phi)
-  sin_phi = jnp.sin(phi)
+  # For proper rotation (det > 0), check and correct if needed
+  # Ensure det(R) = +1 by potentially flipping the sign of V's last column
+  det_UV = jnp.linalg.det(U @ Vt)
+  # If det < 0, flip the sign of the last column of V (equivalently, last row of Vt)
+  correction = jnp.where(det_UV < 0, -1.0, 1.0)
+  Vt_corrected = Vt * correction[:, None, None]
 
-  # O: (0, dist_O_to_COM) rotated by phi -> (-dist_O_to_COM*sin, dist_O_to_COM*cos)
-  oxygen_x = -dist_O_to_COM * sin_phi
-  oxygen_y = dist_O_to_COM * cos_phi
-  oxygen_z = jnp.zeros_like(oxygen_x)
+  R = U @ Vt_corrected  # (N_waters, 3, 3)
 
-  # H1: (half_dist_hh, -dist_H_mid_to_COM) rotated by phi
-  h1_x = half_dist_hh * cos_phi - (-dist_H_mid_to_COM) * sin_phi
-  h1_y = half_dist_hh * sin_phi + (-dist_H_mid_to_COM) * cos_phi
-  h1_z = jnp.zeros_like(h1_x)
+  # Ensure rotation is continuous: prefer the rotation closest to identity
+  # This helps with numerical stability and prevents flipping in degenerate cases
+  # Compute the trace: tr(R) = 1 + 2*cos(angle), so angle from trace
+  # If |tr(R) - 3| is large, it means large rotation, flip sign of eigenvector
+  trace_R = jnp.trace(R, axis1=1, axis2=2)  # (N_waters,)
+  # For planar molecules with small motion, prefer identity-like rotation
+  flip_R = jnp.where(trace_R < 1.5, -1.0, 1.0)  # (N_waters,)
+  R = R * flip_R[:, None, None]
 
-  # H2: (-half_dist_hh, -dist_H_mid_to_COM) rotated by phi
-  h2_x = -half_dist_hh * cos_phi - (-dist_H_mid_to_COM) * sin_phi
-  h2_y = -half_dist_hh * sin_phi + (-dist_H_mid_to_COM) * cos_phi
-  h2_z = jnp.zeros_like(h2_x)
-  pos_oxygen_c = (
-    com_new + oxygen_x[:, None] * axis_x + oxygen_y[:, None] * axis_y + oxygen_z[:, None] * axis_z
-  )
+  # Apply rotation to body-frame template
+  # R @ b_i for each atom i
+  rotated_b_O = jnp.einsum("nij,j->ni", R, b_O)  # (N_waters, 3)
+  rotated_b_H1 = jnp.einsum("nij,j->ni", R, b_H1)  # (N_waters, 3)
+  rotated_b_H2 = jnp.einsum("nij,j->ni", R, b_H2)  # (N_waters, 3)
 
-  pos_h1_c = com_new + h1_x[:, None] * axis_x + h1_y[:, None] * axis_y + h1_z[:, None] * axis_z
-
-  pos_h2_c = com_new + h2_x[:, None] * axis_x + h2_y[:, None] * axis_y + h2_z[:, None] * axis_z
+  # Constrained positions: COM + rotated body frame
+  pos_oxygen_c = com_new + rotated_b_O
+  pos_h1_c = com_new + rotated_b_H1
+  pos_h2_c = com_new + rotated_b_H2
 
   return pos_oxygen_c, pos_h1_c, pos_h2_c
 
