@@ -740,28 +740,18 @@ def settle_langevin(
       box,
     )
 
-    # OpenMM R-step: momentum correction from constraint impulse
-    dp_1 = state.mass * (x_con_1 - x_unc_1) / half_dt
+    # OpenMM R-step: momentum correction from constraint impulse.
+    # Use the minimum-image displacement: shift_fn may wrap x_unc across a
+    # periodic boundary while settle_positions reconstructs x_con in the
+    # unwrapped frame of positions_old, so the raw difference can jump by a full
+    # box vector for any atom starting near/outside the primary cell -> a
+    # spurious ~box-sized impulse that detonates the integrator at liquid
+    # density (see scripts/explore/p5_rstep_substep_trace.py).
+    dx_1 = x_con_1 - x_unc_1
+    if box is not None:
+      dx_1 = dx_1 - box * jnp.round(dx_1 / box)
+    dp_1 = state.mass * dx_1 / half_dt
     momentum = momentum + dp_1
-
-    # Solute RATTLE (Velocity)
-    if constraints is not None:
-      pairs, _ = constraints
-      momentum = project_momenta(momentum, x_con_1, pairs, state.mass, shift_fn)
-
-    # SETTLE velocity constraints
-    momentum = _langevin_settle_vel(
-      momentum,
-      positions_old,
-      x_con_1,
-      state.mass,
-      water_indices,
-      half_dt,
-      mass_oxygen,
-      mass_hydrogen,
-      n_iters=settle_velocity_iters,
-      settle_velocity_tol=settle_velocity_tol,
-    )
 
     position = x_con_1
     positions_mid = x_con_1
@@ -794,28 +784,13 @@ def settle_langevin(
       box,
     )
 
-    # OpenMM R-step: momentum correction from constraint impulse
-    dp_2 = state.mass * (x_con_2 - x_unc_2) / half_dt
+    # OpenMM R-step: momentum correction from constraint impulse (minimum-image;
+    # see R1 above for why the raw difference is unsafe under PBC wrapping).
+    dx_2 = x_con_2 - x_unc_2
+    if box is not None:
+      dx_2 = dx_2 - box * jnp.round(dx_2 / box)
+    dp_2 = state.mass * dx_2 / half_dt
     momentum = momentum + dp_2
-
-    # Solute RATTLE (Velocity)
-    if constraints is not None:
-      pairs, _ = constraints
-      momentum = project_momenta(momentum, x_con_2, pairs, state.mass, shift_fn)
-
-    # SETTLE velocity constraints
-    momentum = _langevin_settle_vel(
-      momentum,
-      positions_mid,
-      x_con_2,
-      state.mass,
-      water_indices,
-      half_dt,
-      mass_oxygen,
-      mass_hydrogen,
-      n_iters=settle_velocity_iters,
-      settle_velocity_tol=settle_velocity_tol,
-    )
 
     position = x_con_2
 

@@ -56,15 +56,29 @@ def _build_tip3p_system(
     if n_atoms % 3 != 0:
         raise ValueError(f"Expected n_atoms % 3 == 0, got {n_atoms}")
 
-    # Create a minimal topology: just water residues with O, H, H atoms
+    # Create a minimal topology: water residues with O, H, H atoms.
+    # The residue must be named "HOH" and carry explicit O-H bonds; otherwise
+    # tip3p.xml template matching fails with "atoms match HOH, but the bonds are
+    # different" (OpenMM matches by element set AND bond graph).
     from openmm import app
     topology = app.Topology()
     chain = topology.addChain()
     for i in range(n_waters):
-        residue = topology.addResidue("WAT", chain)
-        topology.addAtom("O", app.element.Element.getByAtomicNumber(8), residue)
-        topology.addAtom("H", app.element.Element.getByAtomicNumber(1), residue)
-        topology.addAtom("H", app.element.Element.getByAtomicNumber(1), residue)
+        residue = topology.addResidue("HOH", chain)
+        o_atom = topology.addAtom("O", app.element.Element.getByAtomicNumber(8), residue)
+        h1_atom = topology.addAtom("H1", app.element.Element.getByAtomicNumber(1), residue)
+        h2_atom = topology.addAtom("H2", app.element.Element.getByAtomicNumber(1), residue)
+        topology.addBond(o_atom, h1_atom)
+        topology.addBond(o_atom, h2_atom)
+
+    # Box vectors (cubic). Must be set on the *topology* before createSystem,
+    # otherwise PME raises "Topology that does not specify periodic box dimensions".
+    box_vectors = (
+        Vec3(box_edge, 0.0, 0.0) * omm_unit.angstroms,
+        Vec3(0.0, box_edge, 0.0) * omm_unit.angstroms,
+        Vec3(0.0, 0.0, box_edge) * omm_unit.angstroms,
+    )
+    topology.setPeriodicBoxVectors(box_vectors)
 
     # Create system from topology and forcefield
     system = ff.createSystem(
@@ -72,13 +86,6 @@ def _build_tip3p_system(
         nonbondedMethod=PME,
         nonbondedCutoff=9.0 * omm_unit.angstroms,
         constraints=HBonds,  # SETTLE-equivalent: rigid water geometry
-    )
-
-    # Set box vectors (cubic)
-    box_vectors = (
-        Vec3(box_edge, 0.0, 0.0) * omm_unit.angstroms,
-        Vec3(0.0, box_edge, 0.0) * omm_unit.angstroms,
-        Vec3(0.0, 0.0, box_edge) * omm_unit.angstroms,
     )
     system.setDefaultPeriodicBoxVectors(*box_vectors)
 
@@ -108,14 +115,14 @@ def _measure_temperature(context: openmm.Context, n_dof: int) -> float:
     Returns:
         Temperature in Kelvin
     """
-    state = context.getState(getKineticEnergy=True)
-    ke_j = state.getKineticEnergy().value_in_unit(omm_unit.joules)
+    state = context.getState(getEnergy=True)
+    # OpenMM kinetic energy is molar (kJ/mol), so pair it with the molar gas
+    # constant R (kJ/mol/K), not the per-particle Boltzmann constant.
+    ke_kj_mol = state.getKineticEnergy().value_in_unit(omm_unit.kilojoule_per_mole)
+    R = 8.314462618e-3  # kJ / (mol K)
 
-    # Boltzmann constant: J / K
-    k_B = 1.380649e-23
-
-    # T = 2 * KE / (k_B * DOF)
-    t_k = (2.0 * ke_j) / (k_B * n_dof)
+    # T = 2 * KE / (R * DOF)
+    t_k = (2.0 * ke_kj_mol) / (R * n_dof)
     return float(t_k)
 
 
@@ -160,7 +167,11 @@ def main() -> None:
         return
 
     try:
-        # Load equilibrated water positions
+        # Load equilibrated water positions — add project root to sys.path so
+        # tests/ is importable when the script is run from scripts/experiments/
+        _proj_root = str(Path(__file__).resolve().parents[2])
+        if _proj_root not in sys.path:
+            sys.path.insert(0, _proj_root)
         from tests.physics.test_explicit_langevin_tip3p_parity import _equil_water_positions
 
         positions, box_edge = _equil_water_positions(args.n_waters, seed=args.seed)

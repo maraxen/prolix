@@ -3,24 +3,29 @@
 Phase 2b cross-validation: t2 validates that the thermostat is active and
 controlling temperature for TIP3P water with SETTLE constraints.
 
-## Known limitation: BAOA-SETTLE-B integration order
+## Resolved: PBC minimum-image bug in the R-step constraint impulse
 
-The current settle_langevin uses a BAOA-SETTLE_POS-B-SETTLE_VEL scheme
-(not the standard BAOAB-SETTLE-after-each-A). This causes systematic
-constraint-impulse energy injection at each step because:
-  - Two A-steps advance positions without constraint (2×dt excursion)
-  - One SETTLE position correction makes a large impulse at the end
-  - This impulse is not reflected in momentum until the RATTLE step
+Earlier analysis blamed the integration order / "liquid-density energy
+injection". That diagnosis was wrong. The real cause was a periodic-boundary
+bug in the R-step momentum correction:
 
-At liquid density (895 waters, 30 Å box), the energy injection overwhelms
-the thermostat regardless of γ: observed T_eq ≈ 5000-8000 K even at γ=10 ps⁻¹.
-Temperature trajectory: 286 K at step 1 → 1697 K at step 50 → 4098 K at step 100.
+    dp = mass * (x_con - x_unc) / half_dt
 
-At dilute density (low N, grid positions), the forces and thus the constraint
-excursion per step are small, so injection is negligible and T≈300 K is achieved.
+used a *raw* coordinate difference. `shift_fn` may wrap an atom across a
+periodic boundary while `settle_positions` reconstructs the rigid water in the
+unwrapped reference frame of `positions_old`, so `x_con - x_unc` jumps by a
+full box vector for any atom that starts near/outside the primary cell. The
+liquid 895-water asset has 91/2685 atoms outside [0, 30) Å, so step 1 produced
+dp ≈ mass·30 Å/half_dt → T ≈ 10⁹ K in a single step (instant, not gradual).
 
-Resolution: Phase 5 (constraint-aware thermostat) will fix the integration order.
-The liquid-density ±5 K gate is marked xfail until Phase 5.
+The dilute grid asset keeps all atoms inside the box, so no wrap occurs and
+T ≈ 300 K — which is why dilute passed and liquid diverged. It was never about
+density.
+
+Fix (settle.py, settle_langevin apply_fn): take the minimum-image displacement
+before forming dp in both R-steps. This is a no-op for genuine sub-Ångström
+constraint corrections, so in-cell trajectories are bitwise unchanged.
+Diagnostic: scripts/explore/p5_rstep_substep_trace.py.
 """
 
 from __future__ import annotations
