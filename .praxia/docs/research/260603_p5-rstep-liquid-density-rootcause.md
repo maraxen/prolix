@@ -6,8 +6,10 @@ Date: 2026-06-03 · Branch: `worktree-p5-rstep-liquid-density` · Campaign ef45b
 
 The 895-water NVT gate (`test_nvt_216water_temperature_stability`) failed on the
 cluster with `mean T = 7.09e53 K`. Investigation found **two independent bugs**
-(plus four oracle-script bugs). The first is fixed; the second is the genuine
-Phase 5 constraint-aware-thermostat deliverable and remains open.
+(plus four oracle-script bugs). Both are now fixed: Bug 1 (PBC min-image in the
+R-step impulse) and Bug 2 (the genuine Phase 5 deliverable — `_settle_water_batch`
+discarding rigid-body rotation, fixed via a mass-weighted Horn quaternion rigid
+fit). The 895-water cluster gate is the remaining end-to-end confirmation.
 
 ## Bug 1 — PBC minimum-image in the R-step impulse (FIXED, commit 8192ea1)
 
@@ -30,7 +32,7 @@ Fix: minimum-image `(x_con - x_unc)` before forming dp in both R-steps. No-op
 for genuine sub-Å corrections → in-cell trajectories unchanged (settle suite +
 dilute smoke: 10 passed).
 
-## Bug 2 — `settle_positions` removes rigid-body rotation (OPEN)
+## Bug 2 — `settle_positions` removes rigid-body rotation (FIXED, branch `worktree-p5-bug2-rotation`)
 
 After Bug 1, the gate is **stable** but equilibrates at **158 K, not 300 K**.
 KE decomposition (`scripts/explore/p5_transrot_decomp.py`):
@@ -56,14 +58,42 @@ it untouched. Instead it moved atoms by **0.045 Å ≈ the full 0.051 Å rotatio
 reconstructing at the old orientation. So it is not a constraint projection — it
 discards rigid rotation.
 
-### Fix direction (substantial — core Phase 5 work)
+### Fix (implemented — mass-weighted Horn quaternion rigid fit)
 
-`_settle_water_batch` must implement a proper rotation-preserving constraint:
-given unconstrained positions, find the nearest rigid configuration that
-preserves the molecule's net rotation (correct Miyamoto–Kollman SETTLE handles
-full 3D rotation, not just an in-plane φ). Then `dp = m(x_con-x_unc)/half_dt`
-removes only the radial bond-stretch velocity, preserving angular momentum —
-matching OpenMM's LangevinMiddleIntegrator, which thermalizes rotation correctly.
+`_settle_water_batch` was reimplemented as a proper rotation-preserving
+constraint: for each water it fits the fixed ideal TIP3P body-frame template to
+the COM-centred unconstrained positions and returns `COM_new + R · template`,
+where `R` is the mass-weighted least-squares rotation. `positions_old` is now
+used **only** for the PBC unwrap, never for orientation. With the rigid
+configuration carrying the molecule's net rotation, `dp = m(x_con−x_unc)/half_dt`
+removes only the radial bond-stretch velocity and preserves angular momentum —
+matching OpenMM's LangevinMiddleIntegrator.
+
+**Method choice — Horn (1987) quaternion, not SVD/Kabsch.** TIP3P water is
+planar, so the 3×3 cross-covariance is rank-deficient and the SVD's smallest
+singular vectors flip sign discontinuously between steps. An initial SVD-Kabsch
+implementation passed the single-step geometry unit tests but **detonated
+`test_integrator_energy_conservation`** (0.92 → 1.5e7 over 100 steps) because the
+discontinuous rotation matrix injected spurious work; a `trace(R)<1.5 → R·(−1)`
+"continuity" patch only masked it (and `−R` is a reflection, det = −1, not a
+rotation). Horn's largest-eigenvalue quaternion is well-separated and continuous
+through the planar case and always yields a proper rotation. Switching to Horn
+fixed energy conservation, the PBC-crossing test, and rotation preservation
+simultaneously.
+
+**Verification (local):**
+- `test_settle_rotation_preserving.py` (5 new tests): already-rigid invariance
+  under 5° about-x and 17° generic 3D rotation (≤1e-6 Å), bond/angle restoration
+  (≤1e-6), COM preservation (≤1e-9), batched consistency — all pass.
+- `test_settle.py` (9 tests incl. energy conservation + PBC crossing) — all pass.
+- `p5_rot_substep.py` T_rot trace, **after** the fix (compare the collapse above):
+
+      init 282.9 → after B 286.0 → after dp_1 286.7 → after O 283.0
+      → after dp_2 283.0 → after final B 286.3 → after SETTLE_vel 283.2
+
+  T_rot is preserved (≈283–287 K, matched to T_trans ≈299 K) instead of
+  collapsing to ~12 K. The 895-water cluster gate (300±5 K) is the remaining
+  end-to-end confirmation.
 
 ## Oracle (`openmm_oracle_tip3p.py`) — 4 bugs fixed
 

@@ -248,7 +248,8 @@ def _settle_water_batch(
     mass_oxygen * pos_oxygen_new + mass_hydrogen * pos_h1_new + mass_hydrogen * pos_h2_new
   ) / mass_total
 
-  # Center atoms at COM
+  # Center atoms at COM (old positions are used only for the PBC unwrap above;
+  # orientation comes entirely from fitting the template to the new positions).
   delta_O_new = pos_oxygen_new - com_new  # (N_waters, 3)
   delta_H1_new = pos_h1_new - com_new
   delta_H2_new = pos_h2_new - com_new
@@ -268,43 +269,56 @@ def _settle_water_batch(
   b_all = jnp.stack([b_O, b_H1, b_H2], axis=0)  # (3, 3)
 
   # Target (centered) points
-  n_waters = delta_O_new.shape[0]
   y_all = jnp.stack([delta_O_new, delta_H1_new, delta_H2_new], axis=1)  # (N_waters, 3, 3)
 
   # Mass weights
   m_all = jnp.array([mass_oxygen, mass_hydrogen, mass_hydrogen])  # (3,)
 
-  # Compute weighted cross-covariance H = sum_i w_i * y_i @ b_i^T
-  # This is the standard Kabsch approach: H[n, j, k] = sum_i m[i] * y[n, i, j] * b[i, k]
-  weighted_H = jnp.zeros((n_waters, 3, 3), dtype=y_all.dtype)
-  for atom_idx in range(3):
-    b_i = b_all[atom_idx, :]  # (3,)
-    y_ni = y_all[:, atom_idx, :]  # (N_waters, 3)
-    # We want H[n, j, k] = y[n, j] * b[k]
-    contrib = jnp.einsum("nj,k->njk", y_ni, b_i)  # (N_waters, 3, 3)
-    weighted_H = weighted_H + m_all[atom_idx] * contrib
+  # Optimal rotation via Horn's (1987) unit-quaternion method. We deliberately
+  # use the 4x4 eigenvalue formulation rather than SVD/Kabsch: TIP3P water is
+  # PLANAR, so the 3x3 cross-covariance is rank-deficient and the SVD's smallest
+  # singular vectors flip sign discontinuously between steps -> a discontinuous
+  # rotation matrix that injects spurious work and detonates energy conservation
+  # over a trajectory. Horn's largest-eigenvalue quaternion is well-separated and
+  # continuous through the planar case, and always yields a proper rotation.
+  #
+  # Mass-weighted cross-covariance S[a, b] = sum_i m_i * b_i[a] * y_i[b]
+  # (b_i = body-frame template, y_i = COM-centered unconstrained target).
+  s_mat = jnp.einsum("i,ia,nib->nab", m_all, b_all, y_all)  # (N_waters, 3, 3)
+  sxx, sxy, sxz = s_mat[:, 0, 0], s_mat[:, 0, 1], s_mat[:, 0, 2]
+  syx, syy, syz = s_mat[:, 1, 0], s_mat[:, 1, 1], s_mat[:, 1, 2]
+  szx, szy, szz = s_mat[:, 2, 0], s_mat[:, 2, 1], s_mat[:, 2, 2]
 
-  # SVD: H = U @ S_values @ V^T
-  # Optimal rotation R = U @ V^T (ensures det(R) = +1 for proper rotation)
-  U, S_values, Vt = jnp.linalg.svd(weighted_H)
+  # Symmetric 4x4 Horn matrix N (per water), stacked to (N_waters, 4, 4).
+  row0 = jnp.stack([sxx + syy + szz, syz - szy, szx - sxz, sxy - syx], axis=-1)
+  row1 = jnp.stack([syz - szy, sxx - syy - szz, sxy + syx, szx + sxz], axis=-1)
+  row2 = jnp.stack([szx - sxz, sxy + syx, -sxx + syy - szz, syz + szy], axis=-1)
+  row3 = jnp.stack([sxy - syx, szx + sxz, syz + szy, -sxx - syy + szz], axis=-1)
+  n_mat = jnp.stack([row0, row1, row2, row3], axis=1)  # (N_waters, 4, 4)
 
-  # For proper rotation (det > 0), check and correct if needed
-  # Ensure det(R) = +1 by potentially flipping the sign of V's last column
-  det_UV = jnp.linalg.det(U @ Vt)
-  # If det < 0, flip the sign of the last column of V (equivalently, last row of Vt)
-  correction = jnp.where(det_UV < 0, -1.0, 1.0)
-  Vt_corrected = Vt * correction[:, None, None]
+  # Largest-eigenvalue eigenvector is the optimal quaternion (eigh: ascending).
+  _, eigvecs = jnp.linalg.eigh(n_mat)
+  quat = eigvecs[:, :, -1]  # (N_waters, 4): (q0, q1, q2, q3)
+  q0, q1, q2, q3 = quat[:, 0], quat[:, 1], quat[:, 2], quat[:, 3]
 
-  R = U @ Vt_corrected  # (N_waters, 3, 3)
-
-  # Ensure rotation is continuous: prefer the rotation closest to identity
-  # This helps with numerical stability and prevents flipping in degenerate cases
-  # Compute the trace: tr(R) = 1 + 2*cos(angle), so angle from trace
-  # If |tr(R) - 3| is large, it means large rotation, flip sign of eigenvector
-  trace_R = jnp.trace(R, axis1=1, axis2=2)  # (N_waters,)
-  # For planar molecules with small motion, prefer identity-like rotation
-  flip_R = jnp.where(trace_R < 1.5, -1.0, 1.0)  # (N_waters,)
-  R = R * flip_R[:, None, None]
+  # Quaternion -> rotation matrix (proper rotation by construction).
+  r00 = 1.0 - 2.0 * (q2 * q2 + q3 * q3)
+  r01 = 2.0 * (q1 * q2 - q0 * q3)
+  r02 = 2.0 * (q1 * q3 + q0 * q2)
+  r10 = 2.0 * (q1 * q2 + q0 * q3)
+  r11 = 1.0 - 2.0 * (q1 * q1 + q3 * q3)
+  r12 = 2.0 * (q2 * q3 - q0 * q1)
+  r20 = 2.0 * (q1 * q3 - q0 * q2)
+  r21 = 2.0 * (q2 * q3 + q0 * q1)
+  r22 = 1.0 - 2.0 * (q1 * q1 + q2 * q2)
+  R = jnp.stack(
+    [
+      jnp.stack([r00, r01, r02], axis=-1),
+      jnp.stack([r10, r11, r12], axis=-1),
+      jnp.stack([r20, r21, r22], axis=-1),
+    ],
+    axis=1,
+  )  # (N_waters, 3, 3), maps body-frame b_i -> target y_i
 
   # Apply rotation to body-frame template
   # R @ b_i for each atom i
