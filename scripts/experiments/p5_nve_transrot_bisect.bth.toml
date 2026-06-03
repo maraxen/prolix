@@ -1,0 +1,26 @@
+[experiment]
+hypothesis = "T_rot deficit is thermostat-noise covariance mismatch (mechanism B), not a deterministic projection sink (mechanism A)"
+
+[outcomes.pass]
+condition   = "split_k > -2.0"
+decision    = "implement B1: inertia-weighted OU noise at settle.py:144"
+reasoning   = "gamma=0 keeps T_rot near T_trans — thermostat noise is the culprit"
+
+[outcomes.ambiguous]
+condition   = "split_k > -5.0 AND split_k <= -2.0"
+decision    = "escalate to user with the numeric split_k"
+reasoning   = "borderline — human judgment required before fixing"
+
+[outcomes.fail]
+condition   = "split_k <= -5.0"
+decision    = "implement B2: angular-momentum-conserving RATTLE projection at settle.py:446"
+reasoning   = "gamma=0 shows T_rot drifting down — RATTLE projection is a deterministic rotational-KE sink"
+is_residual = true
+
+[result_schema]
+gamma     = "float"
+n_waters  = "int"
+steps     = "int"
+t_trans_k = "float"
+t_rot_k   = "float"
+split_k   = "float"
