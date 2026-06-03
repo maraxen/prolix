@@ -1,0 +1,65 @@
+---
+workspace: prolix
+session_id: 5fa0de33-cb11-4a7f-9453-2c1d5a853197
+status: in_progress
+immediately_relevant:
+- file: .praxia/docs/plans/260603_p5-settle-correctness-sprint.md
+  lines:
+  - 1
+  - 60
+  reason: The full sprint plan — phases, decision gate G-A, risk table, cluster/bathos discipline. Read first.
+- file: src/prolix/physics/settle.py
+  lines:
+  - 144
+  - 193
+  reason: _project_one_water_momentum_rigid (144) and project_tip3p_waters_momentum_rigid (174) — OU rotational noise (B-fix branch B1); _settle_water_batch (193) is the Horn fix already landed.
+- file: src/prolix/physics/settle.py
+  lines:
+  - 446
+  - 446
+  reason: settle_velocities — RATTLE velocity projection, the B-fix branch B2 (angular-momentum sink candidate).
+- file: tests/physics/test_p2b_nvt_216water.py
+  lines:
+  - 136
+  - 154
+  reason: The 895-water gate (DOF=6N-3 at line 47). Acceptance number. cpu preset only, never local.
+- file: tests/physics/test_settle_batched.py
+  lines:
+  - 445
+  - 445
+  reason: test_settle_batched_vs_unbatched — the elevated Phase C divergence (box-scale on cluster for both Horn and pre-Bug2, passes locally).
+active_dispatches:
+- 'SLURM 15374423 on engaging (cpu): heavy regression baoab_equivalence + settle_temperature_control — exited 1, output lost to compute-node /tmp; Phase E reclassification via script-file A/B to SLURM stdout'
+task_id: 260603_p5_settle_correctness
+phase: Phase 5
+goal_statement: Make explicit-solvent SETTLE certifiably correct (single-system + batched) to protect paper Claim 1 (heterogeneous batching) and retire the red 895-water NVT gate (293.8 K vs 300+/-5). NOT lifting the dt cap (explicit non-goal).
+context_refs:
+- phase: Phase 5
+  task_id: 260603_p5_rstep_liquid_density
+  summary: Prior session fixed Bug 1 (PBC min-image, 8192ea1) + Bug 2 (Horn quaternion rotation-preserving SETTLE, a42503d); gate 158K->293.8K. Residual rot-trans imbalance is this sprint's Phase A/B.
+failed_attempts:
+- attempt_id: b1
+  description: SVD/Kabsch rigid fit for _settle_water_batch (prior session, commit 4266d35)
+  outcome: Detonated test_integrator_energy_conservation (0.92 -> 1.5e7 over 100 steps)
+  reason_failed: TIP3P water is planar -> 3x3 cross-covariance rank-deficient -> SVD smallest singular vectors flip sign discontinuously -> spurious work. Use Horn 4x4 eigenvalue quaternion. DO NOT reintroduce SVD/Kabsch in any B-fix.
+  do_not_retry: true
+  evidence_ref: commit a42503d message
+- attempt_id: b3
+  description: Running the combined settle regression sweep (5 files) + 895-water test locally on WSL2
+  outcome: SIGTERM at 900s, nearly crashed the box (disk at 100%)
+  reason_failed: MD-scale CPU workloads saturate the local box. Cluster-first from the start (lesson 106). Only <60s single-system smokes may run local.
+  do_not_retry: true
+  evidence_ref: bg job bnssa220d exit 143
+open_questions:
+- User go/no-go on starting Phase 0 (worktree + campaign + backlog) vs reviewing the plan first.
+- 'Phase A mechanism: does T_rot drift down at gamma=0 (RATTLE projection sink) or only with thermostat on (OU rotational noise covariance mismatch)? Decides the B-fix branch.'
+deferred:
+- description: dt >= 1.0 fs / full constraint-aware thermostat redesign (Phase 5 epic)
+  rationale: Throughput is supporting/defensive (S2) not a paper headline; lifting dt buys little reviewer leverage and is honestly disclosed in CLAUDE.md. Parked until the paper demands it.
+  recommended_phase: Phase 5 (epic, later)
+- description: NPT long-trajectory divergence (>10 ps, ->10^115 K)
+  rationale: Separate CSVR+rigid-KE coupling problem, out of this sprint's SETTLE-correctness scope.
+  recommended_phase: Phase 6
+lessons_refs:
+- .praxia/lessons.jsonl
+---

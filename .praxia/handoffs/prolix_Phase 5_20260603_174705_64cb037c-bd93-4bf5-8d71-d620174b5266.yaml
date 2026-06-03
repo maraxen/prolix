@@ -1,0 +1,63 @@
+---
+workspace: prolix
+session_id: 5fa0de33-cb11-4a7f-9453-2c1d5a853197
+status: in_progress
+immediately_relevant:
+- file: src/prolix/physics/settle.py
+  lines:
+  - 266
+  - 330
+  reason: '_settle_water_batch: the new Horn quaternion rigid fit (mass-weighted cross-covariance -> 4x4 eigh -> quaternion -> R). This is the Bug 2 fix. Orientation now comes ONLY from new positions; positions_old used only for PBC unwrap.'
+- file: src/prolix/physics/settle.py
+  lines:
+  - 800
+  - 815
+  reason: Final _langevin_settle_vel (RATTLE) after the R-O-R sequence. The OU rotational coupling that likely causes the residual T_rot deficit lives in _langevin_step_o_constrained + the rigid momentum projection (project_tip3p_waters_momentum_rigid ~line 174, _project_one_water_momentum_rigid ~line 144).
+- file: tests/physics/test_p2b_nvt_216water.py
+  lines:
+  - 136
+  - 152
+  reason: The 895-water gate. Currently asserts |meanT-300|<5; got 293.8 K. DOF=6N-3 (line 47), full atomic KE — measurement is sound. Run on cluster cpu preset (slow ~9.6 min), never locally.
+- file: scripts/explore/p5_rot_substep.py
+  lines:
+  - 1
+  - 96
+  reason: Per-substep T_trans/T_rot trace. Post-fix shows T_rot held at 283-287 K through dp steps (was collapsing to ~12 K). Use to probe the residual rot-trans imbalance.
+active_dispatches:
+- 'SLURM 15374423 on engaging (cpu preset): heavy regression baoab_equivalence + settle_temperature_control — exited 1, output lost, NEEDS reclassification rerun'
+task_id: 260603_p5_rstep_liquid_density
+phase: Phase 5
+goal_statement: Make the 895-water liquid-density NVT gate (test_nvt_216water_temperature_stability) hold 300±5 K by fixing the SETTLE constraint that discarded rigid-body rotation (Bug 2).
+context_refs:
+- phase: Phase 5
+  task_id: 260603_p5_rstep_liquid_density
+  summary: Prior session fixed Bug 1 (PBC min-image, 8192ea1) and localized Bug 2 (rotation damping) to _settle_water_batch.
+failed_attempts:
+- attempt_id: b1
+  description: SVD/Kabsch rigid fit for _settle_water_batch (fixer's first implementation, commit 4266d35).
+  outcome: Passed single-step geometry unit tests but DETONATED test_integrator_energy_conservation (0.92 -> 1.5e7 over 100 steps).
+  reason_failed: TIP3P water is planar -> 3x3 cross-covariance is rank-deficient -> SVD smallest singular vectors flip sign discontinuously between steps -> discontinuous rotation matrix injects spurious work. Fixed by switching to Horn 4x4 eigenvalue quaternion (continuous through the planar case).
+  do_not_retry: true
+  evidence_ref: commit a42503d message
+- attempt_id: b2
+  description: trace(R)<1.5 -> R*(-1) 'continuity' patch on top of SVD to suppress the energy blowup.
+  outcome: Masked the energy explosion in tests but is physically wrong.
+  reason_failed: Multiplying a 3x3 rotation by -1 gives det=-1 (a reflection, not a rotation); would flip chirality for any rotation >75 degrees. Removed.
+  do_not_retry: true
+  evidence_ref: null
+- attempt_id: b3
+  description: Running the combined settle regression sweep (5 physics files) + 895-water test LOCALLY on the WSL2 box.
+  outcome: SIGTERM at 900s timeout without completing; nearly crashed the machine (disk had hit 100% earlier).
+  reason_failed: MD-scale CPU workloads saturate the local box. Route to cluster from the start (lesson 106).
+  do_not_retry: true
+  evidence_ref: bg job bnssa220d exit 143
+open_questions:
+- What is the mechanism of the residual ~6 K (T_rot ~285 vs T_trans ~299)? Is the OU thermostat's rotational-subspace noise covariance mismatched to the rotational inertia, or does the Horn least-squares position projection act as a small rotational-KE sink that the thermostat under-replenishes?
+- Did baoab_equivalence and/or settle_temperature_control genuinely fail with Horn on cpu (job 15374423 exit 1), or is it pre-existing? Output was lost; needs an A/B rerun writing to SLURM stdout.
+deferred:
+- description: Pre-existing batched vmap-vs-unbatched divergence in test_settle_batched_vs_unbatched (RMSD ~box-scale on cluster for BOTH Horn and pre-Bug2; passes locally).
+  rationale: Not caused by Bug 2; platform/PBC/RNG issue in the batched SETTLE path, already a documented v1.1 limitation.
+  recommended_phase: Phase 4 (Extended) batched SETTLE validation
+lessons_refs:
+- .praxia/lessons.jsonl
+---
