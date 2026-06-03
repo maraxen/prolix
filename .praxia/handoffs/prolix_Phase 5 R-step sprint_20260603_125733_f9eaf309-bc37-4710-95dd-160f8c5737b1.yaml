@@ -1,0 +1,77 @@
+---
+workspace: prolix
+session_id: 73d33642-4de4-484d-bb3e-5e02089216ec
+status: in_progress
+immediately_relevant:
+- file: src/prolix/physics/settle.py
+  lines:
+  - 712
+  - 850
+  reason: settle_langevin apply_fn with new R-step implementation (B-R-O-R-F-B). R-step = A(dt/2) + SETTLE_pos + dp=mass*(x_con-x_unc)/half_dt. No intermediate SETTLE_vel — that was the double-counting bug. Single SETTLE_vel kept at end.
+- file: scripts/experiments/openmm_oracle_tip3p.py
+  lines:
+  - 160
+  - 170
+  reason: 'sys.path fix at line ~162: _proj_root inserted before ''from tests.physics'' import. Run --smoke to verify import works before cluster submit.'
+- file: .praxia/docs/dynamic_workflows/260602_phase5-settle-rstep.js
+  lines:
+  - 1
+  - 50
+  reason: 'Two-phase workflow: impl (default) already ran. Verify phase needs args={phase:''verify'', oracle_job:''15367629'', gate_job:''15367630''}.'
+- file: tests/physics/test_p2b_nvt_216water.py
+  lines:
+  - 128
+  - 162
+  reason: 'xfail removed by workflow fixer. test_nvt_216water_temperature_stability is now a regular slow test. If gate job passes: n_passed=2, n_xfailed=0, gate_pass=1.'
+active_dispatches:
+- 'SLURM job 15367629 on engaging: OpenMM oracle (p5_oracle.slurm), campaign ef45b8b4, ~10 min'
+- 'SLURM job 15367630 on engaging: prolix R-step gate (p2b_slow_gate.slurm), campaign ef45b8b4, ~15 min'
+task_id: 260602_phase5_rstep
+phase: Phase 5 R-step sprint
+goal_statement: Fix liquid-density NVT energy injection in settle_langevin by implementing OpenMM-style R-step (A + SETTLE_pos + dp momentum correction) to achieve T=300±5K at 895-water TIP3P liquid density, closing the t2 gate xfail and unblocking P2b cross-validation.
+context_refs:
+- phase: P2b t2 gate v2
+  task_id: 260601_p2b_crossval_harness
+  summary: P2b gate closed (job 15337972, gate_pass=1, 1 passed+1 xfailed). Phase 5 R-step sprint starts here.
+failed_attempts:
+- attempt_id: a1-lfmiddle
+  description: LFMiddle O-step splitting hypothesis (campaign 89c9a900, 46 runs)
+  outcome: FALSIFIED — 0 passes across all dt values {0.25, 0.5, 1.0} fs
+  reason_failed: 'O-step splitting does not reduce SETTLE+thermostat coupling. Mean T: 13818 K at dt=0.25, 3.35e57 K at dt=1.0.'
+  do_not_retry: true
+  evidence_ref: .praxia/docs/handoffs/260601_p0-parallel-close.md
+- attempt_id: a2-double-settle-stale-ref
+  description: SETTLE after each A-step using positions_old (start-of-step) for both calls (job 15341583)
+  outcome: FAILED — T=8225 K. Stale reference caused incorrect SETTLE correction in second call.
+  reason_failed: Second SETTLE call needs positions_mid (constrained midpoint) as reference, not state.positions.
+  do_not_retry: true
+  evidence_ref: null
+- attempt_id: a3-double-settle-positions-mid
+  description: SETTLE after each A-step using positions_mid as second reference (job 15343380)
+  outcome: FAILED — T=19794 K (worse). Broke SETTLE_vel consistency.
+  reason_failed: SETTLE_vel at end uses state.positions→r_final, but r_final was constrained from positions_mid. Reference mismatch injected more energy.
+  do_not_retry: true
+  evidence_ref: null
+- attempt_id: a4-rstep-with-intermediate-settle-vel
+  description: 'Full R-step: dp correction + SETTLE_vel at each half-step (jobs 15347179/15347194)'
+  outcome: 'FAILED — T=5e48 K (catastrophic). Oracle also failed (ModuleNotFoundError: tests.physics).'
+  reason_failed: 'Double-counted constraint impulse: RATTLE (settle_velocities) already encodes dp=m*Δx/dt implicitly; adding explicit dp on top doubled every impulse. Also: oracle missing sys.path for tests import.'
+  do_not_retry: true
+  evidence_ref: null
+open_questions:
+- Does dp-only R-step (no intermediate SETTLE_vel) actually stabilize T at liquid density? Jobs 15367629/15367630 will answer this.
+- 'Is openmm installed in the cluster venv? If oracle fails with import error (not sys.path), need: ssh engaging ''uv add openmm --dev'''
+- 'If gate still fails: is the remaining energy injection from the final SETTLE_vel (which uses positions_mid→position, full dt) being inconsistent with the R-step geometry?'
+deferred:
+- description: dt-sweep campaign (dt in {0.5, 1.0, 2.0} fs) to test if R-step correction lifts the dt≤0.5fs constraint
+  rationale: Cannot run until gate passes and R-step is confirmed working at dt=0.5 fs
+  recommended_phase: Phase 5 extended (after C0 close)
+- description: P2b NVT strategic roadmap Phase 2b cross-validation formal close
+  rationale: Requires Phase 5 gate pass + trajectory parity (P5-A2)
+  recommended_phase: After P5-C0 (backlog item 862)
+- description: P3 benchmarks (DHFR throughput, gradient, memory scaling)
+  rationale: Blocked by P2b close
+  recommended_phase: After P2b close
+lessons_refs:
+- .praxia/lessons.jsonl
+---

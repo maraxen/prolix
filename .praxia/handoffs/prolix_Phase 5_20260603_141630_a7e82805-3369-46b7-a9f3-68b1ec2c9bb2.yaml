@@ -1,0 +1,70 @@
+---
+workspace: prolix
+session_id: 572b4062-14d2-4193-b040-dced2c0521d1
+status: in_progress
+immediately_relevant:
+- file: src/prolix/physics/settle.py
+  lines:
+  - 193
+  - 220
+  reason: _settle_water_batch — the SETTLE reconstruction that snaps orientation back to positions_old (step 3 builds frame from OLD positions). This is the OPEN Bug 2 root cause; must preserve rigid rotation.
+- file: src/prolix/physics/settle.py
+  lines:
+  - 743
+  - 758
+  reason: R1 dp impulse with the new min-image fix (Bug 1). dp damps rotation because settle_positions removes it; once settle is fixed this dp becomes correct.
+- file: src/prolix/physics/settle.py
+  lines:
+  - 778
+  - 790
+  reason: R2 dp impulse (min-image fix). Same as R1.
+- file: scripts/explore/p5_rot_substep.py
+  lines:
+  - 1
+  - 20
+  reason: Per-substep T_rot trace that localized Bug 2 to dp_1/dp_2 (286->58->12). Use to verify the rotation fix.
+- file: .praxia/docs/research/260603_p5-rstep-liquid-density-rootcause.md
+  lines:
+  - 1
+  - 40
+  reason: Full two-bug root-cause writeup with all evidence.
+active_dispatches: []
+task_id: 260603_p5_rstep_liquid_density
+phase: Phase 5
+goal_statement: 'Lift the dt<=0.5fs constraint via a constraint-aware thermostat: make the 895-water liquid-density NVT gate (test_nvt_216water_temperature_stability) hold 300+-5 K.'
+context_refs:
+- phase: Phase 5 setup
+  task_id: 260602_phase5_settle_rstep
+  summary: PCW instance 33, campaign ef45b8b4; f2fc117 introduced dp-only R-steps (removed double-counted intermediate SETTLE_vel) on branch worktree-glowing-orbiting-bear.
+- phase: P0
+  task_id: 260601_p0_outcomes
+  summary: LFMiddle falsified; Phase 5 constraint-aware thermostat is the only known path to dt>=1fs.
+failed_attempts:
+- attempt_id: a1
+  description: Earlier sprint added explicit dp correction ON TOP of intermediate SETTLE_vel in each R-step (be731b2 / main HEAD 72b5418).
+  outcome: T -> 5e48 K; double-counted the constraint impulse.
+  reason_failed: settle_velocities (RATTLE) already encodes v += (x_con-x_old)/dt implicitly; adding explicit dp doubled every impulse.
+  do_not_retry: true
+  evidence_ref: null
+- attempt_id: a2
+  description: dp-only R-step (f2fc117) WITHOUT minimum-image on (x_con - x_unc).
+  outcome: T -> 7e53 K on cluster gate (job 15367630); 1e9 K in one step locally.
+  reason_failed: Raw coordinate diff jumps a full box vector when shift_fn wraps atoms that start outside [0,box). 91/2685 liquid atoms are outside the cell.
+  do_not_retry: true
+  evidence_ref: scripts/explore/p5_rstep_substep_trace.py
+- attempt_id: a3
+  description: 'Hypothesis: divergence caused by initial geometry being off the SETTLE manifold.'
+  outcome: Falsified — loaded O-H/H-H distances within 0.0013 A of TIP3P targets.
+  reason_failed: Initial geometry is essentially on-manifold; not the cause.
+  do_not_retry: true
+  evidence_ref: null
+open_questions:
+- Is _settle_water_batch's in-plane-phi reconstruction (step 5) only handling in-plane rotation, losing out-of-plane (e.g. about-x) rotation? The decisive test rotated about x.
+- Does init_fn also need to pre-wrap initial positions into [0,box), or is the min-image dp fix sufficient on its own for long trajectories?
+deferred:
+- description: Sync the combined fix (8192ea1) onto a canonical branch — note main HEAD 72b5418 still has the old double-counting code; the tested dp-only code lived on worktree-glowing-orbiting-bear (f2fc117) and the cluster ran it as an uncommitted rsync over base 78f5f5b.
+  rationale: Branch/commit hygiene; the working code is currently only on worktree-p5-rstep-liquid-density.
+  recommended_phase: Phase 5
+lessons_refs:
+- .praxia/lessons.jsonl
+---
