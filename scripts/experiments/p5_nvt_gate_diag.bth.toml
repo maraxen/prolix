@@ -22,7 +22,6 @@ reasoning = "Mean T over 5 seeds within 300±5 K means the 293.83 K single-seed 
 is_residual = false
 
 [outcomes.systematic_rot]
-condition = "gate_pass = 0 AND q2_decomp_T_rot < 290 AND q3_ou_comparison_delta_K < -2"
 condition = "gate_pass = 0"
 decision = "Gate fails. Check q2 and q3 values: if T_rot << T_trans and unconstrained OU is closer to 300K, the O-step projection is draining rotational KE. Fix: remove P(p_in) projection from O-step entry in _langevin_step_o_constrained."
 reasoning = "Persistent T_rot deficit + projection-removes-gain confirms the c1*P(p_in) drain hypothesis."
