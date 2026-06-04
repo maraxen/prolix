@@ -1,0 +1,7 @@
+{
+  "mean_t": 0.0,
+  "std_t": 0.0,
+  "gate_pass": 0,
+  "n_steps": 3000,
+  "error": "No template found for residue 0 (WAT).  The set of atoms matches HOH, but the bonds are different.  Perhaps the chain is missing a terminal group?  For more information, see https://github.com/openmm/openmm/wiki/Frequently-Asked-Questions#template"
+}

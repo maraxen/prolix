@@ -1,0 +1,66 @@
+---
+workspace: prolix
+session_id: 5fa0de33-cb11-4a7f-9453-2c1d5a853197
+status: in_progress
+immediately_relevant:
+- file: .praxia/workflows/p5_settle_correctness.js
+  lines:
+  - 329
+  - 395
+  reason: Gate-A section — replace the agent() call with a hardcoded const after reading cluster results
+- file: scripts/experiments/p5_nve_transrot_bisect.py
+  lines:
+  - 1
+  - 30
+  reason: Bisect script on cluster — confirms --out is a required arg, do not use bth run without -- separator
+active_dispatches:
+- SLURM 15387511 (γ=0, p5_bisect_g0, mit_normal cpu preset)
+- SLURM 15387514 (γ=10, p5_bisect_g10, mit_normal cpu preset)
+- ScheduleWakeup at ~13:58 to check completion
+task_id: 260603_p5_settle_correctness
+phase: Gate-A
+goal_statement: Run 895-water NVE γ=0 and γ=10 bisection jobs on cluster, read split_k from output JSON, hardcode Gate-A result in workflow script, resume workflow through Fix-B/C/Certify/Close.
+context_refs:
+- phase: Diagnose (cached)
+  task_id: 260603_p5_settle_correctness
+  summary: 'campaign_id=cd2fa896, head_sha=a2a83fb; aDesign.l2_split_k_indicative=+31.48K (meaningless at 8w); cChar: platform_precision / fix_code'
+failed_attempts:
+- attempt_id: ga1
+  description: Gate-A myxcel agent submitted jobs using aDesign.script_path (worktree path)
+  outcome: 'Jobs 15381934/15381935 failed in 1s: path does not exist on cluster'
+  reason_failed: 'A-design wrote script to worktree; push_project syncs main project only. Fix: copy script to main project, commit, push.'
+  do_not_retry: true
+  evidence_ref: null
+- attempt_id: ga2
+  description: Gate-A agent used 'cd /home/marielle/projects/prolix' in cluster bth run command
+  outcome: 'Jobs 15383780/15383782 failed in 1s: ''bash: cd: /home/marielle/...: No such file or directory'''
+  reason_failed: Cluster username is maarxaru, home is /home/maarxaru/. All cluster-submitted commands must use ~/projects/prolix, never /home/marielle/.
+  do_not_retry: true
+  evidence_ref: null
+- attempt_id: ga3
+  description: Used 'uv run bth run python <script> --gamma 0 --out outputs/...' without -- separator
+  outcome: 'Jobs 15384816/15384817 failed exit 2: ''error: the following arguments are required: --out'''
+  reason_failed: bth run treats --out as its own flag. Script args must follow '--' separator, OR use plain 'uv run python' without bth wrapper.
+  do_not_retry: true
+  evidence_ref: null
+- attempt_id: ga4
+  description: Called mcp__myxcel__job_wait on cluster jobs
+  outcome: 'Always errors: ''sacct: fatal: AllocGRES has been removed, please use AllocTRES'''
+  reason_failed: engaging sacct is misconfigured. job_wait internally uses sacct and always fails. Check completion via squeue instead.
+  do_not_retry: true
+  evidence_ref: null
+- attempt_id: ga5
+  description: Delegated Gate-A cluster submission to myxcel-cluster-ops workflow agent
+  outcome: Agent burned 55k+ tokens in tail_job_log polling loops, ignored anti-polling instructions
+  reason_failed: 'Workflow subagents ignore anti-polling instructions under auto-mode. Gate-A must be done from main session: submit_job + ScheduleWakeup to check, then hardcode result.'
+  do_not_retry: true
+  evidence_ref: null
+open_questions:
+- 'What are the split_k values from jobs 15387511 (γ=0) and 15387514 (γ=10)? This determines Phase B branch: B1 (noise_covariance) vs B2 (projection_sink).'
+deferred:
+- description: Certify phase uses 'cd ${PROJECT}' in cluster pytest commands — same wrong-home-dir bug as ga2
+  rationale: Not yet reached; Gate-A is still in flight
+  recommended_phase: Phase D — fix before resuming Certify agent
+lessons_refs:
+- .praxia/lessons.jsonl
+---

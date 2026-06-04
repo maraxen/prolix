@@ -1,0 +1,57 @@
+---
+workspace: prolix
+session_id: 5fa0de33-cb11-4a7f-9453-2c1d5a853197
+status: in_progress
+immediately_relevant:
+- file: src/prolix/physics/settle.py
+  lines:
+  - 490
+  - 560
+  reason: _remove_angular_momentum_from_impulse — the linalg.solve call at ~line 537 is inside the scan body and causes XLA compile timeout on 895-water test. Replace with explicit 3x3 Cramer-rule.
+- file: src/prolix/physics/settle.py
+  lines:
+  - 228
+  - 250
+  reason: '_settle_water_batch minimum_image: `delta - box * jnp.round(delta / box)` at ~233. Replace round() with floor(x+0.5) to avoid FMA ULP ambiguity that causes 8.975A batched RMSD on cluster.'
+- file: .praxia/workflows/p5_settle_correctness.js
+  lines:
+  - 590
+  - 615
+  reason: Certify phase STEP 3 — test_settle_temperature_control.py must be submitted with cpu preset (12h), not mit_quicktest (14min). XLA compile alone exceeds 14 min.
+active_dispatches: []
+task_id: 260603_p5_settle_correctness
+phase: Certify
+goal_statement: Fix three Certify blockers, re-run certification suite on cluster, get reviewer PASS, close sprint.
+context_refs:
+- phase: Gate-A
+  task_id: 260603_p5_settle_correctness
+  summary: 'G-A result hardcoded: projection_sink, split_k_gamma0=-103.4K (SLURM 15387511/15387514). Mechanism confirmed: RATTLE velocity projection is deterministic rotational-KE sink at gamma=0.'
+- phase: Fix-B/C
+  task_id: 260603_p5_settle_correctness
+  summary: 'Fix-B (4b00c9d): _remove_angular_momentum_from_impulse added to settle_velocities; Fix-C (89ee670): linalg.solve vector-rhs API fix. Single-system tests 5/5 rotation + 9/9 settle pass.'
+failed_attempts:
+- attempt_id: cert1
+  description: Certify ran with Phase B+C commits on cluster (workflow wf_9048c21b-df8 Certify agent, 6 agents total, 168k tokens)
+  outcome: gate_895w_pass=false (JAX hang), batched RMSD=8.975A, temperature_control CANCELLED
+  reason_failed: 'Three separate issues: (1) linalg.solve in scan body → XLA compile timeout; (2) minimum_image ULP not fixed by Fix-C; (3) quicktest 14min walltime too short for XLA compile of temperature_control tests'
+  do_not_retry: true
+  evidence_ref: workflow task w5xkuvwti, cert result in task notification
+- attempt_id: cert_reviewer_eigen
+  description: Reviewer diagnosed batched divergence as Horn quaternion eigenvector sign instability across vmap lanes
+  outcome: This diagnosis is physically incorrect
+  reason_failed: R(-q) = R(q) for quaternion rotation matrices — sign flip does not change the rotation output. The actual cause is FMA-sensitive minimum_image at settle.py:233. Do not implement eigenvector sign-fixing as a fix for the batched divergence.
+  do_not_retry: true
+  evidence_ref: null
+open_questions:
+- 'After Cramer-rule fix for linalg.solve: does the 895-water test complete without hanging? (Should — eliminates the XLA solver kernel from scan body)'
+- 'After floor(x+0.5) minimum_image fix: does batched RMSD drop below 1e-10? (May need tolerance if residual FMA sensitivity remains)'
+deferred:
+- description: bathos bth run provenance for Gate-A bisection runs 15387511/15387514 — these were submitted without bth wrapper so no campaign association
+  rationale: Not on critical path; runs succeeded and results are hardcoded
+  recommended_phase: Phase E Close
+- description: SLURM job 15374423 reclassification (p5b2-heav+, COMPLETED but flagged in Phase E Close)
+  rationale: Phase E not yet reached
+  recommended_phase: Phase E Close
+lessons_refs:
+- .praxia/lessons.jsonl
+---
