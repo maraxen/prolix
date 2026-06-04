@@ -1,30 +1,28 @@
 [experiment]
 hypothesis = """
-Phase 5 Bug 2 fix (Horn quaternion SETTLE, commit a42503d) raised the 895-water
-NVT gate from 158 K to 293.83 K. The 6.17 K residual gap was initially attributed
-to isotropic OU noise covariance, but debug_noise_covariance.py confirmed the
-noise is correct (ratio_v2=0.9977). This experiment tests three hypotheses:
+B1 fix (commit 485f754): replacing the 6×6 G-matrix Cholesky in _ou_noise_one_water_rigid
+with explicit 3+3 trans/rot block decomposition eliminates numerical cross-mode coupling
+and brings mean NVT T within 300±5 K for 895-water TIP3P.
 
-  H1 (statistical): 293.83 K is a seed-42 fluke (σ~2 K); mean over 5 seeds ≈ 300 K
-  H2 (DOF mismatch): T_rot << T_trans — rotational DOF are underpowered
-  H3 (projection drain): unconstrained OU (no P(p_in) at O-step) gives T closer to 300 K
+Prior diagnostic (run c3206007, campaign 933024dc) showed:
+  mean T = 294.80 ± 1.08 K over 5 seeds (target 300 K, error 5.20 K)
+  T_trans = 305.9 K, T_rot = 281.7 K (+/-23 K imbalance)
 
-Decision tree:
-  H1 confirmed (mean 295-305 K): gate already passes, close Phase 5 diagnostic
-  H2 confirmed (T_rot << T_trans): root cause is rotational DOF underpowering
-  H3 confirmed (unconstrained T closer to 300 K): projection is the bias source
+Expected outcome after B1 fix:
+  T_trans ≈ T_rot ≈ 300 K (within ±5 K each)
+  mean T within 300±5 K → gate_pass = 1
 """
 
 [outcomes.pass]
 condition = "gate_pass = 1"
-decision = "Gate passes. H1 confirmed (statistical fluke). No code change needed — close P5 diagnostic and run full gate on cluster to confirm."
-reasoning = "Mean T over 5 seeds within 300±5 K means the 293.83 K single-seed result was statistical noise."
+decision = "B1 fix confirmed. Gate passes. Close Phase 5 / Phase D Certify. Merge worktree to main."
+reasoning = "Mean T over 5 seeds within 300±5 K confirms the trans+rot block decomposition gives correct equipartition."
 is_residual = false
 
-[outcomes.systematic_rot]
+[outcomes.fail]
 condition = "gate_pass = 0"
-decision = "Gate fails. Check q2 and q3 values: if T_rot << T_trans and unconstrained OU is closer to 300K, the O-step projection is draining rotational KE. Fix: remove P(p_in) projection from O-step entry in _langevin_step_o_constrained."
-reasoning = "Persistent T_rot deficit + projection-removes-gain confirms the c1*P(p_in) drain hypothesis."
+decision = "B1 fix insufficient. Inspect T_trans and T_rot values from q2_decomp; if imbalance persists, deeper investigation needed (SETTLE_vel impulse coupling, c1/c2 scaling, or DOF counting error)."
+reasoning = "Persistent gate failure after explicit block decomposition means a different mechanism is active."
 is_residual = true
 
 [result_schema]
@@ -40,5 +38,6 @@ q3_ou_comparison_unconstrained_T = "float"
 q3_ou_comparison_delta_K = "float"
 
 [metadata]
-campaign = "p5-nvt-gate-diag"
-phase = "Phase 5 constraint-aware thermostat diagnostic"
+campaign = "p5-b1-verify"
+phase = "Phase 5 B1 inertia-weighted noise fix verification"
+task_id = "260603_p5_settle_correctness"
