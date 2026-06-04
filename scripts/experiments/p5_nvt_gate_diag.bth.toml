@@ -1,0 +1,45 @@
+[experiment]
+hypothesis = """
+Phase 5 Bug 2 fix (Horn quaternion SETTLE, commit a42503d) raised the 895-water
+NVT gate from 158 K to 293.83 K. The 6.17 K residual gap was initially attributed
+to isotropic OU noise covariance, but debug_noise_covariance.py confirmed the
+noise is correct (ratio_v2=0.9977). This experiment tests three hypotheses:
+
+  H1 (statistical): 293.83 K is a seed-42 fluke (σ~2 K); mean over 5 seeds ≈ 300 K
+  H2 (DOF mismatch): T_rot << T_trans — rotational DOF are underpowered
+  H3 (projection drain): unconstrained OU (no P(p_in) at O-step) gives T closer to 300 K
+
+Decision tree:
+  H1 confirmed (mean 295-305 K): gate already passes, close Phase 5 diagnostic
+  H2 confirmed (T_rot << T_trans): root cause is rotational DOF underpowering
+  H3 confirmed (unconstrained T closer to 300 K): projection is the bias source
+"""
+
+[outcomes.pass]
+condition = "gate_pass = 1"
+decision = "Gate passes. H1 confirmed (statistical fluke). No code change needed — close P5 diagnostic and run full gate on cluster to confirm."
+reasoning = "Mean T over 5 seeds within 300±5 K means the 293.83 K single-seed result was statistical noise."
+is_residual = false
+
+[outcomes.systematic_rot]
+condition = "gate_pass = 0 AND q2_decomp_T_rot < 290 AND q3_ou_comparison_delta_K < -2"
+condition = "gate_pass = 0"
+decision = "Gate fails. Check q2 and q3 values: if T_rot << T_trans and unconstrained OU is closer to 300K, the O-step projection is draining rotational KE. Fix: remove P(p_in) projection from O-step entry in _langevin_step_o_constrained."
+reasoning = "Persistent T_rot deficit + projection-removes-gain confirms the c1*P(p_in) drain hypothesis."
+is_residual = true
+
+[result_schema]
+gate_pass = "int"
+gate_error_k = "float"
+q1_mean_t = "float"
+q1_std_t = "float"
+q2_decomp_T_total = "float"
+q2_decomp_T_trans = "float"
+q2_decomp_T_rot = "float"
+q3_ou_comparison_constrained_T = "float"
+q3_ou_comparison_unconstrained_T = "float"
+q3_ou_comparison_delta_K = "float"
+
+[metadata]
+campaign = "p5-nvt-gate-diag"
+phase = "Phase 5 constraint-aware thermostat diagnostic"
