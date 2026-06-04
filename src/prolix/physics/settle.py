@@ -110,19 +110,37 @@ def settle_positions(
     box,
   )
 
-  # Re-wrap constrained positions back into the periodic box
-  # Use MOLECULE-CENTERED wrapping: wrap based on O position,
-  # then apply same displacement to H atoms to preserve geometry
+  # Re-wrap constrained positions using minimum-image relative to the
+  # UNCONSTRAINED oxygen position (pos_oxygen_new), not jnp.mod on the
+  # constrained position directly.
+  #
+  # WHY NOT jnp.mod(pos_oxygen_c, box): jnp.mod has a hard discontinuity at
+  # every integer multiple of box.  When pos_oxygen_c sits within floating-
+  # point epsilon of a face (e.g. 10.0000000001 vs 9.9999999999) due to FMA
+  # reassociation differences between CPU and GPU XLA backends, jnp.mod maps
+  # the two values to opposite ends of the box (0 vs ~10), producing a ±box
+  # jump and a divergent trajectory between otherwise identical vmap replicas.
+  #
+  # FIX: apply minimum-image of pos_oxygen_c relative to pos_oxygen_new (the
+  # unconstrained O position, which is already in [0, box) because the caller
+  # wraps positions each step via shift_fn).  The SETTLE geometry correction is
+  # sub-Ångström, so pos_oxygen_c is within a fraction of a bond-length of
+  # pos_oxygen_new, and the minimum-image delta is << 0.5 box.  The only
+  # exception is a genuine PBC crossing (|delta| ≈ box), handled by round().
+  # Crucially, the image decision is based on (pos_oxygen_c - pos_oxygen_new),
+  # NOT on pos_oxygen_c alone, so FMA-level differences in the Horn-SETTLE
+  # result (9.9999... vs 10.0000...) produce a delta difference of only ~1e-7,
+  # not the ±box discontinuity that jnp.mod exhibits.
   if box is not None:
-    r_oxygen_wrapped = jnp.mod(pos_oxygen_c, box)
-    wrap_displacement = r_oxygen_wrapped - pos_oxygen_c  # (N_waters, 3)
+    # Minimum-image of pos_oxygen_c relative to pos_oxygen_new.
+    # All three constrained atoms get the same rigid integer-image shift so
+    # the molecule's internal geometry is not distorted.
+    delta_o = pos_oxygen_c - pos_oxygen_new
+    image_correction = -box * jnp.round(delta_o / box)
 
-    # Apply same displacement to H atoms
-    r_h1_wrapped = pos_h1_c + wrap_displacement
-    r_h2_wrapped = pos_h2_c + wrap_displacement
-    pos_oxygen_c = r_oxygen_wrapped
-    pos_h1_c = r_h1_wrapped
-    pos_h2_c = r_h2_wrapped
+    pos_oxygen_c = pos_oxygen_c + image_correction
+    pos_h1_c = pos_h1_c + image_correction
+    pos_h2_c = pos_h2_c + image_correction
 
   # Update positions in result array
   positions_constrained = positions_unconstrained.at[indices.oxygen].set(pos_oxygen_c)
@@ -217,6 +235,15 @@ def _settle_water_batch(
   Preserves COM position while correcting internal bond lengths and angles.
   Uses rotation-preserving rigid fit (Horn method) to avoid damping genuine molecular rotation.
 
+  NOTES:
+  - PBC unwrap uses ``jnp.floor(delta/box + 0.5)`` rather than ``jnp.round``.
+    ``jnp.round`` applies banker's rounding (round-half-to-even); under XLA FMA
+    contraction on cluster hardware, values at ULP proximity to ±0.5 can round
+    in opposite directions on the loop path vs the vmap path, producing an
+    8.975 Å RMSD in ``test_settle_batched_vs_unbatched`` on the Engaging cluster
+    while passing locally.  ``floor(x + 0.5)`` gives deterministic round-half-up
+    regardless of FMA reassociation order.
+
   Args:
       r_O_old, r_H1_old, r_H2_old: Old positions (used for PBC unwrap only).
       r_O_new, r_H1_new, r_H2_new: Unconstrained new positions.
@@ -228,13 +255,14 @@ def _settle_water_batch(
   Returns:
       Tuple of constrained positions (r_O_c, r_H1_c, r_H2_c).
   """
-  # Apply minimum image convention if box is provided
-  # This unwraps R_new relative to R_old to handle PBC crossings
+  # Apply minimum image convention if box is provided.
+  # floor(x + 0.5) instead of round(x): deterministic round-half-up avoids
+  # FMA ULP banker's rounding divergence between loop and vmap paths on cluster.
   if box is not None:
 
     def unwrap(pos_new, pos_old):
       delta = pos_new - pos_old
-      delta = delta - box * jnp.round(delta / box)
+      delta = delta - box * jnp.floor(delta / box + 0.5)
       return pos_old + delta
 
     pos_oxygen_new = unwrap(pos_oxygen_new, pos_oxygen_old)
@@ -443,6 +471,146 @@ def _apply_rattle_velocity_correction_with_residual(
   return vel_new, residual
 
 
+def _remove_angular_momentum_from_impulse(
+  vel_unconstrained: Array,
+  vel_constrained: Array,
+  indices: "WaterIndices",
+  pos_constrained_O: Array,
+  pos_constrained_H1: Array,
+  pos_constrained_H2: Array,
+  mass_oxygen: float,
+  mass_hydrogen: float,
+) -> Array:
+  """Remove the angular-momentum component from the RATTLE velocity impulse.
+
+  RATTLE bond projections satisfy zero relative velocity along bonds, but the
+  resulting impulse dp_i = m_i*(v_con_i - v_unc_i) can carry a net angular
+  momentum, causing T_rot to drift downward deterministically.
+
+  This function computes the angular momentum of dp for each water, solves for
+  the equivalent rigid-body angular velocity omega, and subtracts the rotational
+  part from dp, leaving only the radial bond-stretch contribution.
+
+  Algorithm (vectorised over all waters):
+    1. r_com = sum_i(m_i * r_con_i) / m_total
+    2. d_i   = r_con_i - r_com
+    3. dp_i  = m_i * (v_con_i - v_unc_i)
+    4. L     = sum_i d_i x dp_i          (AM of dp impulse)
+    5. I_ab  = sum_i m_i*(|d_i|^2*delta_ab - d_ia*d_ib)  (inertia tensor)
+    6. omega = I^{-1} L                  (angular velocity; explicit Cramer's rule)
+    7. dp_i -= m_i * (omega x d_i)       (subtract angular component)
+    8. return v_unc + dp_corrected / m_i
+
+  NOTES:
+  - Step 6 uses explicit 3×3 Cramer's rule instead of ``jnp.linalg.solve``.
+    At 895-water scale inside ``lax.scan``, ``linalg.solve`` dispatches an XLA
+    batched-linear-solver kernel whose scheduling interacts badly with the scan
+    loop, causing a hang (observed on Engaging cluster, job 15374423 and Certify
+    Phase D).  Cramer's rule expands to pure scalar multiply-add ops that XLA can
+    fully fuse without a separate kernel dispatch.  The inertia tensor is always
+    symmetric positive-definite for physical geometries, so the determinant is
+    never zero and the explicit inverse is numerically equivalent.
+
+  Args:
+      vel_unconstrained: Velocities before RATTLE (N_atoms, 3).
+      vel_constrained: Velocities after RATTLE convergence (N_atoms, 3).
+      indices: WaterIndices with oxygen, hydrogen1, hydrogen2 index arrays.
+      pos_constrained_O: Constrained O positions (N_waters, 3).
+      pos_constrained_H1: Constrained H1 positions (N_waters, 3).
+      pos_constrained_H2: Constrained H2 positions (N_waters, 3).
+      mass_oxygen: Mass of oxygen atom.
+      mass_hydrogen: Mass of hydrogen atom.
+
+  Returns:
+      Velocity array with AM-corrected RATTLE impulse applied (N_atoms, 3).
+  """
+  mass_total = mass_oxygen + 2.0 * mass_hydrogen
+  m_all = jnp.array([mass_oxygen, mass_hydrogen, mass_hydrogen])  # (3,)
+
+  # Stack constrained positions: (N_waters, 3, 3) — axis-1 indexes O/H1/H2
+  r_con = jnp.stack(
+    [pos_constrained_O, pos_constrained_H1, pos_constrained_H2], axis=1
+  )  # (N_waters, 3, 3)
+
+  # COM from constrained positions: (N_waters, 3)
+  r_com = jnp.einsum("i,nij->nj", m_all, r_con) / mass_total  # (N_waters, 3)
+
+  # Relative positions from COM: d_i = r_con_i - r_com  => (N_waters, 3, 3)
+  d = r_con - r_com[:, None, :]  # (N_waters, 3, 3); axis-1 = O/H1/H2
+
+  # Velocity impulse dp_i = m_i * (v_con_i - v_unc_i)
+  dv_O = (
+    vel_constrained[indices.oxygen] - vel_unconstrained[indices.oxygen]
+  )  # (N_waters, 3)
+  dv_H1 = (
+    vel_constrained[indices.hydrogen1] - vel_unconstrained[indices.hydrogen1]
+  )  # (N_waters, 3)
+  dv_H2 = (
+    vel_constrained[indices.hydrogen2] - vel_unconstrained[indices.hydrogen2]
+  )  # (N_waters, 3)
+
+  # dp_i = m_i * dv_i; shape (N_waters, 3, 3) — axis-1 indexes O/H1/H2
+  dp = jnp.stack(
+    [
+      mass_oxygen * dv_O,
+      mass_hydrogen * dv_H1,
+      mass_hydrogen * dv_H2,
+    ],
+    axis=1,
+  )  # (N_waters, 3, 3)
+
+  # Angular momentum of impulse: L = sum_i d_i x dp_i  => (N_waters, 3)
+  L = jnp.sum(jnp.cross(d, dp), axis=1)  # (N_waters, 3)
+
+  # Inertia tensor: I_ab = sum_i m_i*(|d_i|^2*delta_ab - d_ia*d_ib) => (N_waters, 3, 3)
+  d_sq = jnp.sum(d**2, axis=-1)  # (N_waters, 3): |d_i|^2 per atom
+  # sum_i m_i*|d_i|^2 per water => (N_waters,)
+  trace_term = jnp.einsum("i,ni->n", m_all, d_sq)  # (N_waters,)
+  # sum_i m_i*d_ia*d_ib => (N_waters, 3, 3)
+  outer_term = jnp.einsum("i,nia,nib->nab", m_all, d, d)  # (N_waters, 3, 3)
+  I_eye = trace_term[:, None, None] * jnp.eye(3)[None, :, :]  # (N_waters, 3, 3)
+  I_tensor = I_eye - outer_term  # (N_waters, 3, 3)
+
+  # omega = I^{-1} L via explicit 3×3 Cramer's rule (see NOTES in docstring).
+  # Extract elements for batched scalar arithmetic.
+  _a00, _a01, _a02 = I_tensor[:, 0, 0], I_tensor[:, 0, 1], I_tensor[:, 0, 2]
+  _a10, _a11, _a12 = I_tensor[:, 1, 0], I_tensor[:, 1, 1], I_tensor[:, 1, 2]
+  _a20, _a21, _a22 = I_tensor[:, 2, 0], I_tensor[:, 2, 1], I_tensor[:, 2, 2]
+  _det = (
+    _a00 * (_a11 * _a22 - _a12 * _a21)
+    - _a01 * (_a10 * _a22 - _a12 * _a20)
+    + _a02 * (_a10 * _a21 - _a11 * _a20)
+  )
+  _Lx, _Ly, _Lz = L[:, 0], L[:, 1], L[:, 2]
+  _inv = 1.0 / _det
+  omega = jnp.stack([  # (N_waters, 3)
+    _inv * ((_a11 * _a22 - _a12 * _a21) * _Lx + (_a02 * _a21 - _a01 * _a22) * _Ly + (_a01 * _a12 - _a02 * _a11) * _Lz),
+    _inv * ((_a12 * _a20 - _a10 * _a22) * _Lx + (_a00 * _a22 - _a02 * _a20) * _Ly + (_a02 * _a10 - _a00 * _a12) * _Lz),
+    _inv * ((_a10 * _a21 - _a11 * _a20) * _Lx + (_a01 * _a20 - _a00 * _a21) * _Ly + (_a00 * _a11 - _a01 * _a10) * _Lz),
+  ], axis=-1)
+
+  # Angular impulse to subtract: m_i * (omega x d_i) for each atom
+  # omega broadcast over atom axis: (N_waters, 1, 3) x (N_waters, 3, 3)
+  omega_exp = omega[:, None, :]  # (N_waters, 1, 3)
+  # cross product: (omega x d_i) per atom => (N_waters, 3, 3)
+  omega_cross_d = jnp.cross(omega_exp * jnp.ones_like(d), d)  # (N_waters, 3, 3)
+  # m_i * (omega x d_i): broadcast mass per atom
+  angular_dp = m_all[None, :, None] * omega_cross_d  # (N_waters, 3, 3)
+
+  # Corrected impulse: remove angular part
+  dp_corrected = dp - angular_dp  # (N_waters, 3, 3)
+
+  # Apply corrected dv = dp_corrected / m_i back to velocity array
+  dv_O_cor = dp_corrected[:, 0, :] / mass_oxygen
+  dv_H1_cor = dp_corrected[:, 1, :] / mass_hydrogen
+  dv_H2_cor = dp_corrected[:, 2, :] / mass_hydrogen
+
+  vel_out = vel_unconstrained.at[indices.oxygen].add(dv_O_cor)
+  vel_out = vel_out.at[indices.hydrogen1].add(dv_H1_cor)
+  vel_out = vel_out.at[indices.hydrogen2].add(dv_H2_cor)
+  return vel_out
+
+
 def settle_velocities(
   velocities: Array,
   positions_old: Array,
@@ -460,9 +628,12 @@ def settle_velocities(
   1.  **Extract Indices**: Use `WaterIndices` for O, H1, H2.
   2.  **Bond Vectors**: Compute normalized bond vectors $\hat{n}_{ij}$ from constrained positions.
   3.  **RATTLE Loop**: Iterate velocity corrections to satisfy $\vec{v}_{ij} \cdot \hat{n}_{ij} = 0$.
+  4.  **AM Correction**: Remove the angular-momentum component from the RATTLE impulse
+      so that T_rot is not drained by constraint projection.
 
   Notes:
-  This ensures velocities are consistent with the rigid constraints.
+  This ensures velocities are consistent with the rigid constraints while
+  preserving angular momentum of each water molecule.
   Typically converges in 1-5 iterations.
 
   Args:
@@ -473,7 +644,7 @@ def settle_velocities(
       m_O, m_H: Masses.
 
   Returns:
-      Constrained velocities array.
+      Constrained velocities array with angular-momentum-conserving RATTLE projection.
   """
   if water_indices.shape[0] == 0:
     return velocities
@@ -494,7 +665,7 @@ def settle_velocities(
   # Iterate a few times for convergence.
   n_iters = max(int(n_iters), 0)
   if adaptive_tol is None:
-    return jax.lax.fori_loop(
+    vel_rattle = jax.lax.fori_loop(
       0,
       n_iters,
       lambda _i, v: _apply_rattle_velocity_correction(
@@ -526,8 +697,22 @@ def settle_velocities(
       carry[0] < jnp.int32(n_iters),
       carry[2] > jnp.array(adaptive_tol, dtype=velocities.dtype)
     )
-    _, final_vel, _ = jax.lax.while_loop(cond, body, initial)
-    return final_vel
+    _, vel_rattle, _ = jax.lax.while_loop(cond, body, initial)
+
+  # Angular-momentum-conserving post-correction:
+  # RATTLE bond projections can drain angular momentum from each water.
+  # Subtract the rotational component of the RATTLE impulse so that
+  # only the radial bond-stretch impulse remains (conserves T_rot).
+  return _remove_angular_momentum_from_impulse(
+    velocities,
+    vel_rattle,
+    indices,
+    positions_constrained[indices.oxygen],
+    positions_constrained[indices.hydrogen1],
+    positions_constrained[indices.hydrogen2],
+    mass_oxygen,
+    mass_hydrogen,
+  )
 
 
 def get_water_indices(n_protein_atoms: int, n_waters: int) -> Array:

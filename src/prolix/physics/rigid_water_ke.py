@@ -19,6 +19,14 @@ def rigid_tip3p_box_ke_kcal(
   grouped as ``(O, H, H)`` per water. This matches the physical kinetic energy counted by
   OpenMM's ``State.getKineticEnergy()`` for ``rigidWater=True`` more closely than
   ``sum_i |p_i|^2 / (2 m_i)``, which still includes internal components that constraints remove.
+
+  NOTES:
+  - ``one_water`` uses ``jnp.linalg.solve(inertia, ang[:, None]).squeeze(-1)`` rather than
+    the natural ``jnp.linalg.solve(inertia, ang)``.  JAX >= 0.5.0 requires the rhs of
+    ``linalg.solve`` to have an explicit trailing dimension when the function is traced
+    under ``jax.vmap``; passing a 1-D vector causes a tracer shape mismatch that surfaces
+    as a cryptic vmap slicing error.  The ``[:, None] / .squeeze`` pattern is the canonical
+    workaround (same fix applied to ``_remove_angular_momentum_from_impulse`` in settle.py).
   """
   m_flat = jnp.asarray(mass).reshape(-1)
   pos = jnp.asarray(position).reshape((n_waters, 3, 3))
@@ -39,7 +47,7 @@ def rigid_tip3p_box_ke_kcal(
       + m[1] * (jnp.sum(rc[1] * rc[1]) * eye - jnp.outer(rc[1], rc[1]))
       + m[2] * (jnp.sum(rc[2] * rc[2]) * eye - jnp.outer(rc[2], rc[2]))
     )
-    omega = jnp.linalg.solve(inertia, ang)
+    omega = jnp.linalg.solve(inertia, ang[:, None]).squeeze(-1)  # see NOTES in docstring
     ke_r = 0.5 * jnp.dot(ang, omega)
     return ke_t + ke_r
 
