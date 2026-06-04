@@ -1763,7 +1763,9 @@ def _ou_noise_one_water_rigid(
   r"""Sample OU noise in the 6D rigid-body subspace for one TIP3P water.
 
   Returns mass-weighted noise (shape (3, 3)) and consumed key.
-  Covariance is kT * M * P_rigid — correct constrained Maxwell-Boltzmann.
+  Noise is sampled in two independent blocks: translational (COM velocity ~ N(0, kT/M))
+  and rotational (angular velocity ~ N(0, kT·I⁻¹)), eliminating numerical trans–rot
+  cross-coupling from the former 6×6 G-matrix Cholesky.
 
   Args:
     key: JAX PRNGKey.
@@ -1776,27 +1778,31 @@ def _ou_noise_one_water_rigid(
   """
   msum = jnp.sum(m_stack)
   com = jnp.sum(m_stack[:, None] * r_stack, axis=0) / msum
-  rrel = r_stack - com
+  rrel = r_stack - com  # (3, 3): COM-relative positions of O, H1, H2
 
-  rows = []
-  for i in range(3):
-    row = jnp.concatenate([jnp.eye(3, dtype=r_stack.dtype), -_skew_symmetric3(rrel[i])], axis=1)
-    rows.append(row)
-  jmat = jnp.vstack(rows)
+  # --- translational block ---
+  # Sample COM velocity noise: xi_trans ~ N(0, kT/M * I_3)
+  key, k_trans, k_rot = jax.random.split(key, 3)
+  z_trans = jax.random.normal(k_trans, (3,), dtype=r_stack.dtype)
+  xi_trans = z_trans * jnp.sqrt(kT / msum)          # (3,): COM velocity noise
+  p_trans = m_stack[:, None] * xi_trans[None, :]     # (3, 3): p_i = m_i * xi_trans
 
-  m_rep = jnp.repeat(m_stack, 3)
-  g = (jmat.T * m_rep) @ jmat
-  reg = jnp.array(1e-12, dtype=g.dtype) * (jnp.trace(g) / 6.0 + 1.0)
-  g_reg = g + reg * jnp.eye(6, dtype=g.dtype)
+  # --- rotational block ---
+  # Inertia tensor: I = sum_i m_i (|r_i|^2 I_3 - r_i r_i^T)
+  eye3 = jnp.eye(3, dtype=r_stack.dtype)
+  r_sq = jnp.einsum('ia,ia->i', rrel, rrel)          # (3,): |r_rel_i|^2
+  I_tensor = jnp.einsum('i,i->', m_stack, r_sq) * eye3 \
+             - jnp.einsum('i,ia,ib->ab', m_stack, rrel, rrel)  # (3, 3)
+  reg_r = jnp.array(1e-12, dtype=I_tensor.dtype) * (jnp.trace(I_tensor) / 3.0 + 1.0)
+  I_reg = I_tensor + reg_r * eye3
+  L_I = jnp.linalg.cholesky(I_reg)
+  z_rot = jax.random.normal(k_rot, (3,), dtype=r_stack.dtype)
+  # omega ~ N(0, kT * I^{-1}): solve L_I^T omega = sqrt(kT) * z_rot
+  omega = jnp.linalg.solve(L_I.T, jnp.sqrt(kT) * z_rot[:, None]).squeeze(-1)
+  # p_rot_i = m_i * (omega × r_rel_i)
+  p_rot = m_stack[:, None] * jnp.cross(omega[None, :], rrel)   # (3, 3)
 
-  key, split = jax.random.split(key)
-  z = jax.random.normal(split, (6,), dtype=r_stack.dtype)
-
-  L = jnp.linalg.cholesky(g_reg)
-  xi = jnp.linalg.solve(L.T, jnp.sqrt(kT) * z)
-
-  p_noise_flat = m_rep * (jmat @ xi)
-  return p_noise_flat.reshape(3, 3), key
+  return p_trans + p_rot, key
 
 
 def _init_momentum_one_water_rigid(
