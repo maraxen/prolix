@@ -22,11 +22,12 @@
 set -euo pipefail
 
 _PROJ="${SLURM_SUBMIT_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
-# Validate: myxcel wraps scripts in a /tmp sbatch, so SLURM_SUBMIT_DIR may be /tmp.
-# Fall back to the canonical cluster project path if _common_env.sh is not found.
+# Validate: myxcel wraps scripts in a /tmp sbatch so SLURM_SUBMIT_DIR may be /tmp.
+# Fall back to canonical cluster path, then export back so _common_env.sh agrees.
 if [[ ! -f "${_PROJ}/scripts/slurm/_common_env.sh" ]]; then
   _PROJ="${HOME}/projects/prolix"
 fi
+export SLURM_SUBMIT_DIR="${_PROJ}"
 cd "${_PROJ}"
 
 # shellcheck source=/dev/null
