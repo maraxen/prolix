@@ -1,0 +1,22 @@
+# Project-level myxcel configuration for prolix.
+# Override resolution: built-in → ~/.myxcel.toml → this file (env/extra_args merged).
+
+[slurm.presets.preempt_gpu]
+# Preemptable GPU jobs — long walltime, fault-tolerant workloads.
+# Use for multi-hour GPU runs that can tolerate preemption.
+partition    = "mit_preemptable"
+walltime     = "47:00:00"
+cpus_per_task = 16
+mem          = "64G"
+gpus         = "1"
+
+[slurm.presets.pi_so3_preempt_gpu]
+# pi_so3 long GPU jobs with Blackwell (SM120) workaround.
+# XLA_FLAGS is a no-op on non-Blackwell nodes; safe to set unconditionally.
+# Use for production MD runs that need > 6h on dedicated hardware.
+partition    = "pi_so3"
+walltime     = "47:00:00"
+cpus_per_task = 16
+mem          = "128G"
+gpus         = "1"
+env          = { XLA_FLAGS = "--xla_gpu_shard_autotuning=false" }
