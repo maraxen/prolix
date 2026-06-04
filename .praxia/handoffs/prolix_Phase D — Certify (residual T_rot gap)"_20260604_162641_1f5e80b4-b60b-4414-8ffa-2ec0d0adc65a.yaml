@@ -1,0 +1,80 @@
+---
+workspace: prolix
+session_id: ead55976-3965-43ce-8bc0-23a38d404572
+status: in_progress
+immediately_relevant:
+- file: src/prolix/physics/settle.py
+  lines:
+  - 130
+  - 195
+  reason: _project_one_water_momentum_rigid (:144) and project_tip3p_waters_momentum_rigid (:174) — B1 fix target. Currently projects isotropic noise into 6D rigid subspace without per-water I-tensor weighting.
+- file: src/prolix/physics/settle.py
+  lines:
+  - 446
+  - 495
+  reason: _remove_angular_momentum_from_impulse — B2 fix (already done, commit 4b00c9d). Read to understand the distinction between what B2 fixed vs what B1 still needs to do.
+- file: tests/physics/test_p2b_nvt_216water.py
+  lines:
+  - 40
+  - 165
+  reason: 895-water gate test. _dof_rigid_tip3p_waters(:47), _run_nvt_scan(:69), gate at :136. Needs mean T in [295, 305] K; currently 293.83 K.
+- file: .praxia/docs/plans/260603_p5-settle-correctness-sprint.md
+  lines:
+  - 110
+  - 135
+  reason: 'Branch B1 spec: weight rotational-subspace OU noise by per-water moment-of-inertia tensor so FD balance holds per-DOF.'
+- file: .praxia/docs/research/260603_p5-rstep-liquid-density-rootcause.md
+  lines:
+  - 1
+  - 50
+  reason: Full Bug 1/2 root-cause chain — context the oracle needs to understand what has already been fixed and what the residual is.
+active_dispatches: []
+task_id: 260603_p5_settle_correctness
+phase: Phase D — Certify (residual T_rot gap)
+goal_statement: 'Make the 895-water liquid-density NVT gate (test_nvt_216water_temperature_stability) hold 300±5 K with no red tests in the settle suite. Currently at 293.83 K — 1.17 K short of the [295, 305] K window. Fix path is B1: inertia-weighted OU noise covariance in _project_one_water_momentum_rigid.'
+context_refs:
+- phase: Gate-A (wf_9048c21b-df8)
+  task_id: 260603_p5_settle_correctness
+  summary: NVE bisection confirmed mechanism=projection_sink (split_k=-103.4K at gamma=0). B2 branch selected and implemented.
+- phase: P5 R-step liquid density
+  task_id: 260603_p5_rstep_liquid_density
+  summary: Bug 1 (PBC min-image) + Bug 2 (rotation-damping) fixed; gate 158K→293.8K. Residual 6.2K rot-trans imbalance identified as next step.
+failed_attempts:
+- attempt_id: svd_rigid_fit
+  description: SVD/Kabsch-based rotation reconstruction in _settle_water_batch
+  outcome: Sign-flip blowup for planar TIP3P geometry
+  reason_failed: TIP3P is planar; SVD returns a reflection not a rotation for coplanar atoms
+  do_not_retry: true
+  evidence_ref: commit 4266d35 broken, fixed a42503d Horn
+- attempt_id: double_count_dp
+  description: Explicit dp correction added on top of intermediate SETTLE_vel in R-steps
+  outcome: T -> 5e48 K
+  reason_failed: settle_velocities (RATTLE) already encodes v += (x_con-x_old)/dt; adding explicit dp doubled every impulse
+  do_not_retry: true
+  evidence_ref: null
+- attempt_id: dp_without_minimage
+  description: dp-only R-step without minimum-image on (x_con - x_unc)
+  outcome: T -> 7e53 K on cluster
+  reason_failed: Raw coordinate diff jumps a full box vector for atoms outside [0, box)
+  do_not_retry: true
+  evidence_ref: commit 8192ea1
+- attempt_id: widen_gate
+  description: Widen 895-water gate from [295, 305] to [290, 305] K to accept known T_rot residual
+  outcome: Rejected by user
+  reason_failed: 'User: fix properly per literature, not by loosening the definition of OK. MD engine must use correct approaches.'
+  do_not_retry: true
+  evidence_ref: null
+open_questions:
+- What is the correct FD relation for OU thermostat in the constrained rigid-body subspace? Should noise covariance be I_water x 2kT/dt per rotational DOF, or is isotropic noise in 6D sufficient? Canonical literature ref?
+- Is the 6.17 K T_rot deficit quantitatively consistent with isotropic-vs-I-weighted noise mismatch for TIP3P at 300 K?
+- Does the B1 fix interact with projection_site=post_o, or is it purely additive in _project_one_water_momentum_rigid?
+deferred:
+- description: Full dt>=1.0 fs constraint-aware thermostat redesign
+  rationale: B1 may close the 6K gap at dt=0.5 fs; full dt redesign is a separate Phase 5 sprint
+  recommended_phase: Phase 5 follow-on
+- description: NPT long-trajectory stability (Phase 6)
+  rationale: Not on critical path for paper correctness claims
+  recommended_phase: Phase 6
+lessons_refs:
+- .praxia/lessons.jsonl
+---
