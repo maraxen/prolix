@@ -15,58 +15,49 @@ from pathlib import Path
 jax.config.update("jax_enable_x64", True)
 
 from prolix.physics import settle, system, pbc
+from prolix.physics.solvation import load_water_box
+from prolix.physics.water_models import WaterModelType, get_water_params
 from prolix.simulate import AKMA_TIME_UNIT_FS, BOLTZMANN_KCAL
 
 
-# --- Water geometry setup (copied from test_p2b_nvt_216water.py) ---
 def _proxide_params_pure_water(n_waters: int) -> dict:
-    """Build TIP3P water system parameters."""
-    # TIP3P parameters
-    sigma_oh = 0.315365  # Å
-    sigma_hh = 0.0  # No LJ on H-H
-    sigma_oo = 3.15365  # Å
-
-    eps_oh = 0.0  # No LJ on O-H
-    eps_hh = 0.0
-    eps_oo = 0.1521  # kcal/mol
-
-    # Charges (elementary units)
-    q_o = -0.834
-    q_h = 0.417
-
-    # Build arrays for n_waters * 3 atoms (O, H1, H2 per water)
-    n_atoms = n_waters * 3
-    sigma = np.zeros(n_atoms)
-    epsilon = np.zeros(n_atoms)
-    charges = np.zeros(n_atoms)
-
+    """Build TIP3P water system parameters (matches canonical test helper)."""
+    tip = get_water_params(WaterModelType.TIP3P)
+    qo, qh = float(tip.charge_O), float(tip.charge_H)
+    sig_o = float(tip.sigma_O)
+    eps_o = float(tip.epsilon_O)
+    n = n_waters * 3
+    charges: list[float] = []
+    sigmas: list[float] = []
+    epsilons: list[float] = []
+    for _ in range(n_waters):
+        charges.extend([qo, qh, qh])
+        sigmas.extend([sig_o, 1.0, 1.0])
+        epsilons.extend([eps_o, 0.0, 0.0])
+    mask = jnp.ones((n, n), dtype=jnp.float64) - jnp.eye(n, dtype=jnp.float64)
     for w in range(n_waters):
-        o_idx = w * 3
-        h1_idx = w * 3 + 1
-        h2_idx = w * 3 + 2
-
-        sigma[o_idx] = sigma_oo
-        sigma[h1_idx] = sigma_hh
-        sigma[h2_idx] = sigma_hh
-
-        epsilon[o_idx] = eps_oo
-        epsilon[h1_idx] = eps_oh
-        epsilon[h2_idx] = eps_oh
-
-        charges[o_idx] = q_o
-        charges[h1_idx] = q_h
-        charges[h2_idx] = q_h
-
+        b = w * 3
+        for i, j in [(0, 1), (0, 2), (1, 2)]:
+            a, c = b + i, b + j
+            mask = mask.at[a, c].set(0.0).at[c, a].set(0.0)
     return {
-        "sigma": jnp.array(sigma, dtype=jnp.float64),
-        "epsilon": jnp.array(epsilon, dtype=jnp.float64),
         "charges": jnp.array(charges, dtype=jnp.float64),
-        "excl_indices": _make_tip3p_excl_indices(n_waters),
+        "sigmas": jnp.array(sigmas, dtype=jnp.float64),
+        "epsilons": jnp.array(epsilons, dtype=jnp.float64),
+        "bonds": jnp.zeros((0, 2), dtype=jnp.int32),
+        "bond_params": jnp.zeros((0, 2), dtype=jnp.float64),
+        "angles": jnp.zeros((0, 3), dtype=jnp.int32),
+        "angle_params": jnp.zeros((0, 2), dtype=jnp.float64),
+        "dihedrals": jnp.zeros((0, 4), dtype=jnp.int32),
+        "dihedral_params": jnp.zeros((0, 3), dtype=jnp.float64),
+        "impropers": jnp.zeros((0, 4), dtype=jnp.int32),
+        "improper_params": jnp.zeros((0, 3), dtype=jnp.float64),
+        "exclusion_mask": mask,
     }
 
 
 def _make_tip3p_excl_indices(n_waters: int) -> jnp.ndarray:
-    """Per-atom sparse exclusion list for TIP3P."""
+    """Per-atom sparse exclusion list for TIP3P: shape (N_atoms, 2)."""
     n_atoms = n_waters * 3
     excl = np.zeros((n_atoms, 2), dtype=np.int32)
     for w in range(n_waters):
@@ -77,38 +68,16 @@ def _make_tip3p_excl_indices(n_waters: int) -> jnp.ndarray:
     return jnp.array(excl, dtype=jnp.int32)
 
 
-def _equil_water_positions(n_waters: int, box_edge: float) -> np.ndarray:
-    """Generate equilibrium TIP3P water positions on a grid."""
-    n_per_side = int(np.ceil(n_waters ** (1.0 / 3.0)))
-    spacing = box_edge / n_per_side
-
-    positions = []
-    water_count = 0
-
-    for i in range(n_per_side):
-        for j in range(n_per_side):
-            for k in range(n_per_side):
-                if water_count >= n_waters:
-                    break
-
-                x = (i + 0.5) * spacing
-                y = (j + 0.5) * spacing
-                z = (k + 0.5) * spacing
-
-                # O atom
-                positions.append([x, y, z])
-                # H1 atom (offset along x)
-                positions.append([x + 0.9572, y, z])
-                # H2 atom (offset along y)
-                positions.append([x, y + 0.9572, z])
-
-                water_count += 1
-            if water_count >= n_waters:
-                break
-        if water_count >= n_waters:
-            break
-
-    return np.array(positions[:n_waters * 3], dtype=np.float64)
+def _equil_water_positions(n_waters: int, seed: int = 0) -> tuple[np.ndarray, float]:
+    """Subsample from the pre-equilibrated TIP3P water box asset (30 Å cube)."""
+    box = load_water_box()
+    positions = np.array(box.positions)
+    box_edge = float(np.array(box.box_size)[0])
+    n_total = len(positions) // 3
+    rng = np.random.default_rng(seed)
+    chosen = np.sort(rng.choice(n_total, size=n_waters, replace=False))
+    atom_idx = np.concatenate([np.array([3*i, 3*i+1, 3*i+2]) for i in chosen])
+    return positions[atom_idx], box_edge
 
 
 def compute_T_rot_trans_one_water(
@@ -197,8 +166,6 @@ def compute_T_rot_trans_all_waters(
 def main():
     # --- Setup ---
     n_waters = 64
-    box_edge = 20.0  # Å
-    box_vec = jnp.array([box_edge] * 3, dtype=jnp.float64)
     n_atoms = n_waters * 3
 
     n_steps = 500
@@ -210,19 +177,22 @@ def main():
     kT = float(temperature_k) * BOLTZMANN_KCAL
     gamma_reduced = float(gamma_ps) * float(AKMA_TIME_UNIT_FS) * 1e-3
 
+    # --- Positions from pre-equilibrated water box ---
+    positions_init, box_edge = _equil_water_positions(n_waters)
+    box_vec = jnp.array([box_edge] * 3, dtype=jnp.float64)
+    positions = jnp.array(positions_init, dtype=jnp.float64)
+
     # --- Create energy and displacement functions ---
     displacement_fn, shift_fn = pbc.create_periodic_space(box_vec)
 
-    sys_dict = _proxide_params_pure_water(n_waters)
+    sys_dict = {k: v for k, v in _proxide_params_pure_water(n_waters).items() if k != "exclusion_mask"}
+    sys_dict["excl_indices"] = _make_tip3p_excl_indices(n_waters)
+    grid = max(16, round(box_edge / 1.0))
     energy_fn = system.make_energy_fn(
         displacement_fn, sys_dict, box=box_vec, use_pbc=True,
-        implicit_solvent=False, pme_grid_points=32, pme_alpha=0.34,
+        implicit_solvent=False, pme_grid_points=grid, pme_alpha=0.34,
         cutoff_distance=9.0, strict_parameterization=False
     )
-
-    # --- Build initial positions and masses ---
-    positions_init = _equil_water_positions(n_waters, box_edge)
-    positions = jnp.array(positions_init, dtype=jnp.float64)
 
     mass_array = np.array([[15.999], [1.008], [1.008]] * n_waters, dtype=np.float64).reshape(n_atoms)
     mass = jnp.array(mass_array, dtype=jnp.float64)
