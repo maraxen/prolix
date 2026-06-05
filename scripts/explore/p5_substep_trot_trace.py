@@ -219,6 +219,9 @@ def main():
     writer = csv.writer(csv_file)
     writer.writerow(["step", "substep", "T_rot", "T_trans", "delta_T_rot", "delta_T_trans"])
 
+    # JIT the force computation once so XLA compiles a single kernel
+    force_fn = jax.jit(jax.grad(energy_fn))
+
     # --- Run integration with instrumentation ---
     momentum = state.momentum
     force = state.force
@@ -319,7 +322,7 @@ def main():
         T_trans_prev, T_rot_prev = T_trans, T_rot
 
         # --- Compute force at new positions ---
-        force = jax.grad(energy_fn)(positions)
+        force = force_fn(positions)
 
         # --- B2: final half force kick ---
         momentum = momentum + 0.5 * dt_akma * force
