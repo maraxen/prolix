@@ -163,7 +163,7 @@ def compute_T_rot_trans_one_water(
     reg = 1e-12 * (jnp.trace(I_tensor) / 3.0 + 1.0)
     I_inv = jnp.linalg.inv(I_tensor + reg * eye3)
 
-    T_rot = 0.5 * jnp.dot(L, jnp.dot(I_inv, L)) / (3.0 * kB)
+    T_rot = jnp.dot(L, jnp.dot(I_inv, L)) / (3.0 * kB)
 
     return float(T_trans), float(T_rot)
 
@@ -294,6 +294,8 @@ def main():
         momentum = momentum + dp
         positions = positions_constrained
 
+        positions_mid = positions  # x_con_1: reference positions for SETTLE2
+
         T_trans, T_rot = compute_T_rot_trans_all_waters(momentum, positions, water_indices)
         delta_T_trans = T_trans - T_trans_prev
         delta_T_rot = T_rot - T_rot_prev
@@ -328,8 +330,7 @@ def main():
         writer.writerow([step, "A2", T_rot, T_trans, delta_T_rot, delta_T_trans])
         T_trans_prev, T_rot_prev = T_trans, T_rot
 
-        # --- SETTLE_pos (second) ---
-        positions_mid = positions
+        # --- SETTLE_pos (second): positions=x_unc_2, reference=positions_mid=x_con_1 ---
         positions_constrained = settle.settle_positions(
             positions, positions_mid, water_indices, box=box_vec
         )
@@ -356,6 +357,18 @@ def main():
         delta_T_trans = T_trans - T_trans_prev
         delta_T_rot = T_rot - T_rot_prev
         writer.writerow([step, "B2", T_rot, T_trans, delta_T_rot, delta_T_trans])
+        T_trans_prev, T_rot_prev = T_trans, T_rot
+
+        # --- SETTLE_vel: RATTLE velocity correction after force kick ---
+        velocity_constrained = settle.settle_velocities(
+            momentum / mass_col, positions_mid, positions, water_indices, dt_akma,
+            n_iters=10
+        )
+        momentum = velocity_constrained * mass_col
+        T_trans, T_rot = compute_T_rot_trans_all_waters(momentum, positions, water_indices)
+        delta_T_trans = T_trans - T_trans_prev
+        delta_T_rot = T_rot - T_rot_prev
+        writer.writerow([step, "SETTLE_vel", T_rot, T_trans, delta_T_rot, delta_T_trans])
 
         # Update state for next step
         state = settle.NVTLangevinState(positions, momentum, force, mass_col, key)
