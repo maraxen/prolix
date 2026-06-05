@@ -1,0 +1,53 @@
+{
+  "n_waters": 895,
+  "steps": 3000,
+  "burn": 1000,
+  "gate_tolerance_k": 5.0,
+  "q1_stability": [
+    {
+      "seed": 42,
+      "T_total": 293.83,
+      "T_trans": 305.94,
+      "T_rot": 281.73
+    },
+    {
+      "seed": 43,
+      "T_total": 295.17,
+      "T_trans": 305.28,
+      "T_rot": 285.07
+    },
+    {
+      "seed": 44,
+      "T_total": 296.04,
+      "T_trans": 307.06,
+      "T_rot": 285.03
+    },
+    {
+      "seed": 45,
+      "T_total": 295.7,
+      "T_trans": 307.21,
+      "T_rot": 284.21
+    },
+    {
+      "seed": 46,
+      "T_total": 293.25,
+      "T_trans": 304.55,
+      "T_rot": 281.95
+    }
+  ],
+  "q2_decomp": {
+    "seed": 42,
+    "T_total": 293.83,
+    "T_trans": 305.94,
+    "T_rot": 281.73
+  },
+  "q3_ou_comparison": {
+    "constrained_T": 293.83,
+    "unconstrained_T": 292.59,
+    "delta_K": 1.24
+  },
+  "q1_mean_t": 294.8,
+  "q1_std_t": 1.08,
+  "gate_pass": 0,
+  "gate_error_k": 5.2
+}
