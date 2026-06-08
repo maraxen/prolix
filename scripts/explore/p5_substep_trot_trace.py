@@ -219,8 +219,8 @@ def main():
     writer = csv.writer(csv_file)
     writer.writerow(["step", "substep", "T_rot", "T_trans", "delta_T_rot", "delta_T_trans"])
 
-    # JIT the force computation once so XLA compiles a single kernel
-    force_fn = jax.jit(jax.grad(energy_fn))
+    # Force = -dE/dR (same convention as _make_settle_compatible_force_fn)
+    force_fn = jax.jit(lambda r: -jax.grad(energy_fn)(r))
 
     # --- Run integration with instrumentation ---
     momentum = state.momentum
