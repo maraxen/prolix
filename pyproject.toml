@@ -16,7 +16,7 @@ dependencies = [
     "jax",
     "jax-md",
     "equinox",
-    "proxide==0.1.0a7",
+    "proxide>=0.1.0a8",
     "biotite",
     "mdtraj",
     "numpy",
