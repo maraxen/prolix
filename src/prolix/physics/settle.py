@@ -619,6 +619,7 @@ def _r_step_conserve_angular_momentum(
   water_indices: "WaterIndicesArray",
   mass_oxygen: float,
   mass_hydrogen: float,
+  box: Array | None = None,
 ) -> Array:
   """Restore per-water angular momentum after an A+SETTLE+R-step block.
 
@@ -635,14 +636,23 @@ def _r_step_conserve_angular_momentum(
   _remove_angular_momentum_from_impulse docstring for rationale (XLA
   batched-solver hang at 895-water scale inside lax.scan).
 
+  PBC note: shift_fn wraps atoms individually after the A step, so water
+  molecules near a periodic boundary may have O at x≈0 and H at x≈L_box.
+  Without correction |d_unc| ~ L_box → catastrophically large impulse → NaN.
+  When box is provided, H atoms are unwrapped relative to O via minimum-image
+  before computing L_target.
+
   Args:
       momentum: (N_atoms, 3) momenta after R-step.
       p_pre_a: (N_atoms, 3) momenta before the A step (L_target reference).
-      x_unc: (N_atoms, 3) positions after A step, before SETTLE.
-      x_con: (N_atoms, 3) constrained positions after SETTLE.
+      x_unc: (N_atoms, 3) positions after A step, before SETTLE (may be
+          PBC-split — H atoms are unwrapped relative to O internally).
+      x_con: (N_atoms, 3) constrained positions after SETTLE (already in
+          consistent frame from settle_positions).
       water_indices: (N_waters, 3) int array of [O, H1, H2] atom indices.
       mass_oxygen: float mass of oxygen.
       mass_hydrogen: float mass of hydrogen.
+      box: (3,) periodic box lengths, or None for non-periodic systems.
 
   Returns:
       (N_atoms, 3) AM-corrected momenta.
@@ -654,10 +664,20 @@ def _r_step_conserve_angular_momentum(
   mass_total = mass_oxygen + 2.0 * mass_hydrogen
   m_all = jnp.array([mass_oxygen, mass_hydrogen, mass_hydrogen])  # (3,)
 
-  # L_target = L(r_unc, p_pre_a): angular momentum before A+SETTLE+R
-  r_unc_w = jnp.stack(
-    [x_unc[indices.oxygen], x_unc[indices.hydrogen1], x_unc[indices.hydrogen2]], axis=1
-  )  # (N_w, 3, 3)
+  # L_target = L(r_unc, p_pre_a): angular momentum before A+SETTLE+R.
+  # Unwrap H atoms relative to O: shift_fn wraps atoms independently, so a
+  # water molecule straddling a PBC boundary has O and H in different images.
+  r_O_unc = x_unc[indices.oxygen]      # (N_w, 3)
+  r_H1_unc = x_unc[indices.hydrogen1]  # (N_w, 3)
+  r_H2_unc = x_unc[indices.hydrogen2]  # (N_w, 3)
+  if box is not None:
+    dH1 = r_H1_unc - r_O_unc
+    dH1 = dH1 - box * jnp.round(dH1 / box)
+    r_H1_unc = r_O_unc + dH1
+    dH2 = r_H2_unc - r_O_unc
+    dH2 = dH2 - box * jnp.round(dH2 / box)
+    r_H2_unc = r_O_unc + dH2
+  r_unc_w = jnp.stack([r_O_unc, r_H1_unc, r_H2_unc], axis=1)  # (N_w, 3, 3)
   p_pre_a_w = jnp.stack(
     [p_pre_a[indices.oxygen], p_pre_a[indices.hydrogen1], p_pre_a[indices.hydrogen2]], axis=1
   )  # (N_w, 3, 3)
@@ -1059,7 +1079,7 @@ def settle_langevin(
     # Restore angular momentum after A+SETTLE+R block
     if water_indices is not None:
       momentum = _r_step_conserve_angular_momentum(
-        momentum, p_pre_a1, x_unc_1, x_con_1, water_indices, mass_oxygen, mass_hydrogen
+        momentum, p_pre_a1, x_unc_1, x_con_1, water_indices, mass_oxygen, mass_hydrogen, box=box
       )
 
     position = x_con_1
@@ -1107,7 +1127,7 @@ def settle_langevin(
     # Restore angular momentum after A+SETTLE+R block
     if water_indices is not None:
       momentum = _r_step_conserve_angular_momentum(
-        momentum, p_pre_a2, x_unc_2, x_con_2, water_indices, mass_oxygen, mass_hydrogen
+        momentum, p_pre_a2, x_unc_2, x_con_2, water_indices, mass_oxygen, mass_hydrogen, box=box
       )
 
     position = x_con_2
