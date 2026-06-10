@@ -60,7 +60,7 @@ source "scripts/slurm/_bth_env.sh"
 
 mkdir -p outputs/p5_nvt_gate_diag
 
-CAMPAIGN_ID="${CAMPAIGN_ID:-933024dc}"
+CAMPAIGN_ID="${CAMPAIGN_ID:-dbb2cc17}"
 OUT="outputs/p5_nvt_gate_diag/result_${SLURM_JOB_ID:-local}.json"
 
 echo "=== P5 NVT gate diagnostic (campaign=${CAMPAIGN_ID}) ==="
