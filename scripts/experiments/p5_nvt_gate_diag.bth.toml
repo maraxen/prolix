@@ -1,28 +1,35 @@
 [experiment]
 hypothesis = """
-B1 fix (commit 485f754): replacing the 6×6 G-matrix Cholesky in _ou_noise_one_water_rigid
-with explicit 3+3 trans/rot block decomposition eliminates numerical cross-mode coupling
-and brings mean NVT T within 300±5 K for 895-water TIP3P.
+C3 fix (commit 678c9cb): adding angular momentum conservation to the SETTLE
+R-step in settle_langevin eliminates the systematic T_rot drain and brings
+mean NVT T within 300±5 K for 895-water TIP3P at gamma=10 ps^-1.
 
-Prior diagnostic (run c3206007, campaign 933024dc) showed:
-  mean T = 294.80 ± 1.08 K over 5 seeds (target 300 K, error 5.20 K)
-  T_trans = 305.9 K, T_rot = 281.7 K (+/-23 K imbalance)
+Root cause identified: dp = mass*(x_con - x_unc)/half_dt carries net angular
+momentum per step (both delta_L_SETTLE_pos and delta_L_R contributions),
+draining T_rot toward T_mech ~ 229-267 K. Fix adds
+_r_step_conserve_angular_momentum after each A+SETTLE+R block — computes
+L_target = L(r_unc, p_pre_a) per water, then corrects momentum via
+Cramer's-rule rigid-body impulse to restore L_target.
 
-Expected outcome after B1 fix:
+Prior diagnostic result (B1 run, job 15458955, 5 seeds, gamma=10):
+  mean T = 293.97 +/- 0.77 K (target 300 K)
+  T_trans = 304.8 K, T_rot = 283.6 K (imbalance ~21 K)
+
+Expected outcome after C3 fix:
   T_trans ≈ T_rot ≈ 300 K (within ±5 K each)
   mean T within 300±5 K → gate_pass = 1
 """
 
 [outcomes.pass]
 condition = "gate_pass = 1"
-decision = "B1 fix confirmed. Gate passes. Close Phase 5 / Phase D Certify. Merge worktree to main."
-reasoning = "Mean T over 5 seeds within 300±5 K confirms the trans+rot block decomposition gives correct equipartition."
+decision = "C3 fix confirmed. Gate passes. Close Phase 5 / Phase D Certify."
+reasoning = "Mean T over 5 seeds within 300±5 K confirms AM conservation corrects the T_rot deficit."
 is_residual = false
 
 [outcomes.fail]
 condition = "gate_pass = 0"
-decision = "B1 fix insufficient. Inspect T_trans and T_rot values from q2_decomp; if imbalance persists, deeper investigation needed (SETTLE_vel impulse coupling, c1/c2 scaling, or DOF counting error)."
-reasoning = "Persistent gate failure after explicit block decomposition means a different mechanism is active."
+decision = "C3 fix insufficient. Inspect T_trans and T_rot from q2_decomp. If T_rot still depressed, check B-step torque contribution (estimated ~0.09K/step at T=537K) or DOF counting error."
+reasoning = "If T_rot imbalance persists after AM correction, a different mechanism (B-step torque or DOF counting) is dominant."
 is_residual = true
 
 [result_schema]
@@ -38,6 +45,6 @@ q3_ou_comparison_unconstrained_T = "float"
 q3_ou_comparison_delta_K = "float"
 
 [metadata]
-campaign = "p5-b1-verify"
-phase = "Phase 5 B1 inertia-weighted noise fix verification"
+campaign = "p5-c3-verify"
+phase = "Phase 5 C3 AM conservation fix verification"
 task_id = "260603_p5_settle_correctness"
