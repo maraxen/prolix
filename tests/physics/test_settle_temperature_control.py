@@ -853,3 +853,99 @@ def test_ke_measurement_ablation() -> None:
   # (within 30K to allow for equilibration variance in short 150-step production)
   assert mean_t_rigid < 350.0 and mean_t_atomic < 350.0, \
     f"Both KE methods report T > 350K: T_rigid={mean_t_rigid:.1f}K, T_atomic={mean_t_atomic:.1f}K"
+
+
+def test_r_step_conserves_angular_momentum() -> None:
+  """Unit test: _r_step_conserve_angular_momentum restores per-water AM.
+
+  Given random momenta before and after an A+SETTLE+R step, verify that
+  the AM correction impulse restores the angular momentum of each water
+  back to its initial value (within float64 tolerance ~1e-8).
+  """
+  jax.config.update("jax_enable_x64", True)
+  from prolix.physics.settle import _r_step_conserve_angular_momentum, WaterIndices
+
+  key = jax.random.PRNGKey(42)
+  n_waters = 4
+  mass_oxygen = 15.999
+  mass_hydrogen = 1.008
+  mass_total = mass_oxygen + 2.0 * mass_hydrogen
+
+  # Create water indices
+  water_indices = settle.get_water_indices(0, n_waters)
+  indices = WaterIndices.from_row(water_indices.T)
+  m_all = jnp.array([mass_oxygen, mass_hydrogen, mass_hydrogen])
+
+  # Random positions before A step
+  key, subkey = jax.random.split(key)
+  x_unc = jax.random.normal(subkey, (n_waters * 3, 3)) * 0.1
+
+  # Random momenta before A step
+  key, subkey = jax.random.split(key)
+  p_pre_a = jax.random.normal(subkey, (n_waters * 3, 3)) * 10.0
+
+  # Simulate SETTLE displacement: constrained positions differ slightly from unconstrained
+  key, subkey = jax.random.split(key)
+  settle_displacement = jax.random.normal(subkey, (n_waters * 3, 3)) * 0.01
+  x_con = x_unc + settle_displacement
+
+  # Apply R-step momentum correction: dp = m * dx / half_dt
+  half_dt = 0.25  # 0.5 fs (AKMA units)
+  mass_arr = jnp.array([m for m in [mass_oxygen, mass_hydrogen, mass_hydrogen] for _ in range(n_waters)]).reshape(n_waters * 3)
+  dp_r_w = mass_arr[:, None] * settle_displacement / half_dt
+  momentum_after_r = p_pre_a + dp_r_w
+
+  # Apply the AM correction
+  momentum_corrected = _r_step_conserve_angular_momentum(
+    momentum_after_r, p_pre_a, x_unc, x_con, water_indices, mass_oxygen, mass_hydrogen
+  )
+
+  # Check per-water angular momentum is restored
+  for w in range(n_waters):
+    o_idx = indices.oxygen[w]
+    h1_idx = indices.hydrogen1[w]
+    h2_idx = indices.hydrogen2[w]
+
+    # Compute L_target = L(x_unc, p_pre_a)
+    r_unc_w = jnp.array([x_unc[o_idx], x_unc[h1_idx], x_unc[h2_idx]])
+    p_target_w = jnp.array([p_pre_a[o_idx], p_pre_a[h1_idx], p_pre_a[h2_idx]])
+    r_com_target = (m_all @ r_unc_w) / mass_total
+    d_target = r_unc_w - r_com_target
+    L_target = jnp.sum(jnp.cross(d_target, p_target_w), axis=0)
+
+    # Compute L_corrected = L(x_con, momentum_corrected)
+    r_con_w = jnp.array([x_con[o_idx], x_con[h1_idx], x_con[h2_idx]])
+    p_corrected_w = jnp.array([momentum_corrected[o_idx], momentum_corrected[h1_idx], momentum_corrected[h2_idx]])
+    r_com_corrected = (m_all @ r_con_w) / mass_total
+    d_corrected = r_con_w - r_com_corrected
+    L_corrected = jnp.sum(jnp.cross(d_corrected, p_corrected_w), axis=0)
+
+    # Verify AM is conserved
+    diff = jnp.max(jnp.abs(L_target - L_corrected))
+    assert diff < 1e-8, f"Water {w}: AM not restored. L_target={L_target}, L_corrected={L_corrected}, diff={diff}"
+
+
+def test_settle_langevin_t_rot_small_system() -> None:
+  """Regression test: AM conservation smoke test for small system.
+
+  Validates that the R-step AM correction does not cause divergence.
+  For a 4-water system with dt=0.5fs and gamma=1ps^-1, T_rot should
+  remain finite and stable.
+
+  Note: The actual T_rot depends on system size and may vary; this test
+  is a smoke test to ensure the AM correction doesn't cause runaway.
+  """
+  jax.config.update("jax_enable_x64", True)
+  n_waters = 4
+  dt_fs = 0.5
+  steps = 500
+  burn = 100
+  seed = 704
+  mean_t_observable, _ = _mean_rigid_t_after_burn(
+    dt_fs=dt_fs, n_waters=n_waters, seed=seed, steps=steps, burn=burn
+  )
+  # Smoke test: temperature should be finite and not runaway
+  assert jnp.isfinite(mean_t_observable), \
+    f"T_rot={mean_t_observable} is not finite (NaN or inf). Integration may have failed."
+  assert mean_t_observable < 1000.0, \
+    f"T_rot={mean_t_observable:.1f}K exceeds 1000K, suggesting thermal runaway."

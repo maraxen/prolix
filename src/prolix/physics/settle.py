@@ -611,6 +611,110 @@ def _remove_angular_momentum_from_impulse(
   return vel_out
 
 
+def _r_step_conserve_angular_momentum(
+  momentum: Array,
+  p_pre_a: Array,
+  x_unc: Array,
+  x_con: Array,
+  water_indices: "WaterIndicesArray",
+  mass_oxygen: float,
+  mass_hydrogen: float,
+) -> Array:
+  """Restore per-water angular momentum after an A+SETTLE+R-step block.
+
+  The combined A+SETTLE+R-step introduces angular momentum error
+      ΔL = sum_i(r_con_i - r_unc_i) × p_pre_a_i  (SETTLE_pos contribution)
+         + sum_i r_con_i × dp_i                    (R-step contribution)
+  where dp_i = m_i*(r_con_i - r_unc_i)/half_dt.
+
+  This function computes ΔL per water molecule and adds a corrective
+  rigid-body impulse dp_correct_i = m_i*(ω × d_con_i) so that
+  L(r_con, momentum_out) = L(r_unc, p_pre_a).
+
+  Uses explicit 3×3 Cramer's rule (not linalg.solve) — see
+  _remove_angular_momentum_from_impulse docstring for rationale (XLA
+  batched-solver hang at 895-water scale inside lax.scan).
+
+  Args:
+      momentum: (N_atoms, 3) momenta after R-step.
+      p_pre_a: (N_atoms, 3) momenta before the A step (L_target reference).
+      x_unc: (N_atoms, 3) positions after A step, before SETTLE.
+      x_con: (N_atoms, 3) constrained positions after SETTLE.
+      water_indices: (N_waters, 3) int array of [O, H1, H2] atom indices.
+      mass_oxygen: float mass of oxygen.
+      mass_hydrogen: float mass of hydrogen.
+
+  Returns:
+      (N_atoms, 3) AM-corrected momenta.
+  """
+  if water_indices.shape[0] == 0:
+    return momentum
+
+  indices = WaterIndices.from_row(water_indices.T)
+  mass_total = mass_oxygen + 2.0 * mass_hydrogen
+  m_all = jnp.array([mass_oxygen, mass_hydrogen, mass_hydrogen])  # (3,)
+
+  # L_target = L(r_unc, p_pre_a): angular momentum before A+SETTLE+R
+  r_unc_w = jnp.stack(
+    [x_unc[indices.oxygen], x_unc[indices.hydrogen1], x_unc[indices.hydrogen2]], axis=1
+  )  # (N_w, 3, 3)
+  p_pre_a_w = jnp.stack(
+    [p_pre_a[indices.oxygen], p_pre_a[indices.hydrogen1], p_pre_a[indices.hydrogen2]], axis=1
+  )  # (N_w, 3, 3)
+  r_com_unc = jnp.einsum("i,nij->nj", m_all, r_unc_w) / mass_total  # (N_w, 3)
+  d_unc = r_unc_w - r_com_unc[:, None, :]  # (N_w, 3, 3)
+  L_target = jnp.sum(jnp.cross(d_unc, p_pre_a_w), axis=1)  # (N_w, 3)
+
+  # L_current = L(r_con, momentum): angular momentum after R-step
+  r_con_w = jnp.stack(
+    [x_con[indices.oxygen], x_con[indices.hydrogen1], x_con[indices.hydrogen2]], axis=1
+  )  # (N_w, 3, 3)
+  p_after_w = jnp.stack(
+    [momentum[indices.oxygen], momentum[indices.hydrogen1], momentum[indices.hydrogen2]], axis=1
+  )  # (N_w, 3, 3)
+  r_com_con = jnp.einsum("i,nij->nj", m_all, r_con_w) / mass_total  # (N_w, 3)
+  d_con = r_con_w - r_com_con[:, None, :]  # (N_w, 3, 3)
+  L_current = jnp.sum(jnp.cross(d_con, p_after_w), axis=1)  # (N_w, 3)
+
+  # Correction: add ω × r_con impulse to restore L to L_target
+  L_correct = L_target - L_current  # (N_w, 3)
+
+  # Inertia tensor at constrained positions
+  d_sq = jnp.sum(d_con ** 2, axis=-1)  # (N_w, 3)
+  trace_term = jnp.einsum("i,ni->n", m_all, d_sq)  # (N_w,)
+  outer_term = jnp.einsum("i,nia,nib->nab", m_all, d_con, d_con)  # (N_w, 3, 3)
+  I_eye = trace_term[:, None, None] * jnp.eye(3)[None, :, :]
+  I_tensor = I_eye - outer_term  # (N_w, 3, 3)
+
+  # omega = I^{-1} L_correct via explicit 3×3 Cramer's rule
+  _a00, _a01, _a02 = I_tensor[:, 0, 0], I_tensor[:, 0, 1], I_tensor[:, 0, 2]
+  _a10, _a11, _a12 = I_tensor[:, 1, 0], I_tensor[:, 1, 1], I_tensor[:, 1, 2]
+  _a20, _a21, _a22 = I_tensor[:, 2, 0], I_tensor[:, 2, 1], I_tensor[:, 2, 2]
+  _det = (
+    _a00 * (_a11 * _a22 - _a12 * _a21)
+    - _a01 * (_a10 * _a22 - _a12 * _a20)
+    + _a02 * (_a10 * _a21 - _a11 * _a20)
+  )
+  _Lx, _Ly, _Lz = L_correct[:, 0], L_correct[:, 1], L_correct[:, 2]
+  _inv = 1.0 / _det
+  omega = jnp.stack([
+    _inv * ((_a11 * _a22 - _a12 * _a21) * _Lx + (_a02 * _a21 - _a01 * _a22) * _Ly + (_a01 * _a12 - _a02 * _a11) * _Lz),
+    _inv * ((_a12 * _a20 - _a10 * _a22) * _Lx + (_a00 * _a22 - _a02 * _a20) * _Ly + (_a02 * _a10 - _a00 * _a12) * _Lz),
+    _inv * ((_a10 * _a21 - _a11 * _a20) * _Lx + (_a01 * _a20 - _a00 * _a21) * _Ly + (_a00 * _a11 - _a01 * _a10) * _Lz),
+  ], axis=-1)  # (N_w, 3)
+
+  # Corrective impulse: m_i * (omega × d_con_i)
+  omega_exp = omega[:, None, :]  # (N_w, 1, 3)
+  omega_cross_d = jnp.cross(omega_exp * jnp.ones_like(d_con), d_con)  # (N_w, 3, 3)
+  dp_correct = m_all[None, :, None] * omega_cross_d  # (N_w, 3, 3)
+
+  # Apply to momentum array
+  mom_out = momentum.at[indices.oxygen].add(dp_correct[:, 0, :])
+  mom_out = mom_out.at[indices.hydrogen1].add(dp_correct[:, 1, :])
+  mom_out = mom_out.at[indices.hydrogen2].add(dp_correct[:, 2, :])
+  return mom_out
+
+
 def settle_velocities(
   velocities: Array,
   positions_old: Array,
@@ -916,6 +1020,9 @@ def settle_langevin(
     # B: half force kick
     momentum = _langevin_step_b(state.momentum, state.force, _dt)
 
+    # L_target reference for A+SETTLE1+R1 AM correction
+    p_pre_a1 = momentum
+
     # R1: first half-step (A + SETTLE + dp-correction + SETTLE_vel)
     x_unc_1 = _langevin_step_a(state.positions, momentum, state.mass, half_dt, shift_fn)
 
@@ -949,6 +1056,12 @@ def settle_langevin(
     dp_1 = state.mass * dx_1 / half_dt
     momentum = momentum + dp_1
 
+    # Restore angular momentum after A+SETTLE+R block
+    if water_indices is not None:
+      momentum = _r_step_conserve_angular_momentum(
+        momentum, p_pre_a1, x_unc_1, x_con_1, water_indices, mass_oxygen, mass_hydrogen
+      )
+
     position = x_con_1
     positions_mid = x_con_1
 
@@ -959,6 +1072,9 @@ def settle_langevin(
       )
     else:
       momentum, key = _langevin_step_o(momentum, state.mass, gamma, _dt, _kT, state.key)
+
+    # L_target reference for A+SETTLE2+R2 AM correction
+    p_pre_a2 = momentum
 
     # R2: second half-step (A + SETTLE + dp-correction + SETTLE_vel)
     x_unc_2 = _langevin_step_a(position, momentum, state.mass, half_dt, shift_fn)
@@ -987,6 +1103,12 @@ def settle_langevin(
       dx_2 = dx_2 - box * jnp.round(dx_2 / box)
     dp_2 = state.mass * dx_2 / half_dt
     momentum = momentum + dp_2
+
+    # Restore angular momentum after A+SETTLE+R block
+    if water_indices is not None:
+      momentum = _r_step_conserve_angular_momentum(
+        momentum, p_pre_a2, x_unc_2, x_con_2, water_indices, mass_oxygen, mass_hydrogen
+      )
 
     position = x_con_2
 
