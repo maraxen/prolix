@@ -1,0 +1,44 @@
+[experiment]
+mode = "confirmation"
+hypothesis = """
+dt=1.0 fs SETTLE+Langevin NVT at 895 TIP3P waters,
+gamma=10 ps^-1, 5 seeds (42-46), 50 ps trajectory is thermally stable:
+|mean T_rot - 300 K| <= 5 K. Pre-conditions: C3 AM conservation (678c9cb) and
+PBC fix (5d65edb) both applied. Phase 5 paper claim (C3 AM architecture) is
+independent of this gate result.
+"""
+
+[outcomes.pass]
+condition = "ABS(mean_t_rot - 300.0) <= 5.0"
+decision = "Remove dt=1.0 fs xfail from test_dt_sweep_16water_nvt and test_temperature_dt1fs_near_target. Update settle_langevin docstring to lift cap to dt <= 1.0 fs."
+reasoning = """
+Threshold |mean T_rot - 300| <= 5 K anchored at ~4x the T_rot std
+from job 15800837: at dt=0.5 fs, 5 seeds, T_rot ranged 296.6-301.9 K (std ~1.2 K).
+4 * 1.2 K = 4.8 K ~ 5 K. This accommodates mild noise at dt=1.0 fs while detecting
+genuine instability.
+"""
+
+[outcomes.fail]
+is_residual = true
+condition = "ABS(mean_t_rot - 300.0) > 5.0 OR gate_pass == 0"
+decision = "Retain all dt=1.0 fs xfails. Write sprint retrospective classifying failure as A (thermostat instability), B (infrastructure regression), or C (near-miss / too tight)."
+reasoning = """
+T_rot deviation > 5 K at dt=1.0 fs indicates instability or
+infrastructure regression. Retrospective must distinguish cases for next sprint.
+"""
+
+[result_schema]
+mean_t_rot = "float"
+gate_pass = "int"
+n_waters = "int"
+dt_fs = "float"
+gamma_ps = "float"
+n_seeds = "int"
+job_id = "str"
+
+[metadata]
+task_id = "260603_p5_settle_correctness"
+phase = "Phase 5 Extended"
+depends_on_commits = ["678c9cb", "5d65edb"]
+prior_gate_job = "15800837"
+campaign_slug = "p5-nvt-gate-dt1fs"
