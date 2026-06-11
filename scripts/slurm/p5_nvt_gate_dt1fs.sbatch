@@ -59,7 +59,8 @@ CAMPAIGN_ID="${CAMPAIGN_ID:?CAMPAIGN_ID env var required — pass via sbatch --e
 uv run bth run python scripts/experiments/p5_nvt_gate_dt1fs.py \
     --tag p5 --tag nvt-gate --tag dt1fs \
     --campaign "${CAMPAIGN_ID}" \
-    --out "${OUT}"
+    --out "${OUT}" \
+    -- --out "${OUT}"
 
 EXIT=$?
 echo "=== output: ${OUT} ==="
