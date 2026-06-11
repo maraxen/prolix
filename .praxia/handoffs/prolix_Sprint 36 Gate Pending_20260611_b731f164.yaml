@@ -1,0 +1,59 @@
+workspace: prolix
+session_id: b731f164-cdd3-47b4-8bdd-d3867205b6f8
+status: in_progress
+task_id: 260603_p5_settle_correctness
+phase: Sprint 36 / Gate Pending
+goal_statement: >
+  Validate dt=1.0 fs NVT stability at 895 waters; gate_pass=1 unlocks G1
+  (xfail removal + docstring lift).
+
+summary: >
+  Sprint 36 workflow completed. Gate job 15870804 (895-water TIP3P, dt=1.0 fs,
+  gamma=10 ps^-1, 5 seeds 42-46, 50 ps) RUNNING on node4007 (campaign 894af0cf).
+  test_inner_tile_size_alignment added to main (commit cba0083) -- pure-Python
+  boundary check for optimization.py:28 ceiling formula, covering the excl_count=897
+  production failure case. Premature H-track commit 405bf95 in worktree
+  worktree-inherited-honking-music was intercepted and NOT cherry-picked to main:
+  it incorrectly lifted the dt=1.0 fs cap based on job 15800837 (a 0.5 fs gate).
+  Main is clean -- dt=1.0 fs xfail and dt<=0.5 fs docstring both intact.
+
+next_steps:
+  - "Poll gate: ssh engaging 'squeue -j 15870804 --format=%i,%T,%R'"
+  - "When complete: uv run bth campaign review 894af0cf"
+  - |
+    If gate_pass=1 (|mean_t_rot - 300| <= 5K): run G1 --
+      1. Remove xfail from test_temperature_dt1fs_near_target (~line 61 in test_settle_temperature_control.py)
+      2. Remove xfail from DT_CASES dt=1.0 entry (~line 1064-1071)
+      3. Update settle_langevin docstring: "dt <= 0.5 fs" -> "dt <= 1.0 fs" (settle.py ~line 929)
+      4. Update CLAUDE.md Phase 2 constraint text
+      5. Attribute gate to job 15870804 (NOT 15800837)
+  - "If gate_pass=0: G2 retrospective classifying failure as A/B/C per sidecar decision field"
+  - "Remove or abandon worktree-inherited-honking-music after gate resolution"
+
+immediately_relevant:
+  - file: tests/physics/test_settle_temperature_control.py
+    lines: [55, 75]
+    reason: "test_temperature_dt1fs_near_target with xfail -- remove on gate_pass=1"
+  - file: tests/physics/test_settle_temperature_control.py
+    lines: [1062, 1080]
+    reason: "DT_CASES: dt=1.0 xfail entry -- remove on gate_pass=1"
+  - file: src/prolix/physics/settle.py
+    lines: [920, 940]
+    reason: "settle_langevin docstring: update dt<=0.5->dt<=1.0 on gate_pass=1"
+  - file: scripts/experiments/p5_nvt_gate_dt1fs.bth.toml
+    lines: [1, 45]
+    reason: "Gate sidecar: threshold |mean_t_rot-300|<=5K, gate_pass in result_schema"
+
+failed_attempts:
+  - attempt_id: sprint36-h-track-premature
+    description: "Sprint 36 H-track committed 405bf95 lifting dt=1.0 fs cap in worktree"
+    outcome: "NOT in main -- cherry-pick deliberately skipped this session"
+    reason_failed: >
+      H-track used job 15800837 (dt=0.5 fs AM-conservation gate) as evidence
+      for dt=1.0 fs stability. These are different claims. The dt=1.0 fs gate
+      is 15870804 and was RUNNING when the H-track fired. Do not use 15800837
+      to justify lifting the 1.0 fs cap.
+    do_not_retry: true
+
+open_questions:
+  - "Will gate job 15870804 produce gate_pass=1?"
