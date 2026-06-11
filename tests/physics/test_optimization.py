@@ -2,7 +2,47 @@ import jax
 import jax.numpy as jnp
 from jax_md import space
 import pytest
-from prolix.physics.optimization import chunked_lj_energy, chunked_coulomb_energy
+from prolix.physics.optimization import chunked_lj_energy, chunked_coulomb_energy, chunked_lj_energy_nl
+
+
+def test_chunked_lj_tiling_alignment_regression():
+    """Regression for tiling atom-drop bug: inner_tile_size must be tile_size multiple.
+
+    At excl_count=897 (excl_count+128=1025, not divisible by 128), the pre-fix code
+    used inner_tile_size=1025, silently dropped atoms in tile_reduction, and produced
+    10^62 K blowup at 895-water scale.
+
+    The fix (src/prolix/physics/optimization.py, line 28) uses ceiling division:
+        inner_tile_size = ((_need + tile_size - 1) // tile_size) * tile_size
+    """
+    from jax_md import space
+    displacement_fn, _ = space.free()
+
+    n_atoms = 8
+    key = jax.random.PRNGKey(0)
+    positions = jax.random.normal(key, (n_atoms, 3)) * 2.0
+    sigmas = jnp.ones(n_atoms) * 3.0
+    epsilons = jnp.ones(n_atoms) * 0.1
+
+    # Case 1: excl_count=897 → _need=max(1024,1025)=1025 → NOT tile-aligned without the fix
+    excl_count = 897
+    excl_indices = jnp.zeros((excl_count, 2), dtype=jnp.int32)
+    excl_scales = jnp.ones((excl_count, 2))
+
+    result = chunked_lj_energy(positions, sigmas, epsilons, excl_indices, excl_scales, displacement_fn)
+    assert jnp.isfinite(result), f"NaN/Inf at excl_count={excl_count} (tiling regression)"
+
+    # Case 2: Aligned baseline (excl_count=896 → _need=1024, aligned)
+    excl_count_2 = 896
+    excl_indices_2 = jnp.zeros((excl_count_2, 2), dtype=jnp.int32)
+    excl_scales_2 = jnp.ones((excl_count_2, 2))
+    result_2 = chunked_lj_energy(positions, sigmas, epsilons, excl_indices_2, excl_scales_2, displacement_fn)
+    assert jnp.isfinite(result_2), f"NaN/Inf at excl_count={excl_count_2} (aligned baseline)"
+
+    # Case 3: Test chunked_lj_energy_nl with the same misaligned excl_count
+    neighbor_idx = jnp.array([[0, 1], [1, 2], [2, 3]], dtype=jnp.int32)
+    result_nl = chunked_lj_energy_nl(positions, sigmas, epsilons, excl_indices, excl_scales, neighbor_idx, displacement_fn)
+    assert jnp.isfinite(result_nl), f"NaN/Inf at excl_count={excl_count} in chunked_lj_energy_nl"
 
 def test_chunked_coulomb_parity():
     n_atoms = 2
