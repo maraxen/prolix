@@ -925,6 +925,110 @@ def test_r_step_conserves_angular_momentum() -> None:
     assert diff < 1e-8, f"Water {w}: AM not restored. L_target={L_target}, L_corrected={L_corrected}, diff={diff}"
 
 
+def test_r_step_conserves_angular_momentum_pbc() -> None:
+  """Unit test: _r_step_conserve_angular_momentum handles PBC split-molecule case.
+
+  When a water molecule straddles a periodic boundary, shift_fn wraps atoms
+  individually, placing O at one image and H at another (e.g., x_O ≈ 0.1,
+  x_H1 ≈ L_box - 0.2). Without minimum-image unwrapping of H relative to O,
+  |d_unc| ~ L_box → catastrophic impulse → NaN.
+
+  This test verifies that when box is provided, H atoms are unwrapped via
+  minimum-image before computing L_target, and the AM correction succeeds
+  without NaN or numerical blowup.
+
+  Fixture: n_waters=1, split-molecule water straddling PBC boundary
+    x_unc[0] = [0.1, 0.1, 0.1]    # O at x=0.1
+    x_unc[1] = [3.0, 0.1, 0.1]    # H1 near boundary (x=3.0, box=3.1)
+    x_unc[2] = [0.1, 0.3, 0.1]    # H2 within box
+    box = [3.1, 3.1, 3.1]
+  Minimum-image: d_OH1 = 3.0 - 0.1 = 2.9 → round(2.9/3.1) = 1 →
+                 d_OH1_mi = 2.9 - 3.1 = -0.2 → H1_unwrapped_x = 0.1 - 0.2 = -0.1
+  """
+  jax.config.update("jax_enable_x64", True)
+  from prolix.physics.settle import _r_step_conserve_angular_momentum, WaterIndices
+
+  key = jax.random.PRNGKey(99)
+  n_waters = 1
+  mass_oxygen = 15.999
+  mass_hydrogen = 1.008
+  mass_total = mass_oxygen + 2.0 * mass_hydrogen
+
+  # Create water indices for a single water
+  water_indices = settle.get_water_indices(0, 1)
+  indices = WaterIndices.from_row(water_indices.T)
+  m_all = jnp.array([mass_oxygen, mass_hydrogen, mass_hydrogen])
+
+  # Split-molecule fixture: H1 straddling PBC boundary
+  x_unc = jnp.array([
+    [0.1, 0.1, 0.1],      # O at x=0.1
+    [3.0, 0.1, 0.1],      # H1 near boundary (x≈L_box)
+    [0.1, 0.3, 0.1],      # H2 within box
+  ], dtype=jnp.float64)
+
+  # Box edge length
+  box = jnp.array([3.1, 3.1, 3.1], dtype=jnp.float64)
+
+  # Random momenta before A step
+  key, subkey = jax.random.split(key)
+  p_pre_a = jax.random.normal(subkey, (3, 3), dtype=jnp.float64) * 5.0
+
+  # Simulate SETTLE displacement (small perturbation)
+  settle_displacement = jnp.array([
+    [0.001, 0.001, 0.001],
+    [-0.001, 0.001, 0.001],
+    [0.001, -0.001, 0.001],
+  ], dtype=jnp.float64)
+  x_con = x_unc + settle_displacement
+
+  # Apply R-step momentum correction: dp = m * dx / half_dt
+  half_dt = 0.25  # 0.5 fs (AKMA units)
+  mass_arr = jnp.array([mass_oxygen, mass_hydrogen, mass_hydrogen], dtype=jnp.float64)
+  dp_r_w = mass_arr[:, None] * settle_displacement / half_dt
+  momentum_after_r = p_pre_a + dp_r_w
+
+  # Apply the AM correction WITH box argument
+  momentum_corrected = _r_step_conserve_angular_momentum(
+    momentum_after_r, p_pre_a, x_unc, x_con, water_indices,
+    mass_oxygen, mass_hydrogen, box=box
+  )
+
+  # Verify: no NaN in output
+  assert jnp.all(jnp.isfinite(momentum_corrected)), \
+    f"NaN in corrected momentum (PBC fixture). momentum_corrected={momentum_corrected}"
+
+  # Compute L_target with unwrapped H atoms
+  r_O_unc = x_unc[0]
+  r_H1_unc = x_unc[1]
+  r_H2_unc = x_unc[2]
+
+  # Unwrap H atoms relative to O via minimum-image
+  dH1 = r_H1_unc - r_O_unc
+  dH1_mi = dH1 - box * jnp.round(dH1 / box)
+  r_H1_unc_unwrapped = r_O_unc + dH1_mi
+
+  dH2 = r_H2_unc - r_O_unc
+  dH2_mi = dH2 - box * jnp.round(dH2 / box)
+  r_H2_unc_unwrapped = r_O_unc + dH2_mi
+
+  r_unc_w_unwrapped = jnp.array([r_O_unc, r_H1_unc_unwrapped, r_H2_unc_unwrapped])
+  r_com_target = (m_all @ r_unc_w_unwrapped) / mass_total
+  d_target = r_unc_w_unwrapped - r_com_target
+  L_target = jnp.sum(jnp.cross(d_target, p_pre_a), axis=0)
+
+  # Compute L_actual from corrected momentum at constrained positions
+  r_con_w = jnp.array([x_con[0], x_con[1], x_con[2]])
+  p_corrected_w = momentum_corrected
+  r_com_corrected = (m_all @ r_con_w) / mass_total
+  d_corrected = r_con_w - r_com_corrected
+  L_actual = jnp.sum(jnp.cross(d_corrected, p_corrected_w), axis=0)
+
+  # Verify AM is conserved (with slightly relaxed tolerance for PBC case)
+  diff = jnp.max(jnp.abs(L_target - L_actual))
+  assert jnp.allclose(L_actual, L_target, atol=1e-8), \
+    f"AM not restored in PBC case: L_target={L_target}, L_actual={L_actual}, diff={diff}"
+
+
 def test_settle_langevin_t_rot_small_system() -> None:
   """Regression test: AM conservation smoke test for small system.
 
@@ -949,3 +1053,48 @@ def test_settle_langevin_t_rot_small_system() -> None:
     f"T_rot={mean_t_observable} is not finite (NaN or inf). Integration may have failed."
   assert mean_t_observable < 1000.0, \
     f"T_rot={mean_t_observable:.1f}K exceeds 1000K, suggesting thermal runaway."
+
+
+# ============================================================================
+# Parametrized dt sweep: 16-water NVT across dt=[0.5, 1.0, 2.0] fs
+# ============================================================================
+
+DT_CASES = [
+    pytest.param(0.5, id="dt0.5fs"),
+    pytest.param(
+        1.0,
+        marks=pytest.mark.xfail(
+            strict=False,
+            reason="dt=1.0 fs pending cluster gate P5E-S2 (job p5-nvt-gate-dt1fs); remove xfail on gate_pass=1"
+        ),
+        id="dt1.0fs"
+    ),
+    pytest.param(
+        2.0,
+        marks=pytest.mark.xfail(
+            strict=False,
+            reason="dt=2.0 fs untested — no gate run; do NOT interpret xfail as expected-stable"
+        ),
+        id="dt2.0fs"
+    ),
+]
+
+
+@pytest.mark.slow
+@pytest.mark.parametrize("dt_fs", DT_CASES)
+def test_dt_sweep_16water_nvt(dt_fs: float) -> None:
+  """Parametrized dt sweep: 16-water NVT, SETTLE+Langevin.
+
+  dt=0.5 fs: passes (no xfail). dt=1.0 fs: xfail until gate_pass=1.
+  dt=2.0 fs: PERMANENT xfail — no gate run planned; not evidence of stability.
+
+  NOTE: Existing n=2 tests (test_temperature_dt1fs_near_target, test_temperature_dt2fs_near_target)
+  are separate and not the gate evidence. Do not confuse them with this sweep.
+  """
+  n_waters = 16
+  sim_ps = 10.0
+  steps = int(sim_ps * 1000.0 / dt_fs)
+  burn = max(100, steps // 3)
+  seed = 777
+  mean_t, _ = _mean_rigid_t_after_burn(dt_fs=dt_fs, n_waters=n_waters, seed=seed, steps=steps, burn=burn)
+  assert abs(mean_t - 300.0) < 15.0, f"dt={dt_fs}: T={mean_t:.1f}K, expected 300±15K"
