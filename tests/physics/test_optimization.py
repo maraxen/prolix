@@ -44,6 +44,43 @@ def test_chunked_lj_tiling_alignment_regression():
     result_nl = chunked_lj_energy_nl(positions, sigmas, epsilons, excl_indices, excl_scales, neighbor_idx, displacement_fn)
     assert jnp.isfinite(result_nl), f"NaN/Inf at excl_count={excl_count} in chunked_lj_energy_nl"
 
+def test_inner_tile_size_alignment():
+    """Pure-Python boundary check for inner_tile_size ceiling formula.
+
+    optimization.py:28: inner_tile_size = ((_need + tile_size - 1) // tile_size) * tile_size
+    Pre-fix: inner_tile_size = _need (not tile-aligned), silently dropping atoms.
+    Critical failure: excl_count=897 → _need=1025 → pre-fix used 1025 (not a
+    multiple of 128), causing tile_reduction to drop atoms → 10^62 K blowup.
+    """
+    tile_size = 128
+
+    def _compute(excl_count):
+        _need = max(1024, excl_count + 128)
+        return ((_need + tile_size - 1) // tile_size) * tile_size
+
+    cases = [
+        # (excl_count, expected_inner_tile_size)
+        (0,    1024),  # _need=1024, already aligned
+        (896,  1024),  # _need=max(1024,1024)=1024, already aligned (boundary)
+        (897,  1152),  # _need=1025, the failing production case → must be 9*128=1152
+        (1023, 1152),  # _need=1151 → ceil to 1152
+        (1024, 1152),  # _need=1152, already aligned (next boundary)
+        (1025, 1280),  # _need=1153 → ceil to 10*128=1280
+    ]
+    for excl_count, expected in cases:
+        result = _compute(excl_count)
+        _need = max(1024, excl_count + 128)
+        assert result == expected, (
+            f"excl_count={excl_count}: got {result}, expected {expected}"
+        )
+        assert result % tile_size == 0, (
+            f"excl_count={excl_count}: {result} not divisible by {tile_size}"
+        )
+        assert result >= _need, (
+            f"excl_count={excl_count}: {result} < _need={_need} (under-allocated)"
+        )
+
+
 def test_chunked_coulomb_parity():
     n_atoms = 2
     positions = jnp.array([
