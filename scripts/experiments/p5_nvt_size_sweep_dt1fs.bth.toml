@@ -1,0 +1,53 @@
+[experiment]
+mode = "exploration"
+hypothesis = """
+The dt=1.0 fs SETTLE+Langevin warm bias is system-size dependent. At the gate's
+exact configuration (dt=1.0 fs, gamma=10 ps^-1, project_ou=True, remove_com=False,
+settle_velocity_iters=10), |mean T_rot - 300 K| decreases monotonically with
+n_waters: large at the unit-test sizes (n=2 ~358-403 K, n=16 ~343 K observed in
+local CPU verification) and within +-5 K at the gate size (n=895 -> 299.63 K, job
+15870804). There exists a crossover size N* above which |mean T_rot - 300| <= 15 K.
+This run measures one size; the campaign aggregates the n -> T_rot curve to locate N*.
+Reuses run_nvt() from p5_nvt_gate_dt1fs.py verbatim so the metric is identical to
+the gate (raw rigid-body KE over dof=6N-3), which also distinguishes genuine
+size-dependence from any metric difference vs the unit-test helper at n<=16.
+"""
+
+[outcomes.pass]
+condition = "within_15k == 1"
+decision = "Record this size as above-crossover (warm bias within unit-test tolerance). If the smallest such size is <= 64, the unit-test xfails can be reframed as small-system-only; if only n>=512 passes, the dt<=1.0 fs lift must be documented as production-scale-only."
+reasoning = """
+The +-15 K bound matches the unit-test assertion tolerance
+(test_temperature_dt1fs_near_target / test_dt_sweep_16water_nvt). A size whose mean
+T_rot lands within 15 K of 300 K would pass those tests if run at that size, so the
+crossover N* directly informs how to reframe the xfails and the documented dt cap.
+"""
+
+[outcomes.fail]
+is_residual = true
+condition = "within_15k == 0 OR within_15k IS NULL"
+decision = "Record this size as below-crossover (warm bias exceeds unit-test tolerance). Confirms the dt=1.0 fs cap cannot be lifted unconditionally at this size; keep the corresponding xfail."
+reasoning = """
+|mean T_rot - 300| > 15 K at this size means dt=1.0 fs is not thermally
+faithful here despite passing at 895 waters — the residual/expected branch for
+small and intermediate sizes given the local verification finding.
+"""
+
+[result_schema]
+n_waters = "int"
+mean_t_rot = "float"
+std_t_rot = "float"
+mean_t_trans = "float"
+mean_t_total = "float"
+dev_t_rot = "float"
+within_5k = "int"
+within_15k = "int"
+dt_fs = "float"
+gamma_ps = "float"
+
+[metadata]
+task_id = "260603_p5_settle_correctness"
+phase = "Phase 5 Extended — dt=1fs size-crossover characterization"
+depends_on_commits = ["678c9cb", "5d65edb"]
+prior_gate_job = "15870804"
+campaign_slug = "p5-nvt-size-sweep-dt1fs"
