@@ -64,9 +64,19 @@ n_waters    T_rot   T_trans  T_total |dev_rot| |dev_tot|  tot<=15  tot<=5
 - The n=2 xfail (`test_temperature_dt1fs_near_target`) should be **kept**, reason
   reframed: small-N translational finite-size artifact (3 trans DOF), not dt
   instability.
-- The n=16 sweep xfail (`test_dt_sweep_16water_nvt[dt1.0fs]`) passes **only at
-  gamma=10**, not at the helper's gamma=1. Decision pending: either retarget the
-  test to gamma=10 (then un-xfail) or keep it with a weak-friction caveat.
+- The n=16 sweep test (`test_dt_sweep_16water_nvt`) was **retargeted to assert T_rot**
+  (the finite-size-robust, gate-validated metric) at gamma=10, and un-xfailed for
+  dt=1.0 fs (dt=2.0 stays permanent xfail). **Resolved (2026-06-13).**
+
+## Side finding: latent T_total failure at n=16
+
+Retargeting uncovered that the *previous* assertion (on combined **T_total**) was a
+latent failure even at the dt=0.5 fs baseline: at n=16/10 ps, T_total = 364.9 K
+(gamma=1) / 315.8 K (gamma=10), both > 300 ± 15 K. It was masked because the test is
+`@pytest.mark.slow` and excluded from the fast CI gate, so it was never actually run.
+Root cause is the same small-N translational finite-size mode that dominates T_total at
+n=16. The fix (assert T_rot) makes both dt=0.5 and dt=1.0 pass cleanly (~300 K), since
+T_rot is faithful at every size.
 
 ## Open question
 

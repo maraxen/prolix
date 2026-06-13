@@ -9,8 +9,10 @@ last-edit: 2026-06-01
 ongoing-work: P1a MolecularBundle (bucketed JIT boundary). NPT KE init bug resolved
 (settle.py:1944 `/mu` → `*mu`, 2026-06-01, commit b6e5bb9). LFMiddle campaign 89c9a900
 concluded FALSIFIED (2026-06-01) — 46 runs, 0 passes, all dt values; see
-v1.1_next_steps.md. Phase 5 (constraint-aware thermostat) is now P1 candidate for
-lifting the dt ≤ 0.5 fs constraint.
+v1.1_next_steps.md. Phase 5 (C3 AM conservation, 678c9cb) lifted the dt cap to
+≤ 1.0 fs at production scale (n ≳ 16, gamma ≈ 10 ps⁻¹) — gate job 15870804 +
+size sweep ba334c1f (2026-06-13). Residual small-N warm bias is translational
+finite-size; see `.praxia/docs/research/260612_p5-dt1fs-size-crossover.md`.
 
 notes:
 - Tiling bug found in `src/prolix/physics/optimization.py`: `inner_tile_size` for the
@@ -48,9 +50,13 @@ Exploratory ideas for future sprints (electrostatics, allostery, spectral analys
 
 ## Phase 2: Explicit Solvent Integration
 
-**Status**: v1.0 Release with known constraint  
+**Status**: v1.0 Release; dt cap lifted to ≤ 1.0 fs at production scale (2026-06-13)  
 **Decision**: Use SETTLE + Langevin thermostat  
-**Constraint**: dt ≤ 0.5 fs (timestep limitation)
+**Constraint**: dt ≤ 1.0 fs for production-scale NVT (n_waters ≳ 16, gamma ≈ 10 ps⁻¹);
+dt ≤ 0.5 fs for very small systems (n ≲ 16) or weak friction (gamma ≈ 1 ps⁻¹).
+Validated by gate job 15870804 + size sweep ba334c1f; the residual small-N warm bias
+is translational finite-size, not dt instability. See
+`.praxia/docs/research/260612_p5-dt1fs-size-crossover.md`.
 
 ### Background
 
@@ -60,7 +66,7 @@ Explicit solvent (TIP3P water with SETTLE rigid constraints) requires careful in
 2. **Phase 2C (Constrained OU)**: Temperature unstable at all timesteps
 3. **settle_with_nhc (NHC wrapper)**: Chain state desynchronization at longer timescales
 
-### Why dt ≤ 0.5fs?
+### Why the dt cap was 0.5 fs (and how it was lifted to 1.0 fs)
 
 SETTLE velocity constraints remove kinetic energy from constrained degrees of freedom. Standard thermostats expect to regulate total kinetic energy, creating a feedback loop:
 
@@ -69,7 +75,16 @@ SETTLE velocity constraints remove kinetic energy from constrained degrees of fr
 3. SETTLE removes it again next step
 4. Oscillation/divergence emerges
 
-At smaller timesteps (dt ≤ 0.5fs), the per-step constraint impulse magnitude is small, giving the Langevin thermostat (friction + noise) time to re-equilibrate before the next SETTLE constraint applies.
+At smaller timesteps (dt ≤ 0.5 fs), the per-step constraint impulse magnitude is small, giving the Langevin thermostat (friction + noise) time to re-equilibrate before the next SETTLE constraint applies.
+
+**Resolution (2026-06-13):** the C3 AM-conservation correction (678c9cb) plus adequate
+friction (gamma ≈ 10 ps⁻¹) lifted this to **dt ≤ 1.0 fs at production scale**. Gate job
+15870804 (895 waters) holds T_rot = 299.6 K, and size sweep ba334c1f shows the residual
+warm bias is **translational finite-size** — concentrated in the 3·N−3 translational DOF,
+so it only bites for very small systems (n ≲ 16) and washes out by n ≳ 16 (T_total within
+±15 K) / n ≳ 64 (within ±5 K). T_rot is faithful at every size. Use dt ≤ 0.5 fs only for
+n ≲ 16 or weak friction (gamma ≈ 1 ps⁻¹). See
+`.praxia/docs/research/260612_p5-dt1fs-size-crossover.md`.
 
 ### Production Usage
 
@@ -80,9 +95,9 @@ from prolix.physics import settle
 
 init_fn, apply_fn = settle.settle_langevin(
     energy_fn, shift_fn,
-    dt=0.5,  # AKMA units (0.5 fs) — do NOT exceed this
+    dt=1.0,  # AKMA units (1.0 fs) — validated at production scale (n≳16, gamma≈10); use 0.5 for n≲16 / weak friction
     kT=kT,
-    gamma=1.0,  # ps^-1
+    gamma=10.0,  # ps^-1 — adequate friction is required for the dt=1.0 fs lift
     mass=masses,
     water_indices=water_indices,
     project_ou_momentum_rigid=True,  # Required for correct equipartition
@@ -176,7 +191,7 @@ equilibration, use `batched_equilibrate_nl`.
 
 ### Known Limitations (v1.0 / v1.1)
 
-1. **NVT timestep cap**: dt ≤ 0.5 fs (rigid body + thermostat feedback coupling)
+1. **NVT timestep cap**: dt ≤ 1.0 fs at production scale (n_waters ≳ 16, gamma ≈ 10 ps⁻¹; gate job 15870804, sweep ba334c1f). dt ≤ 0.5 fs for n ≲ 16 or weak friction (gamma ≈ 1 ps⁻¹). Residual small-N warm bias is translational finite-size (3·N−3 DOF), not dt instability — see `.praxia/docs/research/260612_p5-dt1fs-size-crossover.md`.
 2. **NPT long-trajectory divergence**: Temperature runaway (→ 10^115 K) beyond ~10 ps due to CSVR + rigid-water KE coupling. Use NVT for longer production runs. *KE init spike (T≈5000 K at step 0) fixed 2026-06-01: `settle.py:1944` `/ mu` → `* mu` (Bernetti-Bussi sign correction); `test_npt_20ps_liquid_water` xfail removed (commit b6e5bb9).* Long-trajectory divergence root cause (CSVR+SETTLE decoupling) addressed in Phase 6.
 3. **Batched SETTLE constraints**: `make_integrator(..., water_indices=...)` is not supported in v1.0. For batched simulations with SETTLE-constrained water, use `settle.settle_langevin` directly and wrap in `jax.vmap` (see v1.1 roadmap for full modular support).
 
@@ -207,8 +222,10 @@ A constraint-aware thermostat that only couples to unconstrained DOF could elimi
 
 ### Production Status
 
-**v1.0**: settle_langevin with dt ≤ 0.5 fs validated and production-ready (NVT only)
-**v1.1+**: LFMiddle hypothesis test, constraint-aware thermostat, NPT fix planned
+**v1.0**: settle_langevin validated and production-ready (NVT only). dt ≤ 1.0 fs at
+production scale (n ≳ 16, gamma ≈ 10 ps⁻¹; gate 15870804 + sweep ba334c1f); dt ≤ 0.5 fs
+for n ≲ 16 / weak friction.
+**v1.1+**: ~~LFMiddle hypothesis test~~ (falsified), constraint-aware thermostat, NPT fix planned
 
 ## Phase 2–4: Integrator Modular Architecture (v1.0 Release)
 
@@ -242,7 +259,7 @@ A constraint-aware thermostat that only couples to unconstrained DOF could elimi
 
 ### Known Limitations (v1.0)
 
-- dt ≤ 0.5 fs (SETTLE+thermostat coupling; documented in Phase 2 section)
+- dt ≤ 1.0 fs at production scale (n ≳ 16, gamma ≈ 10 ps⁻¹); dt ≤ 0.5 fs for n ≲ 16 / weak friction (documented in Phase 2 section)
 - NPT long-trajectory divergence (> 10 ps); use NVT for production (documented in Phase 2 section)
 - Batched SETTLE: smoke-tested but not exhaustively validated at scale (see v1.1 roadmap)
 
@@ -275,7 +292,13 @@ show genuine thermal runaway independent of the tiling bug.*
 
 **Estimated effort**: 2–3 days
 
-### Phase 5 (New): Constraint-Aware Thermostat — **P1 candidate (promoted 2026-06-01)**
+### Phase 5 (New): Constraint-Aware Thermostat — **dt cap lifted at production scale (2026-06-13)**
+
+**Status**: The C3 AM-conservation correction (678c9cb) achieved stable dt=1.0 fs NVT at
+production scale — gate job 15870804 (895 waters, T_rot 299.6 K) + size sweep ba334c1f.
+The remaining sub-goal is the small-N regime: a translational finite-size warm bias
+(n ≲ 16, only 3·N−3 translational DOF) and the weak-friction (gamma ≈ 1 ps⁻¹) case still
+need dt ≤ 0.5 fs. See `.praxia/docs/research/260612_p5-dt1fs-size-crossover.md`.
 
 **Objective**: Fix dt ≤ 0.5 fs limitation via constraint-aware thermostat that only couples to unconstrained DOF
 

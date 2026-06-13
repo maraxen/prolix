@@ -926,11 +926,14 @@ def settle_langevin(
   water's rigid-body subspace (unless ``project_ou_momentum_rigid=False``), so isotropic
   Cartesian noise does not over-drive ``6 N_w-3`` kinetic degrees of freedom.
 
-  **IMPORTANT**: For stable temperature control with SETTLE constraints, use **dt ≤ 0.5 fs**.
-  Larger timesteps couple SETTLE constraint impulses with Langevin thermostat feedback,
-  creating oscillations that compromise temperature stability. The reduced timestep constraint
-  is a known limitation in v1.0; future versions will implement constraint-aware thermostats
-  to eliminate this restriction.
+  **IMPORTANT (timestep)**: **dt ≤ 1.0 fs** is validated for production-scale systems
+  (n_waters ≳ 16 with gamma ≈ 10 ps⁻¹). The dt=1.0 fs gate (895 waters, job 15870804)
+  holds T_rot = 299.6 K, and a system-size sweep (campaign ba334c1f) shows T_total within
+  ±15 K for n ≥ 16 and within ±5 K for n ≥ 64; T_rot is faithful at every size. Below
+  n ≈ 16 a **translational finite-size warm bias** appears (only 3·N−3 translational DOF
+  at small N, under-regulated against the SETTLE constraint impulse). For very small
+  systems (n ≲ 16) or weak friction (gamma ≈ 1 ps⁻¹), use **dt ≤ 0.5 fs**. See
+  .praxia/docs/research/260612_p5-dt1fs-size-crossover.md.
 
   Args:
       energy_or_force_fn: System force definition.
