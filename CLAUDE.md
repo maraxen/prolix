@@ -355,7 +355,7 @@ None. New APIs are additive.
 
 ### Known Limitations
 
-1. dt ≤ 0.5 fs for NVT (SETTLE+Langevin coupling; workaround: use smaller dt). LFMiddle hypothesis falsified (campaign 89c9a900, 2026-06-01). Phase 5 is the only known path to lifting this.
+1. dt ≤ 1.0 fs for NVT at production scale (n ≳ 16, gamma ≈ 10 ps⁻¹; gate 15870804 + sweep ba334c1f, 2026-06-13); dt ≤ 0.5 fs for n ≲ 16 or weak friction. LFMiddle hypothesis falsified (campaign 89c9a900, 2026-06-01); the cap was instead lifted by C3 AM conservation (678c9cb). Residual small-N warm bias is translational finite-size — see `.praxia/docs/research/260612_p5-dt1fs-size-crossover.md`.
 2. NPT long-trajectory divergence beyond ~10 ps (use NVT for production). *KE init spike fixed (commit b6e5bb9, 2026-06-01).*
 3. Batched SETTLE validated on small systems (4 waters, 100 steps); large-scale testing in v1.1
 
