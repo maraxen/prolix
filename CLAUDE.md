@@ -106,7 +106,7 @@ init_fn, apply_fn = settle.settle_langevin(
 ```
 
 **Key parameters**:
-- `dt=0.5`: Maximum recommended timestep for SETTLE + Langevin coupling
+- `dt=1.0`: Recommended timestep at production scale (n≳16, gamma≈10 ps⁻¹); use `dt=0.5` for very small systems (n≲16) or weak friction
 - `project_ou_momentum_rigid=True`: Samples noise in 6D rigid-body subspace per water
 - `projection_site="post_o"`: Apply projection after O-step (Ornstein-Uhlenbeck stochastic update)
 
