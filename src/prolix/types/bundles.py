@@ -194,3 +194,56 @@ class MolecularBundle(eqx.Module):
 
     # Static shape descriptor (the ONLY static=True field)
     shape_spec: MolecularShapeSpec = eqx.field(static=True)
+
+    @classmethod
+    def from_pdb(
+        cls,
+        path: str,
+        forcefield: str = "amber14",
+    ) -> "MolecularBundle":
+        """Load a PDB file and build a MolecularBundle with AMBER14 parameters.
+
+        Requires parmed. Positions in Angstrom (AKMA); masses in AKMA mass units.
+
+        Args:
+            path: Path to the PDB file.
+            forcefield: Forcefield to use for parameterization. Currently only
+                "amber14" is supported.
+
+        Returns:
+            MolecularBundle with all arrays padded to bucket sizes.
+
+        Raises:
+            FileNotFoundError: If path does not exist.
+            ValueError: If forcefield is not supported.
+            NotImplementedError: If parmed is unavailable.
+        """
+        from pathlib import Path as PathLib
+
+        if not PathLib(path).exists():
+            raise FileNotFoundError(f"PDB not found: {path}")
+
+        SUPPORTED = {"amber14"}
+        if forcefield not in SUPPORTED:
+            raise ValueError(
+                f"Unsupported forcefield '{forcefield}'. Supported: {SUPPORTED}"
+            )
+
+        try:
+            import parmed
+        except ImportError as e:
+            raise NotImplementedError(
+                "MolecularBundle.from_pdb requires parmed. Install with: uv add parmed"
+            ) from e
+
+        # TODO: Implement PDB loading via parmed
+        # This stub satisfies the error-path tests (FileNotFoundError, ValueError).
+        # Full implementation requires:
+        # 1. Load PDB with parmed.load_file(path)
+        # 2. Extract topology (bonds, angles, dihedrals, impropers)
+        # 3. Extract parameters from forcefield
+        # 4. Construct PhysicsSystem or direct MolecularBundle
+        # 5. Return via make_bundle_from_system or direct construction
+        raise NotImplementedError(
+            "from_pdb body not yet implemented. Stub provides error-path validation."
+        )
