@@ -354,7 +354,7 @@ class TestNLLangevinStep:
         # Take one step
         new_state = step_fn(padded, state, neighbor_idx)
 
-        assert jnp.all(jnp.isfinite(new_state(positions)), \
+        assert jnp.all(jnp.isfinite(new_state.positions)), \
             "NL step positions must be finite"
         assert jnp.all(jnp.isfinite(new_state.momentum)), \
             "NL step momenta must be finite"

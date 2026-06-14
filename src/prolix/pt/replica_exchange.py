@@ -390,7 +390,7 @@ def run_replica_exchange(
     step_rngs = random.split(step_rng, n_replicas)
 
     langevin_state = physics_simulate.NVTLangevinState(
-      positions=curr_state(positions,
+      positions=curr_state.positions,
       momentum=curr_state.velocities * curr_state.mass,
       force=curr_state.forces,
       mass=curr_state.mass,
