@@ -236,17 +236,16 @@ class MolecularBundle(eqx.Module):
                 "MolecularBundle.from_pdb requires parmed. Install with: uv add parmed"
             ) from e
 
-        # TODO: Implement PDB loading via parmed
-        # This stub satisfies the error-path tests (FileNotFoundError, ValueError).
-        # Full implementation requires:
-        # 1. Load PDB with parmed.load_file(path)
-        # 2. Extract topology (bonds, angles, dihedrals, impropers)
-        # 3. Extract parameters from forcefield
-        # 4. Construct PhysicsSystem or direct MolecularBundle
-        # 5. Return via make_bundle_from_system or direct construction
-        raise NotImplementedError(
-            "from_pdb body not yet implemented. Stub provides error-path validation."
-        )
+        # Load PDB and extract structure
+        struct = parmed.load_file(path)
+
+        # Convert parmed.Structure to a system-like namespace
+        system = _parmed_struct_to_system(struct)
+
+        # Delegate to the standard factory
+        from prolix.physics.system import make_bundle_from_system
+
+        return make_bundle_from_system(system, boundary_condition="periodic")
 
     @classmethod
     def from_system_dict(
@@ -283,3 +282,153 @@ class MolecularBundle(eqx.Module):
         )
         ns = SimpleNamespace(**d)
         return make_bundle_from_system(ns, boundary_condition=boundary_condition)
+
+
+def _parmed_struct_to_system(struct):
+    """Convert parmed.Structure to a system-like namespace for make_bundle_from_system.
+
+    Extracts positions (Angstrom), masses, bonds, and topology information from a
+    parmed Structure. Note: parmed can infer bonds from PDB connectivity, but
+    parameters (k, r0 for bonds, angles, etc.) are empty unless the structure
+    was loaded from a parameter file (e.g., .prmtop).
+
+    Args:
+        struct: parmed.Structure instance.
+
+    Returns:
+        SimpleNamespace with fields: positions, masses, charges, sigmas, epsilons,
+        bonds, bond_params, angles, angle_params, dihedrals, dihedral_params,
+        impropers, improper_params, water_indices, box_size.
+    """
+    from types import SimpleNamespace
+
+    import numpy as np
+
+    import jax.numpy as jnp
+
+    # Extract positions (Angstrom)
+    positions = jnp.asarray(struct.coordinates, dtype=jnp.float32)
+
+    # Extract masses from atoms
+    masses = jnp.asarray([atom.mass for atom in struct.atoms], dtype=jnp.float32)
+
+    # Extract charges (default 0 if not set)
+    charges = jnp.asarray(
+        [getattr(atom, "charge", 0.0) for atom in struct.atoms], dtype=jnp.float32
+    )
+
+    # Extract LJ parameters (sigma, epsilon) — defaults to 0 if not set
+    sigmas = jnp.asarray([getattr(atom, "sigma", 0.0) for atom in struct.atoms], dtype=jnp.float32)
+    epsilons = jnp.asarray([getattr(atom, "epsilon", 0.0) for atom in struct.atoms], dtype=jnp.float32)
+
+    # Extract bonds (parmed.Bond objects store atom indices and parameters)
+    if struct.bonds:
+        bond_idx = jnp.asarray(
+            [[b.atom1.idx, b.atom2.idx] for b in struct.bonds], dtype=jnp.int32
+        )
+        # Bond parameters: [k (kcal/mol/Å^2), r0 (Å)]
+        # parmed stores as Bond.type.k and Bond.type.req if available
+        bond_params = []
+        for b in struct.bonds:
+            k = getattr(b.type, "k", 0.0) if b.type else 0.0
+            req = getattr(b.type, "req", 0.0) if b.type else 0.0
+            bond_params.append([k, req])
+        bond_params = jnp.asarray(bond_params, dtype=jnp.float32)
+    else:
+        bond_idx = jnp.zeros((0, 2), dtype=jnp.int32)
+        bond_params = jnp.zeros((0, 2), dtype=jnp.float32)
+
+    # Extract angles (parmed.Angle objects)
+    if struct.angles:
+        angle_idx = jnp.asarray(
+            [[a.atom1.idx, a.atom2.idx, a.atom3.idx] for a in struct.angles],
+            dtype=jnp.int32,
+        )
+        # Angle parameters: [k (kcal/mol/rad^2), theta0 (degrees)]
+        angle_params = []
+        for a in struct.angles:
+            k = getattr(a.type, "k", 0.0) if a.type else 0.0
+            theteq = getattr(a.type, "theteq", 0.0) if a.type else 0.0
+            angle_params.append([k, theteq])
+        angle_params = jnp.asarray(angle_params, dtype=jnp.float32)
+    else:
+        angle_idx = jnp.zeros((0, 3), dtype=jnp.int32)
+        angle_params = jnp.zeros((0, 2), dtype=jnp.float32)
+
+    # Extract proper dihedrals (parmed.Dihedral objects)
+    # Note: parmed stores multiple terms per dihedral; we flatten them
+    if struct.dihedrals:
+        proper_dih_list = []
+        dih_params_list = []
+        for d in struct.dihedrals:
+            # Only include proper dihedrals (improper=False or not set)
+            if not getattr(d, "improper", False):
+                proper_dih_list.append([d.atom1.idx, d.atom2.idx, d.atom3.idx, d.atom4.idx])
+                # Dihedral params: [pk, phase, periodicity] (convert to AMBER convention)
+                if d.type:
+                    pk = getattr(d.type, "pk", 0.0)
+                    phase = getattr(d.type, "phase", 0.0)
+                    pn = getattr(d.type, "pn", 0.0)
+                    # Pad to 4 params per the MolecularBundle expectation
+                    dih_params_list.append([pk, phase, pn, 0.0])
+                else:
+                    dih_params_list.append([0.0, 0.0, 0.0, 0.0])
+
+        if proper_dih_list:
+            dihedrals = jnp.asarray(proper_dih_list, dtype=jnp.int32)
+            dihedral_params = jnp.asarray(dih_params_list, dtype=jnp.float32)
+        else:
+            dihedrals = jnp.zeros((0, 4), dtype=jnp.int32)
+            dihedral_params = jnp.zeros((0, 4), dtype=jnp.float32)
+    else:
+        dihedrals = jnp.zeros((0, 4), dtype=jnp.int32)
+        dihedral_params = jnp.zeros((0, 4), dtype=jnp.float32)
+
+    # Extract improper dihedrals (improper=True)
+    if struct.dihedrals:
+        improper_list = []
+        improper_params_list = []
+        for d in struct.dihedrals:
+            if getattr(d, "improper", False):
+                improper_list.append([d.atom1.idx, d.atom2.idx, d.atom3.idx, d.atom4.idx])
+                # Improper params: [k, phase, periodicity] (3 elements)
+                if d.type:
+                    pk = getattr(d.type, "pk", 0.0)
+                    phase = getattr(d.type, "phase", 0.0)
+                    pn = getattr(d.type, "pn", 0.0)
+                    improper_params_list.append([pk, phase, pn])
+                else:
+                    improper_params_list.append([0.0, 0.0, 0.0])
+
+        if improper_list:
+            impropers = jnp.asarray(improper_list, dtype=jnp.int32)
+            improper_params = jnp.asarray(improper_params_list, dtype=jnp.float32)
+        else:
+            impropers = jnp.zeros((0, 4), dtype=jnp.int32)
+            improper_params = jnp.zeros((0, 3), dtype=jnp.float32)
+    else:
+        impropers = jnp.zeros((0, 4), dtype=jnp.int32)
+        improper_params = jnp.zeros((0, 3), dtype=jnp.float32)
+
+    # Box size (PBC): parmed stores as box array [a, b, c]
+    box_size = None
+    if struct.box is not None and len(struct.box) >= 3:
+        box_size = jnp.asarray(struct.box[:3], dtype=jnp.float32)
+
+    # Return as SimpleNamespace (protocol compatible with make_bundle_from_system)
+    return SimpleNamespace(
+        positions=positions,
+        masses=masses,
+        charges=charges,
+        sigmas=sigmas,
+        epsilons=epsilons,
+        bonds=bond_idx if bond_idx.shape[0] > 0 else None,
+        bond_params=bond_params if bond_params.shape[0] > 0 else None,
+        angles=angle_idx if angle_idx.shape[0] > 0 else None,
+        angle_params=angle_params if angle_params.shape[0] > 0 else None,
+        dihedrals=dihedrals if dihedrals.shape[0] > 0 else None,
+        dihedral_params=dihedral_params if dihedral_params.shape[0] > 0 else None,
+        impropers=impropers if impropers.shape[0] > 0 else None,
+        improper_params=improper_params if improper_params.shape[0] > 0 else None,
+        box_size=box_size,
+    )

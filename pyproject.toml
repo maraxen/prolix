@@ -30,6 +30,7 @@ dependencies = [
     "h5py>=3.16.0",
     "rdkit>=2024.3.0",
     "xtrax @ file:///home/marielle/projects/xtrax",
+    "parmed>=4.3.1",
 ]
 
 [project.urls]
