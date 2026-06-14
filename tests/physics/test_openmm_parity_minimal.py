@@ -1,8 +1,9 @@
 import pytest
+pytest.importorskip("openmm", reason="openmm not installed")
 import numpy as np
 import jax.numpy as jnp
 from prolix.physics import system, cmap
-from prolix.typing import PhysicsSystem, CoordFormat
+from prolix.typing import PhysicsSystem
 from proxide.io.parsing.backend import parse_structure, OutputSpec
 import openmm
 from openmm import app, unit

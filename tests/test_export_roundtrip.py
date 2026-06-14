@@ -3,7 +3,8 @@ import jax.numpy as jnp
 import os
 import pathlib
 import pytest
-from prolix.physics import pbc, system, types
+from prolix.physics import pbc, system
+from prolix import types
 from prolix.physics.system import make_energy_fn_pure
 from prolix.export import export_energy_fn, export_langevin_step, save_artifact, load_artifact
 

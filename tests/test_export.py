@@ -16,7 +16,8 @@ import pytest
 from prolix import export
 from prolix.physics import pbc
 from prolix.physics.regression_explicit_pme import REGRESSION_EXPLICIT_PME
-from prolix.physics.system import EnergyParams, make_energy_fn_pure
+from prolix.physics.system import make_energy_fn_pure
+from prolix.typing import EnergyParams
 
 import importlib.util as _ilu, pathlib as _pl
 _parity = _ilu.spec_from_file_location(
