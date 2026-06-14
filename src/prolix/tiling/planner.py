@@ -4,13 +4,6 @@ import logging
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from xtrax.tiling.plan import (
-    AxisSpec as XtraxAxisSpec,
-    AxisDecision as XtraxAxisDecision,
-    BatchPlan as XtraxBatchPlan,
-    BatchPlanner as XtraxBatchPlanner,
-)
-from xtrax.tiling.strategy import SafeMap, Vmap
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -99,8 +92,9 @@ class BatchPlan:
 class BatchPlanner:
     """Host-side planner: decides vmap vs safe_map tile size per axis.
 
-    Delegates to xtrax.tiling.BatchPlanner while preserving prolix API and
-    budget-loop semantics.
+    Uses greedy budget-driven demotion: homogeneous axes start as vmap;
+    innermost-first axes are demoted to safe_map if budget exceeded.
+    Heterogeneous axes are always safe_map (element shapes vary).
 
     estimate_memory is injected so the theoretical estimator can be swapped
     for an HLO-backed empirical model without changing this class.
@@ -110,18 +104,16 @@ class BatchPlanner:
     estimate_memory: Callable[..., float]
 
     def plan(self) -> BatchPlan:
-        """Generate a BatchPlan using xtrax.BatchPlanner with greedy demotion.
+        """Generate a BatchPlan with greedy demotion.
 
         Phases:
-        1. Pre-demote heterogeneous axes (vmap invalid; unsafe_map required)
+        1. Pre-demote heterogeneous axes (vmap invalid; safe_map required)
         2. Greedy budget loop for homogeneous axes (innermost-first demotion)
+
+        Note: xtrax.tiling is imported in pyproject.toml for future phases
+        (v1.1: Bucket/Carry/Dedup strategies). v1.0 uses prolix's own
+        budget-driven greedy loop.
         """
-        # Convert prolix AxisSpec to xtrax AxisSpec
-        xtrax_specs = [self._prolix_to_xtrax(spec) for spec in self.axes]
-
-        # Create xtrax planner with no memory estimator initially
-        xtrax_planner = XtraxBatchPlanner()
-
         # Phase 1: Pre-demote heterogeneous axes
         decisions: list[AxisDecision] = []
         sorted_axes = sorted(self.axes, key=lambda a: a.axis_index)
@@ -164,17 +156,4 @@ class BatchPlanner:
             total_memory_estimate=final_estimate,
             axes_by_index={ax.axis_index: ax for ax in self.axes},
             budget_exceeded=exceeded,
-        )
-
-    @staticmethod
-    def _prolix_to_xtrax(spec: AxisSpec) -> XtraxAxisSpec:
-        """Convert prolix AxisSpec to xtrax AxisSpec."""
-        return XtraxAxisSpec(
-            name=spec.name,
-            cardinality=spec.cardinality,
-            batch_size=spec.default_batch_size,
-            granularity=spec.tile_granularity,
-            heterogeneous=spec.heterogeneous,
-            dedup_eligible=False,
-            bucket_boundaries=None,
         )

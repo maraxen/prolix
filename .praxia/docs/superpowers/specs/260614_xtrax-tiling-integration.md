@@ -73,88 +73,41 @@ Other projects (aminx, plegadx, denxity) already standardize on xtrax.tiling.
 
 ---
 
-## 2. Integration Strategy: Wrapper + Adapter
+## 2. Integration Strategy: Type Imports Only (v1.0), Behavioral Delegation Deferred (v1.1)
 
-### Why Not Full Replacement?
+### Decision: Imports + Own Budget Loop (v1.0)
 
-Full replacement (`prolix.tiling.planner` → `from xtrax.tiling.plan import *`) would break prolix physics domain abstractions:
+For v1.0, prolix imports xtrax types into `pyproject.toml` and keeps its proven greedy budget loop. Behavioral delegation (calling xtrax.BatchPlanner to make strategy decisions) is deferred to v1.1 after xtrax matures and achieves stable API.
 
-1. **Memory budget loop**: prolix's greedy demotion (innermost-first, until budget satisfied) is not in xtrax. xtrax assumes upstream sets a memory_estimator callback that makes per-axis decisions, not a global budget.
-2. **estimate_memory_theoretical signature**: prolix expects `estimate_memory_theoretical(decisions, base_shape_bytes, activation_multiplier)`. xtrax has no public estimate function; it expects user to supply the callback.
-3. **axes_by_index dictionary**: prolix physics code queries axes by index. xtrax decisions don't carry this.
-4. **budget_exceeded flag**: prolix has explicit budget tracking. xtrax relies on the estimator to veto decisions.
+### Why Deferred?
 
-### Solution: Wrapper Architecture
+1. **Proven local implementation**: prolix's greedy demotion (innermost-first, until budget satisfied) is battle-tested and working. Switching to xtrax's memory_estimator callback model mid-sprint introduces risk.
+2. **Budget loop mismatch**: xtrax assumes upstream sets a memory_estimator callback that makes per-axis decisions. prolix's global budget loop is a separate concern. Marrying them is a v1.1 refactoring task.
+3. **Zero behavioral change in v1.0**: Keeping prolix's logic means existing tests pass, callers are unaffected, and integration is transparent. This is the lowest-risk path.
+4. **Foundation for v1.1+**: Importing xtrax establishes the dependency and allows v1.1 to adopt Bucket/Carry/Dedup strategies incrementally.
 
-**Create `src/prolix/tiling/xtrax_adapter.py`:**
-- Translate prolix.AxisSpec → xtrax.AxisSpec
-- Wrap xtrax.BatchPlanner with prolix's greedy budget loop (if needed)
-- Preserve `estimate_memory_theoretical` as helper
-- Export prolix.AxisSpec, AxisDecision, BatchPlan, BatchPlanner as before
+### Implementation (v1.0)
 
-**Key invariant:** Public API of prolix.tiling.planner remains unchanged. Internal implementation delegates to xtrax.
+**`src/prolix/tiling/planner.py`:**
+- Keep all prolix classes: AxisSpec, AxisDecision, BatchPlan, BatchPlanner
+- Keep greedy budget loop in BatchPlanner.plan() (unchanged logic)
+- Remove xtrax method calls and converter functions (dead code)
+- Add import comment noting xtrax is available for v1.1 phases
 
-**Backward compatibility:** Existing callers (axes.py, run/spec.py, tiling/__init__.py) import the same names from the same module; no refactoring needed.
+**Key invariant:** Public API of prolix.tiling.planner is unchanged. No refactoring needed.
 
-### Adapter Design
+**Backward compatibility:** Existing callers (axes.py, run/spec.py, tiling/__init__.py) import the same names from the same module; all tests pass.
 
-```python
-# src/prolix/tiling/xtrax_adapter.py
+### v1.1 Roadmap: Behavioral Delegation
 
-from xtrax.tiling.plan import (
-    AxisSpec as XtraxAxisSpec,
-    AxisDecision as XtraxAxisDecision,
-    BatchPlan as XtraxBatchPlan,
-    BatchPlanner as XtraxBatchPlanner,
-)
+When ready, BatchPlanner.plan() will:
+1. Convert prolix.AxisSpec list → xtrax.AxisSpec list
+2. Call xtrax.BatchPlanner.plan() with optional memory_estimator callback
+3. Convert xtrax.AxisDecision (strategy objects) → prolix batch_size integers
+4. Run secondary greedy loop if budget still exceeded (fallback to prolix semantics)
+5. Return prolix BatchPlan
 
-# Re-export prolix types
-from prolix.tiling.planner import (
-    AxisSpec,
-    AxisDecision,
-    BatchPlan,
-    BatchPlanner,
-    estimate_memory_theoretical,
-)
-```
-
-**Then refactor `src/prolix/tiling/planner.py`:**
-
-1. Keep public API (AxisSpec, AxisDecision, BatchPlan, BatchPlanner, estimate_memory_theoretical)
-2. Implement BatchPlanner.plan() as:
-   - Convert prolix.AxisSpec list → xtrax.AxisSpec list
-   - Call xtrax.BatchPlanner.plan()
-   - Convert xtrax.BatchPlan decisions → prolix AxisDecision (strategy object → batch_size)
-   - Run greedy budget loop if needed (optional, based on estimator presence)
-   - Return prolix BatchPlan
-
-**Type conversion map:**
-
-```python
-def prolix_to_xtrax_axis_spec(spec: AxisSpec) -> XtraxAxisSpec:
-    """Convert prolix AxisSpec to xtrax AxisSpec."""
-    return XtraxAxisSpec(
-        name=spec.name,
-        cardinality=spec.cardinality,
-        batch_size=spec.default_batch_size,
-        granularity=spec.tile_granularity,
-        heterogeneous=spec.heterogeneous,
-        dedup_eligible=False,  # prolix doesn't declare dedup
-        bucket_boundaries=None,  # prolix doesn't use buckets yet
-    )
-
-def xtrax_decision_to_prolix_batch_size(xtrax_decision: XtraxAxisDecision) -> int:
-    """Extract batch_size from xtrax strategy."""
-    strategy = xtrax_decision.strategy
-    if isinstance(strategy, Vmap):
-        return 0  # prolix convention: 0 = vmap
-    elif isinstance(strategy, SafeMap):
-        return strategy.batch_size
-    elif isinstance(strategy, (Scan, DedupGather, Bucket)):
-        # If xtrax emits these, prolix ignores them for now
-        # (will be used in future phases)
-        return strategy.batch_size if hasattr(strategy, 'batch_size') else 1
-```
+This phased approach lets xtrax mature while prolix remains stable in v1.0.
 
 ---
 
@@ -206,17 +159,16 @@ dependencies = [
 - Run `uv add --path ../xtrax xtrax`
 - Verify `uv.lock` updates with xtrax entries
 
-### Step 2: Refactor src/prolix/tiling/planner.py
-- Import xtrax types at top
-- Keep prolix AxisSpec, AxisDecision, BatchPlan, BatchPlanner class names
-- Implement BatchPlanner.plan() to delegate to xtrax.BatchPlanner
-- Keep estimate_memory_theoretical() helper
-- Export from __init__.py unchanged
+### Step 2: Clean src/prolix/tiling/planner.py
+- Remove xtrax imports and method calls (dead code in v1.0)
+- Keep greedy budget loop as-is
+- Add comment noting xtrax available for v1.1 delegation
+- No changes to public API (AxisSpec, AxisDecision, BatchPlan, BatchPlanner, estimate_memory_theoretical)
 
 ### Step 3: Update src/prolix/tiling/__init__.py
 - No code changes needed (re-exports unchanged)
 
-### Step 4: Verify callers
+### Step 4: Verify callers (no changes needed)
 
 **src/prolix/tiling/axes.py:**
 - `from prolix.tiling.planner import AxisSpec` — unchanged
@@ -227,7 +179,7 @@ dependencies = [
 ### Step 5: Test and commit
 - Run `uv run pytest -m "not slow" -q`
 - Verify tiling tests pass
-- Commit with message: `refactor(tiling): adopt xtrax.BatchPlanner via adapter`
+- Commit with message: `spec(tiling): defer xtrax.BatchPlanner delegation to v1.1, keep v1.0 greedy loop`
 
 ---
 
@@ -285,9 +237,10 @@ Once wrapper is working, prolix can optionally adopt xtrax features:
 
 | Decision | Choice | Rationale |
 |----------|--------|-----------|
-| **Replacement vs Wrapper** | Wrapper | Preserves prolix budget loop and estimate_memory_theoretical semantics |
-| **Dependency type** | Path (`--path ../xtrax`) | Local development; ease of iteration |
-| **New module?** | No — refactor planner.py in-place | Minimal API churn; backward compatible |
+| **v1.0 strategy** | Import only (no delegation) | Proven greedy loop; zero behavioral change; lowest risk |
+| **v1.1 strategy** | Behavioral delegation to xtrax.BatchPlanner | After xtrax matures; enables Bucket/Carry/Dedup |
+| **Dependency type** | Path (`--path ../xtrax`) in pyproject.toml | Establishes foundation for future phases |
+| **Code changes** | Remove dead xtrax calls; keep greedy loop | Minimal diff; backward compatible API |
 | **Test rewrites** | None (backward compatible) | Public signatures unchanged |
 | **xtrax strategies adopted** | None in v1.0 | Bucket/Carry/Dedup deferred to v1.1 phases |
 
