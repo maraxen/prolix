@@ -1,7 +1,9 @@
 """Tests for EnsemblePlan stub."""
 
 import pytest
-from prolix.api import EnsemblePlan
+import jax.numpy as jnp
+from prolix.api import EnsemblePlan, Trajectory
+from prolix.types.bundles import MolecularBundle, MolecularShapeSpec
 
 
 class FakePlanner:
@@ -12,6 +14,149 @@ class FakePlanner:
         return None
 
 
+def _make_minimal_bundle(n_atoms=3) -> MolecularBundle:
+    """Create a minimal MolecularBundle for testing (water molecule or similar).
+
+    Args:
+        n_atoms: Number of atoms (default 3 for water)
+
+    Returns:
+        MolecularBundle with minimal topology
+    """
+    # Create a minimal bundle directly with padded arrays
+    # For simplicity: 3-atom system with no bonds, angles, dihedrals, etc.
+
+    # Pad to smallest bucket sizes
+    from prolix.types.bundles import ATOM_BUCKETS, _bucket_idx
+
+    atom_bucket_idx = _bucket_idx(n_atoms, ATOM_BUCKETS)
+    padded_n_atoms = ATOM_BUCKETS[atom_bucket_idx]
+
+    positions = jnp.zeros((padded_n_atoms, 3), dtype=jnp.float32)
+    positions = positions.at[:n_atoms].set(jnp.array([
+        [0.0, 0.0, 0.0],
+        [1.0, 0.0, 0.0],
+        [0.0, 1.0, 0.0]
+    ], dtype=jnp.float32))
+
+    charges = jnp.zeros(padded_n_atoms, dtype=jnp.float32)
+    charges = charges.at[:n_atoms].set(jnp.array([0.8, -0.4, -0.4], dtype=jnp.float32))
+
+    sigmas = jnp.ones(padded_n_atoms, dtype=jnp.float32) * 3.15
+    epsilons = jnp.zeros(padded_n_atoms, dtype=jnp.float32)
+    radii = jnp.ones(padded_n_atoms, dtype=jnp.float32)
+    scaled_radii = jnp.ones(padded_n_atoms, dtype=jnp.float32)
+
+    atom_mask = jnp.zeros(padded_n_atoms, dtype=jnp.bool_)
+    atom_mask = atom_mask.at[:n_atoms].set(True)
+
+    # Empty topology arrays
+    empty_bond = jnp.zeros((8, 2), dtype=jnp.int32)
+    empty_bond_params = jnp.zeros((8, 2), dtype=jnp.float32)
+    empty_bond_mask = jnp.zeros(8, dtype=jnp.bool_)
+
+    empty_angle = jnp.zeros((32, 3), dtype=jnp.int32)
+    empty_angle_params = jnp.zeros((32, 2), dtype=jnp.float32)
+    empty_angle_mask = jnp.zeros(32, dtype=jnp.bool_)
+
+    empty_dihedral = jnp.zeros((32, 4), dtype=jnp.int32)
+    empty_dihedral_params = jnp.zeros((32, 4), dtype=jnp.float32)
+    empty_dihedral_mask = jnp.zeros(32, dtype=jnp.bool_)
+
+    empty_improper = jnp.zeros((32, 4), dtype=jnp.int32)
+    empty_improper_params = jnp.zeros((32, 3), dtype=jnp.float32)
+    empty_improper_mask = jnp.zeros(32, dtype=jnp.bool_)
+
+    empty_ub = jnp.zeros((32, 3), dtype=jnp.int32)
+    empty_ub_params = jnp.zeros((32, 2), dtype=jnp.float32)
+    empty_ub_mask = jnp.zeros(32, dtype=jnp.bool_)
+
+    empty_cmap = jnp.zeros((8, 24, 24), dtype=jnp.float32)
+    empty_cmap_mask = jnp.zeros(8, dtype=jnp.bool_)
+
+    empty_water = jnp.zeros((8, 3), dtype=jnp.int32)
+    empty_water_mask = jnp.zeros(8, dtype=jnp.bool_)
+
+    empty_excl = jnp.zeros((32, 2), dtype=jnp.int32)
+    empty_excl_vdw = jnp.zeros(32, dtype=jnp.float32)
+    empty_excl_elec = jnp.zeros(32, dtype=jnp.float32)
+    empty_excl_mask = jnp.zeros(32, dtype=jnp.bool_)
+
+    empty_exc = jnp.zeros((32, 2), dtype=jnp.int32)
+    empty_exc_sigma = jnp.zeros(32, dtype=jnp.float32)
+    empty_exc_epsilon = jnp.zeros(32, dtype=jnp.float32)
+    empty_exc_charge = jnp.zeros(32, dtype=jnp.float32)
+    empty_exc_mask = jnp.zeros(32, dtype=jnp.bool_)
+
+    shape_spec = MolecularShapeSpec(
+        atom_bucket_idx=atom_bucket_idx,
+        bond_bucket_idx=0,
+        angle_bucket_idx=0,
+        dihedral_bucket_idx=0,
+        water_bucket_idx=0,
+        excl_bucket_idx=0,
+        cmap_bucket_idx=0,
+        exception_bucket_idx=0,
+        has_pbc=False,
+        has_implicit_solvent=False,
+        boundary_condition='free',
+    )
+
+    return MolecularBundle(
+        positions=positions,
+        charges=charges,
+        sigmas=sigmas,
+        epsilons=epsilons,
+        radii=radii,
+        scaled_radii=scaled_radii,
+        atom_mask=atom_mask,
+        n_atoms=jnp.array(n_atoms, dtype=jnp.int32),
+        box=jnp.zeros((3, 3), dtype=jnp.float32),
+        bond_idx=empty_bond,
+        bond_params=empty_bond_params,
+        bond_mask=empty_bond_mask,
+        n_bonds=jnp.array(0, dtype=jnp.int32),
+        angle_idx=empty_angle,
+        angle_params=empty_angle_params,
+        angle_mask=empty_angle_mask,
+        n_angles=jnp.array(0, dtype=jnp.int32),
+        dihedral_idx=empty_dihedral,
+        dihedral_params=empty_dihedral_params,
+        dihedral_mask=empty_dihedral_mask,
+        n_dihedrals=jnp.array(0, dtype=jnp.int32),
+        improper_idx=empty_improper,
+        improper_params=empty_improper_params,
+        improper_mask=empty_improper_mask,
+        improper_is_periodic=jnp.array(False, dtype=jnp.bool_),
+        n_impropers=jnp.array(0, dtype=jnp.int32),
+        urey_bradley_idx=empty_ub,
+        urey_bradley_params=empty_ub_params,
+        urey_bradley_mask=empty_ub_mask,
+        n_urey_bradley=jnp.array(0, dtype=jnp.int32),
+        cmap_torsion_idx=jnp.zeros((8, 8), dtype=jnp.int32),
+        cmap_energy_grids=empty_cmap,
+        cmap_mask=empty_cmap_mask,
+        n_cmap=jnp.array(0, dtype=jnp.int32),
+        water_indices=empty_water,
+        water_mask=empty_water_mask,
+        n_waters=jnp.array(0, dtype=jnp.int32),
+        excl_indices=empty_excl,
+        excl_scales_vdw=empty_excl_vdw,
+        excl_scales_elec=empty_excl_elec,
+        excl_mask=empty_excl_mask,
+        n_excl=jnp.array(0, dtype=jnp.int32),
+        exception_pairs=empty_exc,
+        exception_sigmas=empty_exc_sigma,
+        exception_epsilons=empty_exc_epsilon,
+        exception_chargeprods=empty_exc_charge,
+        exception_mask=empty_exc_mask,
+        n_exception_pairs=jnp.array(0, dtype=jnp.int32),
+        pme_alpha=jnp.array(0.3, dtype=jnp.float32),
+        cutoff_distance=jnp.array(9.0, dtype=jnp.float32),
+        shape_spec=shape_spec,
+    )
+
+
 def test_ensemble_plan_construction():
     """Test EnsemblePlan can be constructed with empty bundle list."""
     ep = EnsemblePlan([])
@@ -19,15 +164,14 @@ def test_ensemble_plan_construction():
     assert ep.bundles == []
 
 
-def test_ensemble_plan_run_raises_not_implemented():
-    """Test EnsemblePlan.run() raises NotImplementedError."""
+def test_ensemble_plan_run_requires_bundle():
+    """Test EnsemblePlan.run() raises ValueError when no bundles provided."""
     ep = EnsemblePlan([])
-    with pytest.raises(NotImplementedError) as excinfo:
+    with pytest.raises(ValueError) as excinfo:
         ep.run(n_steps=10, dt=0.5, kT=2.479e-3)
 
-    # Verify error message references #1842
-    assert "#1842" in str(excinfo.value)
-    assert "Sprint 38" in str(excinfo.value)
+    # Verify error message
+    assert "at least one bundle" in str(excinfo.value)
 
 
 def test_ensemble_plan_with_planner():
@@ -41,3 +185,36 @@ def test_ensemble_plan_with_none_planner():
     """Test EnsemblePlan sets batch_plan to None when planner is None."""
     ep = EnsemblePlan([], planner=None)
     assert ep.batch_plan is None
+
+
+def test_ensemble_plan_run_returns_trajectory():
+    """Test that EnsemblePlan.run() returns a Trajectory object."""
+    # Create minimal bundle
+    bundle = _make_minimal_bundle(n_atoms=3)
+    ep = EnsemblePlan([bundle])
+
+    # Run simulation
+    trajectory = ep.run(n_steps=5, dt=0.5, kT=0.596, seed=42)
+
+    # Check return type and shape
+    assert isinstance(trajectory, Trajectory)
+    assert hasattr(trajectory, 'positions')
+    assert hasattr(trajectory, 'observable_values')
+    assert hasattr(trajectory, 'n_steps')
+    assert trajectory.n_steps == 5
+    assert trajectory.positions.shape == (5, 3, 3)  # (steps, atoms, 3)
+
+
+def test_ensemble_plan_run_single_bundle_parity():
+    """Test that single-bundle run produces reasonable positions."""
+    bundle = _make_minimal_bundle(n_atoms=3)
+    ep = EnsemblePlan([bundle])
+
+    # Run short simulation
+    trajectory = ep.run(n_steps=5, dt=0.5, kT=0.596, seed=42)
+
+    # Verify positions changed (not just returned initial)
+    assert not jnp.allclose(trajectory.positions[0], trajectory.positions[-1])
+
+    # Verify all positions are finite
+    assert jnp.all(jnp.isfinite(trajectory.positions))

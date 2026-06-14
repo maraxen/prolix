@@ -74,14 +74,70 @@ class Temperature(eqx.Module):
     def compute(self, state) -> Float[Array, ""]:
         """Compute temperature from state momenta.
 
-        Placeholder implementation returning NaN. Real implementation
-        will be fixed in Sprint 38 once state type is finalized.
+        Uses the kinetic temperature formula: T = (2 * KE) / (dof * k_B)
+        where KE = sum(p_i^2 / (2*m_i)) is the kinetic energy.
 
         Args:
-            state: IntegratorState (type finalized in Sprint 38)
+            state: IntegratorState with momentum and mass fields
+                   (e.g., from prolix.typing.IntegratorState)
 
         Returns:
             Scalar temperature in Kelvin
         """
-        # Placeholder: will be implemented when state type is fixed in Sprint 38
-        return jnp.nan
+        from prolix.simulate import BOLTZMANN_KCAL
+
+        # Ensure masses are available
+        if not hasattr(state, 'mass') or state.mass is None:
+            return jnp.nan
+
+        # Extract momenta and masses
+        momentum = state.momentum  # Shape (N, 3) or (B, N, 3)
+        mass = state.mass  # Shape (N,) or (N, 1)
+
+        # Reshape mass if needed to broadcast with momentum
+        if mass.ndim == 1:
+            mass_expanded = mass[:, None]  # (N, 1)
+        else:
+            mass_expanded = mass
+
+        # Compute kinetic energy: KE = sum(p^2 / (2*m))
+        # Handle both batched and unbatched cases
+        ke_per_atom = jnp.sum(momentum**2 / (2.0 * mass_expanded), axis=-1)  # Remove coord axis
+        total_ke = jnp.sum(ke_per_atom)
+
+        # Compute temperature: T = (2 * KE) / (dof * k_B)
+        temperature = (2.0 * total_ke) / (self.dof * BOLTZMANN_KCAL)
+
+        return temperature
+
+
+class Energy(eqx.Module):
+    """Observable computing total potential energy from integrator state.
+
+    The energy function is evaluated at the current state positions and a
+    captured MolecularBundle. This observable bridges the gap between the
+    state (positions) and the potential energy function.
+
+    Attributes:
+        energy_fn: Callable taking (positions, bundle) -> scalar energy.
+            The function should accept positions (N, 3) and a MolecularBundle,
+            returning a scalar potential energy value.
+        bundle: MolecularBundle or similar system description (captured at
+            construction). Stored as a pytree leaf (not static) to allow
+            batching and pytree operations.
+    """
+
+    energy_fn: any = eqx.field(static=True)  # Callables are static (not traced)
+    bundle: any  # MolecularBundle or system descriptor
+
+    def compute(self, state) -> Float[Array, ""]:
+        """Compute total potential energy at current state.
+
+        Args:
+            state: IntegratorState with positions attribute
+                (e.g., LangevinState, CSVRState, NHCState)
+
+        Returns:
+            Scalar potential energy value
+        """
+        return self.energy_fn(state.positions, self.bundle)

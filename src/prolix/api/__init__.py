@@ -5,14 +5,16 @@ Exports:
   - Observable: @runtime_checkable Protocol for observable quantities
   - Trajectory: eqx.Module output type from simulation runs
   - Temperature: Example Observable for kinetic temperature
+  - Energy: Observable for total potential energy
 """
 
 from prolix.api.ensemble_plan import EnsemblePlan
-from prolix.api.observables import Observable, Trajectory, Temperature
+from prolix.api.observables import Observable, Trajectory, Temperature, Energy
 
 __all__ = [
     "EnsemblePlan",
     "Observable",
     "Trajectory",
     "Temperature",
+    "Energy",
 ]
