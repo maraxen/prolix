@@ -1,3 +1,14 @@
+"""Batch tiling planner: decides vmap vs safe_map per axis.
+
+This module implements prolix's greedy budget-driven tiling strategy.
+For v1.0, prolix retains its proven greedy loop; behavioral delegation to
+xtrax.tiling.BatchPlanner is deferred to v1.1 (issue #1842).
+
+xtrax types (xtrax.tiling.plan.BatchPlanner, AxisSpec, etc.) are available
+as a future backend for custom strategies (Bucket, Carry, Dedup). See
+`.praxia/docs/superpowers/specs/260614_xtrax-tiling-integration.md` for details.
+"""
+
 from __future__ import annotations
 
 import logging
@@ -7,6 +18,9 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from collections.abc import Callable
+
+    from xtrax.tiling.plan import AxisSpec as XtraxAxisSpec
+    from xtrax.tiling.plan import BatchPlanner as XtraxBatchPlanner
 
 logger = logging.getLogger(__name__)
 
