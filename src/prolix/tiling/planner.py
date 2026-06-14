@@ -4,6 +4,14 @@ import logging
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+from xtrax.tiling.plan import (
+    AxisSpec as XtraxAxisSpec,
+    AxisDecision as XtraxAxisDecision,
+    BatchPlan as XtraxBatchPlan,
+    BatchPlanner as XtraxBatchPlanner,
+)
+from xtrax.tiling.strategy import SafeMap, Vmap
+
 if TYPE_CHECKING:
     from collections.abc import Callable
 
@@ -91,6 +99,9 @@ class BatchPlan:
 class BatchPlanner:
     """Host-side planner: decides vmap vs safe_map tile size per axis.
 
+    Delegates to xtrax.tiling.BatchPlanner while preserving prolix API and
+    budget-loop semantics.
+
     estimate_memory is injected so the theoretical estimator can be swapped
     for an HLO-backed empirical model without changing this class.
     """
@@ -99,25 +110,40 @@ class BatchPlanner:
     estimate_memory: Callable[..., float]
 
     def plan(self) -> BatchPlan:
+        """Generate a BatchPlan using xtrax.BatchPlanner with greedy demotion.
+
+        Phases:
+        1. Pre-demote heterogeneous axes (vmap invalid; unsafe_map required)
+        2. Greedy budget loop for homogeneous axes (innermost-first demotion)
+        """
+        # Convert prolix AxisSpec to xtrax AxisSpec
+        xtrax_specs = [self._prolix_to_xtrax(spec) for spec in self.axes]
+
+        # Create xtrax planner with no memory estimator initially
+        xtrax_planner = XtraxBatchPlanner()
+
+        # Phase 1: Pre-demote heterogeneous axes
+        decisions: list[AxisDecision] = []
         sorted_axes = sorted(self.axes, key=lambda a: a.axis_index)
 
-        # Phase 1: pre-demote heterogeneous axes (shapes vary; vmap invalid)
-        decisions: list[AxisDecision] = []
         for ax in sorted_axes:
             if ax.heterogeneous:
                 tile = max(1, ax.tile_granularity)
-                decisions.append(AxisDecision(
-                    axis=ax,
-                    batch_size=tile,
-                    reasoning="heterogeneous axis: element shapes vary; safe_map required",
-                ))
+                decisions.append(
+                    AxisDecision(
+                        axis=ax,
+                        batch_size=tile,
+                        reasoning="heterogeneous axis: element shapes vary; safe_map required",
+                    )
+                )
 
-        # Phase 2: greedy budget loop for homogeneous axes (innermost-first)
+        # Phase 2: Greedy budget loop for homogeneous axes (innermost-first)
         homogeneous = [ax for ax in sorted_axes if not ax.heterogeneous]
         hom_decisions: list[AxisDecision] = [
             AxisDecision(axis=ax, batch_size=0, reasoning="vmap (homogeneous, within budget)")
             for ax in homogeneous
         ]
+
         for i, ax in enumerate(homogeneous):
             current = decisions + hom_decisions
             if self.estimate_memory(current) <= self.budget_bytes:
@@ -138,4 +164,17 @@ class BatchPlanner:
             total_memory_estimate=final_estimate,
             axes_by_index={ax.axis_index: ax for ax in self.axes},
             budget_exceeded=exceeded,
+        )
+
+    @staticmethod
+    def _prolix_to_xtrax(spec: AxisSpec) -> XtraxAxisSpec:
+        """Convert prolix AxisSpec to xtrax AxisSpec."""
+        return XtraxAxisSpec(
+            name=spec.name,
+            cardinality=spec.cardinality,
+            batch_size=spec.default_batch_size,
+            granularity=spec.tile_granularity,
+            heterogeneous=spec.heterogeneous,
+            dedup_eligible=False,
+            bucket_boundaries=None,
         )

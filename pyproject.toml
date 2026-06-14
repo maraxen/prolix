@@ -11,7 +11,7 @@ license = "MIT"
 authors = [
     { name = "Marielle Russo", email = "67157875+maraxen@users.noreply.github.com" },
 ]
-requires-python = ">=3.11,<3.14"
+requires-python = ">=3.13,<3.14"
 dependencies = [
     "jax",
     "jax-md",
@@ -29,6 +29,7 @@ dependencies = [
     "jaxopt",
     "h5py>=3.16.0",
     "rdkit>=2024.3.0",
+    "xtrax @ file:///home/marielle/projects/xtrax",
 ]
 
 [project.urls]
