@@ -1,0 +1,322 @@
+[sprint]
+sprint_id = "37"
+sprint_num = 1
+name = "37"
+description = ""
+context = "[MANUAL: paste recon findings here before running emit-sprint]"
+max_fix_retries = 1
+worktree_shadow_mode = false
+
+[[tracks]]
+id = "a"
+is_research = false
+worktree = false
+skip_worktree = false
+
+[[tracks.items]]
+backlog_id = "328"
+phase_name = "Track A — HP4 sub-spec drafting: ANI-1x DFT-forces subset curation criteria (#328)"
+fixer_prompt = """
+# DRAFT — requires human review before dw emit-sprint
+
+BACKLOG DESCRIPTION:
+Write the actual sub-spec text behind HP4 (260): how the 16-system ANI-1x subset is selected and curated for §7.1.
+
+**Success:** Sub-spec at docs/superpowers/sub-specs/HP4-ani1x-subset.md covering: selection criteria (organic small molecules at dipeptide scale; ωB97X-D/6-31G* reference); curation pipeline (download → filter → store at data/ani1x_subset/); per-system metadata schema (atom count, element set, reference force shape); reproducibility hash.
+
+**Exit:** Sub-spec merged; data/ani1x_subset/ populated; HP4 (260) unblocked.
+
+**Spec ref:** docs/superpowers/specs/2026-05-19-prolix-long-horizon-roadmap.md#7.1
+
+[AUTO: no recon anchors — paste file:line references here, then write the full fixer prompt]"""
+reviewer_prompt = """
+# DRAFT — requires human review before dw emit-sprint
+
+BACKLOG DESCRIPTION:
+Write the actual sub-spec text behind HP4 (260): how the 16-system ANI-1x subset is selected and curated for §7.1.
+
+**Success:** Sub-spec at docs/superpowers/sub-specs/HP4-ani1x-subset.md covering: selection criteria (organic small molecules at dipeptide scale; ωB97X-D/6-31G* reference); curation pipeline (download → filter → store at data/ani1x_subset/); per-system metadata schema (atom count, element set, reference force shape); reproducibility hash.
+
+**Exit:** Sub-spec merged; data/ani1x_subset/ populated; HP4 (260) unblocked.
+
+**Spec ref:** docs/superpowers/specs/2026-05-19-prolix-long-horizon-roadmap.md#7.1
+
+REVIEWER CHECKLIST (fill in before running dw emit-sprint):
+VERIFY: cargo command or test that must pass — e.g. `cargo nextest run -p <crate>`
+VERIFY: observable assertion — e.g. "new test exists and calls the handler directly"
+VERIFY: no regression — e.g. "existing tests still pass"
+PASS if all VERIFY items are satisfied.
+FAIL if any VERIFY item is not met or untestable as written."""
+return_key = "328"
+
+[[tracks]]
+id = "b"
+is_research = false
+worktree = false
+skip_worktree = false
+
+[[tracks.items]]
+backlog_id = "327"
+phase_name = "Track B — HP1 sub-spec drafting: migration policy doc for legacy entry-points (#327)"
+fixer_prompt = """
+# DRAFT — requires human review before dw emit-sprint
+
+BACKLOG DESCRIPTION:
+Write the actual sub-spec text behind HP1 migration policy (250).
+
+**Success:** Sub-spec document drafted at docs/superpowers/sub-specs/HP1-migration-policy.md covering: legacy entry-points list (batched_produce, LangevinState public re-export, pad_protein, PaddedSystem, collate_batch); deprecation→removal timeline (v1.2 warn, v2.0 remove); one-line replacement per item; CHANGELOG migration-table format.
+
+**Exit:** Sub-spec merged; HP1 (250) can be marked decided.
+
+**Spec ref:** docs/superpowers/specs/2026-05-19-prolix-long-horizon-roadmap.md#2.7
+
+[AUTO: no recon anchors — paste file:line references here, then write the full fixer prompt]"""
+reviewer_prompt = """
+# DRAFT — requires human review before dw emit-sprint
+
+BACKLOG DESCRIPTION:
+Write the actual sub-spec text behind HP1 migration policy (250).
+
+**Success:** Sub-spec document drafted at docs/superpowers/sub-specs/HP1-migration-policy.md covering: legacy entry-points list (batched_produce, LangevinState public re-export, pad_protein, PaddedSystem, collate_batch); deprecation→removal timeline (v1.2 warn, v2.0 remove); one-line replacement per item; CHANGELOG migration-table format.
+
+**Exit:** Sub-spec merged; HP1 (250) can be marked decided.
+
+**Spec ref:** docs/superpowers/specs/2026-05-19-prolix-long-horizon-roadmap.md#2.7
+
+REVIEWER CHECKLIST (fill in before running dw emit-sprint):
+VERIFY: cargo command or test that must pass — e.g. `cargo nextest run -p <crate>`
+VERIFY: observable assertion — e.g. "new test exists and calls the handler directly"
+VERIFY: no regression — e.g. "existing tests still pass"
+PASS if all VERIFY items are satisfied.
+FAIL if any VERIFY item is not met or untestable as written."""
+return_key = "327"
+
+[[tracks]]
+id = "c"
+is_research = false
+worktree = false
+skip_worktree = false
+
+[[tracks.items]]
+backlog_id = "261"
+phase_name = "Track C — Claim 1 Plan-layer impl: EnsemblePlan.run integration with BatchPlanner (#261)"
+fixer_prompt = """
+# DRAFT — requires human review before dw emit-sprint
+
+BACKLOG DESCRIPTION:
+Wire BatchPlanner into EnsemblePlan.from_bundles construction site so a BatchPlan is pre-computed before JIT. BatchPlanner currently lives at src/prolix/tiling/planner.py; the Plan layer needs an integration point and a tested run() method.
+
+**Success:** EnsemblePlan.run consumes BatchPlan; planner decision exercised on construction; passes V1 and V7.
+**Exit:** V1, V3, V7, V8 green using EnsemblePlan.run as the integration point.
+
+[AUTO: no recon anchors — paste file:line references here, then write the full fixer prompt]"""
+reviewer_prompt = """
+# DRAFT — requires human review before dw emit-sprint
+
+BACKLOG DESCRIPTION:
+Wire BatchPlanner into EnsemblePlan.from_bundles construction site so a BatchPlan is pre-computed before JIT. BatchPlanner currently lives at src/prolix/tiling/planner.py; the Plan layer needs an integration point and a tested run() method.
+
+**Success:** EnsemblePlan.run consumes BatchPlan; planner decision exercised on construction; passes V1 and V7.
+**Exit:** V1, V3, V7, V8 green using EnsemblePlan.run as the integration point.
+
+REVIEWER CHECKLIST (fill in before running dw emit-sprint):
+VERIFY: cargo command or test that must pass — e.g. `cargo nextest run -p <crate>`
+VERIFY: observable assertion — e.g. "new test exists and calls the handler directly"
+VERIFY: no regression — e.g. "existing tests still pass"
+PASS if all VERIFY items are satisfied.
+FAIL if any VERIFY item is not met or untestable as written."""
+return_key = "261"
+
+[[tracks]]
+id = "d"
+is_research = false
+worktree = false
+skip_worktree = false
+
+[[tracks.items]]
+backlog_id = "281"
+phase_name = "Track D — Claim 3 Bundle.from_pdb factory (#281)"
+fixer_prompt = """
+# DRAFT — requires human review before dw emit-sprint
+
+BACKLOG DESCRIPTION:
+MolecularBundle.from_pdb(path, forcefield='amber14') constructor.
+
+**Success:** Loads PDB; assigns forcefield params; returns valid Bundle that flows through EnsemblePlan.
+**Exit:** A1 contract test passes through this constructor.
+
+[AUTO: no recon anchors — paste file:line references here, then write the full fixer prompt]"""
+reviewer_prompt = """
+# DRAFT — requires human review before dw emit-sprint
+
+BACKLOG DESCRIPTION:
+MolecularBundle.from_pdb(path, forcefield='amber14') constructor.
+
+**Success:** Loads PDB; assigns forcefield params; returns valid Bundle that flows through EnsemblePlan.
+**Exit:** A1 contract test passes through this constructor.
+
+REVIEWER CHECKLIST (fill in before running dw emit-sprint):
+VERIFY: cargo command or test that must pass — e.g. `cargo nextest run -p <crate>`
+VERIFY: observable assertion — e.g. "new test exists and calls the handler directly"
+VERIFY: no regression — e.g. "existing tests still pass"
+PASS if all VERIFY items are satisfied.
+FAIL if any VERIFY item is not met or untestable as written."""
+return_key = "281"
+
+[[tracks]]
+id = "e"
+is_research = false
+worktree = false
+skip_worktree = false
+
+[[tracks.items]]
+backlog_id = "284"
+phase_name = "Track E — Claim 3 Observable protocol + Trajectory eqx.Module (#284)"
+fixer_prompt = """
+# DRAFT — requires human review before dw emit-sprint
+
+BACKLOG DESCRIPTION:
+Implement runtime_checkable Observable protocol returning Array (policy: scalar in core, tensor in capability). Define Trajectory eqx.Module with positions/momenta?/observables/final_state.
+
+**Success:** Protocol shipped; Trajectory class shipped; one example observable conforms.
+**Exit:** A1 + A3 contract tests green.
+
+[AUTO: no recon anchors — paste file:line references here, then write the full fixer prompt]"""
+reviewer_prompt = """
+# DRAFT — requires human review before dw emit-sprint
+
+BACKLOG DESCRIPTION:
+Implement runtime_checkable Observable protocol returning Array (policy: scalar in core, tensor in capability). Define Trajectory eqx.Module with positions/momenta?/observables/final_state.
+
+**Success:** Protocol shipped; Trajectory class shipped; one example observable conforms.
+**Exit:** A1 + A3 contract tests green.
+
+REVIEWER CHECKLIST (fill in before running dw emit-sprint):
+VERIFY: cargo command or test that must pass — e.g. `cargo nextest run -p <crate>`
+VERIFY: observable assertion — e.g. "new test exists and calls the handler directly"
+VERIFY: no regression — e.g. "existing tests still pass"
+PASS if all VERIFY items are satisfied.
+FAIL if any VERIFY item is not met or untestable as written."""
+return_key = "284"
+
+[[tracks]]
+id = "f"
+is_research = false
+worktree = false
+skip_worktree = false
+
+[[tracks.items]]
+backlog_id = "255"
+phase_name = "Track F — DR-claim1-1: Hetero-batched MD precedent scan (kUPS, jax-md, OpenMM swarm, GROMACS multi-sim, F@H) (#255)"
+fixer_prompt = """
+# DRAFT — requires human review before dw emit-sprint
+
+BACKLOG DESCRIPTION:
+**DR-claim1-1: deep-research query for the 'Related Work' section of the engine paper.**
+
+**Query:** What heterogeneous-batched MD precedent exists in kUPS, jax-md, OpenMM swarm/multi-sim, GROMACS -multidir, Folding@home? What do they do that prolix does, and crucially what do they NOT do that prolix does?
+
+**Target:** Paper §Related Work; RR1 rebuttal evidence ('how is this different from existing tools?').
+
+**Success:** Synthesis entry appended to .praxia/research/synthesis.jsonl with confidence rating; structured comparison table of axes covered (declarative API, varied-system batch, init+exec wall-clock, portability) per tool; positions prolix's contribution clearly.
+
+**Exit:** Synthesis entry merged; comparison table in paper draft §Related Work; RR1 status moves from TODO → evidence-ready.
+
+[AUTO: no recon anchors — paste file:line references here, then write the full fixer prompt]"""
+reviewer_prompt = """
+# DRAFT — requires human review before dw emit-sprint
+
+BACKLOG DESCRIPTION:
+**DR-claim1-1: deep-research query for the 'Related Work' section of the engine paper.**
+
+**Query:** What heterogeneous-batched MD precedent exists in kUPS, jax-md, OpenMM swarm/multi-sim, GROMACS -multidir, Folding@home? What do they do that prolix does, and crucially what do they NOT do that prolix does?
+
+**Target:** Paper §Related Work; RR1 rebuttal evidence ('how is this different from existing tools?').
+
+**Success:** Synthesis entry appended to .praxia/research/synthesis.jsonl with confidence rating; structured comparison table of axes covered (declarative API, varied-system batch, init+exec wall-clock, portability) per tool; positions prolix's contribution clearly.
+
+**Exit:** Synthesis entry merged; comparison table in paper draft §Related Work; RR1 status moves from TODO → evidence-ready.
+
+REVIEWER CHECKLIST (fill in before running dw emit-sprint):
+VERIFY: cargo command or test that must pass — e.g. `cargo nextest run -p <crate>`
+VERIFY: observable assertion — e.g. "new test exists and calls the handler directly"
+VERIFY: no regression — e.g. "existing tests still pass"
+PASS if all VERIFY items are satisfied.
+FAIL if any VERIFY item is not met or untestable as written."""
+return_key = "255"
+
+[[tracks]]
+id = "g"
+is_research = false
+worktree = false
+skip_worktree = false
+
+[[tracks.items]]
+backlog_id = "304"
+phase_name = "Track G — DR-paper-1: Venue fit scan -- JCP/JCTC/JCIM/JOSS/ICML/ICLR/MLSys (#304)"
+fixer_prompt = """
+# DRAFT — requires human review before dw emit-sprint
+
+BACKLOG DESCRIPTION:
+Submission criteria, expected scope.
+
+**Success:** Synthesis with shortlist + rationale.
+**Exit:** OQ6 resolved.
+
+[AUTO: no recon anchors — paste file:line references here, then write the full fixer prompt]"""
+reviewer_prompt = """
+# DRAFT — requires human review before dw emit-sprint
+
+BACKLOG DESCRIPTION:
+Submission criteria, expected scope.
+
+**Success:** Synthesis with shortlist + rationale.
+**Exit:** OQ6 resolved.
+
+REVIEWER CHECKLIST (fill in before running dw emit-sprint):
+VERIFY: cargo command or test that must pass — e.g. `cargo nextest run -p <crate>`
+VERIFY: observable assertion — e.g. "new test exists and calls the handler directly"
+VERIFY: no regression — e.g. "existing tests still pass"
+PASS if all VERIFY items are satisfied.
+FAIL if any VERIFY item is not met or untestable as written."""
+return_key = "304"
+
+[[tracks]]
+id = "h"
+is_research = false
+worktree = false
+skip_worktree = false
+
+[[tracks.items]]
+backlog_id = "305"
+phase_name = "Track H — DR-paper-2: Recent MD-engine papers (last 24 months) -- narrative tropes, expected reviewer criticisms (#305)"
+fixer_prompt = """
+# DRAFT — requires human review before dw emit-sprint
+
+BACKLOG DESCRIPTION:
+Survey of recent MD engine papers: narrative tropes, expected sections, anticipated reviewer criticisms.
+
+**Success:** Synthesis with structure + rebuttal-table augmentation.
+**Exit:** RR1-RR7 strengthened.
+
+[AUTO: no recon anchors — paste file:line references here, then write the full fixer prompt]"""
+reviewer_prompt = """
+# DRAFT — requires human review before dw emit-sprint
+
+BACKLOG DESCRIPTION:
+Survey of recent MD engine papers: narrative tropes, expected sections, anticipated reviewer criticisms.
+
+**Success:** Synthesis with structure + rebuttal-table augmentation.
+**Exit:** RR1-RR7 strengthened.
+
+REVIEWER CHECKLIST (fill in before running dw emit-sprint):
+VERIFY: cargo command or test that must pass — e.g. `cargo nextest run -p <crate>`
+VERIFY: observable assertion — e.g. "new test exists and calls the handler directly"
+VERIFY: no regression — e.g. "existing tests still pass"
+PASS if all VERIFY items are satisfied.
+FAIL if any VERIFY item is not met or untestable as written."""
+return_key = "305"
+
+[orchestration]
+sequential = []
+concurrent = []
