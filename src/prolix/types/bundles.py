@@ -247,3 +247,39 @@ class MolecularBundle(eqx.Module):
         raise NotImplementedError(
             "from_pdb body not yet implemented. Stub provides error-path validation."
         )
+
+    @classmethod
+    def from_system_dict(
+        cls,
+        d: dict,
+        boundary_condition: str = "periodic",
+    ) -> "MolecularBundle":
+        """Build MolecularBundle from a legacy system dict.
+
+        Emits DeprecationWarning. Use MolecularBundle.from_pdb for new code.
+
+        Args:
+            d: Dict with keys: positions, masses, bonds, bond_params,
+               angles, angle_params (optional: dihedrals, dihedral_params,
+               water_indices, box).
+            boundary_condition: "periodic" or "free".
+
+        Returns:
+            MolecularBundle with all arrays padded to bucket sizes.
+
+        Raises:
+            KeyError: If required keys are missing.
+        """
+        import warnings
+        from types import SimpleNamespace
+
+        from prolix.physics.system import make_bundle_from_system
+
+        warnings.warn(
+            "MolecularBundle.from_system_dict is deprecated. "
+            "Use MolecularBundle.from_pdb for new code.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        ns = SimpleNamespace(**d)
+        return make_bundle_from_system(ns, boundary_condition=boundary_condition)
