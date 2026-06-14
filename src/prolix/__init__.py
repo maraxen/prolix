@@ -6,6 +6,7 @@ from .batched_energy import make_batched_energy_fn, single_padded_energy
 from .padding import bucket_proteins, collate_batch, pad_protein
 from .padding import PaddedSystem as _PaddedSystem
 from .export import export_energy_fn, export_langevin_step, save_artifact, load_artifact
+from .api import EnsemblePlan
 
 __all__ = [
     "pad_protein",
@@ -19,6 +20,8 @@ __all__ = [
     "export_langevin_step",
     "save_artifact",
     "load_artifact",
+    # New API (v1.1+) — EnsemblePlan.run() pending xtrax.tiling integration (#1842)
+    "EnsemblePlan",
 ]
 
 
