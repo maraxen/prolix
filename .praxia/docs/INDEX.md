@@ -98,6 +98,10 @@
 - [260423_cycle84](research/260423_cycle84.md)
 - [260423_cycle51](research/260423_cycle51.md)
 - [260423_explicit-solvent-validation-recon-260416](research/260423_explicit-solvent-validation-recon-260416.md)
+- [260603_p5-rstep-liquid-density-rootcause](research/260603_p5-rstep-liquid-density-rootcause.md) — P5 R-step PBC min-image + Horn quaternion SETTLE fix
+- [260612_p5-dt1fs-size-crossover](research/260612_p5-dt1fs-size-crossover.md) — dt=1fs warm bias is translational finite-size; crossover N*≈16
+- [260615_rr7-differentiability-evidence](research/260615_rr7-differentiability-evidence.md) — RR7 rebuttal: differentiability × hetero-batch = S71; D1/D2 S1 test evidence
+- [260615_claim1-hetero-batch-precedent](research/260615_claim1-hetero-batch-precedent.md) — DR-claim1-1 hetero-batched MD precedent scan; TorchSim closest prior art
 
 ## Decisions
 - [260423_release-decision-v10](decisions/260423_release-decision-v10.md)
@@ -255,3 +259,6 @@
 > Skill outputs live in `.praxia/docs/superpowers/plans/` and `.praxia/docs/superpowers/specs/`.
 - [plans](superpowers/plans/) — brainstorming + writing-plans outputs
 - [specs](superpowers/specs/) — specification outputs
+- [260614_xtrax-tiling-integration](superpowers/specs/260614_xtrax-tiling-integration.md) — xtrax tiling integration spec for prolix v1.1 BatchPlanner
+- [260615_hp1-migration-policy](superpowers/specs/260615_hp1-migration-policy.md) — HP1 legacy entry-points deprecation and replacement policy (#327)
+- [260615_hp4-ani1x-subset](superpowers/specs/260615_hp4-ani1x-subset.md) — HP4 ANI-1x 16-system curation criteria for §7.1 (#328 → #260 → #259)
