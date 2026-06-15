@@ -1,0 +1,327 @@
+# Sprint 41 — EnsemblePlan API completion + deep-research batch
+# Task ID: 260615_autonomous-loop
+# Composed: 2026-06-15 (iteration 1)
+
+[sprint]
+sprint_id = "260615_sprint41"
+name = "Sprint 41: EnsemblePlan API + DR Research Batch"
+task_id = "260615_autonomous-loop"
+items = [283, 296, 297, 298, 299, 300, 301]
+created = "2026-06-15"
+
+# ── Track A: EnsemblePlan.from_bundles + .from_bundle + .run (#283) ───────────
+[[tracks]]
+id = "A"
+backlog_items = [283]
+label = "Claim 3 EnsemblePlan.from_bundles + .from_bundle + .run"
+worktree = true
+is_research = false
+difficulty = "standard"
+
+fixer_prompt = """
+You are implementing Sprint 41 Track A for the prolix project (JAX-based MD engine).
+task_id: 260615_autonomous-loop
+
+## Context
+
+The EnsemblePlan API (src/prolix/api/ensemble_plan.py) currently has:
+- `__init__(self, bundles: list[Any], planner: Any = None)` — basic init
+- `run(self, n_steps, dt, kT, seed)` — single-bundle NVT simulation
+
+## What needs to be added (Claim 3 surface)
+
+### 1. `EnsemblePlan.from_bundles(cls, bundles, planner=None)` classmethod
+A classmethod constructor that wraps the existing __init__. Identical semantics,
+but follows the standard "factory on plural input" naming convention.
+
+```python
+@classmethod
+def from_bundles(cls, bundles: list[Any], planner: Any = None) -> "EnsemblePlan":
+    return cls(bundles, planner)
+```
+
+### 2. `EnsemblePlan.from_bundle(cls, bundle, planner=None)` classmethod
+Convenience constructor for the common single-bundle case.
+
+```python
+@classmethod
+def from_bundle(cls, bundle: Any, planner: Any = None) -> "EnsemblePlan":
+    return cls([bundle], planner)
+```
+
+### 3. Verify `.run()` works end-to-end with the above constructors
+Read `src/prolix/api/ensemble_plan.py` fully to understand what `.run()` does
+(it uses settle_langevin with a dummy zero energy function). The implementation
+must actually run without error on a minimal MolecularBundle-like object.
+
+### 4. Write tests: tests/api/test_ensemble_plan.py
+Create a test file that covers:
+
+```python
+import pytest
+from unittest.mock import MagicMock
+from prolix.api.ensemble_plan import EnsemblePlan
+
+def _mock_bundle(n_atoms=3, n_waters=1):
+    \"\"\"Minimal mock bundle for unit testing EnsemblePlan.\"\"\"
+    bundle = MagicMock()
+    bundle.n_atoms = n_atoms
+    bundle.n_waters = n_waters
+    bundle.positions = jnp.zeros((n_atoms, 3))
+    bundle.water_indices = jnp.array([[0, 1, 2]])
+    return bundle
+
+
+def test_from_bundle_creates_single_bundle_plan():
+    \"\"\"from_bundle(b) should set self.bundles = [b].\"\"\"
+    b = _mock_bundle()
+    ep = EnsemblePlan.from_bundle(b)
+    assert ep.bundles == [b]
+    assert ep.batch_plan is None
+
+
+def test_from_bundles_creates_multi_bundle_plan():
+    b1, b2 = _mock_bundle(), _mock_bundle()
+    ep = EnsemblePlan.from_bundles([b1, b2])
+    assert ep.bundles == [b1, b2]
+    assert ep.batch_plan is None
+
+
+def test_from_bundles_with_planner_calls_plan():
+    b = _mock_bundle()
+    planner = MagicMock()
+    planner.plan.return_value = "mock_plan"
+    ep = EnsemblePlan.from_bundles([b], planner=planner)
+    planner.plan.assert_called_once_with([b])
+    assert ep.batch_plan == "mock_plan"
+
+
+def test_empty_bundles_raises():
+    ep = EnsemblePlan([])
+    with pytest.raises(ValueError, match="at least one bundle"):
+        ep.run(n_steps=1, dt=0.5, kT=2.479e-3)
+
+
+def test_multi_bundle_raises_not_implemented():
+    b1, b2 = _mock_bundle(), _mock_bundle()
+    ep = EnsemblePlan.from_bundles([b1, b2])
+    with pytest.raises(NotImplementedError, match="Multi-bundle"):
+        ep.run(n_steps=1, dt=0.5, kT=2.479e-3)
+```
+
+Note: Do NOT write a test that actually runs the full MD simulation (settle_langevin
+requires JAX and real physics). The unit tests above mock the bundle and just test
+the constructor/dispatch surface. The run() integration test is covered by existing
+physics tests.
+
+## Files to read first
+1. `src/prolix/api/ensemble_plan.py` — current implementation
+2. `src/prolix/api/__init__.py` — check if EnsemblePlan is exported
+3. `src/prolix/api/observables.py` — Trajectory type (used by run())
+
+## Changes
+1. Add `from_bundle` and `from_bundles` classmethods to EnsemblePlan
+2. Create `tests/api/test_ensemble_plan.py`
+3. Make sure `EnsemblePlan` is exported from `src/prolix/api/__init__.py`
+
+## Verification
+```bash
+uv run pytest tests/api/test_ensemble_plan.py -v
+uv run ty check src/prolix/api/
+uv run ruff check src/prolix/api/ensemble_plan.py
+uv run pytest -m "not slow" -q 2>&1 | tail -5
+```
+
+## Commit
+```
+feat(api): add EnsemblePlan.from_bundle + .from_bundles classmethods + unit tests
+
+Completes Claim 3 EnsemblePlan API surface (#283):
+- EnsemblePlan.from_bundle(bundle) — single-bundle factory
+- EnsemblePlan.from_bundles(bundles) — multi-bundle factory
+- Unit tests: constructor, planner dispatch, empty-bundle/multi-bundle guards
+
+Closes #283
+```
+"""
+
+reviewer_prompt = """
+You are reviewing Sprint 41 Track A (EnsemblePlan API completion).
+task_id: 260615_autonomous-loop
+
+Run each gate and report pass/fail:
+
+1. **Classmethods exist**
+   ```bash
+   uv run python -c "from prolix.api import EnsemblePlan; print(EnsemblePlan.from_bundle); print(EnsemblePlan.from_bundles)"
+   ```
+   PASS = both print without AttributeError.
+
+2. **Unit tests pass**
+   ```bash
+   uv run pytest tests/api/test_ensemble_plan.py -v
+   ```
+   PASS = all tests PASSED.
+
+3. **ty clean**
+   ```bash
+   uv run ty check src/prolix/api/
+   ```
+   PASS = "All checks passed!"
+
+4. **ruff clean**
+   ```bash
+   uv run ruff check src/prolix/api/ensemble_plan.py
+   ```
+   PASS = exits 0, no output.
+
+5. **Fast suite unbroken**
+   ```bash
+   uv run pytest -m "not slow" -q 2>&1 | tail -5
+   ```
+   PASS = no new FAILED tests.
+
+All 5 PASS → verdict: advance
+Any FAIL → verdict: needs_work (list which gates failed)
+"""
+
+# ── Track B: Deep-research batch (6 quick items, parallel) ────────────────────
+[[tracks]]
+id = "B"
+backlog_items = [296, 297, 298, 299, 300, 301]
+label = "Deep-research batch (DR-claim1-2 through DR-LBfig-1)"
+worktree = false
+is_research = true
+difficulty = "quick"
+
+fixer_prompt = """
+You are a librarian/research specialist for the prolix project (JAX-based MD engine).
+task_id: 260615_autonomous-loop
+
+## Task: 6-item deep research batch (all quick, no dependencies)
+
+Run each research question independently and write each result to its own file.
+All 6 can be done sequentially or in parallel — your choice based on tool availability.
+
+---
+
+### #296 — DR-claim1-2: API-design patterns for plan-then-execute scientific computing
+
+**Question:** What established API-design patterns exist for "plan-then-execute" scientific
+computing frameworks (e.g., TensorFlow's static graph, PyTorch's lazy tensor,
+jax.jit compile-then-run, Dask delayed, ONNX export)? What are the design principles
+and tradeoffs that distinguish prolix's EnsemblePlan approach?
+
+**Output file:** `.praxia/docs/research/260615_dr-claim1-2-plan-execute-patterns.md`
+
+---
+
+### #297 — DR-claim1-3: Bucket-policy literature — PDB/CASP/AlphaFold-DB size distributions
+
+**Question:** What are the system size distributions in common MD/protein datasets
+(PDB, CASP, AlphaFold-DB, ANI-1x)? What does this imply for the optimal bucket
+ladder design (currently ATOM_BUCKETS = (64, 128, 256, 1024, 5000, 25000, 60000))?
+Are there any published bucketing or binning policies for heterogeneous molecular datasets?
+
+**Output file:** `.praxia/docs/research/260615_dr-claim1-3-bucket-policy.md`
+
+---
+
+### #298 — DR-claim2-1: IREE-WASM ecosystem status (2026)
+
+**Question:** What is the current status of IREE's WASM/WebGPU compilation target?
+What StableHLO→WASM compilation pipelines exist? What are the known artifact size
+and cold-start constraints? Is there documented prior work on JAX→IREE→WASM for
+scientific computing?
+
+**Output file:** `.praxia/docs/research/260615_dr-claim2-1-iree-wasm.md`
+
+---
+
+### #299 — DR-claim2-2: Browser MD precedent — NGL viewer, MMTF, Mol*
+
+**Question:** What prior work exists on browser-based molecular dynamics or visualization
+(NGL viewer, Mol*, MMTF streaming, WebGPU MD)? What are the reported performance
+constraints (data transfer, compute, cold-start)? What is the state of the art for
+WebGPU-accelerated MD as of 2026?
+
+**Output file:** `.praxia/docs/research/260615_dr-claim2-2-browser-md.md`
+
+---
+
+### #300 — DR-claim3-1: Declarative scientific API surveys
+
+**Question:** What published surveys or position papers discuss declarative vs. imperative
+APIs for scientific computing? What design principles distinguish a "declarative plan"
+API (like prolix's EnsemblePlan) from standard imperative MD loops? Any relevant HCI
+or API-design literature on scientific workflow expressiveness?
+
+**Output file:** `.praxia/docs/research/260615_dr-claim3-1-declarative-api.md`
+
+---
+
+### #301 — DR-LBfig-1: Differentiable force-field fitting prior art (Espaloma, OpenFF, ML-FFs)
+
+**Question:** What prior work exists on differentiable force-field fitting with
+JAX/PyTorch autodiff? Key papers: Espaloma (Chodera lab), OpenFF toolkit gradient
+approaches, NequIP/MACE for ML-FF. How do these approaches use autodiff through
+simulation? What are the reported convergence properties? How does prolix's approach
+(jax.grad through settle_langevin + SETTLE constraints) compare?
+
+**Output file:** `.praxia/docs/research/260615_dr-lbfig-1-diff-ff-fitting.md`
+
+---
+
+## Output format for each file
+
+```markdown
+---
+task_id: 260615_autonomous-loop
+backlog_item: <N>
+date: 2026-06-15
+---
+
+# <title>
+
+## Summary
+[2-3 sentence executive summary]
+
+## Key findings
+[bullet points with source citations]
+
+## Gaps / open questions
+[what remains unknown]
+
+## Sources
+[numbered list]
+```
+
+## After writing all 6 files, update .praxia/docs/INDEX.md
+
+Add each new file under `## Research` in INDEX.md.
+
+Return a list of the 6 file paths written and a one-sentence summary of each.
+"""
+
+reviewer_prompt = """
+Research track gate. Verify all 6 files exist and are non-trivially populated.
+
+```bash
+for f in \\
+  .praxia/docs/research/260615_dr-claim1-2-plan-execute-patterns.md \\
+  .praxia/docs/research/260615_dr-claim1-3-bucket-policy.md \\
+  .praxia/docs/research/260615_dr-claim2-1-iree-wasm.md \\
+  .praxia/docs/research/260615_dr-claim2-2-browser-md.md \\
+  .praxia/docs/research/260615_dr-claim3-1-declarative-api.md \\
+  .praxia/docs/research/260615_dr-lbfig-1-diff-ff-fitting.md; do
+  wc -l "$f" 2>/dev/null || echo "MISSING: $f"
+done
+```
+
+PASS criteria:
+- All 6 files exist (no MISSING lines)
+- Each file ≥ 20 lines
+- INDEX.md updated with all 6 entries (grep for 260615_dr in INDEX.md)
+
+verdict: advance if all pass, needs_work if any file missing or < 20 lines
+"""
