@@ -1,0 +1,875 @@
+[sprint]
+sprint_id = "39"
+sprint_num = 39
+name = "Sprint 39 — Spec Completion, Core Observables, API Hardening"
+description = """
+Critical-path unblocking sprint toward the §7.1 paper figure.
+Research tracks (#327, #328, #311, #255) produce spec docs and evidence.
+Implementation tracks (#285, #286, #288, #253) harden the prolix.api surface.
+
+Dependency unlocks after this sprint:
+  #327 → #250 → #283 → #259 (§7.1 figure)
+  #328 → #260 → #259 (§7.1 figure)
+  #253 now executable (unblocked by #261 done in Sprint 38)
+  #311 now executable (unblocked by #292, #293 done in Sprint 38)
+"""
+context = """
+task_id: 260615_sprint39
+
+=== API ANCHORS (src/prolix/api/) ===
+
+observables.py:
+  Observable Protocol (@runtime_checkable): line 14-41
+    def compute(self, state) -> Array
+  Trajectory eqx.Module: line 44-58
+    positions: Float[Array, 'steps atoms 3']
+    observable_values: dict  # name -> Array
+    n_steps: int (static)
+  Temperature eqx.Module: line 61-111
+    dof: int (static)
+    compute(state): uses state.momentum, state.mass, BOLTZMANN_KCAL from prolix.simulate
+    formula: T = (2 * KE) / (dof * k_B)
+  Energy eqx.Module: line 114-143
+    energy_fn: callable (static field)
+    bundle: any
+    compute(state): returns self.energy_fn(state.positions, self.bundle)
+  NOTE: currently has 'any' type annotations (lines 130-131) — mypy strict violation
+
+ensemble_plan.py:
+  EnsemblePlan: line 12-150
+    __init__(bundles: list, planner: Any = None): line 30
+    run(n_steps, dt, kT, seed=0) -> Trajectory: line 45
+    v1.0: single-bundle only; raises NotImplementedError for len(bundles) > 1
+    v1.1: will use xtrax.tiling.BatchPlanner for vmap/safe_map decisions
+
+api/__init__.py — current exports:
+  EnsemblePlan, Observable, Trajectory, Temperature, Energy
+
+=== TILING ANCHORS ===
+
+src/prolix/tiling/planner.py:
+  BatchPlanner (line 106): axes, budget_bytes, estimate_memory
+  .plan() -> BatchPlan (line 120)
+  BatchPlan.decisions: list[AxisDecision]
+  AxisDecision.batch_size: int (0=vmap, >0=safe_map tile size)
+
+=== TYPES ===
+
+src/prolix/types/bundles.py:
+  MolecularBundle (line 66): from_pdb(path), from_system_dict(d)
+  fields: positions, n_atoms, n_waters, water_indices, masses, etc.
+
+=== SIMULATE ===
+
+src/prolix/simulate.py: exports BOLTZMANN_KCAL constant
+
+=== SPRINT 38 COMPLETIONS (all on main, commit range 47e4522..96b9d1c) ===
+#261 EnsemblePlan.run() — DONE
+#281 MolecularBundle.from_pdb — DONE
+#282 from_system_dict — DONE
+#284 Observable/Trajectory eqx.Module — DONE
+#292 S1 D1 force parity tests — DONE (tests/physics/test_s1_force_parity.py)
+#293 S1 D2 jax.grad parity tests — DONE (tests/api/test_s1_jaxgrad_parity.py)
+#254 Energy observable — DONE
+
+=== EXISTING TESTS ===
+tests/api/test_ensemble_plan.py — EnsemblePlan.run() tests
+tests/api/test_observables.py — Observable/Trajectory/Temperature tests
+tests/physics/test_s1_force_parity.py — bond/angle/dihedral force parity
+tests/api/test_s1_jaxgrad_parity.py — jax.grad finite-diff parity
+"""
+max_fix_retries = 1
+worktree_shadow_mode = false
+
+# ── Track A: HP1 sub-spec (#327) ─────────────────────────────────────────────
+
+[[tracks]]
+id = "a"
+is_research = true
+worktree = false
+skip_worktree = false
+
+[[tracks.items]]
+backlog_id = "327"
+phase_name = "Track A — HP1 sub-spec: migration policy for legacy entry-points (#327)"
+fixer_prompt = """
+task_id: 260615_sprint39
+
+You are a specification-specialist. Write the HP1 migration policy spec document.
+
+## Goal
+Create `.praxia/docs/superpowers/specs/260615_hp1-migration-policy.md` covering the
+deprecation and replacement plan for prolix's legacy entry-points. This unblocks
+backlog item #250 (HP1: Migration policy decided) → #283 (EnsemblePlan.from_bundles)
+→ #259 (§7.1 figure).
+
+## Step 1 — Audit legacy entry-points
+Read these files to find all public symbols that will be deprecated:
+- `src/prolix/batched_simulate.py` (batched_produce, batched_equilibrate, LangevinState
+  re-export, collate_batch, pad_protein, PaddedSystem)
+- `src/prolix/simulate.py` (legacy top-level functions)
+- `src/prolix/api/__init__.py` (new canonical API surface)
+- `src/prolix/types/bundles.py` (MolecularBundle — the new type)
+
+## Step 2 — Write the spec document
+
+The document must cover:
+
+### 1. Legacy entry-points inventory
+Table with columns: symbol | current location | category (deprecated/removed/renamed)
+
+### 2. Replacement mapping
+One-line replacement per legacy symbol:
+- `batched_produce(batch, state, n_saves, steps_per_save)` → `EnsemblePlan(bundles).run(n_steps, dt, kT)`
+- `batched_equilibrate` → removed (use cold-start with real forces — see CLAUDE.md)
+- `LangevinState` (public re-export) → `prolix.typing.LangevinState` (internal only)
+- `pad_protein`, `PaddedSystem`, `collate_batch` → `MolecularBundle.from_pdb` / `MolecularBundle.from_system_dict`
+- Add any others found in the audit
+
+### 3. Timeline
+- v1.0 (current): legacy symbols emit `DeprecationWarning` on import
+- v1.1: warning text updated to 'use EnsemblePlan instead'
+- v2.0: symbols removed entirely
+
+### 4. CHANGELOG migration table
+Markdown table format:
+| Legacy | Replacement | Since | Removed |
+| batched_produce | EnsemblePlan.run() | v1.0 | v2.0 |
+...
+
+### 5. Rationale
+One paragraph: why this migration (paper-facing API alignment, batch-planner
+integration path, xtrax.tiling backend abstraction).
+
+## Output
+Write the spec to `.praxia/docs/superpowers/specs/260615_hp1-migration-policy.md`
+then update `.praxia/docs/INDEX.md` to add it under the Specs section.
+Finally commit with message: `spec(api): HP1 migration policy for legacy entry-points (#327)`
+"""
+reviewer_prompt = """
+task_id: 260615_sprint39
+
+You are a plan-auditor reviewing the HP1 migration spec for completeness and correctness.
+
+## Acceptance criteria
+
+VERIFY: File `.praxia/docs/superpowers/specs/260615_hp1-migration-policy.md` exists
+VERIFY: Contains a legacy entry-points inventory table
+VERIFY: Contains a replacement mapping for at least batched_produce, batched_equilibrate, LangevinState re-export
+VERIFY: Contains a v1.0/v1.1/v2.0 deprecation timeline
+VERIFY: Contains a CHANGELOG migration table
+VERIFY: `.praxia/docs/INDEX.md` has been updated to reference the new spec
+
+PASS if all VERIFY items are satisfied.
+FAIL if the spec document is missing, empty, or lacks the replacement mapping table.
+"""
+return_key = "327"
+
+# ── Track B: HP4 sub-spec (#328) ─────────────────────────────────────────────
+
+[[tracks]]
+id = "b"
+is_research = true
+worktree = false
+skip_worktree = false
+
+[[tracks.items]]
+backlog_id = "328"
+phase_name = "Track B — HP4 sub-spec: ANI-1x DFT-forces subset curation criteria (#328)"
+fixer_prompt = """
+task_id: 260615_sprint39
+
+You are a specification-specialist. Write the HP4 ANI-1x curation spec document.
+
+## Goal
+Create `.praxia/docs/superpowers/specs/260615_hp4-ani1x-subset.md` specifying exactly
+how the 16-system ANI-1x subset for §7.1 is curated. This unblocks #260 (HP4:
+ANI-1x DFT-forces sub-spec) → #259 (§7.1 figure).
+
+## Background
+§7.1 figure shows differentiable bonded-parameter fitting on a heterogeneous ANI-1x
+ensemble. ANI-1x is a DFT-reference dataset of small organic molecules computed at
+the ωB97X-D/6-31G* level. We need 16 diverse systems that span dipeptide-scale
+complexity, test hetero-batching (varied atom counts), and have reliable DFT forces.
+
+## Reference material to consult
+1. Check if `.praxia/docs/superpowers/specs/` has any existing ANI-1x or HP4 docs
+2. Check `.praxia/research/` for any prior HP4 findings
+3. The HP4 NLM notebook (accession 301840a8-1c9a-4e9a-b41c-1ea7b3ea8b76) if available
+4. The MD theory NLM notebook (accession 9230d5f7-cff8-49a1-9ccd-8b65e8e207a7)
+
+## Spec document must cover
+
+### 1. Dataset provenance
+- Source: ANI-1x (Smith et al. 2020, DOI: 10.1038/s41597-020-0473-z)
+- Reference level: ωB97X-D/6-31G* DFT forces + energies
+- Download: torchani/ANI1x_releases or HuggingFace chembl-mirna
+
+### 2. Selection criteria (16 systems)
+- Atom count range: 5–35 atoms (dipeptide scale, test hetero-batching)
+- Element diversity: C, H, N, O required; optionally S, F
+- Geometry filter: no strained bonds (bond > 1.6x equilibrium)
+- Force filter: max force component < 200 kcal/mol/Å (remove pathological geometries)
+- Diversity: max pairwise Tanimoto similarity < 0.85 (ECFP4 fingerprints)
+- At least 3 distinct atom counts to validate hetero-batch vmap/safe_map decisions
+
+### 3. Curation pipeline
+Step-by-step script outline:
+```
+scripts/curate/hp4_ani1x_subset.py
+  --input  data/raw/ani1x/
+  --output data/ani1x_subset/
+  --n 16
+  --force-ceiling 200.0  # kcal/mol/Å
+  --max-atoms 35
+  --min-atoms 5
+```
+
+### 4. Per-system metadata schema
+JSON fields per system:
+- mol_id: str (ANI-1x molecule hash)
+- n_atoms: int
+- elements: list[str]
+- reference_energy_kcal: float
+- reference_forces_shape: [n_atoms, 3]
+- selection_criteria_passed: list[str]
+- reproducibility_sha256: str (hash of coordinates + forces)
+
+### 5. Storage layout
+```
+data/ani1x_subset/
+  manifest.json        # list of 16 mol_ids
+  <mol_id>/
+    coords.npy         # (n_atoms, 3) float32
+    forces.npy         # (n_atoms, 3) float32
+    energy.npy         # scalar float32
+    meta.json          # per-system metadata
+```
+
+### 6. Reproducibility
+- Git-tracked manifest.json with sha256 hashes
+- Script version pinned in pyproject.toml or requirements-curation.txt
+
+## Output
+Write the spec to `.praxia/docs/superpowers/specs/260615_hp4-ani1x-subset.md`
+then update `.praxia/docs/INDEX.md` to reference it.
+Commit: `spec(data): HP4 ANI-1x subset curation criteria for §7.1 (#328)`
+"""
+reviewer_prompt = """
+task_id: 260615_sprint39
+
+You are a plan-auditor reviewing the HP4 ANI-1x spec.
+
+VERIFY: File `.praxia/docs/superpowers/specs/260615_hp4-ani1x-subset.md` exists
+VERIFY: Contains dataset provenance (ANI-1x, ωB97X-D/6-31G*)
+VERIFY: Contains quantitative selection criteria (atom count range, force ceiling)
+VERIFY: Contains storage layout spec for data/ani1x_subset/
+VERIFY: Contains reproducibility hash approach
+VERIFY: `.praxia/docs/INDEX.md` updated
+
+PASS if all VERIFY items satisfied.
+FAIL if spec is empty, missing criteria, or has no storage layout.
+"""
+return_key = "328"
+
+# ── Track C: Core observables (#285) ─────────────────────────────────────────
+
+[[tracks]]
+id = "c"
+is_research = false
+worktree = true
+skip_worktree = false
+
+[[tracks.items]]
+backlog_id = "285"
+phase_name = "Track C — Core observables: KineticEnergy, RMSD, Pressure (#285)"
+fixer_prompt = """
+task_id: 260615_sprint39
+
+You are a fixer. Implement the three remaining core observables for prolix.api.
+
+## Context
+Read `src/prolix/api/observables.py` (Observable Protocol line 14, Temperature line 61,
+Energy line 114 — these are the reference patterns to follow).
+Read `src/prolix/api/__init__.py` (current exports).
+Read `tests/api/test_observables.py` (existing test patterns).
+
+## What to implement
+
+### 1. KineticEnergy observable (src/prolix/api/observables.py)
+Add after the Temperature class:
+
+```python
+class KineticEnergy(eqx.Module):
+    '''Observable computing total kinetic energy from integrator state.
+
+    KE = sum_i p_i^2 / (2 * m_i)
+    '''
+
+    def compute(self, state) -> Float[Array, '']:
+        momentum = state.momentum  # (N, 3)
+        mass = state.mass           # (N,) or (N, 1)
+        if mass.ndim == 1:
+            mass_expanded = mass[:, None]
+        else:
+            mass_expanded = mass
+        ke_per_atom = jnp.sum(momentum**2 / (2.0 * mass_expanded), axis=-1)
+        return jnp.sum(ke_per_atom)
+```
+
+### 2. RMSD observable (src/prolix/api/observables.py)
+Add after KineticEnergy:
+
+```python
+class RMSD(eqx.Module):
+    '''Observable computing RMSD vs a stored reference structure.
+
+    RMSD = sqrt(mean over atoms of ||r_i - ref_i||^2)
+    '''
+    reference: Float[Array, 'atoms 3']
+
+    def compute(self, state) -> Float[Array, '']:
+        positions = state.positions  # (N, 3)
+        diff = positions - self.reference
+        return jnp.sqrt(jnp.mean(jnp.sum(diff**2, axis=-1)))
+```
+
+### 3. Pressure observable (src/prolix/api/observables.py)
+Add after RMSD — use ideal-gas approximation (virial requires force decomposition,
+which is a v1.1 task):
+
+```python
+class Pressure(eqx.Module):
+    '''Observable computing instantaneous pressure (ideal-gas approximation).
+
+    P = N * k_B * T / V  (ideal gas)
+    Note: virial contribution deferred to v1.1 (requires per-pair force decomposition).
+    '''
+    n_atoms: int = eqx.field(static=True)
+    volume_angstrom3: float = eqx.field(static=True)
+
+    def compute(self, state) -> Float[Array, '']:
+        from prolix.simulate import BOLTZMANN_KCAL
+        momentum = state.momentum
+        mass = state.mass
+        if mass.ndim == 1:
+            mass_expanded = mass[:, None]
+        else:
+            mass_expanded = mass
+        ke_per_atom = jnp.sum(momentum**2 / (2.0 * mass_expanded), axis=-1)
+        total_ke = jnp.sum(ke_per_atom)
+        # T = 2*KE / (3*N*k_B); P = N*k_B*T/V = 2*KE / (3*V)
+        # Volume in Angstrom^3; BOLTZMANN_KCAL in kcal/mol/K
+        # Pressure in kcal/mol/Angstrom^3; convert to bar: 1 kcal/mol/A^3 ~ 68568 bar
+        KCAL_MOL_PER_A3_TO_BAR = 68568.0
+        pressure_kcal = (2.0 * total_ke) / (3.0 * self.volume_angstrom3)
+        return pressure_kcal * KCAL_MOL_PER_A3_TO_BAR
+```
+
+## Step 2 — Update exports
+Add KineticEnergy, RMSD, Pressure to `src/prolix/api/__init__.py` imports and `__all__`.
+
+## Step 3 — Write tests
+Create `tests/api/test_core_observables.py`:
+- test_kinetic_energy_compute: construct a state with known momentum/mass, verify KE
+- test_rmsd_at_reference: compute RMSD at reference (should be 0.0)
+- test_rmsd_displaced: displace by known amount, verify RMSD
+- test_pressure_positive: check pressure is positive and finite for warm state
+- test_all_implement_protocol: assert isinstance(KineticEnergy(...), Observable) etc.
+
+## Step 4 — Verify
+`uv run pytest tests/api/test_core_observables.py tests/api/test_observables.py -v`
+All tests must pass.
+
+## Commit
+`feat(api): add KineticEnergy, RMSD, Pressure core observables (#285)`
+"""
+reviewer_prompt = """
+task_id: 260615_sprint39
+
+You are a reviewer. Verify the core observables implementation.
+
+## Verification steps
+
+1. Run: `uv run pytest tests/api/test_core_observables.py tests/api/test_observables.py -v`
+   VERIFY: all tests pass
+
+2. Check src/prolix/api/observables.py contains KineticEnergy, RMSD, Pressure classes
+   VERIFY: each has a `compute(self, state)` method returning a JAX array
+
+3. Check src/prolix/api/__init__.py exports KineticEnergy, RMSD, Pressure
+   VERIFY: all three appear in __all__
+
+4. Check tests/api/test_core_observables.py exists with at least 4 tests
+   VERIFY: includes RMSD-at-reference==0 and protocol conformance test
+
+5. Run: `uv run pytest tests/ -m 'not slow' --tb=no -q`
+   VERIFY: no regressions (same pass count as before this track or better)
+
+PASS if all VERIFY items satisfied.
+FAIL if any observable class is missing, any test fails, or exports are incomplete.
+"""
+return_key = "285"
+
+# ── Track D: API contract test (#286) ────────────────────────────────────────
+
+[[tracks]]
+id = "d"
+is_research = false
+worktree = true
+skip_worktree = false
+
+[[tracks.items]]
+backlog_id = "286"
+phase_name = "Track D — A1: API contract acceptance test (#286)"
+fixer_prompt = """
+task_id: 260615_sprint39
+
+You are a fixer. Write the A1 API contract acceptance test for prolix.api.
+
+## Context
+Read `src/prolix/api/__init__.py` (canonical export surface).
+Read `src/prolix/api/ensemble_plan.py` (EnsemblePlan, run() signature).
+Read `src/prolix/api/observables.py` (Observable Protocol, Trajectory, Temperature, Energy).
+Read `tests/api/test_ensemble_plan.py` (existing patterns).
+
+## What to create: tests/api/test_api_contract.py
+
+Write a comprehensive acceptance test that verifies the entire prolix.api contract.
+Structure as a single test class `TestApiContract` with these test methods:
+
+### 1. test_canonical_imports
+Verify that all expected symbols can be imported from prolix.api:
+  from prolix.api import EnsemblePlan, Observable, Trajectory, Temperature, Energy
+  (After Track C ships: also KineticEnergy, RMSD, Pressure — use try/import guards)
+
+### 2. test_observable_protocol_conformance
+For each concrete observable class (Temperature, Energy, KineticEnergy if available),
+verify isinstance(obs, Observable) is True (runtime_checkable Protocol check).
+
+### 3. test_trajectory_fields
+Construct a minimal Trajectory and verify:
+- .positions has shape (n_steps, n_atoms, 3)
+- .observable_values is a dict
+- .n_steps equals the declared n_steps
+
+### 4. test_ensemble_plan_construction
+Construct EnsemblePlan with a minimal mock bundle (or real MolecularBundle.from_system_dict
+if available). Verify it constructs without error and .bundles is set.
+
+### 5. test_ensemble_plan_run_returns_trajectory
+Call EnsemblePlan([bundle]).run(n_steps=5, dt=0.5, kT=2.479e-3) and verify:
+- Returns a Trajectory instance
+- trajectory.n_steps == 5
+- trajectory.positions.shape[0] == 5
+- trajectory.positions is finite (no NaN)
+
+### 6. test_observables_implement_compute
+For Temperature(dof=10): call obs.compute(mock_state) where mock_state has
+.momentum = jnp.ones((10, 3)) and .mass = jnp.ones(10). Verify result is a scalar.
+
+## Implementation hints
+- Use a minimal MolecularBundle: construct via from_system_dict or mock with a namedtuple
+  that has .positions, .n_atoms, .n_waters=0, .water_indices, .masses
+- Keep tests fast (no actual MD — use n_steps=2 or 5)
+- Use `@pytest.mark.usefixtures` if shared setup is needed
+
+## Verify
+`uv run pytest tests/api/test_api_contract.py -v`
+All 6 tests (or more) must pass.
+
+## Commit
+`test(api): A1 API contract acceptance test for prolix.api surface (#286)`
+"""
+reviewer_prompt = """
+task_id: 260615_sprint39
+
+You are a reviewer. Verify the A1 API contract test.
+
+VERIFY: `uv run pytest tests/api/test_api_contract.py -v` passes (all tests green)
+VERIFY: File has at least 5 test methods in TestApiContract class
+VERIFY: test_ensemble_plan_run_returns_trajectory actually calls .run() (not mocked)
+VERIFY: test_trajectory_fields checks .positions shape and finiteness
+VERIFY: `uv run pytest tests/ -m 'not slow' --tb=no -q` shows no regressions
+
+PASS if all VERIFY items satisfied.
+FAIL if fewer than 5 tests, any test is empty/pass-only, or run() is not actually called.
+"""
+return_key = "286"
+
+# ── Track E: mypy --strict (#288) ────────────────────────────────────────────
+
+[[tracks]]
+id = "e"
+is_research = false
+worktree = true
+skip_worktree = false
+
+[[tracks.items]]
+backlog_id = "288"
+phase_name = "Track E — A3: mypy --strict on prolix.api (#288)"
+fixer_prompt = """
+task_id: 260615_sprint39
+
+You are a fixer. Make prolix.api pass mypy --strict type checking.
+
+## Step 1 — Check if mypy is available
+Run: `uv run python -m mypy --version 2>&1`
+If mypy is not installed, add it: `uv add --dev mypy`
+Also add: `uv add --dev types-all` or specific stubs as needed.
+
+## Step 2 — Run mypy --strict and capture errors
+Run: `uv run python -m mypy --strict src/prolix/api/ 2>&1`
+Capture the full error list.
+
+## Step 3 — Fix errors in src/prolix/api/
+
+Known issues in observables.py:
+- Line 130: `energy_fn: any` — change to `energy_fn: Any` (already imported from typing)
+  or a more specific Callable type: `energy_fn: Callable[..., Float[Array, '']]`
+- Line 131: `bundle: any` — change to `bundle: Any`
+- Line 57: `observable_values: dict` — should be `dict[str, Array]`
+- The Protocol's `compute` method uses untyped `state` — add `Any` annotation:
+  `def compute(self, state: Any) -> Array:`
+
+Known issues in ensemble_plan.py:
+- Return type of run() is missing: add `-> Trajectory`
+- `def energy_fn(positions, **kwargs)` — add type: `def energy_fn(positions: Any, **kwargs: Any) -> Any:`
+- Various local variable types may need annotation
+
+## Step 4 — Fix iteratively
+Run mypy after each batch of fixes. Goal: zero errors under `--strict`.
+
+If some errors are genuinely hard (e.g., jaxtyping annotations conflict with mypy),
+use `# type: ignore[specific-code]` ONLY as a last resort and add a comment explaining why.
+
+## Step 5 — Add mypy config to pyproject.toml
+If not already present, add under [tool.mypy]:
+```
+[tool.mypy]
+strict = true
+ignore_missing_imports = true
+```
+(This ensures `uv run python -m mypy src/prolix/api/` picks up strict by default.)
+
+## Verify
+`uv run python -m mypy --strict src/prolix/api/ 2>&1 | grep -c '^src/prolix/api/.*error'`
+Result should be 0 (no errors).
+
+Also run: `uv run pytest tests/api/ -q` — no regressions.
+
+## Commit
+`fix(types): mypy --strict compliance for prolix.api module (#288)`
+"""
+reviewer_prompt = """
+task_id: 260615_sprint39
+
+You are a reviewer. Verify mypy --strict compliance.
+
+VERIFY: `uv run python -m mypy --strict src/prolix/api/ 2>&1 | grep error` returns empty
+  (or only `ignore` comments with explanations)
+VERIFY: observable_values field in Trajectory has explicit type (not bare `dict`)
+VERIFY: energy_fn and bundle fields in Energy have explicit types (not bare `any`)
+VERIFY: EnsemblePlan.run() has explicit return type annotation `-> Trajectory`
+VERIFY: `uv run pytest tests/api/ -q` still passes
+
+PASS if mypy --strict exits 0 and all tests pass.
+FAIL if any unignored type error remains or if tests regress.
+"""
+return_key = "288"
+
+# ── Track F: B1-smoke benchmark (#253) ───────────────────────────────────────
+
+[[tracks]]
+id = "f"
+is_research = false
+worktree = true
+skip_worktree = false
+
+[[tracks.items]]
+backlog_id = "253"
+phase_name = "Track F — B1-smoke: hetero-batch B=4 init+exec benchmark (#253)"
+fixer_prompt = """
+task_id: 260615_sprint39
+
+You are a fixer. Write the B1-smoke benchmark as a pytest test file.
+
+## Context
+Read `src/prolix/api/ensemble_plan.py` (EnsemblePlan, run()).
+Read `src/prolix/types/bundles.py` (MolecularBundle, from_system_dict).
+Read `tests/api/test_ensemble_plan.py` (existing patterns for constructing bundles).
+
+## What to create: tests/bench/test_b1_smoke.py
+
+This test is a nightly CI regression detector for the §7.1 hetero-batch benchmark.
+It tests B=4 different-sized systems through EnsemblePlan.
+
+### Test structure
+
+```python
+import time
+import pytest
+import jax.numpy as jnp
+from prolix.api import EnsemblePlan
+from prolix.types.bundles import MolecularBundle
+
+def _make_bundle(n_atoms: int, seed: int = 0) -> MolecularBundle:
+    '''Create a synthetic bundle with n_atoms atoms.'''
+    # Use from_system_dict with random positions and unit masses
+    ...
+
+@pytest.mark.slow
+@pytest.mark.benchmark
+class TestB1Smoke:
+    def test_b1_smoke_b4_wall_clock(self):
+        '''B1-smoke: 4 varied-size bundles, 10 steps, wall-clock logged.'''
+        # B=4 bundles with varied atom counts (5, 10, 20, 35 atoms)
+        # Simulates hetero-batch: varied N tests BatchPlanner vmap/safe_map decisions
+        bundles = [_make_bundle(n) for n in (5, 10, 20, 35)]
+
+        t0 = time.perf_counter()
+        # v1.0: single-bundle only — test each bundle independently as smoke
+        # v1.1 will accept bundles list directly
+        trajectories = []
+        for bundle in bundles:
+            plan = EnsemblePlan([bundle])
+            traj = plan.run(n_steps=10, dt=0.5, kT=2.479e-3)
+            trajectories.append(traj)
+        t_total = time.perf_counter() - t0
+
+        # Verify outputs
+        for traj in trajectories:
+            assert traj.n_steps == 10
+            assert traj.positions.shape[-1] == 3
+            assert jnp.all(jnp.isfinite(traj.positions))
+
+        # Log wall-clock (informational, not gated — baseline for R4 AOT monitor)
+        print(f'B1-smoke wall_clock={t_total:.3f}s for B=4 x 10 steps')
+
+        # Loose timing gate: must complete in < 300s on CPU
+        assert t_total < 300.0, f'B1-smoke timed out: {t_total:.1f}s'
+```
+
+## Steps
+
+1. Create `tests/bench/__init__.py` (empty) if it doesn't exist
+2. Write `tests/bench/test_b1_smoke.py` with the above structure
+3. Add a helper `_make_bundle(n_atoms, seed)` that uses MolecularBundle.from_system_dict
+   or constructs a minimal valid bundle with the right fields
+4. Register `benchmark` mark in `pyproject.toml` under `[tool.pytest.ini_options]`
+   markers = [..., "benchmark: marks tests as benchmark (deselect with -m 'not benchmark')"]
+
+## Verify (collection only — don't run the full benchmark locally)
+`uv run pytest tests/bench/test_b1_smoke.py --collect-only`
+Should show: 1 test collected (TestB1Smoke::test_b1_smoke_b4_wall_clock)
+
+## Commit
+`test(bench): B1-smoke hetero-batch B=4 init+exec benchmark (#253)`
+"""
+reviewer_prompt = """
+task_id: 260615_sprint39
+
+You are a reviewer. Verify the B1-smoke benchmark file.
+
+VERIFY: tests/bench/test_b1_smoke.py exists
+VERIFY: tests/bench/__init__.py exists
+VERIFY: `uv run pytest tests/bench/test_b1_smoke.py --collect-only` shows 1+ test collected
+VERIFY: test is marked @pytest.mark.slow AND @pytest.mark.benchmark
+VERIFY: test constructs bundles with at least 3 different atom counts
+VERIFY: test calls EnsemblePlan.run() with actual bundles (not mocked)
+VERIFY: test checks traj.positions is finite
+VERIFY: `uv run pytest tests/ -m 'not slow' --tb=no -q` shows no regressions
+
+PASS if all VERIFY items satisfied.
+FAIL if test file is missing, has wrong marks, or doesn't call EnsemblePlan.run().
+"""
+return_key = "253"
+
+# ── Track G: RR7 evidence synthesis (#311) ───────────────────────────────────
+
+[[tracks]]
+id = "g"
+is_research = true
+worktree = false
+skip_worktree = false
+
+[[tracks.items]]
+backlog_id = "311"
+phase_name = "Track G — RR7 evidence: differentiability synthesis (#311)"
+fixer_prompt = """
+task_id: 260615_sprint39
+
+You are a specification-specialist. Write the RR7 reviewer rebuttal evidence document.
+
+## Context
+RR7 is the anticipated reviewer objection: 'Differentiability via jax.grad is not
+novel — this is already done in DMFF, TorchMD, Espaloma, and other tools.'
+
+The key evidence: prolix's value is the COMBINATION of (1) heterogeneous batching
+(varied-system, bucketed, compile-once) AND (2) differentiability. The §7.1 figure
+demonstrates this multiplicativity — it could not be produced by a tool with only
+one capability.
+
+Sprint 38 completed the S1 D1 and D2 tests:
+- D1: tests/physics/test_s1_force_parity.py — per-term analytical vs autograd force agreement
+- D2: tests/api/test_s1_jaxgrad_parity.py — jax.grad through trajectory, finite-diff parity
+
+## Step 1 — Read the Sprint 38 test files to understand what was proved
+Read: `tests/physics/test_s1_force_parity.py` (D1 — what bonds/angles/dihedrals are tested)
+Read: `tests/api/test_s1_jaxgrad_parity.py` (D2 — what gradient is being verified)
+
+## Step 2 — Write the evidence document
+Create `.praxia/docs/research/260615_rr7-differentiability-evidence.md`
+
+Structure:
+### 1. The objection (verbatim anticipated reviewer text)
+'Differentiability via automatic differentiation is well-established in JAX-MD,
+DMFF, TorchMD-Net, and Espaloma. This does not constitute a novel contribution.'
+
+### 2. Evidence from prolix S1 tests
+Cite D1 and D2 results:
+- D1 (test_s1_force_parity.py): bond/angle/dihedral analytical == autograd forces
+  to rtol=1e-4. Confirmed on [N_atoms] atoms, [coverage].
+- D2 (test_s1_jaxgrad_parity.py): jax.grad through full 10-step trajectory vs
+  finite difference, agreement to rtol=1e-4.
+
+### 3. The multiplicativity argument
+'Differentiability × hetero-batching = §7.1 figure. No prior tool provides both.
+DMFF and TorchMD are differentiable but process one system at a time.
+jax-md supports batching but with homogeneous shapes (pad-to-max).
+prolix's bucketed hetero-batch + jax.grad enables the exact §7.1 experiment:
+training bonded parameters on a MIXED ensemble in a single jit-compiled backward pass.'
+
+### 4. Positioning statement (1 paragraph, paper-draft ready)
+'We do not claim jax.grad itself is novel. We claim that differentiability through
+a heterogeneous-batch trajectory is novel, and that the §7.1 result is enabled
+by the combination rather than either capability alone.'
+
+### 5. Evidence status table
+| Evidence item | Status | File |
+| D1 force parity | PASS | tests/physics/test_s1_force_parity.py |
+| D2 grad parity | PASS | tests/api/test_s1_jaxgrad_parity.py |
+| §7.1 figure | PENDING | blocked on HP4 sub-spec (#260) |
+
+## Output
+Write to `.praxia/docs/research/260615_rr7-differentiability-evidence.md`
+Update `.praxia/docs/INDEX.md` under Research section.
+Commit: `docs(evidence): RR7 differentiability rebuttal evidence synthesis (#311)`
+"""
+reviewer_prompt = """
+task_id: 260615_sprint39
+
+You are a plan-auditor reviewing the RR7 evidence document.
+
+VERIFY: `.praxia/docs/research/260615_rr7-differentiability-evidence.md` exists
+VERIFY: Contains the verbatim objection framing (not paraphrased)
+VERIFY: References both test files (test_s1_force_parity.py and test_s1_jaxgrad_parity.py)
+VERIFY: Contains the multiplicativity argument (differentiability x hetero-batching)
+VERIFY: Contains a paper-draft-ready positioning statement
+VERIFY: Contains an evidence status table
+VERIFY: `.praxia/docs/INDEX.md` updated
+
+PASS if all VERIFY items satisfied.
+FAIL if document is missing, lacks the multiplicativity argument, or doesn't cite tests.
+"""
+return_key = "311"
+
+# ── Track H: DR-claim1-1 precedent scan (#255) ───────────────────────────────
+
+[[tracks]]
+id = "h"
+is_research = true
+worktree = false
+skip_worktree = false
+
+[[tracks.items]]
+backlog_id = "255"
+phase_name = "Track H — DR-claim1-1: hetero-batched MD precedent scan (#255)"
+fixer_prompt = """
+task_id: 260615_sprint39
+
+You are a librarian-researcher. Complete the hetero-batched MD precedent scan.
+
+## Goal
+Produce a structured comparison document answering: 'What do existing MD tools do
+regarding heterogeneous batch simulation, and where does prolix's contribution fit?'
+
+This feeds:
+- Paper §Related Work section
+- RR1 rebuttal: 'How does this differ from existing tools?'
+- §7.1 positioning: why no prior tool can produce this figure
+
+## Tools to survey
+
+### kUPS (Kernel Universal Potential Simulation)
+- Key question: does kUPS support varied-size system batches or only fixed-size?
+- Look for: batch axis, padding approach, system-type mixing
+
+### jax-md
+- Key question: batching approach (pad-to-max? vmap over homogeneous systems?)
+- Look for: NVT batch, safe_map, SpaceFunction design
+
+### OpenMM swarm / multi-simulation
+- Key question: does multi-simulation run varied-size systems concurrently?
+- Look for: swarm API, MPI ranks, memory layout
+
+### GROMACS -multidir
+- Key question: -multidir flag — same topology, varied coordinates? or varied topology?
+- Look for: multi-simulation design documentation
+
+### Folding@home (FAH)
+- Key question: client batching — does FAH send varied work units concurrently?
+- Look for: WU design, protein-type diversity per GPU
+
+### TorchSim (2024/2025 preprint if available)
+- Key question: how does TorchSim handle hetero batches?
+
+## Comparison axes
+For each tool, assess (Y/N/Partial):
+1. Declarative API (user specifies intent, system optimizes execution)
+2. Varied-topology batch (different atom counts in one compiled forward pass)
+3. Bucketed compilation (separate compiled functions per bucket, not pad-to-max)
+4. Differentiable trajectory (jax.grad or torch.grad through n_steps)
+5. Compile-once for varied shapes (xla shape polymorphism or equivalent)
+
+## Sources to use
+1. WebSearch for each tool's recent papers and documentation
+2. NLM notebook MD Theory (9230d5f7-cff8-49a1-9ccd-8b65e8e207a7) if available
+3. Any `.praxia/research/` files from prior Sprint 37 librarian runs
+
+## Output document: `.praxia/docs/research/260615_claim1-hetero-batch-precedent.md`
+
+Structure:
+### Executive summary (2-3 sentences)
+### Per-tool analysis (one subsection each)
+### Comparison table
+| Tool | Decl. API | Varied-topo batch | Bucketed compile | Diff. traj | Compile-once |
+| prolix | Y | Y | Y | Y | Partial (v1.1) |
+| kUPS | ? | ? | ? | ? | ? |
+| jax-md | ? | N | N | Y | N |
+... (fill in from research)
+### Prolix contribution framing (1 paragraph, paper-draft ready)
+
+## Commit
+`docs(research): DR-claim1-1 hetero-batched MD precedent scan (#255)`
+"""
+reviewer_prompt = """
+task_id: 260615_sprint39
+
+You are a plan-auditor reviewing the precedent scan.
+
+VERIFY: `.praxia/docs/research/260615_claim1-hetero-batch-precedent.md` exists
+VERIFY: Contains analysis of at least 4 tools (kUPS, jax-md, OpenMM swarm/GROMACS, TorchSim/FAH)
+VERIFY: Contains a comparison table with all 5 axes for each tool
+VERIFY: Contains a paper-draft-ready prolix contribution framing paragraph
+VERIFY: Executive summary is present and 2-3 sentences
+VERIFY: `.praxia/docs/INDEX.md` updated
+
+PASS if all VERIFY items satisfied and table has substantive (not all '?') entries.
+FAIL if fewer than 4 tools analyzed, table is missing, or framing paragraph absent.
+"""
+return_key = "255"
+
+[orchestration]
+sequential = []
+concurrent = ["a", "b", "c", "d", "e", "f", "g", "h"]
