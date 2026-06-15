@@ -18,8 +18,13 @@ def _access_with_warnings(module_name: str, attr: str) -> list:
 def test_langevin_state_deprecated():
     """LangevinState accessed from batched_simulate must emit DeprecationWarning."""
     caught = _access_with_warnings("prolix.batched_simulate", "LangevinState")
-    assert caught, "Expected DeprecationWarning for prolix.batched_simulate.LangevinState"
-    assert "EnsemblePlan" in str(caught[0].message) or "prolix.types" in str(caught[0].message)
+    prolix_warnings = [
+        w for w in caught
+        if "batched_simulate" in str(w.message) or "prolix.types" in str(w.message) or "EnsemblePlan" in str(w.message)
+    ]
+    assert prolix_warnings, (
+        f"Expected prolix DeprecationWarning for LangevinState, got: {[str(w.message) for w in caught]}"
+    )
 
 
 def test_padded_system_deprecated():

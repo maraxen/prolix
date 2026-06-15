@@ -37,40 +37,39 @@ from proxide.physics.vdw import (
   compute_lj_forces_at_backbone,
 )
 
-from .noising import (
-  compute_thermal_sigma,
-  thermal_noise_fn,
-)
-
-# NPT integrators and supporting functions (Sprint 6)
-from .settle import settle_csvr_npt
-from .simulate import NPTState
-from .pressure import instantaneous_pressure_akma
-from .stress import virial_trace
-from .pbc import box_volume, isotropic_box_scale
-from .units import (
-  BAR_PER_AKMA_PRESSURE,
-  AKMA_PRESSURE_PER_BAR,
-  WATER_COMPRESSIBILITY_300K_BAR_INV,
-  WATER_COMPRESSIBILITY_300K_AKMA_INV,
-  AKMA_TIME_UNIT_FS,
-)
-
-# Explicit-params energy API for jax.export / StableHLO (v1.1 Item 1)
-from .system import DifferentiableParams, make_energy_fn_pure
-
 # kUPS cross-validation unit conversion adapter (v1.1 Item 3)
 from prolix.physics import kups_adapter
 
 # Modular integrator builder (Phase 2.1, ADR-005; Phase 4 batching)
 from .integrator_builder import make_integrator, make_integrator_batched
+from .noising import (
+  compute_thermal_sigma,
+  thermal_noise_fn,
+)
+from .pbc import box_volume, isotropic_box_scale
+from .pressure import instantaneous_pressure_akma
+
+# NPT integrators and supporting functions (Sprint 6)
+from .settle import settle_csvr_npt
+from prolix.typing import NPTState
 from .step_system import (
   IntegratorState,
   Step,
   StepSequence,
-  step_sequences,
-  make_step,
   make_sequence,
+  make_step,
+  step_sequences,
+)
+from .stress import virial_trace
+
+# Explicit-params energy API for jax.export / StableHLO (v1.1 Item 1)
+from .system import DifferentiableParams, make_energy_fn_pure
+from .units import (
+  AKMA_PRESSURE_PER_BAR,
+  AKMA_TIME_UNIT_FS,
+  BAR_PER_AKMA_PRESSURE,
+  WATER_COMPRESSIBILITY_300K_AKMA_INV,
+  WATER_COMPRESSIBILITY_300K_BAR_INV,
 )
 
 __all__ = [

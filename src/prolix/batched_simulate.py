@@ -22,17 +22,13 @@ from jax_md import partition, space
 
 from prolix.padding import precompute_dense_exclusions
 from prolix.simulate import AKMA_TIME_UNIT_FS, BOLTZMANN_KCAL
-from prolix.typing import PaddedSystem, IntegratorState as _LangevinState
+from prolix.typing import IntegratorState as _LangevinState
+from prolix.typing import PaddedSystem
 
 if TYPE_CHECKING:
     from jax_md.util import Array
 
 T = TypeVar("T")
-
-# Internal alias: _LangevinState is the canonical type from prolix.typing.
-# It's re-exported as LangevinState for backward compatibility.
-# The module-level __getattr__ below warns on external import of LangevinState.
-LangevinState = _LangevinState
 
 
 def __getattr__(name: str):
@@ -988,7 +984,7 @@ def batched_equilibrate(
         DeprecationWarning,
         stacklevel=2,
     )
-    from prolix.batched_energy import single_padded_force, single_padded_energy
+    from prolix.batched_energy import single_padded_energy, single_padded_force
     
     n_stages = 10
     dt = 0.002 # 2 fs
@@ -1993,7 +1989,7 @@ def batched_produce_streaming_nl_dynamic(
             io_callback(write_fn, None, s_next.positions, batch_idx, save_idx)
 
             # Check for overflow and signal if needed
-            # (In a real implementation we might want to stop, 
+            # (In a real implementation we might want to stop,
             # but for now we just propagate the flag)
             return (s_next, nbrs_next), None
 

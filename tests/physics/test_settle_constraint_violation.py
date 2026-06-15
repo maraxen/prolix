@@ -23,7 +23,7 @@ import pytest
 from prolix.physics import pbc, settle, system, pressure, stress
 from prolix.physics.rigid_water_ke import rigid_tip3p_box_ke_kcal
 from prolix.physics.units import BAR_PER_AKMA_PRESSURE
-from prolix.physics.simulate import NPTState
+from prolix.typing import NPTState
 from prolix.simulate import AKMA_TIME_UNIT_FS, BOLTZMANN_KCAL
 from .test_explicit_langevin_tip3p_parity import (
     _grid_water_positions,
