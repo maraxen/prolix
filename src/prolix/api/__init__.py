@@ -6,10 +6,21 @@ Exports:
   - Trajectory: eqx.Module output type from simulation runs
   - Temperature: Example Observable for kinetic temperature
   - Energy: Observable for total potential energy
+  - KineticEnergy: Observable for total kinetic energy
+  - RMSD: Observable for root-mean-square displacement vs reference
+  - Pressure: Observable for instantaneous pressure (ideal gas)
 """
 
 from prolix.api.ensemble_plan import EnsemblePlan
-from prolix.api.observables import Observable, Trajectory, Temperature, Energy
+from prolix.api.observables import (
+    Observable,
+    Trajectory,
+    Temperature,
+    Energy,
+    KineticEnergy,
+    RMSD,
+    Pressure,
+)
 
 __all__ = [
     "EnsemblePlan",
@@ -17,4 +28,7 @@ __all__ = [
     "Trajectory",
     "Temperature",
     "Energy",
+    "KineticEnergy",
+    "RMSD",
+    "Pressure",
 ]

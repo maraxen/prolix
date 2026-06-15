@@ -141,3 +141,123 @@ class Energy(eqx.Module):
             Scalar potential energy value
         """
         return self.energy_fn(state.positions, self.bundle)
+
+
+class KineticEnergy(eqx.Module):
+    """Observable computing total kinetic energy from integrator state.
+
+    KE = sum_i p_i^2 / (2 * m_i)
+
+    The kinetic energy is computed from momentum and mass directly,
+    without the Boltzmann constant (unlike Temperature which scales by dof).
+    """
+
+    def compute(self, state) -> Float[Array, ""]:
+        """Compute total kinetic energy from state.
+
+        Args:
+            state: IntegratorState with momentum and mass attributes
+                (e.g., LangevinState, CSVRState, NHCState)
+
+        Returns:
+            Scalar kinetic energy in kcal/mol
+        """
+        momentum = state.momentum  # Shape (N, 3)
+        mass = state.mass          # Shape (N,) or (N, 1)
+
+        # Expand mass to broadcast with momentum coords
+        if mass.ndim == 1:
+            mass_expanded = mass[:, None]
+        else:
+            mass_expanded = mass
+
+        # Compute KE per atom: sum(p^2 / (2*m)) along coordinate axis
+        ke_per_atom = jnp.sum(momentum**2 / (2.0 * mass_expanded), axis=-1)
+
+        # Sum over all atoms
+        return jnp.sum(ke_per_atom)
+
+
+class RMSD(eqx.Module):
+    """Observable computing RMSD vs a stored reference structure.
+
+    RMSD = sqrt(mean over atoms of ||r_i - ref_i||^2)
+
+    Attributes:
+        reference: Shape (atoms, 3) reference positions
+    """
+
+    reference: Float[Array, "atoms 3"]
+
+    def compute(self, state) -> Float[Array, ""]:
+        """Compute RMSD from reference structure.
+
+        Args:
+            state: IntegratorState with positions attribute
+                (e.g., LangevinState, CSVRState, NHCState)
+
+        Returns:
+            Scalar RMSD in Angstroms (same units as positions)
+        """
+        positions = state.positions  # Shape (N, 3)
+
+        # Compute displacement from reference
+        diff = positions - self.reference
+
+        # RMSD = sqrt(mean of squared displacements)
+        squared_distances = jnp.sum(diff**2, axis=-1)  # Sum over coordinates
+        mean_squared = jnp.mean(squared_distances)     # Mean over atoms
+
+        return jnp.sqrt(mean_squared)
+
+
+class Pressure(eqx.Module):
+    """Observable computing instantaneous pressure (ideal-gas approximation).
+
+    P = N * k_B * T / V  (ideal gas)
+
+    Note: virial contribution deferred to v1.1 (requires per-pair force decomposition).
+
+    Attributes:
+        n_atoms: Number of atoms in system (static)
+        volume_angstrom3: System volume in Angstroms^3 (static)
+    """
+
+    n_atoms: int = eqx.field(static=True)
+    volume_angstrom3: float = eqx.field(static=True)
+
+    def compute(self, state) -> Float[Array, ""]:
+        """Compute pressure from state using ideal gas approximation.
+
+        Uses P = 2*KE / (3*V) where KE is kinetic energy and V is volume.
+
+        Args:
+            state: IntegratorState with momentum and mass attributes
+                (e.g., LangevinState, CSVRState, NHCState)
+
+        Returns:
+            Scalar pressure in bar
+        """
+        from prolix.simulate import BOLTZMANN_KCAL
+
+        momentum = state.momentum  # Shape (N, 3)
+        mass = state.mass          # Shape (N,) or (N, 1)
+
+        # Expand mass to broadcast with momentum coords
+        if mass.ndim == 1:
+            mass_expanded = mass[:, None]
+        else:
+            mass_expanded = mass
+
+        # Compute kinetic energy
+        ke_per_atom = jnp.sum(momentum**2 / (2.0 * mass_expanded), axis=-1)
+        total_ke = jnp.sum(ke_per_atom)
+
+        # Ideal gas: T = 2*KE / (3*N*k_B), so P = N*k_B*T/V = 2*KE / (3*V)
+        # Volume in Angstrom^3; BOLTZMANN_KCAL in kcal/mol/K
+        # Pressure in kcal/mol/Angstrom^3; convert to bar
+        # 1 kcal/mol/A^3 = 68568 bar (derived from unit conversion)
+        KCAL_MOL_PER_A3_TO_BAR = 68568.0
+
+        pressure_kcal = (2.0 * total_ke) / (3.0 * self.volume_angstrom3)
+        return pressure_kcal * KCAL_MOL_PER_A3_TO_BAR
