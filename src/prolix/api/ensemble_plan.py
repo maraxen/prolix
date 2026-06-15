@@ -75,10 +75,11 @@ class EnsemblePlan:
             Trajectory: Object containing positions (n_steps, n_atoms, 3) and
                        observable_values dict.
         """
-        from prolix.physics.settle import settle_langevin
-        from prolix.api.observables import Trajectory
         import jax
         import jax.numpy as jnp
+
+        from prolix.api.observables import Trajectory
+        from prolix.physics.settle import settle_langevin
 
         # v1.0: simple sequential loop over bundles
         # TODO (v1.1): integrate with xtrax.tiling.BatchPlanner for vmap/safe_map decisions
@@ -138,7 +139,7 @@ class EnsemblePlan:
             return new_state, new_state.position
 
         # Execute n_steps and record positions at each step (not including initial)
-        for i in range(n_steps):
+        for _i in range(n_steps):
             state, pos = step_fn(state, None)
             positions_traj.append(pos)
 

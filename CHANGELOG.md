@@ -51,6 +51,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## v1.1.x — Deprecations
 
+### Migration Guide (HP1: Legacy API Deprecation)
+
+| Deprecated symbol | Module | Replacement | Removal |
+|---|---|---|---|
+| `batched_produce` | `prolix.batched_simulate` | `EnsemblePlan.run()` | v2.0 |
+| `batched_equilibrate` | `prolix.batched_simulate` | `EnsemblePlan.run()` (use burn-in steps) | v2.0 |
+| `pad_protein` | `prolix.padding` | `MolecularBundle.from_pdb()` | v2.0 |
+| `bucket_proteins` | `prolix.padding` | `MolecularBundle.from_pdb()` (auto-bucketing) | v2.0 |
+| `collate_batch` | `prolix.padding` | `EnsemblePlan.from_bundles()` (v1.2+) | v1.2 |
+| `PaddedSystem` | `prolix` | `MolecularBundle` | v2.0 |
+| `LangevinState` | `prolix.batched_simulate` | `prolix.typing.LangevinState` | v2.0 |
+
 ### Deprecated
 
 - **`batched_produce`** (`src/prolix/batched_simulate.py`): Issues `DeprecationWarning` on call.
