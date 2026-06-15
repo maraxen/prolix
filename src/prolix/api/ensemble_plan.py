@@ -6,7 +6,10 @@ Full batching (xtrax.tiling integration) deferred to v1.1 (#1842).
 
 from __future__ import annotations
 
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from prolix.api.observables import Trajectory
 
 
 class EnsemblePlan:
@@ -27,7 +30,7 @@ class EnsemblePlan:
         batch_plan: Result of planner.plan() if planner was provided, else None.
     """
 
-    def __init__(self, bundles: list, planner: Any = None) -> None:
+    def __init__(self, bundles: list[Any], planner: Any = None) -> None:
         """Initialize EnsemblePlan with bundles and optional planner.
 
         Args:
@@ -48,7 +51,7 @@ class EnsemblePlan:
         dt: float,
         kT: float,
         seed: int = 0,
-    ):
+    ) -> Trajectory:
         """Run batch MD simulation over all bundles.
 
         v1.0 Implementation (Sprint 38):
@@ -91,12 +94,12 @@ class EnsemblePlan:
 
         # Construct a simple energy function from the bundle
         # For v1.0: use a dummy potential (Lennard-Jones cutoff, no bonded terms)
-        def energy_fn(positions, **kwargs):
+        def energy_fn(positions: Any, **kwargs: Any) -> Any:
             # Minimal energy: just return zeros for now
             # In production, this would use the bundle's force field
             return jnp.array(0.0, dtype=positions.dtype)
 
-        def shift_fn(r, v):
+        def shift_fn(r: Any, v: Any) -> Any:
             # Minimum-image convention for free boundary
             # (PBC would be handled if bundle.box is non-zero)
             # shift_fn(r, v) -> r + v (position update)
@@ -130,7 +133,7 @@ class EnsemblePlan:
         # Run trajectory
         positions_traj = []
 
-        def step_fn(state, _):
+        def step_fn(state: Any, _: Any) -> tuple[Any, Any]:
             new_state = apply_fn(state, kT=kT, dt=dt)
             return new_state, new_state.position
 

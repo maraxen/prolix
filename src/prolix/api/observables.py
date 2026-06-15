@@ -5,7 +5,7 @@ Trajectory: eqx.Module storing positions and observable values for a simulation 
 Temperature: Example Observable computing kinetic temperature from state.
 """
 
-from typing import Protocol, runtime_checkable
+from typing import Any, Callable, Protocol, runtime_checkable
 import jax.numpy as jnp
 import equinox as eqx
 from jaxtyping import Array, Float
@@ -29,7 +29,7 @@ class Observable(Protocol):
                 return temperature_array
     """
 
-    def compute(self, state) -> Array:
+    def compute(self, state: Any) -> Array:
         """Compute observable from integrator state.
 
         Args:
@@ -54,7 +54,7 @@ class Trajectory(eqx.Module):
     """
 
     positions: Float[Array, "steps atoms 3"]
-    observable_values: dict  # name -> Array
+    observable_values: dict[str, Array]
     n_steps: int = eqx.field(static=True)
 
 
@@ -71,7 +71,7 @@ class Temperature(eqx.Module):
 
     dof: int = eqx.field(static=True)
 
-    def compute(self, state) -> Float[Array, ""]:
+    def compute(self, state: Any) -> Float[Array, ""]:
         """Compute temperature from state momenta.
 
         Uses the kinetic temperature formula: T = (2 * KE) / (dof * k_B)
@@ -88,7 +88,7 @@ class Temperature(eqx.Module):
 
         # Ensure masses are available
         if not hasattr(state, 'mass') or state.mass is None:
-            return jnp.nan
+            return jnp.array(float('nan'))
 
         # Extract momenta and masses
         momentum = state.momentum  # Shape (N, 3) or (B, N, 3)
@@ -127,10 +127,10 @@ class Energy(eqx.Module):
             batching and pytree operations.
     """
 
-    energy_fn: any = eqx.field(static=True)  # Callables are static (not traced)
-    bundle: any  # MolecularBundle or system descriptor
+    energy_fn: Callable[..., Float[Array, ""]] = eqx.field(static=True)
+    bundle: Any  # MolecularBundle or system descriptor
 
-    def compute(self, state) -> Float[Array, ""]:
+    def compute(self, state: Any) -> Float[Array, ""]:
         """Compute total potential energy at current state.
 
         Args:
@@ -152,7 +152,7 @@ class KineticEnergy(eqx.Module):
     without the Boltzmann constant (unlike Temperature which scales by dof).
     """
 
-    def compute(self, state) -> Float[Array, ""]:
+    def compute(self, state: Any) -> Float[Array, ""]:
         """Compute total kinetic energy from state.
 
         Args:
@@ -189,7 +189,7 @@ class RMSD(eqx.Module):
 
     reference: Float[Array, "atoms 3"]
 
-    def compute(self, state) -> Float[Array, ""]:
+    def compute(self, state: Any) -> Float[Array, ""]:
         """Compute RMSD from reference structure.
 
         Args:
@@ -226,7 +226,7 @@ class Pressure(eqx.Module):
     n_atoms: int = eqx.field(static=True)
     volume_angstrom3: float = eqx.field(static=True)
 
-    def compute(self, state) -> Float[Array, ""]:
+    def compute(self, state: Any) -> Float[Array, ""]:
         """Compute pressure from state using ideal gas approximation.
 
         Uses P = 2*KE / (3*V) where KE is kinetic energy and V is volume.
