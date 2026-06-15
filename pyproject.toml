@@ -170,6 +170,10 @@ root = ["src/prolix"]
 
 [tool.ty.rules]
 invalid-type-form = "ignore"
+# ty 0.0.29: false positives — stdlib typing members not resolved in this env config
+unresolved-import = "ignore"
+# Protocol methods with `...` bodies are valid; ty does not yet detect @runtime_checkable
+empty-body = "ignore"
 
 [tool.uv]
 # OpenMM 8.4+ ships manylinux_2_34 wheels only (no sdist). Older Linux (e.g. glibc/manylinux_2_28
