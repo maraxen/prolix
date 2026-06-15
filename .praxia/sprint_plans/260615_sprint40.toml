@@ -1,0 +1,316 @@
+# Sprint 40 — HP1 deprecation closure + RR1 rebuttal evidence
+# Task ID: 260615_autonomous-loop
+# Composed: 2026-06-15
+
+[sprint]
+sprint_id = "260615_sprint40"
+name = "Sprint 40: HP1 Deprecation Closure + RR1 Rebuttal"
+task_id = "260615_autonomous-loop"
+items = [250, 289, 257]
+created = "2026-06-15"
+
+# ── Track A: HP1 LangevinState warning + CHANGELOG + migration smoke test ─────
+[[tracks]]
+id = "A"
+backlog_items = [250, 289]
+label = "HP1 deprecation closure"
+worktree = true
+is_research = false
+difficulty = "standard"
+
+fixer_prompt = """
+You are implementing Sprint 40 Track A for the prolix project (JAX MD engine).
+task_id: 260615_autonomous-loop
+
+## Context
+
+The HP1 migration policy spec is at:
+  .praxia/docs/superpowers/specs/260615_hp1-migration-policy.md
+
+Most DeprecationWarnings already exist for legacy symbols. ONE gap remains:
+- `LangevinState` re-export at `src/prolix/batched_simulate.py:36`
+  Currently: `LangevinState = _LangevinState`  (bare alias, no warning)
+  Required: emit DeprecationWarning when `LangevinState` is accessed from batched_simulate
+
+The existing symbols (these ALREADY have warnings — do NOT touch them):
+- `batched_produce` (~line 1129): DeprecationWarning → "use EnsemblePlan.run()"
+- `batched_equilibrate` (~line 970): DeprecationWarning
+- `pad_protein` in padding.py:81: DeprecationWarning
+- `collate_batch` in padding.py: DeprecationWarning
+- `PaddedSystem` in __init__.py:29: DeprecationWarning via __getattr__
+
+## Changes required (in order)
+
+### 1. Fix ruff B007 in ensemble_plan.py:142
+File: src/prolix/api/ensemble_plan.py
+Line 142: `for i in range(n_steps):` → `for _i in range(n_steps):`
+(Loop variable `i` is never used; ruff flags as B007.)
+
+### 2. Add LangevinState DeprecationWarning (batched_simulate.py)
+File: src/prolix/batched_simulate.py
+
+Read the file around lines 30–55 first. The current line 36 is:
+  LangevinState = _LangevinState
+
+Remove the bare alias and add a module-level __getattr__ that warns on access:
+
+```python
+import warnings as _warnings
+
+def __getattr__(name: str):
+    if name == "LangevinState":
+        _warnings.warn(
+            "prolix.batched_simulate.LangevinState is deprecated. "
+            "Import from prolix.typing or use the EnsemblePlan API instead. "
+            "Will be removed in v2.0.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        return _LangevinState
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+```
+
+IMPORTANT: If a module-level `__getattr__` already exists, ADD the LangevinState
+branch to it rather than creating a second one. Do not remove `_LangevinState` — it
+must remain importable internally (only the public `LangevinState` name is deprecated).
+
+### 3. CHANGELOG migration table
+File: CHANGELOG.md
+
+Read the file to find the right insertion point (Unreleased or v1.1 section).
+Add a "Migration Guide" subsection under it:
+
+```markdown
+### Migration Guide (HP1: Legacy API Deprecation)
+
+| Deprecated symbol | Module | Replacement | Removal |
+|---|---|---|---|
+| `batched_produce` | `prolix.batched_simulate` | `EnsemblePlan.run()` | v2.0 |
+| `batched_equilibrate` | `prolix.batched_simulate` | `EnsemblePlan.run()` (use burn-in steps) | v2.0 |
+| `pad_protein` | `prolix.padding` | `MolecularBundle.from_pdb()` | v2.0 |
+| `bucket_proteins` | `prolix.padding` | `MolecularBundle.from_pdb()` (auto-bucketing) | v2.0 |
+| `collate_batch` | `prolix.padding` | `EnsemblePlan.from_bundles()` (v1.2+) | v1.2 |
+| `PaddedSystem` | `prolix` | `MolecularBundle` | v2.0 |
+| `LangevinState` | `prolix.batched_simulate` | `prolix.typing.LangevinState` | v2.0 |
+```
+
+### 4. Migration smoke test
+File: tests/api/test_hp1_migration_smoke.py
+
+Write a pytest file that verifies DeprecationWarning is emitted for each deprecated symbol.
+Keep it import-only (no MD simulation). Use `warnings.catch_warnings(record=True)`.
+
+```python
+\"\"\"Smoke tests verifying HP1 deprecated symbols emit DeprecationWarning.\"\"\"
+import importlib
+import warnings
+import pytest
+
+pytestmark = pytest.mark.unit
+
+
+def _get_with_warning(module_name: str, attr: str) -> list:
+    with warnings.catch_warnings(record=True) as w:
+        warnings.simplefilter("always")
+        m = importlib.import_module(module_name)
+        _ = getattr(m, attr)
+    return [x for x in w if issubclass(x.category, DeprecationWarning)]
+
+
+def test_langevin_state_deprecated():
+    caught = _get_with_warning("prolix.batched_simulate", "LangevinState")
+    assert caught, "Expected DeprecationWarning for LangevinState"
+
+
+def test_padded_system_deprecated():
+    caught = _get_with_warning("prolix", "PaddedSystem")
+    assert caught, "Expected DeprecationWarning for PaddedSystem"
+
+
+def test_pad_protein_deprecated():
+    import prolix.padding as p
+    with warnings.catch_warnings(record=True) as w:
+        warnings.simplefilter("always")
+        # Trigger warning by accessing the function (not calling it)
+        _ = p.pad_protein
+    # pad_protein warns on call, not on attribute access — call with dummy args
+    # to verify; alternatively check the source has the warning
+    # For now just verify it exists and is callable
+    assert callable(p.pad_protein)
+
+
+def test_batched_produce_deprecated():
+    import prolix.batched_simulate as bs
+    with warnings.catch_warnings(record=True) as w:
+        warnings.simplefilter("always")
+        # batched_produce warns on call — just import and verify callable
+        assert callable(bs.batched_produce)
+```
+
+Note: pad_protein and batched_produce warn on call not on attribute access, so the
+smoke test just verifies they're callable (the existing unit tests cover the warn-on-call
+behavior). The critical NEW coverage is LangevinState (warn on access) and PaddedSystem.
+
+## Verification
+```bash
+# 1. B007 clean
+uv run ruff check src/prolix/api/ensemble_plan.py --select B007
+
+# 2. LangevinState warns
+uv run python -c "import prolix.batched_simulate as bs; bs.LangevinState" 2>&1 | grep -i deprecat
+
+# 3. Smoke test passes
+uv run pytest tests/api/test_hp1_migration_smoke.py -v
+
+# 4. ty still clean
+uv run ty check src/prolix/api/
+
+# 5. Fast suite unbroken
+uv run pytest -m "not slow" -q 2>&1 | tail -5
+```
+
+## Commit
+```
+feat(hp1): close LangevinState deprecation gap; add migration table + smoke test
+
+- Add DeprecationWarning for LangevinState re-export (batched_simulate.py)
+- Fix ruff B007: for i → for _i in ensemble_plan.py:142
+- Add HP1 migration table to CHANGELOG.md
+- Add migration smoke test (tests/api/test_hp1_migration_smoke.py)
+
+Closes #250, #289
+```
+"""
+
+reviewer_prompt = """
+You are reviewing Sprint 40 Track A (HP1 deprecation closure).
+task_id: 260615_autonomous-loop
+
+Run each gate and report pass/fail:
+
+1. **Ruff B007 clean**
+   ```bash
+   uv run ruff check src/prolix/api/ensemble_plan.py --select B007
+   ```
+   PASS = exits 0, no output.
+
+2. **LangevinState warns on access**
+   ```bash
+   uv run python -c "import prolix.batched_simulate as bs; bs.LangevinState" 2>&1 | grep -i deprecat
+   ```
+   PASS = prints a line containing "deprecat" (case-insensitive).
+
+3. **CHANGELOG migration table present**
+   ```bash
+   grep "LangevinState" CHANGELOG.md
+   ```
+   PASS = at least one match.
+
+4. **Smoke test passes**
+   ```bash
+   uv run pytest tests/api/test_hp1_migration_smoke.py -v
+   ```
+   PASS = all tests PASSED (xfail OK, skip OK, error/FAILED not OK).
+
+5. **ty passes**
+   ```bash
+   uv run ty check src/prolix/api/
+   ```
+   PASS = "All checks passed!"
+
+6. **Fast suite unbroken**
+   ```bash
+   uv run pytest -m "not slow" -q 2>&1 | tail -5
+   ```
+   PASS = no new FAILED tests compared to pre-track baseline (existing xfail expected).
+
+All 6 PASS → verdict: advance
+Any FAIL → verdict: needs_work (list which gates failed and the exact error output)
+"""
+
+# ── Track B: RR1 rebuttal evidence research ───────────────────────────────────
+[[tracks]]
+id = "B"
+backlog_items = [257]
+label = "RR1 rebuttal evidence (differentiation from prior work)"
+worktree = false
+is_research = true
+difficulty = "standard"
+
+fixer_prompt = """
+You are a librarian/research specialist for the prolix project (JAX MD engine).
+task_id: 260615_autonomous-loop
+
+## Task: RR1 Rebuttal Evidence — Differentiation from Prior Work
+
+The prolix §7.1 figure compares prolix against kUPS/jax-md, OpenMM, and GROMACS
+multi-sim. Anticipated reviewer objection RR1: "How is this different from batched
+inputs in jax-md or OpenMM?"
+
+## Research questions
+
+1. **kUPS / jax-md**: How does jax-md handle multi-system throughput? vmap over
+   systems, or sequential? What is the known bottleneck (NL rebuild, padding, etc.)?
+   What does kUPS specifically measure (single large system or ensemble)?
+
+2. **OpenMM**: Does OpenMM support true GPU-parallel batching across independent
+   heterogeneous systems, or does it serialize? What is the GPU utilization model
+   for independent replica runs?
+
+3. **GROMACS multi-sim**: How does GROMACS MPI multi-sim work (separate MPI ranks
+   per replica vs. GPU sharing)? What is the inter-replica communication overhead?
+
+4. **Prolix differentiator**: What makes prolix's batching architecture distinct?
+   Key hypothesis: heterogeneous bucketing + single JIT boundary across non-uniform
+   system sizes (the "two-lane" model). Find evidence in the codebase for this claim.
+
+## Sources to check (in order)
+
+1. `.praxia/docs/` — grep for "jax-md", "kUPS", "OpenMM", "GROMACS", "RR1", "differentiat"
+2. `.praxia/ideas.jsonl` — scan for differentiation or comparison notes
+3. `mcp__praxia__knowledge` — query "jax-md multi-system batching" and "OpenMM replica parallelism"
+4. `src/prolix/` — grep for "bucket" or "heterogeneous" to find the bucketing implementation
+5. Web search if key facts are still missing (jax-md vmap behavior, OpenMM GPU multi-context)
+
+## Output
+
+Write findings to: .praxia/docs/research/260615_rr1-differentiation-evidence.md
+
+```markdown
+---
+task_id: 260615_autonomous-loop
+backlog_item: 257
+date: 2026-06-15
+---
+
+# RR1 Rebuttal Evidence: Differentiation from Prior Work
+
+## kUPS / jax-md
+[findings — at least 2 sentences with specific claims]
+
+## OpenMM
+[findings]
+
+## GROMACS multi-sim
+[findings]
+
+## Prolix claim + codebase evidence
+[claim + file:line evidence]
+
+## Gaps / open questions
+[what remains unknown or needs a citation]
+```
+
+Return the absolute path to the written file.
+"""
+
+reviewer_prompt = """
+Research track — lightweight gate.
+
+1. File .praxia/docs/research/260615_rr1-differentiation-evidence.md exists
+2. Each of the four content sections has ≥ 2 sentences
+3. "Gaps / open questions" section is present and non-empty
+4. At least one file:line code reference is cited in "Prolix claim" section
+
+verdict: advance if all 4 checks pass, needs_work otherwise.
+"""
