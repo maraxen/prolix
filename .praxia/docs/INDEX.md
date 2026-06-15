@@ -102,6 +102,7 @@
 - [260612_p5-dt1fs-size-crossover](research/260612_p5-dt1fs-size-crossover.md) — dt=1fs warm bias is translational finite-size; crossover N*≈16
 - [260615_rr7-differentiability-evidence](research/260615_rr7-differentiability-evidence.md) — RR7 rebuttal: differentiability × hetero-batch = S71; D1/D2 S1 test evidence
 - [260615_claim1-hetero-batch-precedent](research/260615_claim1-hetero-batch-precedent.md) — DR-claim1-1 hetero-batched MD precedent scan; TorchSim closest prior art
+- [260615_rr1-differentiation-evidence](research/260615_rr1-differentiation-evidence.md) — RR1 rebuttal: prolix hetero-batch vs kUPS/jax-md/OpenMM/GROMACS; codebase evidence at bundles.py:113 + planner.py:63
 
 ## Decisions
 - [260423_release-decision-v10](decisions/260423_release-decision-v10.md)
