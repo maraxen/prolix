@@ -1,0 +1,671 @@
+[sprint]
+sprint_id = "38"
+sprint_num = 1
+name = "38"
+description = "API Implementation: EnsemblePlan, Bundle factories, Observables, xtrax wiring"
+max_fix_retries = 2
+worktree_shadow_mode = false
+
+context = """
+task_id: 260614_sprint38_api_impl
+Project root: /home/marielle/projects/prolix
+
+KEY FACTS (verified against codebase before emit):
+- xtrax is ALREADY a dependency: pyproject.toml line ~23: 'xtrax @ file:///home/marielle/projects/xtrax'
+  xtrax.tiling.plan has: BatchPlanner (frozen dataclass, strategies=[Vmap|SafeMap|Scan|DedupGather|Bucket])
+  AxisSpec at xtrax/src/xtrax/tiling/plan.py:20; BatchPlan, BatchPlanner at :99
+- prolix BatchPlanner: src/prolix/tiling/planner.py:91 -- greedy budget-driven demotion, plan()->BatchPlan
+  AxisSpec:44, AxisDecision:56, BatchPlan:64 -- prolix owns these types currently
+- MolecularBundle: src/prolix/types/bundles.py:66 (frozen dataclass, eqx.Module)
+  from_pdb stub: :198-249 -- error-path validation done; raises NotImplementedError at :247
+  from_system_dict: DOES NOT EXIST -- must be added as new classmethod
+  make_bundle_from_system factory: src/prolix/physics/system.py:419 (converts PhysicsSystem -> MolecularBundle)
+- EnsemblePlan: src/prolix/api/ensemble_plan.py:12 (77 lines)
+  __init__:30 (takes bundles: list, planner=None)
+  run():45 -- raises NotImplementedError at :74; must be implemented this sprint
+- Observable: src/prolix/api/observables.py:14 -- @runtime_checkable Protocol, compute(state)->Array
+  Trajectory: :44 -- eqx.Module, positions/observable_values/n_steps
+  Temperature: :61 -- compute() returns jnp.nan placeholder (needs real impl)
+  Energy: DOES NOT EXIST -- must be added
+- prolix.api.__init__.py exports: EnsemblePlan, Observable, Trajectory, Temperature
+- Test suite: uv run pytest -m 'not slow' for fast CI; full: uv run pytest
+  Results written to tmp/pytest.json
+- Sprint 37 xtrax spec decision: v1.0 = type imports only, greedy loop stays; v1.1 = behavioral delegation
+  Spec at: .praxia/docs/superpowers/specs/260614_xtrax-tiling-integration.md
+"""
+
+[[tracks]]
+id = "a"
+is_research = false
+worktree = true
+skip_worktree = false
+
+[[tracks.items]]
+backlog_id = "1842"
+phase_name = "Track A -- xtrax.tiling wiring: import cleanup in prolix planner (#1842)"
+fixer_prompt = """
+task_id: 260614_sprint38_api_impl
+Backlog: #1842 -- Integrate xtrax.tiling into prolix (v1.0: type imports only)
+
+DECISION (from .praxia/docs/superpowers/specs/260614_xtrax-tiling-integration.md):
+  v1.0 = keep prolix's greedy loop; add xtrax as type-import only
+  v1.1 = behavioral delegation to xtrax.BatchPlanner (deferred)
+
+CURRENT STATE:
+  - xtrax already in pyproject.toml: 'xtrax @ file:///home/marielle/projects/xtrax'
+  - src/prolix/tiling/planner.py:91 -- prolix BatchPlanner with greedy plan()
+  - planner.py:112 -- comment mentions xtrax but no actual import
+
+WHAT TO DO:
+1. Read src/prolix/tiling/planner.py in full.
+2. Read src/xtrax/tiling/plan.py (at ~/projects/xtrax) to understand xtrax interface.
+   Key types: XtraxBatchPlanner (line ~99), XtraxAxisSpec (:20), XtraxBatchPlan, Strategy enum.
+3. Add TYPE_CHECKING import block to planner.py:
+   ```python
+   from __future__ import annotations
+   from typing import TYPE_CHECKING
+   if TYPE_CHECKING:
+       from xtrax.tiling.plan import BatchPlanner as XtraxBatchPlanner
+       from xtrax.tiling.plan import AxisSpec as XtraxAxisSpec
+   ```
+4. Add a module-level docstring note that xtrax.tiling is available as a future
+   backend (cite #1842 and the spec).
+5. Verify `from xtrax.tiling.plan import BatchPlanner` is importable at runtime
+   (not just TYPE_CHECKING) by adding a try/import in a __init__.py or running
+   `uv run python -c 'from xtrax.tiling.plan import BatchPlanner; print(BatchPlanner)'`.
+6. Run: uv run pytest src/prolix/tiling/ -x --tb=short
+   Also run: uv run pytest -m 'not slow' -x --tb=short -q 2>&1 | tail -20
+
+SUCCESS GATE:
+  - `from xtrax.tiling.plan import BatchPlanner` succeeds in prolix env
+  - All existing planner tests pass
+  - No behavioral change to prolix.tiling.BatchPlanner.plan()
+  - planner.py has type-import block referencing xtrax types
+"""
+reviewer_prompt = """
+task_id: 260614_sprint38_api_impl
+Reviewing Track A: xtrax.tiling wiring (#1842)
+
+VERIFY:
+1. Run: uv run python -c 'from xtrax.tiling.plan import BatchPlanner; print("ok")'
+   PASS if prints "ok". FAIL if ImportError.
+2. Run: uv run pytest -m 'not slow' -x --tb=short -q 2>&1 | tail -5
+   PASS if no failures. FAIL if any test fails.
+3. Read src/prolix/tiling/planner.py -- check that plan() body is UNCHANGED (greedy loop preserved).
+   FAIL if greedy loop was replaced with xtrax.BatchPlanner.plan() delegation.
+4. Check planner.py has TYPE_CHECKING block with xtrax imports.
+   FAIL if missing.
+
+PASS if all 4 checks pass. FAIL otherwise.
+"""
+return_key = "1842"
+
+[[tracks]]
+id = "b"
+is_research = false
+worktree = true
+skip_worktree = false
+
+[[tracks.items]]
+backlog_id = "281"
+phase_name = "Track B -- Bundle.from_pdb factory implementation (#281)"
+fixer_prompt = """
+task_id: 260614_sprint38_api_impl
+Backlog: #281 -- MolecularBundle.from_pdb(path, forcefield='amber14')
+
+CURRENT STATE:
+  - src/prolix/types/bundles.py:198-249: stub exists, error-path validation done
+    (FileNotFoundError, ValueError for unsupported FF, NotImplementedError for missing parmed)
+    Body raises NotImplementedError at line 247.
+  - src/prolix/physics/system.py:419: make_bundle_from_system(system, boundary_condition='periodic')
+    Takes an object with .positions, .bonds, .bond_params, .angles, .angle_params, etc.
+    Returns a padded MolecularBundle.
+
+WHAT TO DO:
+1. Read bundles.py:66-196 to understand MolecularBundle field names and types.
+2. Read physics/system.py:419-500 to understand PhysicsSystem fields and how
+   make_bundle_from_system consumes them.
+3. Read parmed docs via: uv run python -c 'import parmed; help(parmed.load_file)' or
+   inspect parmed.Structure attributes.
+4. Implement the from_pdb body (replacing the NotImplementedError at :247):
+   ```python
+   import parmed
+   struct = parmed.load_file(path)
+   # Apply AMBER14 parameters
+   if forcefield == 'amber14':
+       from parmed.amber import AmberParameterSet
+       # or use parmed's built-in AMBER param application
+       pass
+   # Build a PhysicsSystem-like namespace or direct arrays from struct
+   # ... extract positions (Angstrom), bonds, angles, dihedrals, masses ...
+   # Delegate to make_bundle_from_system
+   from prolix.physics.system import make_bundle_from_system
+   system = _parmed_struct_to_system(struct)
+   return make_bundle_from_system(system)
+   ```
+5. Add a helper _parmed_struct_to_system(struct) -> SimpleNamespace that maps
+   parmed.Structure fields to the PhysicsSystem protocol make_bundle_from_system expects.
+   Key fields: positions (Angstrom -> keep as-is, AKMA uses Angstrom),
+   masses (in atomic mass units), bonds (index pairs), bond_params (k, r0 in kcal/mol/A^2),
+   angles, angle_params, dihedrals, dihedral_params.
+6. Write tests/types/test_bundle_from_pdb.py:
+   - test_from_pdb_file_not_found: assert FileNotFoundError on missing path
+   - test_from_pdb_bad_forcefield: assert ValueError on unsupported FF
+   - test_from_pdb_no_parmed: mock parmed import failure -> NotImplementedError
+   - test_from_pdb_roundtrip: if parmed available, load a small test PDB (use existing
+     test fixtures or create a minimal 3-atom PDB) and check bundle.positions.shape[0] > 0
+7. Run: uv run pytest tests/types/test_bundle_from_pdb.py -x --tb=short
+
+NOTE: If parmed is not in the dev dependencies, add it:
+  uv add --optional parmed  (or uv add parmed if it's a hard dep)
+  The stub already has try/except ImportError -> NotImplementedError, so
+  tests that don't need parmed can be run without it.
+
+SUCCESS GATE:
+  - Error-path tests all pass without parmed installed
+  - If parmed is available: roundtrip test produces a valid MolecularBundle
+  - uv run pytest -m 'not slow' passes
+"""
+reviewer_prompt = """
+task_id: 260614_sprint38_api_impl
+Reviewing Track B: Bundle.from_pdb (#281)
+
+VERIFY:
+1. Read src/prolix/types/bundles.py:198-260 -- confirm from_pdb body is implemented
+   (no longer raises NotImplementedError unconditionally at line 247).
+   FAIL if still raises NotImplementedError without parmed check.
+2. Run: uv run pytest tests/types/test_bundle_from_pdb.py -x --tb=short
+   PASS if all tests pass. FAIL if missing or failing.
+3. Run: uv run pytest -m 'not slow' -x --tb=short -q 2>&1 | tail -5
+   PASS if no regressions. FAIL if new failures.
+4. Confirm error-path tests exist: test_from_pdb_file_not_found,
+   test_from_pdb_bad_forcefield, test_from_pdb_no_parmed.
+   FAIL if any of these are missing.
+
+PASS if all 4 checks pass. FAIL otherwise.
+"""
+return_key = "281"
+
+[[tracks]]
+id = "c"
+is_research = false
+worktree = true
+skip_worktree = false
+
+[[tracks.items]]
+backlog_id = "261"
+phase_name = "Track C -- EnsemblePlan.run() implementation (#261)"
+fixer_prompt = """
+task_id: 260614_sprint38_api_impl
+Backlog: #261 -- EnsemblePlan.run integration with BatchPlanner
+
+CURRENT STATE:
+  - src/prolix/api/ensemble_plan.py:12-77 (77 lines):
+    __init__:30 accepts bundles: list, planner=None (stores batch_plan if planner given)
+    run():45 raises NotImplementedError at :74
+  - prolix.tiling.BatchPlanner at src/prolix/tiling/planner.py:91
+    BatchPlanner.plan() -> BatchPlan with decisions per AxisSpec
+  - xtrax is available (in pyproject.toml); xtrax.tiling.plan.BatchPlanner has .plan()
+    Per Sprint 37 decision: v1.0 uses prolix BatchPlanner (greedy), xtrax in v1.1
+  - settle_langevin is the production integrator: src/prolix/physics/settle.py
+    settle_langevin(energy_fn, shift_fn, dt, kT, gamma, mass, water_indices, ...) -> (init_fn, apply_fn)
+  - LangevinState: src/prolix/batched_simulate.py
+
+WHAT TO DO:
+1. Read ensemble_plan.py in full. Read prolix/tiling/planner.py:64-160 (BatchPlan + BatchPlanner).
+2. Read prolix/physics/settle.py:1-50 for settle_langevin signature.
+3. Implement EnsemblePlan.run(n_steps, dt, kT, seed=0) to:
+   a. If self.batch_plan is None, call BatchPlanner.plan() using a default set of AxisSpecs
+      based on self.bundles (e.g., one AxisSpec per bundle axis with heterogeneous=True if shapes differ).
+   b. Based on batch_plan.decisions: if decision.batch_size == 0, use jax.vmap;
+      if > 0, use prolix safe_map or jax.lax.map with tile size.
+   c. Run a simplified Langevin NVT integrator on each bundle.
+      For v1.0, it's acceptable to loop over bundles (sequential safe_map),
+      with a clear TODO comment noting that the batched vmap path comes in v1.1
+      once xtrax Bucket strategy is adopted.
+   d. Return a Trajectory object (from prolix.api.observables):
+      positions=(n_steps, n_atoms, 3), observable_values={}, n_steps=n_steps.
+4. Write tests/api/test_ensemble_plan.py:
+   - test_ensemble_plan_init_no_planner: EnsemblePlan([bundle]).batch_plan is None
+   - test_ensemble_plan_init_with_planner: planner.plan() called; batch_plan set
+   - test_ensemble_plan_run_returns_trajectory: run(n_steps=10, dt=0.5, kT=0.596)
+     returns Trajectory with positions.shape == (10, n_atoms, 3)
+   - test_ensemble_plan_run_single_bundle_parity: EnsemblePlan([bundle]).run(n_steps=5)
+     produces positions close to direct settle_langevin run (V1 parity)
+5. Run: uv run pytest tests/api/test_ensemble_plan.py -x --tb=short
+
+NOTE: For a minimal MolecularBundle to test with, use an existing test fixture or
+create a water molecule (3 atoms) with appropriate bond topology and masses.
+
+SUCCESS GATE:
+  - run() no longer raises NotImplementedError
+  - Returns Trajectory object
+  - test_ensemble_plan_run_returns_trajectory passes
+  - uv run pytest -m 'not slow' passes
+"""
+reviewer_prompt = """
+task_id: 260614_sprint38_api_impl
+Reviewing Track C: EnsemblePlan.run() (#261)
+
+VERIFY:
+1. Read src/prolix/api/ensemble_plan.py -- run() must NOT raise NotImplementedError unconditionally.
+   FAIL if line 74 still raises NotImplementedError.
+2. Run: uv run pytest tests/api/test_ensemble_plan.py -x --tb=short
+   PASS if all tests pass. FAIL if missing or failing.
+3. Confirm test_ensemble_plan_run_returns_trajectory exists and passes:
+   checks return type is Trajectory and positions.shape[0] == n_steps.
+4. Run: uv run pytest -m 'not slow' -x --tb=short -q 2>&1 | tail -5
+   PASS if no regressions.
+
+PASS if all 4 checks pass. FAIL otherwise.
+"""
+return_key = "261"
+
+[[tracks]]
+id = "d"
+is_research = false
+worktree = true
+skip_worktree = false
+
+[[tracks.items]]
+backlog_id = "284"
+phase_name = "Track D -- Observable protocol + Trajectory + Temperature implementation (#284)"
+fixer_prompt = """
+task_id: 260614_sprint38_api_impl
+Backlog: #284 -- Observable protocol + Trajectory eqx.Module
+
+CURRENT STATE (mostly done by Sprint 37):
+  - src/prolix/api/observables.py:14 -- Observable Protocol (@runtime_checkable), compute(state)->Array
+  - :44 -- Trajectory eqx.Module with positions, observable_values, n_steps
+  - :61 -- Temperature eqx.Module -- compute() returns jnp.nan (PLACEHOLDER, needs real impl)
+  - prolix.api.__init__.py already exports: Observable, Trajectory, Temperature
+
+WHAT TO DO:
+1. Read observables.py in full (87 lines).
+2. Implement Temperature.compute(self, state) properly:
+   - state is likely LangevinState: has .momentum (N, 3) and .mass (N,) fields
+   - T = (2 * KE) / (dof * k_B) where KE = sum(p^2 / (2*m))
+   - k_B in AKMA units = 0.00198720425 kcal/(mol*K)
+   - dof: use self.dof (passed at construction)
+   - Check what fields LangevinState has: read src/prolix/batched_simulate.py top
+   - Replace the `return jnp.nan` placeholder at line 87
+3. Write tests/api/test_observables.py:
+   - test_observable_protocol_compliance: Temperature() satisfies isinstance(t, Observable)
+   - test_temperature_compute_equipartition: create synthetic state with known KE,
+     verify Temperature.compute() returns expected T
+   - test_trajectory_fields: Trajectory has .positions, .observable_values, .n_steps
+   - test_temperature_returns_scalar: Temperature.compute() returns scalar Array, not nan
+4. Verify prolix.api imports: `from prolix.api import Observable, Trajectory, Temperature`
+5. Run: uv run pytest tests/api/test_observables.py -x --tb=short
+6. Run: uv run pytest -m 'not slow' -x --tb=short -q 2>&1 | tail -5
+
+SUCCESS GATE:
+  - Temperature.compute() no longer returns jnp.nan
+  - isinstance(Temperature(dof=9), Observable) is True
+  - All 4 tests in test_observables.py pass
+"""
+reviewer_prompt = """
+task_id: 260614_sprint38_api_impl
+Reviewing Track D: Observable + Trajectory + Temperature (#284)
+
+VERIFY:
+1. Run: uv run python -c 'from prolix.api import Observable, Trajectory, Temperature; print("ok")'
+   PASS if prints "ok". FAIL if ImportError.
+2. Run: uv run python -c '
+from prolix.api import Observable, Temperature
+t = Temperature(dof=9)
+print(isinstance(t, Observable))
+'
+   PASS if prints True. FAIL otherwise.
+3. Read observables.py:86-87 -- confirm Temperature.compute() no longer returns jnp.nan.
+   FAIL if still returns jnp.nan.
+4. Run: uv run pytest tests/api/test_observables.py -x --tb=short
+   PASS if all tests pass. FAIL if missing or failing.
+5. Run: uv run pytest -m 'not slow' -x --tb=short -q 2>&1 | tail -5
+   PASS if no regressions.
+
+PASS if all 5 checks pass. FAIL otherwise.
+"""
+return_key = "284"
+
+[[tracks]]
+id = "e"
+is_research = false
+worktree = true
+skip_worktree = false
+
+[[tracks.items]]
+backlog_id = "282"
+phase_name = "Track E -- Bundle.from_system_dict migration factory (#282)"
+fixer_prompt = """
+task_id: 260614_sprint38_api_impl
+Backlog: #282 -- MolecularBundle.from_system_dict(legacy_dict) migration factory
+
+CURRENT STATE:
+  - src/prolix/types/bundles.py:198 -- from_pdb classmethod exists (stub/impl from Track B)
+  - from_system_dict does NOT exist yet on MolecularBundle
+  - make_bundle_from_system at src/prolix/physics/system.py:419 converts a PhysicsSystem-like
+    object to MolecularBundle -- this is what legacy entry-points produce
+  - Legacy entry-points produce dicts like: {'positions': ..., 'masses': ..., 'bonds': ...,
+    'bond_params': ..., 'angles': ..., 'angle_params': ..., 'boundary_condition': ...}
+
+WHAT TO DO:
+1. Read bundles.py:66-200 to understand MolecularBundle fields.
+2. Read physics/system.py:419-490 to understand what make_bundle_from_system expects
+   (it uses getattr, so a SimpleNamespace works).
+3. Add classmethod from_system_dict to MolecularBundle after from_pdb:
+   ```python
+   @classmethod
+   def from_system_dict(
+       cls,
+       d: dict,
+       boundary_condition: str = "periodic",
+   ) -> "MolecularBundle":
+       '''Build MolecularBundle from a legacy system dict.
+
+       Emits DeprecationWarning. Use Bundle.from_pdb for new code.
+
+       Args:
+           d: Dict with keys: positions, masses, bonds, bond_params,
+              angles, angle_params (optional: dihedrals, dihedral_params,
+              water_indices, box).
+           boundary_condition: "periodic" or "free".
+       '''
+       import warnings
+       from types import SimpleNamespace
+       from prolix.physics.system import make_bundle_from_system
+       warnings.warn(
+           'MolecularBundle.from_system_dict is deprecated. '
+           'Use MolecularBundle.from_pdb for new code.',
+           DeprecationWarning, stacklevel=2,
+       )
+       ns = SimpleNamespace(**d)
+       return make_bundle_from_system(ns, boundary_condition=boundary_condition)
+   ```
+4. Write tests/types/test_bundle_from_system_dict.py:
+   - test_from_system_dict_warns: assert DeprecationWarning emitted
+   - test_from_system_dict_roundtrip: pass a minimal dict (3-atom water toy),
+     verify returned MolecularBundle has correct positions shape
+   - test_from_system_dict_invalid_key: graceful error for missing required key
+5. Run: uv run pytest tests/types/test_bundle_from_system_dict.py -x --tb=short
+6. Run: uv run pytest -m 'not slow' -x --tb=short -q 2>&1 | tail -5
+
+SUCCESS GATE:
+  - MolecularBundle.from_system_dict() exists and emits DeprecationWarning
+  - Roundtrip test passes (dict -> MolecularBundle)
+  - uv run pytest -m 'not slow' passes
+"""
+reviewer_prompt = """
+task_id: 260614_sprint38_api_impl
+Reviewing Track E: Bundle.from_system_dict (#282)
+
+VERIFY:
+1. Run: uv run python -c '
+import warnings
+from prolix.types.bundles import MolecularBundle
+print(hasattr(MolecularBundle, "from_system_dict"))
+'
+   PASS if prints True. FAIL otherwise.
+2. Run: uv run python -c '
+import warnings
+from prolix.types.bundles import MolecularBundle
+with warnings.catch_warnings(record=True) as w:
+    warnings.simplefilter("always")
+    try:
+        MolecularBundle.from_system_dict({})
+    except Exception:
+        pass
+    print(any(issubclass(x.category, DeprecationWarning) for x in w))
+'
+   PASS if prints True. FAIL otherwise.
+3. Run: uv run pytest tests/types/test_bundle_from_system_dict.py -x --tb=short
+   PASS if all tests pass. FAIL if missing or failing.
+4. Run: uv run pytest -m 'not slow' -x --tb=short -q 2>&1 | tail -5
+   PASS if no regressions.
+
+PASS if all 4 checks pass. FAIL otherwise.
+"""
+return_key = "282"
+
+[[tracks]]
+id = "f"
+is_research = false
+worktree = true
+skip_worktree = false
+
+[[tracks.items]]
+backlog_id = "292"
+phase_name = "Track F -- S1 D1: per-term ANALYTICAL vs AUTOGRAD force agreement (#292)"
+fixer_prompt = """
+task_id: 260614_sprint38_api_impl
+Backlog: #292 -- S1 D1: per-term ANALYTICAL vs AUTOGRAD force agreement < 1e-6 kcal/mol/A
+
+CONTEXT:
+  S1 is the differentiability claim. D1 validates that per-term bonded force analytical
+  implementations agree with jax.grad-computed autograd forces. This is paper-critical:
+  it's the evidence that jax.grad through prolix produces physically correct gradients.
+
+RELEVANT FILES:
+  - src/prolix/physics/analytical_forces.py -- per-term analytical force implementations
+  - src/prolix/physics/bonded.py -- bonded energy terms (bonds, angles, dihedrals, impropers)
+  - src/prolix/physics/system.py:419 -- make_bundle_from_system
+  - Existing tests: tests/physics/ -- look for any existing force agreement tests
+
+WHAT TO DO:
+1. Read analytical_forces.py and bonded.py to understand the function signatures.
+   Key functions: harmonic_bond_energy, harmonic_angle_energy, periodic_dihedral_energy,
+   or however they are named. Check both files.
+2. For each bonded term, write a parametric pytest test that:
+   a. Creates synthetic parameters (random k, r0, positions near equilibrium)
+   b. Computes analytical forces via prolix's analytical implementation
+   c. Computes autograd forces via jax.grad of the energy function
+   d. Asserts max |analytical - autograd| < 1e-6 (kcal/mol/A)
+3. Write tests/physics/test_s1_force_parity.py covering at minimum:
+   - test_bond_force_parity: harmonic bond term
+   - test_angle_force_parity: harmonic angle term
+   - test_dihedral_force_parity: periodic dihedral term
+   Each test should use jax.random for reproducible random geometries (seed=42).
+4. Mark tests with @pytest.mark.slow if they are expensive (>1s); otherwise leave unmarked.
+5. Run: uv run pytest tests/physics/test_s1_force_parity.py -x --tb=short -v
+6. Run: uv run pytest -m 'not slow' -x --tb=short -q 2>&1 | tail -5
+
+SUCCESS GATE:
+  - test_bond_force_parity, test_angle_force_parity, test_dihedral_force_parity all pass
+  - Each asserts max |f_analytical - f_autograd| < 1e-6
+  - uv run pytest -m 'not slow' passes
+"""
+reviewer_prompt = """
+task_id: 260614_sprint38_api_impl
+Reviewing Track F: S1 D1 force parity (#292)
+
+VERIFY:
+1. Run: uv run pytest tests/physics/test_s1_force_parity.py -x --tb=short -v
+   PASS if all tests pass. FAIL if file missing or any test fails.
+2. Grep for assertion pattern in the test file:
+   grep -n "1e-6" tests/physics/test_s1_force_parity.py
+   grep -En "atol|allclose|max.*force" tests/physics/test_s1_force_parity.py
+   FAIL if no assertion against 1e-6 tolerance is found.
+3. Confirm tests exist for at least 3 terms (bond, angle, dihedral):
+   grep -n "def test_" tests/physics/test_s1_force_parity.py | wc -l
+   FAIL if fewer than 3 test functions.
+4. Run: uv run pytest -m 'not slow' -x --tb=short -q 2>&1 | tail -5
+   PASS if no regressions.
+
+PASS if all 4 checks pass. FAIL otherwise.
+"""
+return_key = "292"
+
+[[tracks]]
+id = "g"
+is_research = false
+worktree = true
+skip_worktree = false
+
+[[tracks.items]]
+backlog_id = "293"
+phase_name = "Track G -- S1 D2: jax.grad through trajectory finite-diff parity (#293)"
+fixer_prompt = """
+task_id: 260614_sprint38_api_impl
+Backlog: #293 -- S1 D2: jax.grad / jax.jacrev through EnsemblePlan.run finite-diff parity, RMS < 1e-4
+
+CONTEXT:
+  This validates the differentiability claim end-to-end: jax.grad(loss)(params) through
+  a short MD trajectory must agree with finite-difference gradients to RMS < 1e-4.
+  This is used directly in the §7.1 paper figure (bonded-parameter fitting).
+
+NOTE: EnsemblePlan.run() is being implemented in Track C. This track can proceed
+in parallel assuming run() will exist; write the test structure even if run() is
+still a stub -- the test should be marked xfail(strict=False) if run() not yet complete,
+then converted to a real test once Track C lands.
+
+RELEVANT FILES:
+  - src/prolix/api/ensemble_plan.py -- EnsemblePlan.run() (Track C implementing this)
+  - src/prolix/physics/bonded.py -- bonded energy with differentiable params
+  - tests/physics/test_settle_temperature_control.py -- reference for how integration tests work
+
+WHAT TO DO:
+1. Read ensemble_plan.py and bonded.py to understand the parameter structure.
+2. Write tests/api/test_s1_jaxgrad_parity.py:
+   ```python
+   import pytest
+   import jax
+   import jax.numpy as jnp
+
+   def test_jaxgrad_bond_params_parity():
+       '''S1 D2: jax.grad through 5-step trajectory agrees with finite-diff to RMS < 1e-4.'''
+       # Setup: single water molecule or minimal 2-atom system with one bond
+       # Parameterize bond_k as a differentiable parameter
+       # Define loss = mean squared displacement over n_steps=5 trajectory
+       # Compute jax.grad(loss)(bond_k)
+       # Compute finite-diff: (loss(bond_k + eps) - loss(bond_k - eps)) / (2*eps)
+       # Assert jnp.sqrt(jnp.mean((grad_jax - grad_fd)**2)) < 1e-4
+       ...
+   ```
+   Key: use a SHORT trajectory (n_steps=5, dt=0.5) and small system (2-4 atoms) to keep
+   this fast and not slow-marked.
+3. If EnsemblePlan.run() is not yet implemented, mark the test:
+   @pytest.mark.xfail(strict=False, reason='EnsemblePlan.run() pending Track C')
+4. If jax.grad doesn't compose through run() as written, try jax.linear_util or
+   use the lower-level settle_langevin directly (differentiate through the apply_fn loop).
+5. Run: uv run pytest tests/api/test_s1_jaxgrad_parity.py -x --tb=short -v
+6. Run: uv run pytest -m 'not slow' -x --tb=short -q 2>&1 | tail -5
+
+SUCCESS GATE:
+  - Test file exists with the RMS < 1e-4 assertion
+  - Either passes (if Track C complete) or correctly xfail
+  - uv run pytest -m 'not slow' passes
+"""
+reviewer_prompt = """
+task_id: 260614_sprint38_api_impl
+Reviewing Track G: S1 D2 jax.grad parity (#293)
+
+VERIFY:
+1. Run: uv run pytest tests/api/test_s1_jaxgrad_parity.py -x --tb=short -v
+   PASS if all tests pass or xfail. FAIL if file missing or ERROR.
+2. Grep for RMS assertion:
+   grep -n "1e-4" tests/api/test_s1_jaxgrad_parity.py
+   grep -En "sqrt.*mean|RMS|rms" tests/api/test_s1_jaxgrad_parity.py
+   FAIL if no assertion against 1e-4 tolerance.
+3. Grep for jax.grad or jax.jacrev usage:
+   grep -En "jax.grad|jax.jacrev|jax.jacobian" tests/api/test_s1_jaxgrad_parity.py
+   FAIL if neither appears.
+4. Run: uv run pytest -m 'not slow' -x --tb=short -q 2>&1 | tail -5
+   PASS if no regressions.
+
+PASS if all 4 checks pass. FAIL otherwise.
+"""
+return_key = "293"
+
+[[tracks]]
+id = "h"
+is_research = false
+worktree = true
+skip_worktree = false
+
+[[tracks.items]]
+backlog_id = "254"
+phase_name = "Track H -- Energy observable: prolix.api.observables.Energy (#254)"
+fixer_prompt = """
+task_id: 260614_sprint38_api_impl
+Backlog: #254 -- prolix.api.observables.Energy implementation
+
+CURRENT STATE:
+  - src/prolix/api/observables.py: Observable Protocol, Trajectory, Temperature all exist
+  - Temperature.compute() is being fixed in Track D (returns jnp.nan currently)
+  - Energy class does NOT exist in observables.py
+  - make_energy_fn pattern: src/prolix/physics/md_potential_bundle.py or
+    src/prolix/batched_energy.py -- find the energy evaluation path
+
+RELEVANT FILES:
+  - src/prolix/api/observables.py:14 -- Observable Protocol
+  - src/prolix/batched_energy.py or src/prolix/physics/md_potential_bundle.py -- energy fn
+  - src/prolix/types/bundles.py -- MolecularBundle fields (positions, masses, etc.)
+  - src/prolix/batched_simulate.py -- LangevinState fields (positions, momentum, force, mass)
+
+WHAT TO DO:
+1. Read observables.py in full.
+2. Read batched_simulate.py:1-50 to understand LangevinState fields.
+3. Read batched_energy.py or md_potential_bundle.py to understand energy fn signature.
+   The energy fn typically takes (positions, bundle) or (positions, params) -> scalar.
+4. Add Energy class to observables.py:
+   ```python
+   class Energy(eqx.Module):
+       '''Observable: total potential energy from integrator state.
+
+       Args:
+           energy_fn: Callable[[positions, bundle], Float[Array, '']]
+               -- the potential energy function (from make_energy_fn or similar).
+               Capture bundle at construction via functools.partial or closure.
+           bundle: MolecularBundle used to compute energy.
+       '''
+       energy_fn: Any  # callable; not jit-traced at construction
+       bundle: Any     # MolecularBundle; static at construction
+
+       def compute(self, state) -> Float[Array, '']:
+           '''Return total potential energy at current state.positions.'''
+           return self.energy_fn(state.positions, self.bundle)
+   ```
+   Adjust signature to match how make_energy_fn / single_padded_energy actually works.
+5. Export Energy from prolix/api/__init__.py.
+6. Write test in tests/api/test_observables.py (or new file tests/api/test_energy_observable.py):
+   - test_energy_matches_make_energy_fn: create a minimal bundle, create Energy(energy_fn, bundle),
+     call compute(state) and compare to energy_fn(state.positions, bundle) directly.
+     Assert relative error < 1e-6.
+   - test_energy_isinstance_observable: isinstance(Energy(fn, bundle), Observable) is True.
+7. Run: uv run pytest tests/api/ -x --tb=short -v -k energy
+8. Run: uv run pytest -m 'not slow' -x --tb=short -q 2>&1 | tail -5
+
+SUCCESS GATE:
+  - prolix.api.Energy exists and is importable
+  - isinstance(Energy(fn, bundle), Observable) is True
+  - test_energy_matches_make_energy_fn passes with < 1e-6 relative error
+  - uv run pytest -m 'not slow' passes
+"""
+reviewer_prompt = """
+task_id: 260614_sprint38_api_impl
+Reviewing Track H: Energy observable (#254)
+
+VERIFY:
+1. Run: uv run python -c 'from prolix.api import Energy; print("ok")'
+   PASS if prints "ok". FAIL if ImportError.
+2. Run: uv run python -c '
+from prolix.api import Observable, Energy
+import jax.numpy as jnp
+fn = lambda pos, bundle: jnp.sum(pos)
+bundle = None
+e = Energy(energy_fn=fn, bundle=bundle)
+print(isinstance(e, Observable))
+'
+   PASS if prints True. FAIL otherwise.
+3. Run: uv run pytest tests/api/ -x --tb=short -v -k energy 2>&1 | tail -10
+   PASS if test(s) pass. FAIL if missing or failing.
+4. Run: uv run pytest -m 'not slow' -x --tb=short -q 2>&1 | tail -5
+   PASS if no regressions.
+
+PASS if all 4 checks pass. FAIL otherwise.
+"""
+return_key = "254"
+
+[orchestration]
+sequential = []
+concurrent = ["a", "b", "c", "d", "e", "f", "g", "h"]

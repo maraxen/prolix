@@ -1,0 +1,664 @@
+[sprint]
+sprint_id = "36"
+sprint_num = 1
+name = "Phase 5 Extended: dt=1.0 fs Validation + Tiling Regression"
+description = "PBC unit test for AM conservation, tiling hotfix audit, dt=1.0 fs cluster gate, and CI hardening with tiling regression + xfail parametrize sweep."
+context = """
+task_id: 260603_p5_settle_correctness
+Project root: /home/marielle/projects/prolix
+
+Background:
+- Phase 5 / C3 hypothesis confirmed: AM conservation added to SETTLE R-step (commit 678c9cb)
+  eliminates T_rot deficit (was 283.6K, now 296.6–301.9K at dt=0.5 fs, job 15800837 gate_pass=1).
+- PBC split-molecule bug fixed (commit 5d65edb): H atoms unwrapped relative to O in x_unc before
+  computing L_target in _r_step_conserve_angular_momentum. Without this, |d_unc|~L_box~29A caused
+  catastrophic impulse → NaN (root cause of jobs 15770523 and 15775369 returning NaN).
+- Tiling hotfix at src/prolix/physics/optimization.py (function chunked_lj_energy, ~line 28):
+    inner_tile_size = ((_need + tile_size - 1) // tile_size) * tile_size
+  Ceiling-division ensures tile alignment. Bug: non-multiple inner_tile_size silently dropped
+  atoms near the tile boundary → 10^62 K blowup.
+- Spec: .praxia/docs/specs/260611_p5-extended-dt-validation-tiling-regression.md
+
+Key invariants:
+- All Python via `uv run python` / `uv run pytest`; never bare python
+- task_id must appear in every transduction_log call
+- Gate L1→L2→L3 discipline: never submit to cluster without passing local smoke first
+- Never modify a running bathos sidecar; create a new one
+
+Sprint DAG:
+  Phase 1 (local, ~2.5 hrs): a + b (parallel) → c → d → e (gate submit, async)
+  Phase 3 (during gate queue, ~3 hrs): f + g (parallel, concurrent with gate wait)
+  Post-gate: h (if gate_pass=1) OR i (if gate_pass=0)
+"""
+max_fix_retries = 2
+worktree_shadow_mode = false
+
+[[tracks]]
+id = "a"
+is_research = false
+worktree = true
+
+[[tracks.items]]
+backlog_id = "1515"
+phase_name = "Track A — D1: PBC unit test for _r_step_conserve_angular_momentum (#1515)"
+fixer_prompt = """
+task_id: 260603_p5_settle_correctness
+Project root: /home/marielle/projects/prolix
+
+Add a PBC split-molecule unit test to tests/physics/test_settle_temperature_control.py,
+immediately after the existing test_r_step_conserves_angular_momentum (line ~858).
+
+New test name: test_r_step_conserves_angular_momentum_pbc
+
+Context: _r_step_conserve_angular_momentum takes an optional box=Array|None argument
+(added in commit 5d65edb). When box is provided, H atoms are unwrapped relative to O
+via minimum-image before computing L_target. Without this, a water molecule straddling a
+PBC boundary gives |d_unc| ~ L_box → catastrophic impulse → NaN.
+
+FIXTURE: n_waters=1, split-molecule water
+  x_unc[0] = [0.1, 0.1, 0.1]   # O at x=0.1
+  x_unc[1] = [3.0, 0.1, 0.1]   # H1 straddling PBC (x=3.0, box=3.1)
+  x_unc[2] = [0.1, 0.3, 0.1]   # H2 within box
+  box = jnp.array([3.1, 3.1, 3.1])
+  Minimum-image d_OH1_x = 3.0 - 0.1 - 3.1 = -0.2 → H1_unwrapped_x = 0.1 - 0.2 = -0.1
+
+STEPS:
+1. Enable float64: jax.config.update("jax_enable_x64", True)
+2. Import: from prolix.physics import settle
+           from prolix.physics.settle import _r_step_conserve_angular_momentum, WaterIndices
+3. Build water_indices: water_indices = settle.get_water_indices(0, 1)
+4. Add small SETTLE displacement (simulate R-step magnitude):
+   settle_displacement = jnp.array([[0.001, 0.001, 0.001], [-0.001, 0.001, 0.001], [0.001, -0.001, 0.001]])
+   x_con = x_unc + settle_displacement
+5. Build momenta p_pre_a via jax.random.normal(PRNGKey(99), (3,3), dtype=float64) * 5.0
+   half_dt = 0.25
+   mass_arr = jnp.array([15.999, 1.008, 1.008])
+   dp_r_w = mass_arr[:, None] * settle_displacement / half_dt
+   momentum_after_r = p_pre_a + dp_r_w
+6. Call with box:
+   momentum_corrected = _r_step_conserve_angular_momentum(
+     momentum_after_r, p_pre_a, x_unc, x_con, water_indices,
+     mass_oxygen=15.999, mass_hydrogen=1.008, box=jnp.array([3.1, 3.1, 3.1])
+   )
+7. Compute L_target from (x_unc_unwrapped, p_pre_a):
+   Unwrap H1: dH1 = x_unc[1] - x_unc[0]; box_arr = jnp.array([3.1,3.1,3.1])
+   dH1_mi = dH1 - box_arr * jnp.round(dH1 / box_arr)
+   r_H1_uw = x_unc[0] + dH1_mi
+   m = jnp.array([15.999, 1.008, 1.008])
+   com = (m[0]*x_unc[0] + m[1]*r_H1_uw + m[2]*x_unc[2]) / m.sum()
+   L_target = (m[0]*jnp.cross(x_unc[0]-com, p_pre_a[0])
+             + m[1]*jnp.cross(r_H1_uw-com, p_pre_a[1])  # use unwrapped H1
+             + m[2]*jnp.cross(x_unc[2]-com, p_pre_a[2]))
+8. Compute L_actual from (x_unc_unwrapped, momentum_corrected) with same unwrapped positions
+9. Assertions:
+   assert jnp.all(jnp.isfinite(momentum_corrected)), "NaN in corrected momentum (PBC fixture)"
+   assert jnp.allclose(L_actual, L_target, atol=1e-8), f"AM not restored: {L_actual} vs {L_target}"
+
+Gate: `uv run pytest tests/physics/test_settle_temperature_control.py::test_r_step_conserves_angular_momentum_pbc -v` PASS.
+"""
+reviewer_prompt = """
+Verify the PBC unit test:
+1. test_r_step_conserves_angular_momentum_pbc exists in test_settle_temperature_control.py (~after line 858).
+2. Fixture: O at [0.1,0.1,0.1], H1 at [3.0,0.1,0.1] (straddling PBC), box=[3.1,3.1,3.1].
+3. Calls _r_step_conserve_angular_momentum with box=jnp.array([3.1,3.1,3.1]).
+4. Asserts jnp.isfinite(momentum_corrected) — no NaN.
+5. Asserts jnp.allclose(L_actual, L_target, atol=1e-8) using unwrapped H1 positions.
+6. Run: `uv run pytest tests/physics/test_settle_temperature_control.py::test_r_step_conserves_angular_momentum_pbc -v` — PASS.
+7. Existing test_r_step_conserves_angular_momentum (without box, line ~858) still PASS.
+"""
+return_key = "1515"
+
+[[tracks]]
+id = "b"
+is_research = false
+worktree = true
+
+[[tracks.items]]
+backlog_id = "1516"
+phase_name = "Track B — D2: Tiling hotfix audit at optimization.py (_need=125 case) (#1516)"
+fixer_prompt = """
+task_id: 260603_p5_settle_correctness
+Project root: /home/marielle/projects/prolix
+
+Add a computed-check test for the tiling hotfix to tests/physics/test_optimization.py.
+
+CONTEXT: The tiling hotfix formula (in src/prolix/physics/optimization.py, chunked_lj_energy):
+  inner_tile_size = ((_need + tile_size - 1) // tile_size) * tile_size
+where _need = max(1024, int(excl_indices.shape[0]) + 128).
+
+Add: def test_inner_tile_size_alignment()
+
+Pure Python (no JAX tracing), verifies the formula for key boundary cases:
+
+def test_inner_tile_size_alignment():
+    '''Regression: inner_tile_size must be divisible by tile_size.
+
+    The original bug silently dropped atoms when inner_tile_size was not a tile_size multiple.
+    At 895-water simulations, this caused 10^62 K blowup.
+    '''
+    tile_size = 128
+    test_cases = [
+        # (_need, expected_inner_tile_size)
+        (125, 128),     # NOT a multiple of 128 without ceiling → was the atom-drop case
+        (128, 128),     # already aligned
+        (129, 256),     # one over → rounds up to next multiple
+        (256, 256),     # aligned
+        (1024, 1024),   # default lower bound of _need
+        (1025, 1152),   # 1025 → ceil(1025/128)*128 = 9*128 = 1152
+        (897, 1024),    # _need = max(1024, 897+128) = 1024; already aligned
+    ]
+    for _need, expected in test_cases:
+        result = ((_need + tile_size - 1) // tile_size) * tile_size
+        assert result == expected, f"_need={_need}: expected {expected}, got {result}"
+        assert result % tile_size == 0, f"_need={_need}: {result} not divisible by {tile_size}"
+
+ALSO verify the formula is present in the actual optimization.py:
+Read src/prolix/physics/optimization.py and confirm the line
+    inner_tile_size = ((_need + tile_size - 1) // tile_size) * tile_size
+is present (or equivalent ceiling-division). Include a brief comment in the test docstring:
+  # Formula confirmed present in src/prolix/physics/optimization.py
+
+Gate: `uv run pytest tests/physics/test_optimization.py::test_inner_tile_size_alignment -v` PASS.
+"""
+reviewer_prompt = """
+Verify the tiling hotfix audit test:
+1. test_inner_tile_size_alignment exists in tests/physics/test_optimization.py.
+2. Tests include _need=125 (expected=128) — the original atom-drop boundary case.
+3. All test cases have result % tile_size == 0 assertion.
+4. Docstring mentions "10^62 K blowup" and "895-water".
+5. Run: `uv run pytest tests/physics/test_optimization.py::test_inner_tile_size_alignment -v` — PASS.
+6. Pre-existing optimization tests still PASS.
+"""
+return_key = "1516"
+
+[[tracks]]
+id = "c"
+is_research = false
+
+[[tracks.items]]
+backlog_id = "1517"
+phase_name = "Track C — L2: Local smoke, dt=1.0 fs, 16-water, 2 seeds (#1517)"
+fixer_prompt = """
+task_id: 260603_p5_settle_correctness
+Project root: /home/marielle/projects/prolix
+
+Add L2 smoke test to tests/physics/test_settle_temperature_control.py.
+
+New test: test_dt1fs_16water_smoke
+
+This is an L2 liveness gate (not paper evidence). It verifies dt=1.0 fs does not
+immediately NaN on a 16-water system before burning cluster queue time.
+
+@pytest.mark.slow
+def test_dt1fs_16water_smoke() -> None:
+    '''L2 liveness gate only — not sufficient to validate dt=1.0 fs stability.
+
+    Runs 16-water TIP3P with settle_langevin at dt=1.0 fs for 10 ps.
+    Asserts: no NaN (finite positions and momenta), rough temperature proximity.
+    See cluster gate P5E-S2 (job p5-nvt-gate-dt1fs) for 895-water stability evidence.
+    '''
+    n_waters = 16
+    dt_fs = 1.0
+    sim_ps = 10.0
+    steps = int(sim_ps * 1000.0 / dt_fs)
+    burn = max(100, steps // 3)
+
+    for seed in [42, 43]:
+        mean_t, _ = _mean_rigid_t_after_burn(
+            dt_fs=dt_fs, n_waters=n_waters, seed=seed, steps=steps, burn=burn
+        )
+        assert jnp.isfinite(mean_t), f"seed={seed}: mean_t is NaN/Inf"
+        assert abs(mean_t - 300.0) < 50.0, f"seed={seed}: T={mean_t:.1f}K far from 300K (liveness check)"
+
+If _mean_rigid_t_after_burn uses gamma internally and does not expose it, use the
+default (gamma=1.0 ps^-1) and note: "gamma=1.0 ps^-1 (default). For gate-comparable
+conditions use gamma=10.0 ps^-1 directly via settle_langevin."
+Only modify _mean_rigid_t_after_burn's signature if it can be done without breaking
+any existing call sites.
+
+Gate: `uv run pytest tests/physics/test_settle_temperature_control.py::test_dt1fs_16water_smoke -v`
+PASS in < 60 seconds (CPU).
+"""
+reviewer_prompt = """
+Verify the L2 smoke test:
+1. test_dt1fs_16water_smoke exists in test_settle_temperature_control.py.
+2. Uses n_waters=16 (NOT n=2).
+3. Uses dt_fs=1.0, sim_ps=10.0, seeds=[42, 43].
+4. Asserts jnp.isfinite(mean_t) — no NaN.
+5. Asserts |mean_t - 300| < 50 K (loose liveness tolerance).
+6. Docstring says "L2 liveness gate only" and "not sufficient to validate stability."
+7. Marked @pytest.mark.slow.
+8. Run: `uv run pytest tests/physics/test_settle_temperature_control.py::test_dt1fs_16water_smoke -v` — PASS in < 60s.
+9. No regressions in existing test_settle_temperature_control.py tests.
+"""
+return_key = "1517"
+
+[[tracks]]
+id = "d"
+is_research = false
+
+[[tracks.items]]
+backlog_id = "1518"
+phase_name = "Track D — S1: Bathos sidecar p5_nvt_gate_dt1fs.bth.toml (#1518)"
+fixer_prompt = """
+task_id: 260603_p5_settle_correctness
+Project root: /home/marielle/projects/prolix
+
+Create scripts/experiments/p5_nvt_gate_dt1fs.bth.toml.
+
+RULES:
+- Do NOT modify scripts/experiments/p5_nvt_gate_diag.bth.toml (never-patch-a-running-sidecar)
+- Use [experiment] schema (NOT [benchmark])
+- Exactly one outcome must have is_residual = true (on the fail branch)
+- mode = "confirmation" — threshold pre-registered before run
+
+WRITE THIS FILE (scripts/experiments/p5_nvt_gate_dt1fs.bth.toml) with these fields:
+
+[experiment] section:
+  mode = "confirmation"
+  hypothesis = multi-line string: "dt=1.0 fs SETTLE+Langevin NVT at 895 TIP3P waters,
+    gamma=10 ps^-1, 5 seeds (42-46), 50 ps trajectory is thermally stable:
+    |mean T_rot - 300 K| <= 5 K. Pre-conditions: C3 AM conservation (678c9cb) and
+    PBC fix (5d65edb) both applied. Phase 5 paper claim (C3 AM architecture) is
+    independent of this gate result."
+
+[outcomes.pass] section:
+  condition = "ABS(mean_t_rot - 300.0) <= 5.0"
+  decision = "Remove dt=1.0 fs xfail from test_dt_sweep_16water_nvt and
+    test_temperature_dt1fs_near_target. Update settle_langevin docstring to lift cap to dt <= 1.0 fs."
+  reasoning = multi-line: "Threshold |mean T_rot - 300| <= 5 K anchored at ~4x the T_rot std
+    from job 15800837: at dt=0.5 fs, 5 seeds, T_rot ranged 296.6-301.9 K (std ~1.2 K).
+    4 * 1.2 K = 4.8 K ~ 5 K. This accommodates mild noise at dt=1.0 fs while detecting
+    genuine instability."
+
+[outcomes.fail] section (is_residual = true):
+  is_residual = true
+  condition = "ABS(mean_t_rot - 300.0) > 5.0 OR gate_pass == 0"
+  decision = "Retain all dt=1.0 fs xfails. Write sprint retrospective classifying failure
+    as A (thermostat instability), B (infrastructure regression), or C (near-miss / too tight)."
+  reasoning = multi-line: "T_rot deviation > 5 K at dt=1.0 fs indicates instability or
+    infrastructure regression. Retrospective must distinguish cases for next sprint."
+
+[result_schema] section:
+  mean_t_rot = "float"
+  gate_pass = "int"
+  n_waters = "int"
+  dt_fs = "float"
+  gamma_ps = "float"
+  n_seeds = "int"
+  job_id = "str"
+
+[metadata] section:
+  task_id = "260603_p5_settle_correctness"
+  phase = "Phase 5 Extended"
+  depends_on_commits = ["678c9cb", "5d65edb"]
+  prior_gate_job = "15800837"
+  campaign_slug = "p5-nvt-gate-dt1fs"
+
+After writing, verify it passes the bathos gate:
+  uv run bth check scripts/experiments/p5_nvt_gate_dt1fs.bth.toml
+
+Read the structured error JSON if it fails and fix the sidecar. Do NOT use --no-sidecar.
+
+Gate: `uv run bth check scripts/experiments/p5_nvt_gate_dt1fs.bth.toml` exits 0.
+"""
+reviewer_prompt = """
+Verify the bathos sidecar:
+1. File exists at scripts/experiments/p5_nvt_gate_dt1fs.bth.toml.
+2. Uses [experiment] schema (NOT [benchmark]).
+3. mode = "confirmation".
+4. Exactly one outcome has is_residual = true (on the fail branch).
+5. Pass threshold: ABS(mean_t_rot - 300.0) <= 5.0.
+6. reasoning field on pass outcome references job 15800837, 1.2 K std, 4x anchoring.
+7. [result_schema] includes mean_t_rot and gate_pass.
+8. [metadata] includes task_id and depends_on_commits with both 678c9cb and 5d65edb.
+9. Run: `uv run bth check scripts/experiments/p5_nvt_gate_dt1fs.bth.toml` — exits 0.
+10. EXISTING p5_nvt_gate_diag.bth.toml is UNCHANGED.
+"""
+return_key = "1518"
+
+[[tracks]]
+id = "e"
+is_research = false
+
+[[tracks.items]]
+backlog_id = "1519"
+phase_name = "Track E — S2: Submit 895-water dt=1.0 fs cluster gate (#1519)"
+fixer_prompt = """
+task_id: 260603_p5_settle_correctness
+Project root: /home/marielle/projects/prolix
+
+Submit the 895-water dt=1.0 fs cluster gate.
+
+PREREQUISITES (verify before proceeding):
+1. Tracks A, B, C, D committed on main branch.
+2. D1, D2, L2 pass locally.
+3. p5_nvt_gate_dt1fs.bth.toml passes `bth check`.
+
+STEPS:
+
+1. Create bathos campaign:
+   uv run bth campaign create "p5-nvt-gate-dt1fs" --mode confirmation \
+     --question "Does settle_langevin at dt=1.0 fs achieve T_rot within 5K of 300K at 895 waters?"
+   Record campaign_id.
+
+2. Check if p5_nvt_gate_diag.py accepts --dt-fs argument:
+   uv run python scripts/experiments/p5_nvt_gate_diag.py --help 2>&1 | grep dt
+   If yes: use --dt-fs 1.0 in the bth run invocation.
+   If no: copy p5_nvt_gate_diag.py to p5_nvt_gate_dt1fs.py and hard-code dt_fs=1.0.
+   Do NOT modify the original p5_nvt_gate_diag.py.
+
+3. L1 dry-run (local):
+   uv run python scripts/experiments/p5_nvt_gate_dt1fs.py --dry-run --out /dev/null
+   Must exit 0.
+
+4. Push to cluster (from main checkout, NOT worktree):
+   cd /home/marielle/projects/prolix && just -g cluster-push-workspace prolix engaging
+   OR use mcp__myxcel__push_project.
+   Verify on cluster: ssh engaging "cd ~/projects/prolix && git log --oneline -5"
+   Commits 678c9cb and 5d65edb must appear.
+
+5. Submit:
+   sbatch scripts/slurm/p5_nvt_gate_dt1fs.sbatch
+   OR create the sbatch if it doesn't exist, modeled on existing p5_nvt_gate_diag.sbatch,
+   with dt=1.0 fs, 895 waters, 5 seeds (42-46), gamma=10 ps^-1, 50 ps NVT.
+   The sbatch must source scripts/slurm/_bth_env.sh and use bth run with --campaign $CAMPAIGN_ID.
+
+6. Record job_id and log:
+   transduction_log(action="append_daily", task_id="260603_p5_settle_correctness",
+     payload={entry_date: "YYYY-MM-DD",
+       summary: "Submitted dt=1.0 fs gate, job <id>, campaign p5-nvt-gate-dt1fs (<campaign_id>)",
+       outcomes: ["Sidecar validated", "Campaign created", "Gate submitted async"],
+       next_actions: ["Check gate result when complete", "Proceed with C1/C2"]})
+
+Gate: gate job submitted, job ID and campaign ID recorded.
+(Gate pass/fail handled in Tracks H and I after results arrive.)
+"""
+reviewer_prompt = """
+Verify the gate submission:
+1. Campaign p5-nvt-gate-dt1fs exists (uv run bth campaign list).
+2. A dt=1.0 fs gate script exists (p5_nvt_gate_diag.py with --dt-fs arg, OR new p5_nvt_gate_dt1fs.py).
+3. The sbatch script includes: 895 waters, 5 seeds 42-46, dt=1.0 fs, gamma=10 ps^-1, 50 ps.
+4. The bth run invocation in the sbatch includes --campaign $CAMPAIGN_ID.
+5. Cluster has commits 678c9cb and 5d65edb: ssh engaging "cd ~/projects/prolix && git log --oneline -5".
+6. Job ID recorded in transduction_log or session notes.
+"""
+return_key = "1519"
+
+[[tracks]]
+id = "f"
+is_research = false
+worktree = true
+
+[[tracks.items]]
+backlog_id = "1520"
+phase_name = "Track F — C1: Tiling regression test at chunked_lj_energy formula level (#1520)"
+fixer_prompt = """
+task_id: 260603_p5_settle_correctness
+Project root: /home/marielle/projects/prolix
+
+Add a tiling regression test to tests/physics/test_optimization.py that exercises
+chunked_lj_energy with an exclusion count that produces a non-multiple _need,
+verifying the tiling hotfix prevents atom-drop.
+
+CONTEXT:
+The tiling formula in optimization.py (chunked_lj_energy):
+  _need = max(1024, int(excl_indices.shape[0]) + 128)
+  inner_tile_size = ((_need + tile_size - 1) // tile_size) * tile_size
+
+To get _need that requires rounding: need excl_count such that excl_count + 128 > 1024
+AND (excl_count + 128) % 128 != 0.
+  excl_count = 897 → _need = max(1024, 1025) = 1025 → rounded to 1152 ✓
+
+Add: def test_chunked_lj_tiling_alignment_regression()
+
+The test passes synthetic positions + large excl_indices to chunked_lj_energy and
+asserts the result is finite (no atom-drop NaN/Inf).
+
+First check the actual function signature of chunked_lj_energy in optimization.py.
+The signature observed is:
+  chunked_lj_energy(r, sigmas, epsilons, excl_indices, excl_scales, displacement_fn, cutoff=9.0, tile_size=128)
+
+def test_chunked_lj_tiling_alignment_regression():
+    '''Regression for tiling atom-drop bug: inner_tile_size must be tile_size multiple.
+
+    At excl_count=897 (excl_count+128=1025, not divisible by 128), the pre-fix code
+    used inner_tile_size=1025, silently dropped atoms in tile_reduction, and produced
+    10^62 K blowup at 895-water scale.
+    '''
+    from jax_md import space
+    displacement_fn, _ = space.free()
+
+    n_atoms = 8
+    key = jax.random.PRNGKey(0)
+    positions = jax.random.normal(key, (n_atoms, 3)) * 2.0
+    sigmas = jnp.ones(n_atoms) * 3.0
+    epsilons = jnp.ones(n_atoms) * 0.1
+
+    # excl_count=897 → _need=max(1024,1025)=1025 → NOT tile-aligned without the fix
+    excl_count = 897
+    excl_indices = jnp.zeros((excl_count, 2), dtype=jnp.int32)
+    excl_scales = jnp.ones((excl_count, 2))
+
+    result = chunked_lj_energy(positions, sigmas, epsilons, excl_indices, excl_scales, displacement_fn)
+    assert jnp.isfinite(result), f"NaN/Inf at excl_count={excl_count} (tiling regression)"
+
+    # Also verify aligned baseline (excl_count=896 → _need=1024, aligned)
+    excl_count_2 = 896
+    excl_indices_2 = jnp.zeros((excl_count_2, 2), dtype=jnp.int32)
+    excl_scales_2 = jnp.ones((excl_count_2, 2))
+    result_2 = chunked_lj_energy(positions, sigmas, epsilons, excl_indices_2, excl_scales_2, displacement_fn)
+    assert jnp.isfinite(result_2), f"NaN/Inf at excl_count={excl_count_2} (aligned baseline)"
+
+Adjust the call signature if the actual function signature differs.
+If chunked_lj_energy_nl exists, add a third assertion using it with the same excl_count=897 case.
+
+Gate: `uv run pytest tests/physics/test_optimization.py::test_chunked_lj_tiling_alignment_regression -v` PASS.
+"""
+reviewer_prompt = """
+Verify the tiling regression test:
+1. test_chunked_lj_tiling_alignment_regression exists in test_optimization.py.
+2. Calls chunked_lj_energy with excl_count=897 (non-multiple _need case).
+3. Asserts jnp.isfinite(result) for both excl_count=897 and aligned baseline.
+4. Docstring mentions "atom-drop bug" and "10^62 K blowup".
+5. Run: `uv run pytest tests/physics/test_optimization.py::test_chunked_lj_tiling_alignment_regression -v` — PASS.
+6. All pre-existing optimization tests still PASS.
+"""
+return_key = "1520"
+
+[[tracks]]
+id = "g"
+is_research = false
+worktree = true
+
+[[tracks.items]]
+backlog_id = "1521"
+phase_name = "Track G — C2: Parametrize dt xfail sweep [0.5, 1.0, 2.0] fs with n=16 (#1521)"
+fixer_prompt = """
+task_id: 260603_p5_settle_correctness
+Project root: /home/marielle/projects/prolix
+
+Add a parametrized dt sweep test to tests/physics/test_settle_temperature_control.py.
+
+IMPORTANT: Do NOT modify or remove existing tests test_temperature_dt1fs_near_target (line ~67,
+n=2) or test_temperature_dt2fs_near_target (line ~86, n=2). These use n=2 and are separate.
+
+Add a NEW test test_dt_sweep_16water_nvt using n_waters=16.
+
+Use this exact parametrize pattern (individual pytest.param with marks, not conditional pytest.xfail):
+
+DT_CASES = [
+    pytest.param(0.5, id="dt0.5fs"),
+    pytest.param(
+        1.0,
+        marks=pytest.mark.xfail(
+            strict=False,
+            reason="dt=1.0 fs pending cluster gate P5E-S2 (job p5-nvt-gate-dt1fs); remove xfail on gate_pass=1"
+        ),
+        id="dt1.0fs"
+    ),
+    pytest.param(
+        2.0,
+        marks=pytest.mark.xfail(
+            strict=False,
+            reason="dt=2.0 fs untested — no gate run; do NOT interpret xfail as expected-stable"
+        ),
+        id="dt2.0fs"
+    ),
+]
+
+@pytest.mark.slow
+@pytest.mark.parametrize("dt_fs", DT_CASES)
+def test_dt_sweep_16water_nvt(dt_fs: float) -> None:
+    '''Parametrized dt sweep: 16-water NVT, SETTLE+Langevin.
+
+    dt=0.5 fs: passes (no xfail). dt=1.0 fs: xfail until gate_pass=1.
+    dt=2.0 fs: PERMANENT xfail — no gate run planned; not evidence of stability.
+
+    NOTE: Existing n=2 tests (test_temperature_dt1fs_near_target, test_temperature_dt2fs_near_target)
+    are separate and not the gate evidence. Do not confuse them with this sweep.
+    '''
+    n_waters = 16
+    sim_ps = 10.0
+    steps = int(sim_ps * 1000.0 / dt_fs)
+    burn = max(100, steps // 3)
+    seed = 777
+    mean_t, _ = _mean_rigid_t_after_burn(dt_fs=dt_fs, n_waters=n_waters, seed=seed, steps=steps, burn=burn)
+    assert abs(mean_t - 300.0) < 15.0, f"dt={dt_fs}: T={mean_t:.1f}K, expected 300±15K"
+
+CRITICAL constraints:
+- dt=2.0 fs xfail reason must contain the exact string "do NOT interpret xfail as expected-stable"
+- The dt=2.0 fs xfail is PERMANENT — it must NOT be removed when the dt=1.0 fs gate passes
+- n_waters=16 (not 2)
+
+Gate: `uv run pytest tests/physics/test_settle_temperature_control.py::test_dt_sweep_16water_nvt -v`
+Shows: dt0.5fs PASSED, dt1.0fs XFAIL, dt2.0fs XFAIL.
+"""
+reviewer_prompt = """
+Verify the xfail parametrize sweep:
+1. test_dt_sweep_16water_nvt exists with n_waters=16 (NOT n=2).
+2. Three dt cases: 0.5 (no xfail), 1.0 (xfail removable), 2.0 (permanent xfail).
+3. dt=2.0 reason contains "do NOT interpret xfail as expected-stable".
+4. dt=1.0 reason mentions "P5E-S2" and "gate_pass=1".
+5. Marked @pytest.mark.slow.
+6. Existing n=2 tests (test_temperature_dt1fs_near_target, test_temperature_dt2fs_near_target) UNCHANGED.
+7. Run: `uv run pytest tests/physics/test_settle_temperature_control.py::test_dt_sweep_16water_nvt -v`
+   Must show: dt0.5fs PASSED, dt1.0fs XFAIL, dt2.0fs XFAIL (both xfails expected to xfail locally).
+"""
+return_key = "1521"
+
+[[tracks]]
+id = "h"
+is_research = false
+
+[[tracks.items]]
+backlog_id = "1525"
+phase_name = "Track H — G1: Gate-pass actions, remove xfail, lift docstring cap (#1525)"
+fixer_prompt = """
+task_id: 260603_p5_settle_correctness
+Project root: /home/marielle/projects/prolix
+
+PRECONDITION: Run only if gate_pass=1 from P5E-S2 (job p5-nvt-gate-dt1fs).
+Check first: uv run bth campaign review p5-nvt-gate-dt1fs
+If gate_pass=0, STOP and run Track I (G2) instead.
+
+IF gate_pass=1:
+
+1. Remove dt=1.0 fs xfail from test_dt_sweep_16water_nvt (test_settle_temperature_control.py):
+   Change pytest.param(1.0, marks=pytest.mark.xfail(...), id="dt1.0fs")
+   to:     pytest.param(1.0, id="dt1.0fs")
+   Leave dt=2.0 fs xfail UNCHANGED.
+
+2. Remove xfail from test_temperature_dt1fs_near_target (line ~58):
+   Remove the @pytest.mark.xfail decorator block (lines ~58-66).
+   The test itself stays; only the decorator is removed.
+
+3. Update settle_langevin docstring in src/prolix/physics/settle.py:
+   Search for "dt=0.5" or "0.5 fs" or "dt <= 0.5 fs" near the `settle_langevin` function
+   definition or its docstring (around line 930, based on CLAUDE.md reference).
+   Change the dt cap from "≤ 0.5 fs" to "≤ 1.0 fs" everywhere it appears in the docstring.
+   Also update the CLAUDE.md Phase 2 Section "Phase 2: Explicit Solvent Integration":
+   Change "dt=0.5,  # AKMA units (0.5 fs) — do NOT exceed this" to
+           "dt=1.0,  # AKMA units (1.0 fs) — do NOT exceed this (validated by gate P5E-S2)"
+   AND update "dt ≤ 0.5 fs (rigid body + thermostat feedback coupling)" in known limitations.
+
+4. Log:
+   transduction_log(action="append_daily", task_id="260603_p5_settle_correctness",
+     payload={entry_date: "YYYY-MM-DD",
+       summary: "Gate PASSED (T_rot <value>K). Lifted dt cap to 1.0 fs in docstrings. Removed dt=1.0 xfails.",
+       outcomes: ["gate_pass=1", "xfails removed for dt=1.0 fs", "settle.py and CLAUDE.md updated"],
+       next_actions: ["Merge to main", "Close sprint 36"]})
+
+Gate: `uv run pytest tests/physics/test_settle_temperature_control.py -v -m "not slow"` all pass;
+test_temperature_dt1fs_near_target has no xfail; test_dt_sweep_16water_nvt dt1.0fs has no xfail.
+"""
+reviewer_prompt = """
+Verify gate-pass actions (only if gate_pass=1):
+1. test_dt_sweep_16water_nvt dt1.0fs: NO xfail marker.
+2. test_temperature_dt1fs_near_target (n=2, ~line 67): NO @pytest.mark.xfail decorator.
+3. test_dt_sweep_16water_nvt dt2.0fs: xfail UNCHANGED (still permanent).
+4. settle.py settle_langevin docstring says dt ≤ 1.0 fs.
+5. CLAUDE.md dt constraint updated to 1.0 fs.
+6. Run: `uv run pytest tests/physics/test_settle_temperature_control.py -m "not slow" -v` — all pass.
+"""
+return_key = "1525"
+
+[[tracks]]
+id = "i"
+is_research = false
+
+[[tracks.items]]
+backlog_id = "1527"
+phase_name = "Track I — G2: Gate-fail retrospective (#1527)"
+fixer_prompt = """
+task_id: 260603_p5_settle_correctness
+Project root: /home/marielle/projects/prolix
+
+PRECONDITION: Run only if gate_pass=0 from P5E-S2 (job p5-nvt-gate-dt1fs).
+If gate_pass=1, run Track H (G1) instead. Do NOT run both.
+
+IF gate_pass=0:
+
+1. Pull the gate log:
+   ssh engaging "tail -200 ~/projects/prolix/outputs/logs/slurm/<job_id>.out"
+   Note: observed T_rot value, any NaN/Inf, which seeds failed.
+
+2. Classify the failure:
+   A) Thermostat-scale instability: T_rot drifts steadily away from 300K over 50 ps.
+   B) Infrastructure regression: T_rot is NaN or extreme from step 1 (suggests PBC/tiling bug).
+   C) Near-miss: T_rot is in [295, 310] K but fails the ≤5K threshold.
+
+3. Write retrospective at .praxia/docs/research/260611_p5e-gate-fail.md:
+   Sections: Gate result, Failure classification (A/B/C), Evidence, Root cause hypothesis,
+   Recommended next action:
+     A → Phase 5 dt constraint stands at ≤0.5 fs; no xfail removal; investigate AM fix at dt=1.0 fs
+     B → Debug infrastructure (tiling? PBC? branch sync?); resubmit with fix
+     C → Consider relaxing threshold to 8 K with updated justification; resubmit
+   Also state: "Phase 5 paper claim (C3 AM architecture, commit 678c9cb) is NOT affected. dt gate is bonus validation."
+
+4. Do NOT modify any xfails. Do NOT update settle.py docstring. Do NOT update CLAUDE.md.
+
+5. Log:
+   transduction_log(action="append_daily", task_id="260603_p5_settle_correctness",
+     payload={entry_date: "YYYY-MM-DD",
+       summary: "Gate FAILED. T_rot=<value>K. Classification: <A/B/C>. Retrospective written.",
+       outcomes: ["gate_pass=0", "xfails retained", "retrospective at .praxia/docs/research/260611_p5e-gate-fail.md"],
+       next_actions: ["Review retrospective", "Decide on threshold relaxation or re-investigation"]})
+
+Gate: Retrospective document at .praxia/docs/research/260611_p5e-gate-fail.md with failure
+classification and recommended next action.
+"""
+reviewer_prompt = """
+Verify gate-fail retrospective (only if gate_pass=0):
+1. Retrospective exists at .praxia/docs/research/260611_p5e-gate-fail.md.
+2. Contains: T_rot observed, failure classification (A/B/C), evidence, next action.
+3. States paper claim (C3 AM architecture) is NOT affected by gate failure.
+4. NO xfails removed from test_dt_sweep_16water_nvt.
+5. test_temperature_dt1fs_near_target xfail UNCHANGED.
+6. settle.py docstring UNCHANGED (still dt ≤ 0.5 fs).
+"""
+return_key = "1527"
+
+[orchestration]
+sequential = ["c", "d", "e", "h", "i"]
+concurrent = ["a", "b", "f", "g"]
