@@ -111,6 +111,12 @@ class EnsemblePlan:
         import jax
         import jax.numpy as jnp
 
+        from prolix.api.bundle_md import (
+            active_positions,
+            bonded_energy_fn_from_bundle,
+            displacement_fn_for_bundle,
+            masses_for_bundle,
+        )
         from prolix.api.observables import Trajectory
         from prolix.physics.settle import settle_langevin
 
@@ -126,27 +132,15 @@ class EnsemblePlan:
                 "v1.0 supports single-bundle execution only."
             )
 
-        # Construct a simple energy function from the bundle
-        # For v1.0: use a dummy potential (Lennard-Jones cutoff, no bonded terms)
-        def energy_fn(positions: Any, **kwargs: Any) -> Any:
-            # Minimal energy: just return zeros for now
-            # In production, this would use the bundle's force field
-            return jnp.array(0.0, dtype=positions.dtype)
+        energy_fn = bonded_energy_fn_from_bundle(bundle)
+        _displacement_fn, shift_fn = displacement_fn_for_bundle(bundle)
 
-        def shift_fn(r: Any, v: Any) -> Any:
-            # Minimum-image convention for free boundary
-            # (PBC would be handled if bundle.box is non-zero)
-            # shift_fn(r, v) -> r + v (position update)
-            return r + v
+        positions_init = active_positions(bundle)
+        masses = masses_for_bundle(bundle)
 
-        # Extract bundle properties
-        positions_init = bundle.positions[:bundle.n_atoms]
-        masses = jnp.ones_like(positions_init[:, 0])  # unit mass for now
-
-        # Create water indices if water molecules exist
         water_indices = None
-        if bundle.n_waters > 0:
-            water_indices = bundle.water_indices[:bundle.n_waters]
+        if int(bundle.n_waters) > 0:
+            water_indices = bundle.water_indices[: int(bundle.n_waters)]
 
         # Initialize integrator
         init_fn, apply_fn = settle_langevin(
@@ -154,7 +148,7 @@ class EnsemblePlan:
             shift_fn,
             dt=dt,
             kT=kT,
-            gamma=10.0,  # friction coefficient (ps^-1)
+            gamma=10.0,
             mass=masses,
             water_indices=water_indices,
             project_ou_momentum_rigid=True,

@@ -403,6 +403,32 @@ def _mask(n_real: int, bucket: int):
     )
 
 
+def _flatten_multi_term_torsions(
+    indices,
+    params,
+) -> tuple[object, object, int]:
+    """Flatten PhysicsSystem (N, T, P) torsion params to bundle (N*T, P) layout.
+
+    PhysicsSystem stores ``dihedral_params`` / ``improper_params`` as
+    ``(N_torsions, N_terms, P)``. MolecularBundle stores one row per term.
+    """
+    import jax.numpy as jnp
+
+    if indices is None or (hasattr(indices, "size") and indices.size == 0):
+        return indices, params, 0
+    indices = jnp.asarray(indices)
+    params = jnp.asarray(params)
+    if params.ndim == 2:
+        return indices, params, int(indices.shape[0])
+    if params.ndim == 3:
+        n_terms = int(params.shape[1])
+        flat_idx = jnp.repeat(indices, n_terms, axis=0)
+        flat_params = params.reshape(-1, params.shape[-1])
+        return flat_idx, flat_params, int(flat_idx.shape[0])
+    msg = f"expected params ndim 2 or 3, got {params.ndim}"
+    raise ValueError(msg)
+
+
 def make_bundle_from_system(
     system,
     boundary_condition: str = "periodic",
@@ -448,12 +474,12 @@ def make_bundle_from_system(
 
     dihs = _get("dihedrals")
     dp = _get("dihedral_params")
-    nd = 0 if dihs is None or dihs.size == 0 else dihs.shape[0]
+    dihs, dp, nd = _flatten_multi_term_torsions(dihs, dp)
     db = _next_bucket(max(nd, 1), DIHEDRAL_BUCKETS)
 
     imps = _get("impropers")
     imp_p = _get("improper_params")
-    ni = 0 if imps is None or imps.size == 0 else imps.shape[0]
+    imps, imp_p, ni = _flatten_multi_term_torsions(imps, imp_p)
 
     ub = _get("urey_bradley_bonds")
     ub_p = _get("urey_bradley_params")
@@ -533,17 +559,21 @@ def make_bundle_from_system(
         angle_params=_pad_2d(ap, ab, 2, dtype=jnp.float32),
         angle_mask=_mask(na, ab),
         n_angles=jnp.array(na, dtype=jnp.int32),
-        # proper dihedrals
-        # NOTE: dp is (N, N_terms, 3) in PhysicsSystem; _pad_2d handles size==0 path
+        # proper dihedrals (flattened multi-term)
         dihedral_idx=_pad_2d(dihs, db, 4, dtype=jnp.int32),
-        dihedral_params=_pad_2d(dp, db, 4, dtype=jnp.float32),
+        dihedral_params=_pad_2d(dp, db, 3, dtype=jnp.float32),
         dihedral_mask=_mask(nd, db),
         n_dihedrals=jnp.array(nd, dtype=jnp.int32),
-        # impropers (same shape caveat as dihedrals)
+        # impropers (flattened multi-term)
         improper_idx=_pad_2d(imps, db, 4, dtype=jnp.int32),
         improper_params=_pad_2d(imp_p, db, 3, dtype=jnp.float32),
         improper_mask=_mask(ni, db),
-        improper_is_periodic=jnp.array(False),
+        improper_is_periodic=jnp.array(
+            imp_p is not None
+            and getattr(imp_p, "size", 0) > 0
+            and int(jnp.asarray(imp_p).shape[-1]) == 3,
+            dtype=bool,
+        ),
         n_impropers=jnp.array(ni, dtype=jnp.int32),
         # Urey-Bradley
         urey_bradley_idx=_pad_2d(ub, ab, 3, dtype=jnp.int32),

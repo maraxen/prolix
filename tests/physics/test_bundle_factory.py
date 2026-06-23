@@ -98,3 +98,62 @@ def test_factory_sets_boundary_condition():
     assert bundle.shape_spec.boundary_condition == "periodic"
     bundle_free = make_bundle_from_system(sys, boundary_condition="free")
     assert bundle_free.shape_spec.boundary_condition == "free"
+
+
+def test_factory_flattens_multi_term_dihedrals():
+    """(N, T, 3) dihedral_params expand to N*T rows in the bundle."""
+    from prolix.typing import PhysicsSystem
+
+    n = 4
+    pos = jnp.zeros((n, 3))
+    ones_f = jnp.zeros(n)
+    ones_b = jnp.ones(n, dtype=bool)
+    zeros_b = jnp.zeros(n, dtype=bool)
+    elem = jnp.ones(n, dtype=jnp.int32)
+    empty = jnp.zeros((0, 2), dtype=jnp.int32)
+    empty_p = jnp.zeros((0, 2))
+    empty_m = jnp.zeros(0, dtype=bool)
+    empty_ang = jnp.zeros((0, 3), dtype=jnp.int32)
+
+    dihs = jnp.array([[0, 1, 2, 3], [0, 1, 2, 4]], dtype=jnp.int32)
+    # 2 dihedrals × 2 terms each
+    dih_p = jnp.array(
+        [
+            [[1.0, 0.0, 2.0], [2.0, jnp.pi, 3.0]],
+            [[1.0, 0.0, 1.5], [1.0, 0.0, 1.5]],
+        ],
+        dtype=jnp.float64,
+    )
+
+    sys = PhysicsSystem(
+        positions=pos,
+        charges=ones_f,
+        sigmas=ones_f,
+        epsilons=ones_f,
+        radii=ones_f,
+        scaled_radii=ones_f,
+        masses=ones_f,
+        element_ids=elem,
+        atom_mask=ones_b,
+        is_hydrogen=zeros_b,
+        is_backbone=zeros_b,
+        is_heavy=zeros_b,
+        protein_atom_mask=zeros_b,
+        water_atom_mask=zeros_b,
+        bonds=empty,
+        bond_params=empty_p,
+        bond_mask=empty_m,
+        angles=empty_ang,
+        angle_params=empty_p,
+        angle_mask=empty_m,
+        dihedrals=dihs,
+        dihedral_params=dih_p,
+        dihedral_mask=jnp.ones(2, dtype=bool),
+        impropers=jnp.zeros((0, 4), dtype=jnp.int32),
+        improper_params=jnp.zeros((0, 1, 3)),
+        improper_mask=jnp.zeros(0, dtype=bool),
+    )
+    bundle = make_bundle_from_system(sys, boundary_condition="free")
+    assert int(bundle.n_dihedrals) == 4
+    assert bundle.dihedral_params.shape[1] == 3
+    assert int(bundle.dihedral_mask.sum()) == 4
