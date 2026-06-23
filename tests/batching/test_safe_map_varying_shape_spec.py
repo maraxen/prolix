@@ -270,6 +270,32 @@ def test_vmap_with_coarsened_shape_spec():
 
 
 @pytest.mark.fast
+def test_v4_hlo_scoped_compile_once_same_shape_spec():
+    """V4-HLO scoped gate (backlog #266): one JIT compile per shape_spec.
+
+    Full hetero-batch V4-HLO (delta==1 across mixed BatchPlan ensemble) remains
+    blocked on multi-bundle dispatch (#1842). This scoped test asserts the
+    compile-once property at the single-dispatch / shape_spec level.
+    """
+    bundle_1 = _make_minimal_bundle(n_atoms=10)
+    bundle_2 = _make_minimal_bundle(n_atoms=12)
+    assert bundle_1.shape_spec == bundle_2.shape_spec
+
+    trace_count = [0]
+
+    def dispatch(bundle: MolecularBundle) -> Float:
+        trace_count[0] += 1
+        return jnp.sum(bundle.positions)
+
+    jitted = jax.jit(dispatch)
+    jitted(bundle_1)
+    jitted(bundle_2)
+    assert trace_count[0] == 1, (
+        f"V4-HLO scoped: expected 1 compile, got {trace_count[0]}"
+    )
+
+
+@pytest.mark.fast
 def test_vmap_different_bucket_sizes_retraces():
     """HP3 Expected-Case Test: JIT recompilation with different bucket indices.
 
