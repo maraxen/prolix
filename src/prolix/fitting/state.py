@@ -4,7 +4,6 @@ Holds trainable parameters, optimizer state, step counter, and RNG key.
 Designed as a pure pytree for use with jax.lax.scan.
 """
 
-from typing import Optional
 
 import equinox as eqx
 import jax

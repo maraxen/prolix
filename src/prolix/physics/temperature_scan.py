@@ -5,7 +5,6 @@ from __future__ import annotations
 import functools
 
 import jax
-import jax.numpy as jnp
 
 from prolix.physics.rigid_water_ke import rigid_tip3p_box_ke_kcal
 from prolix.simulate import BOLTZMANN_KCAL

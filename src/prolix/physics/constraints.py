@@ -30,13 +30,14 @@ Reference:
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Callable
 
 import equinox as eqx
 import jax
 import jax.numpy as jnp
-from jaxtyping import Array as ArrayType, Bool, Int
+from jaxtyping import Array as ArrayType
+from jaxtyping import Bool
 
 from prolix.typing import Array, WaterIndicesArray
 
@@ -494,7 +495,7 @@ def make_constraint(
   Returns:
       A ConstraintAlgorithm instance.
   """
-  from prolix.physics.settle import TIP3P_ROH, TIP3P_RHH
+  from prolix.physics.settle import TIP3P_RHH, TIP3P_ROH
 
   r_OH = r_OH or TIP3P_ROH
   r_HH = r_HH or TIP3P_RHH
@@ -521,7 +522,6 @@ def make_constraint(
 
   if len(parts) == 0:
     return NullConstraint()
-  elif len(parts) == 1:
+  if len(parts) == 1:
     return parts[0]
-  else:
-    return CompositeConstraint(constraints=tuple(parts))
+  return CompositeConstraint(constraints=tuple(parts))

@@ -56,30 +56,29 @@ for step_name in sequence.steps:
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, List, Optional
-import numpy as np
+from typing import Any
 
 import equinox as eqx
 import jax
 import jax.numpy as jnp
+import numpy as np
 from jaxtyping import Array as ArrayType
 from jaxtyping import PRNGKeyArray
 
 from prolix.physics.constraints import ConstraintDOFMask
-from prolix.typing import IntegratorParams, IntegratorState
 from prolix.physics.settle import (
-    _DEFAULT_CSVR_TAU_AKMA,
-    _csvr_rescale_momenta,
-    _langevin_step_a,
-    _langevin_step_b,
-    _langevin_step_o,
-    _langevin_step_o_constrained,
-    _langevin_step_o_free_dof,
-    settle_velocities,
-    settle_positions,
+  _DEFAULT_CSVR_TAU_AKMA,
+  _csvr_rescale_momenta,
+  _langevin_step_a,
+  _langevin_step_o,
+  _langevin_step_o_constrained,
+  _langevin_step_o_free_dof,
+  settle_positions,
+  settle_velocities,
 )
-from prolix.typing import Array, WaterIndicesArray
+from prolix.typing import Array, IntegratorParams, IntegratorState
 
 
 def _csvr_compute_lambda_jit_safe(
@@ -349,7 +348,7 @@ class A_Step(Step):
       fraction: Fraction of timestep (1.0 for full step).
   """
   fraction: float = eqx.field(static=True)
-  shift_fn: Optional[Callable] = eqx.field(static=True)
+  shift_fn: Callable | None = eqx.field(static=True)
 
   def __init__(self, fraction: float = 1.0, shift_fn: Callable | None = None):
     """Initialize A_Step.
@@ -402,7 +401,7 @@ class SETTLE_Velocity_Step(Step):
       water_indices: Optional water indices. If None, must be provided in apply params.
       n_iters: Number of RATTLE iterations (default 10).
   """
-  water_indices: Optional[tuple[tuple[int, ...], ...]] = eqx.field(static=True)
+  water_indices: tuple[tuple[int, ...], ...] | None = eqx.field(static=True)
   n_iters: int = eqx.field(static=True)
   mass_oxygen: float = eqx.field(static=True)
   mass_hydrogen: float = eqx.field(static=True)
@@ -613,7 +612,6 @@ class NHC_Step(Step):
 
   def __init__(self):
     """Initialize NHC_Step."""
-    pass
 
   def apply(
       self,
@@ -721,15 +719,15 @@ class StepSequence:
   """
 
   name: str
-  steps: List[str]
-  parameters: Dict[str, Any]
-  constraint_dofs: Optional[ConstraintDOFMask] = None
+  steps: list[str]
+  parameters: dict[str, Any]
+  constraint_dofs: ConstraintDOFMask | None = None
   description: str = ""
 
 
 # Step sequences registry: integrator variants and their step compositions
 # Populated after step_registry is defined and validated
-step_sequences: Dict[str, StepSequence] = {}
+step_sequences: dict[str, StepSequence] = {}
 
 
 def _initialize_step_sequences() -> None:

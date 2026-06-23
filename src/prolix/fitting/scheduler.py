@@ -7,8 +7,7 @@ Uses JAX random key for reproducibility.
 from typing import NamedTuple
 
 import jax
-import jax.numpy as jnp
-from jaxtyping import Array, Float, Int
+from jaxtyping import Array, Float
 
 
 class ConformerBatch(NamedTuple):

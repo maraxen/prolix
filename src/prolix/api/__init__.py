@@ -13,13 +13,13 @@ Exports:
 
 from prolix.api.ensemble_plan import EnsemblePlan
 from prolix.api.observables import (
-    Observable,
-    Trajectory,
-    Temperature,
+    RMSD,
     Energy,
     KineticEnergy,
-    RMSD,
+    Observable,
     Pressure,
+    Temperature,
+    Trajectory,
 )
 
 __all__ = [

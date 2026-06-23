@@ -1,14 +1,18 @@
 from __future__ import annotations
 
-import equinox as eqx
 import jax
 import jax.numpy as jnp
 from jaxtyping import Array as ArrayType
 
-from prolix.physics.step_system import Step, IntegratorState
-from prolix.typing import IntegratorParams
+from prolix.physics.step_system import IntegratorState, Step
 from prolix.physics.virtual_sites import reconstruct_virtual_sites
-from prolix.typing import VirtualSiteDef, VirtualSiteParamsPacked, VirtualSiteParams
+from prolix.typing import (
+  IntegratorParams,
+  VirtualSiteDef,
+  VirtualSiteParams,
+  VirtualSiteParamsPacked,
+)
+
 
 class VirtualSiteReconstructionStep(Step):
   """Virtual site position reconstruction step."""
@@ -60,7 +64,7 @@ def redistribute_forces(
       jnp.stack([p1_idx, p2_idx, p3_idx]),
     )
 
-  # For now, let's implement the simpler version: 
+  # For now, let's implement the simpler version:
   # redistribute forces from vs to parents based on origin_weights
   # This is already a massive improvement over zeroing them.
   

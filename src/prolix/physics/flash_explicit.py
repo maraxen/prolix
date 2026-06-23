@@ -23,12 +23,12 @@ from proxide.physics.constants import COULOMB_CONSTANT
 
 from prolix.padding import PaddedSystem
 from prolix.physics import explicit_corrections, pbc
-from prolix.physics.electrostatic_methods import ElectrostaticMethod
-from prolix.physics.pme import make_spme_energy_fn, spme_background_energy
 from prolix.physics.efa_coulomb import (
     efa_lebedev_coulomb_energy,
     efa_lebedev_params,
 )
+from prolix.physics.electrostatic_methods import ElectrostaticMethod
+from prolix.physics.pme import make_spme_energy_fn, spme_background_energy
 from prolix.physics.rff_coulomb import (
     efa_exclusion_correction,
     efa_short_range_erfc_energy,

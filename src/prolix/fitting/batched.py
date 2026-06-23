@@ -4,7 +4,6 @@ Provides padded containers for stacking multiple molecules' parameters and
 topology into a single batch, with per-molecule masks indicating real entries.
 """
 
-from typing import Tuple
 
 import equinox as eqx
 import jax.numpy as jnp
@@ -59,7 +58,7 @@ class BondedTopologyBundle(eqx.Module):
 def stack_molecules(
     params_list: list[BondedParams],
     topology_list: list[BondedTopology],
-) -> Tuple[BondedParamsBundle, BondedTopologyBundle]:
+) -> tuple[BondedParamsBundle, BondedTopologyBundle]:
     """Stack multiple molecules' parameters and topology into batched containers.
 
     Pads each per-molecule array to the max size across the batch. Padding rows

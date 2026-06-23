@@ -6,8 +6,10 @@ Implements instantaneous pressure computation used in barostat algorithms.
 from __future__ import annotations
 
 from typing import Any
+
 import jax.numpy as jnp
 from jax_md import util
+
 from prolix.physics import explicit_corrections
 
 Array = util.Array
@@ -48,15 +50,15 @@ def instantaneous_pressure_akma(
 
   p_tail = explicit_corrections.lj_dispersion_tail_pressure(
       physics_system.box_size,
-      jnp.maximum(params.params['sigmas'], 1e-6),
-      params.params['epsilons'],
+      jnp.maximum(params.params["sigmas"], 1e-6),
+      params.params["epsilons"],
       cutoff_distance,
       physics_system.atom_mask,
   )
   p_imp = explicit_corrections.lj_dispersion_tail_impulsive_pressure(
       physics_system.box_size,
-      jnp.maximum(params.params['sigmas'], 1e-6),
-      params.params['epsilons'],
+      jnp.maximum(params.params["sigmas"], 1e-6),
+      params.params["epsilons"],
       cutoff_distance,
       physics_system.atom_mask,
   )

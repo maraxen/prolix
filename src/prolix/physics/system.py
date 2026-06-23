@@ -4,7 +4,6 @@ from collections.abc import Callable
 from typing import Any
 
 import equinox as eqx
-import jax
 import jax.numpy as jnp
 from jax_md import space
 from jaxtyping import Array
@@ -12,17 +11,17 @@ from jaxtyping import Array
 from prolix.physics import bonded, cmap, explicit_corrections, generalized_born, pme
 from prolix.physics.bonded import compute_dihedral_angles
 from prolix.types.bundles import (
-    MolecularBundle,
-    MolecularShapeSpec,
-    _bucket_idx,
-    ATOM_BUCKETS,
-    BOND_BUCKETS,
-    ANGLE_BUCKETS,
-    DIHEDRAL_BUCKETS,
-    WATER_BUCKETS,
-    EXCL_BUCKETS,
-    CMAP_BUCKETS,
-    EXCEPTION_BUCKETS,
+  ANGLE_BUCKETS,
+  ATOM_BUCKETS,
+  BOND_BUCKETS,
+  CMAP_BUCKETS,
+  DIHEDRAL_BUCKETS,
+  EXCEPTION_BUCKETS,
+  EXCL_BUCKETS,
+  WATER_BUCKETS,
+  MolecularBundle,
+  MolecularShapeSpec,
+  _bucket_idx,
 )
 from prolix.typing import DifferentiableParams, PhysicsSystem
 
@@ -365,18 +364,6 @@ def make_energy_fn_pure(
 # ---------------------------------------------------------------------------
 # Phase 1 migration: PhysicsSystem -> MolecularBundle factory
 # ---------------------------------------------------------------------------
-from prolix.types.bundles import (  # noqa: E402 — local import after module body
-    ANGLE_BUCKETS,
-    ATOM_BUCKETS,
-    BOND_BUCKETS,
-    CMAP_BUCKETS,
-    DIHEDRAL_BUCKETS,
-    EXCL_BUCKETS,
-    EXCEPTION_BUCKETS,
-    WATER_BUCKETS,
-    MolecularBundle,
-    MolecularShapeSpec,
-)
 
 
 def _next_bucket(n: int, buckets: tuple) -> int:
@@ -419,7 +406,7 @@ def _mask(n_real: int, bucket: int):
 def make_bundle_from_system(
     system,
     boundary_condition: str = "periodic",
-) -> "MolecularBundle":
+) -> MolecularBundle:
     """Convert a PhysicsSystem to a MolecularBundle with bucketed padding.
 
     All Optional fields are resolved; None becomes zeros. This factory is

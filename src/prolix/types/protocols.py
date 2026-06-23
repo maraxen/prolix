@@ -12,7 +12,9 @@ Key design principles:
 """
 
 from typing import Protocol, runtime_checkable
+
 from jaxtyping import Array, Float
+
 from prolix.types.bundles import MolecularBundle
 from prolix.types.integrators import IntegratorState
 

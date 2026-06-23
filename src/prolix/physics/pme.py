@@ -7,8 +7,9 @@ from typing import NamedTuple
 
 import jax
 import jax.numpy as jnp
+
 # kcal*A/(mol*e^2)
-COULOMB_CONSTANT = 332.0637 
+COULOMB_CONSTANT = 332.0637
 
 # ===========================================================================
 # Configuration
@@ -58,8 +59,8 @@ def _factorizable(n: int) -> bool:
 
 
 def compute_pme_grid_dims(
-    box_size: jnp.ndarray, 
-    grid_spacing: float = 1.0, 
+    box_size: jnp.ndarray,
+    grid_spacing: float = 1.0,
     min_dim: int = 8
 ) -> tuple[int, int, int]:
     """Determine FFT grid dimensions based on box size and target spacing."""
@@ -126,7 +127,7 @@ def influence_function(grid_dims: tuple[int, int, int], box_size: jnp.ndarray, a
 
 def _bspline_modulation(freq_frac: jnp.ndarray, K: int, order: int) -> jnp.ndarray:
     if order == 4: m_vals = jnp.array([1.0/6.0, 4.0/6.0, 1.0/6.0, 0.0])
-    else: raise NotImplementedError()
+    else: raise NotImplementedError
     k_indices = jnp.arange(order, dtype=jnp.float32)
     phases = jnp.exp(2j * jnp.pi * freq_frac[:, None] * k_indices[None, :])
     return jnp.maximum(jnp.abs(jnp.sum(m_vals[None, :] * phases, axis=-1)), jnp.float32(1e-6))

@@ -7,7 +7,8 @@ and TrainMetrics (step-wise metrics collection).
 from __future__ import annotations
 
 import dataclasses
-from typing import TYPE_CHECKING, Any, Callable, NamedTuple
+from collections.abc import Callable
+from typing import TYPE_CHECKING, Any
 
 import equinox as eqx
 import jax
@@ -15,9 +16,9 @@ import jax.numpy as jnp
 import optax
 from jaxtyping import Array, Float
 
-from prolix.fitting.loss import bonded_loss, default_sigma
-from prolix.fitting.topology import BondedTopology
 from prolix.fitting.bundles import TrainState
+from prolix.fitting.loss import bonded_loss
+from prolix.fitting.topology import BondedTopology
 
 if TYPE_CHECKING:
     from prolix.fitting.bundles import BatchedFittingBundle
@@ -26,7 +27,7 @@ if TYPE_CHECKING:
 # Sentinel wrapper to make BatchPlan hashable by identity
 class _BatchPlanWrapper:
     """Wrapper to make BatchPlan hashable by identity (id-based) for use with eqx.filter_jit."""
-    __slots__ = ('_plan', '_id')
+    __slots__ = ("_id", "_plan")
 
     def __init__(self, plan):
         self._plan = plan
@@ -41,7 +42,7 @@ class _BatchPlanWrapper:
         return self._id == other._id
 
     def __getattr__(self, name):
-        if name in ('_plan', '_id'):
+        if name in ("_plan", "_id"):
             return object.__getattribute__(self, name)
         return getattr(self._plan, name)
 

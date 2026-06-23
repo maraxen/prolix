@@ -12,7 +12,7 @@ Type annotations use jaxtyping (Float, Int, Bool, Array) without runtime
 from __future__ import annotations
 
 import jax.numpy as jnp
-from jaxtyping import Array, Bool, Float, Int
+from jaxtyping import Array, Bool, Float
 
 from prolix.fitting.bundles import ConformerBundle, FittingBundle
 from prolix.fitting.params import BondedParams
@@ -22,11 +22,11 @@ from prolix.fitting.topology import BondedTopology
 def build_fitting_bundle(
     positions_all: Float[Array, "N_conf n_atoms 3"] | Float[Array, "n_atoms 3"],
     forces_all: Float[Array, "N_conf n_atoms 3"] | Float[Array, "n_atoms 3"],
-    energies_all: Float[Array, "N_conf"] | Float[Array, ""],
+    energies_all: Float[Array, N_conf] | Float[Array, ""],
     params: BondedParams,
     topology: BondedTopology,
     *,
-    atom_mask: Bool[Array, "n_atoms"] | None = None,
+    atom_mask: Bool[Array, n_atoms] | None = None,
     box: Float[Array, "3 3"] | None = None,
     n_conf_real: int | None = None,
 ) -> FittingBundle:
@@ -122,20 +122,18 @@ def build_fitting_bundle(
     # atom_mask: default to all-ones (no padding)
     if atom_mask is None:
         atom_mask = jnp.ones(n_atoms, dtype=jnp.bool_)
-    else:
-        if atom_mask.shape[0] != n_atoms:
-            raise ValueError(
-                f"atom_mask.shape[0] ({atom_mask.shape[0]}) must equal n_atoms ({n_atoms})"
-            )
+    elif atom_mask.shape[0] != n_atoms:
+        raise ValueError(
+            f"atom_mask.shape[0] ({atom_mask.shape[0]}) must equal n_atoms ({n_atoms})"
+        )
 
     # box: default to zero matrix (vacuum sentinel)
     if box is None:
         box = jnp.zeros((3, 3), dtype=jnp.float32)
-    else:
-        if box.shape != (3, 3):
-            raise ValueError(
-                f"box must have shape (3, 3), got shape {box.shape}"
-            )
+    elif box.shape != (3, 3):
+        raise ValueError(
+            f"box must have shape (3, 3), got shape {box.shape}"
+        )
 
     # n_conf_real: default to all conformers are real
     if n_conf_real is None:

@@ -1,10 +1,11 @@
+import functools
+from collections.abc import Callable
+from typing import TypeVar
+
 import jax
 import jax.numpy as jnp
-import equinox as eqx
-import functools
-from typing import Any, Callable, TypeVar, Tuple
-from prolix.typing import PhysicsSystem, DifferentiableParams
-from .tiling import tile_reduction, tile_reduction_nl, pad_to_tile
+
+from .tiling import pad_to_tile, tile_reduction, tile_reduction_nl
 
 T = TypeVar("T")
 

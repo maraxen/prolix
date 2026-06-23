@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import dataclasses
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -18,6 +17,7 @@ if TYPE_CHECKING:
   from collections.abc import Callable
 
   from proxide.core.containers import Protein
+
   from prolix.typing import SystemParams
 
 Array = util.Array
@@ -52,7 +52,7 @@ class SimulationSpec:
     return int(self.total_time_ns * 1000.0 / self.dt)
 
 
-from prolix.typing import NPTState, NVTLangevinState
+from prolix.typing import NVTLangevinState
 
 
 def rattle_langevin(
@@ -116,7 +116,7 @@ def rattle_langevin(
     # --- SHAKE (Position Constraint) ---
     if constraints is not None:
       pairs, lengths = constraints
-      from prolix.physics.constraints import project_positions, project_momenta
+      from prolix.physics.constraints import project_momenta, project_positions
 
       position = project_positions(position, pairs, lengths, state.mass, shift_fn)
 

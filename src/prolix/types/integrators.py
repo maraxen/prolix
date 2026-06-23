@@ -4,6 +4,7 @@ Provides jax.export-compatible integrator state hierarchy with no Optional field
 plus frozen configuration dataclass for static parameters.
 """
 from __future__ import annotations
+
 from dataclasses import dataclass
 from typing import Literal
 
@@ -31,7 +32,6 @@ class LangevinState(IntegratorState):
     No additional fields beyond base IntegratorState.
     All state needed is in the parent class.
     """
-    pass
 
 
 class CSVRState(IntegratorState):
@@ -48,8 +48,8 @@ class NHCState(IntegratorState):
     Adds M-length chain degree-of-freedom vectors for extended-system
     thermostat control.
     """
-    nhc_xi:  Float[Array, "M"]   # chain positions
-    nhc_vxi: Float[Array, "M"]   # chain velocities
+    nhc_xi:  Float[Array, M]   # chain positions
+    nhc_vxi: Float[Array, M]   # chain velocities
 
 
 @dataclass(frozen=True)

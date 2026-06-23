@@ -48,8 +48,8 @@ class ConformerBundle(eqx.Module):
 
     positions: Float[Array, "N_conf n_atoms 3"]
     forces_ref: Float[Array, "N_conf n_atoms 3"]
-    energies_ref: Float[Array, "N_conf"]
-    atom_mask: Bool[Array, "n_atoms"]
+    energies_ref: Float[Array, N_conf]
+    atom_mask: Bool[Array, n_atoms]
     n_conf: int = eqx.field(static=True)
     n_atoms: int = eqx.field(static=True)
 
@@ -109,8 +109,8 @@ class BatchedConformerBundle(eqx.Module):
     forces_ref: Float[Array, "B max_n_conf max_n_atoms 3"]
     energies_ref: Float[Array, "B max_n_conf"]
     atom_mask: Bool[Array, "B max_n_atoms"]
-    n_conf_real: Int[Array, "B"]
-    n_atoms_real: Int[Array, "B"]
+    n_conf_real: Int[Array, B]
+    n_atoms_real: Int[Array, B]
     n_mols: int = eqx.field(static=True)
     max_n_atoms: int = eqx.field(static=True)
     max_n_conf: int = eqx.field(static=True)
@@ -137,13 +137,13 @@ class BatchedFittingBundle(eqx.Module):
     """
 
     conformers_batched: BatchedConformerBundle
-    params_batched: "BondedParamsBundle"
-    topology_batched: "BondedTopologyBundle"
+    params_batched: BondedParamsBundle
+    topology_batched: BondedTopologyBundle
     box_batched: Float[Array, "B 3 3"]
     n_mols_real: int = eqx.field(static=True)
 
     @staticmethod
-    def stack(bundles: list[FittingBundle]) -> "BatchedFittingBundle":
+    def stack(bundles: list[FittingBundle]) -> BatchedFittingBundle:
         """Typed constructor: stack N FittingBundle instances into batched form.
 
         Calls existing stack_molecules() internally to batch parameters and topology.

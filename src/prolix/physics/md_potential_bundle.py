@@ -20,8 +20,8 @@ from typing import Any, Literal
 
 import jax
 import jax.numpy as jnp
-from jax import Array
-from jax import ShapeDtypeStruct
+from jax import Array, ShapeDtypeStruct
+
 
 @dataclass(frozen=True)
 class EnergyForceBundle:

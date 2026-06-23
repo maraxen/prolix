@@ -80,12 +80,11 @@ def box_volume(box: Array) -> Array:
   if box.ndim == 1:
     # Orthogonal box: volume = Lx * Ly * Lz
     return jnp.prod(box)
-  elif box.ndim == 2:
+  if box.ndim == 2:
     # Triclinic box: volume = |det(box vectors)|
     return jnp.abs(jnp.linalg.det(box))
-  else:
-    msg = f"box must be 1D or 2D, got shape {box.shape}"
-    raise ValueError(msg)
+  msg = f"box must be 1D or 2D, got shape {box.shape}"
+  raise ValueError(msg)
 
 
 def isotropic_box_scale(box: Array, scaling_factor: Array) -> Array:

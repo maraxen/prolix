@@ -10,7 +10,6 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 import jax.numpy as jnp
-import numpy as np
 from flax import struct
 from proxide.core.containers import Protein
 
@@ -204,7 +203,7 @@ def merge_solvated_topology(
     exc_chargeprods = jnp.zeros((0,), dtype=jnp.float32)
 
     # Propagate protein exception data if available
-    if (hasattr(protein, 'exception_pairs') and protein.exception_pairs is not None
+    if (hasattr(protein, "exception_pairs") and protein.exception_pairs is not None
             and len(protein.exception_pairs) > 0):
       exc_pairs = jnp.asarray(protein.exception_pairs, dtype=jnp.int32)
       exc_sigmas = jnp.asarray(protein.exception_sigmas, dtype=jnp.float32)

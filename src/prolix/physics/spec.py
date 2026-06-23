@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-import jax.numpy as jnp
+
 from jax_md import util
 
 Array = util.Array

@@ -120,12 +120,12 @@ class MolecularBundle(eqx.Module):
 
     # Per-atom arrays (padded to ATOM_BUCKETS)
     positions: Float[Array, "N 3"]
-    charges: Float[Array, "N"]
-    sigmas: Float[Array, "N"]
-    epsilons: Float[Array, "N"]
-    radii: Float[Array, "N"]
-    scaled_radii: Float[Array, "N"]
-    atom_mask: Bool[Array, "N"]
+    charges: Float[Array, N]
+    sigmas: Float[Array, N]
+    epsilons: Float[Array, N]
+    radii: Float[Array, N]
+    scaled_radii: Float[Array, N]
+    atom_mask: Bool[Array, N]
     n_atoms: Int[Array, ""]  # Real count (derived from atom_mask.sum())
 
     # Periodic boundary condition box (zero array when has_pbc=False)
@@ -134,58 +134,58 @@ class MolecularBundle(eqx.Module):
     # Bond terms (padded to BOND_BUCKETS)
     bond_idx: Int[Array, "B 2"]
     bond_params: Float[Array, "B 2"]
-    bond_mask: Bool[Array, "B"]
+    bond_mask: Bool[Array, B]
     n_bonds: Int[Array, ""]  # Real count (derived from bond_mask.sum())
 
     # Angle terms (padded to ANGLE_BUCKETS)
     angle_idx: Int[Array, "A 3"]
     angle_params: Float[Array, "A 2"]
-    angle_mask: Bool[Array, "A"]
+    angle_mask: Bool[Array, A]
     n_angles: Int[Array, ""]  # Real count
 
     # Proper dihedral terms (padded to DIHEDRAL_BUCKETS)
     dihedral_idx: Int[Array, "D 4"]
     dihedral_params: Float[Array, "D 4"]
-    dihedral_mask: Bool[Array, "D"]
+    dihedral_mask: Bool[Array, D]
     n_dihedrals: Int[Array, ""]  # Real count
 
     # Improper dihedral terms (padded to DIHEDRAL_BUCKETS)
     improper_idx: Int[Array, "I 4"]
     improper_params: Float[Array, "I 3"]
-    improper_mask: Bool[Array, "I"]
+    improper_mask: Bool[Array, I]
     improper_is_periodic: Bool[Array, ""]
     n_impropers: Int[Array, ""]  # Real count
 
     # Urey-Bradley 1-3 interaction terms (padded to ANGLE_BUCKETS)
     urey_bradley_idx: Int[Array, "U 3"]
     urey_bradley_params: Float[Array, "U 2"]
-    urey_bradley_mask: Bool[Array, "U"]
+    urey_bradley_mask: Bool[Array, U]
     n_urey_bradley: Int[Array, ""]  # Real count
 
     # CMAP cross-term tables (padded to CMAP_BUCKETS)
     cmap_torsion_idx: Int[Array, "CM 8"]
     cmap_energy_grids: Float[Array, "CM G G"]
-    cmap_mask: Bool[Array, "CM"]
+    cmap_mask: Bool[Array, CM]
     n_cmap: Int[Array, ""]  # Real count
 
     # SETTLE rigid water molecules (padded to WATER_BUCKETS)
     water_indices: Int[Array, "W 3"]
-    water_mask: Bool[Array, "W"]
+    water_mask: Bool[Array, W]
     n_waters: Int[Array, ""]  # Real count
 
     # Nonbonded exclusion pairs (padded to EXCL_BUCKETS)
     excl_indices: Int[Array, "E 2"]
-    excl_scales_vdw: Float[Array, "E"]
-    excl_scales_elec: Float[Array, "E"]
-    excl_mask: Bool[Array, "E"]
+    excl_scales_vdw: Float[Array, E]
+    excl_scales_elec: Float[Array, E]
+    excl_mask: Bool[Array, E]
     n_excl: Int[Array, ""]  # Real count
 
     # 1-4 exception pairs (special LJ/Coulomb scaling, padded to EXCEPTION_BUCKETS)
     exception_pairs: Int[Array, "X 2"]
-    exception_sigmas: Float[Array, "X"]
-    exception_epsilons: Float[Array, "X"]
-    exception_chargeprods: Float[Array, "X"]
-    exception_mask: Bool[Array, "X"]
+    exception_sigmas: Float[Array, X]
+    exception_epsilons: Float[Array, X]
+    exception_chargeprods: Float[Array, X]
+    exception_mask: Bool[Array, X]
     n_exception_pairs: Int[Array, ""]  # Real count
 
     # Nonbonded computation parameters
@@ -200,7 +200,7 @@ class MolecularBundle(eqx.Module):
         cls,
         path: str,
         forcefield: str = "amber14",
-    ) -> "MolecularBundle":
+    ) -> MolecularBundle:
         """Load a PDB file and build a MolecularBundle with AMBER14 parameters.
 
         Requires parmed. Positions in Angstrom (AKMA); masses in AKMA mass units.
@@ -252,7 +252,7 @@ class MolecularBundle(eqx.Module):
         cls,
         d: dict,
         boundary_condition: str = "periodic",
-    ) -> "MolecularBundle":
+    ) -> MolecularBundle:
         """Build MolecularBundle from a legacy system dict.
 
         Emits DeprecationWarning. Use MolecularBundle.from_pdb for new code.
@@ -302,9 +302,7 @@ def _parmed_struct_to_system(struct):
     """
     from types import SimpleNamespace
 
-    import numpy as np
 
-    import jax.numpy as jnp
 
     # Extract positions (Angstrom)
     positions = jnp.asarray(struct.coordinates, dtype=jnp.float32)

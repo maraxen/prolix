@@ -584,13 +584,12 @@ def improper_forces_analytical(
         return _improper_forces_periodic(
             positions, improper_indices, improper_params, displacement_fn, improper_mask
         )
-    elif param_shape == 2:
+    if param_shape == 2:
         # Harmonic improper
         return _improper_forces_harmonic(
             positions, improper_indices, improper_params, displacement_fn, improper_mask
         )
-    else:
-        raise ValueError(f"Improper params shape[-1] must be 2 or 3, got {param_shape}")
+    raise ValueError(f"Improper params shape[-1] must be 2 or 3, got {param_shape}")
 
 
 def _improper_forces_periodic(
@@ -696,12 +695,12 @@ def urey_bradley_forces_analytical(
 
 
 def bond_forces(
-    positions: "Array",
-    bond_indices: "Array",
-    bond_params: "Array",
-    bond_mask: "Array",
+    positions: Array,
+    bond_indices: Array,
+    bond_params: Array,
+    bond_mask: Array,
     displacement_fn,
-) -> "Array":
+) -> Array:
     """Public API: harmonic bond forces with (positions, idx, params, mask, disp_fn) signature.
 
     Thin adapter over bond_forces_analytical with mask before displacement_fn.

@@ -14,7 +14,6 @@ from prolix.typing import (
     AngleParams,
     BondIndices,
     BondParams,
-    DihedralParams,
 )
 
 
@@ -174,15 +173,14 @@ def make_harmonic_improper_energy_fn(
             phi = compute_dihedral_angles(r, improper_indices, displacement_fn)
             phi = phi[:, jnp.newaxis]
             return jnp.sum(k * (1.0 + jnp.cos(n * phi - phase)))
-        else:
-            # Harmonic-style impropers: [k, phi0]
-            k = improper_params[:, :, 0]
-            phi0 = improper_params[:, :, 1]
-            phi = compute_dihedral_angles(r, improper_indices, displacement_fn)
-            phi = phi[:, jnp.newaxis]
-            diff = phi - phi0
-            diff = (diff + jnp.pi) % (2 * jnp.pi) - jnp.pi
-            return jnp.sum(k * diff**2)
+        # Harmonic-style impropers: [k, phi0]
+        k = improper_params[:, :, 0]
+        phi0 = improper_params[:, :, 1]
+        phi = compute_dihedral_angles(r, improper_indices, displacement_fn)
+        phi = phi[:, jnp.newaxis]
+        diff = phi - phi0
+        diff = (diff + jnp.pi) % (2 * jnp.pi) - jnp.pi
+        return jnp.sum(k * diff**2)
 
     return energy_fn
 

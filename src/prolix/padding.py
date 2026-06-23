@@ -4,15 +4,16 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-import equinox as eqx
 import jax
 import jax.numpy as jnp
 import numpy as np
 from jax_md import util
+
 from prolix.typing import PhysicsSystem
 
 if TYPE_CHECKING:
   from proxide.core.containers import Protein
+
   from prolix.physics.topology_merger import MergedTopology
 
 Array = util.Array

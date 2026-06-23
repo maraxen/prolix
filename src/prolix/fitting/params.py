@@ -4,7 +4,6 @@ BondedParams is an Equinox Module holding per-molecule bonded parameters
 (force constants and equilibrium geometry). All fields are trainable by default.
 """
 
-from typing import Optional
 
 import equinox as eqx
 import jax

@@ -19,15 +19,18 @@ from prolix.fitting.batched import (
     stack_molecules,
     unbatch_params,
 )
+from prolix.fitting.bundle_builder import build_fitting_bundle
 from prolix.fitting.bundles import (
     BatchedConformerBundle,
     BatchedFittingBundle,
     ConformerBundle,
     FittingBundle,
+)
+from prolix.fitting.bundles import (
     TrainState as TrainStateBundle,
 )
-from prolix.fitting.bundle_builder import build_fitting_bundle
-from prolix.fitting.config import FittingConfig, FittingPlan, TrainMetrics as BundledTrainMetrics, make_fitting_plan
+from prolix.fitting.config import FittingConfig, FittingPlan, make_fitting_plan
+from prolix.fitting.config import TrainMetrics as BundledTrainMetrics
 from prolix.fitting.energy import bonded_energy
 from prolix.fitting.init import load_params_init_json
 from prolix.fitting.loss import bonded_loss, default_sigma

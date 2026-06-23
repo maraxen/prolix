@@ -21,7 +21,7 @@ Example:
 from __future__ import annotations
 
 import enum
-from typing import Callable
+from collections.abc import Callable
 
 import jax
 import jax.numpy as jnp

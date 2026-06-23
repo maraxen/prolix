@@ -22,16 +22,23 @@ from jax import random
 from jax_md import quantity, simulate
 
 from prolix.physics import (
-    md_potential_bundle,
-    pbc as pbc_module,
-    pressure as pressure_module,
-    rigid_water_ke,
-    stress as stress_module,
-    units as units_module,
+  md_potential_bundle,
+  rigid_water_ke,
+)
+from prolix.physics import (
+  pbc as pbc_module,
+)
+from prolix.physics import (
+  pressure as pressure_module,
+)
+from prolix.physics import (
+  stress as stress_module,
+)
+from prolix.physics import (
+  units as units_module,
 )
 from prolix.physics.constraints import project_momenta, project_positions
 from prolix.typing import NPTState, NVTLangevinState, WaterIndices, WaterIndicesArray
-
 
 if TYPE_CHECKING:
 
@@ -474,7 +481,7 @@ def _apply_rattle_velocity_correction_with_residual(
 def _remove_angular_momentum_from_impulse(
   vel_unconstrained: Array,
   vel_constrained: Array,
-  indices: "WaterIndices",
+  indices: WaterIndices,
   pos_constrained_O: Array,
   pos_constrained_H1: Array,
   pos_constrained_H2: Array,
@@ -616,7 +623,7 @@ def _r_step_conserve_angular_momentum(
   p_pre_a: Array,
   x_unc: Array,
   x_con: Array,
-  water_indices: "WaterIndicesArray",
+  water_indices: WaterIndicesArray,
   mass_oxygen: float,
   mass_hydrogen: float,
   box: Array | None = None,
@@ -1935,9 +1942,9 @@ def _ou_noise_one_water_rigid(
   # --- rotational block ---
   # Inertia tensor: I = sum_i m_i (|r_i|^2 I_3 - r_i r_i^T)
   eye3 = jnp.eye(3, dtype=r_stack.dtype)
-  r_sq = jnp.einsum('ia,ia->i', rrel, rrel)          # (3,): |r_rel_i|^2
-  I_tensor = jnp.einsum('i,i->', m_stack, r_sq) * eye3 \
-             - jnp.einsum('i,ia,ib->ab', m_stack, rrel, rrel)  # (3, 3)
+  r_sq = jnp.einsum("ia,ia->i", rrel, rrel)          # (3,): |r_rel_i|^2
+  I_tensor = jnp.einsum("i,i->", m_stack, r_sq) * eye3 \
+             - jnp.einsum("i,ia,ib->ab", m_stack, rrel, rrel)  # (3, 3)
   reg_r = jnp.array(1e-12, dtype=I_tensor.dtype) * (jnp.trace(I_tensor) / 3.0 + 1.0)
   I_reg = I_tensor + reg_r * eye3
   L_I = jnp.linalg.cholesky(I_reg)

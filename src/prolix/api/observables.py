@@ -5,9 +5,11 @@ Trajectory: eqx.Module storing positions and observable values for a simulation 
 Temperature: Example Observable computing kinetic temperature from state.
 """
 
-from typing import Any, Callable, Protocol, runtime_checkable
-import jax.numpy as jnp
+from collections.abc import Callable
+from typing import Any, Protocol, runtime_checkable
+
 import equinox as eqx
+import jax.numpy as jnp
 from jaxtyping import Array, Float
 
 
@@ -87,8 +89,8 @@ class Temperature(eqx.Module):
         from prolix.simulate import BOLTZMANN_KCAL
 
         # Ensure masses are available
-        if not hasattr(state, 'mass') or state.mass is None:
-            return jnp.array(float('nan'))
+        if not hasattr(state, "mass") or state.mass is None:
+            return jnp.array(float("nan"))
 
         # Extract momenta and masses
         momentum = state.momentum  # Shape (N, 3) or (B, N, 3)
@@ -238,7 +240,6 @@ class Pressure(eqx.Module):
         Returns:
             Scalar pressure in bar
         """
-        from prolix.simulate import BOLTZMANN_KCAL
 
         momentum = state.momentum  # Shape (N, 3)
         mass = state.mass          # Shape (N,) or (N, 1)

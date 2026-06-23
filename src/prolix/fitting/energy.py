@@ -5,9 +5,7 @@ JAX-pure and vmap-friendly. Gradients w.r.t. positions give forces;
 gradients w.r.t. params give parameter gradient for optimization.
 """
 
-from typing import Optional
 
-import jax
 import jax.numpy as jnp
 from jaxtyping import Array, Float
 
@@ -20,9 +18,9 @@ def bonded_energy(
     params: BondedParams,
     topology: BondedTopology,
     *,
-    bond_mask: Optional[Float[Array, "N_bonds"]] = None,
-    angle_mask: Optional[Float[Array, "N_angles"]] = None,
-    torsion_mask: Optional[Float[Array, "N_torsions"]] = None,
+    bond_mask: Float[Array, "N_bonds"] | None = None,
+    angle_mask: Float[Array, "N_angles"] | None = None,
+    torsion_mask: Float[Array, "N_torsions"] | None = None,
 ) -> Float[Array, ""]:
     """Compute total bonded energy with optional per-term masking.
 
@@ -64,7 +62,7 @@ def _bond_energy(
     positions: Float[Array, "N_atoms 3"],
     params: BondedParams,
     topology: BondedTopology,
-    bond_mask: Optional[Float[Array, "N_bonds"]] = None,
+    bond_mask: Float[Array, "N_bonds"] | None = None,
 ) -> Float[Array, ""]:
     """Harmonic bond energy: sum_b mask_b * k_b * (r_b - r0_b)^2."""
     i_idx = topology.bond_idx[:, 0].astype(jnp.int32)
@@ -89,7 +87,7 @@ def _angle_energy(
     positions: Float[Array, "N_atoms 3"],
     params: BondedParams,
     topology: BondedTopology,
-    angle_mask: Optional[Float[Array, "N_angles"]] = None,
+    angle_mask: Float[Array, "N_angles"] | None = None,
 ) -> Float[Array, ""]:
     """Harmonic angle energy: sum_a mask_a * k_theta_a * (theta_a - theta0_a)^2."""
     i_idx = topology.angle_idx[:, 0].astype(jnp.int32)
@@ -129,7 +127,7 @@ def _torsion_energy(
     positions: Float[Array, "N_atoms 3"],
     params: BondedParams,
     topology: BondedTopology,
-    torsion_mask: Optional[Float[Array, "N_torsions"]] = None,
+    torsion_mask: Float[Array, "N_torsions"] | None = None,
 ) -> Float[Array, ""]:
     """Periodic torsion energy: sum_t mask_t * sum_term k_phi_term * (1 + cos(periodicity_term * phi_t - phase_term))."""
     i_idx = topology.torsion_idx[:, 0].astype(jnp.int32)

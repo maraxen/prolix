@@ -18,7 +18,8 @@ Usage:
     print(f"Accessed fields: {fields_accessed}")
 """
 
-from typing import FrozenSet, Any
+from typing import Any
+
 import jax.numpy as jnp
 from jax_md import space
 
@@ -35,8 +36,8 @@ class FieldAuditProxy:
         Args:
             system: PhysicsSystem instance to wrap.
         """
-        object.__setattr__(self, '_system', system)
-        object.__setattr__(self, '_accessed_fields', set())
+        object.__setattr__(self, "_system", system)
+        object.__setattr__(self, "_accessed_fields", set())
 
     def __getattr__(self, name: str) -> Any:
         """Intercept attribute access and log field reads.
@@ -48,15 +49,15 @@ class FieldAuditProxy:
             The attribute value from the wrapped system.
         """
         # Avoid recursion on special attributes
-        if name in ('_system', '_accessed_fields'):
+        if name in ("_system", "_accessed_fields"):
             return object.__getattribute__(self, name)
 
         # Log the access
-        accessed = object.__getattribute__(self, '_accessed_fields')
+        accessed = object.__getattribute__(self, "_accessed_fields")
         accessed.add(name)
 
         # Return the attribute from the wrapped system
-        system = object.__getattribute__(self, '_system')
+        system = object.__getattribute__(self, "_system")
         return getattr(system, name)
 
     def __setattr__(self, name: str, value: Any) -> None:
@@ -69,23 +70,23 @@ class FieldAuditProxy:
         Raises:
             AttributeError: Always, to prevent modification.
         """
-        if name in ('_system', '_accessed_fields'):
+        if name in ("_system", "_accessed_fields"):
             object.__setattr__(self, name, value)
         else:
             raise AttributeError("Proxy is read-only; cannot set attributes")
 
-    def get_accessed_fields(self) -> FrozenSet[str]:
+    def get_accessed_fields(self) -> frozenset[str]:
         """Return the set of fields accessed so far.
 
         Returns:
             Frozenset of field names.
         """
-        accessed = object.__getattribute__(self, '_accessed_fields')
+        accessed = object.__getattribute__(self, "_accessed_fields")
         return frozenset(accessed)
 
 
 def audit_bonded_fields(system: Any, displacement_fn: space.DisplacementFn,
-                        positions: Any) -> FrozenSet[str]:
+                        positions: Any) -> frozenset[str]:
     """Run bonded energy functions on a system with field-access logging.
 
     Wraps the PhysicsSystem in a FieldAuditProxy, calls the per-term bonded

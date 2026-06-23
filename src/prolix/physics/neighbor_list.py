@@ -16,6 +16,7 @@ if TYPE_CHECKING:
   from collections.abc import Callable
 
   from proxide.core.containers import Protein
+
   from prolix.typing import SystemParams
 
 Array = util.Array
@@ -104,9 +105,9 @@ class ExclusionSpec:
     # We also clear idx_14 so the same pairs don't get re-added with the global
     # scale factors and cause double-counting.
     use_explicit_14 = (
-      hasattr(protein, 'pairs_14') and protein.pairs_14 is not None
+      hasattr(protein, "pairs_14") and protein.pairs_14 is not None
       and len(protein.pairs_14) > 0
-      and hasattr(protein, 'exception_14_params') and protein.exception_14_params is not None
+      and hasattr(protein, "exception_14_params") and protein.exception_14_params is not None
       and len(protein.exception_14_params) > 0
     )
 

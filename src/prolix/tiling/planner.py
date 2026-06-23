@@ -15,12 +15,9 @@ import logging
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-    from xtrax.tiling.plan import AxisSpec as XtraxAxisSpec
-    from xtrax.tiling.plan import BatchPlanner as XtraxBatchPlanner
 
 logger = logging.getLogger(__name__)
 

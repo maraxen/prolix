@@ -15,7 +15,6 @@ from __future__ import annotations
 import functools
 from dataclasses import dataclass
 
-import jax
 import jax.numpy as jnp
 import numpy as np
 from jaxtyping import Array, Float
@@ -190,7 +189,7 @@ def efa_erf_features(
     lam = jnp.asarray(params.quad_weights)    # (G,)
 
     # Projection: (N, G, K) <- positions (N,3) @ nodes.T (3,G) then *omegas
-    proj = jnp.einsum('ni,gi->ng', positions, nodes)  # (N, G)
+    proj = jnp.einsum("ni,gi->ng", positions, nodes)  # (N, G)
     proj = proj[:, :, None] * omegas[None, None, :]   # (N, G, K)
 
     # Feature amplitude per (node, freq): sqrt(w_k * λ_j)
@@ -208,8 +207,8 @@ def efa_erf_features(
 
 def efa_lebedev_coulomb_energy(
     positions: Float[Array, "N 3"],
-    charges: Float[Array, "N"],
-    atom_mask: Float[Array, "N"],
+    charges: Float[Array, N],
+    atom_mask: Float[Array, N],
     params: EFAParams,
 ) -> Float[Array, ""]:
     """O(N*K*G) erf(αr)/r Coulomb energy via EFA-Lebedev quadrature.
@@ -247,8 +246,8 @@ def efa_lebedev_coulomb_energy(
 
 def efa_lebedev_coulomb_energy_and_params(
     positions: Float[Array, "N 3"],
-    charges: Float[Array, "N"],
-    atom_mask: Float[Array, "N"],
+    charges: Float[Array, N],
+    atom_mask: Float[Array, N],
     alpha: float,
     n_freqs: int = 32,
     n_lebedev_pts: int = 26,

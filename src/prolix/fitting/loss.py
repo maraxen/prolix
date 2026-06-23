@@ -8,7 +8,6 @@ Implements the loss formulation from spec §6:
 Gradient flows through both positions (for forces) and parameters (for fitting).
 """
 
-from typing import Optional
 
 import jax
 import jax.numpy as jnp
@@ -17,7 +16,6 @@ from jaxtyping import Array, Float
 from prolix.fitting.energy import bonded_energy
 from prolix.fitting.params import BondedParams
 from prolix.fitting.topology import BondedTopology
-
 
 # Unit conversion
 HA_TO_KCAL_PER_MOL = 627.5094740631
@@ -51,10 +49,10 @@ def bonded_loss(
     *,
     alpha: float = 0.25,
     w_reg: float = 0.01,
-    sigma: Optional[BondedParams] = None,
-    bond_mask: Optional[Array] = None,
-    angle_mask: Optional[Array] = None,
-    torsion_mask: Optional[Array] = None,
+    sigma: BondedParams | None = None,
+    bond_mask: Array | None = None,
+    angle_mask: Array | None = None,
+    torsion_mask: Array | None = None,
 ) -> Float[Array, ""]:
     """Per-molecule bonded loss with energy + force + regularization.
 

@@ -4,17 +4,17 @@ Implements single-molecule training step, scan-based training loop,
 and both looped and batched orchestration strategies.
 """
 
-from typing import TYPE_CHECKING, Callable, NamedTuple, Optional, Tuple
+from collections.abc import Callable
+from typing import TYPE_CHECKING, NamedTuple
 
 import equinox as eqx
 import jax
 import jax.numpy as jnp
 import optax
-from jaxtyping import Array, Float, PyTree
+from jaxtyping import Array, Float
 
 from prolix.fitting.loss import bonded_loss, default_sigma
 from prolix.fitting.params import BondedParams
-from prolix.fitting.scheduler import sample_one_conformer
 from prolix.fitting.state import TrainState
 from prolix.fitting.topology import BondedTopology
 
@@ -44,7 +44,7 @@ def train_step_one_mol(
     optimizer: optax.GradientTransformation,
     alpha: float = 0.25,
     w_reg: float = 0.01,
-) -> Tuple[TrainState, TrainMetrics]:
+) -> tuple[TrainState, TrainMetrics]:
     """Single training step for one molecule: loss + grad + optimizer.update.
 
     Pure function; suitable as a scan body.
@@ -157,8 +157,8 @@ def train_loop_one_mol(
     optimizer: optax.GradientTransformation,
     alpha: float = 0.25,
     w_reg: float = 0.01,
-    io_callback_fn: Optional[Callable[[TrainMetrics], None]] = None,
-) -> Tuple[TrainState, list]:
+    io_callback_fn: Callable[[TrainMetrics], None] | None = None,
+) -> tuple[TrainState, list]:
     """Training loop for one molecule via jax.lax.scan.
 
     Args:
@@ -240,7 +240,7 @@ def train_loop_looped_baseline(
     optimizer: optax.GradientTransformation,
     alpha: float = 0.25,
     w_reg: float = 0.01,
-    io_callback_fn: Optional[Callable[[TrainMetrics], None]] = None,
+    io_callback_fn: Callable[[TrainMetrics], None] | None = None,
 ) -> dict:
     """Sequential train_loop_one_mol per molecule (looped baseline).
 
@@ -308,7 +308,7 @@ def train_loop_batched(
     optimizer: optax.GradientTransformation,
     alpha: float = 0.25,
     w_reg: float = 0.01,
-    io_callback_fn: Optional[Callable[[int, list], None]] = None,
+    io_callback_fn: Callable[[int, list], None] | None = None,
 ) -> dict:
     """Batched training via jit(vmap(train_step)) over molecule axis.
 
@@ -336,9 +336,6 @@ def train_loop_batched(
             'final_losses': [B] array of per-molecule final loss values
             'wallclock_s': wall-clock time (JAX block_until_ready)
     """
-    from prolix.fitting.batched import BondedParamsBundle, BondedTopologyBundle
-    from prolix.fitting.energy import bonded_energy
-    from prolix.fitting.loss import default_sigma
 
     B = batched_state.params.k_bond.shape[0]
     positions_all = batched_data["positions_all"]  # (B, N_conf_max, N_atoms_padded, 3)

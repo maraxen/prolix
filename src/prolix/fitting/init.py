@@ -11,7 +11,6 @@ Converts theta0_deg → theta0_rad and phase_deg → phase_rad.
 
 import json
 from pathlib import Path
-from typing import Tuple
 
 import jax.numpy as jnp
 import numpy as np
@@ -20,7 +19,7 @@ from prolix.fitting.params import BondedParams
 from prolix.fitting.topology import BondedTopology
 
 
-def load_params_init_json(path: Path) -> Tuple[BondedParams, BondedTopology]:
+def load_params_init_json(path: Path) -> tuple[BondedParams, BondedTopology]:
     """Parse a Phase A params_init.json file into (BondedParams, BondedTopology).
 
     Args:
@@ -31,7 +30,7 @@ def load_params_init_json(path: Path) -> Tuple[BondedParams, BondedTopology]:
         - params: BondedParams with k_bond, r0, k_theta, theta0_rad, k_phi (all jnp arrays)
         - topology: BondedTopology with bond_idx, angle_idx, torsion_idx, torsion_periodicity, torsion_phase_rad (all np arrays for static use)
     """
-    with open(path, "r") as f:
+    with open(path) as f:
         data = json.load(f)
 
     # ===== BONDS =====

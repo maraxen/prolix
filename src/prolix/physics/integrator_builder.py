@@ -38,34 +38,33 @@ The make_integrator_batched factory creates batched integrators:
 
 from __future__ import annotations
 
-from typing import Any, Callable, Optional, Tuple
+from collections.abc import Callable
+from typing import Any
 
 import equinox as eqx
 import jax
 import jax.numpy as jnp
-from jaxtyping import Array as ArrayType, PRNGKeyArray
+from jaxtyping import Array as ArrayType
+from jaxtyping import PRNGKeyArray
 
 from prolix.physics.constraints import ConstraintDOFMask
 from prolix.physics.step_system import (
-    Force_Step,
-    IntegratorState,
-    Step,
-    StepSequence,
-    make_step,
-    step_sequences,
+  Force_Step,
+  IntegratorState,
+  make_step,
+  step_sequences,
 )
-from prolix.typing import IntegratorParams, EnergyParams
 from prolix.physics.virtual_sites_step import redistribute_forces
-from prolix.typing import Array, WaterIndicesArray
+from prolix.typing import Array, EnergyParams, IntegratorParams, WaterIndicesArray
 
 
 def _compute_forces(
     positions: ArrayType,
-    box: Optional[ArrayType],
+    box: ArrayType | None,
     energy_fn: Callable,
     energy_params: Any = None,
-    vs_def: Optional[ArrayType] = None,
-    vs_params: Optional[ArrayType] = None,
+    vs_def: ArrayType | None = None,
+    vs_params: ArrayType | None = None,
 ) -> ArrayType:
   r"""Compute forces via autodiff of energy function.
 
@@ -94,9 +93,9 @@ def _compute_forces(
 
 
 def _initialize_constraint_dofs(
-    water_indices: Optional[WaterIndicesArray],
+    water_indices: WaterIndicesArray | None,
     n_atoms: int,
-) -> Optional[ConstraintDOFMask]:
+) -> ConstraintDOFMask | None:
   """Initialize constraint DOF mask if water indices provided.
 
   Args:
@@ -120,12 +119,12 @@ def make_integrator_batched(
     dt: float = 0.5,
     kT: float = 1.0,
     gamma: float = 1.0,
-    water_indices: Optional[Array] = None,
-    target_pressure_bar: Optional[float] = None,
-    tau_barostat_akma: Optional[float] = 2000.0,
-    tau_thermostat_akma: Optional[float] = 2000.0,
+    water_indices: Array | None = None,
+    target_pressure_bar: float | None = None,
+    tau_barostat_akma: float | None = 2000.0,
+    tau_thermostat_akma: float | None = 2000.0,
     **kwargs,
-) -> Tuple[Callable, Callable]:
+) -> tuple[Callable, Callable]:
   r"""Create a batched integrator via vmap composition over independent trajectories.
 
   This factory creates a batched integrator where multiple independent trajectories
@@ -198,7 +197,7 @@ def make_integrator_batched(
   def init_fn_batched(
       key: PRNGKeyArray,
       positions_batch: ArrayType,
-      box: Optional[ArrayType] = None,
+      box: ArrayType | None = None,
   ) -> IntegratorState:
     r"""Initialize batched integrator state for B independent trajectories.
 
@@ -294,16 +293,16 @@ def make_integrator(
     dt: float = 0.5,
     kT: float = 1.0,
     gamma: float = 1.0,
-    water_indices: Optional[Array] = None,
-    target_pressure_bar: Optional[float] = None,
-    tau_barostat_akma: Optional[float] = 2000.0,
-    tau_thermostat_akma: Optional[float] = 2000.0,
+    water_indices: Array | None = None,
+    target_pressure_bar: float | None = None,
+    tau_barostat_akma: float | None = 2000.0,
+    tau_thermostat_akma: float | None = 2000.0,
     energy_params: Any = None,
-    vs_def: Optional[Array] = None,
-    vs_params: Optional[Array] = None,
-    n_molecules: Optional[int] = None,
+    vs_def: Array | None = None,
+    vs_params: Array | None = None,
+    n_molecules: int | None = None,
     **kwargs,
-) -> Tuple[Callable, Callable]:
+) -> tuple[Callable, Callable]:
   r"""Create a modular integrator from a sequence registry entry.
 
   This is the primary factory function for Phase 2.1. It takes a sequence name
@@ -494,7 +493,7 @@ def make_integrator(
   def init_fn(
       key: PRNGKeyArray,
       positions: ArrayType,
-      box: Optional[ArrayType] = None,
+      box: ArrayType | None = None,
   ) -> IntegratorState:
     r"""Initialize integrator state with eager computation of all fields.
 

@@ -1,13 +1,14 @@
 from __future__ import annotations
-from abc import ABC, abstractmethod
-from typing import Callable, Optional
+
+from collections.abc import Callable
+
 import equinox as eqx
 import jax
 import jax.numpy as jnp
-from jaxtyping import PRNGKeyArray
 
-from prolix.physics.step_system import Step, IntegratorState
+from prolix.physics.step_system import IntegratorState, Step
 from prolix.typing import IntegratorParams
+
 
 class MC_Barostat_Step(Step):
     """Monte Carlo Barostat step for NPT ensemble.
@@ -137,7 +138,7 @@ class SCR_Barostat_Step(Step):
         cutoff: Cutoff distance for tail corrections.
     """
     mu_min: float = eqx.field(static=True, default=0.99)
-    atom_mask: Optional[jnp.ndarray] = eqx.field(static=True, default=None)
+    atom_mask: jnp.ndarray | None = eqx.field(static=True, default=None)
     cutoff: float = eqx.field(static=True, default=9.0)
 
     def apply(

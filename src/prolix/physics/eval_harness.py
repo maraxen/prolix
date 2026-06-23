@@ -7,24 +7,18 @@ and energy consistency checks across electrostatic methods.
 from __future__ import annotations
 
 import math
-from typing import TYPE_CHECKING
 
 import jax
 import jax.numpy as jnp
 import numpy as np
-from jax_md import space
 
 from prolix.padding import PaddedSystem
-from prolix.physics import pbc
 from prolix.physics.electrostatic_methods import ElectrostaticMethod
 from prolix.physics.flash_explicit import (
     flash_explicit_energy,
     flash_explicit_forces,
 )
 from prolix.physics.water_models import WaterModelType, get_water_params
-
-if TYPE_CHECKING:
-    from jax_md.util import Array
 
 
 def _tip3p_local_frame() -> tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -126,8 +120,8 @@ def make_tip3p_water_system(
     box_vec = jnp.array([box_edge, box_edge, box_edge], dtype=jnp.float64)
 
     # Create sparse exclusion for water (O-H bonds only, all intramolecular)
-    from prolix.utils import topology
     from prolix.padding import pad_array, select_bucket
+    from prolix.utils import topology
 
     bonds_list = []
     for w in range(n_waters):
@@ -346,7 +340,7 @@ def run_nve(
         )
         f = forces_fn(sys_updated)
         e = flash_explicit_energy(sys_updated, electrostatic_method=ElectrostaticMethod.PME)
-        ke = float(0.0)  # No motion
+        ke = 0.0  # No motion
         pe = float(e)
         ke_list.append(ke)
         pe_list.append(pe)

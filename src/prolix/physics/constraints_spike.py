@@ -12,11 +12,7 @@ implementation is Phase 1 work.
 
 from __future__ import annotations
 
-from collections.abc import Callable
 from typing import Any, NamedTuple
-
-import jax
-import jax.numpy as jnp
 
 from prolix.physics import settle
 from prolix.typing import WaterIndicesArray

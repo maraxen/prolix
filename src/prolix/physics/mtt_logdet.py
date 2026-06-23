@@ -72,10 +72,10 @@ def mtt_logdet_params(
 
 
 def _matvec(
-    v: Float[Array, "N"],
+    v: Float[Array, N],
     features: Float[Array, "N D"],
     eps: float,
-) -> Float[Array, "N"]:
+) -> Float[Array, N]:
     """Apply the regularized graph Laplacian L_reg = D - K + εI to vector v.
 
     Exploits the low-rank structure K = Φ Φᵀ for O(ND) cost instead of O(N²).
@@ -103,7 +103,7 @@ def _matvec(
 
 def _lanczos_logdet(
     matvec_fn,
-    z: Float[Array, "N"],
+    z: Float[Array, N],
     n_steps: int,
 ) -> Float[Array, ""]:
     """Estimate z^T log(L_reg) z using k-step Lanczos with full re-orthogonalization.
@@ -208,8 +208,8 @@ def _lanczos_logdet(
 
 def mtt_estimate_log_det(
     positions: Float[Array, "N 3"],
-    charges: Float[Array, "N"],
-    atom_mask: Float[Array, "N"],
+    charges: Float[Array, N],
+    atom_mask: Float[Array, N],
     key: Array,
     *,
     params: MTTParams,

@@ -5,14 +5,12 @@ Adapted from jaxbeans.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, Callable, TypeVar
+from collections.abc import Callable
+from typing import Any, TypeVar
 
 import jax
 import jax.numpy as jnp
 from jaxtyping import Array, Bool
-
-if TYPE_CHECKING:
-    pass
 
 N = "N"
 T = "T"
@@ -21,7 +19,7 @@ _T = TypeVar("_T")
 
 def pad_to_tile(
     arr: Array, tile_size: int, axis: int = 0, pad_value: Any = 0.0
-) -> tuple[Array, Bool[Array, N]]:  # noqa: F821
+) -> tuple[Array, Bool[Array, N]]:
     """Pad an array so its length is divisible by `tile_size`.
 
     Args:
@@ -53,8 +51,8 @@ def pad_to_tile(
 
 def tile_reduction(
     positions: Array,
-    atom_mask: Bool[Array, N],  # noqa: F821
-    f_tile: Callable[[Array, Array, Bool[Array, Any], Bool[Array, T], int, int], Any],  # noqa: F821
+    atom_mask: Bool[Array, N],
+    f_tile: Callable[[Array, Array, Bool[Array, Any], Bool[Array, T], int, int], Any],
     init_state: Any,
     tile_size: int,
     inner_tile_size: int = 1024,
@@ -113,8 +111,8 @@ def tile_reduction(
 def tile_reduction_nl(
     positions: Array,
     neighbor_idx: Array,
-    atom_mask: Bool[Array, N],  # noqa: F821
-    f_tile: Callable[[Array, Array, Bool[Array, Any], Bool[Array, Any], Array, int, int], Any],  # noqa: F821
+    atom_mask: Bool[Array, N],
+    f_tile: Callable[[Array, Array, Bool[Array, Any], Bool[Array, Any], Array, int, int], Any],
     init_state: Any,
     tile_size: int,
     inner_tile_size: int = 1024,
