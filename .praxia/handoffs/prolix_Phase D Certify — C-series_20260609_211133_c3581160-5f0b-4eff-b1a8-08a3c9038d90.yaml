@@ -1,0 +1,64 @@
+---
+workspace: prolix
+session_id: b731f164-cdd3-47b4-8bdd-d3867205b6f8
+status: in_progress
+immediately_relevant:
+- file: src/prolix/physics/settle.py
+  lines:
+  - 1825
+  - 1882
+  reason: '_langevin_step_o_constrained: production O step (project+rigid OU). Key: p_water_in uses ORIGINAL momentum (pre-OU), then overwrites isotropic p_ou at water atom indices. Confirmed correct by reading.'
+- file: src/prolix/physics/settle.py
+  lines:
+  - 1757
+  - 1805
+  reason: '_ou_noise_one_water_rigid: confirmed correct by direct sampling (T_rot=300.2K, 50k samples). NOT the root cause.'
+- file: scripts/explore/p5_substep_trot_trace_c2.py
+  lines:
+  - 1
+  - 50
+  reason: 'C2 trace script: gamma=1, production O step, 2000 warmup + 500 trace steps. Written to worktree AND main project (for cluster push). Cluster job 15645871.'
+- file: tests/physics/test_settle_noise_direct.py
+  lines:
+  - 1
+  - 80
+  reason: Direct sampling tests confirming _ou_noise_one_water_rigid equipartition. Passes. Committed b4540f7.
+active_dispatches:
+- SLURM job 15645871 on engaging cluster — C2 substep trace (gamma=1, production O step, 64 waters, 500 steps after 2000 warmup). SSH was unreachable at handoff time; job was submitted successfully before SSH dropped.
+task_id: 260603_p5_settle_correctness
+phase: Phase D Certify — C-series
+goal_statement: Fix T_rot = 283.6K deficit in settle_langevin (gamma=1, project+rigid OU) so T in [295, 305]K gate passes. Root cause still unknown after C1 trace and O-step noise validation.
+context_refs:
+- phase: Phase D pre-C1
+  task_id: 260603_p5_settle_correctness
+  summary: C1 substep trace (job 15631127) measured substep T_rot contributions with gamma=10 and isotropic OU + project. Showed net -0.09K/step but O step algorithm mismatch vs production makes numbers non-representative.
+failed_attempts:
+- attempt_id: B1_o_step_noise
+  description: Identified O step as T_rot drain site from C1 substep trace (job 15631127). Dispatched fixer to fix _langevin_step_o_constrained.
+  outcome: Fixer found the noise function correct (direct sampling T_rot=300.2K). No code changes to production were made.
+  reason_failed: C1 trace used isotropic OU + project for O step, not production project+rigid OU. C1's O step contribution (-0.42K) is not representative of production. The noise function itself is theoretically and empirically correct.
+  do_not_retry: true
+  evidence_ref: tests/physics/test_settle_noise_direct.py (commit b4540f7)
+- attempt_id: B1_G_block_diagonal
+  description: Made G matrix block-diagonal in _ou_noise_one_water_rigid (prior session).
+  outcome: No-op — G was already block-diagonal by construction (sum_i m_i r_rel_i = 0 in COM frame).
+  reason_failed: The block-diagonal property was a mathematical identity, not a bug.
+  do_not_retry: true
+  evidence_ref: null
+open_questions:
+- Which specific substep (A, SETTLE1, SETTLE2, B, or O) drains T_rot under production conditions (gamma=1)? C2 trace job 15645871 will answer this.
+- With c2^2 ≈ 0.001 for gamma=1, the mechanical drain only needs to be -0.016 K/step to explain 283.6K. Is this from the R-step momentum correction (dp = m*dx/half_dt) having systematic rotational content?
+- Does changing projection_site from 'post_o' to 'post_settle_vel' fix the deficit? (C3 hypothesis — untested, low-effort 1-parameter change)
+deferred:
+- description: 'C3: try projection_site=post_settle_vel as a 1-line parameter change gate test'
+  rationale: Quick to test but untargeted — better to first identify the drain substep from C2 trace, then apply targeted fix
+  recommended_phase: Phase D post-C2 if C2 shows O step is correct
+lessons_refs: []
+next_steps:
+- 'When cluster reconnects, tail job 15645871 output: ssh engaging ''tail -50 ~/projects/prolix/outputs/logs/slurm/15645871.out'''
+- Parse mean delta_T_rot per substep from C2 trace CSV (scripts/explore/p5_substep_trot_trace_c2.csv on cluster)
+- 'Key theoretical constraint: with gamma=1, c2^2 ≈ 0.001, so only -0.016 K/step mechanical drain is needed to explain T_rot_ss=283.6K — the drain is tiny and in a specific substep'
+- 'If O step is under-injecting (delta_T_rot_O < c2^2 * (300 - T_rot_before_O) expected): bug is in _langevin_step_o_constrained scan over waters'
+- 'If mechanical substeps (A/SETTLE/B) show net negative T_rot: implement C3 (projection_site=post_settle_vel) or constrained OU fix'
+- 'After identifying root cause: fix, run L2 smoke test locally, submit 895-water NVT gate run with bth campaign'
+---

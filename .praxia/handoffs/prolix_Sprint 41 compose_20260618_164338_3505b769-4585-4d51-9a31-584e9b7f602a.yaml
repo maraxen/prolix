@@ -1,0 +1,74 @@
+---
+workspace: prolix
+session_id: 7279cb3c-7db8-478b-ab0c-d2f5b394760e
+status: in_progress
+immediately_relevant:
+- file: .praxia/loop_state.toml
+  lines:
+  - 1
+  - 35
+  reason: 'Loop state: current_phase=SPRINT_COMPOSE, last_subphase=gate_pending, sprint_approved=false. User must flip sprint_approved=true to proceed.'
+- file: .praxia/sprint_plans/260615_sprint41.toml
+  lines:
+  - 1
+  - 50
+  reason: Sprint 41 TOML with Track A (#283) and Track B (#296-301) prompts. Approved as-is — do not re-compose.
+- file: src/prolix/api/ensemble_plan.py
+  lines:
+  - 1
+  - 55
+  reason: Current EnsemblePlan implementation; Track A adds from_bundle + from_bundles classmethods here.
+- file: src/prolix/batched_simulate.py
+  lines:
+  - 30
+  - 55
+  reason: LangevinState __getattr__ added this session (bare alias removed at line 36); now warns correctly on access.
+active_dispatches: []
+task_id: 260615_autonomous-loop
+phase: Sprint 41 compose
+goal_statement: 'Autonomous dev loop iteration 1: EnsemblePlan API completion (#283) + 6-item deep-research batch (#296-301). Sprint 41 TOML composed and awaiting sprint_approved L2 gate.'
+context_refs:
+- phase: Sprint 39 Track E
+  task_id: 260615_autonomous-loop
+  summary: Switched project from mypy to ty; fixed type annotations in api/; removed mypy from dev deps
+- phase: Sprint 40 execution
+  task_id: 260615_autonomous-loop
+  summary: 'Closed #250 #289 #257: LangevinState DeprecationWarning activated, CHANGELOG HP1 migration table, RR1 rebuttal evidence doc'
+failed_attempts:
+- attempt_id: a1
+  description: Track A fixer (worktree-isolated) claimed LangevinState __getattr__ was already working
+  outcome: Warning was NOT emitted — bare alias `LangevinState = _LangevinState` at line 36 shadowed __getattr__
+  reason_failed: Python module-level __getattr__ only fires for attributes NOT in the module dict; the bare alias put it in the dict, bypassing the hook entirely
+  do_not_retry: true
+  evidence_ref: 'src/prolix/batched_simulate.py lines 33-50 (now fixed: alias removed, __getattr__ fires)'
+- attempt_id: a2
+  description: Smoke test `test_langevin_state_deprecated` checked caught[0].message for prolix text
+  outcome: e3nn_jax NamedTuple DeprecationWarning was caught[0]; assertion failed
+  reason_failed: warnings.catch_warnings captures all DeprecationWarnings including from e3nn; must filter by message content across all caught warnings
+  do_not_retry: true
+  evidence_ref: 'tests/api/test_hp1_migration_smoke.py test_langevin_state_deprecated (fixed: now searches all caught)'
+- attempt_id: a3
+  description: physics/__init__.py imported NPTState from .simulate (prolix.physics.simulate)
+  outcome: 'ImportError: cannot import name NPTState from prolix.physics.simulate'
+  reason_failed: NPTState is defined in prolix.typing not prolix.physics.simulate; wrong module in import
+  do_not_retry: true
+  evidence_ref: 'src/prolix/physics/__init__.py:54 (fixed: now imports from prolix.typing)'
+open_questions:
+- 'Does #283 EnsemblePlan need .from_bundle/.from_bundles to actually RUN the MD simulation in the unit tests, or is constructor-only coverage sufficient? (Decision taken: constructor-only, no JAX simulation in unit tests — integration covered by physics suite)'
+deferred:
+- description: '#260 HP4 ANI-1x curation (extended difficulty, ~5GB download, cluster-scale)'
+  rationale: Too large for a single sprint track; needs dedicated campaign design with bathos + cluster submission
+  recommended_phase: Sprint 42 or dedicated HP4 sprint
+- description: '#319 §9.1 code health (description still references mypy --strict; stale)'
+  rationale: ty already passes; ruff has many physics-code ignores needed; backlog description needs update before sprint inclusion
+  recommended_phase: Sprint 42 after backlog item description is corrected
+- description: Pre-existing unstaged changes to ~50 src/prolix/ files in main checkout
+  rationale: These are outside this session's scope; origin unclear (possibly from worktree operations or Sprint 39 tracks copied back). Not committed — treat as pre-existing state.
+  recommended_phase: Investigate in next session before committing
+lessons_refs:
+- .praxia/lessons.jsonl
+next_steps:
+- User must set sprint_approved=true in .praxia/loop_state.toml to ungate Sprint 41 execution
+- 'Once approved: dispatch Track A fixer (worktree, #283 EnsemblePlan.from_bundle + .from_bundles) and Track B librarian batch (#296-301, 6 parallel research dispatches) in parallel'
+- 'After tracks complete: run reviewer gates, close #283 + #296-301 in backlog, write Sprint 42 TOML targeting #260 HP4 curation or V-series tests'
+---

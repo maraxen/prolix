@@ -1,0 +1,96 @@
+workspace: prolix
+session_id: 825e5b66-825d-46ed-ad83-bdefe255c970
+status: complete
+task_id: 260603_p5_settle_correctness
+phase: Sprint 36 / G1 — dt=1.0 fs cap lift
+goal_statement: >
+  Resolve the dt=1.0 fs gate (job 15870804) and execute G1: lift the
+  SETTLE+Langevin dt cap on main with evidence.
+
+summary: >
+  Gate job 15870804 PASSED (T_rot 299.63 K, gate_pass=1). Pre-removal verification
+  showed the prior handoff's blanket xfail-removal plan would BREAK CI: the gate ran
+  gamma=10/n=895 but the unit tests use gamma=1/small-N. A system-size sweep
+  (campaign ba334c1f, jobs 15911790+15929525, n in {2,16,64,216,512,895}) proved the
+  warm bias is TRANSLATIONAL FINITE-SIZE, not dt instability — T_rot stable at all
+  sizes (~299-312 K); T_total crossover N*=16 (±15K) / 64 (±5K); T_trans ~1/N decay.
+  Executed a SCOPED G1, landed on main at commit c5ddef3, verified green.
+
+landed_on_main:
+  head: c5ddef3
+  commits:
+    - "fc33a44 feat(p5): dt=1fs NVT system-size sweep (script + sidecar + slurm array)"
+    - "3c8ad6e research(p5): warm bias is translational finite-size, N*=16 (note + aggregator)"
+    - "e65f7c3 feat(p5): lift dt cap to <=1.0 fs at production scale (scoped G1)"
+    - "f1aec5b docs(p5): fix stale 'dt=0.5 max' key-param bullet"
+    - "c5ddef3 docs(p5): scope-lift the v1.0 release-notes NVT cap entry"
+  changes:
+    - "settle.py docstring + CLAUDE.md (8 live spots): dt<=1.0 fs at production scale (n>~16, gamma~10); dt<=0.5 fs for n<~16 / weak friction. LFMiddle history + NPT path left intact."
+    - "test_dt_sweep_16water_nvt: asserts T_rot (finite-size-robust gate metric) at gamma=10; dt=1.0 un-xfailed; dt=2.0 permanent xfail. Fixed a latent dt=0.5 T_total failure (364.9 K) masked by @slow."
+    - "n=2 test (test_temperature_dt1fs_near_target): xfail KEPT, reframed as translational finite-size artifact."
+    - "Added _mean_trot_after_burn (T_rot decomposition); gamma_ps param on _mean_rigid_t_after_burn (default 1.0, preserves callers)."
+
+verification:
+  - "dt=0.5 + dt=1.0 sweep cases PASS via pytest (T_rot ~300 K), 707s run."
+  - "Collection clean (26 tests). Other helper callers unchanged (default gamma=1)."
+  - "Did NOT run full MD suite locally (no CUDA jaxlib here; resource rule) — targeted strict cases are the gate."
+  - "Campaign ba334c1f concluded outcome=characterized."
+
+next_steps:
+  - "OPTIONAL: cluster main is behind on doc/test changes (only sweep scripts were rsynced); next `bth sync`/`myxcel push` propagates c5ddef3."
+  - "OPTIONAL follow-up: gamma=1 at n>=216 to test whether the weak-friction warm bias is also size-curable (open question)."
+  - "No blocker — G1 complete. Verify: `git -C ~/projects/prolix log --oneline -1` == c5ddef3."
+
+immediately_relevant:
+  - file: .praxia/docs/research/260612_p5-dt1fs-size-crossover.md
+    lines: [1, 90]
+    reason: "Full finding — crossover table, mechanism, gamma-vs-size disambiguation, G1 implications."
+  - file: tests/physics/test_settle_temperature_control.py
+    lines: [62, 110]
+    reason: "_mean_trot_after_burn helper + n=2 reframed xfail."
+  - file: tests/physics/test_settle_temperature_control.py
+    lines: [1119, 1160]
+    reason: "DT_CASES (gamma=10) + test_dt_sweep_16water_nvt retargeted to T_rot, dt=1.0 un-xfailed."
+  - file: src/prolix/physics/settle.py
+    lines: [929, 940]
+    reason: "settle_langevin docstring scoped dt<=1.0 fs lift."
+
+failed_attempts:
+  - attempt_id: blanket-g1
+    description: "Sidecar/handoff pre-registered: on gate_pass=1, remove all dt=1fs xfails + blanket replace dt<=0.5->1.0."
+    outcome: "Would break CI — n=2/n=16 unit tests fail at dt=1fs in their own config."
+    reason_failed: >
+      Gate ran gamma=10/n=895; unit-test helper hardcodes gamma=1 and tests small N.
+      Warm bias is translational finite-size (3N-3 DOF at small N). Naive removal
+      ignores the config + size dependence.
+    do_not_retry: true
+    evidence_ref: .praxia/docs/research/260612_p5-dt1fs-size-crossover.md
+  - attempt_id: retarget-whole-test-gamma10
+    description: "Retarget the entire DT_CASES sweep test to gamma=10 (all dt cases)."
+    outcome: "Broke the dt=0.5 baseline (T_total 315.8 K at gamma=10, just over 15K)."
+    reason_failed: >
+      T_total at n=16 is confounded by the noisy small-N translational mode regardless
+      of gamma. Fix: assert T_rot (finite-size-robust) instead of T_total.
+    do_not_retry: true
+
+open_questions:
+  - "Is the gamma=1 warm bias also size-curable at large N, or is gamma=1 fundamentally worse at dt=1fs even at scale? Only gamma=1 small-N data (n<=16) exists."
+
+deferred:
+  - description: "gamma=1 size-curability point (n>=216 at gamma=1, dt=1fs)."
+    rationale: "Not on G1 critical path; production config is gamma=10. Completeness only."
+    recommended_phase: "Phase 5 follow-up"
+  - description: "Gate harness precision provenance: make float64-vs-float32 explicit/recorded; evaluate float32 for speedup (FP64 throttle on workstation Blackwell)."
+    rationale: "Logged as backlog item gate_harness_precision_lever_260611."
+    recommended_phase: "Gate harness follow-up"
+
+context_refs:
+  - phase: Sprint 36 / Gate Pending
+    task_id: 260603_p5_settle_correctness
+    summary: "Prior session: gate 15870804 submitted; test_inner_tile_size_alignment landed (cba0083); premature H-track 405bf95 quarantined."
+  - phase: Phase 5 C3 AM Fix
+    task_id: 260603_p5_settle_correctness
+    summary: "678c9cb added AM conservation to SETTLE R-step — the fix that made dt=1.0 fs stable at scale."
+
+lessons_refs:
+  - .praxia/docs/research/260612_p5-dt1fs-size-crossover.md
