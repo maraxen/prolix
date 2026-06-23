@@ -1,7 +1,6 @@
 """EnsemblePlan: high-level API for batch molecular dynamics simulations.
 
-Status: v1.0 implementation. Basic single-bundle MD simulation with settle_langevin.
-Full batching (xtrax.tiling integration) deferred to v1.1 (#1842).
+Multi-bundle dispatch uses xtrax.tiling via EnsembleMDPlanner (#1842).
 """
 
 from __future__ import annotations
@@ -15,31 +14,27 @@ if TYPE_CHECKING:
 class EnsemblePlan:
     """Orchestrates batch MD simulations over multiple MolecularBundle instances.
 
-    v1.0: Single-bundle sequential execution. v1.1 will integrate with mature planner
-    backend (either prolix.tiling.BatchPlanner or xtrax.BatchPlanner) for vmap/safe_map
-    decisions and GPU/TPU parallelism.
+    Single-bundle runs return a Trajectory. Multi-bundle runs return a list of
+    Trajectory objects, one per bundle, dispatched according to batch_plan
+    (vmap vs safe_map chunk size on the N_MOLS axis).
 
     Args:
         bundles: List of MolecularBundle instances to simulate in parallel.
-        planner: Optional planner backend (BatchPlanner or compatible). If provided,
-                 planner.plan(bundles) is called immediately. If None, batch_plan is
-                 set to None.
+        planner: Optional planner with plan(bundles). When omitted and
+                 len(bundles) > 1, EnsembleMDPlanner is used automatically.
 
     Attributes:
         bundles: The input bundle list.
-        batch_plan: Result of planner.plan() if planner was provided, else None.
+        batch_plan: Result of planner.plan(bundles), or None for single-bundle
+                    runs without an explicit planner.
     """
 
     def __init__(self, bundles: list[Any], planner: Any = None) -> None:
-        """Initialize EnsemblePlan with bundles and optional planner.
-
-        Args:
-            bundles: List of MolecularBundle instances.
-            planner: Optional planner with a plan() method. If provided,
-                     self.batch_plan = planner.plan(bundles).
-                     If None, self.batch_plan = None.
-        """
         self.bundles = bundles
+        if planner is None and len(bundles) > 1:
+            from prolix.api.ensemble_planner import EnsembleMDPlanner
+
+            planner = EnsembleMDPlanner()
         if planner is not None:
             self.batch_plan = planner.plan(bundles)
         else:
@@ -47,36 +42,24 @@ class EnsemblePlan:
 
     @classmethod
     def from_bundle(cls, bundle: Any, planner: Any = None) -> EnsemblePlan:
-        """Convenience constructor for single-bundle simulation.
-
-        Wraps the bundle in a list and delegates to __init__.
-
-        Args:
-            bundle: A single MolecularBundle instance.
-            planner: Optional planner with a plan() method.
-
-        Returns:
-            EnsemblePlan with bundles=[bundle].
-        """
         return cls([bundle], planner)
 
     @classmethod
     def from_bundles(
         cls, bundles: list[Any], planner: Any = None
     ) -> EnsemblePlan:
-        """Factory constructor for multi-bundle simulation.
-
-        Standard "factory on plural input" naming convention.
-        Equivalent to __init__ but makes caller intent explicit.
-
-        Args:
-            bundles: List of MolecularBundle instances.
-            planner: Optional planner with a plan() method.
-
-        Returns:
-            EnsemblePlan with the provided bundles.
-        """
         return cls(bundles, planner)
+
+    def _systems_chunk_size(self) -> int:
+        """Chunk size for N_MOLS dispatch (0 = vmap intent)."""
+        if self.batch_plan is None:
+            return 1
+        for name in ("n_mols", "n_systems"):
+            try:
+                return self.batch_plan.decision_for(name).batch_size
+            except KeyError:
+                continue
+        return 1
 
     def run(
         self,
@@ -84,19 +67,8 @@ class EnsemblePlan:
         dt: float,
         kT: float,
         seed: int = 0,
-    ) -> Trajectory:
-        """Run batch MD simulation over all bundles.
-
-        v1.0 Implementation (Sprint 38):
-          - Sequential execution over bundles (no vmap batching yet)
-          - Uses settle_langevin for NVT dynamics
-          - Returns Trajectory object with positions and observable values
-
-        Full batching (v1.1):
-          - Will use self.batch_plan to decide vmap vs safe_map per axis
-          - Compile batched integrator (settle_langevin or settle_csvr_npt)
-          - Execute n_steps on GPU/TPU with parallelism
-          - Pending xtrax.tiling integration (#1842)
+    ) -> Trajectory | list[Trajectory]:
+        """Run MD simulation over all bundles.
 
         Args:
             n_steps: Number of MD steps.
@@ -105,9 +77,39 @@ class EnsemblePlan:
             seed: PRNG seed for thermostat noise.
 
         Returns:
-            Trajectory: Object containing positions (n_steps, n_atoms, 3) and
-                       observable_values dict.
+            Trajectory for a single bundle, or list[Trajectory] when
+            len(bundles) > 1.
         """
+        if not self.bundles:
+            raise ValueError("EnsemblePlan requires at least one bundle")
+
+        if len(self.bundles) == 1:
+            return self._run_single(self.bundles[0], n_steps, dt, kT, seed)
+
+        chunk = self._systems_chunk_size()
+        chunk = len(self.bundles) if chunk == 0 else max(1, chunk)
+        trajectories: list[Trajectory] = []
+        for i in range(0, len(self.bundles), chunk):
+            for bundle in self.bundles[i : i + chunk]:
+                trajectories.append(
+                    self._run_single(
+                        bundle,
+                        n_steps,
+                        dt,
+                        kT,
+                        seed + len(trajectories),
+                    )
+                )
+        return trajectories
+
+    def _run_single(
+        self,
+        bundle: Any,
+        n_steps: int,
+        dt: float,
+        kT: float,
+        seed: int,
+    ) -> Trajectory:
         import jax
         import jax.numpy as jnp
 
@@ -120,18 +122,6 @@ class EnsemblePlan:
         from prolix.api.observables import Trajectory
         from prolix.physics.settle import settle_langevin
 
-        # v1.0: simple sequential loop over bundles
-        # TODO (v1.1): integrate with xtrax.tiling.BatchPlanner for vmap/safe_map decisions
-        if not self.bundles:
-            raise ValueError("EnsemblePlan requires at least one bundle")
-
-        bundle = self.bundles[0]  # v1.0: single bundle only
-        if len(self.bundles) > 1:
-            raise NotImplementedError(
-                "Multi-bundle batching pending xtrax.tiling integration (#1842). "
-                "v1.0 supports single-bundle execution only."
-            )
-
         energy_fn = bonded_energy_fn_from_bundle(bundle)
         _displacement_fn, shift_fn = displacement_fn_for_bundle(bundle)
 
@@ -142,7 +132,6 @@ class EnsemblePlan:
         if int(bundle.n_waters) > 0:
             water_indices = bundle.water_indices[: int(bundle.n_waters)]
 
-        # Initialize integrator
         init_fn, apply_fn = settle_langevin(
             energy_fn,
             shift_fn,
@@ -154,26 +143,21 @@ class EnsemblePlan:
             project_ou_momentum_rigid=True,
         )
 
-        # Initialize state
         key = jax.random.PRNGKey(seed)
         state = init_fn(key, positions_init)
 
-        # Run trajectory
         positions_traj = []
 
         def step_fn(state: Any, _: Any) -> tuple[Any, Any]:
             new_state = apply_fn(state, kT=kT, dt=dt)
             return new_state, new_state.position
 
-        # Execute n_steps and record positions at each step (not including initial)
         for _i in range(n_steps):
             state, pos = step_fn(state, None)
             positions_traj.append(pos)
 
-        # Stack trajectory (should be n_steps x n_atoms x 3)
         positions_array = jnp.stack(positions_traj)
 
-        # Return Trajectory object
         return Trajectory(
             positions=positions_array,
             observable_values={},

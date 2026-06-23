@@ -1,12 +1,12 @@
 """Batch tiling planner: decides vmap vs safe_map per axis.
 
 This module implements prolix's greedy budget-driven tiling strategy.
-For v1.0, prolix retains its proven greedy loop; behavioral delegation to
-xtrax.tiling.BatchPlanner is deferred to v1.1 (issue #1842).
+Behavioral delegation to xtrax.tiling.BatchPlanner is available via
+``BatchPlanner.plan_with_xtrax()`` (#1842); the default ``plan()`` keeps
+the proven prolix greedy loop for backward compatibility.
 
-xtrax types (xtrax.tiling.plan.BatchPlanner, AxisSpec, etc.) are available
-as a future backend for custom strategies (Bucket, Carry, Dedup). See
-`.praxia/docs/superpowers/specs/260614_xtrax-tiling-integration.md` for details.
+See ``prolix.tiling.xtrax_adapter`` and
+``.praxia/docs/superpowers/specs/260614_xtrax-tiling-integration.md``.
 """
 
 from __future__ import annotations
@@ -121,9 +121,7 @@ class BatchPlanner:
         1. Pre-demote heterogeneous axes (vmap invalid; safe_map required)
         2. Greedy budget loop for homogeneous axes (innermost-first demotion)
 
-        Note: xtrax.tiling is imported in pyproject.toml for future phases
-        (v1.1: Bucket/Carry/Dedup strategies). v1.0 uses prolix's own
-        budget-driven greedy loop.
+        For xtrax-backed strategy selection, use ``plan_with_xtrax()``.
         """
         # Phase 1: Pre-demote heterogeneous axes
         decisions: list[AxisDecision] = []
@@ -167,4 +165,14 @@ class BatchPlanner:
             total_memory_estimate=final_estimate,
             axes_by_index={ax.axis_index: ax for ax in self.axes},
             budget_exceeded=exceeded,
+        )
+
+    def plan_with_xtrax(self) -> BatchPlan:
+        """Plan using xtrax.tiling.BatchPlanner with prolix budget fallback (#1842)."""
+        from prolix.tiling.xtrax_adapter import plan_axes_with_xtrax
+
+        return plan_axes_with_xtrax(
+            axes=self.axes,
+            budget_bytes=self.budget_bytes,
+            estimate_memory=lambda decisions: self.estimate_memory(decisions),
         )
