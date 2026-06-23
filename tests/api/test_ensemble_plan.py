@@ -218,3 +218,65 @@ def test_ensemble_plan_run_single_bundle_parity():
 
     # Verify all positions are finite
     assert jnp.all(jnp.isfinite(trajectory.positions))
+
+
+class TestFromBundleConstructor:
+    """Tests for EnsemblePlan.from_bundle classmethod."""
+
+    def test_from_bundle_creates_single_bundle_plan(self) -> None:
+        """from_bundle(b) should set self.bundles = [b]."""
+        b = _make_minimal_bundle()
+        ep = EnsemblePlan.from_bundle(b)
+        assert len(ep.bundles) == 1
+        assert ep.bundles[0] is b
+        assert ep.batch_plan is None
+
+    def test_from_bundle_with_planner_calls_plan(self) -> None:
+        """from_bundle with planner should call planner.plan([bundle])."""
+        from unittest.mock import MagicMock
+        b = _make_minimal_bundle()
+        planner = MagicMock()
+        planner.plan.return_value = "mock_plan"
+        ep = EnsemblePlan.from_bundle(b, planner=planner)
+        planner.plan.assert_called_once()
+        # Verify the argument is a list with the bundle
+        call_args = planner.plan.call_args[0][0]
+        assert len(call_args) == 1
+        assert call_args[0] is b
+        assert ep.batch_plan == "mock_plan"
+
+
+class TestFromBundlesConstructor:
+    """Tests for EnsemblePlan.from_bundles classmethod."""
+
+    def test_from_bundles_creates_multi_bundle_plan(self) -> None:
+        """from_bundles([b1, b2]) should set self.bundles = [b1, b2]."""
+        b1, b2 = _make_minimal_bundle(), _make_minimal_bundle()
+        ep = EnsemblePlan.from_bundles([b1, b2])
+        assert len(ep.bundles) == 2
+        assert ep.bundles[0] is b1
+        assert ep.bundles[1] is b2
+        assert ep.batch_plan is None
+
+    def test_from_bundles_with_planner_calls_plan(self) -> None:
+        """from_bundles with planner should call planner.plan(bundles)."""
+        from unittest.mock import MagicMock
+        b1, b2 = _make_minimal_bundle(), _make_minimal_bundle()
+        planner = MagicMock()
+        planner.plan.return_value = "mock_plan"
+        ep = EnsemblePlan.from_bundles([b1, b2], planner=planner)
+        planner.plan.assert_called_once()
+        # Verify the argument is the list of bundles
+        call_args = planner.plan.call_args[0][0]
+        assert len(call_args) == 2
+        assert call_args[0] is b1
+        assert call_args[1] is b2
+        assert ep.batch_plan == "mock_plan"
+
+    def test_from_bundles_single_bundle(self) -> None:
+        """from_bundles with one bundle should work."""
+        b = _make_minimal_bundle()
+        ep = EnsemblePlan.from_bundles([b])
+        assert len(ep.bundles) == 1
+        assert ep.bundles[0] is b
+        assert ep.batch_plan is None

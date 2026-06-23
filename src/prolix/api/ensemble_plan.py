@@ -45,6 +45,39 @@ class EnsemblePlan:
         else:
             self.batch_plan = None
 
+    @classmethod
+    def from_bundle(cls, bundle: Any, planner: Any = None) -> EnsemblePlan:
+        """Convenience constructor for single-bundle simulation.
+
+        Wraps the bundle in a list and delegates to __init__.
+
+        Args:
+            bundle: A single MolecularBundle instance.
+            planner: Optional planner with a plan() method.
+
+        Returns:
+            EnsemblePlan with bundles=[bundle].
+        """
+        return cls([bundle], planner)
+
+    @classmethod
+    def from_bundles(
+        cls, bundles: list[Any], planner: Any = None
+    ) -> EnsemblePlan:
+        """Factory constructor for multi-bundle simulation.
+
+        Standard "factory on plural input" naming convention.
+        Equivalent to __init__ but makes caller intent explicit.
+
+        Args:
+            bundles: List of MolecularBundle instances.
+            planner: Optional planner with a plan() method.
+
+        Returns:
+            EnsemblePlan with the provided bundles.
+        """
+        return cls(bundles, planner)
+
     def run(
         self,
         n_steps: int,
