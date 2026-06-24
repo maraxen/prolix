@@ -13,7 +13,7 @@ import jax
 import jax.numpy as jnp
 import pytest
 
-from prolix.api import EnsemblePlan
+from prolix.api.export_run import make_single_trajectory_fn
 
 _b1_path = Path(__file__).resolve().parent.parent / "bench" / "test_b1_smoke.py"
 _spec = importlib.util.spec_from_file_location("test_b1_smoke", _b1_path)
@@ -31,18 +31,9 @@ def _hlo_text(lowered) -> str:
 
 
 def _make_trajectory_fn(bundle, *, n_steps: int, dt: float, kT: float):
-    """Export-shaped wrapper: bundle fixed in closure; n_steps static for jit."""
-
-    def trajectory(seed: jnp.ndarray) -> jnp.ndarray:
-        traj = EnsemblePlan.from_bundle(bundle).run(
-            n_steps=n_steps,
-            dt=dt,
-            kT=kT,
-            seed=seed,
-        )
-        return traj.positions
-
-    return trajectory
+    return make_single_trajectory_fn(
+        bundle, n_steps=n_steps, dt=dt, kT=kT
+    )
 
 
 @pytest.mark.fast
