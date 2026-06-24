@@ -28,8 +28,10 @@ from prolix.batched_energy import (
     _angle_energy_masked,
     _bond_energy_masked,
     _dihedral_energy_masked,
+    single_padded_energy,
 )
 from prolix.types.bundles import ATOM_BUCKETS, WATER_BUCKETS, MolecularBundle
+from prolix.typing import PhysicsSystem
 
 
 def atom_bucket_size(bundle: MolecularBundle) -> int:
@@ -116,6 +118,10 @@ def bonded_energy_fn_from_bundle(
     bundle: MolecularBundle,
 ) -> Callable[..., jnp.ndarray]:
     """Bonded-only energy callable compatible with settle_langevin."""
+    return _bonded_energy_core(bundle)
+
+
+def _bonded_energy_core(bundle: MolecularBundle) -> Callable[..., jnp.ndarray]:
     disp_fn, _ = displacement_fn_for_bundle(bundle)
 
     def energy_fn(positions: jnp.ndarray, **kwargs: object) -> jnp.ndarray:
@@ -153,5 +159,138 @@ def bonded_energy_fn_from_bundle(
             disp_fn,
         )
         return e
+
+    return energy_fn
+
+
+def _dense_excl_matrices_from_bundle(
+    bundle: MolecularBundle,
+    n_atoms: int,
+) -> tuple[jnp.ndarray, jnp.ndarray]:
+    """Build (N, N) exclusion scale matrices from bundle pair lists (host-side)."""
+    import numpy as np
+
+    dense_vdw = np.ones((n_atoms, n_atoms), dtype=np.float32)
+    dense_elec = np.ones((n_atoms, n_atoms), dtype=np.float32)
+    n_excl = int(jnp.asarray(bundle.n_excl))
+    if n_excl <= 0:
+        return jnp.asarray(dense_vdw), jnp.asarray(dense_elec)
+
+    pairs = np.asarray(bundle.excl_indices[:n_excl])
+    active = np.asarray(bundle.excl_mask[:n_excl], dtype=bool)
+    sv = np.asarray(bundle.excl_scales_vdw[:n_excl], dtype=np.float32)
+    se = np.asarray(bundle.excl_scales_elec[:n_excl], dtype=np.float32)
+    for k in range(n_excl):
+        if not active[k]:
+            continue
+        i, j = int(pairs[k, 0]), int(pairs[k, 1])
+        if i < 0 or j < 0 or i >= n_atoms or j >= n_atoms:
+            continue
+        dense_vdw[i, j] = dense_vdw[j, i] = float(sv[k])
+        dense_elec[i, j] = dense_elec[j, i] = float(se[k])
+    return jnp.asarray(dense_vdw), jnp.asarray(dense_elec)
+
+
+def physics_system_from_bundle(
+    bundle: MolecularBundle,
+    positions: jnp.ndarray,
+) -> PhysicsSystem:
+    """Reconstruct a PhysicsSystem view for ``single_padded_energy`` (host prefix ``N``)."""
+    n = int(positions.shape[0])
+    n_real = int(jnp.asarray(bundle.n_atoms))
+
+    def _slice1(arr):
+        return arr[:n]
+
+    def _slice_mask(mask, count: int):
+        return mask[:count]
+
+    nb = int(jnp.asarray(bundle.n_bonds))
+    na = int(jnp.asarray(bundle.n_angles))
+    nd = int(jnp.asarray(bundle.n_dihedrals))
+    ni = int(jnp.asarray(bundle.n_impropers))
+    nub = int(jnp.asarray(bundle.n_urey_bradley))
+    nw = int(jnp.asarray(bundle.n_waters))
+
+    empty_ub_b = jnp.zeros((0, 3), dtype=jnp.int32)
+    empty_ub_p = jnp.zeros((0, 2), dtype=jnp.float32)
+    empty_ub_m = jnp.zeros(0, dtype=bool)
+
+    dih_params = bundle.dihedral_params
+    if dih_params.ndim == 3:
+        flat_dih = dih_params.reshape(-1, dih_params.shape[-1])
+    else:
+        flat_dih = dih_params[..., :3]
+
+    imp_params = bundle.improper_params
+    if imp_params.ndim == 3:
+        flat_imp = imp_params.reshape(-1, imp_params.shape[-1])
+    else:
+        flat_imp = imp_params[..., :3]
+
+    box_size = None
+    if bundle.shape_spec.has_pbc:
+        box_size = jnp.diag(bundle.box).astype(positions.dtype)
+
+    dense_vdw, dense_elec = _dense_excl_matrices_from_bundle(bundle, n)
+
+    return PhysicsSystem(
+        positions=positions,
+        charges=_slice1(bundle.charges),
+        sigmas=_slice1(bundle.sigmas),
+        epsilons=_slice1(bundle.epsilons),
+        radii=_slice1(bundle.radii),
+        scaled_radii=_slice1(bundle.scaled_radii),
+        masses=masses_for_bundle(bundle)[:n],
+        element_ids=jnp.zeros(n, dtype=jnp.int32),
+        atom_mask=_slice1(bundle.atom_mask),
+        is_hydrogen=jnp.zeros(n, dtype=bool),
+        is_backbone=jnp.zeros(n, dtype=bool),
+        is_heavy=_slice1(bundle.atom_mask),
+        protein_atom_mask=jnp.zeros(n, dtype=bool),
+        water_atom_mask=jnp.zeros(n, dtype=bool),
+        bonds=bundle.bond_idx[:nb],
+        bond_params=bundle.bond_params[:nb],
+        bond_mask=_slice_mask(bundle.bond_mask, nb),
+        angles=bundle.angle_idx[:na],
+        angle_params=bundle.angle_params[:na],
+        angle_mask=_slice_mask(bundle.angle_mask, na),
+        dihedrals=bundle.dihedral_idx[:nd],
+        dihedral_params=flat_dih[:nd],
+        dihedral_mask=_slice_mask(bundle.dihedral_mask, nd),
+        impropers=bundle.improper_idx[:ni],
+        improper_params=flat_imp[:ni] if ni else jnp.zeros((0, 3), dtype=flat_imp.dtype),
+        improper_mask=_slice_mask(bundle.improper_mask, ni) if ni else jnp.zeros(0, dtype=bool),
+        urey_bradley_bonds=bundle.urey_bradley_idx[:nub] if nub else empty_ub_b,
+        urey_bradley_params=bundle.urey_bradley_params[:nub] if nub else empty_ub_p,
+        urey_bradley_mask=_slice_mask(bundle.urey_bradley_mask, nub) if nub else empty_ub_m,
+        water_indices=bundle.water_indices[:nw] if nw else None,
+        water_mask=_slice_mask(bundle.water_mask, nw) if nw else None,
+        n_real_atoms=jnp.array(min(n, n_real), dtype=jnp.int32),
+        n_padded_atoms=n,
+        box_size=box_size,
+        pme_alpha=float(jnp.asarray(bundle.pme_alpha)),
+        pme_grid_points=64,
+        nonbonded_cutoff=float(jnp.asarray(bundle.cutoff_distance)),
+        dense_excl_scale_vdw=dense_vdw,
+        dense_excl_scale_elec=dense_elec,
+    )
+
+
+def energy_fn_from_bundle(
+    bundle: MolecularBundle,
+    *,
+    include_nonbonded: bool = True,
+) -> Callable[..., jnp.ndarray]:
+    """Total energy from bundle fields (bonded + optional nonbonded via ``single_padded_energy``)."""
+    if not include_nonbonded:
+        return bonded_energy_fn_from_bundle(bundle)
+
+    disp_fn, _ = displacement_fn_for_bundle(bundle)
+
+    def energy_fn(positions: jnp.ndarray, **kwargs: object) -> jnp.ndarray:
+        del kwargs
+        sys = physics_system_from_bundle(bundle, positions)
+        return single_padded_energy(sys, disp_fn, implicit_solvent=False)
 
     return energy_fn

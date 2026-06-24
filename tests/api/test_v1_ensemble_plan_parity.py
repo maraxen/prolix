@@ -8,7 +8,8 @@ import pytest
 
 from prolix.api.bundle_md import (
     active_positions,
-    bonded_energy_fn_from_bundle,
+    as_integration_scalars,
+    energy_fn_from_bundle,
     displacement_fn_for_bundle,
     masses_for_bundle,
 )
@@ -108,7 +109,7 @@ def _one_water_bundle():
 
 def _reference_trajectory(bundle, *, n_steps, dt, kT, seed):
     """Direct settle_langevin using the same bundle-backed helpers as EnsemblePlan."""
-    energy_fn = bonded_energy_fn_from_bundle(bundle)
+    energy_fn = energy_fn_from_bundle(bundle)
     _, shift_fn = displacement_fn_for_bundle(bundle)
     masses = masses_for_bundle(bundle)
     water_indices = bundle.water_indices[: int(bundle.n_waters)]

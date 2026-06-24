@@ -183,7 +183,7 @@ class EnsemblePlan:
         from prolix.api.bundle_md import (
             active_positions,
             as_integration_scalars,
-            bonded_energy_fn_from_bundle,
+            energy_fn_from_bundle,
             displacement_fn_for_bundle,
             masses_for_bundle,
             positions_with_prefix,
@@ -194,7 +194,7 @@ class EnsemblePlan:
         from prolix.api.observables import Trajectory
         from prolix.physics.settle import settle_langevin
 
-        energy_fn = bonded_energy_fn_from_bundle(bundle)
+        energy_fn = energy_fn_from_bundle(bundle)
         _displacement_fn, shift_fn = displacement_fn_for_bundle(bundle)
         dt, kT = as_integration_scalars(dt, kT, dtype=bundle.positions.dtype)
 
