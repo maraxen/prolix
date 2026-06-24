@@ -1,10 +1,26 @@
-"""MolecularBundle-backed energy and displacement helpers for EnsemblePlan.run()."""
+"""MolecularBundle-backed energy and displacement helpers for EnsemblePlan.run().
+
+JIT contract
+------------
+``bundle.n_atoms``, ``bundle.n_waters``, etc. are **dynamic scalar arrays**. Never
+call ``int()`` on them inside ``jax.vmap`` / ``jit`` — that forces concretization
+and extra recompiles.
+
+Patterns:
+- **Static batch prefix** (``integration_prefix: int``): set once on the host when
+  ``can_jit_vmap_n_mols`` holds (all bundles share the same ``n_atoms``). Passed
+  as a closure constant into vmap so XLA sees a static slice, not a traced length.
+- **Bucket size** (``atom_bucket_size``): from ``shape_spec`` only — compile-time
+  constant per bucket, used for padding checks and planner axes, not for
+  ``int(bundle.n_atoms)`` inside traced code.
+- **Trajectory trim**: ``trim_trajectory_positions`` uses ``int(n_atoms)`` on the
+  **host** after integration (or in ``unstack_trajectories``), never mid-trace.
+"""
 
 from __future__ import annotations
 
 from collections.abc import Callable
 
-import jax
 import jax.numpy as jnp
 from jax_md import space
 
@@ -13,7 +29,35 @@ from prolix.batched_energy import (
     _bond_energy_masked,
     _dihedral_energy_masked,
 )
-from prolix.types.bundles import MolecularBundle
+from prolix.types.bundles import ATOM_BUCKETS, WATER_BUCKETS, MolecularBundle
+
+
+def atom_bucket_size(bundle: MolecularBundle) -> int:
+    """Static padded atom count from shape_spec (compile-time constant per bucket)."""
+    return ATOM_BUCKETS[bundle.shape_spec.atom_bucket_idx]
+
+
+def water_bucket_size(bundle: MolecularBundle) -> int:
+    """Static padded water slot count from shape_spec."""
+    return WATER_BUCKETS[bundle.shape_spec.water_bucket_idx]
+
+
+def positions_with_prefix(bundle: MolecularBundle, prefix: int) -> jnp.ndarray:
+    """Prefix slice of positions; ``prefix`` must be a host static int (not traced)."""
+    return bundle.positions[:prefix]
+
+
+def unit_masses(prefix: int, dtype) -> jnp.ndarray:
+    """Unit masses for ``prefix`` atoms; ``prefix`` is host static."""
+    return jnp.ones(prefix, dtype=dtype)
+
+
+def trim_trajectory_positions(
+    positions: jnp.ndarray, bundle: MolecularBundle
+) -> jnp.ndarray:
+    """Trim ``(steps, bucket, 3)`` or ``(steps, n, 3)`` to real atoms (host)."""
+    n_real = int(jnp.asarray(bundle.n_atoms))
+    return positions[:, :n_real, ...]
 
 
 def displacement_fn_for_bundle(
@@ -28,23 +72,31 @@ def displacement_fn_for_bundle(
 
 
 def tip3p_masses(n_waters: int, dtype=jnp.float64) -> jnp.ndarray:
-    """TIP3P O-H-H masses for ``n_waters`` molecules."""
+    """TIP3P O-H-H masses for ``n_waters`` molecules (host ``n_waters``)."""
     per = jnp.array([15.999, 1.008, 1.008], dtype=dtype)
     return jnp.tile(per, n_waters)
 
 
 def masses_for_bundle(bundle: MolecularBundle) -> jnp.ndarray:
-    """Infer atomic masses from bundle water count (TIP3P) or unit mass."""
-    n_atoms = int(bundle.n_atoms)
-    n_waters = int(bundle.n_waters)
+    """Real-prefix masses for host-side single-system runs."""
+    n_atoms = int(jnp.asarray(bundle.n_atoms))
+    n_waters = int(jnp.asarray(bundle.n_waters))
     if n_waters > 0 and n_atoms == 3 * n_waters:
         return tip3p_masses(n_waters, dtype=bundle.positions.dtype)
     return jnp.ones(n_atoms, dtype=bundle.positions.dtype)
 
 
 def active_positions(bundle: MolecularBundle) -> jnp.ndarray:
-    """Real atom positions (prefix-packed by make_bundle_from_system)."""
-    return bundle.positions[: int(bundle.n_atoms)]
+    """Real atom positions (host path)."""
+    n_atoms = int(jnp.asarray(bundle.n_atoms))
+    return bundle.positions[:n_atoms]
+
+
+def water_indices_for_integration(bundle: MolecularBundle) -> jnp.ndarray | None:
+    """Water indices for SETTLE when the bundle carries waters (host check)."""
+    if int(jnp.asarray(bundle.n_waters)) == 0:
+        return None
+    return bundle.water_indices[: int(jnp.asarray(bundle.n_waters))]
 
 
 def bonded_energy_fn_from_bundle(

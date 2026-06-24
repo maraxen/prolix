@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from typing import Any
 
-import equinox as eqx
 import jax
 import jax.numpy as jnp
 
@@ -31,12 +30,22 @@ def can_stack_molecular_bundles(bundles: list[MolecularBundle]) -> bool:
     return True
 
 
+def _n_atoms_equal(a: MolecularBundle, b: MolecularBundle) -> bool:
+    """Compare dynamic n_atoms scalars without Python int() (host-side only)."""
+    return bool(
+        jnp.array_equal(
+            jnp.asarray(a.n_atoms, dtype=jnp.int32),
+            jnp.asarray(b.n_atoms, dtype=jnp.int32),
+        )
+    )
+
+
 def can_jit_vmap_n_mols(bundles: list[MolecularBundle]) -> bool:
-    """True when stack-compatible and every bundle has the same real atom count."""
+    """True when stack-compatible and all bundles share the same n_atoms scalar."""
     if not can_stack_molecular_bundles(bundles):
         return False
-    n0 = int(bundles[0].n_atoms)
-    return all(int(b.n_atoms) == n0 for b in bundles)
+    ref = bundles[0]
+    return all(_n_atoms_equal(ref, b) for b in bundles[1:])
 
 
 def stack_molecular_bundles(bundles: list[MolecularBundle]) -> MolecularBundle:
@@ -48,12 +57,18 @@ def stack_molecular_bundles(bundles: list[MolecularBundle]) -> MolecularBundle:
     return jax.tree.map(lambda *xs: jnp.stack(xs, axis=0), *bundles)
 
 
-def unstack_trajectories(batched: Any, batch_size: int) -> list[Any]:
-    """Split a vmapped Trajectory (batch axis 0) into a list."""
+def unstack_trajectories(
+    batched: Any,
+    bundles: list[MolecularBundle],
+) -> list[Any]:
+    """Split a vmapped Trajectory and trim each to real atom count on the host."""
+    from prolix.api.bundle_md import trim_trajectory_positions
     from prolix.api.observables import Trajectory
 
     if not isinstance(batched, Trajectory):
         raise TypeError(f"Expected Trajectory, got {type(batched)}")
+
+    batch_size = len(bundles)
 
     def _slice_leaf(x):
         if isinstance(x, jnp.ndarray) and x.ndim > 0:
@@ -63,15 +78,15 @@ def unstack_trajectories(batched: Any, batch_size: int) -> list[Any]:
     positions_lists = _slice_leaf(batched.positions)
     obs_lists: dict[str, list[Any]] = {}
     for name, value in batched.observable_values.items():
-        slices = _slice_leaf(value)
-        obs_lists[name] = slices
+        obs_lists[name] = _slice_leaf(value)
 
     out: list[Trajectory] = []
-    for i in range(batch_size):
+    for i, bundle in enumerate(bundles):
         obs_i = {name: obs_lists[name][i] for name in batched.observable_values}
+        pos = trim_trajectory_positions(positions_lists[i], bundle)
         out.append(
             Trajectory(
-                positions=positions_lists[i],
+                positions=pos,
                 observable_values=obs_i,
                 n_steps=batched.n_steps,
             )

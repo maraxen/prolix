@@ -137,8 +137,9 @@ class EnsemblePlan:
 
         stacked = stack_molecular_bundles(self.bundles)
         n_systems = len(self.bundles)
-        n_active = int(self.bundles[0].n_atoms)
         seeds = jnp.arange(n_systems, dtype=jnp.int32) + seed
+        # Host-static: identical for every bundle in a jit-vmap batch (see can_jit_vmap_n_mols).
+        integration_prefix = int(jnp.asarray(self.bundles[0].n_atoms))
 
         def run_one(bundle, seed_i: jnp.ndarray) -> Trajectory:
             obs = observables
@@ -151,7 +152,8 @@ class EnsemblePlan:
                 kT,
                 seed_i,
                 observables=obs,
-                n_active=n_active,
+                integration_prefix=integration_prefix,
+                trim_output=False,
             )
 
         batched = dispatch_n_mols(
@@ -161,7 +163,7 @@ class EnsemblePlan:
             stacked,
             seeds,
         )
-        return unstack_trajectories(batched, n_systems)
+        return unstack_trajectories(batched, self.bundles)
 
     def _run_single(
         self,
@@ -169,9 +171,11 @@ class EnsemblePlan:
         n_steps: int,
         dt: float,
         kT: float,
-        seed: int | Any,
+        seed: int | jnp.ndarray,
         observables: dict[str, Any] | None = None,
-        n_active: int | None = None,
+        *,
+        integration_prefix: int | None = None,
+        trim_output: bool = True,
     ) -> Trajectory:
         import jax
         import jax.numpy as jnp
@@ -181,6 +185,10 @@ class EnsemblePlan:
             bonded_energy_fn_from_bundle,
             displacement_fn_for_bundle,
             masses_for_bundle,
+            positions_with_prefix,
+            trim_trajectory_positions,
+            unit_masses,
+            water_indices_for_integration,
         )
         from prolix.api.observables import Trajectory
         from prolix.physics.settle import settle_langevin
@@ -188,19 +196,14 @@ class EnsemblePlan:
         energy_fn = bonded_energy_fn_from_bundle(bundle)
         _displacement_fn, shift_fn = displacement_fn_for_bundle(bundle)
 
-        positions_init = (
-            bundle.positions[:n_active]
-            if n_active is not None
-            else active_positions(bundle)
-        )
-        if n_active is not None:
-            masses = jnp.ones(n_active, dtype=bundle.positions.dtype)
+        if integration_prefix is not None:
+            positions_init = positions_with_prefix(bundle, integration_prefix)
+            masses = unit_masses(integration_prefix, bundle.positions.dtype)
+            water_indices = None
         else:
+            positions_init = active_positions(bundle)
             masses = masses_for_bundle(bundle)
-
-        water_indices = None
-        if n_active is None and int(bundle.n_waters) > 0:
-            water_indices = bundle.water_indices[: int(bundle.n_waters)]
+            water_indices = water_indices_for_integration(bundle)
 
         init_fn, apply_fn = settle_langevin(
             energy_fn,
@@ -227,6 +230,8 @@ class EnsemblePlan:
             positions_traj.append(pos)
 
         positions_array = jnp.stack(positions_traj)
+        if trim_output:
+            positions_array = trim_trajectory_positions(positions_array, bundle)
 
         observable_values: dict[str, Any] = {}
         if observables:
