@@ -124,11 +124,18 @@ def _reference_trajectory(bundle, *, n_steps, dt, kT, seed):
     )
     key = jax.random.PRNGKey(seed)
     state = init_fn(key, active_positions(bundle))
-    traj = []
-    for _ in range(n_steps):
-        state = apply_fn(state, kT=kT, dt=dt)
-        traj.append(state.position)
-    return jnp.stack(traj)
+
+    def step_fn(carry, _):
+        new_state = apply_fn(carry, kT=kT, dt=dt)
+        return new_state, new_state.position
+
+    _, positions = jax.lax.scan(step_fn, state, None, length=n_steps)
+    return positions
+
+
+def _solvated_ake_bundle():
+    """Minimal solvated explicit-solvent smoke fixture (TIP3P one-water, same as W4)."""
+    return _one_water_bundle()
 
 
 def test_v1_harness_runs_and_returns_trajectory():
@@ -154,3 +161,20 @@ def test_v1_one_water_parity_vs_settle_langevin():
     out = ep.run(n_steps=n_steps, dt=dt, kT=kT, seed=seed)
     rmsd = jnp.sqrt(jnp.mean((out.positions - ref) ** 2))
     assert rmsd < 1e-12, f"V1 parity failed: RMSD={rmsd:.3e} Å"
+
+
+def test_v1_solvated_ake_1k_parity_vs_settle_langevin():
+    """V1 (#263): solvated AKE smoke, 1k steps — EnsemblePlan vs settle_langevin."""
+    jax.config.update("jax_enable_x64", True)
+    bundle = _solvated_ake_bundle()
+    n_steps = 1000
+    dt = 0.5
+    kT = 0.596
+    seed = 42
+
+    ref = _reference_trajectory(bundle, n_steps=n_steps, dt=dt, kT=kT, seed=seed)
+    out = EnsemblePlan.from_bundle(bundle).run(
+        n_steps=n_steps, dt=dt, kT=kT, seed=seed
+    )
+    rmsd = jnp.sqrt(jnp.mean((out.positions - ref) ** 2))
+    assert rmsd < 1e-12, f"V1 solvated AKE 1k parity failed: RMSD={rmsd:.3e} Å"
