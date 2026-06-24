@@ -9,9 +9,23 @@ v1.1 Item 4: unblocked by EnergyParams / make_energy_fn_pure (Item 1).
 from __future__ import annotations
 
 import pathlib
+import shutil
+import subprocess
 from typing import Any
 
 import jax
+
+# Claim 2 W3 gate (#277): roadmap target for browser-deployable artifacts.
+WASM_ARTIFACT_MAX_BYTES = 50 * 1024 * 1024
+
+# Default iree-compile flags for StableHLO → wasm32 (Claim 2 / IREE-WASM path).
+_IREE_WASM_COMPILE_ARGS = (
+    "--iree-input-type=stablehlo",
+    "--iree-hal-target-device=local",
+    "--iree-hal-local-target-device-backends=llvm-cpu",
+    "--iree-llvmcpu-target-triple=wasm32-unknown-unknown",
+    "--iree-llvmcpu-target-cpu=generic",
+)
 
 
 def export_energy_fn(
@@ -118,9 +132,102 @@ def load_artifact(path: str | pathlib.Path) -> str:
   return pathlib.Path(path).read_text()
 
 
+def find_iree_compile() -> str | None:
+  """Return path to ``iree-compile`` on PATH, or None if not installed."""
+  return shutil.which("iree-compile")
+
+
+def compile_stablehlo_mlir_to_wasm(
+    mlir: str | pathlib.Path,
+    output: str | pathlib.Path,
+    *,
+    iree_compile: str | None = None,
+) -> pathlib.Path:
+  """Compile StableHLO MLIR text to a wasm32 IREE artifact via ``iree-compile``.
+
+  Requires the optional ``wasm`` extra (``iree-base-compiler``) or a system
+  ``iree-compile`` on PATH.
+
+  Args:
+      mlir: StableHLO MLIR module text or path to a ``.mlir`` file.
+      output: Destination ``.wasm`` (or ``.vmfb``) path.
+      iree_compile: Optional explicit ``iree-compile`` binary path.
+
+  Returns:
+      Resolved output path.
+
+  Raises:
+      FileNotFoundError: ``iree-compile`` not found.
+      subprocess.CalledProcessError: IREE compilation failed.
+  """
+  exe = iree_compile or find_iree_compile()
+  if exe is None:
+    msg = (
+        "iree-compile not found on PATH; install with: "
+        "uv sync --extra wasm  (provides iree-base-compiler)"
+    )
+    raise FileNotFoundError(msg)
+
+  out_path = pathlib.Path(output)
+  out_path.parent.mkdir(parents=True, exist_ok=True)
+
+  if isinstance(mlir, pathlib.Path):
+    mlir_path = mlir
+  elif isinstance(mlir, str):
+    candidate = pathlib.Path(mlir)
+    try:
+      is_existing_file = candidate.is_file()
+    except OSError:
+      is_existing_file = False
+    if is_existing_file:
+      mlir_path = candidate
+    else:
+      mlir_path = out_path.with_suffix(".mlir")
+      mlir_path.write_text(mlir)
+  else:
+    raise TypeError(f"mlir must be pathlib.Path or str, got {type(mlir)!r}")
+
+  cmd = [exe, *_IREE_WASM_COMPILE_ARGS, str(mlir_path), "-o", str(out_path)]
+  subprocess.run(cmd, check=True, capture_output=True, text=True)
+  return out_path
+
+
+def compile_lowered_to_wasm(
+    lowered: Any,
+    output: str | pathlib.Path,
+    *,
+    iree_compile: str | None = None,
+) -> pathlib.Path:
+  """Compile a JAX ``Lowered`` artifact (``.as_text()`` StableHLO) to wasm32."""
+  return compile_stablehlo_mlir_to_wasm(
+      lowered.as_text(), output, iree_compile=iree_compile
+  )
+
+
+def assert_wasm_artifact_under_limit(
+    path: str | pathlib.Path,
+    *,
+    max_bytes: int = WASM_ARTIFACT_MAX_BYTES,
+) -> int:
+  """Return artifact size in bytes; raise ``AssertionError`` if over limit."""
+  size = pathlib.Path(path).stat().st_size
+  if size > max_bytes:
+    mb = size / (1024 * 1024)
+    cap = max_bytes / (1024 * 1024)
+    raise AssertionError(
+        f"WASM artifact {path} is {mb:.2f} MB; limit is {cap:.0f} MB (#277)"
+    )
+  return size
+
+
 __all__ = [
+    "WASM_ARTIFACT_MAX_BYTES",
+    "assert_wasm_artifact_under_limit",
+    "compile_lowered_to_wasm",
+    "compile_stablehlo_mlir_to_wasm",
     "export_energy_fn",
     "export_langevin_step",
-    "save_artifact",
+    "find_iree_compile",
     "load_artifact",
+    "save_artifact",
 ]

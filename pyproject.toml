@@ -77,6 +77,10 @@ viz = [
     "flask>=3.0.0",
 ]
 
+wasm = [
+    "iree-base-compiler>=3.11",
+]
+
 [tool.pytest.ini_options]
 timeout = 900
 timeout_method = "thread"
@@ -89,6 +93,7 @@ markers = [
     "benchmark: marks tests as benchmark (deselect with -m 'not benchmark')",
     "openmm: marks tests that require OpenMM (optional dependency)",
     "kups: optional third-party kups package for thermostat cross-validation (pytest -m \"not kups\" to skip)",
+    "wasm: marks tests requiring iree-compile (optional wasm extra, Claim 2 W3)",
     "integration: marks heavy parity or integration tests against other engines",
     "dynamics: marks tests involving long MD trajectories or statistical checks",
     "order: controls test execution order",

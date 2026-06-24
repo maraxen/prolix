@@ -886,6 +886,23 @@ wheels = [
 ]
 
 [[package]]
+name = "iree-base-compiler"
+version = "3.11.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "numpy" },
+    { name = "sympy" },
+]
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/4c/1f/ae45ccb7edef9eead14eacb0e8b472ce3d72ee3863a0f9eb6c916e09e6e3/iree_base_compiler-3.11.0-cp312-abi3-macosx_13_0_universal2.whl", hash = "sha256:2e9fc888b9044662a14eeba01b6302d75a6118f68874699dcf8f9c7e991a4ee2", size = 71963066, upload-time = "2026-03-19T23:20:15.961Z" },
+    { url = "https://files.pythonhosted.org/packages/24/a3/67dda13e131479d17a5f8c63c0e43bd6674ddc5ff84d49f77b9155a917f8/iree_base_compiler-3.11.0-cp312-abi3-manylinux_2_27_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:1aea934fdc2ebe1dd64e5f2063a96de675a35f0b4856f9ddb76b2df58dfefb87", size = 82753538, upload-time = "2026-03-19T23:20:20.781Z" },
+    { url = "https://files.pythonhosted.org/packages/47/9c/f7cd82016c869ceb37b787b628608b68225c9e7bc46e0de9f18a9932ef3c/iree_base_compiler-3.11.0-cp312-abi3-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:99fc3369375405485f11da541a75ef2b153d529fa3712c1d9771c98a35e2669e", size = 83137835, upload-time = "2026-03-19T23:20:26.161Z" },
+    { url = "https://files.pythonhosted.org/packages/ce/9f/f8c8cd7ed546a59266e2e76847f4795549d1451b6be1e3c4bea62192f2e4/iree_base_compiler-3.11.0-cp312-abi3-win_amd64.whl", hash = "sha256:67b3656c473d6dd3059b9ad9676190591f11b77c6e2f785d55e79730be677be7", size = 57917646, upload-time = "2026-03-19T23:20:30.796Z" },
+    { url = "https://files.pythonhosted.org/packages/b5/65/a3de9aef2cdc64fcde2fb13f1e3f56d874973dafecb0aa5751e52c60b05b/iree_base_compiler-3.11.0-cp313-cp313t-manylinux_2_27_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:3c99a4484d3e56ae9e83bc2d079e5f3d8329cd7836568b60c39cf9ff8847dd6c", size = 82806062, upload-time = "2026-03-19T23:20:35.266Z" },
+    { url = "https://files.pythonhosted.org/packages/86/1c/0d0fabfeff79b1f0b53b190dea6f5e65546f74d821693ebe200ffd195ca6/iree_base_compiler-3.11.0-cp313-cp313t-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:5be5421f6a447f04188a571d7e7668430b2fe1ec413fb2a3ab997fb7e4e46671", size = 83171193, upload-time = "2026-03-19T23:20:40.594Z" },
+]
+
+[[package]]
 name = "itsdangerous"
 version = "2.2.0"
 source = { registry = "https://pypi.org/simple" }
@@ -2215,6 +2232,9 @@ viz = [
     { name = "flask" },
     { name = "py2dmol" },
 ]
+wasm = [
+    { name = "iree-base-compiler" },
+]
 
 [package.dev-dependencies]
 benchmark-dmff = [
@@ -2251,6 +2271,7 @@ requires-dist = [
     { name = "flask", marker = "extra == 'viz'", specifier = ">=3.0.0" },
     { name = "h5py", specifier = ">=3.16.0" },
     { name = "imageio", specifier = ">=2.37.2" },
+    { name = "iree-base-compiler", marker = "extra == 'wasm'", specifier = ">=3.11" },
     { name = "jax" },
     { name = "jax", marker = "extra == 'cpu'" },
     { name = "jax", extras = ["cuda12"], marker = "extra == 'cuda'" },
@@ -2283,7 +2304,7 @@ requires-dist = [
     { name = "ty", marker = "extra == 'dev'" },
     { name = "xtrax", directory = "/home/marielle/projects/xtrax" },
 ]
-provides-extras = ["cuda", "tpu", "cpu", "dev", "openmm", "docs", "viz"]
+provides-extras = ["cuda", "tpu", "cpu", "dev", "openmm", "docs", "viz", "wasm"]
 
 [package.metadata.requires-dev]
 benchmark-dmff = [
@@ -3424,6 +3445,7 @@ requires-dist = [
     { name = "chex", marker = "extra == 'dev'", specifier = ">=0.1.86" },
     { name = "complexipy", marker = "extra == 'dev'", specifier = ">=5.6.1" },
     { name = "equinox", specifier = ">=0.11.0" },
+    { name = "flatbuffers", marker = "extra == 'cli'", specifier = ">=2" },
     { name = "grain", specifier = ">=0.2.0" },
     { name = "import-linter", marker = "extra == 'dev'", specifier = ">=2.1" },
     { name = "interrogate", marker = "extra == 'dev'", specifier = ">=1.7.0" },
@@ -3445,14 +3467,17 @@ requires-dist = [
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.4.0" },
     { name = "seaborn", marker = "extra == 'eda'", specifier = ">=0.13" },
     { name = "ty", marker = "extra == 'dev'" },
+    { name = "tyro", marker = "extra == 'cli'", specifier = ">=0.9,<2" },
 ]
-provides-extras = ["dev", "eda"]
+provides-extras = ["cli", "dev", "eda"]
 
 [package.metadata.requires-dev]
 dev = [
     { name = "complexipy", specifier = ">=5.6.1" },
+    { name = "import-linter", specifier = ">=2.1" },
     { name = "pytest-benchmark", specifier = ">=5.2.3" },
     { name = "pytest-cov", specifier = ">=7.1.0" },
+    { name = "tyro", specifier = ">=0.9,<2" },
 ]
 docs = [
     { name = "furo" },
