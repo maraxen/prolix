@@ -91,6 +91,13 @@ class EnsemblePlan:
                 self.bundles[0], n_steps, dt, kT, seed, observables=observables
             )
 
+        from prolix.api.bundle_stack import can_jit_vmap_n_mols
+
+        if can_jit_vmap_n_mols(self.bundles):
+            return self._run_stacked_dispatch(
+                n_steps, dt, kT, seed, observables=observables
+            )
+
         chunk = self._systems_chunk_size()
         chunk = len(self.bundles) if chunk == 0 else max(1, chunk)
         trajectories: list[Trajectory] = []
@@ -111,14 +118,60 @@ class EnsemblePlan:
                 )
         return trajectories
 
+    def _run_stacked_dispatch(
+        self,
+        n_steps: int,
+        dt: float,
+        kT: float,
+        seed: int,
+        observables: dict[str, Any] | None = None,
+    ) -> list[Trajectory]:
+        """JIT vmap / safe_map over stack-compatible bundles (#2645)."""
+        import jax.numpy as jnp
+
+        from prolix.api.bundle_stack import (
+            stack_molecular_bundles,
+            unstack_trajectories,
+        )
+        from prolix.api.ensemble_dispatch import dispatch_n_mols
+
+        stacked = stack_molecular_bundles(self.bundles)
+        n_systems = len(self.bundles)
+        n_active = int(self.bundles[0].n_atoms)
+        seeds = jnp.arange(n_systems, dtype=jnp.int32) + seed
+
+        def run_one(bundle, seed_i: jnp.ndarray) -> Trajectory:
+            obs = observables
+            if observables is not None:
+                obs = _observables_for_bundle(bundle, observables)
+            return self._run_single(
+                bundle,
+                n_steps,
+                dt,
+                kT,
+                seed_i,
+                observables=obs,
+                n_active=n_active,
+            )
+
+        batched = dispatch_n_mols(
+            self.batch_plan,
+            n_systems,
+            run_one,
+            stacked,
+            seeds,
+        )
+        return unstack_trajectories(batched, n_systems)
+
     def _run_single(
         self,
         bundle: Any,
         n_steps: int,
         dt: float,
         kT: float,
-        seed: int,
+        seed: int | Any,
         observables: dict[str, Any] | None = None,
+        n_active: int | None = None,
     ) -> Trajectory:
         import jax
         import jax.numpy as jnp
@@ -135,11 +188,18 @@ class EnsemblePlan:
         energy_fn = bonded_energy_fn_from_bundle(bundle)
         _displacement_fn, shift_fn = displacement_fn_for_bundle(bundle)
 
-        positions_init = active_positions(bundle)
-        masses = masses_for_bundle(bundle)
+        positions_init = (
+            bundle.positions[:n_active]
+            if n_active is not None
+            else active_positions(bundle)
+        )
+        if n_active is not None:
+            masses = jnp.ones(n_active, dtype=bundle.positions.dtype)
+        else:
+            masses = masses_for_bundle(bundle)
 
         water_indices = None
-        if int(bundle.n_waters) > 0:
+        if n_active is None and int(bundle.n_waters) > 0:
             water_indices = bundle.water_indices[: int(bundle.n_waters)]
 
         init_fn, apply_fn = settle_langevin(
@@ -153,7 +213,7 @@ class EnsemblePlan:
             project_ou_momentum_rigid=True,
         )
 
-        key = jax.random.PRNGKey(seed)
+        key = jax.random.PRNGKey(jnp.asarray(seed, dtype=jnp.uint32))
         state = init_fn(key, positions_init)
 
         positions_traj = []

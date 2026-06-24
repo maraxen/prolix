@@ -11,6 +11,8 @@ from prolix.tiling.axes import N_ATOMS, N_MOLS
 from prolix.tiling.planner import BatchPlan, estimate_memory_theoretical
 from prolix.tiling.xtrax_adapter import plan_axes_with_xtrax
 
+from prolix.api.bundle_stack import can_jit_vmap_n_mols, can_stack_molecular_bundles
+
 
 def _device_budget_bytes(headroom: float, param_bytes: float) -> float:
     try:
@@ -40,10 +42,19 @@ class EnsembleMDPlanner:
         """Return a BatchPlan for the given bundle batch."""
         n_systems = max(1, len(bundles))
         max_atoms = max((int(b.n_atoms) for b in bundles), default=1)
+        stackable = len(bundles) > 1 and can_stack_molecular_bundles(bundles)
+        homo_n_atoms = (
+            len(bundles) > 1
+            and can_jit_vmap_n_mols(bundles)
+        )
 
         axes = [
             dataclasses.replace(N_ATOMS, cardinality=max_atoms),
-            dataclasses.replace(N_MOLS, cardinality=n_systems),
+            dataclasses.replace(
+                N_MOLS,
+                cardinality=n_systems,
+                heterogeneous=not homo_n_atoms,
+            ),
         ]
         budget = _device_budget_bytes(self.headroom, self.param_bytes)
 
