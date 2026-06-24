@@ -27,6 +27,10 @@ def _hlo_text(lowered) -> str:
         return lowered.as_text()
 
 
+def _md_scalars(dt: float, kT: float, *, dtype=jnp.float32):
+    return jnp.asarray(dt, dtype=dtype), jnp.asarray(kT, dtype=dtype)
+
+
 def _hetero_b4_bundles():
     sizes = (5, 10, 20, 35)
     return [_make_bundle(n, seed=100 + i) for i, n in enumerate(sizes)], sizes
@@ -37,16 +41,13 @@ def test_w2_hetero_b4_lower_succeeds():
     """B=4 mixed n_atoms: export fn lowers and matches EnsemblePlan.run parity."""
     bundles, sizes = _hetero_b4_bundles()
     n_steps = 4
-    dt = 0.5
-    kT = 0.596
+    dt, kT = _md_scalars(0.5, 0.596)
     seed_base = jnp.array(276, dtype=jnp.uint32)
 
-    run_all = make_hetero_trajectory_fn(
-        bundles, n_steps=n_steps, dt=dt, kT=kT
-    )
-    lowered = jax.jit(run_all).lower(seed_base)
+    run_all = make_hetero_trajectory_fn(bundles, n_steps=n_steps)
+    lowered = jax.jit(run_all).lower(seed_base, dt, kT)
     compiled = lowered.compile()
-    exported = compiled(seed_base)
+    exported = compiled(seed_base, dt, kT)
 
     assert len(exported) == len(sizes)
     for i, (pos, n_atoms) in enumerate(zip(exported, sizes, strict=True)):
@@ -66,19 +67,19 @@ def test_w2_hetero_b4_lower_succeeds():
 def test_w2_hetero_b4_stablehlo_no_custom_call():
     """Hetero B=4 export HLO must not contain custom_call ops."""
     bundles, _ = _hetero_b4_bundles()
-    run_all = make_hetero_trajectory_fn(bundles, n_steps=4, dt=0.5, kT=0.596)
+    dt, kT = _md_scalars(0.5, 0.596)
     seed_base = jnp.array(42, dtype=jnp.uint32)
-    lowered = jax.jit(run_all).lower(seed_base)
+    run_all = make_hetero_trajectory_fn(bundles, n_steps=4)
+    lowered = jax.jit(run_all).lower(seed_base, dt, kT)
     hlo = _hlo_text(lowered)
     assert "custom_call" not in hlo
     assert "module" in lowered.as_text()
 
 
-# Re-export W1 helpers through export_run for a single import surface
 @pytest.mark.fast
 def test_w1_helper_reexport_still_works():
     bundle = _make_bundle(10, seed=275)
-    fn = make_single_trajectory_fn(bundle, n_steps=2, dt=0.5, kT=0.596)
+    dt, kT = _md_scalars(0.5, 0.596)
     seed = jnp.array(1, dtype=jnp.uint32)
-    pos = jax.jit(fn)(seed)
+    pos = jax.jit(make_single_trajectory_fn(bundle, n_steps=2))(seed, dt, kT)
     assert pos.shape == (2, 10, 3)

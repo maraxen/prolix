@@ -1,9 +1,9 @@
 """Export-shaped EnsemblePlan runners for StableHLO / jax.jit lowering.
 
-These helpers fix ``MolecularBundle``(s) and integration hyperparameters in a
-closure so ``jax.jit(fn).lower(...)`` traces a pure trajectory computation.
-Hetero batches unroll per-system scans (different ``n_atoms``); homo batches
-can use the stacked vmap path separately (#2645).
+``dt`` and ``kT`` are JAX scalar **arguments** to the returned callables so one
+compiled program can sweep thermodynamic parameters without recompilation.
+``n_steps`` remains host-static (``lax.scan`` length). Bundles are fixed in the
+closure.
 """
 
 from __future__ import annotations
@@ -19,12 +19,14 @@ def make_single_trajectory_fn(
     bundle: Any,
     *,
     n_steps: int,
-    dt: float,
-    kT: float,
 ):
-    """B=1 trajectory: returns ``(n_steps, n_atoms, 3)`` positions."""
+    """B=1 trajectory: ``(seed, dt, kT) -> (n_steps, n_atoms, 3)`` positions."""
 
-    def trajectory(seed: jnp.ndarray) -> jnp.ndarray:
+    def trajectory(
+        seed: jnp.ndarray,
+        dt: jnp.ndarray,
+        kT: jnp.ndarray,
+    ) -> jnp.ndarray:
         traj = EnsemblePlan.from_bundle(bundle).run(
             n_steps=n_steps,
             dt=dt,
@@ -40,23 +42,20 @@ def make_hetero_trajectory_fn(
     bundles: list[Any],
     *,
     n_steps: int,
-    dt: float,
-    kT: float,
 ):
-    """B>1 hetero export: fixed bundle list in closure, tuple of trajectories out.
+    """B>1 hetero export: ``(seed, dt, kT) -> tuple of position trajectories."""
 
-    Systems are unrolled at trace time (constant ``len(bundles)``). Each element
-    has shape ``(n_steps, n_atoms_i, 3)`` — ragged lengths are not stacked.
-    """
-
-    singles = [
-        make_single_trajectory_fn(b, n_steps=n_steps, dt=dt, kT=kT) for b in bundles
-    ]
+    singles = [make_single_trajectory_fn(b, n_steps=n_steps) for b in bundles]
     n_systems = len(singles)
 
-    def run_all(seed_base: jnp.ndarray) -> tuple[jnp.ndarray, ...]:
+    def run_all(
+        seed_base: jnp.ndarray,
+        dt: jnp.ndarray,
+        kT: jnp.ndarray,
+    ) -> tuple[jnp.ndarray, ...]:
         return tuple(
-            singles[i](seed_base + jnp.uint32(i)) for i in range(n_systems)
+            singles[i](seed_base + jnp.uint32(i), dt, kT)
+            for i in range(n_systems)
         )
 
     return run_all

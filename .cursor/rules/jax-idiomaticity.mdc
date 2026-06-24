@@ -18,7 +18,9 @@ Before adding a Python `int`, `bool`, `str`, or `Optional[...]` on a hot path, a
 |---------------------|------------------|
 | `static_argnames` / closure constants set **once on host** before `jit`/`vmap` | Dynamic counts stored as `jnp.int32` scalars on bundles/state |
 | Bucket indices from `shape_spec` (compile-time per bucket) | Comparisons via `jnp.array_equal`, masks, `jnp.where` |
-| Planner / dispatch decisions outside the trace | PRNG keys: `jnp.asarray(seed, dtype=jnp.uint32)` for vmap |
+| `n_steps` (scan length) | Host-static `int` only |
+| `dt`, `kT` in integration | `jnp.asarray` scalars — JIT args; `as_integration_scalars` in `bundle_md` |
+| `seed` | `jnp.uint32` scalar/array |
 
 **Never** call `int()`, `bool()`, or `if traced_value:` inside `jit`, `vmap`, or code they trace — causes `ConcretizationTypeError` and **one XLA program per distinct value**.
 

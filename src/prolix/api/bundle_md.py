@@ -60,6 +60,19 @@ def trim_trajectory_positions(
     return positions[:, :n_real, ...]
 
 
+def as_integration_scalars(
+    dt: float | jnp.ndarray,
+    kT: float | jnp.ndarray,
+    *,
+    dtype,
+) -> tuple[jnp.ndarray, jnp.ndarray]:
+    """Promote host floats to JAX scalars for traced integration (no recompile on change)."""
+    return (
+        jnp.asarray(dt, dtype=dtype),
+        jnp.asarray(kT, dtype=dtype),
+    )
+
+
 def displacement_fn_for_bundle(
     bundle: MolecularBundle,
 ) -> tuple[space.DisplacementFn, space.ShiftFn]:

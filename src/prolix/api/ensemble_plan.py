@@ -64,18 +64,18 @@ class EnsemblePlan:
     def run(
         self,
         n_steps: int,
-        dt: float,
-        kT: float,
-        seed: int = 0,
+        dt: float | Any,
+        kT: float | Any,
+        seed: int | Any = 0,
         observables: dict[str, Any] | None = None,
     ) -> Trajectory | list[Trajectory]:
         """Run MD simulation over all bundles.
 
         Args:
-            n_steps: Number of MD steps.
-            dt: Timestep in AKMA units (1.0 fs).
-            kT: Thermal energy (default 300 K ≈ 2.479e-3 AKMA).
-            seed: PRNG seed for thermostat noise.
+            n_steps: Number of MD steps (host-static; ``lax.scan`` length).
+            dt: Timestep in AKMA units (``jnp.ndarray`` scalar or float).
+            kT: Thermal energy (``jnp.ndarray`` scalar or float).
+            seed: PRNG seed for thermostat noise (int or uint32 array).
             observables: Optional name → Observable map; final-step values
                 are stored in Trajectory.observable_values.
 
@@ -121,9 +121,9 @@ class EnsemblePlan:
     def _run_stacked_dispatch(
         self,
         n_steps: int,
-        dt: float,
-        kT: float,
-        seed: int,
+        dt: float | Any,
+        kT: float | Any,
+        seed: int | Any,
         observables: dict[str, Any] | None = None,
     ) -> list[Trajectory]:
         """JIT vmap / safe_map over stack-compatible bundles (#2645)."""
@@ -169,9 +169,9 @@ class EnsemblePlan:
         self,
         bundle: Any,
         n_steps: int,
-        dt: float,
-        kT: float,
-        seed: int | jnp.ndarray,
+        dt: float | Any,
+        kT: float | Any,
+        seed: int | Any,
         observables: dict[str, Any] | None = None,
         *,
         integration_prefix: int | None = None,
@@ -182,6 +182,7 @@ class EnsemblePlan:
 
         from prolix.api.bundle_md import (
             active_positions,
+            as_integration_scalars,
             bonded_energy_fn_from_bundle,
             displacement_fn_for_bundle,
             masses_for_bundle,
@@ -195,6 +196,7 @@ class EnsemblePlan:
 
         energy_fn = bonded_energy_fn_from_bundle(bundle)
         _displacement_fn, shift_fn = displacement_fn_for_bundle(bundle)
+        dt, kT = as_integration_scalars(dt, kT, dtype=bundle.positions.dtype)
 
         if integration_prefix is not None:
             positions_init = positions_with_prefix(bundle, integration_prefix)
@@ -205,11 +207,12 @@ class EnsemblePlan:
             masses = masses_for_bundle(bundle)
             water_indices = water_indices_for_integration(bundle)
 
+        # Factory defaults are placeholders; init/apply always receive traced dt/kT.
         init_fn, apply_fn = settle_langevin(
             energy_fn,
             shift_fn,
-            dt=dt,
-            kT=kT,
+            dt=1.0,
+            kT=1.0,
             gamma=10.0,
             mass=masses,
             water_indices=water_indices,
@@ -217,7 +220,7 @@ class EnsemblePlan:
         )
 
         key = jax.random.PRNGKey(jnp.asarray(seed, dtype=jnp.uint32))
-        state = init_fn(key, positions_init)
+        state = init_fn(key, positions_init, kT=kT)
 
         def step_fn(carry: Any, _: Any) -> tuple[Any, Any]:
             new_state = apply_fn(carry, kT=kT, dt=dt)
