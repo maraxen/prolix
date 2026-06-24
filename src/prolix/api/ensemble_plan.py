@@ -67,6 +67,7 @@ class EnsemblePlan:
         dt: float,
         kT: float,
         seed: int = 0,
+        observables: dict[str, Any] | None = None,
     ) -> Trajectory | list[Trajectory]:
         """Run MD simulation over all bundles.
 
@@ -75,6 +76,8 @@ class EnsemblePlan:
             dt: Timestep in AKMA units (1.0 fs).
             kT: Thermal energy (default 300 K ≈ 2.479e-3 AKMA).
             seed: PRNG seed for thermostat noise.
+            observables: Optional name → Observable map; final-step values
+                are stored in Trajectory.observable_values.
 
         Returns:
             Trajectory for a single bundle, or list[Trajectory] when
@@ -84,13 +87,18 @@ class EnsemblePlan:
             raise ValueError("EnsemblePlan requires at least one bundle")
 
         if len(self.bundles) == 1:
-            return self._run_single(self.bundles[0], n_steps, dt, kT, seed)
+            return self._run_single(
+                self.bundles[0], n_steps, dt, kT, seed, observables=observables
+            )
 
         chunk = self._systems_chunk_size()
         chunk = len(self.bundles) if chunk == 0 else max(1, chunk)
         trajectories: list[Trajectory] = []
         for i in range(0, len(self.bundles), chunk):
             for bundle in self.bundles[i : i + chunk]:
+                obs = observables
+                if observables is not None and len(self.bundles) > 1:
+                    obs = _observables_for_bundle(bundle, observables)
                 trajectories.append(
                     self._run_single(
                         bundle,
@@ -98,6 +106,7 @@ class EnsemblePlan:
                         dt,
                         kT,
                         seed + len(trajectories),
+                        observables=obs,
                     )
                 )
         return trajectories
@@ -109,6 +118,7 @@ class EnsemblePlan:
         dt: float,
         kT: float,
         seed: int,
+        observables: dict[str, Any] | None = None,
     ) -> Trajectory:
         import jax
         import jax.numpy as jnp
@@ -158,8 +168,31 @@ class EnsemblePlan:
 
         positions_array = jnp.stack(positions_traj)
 
+        observable_values: dict[str, Any] = {}
+        if observables:
+            for name, observable in observables.items():
+                observable_values[name] = observable.compute(state)
+
         return Trajectory(
             positions=positions_array,
-            observable_values={},
+            observable_values=observable_values,
             n_steps=n_steps,
         )
+
+
+def _observables_for_bundle(
+    bundle: Any, observables: dict[str, Any]
+) -> dict[str, Any]:
+    """Re-bind bundle-scoped observables (e.g. Energy) for multi-bundle runs."""
+    from prolix.api.observables import Energy
+
+    rebound: dict[str, Any] = {}
+    for name, observable in observables.items():
+        if isinstance(observable, Energy):
+            rebound[name] = Energy(
+                energy_fn=observable.energy_fn,
+                bundle=bundle,
+            )
+        else:
+            rebound[name] = observable
+    return rebound

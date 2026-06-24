@@ -1,0 +1,29 @@
+[sprint]
+sprint_id = "260624_sprint47"
+sprint_num = 47
+name = "Sprint 47: V5 observable parity"
+description = "Track A: wire observables into EnsemblePlan.run (#267)"
+context = "V3/V4 closed. Final-step observable_values on Trajectory."
+max_fix_retries = 1
+worktree_shadow_mode = false
+
+[[tracks]]
+id = "a"
+is_research = false
+worktree = false
+skip_worktree = false
+
+[[tracks.items]]
+backlog_id = "267"
+phase_name = "Track A — V5: Observable parity single vs batched (#267)"
+fixer_prompt = """
+Extend EnsemblePlan.run(observables=...) to populate Trajectory.observable_values
+from final integrator state. Add tests/api/test_v5_observable_parity.py B=4 homo.
+Gate: ke and energy match independent runs within 1e-10.
+"""
+reviewer_prompt = """
+VERIFY: uv run pytest tests/api/test_v5_observable_parity.py -q passes
+VERIFY: existing V3/V4 parity tests still pass
+"""
+return_key = "267"
+workflow_template = "spec_driven_dev"
