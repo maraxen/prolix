@@ -194,6 +194,21 @@ def make_integrator_batched(
       **kwargs,
   )
 
+  batched_axes = IntegratorState(
+      positions=0,
+      momentum=0,
+      force=0,
+      mass=None,
+      rng=0,
+      cap_count=0,
+      warn_counts=0,
+      potential_energy=None,
+      did_overflow=0,
+      last_update_positions=None,
+      box=None,
+      step_count=0,
+  )
+
   def init_fn_batched(
       key: PRNGKeyArray,
       positions_batch: ArrayType,
@@ -219,65 +234,99 @@ def make_integrator_batched(
     def init_single(key_i, pos_i):
       return init_fn_unbatched(key_i, pos_i, box=box)
 
-  # vmap over batch dimension with explicit out_axes structure
-    # We want to batch position, momentum, force, rng, and step_count (all at axis 0)
-    # but keep mass and box shared (not batched at all)
-    out_axes_spec = IntegratorState(
-        positions=0,      # batch at axis 0
-        momentum=0,      # batch at axis 0
-        force=0,         # batch at axis 0
-        mass=None,       # do NOT batch (broadcast)
-        rng=0,           # batch at axis 0
-        box=None,        # do NOT batch (broadcast)
-        step_count=0,    # batch at axis 0
-    )
-
-    state_list = jax.vmap(init_single, in_axes=(0, 0), out_axes=out_axes_spec)(
-        keys_batch, positions_batch
-    )
+    state_list = jax.vmap(
+        init_single, in_axes=(0, 0), out_axes=batched_axes
+    )(keys_batch, positions_batch)
 
     return state_list
 
-  # Create batched apply_fn via vmap
   def apply_fn_batched(state_batch: IntegratorState) -> IntegratorState:
-    r"""Apply one timestep of batched integrator on all B trajectories.
+    in_axes = (0, 0, 0, None, 0, 0, 0, None, 0, None, None, 0)
+    out_axes = in_axes
 
-    Args:
-        state_batch: IntegratorState with batched dimensions [B, ...].
-
-    Returns:
-        Updated IntegratorState (still batched, axis 0 preserved).
-    """
-    # vmap over the batch dimension (axis 0) for batched fields
-    # IntegratorState has fields: position, momentum, force, mass, rng, box, step_count
-    # Flattened order: (position, momentum, force, mass, rng, box, step_count)
-    in_axes_spec = (0, 0, 0, None, 0, None, 0)
-    out_axes_spec = (0, 0, 0, None, 0, None, 0)
-
-    # Create a wrapper that takes flattened arguments
-    def apply_fn_flat(position, momentum, force, mass, rng, box, step_count):
-      state = IntegratorState(positions=position, momentum=momentum, force=force,
-                             mass=mass, rng=rng, box=box, step_count=step_count)
+    def apply_fn_flat(
+        positions,
+        momentum,
+        force,
+        mass,
+        rng,
+        cap_count,
+        warn_counts,
+        potential_energy,
+        did_overflow,
+        last_update_positions,
+        box,
+        step_count,
+    ):
+      state = IntegratorState(
+          positions=positions,
+          momentum=momentum,
+          force=force,
+          mass=mass,
+          rng=rng,
+          cap_count=cap_count,
+          warn_counts=warn_counts,
+          potential_energy=potential_energy,
+          did_overflow=did_overflow,
+          last_update_positions=last_update_positions,
+          box=box,
+          step_count=step_count,
+      )
       result = apply_fn_unbatched(state)
-      return (result.positions, result.momentum, result.force, result.mass,
-              result.rng, result.box, result.step_count)
+      return (
+          result.positions,
+          result.momentum,
+          result.force,
+          result.mass,
+          result.rng,
+          result.cap_count,
+          result.warn_counts,
+          result.potential_energy,
+          result.did_overflow,
+          result.last_update_positions,
+          result.box,
+          result.step_count,
+      )
 
-    # Apply vmap over the flattened function
-    apply_fn_flat_vmapped = jax.vmap(apply_fn_flat, in_axes=in_axes_spec, out_axes=out_axes_spec)
-
-    # Call with flattened state
-    pos_out, mom_out, force_out, mass_out, rng_out, box_out, step_out = apply_fn_flat_vmapped(
-        state_batch.positions, state_batch.momentum, state_batch.force,
-        state_batch.mass, state_batch.rng, state_batch.box, state_batch.step_count
+    (
+        pos_out,
+        mom_out,
+        force_out,
+        mass_out,
+        rng_out,
+        cap_out,
+        warn_out,
+        pe_out,
+        overflow_out,
+        last_pos_out,
+        box_out,
+        step_out,
+    ) = jax.vmap(apply_fn_flat, in_axes=in_axes, out_axes=out_axes)(
+        state_batch.positions,
+        state_batch.momentum,
+        state_batch.force,
+        state_batch.mass,
+        state_batch.rng,
+        state_batch.cap_count,
+        state_batch.warn_counts,
+        state_batch.potential_energy,
+        state_batch.did_overflow,
+        state_batch.last_update_positions,
+        state_batch.box,
+        state_batch.step_count,
     )
 
-    # Reconstruct state
     return IntegratorState(
         positions=pos_out,
         momentum=mom_out,
         force=force_out,
         mass=mass_out,
         rng=rng_out,
+        cap_count=cap_out,
+        warn_counts=warn_out,
+        potential_energy=pe_out,
+        did_overflow=overflow_out,
+        last_update_positions=last_pos_out,
         box=box_out,
         step_count=step_out,
     )

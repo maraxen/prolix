@@ -232,7 +232,7 @@ def test_batching_settle_smoke_initialization(water_system_batch_2, rng_key):
         f"Expected position shape ({batch_size}, {n_atoms}, 3), got {state_batch.positions.shape}"
     assert state_batch.momentum.shape == (batch_size, n_atoms, 3)
     assert state_batch.force.shape == (batch_size, n_atoms, 3)
-    assert state_batch.rng.shape == (batch_size, 2)
+    assert state_batch.rng.shape == (batch_size,)
 
     # Check no NaN/Inf
     assert not jnp.isnan(state_batch.positions).any(), "NaN in position"
