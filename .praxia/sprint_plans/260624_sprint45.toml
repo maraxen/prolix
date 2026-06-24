@@ -1,0 +1,31 @@
+[sprint]
+sprint_id = "260624_sprint45"
+sprint_num = 45
+name = "Sprint 45: V3 homo batch parity"
+description = "Track A: V3 homogeneous B=4 parity vs independent runs (#264). Follow-up #2645 (JIT vmap) deferred."
+context = "Sprint 44 closed #1842. Multi-bundle EnsemblePlan returns list[Trajectory]; sequential/chunk dispatch."
+max_fix_retries = 1
+worktree_shadow_mode = false
+
+[[tracks]]
+id = "a"
+is_research = false
+worktree = false
+skip_worktree = false
+
+[[tracks.items]]
+backlog_id = "264"
+phase_name = "Track A — V3: Homogeneous batch parity (#264)"
+fixer_prompt = """
+Add tests/api/test_v3_homogeneous_batch_parity.py:
+- B=4 identical same-size bundles via _make_bundle
+- Compare EnsemblePlan.from_bundles(...).run() vs B independent from_bundle runs
+- Gate: RMSD < 1e-10 Å per system, n_steps=8, dt=0.5 fs
+"""
+reviewer_prompt = """
+VERIFY: uv run pytest tests/api/test_v3_homogeneous_batch_parity.py -q passes
+VERIFY: test asserts RMSD < 1e-10 for each of B=4 systems
+PASS if both satisfied.
+"""
+return_key = "264"
+workflow_template = "spec_driven_dev"
