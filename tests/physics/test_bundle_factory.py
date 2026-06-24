@@ -5,12 +5,15 @@ Verifies that PhysicsSystem -> MolecularBundle conversion:
 - Pads arrays to the smallest containing bucket
 - Preserves the atom mask for real atoms
 - Threads boundary_condition through to shape_spec
+- Flattens multi-term dihedral/improper params
+- Converts dense exclusion layouts to pair lists
 """
 
 import jax.numpy as jnp
+import numpy as np
 import pytest
 
-from prolix.physics.system import make_bundle_from_system
+from prolix.physics.system import _dense_excl_to_pair_list, make_bundle_from_system
 from prolix.types.bundles import ATOM_BUCKETS, MolecularBundle
 
 
@@ -82,7 +85,7 @@ def test_factory_returns_molecular_bundle():
 def test_factory_pads_to_bucket():
     sys = _make_minimal_physics_system()
     bundle = make_bundle_from_system(sys, boundary_condition="free")
-    # 10 atoms should land in the first bucket (256)
+    # 10 atoms should land in the first bucket (64)
     assert bundle.positions.shape[0] == ATOM_BUCKETS[0]
 
 
@@ -157,3 +160,17 @@ def test_factory_flattens_multi_term_dihedrals():
     assert int(bundle.n_dihedrals) == 4
     assert bundle.dihedral_params.shape[1] == 3
     assert int(bundle.dihedral_mask.sum()) == 4
+
+
+def test_dense_excl_to_pair_list_deduplicates():
+    """Dense (N, M) excl layout converts to unique (E, 2) pairs."""
+    excl = np.array([[1, -1], [0, -1]], dtype=np.int32)
+    vdw = np.array([[0.0, 1.0], [0.5, 1.0]], dtype=np.float32)
+    elec = np.ones_like(vdw)
+    pairs, sv, se, n = _dense_excl_to_pair_list(excl, vdw, elec)
+    assert n == 1
+    assert pairs is not None
+    assert pairs.shape == (1, 2)
+    assert list(pairs[0]) == [0, 1]
+    assert float(sv[0]) == 0.0
+    assert float(se[0]) == 1.0

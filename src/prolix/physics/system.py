@@ -403,6 +403,73 @@ def _mask(n_real: int, bucket: int):
     )
 
 
+def _pad_3d(arr, bucket: int, d1: int, d2: int, dtype=None):
+    """Pad a 3D array to (bucket, d1, d2); return zeros if arr is None or empty."""
+    import jax.numpy as jnp
+
+    if arr is None or (hasattr(arr, "size") and arr.size == 0):
+        return jnp.zeros((bucket, d1, d2), dtype=dtype or jnp.float32)
+    arr = jnp.asarray(arr)
+    if arr.ndim != 3:
+        msg = f"expected 3D cmap grid, got ndim={arr.ndim}"
+        raise ValueError(msg)
+    pad = bucket - arr.shape[0]
+    return jnp.pad(arr, ((0, pad), (0, 0), (0, 0)))
+
+
+def _dense_excl_to_pair_list(
+    excl_indices,
+    excl_scales_vdw,
+    excl_scales_elec,
+) -> tuple[object | None, object | None, object | None, int]:
+    """Convert PhysicsSystem dense ``(N, M)`` excl layout to bundle ``(E, 2)`` pairs."""
+    import numpy as np
+
+    if excl_indices is None or getattr(excl_indices, "size", 0) == 0:
+        return None, None, None, 0
+
+    idx = np.asarray(excl_indices)
+    if idx.ndim == 2 and idx.shape[1] == 2 and not np.any(idx < 0):
+        n = int(idx.shape[0])
+        sv = np.asarray(excl_scales_vdw) if excl_scales_vdw is not None else np.ones(n)
+        se = np.asarray(excl_scales_elec) if excl_scales_elec is not None else np.ones(n)
+        return idx.astype(np.int32), sv.astype(np.float32), se.astype(np.float32), n
+
+    if idx.ndim != 2:
+        msg = f"excl_indices must be 2D, got ndim={idx.ndim}"
+        raise ValueError(msg)
+
+    sv = np.asarray(excl_scales_vdw, dtype=np.float32)
+    se = np.asarray(excl_scales_elec, dtype=np.float32)
+    pairs: list[list[int]] = []
+    vdw: list[float] = []
+    elec: list[float] = []
+    seen: set[tuple[int, int]] = set()
+    n_atoms, n_slots = idx.shape
+    for i in range(n_atoms):
+        for k in range(n_slots):
+            j = int(idx[i, k])
+            if j < 0:
+                continue
+            a, b = (i, j) if i < j else (j, i)
+            key = (a, b)
+            if key in seen:
+                continue
+            seen.add(key)
+            pairs.append([a, b])
+            vdw.append(float(sv[i, k] if sv.size else 1.0))
+            elec.append(float(se[i, k] if se.size else 1.0))
+    n = len(pairs)
+    if n == 0:
+        return None, None, None, 0
+    return (
+        np.array(pairs, dtype=np.int32),
+        np.array(vdw, dtype=np.float32),
+        np.array(elec, dtype=np.float32),
+        n,
+    )
+
+
 def _flatten_multi_term_torsions(
     indices,
     params,
@@ -432,6 +499,7 @@ def _flatten_multi_term_torsions(
 def make_bundle_from_system(
     system,
     boundary_condition: str = "periodic",
+    exclusion_spec: Any = None,
 ) -> MolecularBundle:
     """Convert a PhysicsSystem to a MolecularBundle with bucketed padding.
 
@@ -441,16 +509,16 @@ def make_bundle_from_system(
     Args:
         system: PhysicsSystem (or compatible object with getattr access).
         boundary_condition: "periodic" or "free".
+        exclusion_spec: Optional ``ExclusionSpec``; when provided, populates
+            ``excl_*`` pair lists and ``exception_*`` fields on the bundle.
 
     Returns:
         MolecularBundle with all arrays padded to bucket sizes.
 
     Notes:
-        TODO(T7+): dihedral_params and improper_params in PhysicsSystem are
-        3D (N, N_terms, 3) while MolecularBundle expects 2D (D, 4) / (I, 3).
-        For non-empty topologies, callers should pre-flatten multi-term params
-        before passing to this factory.  With zero-term topology the size==0
-        short-circuit in _pad_2d avoids any shape error.
+        Multi-term ``dihedral_params`` / ``improper_params`` ``(N, T, P)`` are
+        flattened to one bundle row per term via ``_flatten_multi_term_torsions``.
+        Dense ``excl_indices`` ``(N, M)`` are converted to ``(E, 2)`` pair lists.
     """
     import jax.numpy as jnp
 
@@ -491,11 +559,41 @@ def make_bundle_from_system(
     wb = _next_bucket(max(nw, 1), WATER_BUCKETS)
 
     # --- exclusions -------------------------------------------------------
-    # PhysicsSystem stores excl_indices as (N_padded, max_excl) per-atom;
-    # MolecularBundle stores as (E, 2) pair list.  With None/empty, both are zeros.
+    # PhysicsSystem: dense (N, max_excl) or pair list (E, 2). Bundle: (E, 2).
     excl = _get("excl_indices")
-    ne = 0 if excl is None or excl.size == 0 else excl.shape[0]
+    excl_sv = _get("excl_scales_vdw")
+    excl_se = _get("excl_scales_elec")
+    if exclusion_spec is not None:
+        from prolix.physics.neighbor_list import map_exclusions_to_dense_padded
+
+        dense_i, dense_sv, dense_se = map_exclusions_to_dense_padded(exclusion_spec)
+        excl, excl_sv, excl_se, ne = _dense_excl_to_pair_list(
+            dense_i, dense_sv, dense_se
+        )
+    else:
+        excl, excl_sv, excl_se, ne = _dense_excl_to_pair_list(excl, excl_sv, excl_se)
     eb = _next_bucket(max(ne, 1), EXCL_BUCKETS)
+
+    # --- exceptions (1-4 pairs) -------------------------------------------
+    exc_pairs = _get("exception_pairs")
+    exc_sig = _get("exception_sigmas")
+    exc_eps = _get("exception_epsilons")
+    exc_q = _get("exception_chargeprods")
+    if exclusion_spec is not None and exclusion_spec.exception_pairs.shape[0] > 0:
+        exc_pairs = exclusion_spec.exception_pairs
+        exc_sig = exclusion_spec.exception_sigmas
+        exc_eps = exclusion_spec.exception_epsilons
+        exc_q = exclusion_spec.exception_chargeprods
+    nx = 0 if exc_pairs is None or exc_pairs.size == 0 else int(exc_pairs.shape[0])
+    xb = _next_bucket(max(nx, 1), EXCEPTION_BUCKETS)
+
+    # --- CMAP -------------------------------------------------------------
+    cmap_t = _get("cmap_torsions")
+    cmap_g = _get("cmap_energy_grids")
+    if cmap_g is None:
+        cmap_g = _get("cmap_energy")
+    nc = 0 if cmap_t is None or cmap_t.size == 0 else int(cmap_t.shape[0])
+    cb = _next_bucket(max(nc, 1), CMAP_BUCKETS)
 
     # --- box / PBC -------------------------------------------------------
     box_size = _get("box_size")
@@ -506,9 +604,6 @@ def make_bundle_from_system(
     else:
         box_mat = jnp.zeros((3, 3), dtype=jnp.float32)
 
-    # --- exception bucket (empty for fresh conversions) -------------------
-    xb = _next_bucket(1, EXCEPTION_BUCKETS)
-
     # --- shape spec -------------------------------------------------------
     # Compute bucket indices (coarse; enables identical static hashing for same-bucket systems)
     atom_bucket_idx = _bucket_idx(n, ATOM_BUCKETS)
@@ -517,8 +612,8 @@ def make_bundle_from_system(
     dihedral_bucket_idx = _bucket_idx(max(nd, 1), DIHEDRAL_BUCKETS)
     water_bucket_idx = _bucket_idx(max(nw, 1), WATER_BUCKETS)
     excl_bucket_idx = _bucket_idx(max(ne, 1), EXCL_BUCKETS)
-    cmap_bucket_idx = _bucket_idx(0 + 1, CMAP_BUCKETS)  # CMAP is always 0 in v1.0
-    exception_bucket_idx = _bucket_idx(1, EXCEPTION_BUCKETS)  # Empty for fresh conversions
+    cmap_bucket_idx = _bucket_idx(max(nc, 1), CMAP_BUCKETS)
+    exception_bucket_idx = _bucket_idx(max(nx, 1), EXCEPTION_BUCKETS)
 
     spec = MolecularShapeSpec(
         atom_bucket_idx=atom_bucket_idx,
@@ -580,28 +675,34 @@ def make_bundle_from_system(
         urey_bradley_params=_pad_2d(ub_p, ab, 2, dtype=jnp.float32),
         urey_bradley_mask=_mask(nub, ab),
         n_urey_bradley=jnp.array(nub, dtype=jnp.int32),
-        # CMAP (empty — T6 does not map CMAP from PhysicsSystem)
-        cmap_torsion_idx=jnp.zeros((16, 8), dtype=jnp.int32),
-        cmap_energy_grids=jnp.zeros((16, 24, 24), dtype=jnp.float32),
-        cmap_mask=jnp.zeros(16, dtype=bool),
-        n_cmap=jnp.array(0, dtype=jnp.int32),
+        # CMAP
+        cmap_torsion_idx=_pad_2d(cmap_t, cb, 8, dtype=jnp.int32),
+        cmap_energy_grids=_pad_3d(
+            cmap_g,
+            cb,
+            int(cmap_g.shape[1]) if cmap_g is not None and getattr(cmap_g, "size", 0) else 24,
+            int(cmap_g.shape[2]) if cmap_g is not None and getattr(cmap_g, "size", 0) else 24,
+            dtype=jnp.float32,
+        ),
+        cmap_mask=_mask(nc, cb),
+        n_cmap=jnp.array(nc, dtype=jnp.int32),
         # SETTLE water
         water_indices=_pad_2d(wi, wb, 3, dtype=jnp.int32),
         water_mask=_mask(nw, wb),
         n_waters=jnp.array(nw, dtype=jnp.int32),
         # nonbonded exclusions
         excl_indices=_pad_2d(excl, eb, 2, dtype=jnp.int32),
-        excl_scales_vdw=_pad_1d(_get("excl_scales_vdw"), eb, dtype=jnp.float32),
-        excl_scales_elec=_pad_1d(_get("excl_scales_elec"), eb, dtype=jnp.float32),
+        excl_scales_vdw=_pad_1d(excl_sv, eb, dtype=jnp.float32),
+        excl_scales_elec=_pad_1d(excl_se, eb, dtype=jnp.float32),
         excl_mask=_mask(ne, eb),
         n_excl=jnp.array(ne, dtype=jnp.int32),
-        # 1-4 exception pairs (empty for fresh conversions)
-        exception_pairs=jnp.zeros((xb, 2), dtype=jnp.int32),
-        exception_sigmas=jnp.zeros(xb, dtype=jnp.float32),
-        exception_epsilons=jnp.zeros(xb, dtype=jnp.float32),
-        exception_chargeprods=jnp.zeros(xb, dtype=jnp.float32),
-        exception_mask=jnp.zeros(xb, dtype=bool),
-        n_exception_pairs=jnp.array(0, dtype=jnp.int32),
+        # 1-4 exception pairs
+        exception_pairs=_pad_2d(exc_pairs, xb, 2, dtype=jnp.int32),
+        exception_sigmas=_pad_1d(exc_sig, xb, dtype=jnp.float32),
+        exception_epsilons=_pad_1d(exc_eps, xb, dtype=jnp.float32),
+        exception_chargeprods=_pad_1d(exc_q, xb, dtype=jnp.float32),
+        exception_mask=_mask(nx, xb),
+        n_exception_pairs=jnp.array(nx, dtype=jnp.int32),
         # nonbonded parameters
         pme_alpha=jnp.array(float(_get("pme_alpha") or 0.0)),
         cutoff_distance=jnp.array(float(_get("nonbonded_cutoff") or 9.0)),
