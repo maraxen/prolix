@@ -43,12 +43,35 @@ def make_hetero_trajectory_fn(
     *,
     n_steps: int,
 ):
-    """B>1 hetero export: ``(seed, dt, kT) -> tuple of position trajectories."""
+    """B>1 export: ``(seed, dt, kT) -> tuple of position trajectories``.
+
+    When bundles are stack-compatible with identical ``n_atoms`` (homogeneous
+    batch), uses ``EnsemblePlan._run_stacked_dispatch`` for a single ``scan``
+    (V4-HLO compile-once / batched path, #266). Otherwise falls back to an
+    unrolled tuple of single-system exports (one JIT compile, B scans).
+    """
+    from prolix.api.bundle_stack import can_jit_vmap_n_mols
+    from prolix.api.ensemble_plan import EnsemblePlan
+
+    if can_jit_vmap_n_mols(bundles):
+        plan = EnsemblePlan.from_bundles(bundles)
+
+        def run_stacked(
+            seed_base: jnp.ndarray,
+            dt: jnp.ndarray,
+            kT: jnp.ndarray,
+        ) -> tuple[jnp.ndarray, ...]:
+            trajs = plan._run_stacked_dispatch(
+                n_steps, dt, kT, seed_base, observables=None
+            )
+            return tuple(t.positions for t in trajs)
+
+        return run_stacked
 
     singles = [make_single_trajectory_fn(b, n_steps=n_steps) for b in bundles]
     n_systems = len(singles)
 
-    def run_all(
+    def run_unrolled(
         seed_base: jnp.ndarray,
         dt: jnp.ndarray,
         kT: jnp.ndarray,
@@ -58,7 +81,7 @@ def make_hetero_trajectory_fn(
             for i in range(n_systems)
         )
 
-    return run_all
+    return run_unrolled
 
 
 def make_smoke_diagnostics_fn(

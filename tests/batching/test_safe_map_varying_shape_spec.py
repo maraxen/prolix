@@ -273,9 +273,10 @@ def test_vmap_with_coarsened_shape_spec():
 def test_v4_hlo_scoped_compile_once_same_shape_spec():
     """V4-HLO scoped gate (backlog #266): one JIT compile per shape_spec.
 
-    Full hetero-batch V4-HLO (delta==1 across mixed BatchPlan ensemble) remains
-    blocked on multi-bundle dispatch (#1842). This scoped test asserts the
-    compile-once property at the single-dispatch / shape_spec level.
+    Full hetero-batch compile-once at the ensemble level is covered by
+    ``tests/api/test_v4_hlo_hetero_compile_once.py`` (homo stacked + hetero
+    unrolled). This scoped test asserts compile-once at single-dispatch /
+    shape_spec level.
     """
     bundle_1 = _make_minimal_bundle(n_atoms=10)
     bundle_2 = _make_minimal_bundle(n_atoms=12)
