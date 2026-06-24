@@ -219,17 +219,11 @@ class EnsemblePlan:
         key = jax.random.PRNGKey(jnp.asarray(seed, dtype=jnp.uint32))
         state = init_fn(key, positions_init)
 
-        positions_traj = []
-
-        def step_fn(state: Any, _: Any) -> tuple[Any, Any]:
-            new_state = apply_fn(state, kT=kT, dt=dt)
+        def step_fn(carry: Any, _: Any) -> tuple[Any, Any]:
+            new_state = apply_fn(carry, kT=kT, dt=dt)
             return new_state, new_state.position
 
-        for _i in range(n_steps):
-            state, pos = step_fn(state, None)
-            positions_traj.append(pos)
-
-        positions_array = jnp.stack(positions_traj)
+        state, positions_array = jax.lax.scan(step_fn, state, None, length=n_steps)
         if trim_output:
             positions_array = trim_trajectory_positions(positions_array, bundle)
 
