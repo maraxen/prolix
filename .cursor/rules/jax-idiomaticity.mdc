@@ -1,0 +1,61 @@
+---
+description: JAX/xtrax idioms — avoid recompiles, trace-safe control flow, batching boundaries
+globs: src/prolix/**/*.py,tests/**/*.py
+alwaysApply: false
+---
+
+# JAX idiomaticity (Prolix)
+
+**Load skills when editing JAX/xtrax code:**
+- `using-jax` — trace vs execution, PRNG, `lax.*` control flow, NaN/debug, `filter_jit`
+- `using-xtrax` — `AxisSpec` / `BatchPlanner`, Vmap vs SafeMap vs Bucket, `make_axis_dispatch`, static `AxisBoundary`
+
+## Python type vs JAX array (recompile gate)
+
+Before adding a Python `int`, `bool`, `str`, or `Optional[...]` on a hot path, ask: **does this need to be Python, or can it be a JAX scalar/array?**
+
+| Keep Python (static) | Prefer JAX array |
+|---------------------|------------------|
+| `static_argnames` / closure constants set **once on host** before `jit`/`vmap` | Dynamic counts stored as `jnp.int32` scalars on bundles/state |
+| Bucket indices from `shape_spec` (compile-time per bucket) | Comparisons via `jnp.array_equal`, masks, `jnp.where` |
+| Planner / dispatch decisions outside the trace | PRNG keys: `jnp.asarray(seed, dtype=jnp.uint32)` for vmap |
+
+**Never** call `int()`, `bool()`, or `if traced_value:` inside `jit`, `vmap`, or code they trace — causes `ConcretizationTypeError` and **one XLA program per distinct value**.
+
+```python
+# BAD — inside vmapped fn
+n = int(bundle.n_atoms)
+pos = bundle.positions[:n]
+
+# GOOD — host sets static prefix once; vmap sees constant slice
+integration_prefix = int(jnp.asarray(bundles[0].n_atoms))  # host only
+pos = bundle.positions[:integration_prefix]  # prefix is closure constant
+```
+
+Trim padded outputs **on the host** after `vmap` (`unstack_trajectories`), not mid-trace.
+
+## Trace-safe patterns
+
+- Branch on arrays: `jax.lax.cond` / `jnp.where`, not Python `if`
+- Loops over traced length: `lax.scan`, `lax.fori_loop`, `lax.while_loop` (inference-only)
+- Index/slice dynamic length: `lax.dynamic_slice`, scatter/gather — not `x[:n]` with traced `n`
+- Debug inside JIT: `jax.debug.print`, not `print`
+- Physics: prefer `jax_enable_x64` where prolix tests already do
+
+## JIT boundaries
+
+- **`eqx.filter_jit`** when modules mix arrays + static callables (`AxisBoundary`, integrator steps)
+- Mark true constants: `@jax.jit(static_argnames=[...])` — stabilize enums/modes, not per-step counts
+- **`sparsify_model`**: host only, never inside `jit`
+- Donation / checkpointing: see `using-jax` memory section before large scans
+
+## xtrax / EnsemblePlan
+
+- Resolve axis roles before planning (`AxisRole.UNKNOWN` → planner halts)
+- **Vmap**: fixed cardinality, stack-compatible shapes; **SafeMap**: chunk when `cardinality > batch_size`
+- **Bucket / DedupGather**: host-side padding/dedup — not via `make_axis_dispatch`
+- Heterogeneous `n_atoms` across a batch: sequential or explicit bucket+mask — do not vmap with per-trace `int(n_atoms)`
+
+## Prolix bundle contract
+
+`MolecularBundle.n_atoms`, `n_waters`, etc. are **dynamic JAX scalars**. Document host-only vs traced use in module docstrings (see `bundle_md.py` JIT contract). Prefer bucket-static shapes + `atom_mask` over prefix slicing when ghost DOF padding is acceptable.
