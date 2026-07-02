@@ -1,9 +1,12 @@
 """Batch tiling planner: decides vmap vs safe_map per axis.
 
 This module implements prolix's greedy budget-driven tiling strategy.
-Behavioral delegation to xtrax.tiling.BatchPlanner is available via
-``BatchPlanner.plan_with_xtrax()`` (#1842); the default ``plan()`` keeps
-the proven prolix greedy loop for backward compatibility.
+As of the xtrax 0.3.0 cutover, production strategy selection delegates to
+xtrax.tiling.BatchPlanner via ``BatchPlanner.plan_with_xtrax()`` (#1842);
+``prolix.run.spec.make_fitting_planner`` calls it. The native greedy
+``plan()`` is retained as the reference implementation and as the budget-
+demotion fallback that ``plan_with_xtrax()`` itself applies; a strict parity
+gate (``tests/tiling/test_planner_xtrax_parity.py``) asserts the two agree.
 
 See ``prolix.tiling.xtrax_adapter`` and
 ``.praxia/docs/superpowers/specs/260614_xtrax-tiling-integration.md``.

@@ -98,7 +98,7 @@ def make_fitting_planner(
         estimate_memory=lambda ds: estimate_memory_theoretical(
             ds, 1.0, activation_multiplier
         ),
-    ).plan()
+    ).plan_with_xtrax()  # xtrax.tiling.BatchPlanner is the production strategy engine (#1842)
 
 
 def extract_batch_sizes(plan: BatchPlan) -> tuple[int, int]:
