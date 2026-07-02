@@ -2302,7 +2302,7 @@ requires-dist = [
     { name = "sphinx-design", marker = "extra == 'docs'" },
     { name = "sphinxext-rediraffe", marker = "extra == 'docs'" },
     { name = "ty", marker = "extra == 'dev'" },
-    { name = "xtrax", directory = "/home/marielle/projects/xtrax" },
+    { name = "xtrax", specifier = ">=0.3.0,<0.4" },
 ]
 provides-extras = ["cuda", "tpu", "cpu", "dev", "openmm", "docs", "viz", "wasm"]
 
@@ -3427,7 +3427,8 @@ wheels = [
 
 [[package]]
 name = "xtrax"
-source = { directory = "/home/marielle/projects/xtrax" }
+version = "0.3.0"
+source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "equinox" },
     { name = "grain" },
@@ -3438,57 +3439,9 @@ dependencies = [
     { name = "orbax-checkpoint" },
     { name = "pytest-asyncio" },
 ]
-
-[package.metadata]
-requires-dist = [
-    { name = "beartype", marker = "extra == 'dev'", specifier = ">=0.18.0" },
-    { name = "chex", marker = "extra == 'dev'", specifier = ">=0.1.86" },
-    { name = "complexipy", marker = "extra == 'dev'", specifier = ">=5.6.1" },
-    { name = "equinox", specifier = ">=0.11.0" },
-    { name = "flatbuffers", marker = "extra == 'cli'", specifier = ">=2" },
-    { name = "grain", specifier = ">=0.2.0" },
-    { name = "import-linter", marker = "extra == 'dev'", specifier = ">=2.1" },
-    { name = "interrogate", marker = "extra == 'dev'", specifier = ">=1.7.0" },
-    { name = "jax", specifier = ">=0.4.36" },
-    { name = "jaxlib", specifier = ">=0.4.36" },
-    { name = "jaxlint", marker = "extra == 'dev'", specifier = ">=0.1.0a1" },
-    { name = "jaxtyping", marker = "extra == 'dev'", specifier = ">=0.2.28" },
-    { name = "libcst", marker = "extra == 'dev'", specifier = ">=1.5.0" },
-    { name = "matplotlib", marker = "extra == 'eda'", specifier = ">=3.8" },
-    { name = "numpy", specifier = ">=1.26" },
-    { name = "optax", specifier = ">=0.2.3" },
-    { name = "orbax-checkpoint", specifier = ">=0.6.0" },
-    { name = "pandas", marker = "extra == 'eda'", specifier = ">=2.0" },
-    { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0" },
-    { name = "pytest-asyncio", specifier = ">=0.23" },
-    { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = ">=0.23" },
-    { name = "pytest-benchmark", marker = "extra == 'dev'", specifier = ">=4.0" },
-    { name = "pytest-cov", marker = "extra == 'dev'", specifier = ">=5.0" },
-    { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.4.0" },
-    { name = "seaborn", marker = "extra == 'eda'", specifier = ">=0.13" },
-    { name = "ty", marker = "extra == 'dev'" },
-    { name = "tyro", marker = "extra == 'cli'", specifier = ">=0.9,<2" },
-]
-provides-extras = ["cli", "dev", "eda"]
-
-[package.metadata.requires-dev]
-dev = [
-    { name = "complexipy", specifier = ">=5.6.1" },
-    { name = "import-linter", specifier = ">=2.1" },
-    { name = "pytest-benchmark", specifier = ">=5.2.3" },
-    { name = "pytest-cov", specifier = ">=7.1.0" },
-    { name = "tyro", specifier = ">=0.9,<2" },
-]
-docs = [
-    { name = "furo" },
-    { name = "myst-parser" },
-    { name = "sphinx", specifier = ">=7" },
-    { name = "sphinx-autodoc-typehints" },
-]
-eda = [
-    { name = "matplotlib", specifier = ">=3.8" },
-    { name = "pandas", specifier = ">=2.0" },
-    { name = "seaborn", specifier = ">=0.13" },
+sdist = { url = "https://files.pythonhosted.org/packages/b2/7c/c5530858dc77cb007c679cebaf8f4cd8b94a30ffb54e79ff50839c09048c/xtrax-0.3.0.tar.gz", hash = "sha256:d3d374331b05a5cfc41dd2173b01dd9a4cf9419296d346011b928526bab6dec1", size = 864071, upload-time = "2026-07-02T14:14:41.187Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/17/a0/8c77f5a31f573081bf843e5ad09aec829a0bede2669d3eee4a401fe587f3/xtrax-0.3.0-py3-none-any.whl", hash = "sha256:9d22c2fe985c9253528573e344291f5acff2af4382ab56794a49385cf229a5c0", size = 112648, upload-time = "2026-07-02T14:14:39.248Z" },
 ]
 
 [[package]]

@@ -29,7 +29,7 @@ dependencies = [
     "jaxopt",
     "h5py>=3.16.0",
     "rdkit>=2024.3.0",
-    "xtrax @ file:///home/marielle/projects/xtrax",
+    "xtrax>=0.3.0,<0.4",
     "parmed>=4.3.1",
 ]
 
