@@ -1,0 +1,50 @@
+[experiment]
+hypothesis = """
+B1 / Claim 1 (init-bound heterogeneous throughput). For a fixed ensemble of
+64 heterogeneous systems (4 topology classes {1ake, 1ubq, 2gb1, 4-water} x 16
+replicas), prolix cold-start t_total (median over >=3 seeds) is LOWER than
+OpenMM's equivalent cold-start protocol using N independent Contexts (no
+Context reuse), in the short-trajectory regime (100 ps/system) where
+initialization + AOT compilation dominate.
+
+H0: no meaningful wall-clock advantage, OR prolix's advantage is entirely a
+compile-dominated artifact (t_aot_compile / t_total > 0.5).
+
+Binding pre-registration: .praxia/docs/specs/260528_b1-preregistration.md.
+Deviations from pinned fields require an amendment PR before cluster spend.
+One CONFIRMED open amendment item: the pinned protocol does not minimize
+either engine, and raw PDB coordinates diverge (non-finite) within ~10 steps;
+an equilibration/minimization stage must be pinned before the cluster run.
+"""
+
+[outcomes.pass]
+condition = "t_total IS NOT NULL AND t_total > 0 AND aot_ratio < 0.5 AND trajectory_finite = true"
+decision = "Ingest into the b1-full campaign. Per-run pass means this configuration produced a finite cold-start trajectory with the AOT-compile guard satisfied. The headline cross-engine comparison (median prolix t_total < median openmm t_total) is evaluated across rows via `bth campaign review`, not per-run."
+reasoning = "A single bth run captures one (engine, seed, hardware, precision) cold-start of the full ensemble. The AOT guard (aot_ratio < 0.5) is the pinned per-run success criterion that distinguishes a genuine init-bound win from a compile-dominated artifact. trajectory_finite guards against timing a diverged (NaN) run, whose wall-clock is not a defensible datapoint."
+
+[outcomes.fail]
+condition = "t_total IS NULL OR t_total <= 0 OR aot_ratio >= 0.5 OR trajectory_finite = false"
+decision = "Investigate: (a) t_total NULL/<=0 -> script crashed before the timed region (check FF resolve, fixture load, OpenMM Context creation); (b) aot_ratio >= 0.5 -> compile-dominated, escalate to the R4 sub-spec per pre-reg success criterion 2; (c) trajectory_finite false -> the system diverged (unminimized coordinates) -> the equilibration amendment is required before trusting this run."
+reasoning = "Any of these means the run is not a usable B1 datapoint. is_residual catches everything not explicitly passing."
+is_residual = true
+
+[result_schema]
+engine = "str"
+system_type = "str"
+seed = "int"
+hardware_tag = "str"
+precision = "str"
+n_steps = "int"
+t_ff_load = "float"
+t_bundle_construct = "float"
+t_aot_compile = "float"
+t_first_step = "float"
+t_steady_state = "float"
+t_total = "float"
+aot_ratio = "float"
+trajectory_finite = "bool"
+
+[metadata]
+campaign_id = "b1-full"
+campaign_mode = "confirmation"
+tags = ["b1", "claim1", "cluster", "init-bound"]
