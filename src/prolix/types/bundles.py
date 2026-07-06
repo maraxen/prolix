@@ -120,6 +120,7 @@ class MolecularBundle(eqx.Module):
 
     # Per-atom arrays (padded to ATOM_BUCKETS)
     positions: Float[Array, "N 3"]
+    masses: Float[Array, N]
     charges: Float[Array, N]
     sigmas: Float[Array, N]
     epsilons: Float[Array, N]

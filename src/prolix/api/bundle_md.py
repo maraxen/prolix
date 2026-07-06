@@ -93,12 +93,21 @@ def tip3p_masses(n_waters: int, dtype=jnp.float64) -> jnp.ndarray:
 
 
 def masses_for_bundle(bundle: MolecularBundle) -> jnp.ndarray:
-    """Real-prefix masses for host-side single-system runs."""
+    """Real-prefix masses for host-side single-system runs.
+
+    Prefers the bundle's own ``masses`` field (real per-atom masses, e.g. from
+    ``from_pdb`` / proxide-backed loaders). Falls back to the canonical TIP3P
+    mass table for water-shaped bundles that don't supply real masses (unit
+    fill), preserving prior behavior for callers built before the masses field
+    existed.
+    """
     n_atoms = int(jnp.asarray(bundle.n_atoms))
-    n_waters = int(jnp.asarray(bundle.n_waters))
-    if n_waters > 0 and n_atoms == 3 * n_waters:
-        return tip3p_masses(n_waters, dtype=bundle.positions.dtype)
-    return jnp.ones(n_atoms, dtype=bundle.positions.dtype)
+    m = bundle.masses[:n_atoms]
+    if bool(jnp.all(m == 1.0)):
+        n_waters = int(jnp.asarray(bundle.n_waters))
+        if n_waters > 0 and n_atoms == 3 * n_waters:
+            return tip3p_masses(n_waters, dtype=bundle.positions.dtype)
+    return m
 
 
 def active_positions(bundle: MolecularBundle) -> jnp.ndarray:

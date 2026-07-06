@@ -634,8 +634,21 @@ def make_bundle_from_system(
         arr = _get(attr)
         return _pad_1d(arr, a)
 
+    # masses: unlike other per-atom fields, missing data must NOT zero-fill
+    # (mass=0 is physically invalid — div-by-zero in p/m). Default to unit mass,
+    # matching the historical masses_for_bundle() fallback for systems that don't
+    # supply real masses (e.g. energy-only fixtures); real masses (from_pdb,
+    # proxide-backed loaders) flow through unchanged.
+    masses_in = _get("masses")
+    if masses_in is None or (hasattr(masses_in, "size") and masses_in.size == 0):
+        masses_padded = jnp.ones(a, dtype=jnp.float32)
+    else:
+        masses_in = jnp.asarray(masses_in, dtype=jnp.float32)
+        masses_padded = jnp.pad(masses_in, (0, a - masses_in.shape[0]), constant_values=1.0)
+
     return MolecularBundle(
         positions=_pad_2d(pos, a, 3, dtype=jnp.float32),
+        masses=masses_padded,
         charges=_pad_atom("charges"),
         sigmas=_pad_atom("sigmas"),
         epsilons=_pad_atom("epsilons"),

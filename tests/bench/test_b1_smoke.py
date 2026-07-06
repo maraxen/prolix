@@ -107,6 +107,7 @@ def _make_bundle(n_atoms: int, seed: int = 0) -> MolecularBundle:
 
     return MolecularBundle(
         positions=positions,
+        masses=jnp.ones_like(charges),
         charges=charges,
         sigmas=sigmas,
         epsilons=epsilons,

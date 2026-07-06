@@ -146,6 +146,7 @@ def _make_minimal_bundle(n_atoms: int, atom_bucket: int | None = None) -> Molecu
 
     return MolecularBundle(
         positions=positions,
+        masses=jnp.ones_like(charges),
         charges=charges,
         sigmas=sigmas,
         epsilons=epsilons,
