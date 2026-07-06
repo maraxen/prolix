@@ -10,6 +10,15 @@ path prolix's ``test_system_parity`` suite exercises — to produce a fully
 parametrized ``Protein``, then maps it onto ``make_bundle_from_system`` to get a
 ``MolecularBundle`` with real bond/angle/dihedral/nonbonded parameters.
 
+KNOWN LIMITATION (blocked on Sprint A — .praxia/docs/specs/260706_b1-core-md-path-fix.md):
+this loader does NOT yet pass an ``exclusion_spec`` to ``make_bundle_from_system``,
+so the resulting bundle omits 1-2/1-3/1-4 nonbonded exclusions — bonded neighbors
+are double-counted as LJ clashes (median force ~3.8e5 kcal/mol/A on 2GB1) and
+protein trajectories diverge. The self-test's short "finite" check is a FALSE PASS
+(too few steps to overflow f32; force scale unchecked). A2 wires
+``ExclusionSpec.from_protein`` + a median-|grad| invariant; until then, treat this
+as parametrization-cost-only, not a physically valid MD input.
+
 Usage (self-test):
     uv run python scripts/benchmarks/_b1_paramize.py data/pdb/2GB1.pdb
 """

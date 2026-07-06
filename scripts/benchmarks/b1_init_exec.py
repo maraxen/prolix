@@ -57,15 +57,15 @@ CSV_COLUMNS = [
     "t_first_step", "t_steady_state", "t_total", "aot_ratio", "trajectory_finite",
 ]
 
-# KNOWN OPEN ITEM (pre-reg amendment pending): the pinned B1 protocol minimizes
-# neither engine, but raw crystal/NMR PDB coordinates carry steric clashes that
-# diverge (non-finite) within ~10 dynamics steps (confirmed: independent of f32/f64
-# and of the water system; the protein alone diverges). OpenMM's own parity fixtures
-# call LocalEnergyMinimizer first. Timing a diverged trajectory is not a defensible
-# datapoint, so `trajectory_finite` is emitted and gated in the sidecar. Before the
-# cluster B1-full run, an equilibration/minimization stage must be pinned via an
-# amendment to .praxia/docs/specs/260528_b1-preregistration.md (decide whether it sits
-# inside or outside the timed cold-start region).
+# BLOCKED ON CORE MD-PATH FIX (see .praxia/docs/specs/260706_b1-core-md-path-fix.md):
+# prolix protein bundles currently diverge (trajectory_finite=False) NOT because of
+# unminimized coordinates (minimization was ruled out — it plateaus on a broken
+# energy), but because the bundle MD path drops nonbonded exclusions (1-2/1-3
+# neighbors double-counted as LJ clashes -> median force 3.8e5 kcal/mol/A), runs
+# proteins at unit mass (MolecularBundle has no mass field), and settle_langevin
+# needs dt<=0.01 fs for vacuum proteins. `trajectory_finite` is emitted + gated so a
+# diverged run is never counted. B1-full over proteins resumes once Sprint A
+# (260706 spec: JIT-safe exclusions + mass field + settle vacuum-protein dt) lands.
 
 # TIP3P (flexible variant for a runnable bench; rigid constants + soft k).
 _TIP3P = dict(
