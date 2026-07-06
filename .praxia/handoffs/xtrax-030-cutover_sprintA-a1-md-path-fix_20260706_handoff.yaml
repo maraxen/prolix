@@ -1,76 +1,72 @@
 ---
 workspace: xtrax-030-cutover
 session_id: 64f064d0-f73b-4f23-b835-360683c646bf
-status: blocked
-phase: Sprint A / A1
+status: in_progress
+phase: Sprint A / A2
 task_id: 260706_xtrax_pathc
 goal_statement: >
   Sprint A (.praxia/docs/specs/260706_b1-core-md-path-fix.md): fix prolix's
   MolecularBundle MD path so it can run a real vacuum protein, unblocking the
   B1 Claim-1 benchmark. Three work items: A1 add a `masses` field to
-  MolecularBundle (IN PROGRESS, REGRESSED), A2 JIT-safe nonbonded exclusions
-  (not started), A3 settle_langevin vacuum-protein dt investigation (not
-  started).
+  MolecularBundle (DONE, resolved a regression along the way), A2 JIT-safe
+  nonbonded exclusions (not started), A3 settle_langevin vacuum-protein dt
+  investigation (not started).
 
 summary: >
-  A1 (add masses field to MolecularBundle) implemented and committed as WIP
-  (a048f61, pushed to branch worktree-xtrax-030-cutover / PR #1, clearly
-  labeled "KNOWN REGRESSION, do not merge") but full-suite verification
-  revealed a widespread regression far beyond the 9 direct MolecularBundle(...)
-  construction sites found via `rg`. Root cause NOT yet diagnosed. Note: the
-  mcp__praxia__handoff MCP tool failed to write (ENOENT) across 3 attempts
-  (workspace="prolix", workspace="xtrax-030-cutover", after mkdir -p
-  .agent/handoffs) — this file was written directly as a fallback, matching
-  the existing .praxia/handoffs/*.yaml convention. Worth investigating
-  separately; not blocking for this handoff's purpose.
+  A1 is complete and verified clean (commits a048f61 WIP + e41854b fix, both
+  pushed to worktree-xtrax-030-cutover / PR #1). The full-suite regression
+  flagged in the WIP commit was root-caused precisely: masses_for_bundle()
+  had a JIT-illegal data-value branch (`bool(jnp.all(m == 1.0))`), fixed by
+  making it a pure slice of bundle.masses. Verified against the pre-A1
+  baseline (a4f455f) that the only remaining failures (4, in
+  tests/api/test_v3/v4/v5 + test_multi_bundle_run) are byte-identical
+  pre-existing failures (ConcretizationTypeError, stacked-dispatch bug,
+  unrelated to A1/A2/A3 — see deferred). Zero new failures from the A1 fix.
+  Next: A2 (JIT-safe exclusions).
 
 immediately_relevant:
-  - file: src/prolix/types/bundles.py
-    lines: [121, 130]
+  - file: src/prolix/api/bundle_md.py
+    lines: [95, 106]
     reason: >
-      MolecularBundle field list — `masses: Float[Array, N]` inserted here,
-      2nd field right after `positions`. This schema change is the thing
-      under investigation. One open question: does moving it to the END of
-      the field list (vs. this position) change the blast radius?
+      masses_for_bundle — now a pure slice (`return bundle.masses[:n_atoms]`),
+      no runtime branch. This is the A1 fix. Also see
+      _dense_excl_matrices_from_bundle (~line 175) and
+      physics_system_from_bundle (~line 203) — the A2 target. The module
+      docstring (lines 1-18) documents the JIT contract explicitly: never
+      branch on bundle field *values* inside a function reachable from
+      energy_fn_from_bundle's jit trace; int()-ing scalar count fields
+      (n_atoms, n_excl, etc.) is the existing (if fragile) convention for
+      host-only code paths.
   - file: src/prolix/physics/system.py
     lines: [632, 651]
     reason: >
-      make_bundle_from_system — masses_in handling added with a unit-mass
-      default (never zero-fill, to avoid a worse regression than before).
-      This is the ONE production MolecularBundle constructor.
-  - file: src/prolix/api/bundle_md.py
-    lines: [95, 108]
+      make_bundle_from_system — masses_in handling, unit-mass default
+      preserved for callers without real data. Unchanged since A1's first
+      pass; still correct.
+  - file: src/prolix/types/bundles.py
+    lines: [121, 130]
     reason: >
-      masses_for_bundle — now prefers bundle.masses, falls back to the
-      canonical TIP3P mass table for water-shaped bundles with all-ones
-      masses (preserves prior behavior for legacy callers). Also see lines
-      ~166-260 (_dense_excl_matrices_from_bundle, physics_system_from_bundle)
-      — the A2 target, and where a SEPARATE pre-existing bug lives
-      (ConcretizationTypeError in the V4/V5 stacked-dispatch path, tracer
-      created at ensemble_dispatch.py:43 dispatch_n_mols — unrelated to
-      masses/exclusions, bisected to base commit 6b9e588 before any of this
-      session's work).
+      MolecularBundle field list — masses field, 2nd position after
+      positions. Turned out NOT to be the cause of the regression (position
+      was a red herring; the actual bug was the runtime bool() branch). No
+      further action needed here.
   - file: .praxia/docs/specs/260706_b1-core-md-path-fix.md
     lines: []
-    reason: >
-      The full Sprint A plan (A1/A2/A3), the verified diagnosis that led to
-      it (dropped exclusions, no mass field, settle dt), and acceptance
-      criteria. Read this first — it has the complete "why".
+    reason: The full Sprint A plan, verified diagnosis, and acceptance criteria.
   - file: scripts/benchmarks/_b1_paramize.py
     lines: [1, 20]
     reason: >
-      A2's target — the keystone PDB-to-bundle loader. Currently does NOT
-      pass exclusion_spec= to make_bundle_from_system; has an honest
-      limitation docstring already added this session.
-  - file: /tmp/claude-1000/-home-marielle-projects-prolix--claude-worktrees-xtrax-030-cutover/84f1d896-3d08-47c8-8baa-17c91c194551/tasks/bkk763e6n.output
-    lines: []
+      A2's target — the keystone PDB-to-bundle loader. Still does NOT pass
+      exclusion_spec= to make_bundle_from_system; has an honest limitation
+      docstring already added.
+  - file: src/prolix/simulate.py
+    lines: [485, 495]
     reason: >
-      Raw output of the background bash job (pytest full-suite run) that
-      surfaced the A1 regression. Also mirrored to
-      $CLAUDE_JOB_DIR/tmp/sprintA_a1_full2.log. May have finished by the time
-      this is read — check for FAILED test names and tracebacks (the
-      dot-matrix progress alone showed F/E starting at the 8% checkpoint,
-      well before the LFMiddle test that was deliberately deselected).
+      ExclusionSpec.from_protein(protein) — the existing, working exclusion
+      builder A2 should reuse (don't reinvent).
+  - file: src/prolix/padding.py
+    lines: [160, 175]
+    reason: map_exclusions_to_dense_padded — the existing JIT-safe padding helper A2 should reuse.
 
 active_dispatches: []
 
@@ -79,156 +75,128 @@ context_refs:
     task_id: 260706_xtrax_pathc
     summary: >
       b1_init_exec.py + _b1_paramize.py keystone loader built and pushed
-      (commits f2d05ff/1ca3978/ccbc13c); L1/L2 verified for init-bound
-      mechanics only — protein MD itself is what's blocked, which is why
-      Sprint A exists.
+      (f2d05ff/1ca3978/ccbc13c); L1/L2 verified for init-bound mechanics
+      only — protein MD is what Sprint A unblocks.
   - phase: Path B delegation
     task_id: 260706_xtrax_pathc
-    summary: >
-      xtrax 0.3.0 cutover (1414fb6) + production BatchPlanner delegation
-      (a519a06) — clean, on this same branch, unaffected by Sprint A work.
-  - phase: Sprint A spec authored
+    summary: xtrax 0.3.0 cutover (1414fb6) + BatchPlanner delegation (a519a06) — clean, unaffected.
+  - phase: Sprint A spec + diagnosis
     task_id: 260706_xtrax_pathc
     summary: >
-      Root-caused the B1 protein-MD divergence to dropped exclusions (not
-      minimization, which was ruled out) + no mass field + settle dt.
-      Reverted a fork's core-change attempt that regressed V4/V5 gates.
-      Spec committed at a4f455f before this A1 execution attempt.
+      Root-caused B1 protein-MD divergence to dropped exclusions (not
+      minimization) + no mass field + settle dt. Spec at a4f455f.
+  - phase: Sprint A / A1 (superseded)
+    task_id: 260706_xtrax_pathc
+    summary: >
+      Prior handoff version of this file recorded A1 as blocked on an
+      undiagnosed regression. Now resolved — see summary above. That
+      version's failed_attempts entries are preserved below for the
+      historical record.
 
 failed_attempts:
   - attempt_id: a1_masses_field_regression
     description: >
-      Added `masses` field to MolecularBundle (after `positions`), wired it
-      through make_bundle_from_system (unit-mass default preserved),
-      updated masses_for_bundle, and added masses= to all 9 direct
-      MolecularBundle(...) test constructors found via
-      `rg "MolecularBundle\("`.
+      Added `masses` field to MolecularBundle, wired through
+      make_bundle_from_system, updated masses_for_bundle to prefer
+      bundle.masses with a TIP3P-water fallback for legacy all-ones callers,
+      updated all 9 direct MolecularBundle(...) test constructors.
     outcome: >
-      Full-suite verification (tests/api tests/bench tests/tiling
-      tests/batching tests/physics -m "not slow", deselecting the one
-      pre-existing unrelated slow LFMiddle test) showed WIDESPREAD F/E
-      failures starting at the 8% checkpoint — well beyond the 9 known sites,
-      which passed cleanly before this change in isolation (a narrower
-      tests/api+tests/bench+tests/tiling run was clean earlier in the
-      session).
+      RESOLVED (commit e41854b). The TIP3P-fallback branch
+      (`if bool(jnp.all(m == 1.0)):`) was a JIT-illegal data-value branch —
+      TracerBoolConversionError/ConcretizationTypeError in 22 tests, all at
+      the same bundle_md.py call site, inside energy_fn_from_bundle's jit
+      trace.
     reason_failed: >
-      NOT YET DIAGNOSED. Hypothesis: there are more MolecularBundle
-      construction/reconstruction paths than direct `MolecularBundle(...)`
-      calls — e.g. positional/ordinal pytree access (tree_flatten/
-      tree_unflatten, jax.tree_util.tree_leaves indexing), an export/
-      StableHLO signature contract with a hardcoded leaf count/order
-      (V-series export tests), or something in ensemble_dispatch.py's
-      stacked dispatch. Field insertion position (2nd, right after
-      `positions`) may matter if anything relies on ordinal indexing rather
-      than named access — untested whether appending at the END instead
-      reduces the blast radius.
-    do_not_retry: false
+      energy_fn_from_bundle's closure is traced far more broadly than its
+      "host-side" docstring framing suggested. Fix: drop the runtime branch
+      entirely — masses_for_bundle is now a pure slice. Safe because
+      make_bundle_from_system already always populates masses correctly, so
+      the fallback heuristic was unnecessary (confirmed no test fixture
+      relies on it — all have n_waters=0).
+    do_not_retry: true
     evidence_ref: >
-      $CLAUDE_JOB_DIR/tmp/sprintA_a1_full2.log (background job, was still
-      running at handoff time, ~42% through with dozens of F/E already).
-      Committed as a048f61 on worktree-xtrax-030-cutover, explicitly labeled
-      "KNOWN REGRESSION, do not merge" in the commit message.
+      Fixed and verified: tests/api+bench+tiling+batching -m "not slow" →
+      108 passed, 4 failed (all pre-existing, confirmed identical at
+      baseline a4f455f), 3 skipped, 1 deselected. All 6 tests/physics files
+      touching MolecularBundle/EnsemblePlan/masses_for_bundle: 23/23 passed.
 
   - attempt_id: a2_exclusion_jit_fix_reverted
     description: >
-      Earlier this session (before this handoff's A1 work), a fork rewrote
-      the JIT-unsafe numpy loop in _dense_excl_matrices_from_bundle
-      (bundle_md.py) as a jnp scatter, alongside wiring exclusion_spec
-      through _b1_paramize.py.
+      Earlier attempt (before A1) at rewriting _dense_excl_matrices_from_bundle
+      as a jnp scatter, alongside wiring exclusion_spec through
+      _b1_paramize.py.
     outcome: >
-      Fixed the immediate TracerArrayConversionError on the exclusion path,
-      but the full V4/V5 test run still failed (different/additional
-      concretization error) — the change was made without full-suite
-      regression testing before being considered done.
+      Fixed the immediate TracerArrayConversionError but the change was made
+      without full-suite regression testing; reverted.
     reason_failed: >
-      Root cause of V4/V5 is a SEPARATE pre-existing bug (bisected to base
-      commit 6b9e588, before ANY of this session's work) in the stacked-
-      dispatch path — not something A2 needs to fix for B1, since B1's
-      ensemble is heterogeneous and never hits the homogeneous
-      stacked-compile-once path that triggers it. The scatter-based approach
-      itself (reusing ExclusionSpec.from_protein @ simulate.py:489 and
-      map_exclusions_to_dense_padded @ padding.py:166 — both already exist
-      in prolix) is architecturally correct and remains the recommended A2
-      path. Retry it, but verify against the FULL suite (not just V4/V5)
-      after each incremental change, and don't conflate it with the separate
-      pre-existing V4/V5 bug.
+      Not actually wrong in approach — ExclusionSpec.from_protein +
+      map_exclusions_to_dense_padded (both already exist in prolix) remains
+      the recommended A2 path. The lesson from THIS session's A1 experience
+      applies directly: verify against the FULL suite after each incremental
+      change, not just the tests that motivated the change.
     do_not_retry: false
-    evidence_ref: >
-      Reverted via `git checkout src/prolix/api/bundle_md.py` this session;
-      not preserved as a diff. Approach documented in
-      .praxia/docs/specs/260706_b1-core-md-path-fix.md.
+    evidence_ref: Reverted via git checkout; approach documented in the Sprint A spec.
 
 open_questions:
   - >
-    What is the exact set of MolecularBundle construction/reconstruction
-    sites beyond the 9 found by `rg "MolecularBundle\("`? Does any V-series
-    export test or ensemble_dispatch stacking code do positional pytree
-    reconstruction that assumes a fixed field count/order?
+    A2: does wiring ExclusionSpec.from_protein through _b1_paramize.py and
+    fixing _dense_excl_matrices_from_bundle's JIT-unsafety (same class of bug
+    as A1 — check for int()/bool() on traced values) also fix the pre-existing
+    V4/V5/V3/multi-bundle ConcretizationTypeError, since they're in adjacent
+    code (physics_system_from_bundle)? Worth checking as a side effect, not a
+    requirement.
   - >
-    Does moving `masses` to the END of the field list (vs. its current
-    position right after `positions`) reduce or eliminate the regression?
-    Untested.
+    Is the pre-existing V4/V5-family stacked-dispatch ConcretizationTypeError
+    in scope for Sprint A, or genuinely separate (B1's heterogeneous ensemble
+    never exercises the homogeneous stacked-compile-once path)? Leaning
+    "separate, deferred" — not yet asked explicitly of the user.
   - >
-    Is the pre-existing V4/V5 stacked-dispatch ConcretizationTypeError
-    (separate from A1/A2) something Sprint A should also fix, or is it
-    genuinely out of scope since B1's heterogeneous ensemble never exercises
-    that code path? User has not been asked this explicitly.
-  - >
-    Why did mcp__praxia__handoff(action="create") fail with "Failed to write
-    handoff file: No such file or directory" across 3 attempts (2 workspace
-    names, after creating .agent/handoffs/)? Worth a quick look separately —
-    this file was written manually as a working fallback.
+    What is the second slow/hanging test in tests/physics -m "not slow"
+    (beyond the already-known LFMiddle one)? Traceback was deep in JAX
+    vmap/pjit internals, not obviously related to any file touched this
+    session. Not yet identified by name — the full tests/physics directory
+    run needs a proper triage pass (e.g. run file-by-file or add
+    --durations=20) rather than one big timeout-prone invocation.
 
 deferred:
   - description: >
-      Pre-existing V4-HLO/V5 observable-parity gate failures
-      (ConcretizationTypeError, bisected to base commit 6b9e588).
+      Pre-existing V4-HLO/V5/V3/multi-bundle stacked-dispatch
+      ConcretizationTypeError family (bisected to base commit 6b9e588 AND
+      reconfirmed identical at a4f455f — predates all of this session's work).
     rationale: >
-      Confirmed unrelated to Path B, B1, or Sprint A — pre-existing on the
-      branch before any of this session's work. Not required for B1 unblock
-      since B1's heterogeneous ensemble never hits the homogeneous
-      stacked-compile-once path that triggers it.
+      Not required for B1 unblock since B1's heterogeneous ensemble never
+      hits the homogeneous stacked-compile-once path that triggers it.
     recommended_phase: separate sprint, flagged to user but not yet actioned
-
+  - description: Second unidentified slow/hanging test in tests/physics (not LFMiddle).
+    rationale: Orthogonal to Sprint A; needs its own triage pass.
+    recommended_phase: separate, low priority
   - description: Bucket/Carry/Dedup adoption in xtrax_adapter (optional Claim-1 speedup).
     rationale: Deferred since before Sprint A; unaffected by current work.
     recommended_phase: after Sprint A + B1-full
 
 next_steps:
   - >
-    Read the full log at $CLAUDE_JOB_DIR/tmp/sprintA_a1_full2.log (or
-    /tmp/claude-1000/.../tasks/bkk763e6n.output — background job, may have
-    finished) to get every FAILED test name and traceback, not just the
-    dot-matrix progress.
+    A2: wire ExclusionSpec.from_protein (src/prolix/simulate.py:489) +
+    map_exclusions_to_dense_padded (src/prolix/padding.py:166) through
+    _b1_paramize.py's exclusion_spec= param on make_bundle_from_system.
   - >
-    For each distinct failure signature, identify whether it's a missed
-    MolecularBundle(...) construction site, a positional/ordinal pytree
-    access, an export/StableHLO signature contract with a hardcoded leaf
-    count, or something in ensemble_dispatch.py's stacked dispatch.
+    A2: fix _dense_excl_matrices_from_bundle's JIT-unsafe numpy loop
+    (bundle_md.py ~line 175) — check carefully for int()/bool()-on-traced-value
+    patterns, the SAME class of bug A1 just hit. Verify against the FULL
+    suite (tests/api+bench+tiling+batching+the 6 physics files, at minimum)
+    after this change, before considering it done — do not repeat the
+    prior attempt's mistake of only checking the tests that motivated it.
   - >
-    grep beyond 'MolecularBundle(' for: 'tree_unflatten', 'tree_leaves',
-    'dataclasses.fields(MolecularBundle', any .npz/.pkl/.json serialized
-    bundle fixtures, and the V-series export tests (V1-V6).
+    A2 acceptance: run the keystone self-test on 2GB1 — median |grad| should
+    drop from 3.84e5 to O(10^2) kcal/mol/Å once exclusions are populated.
   - >
-    Try moving `masses` to the END of the field list instead of after
-    `positions`; re-run the full suite to see if the blast radius changes.
+    A3 (unstarted): root-cause why vacuum proteins need dt<=0.01fs vs the
+    pinned 0.5fs, after A1+A2 land. Compare settle_langevin vs plain BAOAB
+    (no SETTLE) on a protein-only bundle.
   - >
-    Once root-caused and fixed, re-run:
-    uv run pytest tests/api tests/bench tests/tiling tests/batching
-    tests/physics -m "not slow" --deselect
-    tests/physics/test_lfmiddle_dt_sweep.py::TestLFMiddleSingleWaterStability::test_lfmiddle_single_water_stability -q
-    — must be 100% clean (same pass count as pre-A1 baseline) before
-    amending the WIP commit or moving to A2.
-  - >
-    After A1 is clean: A2 wires ExclusionSpec.from_protein
-    (src/prolix/simulate.py:489) + map_exclusions_to_dense_padded
-    (src/prolix/padding.py:166) through _b1_paramize.py's exclusion_spec=
-    param, and redoes the JIT-safe scatter rewrite of
-    _dense_excl_matrices_from_bundle — WITH full-suite regression testing
-    after each incremental step this time.
-  - >
-    A3 (settle_langevin dt) is unstarted — root-cause why vacuum proteins
-    need dt<=0.01fs vs the pinned 0.5fs, after A1+A2 land.
+    B1-full unblock acceptance (per the Sprint A spec): a protein bundle from
+    _b1_paramize runs a finite trajectory at dt=0.5fs through
+    EnsemblePlan.from_bundles(...).run(), median |grad| O(10^2), real masses.
 
 lessons_refs: []
 ---
