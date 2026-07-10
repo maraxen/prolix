@@ -1,0 +1,57 @@
+[experiment]
+mode = "confirmation"
+hypothesis = """
+After the xtrax 0.4 rewire, prolix BAOAB/CSVR thermostats on a harmonic
+oscillator still agree with kUPS within Sprint-5 gates (|ΔT|≤2 K for BAOAB
+and CSVR@0.5 fs; ≤10 K for CSVR@1.0 fs). The always-on kups_adapter unit
+roundtrips must hold even when the optional kups package is absent.
+"""
+claim_discriminates = ["H_rewire_ok"]
+claim_isolates = ["C_throughput_confound"]
+
+[outcomes.pass]
+condition = """
+gate_pass = 1
+AND adapter_pass = 1
+AND (
+  crossval_ran = 0
+  OR (
+    crossval_ran = 1
+    AND ABS(delta_t_k) <= COALESCE(t_tolerance_k, 2.0)
+  )
+)
+"""
+decision = "kUPS adapter contract (and optional crossval) confirmed for rewire regression."
+reasoning = """
+Adapter probe is the CI-safe gate. Crossval requires optional kups; when it
+runs, ΔT gates match tests/physics/test_kups_thermostat_crossval.py.
+"""
+is_residual = false
+
+[outcomes.fail]
+condition = "gate_pass = 0 OR adapter_pass = 0 OR (crossval_ran = 1 AND ABS(delta_t_k) > COALESCE(t_tolerance_k, 2.0))"
+decision = "Investigate kups_adapter unit drift or thermostat crossval regression."
+reasoning = "Residual catch-all for adapter or crossval gate miss."
+is_residual = true
+
+[result_schema]
+campaign_slug = "str"
+probe = "str"
+seed = "int"
+kups_available = "int"
+adapter_pass = "int"
+gate_pass = "int"
+crossval_ran = "int"
+delta_t_k = "float"
+t_prolix_k = "float"
+t_kups_k = "float"
+integrator = "str"
+dt_fs = "float"
+n_particles = "int"
+t_tolerance_k = "float"
+skip_reason = "str"
+
+[metadata]
+campaign_slug = "xr-parity-kups"
+backlog_item = "XR-PARITY-KUPS"
+tags = ["xr-parity-kups", "confirmation", "kups"]

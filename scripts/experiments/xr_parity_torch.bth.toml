@@ -1,0 +1,52 @@
+[experiment]
+mode = "confirmation"
+hypothesis = """
+After the xtrax 0.4 rewire (FIT-FLIP / KILL-FORK), the prolix Scope A primitive
+from external_baseline still emits valid metrics (per_mol_step_seconds > 0,
+0 < final_loss < 1e10) on lane_a fixtures, and BatchPlanner.plan remains an
+alias of plan_with_xtrax. This is a rewire regression — not Claim-1 throughput
+and not a TorchMD comparator run.
+"""
+claim_discriminates = ["H_rewire_ok"]
+claim_isolates = ["C_throughput_confound"]
+
+[outcomes.pass]
+condition = """
+gate_pass = 1
+AND planner_pass = 1
+AND prolix_smoke_ran = 1
+AND per_mol_step_seconds > 0
+AND final_loss > 0
+AND final_loss < 1e10
+"""
+decision = "Rewire regression green for prolix Scope A / planner alias."
+reasoning = """
+Process gates match bench_prolix.bth.toml. Structural planner_pass locks
+FIT-FLIP. TorchMD/DMFF remain optional cluster comparators outside this leaf.
+"""
+is_residual = false
+
+[outcomes.fail]
+condition = "gate_pass = 0 OR planner_pass = 0 OR prolix_smoke_ran = 0 OR per_mol_step_seconds IS NULL OR per_mol_step_seconds <= 0 OR final_loss IS NULL OR final_loss <= 0 OR final_loss >= 1e10"
+decision = "Investigate rewire regression in fitting Scope A or BatchPlanner.plan alias."
+reasoning = "Residual catch-all for planner or prolix smoke gate miss."
+is_residual = true
+
+[result_schema]
+campaign_slug = "str"
+probe = "str"
+seed = "int"
+planner_pass = "int"
+prolix_smoke_ran = "int"
+gate_pass = "int"
+per_mol_step_seconds = "float"
+final_loss = "float"
+n_mols = "int"
+skip_reason = "str"
+device = "str"
+git_hash = "str"
+
+[metadata]
+campaign_slug = "xr-parity-torch"
+backlog_item = "XR-PARITY-TORCH"
+tags = ["xr-parity-torch", "confirmation", "external-baseline", "rewire"]
