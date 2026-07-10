@@ -9,6 +9,15 @@ try:
 except ImportError:
     pass
 
+
+@pytest.fixture
+def regression_pme_params():
+    """Shared PME knobs for OpenMM ↔ Prolix explicit-solvent parity tests."""
+    from prolix.physics.regression_explicit_pme import REGRESSION_EXPLICIT_PME
+
+    return dict(REGRESSION_EXPLICIT_PME)
+
+
 @pytest.fixture
 def simple_positions():
     """Fixture for simple particle positions (4 atoms)."""

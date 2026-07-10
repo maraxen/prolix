@@ -121,6 +121,7 @@ def test_shim_grad_uses_analytical_path():
     pos = jnp.ones((a, 3)) * 0.5
     bundle = MolecularBundle(
         positions=pos,
+        masses=jnp.ones(a),
         charges=jnp.zeros(a),
         sigmas=jnp.ones(a),
         epsilons=jnp.ones(a),

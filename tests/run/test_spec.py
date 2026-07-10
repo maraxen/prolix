@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import dataclasses
+import inspect
 
 import pytest
 
+from prolix.api.ensemble_planner import resolve_device_budget_bytes
 from prolix.run.spec import (
     BatchingConfig,
     FittingAxisNames,
@@ -20,6 +22,7 @@ from prolix.tiling.axes import (
     N_MOLS,
     N_TORSIONS,
 )
+from prolix.tiling.planner import BatchPlanner, estimate_memory_theoretical
 
 
 def test_make_fitting_planner_returns_valid_plan():
@@ -103,3 +106,53 @@ def test_both_batch_size_overrides():
     conf_decision = plan.decision_for(FittingAxisNames.N_CONFORMERS)
     assert mols_decision.batch_size > 0
     assert conf_decision.batch_size > 0
+
+
+def test_make_fitting_planner_uses_plan_with_xtrax_not_greedy():
+    """Kill test (XR-FIT-FLIP): entrypoint must call plan_with_xtrax, not .plan()."""
+    source = inspect.getsource(make_fitting_planner)
+    assert "plan_with_xtrax" in source
+    assert ").plan()" not in source
+    assert "resolve_device_budget_bytes" in source
+
+
+def test_make_fitting_planner_is_thin_wrapper_over_plan_with_xtrax():
+    """Decision-parity: entrypoint matches direct BatchPlanner.plan_with_xtrax."""
+    spec = BatchingConfig(n_mols=32, n_conformers=100)
+    headroom = 0.80
+    param_bytes = 0.0
+    activation_multiplier = 2.5
+
+    via_entrypoint = make_fitting_planner(
+        spec,
+        param_bytes=param_bytes,
+        headroom=headroom,
+        activation_multiplier=activation_multiplier,
+    )
+
+    budget = resolve_device_budget_bytes(headroom, param_bytes)
+    axes = [
+        dataclasses.replace(
+            N_MOLS,
+            cardinality=max(1, spec.n_mols),
+            default_batch_size=N_MOLS.default_batch_size,
+        ),
+        dataclasses.replace(
+            N_CONFORMERS,
+            cardinality=max(1, spec.n_conformers),
+            default_batch_size=N_CONFORMERS.default_batch_size,
+        ),
+    ]
+    via_direct = BatchPlanner(
+        axes=axes,
+        budget_bytes=budget,
+        estimate_memory=lambda ds: estimate_memory_theoretical(
+            ds, 1.0, activation_multiplier
+        ),
+    ).plan_with_xtrax()
+
+    for name in (FittingAxisNames.N_MOLS, FittingAxisNames.N_CONFORMERS):
+        assert (
+            via_entrypoint.decision_for(name).batch_size
+            == via_direct.decision_for(name).batch_size
+        )

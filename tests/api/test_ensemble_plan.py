@@ -104,6 +104,7 @@ def _make_minimal_bundle(n_atoms=3) -> MolecularBundle:
 
     return MolecularBundle(
         positions=positions,
+        masses=jnp.ones_like(charges),
         charges=charges,
         sigmas=sigmas,
         epsilons=epsilons,
