@@ -1,28 +1,40 @@
-"""Batch planner for EnsemblePlan multi-bundle MD dispatch (#1842)."""
+"""Batch planner for EnsemblePlan multi-bundle MD dispatch (#1842 / XR-BUDGET)."""
 
 from __future__ import annotations
 
 import dataclasses
 from typing import Any
 
-import jax
+from xtrax.tiling.estimators import device_memory_budget
 
 from prolix.tiling.axes import N_ATOMS, N_MOLS
 from prolix.tiling.planner import BatchPlan, estimate_memory_theoretical
-from prolix.tiling.xtrax_adapter import plan_axes_with_xtrax
+from prolix.tiling.xtrax_adapter import BudgetInfeasibleError, plan_axes_with_xtrax
 
-from prolix.api.bundle_stack import can_jit_vmap_n_mols, can_stack_molecular_bundles
+from prolix.api.bundle_stack import can_jit_vmap_n_mols
+
+# CI / CPU backends without memory_stats: match historical _device_budget_bytes fallback.
+_CI_DEVICE_LIMIT_BYTES = 4 << 30
+
+__all__ = [
+    "BudgetInfeasibleError",
+    "EnsembleMDPlanner",
+    "resolve_device_budget_bytes",
+]
 
 
-def _device_budget_bytes(headroom: float, param_bytes: float) -> float:
+def resolve_device_budget_bytes(headroom: float, param_bytes: float = 0.0) -> int:
+    """Resolve an int MemoryBudget byte count (1A estimator policy).
+
+    GPU/prod: ``device_memory_budget(fraction=headroom)`` when the device
+    reports ``bytes_limit``. CI CPU: fixed ``4<<30`` device limit × headroom.
+    ``param_bytes`` are subtracted in both cases (floored at 1).
+    """
     try:
-        stats = jax.devices()[0].memory_stats()
-        if stats is None:
-            raise AttributeError("memory_stats returned None")
-        device_limit = stats["bytes_limit"]
-    except (KeyError, IndexError, AttributeError, TypeError):
-        device_limit = 4 * 1024**3
-    return device_limit * headroom - param_bytes
+        device_budget = device_memory_budget(fraction=headroom)
+    except (RuntimeError, ValueError, AttributeError, IndexError, TypeError, KeyError):
+        device_budget = int(_CI_DEVICE_LIMIT_BYTES * headroom)
+    return max(1, int(device_budget - param_bytes))
 
 
 @dataclasses.dataclass(frozen=True)
@@ -42,11 +54,7 @@ class EnsembleMDPlanner:
         """Return a BatchPlan for the given bundle batch."""
         n_systems = max(1, len(bundles))
         max_atoms = max((int(b.n_atoms) for b in bundles), default=1)
-        stackable = len(bundles) > 1 and can_stack_molecular_bundles(bundles)
-        homo_n_atoms = (
-            len(bundles) > 1
-            and can_jit_vmap_n_mols(bundles)
-        )
+        homo_n_atoms = len(bundles) > 1 and can_jit_vmap_n_mols(bundles)
 
         axes = [
             dataclasses.replace(N_ATOMS, cardinality=max_atoms),
@@ -56,7 +64,7 @@ class EnsembleMDPlanner:
                 heterogeneous=not homo_n_atoms,
             ),
         ]
-        budget = _device_budget_bytes(self.headroom, self.param_bytes)
+        budget = resolve_device_budget_bytes(self.headroom, self.param_bytes)
 
         def estimate_memory(decisions: list) -> float:
             return estimate_memory_theoretical(

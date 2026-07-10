@@ -68,16 +68,28 @@ class EnsemblePlan:
         kT: float | Any,
         seed: int | Any = 0,
         observables: dict[str, Any] | None = None,
+        *,
+        xtc_path: str | Any | None = None,
+        dt_unit: str = "fs",
+        gamma: float = 10.0,
     ) -> Trajectory | list[Trajectory]:
         """Run MD simulation over all bundles.
 
         Args:
             n_steps: Number of MD steps (host-static; ``lax.scan`` length).
-            dt: Timestep in AKMA units (``jnp.ndarray`` scalar or float).
-            kT: Thermal energy (``jnp.ndarray`` scalar or float).
+            dt: Timestep. By default (**``dt_unit='fs'``**) this is **femtoseconds**
+                and is converted to AKMA via ``dt_fs_to_akma`` (XR-VACUUM-DT).
+                Pass ``dt_unit='akma'`` if ``dt`` is already in AKMA time units.
+            kT: Thermal energy in kcal/mol (``jnp.ndarray`` scalar or float).
             seed: PRNG seed for thermostat noise (int or uint32 array).
             observables: Optional name → Observable map; final-step values
                 are stored in Trajectory.observable_values.
+            xtc_path: Optional path for MD traj XTC output (XR-SINK-XTC).
+                Single-bundle only; writes via ``XtcFrameSink`` (not Zarr).
+            dt_unit: ``'fs'`` (default) or ``'akma'``.
+            gamma: Langevin friction in **ps⁻¹** (converted via ``gamma_ps_to_akma``).
+                Default ``10`` matches water NVT production. Vacuum proteins without
+                H-constraints need ``gamma >= 50`` at ``dt=0.5`` fs (XR-VACUUM-DT).
 
         Returns:
             Trajectory for a single bundle, or list[Trajectory] when
@@ -85,17 +97,42 @@ class EnsemblePlan:
         """
         if not self.bundles:
             raise ValueError("EnsemblePlan requires at least one bundle")
+        if dt_unit not in ("fs", "akma"):
+            raise ValueError(f"dt_unit must be 'fs' or 'akma', got {dt_unit!r}")
+
+        if xtc_path is not None and len(self.bundles) != 1:
+            raise ValueError(
+                "xtc_path is supported for single-bundle EnsemblePlan runs only"
+            )
 
         if len(self.bundles) == 1:
-            return self._run_single(
-                self.bundles[0], n_steps, dt, kT, seed, observables=observables
+            traj = self._run_single(
+                self.bundles[0],
+                n_steps,
+                dt,
+                kT,
+                seed,
+                observables=observables,
+                dt_unit=dt_unit,
+                gamma=gamma,
             )
+            if xtc_path is not None:
+                from prolix.api.xtc_sink import write_positions_xtc
+
+                write_positions_xtc(xtc_path, traj.positions)
+            return traj
 
         from prolix.api.bundle_stack import can_jit_vmap_n_mols
 
         if can_jit_vmap_n_mols(self.bundles):
             return self._run_stacked_dispatch(
-                n_steps, dt, kT, seed, observables=observables
+                n_steps,
+                dt,
+                kT,
+                seed,
+                observables=observables,
+                dt_unit=dt_unit,
+                gamma=gamma,
             )
 
         chunk = self._systems_chunk_size()
@@ -114,6 +151,8 @@ class EnsemblePlan:
                         kT,
                         seed + len(trajectories),
                         observables=obs,
+                        dt_unit=dt_unit,
+                        gamma=gamma,
                     )
                 )
         return trajectories
@@ -125,6 +164,9 @@ class EnsemblePlan:
         kT: float | Any,
         seed: int | Any,
         observables: dict[str, Any] | None = None,
+        *,
+        dt_unit: str = "fs",
+        gamma: float = 10.0,
     ) -> list[Trajectory]:
         """JIT vmap / safe_map over stack-compatible bundles (#2645)."""
         import jax.numpy as jnp
@@ -154,6 +196,8 @@ class EnsemblePlan:
                 observables=obs,
                 integration_prefix=integration_prefix,
                 trim_output=False,
+                dt_unit=dt_unit,
+                gamma=gamma,
             )
 
         batched = dispatch_n_mols(
@@ -176,6 +220,8 @@ class EnsemblePlan:
         *,
         integration_prefix: int | None = None,
         trim_output: bool = True,
+        dt_unit: str = "fs",
+        gamma: float = 10.0,
     ) -> Trajectory:
         import jax
         import jax.numpy as jnp
@@ -192,11 +238,21 @@ class EnsemblePlan:
             water_indices_for_integration,
         )
         from prolix.api.observables import Trajectory
+        from prolix.physics.kups_adapter import dt_fs_to_akma, gamma_ps_to_akma
         from prolix.physics.settle import settle_langevin
 
         energy_fn = energy_fn_from_bundle(bundle)
         _displacement_fn, shift_fn = displacement_fn_for_bundle(bundle)
-        dt, kT = as_integration_scalars(dt, kT, dtype=bundle.positions.dtype)
+
+        # XR-VACUUM-DT: EnsemblePlan dt is femtoseconds; gamma is ps⁻¹.
+        dt_host = float(jnp.asarray(dt))
+        if dt_unit == "fs":
+            dt_akma = dt_fs_to_akma(dt_host)
+        else:
+            dt_akma = dt_host
+        gamma_akma = gamma_ps_to_akma(float(gamma))
+
+        dt, kT = as_integration_scalars(dt_akma, kT, dtype=bundle.positions.dtype)
 
         if integration_prefix is not None:
             positions_init = positions_with_prefix(bundle, integration_prefix)
@@ -207,13 +263,13 @@ class EnsemblePlan:
             masses = masses_for_bundle(bundle)
             water_indices = water_indices_for_integration(bundle)
 
-        # Factory defaults are placeholders; init/apply always receive traced dt/kT.
+        # Factory defaults are placeholders for dt/kT; gamma is physical (ps^-1→AKMA).
         init_fn, apply_fn = settle_langevin(
             energy_fn,
             shift_fn,
             dt=1.0,
             kT=1.0,
-            gamma=10.0,
+            gamma=gamma_akma,
             mass=masses,
             water_indices=water_indices,
             project_ou_momentum_rigid=True,
@@ -226,7 +282,9 @@ class EnsemblePlan:
             new_state = apply_fn(carry, kT=kT, dt=dt)
             return new_state, new_state.position
 
-        state, positions_array = jax.lax.scan(step_fn, state, None, length=n_steps)
+        from prolix.api.ensemble_dispatch import dispatch_n_steps
+
+        state, positions_array = dispatch_n_steps(step_fn, state, int(n_steps))
         if trim_output:
             positions_array = trim_trajectory_positions(positions_array, bundle)
 
