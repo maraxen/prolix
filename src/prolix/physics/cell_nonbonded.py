@@ -195,9 +195,13 @@ def cell_energy_scan(
             chg, nbr_chg, msk, nbr_msk,
             box_size, cutoff, alpha, is_self_interaction=False,
         )
-        return carry + e, None
+        return carry + jnp.asarray(e, dtype=carry.dtype), None
 
-    e_neighbors, _ = lax.scan(_neighbor_energy, jnp.float32(0.0), shifts_array)
+    # Match carry dtype to e_self (not pos): suite x64 can promote pair energy
+    # while CellList positions remain float32.
+    e_neighbors, _ = lax.scan(
+        _neighbor_energy, jnp.zeros((), dtype=e_self.dtype), shifts_array
+    )
     # 0.5 for double-counting: each pair appears as (i→j) and (j→i)
     e_neighbors = 0.5 * e_neighbors
 

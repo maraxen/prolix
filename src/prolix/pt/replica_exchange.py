@@ -29,6 +29,18 @@ logger = logging.getLogger(__name__)
 Array = Any
 
 
+def _langevin_positions(state: Any) -> Array:
+  """jax_md NVTLangevinState uses ``position``; prolix uses ``positions``."""
+  return state.positions if hasattr(state, "positions") else state.position
+
+
+def _langevin_momenta(state: Any) -> Array:
+  """Prefer ``momenta`` alias; fall back to ``momentum``."""
+  if hasattr(state, "momenta"):
+    return state.momenta
+  return state.momentum
+
+
 @dataclasses.dataclass
 class ReplicaExchangeSpec:
   """Configuration for Replica Exchange MD."""
@@ -338,22 +350,24 @@ def run_replica_exchange(
   sub_states = v_init_wrapper(init_keys, r_replicas, kTs, masses)
 
   # Convert to ReplicaExchangeState
-  # sub_states is NVTLangevinState with stacked arrays
-  E_init = jax.vmap(energy_fn)(sub_states.positions)
+  # sub_states may be jax_md (``.position``) or prolix (``.positions``).
+  init_pos = _langevin_positions(sub_states)
+  init_mom = _langevin_momenta(sub_states)
+  E_init = jax.vmap(energy_fn)(init_pos)
 
   def compute_ke(p, m):
     return quantity.kinetic_energy(momentum=p, mass=m)
 
-  K_init = jax.vmap(compute_ke)(sub_states.momentum, sub_states.mass)
+  K_init = jax.vmap(compute_ke)(init_mom, sub_states.mass)
 
   # helper for velocity calculation: ensure mass broadcasts
   m_init = sub_states.mass
-  while m_init.ndim < sub_states.momentum.ndim:
+  while m_init.ndim < init_mom.ndim:
     m_init = m_init[..., None]
 
   state = ReplicaExchangeState(
-    positions=sub_states.positions,
-    velocities=sub_states.momentum / m_init,
+    positions=init_pos,
+    velocities=init_mom / m_init,
     forces=sub_states.force,
     mass=m_init,
     walker_indices=jnp.arange(n_replicas),
@@ -389,35 +403,49 @@ def run_replica_exchange(
     rng, step_rng = random.split(rng)
     step_rngs = random.split(step_rng, n_replicas)
 
-    langevin_state = physics_simulate.NVTLangevinState(
-      positions=curr_state.positions,
-      momentum=curr_state.velocities * curr_state.mass,
-      force=curr_state.forces,
-      mass=curr_state.mass,
-      rng=step_rngs,
-    )
+    # Reconstruct integrator state for apply_fn.
+    # jax_md nvt_langevin expects NamedTuple with ``.set``; prolix rattle uses eqx Module.
+    mom = curr_state.velocities * curr_state.mass
+    if constraints is not None:
+      langevin_state = physics_simulate.NVTLangevinState(
+        positions=curr_state.positions,
+        momentum=mom,
+        force=curr_state.forces,
+        mass=curr_state.mass,
+        rng=step_rngs,
+      )
+    else:
+      langevin_state = simulate.NVTLangevinState(
+        position=curr_state.positions,
+        momentum=mom,
+        force=curr_state.forces,
+        mass=curr_state.mass,
+        rng=step_rngs,
+      )
 
     def inner_step(i, s):
       return v_step_fn(s, kTs)
 
     final_langevin = jax.lax.fori_loop(0, steps_per_exchange, inner_step, langevin_state)
 
-    # Update ReplicaExchangeState
-    PE = jax.vmap(energy_fn)(final_langevin.positions)
+    # Update ReplicaExchangeState (jax_md apply may return ``.position``)
+    final_pos = _langevin_positions(final_langevin)
+    final_mom = _langevin_momenta(final_langevin)
+    PE = jax.vmap(energy_fn)(final_pos)
 
     # Re-use compute_ke from outer scope or redefine
     def compute_ke_step(p, m):
       return quantity.kinetic_energy(momentum=p, mass=m)
 
-    KE = jax.vmap(compute_ke_step)(final_langevin.momentum, final_langevin.mass)
+    KE = jax.vmap(compute_ke_step)(final_mom, final_langevin.mass)
 
     m_step = final_langevin.mass
-    while m_step.ndim < final_langevin.momentum.ndim:
+    while m_step.ndim < final_mom.ndim:
       m_step = m_step[..., None]
 
     updated_state = curr_state.replace(
-      positions=final_langevin.positions,
-      velocities=final_langevin.momentum / m_step,  # velocity
+      positions=final_pos,
+      velocities=final_mom / m_step,  # velocity
       forces=final_langevin.force,
       step=curr_state.step + steps_per_exchange,
       time_ns=curr_state.time_ns + (steps_per_exchange * dt * 1e-3),  # ns

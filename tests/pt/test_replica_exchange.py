@@ -7,9 +7,6 @@ import pytest
 
 from prolix.pt import replica_exchange, temperature
 
-# XA-CI: NVTLangevinState position/positions API drift — tracked under XA-DRIFT.
-pytestmark = pytest.mark.slow
-
 
 def test_temperature_ladder():
   temps = temperature.generate_temperature_ladder(4, 300, 400, geometric=True)

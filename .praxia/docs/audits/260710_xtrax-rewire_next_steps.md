@@ -17,7 +17,7 @@
 | XA-CLOSEOUT | **completed** | VERIFY PASS (AC5–AC8) |
 | XA-EPIC | **completed** | inter-epic audit closed |
 | XA-NL-DEBT | **ready** | NL vs dense tile assert — do not reopen XR-BUCKET |
-| XA-REHOME | **ready** | cheap API-drift re-admit (replica-exchange, cell_list) |
+| XA-REHOME | **completed** | replica_exchange + cell_list in default CI; 591 passed |
 
 ```mermaid
 flowchart LR
@@ -32,9 +32,9 @@ flowchart LR
 
 ## Immediate
 
-1. **XA-REHOME** — unmark `slow` only for cheap API-drift (`tests/pt/test_replica_exchange.py`, `tests/test_cell_list.py`); keep heavy/OpenMM/long-MD deselected; GitHub-faithful suite must stay green.
-2. **TRIAGE** — human picks next epic slug (paper / B1-full / HP4). AC1∧AC3∧AC5 hold; call out bathos `outcome` quirk and no merge to `main` yet.
-3. **Land branch** — push/PR when human requests (invariant: no autonomous push/merge to main).
+1. **TRIAGE** — human picks next epic slug (paper / B1-full / HP4). AC1∧AC3∧AC5 hold; call out bathos `outcome` quirk and no merge to `main` yet.
+2. **Land branch** — push/PR when human requests (invariant: no autonomous push/merge to main).
+3. **XA-NL-DEBT** — optional; reopen XR-BUCKET only on silent-drop repro.
 
 ## Frozen invariants (pinned)
 
