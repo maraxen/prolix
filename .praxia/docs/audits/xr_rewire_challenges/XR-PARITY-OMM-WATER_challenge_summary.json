@@ -1,0 +1,12 @@
+{
+  "backlog_id": "XR-PARITY-OMM-WATER",
+  "overall_verdict": "pass",
+  "confidence": "high",
+  "blocking_count": 0,
+  "summary": "Campaign 5ffe2644 concluded pass on Titanix. T2: |ΔE|=0.040 kcal/mol, force_rmse=0.011, mean_T=303.6 K. Sparse excl_indices fix for static; liquid-density 3.1 Å grid + 10 ps NVT for T. XR-KILL-FORK unblocked.",
+  "leaf_spec": ".praxia/docs/specs/260709_xr-parity-omm-water.md",
+  "campaign_id": "5ffe2644",
+  "run_id": "cbea8064-4ac0-4e1a-bdea-8c033ce3e801",
+  "result_json": "outputs/xr_parity_omm_tip3p_final.json",
+  "full_challenge": "see agent transcripts / revise from ROLLUP probes"
+}

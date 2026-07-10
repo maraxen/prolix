@@ -1,0 +1,19 @@
+{
+  "backlog_id": "XR-DISPATCH",
+  "praxia_id": 3275,
+  "overall_verdict": "near_ready",
+  "confidence": "high",
+  "round": 2,
+  "prior_blockers_cleared": [
+    "2A N_MOLS-only scope locked",
+    "make_axis_dispatch iterators applied (not discarded)",
+    "Bucket/DedupGather/Scan raise DispatchRejected",
+    "V1/V3/V4/V5 + V8 in leaf gate set; V6 out",
+    "XR-DISPATCH-MULTI debt filed for non-N_MOLS axes"
+  ],
+  "residual": [
+    "Multi-axis dispatch deferred to XR-DISPATCH-MULTI",
+    "Scan deferred to XR-CARRY"
+  ],
+  "summary": "near_ready — N_MOLS iterator dispatch live; proceed to XR-SHADOW with BUDGET"
+}

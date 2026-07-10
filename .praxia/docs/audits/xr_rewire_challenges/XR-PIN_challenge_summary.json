@@ -1,0 +1,9 @@
+{
+  "backlog_id": "XR-PIN",
+  "praxia_id": 3272,
+  "overall_verdict": "pass",
+  "confidence": "high",
+  "blocking_count": 0,
+  "summary": "PyPI pin xtrax>=0.4.0a5,<0.5; check_xtrax_pin.py + CI step; path/editable rejected. Bookkeeping closed 2026-07-09.",
+  "leaf_spec": ".praxia/docs/specs/260709_xr-pin.md"
+}

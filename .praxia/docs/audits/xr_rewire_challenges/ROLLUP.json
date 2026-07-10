@@ -1,0 +1,127 @@
+{
+  "audit_id": "260709_xr_rewire_spec_challenge",
+  "task_id": "260709_xtrax_rewire",
+  "timestamp": "2026-07-09T19:01:53.875948+00:00",
+  "epic_spec": ".praxia/docs/specs/260709_xtrax-rewire-epic.md",
+  "promotion": {
+    "method": "backlog.jsonl (praxia staging DB insert failed)",
+    "items": 13,
+    "note": "praxia staging add failed with insert_staging DB error; promoted directly to .praxia/backlog.jsonl"
+  },
+  "leaves_challenged": {
+    "XR-PIN": {
+      "overall_verdict": "pass",
+      "confidence": "high",
+      "blocking": 0,
+      "summary": "PyPI xtrax>=0.4.0a5,<0.5; check_xtrax_pin.py + CI; path/editable rejected. Bookkeeping closed 2026-07-09."
+    },
+    "XR-BUDGET": {
+      "overall_verdict": "not_ready",
+      "confidence": "high",
+      "blocking": 5,
+      "summary": "Estimator policy TBD; MemoryBudget API bridge unspecified; hetero budget_exceeded vs raise; call-site scope unclear."
+    },
+    "XR-DISPATCH": {
+      "overall_verdict": "not_ready",
+      "confidence": "high",
+      "blocking": 4,
+      "summary": "AC1 satisfiable by dead make_axis_dispatch call; axes scope ambiguous; AC3 already true without iterator apply."
+    },
+    "XR-SHADOW": {
+      "overall_verdict": "not_ready",
+      "confidence": "high",
+      "blocking": 5,
+      "summary": "Strategy types already collapsed to ints; fitting still greedy before FIT-FLIP; fixture unnamed."
+    },
+    "XR-FIT-FLIP": {
+      "overall_verdict": "not_ready",
+      "confidence": "high",
+      "blocking": 3,
+      "summary": "Replacement call shape unpinned; AC3 smoke tests pass under either planner; decision-parity contract missing."
+    },
+    "XR-PARITY-OMM-WATER": {
+      "overall_verdict": "pass",
+      "confidence": "high",
+      "blocking": 0,
+      "summary": "Campaign 5ffe2644 pass on Titanix: |ΔE|=0.040, force_rmse=0.011, mean_T=303.6 K; XR-KILL-FORK unblocked."
+    },
+    "XR-KILL-FORK": {
+      "overall_verdict": "pass",
+      "confidence": "high",
+      "blocking": 0,
+      "summary": "Greedy loop deleted; plan() aliases plan_with_xtrax; V7 joint-budget rewrite; paper/B1-full AC8 gate lifted."
+    },
+    "XR-CARRY": {
+      "overall_verdict": "pass",
+      "confidence": "high",
+      "blocking": 0,
+      "summary": "N_STEPS CarrySpec→Scan; dispatch_n_steps JaxScanIterator; EnsemblePlan._run_single wired."
+    },
+    "XR-A2A3": {
+      "overall_verdict": "pass",
+      "confidence": "high",
+      "blocking": 0,
+      "summary": "A1+A2 done; A3 C3 via XR-VACUUM-DT (unit+gamma policy delivered)."
+    },
+    "XR-VACUUM-DT": {
+      "overall_verdict": "pass",
+      "confidence": "high",
+      "blocking": 0,
+      "summary": "dt fs→AKMA; gamma ps→AKMA; vacuum unconstrained-H: gamma≥50 at dt=0.5 or dt≤0.1 at gamma=10; gate test_xr_vacuum_dt green."
+    },
+    "XR-PARITY-OMM-PROTEIN": {
+      "overall_verdict": "pass",
+      "confidence": "high",
+      "blocking": 0,
+      "summary": "exception_* wired into energy_fn_from_bundle; 2GB1 shared amber14 static ΔE≈0.001, force_rmse≈2e-6; pytest gate green."
+    },
+    "XR-PARITY-KUPS": {
+      "overall_verdict": "pass",
+      "confidence": "high",
+      "blocking": 0,
+      "summary": "xr_parity_kups sidecar+driver; adapter probe bathos pass (991b1851); always-on unit tests; T crossval optional when kups installed."
+    },
+    "XR-PARITY-TORCH": {
+      "overall_verdict": "pass",
+      "confidence": "high",
+      "blocking": 0,
+      "summary": "Re-homed prolix Scope A as xr_parity_torch confirmation; bathos pass (29c5f27f); BatchPlanner.plan→xtrax; TorchMD out of CI."
+    },
+    "XR-DISPATCH-MULTI": {
+      "overall_verdict": "pass",
+      "confidence": "high",
+      "blocking": 0,
+      "summary": "dispatch_vmap_safemap + dispatch_n_atoms; dispatch_n_mols via generic helper; Bucket/Scan/Dedup rejected."
+    },
+    "XR-BUCKET": {
+      "overall_verdict": "pass",
+      "confidence": "high",
+      "blocking": 0,
+      "summary": "#746: compute_dense_tiling_dims + tile_reduction ValueError; dense LJ/Coulomb routed through helper."
+    },
+    "XR-DEDUP": {
+      "overall_verdict": "pass",
+      "confidence": "high",
+      "blocking": 0,
+      "summary": "DedupSpec→DedupGather planning; execute via axis_dispatch (not make_axis_dispatch); N_MOLS forced homogeneous; dispatch_n_mols still rejects DedupGather."
+    },
+    "XR-SINK-XTC": {
+      "overall_verdict": "pass",
+      "confidence": "high",
+      "blocking": 0,
+      "summary": "Proxide XtcWriter stub; mdtraj backend; XtcFrameSink xtrax Sink; EnsemblePlan xtc_path; Zarr rejected for MD."
+    }
+  },
+  "leaves_deferred_challenge": [
+    "XR-PARITY-OMM-PROTEIN",
+    "XR-PARITY-KUPS",
+    "XR-PARITY-TORCH",
+    "XR-BUCKET",
+    "XR-EPIC"
+  ],
+  "overall": "tiling path + XR-A2A3 closed; vacuum dt deferred to XR-VACUUM-DT before PROT",
+  "next": [
+    "XR-VACUUM-DT challenge + implement (gates PROT)",
+    "XR-PARITY-KUPS / TORCH secondary"
+  ]
+}

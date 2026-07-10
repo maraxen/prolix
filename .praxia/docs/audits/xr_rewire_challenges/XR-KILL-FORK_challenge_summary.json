@@ -1,0 +1,9 @@
+{
+  "backlog_id": "XR-KILL-FORK",
+  "overall_verdict": "pass",
+  "confidence": "high",
+  "blocking_count": 0,
+  "summary": "Greedy BatchPlanner.plan loop deleted; plan() aliases plan_with_xtrax; V7 rewritten to joint-budget; structural kill gates green. Paper/B1-full AC8 gate lifted.",
+  "leaf_spec": ".praxia/docs/specs/260709_xr-kill-fork.md",
+  "full_challenge": "see agent transcripts / revise from ROLLUP probes"
+}
