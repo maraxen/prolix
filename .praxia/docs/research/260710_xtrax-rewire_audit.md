@@ -43,21 +43,15 @@
 
 ## Regression status
 
-**Default CI (from project docs / CLAUDE.md):** `uv run pytest -m "not slow"` (no `loop_priorities.toml` `[invariants]` present — **UNVERIFIED** formal default_ci).
+**Default CI (GitHub):** `uv run pytest -m "not (slow or integration or dynamics)"` ([`.github/workflows/ci.yml`](.github/workflows/ci.yml) L72).
 
-**Audit smoke (2026-07-10):**
-```text
-uv run pytest -m "not slow and not openmm and not kups" \
-  tests/tiling/test_xtrax_adapter.py \
-  tests/api/test_ensemble_vmap_dispatch.py \
-  tests/api/test_xr_dispatch_multi.py \
-  tests/physics/test_xr_bucket_tiling.py \
-  tests/tiling/test_xr_parity_torch_planner.py \
-  tests/physics/test_xr_parity_kups_adapter.py -q
-→ 36 passed in 1.97s
-```
+**XA-CI (2026-07-10):** **REQUEST_CHANGES** — full suite does not exit 0 on this host.
+- Pin check: PASS (`xtrax 0.4.0a5`).
+- XR always-on subset: **41 passed** (`tmp/xa_xr_subset.log`).
+- Clear XR regressions fixed mid-audit: tracer-safe `dt` conversion + V1 `dt_unit="akma"` (EnsemblePlan W1/W2/V4/V6/V1 gates green after fix).
+- Wave-1 inventory (`--maxfail=40`): **40 failed / 288 passed** — remaining failures dominated by pre-existing ImportError/`project_momenta`, OpenMM bench, EFA TypeErrors, batched simulate; suite also **hangs** on `test_settle_preserves_water_geometry` (JAX compile >120s). Evidence: `tmp/xa_ci_failures.txt`, `tmp/xa_ci_wave1.log`.
 
-Full default suite **not yet run** in this audit session — track for Phase 5/6.
+**Audit smoke (earlier):** 36 passed on XR tiling/dispatch subset.
 
 ## Open risks for next epic
 
