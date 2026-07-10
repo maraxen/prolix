@@ -1,0 +1,44 @@
+# Epic-audit VERIFY checklist — 260710_epic-audit_xtrax-rewire
+# Filled at XA-CLOSEOUT (2026-07-10).
+
+[audit]
+closed_epic_id = 3269
+next_epic_id = 0
+task_id = "260710_epic-audit_xtrax-rewire"
+verdict = "VERIFY PASS"
+
+[[checks]]
+id = "ci_green"
+description = "Default test suite passes"
+command = 'uv run pytest -m "not (slow or integration or dynamics)"'
+required = true
+status = "PASS"
+evidence = "570 passed; commit bf8e5f1; tmp/xa_ci_junit_final.xml"
+
+[[checks]]
+id = "research_memo"
+description = "Closeout research memo exists with cited evidence"
+path = ".praxia/docs/research/260710_xtrax-rewire-epic-closeout-audit.md"
+required = true
+status = "PASS"
+
+[[checks]]
+id = "loop_priorities"
+description = "loop_priorities.toml reflects closed epic and next active epic"
+path = ".praxia/loop_priorities.toml"
+required = true
+status = "PASS"
+
+[[checks]]
+id = "hygiene"
+description = "Commits on branch or open PR"
+required = true
+status = "PASS"
+evidence = "branch audit/xtrax-rewire-xa; push/PR deferred by human"
+
+[[checks]]
+id = "dt_callsite"
+description = "VACUUM-DT call-site audit clean"
+required = true
+status = "PASS"
+evidence = "XA-DRIFT commit 586cf87"

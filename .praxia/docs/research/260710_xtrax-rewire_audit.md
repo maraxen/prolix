@@ -4,7 +4,7 @@
 **closed_epic:** `#3269` / `XR-EPIC` — Prolix × xtrax 0.4 rewire (`260709_xtrax_rewire`)  
 **next_epic:** TBD (paper / B1-full / HP4 per epic AC8; triage after audit)  
 **date:** 2026-07-10  
-**status:** Phase 0 research (cited claims only)
+**status:** Phase 0 research (cited claims only) — **superseded for verdict** by `.praxia/docs/research/260710_xtrax-rewire-epic-closeout-audit.md` (VERIFY PASS, 2026-07-10)
 
 ## Scope anchors
 
