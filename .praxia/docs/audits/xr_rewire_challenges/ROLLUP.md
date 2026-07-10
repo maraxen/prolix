@@ -4,7 +4,7 @@
 
 **Epic status (2026-07-10):** all XR leaves **completed** / challenge `pass` (see table). Stale “all 8 = not_ready” header retired.
 
-**XA-SYNC (2026-07-10):** `bth sync engaging --pull` failed (rsync 23); fallback catalog rsync OK. Local bathos row `cbea8064…` tags `xr-parity-omm-water` still `outcome=unknown`. Campaign `5ffe2644` pass remains **UNVERIFIED locally** (cited only via challenge summary / Titanix claim). Paper must not treat local catalog as confirmatory.
+**XA-SYNC (2026-07-10):** Titanix confirmatory re-run **PASS** — run `dfa001bf-c376-4bfb-a1ff-cdc68d35da86`, campaign `944fef0b`, `outputs/xr_parity_omm_tip3p_xa_sync.json`: gate_pass=1, |ΔE|=0.0399, force_rmse=0.0108, mean_T=303.6 K. (Earlier engaging sync left `cbea8064` as `outcome=unknown`; bathos outcome column still unknown on the new run despite T2 metrics — cite JSON/`gate_pass`.)
 
 | Leaf | Verdict | Blocking | Worst gap |
 |------|---------|----------|-----------|

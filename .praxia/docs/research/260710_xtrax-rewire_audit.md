@@ -24,7 +24,7 @@
 | AC2 Adapter uses `MemoryBudget`; no host demotion loop | PASS | `src/prolix/tiling/xtrax_adapter.py` imports `MemoryBudget`; `rg` under `src/prolix/tiling` finds no `while.*estimate` / `secondary demotion` / `greedy` |
 | AC3 Shadow: strategy type + `batch_size` + dispatch | PASS (leaf) | ROLLUP XR-SHADOW; tests under `tests/tiling/` / ensemble (subset green below) |
 | AC4 Fitting does not call prolix greedy `.plan()` | PASS | XR-FIT-FLIP / XR-KILL-FORK: `BatchPlanner.plan` → `plan_with_xtrax` (`260709_xr-kill-fork.md`) |
-| AC5 TIP3P OpenMM bathos confirmatory | **UNVERIFIED** (XA-SYNC 2026-07-10) | Challenge summary claims campaign `5ffe2644` pass (\|ΔE\|=0.040, force_rmse=0.011, mean_T=303.6 K). After `bth sync engaging` fail + catalog rsync: local SQL still only `cbea8064…` `outcome=unknown`. Do not cite as locally confirmed. |
+| AC5 TIP3P OpenMM bathos confirmatory | **PASS** (Titanix 2026-07-10) | Fresh run `dfa001bf…` on Titanix GPU1, campaign `944fef0b`, EXIT=0, JSON `outputs/xr_parity_omm_tip3p_xa_sync.json`: gate_pass=1, \|ΔE\|=0.0399, force_rmse=0.0108, mean_T=303.6 K (matches Jul-9 `cbea8064` / claimed `5ffe2644`). Bathos `outcome` column still `unknown` (eval quirk; manual T2 condition True) — do not treat `outcome` alone as authority. |
 | AC6 Post-kill: no competing greedy planner | PASS | Structural kill leaf complete; planner docstring authority = xtrax `MemoryBudget` |
 | AC7 V7 rewritten to joint-budget | PASS | XR-KILL-FORK V7 contracts in spec; `tests/physics/test_batch_planner_v7.py` modified |
 | AC8 Paper epic unblocked after AC6 | PASS (process) | Kill-fork challenge_summary: “Paper/B1-full AC8 gate lifted” |
