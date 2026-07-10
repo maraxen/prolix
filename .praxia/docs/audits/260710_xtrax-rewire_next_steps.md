@@ -1,40 +1,43 @@
-# Next steps — after XA-CLOSEOUT VERIFY PASS
+# Next steps — after TRIAGE (B1-full locked)
 
 **date:** 2026-07-10  
 **task_id:** `260710_epic-audit_xtrax-rewire`  
 **branch:** `audit/xtrax-rewire-xa`  
 **closeout memo:** `.praxia/docs/research/260710_xtrax-rewire-epic-closeout-audit.md`  
-**invariants:** `.praxia/loop_priorities.toml`
+**triage:** `.praxia/docs/audits/260710_xtrax-rewire_triage.md`  
+**invariants:** `.praxia/loop_priorities.toml`  
+**next epic:** `260528_b1-full`
 
 ## Where we are
 
 | Leaf | Status | Gate |
 |------|--------|------|
-| XA-SYNC | **completed** | AC2 PASS (Titanix `dfa001bf`, gate_pass=1) |
-| XA-HYGIENE | **completed** | commits on branch (no push/PR yet) |
-| XA-CI | **completed** | GitHub-faithful suite exit 0 — 570 passed |
-| XA-DRIFT | **completed** | AC4 + freeze → `loop_priorities.toml` |
-| XA-CLOSEOUT | **completed** | VERIFY PASS (AC5–AC8) |
-| XA-EPIC | **completed** | inter-epic audit closed |
-| XA-NL-DEBT | **ready** | NL vs dense tile assert — do not reopen XR-BUCKET |
-| XA-REHOME | **completed** | replica_exchange + cell_list in default CI; 591 passed |
+| XA-* audit leaves | **completed** | VERIFY PASS |
+| XA-REHOME | **completed** | 591 passed |
+| XA-NL-DEBT | **ready** | not on B1 critical path |
+| **TRIAGE** | **completed** | next = B1-full |
+| B1-LAND | **ready** | P0 push/PR (human) |
+| B1-SMOKE / B1-FULL | **ready** | prereg cadence |
 
 ```mermaid
 flowchart LR
-  closeDone[XA-CLOSEOUT done]
-  rehome[XA-REHOME]
-  triage[TRIAGE paper B1 HP4]
-  nlDebt[XA-NL-DEBT]
-  closeDone --> rehome
-  closeDone --> triage
-  closeDone --> nlDebt
+  triageDone[TRIAGE done]
+  land[B1-LAND]
+  smoke[B1-SMOKE]
+  full[B1-FULL]
+  paper[Paper later]
+  triageDone --> land
+  land --> smoke
+  smoke --> full
+  full --> paper
 ```
 
 ## Immediate
 
-1. **TRIAGE** — human picks next epic slug (paper / B1-full / HP4). AC1∧AC3∧AC5 hold; call out bathos `outcome` quirk and no merge to `main` yet.
-2. **Land branch** — push/PR when human requests (invariant: no autonomous push/merge to main).
-3. **XA-NL-DEBT** — optional; reopen XR-BUCKET only on silent-drop repro.
+1. **B1-LAND** — push/PR `audit/xtrax-rewire-xa` when human requests (no autonomous push/merge to main).
+2. **B1-SMOKE** — B=4 mixed EnsemblePlan regression (prereg).
+3. **B1-FULL** — B=64 Claim-1 campaign via `bth run` (prereg); do not use pytest for cluster runs.
+4. Paper / HP4 remain deferred until B1-full numbers exist and branch is landed.
 
 ## Frozen invariants (pinned)
 

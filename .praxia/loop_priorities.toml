@@ -14,4 +14,4 @@ exception_14_on_bundle_energy_path = true
 [epics]
 closed = "260709_xtrax_rewire" # XR-EPIC
 audit = "260710_epic-audit_xtrax-rewire" # XA-EPIC
-next = "TRIAGE" # paper / B1-full / HP4 — human picks slug
+next = "260528_b1-full" # Claim 1 — locked by TRIAGE 2026-07-10; paper/HP4 deferred

@@ -6,6 +6,7 @@ closed_epic_id = 3269
 next_epic_id = 0
 task_id = "260710_epic-audit_xtrax-rewire"
 verdict = "VERIFY PASS"
+next_epic_slug = "260528_b1-full"
 
 [[checks]]
 id = "ci_green"

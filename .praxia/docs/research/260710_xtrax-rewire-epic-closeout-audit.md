@@ -3,7 +3,7 @@
 **task_id:** `260710_epic-audit_xtrax-rewire`  
 **closed_epic:** `#3269` / `XR-EPIC` — Prolix × xtrax 0.4 rewire (`260709_xtrax_rewire`)  
 **audit_epic:** `XA-EPIC` (`260710_epic-audit_xtrax-rewire`)  
-**next_epic:** TRIAGE (paper / B1-full / HP4 — human picks slug)  
+**next_epic:** `260528_b1-full` (B1-full / Claim 1 — locked TRIAGE 2026-07-10; paper/HP4 deferred)  
 **date:** 2026-07-10  
 **branch:** `audit/xtrax-rewire-xa`  
 **status:** VERIFY PASS
@@ -65,7 +65,7 @@ Pinned in `.praxia/loop_priorities.toml` as `[invariants].default_ci`.
 
 **VERIFY PASS**
 
-Blockers for REQUEST_CHANGES (CI green ∧ hygiene ∧ dt audit) are cleared. Next: human TRIAGE for paper / B1-full / HP4; execute `XA-REHOME` for cheap CI re-admits; do not reopen XR-BUCKET without silent-drop repro.
+Blockers for REQUEST_CHANGES (CI green ∧ hygiene ∧ dt audit) are cleared. Next epic locked by TRIAGE 2026-07-10: **B1-full** (see `.praxia/docs/audits/260710_xtrax-rewire_triage.md`). Paper/HP4 deferred; land branch before paper citations.
 
 ## Citations index
 
