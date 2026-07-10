@@ -5,7 +5,12 @@ from typing import TypeVar
 import jax
 import jax.numpy as jnp
 
-from .tiling import pad_to_tile, tile_reduction, tile_reduction_nl
+from .tiling import (
+    compute_dense_tiling_dims,
+    pad_to_tile,
+    tile_reduction,
+    tile_reduction_nl,
+)
 
 T = TypeVar("T")
 
@@ -25,9 +30,9 @@ def chunked_lj_energy(
     tile_size: int = 128
 ) -> jnp.ndarray:
     """Computes dense LJ energy using FlashMD tiling O(N^2)."""
-    _need = max(1024, int(excl_indices.shape[0]) + 128)
-    inner_tile_size = ((_need + tile_size - 1) // tile_size) * tile_size
-    pad_dim = max(tile_size, inner_tile_size)
+    pad_dim, inner_tile_size = compute_dense_tiling_dims(
+        int(r.shape[0]), int(excl_indices.shape[0]), tile_size
+    )
     r_pad, mask_pad = pad_to_tile(r, pad_dim)
     sig_pad, _ = pad_to_tile(sigmas, pad_dim)
     eps_pad, _ = pad_to_tile(epsilons, pad_dim)
@@ -70,9 +75,9 @@ def _chunked_lj_fwd(r, sigmas, epsilons, excl_indices, excl_scales, displacement
 def _chunked_lj_bwd(excl_indices, displacement_fn, cutoff, tile_size, res, g):
     r, sigmas, epsilons, excl_scales = res
     N = r.shape[0]
-    _need = max(1024, int(excl_indices.shape[0]) + 128)
-    inner_tile_size = ((_need + tile_size - 1) // tile_size) * tile_size
-    pad_dim = max(tile_size, inner_tile_size)
+    pad_dim, inner_tile_size = compute_dense_tiling_dims(
+        int(N), int(excl_indices.shape[0]), tile_size
+    )
     r_pad, mask_pad = pad_to_tile(r, pad_dim)
     sig_pad, _ = pad_to_tile(sigmas, pad_dim)
     eps_pad, _ = pad_to_tile(epsilons, pad_dim)
@@ -193,12 +198,10 @@ def chunked_coulomb_energy(
     tile_size: int = 128
 ) -> jnp.ndarray:
     """Computes direct-space Coulomb energy using FlashMD tiling."""
-    # inner_tile_size must exceed the total number of exclusion pairs
-    # (n_waters × excl_per_mol) AND be a multiple of tile_size so the
-    # tile_reduction loop range(inner//tile) covers every atom row.
-    _need = max(1024, int(excl_indices.shape[0]) + 128)
-    inner_tile_size = ((_need + tile_size - 1) // tile_size) * tile_size
-    pad_dim = max(tile_size, inner_tile_size)
+    # pad_dim / inner_tile_size via XR-BUCKET helper (#746).
+    pad_dim, inner_tile_size = compute_dense_tiling_dims(
+        int(r.shape[0]), int(excl_indices.shape[0]), tile_size
+    )
     r_pad, mask_pad = pad_to_tile(r, pad_dim)
     q_pad, _ = pad_to_tile(charges, pad_dim)
     excl_i_pad = jnp.pad(excl_indices, ((0, pad_dim - excl_indices.shape[0]), (0, 0)), constant_values=-1)
@@ -235,9 +238,9 @@ def _chunked_coulomb_fwd(r, charges, excl_indices, excl_scales, displacement_fn,
 def _chunked_coulomb_bwd(excl_indices, displacement_fn, pme_alpha, coulomb_constant, cutoff, tile_size, res, g):
     r, charges, excl_idx_orig, excl_scales, pme_alpha = res
     N = r.shape[0]
-    _need = max(1024, int(excl_idx_orig.shape[0]) + 128)
-    inner_tile_size = ((_need + tile_size - 1) // tile_size) * tile_size
-    pad_dim = max(tile_size, inner_tile_size)
+    pad_dim, inner_tile_size = compute_dense_tiling_dims(
+        int(N), int(excl_idx_orig.shape[0]), tile_size
+    )
     r_pad, mask_pad = pad_to_tile(r, pad_dim)
     q_pad, _ = pad_to_tile(charges, pad_dim)
     excl_i_pad = jnp.pad(excl_idx_orig, ((0, pad_dim - excl_idx_orig.shape[0]), (0, 0)), constant_values=-1)
