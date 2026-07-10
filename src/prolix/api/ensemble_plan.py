@@ -238,18 +238,20 @@ class EnsemblePlan:
             water_indices_for_integration,
         )
         from prolix.api.observables import Trajectory
-        from prolix.physics.kups_adapter import dt_fs_to_akma, gamma_ps_to_akma
+        from prolix.physics.kups_adapter import AKMA_TIME_UNIT_FS, gamma_ps_to_akma
         from prolix.physics.settle import settle_langevin
 
         energy_fn = energy_fn_from_bundle(bundle)
         _displacement_fn, shift_fn = displacement_fn_for_bundle(bundle)
 
         # XR-VACUUM-DT: EnsemblePlan dt is femtoseconds; gamma is ps⁻¹.
-        dt_host = float(jnp.asarray(dt))
+        # Keep dt conversion in JAX so StableHLO / jaxgrad paths can trace dt
+        # (Python float() on a tracer raises ConcretizationTypeError).
+        dt_arr = jnp.asarray(dt)
         if dt_unit == "fs":
-            dt_akma = dt_fs_to_akma(dt_host)
+            dt_akma = dt_arr / AKMA_TIME_UNIT_FS
         else:
-            dt_akma = dt_host
+            dt_akma = dt_arr
         gamma_akma = gamma_ps_to_akma(float(gamma))
 
         dt, kT = as_integration_scalars(dt_akma, kT, dtype=bundle.positions.dtype)

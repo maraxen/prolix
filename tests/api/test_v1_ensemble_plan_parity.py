@@ -109,16 +109,19 @@ def _one_water_bundle():
 
 def _reference_trajectory(bundle, *, n_steps, dt, kT, seed):
     """Direct settle_langevin using the same bundle-backed helpers as EnsemblePlan."""
+    from prolix.physics.kups_adapter import gamma_ps_to_akma
+
     energy_fn = energy_fn_from_bundle(bundle)
     _, shift_fn = displacement_fn_for_bundle(bundle)
     masses = masses_for_bundle(bundle)
     water_indices = bundle.water_indices[: int(bundle.n_waters)]
+    # settle_langevin expects gamma already in AKMA (caller converts from ps⁻¹).
     init_fn, apply_fn = settle.settle_langevin(
         energy_fn,
         shift_fn,
         dt=dt,
         kT=kT,
-        gamma=10.0,
+        gamma=gamma_ps_to_akma(10.0),
         mass=masses,
         water_indices=water_indices,
         project_ou_momentum_rigid=True,
@@ -142,7 +145,8 @@ def _solvated_ake_bundle():
 def test_v1_harness_runs_and_returns_trajectory():
     bundle = _one_water_bundle()
     ep = EnsemblePlan.from_bundle(bundle)
-    traj = ep.run(n_steps=5, dt=0.5, kT=0.596, seed=42)
+    # Pre-XR tests used AKMA dt; keep escape hatch for bitwise parity gates.
+    traj = ep.run(n_steps=5, dt=0.5, kT=0.596, seed=42, dt_unit="akma")
     assert traj.n_steps == 5
     assert traj.positions.shape == (5, 3, 3)
     assert jnp.all(jnp.isfinite(traj.positions))
@@ -159,7 +163,7 @@ def test_v1_one_water_parity_vs_settle_langevin():
 
     ref = _reference_trajectory(bundle, n_steps=n_steps, dt=dt, kT=kT, seed=seed)
     ep = EnsemblePlan.from_bundle(bundle)
-    out = ep.run(n_steps=n_steps, dt=dt, kT=kT, seed=seed)
+    out = ep.run(n_steps=n_steps, dt=dt, kT=kT, seed=seed, dt_unit="akma")
     rmsd = jnp.sqrt(jnp.mean((out.positions - ref) ** 2))
     assert rmsd < 1e-12, f"V1 parity failed: RMSD={rmsd:.3e} Å"
 
@@ -175,7 +179,7 @@ def test_v1_solvated_ake_1k_parity_vs_settle_langevin():
 
     ref = _reference_trajectory(bundle, n_steps=n_steps, dt=dt, kT=kT, seed=seed)
     out = EnsemblePlan.from_bundle(bundle).run(
-        n_steps=n_steps, dt=dt, kT=kT, seed=seed
+        n_steps=n_steps, dt=dt, kT=kT, seed=seed, dt_unit="akma"
     )
     rmsd = jnp.sqrt(jnp.mean((out.positions - ref) ** 2))
     assert rmsd < 1e-12, f"V1 solvated AKE 1k parity failed: RMSD={rmsd:.3e} Å"

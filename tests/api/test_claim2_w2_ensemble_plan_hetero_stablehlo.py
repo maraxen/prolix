@@ -60,7 +60,8 @@ def test_w2_hetero_b4_lower_succeeds():
     assert isinstance(refs, list)
     for i, (got, ref) in enumerate(zip(exported, refs, strict=True)):
         rmsd = jnp.sqrt(jnp.mean((got - ref.positions) ** 2))
-        assert rmsd < 1e-10, f"system {i}: RMSD={rmsd:.3e}"
+        # float32 + XR-VACUUM-DT jnp conversion; was 1e-10 pre-fs-default.
+        assert rmsd < 1e-6, f"system {i}: RMSD={rmsd:.3e}"
 
 
 @pytest.mark.fast
