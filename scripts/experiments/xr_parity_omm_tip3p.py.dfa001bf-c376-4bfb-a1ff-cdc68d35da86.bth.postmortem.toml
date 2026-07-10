@@ -1,0 +1,49 @@
+run_id = "dfa001bf-c376-4bfb-a1ff-cdc68d35da86"
+
+[postmortem]
+hypothesis_status = "confirmed"
+summary = """
+XA-SYNC confirmatory re-run of XR-PARITY-OMM-WATER on Titanix (GPU1, screen)
+after the xtrax 0.4 rewire landed on branch audit/xtrax-rewire-xa. Campaign
+944fef0b. EXIT=0, gate_pass=1. T2 metrics: |ΔE|=0.0399 kcal/mol,
+force_rmse=0.0108 kcal/mol/Å, mean_T=303.6 K (±15 K band). Numerically
+indistinguishable from the Jul-9 Titanix run cbea8064 / claimed campaign
+5ffe2644. Rewire does not falsify OpenMM TIP3P ΔE/ΔF/T parity.
+"""
+unexpected_observations = """
+1. Bathos catalog outcome stayed 'unknown' despite EXIT=0, declared sidecar,
+   and JSON that manually satisfies [outcomes.pass] (empty outcome_error_reason).
+   Same quirk on cbea8064. Cite gate_pass/JSON, not outcome column.
+2. Two earlier attempts on 2026-07-10 were killed: 470b6ed4 SIGTERM (-15) when
+   SSH dropped mid-run; d78d29c0 SIGKILL (-9) under nohup on GPU0. Detached
+   screen + CUDA_VISIBLE_DEVICES=1 + PYTHONUNBUFFERED fixed durability.
+3. myxcel titanix.toml workspace was wrong (/home/solab/marielle/projects vs
+   /home/solab/projects); push hung on interactive Proceed? until -y + path fix.
+4. Engaging bth sync --pull failed (rsync 23); Titanix catalog rsync was the
+   working path for local evidence.
+"""
+root_cause = """
+Primary science result: no rewire regression — static sparse-excl PME grid and
+liquid-density 64-water NVT still match OpenMM within T2. Process failures were
+ops: SSH-attached long jobs, wrong myxcel workspace path, and a bathos outcome
+evaluator quirk that leaves outcome=unknown on otherwise-passing confirmation
+runs (debt_bathos_outcome_unknown_gate_pass).
+"""
+verdict_override = "pass"
+next_steps = """
+1. Keep citing gate_pass/JSON for AC5; do not block on outcome=unknown.
+2. Prefer screen/tmux on Titanix for ≥10 ps NVT; never rely on interactive SSH.
+3. Fix bathos outcome evaluation (debt) or document SQL-on-JSON as the audit gate.
+4. Resume audit DAG: unblock XA-CI (default suite green) → XA-DRIFT → XA-CLOSEOUT.
+5. Optional: open PR from audit/xtrax-rewire-xa once CI is green.
+"""
+author = "agent+marielle"
+status = "final"
+
+[asset_links]
+result_json = "outputs/xr_parity_omm_tip3p_xa_sync.json"
+run_log = "outputs/xr_parity_omm_tip3p_xa_sync.log"
+prior_jul9_json = "outputs/xr_parity_omm_tip3p_final.json"
+claim = ".bth/claims/xr-parity-omm-water.claim.toml"
+sidecar = "scripts/experiments/xr_parity_omm_tip3p.bth.toml"
+audit_memo = ".praxia/docs/research/260710_xtrax-rewire_audit.md"
