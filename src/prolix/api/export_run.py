@@ -4,6 +4,11 @@
 compiled program can sweep thermodynamic parameters without recompilation.
 ``n_steps`` remains host-static (``lax.scan`` length). Bundles are fixed in the
 closure.
+
+**Units (XR-VACUUM-DT):** ``dt`` is **femtoseconds** for EnsemblePlan-backed
+exports (``make_single_trajectory_fn`` / ``make_hetero_trajectory_fn``) and for
+``make_smoke_diagnostics_fn``. Conversion to AKMA is internal. Do not pass
+pre-converted AKMA ``dt`` unless you also bypass these helpers.
 """
 
 from __future__ import annotations
@@ -20,7 +25,10 @@ def make_single_trajectory_fn(
     *,
     n_steps: int,
 ):
-    """B=1 trajectory: ``(seed, dt, kT) -> (n_steps, n_atoms, 3)`` positions."""
+    """B=1 trajectory: ``(seed, dt, kT) -> (n_steps, n_atoms, 3)`` positions.
+
+    ``dt`` is femtoseconds (EnsemblePlan default ``dt_unit='fs'``).
+    """
 
     def trajectory(
         seed: jnp.ndarray,
@@ -88,6 +96,7 @@ def make_smoke_diagnostics_fn(
     bundle: Any,
     *,
     n_steps: int,
+    gamma: float = 10.0,
 ):
     """B=1 smoke export: ``(seed, dt, kT) -> (positions, temperatures, energies)``.
 
@@ -95,6 +104,9 @@ def make_smoke_diagnostics_fn(
     (Claim 2 W4). Bonded potential is omitted here because ``bonded_energy_fn``
     is not yet JIT-safe on the one-water fixture; KE is the thermostat-coupled
     quantity. ``dof`` is fixed at factory time from ``n_atoms``.
+
+    ``dt`` is **femtoseconds**; ``gamma`` is **ps⁻¹** (same contract as
+    ``EnsemblePlan.run``). Both are converted to AKMA before ``settle_langevin``.
     """
 
     import jax
@@ -109,6 +121,7 @@ def make_smoke_diagnostics_fn(
         trim_trajectory_positions,
         water_indices_for_integration,
     )
+    from prolix.physics.kups_adapter import AKMA_TIME_UNIT_FS, gamma_ps_to_akma
     from prolix.physics.settle import settle_langevin
     from prolix.simulate import BOLTZMANN_KCAL
 
@@ -118,19 +131,22 @@ def make_smoke_diagnostics_fn(
     _, shift_fn = displacement_fn_for_bundle(bundle)
     masses = masses_for_bundle(bundle)
     water_indices = water_indices_for_integration(bundle)
+    gamma_akma = gamma_ps_to_akma(float(gamma))
 
     def diagnostics(
         seed: jnp.ndarray,
         dt: jnp.ndarray,
         kT: jnp.ndarray,
     ) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
-        dt, kT = as_integration_scalars(dt, kT, dtype=bundle.positions.dtype)
+        # XR-VACUUM-DT: caller dt is fs; keep conversion in JAX for tracers.
+        dt_akma = jnp.asarray(dt) / AKMA_TIME_UNIT_FS
+        dt, kT = as_integration_scalars(dt_akma, kT, dtype=bundle.positions.dtype)
         init_fn, apply_fn = settle_langevin(
             energy_fn,
             shift_fn,
             dt=1.0,
             kT=1.0,
-            gamma=10.0,
+            gamma=gamma_akma,
             mass=masses,
             water_indices=water_indices,
             project_ou_momentum_rigid=True,

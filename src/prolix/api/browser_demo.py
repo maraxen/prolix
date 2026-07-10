@@ -2,6 +2,8 @@
 
 Builds a self-contained ``index.html`` plus ``trace.json`` from a JIT smoke
 diagnostics export. Optional IREE-WASM artifact when ``iree-compile`` is present.
+
+``dt`` defaults to **0.5 fs** (XR-VACUUM-DT); see ``make_smoke_diagnostics_fn``.
 """
 
 from __future__ import annotations

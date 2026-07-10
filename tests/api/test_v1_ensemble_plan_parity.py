@@ -146,7 +146,8 @@ def _solvated_ake_bundle():
 def test_v1_harness_runs_and_returns_trajectory():
     bundle = _one_water_bundle()
     ep = EnsemblePlan.from_bundle(bundle)
-    # Pre-XR tests used AKMA dt; keep escape hatch for bitwise parity gates.
+    # Pre-XR tests used AKMA dt (~24 fs at 0.5); keep dt_unit="akma" for
+    # bitwise parity vs settle_langevin (not the production fs default).
     traj = ep.run(n_steps=5, dt=0.5, kT=0.596, seed=42, dt_unit="akma")
     assert traj.n_steps == 5
     assert traj.positions.shape == (5, 3, 3)
