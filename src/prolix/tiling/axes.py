@@ -64,8 +64,19 @@ N_MOLS = AxisSpec(
     doc="Molecule/system count axis (heterogeneous batch of molecules).",
 )
 
+# MD timestep axis (homogeneous; CarrySpec → Scan via XR-CARRY)
+N_STEPS = AxisSpec(
+    name="n_steps",
+    axis_index=6,
+    cardinality=1,            # overwritten at plan time with trajectory length
+    default_batch_size=0,     # vmap sentinel; CarrySpec pre-demotes to Scan
+    tile_granularity=1,
+    heterogeneous=False,
+    doc="MD integration step axis (carry-bearing Scan via CarrySpec).",
+)
+
 # Backward-compatibility alias (deprecated; planned removal 2026-08-21)
 N_SYSTEMS = N_MOLS
 
 # Registry of all axes, sorted by axis_index
-ALL_AXES = [N_ATOMS, N_BONDS, N_ANGLES, N_TORSIONS, N_CONFORMERS, N_MOLS]
+ALL_AXES = [N_ATOMS, N_BONDS, N_ANGLES, N_TORSIONS, N_CONFORMERS, N_MOLS, N_STEPS]

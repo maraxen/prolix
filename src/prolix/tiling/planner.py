@@ -1,12 +1,12 @@
-"""Batch tiling planner: decides vmap vs safe_map per axis.
+"""Batch tiling planner: thin facade over xtrax joint MemoryBudget.
 
-This module implements prolix's greedy budget-driven tiling strategy.
-Behavioral delegation to xtrax.tiling.BatchPlanner is available via
-``BatchPlanner.plan_with_xtrax()`` (#1842); the default ``plan()`` keeps
-the proven prolix greedy loop for backward compatibility.
+Domain types (``AxisSpec``, ``AxisDecision``, ``BatchPlan``) and the
+``BatchPlanner`` constructor stay in prolix for a stable public API.
+Strategy selection is exclusively via ``plan_with_xtrax`` →
+``prolix.tiling.xtrax_adapter.plan_axes_with_xtrax`` (XR-KILL-FORK).
 
 See ``prolix.tiling.xtrax_adapter`` and
-``.praxia/docs/superpowers/specs/260614_xtrax-tiling-integration.md``.
+``.praxia/docs/specs/260709_xr-kill-fork.md``.
 """
 
 from __future__ import annotations
@@ -56,7 +56,7 @@ def estimate_memory_theoretical(
 class AxisSpec:
     """Describes one mappable axis for the batch planner."""
     name: str
-    axis_index: int        # lower = innermost; greedy loop demotes in ascending order
+    axis_index: int        # lower = innermost; demotion order follows ascending index
     cardinality: int       # typical/max size of this axis
     default_batch_size: int  # 0 = vmap; positive = safe_map tile size
     tile_granularity: int  # safe_map tile sizes are rounded up to multiples of this
@@ -101,11 +101,12 @@ class BatchPlan:
 
 @dataclass(frozen=True)
 class BatchPlanner:
-    """Host-side planner: decides vmap vs safe_map tile size per axis.
+    """Host-side planner facade: decides vmap vs safe_map tile size per axis.
 
-    Uses greedy budget-driven demotion: homogeneous axes start as vmap;
-    innermost-first axes are demoted to safe_map if budget exceeded.
-    Heterogeneous axes are always safe_map (element shapes vary).
+    Authority is xtrax joint ``MemoryBudget`` via ``plan_with_xtrax``.
+    ``plan()`` is a thin alias for call-site stability (XR-KILL-FORK).
+    Optional ``carry_specs`` pre-demote named axes to Scan (XR-CARRY).
+    Optional ``dedup_specs`` pre-demote named axes to DedupGather (XR-DEDUP).
 
     estimate_memory is injected so the theoretical estimator can be swapped
     for an HLO-backed empirical model without changing this class.
@@ -113,66 +114,21 @@ class BatchPlanner:
     axes: list[AxisSpec]
     budget_bytes: float
     estimate_memory: Callable[..., float]
+    carry_specs: list | None = None
+    dedup_specs: list | None = None
 
     def plan(self) -> BatchPlan:
-        """Generate a BatchPlan with greedy demotion.
-
-        Phases:
-        1. Pre-demote heterogeneous axes (vmap invalid; safe_map required)
-        2. Greedy budget loop for homogeneous axes (innermost-first demotion)
-
-        For xtrax-backed strategy selection, use ``plan_with_xtrax()``.
-        """
-        # Phase 1: Pre-demote heterogeneous axes
-        decisions: list[AxisDecision] = []
-        sorted_axes = sorted(self.axes, key=lambda a: a.axis_index)
-
-        for ax in sorted_axes:
-            if ax.heterogeneous:
-                tile = max(1, ax.tile_granularity)
-                decisions.append(
-                    AxisDecision(
-                        axis=ax,
-                        batch_size=tile,
-                        reasoning="heterogeneous axis: element shapes vary; safe_map required",
-                    )
-                )
-
-        # Phase 2: Greedy budget loop for homogeneous axes (innermost-first)
-        homogeneous = [ax for ax in sorted_axes if not ax.heterogeneous]
-        hom_decisions: list[AxisDecision] = [
-            AxisDecision(axis=ax, batch_size=0, reasoning="vmap (homogeneous, within budget)")
-            for ax in homogeneous
-        ]
-
-        for i, ax in enumerate(homogeneous):
-            current = decisions + hom_decisions
-            if self.estimate_memory(current) <= self.budget_bytes:
-                break
-            tile = max(1, ax.tile_granularity)
-            hom_decisions[i] = AxisDecision(
-                axis=ax,
-                batch_size=tile,
-                reasoning=f"demoted to safe_map tile={tile}: estimate exceeded budget",
-            )
-
-        all_decisions = decisions + hom_decisions
-        final_estimate = self.estimate_memory(all_decisions)
-        exceeded = final_estimate > self.budget_bytes
-
-        return BatchPlan(
-            decisions=all_decisions,
-            total_memory_estimate=final_estimate,
-            axes_by_index={ax.axis_index: ax for ax in self.axes},
-            budget_exceeded=exceeded,
-        )
+        """Generate a BatchPlan via xtrax joint MemoryBudget (alias of plan_with_xtrax)."""
+        return self.plan_with_xtrax()
 
     def plan_with_xtrax(self) -> BatchPlan:
-        """Plan using xtrax.tiling.BatchPlanner with prolix budget fallback (#1842)."""
+        """Plan using xtrax joint MemoryBudget via the adapter (XR-BUDGET / XR-KILL-FORK)."""
         from prolix.tiling.xtrax_adapter import plan_axes_with_xtrax
 
         return plan_axes_with_xtrax(
             axes=self.axes,
             budget_bytes=self.budget_bytes,
             estimate_memory=lambda decisions: self.estimate_memory(decisions),
+            carry_specs=self.carry_specs,
+            dedup_specs=self.dedup_specs,
         )
