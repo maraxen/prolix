@@ -67,8 +67,11 @@ def _angle_energy_masked(r: Array, indices: Array, params: Array, mask: Array, d
     return jnp.sum(e_per_angle * mask)
 
 def _dihedral_energy_masked(r: Array, indices: Array, params: Array, mask: Array, displacement_fn: space.DisplacementFn) -> Array:
-    """Computes periodic dihedral energy with per-dihedral masking."""
-    # Cast to int32
+    """Computes periodic dihedral energy with per-dihedral masking.
+
+    Supports single-term ``(N, 3|4)`` and multi-term ``(N, T, 3)`` params.
+    Padded rows are sanitized before ``arctan2`` so NaN gradients cannot leak.
+    """
     r_i = r[indices[:, 0].astype(jnp.int32)]
     r_j = r[indices[:, 1].astype(jnp.int32)]
     r_k = r[indices[:, 2].astype(jnp.int32)]
@@ -86,21 +89,28 @@ def _dihedral_energy_masked(r: Array, indices: Array, params: Array, mask: Array
 
     x = jnp.sum(v * w, axis=-1)
     y = jnp.sum(jnp.cross(b1_unit, v) * w, axis=-1)
-    
+
     # Pad safe: Prevent arctan2(0,0) which has a NaN gradient
     overlap_mask = (mask == 0) | ((x == 0.0) & (y == 0.0))
     safe_x = jnp.where(overlap_mask, 1.0, x)
     safe_y = jnp.where(overlap_mask, 0.0, y)
-    
+
     phi = jnp.arctan2(safe_y, safe_x)
     phi = phi - jnp.pi
-    
-    periodicity = params[:, 0]
-    phase = params[:, 1]
-    k = params[:, 2]
 
-    e_per_dih = k * (1.0 + jnp.cos(periodicity * phi - phase))
-    return jnp.sum(e_per_dih * mask)
+    # Multi-term (N, T, 3) vs single-term (N, 3|4).
+    if params.ndim == 3:
+        n = params[:, :, 0]
+        phase = params[:, :, 1]
+        k = params[:, :, 2]
+        e_per_dih = jnp.sum(k * (1.0 + jnp.cos(n * phi[:, None] - phase)), axis=-1)
+    else:
+        periodicity = params[:, 0]
+        phase = params[:, 1]
+        k = params[:, 2]
+        e_per_dih = k * (1.0 + jnp.cos(periodicity * phi - phase))
+    return jnp.sum(jnp.where(mask != 0, e_per_dih, 0.0))
+
 
 def _cmap_energy_masked(r: Array, indices: Array, map_indices: Array, mask: Array, coeffs: Array | None, displacement_fn: space.DisplacementFn) -> Array:
     """Computes CMAP energy with per-torsion masking."""

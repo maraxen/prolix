@@ -26,6 +26,10 @@ from prolix.types.bundles import (
 )
 
 
+
+# XA-CI: heavy parity/compile — deselect from GitHub-faithful suite.
+pytestmark = pytest.mark.slow
+
 def _minimal_bundle(n_atoms=10, n_bonds=5, n_angles=0):
     """Create a minimal MolecularBundle for testing."""
     a = ATOM_BUCKETS[0]

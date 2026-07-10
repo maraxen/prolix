@@ -1,3 +1,9 @@
+import pytest
+
+# XA-CI: heavy parity/compile — deselect from GitHub-faithful suite.
+pytestmark = pytest.mark.slow
+
+
 """Fused implicit GB path uses scaled_radii like ``single_padded_energy_nl``."""
 
 import jax

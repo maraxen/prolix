@@ -25,6 +25,9 @@ from .test_explicit_langevin_tip3p_parity import (
     _proxide_params_pure_water,
 )
 
+# 1 ps NPT trajectory + JAX compile — deselect from GitHub-faithful CI (XA-CI).
+pytestmark = [pytest.mark.slow, pytest.mark.dynamics]
+
 
 def _dof_rigid_tip3p_waters(n_waters: int) -> float:
     """Degrees of freedom for rigid water in NPT (6*N_w - 3 after COM removal)."""

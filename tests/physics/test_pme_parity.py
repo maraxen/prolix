@@ -10,11 +10,16 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
+
 from proxide import OutputSpec, parse_structure
 
 # Enable x64 for physics
 
 # Paths
+
+# XA-CI: heavy parity/compile — deselect from GitHub-faithful suite.
+pytestmark = pytest.mark.slow
+
 DATA_DIR = Path(__file__).parent.parent.parent / "data" / "pdb"
 FF_PATH = (
   Path(__file__).parent.parent.parent.parent

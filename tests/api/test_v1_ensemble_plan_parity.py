@@ -6,6 +6,7 @@ import jax
 import jax.numpy as jnp
 import pytest
 
+
 from prolix.api.bundle_md import (
     active_positions,
     as_integration_scalars,

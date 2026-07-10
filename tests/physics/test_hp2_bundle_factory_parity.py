@@ -9,7 +9,10 @@ from __future__ import annotations
 import jax.numpy as jnp
 import pytest
 
-pytestmark = pytest.mark.openmm
+# XA-CI: heavy parity/compile — deselect from GitHub-faithful suite.
+pytestmark = pytest.mark.slow
+
+pytestmark = [pytest.mark.openmm, pytest.mark.slow, pytest.mark.integration]  # XA-CI
 
 from prolix.api.bundle_md import bonded_energy_fn_from_bundle
 from prolix.physics.system import _dense_excl_to_pair_list, make_bundle_from_system

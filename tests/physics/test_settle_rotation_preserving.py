@@ -8,9 +8,14 @@ import jax
 import jax.numpy as jnp
 import pytest
 
+
 from prolix.physics.settle import _settle_water_batch, settle_positions
 
 # Enable x64 for numerical precision
+
+# XA-CI: heavy parity/compile — deselect from GitHub-faithful suite.
+pytestmark = pytest.mark.slow
+
 jax.config.update("jax_enable_x64", True)
 
 # TIP3P water model constants

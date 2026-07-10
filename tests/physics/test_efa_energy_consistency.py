@@ -16,6 +16,9 @@ from prolix.physics.eval_harness import (
 from prolix.physics.electrostatic_methods import ElectrostaticMethod
 from prolix.physics.flash_explicit import flash_explicit_energy
 
+# Heavy flash/PME compiles — deselect from GitHub-faithful CI (XA-CI).
+pytestmark = pytest.mark.slow
+
 
 @pytest.mark.electrostatic_comparison
 def test_pme_energy_reproducibility_frozen():

@@ -20,6 +20,9 @@ import pytest
 # consistency validation (TestGradientConsistency) uses JAX autodiff vs finite-difference on
 # individual energy functions extracted from the system, not per-group OpenMM forces.
 
+# OpenMM parity suite is integration-heavy — deselect from GitHub-faithful CI (XA-CI).
+pytestmark = [pytest.mark.slow, pytest.mark.integration, pytest.mark.openmm]
+
 # Enable x64 for physics
 # =============================================================================
 # Shared Fixtures

@@ -3,10 +3,15 @@
 import jax
 import jax.numpy as jnp
 import pytest
+
 from jax import random
 from jax_md import space
 
 from prolix.physics import settle
+
+# XA-CI: heavy parity/compile — deselect from GitHub-faithful suite.
+pytestmark = pytest.mark.slow
+
 
 def test_settle_rattle_combined_integrator():
   """Verifies that both SETTLE and RATTLE constraints are obeyed simultaneously."""

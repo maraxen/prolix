@@ -13,6 +13,8 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
+
+pytestmark = [pytest.mark.slow, pytest.mark.dynamics]  # XA-CI: long compile
 from jax_md import space
 from proxide import CoordFormat, OutputSpec, parse_structure
 

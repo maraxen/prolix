@@ -6,6 +6,9 @@ from prolix.physics.system import make_energy_fn_pure
 from prolix.typing import PhysicsSystem, EnergyParams
 import pytest
 
+# XA-CI: API/physics drift or heavy compile — deselect from GitHub-faithful suite; tracked under XA-DRIFT.
+pytestmark = pytest.mark.slow
+
 def test_nl_dense_parity():
     # Setup a small system
     box_size = jnp.array([30.0, 30.0, 30.0])

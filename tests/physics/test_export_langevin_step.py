@@ -15,6 +15,9 @@ from jax import random
 
 import pytest
 
+# XA-CI: heavy parity/compile — deselect from GitHub-faithful suite.
+pytestmark = pytest.mark.slow
+
 from prolix.export import export_langevin_step
 from prolix.types.integrators import IntegratorConfig, LangevinState
 

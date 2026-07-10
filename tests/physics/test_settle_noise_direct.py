@@ -8,8 +8,13 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
+
 from prolix.physics import settle
 from prolix.simulate import BOLTZMANN_KCAL
+
+# XA-CI: heavy parity/compile — deselect from GitHub-faithful suite.
+pytestmark = pytest.mark.slow
+
 
 
 def _setup_tip3p_water():

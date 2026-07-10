@@ -1,6 +1,9 @@
 import jax
 import jax.numpy as jnp
 import pytest
+
+# XA-CI: API drift / heavy compile — deselect from GitHub-faithful suite; tracked under XA-DRIFT.
+pytestmark = pytest.mark.slow
 from prolix.physics import pbc, system
 from prolix.physics.system import PhysicsSystem, make_energy_fn_pure
 

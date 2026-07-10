@@ -7,6 +7,9 @@ from __future__ import annotations
 
 import pytest
 
+# XA-CI: heavy parity/compile — deselect from GitHub-faithful suite.
+pytestmark = pytest.mark.slow
+
 
 @pytest.mark.skip(reason="L3 RDF observables are post-release per validation plan P2b")
 def test_explicit_rdf_water_water_placeholder():

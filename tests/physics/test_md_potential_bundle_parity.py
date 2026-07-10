@@ -5,6 +5,9 @@ from __future__ import annotations
 import jax
 import jax.numpy as jnp
 import pytest
+
+# XA-CI: heavy parity/compile — deselect from GitHub-faithful suite.
+pytestmark = pytest.mark.slow
 from jax_md import quantity
 
 from prolix.physics import pbc, system

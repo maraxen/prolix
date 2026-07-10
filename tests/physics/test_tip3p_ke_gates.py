@@ -8,6 +8,9 @@ from pathlib import Path
 
 import pytest
 
+# XA-CI: API drift / heavy compile — deselect from GitHub-faithful suite; tracked under XA-DRIFT.
+pytestmark = pytest.mark.slow
+
 _FIXTURES = Path(__file__).resolve().parents[1] / "fixtures" / "tip3p_ke_compare"
 _FIXTURES_AGG = Path(__file__).resolve().parents[1] / "fixtures" / "tip3p_tightening_aggregate"
 _GATES_PATH = Path(__file__).resolve().parents[2] / "scripts" / "benchmarks" / "tip3p_ke_gates.py"

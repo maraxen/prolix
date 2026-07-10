@@ -12,6 +12,7 @@ from pathlib import Path
 import jax.numpy as jnp
 import pytest
 
+
 from prolix.api import EnsemblePlan
 
 _b1_path = Path(__file__).resolve().parent.parent / "bench" / "test_b1_smoke.py"

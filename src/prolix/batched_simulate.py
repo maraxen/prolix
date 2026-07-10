@@ -215,7 +215,7 @@ def _restraint_schedule(k_start: float, k_end: float, n_steps: int) -> Array:
     return jnp.linspace(k_start, k_end, n_steps)
 
 
-def make_langevin_step(dt: float, kT: float, gamma: float) -> Callable[[PaddedSystem, LangevinState], LangevinState]:
+def make_langevin_step(dt: float, kT: float, gamma: float) -> Callable[[PaddedSystem, _LangevinState], _LangevinState]:
     """Create a BAOAB Langevin step function with RATTLE constraints.
     
     BAOAB scheme with SHAKE/RATTLE:
@@ -232,7 +232,7 @@ def make_langevin_step(dt: float, kT: float, gamma: float) -> Callable[[PaddedSy
     to avoid autodiff NaN from exclusion matrix scatter and padded-atom distances.
     """
     from prolix.batched_energy import single_padded_force
-    from prolix.physics.simulate import project_momenta, project_positions
+    from prolix.physics.constraints import project_momenta, project_positions
     
     # Precompute constants
     c1 = jnp.exp(-gamma * dt)
@@ -240,7 +240,7 @@ def make_langevin_step(dt: float, kT: float, gamma: float) -> Callable[[PaddedSy
     
     displacement_fn, shift_fn = space.free()
     
-    def step_fn(padded_sys: PaddedSystem, state: LangevinState) -> LangevinState:
+    def step_fn(padded_sys: PaddedSystem, state: _LangevinState) -> _LangevinState:
         def force_fn(r):
             sys_with_r = dataclasses.replace(padded_sys, positions=r)
             return single_padded_force(
@@ -359,14 +359,14 @@ def make_langevin_step(dt: float, kT: float, gamma: float) -> Callable[[PaddedSy
 
         # --- Quality gate accumulation (zero-sync) ---
         wc = state.warn_counts if state.warn_counts is not None else jnp.zeros(
-            LangevinState.NUM_WARN_TYPES, dtype=jnp.int32,
+            _LangevinState.NUM_WARN_TYPES, dtype=jnp.int32,
         )
-        wc = wc.at[LangevinState.WARN_VLIMIT].add(v_exceeded.astype(jnp.int32))
-        wc = wc.at[LangevinState.WARN_FORCE_CAP].add(force_capped.astype(jnp.int32))
-        wc = wc.at[LangevinState.WARN_CONSTR_VIOL].add(constr_violated.astype(jnp.int32))
-        wc = wc.at[LangevinState.WARN_DX_CAP].add(dx_capped.astype(jnp.int32))
+        wc = wc.at[_LangevinState.WARN_VLIMIT].add(v_exceeded.astype(jnp.int32))
+        wc = wc.at[_LangevinState.WARN_FORCE_CAP].add(force_capped.astype(jnp.int32))
+        wc = wc.at[_LangevinState.WARN_CONSTR_VIOL].add(constr_violated.astype(jnp.int32))
+        wc = wc.at[_LangevinState.WARN_DX_CAP].add(dx_capped.astype(jnp.int32))
 
-        return LangevinState(
+        return _LangevinState(
             positions=r,
             momentum=p,
             force=f,
@@ -391,7 +391,7 @@ def make_langevin_step_nl(
     Same BAOAB scheme as make_langevin_step, but uses O(N*K) energy
     via single_padded_energy_nl instead of O(N^2).
 
-    The neighbor_idx is passed as a separate argument (not in LangevinState)
+    The neighbor_idx is passed as a separate argument (not in _LangevinState)
     since it's updated less frequently than the dynamics state.
 
     Args:
@@ -399,7 +399,7 @@ def make_langevin_step_nl(
             of single_padded_energy_nl. Useful for jax.checkpoint wrapping.
 
     Returns:
-        step_fn(padded_sys, state, neighbor_idx) -> LangevinState
+        step_fn(padded_sys, state, neighbor_idx) -> _LangevinState
     """
     if energy_fn is None:
         from prolix.batched_energy import single_padded_energy_nl_cvjp
@@ -415,9 +415,9 @@ def make_langevin_step_nl(
 
     def step_fn(
         padded_sys: PaddedSystem,
-        state: LangevinState,
+        state: _LangevinState,
         neighbor_idx: Array,
-    ) -> LangevinState:
+    ) -> _LangevinState:
         def _energy_of_r(r):
             sys_with_r = dataclasses.replace(padded_sys, positions=r)
             return energy_fn(
@@ -476,12 +476,12 @@ def make_langevin_step_nl(
 
         # --- Quality gate accumulation (zero-sync) ---
         wc = state.warn_counts if state.warn_counts is not None else jnp.zeros(
-            LangevinState.NUM_WARN_TYPES, dtype=jnp.int32,
+            _LangevinState.NUM_WARN_TYPES, dtype=jnp.int32,
         )
-        wc = wc.at[LangevinState.WARN_VLIMIT].add(v_exceeded.astype(jnp.int32))
-        wc = wc.at[LangevinState.WARN_FORCE_CAP].add(force_capped.astype(jnp.int32))
+        wc = wc.at[_LangevinState.WARN_VLIMIT].add(v_exceeded.astype(jnp.int32))
+        wc = wc.at[_LangevinState.WARN_FORCE_CAP].add(force_capped.astype(jnp.int32))
 
-        return LangevinState(
+        return _LangevinState(
             positions=r,
             momentum=p,
             force=f,
@@ -514,9 +514,9 @@ def make_langevin_step_nl_fused(
 
     def step_fn(
         padded_sys: PaddedSystem,
-        state: LangevinState,
+        state: _LangevinState,
         neighbor_idx: Array,
-    ) -> LangevinState:
+    ) -> _LangevinState:
         def energy_and_forces_nl(r):
             sys_with_r = dataclasses.replace(padded_sys, positions=r)
             return fused_energy_and_forces_nl(
@@ -574,12 +574,12 @@ def make_langevin_step_nl_fused(
 
         # --- Quality gate accumulation (zero-sync) ---
         wc = state.warn_counts if state.warn_counts is not None else jnp.zeros(
-            LangevinState.NUM_WARN_TYPES, dtype=jnp.int32,
+            _LangevinState.NUM_WARN_TYPES, dtype=jnp.int32,
         )
-        wc = wc.at[LangevinState.WARN_VLIMIT].add(v_exceeded.astype(jnp.int32))
-        wc = wc.at[LangevinState.WARN_FORCE_CAP].add(force_capped.astype(jnp.int32))
+        wc = wc.at[_LangevinState.WARN_VLIMIT].add(v_exceeded.astype(jnp.int32))
+        wc = wc.at[_LangevinState.WARN_FORCE_CAP].add(force_capped.astype(jnp.int32))
 
-        return LangevinState(
+        return _LangevinState(
             positions=r,
             momentum=p,
             force=f,
@@ -971,7 +971,7 @@ def batched_equilibrate(
     duration_ps: float = 100.0,
     temp: float = 300.0,
     chunk_size: int | None = 1,
-) -> LangevinState:
+) -> _LangevinState:
     """Equilibrate a batch of systems using a staged ramp protocol.
 
     .. deprecated:: 0.0.1
@@ -1004,7 +1004,7 @@ def batched_equilibrate(
         dtype=pos_dtype,
     )
 
-    def equilibrate_single(args: tuple[int, jax.Array, jax.Array]) -> LangevinState:
+    def equilibrate_single(args: tuple[int, jax.Array, jax.Array]) -> _LangevinState:
         sys_idx, pos, key = args
         
         # 0. Reconstruct PaddedSystem from unique shared topology + dynamic pos
@@ -1105,7 +1105,7 @@ def batched_equilibrate(
         f_final = single_padded_force(final_sys, displacement_fn) * pad_mask_3d
         e_final = single_padded_energy(final_sys, displacement_fn)
         
-        return LangevinState(
+        return _LangevinState(
             positions=final_r,
             momentum=final_v * mass_3d,
             force=f_final,
@@ -1124,12 +1124,12 @@ def batched_equilibrate(
 
 def batched_produce(
     batch: PaddedSystem,
-    state: LangevinState,
+    state: _LangevinState,
     n_saves: int,
     steps_per_save: int,
     temperature_k: float = 310.15,
     chunk_size: int | None = None
-) -> tuple[LangevinState, Array]:
+) -> tuple[_LangevinState, Array]:
     """Produces trajectory for a batch of padded systems."""
     import warnings
     warnings.warn(
@@ -1147,7 +1147,7 @@ def batched_produce(
     
     step_fn = make_langevin_step(dt, kT, gamma)
     
-    def produce_single(args: tuple[PaddedSystem, LangevinState]) -> tuple[LangevinState, Array]:
+    def produce_single(args: tuple[PaddedSystem, _LangevinState]) -> tuple[_LangevinState, Array]:
         sys, s = args
         # FlashMD uses sparse exclusions — no dense precomputation needed
         
@@ -1226,7 +1226,7 @@ def safe_map_no_output(
 def batched_produce_streaming(
     unique_batch: PaddedSystem,
     system_index: jax.Array,
-    state: LangevinState,
+    state: _LangevinState,
     n_saves: int,
     steps_per_save: int,
     write_fn: Callable,
@@ -1237,7 +1237,7 @@ def batched_produce_streaming(
     write_batch_size: int = 1,
     start_frame: int = 0,
     device_offset: int = 0,
-) -> LangevinState:
+) -> _LangevinState:
     """Produce trajectory with streaming IO — no GPU trajectory accumulation.
 
     Instead of accumulating a (n_saves, N, 3) trajectory tensor on GPU,
@@ -1272,7 +1272,7 @@ def batched_produce_streaming(
         device_offset: Global offset for batch_idx in distributed runs.
 
     Returns:
-        Final LangevinState (no trajectory — it was streamed to disk).
+        Final _LangevinState (no trajectory — it was streamed to disk).
     """
     from jax.experimental import io_callback
 
@@ -1288,8 +1288,8 @@ def batched_produce_streaming(
     B = state.positions.shape[0]
 
     def produce_single_streaming(
-        args: tuple[int, LangevinState, Any],
-    ) -> LangevinState:
+        args: tuple[int, _LangevinState, Any],
+    ) -> _LangevinState:
         sys_idx, s, local_batch_idx = args
         batch_idx = local_batch_idx + device_offset
         
@@ -1328,7 +1328,7 @@ def batched_produce_streaming(
                             step_i, recenter_every, remove_rotation,
                             mask=sys.atom_mask,
                         )
-                        s_next = LangevinState(
+                        s_next = _LangevinState(
                             positions=r_corrected,
                             momentum=s_next.momentum,
                             force=s_next.force,
@@ -1378,7 +1378,7 @@ def batched_produce_streaming(
                         step_i, recenter_every, remove_rotation,
                         mask=sys.atom_mask,
                     )
-                    s_next = LangevinState(
+                    s_next = _LangevinState(
                         positions=r_corrected,
                         momentum=s_next.momentum,
                         force=s_next.force,
@@ -1540,7 +1540,7 @@ def make_langevin_step_nl_dynamic(
         dr_threshold: Buffer distance for neighbor list updates.
 
     Returns:
-        step_fn(padded_sys, state, nbrs) -> (LangevinState, NeighborList)
+        step_fn(padded_sys, state, nbrs) -> (_LangevinState, NeighborList)
     """
     if energy_fn is None:
         from prolix.batched_energy import single_padded_energy_nl_cvjp
@@ -1555,9 +1555,9 @@ def make_langevin_step_nl_dynamic(
 
     def step_fn(
         padded_sys: PaddedSystem,
-        state: LangevinState,
+        state: _LangevinState,
         nbrs: Any,
-    ) -> tuple[LangevinState, Any]:
+    ) -> tuple[_LangevinState, Any]:
         # Use current neighbor list for this step's energy/forces
         neighbor_idx = nbrs.idx
 
@@ -1623,7 +1623,7 @@ def make_langevin_step_nl_dynamic(
         # Accumulate overflow flag
         did_overflow = state.did_overflow | new_nbrs.did_buffer_overflow
 
-        new_state = LangevinState(
+        new_state = _LangevinState(
             positions=r,
             momentum=p,
             force=f,
@@ -1689,7 +1689,7 @@ def batched_equilibrate_nl(
     temperature_k: float = 310.15,
     chunk_size: int | None = None,
     energy_fn: Callable | None = None,
-) -> LangevinState:
+) -> _LangevinState:
     """Equilibrate using neighbor-list energy (O(N*K) per step).
 
     Same as batched_equilibrate but uses the NL energy path.
@@ -1724,7 +1724,7 @@ def batched_equilibrate_nl(
 
     def equilibrate_single(
         args: tuple[PaddedSystem, Array, Array],
-    ) -> LangevinState:
+    ) -> _LangevinState:
         sys, nbr, k = args
 
         def _energy_of_r(r):
@@ -1735,7 +1735,7 @@ def batched_equilibrate_nl(
 
         e0, initial_f = value_energy_and_grad_energy(_energy_of_r, sys.positions)
 
-        state = LangevinState(
+        state = _LangevinState(
             positions=sys.positions,
             momentum=jnp.zeros_like(sys.positions),
             force=initial_f,
@@ -1760,14 +1760,14 @@ def batched_equilibrate_nl(
 def batched_produce_streaming_nl(
     batch: PaddedSystem,
     neighbor_idx: Array,
-    state: LangevinState,
+    state: _LangevinState,
     n_saves: int,
     steps_per_save: int,
     write_fn: Callable,
     temperature_k: float = 310.15,
     chunk_size: int | None = None,
     energy_fn: Callable | None = None,
-) -> LangevinState:
+) -> _LangevinState:
     """Produce trajectory with streaming IO using neighbor-list energy.
 
     Same as batched_produce_streaming but uses O(N*K) energy via NL.
@@ -1785,7 +1785,7 @@ def batched_produce_streaming_nl(
         energy_fn: Custom energy function (default: cvjp variant).
 
     Returns:
-        Final LangevinState (trajectory streamed to disk).
+        Final _LangevinState (trajectory streamed to disk).
     """
     from jax.experimental import io_callback
 
@@ -1805,8 +1805,8 @@ def batched_produce_streaming_nl(
     B = leaves[0].shape[0]
 
     def produce_single_streaming_nl(
-        args: tuple[PaddedSystem, Array, LangevinState, Any],
-    ) -> LangevinState:
+        args: tuple[PaddedSystem, Array, _LangevinState, Any],
+    ) -> _LangevinState:
         sys, nbr, s, batch_idx = args
 
         def save_step(s, save_idx):
@@ -1843,7 +1843,7 @@ def batched_equilibrate_nl_dynamic(
     temperature_k: float = 310.15,
     chunk_size: int | None = 1,
     energy_fn: Callable | None = None,
-) -> tuple[LangevinState, Any]:
+) -> tuple[_LangevinState, Any]:
     """Equilibrate using dynamic JAX-MD neighbor lists (GPU-native updates).
 
     Unlike batched_equilibrate_nl which uses a static neighbor_idx array,
@@ -1860,7 +1860,7 @@ def batched_equilibrate_nl_dynamic(
         energy_fn: Custom energy function (default: cvjp variant).
 
     Returns:
-        Tuple of (final LangevinState, updated NeighborList).
+        Tuple of (final _LangevinState, updated NeighborList).
     """
     from prolix.simulate import BOLTZMANN_KCAL
 
@@ -1882,7 +1882,7 @@ def batched_equilibrate_nl_dynamic(
 
     def equilibrate_single(
         args: tuple[PaddedSystem, Any, Array],
-    ) -> tuple[LangevinState, Any]:
+    ) -> tuple[_LangevinState, Any]:
         sys, nbrs, k = args
 
         neighbor_idx = nbrs.idx
@@ -1895,7 +1895,7 @@ def batched_equilibrate_nl_dynamic(
 
         e0, initial_f = value_energy_and_grad_energy(_energy_of_r, sys.positions)
 
-        state = LangevinState(
+        state = _LangevinState(
             positions=sys.positions,
             momentum=jnp.zeros_like(sys.positions),
             force=initial_f,
@@ -1919,20 +1919,20 @@ def batched_equilibrate_nl_dynamic(
         equilibrate_single, (batch, batched_nbrs, keys),
         chunk_size=chunk_size,
     )
-    return results  # (batched LangevinState, batched NeighborList)
+    return results  # (batched _LangevinState, batched NeighborList)
 
 
 def batched_produce_streaming_nl_dynamic(
     batch: PaddedSystem,
     batched_nbrs: Any,
-    state: LangevinState,
+    state: _LangevinState,
     n_saves: int,
     steps_per_save: int,
     write_fn: Callable,
     temperature_k: float = 310.15,
     chunk_size: int | None = None,
     energy_fn: Callable | None = None,
-) -> tuple[LangevinState, Any]:
+) -> tuple[_LangevinState, Any]:
     """Produce trajectory with streaming IO using dynamic JAX-MD neighbor lists.
 
     Same as batched_produce_streaming_nl but uses native GPU-updated neighbor
@@ -1950,7 +1950,7 @@ def batched_produce_streaming_nl_dynamic(
         energy_fn: Custom energy function (default: cvjp variant).
 
     Returns:
-        Tuple of (final LangevinState, updated NeighborList).
+        Tuple of (final _LangevinState, updated NeighborList).
     """
     from jax.experimental import io_callback
 
@@ -1970,8 +1970,8 @@ def batched_produce_streaming_nl_dynamic(
     B = leaves[0].shape[0]
 
     def produce_single_streaming_nl_dynamic(
-        args: tuple[PaddedSystem, Any, LangevinState, Any],
-    ) -> tuple[LangevinState, Any]:
+        args: tuple[PaddedSystem, Any, _LangevinState, Any],
+    ) -> tuple[_LangevinState, Any]:
         sys, nbrs, s, batch_idx = args
 
         def save_step(carry, save_idx):
@@ -2011,7 +2011,7 @@ def make_langevin_step_explicit(
     dt: float,
     kT: float,
     gamma: float,
-) -> Callable[[PaddedSystem, LangevinState], LangevinState]:
+) -> Callable[[PaddedSystem, _LangevinState], _LangevinState]:
     """Create a BAOAB Langevin step function for explicit solvent (SETTLE + rigid water).
     
     Includes:
@@ -2023,14 +2023,14 @@ def make_langevin_step_explicit(
     """
     from prolix.batched_energy import single_padded_force
     from prolix.physics.settle import settle_positions, settle_velocities
-    from prolix.physics.simulate import project_momenta, project_positions
+    from prolix.physics.constraints import project_momenta, project_positions
     
     c1 = jnp.exp(-gamma * dt)
     c2 = jnp.sqrt(1.0 - jnp.exp(-2.0 * gamma * dt))
     
     displacement_fn, shift_fn = space.free()
     
-    def step_fn(padded_sys: PaddedSystem, state: LangevinState) -> LangevinState:
+    def step_fn(padded_sys: PaddedSystem, state: _LangevinState) -> _LangevinState:
         def force_fn(r):
             sys_with_r = dataclasses.replace(padded_sys, positions=r)
             return single_padded_force(
@@ -2145,13 +2145,13 @@ def make_langevin_step_explicit(
         p = jnp.where(mask, p, jnp.float32(0.0))
 
         # --- Quality gate accumulation ---
-        wc = state.warn_counts if state.warn_counts is not None else jnp.zeros(LangevinState.NUM_WARN_TYPES, dtype=jnp.int32)
-        wc = wc.at[LangevinState.WARN_VLIMIT].add(v_exceeded.astype(jnp.int32))
-        wc = wc.at[LangevinState.WARN_FORCE_CAP].add(force_capped.astype(jnp.int32))
-        wc = wc.at[LangevinState.WARN_CONSTR_VIOL].add(constr_violated.astype(jnp.int32))
-        wc = wc.at[LangevinState.WARN_DX_CAP].add(dx_capped.astype(jnp.int32))
+        wc = state.warn_counts if state.warn_counts is not None else jnp.zeros(_LangevinState.NUM_WARN_TYPES, dtype=jnp.int32)
+        wc = wc.at[_LangevinState.WARN_VLIMIT].add(v_exceeded.astype(jnp.int32))
+        wc = wc.at[_LangevinState.WARN_FORCE_CAP].add(force_capped.astype(jnp.int32))
+        wc = wc.at[_LangevinState.WARN_CONSTR_VIOL].add(constr_violated.astype(jnp.int32))
+        wc = wc.at[_LangevinState.WARN_DX_CAP].add(dx_capped.astype(jnp.int32))
 
-        return LangevinState(
+        return _LangevinState(
             positions=r.astype(state.positions.dtype),
             momentum=p.astype(state.momentum.dtype),
             force=f.astype(state.force.dtype),

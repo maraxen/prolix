@@ -11,6 +11,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
+
 from jax_md import space
 from proxide import CoordFormat
 from proxide.io.parsing.backend import OutputSpec, parse_structure
@@ -20,6 +21,10 @@ from prolix.physics import bonded, pbc, pme, system
 # Enable x64 for physics
 
 # Paths
+
+# XA-CI: heavy parity/compile — deselect from GitHub-faithful suite.
+pytestmark = pytest.mark.slow
+
 DATA_DIR = Path(__file__).parent.parent.parent / "data" / "pdb"
 FF_PATH = (
   Path(__file__).parent.parent.parent.parent

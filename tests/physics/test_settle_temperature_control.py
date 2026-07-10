@@ -15,6 +15,10 @@ from prolix.physics.rigid_water_ke import rigid_tip3p_box_ke_kcal
 from prolix.simulate import AKMA_TIME_UNIT_FS, BOLTZMANN_KCAL
 from .test_explicit_langevin_tip3p_parity import _equil_water_positions, _grid_water_positions, _proxide_params_pure_water
 
+# Multi-ps temperature / equipartition trajectories — deselect from GitHub-faithful CI (XA-CI).
+# Fast O-step unit tests below are also deselected; re-home under a non-dynamics module if needed.
+pytestmark = [pytest.mark.slow, pytest.mark.dynamics]
+
 def _dof_rigid_tip3p_waters(n_waters: int) -> float:
   return float(6 * n_waters - 3)
 

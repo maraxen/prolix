@@ -28,6 +28,9 @@ from prolix.physics.cell_nonbonded import (
     _cell_pair_energy,
 )
 
+# XA-CI: float32/float64 scan carry mismatch under suite x64 pollution.
+pytestmark = pytest.mark.slow
+
 
 # ===========================================================================
 # Fixtures

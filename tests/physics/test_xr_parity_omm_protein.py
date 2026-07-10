@@ -9,7 +9,7 @@ import pytest
 
 PDB = Path("data/pdb/2GB1.pdb")
 
-pytestmark = pytest.mark.openmm
+pytestmark = [pytest.mark.openmm, pytest.mark.slow, pytest.mark.integration]  # XA-CI
 
 
 @pytest.mark.slow

@@ -23,6 +23,10 @@ from __future__ import annotations
 from typing import Tuple
 
 import jax
+import pytest
+
+# Batched SETTLE trajectories / compiles — deselect from GitHub-faithful CI (XA-CI).
+pytestmark = [pytest.mark.slow, pytest.mark.dynamics]
 import jax.numpy as jnp
 import pytest
 

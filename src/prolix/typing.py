@@ -525,7 +525,18 @@ class IntegratorState(eqx.Module):
     step_count: Array = eqx.field(default_factory=lambda: jnp.array(0, dtype=jnp.int32))
 
     def __post_init__(self):
-        """Handle initialization logic."""
+        """Auto-init warn_counts when explicitly passed as None (batch-aware)."""
+        if self.warn_counts is None:
+            n_types = 4  # NUM_WARN_TYPES — class attrs not yet bound in __post_init__
+            if self.positions.ndim >= 3:
+                b = self.positions.shape[0]
+                object.__setattr__(
+                    self, "warn_counts", jnp.zeros((b, n_types), dtype=jnp.int32)
+                )
+            else:
+                object.__setattr__(
+                    self, "warn_counts", jnp.zeros(n_types, dtype=jnp.int32)
+                )
 
     # Named indices for warn_counts (Langevin compatibility)
     WARN_VLIMIT = 0
@@ -544,6 +555,16 @@ class IntegratorState(eqx.Module):
         """Alias for positions."""
         return self.positions
 
+    @property
+    def momenta(self) -> Array:
+        """Alias for momentum (legacy batched API)."""
+        return self.momentum
+
+    @property
+    def forces(self) -> Array:
+        """Alias for force (legacy batched API)."""
+        return self.force
+
     def replace(self: S, **kwargs) -> S:
         """Return a copy with specified fields replaced."""
         # Handle 'key' -> 'rng' alias in replace
@@ -551,7 +572,11 @@ class IntegratorState(eqx.Module):
             kwargs["rng"] = kwargs.pop("key")
         if "position" in kwargs:
             kwargs["positions"] = kwargs.pop("position")
-        
+        if "momenta" in kwargs:
+            kwargs["momentum"] = kwargs.pop("momenta")
+        if "forces" in kwargs:
+            kwargs["force"] = kwargs.pop("forces")
+
         return eqx.tree_at(
             lambda s: tuple(getattr(s, k) for k in kwargs.keys()),
             self,

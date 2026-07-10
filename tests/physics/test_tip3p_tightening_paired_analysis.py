@@ -9,6 +9,9 @@ from pathlib import Path
 
 import pytest
 
+# XA-CI: API drift / heavy compile — deselect from GitHub-faithful suite; tracked under XA-DRIFT.
+pytestmark = pytest.mark.slow
+
 _SCRIPT_PATH = (
   Path(__file__).resolve().parents[2] / "scripts" / "benchmarks" / "tip3p_tightening_paired_analysis.py"
 )

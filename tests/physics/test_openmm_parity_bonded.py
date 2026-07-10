@@ -12,8 +12,13 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
+
 # Register openmm marker
-pytestmark = pytest.mark.openmm
+
+# XA-CI: heavy parity/compile — deselect from GitHub-faithful suite.
+pytestmark = pytest.mark.slow
+
+pytestmark = [pytest.mark.openmm, pytest.mark.slow, pytest.mark.integration]  # XA-CI
 
 from .fixtures_openmm_parity import (
     ala_dip_reference,

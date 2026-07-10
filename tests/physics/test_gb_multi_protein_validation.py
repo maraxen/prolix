@@ -21,6 +21,9 @@ from proxide import CoordFormat, OutputSpec, assign_mbondi2_radii, assign_obc2_s
 
 from prolix.physics import neighbor_list as nl, system
 
+# Multi-protein GB dynamics / long compiles — deselect from GitHub-faithful CI (XA-CI).
+pytestmark = [pytest.mark.slow, pytest.mark.dynamics]
+
 # Enable x64 for physics
 jax.config.update("jax_enable_x64", True)
 

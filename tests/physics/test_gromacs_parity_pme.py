@@ -17,6 +17,9 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
+# XA-CI: heavy parity/compile — deselect from GitHub-faithful suite.
+pytestmark = pytest.mark.slow
+
 from prolix.physics import pbc, settle, system
 from prolix.simulate import AKMA_TIME_UNIT_FS, BOLTZMANN_KCAL
 from .test_explicit_langevin_tip3p_parity import (

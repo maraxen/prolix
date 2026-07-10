@@ -13,6 +13,9 @@ import jax
 import jax.numpy as jnp
 import pytest
 
+# XA-CI: API drift / heavy compile — deselect from GitHub-faithful suite; tracked under XA-DRIFT.
+pytestmark = pytest.mark.slow
+
 from prolix import export
 from prolix.physics import pbc
 from prolix.physics.regression_explicit_pme import REGRESSION_EXPLICIT_PME

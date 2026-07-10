@@ -364,6 +364,7 @@ class TestOpenMMSolvationParity:
     assert rmse < 3.0, f"Force RMSE too high: {rmse}"
 
 
+@pytest.mark.dynamics  # JAX compile of settle_langevin hangs default CI on CPU
 class TestSETTLEIntegration:
   """Tests for SETTLE integration with simulation."""
 

@@ -24,6 +24,9 @@ from prolix.typing import NPTState
 from prolix.simulate import AKMA_TIME_UNIT_FS, BOLTZMANN_KCAL
 from .test_explicit_langevin_tip3p_parity import _grid_water_positions, _proxide_params_pure_water
 
+# NPT trajectories / compiles — deselect from GitHub-faithful CI (XA-CI).
+pytestmark = [pytest.mark.slow, pytest.mark.dynamics]
+
 
 def _dof_rigid_tip3p_waters(n_waters: int) -> float:
   """Degrees of freedom for rigid water in NVT (6*N_w - 3 after COM removal)."""

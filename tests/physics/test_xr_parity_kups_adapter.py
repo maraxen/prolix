@@ -2,11 +2,17 @@
 
 from __future__ import annotations
 
+import pytest
+
 import math
 
 from prolix.physics import kups_adapter
 from prolix.simulate import AKMA_TIME_UNIT_FS
 
+
+
+# XA-CI: heavy parity/compile — deselect from GitHub-faithful suite.
+pytestmark = pytest.mark.slow
 
 def test_akma_time_unit_matches_adapter_expectation():
     assert abs(AKMA_TIME_UNIT_FS - 48.88821291839) < 1e-6

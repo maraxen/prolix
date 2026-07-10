@@ -12,6 +12,9 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
+# Flash nonbonded force compiles — deselect from GitHub-faithful CI (XA-CI).
+pytestmark = pytest.mark.slow
+
 from prolix.physics.flash_nonbonded import flash_nonbonded_forces
 from prolix.padding import PaddedSystem
 
