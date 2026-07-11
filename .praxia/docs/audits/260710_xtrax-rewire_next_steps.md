@@ -1,8 +1,8 @@
-# Next steps — after B1-LAND (PR open)
+# Next steps — after B1-SMOKE
 
 **date:** 2026-07-11  
-**branch:** `audit/xtrax-rewire-xa`  
-**PR:** https://github.com/maraxen/prolix/pull/2  
+**branch:** `b1/smoke`  
+**PR landed:** https://github.com/maraxen/prolix/pull/2 (merged)  
 **next epic:** `260528_b1-full`  
 **invariants:** `.praxia/loop_priorities.toml`
 
@@ -12,29 +12,25 @@
 |------|--------|------|
 | XA-* audit | **completed** | VERIFY PASS |
 | TRIAGE | **completed** | next = B1-full |
-| **B1-LAND** | **completed** | push + PR #2 (merge still human) |
-| B1-SMOKE | **ready** | B=4 mixed EnsemblePlan |
-| B1-FULL | **ready** | B=64 `bth run` |
+| B1-LAND | **completed** | PR #2 merged (admin) |
+| **B1-SMOKE** | **completed** | B=4 hetero + AOT-ratio `< 0.5` (`tests/bench/test_b1_smoke.py`) |
+| B1-FULL | **ready** | B=64 `bth run` Claim-1 campaign |
 | XA-NL-DEBT | **ready** | not on B1 critical path |
 
 ```mermaid
 flowchart LR
-  landDone[B1-LAND PR open]
-  smoke[B1-SMOKE]
+  smokeDone[B1-SMOKE done]
   full[B1-FULL]
-  merge[Human merge PR]
-  landDone --> smoke
-  landDone --> merge
-  smoke --> full
+  smokeDone --> full
 ```
 
 ## Immediate
 
-1. **Human:** review + merge PR #2 when CI is green (agent will not merge).
-2. **B1-SMOKE** — B=4 mixed EnsemblePlan regression (prereg).
-3. **B1-FULL** — B=64 Claim-1 campaign via `bth run`.
+1. **B1-FULL** — scaffold/run `scripts/benchmarks/b1_init_exec.py` + bathos sidecar; B=64, 100 ps, H100 primary (prereg 260528). Do not use pytest for cluster runs.
+2. Paper / HP4 remain deferred until B1-full headline numbers exist.
 
 ## Callouts
 
 - Cite OMM-WATER via `gate_pass` / JSON, not bathos `outcome`.
 - Honor VACUUM-DT + `exception_*` invariants.
+- B1-smoke stays `@pytest.mark.slow` (nightly); default CI marker unchanged.

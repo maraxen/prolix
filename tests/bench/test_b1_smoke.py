@@ -1,15 +1,18 @@
 """B1-smoke: Nightly CI regression detector for hetero-batch benchmark.
 
 Tests B=4 different-sized systems through EnsemblePlan.run() to verify:
-1. Smoke test (< 10 steps) covers varied system sizes
+1. Smoke coverage (< 10 steps) across varied system sizes
 2. Wall-clock regression threshold
-3. Output structure and numerical correctness
+3. AOT-ratio alert (prereg: t_aot / t_cold < 0.5)
+4. Output structure and numerical correctness
 
-Status: v1.0 smoke-only. v1.1 will expand to full-scale batching.
+Cadence: ``@pytest.mark.slow`` + ``benchmark`` (deselected from default GitHub CI).
+Prereg: ``.praxia/docs/specs/260528_b1-preregistration.md``.
 """
 
 import time
 
+import jax
 import jax.numpy as jnp
 import pytest
 
@@ -161,68 +164,77 @@ def _make_bundle(n_atoms: int, seed: int = 0) -> MolecularBundle:
     )
 
 
+def _block_trajs(trajectories: list) -> None:
+    """Force device sync so wall-clock includes XLA work."""
+    for traj in trajectories:
+        jax.block_until_ready(traj.positions)
+
+
 @pytest.mark.slow
 @pytest.mark.benchmark
 class TestB1Smoke:
-    """B1-smoke: Hetero-batch regression suite for v1.0.
+    """B1-smoke: Hetero-batch regression + AOT-ratio alert (prereg 260528).
 
-    Tests EnsemblePlan.run() with B=4 varied-size systems to:
-    1. Verify smoke test (10 steps each) executes without NaN/inf
-    2. Catch performance regressions (wall-clock < 300s on CPU)
-    3. Validate output structure across varied N
+    Tests EnsemblePlan.from_bundles(...).run() with B=4 varied-size systems to:
+    1. Execute 10 steps without NaN/inf
+    2. Catch wall-clock regressions (cold run < 300s on CPU)
+    3. Alert if approximate AOT share of cold time is ≥ 0.5
+    4. Validate output structure across varied N
     """
 
     def test_b1_smoke_b4_wall_clock(self):
-        """B1-smoke: 4 varied-size bundles, 10 steps, wall-clock logged.
+        """B1-smoke: 4 varied-size bundles, cold/warm timing, AOT-ratio gate.
 
-        Creates 4 bundles with 5, 10, 20, 35 atoms respectively. Each runs
-        10 steps of NVT MD with dt=0.5 fs, kT ≈ 300K. Logs total wall-clock
-        time and verifies it stays below 300s (sanity gate for CPU execution).
+        Creates 4 bundles with 5, 10, 20, 35 atoms. Runs 10 steps of NVT via
+        ``EnsemblePlan.from_bundles`` with ``dt=0.5`` **fs** (XR-VACUUM-DT).
 
-        v1.0 limitation: Sequential execution (no vmap batching). Each bundle
-        runs independently through EnsemblePlan([bundle]).run().
-
-        v1.1: Accept full list [bundle0, bundle1, ...] with xtrax-backed
-        BatchPlanner dispatch (#1842).
+        AOT proxy (prereg success criterion 3 / R4 alert):
+        ``aot_ratio = (t_cold - t_warm) / t_cold`` must be ``< 0.5``.
         """
-        # Create hetero-batch: varied system sizes
         bundles = [_make_bundle(n) for n in (5, 10, 20, 35)]
-
-        # Run hetero-batch through single EnsemblePlan (xtrax-backed planner)
-        t0 = time.perf_counter()
         plan = EnsemblePlan.from_bundles(bundles)
+
+        t0 = time.perf_counter()
         trajectories = plan.run(n_steps=10, dt=0.5, kT=2.479e-3, seed=42)
+        _block_trajs(trajectories)
+        t_cold = time.perf_counter() - t0
+
         assert isinstance(trajectories, list)
         assert len(trajectories) == 4
-        t_total = time.perf_counter() - t0
 
-        # Verify outputs
         for i, traj in enumerate(trajectories):
             n_atoms = bundles[i].n_atoms.item()
 
-            # Check trajectory shape
             assert traj.n_steps == 10, f"Bundle {i}: expected 10 steps, got {traj.n_steps}"
-            assert (
-                traj.positions.shape == (10, n_atoms, 3)
-            ), f"Bundle {i}: expected (10, {n_atoms}, 3), got {traj.positions.shape}"
-
-            # Check observables dict
-            assert isinstance(traj.observable_values, dict), f"Bundle {i}: observable_values not a dict"
-
-            # Numerical sanity: all positions finite
+            assert traj.positions.shape == (10, n_atoms, 3), (
+                f"Bundle {i}: expected (10, {n_atoms}, 3), got {traj.positions.shape}"
+            )
+            assert isinstance(traj.observable_values, dict), (
+                f"Bundle {i}: observable_values not a dict"
+            )
             assert jnp.all(jnp.isfinite(traj.positions)), (
                 f"Bundle {i}: non-finite positions detected (NaN or inf)"
             )
+            assert not jnp.allclose(traj.positions[0], traj.positions[-1]), (
+                f"Bundle {i}: positions unchanged after 10 steps"
+            )
 
-            # Positions should have changed (not static)
-            assert not jnp.allclose(
-                traj.positions[0], traj.positions[-1]
-            ), f"Bundle {i}: positions unchanged after 10 steps"
+        t1 = time.perf_counter()
+        warm = plan.run(n_steps=10, dt=0.5, kT=2.479e-3, seed=43)
+        _block_trajs(warm)
+        t_warm = time.perf_counter() - t1
 
-        # Log wall-clock (informational baseline)
-        print(f"\nB1-smoke wall_clock={t_total:.3f}s for B=4 x 10 steps")
-
-        # Loose timing gate: must complete in < 300s on CPU (room for jitting overhead)
-        assert (
-            t_total < 300.0
-        ), f"B1-smoke timed out: {t_total:.1f}s (expected < 300s on CPU)"
+        assert t_cold < 300.0, (
+            f"B1-smoke timed out: t_cold={t_cold:.1f}s (expected < 300s on CPU)"
+        )
+        assert t_cold > 0.0
+        aot_ratio = max(0.0, (t_cold - t_warm) / t_cold)
+        print(
+            f"\nB1-smoke t_cold={t_cold:.3f}s t_warm={t_warm:.3f}s "
+            f"aot_ratio={aot_ratio:.3f} (B=4 x 10 steps)"
+        )
+        assert aot_ratio < 0.5, (
+            f"B1-smoke AOT-ratio alert: aot_ratio={aot_ratio:.3f} ≥ 0.5 "
+            f"(t_cold={t_cold:.3f}s, t_warm={t_warm:.3f}s). "
+            "Escalate to R4 / AOT-budget before Claim-1 headline (prereg 260528)."
+        )
