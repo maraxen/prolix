@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH --job-name=prolix_b1_init_exec
 #SBATCH --partition=mit_normal_gpu
-#SBATCH --gres=gpu:h100:1
+#SBATCH --gres=gpu:l40s:1
 #SBATCH --time=6:00:00
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
@@ -9,6 +9,7 @@
 #SBATCH --mem=64G
 #SBATCH --output=outputs/logs/slurm/%A_%a.b1_init_exec.out
 #SBATCH --error=outputs/logs/slurm/%A_%a.b1_init_exec.err
+# gres tag only (no --nodelist). Override e.g. --gres=gpu:a100:1 if needed.
 # Secondary (pi_so3): sbatch -p pi_so3 --gres=gpu:1 --time=8:00:00 ...
 
 # B1-full Claim-1 init-bound campaign (prereg 260528).

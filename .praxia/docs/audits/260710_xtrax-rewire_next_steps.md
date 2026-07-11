@@ -30,19 +30,19 @@ flowchart LR
 
 **Campaign id:** `2115b4dd`
 
-**Prolix wave (queued):** job `17704429` array `0-2` on `mit_normal_gpu` / `gpu:h100:1`  
-(Pending: `ReqNodeNotAvail` — only H100 node `node2906` currently unavailable.)
+**Prolix wave:** `mit_normal_gpu` + `--gres=gpu:l40s:1` (no nodelist; not H100).  
+Cancelled H100-pinned `17704429` (only lived on unavailable `node2906`).
 
 ```bash
 # From engaging:~/projects/prolix after sync
 export CAMPAIGN_ID=2115b4dd
-# Prolix seeds 0..2 (already submitted as 17704429)
+# Prolix seeds 0..2
 sbatch --array=0-2%3 --export=ALL,CAMPAIGN_ID scripts/slurm/b1_init_exec.slurm
 # OpenMM wave (second wave; same campaign tags)
 sbatch --array=3-5%3 --export=ALL,CAMPAIGN_ID scripts/slurm/b1_init_exec.slurm
-# Fallback if H100 scarce — pi_so3 secondary hardware:
-sbatch -p pi_so3 --gres=gpu:1 --time=8:00:00 --array=0-2%3 \
-  --export=ALL,CAMPAIGN_ID scripts/slurm/b1_init_exec.slurm
+# Optional A100 override (gres tag only):
+sbatch --gres=gpu:a100:1 --array=0-2%3 --export=ALL,CAMPAIGN_ID \
+  scripts/slurm/b1_init_exec.slurm
 ```
 
 **Local dry-run (green):**
