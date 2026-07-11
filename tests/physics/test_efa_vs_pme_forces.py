@@ -16,6 +16,9 @@ from prolix.physics.eval_harness import (
     make_tip3p_water_system,
 )
 
+# Heavy EFA/PME force compiles — deselect from GitHub-faithful CI (XA-CI).
+pytestmark = pytest.mark.slow
+
 
 @pytest.mark.electrostatic_comparison
 def test_efa_pme_force_rmse_relative():

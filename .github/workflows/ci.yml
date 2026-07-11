@@ -58,6 +58,10 @@ jobs:
         run: |
           uv sync --extra dev
 
+      - name: XR-PIN — xtrax PyPI floor check
+        run: |
+          uv run python scripts/ci/check_xtrax_pin.py
+
       - name: REGRESSION_EXPLICIT_PME docs export is in sync
         run: |
           uv run python scripts/export_regression_pme.py --check

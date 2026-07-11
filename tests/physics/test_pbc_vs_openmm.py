@@ -4,6 +4,11 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
+# XA-CI: heavy parity/compile — deselect from GitHub-faithful suite.
+pytestmark = pytest.mark.slow
+
+
+
 try:
   import openmm
   from openmm import app, unit

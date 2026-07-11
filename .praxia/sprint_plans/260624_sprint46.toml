@@ -1,0 +1,30 @@
+[sprint]
+sprint_id = "260624_sprint46"
+sprint_num = 46
+name = "Sprint 46: V4 hetero batch parity"
+description = "Track A: V4 heterogeneous B=4 parity vs independent runs (#265)"
+context = "Sprint 45 closed #264. Multi-bundle dispatch sequential/chunk; hetero sizes 5/10/20/35."
+max_fix_retries = 1
+worktree_shadow_mode = false
+
+[[tracks]]
+id = "a"
+is_research = false
+worktree = false
+skip_worktree = false
+
+[[tracks.items]]
+backlog_id = "265"
+phase_name = "Track A — V4: Heterogeneous batch parity (#265)"
+fixer_prompt = """
+Add tests/api/test_v4_heterogeneous_batch_parity.py:
+- B=4 bundles with n_atoms in (5, 10, 20, 35)
+- Compare from_bundles vs independent from_bundle runs
+- Gate: per-system RMSD < 1e-10 Å
+"""
+reviewer_prompt = """
+VERIFY: uv run pytest tests/api/test_v4_heterogeneous_batch_parity.py -q passes
+PASS if per-system RMSD < 1e-10 for all four systems.
+"""
+return_key = "265"
+workflow_template = "spec_driven_dev"

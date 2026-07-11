@@ -32,6 +32,9 @@ from prolix.typing import WaterIndicesArray
 
 jax.config.update("jax_enable_x64", True)
 
+# Multi-ps ablation trajectories — deselect from GitHub-faithful CI (XA-CI).
+pytestmark = [pytest.mark.slow, pytest.mark.dynamics]
+
 # Constants
 BOLTZMANN_KCAL = 0.0019872041  # kB in kcal/(mol·K)
 AKMA_TIME_UNIT_FS = 48.88821291839  # 1 AKMA time unit in fs

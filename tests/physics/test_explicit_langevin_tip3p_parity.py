@@ -122,12 +122,17 @@ def _proxide_params_pure_water(n_waters: int) -> dict:
     charges.extend([qo, qh, qh])
     sigmas.extend([sig_o, 1.0, 1.0])
     epsilons.extend([eps_o, 0.0, 0.0])
-  mask = jnp.ones((n, n), dtype=jnp.float64) - jnp.eye(n, dtype=jnp.float64)
+  # Sparse excl required by chunked Coulomb (dense exclusion_mask is ignored).
+  excl_indices = np.full((n, 2), -1, dtype=np.int32)
+  excl_sv = np.ones((n, 2), dtype=np.float32)
+  excl_se = np.ones((n, 2), dtype=np.float32)
   for w in range(n_waters):
-    b = w * 3
-    for i, j in [(0, 1), (0, 2), (1, 2)]:
-      a, c = b + i, b + j
-      mask = mask.at[a, c].set(0.0).at[c, a].set(0.0)
+    o, h1, h2 = 3 * w, 3 * w + 1, 3 * w + 2
+    for atom, partners in ((o, (h1, h2)), (h1, (o, h2)), (h2, (o, h1))):
+      for k, partner in enumerate(partners):
+        excl_indices[atom, k] = partner
+        excl_sv[atom, k] = 0.0
+        excl_se[atom, k] = 0.0
   return {
     "charges": jnp.array(charges, dtype=jnp.float64),
     "sigmas": jnp.array(sigmas, dtype=jnp.float64),
@@ -140,7 +145,9 @@ def _proxide_params_pure_water(n_waters: int) -> dict:
     "dihedral_params": jnp.zeros((0, 3), dtype=jnp.float64),
     "impropers": jnp.zeros((0, 4), dtype=jnp.int32),
     "improper_params": jnp.zeros((0, 3), dtype=jnp.float64),
-    "exclusion_mask": mask,
+    "excl_indices": jnp.asarray(excl_indices),
+    "excl_scales_vdw": jnp.asarray(excl_sv),
+    "excl_scales_elec": jnp.asarray(excl_se),
   }
 
 

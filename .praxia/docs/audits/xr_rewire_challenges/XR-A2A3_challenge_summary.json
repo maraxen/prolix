@@ -1,0 +1,10 @@
+{
+  "backlog_id": "XR-A2A3",
+  "praxia_id": 3273,
+  "overall_verdict": "pass",
+  "confidence": "high",
+  "blocking_count": 0,
+  "summary": "A1+A2 done; A3 C3 via XR-VACUUM-DT exception. SETTLE-only falsified; step-1 KE explosion at dt=0.5; EnsemblePlan fails 1000 steps at 0.01.",
+  "leaf_spec": ".praxia/docs/specs/260709_xr-a2a3.md",
+  "exception_leaf": "XR-VACUUM-DT"
+}

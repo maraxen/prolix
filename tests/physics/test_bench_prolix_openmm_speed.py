@@ -1,4 +1,4 @@
-"""Smoke tests for ``scripts/benchmarks/proxide_vs_openmm_speed.py`` (import + helpers)."""
+"""Smoke tests for ``scripts/benchmarks/prolix_vs_openmm_speed.py`` (import + helpers)."""
 
 from __future__ import annotations
 
@@ -7,40 +7,44 @@ import sys
 from pathlib import Path
 
 _ROOT = Path(__file__).resolve().parents[2]
-_BENCH = _ROOT / "scripts" / "benchmarks" / "proxide_vs_openmm_speed.py"
+_BENCH = _ROOT / "scripts" / "benchmarks" / "prolix_vs_openmm_speed.py"
 
 
 def _load_bench():
-  spec = importlib.util.spec_from_file_location("proxide_vs_openmm_speed", _BENCH)
+  spec = importlib.util.spec_from_file_location("prolix_vs_openmm_speed", _BENCH)
   assert spec and spec.loader
   mod = importlib.util.module_from_spec(spec)
   # Required so dataclasses can resolve TimingRow.__module__ during import.
-  sys.modules["proxide_vs_openmm_speed"] = mod
+  # Must match the module name passed to spec_from_file_location.
+  sys.modules["prolix_vs_openmm_speed"] = mod
   spec.loader.exec_module(mod)
   return mod
 
 
-def test_list_openmm_platform_names_returns_list():
+def test_openmm_platform_order_is_nonempty_tuple():
   mod = _load_bench()
-  names = mod.list_openmm_platform_names()
-  assert isinstance(names, list)
-  for n in names:
-    assert isinstance(n, str)
-    assert len(n) > 0
+  assert isinstance(mod.OPENMM_PLATFORM_ORDER, tuple)
+  assert len(mod.OPENMM_PLATFORM_ORDER) > 0
+  assert "CUDA" in mod.OPENMM_PLATFORM_ORDER
+  assert mod.OPENMM_PLATFORM_ORDER.index("CUDA") < mod.OPENMM_PLATFORM_ORDER.index("Reference")
 
 
-def test_iter_openmm_platforms_in_order_is_subset():
+def test_timing_row_dataclass_fields():
   mod = _load_bench()
-  have = set(mod.list_openmm_platform_names())
-  ordered = mod.iter_openmm_platforms_in_order()
-  assert set(ordered) == have
-  if "CUDA" in have and "Reference" in have:
-    assert ordered.index("CUDA") < ordered.index("Reference")
+  row = mod.TimingRow(
+    engine="Prolix",
+    backend="jax",
+    n_atoms=100,
+    mean_ms=1.0,
+    std_ms=0.1,
+    calls_per_s=1000.0,
+  )
+  assert row.engine == "Prolix"
+  assert row.n_atoms == 100
+  assert row.vram_gb == 0.0
 
 
-def test_minimal_protein_dict_has_radii():
+def test_build_openmm_system_smoke():
   mod = _load_bench()
-  import numpy as np
-
-  d = mod._minimal_protein_dict(np.array([1.0, -1.0]))
-  assert "radii" in d and "scaled_radii" in d
+  omm_system = mod.build_openmm_system(n_atoms=4, box_angstrom=50.0)
+  assert omm_system.getNumParticles() == 4

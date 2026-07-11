@@ -3,14 +3,17 @@
 This module bridges user-level BatchingConfig (input knobs) with device-side
 BatchPlan (vmap vs safe_map dispatch decisions). All logic is host-side pure Python
 over AxisSpec dataclasses, with no JAX runtime operations.
+
+``make_fitting_planner`` uses the shared xtrax adapter path
+(``BatchPlanner.plan`` / ``plan_with_xtrax``). The prolix greedy demotion
+loop was removed in XR-KILL-FORK; ``plan()`` is a thin alias.
 """
 
 from __future__ import annotations
 
 import dataclasses
 
-import jax
-
+from prolix.api.ensemble_planner import resolve_device_budget_bytes
 from prolix.tiling.axes import N_CONFORMERS, N_MOLS
 from prolix.tiling.planner import BatchPlan, BatchPlanner, estimate_memory_theoretical
 
@@ -47,7 +50,11 @@ def make_fitting_planner(
     headroom: float = 0.80,
     activation_multiplier: float = 2.5,
 ) -> BatchPlan:
-    """Build a BatchPlan for fitting dispatch.
+    """Build a BatchPlan for fitting dispatch via the shared xtrax adapter.
+
+    Uses ``BatchPlanner.plan_with_xtrax()`` (XR-FIT-FLIP / XR-KILL-FORK), not a
+    competing prolix greedy demotion loop. ``BatchPlanner.plan()`` is the same path.
+    Budget policy matches EnsembleMDPlanner (``resolve_device_budget_bytes``).
 
     Args:
         spec: BatchingConfig with cardinalities and optional overrides.
@@ -57,17 +64,11 @@ def make_fitting_planner(
 
     Returns:
         BatchPlan describing batch size decisions for N_MOLS and N_CONFORMERS.
-    """
-    try:
-        stats = jax.devices()[0].memory_stats()
-        if stats is None:
-            raise AttributeError("memory_stats returned None")
-        device_limit = stats["bytes_limit"]
-    except (KeyError, IndexError, AttributeError, TypeError):
-        # Fallback for CPU/test environments where memory_stats unavailable
-        device_limit = 4 * 1024**3  # 4 GB
 
-    budget = device_limit * headroom - param_bytes
+    Raises:
+        BudgetInfeasibleError: If the joint estimate cannot fit the budget.
+    """
+    budget = resolve_device_budget_bytes(headroom, param_bytes)
 
     # Build axes with cardinalities overridden from spec
     axes = [
@@ -98,7 +99,7 @@ def make_fitting_planner(
         estimate_memory=lambda ds: estimate_memory_theoretical(
             ds, 1.0, activation_multiplier
         ),
-    ).plan()
+    ).plan_with_xtrax()
 
 
 def extract_batch_sizes(plan: BatchPlan) -> tuple[int, int]:

@@ -1,8 +1,13 @@
 import pytest
+
 import jax
 import jax.numpy as jnp
 from prolix.physics.integrator_builder import make_integrator
 from prolix.physics.step_system import step_sequences
+
+# XA-CI: heavy parity/compile — deselect from GitHub-faithful suite.
+pytestmark = pytest.mark.slow
+
 
 def test_modular_scr_barostat_smoke():
     """Verify that baoab_csvr_npt instantiates and runs without errors."""

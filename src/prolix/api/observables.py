@@ -142,7 +142,12 @@ class Energy(eqx.Module):
         Returns:
             Scalar potential energy value
         """
-        return self.energy_fn(state.positions, self.bundle)
+        positions = (
+            state.positions
+            if hasattr(state, "positions")
+            else state.position
+        )
+        return self.energy_fn(positions, self.bundle)
 
 
 class KineticEnergy(eqx.Module):
@@ -201,7 +206,11 @@ class RMSD(eqx.Module):
         Returns:
             Scalar RMSD in Angstroms (same units as positions)
         """
-        positions = state.positions  # Shape (N, 3)
+        positions = (
+            state.positions
+            if hasattr(state, "positions")
+            else state.position
+        )
 
         # Compute displacement from reference
         diff = positions - self.reference

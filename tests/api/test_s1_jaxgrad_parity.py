@@ -1,15 +1,9 @@
-"""S1 D2: jax.grad / jax.jacrev through finite-diff parity test.
+"""S1 D2 / V6 (#268): jax.grad / jax.jacrev through finite-diff parity test.
 
-Validates the differentiability claim end-to-end: jax.grad(loss)(params) through
-a short MD trajectory must agree with finite-difference gradients to RMS < 1e-4.
+Validates the differentiability claim: jax.grad(loss)(params) through MD must
+agree with finite-difference gradients to RMS < 1e-4.
 
-Status: Test structure defined. EnsemblePlan.run() implementation pending Track C.
-For now, this test uses settle_langevin directly and calls it via a wrapper.
-Test is marked xfail(strict=False) because run() is not yet implemented.
-
-References:
-- Backlog #293: S1 D2: jax.grad / jax.jacrev through EnsemblePlan.run finite-diff parity
-- Relevant for §7.1 paper figure (bonded-parameter fitting)
+See also ``test_v6_jaxgrad_ensemble_plan.py`` for the EnsemblePlan.run path.
 """
 
 from __future__ import annotations
@@ -18,6 +12,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
+
 
 from prolix.physics import pbc, settle, system
 from prolix.physics.bonded import make_bond_energy_fn
@@ -161,22 +156,3 @@ def test_jaxgrad_bond_params_parity():
         f"jax.grad / FD gradient mismatch: RMS={rms_error:.4e} "
         f"(threshold 1e-4). jax.grad={grad_jax[0]:.8e}, fd={grad_fd:.8e}"
     )
-
-
-@pytest.mark.xfail(
-    strict=False,
-    reason='EnsemblePlan.run() not yet implemented; test structure defined'
-)
-def test_jaxgrad_ensemble_plan_when_run_implemented():
-    """S1 D2 end-to-end test through EnsemblePlan.run() once Track C completes.
-
-    Expected behavior (when run() is implemented):
-    - Create EnsemblePlan with MolecularBundle(s)
-    - Call plan.run(n_steps=5, dt=0.5, kT=2.479e-3, seed=0)
-    - Wrap run() output loss function
-    - Verify jax.grad(loss)(bond_params) matches finite-diff
-
-    This test is a placeholder. Once EnsemblePlan.run() is implemented,
-    replace with real test that calls plan.run() directly.
-    """
-    pytest.skip("EnsemblePlan.run() implementation pending Track C (Sprint 38)")

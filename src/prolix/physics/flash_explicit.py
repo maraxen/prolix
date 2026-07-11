@@ -306,7 +306,7 @@ def _total_energy_fn(
         omega = rff_frequency_sample(
             alpha=pme_alpha_float,
             n_features=n_rff_features,
-            rng=rng_key,
+            key=rng_key,
         )
         e_coul_rff = erfc_rff_coulomb_energy_diff(
             pos, safe_charges, sys.atom_mask, omega, pme_alpha_float

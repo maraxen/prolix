@@ -1,0 +1,106 @@
+[sprint]
+sprint_id = "260623_sprint43"
+sprint_num = 43
+name = "Sprint 43: V1 close path + P2a"
+description = "Track A: wire bundle energy into EnsemblePlan.run (#263); Track B: dihedral flatten in make_bundle_from_system (#162); Track C: P2a OpenMM fixture fix (#557)"
+context = "[MANUAL: paste recon findings here before running emit-sprint]"
+max_fix_retries = 1
+worktree_shadow_mode = false
+
+[[tracks]]
+id = "a"
+is_research = false
+worktree = false
+skip_worktree = false
+
+[[tracks.items]]
+backlog_id = "263"
+phase_name = "Track A — V1: EnsemblePlan(B=1) parity vs settle_langevin (#263)"
+fixer_prompt = """
+# DRAFT — requires human review before dw emit-sprint
+
+BACKLOG DESCRIPTION:
+V1 harness landed: test_v1_harness_runs_and_returns_trajectory (green). Strict solvated-AKE 1k-step RMSD<1e-12 test skipped pending bundle FF wiring in EnsemblePlan.run(). See HP2 audit .praxia/docs/audits/260623_hp2_make_bundle_field_audit.md.
+
+[AUTO: no recon anchors — paste file:line references here, then write the full fixer prompt]"""
+reviewer_prompt = """
+# DRAFT — requires human review before dw emit-sprint
+
+BACKLOG DESCRIPTION:
+V1 harness landed: test_v1_harness_runs_and_returns_trajectory (green). Strict solvated-AKE 1k-step RMSD<1e-12 test skipped pending bundle FF wiring in EnsemblePlan.run(). See HP2 audit .praxia/docs/audits/260623_hp2_make_bundle_field_audit.md.
+
+REVIEWER CHECKLIST (fill in before running dw emit-sprint):
+VERIFY: cargo command or test that must pass — e.g. `cargo nextest run -p <crate>`
+VERIFY: observable assertion — e.g. \"new test exists and calls the handler directly\"
+VERIFY: no regression — e.g. \"existing tests still pass\"
+PASS if all VERIFY items are satisfied.
+FAIL if any VERIFY item is not met or untestable as written."""
+return_key = "263"
+workflow_template = "spec_driven_dev"
+
+[[tracks]]
+id = "b"
+is_research = false
+worktree = false
+skip_worktree = false
+
+[[tracks.items]]
+backlog_id = "162"
+phase_name = "Track B — HP2: make_bundle_from_system feature parity audit vs make_energy_fn (#162)"
+fixer_prompt = """
+# DRAFT — requires human review before dw emit-sprint
+
+BACKLOG DESCRIPTION:
+Advisory field audit complete 2026-06-23: .praxia/docs/audits/260623_hp2_make_bundle_field_audit.md — 4 gaps (dihedral multi-term flatten, excl layout, CMAP, atom_names). Full OpenMM term parity and bundle-path close deferred.
+
+[AUTO: no recon anchors — paste file:line references here, then write the full fixer prompt]"""
+reviewer_prompt = """
+# DRAFT — requires human review before dw emit-sprint
+
+BACKLOG DESCRIPTION:
+Advisory field audit complete 2026-06-23: .praxia/docs/audits/260623_hp2_make_bundle_field_audit.md — 4 gaps (dihedral multi-term flatten, excl layout, CMAP, atom_names). Full OpenMM term parity and bundle-path close deferred.
+
+REVIEWER CHECKLIST (fill in before running dw emit-sprint):
+VERIFY: cargo command or test that must pass — e.g. `cargo nextest run -p <crate>`
+VERIFY: observable assertion — e.g. \"new test exists and calls the handler directly\"
+VERIFY: no regression — e.g. \"existing tests still pass\"
+PASS if all VERIFY items are satisfied.
+FAIL if any VERIFY item is not met or untestable as written."""
+return_key = "162"
+workflow_template = "spec_driven_dev"
+
+[[tracks]]
+id = "c"
+is_research = false
+worktree = false
+skip_worktree = false
+
+[[tracks.items]]
+backlog_id = "557"
+phase_name = "Track C — P2a: OpenMM parity harness on PhysicsSystem (bonded-only first) (#557)"
+fixer_prompt = """
+# DRAFT — requires human review before dw emit-sprint
+
+[MANUAL: paste backlog description here]
+
+[AUTO: no recon anchors — paste file:line references here, then write the full fixer prompt]"""
+reviewer_prompt = """
+# DRAFT — requires human review before dw emit-sprint
+
+BACKLOG DESCRIPTION:
+[MANUAL: paste backlog description here]
+
+REVIEWER CHECKLIST (fill in before running dw emit-sprint):
+VERIFY: cargo command or test that must pass — e.g. `cargo nextest run -p <crate>`
+VERIFY: observable assertion — e.g. \"new test exists and calls the handler directly\"
+VERIFY: no regression — e.g. \"existing tests still pass\"
+PASS if all VERIFY items are satisfied.
+FAIL if any VERIFY item is not met or untestable as written."""
+return_key = "557"
+workflow_template = "spec_driven_dev"
+
+[orchestration]
+sequential = []
+concurrent = []
+
+[deprecation]

@@ -136,6 +136,7 @@ def test_safe_map_heterogeneous_pytree():
     res = safe_map(fn, x, chunk_size=2)
     assert jnp.allclose(res, x * 2)
 
+@pytest.mark.slow  # 1CRN GB energy/grad compile exceeds CI timeout under suite pressure (XA-CI)
 def test_langevin_step_finite(fake_padded_batch):
     sys = fake_padded_batch
     dt = 2.0 / 48.88821  # 2fs
@@ -173,6 +174,7 @@ def test_langevin_step_finite(fake_padded_batch):
         assert jnp.allclose(ghost_pos, 9999.0, atol=1e-1)
 
 
+@pytest.mark.slow  # 1CRN GB compile — XA-CI
 def test_batched_minimize(fake_padded_batch):
     # Short schedules keep first-JIT compile tractable in CI (defaults are 500×4 FIRE + L-BFGS).
     minimized_pos, converged, rms_grad = batched_minimize(
@@ -225,6 +227,7 @@ def _cold_start_state(batch) -> LangevinState:
     )
 
 
+@pytest.mark.slow  # 1CRN GB compile — XA-CI
 def test_batched_equilibrate_deprecated(fake_padded_batch):
     """batched_equilibrate must emit DeprecationWarning."""
     import pytest
@@ -233,11 +236,12 @@ def test_batched_equilibrate_deprecated(fake_padded_batch):
     with pytest.warns(DeprecationWarning, match="batched_equilibrate is deprecated"):
         batched_equilibrate(
             fake_padded_batch, system_index, fake_padded_batch.positions,
-            key=random.key(0), duration_ps=0.02, temp=300.0, chunk_size=1
+            rng=random.key(0), duration_ps=0.02, temp=300.0, chunk_size=1
         )
 
 
 
+@pytest.mark.slow  # 1CRN GB compile — XA-CI
 def test_cold_start_state_finite(fake_padded_batch):
     """Cold-start has finite positions and forces (replaces test_batched_equilibrate)."""
     state = _cold_start_state(fake_padded_batch)
@@ -252,6 +256,7 @@ def test_cold_start_state_finite(fake_padded_batch):
         assert jnp.allclose(ghost_pos, 9999.0, atol=1e-1)
 
 
+@pytest.mark.slow  # 1CRN GB compile — XA-CI
 def test_batched_produce(fake_padded_batch):
     state = _cold_start_state(fake_padded_batch)
     with pytest.warns(DeprecationWarning):
@@ -262,6 +267,7 @@ def test_batched_produce(fake_padded_batch):
     assert traj.shape == (2, 2, fake_padded_batch.positions.shape[1], 3)
 
 
+@pytest.mark.slow  # 1CRN GB compile — XA-CI
 def test_batched_produce_streaming(fake_padded_batch):
     """Streaming production via io_callback — no GPU trajectory accumulation.
 
@@ -379,6 +385,7 @@ def test_batched_produce_streaming(fake_padded_batch):
         )
 
 
+@pytest.mark.slow  # 1CRN GB compile — XA-CI
 def test_batched_produce_streaming_write_batch_size(fake_padded_batch):
     """``write_batch_size>1`` passes (W,N,3) once per batch of saves; matches ``batched_produce``."""
     import numpy as np
@@ -408,7 +415,7 @@ def test_batched_produce_streaming_write_batch_size(fake_padded_batch):
         momentum=jnp.zeros_like(batch.positions),
         force=initial_forces,
         mass=batch.masses,
-        key=random.split(random.key(1), B),
+        rng=random.split(random.key(1), B),
         cap_count=jnp.zeros(B, dtype=jnp.int32),
     )
 

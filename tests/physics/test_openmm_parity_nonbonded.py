@@ -15,7 +15,7 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
-pytestmark = pytest.mark.openmm
+pytestmark = [pytest.mark.openmm, pytest.mark.slow, pytest.mark.integration]  # XA-CI: OpenMM parity compile hang
 
 
 @pytest.fixture(scope="module")

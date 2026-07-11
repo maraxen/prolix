@@ -1,0 +1,30 @@
+[sprint]
+sprint_id = "260624_sprint48"
+sprint_num = 48
+name = "Sprint 48: 64-water SETTLE batched 10 ps (#161)"
+description = "Track A: large-scale SETTLE batching validation + integrator_builder vmap fix"
+context = "V5 closed. P0c gate for batched SETTLE at production scale."
+max_fix_retries = 1
+worktree_shadow_mode = false
+
+[[tracks]]
+id = "a"
+is_research = false
+worktree = false
+skip_worktree = false
+
+[[tracks.items]]
+backlog_id = "161"
+phase_name = "Track A — 64-water batched SETTLE 10 ps (#161)"
+fixer_prompt = """
+Add tests/physics/test_settle_64water_batched_10ps.py (@slow): 64 waters, B=2,
+settle_langevin + vmap, 10 ps at dt=0.5 fs. Fix make_integrator_batched vmap
+out_axes for cap_count/warn_counts/did_overflow.
+Gate: finite positions, SETTLE geometry, T stable (no runaway).
+"""
+reviewer_prompt = """
+VERIFY: uv run pytest tests/physics/test_settle_64water_batched_10ps.py -v --timeout=600
+VERIFY: uv run pytest tests/physics/test_batching_settle_smoke.py -v
+"""
+return_key = "161"
+workflow_template = "spec_driven_dev"

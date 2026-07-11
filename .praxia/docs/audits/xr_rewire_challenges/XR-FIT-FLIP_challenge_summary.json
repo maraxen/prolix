@@ -1,0 +1,19 @@
+{
+  "backlog_id": "XR-FIT-FLIP",
+  "praxia_id": 3277,
+  "overall_verdict": "near_ready",
+  "confidence": "high",
+  "round": 2,
+  "prior_blockers_cleared": [
+    "Call shape: .plan() → .plan_with_xtrax()",
+    "Budget via resolve_device_budget_bytes (1A shared with MD)",
+    "Kill test asserts plan_with_xtrax not greedy .plan()",
+    "Thin-wrapper decision-parity vs direct plan_with_xtrax",
+    "XR-SHADOW suite still green"
+  ],
+  "residual": [
+    "Greedy BatchPlanner.plan remains until XR-KILL-FORK",
+    "Fitting runtime still hand-rolls chunked vmap (not make_axis_dispatch)"
+  ],
+  "summary": "near_ready — fitting on shared adapter; next XR-PARITY-OMM-WATER"
+}

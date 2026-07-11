@@ -1,0 +1,9 @@
+{
+  "backlog_id": "XR-CARRY",
+  "praxia_id": 3280,
+  "overall_verdict": "pass",
+  "confidence": "high",
+  "blocking_count": 0,
+  "summary": "N_STEPS + CarrySpec→Scan planning; dispatch_n_steps via JaxScanIterator; EnsemblePlan._run_single wired. Hetero CarrySpec fails loud. Replica/export_run out of scope.",
+  "leaf_spec": ".praxia/docs/specs/260709_xr-carry.md"
+}

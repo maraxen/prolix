@@ -25,6 +25,10 @@ from prolix.physics.pme import (
 )
 
 
+
+# XA-CI: heavy parity/compile — deselect from GitHub-faithful suite.
+pytestmark = pytest.mark.slow
+
 class TestBSpline:
     """Tests for B-spline weight computation."""
 

@@ -9,3 +9,7 @@ path = "~/projects/prolix"
 [remotes.engaging]
 host = "engaging"
 remote_root = "~/projects/prolix"
+
+[remotes.titanix]
+host = "titanix"
+remote_root = "/home/solab/projects/prolix"

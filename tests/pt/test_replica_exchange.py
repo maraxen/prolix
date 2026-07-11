@@ -62,8 +62,11 @@ def test_replica_exchange_run():
   try:
     final_state = replica_exchange.run_replica_exchange(params, r_init, spec)
 
-    # Check integrity
-    assert final_state.positions.shape == (4, 2, 3)
+    # Check integrity (NVTLangevinState uses ``position``; IntegratorState uses ``positions``)
+    pos = getattr(final_state, "positions", None)
+    if pos is None:
+      pos = final_state.position
+    assert pos.shape == (4, 2, 3)
     assert final_state.walker_indices.shape == (4,)
 
     # Check energy calculation

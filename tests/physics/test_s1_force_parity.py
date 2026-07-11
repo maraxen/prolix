@@ -8,9 +8,14 @@ through prolix produces physically correct gradients.
 import jax
 import jax.numpy as jnp
 import pytest
+
 from jax_md import space
 
 # Force CPU backend for deterministic testing
+
+# XA-CI: heavy parity/compile — deselect from GitHub-faithful suite.
+pytestmark = pytest.mark.slow
+
 jax.config.update("jax_platform_name", "cpu")
 
 

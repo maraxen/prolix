@@ -15,6 +15,9 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
+# XA-CI: heavy parity/compile — deselect from GitHub-faithful suite.
+pytestmark = pytest.mark.slow
+
 from prolix.physics.pme import (
     _bspline4,
     _bspline4_deriv,

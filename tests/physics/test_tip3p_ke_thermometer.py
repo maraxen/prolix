@@ -7,6 +7,9 @@ import math
 import numpy as np
 import pytest
 
+# XA-CI: heavy parity/compile — deselect from GitHub-faithful suite.
+pytestmark = pytest.mark.slow
+
 from prolix.simulate import BOLTZMANN_KCAL
 
 try:

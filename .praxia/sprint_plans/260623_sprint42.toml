@@ -1,0 +1,231 @@
+[sprint]
+sprint_id = "260623_sprint42"
+sprint_num = 42
+name = "Sprint 42: V-series harness + verify closes"
+description = "Track A: V7/V4-HLO/V1 test harness; Track B: verify+close #558/#268; Track C: HP2 oracle audit"
+context = "[MANUAL: paste recon findings here before running emit-sprint]"
+max_fix_retries = 1
+worktree_shadow_mode = false
+
+[[tracks]]
+id = "a"
+is_research = false
+worktree = false
+skip_worktree = false
+
+[[tracks.items]]
+backlog_id = "269"
+phase_name = "Track A — V7: BatchPlanner decision correctness (#269)"
+fixer_prompt = """
+# DRAFT — requires human review before dw emit-sprint
+
+BACKLOG DESCRIPTION:
+Planner picks the expected vmap/safe_map split across synthetic axis workloads.
+
+**Success:** Plan output equals expected split for each synthetic axis workload.
+**Exit:** Green on every PR.
+
+[AUTO: no recon anchors — paste file:line references here, then write the full fixer prompt]"""
+reviewer_prompt = """
+# DRAFT — requires human review before dw emit-sprint
+
+BACKLOG DESCRIPTION:
+Planner picks the expected vmap/safe_map split across synthetic axis workloads.
+
+**Success:** Plan output equals expected split for each synthetic axis workload.
+**Exit:** Green on every PR.
+
+REVIEWER CHECKLIST (fill in before running dw emit-sprint):
+VERIFY: cargo command or test that must pass — e.g. `cargo nextest run -p <crate>`
+VERIFY: observable assertion — e.g. \"new test exists and calls the handler directly\"
+VERIFY: no regression — e.g. \"existing tests still pass\"
+PASS if all VERIFY items are satisfied.
+FAIL if any VERIFY item is not met or untestable as written."""
+return_key = "269"
+workflow_template = "spec_driven_dev"
+
+[[tracks]]
+id = "b"
+is_research = false
+worktree = false
+skip_worktree = false
+
+[[tracks.items]]
+backlog_id = "266"
+phase_name = "Track B — V4-HLO: Compile-once assertion (JIT cache-miss delta=1) (#266)"
+fixer_prompt = """
+# DRAFT — requires human review before dw emit-sprint
+
+BACKLOG DESCRIPTION:
+Prove batched mechanism is actually batching, not running N independent traces under the hood.
+
+**Primary check:** Assert EnsemblePlan.run produces exactly one JIT cache miss for a given BatchPlan across a heterogeneous-bundle ensemble (delta == 1). Use jax._src.compilation_cache introspection or process-level cache-miss counter.
+**Secondary check (defense in depth):** jax.make_jaxpr(EnsemblePlan.run) returns a jaxpr where the outer-level dispatch primitive (scan or pjit) shows a single batched call rather than B per-element calls.
+
+**Success:** Both checks pass on V4 ensemble.
+**Exit:** Green on every PR.
+**Notes:** Requires a 0.5-day spike to pin the actual JAX API for cache-miss counting before writing the assertion.
+
+[AUTO: no recon anchors — paste file:line references here, then write the full fixer prompt]"""
+reviewer_prompt = """
+# DRAFT — requires human review before dw emit-sprint
+
+BACKLOG DESCRIPTION:
+Prove batched mechanism is actually batching, not running N independent traces under the hood.
+
+**Primary check:** Assert EnsemblePlan.run produces exactly one JIT cache miss for a given BatchPlan across a heterogeneous-bundle ensemble (delta == 1). Use jax._src.compilation_cache introspection or process-level cache-miss counter.
+**Secondary check (defense in depth):** jax.make_jaxpr(EnsemblePlan.run) returns a jaxpr where the outer-level dispatch primitive (scan or pjit) shows a single batched call rather than B per-element calls.
+
+**Success:** Both checks pass on V4 ensemble.
+**Exit:** Green on every PR.
+**Notes:** Requires a 0.5-day spike to pin the actual JAX API for cache-miss counting before writing the assertion.
+
+REVIEWER CHECKLIST (fill in before running dw emit-sprint):
+VERIFY: cargo command or test that must pass — e.g. `cargo nextest run -p <crate>`
+VERIFY: observable assertion — e.g. \"new test exists and calls the handler directly\"
+VERIFY: no regression — e.g. \"existing tests still pass\"
+PASS if all VERIFY items are satisfied.
+FAIL if any VERIFY item is not met or untestable as written."""
+return_key = "266"
+workflow_template = "spec_driven_dev"
+
+[[tracks]]
+id = "c"
+is_research = false
+worktree = false
+skip_worktree = false
+
+[[tracks.items]]
+backlog_id = "263"
+phase_name = "Track C — V1: EnsemblePlan(B=1) parity vs settle_langevin (#263)"
+fixer_prompt = """
+# DRAFT — requires human review before dw emit-sprint
+
+BACKLOG DESCRIPTION:
+PR-gated parity test. EnsemblePlan(B=1).run on solvated AKE for 1k steps must match settle_langevin trajectory.
+
+**Success:** RMSD < 1e-12 A on solvated AKE 1k steps.
+**Exit:** Test green on every PR.
+
+[AUTO: no recon anchors — paste file:line references here, then write the full fixer prompt]"""
+reviewer_prompt = """
+# DRAFT — requires human review before dw emit-sprint
+
+BACKLOG DESCRIPTION:
+PR-gated parity test. EnsemblePlan(B=1).run on solvated AKE for 1k steps must match settle_langevin trajectory.
+
+**Success:** RMSD < 1e-12 A on solvated AKE 1k steps.
+**Exit:** Test green on every PR.
+
+REVIEWER CHECKLIST (fill in before running dw emit-sprint):
+VERIFY: cargo command or test that must pass — e.g. `cargo nextest run -p <crate>`
+VERIFY: observable assertion — e.g. \"new test exists and calls the handler directly\"
+VERIFY: no regression — e.g. \"existing tests still pass\"
+PASS if all VERIFY items are satisfied.
+FAIL if any VERIFY item is not met or untestable as written."""
+return_key = "263"
+workflow_template = "spec_driven_dev"
+
+[[tracks]]
+id = "d"
+is_research = false
+worktree = false
+skip_worktree = false
+
+[[tracks.items]]
+backlog_id = "558"
+phase_name = "Track D — P1a-1d: expand analytical_forces.py to all bonded terms (bonds, angles, dihedrals, impropers, urey-bradley) (#558)"
+fixer_prompt = """
+# DRAFT — requires human review before dw emit-sprint
+
+[MANUAL: paste backlog description here]
+
+[AUTO: no recon anchors — paste file:line references here, then write the full fixer prompt]"""
+reviewer_prompt = """
+# DRAFT — requires human review before dw emit-sprint
+
+BACKLOG DESCRIPTION:
+[MANUAL: paste backlog description here]
+
+REVIEWER CHECKLIST (fill in before running dw emit-sprint):
+VERIFY: cargo command or test that must pass — e.g. `cargo nextest run -p <crate>`
+VERIFY: observable assertion — e.g. \"new test exists and calls the handler directly\"
+VERIFY: no regression — e.g. \"existing tests still pass\"
+PASS if all VERIFY items are satisfied.
+FAIL if any VERIFY item is not met or untestable as written."""
+return_key = "558"
+workflow_template = "spec_driven_dev"
+
+[[tracks]]
+id = "e"
+is_research = false
+worktree = false
+skip_worktree = false
+
+[[tracks.items]]
+backlog_id = "268"
+phase_name = "Track E — V6: jax.grad finite-diff parity (composes with S1) (#268)"
+fixer_prompt = """
+# DRAFT — requires human review before dw emit-sprint
+
+BACKLOG DESCRIPTION:
+Nightly CI gate. jax.grad through trajectory must agree with finite-difference baseline.
+
+**Success:** Force-matching loss gradient RMS < 1e-4.
+**Exit:** Green nightly; cross-references S1 D2.
+
+[AUTO: no recon anchors — paste file:line references here, then write the full fixer prompt]"""
+reviewer_prompt = """
+# DRAFT — requires human review before dw emit-sprint
+
+BACKLOG DESCRIPTION:
+Nightly CI gate. jax.grad through trajectory must agree with finite-difference baseline.
+
+**Success:** Force-matching loss gradient RMS < 1e-4.
+**Exit:** Green nightly; cross-references S1 D2.
+
+REVIEWER CHECKLIST (fill in before running dw emit-sprint):
+VERIFY: cargo command or test that must pass — e.g. `cargo nextest run -p <crate>`
+VERIFY: observable assertion — e.g. \"new test exists and calls the handler directly\"
+VERIFY: no regression — e.g. \"existing tests still pass\"
+PASS if all VERIFY items are satisfied.
+FAIL if any VERIFY item is not met or untestable as written."""
+return_key = "268"
+workflow_template = "spec_driven_dev"
+
+[[tracks]]
+id = "f"
+is_research = false
+worktree = false
+skip_worktree = false
+
+[[tracks.items]]
+backlog_id = "162"
+phase_name = "Track F — HP2: make_bundle_from_system feature parity audit vs make_energy_fn (#162)"
+fixer_prompt = """
+# DRAFT — requires human review before dw emit-sprint
+
+BACKLOG DESCRIPTION:
+Stand up OpenMM parity harness against current PhysicsSystem before freezing MolecularBundle. Load same .pdb + .xml force field into both OpenMM and prolix; compare energy per term for solvated alanine dipeptide. Deliverable: field-audit report mapping all system.py:49–151 fields to bundle entries. Results feed back into Phase 1a MolecularBundle field list — Phase 1 is not complete until this closes. Parallel to Phase 1. Exit: all terms < 0.05 kcal/mol; field-audit report merged. Spec: .praxia/specs/2026-05-15-prolix-strategic-roadmap.md
+
+[AUTO: no recon anchors — paste file:line references here, then write the full fixer prompt]"""
+reviewer_prompt = """
+# DRAFT — requires human review before dw emit-sprint
+
+BACKLOG DESCRIPTION:
+Stand up OpenMM parity harness against current PhysicsSystem before freezing MolecularBundle. Load same .pdb + .xml force field into both OpenMM and prolix; compare energy per term for solvated alanine dipeptide. Deliverable: field-audit report mapping all system.py:49–151 fields to bundle entries. Results feed back into Phase 1a MolecularBundle field list — Phase 1 is not complete until this closes. Parallel to Phase 1. Exit: all terms < 0.05 kcal/mol; field-audit report merged. Spec: .praxia/specs/2026-05-15-prolix-strategic-roadmap.md
+
+REVIEWER CHECKLIST (fill in before running dw emit-sprint):
+VERIFY: cargo command or test that must pass — e.g. `cargo nextest run -p <crate>`
+VERIFY: observable assertion — e.g. \"new test exists and calls the handler directly\"
+VERIFY: no regression — e.g. \"existing tests still pass\"
+PASS if all VERIFY items are satisfied.
+FAIL if any VERIFY item is not met or untestable as written."""
+return_key = "162"
+workflow_template = "spec_driven_dev"
+
+[orchestration]
+sequential = []
+concurrent = []
+
+[deprecation]

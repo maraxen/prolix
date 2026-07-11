@@ -1,0 +1,19 @@
+{
+  "backlog_id": "XR-BUDGET",
+  "praxia_id": 3274,
+  "overall_verdict": "near_ready",
+  "confidence": "high",
+  "round": 2,
+  "prior_blockers_cleared": [
+    "1A estimator policy locked (device_memory_budget + 4GiB CI fallback)",
+    "MemoryBudget API bridge via plan_axes_with_xtrax shim",
+    "Secondary demotion loop deleted",
+    "BudgetInfeasibleError fail-loud (hetero-only + joint)",
+    "Call-site scope: adapter + EnsembleMDPlanner + plan_with_xtrax"
+  ],
+  "residual": [
+    "lowered_memory_estimate AOT still optional follow-up",
+    "Fitting greedy .plan() remains until XR-FIT-FLIP"
+  ],
+  "summary": "near_ready — MemoryBudget path implemented; proceed to XR-SHADOW after DISPATCH"
+}

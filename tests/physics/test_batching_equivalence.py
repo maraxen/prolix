@@ -114,7 +114,9 @@ def test_batching_initialization_shape(simple_lj_system, key):
   assert state_batch.positions.shape == (batch_size, n_atoms, 3)
   assert state_batch.momentum.shape == (batch_size, n_atoms, 3)
   assert state_batch.force.shape == (batch_size, n_atoms, 3)
-  assert state_batch.rng.shape == (batch_size, 2)
+  assert state_batch.rng.shape[0] == batch_size
+  # Typed JAX keys are shape (B,); legacy uint32 keys were (B, 2).
+  assert state_batch.rng.shape in ((batch_size,), (batch_size, 2))
 
   # Check shared shapes
   assert state_batch.mass.shape == (n_atoms,)

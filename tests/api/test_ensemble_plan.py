@@ -104,6 +104,7 @@ def _make_minimal_bundle(n_atoms=3) -> MolecularBundle:
 
     return MolecularBundle(
         positions=positions,
+        masses=jnp.ones_like(charges),
         charges=charges,
         sigmas=sigmas,
         epsilons=epsilons,
@@ -256,7 +257,7 @@ class TestFromBundlesConstructor:
         assert len(ep.bundles) == 2
         assert ep.bundles[0] is b1
         assert ep.bundles[1] is b2
-        assert ep.batch_plan is None
+        assert ep.batch_plan is not None
 
     def test_from_bundles_with_planner_calls_plan(self) -> None:
         """from_bundles with planner should call planner.plan(bundles)."""
@@ -280,3 +281,19 @@ class TestFromBundlesConstructor:
         assert len(ep.bundles) == 1
         assert ep.bundles[0] is b
         assert ep.batch_plan is None
+
+
+class TestMultiBundleRun:
+    """Multi-bundle dispatch via xtrax-backed planner (#1842)."""
+
+    def test_multi_bundle_run_returns_trajectory_list(self) -> None:
+        b1, b2 = _make_minimal_bundle(), _make_minimal_bundle()
+        ep = EnsemblePlan.from_bundles([b1, b2])
+        assert ep.batch_plan is not None
+        result = ep.run(n_steps=3, dt=0.5, kT=0.596, seed=42)
+        assert isinstance(result, list)
+        assert len(result) == 2
+        for traj in result:
+            assert traj.n_steps == 3
+            assert traj.positions.shape[0] == 3
+            assert jnp.all(jnp.isfinite(traj.positions))

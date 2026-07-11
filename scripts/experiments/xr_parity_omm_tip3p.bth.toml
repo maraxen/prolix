@@ -1,0 +1,66 @@
+[experiment]
+mode = "confirmation"
+hypothesis = """
+After the xtrax 0.4 rewire (MemoryBudget, make_axis_dispatch N_MOLS, fitting
+plan_with_xtrax), prolix TIP3P energy/force/T still match OpenMM within locked
+T2 gates: |ΔE|≤0.1 kcal/mol, force RMSE<3.0 kcal/mol/Å on a 4-water grid, and
+|mean T−300|≤15 K for 64-water NVT (dt=0.5 fs, gamma=10 ps^-1). Residual fail
+falsifies the rewire and blocks XR-KILL-FORK.
+"""
+claim_discriminates = ["H_rewire_ok", "H_null_misspec"]
+claim_isolates = ["C_throughput_confound"]
+
+[outcomes.pass]
+condition = """
+gate_pass = 1
+AND ABS(delta_e_kcal) <= 0.1
+AND force_rmse_kcal_mol_A < 3.0
+AND ABS(mean_t_k - 300.0) <= 15.0
+AND t_finite = 1
+AND static_finite = 1
+"""
+decision = "Rewire OpenMM TIP3P parity confirmed. XR-KILL-FORK unblocked."
+reasoning = """
+Static ΔE/ΔF reuse the validated 4-water PME grid with sparse
+excl_indices (dense exclusion_mask alone is ignored by chunked Coulomb).
+T gate (±15 K) uses liquid-density ~3.1 Å packing + ~10 ps NVT
+(dt=0.5 fs, gamma=10); dilute 30 Å subsamples warm on short windows.
+Tighter long-trajectory T is Phase 5 NVT gate territory, not this leaf.
+"""
+is_residual = false
+
+[outcomes.fail]
+condition = "gate_pass = 0 OR ABS(delta_e_kcal) > 0.1 OR force_rmse_kcal_mol_A >= 3.0 OR ABS(mean_t_k - 300.0) > 15.0 OR t_finite = 0 OR static_finite = 0"
+decision = "Do NOT start XR-KILL-FORK. Investigate rewire regression vs OpenMM/PME/SETTLE."
+reasoning = "Residual catch-all: any T2 gate miss falsifies rewire-correctness for kill-date."
+is_residual = true
+
+[result_schema]
+campaign_slug = "str"
+probe = "str"
+seed = "int"
+n_waters_static = "int"
+n_waters_t = "int"
+delta_e_kcal = "float"
+force_rmse_kcal_mol_A = "float"
+mean_t_k = "float"
+std_t_k = "float"
+dt_fs = "float"
+gamma_ps = "float"
+n_steps = "int"
+burn = "int"
+gate_pass = "int"
+t_finite = "int"
+static_finite = "int"
+e_openmm_kcal = "float"
+e_prolix_kcal = "float"
+pme_alpha_per_angstrom = "float"
+pme_grid_points = "int"
+cutoff_angstrom = "float"
+openmm_platform = "str"
+
+[metadata]
+campaign_slug = "xr-parity-omm-water"
+backlog_item = "#3278"
+host_preference = "titanix"
+tags = ["xr-parity-omm-water", "confirmation", "tip3p"]

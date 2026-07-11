@@ -20,7 +20,7 @@ __all__ = [
     "export_langevin_step",
     "save_artifact",
     "load_artifact",
-    # New API (v1.1+) — EnsemblePlan.run() pending xtrax.tiling integration (#1842)
+    # New API (v1.1+) — EnsemblePlan multi-bundle via xtrax BatchPlanner (#1842)
     "EnsemblePlan",
 ]
 

@@ -1,9 +1,14 @@
 import jax
 import jax.numpy as jnp
 import pytest
+
 import equinox as eqx
 from prolix.physics.pure_utils import wrap_energy_fn_pure
 from prolix.typing import EnergyParams
+
+# XA-CI: heavy parity/compile — deselect from GitHub-faithful suite.
+pytestmark = pytest.mark.slow
+
 
 def test_energy_parity():
     # Simple harmonic potential: 0.5 * k * (x - x0)^2

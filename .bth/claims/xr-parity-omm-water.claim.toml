@@ -1,0 +1,39 @@
+[claim]
+headline = "xtrax 0.4 rewire preserves OpenMM TIP3P energy/force/T parity within T2 gates"
+kill_condition = "static ΔE/ΔF or NVT mean-T gate fails (sidecar residual) — rewire falsified; do not start XR-KILL-FORK"
+regime = "TIP3P water: 4-water static PME grid + 64-water NVT dt=0.5 fs gamma=10 ps^-1 on Titanix CUDA"
+
+[[hypotheses]]
+id = "H_rewire_ok"
+label = "rewire preserves OpenMM TIP3P ΔE/ΔF/T within T2 gates"
+predicted_signature = "gate_pass=1 with |ΔE|≤0.1, force_rmse<3.0, |mean_T−300|≤15"
+
+[[hypotheses]]
+id = "H_null_misspec"
+label = "rewire broke parity or measurement misspecified"
+predicted_signature = "gate_pass=0 or any T2 metric outside pass band"
+
+[[assumptions]]
+id = "A_openmm_reference"
+label = "OpenMM amber14/tip3p + HBonds/rigidWater is the energy/force reference"
+halt_if = "OpenMM unavailable or Reference platform cannot evaluate the fixture"
+status = "untested"
+
+[[confounds]]
+id = "C_throughput_confound"
+label = "throughput-only prolix_vs_openmm_speed scripts do not establish ΔE/ΔF/T"
+control = "dedicated xr_parity_omm_tip3p ΔE/ΔF/T driver"
+isolating_run = "xr_parity_omm_tip3p --probe all"
+status = "controlled"
+
+[[claim.discriminability]]
+hypothesis_a = "H_rewire_ok"
+hypothesis_b = "H_null_misspec"
+planned_run_label = "tip3p_static_and_t"
+predicted_outcome = "gate_pass_eq_1"
+
+[union_gate]
+[[union_gate.clauses]]
+id = "C_rewire_parity"
+description = "static ΔE/ΔF and NVT T jointly establish rewire-correctness vs OpenMM TIP3P"
+hypothesis_ids = ["H_rewire_ok", "H_null_misspec"]

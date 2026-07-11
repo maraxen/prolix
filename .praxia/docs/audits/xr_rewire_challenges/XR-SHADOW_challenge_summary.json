@@ -1,0 +1,19 @@
+{
+  "backlog_id": "XR-SHADOW",
+  "praxia_id": 3276,
+  "overall_verdict": "near_ready",
+  "confidence": "high",
+  "round": 2,
+  "prior_blockers_cleared": [
+    "Option 1: both sides via shared xtrax path in test only",
+    "SHADOW_AXES named (homogeneous N_ATOMS + N_MOLS)",
+    "Strategy-type asserts (Vmap/SafeMap) not ints alone",
+    "make_axis_dispatch agreement via n_mols_strategy",
+    "Production make_fitting_planner remains greedy until FIT-FLIP"
+  ],
+  "residual": [
+    "Production fitting still greedy until XR-FIT-FLIP",
+    "Fitting runtime iterator parity deferred"
+  ],
+  "summary": "near_ready — shadow fixture green; proceed to XR-FIT-FLIP"
+}

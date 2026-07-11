@@ -165,7 +165,7 @@ def test_cold_start_pattern_docstring_example() -> None:
             momentum=jnp.zeros_like(batch.positions),
             force=initial_forces,
             mass=batch.masses,
-            key=jax.random.key(0),
+            rng=jax.random.key(0),
             cap_count=jnp.int32(0),
             warn_counts=None,  # auto-initialized by __post_init__
         )
@@ -181,7 +181,7 @@ def test_cold_start_pattern_docstring_example() -> None:
         momentum=jnp.zeros_like(positions),
         force=initial_forces,
         mass=masses,
-        key=jax.random.key(0),
+        rng=jax.random.key(0),
         cap_count=jnp.int32(0),
         warn_counts=None,  # auto-initialized by __post_init__
     )

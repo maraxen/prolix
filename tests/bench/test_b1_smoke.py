@@ -107,6 +107,7 @@ def _make_bundle(n_atoms: int, seed: int = 0) -> MolecularBundle:
 
     return MolecularBundle(
         positions=positions,
+        masses=jnp.ones_like(charges),
         charges=charges,
         sigmas=sigmas,
         epsilons=epsilons,
@@ -181,19 +182,18 @@ class TestB1Smoke:
         v1.0 limitation: Sequential execution (no vmap batching). Each bundle
         runs independently through EnsemblePlan([bundle]).run().
 
-        v1.1 will: Accept full list [bundle0, bundle1, ...] and vmap over
-        varied sizes using BatchPlanner.
+        v1.1: Accept full list [bundle0, bundle1, ...] with xtrax-backed
+        BatchPlanner dispatch (#1842).
         """
         # Create hetero-batch: varied system sizes
         bundles = [_make_bundle(n) for n in (5, 10, 20, 35)]
 
-        # Run each bundle through EnsemblePlan independently (v1.0 constraint)
+        # Run hetero-batch through single EnsemblePlan (xtrax-backed planner)
         t0 = time.perf_counter()
-        trajectories = []
-        for bundle in bundles:
-            plan = EnsemblePlan([bundle])
-            traj = plan.run(n_steps=10, dt=0.5, kT=2.479e-3, seed=42)
-            trajectories.append(traj)
+        plan = EnsemblePlan.from_bundles(bundles)
+        trajectories = plan.run(n_steps=10, dt=0.5, kT=2.479e-3, seed=42)
+        assert isinstance(trajectories, list)
+        assert len(trajectories) == 4
         t_total = time.perf_counter() - t0
 
         # Verify outputs

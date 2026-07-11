@@ -18,6 +18,9 @@ from prolix.physics.step_system import make_sequence
 from prolix.simulate import AKMA_TIME_UNIT_FS, BOLTZMANN_KCAL
 from .test_explicit_langevin_tip3p_parity import _grid_water_positions, _proxide_params_pure_water
 
+# Long JAX compiles / multi-ps trajectories — deselect from GitHub-faithful CI.
+pytestmark = [pytest.mark.dynamics, pytest.mark.slow]
+
 
 def _dof_rigid_tip3p_waters(n_waters: int) -> float:
   """Degrees of freedom for rigid TIP3P water molecules (6N_w - 3)."""

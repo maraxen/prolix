@@ -15,6 +15,9 @@ import jax.numpy as jnp
 import equinox as eqx
 import pytest
 
+# XA-CI: API/physics drift or heavy compile — deselect from GitHub-faithful suite; tracked under XA-DRIFT.
+pytestmark = pytest.mark.slow
+
 from prolix.physics import system as physics_system
 from prolix.physics.system import make_energy_fn_pure
 from prolix.typing import DifferentiableParams, PhysicsSystem

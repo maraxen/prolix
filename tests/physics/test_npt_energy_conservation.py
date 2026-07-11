@@ -32,6 +32,9 @@ from .test_explicit_langevin_tip3p_parity import (
     _proxide_params_pure_water,
 )
 
+# Short NPT trajectories still too heavy for GitHub-faithful CI (XA-CI).
+pytestmark = [pytest.mark.slow, pytest.mark.dynamics]
+
 
 def _hamiltonian_npt(
     positions: jnp.ndarray,

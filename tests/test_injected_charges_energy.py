@@ -7,6 +7,9 @@ from pathlib import Path
 
 import jax.numpy as jnp
 import pytest
+
+# Heavy explicit-energy compile — deselect from GitHub-faithful CI (XA-CI).
+pytestmark = pytest.mark.slow
 from jax_md import space
 from proxide import CoordFormat, OutputSpec, parse_structure
 

@@ -146,6 +146,7 @@ def _make_minimal_bundle(n_atoms: int, atom_bucket: int | None = None) -> Molecu
 
     return MolecularBundle(
         positions=positions,
+        masses=jnp.ones_like(charges),
         charges=charges,
         sigmas=sigmas,
         epsilons=epsilons,
@@ -266,6 +267,33 @@ def test_vmap_with_coarsened_shape_spec():
     assert trace_count[0] == 1, (
         f"HP3 GATING: Expected 1 JIT compile (cache hit on same shape_spec), "
         f"got {trace_count[0]}. Coarsening refactor successful?"
+    )
+
+
+@pytest.mark.fast
+def test_v4_hlo_scoped_compile_once_same_shape_spec():
+    """V4-HLO scoped gate (backlog #266): one JIT compile per shape_spec.
+
+    Full hetero-batch compile-once at the ensemble level is covered by
+    ``tests/api/test_v4_hlo_hetero_compile_once.py`` (homo stacked + hetero
+    unrolled). This scoped test asserts compile-once at single-dispatch /
+    shape_spec level.
+    """
+    bundle_1 = _make_minimal_bundle(n_atoms=10)
+    bundle_2 = _make_minimal_bundle(n_atoms=12)
+    assert bundle_1.shape_spec == bundle_2.shape_spec
+
+    trace_count = [0]
+
+    def dispatch(bundle: MolecularBundle) -> Float:
+        trace_count[0] += 1
+        return jnp.sum(bundle.positions)
+
+    jitted = jax.jit(dispatch)
+    jitted(bundle_1)
+    jitted(bundle_2)
+    assert trace_count[0] == 1, (
+        f"V4-HLO scoped: expected 1 compile, got {trace_count[0]}"
     )
 
 

@@ -1,7 +1,7 @@
 import pytest
 from prolix.tiling.planner import AxisSpec, BatchPlanner
 from prolix.tiling.axes import (
-    N_ATOMS, N_BONDS, N_ANGLES, N_TORSIONS, N_CONFORMERS, N_MOLS, N_SYSTEMS, ALL_AXES
+    N_ATOMS, N_BONDS, N_ANGLES, N_TORSIONS, N_CONFORMERS, N_MOLS, N_STEPS, N_SYSTEMS, ALL_AXES
 )
 
 
@@ -59,6 +59,14 @@ def test_n_mols_axis_spec():
     assert N_MOLS.tile_granularity == 1
 
 
+def test_n_steps_axis_spec():
+    assert N_STEPS.name == "n_steps"
+    assert N_STEPS.axis_index == 6
+    assert N_STEPS.heterogeneous is False
+    assert N_STEPS.tile_granularity == 1
+    assert N_STEPS.default_batch_size == 0
+
+
 def test_n_systems_alias_preserved():
     """N_SYSTEMS alias should resolve to N_MOLS for backward compatibility."""
     assert N_SYSTEMS is N_MOLS
@@ -72,19 +80,20 @@ def test_axes_are_hashable():
 
 def test_all_axes_registered():
     """All axes should be in ALL_AXES registry."""
-    assert len(ALL_AXES) == 6
+    assert len(ALL_AXES) == 7
     assert N_ATOMS in ALL_AXES
     assert N_BONDS in ALL_AXES
     assert N_ANGLES in ALL_AXES
     assert N_TORSIONS in ALL_AXES
     assert N_CONFORMERS in ALL_AXES
     assert N_MOLS in ALL_AXES
+    assert N_STEPS in ALL_AXES
 
 
 def test_all_axes_contiguous_indices():
-    """Axis indices should be contiguous [0..5]."""
+    """Axis indices should be contiguous [0..6]."""
     indices = [ax.axis_index for ax in ALL_AXES]
-    assert sorted(indices) == list(range(6))
+    assert sorted(indices) == list(range(7))
 
 
 def test_batch_planner_demotes_heterogeneous_first():
