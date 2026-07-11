@@ -1,44 +1,40 @@
-# Next steps — after TRIAGE (B1-full locked)
+# Next steps — after B1-LAND (PR open)
 
-**date:** 2026-07-10  
-**task_id:** `260710_epic-audit_xtrax-rewire`  
+**date:** 2026-07-11  
 **branch:** `audit/xtrax-rewire-xa`  
-**closeout memo:** `.praxia/docs/research/260710_xtrax-rewire-epic-closeout-audit.md`  
-**triage:** `.praxia/docs/audits/260710_xtrax-rewire_triage.md`  
-**invariants:** `.praxia/loop_priorities.toml`  
-**next epic:** `260528_b1-full`
+**PR:** https://github.com/maraxen/prolix/pull/2  
+**next epic:** `260528_b1-full`  
+**invariants:** `.praxia/loop_priorities.toml`
 
 ## Where we are
 
 | Leaf | Status | Gate |
 |------|--------|------|
-| XA-* audit leaves | **completed** | VERIFY PASS |
-| XA-REHOME | **completed** | 591 passed |
+| XA-* audit | **completed** | VERIFY PASS |
+| TRIAGE | **completed** | next = B1-full |
+| **B1-LAND** | **completed** | push + PR #2 (merge still human) |
+| B1-SMOKE | **ready** | B=4 mixed EnsemblePlan |
+| B1-FULL | **ready** | B=64 `bth run` |
 | XA-NL-DEBT | **ready** | not on B1 critical path |
-| **TRIAGE** | **completed** | next = B1-full |
-| B1-LAND | **ready** | P0 push/PR (human) |
-| B1-SMOKE / B1-FULL | **ready** | prereg cadence |
 
 ```mermaid
 flowchart LR
-  triageDone[TRIAGE done]
-  land[B1-LAND]
+  landDone[B1-LAND PR open]
   smoke[B1-SMOKE]
   full[B1-FULL]
-  paper[Paper later]
-  triageDone --> land
-  land --> smoke
+  merge[Human merge PR]
+  landDone --> smoke
+  landDone --> merge
   smoke --> full
-  full --> paper
 ```
 
 ## Immediate
 
-1. **B1-LAND** — push/PR `audit/xtrax-rewire-xa` when human requests (no autonomous push/merge to main).
+1. **Human:** review + merge PR #2 when CI is green (agent will not merge).
 2. **B1-SMOKE** — B=4 mixed EnsemblePlan regression (prereg).
-3. **B1-FULL** — B=64 Claim-1 campaign via `bth run` (prereg); do not use pytest for cluster runs.
-4. Paper / HP4 remain deferred until B1-full numbers exist and branch is landed.
+3. **B1-FULL** — B=64 Claim-1 campaign via `bth run`.
 
-## Frozen invariants (pinned)
+## Callouts
 
-See `.praxia/loop_priorities.toml`: `default_ci`, no autonomous push/merge, EnsemblePlan dt=fs / gamma=ps⁻¹, vacuum γ policy, `exception_*` on bundle energy path.
+- Cite OMM-WATER via `gate_pass` / JSON, not bathos `outcome`.
+- Honor VACUUM-DT + `exception_*` invariants.
