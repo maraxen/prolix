@@ -111,6 +111,7 @@ uv run --python "${UV_PYTHON}" bth run python scripts/benchmarks/b1_init_exec.py
     --seed "${SEED}" \
     --replicas "${REPLICAS}" \
     --ps "${PS}" \
+    --out-json "${OUT}" \
     ${SMOKE_FLAG}
 
 EXIT=$?
