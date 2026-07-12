@@ -9,25 +9,25 @@
 #SBATCH --mem=64G
 #SBATCH --output=outputs/logs/slurm/%A_%a.b1_init_exec.out
 #SBATCH --error=outputs/logs/slurm/%A_%a.b1_init_exec.err
-# gres tag only (no --nodelist). Override e.g. --gres=gpu:a100:1 if needed.
-# Secondary (pi_so3): sbatch -p pi_so3 --gres=gpu:1 --time=8:00:00 ...
+# Default gres=l40s. Override at submit time (no nodelist):
+#   sbatch --gres=gpu:h200:1 --export=ALL,CAMPAIGN_ID,FOOTPRINT=h200 ...
+#   sbatch -p mit_preemptable --gres=gpu:a100:1 --export=ALL,CAMPAIGN_ID,FOOTPRINT=a100 ...
 
 # B1-full Claim-1 init-bound campaign (prereg 260528).
+#
+# FOOTPRINT tiers (see b1_init_exec.py FOOTPRINTS):
+#   l40s   — first test: B=8 (2×4 classes), 1 ps, chunk=50   [default]
+#   a100   — B=32, 10 ps, chunk=100
+#   h200   — B=64, 100 ps, chunk=200
+#   prereg — same pins as h200 (full protocol, still chunked)
 #
 # Array tasks map to (backend, seed):
 #   0..2  → prolix  seeds 0,1,2
 #   3..5  → openmm  seeds 0,1,2
 #
-# Submission (from repo root after campaign create):
-#   export CAMPAIGN_ID=<id from bth campaign create>
-#   mkdir -p outputs/logs/slurm outputs/bench
-#   sbatch --array=0-2%3 --export=ALL,CAMPAIGN_ID \
-#       scripts/slurm/b1_init_exec.slurm          # prolix wave
-#   sbatch --array=3-5%3 --export=ALL,CAMPAIGN_ID \
-#       scripts/slurm/b1_init_exec.slurm          # openmm wave (if CUDA OpenMM ok)
-#
-# Single-cell override:
-#   sbatch --export=ALL,CAMPAIGN_ID,BACKEND=prolix,SEED=0 \
+# Submission (from repo root):
+#   export CAMPAIGN_ID=2115b4dd
+#   sbatch --array=0-2%3 --export=ALL,CAMPAIGN_ID,FOOTPRINT=l40s \
 #       scripts/slurm/b1_init_exec.slurm
 
 set -euo pipefail
@@ -43,8 +43,6 @@ PROLIX_ROOT="$(pwd -P)"
 cd "${PROLIX_ROOT}"
 export PROLIX_ROOT
 
-# Engaging UV workspace lives at ~/projects (parent of prolix). Pin 3.13 to match
-# prolix requires-python ==3.13.* (parent .python-version must not force 3.12).
 WORKSPACE_ROOT="${ENGAGING_WORKSPACE_ROOT:-$(dirname "${PROLIX_ROOT}")}"
 export UV_PROJECT="${WORKSPACE_ROOT}"
 export UV_PYTHON="${UV_PYTHON:-3.13}"
@@ -64,8 +62,7 @@ fi
 BACKEND="${BACKEND:-prolix}"
 SEED="${SEED:-0}"
 CAMPAIGN_ID="${CAMPAIGN_ID:-}"
-REPLICAS="${REPLICAS:-16}"
-PS="${PS:-100}"
+FOOTPRINT="${FOOTPRINT:-l40s}"
 SMOKE_FLAG=""
 if [[ "${SMOKE:-0}" == "1" ]]; then
     SMOKE_FLAG="--smoke"
@@ -73,10 +70,8 @@ fi
 
 # shellcheck source=/dev/null
 source "scripts/slurm/_bth_env.sh"
-# _common_env cds via SLURM_SUBMIT_DIR; re-assert prolix cwd for the bench
 cd "${PROLIX_ROOT}"
 
-# Prereg XLA pins (GPU). Opt-in flag for triton softmax (may be unknown on some jaxlibs).
 export XLA_PYTHON_CLIENT_PREALLOCATE=false
 export B1_XLA_TRITON_FLAG="${B1_XLA_TRITON_FLAG:-0}"
 
@@ -89,13 +84,13 @@ echo "uv python: $(uv run --python "${UV_PYTHON}" python -c 'import sys; print(s
 echo "Array job: ${SLURM_ARRAY_JOB_ID:-N/A}  task: ${SLURM_ARRAY_TASK_ID:-N/A}"
 echo "Job: ${SLURM_JOB_ID:-local}"
 echo "GPU: $(nvidia-smi --query-gpu=name,memory.total --format=csv,noheader 2>&1 | head -1)"
-echo "Backend: ${BACKEND}  Seed: ${SEED}  Replicas: ${REPLICAS}  PS: ${PS}"
+echo "Backend: ${BACKEND}  Seed: ${SEED}  Footprint: ${FOOTPRINT}"
 echo "Campaign: ${CAMPAIGN_ID:-<none>}"
 echo "Date: $(date -Is)"
 
 mkdir -p outputs/bench outputs/logs/slurm
 
-OUT="outputs/bench/b1_full_${BACKEND}_seed${SEED}_job${SLURM_JOB_ID:-local}.json"
+OUT="outputs/bench/b1_full_${FOOTPRINT}_${BACKEND}_seed${SEED}_job${SLURM_JOB_ID:-local}.json"
 
 CAMPAIGN_FLAG=""
 [[ -n "${CAMPAIGN_ID}" ]] && CAMPAIGN_FLAG="--campaign ${CAMPAIGN_ID}"
@@ -103,14 +98,14 @@ CAMPAIGN_FLAG=""
 # shellcheck disable=SC2086
 uv run --python "${UV_PYTHON}" bth run python scripts/benchmarks/b1_init_exec.py \
     --tag cluster --tag b1-full --tag "backend:${BACKEND}" --tag "seed:${SEED}" \
+    --tag "footprint:${FOOTPRINT}" \
     ${SLURM_ARRAY_TASK_ID:+--tag "array_task:${SLURM_ARRAY_TASK_ID}"} \
     ${CAMPAIGN_FLAG} \
     --out "${OUT}" \
     -- \
     --backend "${BACKEND}" \
     --seed "${SEED}" \
-    --replicas "${REPLICAS}" \
-    --ps "${PS}" \
+    --footprint "${FOOTPRINT}" \
     --out-json "${OUT}" \
     ${SMOKE_FLAG}
 

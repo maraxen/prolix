@@ -24,10 +24,13 @@ is_residual = true
 
 [result_schema]
 backend = "str"
+footprint = "str"
 smoke = "bool"
 seed = "int"
 n_systems = "int"
 n_steps = "int"
+chunk = "int"
+replicas = "int"
 dt_fs = "float"
 gamma_ps = "float"
 t_total = "float"

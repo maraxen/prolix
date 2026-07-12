@@ -45,6 +45,17 @@ PROTEIN_CLASSES = (
     ("2gb1", "2GB1.pdb"),
 )
 
+# GPU footprint tiers: shrink B / trajectory for smaller cards; always chunk the
+# step scan so we never allocate a full (n_steps, N, 3) Trajectory buffer
+# (that alone OOMs L40S at prereg length for 1AKE).
+# l40s = first-test measure (not Claim-1 headline). prereg = full protocol pins.
+FOOTPRINTS: dict[str, dict[str, float | int]] = {
+    "l40s": {"replicas": 2, "ps": 1.0, "chunk": 50},  # B=8, 2k steps
+    "a100": {"replicas": 8, "ps": 10.0, "chunk": 100},  # B=32, 20k steps
+    "h200": {"replicas": 16, "ps": 100.0, "chunk": 200},  # B=64, 200k (chunked)
+    "prereg": {"replicas": 16, "ps": 100.0, "chunk": 200},
+}
+
 
 def _configure_cold_start_env() -> str:
     """Prereg cold-start: unique compile cache + optional XLA client flags.
@@ -341,7 +352,55 @@ def _block_trajs(trajectories) -> None:
         jax.block_until_ready(traj.positions)
 
 
-def run_prolix(*, n_steps: int, seed: int, replicas: int, smoke: bool) -> dict:
+def _last_positions_finite(trajectories) -> bool:
+    import jax
+
+    if not isinstance(trajectories, list):
+        trajectories = [trajectories]
+    ok = True
+    for traj in trajectories:
+        # Only the final frame — never keep the full stack resident for checks
+        pos = traj.positions[-1]
+        jax.block_until_ready(pos)
+        ok = ok and bool(jax.numpy.all(jax.numpy.isfinite(pos)))
+    return ok
+
+
+def _run_plan_chunked(plan, *, n_steps: int, chunk: int, seed: int) -> object:
+    """Run ``n_steps`` as fixed-size chunks; discard each traj after sync.
+
+    Peak device memory scales with ``chunk``, not ``n_steps``. Seed advances
+    per chunk so noise is not identical across chunks.
+    """
+    if n_steps < 1:
+        raise ValueError(f"n_steps must be >= 1, got {n_steps}")
+    chunk = max(1, int(chunk))
+    remaining = int(n_steps)
+    seed_i = int(seed)
+    last = None
+    while remaining > 0:
+        this = min(chunk, remaining)
+        last = plan.run(
+            n_steps=this, dt=DT_FS, kT=KT_KCAL, seed=seed_i, gamma=GAMMA_PS
+        )
+        _block_trajs(last)
+        # Drop references so the full (this, N, 3) buffer can be freed
+        remaining -= this
+        seed_i += 1
+        if remaining > 0:
+            last = None
+    return last
+
+
+def run_prolix(
+    *,
+    n_steps: int,
+    seed: int,
+    replicas: int,
+    smoke: bool,
+    chunk: int = 50,
+    footprint: str = "l40s",
+) -> dict:
     import jax
 
     from prolix.api import EnsemblePlan
@@ -354,6 +413,7 @@ def run_prolix(*, n_steps: int, seed: int, replicas: int, smoke: bool) -> dict:
         bundles = _synthetic_smoke_bundles()
         segs["t_ff_load"] = 0.0
         segs["t_bundle_construct"] = time.perf_counter() - t_b0
+        chunk = min(chunk, max(n_steps, 1))
     else:
         bundles, t_ff, t_bundle = _build_prolix_full_bundles(replicas)
         segs["t_ff_load"] = t_ff
@@ -361,44 +421,49 @@ def run_prolix(*, n_steps: int, seed: int, replicas: int, smoke: bool) -> dict:
 
     plan = EnsemblePlan.from_bundles(bundles)
 
-    # Cold run (includes AOT) — first step timing via 1-step then remaining
+    # Cold first step (AOT proxy) — length-1 scan, distinct compile from chunks
     t_aot0 = time.perf_counter()
     first = plan.run(n_steps=1, dt=DT_FS, kT=KT_KCAL, seed=seed, gamma=GAMMA_PS)
     _block_trajs(first)
     t_first = time.perf_counter() - t_aot0
     segs["t_first_step"] = t_first
-    # Approximate AOT as cold first-step cost (compile-dominated on fresh cache)
     segs["t_aot_compile"] = t_first
+    del first
 
+    # Steady-state: remaining steps in fixed chunks (no full-trajectory stack)
     t_ss0 = time.perf_counter()
+    last = None
     if n_steps > 1:
-        rest = plan.run(
-            n_steps=n_steps - 1, dt=DT_FS, kT=KT_KCAL, seed=seed + 1, gamma=GAMMA_PS
+        last = _run_plan_chunked(
+            plan, n_steps=n_steps - 1, chunk=chunk, seed=seed + 1
         )
-        _block_trajs(rest)
     segs["t_steady_state"] = time.perf_counter() - t_ss0
 
-    # Warm re-run of 1 step for aot_ratio guard (prereg / B1-smoke proxy)
+    # Warm 1-step for aot_ratio (prereg / B1-smoke proxy)
     t_w0 = time.perf_counter()
-    warm = plan.run(n_steps=1, dt=DT_FS, kT=KT_KCAL, seed=seed + 2, gamma=GAMMA_PS)
-    _block_trajs(warm)
+    warm1 = plan.run(n_steps=1, dt=DT_FS, kT=KT_KCAL, seed=seed + 10_000, gamma=GAMMA_PS)
+    _block_trajs(warm1)
     t_warm = time.perf_counter() - t_w0
+    del warm1
     t_cold_proxy = max(t_first, 1e-12)
     segs["aot_ratio"] = max(0.0, (t_cold_proxy - t_warm) / t_cold_proxy)
 
     t_total = time.perf_counter() - t_total0
-    # Sanity: last positions finite
-    last = rest if n_steps > 1 else first
-    if not isinstance(last, list):
-        last = [last]
-    finite = all(bool(jax.numpy.all(jax.numpy.isfinite(t.positions))) for t in last)
+    if last is not None:
+        finite = _last_positions_finite(last)
+        del last
+    else:
+        finite = True
 
     return {
         "backend": "prolix",
         "smoke": bool(smoke),
+        "footprint": footprint,
         "seed": int(seed),
         "n_systems": len(bundles),
         "n_steps": int(n_steps),
+        "chunk": int(chunk),
+        "replicas": int(replicas),
         "dt_fs": DT_FS,
         "gamma_ps": GAMMA_PS,
         "t_total": float(t_total),
@@ -410,19 +475,18 @@ def run_prolix(*, n_steps: int, seed: int, replicas: int, smoke: bool) -> dict:
     }
 
 
-def _openmm_pdb_paths(smoke: bool) -> list[Path]:
+def _openmm_pdb_paths(smoke: bool, replicas: int) -> list[Path]:
     if smoke:
-        # One of each class that OpenMM can load without heavy prep
         return [
             PDB_DIR / "2GB1.pdb",
             PDB_DIR / "1UBQ.pdb",
             PDB_DIR / "4water.pdb",
             PDB_DIR / "4water.pdb",
         ]
-    paths = []
+    paths: list[Path] = []
     for _name, fname in PROTEIN_CLASSES:
-        paths.extend([PDB_DIR / fname] * 16)
-    paths.extend([PDB_DIR / "4water.pdb"] * 16)
+        paths.extend([PDB_DIR / fname] * replicas)
+    paths.extend([PDB_DIR / "4water.pdb"] * replicas)
     return paths
 
 
@@ -453,7 +517,14 @@ def _openmm_prepare_topology(path: Path, ff_protein, app, unit):
             pass
 
 
-def run_openmm(*, n_steps: int, seed: int, replicas: int, smoke: bool) -> dict:
+def run_openmm(
+    *,
+    n_steps: int,
+    seed: int,
+    replicas: int,
+    smoke: bool,
+    footprint: str = "l40s",
+) -> dict:
     """N independent OpenMM Contexts — no reuse (prereg baseline)."""
     try:
         import openmm as mm
@@ -469,12 +540,7 @@ def run_openmm(*, n_steps: int, seed: int, replicas: int, smoke: bool) -> dict:
     ff_water = app.ForceField("amber14/tip3pfb.xml")
     segs["t_ff_load"] = time.perf_counter() - t_ff0
 
-    paths = _openmm_pdb_paths(smoke)
-    if not smoke and replicas != 16:
-        paths = []
-        for _name, fname in PROTEIN_CLASSES:
-            paths.extend([PDB_DIR / fname] * replicas)
-        paths.extend([PDB_DIR / "4water.pdb"] * replicas)
+    paths = _openmm_pdb_paths(smoke, replicas)
 
     platform = None
     for name in ("CUDA", "OpenCL", "CPU"):
@@ -533,9 +599,12 @@ def run_openmm(*, n_steps: int, seed: int, replicas: int, smoke: bool) -> dict:
     return {
         "backend": "openmm",
         "smoke": bool(smoke),
+        "footprint": footprint,
         "seed": int(seed),
         "n_systems": len(contexts),
         "n_steps": int(n_steps),
+        "chunk": 0,
+        "replicas": int(replicas),
         "dt_fs": DT_FS,
         "gamma_ps": GAMMA_PS,
         "t_total": float(t_total),
@@ -551,10 +620,13 @@ def _append_csv(row: dict) -> None:
     CSV_PATH.parent.mkdir(parents=True, exist_ok=True)
     fieldnames = [
         "backend",
+        "footprint",
         "smoke",
         "seed",
         "n_systems",
         "n_steps",
+        "chunk",
+        "replicas",
         "t_total",
         "t_ff_load",
         "t_bundle_construct",
@@ -579,9 +651,22 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="B1-full Claim-1 init-bound benchmark")
     parser.add_argument("--backend", choices=("prolix", "openmm"), default="prolix")
     parser.add_argument("--seed", type=int, default=0)
-    parser.add_argument("--replicas", type=int, default=16, help="Replicas per class (full=16)")
+    parser.add_argument(
+        "--footprint",
+        choices=tuple(FOOTPRINTS.keys()),
+        default="l40s",
+        help="GPU tier preset (l40s=first test; prereg=full pins). Overrides "
+        "default replicas/ps/chunk unless flags are set explicitly.",
+    )
+    parser.add_argument("--replicas", type=int, default=None, help="Replicas per class")
     parser.add_argument("--n-steps", type=int, default=None)
     parser.add_argument("--ps", type=float, default=None, help="Trajectory length in ps")
+    parser.add_argument(
+        "--chunk",
+        type=int,
+        default=None,
+        help="Steps per EnsemblePlan scan chunk (peak VRAM ~ chunk, not n_steps)",
+    )
     parser.add_argument(
         "--smoke",
         action="store_true",
@@ -600,22 +685,40 @@ def main() -> int:
         if env_path:
             args.out_json = Path(env_path)
 
+    preset = FOOTPRINTS[args.footprint]
     if args.smoke:
         n_steps = args.n_steps if args.n_steps is not None else 10
         replicas = 1
+        chunk = args.chunk if args.chunk is not None else 10
+        footprint = "smoke"
     else:
+        replicas = int(args.replicas if args.replicas is not None else preset["replicas"])
+        chunk = int(args.chunk if args.chunk is not None else preset["chunk"])
         if args.n_steps is not None:
             n_steps = args.n_steps
         elif args.ps is not None:
             n_steps = int(round(args.ps * STEPS_PER_PS))
         else:
-            n_steps = int(round(PS_FULL * STEPS_PER_PS))
-        replicas = args.replicas
+            n_steps = int(round(float(preset["ps"]) * STEPS_PER_PS))
+        footprint = args.footprint
 
     if args.backend == "prolix":
-        row = run_prolix(n_steps=n_steps, seed=args.seed, replicas=replicas, smoke=args.smoke)
+        row = run_prolix(
+            n_steps=n_steps,
+            seed=args.seed,
+            replicas=replicas,
+            smoke=args.smoke,
+            chunk=chunk,
+            footprint=footprint,
+        )
     else:
-        row = run_openmm(n_steps=n_steps, seed=args.seed, replicas=replicas, smoke=args.smoke)
+        row = run_openmm(
+            n_steps=n_steps,
+            seed=args.seed,
+            replicas=replicas,
+            smoke=args.smoke,
+            footprint=footprint,
+        )
 
     row["jax_cache_dir"] = row.get("jax_cache_dir") or cache
     _append_csv(row)

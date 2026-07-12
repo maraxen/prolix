@@ -30,21 +30,19 @@ flowchart LR
 
 **Campaign id:** `2115b4dd`
 
-**Prolix wave:** `mit_normal_gpu` + `--gres=gpu:l40s:1` (no nodelist).  
-UV: `UV_PROJECT=$HOME/projects`, `UV_PYTHON=3.13`, `uv run --python 3.13` from prolix cwd (workspace `.python-version` pinned 3.13).
+**Prolix wave (first test):** `FOOTPRINT=l40s` — B=8, 1 ps, chunked scan (peak VRAM ~ chunk).  
+Not the Claim-1 headline; `prereg`/`h200` tiers are later. Spec: `.praxia/docs/specs/260712_b1-full-shrink-gpu-footprint-profiles-fi.md`
 
 ```bash
-# From engaging:~/projects/prolix after sync
 export CAMPAIGN_ID=2115b4dd
-# Optional env smoke (10 steps):
-sbatch --array=0 --export=ALL,CAMPAIGN_ID,SMOKE=1 scripts/slurm/b1_init_exec.slurm
-# Prolix seeds 0..2
-sbatch --array=0-2%3 --export=ALL,CAMPAIGN_ID scripts/slurm/b1_init_exec.slurm
-# OpenMM wave (second wave; same campaign tags)
-sbatch --array=3-5%3 --export=ALL,CAMPAIGN_ID scripts/slurm/b1_init_exec.slurm
-# Optional A100 override (gres tag only):
-sbatch --gres=gpu:a100:1 --array=0-2%3 --export=ALL,CAMPAIGN_ID \
+# First L40S measure (default FOOTPRINT=l40s)
+sbatch --array=0-2%3 --export=ALL,CAMPAIGN_ID,FOOTPRINT=l40s \
   scripts/slurm/b1_init_exec.slurm
+# Later tiers (gres tag only):
+sbatch --gres=gpu:h200:1 --array=0-2%3 --export=ALL,CAMPAIGN_ID,FOOTPRINT=h200 \
+  scripts/slurm/b1_init_exec.slurm
+sbatch -p mit_preemptable --gres=gpu:a100:1 --array=0-2%3 \
+  --export=ALL,CAMPAIGN_ID,FOOTPRINT=a100 scripts/slurm/b1_init_exec.slurm
 ```
 
 **Local dry-run (green):**
