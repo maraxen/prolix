@@ -30,19 +30,16 @@ flowchart LR
 
 **Campaign id:** `2115b4dd`
 
-**Prolix wave (first test):** `FOOTPRINT=l40s` — B=8, 1 ps, chunked scan (peak VRAM ~ chunk).  
-Not the Claim-1 headline; `prereg`/`h200` tiers are later. Spec: `.praxia/docs/specs/260712_b1-full-shrink-gpu-footprint-profiles-fi.md`
+**Prereg settings (from OOM post-mortem):** host RSS ≈67 GiB killed jobs at `--mem=64G`; GPU VRAM ≈54 GiB on RTX PRO 6000. Use **`--mem=256G`**, **`--array=%1`**, gres **`h200`** or **`rtx_pro_6000`** (not A100-40 / L40S for full B=64).
 
 ```bash
 export CAMPAIGN_ID=2115b4dd
-# First L40S measure (default FOOTPRINT=l40s)
-sbatch --array=0-2%3 --export=ALL,CAMPAIGN_ID,FOOTPRINT=l40s \
+# Claim-1 prereg on mit_preemptable (recommended)
+sbatch --array=0-2%1 --export=ALL,CAMPAIGN_ID,FOOTPRINT=prereg \
   scripts/slurm/b1_init_exec.slurm
-# Later tiers (gres tag only):
-sbatch --gres=gpu:h200:1 --array=0-2%3 --export=ALL,CAMPAIGN_ID,FOOTPRINT=h200 \
-  scripts/slurm/b1_init_exec.slurm
-sbatch -p mit_preemptable --gres=gpu:a100:1 --array=0-2%3 \
-  --export=ALL,CAMPAIGN_ID,FOOTPRINT=a100 scripts/slurm/b1_init_exec.slurm
+# Alt Blackwell-class:
+sbatch --gres=gpu:rtx_pro_6000:1 --array=0-2%1 \
+  --export=ALL,CAMPAIGN_ID,FOOTPRINT=prereg scripts/slurm/b1_init_exec.slurm
 ```
 
 **Local dry-run (green):**

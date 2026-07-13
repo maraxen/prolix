@@ -1,40 +1,46 @@
 #!/bin/bash
 #SBATCH --job-name=prolix_b1_init_exec
-#SBATCH --partition=mit_normal_gpu
-#SBATCH --gres=gpu:l40s:1
-#SBATCH --time=6:00:00
+#SBATCH --partition=mit_preemptable
+#SBATCH --gres=gpu:h200:1
+#SBATCH --time=12:00:00
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=8
-#SBATCH --mem=64G
+#SBATCH --mem=256G
 #SBATCH --output=outputs/logs/slurm/%A_%a.b1_init_exec.out
 #SBATCH --error=outputs/logs/slurm/%A_%a.b1_init_exec.err
-# Default gres=l40s. Override at submit time (no nodelist):
-#   sbatch --gres=gpu:h200:1 --export=ALL,CAMPAIGN_ID,FOOTPRINT=h200 ...
-#   sbatch -p mit_preemptable --gres=gpu:a100:1 --export=ALL,CAMPAIGN_ID,FOOTPRINT=a100 ...
-
-# B1-full Claim-1 init-bound campaign (prereg 260528).
 #
-# FOOTPRINT tiers (see b1_init_exec.py FOOTPRINTS):
-#   l40s   — first test: B=8 (2×4 classes), 1 ps, chunk=50   [default]
+# Host RAM (not GPU) killed prereg on pi_so3: ~67 GiB RSS vs --mem=64G.
+# Defaults: mit_preemptable + h200 + 256G + submit with --array=%1.
+#
+# GRES overrides (tag only, no --nodelist):
+#   --gres=gpu:h200:1              # best VRAM; often ≥1–2 TiB host (default)
+#   --gres=gpu:rtx_pro_6000:1      # same class as pi_so3 4007/4008 (~96 GiB)
+#   --gres=gpu:h100:1              # 80 GiB class; OK if host mem ≥256G
+#   --gres=gpu:l40s:1              # first-test FOOTPRINT=l40s only (48 GiB VRAM)
+#   A100 40GB is too small for prereg VRAM (~54 GiB seen on Blackwell)
+#
+# Footprint tiers (b1_init_exec.py FOOTPRINTS):
+#   l40s   — B=8, 1 ps, chunk=50     (first measure; not Claim-1 headline)
 #   a100   — B=32, 10 ps, chunk=100
 #   h200   — B=64, 100 ps, chunk=200
-#   prereg — same pins as h200 (full protocol, still chunked)
+#   prereg — same as h200 (full protocol, still chunked)
 #
-# Array tasks map to (backend, seed):
-#   0..2  → prolix  seeds 0,1,2
-#   3..5  → openmm  seeds 0,1,2
+# Array: 0..2 prolix seeds; 3..5 openmm. Use %1 so two seeds never share a node.
 #
-# Submission (from repo root):
+# Submission:
 #   export CAMPAIGN_ID=2115b4dd
-#   # First L40S tier:
-#   sbatch --array=0-2%3 --export=ALL,CAMPAIGN_ID,FOOTPRINT=l40s \
+#   # Claim-1 prereg (recommended):
+#   sbatch --array=0-2%1 --export=ALL,CAMPAIGN_ID,FOOTPRINT=prereg \
 #       scripts/slurm/b1_init_exec.slurm
-#   # Claim-1 prereg on pi_so3 Blackwell (node4007/4008):
-#   sbatch -p pi_so3 --nodelist=node4007,node4008 --gres=gpu:1 \
-#       --time=24:00:00 --mem=64G --array=0-2%2 \
-#       --export=ALL,CAMPAIGN_ID,FOOTPRINT=prereg \
+#   # Same on Blackwell-class preemptable:
+#   sbatch --gres=gpu:rtx_pro_6000:1 --array=0-2%1 \
+#       --export=ALL,CAMPAIGN_ID,FOOTPRINT=prereg scripts/slurm/b1_init_exec.slurm
+#   # L40S first-test tier:
+#   sbatch -p mit_normal_gpu --gres=gpu:l40s:1 --mem=64G --time=2:00:00 \
+#       --array=0-2%3 --export=ALL,CAMPAIGN_ID,FOOTPRINT=l40s \
 #       scripts/slurm/b1_init_exec.slurm
+#   # pi_so3 pin (only if asked): -p pi_so3 --nodelist=node4007,node4008 --gres=gpu:1 --mem=256G --array=%1
 
 set -euo pipefail
 
