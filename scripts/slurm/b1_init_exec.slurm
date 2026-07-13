@@ -27,7 +27,13 @@
 #
 # Submission (from repo root):
 #   export CAMPAIGN_ID=2115b4dd
+#   # First L40S tier:
 #   sbatch --array=0-2%3 --export=ALL,CAMPAIGN_ID,FOOTPRINT=l40s \
+#       scripts/slurm/b1_init_exec.slurm
+#   # Claim-1 prereg on pi_so3 Blackwell (node4007/4008):
+#   sbatch -p pi_so3 --nodelist=node4007,node4008 --gres=gpu:1 \
+#       --time=24:00:00 --mem=64G --array=0-2%2 \
+#       --export=ALL,CAMPAIGN_ID,FOOTPRINT=prereg \
 #       scripts/slurm/b1_init_exec.slurm
 
 set -euo pipefail
@@ -74,6 +80,13 @@ cd "${PROLIX_ROOT}"
 
 export XLA_PYTHON_CLIENT_PREALLOCATE=false
 export B1_XLA_TRITON_FLAG="${B1_XLA_TRITON_FLAG:-0}"
+
+# Blackwell (node4007/4008, SM120) — same pin as fit_bonded_hp4 / p5 diag
+_NODE="${SLURM_JOB_NODELIST:-$(hostname -s)}"
+if [[ "${_NODE}" == *node4007* ]] || [[ "${_NODE}" == *node4008* ]]; then
+  export XLA_FLAGS="${XLA_FLAGS:+${XLA_FLAGS} }--xla_gpu_shard_autotuning=false"
+  echo "Blackwell workaround active: XLA_FLAGS=${XLA_FLAGS}"
+fi
 
 echo "=== B1-full b1_init_exec ==="
 echo "Host: $(hostname)"
