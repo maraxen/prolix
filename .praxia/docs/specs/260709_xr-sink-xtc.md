@@ -27,7 +27,7 @@ Do **not** adopt `xtrax.run.ZarrStagingSink` as the production MD trajectory sin
 | Writer | `XtcWriterBackend` Protocol; default `MdtrajXtcWriter` (mdtraj `XTCTrajectoryFile`) |
 | Proxide | Rust `XtcWriter` is a **stub** (`create`/`write_frame` return not-implemented). Readback via `proxide.parse_xtc` (Å). Swap backend when proxide ships a real Py binding. |
 | Sink | `XtcFrameSink` — `ordered=True`, `__call__(positions)` → frames; host-side (wrap with `io_callback` under JAX trace) |
-| EnsemblePlan | Optional `run(..., xtc_path=)` single-bundle only; post-run flush via `write_positions_xtc` |
+| EnsemblePlan | Optional `run(..., xtc_path=)` single-bundle only; trajectory mode: post-run flush via `write_positions_xtc`. **Inference (B1-INFER, 2026-07-13):** stream frames every `save_every` via `io_callback` → `XtcFrameSink`. |
 | Units | Prolix positions Å → mdtraj writes nm; proxide parse returns Å |
 | Zarr | Never recommended for MD traj |
 

@@ -37,6 +37,9 @@ results/
 *.lock
 .env
 
+# Bathos per-run lock artifacts (ephemeral, regenerated per bth run; never tracked)
+*.bth.lock.toml
+
 # Claude Code worktrees (ephemeral per-session)
 .claude/worktrees/
 

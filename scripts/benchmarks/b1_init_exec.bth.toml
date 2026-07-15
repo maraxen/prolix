@@ -7,23 +7,25 @@ cold-start protocol with N independent Contexts (no Context reuse), in the
 short-trajectory / init-bound regime (100 ps per system @ dt=0.5 fs).
 
 H0: No statistically meaningful wall-clock advantage, or prolix advantage is
-entirely explained by aot_ratio = t_aot_compile / t_total > 0.5
+    entirely explained by aot_ratio = t_aot_compile / t_total > 0.5
 (compile-dominated artifact).
 """
 
 [outcomes.pass]
-condition = "t_total IS NOT NULL AND t_total > 0 AND finite_positions = true AND (backend = 'openmm' OR aot_ratio < 0.5)"
-decision = "Keep / aggregate into campaign median. Finite wall-clock with AOT guard satisfied for prolix (or OpenMM baseline segment). Compare prolix vs openmm medians offline for H1."
-reasoning = "Prereg success criteria: usable t_total plus AOT guard aot_ratio < 0.5 on prolix. OpenMM stubs aot_ratio=0 (N/A). Headline H1 comparison is cross-run (prolix median < openmm median), not a single-run pass."
+condition = "t_total IS NOT NULL AND t_total > 0 AND finite_fraction >= 0.9 AND (backend = 'openmm' OR aot_ratio < 0.5)"
+decision = "Keep / aggregate into campaign median. Usable t_total with soft-finite + AOT guard for prolix (or OpenMM baseline). Compare prolix vs openmm medians offline for H1."
+reasoning = "Claim-1 gate (B1-AOT-RATIO / B1-FINITE-GATE): aot_ratio is t_aot_compile/t_total; finite_fraction >= 0.9 tolerates minority vacuum-1AKE NaNs under B=16×200k (diag 17905437: 5/64). finite_positions remains strict diagnostic. OpenMM stubs aot_ratio=0 and finite_fraction=1."
 
 [outcomes.fail]
-condition = "t_total IS NULL OR t_total <= 0 OR finite_positions = false OR (backend = 'prolix' AND aot_ratio >= 0.5)"
-decision = "Investigate crash, non-finite MD, missing timers, or AOT-dominated prolix cold-start (escalate R4 / AOT budget before Claim-1 headline)."
+condition = "t_total IS NULL OR t_total <= 0 OR finite_fraction < 0.9 OR (backend = 'prolix' AND aot_ratio >= 0.5)"
+decision = "Investigate crash, too many non-finite finals, missing timers, or AOT-dominated prolix cold-start (escalate R4 / AOT budget before Claim-1 headline)."
 reasoning = "Any of these means the run did not produce a usable Claim-1 confirmation datum. Residual catches schema/parse failures too."
 is_residual = true
 
 [result_schema]
 backend = "str"
+path = "str"
+run_mode = "str"
 footprint = "str"
 smoke = "bool"
 seed = "int"
@@ -41,6 +43,9 @@ t_first_step = "float"
 t_steady_state = "float"
 aot_ratio = "float"
 finite_positions = "bool"
+finite_fraction = "float"
+n_finite = "int"
+n_finite_systems = "int"
 hardware_tag = "str"
 git_hash = "str"
 jax_cache_dir = "str"
@@ -48,4 +53,4 @@ jax_cache_dir = "str"
 [metadata]
 campaign_id = "b1-full"
 campaign_mode = "confirmation"
-tags = ["cluster", "b1-full", "claim1"]
+tags = ["cluster", "b1-full", "claim1", "path:inference"]

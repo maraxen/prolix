@@ -26,7 +26,7 @@ Use `DedupSpec` / `DedupGather` for ensemble axes where many elements share topo
 | K bucket | `get_k_bucket(k)` power-of-2; prolix `batch_size` = `k_bucket` |
 | Execution | `dispatch_n_mols_dedup` → xtrax `axis_dispatch(DedupGather, …)` (dedup→map→gather) |
 | `make_axis_dispatch` | Still rejects `DedupGather` — `dispatch_n_mols` raises `DispatchRejected` (no silent vmap) |
-| EnsemblePlan wire | Out of scope this leaf (helper + adapter only; callers opt in) |
+| EnsemblePlan wire | Out of scope this leaf (helper + adapter only; callers opt in). **Closed for inference 2026-07-13 (B1-INFER):** `build_dedup_spec_by_shape` + `plan_n_mols_with_dedup` in `EnsemblePlan._run_inference`; seeded Langevin still vmaps N. |
 | Topology keying | Caller supplies `unique_indices` / `index_map` / `k` (no auto-hash in this leaf) |
 
 ## Acceptance Criteria

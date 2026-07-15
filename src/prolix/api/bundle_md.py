@@ -7,12 +7,14 @@ call ``int()`` on them inside ``jax.vmap`` / ``jit`` — that forces concretizat
 and extra recompiles.
 
 Patterns:
-- **Static batch prefix** (``integration_prefix: int``): set once on the host when
-  ``can_jit_vmap_n_mols`` holds (all bundles share the same ``n_atoms``). Passed
-  as a closure constant into vmap so XLA sees a static slice, not a traced length.
+- **Static batch prefix** (``integration_prefix: int``): host-static **atom
+  bucket** length when ``can_jit_vmap_n_mols`` holds (same ``shape_spec`` /
+  padded shapes; real ``n_atoms`` may differ). Passed as a closure constant
+  into vmap so XLA sees a static slice, not a traced length.
 - **Bucket size** (``atom_bucket_size``): from ``shape_spec`` only — compile-time
-  constant per bucket, used for padding checks and planner axes, not for
-  ``int(bundle.n_atoms)`` inside traced code.
+  constant per bucket.
+- **Masses on stacked path**: ``masses_with_prefix`` (real ``bundle.masses``),
+  never unit masses.
 - **Trajectory trim**: ``trim_trajectory_positions`` uses ``int(n_atoms)`` on the
   **host** after integration (or in ``unstack_trajectories``), never mid-trace.
 """
@@ -80,8 +82,16 @@ def positions_with_prefix(bundle: MolecularBundle, prefix: int) -> jnp.ndarray:
     return bundle.positions[:prefix]
 
 
+def masses_with_prefix(bundle: MolecularBundle, prefix: int) -> jnp.ndarray:
+    """Prefix slice of real ``bundle.masses``; ``prefix`` is host static (atom bucket)."""
+    return bundle.masses[:prefix]
+
+
 def unit_masses(prefix: int, dtype) -> jnp.ndarray:
-    """Unit masses for ``prefix`` atoms; ``prefix`` is host static."""
+    """Unit masses for ``prefix`` atoms; ``prefix`` is host static.
+
+    Prefer ``masses_with_prefix`` on EnsemblePlan stacked paths.
+    """
     return jnp.ones(prefix, dtype=dtype)
 
 

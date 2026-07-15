@@ -1,4 +1,9 @@
-"""Stack MolecularBundle batches for JIT vmap on N_MOLS (#2645)."""
+"""Stack MolecularBundle batches for JIT vmap on N_MOLS (#2645).
+
+Claim-1 substrate: same ``shape_spec`` (bucket indices) + matching padded
+array shapes ⇒ stackable / vmappable. Real atom counts may differ; masks and
+``trim_trajectory_positions`` handle that. Do **not** require equal ``n_atoms``.
+"""
 
 from __future__ import annotations
 
@@ -7,7 +12,15 @@ from typing import Any
 import jax
 import jax.numpy as jnp
 
-from prolix.types.bundles import MolecularBundle
+from prolix.types.bundles import ATOM_BUCKETS, MolecularBundle
+
+__all__ = [
+    "can_jit_vmap_n_mols",
+    "can_stack_molecular_bundles",
+    "integration_prefix_for_bundles",
+    "stack_molecular_bundles",
+    "unstack_trajectories",
+]
 
 
 def can_stack_molecular_bundles(bundles: list[MolecularBundle]) -> bool:
@@ -30,22 +43,20 @@ def can_stack_molecular_bundles(bundles: list[MolecularBundle]) -> bool:
     return True
 
 
-def _n_atoms_equal(a: MolecularBundle, b: MolecularBundle) -> bool:
-    """Compare dynamic n_atoms scalars without Python int() (host-side only)."""
-    return bool(
-        jnp.array_equal(
-            jnp.asarray(a.n_atoms, dtype=jnp.int32),
-            jnp.asarray(b.n_atoms, dtype=jnp.int32),
-        )
-    )
-
-
 def can_jit_vmap_n_mols(bundles: list[MolecularBundle]) -> bool:
-    """True when stack-compatible and all bundles share the same n_atoms scalar."""
-    if not can_stack_molecular_bundles(bundles):
-        return False
-    ref = bundles[0]
-    return all(_n_atoms_equal(ref, b) for b in bundles[1:])
+    """True when bundles are stack-compatible (same shape_spec + array shapes).
+
+    Real ``n_atoms`` may differ across the batch — energy / integration use the
+    static atom-bucket prefix and masks (Claim-1 substrate).
+    """
+    return can_stack_molecular_bundles(bundles)
+
+
+def integration_prefix_for_bundles(bundles: list[MolecularBundle]) -> int:
+    """Host-static atom-bucket pad length for stacked integration (not ``n_atoms``)."""
+    if not bundles:
+        raise ValueError("bundles must be non-empty")
+    return int(ATOM_BUCKETS[bundles[0].shape_spec.atom_bucket_idx])
 
 
 def stack_molecular_bundles(bundles: list[MolecularBundle]) -> MolecularBundle:
