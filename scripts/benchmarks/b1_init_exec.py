@@ -114,6 +114,7 @@ def _four_water_bundle():
     """Minimal TIP3P 4-water MolecularBundle (prereg 4-water class)."""
     import jax.numpy as jnp
 
+    from prolix.physics.neighbor_list import ExclusionSpec
     from prolix.physics.settle import settle_positions
     from prolix.physics.system import make_bundle_from_system
     from prolix.physics.water_models import WaterModelType, get_water_params
@@ -188,13 +189,56 @@ def _four_water_bundle():
         improper_params=empty_dih_p,
         improper_mask=empty_m,
         water_indices=water_indices,
+        # Periodic box matching data/pdb/4water.pdb's CRYST1 record (30x30x30
+        # cubic, 90deg) -- required for physics parity with OpenMM's B1 water
+        # baseline (CutoffPeriodic/PME, not vacuum). See B1-NONBONDED-PARITY
+        # (.praxia/docs/specs/260715_b1-nonbonded-parity.md). energy_fn_from_bundle
+        # already handles periodic PME transparently once the bundle carries a
+        # box_size and boundary_condition="periodic" -- no other code change needed.
+        box_size=jnp.array([30.0, 30.0, 30.0], dtype=jnp.float64),
+        # PhysicsSystem.pme_alpha defaults to 0.0 (degenerate Ewald splitting --
+        # _host_float in bundle_md.py only falls back to a nonzero default on a
+        # ConcretizationTypeError, not for a concrete 0.0), so it must be set
+        # explicitly for periodic PME to be physically valid. 0.34 A^-1 matches
+        # repo convention (REGRESSION_EXPLICIT_PME, src/prolix/physics/regression_explicit_pme.py).
+        pme_alpha=0.34,
     )
-    bundle = make_bundle_from_system(sys, boundary_condition="free")
+    # Fully exclude each water's 3 intramolecular pairs (O-H1, O-H2, H1-H2)
+    # from the nonbonded kernel -- standard rigid-water convention (matches
+    # OpenMM's ForceField-generated exceptions for TIP3P). Without this,
+    # unscreened intramolecular Coulomb/LJ between bonded atoms ~1 Angstrom
+    # apart dominates the total energy (~100+ kcal/mol per water). Found via
+    # B1-NONBONDED-PARITY energy/force parity validation
+    # (.praxia/docs/specs/260715_b1-nonbonded-parity.md) -- pre-existing bug,
+    # not introduced by periodicity; the vacuum path had it too but no prior
+    # test checked absolute water energy against OpenMM.
+    excl_pairs = jnp.array(
+        [
+            pair
+            for i in range(n_w)
+            for pair in ((3 * i, 3 * i + 1), (3 * i, 3 * i + 2), (3 * i + 1, 3 * i + 2))
+        ],
+        dtype=jnp.int32,
+    )
+    exclusion_spec = ExclusionSpec(
+        idx_12_13=excl_pairs,
+        idx_14=jnp.zeros((0, 2), dtype=jnp.int32),
+        scale_14_elec=0.8333333,
+        scale_14_vdw=0.5,
+        n_atoms=n,
+        exception_pairs=jnp.zeros((0, 2), dtype=jnp.int32),
+        exception_sigmas=jnp.zeros(0),
+        exception_epsilons=jnp.zeros(0),
+        exception_chargeprods=jnp.zeros(0),
+    )
+    # make_bundle_from_system's default boundary_condition is "periodic"; no
+    # override needed now that sys carries box_size above.
+    bundle = make_bundle_from_system(sys, exclusion_spec=exclusion_spec)
     from prolix.api.bundle_md import active_positions
 
     pos = settle_positions(active_positions(bundle), active_positions(bundle), water_indices)
     sys = sys.replace(positions=pos)
-    return make_bundle_from_system(sys, boundary_condition="free")
+    return make_bundle_from_system(sys, exclusion_spec=exclusion_spec)
 
 
 def _make_synthetic_bundle(n_atoms: int, seed: int = 0):
@@ -632,12 +676,18 @@ def run_openmm(
         )
         ff = ff_water if is_water else ff_protein
         kwargs = dict(
-            nonbondedMethod=app.NoCutoff if not is_water else app.CutoffPeriodic,
+            nonbondedMethod=app.NoCutoff if not is_water else app.PME,
             constraints=app.HBonds,
             rigidWater=True,
         )
         if is_water:
+            # PME (not CutoffPeriodic) to match prolix's B1 water bundle, which is
+            # now periodic and always uses PME electrostatics once periodic (see
+            # B1-NONBONDED-PARITY, .praxia/docs/specs/260715_b1-nonbonded-parity.md).
+            # ewaldErrorTolerance pinned explicitly (repo convention 5e-4) rather
+            # than relying on OpenMM's default for reproducibility.
             kwargs["nonbondedCutoff"] = 1.0 * unit.nanometer
+            kwargs["ewaldErrorTolerance"] = 5e-4
         system = ff.createSystem(topology, **kwargs)
         integrator = mm.LangevinMiddleIntegrator(temperature, friction, dt)
         integrator.setRandomNumberSeed(int(seed) + i)
