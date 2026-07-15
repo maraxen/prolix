@@ -477,14 +477,20 @@ class EnsemblePlan:
         if integration_prefix is not None:
             positions_init = positions_with_prefix(bundle, integration_prefix)
             masses = masses_with_prefix(bundle, integration_prefix)
-            # SETTLE water indices: host int() is unsafe under vmap; stacked
-            # path leaves SETTLE off (None). Single-system path uses the
-            # non-prefix branch below.
-            water_indices = None
+            # bundle.water_indices is already bucket-sized (static shape from
+            # shape_spec.water_bucket_idx) — no host int() needed, unlike
+            # water_indices_for_integration below which slices to the real
+            # (traced) count and is unsafe under vmap. water_mask marks real
+            # vs. padding rows so settle_langevin can redirect padding
+            # scatters away from real atoms. See B1-SETTLE-STACK
+            # (.praxia/docs/specs/260715_b1-settle-stack.md).
+            water_indices = bundle.water_indices
+            water_mask = bundle.water_mask
         else:
             positions_init = active_positions(bundle)
             masses = masses_for_bundle(bundle)
             water_indices = water_indices_for_integration(bundle)
+            water_mask = None
 
         init_fn, apply_fn = settle_langevin(
             energy_fn,
@@ -495,6 +501,7 @@ class EnsemblePlan:
             mass=masses,
             water_indices=water_indices,
             project_ou_momentum_rigid=True,
+            water_mask=water_mask,
         )
 
         key = jax.random.PRNGKey(jnp.asarray(seed, dtype=jnp.uint32))
