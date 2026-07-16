@@ -133,3 +133,59 @@ def test_b1_water_bundle_is_periodic():
     assert bool(bundle.shape_spec.has_pbc)
     assert float(bundle.pme_alpha) == pytest.approx(PME_ALPHA_PER_ANGSTROM)
     assert float(bundle.cutoff_distance) == pytest.approx(CUTOFF_ANGSTROM)
+
+
+def test_b1_water_ensemble_plan_run_succeeds():
+    """Regression guard: EnsemblePlan.run() must actually work on a periodic-PME bundle.
+
+    Post-audit finding (code-review workflow, run after this leaf first landed):
+    constructing EnsemblePlan with ANY periodic-PME bundle crashed unconditionally
+    with jax.errors.ConcretizationTypeError. jax_md.quantity.canonicalize_force /
+    make_force_fn_like_canonicalize (md_potential_bundle.py) probe the energy
+    function via jax.eval_shape (a fully abstract trace) to detect scalar-vs-array
+    output; single_padded_energy's PME reciprocal-space block did concrete
+    int()/float() conversions of box-derived FFT grid dimensions that cannot be
+    abstractly traced. Fixed in batched_energy.py by extracting the reciprocal-
+    space+corrections block into _pme_reciprocal_and_corrections and skipping it
+    (safe -- only e_elec/e_lj's shape matters during the probe, always scalar)
+    when that block raises under eval_shape's abstract trace.
+
+    Neither this file's parity test (calls energy_fn_from_bundle directly,
+    bypassing settle_langevin's force-function wrapping that triggers the probe)
+    nor Phase 2's b1_init_exec.py --smoke (uses non-periodic synthetic bundles)
+    caught this -- this test exercises the actual EnsemblePlan.run() path B1-full
+    uses, both single-bundle and the real stacked/vmapped dispatch.
+    """
+    import jax
+    import jax.numpy as jnp
+
+    from prolix.api.ensemble_plan import EnsemblePlan
+
+    jax.config.update("jax_enable_x64", True)
+
+    b1 = _b1._four_water_bundle()
+    b2 = _b1._four_water_bundle()
+
+    single = EnsemblePlan.from_bundles([b1])
+    traj_single = single.run(
+        n_steps=1, dt=0.5, kT=300.0 * 0.0019872041, seed=7, gamma=0.0, run_mode="inference"
+    )
+    assert jnp.all(jnp.isfinite(traj_single.positions)), "single-bundle run produced NaN/Inf"
+
+    # Real stacked/vmapped dispatch (2 identical-shape bundles -> can_jit_vmap_n_mols
+    # -> vmap, not a Python loop) -- this is the code path that actually crashed.
+    stacked = EnsemblePlan.from_bundles([b1, b2])
+    traj_stacked = stacked.run(
+        n_steps=1, dt=0.5, kT=300.0 * 0.0019872041, seed=7, gamma=0.0, run_mode="inference"
+    )
+    for traj in traj_stacked:
+        assert jnp.all(jnp.isfinite(traj.positions)), "stacked-dispatch run produced NaN/Inf"
+
+    # Single-bundle and stacked-dispatch member 0 should agree closely (both use
+    # the same real pme_alpha=0.34 -- this also guards the separate pme_alpha
+    # vmap-fallback fix in bundle_md.py: a 0.3-vs-0.34 mismatch would show up as
+    # a much larger divergence than ordinary floating-point noise).
+    rmsd = float(
+        jnp.sqrt(jnp.mean((traj_single.positions[-1] - traj_stacked[0].positions[-1]) ** 2))
+    )
+    assert rmsd < 1e-4, f"single vs stacked-dispatch RMSD {rmsd:.2e} exceeds 1e-4"

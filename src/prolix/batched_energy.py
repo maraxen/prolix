@@ -365,6 +365,76 @@ def _lj_energy_neighbor_list(
 # BATCHED EVALUATION
 # ==============================================================================
 
+def _pme_reciprocal_and_corrections(
+    r: Array,
+    sys: PaddedSystem,
+    N: int,
+    e_elec: Array,
+    e_lj: Array,
+    displacement_fn: space.DisplacementFn,
+    implicit_solvent: bool,
+) -> tuple[Array, Array]:
+    """PME reciprocal-space energy + explicit-solvent corrections.
+
+    Requires ``sys.box_size`` to be concretely readable (real FFT grid
+    dimensions genuinely depend on its value, not just shape/dtype) --
+    raises under ``jax.eval_shape``'s abstract tracing. Callers must catch
+    that and skip this contribution when only probing output shape, since
+    e_elec/e_lj's shape (always scalar) is unaffected either way. See the
+    call site in ``single_padded_energy`` for why this matters (B1-NONBONDED-
+    PARITY, `.praxia/docs/specs/260715_b1-nonbonded-parity.md`).
+    """
+    from prolix.physics import explicit_corrections
+    from prolix.physics.pme import make_spme_energy_fn, spme_background_energy
+    from prolix.utils import topology
+
+    box_arr = jnp.asarray(sys.box_size)
+    mean_l = jnp.mean(box_arr.astype(jnp.float64))
+    grid_points = int(sys.pme_grid_points)
+    grid_spacing = float(mean_l) / float(max(grid_points, 1))
+    pme_recip_fn = make_spme_energy_fn(
+        box_size=box_arr,
+        alpha=float(sys.pme_alpha),
+        grid_spacing=grid_spacing,
+    )
+    e_elec = e_elec + pme_recip_fn(r, sys.charges, sys.atom_mask)
+    e_elec = e_elec + spme_background_energy(
+        sys.charges, sys.atom_mask, sys.pme_alpha, sys.box_size
+    )
+
+    if not implicit_solvent:
+        if sys.bonds is not None and sys.bonds.shape[0] > 0:
+            excl = topology.find_bonded_exclusions(sys.bonds, N)
+            idx_12, idx_13, idx_14 = excl.idx_12, excl.idx_13, excl.idx_14
+        else:
+            z = jnp.zeros((0, 2), dtype=jnp.int32)
+            idx_12 = idx_13 = idx_14 = z
+        coul_14 = 0.83333333
+        safe_charges = jnp.where(sys.atom_mask, sys.charges, jnp.float32(0.0))
+        e_elec = e_elec + explicit_corrections.pme_exclusion_correction_energy(
+            r,
+            displacement_fn,
+            idx_12,
+            idx_13,
+            idx_14,
+            safe_charges,
+            float(sys.pme_alpha),
+            float(coul_14),
+        )
+        safe_sigmas = jnp.where(sys.atom_mask, sys.sigmas, jnp.float32(1.0))
+        safe_epsilons = jnp.where(sys.atom_mask, sys.epsilons, jnp.float32(0.0))
+        n_tail = sys.n_real_atoms if sys.n_real_atoms is not None else N
+        e_lj = e_lj + explicit_corrections.lj_dispersion_tail_energy(
+            box_arr,
+            safe_sigmas,
+            safe_epsilons,
+            float(sys.nonbonded_cutoff),
+            n_tail,
+        )
+
+    return e_elec, e_lj
+
+
 def single_padded_energy(sys: PaddedSystem, displacement_fn: space.DisplacementFn, implicit_solvent: bool = True, soft_core_lambda: Array = jnp.array(1.0)) -> Array:
     """Computes total potential energy for a single padded system.
 
@@ -428,53 +498,27 @@ def single_padded_energy(sys: PaddedSystem, displacement_fn: space.DisplacementF
 
     # Reciprocal Space (PME) + explicit-solvent corrections (aligned with system / Flash)
     if sys.box_size is not None and sys.pme_alpha > 0.0:
-        from prolix.physics import explicit_corrections
-        from prolix.physics.pme import make_spme_energy_fn, spme_background_energy
-        from prolix.utils import topology
-
-        box_arr = jnp.asarray(sys.box_size)
-        mean_l = jnp.mean(box_arr.astype(jnp.float64))
-        grid_points = int(sys.pme_grid_points)
-        grid_spacing = float(mean_l) / float(max(grid_points, 1))
-        pme_recip_fn = make_spme_energy_fn(
-            box_size=box_arr,
-            alpha=float(sys.pme_alpha),
-            grid_spacing=grid_spacing,
-        )
-        e_elec += pme_recip_fn(r, sys.charges, sys.atom_mask)
-        e_elec += spme_background_energy(
-            sys.charges, sys.atom_mask, sys.pme_alpha, sys.box_size
-        )
-
-        if not implicit_solvent:
-            if sys.bonds is not None and sys.bonds.shape[0] > 0:
-                excl = topology.find_bonded_exclusions(sys.bonds, N)
-                idx_12, idx_13, idx_14 = excl.idx_12, excl.idx_13, excl.idx_14
-            else:
-                z = jnp.zeros((0, 2), dtype=jnp.int32)
-                idx_12 = idx_13 = idx_14 = z
-            coul_14 = 0.83333333
-            safe_charges = jnp.where(sys.atom_mask, sys.charges, jnp.float32(0.0))
-            e_elec += explicit_corrections.pme_exclusion_correction_energy(
-                r,
-                displacement_fn,
-                idx_12,
-                idx_13,
-                idx_14,
-                safe_charges,
-                float(sys.pme_alpha),
-                float(coul_14),
+        try:
+            e_elec, e_lj = _pme_reciprocal_and_corrections(
+                r, sys, N, e_elec, e_lj, displacement_fn, implicit_solvent
             )
-            safe_sigmas = jnp.where(sys.atom_mask, sys.sigmas, jnp.float32(1.0))
-            safe_epsilons = jnp.where(sys.atom_mask, sys.epsilons, jnp.float32(0.0))
-            n_tail = sys.n_real_atoms if sys.n_real_atoms is not None else N
-            e_lj += explicit_corrections.lj_dispersion_tail_energy(
-                box_arr,
-                safe_sigmas,
-                safe_epsilons,
-                float(sys.nonbonded_cutoff),
-                n_tail,
-            )
+        except (TypeError, ValueError, jax.errors.ConcretizationTypeError):
+            # jax_md.quantity.canonicalize_force / make_force_fn_like_canonicalize
+            # (md_potential_bundle.py) probe energy_or_force_fn via jax.eval_shape
+            # to detect scalar (energy) vs array (force) output -- a fully
+            # abstract trace where box_size-derived grid dimensions (real FFT
+            # array shapes, genuinely dependent on box_size's concrete value,
+            # not just dtype/shape) can never be concretized, regardless of
+            # vmap. Only e_elec/e_lj's final *shape* (always scalar) matters
+            # during that probe, not their value -- skipping the PME
+            # reciprocal contribution here leaves them unchanged (still
+            # scalar), which is all eval_shape checks. Every real evaluation
+            # (outside eval_shape) has concrete box_size and takes the
+            # unwrapped path via _pme_reciprocal_and_corrections directly
+            # below on the *next* call, since eval_shape only traces once to
+            # determine output shape -- the actual force/energy computation
+            # that follows always runs on real inputs.
+            pass
 
     if implicit_solvent:
         mask_ij = sys.atom_mask[:, None] & sys.atom_mask[None, :]

@@ -293,7 +293,19 @@ def physics_system_from_bundle(
 
     # Static PhysicsSystem floats: concrete on host; defaults when traced under vmap.
     # Free-space (no PBC) never takes the PME branch; cutoff default matches AKMA tip3p.
-    pme_alpha = _host_float(bundle.pme_alpha, 0.0 if not bundle.shape_spec.has_pbc else 0.3)
+    # PBC fallback is 0.34, matching prolix.physics.system.make_energy_fn's canonical
+    # default_pme_alpha (system.py:123) -- NOT an arbitrary choice. bundle.pme_alpha is
+    # a per-bundle scalar that becomes a traced value under vmap (e.g. B1's stacked/
+    # N_MOLS dispatch, replicas batched via vmap), so _host_float's exception-based
+    # fallback fires on every such call, silently discarding whatever concrete alpha
+    # the bundle was actually constructed with. Before this fix the fallback was 0.3,
+    # which silently disagreed with the 0.34 callers (e.g. scripts/benchmarks/
+    # b1_init_exec.py's _four_water_bundle) explicitly configure -- found via
+    # B1-NONBONDED-PARITY code review (.praxia/docs/specs/260715_b1-nonbonded-parity.md):
+    # a parity test validated 0.34 through a non-vmapped single-bundle call, which does
+    # not exercise this fallback at all, so it did not catch that the real vmapped B1
+    # dispatch would silently use a different (and disagreeing-with-OpenMM) alpha.
+    pme_alpha = _host_float(bundle.pme_alpha, 0.0 if not bundle.shape_spec.has_pbc else 0.34)
     nonbonded_cutoff = _host_float(bundle.cutoff_distance, 9.0)
 
     return PhysicsSystem(
