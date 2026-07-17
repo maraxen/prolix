@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import jax
 import jax.numpy as jnp
@@ -500,7 +500,7 @@ def _pme_reciprocal_and_corrections(
     return e_elec, e_lj
 
 
-def single_padded_energy(sys: PaddedSystem, displacement_fn: space.DisplacementFn, implicit_solvent: bool = True, soft_core_lambda: Array = jnp.array(1.0)) -> Array:
+def single_padded_energy(sys: PaddedSystem, displacement_fn: space.DisplacementFn, implicit_solvent: bool = True, soft_core_lambda: Array = jnp.array(1.0), neighbor: Any = None) -> Array:
     """Computes total potential energy for a single padded system.
 
     This is the public API for computing energy of one PaddedSystem.
@@ -511,55 +511,140 @@ def single_padded_energy(sys: PaddedSystem, displacement_fn: space.DisplacementF
     as ``physics.system.make_energy_fn`` and ``physics.flash_explicit`` (mean box
     edge / ``pme_grid_points``), and adds the same PME exclusion correction and
     isotropic LJ dispersion tail as those paths (see ``explicit_corrections``).
-    
+
     Args:
         soft_core_lambda: JAX array for soft-core LJ coupling.
             λ=1.0 → standard LJ, λ<1.0 → soft-core (for staged minimization).
             None defaults to λ=1.0 (standard LJ).
+        neighbor: Optional jax_md ``NeighborList`` (or a raw ``(N, K)`` index
+            array, matching ``physics.system.make_energy_fn``'s
+            ``getattr(neighbor, "idx", neighbor)`` convention) — when given,
+            the direct-space LJ/Coulomb terms are computed via
+            ``optimization.chunked_lj_energy_nl``/``chunked_coulomb_energy_nl``
+            (O(N*K)) instead of the dense O(N²) masked path (debt 760: no
+            PME-over-neighbor-list Coulomb term existed anywhere in the
+            bundle world before this — this mirrors ``system.py``'s own
+            ``electrostatics_energy_fn_bound`` NL branch exactly, not new
+            physics). PME reciprocal + exclusion correction + LJ-tail
+            (below) are identical either way — only the direct-space method
+            changes. Requires ``sys.excl_indices``/``excl_scales_vdw``/
+            ``excl_scales_elec`` to be the per-atom-row ``(N, max_excl)``
+            layout (debt 765) — always true for bundle-derived systems as of
+            that fix.
+
+            !!! DO NOT USE IN PRODUCTION YET (debt 790, filed 2026-07-17) !!!
+            ``chunked_lj_energy_nl``/``chunked_coulomb_energy_nl`` themselves
+            (not this wiring) have a confirmed, currently-unfixed correctness
+            bug: they give silently, wildly wrong energy (wrong sign, >10x
+            magnitude error, verified on the real 1VII solvated-protein
+            bundle: +30262 vs the correct -2544 kcal/mol) whenever BOTH (a)
+            a real, non-trivial per-atom exclusion table (debt 765's
+            ``excl_indices``, ~10-20 real exclusions/atom, not the trivial
+            empty case) AND (b) production molecular scale (N~2000+, dense
+            neighbor lists) are present simultaneously. Isolated to the
+            kernels' internal exclusion-matching/tile-accumulation logic
+            (``optimization.py``'s ``f_tile`` closures + ``tiling.py``'s
+            ``tile_reduction_nl``), NOT this function's wiring, NOT the
+            exclusion data itself (independently verified correct via
+            ``_build_dense_exclusion_scales`` producing an exact match with
+            ``sys.dense_excl_scale_elec``), NOT ghost/padding atoms (ruled
+            out: they have charge=sigma=epsilon=0, already zero regardless
+            of masking). See debt 790 for the full bisection trail. This
+            branch is left wired (not reverted) because the design is
+            otherwise correct and this is the natural landing point once the
+            kernel bug is fixed — but any caller passing ``neighbor=`` today
+            will get silently wrong energy, exactly the failure mode this
+            warning exists to prevent.
     """
     r = sys.positions
-    
+
     # Bonded terms
     e_bond = _bond_energy_masked(r, sys.bonds, sys.bond_params, sys.bond_mask, displacement_fn)
     e_ub = _bond_energy_masked(r, sys.urey_bradley_bonds, sys.urey_bradley_params, sys.urey_bradley_mask, displacement_fn)
     e_angle = _angle_energy_masked(r, sys.angles, sys.angle_params, sys.angle_mask, displacement_fn)
     e_dih = _dihedral_energy_masked(r, sys.dihedrals, sys.dihedral_params, sys.dihedral_mask, displacement_fn)
     e_imp = _dihedral_energy_masked(r, sys.impropers, sys.improper_params, sys.improper_mask, displacement_fn)
-    
-    e_cmap = _cmap_energy_masked(r, sys.cmap_torsions, sys.cmap_indices, sys.cmap_mask, sys.cmap_coeffs, displacement_fn)
-    
-    # Non-bonded — use precomputed dense exclusion scale matrices if available.
-    # These are topology constants (independent of r). Precomputing once
-    # avoids the costly fori_loop+scatter rebuild every step.
-    # stop_gradient is critical: the fori_loop+scatter backward pass in
-    # _build_dense_exclusion_scales produces NaN due to overlapping scatter
-    # indices. These matrices are topology constants (independent of r),
-    # so cutting the gradient is both correct and necessary.
-    N = len(sys.atom_mask)
-    if sys.dense_excl_scale_vdw is not None:
-        excl_scale_vdw = sys.dense_excl_scale_vdw
-    else:
-        excl_scale_vdw = jax.lax.stop_gradient(_build_dense_exclusion_scales(
-            sys.excl_indices, sys.excl_scales_vdw, N,
-        ))
-    if sys.dense_excl_scale_elec is not None:
-        excl_scale_elec = sys.dense_excl_scale_elec
-    else:
-        excl_scale_elec = jax.lax.stop_gradient(_build_dense_exclusion_scales(
-            sys.excl_indices, sys.excl_scales_elec, N,
-        ))
 
-    e_lj = _lj_energy_masked(
-        r, sys.sigmas, sys.epsilons, sys.atom_mask, displacement_fn,
-        soft_core_lambda=soft_core_lambda, excl_scale_vdw=excl_scale_vdw,
-    )
-    
-    # Coulomb interaction (direct space, optionally damped for PME)
-    e_elec = _coulomb_energy_masked(
-        r, sys.charges, sys.atom_mask, displacement_fn,
-        excl_scale_elec=excl_scale_elec,
-        pme_alpha=sys.pme_alpha,
-    )
+    e_cmap = _cmap_energy_masked(r, sys.cmap_torsions, sys.cmap_indices, sys.cmap_mask, sys.cmap_coeffs, displacement_fn)
+
+    N = len(sys.atom_mask)
+
+    if neighbor is not None:
+        # O(N*K) direct-space path (debt 760) -- mirrors system.py's own
+        # NL branch (chunked_lj_energy_nl/chunked_coulomb_energy_nl,
+        # system.py:175-220) exactly. excl_indices/excl_scales_vdw/
+        # excl_scales_elec are per-atom-row (N, max_excl) since debt 765;
+        # soft_core_lambda is not yet threaded through the NL kernels
+        # (no caller needs soft-core + NL simultaneously today -- staged
+        # minimization uses the dense path).
+        from prolix.physics.optimization import (
+            chunked_coulomb_energy_nl,
+            chunked_lj_energy_nl,
+        )
+
+        nb_idx = getattr(neighbor, "idx", neighbor)
+        # chunked_lj_energy_nl/chunked_coulomb_energy_nl have no atom_mask
+        # parameter -- they only exclude jax_md's own "no neighbor" sentinel
+        # (index == N, via pad_to_tile's internal tile-alignment mask), which
+        # is unrelated to bundle padding. This redirects any neighbor-list
+        # entry involving a ghost/padding atom to that same sentinel, so
+        # ghost-involving pairs are structurally excluded regardless of what
+        # charge/sigma/epsilon values ghost atoms happen to carry -- a
+        # correct, defensive measure. NOTE: this was NOT the cause of debt
+        # 790's energy-correctness bug (ruled out empirically -- ghost atoms
+        # already have charge=sigma=epsilon=0, so ghost-involving pairs
+        # already contributed exactly zero with or without this redirect;
+        # the actual bug is in the kernels' exclusion-matching logic itself,
+        # unrelated to ghosts). Kept because it's still correct in principle
+        # and costs nothing.
+        nb_idx = jnp.where(
+            sys.atom_mask[:, None] & sys.atom_mask[jnp.minimum(nb_idx, N - 1)],
+            nb_idx,
+            N,
+        )
+        e_lj = chunked_lj_energy_nl(
+            r, sys.sigmas, sys.epsilons, sys.excl_indices, sys.excl_scales_vdw,
+            nb_idx, displacement_fn, float(sys.nonbonded_cutoff), 128,
+        )
+        e_elec = chunked_coulomb_energy_nl(
+            r, sys.charges, sys.excl_indices, sys.excl_scales_elec,
+            nb_idx, displacement_fn, float(sys.pme_alpha), 332.0637,
+            float(sys.nonbonded_cutoff), 128,
+        )
+    else:
+        # Dense O(N^2) path — use precomputed dense exclusion scale matrices
+        # if available. These are topology constants (independent of r).
+        # Precomputing once avoids the costly fori_loop+scatter rebuild every
+        # step.
+        # stop_gradient is critical: the fori_loop+scatter backward pass in
+        # _build_dense_exclusion_scales produces NaN due to overlapping
+        # scatter indices. These matrices are topology constants
+        # (independent of r), so cutting the gradient is both correct and
+        # necessary.
+        if sys.dense_excl_scale_vdw is not None:
+            excl_scale_vdw = sys.dense_excl_scale_vdw
+        else:
+            excl_scale_vdw = jax.lax.stop_gradient(_build_dense_exclusion_scales(
+                sys.excl_indices, sys.excl_scales_vdw, N,
+            ))
+        if sys.dense_excl_scale_elec is not None:
+            excl_scale_elec = sys.dense_excl_scale_elec
+        else:
+            excl_scale_elec = jax.lax.stop_gradient(_build_dense_exclusion_scales(
+                sys.excl_indices, sys.excl_scales_elec, N,
+            ))
+
+        e_lj = _lj_energy_masked(
+            r, sys.sigmas, sys.epsilons, sys.atom_mask, displacement_fn,
+            soft_core_lambda=soft_core_lambda, excl_scale_vdw=excl_scale_vdw,
+        )
+
+        # Coulomb interaction (direct space, optionally damped for PME)
+        e_elec = _coulomb_energy_masked(
+            r, sys.charges, sys.atom_mask, displacement_fn,
+            excl_scale_elec=excl_scale_elec,
+            pme_alpha=sys.pme_alpha,
+        )
 
     # Reciprocal Space (PME) + explicit-solvent corrections (aligned with system / Flash)
     if sys.box_size is not None and sys.pme_alpha > 0.0:
