@@ -403,6 +403,87 @@ def _mask(n_real: int, bucket: int):
     )
 
 
+def _pad_positions_with_ghost_lattice(pos, bucket: int, box_size, dtype=None):
+    """Pad positions to ``bucket`` rows, placing padding (ghost) rows on a
+    uniform sub-lattice filling the periodic box instead of the coordinate
+    origin (debt 772).
+
+    Zero-filling ghost positions (the previous behavior, matching
+    ``_pad_2d``'s general convention) puts every ghost atom exactly at the
+    box origin under periodic boundary conditions. For a bundle with a large
+    padding fraction (e.g. a 1963-real-atom protein padded to 5000), this
+    means hundreds of real atoms near the origin see hundreds of ghost
+    "neighbors" once a fixed-capacity neighbor list is built on these
+    positions — evicting real neighbor-list entries and silently corrupting
+    energy/forces. This is invisible in the current dense O(N^2) energy path
+    (every ghost-involving pair is exactly zeroed via ``atom_mask``,
+    regardless of position — see ``_lj_energy_masked``/``_coulomb_energy_masked``
+    in batched_energy.py — so where ghosts sit has never mattered before now),
+    but is a hard blocker for any neighbor-list-based dispatch (debt 760).
+
+    Ghost atoms carry zero force everywhere in the energy path already, so
+    their position is otherwise physically irrelevant — a deterministic,
+    non-overlapping uniform lattice is the correct, cheap choice: no bias,
+    bounded and predictable neighbor-list occupancy (measured: ~1.75x
+    direct-space overhead for the 5000/32A-box/9A-cutoff class, vs ~10x and
+    silently wrong when ghosts pile up at the origin).
+
+    Note: this only fixes the *initial* placement. Ghost atoms have nonzero
+    mass (see ``masses_padded`` below, ``constant_values=1.0``) and the
+    Langevin O-step (``settle.py``) is not atom_mask-aware, so ghosts still
+    receive stochastic momentum kicks and will drift from this lattice over
+    a trajectory. Not fixed here — deferred to debt 760's dispatch-carry
+    implementation (the first place a live, running trajectory with a real
+    neighbor list actually exists to test against); see debt 772.
+
+    Args:
+        pos: (n, 3) real positions, or None/empty.
+        bucket: total padded row count.
+        box_size: (3,) box edge lengths, or None/non-positive for
+            non-periodic systems — falls back to zero-fill (no periodic
+            wraparound to place ghosts sensibly against, and non-periodic
+            dispatch has no neighbor-list capacity concern to protect).
+        dtype: output dtype.
+
+    Returns:
+        (bucket, 3) array.
+    """
+    import jax.numpy as jnp
+    import numpy as np
+
+    # Preserve pos's own dtype (matching _pad_2d's actual behavior, which
+    # pads via jnp.pad and never touches dtype for the non-empty case --
+    # under jax_enable_x64=True with a float64 pos, that means output stays
+    # float64 despite the dtype=jnp.float32 call-site argument). Forcing
+    # out_dtype unconditionally here broke that under x64
+    # (tests/physics/test_b1_water_pme_parity.py enables x64 explicitly) --
+    # a real regression caught by the existing test suite, not just a
+    # theoretical risk. `dtype` is only a fallback for the all-empty case.
+    if pos is None or (hasattr(pos, "size") and pos.size == 0):
+        out_dtype = dtype or jnp.float32
+        real = np.zeros((0, 3), dtype=np.float64)
+    else:
+        out_dtype = pos.dtype if hasattr(pos, "dtype") else (dtype or jnp.float32)
+        real = np.asarray(pos, dtype=np.float64)
+
+    n = real.shape[0]
+    n_ghost = bucket - n
+    if n_ghost <= 0:
+        return jnp.asarray(real, dtype=out_dtype)
+
+    box_np = None if box_size is None else np.asarray(box_size, dtype=np.float64)
+    if box_np is None or box_np.shape != (3,) or np.any(box_np <= 0):
+        ghost = np.zeros((n_ghost, 3), dtype=np.float64)
+        return jnp.asarray(np.concatenate([real, ghost], axis=0), dtype=out_dtype)
+
+    m = max(int(np.ceil(n_ghost ** (1.0 / 3.0))), 1)
+    axes = [np.linspace(0.0, box_np[d], num=m, endpoint=False) for d in range(3)]
+    grid = np.stack(np.meshgrid(*axes, indexing="ij"), axis=-1).reshape(-1, 3)
+    ghost = grid[:n_ghost]
+
+    return jnp.asarray(np.concatenate([real, ghost], axis=0), dtype=out_dtype)
+
+
 def _pad_3d(arr, bucket: int, d1: int, d2: int, dtype=None):
     """Pad a 3D array to (bucket, d1, d2); return zeros if arr is None or empty."""
     import jax.numpy as jnp
@@ -699,7 +780,7 @@ def make_bundle_from_system(
         masses_padded = jnp.pad(masses_in, (0, a - masses_in.shape[0]), constant_values=1.0)
 
     return MolecularBundle(
-        positions=_pad_2d(pos, a, 3, dtype=jnp.float32),
+        positions=_pad_positions_with_ghost_lattice(pos, a, box_size, dtype=jnp.float32),
         masses=masses_padded,
         charges=_pad_atom("charges"),
         sigmas=_pad_atom("sigmas"),
