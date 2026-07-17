@@ -27,6 +27,21 @@ Usage::
 
     # Device trace (GPU required)
     uv run python scripts/profile_b1_water_trace.py --trace --n-steps 100 --n-trials 5
+
+KNOWN LIMITATION (--hlo-only): at tiny toy scale (replicas=2, n_steps=5), the
+compiled HLO text shows zero occurrences of every pme_* named_scope label,
+even though this script's own reconstruction was directly verified (byte-
+identical final positions) against EnsemblePlan._run_stacked_dispatch itself,
+and PME reciprocal energy is independently confirmed to execute correctly at
+that scale (research record
+260717_pme_reciprocal_silently_disabled_under_stacked_dispatch's post-fix
+verification). Root cause not yet pinned down -- likely XLA constant-folding
+or op-fusion at this toy scale drops the named_scope metadata rather than
+dropping the computation itself (settle_* labels DO survive at this scale,
+serving as a positive control that the grep methodology itself works). Re-
+check at production scale (replicas=16, n_steps>=200) before trusting a
+"not_found_in_hlo" verdict for any pme_* label -- it may just mean "not
+visible at this trace size," not "not computed."
 """
 
 from __future__ import annotations
