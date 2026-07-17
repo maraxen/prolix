@@ -90,39 +90,41 @@ def spread_charges(positions: jnp.ndarray, charges: jnp.ndarray, atom_mask: jnp.
     Q = jnp.zeros(grid_dims, dtype=jnp.float32)
     q = charges * atom_mask.astype(jnp.float32)
 
-    for dx in range(order):
-        for dy in range(order):
-            for dz in range(order):
-                ix = (grid_idx[:, 0] + dx - 1) % Kx
-                iy = (grid_idx[:, 1] + dy - 1) % Ky
-                iz = (grid_idx[:, 2] + dz - 1) % Kz
-                w = (wx[dx] * wy[dy] * wz[dz] * q).astype(Q.dtype)
-                Q = Q.at[ix, iy, iz].add(w)
+    with jax.named_scope("pme_charge_spread"):
+        for dx in range(order):
+            for dy in range(order):
+                for dz in range(order):
+                    ix = (grid_idx[:, 0] + dx - 1) % Kx
+                    iy = (grid_idx[:, 1] + dy - 1) % Ky
+                    iz = (grid_idx[:, 2] + dz - 1) % Kz
+                    w = (wx[dx] * wy[dy] * wz[dz] * q).astype(Q.dtype)
+                    Q = Q.at[ix, iy, iz].add(w)
     return Q
 
 
 def influence_function(grid_dims: tuple[int, int, int], box_size: jnp.ndarray, alpha: float, order: int = 4) -> jnp.ndarray:
-    Kx, Ky, Kz = grid_dims
-    V = jnp.prod(box_size)
+    with jax.named_scope("pme_greens_setup_standalone"):
+        Kx, Ky, Kz = grid_dims
+        V = jnp.prod(box_size)
 
-    mx = jnp.fft.fftfreq(Kx) * Kx / box_size[0]
-    my = jnp.fft.fftfreq(Ky) * Ky / box_size[1]
-    mz = jnp.fft.rfftfreq(Kz) * Kz / box_size[2]
-    m_sq = mx[:, None, None] ** 2 + my[None, :, None] ** 2 + mz[None, None, :] ** 2
+        mx = jnp.fft.fftfreq(Kx) * Kx / box_size[0]
+        my = jnp.fft.fftfreq(Ky) * Ky / box_size[1]
+        mz = jnp.fft.rfftfreq(Kz) * Kz / box_size[2]
+        m_sq = mx[:, None, None] ** 2 + my[None, :, None] ** 2 + mz[None, None, :] ** 2
 
-    gauss = jnp.exp(-jnp.pi**2 * m_sq / alpha**2)
-    m_sq_safe = jnp.where(m_sq > 0, m_sq, jnp.float32(1.0))
-    denom = jnp.pi * m_sq_safe * V
+        gauss = jnp.exp(-jnp.pi**2 * m_sq / alpha**2)
+        m_sq_safe = jnp.where(m_sq > 0, m_sq, jnp.float32(1.0))
+        denom = jnp.pi * m_sq_safe * V
 
-    bx = _bspline_modulation(jnp.fft.fftfreq(Kx), Kx, order)
-    by = _bspline_modulation(jnp.fft.fftfreq(Ky), Ky, order)
-    bz = _bspline_modulation(jnp.fft.rfftfreq(Kz), Kz, order)
-    b_sq = (bx[:, None, None] * by[None, :, None] * bz[None, None, :]) ** 2
-    b_sq_safe = jnp.maximum(b_sq, jnp.float32(1e-10))
+        bx = _bspline_modulation(jnp.fft.fftfreq(Kx), Kx, order)
+        by = _bspline_modulation(jnp.fft.fftfreq(Ky), Ky, order)
+        bz = _bspline_modulation(jnp.fft.rfftfreq(Kz), Kz, order)
+        b_sq = (bx[:, None, None] * by[None, :, None] * bz[None, None, :]) ** 2
+        b_sq_safe = jnp.maximum(b_sq, jnp.float32(1e-10))
 
-    G = gauss / (denom * b_sq_safe)
-    G = G.at[0, 0, 0].set(0.0)
-    return G
+        G = gauss / (denom * b_sq_safe)
+        G = G.at[0, 0, 0].set(0.0)
+        return G
 
 
 def _bspline_modulation(freq_frac: jnp.ndarray, K: int, order: int) -> jnp.ndarray:
@@ -161,32 +163,35 @@ def spme_energy_with_forces(positions: jnp.ndarray, charges: jnp.ndarray, atom_m
 def _spme_fwd(positions, charges, atom_mask, box_size, grid_dims, alpha, order):
     Kx, Ky, Kz = grid_dims
     Q = spread_charges(positions, charges, atom_mask, box_size, grid_dims, order)
-    Q_hat = jnp.fft.rfftn(Q)
-    
+    with jax.named_scope("pme_fft_forward"):
+        Q_hat = jnp.fft.rfftn(Q)
+
     # Precompute G and m_sq for both energy and alpha-gradient
-    mx = jnp.fft.fftfreq(Kx) * Kx / box_size[0]
-    my = jnp.fft.fftfreq(Ky) * Ky / box_size[1]
-    mz = jnp.fft.rfftfreq(Kz) * Kz / box_size[2]
-    m_sq = mx[:, None, None] ** 2 + my[None, :, None] ** 2 + mz[None, None, :] ** 2
-    
-    V = jnp.prod(box_size)
-    gauss = jnp.exp(-jnp.pi**2 * m_sq / alpha**2)
-    m_sq_safe = jnp.where(m_sq > 0, m_sq, jnp.float32(1.0))
-    denom = jnp.pi * m_sq_safe * V
+    with jax.named_scope("pme_greens_setup"):
+        mx = jnp.fft.fftfreq(Kx) * Kx / box_size[0]
+        my = jnp.fft.fftfreq(Ky) * Ky / box_size[1]
+        mz = jnp.fft.rfftfreq(Kz) * Kz / box_size[2]
+        m_sq = mx[:, None, None] ** 2 + my[None, :, None] ** 2 + mz[None, None, :] ** 2
 
-    bx = _bspline_modulation(jnp.fft.fftfreq(Kx), Kx, order)
-    by = _bspline_modulation(jnp.fft.fftfreq(Ky), Ky, order)
-    bz = _bspline_modulation(jnp.fft.rfftfreq(Kz), Kz, order)
-    b_sq = (bx[:, None, None] * by[None, :, None] * bz[None, None, :]) ** 2
-    b_sq_safe = jnp.maximum(b_sq, jnp.float32(1e-10))
+        V = jnp.prod(box_size)
+        gauss = jnp.exp(-jnp.pi**2 * m_sq / alpha**2)
+        m_sq_safe = jnp.where(m_sq > 0, m_sq, jnp.float32(1.0))
+        denom = jnp.pi * m_sq_safe * V
 
-    G = gauss / (denom * b_sq_safe)
-    G = G.at[0, 0, 0].set(0.0)
-    
+        bx = _bspline_modulation(jnp.fft.fftfreq(Kx), Kx, order)
+        by = _bspline_modulation(jnp.fft.fftfreq(Ky), Ky, order)
+        bz = _bspline_modulation(jnp.fft.rfftfreq(Kz), Kz, order)
+        b_sq = (bx[:, None, None] * by[None, :, None] * bz[None, None, :]) ** 2
+        b_sq_safe = jnp.maximum(b_sq, jnp.float32(1e-10))
+
+        G = gauss / (denom * b_sq_safe)
+        G = G.at[0, 0, 0].set(0.0)
+
     Q_hat_sq = jnp.abs(Q_hat) ** 2
-    
+
     # irfftn normalization
-    theta = jnp.fft.irfftn(Q_hat * G, s=grid_dims)
+    with jax.named_scope("pme_fft_inverse"):
+        theta = jnp.fft.irfftn(Q_hat * G, s=grid_dims)
     N_grid = float(Kx * Ky * Kz)
     theta_norm = theta * N_grid
     
@@ -210,23 +215,24 @@ def _spme_bwd(grid_dims, order, residuals, g):
     forces = jnp.zeros((positions.shape[0], 3), dtype=jnp.float32)
     potentials = jnp.zeros(positions.shape[0], dtype=jnp.float32)
 
-    for dx in range(order):
-        for dy in range(order):
-            for dz in range(order):
-                ix = (grid_idx[:, 0] + dx - 1) % Kx
-                iy = (grid_idx[:, 1] + dy - 1) % Ky
-                iz = (grid_idx[:, 2] + dz - 1) % Kz
-                t_val = theta_norm[ix, iy, iz]
-                
-                # Potential for charge gradient
-                w = wx[dx] * wy[dy] * wz[dz]
-                potentials = potentials + w * t_val
-                
-                # Forces for position gradient
-                fx = q_masked * (K_arr[0] / box_size[0]) * dwx[dx] * wy[dy] * wz[dz] * t_val
-                fy = q_masked * (K_arr[1] / box_size[1]) * wx[dx] * dwy[dy] * wz[dz] * t_val
-                fz = q_masked * (K_arr[2] / box_size[2]) * wx[dx] * wy[dy] * dwz[dz] * t_val
-                forces = forces + jnp.stack([fx, fy, fz], axis=-1)
+    with jax.named_scope("pme_bwd_gather"):
+        for dx in range(order):
+            for dy in range(order):
+                for dz in range(order):
+                    ix = (grid_idx[:, 0] + dx - 1) % Kx
+                    iy = (grid_idx[:, 1] + dy - 1) % Ky
+                    iz = (grid_idx[:, 2] + dz - 1) % Kz
+                    t_val = theta_norm[ix, iy, iz]
+
+                    # Potential for charge gradient
+                    w = wx[dx] * wy[dy] * wz[dz]
+                    potentials = potentials + w * t_val
+
+                    # Forces for position gradient
+                    fx = q_masked * (K_arr[0] / box_size[0]) * dwx[dx] * wy[dy] * wz[dz] * t_val
+                    fy = q_masked * (K_arr[1] / box_size[1]) * wx[dx] * dwy[dy] * wz[dz] * t_val
+                    fz = q_masked * (K_arr[2] / box_size[2]) * wx[dx] * wy[dy] * dwz[dz] * t_val
+                    forces = forces + jnp.stack([fx, fy, fz], axis=-1)
 
     # 1. Position gradient
     dE_dpos = COULOMB_CONSTANT * forces * g
