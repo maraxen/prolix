@@ -1,0 +1,51 @@
+[experiment]
+hypothesis = """
+Phase 5 scoping of debt 761 (task 260715_b1_physics_parity): does
+single_padded_force(use_flash=True) -- flash_explicit_forces' tiled/
+checkpointed direct-space nonbonded pass -- actually beat
+single_padded_energy+jax.grad (EnsemblePlan's current, dense, autodiff force
+path) in wall-clock, on a real bundle-derived PME+SETTLE solvated-protein
+PhysicsSystem (the same solvate_protein_to_bundle-constructed 1VII/2GB1
+bundles validated for compile-sharing this session)?
+
+Two corrections found during read-only Phase 5 scoping mean this is NOT a
+free assumed win: (1) flash_explicit_forces is still autodiff internally
+(eqx.filter_grad), not closed-form analytical -- only the tiling/
+checkpointing pattern differs; (2) the PME custom_vjp benefit is already
+present in today's single_padded_energy+jax.grad path, not unique to flash.
+So the only real unknown is whether the tiled/checkpointed memory-locality
+pattern is actually faster in practice. This experiment measures that
+directly, before committing any engineering time to wiring 761 into
+EnsemblePlan (per .praxia/docs/decisions/260717_b1-connect-existing-engines-scope.md).
+"""
+
+[outcomes.pass]
+condition = "flash_speedup >= 1.2"
+decision = "Flash forces show a material (>=20%) speedup over autodiff -- proceed with debt 761's full scope (parity test + tile-size-divisibility check/fix, then wire force_fn_from_bundle into EnsemblePlan's _setup_integrator)."
+reasoning = "A 20%+ measured speedup on a real bundle-derived PME+SETTLE system justifies the ~1-2 day investment (parity test + tile-size fix) debt 761 requires before it can be trusted in production."
+
+[outcomes.marginal]
+condition = "flash_speedup >= 0.9 AND flash_speedup < 1.2"
+decision = "No clear win -- do not commit the 1-2 day parity-test-and-wire investment yet. Re-measure at larger scale (more replicas / larger protein) before deciding, since tiling benefits may only appear above a size threshold."
+reasoning = "A near-parity result could still hide a real effect that only appears at a different scale (256-atom tile size interacting with system size) -- don't conclude 'no benefit' from a single system size without checking that possibility first."
+
+[outcomes.fail]
+condition = "flash_speedup IS NULL OR flash_speedup < 0.9"
+decision = "Close debt 761 as measured-not-worth-pursuing (flash forces are not faster, or the benchmark itself failed). Keep debt 763 (flash_explicit.py tile-size divisibility bug) open independently -- it's a latent correctness issue regardless of whether flash forces get wired into EnsemblePlan."
+reasoning = "If flash isn't measurably faster, wiring it in for its own sake adds a full autodiff/checkpointing path plus an unverified correctness surface (debt 763) for no benefit -- not worth the engineering cost identified in the Phase 5 scoping doc."
+is_residual = true
+
+[result_schema]
+mode = "str"
+protein = "str"
+n_real_atoms = "int"
+n_padded_atoms = "int"
+energy_only_ms = "float"
+autodiff_forces_ms = "float"
+flash_forces_ms = "float"
+flash_speedup = "float"
+
+[metadata]
+campaign_id = "32d6574e"
+campaign_mode = "exploration"
+tags = ["b1", "phase5", "profiling", "connection-work-scoping", "flash-forces", "debt-761"]
