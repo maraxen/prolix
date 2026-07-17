@@ -196,6 +196,20 @@ class MolecularBundle(eqx.Module):
     # Static shape descriptor (the ONLY static=True field)
     shape_spec: MolecularShapeSpec = eqx.field(static=True)
 
+    # Nonbonded exclusions, per-atom-row form (N, 32) -- for neighbor-list/
+    # flash consumers (chunked_lj_energy_nl/chunked_coulomb_energy_nl,
+    # flash_explicit.py, flash_nonbonded.py), which need the documented
+    # PhysicsSystem.excl_indices contract (typing.py:300-302), distinct from
+    # excl_indices/excl_scales_vdw/excl_scales_elec above (which are this
+    # bundle's own (E, 2) pair-list format). Optional/None because only
+    # make_bundle_from_system's exclusion_spec path populates it today
+    # (debt 765, found 2026-07-17: physics_system_from_bundle was squatting
+    # the pair-list data directly on PhysicsSystem's per-atom-row-contracted
+    # excl_indices field, crashing every NL/flash kernel).
+    excl_dense_indices: Int[Array, "N 32"] | None = None
+    excl_dense_scales_vdw: Float[Array, "N 32"] | None = None
+    excl_dense_scales_elec: Float[Array, "N 32"] | None = None
+
     @classmethod
     def from_pdb(
         cls,

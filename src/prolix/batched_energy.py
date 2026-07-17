@@ -379,8 +379,11 @@ def _pme_exclusion_correction_from_pairs(
     Removes double counting for excluded/scaled bonded pairs (same formula
     as ``explicit_corrections.pme_exclusion_correction_energy``), but reads
     per-pair scale factors directly from bundle-precomputed
-    ``excl_indices``/``excl_scales_elec`` (populated in
-    ``bundle_md.physics_system_from_bundle``) instead of deriving separate
+    ``excl_pair_indices``/``excl_pair_scales_elec`` (populated in
+    ``bundle_md.physics_system_from_bundle`` -- kept distinct from
+    ``excl_indices``/``excl_scales_elec``, which since debt 765 hold the
+    per-atom-row ``(N, max_excl)`` layout NL/flash kernels need, not this
+    function's pair-list ``(E, 2)``/``(E,)`` shape) instead of deriving separate
     1-2/1-3/1-4 groups via ``topology.find_bonded_exclusions``. That function
     does pure Python/numpy graph traversal on ``sys.bonds`` and cannot run
     under ``jax.vmap``/``jax.jit`` tracing at all -- under EnsemblePlan's
@@ -461,12 +464,15 @@ def _pme_reciprocal_and_corrections(
 
     if not implicit_solvent:
         safe_charges = jnp.where(sys.atom_mask, sys.charges, jnp.float32(0.0))
-        if sys.excl_indices is not None and sys.excl_indices.shape[0] > 0:
+        # excl_pair_indices/excl_pair_scales_elec (pair-list, (E,2)/(E,)) --
+        # NOT excl_indices/excl_scales_elec, which since debt 765 hold the
+        # per-atom-row (N, max_excl) layout NL/flash kernels need.
+        if sys.excl_pair_indices is not None and sys.excl_pair_indices.shape[0] > 0:
             e_elec = e_elec + _pme_exclusion_correction_from_pairs(
                 r,
                 displacement_fn,
-                sys.excl_indices,
-                sys.excl_scales_elec,
+                sys.excl_pair_indices,
+                sys.excl_pair_scales_elec,
                 safe_charges,
                 float(sys.pme_alpha),
                 N,

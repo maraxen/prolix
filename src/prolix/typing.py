@@ -296,10 +296,27 @@ class PhysicsSystem(eqx.Module):
     cmap_mask: Array | None = None  # (N_cmap_padded,) bool
     cmap_coeffs: Array | None = None  # (N_maps, G, G, 16) — shared across batch
 
-    # Non-bonded exclusions — sparse per-atom arrays
+    # Non-bonded exclusions — sparse per-atom arrays. Consumed by every
+    # neighbor-list/flash kernel (system.py, optimization.py's chunked_*_nl,
+    # flash_explicit.py, flash_nonbonded.py) — this (N, max_excl) shape is
+    # the load-bearing contract; see excl_pair_* below for the different
+    # pair-list shape the PME exclusion correction needs.
     excl_indices: Array | None = None  # (N_padded, max_excl) int32
     excl_scales_vdw: Array | None = None  # (N_padded, max_excl) float32
     excl_scales_elec: Array | None = None  # (N_padded, max_excl) float32
+
+    # Non-bonded exclusions — bundle-style pair list. Only
+    # _pme_exclusion_correction_from_pairs (batched_energy.py) reads these;
+    # everything else uses excl_indices/excl_scales_* above. Kept as
+    # separate fields (not reusing excl_indices' name) because bundle-derived
+    # systems previously populated excl_indices/excl_scales_* with THIS
+    # (E, 2)/(E,) pair-list shape instead of the documented (N, max_excl)
+    # per-atom-row shape, silently breaking every NL/flash consumer
+    # (debt 765, found 2026-07-17 running single_padded_force(use_flash=True)
+    # on a real bundle-derived solvated protein).
+    excl_pair_indices: Array | None = None  # (E, 2) int32
+    excl_pair_scales_vdw: Array | None = None  # (E,) float32
+    excl_pair_scales_elec: Array | None = None  # (E,) float32
 
     # RATTLE/SHAKE constraints — X-H bond pairs with target lengths
     constraint_pairs: Array | None = None  # (N_constr_padded, 2) int

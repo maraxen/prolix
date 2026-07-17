@@ -579,6 +579,53 @@ def make_bundle_from_system(
         excl, excl_sv, excl_se, ne = _dense_excl_to_pair_list(excl, excl_sv, excl_se)
     eb = _next_bucket(max(ne, 1), EXCL_BUCKETS)
 
+    # --- exclusions (per-atom-row form, for NL/flash kernels; debt 765) ---
+    # Every neighbor-list/flash consumer (this file's own make_energy_fn NL
+    # branch, optimization.py's chunked_*_nl, flash_explicit.py,
+    # flash_nonbonded.py) needs excl_indices/excl_scales_vdw/excl_scales_elec
+    # in the documented (N, max_excl) per-atom-row shape (typing.py:300-302)
+    # -- NOT the (E, 2) pair-list MolecularBundle stores above (excl/excl_sv/
+    # excl_se). Computed once here, host-side, construction-time-only -- NEVER
+    # inside bundle_md.physics_system_from_bundle, which runs per-replica
+    # under jax.vmap/jit during real dispatch (this session's heterogeneous-
+    # batching confirmation requires per-replica-varying bundle fields, so
+    # bundle.excl_indices is a genuine tracer there, not a host array; a
+    # numpy-loop reconstruction is only safe at true bundle-construction time,
+    # same rationale as map_exclusions_to_dense_padded / _dense_excl_to_pair_list
+    # above). exclusion_spec path uses map_exclusions_to_dense_padded directly
+    # (same source data _dense_excl_to_pair_list above converts to pairs);
+    # the no-exclusion_spec fallback instead converts the just-computed
+    # pair-list excl/excl_sv/excl_se (ne real pairs, all valid) via
+    # pair_list_to_dense_padded.
+    _EXCL_DENSE_MAX = 32
+    excl_dense_indices = excl_dense_scales_vdw = excl_dense_scales_elec = None
+    if exclusion_spec is not None:
+        from prolix.physics.neighbor_list import map_exclusions_to_dense_padded
+
+        dense_idx, dense_sv, dense_se = map_exclusions_to_dense_padded(
+            exclusion_spec, max_exclusions=_EXCL_DENSE_MAX
+        )
+        pad_rows = a - dense_idx.shape[0]
+        excl_dense_indices = jnp.pad(
+            dense_idx, ((0, pad_rows), (0, 0)), constant_values=-1
+        )
+        excl_dense_scales_vdw = jnp.pad(
+            dense_sv, ((0, pad_rows), (0, 0)), constant_values=1.0
+        )
+        excl_dense_scales_elec = jnp.pad(
+            dense_se, ((0, pad_rows), (0, 0)), constant_values=1.0
+        )
+    elif ne > 0:
+        from prolix.physics.neighbor_list import pair_list_to_dense_padded
+
+        dense_idx, dense_sv, dense_se = pair_list_to_dense_padded(
+            excl, excl_sv, excl_se, jnp.ones(ne, dtype=bool), a,
+            max_exclusions=_EXCL_DENSE_MAX,
+        )
+        excl_dense_indices = dense_idx
+        excl_dense_scales_vdw = dense_sv
+        excl_dense_scales_elec = dense_se
+
     # --- exceptions (1-4 pairs) -------------------------------------------
     exc_pairs = _get("exception_pairs")
     exc_sig = _get("exception_sigmas")
@@ -714,6 +761,10 @@ def make_bundle_from_system(
         excl_scales_elec=_pad_1d(excl_se, eb, dtype=jnp.float32),
         excl_mask=_mask(ne, eb),
         n_excl=jnp.array(ne, dtype=jnp.int32),
+        # nonbonded exclusions, per-atom-row form (debt 765)
+        excl_dense_indices=excl_dense_indices,
+        excl_dense_scales_vdw=excl_dense_scales_vdw,
+        excl_dense_scales_elec=excl_dense_scales_elec,
         # 1-4 exception pairs
         exception_pairs=_pad_2d(exc_pairs, xb, 2, dtype=jnp.int32),
         exception_sigmas=_pad_1d(exc_sig, xb, dtype=jnp.float32),

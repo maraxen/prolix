@@ -303,6 +303,82 @@ def map_exclusions_to_dense_padded(
   return jnp.array(excl_indices_np), jnp.array(scales_vdw_np), jnp.array(scales_elec_np)
 
 
+def pair_list_to_dense_padded(
+  pair_indices: Array,
+  pair_scales_vdw: Array,
+  pair_scales_elec: Array,
+  pair_mask: Array,
+  n_atoms: int,
+  max_exclusions: int = 32,
+) -> tuple[Array, Array, Array]:
+  r"""Convert a bundle-style pair-list exclusion set to per-atom padded arrays.
+
+  Same output contract as :func:`map_exclusions_to_dense_padded` (the
+  ``PhysicsSystem.excl_indices``/``excl_scales_vdw``/``excl_scales_elec``
+  ``(N, max_exclusions)`` layout every neighbor-list/flash kernel in this
+  codebase expects — ``system.py:152-153``, ``optimization.py``'s
+  ``chunked_*_nl``, ``flash_explicit.py``, ``flash_nonbonded.py``), but takes
+  an already-built pair list (``(E, 2)`` indices + ``(E,)`` per-pair scales +
+  ``(E,)`` validity mask — the format ``MolecularBundle``/
+  ``physics_system_from_bundle`` already carry) instead of an
+  :class:`ExclusionSpec`, so bundle-derived systems don't need one
+  reconstructed just for this.
+
+  Host-side (numpy) by construction, same rationale as
+  ``map_exclusions_to_dense_padded``: exclusion topology is a per-bundle
+  constant fixed at construction time, never traced.
+
+  Args:
+      pair_indices: (E, 2) int, atom index pairs. Padding-row values are
+          ignored via ``pair_mask``, not via a sentinel value in this array.
+      pair_scales_vdw, pair_scales_elec: (E,) float, per-pair scale factors
+          (0.0 = fully excluded, e.g. 0.5/1-1.2 = 1-4 scaled, matching the
+          convention already used by ``_pme_exclusion_correction_from_pairs``).
+      pair_mask: (E,) bool, True for real (non-padding) pair slots.
+      n_atoms: N_padded — output arrays are always exactly this many rows,
+          regardless of how many real atoms are populated (matches
+          ``PhysicsSystem.n_padded_atoms``).
+      max_exclusions: Capacity per atom. If a real atom needs more than this,
+          entries are silently truncated (same caveat as
+          ``map_exclusions_to_dense_padded`` — call sites needing a hard
+          guarantee should check counts against this cap beforehand).
+
+  Returns:
+      (excl_indices, excl_scales_vdw, excl_scales_elec), each
+      ``(n_atoms, max_exclusions)``, dtype int32/float32/float32.
+  """
+  idx_np = np.asarray(pair_indices)
+  vdw_np = np.asarray(pair_scales_vdw)
+  elec_np = np.asarray(pair_scales_elec)
+  mask_np = np.asarray(pair_mask)
+
+  atom_excls: list[list[tuple[int, float, float]]] = [[] for _ in range(n_atoms)]
+  for k in range(idx_np.shape[0]):
+    if not mask_np[k]:
+      continue
+    i, j = int(idx_np[k, 0]), int(idx_np[k, 1])
+    sv, se = float(vdw_np[k]), float(elec_np[k])
+    if 0 <= i < n_atoms:
+      atom_excls[i].append((j, sv, se))
+    if 0 <= j < n_atoms:
+      atom_excls[j].append((i, sv, se))
+
+  excl_indices_np = np.full((n_atoms, max_exclusions), -1, dtype=np.int32)
+  scales_vdw_np = np.ones((n_atoms, max_exclusions), dtype=np.float32)
+  scales_elec_np = np.ones((n_atoms, max_exclusions), dtype=np.float32)
+
+  for i in range(n_atoms):
+    entries = atom_excls[i]
+    entries.sort(key=lambda x: x[0])
+    n_entries = min(len(entries), max_exclusions)
+    for k in range(n_entries):
+      excl_indices_np[i, k] = entries[k][0]
+      scales_vdw_np[i, k] = entries[k][1]
+      scales_elec_np[i, k] = entries[k][2]
+
+  return jnp.array(excl_indices_np), jnp.array(scales_vdw_np), jnp.array(scales_elec_np)
+
+
 def get_neighbor_exclusion_scales(
   excl_indices: Array,
   excl_scales_vdw: Array,

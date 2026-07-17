@@ -376,8 +376,30 @@ def physics_system_from_bundle(
     # check) rather than left as whatever sentinel bundle.excl_mask marks --
     # same defensive pattern as _scatter_water_target's padding-row redirect
     # for SETTLE (B1-SETTLE-STACK, .praxia/docs/specs/260715_b1-settle-stack.md).
-    excl_indices = jnp.where(
+    excl_pair_indices = jnp.where(
         bundle.excl_mask[:, None], bundle.excl_indices, n
+    )
+
+    # Per-atom-row exclusions (debt 765) for NL/flash kernels -- distinct from
+    # the pair-list excl_pair_indices above, which only the PME exclusion
+    # correction reads. Populated at bundle-construction time
+    # (make_bundle_from_system, host-side, debt 765) -- None if the bundle
+    # was built without an exclusion_spec (no NL/flash kernel support for
+    # that bundle yet; matches every existing None-check consumer).
+    excl_dense_indices = (
+        _slice1(bundle.excl_dense_indices)
+        if bundle.excl_dense_indices is not None
+        else None
+    )
+    excl_dense_scales_vdw = (
+        _slice1(bundle.excl_dense_scales_vdw)
+        if bundle.excl_dense_scales_vdw is not None
+        else None
+    )
+    excl_dense_scales_elec = (
+        _slice1(bundle.excl_dense_scales_elec)
+        if bundle.excl_dense_scales_elec is not None
+        else None
     )
 
     # Static PhysicsSystem floats: concrete on host; defaults when traced under vmap.
@@ -437,9 +459,12 @@ def physics_system_from_bundle(
         nonbonded_cutoff=nonbonded_cutoff,
         dense_excl_scale_vdw=dense_vdw,
         dense_excl_scale_elec=dense_elec,
-        excl_indices=excl_indices,
-        excl_scales_vdw=bundle.excl_scales_vdw,
-        excl_scales_elec=bundle.excl_scales_elec,
+        excl_indices=excl_dense_indices,
+        excl_scales_vdw=excl_dense_scales_vdw,
+        excl_scales_elec=excl_dense_scales_elec,
+        excl_pair_indices=excl_pair_indices,
+        excl_pair_scales_vdw=bundle.excl_scales_vdw,
+        excl_pair_scales_elec=bundle.excl_scales_elec,
     )
 
 
