@@ -446,3 +446,85 @@ def get_neighbor_exclusion_scales(
   final_vdw, final_elec = jax.lax.fori_loop(0, M, loop_body, (final_vdw, final_elec))
 
   return final_vdw, final_elec
+
+
+def compute_nl_capacity(
+  atom_bucket_size: int,
+  box_size,
+  cutoff: float,
+  dr_threshold: float = 0.5,
+  safety_factor: float = 1.5,
+  round_to: int = 256,
+) -> int:
+  r"""Static neighbor-list capacity for a shape-class, from bucket constants only.
+
+  Debt 760 (B1 connect-existing-NL-PME, `.praxia/docs/decisions/
+  260717_b1-connect-existing-engines-scope.md`, decision D1): a single
+  capacity per shape-class -- derived only from static, bucket-level
+  quantities (padded atom count, box volume, cutoff), never from any
+  particular bundle's actual measured occupancy -- so that two different
+  real proteins sharing a shape bucket also always share the same neighbor-
+  list capacity. Capacity computed per-bundle (e.g. via
+  ``neighbor_fn.allocate()``'s own automatic sizing on real, per-protein
+  positions) would fragment the cross-protein compile-sharing this session
+  spent real effort confirming, since different proteins' local density can
+  differ enough to pick different capacities even within the same atom
+  bucket.
+
+  Formula: ``K = ceil_to(round_to, safety_factor * rho_padded *
+  (4/3) * pi * (cutoff + dr_threshold)**3)``, where ``rho_padded =
+  atom_bucket_size / box_volume`` -- uniform padded-atom density times the
+  volume of the effective neighbor-list sphere (cutoff + Verlet skin),
+  times a safety margin. Ghost/padding atoms must already be spread
+  uniformly across the box (debt 772, ``_pad_positions_with_ghost_lattice``
+  in ``system.py``) for this density-based estimate to be valid -- it
+  assumes no pathological clustering.
+
+  Verified against real measurements (Opus-backed investigation, same
+  decision doc): for the 5000-atom/32A-box/9.0A-cutoff shape class, this
+  formula gives 822 (pre-rounding); jax_md's own `.allocate()` on the real,
+  ghost-lattice-fixed 1VII bundle measured a required capacity of 895 (max
+  occupancy 716) at the same cutoff -- comfortably under the ``round_to=256``
+  rounded value of 1024, confirming the formula's safety margin holds in
+  practice, not just in theory.
+
+  Args:
+      atom_bucket_size: Padded atom count for this shape class (e.g.
+          `MolecularBundle.positions.shape[0]`, or equivalently the bucket
+          size `ATOM_BUCKETS` resolved to for this class).
+      box_size: (3,) box edge lengths (periodic systems only -- this
+          function assumes a periodic box; callers must not call it for
+          non-periodic bundles).
+      cutoff: Direct-space nonbonded cutoff distance (Angstrom).
+      dr_threshold: Verlet-list skin (Angstrom) -- matches jax_md's
+          `dr_threshold` parameter to `partition.neighbor_list`; must be the
+          same value used when actually allocating the neighbor list, or the
+          capacity estimate and the real allocation diverge.
+      safety_factor: Multiplicative headroom over the uniform-density
+          estimate, to absorb the measured spread between different real
+          proteins' local density within the same shape bucket (~11% in the
+          1VII/2GB1 case) plus general safety margin.
+      round_to: Round the final capacity up to a multiple of this value.
+          256 (not 128) by default: aligns with both the O(N*K) direct-space
+          kernels' 128-atom tile size (`optimization.py`) and
+          `flash_explicit.py`'s 256-atom tile size (debt 763's tile-size-
+          divisibility concern applies to K too, not just N).
+
+  Returns:
+      Static neighbor-list capacity K (Python int).
+  """
+  import math
+
+  import numpy as np
+
+  box_np = np.asarray(box_size, dtype=np.float64)
+  box_volume = float(np.prod(box_np))
+  if box_volume <= 0:
+    msg = f"compute_nl_capacity: box_size must describe a positive-volume periodic box, got {box_size}"
+    raise ValueError(msg)
+
+  rho_padded = atom_bucket_size / box_volume
+  sphere_volume = (4.0 / 3.0) * math.pi * (cutoff + dr_threshold) ** 3
+  k_raw = safety_factor * rho_padded * sphere_volume
+
+  return int(math.ceil(k_raw / round_to) * round_to)
