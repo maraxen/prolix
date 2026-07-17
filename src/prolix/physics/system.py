@@ -122,7 +122,16 @@ def make_energy_fn(
   box, use_pbc = kwargs.get("box"), kwargs.get("use_pbc", False)
   default_pme_alpha = 0.34 if use_pbc else 0.0
   pme_alpha = kwargs.get("pme_alpha", default_pme_alpha)
-  cutoff = kwargs.get("cutoff_distance", kwargs.get("cutoff", 9.0))
+  # cutoff_distance is a named parameter (see signature above), so it never
+  # lands in kwargs -- kwargs.get("cutoff_distance", ...) could never succeed,
+  # silently discarding whatever cutoff_distance the caller passed and
+  # falling through to the 9.0 default regardless. A separate `cutoff=`
+  # kwarg alias is used by some callers (e.g. test_openmm_parity.py's
+  # cutoff=0) and did work via the second fallback -- preserved here by
+  # keeping kwargs["cutoff"] as the higher-priority override, with the
+  # actual cutoff_distance parameter (not a dead kwargs lookup) as the
+  # correct fallback instead of a hardcoded 9.0.
+  cutoff = kwargs.get("cutoff", cutoff_distance)
   COULOMB_CONSTANT = 332.0637
 
   # Sparse Non-bonded Setup
