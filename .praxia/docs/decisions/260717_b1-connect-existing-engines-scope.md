@@ -75,6 +75,16 @@ Added `_pad_positions_with_ghost_lattice` (`system.py`), replacing the zero-fill
 
 Raw measurement scripts/data (scratch, not committed): `/home/marielle/.claude/jobs/51dbbbc3/tmp/{measure_nl_capacity.py,measure_nl_cost2.py,inspect_bundle.py,nl_capacity_results.json,nl_cost_curve.json}`.
 
+## Phase 6 step 3 — BLOCKED (2026-07-17): a real, pre-existing bug in the NL kernels themselves
+
+Implementing the `neighbor=` kwarg on `single_padded_energy`/`energy_fn_from_bundle` (mirroring `system.py`'s own NL branch, no new physics) surfaced a serious, previously-undiscovered correctness bug — not in the new wiring, but in the shared `chunked_lj_energy_nl`/`chunked_coulomb_energy_nl` kernels (`optimization.py`) themselves, filed as **debt 790 (P1, blocking)**.
+
+**Symptom**: on the real 1VII solvated-protein bundle, `single_padded_energy(..., neighbor=nbrs)` gives `+30262 kcal/mol` vs. the correct dense-path reference of `-2544 kcal/mol` — wrong sign, >10x magnitude error.
+
+**Bisection** (full detail in debt 790): initially suspected debt 772's ghost-atom spreading, but ruled out — ghost atoms have charge=sigma=epsilon=0, so ghost-involving pairs already contribute exactly zero regardless of masking (a defensive ghost-masking redirect was still added, confirmed harmless-but-not-load-bearing here). Systematically isolated via progressively targeted tests: small synthetic cases (N=4 to N=2000, sparse/dense/periodic/multi-tile) all pass exactly; real molecular data at N=100-1963 with **trivial** exclusions all pass; the SAME N=1963 real-data test with the **real**, debt-765-populated per-atom-row exclusion table fails (`-3862` vs. the correct `-106131`). This pins the bug to the kernels' internal exclusion-matching/tile-accumulation logic (`optimization.py`'s `f_tile` closures + `tiling.py`'s `tile_reduction_nl`'s nested `lax.scan`) — confirmed NOT the exclusion data itself (`_build_dense_exclusion_scales` on the same per-atom-row data reproduces the already-validated dense exclusion matrix exactly, 25M/25M entries). A per-atom spot-check (one real atom, 12 exclusion partners) showed every individual pair-scale value computed correctly — the bug likely lives in cross-tile aggregation, not any single atom's local computation, but the exact root cause was not found before stopping.
+
+**Decision**: stopped here rather than continue an open-ended debugging session, or worse, wire a silently-broken energy kernel into `EnsemblePlan`'s production dispatch. The `neighbor=` wiring itself is committed (correct design, natural landing point once fixed) but is prominently documented as non-functional and MUST NOT be used until debt 790 lands. **Steps 4-7 of Phase 6 (carry restructuring, ghost pinning, the OpenMM parity test, the compile-sharing regression check) are all blocked on debt 790** — building any of them on top of a known-broken energy kernel would be wasted, risky work.
+
 ## Debt 761 — connect `single_padded_force`/`flash_explicit_forces`
 
 ### Correction to the debt's original premise
