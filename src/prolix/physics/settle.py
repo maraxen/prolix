@@ -379,7 +379,8 @@ def _settle_water_batch(
   n_mat = jnp.stack([row0, row1, row2, row3], axis=1)  # (N_waters, 4, 4)
 
   # Largest-eigenvalue eigenvector is the optimal quaternion (eigh: ascending).
-  _, eigvecs = jnp.linalg.eigh(n_mat)
+  with jax.named_scope("settle_pos_eigh"):
+    _, eigvecs = jnp.linalg.eigh(n_mat)
   quat = eigvecs[:, :, -1]  # (N_waters, 4): (q0, q1, q2, q3)
   q0, q1, q2, q3 = quat[:, 0], quat[:, 1], quat[:, 2], quat[:, 3]
 
@@ -653,22 +654,23 @@ def _remove_angular_momentum_from_impulse(
   I_tensor = I_eye - outer_term  # (N_waters, 3, 3)
 
   # omega = I^{-1} L via explicit 3×3 Cramer's rule (see NOTES in docstring).
-  # Extract elements for batched scalar arithmetic.
-  _a00, _a01, _a02 = I_tensor[:, 0, 0], I_tensor[:, 0, 1], I_tensor[:, 0, 2]
-  _a10, _a11, _a12 = I_tensor[:, 1, 0], I_tensor[:, 1, 1], I_tensor[:, 1, 2]
-  _a20, _a21, _a22 = I_tensor[:, 2, 0], I_tensor[:, 2, 1], I_tensor[:, 2, 2]
-  _det = (
-    _a00 * (_a11 * _a22 - _a12 * _a21)
-    - _a01 * (_a10 * _a22 - _a12 * _a20)
-    + _a02 * (_a10 * _a21 - _a11 * _a20)
-  )
-  _Lx, _Ly, _Lz = L[:, 0], L[:, 1], L[:, 2]
-  _inv = 1.0 / _det
-  omega = jnp.stack([  # (N_waters, 3)
-    _inv * ((_a11 * _a22 - _a12 * _a21) * _Lx + (_a02 * _a21 - _a01 * _a22) * _Ly + (_a01 * _a12 - _a02 * _a11) * _Lz),
-    _inv * ((_a12 * _a20 - _a10 * _a22) * _Lx + (_a00 * _a22 - _a02 * _a20) * _Ly + (_a02 * _a10 - _a00 * _a12) * _Lz),
-    _inv * ((_a10 * _a21 - _a11 * _a20) * _Lx + (_a01 * _a20 - _a00 * _a21) * _Ly + (_a00 * _a11 - _a01 * _a10) * _Lz),
-  ], axis=-1)
+  with jax.named_scope("settle_cramers_rule"):
+    # Extract elements for batched scalar arithmetic.
+    _a00, _a01, _a02 = I_tensor[:, 0, 0], I_tensor[:, 0, 1], I_tensor[:, 0, 2]
+    _a10, _a11, _a12 = I_tensor[:, 1, 0], I_tensor[:, 1, 1], I_tensor[:, 1, 2]
+    _a20, _a21, _a22 = I_tensor[:, 2, 0], I_tensor[:, 2, 1], I_tensor[:, 2, 2]
+    _det = (
+      _a00 * (_a11 * _a22 - _a12 * _a21)
+      - _a01 * (_a10 * _a22 - _a12 * _a20)
+      + _a02 * (_a10 * _a21 - _a11 * _a20)
+    )
+    _Lx, _Ly, _Lz = L[:, 0], L[:, 1], L[:, 2]
+    _inv = 1.0 / _det
+    omega = jnp.stack([  # (N_waters, 3)
+      _inv * ((_a11 * _a22 - _a12 * _a21) * _Lx + (_a02 * _a21 - _a01 * _a22) * _Ly + (_a01 * _a12 - _a02 * _a11) * _Lz),
+      _inv * ((_a12 * _a20 - _a10 * _a22) * _Lx + (_a00 * _a22 - _a02 * _a20) * _Ly + (_a02 * _a10 - _a00 * _a12) * _Lz),
+      _inv * ((_a10 * _a21 - _a11 * _a20) * _Lx + (_a01 * _a20 - _a00 * _a21) * _Ly + (_a00 * _a11 - _a01 * _a10) * _Lz),
+    ], axis=-1)
 
   # Angular impulse to subtract: m_i * (omega x d_i) for each atom
   # omega broadcast over atom axis: (N_waters, 1, 3) x (N_waters, 3, 3)
@@ -803,21 +805,22 @@ def _r_step_conserve_angular_momentum(
   I_tensor = I_eye - outer_term  # (N_w, 3, 3)
 
   # omega = I^{-1} L_correct via explicit 3×3 Cramer's rule
-  _a00, _a01, _a02 = I_tensor[:, 0, 0], I_tensor[:, 0, 1], I_tensor[:, 0, 2]
-  _a10, _a11, _a12 = I_tensor[:, 1, 0], I_tensor[:, 1, 1], I_tensor[:, 1, 2]
-  _a20, _a21, _a22 = I_tensor[:, 2, 0], I_tensor[:, 2, 1], I_tensor[:, 2, 2]
-  _det = (
-    _a00 * (_a11 * _a22 - _a12 * _a21)
-    - _a01 * (_a10 * _a22 - _a12 * _a20)
-    + _a02 * (_a10 * _a21 - _a11 * _a20)
-  )
-  _Lx, _Ly, _Lz = L_correct[:, 0], L_correct[:, 1], L_correct[:, 2]
-  _inv = 1.0 / _det
-  omega = jnp.stack([
-    _inv * ((_a11 * _a22 - _a12 * _a21) * _Lx + (_a02 * _a21 - _a01 * _a22) * _Ly + (_a01 * _a12 - _a02 * _a11) * _Lz),
-    _inv * ((_a12 * _a20 - _a10 * _a22) * _Lx + (_a00 * _a22 - _a02 * _a20) * _Ly + (_a02 * _a10 - _a00 * _a12) * _Lz),
-    _inv * ((_a10 * _a21 - _a11 * _a20) * _Lx + (_a01 * _a20 - _a00 * _a21) * _Ly + (_a00 * _a11 - _a01 * _a10) * _Lz),
-  ], axis=-1)  # (N_w, 3)
+  with jax.named_scope("settle_cramers_rule"):
+    _a00, _a01, _a02 = I_tensor[:, 0, 0], I_tensor[:, 0, 1], I_tensor[:, 0, 2]
+    _a10, _a11, _a12 = I_tensor[:, 1, 0], I_tensor[:, 1, 1], I_tensor[:, 1, 2]
+    _a20, _a21, _a22 = I_tensor[:, 2, 0], I_tensor[:, 2, 1], I_tensor[:, 2, 2]
+    _det = (
+      _a00 * (_a11 * _a22 - _a12 * _a21)
+      - _a01 * (_a10 * _a22 - _a12 * _a20)
+      + _a02 * (_a10 * _a21 - _a11 * _a20)
+    )
+    _Lx, _Ly, _Lz = L_correct[:, 0], L_correct[:, 1], L_correct[:, 2]
+    _inv = 1.0 / _det
+    omega = jnp.stack([
+      _inv * ((_a11 * _a22 - _a12 * _a21) * _Lx + (_a02 * _a21 - _a01 * _a22) * _Ly + (_a01 * _a12 - _a02 * _a11) * _Lz),
+      _inv * ((_a12 * _a20 - _a10 * _a22) * _Lx + (_a00 * _a22 - _a02 * _a20) * _Ly + (_a02 * _a10 - _a00 * _a12) * _Lz),
+      _inv * ((_a10 * _a21 - _a11 * _a20) * _Lx + (_a01 * _a20 - _a00 * _a21) * _Ly + (_a00 * _a11 - _a01 * _a10) * _Lz),
+    ], axis=-1)  # (N_w, 3)
 
   # Corrective impulse: m_i * (omega × d_con_i)
   omega_exp = omega[:, None, :]  # (N_w, 1, 3)
@@ -899,21 +902,22 @@ def settle_velocities(
   # Iterate a few times for convergence.
   n_iters = max(int(n_iters), 0)
   if adaptive_tol is None:
-    vel_rattle = jax.lax.fori_loop(
-      0,
-      n_iters,
-      lambda _i, v: _apply_rattle_velocity_correction(
-        v,
-        indices,
-        norm_vec_oh1,
-        norm_vec_oh2,
-        norm_vec_h1h2,
-        inv_mass_oxygen,
-        inv_mass_hydrogen,
-        water_mask,
-      ),
-      velocities,
-    )
+    with jax.named_scope("settle_rattle_loop"):
+      vel_rattle = jax.lax.fori_loop(
+        0,
+        n_iters,
+        lambda _i, v: _apply_rattle_velocity_correction(
+          v,
+          indices,
+          norm_vec_oh1,
+          norm_vec_oh2,
+          norm_vec_h1h2,
+          inv_mass_oxygen,
+          inv_mass_hydrogen,
+          water_mask,
+        ),
+        velocities,
+      )
   else:
     def body(carry):
       i, vel, residual = carry
