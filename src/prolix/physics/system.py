@@ -541,6 +541,11 @@ def make_bundle_from_system(
     ab = _next_bucket(max(na, 1), ANGLE_BUCKETS)
 
     dihs = _get("dihedrals")
+    if dihs is None:
+        # MergedTopology (topology_merger.py) names this field proper_dihedrals,
+        # not dihedrals -- same fallback convention already used a few lines up
+        # in this file's make_energy_fn (system.py:61-63) for the same mismatch.
+        dihs = _get("proper_dihedrals")
     dp = _get("dihedral_params")
     dihs, dp, nd = _flatten_multi_term_torsions(dihs, dp)
     db = _next_bucket(max(nd, 1), DIHEDRAL_BUCKETS)

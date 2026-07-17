@@ -473,13 +473,22 @@ def _pme_reciprocal_and_corrections(
             )
         safe_sigmas = jnp.where(sys.atom_mask, sys.sigmas, jnp.float32(1.0))
         safe_epsilons = jnp.where(sys.atom_mask, sys.epsilons, jnp.float32(0.0))
-        n_tail = sys.n_real_atoms if sys.n_real_atoms is not None else N
+        # lj_dispersion_tail_energy's last parameter is `atom_mask` (an (N,)
+        # array) -- this used to pass a scalar real-atom COUNT (n_tail)
+        # instead. Since the count gets squared inside the C6/C12 sums, the
+        # error scales as n_atoms^2: negligible for B1's 12-atom water class
+        # (~144x on an already-tiny term) but catastrophic for a real
+        # solvated protein (~1963 atoms -> ~3.85e6x, a multi-million-kcal/mol
+        # energy from what should be a small long-range correction). Found
+        # via the solvate_protein_to_bundle adapter verification against the
+        # already-tested pad_solvated_system/single_padded_energy_nl_cvjp
+        # reference pathway (1VII solvated, 32A box).
         e_lj = e_lj + explicit_corrections.lj_dispersion_tail_energy(
             box_arr,
             safe_sigmas,
             safe_epsilons,
             float(sys.nonbonded_cutoff),
-            n_tail,
+            sys.atom_mask,
         )
 
     return e_elec, e_lj
