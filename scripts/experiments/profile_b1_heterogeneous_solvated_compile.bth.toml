@@ -1,0 +1,61 @@
+[experiment]
+hypothesis = """
+Phase 4 redirect (task 260715_b1_physics_parity): the water/PME-focused
+step-scaling investigation found 1AKE (vacuum, GB implicit solvent) --
+not water/PME/SETTLE -- dominates B1's aggregate per-step cost, which is
+orthogonal to prolix's actual heterogeneous-batching thesis (see memory
+project_prolix_identity_and_thesis: hybrid two-lane, heterogeneous batching
++ portability is the core claim, not raw throughput). B1's original 4
+classes never actually tested that thesis for solvated (SETTLE+PME) systems
+-- each class is one topology tiled to itself, never a genuine mix of
+different real systems.
+
+1VII (villin headpiece, 1963 real atoms) and 2GB1 (protein G B1 domain,
+1987 real atoms) -- two genuinely different real proteins -- were found
+(by testing several candidates: 1VII/2JOF/1CRN/1UBQ/2GB1) to land in the
+IDENTICAL MolecularShapeSpec across all 8 bucket axes once solvated with
+the same target_box_size=[32,32,32] via the new solvate_protein_to_bundle
+adapter (src/prolix/physics/solvation.py) -- confirmed structurally via
+partition_bundles_by_shape returning 1 group for a mixed bundle list.
+This is NOT automatic for arbitrary pairs (1VII vs 2JOF/1CRN do NOT
+bucket-match despite the same box, since protein-topology-derived
+bond/angle/dihedral buckets scale with protein composition, independent
+of the water-dominated atom-count bucket).
+
+This experiment measures whether that structural grouping produces a real
+shared JIT compile: does --mode combined's compile_fixed_s approximate
+EITHER single-protein run's compile_fixed_s (one shared compile across
+genuinely different real proteins), or their SUM (still compiling
+separately despite matching shape_spec -- a gap worth flagging)?
+"""
+
+[outcomes.pass]
+condition = "n_groups_from_partition = 1 AND r_squared IS NOT NULL AND r_squared > 0.7 AND compile_fixed_s IS NOT NULL AND compile_fixed_s > 0"
+decision = "partition_bundles_by_shape correctly grouped the mixed 1vii+2gb1 bundle list into one class, and the regression fit is trustworthy -- compare this run's compile_fixed_s against the two --mode single control runs (same campaign, same task_id) to determine whether compilation is genuinely shared or merely dispatched together with hidden per-topology recompiles."
+reasoning = "n_groups=1 confirms the structural precondition; a clean fit (R^2>0.7, looser than the water/protein step-scaling gate since only 2 distinct real topologies are being amortized here rather than 4 replicated ones) is needed before trusting compile_fixed_s as evidence either way."
+
+[outcomes.marginal]
+condition = "n_groups_from_partition = 1 AND r_squared IS NOT NULL AND r_squared > 0.4 AND r_squared <= 0.7"
+decision = "Structural grouping confirmed but the fit is noisy -- re-run with more/wider n_steps points before drawing a compile-sharing conclusion from compile_fixed_s alone."
+reasoning = "A noisy fit at this sample size could still be consistent with either a shared or separate compile; don't let noise masquerade as evidence for either answer."
+
+[outcomes.fail]
+condition = "n_groups_from_partition IS NULL OR n_groups_from_partition != 1 OR r_squared IS NULL OR r_squared <= 0.4 OR compile_fixed_s IS NULL"
+decision = "If n_groups != 1: the bucket-matching assumption broke (data/code drift since the interactive session that found this pair) -- re-verify 1vii/2gb1 shape_spec equality before re-running. Otherwise: check for exceptions in the per-n_steps loop or an insufficient n_steps spread."
+reasoning = "This experiment's entire premise depends on the two proteins genuinely sharing one partition group -- if that structural precondition fails, no compile-cost number from this run means anything about heterogeneous batching."
+is_residual = true
+
+[result_schema]
+mode = "str"
+protein = "str"
+replicas = "int"
+n_groups_from_partition = "int"
+per_step_corrected_s = "float"
+compile_fixed_s = "float"
+r_squared = "float"
+n_real_atoms_first = "int"
+
+[metadata]
+campaign_id = "32d6574e"
+campaign_mode = "exploration"
+tags = ["b1", "phase4", "profiling", "heterogeneous-batching", "solvated-protein", "compile-sharing"]

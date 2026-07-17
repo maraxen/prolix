@@ -222,10 +222,22 @@ def _host_float(x: object, default: float) -> float:
 # general solution, but correct for every periodic system this codebase
 # currently constructs. See _host_box_size's docstring for why a fallback
 # is needed at all.
-_DEFAULT_PBC_BOX_SIZE = jnp.array([30.0, 30.0, 30.0])
+#
+# Plain Python tuple, NOT a module-level jnp.array: a single shared JAX array
+# object referenced as a fallback across many different jax.jit trace
+# contexts (e.g. repeated EnsemblePlan.run() calls under vmap, as happens in
+# _run_stacked_dispatch) can trigger "leaked tracer" errors from a later
+# trace picking up a stale reference tied to an earlier, already-exited
+# trace. Constructing a fresh jnp.array from this tuple inside
+# _host_box_size on every call avoids any possibility of that -- found while
+# testing solvate_protein_to_bundle under real stacked dispatch (2+
+# heterogeneous solvated proteins), where it reproduces reliably; B1's
+# water class never triggered it, likely because its box_size fallback
+# path is exercised far less variably (single topology, not a genuine mix).
+_DEFAULT_PBC_BOX_SIZE = (30.0, 30.0, 30.0)
 
 
-def _host_box_size(bundle: MolecularBundle, default: jnp.ndarray) -> jnp.ndarray:
+def _host_box_size(bundle: MolecularBundle, default: tuple[float, float, float]) -> jnp.ndarray:
     """Concrete (3,) box size for PhysicsSystem's static box_size field.
 
     ``MolecularBundle.box`` is deliberately a DYNAMIC field (see
@@ -270,7 +282,7 @@ def _host_box_size(bundle: MolecularBundle, default: jnp.ndarray) -> jnp.ndarray
         # rather than silently propagating as a "static" tracer.
         return jnp.array([float(diag[0]), float(diag[1]), float(diag[2])])
     except (TypeError, ValueError, jax.errors.ConcretizationTypeError):
-        return default
+        return jnp.array(default)
 
 
 def _dense_excl_matrices_from_bundle(
