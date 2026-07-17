@@ -82,11 +82,42 @@ Running the benchmark (L2 CPU, then a bathos-tracked run `cb191665-a6c4-4552-95d
 
 **Updated recommendation**: do not invest further time in 761 (wiring or re-benchmarking) until debt 765 is resolved as its own piece of work. Debt 763 (tile-size-256-divisibility) remains a separate, independent, still-unverified risk on top of this — both must be addressed before flash forces can be trusted on bundle-derived systems.
 
-## Recommended sequencing (updated post-runtime-finding)
+## Independent Opus review corrections (2026-07-17)
+
+An independent architecture review (fresh agent, not inherited context, `praxia-code-architecture-advisor` @ Opus) verified every load-bearing claim above against the actual code and found the plan's **central sequencing thesis is wrong**: debt 760 is NOT unblocked. It shares debt 765's exclusion-layout problem.
+
+### The dependency the original scoping missed
+
+Two bundle-world neighbor-list functions already exist and were **not found during the original scoping**: `single_padded_energy_nl`/`single_padded_energy_nl_cvjp` (`batched_energy.py:824,898`). These, and the `Protein`-world kernels 760's design proposed reusing (`chunked_lj_energy_nl`/`chunked_coulomb_energy_nl`, `optimization.py:146-160,305-316`), **all require the same per-atom-row `(N, max_excl_per_atom)` exclusion layout** that `flash_explicit.py` needed — not the pair-list layout `physics_system_from_bundle` actually populates. Debt 760's own proposed step 3 ("mirror `system.py:175-218` exactly") routes bundle exclusions into these kernels and would crash identically to the flash benchmark. **765 is shared foundational infrastructure for the entire NL/flash kernel family, not a 761-specific blocker.**
+
+Good news buried in this: 765's fix is easier than scoped. `map_exclusions_to_dense_padded` (`neighbor_list.py:236-303`) **already exists** and already produces the exact per-atom-row layout these kernels need — 765 is mostly wiring an existing helper into bundle construction, not new code.
+
+### A second gap: no PME-over-neighbors term exists yet, anywhere
+
+`single_padded_energy_nl`'s Coulomb branch is explicitly dense, vacuum-only (`pme_alpha=0`, no PME reciprocal) — confirmed in code, not previously known. Debt 760, to actually deliver the PME+SETTLE explicit-solvent case this session's heterogeneous-batching work is centered on, needs a **new damped-direct-space Coulomb-over-neighbors term** (only the per-atom-row `chunked_coulomb_energy_nl` exists) composed with the reusable PME reciprocal correction, **plus a PME-under-neighbor-list parity test** against the already-confirmed dense baseline. This is real new physics wiring, not "no new physics" as originally scoped.
+
+### Other corrections
+
+- No jax_md escape hatch exists for in-loop capacity resize (confirms the original "host-check, don't resize" call) — but `make_neighbor_list_fn` **hardcodes `capacity_multiplier=1.25`** (`neighbor_list.py:159,168`), so "generous static capacity" requires explicitly plumbing a higher multiplier, not assuming the default is generous.
+- Host-side overflow response should be **reallocate + re-run the block** (mirroring `simulate.py`'s epoch loop), not "assert/raise" — asserting throws away the whole dispatched block for what may be a recoverable, cheap host-boundary retry.
+- The NL kernel cost is **linear in `max_neighbors`** (capacity) — over-provisioning a shared conservative capacity is a first-order compute cost, not "some wasted compute" as originally framed. Static capacity is already implicitly part of the compiled shape signature whether or not it's named a bucket axis. Recommendation stands (fixed conservative capacity over an explicit bucket axis, to preserve the confirmed compile-sharing) but **must be measured**, and the 1VII/2GB1 compile-sharing test should be re-run specifically checking that differing per-protein required capacities don't silently break the shared compile.
+- The periodic "every K steps" neighbor update needs a counter threaded into the dispatch carry (`step_fn` currently receives no step index, `ensemble_dispatch.py:206`) — in tension with the original "no changes needed to `dispatch_n_steps_inference`" claim. Wrapping the carry in a struct also touches 3 call sites that currently access `state.position` directly (`ensemble_dispatch.py:214`'s `on_step` hook, `ensemble_plan.py:541,622`) — not a blocker, but not "no changes needed" either.
+- `energy_fn_from_bundle` explicitly does `del kwargs` (`bundle_md.py:461`) — threading `neighbor=` through requires touching it and confirming `settle_langevin`'s `apply_fn` forwards the kwarg, not just adding the parameter.
+- Multiple additional `float(sys.*)` concretization points exist in `flash_explicit.py` beyond the one already found (`:428, :481, :489` in addition to `:439`) — a broader static/dynamic field convention gap in that file that will resurface even after 765 is fixed.
+
+### Corrected sequencing
+
+**765 first** (shared prerequisite for both 760 and 761, ~1-2 days — easier than expected since `map_exclusions_to_dense_padded` already exists) → **760** (re-scoped to include the new damped-Coulomb-over-neighbors term + PME-under-NL parity validation, revised effort **~4-7 days, not 3-5**) → **761** becomes a cheap re-measure once 765 has already unblocked flash, likely a half-day to re-run the benchmark plus the original ~1-2 day wiring if it's still worth it.
+
+What NOT to change, per the review: don't add an explicit capacity bucket axis (agrees with the original recommendation, just wants it measured); don't try to preserve `simulate.py`'s in-loop reallocation (confirmed no escape hatch exists); don't touch `settle.py` (confirmed the `eval_shape` auto-detection genuinely needs no changes); don't attempt flash parity work before 765 lands (it will crash identically to the benchmark already run).
+
+## Recommended sequencing — SUPERSEDED, see "Independent Opus review corrections" above
+
+The sequencing below was this document's original recommendation, written before the independent review found that debt 765 is a *shared* prerequisite for 760 (not just 761). **It is kept here for the record but should not be followed as written** — see the corrected sequencing in the review-corrections section above (765 → 760 [re-scoped] → 761).
 
 1. ~~Build+run the flash-vs-autodiff benchmark~~ — done. Result: debt 761 is blocked by debt 765 (exclusion-layout mismatch), not just unmeasured — see the runtime-finding section above.
-2. File debt for the tile-size divisibility bug — done, debt 763. File debt for the exclusion-layout mismatch — done, debt 765 (P1, primary blocker for 761).
-3. Decide the NL-capacity-vs-bucket design for 760 (recommend option (a)).
-4. **Implement 760 (3-5 days) — proceed first.** The connection work with the clearer, larger expected payoff (dense O(N²) → O(N·K) is a first-order algorithmic win at ~2000-atom solvated-protein scale), no unresolved blocking unknowns, and no dependency on 761/763/765.
-5. **761 is now deprioritized behind 760.** Before any further 761 work: fix debt 765 (exclusion-layout reconciliation) as its own scoped task, then debt 763 (tile-size), then re-run this benchmark to see if there's actually a speed win worth wiring in.
+2. File debt for the tile-size divisibility bug — done, debt 763. File debt for the exclusion-layout mismatch — done, debt 765 (P1, primary blocker for 761 — ~~and, per the review, for 760 too~~).
+3. Decide the NL-capacity-vs-bucket design for 760 (recommend option (a), confirmed by review — but measure the linear capacity cost).
+4. ~~Implement 760 (3-5 days) — proceed first.~~ **Incorrect — 760 shares 765's blocker. See corrected sequencing above.**
+5. ~~761 is now deprioritized behind 760.~~ **Incorrect ordering — 765 unblocks both; do 765 first.**
 6. After 760 lands: re-run the 1VII/2GB1 compile-sharing test to confirm no regression, then resume the deferred profiling backlog (tasks #26/#27/#28/#30/#32, debts 750/756).
