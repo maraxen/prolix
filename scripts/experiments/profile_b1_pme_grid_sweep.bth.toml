@@ -1,0 +1,48 @@
+[experiment]
+hypothesis = """
+Phase 4 Step 4 (task 260715_b1_physics_parity): pme_grid_points=64 is
+hardcoded unconditionally in physics_system_from_bundle (bundle_md.py),
+regardless of system size -- for B1's water box (30x30x30 Angstrom, 4
+waters/12 atoms), this yields a 64x64x64 dense FFT grid, almost certainly
+wildly oversized (typical PME grid spacing convention is ~1 Angstrom; a
+right-sized grid for a 30A box would be closer to ~30 points per axis).
+Sweeping pme_grid_points in {64 (baseline), 32, 16, 8} and re-measuring
+per-step cost (energy, grad, and a full settle_langevin step, both
+single-system and 16-replica vmap width) should show a real, positive
+speedup at smaller grid sizes -- measurement only, no production change.
+
+This measurement is only meaningful now that real PME reciprocal energy
+actually executes under vmap (fix 395995b, research record
+260717_pme_reciprocal_silently_disabled_under_stacked_dispatch) -- before
+that fix, this sweep would have measured a code path that never ran in
+production.
+"""
+
+[outcomes.pass]
+condition = "n_grid_points_measured IS NOT NULL AND n_grid_points_measured >= 3 AND best_full_step_speedup IS NOT NULL AND best_full_step_speedup > 1.0"
+decision = "Grid right-sizing is a real, measurable speedup -- feed best_full_step_speedup and baseline_energy_ms into the Phase 4 synthesis doc's reweighted-gap estimate (water is only 16/64 systems) to decide whether pursuing the production fix (adding a real pme_grid_points field to MolecularBundle, sized via compute_pme_grid_dims) is worth the effort."
+reasoning = "A measured speedup >1.0x across at least 3 of the 4 swept grid sizes confirms the grid-oversizing hypothesis isn't just plausible from reading the code -- it's real and worth acting on."
+
+[outcomes.marginal]
+condition = "n_grid_points_measured IS NOT NULL AND n_grid_points_measured >= 3 AND best_full_step_speedup IS NOT NULL AND best_full_step_speedup <= 1.0"
+decision = "Grid right-sizing alone does not explain a meaningful fraction of the gap -- redirect the synthesis doc toward the scatter/gather cost (order^3-iteration loop in spread_charges, independent of grid size) or SETTLE cost instead, per the HLO trace findings."
+reasoning = "If smaller grids don't measurably speed up energy/grad/full_step, the dominant PME cost is elsewhere (the fixed order^3 scatter/gather work, not the grid array size itself) -- a real, useful negative result, not a failure."
+
+[outcomes.fail]
+condition = "n_grid_points_measured IS NULL OR n_grid_points_measured < 3"
+decision = "Investigate: dataclasses.replace(sys, pme_grid_points=G) may not be taking effect (check for a static-field caching issue similar to the box_size bug in 395995b), or benchmarks are raising exceptions being silently caught somewhere in the sweep loop -- check the full JSON output's per-grid-point results before re-running."
+reasoning = "Fewer than 3 of the 4 swept grid points producing a measurement means the sweep itself is broken, not that the speedup is small -- do not report a null/near-null result from this state as a real negative finding."
+is_residual = true
+
+[result_schema]
+dry_run = "bool"
+replicas = "int"
+n_grid_points_swept = "int"
+n_grid_points_measured = "int"
+baseline_energy_ms = "float"
+best_full_step_speedup = "float"
+
+[metadata]
+campaign_id = "32d6574e"
+campaign_mode = "exploration"
+tags = ["b1", "phase4", "profiling", "pme", "grid-sweep"]

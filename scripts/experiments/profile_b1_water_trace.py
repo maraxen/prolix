@@ -61,7 +61,7 @@ logging.basicConfig(
 )
 log = logging.getLogger("profile_b1_water_trace")
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "scripts" / "benchmarks"))
 
 # Prereg pins (must match scripts/benchmarks/b1_init_exec.py)
@@ -302,11 +302,24 @@ def main() -> int:
     log.info("jax.config.x64_enabled = %s", jax.config.x64_enabled)
     log.info("jax.devices() = %s", jax.devices())
 
-    summary = {}
-    if args.hlo_only:
-        summary["hlo_only"] = run_hlo_only(args.replicas, args.n_steps)
-    if args.trace:
-        summary["trace"] = run_trace(args.replicas, args.n_steps, args.n_trials)
+    hlo_result = run_hlo_only(args.replicas, args.n_steps) if args.hlo_only else None
+    trace_result = run_trace(args.replicas, args.n_steps, args.n_trials) if args.trace else None
+
+    # Flat top-level fields for bathos's DuckDB-based outcome gate (result_schema
+    # in profile_b1_water_trace.bth.toml expects flat scalars) -- nested
+    # hlo_only/trace blocks remain for direct analysis/synthesis-doc use.
+    mode = "both" if (hlo_result and trace_result) else ("hlo_only" if hlo_result else "trace")
+    summary = {
+        "mode": mode,
+        "n_steps": args.n_steps,
+        "replicas": args.replicas,
+        "n_while_bodies_found": hlo_result["n_while_bodies_found"] if hlo_result else None,
+        "n_blocks_found": hlo_result["n_blocks_found"] if hlo_result else None,
+        "n_trials": trace_result["n_trials"] if trace_result else None,
+        "trace_dir": trace_result["trace_dir"] if trace_result else None,
+        "hlo_only": hlo_result,
+        "trace": trace_result,
+    }
 
     text = json.dumps(summary, indent=2, default=str)
     print(text)

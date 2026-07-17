@@ -38,7 +38,7 @@ import jax.numpy as jnp
 from jax_md import space
 
 # Add scripts/ to path for imports
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "scripts" / "benchmarks"))
 
 logging.basicConfig(
@@ -115,6 +115,12 @@ def main():
         type=int,
         default=5,
         help="Inner loop iterations per trial (default: 5)",
+    )
+    parser.add_argument(
+        "--out",
+        type=Path,
+        default=ROOT / "outputs" / "profiling" / "b1_pme_grid_sweep.json",
+        help="Result JSON path (bathos --out convention: must be a persistent path, not tmp/)",
     )
     args = parser.parse_args()
 
@@ -353,8 +359,24 @@ def main():
                 line += f", vmap {result['full_step_vmap_speedup']:.2f}x"
             log.info(line)
 
-    # Output JSON
+    # Flat top-level fields for bathos's DuckDB-based outcome gate (result_schema
+    # in profile_b1_pme_grid_sweep.bth.toml expects flat scalars, not the nested
+    # config/system/results structure below, which remains for direct analysis).
+    baseline_result = next((r for r in results if r["grid_points"] == 64), None)
+    n_grid_points_measured = sum(1 for r in results if r.get("energy_ms") is not None)
+    best_full_step_speedup = max(
+        (r["full_step_speedup"] for r in results if r.get("full_step_speedup") is not None),
+        default=None,
+    )
+
     output = {
+        "dry_run": args.dry_run,
+        "replicas": args.replicas,
+        "x64_enabled": bool(jax.config.x64_enabled),
+        "n_grid_points_swept": len(grid_points_list),
+        "n_grid_points_measured": n_grid_points_measured,
+        "baseline_energy_ms": baseline_result["energy_ms"] if baseline_result else None,
+        "best_full_step_speedup": best_full_step_speedup,
         "config": {
             "grid_points_list": grid_points_list,
             "replicas": args.replicas,
@@ -370,14 +392,13 @@ def main():
         "results": results,
     }
 
-    output_path = Path("tmp/pme_grid_sweep.json")
-    output_path.parent.mkdir(exist_ok=True, parents=True)
-    with open(output_path, "w") as f:
+    args.out.parent.mkdir(exist_ok=True, parents=True)
+    with open(args.out, "w") as f:
         json.dump(output, f, indent=2)
 
     log.info("")
     log.info("=" * 80)
-    log.info(f"Output written to {output_path}")
+    log.info(f"Output written to {args.out}")
     log.info("=" * 80)
 
 

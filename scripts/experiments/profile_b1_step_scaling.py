@@ -46,7 +46,7 @@ logging.basicConfig(
 )
 log = logging.getLogger("profile_b1_step_scaling")
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[2]
 PDB_DIR = ROOT / "data" / "pdb"
 
 # Prereg pins (must match b1_init_exec.py)
@@ -196,7 +196,7 @@ def main() -> int:
     if args.dry_run:
         summary = {
             "mode": "dry-run",
-            "class": args.bundle_class or "all-4-aggregate",
+            "shape_class": args.bundle_class or "all-4-aggregate",
             "bundle_info": bundle_info,
         }
         print(json.dumps(summary, indent=2))
@@ -304,7 +304,7 @@ def main() -> int:
 
     summary = {
         "mode": args.mode,
-        "class": args.bundle_class or "all-4-aggregate",
+        "shape_class": args.bundle_class or "all-4-aggregate",
         "replicas": args.replicas,
         "per_step_corrected_s": slope,
         "compile_fixed_s": intercept,
