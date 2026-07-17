@@ -343,13 +343,15 @@ def main():
 
         # Log summary
         if result["energy_speedup"] is not None:
-            log.info(f"  Grid {G}: energy {result['energy_speedup']:.2f}x, "
-                     f"grad {result['grad_speedup']:.2f}x", end="")
+            line = (
+                f"  Grid {G}: energy {result['energy_speedup']:.2f}x, "
+                f"grad {result['grad_speedup']:.2f}x"
+            )
             if result["full_step_speedup"] is not None:
-                log.info(f", full_step {result['full_step_speedup']:.2f}x", end="")
+                line += f", full_step {result['full_step_speedup']:.2f}x"
             if result["full_step_vmap_speedup"] is not None:
-                log.info(f", vmap {result['full_step_vmap_speedup']:.2f}x", end="")
-            log.info("")
+                line += f", vmap {result['full_step_vmap_speedup']:.2f}x"
+            log.info(line)
 
     # Output JSON
     output = {
