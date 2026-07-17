@@ -1,10 +1,16 @@
-# Next steps — after B1-XTRAX-WIRE (superseded — Claim-1 closed, re-tested under physics parity, closed again)
+# Next steps — after B1-XTRAX-WIRE (superseded — Claim-1 closed, re-tested under supposed physics parity, PME bug found, re-run pending)
 
-**date:** 2026-07-15 (original), updated 2026-07-16/17 (Phase 3 physics-parity re-run)
-**campaign:** `2115b4dd` (`b1-full`, confounded physics) — **CONCLUDED: fail**; `c3644ac7` (`b1-full-parity`, genuine physics) — **CONCLUDED: fail, more decisively**
-**status:** Claim-1 (H1) **FALSIFIED** under both the original confounded comparison and the corrected, physics-matched re-run.
-**leaves:** B1-INFER, B1-XTRAX-WIRE, B1-AOT-RATIO, B1-FINITE-GATE, B1-SETTLE-STACK, B1-NONBONDED-PARITY all completed. Full re-run (Phase 3) completed 2026-07-16.
+**date:** 2026-07-15 (original), updated 2026-07-16/17 (Phase 3 physics-parity re-run), corrected 2026-07-17 (PME stacked-dispatch bug)
+**campaign:** `2115b4dd` (`b1-full`, confounded physics) — **CONCLUDED: fail**; `c3644ac7` (`b1-full-parity`, believed-genuine physics) — **CONCLUDED: fail, more decisively — but see correction below, this campaign's water-class physics was NOT actually PME-complete**
+**status:** Claim-1 (H1) **FALSIFIED** under both the original confounded comparison and the Phase 3 re-run. **However, Phase 3's "genuine physics parity" claim is INCORRECT for the water class** — see "Correction (2026-07-17)" below. A further re-run is needed before Phase 3's 7.28x number can be cited as the physics-matched result.
+**leaves:** B1-INFER, B1-XTRAX-WIRE, B1-AOT-RATIO, B1-FINITE-GATE, B1-SETTLE-STACK, B1-NONBONDED-PARITY all completed. Full re-run (Phase 3) completed 2026-07-16. PME stacked-dispatch bug found+fixed 2026-07-17 (commit `395995b`).
 **invariants:** `.praxia/loop_priorities.toml`
+
+## Correction (2026-07-17) — PME reciprocal energy was silently disabled for the entire Phase 3 re-run
+
+While building a Phase 4 profiling script, found the compiled HLO for B1's real production dispatch (`EnsemblePlan`'s stacked/vmapped path, the *only* path B1 ever uses at B>1) contained zero PME/FFT instructions. Confirmed via 4 independent tests: real `EnsemblePlan.run()` gave bit-identical trajectories regardless of `pme_alpha`/`box_size` whenever dispatched through the stacked path, while single-bundle dispatch and hand-wired `settle_langevin` calls both showed genuine PME sensitivity. Two root causes, both required: (1) `physics_system_from_bundle`'s `box_size` derivation had no vmap-safe fallback (unlike `pme_alpha`/`nonbonded_cutoff`, which already had one) — a traced value landed in a field declared `static=True`; (2) the PME exclusion-correction branch derived 1-2/1-3/1-4 pairs via pure Python/numpy graph traversal (`topology.find_bonded_exclusions`), fundamentally unable to run under `jax.vmap`/`jit` tracing. Both raised exceptions silently caught by `single_padded_energy`'s (deliberately broad, to catch a legitimate one-time shape-probe) except clause. Fixed in commit `395995b`: `_host_box_size` mirrors the existing `_host_float` pattern; the exclusion correction now reuses `bundle.excl_indices`/`excl_scales_elec` (already precomputed host-side, already vmap-safe) instead of the host-only traversal. Verified 4 ways post-fix + a regression sweep (target parity test 3/3 pass, broader 8-file sweep 15 passed / 3 pre-existing-and-unrelated failures confirmed by direct comparison against the pre-fix code). Full record: memory `project_b1_pme_stacked_dispatch_fix_260717`, research record `260717_pme_reciprocal_silently_disabled_under_stacked_dispatch`.
+
+**Implication: SETTLE constraints genuinely ran in Phase 3 (independently verified), but PME reciprocal did not.** The reported 7.28x slowdown reflects prolix's water class *without* real PME reciprocal cost for 16/64 systems. Since real PME only adds compute, not removes it, the true physics-matched gap is likely **larger**, not smaller — but this needs a re-run to confirm, not just asserted. Do not cite 7.28x as the physics-matched number until that re-run lands.
 
 ## Phase 3 outcome (2026-07-16/17) — genuine physics parity re-run
 
