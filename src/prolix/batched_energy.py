@@ -365,6 +365,64 @@ def _lj_energy_neighbor_list(
 # BATCHED EVALUATION
 # ==============================================================================
 
+def _pme_exclusion_correction_from_pairs(
+    r: Array,
+    displacement_fn: space.DisplacementFn,
+    excl_indices: Array,
+    excl_scales_elec: Array,
+    charges: Array,
+    pme_alpha: float,
+    n_atoms: int,
+) -> Array:
+    """Vmap-safe PME reciprocal-space exclusion correction.
+
+    Removes double counting for excluded/scaled bonded pairs (same formula
+    as ``explicit_corrections.pme_exclusion_correction_energy``), but reads
+    per-pair scale factors directly from bundle-precomputed
+    ``excl_indices``/``excl_scales_elec`` (populated in
+    ``bundle_md.physics_system_from_bundle``) instead of deriving separate
+    1-2/1-3/1-4 groups via ``topology.find_bonded_exclusions``. That function
+    does pure Python/numpy graph traversal on ``sys.bonds`` and cannot run
+    under ``jax.vmap``/``jax.jit`` tracing at all -- under EnsemblePlan's
+    stacked/vmapped dispatch (any B > 1, i.e. B1's real production path),
+    calling it raised ``TracerArrayConversionError`` on every real
+    evaluation, silently caught by ``single_padded_energy``'s (deliberately
+    broad, to also catch the one-time ``jax.eval_shape`` probe) except
+    clause -- meaning this correction, and therefore PME reciprocal energy's
+    entire ``if not implicit_solvent`` contribution, never executed for any
+    multi-bundle stacked water-class dispatch. Confirmed via research record
+    260717_pme_reciprocal_silently_disabled_under_stacked_dispatch.
+
+    Padding rows in ``excl_indices`` are pre-redirected to index ``n_atoms``
+    at bundle-construction time (see ``physics_system_from_bundle``), so the
+    ``< n_atoms`` bounds check below correctly zeroes their contribution.
+    """
+    i_idx = excl_indices[:, 0]
+    j_idx = excl_indices[:, 1]
+    valid = (i_idx < n_atoms) & (j_idx < n_atoms) & (i_idx != j_idx)
+    i_safe = jnp.clip(i_idx, 0, max(n_atoms - 1, 0))
+    j_safe = jnp.clip(j_idx, 0, max(n_atoms - 1, 0))
+
+    r_i = r[i_safe]
+    r_j = r[j_safe]
+    dr = jax.vmap(displacement_fn)(r_i, r_j)
+    dist = space.distance(dr) + 1e-6
+
+    q_i = charges[i_safe]
+    q_j = charges[j_safe]
+    erf_term = jax.scipy.special.erf(pme_alpha * dist)
+    e_pair_recip = COULOMB_CONSTANT * (q_i * q_j / dist) * erf_term
+
+    # excl_scales_elec is the fraction of the FULL (unscreened) interaction
+    # that should remain (0.0 = fully excluded 1-2/1-3 pair, ~0.833 = scaled
+    # 1-4 pair) -- the reciprocal-space contribution to REMOVE is the
+    # complement of that, matching pme_exclusion_correction_energy's
+    # `factor = 1.0 - scale_factor` convention exactly, just per-pair
+    # instead of per-group.
+    factor = jnp.where(valid, 1.0 - excl_scales_elec, 0.0)
+    return -jnp.sum(e_pair_recip * factor)
+
+
 def _pme_reciprocal_and_corrections(
     r: Array,
     sys: PaddedSystem,
@@ -386,7 +444,6 @@ def _pme_reciprocal_and_corrections(
     """
     from prolix.physics import explicit_corrections
     from prolix.physics.pme import make_spme_energy_fn, spme_background_energy
-    from prolix.utils import topology
 
     box_arr = jnp.asarray(sys.box_size)
     mean_l = jnp.mean(box_arr.astype(jnp.float64))
@@ -403,24 +460,17 @@ def _pme_reciprocal_and_corrections(
     )
 
     if not implicit_solvent:
-        if sys.bonds is not None and sys.bonds.shape[0] > 0:
-            excl = topology.find_bonded_exclusions(sys.bonds, N)
-            idx_12, idx_13, idx_14 = excl.idx_12, excl.idx_13, excl.idx_14
-        else:
-            z = jnp.zeros((0, 2), dtype=jnp.int32)
-            idx_12 = idx_13 = idx_14 = z
-        coul_14 = 0.83333333
         safe_charges = jnp.where(sys.atom_mask, sys.charges, jnp.float32(0.0))
-        e_elec = e_elec + explicit_corrections.pme_exclusion_correction_energy(
-            r,
-            displacement_fn,
-            idx_12,
-            idx_13,
-            idx_14,
-            safe_charges,
-            float(sys.pme_alpha),
-            float(coul_14),
-        )
+        if sys.excl_indices is not None and sys.excl_indices.shape[0] > 0:
+            e_elec = e_elec + _pme_exclusion_correction_from_pairs(
+                r,
+                displacement_fn,
+                sys.excl_indices,
+                sys.excl_scales_elec,
+                safe_charges,
+                float(sys.pme_alpha),
+                N,
+            )
         safe_sigmas = jnp.where(sys.atom_mask, sys.sigmas, jnp.float32(1.0))
         safe_epsilons = jnp.where(sys.atom_mask, sys.epsilons, jnp.float32(0.0))
         n_tail = sys.n_real_atoms if sys.n_real_atoms is not None else N

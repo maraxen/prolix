@@ -216,6 +216,63 @@ def _host_float(x: object, default: float) -> float:
         return default
 
 
+# B1's only periodic shape class today (4-water TIP3P) uses a 30x30x30 Å box
+# (scripts/benchmarks/b1_init_exec.py:_four_water_bundle). Matches the same
+# scoped-default philosophy as pme_alpha's 0.34 fallback below -- not a
+# general solution, but correct for every periodic system this codebase
+# currently constructs. See _host_box_size's docstring for why a fallback
+# is needed at all.
+_DEFAULT_PBC_BOX_SIZE = jnp.array([30.0, 30.0, 30.0])
+
+
+def _host_box_size(bundle: MolecularBundle, default: jnp.ndarray) -> jnp.ndarray:
+    """Concrete (3,) box size for PhysicsSystem's static box_size field.
+
+    ``MolecularBundle.box`` is deliberately a DYNAMIC field (see
+    ``MolecularBundle``'s docstring: "All topology arrays are DYNAMIC ... to
+    avoid XLA recompilation per distinct topology") -- but ``PhysicsSystem.
+    box_size`` is ``eqx.field(static=True)``, since real FFT grid dimensions
+    genuinely depend on its concrete value. Under EnsemblePlan's stacked/
+    vmapped N_MOLS dispatch (B1's real production path for any B > 1), the
+    per-bundle ``bundle.box`` a caller sees inside the vmapped closure is a
+    BatchTracer, not a concrete array, regardless of whether every replica in
+    the stack is physically identical (which they are, for a shape-class
+    group built by tiling one template -- vmap doesn't know that a priori).
+
+    Before this fix, ``box_size`` was derived unconditionally
+    (``jnp.diag(bundle.box)``) with no fallback -- assigning a live tracer
+    into a field declared ``static=True`` (silently, no error at
+    construction time; Equinox just warns). Downstream, ``jax.grad``'s
+    ``jax.eval_shape`` probe caught the resulting ``ConcretizationTypeError``
+    correctly (that was the intended, documented case), but the SAME
+    exception fires on every REAL evaluation too (not just the probe) once
+    box_size is a real tracer -- and ``single_padded_energy``'s except clause
+    (necessarily broad, to catch the probe) silently swallowed it every time,
+    meaning PME reciprocal-space energy never actually executed for any
+    multi-bundle stacked dispatch. Confirmed via 4 independent tests
+    (research record 260717_pme_reciprocal_silently_disabled_under_stacked_dispatch):
+    real ``EnsemblePlan.run()`` trajectories were bit-identical regardless of
+    ``pme_alpha`` whenever dispatched through the stacked (B > 1) path, while
+    single-bundle dispatch and hand-wired settle_langevin calls both showed
+    genuine PME sensitivity.
+
+    Mirrors the existing ``_host_float`` fallback pattern (already used for
+    ``pme_alpha``/``nonbonded_cutoff`` below) rather than introducing a new
+    approach -- same accepted tradeoff, same limitation: this is correct for
+    every periodic system this codebase currently constructs, not a general
+    fix for arbitrarily-varying box sizes within one stacked group.
+    """
+    diag = jnp.diag(jnp.asarray(bundle.box))
+    try:
+        # jnp.diag itself never raises under tracing (it's a normal traced op)
+        # -- force concretization per-element via float(), mirroring
+        # _host_float, so a traced bundle.box is actually detected here
+        # rather than silently propagating as a "static" tracer.
+        return jnp.array([float(diag[0]), float(diag[1]), float(diag[2])])
+    except (TypeError, ValueError, jax.errors.ConcretizationTypeError):
+        return default
+
+
 def _dense_excl_matrices_from_bundle(
     bundle: MolecularBundle,
     n_atoms: int,
@@ -287,9 +344,29 @@ def physics_system_from_bundle(
 
     box_size = None
     if bundle.shape_spec.has_pbc:
-        box_size = jnp.diag(bundle.box).astype(positions.dtype)
+        box_size = _host_box_size(bundle, _DEFAULT_PBC_BOX_SIZE).astype(positions.dtype)
 
     dense_vdw, dense_elec = _dense_excl_matrices_from_bundle(bundle, n)
+
+    # Padding-safe pair-list exclusions for the PME reciprocal-space correction
+    # (_pme_reciprocal_and_corrections in batched_energy.py) -- the dense direct-
+    # space path above doesn't need this (it already has dense_vdw/dense_elec),
+    # but the PME correction requires a per-pair (i, j) list, and MUST be
+    # precomputed here (bundle-construction time, always concrete/host-side) --
+    # unlike box_size/pme_alpha above, there's no viable trace-time fallback:
+    # the natural way to derive per-pair exclusions from raw bonds
+    # (topology.find_bonded_exclusions) is pure Python/numpy graph traversal,
+    # fundamentally unable to run under jax.vmap/jit tracing at all. Reusing
+    # bundle.excl_indices/excl_scales_elec here (already correctly populated
+    # host-side at bundle construction, already vmap-safe) avoids needing that
+    # traversal a second time. Padding rows are redirected to index `n`
+    # (guaranteed out-of-bounds, safely excluded by any `< n_atoms` bounds
+    # check) rather than left as whatever sentinel bundle.excl_mask marks --
+    # same defensive pattern as _scatter_water_target's padding-row redirect
+    # for SETTLE (B1-SETTLE-STACK, .praxia/docs/specs/260715_b1-settle-stack.md).
+    excl_indices = jnp.where(
+        bundle.excl_mask[:, None], bundle.excl_indices, n
+    )
 
     # Static PhysicsSystem floats: concrete on host; defaults when traced under vmap.
     # Free-space (no PBC) never takes the PME branch; cutoff default matches AKMA tip3p.
@@ -348,6 +425,9 @@ def physics_system_from_bundle(
         nonbonded_cutoff=nonbonded_cutoff,
         dense_excl_scale_vdw=dense_vdw,
         dense_excl_scale_elec=dense_elec,
+        excl_indices=excl_indices,
+        excl_scales_vdw=bundle.excl_scales_vdw,
+        excl_scales_elec=bundle.excl_scales_elec,
     )
 
 
