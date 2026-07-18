@@ -260,6 +260,15 @@ def _coulomb_energy_masked(
 ) -> Array:
     """Computes Coulomb energy with atom masking, exclusion scaling, and damping.
 
+    When ``pme_alpha > 0`` and ``excl_scale_elec`` is given, this applies
+    ``erfc(alpha * r) * scale`` — NOT the self-contained ``(scale - erf(alpha
+    * r))`` convention ``optimization.chunked_coulomb_energy``/
+    ``chunked_coulomb_energy_nl`` use. That means excluded/scaled pairs are
+    *incomplete* on their own: the caller (``single_padded_energy``'s dense
+    branch) must also add ``_pme_exclusion_correction_from_pairs`` via
+    ``_pme_reciprocal_and_corrections`` to get the correct total. Do not call
+    this standalone under PME and treat the result as final (debt 790).
+
     Args:
         excl_scale_elec: (N, N) scale matrix for excluded/scaled pairs.
             If None, no exclusions are applied (legacy behavior).
@@ -434,6 +443,7 @@ def _pme_reciprocal_and_corrections(
     e_lj: Array,
     displacement_fn: space.DisplacementFn,
     implicit_solvent: bool,
+    direct_space_includes_exclusion_correction: bool = False,
 ) -> tuple[Array, Array]:
     """PME reciprocal-space energy + explicit-solvent corrections.
 
@@ -444,6 +454,22 @@ def _pme_reciprocal_and_corrections(
     e_elec/e_lj's shape (always scalar) is unaffected either way. See the
     call site in ``single_padded_energy`` for why this matters (B1-NONBONDED-
     PARITY, `.praxia/docs/specs/260715_b1-nonbonded-parity.md`).
+
+    Args:
+        direct_space_includes_exclusion_correction: True when ``e_elec``'s
+            direct-space term was computed by ``chunked_coulomb_energy_nl``
+            (debt 760's NL path), which already sums ``pair_scale -
+            erf(alpha * r)`` per pair internally -- the same self-contained
+            convention ``system.py``'s ``make_energy_fn`` uses for both its
+            dense and NL branches (system.py:222-226, no separate exclusion
+            correction there either). ``_coulomb_energy_masked`` (the dense
+            fallback here) uses a different, incomplete convention instead
+            (``erfc(alpha * r) * scale``, no ``-erf`` term) that requires
+            ``_pme_exclusion_correction_from_pairs`` below to become
+            complete. Applying that correction unconditionally double-counts
+            it on the NL branch -- root cause of debt 790 (originally
+            misattributed to the NL kernels themselves; they were always
+            correct, see test_nl_kernel_exclusion_parity.py).
     """
     from prolix.physics import explicit_corrections
     from prolix.physics.pme import make_spme_energy_fn, spme_background_energy
@@ -467,7 +493,11 @@ def _pme_reciprocal_and_corrections(
         # excl_pair_indices/excl_pair_scales_elec (pair-list, (E,2)/(E,)) --
         # NOT excl_indices/excl_scales_elec, which since debt 765 hold the
         # per-atom-row (N, max_excl) layout NL/flash kernels need.
-        if sys.excl_pair_indices is not None and sys.excl_pair_indices.shape[0] > 0:
+        if (
+            not direct_space_includes_exclusion_correction
+            and sys.excl_pair_indices is not None
+            and sys.excl_pair_indices.shape[0] > 0
+        ):
             e_elec = e_elec + _pme_exclusion_correction_from_pairs(
                 r,
                 displacement_fn,
@@ -525,36 +555,40 @@ def single_padded_energy(sys: PaddedSystem, displacement_fn: space.DisplacementF
             PME-over-neighbor-list Coulomb term existed anywhere in the
             bundle world before this — this mirrors ``system.py``'s own
             ``electrostatics_energy_fn_bound`` NL branch exactly, not new
-            physics). PME reciprocal + exclusion correction + LJ-tail
-            (below) are identical either way — only the direct-space method
-            changes. Requires ``sys.excl_indices``/``excl_scales_vdw``/
+            physics). Requires ``sys.excl_indices``/``excl_scales_vdw``/
             ``excl_scales_elec`` to be the per-atom-row ``(N, max_excl)``
             layout (debt 765) — always true for bundle-derived systems as of
             that fix.
 
-            !!! DO NOT USE IN PRODUCTION YET (debt 790, filed 2026-07-17) !!!
-            ``chunked_lj_energy_nl``/``chunked_coulomb_energy_nl`` themselves
-            (not this wiring) have a confirmed, currently-unfixed correctness
-            bug: they give silently, wildly wrong energy (wrong sign, >10x
-            magnitude error, verified on the real 1VII solvated-protein
-            bundle: +30262 vs the correct -2544 kcal/mol) whenever BOTH (a)
-            a real, non-trivial per-atom exclusion table (debt 765's
-            ``excl_indices``, ~10-20 real exclusions/atom, not the trivial
-            empty case) AND (b) production molecular scale (N~2000+, dense
-            neighbor lists) are present simultaneously. Isolated to the
-            kernels' internal exclusion-matching/tile-accumulation logic
-            (``optimization.py``'s ``f_tile`` closures + ``tiling.py``'s
-            ``tile_reduction_nl``), NOT this function's wiring, NOT the
-            exclusion data itself (independently verified correct via
-            ``_build_dense_exclusion_scales`` producing an exact match with
-            ``sys.dense_excl_scale_elec``), NOT ghost/padding atoms (ruled
-            out: they have charge=sigma=epsilon=0, already zero regardless
-            of masking). See debt 790 for the full bisection trail. This
-            branch is left wired (not reverted) because the design is
-            otherwise correct and this is the natural landing point once the
-            kernel bug is fixed — but any caller passing ``neighbor=`` today
-            will get silently wrong energy, exactly the failure mode this
-            warning exists to prevent.
+            debt 790 (filed 2026-07-17, root-caused and fixed 2026-07-18):
+            this branch was initially blocked by a confirmed, wildly-wrong
+            energy under real PME exclusions. Root cause was NOT the NL
+            kernels (``chunked_lj_energy_nl``/``chunked_coulomb_energy_nl``
+            are self-contained and correct — they already sum ``pair_scale -
+            erf(alpha * r)`` per pair internally, the same convention
+            ``system.py``'s already-validated NL branch uses). It was
+            ``_pme_reciprocal_and_corrections`` unconditionally adding the
+            separate ``_pme_exclusion_correction_from_pairs`` term needed to
+            complete the dense path's different, incomplete convention
+            (``_coulomb_energy_masked`` uses ``erfc(alpha*r) * scale``, no
+            ``-erf`` term) — double-counting that correction on the NL
+            branch, whose direct-space term already includes it. Fixed by
+            passing ``direct_space_includes_exclusion_correction=(neighbor
+            is not None)`` into ``_pme_reciprocal_and_corrections``. See
+            ``tests/physics/test_nl_kernel_exclusion_parity.py`` (permanent
+            regression test) and
+            ``.praxia/docs/decisions/260717_b1-connect-existing-engines-scope.md``
+            for the full bisection trail. PME reciprocal + LJ-tail (below)
+            are unaffected and identical either way — only the exclusion
+            correction is now conditional on which direct-space path ran.
+
+            (Original filing misdiagnosed the NL kernels themselves as
+            broken, based on a comparison against ``_coulomb_energy_masked``
+            in isolation — which is itself incomplete-by-design and only
+            correct when paired with the exclusion correction it was never
+            given in that isolated test. Ghost/padding atoms and the
+            exclusion data itself were independently ruled out and remain
+            ruled out; see the decision doc for the full trail.)
     """
     r = sys.positions
 
@@ -650,7 +684,8 @@ def single_padded_energy(sys: PaddedSystem, displacement_fn: space.DisplacementF
     if sys.box_size is not None and sys.pme_alpha > 0.0:
         try:
             e_elec, e_lj = _pme_reciprocal_and_corrections(
-                r, sys, N, e_elec, e_lj, displacement_fn, implicit_solvent
+                r, sys, N, e_elec, e_lj, displacement_fn, implicit_solvent,
+                direct_space_includes_exclusion_correction=(neighbor is not None),
             )
         except (TypeError, ValueError, jax.errors.ConcretizationTypeError):
             # jax_md.quantity.canonicalize_force / make_force_fn_like_canonicalize
