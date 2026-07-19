@@ -139,10 +139,32 @@ def main() -> int:
     parser.add_argument("--n-steps-list", default="2,10,50,200,800")
     parser.add_argument("--replicas", type=int, default=16)
     parser.add_argument("--out", type=Path, default=None)
+    parser.add_argument(
+        "--use-neighbor-list", action="store_true",
+        help=(
+            "debt 760 Phase 6 step 7: exercise EnsemblePlan.run(use_neighbor_list=True) "
+            "for a single solvated protein's inference dispatch, instead of the dense "
+            "path. IMPORTANT SCOPE LIMIT: use_neighbor_list=True is only wired into "
+            "_run_single_inference (ensemble_plan.py) as of Phase 6 steps 4-5 -- it "
+            "raises if len(bundles) != 1, so it CANNOT be combined with --mode combined "
+            "(the actual cross-protein compile-sharing question this script otherwise "
+            "measures). Extending use_neighbor_list to _run_stacked_dispatch (the "
+            "vmapped multi-bundle path) is real, separate, not-yet-done follow-on work "
+            "-- this flag only confirms NL doesn't break for a single real solvated "
+            "protein's compile/steady-state timing, nothing about cross-protein sharing."
+        ),
+    )
+    parser.add_argument("--nl-update-every", type=int, default=20)
     args = parser.parse_args()
 
     if args.mode == "single" and args.protein is None:
         parser.error("--protein is required when --mode single")
+    if args.use_neighbor_list and args.mode != "single":
+        parser.error(
+            "--use-neighbor-list requires --mode single (use_neighbor_list=True is "
+            "not yet wired into the stacked/multi-bundle dispatch path -- see "
+            "the --use-neighbor-list help text)"
+        )
 
     import jax
 
@@ -187,6 +209,22 @@ def main() -> int:
         for traj in trajectories:
             jax.block_until_ready(traj.positions)
 
+    run_kwargs = {}
+    if args.use_neighbor_list:
+        run_kwargs = {
+            "use_neighbor_list": True,
+            "nl_update_every": args.nl_update_every,
+        }
+        if len(bundles) != 1:
+            log.error(
+                "use_neighbor_list=True requires a single-bundle EnsemblePlan "
+                "(debt 760 scope) -- got %d bundles from mode=%s. Re-run with "
+                "--replicas 1 to test a single protein's NL path, or omit "
+                "--use-neighbor-list for the dense-path (multi-bundle) check.",
+                len(bundles), args.mode,
+            )
+            return 1
+
     n_steps_list = [int(x) for x in args.n_steps_list.split(",")]
     results = []
     for n_steps in n_steps_list:
@@ -194,7 +232,7 @@ def main() -> int:
             plan = EnsemblePlan.from_bundles(bundles)
 
             t_first0 = time.perf_counter()
-            first = plan.run(n_steps=1, dt=DT_FS, kT=KT_KCAL, seed=0, gamma=GAMMA_PS, run_mode="inference")
+            first = plan.run(n_steps=1, dt=DT_FS, kT=KT_KCAL, seed=0, gamma=GAMMA_PS, run_mode="inference", **run_kwargs)
             _block_trajs(first)
             t_first = time.perf_counter() - t_first0
             del first
@@ -202,7 +240,7 @@ def main() -> int:
             t_ss = 0.0
             if n_steps > 1:
                 t_ss0 = time.perf_counter()
-                last = plan.run(n_steps=n_steps - 1, dt=DT_FS, kT=KT_KCAL, seed=1, gamma=GAMMA_PS, run_mode="inference")
+                last = plan.run(n_steps=n_steps - 1, dt=DT_FS, kT=KT_KCAL, seed=1, gamma=GAMMA_PS, run_mode="inference", **run_kwargs)
                 _block_trajs(last)
                 t_ss = time.perf_counter() - t_ss0
                 del last
