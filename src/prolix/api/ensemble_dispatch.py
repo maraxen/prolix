@@ -101,23 +101,44 @@ def dispatch_n_mols(
     fn: Callable[[Any, jnp.ndarray], Any],
     stacked_bundle: Any,
     seeds: jnp.ndarray,
+    *,
+    extra_stacked: Any = None,
 ) -> Any:
     """Dispatch ``fn(bundle, seed)`` over stacked bundles on N_MOLS.
 
     Applies the iterator returned by ``make_axis_dispatch`` (VmapIterator /
     SafeMapIterator). Unsupported strategies raise rather than silent-vmap.
+
+    Args:
+        extra_stacked: Optional additional stacked pytree (same leading batch
+            axis as ``stacked_bundle``/``seeds``) to map alongside them --
+            debt 802 uses this for a per-replica ``jax_md.NeighborList``.
+            When given, ``fn`` is called as ``fn(bundle, seed, extra)``
+            instead of ``fn(bundle, seed)``. Every existing 2-arg caller is
+            unaffected (default ``None`` preserves the original call shape).
     """
     strategy = n_mols_strategy(plan, n_systems)
 
-    def _mapped(pair: tuple[Any, jnp.ndarray]) -> Any:
-        bundle, seed = pair
-        return fn(bundle, seed)
+    if extra_stacked is None:
+
+        def _mapped(pair: tuple[Any, jnp.ndarray]) -> Any:
+            bundle, seed = pair
+            return fn(bundle, seed)
+
+        args = (stacked_bundle, seeds)
+    else:
+
+        def _mapped(triple: tuple[Any, jnp.ndarray, Any]) -> Any:
+            bundle, seed, extra = triple
+            return fn(bundle, seed, extra)
+
+        args = (stacked_bundle, seeds, extra_stacked)
 
     return dispatch_vmap_safemap(
         N_MOLS.name,
         strategy,
         _mapped,
-        (stacked_bundle, seeds),
+        args,
         in_axes=0,
     )
 

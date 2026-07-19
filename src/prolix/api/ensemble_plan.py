@@ -126,11 +126,18 @@ class EnsemblePlan:
                 ``'inference'`` (while_loop carry-only; not AD-safe).
             save_every: Inference XTC stride (steps). Ignored in trajectory mode
                 unless ``xtc_path`` is set (then full traj is flushed once).
-            use_neighbor_list: debt 760 — compute direct-space LJ/Coulomb via
-                O(N*K) neighbor-list kernels instead of the dense O(N²) path.
-                Single-bundle ``run_mode='inference'`` only (raises otherwise
-                if True); periodic (``box_size``) bundles only. Default False
-                preserves existing dense-path behavior exactly.
+            use_neighbor_list: debt 760/802 — compute direct-space LJ/Coulomb
+                via O(N*K) neighbor-list kernels instead of the dense O(N²)
+                path. ``run_mode='inference'`` only (raises otherwise if
+                True); periodic (``box_size``) bundles only. Works for both
+                single-bundle and multi-bundle (vmapped/stacked) dispatch --
+                stacked bundles must share identical ``box_size``/
+                ``cutoff_distance`` (one shared ``NeighborList`` seed is
+                built and reused across the batch, debt 802). The rare
+                "defensive fallback" per-bundle loop inside a shape-class
+                group (should not normally trigger) does not support NL and
+                raises clearly rather than silently degrading compile-sharing.
+                Default False preserves existing dense-path behavior exactly.
             nl_update_every: Steps between neighbor-list rebuilds when
                 ``use_neighbor_list=True`` (ignored otherwise).
 
@@ -153,10 +160,10 @@ class EnsemblePlan:
                 "xtc_path is supported for single-bundle EnsemblePlan runs only"
             )
 
-        if use_neighbor_list and (run_mode != "inference" or len(self.bundles) != 1):
+        if use_neighbor_list and run_mode != "inference":
             raise ValueError(
-                "use_neighbor_list=True requires run_mode='inference' and a "
-                "single-bundle EnsemblePlan (debt 760 scope; see plan doc)"
+                "use_neighbor_list=True requires run_mode='inference' (debt 760/802 "
+                "scope; see plan doc)"
             )
         if use_neighbor_list and xtc_path is not None:
             raise ValueError(
@@ -271,6 +278,8 @@ class EnsemblePlan:
             dt_unit=dt_unit,
             gamma=gamma,
             run_mode="inference",
+            use_neighbor_list=use_neighbor_list,
+            nl_update_every=nl_update_every,
         )
 
     def _run_grouped(
@@ -284,6 +293,8 @@ class EnsemblePlan:
         dt_unit: str,
         gamma: float,
         run_mode: RunMode,
+        use_neighbor_list: bool = False,
+        nl_update_every: int = 20,
     ) -> list[Trajectory]:
         """Host-partition by shape_spec; Vmap/SafeMap within each class (xtrax).
 
@@ -319,6 +330,8 @@ class EnsemblePlan:
                         observables=obs,
                         dt_unit=dt_unit,
                         gamma=gamma,
+                        use_neighbor_list=use_neighbor_list,
+                        nl_update_every=nl_update_every,
                     )
                 else:
                     traj = self._run_single(
@@ -344,10 +357,26 @@ class EnsemblePlan:
                     run_mode=run_mode,
                     bundles_override=group,
                     plan_override=group_plan,
+                    use_neighbor_list=use_neighbor_list,
+                    nl_update_every=nl_update_every,
                 )
             else:
                 # Defensive: same shape_spec should always stack; fall back
-                # without inventing DedupGather of seeded MD.
+                # without inventing DedupGather of seeded MD. NL is not
+                # extended to this rare fallback path (each bundle would
+                # independently allocate/compile its own NL, defeating the
+                # compile-sharing this whole path exists to preserve) --
+                # raise clearly rather than silently ignoring the request.
+                if use_neighbor_list:
+                    raise RuntimeError(
+                        "use_neighbor_list=True: this shape-class group failed "
+                        "can_jit_vmap_n_mols's stackability check and fell back to "
+                        "the defensive per-bundle loop -- NL is not supported there "
+                        "(would defeat the compile-sharing this path exists for). "
+                        "This indicates a real shape_spec/array-shape mismatch "
+                        "within a group partition_bundles_by_shape considered "
+                        "identical -- investigate before retrying."
+                    )
                 trajs = []
                 for j, bundle in enumerate(group):
                     obs = observables
@@ -398,6 +427,8 @@ class EnsemblePlan:
         run_mode: RunMode = "trajectory",
         bundles_override: list[Any] | None = None,
         plan_override: Any | None = None,
+        use_neighbor_list: bool = False,
+        nl_update_every: int = 20,
     ) -> list[Trajectory]:
         """JIT vmap / safe_map over stack-compatible bundles (#2645)."""
         import jax.numpy as jnp
@@ -422,7 +453,10 @@ class EnsemblePlan:
         else:
             plan = self.batch_plan
 
-        def run_one(bundle, seed_i: jnp.ndarray) -> Trajectory:
+        if use_neighbor_list and run_mode != "inference":
+            raise ValueError("use_neighbor_list=True requires run_mode='inference'")
+
+        def run_one(bundle, seed_i: jnp.ndarray, neighbor: Any = None) -> Trajectory:
             obs = observables
             if observables is not None:
                 obs = _observables_for_bundle(bundle, observables)
@@ -438,6 +472,9 @@ class EnsemblePlan:
                     trim_output=False,
                     dt_unit=dt_unit,
                     gamma=gamma,
+                    use_neighbor_list=use_neighbor_list,
+                    nl_update_every=nl_update_every,
+                    initial_neighbor=neighbor,
                 )
             return self._run_single(
                 bundle,
@@ -454,13 +491,37 @@ class EnsemblePlan:
 
         import jax
 
+        stacked_neighbor = None
+        neighbor_fn = None
+        if use_neighbor_list:
+            stacked_neighbor, neighbor_fn = self._build_stacked_neighbor_seed(
+                bundles, integration_prefix
+            )
+
         if run_mode == "inference":
             # One XLA program: vmap × while_loop (step axis inside jit boundary).
             @jax.jit
-            def _batched(sb, sd):
-                return dispatch_n_mols(plan, n_systems, run_one, sb, sd)
+            def _batched(sb, sd, snb):
+                return dispatch_n_mols(plan, n_systems, run_one, sb, sd, extra_stacked=snb)
 
-            batched = _batched(stacked, seeds)
+            batched = _batched(stacked, seeds, stacked_neighbor)
+
+            if use_neighbor_list:
+                overflow_arr = batched.observable_values.pop("_nl_did_overflow", None)
+                if overflow_arr is not None and bool(jnp.any(overflow_arr)):
+                    bumped_capacity = int(0.5 * stacked_neighbor.idx.shape[-1])
+                    retried_neighbor = self._reallocate_stacked_neighbor_seed(
+                        neighbor_fn, bundles, integration_prefix, extra_capacity=bumped_capacity
+                    )
+                    batched = _batched(stacked, seeds, retried_neighbor)
+                    overflow_arr = batched.observable_values.pop("_nl_did_overflow", None)
+                    if overflow_arr is not None and bool(jnp.any(overflow_arr)):
+                        raise RuntimeError(
+                            "Stacked neighbor list overflowed even after reallocating "
+                            f"with +{bumped_capacity} extra capacity -- capacity formula "
+                            "(compute_nl_capacity) likely needs a larger safety_factor "
+                            "for this shape class."
+                        )
         else:
             batched = dispatch_n_mols(
                 plan,
@@ -470,6 +531,82 @@ class EnsemblePlan:
                 seeds,
             )
         return unstack_trajectories(batched, bundles)
+
+    @staticmethod
+    def _build_stacked_neighbor_seed(
+        bundles: list[Any], integration_prefix: int
+    ) -> tuple[Any, Any]:
+        """debt 802: one shared, vmap-safe ``NeighborList`` per bundle, pre-stacked.
+
+        ``neighbor_fn.allocate()`` is host-only and cannot run on a traced
+        position array, so this must happen *before* any bundle enters the
+        vmapped/jitted dispatch. Each bundle's per-replica ``NeighborList`` is
+        derived via ``seed.update(positions)`` rather than an independent
+        ``.allocate()`` call — ``.allocate()`` computes a fresh, data-dependent
+        capacity every time (confirmed empirically: two different position
+        arrays of the same size/box/cutoff allocate to *different* capacities
+        and are therefore not stackable), while ``.update()`` reuses `self`'s
+        static fields (capacity, cell-list closures) applied to new positions,
+        so every bundle's result shares identical pytree metadata with the
+        seed and with each other — directly stackable via
+        ``jax.tree.map(jnp.stack)`` and safe to slice per-replica under vmap.
+        """
+        import jax
+        import jax.numpy as jnp
+
+        from prolix.api.bundle_md import (
+            _host_float,
+            displacement_fn_for_bundle,
+            positions_with_prefix,
+        )
+        from prolix.physics import neighbor_list as nl_mod
+
+        ref = bundles[0]
+        box_vec = jnp.diag(ref.box)
+        cutoff = _host_float(ref.cutoff_distance, 9.0)
+        for b in bundles[1:]:
+            if not jnp.array_equal(jnp.diag(b.box), box_vec) or _host_float(
+                b.cutoff_distance, 9.0
+            ) != cutoff:
+                raise ValueError(
+                    "use_neighbor_list=True requires every stacked bundle to share "
+                    "the same box_size and cutoff_distance (decision D1) -- got a "
+                    "mismatch, so one shared NeighborList seed cannot be built."
+                )
+
+        displacement_fn, _shift_fn = displacement_fn_for_bundle(ref)
+        neighbor_fn = nl_mod.make_neighbor_list_fn(displacement_fn, box_vec, cutoff)
+
+        target_capacity = nl_mod.compute_nl_capacity(integration_prefix, box_vec, cutoff)
+        seed_positions = positions_with_prefix(ref, integration_prefix)
+        seed = neighbor_fn.allocate(seed_positions)
+        extra_needed = max(0, target_capacity - seed.idx.shape[-1])
+        if extra_needed > 0:
+            seed = neighbor_fn.allocate(seed_positions, extra_capacity=extra_needed)
+
+        per_bundle = [
+            seed.update(positions_with_prefix(b, integration_prefix)) for b in bundles
+        ]
+        stacked_neighbor = jax.tree.map(lambda *xs: jnp.stack(xs, axis=0), *per_bundle)
+        return stacked_neighbor, neighbor_fn
+
+    @staticmethod
+    def _reallocate_stacked_neighbor_seed(
+        neighbor_fn: Any, bundles: list[Any], integration_prefix: int, *, extra_capacity: int
+    ) -> Any:
+        """Host-side reallocate-and-restack after an overflow (debt 802)."""
+        import jax
+        import jax.numpy as jnp
+
+        from prolix.api.bundle_md import positions_with_prefix
+
+        ref = bundles[0]
+        seed_positions = positions_with_prefix(ref, integration_prefix)
+        seed = neighbor_fn.allocate(seed_positions, extra_capacity=extra_capacity)
+        per_bundle = [
+            seed.update(positions_with_prefix(b, integration_prefix)) for b in bundles
+        ]
+        return jax.tree.map(lambda *xs: jnp.stack(xs, axis=0), *per_bundle)
 
     def _setup_integrator(
         self,
@@ -611,8 +748,24 @@ class EnsemblePlan:
         save_every: int | None = None,
         use_neighbor_list: bool = False,
         nl_update_every: int = 20,
+        initial_neighbor: Any = None,
     ) -> Trajectory:
-        """Carry-only MD via while_loop; Trajectory holds final frame only."""
+        """Carry-only MD via while_loop; Trajectory holds final frame only.
+
+        Args:
+            initial_neighbor: debt 802 -- a pre-allocated ``jax_md.NeighborList``
+                supplied by ``_run_stacked_dispatch`` when this call happens
+                *inside* a vmapped/jitted context (``neighbor_fn.allocate()``
+                is host-only and cannot run on a traced position array, so
+                the stacked path must allocate outside and pass the result
+                in). When given, internal allocation and the
+                overflow-then-reallocate retry are both skipped -- overflow
+                is instead surfaced via
+                ``observable_values["_nl_did_overflow"]`` for the caller to
+                check and retry the whole stack if needed. ``None`` (default)
+                preserves the original single-bundle behavior exactly
+                (internal allocation + retry, as verified in Phase 6 steps 4-5).
+        """
         import jax
         import jax.numpy as jnp
 
@@ -666,16 +819,9 @@ class EnsemblePlan:
                     pos = np.asarray(positions)[:n_write]
                     sink(pos)
 
+        nl_overflow_for_caller = None
         if use_neighbor_list:
             import equinox as eqx
-
-            from prolix.api.bundle_md import _host_float, displacement_fn_for_bundle
-            from prolix.physics import neighbor_list as nl_mod
-
-            displacement_fn, _shift_fn = displacement_fn_for_bundle(bundle)
-            box_vec = jnp.diag(bundle.box)
-            cutoff = _host_float(bundle.cutoff_distance, 9.0)
-            neighbor_fn = nl_mod.make_neighbor_list_fn(displacement_fn, box_vec, cutoff)
 
             ghost_target_positions = state.positions
             pad_mask_3d = bundle.atom_mask[:, None]
@@ -715,30 +861,50 @@ class EnsemblePlan:
                 )
                 return _NLDispatchCarry(new_langevin_state, new_neighbor, did_overflow)
 
-            nbr0 = neighbor_fn.allocate(state.positions)
-            init_carry = _NLDispatchCarry(state, nbr0, jnp.array(False))
-            final_carry = dispatch_n_steps_inference(
-                _nl_step_fn, init_carry, int(n_steps)
-            )
-            if bool(final_carry.did_overflow):
-                bumped_capacity = int(0.5 * nbr0.idx.shape[1])
-                retried_neighbor = neighbor_fn.allocate(
-                    final_carry.langevin_state.positions,
-                    extra_capacity=bumped_capacity,
-                )
-                retry_carry = _NLDispatchCarry(
-                    state, retried_neighbor, jnp.array(False)
-                )
+            if initial_neighbor is not None:
+                # debt 802 (stacked/vmapped path): allocation and retry both
+                # happen host-side in _run_stacked_dispatch, outside this
+                # (potentially traced/vmapped) call -- neighbor_fn.allocate()
+                # cannot run on a tracer. Surface overflow to the caller
+                # instead of host-checking/retrying here.
+                nbr0 = initial_neighbor
                 final_carry = dispatch_n_steps_inference(
-                    _nl_step_fn, retry_carry, int(n_steps)
+                    _nl_step_fn, _NLDispatchCarry(state, nbr0, jnp.array(False)), int(n_steps)
+                )
+                nl_overflow_for_caller = final_carry.did_overflow
+            else:
+                from prolix.api.bundle_md import _host_float, displacement_fn_for_bundle
+                from prolix.physics import neighbor_list as nl_mod
+
+                displacement_fn, _shift_fn = displacement_fn_for_bundle(bundle)
+                box_vec = jnp.diag(bundle.box)
+                cutoff = _host_float(bundle.cutoff_distance, 9.0)
+                neighbor_fn = nl_mod.make_neighbor_list_fn(displacement_fn, box_vec, cutoff)
+
+                nbr0 = neighbor_fn.allocate(state.positions)
+                init_carry = _NLDispatchCarry(state, nbr0, jnp.array(False))
+                final_carry = dispatch_n_steps_inference(
+                    _nl_step_fn, init_carry, int(n_steps)
                 )
                 if bool(final_carry.did_overflow):
-                    raise RuntimeError(
-                        "Neighbor list overflowed even after reallocating with "
-                        f"+{bumped_capacity} extra capacity -- capacity formula "
-                        "(compute_nl_capacity) likely needs a larger safety_factor "
-                        "for this system."
+                    bumped_capacity = int(0.5 * nbr0.idx.shape[1])
+                    retried_neighbor = neighbor_fn.allocate(
+                        final_carry.langevin_state.positions,
+                        extra_capacity=bumped_capacity,
                     )
+                    retry_carry = _NLDispatchCarry(
+                        state, retried_neighbor, jnp.array(False)
+                    )
+                    final_carry = dispatch_n_steps_inference(
+                        _nl_step_fn, retry_carry, int(n_steps)
+                    )
+                    if bool(final_carry.did_overflow):
+                        raise RuntimeError(
+                            "Neighbor list overflowed even after reallocating with "
+                            f"+{bumped_capacity} extra capacity -- capacity formula "
+                            "(compute_nl_capacity) likely needs a larger safety_factor "
+                            "for this system."
+                        )
             state = final_carry.langevin_state
         else:
 
@@ -772,6 +938,8 @@ class EnsemblePlan:
         if observables:
             for name, observable in observables.items():
                 observable_values[name] = observable.compute(state)
+        if nl_overflow_for_caller is not None:
+            observable_values["_nl_did_overflow"] = nl_overflow_for_caller
 
         return Trajectory(
             positions=positions_array,
