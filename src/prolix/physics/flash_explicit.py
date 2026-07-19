@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING
 import equinox as eqx
 import jax
 import jax.numpy as jnp
+import numpy as np
 from jax.scipy.special import erfc
 from jaxtyping import Array
 from proxide.physics.constants import COULOMB_CONSTANT
@@ -434,9 +435,17 @@ def _total_energy_fn(
     # Default PME path (unchanged)
     recip_energy_fn = None
     if sys.box_size is not None and sys.pme_alpha > 0:
-        mean_l = jnp.mean(jnp.asarray(sys.box_size, dtype=jnp.float64))
+        # debt 770: box_size is a concrete/static host scalar by the time it
+        # reaches here (see bundle_md.py's _host_box_size), but ANY jnp op
+        # (jnp.mean/jnp.asarray) invoked while jax.jit is actively tracing
+        # returns a tracer as its output regardless of operand concreteness
+        # -- confirmed via minimal repro, unrelated to static-field/vmap
+        # considerations. float()/int() can never be applied to that tracer.
+        # Using plain numpy for this host-scalar extraction sidesteps
+        # JAX's tracing machinery entirely.
+        mean_l = float(np.mean(np.asarray(sys.box_size)))
         grid_points = int(sys.pme_grid_points)
-        grid_spacing = float(mean_l) / float(max(grid_points, 1))
+        grid_spacing = mean_l / float(max(grid_points, 1))
         recip_energy_fn = make_spme_energy_fn(
             box_size=sys.box_size,
             alpha=float(sys.pme_alpha),
@@ -470,7 +479,10 @@ def _total_energy_fn(
         else:
             z = jnp.zeros((0, 2), dtype=jnp.int32)
             idx_12 = idx_13 = idx_14 = z
-        coul_14 = jnp.float32(0.83333333)
+        # Plain Python float, not jnp.float32 -- immediately float()'d below,
+        # and constructing it via jnp would hit the same debt-770 tracer
+        # issue as mean_l above once this code path is reached under jit.
+        coul_14 = 0.83333333
         e_total += explicit_corrections.pme_exclusion_correction_energy(
             pos,
             displacement_fn,
