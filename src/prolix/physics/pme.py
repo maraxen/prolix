@@ -7,6 +7,7 @@ from typing import NamedTuple
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 
 # kcal*A/(mol*e^2)
 COULOMB_CONSTANT = 332.0637
@@ -64,8 +65,12 @@ def compute_pme_grid_dims(
     min_dim: int = 8
 ) -> tuple[int, int, int]:
     """Determine FFT grid dimensions based on box size and target spacing."""
-    dims = jnp.ceil(box_size / grid_spacing).astype(jnp.int32)
-    dims = jnp.maximum(dims, min_dim)
+    # grid_dims must be static Python ints (used as literal array shapes
+    # downstream), so this must never touch jnp: float()/int() on a jax.Array
+    # raises ConcretizationTypeError whenever any JAX trace is active,
+    # regardless of whether the array is actually concrete (debt 770).
+    box_size_np = np.asarray(box_size)
+    dims = np.maximum(np.ceil(box_size_np / grid_spacing).astype(np.int32), min_dim)
     # Ensure even/optimal FFT dimensions? For now just cast.
     return (int(dims[0]), int(dims[1]), int(dims[2]))
 
@@ -278,6 +283,7 @@ def make_spme_energy_fn(box_size: jnp.ndarray, alpha: float = 0.34, grid_spacing
 def make_pme_energy_fn(charges: jnp.ndarray, box_size: jnp.ndarray, *, grid_points: int = 64, alpha: float = 0.34, order: int = 4):
     charges, box_size = jnp.asarray(charges), jnp.asarray(box_size)
     mask = jnp.ones(charges.shape[0], dtype=bool)
-    grid_spacing = float(jnp.mean(box_size.astype(jnp.float64))) / float(max(grid_points, 1))
+    # numpy, not jnp: see compute_pme_grid_dims above (debt 770).
+    grid_spacing = float(np.mean(np.asarray(box_size))) / float(max(grid_points, 1))
     inner = make_spme_energy_fn(box_size, alpha=alpha, grid_spacing=grid_spacing, order=order)
     return lambda positions: inner(positions, charges, mask) + spme_background_energy(charges, mask, alpha, box_size)

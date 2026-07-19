@@ -49,6 +49,53 @@ def _safe_norm(x: Array, axis: int = -1, eps: float = 1e-12) -> Array:
     return jnp.sqrt(jnp.sum(x ** 2, axis=axis) + eps)
 
 
+def _pad_to_tile_multiple(
+    positions: Array,
+    charges: Array | None,
+    sigmas: Array,
+    epsilons: Array,
+    atom_mask: Array,
+    sys: "PaddedSystem",
+    T: int,
+    include_elec: bool,
+):
+    """Pad tile-sliced arrays up to a multiple of T (debt 763).
+
+    The tiled kernels below scan ``n_tiles = N // T`` tiles over the j-side
+    of the interaction. None of prolix's own ``ATOM_BUCKETS`` (64, 128,
+    5_000, 25_000, 60_000) are exact multiples of T=256: for the two
+    smallest, floor division gives ``n_tiles == 0`` and the tiled energy is
+    silently *zero*; for the larger three, the tail atoms beyond
+    ``n_tiles * T`` are silently dropped from the j-side of every pair.
+    Padding here (zero-valued, ``atom_mask=False``) makes ``N`` an exact
+    multiple of T so every atom is covered, while contributing nothing to
+    any pair -- the existing ``pair_mask``/``jnp.where`` masking already
+    zeroes any interaction touching a masked atom. ``charges=None`` for the
+    LJ-only caller, which has no charges array to pad.
+    """
+    N = positions.shape[0]
+    n_tiles = -(-N // T)  # ceil division -- N, T are static Python ints (shapes), never traced
+    pad_amt = n_tiles * T - N
+    if pad_amt == 0:
+        excl_scales_elec = sys.excl_scales_elec if include_elec else None
+        return (positions, charges, sigmas, epsilons, atom_mask,
+                sys.excl_indices, sys.excl_scales_vdw, excl_scales_elec, n_tiles)
+
+    positions = jnp.pad(positions, ((0, pad_amt), (0, 0)))
+    if charges is not None:
+        charges = jnp.pad(charges, (0, pad_amt))
+    sigmas = jnp.pad(sigmas, (0, pad_amt))
+    epsilons = jnp.pad(epsilons, (0, pad_amt))
+    atom_mask = jnp.pad(atom_mask, (0, pad_amt))
+    excl_indices = jnp.pad(sys.excl_indices, ((0, pad_amt), (0, 0)))
+    excl_scales_vdw = jnp.pad(sys.excl_scales_vdw, ((0, pad_amt), (0, 0)))
+    excl_scales_elec = (
+        jnp.pad(sys.excl_scales_elec, ((0, pad_amt), (0, 0))) if include_elec else None
+    )
+    return (positions, charges, sigmas, epsilons, atom_mask,
+            excl_indices, excl_scales_vdw, excl_scales_elec, n_tiles)
+
+
 def chunked_explicit_nonbonded_energy(
     positions: Array,
     charges: Array,
@@ -73,15 +120,18 @@ def chunked_explicit_nonbonded_energy(
         atom_mask: (N,) boolean mask.
         dense_excl_scale_vdw: (N, N) precomputed VDW exclusion scale matrix.
         dense_excl_scale_elec: (N, N) precomputed Coulomb exclusion scale matrix.
-        T: Tile size. Must evenly divide N.
+        T: Tile size. N is padded internally to a multiple of T (debt 763)
+            so this is safe for any N, including N < T.
         soft_core_lambda: Soft-core coupling (1.0=standard LJ).
         pme_alpha: Ewald alpha for direct space damping. If 0, uses regular Coulomb.
 
     Returns:
         Scalar total nonbonded energy (kcal/mol).
     """
+    positions, charges, sigmas, epsilons, atom_mask, excl_indices, excl_scales_vdw, excl_scales_elec, n_tiles = (
+        _pad_to_tile_multiple(positions, charges, sigmas, epsilons, atom_mask, sys, T, include_elec=True)
+    )
     N = positions.shape[0]
-    n_tiles = N // T
 
     lam = jnp.float32(soft_core_lambda)
     alpha_sc = jnp.float32(0.5)
@@ -105,15 +155,15 @@ def chunked_explicit_nonbonded_energy(
 
             # --- Sparse Exclusion Processing ---
             # Instead of a dense (N, N) matrix, we compute the (N, T) exclusion block
-            # on the fly from sys.excl_indices and sys.excl_scales.
+            # on the fly from excl_indices and excl_scales (already padded to N).
             # Base scales are 1.0 (everything included)
             vdw_scale_tile = jnp.ones((N, T), dtype=jnp.float32)
             elec_scale_tile = jnp.ones((N, T), dtype=jnp.float32)
-            
+
             # Slice the sparse exclusion data for these T atoms
-            t_excl_idx = jax.lax.dynamic_slice(sys.excl_indices, (start_idx, 0), (T, sys.excl_indices.shape[1]))
-            t_vdw_scale = jax.lax.dynamic_slice(sys.excl_scales_vdw, (start_idx, 0), (T, sys.excl_scales_vdw.shape[1]))
-            t_elec_scale = jax.lax.dynamic_slice(sys.excl_scales_elec, (start_idx, 0), (T, sys.excl_scales_elec.shape[1]))
+            t_excl_idx = jax.lax.dynamic_slice(excl_indices, (start_idx, 0), (T, excl_indices.shape[1]))
+            t_vdw_scale = jax.lax.dynamic_slice(excl_scales_vdw, (start_idx, 0), (T, excl_scales_vdw.shape[1]))
+            t_elec_scale = jax.lax.dynamic_slice(excl_scales_elec, (start_idx, 0), (T, excl_scales_elec.shape[1]))
 
             # Scatter scales into the (N, T) block
             j_local = jnp.arange(T)
@@ -198,8 +248,10 @@ def _chunked_lj_only_energy(
   Returns:
       Scalar LJ energy.
   """
+  positions, _, sigmas, epsilons, atom_mask, excl_indices, excl_scales_vdw, _, n_tiles = (
+      _pad_to_tile_multiple(positions, None, sigmas, epsilons, atom_mask, sys, T, include_elec=False)
+  )
   N = positions.shape[0]
-  n_tiles = N // T
   lam = jnp.float32(soft_core_lambda)
 
   def tile_energy_outer(carry, j_idx):
@@ -218,8 +270,8 @@ def _chunked_lj_only_energy(
 
       # Sparse exclusion scales
       vdw_scale_tile = jnp.ones((N, T), dtype=jnp.float32)
-      t_excl_idx = jax.lax.dynamic_slice(sys.excl_indices, (start_idx, 0), (T, sys.excl_indices.shape[1]))
-      t_vdw_scale = jax.lax.dynamic_slice(sys.excl_scales_vdw, (start_idx, 0), (T, sys.excl_scales_vdw.shape[1]))
+      t_excl_idx = jax.lax.dynamic_slice(excl_indices, (start_idx, 0), (T, excl_indices.shape[1]))
+      t_vdw_scale = jax.lax.dynamic_slice(excl_scales_vdw, (start_idx, 0), (T, excl_scales_vdw.shape[1]))
       j_local = jnp.arange(T)
       flat_ii = t_excl_idx.reshape(-1)
       flat_jj = jnp.repeat(j_local, t_excl_idx.shape[1])
@@ -353,14 +405,17 @@ def _total_energy_fn(
 
         e_total = e_lj + e_coul_rff + e_short_range + e_excl
 
-        # Dispersion tail correction (still needed for consistency)
-        n_tail = sys.n_real_atoms if sys.n_real_atoms is not None else n_atoms
+        # Dispersion tail correction (still needed for consistency).
+        # lj_dispersion_tail_energy's last parameter is `atom_mask` (an (N,)
+        # array), not an atom count -- passing a scalar count here gets
+        # squared inside the C6/C12 sums, inflating the term by ~n_atoms^2
+        # (see the identical, already-fixed bug in batched_energy.py:510-528).
         e_total += explicit_corrections.lj_dispersion_tail_energy(
             sys.box_size,
             safe_sigmas,
             safe_epsilons,
             float(sys.nonbonded_cutoff),
-            n_tail,
+            sys.atom_mask,
         )
 
         return e_total
@@ -420,14 +475,16 @@ def _total_energy_fn(
 
         e_total = e_lj + e_coul_efa + e_short_range + e_excl
 
-        # Dispersion tail correction
-        n_tail = sys.n_real_atoms if sys.n_real_atoms is not None else n_atoms
+        # Dispersion tail correction. lj_dispersion_tail_energy's last
+        # parameter is `atom_mask` (an (N,) array), not an atom count -- see
+        # the EFA branch above / batched_energy.py:510-528 for the identical,
+        # already-fixed bug this mirrors.
         e_total += explicit_corrections.lj_dispersion_tail_energy(
             sys.box_size,
             safe_sigmas,
             safe_epsilons,
             float(sys.nonbonded_cutoff),
-            n_tail,
+            sys.atom_mask,
         )
 
         return e_total
@@ -493,13 +550,15 @@ def _total_energy_fn(
             float(sys.pme_alpha),
             float(coul_14),
         )
-        n_tail = sys.n_real_atoms if sys.n_real_atoms is not None else n_atoms
+        # lj_dispersion_tail_energy's last parameter is `atom_mask` (an (N,)
+        # array), not an atom count -- see the EFA branch above /
+        # batched_energy.py:510-528 for the identical, already-fixed bug.
         e_total += explicit_corrections.lj_dispersion_tail_energy(
             sys.box_size,
             safe_sigmas,
             safe_epsilons,
             float(sys.nonbonded_cutoff),
-            n_tail,
+            sys.atom_mask,
         )
 
     return e_total
