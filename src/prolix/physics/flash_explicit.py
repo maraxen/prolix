@@ -150,6 +150,20 @@ def chunked_explicit_nonbonded_energy(
 
             # Shared distances (N, T)
             dr = pos[:, None, :] - r_j[None, :, :]
+            if sys.box_size is not None:
+                # Minimum-image convention (debt 805) -- unlike the dense path
+                # (_lj_energy_masked/_coulomb_energy_masked), which computes dr
+                # via displacement_fn (jax_md's periodic space, itself
+                # minimum-image), this tiled kernel computed dr as a raw
+                # Cartesian subtraction with NO periodic wrapping at all. For
+                # a periodic box this is wrong for any pair whose true nearest
+                # image isn't the raw delta -- confirmed on the real 1VII
+                # bundle that 54% of real-atom pairs need wrapping, and that
+                # applying it here reproduces the dense reference to <1e-3
+                # (previously ~5-7% off). Same convention as
+                # pbc.minimum_image_distance, inlined since only the wrapped
+                # delta (not the pbc module's returned norm) is needed here.
+                dr = dr - sys.box_size * jnp.round(dr / sys.box_size)
             dist_sq = jnp.sum(dr ** 2, axis=-1) + 1e-10
             dist = jnp.sqrt(dist_sq)
 
@@ -265,6 +279,10 @@ def _chunked_lj_only_energy(
       m_j = jax.lax.dynamic_slice(atom_mask, (start_idx,), (T,))
 
       dr = pos[:, None, :] - r_j[None, :, :]
+      if sys.box_size is not None:
+        # Minimum-image convention (debt 805) -- see chunked_explicit_nonbonded_energy's
+        # identical fix for the full rationale/evidence.
+        dr = dr - sys.box_size * jnp.round(dr / sys.box_size)
       dist_sq = jnp.sum(dr ** 2, axis=-1) + 1e-10
       dist = jnp.sqrt(dist_sq)
 
