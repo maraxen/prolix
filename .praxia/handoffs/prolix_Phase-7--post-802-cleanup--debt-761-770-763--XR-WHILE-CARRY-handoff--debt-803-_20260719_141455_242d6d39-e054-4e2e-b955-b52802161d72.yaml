@@ -1,0 +1,76 @@
+---
+workspace: prolix
+session_id: eb063f7a-ba81-4191-ab5a-cf9f3fb28280
+status: in_progress
+immediately_relevant:
+- file: src/prolix/physics/flash_explicit.py
+  lines:
+  - 434
+  - 493
+  reason: 'debt 770 fix landed here (commit 548aca6): mean_l/coul_14 now computed via numpy instead of jnp to avoid the tracer-under-jit crash. This is the reference pattern for the remaining fix.'
+- file: src/prolix/physics/pme.py
+  lines:
+  - 1
+  - 10
+  reason: 'compute_pme_grid_dims still uses jnp.ceil/astype/int() on box_size -- confirmed via direct execution to be the NEXT crash site (ConcretizationTypeError at int(dims[0])) once flash_explicit.py''s fix is applied. Needs the identical numpy-based fix: box_size is always host-known by design (grid dims must be static Python ints anyway, used as literal jnp.zeros(grid_dims,...) shapes downstream), so switching to numpy is unconditionally correct, not a special case. import numpy as np not yet added to this file.'
+- file: scripts/experiments/profile_b1_flash_vs_autodiff_forces.py
+  lines:
+  - 176
+  - 229
+  reason: the benchmark script for debt 761's go/no-go decision. Confirmed working for energy_only/autodiff_forces on CPU (123ms / 635ms for 1VII). flash_forces still fails pending the pme.py fix above.
+- file: .praxia/docs/decisions/260717_b1-connect-existing-engines-scope.md
+  lines:
+  - 88
+  - 249
+  reason: 'the running decision-log doc (debt 761/763/765/770/790/802 all documented here in sequence). Append the debt 770 finding + eventual benchmark result here, following the doc''s established convention, once the benchmark produces a real number. Note: this doc''s own ''flash_error'' comment in the benchmark script and its own text still frame debt 770 as vmap/static-field-related -- that framing is WRONG per this session''s minimal repro; correct it when updating.'
+- file: .praxia/docs/specs/260718_xr-while-carry.md
+  lines:
+  - 1
+  - 85
+  reason: 'prolix-side WhileCarry draft spec, status: draft. Its own ''Status'' section says the concrete next step is writing this up properly in the xtrax repo''s own .praxia/docs/specs/ convention and getting it reviewed there -- not started this session. /home/marielle/projects/xtrax exists locally and is a real, separate git repo.'
+- file: /home/marielle/projects/myxcel/src/myxcel/rsync.py
+  lines:
+  - 185
+  - 241
+  reason: 'debt 803 root cause: myxcel push runs a fixed rsync -azP (no --update/--checksum, deliberately no --delete) FROM a hardcoded Profile.local_workspace default (~/projects, config.py:43, self-flagged as MYXCEL_DEBT(eng-002)) -- meaning push always sources from ~/projects/prolix (the main checkout, currently on branch b1/full), never from whichever worktree/branch the invoking session is actually in. This is not a flag problem; there is no source-path override in the MCP schema.'
+active_dispatches: []
+task_id: 260715_b1_physics_parity
+phase: 'Phase 7 (post-802 cleanup: debt 761/770/763, XR-WHILE-CARRY handoff, debt 803)'
+goal_statement: 'Resume session working in worktree /home/marielle/projects/prolix/.claude/worktrees/linked-exploring-lagoon (branch worktree-linked-exploring-lagoon, PR #3 open against main). Three parallel workstreams from the prior handoff''s next_steps: (A) benchmark flash forces (debt 761) to decide go/no-go, (B) finalize the XR-WHILE-CARRY spec by writing it up properly in the xtrax repo, (C) fix debt 803 (cluster sync gap) and verify per-protein NL compile-sharing performance on the cluster.'
+context_refs:
+- phase: Phase 6 (debt 760/790/802)
+  task_id: 260715_b1_physics_parity
+  summary: 'NL+PME wired into both single-bundle and stacked/vmapped EnsemblePlan dispatch; debt 790 (double-counted exclusion correction) and 802 (stacked NL support) both resolved and committed (7367f93, 83899a2, 3950f4c). PR #3 open against main, mergeable.'
+- phase: Phase 6a (XR-WHILE-CARRY scoping)
+  task_id: 260715_b1_physics_parity
+  summary: Drafted prolix-side scoping doc for a lax.while_loop-backed WhileCarry strategy for xtrax, generalizing debt 760's hand-rolled _NLDispatchCarry. Explicitly scoping-only; xtrax-side spec writing was left as the next step.
+- phase: Phase 6 step 7 correction (debt 802/803 discovery)
+  task_id: 260715_b1_physics_parity
+  summary: 'First cross-protein NL compile-sharing cluster job (18304424) failed; investigation found two real gaps: debt 802 (NL not wired into stacked dispatch -- since fixed) and debt 803 (cluster sync stale, myxcel push not delivering current code) -- 803 was not fixed, only diagnosed.'
+failed_attempts:
+- attempt_id: 770_static_field_theory
+  description: Initially hypothesized debt 770's ConcretizationTypeError was caused by eqx.field(static=True) fields interacting badly with eqx.filter_grad or jax.vmap (matching the existing decision doc's framing, which attributes it to 'the same vmap-safe host-concretization pattern' as the box_size/pme_alpha fix in bundle_md.py).
+  outcome: 'Disproven by direct experiment: isolated jax.jit(lambda: _total_energy_fn(sys_obj))() crashes identically with NO eqx.filter_grad involved at all, and a minimal eqx-free repro (plain numpy closure + jnp.mean + float(), no eqx.Module anywhere) reproduces the exact same ConcretizationTypeError under jax.jit.'
+  reason_failed: 'The real root cause: calling Python float()/int() on ANY jax.Array (via __float__/__int__) raises ConcretizationTypeError whenever ANY jax trace is currently active -- REGARDLESS of whether that specific array is genuinely concrete/closed-over/non-tracer. This is a hard, global JAX invariant, not specific to static fields, vmap, or grad. Plain Python floats/ints and numpy arrays never hit this because they don''t dispatch through jax.Array.__float__ at all.'
+  do_not_retry: true
+  evidence_ref: 'session transcript: three escalating minimal repros (eqx.Module class Foo with static jax.Array box_size; then plain numpy closure with no eqx at all -- both crash under jax.jit identically to the real flash_explicit.py bug)'
+open_questions:
+- Does batched_energy.py's ALREADY-SHIPPED _pme_reciprocal_and_corrections (same jnp.mean+float() pattern on box_size, batched_energy.py ~line 473-478) also hit this exact crash under real single-bundle EnsemblePlan.run() dispatch, silently swallowed by single_padded_energy's broad except clause? The existing research record claims 'genuine PME sensitivity' was measured for the single-bundle case (max abs diff 4.58e-5), which would be surprising if this crash fires there too. NOT investigated this session (out of scope -- that code path is already shipped/PR'd) but worth a skeptical look given how directly analogous the code is.
+- Once compute_pme_grid_dims is fixed and the flash benchmark actually produces flash_forces_ms, is flash meaningfully faster than the current autodiff path (635ms for 1VII on CPU)? This is the actual go/no-go question debt 761 exists to answer -- still unmeasured.
+- Does debt 763 (T=256 doesn't evenly divide N=5000, the standard bundle atom-bucket size) still need fixing, or does chunked_explicit_nonbonded_energy's masked-atom design happen to make the silent atom-dropping harmless in practice? Not yet empirically checked -- reasoned analysis suggests pairs fully within the remainder region are dropped entirely and cross-boundary pairs are half-counted, which would be a real correctness bug, but this was not verified by comparing dense-vs-flash energy on real data.
+deferred:
+- description: Fixing debt 803 by having a human/session deliberately ssh to engaging, git stash the ~180 files of uncommitted local modifications there (non-destructive), then git fetch origin && git checkout origin/worktree-linked-exploring-lagoon -- this delivers current code and sidesteps myxcel's fixed-source-path bug entirely, since that branch is already fully pushed to GitHub origin (confirmed via git ls-remote) and matches local HEAD 483169d exactly.
+  rationale: Mutates shared cluster state other sessions may be using; deliberately not automated this session per project's shared-infra caution norms. Needs an explicit go-ahead.
+  recommended_phase: Phase 7 continuation
+- description: b1/full branch (the session's original/default branch, distinct from this worktree's worktree-linked-exploring-lagoon) has no live ref on GitHub origin at all (git ls-remote shows none) -- it exists only locally across various worktrees. Someone should decide whether/when to push it, independent of this session's B1 work.
+  rationale: Noticed incidentally while investigating debt 803; not part of this session's scope.
+  recommended_phase: unscoped -- flag to user
+lessons_refs: []
+next_steps:
+- 'Fix prolix/physics/pme.py''s compute_pme_grid_dims: add ''import numpy as np'', replace jnp.ceil(box_size/grid_spacing).astype(jnp.int32) + int(dims[i]) with an all-numpy equivalent (np.ceil, np.maximum, int()) -- mirrors the flash_explicit.py fix in commit 548aca6.'
+- Re-run scripts/experiments/profile_b1_flash_vs_autodiff_forces.py --protein 1vii (and --protein 2gb1) with JAX_PLATFORMS=cpu locally (narrow single-file run, consistent with local-compute-limits.md) to get real flash_forces_ms numbers and decide debt 761's go/no-go.
+- 'Check debt 763 (T=256 vs N=5000 divisibility) empirically: compare flash energy (chunked_explicit_nonbonded_energy) against the dense single_padded_energy reference on a real bundle to see if the remainder-atom handling is actually wrong; fix via masked-padding-to-next-multiple-of-T if it is.'
+- Update .praxia/docs/decisions/260717_b1-connect-existing-engines-scope.md with the debt 770 root-cause correction (it's a jax.jit+float()-on-any-Array invariant, not a vmap/static-field issue) and the eventual flash-vs-autodiff benchmark verdict. Commit.
+- Write the proper xtrax-side WhileCarry spec in /home/marielle/projects/xtrax (its own .praxia/docs/specs/ convention), based on the prolix-side draft at .praxia/docs/specs/260718_xr-while-carry.md; then update that prolix-side doc's status from draft to reflect the hand-off.
+- Decide on debt 803 remediation (see deferred items above) -- likely needs explicit user go-ahead given it touches shared cluster state -- then resubmit/verify the 1VII+2GB1 cross-protein NL compile-sharing benchmark on engaging (previously job 18304424 failed on stale code).
+---
