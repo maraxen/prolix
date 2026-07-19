@@ -125,7 +125,7 @@ def _chunked_lj_bwd(excl_indices, displacement_fn, cutoff, tile_size, res, g):
 
 chunked_lj_energy.defvjp(_chunked_lj_fwd, _chunked_lj_bwd)
 
-@functools.partial(jax.custom_vjp, nondiff_argnums=(3, 5, 6, 7, 8))
+@functools.partial(jax.custom_vjp, nondiff_argnums=(3, 6, 7, 8))
 def chunked_lj_energy_nl(
     r: jnp.ndarray,
     sigmas: jnp.ndarray,
@@ -175,9 +175,18 @@ def chunked_lj_energy_nl(
 def _chunked_lj_nl_fwd(r, sigmas, epsilons, excl_indices, excl_scales, nb_idx, disp_fn, cutoff, tile_size):
     return chunked_lj_energy_nl(r, sigmas, epsilons, excl_indices, excl_scales, nb_idx, disp_fn, cutoff, tile_size), (r, sigmas, epsilons, excl_scales, nb_idx)
 
-def _chunked_lj_nl_bwd(excl_indices, neighbor_idx, displacement_fn, cutoff, tile_size, res, g):
+def _chunked_lj_nl_bwd(excl_indices, displacement_fn, cutoff, tile_size, res, g):
+    # neighbor_idx (nb_idx) is a differentiable-position argument (not
+    # nondiff_argnums, debt 760) purely so it can be a jax.lax.while_loop
+    # tracer -- gradient w.r.t. an integer index array is always zero.
     r, sigmas, epsilons, excl_scales, nb_idx = res
-    return (-g * jnp.zeros_like(r), g * jnp.zeros_like(sigmas), g * jnp.zeros_like(epsilons), g * jnp.zeros_like(excl_scales))
+    return (
+        -g * jnp.zeros_like(r),
+        g * jnp.zeros_like(sigmas),
+        g * jnp.zeros_like(epsilons),
+        g * jnp.zeros_like(excl_scales),
+        jnp.zeros_like(nb_idx),
+    )
 
 chunked_lj_energy_nl.defvjp(_chunked_lj_nl_fwd, _chunked_lj_nl_bwd)
 
@@ -284,7 +293,7 @@ def _chunked_coulomb_bwd(excl_indices, displacement_fn, pme_alpha, coulomb_const
 
 chunked_coulomb_energy.defvjp(_chunked_coulomb_fwd, _chunked_coulomb_bwd)
 
-@functools.partial(jax.custom_vjp, nondiff_argnums=(2, 4, 5, 6, 7, 8, 9))
+@functools.partial(jax.custom_vjp, nondiff_argnums=(2, 5, 6, 7, 8, 9))
 def chunked_coulomb_energy_nl(
     r: jnp.ndarray,
     charges: jnp.ndarray,
@@ -327,8 +336,16 @@ def chunked_coulomb_energy_nl(
 def _chunked_coulomb_nl_fwd(r, charges, excl_indices, excl_scales, nb_idx, disp_fn, pme_alpha, coulomb_constant, cutoff, tile_size):
     return chunked_coulomb_energy_nl(r, charges, excl_indices, excl_scales, nb_idx, disp_fn, pme_alpha, coulomb_constant, cutoff, tile_size), (r, charges, excl_indices, excl_scales, nb_idx, pme_alpha)
 
-def _chunked_coulomb_nl_bwd(excl_indices, neighbor_idx, displacement_fn, pme_alpha, coulomb_constant, cutoff, tile_size, res, g):
+def _chunked_coulomb_nl_bwd(excl_indices, displacement_fn, pme_alpha, coulomb_constant, cutoff, tile_size, res, g):
+    # neighbor_idx (nb_idx) is a differentiable-position argument (not
+    # nondiff_argnums, debt 760) purely so it can be a jax.lax.while_loop
+    # tracer -- gradient w.r.t. an integer index array is always zero.
     r, charges, excl_indices, excl_scales, nb_idx, pme_alpha = res
-    return (-g * jnp.zeros_like(r), g * jnp.zeros_like(charges), g * jnp.zeros_like(excl_scales))
+    return (
+        -g * jnp.zeros_like(r),
+        g * jnp.zeros_like(charges),
+        g * jnp.zeros_like(excl_scales),
+        jnp.zeros_like(nb_idx),
+    )
 
 chunked_coulomb_energy_nl.defvjp(_chunked_coulomb_nl_fwd, _chunked_coulomb_nl_bwd)

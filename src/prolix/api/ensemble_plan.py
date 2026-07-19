@@ -17,12 +17,25 @@ N_MOLS (using-xtrax):
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, NamedTuple
 
 if TYPE_CHECKING:
     from prolix.api.observables import Trajectory
 
 RunMode = Literal["trajectory", "inference"]
+
+
+class _NLDispatchCarry(NamedTuple):
+    """``dispatch_n_steps_inference`` carry for the neighbor-list-aware step (debt 760).
+
+    ``did_overflow`` is OR-accumulated across the loop (never branched on
+    in-loop -- ``lax.while_loop`` can't do a host reallocation mid-loop) and
+    host-checked once after the loop returns; see ``_run_single_inference``.
+    """
+
+    langevin_state: Any
+    neighbor: Any
+    did_overflow: Any
 
 
 class EnsemblePlan:
@@ -88,6 +101,8 @@ class EnsemblePlan:
         gamma: float = 10.0,
         run_mode: RunMode = "trajectory",
         save_every: int | None = None,
+        use_neighbor_list: bool = False,
+        nl_update_every: int = 20,
     ) -> Trajectory | list[Trajectory]:
         """Run MD simulation over all bundles.
 
@@ -103,13 +118,21 @@ class EnsemblePlan:
             xtc_path: Optional path for MD traj XTC output (XR-SINK-XTC).
                 Single-bundle only. Trajectory mode: post-run flush.
                 Inference mode: stream frames every ``save_every`` steps
-                (default: every step when ``xtc_path`` set).
+                (default: every step when ``xtc_path`` set). Not yet supported
+                together with ``use_neighbor_list=True`` (raises).
             dt_unit: ``'fs'`` (default) or ``'akma'``.
             gamma: Langevin friction in **ps⁻¹** (converted via ``gamma_ps_to_akma``).
             run_mode: ``'trajectory'`` (scan + full traj stack, default) or
                 ``'inference'`` (while_loop carry-only; not AD-safe).
             save_every: Inference XTC stride (steps). Ignored in trajectory mode
                 unless ``xtc_path`` is set (then full traj is flushed once).
+            use_neighbor_list: debt 760 — compute direct-space LJ/Coulomb via
+                O(N*K) neighbor-list kernels instead of the dense O(N²) path.
+                Single-bundle ``run_mode='inference'`` only (raises otherwise
+                if True); periodic (``box_size``) bundles only. Default False
+                preserves existing dense-path behavior exactly.
+            nl_update_every: Steps between neighbor-list rebuilds when
+                ``use_neighbor_list=True`` (ignored otherwise).
 
         Returns:
             Trajectory for a single bundle, or list[Trajectory] when
@@ -130,6 +153,16 @@ class EnsemblePlan:
                 "xtc_path is supported for single-bundle EnsemblePlan runs only"
             )
 
+        if use_neighbor_list and (run_mode != "inference" or len(self.bundles) != 1):
+            raise ValueError(
+                "use_neighbor_list=True requires run_mode='inference' and a "
+                "single-bundle EnsemblePlan (debt 760 scope; see plan doc)"
+            )
+        if use_neighbor_list and xtc_path is not None:
+            raise ValueError(
+                "use_neighbor_list=True does not yet support xtc_path streaming"
+            )
+
         if run_mode == "inference":
             return self._run_inference(
                 n_steps,
@@ -141,6 +174,8 @@ class EnsemblePlan:
                 dt_unit=dt_unit,
                 gamma=gamma,
                 save_every=save_every,
+                use_neighbor_list=use_neighbor_list,
+                nl_update_every=nl_update_every,
             )
 
         return self._run_trajectory(
@@ -207,6 +242,8 @@ class EnsemblePlan:
         dt_unit: str,
         gamma: float,
         save_every: int | None,
+        use_neighbor_list: bool = False,
+        nl_update_every: int = 20,
     ) -> Trajectory | list[Trajectory]:
         """Inference path: while_loop carry-only; group-by-shape for multi-bundle."""
         if len(self.bundles) == 1:
@@ -221,6 +258,8 @@ class EnsemblePlan:
                 gamma=gamma,
                 xtc_path=xtc_path,
                 save_every=save_every,
+                use_neighbor_list=use_neighbor_list,
+                nl_update_every=nl_update_every,
             )
 
         return self._run_grouped(
@@ -570,13 +609,33 @@ class EnsemblePlan:
         gamma: float = 10.0,
         xtc_path: str | Any | None = None,
         save_every: int | None = None,
+        use_neighbor_list: bool = False,
+        nl_update_every: int = 20,
     ) -> Trajectory:
         """Carry-only MD via while_loop; Trajectory holds final frame only."""
+        import jax
         import jax.numpy as jnp
 
         from prolix.api.bundle_md import trim_trajectory_positions
         from prolix.api.ensemble_dispatch import dispatch_n_steps_inference
         from prolix.api.observables import Trajectory
+
+        if use_neighbor_list:
+            if xtc_path is not None:
+                raise ValueError(
+                    "use_neighbor_list=True does not yet support xtc_path streaming"
+                )
+            if not bundle.shape_spec.has_pbc:
+                raise ValueError(
+                    "use_neighbor_list=True requires a periodic bundle (box_size)"
+                )
+            if integration_prefix is None:
+                # Ghost atoms (debt 772's uniform lattice) must be present for
+                # the shape-class NL capacity formula (compute_nl_capacity) to
+                # apply -- default to the bundle's full padded/bucket size
+                # rather than the real-atom-only slice active_positions()
+                # would otherwise give _setup_integrator.
+                integration_prefix = int(bundle.positions.shape[0])
 
         state, apply_fn, dt_s, kT_s = self._setup_integrator(
             bundle,
@@ -607,16 +666,92 @@ class EnsemblePlan:
                     pos = np.asarray(positions)[:n_write]
                     sink(pos)
 
-        def step_fn(carry: Any) -> Any:
-            return apply_fn(carry, kT=kT_s, dt=dt_s)
+        if use_neighbor_list:
+            import equinox as eqx
 
-        try:
-            state = dispatch_n_steps_inference(
-                step_fn, state, int(n_steps), on_step=on_step
+            from prolix.api.bundle_md import _host_float, displacement_fn_for_bundle
+            from prolix.physics import neighbor_list as nl_mod
+
+            displacement_fn, _shift_fn = displacement_fn_for_bundle(bundle)
+            box_vec = jnp.diag(bundle.box)
+            cutoff = _host_float(bundle.cutoff_distance, 9.0)
+            neighbor_fn = nl_mod.make_neighbor_list_fn(displacement_fn, box_vec, cutoff)
+
+            ghost_target_positions = state.positions
+            pad_mask_3d = bundle.atom_mask[:, None]
+            update_every = int(nl_update_every)
+
+            def _nl_step_fn(carry: _NLDispatchCarry, step_i: Any) -> _NLDispatchCarry:
+                langevin_state, neighbor, did_overflow = carry
+                should_update = (step_i % update_every) == 0
+                new_neighbor = jax.lax.cond(
+                    should_update,
+                    lambda n: n.update(langevin_state.positions),
+                    lambda n: n,
+                    neighbor,
+                )
+                did_overflow = did_overflow | new_neighbor.did_buffer_overflow.astype(bool)
+                new_langevin_state = apply_fn(
+                    langevin_state, neighbor=new_neighbor, kT=kT_s, dt=dt_s
+                )
+                # Ghost-position/momentum pinning (debt 772's deferred piece):
+                # settle.py's O-step has no atom_mask awareness, so ghosts
+                # would otherwise random-walk off their fixed NL-capacity
+                # lattice. Masking happens here, at the dispatch layer,
+                # outside settle.py's validated internals -- matches the
+                # existing batched_simulate.py precedent (equilibrate_single).
+                # NVTLangevinState (typing.py:611) has no .replace() of its
+                # own (that method belongs to the earlier IntegratorState
+                # class, typing.py:511) -- reconstruct directly via eqx.tree_at.
+                new_langevin_state = eqx.tree_at(
+                    lambda s: (s.positions, s.momentum),
+                    new_langevin_state,
+                    (
+                        jnp.where(
+                            pad_mask_3d, new_langevin_state.positions, ghost_target_positions
+                        ),
+                        jnp.where(pad_mask_3d, new_langevin_state.momentum, 0.0),
+                    ),
+                )
+                return _NLDispatchCarry(new_langevin_state, new_neighbor, did_overflow)
+
+            nbr0 = neighbor_fn.allocate(state.positions)
+            init_carry = _NLDispatchCarry(state, nbr0, jnp.array(False))
+            final_carry = dispatch_n_steps_inference(
+                _nl_step_fn, init_carry, int(n_steps)
             )
-        finally:
-            if sink_cm is not None:
-                sink_cm.__exit__(None, None, None)
+            if bool(final_carry.did_overflow):
+                bumped_capacity = int(0.5 * nbr0.idx.shape[1])
+                retried_neighbor = neighbor_fn.allocate(
+                    final_carry.langevin_state.positions,
+                    extra_capacity=bumped_capacity,
+                )
+                retry_carry = _NLDispatchCarry(
+                    state, retried_neighbor, jnp.array(False)
+                )
+                final_carry = dispatch_n_steps_inference(
+                    _nl_step_fn, retry_carry, int(n_steps)
+                )
+                if bool(final_carry.did_overflow):
+                    raise RuntimeError(
+                        "Neighbor list overflowed even after reallocating with "
+                        f"+{bumped_capacity} extra capacity -- capacity formula "
+                        "(compute_nl_capacity) likely needs a larger safety_factor "
+                        "for this system."
+                    )
+            state = final_carry.langevin_state
+        else:
+
+            def step_fn(carry: Any, _step_i: Any) -> Any:
+                return apply_fn(carry, kT=kT_s, dt=dt_s)
+
+            try:
+                state = dispatch_n_steps_inference(
+                    step_fn, state, int(n_steps), on_step=on_step
+                )
+            finally:
+                if sink_cm is not None:
+                    sink_cm.__exit__(None, None, None)
 
         # Final frame only: (1, n_atoms, 3)
         final_pos = state.position

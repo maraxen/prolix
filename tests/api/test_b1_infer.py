@@ -173,7 +173,7 @@ def test_dispatch_n_steps_inference_matches_scan_final():
         new = carry + 0.5
         return new, new
 
-    def infer_step(carry):
+    def infer_step(carry, _step_i):
         return carry + 0.5
 
     n = 7

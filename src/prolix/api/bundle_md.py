@@ -483,9 +483,16 @@ def energy_fn_from_bundle(
     disp_fn, _ = displacement_fn_for_bundle(bundle)
 
     def energy_fn(positions: jnp.ndarray, **kwargs: object) -> jnp.ndarray:
+        # `neighbor` (debt 760's NL path, see single_padded_energy's docstring)
+        # is the only kwarg this energy function understands -- forward it
+        # through. Everything else is dropped, matching prior behavior (this
+        # closure is called via jax_md's canonicalize_force/eval_shape probing,
+        # which may pass conventional extra kwargs like `t`/`box` this function
+        # doesn't use).
+        neighbor = kwargs.pop("neighbor", None)
         del kwargs
         sys = physics_system_from_bundle(bundle, positions)
-        e = single_padded_energy(sys, disp_fn, implicit_solvent=False)
+        e = single_padded_energy(sys, disp_fn, implicit_solvent=False, neighbor=neighbor)
         e = e + _exception_energy_masked(
             positions,
             bundle.exception_pairs,

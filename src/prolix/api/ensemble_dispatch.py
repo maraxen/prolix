@@ -160,7 +160,7 @@ def dispatch_n_steps(
 
 
 def dispatch_n_steps_inference(
-    step_fn: Callable[[Any], Any],
+    step_fn: Callable[[Any, Any], Any],
     init_state: Any,
     n_steps: int,
     *,
@@ -169,7 +169,7 @@ def dispatch_n_steps_inference(
     """Carry-only N_STEPS dispatch via ``lax.while_loop`` (B1-INFER).
 
     Unlike ``dispatch_n_steps``, this does **not** materialize a
-    ``(n_steps, ...)`` trajectory stack. ``step_fn(state) -> state``.
+    ``(n_steps, ...)`` trajectory stack. ``step_fn(state, step_i) -> state``.
 
     The step loop is an XLA ``while_loop`` (device-side). When invoked from
     host Python (not already under a JAX transform), the whole loop is wrapped
@@ -181,7 +181,12 @@ def dispatch_n_steps_inference(
     throughput timing only; keep ``dispatch_n_steps`` (scan) for AD paths.
 
     Args:
-        step_fn: Pure state → state integrator step.
+        step_fn: Pure ``(state, step_i) -> state`` integrator step. ``step_i``
+            is the while_loop's own 0-indexed iteration counter (already
+            tracked internally regardless of whether callers use it) --
+            surfaced so a step_fn can gate periodic work (e.g. debt 760's
+            neighbor-list update) on ``step_i % K == 0`` without needing a
+            second, redundant counter threaded through the carry itself.
         init_state: Initial integrator carry.
         n_steps: Host-static step count (>= 1).
         on_step: Optional ``(step_i, positions) -> None`` host side-effect hook
@@ -203,7 +208,7 @@ def dispatch_n_steps_inference(
 
         def body(carry: tuple[Any, Any]) -> tuple[Any, Any]:
             step_i, state = carry
-            new_state = step_fn(state)
+            new_state = step_fn(state, step_i)
             if on_step is not None:
                 from jax.experimental import io_callback
 
