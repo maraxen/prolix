@@ -1,7 +1,7 @@
 ---
 title: XR-WHILE-CARRY
 description: Scope a lax.while_loop-backed WhileCarry strategy for xtrax (upstream), motivated by debt 760's neighbor-list carry in prolix's EnsemblePlan inference dispatch
-status: draft
+status: handed-off
 task_id: 260715_b1_physics_parity
 date: '260718'
 backlog_ids: ''
@@ -81,4 +81,6 @@ Verified in production use (1VII, real periodic PME): zero ghost-position drift 
 
 ## Status
 
-Scoping only, drafted 2026-07-18 alongside debt 760's Phase 6 implementation. No xtrax-side backlog item filed yet — the concrete next step is writing this design up as a proper xtrax-side spec (matching that project's own conventions) and getting it reviewed there before any code lands.
+Scoping only, drafted 2026-07-18 alongside debt 760's Phase 6 implementation.
+
+**Handed off 2026-07-19**: written up as a proper xtrax-side spec, grounded directly against xtrax's own current `strategy.py`/`dispatch.py`/`iterator.py`/`carry.py`/`plan.py` (not a paraphrase of this doc) — `xtrax/.praxia/docs/specs/260719_xr-while-carry.md`, xtrax PR [#81](https://github.com/maraxen/xtrax/pull/81) (draft, branch `xr-while-carry-spec`). This prolix-side doc remains the motivating record; the xtrax-side doc is now the authoritative design surface for any actual `WhileCarry` implementation. No further action needed here unless xtrax's review changes the design in a way that affects prolix's eventual migration plan (itself a separate, later, non-blocking follow-up per this doc's non-goals).
