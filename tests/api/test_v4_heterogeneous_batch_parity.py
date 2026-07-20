@@ -54,4 +54,6 @@ def test_v4_hetero_b4_parity_vs_independent_runs():
         assert got.positions.shape == (n_steps, n_atoms, 3)
         assert ref.positions.shape == (n_steps, n_atoms, 3)
         rmsd = jnp.sqrt(jnp.mean((got.positions - ref.positions) ** 2))
-        assert rmsd < 1e-10, f"system {i} (n={n_atoms}): RMSD={rmsd:.3e} Å"
+        # float32 noise floor -- see test_v3_homogeneous_batch_parity.py's
+        # comment (debt 841 fixed; residual is ordinary float32 rounding).
+        assert rmsd < 1e-5, f"system {i} (n={n_atoms}): RMSD={rmsd:.3e} Å"

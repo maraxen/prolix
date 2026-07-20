@@ -10,7 +10,7 @@ from typing import Any, Protocol, runtime_checkable
 
 import equinox as eqx
 import jax.numpy as jnp
-from jaxtyping import Array, Float
+from jaxtyping import Array, Bool, Float
 
 
 @runtime_checkable
@@ -69,9 +69,19 @@ class Temperature(eqx.Module):
 
     Attributes:
         dof: Degrees of freedom for temperature calculation
+        atom_mask: Optional (N,) bool, True for real (non-padding) atoms.
+            Padding atoms carry unit mass, not zero (see
+            `masses_with_prefix`), and draw genuine nonzero momentum over
+            the course of integration, so they must be excluded from the sum
+            on the batched/stacked EnsemblePlan dispatch path or the result
+            is polluted by however many padding atoms the shape bucket
+            carries (debt 841). `None` (default) preserves prior behavior
+            for callers whose state already contains only real atoms (e.g.
+            the single-bundle path).
     """
 
     dof: int = eqx.field(static=True)
+    atom_mask: Bool[Array, "N"] | None = None
 
     def compute(self, state: Any) -> Float[Array, ""]:
         """Compute temperature from state momenta.
@@ -105,6 +115,8 @@ class Temperature(eqx.Module):
         # Compute kinetic energy: KE = sum(p^2 / (2*m))
         # Handle both batched and unbatched cases
         ke_per_atom = jnp.sum(momentum**2 / (2.0 * mass_expanded), axis=-1)  # Remove coord axis
+        if self.atom_mask is not None:
+            ke_per_atom = jnp.where(self.atom_mask, ke_per_atom, 0.0)
         total_ke = jnp.sum(ke_per_atom)
 
         # Compute temperature: T = (2 * KE) / (dof * k_B)
@@ -157,7 +169,14 @@ class KineticEnergy(eqx.Module):
 
     The kinetic energy is computed from momentum and mass directly,
     without the Boltzmann constant (unlike Temperature which scales by dof).
+
+    Attributes:
+        atom_mask: Optional (N,) bool, True for real (non-padding) atoms.
+            See `Temperature.atom_mask` for why this is needed on the
+            batched/stacked EnsemblePlan dispatch path (debt 841).
     """
+
+    atom_mask: Bool[Array, "N"] | None = None
 
     def compute(self, state: Any) -> Float[Array, ""]:
         """Compute total kinetic energy from state.
@@ -180,8 +199,10 @@ class KineticEnergy(eqx.Module):
 
         # Compute KE per atom: sum(p^2 / (2*m)) along coordinate axis
         ke_per_atom = jnp.sum(momentum**2 / (2.0 * mass_expanded), axis=-1)
+        if self.atom_mask is not None:
+            ke_per_atom = jnp.where(self.atom_mask, ke_per_atom, 0.0)
 
-        # Sum over all atoms
+        # Sum over all (real) atoms
         return jnp.sum(ke_per_atom)
 
 
@@ -232,10 +253,14 @@ class Pressure(eqx.Module):
     Attributes:
         n_atoms: Number of atoms in system (static)
         volume_angstrom3: System volume in Angstroms^3 (static)
+        atom_mask: Optional (N,) bool, True for real (non-padding) atoms.
+            See `Temperature.atom_mask` for why this is needed on the
+            batched/stacked EnsemblePlan dispatch path (debt 841).
     """
 
     n_atoms: int = eqx.field(static=True)
     volume_angstrom3: float = eqx.field(static=True)
+    atom_mask: Bool[Array, "N"] | None = None
 
     def compute(self, state: Any) -> Float[Array, ""]:
         """Compute pressure from state using ideal gas approximation.
@@ -261,6 +286,8 @@ class Pressure(eqx.Module):
 
         # Compute kinetic energy
         ke_per_atom = jnp.sum(momentum**2 / (2.0 * mass_expanded), axis=-1)
+        if self.atom_mask is not None:
+            ke_per_atom = jnp.where(self.atom_mask, ke_per_atom, 0.0)
         total_ke = jnp.sum(ke_per_atom)
 
         # Ideal gas: T = 2*KE / (3*N*k_B), so P = N*k_B*T/V = 2*KE / (3*V)
