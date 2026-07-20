@@ -298,4 +298,18 @@ With debts 763, 770 (pme.py), 804, and 805 all fixed and each independently veri
 
 Both comfortably clear the sidecar's `flash_speedup >= 1.2` PASS threshold, and — unlike the earlier, premature PASS reached before this session's bisection — the underlying values are now confirmed correct, not just fast. **Recommendation: proceed with debt 761's full scope** (wire `flash_explicit_forces`/`force_fn_from_bundle` into `EnsemblePlan`'s `_setup_integrator`), with the real dense-vs-flash comparisons performed in this session (real 1VII bundle, periodic, real exclusions) promoted to a permanent regression test (`tests/physics/test_flash_dense_parity.py` or similar) before the wiring lands, so this correctness guarantee doesn't silently regress.
 
+## Debt 760 — cross-protein NL compile-sharing: CONFIRMED via single-protein control jobs (2026-07-19)
+
+Following the debt-803 cluster-sync remediation (git-based workaround, above), the actual `--mode combined --use-neighbor-list` cross-protein run (job `18330082`, `engaging`) completed successfully: `n_groups_from_partition=1`, `compile_fixed_s=12.036s`. But `n_groups_from_partition=1` on its own only confirms 1VII and 2GB1 still bucket into the same partition group *structurally* — it says nothing about whether the compile *cost* is actually shared, versus the two proteins being co-dispatched in the same job while each secretly compiles its own kernel.
+
+To distinguish these, two single-protein control jobs were submitted with identical `--replicas 16 --n-steps-list 2,10,50,200,800 --nl-update-every 20` parameters, differing only in `--mode single --protein {1vii,2gb1}`:
+
+| Run | Job | `compile_fixed_s` | `per_step_corrected_s` | `r_squared` |
+|---|---|---|---|---|
+| 1VII alone | `18331080` | 12.021s | 0.0878s | 0.99995 |
+| 2GB1 alone | `18331082` | 12.114s | 0.0888s | 0.99994 |
+| 1VII+2GB1 combined | `18330082` | 12.036s | 0.0881s | 0.99987 |
+
+The combined run's fixed compile cost (12.036s) matches each single-protein run individually (12.021s / 12.114s) to within noise — **not their sum** (~24s), which is what co-dispatch-without-sharing would produce. `per_step_corrected_s` is likewise flat across all three (0.0878–0.0888s). This confirms **real compile-sharing**, not mere co-dispatch: running 16 replicas of two structurally-different real solvated proteins together costs the same fixed JIT overhead as running 16 replicas of either protein alone, through the full NL+PME production path (not just the dense path confirmed 2026-07-17). Debt 760 marked resolved on the strength of this measurement.
+
 **Regression check**: `tests/physics/test_flash_nonbonded_dtype.py` (5/5) and `tests/physics/test_pme.py`/`tests/test_pme.py` (32/32) pass after all four fixes (763/770/804/805). `tests/physics/test_efa_vs_pme_forces.py` has 3 pre-existing failures (`test_efa_pme_force_rmse_relative`, `test_efa_forces_unbiased`, `test_efa_nvt_smoke_dt05`) — confirmed via a direct A/B file-swap (this session's fixes reverted, same test run) to fail identically, down to the exact RMSE/t-stat values, with or without this session's changes. Not caused by or in scope for this pass; EFA (RFF-approximated electrostatics) is a separate electrostatic method from the PME path debt 761 targets.
