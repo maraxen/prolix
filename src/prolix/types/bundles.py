@@ -83,6 +83,16 @@ class MolecularShapeSpec:
         has_pbc: Whether periodic boundary conditions are enabled
         has_implicit_solvent: Whether implicit solvent is present
         boundary_condition: "free" or "periodic" — used to reconstruct displacement_fn
+        has_real_water: Whether this bundle has >=1 real (non-padding) water
+            molecule. WATER_BUCKETS has no zero-size entry (smallest is 8), so
+            `water_indices.shape[0] == 0` can never be true for a bucketed/padded
+            bundle even when every row is a masked-off placeholder -- without
+            this static (host-known, vmap-safe) signal, settle_langevin's
+            "no water -> plain Langevin" fallback is unreachable from the
+            batched/stacked EnsemblePlan dispatch path, causing it to silently
+            run the SETTLE rigid-body-projected integrator (with a different
+            PRNG-consumption pattern) for non-water systems instead of plain
+            unconstrained Langevin -- see debt 841.
     """
 
     atom_bucket_idx: int
@@ -96,6 +106,7 @@ class MolecularShapeSpec:
     has_pbc: bool
     has_implicit_solvent: bool
     boundary_condition: Literal["free", "periodic"] = "periodic"
+    has_real_water: bool = False
 
 
 class MolecularBundle(eqx.Module):

@@ -1025,6 +1025,7 @@ def settle_langevin(
   settle_velocity_iters: int = 10,
   settle_velocity_tol: float | None = None,
   water_mask: Array | None = None,
+  atom_mask: Array | None = None,
 ):
   r"""Langevin dynamics integrator with SETTLE constraints for water.
 
@@ -1090,6 +1091,13 @@ def settle_langevin(
       real atom the padding fill index ([0, 0, 0]) happens to coincide with.
       `None` (default) preserves prior behavior for callers that already
       guarantee `water_indices` has no padding (e.g. the single-system path).
+    atom_mask: Optional (N,) bool, True for real (non-padding) atoms. Only
+      consulted on the no-water fallback path (plain `simulate.nvt_langevin`)
+      to re-mask/re-center the initial momentum draw so padding atoms (unit
+      mass, not zero -- see `masses_with_prefix`) don't pollute real atoms'
+      momentum via jax_md's default whole-array `center_velocity` correction
+      (debt 841). `None` (default) preserves prior behavior for callers whose
+      `R` already contains only real atoms (e.g. the single-system path).
 
   Returns:
       (init_fn, apply_fn) pair.
@@ -1104,7 +1112,34 @@ def settle_langevin(
 
   # If no water indices, fall back to standard Langevin
   if water_indices is None or water_indices.shape[0] == 0:
-    return simulate.nvt_langevin(energy_or_force_fn, shift_fn, dt, kT, gamma=gamma, mass=mass)
+    plain_init_fn, plain_apply_fn = simulate.nvt_langevin(
+      energy_or_force_fn, shift_fn, dt, kT, gamma=gamma, mass=mass
+    )
+    if atom_mask is None:
+      return plain_init_fn, plain_apply_fn
+
+    # jax_md's nvt_langevin.init_fn (center_velocity=True default) subtracts
+    # the momentum mean over ALL rows of R -- including padding atoms, which
+    # carry a nonzero (unit-mass, see masses_with_prefix) random draw, not
+    # zero. That pollutes every real atom's momentum with an incorrect COM
+    # term (debt 841: this is why the batched/stacked EnsemblePlan dispatch
+    # path diverged from independent single-bundle dispatch from step one,
+    # even after fixing the water-detection bug above). Since mean-subtraction
+    # is a rigid per-row shift by one constant vector, re-masking and
+    # re-centering using ONLY the real (atom_mask) rows exactly cancels
+    # jax_md's incorrect global term algebraically -- recovering the same
+    # momentum an unpadded/independent call would produce for the real atoms.
+    def masked_init_fn(key, R, mass=mass, **kwargs):
+      state = plain_init_fn(key, R, mass=mass, **kwargs)
+      mask_col = atom_mask[:, None]
+      n_real = jnp.sum(atom_mask)
+      com = jnp.sum(
+        jnp.where(mask_col, state.momentum, 0.0), axis=0, keepdims=True
+      ) / jnp.maximum(n_real, 1)
+      corrected = jnp.where(mask_col, state.momentum - com, 0.0)
+      return state.set(momentum=corrected)
+
+    return masked_init_fn, plain_apply_fn
 
   def init_fn(key, R, mass=mass, **kwargs):
     _kT = kwargs.pop("kT", kT)

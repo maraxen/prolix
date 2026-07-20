@@ -1,0 +1,89 @@
+---
+workspace: prolix
+session_id: 260719_prolix_nl_pme_ensemble_trace
+status: in_progress
+immediately_relevant:
+- file: system.py
+  lines: []
+  reason: referenced in 6 segment(s)
+- file: src/prolix/physics/optimization.py
+  lines: []
+  reason: referenced in 6 segment(s)
+- file: src/prolix/api/ensemble_plan.py
+  lines: []
+  reason: referenced in 5 segment(s)
+- file: settle.py
+  lines: []
+  reason: referenced in 5 segment(s)
+- file: ensemble_plan.py
+  lines: []
+  reason: referenced in 5 segment(s)
+- file: tests/physics/test_nl_kernel_exclusion_parity.py
+  lines: []
+  reason: referenced in 4 segment(s)
+- file: src/prolix/batched_energy.py
+  lines: []
+  reason: referenced in 4 segment(s)
+- file: /plan
+  lines: []
+  reason: referenced in 4 segment(s)
+- file: bundle_md.py
+  lines: []
+  reason: referenced in 4 segment(s)
+- file: src/prolix/api/ensemble_dispatch.py
+  lines: []
+  reason: referenced in 4 segment(s)
+active_dispatches: []
+task_id: 260719_prolix_nl_pme_ensemble_trace
+phase: null
+goal_statement: Implement and verify the Neighbor List (NL) and PME engine integration within EnsemblePlan, specifically addressing the 'WhileCarry' logic for periodic updates and multi-bundle vmap compatibility.
+context_refs:
+- phase: trace_segment
+  task_id: 260719_prolix_nl_pme_ensemble_trace
+  summary: 'This segment provides a comprehensive status update and scoping for the ''B1 Physics Parity'' plan. It summarizes the completion of Phases 1-3, which confirmed that prolix is significantly slower than OpenMM under genuine physics parity (~7.28x slower). Phase 4 was redirected because the initial profiling identified 1AKE (vacuum/GB) as the cost outlier rather than water/PME, which was orthogonal to the core thesis. Instead, the user redirected the focus to confirm the core thesis: that EnsemblePlan successfully shares a single compiled program across different solvated proteins (1VII+2GB1), which was empirically confirmed. The segment then details the scoping of Debt 760 (connecting the NL+PME engine from simulate.py) and Debt 761 (connecting analytical/flash forces). It identifies that while the necessary engines exist, they were never wired into EnsemblePlan. The scoping includes a design for a hand-rolled carry extension for the lax.while_loop, a plan to handle NeighborList capacity vs. shape buckets, and a recommendation to benchmark flash forces before committing to their integration. Finally, it scopes a long-term upstream goal (Phase 6a) to introduce a ''WhileCarry'' strategy to the xtrax library to close the abstraction gap between lax.scan and lax.while_loop.'
+- phase: trace_segment
+  task_id: 260719_prolix_nl_pme_ensemble_trace
+  summary: The segment covers a series of technical improvements and bug fixes related to the Neighbor List (NL) and energy calculations. Key actions included fixing a `cutoff_distance` kwarg absorption bug in `system.py`, implementing the `compute_nl_capacity` formula in `neighbor_list.py`, and introducing a new damped-direct-space Coulomb-over-neighbors term. The agent also extended the `_setup_integrator/step_fn` to handle periodic NL updates and ghost-position pinning. A significant portion of the segment was dedicated to designing a new OpenMM PME-over-NL parity test to ensure consistency with existing benchmarks. Towards the end, the agent performed a deep dive into a discrepancy between LJ and Coulomb energy kernels, identifying a likely root cause involving spatial cutoffs in the dense reference versus the NL path.
+- phase: trace_segment
+  task_id: 260719_prolix_nl_pme_ensemble_trace
+  summary: 'The agent performed a deep dive into a 75% discrepancy in Coulomb energy between dense and NL paths. Through systematic decomposition of the energy terms, it was discovered that the NL kernels were actually correct and matched ground truth. The root cause was identified as a double-counting of the PME exclusion correction: the dense path used an incomplete formula requiring a subsequent correction, while the NL path used a self-contained formula. Because the correction was applied unconditionally in the wiring, it was applied twice to the NL path. The agent implemented a fix by introducing a boolean flag `direct_space_includes_exclusion_correction` to skip the redundant correction when the NL path is used. The fix was verified with a new regression test, and the documentation was updated to reflect the correct root cause.'
+- phase: trace_segment
+  task_id: 260719_prolix_nl_pme_ensemble_trace
+  summary: The agent initiated a multi-pronged investigation using three parallel research agents to survey the current state of the carry structure, Langevin O-step masking, and OpenMM parity test infrastructure. This was necessary because recent fixes (specifically for debt 790) significantly altered the wiring of the components involved in Phase 6. The research agents identified precedents for ghost-pinning and confirmed the absence of certain fields in the Langevin state. A critical mechanical check was performed to verify if the `apply_fn` could forward per-step-varying `neighbor=` arguments; this was confirmed to work, though a specific kwarg-forwarding gap in `energy_fn_from_bundle` was identified and resolved via a reallocation path in `jax_md`. Following this, the agent updated the Phase 6 plan with these concrete findings, which were subsequently approved by the user. The segment also includes a comprehensive retrospective on completed phases (1-5.5), including the resolution of debt 790 (a wiring bug in `single_padded_energy`) and a detailed scoping of debt 760 (NL+PME connection) and debt 761 (analytical/flash forces).
+- phase: trace_segment
+  task_id: 260719_prolix_nl_pme_ensemble_trace
+  summary: 'The segment began by scoping Phase 6a, which involves proposing a first-class ''WhileCarry'' strategy for the upstream xtrax library to close the abstraction gap between ''lax.scan'' and ''lax.while_loop''. However, the current session focuses on Phase 6: implementing the hand-rolled carry extension for debt 760. The implementation started with fixing a bug in ''energy_fn_from_bundle'' where the ''neighbor'' kwarg was being discarded. Following this, the ''dispatch_n_steps_inference'' signature was updated to thread the iteration counter (''step_i'') through the step function, allowing for periodic updates. Finally, the ''EnsemblePlan'' API was updated to accept ''use_neighbor_list'' and ''nl_update_every'' parameters, and a new ''_NLDispatchCarry'' NamedTuple was introduced to manage the state (langevin state, neighbor list, and overflow flag) during the inference loop.'
+- phase: trace_segment
+  task_id: 260719_prolix_nl_pme_ensemble_trace
+  summary: "This segment involved a significant push to finalize the neighbor-list engine integration. First, the agent implemented the core logic for `use_neighbor_list=True` in `EnsemblePlan.run`, which included handling neighbor list updates, ghost atom pinning (to prevent them from drifting off the lattice), and an overflow-and-reallocate path. During this process, a critical bug was discovered where `chunked_lj_energy_nl` and `chunked_coulomb_energy_nl` incorrectly marked the neighbor index as a non-differentiable argument in `custom_vjp`, which broke the requirement for the neighbor list to vary within a jitted loop. This was fixed by adjusting the `nondiff_argnums`. \n\nAfter verifying the NL path with multi-step runs and confirming ghost atom stability, the agent moved to verification. It wrote a new OpenMM parity test for the Bundle/NL path. While local execution of this heavy test was killed by the system's compute limits (exit code 143), the agent verified all components independently and submitted the test for nightly CI. Finally, the agent performed a local dry-run of the compile-sharing check (confirming 1VII and 2GB1 still share a bucket) and submitted the full verification job to the cluster (job 18304424)."
+- phase: trace_segment
+  task_id: 260719_prolix_nl_pme_ensemble_trace
+  summary: The agent documented a new `XR-WHILE-CARRY` strategy in `xtrax` to address the abstraction gap for `lax.while_loop` in inference. During the final verification of Debt 760, a cluster job failure revealed that while NL inference works for single-bundle runs, it was never wired into the vmapped multi-bundle dispatch path. This meant the core goal of Step 7 (verifying cross-protein compile-sharing) could not be tested as the code path didn't exist. The agent updated the profiling script to fail loudly on this mismatch, filed Debt 802 (multi-bundle NL extension) and Debt 803 (cluster sync issue), and updated the project's decision docs and memory.
+- phase: trace_segment
+  task_id: 260719_prolix_nl_pme_ensemble_trace
+  summary: The agent addressed a fundamental incompatibility where 'neighbor_fn.allocate()' is a host-only operation and cannot be called inside a vmapped/traced function. To solve this, the agent identified a strategy to allocate a 'seed' NeighborList on the host once and then use '.update()' per bundle. Since '.update()' preserves the static metadata of the seed, the resulting NeighborLists for different bundles become stackable as a pytree. The agent implemented this by updating 'dispatch_n_mols' to accept 'extra_stacked' arguments, modifying '_run_single_inference' to accept pre-allocated neighbors and surface overflows via observables, and creating helper methods to build and reallocate these stacked neighbor seeds. Finally, the agent fixed a secondary issue where 'excl_indices' were being incorrectly marked as non-differentiable in the stacked path, updating the 'custom_vjp' definitions for both LJ and Coulomb energy kernels.
+- phase: trace_segment
+  task_id: 260719_prolix_nl_pme_ensemble_trace
+  summary: 'The agent finalized the implementation of NL support for multi-bundle vmapped dispatch. This involved updating the backward pass in `src/prolix/physics/optimization.py` to handle `excl_indices` as differentiable-position arguments to satisfy JAX tracer requirements. After verifying the fix, the agent conducted extensive testing, including a specific check for cross-protein compile-sharing. It was determined that while the engineering correctness for vmap-safe NL stacking is proven via synthetic tests, actual performance gains for different proteins remain unverified locally due to hardware/time constraints. The agent then created a permanent regression test (`test_b1_stacked_neighbor_list.py`), verified the entire suite, and committed the final changes to PR #3. Finally, the debt tracker, decision docs, and memory were updated to reflect the resolution of Debts 760, 790, and 802.'
+failed_attempts:
+- attempt_id: trace_segment_05_0
+  description: Local execution of the heavy OpenMM PME-over-NL parity test.
+  outcome: ''
+  reason_failed: System compute limits (exit code 143).
+  do_not_retry: false
+  evidence_ref: segment_05
+- attempt_id: trace_segment_06_1
+  description: Initial multi-bundle NL inference test.
+  outcome: ''
+  reason_failed: The NL inference was never wired into the vmapped multi-bundle dispatch path, causing a mismatch in the profiling script.
+  do_not_retry: false
+  evidence_ref: segment_06
+open_questions:
+- What are the specific performance gains for different proteins compared to the current baseline?
+deferred: []
+lessons_refs: []
+next_steps:
+- Benchmark flash forces before committing to integration (Debt 761).
+- Finalize 'WhileCarry' strategy proposal for xtrax library.
+- Verify actual performance gains for different proteins on the cluster.
+---

@@ -494,7 +494,7 @@ class EnsemblePlan:
         def run_one(bundle, seed_i: jnp.ndarray, neighbor: Any = None) -> Trajectory:
             obs = observables
             if observables is not None:
-                obs = _observables_for_bundle(bundle, observables)
+                obs = _observables_for_bundle(bundle, observables, atom_mask=bundle.atom_mask)
             if run_mode == "inference":
                 return self._run_single_inference(
                     bundle,
@@ -707,13 +707,34 @@ class EnsemblePlan:
             # vs. padding rows so settle_langevin can redirect padding
             # scatters away from real atoms. See B1-SETTLE-STACK
             # (.praxia/docs/specs/260715_b1-settle-stack.md).
-            water_indices = bundle.water_indices
-            water_mask = bundle.water_mask
+            #
+            # WATER_BUCKETS has no zero-size entry (smallest is 8), so a
+            # bundle with zero real water molecules still gets
+            # water_indices.shape[0] == 8 (all masked-off placeholder rows).
+            # settle_langevin's "no water -> plain Langevin" fallback keys
+            # off water_indices.shape[0] == 0, which can therefore never
+            # trigger here -- silently running the SETTLE rigid-body
+            # integrator (different PRNG-consumption pattern) instead of
+            # plain Langevin for non-water systems (debt 841). shape_spec is
+            # this bundle's static field (host-known, vmap-safe even when
+            # this runs under vmap), so checking it here is safe.
+            if bundle.shape_spec.has_real_water:
+                water_indices = bundle.water_indices
+                water_mask = bundle.water_mask
+            else:
+                water_indices = None
+                water_mask = None
+            # Padding atoms carry unit mass (masses_with_prefix), not zero, so
+            # they draw genuine nonzero initial momentum -- atom_mask lets the
+            # no-water fallback re-center momentum using only real atoms
+            # (debt 841; see settle_langevin's atom_mask docstring).
+            atom_mask = bundle.atom_mask[:integration_prefix]
         else:
             positions_init = active_positions(bundle)
             masses = masses_for_bundle(bundle)
             water_indices = water_indices_for_integration(bundle)
             water_mask = None
+            atom_mask = None
 
         init_fn, apply_fn = settle_langevin(
             energy_or_force_fn,
@@ -725,6 +746,7 @@ class EnsemblePlan:
             water_indices=water_indices,
             project_ou_momentum_rigid=True,
             water_mask=water_mask,
+            atom_mask=atom_mask,
         )
 
         key = jax.random.PRNGKey(jnp.asarray(seed, dtype=jnp.uint32))
@@ -1007,10 +1029,22 @@ def _group_indices_by_shape_spec(bundles: list[Any]) -> list[list[int]]:
 
 
 def _observables_for_bundle(
-    bundle: Any, observables: dict[str, Any]
+    bundle: Any, observables: dict[str, Any], *, atom_mask: Any | None = None
 ) -> dict[str, Any]:
-    """Re-bind bundle-scoped observables (e.g. Energy) for multi-bundle runs."""
-    from prolix.api.observables import Energy
+    """Re-bind bundle-scoped observables (e.g. Energy) for multi-bundle runs.
+
+    Args:
+        atom_mask: Bucket-sized (N,) bool, True for real (non-padding) atoms,
+            when this bundle's integration state will be padded (the
+            stacked/vmapped dispatch path). `None` (default) for unpadded
+            dispatch (state already contains only real atoms). Threaded into
+            KineticEnergy/Temperature/Pressure, whose momentum**2/(2*mass)
+            sums are otherwise polluted by padding atoms (unit mass, nonzero
+            momentum after the first integration step) -- debt 841.
+    """
+    import equinox as eqx
+
+    from prolix.api.observables import Energy, KineticEnergy, Pressure, Temperature
 
     rebound: dict[str, Any] = {}
     for name, observable in observables.items():
@@ -1018,6 +1052,12 @@ def _observables_for_bundle(
             rebound[name] = Energy(
                 energy_fn=observable.energy_fn,
                 bundle=bundle,
+            )
+        elif atom_mask is not None and isinstance(
+            observable, (KineticEnergy, Temperature, Pressure)
+        ):
+            rebound[name] = eqx.tree_at(
+                lambda o: o.atom_mask, observable, atom_mask, is_leaf=lambda x: x is None
             )
         else:
             rebound[name] = observable

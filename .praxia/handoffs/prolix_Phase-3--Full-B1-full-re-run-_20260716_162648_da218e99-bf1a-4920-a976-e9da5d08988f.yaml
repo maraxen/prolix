@@ -1,0 +1,68 @@
+---
+workspace: prolix
+session_id: 51dbbbc3-040d-4ca3-8baa-f00c6e1e349c
+status: in_progress
+immediately_relevant:
+- file: scripts/slurm/b1_init_exec.slurm
+  lines:
+  - 1
+  - 50
+  reason: 'Submission script: FOOTPRINT tiers (l40s/a100/h200/prereg), partition+gres defaults (mit_preemptable, h200, 256G, %1 throttle), array task ID -> seed mapping (task<=2 prolix, task>2 openmm)'
+- file: scripts/benchmarks/b1_init_exec.py
+  lines:
+  - 113
+  - 197
+  reason: '_four_water_bundle(): periodic box_size + pme_alpha=0.34 + ExclusionSpec fix; OpenMM water baseline switched to PME'
+- file: src/prolix/physics/settle.py
+  lines:
+  - 1
+  - 60
+  reason: 'Phase 1: _scatter_water_target padding-mask guard across 7 call sites, fixes silent atom-0 corruption from unmasked [0,0,0] padding rows'
+- file: src/prolix/batched_energy.py
+  lines:
+  - 1
+  - 60
+  reason: 'Phase 2.5: _pme_reciprocal_and_corrections extraction + try/except around jax.eval_shape abstract-trace probe, fixes unconditional ConcretizationTypeError on any periodic-PME EnsemblePlan construction'
+- file: src/prolix/api/bundle_md.py
+  lines:
+  - 290
+  - 300
+  reason: 'Phase 2.5: pme_alpha vmap-tracing fallback corrected from 0.3 to 0.34'
+- file: tests/physics/test_b1_water_pme_parity.py
+  lines:
+  - 1
+  - 192
+  reason: Energy/force parity test + EnsemblePlan.run() regression guard that caught the Phase 2.5 bugs
+- file: .praxia/docs/specs/260715_b1-settle-stack.md
+  lines:
+  - 1
+  - 1
+  reason: Phase 1 spec + Result section
+- file: .praxia/docs/specs/260715_b1-nonbonded-parity.md
+  lines:
+  - 1
+  - 1
+  reason: Phase 2 spec + Result section
+active_dispatches: []
+task_id: 260715_b1_physics_parity
+phase: Phase 3 (Full B1-full re-run)
+goal_statement: 'Re-test B1-FULL Claim-1 (H1: prolix cold-start t_total beats OpenMM N-Context) under genuine physics parity, after discovering the original falsification (campaign 2115b4dd, concluded fail, commit 9c76e40) compared mismatched physics — prolix ran zero constraints and no cutoff/PBC for water while OpenMM used HBonds+rigidWater+CutoffPeriodic. User explicitly redirected from profiling to implementing the missing features first: ''we need to support the same nonbonded potentials and h bond constraints. all these features were supposed to be implemented.'''
+context_refs: []
+failed_attempts: []
+open_questions:
+- Will the mit_preemptable queue (2946 pending jobs cluster-wide as of last check) clear in a reasonable time, or will Phase 3 need a different partition/gres to actually run?
+deferred:
+- description: Neighbor-list-accelerated periodic PME energy dispatch (CarrySpec-based or plain carry field on NVTLangevinState)
+  rationale: Not needed for B1's 4-water/12-atom system — dense periodic path is performance-equivalent at this scale and already correct
+  recommended_phase: Future, only if B1 water count scales up or periodic treatment extends to protein classes
+- description: cutoff_distance kwarg bug in prolix.physics.system.make_energy_fn (silently no-ops to 9.0 A regardless of what's passed, affects simulate.py:508 too)
+  rationale: Pre-existing bug found during Phase 2 research; B1's dense bundle path (physics_system_from_bundle) doesn't use this function so it doesn't block Phase 3
+  recommended_phase: Separate backlog item, not gated on B1
+lessons_refs: []
+next_steps:
+- Check `cd /home/marielle/projects/prolix && sacct -j 18057963,18057965 --format=JobID,JobName,State,ExitCode,Elapsed,Start,End -X` and `squeue -j 18057963,18057965` for task progress
+- Once tasks COMPLETE, SSH to engaging and read outputs/bench/b1_full_prereg_*_job*.json directly (not just exit codes) for finite_fraction/aot_ratio/t_total per task
+- Once all 6 tasks complete, compute median t_total for prolix vs openmm and report the Claim-1 verdict (confirmed / still falsified / inconclusive) clearly with numbers
+- Update .praxia/docs/audits/260710_xtrax-rewire_next_steps.md and the B1-EPIC backlog notes in .praxia/backlog.jsonl with the new campaign's outcome
+- If mit_preemptable congestion persists for many hours, consider whether to ask the user about the pi_so3 partition pin documented in scripts/slurm/b1_init_exec.slurm:49 (explicitly 'only if asked' — do not switch unilaterally)
+---

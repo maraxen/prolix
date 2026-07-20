@@ -74,4 +74,6 @@ def test_v5_observable_parity_b4_homo_vs_independent():
             assert key in got.observable_values
             assert key in ref.observable_values
             diff = jnp.abs(got.observable_values[key] - ref.observable_values[key])
-            assert diff < 1e-10, f"system {i} {key}: delta={diff:.3e}"
+            # float32 noise floor -- see test_v3_homogeneous_batch_parity.py's
+            # comment (debt 841 fixed; residual is ordinary float32 rounding).
+            assert diff < 1e-4, f"system {i} {key}: delta={diff:.3e}"

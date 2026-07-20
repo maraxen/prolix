@@ -1,0 +1,98 @@
+---
+workspace: prolix
+session_id: 51dbbbc3-040d-4ca3-8baa-f00c6e1e349c
+status: in_progress
+immediately_relevant:
+- file: src/prolix/physics/simulate.py
+  lines:
+  - 60
+  - 142
+  reason: SimulationSpec -- the existing, working periodic+PME+neighbor-list config surface (use_pbc, electrostatic_method=PME, use_neighbor_list, rigid_water/SETTLE) that debt 760 needs to connect to EnsemblePlan, not rebuild
+- file: src/prolix/physics/simulate.py
+  lines:
+  - 941
+  - 1039
+  reason: scan_fn_with_neighbor + host-side did_buffer_overflow retry -- the actual working neighbor-list carry pattern; this is the template for whatever gets threaded into EnsemblePlan's dispatch
+- file: src/prolix/physics/system.py
+  lines:
+  - 29
+  - 262
+  reason: 'make_energy_fn -- backs simulate.py''s NL+PME; also has a known, still-unfixed, separate bug: cutoff_distance is a named param (line 32) silently absorbed before **kwargs, so the internal cutoff read (kwargs.get(''cutoff_distance'', kwargs.get(''cutoff'', 9.0)), line 125) never sees it -- simulate.py''s own call (line 508) is affected'
+- file: src/prolix/api/ensemble_dispatch.py
+  lines:
+  - 162
+  - 226
+  reason: dispatch_n_steps_inference -- the EnsemblePlan-side while_loop (line 218) that would need the neighbor-list carry threaded through it for debt 760
+- file: src/prolix/batched_energy.py
+  lines:
+  - 604
+  - 604
+  reason: single_padded_force -- the existing, production-used (batched_simulate.py integrators) analytical/chunked force entry point debt 761 needs to connect to EnsemblePlan instead of single_padded_energy+jax.grad
+- file: src/prolix/physics/flash_explicit.py
+  lines:
+  - 430
+  - 450
+  reason: flash_explicit_forces -- calls make_spme_energy_fn (same PME custom_vjp already confirmed elsewhere); the analytical-forces branch single_padded_force dispatches to for explicit-solvent systems
+- file: src/prolix/physics/analytical_forces.py
+  lines:
+  - 1
+  - 50
+  reason: lj_forces_dense/coulomb_forces_dense/gb_ace_forces_dense -- the real analytical (non-autodiff) dense force implementations already wired into single_padded_force
+- file: src/prolix/api/bundle_md.py
+  lines:
+  - 354
+  - 384
+  reason: energy_fn_from_bundle -- the CURRENT EnsemblePlan energy path (calls single_padded_energy only); this is what debt 761 would redirect to single_padded_force instead
+- file: src/prolix/api/ensemble_plan.py
+  lines:
+  - 435
+  - 509
+  reason: _setup_integrator -- calls energy_fn_from_bundle then settle_langevin; need to check whether settle_langevin's energy_or_force_fn param can accept a force fn directly (open question, not yet answered)
+- file: src/prolix/physics/solvation.py
+  lines:
+  - 485
+  - 620
+  reason: solvate_protein / solvate_protein_to_bundle -- new capability built this session (commit 89ef602), used to construct the 1VII/2GB1 heterogeneous test bundles
+active_dispatches: []
+task_id: 260715_b1_physics_parity
+phase: Phase 4 (Profiling + Connection-Work Scoping)
+goal_statement: 'Next immediate goal (explicit user instruction): scope the ''connection work'' for tech debt 760 (wire simulate.py''s existing periodic+PME+neighbor-list engine into EnsemblePlan) and 761 (wire single_padded_force''s existing analytical/flash-forces path into EnsemblePlan) carefully and thoroughly, BEFORE resuming the broader Phase 4 profiling investigation. This is scoping/investigation only -- do not start implementing the connection until it''s actually scoped and the user has weighed in on the plan.'
+context_refs:
+- phase: Phase 3 (Full B1-full re-run)
+  task_id: 260715_b1_physics_parity
+  summary: 'Full B1-full re-run completed 2026-07-16/17 under believed-genuine physics parity, Claim-1 falsified 7.28x -- LATER found this was measured without real PME cost (see failed_attempts below), re-run needed (task #30)'
+failed_attempts:
+- attempt_id: a1
+  description: Claimed periodic+PME+neighbor-list MD support and analytical/custom_vjp force computation would need to be built from scratch for EnsemblePlan, and filed tech debt (758) to that effect
+  outcome: 'User pushed back: ''i remember intensively developing that'' -- re-investigation (2 parallel fork agents) confirmed BOTH already exist, fully built and production-tested: src/prolix/simulate.py::run_simulation (periodic+PME+NL, ~1229 lines/~31 commits) and single_padded_force->flash_explicit_forces (analytical forces + PME custom_vjp, used throughout batched_simulate.py)'
+  reason_failed: Only searched/read the MolecularBundle/EnsemblePlan-side code track when investigating 'does X exist' -- missed an entire separate, more mature type system (Protein/PhysicsSystem/batched_simulate) where both capabilities actually live. The gap is 'never connected to EnsemblePlan', not 'doesn't exist'.
+  do_not_retry: true
+  evidence_ref: memory reference_simulate_py_nl_pme_engine.md; debt 758 (resolved with correction note) superseded by 760/761
+open_questions:
+- Does settle_langevin (src/prolix/physics/settle.py) / its force-function wrapping (_make_settle_compatible_force_fn -> jax_md.quantity.canonicalize_force) accept a FORCE function directly, or only an ENERGY function it differentiates itself? This determines whether wiring single_padded_force (debt 761) into the EnsemblePlan path is a small swap or requires new plumbing in settle_langevin/_setup_integrator.
+- Is flash_explicit_forces (src/prolix/physics/flash_explicit.py) actually correct/tested for a PhysicsSystem built via physics_system_from_bundle (the MolecularBundle-derived construction path), or only for whatever PhysicsSystem construction path it was originally built and tested against? Needs its own verification pass before trusting it at B1 scale (same discipline solvate_protein_to_bundle got today, given today's track record of 4 real bugs found by verifying-before-trusting).
+- What exactly would threading simulate.py's neighbor-list carry (scan_fn_with_neighbor's .update()-inside-fori_loop + host-side overflow-retry pattern) into dispatch_n_steps_inference's lax.while_loop actually require -- can the SAME carry structure work inside a while_loop (not just lax.scan), and does the host-side overflow-retry pattern (which presumably breaks out of the loop to reallocate) even make sense inside a while_loop's carry-only structure, or does it need a fundamentally different retry mechanism for the while_loop case?
+- Should debt 760 and 761 be scoped/sequenced together (connect both at once) or independently -- does wiring analytical forces first change what the NL+PME carry needs to carry, or vice versa?
+deferred:
+- description: 'Water-specific HLO structural check (Step 3a/3b, tasks #26) and PME grid-size sweep (Step 4, task #27) using scripts/experiments/profile_b1_water_trace.py and profile_b1_pme_grid_sweep.py'
+  rationale: Water was found NOT to be the dominant per-step cost driver (1AKE is, and separately the heterogeneous-batching redirect took priority) -- these scripts are built and bathos-tracked (campaign 32d6574e) and can still be run, just no longer urgent
+  recommended_phase: After connection-work scoping, if still relevant
+- description: 1AKE per-step cost component breakdown + correctness audit (debt 750)
+  rationale: Orthogonal to the PME+SETTLE+heterogeneous-batching focus; explicitly deprioritized by user 2026-07-17
+  recommended_phase: Separate future sprint
+- description: Bucket-matching reliability for arbitrary real proteins (debt 756)
+  rationale: 1VII+2GB1 was found by trial (5 candidates tested); no deliberate mechanism exists yet to make this reliable by design
+  recommended_phase: After connection-work (760/761) lands, since a faster/more efficient path might change what bucket sizes are even worth targeting
+- description: 'Write the Phase 4 heterogeneous-batching synthesis doc (tasks #28/#32) summarizing today''s full investigation (bug fixes, compile-sharing confirmation, corrected debt)'
+  rationale: Tracked as a task since early in Phase 4 but never actually written -- today's findings (2 more bugs, the compile-sharing confirmation, the NL+PME/analytical-forces correction) should be folded in before writing it, not written prematurely
+  recommended_phase: After connection-work scoping, or in parallel if convenient
+lessons_refs:
+- .praxia/lessons.jsonl (praxia lesson IDs 257, 258, 259, 262, 264, 265 -- logging.info end= kwarg bug; box_size static-field tracer leak; find_bonded_exclusions host-only-under-tracing; myxcel push wrong-source-tree + bathos remote-campaign-sync gap; LJ-tail scalar-mask bug; module-level jnp.array tracer leak)
+next_steps:
+- 'Scope debt 760 (wire simulate.py''s existing NL+PME engine into EnsemblePlan): read src/prolix/simulate.py::run_simulation IN FULL (not excerpts -- ~1229 lines) focusing on scan_fn_with_neighbor (lines 941-979) and the host-side did_buffer_overflow retry (lines 1028-1039), and src/prolix/physics/system.py::make_energy_fn (lines 29-262) to understand exactly what neighbor-list-carry machinery exists and what EnsemblePlan''s dispatch_n_steps_inference (src/prolix/api/ensemble_dispatch.py, while_loop at line 218) would need to gain to support it -- a carry-threading job, not new physics'
+- 'Scope debt 761 (wire single_padded_force''s analytical/flash forces into EnsemblePlan): FIRST check whether settle_langevin (src/prolix/physics/settle.py) or its force-function wrapping (_make_settle_compatible_force_fn / md_potential_bundle.make_force_fn_like_canonicalize -> jax_md.quantity.canonicalize_force) can accept a FORCE function directly instead of an ENERGY function -- this determines whether swapping single_padded_energy+jax.grad for single_padded_force+flash_explicit_forces (src/prolix/physics/flash_explicit.py:440 area, calls make_spme_energy_fn) is a small swap or needs new plumbing. Also check flash_explicit_forces'' own test coverage for MolecularBundle-derived PhysicsSystem shapes specifically (as opposed to whatever PhysicsSystem construction path it was originally tested against) -- it may need its own parity verification before trusting it at B1 scale, same discipline as solvate_protein_to_bundle got today'
+- Decide relative priority/sequencing of 760 vs 761 -- do they interact (e.g. does wiring analytical forces first change what the NL+PME carry needs to look like), or are they independent and parallelizable
+- Present the scoped plan to the user for confirmation before implementing either connection
+- 'Only after connection-work scoping is resolved: resume broader Phase 4 profiling (tasks #26/#27, the water-specific HLO check + PME grid sweep -- now LOWER priority since water was shown not to be the dominant cost driver, but not cancelled, just deprioritized)'
+- 'Separately pending, not blocking: task #30 (re-run Phase 3 B1-full with the PME fix landed -- Phase 3''s reported 7.28x was measured WITHOUT real PME cost, per research record 260717_pme_reciprocal_silently_disabled_under_stacked_dispatch); task #32/#28 (write the Phase 4 heterogeneous-batching synthesis doc, has NOT been written yet despite being tracked since early in this session); debt 750 (1AKE per-step cost breakdown, P3, deferred by user direction) and 756 (bucket-matching reliability, P3, deferred)'
+---

@@ -1,0 +1,67 @@
+---
+workspace: prolix
+session_id: 51dbbbc3-040d-4ca3-8baa-f00c6e1e349c
+status: in_progress
+immediately_relevant:
+- file: scripts/slurm/b1_init_exec.slurm
+  lines:
+  - 1
+  - 50
+  reason: 'Submission script: FOOTPRINT tiers, partition+gres defaults, array task ID -> seed mapping, pi_so3 pin comment at line 49'
+- file: scripts/benchmarks/b1_init_exec.py
+  lines:
+  - 113
+  - 197
+  reason: '_four_water_bundle(): periodic box_size + pme_alpha=0.34 + ExclusionSpec fix; OpenMM water baseline switched to PME'
+- file: src/prolix/physics/settle.py
+  lines:
+  - 1
+  - 60
+  reason: 'Phase 1: _scatter_water_target padding-mask guard across 7 call sites'
+- file: src/prolix/batched_energy.py
+  lines:
+  - 1
+  - 60
+  reason: 'Phase 2.5: _pme_reciprocal_and_corrections extraction + try/except fix'
+- file: src/prolix/api/bundle_md.py
+  lines:
+  - 290
+  - 300
+  reason: 'Phase 2.5: pme_alpha vmap-tracing fallback corrected from 0.3 to 0.34'
+active_dispatches: []
+task_id: 260715_b1_physics_parity
+phase: Phase 3 (Full B1-full re-run)
+goal_statement: 'Re-test B1-FULL Claim-1 (H1: prolix cold-start t_total beats OpenMM N-Context) under genuine physics parity (SETTLE constraints + periodic PME, Phases 1/2/2.5 complete on b1/full: f73aea4, e014ecc, 3cbe258). This handoff covers Phase 3, the full re-run itself.'
+context_refs: []
+failed_attempts:
+- attempt_id: a1
+  description: export CAMPAIGN_ID=c3644ac7 && sbatch ... --export=ALL,CAMPAIGN_ID,FOOTPRINT=prereg,B1_PATH=inference scripts/slurm/b1_init_exec.slurm (both prolix and openmm resubmissions on pi_so3)
+  outcome: 'Job ran successfully (seed 0 executing fine, real physics, real GPU), but stdout log shows ''Campaign: <none>'' -- CAMPAIGN_ID was not received by the remote job'
+  reason_failed: The local sbatch proxy wrapper (~/.local/bin/sbatch) runs `ssh -q engaging "cd ... && /usr/bin/sbatch $*"` -- this does not forward the local shell's exported env vars over SSH. --export=ALL,CAMPAIGN_ID on the remote sbatch call looks for CAMPAIGN_ID already set in the SSH session's environment, which it never was (only the local shell had it exported, and bare var names in $* don't carry their values -- only the var NAME text `CAMPAIGN_ID` gets passed as a literal string arg to remote sbatch's --export list, which then finds no such var set and presumably silently drops it or exports empty)
+  do_not_retry: true
+  evidence_ref: 'outputs/logs/slurm/18069084_0.b1_init_exec.out line ~13 ''Campaign: <none>'''
+open_questions:
+- 'Does 18069084/18069190''s bathos run actually lack the c3644ac7 campaign tag? (found ''Campaign: <none>'' in stdout, root cause suspected but not fully confirmed -- did not finish reading the sbatch wrapper before interruption)'
+- If campaign tag is missing, can mcp__bathos__campaign_add retroactively associate already-catalogued runs, or does this campaign need to be treated as informal/untracked for this particular re-run?
+- Is the engaging login node backup transient (routine congestion) or a sign of a broader cluster issue worth checking `myxcel maintenance engaging` for?
+deferred:
+- description: Neighbor-list-accelerated periodic PME energy dispatch (CarrySpec-based or plain carry field on NVTLangevinState)
+  rationale: Not needed for B1's 4-water/12-atom system
+  recommended_phase: Future, only if B1 water count scales up or periodic treatment extends to protein classes
+- description: cutoff_distance kwarg bug in prolix.physics.system.make_energy_fn (silently no-ops to 9.0 A)
+  rationale: Pre-existing bug found during Phase 2 research; B1's dense bundle path doesn't use this function
+  recommended_phase: Separate backlog item, not gated on B1
+- description: sbatch wrapper (~/.local/bin/sbatch) doesn't forward local env vars over SSH -- fix the wrapper itself (or document the --export=VAR=value inline pattern) so this class of bug doesn't recur for future cluster submissions project-wide
+  rationale: Out of scope for B1 specifically; affects any script relying on --export=ALL,SOME_VAR pattern with the local proxy wrappers
+  recommended_phase: Infra/tooling backlog, not B1
+lessons_refs: []
+next_steps:
+- 'Confirm the CAMPAIGN_ID-not-threaded root cause: read ~/.local/bin/sbatch in full (already partially read -- it does `ssh -q engaging "cd ... && /usr/bin/sbatch $*"`, which does NOT forward local shell env vars over SSH; --export=ALL,CAMPAIGN_ID on the remote sbatch looks for CAMPAIGN_ID in the SSH session''s env, which was never set there since it only existed in the local shell that ran `export CAMPAIGN_ID=...`)'
+- 'If confirmed: do NOT cancel/resubmit the currently-running jobs (18069084 has ~65min+ of real compute sunk into it already). Instead check whether bathos supports retroactively associating existing runs with a campaign (mcp__bathos__campaign_add looks like the right tool) and apply it once the runs land in the catalog'
+- For future submissions, fix the export by inlining the value directly in the --export string (e.g. `--export=ALL,CAMPAIGN_ID=c3644ac7,...`) rather than relying on local env + bare var-name forwarding, since the wrapper's `ssh ... "...sbatch $*"` only transmits the literal argv text, not the local environment
+- Check `cd /home/marielle/projects/prolix && sacct -j 18069084,18069190 --format=JobID,JobName,State,ExitCode,Elapsed,Start,End -X` and `ssh engaging "squeue -j 18069084,18069190 -u maarxaru"` for task progress
+- Once tasks COMPLETE, read outputs/bench/b1_full_prereg_*_job*.json via ssh (job IDs 18069084/18069190) for finite_fraction/aot_ratio/t_total -- not just exit codes
+- Once all 6 tasks complete, compute median t_total prolix-vs-openmm and report the Claim-1 verdict (confirmed / still falsified / inconclusive) clearly with numbers
+- Update .praxia/docs/audits/260710_xtrax-rewire_next_steps.md and the B1-EPIC backlog notes in .praxia/backlog.jsonl with the new campaign's outcome
+- Given the login node is currently backed up (per user), avoid rapid/repeated SSH polling in the next session -- space out sacct/squeue checks
+---

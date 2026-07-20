@@ -789,6 +789,7 @@ def make_bundle_from_system(
         has_pbc=has_pbc,
         has_implicit_solvent=False,
         boundary_condition=boundary_condition,
+        has_real_water=nw > 0,
     )
 
     # --- per-atom helpers -------------------------------------------------
