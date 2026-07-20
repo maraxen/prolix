@@ -20,6 +20,27 @@ from prolix.physics.system import make_bundle_from_system
 from prolix.physics.settle import settle_positions
 
 
+@pytest.fixture
+def _x64_scope():
+    """Enable jax_enable_x64 for one test, restoring the prior value after.
+
+    Debt 833: the two tests below previously called
+    ``jax.config.update("jax_enable_x64", True)`` directly, with no
+    restoration -- ``jax.config`` is process-global and sticky, so this
+    silently left x64 ON for every test collected afterward in the same
+    pytest session (e.g. ``test_v3_homogeneous_batch_parity.py``,
+    ``test_v4_heterogeneous_batch_parity.py``,
+    ``test_v5_observable_parity.py``), producing spurious RMSD/observable
+    failures unrelated to those tests' own logic. Confirmed via A/B
+    git-stash comparison while regression-checking debt 761. Mirrors the
+    ``_force_float32`` pattern in ``tests/physics/test_flash_dense_parity.py``.
+    """
+    previous = jax.config.jax_enable_x64
+    jax.config.update("jax_enable_x64", True)
+    yield
+    jax.config.update("jax_enable_x64", previous)
+
+
 def _one_water_bundle():
     """Single TIP3P water as MolecularBundle (minimal V1 fixture)."""
     from prolix.typing import PhysicsSystem
@@ -154,9 +175,8 @@ def test_v1_harness_runs_and_returns_trajectory():
     assert jnp.all(jnp.isfinite(traj.positions))
 
 
-def test_v1_one_water_parity_vs_settle_langevin():
+def test_v1_one_water_parity_vs_settle_langevin(_x64_scope):
     """V1: EnsemblePlan.run matches direct settle_langevin (1 water, short run)."""
-    jax.config.update("jax_enable_x64", True)
     bundle = _one_water_bundle()
     n_steps = 50
     dt = 0.5
@@ -170,9 +190,8 @@ def test_v1_one_water_parity_vs_settle_langevin():
     assert rmsd < 1e-12, f"V1 parity failed: RMSD={rmsd:.3e} Å"
 
 
-def test_v1_solvated_ake_1k_parity_vs_settle_langevin():
+def test_v1_solvated_ake_1k_parity_vs_settle_langevin(_x64_scope):
     """V1 (#263): solvated AKE smoke, 1k steps — EnsemblePlan vs settle_langevin."""
-    jax.config.update("jax_enable_x64", True)
     bundle = _solvated_ake_bundle()
     n_steps = 1000
     dt = 0.5

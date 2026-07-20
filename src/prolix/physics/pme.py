@@ -208,17 +208,26 @@ def _spme_fwd(positions, charges, atom_mask, box_size, grid_dims, alpha, order):
 
 def _spme_bwd(grid_dims, order, residuals, g):
     positions, charges, atom_mask, box_size, theta_norm, m_sq, Q_hat_sq, G, alpha, mx, my, mz, Kx, Ky, Kz = residuals
-    K_arr = jnp.array([Kx, Ky, Kz], dtype=jnp.float32)
+    # debt 832: dtype follows positions (the ambient float precision -- float32
+    # normally, float64 under jax_enable_x64) rather than hardcoding float32.
+    # Hardcoded float32 intermediates here previously crashed under x64 with
+    # "lax.add requires arguments to have the same dtypes, got float32,
+    # float64" -- JAX's grad accumulation requires each returned cotangent to
+    # exactly match its primal's dtype (unlike jnp-level ops, which
+    # auto-promote), and this backward pass's internals stayed float32
+    # regardless of the actual (float64-under-x64) primal dtype.
+    dtype = positions.dtype
+    K_arr = jnp.array([Kx, Ky, Kz], dtype=dtype)
     frac = positions / box_size * K_arr
     grid_idx = jnp.floor(frac).astype(jnp.int32)
-    u = frac - grid_idx.astype(jnp.float32)
+    u = frac - grid_idx.astype(dtype)
 
     wx = _bspline4(u[:, 0]); wy = _bspline4(u[:, 1]); wz = _bspline4(u[:, 2])
     dwx = _bspline4_deriv(u[:, 0]); dwy = _bspline4_deriv(u[:, 1]); dwz = _bspline4_deriv(u[:, 2])
 
-    q_masked = charges * atom_mask.astype(jnp.float32)
-    forces = jnp.zeros((positions.shape[0], 3), dtype=jnp.float32)
-    potentials = jnp.zeros(positions.shape[0], dtype=jnp.float32)
+    q_masked = charges * atom_mask.astype(dtype)
+    forces = jnp.zeros((positions.shape[0], 3), dtype=dtype)
+    potentials = jnp.zeros(positions.shape[0], dtype=dtype)
 
     with jax.named_scope("pme_bwd_gather"):
         for dx in range(order):
@@ -245,7 +254,7 @@ def _spme_bwd(grid_dims, order, residuals, g):
     # 2. Charge gradient
     dE_dq = COULOMB_CONSTANT * potentials
     dE_dq += -2.0 * alpha / jnp.sqrt(jnp.pi) * COULOMB_CONSTANT * charges
-    dE_dq = dE_dq * atom_mask.astype(jnp.float32) * g
+    dE_dq = dE_dq * atom_mask.astype(dtype) * g
 
     # 3. Alpha gradient
     dG_dalpha = G * (2.0 * jnp.pi**2 * m_sq / alpha**3)
@@ -261,9 +270,9 @@ def _spme_bwd(grid_dims, order, residuals, g):
     # 4. Box size gradient
     virial_term = -1.0 / box_size * jnp.sum(positions * dE_dpos, axis=0)
     Kz_rfft = Kz // 2 + 1
-    m_x_sq = mx[:, None, None]**2 * jnp.ones((1, Ky, Kz_rfft), dtype=jnp.float32)
-    m_y_sq = my[None, :, None]**2 * jnp.ones((Kx, 1, Kz_rfft), dtype=jnp.float32)
-    m_z_sq = mz[None, None, :]**2 * jnp.ones((Kx, Ky, 1), dtype=jnp.float32)
+    m_x_sq = mx[:, None, None]**2 * jnp.ones((1, Ky, Kz_rfft), dtype=dtype)
+    m_y_sq = my[None, :, None]**2 * jnp.ones((Kx, 1, Kz_rfft), dtype=dtype)
+    m_z_sq = mz[None, None, :]**2 * jnp.ones((Kx, Ky, 1), dtype=dtype)
     m_i_sq = jnp.stack([m_x_sq, m_y_sq, m_z_sq], axis=-1)
     
     term_alpha = 2.0 * jnp.pi**2 * m_i_sq / alpha**2
@@ -272,7 +281,7 @@ def _spme_bwd(grid_dims, order, residuals, g):
     dE_dL_recip = 0.5 * COULOMB_CONSTANT * jnp.sum(Q_hat_sq[:, :, :, None] * dG_dL * weights[:, :, :, None], axis=(0, 1, 2))
     dE_dL = (virial_term + dE_dL_recip) * g
 
-    return dE_dpos, dE_dq, jnp.zeros_like(atom_mask, dtype=jnp.float32), dE_dL, dE_dalpha
+    return dE_dpos, dE_dq, jnp.zeros_like(atom_mask, dtype=dtype), dE_dL, dE_dalpha
 
 spme_energy_with_forces.defvjp(_spme_fwd, _spme_bwd)
 
