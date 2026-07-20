@@ -32,6 +32,7 @@ from prolix.batched_energy import (
     _bond_energy_masked,
     _dihedral_energy_masked,
     single_padded_energy,
+    single_padded_force,
 )
 from prolix.types.bundles import ATOM_BUCKETS, WATER_BUCKETS, MolecularBundle
 from prolix.typing import PhysicsSystem
@@ -505,3 +506,77 @@ def energy_fn_from_bundle(
         return e
 
     return energy_fn
+
+
+def force_fn_from_bundle(bundle: MolecularBundle) -> Callable[..., jnp.ndarray]:
+    """Analytical/FlashMD forces from bundle fields (debt 761).
+
+    Drop-in force-returning alternative to ``energy_fn_from_bundle`` for
+    ``settle_langevin``'s ``energy_or_force_fn`` parameter (auto-detected via
+    ``jax.eval_shape``'s output shape in ``_make_settle_compatible_force_fn`` /
+    ``make_force_fn_like_canonicalize`` -- a force-shaped ``(N, 3)`` return
+    skips the dense-energy autodiff pass entirely). Uses
+    ``single_padded_force(..., use_flash=True)`` -- FlashMD's tiled,
+    checkpointed direct-space kernel (``flash_explicit_forces``) -- instead
+    of ``jax.grad`` through ``single_padded_energy``'s dense O(N^2) energy.
+    The AMBER 1-4 exception term (absent from ``single_padded_force`` itself)
+    is added back via a cheap ``jax.grad`` pass, mirroring
+    ``energy_fn_from_bundle``'s own handling, so this is a faithful,
+    physics-complete substitute -- not merely the non-bonded term.
+
+    Verified (2026-07-19) to float32 precision (rel diff ~1.3e-5) against
+    ``-jax.grad(energy_fn_from_bundle(bundle))`` on real periodic,
+    PME-solvated 1VII/2GB1 bundles (see
+    ``tests/physics/test_flash_dense_parity.py`` and
+    ``.praxia/docs/decisions/260717_b1-connect-existing-engines-scope.md``).
+    Raises for bundle shapes outside that verified scope rather than silently
+    using an unvalidated path: implicit-solvent (``flash_explicit_forces``/
+    ``flash_nonbonded_forces`` have no GB term at all) and non-periodic/vacuum
+    bundles (the ``flash_nonbonded_forces`` branch was never benchmarked or
+    parity-tested).
+    """
+    if bundle.shape_spec.has_implicit_solvent:
+        raise ValueError(
+            "force_fn_from_bundle (debt 761 FlashMD path) does not support "
+            "implicit-solvent (GB) bundles -- flash_explicit_forces/"
+            "flash_nonbonded_forces have no GB term. Use energy_fn_from_bundle "
+            "(autodiff path) for implicit-solvent systems."
+        )
+    if not bundle.shape_spec.has_pbc:
+        raise ValueError(
+            "force_fn_from_bundle (debt 761 FlashMD path) is only verified for "
+            "periodic explicit-solvent/PME bundles -- the vacuum "
+            "flash_nonbonded_forces branch was not benchmarked or "
+            "parity-tested. Use energy_fn_from_bundle (autodiff path) for "
+            "vacuum/non-periodic systems."
+        )
+
+    disp_fn, _ = displacement_fn_for_bundle(bundle)
+
+    def force_fn(positions: jnp.ndarray, **kwargs: object) -> jnp.ndarray:
+        # single_padded_force has no neighbor-list branch (debt 761 is scoped
+        # to the dense flash path only) -- callers must not combine
+        # use_flash_forces with use_neighbor_list (EnsemblePlan.run() raises
+        # before this is ever reached with a real NL request), so any
+        # incoming kwargs here are jax_md probing artifacts
+        # (eval_shape/canonicalize_force), matching energy_fn_from_bundle's
+        # own "everything else is dropped" contract.
+        del kwargs
+        sys = physics_system_from_bundle(bundle, positions)
+        f = single_padded_force(
+            sys, disp_fn, implicit_solvent=False, explicit_solvent=True, use_flash=True,
+        )
+        f_exception = -jax.grad(
+            lambda r: _exception_energy_masked(
+                r,
+                bundle.exception_pairs,
+                bundle.exception_sigmas,
+                bundle.exception_epsilons,
+                bundle.exception_chargeprods,
+                bundle.exception_mask,
+                disp_fn,
+            )
+        )(positions)
+        return f + f_exception
+
+    return force_fn

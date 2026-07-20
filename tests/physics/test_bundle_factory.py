@@ -162,6 +162,81 @@ def test_factory_flattens_multi_term_dihedrals():
     assert int(bundle.dihedral_mask.sum()) == 4
 
 
+def test_factory_bond_idx_is_int32_regardless_of_input_dtype():
+    """``bond_idx`` must be int32 even when the source topology arrives non-int32.
+
+    Regression for a real bug found via ``tests/physics/test_flash_dense_parity.py``
+    (debt 761): ``system.py``'s ``_pad_2d(arr, bucket, cols, dtype=jnp.int32)``
+    only applied ``dtype`` on the empty/None fallback branch -- the real-data
+    branch (``jnp.pad``, which preserves the input's own dtype) silently
+    ignored the caller's explicit ``dtype=jnp.int32`` request. Harmless for
+    plain array indexing (which tolerates/truncates), but fatal for any
+    dtype-based static/dynamic or differentiable/non-differentiable
+    partitioning downstream (``eqx.filter_grad``, used by
+    ``flash_explicit.py::flash_explicit_forces``, treats a float-typed index
+    array as differentiable, producing a tracer where concrete-array-only
+    code -- ``topology.find_bonded_exclusions`` -- expects a real value).
+
+    This was previously invisible because every existing fixture in this
+    file uses *empty* bonds (the only branch that did apply ``dtype``
+    correctly) -- this test is the first to exercise real, non-empty,
+    non-int32-dtyped topology through ``make_bundle_from_system``.
+    """
+    from prolix.typing import PhysicsSystem
+
+    n = 4
+    pos = jnp.zeros((n, 3))
+    ones_f = jnp.zeros(n)
+    ones_b = jnp.ones(n, dtype=bool)
+    zeros_b = jnp.zeros(n, dtype=bool)
+    elem = jnp.ones(n, dtype=jnp.int32)
+
+    # Deliberately float-dtyped bond indices -- upstream data (e.g. a merged
+    # topology under jax_enable_x64) can arrive this way; the factory must
+    # still normalize to int32, not just trust the input.
+    bonds = jnp.array([[0, 1], [1, 2], [2, 3]], dtype=jnp.float32)
+    bond_params = jnp.zeros((3, 2))
+    bond_mask = jnp.ones(3, dtype=bool)
+
+    empty_ang = jnp.zeros((0, 3), dtype=jnp.int32)
+    empty_p = jnp.zeros((0, 2))
+    empty_m = jnp.zeros(0, dtype=bool)
+
+    sys = PhysicsSystem(
+        positions=pos,
+        charges=ones_f,
+        sigmas=ones_f,
+        epsilons=ones_f,
+        radii=ones_f,
+        scaled_radii=ones_f,
+        masses=ones_f,
+        element_ids=elem,
+        atom_mask=ones_b,
+        is_hydrogen=zeros_b,
+        is_backbone=zeros_b,
+        is_heavy=zeros_b,
+        protein_atom_mask=zeros_b,
+        water_atom_mask=zeros_b,
+        bonds=bonds,
+        bond_params=bond_params,
+        bond_mask=bond_mask,
+        angles=empty_ang,
+        angle_params=empty_p,
+        angle_mask=empty_m,
+        dihedrals=jnp.zeros((0, 4), dtype=jnp.int32),
+        dihedral_params=jnp.zeros((0, 1, 3)),
+        dihedral_mask=jnp.zeros(0, dtype=bool),
+        impropers=jnp.zeros((0, 4), dtype=jnp.int32),
+        improper_params=jnp.zeros((0, 1, 3)),
+        improper_mask=jnp.zeros(0, dtype=bool),
+    )
+    bundle = make_bundle_from_system(sys, boundary_condition="free")
+    assert bundle.bond_idx.dtype == jnp.int32, (
+        f"bond_idx must be int32 regardless of input dtype, got {bundle.bond_idx.dtype}"
+    )
+    assert jnp.array_equal(bundle.bond_idx[:3], jnp.array([[0, 1], [1, 2], [2, 3]]))
+
+
 def test_dense_excl_to_pair_list_deduplicates():
     """Dense (N, M) excl layout converts to unique (E, 2) pairs."""
     excl = np.array([[1, -1], [0, -1]], dtype=np.int32)

@@ -394,13 +394,33 @@ def _pad_1d(arr, bucket: int, dtype=None):
 
 
 def _pad_2d(arr, bucket: int, cols: int, dtype=None):
-    """Pad a 2D array to (bucket, cols); return zeros if arr is None or empty."""
+    """Pad a 2D array to (bucket, cols); return zeros if arr is None or empty.
+
+    ``dtype`` is enforced unconditionally (real-data branch included) --
+    every call site passes an explicit ``dtype`` expecting it to be a hard
+    guarantee (index arrays as int32, param arrays as float32), not merely
+    a fallback for the empty case. Previously this branch silently trusted
+    whatever dtype the upstream merged-topology data happened to arrive in
+    via ``jnp.pad`` (which preserves input dtype) -- under
+    ``jax_enable_x64``, upstream int index arrays (e.g. bond/angle/dihedral
+    indices) could arrive as float64, silently producing a float-typed
+    ``bond_idx``/etc. on the bundle. Harmless for plain indexing (JAX
+    truncates during gather), but fatal for any consumer that partitions
+    dynamic/static or differentiable/non-differentiable fields by dtype --
+    e.g. ``eqx.filter_grad`` (used internally by
+    ``flash_explicit.py::flash_explicit_forces``) then treats the
+    index array as a differentiable leaf, producing a tracer where
+    downstream code (``topology.find_bonded_exclusions``) expects a
+    concrete array, crashing with ``TracerArrayConversionError``. Found via
+    ``tests/physics/test_flash_dense_parity.py`` (debt 761).
+    """
     import jax.numpy as jnp
 
     if arr is None or (hasattr(arr, "size") and arr.size == 0):
         return jnp.zeros((bucket, cols), dtype=dtype or jnp.int32)
     pad = bucket - arr.shape[0]
-    return jnp.pad(arr, ((0, pad), (0, 0)))
+    padded = jnp.pad(arr, ((0, pad), (0, 0)))
+    return padded.astype(dtype) if dtype is not None else padded
 
 
 def _mask(n_real: int, bucket: int):

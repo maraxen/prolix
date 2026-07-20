@@ -103,6 +103,7 @@ class EnsemblePlan:
         save_every: int | None = None,
         use_neighbor_list: bool = False,
         nl_update_every: int = 20,
+        use_flash_forces: bool = False,
     ) -> Trajectory | list[Trajectory]:
         """Run MD simulation over all bundles.
 
@@ -140,6 +141,19 @@ class EnsemblePlan:
                 Default False preserves existing dense-path behavior exactly.
             nl_update_every: Steps between neighbor-list rebuilds when
                 ``use_neighbor_list=True`` (ignored otherwise).
+            use_flash_forces: debt 761 — compute forces via
+                ``force_fn_from_bundle`` (FlashMD's tiled/checkpointed
+                ``flash_explicit_forces`` kernel) instead of autodiff through
+                ``energy_fn_from_bundle``'s dense O(N²) energy. Verified to
+                float32 precision against the autodiff path on real periodic
+                PME-solvated bundles (1VII/2GB1); raises for implicit-solvent
+                or non-periodic bundles (unverified paths — see
+                ``force_fn_from_bundle``'s docstring) and when combined with
+                ``use_neighbor_list=True`` (``single_padded_force`` has no
+                neighbor-list branch yet). Works in both ``run_mode``s and for
+                both single-bundle and multi-bundle (stacked) dispatch.
+                Default False preserves existing autodiff-path behavior
+                exactly.
 
         Returns:
             Trajectory for a single bundle, or list[Trajectory] when
@@ -169,6 +183,12 @@ class EnsemblePlan:
             raise ValueError(
                 "use_neighbor_list=True does not yet support xtc_path streaming"
             )
+        if use_flash_forces and use_neighbor_list:
+            raise ValueError(
+                "use_flash_forces=True cannot be combined with "
+                "use_neighbor_list=True -- single_padded_force (debt 761's "
+                "FlashMD path) has no neighbor-list branch yet."
+            )
 
         if run_mode == "inference":
             return self._run_inference(
@@ -183,6 +203,7 @@ class EnsemblePlan:
                 save_every=save_every,
                 use_neighbor_list=use_neighbor_list,
                 nl_update_every=nl_update_every,
+                use_flash_forces=use_flash_forces,
             )
 
         return self._run_trajectory(
@@ -194,6 +215,7 @@ class EnsemblePlan:
             xtc_path=xtc_path,
             dt_unit=dt_unit,
             gamma=gamma,
+            use_flash_forces=use_flash_forces,
         )
 
     def _run_trajectory(
@@ -207,6 +229,7 @@ class EnsemblePlan:
         xtc_path: str | Any | None,
         dt_unit: str,
         gamma: float,
+        use_flash_forces: bool = False,
     ) -> Trajectory | list[Trajectory]:
         """Pathological / baseline path: scan + full trajectory stack."""
         if len(self.bundles) == 1:
@@ -219,6 +242,7 @@ class EnsemblePlan:
                 observables=observables,
                 dt_unit=dt_unit,
                 gamma=gamma,
+                use_flash_forces=use_flash_forces,
             )
             if xtc_path is not None:
                 from prolix.api.xtc_sink import write_positions_xtc
@@ -235,6 +259,7 @@ class EnsemblePlan:
             dt_unit=dt_unit,
             gamma=gamma,
             run_mode="trajectory",
+            use_flash_forces=use_flash_forces,
         )
 
     def _run_inference(
@@ -251,6 +276,7 @@ class EnsemblePlan:
         save_every: int | None,
         use_neighbor_list: bool = False,
         nl_update_every: int = 20,
+        use_flash_forces: bool = False,
     ) -> Trajectory | list[Trajectory]:
         """Inference path: while_loop carry-only; group-by-shape for multi-bundle."""
         if len(self.bundles) == 1:
@@ -267,6 +293,7 @@ class EnsemblePlan:
                 save_every=save_every,
                 use_neighbor_list=use_neighbor_list,
                 nl_update_every=nl_update_every,
+                use_flash_forces=use_flash_forces,
             )
 
         return self._run_grouped(
@@ -280,6 +307,7 @@ class EnsemblePlan:
             run_mode="inference",
             use_neighbor_list=use_neighbor_list,
             nl_update_every=nl_update_every,
+            use_flash_forces=use_flash_forces,
         )
 
     def _run_grouped(
@@ -295,6 +323,7 @@ class EnsemblePlan:
         run_mode: RunMode,
         use_neighbor_list: bool = False,
         nl_update_every: int = 20,
+        use_flash_forces: bool = False,
     ) -> list[Trajectory]:
         """Host-partition by shape_spec; Vmap/SafeMap within each class (xtrax).
 
@@ -332,6 +361,7 @@ class EnsemblePlan:
                         gamma=gamma,
                         use_neighbor_list=use_neighbor_list,
                         nl_update_every=nl_update_every,
+                        use_flash_forces=use_flash_forces,
                     )
                 else:
                     traj = self._run_single(
@@ -343,6 +373,7 @@ class EnsemblePlan:
                         observables=obs,
                         dt_unit=dt_unit,
                         gamma=gamma,
+                        use_flash_forces=use_flash_forces,
                     )
                 trajs = [traj]
             elif can_jit_vmap_n_mols(group):
@@ -359,6 +390,7 @@ class EnsemblePlan:
                     plan_override=group_plan,
                     use_neighbor_list=use_neighbor_list,
                     nl_update_every=nl_update_every,
+                    use_flash_forces=use_flash_forces,
                 )
             else:
                 # Defensive: same shape_spec should always stack; fall back
@@ -393,6 +425,7 @@ class EnsemblePlan:
                                 observables=obs,
                                 dt_unit=dt_unit,
                                 gamma=gamma,
+                                use_flash_forces=use_flash_forces,
                             )
                         )
                     else:
@@ -406,6 +439,7 @@ class EnsemblePlan:
                                 observables=obs,
                                 dt_unit=dt_unit,
                                 gamma=gamma,
+                                use_flash_forces=use_flash_forces,
                             )
                         )
             for idx, traj in zip(indices, trajs, strict=True):
@@ -429,6 +463,7 @@ class EnsemblePlan:
         plan_override: Any | None = None,
         use_neighbor_list: bool = False,
         nl_update_every: int = 20,
+        use_flash_forces: bool = False,
     ) -> list[Trajectory]:
         """JIT vmap / safe_map over stack-compatible bundles (#2645)."""
         import jax.numpy as jnp
@@ -475,6 +510,7 @@ class EnsemblePlan:
                     use_neighbor_list=use_neighbor_list,
                     nl_update_every=nl_update_every,
                     initial_neighbor=neighbor,
+                    use_flash_forces=use_flash_forces,
                 )
             return self._run_single(
                 bundle,
@@ -487,6 +523,7 @@ class EnsemblePlan:
                 trim_output=False,
                 dt_unit=dt_unit,
                 gamma=gamma,
+                use_flash_forces=use_flash_forces,
             )
 
         import jax
@@ -618,6 +655,7 @@ class EnsemblePlan:
         integration_prefix: int | None,
         dt_unit: str,
         gamma: float,
+        use_flash_forces: bool = False,
     ) -> tuple[Any, Any, Any, Any]:
         """Shared settle_langevin init. Returns (state, apply_fn, dt, kT)."""
         import jax
@@ -627,6 +665,7 @@ class EnsemblePlan:
             active_positions,
             as_integration_scalars,
             energy_fn_from_bundle,
+            force_fn_from_bundle,
             displacement_fn_for_bundle,
             masses_for_bundle,
             masses_with_prefix,
@@ -636,7 +675,15 @@ class EnsemblePlan:
         from prolix.physics.kups_adapter import AKMA_TIME_UNIT_FS, gamma_ps_to_akma
         from prolix.physics.settle import settle_langevin
 
-        energy_fn = energy_fn_from_bundle(bundle)
+        # debt 761: force_fn_from_bundle returns an (N, 3) force array rather
+        # than a scalar energy -- settle_langevin's energy_or_force_fn
+        # auto-detects which via jax.eval_shape (see
+        # _make_settle_compatible_force_fn/make_force_fn_like_canonicalize),
+        # so no other change is needed here for the integrator itself to
+        # skip the dense-energy autodiff pass.
+        energy_or_force_fn = (
+            force_fn_from_bundle(bundle) if use_flash_forces else energy_fn_from_bundle(bundle)
+        )
         _displacement_fn, shift_fn = displacement_fn_for_bundle(bundle)
 
         dt_arr = jnp.asarray(dt)
@@ -669,7 +716,7 @@ class EnsemblePlan:
             water_mask = None
 
         init_fn, apply_fn = settle_langevin(
-            energy_fn,
+            energy_or_force_fn,
             shift_fn,
             dt=1.0,
             kT=1.0,
@@ -697,6 +744,7 @@ class EnsemblePlan:
         trim_output: bool = True,
         dt_unit: str = "fs",
         gamma: float = 10.0,
+        use_flash_forces: bool = False,
     ) -> Trajectory:
         from prolix.api.bundle_md import trim_trajectory_positions
         from prolix.api.ensemble_dispatch import dispatch_n_steps
@@ -710,6 +758,7 @@ class EnsemblePlan:
             integration_prefix=integration_prefix,
             dt_unit=dt_unit,
             gamma=gamma,
+            use_flash_forces=use_flash_forces,
         )
 
         def step_fn(carry: Any, _: Any) -> tuple[Any, Any]:
@@ -749,6 +798,7 @@ class EnsemblePlan:
         use_neighbor_list: bool = False,
         nl_update_every: int = 20,
         initial_neighbor: Any = None,
+        use_flash_forces: bool = False,
     ) -> Trajectory:
         """Carry-only MD via while_loop; Trajectory holds final frame only.
 
@@ -798,6 +848,7 @@ class EnsemblePlan:
             integration_prefix=integration_prefix,
             dt_unit=dt_unit,
             gamma=gamma,
+            use_flash_forces=use_flash_forces,
         )
 
         sink_cm = None
