@@ -1,0 +1,62 @@
+---
+workspace: prolix
+session_id: 68f9703c-b1-full-debt-sweep-260720
+status: in_progress
+immediately_relevant:
+- file: .praxia/docs/decisions/260717_b1-connect-existing-engines-scope.md
+  lines:
+  - 1
+  - 350
+  reason: the running decision-log doc for this whole task_id -- every debt item's investigation, fix, and verification is documented here in sequence; read the tail for the most recent (PR merge + debt sweep) section
+- file: src/prolix/physics/pme.py
+  lines:
+  - 209
+  - 285
+  reason: _spme_bwd -- debt 832's partial fix (dtype = positions.dtype pattern); template to replicate in flash_explicit.py for debt 835
+- file: src/prolix/physics/flash_explicit.py
+  lines:
+  - 136
+  - 359
+  reason: debt 835's actual scope -- 20+ hardcoded jnp.float32 sites in chunked_explicit_nonbonded_energy/_chunked_lj_only_energy, not yet fixed
+- file: tests/api/test_v1_ensemble_plan_parity.py
+  lines:
+  - 1
+  - 40
+  reason: debt 833's fix (_x64_scope fixture) -- template for isolating jax_enable_x64 config mutation to a single test
+- file: tests/api/test_v3_homogeneous_batch_parity.py
+  lines:
+  - 1
+  - 50
+  reason: debt 834 -- fails identically whether or not test_v1's x64 leak is fixed; needs isolated-run investigation to find the real root cause
+active_dispatches: []
+task_id: 260715_b1_physics_parity
+phase: 'Phase 8 (PR #3 merge + B1 debt sweep)'
+goal_statement: Merge B1 physics-parity work into main, then sweep the remaining open B1 debt backlog (all P3 at session start) as far as reasonably scoped in one session.
+context_refs:
+- phase: Phase 7 (debt 770/803 diagnosis)
+  task_id: 260715_b1_physics_parity
+  summary: Prior handoff at commit 10902c5, before this session's control-job pull, debt 761 implementation, PR merge, and debt sweep
+failed_attempts:
+- attempt_id: 833_x64_leakage_hypothesis
+  description: Hypothesized test_v1_ensemble_plan_parity.py's un-restored jax.config.update('jax_enable_x64', True) was the cause of test_v3/v4/v5's batch-parity test failures when collected together in one pytest session.
+  outcome: Fixed the actual leak (restoring fixture) and re-ran v1+v3+v4+v5 together -- v3/v4/v5 failed with the EXACT SAME measured RMSD/delta values as before the fix.
+  reason_failed: The hypothesis was plausible by analogy (same bug class confirmed elsewhere this session, debt 831/832) but wrong for these specific tests. The fix was kept anyway (real test hygiene value) but does not explain v3/v4/v5's failures -- root cause is still unknown, filed as debt 834.
+  do_not_retry: true
+  evidence_ref: 'commit ab61b50; PR #4 description'
+open_questions:
+- 'Debt 834: what actually causes test_v3/v4/v5''s batch-parity tests to fail when run together (confirmed NOT jax_enable_x64 leakage from test_v1)? Do they fail in complete isolation too?'
+- 'Is PR #4 (debt 833/832 partial fixes) reviewed/mergeable, or does the user want changes first?'
+deferred:
+- description: 'Debt 835: full x64 support for flash_explicit_forces (20+ hardcoded float32 sites in flash_explicit.py''s tiled kernels)'
+  rationale: Much larger fix than debt 832's pme.py-only scope; production regime is float32 so this is non-blocking
+  recommended_phase: next dedicated pass
+- description: Debt 773 (intermediate ATOM_BUCKET), 756 (deliberate bucket-matching), 750 (1AKE cost breakdown), 567 (multi-axis dispatch)
+  rationale: Each is a genuine architecture/performance investigation already scoped as its own dedicated pass in its original filing -- not attempted this session
+  recommended_phase: unscoped -- pick per B1 critical-path priority
+lessons_refs: []
+next_steps:
+- 'Review and merge PR #4 (https://github.com/maraxen/prolix/pull/4) if the debt-833/832 fixes look correct -- or ask the user if merge authorization extends to it'
+- 'Investigate debt 834: determine whether test_v3_homogeneous_batch_parity.py/test_v4_heterogeneous_batch_parity.py/test_v5_observable_parity.py fail even in complete isolation (not just when collected together) -- if isolated failures reproduce, this is a plain correctness/tolerance bug in the parity logic itself, not a cross-test-state leak'
+- 'If pursuing debt 835 (full x64 support for flash_explicit_forces): systematically convert every hardcoded jnp.float32 in flash_explicit.py''s chunked_explicit_nonbonded_energy/_chunked_lj_only_energy (~20 sites, lines 136-359 and the 0.83333333 dispersion-tail constant) to follow an ambient dtype (positions.dtype), then re-verify the full debt-761 flash-forces parity suite doesn''t regress -- non-blocking since production regime is float32'
+- When ready, tackle debt 773 (intermediate ATOM_BUCKET ~2048), 756 (deliberate bucket-matching for solvate_protein_to_bundle), 750 (1AKE cost-breakdown profiling), or 567 (multi-axis EnsemblePlan dispatch beyond N_MOLS) -- each is a standalone design task, pick based on what's next on the B1 critical path
+---
