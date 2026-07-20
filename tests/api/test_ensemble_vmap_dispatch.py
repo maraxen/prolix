@@ -39,7 +39,7 @@ def test_n_mols_strategy_vmap_when_stackable():
 def test_n_mols_strategy_safemap_when_not_stackable(monkeypatch):
     bundles = [_make_bundle(10, seed=1), _make_bundle(10, seed=2)]
     monkeypatch.setattr(
-        "prolix.api.ensemble_planner.can_jit_vmap_n_mols",
+        "prolix.api.ensemble_planner.can_stack_molecular_bundles",
         lambda _: False,
     )
     plan = EnsemblePlan.from_bundles(bundles).batch_plan

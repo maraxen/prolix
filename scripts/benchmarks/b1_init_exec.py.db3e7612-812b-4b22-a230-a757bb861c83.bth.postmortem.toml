@@ -1,0 +1,66 @@
+run_id = "db3e7612-812b-4b22-a230-a757bb861c83"
+
+[postmortem]
+hypothesis_status = "falsified"
+summary = """
+Campaign 2115b4dd (B1-full Claim-1) confirmation on Engaging H200: prolix
+inference-path cold-start median t_total is worse than OpenMM CUDA N-Context
+baseline under the locked prereg protocol (64 systems × 100 ps @ dt=0.5 fs,
+3 seeds). Prolix median 2755.3 s (seeds 0/1/2 jobs 17928274 / 17930333 /
+17924116); OpenMM CUDA median 633.0 s (jobs 17982750 / 17983798 / 17982521,
+hardware_tag=openmm:CUDA). Ratio prolix/openmm ≈ 4.35×. AOT is not explanatory
+(aot_ratio = t_aot/t_total ≈ 0.003–0.004 ≪ 0.5). H1 falsified; H0 stands.
+"""
+unexpected_observations = """
+1. First prolix prereg wave (17871881) failed bathos on finite_positions=false
+   and aot_ratio≈0.78. Root causes: (a) harness aot_ratio used (cold−warm)/cold
+   instead of t_aot/t_total; (b) minority vacuum 1AKE NaNs under B=16×200k
+   (5/64 on diag 17905437). Fixed as B1-AOT-RATIO + B1-FINITE-GATE
+   (finite_fraction≥0.9). After fix, prolix seeds exit 0 with usable t_total.
+2. First OpenMM array (17973437) failed immediately: PyPI openmm 8.3.1 wheel in
+   the shared uv venv has no libOpenMMCUDA (CPU/OpenCL only). Required CUDA-only
+   platform correctly refused OpenCL/CPU fallback. Fixed with conda-forge env
+   b1-openmm @ /orcd/pool/007/maarxaru/local/share/mamba/envs/b1-openmm plus
+   slurm OPENMM_PLUGIN_DIR / module load cuda; resubmit 17982521 passed.
+3. Bathos catalog outcome column is 'unknown' on completed prolix/openmm runs
+   despite EXIT=0 and JSON satisfying the soft gate (same quirk as XR parity
+   postmortems). Cite JSON medians / exit codes, not outcome column.
+4. Stacked SETTLE remains off (water_indices=None); water stayed finite but
+   drifted pathologically — not the H1 fail driver. Parked as B1-SETTLE-STACK.
+"""
+root_cause = """
+H1 predicted prolix heterogeneous EnsemblePlan cold-start wall-clock advantage
+vs N independent OpenMM Contexts in the init-bound short-trajectory regime.
+Measured opposite on primary hardware class used for this campaign (H200):
+OpenMM CUDA steady-state dominates (~574 s) with small construct (~50–70 s);
+prolix inference while_loop ensemble spends ~2730 s in t_steady_state after
+~10–12 s AOT. The gap is production MD throughput / ensemble dispatch cost,
+not compile dominance. Soft-finite 1AKE NaNs and prior gate bugs were
+process/protocol issues that blocked reading the datum; they do not reverse
+the median comparison once gates are aligned with prereg intent.
+"""
+verdict_override = "fail"
+next_steps = """
+1. Close or amend Claim-1 prereg: record H1 falsified for this protocol/hardware;
+   do not cite a prolix win from campaign 2115b4dd.
+2. Optional follow-ups (not required to close the falsification): profile prolix
+   t_steady_state (per-class vmap cost, energy/force, SETTLE restore); compare
+   OpenMM Context reuse vs N-independent (prereg forbids reuse — keep locked).
+3. Keep B1-SETTLE-STACK (P2) and B1-1AKE-NAN (P3) parked unless paper needs
+   vacuum long-horizon all-finite.
+4. Prefer conda CUDA OpenMM for any future OpenMM baseline on Engaging; do not
+   rely on the uv PyPI wheel for CUDA.
+"""
+author = "agent+marielle"
+status = "final"
+
+[asset_links]
+sidecar = "scripts/benchmarks/b1_init_exec.bth.toml"
+prereg = ".praxia/docs/specs/260528_b1-preregistration.md"
+prolix_seed0 = "outputs/bench/b1_full_prereg_prolix_inference_seed0_job17928274.json"
+prolix_seed1 = "outputs/bench/b1_full_prereg_prolix_inference_seed1_job17930333.json"
+prolix_seed2 = "outputs/bench/b1_full_prereg_prolix_inference_seed2_job17924116.json"
+openmm_seed0 = "outputs/bench/b1_full_prereg_openmm_inference_seed0_job17982750.json"
+openmm_seed1 = "outputs/bench/b1_full_prereg_openmm_inference_seed1_job17983798.json"
+openmm_seed2 = "outputs/bench/b1_full_prereg_openmm_inference_seed2_job17982521.json"
+slurm = "scripts/slurm/b1_init_exec.slurm"

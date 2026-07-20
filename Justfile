@@ -133,7 +133,7 @@ submit-bench-chignolin: push-engaging
 submit-bench-chignolin-preemptable: push-engaging
     ssh {{ssh_opts}} {{engaging_login}} 'cd {{engaging_remote_dir}} && export ENGAGING_LOG_DATE=$(date +%Y%m%d) && mkdir -p outputs/logs/engaging/$ENGAGING_LOG_DATE/slurm && sbatch -o outputs/logs/engaging/$ENGAGING_LOG_DATE/slurm/%x_%j.out -e outputs/logs/engaging/$ENGAGING_LOG_DATE/slurm/%x_%j.err scripts/slurm/bench_chignolin_preemptable.slurm'
 
-# Workspace venv (``proxide`` from PyPI). Python 3.12 via ``workspace/.python-version``.
+# Workspace venv (``proxide`` from PyPI). Python 3.13 via ``workspace/.python-version`` (prolix ==3.13.*).
 submit-workspace-uv-sync-pi-so3: push-engaging-clean
     ssh {{ssh_opts}} {{engaging_login}} 'cd {{engaging_remote_dir}} && export ENGAGING_LOG_DATE=$(date +%Y%m%d) && mkdir -p outputs/logs/engaging/$ENGAGING_LOG_DATE/slurm && sbatch --parsable --partition={{engaging_partition}} -o outputs/logs/engaging/$ENGAGING_LOG_DATE/slurm/uvsync_%j.out -e outputs/logs/engaging/$ENGAGING_LOG_DATE/slurm/uvsync_%j.err scripts/slurm/bench_workspace_uv_sync.slurm'
 

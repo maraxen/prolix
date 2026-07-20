@@ -1,0 +1,47 @@
+[experiment]
+hypothesis = """
+Phase 4 Step 1/2 (task 260715_b1_physics_parity): EnsemblePlan._run_stacked_dispatch's
+t_steady_state timing is contaminated by a hidden per-call JIT compile (a fresh
+@jax.jit closure is built on every plan.run() call -- 8 independent compiles per
+seed in the real B1 harness, 2 calls x 4 shape groups), undercounting true
+compile fraction relative to the harness's own reported aot_ratio. Fitting
+t_steady_state = compile_fixed + per_step*(n_steps-1) via a small n_steps sweep
+recovers a corrected per-step cost and the true compile_fixed magnitude,
+separately for the aggregate 4-class B1 set (--mode full) and each individual
+shape class (--mode per-class water/1ake/1ubq/2gb1), to test whether the water
+class (SETTLE+PME) is a disproportionate outlier vs the 3 protein classes.
+
+Re-run after fixing the PME-reciprocal-silently-disabled bug (commit 395995b,
+research record 260717_pme_reciprocal_silently_disabled_under_stacked_dispatch)
+-- per-step water-class costs now reflect real PME physics for the first time;
+prior numbers (Phase 3's 7.28x) did not.
+"""
+
+[outcomes.pass]
+condition = "r_squared IS NOT NULL AND r_squared > 0.9 AND per_step_corrected_s IS NOT NULL AND per_step_corrected_s > 0"
+decision = "Regression fit is trustworthy; use per_step_corrected_s and compile_fixed_s for the per-class breakdown and the decision gate (does water's per_step clearly dominate the 3 protein classes?)."
+reasoning = "A clean linear fit (R^2>0.9) across the n_steps sweep confirms the compile-vs-execute decomposition is real signal, not GPU-scheduling noise -- BATHOS measurement-pipeline-verification discipline applied to this new metric before trusting any conclusion drawn from it."
+
+[outcomes.marginal]
+condition = "r_squared IS NOT NULL AND r_squared > 0.5 AND r_squared <= 0.9"
+decision = "Fit is usable but noisy -- re-run with a wider n_steps range or more trials before treating per_step_corrected_s as decisive for the decision gate."
+reasoning = "R^2 in this band suggests real signal but non-trivial noise (GPU scheduling jitter, insufficient n_steps spread, or n_steps values too close together to separate compile_fixed from per_step cleanly)."
+
+[outcomes.fail]
+condition = "r_squared IS NULL OR r_squared <= 0.5 OR per_step_corrected_s IS NULL OR per_step_corrected_s <= 0"
+decision = "Do not trust this run's numbers for the decision gate. Check for OOM/exceptions in the per-n_steps loop, or a genuinely non-linear compile/execute relationship (e.g. per-n_steps recompilation confound, or the fix from 395995b changed the water class's compile behavior in a way this sweep's n_steps range doesn't resolve)."
+reasoning = "A failed or degenerate fit means the corrected per-step number cannot be trusted -- exactly the class of measurement-pipeline failure BATHOS.md warns about (a broken metric silently producing numerically-plausible-looking wrong conclusions)."
+is_residual = true
+
+[result_schema]
+mode = "str"
+shape_class = "str"
+replicas = "int"
+per_step_corrected_s = "float"
+compile_fixed_s = "float"
+r_squared = "float"
+
+[metadata]
+campaign_id = "32d6574e"
+campaign_mode = "exploration"
+tags = ["b1", "phase4", "profiling", "step-scaling", "compile-regression"]

@@ -122,7 +122,16 @@ def make_energy_fn(
   box, use_pbc = kwargs.get("box"), kwargs.get("use_pbc", False)
   default_pme_alpha = 0.34 if use_pbc else 0.0
   pme_alpha = kwargs.get("pme_alpha", default_pme_alpha)
-  cutoff = kwargs.get("cutoff_distance", kwargs.get("cutoff", 9.0))
+  # cutoff_distance is a named parameter (see signature above), so it never
+  # lands in kwargs -- kwargs.get("cutoff_distance", ...) could never succeed,
+  # silently discarding whatever cutoff_distance the caller passed and
+  # falling through to the 9.0 default regardless. A separate `cutoff=`
+  # kwarg alias is used by some callers (e.g. test_openmm_parity.py's
+  # cutoff=0) and did work via the second fallback -- preserved here by
+  # keeping kwargs["cutoff"] as the higher-priority override, with the
+  # actual cutoff_distance parameter (not a dead kwargs lookup) as the
+  # correct fallback instead of a hardcoded 9.0.
+  cutoff = kwargs.get("cutoff", cutoff_distance)
   COULOMB_CONSTANT = 332.0637
 
   # Sparse Non-bonded Setup
@@ -385,13 +394,33 @@ def _pad_1d(arr, bucket: int, dtype=None):
 
 
 def _pad_2d(arr, bucket: int, cols: int, dtype=None):
-    """Pad a 2D array to (bucket, cols); return zeros if arr is None or empty."""
+    """Pad a 2D array to (bucket, cols); return zeros if arr is None or empty.
+
+    ``dtype`` is enforced unconditionally (real-data branch included) --
+    every call site passes an explicit ``dtype`` expecting it to be a hard
+    guarantee (index arrays as int32, param arrays as float32), not merely
+    a fallback for the empty case. Previously this branch silently trusted
+    whatever dtype the upstream merged-topology data happened to arrive in
+    via ``jnp.pad`` (which preserves input dtype) -- under
+    ``jax_enable_x64``, upstream int index arrays (e.g. bond/angle/dihedral
+    indices) could arrive as float64, silently producing a float-typed
+    ``bond_idx``/etc. on the bundle. Harmless for plain indexing (JAX
+    truncates during gather), but fatal for any consumer that partitions
+    dynamic/static or differentiable/non-differentiable fields by dtype --
+    e.g. ``eqx.filter_grad`` (used internally by
+    ``flash_explicit.py::flash_explicit_forces``) then treats the
+    index array as a differentiable leaf, producing a tracer where
+    downstream code (``topology.find_bonded_exclusions``) expects a
+    concrete array, crashing with ``TracerArrayConversionError``. Found via
+    ``tests/physics/test_flash_dense_parity.py`` (debt 761).
+    """
     import jax.numpy as jnp
 
     if arr is None or (hasattr(arr, "size") and arr.size == 0):
         return jnp.zeros((bucket, cols), dtype=dtype or jnp.int32)
     pad = bucket - arr.shape[0]
-    return jnp.pad(arr, ((0, pad), (0, 0)))
+    padded = jnp.pad(arr, ((0, pad), (0, 0)))
+    return padded.astype(dtype) if dtype is not None else padded
 
 
 def _mask(n_real: int, bucket: int):
@@ -401,6 +430,87 @@ def _mask(n_real: int, bucket: int):
     return jnp.concatenate(
         [jnp.ones(n_real, dtype=bool), jnp.zeros(bucket - n_real, dtype=bool)]
     )
+
+
+def _pad_positions_with_ghost_lattice(pos, bucket: int, box_size, dtype=None):
+    """Pad positions to ``bucket`` rows, placing padding (ghost) rows on a
+    uniform sub-lattice filling the periodic box instead of the coordinate
+    origin (debt 772).
+
+    Zero-filling ghost positions (the previous behavior, matching
+    ``_pad_2d``'s general convention) puts every ghost atom exactly at the
+    box origin under periodic boundary conditions. For a bundle with a large
+    padding fraction (e.g. a 1963-real-atom protein padded to 5000), this
+    means hundreds of real atoms near the origin see hundreds of ghost
+    "neighbors" once a fixed-capacity neighbor list is built on these
+    positions — evicting real neighbor-list entries and silently corrupting
+    energy/forces. This is invisible in the current dense O(N^2) energy path
+    (every ghost-involving pair is exactly zeroed via ``atom_mask``,
+    regardless of position — see ``_lj_energy_masked``/``_coulomb_energy_masked``
+    in batched_energy.py — so where ghosts sit has never mattered before now),
+    but is a hard blocker for any neighbor-list-based dispatch (debt 760).
+
+    Ghost atoms carry zero force everywhere in the energy path already, so
+    their position is otherwise physically irrelevant — a deterministic,
+    non-overlapping uniform lattice is the correct, cheap choice: no bias,
+    bounded and predictable neighbor-list occupancy (measured: ~1.75x
+    direct-space overhead for the 5000/32A-box/9A-cutoff class, vs ~10x and
+    silently wrong when ghosts pile up at the origin).
+
+    Note: this only fixes the *initial* placement. Ghost atoms have nonzero
+    mass (see ``masses_padded`` below, ``constant_values=1.0``) and the
+    Langevin O-step (``settle.py``) is not atom_mask-aware, so ghosts still
+    receive stochastic momentum kicks and will drift from this lattice over
+    a trajectory. Not fixed here — deferred to debt 760's dispatch-carry
+    implementation (the first place a live, running trajectory with a real
+    neighbor list actually exists to test against); see debt 772.
+
+    Args:
+        pos: (n, 3) real positions, or None/empty.
+        bucket: total padded row count.
+        box_size: (3,) box edge lengths, or None/non-positive for
+            non-periodic systems — falls back to zero-fill (no periodic
+            wraparound to place ghosts sensibly against, and non-periodic
+            dispatch has no neighbor-list capacity concern to protect).
+        dtype: output dtype.
+
+    Returns:
+        (bucket, 3) array.
+    """
+    import jax.numpy as jnp
+    import numpy as np
+
+    # Preserve pos's own dtype (matching _pad_2d's actual behavior, which
+    # pads via jnp.pad and never touches dtype for the non-empty case --
+    # under jax_enable_x64=True with a float64 pos, that means output stays
+    # float64 despite the dtype=jnp.float32 call-site argument). Forcing
+    # out_dtype unconditionally here broke that under x64
+    # (tests/physics/test_b1_water_pme_parity.py enables x64 explicitly) --
+    # a real regression caught by the existing test suite, not just a
+    # theoretical risk. `dtype` is only a fallback for the all-empty case.
+    if pos is None or (hasattr(pos, "size") and pos.size == 0):
+        out_dtype = dtype or jnp.float32
+        real = np.zeros((0, 3), dtype=np.float64)
+    else:
+        out_dtype = pos.dtype if hasattr(pos, "dtype") else (dtype or jnp.float32)
+        real = np.asarray(pos, dtype=np.float64)
+
+    n = real.shape[0]
+    n_ghost = bucket - n
+    if n_ghost <= 0:
+        return jnp.asarray(real, dtype=out_dtype)
+
+    box_np = None if box_size is None else np.asarray(box_size, dtype=np.float64)
+    if box_np is None or box_np.shape != (3,) or np.any(box_np <= 0):
+        ghost = np.zeros((n_ghost, 3), dtype=np.float64)
+        return jnp.asarray(np.concatenate([real, ghost], axis=0), dtype=out_dtype)
+
+    m = max(int(np.ceil(n_ghost ** (1.0 / 3.0))), 1)
+    axes = [np.linspace(0.0, box_np[d], num=m, endpoint=False) for d in range(3)]
+    grid = np.stack(np.meshgrid(*axes, indexing="ij"), axis=-1).reshape(-1, 3)
+    ghost = grid[:n_ghost]
+
+    return jnp.asarray(np.concatenate([real, ghost], axis=0), dtype=out_dtype)
 
 
 def _pad_3d(arr, bucket: int, d1: int, d2: int, dtype=None):
@@ -541,6 +651,11 @@ def make_bundle_from_system(
     ab = _next_bucket(max(na, 1), ANGLE_BUCKETS)
 
     dihs = _get("dihedrals")
+    if dihs is None:
+        # MergedTopology (topology_merger.py) names this field proper_dihedrals,
+        # not dihedrals -- same fallback convention already used a few lines up
+        # in this file's make_energy_fn (system.py:61-63) for the same mismatch.
+        dihs = _get("proper_dihedrals")
     dp = _get("dihedral_params")
     dihs, dp, nd = _flatten_multi_term_torsions(dihs, dp)
     db = _next_bucket(max(nd, 1), DIHEDRAL_BUCKETS)
@@ -573,6 +688,53 @@ def make_bundle_from_system(
     else:
         excl, excl_sv, excl_se, ne = _dense_excl_to_pair_list(excl, excl_sv, excl_se)
     eb = _next_bucket(max(ne, 1), EXCL_BUCKETS)
+
+    # --- exclusions (per-atom-row form, for NL/flash kernels; debt 765) ---
+    # Every neighbor-list/flash consumer (this file's own make_energy_fn NL
+    # branch, optimization.py's chunked_*_nl, flash_explicit.py,
+    # flash_nonbonded.py) needs excl_indices/excl_scales_vdw/excl_scales_elec
+    # in the documented (N, max_excl) per-atom-row shape (typing.py:300-302)
+    # -- NOT the (E, 2) pair-list MolecularBundle stores above (excl/excl_sv/
+    # excl_se). Computed once here, host-side, construction-time-only -- NEVER
+    # inside bundle_md.physics_system_from_bundle, which runs per-replica
+    # under jax.vmap/jit during real dispatch (this session's heterogeneous-
+    # batching confirmation requires per-replica-varying bundle fields, so
+    # bundle.excl_indices is a genuine tracer there, not a host array; a
+    # numpy-loop reconstruction is only safe at true bundle-construction time,
+    # same rationale as map_exclusions_to_dense_padded / _dense_excl_to_pair_list
+    # above). exclusion_spec path uses map_exclusions_to_dense_padded directly
+    # (same source data _dense_excl_to_pair_list above converts to pairs);
+    # the no-exclusion_spec fallback instead converts the just-computed
+    # pair-list excl/excl_sv/excl_se (ne real pairs, all valid) via
+    # pair_list_to_dense_padded.
+    _EXCL_DENSE_MAX = 32
+    excl_dense_indices = excl_dense_scales_vdw = excl_dense_scales_elec = None
+    if exclusion_spec is not None:
+        from prolix.physics.neighbor_list import map_exclusions_to_dense_padded
+
+        dense_idx, dense_sv, dense_se = map_exclusions_to_dense_padded(
+            exclusion_spec, max_exclusions=_EXCL_DENSE_MAX
+        )
+        pad_rows = a - dense_idx.shape[0]
+        excl_dense_indices = jnp.pad(
+            dense_idx, ((0, pad_rows), (0, 0)), constant_values=-1
+        )
+        excl_dense_scales_vdw = jnp.pad(
+            dense_sv, ((0, pad_rows), (0, 0)), constant_values=1.0
+        )
+        excl_dense_scales_elec = jnp.pad(
+            dense_se, ((0, pad_rows), (0, 0)), constant_values=1.0
+        )
+    elif ne > 0:
+        from prolix.physics.neighbor_list import pair_list_to_dense_padded
+
+        dense_idx, dense_sv, dense_se = pair_list_to_dense_padded(
+            excl, excl_sv, excl_se, jnp.ones(ne, dtype=bool), a,
+            max_exclusions=_EXCL_DENSE_MAX,
+        )
+        excl_dense_indices = dense_idx
+        excl_dense_scales_vdw = dense_sv
+        excl_dense_scales_elec = dense_se
 
     # --- exceptions (1-4 pairs) -------------------------------------------
     exc_pairs = _get("exception_pairs")
@@ -647,7 +809,7 @@ def make_bundle_from_system(
         masses_padded = jnp.pad(masses_in, (0, a - masses_in.shape[0]), constant_values=1.0)
 
     return MolecularBundle(
-        positions=_pad_2d(pos, a, 3, dtype=jnp.float32),
+        positions=_pad_positions_with_ghost_lattice(pos, a, box_size, dtype=jnp.float32),
         masses=masses_padded,
         charges=_pad_atom("charges"),
         sigmas=_pad_atom("sigmas"),
@@ -709,6 +871,10 @@ def make_bundle_from_system(
         excl_scales_elec=_pad_1d(excl_se, eb, dtype=jnp.float32),
         excl_mask=_mask(ne, eb),
         n_excl=jnp.array(ne, dtype=jnp.int32),
+        # nonbonded exclusions, per-atom-row form (debt 765)
+        excl_dense_indices=excl_dense_indices,
+        excl_dense_scales_vdw=excl_dense_scales_vdw,
+        excl_dense_scales_elec=excl_dense_scales_elec,
         # 1-4 exception pairs
         exception_pairs=_pad_2d(exc_pairs, xb, 2, dtype=jnp.int32),
         exception_sigmas=_pad_1d(exc_sig, xb, dtype=jnp.float32),

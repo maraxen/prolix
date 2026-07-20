@@ -303,6 +303,82 @@ def map_exclusions_to_dense_padded(
   return jnp.array(excl_indices_np), jnp.array(scales_vdw_np), jnp.array(scales_elec_np)
 
 
+def pair_list_to_dense_padded(
+  pair_indices: Array,
+  pair_scales_vdw: Array,
+  pair_scales_elec: Array,
+  pair_mask: Array,
+  n_atoms: int,
+  max_exclusions: int = 32,
+) -> tuple[Array, Array, Array]:
+  r"""Convert a bundle-style pair-list exclusion set to per-atom padded arrays.
+
+  Same output contract as :func:`map_exclusions_to_dense_padded` (the
+  ``PhysicsSystem.excl_indices``/``excl_scales_vdw``/``excl_scales_elec``
+  ``(N, max_exclusions)`` layout every neighbor-list/flash kernel in this
+  codebase expects — ``system.py:152-153``, ``optimization.py``'s
+  ``chunked_*_nl``, ``flash_explicit.py``, ``flash_nonbonded.py``), but takes
+  an already-built pair list (``(E, 2)`` indices + ``(E,)`` per-pair scales +
+  ``(E,)`` validity mask — the format ``MolecularBundle``/
+  ``physics_system_from_bundle`` already carry) instead of an
+  :class:`ExclusionSpec`, so bundle-derived systems don't need one
+  reconstructed just for this.
+
+  Host-side (numpy) by construction, same rationale as
+  ``map_exclusions_to_dense_padded``: exclusion topology is a per-bundle
+  constant fixed at construction time, never traced.
+
+  Args:
+      pair_indices: (E, 2) int, atom index pairs. Padding-row values are
+          ignored via ``pair_mask``, not via a sentinel value in this array.
+      pair_scales_vdw, pair_scales_elec: (E,) float, per-pair scale factors
+          (0.0 = fully excluded, e.g. 0.5/1-1.2 = 1-4 scaled, matching the
+          convention already used by ``_pme_exclusion_correction_from_pairs``).
+      pair_mask: (E,) bool, True for real (non-padding) pair slots.
+      n_atoms: N_padded — output arrays are always exactly this many rows,
+          regardless of how many real atoms are populated (matches
+          ``PhysicsSystem.n_padded_atoms``).
+      max_exclusions: Capacity per atom. If a real atom needs more than this,
+          entries are silently truncated (same caveat as
+          ``map_exclusions_to_dense_padded`` — call sites needing a hard
+          guarantee should check counts against this cap beforehand).
+
+  Returns:
+      (excl_indices, excl_scales_vdw, excl_scales_elec), each
+      ``(n_atoms, max_exclusions)``, dtype int32/float32/float32.
+  """
+  idx_np = np.asarray(pair_indices)
+  vdw_np = np.asarray(pair_scales_vdw)
+  elec_np = np.asarray(pair_scales_elec)
+  mask_np = np.asarray(pair_mask)
+
+  atom_excls: list[list[tuple[int, float, float]]] = [[] for _ in range(n_atoms)]
+  for k in range(idx_np.shape[0]):
+    if not mask_np[k]:
+      continue
+    i, j = int(idx_np[k, 0]), int(idx_np[k, 1])
+    sv, se = float(vdw_np[k]), float(elec_np[k])
+    if 0 <= i < n_atoms:
+      atom_excls[i].append((j, sv, se))
+    if 0 <= j < n_atoms:
+      atom_excls[j].append((i, sv, se))
+
+  excl_indices_np = np.full((n_atoms, max_exclusions), -1, dtype=np.int32)
+  scales_vdw_np = np.ones((n_atoms, max_exclusions), dtype=np.float32)
+  scales_elec_np = np.ones((n_atoms, max_exclusions), dtype=np.float32)
+
+  for i in range(n_atoms):
+    entries = atom_excls[i]
+    entries.sort(key=lambda x: x[0])
+    n_entries = min(len(entries), max_exclusions)
+    for k in range(n_entries):
+      excl_indices_np[i, k] = entries[k][0]
+      scales_vdw_np[i, k] = entries[k][1]
+      scales_elec_np[i, k] = entries[k][2]
+
+  return jnp.array(excl_indices_np), jnp.array(scales_vdw_np), jnp.array(scales_elec_np)
+
+
 def get_neighbor_exclusion_scales(
   excl_indices: Array,
   excl_scales_vdw: Array,
@@ -370,3 +446,85 @@ def get_neighbor_exclusion_scales(
   final_vdw, final_elec = jax.lax.fori_loop(0, M, loop_body, (final_vdw, final_elec))
 
   return final_vdw, final_elec
+
+
+def compute_nl_capacity(
+  atom_bucket_size: int,
+  box_size,
+  cutoff: float,
+  dr_threshold: float = 0.5,
+  safety_factor: float = 1.5,
+  round_to: int = 256,
+) -> int:
+  r"""Static neighbor-list capacity for a shape-class, from bucket constants only.
+
+  Debt 760 (B1 connect-existing-NL-PME, `.praxia/docs/decisions/
+  260717_b1-connect-existing-engines-scope.md`, decision D1): a single
+  capacity per shape-class -- derived only from static, bucket-level
+  quantities (padded atom count, box volume, cutoff), never from any
+  particular bundle's actual measured occupancy -- so that two different
+  real proteins sharing a shape bucket also always share the same neighbor-
+  list capacity. Capacity computed per-bundle (e.g. via
+  ``neighbor_fn.allocate()``'s own automatic sizing on real, per-protein
+  positions) would fragment the cross-protein compile-sharing this session
+  spent real effort confirming, since different proteins' local density can
+  differ enough to pick different capacities even within the same atom
+  bucket.
+
+  Formula: ``K = ceil_to(round_to, safety_factor * rho_padded *
+  (4/3) * pi * (cutoff + dr_threshold)**3)``, where ``rho_padded =
+  atom_bucket_size / box_volume`` -- uniform padded-atom density times the
+  volume of the effective neighbor-list sphere (cutoff + Verlet skin),
+  times a safety margin. Ghost/padding atoms must already be spread
+  uniformly across the box (debt 772, ``_pad_positions_with_ghost_lattice``
+  in ``system.py``) for this density-based estimate to be valid -- it
+  assumes no pathological clustering.
+
+  Verified against real measurements (Opus-backed investigation, same
+  decision doc): for the 5000-atom/32A-box/9.0A-cutoff shape class, this
+  formula gives 822 (pre-rounding); jax_md's own `.allocate()` on the real,
+  ghost-lattice-fixed 1VII bundle measured a required capacity of 895 (max
+  occupancy 716) at the same cutoff -- comfortably under the ``round_to=256``
+  rounded value of 1024, confirming the formula's safety margin holds in
+  practice, not just in theory.
+
+  Args:
+      atom_bucket_size: Padded atom count for this shape class (e.g.
+          `MolecularBundle.positions.shape[0]`, or equivalently the bucket
+          size `ATOM_BUCKETS` resolved to for this class).
+      box_size: (3,) box edge lengths (periodic systems only -- this
+          function assumes a periodic box; callers must not call it for
+          non-periodic bundles).
+      cutoff: Direct-space nonbonded cutoff distance (Angstrom).
+      dr_threshold: Verlet-list skin (Angstrom) -- matches jax_md's
+          `dr_threshold` parameter to `partition.neighbor_list`; must be the
+          same value used when actually allocating the neighbor list, or the
+          capacity estimate and the real allocation diverge.
+      safety_factor: Multiplicative headroom over the uniform-density
+          estimate, to absorb the measured spread between different real
+          proteins' local density within the same shape bucket (~11% in the
+          1VII/2GB1 case) plus general safety margin.
+      round_to: Round the final capacity up to a multiple of this value.
+          256 (not 128) by default: aligns with both the O(N*K) direct-space
+          kernels' 128-atom tile size (`optimization.py`) and
+          `flash_explicit.py`'s 256-atom tile size (debt 763's tile-size-
+          divisibility concern applies to K too, not just N).
+
+  Returns:
+      Static neighbor-list capacity K (Python int).
+  """
+  import math
+
+  import numpy as np
+
+  box_np = np.asarray(box_size, dtype=np.float64)
+  box_volume = float(np.prod(box_np))
+  if box_volume <= 0:
+    msg = f"compute_nl_capacity: box_size must describe a positive-volume periodic box, got {box_size}"
+    raise ValueError(msg)
+
+  rho_padded = atom_bucket_size / box_volume
+  sphere_volume = (4.0 / 3.0) * math.pi * (cutoff + dr_threshold) ** 3
+  k_raw = safety_factor * rho_padded * sphere_volume
+
+  return int(math.ceil(k_raw / round_to) * round_to)

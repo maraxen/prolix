@@ -561,3 +561,71 @@ def solvate_protein(
         box_size=box_size,
         merged_positions=pos_final
     )
+
+
+def solvate_protein_to_bundle(
+    protein: Protein,
+    padding: float = 10.0,
+    model_type: WaterModelType = WaterModelType.TIP3P,
+    ionic_strength: float = 0.0,
+    neutralize: bool = True,
+    target_box_size: Array | None = None,
+    pme_alpha: float = 0.34,
+    nonbonded_cutoff: float = 9.0,
+):
+    """Solvate a protein and return a MolecularBundle usable by EnsemblePlan.
+
+    Bridges solvate_protein's MergedTopology (the old PhysicsSystem /
+    prolix.padding bucket system, consumed by pad_solvated_system +
+    single_padded_energy_nl_cvjp -- see test_solvated_explicit_integration.py)
+    to the MolecularBundle / prolix.types.bundles bucket system that
+    EnsemblePlan and B1's shape-class dispatch actually use. No existing
+    function connected these two representations before this one.
+
+    Two correctness traps guarded against explicitly here, rather than left
+    to a shared implicit default -- the second is the exact same failure
+    mode as the box_size bug fixed in commit 395995b (research record
+    260717_pme_reciprocal_silently_disabled_under_stacked_dispatch), just at
+    a different seam:
+
+    1. MergedTopology names its dihedral field ``proper_dihedrals``, not
+       ``dihedrals``. Fixed at the root in ``make_bundle_from_system``
+       (system.py), mirroring the identical fallback ``make_energy_fn``
+       already uses a few lines up in the same file for the same mismatch.
+    2. MergedTopology carries no ``pme_alpha``/``nonbonded_cutoff`` fields
+       at all. ``make_bundle_from_system`` silently defaults ``pme_alpha``
+       to 0.0 when the input object has no such attribute -- which would
+       silently disable PME reciprocal energy. Both values are supplied
+       explicitly via a thin proxy below rather than relying on any
+       implicit default resolving to something reasonable.
+    """
+    merged = solvate_protein(
+        protein,
+        padding=padding,
+        model_type=model_type,
+        ionic_strength=ionic_strength,
+        neutralize=neutralize,
+        target_box_size=target_box_size,
+    )
+
+    from prolix.physics.system import make_bundle_from_system
+
+    class _BundleSourceProxy:
+        """Delegates to `merged` for everything except the fields it lacks.
+
+        Local to this function -- does not touch MergedTopology's class
+        definition or make_bundle_from_system's shared defaults.
+        """
+
+        def __getattr__(self, name):
+            if name == "pme_alpha":
+                return pme_alpha
+            if name == "nonbonded_cutoff":
+                return nonbonded_cutoff
+            return getattr(merged, name)
+
+    return make_bundle_from_system(
+        _BundleSourceProxy(),
+        boundary_condition="periodic",
+        exclusion_spec=merged.exclusion_spec,
+    )
