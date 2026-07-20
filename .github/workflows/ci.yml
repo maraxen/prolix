@@ -43,7 +43,7 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        python-version: ['3.11', '3.12']
+        python-version: ['3.13']
     
     steps:
       - uses: actions/checkout@v4
@@ -72,7 +72,7 @@ jobs:
           uv run pytest -m "not (slow or integration or dynamics)" -v --cov=prolix --cov-report=xml
       
       - name: Upload coverage
-        if: matrix.python-version == '3.11'
+        if: matrix.python-version == '3.13'
         uses: codecov/codecov-action@v4
         with:
           file: ./coverage.xml
