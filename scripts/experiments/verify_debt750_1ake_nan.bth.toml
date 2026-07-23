@@ -1,0 +1,50 @@
+[experiment]
+hypothesis = """
+Debt 750/3516 (B1-1AKE-NAN): job 17905437's B1-full prereg run found 5/64
+systems non-finite at trajectory end, all within the 1AKE (vacuum,
+no-water) shape-class group under batched B=16 vmap. partition_bundles_by_shape
+groups 1AKE's 16 identical-topology replicas into their own homogeneous
+group; _setup_integrator routes has_real_water==False bundles (1AKE's case)
+through settle_langevin's "no water" fallback -- the exact code path debt
+841 fixed (atom_mask-aware COM-momentum recentering in masked_init_fn,
+settle.py:1104-1135, commit a360a22).
+
+Hypothesis: the debt-841 fix, applied to the same code path, either resolves
+or measurably changes the 1AKE finite_fraction at the same B=16, same
+prereg step count (200_000 steps @ dt=0.5fs, 100ps), same seed=0 as the
+original diagnostic. This isolates 1AKE alone (no 1ubq/2gb1/water) so the
+comparison is a clean before/after on the fixed code path, not a full
+B1-full re-run.
+"""
+
+[outcomes.pass]
+condition = "finite_fraction IS NOT NULL AND finite_fraction >= 0.99"
+decision = "Debt 750 is resolved by debt 841's fix (or was never a distinct bug). Close debt 3516/750 as duplicate-of-841, referencing this run. No further B1-1AKE-NAN work needed."
+reasoning = "finite_fraction >= 0.99 at B=16 means at most 0 (rounds to 0/16) systems went non-finite -- a qualitative change from the original 5/16 (0.6875 fraction) diagnostic under the same conditions."
+source = "0.99 threshold at B=16: 1/16 = 0.0625, so a single residual failure (15/16 = 0.9375) still fails this gate -- the bar is exact recovery (16/16), not merely 'better than 11/16'. Chosen because the fix is a targeted code-path change (atom_mask threading), not a statistical mitigation, so partial improvement would itself be evidence of a second bug, not a pass."
+adversarial_check = "If finite_fraction >= 0.99 but t_steady_state is anomalously low (e.g. < 1% of the smoke-scale per-step rate x n_steps), the run may have short-circuited (e.g. NaN propagated but isfinite() checked the wrong array, or while_loop exited early) rather than genuinely completed 200_000 steps -- cross-check t_steady_state against the smoke run's per-step rate before trusting a pass."
+
+[outcomes.fail]
+condition = "finite_fraction IS NULL OR finite_fraction < 0.99"
+decision = "Debt 750 is NOT resolved by debt 841's fix -- it has a distinct root cause. Keep debt 3516/750 open as its own investigation (component-decomposition profiling: bonded vs GB/ACE vs LJ/Coulomb vs dispatch, per the original filing)."
+reasoning = "If NaNs persist post-fix on the exact code path debt 841 touched, the 1AKE fragility is either a different bug in the same fallback, or unrelated to the no-water fallback entirely (e.g. GB/ACE implicit solvent numerics, dense LJ/Coulomb, or dispatch-level PRNG issues) -- worth knowing either way before spending more time on debt 750."
+source = "Same 0.99 threshold as outcomes.pass (complementary condition) -- see that entry's source field."
+is_residual = true
+
+[result_schema]
+replicas = "int"
+n_steps = "int"
+seed = "int"
+has_real_water = "bool"
+finite_positions = "bool"
+finite_fraction = "float"
+n_finite = "int"
+n_systems = "int"
+t_first_step = "float"
+t_steady_state = "float"
+git_hash = "str"
+
+[metadata]
+campaign_id = "debt750-1ake-nan-verify"
+campaign_mode = "confirmation"
+tags = ["debt750", "debt3516", "debt841", "b1-1ake-nan", "cluster"]
