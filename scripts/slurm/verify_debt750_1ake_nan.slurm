@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH --job-name=prolix_verify_debt750
-#SBATCH --partition=mit_preemptable
-#SBATCH --gres=gpu:h200:1
+#SBATCH --partition=pi_so3
+#SBATCH --gres=gpu:1
 #SBATCH --time=03:00:00
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
