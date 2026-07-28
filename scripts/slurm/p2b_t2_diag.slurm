@@ -16,7 +16,9 @@ cd "${_PROJ}"
 source "scripts/slurm/_common_env.sh"
 
 WORKSPACE_ROOT="${ENGAGING_WORKSPACE_ROOT:-${HOME}/projects}"
-export UV_PROJECT="${WORKSPACE_ROOT}"
+# shellcheck source=/dev/null
+source "scripts/slurm/_uv_project_guard.sh"
+_resolve_uv_project_for_workspace "${WORKSPACE_ROOT}"
 echo "job=${SLURM_JOB_ID:-local} node=${SLURMD_NODENAME:-local}"
 
 if [[ "${P2B_SKIP_UV_SYNC:-0}" != "1" ]]; then
@@ -35,7 +37,7 @@ export JAX_PLATFORMS="${JAX_PLATFORMS:-cuda}"
 mkdir -p tmp
 
 echo "=== T2 diagnostic: settle_velocity_iters sweep (gamma=10, 300 steps) ==="
-uv run python - << 'PY'
+uv run "${UV_SYNC_EXTRAS[@]}" python - << 'PY'
 import jax
 jax.config.update("jax_enable_x64", True)
 import jax.numpy as jnp

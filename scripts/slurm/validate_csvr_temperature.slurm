@@ -28,14 +28,18 @@ cd "${_PROJ}"
 source "scripts/slurm/_common_env.sh"
 
 WORKSPACE_ROOT="${ENGAGING_WORKSPACE_ROOT:-${HOME}/projects}"
-export UV_PROJECT="${WORKSPACE_ROOT}"
+# shellcheck source=/dev/null
+source "scripts/slurm/_uv_project_guard.sh"
+_resolve_uv_project_for_workspace "${WORKSPACE_ROOT}"
 
 echo "csvr_validate job=${SLURM_JOB_ID:-local} host=$(hostname) workspace=${WORKSPACE_ROOT}"
 
-[[ -d "${WORKSPACE_ROOT}/.venv" ]] || {
-  echo "missing ${WORKSPACE_ROOT}/.venv; run bench_workspace_uv_sync.slurm first" >&2
-  exit 2
-}
+if [[ -n "${UV_PROJECT:-}" ]]; then
+  [[ -d "${WORKSPACE_ROOT}/.venv" ]] || {
+    echo "missing ${WORKSPACE_ROOT}/.venv; run bench_workspace_uv_sync.slurm first" >&2
+    exit 2
+  }
+fi
 
 export JAX_PLATFORMS="${JAX_PLATFORMS:-cpu}"
 export JAX_ENABLE_X64="${JAX_ENABLE_X64:-1}"
@@ -47,7 +51,7 @@ mkdir -p "${LOG_ROOT}/app"
 
 echo "JAX_PLATFORMS=${JAX_PLATFORMS} JAX_ENABLE_X64=${JAX_ENABLE_X64}" | tee -a "${LOGFILE}"
 
-uv run pytest \
+uv run "${UV_SYNC_EXTRAS[@]}" pytest \
   tests/physics/test_settle_temperature_control.py::test_temperature_csvr_dt1fs_near_target \
   tests/physics/test_settle_temperature_control.py::test_temperature_csvr_dt2fs_near_target \
   tests/physics/test_settle_temperature_control.py::test_equipartition_csvr_dt2fs_chi2 \

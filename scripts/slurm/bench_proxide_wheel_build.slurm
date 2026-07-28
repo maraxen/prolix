@@ -8,6 +8,10 @@
 # Output: ``wheels/proxide-*.whl`` (newest used by sync). Rebuild after proxide changes:
 #   ``REBUILD_PROXIDE_WHEEL=1`` in the submit chain or delete old wheels.
 #
+# debt 937 audit (2026-07-28): builds the `proxide` uv-workspace member, which only
+# exists in the shared workspace, not an isolated worktree -- forcing UV_PROJECT to
+# the shared workspace here is intentional. Left as-is.
+#
 #SBATCH --job-name=plx-pxd-whl
 #SBATCH --partition=mit_preemptable
 #SBATCH --time=4:00:00

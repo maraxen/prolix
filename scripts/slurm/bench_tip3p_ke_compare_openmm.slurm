@@ -2,6 +2,11 @@
 # TIP3P KE diagnostic — **OpenMM only** (``Reference``): ``getKineticEnergy`` vs Σ½m|v|².
 # CPU-only; no JAX. Expects workspace venv at ``~/projects``.
 #
+# debt 937 audit (2026-07-28): unlike its --engine prolix sibling, this script never
+# imports `prolix` (tip3p_ke_compare.py only imports prolix.physics under
+# --engine prolix/both) -- forcing UV_PROJECT to the shared workspace here is
+# intentional, not the isolated-worktree bug. Left as-is.
+#
 #SBATCH --job-name=plx-tip3p-ke-omm
 #SBATCH --partition=mit_preemptable
 #SBATCH --time=1:30:00
