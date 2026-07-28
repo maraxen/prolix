@@ -11,10 +11,20 @@ settle.py:1104-1135, commit a360a22).
 
 Hypothesis: the debt-841 fix, applied to the same code path, either resolves
 or measurably changes the 1AKE finite_fraction at the same B=16, same
-prereg step count (200_000 steps @ dt=0.5fs, 100ps), same seed=0 as the
-original diagnostic. This isolates 1AKE alone (no 1ubq/2gb1/water) so the
-comparison is a clean before/after on the fixed code path, not a full
+prereg step count (200_000 steps @ dt=0.5fs, 100ps), same per-replica seeds
+as the original diagnostic. This isolates 1AKE alone (no 1ubq/2gb1/water) so
+the comparison is a clean before/after on the fixed code path, not a full
 B1-full re-run.
+
+Seed convention (matches scripts/benchmarks/b1_init_exec.py:522 exactly):
+the CLI --seed is nominal (default 0, recorded as result["seed"]), but the
+measured trajectory (the one finite_fraction is computed from) actually
+runs at seed+1 (result["seed_measured"]) -- b1_init_exec.py's own measured
+leg uses the identical seed+1 convention, so at --seed 0 both scripts drive
+the 1AKE group's 16 replicas with the identical per-replica seed set
+(1..16), not merely the same nominal --seed value. This is required for a
+valid before/after comparison since the 16 bundles are otherwise identical
+replicas -- the seed is the only thing distinguishing them.
 """
 
 [outcomes.pass]
@@ -35,6 +45,7 @@ is_residual = true
 replicas = "int"
 n_steps = "int"
 seed = "int"
+seed_measured = "int"
 has_real_water = "bool"
 finite_positions = "bool"
 finite_fraction = "float"

@@ -121,15 +121,6 @@ def main() -> int:
     import prolix
 
     prolix_path = Path(prolix.__file__).resolve()
-    result = {
-        "replicas": replicas,
-        "n_steps": n_steps,
-        "seed": args.seed,
-        "has_real_water": bool(bundles[0].shape_spec.has_real_water),
-        "git_hash": _git_hash(),
-        "prolix_path": str(prolix_path),
-    }
-
     if not str(prolix_path).startswith(str(ROOT) + os.sep):
         raise RuntimeError(
             f"prolix imported from {prolix_path}, which is NOT under this "
@@ -137,6 +128,24 @@ def main() -> int:
             "resolution (the exact failure mode debt 750/937 exist to "
             "catch). Aborting before running any physics."
         )
+
+    result = {
+        "replicas": replicas,
+        "n_steps": n_steps,
+        # "seed" is the nominal --seed argument, matching
+        # scripts/benchmarks/b1_init_exec.py's own (misleading) convention
+        # of recording int(seed) while its measured leg actually runs at
+        # seed+1 (b1_init_exec.py:522). "seed_measured" below is the seed
+        # actually used for the trajectory finite_fraction is computed
+        # from -- keep both consistent with the baseline so per-replica
+        # seeds match exactly (same 1..replicas set at --seed 0), not just
+        # the nominal --seed value.
+        "seed": args.seed,
+        "seed_measured": args.seed + 1,
+        "has_real_water": bool(bundles[0].shape_spec.has_real_water),
+        "git_hash": _git_hash(),
+        "prolix_path": str(prolix_path),
+    }
 
     if args.dry_run:
         print(json.dumps(result, indent=2))
@@ -146,22 +155,23 @@ def main() -> int:
 
     plan = EnsemblePlan.from_bundles(bundles)
 
-    # The first call is a discarded compile/timing probe (t_first_step) --
-    # use a decorrelated seed so it doesn't share a trajectory with the
-    # measured run below. The measured run must use args.seed exactly: the
-    # recorded "seed" field and the .bth.toml hypothesis both claim this is
-    # the same seed=0 as the original diagnostic (job 17905437).
+    # First call is a discarded compile/timing probe (t_first_step) at the
+    # nominal seed. Measured call uses seed+1 -- matching
+    # b1_init_exec.py:522's convention exactly, so per-replica seeds for
+    # the 1AKE group are identical to the original diagnostic (job
+    # 17905437), not merely the nominal --seed value. See result["seed"]
+    # and result["seed_measured"] above.
     t0 = time.perf_counter()
     plan.run(
-        n_steps=1, dt=DT_FS, kT=KT_KCAL, seed=args.seed + 1, gamma=GAMMA_PS,
+        n_steps=1, dt=DT_FS, kT=KT_KCAL, seed=args.seed, gamma=GAMMA_PS,
         run_mode="inference",
     )
     t_first = time.perf_counter() - t0
 
     t1 = time.perf_counter()
     last = plan.run(
-        n_steps=max(n_steps - 1, 1), dt=DT_FS, kT=KT_KCAL, seed=args.seed,
-        gamma=GAMMA_PS, run_mode="inference",
+        n_steps=max(n_steps - 1, 1), dt=DT_FS, kT=KT_KCAL,
+        seed=args.seed + 1, gamma=GAMMA_PS, run_mode="inference",
     )
     _block_trajs(last)
     t_ss = time.perf_counter() - t1
