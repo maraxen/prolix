@@ -1,0 +1,54 @@
+---
+workspace: prolix
+session_id: 5a7cbb35-0141-44cf-9cda-40255a3a3d19
+status: in_progress
+immediately_relevant:
+- file: src/prolix/api/ensemble_plan.py
+  lines:
+  - 648
+  - 745
+  reason: _setup_integrator -- where the debt-841 fix lives (has_real_water gate, atom_mask threading for the no-water momentum-COM fix); read this first if any batched-vs-independent parity question resurfaces
+- file: src/prolix/physics/settle.py
+  lines:
+  - 1104
+  - 1135
+  reason: 'settle_langevin''s no-water fallback -- the atom_mask-aware masked_init_fn wrapper that fixes the COM-momentum pollution bug (debt 841 bug #2)'
+- file: src/prolix/api/observables.py
+  lines:
+  - 63
+  - 190
+  reason: 'Temperature/KineticEnergy/Pressure -- each now has an atom_mask field (debt 841 bug #3); RMSD/Energy were left untouched (not exercised by the failing tests, still worth checking if picked up again)'
+- file: scripts/experiments/profile_b1_step_scaling.py
+  lines:
+  - 200
+  - 230
+  reason: The 1AKE step-scaling profiler that surfaced debt 750's NaN fragility -- start here to determine whether 1AKE's shape-class group ever includes other systems (relevant to the open debt-750 connection question)
+- file: src/prolix/api/compile_once.py
+  lines:
+  - 31
+  - 34
+  reason: count_jaxpr_scans -- the naive string-count needing a real fix for debt 844
+active_dispatches: []
+task_id: 260715_b1_physics_parity
+phase: 'Phase 9 (PR #5 merge + debt 841 root-cause/fix)'
+goal_statement: 'Continue the B1 debt sweep begun in Phase 8: unblock and merge the open debt-sweep PR, keep b1/full reconciled onto main, and dig into debt 834''s unresolved root cause (why batched-vs-independent EnsemblePlan runs diverge from step one).'
+context_refs:
+- phase: 'Phase 8 (PR #3 merge + B1 debt sweep)'
+  task_id: 260715_b1_physics_parity
+  summary: 'PR #3 merged (SETTLE+PME parity, heterogeneous batching). PR #4 opened for debt 833 (fixed)/832 (partially fixed)/834 (filed, root cause unknown)/835 (deferred)/828 (closed). Handoff recommended: review+merge PR #4, investigate debt 834 in isolation, consider debt 835, pick among 773/756/750/567.'
+failed_attempts: []
+open_questions:
+- 'Debt 750 (1AKE NaN fragility): is 1AKE ever grouped with other same-atom-bucket systems in EnsemblePlan.from_bundles''s batched dispatch (partition_bundles_by_shape), or does it always land alone in its own shape-class group (len(group)==1, unpadded, unaffected by the bugs just fixed)? Not confirmed -- would need the actual bundle grouping checked, then (if grouped) a re-run of the 1AKE NaN-fragility repro with the debt-841 fix applied, on the cluster (local compute rules prohibit the heavy benchmark locally).'
+deferred:
+- description: 'Debt 844: test_v4_hlo_hetero_compile_once.py''s count_jaxpr_scans does a naive substring-count of ''scan'' in the jaxpr''s printed text rather than a real primitive walk. Already broken pre-fix (1/2 sub-tests failing either way); the debt-841 fix flips which sub-test fails (removing the now-unneeded per-bundle water-init scan for non-water systems shifts the literal text count) -- not a real compile-sharing regression (compiles==1 held before and after in both sub-tests).'
+  rationale: Orthogonal test-infra fragility, not a correctness issue in EnsemblePlan itself; needs its own pass to rewrite the counter as a jaxpr-primitive walk (eqn.primitive.name == 'scan', recursing into scan bodies/cond branches) and recalibrate both sub-tests' expected counts.
+  recommended_phase: next dedicated test-infra pass
+- description: Debt 835 (flash_explicit.py x64 hardening, ~20 hardcoded float32 sites), debt 773 (intermediate ATOM_BUCKET), 756 (deliberate bucket-matching), 750 (1AKE cost breakdown -- see open_questions above), 567 (multi-axis dispatch)
+  rationale: Each a genuine, standalone architecture/performance investigation already scoped in its own filing; none attempted this session beyond the debt-750 connection check above
+  recommended_phase: unscoped -- pick per B1 critical-path priority
+lessons_refs: []
+next_steps:
+- 'Confirm or rule out debt 750''s connection to debt 841: check partition_bundles_by_shape''s actual grouping for the 1AKE benchmark''s bundle set; if 1AKE is ever batched with same-bucket systems, re-run the NaN-fragility repro on the cluster with the debt-841 fix applied'
+- 'Fix debt 844: rewrite count_jaxpr_scans as a real jaxpr-primitive walk, then recalibrate test_v4_hlo_hetero_compile_once.py''s two sub-tests against the corrected (debt-841-fixed) integrator-selection behavior'
+- Pick among debt 773 (intermediate ATOM_BUCKET), 756 (deliberate bucket-matching reliability), 835 (flash_explicit.py x64 hardening), or 567 (multi-axis dispatch) for the next B1 architecture pass
+---
