@@ -31,7 +31,14 @@ def _md_scalars(dt: float = 0.5, kT: float = 0.596):
 
 
 def _hetero_b4_bundles():
-    sizes = (5, 10, 20, 35)
+    # Sizes must straddle distinct ATOM_BUCKETS (src/prolix/types/bundles.py:
+    # 64, 128, 256, 1024, ...) so the bundles are genuinely stack-incompatible
+    # (can_jit_vmap_n_mols(bundles) is False) and make_hetero_trajectory_fn
+    # actually takes the unrolled branch. (5, 10, 20, 35) all pad to the same
+    # 64-atom bucket, so can_jit_vmap_n_mols was True and this test silently
+    # exercised the stacked path (1 scan) instead of the unrolled one it
+    # claims to test (debt 844).
+    sizes = (10, 100, 200, 300)
     return [_make_bundle(n, seed=100 + i) for i, n in enumerate(sizes)], sizes
 
 
