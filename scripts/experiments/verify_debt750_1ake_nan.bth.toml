@@ -43,6 +43,7 @@ n_systems = "int"
 t_first_step = "float"
 t_steady_state = "float"
 git_hash = "str"
+prolix_path = "str"
 
 [metadata]
 campaign_id = "debt750-1ake-nan-verify"

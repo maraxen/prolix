@@ -117,13 +117,26 @@ def main() -> int:
         )
 
     bundles = _build_1ake_bundles(replicas)
+
+    import prolix
+
+    prolix_path = Path(prolix.__file__).resolve()
     result = {
         "replicas": replicas,
         "n_steps": n_steps,
         "seed": args.seed,
         "has_real_water": bool(bundles[0].shape_spec.has_real_water),
         "git_hash": _git_hash(),
+        "prolix_path": str(prolix_path),
     }
+
+    if not str(prolix_path).startswith(str(ROOT) + os.sep):
+        raise RuntimeError(
+            f"prolix imported from {prolix_path}, which is NOT under this "
+            f"checkout ({ROOT}) -- likely a stale/shared uv workspace "
+            "resolution (the exact failure mode debt 750/937 exist to "
+            "catch). Aborting before running any physics."
+        )
 
     if args.dry_run:
         print(json.dumps(result, indent=2))
@@ -133,16 +146,21 @@ def main() -> int:
 
     plan = EnsemblePlan.from_bundles(bundles)
 
+    # The first call is a discarded compile/timing probe (t_first_step) --
+    # use a decorrelated seed so it doesn't share a trajectory with the
+    # measured run below. The measured run must use args.seed exactly: the
+    # recorded "seed" field and the .bth.toml hypothesis both claim this is
+    # the same seed=0 as the original diagnostic (job 17905437).
     t0 = time.perf_counter()
     plan.run(
-        n_steps=1, dt=DT_FS, kT=KT_KCAL, seed=args.seed, gamma=GAMMA_PS,
+        n_steps=1, dt=DT_FS, kT=KT_KCAL, seed=args.seed + 1, gamma=GAMMA_PS,
         run_mode="inference",
     )
     t_first = time.perf_counter() - t0
 
     t1 = time.perf_counter()
     last = plan.run(
-        n_steps=max(n_steps - 1, 1), dt=DT_FS, kT=KT_KCAL, seed=args.seed + 1,
+        n_steps=max(n_steps - 1, 1), dt=DT_FS, kT=KT_KCAL, seed=args.seed,
         gamma=GAMMA_PS, run_mode="inference",
     )
     _block_trajs(last)
