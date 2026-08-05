@@ -1,0 +1,48 @@
+---
+workspace: prolix
+session_id: a8a4470d-dcbe-46fe-8536-cfcdf306a96a
+status: in_progress
+immediately_relevant:
+- file: scripts/slurm/_uv_project_guard.sh
+  lines:
+  - 1
+  - 37
+  reason: 'New shared guard (PR #7) -- _resolve_uv_project_for_workspace is the fix pattern for all 8 previously-buggy slurm scripts; verify this lands before touching any other scripts/slurm/*.slurm'
+- file: src/prolix/api/compile_once.py
+  lines:
+  - 31
+  - 61
+  reason: 'PR #8 -- count_jaxpr_scans now does a real jaxpr-primitive walk (_count_scan_eqns) instead of a naive string count; any new caller should rely on this being structurally accurate now'
+- file: tests/api/test_v4_hlo_hetero_compile_once.py
+  lines:
+  - 33
+  - 41
+  reason: 'PR #8 -- hetero bundle sizes changed to (10, 100, 200, 300) to genuinely straddle 4 ATOM_BUCKETS entries; do not revert to (5, 10, 20, 35), which silently collapses to the stacked path'
+active_dispatches: []
+task_id: 260728_prolix_debt937_debt844_prs
+phase: Phase 9 follow-up (debt queue)
+goal_statement: 'Work through the debt queue left after PR #6 (debt 750/3516) merged: debt 937 (isolated-worktree UV_PROJECT bug audit) and debt 844 (jaxpr scan-counter fragility), then pick a B1 architecture item.'
+context_refs:
+- phase: Phase 9
+  task_id: 260727_pr6_reviewed_fixed_merged
+  summary: 'PR #6 (debt 750/3516 1AKE NaN-fragility verification) merged after 3 rounds of Opus review; queued debt 844, a B1 item, and debt 937 for this session'
+failed_attempts:
+- attempt_id: a1
+  description: 'Dispatched praxia:reviewer (model=opus) via the Agent tool to review PR #7, twice, plus a resume'
+  outcome: All 3 attempts logged 0 real tool calls; produced fabricated/garbled output (wrong PR number, fake author, malformed URL, duplicated JSON keys, HTML-escaped pseudo-tool-call text)
+  reason_failed: 'Root-caused via a controlled diagnostic (praxia:reviewer+opus vs general-purpose+opus on an identical trivial task): every praxia:* agent .md has duplicate frontmatter where the first (authoritative) block sets tools:[], starving the dispatch of all real tools (no Bash, no ToolSearch); under task pressure it fabricates tool-call-shaped text instead of admitting it has no tools. general-purpose+opus with the same task made 3 clean real tool calls -- not a model issue.'
+  do_not_retry: true
+  evidence_ref: 'memory: project_praxia_agent_tools_empty_bug_260728.md'
+open_questions:
+- Which of debt 756/773/835/567 should be picked next for the B1 architecture item -- not yet decided by the user
+deferred:
+- description: Fix the praxia plugin's duplicate-frontmatter tools:[] bug across all 22 agent .md files
+  rationale: Different project (~/projects/praxia), user is investigating it separately; that repo has unrelated in-progress uncommitted work
+  recommended_phase: separate praxia-project session
+lessons_refs: []
+next_steps:
+- 'Review and merge PR #7 (debt 937, isolated-worktree UV_PROJECT audit): https://github.com/maraxen/prolix/pull/7 -- branch worktree-debt750-1ake-nan-verify, commit 64741d3'
+- 'Review and merge PR #8 (debt 844, jaxpr scan counter): https://github.com/maraxen/prolix/pull/8 -- branch debt844-jaxpr-scan-counter, commit 308bc68'
+- 'Pick one B1 architecture item to start next: debt 756 (bucket-match reliability, no deliberate mechanism to make N proteins co-bucket), debt 773 (ATOM_BUCKETS granularity, 1024->5000 gap leaves 61% ghost padding), debt 835 (flash_explicit.py x64 dtype scope beyond pme.py), or debt 567 (make_axis_dispatch beyond N_MOLS)'
+- Separately investigate the praxia plugin tools:[] bug (all 22 praxia:* agent .md files have duplicate frontmatter, first block sets tools:[] starving every dispatch of real tools) -- source at ~/projects/praxia/.praxia/claude-plugin/agents/*.md; that repo has unrelated uncommitted WIP in crates/praxia-cli/src/commands.rs and crates/praxia-mcp-tools/src/rig_run.rs worth checking first
+---
