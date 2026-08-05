@@ -41,7 +41,14 @@ discovered during this validation run's L1 dry-run, on the ATOM axis too,
 in the OPPOSITE direction (1uao's much smaller protein volume leaves more
 room for solvent water in the same target_box_size, pushing its total
 solvated atom count into a LARGER ATOM_BUCKETS rung than 1vii/2gb1's
-natural one: bucket 2048 for 1vii/2gb1 vs bucket 5000 for 1uao). All three
+natural one: bucket 2048 for 1vii/2gb1 vs bucket 5000 for 1uao). NOTE: the
+ATOM_BUCKETS ladder itself changed on 2026-08-05 (debt 773: a 2048 rung was
+inserted between the pre-existing 1024 and 5000 rungs) -- catalog rows
+recorded before this date are NOT directly comparable to rows recorded
+after, because the same shape_spec_atom_bucket_idx value denotes a
+different real bucket size across that boundary (see
+shape_spec_atom_bucket_size in this script's JSON output, added
+specifically to make that boundary visible per-row). All three
 target_bucket_counts axes (atom/bond/angle/dihedral) are computed as the
 per-axis MAX of the three proteins' natural (unforced) bucket indices, then
 applied uniformly to all three loads -- proving 1UAO can be forced into
@@ -60,7 +67,7 @@ test_solvate_protein_to_bundle_target_bucket_counts_forces_match).
 
 [outcomes.pass]
 condition = "n_groups_from_partition = 1 AND r_squared IS NOT NULL AND r_squared > 0.7 AND compile_fixed_s IS NOT NULL AND compile_fixed_s > 0"
-decision = "partition_bundles_by_shape correctly grouped the mixed bundle list (1vii+2gb1 for --mode combined; 1vii+2gb1+1uao for --mode three_way) into one class, and the regression fit is trustworthy -- compare this run's compile_fixed_s against the relevant --mode single control runs (same campaign, same task_id) to determine whether compilation is genuinely shared or merely dispatched together with hidden per-topology recompiles."
+decision = "partition_bundles_by_shape correctly grouped the mixed bundle list (1vii+2gb1 for --mode combined; 1vii+2gb1+1uao for --mode three_way) into one class, and the regression fit is trustworthy -- compare this run's compile_fixed_s against the relevant --mode single control runs (same campaign, same task_id) to determine whether compilation is genuinely shared or merely dispatched together with hidden per-topology recompiles. EXCEPTION for --mode three_way specifically: no equivalent --mode single control exists at the same forced bucket size (three_way forces the atom axis to bucket 5000 via target_bucket_counts to match 1uao's requirement; there is no CLI flag to force --mode single/combined to bucket 5000, so their natural single-protein runs land at bucket 2048 and are not a valid baseline). For three_way, the valid evidence standard is n_groups_from_partition = 1 (the structural bucket-match proof, already required by this condition) plus three_way-vs-three_way comparisons across repeated runs -- not a cross-mode comparison against single/combined."
 reasoning = "n_groups=1 confirms the structural precondition; a clean fit (R^2>0.7, looser than the water/protein step-scaling gate since only 2-3 distinct real topologies are being amortized here rather than 4 replicated ones) is needed before trusting compile_fixed_s as evidence either way. This condition is unchanged for --mode three_way: partition_bundles_by_shape (src/prolix/api/ensemble_dedup.py) groups by a dict keyed on b.shape_spec for each bundle in the input list -- it is agnostic to how many distinct bundles went in, so n_groups_from_partition=1 means exactly the same thing ('every input bundle shares one shape_spec class') for 2 or 3 (or any N) bundles. Verified by reading the implementation (not assumed) during the debt-756 three_way validation, 2026-08-05."
 
 [outcomes.marginal]

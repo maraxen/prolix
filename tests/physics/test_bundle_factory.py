@@ -302,3 +302,40 @@ def test_target_bucket_counts_none_is_backward_compatible():
     )
     assert bundle_default.shape_spec == bundle_explicit_none.shape_spec
     assert bundle_default.bond_idx.shape == bundle_explicit_none.bond_idx.shape
+
+
+def test_target_bucket_counts_rejects_unknown_key():
+    """debt 756 hardening (final review finding): a typo'd axis name must
+    raise, not silently no-op back to natural bucket selection."""
+    sys = _make_minimal_physics_system()
+    with pytest.raises(ValueError, match="unknown key"):
+        make_bundle_from_system(
+            sys, boundary_condition="free", target_bucket_counts={"bonds": 1024}
+        )
+
+
+def test_target_bucket_counts_rejects_overflow_with_clear_message():
+    """debt 756 hardening (final review finding): a target exceeding the
+    largest configured bucket must raise a message naming the axis, not
+    silently clamp then crash later in an unrelated assert."""
+    sys = _make_minimal_physics_system()
+    with pytest.raises(ValueError, match="atom"):
+        make_bundle_from_system(
+            sys, boundary_condition="free", target_bucket_counts={"atom": 100_000}
+        )
+
+
+def test_target_bucket_counts_atom_axis_composes_with_new_2048_bucket():
+    """debt 756 + debt 773 composition: target_bucket_counts on the atom
+    axis correctly resolves against the new 2048 rung Task 0 added, not
+    just the pre-existing bucket boundaries."""
+    from prolix.types.bundles import ATOM_BUCKETS
+
+    sys = _make_minimal_physics_system()  # 10 real atoms
+    bundle = make_bundle_from_system(
+        sys, boundary_condition="free", target_bucket_counts={"atom": 2048}
+    )
+    assert bundle.positions.shape[0] == 2048
+    assert bundle.shape_spec.atom_bucket_idx == ATOM_BUCKETS.index(2048)
+    assert int(bundle.n_atoms) == 10
+    assert int(bundle.atom_mask.sum()) == 10

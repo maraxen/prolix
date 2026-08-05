@@ -401,6 +401,37 @@ def _effective_bucket_count(real_n: int, target_n: int | None, axis_name: str) -
     return target_n
 
 
+_AXIS_LADDERS = {
+    "atom": ATOM_BUCKETS,
+    "bond": BOND_BUCKETS,
+    "angle": ANGLE_BUCKETS,
+    "dihedral": DIHEDRAL_BUCKETS,
+    "water": WATER_BUCKETS,
+    "excl": EXCL_BUCKETS,
+    "cmap": CMAP_BUCKETS,
+    "exception": EXCEPTION_BUCKETS,
+}
+
+
+def _validate_target_bucket_counts(target_bucket_counts: dict[str, int]) -> None:
+    """Reject unknown axis keys and out-of-range targets before any bucket
+    arithmetic runs, rather than letting a typo silently no-op or an
+    overflow surface as an unrelated internal assertion later."""
+    unknown = set(target_bucket_counts) - set(_AXIS_LADDERS)
+    if unknown:
+        raise ValueError(
+            f"target_bucket_counts has unknown key(s) {sorted(unknown)}; "
+            f"valid keys are {sorted(_AXIS_LADDERS)}"
+        )
+    for axis, target in target_bucket_counts.items():
+        ladder = _AXIS_LADDERS[axis]
+        if target > ladder[-1]:
+            raise ValueError(
+                f"target_bucket_counts['{axis}']={target} exceeds the largest "
+                f"{axis} bucket ({ladder[-1]}); valid buckets are {ladder}"
+            )
+
+
 def _pad_1d(arr, bucket: int, dtype=None):
     """Pad a 1D array to bucket length; return zeros if arr is None or empty."""
     import jax.numpy as jnp
@@ -664,6 +695,7 @@ def make_bundle_from_system(
     pos = system.positions
     n = pos.shape[0]
     _tbc = target_bucket_counts or {}
+    _validate_target_bucket_counts(_tbc)
     n_eff = _effective_bucket_count(n, _tbc.get("atom"), "atom")
     a = _next_bucket(n_eff, ATOM_BUCKETS)
 

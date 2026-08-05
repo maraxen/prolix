@@ -304,10 +304,19 @@ def main() -> int:
     elif args.mode == "three_way":
         protein_label = "three_way-1vii-2gb1-1uao"
 
+    # ATOM_BUCKETS is imported here (not module-level) because its ladder
+    # membership can change across commits (debt 773 inserted a 2048 rung
+    # between 1024 and 5000, 2026-08-05) -- emitting the resolved bucket
+    # *size* alongside the raw index means catalog rows recorded before and
+    # after such a ladder change remain distinguishable, rather than only
+    # recording an index whose real-world meaning silently shifted.
+    from prolix.types.bundles import ATOM_BUCKETS
+
     bundle_info = {
         "n_bundles": len(bundles),
         "n_real_atoms_first": n_real,
         "shape_spec_atom_bucket_idx": bundles[0].shape_spec.atom_bucket_idx,
+        "shape_spec_atom_bucket_size": ATOM_BUCKETS[bundles[0].shape_spec.atom_bucket_idx],
     }
     if args.mode == "three_way":
         # Explicit shape_spec match confirmation for all three proteins --
