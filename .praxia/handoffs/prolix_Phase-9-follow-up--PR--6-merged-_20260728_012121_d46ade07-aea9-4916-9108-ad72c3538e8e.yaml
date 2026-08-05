@@ -1,0 +1,43 @@
+---
+workspace: prolix
+session_id: 7c676771-bb12-4ea1-bb34-1cf32e36288f
+status: in_progress
+immediately_relevant:
+- file: scripts/experiments/verify_debt750_1ake_nan.py
+  lines:
+  - 100
+  - 197
+  reason: main() -- the corrected seed convention (seed vs seed_measured=args.seed+1) and prolix-provenance RuntimeError guard now live here; read before touching this script again
+- file: scripts/benchmarks/b1_init_exec.py
+  lines:
+  - 495
+  - 535
+  reason: The baseline script verify_debt750_1ake_nan.py must stay seed-parity-matched with; line 522's seed=seed+1 on the measured leg is the convention to preserve
+- file: scripts/slurm/verify_debt750_1ake_nan.slurm
+  lines:
+  - 34
+  - 79
+  reason: 'Reference implementation for debt 937''s fix: the conditional UV_PROJECT/UV_SYNC_EXTRAS logic that should be extracted into a shared helper'
+active_dispatches: []
+task_id: 260715_b1_physics_parity
+phase: 'Phase 9 follow-up (PR #6 merged)'
+goal_statement: 'Complete the Phase 9 handoff''s first next_step (review/merge PR #6, the debt-750-1ake-nan-verify slurm/script fix) with rigorous adversarial review before merging, then return to the remaining Phase 9 next_steps.'
+context_refs:
+- phase: Debt 750/3516 verification (post-Phase-9 follow-up)
+  task_id: 260722_debt750_1ake_nan_verify
+  summary: 'Verified debt 841''s fix resolves debt 750''s 1AKE NaN fragility (job 18634624, finite_fraction=1.0); opened PR #6 for the slurm/script fix that made the verification job actually run correct code'
+failed_attempts:
+- attempt_id: a1
+  description: 'First attempt to fix PR #6''s H1 finding (seed didn''t match recorded/pre-registered value) by swapping which plan.run() call used which seed'
+  outcome: Fixed the label/result mismatch but broke per-replica seed parity with scripts/benchmarks/b1_init_exec.py's baseline (measured leg moved from seed+1 to seed, shifting the tested replica ensemble from {1..16} to {0..15})
+  reason_failed: Diagnosed the symptom (recorded seed != actual seed) without checking what the baseline script this experiment is compared against actually does -- b1_init_exec.py:522 uses seed+1 on its own measured leg, and since the 16 bundles are identical replicas, the seed is the only thing distinguishing them, so any seed-set shift silently invalidates the before/after comparison
+  do_not_retry: true
+  evidence_ref: 'PR #6 comment thread; commits 863860a (broken) and f49d2cd (corrected)'
+open_questions: []
+deferred: []
+lessons_refs: []
+next_steps:
+- 'Fix debt 844: count_jaxpr_scans in test_v4_hlo_hetero_compile_once.py uses a naive substring count instead of a real jaxpr-primitive walk (pre-existing test-infra artifact, unrelated to real compile-sharing behavior)'
+- 'Pick among debt 773/756/835/567 for the next B1 architecture item (773: intermediate ATOM_BUCKET sizing; 756/835/567: see debt tracker for current descriptions, not re-scoped this session)'
+- 'Address debt 937: 11 other slurm scripts (b1_init_exec.slurm, bench_proxide_wheel_build.slurm, bench_tip3p_dt_gamma_matrix.slurm, bench_tip3p_ke_compare_openmm.slurm, bench_tip3p_ke_compare_prolix.slurm, bench_tip3p_langevin_preemptable.slurm, bench_workspace_uv_sync.slurm, p2b_slow_gate.slurm, p2b_t2_diag.slurm, p5_nvt_gate_diag.slurm, validate_csvr_temperature.slurm) still have the unconditional ''export UV_PROJECT="${WORKSPACE_ROOT}"'' pattern that PR #6 just fixed in verify_debt750_1ake_nan.slurm -- extract into a shared scripts/slurm/_uv_project_env.sh helper (matching the repo''s existing _common_env.sh/_bth_env.sh convention) rather than duplicating the fix per-script; b1_init_exec.slurm is the priority since it''s also the Claim-1 prereg script and the source of debt750''s original 5/64 baseline (job 17905437)'
+---

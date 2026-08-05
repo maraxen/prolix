@@ -1,0 +1,51 @@
+---
+workspace: prolix
+session_id: e567929b-f7fd-42fe-b314-9ed588a36b3b
+status: in_progress
+immediately_relevant:
+- file: scripts/slurm/verify_debt750_1ake_nan.slurm
+  lines:
+  - 34
+  - 80
+  reason: The fixed reference pattern for detecting an isolated worktree and avoiding the shared uv workspace -- use as the template when auditing/fixing the other 11 scripts (debt 937)
+- file: scripts/experiments/verify_debt750_1ake_nan.bth.toml
+  lines:
+  - 1
+  - 32
+  reason: PASS/FAIL gate definition used to confirm debt 750's resolution; reuse this pattern for future confirmation-mode verification campaigns
+active_dispatches: []
+task_id: 260715_b1_physics_parity
+phase: Phase 9 follow-up
+goal_statement: 'Work through the 3 next_steps queued in the Phase 9 handoff (debt 841 PR #5 merge): (1) confirm debt 750''s connection to debt 841, (2) fix debt 844''s test-infra artifact, (3) pick among debt 773/756/835/567 for the next B1 architecture item.'
+context_refs:
+- phase: 'Phase 9 (PR #5 merge + debt 841 root-cause/fix)'
+  task_id: 260715_b1_physics_parity
+  summary: 'PR #5 merged (debt 841 fix, commit a360a22). Handoff queued 3 next_steps: (1) debt-750 connection check, (2) debt 844 test-infra fix, (3) pick among debt 773/756/835/567.'
+- phase: Debt 750/3516 verification (post-Phase-9 follow-up)
+  task_id: 260722_debt750_1ake_nan_verify
+  summary: Prior session queued SLURM job 18523653 and left it pending; this session found it had crashed on an infra bug, fixed it, resubmitted, and confirmed PASS.
+failed_attempts:
+- attempt_id: a1
+  description: First job submission (18523653) ran with UV_PROJECT forced to the shared cluster workspace (ENGAGING_WORKSPACE_ROOT/dirname(PROLIX_ROOT))
+  outcome: 'Crashed 2m25s in with AttributeError: ''MolecularShapeSpec'' object has no attribute ''has_real_water'''
+  reason_failed: The shared workspace's `prolix` uv-workspace member is an editable install of whatever branch is checked out at ~/projects/prolix (same inode as the ORCD path) -- at run time that was worktree-linked-exploring-lagoon@c0c8fc9, which predates debt 841's fix (a360a22). The debt750 worktree's own source (commit 18bbeae) was correct, but the shared editable install shadowed it.
+  do_not_retry: true
+  evidence_ref: 'outputs/logs/slurm/18523653_4294967294.verify_debt750.err on the ORCD worktree; PR #6 description'
+- attempt_id: a2
+  description: Second submission (18632816, mit_preemptable) with the UV_PROJECT fix but no --extra cuda/dev on the freshly-isolated uv sync
+  outcome: Cancelled while still PENDING once the missing-extras risk was identified, before it could waste GPU allocation time on a CPU-only jax
+  reason_failed: A freshly-synced isolated venv has no cached cuda install to inherit from the shared workspace's one-time `uv sync --extra cuda --extra dev --package prolix`; the extras must be requested explicitly per-job when UV_PROJECT is unset
+  do_not_retry: false
+  evidence_ref: scripts/slurm/verify_debt750_1ake_nan.slurm commit b743dea (fix applied before this job ran)
+open_questions: []
+deferred:
+- description: Auditing/fixing the 11 other slurm scripts with the same UV_PROJECT-forced-to-shared-workspace pattern
+  rationale: Out of scope for the debt 750 verification task itself; filed as debt 937 instead of fixed inline, since none of them were exercised this session and the blast radius/fix needs its own pass
+  recommended_phase: Phase 9 follow-up next_step 4, or whenever one of those scripts is next run from an isolated worktree
+lessons_refs: []
+next_steps:
+- 'Review and merge PR #6 (scripts/slurm/verify_debt750_1ake_nan.slurm fix, commits b743dea/165a9a0)'
+- Fix debt 844 (count_jaxpr_scans naive substring-count test-infra artifact in test_v4_hlo_hetero_compile_once.py)
+- Pick among debt 773/756/835/567 for the next B1 architecture item
+- 'Address debt 937: audit the other 11 slurm scripts sharing verify_debt750_1ake_nan.slurm''s UV_PROJECT-forced-to-shared-workspace pattern (validate_csvr_temperature.slurm, bench_tip3p_langevin_preemptable.slurm, bench_proxide_wheel_build.slurm, bench_workspace_uv_sync.slurm, _workspace_uv_sync_inner.sh, bench_tip3p_dt_gamma_matrix.slurm, bench_tip3p_ke_compare_prolix.slurm, p5_nvt_gate_diag.slurm, p2b_t2_diag.slurm, p2b_slow_gate.slurm, b1_init_exec.slurm, bench_tip3p_ke_compare_openmm.slurm) for the same silent-stale-import risk when run from isolated worktrees'
+---
