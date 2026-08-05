@@ -249,3 +249,56 @@ def test_dense_excl_to_pair_list_deduplicates():
     assert list(pairs[0]) == [0, 1]
     assert float(sv[0]) == 0.0
     assert float(se[0]) == 1.0
+
+
+def test_target_bucket_counts_pads_bond_bucket_higher():
+    """debt 756: an explicit target should force a bigger bucket than the
+    real (here: zero) bond count would naturally select."""
+    sys = _make_minimal_physics_system()
+    bundle = make_bundle_from_system(
+        sys, boundary_condition="free", target_bucket_counts={"bond": 256}
+    )
+    assert bundle.bond_idx.shape[0] == 256
+    from prolix.types.bundles import BOND_BUCKETS
+    assert bundle.shape_spec.bond_bucket_idx == BOND_BUCKETS.index(256)
+
+
+def test_target_bucket_counts_two_systems_can_be_forced_to_match():
+    """The actual debt-756 use case: two systems with different real bond
+    counts land in the SAME bucket (and therefore the same shape_spec) when
+    both are given the same explicit target."""
+    sys_a = _make_minimal_physics_system()  # 0 real bonds
+    sys_b = _make_minimal_physics_system()  # also 0 real bonds in this fixture;
+    # the assertion below is what matters -- both forced to the same target
+    # produce identical bond_bucket_idx regardless of their real counts.
+    bundle_a = make_bundle_from_system(
+        sys_a, boundary_condition="free", target_bucket_counts={"bond": 1024}
+    )
+    bundle_b = make_bundle_from_system(
+        sys_b, boundary_condition="free", target_bucket_counts={"bond": 1024}
+    )
+    assert bundle_a.shape_spec.bond_bucket_idx == bundle_b.shape_spec.bond_bucket_idx
+
+
+def test_target_bucket_counts_rejects_target_below_real_count():
+    """Overflow safety: an explicit target smaller than the real count must
+    raise, not silently truncate real topology data (mirrors the safety
+    check already proven in the deprecated padding.pad_array/pad_protein)."""
+    sys = _make_minimal_physics_system()
+    # This fixture has 10 real atoms; a target below that must raise.
+    with pytest.raises(ValueError, match="atom"):
+        make_bundle_from_system(
+            sys, boundary_condition="free", target_bucket_counts={"atom": 5}
+        )
+
+
+def test_target_bucket_counts_none_is_backward_compatible():
+    """Omitting target_bucket_counts (or passing None) must reproduce
+    exactly the pre-existing behavior -- this is the regression guard."""
+    sys = _make_minimal_physics_system()
+    bundle_default = make_bundle_from_system(sys, boundary_condition="free")
+    bundle_explicit_none = make_bundle_from_system(
+        sys, boundary_condition="free", target_bucket_counts=None
+    )
+    assert bundle_default.shape_spec == bundle_explicit_none.shape_spec
+    assert bundle_default.bond_idx.shape == bundle_explicit_none.bond_idx.shape

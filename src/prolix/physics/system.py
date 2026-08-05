@@ -383,6 +383,24 @@ def _next_bucket(n: int, buckets: tuple) -> int:
     return buckets[-1]
 
 
+def _effective_bucket_count(real_n: int, target_n: int | None, axis_name: str) -> int:
+    """Return the count to select a bucket against: the real count, or an
+    explicit override that must be >= the real count.
+
+    An explicit target can only pad UP, never truncate real topology data --
+    mirrors the same safety check in the deprecated prolix.padding.pad_array.
+    """
+    if target_n is None:
+        return real_n
+    if target_n < real_n:
+        raise ValueError(
+            f"target_bucket_counts['{axis_name}']={target_n} is smaller than "
+            f"the real count ({real_n}); an explicit target can only pad up, "
+            f"never truncate real data."
+        )
+    return target_n
+
+
 def _pad_1d(arr, bucket: int, dtype=None):
     """Pad a 1D array to bucket length; return zeros if arr is None or empty."""
     import jax.numpy as jnp
@@ -610,6 +628,7 @@ def make_bundle_from_system(
     system,
     boundary_condition: str = "periodic",
     exclusion_spec: Any = None,
+    target_bucket_counts: dict[str, int] | None = None,
 ) -> MolecularBundle:
     """Convert a PhysicsSystem to a MolecularBundle with bucketed padding.
 
@@ -621,6 +640,13 @@ def make_bundle_from_system(
         boundary_condition: "periodic" or "free".
         exclusion_spec: Optional ``ExclusionSpec``; when provided, populates
             ``excl_*`` pair lists and ``exception_*`` fields on the bundle.
+        target_bucket_counts: Optional per-axis overrides (keys: "atom",
+            "bond", "angle", "dihedral", "water", "excl", "cmap",
+            "exception") forcing that axis to pad up to an explicit count
+            instead of the smallest bucket that fits the real data. Lets
+            two systems with different real topology be forced into the
+            same MolecularShapeSpec bucket (debt 756). Raises ValueError if
+            an override is smaller than the real count for that axis.
 
     Returns:
         MolecularBundle with all arrays padded to bucket sizes.
@@ -637,18 +663,22 @@ def make_bundle_from_system(
 
     pos = system.positions
     n = pos.shape[0]
-    a = _next_bucket(n, ATOM_BUCKETS)
+    _tbc = target_bucket_counts or {}
+    n_eff = _effective_bucket_count(n, _tbc.get("atom"), "atom")
+    a = _next_bucket(n_eff, ATOM_BUCKETS)
 
     # --- bonded topology -------------------------------------------------
     bonds = _get("bonds")
     bp = _get("bond_params")
     nb = 0 if bonds is None or bonds.size == 0 else bonds.shape[0]
-    bb = _next_bucket(max(nb, 1), BOND_BUCKETS)
+    nb_eff = _effective_bucket_count(nb, _tbc.get("bond"), "bond")
+    bb = _next_bucket(max(nb_eff, 1), BOND_BUCKETS)
 
     angles = _get("angles")
     ap = _get("angle_params")
     na = 0 if angles is None or angles.size == 0 else angles.shape[0]
-    ab = _next_bucket(max(na, 1), ANGLE_BUCKETS)
+    na_eff = _effective_bucket_count(na, _tbc.get("angle"), "angle")
+    ab = _next_bucket(max(na_eff, 1), ANGLE_BUCKETS)
 
     dihs = _get("dihedrals")
     if dihs is None:
@@ -658,7 +688,8 @@ def make_bundle_from_system(
         dihs = _get("proper_dihedrals")
     dp = _get("dihedral_params")
     dihs, dp, nd = _flatten_multi_term_torsions(dihs, dp)
-    db = _next_bucket(max(nd, 1), DIHEDRAL_BUCKETS)
+    nd_eff = _effective_bucket_count(nd, _tbc.get("dihedral"), "dihedral")
+    db = _next_bucket(max(nd_eff, 1), DIHEDRAL_BUCKETS)
 
     imps = _get("impropers")
     imp_p = _get("improper_params")
@@ -671,7 +702,8 @@ def make_bundle_from_system(
     # --- water -----------------------------------------------------------
     wi = _get("water_indices")
     nw = 0 if wi is None or wi.size == 0 else wi.shape[0]
-    wb = _next_bucket(max(nw, 1), WATER_BUCKETS)
+    nw_eff = _effective_bucket_count(nw, _tbc.get("water"), "water")
+    wb = _next_bucket(max(nw_eff, 1), WATER_BUCKETS)
 
     # --- exclusions -------------------------------------------------------
     # PhysicsSystem: dense (N, max_excl) or pair list (E, 2). Bundle: (E, 2).
@@ -687,7 +719,8 @@ def make_bundle_from_system(
         )
     else:
         excl, excl_sv, excl_se, ne = _dense_excl_to_pair_list(excl, excl_sv, excl_se)
-    eb = _next_bucket(max(ne, 1), EXCL_BUCKETS)
+    ne_eff = _effective_bucket_count(ne, _tbc.get("excl"), "excl")
+    eb = _next_bucket(max(ne_eff, 1), EXCL_BUCKETS)
 
     # --- exclusions (per-atom-row form, for NL/flash kernels; debt 765) ---
     # Every neighbor-list/flash consumer (this file's own make_energy_fn NL
@@ -747,7 +780,8 @@ def make_bundle_from_system(
         exc_eps = exclusion_spec.exception_epsilons
         exc_q = exclusion_spec.exception_chargeprods
     nx = 0 if exc_pairs is None or exc_pairs.size == 0 else int(exc_pairs.shape[0])
-    xb = _next_bucket(max(nx, 1), EXCEPTION_BUCKETS)
+    nx_eff = _effective_bucket_count(nx, _tbc.get("exception"), "exception")
+    xb = _next_bucket(max(nx_eff, 1), EXCEPTION_BUCKETS)
 
     # --- CMAP -------------------------------------------------------------
     cmap_t = _get("cmap_torsions")
@@ -755,7 +789,8 @@ def make_bundle_from_system(
     if cmap_g is None:
         cmap_g = _get("cmap_energy")
     nc = 0 if cmap_t is None or cmap_t.size == 0 else int(cmap_t.shape[0])
-    cb = _next_bucket(max(nc, 1), CMAP_BUCKETS)
+    nc_eff = _effective_bucket_count(nc, _tbc.get("cmap"), "cmap")
+    cb = _next_bucket(max(nc_eff, 1), CMAP_BUCKETS)
 
     # --- box / PBC -------------------------------------------------------
     box_size = _get("box_size")
@@ -768,14 +803,14 @@ def make_bundle_from_system(
 
     # --- shape spec -------------------------------------------------------
     # Compute bucket indices (coarse; enables identical static hashing for same-bucket systems)
-    atom_bucket_idx = _bucket_idx(n, ATOM_BUCKETS)
-    bond_bucket_idx = _bucket_idx(max(nb, 1), BOND_BUCKETS)
-    angle_bucket_idx = _bucket_idx(max(na, 1), ANGLE_BUCKETS)
-    dihedral_bucket_idx = _bucket_idx(max(nd, 1), DIHEDRAL_BUCKETS)
-    water_bucket_idx = _bucket_idx(max(nw, 1), WATER_BUCKETS)
-    excl_bucket_idx = _bucket_idx(max(ne, 1), EXCL_BUCKETS)
-    cmap_bucket_idx = _bucket_idx(max(nc, 1), CMAP_BUCKETS)
-    exception_bucket_idx = _bucket_idx(max(nx, 1), EXCEPTION_BUCKETS)
+    atom_bucket_idx = _bucket_idx(n_eff, ATOM_BUCKETS)
+    bond_bucket_idx = _bucket_idx(max(nb_eff, 1), BOND_BUCKETS)
+    angle_bucket_idx = _bucket_idx(max(na_eff, 1), ANGLE_BUCKETS)
+    dihedral_bucket_idx = _bucket_idx(max(nd_eff, 1), DIHEDRAL_BUCKETS)
+    water_bucket_idx = _bucket_idx(max(nw_eff, 1), WATER_BUCKETS)
+    excl_bucket_idx = _bucket_idx(max(ne_eff, 1), EXCL_BUCKETS)
+    cmap_bucket_idx = _bucket_idx(max(nc_eff, 1), CMAP_BUCKETS)
+    exception_bucket_idx = _bucket_idx(max(nx_eff, 1), EXCEPTION_BUCKETS)
 
     spec = MolecularShapeSpec(
         atom_bucket_idx=atom_bucket_idx,
