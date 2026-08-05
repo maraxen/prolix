@@ -27,12 +27,41 @@ shared JIT compile: does --mode combined's compile_fixed_s approximate
 EITHER single-protein run's compile_fixed_s (one shared compile across
 genuinely different real proteins), or their SUM (still compiling
 separately despite matching shape_spec -- a gap worth flagging)?
+
+Debt 756 end-to-end validation (--mode three_way, added 2026-08-05): 1VII
+and 2GB1 bucket-matched by LUCK -- the original hypothesis found this pair
+empirically, by trial, not by construction. Debt 756 built a
+`target_bucket_counts` override mechanism (make_bundle_from_system /
+solvate_protein_to_bundle, Tasks 1-2 of the 260805_b1-debt756-773 plan) that
+lets a caller FORCE any topology into a chosen bucket rather than relying on
+luck. --mode three_way adds a THIRD protein, 1UAO (Chignolin), which does
+NOT naturally bucket-match 1vii/2gb1 -- on bond/angle/dihedral axes (1uao's
+much smaller residue count needs far fewer terms) AND, empirically
+discovered during this validation run's L1 dry-run, on the ATOM axis too,
+in the OPPOSITE direction (1uao's much smaller protein volume leaves more
+room for solvent water in the same target_box_size, pushing its total
+solvated atom count into a LARGER ATOM_BUCKETS rung than 1vii/2gb1's
+natural one: bucket 2048 for 1vii/2gb1 vs bucket 5000 for 1uao). All three
+target_bucket_counts axes (atom/bond/angle/dihedral) are computed as the
+per-axis MAX of the three proteins' natural (unforced) bucket indices, then
+applied uniformly to all three loads -- proving 1UAO can be forced into
+whichever bucket the group as a whole needs, not just some oversized bucket
+nobody would pick. (cmap:512 is included in every load, including the
+"natural" probe loads used to read bucket indices, as an unrelated,
+pre-existing crash workaround for 1UAO -- debt #1170, NOT part of the
+756 mechanism itself.) If three_way's n_groups_from_partition == 1 and
+compile_fixed_s stays in the single-shared-compile regime (same evidence
+bar as the two-protein --mode combined case above), that is reproducible,
+on-demand proof that debt 756 works end-to-end with real proteins/real
+solvation, not just in the fast unit test
+(tests/physics/test_flash_dense_parity.py::
+test_solvate_protein_to_bundle_target_bucket_counts_forces_match).
 """
 
 [outcomes.pass]
 condition = "n_groups_from_partition = 1 AND r_squared IS NOT NULL AND r_squared > 0.7 AND compile_fixed_s IS NOT NULL AND compile_fixed_s > 0"
-decision = "partition_bundles_by_shape correctly grouped the mixed 1vii+2gb1 bundle list into one class, and the regression fit is trustworthy -- compare this run's compile_fixed_s against the two --mode single control runs (same campaign, same task_id) to determine whether compilation is genuinely shared or merely dispatched together with hidden per-topology recompiles."
-reasoning = "n_groups=1 confirms the structural precondition; a clean fit (R^2>0.7, looser than the water/protein step-scaling gate since only 2 distinct real topologies are being amortized here rather than 4 replicated ones) is needed before trusting compile_fixed_s as evidence either way."
+decision = "partition_bundles_by_shape correctly grouped the mixed bundle list (1vii+2gb1 for --mode combined; 1vii+2gb1+1uao for --mode three_way) into one class, and the regression fit is trustworthy -- compare this run's compile_fixed_s against the relevant --mode single control runs (same campaign, same task_id) to determine whether compilation is genuinely shared or merely dispatched together with hidden per-topology recompiles."
+reasoning = "n_groups=1 confirms the structural precondition; a clean fit (R^2>0.7, looser than the water/protein step-scaling gate since only 2-3 distinct real topologies are being amortized here rather than 4 replicated ones) is needed before trusting compile_fixed_s as evidence either way. This condition is unchanged for --mode three_way: partition_bundles_by_shape (src/prolix/api/ensemble_dedup.py) groups by a dict keyed on b.shape_spec for each bundle in the input list -- it is agnostic to how many distinct bundles went in, so n_groups_from_partition=1 means exactly the same thing ('every input bundle shares one shape_spec class') for 2 or 3 (or any N) bundles. Verified by reading the implementation (not assumed) during the debt-756 three_way validation, 2026-08-05."
 
 [outcomes.marginal]
 condition = "n_groups_from_partition = 1 AND r_squared IS NOT NULL AND r_squared > 0.4 AND r_squared <= 0.7"
@@ -41,8 +70,8 @@ reasoning = "A noisy fit at this sample size could still be consistent with eith
 
 [outcomes.fail]
 condition = "n_groups_from_partition IS NULL OR n_groups_from_partition != 1 OR r_squared IS NULL OR r_squared <= 0.4 OR compile_fixed_s IS NULL"
-decision = "If n_groups != 1: the bucket-matching assumption broke (data/code drift since the interactive session that found this pair) -- re-verify 1vii/2gb1 shape_spec equality before re-running. Otherwise: check for exceptions in the per-n_steps loop or an insufficient n_steps spread."
-reasoning = "This experiment's entire premise depends on the two proteins genuinely sharing one partition group -- if that structural precondition fails, no compile-cost number from this run means anything about heterogeneous batching."
+decision = "If n_groups != 1: the bucket-matching assumption broke (data/code drift since the interactive session that found this pair/triple) -- for --mode combined, re-verify 1vii/2gb1 shape_spec equality; for --mode three_way, re-verify the target_bucket_counts override still forces all three (1vii/2gb1/1uao) into one shape_spec (see _build_bundles's RuntimeError guard, which fires before this metric is even recorded if the override stops working). Otherwise: check for exceptions in the per-n_steps loop or an insufficient n_steps spread."
+reasoning = "This experiment's entire premise depends on the bundles genuinely sharing one partition group -- if that structural precondition fails, no compile-cost number from this run means anything about heterogeneous batching."
 is_residual = true
 
 [result_schema]
@@ -58,4 +87,4 @@ n_real_atoms_first = "int"
 [metadata]
 campaign_id = "32d6574e"
 campaign_mode = "exploration"
-tags = ["b1", "phase4", "profiling", "heterogeneous-batching", "solvated-protein", "compile-sharing"]
+tags = ["b1", "phase4", "profiling", "heterogeneous-batching", "solvated-protein", "compile-sharing", "debt-756", "target-bucket-counts"]

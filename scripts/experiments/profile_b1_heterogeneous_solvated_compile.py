@@ -30,14 +30,29 @@ interleaved. If combined's compile_fixed_s ~= either single-protein run's
 compile_fixed_s (not their sum), that's direct evidence of one shared compile
 across genuinely different real solvated proteins.
 
+Debt 756 end-to-end validation (--mode three_way): 1UAO (Chignolin) does NOT
+naturally bucket-match 1vii/2gb1 on the bond/angle/dihedral axes -- a
+genuinely mismatched third protein. `target_bucket_counts` (built in Tasks
+1-2 of this plan) forces all three into ONE shared MolecularShapeSpec,
+proving the mechanism works end-to-end with real proteins/real solvation,
+not just in the fast unit test
+(tests/physics/test_flash_dense_parity.py::
+test_solvate_protein_to_bundle_target_bucket_counts_forces_match). Note:
+1UAO alone hits a pre-existing, unrelated CMAP-padding crash in
+make_bundle_from_system (debt #1170) -- worked around uniformly for all
+three proteins via `target_bucket_counts["cmap"] = 512`.
+
 Usage::
 
     # L1 dry-run (shapes only, no GPU)
     uv run python scripts/experiments/profile_b1_heterogeneous_solvated_compile.py --dry-run --protein 1vii
+    uv run python scripts/experiments/profile_b1_heterogeneous_solvated_compile.py --dry-run --mode three_way
 
     # L2 local CPU smoke
     JAX_PLATFORMS=cpu uv run python scripts/experiments/profile_b1_heterogeneous_solvated_compile.py \\
         --protein 1vii --replicas 2 --n-steps-list 2,5 --out /tmp/smoke.json
+    JAX_PLATFORMS=cpu uv run python scripts/experiments/profile_b1_heterogeneous_solvated_compile.py \\
+        --mode three_way --replicas 3 --n-steps-list 2,5 --out /tmp/smoke_three_way.json
 
     # L3 cluster (via bth run, see campaign 32d6574e)
 """
@@ -77,6 +92,9 @@ PADDING = 8.0
 PROTEIN_PDBS = {
     "1vii": "1VII.pdb",
     "2gb1": "2GB1.pdb",
+    "1uao": "1UAO.pdb",  # debt 756 validation: does NOT naturally bucket-match
+                          # 1vii/2gb1 on bond/angle/dihedral axes; forced via
+                          # target_bucket_counts below.
 }
 
 
@@ -87,7 +105,13 @@ def _resolve_ff_path() -> str:
     return _resolve("protein.ff19SB.xml")
 
 
-def _load_and_solvate(protein_key: str):
+def _load_and_solvate(protein_key: str, target_bucket_counts: dict | None = None):
+    """Parse + solvate one protein into a MolecularBundle.
+
+    ``target_bucket_counts`` (debt 756) is threaded straight through to
+    ``solvate_protein_to_bundle`` -- passing None reproduces the pre-756
+    behavior byte-for-byte (natural smallest-fit bucket selection).
+    """
     import jax.numpy as jnp
     from proxide import CoordFormat, OutputSpec, parse_structure
 
@@ -105,6 +129,7 @@ def _load_and_solvate(protein_key: str):
         ionic_strength=0.0,
         neutralize=True,
         target_box_size=jnp.array(TARGET_BOX_SIZE),
+        target_bucket_counts=target_bucket_counts,
     )
 
 
@@ -124,6 +149,105 @@ def _build_bundles(mode: str, protein_key: str | None, replicas: int):
         half = replicas // 2
         bundles = [b_1vii] * half + [b_2gb1] * (replicas - half)
         return bundles
+    elif mode == "three_way":
+        # Debt 756 end-to-end validation: 1UAO (Chignolin, 138 real
+        # pre-solvation atoms per proxide parameterization -- far smaller
+        # than 1vii/2gb1's ~596) does NOT naturally bucket-match 1vii/2gb1.
+        # Force all three into ONE shared MolecularShapeSpec via
+        # target_bucket_counts, proving the mechanism built in Tasks 1-2
+        # works end-to-end with real proteins/real solvation, not just in a
+        # fast unit test (tests/physics/test_flash_dense_parity.py::
+        # test_solvate_protein_to_bundle_target_bucket_counts_forces_match).
+        from prolix.types.bundles import (
+            ANGLE_BUCKETS,
+            ATOM_BUCKETS,
+            BOND_BUCKETS,
+            DIHEDRAL_BUCKETS,
+        )
+
+        # Determine the shared target ceiling PER AXIS from the NATURAL
+        # (unforced) shape_spec of all three proteins, taking the max bucket
+        # index across all three for each axis. The brief anticipated only
+        # bond/angle/dihedral would need forcing, reasoning that 1vii's own
+        # natural bucket sizes would already be the ceiling (1uao's real
+        # bond/angle/dihedral counts are far smaller than 1vii/2gb1's, given
+        # its far smaller residue count) -- confirmed true empirically below
+        # (max reduces to 1vii/2gb1's value on those three axes, a no-op vs.
+        # reading from b_1vii alone).
+        #
+        # DEVIATION from the brief: the ATOM axis ALSO needs forcing, and in
+        # the OPPOSITE direction (1uao is the ceiling, not 1vii/2gb1). This
+        # module's docstring claims a fixed target_box_size equalizes the
+        # atom bucket because water dominates the atom count -- true for the
+        # 1vii/2gb1 pair it was calibrated on, but NOT for 1uao: its much
+        # smaller protein volume leaves more room for solvent water in the
+        # SAME box, so its total solvated atom count crosses an ATOM_BUCKETS
+        # rung 1vii/2gb1 do not (empirically: 1vii/2gb1 land at bucket 2048,
+        # 1uao lands at bucket 5000). Taking the per-axis MAX natural bucket
+        # across all three proteins (rather than hardcoding to b_1vii) is
+        # correct regardless of which protein happens to be the ceiling for
+        # a given axis, and was verified necessary via the L1 dry-run before
+        # landing this code (see task-3-report.md).
+        # NOTE: even this "natural" (bond/angle/dihedral/atom-unforced) probe
+        # load must pass cmap:512 for all three -- 1uao crashes in
+        # make_bundle_from_system's CMAP padding (debt #1170) regardless of
+        # whether any target_bucket_counts override is in play at all. The
+        # cmap override doesn't touch the atom/bond/angle/dihedral axes being
+        # read here, so the "natural" values inspected below are unaffected.
+        _cmap_workaround = {"cmap": 512}
+        b_1vii_natural = _load_and_solvate("1vii", _cmap_workaround)
+        b_2gb1_natural = _load_and_solvate("2gb1", _cmap_workaround)
+        b_1uao_natural = _load_and_solvate("1uao", _cmap_workaround)
+        naturals = (b_1vii_natural, b_2gb1_natural, b_1uao_natural)
+        target_bucket_counts = {
+            "atom": ATOM_BUCKETS[max(b.shape_spec.atom_bucket_idx for b in naturals)],
+            "bond": BOND_BUCKETS[max(b.shape_spec.bond_bucket_idx for b in naturals)],
+            "angle": ANGLE_BUCKETS[max(b.shape_spec.angle_bucket_idx for b in naturals)],
+            "dihedral": DIHEDRAL_BUCKETS[
+                max(b.shape_spec.dihedral_bucket_idx for b in naturals)
+            ],
+            # cmap:512 works around a pre-existing, unrelated crash in
+            # make_bundle_from_system's CMAP padding -- confirmed present for
+            # 1UAO specifically (ValueError: index can't contain negative
+            # values) even before target_bucket_counts existed at all. See
+            # debt #1170. Included uniformly for all three proteins here
+            # (1vii/2gb1 don't need it -- their natural cmap_bucket_idx
+            # already matches) rather than only for 1uao -- simpler, and
+            # inert/safe wherever the real cmap count doesn't require it.
+            "cmap": 512,
+        }
+
+        # Apply the SAME dict uniformly to all three loads (including 1vii,
+        # whose natural bucket sizes are what defined most of the dict in
+        # the first place -- this re-load should be a no-op for 1vii's own
+        # bond/angle/dihedral/cmap axes but exercises the override code path
+        # identically across all three proteins, and is NOT a no-op for
+        # 1vii/2gb1's atom axis, which gets forced up from bucket 2048 to
+        # 5000 to match 1uao's larger natural requirement).
+        b_1vii = _load_and_solvate("1vii", target_bucket_counts)
+        b_2gb1 = _load_and_solvate("2gb1", target_bucket_counts)
+        b_1uao = _load_and_solvate("1uao", target_bucket_counts)
+
+        if not (b_1vii.shape_spec == b_2gb1.shape_spec == b_1uao.shape_spec):
+            raise RuntimeError(
+                f"three_way bucket-forcing failed -- 1vii/2gb1/1uao "
+                f"shape_spec mismatch even after target_bucket_counts "
+                f"override {target_bucket_counts}: "
+                f"1vii={b_1vii.shape_spec} 2gb1={b_2gb1.shape_spec} "
+                f"1uao={b_1uao.shape_spec}"
+            )
+        log.info(
+            "three_way: forced shape_spec match confirmed for 1vii/2gb1/1uao "
+            "via target_bucket_counts=%s",
+            target_bucket_counts,
+        )
+        third = replicas // 3
+        bundles = (
+            [b_1vii] * third
+            + [b_2gb1] * third
+            + [b_1uao] * (replicas - 2 * third)
+        )
+        return bundles
     else:
         raise ValueError(f"Unknown mode: {mode}")
 
@@ -133,9 +257,9 @@ def main() -> int:
         description="Compile-sharing test: heterogeneous real solvated proteins"
     )
     parser.add_argument("--dry-run", action="store_true")
-    parser.add_argument("--mode", choices=("single", "combined"), default="single")
-    parser.add_argument("--protein", choices=("1vii", "2gb1"), default=None,
-                         help="Required for --mode single, ignored for --mode combined")
+    parser.add_argument("--mode", choices=("single", "combined", "three_way"), default="single")
+    parser.add_argument("--protein", choices=("1vii", "2gb1", "1uao"), default=None,
+                         help="Required for --mode single, ignored for --mode combined/three_way")
     parser.add_argument("--n-steps-list", default="2,10,50,200,800")
     parser.add_argument("--replicas", type=int, default=16)
     parser.add_argument("--out", type=Path, default=None)
@@ -174,14 +298,32 @@ def main() -> int:
         len(bundles), n_real, bundles[0].shape_spec,
     )
 
+    protein_label = args.protein
+    if args.mode == "combined":
+        protein_label = "combined-1vii-2gb1"
+    elif args.mode == "three_way":
+        protein_label = "three_way-1vii-2gb1-1uao"
+
     bundle_info = {
         "n_bundles": len(bundles),
         "n_real_atoms_first": n_real,
         "shape_spec_atom_bucket_idx": bundles[0].shape_spec.atom_bucket_idx,
     }
+    if args.mode == "three_way":
+        # Explicit shape_spec match confirmation for all three proteins --
+        # _build_bundles already raises RuntimeError if this doesn't hold, so
+        # reaching here means it's True; surfaced explicitly in the JSON
+        # output (dry-run and full run) as direct evidence, not just an
+        # absence of a raised exception.
+        bundle_info["shape_spec_bond_bucket_idx"] = bundles[0].shape_spec.bond_bucket_idx
+        bundle_info["shape_spec_angle_bucket_idx"] = bundles[0].shape_spec.angle_bucket_idx
+        bundle_info["shape_spec_dihedral_bucket_idx"] = bundles[0].shape_spec.dihedral_bucket_idx
+        bundle_info["three_way_shape_spec_match"] = all(
+            b.shape_spec == bundles[0].shape_spec for b in bundles
+        )
 
     if args.dry_run:
-        summary = {"mode": "dry-run", "protein": args.protein, **bundle_info}
+        summary = {"mode": "dry-run", "protein": protein_label, **bundle_info}
         print(json.dumps(summary, indent=2))
         if args.out:
             args.out.parent.mkdir(parents=True, exist_ok=True)
@@ -248,7 +390,7 @@ def main() -> int:
 
     summary = {
         "mode": args.mode,
-        "protein": args.protein or "combined-1vii-2gb1",
+        "protein": protein_label,
         "replicas": args.replicas,
         "n_groups_from_partition": n_groups,
         "per_step_corrected_s": slope,
