@@ -110,6 +110,67 @@ def _solvated_1vii_bundle():
     )
 
 
+def _load_solvated_bundle(pdb_name: str, target_bucket_counts=None):
+    """Like _solvated_1vii_bundle but for any PDB, with target_bucket_counts
+    threaded through (debt 756 validation)."""
+    from proxide import CoordFormat, OutputSpec, parse_structure
+
+    from prolix.physics.solvation import solvate_protein_to_bundle
+    from prolix.physics.water_models import WaterModelType
+
+    jax.config.update("jax_enable_x64", False)
+
+    pdb_path = DATA_DIR / pdb_name
+    if not pdb_path.is_file():
+        pytest.skip(f"Missing test PDB: {pdb_path}")
+    ff_path = _ff_path()
+    if not ff_path.is_file():
+        pytest.skip(f"Missing bundled force field: {ff_path}")
+
+    spec = OutputSpec(
+        parameterize_md=True, force_field=str(ff_path), coord_format=CoordFormat.Full
+    )
+    protein = parse_structure(str(pdb_path), spec)
+    return solvate_protein_to_bundle(
+        protein,
+        padding=8.0,
+        model_type=WaterModelType.TIP3P,
+        ionic_strength=0.0,
+        neutralize=True,
+        target_box_size=jnp.array(TARGET_BOX_SIZE),
+        target_bucket_counts=target_bucket_counts,
+    )
+
+
+def test_solvate_protein_to_bundle_target_bucket_counts_forces_match():
+    """debt 756: 1VII (villin headpiece) and 1UAO (10-residue Chignolin) do
+    NOT naturally bucket-match on bond/angle/dihedral axes -- both proteins
+    are far smaller than 5000 real bonds/angles/dihedrals, so a shared
+    target of 5000 is safely >= either protein's real count (satisfies the
+    _effective_bucket_count overflow guard) while forcing both into the
+    identical bucket for each axis. CMAP is also included to avoid bucket
+    size mismatch with pre-padded energy grids."""
+    try:
+        import proxide  # noqa: F401
+    except ImportError:
+        pytest.skip("proxide not installed")
+
+    target_bucket_counts = {
+        "bond": 5000,
+        "angle": 5000,
+        "dihedral": 5000,
+        "cmap": 512,
+    }
+    bundle_1vii = _load_solvated_bundle("1VII.pdb", target_bucket_counts)
+    bundle_1uao = _load_solvated_bundle("1UAO.pdb", target_bucket_counts)
+    assert bundle_1vii.shape_spec.bond_bucket_idx == bundle_1uao.shape_spec.bond_bucket_idx
+    assert bundle_1vii.shape_spec.angle_bucket_idx == bundle_1uao.shape_spec.angle_bucket_idx
+    assert (
+        bundle_1vii.shape_spec.dihedral_bucket_idx
+        == bundle_1uao.shape_spec.dihedral_bucket_idx
+    )
+
+
 class TestFlashForcesDenseParity:
     """force_fn_from_bundle must match -grad(energy_fn_from_bundle) on a real bundle."""
 

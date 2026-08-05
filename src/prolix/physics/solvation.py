@@ -572,6 +572,7 @@ def solvate_protein_to_bundle(
     target_box_size: Array | None = None,
     pme_alpha: float = 0.34,
     nonbonded_cutoff: float = 9.0,
+    target_bucket_counts: dict[str, int] | None = None,
 ):
     """Solvate a protein and return a MolecularBundle usable by EnsemblePlan.
 
@@ -598,6 +599,10 @@ def solvate_protein_to_bundle(
        silently disable PME reciprocal energy. Both values are supplied
        explicitly via a thin proxy below rather than relying on any
        implicit default resolving to something reasonable.
+    3. ``target_bucket_counts`` is passed through to ``make_bundle_from_system``
+       to override the default bucket selection for bond, angle, and dihedral
+       force terms (debt 756: enables forcing heterogeneous systems into
+       identical buckets).
     """
     merged = solvate_protein(
         protein,
@@ -628,4 +633,5 @@ def solvate_protein_to_bundle(
         _BundleSourceProxy(),
         boundary_condition="periodic",
         exclusion_spec=merged.exclusion_spec,
+        target_bucket_counts=target_bucket_counts,
     )
