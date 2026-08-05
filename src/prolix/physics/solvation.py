@@ -600,9 +600,9 @@ def solvate_protein_to_bundle(
        explicitly via a thin proxy below rather than relying on any
        implicit default resolving to something reasonable.
     3. ``target_bucket_counts`` is passed through to ``make_bundle_from_system``
-       to override the default bucket selection for bond, angle, and dihedral
-       force terms (debt 756: enables forcing heterogeneous systems into
-       identical buckets).
+       to override the default bucket selection for various axes (bond, angle,
+       dihedral, cmap, atom, water, excl, exception). Enables forcing
+       heterogeneous systems into identical buckets (debt 756).
     """
     merged = solvate_protein(
         protein,

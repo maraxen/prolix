@@ -148,8 +148,13 @@ def test_solvate_protein_to_bundle_target_bucket_counts_forces_match():
     are far smaller than 5000 real bonds/angles/dihedrals, so a shared
     target of 5000 is safely >= either protein's real count (satisfies the
     _effective_bucket_count overflow guard) while forcing both into the
-    identical bucket for each axis. CMAP is also included to avoid bucket
-    size mismatch with pre-padded energy grids."""
+    identical bucket for each axis.
+
+    Note: cmap:512 works around a pre-existing, unrelated bug in
+    make_bundle_from_system's CMAP padding (crashes with
+    `ValueError: index can't contain negative values` for some
+    proteins, e.g. 1UAO, independent of target_bucket_counts) --
+    see debt #1170. Not part of normal target_bucket_counts usage."""
     try:
         import proxide  # noqa: F401
     except ImportError:
