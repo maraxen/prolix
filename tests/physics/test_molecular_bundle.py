@@ -155,3 +155,16 @@ def test_bundle_jit_passthrough():
     out = identity(bundle)
     assert out.positions.shape == bundle.positions.shape
     assert out.n_atoms == 10
+
+
+def test_atom_bucket_granularity_1963_atoms():
+    """debt 773: a 1963-atom solvated protein (1VII, see
+    scripts/experiments/profile_b1_heterogeneous_solvated_compile.py) should
+    not fall into the 1024->5000 gap and pay 61% ghost padding."""
+    next_bucket = min(b for b in ATOM_BUCKETS if b >= 1963)
+    ghost_fraction = (next_bucket - 1963) / next_bucket
+    assert next_bucket == 2_048, (
+        f"expected an intermediate bucket at 2048 between 1024 and 5000, "
+        f"got {next_bucket} (ghost fraction {ghost_fraction:.1%})"
+    )
+    assert ghost_fraction < 0.10, f"ghost fraction {ghost_fraction:.1%} still too high"

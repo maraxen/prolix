@@ -30,7 +30,7 @@ from jaxtyping import Array, Bool, Float, Int
 # - Large proteins (257–1024 atoms, e.g. Trp-cage 312) → bucket 3
 # - Allows Lane B ensemble to span 4 distinct buckets (cross-bucket heterogeneity).
 # Bonded ladders also refined to small-molecule scale; same proportional principle.
-ATOM_BUCKETS = (64, 128, 256, 1_024, 5_000, 25_000, 60_000)
+ATOM_BUCKETS = (64, 128, 256, 1_024, 2_048, 5_000, 25_000, 60_000)
 # Bonded ladders refined: prepend small-molecule entries (HP3 design forward-compatible)
 BOND_BUCKETS = (16, 64, 256, 1_024, 5_000, 25_000)
 ANGLE_BUCKETS = (32, 128, 256, 1_024, 5_000, 25_000)
