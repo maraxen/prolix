@@ -7,7 +7,7 @@ set -euo pipefail
 # direct execution. Must submit from project root: cd ~/projects/<proj> && sbatch ...
 _PROJ="${SLURM_SUBMIT_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
 cd "${_PROJ}"
-export PROLIX_ROOT="${PROLIX_ROOT:-$(pwd)}"
+export PROLIX_ROOT="${PROLIX_ROOT:-$(pwd -P)}"
 export ENGAGING_LOG_DATE="${ENGAGING_LOG_DATE:-$(date +%Y%m%d)}"
 export LOG_ROOT="${PROLIX_ROOT}/outputs/logs/engaging/${ENGAGING_LOG_DATE}"
 mkdir -p "${LOG_ROOT}/slurm" "${LOG_ROOT}/app"

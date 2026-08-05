@@ -60,6 +60,11 @@ elif [[ -n "${UV_PROJECT:-}" ]]; then
     echo "TIP3P_SKIP_UV_SYNC=1 but ${WORKSPACE_ROOT}/.venv missing; run bench_workspace_uv_sync.slurm first." >&2
     exit 2
   }
+else
+  [[ -d "${PROLIX_ROOT}/.venv" ]] || {
+    echo "TIP3P_SKIP_UV_SYNC=1 but ${PROLIX_ROOT}/.venv missing (isolated worktree); unset TIP3P_SKIP_UV_SYNC to let uv sync run once." >&2
+    exit 2
+  }
 fi
 
 cd "${PROLIX_ROOT}"
