@@ -31,7 +31,9 @@ cd "${_PROJ}"
 source "scripts/slurm/_common_env.sh"
 
 WORKSPACE_ROOT="${ENGAGING_WORKSPACE_ROOT:-${HOME}/projects}"
-export UV_PROJECT="${WORKSPACE_ROOT}"
+# shellcheck source=/dev/null
+source "scripts/slurm/_uv_project_guard.sh"
+_resolve_uv_project_for_workspace "${WORKSPACE_ROOT}"
 
 DT_LIST="${TIP3P_MATRIX_DT_LIST:-1,2}"
 G_LIST="${TIP3P_MATRIX_GAMMA_LIST:-0.5,1,2}"
@@ -45,15 +47,17 @@ SITERS="${TIP3P_MATRIX_SETTLE_ITERS:-20}"
 export JAX_PLATFORMS="${JAX_PLATFORMS:-cuda}"
 export JAX_ENABLE_X64="${JAX_ENABLE_X64:-1}"
 
-[[ -d "${WORKSPACE_ROOT}/.venv" ]] || {
-  echo "missing ${WORKSPACE_ROOT}/.venv; run bench_workspace_uv_sync.slurm first" >&2
-  exit 2
-}
+if [[ -n "${UV_PROJECT:-}" ]]; then
+  [[ -d "${WORKSPACE_ROOT}/.venv" ]] || {
+    echo "missing ${WORKSPACE_ROOT}/.venv; run bench_workspace_uv_sync.slurm first" >&2
+    exit 2
+  }
+fi
 
 mkdir -p "${LOG_ROOT}/app"
 echo "dt_gamma_matrix job=${SLURM_JOB_ID:-} dt_list=${DT_LIST} gamma_list=${G_LIST} nw=${NW} steps=${ST} burn=${BR} replicas=${REP} projection_site=${PSITE}"
 
-uv run python scripts/benchmarks/tip3p_dt_gamma_matrix.py \
+uv run "${UV_SYNC_EXTRAS[@]}" python scripts/benchmarks/tip3p_dt_gamma_matrix.py \
   --dt-list "${DT_LIST}" \
   --gamma-list "${G_LIST}" \
   --n-waters "${NW}" \

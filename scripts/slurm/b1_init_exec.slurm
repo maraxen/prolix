@@ -62,7 +62,9 @@ cd "${PROLIX_ROOT}"
 export PROLIX_ROOT
 
 WORKSPACE_ROOT="${ENGAGING_WORKSPACE_ROOT:-$(dirname "${PROLIX_ROOT}")}"
-export UV_PROJECT="${WORKSPACE_ROOT}"
+# shellcheck source=/dev/null
+source "scripts/slurm/_uv_project_guard.sh"
+_resolve_uv_project_for_workspace "${WORKSPACE_ROOT}"
 export UV_PYTHON="${UV_PYTHON:-3.13}"
 
 # Array → backend/seed (override via env wins)
@@ -124,8 +126,8 @@ echo "=== B1-full b1_init_exec ==="
 echo "Host: $(hostname)"
 echo "cwd: $(pwd)"
 echo "PROLIX_ROOT=${PROLIX_ROOT}"
-echo "UV_PROJECT=${UV_PROJECT} UV_PYTHON=${UV_PYTHON}"
-echo "uv python: $(uv run --python "${UV_PYTHON}" python -c 'import sys; print(sys.executable, sys.version.split()[0])')"
+echo "UV_PROJECT=${UV_PROJECT:-<unset>} UV_PYTHON=${UV_PYTHON}"
+echo "uv python: $(uv run --python "${UV_PYTHON}" "${UV_SYNC_EXTRAS[@]}" python -c 'import sys; print(sys.executable, sys.version.split()[0])')"
 echo "Array job: ${SLURM_ARRAY_JOB_ID:-N/A}  task: ${SLURM_ARRAY_TASK_ID:-N/A}"
 echo "Job: ${SLURM_JOB_ID:-local}"
 echo "GPU: $(nvidia-smi --query-gpu=name,memory.total --format=csv,noheader 2>&1 | head -1)"
@@ -141,7 +143,7 @@ CAMPAIGN_FLAG=""
 [[ -n "${CAMPAIGN_ID}" ]] && CAMPAIGN_FLAG="--campaign ${CAMPAIGN_ID}"
 
 # shellcheck disable=SC2086
-uv run --python "${UV_PYTHON}" bth run "${PYTHON_RUN}" scripts/benchmarks/b1_init_exec.py \
+uv run --python "${UV_PYTHON}" "${UV_SYNC_EXTRAS[@]}" bth run "${PYTHON_RUN}" scripts/benchmarks/b1_init_exec.py \
     --tag cluster --tag b1-full --tag "backend:${BACKEND}" --tag "seed:${SEED}" \
     --tag "footprint:${FOOTPRINT}" --tag "path:${PATH_MODE}" \
     ${SLURM_ARRAY_TASK_ID:+--tag "array_task:${SLURM_ARRAY_TASK_ID}"} \

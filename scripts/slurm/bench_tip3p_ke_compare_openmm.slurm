@@ -2,6 +2,17 @@
 # TIP3P KE diagnostic — **OpenMM only** (``Reference``): ``getKineticEnergy`` vs Σ½m|v|².
 # CPU-only; no JAX. Expects workspace venv at ``~/projects``.
 #
+# debt 937 audit (2026-07-28, corrected): tip3p_ke_compare.py imports
+# prolix.physics.regression_explicit_pme unconditionally at module scope,
+# regardless of --engine -- this script is NOT import-free. It is safe from the
+# isolated-worktree UV_PROJECT bug for a different reason: the script derives
+# _REPO from its own __file__ and manually prepends "${_REPO}/src" onto
+# sys.path ahead of site-packages, so the prolix import always resolves to this
+# job's own checkout and never depends on which venv `uv run` activates.
+# Forcing UV_PROJECT to the shared workspace here is intentional (this script
+# needs the shared venv's other deps, e.g. openmm) and unrelated to prolix
+# import resolution. Left as-is.
+#
 #SBATCH --job-name=plx-tip3p-ke-omm
 #SBATCH --partition=mit_preemptable
 #SBATCH --time=1:30:00

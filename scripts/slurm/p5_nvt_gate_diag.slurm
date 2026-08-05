@@ -34,7 +34,9 @@ cd "${_PROJ}"
 source "scripts/slurm/_common_env.sh"
 
 WORKSPACE_ROOT="${ENGAGING_WORKSPACE_ROOT:-${HOME}/projects}"
-export UV_PROJECT="${WORKSPACE_ROOT}"
+# shellcheck source=/dev/null
+source "scripts/slurm/_uv_project_guard.sh"
+_resolve_uv_project_for_workspace "${WORKSPACE_ROOT}"
 echo "job=${SLURM_JOB_ID:-local} node=${SLURMD_NODENAME:-local} workspace_root=${WORKSPACE_ROOT}"
 
 if [[ "${P5_DIAG_SKIP_UV_SYNC:-0}" != "1" ]]; then
@@ -64,7 +66,7 @@ CAMPAIGN_ID="${CAMPAIGN_ID:-dbb2cc17}"
 OUT="outputs/p5_nvt_gate_diag/result_${SLURM_JOB_ID:-local}.json"
 
 echo "=== P5 NVT gate diagnostic (campaign=${CAMPAIGN_ID}) ==="
-uv run bth run python scripts/experiments/p5_nvt_gate_diag.py \
+uv run "${UV_SYNC_EXTRAS[@]}" bth run python scripts/experiments/p5_nvt_gate_diag.py \
   --tag p5-nvt-gate-diag \
   --tag "slurm_job=${SLURM_JOB_ID:-local}" \
   --campaign "${CAMPAIGN_ID}" \

@@ -22,7 +22,9 @@ cd "${_PROJ}"
 source "scripts/slurm/_common_env.sh"
 
 WORKSPACE_ROOT="${ENGAGING_WORKSPACE_ROOT:-${HOME}/projects}"
-export UV_PROJECT="${WORKSPACE_ROOT}"
+# shellcheck source=/dev/null
+source "scripts/slurm/_uv_project_guard.sh"
+_resolve_uv_project_for_workspace "${WORKSPACE_ROOT}"
 
 NW="${TIP3P_KE_N_WATERS:-4}"
 ST="${TIP3P_KE_STEPS:-3000}"
@@ -33,13 +35,15 @@ echo "engine=prolix workspace_root=${WORKSPACE_ROOT} job=${SLURM_JOB_ID:-} host=
 
 export JAX_PLATFORMS="${JAX_PLATFORMS:-cuda}"
 
-[[ -d "${WORKSPACE_ROOT}/.venv" ]] || {
-  echo "missing ${WORKSPACE_ROOT}/.venv; run bench_workspace_uv_sync.slurm first" >&2
-  exit 2
-}
+if [[ -n "${UV_PROJECT:-}" ]]; then
+  [[ -d "${WORKSPACE_ROOT}/.venv" ]] || {
+    echo "missing ${WORKSPACE_ROOT}/.venv; run bench_workspace_uv_sync.slurm first" >&2
+    exit 2
+  }
+fi
 
 mkdir -p "${LOG_ROOT}/app"
-uv run python scripts/benchmarks/tip3p_ke_compare.py \
+uv run "${UV_SYNC_EXTRAS[@]}" python scripts/benchmarks/tip3p_ke_compare.py \
   --engine prolix \
   --n-waters "${NW}" \
   --steps "${ST}" \

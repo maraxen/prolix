@@ -37,7 +37,9 @@ cd "${_PROJ}"
 source "scripts/slurm/_common_env.sh"
 
 WORKSPACE_ROOT="${ENGAGING_WORKSPACE_ROOT:-${HOME}/projects}"
-export UV_PROJECT="${WORKSPACE_ROOT}"
+# shellcheck source=/dev/null
+source "scripts/slurm/_uv_project_guard.sh"
+_resolve_uv_project_for_workspace "${WORKSPACE_ROOT}"
 echo "job=${SLURM_JOB_ID:-local} node=${SLURMD_NODENAME:-local} workspace_root=${WORKSPACE_ROOT}"
 
 if [[ "${P2B_SKIP_UV_SYNC:-0}" != "1" ]]; then
@@ -67,7 +69,7 @@ CAMPAIGN_ID="${CAMPAIGN_ID:-ef45b8b4}"
 OUT="outputs/p2b_nvt_gate/result_${SLURM_JOB_ID:-local}.json"
 
 echo "=== Phase 5 R-step gate (campaign=${CAMPAIGN_ID}) ==="
-uv run bth run python scripts/experiments/p2b_nvt_gate.py \
+uv run "${UV_SYNC_EXTRAS[@]}" bth run python scripts/experiments/p2b_nvt_gate.py \
   --tag phase5-settle-rstep \
   --tag "slurm_job=${SLURM_JOB_ID:-local}" \
   --campaign "${CAMPAIGN_ID}" \

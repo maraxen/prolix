@@ -46,16 +46,23 @@ cd "${_PROJ}"
 source "scripts/slurm/_common_env.sh"
 
 WORKSPACE_ROOT="${ENGAGING_WORKSPACE_ROOT:-${HOME}/projects}"
-export UV_PROJECT="${WORKSPACE_ROOT}"
+# shellcheck source=/dev/null
+source "scripts/slurm/_uv_project_guard.sh"
+_resolve_uv_project_for_workspace "${WORKSPACE_ROOT}"
 echo "workspace_root=${WORKSPACE_ROOT} replica=${SLURM_ARRAY_TASK_ID:-0} job=${SLURM_JOB_ID:-} skip_uv_sync=${TIP3P_SKIP_UV_SYNC:-0} dt_fs=${TIP3P_DT_FS:-2.0}"
 
 if [[ "${TIP3P_SKIP_UV_SYNC:-0}" != "1" ]]; then
   # shellcheck source=/dev/null
   source "scripts/slurm/_workspace_uv_sync_inner.sh"
   _workspace_uv_sync_run
-else
+elif [[ -n "${UV_PROJECT:-}" ]]; then
   [[ -d "${WORKSPACE_ROOT}/.venv" ]] || {
     echo "TIP3P_SKIP_UV_SYNC=1 but ${WORKSPACE_ROOT}/.venv missing; run bench_workspace_uv_sync.slurm first." >&2
+    exit 2
+  }
+else
+  [[ -d "${PROLIX_ROOT}/.venv" ]] || {
+    echo "TIP3P_SKIP_UV_SYNC=1 but ${PROLIX_ROOT}/.venv missing (isolated worktree); unset TIP3P_SKIP_UV_SYNC to let uv sync run once." >&2
     exit 2
   }
 fi
@@ -97,7 +104,7 @@ SETTLE_ITERS="${TIP3P_SETTLE_VELOCITY_ITERS:-10}"
 DIAG_LEVEL="${TIP3P_DIAGNOSTICS_LEVEL:-off}"
 DIAG_DECIM="${TIP3P_DIAGNOSTICS_DECIMATION:-10}"
 
-uv run python scripts/benchmarks/tip3p_langevin_tightening.py \
+uv run "${UV_SYNC_EXTRAS[@]}" python scripts/benchmarks/tip3p_langevin_tightening.py \
   --engine "${ENGINE}" \
   --checkpoint-dir "${RUN_ROOT}" \
   --checkpoint-every "${CHK_EVERY}" \

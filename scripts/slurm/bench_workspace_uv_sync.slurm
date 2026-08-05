@@ -2,6 +2,9 @@
 # One-shot: create/update the workspace venv at ``~/projects`` (``uv sync --package prolix``).
 # **proxide** is installed from PyPI (manylinux wheels); no Rust/cmake on the node.
 #
+# debt 937 audit (2026-07-28): this job's entire purpose is syncing the shared
+# venv -- there's no isolated-worktree mode to guard against. Left as-is.
+#
 #SBATCH --job-name=plx-uvsync
 #SBATCH --partition=mit_preemptable
 #SBATCH --time=2:00:00
