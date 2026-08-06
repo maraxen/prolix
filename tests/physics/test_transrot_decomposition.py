@@ -288,14 +288,6 @@ def _advance_ratio(dx: np.ndarray, u: np.ndarray, dt: float) -> float:
     return float(np.dot(dx, expected).sum() / np.dot(expected, expected) / dx.shape[0])
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="Half-rate position advance (task 260806_p5_measurement_pipeline_audit): "
-    "settle.py:1233 and :1288 pass half_dt into _langevin_step_a, which itself "
-    "multiplies by another 0.5 (settle.py:2074), so a full cycle advances 0.5*dt*v. "
-    "Measured ratio is exactly 0.5000. Fix: pass _dt at both sites and reconcile the "
-    "constraint-impulse divisors at :1262 and :1313.",
-)
 def test_settle_langevin_advances_positions_by_full_dt():
     """Free particles, gamma=0, zero force: dx must equal dt*v, not dt*v/2.
 
@@ -320,10 +312,13 @@ def test_settle_langevin_advances_positions_by_full_dt():
 
 @pytest.mark.xfail(
     strict=True,
-    reason="LFMiddle has THREE A-steps (settle.py:1430, :1439, :1456) where the comment "
-    "at :1452 intends two, giving 1.5*dt*v per cycle; measured ratio is exactly 1.5000. "
-    "Its O-step also uses half_dt (settle.py:1434, :1437), so friction is half strength. "
-    "Campaign 89c9a900 ('LFMiddle FALSIFIED', 46 runs, 0 passes) tested this propagator.",
+    reason="LFMiddle has THREE A-steps (settle.py:1430, :1439, :1456), giving 1.5*dt*v "
+    "per cycle; measured ratio is exactly 1.5000 against the free-particle invariant. "
+    "NOT fixed alongside settle_langevin: its O-step is correctly split into two "
+    "half_dt halves (:1434 and :1466) that compose to exp(-gamma*dt), so which A-step "
+    "is spurious is a design question about the intended LF-Middle splitting, not a "
+    "typo. Campaign 89c9a900 ('LFMiddle FALSIFIED', 46 runs, 0 passes) tested this "
+    "propagator, so that falsification cannot be trusted until the scheme is settled.",
 )
 def test_lfmiddle_langevin_advances_positions_by_full_dt():
     """settle_lfmiddle_langevin must also advance a free particle by exactly dt*v."""

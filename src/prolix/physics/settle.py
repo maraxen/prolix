@@ -1230,7 +1230,11 @@ def settle_langevin(
     p_pre_a1 = momentum
 
     # R1: first half-step (A + SETTLE + dp-correction + SETTLE_vel)
-    x_unc_1 = _langevin_step_a(state.positions, momentum, state.mass, half_dt, shift_fn)
+    # Pass the FULL _dt: _langevin_step_a already halves internally (it advances
+    # 0.5*dt*v), so this is the A(dt/2) half-step. Passing half_dt here would
+    # advance only 0.25*dt*v, making the full cycle cover 0.5*dt*v instead of
+    # BAOAB's dt*v (task 260806_p5_measurement_pipeline_audit).
+    x_unc_1 = _langevin_step_a(state.positions, momentum, state.mass, _dt, shift_fn)
 
     # Solute RATTLE (SHAKE) before SETTLE
     if constraints is not None:
@@ -1285,7 +1289,9 @@ def settle_langevin(
     p_pre_a2 = momentum
 
     # R2: second half-step (A + SETTLE + dp-correction + SETTLE_vel)
-    x_unc_2 = _langevin_step_a(position, momentum, state.mass, half_dt, shift_fn)
+    # Full _dt for the same reason as R1 above; the sub-step duration this A-step
+    # represents is half_dt, which is what the dp_2 impulse below divides by.
+    x_unc_2 = _langevin_step_a(position, momentum, state.mass, _dt, shift_fn)
 
     # Solute RATTLE (SHAKE) before SETTLE
     if constraints is not None:
