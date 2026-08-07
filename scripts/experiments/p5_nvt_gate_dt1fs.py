@@ -83,6 +83,8 @@ def run_nvt(n_waters, positions_a, box_vec, seed, steps, burn,
     apply_j = jax.jit(apply_s)
     m_flat = mass.reshape(-1)
 
+    m_tot = float(jnp.sum(m_flat))
+
     def step_fn(state, _):
         state = apply_j(state)
         ke_tot = jnp.sum(jnp.sum(state.momentum ** 2, axis=-1) / (2.0 * m_flat))
@@ -91,24 +93,43 @@ def run_nvt(n_waters, positions_a, box_vec, seed, steps, burn,
         v_com = p3.sum(axis=1) / M_water          # (N, 3)
         ke_trans = 0.5 * M_water * jnp.sum(v_com ** 2)
         ke_rot = ke_tot - ke_trans
-        return state, (ke_tot, ke_trans, ke_rot)
+        # System-COM kinetic energy: the smoking-gun observable for the DOF
+        # miscount (task 260806_p5_measurement_pipeline_audit). With
+        # remove_linear_com_momentum=False this is a live thermalized 3-DOF mode
+        # carrying 3kT/2, and it is included in ke_trans above while dof_trans
+        # below subtracts 3 DOF for it -- inflating T_trans by 3*300/(3N-3) K.
+        p_sys = jnp.sum(state.momentum, axis=0)             # (3,)
+        ke_com = 0.5 * jnp.dot(p_sys, p_sys) / m_tot
+        v_sys = p_sys / m_tot
+        ke_trans_rel = 0.5 * M_water * jnp.sum((v_com - v_sys) ** 2)
+        return state, (ke_tot, ke_trans, ke_rot, ke_com, ke_trans_rel)
 
-    _, (kes_tot, kes_trans, kes_rot) = jax.lax.scan(
+    _, (kes_tot, kes_trans, kes_rot, kes_com, kes_trans_rel) = jax.lax.scan(
         step_fn, state, None, length=steps
     )
 
     prod_tot = kes_tot[burn:]
     prod_trans = kes_trans[burn:]
     prod_rot = kes_rot[burn:]
+    prod_com = kes_com[burn:]
+    prod_trans_rel = kes_trans_rel[burn:]
     kB = BOLTZMANN_KCAL
 
     dof_trans = 3 * n_waters - 3   # translational minus system COM
     dof_rot = 3 * n_waters         # rotational
 
-    t_tot = float(2.0 * jnp.mean(prod_tot) / (dof * kB))
-    t_trans = float(2.0 * jnp.mean(prod_trans) / (dof_trans * kB))
-    t_rot = float(2.0 * jnp.mean(prod_rot) / (dof_rot * kB))
-    return t_tot, t_trans, t_rot
+    # ke_trans_rel + ke_com == ke_trans identically, so ke_rot (and hence t_rot,
+    # the gate's decision variable) is unchanged by the corrected accounting.
+    return {
+        "t_total": float(2.0 * jnp.mean(prod_tot) / (dof * kB)),
+        "t_trans": float(2.0 * jnp.mean(prod_trans) / (dof_trans * kB)),
+        "t_rot": float(2.0 * jnp.mean(prod_rot) / (dof_rot * kB)),
+        "t_com": float(2.0 * jnp.mean(prod_com) / (3 * kB)),
+        "t_trans_corrected": float(2.0 * jnp.mean(prod_trans_rel) / (dof_trans * kB)),
+        "t_total_corrected": float(
+            2.0 * (jnp.mean(prod_tot) - jnp.mean(prod_com)) / (dof * kB)
+        ),
+    }
 
 
 def main() -> None:
@@ -176,18 +197,28 @@ def main() -> None:
     t_trans_list = []
     t_rot_list = []
 
+    t_com_list = []
+    t_trans_corr_list = []
+
     for seed in seeds:
-        t_tot, t_trans, t_rot = run_nvt(
+        r = run_nvt(
             n_waters, positions_a, box_vec, seed=seed,
             steps=steps, burn=burn, project_ou=True, remove_com=False,
         )
+        t_tot, t_trans, t_rot = r["t_total"], r["t_trans"], r["t_rot"]
         entry = {"seed": seed, "t_total": round(t_tot, 2),
-                 "t_trans": round(t_trans, 2), "t_rot": round(t_rot, 2)}
+                 "t_trans": round(t_trans, 2), "t_rot": round(t_rot, 2),
+                 "t_com": round(r["t_com"], 2),
+                 "t_trans_corrected": round(r["t_trans_corrected"], 2),
+                 "t_total_corrected": round(r["t_total_corrected"], 2)}
         result["seeds"].append(entry)
         t_tots.append(t_tot)
         t_trans_list.append(t_trans)
         t_rot_list.append(t_rot)
-        print(f"  seed={seed}: T_tot={t_tot:.2f} K  (T_trans={t_trans:.1f}  T_rot={t_rot:.1f})")
+        t_com_list.append(r["t_com"])
+        t_trans_corr_list.append(r["t_trans_corrected"])
+        print(f"  seed={seed}: T_tot={t_tot:.2f} K  (T_trans={t_trans:.1f}  T_rot={t_rot:.1f}"
+              f"  T_com={r['t_com']:.1f}  T_trans_corr={r['t_trans_corrected']:.1f})")
 
     result["mean_t_total"] = round(float(np.mean(t_tots)), 2)
     result["std_t_total"] = round(float(np.std(t_tots)), 2)
@@ -195,6 +226,13 @@ def main() -> None:
     result["std_t_trans"] = round(float(np.std(t_trans_list)), 2)
     result["mean_t_rot"] = round(float(np.mean(t_rot_list)), 2)
     result["std_t_rot"] = round(float(np.std(t_rot_list)), 2)
+    result["mean_t_com"] = round(float(np.mean(t_com_list)), 2)
+    result["std_t_com"] = round(float(np.std(t_com_list)), 2)
+    result["mean_t_trans_corrected"] = round(float(np.mean(t_trans_corr_list)), 2)
+    result["std_t_trans_corrected"] = round(float(np.std(t_trans_corr_list)), 2)
+    # Zero-free-parameter prediction of the DOF-miscount bias, for direct comparison
+    # against (mean_t_trans - mean_t_trans_corrected).
+    result["predicted_dof_bias_k"] = round(3.0 * 300.0 / (3 * n_waters - 3), 3)
 
     print(f"\n  Mean T_rot = {result['mean_t_rot']:.2f} ± {result['std_t_rot']:.2f} K")
     print(f"  Mean T_trans = {result['mean_t_trans']:.2f} ± {result['std_t_trans']:.2f} K")
