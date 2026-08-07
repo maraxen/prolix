@@ -39,6 +39,11 @@ export JAX_PLATFORMS="cuda"
 export JAX_ENABLE_X64="1"
 export XLA_PYTHON_CLIENT_PREALLOCATE="false"
 
+# This worktree's local .venv was synced without the cuda extra (pyproject.toml:
+# cuda = ["jax[cuda12]"]), so jax only sees ['cpu', 'tpu'] backends. Sync it in
+# before running — idempotent, and cheap if already present.
+uv sync --extra cuda --extra dev
+
 LOG="${LOG_ROOT}/app/p5_settle_fix_fastsuite_gpu_${SLURM_JOB_ID:-local}.log"
 echo "log=${LOG} host=$(hostname) date=$(date -Is)" | tee "${LOG}"
 
