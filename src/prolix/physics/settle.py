@@ -1046,10 +1046,20 @@ def settle_langevin(
   Cartesian noise does not over-drive ``6 N_w-3`` kinetic degrees of freedom.
 
   **IMPORTANT (timestep)**: **dt ≤ 1.0 fs** is validated for production-scale systems
-  (n_waters ≳ 16 with gamma ≈ 10 ps⁻¹). The dt=1.0 fs gate (895 waters, job 15870804)
-  holds T_rot = 299.6 K, and a system-size sweep (campaign ba334c1f) shows T_total within
-  ±15 K for n ≥ 16 and within ±5 K for n ≥ 64; T_rot is faithful at every size. Below
-  n ≈ 16 a **translational finite-size warm bias** appears (only 3·N−3 translational DOF
+  (n_waters ≳ 16 with gamma ≈ 10 ps⁻¹). The original dt=1.0 fs gate (895 waters, job
+  15870804) held T_rot = 299.6 K, but its propagator had a bug (fixed in cfd2b85,
+  task 260806_p5_measurement_pipeline_audit): the A-step was passed `half_dt` where
+  `_langevin_step_a` already halves internally, so positions actually advanced at an
+  *effective* dt ≈ 0.5 fs, not the requested 1.0 fs. Job 15870804's pass is therefore
+  not evidence about the corrected propagator at a genuine 1.0 fs step. The corrected
+  propagator was independently re-gated at genuine dt=1.0 fs (job 19774893,
+  T_rot=298.93±0.29 K) and confirmed clean on GPU with no correctness or performance
+  regression in the fast test suite (job 19875071). The system-size sweep (campaign
+  ba334c1f) showing T_total within ±15 K for n ≥ 16 and within ±5 K for n ≥ 64 was run
+  under the same effective-0.5-fs propagator as job 15870804 and has not yet been
+  re-run at genuine dt=1.0 fs; treat its size-crossover conclusions as provisional
+  until re-validated. T_rot is faithful at every size in both gates. Below n ≈ 16 a
+  **translational finite-size warm bias** appears (only 3·N−3 translational DOF
   at small N, under-regulated against the SETTLE constraint impulse). For very small
   systems (n ≲ 16) or weak friction (gamma ≈ 1 ps⁻¹), use **dt ≤ 0.5 fs**. See
   .praxia/docs/research/260612_p5-dt1fs-size-crossover.md.
@@ -1230,7 +1240,11 @@ def settle_langevin(
     p_pre_a1 = momentum
 
     # R1: first half-step (A + SETTLE + dp-correction + SETTLE_vel)
-    x_unc_1 = _langevin_step_a(state.positions, momentum, state.mass, half_dt, shift_fn)
+    # Pass the FULL _dt: _langevin_step_a already halves internally (it advances
+    # 0.5*dt*v), so this is the A(dt/2) half-step. Passing half_dt here would
+    # advance only 0.25*dt*v, making the full cycle cover 0.5*dt*v instead of
+    # BAOAB's dt*v (task 260806_p5_measurement_pipeline_audit).
+    x_unc_1 = _langevin_step_a(state.positions, momentum, state.mass, _dt, shift_fn)
 
     # Solute RATTLE (SHAKE) before SETTLE
     if constraints is not None:
@@ -1285,7 +1299,9 @@ def settle_langevin(
     p_pre_a2 = momentum
 
     # R2: second half-step (A + SETTLE + dp-correction + SETTLE_vel)
-    x_unc_2 = _langevin_step_a(position, momentum, state.mass, half_dt, shift_fn)
+    # Full _dt for the same reason as R1 above; the sub-step duration this A-step
+    # represents is half_dt, which is what the dp_2 impulse below divides by.
+    x_unc_2 = _langevin_step_a(position, momentum, state.mass, _dt, shift_fn)
 
     # Solute RATTLE (SHAKE) before SETTLE
     if constraints is not None:

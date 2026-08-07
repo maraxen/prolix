@@ -118,17 +118,25 @@ def main() -> None:
     print(f"=== P5 size sweep dt=1.0 fs (n={n_waters}, {len(seeds)} seeds, "
           f"{steps} steps, burn {burn}) ===")
     t_tots, t_trans_list, t_rot_list = [], [], []
+    t_com_list, t_trans_corr_list = [], []
     for seed in seeds:
-        t_tot, t_trans, t_rot = gate.run_nvt(
+        r = gate.run_nvt(
             n_waters, positions_a, box_vec, seed=seed,
             steps=steps, burn=burn, project_ou=True, remove_com=False,
         )
+        t_tot, t_trans, t_rot = r["t_total"], r["t_trans"], r["t_rot"]
         result["seeds"].append({"seed": seed, "t_total": round(t_tot, 2),
-                                "t_trans": round(t_trans, 2), "t_rot": round(t_rot, 2)})
+                                "t_trans": round(t_trans, 2), "t_rot": round(t_rot, 2),
+                                "t_com": round(r["t_com"], 2),
+                                "t_trans_corrected": round(r["t_trans_corrected"], 2),
+                                "t_total_corrected": round(r["t_total_corrected"], 2)})
         t_tots.append(t_tot)
         t_trans_list.append(t_trans)
         t_rot_list.append(t_rot)
-        print(f"  seed={seed}: T_tot={t_tot:.2f} K  (T_trans={t_trans:.1f}  T_rot={t_rot:.1f})")
+        t_com_list.append(r["t_com"])
+        t_trans_corr_list.append(r["t_trans_corrected"])
+        print(f"  seed={seed}: T_tot={t_tot:.2f} K  (T_trans={t_trans:.1f}  T_rot={t_rot:.1f}"
+              f"  T_com={r['t_com']:.1f}  T_trans_corr={r['t_trans_corrected']:.1f})")
 
     result["mean_t_total"] = round(float(np.mean(t_tots)), 2)
     result["std_t_total"] = round(float(np.std(t_tots)), 2)
@@ -136,6 +144,11 @@ def main() -> None:
     result["std_t_trans"] = round(float(np.std(t_trans_list)), 2)
     result["mean_t_rot"] = round(float(np.mean(t_rot_list)), 2)
     result["std_t_rot"] = round(float(np.std(t_rot_list)), 2)
+    result["mean_t_com"] = round(float(np.mean(t_com_list)), 2)
+    result["std_t_com"] = round(float(np.std(t_com_list)), 2)
+    result["mean_t_trans_corrected"] = round(float(np.mean(t_trans_corr_list)), 2)
+    result["std_t_trans_corrected"] = round(float(np.std(t_trans_corr_list)), 2)
+    result["predicted_dof_bias_k"] = round(3.0 * 300.0 / (3 * n_waters - 3), 3)
     result["dev_t_rot"] = round(abs(result["mean_t_rot"] - 300.0), 2)
     result["within_5k"] = int(result["dev_t_rot"] <= 5.0)
     result["within_15k"] = int(result["dev_t_rot"] <= 15.0)
