@@ -1,0 +1,8 @@
+{
+  "task_id": "260811_autonomous-loop",
+  "sprint_id": "260811_p6-csvr-com-momentum-fix",
+  "sprint_toml_path": ".praxia/sprint_plans/260811_p6-csvr-com-momentum-fix.toml",
+  "git_base_sha": "864e57a73827d5fe97f89c6ad7a194c564450615",
+  "execute_started_at": "2026-08-11T18:47:00Z",
+  "tracks": [{"id": "a", "backlog_id": 4167}]
+}
