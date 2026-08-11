@@ -1,0 +1,15 @@
+{
+  "task_id": "260811_autonomous-loop",
+  "selected_item_ids": [933, 4167, 162],
+  "selection_mode": "normal",
+  "staleness_downgraded": [933],
+  "rubric_version": "unversioned (no .praxia/sprint_rubric.toml found; used skill defaults: DIFFICULTY_BUDGET=6, ITEM_CAP=3, DIFFICULTY_COST={quick:1,standard:3,extended:5})",
+  "brainstorm_needed": false,
+  "next_phase": "SPRINT_COMPOSE",
+  "difficulty_spend": 5,
+  "items": [
+    {"id": 933, "title": "P5-B: Fix single-system rot-trans imbalance in settle.py", "difficulty": "quick", "action": "verify-and-close: grep settle.py for live inertia-weighted OU noise (superseded by #4058?), run test_settle_rotation_preserving.py + test_settle.py, close or re-scope"},
+    {"id": 4167, "title": "Phase 6: NPT long-trajectory stability fix (decoupled CSVR)", "difficulty": "quick", "action": "check debt_transrot_decomposition_dof_miscount lead first: settle.py:1893/:2325 CSVR remove_com=True feeding _n_dof_thermostated with no actual COM removal"},
+    {"id": 162, "title": "HP2: make_bundle_from_system feature parity audit vs make_energy_fn", "difficulty": "standard", "action": "close remaining gaps per .praxia/docs/audits/260623_hp2_make_bundle_field_audit.md: excl layout, CMAP, atom_names, exception_pairs"}
+  ]
+}
