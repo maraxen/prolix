@@ -1,15 +1,18 @@
 {
   "task_id": "260811_autonomous-loop",
-  "selected_item_ids": [933, 4167, 162],
+  "selected_item_ids": [4167],
   "selection_mode": "normal",
-  "staleness_downgraded": [933],
+  "staleness_downgraded": [933, 162],
+  "correction_log": [
+    "2026-08-11: #933 REMOVED from this sprint after recon_done revealed the pm-triage framing was backwards -- likely OBSOLETE per the later C3 AM-conservation fix (678c9cb), not superseded by #4058. Backlog #933 description updated with full corrected context; excluded pending a maintainer evidence-sufficiency call.",
+    "2026-08-11: #162 CLOSED (status=completed) after recon_done found its own cited audit doc (260623_hp2_make_bundle_field_audit.md, updated Sprint 57) already shows PASS on the item's actual scope (bonded core + factory mapping) -- the backlog description's 'remaining gaps' list was stale relative to the audit it cited. Two genuine follow-on items spun out: #4172 (bundle-path nonbonded LJ/Coulomb/PME wiring, standard) and #4173 (atom_names/mbondi2 GB fallback, quick) -- neither selected for this sprint (new items, need their own future triage pass).",
+    "Net result: of the 3 pm-triaged items, only #4167 survived recon_done as genuinely open, well-scoped, verified-actionable work. This sprint proceeds with #4167 alone."
+  ],
   "rubric_version": "unversioned (no .praxia/sprint_rubric.toml found; used skill defaults: DIFFICULTY_BUDGET=6, ITEM_CAP=3, DIFFICULTY_COST={quick:1,standard:3,extended:5})",
   "brainstorm_needed": false,
   "next_phase": "SPRINT_COMPOSE",
-  "difficulty_spend": 5,
+  "difficulty_spend": 1,
   "items": [
-    {"id": 933, "title": "P5-B: Fix single-system rot-trans imbalance in settle.py", "difficulty": "quick", "action": "verify-and-close: grep settle.py for live inertia-weighted OU noise (superseded by #4058?), run test_settle_rotation_preserving.py + test_settle.py, close or re-scope"},
-    {"id": 4167, "title": "Phase 6: NPT long-trajectory stability fix (decoupled CSVR)", "difficulty": "quick", "action": "check debt_transrot_decomposition_dof_miscount lead first: settle.py:1893/:2325 CSVR remove_com=True feeding _n_dof_thermostated with no actual COM removal"},
-    {"id": 162, "title": "HP2: make_bundle_from_system feature parity audit vs make_energy_fn", "difficulty": "standard", "action": "close remaining gaps per .praxia/docs/audits/260623_hp2_make_bundle_field_audit.md: excl layout, CMAP, atom_names, exception_pairs"}
+    {"id": 4167, "title": "Phase 6: NPT long-trajectory stability fix (decoupled CSVR)", "difficulty": "quick", "action": "recon_done CONFIRMED the debt lead: _n_dof_thermostated (settle.py:1854-1894) sets remove_com=True (adjusts CSVR's target DOF count by -3) but _langevin_settle_vel (settle.py:2297-2324), the function settle_csvr's apply_fn actually calls for velocity constraints, has NO remove_linear_com_momentum parameter at all -- COM momentum is never actually removed anywhere in the CSVR path. Classic flying-ice-cube DOF/actual-removal mismatch. Fix: either wire real COM-momentum removal into the CSVR step (consistent with how settle_langevin's LFMiddle variant and settle_with_nhc already do it), or set remove_com=False to match reality (simpler, but leaves the physical coupling risk unaddressed -- not preferred). Recommend the former."}
   ]
 }
