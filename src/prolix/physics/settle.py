@@ -1055,10 +1055,11 @@ def settle_langevin(
   propagator was independently re-gated at genuine dt=1.0 fs (job 19774893,
   T_rot=298.93±0.29 K) and confirmed clean on GPU with no correctness or performance
   regression in the fast test suite (job 19875071). The system-size sweep (campaign
-  ba334c1f) showing T_total within ±15 K for n ≥ 16 and within ±5 K for n ≥ 64 was run
-  under the same effective-0.5-fs propagator as job 15870804 and has not yet been
-  re-run at genuine dt=1.0 fs; treat its size-crossover conclusions as provisional
-  until re-validated. T_rot is faithful at every size in both gates. Below n ≈ 16 a
+  ba334c1f) showing T_total within ±15 K for n ≥ 16 and within ±5 K for n ≥ 64 was
+  originally run under the same effective-0.5-fs propagator as job 15870804, but has
+  since been re-run at genuine dt=1.0 fs (2026-08-11, campaign 46a4d737) and the
+  crossover conclusion is unchanged: N*=16 (±15 K), N*=64 (±5 K). T_rot is faithful at
+  every size in both gates. Below n ≈ 16 a
   **translational finite-size warm bias** appears (only 3·N−3 translational DOF
   at small N, under-regulated against the SETTLE constraint impulse). For very small
   systems (n ≲ 16) or weak friction (gamma ≈ 1 ps⁻¹), use **dt ≤ 0.5 fs**. See
