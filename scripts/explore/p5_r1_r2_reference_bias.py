@@ -173,8 +173,12 @@ def _run(args: argparse.Namespace) -> dict:
         p_pre_a1 = momentum  # <-- snapshot 1: R1's L_target reference
 
         # R1: A + SETTLE + dp-correction + AM-correction
+        # Pass the FULL dt: _langevin_step_a already halves internally (matches
+        # settle.py's fix, task 260806_p5_measurement_pipeline_audit). The dp_1
+        # divisor below stays half_dt -- that's the sub-step duration this A-step
+        # represents, not the argument to _langevin_step_a.
         p_pre_a1_ref = momentum
-        x_unc_1 = settle._langevin_step_a(positions_old, momentum, mass_col, half_dt, shift_fn)
+        x_unc_1 = settle._langevin_step_a(positions_old, momentum, mass_col, dt, shift_fn)
         x_con_1 = settle.settle_positions(
             x_unc_1, positions_old, wi, r_OH, r_HH, mass_oxygen, mass_hydrogen, box_vec, None
         )
@@ -197,8 +201,9 @@ def _run(args: argparse.Namespace) -> dict:
         p_pre_a2 = momentum  # <-- snapshot 3: R2's L_target reference
 
         # R2: A + SETTLE + dp-correction + AM-correction
+        # Full dt for the same reason as R1 above.
         p_pre_a2_ref = momentum
-        x_unc_2 = settle._langevin_step_a(position, momentum, mass_col, half_dt, shift_fn)
+        x_unc_2 = settle._langevin_step_a(position, momentum, mass_col, dt, shift_fn)
         x_con_2 = settle.settle_positions(
             x_unc_2, positions_mid, wi, r_OH, r_HH, mass_oxygen, mass_hydrogen, box_vec, None
         )

@@ -24,7 +24,7 @@ This script applies that zero-free-parameter correction to the recorded per-seed
 JSONs and tests whether any size-dependent residual survives it.
 
 Usage:
-    uv run python scripts/analysis/p5_dof_artifact_correction.py \\
+    uv run python scripts/explore/p5_dof_artifact_correction.py \\
         --results-dir outputs/results --out outputs/p5_dof_artifact_correction.json
 """
 

@@ -84,3 +84,49 @@ Does the gamma=1 warm bias also recover at large N (finite-size), or is gamma=1
 fundamentally worse at dt=1fs even at scale? Only gamma=1 small-N data exists
 (n≤16). A gamma=1 point at n≥216 would settle whether the friction effect is
 size-curable.
+
+## Re-validation at genuine dt=1.0 fs (2026-08-11)
+
+**Task:** 260806_p5_measurement_pipeline_audit
+**Campaign:** 46a4d737 (`bth`, parent ba334c1f)
+**Jobs:** 19882395 (n=2,16,64), 19898460 (n=216,895), 19898934 (n=512, isolated re-run
+after 19898460's array-slot for n=512 failed on a log-file race — see below)
+
+This sweep predated the discovery that `settle_langevin`'s A-step was passed
+`half_dt` where `_langevin_step_a` already halves internally (fixed in commit
+cfd2b85; see `settle.py` docstring). The original ba334c1f numbers above were
+therefore measured at an *effective* dt ≈ 0.5 fs, not the requested 1.0 fs.
+Re-running the identical sweep script (`p5_nvt_size_sweep_dt1fs.py`, unchanged
+config: gamma=10 ps⁻¹, 3 seeds, 30k steps/10k burn) under the corrected propagator
+gives:
+
+```
+n_waters    T_rot   T_trans  T_total |dev_rot| |dev_tot|  tot<=15  tot<=5
+       2    297.1     614.7    403.0       2.9     103.0    False   False
+      16    296.4     321.7    308.6       3.6       8.6     True   False
+      64    298.9     305.0    301.9       1.1       1.9     True    True
+     216    299.0     301.0    300.0       1.0       0.0     True    True
+     512    300.3     300.4    300.4       0.3       0.4     True    True
+     895    299.0     299.9    299.4       1.0       0.6     True    True
+```
+
+**Conclusion holds unchanged**: Crossover N\*=16 (±15 K), N\*=64 (±5 K); T_rot
+faithful at every size (max |dev| 3.6 K, well inside the 15 K tolerance). Every
+value tracks the original (effective-0.5-fs) table within a few K — consistent with
+3-seed noise, not a propagator-dependent shift. The translational finite-size warm
+bias is confirmed to be a genuine physical effect (T_trans ~1/N decay,
+614.7→321.7→305.0→~300 K), not an artifact of the half_dt bug.
+
+**Operational note:** `myxcel submit` (the raw-sbatch-script command) silently
+defaults `--time` to `01:00:00` and always forces `--partition` (default
+`mit_normal`, no GPUs) onto the `sbatch` invocation — neither is inherited from the
+script's own `#SBATCH` directives; CLI-level args win. The first full-array
+submission (job 19882395 covering all 6 sizes) omitted `--time`, so n=216/512/895
+were killed by `TIMEOUT` at 1 hour despite the script requesting 11:30:00. Always
+pass `--time` and `--partition` explicitly to `myxcel submit`. Separately, myxcel
+also forces the SLURM `--output`/`--error` paths to `%j.out`/`%j.err` (parent job
+ID only, not `%A_%a`), so concurrent array tasks under one job race on the same
+log file — a task's own stderr can be silently clobbered by a sibling. The n=512
+retry (19898460 task 4) failed fast with an unreadable, clobbered log for exactly
+this reason; resubmitting it alone (job 19898934) as a single-task array avoided
+the race and completed cleanly.
