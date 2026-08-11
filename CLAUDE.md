@@ -17,9 +17,11 @@ at an effective dt ≈ 0.5 fs, not 1.0 fs — `settle_langevin`'s A-step was pas
 `half_dt` where the callee already halves internally (fixed in commit cfd2b85). The
 dt=1.0 fs cap-lift is now independently re-confirmed at a genuine 1.0 fs step (gate
 job 19774893, T_rot=298.93±0.29 K; GPU fast-suite regression check, job 19875071,
-clean). Size sweep ba334c1f predates the fix and has not been re-run at genuine
-dt=1.0 fs — its size-crossover numbers (residual small-N warm bias is translational
-finite-size) are provisional pending re-validation; see
+clean). **Size sweep ba334c1f re-run at genuine dt=1.0 fs (2026-08-11, campaign
+46a4d737, jobs 19882395/19898460/19898934):** the crossover conclusion holds
+unchanged — N\*=16 (±15 K), N\*=64 (±5 K), T_rot faithful at every size (max |dev|
+3.6 K). The residual small-N warm bias is confirmed translational finite-size, not
+an artifact of the half_dt bug; see
 `.praxia/docs/research/260612_p5-dt1fs-size-crossover.md`.
 
 notes:

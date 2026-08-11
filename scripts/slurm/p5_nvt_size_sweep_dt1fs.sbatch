@@ -21,14 +21,21 @@
 
 set -euo pipefail
 
-# Durable project root (survives transient worktree submit dirs).
-_SUBMIT_DIR="${SLURM_SUBMIT_DIR:-${PWD}}"
-if PROLIX_ROOT="$(git -C "${_SUBMIT_DIR}" rev-parse --show-toplevel 2>/dev/null)"; then
-  :
-else
-  PROLIX_ROOT="${HOME}/projects/prolix"
-fi
+# Submitted via `myxcel submit --sbatch-arg="chdir=<worktree path>"`, which sets the
+# job's initial cwd correctly (unlike SLURM_SUBMIT_DIR, which reflects myxcel's own
+# ssh-session cwd on the remote host, not the worktree root). Trust pwd instead of
+# re-deriving it (see scripts/slurm/p5_settle_fix_fastsuite_gpu.slurm for the same fix).
+PROLIX_ROOT="$(pwd)"
 cd "${PROLIX_ROOT}"
+
+# Sanity check: fail loudly rather than silently running against a wrong
+# checkout if chdir wasn't set (e.g. a manual sbatch or scontrol requeue).
+if [[ ! -f "${PROLIX_ROOT}/scripts/slurm/_bth_env.sh" ]]; then
+    echo "FATAL: ${PROLIX_ROOT} does not look like the prolix worktree root" \
+         "(scripts/slurm/_bth_env.sh not found). Submit via" \
+         "myxcel submit --sbatch-arg=\"chdir=<worktree path>\"." >&2
+    exit 1
+fi
 
 # Map array task id -> system size.
 SIZES=(2 16 64 216 512 895)
@@ -57,6 +64,10 @@ fi
 export JAX_PLATFORMS=cuda JAX_ENABLE_X64=1 XLA_PYTHON_CLIENT_PREALLOCATE=false
 
 # bathos provenance: per-script sidecar at scripts/experiments/p5_nvt_size_sweep_dt1fs.bth.toml
+# _common_env.sh does its own SLURM_SUBMIT_DIR-based re-cd internally — unset it here so
+# that logic falls through to a BASH_SOURCE-based resolution correct relative to our
+# already-correct pwd, instead of re-cd'ing to the wrong (but non-empty) submit dir.
+unset SLURM_SUBMIT_DIR
 source "scripts/slurm/_bth_env.sh"
 
 CAMPAIGN_ID="${CAMPAIGN_ID:?CAMPAIGN_ID env var required — pass via sbatch --export=ALL,CAMPAIGN_ID=<id>}"
