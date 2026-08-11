@@ -1159,3 +1159,78 @@ def test_dt_sweep_16water_nvt(dt_fs: float, gamma_ps: float) -> None:
   seed = 777
   t_rot = _mean_trot_after_burn(dt_fs=dt_fs, n_waters=n_waters, seed=seed, steps=steps, burn=burn, gamma_ps=gamma_ps)
   assert abs(t_rot - 300.0) < 15.0, f"dt={dt_fs} gamma={gamma_ps}: T_rot={t_rot:.1f}K, expected 300±15K"
+
+
+def _mean_rigid_t_csvr_npt_after_burn(*, dt_fs: float, n_waters: int, seed: int, steps: int, burn: int) -> tuple[float, float]:
+  """NPT CSVR temperature test helper.
+
+  Returns:
+      (mean_T_after_burn, max_T_observed) where max_T is used to detect divergence.
+  """
+  jax.config.update("jax_enable_x64", True)
+  temperature_k = 300.0
+  positions_a, box_edge = _equil_water_positions(n_waters, seed=seed)
+  box_vec = jnp.array([box_edge, box_edge, box_edge], dtype=jnp.float64)
+  dt_akma = float(dt_fs) / float(AKMA_TIME_UNIT_FS)
+  kT = float(temperature_k) * BOLTZMANN_KCAL
+  sys_dict = _proxide_params_pure_water(n_waters)
+  displacement_fn, shift_fn = pbc.create_periodic_space(box_vec)
+  pme_grid = max(16, round(box_edge / 1.0))
+  energy_fn = system.make_energy_fn(displacement_fn, sys_dict, box=box_vec, use_pbc=True, implicit_solvent=False, pme_grid_points=pme_grid, pme_alpha=0.34, cutoff_distance=9.0, strict_parameterization=False)
+  n_atoms = n_waters * 3
+  mass = jnp.array([[15.999], [1.008], [1.008]] * n_waters).reshape(n_atoms)
+  water_indices = settle.get_water_indices(0, n_waters)
+  init_s, apply_s = settle.settle_csvr_npt(
+    energy_fn, shift_fn,
+    dt=dt_akma, kT=kT,
+    target_pressure_bar=1.0,
+    tau_barostat_akma=2000.0,
+    tau_thermostat_akma=2000.0,
+    mass=mass,
+    water_indices=water_indices,
+    box_init=box_vec,
+    remove_com=True,
+  )
+  apply_j = jax.jit(apply_s)
+  dof_rigid = _dof_rigid_tip3p_waters(n_waters)
+  state = init_s(jax.random.key(seed), jnp.array(positions_a), mass=mass, box=box_vec)
+  temps: list[float] = []
+  max_t = 0.0
+  for step in range(steps):
+    state = apply_j(state)
+    if step >= burn:
+      ke_r = float(rigid_tip3p_box_ke_kcal(state.positions, state.momentum, state.mass, n_waters))
+      temp = 2.0 * ke_r / (dof_rigid * BOLTZMANN_KCAL)
+      temps.append(temp)
+      max_t = max(max_t, temp)
+  mean_t = float(np.mean(temps)) if temps else float("nan")
+  return mean_t, max_t
+
+
+def test_csvr_npt_com_momentum_removal_bounds_temperature() -> None:
+  """NPT CSVR: COM momentum removal prevents divergence.
+
+  Regression test for the "flying ice cube" fix where the CSVR thermostat
+  DOF count assumed COM removal but _langevin_settle_vel() was not actually
+  removing it. This caused temperature divergence (T -> 10^115 K) at longer
+  timescales (>10 ps).
+
+  Test uses small system (4 waters) for local-smoke feasibility and runs for
+  10 ps (20k steps at 0.5 fs) to approach the divergence timescale.
+  With the fix, temperature should remain bounded near 300 K (within ~50 K).
+  Without the fix, it would diverge catastrophically.
+  """
+  n_waters = 4
+  dt_fs = 0.5
+  sim_ps = 10.0
+  steps = int(sim_ps * 1000.0 / dt_fs)
+  burn = max(100, steps // 3)
+  seed = 999
+  mean_t, max_t = _mean_rigid_t_csvr_npt_after_burn(dt_fs=dt_fs, n_waters=n_waters, seed=seed, steps=steps, burn=burn)
+
+  # With the fix: temperature should stay near 300 K
+  # Without the fix: temperature would diverge toward 10^115 K
+  # Assert that max_t is finite and reasonable (not diverged)
+  assert jnp.isfinite(max_t), f"NPT temperature diverged: max_T={max_t:.2e} K (non-finite)"
+  assert max_t < 1e6, f"NPT temperature diverged: max_T={max_t:.1f} K (>1e6 K indicates uncontrolled growth)"
+  assert abs(mean_t - 300.0) < 50.0, f"NPT mean T={mean_t:.1f} K, expected ~300 ± 50 K; divergence may be partial"

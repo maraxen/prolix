@@ -2045,6 +2045,7 @@ def settle_csvr(
         mass_hydrogen,
         n_iters=10,
         settle_velocity_tol=None,
+        remove_linear_com_momentum=remove_com,
       )
 
     # === CSVR velocity rescaling ===
@@ -2306,8 +2307,31 @@ def _langevin_settle_vel(
   n_iters: int = 10,
   settle_velocity_tol: float | None = None,
   water_mask: Array | None = None,
+  remove_linear_com_momentum: bool = False,
 ) -> Array:
-  """Apply SETTLE velocity constraints and update momentum."""
+  """Apply SETTLE velocity constraints and update momentum.
+
+  Args:
+      momentum: Particle momenta (N, 3).
+      positions_old: Positions before integrator step.
+      positions_new: Constrained positions after SETTLE.
+      mass: Particle masses (N,) or (N, 1).
+      water_indices: (N_waters, 3) indices [O, H1, H2].
+      dt: Timestep.
+      mass_oxygen: Oxygen mass (amu).
+      mass_hydrogen: Hydrogen mass (amu).
+      n_iters: SETTLE velocity correction iterations.
+      settle_velocity_tol: SETTLE velocity tolerance.
+      water_mask: Optional (N_waters,) bool for padding rows.
+      remove_linear_com_momentum: If True, subtract center-of-mass momentum
+          after SETTLE velocity constraints: p <- p - m * v_com where
+          v_com = sum(p) / sum(m). This corrects a "flying ice cube" pattern
+          where the thermostat DOF count assumes COM removal but the velocity
+          constraint does not perform it.
+
+  Returns:
+      Updated momentum array.
+  """
   velocity = momentum / mass
   velocity = settle_velocities(
     velocity,
@@ -2321,7 +2345,17 @@ def _langevin_settle_vel(
     adaptive_tol=settle_velocity_tol,
     water_mask=water_mask,
   )
-  return velocity * mass
+  momentum = velocity * mass
+
+  # Optionally remove center-of-mass momentum to match CSVR DOF accounting
+  if remove_linear_com_momentum:
+    mass_col = mass
+    p_tot = jnp.sum(momentum, axis=0)
+    m_tot = jnp.sum(mass_col)
+    v_com = p_tot / jnp.maximum(m_tot, jnp.array(1e-30, dtype=m_tot.dtype))
+    momentum = momentum - mass_col * v_com
+
+  return momentum
 
 
 def settle_csvr_npt(
@@ -2607,6 +2641,7 @@ def settle_csvr_npt(
         mass_hydrogen,
         n_iters=10,
         settle_velocity_tol=None,
+        remove_linear_com_momentum=remove_com,
       )
 
     # === CSVR velocity rescaling ===
