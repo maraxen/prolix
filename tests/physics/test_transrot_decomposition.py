@@ -238,7 +238,7 @@ def test_corrected_estimator_recovers_target_temperature(n_waters):
     "estimator divides un-COM-subtracted ke_trans by 3N-3, inflating T_trans by "
     "3*T_target/(3N-3). Reproduces the documented size sweep (603.8 K vs recorded "
     "600.6 K at n=2; 319.6 K vs 319.67 K at n=16) with no dynamics at all. "
-    "Fix: subtract the system COM velocity (see scripts/analysis/p5_dof_artifact_correction.py).",
+    "Fix: subtract the system COM velocity (see scripts/explore/p5_dof_artifact_correction.py).",
 )
 @pytest.mark.parametrize("n_waters", [2, 16])
 def test_current_estimator_recovers_target_temperature(n_waters):
