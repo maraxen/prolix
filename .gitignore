@@ -64,3 +64,6 @@ analysis/
 
 # fastembed model cache (downloaded at runtime, never commit — large blobs)
 .fastembed_cache/
+
+# Raw per-agent subagent transcript dumps (harness-local, never commit)
+.praxia/subagent_outputs/

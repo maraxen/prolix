@@ -1,0 +1,88 @@
+# Sprint 51 — P5-C batched SETTLE vmap divergence, Stage 0 + fix (#934)
+# Task ID: 260811_autonomous-loop
+# Composed: 2026-08-12 (autonomous-loop). Full diagnostic plan (STAGED-BISECT v2) was
+# produced via brainstorm (contemplex 33ef1b3b -> revised fd78460a after adversarial
+# REVISE verdict) + parallel spec-challenger/spec-defender review + orchestrator-level
+# re-verification. Full spec: .praxia/docs/specs/260812_decide-the-fix-approach-for-prolix-backl-2.md
+# (supersedes .praxia/docs/specs/260812_decide-the-fix-approach-for-prolix-backl.md, locked v1).
+#
+# SCOPE NOTE: this sprint covers Stage 0 (zero-compute gates) + THE FIX + sidecar rewrite
+# (AC1-AC6) only. Stage 1 (Engaging cluster A/B job, AC7-AC8, branch selection, backlog
+# close/re-scope) requires sbatch/myxcel access the praxia-fixer agent's Bash allowlist
+# does not grant (cargo/git/praxia/rg/uv only) -- the orchestrator runs Stage 1 directly
+# after this sprint's VERIFY passes, same pattern used for #4167 this session.
+
+[sprint]
+sprint_id = "260812_p5c-settle-pbc-rounding"
+sprint_num = 51
+name = "Sprint 51: P5-C batched SETTLE PBC-rounding fix, Stage 0 (#934)"
+description = "Track A: Stage 0 zero-compute gates (0a arithmetic discriminator, 0b H2 exclusion, 0c full site grep, 0d NEW reachability arithmetic) + THE FIX (convert 5 jnp.round(x/box) PBC-rounding sites to jnp.floor(x/box+0.5), mirroring the already-converted L319) + sidecar rewrite. Cluster verification (Stage 1) is a separate orchestrator-led follow-up, not part of this sprint."
+context = "v1.1/Claim-1 critical path. test_settle_batched_vs_unbatched passes locally but diverges (documented 8.975A RMSD) on Engaging cluster; test_settle_64water_batched_10ps is the larger validation target. Root-cause investigation (recon + brainstorm + adversarial review, this session) found settle_positions:171 still uses the pre-fix jnp.round() banker's-rounding pattern that _settle_water_batch:319 already replaced with floor(x+0.5) -- but ALSO found 4 more unconverted sites (773,776,1277,1329) inside the same traced test path, self-documented in the code as capable of full-box-sized impulses. A revision round further found the original 'hot/cold' framing rested on an arithmetic error (delta~=box gives an integer, not the actual round-vs-floor tie point at delta/box~=0.5) -- hence Stage 0d, a new blocking zero-compute gate deriving per-site reachability before any fix is assumed causal."
+max_fix_retries = 1
+worktree_shadow_mode = false
+
+[[tracks]]
+id = "a"
+is_research = false
+worktree = false
+skip_worktree = false
+
+[[tracks.items]]
+backlog_id = "934"
+phase_name = "Track A — Stage 0 + PBC-rounding fix (#934)"
+fixer_prompt = """
+task_id: 260811_autonomous-loop
+
+Full spec (read this FIRST, in full, before writing any code): .praxia/docs/specs/260812_decide-the-fix-approach-for-prolix-backl-2.md
+Do NOT read or execute the superseded v1 spec (.praxia/docs/specs/260812_decide-the-fix-approach-for-prolix-backl.md, locked, contradictory) -- it is referenced only for historical context inside v2.
+
+YOUR SCOPE IS STAGE 0 + THE FIX + SIDECAR REWRITE (AC1-AC6) ONLY. Do NOT attempt Stage 1 (the Engaging cluster A/B job) -- you do not have sbatch/myxcel/ssh access. Do NOT close backlog #934 -- closure requires Stage 1 cluster evidence per the branch-action rules, which the orchestrator runs separately after your VERIFY passes.
+
+=== AC1: Stage 0a -- arithmetic discriminator ===
+Read the box vector from tests/physics/test_settle_batched.py::test_settle_batched_vs_unbatched (line ~449) and from tests/physics/test_settle_64water_batched_10ps.py. Compare the documented 8.975 A divergence against each box: ~half the box -> minimum-image sign disagreement; ~one full box -> clean box jump; very different from either -> arbitrary, wrap story weak. Record which case applies and state the H1-vs-H3 re-weighting this implies, in writing, in your final report.
+
+=== AC2: Stage 0b -- H2 (RNG key-threading) exclusion, corrected criterion ===
+H2 says PADDED bundle rows advance jax.lax.scan a different number of times than unpadded rows, desynchronizing per-step noise draws -- NOT a gamma-dependent effect (v1's gamma=0 criterion was wrong). For EACH of the two target tests, determine and record: (i) is the bundle homogeneous (water_mask None/all-True, identical per-replica n_atoms/n_waters -- so no padded row exists), AND (ii) inside the scan BODY (not just before it), does each replica's per-step key derive purely from its own carry leaf with no dependence on water_mask/padding/another replica's data? H2 is excluded only if BOTH (i) and (ii) hold. gamma alone is not an acceptable reason. If (i) fails for either test, note that H2 stays LIVE (a gamma=0 control arm would be needed in Stage 1 -- note this for the orchestrator, don't build it yourself).
+
+=== AC3: Stage 0c -- full site grep ===
+Run `rg 'jnp\\.round\\(|jnp\\.mod\\(' src/prolix/physics/settle.py`. Classify every hit: box-normalized or not; inside the traced apply_fn under test (i.e. reachable via settle_langevin(...).apply_fn when water_indices is set) or not. Expected result (verify, don't just trust): L171 (settle_positions), L319 (_settle_water_batch, ALREADY converted to floor), L773/L776 (_r_step_conserve_angular_momentum), L1277/L1329 (settle_langevin R-step). settle_velocities (L850) takes no box param -- structurally exempt, confirm this. Reconcile any discrepancy from this expected list before proceeding to AC4/AC5.
+
+=== AC4: Stage 0d -- reachability arithmetic (NEW, the most important gate, do not skip or rush) ===
+jnp.round() and jnp.floor(x+0.5) can only disagree by tie-breaking rule when x = delta/box lies within ULP of a HALF-INTEGER (0.5, 1.5, 2.5, ... -- note round-half-to-even and round-half-up actually only disagree at ODD half-integers: 0.5, 2.5, not 1.5; verify this yourself, do not take it on faith). For EACH of the five unconverted sites (L171, L773, L776, L1277, L1329), DERIVE (do not eyeball) the physically attainable range of |delta| for that site given what the variable actually represents, divide by the box from AC1, and state explicitly whether a half-integer falls inside that range.
+L1277/L1329 is explicitly flagged as the WEAKEST entry and must be DERIVED, not inherited from any preliminary hypothesis in the spec: dx = x_con - x_unc is a difference of two INDEPENDENTLY-wrapped quantities (shift_fn wraps x_unc each step; settle_positions reconstructs x_con in the unwrapped frame of positions_old) so its attainable range needs real derivation, not an assumption that it's "either ~0 or ~box".
+If deriving the L1277/L1329 range genuinely requires instrumented measurement rather than reasoning from the code (the spec's own INVEST-S split trigger), STOP: do not force a derivation. Record it as UNRESOLVED, treat it as presumptively REACHABLE for branch selection, and flag this explicitly in your final report as requiring a follow-up item -- do not write a confident REACHABLE/UNREACHABLE verdict you cannot actually justify with working shown.
+Record one overall Stage 0d verdict: REACHABLE (at least one site) or UNREACHABLE (no site) -- this determines whether the orchestrator runs Stage 1 as specified or takes branch (d) instead. Show your work for every site; a bare verdict without derivation is not acceptable (this is explicitly one of the spec's own named failure modes).
+
+=== AC5: THE FIX ===
+Convert jnp.round(X/box) to jnp.floor(X/box + 0.5) (mirroring the already-converted L319 pattern exactly) at L171, L773, L776, L1277, L1329 -- UNLESS your AC4 derivation affirmatively argues a specific site is COLD (half-integer definitively outside its attainable range), in which case state that argument explicitly in your report rather than silently skipping the site. A default defer/skip without a written COLD argument is not acceptable for L773/L776/L1277/L1329 -- their own adjacent code comments already describe box-sized-impulse hazards (read lines ~737-741 and ~1268-1274 before deciding).
+Also remove or rewrite the stale comment sentence near L161 ("The only exception is a genuine PBC crossing (|delta| ~ box), handled by round()") -- it currently argues FOR round() in exactly the regime this fix addresses, and would contradict the code right below it once you make the change.
+Land this as ONE reviewable commit. Before committing, confirm the existing dt=1.0fs cap-lift regression guard is undisturbed: run the P5 C3 angular-momentum-conservation unit test (grep test_settle.py / test_settle_rotation_preserving.py for AM-conservation tests near the 678c9cb commit) alongside whatever local tests are feasible single-file/`-k` (do NOT run a whole suite). If ANY test result is marginal (not a clean pass, not a clean fail), STOP and report it rather than proceeding -- the spec's own pre-mortem explicitly warns against treating a marginal regression as a pass. Your commit message must state the mechanism per your AC4 result and must NOT assert this fix is the confirmed root cause (that determination belongs to Stage 1, which you are not running).
+
+=== AC6: sidecar rewrite ===
+Rewrite scripts/experiments/p5_settle_batch_divergence.bth.toml (it currently gates on the wrong threshold and cites a stale line number -- do not reuse it as-is). New sidecar: [experiment] schema, exactly one outcome with is_residual = true, gates on a metric named max_abs_atom_position_delta < 1e-10 (Angstrom), and removes the stale "settle.py:237" reference and the "platform_precision root cause confirmed" pass-branch decision text (that conclusion belongs to Stage 1's actual run, not a pre-registration). You are NOT running the sidecar's experiment (that's Stage 1) -- just correcting the pre-registration so Stage 1 has an accurate gate to run against.
+
+Do NOT write code comments referencing this task_id or backlog ticket number -- only comments for genuinely non-obvious invariants (matching the file's existing style, e.g. the L293-299 docstring already there).
+
+Final report must explicitly restate your AC1/AC2/AC3/AC4 findings (not just "done" -- the actual box comparison, H2 verdict + which criterion decided it, the site table, and the per-site reachability derivations with working shown) plus your AC5/AC6 completion status, since these are exactly what the reviewer will check line-by-line.
+"""
+reviewer_prompt = """
+VERIFY (backlog #934, P5-C Stage 0 + PBC-rounding fix -- Stage 0/AC1-AC6 ONLY, not Stage 1):
+
+1. AC1: the fixer's report states the box vector for both target tests and classifies 8.975A against each box (half-box/one-box/arbitrary), with a stated H1-vs-H3 re-weighting. Verify the box values yourself by reading the two test files.
+2. AC2: the fixer's report states, per test, the (i) homogeneous/padded determination and (ii) in-scan-body key-derivation determination, and an explicit H2 EXCLUDED/LIVE verdict citing which criterion decided it -- NOT "gamma=0 so excluded" (that's the wrong, superseded criterion). Spot-check test_settle_64water_batched_10ps.py yourself for water_mask/padding usage.
+3. AC3: a full classified table of every jnp.round(/jnp.mod( hit in settle.py exists in the fixer's report, reconciled against the expected 5-unconverted-site list (L171,773,776,1277,1329) plus L319 (already converted) and L850 (exempt, no box param). Run the grep yourself and cross-check.
+4. AC4: for EACH of the 5 sites, the report shows a DERIVED attainable-|delta|-range (not a bare assertion) divided by box, with an explicit per-site REACHABLE/UNREACHABLE call and one overall Stage 0d verdict. Specifically check that L1277/L1329 was not just copied from the spec's own preliminary hypothesis without independent derivation -- if it was, this is a FAIL (this is exactly the failure mode the spec's own pre-mortem FAILURE 2 warns about). If the fixer marked it UNRESOLVED with a stated reason (instrumentation needed) and correctly treated it as presumptively REACHABLE for branch selection, that IS an acceptable outcome -- don't fail it for being unresolved, fail it for being resolved WITHOUT real derivation.
+5. AC5: git diff shows floor(X/box+0.5) at each of L171/773/776/1277/1329 that the AC4 derivation called REACHABLE or presumptively-REACHABLE, OR an explicit written COLD argument in the fixer's report for any site skipped -- no silent skips. The stale L161 comment sentence is gone or rewritten to be consistent with the new code. Confirm a regression check against the dt=1.0fs gate / AM-conservation test was actually run (not just claimed) and was a clean pass, not marginal -- if the fixer's report describes anything marginal, that is a FAIL per the spec's explicit instruction to stop and report rather than proceed.
+6. AC6: scripts/experiments/p5_settle_batch_divergence.bth.toml diff shows [experiment] schema, exactly one is_residual=true outcome, gates on max_abs_atom_position_delta < 1e-10, and both the stale settle.py:237 reference and the premature "root cause confirmed" text are gone.
+7. Commit exists, message states mechanism without overclaiming root-cause confirmation, no source comments reference the task_id or ticket number.
+8. No evidence a whole test suite or any cluster job was run by the fixer (out of scope) -- flag as a violation if either occurred.
+
+PASS: all 8 items satisfied, AC4's per-site derivations are genuinely shown-work (not copied verdicts), and no marginal regression was silently treated as a pass.
+FAIL: any item not satisfied -- state which item(s) failed and why, quoting the specific evidence (file:line, report text, or commit diff) that contradicts it.
+"""
+return_key = "934"
+workflow_template = "bugfix_simple"
+
+[orchestration]
+sequential = []
+concurrent = ["a"]
