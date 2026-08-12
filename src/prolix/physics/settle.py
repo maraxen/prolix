@@ -12,6 +12,7 @@ References:
 
 from __future__ import annotations
 
+import os
 import warnings
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
@@ -45,6 +46,23 @@ if TYPE_CHECKING:
   from jax_md.util import Array
 
 Array = Any
+
+# PBC rounding mode selection (A/B testing: round vs floor for banker's rounding)
+# Module-level constant bound at import time, never read inside a traced function.
+_PBC_ROUND_MODE = os.environ.get("PROLIX_PBC_ROUND_MODE", "floor")
+
+
+def _pbc_round_floor(x: Array) -> Array:
+  """Round-half-up via floor(x + 0.5) — deterministic regardless of FMA reassociation."""
+  return jnp.floor(x + 0.5)
+
+
+def _pbc_round_banker(x: Array) -> Array:
+  """Banker's rounding (round-half-to-even) — the pre-fix idiom, for A/B comparison."""
+  return jnp.round(x)
+
+
+_PBC_ROUND_FN = _pbc_round_banker if _PBC_ROUND_MODE == "round" else _pbc_round_floor
 
 # TIP3P water geometry constants
 TIP3P_ROH = 0.9572  # O-H bond length (Å)
@@ -167,7 +185,7 @@ def settle_positions(
     # All three constrained atoms get the same rigid integer-image shift so
     # the molecule's internal geometry is not distorted.
     delta_o = pos_oxygen_c - pos_oxygen_new
-    image_correction = -box * jnp.floor(delta_o / box + 0.5)
+    image_correction = -box * _PBC_ROUND_FN(delta_o / box)
 
     pos_oxygen_c = pos_oxygen_c + image_correction
     pos_h1_c = pos_h1_c + image_correction
@@ -315,7 +333,7 @@ def _settle_water_batch(
 
     def unwrap(pos_new, pos_old):
       delta = pos_new - pos_old
-      delta = delta - box * jnp.floor(delta / box + 0.5)
+      delta = delta - box * _PBC_ROUND_FN(delta / box)
       return pos_old + delta
 
     pos_oxygen_new = unwrap(pos_oxygen_new, pos_oxygen_old)
@@ -769,10 +787,10 @@ def _r_step_conserve_angular_momentum(
   r_H2_unc = x_unc[indices.hydrogen2]  # (N_w, 3)
   if box is not None:
     dH1 = r_H1_unc - r_O_unc
-    dH1 = dH1 - box * jnp.floor(dH1 / box + 0.5)
+    dH1 = dH1 - box * _PBC_ROUND_FN(dH1 / box)
     r_H1_unc = r_O_unc + dH1
     dH2 = r_H2_unc - r_O_unc
-    dH2 = dH2 - box * jnp.floor(dH2 / box + 0.5)
+    dH2 = dH2 - box * _PBC_ROUND_FN(dH2 / box)
     r_H2_unc = r_O_unc + dH2
   r_unc_w = jnp.stack([r_O_unc, r_H1_unc, r_H2_unc], axis=1)  # (N_w, 3, 3)
   p_pre_a_w = jnp.stack(
@@ -1273,7 +1291,7 @@ def settle_langevin(
     # density (see scripts/explore/p5_rstep_substep_trace.py).
     dx_1 = x_con_1 - x_unc_1
     if box is not None:
-      dx_1 = dx_1 - box * jnp.floor(dx_1 / box + 0.5)
+      dx_1 = dx_1 - box * _PBC_ROUND_FN(dx_1 / box)
     dp_1 = state.mass * dx_1 / half_dt
     momentum = momentum + dp_1
 
@@ -1325,7 +1343,7 @@ def settle_langevin(
     # see R1 above for why the raw difference is unsafe under PBC wrapping).
     dx_2 = x_con_2 - x_unc_2
     if box is not None:
-      dx_2 = dx_2 - box * jnp.floor(dx_2 / box + 0.5)
+      dx_2 = dx_2 - box * _PBC_ROUND_FN(dx_2 / box)
     dp_2 = state.mass * dx_2 / half_dt
     momentum = momentum + dp_2
 
