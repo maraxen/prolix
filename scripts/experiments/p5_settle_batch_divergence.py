@@ -205,15 +205,16 @@ def _build_constructed_water_system(box_size: float, seed: int):
     oy = box_size / 2
     oz = box_size / 2
 
-    # H1 and H2: position them symmetrically on the "other side" in the unwrapped frame.
+    # H1 and H2: position them symmetrically on the "other side" in the unwrapped frame,
+    # differentiated in the y-direction to create a proper V-shaped water geometry.
     # After independent shift_fn wrapping per atom, they'll end up ~box away from O,
     # creating a bond vector dH_x ≈ box/2 which hits the tie point.
     h1_x = epsilon  # wraps back to ~box - epsilon after shift_fn
-    h1_y = oy - hy
+    h1_y = oy - hy  # H1 offset below oxygen
     h1_z = oz
 
     h2_x = epsilon
-    h2_y = oy - hy
+    h2_y = oy + hy  # H2 offset above oxygen (symmetric but opposite to H1)
     h2_z = oz
 
     # Add one dummy solute in the center
@@ -366,7 +367,7 @@ def _run_comparison(
             offending_atom = int(jnp.argmax(max_per_atom))
             offending_molecule_index = offending_atom // 3
 
-            # Gather pre/post positions for the offending water
+            # Gather pre/post positions for the offending water (O, H1, H2)
             water_idx = offending_molecule_index
             o_idx = 3 * water_idx
             h1_idx = 3 * water_idx + 1
@@ -374,21 +375,40 @@ def _run_comparison(
 
             o_pos_loop_pre = [float(x) for x in pos_loop[o_idx]]
             o_pos_vmap_pre = [float(x) for x in pos_vmap[o_idx]]
+            h1_pos_loop_pre = [float(x) for x in pos_loop[h1_idx]]
+            h1_pos_vmap_pre = [float(x) for x in pos_vmap[h1_idx]]
+            h2_pos_loop_pre = [float(x) for x in pos_loop[h2_idx]]
+            h2_pos_vmap_pre = [float(x) for x in pos_vmap[h2_idx]]
 
             # Note: we could compute post-step positions by calling settle_positions
             # directly, but for simplicity we just record the current post-step values
             o_pos_loop_post = [float(x) for x in unbatched_curr.positions[o_idx]]
             o_pos_vmap_post = [float(x) for x in batched_curr.positions[0][o_idx]]
+            h1_pos_loop_post = [float(x) for x in unbatched_curr.positions[h1_idx]]
+            h1_pos_vmap_post = [float(x) for x in batched_curr.positions[0][h1_idx]]
+            h2_pos_loop_post = [float(x) for x in unbatched_curr.positions[h2_idx]]
+            h2_pos_vmap_post = [float(x) for x in batched_curr.positions[0][h2_idx]]
 
-            # Attempt to compute delta/box at the five sites (requires more state
-            # tracking; for now store as placeholder)
+            # Compute delta/box at the two recoverable sites (L773/L776: dH bond vectors).
+            # Other sites (L171/L318/L1276/L1328) require internal settle instrumentation.
+            box = float(box_vec[0]) if box_vec is not None else 1.0
+            dh1_loop = np.array(h1_pos_loop_post) - np.array(o_pos_loop_post)
+            dh1_vmap = np.array(h1_pos_vmap_post) - np.array(o_pos_vmap_post)
+            dh2_loop = np.array(h2_pos_loop_post) - np.array(o_pos_loop_post)
+            dh2_vmap = np.array(h2_pos_vmap_post) - np.array(o_pos_vmap_post)
             delta_over_box_at_five_sites = {
-                "L171_delta_o_over_box": None,
-                "L318_delta_over_box": None,
-                "L773_dH1_over_box": None,
-                "L776_dH2_over_box": None,
-                "L1276_dx_1_over_box": None,
-                "L1328_dx_2_over_box": None,
+                "L171_delta_o_over_box": "not_recoverable_without_settle_instrumentation",
+                "L318_delta_over_box": "not_recoverable_without_settle_instrumentation",
+                "L773_dH1_over_box": {
+                    "loop": [float(x / box) for x in dh1_loop],
+                    "vmap": [float(x / box) for x in dh1_vmap],
+                },
+                "L776_dH2_over_box": {
+                    "loop": [float(x / box) for x in dh2_loop],
+                    "vmap": [float(x / box) for x in dh2_vmap],
+                },
+                "L1276_dx_1_over_box": "not_recoverable_without_settle_instrumentation",
+                "L1328_dx_2_over_box": "not_recoverable_without_settle_instrumentation",
             }
 
             # Classify primitive error magnitude
@@ -410,6 +430,14 @@ def _run_comparison(
         "o_pos_vmap_pre": o_pos_vmap_pre,
         "o_pos_loop_post": o_pos_loop_post,
         "o_pos_vmap_post": o_pos_vmap_post,
+        "h1_pos_loop_pre": None if first_divergence_step is None else h1_pos_loop_pre,
+        "h1_pos_vmap_pre": None if first_divergence_step is None else h1_pos_vmap_pre,
+        "h1_pos_loop_post": None if first_divergence_step is None else h1_pos_loop_post,
+        "h1_pos_vmap_post": None if first_divergence_step is None else h1_pos_vmap_post,
+        "h2_pos_loop_pre": None if first_divergence_step is None else h2_pos_loop_pre,
+        "h2_pos_vmap_pre": None if first_divergence_step is None else h2_pos_vmap_pre,
+        "h2_pos_loop_post": None if first_divergence_step is None else h2_pos_loop_post,
+        "h2_pos_vmap_post": None if first_divergence_step is None else h2_pos_vmap_post,
         "delta_over_box_at_five_sites": delta_over_box_at_five_sites,
         "primitive_error_classification": primitive_error_classification,
         "batch_size": 2,
@@ -511,18 +539,42 @@ def _run_constructed_case(
             offending_molecule_index = 0  # Only 1 water in constructed case
 
             o_idx = 0
+            h1_idx = 1
+            h2_idx = 2
+
             o_pos_loop_pre = [float(x) for x in pos_loop[o_idx]]
             o_pos_vmap_pre = [float(x) for x in pos_vmap[o_idx]]
+            h1_pos_loop_pre = [float(x) for x in pos_loop[h1_idx]]
+            h1_pos_vmap_pre = [float(x) for x in pos_vmap[h1_idx]]
+            h2_pos_loop_pre = [float(x) for x in pos_loop[h2_idx]]
+            h2_pos_vmap_pre = [float(x) for x in pos_vmap[h2_idx]]
+
             o_pos_loop_post = [float(x) for x in unbatched_curr.positions[o_idx]]
             o_pos_vmap_post = [float(x) for x in batched_curr.positions[0][o_idx]]
+            h1_pos_loop_post = [float(x) for x in unbatched_curr.positions[h1_idx]]
+            h1_pos_vmap_post = [float(x) for x in batched_curr.positions[0][h1_idx]]
+            h2_pos_loop_post = [float(x) for x in unbatched_curr.positions[h2_idx]]
+            h2_pos_vmap_post = [float(x) for x in batched_curr.positions[0][h2_idx]]
 
+            # Compute delta/box at the two recoverable sites (L773/L776: dH bond vectors).
+            box = float(box_vec[0])
+            dh1_loop = np.array(h1_pos_loop_post) - np.array(o_pos_loop_post)
+            dh1_vmap = np.array(h1_pos_vmap_post) - np.array(o_pos_vmap_post)
+            dh2_loop = np.array(h2_pos_loop_post) - np.array(o_pos_loop_post)
+            dh2_vmap = np.array(h2_pos_vmap_post) - np.array(o_pos_vmap_post)
             delta_over_box_at_five_sites = {
-                "L171_delta_o_over_box": None,
-                "L318_delta_over_box": None,
-                "L773_dH1_over_box": None,
-                "L776_dH2_over_box": None,
-                "L1276_dx_1_over_box": None,
-                "L1328_dx_2_over_box": None,
+                "L171_delta_o_over_box": "not_recoverable_without_settle_instrumentation",
+                "L318_delta_over_box": "not_recoverable_without_settle_instrumentation",
+                "L773_dH1_over_box": {
+                    "loop": [float(x / box) for x in dh1_loop],
+                    "vmap": [float(x / box) for x in dh1_vmap],
+                },
+                "L776_dH2_over_box": {
+                    "loop": [float(x / box) for x in dh2_loop],
+                    "vmap": [float(x / box) for x in dh2_vmap],
+                },
+                "L1276_dx_1_over_box": "not_recoverable_without_settle_instrumentation",
+                "L1328_dx_2_over_box": "not_recoverable_without_settle_instrumentation",
             }
 
             max_err = float(jnp.max(diff))
@@ -543,6 +595,14 @@ def _run_constructed_case(
         "o_pos_vmap_pre": o_pos_vmap_pre,
         "o_pos_loop_post": o_pos_loop_post,
         "o_pos_vmap_post": o_pos_vmap_post,
+        "h1_pos_loop_pre": None if first_divergence_step is None else h1_pos_loop_pre,
+        "h1_pos_vmap_pre": None if first_divergence_step is None else h1_pos_vmap_pre,
+        "h1_pos_loop_post": None if first_divergence_step is None else h1_pos_loop_post,
+        "h1_pos_vmap_post": None if first_divergence_step is None else h1_pos_vmap_post,
+        "h2_pos_loop_pre": None if first_divergence_step is None else h2_pos_loop_pre,
+        "h2_pos_vmap_pre": None if first_divergence_step is None else h2_pos_vmap_pre,
+        "h2_pos_loop_post": None if first_divergence_step is None else h2_pos_loop_post,
+        "h2_pos_vmap_post": None if first_divergence_step is None else h2_pos_vmap_post,
         "delta_over_box_at_five_sites": delta_over_box_at_five_sites,
         "primitive_error_classification": primitive_error_classification,
         "batch_size": 2,
