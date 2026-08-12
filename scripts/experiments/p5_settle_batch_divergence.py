@@ -907,36 +907,65 @@ def _run_small_system_bitexact(box_size: float, _seed: int) -> dict:
     unbatched_after = apply_fn_step(unbatched_state)
     batched_after = vmapped_apply(batched_state)
 
-    # Compare constrained positions for ULP differences
-    unbatched_pos = unbatched_after.positions
-    batched_pos_0 = batched_after.positions[0]
+    unbatched_pos = np.asarray(unbatched_after.positions, dtype=np.float64)
+    batched_pos_0 = np.asarray(batched_after.positions[0], dtype=np.float64)
 
-    unbatched_int = np.asarray(unbatched_pos, dtype=np.float64).view(np.int64)
-    batched_int = np.asarray(batched_pos_0, dtype=np.float64).view(np.int64)
+    def _bit_ulp_diff(a: np.ndarray, b: np.ndarray) -> np.ndarray:
+        """Elementwise |int64 bit-pattern difference| between two float64 arrays."""
+        return np.abs(a.view(np.int64) - b.view(np.int64))
 
-    ulp_diff = np.abs(unbatched_int - batched_int)
+    # AGGREGATE (all 4 atoms' final post-step positions, both paths). This is
+    # NOT a per-site delta/box measurement -- it is the same quantity G2/G1'
+    # already report (in float form) here viewed as raw int64 bit patterns.
+    # It answers "do the two paths differ at all, down to the last bit?", not
+    # "which of the 6 rounding sites is responsible?".
+    aggregate_ulp = _bit_ulp_diff(unbatched_pos, batched_pos_0)
+
+    # PER-SITE (only the sites directly reconstructable from captured O/H1/H2
+    # positions without instrumenting settle.py's hot path -- see the prior
+    # remediation round's Bug 2 fix for the same approach and rationale).
+    # water_indices = [[0, 1, 2]]: O=atom 0, H1=atom 1, H2=atom 2, solute=atom 3.
+    o_loop, h1_loop, h2_loop = unbatched_pos[0], unbatched_pos[1], unbatched_pos[2]
+    o_vmap, h1_vmap, h2_vmap = batched_pos_0[0], batched_pos_0[1], batched_pos_0[2]
+    box_arr = np.asarray(box_vec, dtype=np.float64)
+
+    dh1_loop_over_box = (h1_loop - o_loop) / box_arr
+    dh1_vmap_over_box = (h1_vmap - o_vmap) / box_arr
+    dh2_loop_over_box = (h2_loop - o_loop) / box_arr
+    dh2_vmap_over_box = (h2_vmap - o_vmap) / box_arr
+
+    dh1_ulp = _bit_ulp_diff(dh1_loop_over_box, dh1_vmap_over_box)
+    dh2_ulp = _bit_ulp_diff(dh2_loop_over_box, dh2_vmap_over_box)
 
     result = {
         "step": 0,
-        "pbc_sites_examined": 6,
-        "max_ulp_difference": int(np.max(ulp_diff)),
-        "mean_ulp_difference": float(np.mean(ulp_diff)),
-        "std_ulp_difference": float(np.std(ulp_diff)),
-        "bit_identical": bool(np.all(ulp_diff == 0)),
-        "recovered_sites": {
-            "L171_image_correction": "step_0_delta_near_zero",
-            "L318_unwrap": "step_0_delta_near_zero",
-            "L772_L775_frame_mismatch": "step_0_delta_near_zero",
+        "aggregate_final_position_ulp": {
+            "description": "post-step positions, all 4 atoms, both paths -- NOT per-site",
+            "max_ulp_difference": int(np.max(aggregate_ulp)),
+            "mean_ulp_difference": float(np.mean(aggregate_ulp)),
+            "bit_identical": bool(np.all(aggregate_ulp == 0)),
         },
-        "unreachable_sites": {
-            "L1276_L1328_frame_match": "not_recoverable_without_settle_instrumentation",
+        "per_site_delta_over_box_ulp": {
+            "L772_dH1_over_box": {
+                "max_ulp_difference": int(np.max(dh1_ulp)),
+                "bit_identical": bool(np.all(dh1_ulp == 0)),
+            },
+            "L775_dH2_over_box": {
+                "max_ulp_difference": int(np.max(dh2_ulp)),
+                "bit_identical": bool(np.all(dh2_ulp == 0)),
+            },
+            "L171_delta_o_over_box": "not_recoverable_without_settle_instrumentation",
+            "L318_unwrap_delta_over_box": "not_recoverable_without_settle_instrumentation",
+            "L1276_dx1_over_box": "not_recoverable_without_settle_instrumentation",
+            "L1328_dx2_over_box": "not_recoverable_without_settle_instrumentation",
         },
+        "bit_identical": bool(np.all(aggregate_ulp == 0) and np.all(dh1_ulp == 0) and np.all(dh2_ulp == 0)),
         "n_atoms": 4,
         "box_size": 10.0,
     }
 
-    log.info("  G1''-BITEXACT result: bit_identical=%s, max_ulp_diff=%d",
-             result["bit_identical"], result["max_ulp_difference"])
+    log.info("  G1''-BITEXACT result: bit_identical=%s, aggregate_max_ulp=%d",
+             result["bit_identical"], result["aggregate_final_position_ulp"]["max_ulp_difference"])
 
     return result
 
