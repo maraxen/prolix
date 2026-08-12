@@ -296,7 +296,6 @@ def _mean_rigid_t_csvr_after_burn(*, dt_fs: float, n_waters: int, seed: int, ste
   return float(np.mean(temps)) if temps else float("nan")
 
 
-@pytest.mark.xfail(strict=True, reason="CSVR+SETTLE shows tau-dependent ~+8K bias at dt>=1fs (VV discretization artifact); runtime warning emitted in settle_csvr; see settle.py settle_csvr docstring for details")
 def test_temperature_csvr_dt1fs_near_target() -> None:
   """CSVR: dt=1.0 fs, 100 ps: mean T within 15K of 300K target.
 
