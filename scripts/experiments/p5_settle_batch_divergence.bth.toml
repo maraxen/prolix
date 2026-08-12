@@ -1,26 +1,33 @@
 [experiment]
-hypothesis = "Batched SETTLE divergence is caused by FMA-sensitive PBC minimum-image rounding in _settle_water_batch (platform_precision): `delta - box * round(delta/box)` at settle.py:237 can select the wrong periodic image on GPU XLA paths, displacing constrained positions by one full box-length relative to the CPU/unbatched reference."
+hypothesis = "Batched SETTLE divergence is caused by deterministic round disagreement under XLA FMA reassociation in PBC minimum-image wrapping sites: jnp.round() applies banker's rounding (round-half-to-even) which can select opposite directions on loop vs vmap paths when values lie within ULP of half-integers, displacing atomic positions. Replacement with jnp.floor(x+0.5) gives deterministic round-half-up independent of FMA order."
 
 [outcomes.pass]
-condition   = "max_diff_with_box < 1e-5"
-decision    = "platform_precision root cause confirmed — divergence is below 1e-5 Å on CPU; cluster GPU run required to observe the ULP flip"
-reasoning   = "On CPU float64, FMA is not enabled so round() is exact; max_diff < 1e-5 means the box unwrap is numerically stable here and the bug only manifests on GPU"
+condition   = "max_abs_atom_position_delta < 1e-10"
+decision    = "Conversions fix the identified hot regime deterministically"
+reasoning   = "A constructed adversarial case targeting the half-integer tie point passes; N>=5 random seeds all pass. Frame/vmap equivalence is preserved to the tolerance."
 
 [outcomes.fail]
-condition   = "max_diff_with_box >= 1e-5"
-decision    = "divergence reproduces on CPU; investigate alternative root cause (rng_key_threading or non-PBC path)"
-reasoning   = "If CPU already diverges, the FMA-ULP hypothesis is not the only cause; need to check key threading or other batch-asymmetric paths"
+condition   = "max_abs_atom_position_delta >= 1e-10"
+decision    = "Primitive error persists; investigate alternative root cause"
+reasoning   = "The fix is necessary-but-insufficient. Examine first-divergence dump: if primitive error is box-quantised, an unfound wrap site exists; if arbitrary-magnitude, re-weight toward H3/eigh."
 is_residual = true
 
 [result_schema]
-batch_size            = "int"
-n_waters              = "int"
-box_size              = "float"
-steps                 = "int"
-max_diff_with_box     = "float"
-max_diff_free_space   = "float"
+batch_size                    = "int"
+n_waters                      = "int"
+box_size                      = "float"
+steps                         = "int"
+max_abs_atom_position_delta   = "float"
+first_divergence_step         = "int"
+offending_molecule_index      = "int"
+o_pos_loop_pre                = "tuple[float, float, float]"
+o_pos_vmap_pre                = "tuple[float, float, float]"
+o_pos_loop_post               = "tuple[float, float, float]"
+o_pos_vmap_post               = "tuple[float, float, float]"
+delta_over_box_at_five_sites  = "dict[str, float]"
+primitive_error_classification = "str"
 
 [metadata]
-campaign_id = "cd2fa896"
-task_id     = "260603_p5_settle_correctness"
-phase       = "C"
+campaign_id = "260811_p5c_settle_pbc_rounding"
+task_id     = "260811_autonomous-loop"
+phase       = "verify"
