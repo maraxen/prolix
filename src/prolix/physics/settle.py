@@ -157,18 +157,17 @@ def settle_positions(
   # unconstrained O position, which is already in [0, box) because the caller
   # wraps positions each step via shift_fn).  The SETTLE geometry correction is
   # sub-Ångström, so pos_oxygen_c is within a fraction of a bond-length of
-  # pos_oxygen_new, and the minimum-image delta is << 0.5 box.  The only
-  # exception is a genuine PBC crossing (|delta| ≈ box), handled by round().
-  # Crucially, the image decision is based on (pos_oxygen_c - pos_oxygen_new),
-  # NOT on pos_oxygen_c alone, so FMA-level differences in the Horn-SETTLE
-  # result (9.9999... vs 10.0000...) produce a delta difference of only ~1e-7,
-  # not the ±box discontinuity that jnp.mod exhibits.
+  # pos_oxygen_new, and the minimum-image delta is << 0.5 box. Crucially, the
+  # image decision is based on (pos_oxygen_c - pos_oxygen_new), NOT on
+  # pos_oxygen_c alone, so FMA-level differences in the Horn-SETTLE result
+  # (9.9999... vs 10.0000...) produce a delta difference of only ~1e-7, not the
+  # ±box discontinuity that jnp.mod exhibits.
   if box is not None:
     # Minimum-image of pos_oxygen_c relative to pos_oxygen_new.
     # All three constrained atoms get the same rigid integer-image shift so
     # the molecule's internal geometry is not distorted.
     delta_o = pos_oxygen_c - pos_oxygen_new
-    image_correction = -box * jnp.round(delta_o / box)
+    image_correction = -box * jnp.floor(delta_o / box + 0.5)
 
     pos_oxygen_c = pos_oxygen_c + image_correction
     pos_h1_c = pos_h1_c + image_correction
@@ -770,10 +769,10 @@ def _r_step_conserve_angular_momentum(
   r_H2_unc = x_unc[indices.hydrogen2]  # (N_w, 3)
   if box is not None:
     dH1 = r_H1_unc - r_O_unc
-    dH1 = dH1 - box * jnp.round(dH1 / box)
+    dH1 = dH1 - box * jnp.floor(dH1 / box + 0.5)
     r_H1_unc = r_O_unc + dH1
     dH2 = r_H2_unc - r_O_unc
-    dH2 = dH2 - box * jnp.round(dH2 / box)
+    dH2 = dH2 - box * jnp.floor(dH2 / box + 0.5)
     r_H2_unc = r_O_unc + dH2
   r_unc_w = jnp.stack([r_O_unc, r_H1_unc, r_H2_unc], axis=1)  # (N_w, 3, 3)
   p_pre_a_w = jnp.stack(
@@ -1274,7 +1273,7 @@ def settle_langevin(
     # density (see scripts/explore/p5_rstep_substep_trace.py).
     dx_1 = x_con_1 - x_unc_1
     if box is not None:
-      dx_1 = dx_1 - box * jnp.round(dx_1 / box)
+      dx_1 = dx_1 - box * jnp.floor(dx_1 / box + 0.5)
     dp_1 = state.mass * dx_1 / half_dt
     momentum = momentum + dp_1
 
@@ -1326,7 +1325,7 @@ def settle_langevin(
     # see R1 above for why the raw difference is unsafe under PBC wrapping).
     dx_2 = x_con_2 - x_unc_2
     if box is not None:
-      dx_2 = dx_2 - box * jnp.round(dx_2 / box)
+      dx_2 = dx_2 - box * jnp.floor(dx_2 / box + 0.5)
     dp_2 = state.mass * dx_2 / half_dt
     momentum = momentum + dp_2
 
