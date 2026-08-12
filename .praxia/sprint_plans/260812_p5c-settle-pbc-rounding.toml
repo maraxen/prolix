@@ -11,6 +11,17 @@
 # close/re-scope) requires sbatch/myxcel access the praxia-fixer agent's Bash allowlist
 # does not grant (cargo/git/praxia/rg/uv only) -- the orchestrator runs Stage 1 directly
 # after this sprint's VERIFY passes, same pattern used for #4167 this session.
+#
+# STAGE 1 ADDENDUM (2026-08-12, user approved "go ahead with Stage 1"): Stage 0+fix
+# VERIFIED PASS (audit 260812_p5c_verify_round2) after one REMEDIATE round on the AC4
+# write-up. Stage 1 build (A/B toggle in settle.py behind an import-time module-level
+# constant, constructed adversarial case targeting L772/L775, N>=5 seed sweep, slurm
+# wrapper) dispatched to a fixer (out-of-Bash-allowlist scope, same constraint as above);
+# the orchestrator runs L1/L2 local gates, pushes to Engaging, creates the bth campaign,
+# submits with the #4193-keyed hang budget (--time=02:00:00, 20min no-progress = hang,
+# retry once, then fall back to REPRO-FIRST on the smaller target only), and selects the
+# closing branch (a)/(b)/(c) per the spec's asymmetric evidence rule. Branch (d) is moot
+# -- Stage 0d already returned REACHABLE.
 
 [sprint]
 sprint_id = "260812_p5c-settle-pbc-rounding"
