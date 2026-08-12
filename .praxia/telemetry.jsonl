@@ -92,3 +92,11 @@
 {"agent_type":"unknown","verdict":"unparsed","verdict_source":"unparsed","commit":"","event":"subagent_stop","telemetry_id":"subagent-stop-a7c9af8ecff6d00ee","date":"2026-08-11"}
 {"agent_type":"unknown","verdict":"unparsed","verdict_source":"unparsed","commit":"","event":"subagent_stop","telemetry_id":"subagent-stop-aae1776fce2b68ab4","date":"2026-08-11"}
 {"agent_type":"praxia:auditor","verdict":"FAIL","verdict_source":"regex","commit":"","event":"subagent_stop","telemetry_id":"subagent-stop-ab46f7664c6f71719","date":"2026-08-11"}
+{"agent_type":"unknown","verdict":"PASS","verdict_source":"regex","commit":"","event":"subagent_stop","telemetry_id":"subagent-stop-ad91697ac33b8c6c2","date":"2026-08-12"}
+{"agent_type":"unknown","verdict":"unparsed","verdict_source":"unparsed","commit":"","event":"subagent_stop","telemetry_id":"subagent-stop-af34d48b9c9a2cfe4","date":"2026-08-12"}
+{"agent_type":"unknown","verdict":"unparsed","verdict_source":"unparsed","commit":"","event":"subagent_stop","telemetry_id":"subagent-stop-a3e4f3c7d03a9d92e","date":"2026-08-12"}
+{"agent_type":"unknown","verdict":"unparsed","verdict_source":"unparsed","commit":"","event":"subagent_stop","telemetry_id":"subagent-stop-a1200b5bd9a8f0bf9","date":"2026-08-12"}
+{"agent_type":"praxia-fixer","tool_tier":"READ","event":"subagent_start","telemetry_id":"subagent-start-af5c9e44c839e5f48","date":"2026-08-12"}
+{"agent_type":"unknown","verdict":"unparsed","verdict_source":"unparsed","commit":"","event":"subagent_stop","telemetry_id":"subagent-stop-a14c75bd32dbc2022","date":"2026-08-12"}
+{"agent_type":"unknown","verdict":"unparsed","verdict_source":"unparsed","commit":"","event":"subagent_stop","telemetry_id":"subagent-stop-ab23e3a04faa39997","date":"2026-08-12"}
+{"agent_type":"praxia-fixer","verdict":"unparsed","verdict_source":"unparsed","commit":"","event":"subagent_stop","telemetry_id":"subagent-stop-af5c9e44c839e5f48","date":"2026-08-12"}
