@@ -100,3 +100,4 @@
 {"agent_type":"unknown","verdict":"unparsed","verdict_source":"unparsed","commit":"","event":"subagent_stop","telemetry_id":"subagent-stop-a14c75bd32dbc2022","date":"2026-08-12"}
 {"agent_type":"unknown","verdict":"unparsed","verdict_source":"unparsed","commit":"","event":"subagent_stop","telemetry_id":"subagent-stop-ab23e3a04faa39997","date":"2026-08-12"}
 {"agent_type":"praxia-fixer","verdict":"unparsed","verdict_source":"unparsed","commit":"","event":"subagent_stop","telemetry_id":"subagent-stop-af5c9e44c839e5f48","date":"2026-08-12"}
+{"agent_type":"unknown","verdict":"FAIL","verdict_source":"regex","commit":"","event":"subagent_stop","telemetry_id":"subagent-stop-a8632878e2f979545","date":"2026-08-12"}
