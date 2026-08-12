@@ -53,7 +53,7 @@ _PBC_ROUND_MODE = os.environ.get("PROLIX_PBC_ROUND_MODE", "floor")
 
 
 def _pbc_round_floor(x: Array) -> Array:
-  """Round-half-up via floor(x + 0.5) — deterministic regardless of FMA reassociation."""
+  """Round-half-up via floor(x + 0.5) — project convention for A/B testing."""
   return jnp.floor(x + 0.5)
 
 
@@ -308,12 +308,15 @@ def _settle_water_batch(
 
   NOTES:
   - PBC unwrap uses ``jnp.floor(delta/box + 0.5)`` rather than ``jnp.round``.
-    ``jnp.round`` applies banker's rounding (round-half-to-even); under XLA FMA
-    contraction on cluster hardware, values at ULP proximity to ±0.5 can round
-    in opposite directions on the loop path vs the vmap path, producing an
-    8.975 Å RMSD in ``test_settle_batched_vs_unbatched`` on the Engaging cluster
-    while passing locally.  ``floor(x + 0.5)`` gives deterministic round-half-up
-    regardless of FMA reassociation order.
+    This is a PROJECT CONVENTION adopted to enable A/B testing (a consistent
+    single idiom across all code). Both ``round(x)`` and ``floor(x+0.5)`` are
+    pure functions of float64 input and equally susceptible to ULP-level
+    differences between code paths; neither is inherently more deterministic
+    under FMA reassociation. In fact, ``floor(x+0.5)`` is marginally LESS
+    accurate due to double-rounding in the addition step. Historical note:
+    an 8.975 Å divergence was observed in looped vs vmapped paths on cluster
+    hardware, but this observation is unverified and not causally attributed
+    to this rounding site.
 
   Args:
       r_O_old, r_H1_old, r_H2_old: Old positions (used for PBC unwrap only).
@@ -327,8 +330,8 @@ def _settle_water_batch(
       Tuple of constrained positions (r_O_c, r_H1_c, r_H2_c).
   """
   # Apply minimum image convention if box is provided.
-  # floor(x + 0.5) instead of round(x): deterministic round-half-up avoids
-  # FMA ULP banker's rounding divergence between loop and vmap paths on cluster.
+  # Uses _PBC_ROUND_FN (floor(x+0.5) by default) as project convention;
+  # enables A/B testing of rounding modes (round vs floor).
   if box is not None:
 
     def unwrap(pos_new, pos_old):
