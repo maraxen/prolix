@@ -337,7 +337,14 @@ def _run_comparison(
 
     # Build B=2 batch by stacking the same initial state twice
     def _batch(s):
-        return jax.tree.map(lambda x: jnp.stack([x, x], axis=0), s)
+        # B=1 (expand_dims), matching the actual repo regression test
+        # (test_settle_batched_vs_unbatched) exactly -- NOT a B=2 duplicate
+        # stack. B=2 exercises genuinely batched/vectorized XLA kernels with
+        # their own floating-point reduction order, which can differ from the
+        # unbatched path locally for reasons unrelated to anything under
+        # investigation here; B=1 is the near-trivial wrap the real bug
+        # (passes locally, diverges only on cluster) is actually defined by.
+        return jax.tree.map(lambda x: jnp.expand_dims(x, 0), s)
 
     batched_state = _batch(ref_state)
 
@@ -514,7 +521,14 @@ def _run_constructed_case(
 
     # Build B=2 batch by stacking
     def _batch(s):
-        return jax.tree.map(lambda x: jnp.stack([x, x], axis=0), s)
+        # B=1 (expand_dims), matching the actual repo regression test
+        # (test_settle_batched_vs_unbatched) exactly -- NOT a B=2 duplicate
+        # stack. B=2 exercises genuinely batched/vectorized XLA kernels with
+        # their own floating-point reduction order, which can differ from the
+        # unbatched path locally for reasons unrelated to anything under
+        # investigation here; B=1 is the near-trivial wrap the real bug
+        # (passes locally, diverges only on cluster) is actually defined by.
+        return jax.tree.map(lambda x: jnp.expand_dims(x, 0), s)
 
     batched_state = _batch(ref_state)
 
@@ -702,7 +716,18 @@ def _run_small_system_seeded(box_size: float, steps: int, seed: int) -> dict:
     # Harmonic energy (matches test fixture)
     positions_ref = positions
     def energy_fn(pos, box=None):
-        return 0.5 * 0.5 * jnp.sum((pos - positions_ref) ** 2)
+        # Matches tests/physics/test_settle_batched.py's analytical_energy_fn
+        # fixture EXACTLY: harmonic restoring + weak LJ pair between O (atom 0)
+        # and the solute (atom 3). Omitting the LJ term (as an earlier version
+        # of this script did) changes the actual dynamics from what the real
+        # regression test simulates.
+        e_harmonic = 0.5 * 0.5 * jnp.sum((pos - positions_ref) ** 2)
+        r_oc = jnp.linalg.norm(pos[3] - pos[0])
+        sigma = 3.5
+        epsilon = 0.1
+        r6 = (sigma / r_oc) ** 6
+        e_lj = 4.0 * epsilon * (r6**2 - r6)
+        return e_harmonic + e_lj
 
     init_fn, apply_fn = settle.settle_langevin(
         energy_fn,
@@ -721,7 +746,14 @@ def _run_small_system_seeded(box_size: float, steps: int, seed: int) -> dict:
     ref_state = init_fn(key, positions, box=box_vec)
 
     def _batch(s):
-        return jax.tree.map(lambda x: jnp.stack([x, x], axis=0), s)
+        # B=1 (expand_dims), matching the actual repo regression test
+        # (test_settle_batched_vs_unbatched) exactly -- NOT a B=2 duplicate
+        # stack. B=2 exercises genuinely batched/vectorized XLA kernels with
+        # their own floating-point reduction order, which can differ from the
+        # unbatched path locally for reasons unrelated to anything under
+        # investigation here; B=1 is the near-trivial wrap the real bug
+        # (passes locally, diverges only on cluster) is actually defined by.
+        return jax.tree.map(lambda x: jnp.expand_dims(x, 0), s)
 
     batched_state = _batch(ref_state)
 
@@ -739,7 +771,7 @@ def _run_small_system_seeded(box_size: float, steps: int, seed: int) -> dict:
         unbatched_curr = apply_fn_step(unbatched_curr)
         batched_curr = vmapped_apply(batched_curr)
 
-        for replica in range(2):
+        for replica in range(1):  # B=1: only one batch element
             diff = float(jnp.max(jnp.abs(unbatched_curr.positions - batched_curr.positions[replica])))
             if diff > max_diff:
                 max_diff = diff
@@ -789,7 +821,18 @@ def _run_small_system_translated(box_size: float, steps: int, seed: int) -> dict
 
     positions_ref = positions
     def energy_fn(pos, box=None):
-        return 0.5 * 0.5 * jnp.sum((pos - positions_ref) ** 2)
+        # Matches tests/physics/test_settle_batched.py's analytical_energy_fn
+        # fixture EXACTLY: harmonic restoring + weak LJ pair between O (atom 0)
+        # and the solute (atom 3). Omitting the LJ term (as an earlier version
+        # of this script did) changes the actual dynamics from what the real
+        # regression test simulates.
+        e_harmonic = 0.5 * 0.5 * jnp.sum((pos - positions_ref) ** 2)
+        r_oc = jnp.linalg.norm(pos[3] - pos[0])
+        sigma = 3.5
+        epsilon = 0.1
+        r6 = (sigma / r_oc) ** 6
+        e_lj = 4.0 * epsilon * (r6**2 - r6)
+        return e_harmonic + e_lj
 
     init_fn, apply_fn = settle.settle_langevin(
         energy_fn,
@@ -808,7 +851,14 @@ def _run_small_system_translated(box_size: float, steps: int, seed: int) -> dict
     ref_state = init_fn(key, positions, box=box_vec)
 
     def _batch(s):
-        return jax.tree.map(lambda x: jnp.stack([x, x], axis=0), s)
+        # B=1 (expand_dims), matching the actual repo regression test
+        # (test_settle_batched_vs_unbatched) exactly -- NOT a B=2 duplicate
+        # stack. B=2 exercises genuinely batched/vectorized XLA kernels with
+        # their own floating-point reduction order, which can differ from the
+        # unbatched path locally for reasons unrelated to anything under
+        # investigation here; B=1 is the near-trivial wrap the real bug
+        # (passes locally, diverges only on cluster) is actually defined by.
+        return jax.tree.map(lambda x: jnp.expand_dims(x, 0), s)
 
     batched_state = _batch(ref_state)
 
@@ -826,7 +876,7 @@ def _run_small_system_translated(box_size: float, steps: int, seed: int) -> dict
         unbatched_curr = apply_fn_step(unbatched_curr)
         batched_curr = vmapped_apply(batched_curr)
 
-        for replica in range(2):
+        for replica in range(1):  # B=1: only one batch element
             diff = float(jnp.max(jnp.abs(unbatched_curr.positions - batched_curr.positions[replica])))
             if diff > max_diff:
                 max_diff = diff
@@ -875,7 +925,18 @@ def _run_small_system_bitexact(box_size: float, _seed: int) -> dict:
 
     positions_ref = positions
     def energy_fn(pos, box=None):
-        return 0.5 * 0.5 * jnp.sum((pos - positions_ref) ** 2)
+        # Matches tests/physics/test_settle_batched.py's analytical_energy_fn
+        # fixture EXACTLY: harmonic restoring + weak LJ pair between O (atom 0)
+        # and the solute (atom 3). Omitting the LJ term (as an earlier version
+        # of this script did) changes the actual dynamics from what the real
+        # regression test simulates.
+        e_harmonic = 0.5 * 0.5 * jnp.sum((pos - positions_ref) ** 2)
+        r_oc = jnp.linalg.norm(pos[3] - pos[0])
+        sigma = 3.5
+        epsilon = 0.1
+        r6 = (sigma / r_oc) ** 6
+        e_lj = 4.0 * epsilon * (r6**2 - r6)
+        return e_harmonic + e_lj
 
     init_fn, apply_fn = settle.settle_langevin(
         energy_fn,
@@ -894,7 +955,14 @@ def _run_small_system_bitexact(box_size: float, _seed: int) -> dict:
     unbatched_state = init_fn(key, positions, box=box_vec)
 
     def _batch(s):
-        return jax.tree.map(lambda x: jnp.stack([x, x], axis=0), s)
+        # B=1 (expand_dims), matching the actual repo regression test
+        # (test_settle_batched_vs_unbatched) exactly -- NOT a B=2 duplicate
+        # stack. B=2 exercises genuinely batched/vectorized XLA kernels with
+        # their own floating-point reduction order, which can differ from the
+        # unbatched path locally for reasons unrelated to anything under
+        # investigation here; B=1 is the near-trivial wrap the real bug
+        # (passes locally, diverges only on cluster) is actually defined by.
+        return jax.tree.map(lambda x: jnp.expand_dims(x, 0), s)
 
     batched_state = _batch(unbatched_state)
 
