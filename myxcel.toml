@@ -1,6 +1,9 @@
 # Project-level myxcel configuration for prolix.
 # Override resolution: built-in → ~/.myxcel.toml → this file (env/extra_args merged).
 
+[tier]
+kind = "research"
+
 [slurm.presets.preempt_gpu]
 # Preemptable GPU jobs — long walltime, fault-tolerant workloads.
 # Use for multi-hour GPU runs that can tolerate preemption.
