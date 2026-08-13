@@ -31,6 +31,7 @@ dependencies = [
     "rdkit>=2024.3.0",
     "xtrax>=0.4.0a5,<0.5",
     "parmed>=4.3.1",
+    "openmmtools",
 ]
 
 [project.urls]
@@ -188,6 +189,9 @@ empty-body = "ignore"
 required-environments = [
     "sys_platform == 'linux' and platform_machine == 'x86_64'",
 ]
+
+[tool.uv.sources]
+openmmtools = { git = "https://github.com/choderalab/openmmtools" }
 
 [dependency-groups]
 # Keep in sync with [project.optional-dependencies] dev (no OpenMM here — see `openmm` extra).
