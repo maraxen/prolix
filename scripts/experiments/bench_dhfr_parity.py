@@ -309,7 +309,6 @@ def _build_smoke_system_dict(ff_path: str):
         "improper_params": jnp.asarray(improper_params) if improper_params is not None else jnp.zeros((0, 4, 3)),
     }
 
-    n_waters = int(merged.water_indices.shape[0])
     return (
         sys_dict, jnp.asarray(merged.positions), jnp.asarray(merged.box_size),
         jnp.asarray(merged.water_indices), jnp.asarray(merged.masses),
