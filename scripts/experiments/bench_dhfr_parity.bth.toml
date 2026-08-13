@@ -1,0 +1,58 @@
+[experiment]
+hypothesis = """
+RR5 (paper-gating): prolix's settle_langevin dt=1.0 fs NVT path achieves
+throughput parity (ns/day) with OpenMM on the standard JAC/DHFR explicit-
+solvent benchmark (23,558 atoms, TIP3P, PME, gate job 15870804 / 19774893
+provenance). This sidecar's own gate is HARNESS-LEVEL ONLY: did the script
+produce a finite, positive ratio and a recorded wallclock for a given
+(shim_mode, seed, gpu_tag) cell? It does NOT encode the RR5 3-tier science
+verdict (pass >=0.7x / marginal <0.7x-not-yet-optimized / fail-residual)
+described in the sprint plan (task 260813_triage_next_sprint,
+plan_id 260813_s2_dhfr_plan) -- that verdict is an AGGREGATION across all
+runs (both GPUs, both shim modes, pre/post any profiling-driven
+optimization pass), computed downstream via `bth sql` in Phase 6, not
+per-single-run here.
+
+KNOWN SCOPE LIMIT (see scripts/experiments/bench_dhfr_parity.py module
+docstring "KNOWN BLOCKER"): --shim-mode analytical is not currently
+runnable at DHFR scale (or any non-trivial protein scale) because
+angle_forces_analytical / dihedral_forces_analytical
+(src/prolix/physics/analytical_forces.py) are unvectorized Python
+for-loops under jax.grad -- empirically 61.8s to JIT-compile for just 818
+angles in isolation. Runs tagged shim_mode=analytical at production scale
+should not be expected to exist in the catalog until that vectorization bug
+is fixed upstream; this is a pre-existing library bug, not something this
+harness works around silently.
+"""
+
+[outcomes.pass]
+condition = "ratio IS NOT NULL AND ratio > 0 AND ratio < 1e6 AND wallclock_s IS NOT NULL AND wallclock_s > 0 AND prolix_ns_per_day IS NOT NULL AND openmm_ns_per_day IS NOT NULL"
+decision = "Harness produced a valid, finite throughput measurement for this (shim_mode, seed, gpu_tag) cell. Proceed to aggregate across cells in Phase 6 (bth campaign review / bth sql) to compute the RR5 3-tier verdict per the plan's gate rule."
+reasoning = "A finite positive ratio with recorded wallclock on both engines means the comparison ran to completion end-to-end (proxide parse -> box glue -> filtered bonded terms -> settle_langevin production window; OpenMM System deserialize -> Context -> stepped production window) without NaN/Inf, crash, or a zero-division. The upper bound (1e6) is a sanity cap catching a degenerate near-zero openmm_ns_per_day (e.g. OpenMM stalled) rather than a real speed claim."
+
+[outcomes.fail]
+condition = "ratio IS NULL OR ratio <= 0 OR ratio >= 1e6 OR wallclock_s IS NULL OR wallclock_s <= 0 OR prolix_ns_per_day IS NULL OR openmm_ns_per_day IS NULL"
+decision = "Investigate: (a) NaN/Inf ratio -- check for a crashed/zero wallclock on either engine (script exited before the timed region, or the timed loop produced non-finite positions -- inspect the bth run log); (b) ratio near zero or absurdly large -- one engine's step count or dt didn't match the other (verify DT_FS/n_production_steps parity between the prolix and OpenMM legs); (c) for shim_mode=analytical specifically, check first whether this is the KNOWN _ANALYTICAL_MAX_BONDED_TERMS guard raising (expected, not a new bug -- see module docstring) versus a genuine new failure."
+reasoning = "Any of these conditions means the run did not produce a usable RR5 data point. The is_residual=true catches everything not explicitly passing, including the known/expected analytical-mode guard rejection."
+is_residual = true
+
+[result_schema]
+prolix_ns_per_day = "float"
+openmm_ns_per_day = "float"
+ratio = "float"
+shim_mode = "str"
+seed = "int"
+gpu_tag = "str"
+n_atoms = "int"
+wallclock_s = "float"
+openmm_wallclock_s = "float"
+openmm_platform = "str"
+n_warmup_steps = "int"
+n_production_steps = "int"
+dt_fs = "float"
+smoke = "bool"
+
+[metadata]
+campaign_id = "s2-dhfr-rr5-parity"
+campaign_mode = "confirmation"
+tags = ["cluster", "s2", "dhfr", "rr5", "295", "294"]
