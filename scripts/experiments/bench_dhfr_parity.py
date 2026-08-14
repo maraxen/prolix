@@ -2,19 +2,25 @@
 
 Loads the 23,558-atom DHFR/TIP3P/PME benchmark fixture (materialized by
 ``scripts/data_prep/fetch_dhfr_benchmark.py``, backlog #295) via proxide's
-CURRENT ``parse_structure`` API, runs ``n_warmup_ps`` + ``n_production_ns`` of
-NVT dynamics through prolix's validated ``settle_langevin`` dt=1.0 fs path,
-runs the matching step count through OpenMM (deserializing the pre-built
-``dhfr_jac_benchmark_system.xml``), and reports the ns/day throughput ratio.
+CURRENT ``parse_structure`` API, wraps the corrected topology into a real
+``MolecularBundle`` (``prolix.physics.system.make_bundle_from_system``), and
+dispatches production NVT dynamics through the ACTUAL production entry point
+-- ``prolix.api.EnsemblePlan`` (composed xtrax: ``EnsemblePlan`` routes
+batching through ``xtrax.tiling`` primitives via
+``prolix.tiling.xtrax_adapter`` / ``prolix.api.ensemble_dispatch`` /
+``prolix.api.ensemble_dedup``) -- rather than hand-rolling
+``settle_langevin`` + a raw ``jax.lax.scan`` loop in this script. Runs the
+matching step count through OpenMM (deserializing the pre-built
+``dhfr_jac_benchmark_system.xml``) and reports the ns/day throughput ratio.
 
 Two DEAD-CODE / API corrections baked in (see task 260813_triage_next_sprint,
 recon 260813_dhfr_fixture_phase1):
   1. Uses ``from proxide import CoordFormat, OutputSpec, parse_structure``
      (the ``proxide.md.jax_md_bridge`` pattern in benchmark_ensembles.py is
-     dead — ModuleNotFoundError against proxide==0.1.0a9).
+     dead -- ModuleNotFoundError against proxide==0.1.0a9).
   2. proxide's parsed ``Protein`` has no box field and, for this fixture with
      a bare protein force field, returns ALL-ZERO charges/sigma/epsilon for
-     the water (HOH) region (confirmed empirically — NOT merely "shape
+     the water (HOH) region (confirmed empirically -- NOT merely "shape
      populated", the values are actually zero). Box is read from the PDB's
      CRYST1 record; water nonbonded params are overridden with prolix's own
      TIP3P registry (``prolix.physics.water_models.get_water_params``),
@@ -29,41 +35,61 @@ water's O-H bonds and H-O-H angles as ordinary harmonic bonded terms (16569
 total bonds for DHFR, of which exactly 14046 = 2*7023 are pure water-water
 pairs; 7023 water angles out of 11584 total). The project's VALIDATED
 dt=1.0 fs SETTLE production configuration (CLAUDE.md, gate job 19774893) uses
-*zero* harmonic bond/angle terms for water — SETTLE alone enforces rigidity
+*zero* harmonic bond/angle terms for water -- SETTLE alone enforces rigidity
 (see ``tests/physics/test_explicit_langevin_tip3p_parity.py::_proxide_params_pure_water``,
 which explicitly zeros these). Leaving proxide's water bonds/angles in would
 silently double-constrain water (SETTLE + harmonic restraint) and would not
 be the same physical system CLAUDE.md's dt cap was validated on, corrupting
 both the physics and the throughput comparison (extra bonded-force
 evaluations per step). This script filters bonds/angles/dihedrals/impropers
-to protein-only atom index ranges before constructing the energy function,
-using proxide's ``molecule_type`` array to determine the protein/water atom
-split point programmatically (not a hardcoded atom count).
+to protein-only atom index ranges before constructing the bundle, using
+proxide's ``molecule_type`` array to determine the protein/water atom split
+point programmatically (not a hardcoded atom count).
 
-KNOWN BLOCKER (found this build, filed as a finding — not worked around):
-``--shim-mode analytical`` cannot be exercised at DHFR scale, or even at
-smoke scale, because ``prolix.physics.analytical_forces.angle_forces_analytical``
-and ``dihedral_forces_analytical`` are implemented as native Python ``for``
-loops over every angle/dihedral term, wrapped in ``jax.grad`` — i.e. NOT
-vectorized, despite the "analytical" naming. Empirically measured: JIT-
-compiling ``angle_forces_analytical`` ALONE for 660 atoms / 818 angles
-(1UBQ-scale) takes 61.8 seconds — already over this harness's entire 60s L2
-smoke budget, before dihedrals/impropers/urey-bradley or the full BAOAB+
-SETTLE integrator compile are even added, and light-years short of DHFR's
-~4561 protein-only angles + thousands of dihedral terms. This script
-implements ANALYTICAL mode faithfully against the current (buggy)
-primitives, but guards it with ``_ANALYTICAL_MAX_BONDED_TERMS`` and raises a
-clear, actionable error rather than hanging — see module-level docstring and
-the final sprint report for the full finding. AUTOGRAD mode is unaffected
-(``prolix.physics.bonded``'s energy functions are properly vectorized) and
-is what CLAUDE.md's validated dt=1.0 fs production configuration actually
-uses.
+A FOURTH correction (this build, task 260814_dhfr-bench-redesign): the
+original version of this script hand-rolled the physics stack directly
+(``settle.settle_langevin`` + a raw ``jax.lax.scan``) and timed a naive
+warmup/production ``lax.scan`` pair with DIFFERENT static ``length`` values.
+Since ``lax.scan``'s ``length`` is a trace-time-static constant, the two
+calls compile as two distinct XLA programs -- the "timed" call silently ate
+a full fresh JIT compile, meaning the reported ns/day was compile-time-
+contaminated, not real per-step throughput. Fixed by (a) calling the actual
+production entry point (``EnsemblePlan.from_bundle(bundle).run(...,
+run_mode="inference")``) instead of reimplementing the integrator here, and
+(b) decomposing compile vs. compute via a linear-regression sweep across
+``--n-steps-list`` (same methodology as
+``scripts/experiments/profile_b1_heterogeneous_solvated_compile.py``, already
+validated on real cluster runs): per-call fixed/compile overhead is roughly
+independent of ``n_steps`` while real compute scales linearly with it, so
+``np.polyfit(n_steps - 1, t_steady_state)`` robustly recovers true per-step
+compute time (the slope, ``per_step_corrected_s``) and fixed overhead (the
+intercept, ``compile_fixed_s``), with ``r_squared`` as a built-in fit-quality
+sanity check -- regardless of whether JAX caches or re-pays compilation
+across separate calls (verified empirically NOT cached across ``EnsemblePlan
+.run()`` calls; the regression is robust either way, since it only assumes
+overhead is roughly constant in ``n_steps``, not that it's paid once).
+
+KNOWN BLOCKER, now OUT OF SCOPE rather than worked around (found in the
+original build, filed as a finding): the old ``--shim-mode analytical`` path
+hand-rolled a force function using
+``prolix.physics.analytical_forces.angle_forces_analytical`` /
+``dihedral_forces_analytical``, which are unvectorized native Python ``for``
+loops wrapped in ``jax.grad`` (empirically 61.8s to JIT-compile for just 818
+angles at 1UBQ scale). The ACTUAL production path this script now calls
+(``EnsemblePlan`` -> ``prolix.api.bundle_md.energy_fn_from_bundle``) has no
+such switch -- it always uses the properly vectorized autograd bonded energy
+functions in ``prolix.physics.bonded``. "Analytical mode" was never a real
+production configuration; it was a benchmark-only reimplementation. Passing
+``--shim-mode analytical`` now raises immediately rather than attempting a
+reimplementation this script no longer maintains -- see ``main()``. The
+underlying vectorization bug (backlog #4241) is unaffected by this change and
+remains open upstream.
 
 Usage:
     uv run python scripts/experiments/bench_dhfr_parity.py --dry-run --out /dev/null
-    uv run python scripts/experiments/bench_dhfr_parity.py --smoke --shim-mode autograd --out /tmp/smoke.json
+    uv run python scripts/experiments/bench_dhfr_parity.py --smoke --out /tmp/smoke.json
     uv run bth run python scripts/experiments/bench_dhfr_parity.py \\
-        --shim-mode autograd --gpu-tag h200 --out outputs/bench_dhfr_parity.json --campaign <id>
+        --gpu-tag h200 --out outputs/bench_dhfr_parity.json --campaign <id>
 """
 
 from __future__ import annotations
@@ -75,6 +101,8 @@ import os
 import sys
 import time
 from pathlib import Path
+
+import numpy as np
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
@@ -101,12 +129,25 @@ SMOKE_PDB = DATA_DIR / "1VII.pdb"  # see module docstring: 1UBQ.pdb has no
 DT_FS = 1.0  # AKMA production cap, validated at production scale (CLAUDE.md)
 GAMMA_PS = 10.0
 TARGET_KELVIN = 300.0
+PME_ALPHA = 0.34
+NONBONDED_CUTOFF = 9.0
 
-# See module docstring "KNOWN BLOCKER". Empirically: 818 angles alone took
-# 61.8s to JIT-compile in angle_forces_analytical (unvectorized Python loop).
-# This threshold is deliberately conservative -- it exists purely to fail
-# fast and legibly rather than hang for minutes on any real protein.
-_ANALYTICAL_MAX_BONDED_TERMS = 100
+# Fixed smoke-mode compile/compute regression sweep -- user-selected
+# (AskUserQuestion, task 260814_dhfr-bench-redesign): small enough to run in
+# the L2 smoke budget while still giving >=2 points for a real regression fit.
+_SMOKE_N_STEPS_LIST = [5, 20, 50, 100]
+
+# Full-mode calibration points below the actual production target -- the
+# target step count (derived from --n-production-ns) is appended as the
+# LARGEST point per the user's explicit design choice (AskUserQuestion:
+# "Include as largest sweep point"), so the regression's top point is a real
+# production-scale run, not just an extrapolation.
+_FULL_CALIBRATION_STEPS = [50, 200, 1000, 5000]
+
+# OpenMM's kernel compiles once at Context creation (not per step-count, so
+# no regression is needed there); this fixed warmup absorbs that one-time
+# cost before the timed OpenMM window.
+_OPENMM_WARMUP_STEPS = 500
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 logger = logging.getLogger(__name__)
@@ -316,118 +357,118 @@ def _build_smoke_system_dict(ff_path: str):
     )
 
 
-def _make_prolix_force_or_energy(sys_dict, positions, box_vec, exclusion_spec, shim_mode: str):
-    """Build the callable passed to settle_langevin, per --shim-mode."""
-    import jax
-    from prolix.physics import pbc, system
-    from prolix.physics.analytical_forces import (
-        bond_forces_analytical, angle_forces_analytical, dihedral_forces_analytical,
-        improper_forces_analytical,
+def _build_bundle_from_sys_data(sys_data):
+    """Wrap corrected topology components into a real MolecularBundle.
+
+    Uses ``make_bundle_from_system`` (src/prolix/physics/system.py) directly
+    on the ALREADY-assembled (and already-corrected: TIP3P override, water
+    bonded-term filtering) topology components -- NOT
+    ``solvate_protein_to_bundle``, which would re-solvate from scratch and
+    silently produce a different water count/box than the reference
+    ``dhfr_jac_benchmark_system.xml`` OpenMM system, breaking parity.
+    """
+    from types import SimpleNamespace
+
+    from prolix.physics.system import make_bundle_from_system
+
+    sys_dict, positions, box_vec, water_indices, masses, exclusion_spec, _n_protein_atoms = sys_data
+
+    ns = SimpleNamespace(
+        positions=positions,
+        box_size=box_vec,
+        masses=masses,
+        charges=sys_dict["charges"],
+        sigmas=sys_dict["sigmas"],
+        epsilons=sys_dict["epsilons"],
+        bonds=sys_dict["bonds"],
+        bond_params=sys_dict["bond_params"],
+        angles=sys_dict["angles"],
+        angle_params=sys_dict["angle_params"],
+        dihedrals=sys_dict["dihedrals"],
+        dihedral_params=sys_dict["dihedral_params"],
+        impropers=sys_dict["impropers"],
+        improper_params=sys_dict["improper_params"],
+        water_indices=water_indices,
+        pme_alpha=PME_ALPHA,
+        nonbonded_cutoff=NONBONDED_CUTOFF,
     )
-
-    displacement_fn, shift_fn = pbc.create_periodic_space(box_vec)
-
-    n_angles = int(sys_dict["angles"].shape[0])
-    n_dih_terms = int(sys_dict["dihedral_params"].shape[0] * max(sys_dict["dihedral_params"].shape[1], 1)) \
-        if sys_dict["dihedrals"].shape[0] > 0 else 0
-    n_imp = int(sys_dict["impropers"].shape[0])
-
-    if shim_mode == "autograd":
-        energy_fn = system.make_energy_fn(
-            displacement_fn, sys_dict, box=box_vec, use_pbc=True,
-            implicit_solvent=False, exclusion_spec=exclusion_spec,
-            pme_grid_points=64, pme_alpha=0.34, cutoff_distance=9.0,
-            positions=positions,
-        )
-        return energy_fn, displacement_fn, shift_fn
-
-    if shim_mode == "analytical":
-        if n_angles + n_dih_terms + n_imp > _ANALYTICAL_MAX_BONDED_TERMS:
-            raise RuntimeError(
-                f"--shim-mode analytical refused: {n_angles} angles + {n_dih_terms} dihedral "
-                f"terms + {n_imp} impropers = {n_angles + n_dih_terms + n_imp} exceeds the safety "
-                f"threshold ({_ANALYTICAL_MAX_BONDED_TERMS}). angle_forces_analytical and "
-                "dihedral_forces_analytical (src/prolix/physics/analytical_forces.py) are "
-                "unvectorized native Python for-loops wrapped in jax.grad -- empirically "
-                "measured at 61.8s JIT-compile time for JUST 818 angles (660-atom system), "
-                "in isolation, before dihedrals/full-integrator-compile stack on top. This is "
-                "a pre-existing bug (angle/dihedral forces are not actually vectorized despite "
-                "the 'analytical' name), NOT something introduced by this benchmark. Do not "
-                "raise this threshold to force a run through -- fix the underlying "
-                "vectorization (jax.vmap + segment_sum, matching bond_forces_analytical's own "
-                "pattern) first. See scripts/experiments/bench_dhfr_parity.py module docstring "
-                "'KNOWN BLOCKER' and the sprint report for task 260813_triage_next_sprint."
-            )
-
-        components = system.make_energy_fn(
-            displacement_fn, sys_dict, box=box_vec, use_pbc=True,
-            implicit_solvent=False, exclusion_spec=exclusion_spec,
-            pme_grid_points=64, pme_alpha=0.34, cutoff_distance=9.0,
-            positions=positions, return_decomposed=True,
-        )
-        nonbonded_energy_fn = lambda r: (
-            components["lj"](r) + components["exception"](r) + components["electrostatics"](r)
-            + components["cmap"](r)
-        )
-        bond_idx, bond_prm = sys_dict["bonds"], sys_dict["bond_params"]
-        angle_idx, angle_prm = sys_dict["angles"], sys_dict["angle_params"]
-        dih_idx, dih_prm = sys_dict["dihedrals"], sys_dict["dihedral_params"]
-        imp_idx, imp_prm = sys_dict["impropers"], sys_dict["improper_params"]
-
-        def force_fn(r, **kw):
-            f_nonbonded = -jax.grad(nonbonded_energy_fn)(r)
-            f_bond = bond_forces_analytical(r, bond_idx, bond_prm, displacement_fn) if bond_idx.shape[0] else 0.0
-            f_angle = angle_forces_analytical(r, angle_idx, angle_prm, displacement_fn) if angle_idx.shape[0] else 0.0
-            f_dih = dihedral_forces_analytical(r, dih_idx, dih_prm, displacement_fn) if dih_idx.shape[0] else 0.0
-            f_imp = improper_forces_analytical(r, imp_idx, imp_prm, displacement_fn) if imp_idx.shape[0] else 0.0
-            return f_nonbonded + f_bond + f_angle + f_dih + f_imp
-
-        return force_fn, displacement_fn, shift_fn
-
-    raise ValueError(f"Unknown --shim-mode {shim_mode!r}")
+    return make_bundle_from_system(ns, boundary_condition="periodic", exclusion_spec=exclusion_spec)
 
 
-def _run_prolix_nvt(sys_data, shim_mode: str, n_warmup_steps: int, n_production_steps: int, seed: int):
-    import jax
-    import jax.numpy as jnp
-    from prolix.physics import settle
-    from prolix.simulate import AKMA_TIME_UNIT_FS, BOLTZMANN_KCAL
+def _run_prolix_regression(sys_data, n_steps_list, seed: int):
+    """Time EnsemblePlan.run() across a step-count sweep and regress compile vs. compute.
 
-    sys_dict, positions, box_vec, water_indices, masses, exclusion_spec, n_protein_atoms = sys_data
-    n_atoms = positions.shape[0]
+    Mirrors scripts/experiments/profile_b1_heterogeneous_solvated_compile.py's
+    validated methodology exactly: for each n_steps, time a fresh 1-step call
+    (t_first_step, dominated by whatever per-call overhead exists) and a
+    separate (n_steps - 1)-step call on a NEW EnsemblePlan (t_steady_state).
+    Fit t_steady_state = per_step_corrected_s * (n_steps - 1) + compile_fixed_s
+    via least squares across the sweep -- this recovers true per-step compute
+    (the slope) independent of whether JIT compilation is cached or re-paid
+    per call, since only the intercept (not the trend) absorbs fixed overhead.
+    """
+    from prolix.api import EnsemblePlan
+    from prolix.simulate import BOLTZMANN_KCAL
 
-    energy_or_force_fn, displacement_fn, shift_fn = _make_prolix_force_or_energy(
-        sys_dict, positions, box_vec, exclusion_spec, shim_mode
-    )
-
-    dt_akma = DT_FS / AKMA_TIME_UNIT_FS
+    bundle = _build_bundle_from_sys_data(sys_data)
     kT = TARGET_KELVIN * BOLTZMANN_KCAL
-    gamma = GAMMA_PS * AKMA_TIME_UNIT_FS * 1e-3
 
-    init_fn, apply_fn = settle.settle_langevin(
-        energy_or_force_fn, shift_fn, dt=dt_akma, kT=kT, gamma=gamma,
-        mass=masses, water_indices=water_indices, box=box_vec,
-        project_ou_momentum_rigid=True, projection_site="post_o",
-        settle_velocity_iters=10,
+    def _block(traj) -> None:
+        trajs = traj if isinstance(traj, list) else [traj]
+        for t in trajs:
+            jax.block_until_ready(t.positions)
+
+    results = []
+    for n_steps in n_steps_list:
+        plan = EnsemblePlan.from_bundle(bundle)
+
+        t_first0 = time.perf_counter()
+        first = plan.run(n_steps=1, dt=DT_FS, kT=kT, seed=seed, gamma=GAMMA_PS, run_mode="inference")
+        _block(first)
+        t_first = time.perf_counter() - t_first0
+        del first
+
+        t_ss = 0.0
+        if n_steps > 1:
+            t_ss0 = time.perf_counter()
+            last = plan.run(
+                n_steps=n_steps - 1, dt=DT_FS, kT=kT, seed=seed + 1, gamma=GAMMA_PS, run_mode="inference"
+            )
+            _block(last)
+            t_ss = time.perf_counter() - t_ss0
+            del last
+
+        results.append({"n_steps": n_steps, "t_first_step": t_first, "t_steady_state": t_ss})
+        logger.info("n_steps=%d: t_first=%.4fs t_steady_state=%.4fs", n_steps, t_first, t_ss)
+
+    x_vals = [r["n_steps"] - 1 for r in results if r["n_steps"] > 1]
+    y_vals = [r["t_steady_state"] for r in results if r["n_steps"] > 1]
+    slope = intercept = r_squared = float("nan")
+    if len(x_vals) >= 2:
+        x_arr, y_arr = np.array(x_vals, dtype=np.float64), np.array(y_vals, dtype=np.float64)
+        coeffs = np.polyfit(x_arr, y_arr, 1)
+        slope, intercept = float(coeffs[0]), float(coeffs[1])
+        y_pred = slope * x_arr + intercept
+        ss_res = np.sum((y_arr - y_pred) ** 2)
+        ss_tot = np.sum((y_arr - np.mean(y_arr)) ** 2)
+        r_squared = float(1.0 - ss_res / ss_tot) if ss_tot > 0 else float("nan")
+        logger.info("Regression: per_step=%.6e s, compile_fixed=%.6e s, R^2=%.6f", slope, intercept, r_squared)
+    else:
+        logger.warning("n_steps_list had < 2 points with n_steps > 1 -- cannot fit a regression.")
+
+    ns_per_day = (
+        DT_FS * 1e-6 / slope * 86400.0 if slope == slope and slope > 0 else float("nan")  # noqa: PLR0133 (NaN check)
     )
-    state = init_fn(jax.random.key(seed), positions, mass=masses)
-    apply_j = jax.jit(apply_fn)
 
-    def scan_body(state, _):
-        return apply_j(state), None
-
-    # Warmup (untimed, absorbs JIT compile).
-    state, _ = jax.lax.scan(scan_body, state, None, length=max(n_warmup_steps, 1))
-    jax.block_until_ready(state)
-
-    t0 = time.perf_counter()
-    state, _ = jax.lax.scan(scan_body, state, None, length=n_production_steps)
-    jax.block_until_ready(state)
-    wallclock_s = time.perf_counter() - t0
-
-    ns_simulated = n_production_steps * DT_FS * 1e-6
-    ns_per_day = ns_simulated / wallclock_s * 86400.0 if wallclock_s > 0 else float("nan")
-    return {"wallclock_s": wallclock_s, "ns_per_day": ns_per_day, "n_atoms": int(n_atoms)}
+    return {
+        "per_step_corrected_s": slope,
+        "compile_fixed_s": intercept,
+        "r_squared": r_squared,
+        "ns_per_day": ns_per_day,
+        "n_atoms": int(bundle.n_atoms),
+        "n_steps_list": list(n_steps_list),
+        "raw_results": results,
+    }
 
 
 def _run_openmm_comparator(pdb_path: Path, system_xml_path: Path, n_warmup_steps: int,
@@ -457,7 +498,7 @@ def _run_openmm_comparator(pdb_path: Path, system_xml_path: Path, n_warmup_steps
     context.setPositions(pdb.positions)
     context.setVelocitiesToTemperature(TARGET_KELVIN * omm_unit.kelvin)
 
-    integrator.step(max(n_warmup_steps, 1))  # warmup, untimed
+    integrator.step(max(n_warmup_steps, 1))  # warmup, untimed -- OpenMM compiles its kernel once here
 
     t0 = time.perf_counter()
     integrator.step(n_production_steps)
@@ -468,6 +509,85 @@ def _run_openmm_comparator(pdb_path: Path, system_xml_path: Path, n_warmup_steps
     return {
         "wallclock_s": wallclock_s, "ns_per_day": ns_per_day,
         "platform": platform.getName(), "n_atoms": omm_system.getNumParticles(),
+        "n_production_steps": n_production_steps,
+    }
+
+
+def _run_openmm_smoke_comparator(sys_data, n_warmup_steps: int, n_production_steps: int):
+    """Build a matching tiny OpenMM system on the fly (no pre-built XML for the smoke
+    fixture) using the SAME solvated positions/box, so the comparator exercises the
+    identical code path (deserialize->Context) minus the deserialize step itself."""
+    import numpy as np
+    import openmm
+    from openmm import unit as omm_unit
+    from openmm.vec3 import Vec3
+
+    sys_dict, positions, box_vec, water_indices, masses, _exclusion_spec, _n_protein_atoms = sys_data
+    n_atoms = int(positions.shape[0])
+
+    # Context only needs a System + Integrator (no Topology) -- build the
+    # System's forces/constraints directly from sys_dict/water_indices
+    # rather than round-tripping through a Topology + ForceField match.
+    box_edge = float(np.asarray(box_vec)[0])
+    box_vectors = (
+        Vec3(box_edge, 0.0, 0.0) * omm_unit.angstroms,
+        Vec3(0.0, box_edge, 0.0) * omm_unit.angstroms,
+        Vec3(0.0, 0.0, box_edge) * omm_unit.angstroms,
+    )
+
+    omm_system = openmm.System()
+    for m in np.asarray(masses):
+        omm_system.addParticle(float(m))
+    omm_system.setDefaultPeriodicBoxVectors(*box_vectors)
+    nb = openmm.NonbondedForce()
+    nb.setNonbondedMethod(openmm.NonbondedForce.PME)
+    nb.setCutoffDistance(9.0 * omm_unit.angstroms)
+    for q, sig, eps in zip(
+        np.asarray(sys_dict["charges"]), np.asarray(sys_dict["sigmas"]), np.asarray(sys_dict["epsilons"])
+    ):
+        nb.addParticle(float(q), float(sig) * 0.1, float(eps) * 4.184)  # Å->nm, kcal->kJ
+
+    # 1-2/1-3/1-4 exceptions are mandatory: without them, directly-bonded
+    # atoms (~1 Å apart) see full unshielded LJ/Coulomb repulsion from
+    # NonbondedForce and blow up to NaN on the very first step. Build the
+    # full bond graph (protein bonds, already in sys_dict, + water O-H
+    # bonds reconstructed from water_indices) and let OpenMM derive
+    # 1-2/1-3 exclusions + 1-4 scaling from it directly.
+    bond_list = [(int(i), int(j)) for i, j in np.asarray(sys_dict["bonds"])]
+    for o_i, h1_i, h2_i in np.asarray(water_indices):
+        bond_list.append((int(o_i), int(h1_i)))
+        bond_list.append((int(o_i), int(h2_i)))
+    nb.createExceptionsFromBonds(bond_list, 0.8333333, 0.5)
+    omm_system.addForce(nb)
+    # Use water_indices directly (NOT a contiguous range(n_protein_atoms,
+    # n_atoms, 3) assumption) -- solvate_protein's neutralize=True can
+    # insert monatomic ions after the protein block, replacing some water
+    # molecules, which breaks contiguous O,H,H tiling across the full
+    # remaining atom range (confirmed empirically: 1VII smoke fixture had
+    # 1963 total atoms = 596 protein + 3*455 water + 2 ions, not evenly
+    # divisible by 3 past the protein block).
+    for o_i, h1_i, h2_i in np.asarray(water_indices):
+        omm_system.addConstraint(int(o_i), int(h1_i), 0.09572)
+        omm_system.addConstraint(int(o_i), int(h2_i), 0.09572)
+        omm_system.addConstraint(int(h1_i), int(h2_i), 0.15139)
+
+    integrator = openmm.LangevinMiddleIntegrator(
+        TARGET_KELVIN * omm_unit.kelvin, GAMMA_PS / omm_unit.picoseconds, DT_FS * omm_unit.femtoseconds
+    )
+    platform = openmm.Platform.getPlatformByName("CPU")
+    context = openmm.Context(omm_system, integrator, platform)
+    context.setPositions(np.asarray(positions) * omm_unit.angstrom)
+    context.setVelocitiesToTemperature(TARGET_KELVIN * omm_unit.kelvin)
+    integrator.step(max(n_warmup_steps, 1))
+    t0 = time.perf_counter()
+    integrator.step(n_production_steps)
+    wallclock_s = time.perf_counter() - t0
+    ns_simulated = n_production_steps * DT_FS * 1e-6
+    return {
+        "wallclock_s": wallclock_s,
+        "ns_per_day": ns_simulated / wallclock_s * 86400.0 if wallclock_s > 0 else float("nan"),
+        "platform": platform.getName(), "n_atoms": n_atoms,
+        "n_production_steps": n_production_steps,
     }
 
 
@@ -475,8 +595,16 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--shim-mode", choices=["autograd", "analytical"], default="autograd")
     parser.add_argument("--seed", type=int, default=0)
-    parser.add_argument("--n-warmup-ps", type=float, default=10.0)
     parser.add_argument("--n-production-ns", type=float, default=1.0)
+    parser.add_argument(
+        "--n-steps-list", default=None,
+        help=(
+            "Comma-separated compile/compute regression sweep for full (non-smoke) mode. "
+            "Default: calibration points 50,200,1000,5000 plus the --n-production-ns-derived "
+            "target step count appended as the largest point. Ignored in --smoke mode, which "
+            "always uses a fixed 5,20,50,100 sweep."
+        ),
+    )
     parser.add_argument("--gpu-tag", default="unspecified")
     parser.add_argument("--out", required=True)
     parser.add_argument("--dry-run", action="store_true")
@@ -485,11 +613,30 @@ def main() -> int:
 
     out = Path(args.out) if args.out != "/dev/null" else None
 
+    if args.shim_mode == "analytical":
+        # See module docstring "KNOWN BLOCKER": the production EnsemblePlan
+        # path this script now calls has no analytical-forces switch -- it
+        # always dispatches through the vectorized autograd bonded energy
+        # functions (prolix.physics.bonded). Analytical mode was only ever a
+        # benchmark-only hand-rolled alternative; this script no longer
+        # reimplements the physics stack, so there is nothing left to guard
+        # with a bonded-term-count threshold -- refuse immediately.
+        raise RuntimeError(
+            "--shim-mode analytical is not runnable: this benchmark now dispatches through "
+            "the actual production entry point (prolix.api.EnsemblePlan), which has no "
+            "analytical-bonded-forces mode -- it always uses the vectorized autograd bonded "
+            "energy functions in prolix.physics.bonded. The old analytical hand-rolled path "
+            "(prolix.physics.analytical_forces.angle_forces_analytical / "
+            "dihedral_forces_analytical) was never part of the validated production "
+            "configuration and remains unvectorized upstream (backlog #4241, still open). "
+            "Use --shim-mode autograd (the default)."
+        )
+
     if args.dry_run:
         import proxide  # noqa: F401
         import openmm  # noqa: F401
-        from prolix.physics import settle, system, pbc  # noqa: F401
-        from prolix.physics.analytical_forces import bond_forces_analytical  # noqa: F401
+        from prolix.api import EnsemblePlan  # noqa: F401
+        from prolix.physics.system import make_bundle_from_system  # noqa: F401
 
         for p in (DHFR_PDB, DHFR_SYSTEM_XML, SMOKE_PDB):
             if not p.exists():
@@ -504,111 +651,46 @@ def main() -> int:
     ff_path = _resolve_ff_path()
 
     if args.smoke:
-        n_warmup_steps, n_production_steps = 5, 10
+        n_steps_list = list(_SMOKE_N_STEPS_LIST)
         pdb_path, system_xml_path = SMOKE_PDB, None
         sys_data = _build_smoke_system_dict(ff_path)
     else:
-        n_warmup_steps = round(args.n_warmup_ps * 1000.0 / DT_FS)
         n_production_steps = round(args.n_production_ns * 1.0e6 / DT_FS)
+        if args.n_steps_list:
+            n_steps_list = sorted({int(x) for x in args.n_steps_list.split(",")})
+        else:
+            n_steps_list = sorted({*_FULL_CALIBRATION_STEPS, n_production_steps})
         pdb_path, system_xml_path = DHFR_PDB, DHFR_SYSTEM_XML
         sys_data = _build_dhfr_system_dict(ff_path)
 
+    logger.info("shim_mode=%s smoke=%s n_steps_list=%s", args.shim_mode, args.smoke, n_steps_list)
+
+    prolix_result = _run_prolix_regression(sys_data, n_steps_list, args.seed)
     logger.info(
-        "shim_mode=%s smoke=%s n_warmup_steps=%d n_production_steps=%d",
-        args.shim_mode, args.smoke, n_warmup_steps, n_production_steps,
+        "prolix: per_step=%.6e s compile_fixed=%.6e s R^2=%.4f ns_per_day=%.4f",
+        prolix_result["per_step_corrected_s"], prolix_result["compile_fixed_s"],
+        prolix_result["r_squared"], prolix_result["ns_per_day"],
     )
 
-    prolix_result = _run_prolix_nvt(
-        sys_data, args.shim_mode, n_warmup_steps, n_production_steps, args.seed
-    )
-    logger.info("prolix: %s", prolix_result)
-
+    # OpenMM comparator runs the SAME largest step count as the prolix sweep's
+    # top point, so the ns/day comparison is apples-to-apples against a real
+    # production-scale (or smoke-scale) run, not an extrapolated one.
+    n_production_steps_for_comparator = max(n_steps_list)
     if args.smoke:
-        # Build a matching tiny OpenMM system on the fly (no pre-built XML for
-        # the smoke fixture) using the SAME solvated positions/box, so the
-        # comparator exercises the identical code path (deserialize->Context)
-        # minus the deserialize step itself (nothing to deserialize from).
-        import numpy as np
-        import openmm
-        from openmm import unit as omm_unit
-        from openmm.vec3 import Vec3
-
-        sys_dict, positions, box_vec, water_indices, masses, exclusion_spec, n_protein_atoms = sys_data
-        n_atoms = int(positions.shape[0])
-
-        # Context only needs a System + Integrator (no Topology) -- build the
-        # System's forces/constraints directly from sys_dict/water_indices
-        # rather than round-tripping through a Topology + ForceField match.
-        box_edge = float(np.asarray(box_vec)[0])
-        box_vectors = (
-            Vec3(box_edge, 0.0, 0.0) * omm_unit.angstroms,
-            Vec3(0.0, box_edge, 0.0) * omm_unit.angstroms,
-            Vec3(0.0, 0.0, box_edge) * omm_unit.angstroms,
+        openmm_result = _run_openmm_smoke_comparator(
+            sys_data, n_warmup_steps=min(n_steps_list), n_production_steps=n_production_steps_for_comparator
         )
-
-        omm_system = openmm.System()
-        for m in np.asarray(masses):
-            omm_system.addParticle(float(m))
-        omm_system.setDefaultPeriodicBoxVectors(*box_vectors)
-        nb = openmm.NonbondedForce()
-        nb.setNonbondedMethod(openmm.NonbondedForce.PME)
-        nb.setCutoffDistance(9.0 * omm_unit.angstroms)
-        for q, sig, eps in zip(
-            np.asarray(sys_dict["charges"]), np.asarray(sys_dict["sigmas"]), np.asarray(sys_dict["epsilons"])
-        ):
-            nb.addParticle(float(q), float(sig) * 0.1, float(eps) * 4.184)  # Å->nm, kcal->kJ
-
-        # 1-2/1-3/1-4 exceptions are mandatory: without them, directly-bonded
-        # atoms (~1 Å apart) see full unshielded LJ/Coulomb repulsion from
-        # NonbondedForce and blow up to NaN on the very first step. Build the
-        # full bond graph (protein bonds, already in sys_dict, + water O-H
-        # bonds reconstructed from water_indices) and let OpenMM derive
-        # 1-2/1-3 exclusions + 1-4 scaling from it directly.
-        bond_list = [(int(i), int(j)) for i, j in np.asarray(sys_dict["bonds"])]
-        for o_i, h1_i, h2_i in np.asarray(water_indices):
-            bond_list.append((int(o_i), int(h1_i)))
-            bond_list.append((int(o_i), int(h2_i)))
-        nb.createExceptionsFromBonds(bond_list, 0.8333333, 0.5)
-        omm_system.addForce(nb)
-        # Use water_indices directly (NOT a contiguous range(n_protein_atoms,
-        # n_atoms, 3) assumption) -- solvate_protein's neutralize=True can
-        # insert monatomic ions after the protein block, replacing some water
-        # molecules, which breaks contiguous O,H,H tiling across the full
-        # remaining atom range (confirmed empirically: 1VII smoke fixture had
-        # 1963 total atoms = 596 protein + 3*455 water + 2 ions, not evenly
-        # divisible by 3 past the protein block).
-        for o_i, h1_i, h2_i in np.asarray(water_indices):
-            omm_system.addConstraint(int(o_i), int(h1_i), 0.09572)
-            omm_system.addConstraint(int(o_i), int(h2_i), 0.09572)
-            omm_system.addConstraint(int(h1_i), int(h2_i), 0.15139)
-
-        integrator = openmm.LangevinMiddleIntegrator(
-            TARGET_KELVIN * omm_unit.kelvin, GAMMA_PS / omm_unit.picoseconds, DT_FS * omm_unit.femtoseconds
-        )
-        platform = openmm.Platform.getPlatformByName("CPU")
-        context = openmm.Context(omm_system, integrator, platform)
-        context.setPositions(np.asarray(positions) * omm_unit.angstrom)
-        context.setVelocitiesToTemperature(TARGET_KELVIN * omm_unit.kelvin)
-        integrator.step(max(n_warmup_steps, 1))
-        t0 = time.perf_counter()
-        integrator.step(n_production_steps)
-        wallclock_s = time.perf_counter() - t0
-        ns_simulated = n_production_steps * DT_FS * 1e-6
-        openmm_result = {
-            "wallclock_s": wallclock_s,
-            "ns_per_day": ns_simulated / wallclock_s * 86400.0 if wallclock_s > 0 else float("nan"),
-            "platform": platform.getName(), "n_atoms": n_atoms,
-        }
     else:
         openmm_result = _run_openmm_comparator(
-            pdb_path, system_xml_path, n_warmup_steps, n_production_steps,
-            prefer_cuda=not args.smoke,
+            pdb_path, system_xml_path, _OPENMM_WARMUP_STEPS, n_production_steps_for_comparator,
+            prefer_cuda=True,
         )
     logger.info("openmm: %s", openmm_result)
 
     ratio = (
         prolix_result["ns_per_day"] / openmm_result["ns_per_day"]
         if openmm_result["ns_per_day"] and openmm_result["ns_per_day"] == openmm_result["ns_per_day"]
+        and prolix_result["ns_per_day"] == prolix_result["ns_per_day"]
         else float("nan")
     )
 
@@ -620,11 +702,14 @@ def main() -> int:
         "seed": args.seed,
         "gpu_tag": args.gpu_tag,
         "n_atoms": prolix_result["n_atoms"],
-        "wallclock_s": prolix_result["wallclock_s"],
+        "per_step_corrected_s": prolix_result["per_step_corrected_s"],
+        "compile_fixed_s": prolix_result["compile_fixed_s"],
+        "r_squared": prolix_result["r_squared"],
+        "n_steps_list": prolix_result["n_steps_list"],
+        "raw_results": prolix_result["raw_results"],
         "openmm_wallclock_s": openmm_result["wallclock_s"],
         "openmm_platform": openmm_result["platform"],
-        "n_warmup_steps": n_warmup_steps,
-        "n_production_steps": n_production_steps,
+        "openmm_n_production_steps": openmm_result["n_production_steps"],
         "dt_fs": DT_FS,
         "smoke": args.smoke,
     }
