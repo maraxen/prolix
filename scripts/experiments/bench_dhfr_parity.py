@@ -412,6 +412,12 @@ def _run_prolix_regression(sys_data, n_steps_list, seed: int):
 
     bundle = _build_bundle_from_sys_data(sys_data)
     kT = TARGET_KELVIN * BOLTZMANN_KCAL
+    # use_neighbor_list=True is required at full DHFR scale (23,558 atoms): the default
+    # dense all-pairs nonbonded path OOMs a single H200 on the very first init_fn call
+    # (job 20520003, RESOURCE_EXHAUSTED at ~4-12GiB single allocations). It fit fine at
+    # smoke scale (1,963 atoms) only because the system was small enough for dense
+    # all-pairs to stay under budget -- always enabling it keeps smoke and full runs on
+    # the same code path.
 
     def _block(traj) -> None:
         trajs = traj if isinstance(traj, list) else [traj]
@@ -423,7 +429,9 @@ def _run_prolix_regression(sys_data, n_steps_list, seed: int):
         plan = EnsemblePlan.from_bundle(bundle)
 
         t_first0 = time.perf_counter()
-        first = plan.run(n_steps=1, dt=DT_FS, kT=kT, seed=seed, gamma=GAMMA_PS, run_mode="inference")
+        first = plan.run(
+            n_steps=1, dt=DT_FS, kT=kT, seed=seed, gamma=GAMMA_PS, run_mode="inference", use_neighbor_list=True
+        )
         _block(first)
         t_first = time.perf_counter() - t_first0
         del first
@@ -432,7 +440,13 @@ def _run_prolix_regression(sys_data, n_steps_list, seed: int):
         if n_steps > 1:
             t_ss0 = time.perf_counter()
             last = plan.run(
-                n_steps=n_steps - 1, dt=DT_FS, kT=kT, seed=seed + 1, gamma=GAMMA_PS, run_mode="inference"
+                n_steps=n_steps - 1,
+                dt=DT_FS,
+                kT=kT,
+                seed=seed + 1,
+                gamma=GAMMA_PS,
+                run_mode="inference",
+                use_neighbor_list=True,
             )
             _block(last)
             t_ss = time.perf_counter() - t_ss0
