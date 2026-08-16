@@ -412,12 +412,18 @@ def _run_prolix_regression(sys_data, n_steps_list, seed: int):
 
     bundle = _build_bundle_from_sys_data(sys_data)
     kT = TARGET_KELVIN * BOLTZMANN_KCAL
-    # use_neighbor_list=True is required at full DHFR scale (23,558 atoms): the default
+    # use_flash_forces=True is required at full DHFR scale (23,558 atoms): the default
     # dense all-pairs nonbonded path OOMs a single H200 on the very first init_fn call
-    # (job 20520003, RESOURCE_EXHAUSTED at ~4-12GiB single allocations). It fit fine at
-    # smoke scale (1,963 atoms) only because the system was small enough for dense
-    # all-pairs to stay under budget -- always enabling it keeps smoke and full runs on
-    # the same code path.
+    # (job 20520003, RESOURCE_EXHAUSTED at ~4-12GiB single allocations). use_neighbor_list
+    # does NOT fix this -- EnsemblePlan._setup_integrator's one-time initial-force
+    # computation (settle_langevin's init_fn) is wired to branch only on
+    # use_flash_forces, not use_neighbor_list, so a neighbor-list stepping run still
+    # pays the dense O(N^2) cost once at init and OOMs identically (job 20528981,
+    # confirmed same failure site: settle.py init_fn's initial force call). flash_forces
+    # uses FlashMD's tiled, checkpointed kernel (force_fn_from_bundle ->
+    # single_padded_force(use_flash=True)) for BOTH init and stepping, avoiding the
+    # dense allocation entirely. Always enabling it keeps smoke and full runs on the
+    # same code path (mutually exclusive with use_neighbor_list, so only one is set).
 
     def _block(traj) -> None:
         trajs = traj if isinstance(traj, list) else [traj]
@@ -430,7 +436,7 @@ def _run_prolix_regression(sys_data, n_steps_list, seed: int):
 
         t_first0 = time.perf_counter()
         first = plan.run(
-            n_steps=1, dt=DT_FS, kT=kT, seed=seed, gamma=GAMMA_PS, run_mode="inference", use_neighbor_list=True
+            n_steps=1, dt=DT_FS, kT=kT, seed=seed, gamma=GAMMA_PS, run_mode="inference", use_flash_forces=True
         )
         _block(first)
         t_first = time.perf_counter() - t_first0
@@ -446,7 +452,7 @@ def _run_prolix_regression(sys_data, n_steps_list, seed: int):
                 seed=seed + 1,
                 gamma=GAMMA_PS,
                 run_mode="inference",
-                use_neighbor_list=True,
+                use_flash_forces=True,
             )
             _block(last)
             t_ss = time.perf_counter() - t_ss0

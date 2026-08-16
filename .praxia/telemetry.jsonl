@@ -350,3 +350,13 @@
 {"agent_type":"unknown","verdict":"unparsed","verdict_source":"unparsed","commit":"","event":"subagent_stop","telemetry_id":"subagent-stop-ad5ab38a608622d0a","date":"2026-08-14"}
 {"agent_type":"unknown","verdict":"unparsed","verdict_source":"unparsed","commit":"","event":"subagent_stop","telemetry_id":"subagent-stop-a756de2b3c6c41196","date":"2026-08-14"}
 {"agent_type":"unknown","verdict":"unparsed","verdict_source":"unparsed","commit":"","event":"subagent_stop","telemetry_id":"subagent-stop-a7c04c2640efdeb02","date":"2026-08-14"}
+{"agent_type":"unknown","verdict":"unparsed","verdict_source":"unparsed","commit":"","event":"subagent_stop","telemetry_id":"subagent-stop-ad528cbf63c0f685b","date":"2026-08-14"}
+{"agent_type":"unknown","verdict":"PASS","verdict_source":"regex","commit":"","event":"subagent_stop","telemetry_id":"subagent-stop-a696e9c267c4326ff","date":"2026-08-14"}
+{"agent_type":"unknown","verdict":"unparsed","verdict_source":"unparsed","commit":"","event":"subagent_stop","telemetry_id":"subagent-stop-ac859f66a34e5d340","date":"2026-08-14"}
+{"agent_type":"myxcel-cluster-ops","tool_tier":"READ","event":"subagent_start","telemetry_id":"subagent-start-a51d86d0e5b719d9d","date":"2026-08-14"}
+{"agent_type":"myxcel-cluster-ops","verdict":"unparsed","verdict_source":"unparsed","commit":"","event":"subagent_stop","telemetry_id":"subagent-stop-a51d86d0e5b719d9d","date":"2026-08-14"}
+{"agent_type":"unknown","verdict":"unparsed","verdict_source":"unparsed","commit":"","event":"subagent_stop","telemetry_id":"subagent-stop-acb88629c3f4e153d","date":"2026-08-14"}
+{"agent_type":"unknown","verdict":"unparsed","verdict_source":"unparsed","commit":"","event":"subagent_stop","telemetry_id":"subagent-stop-aeb8147402b71d2c9","date":"2026-08-14"}
+{"agent_type":"unknown","verdict":"unparsed","verdict_source":"unparsed","commit":"","event":"subagent_stop","telemetry_id":"subagent-stop-a2ecf38d7a5abd869","date":"2026-08-14"}
+{"agent_type":"unknown","verdict":"unparsed","verdict_source":"unparsed","commit":"","event":"subagent_stop","telemetry_id":"subagent-stop-a984292c770727b52","date":"2026-08-15"}
+{"agent_type":"unknown","verdict":"unparsed","verdict_source":"unparsed","commit":"","event":"subagent_stop","telemetry_id":"subagent-stop-a3b1f65190ae34d54","date":"2026-08-15"}
