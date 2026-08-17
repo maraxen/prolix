@@ -369,17 +369,29 @@ def _build_bundle_from_sys_data(sys_data):
     """
     from types import SimpleNamespace
 
+    import jax.numpy as jnp
+
     from prolix.physics.system import make_bundle_from_system
 
     sys_dict, positions, box_vec, water_indices, masses, exclusion_spec, _n_protein_atoms = sys_data
 
+    # Force per-atom float arrays to a single consistent dtype (positions'
+    # own dtype). Without this, sys_dict["charges"] (proxide-sourced) came
+    # out float32 while positions/box_size came out float64 under this
+    # script's jax_enable_x64=True -- an input-level precision mismatch, not
+    # a pme.py/flash_explicit.py code bug. That mismatch is what actually
+    # produced the persistent "lax.add requires ... float32, float64" crash
+    # under use_flash_forces (debt 832/835's own extensive dtype-hardcode
+    # fixes were necessary but not sufficient -- confirmed via direct
+    # instrumentation of every intermediate in pme.py's _spme_fwd).
+    work_dtype = jnp.asarray(positions).dtype
     ns = SimpleNamespace(
-        positions=positions,
-        box_size=box_vec,
-        masses=masses,
-        charges=sys_dict["charges"],
-        sigmas=sys_dict["sigmas"],
-        epsilons=sys_dict["epsilons"],
+        positions=jnp.asarray(positions, dtype=work_dtype),
+        box_size=jnp.asarray(box_vec, dtype=work_dtype),
+        masses=jnp.asarray(masses, dtype=work_dtype),
+        charges=jnp.asarray(sys_dict["charges"], dtype=work_dtype),
+        sigmas=jnp.asarray(sys_dict["sigmas"], dtype=work_dtype),
+        epsilons=jnp.asarray(sys_dict["epsilons"], dtype=work_dtype),
         bonds=sys_dict["bonds"],
         bond_params=sys_dict["bond_params"],
         angles=sys_dict["angles"],

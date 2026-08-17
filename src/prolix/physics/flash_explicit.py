@@ -133,9 +133,14 @@ def chunked_explicit_nonbonded_energy(
     )
     N = positions.shape[0]
 
-    lam = jnp.float32(soft_core_lambda)
-    alpha_sc = jnp.float32(0.5)
-    soft_term = alpha_sc * jnp.maximum(1.0 - lam, jnp.float32(1e-8))
+    # dtype follows positions (debt 770/832 pattern) rather than hardcoding
+    # float32 -- see spread_charges/_spme_bwd in pme.py for the established
+    # convention and why this matters under jax.grad's strict (non-promoting)
+    # cotangent accumulation.
+    work_dtype = positions.dtype
+    lam = jnp.asarray(soft_core_lambda, dtype=work_dtype)
+    alpha_sc = jnp.asarray(0.5, dtype=work_dtype)
+    soft_term = alpha_sc * jnp.maximum(1.0 - lam, jnp.asarray(1e-8, dtype=work_dtype))
 
     def tile_energy_outer(carry, j_idx):
         start = j_idx * T
@@ -171,8 +176,8 @@ def chunked_explicit_nonbonded_energy(
             # Instead of a dense (N, N) matrix, we compute the (N, T) exclusion block
             # on the fly from excl_indices and excl_scales (already padded to N).
             # Base scales are 1.0 (everything included)
-            vdw_scale_tile = jnp.ones((N, T), dtype=jnp.float32)
-            elec_scale_tile = jnp.ones((N, T), dtype=jnp.float32)
+            vdw_scale_tile = jnp.ones((N, T), dtype=work_dtype)
+            elec_scale_tile = jnp.ones((N, T), dtype=work_dtype)
 
             # Slice the sparse exclusion data for these T atoms
             t_excl_idx = jax.lax.dynamic_slice(excl_indices, (start_idx, 0), (T, excl_indices.shape[1]))
@@ -190,15 +195,15 @@ def chunked_explicit_nonbonded_energy(
             # Pair mask (atoms exist and it's not a self-interaction)
             i_indices = jnp.arange(N)[:, None]
             j_indices = jnp.arange(T)[None, :] + start_idx
-            not_self = (i_indices != j_indices).astype(jnp.float32)
-            pair_mask = (atom_mask[:, None] & m_j[None, :]).astype(jnp.float32) * not_self
+            not_self = (i_indices != j_indices).astype(work_dtype)
+            pair_mask = (atom_mask[:, None] & m_j[None, :]).astype(work_dtype) * not_self
 
             sig_ij = 0.5 * (sigmas[:, None] + s_j[None, :])
             sig_ij_safe = jnp.where(pair_mask > 0, jnp.maximum(sig_ij, 1e-4), 1.0)
             eps_ij = jnp.sqrt(jnp.maximum(epsilons[:, None] * e_j[None, :], 0.0))
 
             # --- LJ Soft Core (Beutler formulation) ---
-            soft_alpha_lj = jnp.float32(0.5) * (1.0 - lam)
+            soft_alpha_lj = jnp.asarray(0.5, dtype=work_dtype) * (1.0 - lam)
             r_over_sig = dist / sig_ij_safe
             r_over_sig_6 = r_over_sig ** 6
             denom_lj = soft_alpha_lj + r_over_sig_6
@@ -208,7 +213,7 @@ def chunked_explicit_nonbonded_energy(
             e_lj = jnp.where(pair_mask > 0, e_lj * vdw_scale_tile, 0.0)
 
             # --- Coulomb Soft Core ---
-            soft_alpha_coul = jnp.float32(2.0) * (1.0 - lam)
+            soft_alpha_coul = jnp.asarray(2.0, dtype=work_dtype) * (1.0 - lam)
             dist_coul = jnp.sqrt(dist_sq + soft_alpha_coul)
             
             qq = charges[:, None] * q_j[None, :] * COULOMB_CONSTANT
@@ -266,7 +271,8 @@ def _chunked_lj_only_energy(
       _pad_to_tile_multiple(positions, None, sigmas, epsilons, atom_mask, sys, T, include_elec=False)
   )
   N = positions.shape[0]
-  lam = jnp.float32(soft_core_lambda)
+  work_dtype = positions.dtype
+  lam = jnp.asarray(soft_core_lambda, dtype=work_dtype)
 
   def tile_energy_outer(carry, j_idx):
     start = j_idx * T
@@ -287,7 +293,7 @@ def _chunked_lj_only_energy(
       dist = jnp.sqrt(dist_sq)
 
       # Sparse exclusion scales
-      vdw_scale_tile = jnp.ones((N, T), dtype=jnp.float32)
+      vdw_scale_tile = jnp.ones((N, T), dtype=work_dtype)
       t_excl_idx = jax.lax.dynamic_slice(excl_indices, (start_idx, 0), (T, excl_indices.shape[1]))
       t_vdw_scale = jax.lax.dynamic_slice(excl_scales_vdw, (start_idx, 0), (T, excl_scales_vdw.shape[1]))
       j_local = jnp.arange(T)
@@ -298,15 +304,15 @@ def _chunked_lj_only_energy(
       # Pair mask
       i_indices = jnp.arange(N)[:, None]
       j_indices = jnp.arange(T)[None, :] + start_idx
-      not_self = (i_indices != j_indices).astype(jnp.float32)
-      pair_mask = (atom_mask[:, None] & m_j[None, :]).astype(jnp.float32) * not_self
+      not_self = (i_indices != j_indices).astype(work_dtype)
+      pair_mask = (atom_mask[:, None] & m_j[None, :]).astype(work_dtype) * not_self
 
       sig_ij = 0.5 * (sigmas[:, None] + s_j[None, :])
       sig_ij_safe = jnp.where(pair_mask > 0, jnp.maximum(sig_ij, 1e-4), 1.0)
       eps_ij = jnp.sqrt(jnp.maximum(epsilons[:, None] * e_j[None, :], 0.0))
 
       # LJ Soft Core (Beutler)
-      soft_alpha_lj = jnp.float32(0.5) * (1.0 - lam)
+      soft_alpha_lj = jnp.asarray(0.5, dtype=work_dtype) * (1.0 - lam)
       r_over_sig = dist / sig_ij_safe
       r_over_sig_6 = r_over_sig ** 6
       denom_lj = soft_alpha_lj + r_over_sig_6
@@ -354,9 +360,14 @@ def _total_energy_fn(
         electrostatic_method = ElectrostaticMethod(electrostatic_method)
 
     pos = sys.positions
-    safe_charges = jnp.where(sys.atom_mask, sys.charges, jnp.float32(0.0))
-    safe_sigmas = jnp.where(sys.atom_mask, sys.sigmas, jnp.float32(1.0))
-    safe_epsilons = jnp.where(sys.atom_mask, sys.epsilons, jnp.float32(0.0))
+    # dtype follows each array's own precision (debt 770/832 pattern) rather
+    # than hardcoding float32 -- a hardcoded fallback literal here silently
+    # narrows the jnp.where result under x64/float64 bundles, which is fine
+    # for the forward value (jnp.where promotes) but breaks JAX's strict
+    # (non-promoting) cotangent accumulation during gradient computation.
+    safe_charges = jnp.where(sys.atom_mask, sys.charges, jnp.asarray(0.0, dtype=sys.charges.dtype))
+    safe_sigmas = jnp.where(sys.atom_mask, sys.sigmas, jnp.asarray(1.0, dtype=sys.sigmas.dtype))
+    safe_epsilons = jnp.where(sys.atom_mask, sys.epsilons, jnp.asarray(0.0, dtype=sys.epsilons.dtype))
 
     # EFA path: replace PME with RFF approximation
     if electrostatic_method == ElectrostaticMethod.EFA:
@@ -406,7 +417,7 @@ def _total_energy_fn(
             displacement_fn,
             idx_12_13,
             idx_14,
-            jnp.float32(0.83333333),
+            0.83333333,
             pme_alpha_float,
         )
 
@@ -477,7 +488,7 @@ def _total_energy_fn(
             displacement_fn,
             idx_12_13,
             idx_14,
-            jnp.float32(0.83333333),
+            0.83333333,
             pme_alpha_float,
         )
 

@@ -82,18 +82,28 @@ def compute_pme_grid_dims(
 def spread_charges(positions: jnp.ndarray, charges: jnp.ndarray, atom_mask: jnp.ndarray, box_size: jnp.ndarray, grid_dims: tuple[int, int, int], order: int = 4) -> jnp.ndarray:
     """Spread charges onto FFT grid using B-spline interpolation."""
     Kx, Ky, Kz = grid_dims
-    K_arr = jnp.array([Kx, Ky, Kz], dtype=jnp.float32)
-    
+    # Match positions' working precision rather than hardcoding float32 --
+    # mixing a float32 grid with float64 positions/box_size works fine in the
+    # forward pass (jnp operators auto-promote), but under jax.grad the
+    # cotangent-accumulation machinery (ad_util.py's add_jaxvals) uses raw
+    # lax.add, which does NOT auto-promote and raises a hard TypeError on any
+    # dtype mismatch in the backward pass. Confirmed via a real DHFR-scale
+    # gradient call (flash_explicit_forces -> spme_reciprocal_energy) that
+    # never previously executed successfully end-to-end (blocked upstream by
+    # the eval_shape/box_size bug this benchmark redesign also fixed).
+    work_dtype = positions.dtype
+    K_arr = jnp.array([Kx, Ky, Kz], dtype=work_dtype)
+
     # Fractional coordinates in [0, K)
     frac = (positions / box_size) * K_arr
     grid_idx = jnp.floor(frac).astype(jnp.int32)
-    u = frac - grid_idx.astype(jnp.float32)
+    u = frac - grid_idx.astype(work_dtype)
 
     # w shape: (order, N_atoms)
     wx = _bspline4(u[:, 0]); wy = _bspline4(u[:, 1]); wz = _bspline4(u[:, 2])
-    
-    Q = jnp.zeros(grid_dims, dtype=jnp.float32)
-    q = charges * atom_mask.astype(jnp.float32)
+
+    Q = jnp.zeros(grid_dims, dtype=work_dtype)
+    q = charges * atom_mask.astype(charges.dtype)
 
     with jax.named_scope("pme_charge_spread"):
         for dx in range(order):
@@ -118,14 +128,14 @@ def influence_function(grid_dims: tuple[int, int, int], box_size: jnp.ndarray, a
         m_sq = mx[:, None, None] ** 2 + my[None, :, None] ** 2 + mz[None, None, :] ** 2
 
         gauss = jnp.exp(-jnp.pi**2 * m_sq / alpha**2)
-        m_sq_safe = jnp.where(m_sq > 0, m_sq, jnp.float32(1.0))
+        m_sq_safe = jnp.where(m_sq > 0, m_sq, jnp.asarray(1.0, dtype=m_sq.dtype))
         denom = jnp.pi * m_sq_safe * V
 
-        bx = _bspline_modulation(jnp.fft.fftfreq(Kx), Kx, order)
-        by = _bspline_modulation(jnp.fft.fftfreq(Ky), Ky, order)
-        bz = _bspline_modulation(jnp.fft.rfftfreq(Kz), Kz, order)
+        bx = _bspline_modulation(jnp.fft.fftfreq(Kx, dtype=box_size.dtype), Kx, order)
+        by = _bspline_modulation(jnp.fft.fftfreq(Ky, dtype=box_size.dtype), Ky, order)
+        bz = _bspline_modulation(jnp.fft.rfftfreq(Kz, dtype=box_size.dtype), Kz, order)
         b_sq = (bx[:, None, None] * by[None, :, None] * bz[None, None, :]) ** 2
-        b_sq_safe = jnp.maximum(b_sq, jnp.float32(1e-10))
+        b_sq_safe = jnp.maximum(b_sq, jnp.asarray(1e-10, dtype=b_sq.dtype))
 
         G = gauss / (denom * b_sq_safe)
         G = G.at[0, 0, 0].set(0.0)
@@ -133,11 +143,14 @@ def influence_function(grid_dims: tuple[int, int, int], box_size: jnp.ndarray, a
 
 
 def _bspline_modulation(freq_frac: jnp.ndarray, K: int, order: int) -> jnp.ndarray:
-    if order == 4: m_vals = jnp.array([1.0/6.0, 4.0/6.0, 1.0/6.0, 0.0])
+    if order == 4: m_vals = jnp.array([1.0/6.0, 4.0/6.0, 1.0/6.0, 0.0], dtype=freq_frac.dtype)
     else: raise NotImplementedError
-    k_indices = jnp.arange(order, dtype=jnp.float32)
+    k_indices = jnp.arange(order, dtype=freq_frac.dtype)
     phases = jnp.exp(2j * jnp.pi * freq_frac[:, None] * k_indices[None, :])
-    return jnp.maximum(jnp.abs(jnp.sum(m_vals[None, :] * phases, axis=-1)), jnp.float32(1e-6))
+    return jnp.maximum(
+        jnp.abs(jnp.sum(m_vals[None, :] * phases, axis=-1)),
+        jnp.asarray(1e-6, dtype=freq_frac.dtype),
+    )
 
 
 def spme_reciprocal_energy(positions: jnp.ndarray, charges: jnp.ndarray, atom_mask: jnp.ndarray, box_size: jnp.ndarray, grid_dims: tuple[int, int, int], alpha: float = 0.34, order: int = 4) -> jnp.ndarray:
@@ -150,17 +163,17 @@ def spme_reciprocal_energy(positions: jnp.ndarray, charges: jnp.ndarray, atom_ma
 
 
 def spme_self_energy(charges: jnp.ndarray, atom_mask: jnp.ndarray, alpha: float = 0.34) -> jnp.ndarray:
-    q_masked = charges * atom_mask.astype(jnp.float32)
+    q_masked = charges * atom_mask.astype(charges.dtype)
     return -alpha / jnp.sqrt(jnp.pi) * COULOMB_CONSTANT * jnp.sum(q_masked ** 2)
 
 
 def spme_background_energy(charges: jnp.ndarray, atom_mask: jnp.ndarray, alpha: float, box_size: jnp.ndarray) -> jnp.ndarray:
-    Q = jnp.sum(charges * atom_mask.astype(jnp.float32))
+    Q = jnp.sum(charges * atom_mask.astype(charges.dtype))
     V = jnp.prod(box_size)
     return -jnp.pi * Q**2 / (2.0 * alpha**2 * V) * COULOMB_CONSTANT
 
 
-@functools.partial(jax.custom_vjp, nondiff_argnums=(4, 6))
+@functools.partial(jax.custom_vjp, nondiff_argnums=(3, 4, 5, 6))
 def spme_energy_with_forces(positions: jnp.ndarray, charges: jnp.ndarray, atom_mask: jnp.ndarray, box_size: jnp.ndarray, grid_dims: tuple[int, int, int], alpha: float, order: int) -> jnp.ndarray:
     return spme_reciprocal_energy(positions, charges, atom_mask, box_size, grid_dims, alpha, order) + spme_self_energy(charges, atom_mask, alpha)
 
@@ -180,34 +193,33 @@ def _spme_fwd(positions, charges, atom_mask, box_size, grid_dims, alpha, order):
 
         V = jnp.prod(box_size)
         gauss = jnp.exp(-jnp.pi**2 * m_sq / alpha**2)
-        m_sq_safe = jnp.where(m_sq > 0, m_sq, jnp.float32(1.0))
+        m_sq_safe = jnp.where(m_sq > 0, m_sq, jnp.asarray(1.0, dtype=m_sq.dtype))
         denom = jnp.pi * m_sq_safe * V
 
-        bx = _bspline_modulation(jnp.fft.fftfreq(Kx), Kx, order)
-        by = _bspline_modulation(jnp.fft.fftfreq(Ky), Ky, order)
-        bz = _bspline_modulation(jnp.fft.rfftfreq(Kz), Kz, order)
+        bx = _bspline_modulation(jnp.fft.fftfreq(Kx, dtype=box_size.dtype), Kx, order)
+        by = _bspline_modulation(jnp.fft.fftfreq(Ky, dtype=box_size.dtype), Ky, order)
+        bz = _bspline_modulation(jnp.fft.rfftfreq(Kz, dtype=box_size.dtype), Kz, order)
         b_sq = (bx[:, None, None] * by[None, :, None] * bz[None, None, :]) ** 2
-        b_sq_safe = jnp.maximum(b_sq, jnp.float32(1e-10))
+        b_sq_safe = jnp.maximum(b_sq, jnp.asarray(1e-10, dtype=b_sq.dtype))
 
         G = gauss / (denom * b_sq_safe)
         G = G.at[0, 0, 0].set(0.0)
-
-    Q_hat_sq = jnp.abs(Q_hat) ** 2
 
     # irfftn normalization
     with jax.named_scope("pme_fft_inverse"):
         theta = jnp.fft.irfftn(Q_hat * G, s=grid_dims)
     N_grid = float(Kx * Ky * Kz)
     theta_norm = theta * N_grid
-    
+
     e_recip = 0.5 * COULOMB_CONSTANT * jnp.sum(Q * theta_norm)
     e_self = spme_self_energy(charges, atom_mask, alpha)
-    
-    return e_recip + e_self, (positions, charges, atom_mask, box_size, theta_norm, m_sq, Q_hat_sq, G, alpha, mx, my, mz, Kx, Ky, Kz)
+
+    return e_recip + e_self, (positions, charges, atom_mask, theta_norm)
 
 
-def _spme_bwd(grid_dims, order, residuals, g):
-    positions, charges, atom_mask, box_size, theta_norm, m_sq, Q_hat_sq, G, alpha, mx, my, mz, Kx, Ky, Kz = residuals
+def _spme_bwd(box_size, grid_dims, alpha, order, residuals, g):
+    Kx, Ky, Kz = grid_dims
+    positions, charges, atom_mask, theta_norm = residuals
     # debt 832: dtype follows positions (the ambient float precision -- float32
     # normally, float64 under jax_enable_x64) rather than hardcoding float32.
     # Hardcoded float32 intermediates here previously crashed under x64 with
@@ -256,32 +268,24 @@ def _spme_bwd(grid_dims, order, residuals, g):
     dE_dq += -2.0 * alpha / jnp.sqrt(jnp.pi) * COULOMB_CONSTANT * charges
     dE_dq = dE_dq * atom_mask.astype(dtype) * g
 
-    # 3. Alpha gradient
-    dG_dalpha = G * (2.0 * jnp.pi**2 * m_sq / alpha**3)
-    weights = jnp.ones_like(G) * 2.0
-    weights = weights.at[:, :, 0].set(1.0)
-    if Kz % 2 == 0:
-        weights = weights.at[:, :, -1].set(1.0)
-    
-    dE_dalpha_recip = 0.5 * COULOMB_CONSTANT * jnp.sum(Q_hat_sq * dG_dalpha * weights)
-    dE_dalpha_self = -1.0 / jnp.sqrt(jnp.pi) * COULOMB_CONSTANT * jnp.sum(q_masked**2)
-    dE_dalpha = (dE_dalpha_recip + dE_dalpha_self) * g
-
-    # 4. Box size gradient
-    virial_term = -1.0 / box_size * jnp.sum(positions * dE_dpos, axis=0)
-    Kz_rfft = Kz // 2 + 1
-    m_x_sq = mx[:, None, None]**2 * jnp.ones((1, Ky, Kz_rfft), dtype=dtype)
-    m_y_sq = my[None, :, None]**2 * jnp.ones((Kx, 1, Kz_rfft), dtype=dtype)
-    m_z_sq = mz[None, None, :]**2 * jnp.ones((Kx, Ky, 1), dtype=dtype)
-    m_i_sq = jnp.stack([m_x_sq, m_y_sq, m_z_sq], axis=-1)
-    
-    term_alpha = 2.0 * jnp.pi**2 * m_i_sq / alpha**2
-    term_msq = 2.0 * m_i_sq / jnp.where(m_sq[:, :, :, None] > 0, m_sq[:, :, :, None], 1.0)
-    dG_dL = G[:, :, :, None] * (term_alpha + term_msq - 1.0) / box_size
-    dE_dL_recip = 0.5 * COULOMB_CONSTANT * jnp.sum(Q_hat_sq[:, :, :, None] * dG_dL * weights[:, :, :, None], axis=(0, 1, 2))
-    dE_dL = (virial_term + dE_dL_recip) * g
-
-    return dE_dpos, dE_dq, jnp.zeros_like(atom_mask, dtype=dtype), dE_dL, dE_dalpha
+    # box_size and alpha are nondiff_argnums (debt 835 follow-up): no NPT/
+    # barostat caller currently consumes a box_size or alpha gradient from
+    # this function (pressure.py computes pressure via the standard virial
+    # formula on forces/positions instead), while box_size/pme_alpha are
+    # eqx.field(static=True) on PhysicsSystem -- excluded from eqx.filter_grad's
+    # traced pytree entirely. This removes dead, never-consumed gradient code
+    # (Q_hat_sq/mx/my/mz were kept alive in residuals only to compute these)
+    # and the differentiability asymmetry it created between this custom_vjp
+    # and the outer eqx partition. NOTE: this alone did NOT fix the "lax.add
+    # requires ... float32, float64" crash under jax_enable_x64 (verified: the
+    # crash persisted identically with only this change applied) -- the actual
+    # fix was making bundle_md.py's _host_box_size return plain numpy instead
+    # of a jnp array, which is what was really producing per-step tracer
+    # contamination. Kept as a genuine simplification regardless. If a future
+    # NPT/PME virial pressure path needs dE/dbox_size or dE/dalpha,
+    # reintroduce them as differentiable args on a separate, dedicated entry
+    # point rather than reverting this one.
+    return dE_dpos, dE_dq, jnp.zeros_like(atom_mask, dtype=dtype)
 
 spme_energy_with_forces.defvjp(_spme_fwd, _spme_bwd)
 

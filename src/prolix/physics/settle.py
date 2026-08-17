@@ -1004,12 +1004,37 @@ def _make_settle_compatible_force_fn(
   energy_or_force_fn: Callable[..., Array],
   mass: float | Array,
   box_template: Array | None,
+  *,
+  is_force_shaped: bool = False,
 ) -> Callable[..., Array]:
   """``jax_md.quantity.canonicalize_force``-compatible force fn using one ``value_and_grad`` when safe.
 
   If ``mass`` is a scalar, the atom count is unknown at integrator construction time;
   we fall back to ``canonicalize_force`` only.
+
+  Args:
+      is_force_shaped: When True, the caller already knows ``energy_or_force_fn``
+          returns an ``(N, 3)`` force array (not a scalar energy) -- e.g.
+          ``force_fn_from_bundle``'s FlashMD path (debt 761) -- and this skips
+          BOTH shape-auto-detection layers entirely rather than routing through
+          them. This matters because ``jax_md.quantity.canonicalize_force``'s
+          returned closure does its own lazy, UNPROTECTED ``eval_shape`` probe
+          on every first real call (jax_md/quantity.py's ``force_fn``, cached via
+          a ``nonlocal _force_fn`` -- not just once at construction time here).
+          That probe crashes with ``TracerArrayConversionError`` whenever
+          ``energy_or_force_fn`` touches a bundle's static ``box_size`` field via
+          the debt-770 PME-grid-sizing numpy workaround (confirmed via full
+          unfiltered traceback, job 20443232 local repro): our own eval_shape
+          probe below (``make_force_fn_like_canonicalize``) is try/except-
+          protected and correctly falls back to ``canonicalize_force`` on that
+          exception, but jax_md's *own* internal probe inside the fallback is
+          not protected by anything we control, so the crash still propagates
+          on the first real (non-probe) call. Skipping both probes when the
+          shape is already known sidesteps this rather than trying to fix a
+          third-party library's internal caching wrapper.
   """
+  if is_force_shaped:
+    return energy_or_force_fn
   mass_arr = jnp.asarray(mass)
   if mass_arr.ndim == 0:
     return quantity.canonicalize_force(energy_or_force_fn)
@@ -1046,6 +1071,7 @@ def settle_langevin(
   settle_velocity_tol: float | None = None,
   water_mask: Array | None = None,
   atom_mask: Array | None = None,
+  is_force_shaped: bool = False,
 ):
   r"""Langevin dynamics integrator with SETTLE constraints for water.
 
@@ -1133,7 +1159,9 @@ def settle_langevin(
   Returns:
       (init_fn, apply_fn) pair.
   """
-  force_fn = _make_settle_compatible_force_fn(energy_or_force_fn, mass, box)
+  force_fn = _make_settle_compatible_force_fn(
+    energy_or_force_fn, mass, box, is_force_shaped=is_force_shaped
+  )
   if projection_site not in ("post_o", "post_settle_vel", "both"):
     msg = f"invalid projection_site={projection_site!r}; expected post_o|post_settle_vel|both"
     raise ValueError(msg)

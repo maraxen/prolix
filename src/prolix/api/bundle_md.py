@@ -25,6 +25,7 @@ from collections.abc import Callable
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 from jax_md import space
 
 from prolix.batched_energy import (
@@ -238,7 +239,7 @@ def _host_float(x: object, default: float) -> float:
 _DEFAULT_PBC_BOX_SIZE = (30.0, 30.0, 30.0)
 
 
-def _host_box_size(bundle: MolecularBundle, default: tuple[float, float, float]) -> jnp.ndarray:
+def _host_box_size(bundle: MolecularBundle, default: tuple[float, float, float]) -> np.ndarray:
     """Concrete (3,) box size for PhysicsSystem's static box_size field.
 
     ``MolecularBundle.box`` is deliberately a DYNAMIC field (see
@@ -281,9 +282,25 @@ def _host_box_size(bundle: MolecularBundle, default: tuple[float, float, float])
         # -- force concretization per-element via float(), mirroring
         # _host_float, so a traced bundle.box is actually detected here
         # rather than silently propagating as a "static" tracer.
-        return jnp.array([float(diag[0]), float(diag[1]), float(diag[2])])
+        #
+        # Returns a plain numpy array, NOT jnp.array (debt 770 follow-up):
+        # constructing via jnp.array here still produces a DynamicJaxprTracer
+        # Python object whenever this runs inside an active trace (e.g. every
+        # single MD step, since physics_system_from_bundle -> _host_box_size
+        # is called fresh inside lax.while_loop's per-step body) -- even
+        # though its inputs (float(diag[i])) are genuinely concrete Python
+        # floats by this point. np.asarray()/float() calls downstream (the
+        # debt-770 PME-grid-sizing workaround) then fail with
+        # TracerArrayConversionError regardless of the underlying value's
+        # concreteness. A plain numpy array has no such tracer wrapping --
+        # jax arithmetic downstream (dr / sys.box_size etc.) accepts numpy
+        # operands transparently, and this matches box_size's actual intent
+        # as PhysicsSystem's eqx.field(static=True) value (a static Python/
+        # numpy value, not a live jax array -- exactly what equinox's own
+        # "A JAX array is being set as static!" warning was flagging).
+        return np.array([float(diag[0]), float(diag[1]), float(diag[2])])
     except (TypeError, ValueError, jax.errors.ConcretizationTypeError):
-        return jnp.array(default)
+        return np.array(default)
 
 
 def _dense_excl_matrices_from_bundle(
@@ -357,7 +374,16 @@ def physics_system_from_bundle(
 
     box_size = None
     if bundle.shape_spec.has_pbc:
-        box_size = _host_box_size(bundle, _DEFAULT_PBC_BOX_SIZE).astype(positions.dtype)
+        box_size = _host_box_size(bundle, _DEFAULT_PBC_BOX_SIZE)
+        # _host_box_size now returns plain numpy (debt 770 follow-up), so
+        # this dtype check/cast is host-side numpy, not a jax op -- it never
+        # re-taints box_size into a per-step tracer the way an unconditional
+        # jnp .astype() call used to (see _host_box_size's docstring). Kept
+        # only as a safety net for a bundle whose positions/box precision
+        # genuinely differ (bench_dhfr_parity.py's _build_bundle_from_sys_data
+        # now keeps them consistent, making this a no-op in practice).
+        if box_size.dtype != positions.dtype:
+            box_size = box_size.astype(positions.dtype)
 
     dense_vdw, dense_elec = _dense_excl_matrices_from_bundle(bundle, n)
 

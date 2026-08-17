@@ -747,6 +747,13 @@ class EnsemblePlan:
             project_ou_momentum_rigid=True,
             water_mask=water_mask,
             atom_mask=atom_mask,
+            # use_flash_forces=True means energy_or_force_fn is
+            # force_fn_from_bundle's already-force-shaped output -- tell
+            # settle_langevin so it skips jax_md.quantity.canonicalize_force's
+            # unprotected internal eval_shape probe (crashes on PME grid-sizing
+            # code touching a bundle's static box_size field; see settle.py's
+            # _make_settle_compatible_force_fn docstring for the full mechanism).
+            is_force_shaped=use_flash_forces,
         )
 
         key = jax.random.PRNGKey(jnp.asarray(seed, dtype=jnp.uint32))
