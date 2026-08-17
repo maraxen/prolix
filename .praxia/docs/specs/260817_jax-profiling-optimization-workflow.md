@@ -23,7 +23,8 @@ calls this document's implementation plan "phase 2" meaning *the implementation 
 follows this design phase*. To avoid ambiguity, this spec uses:
 
 - **Stage 0/1/2/3** — the measurement-validity axis (fixed, non-negotiable).
-- **Steps P1..P8** — the ordered implementation units below.
+- **Steps P1..P9** — the ordered implementation units below. P1–P8 land in this repo; P9 is
+  the single cross-repo step (`~/projects/xtrax`) and is flagged as such at its own heading.
 
 Steps P1–P6 are the brainstorm's Phase 1 (all free/local/CPU). Step P7 is the **single**
 GPU step in scope: the opening move of the brainstorm's Phase 2, small system only.
@@ -37,9 +38,11 @@ alone cannot answer any term-ranking question — the contract it builds *forbid
 construction, so a Phase-1-only spec ships an enforcement mechanism and zero enforceable
 conclusions, and the live RR5 blocker is untouched. Including the single smallest Stage-2
 probe is what makes the Phase-1 machinery load-bearing rather than speculative, which serves
-the same anti-over-build rationale the decision invoked. The override is bounded: one step,
-one small system, no DHFR, and the INVEST criterion count is respected — §5's in-repo list
-is exactly 8. Stage 3 and hypothesis promotion remain follow-on rows in §4.
+the same anti-over-build rationale the decision invoked. The override is bounded: one step
+(P7), one small system, no DHFR. §5's in-repo acceptance list has 14 criteria across P1–P8,
+with a separate cross-repo subsection for P9; the INVEST-Small concern the brainstorm raised
+is addressed by P7's scope being one array submission on one small system, not by a criterion
+count. Stage 3 and hypothesis promotion remain follow-on rows in §4.
 
 ---
 
@@ -140,7 +143,14 @@ executed, seconds-to-minutes, N ≤ 64 atoms. **GPU** = cluster submission. **CR
 edits files outside this repo; cheap to *write*, but carries another project's review
 process.
 
-Every step is independently gate-able and independently revertable.
+Every step is independently gate-able and independently revertable. One ordering constraint
+overrides the cheapest-first heuristic: **no step may emit a `ProbeRecord` to
+`outputs/profiling/` or commit a fixture under `tests/profiling/fixtures/records/` until P1's
+Gate paragraph passes in full.** A record stamped `contract_version = "1.0"` by an
+implementation that does not yet enforce 1.0's guards carries a version string that denotes
+two different contracts, and no bump rule can repair that after the fact. P3, P4, P6 and P7
+are therefore gated on P1's gate, not merely sequenced after it. This is verified cheap to
+honour: at the time of writing no `ProbeRecord` has been emitted anywhere in the repo.
 
 Steps P1–P8 land in this repo. **P9 is the one cross-repo step** (`~/projects/xtrax`) and is
 flagged as such at its own heading — see §1.
@@ -162,19 +172,53 @@ Create:
   the probe captured no trace at all. Serialisation writes a tuple as a two-element array and
   an absent label as `null`; deserialisation restores tuple vs `None`, never coercing `null`
   to `0.0`.
+  `attribution_method: dict[str, str] | None` — per-scope, one of `"named_scope"` |
+  `"op_name"`. Required whenever `scopes` is not `None`. A ranking whose entries mix methods
+  is reportable but must be labelled as mixed.
   `config: dict[str, str]` (default empty) — the free-form config axes this record was
   produced under, string-valued so it can carry non-numeric identity (e.g.
   `{"protein": "1vii", "mode": "flash", "pme": "on", "grid_spacing": "1.0", "scopes": "on"}`).
   Distinct from `metrics`, which is float-only. `probe_id` remains an opaque label and is
   never parsed.
+  `__post_init__` coerces every `metrics` value with `float(v)`, raising `ClaimValidityError`
+  naming the key if the coercion fails. This is not defensive typing: every producer in this
+  plan (P4 dispatch counters, P5 `ab_max_abs_force_delta` from a `jnp` reduction, P7
+  `flash_speedup`) naturally hands over a numpy/jnp scalar, and `json.dumps` raises on those at
+  `write()` time — after the measurement, on the cluster.
   Plus JSON (de)serialisation. Records are plain data —
   no JAX import at module scope. All of `x64_enabled`/`jax_version`/`jaxlib_version`/
-  `xla_flags` are captured automatically at construction, never passed by the caller — a
-  provenance field a caller can forget is a provenance field that will be forgotten.
+  `xla_flags` are DEFAULTED FROM THE LIVE ENVIRONMENT at construction (`default_factory`), so
+  a producer never has to remember them — a provenance field a caller can forget is a
+  provenance field that will be forgotten. They remain settable because deserialisation
+  requires it; deserialisation is the only sanctioned override path, and guard (d) therefore
+  trusts the provenance the record carries. Deliberate forgery is out of the contract's threat
+  model, which is accidental laundering by pre-filtering.
   `n_atoms: int` — the **real** (unpadded) atom count of the production system, never a
   padded count and never a reduced smoke-mode count. Where a probe pads for bucketing, the
-  padded count goes in `metrics["n_padded_atoms"]`; the scale guard reasons about physical
-  system size, so it keys on the real count.
+  padded count SHOULD go in `metrics["n_padded_atoms"]`. This is best-effort documentation,
+  deliberately not enforced: a padded count is meaningless for a non-bucketed probe, so
+  requiring the key unconditionally would be wrong, and no contract guard reads it. The scale
+  guard reasons about physical system size and keys exclusively on `n_atoms`, which is
+  required, validated (`> 0`), and defined as the real unpadded production count — so omitting
+  `n_padded_atoms` costs interpretability, never correctness of the guard. P6 stamps both (its
+  `--dry-run` path already emits `n_real_atoms`/`n_padded_atoms`); other probes stamp it where
+  they have it.
+  `device_kind` is **auto-captured like the other provenance fields, not caller-declared**,
+  because it is a guard-(d) unanimity field and a free-form caller-supplied string defeats the
+  guard in both directions (two tasks on one machine spelling it differently spuriously
+  invalidate a sweep; two tasks on different machines both hardcoding a literal silently pass
+  one). `_capture_device_kind()` returns `_normalize_device_kind(jax.devices()[0].device_kind)`
+  when a device is available and `None` otherwise (Stage 0 does not execute, and
+  `platform="cpu"` records do not need it). `_normalize_device_kind` lowercases, strips a
+  leading vendor token (`nvidia `, `amd `), and collapses internal whitespace to `_`, so
+  `"NVIDIA H200"` → `"h200"` and `"NVIDIA RTX PRO 6000 Blackwell"` →
+  `"rtx_pro_6000_blackwell"`. It is deliberately a normalisation, not an allow-list: an
+  unrecognised device yields its own normalised spelling rather than an error, so a new device
+  kind is recorded faithfully instead of blocking a probe. It remains settable for
+  deserialisation, on the same terms as the other auto-captured fields. **Consequence for
+  P7's gate:** read the `device_kind="h200"` assertion as `device_kind == "h200"` *after
+  normalisation*, and P1's test suite includes `_normalize_device_kind("NVIDIA H200") ==
+  "h200"`.
   Plus `__post_init__` validation, raising `ClaimValidityError` on any of:
   `stage not in {0,1,2,3}`; `stage >= 2 and platform != "gpu"` (the load-bearing
   implication — a Stage-2+ record is by definition GPU-measured, and `stage` is otherwise
@@ -202,12 +246,22 @@ Create:
   whose `metrics` keys are a superset of `REQUIRED_METRICS[claim]`; (2) for `TERM_RANKING`
   additionally require `scopes is not None` and contains ≥2 non-`None` entries — a ranking
   needs at least two terms to rank; (3) of what survives, return only those at `max(stage)`.
-  An empty result is itself a raise (`ClaimValidityError`: no record carries the metrics this
-  claim ranges over), so the selector is fail-closed on both axes.
+  An empty result is itself a raise (`ClaimValidityError`), and the message must name WHICH
+  filter emptied the set: if the metric filter did, `no record carries the metrics this claim
+  ranges over (required: [...])`; if the `TERM_RANKING` scopes filter did, `N record(s) carry
+  the required metrics but none has >=2 non-None scopes entries — a ranking needs at least
+  two terms to rank`. The two cases have different legitimate responses, so a message that
+  conflates them is not actionable. The selector is fail-closed on both axes.
   `paired_configs(records, claim, *, axis: str, hold_fixed: tuple[str, ...]) ->
   list[tuple[ProbeRecord, ProbeRecord]]` — over `select_sources(records, claim)`, groups by
-  the `hold_fixed` config keys and returns the groups that contain ≥2 distinct values of
-  `axis`. This is the contract helper §P7 gates on; `select_sources` itself does not group.
+  the `hold_fixed` config keys, then within each group returns one `(a, b)` pair for every
+  ordered-by-sorted-axis-value combination of distinct `axis` values — the full cross
+  product within a group, not the groups themselves. A group with fewer than 2 distinct
+  `axis` values contributes no pairs. This is the contract helper §P7 gates on;
+  `select_sources` itself does not group. Raises `ClaimValidityError` if any selected source
+  is missing the `axis` key or any `hold_fixed` key, naming the record and the key —
+  defaulting a missing key to `""` would merge distinct cells and report a confounded pair as
+  a pass.
   `assert_claim_supported(records, claim, *, target_n_atoms=None, allow_no_target=False)`
   which **raises `ClaimValidityError`** when (a) `claim is TERM_RANKING` and any record
   returned by `select_sources(records, claim)` has `stage < 2`; or (b) `claim is END_TO_END`
@@ -224,9 +278,9 @@ Create:
   support it by declaring a smaller `target_n_atoms`, or obtain a larger-`n_atoms` source —
   never pre-filter the input set, and never raise `SCALE_EXTRAPOLATION_LIMIT`; or
   (d) `claim in {TERM_RANKING, END_TO_END}` and the selected source records are not unanimous
-  in `x64_enabled`, `xla_flags`, **or** `device_kind` (platform unanimity is already implied
-  for `TERM_RANKING` by the stage≥2 floor plus the stage≥2 ⇒ platform=="gpu" construction
-  check, and is checked explicitly for `END_TO_END`, which has no stage floor) —
+  in `x64_enabled`, `xla_flags`, `device_kind`, or `git_sha` (platform unanimity is already
+  implied for `TERM_RANKING` by the stage≥2 floor plus the stage≥2 ⇒ platform=="gpu"
+  construction check, and is checked explicitly for `END_TO_END`, which has no stage floor) —
   raises. Rationale: the cluster rules document `XLA_FLAGS=--xla_gpu_shard_autotuning=false`
   changing measured throughput by 1170× on `pi_so3`'s Blackwell nodes (node4007/node4008).
   P7 requests `--gres=gpu:h200:1`, which maps to node4009 (Hopper), where the repo documents
@@ -234,13 +288,44 @@ Create:
   a measured ranking*, not a claim about P7's own device. The rule binds regardless:
   `xla_flags` is recorded verbatim, and a sweep mixing flagged and unflagged tasks is
   uncitable whatever the device. The project also benchmarks both precisions as a matter of
-  standing discipline. A ranking that silently mixes any of the three is not a ranking. Also
-  `CONTRACT_VERSION: str` (semver,
+  standing discipline. `git_sha` is included because a term ranking assembled from a dense
+  record at commit A and a flash record at commit B is not a ranking of the same code.
+  `_capture_git_sha` appends `"-dirty"` when `git status --porcelain` is non-empty, and
+  `select_sources` raises `ClaimValidityError` if any `TERM_RANKING`/`END_TO_END` source
+  carries `git_sha == "unknown"` or a `"-dirty"` suffix — an unrecordable or uncommitted
+  revision is not citable provenance. A ranking that silently mixes any of the four is not a
+  ranking. Also
+  `CONTRACT_VERSION: str` (MAJOR.MINOR,
   starts at `"1.0"`). **Bump rule:** major on any change that would newly reject a
   previously-accepted claim or newly accept a previously-rejected one (adding a rule,
   changing `SCALE_EXTRAPOLATION_LIMIT`, changing the stage floor); minor on additive changes
-  that alter no verdict (new `ClaimClass` member, new field). `ProbeRecord` serialisation
+  that alter no verdict AND leave every previously-written record readable — a new
+  `ClaimClass` member, or a new field declared with a plain default (e.g. `x: str | None =
+  None`) and no `default_factory`. **A new field carrying a `default_factory` is a MAJOR
+  bump, not a minor one**, and this is a direct consequence of read-side rule (ii) below:
+  rule (ii) makes a missing `default_factory` key a hard raise, so adding such a field
+  renders every record written before it unreadable — which alters every verdict those
+  records backed, including P8's committed fixtures, every Stage-0/1 record on disk, and
+  every Stage-2 record rsynced from the cluster. The rule is stated this way rather than
+  softening rule (ii) because rule (ii) is the guard that stops a reading machine's
+  environment being stamped into a measurement made elsewhere, and that protection is worth
+  more than in-place readability of old records. **Consequence, stated so it is not
+  discovered at read time:** a MAJOR bump invalidates all prior records for claim purposes.
+  Records at the older MAJOR version are retained as history but are not citable and are not
+  mixed into a source set (read-side rule (iii) enforces this). Regenerate P8's fixtures with
+  `ProbeRecord.write` at the new version as part of the bump; re-emitting a cheap Stage-0/1
+  record is minutes, and a Stage-2 record that cannot be re-emitted is recorded as lost to the
+  bump rather than silently upgraded. `ProbeRecord` serialisation
   includes the `CONTRACT_VERSION` in force when the record was emitted.
+  **Read-side contract.** `from_json` is fail-closed on both directions of version drift:
+  (i) an unknown key raises `ClaimValidityError` naming the key and both contract versions;
+  (ii) a MISSING key that has a `default_factory` raises `ClaimValidityError` rather than
+  firing the factory — firing it would stamp the reading machine's environment into a record
+  measured elsewhere, which is exactly the provenance corruption auto-defaulting exists to
+  prevent. Deserialisation therefore requires every provenance field to be present.
+  (iii) `select_sources` additionally raises if the selected sources disagree in the MAJOR
+  component of `contract_version`; a minor disagreement is permitted, because by the bump
+  rule a minor bump alters no verdict.
 - `tests/profiling/test_claim_contract.py`
 
 **Import mechanism (specified, because the repo has no convention and one of the obvious
@@ -253,19 +338,28 @@ vacuous and converting the eventual xtrax upstream back into a rewrite.
 **Gate:** `uv run pytest tests/profiling/ -q` passes, and the test suite includes at least:
 a Stage-1 record raising on `TERM_RANKING`; a Stage-2 record permitting it; a Stage-2
 record with `n_atoms=2000` raising on `END_TO_END` against `target_n_atoms=23558`; a
-grep-level check that no file under `scripts/profiling/` imports `prolix`; a mixed set
+recursive, AST-asserted check that no file at any depth under `scripts/profiling/` imports
+`prolix` (treating a relative `ImportFrom` whose `module` is `None` as unresolvable and
+therefore a failure); a mixed set
 of Stage-0, Stage-1 and Stage-2 records permits `TERM_RANKING` (the Stage-2 records are
 selected), while the same set with the Stage-2 records removed raises — i.e. adding a valid
 record must be able to *unblock* a claim, and adding an invalid one must never block one;
 and an `END_TO_END` claim with `target_n_atoms` omitted and `allow_no_target` unset
 **raises**; a record with `stage=2, platform="cpu"` raises at construction, not at
 claim time; two Stage-2 records differing only in `xla_flags` raise on `TERM_RANKING`; two
-Stage-2 records differing only in `device_kind` raise on `TERM_RANKING`; a Stage-2 record
-with `scopes=None` raises on `TERM_RANKING` even though its stage qualifies; a Stage-2
+Stage-2 records differing only in `device_kind` raise on `TERM_RANKING`; two Stage-2 records
+differing only in `git_sha` raise on `TERM_RANKING`; a `git_sha` of `"unknown"` or carrying a
+`"-dirty"` suffix raises on `TERM_RANKING`/`END_TO_END`; a Stage-2 record
+with `scopes=None` raises on `TERM_RANKING` even though its stage qualifies, and the raise
+message matches on the scopes reason, not merely the exception type; a Stage-2
 record lacking `total_step_seconds` in `metrics` raises on `END_TO_END`; and adding a
 further valid same-stage record with a smaller `n_atoms` to a passing `END_TO_END` claim's
 source set flips the claim to raising — the `min`-reducer's deliberate consequence, pinned
-so it is not mistaken for a regression.
+so it is not mistaken for a regression; `paired_configs` returns the expected pairs on a
+well-formed set, raises on a source missing a `hold_fixed` key, and returns no pair for a
+group with a single `axis` value; a record constructed with a numpy `float32` metric value
+round-trips through JSON; and a record missing a required provenance key on read raises
+`ClaimValidityError` rather than firing its `default_factory`.
 And `tests/profiling/` is collected under CI's marker expression
 `-m "not (slow or integration or dynamics)"` — the grep-assert is worthless if CI never runs
 it. Verify by checking the test appears in `tmp/pytest.json` after a CI-equivalent run.
@@ -295,6 +389,16 @@ it. Verify by checking the test appears in `tmp/pytest.json` after a CI-equivale
 where the harness lands. Prerequisite for any *term-attribution* claim, but run in parallel
 with P1, not serialised behind it.
 
+Create:
+- `tests/physics/test_scope_inventory.py` — the home for the compiled-HLO scope inventory
+  assertion below. It lives in `tests/physics/` rather than `tests/profiling/` because it
+  imports `prolix` (which `tests/profiling/`'s seam discipline keeps it clear of) and because
+  it pays a real XLA compile. It is marked `@pytest.mark.slow` so it is EXCLUDED from CI's
+  `-m "not (slow or integration or dynamics)"` expression — the assertion is a P2 gate leg
+  run deliberately, not a per-PR cost. Record in the step notes the exact command used
+  (`uv run pytest tests/physics/test_scope_inventory.py -q -m slow`) and its output, since CI
+  will not re-run it.
+
 Modify:
 - `src/prolix/physics/flash_explicit.py` — wrap `_total_energy_fn` (bonded block),
   `chunked_explicit_nonbonded_energy` (tile loop), `_chunked_lj_only_energy`, and the
@@ -315,8 +419,8 @@ modules, because whole-suite JAX runs are denied on this box by the local-comput
 P2 is declared a FREE/local step. The full check is CI's, using CI's own marker expression:
 `uv run pytest -m "not (slow or integration or dynamics)"` must be unchanged on the PR
 (matching `.github/workflows/ci.yml`, **not** `-m "not slow"`, so "unchanged" is measured
-against the baseline CI actually produces). And a scope
-inventory assertion run against the **compiled** module
+against the baseline CI actually produces). And `tests/physics/test_scope_inventory.py`
+asserts, against the **compiled** module
 (`jax.jit(fn).lower(*args).compile().as_text()`), not the lowering, at the largest size P4
 executes (N = 64) — every label above must appear. Rationale:
 `scripts/experiments/profile_b1_water_trace.py` lines 31-44 documents that at
@@ -324,13 +428,21 @@ replicas=2/n_steps=5 every `pme_*` label vanishes from compiled HLO while `settl
 survive, so a pre-optimization lowering is not evidence of survival. If a
 `dense_pme_reciprocal`-class label fails this assertion at N = 64, escalate the assertion to
 the P7 probe size before declaring the label unavailable.
-**Terminal state when a `dense_pme_reciprocal`-class label is invisible at N = 64:** P2 is
-**conditionally passed with a recorded deferral**, not blocked and not reverted. The other
-two gate legs must still pass; the invisible label is recorded in the step's follow-up notes
-as `deferred_to_p7`; P3–P6 do not wait on it; and the label is declared unavailable
-(triggering the op-name fallback) only if P7's Stage-2 assertion also fails to find it. This
-is the expected path, not an edge case — see the cited `profile_b1_water_trace.py` note.
-**This step's real gate is P5**, which may force its revert.
+**Terminal state when ANY label is invisible at N = 64 — stated per label class, because the
+gate is not uniform.** (a) A `dense_pme_reciprocal`-class label: P2 is **conditionally
+passed with a recorded deferral** — this is the expected path, not an edge case, per the
+cited `profile_b1_water_trace.py` note. Escalate the assertion to the P7 probe size; declare
+the label unavailable (triggering the op-name fallback) only if P7's Stage-2 assertion also
+fails to find it. (b) Any OTHER label (`flash_nonbonded_tiles`, `flash_lj_only`,
+`flash_bonded`, `flash_grad`, `dense_lj_direct`, `dense_coulomb_direct`, `dense_bonded_*`):
+P2 is **also conditionally passed**, but the deferral is recorded as `unexpected_absence`
+rather than `deferred_to_p7`, and it carries one extra obligation — confirm from the
+compiled text that the wrapped call site survived at all (i.e. distinguish "fused away and
+the label with it" from "the wrapping never landed"), because the second is an
+implementation error in P2 itself and IS a hard block. **In neither case does P2 block
+P3–P6.** An absent label is already a defined downstream outcome: P4 records it as
+`scopes[label] = None` and falls back to op-name attribution (see P4's fallback), and P7
+does the same. This step's real gate remains P5.
 **Scope: ~40 LOC of wrapping, no logic change.**
 
 ---
@@ -344,11 +456,27 @@ Create:
   (`prolix.batched_energy.single_padded_energy` + `jax.grad`, and
   `prolix.physics.flash_explicit.flash_explicit_forces`) via
   `jax.jit(fn).lower(*args).compile().cost_analysis()`, and emit `ProbeRecord(stage=0, ...)`
-  to `outputs/profiling/stage0/`.
+  to `outputs/profiling/stage0/`. Stamp `platform="cpu"` on Stage-0 records — the lowering
+  target, and the honest answer for a probe that does not execute. The choice is inert for
+  every guard (a Stage-0 record carries neither `total_step_seconds` nor `scopes`, so
+  `select_sources` filters it out of `TERM_RANKING` and `END_TO_END` before guard (d) is
+  reached, and `STRUCTURAL`/`DISPATCH_COUNT` do not invoke unanimity); it is pinned anyway so
+  two probes do not stamp it differently for no reason. Map `cost_analysis()` into `metrics`
+  with a fixed key convention: take the returned mapping (JAX returns a dict, or a
+  single-element list of dicts on some versions — normalise the list form to its sole element
+  and raise if it has more), and stamp `flops`, `bytes_accessed`, and `optimal_seconds` under
+  exactly those names, omitting any the installed JAX does not provide. Any further keys are
+  stamped verbatim under their JAX-given names. Record in the step notes which keys the
+  installed JAX actually returned, since these are version-fragile in the same way P4's
+  dispatch counters are.
 
 **Gate:** script runs to completion locally; emits ≥6 Stage-0 records; a smoke assertion
-confirms `assert_claim_supported(records, ClaimClass.TERM_RANKING)` **raises** — i.e. the
-contract is live on real records, not just in unit tests.
+confirms `assert_claim_supported(records, ClaimClass.TERM_RANKING)` **raises** AND that the
+raise names the metric/scopes filter, not the stage floor — Stage-0 records carry neither
+`total_step_seconds` nor `scopes`, so the fail-closed selector fires first and the stage
+floor is never reached. This gate demonstrates that the contract is live on real records; it
+does NOT demonstrate the stage rule (P4's gate demonstrates that, on records that actually
+reach guard (a)).
 **Scope: ~120 LOC.**
 
 ---
@@ -360,16 +488,24 @@ Create:
 - `scripts/explore/prof_stage1_cpu_micro.py` — executes a handful of integrator steps at
   N = 4–64 under `jax.profiler.trace`, parses the trace into per-`named_scope` wall times,
   and emits `ProbeRecord(stage=1, platform="cpu", ...)`.
-- `scripts/profiling/trace.py` — **pure** trace→`dict[scope, seconds]` parsing (no prolix
-  imports). **Input artifact:** the `*.trace.json.gz` Perfetto JSON emitted into the
-  `jax.profiler.trace` output directory — chosen over `.xplane.pb` because it needs no
-  TensorBoard plugin dependency, which would violate the xtrax-shaped seam. **Convention:**
-  returns **exclusive** (self) time per scope — a nested child's time is subtracted from its
-  parent — and **sums** across re-entrant occurrences (every `scan`/`while_loop` iteration of
-  the same label aggregates into one entry, with the occurrence count returned alongside as
-  `dict[scope, tuple[seconds, n_occurrences]]`). Inclusive time is derivable from the
-  parent/child tree and is not the default, because a bottleneck table built from inclusive
-  times double-counts.
+- `scripts/profiling/trace.py` — **pure** trace→`dict[scope, tuple[seconds, n_occurrences]]`
+  parsing (no prolix imports); the return type is the tuple form throughout, matching
+  `ProbeRecord.scopes` exactly. There is no seconds-only variant. **Input artifact:** the
+  `*.trace.json.gz` Perfetto JSON emitted into the `jax.profiler.trace` output directory —
+  chosen over `.xplane.pb` because it needs no TensorBoard plugin dependency, which would
+  violate the xtrax-shaped seam. **Convention:** returns **exclusive** (self) time per scope
+  — a nested child's time is subtracted from its parent — and **sums** across re-entrant
+  occurrences (every `scan`/`while_loop` iteration of the same label aggregates into one
+  entry). Inclusive time is derivable from the parent/child tree and is not the default,
+  because a bottleneck table built from inclusive times double-counts.
+  **Input structure (resolve before writing the parser, not after):** dump one real
+  `jax.profiler.trace` output first (`profile_b1_water_trace.py --trace` already produces
+  one) and record in the step notes HOW a `named_scope` label surfaces — as a nested
+  duration slice with a real parent/child stack, as a `/`-delimited prefix on an XLA op
+  name, or on a `TraceAnnotation`/`XLA Modules` row. The exclusive-time convention above is
+  only defined for the nested-slice form; if labels surface as flat name prefixes instead,
+  state that exclusive time is computed by prefix-depth attribution instead, and say so in
+  the record.
 
 Reuse `scripts/experiments/profile_b1_water_trace.py` as the working reference for
 `jax.profiler.trace` capture mechanics — do not re-derive it.
@@ -380,17 +516,65 @@ they are four different diagnostics: (1) `n_executions` — XLA executable invoc
 the timed region; (2) `n_compilations` — distinct XLA compilations triggered, the
 retracing/recompilation tripwire; (3) `n_host_syncs` — `block_until_ready`/device→host
 transfers; (4) `n_jit_traces` — Python-level trace events. All four are stamped into
-`metrics`. A `DISPATCH_COUNT` claim must name which of the four it ranges over. Records are
+`metrics`. **Mechanism, per counter, all derived from the same Perfetto trace this step
+already captures so no second measurement path is introduced:** `n_executions` from
+executable-invocation events; `n_compilations` from XLA compile events (cross-check against
+`jax.monitoring` compilation-event listener counts where available); `n_host_syncs` from
+device-to-host transfer events; `n_jit_traces` from jit trace-annotation events. All four
+are trace-event-derived and therefore version-fragile — assert on their PRESENCE, not their
+exact spelling, and pin the JAX/jaxlib version in the record (already stamped).
+**Resolve counter feasibility as a spike BEFORE P3 or P4 emits any record.** Against the
+installed JAX, capture one throwaway `jax.profiler.trace` of a trivial jitted function and
+confirm each of the four counters is derivable from it. This is minutes of work and it must
+precede the first emitted record, because the fallback below takes a MAJOR
+`CONTRACT_VERSION` bump, and read-side rule (iii) makes records at different MAJOR versions
+unmixable — so a fallback that fires *after* P3's Stage-0 records exist silently strands
+them from every later record, which is precisely the cross-stage load P8 performs. Record
+the spike's result in the step notes. **If the fallback nevertheless fires after any record
+has been written**, that is a bump-invalidation event under P1's bump rule: every record at
+the prior MAJOR version is retained as history but is not citable and is not mixed into a
+source set; re-emit the Stage-0/1 records (minutes) and regenerate P8's fixtures at the new
+version.
+**Fallback, decided now rather than at gate time:** if a counter proves unobtainable on the
+installed JAX, remove it from `REQUIRED_METRICS[DISPATCH_COUNT]`, record the removal and its
+reason in the step notes, and take a MAJOR `CONTRACT_VERSION` bump — removing a required
+metric newly ACCEPTS previously-rejected claims, which is a major-bump trigger under P1's
+rule. Do not ship a `DISPATCH_COUNT` frozenset containing a metric no probe can emit;
+`select_sources` is fail-closed and would raise on every such claim forever. A
+`DISPATCH_COUNT` claim must name which of the four it ranges over. Records are
 Stage-1 stamped and consequently *cannot* be used for PME-vs-nonbonded ranking. Claims
 permitted here: structural, dispatch-count, and bonded/SETTLE relative cost only.
+And `assert_claim_supported(stage1_records, ClaimClass.TERM_RANKING)` raises with the
+STAGE-FLOOR message — P4's records carry `total_step_seconds` and ≥2 non-`None` `scopes`,
+so they are the first real records that reach guard (a). This is where the stage rule is
+demonstrated on real records (contrast P3's gate, which cannot reach guard (a) at all, since
+Stage-0 records carry neither metric).
 **Fallback:** any P2 label absent from the executed trace is recorded as `scopes[label] =
 None` (not 0.0), and attribution for that term falls back to trace-level op-name
-aggregation — the same fallback P5 specifies. A missing label is a recorded outcome, never a
-silent zero.
-**Parser ground-truth check:** `tests/profiling/test_trace_parse.py` feeds a
-hand-constructed synthetic trace with known nesting and known durations (one parent, two
-children, one child entered 3×) and asserts the parser recovers the exact exclusive seconds
-and occurrence counts. Per the project rule on verifying a measurement pipeline before
+aggregation — the same fallback P5 specifies — written into `scopes` with
+`attribution_method[label] = "op_name"`; the `None` sentinel is reserved for a label
+recovered by NEITHER method. A missing label is a recorded outcome, never a silent zero.
+**Parser ground-truth check:** `tests/profiling/test_trace_parse.py` has TWO legs.
+(1) synthetic: a hand-constructed trace with known nesting and known durations (one parent,
+two children, one child entered 3×), asserting the parser recovers the exact exclusive
+seconds and occurrence counts. (2) real: a small (<1 MB) `*.trace.json.gz` committed under
+`tests/profiling/fixtures/`, produced **locally on CPU** by
+`JAX_PLATFORMS=cpu uv run python scripts/experiments/profile_b1_water_trace.py --trace
+--replicas 2 --n-steps 5 --n-trials 2` (the reduced parameters are what keep it under 1 MB;
+the script defaults to `--replicas 16 --n-steps 50 --n-trials 5`, which does not). Record the
+exact command in the fixture directory's README. Over it, the parser must recover at least
+two of `pme.py`/`settle.py`'s pre-existing labels with non-zero exclusive time. **Stated
+limitation, because it bounds what this leg proves:** the fixture is a CPU trace, so it
+validates the parser against the CPU artifact shape only. `--trace` is documented as GPU
+device trace capture and the two artifact shapes may differ (different device-lane rows,
+different XLA op-name decoration). A GPU fixture is not obtainable inside P4, which is a
+local CPU step. Therefore **P7 carries an additional gate leg**: run `trace.py` over one real
+GPU trace captured during the sweep and assert it recovers ≥2 labels with non-zero exclusive
+time, before any P7 per-scope attribution is cited. If the GPU shape differs, that is a
+parser defect discovered at P7 and it invalidates P7's per-scope attribution only — P7's
+dense-vs-flash term ranking survives, on the same reasoning the scopes-equivalence failure
+branch already gives. Leg (1) alone cannot detect a parser written against an assumed
+artifact shape. Per the project rule on verifying a measurement pipeline before
 trusting conclusions, this test gates `trace.py`, not the probe output. **Fallback:** if the
 CPU trace lacks per-scope granularity for a given label, that label is recorded as `None`
 and falls back to op-name attribution (see the label-absence fallback above). The gate list
@@ -412,15 +596,22 @@ Create:
   `jax.named_scope` to a null contextmanager before the prolix modules under test are
   imported (`contextlib.nullcontext`-equivalent). No env var and no source-side toggle: the
   A/B is a property of the harness, so P2 keeps its `no logic change` guarantee and prolix
-  gains no permanent hot-path config surface with no owner. The script asserts the two arms
-  produce forces agreeing to within `rtol=1e-5, atol=1e-6` (float32) or `rtol=1e-12,
-  atol=1e-14` (x64) — deliberately *not* bitwise. A no-op scope cannot change semantics, but
-  it can change XLA fusion, and a changed fusion changes reduction and FMA-contraction order,
-  so last-bit differences are the expected signature of exactly the perturbation this gate
-  exists to detect. A difference above tolerance means the patch is wrong (it disabled or
-  reordered real work) and the timing comparison is void; a difference within tolerance is
-  recorded in `metrics["ab_max_abs_force_delta"]` and the timing comparison proceeds. A
-  nonzero-but-in-tolerance delta is itself reportable evidence that fusion changed, and is
+  gains no permanent hot-path config surface with no owner. The **assertion** is
+  `numpy.allclose(F_on, F_off, rtol=<r>, atol=<a>)` computed elementwise over the full (N,3)
+  force arrays — not a threshold on any scalar summary. `(r, a) = (1e-5, 1e-6)` when the
+  children ran under float32 and `(1e-12, 1e-14)` under x64; the branch is selected from the
+  child records' auto-captured `x64_enabled`, which the driver asserts is identical across
+  both arms before comparing (a cross-precision A/B is void regardless of the delta).
+  `max_abs_force_delta = float(np.max(np.abs(F_on - F_off)))` is computed and stamped into
+  the paired record's `metrics["ab_max_abs_force_delta"]` as **reportage only** — it is what
+  makes a nonzero-but-in-tolerance fusion change visible and comparable across runs, and it
+  is deliberately not the pass/fail quantity, because a relative tolerance has no meaning
+  against an unreferenced absolute maximum. Deliberately not bitwise: a no-op scope cannot
+  change semantics, but it can change XLA fusion, and a changed fusion changes reduction and
+  FMA-contraction order, so last-bit differences are the expected signature of exactly the
+  perturbation this gate exists to detect. `allclose` False means the patch is wrong (it
+  disabled or reordered real work) and the timing comparison is void; `allclose` True with a
+  nonzero `max_abs_force_delta` is itself reportable evidence that fusion changed, and is
   noted alongside the timing verdict.
 
 *Process model (specified, because an import-time patch cannot be flipped in-process).* Each
@@ -430,8 +621,16 @@ A/B/A/B. The child applies (or omits) the patch before importing prolix, perform
 warm-up calls that absorb JIT compile entirely inside the child, then `n_inner` timed
 repeats, and reports the median of its timed repeats. Compile cost therefore never enters a
 reported number, and the two arms' differing HLO compile times cannot enter `d_i`. Pair *i*
-is the *i*-th A child with the *i*-th B child. Each child writes its own `ProbeRecord`; the
-driver emits the paired summary.
+is the *i*-th A child with the *i*-th B child. Each child takes `--system-seed` and
+constructs its N=64 system from that seed alone, so both arms are bit-identical inputs; the
+driver passes the same value to both children of a pair and stamps it into
+`config["system_seed"]`. Each child writes `forces.npy` (float64, shape `(N,3)`) beside its
+`ProbeRecord` at `<record_path>.forces.npy`. The driver loads both arms' arrays, computes
+`max_abs_force_delta`, asserts it against the stated tolerance, and stamps it into the PAIRED
+summary record's `metrics["ab_max_abs_force_delta"]` — the children cannot compute it because
+neither sees the other. `n_inner = 20` timed repeats per child (after the 3 untimed
+warm-ups), stamped into `metrics["n_inner"]` alongside seed/`B`/method/`n_pairs`. Each child
+writes its own `ProbeRecord`; the driver emits the paired summary.
 
 **Gate:** paired equivalence on total step time **and** on the instrumented function in
 isolation. Procedure: ≥21 interleaved A/B pairs (see the process model above), the first 2
@@ -444,11 +643,49 @@ reproducible from the record alone; a gate that flips on an unseeded resample is
 Run the same check a second time on
 `chunked_explicit_nonbonded_energy` timed alone, because a perturbation confined to the tile
 reduction can hide under 5% of a whole step — which is the exact mechanism this gate exists
-to catch. Both checks must pass. **If it fails:** revert the P2 scope insertions in the
-offending function(s) and fall back to trace-level (op-name) attribution there. Record the
-outcome in the spec's follow-up notes either way — this is a real decision point, not a
-formality. Scopes can perturb fusion inside a fused `scan`/tile-reduction, which is exactly what
-`chunked_explicit_nonbonded_energy` is.
+to catch. Both checks must pass. **Distinguish the two failure modes before acting.** If
+`|median(d_i)| > 0.05`, that is a DETECTED perturbation — revert the offending scopes and
+fall back to op-name attribution. If `|median(d_i)| <= 0.05` but the CI is not contained in
+the margin, that is INSUFFICIENT POWER — increase `n_pairs` and re-run; DO NOT revert. **A
+DETECTED perturbation is localised, not blanket-reverted — see the localisation procedure
+after this paragraph.** Size
+`n_pairs` from a pilot: run 10 A/A pairs first (both arms scopes-off; 10 rather than 5
+because an IQR estimated from n=5 is too unstable to size anything), take `s` = the
+interquartile range of those null deltas, and set
+`n_pairs = clip(ceil((3.3*s/0.05)^2), 21, 200)`. The constant 3.3 is a deliberately
+conservative stand-in for the ~1.5 a normal-theory derivation gives (sigma ≈ IQR/1.349; 90%
+CI half-width on a median costs a further sqrt(pi/2)) — roughly 2× on the coefficient and ~5×
+in `n`, erring toward more power because the insufficient-power branch forbids reverting and
+a re-run is cheaper than a wrong revert. Stamp the pilot `s`, the raw derived value, and the
+clipped `n_pairs` into the record. **When the raw value exceeds the 200 cap** the pilot is
+telling you the harness noise floor is comparable to the effect the gate is meant to resolve,
+and no affordable number of pairs will settle it. Do not revert (that branch is forbidden),
+and do not raise the cap. Instead: record the outcome as UNRESOLVED-ON-CPU with the pilot
+`s`, run the gate at `n_pairs = 200` and report the resulting CI without a pass/fail verdict,
+and defer the verdict to P7's Stage-2 replication — which is the backend and size where the
+attribution is actually believed. P2 is then carried forward under the same
+conditional-pass-with-recorded-deferral terms it already has for an invisible label. A gate
+that deletes instrumentation because the measurement was noisy is
+measuring the harness, not the code. Record the outcome in the spec's follow-up notes either
+way — this is a real decision point, not a formality. Scopes can perturb fusion inside a
+fused `scan`/tile-reduction, which is exactly what `chunked_explicit_nonbonded_energy` is.
+
+**Localising a DETECTED perturbation.** The two checks already partition the space once: if
+the `chunked_explicit_nonbonded_energy` check fails, the offender is that function's labels
+(`flash_nonbonded_tiles`, and `flash_lj_only` where it shares the tile body) and those are
+what get reverted. If the whole-step check fails while the per-function check passes, the
+offender is elsewhere and the remedy is a **bisect over scope groups**, not a blanket
+revert: the three groups are (i) `flash_explicit.py`'s bonded + grad labels
+(`flash_bonded`, `flash_grad`), (ii) `flash_explicit.py`'s nonbonded labels
+(`flash_nonbonded_tiles`, `flash_lj_only`), (iii) `batched_energy.py`'s dense term labels
+(`dense_bonded_*`, `dense_lj_direct`, `dense_coulomb_direct`, `dense_pme_reciprocal`). The
+harness patch is already all-or-nothing per import, so a group is disabled by reverting its
+wrapping in a scratch branch and re-running the whole-step check; three re-runs at the
+pilot-derived `n_pairs` bound the search. Revert only the group that reproduces the failure,
+and fall back to op-name attribution for that group's terms alone. **If the bisect is
+inconclusive** (no single group reproduces it), revert all P2 scopes and record that the
+whole-step perturbation was not attributable — but state that outcome explicitly rather than
+reaching it by default.
 **Scope: ~90 LOC.**
 
 ---
@@ -456,33 +693,112 @@ formality. Scopes can perturb fusion inside a fused `scan`/tile-reduction, which
 ### P6 — Re-verify the Stage-2 probe script runs end-to-end, and record its true `n_atoms`
 **Cost: FREE→CHEAP** (CPU, reduced size).
 
+**Precondition (verify before P6's first `bth run`, not after).** The plan's entire
+separation-of-history mechanism assumes `bth run --campaign <new_id>` overrides a sidecar's
+hardcoded `[metadata].campaign_id` (`profile_b1_flash_vs_autodiff_forces.bth.toml` pins
+`32d6574e`). Verify it: `bth campaign create` the new campaign, run one throwaway
+`bth run --campaign <new_id>` of the script's `--dry-run` path, then
+`bth sql "SELECT id, campaign_id, tags FROM read_parquet('~/.bth/catalog/runs/prolix/run_*.parquet') ORDER BY timestamp DESC LIMIT 1"`
+and read `campaign_id` directly. **If the CLI flag wins:** proceed as written. **If the
+sidecar's metadata wins, or the gate rejects the mismatch:** the no-sidecar-edit route is
+unavailable, and the fallback is to run P6's smoke and P7's tasks 0–11 from a
+`scripts/explore/` copy of the script under `--no-sidecar` (project hard rule 6 sanctions
+`--no-sidecar` for that directory), with the ProbeRecord tree carrying all provenance and the
+campaign association recorded in the record's `config`. Record the observed precedence in the
+step notes either way — a later reader must not have to re-derive it.
+
 Modify:
 - `scripts/experiments/profile_b1_flash_vs_autodiff_forces.py` — add `--stage`,
   `--emit-record`, a CPU-sized smoke mode that reports per-(protein × mode) wall time, and
   `ProbeRecord` emission.
-- **Do not modify** `scripts/experiments/profile_b1_flash_vs_autodiff_forces.bth.toml`. It
-  has historical runs under campaign `32d6574e` and the project's pre-registration discipline
-  is never to patch a running sidecar. P6's CPU smoke runs under `--no-sidecar` in
-  `scripts/explore/`, or reports `n_atoms` via the existing `--dry-run` path, which already
-  emits `n_real_atoms`/`n_padded_atoms` without a timing loop.
+- **Plan of record: no sidecar edit.**
+  `scripts/experiments/profile_b1_flash_vs_autodiff_forces.bth.toml` has historical runs
+  under campaign `32d6574e` and the project's pre-registration discipline is never to patch
+  a running sidecar. P6 adds a CPU-sized smoke MODE to
+  `profile_b1_flash_vs_autodiff_forces.py` that runs a real (shortened) timing loop with
+  `--n-trials 3`, invoked under `bth run` against the script's existing frozen sidecar and
+  the NEW campaign id (see P7). The `--dry-run` path is NOT an alternative route for the
+  timing-loop leg of this gate: it returns before any timing (script lines 151-157) and
+  therefore supplies `n_atoms` but no wall time. Use `--dry-run` only for the `n_atoms` half
+  if the timing loop cannot be made to run, and record that P7's walltime derivation is then
+  blocked. `--no-sidecar` is not used: the script lives in `scripts/experiments/` and
+  project hard rule 6 reserves `--no-sidecar` for `scripts/explore/`.
+- **What the frozen sidecar's gate verdict means for this run, stated so it is not later
+  mistaken for evidence.** The frozen sidecar's three outcomes range over `flash_speedup`,
+  pre-registered against a GPU tiling hypothesis. P6's smoke runs on CPU at `--n-trials 3`,
+  so the gate WILL evaluate that condition and WILL record a pass/marginal/fail. That verdict
+  is **not citable for debt 761 or for any hypothesis**: it is a smoke-sized CPU number
+  scored against a GPU-anchored threshold, and it is retained only as the mechanical
+  byproduct of running an existing script under its existing sidecar. Three things make this
+  safe rather than merely disclaimed: (i) the run carries the NEW campaign id, so
+  `bth campaign review 32d6574e` — the artifact debt 761 is decided from — never shows it;
+  (ii) the run additionally carries `--tag p6-cpu-smoke --tag not-citable`, so it is
+  filterable out of any `bth sql` query; (iii) the new campaign's description records that
+  P6's run is a plumbing check and that the sweep's live pre-registration is
+  `prof_stage2_coverage.bth.toml`. If, contrary to (i), `--campaign` does not override the
+  sidecar's `[metadata].campaign_id` (see the precedence check this step's precondition
+  adds), P6's smoke is instead moved to `scripts/explore/` as a temporary copy and run with
+  `--no-sidecar`, which project hard rule 6 sanctions for that directory — and the
+  sidecar-editing prohibition is preserved either way.
 
 This script was blocked by debt 765, debts 832/835, and the `_host_box_size` tracer leak —
 **all fixed this session (commit 3d42805)** — so it is expected to run for the first time.
 Confirm rather than assume.
 
-**Gate:** CPU smoke completes without exception, and the run reports the **actual
-production solvated** `n_atoms` for 1VII and 2GB1 — obtained from bundle construction alone
-via the script's existing `--dry-run` path (lines 140-157 already emit
+**Gate:** the CPU smoke is run TWICE, once per protein (`--protein 1vii` and
+`--protein 2gb1`) — the script's `--protein` flag takes a single value with a single default
+(L127) and each invocation loads and times exactly one bundle, so one run reports one
+protein. Both invocations complete without exception AND run a real timing loop (the
+`--dry-run` path alone does not satisfy this gate — see above), and each reports the
+**actual production solvated** `n_atoms` for its protein — obtained from bundle
+construction alone via the script's existing `--dry-run` path (lines 140-157 already emit
 `n_real_atoms`/`n_padded_atoms` before any timing), so the smoke mode shortens the *timing
 loop* and never shrinks the *system*. `ProbeRecord.n_atoms` is stamped with `n_real_atoms`.
-Then compute `23558 / n_atoms` and record it:
-- ratio ≤ 8 → Stage 2 → Stage 3 extrapolation is permitted by the contract; proceed.
-- ratio in (8, 10] → **near miss**: permitted only if the dense path's memory regime is the
-  same at probe and target; otherwise treat as ratio > 10.
-- ratio > 10 → **a mid-scale rung is mandatory**; file it as a blocking follow-up before any
-  Stage-3 claim (this is the pre-mortem's story-2 failure mode firing early, which is the
-  cheap place for it to fire).
-**Scope: ~80 LOC + sidecar edit.**
+Each invocation emits its own `ProbeRecord`, so P6 produces two records and two bathos runs
+(both under the new campaign id; see the sidecar-verdict note above). **`t_cpu` for P7's
+walltime derivation is the MAXIMUM over both proteins and both modes** of the reported
+per-(protein × mode) wall time — the slowest cell governs, since one `--time` covers the
+whole array.
+Then, rather than re-deriving the ratio by hand, **call the contract**:
+`assert_claim_supported(p6_records, ClaimClass.END_TO_END, target_n_atoms=23558)` over the
+records both proteins emitted, and catch `ClaimValidityError`. A raise is the >10 branch; a
+clean return is the ≤8-or-near-miss branch, disambiguated by reading
+`23558 / min(r.n_atoms)` off the records. This keeps the human procedure and
+`SCALE_EXTRAPOLATION_LIMIT` in sync by construction — a later change to the limit or to the
+min-reducer then changes P6's verdict automatically instead of silently desynchronising from
+a number typed into this paragraph. Record both per-protein ratios alongside the contract's
+verdict so a later claim narrowed to one protein can be re-evaluated on its own ratio without
+re-running P6. **This is also the first time guards (b) and (c) fire on real (non-fixture)
+records** — note the outcome in the step notes for that reason. The governing ratio remains
+the LARGER of the two per-protein ratios (i.e. the smaller `n_atoms`), which is not a choice
+but a restatement of what the contract already enforces: guard (c) reduces with
+`min(r.n_atoms for r in sources)`, so a claim backed by both proteins is governed by the
+smaller system. Branch on the governing ratio:
+- governing ratio ≤ 8 → Stage 2 → Stage 3 extrapolation is permitted by the contract; proceed.
+- governing ratio in (8, 10] → **near miss**. The memory-regime question is answered
+  analytically, not by running at the target — Stage-3 execution is out of scope for this
+  step and for this plan. Compute, for each protein and for DHFR, the dense pair-storage
+  estimate `M(N) = N_pad^2 * 4 bytes` (float32; use 8 for x64), where `N_pad` is the bucketed
+  padded count the probe reports as `n_padded_atoms`, and for DHFR use the smallest bucket
+  ≥ 23,558. Compare both against `D = 0.8 * <device memory of the P7 target>` — for the H200
+  (node4009) take 140 GB, so `D = 112 GB`; state the device and the figure used in the record,
+  because the answer is device-dependent by construction. **If `M(probe) < D` and
+  `M(target) < D`, the memory regime is the same and the near miss passes.** Otherwise treat
+  as ratio > 10 and file the mid-scale rung. Record `M(probe)`, `M(target)`, `D`, the device,
+  and the verdict in `ProbeRecord.metrics` as `dense_pair_bytes_probe` /
+  `dense_pair_bytes_target` / `device_memory_budget_bytes`. This is deliberately an estimate
+  of the dominant term only (it ignores PME grid and neighbor-list storage, both of which grow
+  more slowly) and it is deliberately conservative via the 0.8 factor; it is used because the
+  guard it feeds is one-directional — it can only refuse a claim, never approve one. If the
+  estimate lands within 20% of `D` in either direction, treat the answer as unknown and
+  therefore as ratio > 10.
+- governing ratio > 10 → **a mid-scale rung is mandatory**; file it as a blocking follow-up
+  before any Stage-3 claim (this is the pre-mortem's story-2 failure mode firing early,
+  which is the cheap place for it to fire). File this follow-up when EITHER protein's own
+  ratio trips >10, because either one entering the source set tightens the guard for every
+  claim built on that set. Record both per-protein ratios so a later claim narrowed to one
+  protein alone can be re-evaluated on its own ratio without re-running P6.
+**Scope: ~80 LOC, no sidecar edit.**
 
 ---
 
@@ -502,38 +818,101 @@ Create:
   makes this job unschedulable against `--gres=gpu:h200:1`), nor `--gres=gpu:1`,
   `--time=2:00:00`, `--mem=16G`, or the `fit_bonded_hp4` output paths. P7's own directives:
   `--partition=pi_so3,mit_normal_gpu`, `--gres=gpu:h200:1`, `--time` per the derivation
-  below, and `--array=0-13%<k>` where `<k>` is the H200 GPU count on the target node,
-  confirmed before submitting via `ssh engaging "scontrol show node node4009"` (read `Gres=`
-  and `AllocTRES`). The script also carries the standard hostname-keyed `XLA_FLAGS` guard
+  below, and `--array=0-11%<k>` (task 12 is submitted separately — see the walltime note
+  below). **The throttle `%k` is a courtesy cap on concurrent GPU
+  claims, NOT a placement control:** with `--partition=pi_so3,mit_normal_gpu` the scheduler
+  may place tasks on any H200-equipped node in either partition, and no SLURM mechanism in
+  this submission constrains that. `<k>` is sized by checking pi_so3 H200 availability
+  before submitting (`ssh engaging "scontrol show node node4009"`, read `Gres=` and
+  `AllocTRES`) so the cap is sensible, but it is recorded as a cap, not a guarantee that
+  tasks share a node. The script also carries the standard hostname-keyed `XLA_FLAGS` guard
   block (per `~/.claude/rules/CLUSTER.md` §2, as 9 other slurm scripts in this repo do and
-  the chosen template does not), so `XLA_FLAGS` is set identically and deterministically on
-  every array task regardless of which node it lands on — which is also what makes rule (d)
-  pass rather than fire on P7's own sweep.
+  the chosen template does not). The guard block is carried for consistency with the 9 other
+  slurm scripts in this repo, but note precisely what does and does not make rule (d) pass
+  on this sweep. It is **not** the guard — a hostname-keyed conditional is by construction
+  node-dependent. It is the `--gres=gpu:h200:1` request: node4007/node4008 are the Blackwell
+  RTX Pro 6000 nodes (see the do-not-inherit note above), so an H200 gres request structurally
+  cannot land on either hostname the guard keys on. The guard is therefore inert on every task
+  of this sweep, `XLA_FLAGS` is uniformly the empty string, and guard (d)'s `xla_flags`
+  unanimity passes for that reason. **If the gres request is ever relaxed, this reasoning is
+  void.** Accordingly, `prof_stage2_coverage.py` asserts that all 13 records carry an
+  identical `xla_flags` string before computing any coverage or ranking, and reports the
+  distinct values if not. A sweep that fires the guard on a proper subset of its tasks is
+  uncitable as a whole and cannot be repaired by re-running the odd task out — the remedy is
+  to re-run the entire sweep with the flag forced identically (set `XLA_FLAGS` unconditionally
+  in the slurm script) and to record that the guard fired.
 - `scripts/experiments/prof_stage2_scope_ab.py` — a thin harness wrapper carrying the same
   import-time patch P5 defines: it takes `--scopes {on,off}` plus the probe's own config
   flags, applies the `jax.named_scope`→`nullcontext` patch before importing any prolix
   module when `--scopes off`, then calls
   `profile_b1_flash_vs_autodiff_forces.main()` with the forwarded args. The toggle stays in
   the harness exactly as P5 requires, so P2 keeps its no-logic-change guarantee and prolix
-  gains no permanent hot-path config surface. Array tasks 12 and 13 invoke this wrapper
-  under `bth run` with `--scopes on` / `--scopes off` at the representative config; tasks
-  0–11 invoke the probe directly.
-- `scripts/experiments/prof_stage2_small_system.bth.toml` — a **new** sidecar under a
-  **new** exploration campaign (`bth campaign create` before the first `bth run`, per
-  project hard rule 3). Because the sweep is multi-config and bathos outcomes are scalar,
-  the sidecar's outcomes are defined on a single sweep-level scalar,
-  `n_configs_with_valid_dense_flash_pair`, defined explicitly as: the number of *comparison
-  cells* — the 6 distinct {protein} × {pme/grid} combinations, i.e. {1vii, 2gb1} ×
-  {pme_off, pme_on@1.0Å, pme_on@1.2Å} — for which **both** the dense and the flash array
-  task exited 0 and emitted a Stage-2 `ProbeRecord`. Maximum achievable value: 6.
+  gains no permanent hot-path config surface. **Task 12 runs BOTH arms inside a single array
+  task**, invoking this wrapper twice (`--scopes on`, then `--scopes off`, interleaved
+  A/B/A/B exactly as P5's driver does) and emitting the paired summary itself — see the
+  array-mechanism note below for why this is one task, not two. Tasks 0–11 invoke the probe
+  directly.
+- **Coverage is decided by a 14th, post-hoc AGGREGATION run**, because a bathos outcome
+  condition is evaluated against a single run's flat result keys — the canonical sidecar
+  (`fit_bonded_hp4.bth.toml`) routes cross-cell comparison to `bth campaign review` for
+  exactly this reason; no run in this sweep computes or emits a sweep-level scalar itself.
+  Create `scripts/experiments/prof_stage2_coverage.py`, which after the array completes
+  reads TWO sources and joins them: (i) the 13 `ProbeRecord`s under
+  `outputs/profiling/stage2/`, and (ii) the array tasks' exit codes from the bathos catalog,
+  via `bth sql "SELECT id, status, exit_code, tags FROM
+  read_parquet('~/.bth/catalog/runs/prolix/run_*.parquet') WHERE
+  list_contains(tags, '<campaign-slug>')"` (exit code is captured by `bth run` per project
+  hard rule 1; it is not derivable from the record set, and record presence alone is not a
+  substitute because a task can write a record and then fail). If the catalog is
+  unreachable, the script FAILS rather than falling back to record-presence — a coverage
+  number computed from a weaker criterion than the one the outcome conditions were
+  pre-registered against is not the metric. It then computes
+  `n_configs_with_valid_dense_flash_pair` (0–6) plus per-cell booleans, and emits them as
+  flat scalars. Its sidecar is `scripts/experiments/prof_stage2_coverage.bth.toml` —
+  stem-matched per project hard rule 2 — carrying the outcomes below.
+  `n_configs_with_valid_dense_flash_pair` is defined explicitly as: the number of
+  *comparison cells* — the 6 distinct {protein} × {pme/grid} combinations, i.e. {1vii,
+  2gb1} × {pme_off, pme_on@1.0Å, pme_on@1.2Å} — for which **both** the dense and the flash
+  array task exited 0 and emitted a Stage-2 `ProbeRecord`. Maximum achievable value: 6.
   `[outcomes.pass] condition = "n_configs_with_valid_dense_flash_pair >= 5"`;
   `[outcomes.marginal] condition = "n_configs_with_valid_dense_flash_pair BETWEEN 2 AND 4"`;
-  `[outcomes.fail]` is the residual with `is_residual = true`. Array indices 12–13 (the
-  scopes replication) are excluded from this metric and are gated separately by the P5
-  equivalence criterion. Per-config `flash_speedup` values live in `[result_schema]` as
-  recorded data, **not** as gate conditions: P7 is discovery, so the sidecar gates
-  *coverage*, not *effect size*. Anchored effect-size thresholds arrive with the §4
-  promotion row, one experiment per surviving hypothesis.
+  `[outcomes.fail]` is the residual with `is_residual = true`. Task 12 (the paired-scopes
+  task) is excluded from this metric and is gated separately by the P5 equivalence
+  criterion. Per-config `flash_speedup` values live in `[result_schema]` as recorded data,
+  **not** as gate conditions: P7 is discovery, so the sidecar gates *coverage*, not *effect
+  size*. Anchored effect-size thresholds arrive with the §4 promotion row, one experiment
+  per surviving hypothesis. **Trigger for the aggregation run, stated so it cannot be
+  forgotten:** it is submitted with the array, as a dependent job —
+  `sbatch --dependency=afterany:<array_job_id> scripts/slurm/prof_stage2_coverage.slurm` —
+  so it runs once the array reaches a terminal state whether or not every task succeeded
+  (`afterany`, not `afterok`: partial coverage is exactly what this run exists to measure).
+  Record the dependent job id alongside the array job id.
+- **Per-task sidecar resolution, stated explicitly because P7 spans three different
+  sidecars.** Tasks 0–11 invoke `profile_b1_flash_vs_autodiff_forces.py` and therefore
+  resolve to its EXISTING frozen sidecar (`profile_b1_flash_vs_autodiff_forces.bth.toml`,
+  see P6); they run under the NEW campaign id via `--campaign`, which is what separates
+  them from campaign `32d6574e`'s historical runs. Because P7 changes that script's flag
+  surface while P6 freezes its sidecar, the frozen sidecar's hypothesis and
+  `[result_schema]` describe the pre-P7 shape and are preserved as the historical record,
+  NOT as a live pre-registration for these 12 runs. **The new axes go in the ProbeRecord, not
+  in the bathos result keys.** Tasks 0–11 emit exactly the eight keys the frozen
+  `[result_schema]` declares, unchanged; `pme`, `grid_spacing` and `scopes` are carried in
+  `ProbeRecord.config` per the config vocabulary below, never as bathos result keys. This is
+  deliberate and it is what makes the no-sidecar-edit rule survivable: the sweep's cross-cell
+  structure lives in the record tree, where `paired_configs` and `prof_stage2_coverage.py`
+  read it, and the bathos run records serve only as run provenance (job id, git state, exit
+  code, campaign association) — which is exactly the role the P7 gate assigns them
+  (`bth campaign review <id>` shows the runs associated). The bathos records are consequently
+  NOT the route for cross-cell comparison in this sweep; `paired_configs` over the 12 records
+  is. If, contrary to this, the bath gate rejects a run for any schema reason at all, the
+  remedy is to move the affected invocation to a `scripts/explore/` copy under `--no-sidecar`
+  (sanctioned by project hard rule 6 for that directory) and record the move — never to edit
+  the frozen sidecar. Task 12 carries its own new sidecar,
+  `scripts/experiments/prof_stage2_scope_ab.bth.toml`, stem-matched to
+  `prof_stage2_scope_ab.py`. The live pre-registration for the sweep as a whole is the new
+  campaign plus `prof_stage2_coverage.bth.toml`; record this in the campaign description so
+  the discipline is preserved in substance, not only in letter. State the campaign id
+  explicitly once `bth campaign create` returns it.
 
 **GPU-target note (recon inverted the prior assumption).** The dispatch brief anticipated
 "not H200 first". Live queue data collected during recon says otherwise: for short (<15 min)
@@ -547,33 +926,61 @@ high-priority option before falling back.
 cross product, so a partition-contention inversion costs one contention decision rather than
 N.
 
-*Config list (exact: 14 array tasks = 12 base + 2 scopes replication):* `{1vii, 2gb1} ×
+*Config list (exact: 12 array tasks + 1 separately-submitted paired-scopes job):* `{1vii, 2gb1} ×
 {dense, flash} × {pme_on, pme_off} × {grid spacing 1.0 Å, 1.2 Å}`. PME-off runs use
 direct-space Coulomb only and exist to isolate the reciprocal term; grid spacing is swept
 only on PME-on runs, so the true count is `2 × 2 × (1 + 2) = 12`. Add a fourth axis:
 `× {scopes_on, scopes_off}` on **one** representative config (1VII, flash, PME-on, 1.0 Å) —
 a Stage-2 replication of P5 on the backend and at the size where the attribution is actually
-believed. This is 2 extra array tasks, not a doubling. Task 12 (scopes_on) deliberately
-duplicates base config (1VII, flash, PME-on, 1.0 Å). The duplication is the point: the
-scopes_on/scopes_off pair must be measured within the same submission and under the same
-node conditions as each other, so the pair is self-contained and is never compared against
-the separately-scheduled base task. The base task remains in the 12 and in the coverage
-metric; tasks 12–13 are excluded from it.
+believed. This is 1 extra array task, not a doubling, and not a duplicated base config:
+task 12 measures BOTH arms of the (1VII, flash, PME-on, 1.0 Å) cell itself (see the
+`scope_ab.py` bullet above), rather than duplicating the base task and hoping the two land
+under comparable conditions — running the arms as separate array tasks would not deliver
+that property, because SLURM gives no guarantee that two array tasks share a node, a GPU,
+or a load level (see the throttle note above). The base task (within 0–11) remains in the
+12 and in the coverage metric; task 12 is excluded from it.
 
-*Mechanism:* a **SLURM job array**, `--array=0-13` (12 base configs + 2 scopes-on/off
-replication tasks), one config per task, index-to-config mapping in the slurm script. Not an
-in-job loop: an array isolates per-config failure, and every task carries its own `bth run`,
-so a task that OOMs orphans nothing.
+*Mechanism:* a **SLURM job array**, `--array=0-11` (12 base configs), one config per task,
+index-to-config mapping in the slurm script. Not an in-job loop: an array isolates
+per-config failure, and every task carries its own `bth run`, so a task that OOMs orphans
+nothing. Task 12 (the paired-scopes job) is a second, separately-submitted `sbatch` — see the
+walltime note below for why it cannot share the array's `--time`.
 
-*Walltime:* `--time` is derived from P6, not asserted. P6 already benches both force arms
-per protein; require P6 to report per-(protein × mode) wall time at the default PME-on /
-1.0 Å configuration. Take the slowest such value `t_cpu` and set
-`--time = round_up_to_5min(3 * t_cpu * n_trials_gpu / n_trials_smoke) + 10 min compile
-allowance`, floored at `00:15:00`. The PME-off and 1.2 Å axes are deliberately not timed at
-P6 and need no separate measurement: PME-off strictly removes the reciprocal term and 1.2 Å
-strictly shrinks the grid, so both are bounded above by the timed PME-on/1.0 Å config.
-Record the derived number and its inputs in a comment at the top of the slurm script; do
-not carry the placeholder `00:15:00` into the submitted script without that derivation.
+*Walltime:* `--time = round_up_to_5min(3 * t_cpu * n_trials_gpu / n_trials_smoke) + 10 min
+compile allowance`, floored at `00:15:00`, where `t_cpu` is the slowest per-(protein × mode)
+wall time P6 reports at the default PME-on / 1.0 Å configuration, `n_trials_smoke` is the
+`--n-trials` value P6's CPU smoke runs with (set it to 3), and `n_trials_gpu` is the
+`--n-trials` value P7 passes (set it to 20). The 3× factor and the 10 min allowance are
+stated safety margins, not derived bounds: 3× covers GPU-vs-CPU per-step variance and node
+contention, and 10 min bounds observed XLA compile times for this program class; record both
+as assumptions in the slurm script comment. The smoke route MUST run a timing loop — see
+P6's gate; `--dry-run` alone cannot supply `t_cpu`. The PME-off and 1.2 Å axes are
+deliberately not timed at P6 and need no separate measurement: PME-off strictly removes the
+reciprocal term and 1.2 Å strictly shrinks the grid, so both are bounded above by the timed
+PME-on/1.0 Å config. Record the derived number and its inputs in a comment at the top of the
+slurm script; do not carry the placeholder `00:15:00` into the submitted script without that
+derivation.
+
+**Task 12 is submitted separately and is not covered by the formula above.** The array
+`--array=0-11%<k>` carries the derived `--time`; task 12 is a second `sbatch` of
+`scripts/slurm/prof_stage2_scope_ab.slurm` with its own
+`--time = round_up_to_5min(2 * n_pairs * (t_gpu_child + t_compile_child)) + 15 min`, where
+`t_gpu_child` is one child's (3 warm-ups + n_inner timed repeats) wall time and
+`t_compile_child` is the per-child XLA compile time, both read from the first P7 base task's
+log before task 12 is submitted. If the resulting `--time` exceeds the 12h partition limit,
+reduce `n_pairs` to the largest value that fits and record the reduction plus the resulting
+CI width as an INSUFFICIENT POWER outcome under P5's two-failure-mode rule — never as a
+DETECTED perturbation, and never by reverting scopes.
+
+**Config vocabulary (normative, exact spellings — every array task stamps all five keys,
+never omitted, never defaulted):** `protein` ∈ {`1vii`, `2gb1`}; `mode` ∈ {`dense`,
+`flash`}; `pme` ∈ {`on`, `off`}; `grid_spacing` ∈ {`1.0`, `1.2`} when `pme == on` and the
+literal string `"na"` when `pme == off` (never omitted, never `""`, so PME-off cells group
+cleanly and never merge with a PME-on cell); `scopes` ∈ {`on`, `off`}. A task that cannot
+stamp all five does not emit a record. `paired_configs` (P1) raises `ClaimValidityError` if
+any selected source is missing the `axis` key or any `hold_fixed` key, naming the record and
+the key — defaulting a missing key to `""` would merge distinct cells and report a
+confounded pair as a pass.
 
 *Partial failure:* each array task emits its own `ProbeRecord`. Records from tasks that
 exited 0 are valid and citable **provided**
@@ -584,19 +991,40 @@ comparison arm, not the whole sweep. The gate below means full coverage, not mer
 Modify:
 - `scripts/experiments/profile_b1_flash_vs_autodiff_forces.py` — add `--mode {dense,flash}`,
   `--pme {on,off}`, `--grid-spacing`, and per-config timing output. **This is the step that
-  adds the sweep flags**; P6 adds only `--stage`/`--emit-record`/smoke.
+  adds the sweep flags**; P6 adds only `--stage`/`--emit-record`/smoke. Also re-signature
+  `main()` as `main(argv: list[str] | None = None) -> int`, passing `argv` through to
+  `parser.parse_args(argv)` (currently `def main() -> int` parses `sys.argv` internally at
+  L132, so the P7 wrapper cannot forward anything). `main()` with no argument keeps its
+  present behaviour, so the existing `if __name__ == "__main__"` entry point and every
+  historical invocation are unchanged.
 
-**Gate:** all 14 array tasks complete (exit 0) **or** the surviving subset covers at least
-one full dense/flash arm pair, with the shortfall recorded; emits
-`ProbeRecord(stage=2, platform="gpu", device_kind="h200")` records; `bth campaign review
-<id>` shows the runs associated (not orphaned); and
+**Gate:** all 12 array tasks + task 12 (submitted separately) complete (exit 0) **or** the
+surviving subset covers at least one full dense/flash arm pair, with the shortfall recorded;
+emits `ProbeRecord(stage=2, platform="gpu", device_kind="h200")` records; `bth campaign
+review <id>` shows the runs associated (not orphaned); and
 `assert_claim_supported(records, ClaimClass.TERM_RANKING)` now **passes** — the first
 trustworthy dense-vs-flash and PME-vs-nonbonded ranking in the project. And the Stage-2
-scopes-on/scopes-off pair satisfies P5's equivalence criterion at the P7 size. **If it
-fails**, the P7 term ranking is still valid (both arms of every dense-vs-flash comparison
-carry the same instrumentation) but per-scope attribution from P7 is not — record that and
-fall back to trace-level op-name attribution, exactly as P5 specifies.
-**Scope: ~70 LOC of slurm + ~60 LOC of sweep args and plumbing.**
+scopes-on/scopes-off pair (task 12) satisfies P5's equivalence criterion at the P7 size.
+**If it fails**, the P7 term ranking is still valid (both arms of every dense-vs-flash
+comparison carry the same instrumentation) but per-scope attribution from P7 is not — record
+that and fall back to trace-level op-name attribution, exactly as P5 specifies. This does
+NOT bypass `select_sources`'s ≥2-non-`None`-`scopes` filter, which the pre-existing
+`pme.py`/`settle.py` labels satisfy independently of P2. **Additionally (A17's parser
+ground-truth gate leg):** `trace.py`, run over one real GPU trace captured during this
+sweep, recovers ≥2 labels with non-zero exclusive time before any P7 per-scope attribution
+is cited — see P4's parser ground-truth check.
+
+**Two gates, two different questions, stated so they are not confused.** The STEP gate
+above governs whether P7 is complete as an implementation unit — one full dense/flash pair
+plus a recorded shortfall suffices, because the machinery is then demonstrated end-to-end on
+real Stage-2 records. The SIDECAR gate (the coverage aggregation run above) governs whether
+the sweep's coverage is sufficient to draw a ranking across the design: pass (≥5 cells)
+permits it; marginal (2–4) permits a ranking narrowed to the covered cells only, with the
+uncovered cells named in the report; fail (<2) permits no ranking. §4's promotion row entry
+condition "P7 complete" means the STEP gate; a promotion whose hypothesis ranges over an
+uncovered cell additionally requires that cell's coverage, i.e. a re-run of the failed
+tasks, not a re-run of the sweep.
+**Scope: ~70 LOC of slurm + ~60 LOC of sweep args and plumbing + ~40 LOC aggregation script.**
 
 ---
 
@@ -606,12 +1034,37 @@ fall back to trace-level op-name attribution, exactly as P5 specifies.
 Create:
 - `scripts/profiling/report.py` — loads records across stages, calls
   `assert_claim_supported` **before** emitting any ranked conclusion, and renders a
-  stage-annotated bottleneck table where every row carries the stage and `n_atoms` that
-  produced it.
+  stage-annotated bottleneck table. **Output surface (specified, because a gate that only
+  asserts the contract raises would be satisfied by a report that renders nothing):** a
+  GitHub-flavoured Markdown table written to stdout, and to a path given by `--out` when
+  supplied. Columns, in order: `scope` | `exclusive_seconds` | `n_occurrences` |
+  `pct_of_total` | `stage` | `n_atoms` | `platform` | `device_kind` | `attribution_method` |
+  `probe_id`. Rows are sorted by `exclusive_seconds` descending. A scope whose value is
+  `None` renders as `absent` in `exclusive_seconds`, never as `0.0`. **Mixed-attribution
+  labelling (this is where P1's "must be labelled as mixed" requirement is discharged):** if
+  the rendered ranking's rows do not all share one `attribution_method`, the table is
+  preceded by the line `> MIXED ATTRIBUTION: this ranking combines named_scope and op_name
+  attribution; per-row method is in the attribution_method column.` A footer line states the
+  `contract_version`, `git_sha` and `xla_flags` the selected sources were unanimous on.
+  **Gate addition:** a test asserts that a report rendered over a fixture set containing both
+  attribution methods emits the MIXED ATTRIBUTION line, and that one rendered over a
+  single-method set does not.
+
+**Input surface.** Every probe writes its `ProbeRecord` to
+`outputs/profiling/stage<N>/<probe_id>.json`; `report.py` discovers records by globbing
+`outputs/profiling/stage*/*.json` and takes an optional explicit path list. P7's cluster
+records reach that tree via `bth sync engaging --pull` followed by an rsync of
+`outputs/profiling/` (state the command in the step notes); `report.py` never reads a remote
+path.
 
 **Gate:** running the report over the P3+P4 (Stage 0/1) records alone raises
 `ClaimValidityError` on the term-ranking section; running it over P3+P4+P7 records succeeds
-and produces the ranking. Both behaviours asserted in `tests/profiling/`.
+and produces the ranking. Both behaviours are asserted in `tests/profiling/` against
+COMMITTED FIXTURE records under `tests/profiling/fixtures/records/` — CI cannot produce
+Stage-2 GPU records. Because a fixture can silently drift from real producer output, the
+fixtures are generated by `ProbeRecord.write` (never hand-authored) and a test asserts every
+fixture round-trips through `ProbeRecord.read` without raising, so a producer/consumer
+schema change fails the fixture test rather than passing silently.
 **Scope: ~150 LOC.**
 
 ---
@@ -662,8 +1115,15 @@ it deliberately:
   `rmtree`+`copytree`s every skill directory, so the local `~/.claude/skills` tree is
   regenerated wholesale and must not be edited in place.
 
-**Gate:** the skill directory exists at the path above with `SKILL.md` plus ≥3
-`references/*.md`; `SKILL.md` frontmatter parses as YAML and carries all four fields; every
+**Gate:** the skill directory exists at the path above with `SKILL.md` plus **all five**
+`references/*.md` files named in the Create list. The floor is five, not three, because two
+of them are load-bearing for criteria stated elsewhere: `failure-modes.md` carries the
+skill-rot entry that §5's first cross-repo criterion names as the *only* mitigation for
+`jax_profiling_contract_version` drift (which §3 concedes is otherwise unmitigated by
+construction), and `claims.md` carries rules (b)–(d), which `SKILL.md`'s inline pattern
+references rather than implementing (§3: "a copy of this pattern that omits them is not the
+contract"). A skill shipping without either is missing a part §3 depends on, not merely
+thinner than planned. `SKILL.md` frontmatter parses as YAML and carries all four fields; every
 reference file opens with the `> Part of the ...` backlink line; a reader can answer "may I
 cite this Stage-1 record for a term-ranking claim?" from `SKILL.md` alone without opening a
 reference file; and no prolix-specific path or partition name appears as an instruction
@@ -768,7 +1228,11 @@ Adding `named_scope`; the **mandatory perturbation check** (A/B total step time 
 on vs off, ±5% median with a 90% percentile-bootstrap CI inside the margin — ≥21 interleaved
 A/B pairs, `B=10,000` resamples, seeded — checked both whole-step and
 per-instrumented-function); the fused-`scan`/tile-reduction caveat; the trace-level
-(op-name) fallback when scopes perturb fusion. This is the procedural counterpart to step P5.
+(op-name) fallback when scopes perturb fusion; and the **two-failure-mode distinction** —
+`|median(d_i)| > 0.05` is a DETECTED perturbation (revert the scopes), while a CI that
+misses the margin with `|median(d_i)| <= 0.05` is INSUFFICIENT POWER (increase `n_pairs` from
+a pilot IQR estimate and re-run; never revert on this branch alone). This is the procedural
+counterpart to step P5.
 
 ### `references/claims.md` — the claim-class contract
 
@@ -845,17 +1309,17 @@ already flagged and rejected once.
 
 ## 5. Acceptance criteria (Phase 1 / steps P1–P9)
 
-- [ ] `scripts/profiling/` core contains no `prolix` import (grep-asserted in CI).
+- [ ] No file at any depth under `scripts/profiling/` imports `prolix` (AST-asserted, recursive, in CI).
 - [ ] `ProbeRecord` carries `stage` **and** `n_atoms`; both are required fields.
 - [ ] `ProbeRecord` rejects `stage >= 2` on a non-GPU platform at construction.
 - [ ] `assert_claim_supported` **raises** (does not warn) on a sub-Stage-2 term-ranking claim.
 - [ ] `assert_claim_supported` **raises** on an end-to-end extrapolation exceeding 10× in `n_atoms`.
 - [ ] `assert_claim_supported` **raises** on an END_TO_END claim that declares no target system — the scale guard is fail-closed, not opt-in.
-- [ ] `named_scope` labels cover bonded, LJ-direct, Coulomb-direct, PME-reciprocal, and the grad call on both the dense and flash paths.
-- [ ] The P5 perturbation check passes, or the offending scopes are reverted and the fallback recorded.
+- [ ] `named_scope` labels cover bonded, LJ-direct, Coulomb-direct, PME-reciprocal, and the grad call on the DENSE path; on the FLASH path they cover bonded, the fused LJ+Coulomb-direct tile reduction, and the grad call, with PME-reciprocal covered by `pme.py`'s pre-existing `pme_*` labels (`flash_explicit.py`'s nonbonded path routes the reciprocal through `make_spme_energy_fn`). Flash LJ-direct and Coulomb-direct are NOT separable at `named_scope` granularity: they are accumulated in one fused `jax.checkpoint` tile body and splitting them would restructure the tile reduction, violating P2's no-logic-change guarantee and inducing exactly the fusion perturbation P5 forbids. Flash LJ-vs-Coulomb attribution is available only at op-name granularity; if it is ever needed, the restructuring is separate scoped work with its own perturbation gate.
+- [ ] The P5 perturbation check passes, or the offending scope GROUP is identified by the bisect procedure, reverted, and the fallback recorded.
 - [ ] `trace.py` reproduces exclusive per-scope times on a synthetic trace with known ground truth.
-- [ ] `claims.py` defines `CONTRACT_VERSION`; records serialise it; the skill's frontmatter pins the same string.
-- [ ] `ProbeRecord` auto-captures precision, JAX/jaxlib versions, and `XLA_FLAGS`; `assert_claim_supported` refuses to rank across records that differ in precision, XLA flags, or device kind.
+- [ ] `claims.py` defines `CONTRACT_VERSION` and every emitted record serialises the version in force when it was emitted.
+- [ ] `ProbeRecord` auto-DEFAULTS precision, JAX/jaxlib versions, and `XLA_FLAGS` from the environment; `assert_claim_supported` refuses to rank across records that differ in precision, XLA flags, device kind, or `git_sha`.
 - [ ] `profile_b1_flash_vs_autodiff_forces.py` completes a CPU smoke run and reports actual `n_atoms`.
 - [ ] P7 produces Stage-2 GPU records from a single sweep submission on `pi_so3`, campaign-associated in bathos.
 - [ ] The perturbation check is replicated at Stage 2 on GPU, or per-scope attribution from P7 is recorded as unavailable and the op-name fallback used.
@@ -865,9 +1329,10 @@ already flagged and rejected once.
 Kept in a separate subsection because they are satisfied in a **different repository** and
 cannot be verified by any prolix gate or CI job.
 
+- [ ] `SKILL.md`'s `jax_profiling_contract_version` pins the same string as `claims.py`'s `CONTRACT_VERSION` at authoring time. Unverifiable by any prolix gate or CI job by construction (§3: the skill lives in a repo with no prolix dependency). The obligation is procedural and one-directional: a MAJOR `CONTRACT_VERSION` bump obliges a follow-up PR to the skill, and `references/failure-modes.md` names a stale pin as its own tell.
 - [ ] The skill's *source of truth* is `/home/marielle/projects/xtrax/agent_assets/skills/jax-profiling/SKILL.md` — authored and reviewed in xtrax, not in prolix and not hand-authored directly in `~/.claude/skills/`. A copy at `~/.claude/skills/jax-profiling/` produced by xtrax's own `just install-skills` (`scripts/install_skills.py`, which `rmtree`+`copytree`s every directory under `agent_assets/skills/`) is the sanctioned distribution artifact — identical treatment to the sibling `using-xtrax` — and does not violate this criterion.
 - [ ] `SKILL.md` frontmatter parses as YAML and carries `name`, `description`, `triggers` (list), and `jax_profiling_contract_version`, matching the field pattern of the sibling `using-xtrax` skill.
-- [ ] TIER-2 content is split across ≥3 files in `references/`, each opening with the `> Part of the ...` backlink line — not one flat file.
+- [ ] TIER-2 content is split across all five files named in P9's Create list, including `claims.md` and `failure-modes.md`, each opening with the `> Part of the ...` backlink line — not one flat file.
 - [ ] `SKILL.md` alone answers "may I cite this record for this claim class?" with no reference file loaded.
 - [ ] No prolix-specific path, partition name, or atom count appears in the skill as an instruction; any that appear are labelled worked examples.
 - [ ] `SKILL.md` states explicitly that the primitives are a copyable reference pattern and that xtrax ships no profiling API — a reader must not be able to conclude the skill documents an importable xtrax surface.
