@@ -9,11 +9,14 @@ shows up as a named test disappearing, not a silent gap.
 from __future__ import annotations
 
 import ast
+import dataclasses
+import json
 from pathlib import Path
 
 import pytest
 
 from scripts.profiling.claims import (
+    CONTRACT_VERSION,
     ClaimClass,
     ClaimValidityError,
     assert_claim_supported,
@@ -35,6 +38,10 @@ def _record(
     config: dict[str, str] | None = None,
     xla_flags: str = "",
     probe_id: str = "test-probe",
+    # Fixed, not auto-captured from the real repo -- otherwise every
+    # TERM_RANKING/END_TO_END "must not raise" test would become dependent
+    # on the working tree being clean at test-run time.
+    git_sha: str = "cafefeed",
 ) -> ProbeRecord:
     return ProbeRecord(
         probe_id=probe_id,
@@ -46,6 +53,7 @@ def _record(
         scopes=scopes,
         config=dict(config or {}),
         xla_flags=xla_flags,
+        git_sha=git_sha,
     )
 
 
@@ -228,3 +236,134 @@ def test_select_sources_raises_when_no_record_carries_required_metrics():
     records = [_record(stage=2, metrics={})]
     with pytest.raises(ClaimValidityError):
         select_sources(records, ClaimClass.DISPATCH_COUNT)
+
+
+def test_select_sources_metric_vs_scope_empty_result_messages_differ():
+    with pytest.raises(ClaimValidityError, match="required metrics"):
+        select_sources([_record(stage=2, metrics={})], ClaimClass.TERM_RANKING)
+
+    has_metric_no_scopes = _record(
+        stage=2, metrics={"total_step_seconds": 1.0}, scopes=None
+    )
+    with pytest.raises(ClaimValidityError, match="attributed scopes"):
+        select_sources([has_metric_no_scopes], ClaimClass.TERM_RANKING)
+
+
+# --- device_kind: auto-capture -----------------------------------------
+
+
+def test_device_kind_auto_captured_none_on_cpu_only_stage():
+    # No explicit device_kind override, stage<2 so no device_kind is
+    # required -- on this (CPU-only test) box, auto-capture yields None.
+    rec = ProbeRecord(probe_id="p", stage=0, n_atoms=100, platform="cpu")
+    assert rec.device_kind is None
+
+
+def test_device_kind_explicit_override_still_works():
+    rec = _record(stage=2, device_kind="l40s")
+    assert rec.device_kind == "l40s"
+
+
+# --- metrics: float coercion --------------------------------------------
+
+
+def test_metrics_non_numeric_value_raises():
+    with pytest.raises(ClaimValidityError):
+        _record(stage=0, metrics={"x": "not-a-number"})
+
+
+def test_metrics_numeric_string_is_coerced_to_float():
+    rec = _record(stage=0, metrics={"x": "1.5"})
+    assert rec.metrics["x"] == 1.5
+    assert isinstance(rec.metrics["x"], float)
+
+
+# --- git_sha: unanimity + unverifiable rejection ------------------------
+
+
+def test_differing_git_sha_raises_on_term_ranking():
+    records = [
+        _term_ranking_record(stage=2, git_sha="aaaa111", probe_id="a"),
+        _term_ranking_record(stage=2, git_sha="bbbb222", probe_id="b"),
+    ]
+    with pytest.raises(ClaimValidityError):
+        assert_claim_supported(records, ClaimClass.TERM_RANKING)
+
+
+def test_unknown_git_sha_raises_on_term_ranking_even_if_unanimous():
+    records = [_term_ranking_record(stage=2, git_sha="unknown")]
+    with pytest.raises(ClaimValidityError):
+        assert_claim_supported(records, ClaimClass.TERM_RANKING)
+
+
+def test_dirty_git_sha_raises_on_end_to_end():
+    records = [_end_to_end_record(n_atoms=5000, git_sha="aaaa111-dirty")]
+    with pytest.raises(ClaimValidityError):
+        assert_claim_supported(records, ClaimClass.END_TO_END, allow_no_target=True)
+
+
+def test_clean_matching_git_sha_permits_term_ranking():
+    records = [
+        _term_ranking_record(stage=2, git_sha="aaaa111", probe_id="a"),
+        _term_ranking_record(stage=2, git_sha="aaaa111", probe_id="b"),
+    ]
+    assert_claim_supported(records, ClaimClass.TERM_RANKING)  # must not raise
+
+
+# --- from_json: read-side rules ------------------------------------------
+
+
+def test_from_json_unknown_field_raises():
+    rec = _record(stage=0)
+    raw = json.loads(rec.to_json())
+    raw["some_future_field"] = "value"
+    with pytest.raises(ClaimValidityError):
+        ProbeRecord.from_json(json.dumps(raw))
+
+
+def test_from_json_missing_field_raises():
+    rec = _record(stage=0)
+    raw = json.loads(rec.to_json())
+    del raw["jaxlib_version"]
+    with pytest.raises(ClaimValidityError):
+        ProbeRecord.from_json(json.dumps(raw))
+
+
+def test_from_json_major_version_mismatch_raises():
+    rec = _record(stage=0)
+    raw = json.loads(rec.to_json())
+    assert CONTRACT_VERSION.split(".")[0] != "999"
+    raw["contract_version"] = "999.0"
+    with pytest.raises(ClaimValidityError):
+        ProbeRecord.from_json(json.dumps(raw))
+
+
+def test_from_json_matching_major_version_round_trips():
+    rec = _record(stage=0)
+    restored = ProbeRecord.from_json(rec.to_json())
+    assert restored.probe_id == rec.probe_id
+
+
+# --- attribution_method: present, optional -------------------------------
+
+
+def test_attribution_method_defaults_to_none():
+    rec = _record(stage=0)
+    assert rec.attribution_method is None
+
+
+def test_attribution_method_round_trips():
+    rec = ProbeRecord(
+        probe_id="p",
+        stage=0,
+        n_atoms=100,
+        platform="cpu",
+        attribution_method={"bonded": "trace"},
+    )
+    restored = ProbeRecord.from_json(rec.to_json())
+    assert restored.attribution_method == {"bonded": "trace"}
+
+
+def test_attribution_method_field_exists_on_dataclass():
+    field_names = {f.name for f in dataclasses.fields(ProbeRecord)}
+    assert "attribution_method" in field_names

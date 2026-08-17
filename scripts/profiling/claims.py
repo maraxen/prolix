@@ -17,7 +17,7 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from scripts.profiling.record import ProbeRecord
 
-CONTRACT_VERSION = "1.0"
+CONTRACT_VERSION = "2.0"
 
 # A deliberate cheap linear proxy, not a derived bound -- see the spec's P1
 # note on SCALE_EXTRAPOLATION_LIMIT for the known false-pass case (the real
@@ -30,7 +30,22 @@ SCALE_EXTRAPOLATION_LIMIT = 10.0
 # construction check forces platform=="gpu"); checking it uniformly avoids
 # special-casing per claim class and is the only thing that actually catches
 # a mixed CPU/GPU source set for END_TO_END, which has no stage floor.
-_UNANIMITY_FIELDS = ("x64_enabled", "xla_flags", "device_kind", "platform")
+# `git_sha` catches a claim silently mixing records measured on different
+# commits -- unanimity alone is why it must pair with the separate
+# _reject_unverifiable_git_sha check below: two records that both failed to
+# resolve a sha ("unknown") would otherwise trivially "agree".
+_UNANIMITY_FIELDS = ("x64_enabled", "xla_flags", "device_kind", "platform", "git_sha")
+
+
+def _reject_unverifiable_git_sha(sources: list["ProbeRecord"], claim: ClaimClass) -> None:
+    for r in sources:
+        if r.git_sha == "unknown" or r.git_sha.endswith("-dirty"):
+            raise ClaimValidityError(
+                f"{claim.name} source {r.probe_id!r} has unverifiable "
+                f"git_sha ({r.git_sha!r}) -- measured outside a clean, "
+                "resolvable git checkout; provenance cannot be trusted for "
+                "a citable claim"
+            )
 
 
 class ClaimValidityError(ValueError):
@@ -73,11 +88,18 @@ def select_sources(
 ) -> list["ProbeRecord"]:
     """Return the records that back `claim`: metric-keyed, then stage-maximal.
 
-    Fail-closed: raises ClaimValidityError (never returns an empty list) if
-    no record carries the metrics `claim` ranges over.
+    Fail-closed: raises ClaimValidityError (never returns an empty list),
+    distinguishing two different empty-result causes so the message tells
+    the caller which one actually fired -- "add this metric" is the wrong
+    fix when the real problem is missing scope attribution, and vice versa.
     """
     required = REQUIRED_METRICS[claim]
     candidates = [r for r in records if required.issubset(r.metrics.keys())]
+    if not candidates:
+        raise ClaimValidityError(
+            f"no record carries the metrics {claim.name} ranges over "
+            f"(required metrics: {sorted(required)})"
+        )
     if claim is ClaimClass.TERM_RANKING:
         # A ranking needs at least two terms to rank.
         candidates = [
@@ -86,11 +108,13 @@ def select_sources(
             if r.scopes is not None
             and sum(1 for v in r.scopes.values() if v is not None) >= 2
         ]
-    if not candidates:
-        raise ClaimValidityError(
-            f"no record carries the metrics {claim.name} ranges over "
-            f"(required metrics: {sorted(required)})"
-        )
+        if not candidates:
+            raise ClaimValidityError(
+                f"{claim.name} requires >=2 attributed scopes, but no "
+                "record carrying the required metrics also carries scope "
+                "attribution (scopes is None, or has fewer than 2 non-None "
+                "entries) -- capture a trace, not just aggregate metrics"
+            )
     max_stage = max(r.stage for r in candidates)
     return [r for r in candidates if r.stage == max_stage]
 
@@ -152,7 +176,8 @@ def assert_claim_supported(
           and flip a passing claim to raising. That is fail-closed, not a
           bug.
       (d) TERM_RANKING/END_TO_END sources must be unanimous on
-          x64_enabled/xla_flags/device_kind/platform.
+          x64_enabled/xla_flags/device_kind/platform/git_sha, and no source
+          may carry an unverifiable git_sha ("unknown" or dirty-tree).
     """
     sources = select_sources(records, claim)
 
@@ -185,6 +210,7 @@ def assert_claim_supported(
                 )
 
     if claim in (ClaimClass.TERM_RANKING, ClaimClass.END_TO_END):
+        _reject_unverifiable_git_sha(sources, claim)
         for field in _UNANIMITY_FIELDS:
             values = {getattr(r, field) for r in sources}
             if len(values) > 1:
