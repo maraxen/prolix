@@ -593,13 +593,19 @@ def single_padded_energy(sys: PaddedSystem, displacement_fn: space.DisplacementF
     r = sys.positions
 
     # Bonded terms
-    e_bond = _bond_energy_masked(r, sys.bonds, sys.bond_params, sys.bond_mask, displacement_fn)
-    e_ub = _bond_energy_masked(r, sys.urey_bradley_bonds, sys.urey_bradley_params, sys.urey_bradley_mask, displacement_fn)
-    e_angle = _angle_energy_masked(r, sys.angles, sys.angle_params, sys.angle_mask, displacement_fn)
-    e_dih = _dihedral_energy_masked(r, sys.dihedrals, sys.dihedral_params, sys.dihedral_mask, displacement_fn)
-    e_imp = _dihedral_energy_masked(r, sys.impropers, sys.improper_params, sys.improper_mask, displacement_fn)
+    with jax.named_scope("dense_bonded_bond"):
+        e_bond = _bond_energy_masked(r, sys.bonds, sys.bond_params, sys.bond_mask, displacement_fn)
+    with jax.named_scope("dense_bonded_urey_bradley"):
+        e_ub = _bond_energy_masked(r, sys.urey_bradley_bonds, sys.urey_bradley_params, sys.urey_bradley_mask, displacement_fn)
+    with jax.named_scope("dense_bonded_angle"):
+        e_angle = _angle_energy_masked(r, sys.angles, sys.angle_params, sys.angle_mask, displacement_fn)
+    with jax.named_scope("dense_bonded_dihedral"):
+        e_dih = _dihedral_energy_masked(r, sys.dihedrals, sys.dihedral_params, sys.dihedral_mask, displacement_fn)
+    with jax.named_scope("dense_bonded_improper"):
+        e_imp = _dihedral_energy_masked(r, sys.impropers, sys.improper_params, sys.improper_mask, displacement_fn)
 
-    e_cmap = _cmap_energy_masked(r, sys.cmap_torsions, sys.cmap_indices, sys.cmap_mask, sys.cmap_coeffs, displacement_fn)
+    with jax.named_scope("dense_bonded_cmap"):
+        e_cmap = _cmap_energy_masked(r, sys.cmap_torsions, sys.cmap_indices, sys.cmap_mask, sys.cmap_coeffs, displacement_fn)
 
     N = len(sys.atom_mask)
 
@@ -668,25 +674,28 @@ def single_padded_energy(sys: PaddedSystem, displacement_fn: space.DisplacementF
                 sys.excl_indices, sys.excl_scales_elec, N,
             ))
 
-        e_lj = _lj_energy_masked(
-            r, sys.sigmas, sys.epsilons, sys.atom_mask, displacement_fn,
-            soft_core_lambda=soft_core_lambda, excl_scale_vdw=excl_scale_vdw,
-        )
+        with jax.named_scope("dense_lj_direct"):
+            e_lj = _lj_energy_masked(
+                r, sys.sigmas, sys.epsilons, sys.atom_mask, displacement_fn,
+                soft_core_lambda=soft_core_lambda, excl_scale_vdw=excl_scale_vdw,
+            )
 
         # Coulomb interaction (direct space, optionally damped for PME)
-        e_elec = _coulomb_energy_masked(
-            r, sys.charges, sys.atom_mask, displacement_fn,
-            excl_scale_elec=excl_scale_elec,
-            pme_alpha=sys.pme_alpha,
-        )
+        with jax.named_scope("dense_coulomb_direct"):
+            e_elec = _coulomb_energy_masked(
+                r, sys.charges, sys.atom_mask, displacement_fn,
+                excl_scale_elec=excl_scale_elec,
+                pme_alpha=sys.pme_alpha,
+            )
 
     # Reciprocal Space (PME) + explicit-solvent corrections (aligned with system / Flash)
     if sys.box_size is not None and sys.pme_alpha > 0.0:
         try:
-            e_elec, e_lj = _pme_reciprocal_and_corrections(
-                r, sys, N, e_elec, e_lj, displacement_fn, implicit_solvent,
-                direct_space_includes_exclusion_correction=(neighbor is not None),
-            )
+            with jax.named_scope("dense_pme_reciprocal"):
+                e_elec, e_lj = _pme_reciprocal_and_corrections(
+                    r, sys, N, e_elec, e_lj, displacement_fn, implicit_solvent,
+                    direct_space_includes_exclusion_correction=(neighbor is not None),
+                )
         except (TypeError, ValueError, jax.errors.ConcretizationTypeError):
             # jax_md.quantity.canonicalize_force / make_force_fn_like_canonicalize
             # (md_potential_bundle.py) probe energy_or_force_fn via jax.eval_shape

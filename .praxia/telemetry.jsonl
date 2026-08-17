@@ -431,3 +431,5 @@
 {"agent_type":"workflow-subagent","tool_tier":"READ","event":"subagent_start","telemetry_id":"subagent-start-a5e2a3ebc8fdd8714","date":"2026-08-17"}
 {"agent_type":"workflow-subagent","verdict":"FAIL","verdict_source":"regex","commit":"","event":"subagent_stop","telemetry_id":"subagent-stop-a5e2a3ebc8fdd8714","date":"2026-08-17"}
 {"agent_type":"unknown","verdict":"unparsed","verdict_source":"unparsed","commit":"","event":"subagent_stop","telemetry_id":"subagent-stop-ab0b9382e783e547a","date":"2026-08-17"}
+{"agent_type":"unknown","verdict":"unparsed","verdict_source":"unparsed","commit":"","event":"subagent_stop","telemetry_id":"subagent-stop-a35e490bae397bbb4","date":"2026-08-17"}
+{"agent_type":"unknown","verdict":"unparsed","verdict_source":"unparsed","commit":"","event":"subagent_stop","telemetry_id":"subagent-stop-a521ab6a2df6a9ffe","date":"2026-08-17"}

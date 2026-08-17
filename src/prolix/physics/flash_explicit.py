@@ -231,12 +231,13 @@ def chunked_explicit_nonbonded_energy(
         tile_e = _compute_tile_inner(positions, start)
         return carry + tile_e, None
 
-    total_energy, _ = jax.lax.scan(
-        tile_energy_outer,
-        jnp.array(0.0, dtype=positions.dtype),
-        jnp.arange(n_tiles),
-        unroll=1,
-    )
+    with jax.named_scope("flash_nonbonded_tiles"):
+        total_energy, _ = jax.lax.scan(
+            tile_energy_outer,
+            jnp.array(0.0, dtype=positions.dtype),
+            jnp.arange(n_tiles),
+            unroll=1,
+        )
 
     return total_energy
 
@@ -325,12 +326,13 @@ def _chunked_lj_only_energy(
     tile_e = _compute_tile_lj_only(positions, start)
     return carry + tile_e, None
 
-  total_energy, _ = jax.lax.scan(
-      tile_energy_outer,
-      jnp.array(0.0, dtype=positions.dtype),
-      jnp.arange(n_tiles),
-      unroll=1,
-  )
+  with jax.named_scope("flash_lj_only"):
+    total_energy, _ = jax.lax.scan(
+        tile_energy_outer,
+        jnp.array(0.0, dtype=positions.dtype),
+        jnp.arange(n_tiles),
+        unroll=1,
+    )
 
   return total_energy
 
@@ -623,24 +625,25 @@ def flash_explicit_total_energy(
         displacement_fn, _ = space.free()
 
     # --- Bonded terms (O(N), no N² operations) ---
-    e_bond = _bond_energy_masked(
-        pos, sys.bonds, sys.bond_params, sys.bond_mask, displacement_fn)
-    e_ub = _bond_energy_masked(
-        pos, sys.urey_bradley_bonds, sys.urey_bradley_params,
-        sys.urey_bradley_mask, displacement_fn)
-    e_angle = _angle_energy_masked(
-        pos, sys.angles, sys.angle_params, sys.angle_mask, displacement_fn)
-    e_dih = _dihedral_energy_masked(
-        pos, sys.dihedrals, sys.dihedral_params,
-        sys.dihedral_mask, displacement_fn)
-    e_imp = _dihedral_energy_masked(
-        pos, sys.impropers, sys.improper_params,
-        sys.improper_mask, displacement_fn)
-    e_cmap = _cmap_energy_masked(
-        pos, sys.cmap_torsions, sys.cmap_indices,
-        sys.cmap_mask, sys.cmap_coeffs, displacement_fn)
+    with jax.named_scope("flash_bonded"):
+        e_bond = _bond_energy_masked(
+            pos, sys.bonds, sys.bond_params, sys.bond_mask, displacement_fn)
+        e_ub = _bond_energy_masked(
+            pos, sys.urey_bradley_bonds, sys.urey_bradley_params,
+            sys.urey_bradley_mask, displacement_fn)
+        e_angle = _angle_energy_masked(
+            pos, sys.angles, sys.angle_params, sys.angle_mask, displacement_fn)
+        e_dih = _dihedral_energy_masked(
+            pos, sys.dihedrals, sys.dihedral_params,
+            sys.dihedral_mask, displacement_fn)
+        e_imp = _dihedral_energy_masked(
+            pos, sys.impropers, sys.improper_params,
+            sys.improper_mask, displacement_fn)
+        e_cmap = _cmap_energy_masked(
+            pos, sys.cmap_torsions, sys.cmap_indices,
+            sys.cmap_mask, sys.cmap_coeffs, displacement_fn)
 
-    e_bonded = e_bond + e_ub + e_angle + e_dih + e_imp + e_cmap
+        e_bonded = e_bond + e_ub + e_angle + e_dih + e_imp + e_cmap
 
     # --- Nonbonded terms (FlashMD tiled O(N²/T)) ---
     e_nonbonded = _total_energy_fn(sys, T=T, soft_core_lambda=soft_core_lambda,
@@ -691,7 +694,8 @@ def flash_explicit_forces(
                                 n_rff_features=n_rff_features,
                                 rff_seed=rff_seed)
 
-    grad_at_sys = _grad_fn(sys)
+    with jax.named_scope("flash_grad"):
+        grad_at_sys = _grad_fn(sys)
 
     # We want the forces on positions: F = -dE/dr
     # eqx.filter_grad returns a PyTree of gradients for all dynamic leaves.

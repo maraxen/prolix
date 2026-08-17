@@ -445,6 +445,38 @@ P3–P6.** An absent label is already a defined downstream outcome: P4 records i
 does the same. This step's real gate remains P5.
 **Scope: ~40 LOC of wrapping, no logic change.**
 
+**Step notes (completed 2026-08-17):** All 11 wraps landed (7 dense in `batched_energy.py`'s
+`single_padded_energy` -- bond/urey_bradley/angle/dihedral/improper/cmap split individually
+rather than one `dense_bonded` blob, plus lj/coulomb/pme_reciprocal; 4 flash in
+`flash_explicit.py` -- `flash_bonded` in `flash_explicit_total_energy`'s actual bonded-terms
+block, not `_total_energy_fn` as the spec's Modify list named, since that function is
+purely the nonbonded/electrostatics dispatcher; `flash_nonbonded_tiles`, `flash_lj_only`,
+`flash_grad`). `tests/physics/test_flash_explicit.py` referenced by this section's Gate does
+not exist in the repo -- substituted the actually-relevant `tests/physics/test_flash_dense_parity.py`
++ `tests/physics/test_batched_energy.py` as the narrow local gate (both pass, 5/5, unaffected
+by pure scope-wrapping). Created `tests/physics/test_scope_inventory.py` (6 tests) using the
+existing `_four_water_bundle()` fixture (`scripts/benchmarks/b1_init_exec.py`), which pads to
+N=64 (ATOM_BUCKETS floor) -- exactly the size this gate calls for. Command:
+`uv run pytest tests/physics/test_scope_inventory.py -q -m slow` → `6 passed`. Findings:
+- All 5 dense labels backed by real (non-zero-mask) terms in this fixture (bond,
+  urey_bradley, angle, lj_direct, coulomb_direct) and all 3 flash labels reachable at N=64
+  survive in compiled HLO -- no unexpected absences, no wrapping-never-landed cases.
+- `dense_pme_reciprocal` **does** survive in compiled HLO at N=64 for this fixture --
+  better than this gate's own worst-case expectation (drawn from `profile_b1_water_trace.py`'s
+  toy-scale finding); recorded, not asserted, per case (a).
+- `dense_bonded_dihedral`/`dense_bonded_improper`/`dense_bonded_cmap` do not survive at
+  N=64 for this specific fixture -- rigid TIP3P water has zero real (pre-padding) entries for
+  these three terms, so their bucket-padded all-mask-zero contribution is constant-folded
+  away by XLA with nothing left in HLO to label either way. Verified via source-level check
+  (not HLO) that all three wraps genuinely exist in `batched_energy.py`, ruling out the
+  "wrapping never landed" hard-block case. `flash_lj_only` required a dedicated EFA-method
+  compile (unreachable via the default PME path both `flash_explicit_total_energy` and
+  `flash_explicit_forces` use).
+- CI-marker check: `pytest tests/physics/test_scope_inventory.py --collect-only -m "not (slow or integration or dynamics)"`
+  → `no tests collected (6 deselected)`, confirming the module-level `@pytest.mark.slow` keeps
+  this file out of CI's fast suite. The full-suite `unchanged` comparison is CI's own job
+  (whole-suite runs are blocked locally by this box's compute-limits guard).
+
 ---
 
 ### P3 — Stage 0 probe: `cost_analysis()` dense vs flash, no execution
