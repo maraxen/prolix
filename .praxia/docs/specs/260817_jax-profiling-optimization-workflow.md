@@ -511,6 +511,37 @@ does NOT demonstrate the stage rule (P4's gate demonstrates that, on records tha
 reach guard (a)).
 **Scope: ~120 LOC.**
 
+**Step notes (completed 2026-08-17):** Synthetic systems are hand-built `PhysicsSystem`
+instances at literal N=4/16/64 (not `MolecularBundle`/`ATOM_BUCKETS`-padded -- the bucket
+floor is 64, which would make N=4 and N=16 indistinguishable from N=64 and defeat this
+probe's whole point of comparing structural cost across genuinely different sizes), zero
+bonds/angles/dihedrals/impropers (keeps every host-side topology-processing branch, e.g.
+`topology.find_bonded_exclusions`, inactive via its `sys.bonds.shape[0] > 0` static check),
+periodic with PME (`box_size=[50,50,50]`, `pme_alpha=0.3`). Emitted 6 records (dense × 3
+sizes, flash × 3 sizes) to `outputs/profiling/stage0/`; smoke check passed (raised naming
+"required metrics", not a stage-floor message).
+
+**`cost_analysis()` keys on the installed JAX** (version-fragile, per this section's own
+note): returns a plain `dict` (not a list) with `"flops"` and `"bytes accessed"` (space, not
+underscore -- mapped to `bytes_accessed`) present; **no `"optimal_seconds"` key at all** on
+this install (omitted, per the spec's own "omitting any the installed JAX does not
+provide" rule). Additional keys stamped verbatim: `"transcendentals"`, plus a large
+per-operand/per-output breakdown (`"bytes accessed{N}{}"`, `"bytes accessedout{}"`,
+`"utilization{N}{}"` for N up to the compiled program's per-op count -- 92 such keys at
+N=64 flash, since flash's HLO has far more discrete ops than dense's).
+
+**Structural finding (the actual free/no-execution payoff of this probe):** dense scales
+with N as expected for an O(N²) kernel -- flops 6212 (N=4) → 98000 (N=16) → 1599296 (N=64),
+roughly N² scaling. **Flash's flops stay essentially flat** across all three sizes
+(~7.003e8 at N=4, N=16, AND N=64) -- because FlashMD's fixed tile size (T=256 default)
+pads any N ≤ 256 up to exactly one full T×T tile (`n_tiles = ceil(N/T) = 1` for all three),
+so the compiled graph's cost is dominated by the tile size, not the real atom count, at
+this scale. This is a genuine structural property of the tiled architecture (not a probe
+artifact), and load-bearing context for later stages: any FlashMD-vs-dense cost comparison
+below N≈256 (P4/P6/P7 all measure well under that) will show flash's *fixed* per-tile cost
+dominating, not its real per-atom work -- the crossover where flash's O(N²/T) advantage
+actually materializes is structurally invisible until N exceeds one tile.
+
 ---
 
 ### P4 — Stage 1 probe: executed CPU micro-probe with trace capture
