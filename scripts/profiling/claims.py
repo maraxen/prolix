@@ -17,7 +17,7 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from scripts.profiling.record import ProbeRecord
 
-CONTRACT_VERSION = "2.0"
+CONTRACT_VERSION = "3.0"
 
 # A deliberate cheap linear proxy, not a derived bound -- see the spec's P1
 # note on SCALE_EXTRAPOLATION_LIMIT for the known false-pass case (the real
@@ -63,10 +63,25 @@ class ClaimClass(enum.Enum):
     END_TO_END = "end_to_end"
 
 
+# DISPATCH_COUNT originally required n_host_syncs too (P4's spec: a fourth
+# "device->host transfer" counter). Removed 2026-08-17 during P4's mandated
+# pre-record feasibility spike (spec P4: "resolve counter feasibility as a
+# spike BEFORE P3 or P4 emits any record") -- on this CPU JAX install,
+# repeated block_until_ready() calls on an already-computed result produce
+# zero additional trace signal, and no trace event distinguishes a
+# device->host transfer from execution completion itself. This isn't a
+# transient measurement gap: CPU device buffers ARE host memory, so there is
+# structurally nothing for a "host sync" event to transfer on this platform.
+# Shipping n_host_syncs as required would make every CPU (Stage-1) record
+# fail this required-metrics check forever (select_sources is fail-closed).
+# CONTRACT_VERSION bumped 2.0 -> 3.0 per this removal (P1's bump rule:
+# removing a required metric newly ACCEPTS previously-rejected claims, a
+# MAJOR-bump trigger) -- Stage-0 records emitted under 2.0 (P3) were
+# re-emitted at 3.0 after this change; see P4's step notes.
 REQUIRED_METRICS: dict[ClaimClass, frozenset[str]] = {
     ClaimClass.STRUCTURAL: frozenset(),
     ClaimClass.DISPATCH_COUNT: frozenset(
-        {"n_executions", "n_compilations", "n_host_syncs", "n_jit_traces"}
+        {"n_executions", "n_compilations", "n_jit_traces"}
     ),
     ClaimClass.TERM_RANKING: frozenset({"total_step_seconds"}),
     ClaimClass.END_TO_END: frozenset({"total_step_seconds"}),

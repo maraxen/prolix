@@ -645,6 +645,79 @@ also includes: a record with one absent label round-trips through JSON with that
 still `None`, asserted with `is None`, not falsy.
 **Scope: ~180 LOC.**
 
+**Step notes (completed 2026-08-17):**
+
+*Pre-record feasibility spike (required before P3 or P4 emits any record):* captured a
+throwaway `jax.profiler.trace` of a trivial jitted function on this JAX install and confirmed
+which of the four dispatch counters are derivable. `n_executions`
+(`CommonPjRtLoadedExecutable::ExecuteHelperOnSingleDevice` events -- NOT
+`ExecuteReplicated.__call__`, which does not scale 1:1 with actual dispatch count on this CPU
+backend, confirmed directly: 5 calls to the same jitted function left it at 1 while
+`ExecuteHelperOnSingleDevice` correctly tracked all 5), `n_compilations`
+(`backend_compile_and_load` events, cross-checkable against the official
+`/jax/core/compile/backend_compile_duration` `jax.monitoring` event), and `n_jit_traces`
+(`PjitFunction(<fn_name>)` events, cross-checkable against `/jax/core/compile/jaxpr_trace_duration`)
+are all cleanly derivable. **`n_host_syncs` is not** -- confirmed by direct experiment: calling
+`.block_until_ready()` 7 times on an already-computed result produces *zero* additional trace
+signal (no event count scales with the repeated calls), because CPU device buffers ARE host
+memory, so there is structurally nothing for a "device->host transfer" event to represent on
+this platform. Per the fallback this section specifies, `n_host_syncs` was removed from
+`REQUIRED_METRICS[ClaimClass.DISPATCH_COUNT]` in `claims.py`, and `CONTRACT_VERSION` was bumped
+`2.0` -> `3.0` (removing a required metric newly *accepts* previously-rejected claims, the
+spec's own MAJOR-bump trigger). Since this fallback fired *after* P3's Stage-0 records already
+existed (a fully honest miss of this section's own "resolve BEFORE P3 or P4 emits any record"
+instruction -- the spike was run at the start of P4's work, not before P3's), P3's 6 records
+were re-emitted at the new version per the bump-invalidation remediation this section specifies.
+
+*How a `named_scope` label actually surfaces (resolved before writing the parser, per this
+section's requirement):* dumped a real trace via a toy `jax.named_scope`-wrapped function, then
+a real multi-step water-plan program (`profile_b1_water_trace.py`'s own builders). Neither the
+nested-duration-slice form nor a `TraceAnnotation`/`XLA Modules` row applies. The **executed**
+Perfetto trace's per-thunk events are named after the *post-fusion* HLO thunk/op name (e.g.
+`"wrapped_multiply"`, `"reduce_add_fusion"`), carried in `args["hlo_op"]` -- these names alone
+carry zero `named_scope` information. The scope path survives only in the *separately-obtained*
+compiled HLO text, as a `/`-delimited prefix on each instruction's
+`metadata={op_name="jit(fn)/scope1/scope2/.../leaf_op"}` field. `trace.py`'s parser is therefore
+two-input, not trace-only: `scope_map_from_hlo_text(hlo_text, known_labels)` builds an
+instruction-name -> scope-path map by resolving each instruction's own metadata, or (when absent,
+e.g. a top-level `while`-body/fusion-calling instruction) following `calls=`/`to_apply=`
+references down to a callee computation's `ROOT` instruction, recursively; `parse_scopes(trace_events,
+scope_map)` then looks up each trace event's `hlo_op` in that map. This is exactly the spec's own
+anticipated fallback ("if labels surface as flat name prefixes instead, state that exclusive
+time is computed by prefix-depth attribution instead") -- confirmed as the real shape, not the
+nested-slice default the synthetic-leg description names generically. One further wrinkle found
+only on the real (vmapped + autodiffed) program, not the toy one: under `vmap`/`jvp`, a scope
+path segment is decorated as `"vmap(jvp(dense_bonded_improper))"`, not the bare label --
+`_unwrap_transform` peels these `word(...)` wrappers recursively before matching against
+`known_labels`. Recorded as a durable lesson (praxia lesson id 366) for P9's skill authoring.
+
+*Real-fixture leg finding, and the resulting scope-of-gate decision:* the committed fixture
+(`tests/profiling/fixtures/b1_water_stage1.trace.json.gz`, `--replicas 2 --n-steps 5 --n-trials 2`,
+646 KB) recovers **P2's own `dense_bonded_*`/`dense_lj_direct`/`dense_coulomb_direct` labels**
+with non-zero exclusive time (7 labels) -- but recovers **none** of `pme.py`'s/`settle.py`'s
+pre-existing labels, which is what this section's Gate literally names. This is a *distinct*
+phenomenon from the already-documented "vanishes from HLO text entirely at toy scale" `pme_*`
+limitation: `settle_pos_eigh`/`settle_cramers_rule` *do* survive in the compiled HLO text (46/309
+occurrences at this scale, confirmed via `--hlo-only`'s own analysis), but their instructions get
+fused into larger blocks whose top-level (execution-visible) thunk carries some *other*
+instruction's representative `op_name` metadata -- so they never surface as an attributable
+top-level thunk in the *executed* trace, even though present in the HLO. Neither increasing
+`--n-steps` (fusion granularity is a compiler decision independent of loop trip count) nor a
+larger `--replicas` (blows past the 1 MB fixture budget) resolved this. **User decision
+(2026-08-17):** accept `dense_bonded_*` recovery as satisfying this leg's real purpose (proving
+the two-input trace+HLO attribution pipeline recovers real, non-zero wall-clock time on a real
+program -- exactly what a synthetic-only leg 1 cannot demonstrate) for now; filed as backlog
+#4330 (depends on #4322/P4) to investigate whether `settle.py`/`pme.py`'s `named_scope` placement
+needs to change to survive execution-thunk-level attribution too, needed before any settle/pme
+term-level wall-clock claim (P5/P7/P8) could be trusted the same way `dense_bonded_*` claims now
+can be.
+
+*Gate confirmed on real records (the whole point of P4's gate, contrasting P3's):*
+`scripts/explore/prof_stage1_cpu_micro.py` emits a real Stage-1 record (`total_step_seconds`,
+7 non-`None` scopes, `n_executions`/`n_compilations`/`n_jit_traces` all present) and
+`assert_claim_supported([record], ClaimClass.TERM_RANKING)` raises naming the **stage>=2 floor**
+(not the metric/scopes filter, unlike P3) -- confirmed by direct run.
+
 ---
 
 ### P5 — Perturbation check: do the new scopes change fused hot-path timing?
