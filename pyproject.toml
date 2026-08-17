@@ -85,6 +85,10 @@ wasm = [
 [tool.pytest.ini_options]
 timeout = 900
 timeout_method = "thread"
+# scripts/profiling/ is imported as `scripts.profiling.*` from tests/profiling/ --
+# rootdir-relative, not under src/prolix (deliberate: keeps the seam import-clean
+# of prolix). See .praxia/docs/specs/260817_jax-profiling-optimization-workflow.md P1.
+pythonpath = ["."]
 # Default fast CI: pytest -m "not slow" (matches .github/workflows/ci.yml test step)
 # OpenMM parity (optional dep): pytest -m "openmm"
 markers = [
