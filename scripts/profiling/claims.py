@@ -39,12 +39,16 @@ _UNANIMITY_FIELDS = ("x64_enabled", "xla_flags", "device_kind", "platform", "git
 
 def _reject_unverifiable_git_sha(sources: list["ProbeRecord"], claim: ClaimClass) -> None:
     for r in sources:
-        if r.git_sha == "unknown" or r.git_sha.endswith("-dirty"):
+        if (
+            r.git_sha == "unknown"
+            or r.git_sha.endswith("-dirty")
+            or r.git_sha.endswith("-unverified")
+        ):
             raise ClaimValidityError(
                 f"{claim.name} source {r.probe_id!r} has unverifiable "
                 f"git_sha ({r.git_sha!r}) -- measured outside a clean, "
-                "resolvable git checkout; provenance cannot be trusted for "
-                "a citable claim"
+                "resolvable git checkout (or the dirty-tree check itself "
+                "failed); provenance cannot be trusted for a citable claim"
             )
 
 
@@ -116,7 +120,22 @@ def select_sources(
                 "entries) -- capture a trace, not just aggregate metrics"
             )
     max_stage = max(r.stage for r in candidates)
-    return [r for r in candidates if r.stage == max_stage]
+    sources = [r for r in candidates if r.stage == max_stage]
+
+    # Read-side rule (iii): sources must agree on contract_version's MAJOR
+    # component (a minor disagreement is permitted). from_json already
+    # refuses to deserialize a non-current-major record on its own, but
+    # contract_version is a plain settable field -- an in-process or
+    # programmatically constructed source set can still mix majors
+    # undetected without this check.
+    majors = {r.contract_version.split(".")[0] for r in sources}
+    if len(majors) > 1:
+        raise ClaimValidityError(
+            f"{claim.name} sources disagree on contract_version's MAJOR "
+            f"component: {sorted(majors)} -- records at different major "
+            "contract versions cannot be mixed into one claim"
+        )
+    return sources
 
 
 def paired_configs(
@@ -132,13 +151,31 @@ def paired_configs(
     pair per distinct pair of `axis` values (not just adjacent ones, if a
     group has more than two). select_sources does the metric/stage
     filtering; this only groups and pairs what survives that.
+
+    Raises ClaimValidityError if any selected source is missing the axis
+    key or any hold_fixed key, naming the record and the key -- defaulting
+    a missing key to "" would merge distinct cells and report a confounded
+    pair as a pass.
     """
     sources = select_sources(records, claim)
     groups: dict[tuple[str, ...], dict[str, list["ProbeRecord"]]] = {}
     for r in sources:
-        key = tuple(r.config.get(k, "") for k in hold_fixed)
+        missing_hold = [k for k in hold_fixed if k not in r.config]
+        if missing_hold:
+            raise ClaimValidityError(
+                f"{claim.name} source {r.probe_id!r} is missing hold_fixed "
+                f"config key(s) {missing_hold} -- defaulting would merge "
+                "distinct cells and report a confounded pair as a pass"
+            )
+        if axis not in r.config:
+            raise ClaimValidityError(
+                f"{claim.name} source {r.probe_id!r} is missing axis config "
+                f"key {axis!r} -- defaulting would merge distinct cells and "
+                "report a confounded pair as a pass"
+            )
+        key = tuple(r.config[k] for k in hold_fixed)
         by_axis = groups.setdefault(key, {})
-        by_axis.setdefault(r.config.get(axis, ""), []).append(r)
+        by_axis.setdefault(r.config[axis], []).append(r)
 
     pairs: list[tuple["ProbeRecord", "ProbeRecord"]] = []
     for by_axis in groups.values():
@@ -177,7 +214,9 @@ def assert_claim_supported(
           bug.
       (d) TERM_RANKING/END_TO_END sources must be unanimous on
           x64_enabled/xla_flags/device_kind/platform/git_sha, and no source
-          may carry an unverifiable git_sha ("unknown" or dirty-tree).
+          may carry an unverifiable git_sha ("unknown", dirty-tree, or a
+          failed dirty-check). select_sources additionally enforces
+          contract_version MAJOR-component unanimity (read-side rule iii).
     """
     sources = select_sources(records, claim)
 

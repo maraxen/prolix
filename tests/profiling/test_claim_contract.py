@@ -20,9 +20,10 @@ from scripts.profiling.claims import (
     ClaimClass,
     ClaimValidityError,
     assert_claim_supported,
+    paired_configs,
     select_sources,
 )
-from scripts.profiling.record import ProbeRecord
+from scripts.profiling.record import ProbeRecord, _normalize_device_kind
 
 PROFILING_PKG_DIR = Path(__file__).resolve().parents[2] / "scripts" / "profiling"
 
@@ -35,6 +36,7 @@ def _record(
     n_atoms: int = 5000,
     metrics: dict[str, float] | None = None,
     scopes: dict[str, tuple[float, int] | None] | None = None,
+    attribution_method: dict[str, str] | None = None,
     config: dict[str, str] | None = None,
     xla_flags: str = "",
     probe_id: str = "test-probe",
@@ -51,6 +53,7 @@ def _record(
         device_kind=device_kind,
         metrics=dict(metrics or {}),
         scopes=scopes,
+        attribution_method=attribution_method,
         config=dict(config or {}),
         xla_flags=xla_flags,
         git_sha=git_sha,
@@ -61,6 +64,7 @@ def _term_ranking_record(stage: int, **overrides) -> ProbeRecord:
     defaults = dict(
         metrics={"total_step_seconds": 1.0},
         scopes={"bonded": (0.1, 10), "pme_recip": (0.2, 5)},
+        attribution_method={"bonded": "named_scope", "pme_recip": "named_scope"},
     )
     defaults.update(overrides)
     return _record(stage=stage, **defaults)
@@ -76,7 +80,7 @@ def _end_to_end_record(n_atoms: int, **overrides) -> ProbeRecord:
 
 
 def test_no_prolix_import_in_scripts_profiling():
-    py_files = sorted(PROFILING_PKG_DIR.glob("*.py"))
+    py_files = sorted(PROFILING_PKG_DIR.rglob("*.py"))
     assert py_files, f"expected .py files under {PROFILING_PKG_DIR}, found none"
     for path in py_files:
         tree = ast.parse(path.read_text(), filename=str(path))
@@ -84,11 +88,20 @@ def test_no_prolix_import_in_scripts_profiling():
             if isinstance(node, ast.Import):
                 names = [alias.name for alias in node.names]
             elif isinstance(node, ast.ImportFrom):
-                names = [node.module] if node.module else []
+                if node.module is None:
+                    pytest.fail(
+                        f"{path} has a relative import (`from . import ...` "
+                        "or `from .. import ...`) with no resolvable module "
+                        "-- treated as unresolvable and therefore a failure; "
+                        "scripts/profiling/ must stay a flat, absolute-"
+                        "import-only package to remain a valid xtrax "
+                        "upstream seam"
+                    )
+                names = [node.module]
             else:
                 continue
             for name in names:
-                assert name is None or not name.split(".")[0] == "prolix", (
+                assert not name.split(".")[0] == "prolix", (
                     f"{path} imports prolix ({name!r}) -- scripts/profiling/ "
                     "must stay import-clean of prolix to remain a valid xtrax "
                     "upstream seam"
@@ -358,12 +371,202 @@ def test_attribution_method_round_trips():
         stage=0,
         n_atoms=100,
         platform="cpu",
-        attribution_method={"bonded": "trace"},
+        attribution_method={"bonded": "named_scope"},
     )
     restored = ProbeRecord.from_json(rec.to_json())
-    assert restored.attribution_method == {"bonded": "trace"}
+    assert restored.attribution_method == {"bonded": "named_scope"}
 
 
 def test_attribution_method_field_exists_on_dataclass():
     field_names = {f.name for f in dataclasses.fields(ProbeRecord)}
     assert "attribution_method" in field_names
+
+
+def test_attribution_method_invalid_vocabulary_raises():
+    with pytest.raises(ClaimValidityError):
+        ProbeRecord(
+            probe_id="p",
+            stage=0,
+            n_atoms=100,
+            platform="cpu",
+            attribution_method={"bonded": "trace"},
+        )
+
+
+def test_attribution_method_required_when_scopes_not_none():
+    with pytest.raises(ClaimValidityError):
+        ProbeRecord(
+            probe_id="p",
+            stage=0,
+            n_atoms=100,
+            platform="cpu",
+            scopes={"bonded": (0.1, 10)},
+            attribution_method=None,
+        )
+
+
+# --- ProbeRecord: frozen -------------------------------------------------
+
+
+def test_probe_record_is_frozen():
+    rec = _record(stage=0)
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        rec.stage = 2
+
+
+# --- metrics: non-finite values rejected ---------------------------------
+
+
+def test_metrics_nan_raises():
+    with pytest.raises(ClaimValidityError):
+        _record(stage=0, metrics={"x": float("nan")})
+
+
+def test_metrics_inf_raises():
+    with pytest.raises(ClaimValidityError):
+        _record(stage=0, metrics={"x": float("inf")})
+
+
+# --- device_kind: normalization (not an allow-list) ----------------------
+
+
+def test_normalize_device_kind_strips_vendor_and_lowercases():
+    assert _normalize_device_kind("NVIDIA H200") == "h200"
+
+
+def test_normalize_device_kind_collapses_whitespace():
+    assert (
+        _normalize_device_kind("NVIDIA RTX PRO 6000 Blackwell")
+        == "rtx_pro_6000_blackwell"
+    )
+
+
+def test_normalize_device_kind_does_not_collide_gh200_with_h200():
+    # A substring allow-list would collapse both to "h200"; the spec's
+    # actual normalization (vendor-strip + lowercase) keeps them distinct.
+    assert _normalize_device_kind("NVIDIA H200") != _normalize_device_kind(
+        "NVIDIA GH200 480GB"
+    )
+
+
+# --- git_sha: unverified dirty-check sentinel ----------------------------
+
+
+def test_unverified_git_sha_raises_on_term_ranking():
+    records = [_term_ranking_record(stage=2, git_sha="aaaa111-unverified")]
+    with pytest.raises(ClaimValidityError):
+        assert_claim_supported(records, ClaimClass.TERM_RANKING)
+
+
+# --- from_json: malformed input is always ClaimValidityError ------------
+
+
+def test_from_json_empty_string_raises_claim_validity_error():
+    with pytest.raises(ClaimValidityError):
+        ProbeRecord.from_json("")
+
+
+def test_from_json_non_dict_json_raises_claim_validity_error():
+    for bad in ("[]", "null", "3", '"x"'):
+        with pytest.raises(ClaimValidityError):
+            ProbeRecord.from_json(bad)
+
+
+def test_from_json_wrong_typed_field_raises_claim_validity_error():
+    rec = _record(stage=0)
+    raw = json.loads(rec.to_json())
+    raw["n_atoms"] = "500"
+    with pytest.raises(ClaimValidityError):
+        ProbeRecord.from_json(json.dumps(raw))
+
+
+def test_from_json_non_dict_scopes_raises_claim_validity_error():
+    rec = _record(stage=0)
+    raw = json.loads(rec.to_json())
+    raw["scopes"] = "not-a-dict"
+    with pytest.raises(ClaimValidityError):
+        ProbeRecord.from_json(json.dumps(raw))
+
+
+# --- from_json: rule ordering + minor-bump-field readability -------------
+
+
+def test_from_json_missing_plain_default_field_does_not_raise():
+    # attribution_method has a plain default (None), not a default_factory
+    # -- a record predating it is a MINOR-bump case and must stay readable.
+    rec = _record(stage=0)
+    raw = json.loads(rec.to_json())
+    del raw["attribution_method"]
+    restored = ProbeRecord.from_json(json.dumps(raw))
+    assert restored.attribution_method is None
+
+
+def test_from_json_version_mismatch_diagnosed_even_with_missing_field():
+    # A record skewed on BOTH axes (old major version AND missing a
+    # default_factory field) must be diagnosed as version skew, not
+    # misdiagnosed as field-level corruption -- the version check runs
+    # first.
+    rec = _record(stage=0)
+    raw = json.loads(rec.to_json())
+    del raw["jaxlib_version"]
+    raw["contract_version"] = "999.0"
+    with pytest.raises(ClaimValidityError, match="major version"):
+        ProbeRecord.from_json(json.dumps(raw))
+
+
+# --- select_sources: contract_version MAJOR unanimity (read-side rule iii) --
+
+
+def test_select_sources_raises_on_mixed_contract_version_major():
+    a = _term_ranking_record(stage=2, probe_id="a")
+    b = _term_ranking_record(stage=2, probe_id="b")
+    b = dataclasses.replace(b, contract_version="1.0")
+    with pytest.raises(ClaimValidityError):
+        select_sources([a, b], ClaimClass.TERM_RANKING)
+
+
+# --- paired_configs -------------------------------------------------------
+
+
+def test_paired_configs_returns_expected_pairs_on_well_formed_set():
+    records = [
+        _end_to_end_record(
+            n_atoms=5000, config={"grid_spacing": "0.1", "mode": "dense"}, probe_id="a"
+        ),
+        _end_to_end_record(
+            n_atoms=5000, config={"grid_spacing": "0.1", "mode": "flash"}, probe_id="b"
+        ),
+    ]
+    pairs = paired_configs(
+        records, ClaimClass.END_TO_END, axis="mode", hold_fixed=("grid_spacing",)
+    )
+    assert len(pairs) == 1
+    assert {pairs[0][0].probe_id, pairs[0][1].probe_id} == {"a", "b"}
+
+
+def test_paired_configs_raises_on_source_missing_hold_fixed_key():
+    records = [
+        _end_to_end_record(
+            n_atoms=5000, config={"grid_spacing": "0.1", "mode": "dense"}, probe_id="a"
+        ),
+        _end_to_end_record(n_atoms=5000, config={"mode": "flash"}, probe_id="b"),
+    ]
+    with pytest.raises(ClaimValidityError):
+        paired_configs(
+            records, ClaimClass.END_TO_END, axis="mode", hold_fixed=("grid_spacing",)
+        )
+
+
+def test_paired_configs_returns_no_pair_for_single_axis_value():
+    records = [
+        _end_to_end_record(
+            n_atoms=5000, config={"grid_spacing": "0.1", "mode": "dense"}, probe_id="a"
+        ),
+        _end_to_end_record(
+            n_atoms=5000, config={"grid_spacing": "0.1", "mode": "dense"}, probe_id="b"
+        ),
+    ]
+    pairs = paired_configs(
+        records, ClaimClass.END_TO_END, axis="mode", hold_fixed=("grid_spacing",)
+    )
+    assert pairs == []

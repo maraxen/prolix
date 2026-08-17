@@ -629,7 +629,9 @@ driver passes the same value to both children of a pair and stamps it into
 `max_abs_force_delta`, asserts it against the stated tolerance, and stamps it into the PAIRED
 summary record's `metrics["ab_max_abs_force_delta"]` — the children cannot compute it because
 neither sees the other. `n_inner = 20` timed repeats per child (after the 3 untimed
-warm-ups), stamped into `metrics["n_inner"]` alongside seed/`B`/method/`n_pairs`. Each child
+warm-ups), stamped into `metrics["n_inner"]` alongside seed/`B`/`n_pairs`; `method`
+("percentile bootstrap") is stamped into `config["method"]`, not `metrics` — it is a
+string, and `ProbeRecord.metrics` is float-only by contract (P1). Each child
 writes its own `ProbeRecord`; the driver emits the paired summary.
 
 **Gate:** paired equivalence on total step time **and** on the instrumented function in
@@ -637,9 +639,11 @@ isolation. Procedure: ≥21 interleaved A/B pairs (see the process model above),
 pairs discarded as page-cache/thermal warm-up, leaving ≥19 paired deltas
 `d_i = (t_scopes_i − t_noscope_i) / t_noscope_i`. Pass requires `|median(d_i)| ≤ 0.05`
 **and** the 90% percentile-bootstrap CI of `median(d_i)` contained in [−0.05, +0.05],
-computed with `B = 10,000` resamples using `numpy.random.default_rng(20260817)`. The seed,
-`B`, method and `n_pairs` are stamped into the emitted record's `metrics` so the verdict is
-reproducible from the record alone; a gate that flips on an unseeded resample is not a gate.
+computed with `B = 10,000` resamples using `numpy.random.default_rng(20260817)`. The seed
+and `B` are stamped into the emitted record's `metrics`; `method` is stamped into `config`
+(see the process-model paragraph above for why it cannot live in `metrics`); together with
+`n_pairs` (also in `metrics`), the verdict is reproducible from the record alone; a gate
+that flips on an unseeded resample is not a gate.
 Run the same check a second time on
 `chunked_explicit_nonbonded_energy` timed alone, because a perturbation confined to the tile
 reduction can hide under 5% of a whole step — which is the exact mechanism this gate exists

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import math
 import os
 import subprocess
 from datetime import datetime, timezone
@@ -23,13 +24,16 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
 def _capture_git_sha() -> str:
-    """HEAD sha, suffixed "-dirty" if the working tree has uncommitted changes.
+    """HEAD sha, suffixed "-dirty"/"-unverified" per working-tree state.
 
-    Returns "unknown" on any failure (e.g. no .git present, as on some
-    cluster checkouts) -- claims.py rejects both "unknown" and a "-dirty"
-    suffix outright for TERM_RANKING/END_TO_END sources, since unanimity
-    alone would not catch two records that independently failed to resolve
-    a sha (both report "unknown", which trivially "agrees").
+    Returns "unknown" on any failure to resolve HEAD (e.g. no .git present,
+    as on some cluster checkouts). If HEAD resolves but the dirty check
+    itself fails, returns "<sha>-unverified" rather than silently reporting
+    clean -- a failed `git status` is not evidence of a clean tree, and
+    treating it as such would let two records that both failed the dirty
+    check trivially "agree" under the unanimity guard. claims.py rejects
+    "unknown" and both suffixes outright for TERM_RANKING/END_TO_END
+    sources.
     """
     try:
         sha = subprocess.check_output(
@@ -47,7 +51,7 @@ def _capture_git_sha() -> str:
             ).strip()
         )
     except Exception:
-        dirty = False
+        return f"{sha}-unverified"
     return f"{sha}-dirty" if dirty else sha
 
 
@@ -77,15 +81,25 @@ def _capture_xla_flags() -> str:
     return os.environ.get("XLA_FLAGS", "")
 
 
-_DEVICE_KIND_ALIASES = ("h200", "h100", "a100", "l40s", "l40", "l4", "v100", "a10")
+_VENDOR_PREFIXES = ("nvidia ", "amd ")
 
 
 def _normalize_device_kind(raw: str) -> str:
-    lowered = raw.lower()
-    for canon in _DEVICE_KIND_ALIASES:
-        if canon in lowered:
-            return canon
-    return lowered.replace(" ", "_")
+    """Lowercase, strip a leading vendor token, collapse whitespace to "_".
+
+    A normalisation, not an allow-list: "NVIDIA H200" -> "h200",
+    "NVIDIA RTX PRO 6000 Blackwell" -> "rtx_pro_6000_blackwell". An
+    allow-list (matching known device substrings) was tried first and
+    rejected -- "NVIDIA GH200 480GB" contains the substring "h200", so a
+    Grace-Hopper GH200 would silently collapse to the same device_kind as a
+    real H200, defeating the point of auto-capturing this field at all.
+    """
+    lowered = raw.strip().lower()
+    for prefix in _VENDOR_PREFIXES:
+        if lowered.startswith(prefix):
+            lowered = lowered[len(prefix) :]
+            break
+    return "_".join(lowered.split())
 
 
 def _capture_device_kind() -> str | None:
@@ -104,9 +118,15 @@ def _capture_device_kind() -> str | None:
     return _normalize_device_kind(getattr(devices[0], "device_kind", "unknown"))
 
 
-@dataclasses.dataclass
+@dataclasses.dataclass(frozen=True)
 class ProbeRecord:
     """A single profiling measurement, stamped with what it may be cited for.
+
+    Frozen: every guard below runs once, at construction, and stays true for
+    the record's lifetime -- a mutable record would let a downstream report
+    or aggregation script (accidentally, not adversarially) rewrite a field
+    after validation and silently launder a value the contract never
+    actually checked.
 
     Caller-supplied (the semantic content of the measurement): probe_id,
     stage, n_atoms, platform, metrics, scopes, config, attribution_method.
@@ -144,10 +164,12 @@ class ProbeRecord:
     # being None means the probe captured no trace at all.
     scopes: dict[str, tuple[float, int] | None] | None = None
     config: dict[str, str] = dataclasses.field(default_factory=dict)
-    # Optional per-scope note on how that scope's time was attributed (e.g.
-    # {"bonded": "trace"} vs {"bonded": "manual_split"}) -- distinct from
-    # scopes itself, which is the measurement; this is metadata about how
-    # trustworthy that measurement's attribution is.
+    # Per-scope attribution method: each value must be "named_scope" (a
+    # jax.named_scope label captured directly) or "op_name" (attributed by
+    # HLO op name, a weaker guarantee). Distinct from scopes itself, which
+    # is the measurement; this is metadata about how trustworthy that
+    # measurement's attribution is. Required whenever scopes is not None --
+    # enforced in __post_init__.
     attribution_method: dict[str, str] | None = None
 
     contract_version: str = CONTRACT_VERSION
@@ -170,26 +192,75 @@ class ProbeRecord:
         coerced_metrics: dict[str, float] = {}
         for key, value in self.metrics.items():
             try:
-                coerced_metrics[key] = float(value)
+                coerced = float(value)
             except (TypeError, ValueError) as exc:
                 raise ClaimValidityError(
                     f"metrics[{key!r}]={value!r} is not coercible to float -- "
                     "ProbeRecord.metrics must be float-valued"
                 ) from exc
-        self.metrics = coerced_metrics
+            if not math.isfinite(coerced):
+                raise ClaimValidityError(
+                    f"metrics[{key!r}]={coerced!r} is not finite -- a failed "
+                    "or diverged measurement (nan/inf) is not a citable metric"
+                )
+            coerced_metrics[key] = coerced
+        object.__setattr__(self, "metrics", coerced_metrics)
+
+        if self.scopes is not None and self.attribution_method is None:
+            raise ClaimValidityError(
+                "attribution_method is required whenever scopes is not None"
+            )
+        if self.attribution_method is not None:
+            bad = {
+                v
+                for v in self.attribution_method.values()
+                if v not in ("named_scope", "op_name")
+            }
+            if bad:
+                raise ClaimValidityError(
+                    f"attribution_method values must be 'named_scope' or "
+                    f"'op_name', got {sorted(bad)}"
+                )
 
     def to_json(self) -> str:
         return json.dumps(dataclasses.asdict(self), indent=2, sort_keys=True)
 
     @classmethod
     def from_json(cls, text: str) -> "ProbeRecord":
-        raw = json.loads(text)
+        """Deserialize, fail-closed on version drift AND on malformed input.
+
+        Rule order matters: the contract_version check runs BEFORE the
+        missing-field check, so a version-skewed record is always diagnosed
+        as version skew (naming both versions) rather than misdiagnosed as
+        field-level corruption -- a genuine 1.0 record missing
+        attribution_method would otherwise raise the "provenance cannot be
+        reconstructed" error instead of the version-mismatch error that
+        actually explains it.
+
+        The missing-field check only fires for fields with a default_factory
+        (git_sha, timestamp, x64_enabled, ..., metrics, config): those are
+        the fields a MAJOR bump introduces (spec P1's bump rule). A field
+        with a plain default (e.g. attribution_method) is a MINOR-bump
+        field by the same rule -- an old record missing it is still
+        readable, and simply gets that field's literal default.
+        """
+        try:
+            raw = json.loads(text)
+        except json.JSONDecodeError as exc:
+            raise ClaimValidityError(f"ProbeRecord JSON is not valid JSON: {exc}") from exc
+        if not isinstance(raw, dict):
+            raise ClaimValidityError(
+                "ProbeRecord JSON must decode to an object, got "
+                f"{type(raw).__name__}"
+            )
+
         # ty 0.0.29 mis-resolves `cls`/the concrete class here as not
         # satisfying DataclassInstance in this classmethod context (matches
         # the pre-existing ty-panic class already seen on this package's
         # test file); dataclasses.fields() works correctly on ProbeRecord
         # at runtime -- see the passing round-trip tests.
-        field_names = {f.name for f in dataclasses.fields(cls)}  # ty: ignore[invalid-argument-type]
+        fields = {f.name: f for f in dataclasses.fields(cls)}  # ty: ignore[invalid-argument-type]
+        field_names = set(fields)
         unknown = set(raw.keys()) - field_names
         if unknown:
             raise ClaimValidityError(
@@ -198,24 +269,40 @@ class ProbeRecord:
                 "this code understands; do not deserialize across an "
                 "unrecognized schema change"
             )
-        missing = field_names - set(raw.keys())
-        if missing:
-            raise ClaimValidityError(
-                f"ProbeRecord JSON is missing field(s) {sorted(missing)} -- "
-                "this record predates the field and its provenance cannot "
-                "be reconstructed by defaulting to the READING machine's "
-                "environment (that would silently corrupt provenance)"
-            )
-        record_major = str(raw.get("contract_version", "0.0")).split(".")[0]
+
+        record_version = raw.get("contract_version", "0.0")
+        record_major = str(record_version).split(".")[0]
         current_major = CONTRACT_VERSION.split(".")[0]
         if record_major != current_major:
             raise ClaimValidityError(
-                f"ProbeRecord contract_version {raw.get('contract_version')!r} "
-                f"has a different major version than the running contract "
+                f"ProbeRecord contract_version {record_version!r} has a "
+                f"different major version than the running contract "
                 f"{CONTRACT_VERSION!r} -- a claim-validity verdict computed "
                 "under one major version is not guaranteed valid under another"
             )
-        return cls(**_decode_fields(raw))
+
+        missing = field_names - set(raw.keys())
+        hard_missing = sorted(
+            name for name in missing if fields[name].default_factory is not dataclasses.MISSING
+        )
+        if hard_missing:
+            raise ClaimValidityError(
+                f"ProbeRecord JSON is missing field(s) {hard_missing} -- each "
+                "has a default_factory (not a static default), so silently "
+                "applying it here would fabricate a value (this reading "
+                "machine's own environment, or an empty container standing "
+                "in for lost data) rather than reconstructing what was "
+                "actually recorded"
+            )
+
+        try:
+            return cls(**_decode_fields(raw))
+        except ClaimValidityError:
+            raise
+        except (TypeError, AttributeError, ValueError) as exc:
+            raise ClaimValidityError(
+                f"ProbeRecord JSON has malformed field value(s): {exc}"
+            ) from exc
 
     def write(self, path: str | Path) -> None:
         path = Path(path)
