@@ -1,6 +1,6 @@
 #!/bin/bash
 #SBATCH --job-name=prolix_p7_stage2
-#SBATCH --partition=pi_so3
+#SBATCH --partition=mit_preemptable,pi_so3
 #SBATCH --gres=gpu:h200:1
 #SBATCH --time=00:15:00
 #SBATCH --nodes=1
@@ -24,9 +24,18 @@
 #   mode    = (T % 6) / 3    (dense, flash)
 #   pme_idx = T % 3          (off, on@1.0, on@1.2)
 #
-# Partition is pi_so3 only: gres=gpu:h200:1 + mit_normal_gpu is rejected
-# ("Requested node configuration is not available").
-# Do NOT pin --nodelist=node4007,node4008 (excludes the H200).
+# H200 inventory (scontrol/sinfo 2026-08-18):
+#   pi_so3:            gres/gpu:h200=2 (node4009 only)
+#   mit_preemptable:   gres/gpu:h200=194 (many 8-GPU nodes)
+#   mit_normal_gpu:    also has H200s, but listing it with pi_so3 is not
+#                      required; myxcel defaults to mit_normal (CPU) unless
+#                      --partition is passed on the CLI.
+# sbatch --test-only: including pi_so3 in the same request makes the
+# scheduler wait for node4009 (start estimates Aug 21 / Sep 11).
+# mit_preemptable alone estimated 2026-08-19T17:05 on node3400.
+# Submit with --partition mit_preemptable so the 194-GPU pool is actually
+# eligible; PreemptMode=REQUEUE — 15 min tasks can be requeued.
+# Do NOT pin --nodelist=node4007,node4008 (excludes Hopper H200s).
 # %k throttle is a courtesy cap, not placement.
 #
 # Submit from worktree:
