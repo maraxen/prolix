@@ -29,7 +29,7 @@
 #
 # Submit from worktree:
 #   myxcel submit engaging prolix scripts/slurm/prof_stage2_small_system.slurm \
-#     --array 0-11%<k> --export=ALL,CAMPAIGN_ID=<uuid>
+#     --array 0-11%<k> --export=ALL,CAMPAIGN_ID=450f3583-c8dd-43f7-a59f-0642810746a5
 
 set -euo pipefail
 
@@ -90,7 +90,6 @@ uv run bth run python scripts/experiments/profile_b1_flash_vs_autodiff_forces.py
     --tag "mode:${MODE}" \
     "${CAMPAIGN_FLAG[@]}" \
     --out "outputs/profiling/stage2/${PROBE_ID}_summary.json" \
-    --out "outputs/profiling/stage2/${PROBE_ID}.json" \
     -- \
     --protein "${PROTEIN}" \
     --mode "${MODE}" \
