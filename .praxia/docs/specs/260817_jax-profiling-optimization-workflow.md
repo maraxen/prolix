@@ -1253,6 +1253,7 @@ tasks, not a re-run of the sweep.
 - Array slurm: `--gres=gpu:h200:1`, `--time=00:15:00` from `3 * 0.557 * 20 / 3 = 11.14s` → 5 min + 10 min compile. `#SBATCH --partition=pi_so3` only: `pi_so3,mit_normal_gpu` plus H200 gres is an empty intersection (`sbatch: Requested node configuration is not available`). **myxcel submit** injects `--partition=mit_normal` unless `--partition pi_so3` is passed on the CLI.
 - `scontrol show node node4009`: `Gres=gpu:h200:2` fully allocated → `%k=1`. Occupants: `19720353` (pi_so3, `gres/gpu:h200:2`, ~2 d remaining) and a mit_preemptable task. Scheduler `START_TIME` for the array ~ `2026-08-20T14:04`.
 - Submitted from worktree `wt-20260807-132628`: array **20692608** (`0-11%1`, `CAMPAIGN_ID` exported); coverage **20692636** (`--dependency=afterany:20692608`). Task 12 (`prof_stage2_scope_ab.slurm`) is **not** submitted until the first array-task log exists.
+- **Retarget 2026-08-18:** `scontrol show partition mit_preemptable` reports `gres/gpu:h200=194` vs `pi_so3`'s 2. `--test-only` with `pi_so3` in the partition list still binds to node4009 (start Aug 21 / Sep 11). Cancelled 20692608/20692636; resubmitted array on **`mit_preemptable` only** so the shared Hopper pool is eligible (`PreemptMode=REQUEUE`).
 - STEP / SIDECAR / `TERM_RANKING` / `trace.py` GPU legs wait on H200 start. Do not complete #4325 until those fire.
 
 ---
