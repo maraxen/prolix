@@ -1006,6 +1006,21 @@ smaller system. Branch on the governing ratio:
   protein alone can be re-evaluated on its own ratio without re-running P6.
 **Scope: ~80 LOC, no sidecar edit.**
 
+**Step notes (completed 2026-08-18):**
+
+*Campaign-id precedence (precondition).* `bth campaign create "p6-stage2-cpu-smoke"` returned short id `d6f44eab` (full `d6f44eab-f538-4bf7-a84b-fbed3215908b`). A throwaway `bth run --campaign d6f44eab` of this script's `--dry-run` path recorded `campaign_id = d6f44eab-f538-4bf7-a84b-fbed3215908b` in the catalog, **not** the sidecar pin `32d6574e`. **CLI `--campaign` wins.** No sidecar edit; no `scripts/explore/` fallback. Sidecar was not modified.
+
+*CPU smoke (real timing loop, not `--dry-run`).* Two cataloged runs under campaign `d6f44eab`, tags `p6-cpu-smoke` + `not-citable`; `32d6574e` did not gain them. Timed callables were already `jax.jit`-wrapped. Flash path ran (debt 765 no longer blocks). Bathos sidecar `flash_speedup` scores (≈2.61× / 2.63×) are **not citable** for debt 761 — CPU, `--n-trials 3`, GPU-anchored threshold. ProbeRecords at `outputs/profiling/p6/{1vii,2gb1}/record.json`, `stage=1`, `platform=cpu`, `git_sha=3f7ea36` (clean).
+
+| protein | n_real_atoms | n_padded_atoms | energy_only_ms | autodiff_ms | flash_ms | total_step_seconds | 23558/n_real |
+|---|---|---|---|---|---|---|---|
+| 1vii | 1963 | 5000 | 124.86 | 557.16 | 213.79 | 0.557 | **12.00** |
+| 2gb1 | 1987 | 5000 | 78.52 | 449.28 | 171.02 | 0.449 | **11.86** |
+
+*Contract.* `assert_claim_supported(records, ClaimClass.END_TO_END, target_n_atoms=23558)` **raised** (guards (b) and (c) on real records): `END_TO_END extrapolation ratio 12.00x exceeds SCALE_EXTRAPOLATION_LIMIT=10.0x (min source n_atoms=1963)`. Both proteins independently trip >10. **Mid-scale rung is mandatory** before any Stage-3 claim; filed as a blocking follow-up. Do not raise `SCALE_EXTRAPOLATION_LIMIT`.
+
+*P7 walltime input.* `t_cpu` = max over proteins and modes = **0.557 s** (1vii autodiff). P7 not started this step.
+
 ---
 
 ### P7 — FIRST AND ONLY GPU STEP: Stage 2 small-system probe on H200 / `pi_so3`
