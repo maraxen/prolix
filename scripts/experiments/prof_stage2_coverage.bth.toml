@@ -1,0 +1,38 @@
+[experiment]
+hypothesis = """
+P7 Stage-2 H200 discovery sweep coverage: at least 5 of 6 comparison cells
+({1vii,2gb1} × {pme_off, pme_on@1.0Å, pme_on@1.2Å}) produce a valid
+dense+flash pair (both tasks exited 0 and emitted a Stage-2 ProbeRecord).
+Effect size is recorded, not gated.
+"""
+
+[outcomes.pass]
+condition = "n_configs_with_valid_dense_flash_pair >= 5"
+decision = "Sweep coverage permits a term ranking across the design."
+reasoning = "Five of six cells is enough to rank dense vs flash without a single-cell artifact."
+
+[outcomes.marginal]
+condition = "n_configs_with_valid_dense_flash_pair BETWEEN 2 AND 4"
+decision = "Rank only covered cells; name uncovered cells in the report."
+reasoning = "Partial coverage is still a real Stage-2 ranking on the cells that landed."
+
+[outcomes.fail]
+condition = "n_configs_with_valid_dense_flash_pair < 2"
+decision = "No ranking. Re-run failed tasks, not the whole design, unless xla_flags split."
+reasoning = "Fewer than two comparison cells cannot separate dense vs flash from a singleton."
+is_residual = true
+
+[result_schema]
+n_configs_with_valid_dense_flash_pair = "int"
+n_records = "int"
+n_catalog_ok = "int"
+cell_1vii_pmeoff_gna = "int"
+cell_1vii_pmeon_g1p0 = "int"
+cell_1vii_pmeon_g1p2 = "int"
+cell_2gb1_pmeoff_gna = "int"
+cell_2gb1_pmeon_g1p0 = "int"
+cell_2gb1_pmeon_g1p2 = "int"
+
+[metadata]
+campaign_mode = "exploration"
+tags = ["p7-stage2", "coverage"]
