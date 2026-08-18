@@ -193,7 +193,11 @@ def _run_child(arm: str, system_seed: int, target: str, out_path: Path) -> None:
     if arm == "scopes_off":
         import jax
 
-        jax.named_scope = lambda *_a, **_k: _NullScope()
+        # Deliberate monkeypatch, not a bug -- this IS the scopes_off arm's
+        # mechanism (spec P5: "patching jax.named_scope to a null
+        # contextmanager"). ty flags the type mismatch against the real
+        # named_scope signature, which is expected for a monkeypatch.
+        jax.named_scope = lambda *_a, **_k: _NullScope()  # ty: ignore[invalid-assignment]
     elif arm != "scopes_on":
         raise ValueError(f"unknown arm {arm!r}")
 
@@ -316,7 +320,9 @@ def _bootstrap_median_ci(
     return lo, hi
 
 
-def _run_gate(target: str, out_dir: Path, base_seed: int) -> dict:
+def _run_gate(
+    target: str, out_dir: Path, base_seed: int, n_pairs_override: int | None = None
+) -> dict:
     import math
 
     import numpy as np
@@ -346,6 +352,13 @@ def _run_gate(target: str, out_dir: Path, base_seed: int) -> dict:
     s = float(q75 - q25)
     raw_n_pairs = math.ceil((3.3 * s / TOLERANCE_MARGIN) ** 2) if s > 0 else N_PAIRS_MIN
     n_pairs = int(min(max(raw_n_pairs, N_PAIRS_MIN), N_PAIRS_MAX))
+    if n_pairs_override is not None:
+        # Per spec: an INSUFFICIENT_POWER verdict means "increase n_pairs
+        # and re-run; DO NOT revert" -- this is that escalation path, not a
+        # way to dodge a DETECTED_PERTURBATION verdict (which is not
+        # power-sensitive: it fires on the median itself, not the CI width).
+        print(f"n_pairs override: {n_pairs} -> {n_pairs_override}")
+        n_pairs = int(max(n_pairs_override, N_PAIRS_MIN))
     unresolved_on_cpu = raw_n_pairs > N_PAIRS_MAX
     print(f"pilot IQR s={s:.6g}, raw_n_pairs={raw_n_pairs}, clipped n_pairs={n_pairs}")
 
@@ -437,6 +450,18 @@ def main() -> None:
         "--out-dir", default=str(_ROOT / "outputs" / "profiling" / "stage1_perturbation")
     )
     parser.add_argument("--base-seed", type=int, default=0)
+    parser.add_argument(
+        "--n-pairs",
+        type=int,
+        default=None,
+        help=(
+            "Override the pilot-derived n_pairs. Use to re-run after an "
+            "INSUFFICIENT_POWER verdict with a larger n_pairs (spec: "
+            "increase n_pairs and re-run, do NOT revert). Does not change "
+            "the DETECTED_PERTURBATION criterion, which is not power-"
+            "sensitive."
+        ),
+    )
     args = parser.parse_args()
 
     if args.child:
@@ -450,8 +475,8 @@ def main() -> None:
 
     results = []
     for target in targets:
-        result = _run_gate(target, out_dir, args.base_seed)
-        _emit_summary_record(result, out_dir)
+        result = _run_gate(target, out_dir, args.base_seed, args.n_pairs)
+        _emit_summary_record(result, out_dir / target)
         results.append(result)
         print(
             f"target={target} verdict={result['verdict']} "

@@ -828,6 +828,72 @@ whole-step perturbation was not attributable — but state that outcome explicit
 reaching it by default.
 **Scope: ~90 LOC.**
 
+**Step notes (completed 2026-08-17):** `scripts/explore/prof_stage1_scope_perturbation.py`
+implements the process model exactly as specified (subprocess-per-arm, A/B/A/B, `--child`
+mode patches `jax.named_scope` before importing prolix), with two real bugs found and fixed
+during smoke-testing before any statistical run was trusted:
+
+1. **The timed functions were not `jax.jit`-wrapped.** `eqx.filter_grad`/`jax.grad` alone do
+   not compile; without an explicit `jax.jit`, every call (including the 3 "warm-up" ones)
+   ran in eager per-op dispatch mode -- confirmed directly: median call time ~0.86 s on a
+   trivial N=64 system, ~280x slower than the compiled path, and "warm-up absorbing JIT
+   compile" absorbed nothing because there was no compile to absorb. Since fusion is
+   fundamentally a compile-time decision, an un-jitted measurement cannot detect a fusion
+   perturbation at all -- this would have silently produced a meaningless PASS on every run
+   regardless of what P2 actually did. Fixed by wrapping the target function in `jax.jit`
+   before the warm-up loop (median call time dropped to ~1-3 ms, consistent with a real
+   compiled N=64 call).
+2. **`jax.named_scope`'s scopes_off patch used `contextlib.nullcontext`, which is not
+   callable as a decorator.** `equinox`'s own `eqx.nn` module decorates methods with
+   `@named_scope(...)` at *import time* (not just context-manager usage) -- `nullcontext`
+   instances support `with x:` but not `@x`, so any prolix import chain that pulls in
+   `equinox.nn` crashed immediately under the scopes_off patch. Fixed with a small
+   `contextlib.ContextDecorator` subclass (`_NullScope`) that supports both.
+
+A third, environment-level (not code) bug surfaced while launching the actual gate runs:
+background shell commands run under a **more restrictive filesystem sandbox** than
+foreground ones on this box -- a path (`$CLAUDE_JOB_DIR/tmp`) freely writable all session in
+foreground calls was read-only under `run_in_background`, silently killing two earlier
+background attempts before any log line was written. A separate, related mistake (nesting
+`nohup ... &` inside an already-backgrounded tool call) made the *tracked* command report
+"completed" within ~1 s while the actual detached child was killed anyway -- `nohup`/`disown`
+protect against SIGHUP, not whatever teardown mechanism ends the sandboxed session backing a
+tool call. Fixed by running the real long-lived command as the sole foreground command of a
+`run_in_background` call (no internal `&`), logging to a worktree-relative path instead of the
+job tmp dir.
+
+A fourth bug (found and fixed, not just worked around) was a genuine **race condition**:
+running both targets as separate concurrent processes against one shared `out_dir` let them
+both write `pair{i}_on.json`/`pair{i}_off.json`/`.forces.npy` at identical paths (pair indices
+are process-local counters starting at 0 for every target), corrupting whichever pair happened
+to collide. Fixed with a per-target subdirectory (`out_dir / target`) for all pilot/pair/summary
+files -- required, not cosmetic, once two targets (or two re-runs) can run concurrently.
+
+**Final gate results, both targets independently PASS:**
+
+| target | verdict | median(dᵢ) | 90% CI | n_pairs | pilot s | `ab_max_abs_force_delta` |
+|---|---|---|---|---|---|---|
+| `whole_step` | **PASS** | −0.0040 | [−0.0215, +0.0394] | 50 (n_pairs override, see below) | 0.1160 | 0.0 |
+| `tile_function` | **PASS** | −0.0111 | [−0.0202, +0.0026] | 59 (pilot-derived) | 0.1159 | 0.0 |
+
+Both checks' 90% CI is fully contained in [−0.05, +0.05]; `ab_max_abs_force_delta = 0.0` on
+every pair in both runs (forces bit-identical between arms, not merely within tolerance) --
+the strongest possible negative result for a fusion perturbation. **`whole_step`'s first
+attempt at the pilot-derived floor (`n_pairs=21`) landed `INSUFFICIENT_POWER`**
+(median −0.0037 -- comfortably inside the margin -- but CI [−0.0565, +0.0411] just missed
+full containment on the lower bound). Per this section's own rule ("increase n_pairs and
+re-run; DO NOT revert"), added a `--n-pairs` override flag to the script and re-ran at
+`n_pairs=50`, which resolved cleanly to PASS -- confirming the first result was a genuine
+power problem (this box's timing noise at the 10-pilot-pair sample size), not evidence of a
+perturbation. (A still-earlier `whole_step` attempt, run concurrently with `tile_function`
+before the per-target-subdirectory race-condition fix above, produced a plausible-looking but
+untrustworthy `INSUFFICIENT_POWER` summary and was discarded rather than reported.)
+
+**Conclusion: P2's `named_scope` wraps do not perturb fused hot-path timing on CPU at N=64,
+on either check.** No localisation/bisection was needed (no DETECTED_PERTURBATION verdict on
+either target). P7's Stage-2/H200 replication (this section's own caveat: "a clean CPU/N=64
+result does not transfer to H200 at Stage-2 size") remains the governing check for GPU.
+
 ---
 
 ### P6 — Re-verify the Stage-2 probe script runs end-to-end, and record its true `n_atoms`
