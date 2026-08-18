@@ -1017,7 +1017,7 @@ smaller system. Branch on the governing ratio:
 | 1vii | 1963 | 5000 | 124.86 | 557.16 | 213.79 | 0.557 | **12.00** |
 | 2gb1 | 1987 | 5000 | 78.52 | 449.28 | 171.02 | 0.449 | **11.86** |
 
-*Contract.* `assert_claim_supported(records, ClaimClass.END_TO_END, target_n_atoms=23558)` **raised** (guards (b) and (c) on real records): `END_TO_END extrapolation ratio 12.00x exceeds SCALE_EXTRAPOLATION_LIMIT=10.0x (min source n_atoms=1963)`. Both proteins independently trip >10. **Mid-scale rung is mandatory** before any Stage-3 claim; filed as a blocking follow-up. Do not raise `SCALE_EXTRAPOLATION_LIMIT`.
+*Contract.* `assert_claim_supported(records, ClaimClass.END_TO_END, target_n_atoms=23558)` **raised** (guards (b) and (c) on real records): `END_TO_END extrapolation ratio 12.00x exceeds SCALE_EXTRAPOLATION_LIMIT=10.0x (min source n_atoms=1963)`. Both proteins independently trip >10. **Mid-scale rung is mandatory** before any Stage-3 claim; filed as backlog **#4350**. Do not raise `SCALE_EXTRAPOLATION_LIMIT`.
 
 *P7 walltime input.* `t_cpu` = max over proteins and modes = **0.557 s** (1vii autodiff). P7 not started this step.
 
@@ -1246,6 +1246,14 @@ condition "P7 complete" means the STEP gate; a promotion whose hypothesis ranges
 uncovered cell additionally requires that cell's coverage, i.e. a re-run of the failed
 tasks, not a re-run of the sweep.
 **Scope: ~70 LOC of slurm + ~60 LOC of sweep args and plumbing + ~40 LOC aggregation script.**
+
+**Step notes (2026-08-18, submitted; GPU gates pending):**
+- Campaign `p7-stage2-h200` = `450f3583-c8dd-43f7-a59f-0642810746a5` (short `450f3583`). Exploration. Not `32d6574e`, not P6 `d6f44eab`.
+- Probe flags on `profile_b1_flash_vs_autodiff_forces.py`: `--mode {dense,flash,both}`, `--pme`, `--grid-spacing`, `main(argv)`, PME via `eqx.tree_at` (`pme_alpha=0` / `pme_grid_points`). Frozen sidecar untouched.
+- Array slurm: `--gres=gpu:h200:1`, `--time=00:15:00` from `3 * 0.557 * 20 / 3 = 11.14s` → 5 min + 10 min compile. `#SBATCH --partition=pi_so3` only: `pi_so3,mit_normal_gpu` plus H200 gres is an empty intersection (`sbatch: Requested node configuration is not available`). **myxcel submit** injects `--partition=mit_normal` unless `--partition pi_so3` is passed on the CLI.
+- `scontrol show node node4009`: `Gres=gpu:h200:2` fully allocated → `%k=1`. Occupants: `19720353` (pi_so3, `gres/gpu:h200:2`, ~2 d remaining) and a mit_preemptable task. Scheduler `START_TIME` for the array ~ `2026-08-20T14:04`.
+- Submitted from worktree `wt-20260807-132628`: array **20692608** (`0-11%1`, `CAMPAIGN_ID` exported); coverage **20692636** (`--dependency=afterany:20692608`). Task 12 (`prof_stage2_scope_ab.slurm`) is **not** submitted until the first array-task log exists.
+- STEP / SIDECAR / `TERM_RANKING` / `trace.py` GPU legs wait on H200 start. Do not complete #4325 until those fire.
 
 ---
 

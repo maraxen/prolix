@@ -67,6 +67,48 @@ def _bth_sql(campaign_tag: str) -> list[dict]:
     return rows
 
 
+def _decode_array_task(task_id: int) -> tuple[tuple[str, str, str], str] | None:
+    if task_id < 0 or task_id > 11:
+        return None
+    proteins = ("1vii", "2gb1")
+    modes = ("dense", "flash")
+    protein = proteins[task_id // 6]
+    mode = modes[(task_id % 6) // 3]
+    pme_idx = task_id % 3
+    if pme_idx == 0:
+        return (protein, "off", "na"), mode
+    grid = "1.0" if pme_idx == 1 else "1.2"
+    return (protein, "on", grid), mode
+
+
+def _cell_mode_from_tags(tags) -> tuple[tuple[str, str, str], str] | None:
+    if isinstance(tags, list):
+        tag_list = [str(t) for t in tags]
+    else:
+        tag_list = [p.strip() for p in str(tags).replace(",", " ").split() if p.strip()]
+    task = None
+    protein = pme = grid = mode = None
+    for tag in tag_list:
+        if tag.startswith("array_task:"):
+            try:
+                task = int(tag.split(":", 1)[1])
+            except ValueError:
+                continue
+        elif tag.startswith("protein:"):
+            protein = tag.split(":", 1)[1]
+        elif tag.startswith("mode:"):
+            mode = tag.split(":", 1)[1]
+        elif tag.startswith("pme:"):
+            pme = tag.split(":", 1)[1]
+        elif tag.startswith("grid:"):
+            grid = tag.split(":", 1)[1]
+    if task is not None:
+        return _decode_array_task(task)
+    if protein and mode in ("dense", "flash") and pme and grid:
+        return (protein, pme, grid), mode
+    return None
+
+
 def _cell_key(cfg: dict) -> tuple[str, str, str] | None:
     if cfg.get("scopes") == "off":
         return None
@@ -104,19 +146,24 @@ def main(argv: list[str] | None = None) -> int:
             raise SystemExit(f"xla_flags not unanimous: {sorted(map(repr, flags))}")
 
     catalog = _bth_sql(args.campaign_tag)
-    ok_tasks = set()
+    ok_modes_by_cell: dict[tuple[str, str, str], set[str]] = {c: set() for c in CELLS}
+    n_catalog_ok = 0
     for row in catalog:
         tags = row.get("tags", "")
         exit_code = row.get("exit_code")
-        status = str(row.get("status", ""))
+        status = str(row.get("status", "")).lower()
         code_ok = str(exit_code) in ("0", "0.0") or exit_code == 0
-        if not code_ok or status not in ("completed", "success", ""):
+        if not code_ok:
             continue
-        if isinstance(tags, list):
-            tag_list = tags
-        else:
-            tag_list = str(tags)
-        ok_tasks.add(str(row.get("id")))
+        if status and status not in ("completed", "success", "ok", "pass"):
+            continue
+        n_catalog_ok += 1
+        cell_mode = _cell_mode_from_tags(tags)
+        if cell_mode is None:
+            continue
+        cell, mode = cell_mode
+        if cell in ok_modes_by_cell:
+            ok_modes_by_cell[cell].add(mode)
 
     by_cell: dict[tuple[str, str, str], set[str]] = {c: set() for c in CELLS}
     speedups: dict[str, float | None] = {}
@@ -135,7 +182,10 @@ def main(argv: list[str] | None = None) -> int:
     cell_ok = {}
     n_ok = 0
     for cell in CELLS:
-        ok = by_cell[cell] >= {"dense", "flash"}
+        ok = (
+            by_cell[cell] >= {"dense", "flash"}
+            and ok_modes_by_cell[cell] >= {"dense", "flash"}
+        )
         cell_ok[_slug(cell)] = ok
         if ok:
             n_ok += 1
@@ -143,7 +193,7 @@ def main(argv: list[str] | None = None) -> int:
     summary = {
         "n_configs_with_valid_dense_flash_pair": n_ok,
         "n_records": len(records),
-        "n_catalog_ok": len(ok_tasks),
+        "n_catalog_ok": n_catalog_ok,
         **{k: int(v) for k, v in cell_ok.items()},
         **{k: v for k, v in speedups.items()},
     }

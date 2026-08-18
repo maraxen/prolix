@@ -24,6 +24,8 @@
 #   mode    = (T % 6) / 3    (dense, flash)
 #   pme_idx = T % 3          (off, on@1.0, on@1.2)
 #
+# Partition is pi_so3 only: gres=gpu:h200:1 + mit_normal_gpu is rejected
+# ("Requested node configuration is not available").
 # Do NOT pin --nodelist=node4007,node4008 (excludes the H200).
 # %k throttle is a courtesy cap, not placement.
 #
@@ -88,6 +90,8 @@ uv run bth run python scripts/experiments/profile_b1_flash_vs_autodiff_forces.py
     --tag "array_task:${T}" \
     --tag "protein:${PROTEIN}" \
     --tag "mode:${MODE}" \
+    --tag "pme:${PME}" \
+    --tag "grid:${GRID}" \
     "${CAMPAIGN_FLAG[@]}" \
     --out "outputs/profiling/stage2/${PROBE_ID}_summary.json" \
     -- \

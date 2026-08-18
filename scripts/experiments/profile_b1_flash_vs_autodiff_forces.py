@@ -96,7 +96,12 @@ def bench(fn, name, n_warmup=3, n_trials=20, n_inner=5):
     """Same convention as tests/test_gpu_profile_components.py::bench."""
     import jax
 
-    for _ in range(n_warmup):
+    t_first = time.perf_counter()
+    r = fn()
+    jax.block_until_ready(r)
+    first_s = time.perf_counter() - t_first
+    log.info("  %s first_call_seconds=%.3f (compile + first warmup)", name, first_s)
+    for _ in range(max(n_warmup - 1, 0)):
         r = fn()
         jax.block_until_ready(r)
 
