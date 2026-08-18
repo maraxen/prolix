@@ -1,52 +1,20 @@
 #!/usr/bin/env python3
-"""Phase 5 scoping (task 260715_b1_physics_parity): is debt 761 (wire
-single_padded_force's flash path into EnsemblePlan) worth any engineering
-investment at all?
+"""Phase 5 scoping (task 260715_b1_physics_parity) + P6/P7 probe.
 
-Background: EnsemblePlan's dispatch path (energy_fn_from_bundle,
-src/prolix/api/bundle_md.py:446) calls single_padded_energy + naive jax.grad
-to get forces -- a dense O(N^2) autodiff pass. A separate, already-built,
-already-production-used force path exists: single_padded_force
-(src/prolix/batched_energy.py:604), whose default use_flash=True branch
-(flash_explicit_forces, src/prolix/physics/flash_explicit.py) tiles the
-direct-space nonbonded pass into 256x256 blocks under jax.checkpoint instead
-of building the full dense (N,N) exclusion matrix.
+P6: CPU smoke, --stage 1, --emit-record.
+P7: GPU Stage-2 sweep flags --mode/--pme/--grid-spacing, --stage 2, traces.
 
-Two corrections found during Phase 5 scoping (read-only investigation,
-.praxia/docs/decisions/260717_b1-connect-existing-engines-scope.md) mean this
-is NOT a free win to assume:
-  1. flash_explicit_forces is NOT closed-form analytical -- it still calls
-     jax.grad (via eqx.filter_grad) internally. The only difference from
-     today's path is the tiled/checkpointed memory-locality pattern.
-  2. The PME custom_vjp benefit (make_spme_energy_fn) is already present in
-     today's single_padded_energy+jax.grad path -- it is not unique to flash.
-
-So the ONLY thing this script measures is whether flash's tiled/checkpointed
-direct-space pass is actually faster than the current dense pass, on a real
-bundle-derived PhysicsSystem (the 1VII/2GB1 solvated-protein bundles built by
-solvate_protein_to_bundle this session -- same construction path
-profile_b1_heterogeneous_solvated_compile.py already validated for compile-
-sharing). This is measurement only -- no EnsemblePlan wiring happens here.
-
-Usage::
-
-    # L1 dry-run (shapes only, no GPU)
-    uv run python scripts/experiments/profile_b1_flash_vs_autodiff_forces.py --dry-run --protein 1vii
-
-    # L2 local CPU smoke (P6: --n-trials 3, emit a stage=1 ProbeRecord)
-    JAX_PLATFORMS=cpu uv run python scripts/experiments/profile_b1_flash_vs_autodiff_forces.py \\
-        --protein 1vii --n-warmup 1 --n-trials 3 --n-inner 1 --stage 1 \\
-        --emit-record outputs/profiling/p6/1vii/record.json \\
-        --out outputs/profiling/p6/1vii/summary.json
-
-    # L3 cluster (via bth run, see campaign 32d6574e; P7 passes --stage 2 on GPU)
+The frozen sidecar profile_b1_flash_vs_autodiff_forces.bth.toml is not
+edited; extra axes live on ProbeRecord.config.
 """
 
 from __future__ import annotations
 
 import argparse
+import gzip
 import json
 import logging
+import math
 import sys
 import time
 from pathlib import Path
@@ -67,6 +35,20 @@ PROTEIN_PDBS = {
     "1vii": "1VII.pdb",
     "2gb1": "2GB1.pdb",
 }
+
+KNOWN_LABELS = frozenset(
+    {
+        "dense_bonded_angle", "dense_bonded_bond", "dense_bonded_cmap",
+        "dense_bonded_dihedral", "dense_bonded_improper",
+        "dense_bonded_urey_bradley", "dense_coulomb_direct",
+        "dense_lj_direct", "dense_pme_reciprocal",
+        "flash_bonded", "flash_grad", "flash_lj_only",
+        "flash_nonbonded_tiles", "pme_bwd_gather", "pme_charge_spread",
+        "pme_fft_forward", "pme_fft_inverse", "pme_greens_setup",
+        "pme_greens_setup_standalone", "settle_cramers_rule",
+        "settle_pos_eigh", "settle_rattle_loop",
+    }
+)
 
 
 def _resolve_ff_path() -> str:
@@ -97,6 +79,19 @@ def _load_and_solvate(protein_key: str):
     )
 
 
+def _apply_pme_config(sys_obj, pme: str, grid_spacing: float):
+    import numpy as np
+    import equinox as eqx
+
+    mean_l = float(np.mean(np.asarray(sys_obj.box_size)))
+    if pme == "off":
+        sys_obj = eqx.tree_at(lambda s: s.pme_alpha, sys_obj, 0.0)
+        return sys_obj, "na"
+    ngrid = max(int(math.ceil(mean_l / float(grid_spacing))), 1)
+    sys_obj = eqx.tree_at(lambda s: s.pme_grid_points, sys_obj, ngrid)
+    return sys_obj, str(grid_spacing)
+
+
 def bench(fn, name, n_warmup=3, n_trials=20, n_inner=5):
     """Same convention as tests/test_gpu_profile_components.py::bench."""
     import jax
@@ -121,6 +116,44 @@ def bench(fn, name, n_warmup=3, n_trials=20, n_inner=5):
     return {"mean_ms": avg, "std_ms": std, "min_ms": mn}
 
 
+def _capture_trace(fn, trace_dir: Path) -> tuple[dict, dict[str, float]]:
+    """One post-warmup traced call; return (scopes, dispatch metrics)."""
+    import jax
+
+    if str(ROOT) not in sys.path:
+        sys.path.insert(0, str(ROOT))
+    from scripts.profiling.trace import parse_dispatch_counts, parse_scopes, scope_map_from_hlo_text
+
+    hlo_text = fn.lower().compile().as_text()
+    scope_map = scope_map_from_hlo_text(hlo_text, KNOWN_LABELS)
+    trace_dir.mkdir(parents=True, exist_ok=True)
+    with jax.profiler.trace(str(trace_dir), create_perfetto_trace=True):
+        r = fn()
+        jax.block_until_ready(r)
+    gz_files = list(trace_dir.rglob("*.trace.json.gz"))
+    if not gz_files:
+        log.warning("no *.trace.json.gz under %s", trace_dir)
+        return {label: None for label in KNOWN_LABELS}, {}
+    with gzip.open(gz_files[0], "rt") as fh:
+        events = json.load(fh)["traceEvents"]
+    scopes_raw = parse_scopes(events, scope_map)
+    scopes = {label: scopes_raw.get(label) for label in KNOWN_LABELS}
+    dispatch = {k: float(v) for k, v in parse_dispatch_counts(events).items()}
+    recovered = [k for k, v in scopes.items() if v is not None]
+    log.info("trace recovered %d labels: %s", len(recovered), recovered)
+    return scopes, dispatch
+
+
+def _timed_seconds(results: dict) -> float:
+    candidates = []
+    for key in ("autodiff_forces", "flash_forces", "energy_only"):
+        if key in results:
+            candidates.append(results[key]["mean_ms"] / 1000.0)
+    if not candidates:
+        raise RuntimeError("no timed results to stamp total_step_seconds")
+    return max(candidates)
+
+
 def _emit_probe_record(
     *,
     protein: str,
@@ -132,51 +165,65 @@ def _emit_probe_record(
     n_inner: int,
     results: dict,
     path: Path,
+    force_mode: str,
+    pme: str,
+    grid_spacing: str,
+    scopes_arm: str,
+    platform: str,
+    scopes: dict | None,
+    extra_metrics: dict[str, float] | None = None,
 ) -> None:
-    """Write a ProbeRecord. CPU smoke is stage=1; stage>=2 requires GPU."""
     if str(ROOT) not in sys.path:
         sys.path.insert(0, str(ROOT))
     from scripts.profiling.record import ProbeRecord
 
-    ad_s = results["autodiff_forces"]["mean_ms"] / 1000.0
-    flash_s = (
-        results["flash_forces"]["mean_ms"] / 1000.0
-        if "flash_forces" in results
-        else None
-    )
-    metrics = {
-        "energy_only_ms": results["energy_only"]["mean_ms"],
-        "autodiff_forces_ms": results["autodiff_forces"]["mean_ms"],
-        "total_step_seconds": max(
-            [ad_s] + ([flash_s] if flash_s is not None else [])
-        ),
-    }
-    if flash_s is not None:
+    metrics: dict[str, float] = {"total_step_seconds": _timed_seconds(results)}
+    if "energy_only" in results:
+        metrics["energy_only_ms"] = results["energy_only"]["mean_ms"]
+    if "autodiff_forces" in results:
+        metrics["autodiff_forces_ms"] = results["autodiff_forces"]["mean_ms"]
+    if "flash_forces" in results:
         metrics["flash_forces_ms"] = results["flash_forces"]["mean_ms"]
-        metrics["flash_speedup"] = (
-            results["autodiff_forces"]["mean_ms"] / results["flash_forces"]["mean_ms"]
-        )
+        if "autodiff_forces" in results:
+            metrics["flash_speedup"] = (
+                results["autodiff_forces"]["mean_ms"] / results["flash_forces"]["mean_ms"]
+            )
+    if extra_metrics:
+        metrics.update(extra_metrics)
 
+    attribution = None
+    if scopes is not None:
+        attribution = {
+            label: "named_scope" for label, value in scopes.items() if value is not None
+        } or None
+
+    record_mode = force_mode if force_mode in ("dense", "flash") else "both"
+    probe_id = f"stage{stage}_{protein}_{record_mode}_pme{pme}_g{grid_spacing}_sc{scopes_arm}"
     record = ProbeRecord(
-        probe_id=f"p6_cpu_{protein}",
+        probe_id=probe_id,
         stage=stage,
         n_atoms=n_real,
-        platform="cpu",
+        platform=platform,
         metrics=metrics,
+        scopes=scopes,
+        attribution_method=attribution,
         config={
             "protein": protein,
+            "mode": record_mode if record_mode != "both" else "dense+flash",
+            "pme": pme,
+            "grid_spacing": grid_spacing,
+            "scopes": scopes_arm,
             "n_padded_atoms": str(n_padded),
             "n_warmup": str(n_warmup),
             "n_trials": str(n_trials),
             "n_inner": str(n_inner),
-            "role": "p6-cpu-smoke-not-citable",
         },
     )
     record.write(path)
     log.info("Wrote ProbeRecord to %s", path)
 
 
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description="Measure single_padded_energy+jax.grad vs single_padded_force(use_flash=True) wall-clock"
     )
@@ -186,24 +233,32 @@ def main() -> int:
     parser.add_argument("--n-trials", type=int, default=20)
     parser.add_argument("--n-inner", type=int, default=5)
     parser.add_argument("--out", type=Path, default=None)
+    parser.add_argument("--stage", type=int, default=1)
+    parser.add_argument("--emit-record", type=Path, default=None)
     parser.add_argument(
-        "--stage",
-        type=int,
-        default=1,
-        help="ProbeRecord.stage (default 1 for CPU smoke; P7 passes 2 on GPU)",
+        "--mode",
+        choices=("dense", "flash", "both"),
+        default="both",
+        help="which force path to time (P7 array passes dense|flash)",
     )
+    parser.add_argument("--pme", choices=("on", "off"), default="on")
+    parser.add_argument("--grid-spacing", type=float, default=1.0)
     parser.add_argument(
-        "--emit-record",
-        type=Path,
-        default=None,
-        help="Write a ProbeRecord JSON to this path after the timing loop",
+        "--scopes",
+        choices=("on", "off"),
+        default="on",
+        help="config stamp only; the scopes_off patch lives in prof_stage2_scope_ab.py",
     )
-    args = parser.parse_args()
+    parser.add_argument("--trace-dir", type=Path, default=None)
+    args = parser.parse_args(argv)
 
     import jax
 
     log.info("jax.config.x64_enabled = %s", jax.config.x64_enabled)
-    log.info("protein=%s", args.protein)
+    log.info(
+        "protein=%s mode=%s pme=%s grid=%s stage=%s",
+        args.protein, args.mode, args.pme, args.grid_spacing, args.stage,
+    )
 
     try:
         bundle = _load_and_solvate(args.protein)
@@ -218,12 +273,20 @@ def main() -> int:
     bundle_info = {"n_real_atoms": n_real, "n_padded_atoms": n_padded}
 
     if args.dry_run:
-        summary = {"mode": "dry-run", "protein": args.protein, **bundle_info}
+        summary = {
+            "mode": "dry-run",
+            "protein": args.protein,
+            "force_mode": args.mode,
+            "pme": args.pme,
+            **bundle_info,
+        }
         print(json.dumps(summary, indent=2))
         if args.out:
             args.out.parent.mkdir(parents=True, exist_ok=True)
             args.out.write_text(json.dumps(summary, indent=2))
         return 0
+
+    import equinox as eqx
 
     from prolix.api.bundle_md import displacement_fn_for_bundle, physics_system_from_bundle
     from prolix.batched_energy import single_padded_energy, single_padded_force
@@ -231,6 +294,7 @@ def main() -> int:
     disp_fn, _ = displacement_fn_for_bundle(bundle)
     positions = bundle.positions
     sys_obj = physics_system_from_bundle(bundle, positions)
+    sys_obj, grid_key = _apply_pme_config(sys_obj, args.pme, args.grid_spacing)
 
     def energy_only():
         return single_padded_energy(sys_obj, disp_fn, implicit_solvent=False)
@@ -238,7 +302,9 @@ def main() -> int:
     def autodiff_forces():
         return jax.grad(
             lambda r: single_padded_energy(
-                physics_system_from_bundle(bundle, r), disp_fn, implicit_solvent=False
+                eqx.tree_at(lambda s: s.positions, sys_obj, r),
+                disp_fn,
+                implicit_solvent=False,
             )
         )(positions)
 
@@ -252,41 +318,62 @@ def main() -> int:
     flash_jit = jax.jit(flash_forces)
 
     log.info("Benchmarking (n_warmup=%d, n_trials=%d, n_inner=%d)...", args.n_warmup, args.n_trials, args.n_inner)
-    results = {
-        "energy_only": bench(energy_jit, "single_padded_energy (forward only)", args.n_warmup, args.n_trials, args.n_inner),
-        "autodiff_forces": bench(autodiff_jit, "single_padded_energy + jax.grad (current EnsemblePlan path)", args.n_warmup, args.n_trials, args.n_inner),
-    }
-
+    results: dict = {}
     flash_error = None
-    try:
-        results["flash_forces"] = bench(flash_jit, "single_padded_force(use_flash=True) (debt 761 candidate)", args.n_warmup, args.n_trials, args.n_inner)
-    except Exception as e:
-        # KNOWN BLOCKING BUG (debt 765, filed 2026-07-17): flash_explicit_forces
-        # expects sys.excl_indices/excl_scales_vdw/excl_scales_elec in a
-        # per-atom-row layout (N, max_excl_per_atom); physics_system_from_bundle
-        # populates the pair-list layout (n_pairs, 2)/(n_pairs,) that
-        # single_padded_energy's dense path and the PME exclusion correction
-        # both correctly consume. This crashes on any bundle-derived
-        # PhysicsSystem, independent of jit/device -- reported here as a null
-        # result rather than a hard script failure, so this benchmark degrades
-        # gracefully once/if 765 is fixed rather than needing a rewrite.
-        flash_error = f"{type(e).__name__}: {str(e)[:300]}"
-        log.error("flash_forces benchmark failed (see debt 765): %s", flash_error)
+    timed_fn = None
+    timed_name = None
+
+    if args.mode == "both":
+        results["energy_only"] = bench(
+            energy_jit, "single_padded_energy (forward only)", args.n_warmup, args.n_trials, args.n_inner,
+        )
+        results["autodiff_forces"] = bench(
+            autodiff_jit, "single_padded_energy + jax.grad (current EnsemblePlan path)",
+            args.n_warmup, args.n_trials, args.n_inner,
+        )
+        try:
+            results["flash_forces"] = bench(
+                flash_jit, "single_padded_force(use_flash=True) (debt 761 candidate)",
+                args.n_warmup, args.n_trials, args.n_inner,
+            )
+        except Exception as e:
+            flash_error = f"{type(e).__name__}: {str(e)[:300]}"
+            log.error("flash_forces benchmark failed: %s", flash_error)
+        timed_fn, timed_name = autodiff_jit, "autodiff_forces"
+    elif args.mode == "dense":
+        results["autodiff_forces"] = bench(
+            autodiff_jit, "dense autodiff forces", args.n_warmup, args.n_trials, args.n_inner,
+        )
+        timed_fn, timed_name = autodiff_jit, "autodiff_forces"
+    else:
+        try:
+            results["flash_forces"] = bench(
+                flash_jit, "flash forces", args.n_warmup, args.n_trials, args.n_inner,
+            )
+        except Exception as e:
+            flash_error = f"{type(e).__name__}: {str(e)[:300]}"
+            log.error("flash_forces benchmark failed: %s", flash_error)
+            return 1
+        timed_fn, timed_name = flash_jit, "flash_forces"
 
     flash_ms = results.get("flash_forces", {}).get("mean_ms") if "flash_forces" in results else None
-    speedup = (results["autodiff_forces"]["mean_ms"] / flash_ms) if flash_ms else None
+    autodiff_ms = results.get("autodiff_forces", {}).get("mean_ms") if "autodiff_forces" in results else None
+    energy_ms = results.get("energy_only", {}).get("mean_ms") if "energy_only" in results else None
+    speedup = (autodiff_ms / flash_ms) if (autodiff_ms and flash_ms) else None
     if speedup is not None:
         log.info("Flash speedup over autodiff: %.3fx", speedup)
 
     summary = {
-        "mode": "bench",
+        "mode": args.mode,
         "protein": args.protein,
         **bundle_info,
-        "energy_only_ms": results["energy_only"]["mean_ms"],
-        "autodiff_forces_ms": results["autodiff_forces"]["mean_ms"],
+        "energy_only_ms": energy_ms,
+        "autodiff_forces_ms": autodiff_ms,
         "flash_forces_ms": flash_ms,
         "flash_speedup": speedup,
         "flash_error": flash_error,
+        "pme": args.pme,
+        "grid_spacing": grid_key,
         "raw_results": results,
     }
     text = json.dumps(summary, indent=2)
@@ -295,6 +382,16 @@ def main() -> int:
         args.out.parent.mkdir(parents=True, exist_ok=True)
         args.out.write_text(text)
         log.info("Wrote summary to %s", args.out)
+
+    scopes = None
+    extra_metrics: dict[str, float] = {}
+    if args.emit_record is not None and args.stage >= 2 and timed_fn is not None:
+        trace_dir = args.trace_dir or (args.emit_record.parent / f"{args.emit_record.stem}_trace")
+        scopes, extra_metrics = _capture_trace(timed_fn, trace_dir)
+        log.info("captured trace for %s under %s", timed_name, trace_dir)
+
+    backend = jax.default_backend()
+    platform = "gpu" if backend == "gpu" else "cpu"
     if args.emit_record is not None:
         _emit_probe_record(
             protein=args.protein,
@@ -306,6 +403,13 @@ def main() -> int:
             n_inner=args.n_inner,
             results=results,
             path=args.emit_record,
+            force_mode=args.mode,
+            pme=args.pme,
+            grid_spacing=grid_key,
+            scopes_arm=args.scopes,
+            platform=platform,
+            scopes=scopes,
+            extra_metrics=extra_metrics or None,
         )
     return 0
 
