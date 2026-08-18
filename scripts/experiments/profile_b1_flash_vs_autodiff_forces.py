@@ -33,11 +33,13 @@ Usage::
     # L1 dry-run (shapes only, no GPU)
     uv run python scripts/experiments/profile_b1_flash_vs_autodiff_forces.py --dry-run --protein 1vii
 
-    # L2 local CPU smoke
+    # L2 local CPU smoke (P6: --n-trials 3, emit a stage=1 ProbeRecord)
     JAX_PLATFORMS=cpu uv run python scripts/experiments/profile_b1_flash_vs_autodiff_forces.py \\
-        --protein 1vii --n-warmup 1 --n-trials 2 --n-inner 1 --out /tmp/smoke.json
+        --protein 1vii --n-warmup 1 --n-trials 3 --n-inner 1 --stage 1 \\
+        --emit-record outputs/profiling/p6/1vii/record.json \\
+        --out outputs/profiling/p6/1vii/summary.json
 
-    # L3 cluster (via bth run, see campaign 32d6574e)
+    # L3 cluster (via bth run, see campaign 32d6574e; P7 passes --stage 2 on GPU)
 """
 
 from __future__ import annotations
@@ -119,6 +121,61 @@ def bench(fn, name, n_warmup=3, n_trials=20, n_inner=5):
     return {"mean_ms": avg, "std_ms": std, "min_ms": mn}
 
 
+def _emit_probe_record(
+    *,
+    protein: str,
+    stage: int,
+    n_real: int,
+    n_padded: int,
+    n_warmup: int,
+    n_trials: int,
+    n_inner: int,
+    results: dict,
+    path: Path,
+) -> None:
+    """Write a ProbeRecord. CPU smoke is stage=1; stage>=2 requires GPU."""
+    if str(ROOT) not in sys.path:
+        sys.path.insert(0, str(ROOT))
+    from scripts.profiling.record import ProbeRecord
+
+    ad_s = results["autodiff_forces"]["mean_ms"] / 1000.0
+    flash_s = (
+        results["flash_forces"]["mean_ms"] / 1000.0
+        if "flash_forces" in results
+        else None
+    )
+    metrics = {
+        "energy_only_ms": results["energy_only"]["mean_ms"],
+        "autodiff_forces_ms": results["autodiff_forces"]["mean_ms"],
+        "total_step_seconds": max(
+            [ad_s] + ([flash_s] if flash_s is not None else [])
+        ),
+    }
+    if flash_s is not None:
+        metrics["flash_forces_ms"] = results["flash_forces"]["mean_ms"]
+        metrics["flash_speedup"] = (
+            results["autodiff_forces"]["mean_ms"] / results["flash_forces"]["mean_ms"]
+        )
+
+    record = ProbeRecord(
+        probe_id=f"p6_cpu_{protein}",
+        stage=stage,
+        n_atoms=n_real,
+        platform="cpu",
+        metrics=metrics,
+        config={
+            "protein": protein,
+            "n_padded_atoms": str(n_padded),
+            "n_warmup": str(n_warmup),
+            "n_trials": str(n_trials),
+            "n_inner": str(n_inner),
+            "role": "p6-cpu-smoke-not-citable",
+        },
+    )
+    record.write(path)
+    log.info("Wrote ProbeRecord to %s", path)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         description="Measure single_padded_energy+jax.grad vs single_padded_force(use_flash=True) wall-clock"
@@ -129,6 +186,18 @@ def main() -> int:
     parser.add_argument("--n-trials", type=int, default=20)
     parser.add_argument("--n-inner", type=int, default=5)
     parser.add_argument("--out", type=Path, default=None)
+    parser.add_argument(
+        "--stage",
+        type=int,
+        default=1,
+        help="ProbeRecord.stage (default 1 for CPU smoke; P7 passes 2 on GPU)",
+    )
+    parser.add_argument(
+        "--emit-record",
+        type=Path,
+        default=None,
+        help="Write a ProbeRecord JSON to this path after the timing loop",
+    )
     args = parser.parse_args()
 
     import jax
@@ -226,6 +295,18 @@ def main() -> int:
         args.out.parent.mkdir(parents=True, exist_ok=True)
         args.out.write_text(text)
         log.info("Wrote summary to %s", args.out)
+    if args.emit_record is not None:
+        _emit_probe_record(
+            protein=args.protein,
+            stage=args.stage,
+            n_real=n_real,
+            n_padded=n_padded,
+            n_warmup=args.n_warmup,
+            n_trials=args.n_trials,
+            n_inner=args.n_inner,
+            results=results,
+            path=args.emit_record,
+        )
     return 0
 
 
