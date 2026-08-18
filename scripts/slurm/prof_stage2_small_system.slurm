@@ -1,6 +1,6 @@
 #!/bin/bash
 #SBATCH --job-name=prolix_p7_stage2
-#SBATCH --partition=pi_so3,mit_normal_gpu
+#SBATCH --partition=pi_so3
 #SBATCH --gres=gpu:h200:1
 #SBATCH --time=00:15:00
 #SBATCH --nodes=1
