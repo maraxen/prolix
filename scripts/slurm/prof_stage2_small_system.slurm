@@ -40,7 +40,8 @@
 #
 # Submit from worktree:
 #   myxcel submit engaging prolix scripts/slurm/prof_stage2_small_system.slurm \
-#     --array 0-11%<k> --export=ALL,CAMPAIGN_ID=450f3583-c8dd-43f7-a59f-0642810746a5
+#   myxcel submit ... --sbatch-arg chdir=/home/maarxaru/projects/.worktrees/prolix/wt-20260807-132628
+#   (myxcel sbatch cwd is $HOME; without chdir, SLURM_SUBMIT_DIR misses _bth_env.sh)
 
 set -euo pipefail
 
