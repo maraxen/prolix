@@ -116,7 +116,12 @@ echo "GPU: $(nvidia-smi --query-gpu=name,memory.total --format=csv,noheader 2>&1
 echo "Campaign: ${CAMPAIGN_ID:-<none>}"
 echo "Date: $(date -Is)"
 
+# Cluster bathos.db cannot create/show the local campaign UUID (schema is
+# missing campaigns.negative_check; bth sync push failed rsync 11). Passing
+# --campaign 450f3583 killed tasks in ~30s. Omitting --campaign would attach
+# to the frozen sidecar campaign 32d6574e. --no-sidecar + tags only.
 uv run bth run python scripts/experiments/profile_b1_flash_vs_autodiff_forces.py \
+    --no-sidecar \
     --tag p7-stage2 \
     --tag "array_task:${T}" \
     --tag "protein:${PROTEIN}" \

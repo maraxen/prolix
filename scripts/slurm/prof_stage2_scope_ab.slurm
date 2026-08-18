@@ -61,6 +61,7 @@ echo "GPU: $(nvidia-smi --query-gpu=name,memory.total --format=csv,noheader 2>&1
 echo "Date: $(date -Is)"
 
 uv run bth run python scripts/experiments/prof_stage2_scope_ab.py \
+    --no-sidecar \
     --tag p7-stage2 --tag scope-ab \
     "${CAMPAIGN_FLAG[@]}" \
     --out outputs/profiling/stage2/scope_ab/summary.json \
