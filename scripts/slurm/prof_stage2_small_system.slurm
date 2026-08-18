@@ -44,8 +44,29 @@
 
 set -euo pipefail
 
-_PROJ="${SLURM_SUBMIT_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
+# myxcel sbatch cwd is $HOME, so SLURM_SUBMIT_DIR is not the repo.
+# Spool copy means BASH_SOURCE is /var/spool/slurmd/job*/slurm_script.
+_locate_root() {
+    local cand
+    for cand in \
+        "${PWD}" \
+        "${SLURM_SUBMIT_DIR:-}" \
+        "${HOME}/projects/.worktrees/prolix/wt-20260807-132628" \
+        "${HOME}/projects/prolix"
+    do
+        if [[ -n "${cand}" && -f "${cand}/scripts/slurm/_bth_env.sh" ]]; then
+            echo "${cand}"
+            return 0
+        fi
+    done
+    return 1
+}
+_PROJ="$(_locate_root)" || {
+    echo "ERROR: cannot locate prolix root (PWD=${PWD} SUBMIT_DIR=${SLURM_SUBMIT_DIR:-unset})" >&2
+    exit 1
+}
 cd "${_PROJ}"
+echo "P7 cwd=${_PROJ}"
 
 source "scripts/slurm/_bth_env.sh"
 
