@@ -201,9 +201,11 @@ def _emit_probe_record(
 
     attribution = None
     if scopes is not None:
+        # Keep {} when every scope value is None (missing labels). `or None`
+        # made ProbeRecord reject the record (cluster 20762713).
         attribution = {
             label: "named_scope" for label, value in scopes.items() if value is not None
-        } or None
+        }
 
     record_mode = force_mode if force_mode in ("dense", "flash") else "both"
     probe_id = f"stage{stage}_{protein}_{record_mode}_pme{pme}_g{grid_spacing}_sc{scopes_arm}"
