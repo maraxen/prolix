@@ -80,15 +80,18 @@ def _load_and_solvate(protein_key: str):
 
 
 def _apply_pme_config(sys_obj, pme: str, grid_spacing: float):
-    import numpy as np
-    import equinox as eqx
+    import dataclasses
 
+    import numpy as np
+
+    # pme_alpha / pme_grid_points are eqx.field(static=True) on PhysicsSystem,
+    # so eqx.tree_at cannot replace them (cluster 20707425).
     mean_l = float(np.mean(np.asarray(sys_obj.box_size)))
     if pme == "off":
-        sys_obj = eqx.tree_at(lambda s: s.pme_alpha, sys_obj, 0.0)
+        sys_obj = dataclasses.replace(sys_obj, pme_alpha=0.0)
         return sys_obj, "na"
     ngrid = max(int(math.ceil(mean_l / float(grid_spacing))), 1)
-    sys_obj = eqx.tree_at(lambda s: s.pme_grid_points, sys_obj, ngrid)
+    sys_obj = dataclasses.replace(sys_obj, pme_grid_points=ngrid)
     return sys_obj, str(grid_spacing)
 
 

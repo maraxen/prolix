@@ -50,7 +50,6 @@ echo "Date: $(date -Is)"
 
 uv run bth run python scripts/experiments/prof_stage2_coverage.py \
     --tag p7-stage2 --tag coverage \
-    "${CAMPAIGN_FLAG[@]}" \
     --out outputs/profiling/stage2/coverage.json \
     -- \
     --records-dir outputs/profiling/stage2 \
