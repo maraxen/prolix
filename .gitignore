@@ -39,6 +39,7 @@ results/
 
 # Bathos per-run lock artifacts (ephemeral, regenerated per bth run; never tracked)
 *.bth.lock.toml
+.git_sha
 
 # Claude Code worktrees (ephemeral per-session)
 .claude/worktrees/

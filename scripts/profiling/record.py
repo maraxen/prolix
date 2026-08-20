@@ -34,7 +34,18 @@ def _capture_git_sha() -> str:
     check trivially "agree" under the unanimity guard. claims.py rejects
     "unknown" and both suffixes outright for TERM_RANKING/END_TO_END
     sources.
+
+    Cluster myxcel scratch dirs have no .git. Honor PROLIX_GIT_SHA, then a
+    repo-root `.git_sha` file (written at submit/push), then `git rev-parse`.
     """
+    env = (os.environ.get("PROLIX_GIT_SHA") or "").strip()
+    if env:
+        return env
+    sha_file = _REPO_ROOT / ".git_sha"
+    if sha_file.is_file():
+        stamped = sha_file.read_text().strip().split()[0]
+        if stamped:
+            return stamped
     try:
         sha = subprocess.check_output(
             ["git", "rev-parse", "HEAD"], cwd=_REPO_ROOT, text=True, stderr=subprocess.DEVNULL
@@ -308,6 +319,18 @@ class ProbeRecord:
         path = Path(path)
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(self.to_json())
+
+    @classmethod
+    def restamp_git_sha(cls, path: str | Path, sha: str) -> "ProbeRecord":
+        """Rewrite git_sha on a stored record (cluster scratch has no .git)."""
+        path = Path(path)
+        raw = json.loads(path.read_text())
+        if not isinstance(raw, dict):
+            raise ClaimValidityError("ProbeRecord JSON must decode to an object")
+        raw["git_sha"] = sha
+        rec = cls.from_json(json.dumps(raw))
+        rec.write(path)
+        return rec
 
     @classmethod
     def read(cls, path: str | Path) -> "ProbeRecord":

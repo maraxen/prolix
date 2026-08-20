@@ -39,6 +39,15 @@ _PROJ="$(_locate_root)" || {
 }
 cd "${_PROJ}"
 echo "P7 cwd=${_PROJ}"
+if [[ -z "${PROLIX_GIT_SHA:-}" && -f "${_PROJ}/.git_sha" ]]; then
+    PROLIX_GIT_SHA="$(head -1 "${_PROJ}/.git_sha" | tr -d '[:space:]')"
+    export PROLIX_GIT_SHA
+fi
+if [[ -z "${PROLIX_GIT_SHA:-}" ]]; then
+    PROLIX_GIT_SHA="$(git -C "${_PROJ}" rev-parse HEAD 2>/dev/null || true)"
+    export PROLIX_GIT_SHA
+fi
+echo "PROLIX_GIT_SHA=${PROLIX_GIT_SHA:-unset}"
 source "scripts/slurm/_bth_env.sh"
 
 _NODE="${SLURM_JOB_NODELIST:-$(hostname -s)}"

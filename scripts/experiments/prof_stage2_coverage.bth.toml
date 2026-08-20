@@ -26,6 +26,7 @@ is_residual = true
 n_configs_with_valid_dense_flash_pair = "int"
 n_records = "int"
 n_catalog_ok = "int"
+n_record_dense_flash_pair = "int"
 cell_1vii_pmeoff_gna = "int"
 cell_1vii_pmeon_g1p0 = "int"
 cell_1vii_pmeon_g1p2 = "int"

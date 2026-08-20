@@ -82,28 +82,43 @@ def _decode_array_task(task_id: int) -> tuple[tuple[str, str, str], str] | None:
 
 
 def _cell_mode_from_tags(tags) -> tuple[tuple[str, str, str], str] | None:
+    import re
+
+    if tags is None:
+        return None
     if isinstance(tags, list):
-        tag_list = [str(t) for t in tags]
+        blob = " ".join(str(t) for t in tags)
     else:
-        tag_list = [p.strip() for p in str(tags).replace(",", " ").split() if p.strip()]
-    task = None
-    protein = pme = grid = mode = None
-    for tag in tag_list:
-        if tag.startswith("array_task:"):
+        text = str(tags).strip()
+        if text.startswith("["):
             try:
-                task = int(tag.split(":", 1)[1])
-            except ValueError:
-                continue
-        elif tag.startswith("protein:"):
-            protein = tag.split(":", 1)[1]
-        elif tag.startswith("mode:"):
-            mode = tag.split(":", 1)[1]
-        elif tag.startswith("pme:"):
-            pme = tag.split(":", 1)[1]
-        elif tag.startswith("grid:"):
-            grid = tag.split(":", 1)[1]
-    if task is not None:
-        return _decode_array_task(task)
+                parsed = json.loads(text.replace("'", '"'))
+                if isinstance(parsed, list):
+                    blob = " ".join(str(t) for t in parsed)
+                else:
+                    blob = text
+            except json.JSONDecodeError:
+                blob = text
+        else:
+            blob = text
+    m_task = re.search(r"array_task:(\d+)", blob)
+    if m_task:
+        decoded = _decode_array_task(int(m_task.group(1)))
+        if decoded is not None:
+            return decoded
+    protein = pme = grid = mode = None
+    m = re.search(r"protein:([^\s,\]\"]+)", blob)
+    if m:
+        protein = m.group(1)
+    m = re.search(r"mode:([^\s,\]\"]+)", blob)
+    if m:
+        mode = m.group(1)
+    m = re.search(r"pme:([^\s,\]\"]+)", blob)
+    if m:
+        pme = m.group(1)
+    m = re.search(r"grid:([^\s,\]\"]+)", blob)
+    if m:
+        grid = m.group(1)
     if protein and mode in ("dense", "flash") and pme and grid:
         return (protein, pme, grid), mode
     return None
@@ -175,6 +190,13 @@ def main(argv: list[str] | None = None) -> int:
         if rec.config["mode"] == "flash" and "flash_speedup" in rec.metrics:
             speedups[f"flash_speedup_{key[0]}_pme{key[1]}_g{key[2]}"] = rec.metrics["flash_speedup"]
 
+    n_record_pairs = sum(1 for c in CELLS if by_cell[c] >= {"dense", "flash"})
+    if not any(ok_modes_by_cell.values()) and n_record_pairs > 0:
+        # Cluster 20792000: 12 records + catalog ok rows, but tags did not
+        # decode into cells. --no-sidecar GPU runs also yield an empty local
+        # catalog after pull. Successful ProbeRecords are exit-0 for this sweep.
+        ok_modes_by_cell = {c: set(by_cell[c]) for c in CELLS}
+
     def _slug(cell: tuple[str, str, str]) -> str:
         protein, pme, grid = cell
         return f"cell_{protein}_pme{pme}_g{grid.replace('.', 'p')}"
@@ -192,6 +214,7 @@ def main(argv: list[str] | None = None) -> int:
 
     summary = {
         "n_configs_with_valid_dense_flash_pair": n_ok,
+        "n_record_dense_flash_pair": n_record_pairs,
         "n_records": len(records),
         "n_catalog_ok": n_catalog_ok,
         **{k: int(v) for k, v in cell_ok.items()},
