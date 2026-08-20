@@ -17,7 +17,11 @@ then copied from
 `outputs/profiling/b1_water_trace_local/plugins/profile/<timestamp>/*.trace.json.gz`
 (646 KB, under the 1 MB budget the reduced `--replicas`/`--n-steps` params
 exist to keep it under -- the script's own defaults, `--replicas 16
---n-steps 50 --n-trials 5`, do not fit).
+`--n-steps 50 --n-trials 5`, do not fit).
+
+`records/*.json` -- committed ProbeRecord fixtures for P8 (`test_report.py`).
+Generated only via `ProbeRecord.write` (never hand-authored JSON). Round-trip
+is asserted in `test_every_committed_fixture_roundtrips_probe_record_read`.
 
 The matching compiled-HLO text (needed to build the thunk-name -> scope-path
 map `scripts/profiling/trace.py`'s parser requires) is NOT committed here --
