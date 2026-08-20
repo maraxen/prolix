@@ -2311,7 +2311,7 @@ requires-dist = [
     { name = "sphinx-design", marker = "extra == 'docs'" },
     { name = "sphinxext-rediraffe", marker = "extra == 'docs'" },
     { name = "ty", marker = "extra == 'dev'" },
-    { name = "xtrax", specifier = ">=0.4.0a5,<0.5" },
+    { name = "xtrax", specifier = ">=0.4.0a6,<0.5" },
 ]
 provides-extras = ["cuda", "tpu", "cpu", "dev", "openmm", "docs", "viz", "wasm"]
 
@@ -3436,7 +3436,7 @@ wheels = [
 
 [[package]]
 name = "xtrax"
-version = "0.4.0a5"
+version = "0.4.0a6"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "equinox" },
@@ -3448,9 +3448,9 @@ dependencies = [
     { name = "orbax-checkpoint" },
     { name = "pytest-asyncio" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/fb/2a/db1f77d3b68d68fd171ecfc7096a12b82bce5b38c2c91bbde9abbb94b7ab/xtrax-0.4.0a5.tar.gz", hash = "sha256:b1a36258836b10049b3637c110cb03b20412b974bfab93026bb7a81ffce3d8cf", size = 998632, upload-time = "2026-07-08T14:35:48.63Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/e0/b5/c26c475c470805bb59c9c5fc020db9fd0fbdf90443bf76a2b1ac18236090/xtrax-0.4.0a6.tar.gz", hash = "sha256:fdafa1f5d3c95f07fcc67f453db0ce5185ca9086960f1eb61e37f4c45e898180", size = 1586436, upload-time = "2026-08-20T15:56:37.991Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/c0/c1/5569fb8debe16da08b90f0e52c4f6167a78b27957c9dd12312fb01e8024c/xtrax-0.4.0a5-py3-none-any.whl", hash = "sha256:8206480b54f82c933175f0c24cf6b82fcf32a369b4094f0a90e518496788aa20", size = 125561, upload-time = "2026-07-08T14:35:47.135Z" },
+    { url = "https://files.pythonhosted.org/packages/29/5c/754b2d713abeabb3a19db9d31d36edce0c9b90a28a4126f72d735fc341af/xtrax-0.4.0a6-py3-none-any.whl", hash = "sha256:a5d0f696dbba80523bdad4915e60b201dd58d4f90f027065be81d4879f8707f6", size = 258145, upload-time = "2026-08-20T15:56:36.562Z" },
 ]
 
 [[package]]

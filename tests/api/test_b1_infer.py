@@ -164,6 +164,20 @@ def _make_minimal_bundle(n_atoms=3) -> MolecularBundle:
     )
 
 
+def test_dispatch_n_steps_inference_uses_xtrax_while_carry():
+    """Inference N_STEPS goes through xtrax WhileCarry, not a hand-rolled loop."""
+    import inspect
+
+    from xtrax.tiling.strategy import WhileCarry
+
+    from prolix.api import ensemble_dispatch as m
+
+    assert WhileCarry is not None
+    src = inspect.getsource(m.dispatch_n_steps_inference)
+    assert "WhileCarry" in src
+    assert "make_axis_dispatch" in src
+    assert "lax.while_loop" not in src
+
 
 def test_dispatch_n_steps_inference_matches_scan_final():
     """while_loop final carry agrees with scan final position (atol)."""
