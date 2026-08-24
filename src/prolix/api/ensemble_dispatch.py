@@ -1,7 +1,7 @@
 """Axis dispatch via xtrax make_axis_dispatch (#2645 / XR-DISPATCH / XR-DISPATCH-MULTI / XR-CARRY).
 
 N_MOLS (MVP 2A): ``Vmap`` / ``SafeMap`` only via ``dispatch_n_mols``.
-N_ATOMS (XR-DISPATCH-MULTI): same Vmap/SafeMap policy via ``dispatch_n_atoms``.
+N_WATERS (SETTLE): ``dispatch_n_waters`` Vmap/SafeMap over rigid waters.
 ``Bucket``, ``DedupGather``, and ``Scan`` on mapped axes raise — Scan belongs on
 the step axis (XR-CARRY); ``DedupGather`` executes via
 ``prolix.api.ensemble_dedup.dispatch_n_mols_dedup`` for **topology-keyed**
@@ -24,6 +24,7 @@ import jax.numpy as jnp
 from xtrax.tiling.dispatch import DispatchRejected, make_axis_dispatch
 from xtrax.tiling.strategy import Bucket, DedupGather, SafeMap, Scan, Vmap, WhileCarry
 
+from prolix.tiling.axis_dispatch import dispatch_n_waters, n_waters_strategy
 from prolix.tiling.axes import N_ATOMS, N_MOLS, N_STEPS
 from prolix.tiling.planner import BatchPlan
 
@@ -33,9 +34,11 @@ __all__ = [
     "dispatch_n_mols",
     "dispatch_n_steps",
     "dispatch_n_steps_inference",
+    "dispatch_n_waters",
     "dispatch_vmap_safemap",
     "n_atoms_strategy",
     "n_mols_strategy",
+    "n_waters_strategy",
 ]
 
 

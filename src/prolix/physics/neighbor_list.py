@@ -158,13 +158,14 @@ def make_neighbor_list_fn(
   cutoff: float,
   capacity_multiplier: float = 1.25,
   disable_cell_list: bool = False,
+  dr_threshold: float = 0.5,
 ) -> Callable[..., partition.NeighborList]:
   """Creates a neighbor list function optimized for solvent systems."""
   return partition.neighbor_list(
     displacement_fn,
     box_size,
     r_cutoff=cutoff,
-    dr_threshold=0.5,  # buffer distance for updates
+    dr_threshold=dr_threshold,
     capacity_multiplier=capacity_multiplier,
     disable_cell_list=disable_cell_list,
     mask_self=True,
@@ -246,12 +247,18 @@ def map_exclusions_to_dense_padded(
 
   Args:
       exclusion_spec: Sparse exclusion data.
-      max_exclusions: Capacity per atom for excluded neighbors. If too small,
-          entries are truncated — compare :func:`max_exclusion_slots_needed` first.
+      max_exclusions: Capacity per atom for excluded neighbors. If any atom
+          needs more slots, this raises (no silent truncation).
 
   Returns:
       (excl_indices, excl_scales_vdw, excl_scales_elec) arrays.
   """
+  needed = max_exclusion_slots_needed(exclusion_spec)
+  if needed > int(max_exclusions):
+    raise ValueError(
+        f"exclusion topology needs {needed} slots per atom, "
+        f"max_exclusions={max_exclusions}"
+    )
   N = exclusion_spec.n_atoms
 
   # Initialize with -1 (invalid index)
@@ -362,6 +369,13 @@ def pair_list_to_dense_padded(
       atom_excls[i].append((j, sv, se))
     if 0 <= j < n_atoms:
       atom_excls[j].append((i, sv, se))
+
+  max_needed = max((len(x) for x in atom_excls), default=0)
+  if max_needed > int(max_exclusions):
+    raise ValueError(
+        f"exclusion topology needs {max_needed} slots per atom, "
+        f"max_exclusions={max_exclusions}"
+    )
 
   excl_indices_np = np.full((n_atoms, max_exclusions), -1, dtype=np.int32)
   scales_vdw_np = np.ones((n_atoms, max_exclusions), dtype=np.float32)

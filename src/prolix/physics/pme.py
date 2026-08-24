@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import functools
+import os
 from typing import NamedTuple
 
 import jax
@@ -79,9 +80,91 @@ def compute_pme_grid_dims(
 # SPME Kernels
 # ===========================================================================
 
-def spread_charges(positions: jnp.ndarray, charges: jnp.ndarray, atom_mask: jnp.ndarray, box_size: jnp.ndarray, grid_dims: tuple[int, int, int], order: int = 4) -> jnp.ndarray:
-    """Spread charges onto FFT grid using B-spline interpolation."""
+def _bspline4_stencil(positions, charges, atom_mask, box_size, grid_dims, order: int = 4):
+    """Order-4 B-spline stencil: indices and weights with shape (N, order**3).
+
+    Shared by charge spread (scatter-add) and the custom VJP gather. ``order``
+    must be 4; modulation and the cubic basis are order-4 only.
+    """
+    if order != 4:
+        raise NotImplementedError("vectorized SPME stencil is order-4 only")
     Kx, Ky, Kz = grid_dims
+    work_dtype = positions.dtype
+    K_arr = jnp.array([Kx, Ky, Kz], dtype=work_dtype)
+    frac = (positions / box_size) * K_arr
+    grid_idx = jnp.floor(frac).astype(jnp.int32)
+    u = frac - grid_idx.astype(work_dtype)
+    wx = _bspline4(u[:, 0])
+    wy = _bspline4(u[:, 1])
+    wz = _bspline4(u[:, 2])
+    q = charges * atom_mask.astype(charges.dtype)
+    ox, oy, oz = jnp.meshgrid(
+        jnp.arange(order), jnp.arange(order), jnp.arange(order), indexing="ij"
+    )
+    ox = ox.reshape(-1)
+    oy = oy.reshape(-1)
+    oz = oz.reshape(-1)
+    ix = (grid_idx[:, None, 0] + ox[None, :] - 1) % Kx
+    iy = (grid_idx[:, None, 1] + oy[None, :] - 1) % Ky
+    iz = (grid_idx[:, None, 2] + oz[None, :] - 1) % Kz
+    w = (wx[ox] * wy[oy] * wz[oz] * q[None, :]).astype(work_dtype)
+    w = jnp.transpose(w, (1, 0))
+    return {
+        "ix": ix,
+        "iy": iy,
+        "iz": iz,
+        "w": w,
+        "wx": wx,
+        "wy": wy,
+        "wz": wz,
+        "ox": ox,
+        "oy": oy,
+        "oz": oz,
+        "q": q,
+        "u": u,
+        "K_arr": K_arr,
+        "work_dtype": work_dtype,
+    }
+
+
+def resolve_use_pallas_pme(explicit: bool | None = None) -> bool:
+    """Host-side opt-in (construction time). Never call inside a jitted body."""
+    if explicit is not None:
+        return bool(explicit)
+    return os.environ.get("PROLIX_USE_PALLAS_PME", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
+def _pallas_interpret() -> bool:
+    return jax.default_backend() != "gpu"
+
+
+def spread_charges(
+    positions: jnp.ndarray,
+    charges: jnp.ndarray,
+    atom_mask: jnp.ndarray,
+    box_size: jnp.ndarray,
+    grid_dims: tuple[int, int, int],
+    order: int = 4,
+    use_pallas_pme: bool = False,
+) -> jnp.ndarray:
+    """Spread charges onto FFT grid using B-spline interpolation."""
+    if use_pallas_pme:
+        from prolix.physics.pme_pallas import spread_charges_pallas
+
+        return spread_charges_pallas(
+            positions,
+            charges,
+            atom_mask,
+            box_size,
+            grid_dims,
+            order,
+            interpret=_pallas_interpret(),
+        )
     # Match positions' working precision rather than hardcoding float32 --
     # mixing a float32 grid with float64 positions/box_size works fine in the
     # forward pass (jnp operators auto-promote), but under jax.grad the
@@ -91,29 +174,10 @@ def spread_charges(positions: jnp.ndarray, charges: jnp.ndarray, atom_mask: jnp.
     # gradient call (flash_explicit_forces -> spme_reciprocal_energy) that
     # never previously executed successfully end-to-end (blocked upstream by
     # the eval_shape/box_size bug this benchmark redesign also fixed).
-    work_dtype = positions.dtype
-    K_arr = jnp.array([Kx, Ky, Kz], dtype=work_dtype)
-
-    # Fractional coordinates in [0, K)
-    frac = (positions / box_size) * K_arr
-    grid_idx = jnp.floor(frac).astype(jnp.int32)
-    u = frac - grid_idx.astype(work_dtype)
-
-    # w shape: (order, N_atoms)
-    wx = _bspline4(u[:, 0]); wy = _bspline4(u[:, 1]); wz = _bspline4(u[:, 2])
-
-    Q = jnp.zeros(grid_dims, dtype=work_dtype)
-    q = charges * atom_mask.astype(charges.dtype)
-
+    st = _bspline4_stencil(positions, charges, atom_mask, box_size, grid_dims, order)
+    Q = jnp.zeros(grid_dims, dtype=st["work_dtype"])
     with jax.named_scope("pme_charge_spread"):
-        for dx in range(order):
-            for dy in range(order):
-                for dz in range(order):
-                    ix = (grid_idx[:, 0] + dx - 1) % Kx
-                    iy = (grid_idx[:, 1] + dy - 1) % Ky
-                    iz = (grid_idx[:, 2] + dz - 1) % Kz
-                    w = (wx[dx] * wy[dy] * wz[dz] * q).astype(Q.dtype)
-                    Q = Q.at[ix, iy, iz].add(w)
+        Q = Q.at[st["ix"], st["iy"], st["iz"]].add(st["w"])
     return Q
 
 
@@ -153,8 +217,19 @@ def _bspline_modulation(freq_frac: jnp.ndarray, K: int, order: int) -> jnp.ndarr
     )
 
 
-def spme_reciprocal_energy(positions: jnp.ndarray, charges: jnp.ndarray, atom_mask: jnp.ndarray, box_size: jnp.ndarray, grid_dims: tuple[int, int, int], alpha: float = 0.34, order: int = 4) -> jnp.ndarray:
-    Q = spread_charges(positions, charges, atom_mask, box_size, grid_dims, order)
+def spme_reciprocal_energy(
+    positions: jnp.ndarray,
+    charges: jnp.ndarray,
+    atom_mask: jnp.ndarray,
+    box_size: jnp.ndarray,
+    grid_dims: tuple[int, int, int],
+    alpha: float = 0.34,
+    order: int = 4,
+    use_pallas_pme: bool = False,
+) -> jnp.ndarray:
+    Q = spread_charges(
+        positions, charges, atom_mask, box_size, grid_dims, order, use_pallas_pme
+    )
     Q_hat = jnp.fft.rfftn(Q)
     G = influence_function(grid_dims, box_size, alpha, order)
     theta = jnp.fft.irfftn(Q_hat * G, s=grid_dims)
@@ -173,14 +248,37 @@ def spme_background_energy(charges: jnp.ndarray, atom_mask: jnp.ndarray, alpha: 
     return -jnp.pi * Q**2 / (2.0 * alpha**2 * V) * COULOMB_CONSTANT
 
 
-@functools.partial(jax.custom_vjp, nondiff_argnums=(3, 4, 5, 6))
-def spme_energy_with_forces(positions: jnp.ndarray, charges: jnp.ndarray, atom_mask: jnp.ndarray, box_size: jnp.ndarray, grid_dims: tuple[int, int, int], alpha: float, order: int) -> jnp.ndarray:
-    return spme_reciprocal_energy(positions, charges, atom_mask, box_size, grid_dims, alpha, order) + spme_self_energy(charges, atom_mask, alpha)
+@functools.partial(jax.custom_vjp, nondiff_argnums=(3, 4, 5, 6, 7))
+def spme_energy_with_forces(
+    positions: jnp.ndarray,
+    charges: jnp.ndarray,
+    atom_mask: jnp.ndarray,
+    box_size: jnp.ndarray,
+    grid_dims: tuple[int, int, int],
+    alpha: float,
+    order: int,
+    use_pallas_pme: bool = False,
+) -> jnp.ndarray:
+    return (
+        spme_reciprocal_energy(
+            positions,
+            charges,
+            atom_mask,
+            box_size,
+            grid_dims,
+            alpha,
+            order,
+            use_pallas_pme,
+        )
+        + spme_self_energy(charges, atom_mask, alpha)
+    )
 
 
-def _spme_fwd(positions, charges, atom_mask, box_size, grid_dims, alpha, order):
+def _spme_fwd(positions, charges, atom_mask, box_size, grid_dims, alpha, order, use_pallas_pme):
     Kx, Ky, Kz = grid_dims
-    Q = spread_charges(positions, charges, atom_mask, box_size, grid_dims, order)
+    Q = spread_charges(
+        positions, charges, atom_mask, box_size, grid_dims, order, use_pallas_pme
+    )
     with jax.named_scope("pme_fft_forward"):
         Q_hat = jnp.fft.rfftn(Q)
 
@@ -217,8 +315,7 @@ def _spme_fwd(positions, charges, atom_mask, box_size, grid_dims, alpha, order):
     return e_recip + e_self, (positions, charges, atom_mask, theta_norm)
 
 
-def _spme_bwd(box_size, grid_dims, alpha, order, residuals, g):
-    Kx, Ky, Kz = grid_dims
+def _spme_bwd(box_size, grid_dims, alpha, order, use_pallas_pme, residuals, g):
     positions, charges, atom_mask, theta_norm = residuals
     # debt 832: dtype follows positions (the ambient float precision -- float32
     # normally, float64 under jax_enable_x64) rather than hardcoding float32.
@@ -229,36 +326,43 @@ def _spme_bwd(box_size, grid_dims, alpha, order, residuals, g):
     # auto-promote), and this backward pass's internals stayed float32
     # regardless of the actual (float64-under-x64) primal dtype.
     dtype = positions.dtype
-    K_arr = jnp.array([Kx, Ky, Kz], dtype=dtype)
-    frac = positions / box_size * K_arr
-    grid_idx = jnp.floor(frac).astype(jnp.int32)
-    u = frac - grid_idx.astype(dtype)
+    if use_pallas_pme:
+        from prolix.physics.pme_pallas import gather_pallas
 
-    wx = _bspline4(u[:, 0]); wy = _bspline4(u[:, 1]); wz = _bspline4(u[:, 2])
-    dwx = _bspline4_deriv(u[:, 0]); dwy = _bspline4_deriv(u[:, 1]); dwz = _bspline4_deriv(u[:, 2])
+        with jax.named_scope("pme_bwd_gather"):
+            forces, potentials = gather_pallas(
+                positions,
+                charges,
+                atom_mask,
+                box_size,
+                theta_norm,
+                grid_dims,
+                order,
+                interpret=_pallas_interpret(),
+            )
+    else:
+        st = _bspline4_stencil(positions, charges, atom_mask, box_size, grid_dims, order)
+        K_arr = st["K_arr"]
+        wx, wy, wz = st["wx"], st["wy"], st["wz"]
+        ox, oy, oz = st["ox"], st["oy"], st["oz"]
+        u = st["u"]
+        dwx = _bspline4_deriv(u[:, 0])
+        dwy = _bspline4_deriv(u[:, 1])
+        dwz = _bspline4_deriv(u[:, 2])
+        q_masked = st["q"].astype(dtype)
 
-    q_masked = charges * atom_mask.astype(dtype)
-    forces = jnp.zeros((positions.shape[0], 3), dtype=dtype)
-    potentials = jnp.zeros(positions.shape[0], dtype=dtype)
-
-    with jax.named_scope("pme_bwd_gather"):
-        for dx in range(order):
-            for dy in range(order):
-                for dz in range(order):
-                    ix = (grid_idx[:, 0] + dx - 1) % Kx
-                    iy = (grid_idx[:, 1] + dy - 1) % Ky
-                    iz = (grid_idx[:, 2] + dz - 1) % Kz
-                    t_val = theta_norm[ix, iy, iz]
-
-                    # Potential for charge gradient
-                    w = wx[dx] * wy[dy] * wz[dz]
-                    potentials = potentials + w * t_val
-
-                    # Forces for position gradient
-                    fx = q_masked * (K_arr[0] / box_size[0]) * dwx[dx] * wy[dy] * wz[dz] * t_val
-                    fy = q_masked * (K_arr[1] / box_size[1]) * wx[dx] * dwy[dy] * wz[dz] * t_val
-                    fz = q_masked * (K_arr[2] / box_size[2]) * wx[dx] * wy[dy] * dwz[dz] * t_val
-                    forces = forces + jnp.stack([fx, fy, fz], axis=-1)
+        with jax.named_scope("pme_bwd_gather"):
+            t_val = theta_norm[st["ix"], st["iy"], st["iz"]]
+            w_unit = jnp.transpose(wx[ox] * wy[oy] * wz[oz], (1, 0))
+            potentials = jnp.sum(w_unit * t_val, axis=1)
+            scale = K_arr / box_size
+            fx = q_masked[:, None] * scale[0] * jnp.transpose(dwx[ox] * wy[oy] * wz[oz], (1, 0)) * t_val
+            fy = q_masked[:, None] * scale[1] * jnp.transpose(wx[ox] * dwy[oy] * wz[oz], (1, 0)) * t_val
+            fz = q_masked[:, None] * scale[2] * jnp.transpose(wx[ox] * wy[oy] * dwz[oz], (1, 0)) * t_val
+            forces = jnp.stack(
+                [jnp.sum(fx, axis=1), jnp.sum(fy, axis=1), jnp.sum(fz, axis=1)],
+                axis=-1,
+            )
 
     # 1. Position gradient
     dE_dpos = COULOMB_CONSTANT * forces * g
@@ -289,9 +393,18 @@ def _spme_bwd(box_size, grid_dims, alpha, order, residuals, g):
 
 spme_energy_with_forces.defvjp(_spme_fwd, _spme_bwd)
 
-def make_spme_energy_fn(box_size: jnp.ndarray, alpha: float = 0.34, grid_spacing: float = 1.0, order: int = 4):
+def make_spme_energy_fn(
+    box_size: jnp.ndarray,
+    alpha: float = 0.34,
+    grid_spacing: float = 1.0,
+    order: int = 4,
+    use_pallas_pme: bool | None = None,
+):
     grid_dims = compute_pme_grid_dims(box_size, grid_spacing)
-    return lambda positions, charges, atom_mask: spme_energy_with_forces(positions, charges, atom_mask, box_size, grid_dims, alpha, order)
+    pallas = resolve_use_pallas_pme(use_pallas_pme)
+    return lambda positions, charges, atom_mask: spme_energy_with_forces(
+        positions, charges, atom_mask, box_size, grid_dims, alpha, order, pallas
+    )
 
 def make_pme_energy_fn(charges: jnp.ndarray, box_size: jnp.ndarray, *, grid_points: int = 64, alpha: float = 0.34, order: int = 4):
     charges, box_size = jnp.asarray(charges), jnp.asarray(box_size)

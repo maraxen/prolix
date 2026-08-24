@@ -482,6 +482,7 @@ def _pme_reciprocal_and_corrections(
         box_size=box_arr,
         alpha=float(sys.pme_alpha),
         grid_spacing=grid_spacing,
+        use_pallas_pme=None,
     )
     e_elec = e_elec + pme_recip_fn(r, sys.charges, sys.atom_mask)
     e_elec = e_elec + spme_background_energy(
@@ -530,7 +531,7 @@ def _pme_reciprocal_and_corrections(
     return e_elec, e_lj
 
 
-def single_padded_energy(sys: PaddedSystem, displacement_fn: space.DisplacementFn, implicit_solvent: bool = True, soft_core_lambda: Array = jnp.array(1.0), neighbor: Any = None) -> Array:
+def single_padded_energy(sys: PaddedSystem, displacement_fn: space.DisplacementFn, implicit_solvent: bool = True, soft_core_lambda: Array = jnp.array(1.0), neighbor: Any = None, lj_switch_width: float = 0.0) -> Array:
     """Computes total potential energy for a single padded system.
 
     This is the public API for computing energy of one PaddedSystem.
@@ -645,6 +646,7 @@ def single_padded_energy(sys: PaddedSystem, displacement_fn: space.DisplacementF
         e_lj = chunked_lj_energy_nl(
             r, sys.sigmas, sys.epsilons, sys.excl_indices, sys.excl_scales_vdw,
             nb_idx, displacement_fn, float(sys.nonbonded_cutoff), 128,
+            float(lj_switch_width),
         )
         e_elec = chunked_coulomb_energy_nl(
             r, sys.charges, sys.excl_indices, sys.excl_scales_elec,
@@ -743,6 +745,8 @@ def single_padded_force(
     explicit_solvent: bool = False,
     soft_core_lambda: Array = jnp.array(1.0),
     use_flash: bool = True,
+    flash_tile_size: int = 256,
+    flash_remat: bool = True,
 ) -> Array:
     """Compute forces for a padded system.
 
@@ -806,12 +810,15 @@ def single_padded_force(
             from prolix.physics.flash_explicit import flash_explicit_forces
             f_nonbonded = flash_explicit_forces(
                 sys,
+                T=flash_tile_size,
                 soft_core_lambda=soft_core_lambda,
+                remat=flash_remat,
             )
         else:
             from prolix.physics.flash_nonbonded import flash_nonbonded_forces
             f_nonbonded = flash_nonbonded_forces(
                 sys,
+                T=flash_tile_size,
                 soft_core_lambda=soft_core_lambda,
             )
         total_force = (bonded_force + f_nonbonded) * sys.atom_mask[:, None]

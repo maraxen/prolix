@@ -217,6 +217,37 @@ def parse_scopes(
     return {label: (seconds, count) for label, (seconds, count) in totals.items()}
 
 
+def parse_hlo_op_times(
+    trace_events: list[dict[str, Any]],
+) -> dict[str, tuple[float, int]]:
+    """Attribute executed wall-clock time to every ``hlo_op``, not known labels.
+
+    Same event filter as ``parse_scopes`` (complete ``X`` events, skip
+    ``end: `` bookkeeping, require ``args["hlo_op"]``). Use this when
+    named_scope recovery is a few percent of host ``total_step_seconds``:
+    on GPU the missing mass is often one ``command_buffer_*`` thunk
+    (CUDA graph). Returns ``{hlo_op: (exclusive_seconds, n_occurrences)}``.
+    """
+    totals: dict[str, list[float]] = {}
+    for event in trace_events:
+        if event.get("ph") != "X":
+            continue
+        name = event.get("name", "")
+        if isinstance(name, str) and name.startswith("end: "):
+            continue
+        args = event.get("args")
+        if not isinstance(args, dict):
+            continue
+        hlo_op = args.get("hlo_op")
+        if hlo_op is None:
+            continue
+        dur_seconds = float(event.get("dur", 0.0)) / 1e6
+        bucket = totals.setdefault(str(hlo_op), [0.0, 0])
+        bucket[0] += dur_seconds
+        bucket[1] += 1
+    return {op: (seconds, count) for op, (seconds, count) in totals.items()}
+
+
 def parse_dispatch_counts(
     trace_events: list[dict[str, Any]], fn_name: str | None = None
 ) -> dict[str, int]:

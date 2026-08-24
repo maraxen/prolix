@@ -1,0 +1,40 @@
+{
+  "probe": "water",
+  "openmm_version": "8.3.1",
+  "openmm_platform": "Reference",
+  "nonbonded_method": "CutoffPeriodic",
+  "cutoff_angstrom": 10.0,
+  "switch_distance_angstrom": null,
+  "energy_kcal": -0.0021539245961484455,
+  "forces_kcal_mol_A": [
+    [
+      0.0010873118439073519,
+      0.0,
+      0.0
+    ],
+    [
+      -0.0010873118439073519,
+      0.0,
+      0.0
+    ]
+  ],
+  "positions_A": [
+    [
+      0.0,
+      0.0,
+      0.0
+    ],
+    [
+      8.5,
+      0.0,
+      0.0
+    ]
+  ],
+  "box_A": [
+    20.0,
+    20.0,
+    20.0
+  ],
+  "sigma_A": 3.0,
+  "epsilon_kcal": 0.2
+}

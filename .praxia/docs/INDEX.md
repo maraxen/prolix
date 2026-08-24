@@ -55,6 +55,8 @@
 - [260410_phase4-solvation-implementation-plan](plans/260410_phase4-solvation-implementation-plan.md)
 
 ## Specs
+- [260824_neighbor-list-config](specs/260824_neighbor-list-config.md) — OpenMM-shaped NonbondedConfig / NL Verlet+LJ-switch; flash tile JAX; vendored OpenMM 8.3.1 gold campaign (Pallas deferred)
+- [260820_jax-profiling-skill-DRAFT](specs/260820_jax-profiling-skill-DRAFT.md) — DRAFT source for the xtrax `jax-profiling` skill (not P9; fill §Open after Stage-2 pull → rank → kernel decision)
 - [260718_xr-while-carry](specs/260718_xr-while-carry.md) — Scope a lax.while_loop-backed WhileCarry strategy for xtrax (upstream), motivated by debt 760's neighbor-list carry in prolix's EnsemblePlan inference dispatch
 - [260715_b1-nonbonded-parity](specs/260715_b1-nonbonded-parity.md) — B1-NONBONDED-PARITY
 - [260715_b1-settle-stack](specs/260715_b1-settle-stack.md) — B1-SETTLE-STACK
@@ -140,6 +142,7 @@
 - [260124_task-system-analysis](research/260124_task-system-analysis.md)
 
 ## Decisions
+- [260824_adr-006-pallas-pme-spline](decisions/260824_adr-006-pallas-pme-spline.md) — ADR 006: atom-parallel Pallas SPME spread/gather (**deferred** 2026-08-24 until high-level JAX bottlenecks on implicit/explicit paths are exhausted; XLA stencil remains production)
 - [260717_b1-connect-existing-engines-scope](decisions/260717_b1-connect-existing-engines-scope.md) — Phase 5 scoping of debt 760 (NL+PME) and 761 (analytical/flash forces) connection work for EnsemblePlan, with concrete technical designs and recommended sequencing
 - [260501_adr-001-kups-prolix-potential-eval](decisions/260501_adr-001-kups-prolix-potential-eval.md)
 - [260501_adr-002-neighbor-list-invalidation](decisions/260501_adr-002-neighbor-list-invalidation.md)

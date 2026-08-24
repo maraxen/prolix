@@ -179,12 +179,21 @@ def make_energy_fn(
     box_arr = jnp.asarray(box)
     pme_grid = kwargs.get("pme_grid_points", 64)
     gs = kwargs.get("pme_grid_spacing") or float(jnp.mean(box_arr.astype(jnp.float64))) / float(max(int(pme_grid), 1))
-    _spme = pme.make_spme_energy_fn(box_arr, alpha=float(pme_alpha), grid_spacing=gs)
+    _spme = pme.make_spme_energy_fn(
+        box_arr,
+        alpha=float(pme_alpha),
+        grid_spacing=gs,
+        use_pallas_pme=kwargs.get("use_pallas_pme"),
+    )
+
+  _lj_sw = float(kwargs.get("lj_switch_width") or 0.0)
 
   def lj_energy_fn_bound(r, neighbor=None):
     if neighbor is not None:
         nb_idx = getattr(neighbor, "idx", neighbor)
-        e_lj = chunked_lj_energy_nl(r, sigmas, epsilons, excl_idx, excl_sv, nb_idx, displacement_fn, cutoff, 128)
+        e_lj = chunked_lj_energy_nl(
+            r, sigmas, epsilons, excl_idx, excl_sv, nb_idx, displacement_fn, cutoff, 128, _lj_sw
+        )
     else:
         e_lj = chunked_lj_energy(r, sigmas, epsilons, excl_idx, excl_sv, displacement_fn, cutoff, 128)
 
@@ -343,14 +352,17 @@ def make_energy_fn_pure(
 
     if neighbor is not None:
       nb_idx = getattr(neighbor, "idx", neighbor)
-      e_lj = chunked_lj_energy_nl(r, sigmas_p, epsilons_p, excl_idx, excl_sv, nb_idx, displacement_fn, cutoff_distance, tile_size)
+      e_lj = chunked_lj_energy_nl(r, sigmas_p, epsilons_p, excl_idx, excl_sv, nb_idx, displacement_fn, cutoff_distance, tile_size, float(kwargs.get("lj_switch_width") or 0.0))
       e_direct = chunked_coulomb_energy_nl(r, charges_p, excl_idx, excl_se, nb_idx, displacement_fn, pme_alpha, COULOMB_CONSTANT, cutoff_distance, tile_size)
     else:
       e_lj = chunked_lj_energy(r, sigmas_p, epsilons_p, excl_idx, excl_sv, displacement_fn, cutoff_distance, tile_size)
       e_direct = chunked_coulomb_energy(r, charges_p, excl_idx, excl_se, displacement_fn, pme_alpha, COULOMB_CONSTANT, cutoff_distance, tile_size)
 
     # PME Reciprocal
-    spme_fn = lambda pos, q, m: pme.spme_energy_with_forces(pos, q, m, box_arr, grid_dims, pme_alpha, 4)
+    _pallas = pme.resolve_use_pallas_pme(kwargs.get("use_pallas_pme"))
+    spme_fn = lambda pos, q, m: pme.spme_energy_with_forces(
+        pos, q, m, box_arr, grid_dims, pme_alpha, 4, _pallas
+    )
     e_recip = spme_fn(r, charges_p, physics_system.atom_mask) + pme.spme_background_energy(charges_p, physics_system.atom_mask, pme_alpha, box_arr)
 
     # ACE nonpolar term if implicit solvent
@@ -375,8 +387,10 @@ def make_energy_fn_pure(
 # ---------------------------------------------------------------------------
 
 
-def _next_bucket(n: int, buckets: tuple) -> int:
-    """Return the smallest bucket >= n, or the largest if n exceeds all."""
+def _next_bucket(n: int, buckets: tuple, *, use_size_buckets: bool = True) -> int:
+    """Return the smallest bucket >= n, or n itself when size-bucketing is off."""
+    if not use_size_buckets:
+        return int(n)
     for b in buckets:
         if n <= b:
             return b
@@ -610,6 +624,8 @@ def make_bundle_from_system(
     system,
     boundary_condition: str = "periodic",
     exclusion_spec: Any = None,
+    *,
+    use_size_buckets: bool = True,
 ) -> MolecularBundle:
     """Convert a PhysicsSystem to a MolecularBundle with bucketed padding.
 
@@ -621,6 +637,10 @@ def make_bundle_from_system(
         boundary_condition: "periodic" or "free".
         exclusion_spec: Optional ``ExclusionSpec``; when provided, populates
             ``excl_*`` pair lists and ``exception_*`` fields on the bundle.
+        use_size_buckets: If True (default), pad to ATOM_BUCKETS / bonded
+            ladders so heterogeneous systems share a JIT key. If False, pad
+            each axis to its exact count — one long homogeneous run pays no
+            ghost-atom pair work.
 
     Returns:
         MolecularBundle with all arrays padded to bucket sizes.
@@ -637,18 +657,20 @@ def make_bundle_from_system(
 
     pos = system.positions
     n = pos.shape[0]
-    a = _next_bucket(n, ATOM_BUCKETS)
+    def _nb(count, ladder):
+        return _next_bucket(count, ladder, use_size_buckets=use_size_buckets)
+    a = _nb(n, ATOM_BUCKETS)
 
     # --- bonded topology -------------------------------------------------
     bonds = _get("bonds")
     bp = _get("bond_params")
     nb = 0 if bonds is None or bonds.size == 0 else bonds.shape[0]
-    bb = _next_bucket(max(nb, 1), BOND_BUCKETS)
+    bb = _nb(max(nb, 1), BOND_BUCKETS)
 
     angles = _get("angles")
     ap = _get("angle_params")
     na = 0 if angles is None or angles.size == 0 else angles.shape[0]
-    ab = _next_bucket(max(na, 1), ANGLE_BUCKETS)
+    ab = _nb(max(na, 1), ANGLE_BUCKETS)
 
     dihs = _get("dihedrals")
     if dihs is None:
@@ -658,7 +680,7 @@ def make_bundle_from_system(
         dihs = _get("proper_dihedrals")
     dp = _get("dihedral_params")
     dihs, dp, nd = _flatten_multi_term_torsions(dihs, dp)
-    db = _next_bucket(max(nd, 1), DIHEDRAL_BUCKETS)
+    db = _nb(max(nd, 1), DIHEDRAL_BUCKETS)
 
     imps = _get("impropers")
     imp_p = _get("improper_params")
@@ -671,7 +693,7 @@ def make_bundle_from_system(
     # --- water -----------------------------------------------------------
     wi = _get("water_indices")
     nw = 0 if wi is None or wi.size == 0 else wi.shape[0]
-    wb = _next_bucket(max(nw, 1), WATER_BUCKETS)
+    wb = _nb(max(nw, 1), WATER_BUCKETS)
 
     # --- exclusions -------------------------------------------------------
     # PhysicsSystem: dense (N, max_excl) or pair list (E, 2). Bundle: (E, 2).
@@ -687,7 +709,7 @@ def make_bundle_from_system(
         )
     else:
         excl, excl_sv, excl_se, ne = _dense_excl_to_pair_list(excl, excl_sv, excl_se)
-    eb = _next_bucket(max(ne, 1), EXCL_BUCKETS)
+    eb = _nb(max(ne, 1), EXCL_BUCKETS)
 
     # --- exclusions (per-atom-row form, for NL/flash kernels; debt 765) ---
     # Every neighbor-list/flash consumer (this file's own make_energy_fn NL
@@ -747,7 +769,7 @@ def make_bundle_from_system(
         exc_eps = exclusion_spec.exception_epsilons
         exc_q = exclusion_spec.exception_chargeprods
     nx = 0 if exc_pairs is None or exc_pairs.size == 0 else int(exc_pairs.shape[0])
-    xb = _next_bucket(max(nx, 1), EXCEPTION_BUCKETS)
+    xb = _nb(max(nx, 1), EXCEPTION_BUCKETS)
 
     # --- CMAP -------------------------------------------------------------
     cmap_t = _get("cmap_torsions")
@@ -755,7 +777,7 @@ def make_bundle_from_system(
     if cmap_g is None:
         cmap_g = _get("cmap_energy")
     nc = 0 if cmap_t is None or cmap_t.size == 0 else int(cmap_t.shape[0])
-    cb = _next_bucket(max(nc, 1), CMAP_BUCKETS)
+    cb = _nb(max(nc, 1), CMAP_BUCKETS)
 
     # --- box / PBC -------------------------------------------------------
     box_size = _get("box_size")
@@ -790,6 +812,9 @@ def make_bundle_from_system(
         has_implicit_solvent=False,
         boundary_condition=boundary_condition,
         has_real_water=nw > 0,
+        use_size_buckets=use_size_buckets,
+        exact_n_atoms=0 if use_size_buckets else int(a),
+        exact_n_waters=0 if use_size_buckets else int(wb),
     )
 
     # --- per-atom helpers -------------------------------------------------

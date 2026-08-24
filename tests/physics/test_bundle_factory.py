@@ -89,6 +89,15 @@ def test_factory_pads_to_bucket():
     assert bundle.positions.shape[0] == ATOM_BUCKETS[0]
 
 
+def test_factory_size_buckets_off_pads_to_exact_n():
+    sys = _make_minimal_physics_system()
+    bundle = make_bundle_from_system(sys, boundary_condition="free", use_size_buckets=False)
+    assert bundle.positions.shape[0] == 10
+    assert bundle.shape_spec.use_size_buckets is False
+    assert bundle.shape_spec.exact_n_atoms == 10
+    assert int(bundle.atom_mask.sum()) == 10
+
+
 def test_factory_preserves_atom_mask():
     sys = _make_minimal_physics_system()
     bundle = make_bundle_from_system(sys, boundary_condition="free")

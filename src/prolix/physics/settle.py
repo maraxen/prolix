@@ -22,6 +22,8 @@ import jax.numpy as jnp
 from jax import random
 from jax_md import quantity, simulate
 
+from prolix.tiling.axis_dispatch import dispatch_n_waters
+
 from prolix.physics import (
   md_potential_bundle,
   rigid_water_ke,
@@ -1220,14 +1222,15 @@ def settle_langevin(
       mass_flat = mass_arr.reshape(-1)
       r_water = jnp.stack([R[idx[:, 0]], R[idx[:, 1]], R[idx[:, 2]]], axis=1)
       m_water = jnp.stack([mass_flat[idx[:, 0]], mass_flat[idx[:, 1]], mass_flat[idx[:, 2]]], axis=1)
-
-      def init_one_water(carry, inputs):
-        key_w = carry
-        r_w, m_w = inputs
-        p_w, key_w = _init_momentum_one_water_rigid(key_w, r_w, m_w, _kT)
-        return key_w, p_w
-
-      key, p_water = jax.lax.scan(init_one_water, key, (r_water, m_water))
+      n_w = r_water.shape[0]
+      splits = jax.random.split(key, n_w + 1)
+      key, water_keys = splits[0], splits[1:]
+      p_water = dispatch_n_waters(
+        None,
+        n_w,
+        lambda pack: _init_momentum_one_water_rigid(pack[0], pack[1], pack[2], _kT)[0],
+        (water_keys, r_water, m_water),
+      )
       idx_flat = idx.reshape(-1)
       if water_mask is None:
         momenta = momenta.at[idx_flat].set(p_water.reshape(-1, 3))
@@ -2264,17 +2267,22 @@ def _langevin_step_o_constrained(
   r_water = jnp.stack([position[idx[:, 0]], position[idx[:, 1]], position[idx[:, 2]]], axis=1)
   m_water = jnp.stack([mass_flat[idx[:, 0]], mass_flat[idx[:, 1]], mass_flat[idx[:, 2]]], axis=1)
 
-  def step_one_water(carry, inputs):
-    key_w = carry
-    r_w, m_w, p_w = inputs
-    p_rigid = _project_one_water_momentum_rigid(p_w, r_w, m_w)
-    p_c1 = c1 * p_rigid
-    noise_w, key_w = _ou_noise_one_water_rigid(key_w, r_w, m_w, kT)
-    p_out = p_c1 + c2 * noise_w
-    return key_w, p_out
+  # Batched over waters via xtrax dispatch (Vmap/SafeMap), not lax.scan.
+  n_w = r_water.shape[0]
+  splits = jax.random.split(key, n_w + 1)
+  key, water_keys = splits[0], splits[1:]
 
-  key, p_water_out = jax.lax.scan(
-    step_one_water, key, (r_water, m_water, p_water_in)
+  def step_one_water(pack):
+    key_w, r_w, m_w, p_w = pack
+    p_rigid = _project_one_water_momentum_rigid(p_w, r_w, m_w)
+    noise_w, _ = _ou_noise_one_water_rigid(key_w, r_w, m_w, kT)
+    return c1 * p_rigid + c2 * noise_w
+
+  p_water_out = dispatch_n_waters(
+    None,
+    n_w,
+    step_one_water,
+    (water_keys, r_water, m_water, p_water_in),
   )
 
   idx_flat = idx.reshape(-1)

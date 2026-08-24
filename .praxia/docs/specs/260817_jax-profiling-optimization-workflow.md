@@ -1305,6 +1305,11 @@ schema change fails the fixture test rather than passing silently.
 ### P9 — CROSS-REPO: author the `jax-profiling` skill in `~/projects/xtrax`
 **Cost: CROSS-REPO** (prose only; no execution). **This step edits a different repository.**
 
+**Draft (2026-08-20, not this step):** scoped lessons from P1–P8 live in
+[260820_jax-profiling-skill-DRAFT](260820_jax-profiling-skill-DRAFT.md) in this
+repo. Do not copy it into xtrax until §Open is filled from a real pull →
+ranking → hunt decision. That draft is not P9.
+
 Create, in `/home/marielle/projects/xtrax` (**not** in this repo, **not** in
 `~/.claude/skills/`):
 - `agent_assets/skills/jax-profiling/SKILL.md` — TIER-1, self-contained, frontmatter with

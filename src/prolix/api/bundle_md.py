@@ -35,7 +35,7 @@ from prolix.batched_energy import (
     single_padded_energy,
     single_padded_force,
 )
-from prolix.types.bundles import ATOM_BUCKETS, WATER_BUCKETS, MolecularBundle
+from prolix.types.bundles import MolecularBundle, atom_pad_length, water_pad_length
 from prolix.typing import PhysicsSystem
 
 # Match prolix.physics.bonded.make_exception_pair_energy_fn default (AKMA).
@@ -70,13 +70,13 @@ def _exception_energy_masked(
 
 
 def atom_bucket_size(bundle: MolecularBundle) -> int:
-    """Static padded atom count from shape_spec (compile-time constant per bucket)."""
-    return ATOM_BUCKETS[bundle.shape_spec.atom_bucket_idx]
+    """Static padded atom count from shape_spec (compile-time constant per program)."""
+    return atom_pad_length(bundle.shape_spec)
 
 
 def water_bucket_size(bundle: MolecularBundle) -> int:
     """Static padded water slot count from shape_spec."""
-    return WATER_BUCKETS[bundle.shape_spec.water_bucket_idx]
+    return water_pad_length(bundle.shape_spec)
 
 
 def positions_with_prefix(bundle: MolecularBundle, prefix: int) -> jnp.ndarray:
@@ -499,15 +499,18 @@ def energy_fn_from_bundle(
     bundle: MolecularBundle,
     *,
     include_nonbonded: bool = True,
+    lj_switch_width: float = 0.0,
 ) -> Callable[..., jnp.ndarray]:
     """Total energy from bundle fields (bonded + optional nonbonded via ``single_padded_energy``).
 
     Includes AMBER 1-4 ``exception_*`` pair energy when present (XR-PARITY-OMM-PROTEIN).
+    ``lj_switch_width`` is closed over (OpenMM LJ switch; 0 disables).
     """
     if not include_nonbonded:
         return bonded_energy_fn_from_bundle(bundle)
 
     disp_fn, _ = displacement_fn_for_bundle(bundle)
+    _lj_sw = float(lj_switch_width)
 
     def energy_fn(positions: jnp.ndarray, **kwargs: object) -> jnp.ndarray:
         # `neighbor` (debt 760's NL path, see single_padded_energy's docstring)
@@ -519,7 +522,13 @@ def energy_fn_from_bundle(
         neighbor = kwargs.pop("neighbor", None)
         del kwargs
         sys = physics_system_from_bundle(bundle, positions)
-        e = single_padded_energy(sys, disp_fn, implicit_solvent=False, neighbor=neighbor)
+        e = single_padded_energy(
+            sys,
+            disp_fn,
+            implicit_solvent=False,
+            neighbor=neighbor,
+            lj_switch_width=_lj_sw,
+        )
         e = e + _exception_energy_masked(
             positions,
             bundle.exception_pairs,
@@ -534,7 +543,12 @@ def energy_fn_from_bundle(
     return energy_fn
 
 
-def force_fn_from_bundle(bundle: MolecularBundle) -> Callable[..., jnp.ndarray]:
+def force_fn_from_bundle(
+    bundle: MolecularBundle,
+    *,
+    flash_tile_size: int = 256,
+    flash_remat: bool = True,
+) -> Callable[..., jnp.ndarray]:
     """Analytical/FlashMD forces from bundle fields (debt 761).
 
     Drop-in force-returning alternative to ``energy_fn_from_bundle`` for
@@ -590,7 +604,13 @@ def force_fn_from_bundle(bundle: MolecularBundle) -> Callable[..., jnp.ndarray]:
         del kwargs
         sys = physics_system_from_bundle(bundle, positions)
         f = single_padded_force(
-            sys, disp_fn, implicit_solvent=False, explicit_solvent=True, use_flash=True,
+            sys,
+            disp_fn,
+            implicit_solvent=False,
+            explicit_solvent=True,
+            use_flash=True,
+            flash_tile_size=flash_tile_size,
+            flash_remat=flash_remat,
         )
         f_exception = -jax.grad(
             lambda r: _exception_energy_masked(

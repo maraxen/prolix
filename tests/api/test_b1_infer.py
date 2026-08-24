@@ -20,6 +20,43 @@ from prolix.api.ensemble_plan import EnsemblePlan
 from prolix.tiling.axes import N_MOLS
 from prolix.types.bundles import MolecularBundle, MolecularShapeSpec
 
+
+def test_resolve_nonbonded_defaults_inference_pbc():
+    from types import SimpleNamespace
+
+    plan = EnsemblePlan.__new__(EnsemblePlan)
+    pbc = SimpleNamespace(shape_spec=SimpleNamespace(has_pbc=True, has_implicit_solvent=False))
+    plan.bundles = [pbc]
+    assert plan._resolve_nonbonded_defaults("inference", None, None) == (True, False)
+    assert plan._resolve_nonbonded_defaults("trajectory", None, None) == (False, True)
+    assert plan._resolve_nonbonded_defaults("inference", False, False) == (False, False)
+    vac = SimpleNamespace(shape_spec=SimpleNamespace(has_pbc=False, has_implicit_solvent=False))
+    plan.bundles = [vac]
+    assert plan._resolve_nonbonded_defaults("inference", None, None) == (False, False)
+
+
+def test_run_rejects_nonbonded_config_mixed_with_legacy_flags():
+    from types import SimpleNamespace
+
+    from prolix.physics.nonbonded_config import NonbondedConfig, NonbondedEngine
+
+    plan = EnsemblePlan.__new__(EnsemblePlan)
+    plan.bundles = [
+        SimpleNamespace(
+            cutoff_distance=9.0,
+            shape_spec=SimpleNamespace(has_pbc=True, has_implicit_solvent=False),
+        )
+    ]
+    with pytest.raises(ValueError, match="not both"):
+        plan.run(
+            1,
+            1.0,
+            0.6,
+            nonbonded=NonbondedConfig(engine=NonbondedEngine.FLASH),
+            use_flash_forces=True,
+        )
+
+
 def _make_minimal_bundle(n_atoms=3) -> MolecularBundle:
     """Create a minimal MolecularBundle for testing (water molecule or similar).
 

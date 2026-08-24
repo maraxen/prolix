@@ -72,6 +72,22 @@ def test_parse_scopes_empty_when_no_events_match():
     assert result == {}
 
 
+def test_parse_hlo_op_times_includes_unmapped_thunks():
+    """Op-name dump keeps thunks that parse_scopes drops (no known_label map)."""
+    from scripts.profiling.trace import parse_hlo_op_times
+
+    events = [
+        {"ph": "X", "name": "cb", "dur": 900.0, "args": {"hlo_op": "command_buffer_14"}},
+        {"ph": "X", "name": "fft", "dur": 7.0, "args": {"hlo_op": "fft.0.0"}},
+        {"ph": "X", "name": "end: cb", "dur": 1.0, "args": {"hlo_op": "command_buffer_14"}},
+        {"ph": "X", "name": "no_hlo", "dur": 50.0},
+    ]
+    result = parse_hlo_op_times(events)
+    assert result["command_buffer_14"] == (900.0 / 1e6, 1)
+    assert result["fft.0.0"] == (7.0 / 1e6, 1)
+    assert "no_hlo" not in result
+
+
 # --- synthetic leg: parse_dispatch_counts ----------------------------------
 
 

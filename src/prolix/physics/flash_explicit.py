@@ -96,6 +96,21 @@ def _pad_to_tile_multiple(
             excl_indices, excl_scales_vdw, excl_scales_elec, n_tiles)
 
 
+def _pair_exclusion_scales(excl_indices, excl_scales, start_idx, T, dtype):
+    """(N, T) pair scales via index match (no (N,T).at[].set scatter)."""
+    j_idx = start_idx + jnp.arange(T)
+    valid = excl_indices >= 0
+    matches = (j_idx[None, None, :] == excl_indices[:, :, None]) & valid[:, :, None]
+    scale = jnp.sum(jnp.where(matches, excl_scales[:, :, None], 0.0), axis=1)
+    ones = jnp.asarray(1.0, dtype=dtype)
+    return jnp.where(jnp.any(matches, axis=1), scale, ones).astype(dtype)
+
+
+def _maybe_remat(fn, remat: bool):
+    """Apply ``jax.checkpoint`` when remat is on; identity otherwise."""
+    return jax.checkpoint(fn) if remat else fn
+
+
 def chunked_explicit_nonbonded_energy(
     positions: Array,
     charges: Array,
@@ -106,11 +121,12 @@ def chunked_explicit_nonbonded_energy(
     T: int = 256,
     soft_core_lambda: float = 1.0,
     pme_alpha: float = 0.0,
+    remat: bool = True,
 ) -> Array:
     """Fused LJ + Direct-space Coulomb energy in one tiled O(N²) pass.
 
-    Uses dense exclusion matrices. jax.checkpoint ensures intermediates
-    stay in L2 cache.
+    Uses dense exclusion matrices. jax.checkpoint (when remat=True) discards
+    intermediates so the backward pass recomputes the tile body.
 
     Args:
         positions: (N, 3) atom positions.
@@ -124,6 +140,8 @@ def chunked_explicit_nonbonded_energy(
             so this is safe for any N, including N < T.
         soft_core_lambda: Soft-core coupling (1.0=standard LJ).
         pme_alpha: Ewald alpha for direct space damping. If 0, uses regular Coulomb.
+        remat: If True (default), checkpoint the tile inner. False keeps
+            intermediates for the backward pass (discovery / memory trade).
 
     Returns:
         Scalar total nonbonded energy (kcal/mol).
@@ -145,7 +163,6 @@ def chunked_explicit_nonbonded_energy(
     def tile_energy_outer(carry, j_idx):
         start = j_idx * T
 
-        @jax.checkpoint
         def _compute_tile_inner(pos, start_idx):
             r_j = jax.lax.dynamic_slice(pos, (start_idx, 0), (T, 3))
             q_j = jax.lax.dynamic_slice(charges, (start_idx,), (T,))
@@ -172,25 +189,13 @@ def chunked_explicit_nonbonded_energy(
             dist_sq = jnp.sum(dr ** 2, axis=-1) + 1e-10
             dist = jnp.sqrt(dist_sq)
 
-            # --- Sparse Exclusion Processing ---
-            # Instead of a dense (N, N) matrix, we compute the (N, T) exclusion block
-            # on the fly from excl_indices and excl_scales (already padded to N).
-            # Base scales are 1.0 (everything included)
-            vdw_scale_tile = jnp.ones((N, T), dtype=work_dtype)
-            elec_scale_tile = jnp.ones((N, T), dtype=work_dtype)
-
-            # Slice the sparse exclusion data for these T atoms
-            t_excl_idx = jax.lax.dynamic_slice(excl_indices, (start_idx, 0), (T, excl_indices.shape[1]))
-            t_vdw_scale = jax.lax.dynamic_slice(excl_scales_vdw, (start_idx, 0), (T, excl_scales_vdw.shape[1]))
-            t_elec_scale = jax.lax.dynamic_slice(excl_scales_elec, (start_idx, 0), (T, excl_scales_elec.shape[1]))
-
-            # Scatter scales into the (N, T) block
-            j_local = jnp.arange(T)
-            flat_ii = t_excl_idx.reshape(-1) # (T * max_excl)
-            flat_jj = jnp.repeat(j_local, t_excl_idx.shape[1])
-            
-            vdw_scale_tile = vdw_scale_tile.at[flat_ii, flat_jj].set(t_vdw_scale.reshape(-1))
-            elec_scale_tile = elec_scale_tile.at[flat_ii, flat_jj].set(t_elec_scale.reshape(-1))
+            # Sparse exclusions: match j-global against per-i exclusion rows.
+            vdw_w = _pair_exclusion_scales(
+                excl_indices, excl_scales_vdw, start_idx, T, work_dtype
+            )
+            elec_w = _pair_exclusion_scales(
+                excl_indices, excl_scales_elec, start_idx, T, work_dtype
+            )
 
             # Pair mask (atoms exist and it's not a self-interaction)
             i_indices = jnp.arange(N)[:, None]
@@ -200,7 +205,7 @@ def chunked_explicit_nonbonded_energy(
 
             sig_ij = 0.5 * (sigmas[:, None] + s_j[None, :])
             sig_ij_safe = jnp.where(pair_mask > 0, jnp.maximum(sig_ij, 1e-4), 1.0)
-            eps_ij = jnp.sqrt(jnp.maximum(epsilons[:, None] * e_j[None, :], 0.0))
+            eps_ij = jnp.sqrt(jnp.maximum(epsilons[:, None] * e_j[None, :], 0.0)) * vdw_w
 
             # --- LJ Soft Core (Beutler formulation) ---
             soft_alpha_lj = jnp.asarray(0.5, dtype=work_dtype) * (1.0 - lam)
@@ -210,25 +215,26 @@ def chunked_explicit_nonbonded_energy(
             
             x_inv6_soft = 1.0 / jnp.maximum(denom_lj, 1e-6)
             e_lj = 4.0 * eps_ij * lam * (x_inv6_soft * x_inv6_soft - x_inv6_soft)
-            e_lj = jnp.where(pair_mask > 0, e_lj * vdw_scale_tile, 0.0)
+            e_lj = jnp.where(pair_mask > 0, e_lj, 0.0)
 
             # --- Coulomb Soft Core ---
             soft_alpha_coul = jnp.asarray(2.0, dtype=work_dtype) * (1.0 - lam)
             dist_coul = jnp.sqrt(dist_sq + soft_alpha_coul)
             
-            qq = charges[:, None] * q_j[None, :] * COULOMB_CONSTANT
+            qq = charges[:, None] * q_j[None, :] * COULOMB_CONSTANT * elec_w
             if pme_alpha > 0.0:
                 coulomb_term = qq * erfc(pme_alpha * dist_coul) / dist_coul
             else:
                 coulomb_term = qq / dist_coul
-            e_coul = jnp.where(pair_mask > 0, coulomb_term * elec_scale_tile, 0.0)
+            e_coul = jnp.where(pair_mask > 0, coulomb_term, 0.0)
 
             return 0.5 * jnp.sum(e_lj) + 0.5 * jnp.sum(e_coul)
 
+        compute = _maybe_remat(_compute_tile_inner, remat)
         # Body function for the scan loop (one tile)
         # We explicitly wrap this with unroll=1 to prevent XLA from bloating the graph
         # for a 195-iteration loop with massive intermediates.
-        tile_e = _compute_tile_inner(positions, start)
+        tile_e = compute(positions, start)
         return carry + tile_e, None
 
     with jax.named_scope("flash_nonbonded_tiles"):
@@ -250,6 +256,7 @@ def _chunked_lj_only_energy(
     sys: PaddedSystem,
     T: int = 256,
     soft_core_lambda: float = 1.0,
+    remat: bool = True,
 ) -> Array:
   """Compute LJ energy only, skipping Coulomb (for EFA integration).
 
@@ -264,6 +271,7 @@ def _chunked_lj_only_energy(
       sys: PaddedSystem with exclusion info.
       T: Tile size.
       soft_core_lambda: Soft-core coupling (1.0 = standard).
+      remat: If True (default), checkpoint the tile inner.
 
   Returns:
       Scalar LJ energy.
@@ -278,7 +286,6 @@ def _chunked_lj_only_energy(
   def tile_energy_outer(carry, j_idx):
     start = j_idx * T
 
-    @jax.checkpoint
     def _compute_tile_lj_only(pos, start_idx):
       r_j = jax.lax.dynamic_slice(pos, (start_idx, 0), (T, 3))
       s_j = jax.lax.dynamic_slice(sigmas, (start_idx,), (T,))
@@ -293,14 +300,9 @@ def _chunked_lj_only_energy(
       dist_sq = jnp.sum(dr ** 2, axis=-1) + 1e-10
       dist = jnp.sqrt(dist_sq)
 
-      # Sparse exclusion scales
-      vdw_scale_tile = jnp.ones((N, T), dtype=work_dtype)
-      t_excl_idx = jax.lax.dynamic_slice(excl_indices, (start_idx, 0), (T, excl_indices.shape[1]))
-      t_vdw_scale = jax.lax.dynamic_slice(excl_scales_vdw, (start_idx, 0), (T, excl_scales_vdw.shape[1]))
-      j_local = jnp.arange(T)
-      flat_ii = t_excl_idx.reshape(-1)
-      flat_jj = jnp.repeat(j_local, t_excl_idx.shape[1])
-      vdw_scale_tile = vdw_scale_tile.at[flat_ii, flat_jj].set(t_vdw_scale.reshape(-1))
+      vdw_w = _pair_exclusion_scales(
+          excl_indices, excl_scales_vdw, start_idx, T, work_dtype
+      )
 
       # Pair mask
       i_indices = jnp.arange(N)[:, None]
@@ -310,7 +312,7 @@ def _chunked_lj_only_energy(
 
       sig_ij = 0.5 * (sigmas[:, None] + s_j[None, :])
       sig_ij_safe = jnp.where(pair_mask > 0, jnp.maximum(sig_ij, 1e-4), 1.0)
-      eps_ij = jnp.sqrt(jnp.maximum(epsilons[:, None] * e_j[None, :], 0.0))
+      eps_ij = jnp.sqrt(jnp.maximum(epsilons[:, None] * e_j[None, :], 0.0)) * vdw_w
 
       # LJ Soft Core (Beutler)
       soft_alpha_lj = jnp.asarray(0.5, dtype=work_dtype) * (1.0 - lam)
@@ -319,11 +321,12 @@ def _chunked_lj_only_energy(
       denom_lj = soft_alpha_lj + r_over_sig_6
       x_inv6_soft = 1.0 / jnp.maximum(denom_lj, 1e-6)
       e_lj = 4.0 * eps_ij * lam * (x_inv6_soft * x_inv6_soft - x_inv6_soft)
-      e_lj = jnp.where(pair_mask > 0, e_lj * vdw_scale_tile, 0.0)
+      e_lj = jnp.where(pair_mask > 0, e_lj, 0.0)
 
       return 0.5 * jnp.sum(e_lj)
 
-    tile_e = _compute_tile_lj_only(positions, start)
+    compute = _maybe_remat(_compute_tile_lj_only, remat)
+    tile_e = compute(positions, start)
     return carry + tile_e, None
 
   with jax.named_scope("flash_lj_only"):
@@ -344,6 +347,7 @@ def _total_energy_fn(
     electrostatic_method: ElectrostaticMethod | str = ElectrostaticMethod.PME,
     n_rff_features: int = 512,
     rff_seed: int = 0,
+    remat: bool = True,
 ) -> Array:
     """Internal energy implementation for gradients.
 
@@ -354,6 +358,7 @@ def _total_energy_fn(
         electrostatic_method: EFA or PME (default).
         n_rff_features: Number of RFF features for EFA (default 512).
         rff_seed: PRNG seed for RFF frequency sampling (default 0).
+        remat: If True (default), checkpoint tiled pair bodies.
 
     Returns:
         Scalar energy in kcal/mol.
@@ -381,7 +386,8 @@ def _total_energy_fn(
 
         # Compute LJ only via chunked loop (modify to skip Coulomb)
         e_lj = _chunked_lj_only_energy(
-            pos, safe_sigmas, safe_epsilons, sys.atom_mask, sys, T=T
+            pos, safe_sigmas, safe_epsilons, sys.atom_mask, sys, T=T,
+            remat=remat,
         )
 
         # RFF global Coulomb with threaded seed
@@ -461,7 +467,8 @@ def _total_energy_fn(
 
         # Compute LJ only via chunked loop
         e_lj = _chunked_lj_only_energy(
-            pos, safe_sigmas, safe_epsilons, sys.atom_mask, sys, T=T
+            pos, safe_sigmas, safe_epsilons, sys.atom_mask, sys, T=T,
+            remat=remat,
         )
 
         # EFA-Lebedev global Coulomb (deterministic, no seed)
@@ -538,6 +545,7 @@ def _total_energy_fn(
             box_size=sys.box_size,
             alpha=float(sys.pme_alpha),
             grid_spacing=grid_spacing,
+            use_pallas_pme=None,
         )
 
     # Direct space (LJ + damped Coulomb)
@@ -552,6 +560,7 @@ def _total_energy_fn(
         pme_alpha=sys.pme_alpha,
         T=T,
         soft_core_lambda=soft_core_lambda,
+        remat=remat,
     )
     # Add PME reciprocal and corrections
     if recip_energy_fn is not None:
@@ -602,6 +611,7 @@ def flash_explicit_total_energy(
     electrostatic_method: ElectrostaticMethod | str = ElectrostaticMethod.PME,
     n_rff_features: int = 512,
     rff_seed: int = 0,
+    remat: bool = True,
 ) -> Array:
     """Complete explicit solvent energy: bonded + FlashMD nonbonded + PME.
 
@@ -649,7 +659,7 @@ def flash_explicit_total_energy(
     e_nonbonded = _total_energy_fn(sys, T=T, soft_core_lambda=soft_core_lambda,
                                    electrostatic_method=electrostatic_method,
                                    n_rff_features=n_rff_features,
-                                   rff_seed=rff_seed)
+                                   rff_seed=rff_seed, remat=remat)
 
     return e_bonded + e_nonbonded
 
@@ -661,12 +671,13 @@ def flash_explicit_energy(
     electrostatic_method: ElectrostaticMethod | str = ElectrostaticMethod.PME,
     n_rff_features: int = 512,
     rff_seed: int = 0,
+    remat: bool = True,
 ) -> Array:
     """Compute explicit solvent nonbonded energy via FlashMD architecture."""
     return _total_energy_fn(sys, T=T, soft_core_lambda=soft_core_lambda,
                             electrostatic_method=electrostatic_method,
                             n_rff_features=n_rff_features,
-                            rff_seed=rff_seed)
+                            rff_seed=rff_seed, remat=remat)
 
 
 def flash_explicit_forces(
@@ -676,6 +687,7 @@ def flash_explicit_forces(
     electrostatic_method: ElectrostaticMethod | str = ElectrostaticMethod.PME,
     n_rff_features: int = 512,
     rff_seed: int = 0,
+    remat: bool = True,
 ) -> Array:
     """Compute explicit solvent nonbonded forces via FlashMD architecture.
 
@@ -692,7 +704,7 @@ def flash_explicit_forces(
         return _total_energy_fn(s, T=T, soft_core_lambda=soft_core_lambda,
                                 electrostatic_method=electrostatic_method,
                                 n_rff_features=n_rff_features,
-                                rff_seed=rff_seed)
+                                rff_seed=rff_seed, remat=remat)
 
     with jax.named_scope("flash_grad"):
         grad_at_sys = _grad_fn(sys)

@@ -572,6 +572,7 @@ def solvate_protein_to_bundle(
     target_box_size: Array | None = None,
     pme_alpha: float = 0.34,
     nonbonded_cutoff: float = 9.0,
+    use_size_buckets: bool = True,
 ):
     """Solvate a protein and return a MolecularBundle usable by EnsemblePlan.
 
@@ -581,6 +582,9 @@ def solvate_protein_to_bundle(
     to the MolecularBundle / prolix.types.bundles bucket system that
     EnsemblePlan and B1's shape-class dispatch actually use. No existing
     function connected these two representations before this one.
+
+    ``use_size_buckets=False`` pads to exact atom/water counts (one long
+    homogeneous trajectory) instead of ATOM_BUCKETS.
 
     Two correctness traps guarded against explicitly here, rather than left
     to a shared implicit default -- the second is the exact same failure
@@ -628,4 +632,5 @@ def solvate_protein_to_bundle(
         _BundleSourceProxy(),
         boundary_condition="periodic",
         exclusion_spec=merged.exclusion_spec,
+        use_size_buckets=use_size_buckets,
     )
