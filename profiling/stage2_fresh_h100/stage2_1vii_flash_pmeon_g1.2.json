@@ -1,0 +1,74 @@
+{
+  "attribution_method": {
+    "flash_grad": "named_scope",
+    "pme_bwd_gather": "named_scope",
+    "pme_fft_forward": "named_scope",
+    "pme_fft_inverse": "named_scope"
+  },
+  "config": {
+    "grid_spacing": "1.2",
+    "mode": "flash",
+    "n_inner": "5",
+    "n_padded_atoms": "5000",
+    "n_trials": "20",
+    "n_warmup": "3",
+    "pme": "on",
+    "protein": "1vii",
+    "scopes": "on"
+  },
+  "contract_version": "3.0",
+  "device_kind": "h100_80gb_hbm3",
+  "git_sha": "7d5be076dcd8b266fe46b170fd2c8e31c1fa9df8",
+  "jax_version": "0.10.2",
+  "jaxlib_version": "0.10.2",
+  "metrics": {
+    "flash_forces_ms": 1.9212188408710063,
+    "n_compilations": 0.0,
+    "n_executions": 1.0,
+    "n_jit_traces": 2.0,
+    "total_step_seconds": 0.0019212188408710062
+  },
+  "n_atoms": 1963,
+  "platform": "gpu",
+  "probe_id": "stage2_1vii_flash_pmeon_g1.2_scon",
+  "scopes": {
+    "dense_bonded_angle": null,
+    "dense_bonded_bond": null,
+    "dense_bonded_cmap": null,
+    "dense_bonded_dihedral": null,
+    "dense_bonded_improper": null,
+    "dense_bonded_urey_bradley": null,
+    "dense_coulomb_direct": null,
+    "dense_lj_direct": null,
+    "dense_pme_reciprocal": null,
+    "flash_bonded": null,
+    "flash_grad": [
+      9.92e-07,
+      1
+    ],
+    "flash_lj_only": null,
+    "flash_nonbonded_tiles": null,
+    "pme_bwd_gather": [
+      5.472e-06,
+      1
+    ],
+    "pme_charge_spread": null,
+    "pme_fft_forward": [
+      5.6e-06,
+      3
+    ],
+    "pme_fft_inverse": [
+      8.224000000000001e-06,
+      6
+    ],
+    "pme_greens_setup": null,
+    "pme_greens_setup_standalone": null,
+    "settle_cramers_rule": null,
+    "settle_pos_eigh": null,
+    "settle_rattle_loop": null
+  },
+  "stage": 2,
+  "timestamp": "2026-08-25T22:42:39.492677+00:00",
+  "x64_enabled": false,
+  "xla_flags": ""
+}
