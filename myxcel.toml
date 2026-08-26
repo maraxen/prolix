@@ -5,6 +5,9 @@
 # Local GPU traces / scratch — not source; keep off worktree scratch.
 excludes = ["profiling/", "bench/", "p5c_stage1_v2/"]
 
+[tier]
+kind = "research"
+
 [slurm.presets.preempt_gpu]
 # Preemptable GPU jobs — long walltime, fault-tolerant workloads.
 # Use for multi-hour GPU runs that can tolerate preemption.

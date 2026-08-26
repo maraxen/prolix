@@ -68,3 +68,7 @@ analysis/
 
 # Raw per-agent subagent transcript dumps (harness-local, never commit)
 .praxia/subagent_outputs/
+
+# myxcel local-state cache (coldify sidecar, githook bundle) -- regenerable,
+# never authoritative; see .praxia/docs/plans/260812_storage-tiering-standardization.md
+.myxcel/

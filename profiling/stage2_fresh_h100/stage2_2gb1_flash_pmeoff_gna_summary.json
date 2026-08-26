@@ -1,0 +1,20 @@
+{
+  "mode": "flash",
+  "protein": "2gb1",
+  "n_real_atoms": 1987,
+  "n_padded_atoms": 5000,
+  "energy_only_ms": null,
+  "autodiff_forces_ms": null,
+  "flash_forces_ms": 1.772430712589994,
+  "flash_speedup": null,
+  "flash_error": null,
+  "pme": "off",
+  "grid_spacing": "na",
+  "raw_results": {
+    "flash_forces": {
+      "mean_ms": 1.772430712589994,
+      "std_ms": 0.005028663954374154,
+      "min_ms": 1.7630300018936396
+    }
+  }
+}

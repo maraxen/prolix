@@ -1,0 +1,20 @@
+{
+  "mode": "dense",
+  "protein": "1vii",
+  "n_real_atoms": 1963,
+  "n_padded_atoms": 5000,
+  "energy_only_ms": null,
+  "autodiff_forces_ms": 0.845978669822216,
+  "flash_forces_ms": null,
+  "flash_speedup": null,
+  "flash_error": null,
+  "pme": "off",
+  "grid_spacing": "na",
+  "raw_results": {
+    "autodiff_forces": {
+      "mean_ms": 0.845978669822216,
+      "std_ms": 0.004259907315908892,
+      "min_ms": 0.840013800188899
+    }
+  }
+}
