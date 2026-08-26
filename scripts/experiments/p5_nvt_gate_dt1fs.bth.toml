@@ -35,6 +35,20 @@ dt_fs = "float"
 gamma_ps = "float"
 n_seeds = "int"
 job_id = "str"
+# Added 2026-08-06 (task 260806_p5_measurement_pipeline_audit). The gate's own
+# pass/fail conditions still key only on mean_t_rot and gate_pass, which are
+# unchanged: ke_trans_rel + ke_com == ke_trans identically, so ke_rot is
+# untouched by the corrected accounting. These make the COM diagnostics
+# queryable. mean_t_com is the discriminating observable -- with
+# remove_linear_com_momentum=False it should sit at ~300 K, and
+# (mean_t_trans - mean_t_trans_corrected) should equal predicted_dof_bias_k.
+mean_t_trans = "float"
+mean_t_total = "float"
+mean_t_com = "float"
+std_t_com = "float"
+mean_t_trans_corrected = "float"
+std_t_trans_corrected = "float"
+predicted_dof_bias_k = "float"
 
 [metadata]
 task_id = "260603_p5_settle_correctness"

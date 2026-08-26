@@ -4,15 +4,25 @@ Prolix is a JAX-based molecular dynamics engine for protein folding and dynamics
 
 ## CURRENT STATE
 
-last-edit: 2026-06-01
+last-edit: 2026-08-07
 
 ongoing-work: P1a MolecularBundle (bucketed JIT boundary). NPT KE init bug resolved
 (settle.py:1944 `/mu` → `*mu`, 2026-06-01, commit b6e5bb9). LFMiddle campaign 89c9a900
 concluded FALSIFIED (2026-06-01) — 46 runs, 0 passes, all dt values; see
 v1.1_next_steps.md. Phase 5 (C3 AM conservation, 678c9cb) lifted the dt cap to
-≤ 1.0 fs at production scale (n ≳ 16, gamma ≈ 10 ps⁻¹) — gate job 15870804 +
-size sweep ba334c1f (2026-06-13). Residual small-N warm bias is translational
-finite-size; see `.praxia/docs/research/260612_p5-dt1fs-size-crossover.md`.
+≤ 1.0 fs at production scale (n ≳ 16, gamma ≈ 10 ps⁻¹) — original gate job 15870804 +
+size sweep ba334c1f (2026-06-13). **Correction (2026-08-07, task
+260806_p5_measurement_pipeline_audit):** job 15870804 actually propagated positions
+at an effective dt ≈ 0.5 fs, not 1.0 fs — `settle_langevin`'s A-step was passed
+`half_dt` where the callee already halves internally (fixed in commit cfd2b85). The
+dt=1.0 fs cap-lift is now independently re-confirmed at a genuine 1.0 fs step (gate
+job 19774893, T_rot=298.93±0.29 K; GPU fast-suite regression check, job 19875071,
+clean). **Size sweep ba334c1f re-run at genuine dt=1.0 fs (2026-08-11, campaign
+46a4d737, jobs 19882395/19898460/19898934):** the crossover conclusion holds
+unchanged — N\*=16 (±15 K), N\*=64 (±5 K), T_rot faithful at every size (max |dev|
+3.6 K). The residual small-N warm bias is confirmed translational finite-size, not
+an artifact of the half_dt bug; see
+`.praxia/docs/research/260612_p5-dt1fs-size-crossover.md`.
 
 notes:
 - Tiling bug found in `src/prolix/physics/optimization.py`: `inner_tile_size` for the

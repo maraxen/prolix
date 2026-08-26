@@ -413,6 +413,11 @@ class TestSETTLEIntegration:
     key = jax.random.key(0)
     state = init_fn(key, R)
 
+    # jit-wrap: production usage always wraps apply_fn (settle.py:2430); calling
+    # the raw eager function 1000 times dispatches one GPU kernel launch per op
+    # per step, which can push well past pytest's 900s timeout on a GPU backend.
+    apply_fn = jax.jit(apply_fn)
+
     # Run 1000 steps (Extended from 500)
     for _ in range(1000):
       state = apply_fn(state)
