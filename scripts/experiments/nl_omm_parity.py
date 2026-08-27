@@ -159,26 +159,197 @@ def _emit_1vii_gold() -> dict:
     }
 
 
+def _bundle_from_1vii_gold(rec: dict):
+    """Build a MolecularBundle from 1vii gold record for NL nonbonded-only comparison.
+
+    Constructs an ExclusionSpec directly from omm_exceptions, then routes through
+    make_bundle_from_system with a minimal proxy (zero bonded topology by construction).
+
+    Args:
+        rec: Gold record dict from nl_1vii.json (must have omm_exceptions field).
+
+    Returns:
+        MolecularBundle with nonbonded params + exclusions, zero bonded topology.
+    """
+    import jax.numpy as jnp
+    import numpy as np
+    from prolix.physics import neighbor_list as nl
+    from prolix.physics.system import make_bundle_from_system
+
+    n_atoms = int(rec["n_atoms"])
+    omm_exceptions = rec.get("omm_exceptions", [])
+
+    # Build ExclusionSpec directly from omm_exceptions
+    # All pairs go into idx_12_13 (fully excluded from main kernels)
+    # Nonzero pairs also go into exception_* fields (separate energy term)
+    idx_12_13_list = []
+    exc_pairs_list = []
+    exc_sigmas_list = []
+    exc_epsilons_list = []
+    exc_chargeprods_list = []
+
+    for exc in omm_exceptions:
+        i, j, charge_prod, sigma_exc, epsilon_exc = exc
+        idx_12_13_list.append([int(i), int(j)])
+        # Include in exception energy if nonzero (exact float comparison per spec C6)
+        if charge_prod != 0.0 or epsilon_exc != 0.0:
+            exc_pairs_list.append([int(i), int(j)])
+            exc_sigmas_list.append(float(sigma_exc))
+            exc_epsilons_list.append(float(epsilon_exc))
+            exc_chargeprods_list.append(float(charge_prod))
+
+    idx_12_13 = jnp.array(idx_12_13_list, dtype=jnp.int32) if idx_12_13_list else jnp.zeros((0, 2), dtype=jnp.int32)
+    exc_pairs = jnp.array(exc_pairs_list, dtype=jnp.int32) if exc_pairs_list else jnp.zeros((0, 2), dtype=jnp.int32)
+    exc_sigmas = jnp.array(exc_sigmas_list, dtype=jnp.float32) if exc_sigmas_list else jnp.zeros((0,), dtype=jnp.float32)
+    exc_epsilons = jnp.array(exc_epsilons_list, dtype=jnp.float32) if exc_epsilons_list else jnp.zeros((0,), dtype=jnp.float32)
+    exc_chargeprods = jnp.array(exc_chargeprods_list, dtype=jnp.float32) if exc_chargeprods_list else jnp.zeros((0,), dtype=jnp.float32)
+
+    excl_spec = nl.ExclusionSpec(
+        n_atoms=n_atoms,
+        idx_12_13=idx_12_13,
+        idx_14=jnp.zeros((0, 2), dtype=jnp.int32),  # No implicit 1-4 scaling
+        scale_14_elec=1.0,  # Inert (idx_14 is empty)
+        scale_14_vdw=1.0,   # Inert (idx_14 is empty)
+        exception_pairs=exc_pairs,
+        exception_sigmas=exc_sigmas,
+        exception_epsilons=exc_epsilons,
+        exception_chargeprods=exc_chargeprods,
+    )
+
+    # Build minimal proxy object exposing only nonbonded + PBC params
+    class _Proxy:
+        def __init__(self, positions, box_size, charges, sigmas, epsilons, pme_alpha, cutoff):
+            self.positions = positions
+            self.box_size = box_size
+            self.charges = charges
+            self.sigmas = sigmas
+            self.epsilons = epsilons
+            self.pme_alpha = pme_alpha
+            self.nonbonded_cutoff = cutoff
+
+    positions_A = np.array(rec["positions_A"], dtype=np.float64)
+    box_A = np.array(rec["box_A"], dtype=np.float64)
+    charges = np.array(rec["charges"], dtype=np.float32)
+    sigmas_A = np.array(rec["sigmas_A"], dtype=np.float32)
+    epsilons_kcal = np.array(rec["epsilons_kcal"], dtype=np.float32)
+    pme_alpha = float(rec["pme_alpha_per_angstrom"])
+    cutoff = float(rec["cutoff_angstrom"])
+
+    proxy = _Proxy(
+        positions=positions_A,
+        box_size=box_A,
+        charges=charges,
+        sigmas=sigmas_A,
+        epsilons=epsilons_kcal,
+        pme_alpha=pme_alpha,
+        cutoff=cutoff,
+    )
+
+    # Build bundle via factory: zero bonded topology by construction (all None defaults)
+    bundle = make_bundle_from_system(
+        proxy,
+        boundary_condition="periodic",
+        exclusion_spec=excl_spec,
+        use_size_buckets=False,  # Exact padding to real atom count
+    )
+
+    return bundle
+
+
 def _compare_probe(probe: str, gold: Path) -> dict:
     rec = json.loads(gold.read_text())
     if probe == "1vii" or rec.get("probe") == "1vii":
-        # Gold is vendored for later EnsemblePlan/NL compare; this cut gates the
-        # two-particle switch window only.
-        return {
-            "campaign_slug": "nonbonded-omm-parity",
-            "probe": "1vii",
-            "engine": "neighbor_list",
-            "oracle_path": str(gold.relative_to(_REPO)),
-            "oracle_sha256": sha256_file(gold),
-            "openmm_version": rec.get("openmm_version", ""),
-            "gate_pass": 0,
-            "delta_e_kcal": 1e9,
-            "force_rmse_kcal_mol_A": 1e9,
-            "cutoff_angstrom": float(rec.get("cutoff_angstrom", 9.0)),
-            "switch_distance_angstrom": float(rec.get("switch_distance_angstrom") or 0.0),
-            "skin_angstrom": 1.0,
-            "compare_status": rec.get("compare_status", "gold_only"),
-        }
+        # Real NL nonbonded-only comparison via energy_fn_from_bundle
+        import jax
+        import jax.numpy as jnp
+
+        jax.config.update("jax_enable_x64", True)
+
+        try:
+            from prolix.api.bundle_md import energy_fn_from_bundle
+            from prolix.physics import neighbor_list as nl
+            from prolix.physics.pbc import create_periodic_space
+
+            # Build bundle from gold (zero bonded topology by construction)
+            bundle = _bundle_from_1vii_gold(rec)
+
+            # Build neighbor list with overflow check (mandatory gate per spec C4)
+            displacement_fn, _ = create_periodic_space(jnp.diag(bundle.box))
+            neighbor_fn = nl.make_neighbor_list_fn(
+                displacement_fn, jnp.diag(bundle.box), float(bundle.cutoff_distance)
+            )
+            nbr0 = neighbor_fn.allocate(bundle.positions)
+            nbr = neighbor_fn.update(bundle.positions, nbr0)
+
+            if bool(nbr.did_buffer_overflow):
+                return {
+                    "campaign_slug": "nonbonded-omm-parity",
+                    "probe": "1vii",
+                    "engine": "neighbor_list",
+                    "oracle_path": str(gold.relative_to(_REPO)),
+                    "oracle_sha256": sha256_file(gold),
+                    "openmm_version": rec.get("openmm_version", ""),
+                    "gate_pass": 0,
+                    "delta_e_kcal": 1e9,
+                    "force_rmse_kcal_mol_A": 1e9,
+                    "cutoff_angstrom": float(rec.get("cutoff_angstrom", 9.0)),
+                    "switch_distance_angstrom": float(rec.get("switch_distance_angstrom") or 0.0),
+                    "skin_angstrom": 1.0,
+                    "compare_status": "neighbor_list_overflow",
+                }
+
+            # Evaluate energy and forces
+            energy_fn = energy_fn_from_bundle(
+                bundle,
+                include_nonbonded=True,
+                lj_switch_width=1.0,
+                pme_grid_points=int(rec["pme_grid_points"]),
+            )
+
+            e_prolix = float(energy_fn(bundle.positions, neighbor=nbr))
+
+            # Compute forces via jax.grad
+            grad_fn = jax.grad(energy_fn)
+            f_prolix = grad_fn(bundle.positions, neighbor=nbr)
+
+            # Compute deltas
+            e_gold = float(rec["energy_kcal"])
+            delta_e = e_prolix - e_gold
+
+            f_gold = jnp.asarray(rec["forces_kcal_mol_A"], dtype=jnp.float32)
+            force_rmse = float(jnp.sqrt(jnp.mean((f_prolix - f_gold) ** 2)))
+
+            return result_row(
+                probe=rec.get("probe", "1vii"),
+                engine="neighbor_list",
+                gold=gold,
+                rec=rec,
+                repo=_REPO,
+                delta_e=delta_e,
+                force_rmse=force_rmse,
+                e_prolix=e_prolix,
+            )
+
+        except Exception as e:
+            import traceback
+
+            traceback.print_exc()
+            return {
+                "campaign_slug": "nonbonded-omm-parity",
+                "probe": "1vii",
+                "engine": "neighbor_list",
+                "oracle_path": str(gold.relative_to(_REPO)),
+                "oracle_sha256": sha256_file(gold),
+                "openmm_version": rec.get("openmm_version", ""),
+                "gate_pass": 0,
+                "delta_e_kcal": 1e9,
+                "force_rmse_kcal_mol_A": 1e9,
+                "cutoff_angstrom": float(rec.get("cutoff_angstrom", 9.0)),
+                "switch_distance_angstrom": float(rec.get("switch_distance_angstrom") or 0.0),
+                "skin_angstrom": 1.0,
+                "compare_status": f"exception: {type(e).__name__}",
+            }
+
     delta_e, force_rmse = compare_nl_two_particle(rec)
     e_p = float(rec["energy_kcal"]) + delta_e
     return result_row(
