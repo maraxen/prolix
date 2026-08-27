@@ -56,6 +56,15 @@ def system_params_to_protein(params: SystemParams) -> Protein:
     masses_raw = _get("masses")
     masses = jnp.asarray(masses_raw) if masses_raw is not None else jnp.ones_like(charges)
 
+    # atom_mask: every consumer (system.py's GB/PME/dispersion-tail terms) treats
+    # a missing mask as "all atoms real" via getattr(system, "atom_mask", ones),
+    # but that fallback never fires once the attribute exists with value None --
+    # which is exactly what happens here if left unset, since Protein's
+    # atom_mask field defaults to None rather than being absent. Populate it
+    # explicitly so downstream getattr-with-default reads see a real array.
+    atom_mask_raw = _get("atom_mask")
+    atom_mask = jnp.asarray(atom_mask_raw) if atom_mask_raw is not None else jnp.ones(n_atoms, dtype=bool)
+
     # Constraint fields (C2)
     constrained_bonds = jnp.asarray(_get("constrained_bonds")) if _get("constrained_bonds") is not None else None
     constrained_bond_lengths = jnp.asarray(_get("constrained_bond_lengths")) if _get("constrained_bond_lengths") is not None else None
@@ -86,6 +95,7 @@ def system_params_to_protein(params: SystemParams) -> Protein:
     return Protein(
         coordinates=sentinel_coords, aatype=sentinel_aatype,
         residue_index=sentinel_residue_index, chain_index=sentinel_chain_index,
+        atom_mask=atom_mask,
         charges=charges, masses=masses, bonds=bonds, bond_params=bond_params,
         constrained_bonds=constrained_bonds, constrained_bond_lengths=constrained_bond_lengths,
         angles=angles, angle_params=angle_params, proper_dihedrals=proper_dihedrals,

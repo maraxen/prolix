@@ -627,15 +627,15 @@ def run_simulation(
       new_state = fire_apply_fn(state, **kwargs)
       
       # 3. Displacement capping (limit |dr| to disp_cap Å)
-      dr = new_state.positions - state.positions
+      dr = new_state.position - state.position
       dr_norm = jnp.linalg.norm(dr, axis=-1, keepdims=True)
       scale = jnp.minimum(1.0, disp_cap / (dr_norm + 1e-8))
-      
-      # If capped, we also scale down velocity to maintain some consistency
-      new_pos = state.positions + dr * scale
-      new_vel = new_state.velocity * scale
-      
-      return dataclasses.replace(new_state, positions=new_pos, velocity=new_vel)
+
+      # If capped, we also scale down momentum to maintain some consistency
+      new_pos = state.position + dr * scale
+      new_mom = new_state.momentum * scale
+
+      return dataclasses.replace(new_state, position=new_pos, momentum=new_mom)
       
     return capped_apply
 
@@ -707,7 +707,7 @@ def run_simulation(
 
     # Initialize FIRE from current positions
     if neighbor_fn is not None:
-      nbr = neighbor_fn.update(current_positions)
+      nbr = neighbor.update(current_positions)
       stage_state = stage_init_fn(current_positions, mass=masses, neighbor=nbr)
     else:
       stage_state = stage_init_fn(current_positions, mass=masses)
@@ -717,10 +717,9 @@ def run_simulation(
       interval = max(1, int(spec.fire_neighbor_update_interval))
       for i in range(int(n_steps)):
         if i % interval == 0:
-          nbr = neighbor_fn.update(stage_state.positions)
+          nbr = nbr.update(stage_state.position)
           if nbr.did_buffer_overflow:
-            nbr = neighbor_fn.allocate(stage_state.positions)
-            nbr = neighbor_fn.update(stage_state.positions)
+            nbr = neighbor_fn.allocate(stage_state.position)
         stage_state = stage_step_fn(stage_state, neighbor=nbr)
       final_state = stage_state
       neighbor = nbr
@@ -734,11 +733,11 @@ def run_simulation(
         return jax.lax.fori_loop(0, _n, body_fn, state)
 
       final_state = _run_stage(stage_state)
-    current_positions = final_state.positions
+    current_positions = final_state.position
 
     # Log stage results
     if neighbor_fn is not None:
-      _nbr_log = neighbor_fn.update(current_positions)
+      _nbr_log = neighbor.update(current_positions)
       stage_e = float(stage_energy_fn(current_positions, neighbor=_nbr_log))
     else:
       stage_e = float(stage_energy_fn(current_positions))
