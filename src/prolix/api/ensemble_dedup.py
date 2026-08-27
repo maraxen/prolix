@@ -15,7 +15,8 @@ Scope (B1-XTRAX-WIRE / using-xtrax):
 from __future__ import annotations
 
 import dataclasses
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 
 import numpy as np
 from xtrax.tiling.dedup import DedupSpec
@@ -81,7 +82,7 @@ def plan_n_mols_with_dedup(
     n_mols: int,
     dedup_spec: DedupSpec,
     *,
-    budget_bytes: float | int = 1 << 40,
+    budget_bytes: float = 1 << 40,
 ) -> BatchPlan:
     """Plan ``n_mols`` with a DedupSpec so xtrax pre-demotes to DedupGather.
 

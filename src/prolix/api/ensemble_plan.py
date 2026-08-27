@@ -664,9 +664,9 @@ class EnsemblePlan:
         from prolix.api.bundle_md import (
             active_positions,
             as_integration_scalars,
+            displacement_fn_for_bundle,
             energy_fn_from_bundle,
             force_fn_from_bundle,
-            displacement_fn_for_bundle,
             masses_for_bundle,
             masses_with_prefix,
             positions_with_prefix,

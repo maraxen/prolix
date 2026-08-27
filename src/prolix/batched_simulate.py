@@ -2022,8 +2022,8 @@ def make_langevin_step_explicit(
     - Force dispatch to flash_explicit_forces (dense LJ/Coulomb, no GB)
     """
     from prolix.batched_energy import single_padded_force
-    from prolix.physics.settle import settle_positions, settle_velocities
     from prolix.physics.constraints import project_momenta, project_positions
+    from prolix.physics.settle import settle_positions, settle_velocities
     
     c1 = jnp.exp(-gamma * dt)
     c2 = jnp.sqrt(1.0 - jnp.exp(-2.0 * gamma * dt))

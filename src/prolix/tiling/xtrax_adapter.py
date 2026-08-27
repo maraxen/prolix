@@ -98,7 +98,7 @@ def _hetero_safe_map_decision(axis: AxisSpec) -> AxisDecision:
 
 def plan_axes_with_xtrax(
     axes: list[AxisSpec],
-    budget_bytes: float | int,
+    budget_bytes: float,
     estimate_memory: Callable[[list[AxisDecision]], float],
     carry_specs: list[CarrySpec] | None = None,
     dedup_specs: list[DedupSpec] | None = None,
