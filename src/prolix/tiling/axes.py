@@ -75,8 +75,29 @@ N_STEPS = AxisSpec(
     doc="MD integration step axis (carry-bearing Scan via CarrySpec).",
 )
 
+# Homogeneous rigid-water axis (SETTLE / constrained OU). Vmap by default;
+# SafeMap when a BatchPlan chunks n_waters for memory (xtrax compose).
+N_WATERS = AxisSpec(
+    name="n_waters",
+    axis_index=7,
+    cardinality=4096,
+    default_batch_size=0,
+    tile_granularity=32,
+    heterogeneous=False,
+    doc="Rigid TIP3P water count (constrained Langevin O-step / SETTLE).",
+)
+
 # Backward-compatibility alias (deprecated; planned removal 2026-08-21)
 N_SYSTEMS = N_MOLS
 
 # Registry of all axes, sorted by axis_index
-ALL_AXES = [N_ATOMS, N_BONDS, N_ANGLES, N_TORSIONS, N_CONFORMERS, N_MOLS, N_STEPS]
+ALL_AXES = [
+    N_ATOMS,
+    N_BONDS,
+    N_ANGLES,
+    N_TORSIONS,
+    N_CONFORMERS,
+    N_MOLS,
+    N_STEPS,
+    N_WATERS,
+]

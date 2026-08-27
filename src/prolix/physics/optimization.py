@@ -5,6 +5,7 @@ from typing import TypeVar
 import jax
 import jax.numpy as jnp
 
+from .lj_switching import lj_switch_weight
 from .tiling import (
     compute_dense_tiling_dims,
     pad_to_tile,
@@ -125,7 +126,7 @@ def _chunked_lj_bwd(excl_indices, displacement_fn, cutoff, tile_size, res, g):
 
 chunked_lj_energy.defvjp(_chunked_lj_fwd, _chunked_lj_bwd)
 
-@functools.partial(jax.custom_vjp, nondiff_argnums=(6, 7, 8))
+@functools.partial(jax.custom_vjp, nondiff_argnums=(6, 7, 8, 9))
 def chunked_lj_energy_nl(
     r: jnp.ndarray,
     sigmas: jnp.ndarray,
@@ -135,7 +136,8 @@ def chunked_lj_energy_nl(
     neighbor_idx: jnp.ndarray,
     displacement_fn: Callable,
     cutoff: float = 9.0,
-    tile_size: int = 32
+    tile_size: int = 32,
+    switch_width: float = 0.0,
 ) -> jnp.ndarray:
     """Computes LJ energy over neighbor list."""
     inner_tile_size = 1024
@@ -167,15 +169,17 @@ def chunked_lj_energy_nl(
         inv_r6 = jnp.where(ds > 0.0, (s_ij * inv_ds)**6, 0.0)
         m = mask_i[:, None] & mask_j & (ds > 0.0)
         if cutoff > 0: m = m & (ds < cutoff)
-        energy = jnp.where(m, 4.0 * e_ij * (inv_r6**2 - inv_r6), 0.0)
+        sw = None if switch_width == 0.0 else switch_width
+        switch = lj_switch_weight(ds, cutoff, sw)
+        energy = jnp.where(m, 4.0 * e_ij * (inv_r6**2 - inv_r6) * switch, 0.0)
         return 0.5 * jnp.sum(energy * pair_scale)
 
     return tile_reduction_nl(r_pad, neighbor_idx, mask_pad, f_tile, 0.0, tile_size, inner_tile_size=inner_tile_size)
 
-def _chunked_lj_nl_fwd(r, sigmas, epsilons, excl_indices, excl_scales, nb_idx, disp_fn, cutoff, tile_size):
-    return chunked_lj_energy_nl(r, sigmas, epsilons, excl_indices, excl_scales, nb_idx, disp_fn, cutoff, tile_size), (r, sigmas, epsilons, excl_indices, excl_scales, nb_idx)
+def _chunked_lj_nl_fwd(r, sigmas, epsilons, excl_indices, excl_scales, nb_idx, disp_fn, cutoff, tile_size, switch_width):
+    return chunked_lj_energy_nl(r, sigmas, epsilons, excl_indices, excl_scales, nb_idx, disp_fn, cutoff, tile_size, switch_width), (r, sigmas, epsilons, excl_indices, excl_scales, nb_idx)
 
-def _chunked_lj_nl_bwd(displacement_fn, cutoff, tile_size, res, g):
+def _chunked_lj_nl_bwd(displacement_fn, cutoff, tile_size, switch_width, res, g):
     # excl_indices and neighbor_idx (nb_idx) are differentiable-position
     # arguments (not nondiff_argnums, debt 802) purely so they can be
     # jax.vmap/jax.lax.while_loop tracers (per-replica topology under a

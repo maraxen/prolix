@@ -1,0 +1,74 @@
+[experiment]
+hypothesis = """
+RR5 (paper-gating): prolix's production EnsemblePlan (composed xtrax) dt=1.0
+fs NVT path achieves throughput parity (ns/day) with OpenMM on the standard
+JAC/DHFR explicit-solvent benchmark (23,558 atoms, TIP3P, PME, gate job
+15870804 / 19774893 provenance). This sidecar's own gate is HARNESS-LEVEL
+ONLY: did the script produce a finite, positive ratio backed by a
+well-fitting compile/compute regression (r_squared) for a given (shim_mode,
+seed, gpu_tag) cell? It does NOT encode the RR5 3-tier science verdict
+(pass >=0.7x / marginal <0.7x-not-yet-optimized / fail-residual) described
+in the sprint plan (task 260813_triage_next_sprint, plan_id
+260813_s2_dhfr_plan) -- that verdict is an AGGREGATION across all runs (both
+GPUs, both shim modes, pre/post any profiling-driven optimization pass),
+computed downstream via `bth sql` in Phase 6, not per-single-run here.
+
+REDESIGN (task 260814_dhfr-bench-redesign, superseding the original
+wallclock_s / n_warmup_steps / n_production_steps schema): the original
+harness hand-rolled settle_langevin + a raw jax.lax.scan and timed a
+warmup/production pair with MISMATCHED static scan lengths, which silently
+let a full JIT recompile leak into the "timed" window (lax.scan's length is
+trace-time-static; different lengths compile as different XLA programs).
+Fixed by calling the actual production entry point (prolix.api.EnsemblePlan)
+instead of reimplementing the physics stack in this script, and by replacing
+the broken warmup/timed split with a linear-regression sweep across
+n_steps_list (same validated methodology as
+scripts/experiments/profile_b1_heterogeneous_solvated_compile.py):
+per_step_corrected_s (the regression slope) and compile_fixed_s (the
+intercept) decompose compute from fixed overhead regardless of whether JIT
+compilation is cached or re-paid per call; r_squared is a built-in
+measurement-pipeline sanity check on the fit itself.
+
+KNOWN SCOPE LIMIT (see scripts/experiments/bench_dhfr_parity.py module
+docstring "KNOWN BLOCKER"): --shim-mode analytical now raises immediately
+rather than attempting a reimplementation -- the production EnsemblePlan
+path this script calls has no analytical-bonded-forces switch (it always
+uses the vectorized autograd bonded energy functions). The underlying
+vectorization bug in angle_forces_analytical / dihedral_forces_analytical
+(src/prolix/physics/analytical_forces.py, backlog #4241) remains open
+upstream but is no longer this harness's concern; analytical-mode runs
+should not be expected in the catalog at all going forward.
+"""
+
+[outcomes.pass]
+condition = "ratio IS NOT NULL AND ratio > 0 AND ratio < 1e6 AND per_step_corrected_s IS NOT NULL AND per_step_corrected_s > 0 AND r_squared IS NOT NULL AND r_squared > 0.8 AND prolix_ns_per_day IS NOT NULL AND openmm_ns_per_day IS NOT NULL"
+decision = "Harness produced a valid, finite throughput measurement backed by a well-fitting compile/compute regression for this (shim_mode, seed, gpu_tag) cell. Proceed to aggregate across cells in Phase 6 (bth campaign review / bth sql) to compute the RR5 3-tier verdict per the plan's gate rule."
+reasoning = "A finite positive ratio with a positive per-step slope and r_squared > 0.8 means the regression sweep produced a physically sensible, well-explained fit end-to-end (proxide parse -> box glue -> filtered bonded terms -> MolecularBundle -> EnsemblePlan production sweep; OpenMM System deserialize -> Context -> stepped production window) without NaN/Inf, crash, or a degenerate fit. The r_squared floor catches a measurement-pipeline failure (e.g. noisy/non-linear timings) that a raw ratio check alone would miss. The upper bound (1e6) is a sanity cap catching a degenerate near-zero openmm_ns_per_day (e.g. OpenMM stalled) rather than a real speed claim."
+
+[outcomes.fail]
+condition = "ratio IS NULL OR ratio <= 0 OR ratio >= 1e6 OR per_step_corrected_s IS NULL OR per_step_corrected_s <= 0 OR r_squared IS NULL OR r_squared <= 0.8 OR prolix_ns_per_day IS NULL OR openmm_ns_per_day IS NULL"
+decision = "Investigate: (a) NaN/Inf ratio or non-positive per_step_corrected_s -- check for a crashed engine or non-finite positions during the sweep (inspect the bth run log's raw_results); (b) r_squared <= 0.8 -- the compile/compute regression didn't fit well, meaning the measurement itself is suspect (e.g. thermal throttling, contended GPU, too few n_steps_list points) -- do not trust prolix_ns_per_day from this run even if it looks plausible; (c) ratio near zero or absurdly large -- one engine's step count or dt didn't match the other (verify DT_FS / max(n_steps_list) parity between the prolix sweep's top point and openmm_n_production_steps); (d) for shim_mode=analytical specifically, this is now an immediate, expected RuntimeError (see module docstring), not a new bug."
+reasoning = "Any of these conditions means the run did not produce a usable, trustworthy RR5 data point. The is_residual=true catches everything not explicitly passing, including the known/expected analytical-mode rejection and any regression-fit-quality failure."
+is_residual = true
+
+[result_schema]
+prolix_ns_per_day = "float"
+openmm_ns_per_day = "float"
+ratio = "float"
+shim_mode = "str"
+seed = "int"
+gpu_tag = "str"
+n_atoms = "int"
+per_step_corrected_s = "float"
+compile_fixed_s = "float"
+r_squared = "float"
+openmm_wallclock_s = "float"
+openmm_platform = "str"
+openmm_n_production_steps = "int"
+dt_fs = "float"
+smoke = "bool"
+
+[metadata]
+campaign_id = "s2-dhfr-rr5-parity"
+campaign_mode = "confirmation"
+tags = ["cluster", "s2", "dhfr", "rr5", "295", "294"]

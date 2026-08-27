@@ -107,6 +107,29 @@ class MolecularShapeSpec:
     has_implicit_solvent: bool
     boundary_condition: Literal["free", "periodic"] = "periodic"
     has_real_water: bool = False
+    # When False, arrays are padded to exact counts (single long-running
+    # homogeneous system). exact_* are host-static JIT keys; 0 when unused.
+    use_size_buckets: bool = True
+    exact_n_atoms: int = 0
+    exact_n_waters: int = 0
+
+
+def atom_pad_length(spec: MolecularShapeSpec) -> int:
+    """Host-static padded atom count (bucket ladder or exact)."""
+    if spec.use_size_buckets:
+        return ATOM_BUCKETS[spec.atom_bucket_idx]
+    if spec.exact_n_atoms <= 0:
+        raise ValueError("use_size_buckets=False requires exact_n_atoms > 0")
+    return spec.exact_n_atoms
+
+
+def water_pad_length(spec: MolecularShapeSpec) -> int:
+    """Host-static padded water-slot count (bucket ladder or exact)."""
+    if spec.use_size_buckets:
+        return WATER_BUCKETS[spec.water_bucket_idx]
+    if spec.exact_n_waters <= 0:
+        raise ValueError("use_size_buckets=False requires exact_n_waters > 0")
+    return spec.exact_n_waters
 
 
 class MolecularBundle(eqx.Module):

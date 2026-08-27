@@ -1,0 +1,48 @@
+[experiment]
+hypothesis = """
+Campaign E (bd1f47e8, full-md-path-matrix, exploration): on real
+EnsemblePlan.run(..., run_mode="inference") steps, measure P_flash / P_nl /
+P_dense costs on 1vii and DHFR, and whether NL survives init+step after
+binding neighbor= into settle init.
+
+This sidecar gates HARNESS QUALITY ONLY (finite slope / r_squared when
+status=ok; status=oom allowed for the dense path). It does NOT encode
+"NL faster than flash" — that is campaign review plus lesson-379
+investigation, not a per-run outcome.
+"""
+
+[outcomes.pass]
+condition = "(status = 'ok' AND per_step_corrected_s IS NOT NULL AND per_step_corrected_s > 0 AND r_squared IS NOT NULL AND r_squared > 0.8) OR (status = 'oom' AND nonbonded = 'dense')"
+decision = "Harness produced a usable full-step cell (ok regression or expected dense OOM). Aggregate via bth campaign review; if P_nl is not faster than P_flash, run --probe nl-stats derived-from probes before any default flip."
+reasoning = "A well-fitting slope means compile vs compute split worked. Dense OOM is a recorded cell, not a skip. Unexpected NL/flash OOM or a bad fit must not pass."
+
+[outcomes.fail]
+condition = "status IS NULL OR status = 'error' OR (status = 'ok' AND (per_step_corrected_s IS NULL OR per_step_corrected_s <= 0 OR r_squared IS NULL OR r_squared <= 0.8)) OR (status = 'oom' AND nonbonded <> 'dense')"
+decision = "Investigate crash, unexpected OOM on flash/NL, or a degenerate regression. Do not interpret as a kernel ranking."
+reasoning = "Anything other than a valid ok fit or expected dense OOM is an unusable cell."
+is_residual = true
+
+[result_schema]
+system = "str"
+nonbonded = "str"
+use_size_buckets = "bool"
+remat = "bool"
+dtype = "str"
+n_real = "int"
+n_padded = "int"
+nl_k_max = "int"
+per_step_corrected_s = "float"
+compile_fixed_s = "float"
+r_squared = "float"
+status = "str"
+git_sha = "str"
+xla_flags = "str"
+probe = "str"
+init_neighbor_bound = "bool"
+k_over_n = "float"
+rebuild_every = "int"
+
+[metadata]
+campaign_id = "bd1f47e8"
+campaign_mode = "exploration"
+tags = ["cluster", "full-md-path-matrix", "ensemble-step"]

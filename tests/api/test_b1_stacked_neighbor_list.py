@@ -106,6 +106,45 @@ def _load_vacuum_boxed_1vii_pair():
 
 
 @pytest.mark.slow
+def test_single_bundle_nl_init_first_force_receives_neighbor(monkeypatch):
+    """Init and stepping must share the NL backend (DHFR jobs 20520003 / 20528981).
+
+    EnsemblePlan allocated the neighbor list *after* settle_langevin init_fn,
+    so the first force was dense O(N²) even when use_neighbor_list=True.
+    """
+    import prolix.api.bundle_md as bundle_md
+    from prolix.api.ensemble_plan import EnsemblePlan
+
+    calls: list[bool] = []
+    orig = bundle_md.single_padded_energy
+
+    def _spy(sys, displacement_fn, implicit_solvent=True, *args, **kwargs):
+        calls.append(kwargs.get("neighbor") is not None)
+        return orig(sys, displacement_fn, implicit_solvent, *args, **kwargs)
+
+    monkeypatch.setattr(bundle_md, "single_padded_energy", _spy)
+
+    bundle_a, _bundle_b = _load_vacuum_boxed_1vii_pair()
+    plan = EnsemblePlan.from_bundle(bundle_a)
+    trajs = plan.run(
+        n_steps=20,
+        dt=0.5,
+        kT=0.6,
+        seed=0,
+        run_mode="inference",
+        use_neighbor_list=True,
+        nl_update_every=5,
+    )
+    traj = trajs[0] if isinstance(trajs, list) else trajs
+    assert bool(jnp.all(jnp.isfinite(traj.positions)))
+    assert calls, "expected single_padded_energy to run during NL init+step"
+    assert calls[0], (
+        "first force must receive neighbor=; leftover dense init OOMs DHFR"
+    )
+    assert all(calls), f"every energy eval must use NL, got neighbor-present flags {calls}"
+
+
+@pytest.mark.slow
 def test_stacked_use_neighbor_list_matches_shape_and_is_finite():
     """EnsemblePlan.run(use_neighbor_list=True) over 2 bundles: real vmapped dispatch."""
     from prolix.api.ensemble_plan import EnsemblePlan
@@ -130,7 +169,10 @@ def test_stacked_dense_path_unaffected_by_nl_support():
     bundle_a, bundle_b = _load_vacuum_boxed_1vii_pair()
     plan = EnsemblePlan.from_bundles([bundle_a, bundle_b])
 
-    trajs = plan.run(n_steps=6, dt=0.5, kT=0.6, seed=0, run_mode="inference")
+    trajs = plan.run(
+        n_steps=6, dt=0.5, kT=0.6, seed=0, run_mode="inference",
+        use_neighbor_list=False, use_flash_forces=False,
+    )
     assert isinstance(trajs, list) and len(trajs) == 2
     for traj in trajs:
         assert bool(jnp.all(jnp.isfinite(traj.positions)))

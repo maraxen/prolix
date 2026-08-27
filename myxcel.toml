@@ -1,6 +1,10 @@
 # Project-level myxcel configuration for prolix.
 # Override resolution: built-in → ~/.myxcel.toml → this file (env/extra_args merged).
 
+[push]
+# Local GPU traces / scratch — not source; keep off worktree scratch.
+excludes = ["profiling/", "bench/", "p5c_stage1_v2/"]
+
 [tier]
 kind = "research"
 

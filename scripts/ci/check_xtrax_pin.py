@@ -10,8 +10,8 @@ import json
 import sys
 from pathlib import Path
 
-# Keep in sync with pyproject.toml: xtrax>=0.4.0a5,<0.5
-FLOOR = "0.4.0a5"
+# Keep in sync with pyproject.toml: xtrax>=0.4.0a6,<0.5
+FLOOR = "0.4.0a6"
 UPPER = "0.5"
 
 

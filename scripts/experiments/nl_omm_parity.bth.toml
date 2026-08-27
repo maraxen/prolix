@@ -1,0 +1,38 @@
+[experiment]
+mode = "confirmation"
+hypothesis = """
+Prolix NL LJ+switch (+PME when charges nonzero) matches vendored OpenMM 8.3.1
+Reference gold for the water toy (and 1vii when gold exists). Missing gold is fail.
+"""
+claim_discriminates = ["H_nl_switch_ok", "H_null_misspec"]
+claim_isolates = ["C_flash_not_cutoff"]
+
+[outcomes.pass]
+condition = "gate_pass = 1 AND ABS(delta_e_kcal) <= 0.1 AND force_rmse_kcal_mol_A < 3.0"
+decision = "NL+switch vs gold confirmed. Switch default-on for NL+PME is unblocked."
+reasoning = "Static ΔE/ΔF vs committed Reference gold, not a live CUDA Context."
+is_residual = false
+
+[outcomes.fail]
+condition = "gate_pass = 0 OR ABS(delta_e_kcal) > 0.1 OR force_rmse_kcal_mol_A >= 3.0"
+decision = "Do not default-on LJ switching. Check gold emit pin or NL kernel."
+reasoning = "Residual: missing gold, pin drift, or Prolix mismatch."
+is_residual = true
+
+[result_schema]
+campaign_slug = "str"
+probe = "str"
+engine = "str"
+oracle_path = "str"
+oracle_sha256 = "str"
+openmm_version = "str"
+gate_pass = "int"
+delta_e_kcal = "float"
+force_rmse_kcal_mol_A = "float"
+cutoff_angstrom = "float"
+switch_distance_angstrom = "float"
+skin_angstrom = "float"
+
+[metadata]
+campaign_slug = "nonbonded-omm-parity"
+tags = ["nonbonded-omm-parity", "confirmation", "nl"]

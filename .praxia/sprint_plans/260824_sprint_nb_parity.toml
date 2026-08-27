@@ -1,0 +1,123 @@
+[sprint]
+sprint_id = "260824_sprint_nb_parity"
+name = "Close nonbonded-omm-parity (1vii + switch default)"
+description = "Vendor 1vii Reference gold; Prolix NL+PME+LJ-switch vs gold; bathos confirmation; switch default-on only if claim passes."
+context = "91b3554 landed host NL config + water toy gold. Production switch_width stays None until this sprint."
+max_fix_retries = 1
+worktree_shadow_mode = false
+
+[[tracks]]
+id = "a1"
+is_research = false
+worktree = false
+skip_worktree = false
+
+[[tracks.items]]
+backlog_id = "4382"
+phase_name = "Track A1 — Emit and vendor 1vii OpenMM Reference gold"
+fixer_prompt = """
+Run scripts/experiments/nl_omm_parity.py --emit-oracle --probe 1vii (OpenMM
+Reference platform only, never CUDA). Commit data/oracles/openmm_8.3.1/nl_1vii.json
+(positions, q/sigma/epsilon, E/F) and update data/oracles/openmm_8.3.1/MANIFEST
+with its sha256. Keep the emit nonbonded-only (force groups) so bonded slop does
+not fail the downstream compare. Do NOT edit the frozen xr_parity_omm_tip3p
+sidecars.
+"""
+reviewer_prompt = """
+VERIFY: data/oracles/openmm_8.3.1/nl_1vii.json exists, is nonbonded-only
+(force-group scoped), and its sha256 matches the MANIFEST entry. Confirm the
+oracle was emitted via the Reference platform (grep for platform selection in
+the emit script invocation/logs), not CUDA.
+"""
+return_key = "a1_1vii_gold"
+workflow_template = "spec_driven_dev"
+
+[[tracks]]
+id = "a2"
+is_research = false
+worktree = false
+skip_worktree = false
+
+[[tracks.items]]
+backlog_id = "4383"
+phase_name = "Track A2 — Prolix NL+switch vs vendored 1vii gold"
+fixer_prompt = """
+Rebuild a Prolix MolecularBundle from the vendored 1vii gold arrays + OpenMM
+exceptions -> ExclusionSpec, using the same overlay pattern as
+tests/physics/test_b1_protein_nl_pme_openmm_parity.py (shared q/sigma/epsilon,
+TIP3P water exclusions). Evaluate energy_fn_from_bundle(..., lj_switch_width=1.0)
+with a real neighbor list (cutoff=9, switch=8 A). Use jax.grad to get forces and
+compute force RMSE vs gold forces. Fill the gate_pass, delta_e_kcal, and
+force_rmse_kcal_mol_A fields already declared in
+scripts/experiments/nl_omm_parity.bth.toml (band: |dE|<=0.1 kcal, RMSE < 3.0
+kcal/mol/A -- same band as the water claim). If the 1vii PME offset genuinely
+needs a looser band, change the sidecar BEFORE the first bth run, never after.
+Flash stays out of scope: flash gold is MIC all-pairs, not a 9 A neighbor list.
+"""
+reviewer_prompt = """
+VERIFY: uv run bth run python scripts/experiments/nl_omm_parity.py --probe 1vii
+-- gate_pass flips from 0/gold_only to a real compare_status. Confirm
+delta_e_kcal and force_rmse_kcal_mol_A are populated (not null) and check
+against the sidecar-declared thresholds.
+"""
+return_key = "a2_1vii_compare"
+workflow_template = "spec_driven_dev"
+
+[[tracks]]
+id = "b"
+is_research = false
+worktree = false
+skip_worktree = false
+
+[[tracks.items]]
+backlog_id = "4384"
+phase_name = "Track B — Bathos nonbonded-omm-parity confirmation campaign"
+fixer_prompt = """
+bth campaign create "nonbonded-omm-parity" --mode confirmation --question "..."
+BEFORE any bth run. Then:
+  uv run bth run python scripts/experiments/nl_omm_parity.py --tag nonbonded-omm-parity \
+    --campaign <id> --out ... -- --probe water
+  uv run bth run python scripts/experiments/nl_omm_parity.py --tag nonbonded-omm-parity \
+    --campaign <id> --out ... -- --probe 1vii   # after A2 lands
+  uv run bth run python scripts/experiments/flash_omm_parity.py --tag nonbonded-omm-parity \
+    --campaign <id> --out ... -- --probe water   # flash: water (MIC gold) only
+Slurm wrappers already exist: scripts/slurm/nl_omm_parity.slurm,
+scripts/slurm/flash_omm_parity.slurm -- use bth run inside the job after
+sourcing scripts/slurm/_bth_env.sh. Kill conditions: missing gold, CUDA used as
+oracle, or the 1vii compare still reads gold_only after A2.
+"""
+reviewer_prompt = """
+VERIFY: bth campaign review <id> shows water + 1vii NL runs and the flash water
+run, all tagged nonbonded-omm-parity, with no CUDA-oracle or missing-gold kill
+conditions tripped.
+"""
+return_key = "b_bathos_campaign"
+workflow_template = "spec_driven_dev"
+
+[[tracks]]
+id = "c"
+is_research = false
+worktree = false
+skip_worktree = false
+
+[[tracks.items]]
+backlog_id = "4385"
+phase_name = "Track C — Default-on LJ switch for new NeighborListConfig (gated on B pass)"
+fixer_prompt = """
+ONLY proceed if Track B's water AND 1vii NL outcomes are both pass. Set the new-API
+NeighborListConfig.switch_width default to 1.0 (OpenMM switchDistance = cutoff - 1).
+Leave the legacy use_neighbor_list=True path at switch_width=None
+(legacy_neighbor_list_config in src/prolix/physics/nonbonded_config.py) -- do not
+touch it. Update .praxia/docs/specs/260824_neighbor-list-config.md status to
+closed. Do not make Flash the cutoff default (lesson 379). If Track B's 1vii
+outcome is fail: leave switch off, write a short campaign fail note instead of
+touching nonbonded_config.py, and stop.
+"""
+reviewer_prompt = """
+VERIFY: NeighborListConfig's default switch_width is 1.0 while
+legacy_neighbor_list_config's switch_width stays None (diff both call sites).
+Confirm .praxia/docs/specs/260824_neighbor-list-config.md status is closed only
+if the code change actually landed.
+"""
+return_key = "c_switch_default"
+workflow_template = "spec_driven_dev"

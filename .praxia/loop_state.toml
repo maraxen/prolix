@@ -2,13 +2,15 @@
 
 [loop]
 version     = "1.0"
-task_id     = "260710_epic-audit_xtrax-rewire"
-current_phase = "EPIC_AUDIT"
-last_subphase = "backlog_dag_registered"
-last_artifact_path = ".praxia/docs/audits/260710_xtrax-rewire_audit_dag.md"
-iteration_count = 60
-last_activation = "2026-07-10T13:17:00Z"
+task_id     = "260811_autonomous-loop"
+current_phase = "TRIAGE"
+last_subphase = ""
+last_artifact_path = ""
+iteration_count = 0
+last_activation = "2026-08-11T18:00:00Z"
 autonomy_level = "L2"
+fsm_id = "autoloop-260811_autonomous-loop"
+migrated_at = "2026-08-11T18:19:48.404763020+00:00"
 
 [loop.lock]
 token = ""
@@ -16,11 +18,10 @@ expiry_ts = ""
 timeout_minutes = 45
 
 [loop.gates]
-spec_confirmed = true
-spec_path = ".praxia/docs/specs/260710_xtrax-rewire_audit_spec.md"
+spec_confirmed = false
+spec_path = ""
 sprint_approved = false
 sprint_plan_path = ""
-# sprint TOML intentionally skipped (human 2026-07-10); execute via backlog leaves
 
 [loop.metrics]
 backlog_items_closed_per_iteration = 0
@@ -30,15 +31,15 @@ last_items_closed = 0
 remediate_attempt = 0
 
 [loop.selected]
-closed_epic_id = "3269"
-closed_epic_slug = "260709_xtrax_rewire"
-audit_epic_id = "3288"
-audit_epic_slug = "XA-EPIC"
+closed_epic_id = ""
+closed_epic_slug = ""
+audit_epic_id = ""
+audit_epic_slug = ""
 next_epic_id = ""
 
 [run]
 mode            = "hitl_semi_autonomous"
-human_available = true
+human_available = false
 
 [loop.fingerprint]
 recent_tool_hashes = []

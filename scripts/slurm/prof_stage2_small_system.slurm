@@ -1,0 +1,154 @@
+#!/bin/bash
+#SBATCH --job-name=prolix_p7_stage2
+#SBATCH --partition=mit_preemptable,pi_so3
+#SBATCH --gres=gpu:h200:1
+#SBATCH --time=00:15:00
+#SBATCH --nodes=1
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=16
+#SBATCH --mem=64G
+#SBATCH --output=outputs/logs/slurm/%A_%a.prof_stage2.out
+#SBATCH --error=outputs/logs/slurm/%A_%a.prof_stage2.err
+
+# P7 Stage-2 small-system probe (NOT DHFR).
+#
+# Walltime derivation (spec P7):
+#   t_cpu = 0.557 s   (P6 1vii autodiff, n_trials_smoke=3)
+#   n_trials_gpu = 20
+#   3 * t_cpu * n_trials_gpu / n_trials_smoke = 11.14 s
+#   round_up_to_5min(11.14s) = 5 min + 10 min XLA compile allowance = 00:15:00
+#   (also the floor). 3x = GPU-vs-CPU / contention margin; 10 min = compile bound.
+#
+# Array T=0..11:
+#   protein = T / 6          (1vii, 2gb1)
+#   mode    = (T % 6) / 3    (dense, flash)
+#   pme_idx = T % 3          (off, on@1.0, on@1.2)
+#
+# H200 inventory (scontrol/sinfo 2026-08-18):
+#   pi_so3:            gres/gpu:h200=2 (node4009 only)
+#   mit_preemptable:   gres/gpu:h200=194 (many 8-GPU nodes)
+#   mit_normal_gpu:    also has H200s, but listing it with pi_so3 is not
+#                      required; myxcel defaults to mit_normal (CPU) unless
+#                      --partition is passed on the CLI.
+# sbatch --test-only: including pi_so3 in the same request makes the
+# scheduler wait for node4009 (start estimates Aug 21 / Sep 11).
+# mit_preemptable alone estimated 2026-08-19T17:05 on node3400.
+# Submit with --partition mit_preemptable so the 194-GPU pool is actually
+# eligible; PreemptMode=REQUEUE — 15 min tasks can be requeued.
+# Do NOT pin --nodelist=node4007,node4008 (excludes Hopper H200s).
+# %k throttle is a courtesy cap, not placement.
+#
+# Submit from worktree:
+#   myxcel submit engaging prolix scripts/slurm/prof_stage2_small_system.slurm \
+#   myxcel submit ... --sbatch-arg chdir=/home/maarxaru/projects/.worktrees/prolix/wt-20260807-132628
+#   (myxcel sbatch cwd is $HOME; without chdir, SLURM_SUBMIT_DIR misses _bth_env.sh)
+
+set -euo pipefail
+
+# myxcel sbatch cwd is $HOME, so SLURM_SUBMIT_DIR is not the repo.
+# Spool copy means BASH_SOURCE is /var/spool/slurmd/job*/slurm_script.
+_locate_root() {
+    local cand
+    for cand in \
+        "${PWD}" \
+        "${SLURM_SUBMIT_DIR:-}" \
+        "${HOME}/projects/.worktrees/prolix/wt-20260807-132628" \
+        "${HOME}/projects/prolix"
+    do
+        if [[ -n "${cand}" && -f "${cand}/scripts/slurm/_bth_env.sh" ]]; then
+            echo "${cand}"
+            return 0
+        fi
+    done
+    return 1
+}
+_PROJ="$(_locate_root)" || {
+    echo "ERROR: cannot locate prolix root (PWD=${PWD} SUBMIT_DIR=${SLURM_SUBMIT_DIR:-unset})" >&2
+    exit 1
+}
+cd "${_PROJ}"
+echo "P7 cwd=${_PROJ}"
+if [[ -z "${PROLIX_GIT_SHA:-}" && -f "${_PROJ}/.git_sha" ]]; then
+    PROLIX_GIT_SHA="$(head -1 "${_PROJ}/.git_sha" | tr -d '[:space:]')"
+    export PROLIX_GIT_SHA
+fi
+if [[ -z "${PROLIX_GIT_SHA:-}" ]]; then
+    PROLIX_GIT_SHA="$(git -C "${_PROJ}" rev-parse HEAD 2>/dev/null || true)"
+    export PROLIX_GIT_SHA
+fi
+echo "PROLIX_GIT_SHA=${PROLIX_GIT_SHA:-unset}"
+
+source "scripts/slurm/_bth_env.sh"
+
+# CLUSTER.md §2 — inert on H200 (--gres=gpu:h200:1 cannot land on 4007/4008).
+_NODE="${SLURM_JOB_NODELIST:-$(hostname -s)}"
+if [[ "${_NODE}" == *node4007* ]] || [[ "${_NODE}" == *node4008* ]]; then
+    export XLA_FLAGS="${XLA_FLAGS:+${XLA_FLAGS} }--xla_gpu_shard_autotuning=false"
+    echo "Blackwell workaround active: XLA_FLAGS=${XLA_FLAGS}"
+fi
+
+PROTEINS=(1vii 2gb1)
+MODES=(dense flash)
+
+T="${SLURM_ARRAY_TASK_ID:?SLURM_ARRAY_TASK_ID required}"
+if [[ "${T}" -lt 0 || "${T}" -gt 11 ]]; then
+    echo "ERROR: SLURM_ARRAY_TASK_ID=$T out of range 0-11"
+    exit 1
+fi
+PROTEIN="${PROTEINS[$(( T / 6 ))]}"
+MODE="${MODES[$(( (T % 6) / 3 ))]}"
+PME_IDX=$(( T % 3 ))
+GRID_FLAGS=()
+if [[ "${PME_IDX}" -eq 0 ]]; then
+    PME=off
+    GRID=na
+else
+    PME=on
+    if [[ "${PME_IDX}" -eq 1 ]]; then
+        GRID=1.0
+    else
+        GRID=1.2
+    fi
+    GRID_FLAGS=(--grid-spacing "${GRID}")
+fi
+
+PROBE_ID="stage2_${PROTEIN}_${MODE}_pme${PME}_g${GRID}"
+CAMPAIGN_ID="${CAMPAIGN_ID:-}"
+CAMPAIGN_FLAG=()
+[[ -n "${CAMPAIGN_ID}" ]] && CAMPAIGN_FLAG=(--campaign "${CAMPAIGN_ID}")
+
+mkdir -p outputs/profiling/stage2 outputs/logs/slurm
+
+echo "=== P7 Stage-2 ${PROBE_ID} ==="
+echo "Host: $(hostname)  Job: ${SLURM_JOB_ID:-local}  Array: ${SLURM_ARRAY_JOB_ID:-N/A}/${T}"
+echo "GPU: $(nvidia-smi --query-gpu=name,memory.total --format=csv,noheader 2>&1 | head -1)"
+echo "Campaign: ${CAMPAIGN_ID:-<none>}"
+echo "Date: $(date -Is)"
+
+# Cluster bathos.db cannot create/show the local campaign UUID (schema is
+# missing campaigns.negative_check; bth sync push failed rsync 11). Passing
+# --campaign 450f3583 killed tasks in ~30s. Omitting --campaign would attach
+# to the frozen sidecar campaign 32d6574e. --no-sidecar + tags only.
+uv run bth run python scripts/experiments/profile_b1_flash_vs_autodiff_forces.py \
+    --no-sidecar \
+    --tag p7-stage2 \
+    --tag "array_task:${T}" \
+    --tag "protein:${PROTEIN}" \
+    --tag "mode:${MODE}" \
+    --tag "pme:${PME}" \
+    --tag "grid:${GRID}" \
+    "${CAMPAIGN_FLAG[@]}" \
+    --out "outputs/profiling/stage2/${PROBE_ID}_summary.json" \
+    -- \
+    --protein "${PROTEIN}" \
+    --mode "${MODE}" \
+    --pme "${PME}" \
+    "${GRID_FLAGS[@]}" \
+    --n-warmup 3 --n-trials 20 --n-inner 5 \
+    --stage 2 --scopes on \
+    --emit-record "outputs/profiling/stage2/${PROBE_ID}.json" \
+    --out "outputs/profiling/stage2/${PROBE_ID}_summary.json"
+
+EXIT=$?
+echo "=== exit=${EXIT} ==="
+exit ${EXIT}

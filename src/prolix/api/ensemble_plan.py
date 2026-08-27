@@ -36,6 +36,28 @@ class _NLDispatchCarry(NamedTuple):
     langevin_state: Any
     neighbor: Any
     did_overflow: Any
+    last_update_positions: Any
+
+
+def _integrator_positions(state: Any) -> Any:
+    """Prolix ``NVTLangevinState.positions`` or jax_md ``NVTLangevinState.position``."""
+    return getattr(state, "positions", state.position)
+
+
+def _bind_neighbor(energy_or_force_fn: Any, neighbor: Any) -> Any:
+    """Default ``neighbor=`` on every energy/force call (init probe + first force).
+
+    ``settle_langevin`` / jax_md ``nvt_langevin`` construct canonicalize_force
+    and call init without a neighbor. Closing over the allocated list makes
+    init and stepping share the NL backend (DHFR jobs 20520003 / 20528981).
+    Explicit ``neighbor=`` on apply still wins via kwargs.
+    """
+
+    def _bound(positions: Any, **kwargs: Any) -> Any:
+        kwargs.setdefault("neighbor", neighbor)
+        return energy_or_force_fn(positions, **kwargs)
+
+    return _bound
 
 
 class EnsemblePlan:
@@ -88,6 +110,32 @@ class EnsemblePlan:
                 continue
         return 1
 
+    def _resolve_nonbonded_defaults(
+        self,
+        run_mode: RunMode,
+        use_neighbor_list: bool | None,
+        use_flash_forces: bool | None,
+    ) -> tuple[bool, bool]:
+        """Production defaults: NL inference+PBC, Flash trajectory+PBC, dense opt-in.
+
+        Passing both flags False is the explicit dense autodiff path. Omitting
+        both (None) never silently selects dense on periodic explicit systems.
+        """
+        if use_neighbor_list is not None or use_flash_forces is not None:
+            return bool(use_neighbor_list), bool(use_flash_forces)
+        periodic = all(
+            getattr(getattr(b, "shape_spec", None), "has_pbc", False) for b in self.bundles
+        )
+        implicit = any(
+            getattr(getattr(b, "shape_spec", None), "has_implicit_solvent", False)
+            for b in self.bundles
+        )
+        if implicit or not periodic:
+            return False, False
+        if run_mode == "inference":
+            return True, False
+        return False, True
+
     def run(
         self,
         n_steps: int,
@@ -101,9 +149,10 @@ class EnsemblePlan:
         gamma: float = 10.0,
         run_mode: RunMode = "trajectory",
         save_every: int | None = None,
-        use_neighbor_list: bool = False,
+        use_neighbor_list: bool | None = None,
         nl_update_every: int = 20,
-        use_flash_forces: bool = False,
+        use_flash_forces: bool | None = None,
+        nonbonded: Any = None,
     ) -> Trajectory | list[Trajectory]:
         """Run MD simulation over all bundles.
 
@@ -138,7 +187,10 @@ class EnsemblePlan:
                 "defensive fallback" per-bundle loop inside a shape-class
                 group (should not normally trigger) does not support NL and
                 raises clearly rather than silently degrading compile-sharing.
-                Default False preserves existing dense-path behavior exactly.
+                ``None`` (default) selects production defaults: NL for
+                inference + periodic explicit, Flash for trajectory +
+                periodic, dense autodiff only when neither kernel applies
+                (vacuum/implicit) or when both flags are passed ``False``.
             nl_update_every: Steps between neighbor-list rebuilds when
                 ``use_neighbor_list=True`` (ignored otherwise).
             use_flash_forces: debt 761 — compute forces via
@@ -152,8 +204,12 @@ class EnsemblePlan:
                 ``use_neighbor_list=True`` (``single_padded_force`` has no
                 neighbor-list branch yet). Works in both ``run_mode``s and for
                 both single-bundle and multi-bundle (stacked) dispatch.
-                Default False preserves existing autodiff-path behavior
-                exactly.
+                ``None`` (default) participates in the production default
+                resolution above. Pass ``False`` together with
+                ``use_neighbor_list=False`` to opt into dense autodiff.
+            nonbonded: Optional ``NonbondedConfig``. Mutually exclusive with
+                passing ``use_neighbor_list`` / ``use_flash_forces`` (legacy
+                flags). When omitted, production defaults are unchanged.
 
         Returns:
             Trajectory for a single bundle, or list[Trajectory] when
@@ -173,6 +229,37 @@ class EnsemblePlan:
             raise ValueError(
                 "xtc_path is supported for single-bundle EnsemblePlan runs only"
             )
+
+        from prolix.api.bundle_md import _host_float
+        from prolix.physics.nonbonded_config import engine_flags, resolve_nonbonded_config
+
+        used_legacy = use_neighbor_list is not None or use_flash_forces is not None
+        cutoff0 = _host_float(getattr(self.bundles[0], "cutoff_distance", 9.0), 9.0)
+        if nonbonded is None:
+            use_neighbor_list, use_flash_forces = self._resolve_nonbonded_defaults(
+                run_mode, use_neighbor_list, use_flash_forces
+            )
+            nb_cfg = resolve_nonbonded_config(
+                engine_nl=bool(use_neighbor_list),
+                engine_flash=bool(use_flash_forces),
+                cutoff=cutoff0,
+                nl_update_every=nl_update_every,
+                nonbonded=None,
+                used_legacy_flags=False,
+            )
+        else:
+            nb_cfg = resolve_nonbonded_config(
+                engine_nl=False,
+                engine_flash=False,
+                cutoff=cutoff0,
+                nl_update_every=nl_update_every,
+                nonbonded=nonbonded,
+                used_legacy_flags=used_legacy,
+            )
+            use_neighbor_list, use_flash_forces = engine_flags(nb_cfg)
+            nlc = nb_cfg.neighbor_list
+            if nlc is not None and nlc.nl_update_every is not None:
+                nl_update_every = int(nlc.nl_update_every)
 
         if use_neighbor_list and run_mode != "inference":
             raise ValueError(
@@ -204,6 +291,7 @@ class EnsemblePlan:
                 use_neighbor_list=use_neighbor_list,
                 nl_update_every=nl_update_every,
                 use_flash_forces=use_flash_forces,
+                nb_cfg=nb_cfg,
             )
 
         return self._run_trajectory(
@@ -216,6 +304,7 @@ class EnsemblePlan:
             dt_unit=dt_unit,
             gamma=gamma,
             use_flash_forces=use_flash_forces,
+            nb_cfg=nb_cfg,
         )
 
     def _run_trajectory(
@@ -230,6 +319,7 @@ class EnsemblePlan:
         dt_unit: str,
         gamma: float,
         use_flash_forces: bool = False,
+        nb_cfg: Any = None,
     ) -> Trajectory | list[Trajectory]:
         """Pathological / baseline path: scan + full trajectory stack."""
         if len(self.bundles) == 1:
@@ -243,6 +333,7 @@ class EnsemblePlan:
                 dt_unit=dt_unit,
                 gamma=gamma,
                 use_flash_forces=use_flash_forces,
+                nb_cfg=nb_cfg,
             )
             if xtc_path is not None:
                 from prolix.api.xtc_sink import write_positions_xtc
@@ -260,6 +351,7 @@ class EnsemblePlan:
             gamma=gamma,
             run_mode="trajectory",
             use_flash_forces=use_flash_forces,
+            nb_cfg=nb_cfg,
         )
 
     def _run_inference(
@@ -277,6 +369,7 @@ class EnsemblePlan:
         use_neighbor_list: bool = False,
         nl_update_every: int = 20,
         use_flash_forces: bool = False,
+        nb_cfg: Any = None,
     ) -> Trajectory | list[Trajectory]:
         """Inference path: while_loop carry-only; group-by-shape for multi-bundle."""
         if len(self.bundles) == 1:
@@ -294,6 +387,7 @@ class EnsemblePlan:
                 use_neighbor_list=use_neighbor_list,
                 nl_update_every=nl_update_every,
                 use_flash_forces=use_flash_forces,
+                nb_cfg=nb_cfg,
             )
 
         return self._run_grouped(
@@ -308,6 +402,7 @@ class EnsemblePlan:
             use_neighbor_list=use_neighbor_list,
             nl_update_every=nl_update_every,
             use_flash_forces=use_flash_forces,
+            nb_cfg=nb_cfg,
         )
 
     def _run_grouped(
@@ -324,6 +419,7 @@ class EnsemblePlan:
         use_neighbor_list: bool = False,
         nl_update_every: int = 20,
         use_flash_forces: bool = False,
+        nb_cfg: Any = None,
     ) -> list[Trajectory]:
         """Host-partition by shape_spec; Vmap/SafeMap within each class (xtrax).
 
@@ -362,6 +458,7 @@ class EnsemblePlan:
                         use_neighbor_list=use_neighbor_list,
                         nl_update_every=nl_update_every,
                         use_flash_forces=use_flash_forces,
+                        nb_cfg=nb_cfg,
                     )
                 else:
                     traj = self._run_single(
@@ -374,6 +471,7 @@ class EnsemblePlan:
                         dt_unit=dt_unit,
                         gamma=gamma,
                         use_flash_forces=use_flash_forces,
+                        nb_cfg=nb_cfg,
                     )
                 trajs = [traj]
             elif can_jit_vmap_n_mols(group):
@@ -391,6 +489,7 @@ class EnsemblePlan:
                     use_neighbor_list=use_neighbor_list,
                     nl_update_every=nl_update_every,
                     use_flash_forces=use_flash_forces,
+                    nb_cfg=nb_cfg,
                 )
             else:
                 # Defensive: same shape_spec should always stack; fall back
@@ -426,6 +525,7 @@ class EnsemblePlan:
                                 dt_unit=dt_unit,
                                 gamma=gamma,
                                 use_flash_forces=use_flash_forces,
+                                nb_cfg=nb_cfg,
                             )
                         )
                     else:
@@ -440,6 +540,7 @@ class EnsemblePlan:
                                 dt_unit=dt_unit,
                                 gamma=gamma,
                                 use_flash_forces=use_flash_forces,
+                                nb_cfg=nb_cfg,
                             )
                         )
             for idx, traj in zip(indices, trajs, strict=True):
@@ -464,6 +565,7 @@ class EnsemblePlan:
         use_neighbor_list: bool = False,
         nl_update_every: int = 20,
         use_flash_forces: bool = False,
+        nb_cfg: Any = None,
     ) -> list[Trajectory]:
         """JIT vmap / safe_map over stack-compatible bundles (#2645)."""
         import jax.numpy as jnp
@@ -511,6 +613,7 @@ class EnsemblePlan:
                     nl_update_every=nl_update_every,
                     initial_neighbor=neighbor,
                     use_flash_forces=use_flash_forces,
+                    nb_cfg=nb_cfg,
                 )
             return self._run_single(
                 bundle,
@@ -524,6 +627,7 @@ class EnsemblePlan:
                 dt_unit=dt_unit,
                 gamma=gamma,
                 use_flash_forces=use_flash_forces,
+                nb_cfg=nb_cfg,
             )
 
         import jax
@@ -532,7 +636,7 @@ class EnsemblePlan:
         neighbor_fn = None
         if use_neighbor_list:
             stacked_neighbor, neighbor_fn = self._build_stacked_neighbor_seed(
-                bundles, integration_prefix
+                bundles, integration_prefix, nb_cfg=nb_cfg
             )
 
         if run_mode == "inference":
@@ -571,7 +675,7 @@ class EnsemblePlan:
 
     @staticmethod
     def _build_stacked_neighbor_seed(
-        bundles: list[Any], integration_prefix: int
+        bundles: list[Any], integration_prefix: int, nb_cfg: Any = None
     ) -> tuple[Any, Any]:
         """debt 802: one shared, vmap-safe ``NeighborList`` per bundle, pre-stacked.
 
@@ -612,9 +716,20 @@ class EnsemblePlan:
                 )
 
         displacement_fn, _shift_fn = displacement_fn_for_bundle(ref)
-        neighbor_fn = nl_mod.make_neighbor_list_fn(displacement_fn, box_vec, cutoff)
+        nlc = getattr(nb_cfg, "neighbor_list", None) if nb_cfg is not None else None
+        skin = float(nlc.skin) if nlc is not None else 0.5
+        cap_mult = float(nlc.capacity_multiplier) if nlc is not None else 1.25
+        neighbor_fn = nl_mod.make_neighbor_list_fn(
+            displacement_fn,
+            box_vec,
+            cutoff,
+            capacity_multiplier=cap_mult,
+            dr_threshold=skin,
+        )
 
-        target_capacity = nl_mod.compute_nl_capacity(integration_prefix, box_vec, cutoff)
+        target_capacity = nl_mod.compute_nl_capacity(
+            integration_prefix, box_vec, cutoff, dr_threshold=skin
+        )
         seed_positions = positions_with_prefix(ref, integration_prefix)
         seed = neighbor_fn.allocate(seed_positions)
         extra_needed = max(0, target_capacity - seed.idx.shape[-1])
@@ -656,6 +771,8 @@ class EnsemblePlan:
         dt_unit: str,
         gamma: float,
         use_flash_forces: bool = False,
+        initial_neighbor: Any = None,
+        nb_cfg: Any = None,
     ) -> tuple[Any, Any, Any, Any]:
         """Shared settle_langevin init. Returns (state, apply_fn, dt, kT)."""
         import jax
@@ -673,6 +790,7 @@ class EnsemblePlan:
             water_indices_for_integration,
         )
         from prolix.physics.kups_adapter import AKMA_TIME_UNIT_FS, gamma_ps_to_akma
+        from prolix.physics.nonbonded_config import lj_switch_width_from_config
         from prolix.physics.settle import settle_langevin
 
         # debt 761: force_fn_from_bundle returns an (N, 3) force array rather
@@ -681,9 +799,17 @@ class EnsemblePlan:
         # _make_settle_compatible_force_fn/make_force_fn_like_canonicalize),
         # so no other change is needed here for the integrator itself to
         # skip the dense-energy autodiff pass.
+        tile = int(getattr(nb_cfg, "flash_tile_size", 256) or 256) if nb_cfg is not None else 256
+        remat = bool(getattr(nb_cfg, "flash_remat", True)) if nb_cfg is not None else True
         energy_or_force_fn = (
-            force_fn_from_bundle(bundle) if use_flash_forces else energy_fn_from_bundle(bundle)
+            force_fn_from_bundle(bundle, flash_tile_size=tile, flash_remat=remat)
+            if use_flash_forces
+            else energy_fn_from_bundle(
+                bundle, lj_switch_width=lj_switch_width_from_config(nb_cfg)
+            )
         )
+        if initial_neighbor is not None:
+            energy_or_force_fn = _bind_neighbor(energy_or_force_fn, initial_neighbor)
         _displacement_fn, shift_fn = displacement_fn_for_bundle(bundle)
 
         dt_arr = jnp.asarray(dt)
@@ -747,10 +873,20 @@ class EnsemblePlan:
             project_ou_momentum_rigid=True,
             water_mask=water_mask,
             atom_mask=atom_mask,
+            # use_flash_forces=True means energy_or_force_fn is
+            # force_fn_from_bundle's already-force-shaped output -- tell
+            # settle_langevin so it skips jax_md.quantity.canonicalize_force's
+            # unprotected internal eval_shape probe (crashes on PME grid-sizing
+            # code touching a bundle's static box_size field; see settle.py's
+            # _make_settle_compatible_force_fn docstring for the full mechanism).
+            is_force_shaped=use_flash_forces,
         )
 
         key = jax.random.PRNGKey(jnp.asarray(seed, dtype=jnp.uint32))
-        state = init_fn(key, positions_init, kT=kT_s)
+        init_kwargs: dict[str, Any] = {"kT": kT_s}
+        if initial_neighbor is not None:
+            init_kwargs["neighbor"] = initial_neighbor
+        state = init_fn(key, positions_init, **init_kwargs)
         return state, apply_fn, dt_s, kT_s
 
     def _run_single(
@@ -767,6 +903,7 @@ class EnsemblePlan:
         dt_unit: str = "fs",
         gamma: float = 10.0,
         use_flash_forces: bool = False,
+        nb_cfg: Any = None,
     ) -> Trajectory:
         from prolix.api.bundle_md import trim_trajectory_positions
         from prolix.api.ensemble_dispatch import dispatch_n_steps
@@ -781,6 +918,7 @@ class EnsemblePlan:
             dt_unit=dt_unit,
             gamma=gamma,
             use_flash_forces=use_flash_forces,
+            nb_cfg=nb_cfg,
         )
 
         def step_fn(carry: Any, _: Any) -> tuple[Any, Any]:
@@ -821,6 +959,7 @@ class EnsemblePlan:
         nl_update_every: int = 20,
         initial_neighbor: Any = None,
         use_flash_forces: bool = False,
+        nb_cfg: Any = None,
     ) -> Trajectory:
         """Carry-only MD via while_loop; Trajectory holds final frame only.
 
@@ -862,6 +1001,31 @@ class EnsemblePlan:
                 # would otherwise give _setup_integrator.
                 integration_prefix = int(bundle.positions.shape[0])
 
+        neighbor_fn = None
+        nbr0 = initial_neighbor
+        if use_neighbor_list and nbr0 is None:
+            from prolix.api.bundle_md import (
+                _host_float,
+                displacement_fn_for_bundle,
+                positions_with_prefix,
+            )
+            from prolix.physics import neighbor_list as nl_mod
+
+            displacement_fn, _shift_fn = displacement_fn_for_bundle(bundle)
+            box_vec = jnp.diag(bundle.box)
+            cutoff = _host_float(bundle.cutoff_distance, 9.0)
+            nlc = getattr(nb_cfg, "neighbor_list", None) if nb_cfg is not None else None
+            skin = float(nlc.skin) if nlc is not None else 0.5
+            cap_mult = float(nlc.capacity_multiplier) if nlc is not None else 1.25
+            neighbor_fn = nl_mod.make_neighbor_list_fn(
+                displacement_fn,
+                box_vec,
+                cutoff,
+                capacity_multiplier=cap_mult,
+                dr_threshold=skin,
+            )
+            nbr0 = neighbor_fn.allocate(positions_with_prefix(bundle, integration_prefix))
+
         state, apply_fn, dt_s, kT_s = self._setup_integrator(
             bundle,
             dt,
@@ -871,6 +1035,8 @@ class EnsemblePlan:
             dt_unit=dt_unit,
             gamma=gamma,
             use_flash_forces=use_flash_forces,
+            initial_neighbor=nbr0,
+            nb_cfg=nb_cfg,
         )
 
         sink_cm = None
@@ -896,19 +1062,33 @@ class EnsemblePlan:
         if use_neighbor_list:
             import equinox as eqx
 
-            ghost_target_positions = state.positions
+            ghost_target_positions = _integrator_positions(state)
             pad_mask_3d = bundle.atom_mask[:, None]
-            update_every = int(nl_update_every)
+            nlc = getattr(nb_cfg, "neighbor_list", None) if nb_cfg is not None else None
+            skin = float(nlc.skin) if nlc is not None else 0.5
+            stride = int(nl_update_every)
+            if nlc is not None and nlc.nl_update_every is None:
+                stride = 0
+            thresh_sq = (skin * 0.5) ** 2
 
             def _nl_step_fn(carry: _NLDispatchCarry, step_i: Any) -> _NLDispatchCarry:
-                langevin_state, neighbor, did_overflow = carry
-                should_update = (step_i % update_every) == 0
+                langevin_state, neighbor, did_overflow, last_pos = carry
+                pos = _integrator_positions(langevin_state)
+                d_pos = pos - last_pos
+                max_dr_sq = jnp.max(jnp.sum(d_pos * d_pos, axis=-1))
+                verlet = max_dr_sq > thresh_sq
+                if stride > 0:
+                    by_stride = (step_i % stride) == 0
+                    should_update = verlet | by_stride
+                else:
+                    should_update = verlet
                 new_neighbor = jax.lax.cond(
                     should_update,
-                    lambda n: n.update(langevin_state.positions),
+                    lambda n: n.update(pos),
                     lambda n: n,
                     neighbor,
                 )
+                new_last = jnp.where(should_update, pos, last_pos)
                 did_overflow = did_overflow | new_neighbor.did_buffer_overflow.astype(bool)
                 new_langevin_state = apply_fn(
                     langevin_state, neighbor=new_neighbor, kT=kT_s, dt=dt_s
@@ -919,65 +1099,58 @@ class EnsemblePlan:
                 # lattice. Masking happens here, at the dispatch layer,
                 # outside settle.py's validated internals -- matches the
                 # existing batched_simulate.py precedent (equilibrate_single).
-                # NVTLangevinState (typing.py:611) has no .replace() of its
-                # own (that method belongs to the earlier IntegratorState
-                # class, typing.py:511) -- reconstruct directly via eqx.tree_at.
-                new_langevin_state = eqx.tree_at(
-                    lambda s: (s.positions, s.momentum),
-                    new_langevin_state,
-                    (
-                        jnp.where(
-                            pad_mask_3d, new_langevin_state.positions, ghost_target_positions
-                        ),
-                        jnp.where(pad_mask_3d, new_langevin_state.momentum, 0.0),
-                    ),
+                new_R = jnp.where(
+                    pad_mask_3d,
+                    _integrator_positions(new_langevin_state),
+                    ghost_target_positions,
                 )
-                return _NLDispatchCarry(new_langevin_state, new_neighbor, did_overflow)
+                new_P = jnp.where(pad_mask_3d, new_langevin_state.momentum, 0.0)
+                if hasattr(new_langevin_state, "positions"):
+                    new_langevin_state = eqx.tree_at(
+                        lambda s: (s.positions, s.momentum),
+                        new_langevin_state,
+                        (new_R, new_P),
+                    )
+                else:
+                    new_langevin_state = new_langevin_state.set(
+                        position=new_R, momentum=new_P
+                    )
+                return _NLDispatchCarry(
+                    new_langevin_state, new_neighbor, did_overflow, new_last
+                )
 
+            init_pos = _integrator_positions(state)
+            init_carry = _NLDispatchCarry(state, nbr0, jnp.array(False), init_pos)
+            final_carry = dispatch_n_steps_inference(
+                _nl_step_fn, init_carry, int(n_steps)
+            )
             if initial_neighbor is not None:
-                # debt 802 (stacked/vmapped path): allocation and retry both
-                # happen host-side in _run_stacked_dispatch, outside this
-                # (potentially traced/vmapped) call -- neighbor_fn.allocate()
-                # cannot run on a tracer. Surface overflow to the caller
-                # instead of host-checking/retrying here.
-                nbr0 = initial_neighbor
-                final_carry = dispatch_n_steps_inference(
-                    _nl_step_fn, _NLDispatchCarry(state, nbr0, jnp.array(False)), int(n_steps)
-                )
+                # debt 802 (stacked/vmapped path): overflow retry is host-side
+                # in _run_stacked_dispatch -- neighbor_fn.allocate() cannot run
+                # on a tracer.
                 nl_overflow_for_caller = final_carry.did_overflow
-            else:
-                from prolix.api.bundle_md import _host_float, displacement_fn_for_bundle
-                from prolix.physics import neighbor_list as nl_mod
-
-                displacement_fn, _shift_fn = displacement_fn_for_bundle(bundle)
-                box_vec = jnp.diag(bundle.box)
-                cutoff = _host_float(bundle.cutoff_distance, 9.0)
-                neighbor_fn = nl_mod.make_neighbor_list_fn(displacement_fn, box_vec, cutoff)
-
-                nbr0 = neighbor_fn.allocate(state.positions)
-                init_carry = _NLDispatchCarry(state, nbr0, jnp.array(False))
+            elif neighbor_fn is not None and bool(final_carry.did_overflow):
+                bumped_capacity = int(0.5 * nbr0.idx.shape[1])
+                retried_neighbor = neighbor_fn.allocate(
+                    _integrator_positions(final_carry.langevin_state),
+                    extra_capacity=bumped_capacity,
+                )
+                retry_carry = _NLDispatchCarry(
+                    state,
+                    retried_neighbor,
+                    jnp.array(False),
+                    _integrator_positions(state),
+                )
                 final_carry = dispatch_n_steps_inference(
-                    _nl_step_fn, init_carry, int(n_steps)
+                    _nl_step_fn, retry_carry, int(n_steps)
                 )
                 if bool(final_carry.did_overflow):
-                    bumped_capacity = int(0.5 * nbr0.idx.shape[1])
-                    retried_neighbor = neighbor_fn.allocate(
-                        final_carry.langevin_state.positions,
-                        extra_capacity=bumped_capacity,
+                    raise RuntimeError(
+                        "Neighbor list overflowed even after reallocating with "
+                        f"+{bumped_capacity} extra capacity -- capacity formula "
+                        "(compute_nl_capacity) likely needs a larger safety_factor "
+                        "for this system."
                     )
-                    retry_carry = _NLDispatchCarry(
-                        state, retried_neighbor, jnp.array(False)
-                    )
-                    final_carry = dispatch_n_steps_inference(
-                        _nl_step_fn, retry_carry, int(n_steps)
-                    )
-                    if bool(final_carry.did_overflow):
-                        raise RuntimeError(
-                            "Neighbor list overflowed even after reallocating with "
-                            f"+{bumped_capacity} extra capacity -- capacity formula "
-                            "(compute_nl_capacity) likely needs a larger safety_factor "
-                            "for this system."
-                        )
             state = final_carry.langevin_state
         else:
 

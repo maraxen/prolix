@@ -10,6 +10,10 @@ ensemble_plan_dt_unit = "fs" # AKMA only via dt_unit="akma"
 ensemble_plan_gamma_unit = "ps^-1"
 vacuum_dt_policy = "gamma>=50 at dt=0.5 fs (or smaller dt @ gamma=10)"
 exception_14_on_bundle_energy_path = true
+# Named leftover after XR-EPIC closeout — not a new rewire epic:
+# XA-NL-DEBT (NL vs dense tile assert);
+# batched_simulate.safe_map (EnsemblePlan already on make_axis_dispatch).
+# WhileCarry shipped in xtrax 0.4.0a6; inference dispatch uses it.
 
 [epics]
 closed = "260709_xtrax_rewire" # XR-EPIC
