@@ -235,6 +235,17 @@ def _bundle_from_1vii_gold(rec: dict):
     pme_alpha = float(rec["pme_alpha_per_angstrom"])
     cutoff = float(rec["cutoff_angstrom"])
 
+    # OpenMM's Modeller centers the solvated box at the origin (positions
+    # range roughly [-box/2, +box/2]), but prolix's PME grid-assignment
+    # (pme.py::_bspline4_stencil's fractional-coordinate -> grid-index
+    # mapping) assumes positions already wrapped into [0, box). Confirmed
+    # empirically: unwrapped gold positions produced delta_e=-5305.65
+    # kcal/mol vs gold; wrapping into [0, box) alone dropped that to
+    # -156.70 kcal/mol (34x). 86% of 1vii's 7507 atoms have at least one
+    # negative coordinate in the vendored gold, so this is not an edge
+    # case -- it affects nearly the whole system.
+    positions_A = positions_A - box_A * np.floor(positions_A / box_A)
+
     proxy = _Proxy(
         positions=positions_A,
         box_size=box_A,
