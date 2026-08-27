@@ -1,0 +1,40 @@
+{
+  "attribution_method": {
+    "dense_bonded_bond": "named_scope",
+    "flash_nonbonded_tiles": "named_scope",
+    "pme_fft_forward": "named_scope"
+  },
+  "config": {
+    "grid_spacing": "1.0",
+    "mode": "flash",
+    "pme": "on",
+    "protein": "1vii",
+    "scopes": "on"
+  },
+  "contract_version": "3.0",
+  "device_kind": "h200",
+  "git_sha": "cafefeed",
+  "jax_version": "0.10.2",
+  "jaxlib_version": "0.10.2",
+  "metrics": {
+    "total_step_seconds": 0.001076
+  },
+  "n_atoms": 1963,
+  "platform": "gpu",
+  "probe_id": "p7_stage2_named_scope",
+  "scopes": {
+    "dense_bonded_bond": null,
+    "flash_nonbonded_tiles": [
+      1.056e-06,
+      1
+    ],
+    "pme_fft_forward": [
+      7.041e-06,
+      3
+    ]
+  },
+  "stage": 2,
+  "timestamp": "2026-08-20T00:00:00+00:00",
+  "x64_enabled": false,
+  "xla_flags": ""
+}

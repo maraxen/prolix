@@ -81,6 +81,4 @@ Verified in production use (1VII, real periodic PME): zero ghost-position drift 
 
 ## Status
 
-Scoping only, drafted 2026-07-18 alongside debt 760's Phase 6 implementation.
-
-**Handed off 2026-07-19**: written up as a proper xtrax-side spec, grounded directly against xtrax's own current `strategy.py`/`dispatch.py`/`iterator.py`/`carry.py`/`plan.py` (not a paraphrase of this doc) — `xtrax/.praxia/docs/specs/260719_xr-while-carry.md`, xtrax PR [#81](https://github.com/maraxen/xtrax/pull/81) (draft, branch `xr-while-carry-spec`). This prolix-side doc remains the motivating record; the xtrax-side doc is now the authoritative design surface for any actual `WhileCarry` implementation. No further action needed here unless xtrax's review changes the design in a way that affects prolix's eventual migration plan (itself a separate, later, non-blocking follow-up per this doc's non-goals).
+**Consumed 2026-08-20**: xtrax PRs [#81](https://github.com/maraxen/xtrax/pull/81) (spec) and [#83](https://github.com/maraxen/xtrax/pull/83) (implementation) merged 2026-07-19; published as **0.4.0a6**. Prolix pin floor is `>=0.4.0a6,<0.5`. `dispatch_n_steps_inference` uses `make_axis_dispatch(WhileCarry(), ...)`. Scan path (`dispatch_n_steps`) unchanged.

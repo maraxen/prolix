@@ -1,0 +1,75 @@
+{
+  "task_id": "260811_autonomous-loop",
+  "prioritized_items": [
+    {
+      "id": "933",
+      "title": "P5-B: Fix single-system rot-trans imbalance in settle.py",
+      "category": "bug",
+      "difficulty": "quick",
+      "source": "backlog",
+      "recommended_action": "promote",
+      "rationale": "Staleness gate applied: #4058 (completed 2026-08-05, depends_on=[932]) appears to already implement the exact B1 inertia-weighted-OU-noise branch this item describes, but supersession is plausible-not-confirmed. Selecting as a bounded 'verify-and-close' task (grep settle.py for live inertia-weighted OU noise, run test_settle_rotation_preserving.py + test_settle.py) rather than a fresh implementation.",
+      "priority": "P1",
+      "brainstorm_needed": false,
+      "requires_cluster": false
+    },
+    {
+      "id": "4167",
+      "title": "Phase 6: NPT long-trajectory stability fix (decoupled CSVR)",
+      "category": "bug",
+      "difficulty": "quick",
+      "source": "backlog",
+      "recommended_action": "promote",
+      "rationale": "Named root-cause lead already on record (debt_transrot_decomposition_dof_miscount: settle.py:1893/:2325 CSVR remove_com=True feeds _n_dof_thermostated with no actual COM removal). Check that lead before a full redesign -- a local code read + targeted fix/test, not a multi-day CSVR redesign.",
+      "priority": "P2",
+      "brainstorm_needed": false,
+      "requires_cluster": false
+    },
+    {
+      "id": "162",
+      "title": "HP2: make_bundle_from_system feature parity audit vs make_energy_fn",
+      "category": "feature",
+      "difficulty": "standard",
+      "source": "backlog",
+      "recommended_action": "promote",
+      "rationale": "Remaining scope already enumerated by prior audit doc (.praxia/docs/audits/260623_hp2_make_bundle_field_audit.md: excl layout, CMAP, atom_names, exception_pairs). Self-contained, no cluster/GPU access needed.",
+      "priority": "P1",
+      "brainstorm_needed": false,
+      "requires_cluster": false
+    }
+  ],
+  "deferred": [
+    {"id": "161", "reason": "Requires 64-water 10ps batched NVT cluster/GPU trajectory run; deferred pending cluster access."},
+    {"id": "271", "reason": "B3 memory-scaling sweep; capacity constraint, likely larger-scale runs."},
+    {"id": "272", "reason": "B4 hetero-batch benchmark; capacity constraint, likely GPU/cluster-scale."},
+    {"id": "273", "reason": "B5 BatchPlanner budget sweep; capacity constraint."},
+    {"id": "274", "reason": "R4 AOT-ratio CI monitor; capacity constraint, lower priority than selected items."},
+    {"id": "275", "reason": "Claim 2 W1 export smoke test; capacity constraint."},
+    {"id": "276", "reason": "Claim 2 W2 hetero export; capacity constraint."},
+    {"id": "279", "reason": "Informational-only measurement; lower urgency."},
+    {"id": "280", "reason": "WASM cold-start browser benchmark; needs browser test harness."},
+    {"id": "287", "reason": "Tutorial cold-clone timing gate; effectively gated behind #290."},
+    {"id": "290", "reason": "Tutorial notebook authoring; capacity constraint."},
+    {"id": "291", "reason": "Differentiable-workflow tutorial; capacity constraint."},
+    {"id": "294", "reason": "Reported-only throughput measurement; lower urgency."},
+    {"id": "295", "reason": "S2 DHFR throughput parity -- structurally requires cluster GPU time; defer until cluster access confirmed."},
+    {"id": "304", "reason": "DR-paper-1 venue-fit research synthesis; capacity constraint."},
+    {"id": "305", "reason": "DR-paper-2 MD-engine literature survey; capacity constraint."},
+    {"id": "319", "reason": "Broad cross-cutting item, likely 'extended' difficulty; exceeds remaining budget."},
+    {"id": "320", "reason": "CI job-matrix structure; capacity constraint."},
+    {"id": "934", "reason": "P5-C batched SETTLE vmap divergence diverges specifically at cluster box-scale; requires_cluster, defer."},
+    {"id": "3270", "reason": "Umbrella epic gated by prior spec-challenge annotations; not simply executable-now despite server executable=true flag."},
+    {"id": "3272", "reason": "Child of gated epic; challenge status 'near_ready' but not re-confirmed."},
+    {"id": "3273", "reason": "Child of gated epic; challenge status 'not_ready'."},
+    {"id": "3278", "reason": "Child of gated epic; challenge status 'not_ready', depends on further gated items."},
+    {"id": "4166", "reason": "Next actionable slice (gamma~1 size-sweep) is itself cluster-scale; requires_cluster; also budget already allocated."},
+    {"id": "4168", "reason": "Explicitly lower priority per roadmap -- revisit once Phase 5/6 land."}
+  ],
+  "discarded": [],
+  "conflicts": [],
+  "rubric": {
+    "verdict": "PASS",
+    "confidence": 0.78,
+    "summary": "Staging empty. Selected 3 P1/P2 items totaling 5/6 difficulty budget (quick+quick+standard), all verifiable without cluster/GPU access, none requiring brainstorm. Applied staleness gate on #933 (verify-and-close framing). Treated xtrax epic #3270 and its not_ready/near_ready children as non-executable this cycle despite executable=true. Flagged all cluster/GPU-dependent items (161, 295, 934, 4166) rather than silently excluding them."
+  }
+}

@@ -1,7 +1,7 @@
 import pytest
 from prolix.tiling.planner import AxisSpec, BatchPlanner
 from prolix.tiling.axes import (
-    N_ATOMS, N_BONDS, N_ANGLES, N_TORSIONS, N_CONFORMERS, N_MOLS, N_STEPS, N_SYSTEMS, ALL_AXES
+    N_ATOMS, N_BONDS, N_ANGLES, N_TORSIONS, N_CONFORMERS, N_MOLS, N_STEPS, N_WATERS, N_SYSTEMS, ALL_AXES
 )
 
 
@@ -78,9 +78,16 @@ def test_axes_are_hashable():
     assert d[N_MOLS] == "outermost"
 
 
+def test_n_waters_axis_spec():
+    assert N_WATERS.name == "n_waters"
+    assert N_WATERS.axis_index == 7
+    assert N_WATERS.heterogeneous is False
+    assert N_WATERS.default_batch_size == 0
+
+
 def test_all_axes_registered():
     """All axes should be in ALL_AXES registry."""
-    assert len(ALL_AXES) == 7
+    assert len(ALL_AXES) == 8
     assert N_ATOMS in ALL_AXES
     assert N_BONDS in ALL_AXES
     assert N_ANGLES in ALL_AXES
@@ -88,12 +95,13 @@ def test_all_axes_registered():
     assert N_CONFORMERS in ALL_AXES
     assert N_MOLS in ALL_AXES
     assert N_STEPS in ALL_AXES
+    assert N_WATERS in ALL_AXES
 
 
 def test_all_axes_contiguous_indices():
-    """Axis indices should be contiguous [0..6]."""
+    """Axis indices should be contiguous [0..7]."""
     indices = [ax.axis_index for ax in ALL_AXES]
-    assert sorted(indices) == list(range(7))
+    assert sorted(indices) == list(range(8))
 
 
 def test_batch_planner_demotes_heterogeneous_first():

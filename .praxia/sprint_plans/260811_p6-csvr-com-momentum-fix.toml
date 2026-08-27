@@ -1,0 +1,62 @@
+# Sprint 50 — Phase 6 CSVR COM-momentum removal fix
+# Task ID: 260811_autonomous-loop
+# Composed: 2026-08-11 (autonomous-loop, pm-triage fallback + planner fallback; rig-run
+# tunnel unavailable throughout this cycle). Two co-triaged items (#933, #162) were
+# dropped after recon_done found them stale -- see .praxia/item_selection.json.
+
+[sprint]
+sprint_id = "260811_p6-csvr-com-momentum-fix"
+sprint_num = 50
+name = "Sprint 50: Phase 6 CSVR COM-momentum removal fix"
+description = "Track A: fix the DOF/actual-removal mismatch in the CSVR NPT path (#4167) -- _n_dof_thermostated assumes COM motion is removed (remove_com=True subtracts 3 DOF) but _langevin_settle_vel, the function settle_csvr actually calls for velocity constraints, has no COM-removal mechanism at all."
+context = "v1.1 roadmap Phase 6 (CLAUDE.md). NPT long-trajectory divergence (T -> 10^115 K beyond ~10ps). Root-caused this session via recon: classic flying-ice-cube DOF/actual-removal mismatch, confirmed by direct code read of settle.py (_n_dof_thermostated:1854-1894, _langevin_settle_vel:2297-2324, settle_csvr:1897, settle_csvr_npt:2327). Two existing integrator variants (settle_lfmiddle/settle_langevin, settle_with_nhc) already implement the correct COM-removal pattern to copy."
+max_fix_retries = 1
+worktree_shadow_mode = false
+
+[[tracks]]
+id = "a"
+is_research = false
+worktree = false
+skip_worktree = false
+
+[[tracks.items]]
+backlog_id = "4167"
+phase_name = "Track A — CSVR COM-momentum removal fix (#4167)"
+fixer_prompt = """
+task_id: 260811_autonomous-loop
+
+Background: `_n_dof_thermostated` (src/prolix/physics/settle.py:1854-1894) subtracts 3 DOF when `remove_com=True` (line 1891-1892) purely as bookkeeping for the CSVR thermostat's target DOF count. But `_langevin_settle_vel` (src/prolix/physics/settle.py:2297-2324) -- the function `settle_csvr` (defined at settle.py:1897, calls it at ~line 2037) actually uses to enforce velocity constraints each step -- has NO parameter or mechanism to remove center-of-mass momentum; it only calls `settle_velocities(...)`. This DOF/actual-removal mismatch (a 'flying ice cube' pattern) is a plausible contributor to the documented NPT long-trajectory divergence (T -> 10^115 K beyond ~10ps). Two existing functions already implement the correct pattern to copy: settle_lfmiddle/settle_langevin (remove_linear_com_momentum param at settle.py:1399, threaded at line 1430) and settle_with_nhc (remove_linear_com_momentum param at settle.py:1530, subtract-COM-velocity-after-SETTLE_vel step at ~line 1627).
+
+IMPORTANT -- `_langevin_settle_vel` has 5 call sites in this file (grep-confirmed: lines 1353, 1494, 1614, 2037, 2599), not just the one inside settle_csvr. The new parameter you add to `_langevin_settle_vel`'s OWN signature MUST default to False, so the 3 call sites you are not touching (1353, 1494, 1614 -- verify which functions own these before editing anything) keep their exact current behavior with zero code changes needed at those sites. Only the settle_csvr (~2037) and settle_csvr_npt (~2599) call sites should explicitly pass remove_linear_com_momentum=True (or thread their own parameter defaulting True), consistent with the pre-existing remove_com=True default already assumed by _n_dof_thermostated.
+
+Scope: fix ONLY this DOF/actual-removal mismatch in the CSVR path. Do not attempt a full CSVR redesign or guarantee full resolution of the long-trajectory divergence -- if other mechanisms remain after this fix, report that honestly; a partial-but-measurable improvement is a valid outcome.
+
+Steps:
+1. Read all 5 call sites of _langevin_settle_vel (settle.py:1353, 1494, 1614, 2037, 2599) and identify which outer function owns each (expected: settle_langevin, settle_lfmiddle, settle_with_nhc-adjacent or similar, settle_csvr, settle_csvr_npt -- confirm, don't assume). Confirm settle_csvr_npt's velocity-constraint step is indeed the 2599 call site.
+2. Add a `remove_linear_com_momentum: bool = False` parameter to `_langevin_settle_vel` (settle.py:2297-2324). Following the settle_with_nhc pattern (settle.py:1530, ~1627): after the existing `settle_velocities(...)` call, if remove_linear_com_momentum is True, subtract the mass-weighted center-of-mass velocity from the relevant velocity block (water rigid-body block, consistent with how settle_with_nhc scopes its subtraction -- read that block again before writing this one to match its exact DOF/masking scope). Default False means the 3 untouched call sites need NO changes.
+3. Thread remove_linear_com_momentum through settle_csvr (settle.py:1897) and settle_csvr_npt (settle.py:2327) as a parameter defaulting to True at THOSE functions' own signatures -- matching the existing remove_com=True default that _n_dof_thermostated already assumes. Pass True (or the threaded param) explicitly at the settle_csvr/settle_csvr_npt call sites to _langevin_settle_vel identified in step 1. Do NOT change the default at the other 3 call sites.
+4. Add one new regression test to tests/physics/test_settle_temperature_control.py: a longer-trajectory NPT test at a local-smoke-feasible scale (small water count, enough steps to approach where divergence previously manifested) that asserts temperature stays bounded post-fix (no blowup toward 10^115 K). If full resolution isn't achieved, assert a concrete bounded/improved outcome instead and say so plainly in the test docstring -- do not inflate the assertion to force a pass.
+5. Run `uv run pytest tests/physics/test_settle_temperature_control.py -v` (single file only -- do not run the whole suite) and confirm all pre-existing tests still pass alongside the new test.
+6. Commit the change with a descriptive message (no code comments referencing this task_id or ticket number -- only comments for genuinely non-obvious invariants).
+"""
+reviewer_prompt = """
+VERIFY (backlog #4167, CSVR COM-momentum fix):
+
+1. All 5 call sites of _langevin_settle_vel were surveyed (grep confirms 5 exist: settle.py 1353/1494/1614/2037/2599) and the fixer's diff shows only settle_csvr's and settle_csvr_npt's call sites changed to pass remove_linear_com_momentum=True; the other 3 call sites are untouched in the diff (git diff should show zero changes at lines 1353/1494/1614's immediate call context).
+2. `_langevin_settle_vel`'s new parameter defaults to False in its signature (confirm via git diff) -- this is what makes the 3 untouched callers safe without their own edits.
+3. The COM-velocity subtraction added to _langevin_settle_vel is a REAL mass-weighted computation, not a no-op stub or docstring-only change, and structurally consistent with the existing settle_with_nhc pattern (settle.py ~1530/~1627).
+4. settle_csvr and settle_csvr_npt thread the parameter down with their own default True, matching the pre-existing remove_com=True default already assumed by _n_dof_thermostated's DOF bookkeeping (settle.py:1891-1892).
+5. A new long-trajectory NPT regression test exists in tests/physics/test_settle_temperature_control.py, is non-trivial (would have failed/blown up pre-fix), and its pass/fail claim (full resolution vs. partial/bounded improvement) is stated honestly and matches what the test actually checks.
+6. All pre-existing tests in that file still pass -- run `uv run pytest tests/physics/test_settle_temperature_control.py -v` yourself and confirm output.
+7. No evidence a whole test suite was run locally (single-file/-k invocation only); no evidence of NPT-scale MD run dispatched to local compute inappropriately.
+8. Commit exists, message is descriptive, and no source comments reference the task_id or ticket number.
+
+PASS: all 8 items satisfied.
+FAIL: any item not satisfied -- state which item(s) failed and why, quoting the specific evidence (file:line, test output, or commit diff) that contradicts it.
+"""
+return_key = "4167"
+workflow_template = "bugfix_simple"
+
+[orchestration]
+sequential = []
+concurrent = ["a"]

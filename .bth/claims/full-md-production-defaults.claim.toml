@@ -1,0 +1,70 @@
+[claim]
+headline = "Bare inference + periodic explicit EnsemblePlan.run uses neighbor-list direct space, not silent dense autodiff."
+kill_condition = "Default path is still dense; or DHFR NL init OOMs; or Flash is made the cutoff default because of an unexplained P_nl vs P_flash race (lesson 379)."
+kill_condition_satisfiable_by_null = false
+regime = "Periodic explicit PME NVT, EnsemblePlan inference, 1vii solvated and DHFR JAC on H200; campaign E bd1f47e8 cells plus default-path verification."
+
+[[hypotheses]]
+id = "H_nl_production"
+label = "NL is the production inference+PBC kernel: init and step share neighbor=, DHFR NL survives, defaults resolve to NL not dense"
+predicted_signature = "init_neighbor_bound true on NL cells; status=ok for DHFR nl; default resolution (True, False) for inference+PBC"
+
+[[hypotheses]]
+id = "H_null_misspec"
+label = "Leftover dense init, missing neighbor=, mixed force-only/full-step records, or measurement misspec"
+predicted_signature = "DHFR NL OOM at init, first force without neighbor, or ranking that mixes 1vii force-only ms with full-step seconds"
+
+[[assumptions]]
+id = "A_init_bound"
+label = "settle/jax_md first force uses the allocated neighbor list (EnsemblePlan._bind_neighbor)"
+halt_if = "first energy call has neighbor is None"
+status = "untested"
+
+[[confounds]]
+id = "C_pair_set"
+label = "Flash is an all-pairs memory algorithm, not a cutoff kernel; do not treat a Flash win as cutoff physics"
+control = "name pair-set per cell (dense/flash all-pairs vs nl O(N K)); k_over_n on NL cells"
+isolating_run = "prof_ensemble_step --probe nl-stats"
+status = "uncontrolled"
+
+[[confounds]]
+id = "C_rebuild"
+label = "NL rebuild cadence can dominate pair work"
+control = "nl_update_every recorded; rebuild vs pair-kernel share if P_nl is slower"
+isolating_run = ""
+status = "uncontrolled"
+
+[[confounds]]
+id = "C_pad_K"
+label = "Static neighbor capacity K or size-bucket pad can make K approach N"
+control = "nl_k_max and n_padded in result JSON"
+isolating_run = "prof_ensemble_step --probe nl-stats"
+status = "uncontrolled"
+
+[[claim.discriminability]]
+hypothesis_a = "H_nl_production"
+hypothesis_b = "H_null_misspec"
+planned_run_label = "dhfr_nl_buckets_on"
+predicted_outcome = "status_ok"
+
+[[claim.discriminability]]
+hypothesis_a = "H_nl_production"
+hypothesis_b = "H_null_misspec"
+planned_run_label = "default_resolution_inference_pbc"
+predicted_outcome = "nl_not_dense"
+
+[union_gate]
+[[union_gate.clauses]]
+id = "C_dhfr_nl_survives"
+description = "DHFR NL init+step produces status=ok (not init OOM)"
+hypothesis_ids = ["H_nl_production", "H_null_misspec"]
+
+[[union_gate.clauses]]
+id = "C_default_not_dense"
+description = "Production default for inference+PBC is NL, not silent dense autodiff"
+hypothesis_ids = ["H_nl_production", "H_null_misspec"]
+
+[[union_gate.clauses]]
+id = "C_race_investigation"
+description = "If P_flash < P_nl, investigation JSON covers init backend, K vs N, rebuild, exclusions — not default-the-winner"
+hypothesis_ids = ["H_nl_production", "H_null_misspec"]

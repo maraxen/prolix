@@ -1,0 +1,48 @@
+[claim]
+headline = "Prolix NL+LJ-switch+PME and flash all-pairs match vendored OpenMM 8.3.1 Reference gold"
+kill_condition = "delta_e or force RMSE vs gold outside sidecar pass band — do not default-on switch"
+regime = "static E/F; gold emitted on OpenMM 8.3.1 Reference; CUDA OpenMM is not the energy oracle"
+
+[[hypotheses]]
+id = "H_nl_switch_ok"
+label = "NL+PME+switch matches nl gold"
+predicted_signature = "gate_pass=1 on nl_omm_parity"
+
+[[hypotheses]]
+id = "H_flash_allpairs_ok"
+label = "flash all-pairs matches flash gold (MIC-diameter cutoff)"
+predicted_signature = "gate_pass=1 on flash_omm_parity"
+
+[[hypotheses]]
+id = "H_null_misspec"
+label = "gold missing, pin drift, or implementation misspec"
+predicted_signature = "gate_pass=0"
+
+[[assumptions]]
+id = "A_openmm_reference"
+label = "MANIFEST openmm_version is 8.3.1 and platform=Reference"
+halt_if = "emit used CUDA or gold files absent"
+status = "untested"
+
+[[confounds]]
+id = "C_flash_not_cutoff"
+label = "flash is all-pairs; 9 A OpenMM cutoff is not the flash oracle"
+control = "separate flash_*.json gold with MIC-diameter cutoff"
+status = "controlled"
+
+[[confounds]]
+id = "C_throughput"
+label = "flash remat/tile speed is not this campaign"
+control = "scripts/explore only"
+status = "controlled"
+
+[[claim.discriminability]]
+hypothesis_a = "H_nl_switch_ok"
+hypothesis_b = "H_null_misspec"
+planned_run_label = "nl_vs_gold"
+
+[union_gate]
+[[union_gate.clauses]]
+id = "C_nonbonded_gold"
+description = "NL and flash probes both pass vs committed gold"
+hypothesis_ids = ["H_nl_switch_ok", "H_flash_allpairs_ok", "H_null_misspec"]

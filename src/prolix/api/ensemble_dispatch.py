@@ -1,7 +1,7 @@
 """Axis dispatch via xtrax make_axis_dispatch (#2645 / XR-DISPATCH / XR-DISPATCH-MULTI / XR-CARRY).
 
 N_MOLS (MVP 2A): ``Vmap`` / ``SafeMap`` only via ``dispatch_n_mols``.
-N_ATOMS (XR-DISPATCH-MULTI): same Vmap/SafeMap policy via ``dispatch_n_atoms``.
+N_WATERS (SETTLE): ``dispatch_n_waters`` Vmap/SafeMap over rigid waters.
 ``Bucket``, ``DedupGather``, and ``Scan`` on mapped axes raise — Scan belongs on
 the step axis (XR-CARRY); ``DedupGather`` executes via
 ``prolix.api.ensemble_dedup.dispatch_n_mols_dedup`` for **topology-keyed**
@@ -10,10 +10,10 @@ bodies only (never seeded Langevin).
 N_STEPS (XR-CARRY): ``dispatch_n_steps`` applies ``JaxScanIterator`` from
 ``make_axis_dispatch(Scan(), ...)``.
 
-N_STEPS inference (B1-INFER): ``dispatch_n_steps_inference`` uses
-``lax.while_loop`` carry-only — **not** reverse-mode AD safe. Prefer for
-throughput / Claim-1 cold-start timing; keep ``dispatch_n_steps`` for
-trajectory / AD-compatible paths.
+N_STEPS inference (B1-INFER): ``dispatch_n_steps_inference`` uses xtrax
+``WhileCarry`` / ``WhileLoopIterator`` (``lax.while_loop``, carry-only) —
+**not** reverse-mode AD safe. Prefer for throughput / Claim-1 cold-start
+timing; keep ``dispatch_n_steps`` for trajectory / AD-compatible paths.
 """
 
 from __future__ import annotations
@@ -22,10 +22,10 @@ from collections.abc import Callable
 from typing import Any
 
 import jax.numpy as jnp
-from jax import lax
 from xtrax.tiling.dispatch import DispatchRejected, make_axis_dispatch
-from xtrax.tiling.strategy import Bucket, DedupGather, SafeMap, Scan, Vmap
+from xtrax.tiling.strategy import Bucket, DedupGather, SafeMap, Scan, Vmap, WhileCarry
 
+from prolix.tiling.axis_dispatch import dispatch_n_waters, n_waters_strategy
 from prolix.tiling.axes import N_ATOMS, N_MOLS, N_STEPS
 from prolix.tiling.planner import BatchPlan
 
@@ -35,9 +35,11 @@ __all__ = [
     "dispatch_n_mols",
     "dispatch_n_steps",
     "dispatch_n_steps_inference",
+    "dispatch_n_waters",
     "dispatch_vmap_safemap",
     "n_atoms_strategy",
     "n_mols_strategy",
+    "n_waters_strategy",
 ]
 
 
@@ -188,12 +190,13 @@ def dispatch_n_steps_inference(
     *,
     on_step: Callable[[Any, Any], None] | None = None,
 ) -> Any:
-    """Carry-only N_STEPS dispatch via ``lax.while_loop`` (B1-INFER).
+    """Carry-only N_STEPS dispatch via xtrax ``WhileCarry`` (B1-INFER).
 
     Unlike ``dispatch_n_steps``, this does **not** materialize a
     ``(n_steps, ...)`` trajectory stack. ``step_fn(state, step_i) -> state``.
 
-    The step loop is an XLA ``while_loop`` (device-side). When invoked from
+    The step loop is an XLA ``while_loop`` (device-side) through
+    ``make_axis_dispatch(WhileCarry(), ...)``. When invoked from
     host Python (not already under a JAX transform), the whole loop is wrapped
     in ``jax.jit`` so compile/run is one program. Under ``vmap`` / outer
     ``jit``, the bare ``while_loop`` is embedded in that transform (no nested
@@ -241,7 +244,8 @@ def dispatch_n_steps_inference(
                 io_callback(_hook, None, step_i, payload)
             return (step_i + 1, new_state)
 
-        _final_i, final_state = lax.while_loop(cond, body, (0, init))
+        iterator = make_axis_dispatch(WhileCarry(), axis=N_STEPS.name)
+        _final_i, final_state = iterator(cond, body, (0, init))
         return final_state
 
     # Nested jit under vmap is wrong; host call sites want one jitted program.
