@@ -1,4 +1,7 @@
 
+import logging
+import re
+
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -9,7 +12,10 @@ pytestmark = pytest.mark.slow
 from jax_md import space
 
 from prolix import simulate
+from prolix.physics import neighbor_list as nl
 from prolix.physics import system
+from prolix.physics.pbc import create_periodic_space
+from prolix.physics.spec import PhysicsSpec
 
 # Enable x64 for physics
 
@@ -126,7 +132,7 @@ def test_clash_minimization_survives(minimal_lj_system):
     
     spec = simulate.SimulationSpec(
         total_time_ns=0.0001, # Minimal run
-        step_size_fs=1.0,
+        physics=PhysicsSpec(dt=1.0),
         save_interval_ns=0.0001,
         accumulate_steps=1,
         use_pbc=False,
@@ -165,17 +171,108 @@ def test_standard_minimization_trajectory(minimal_lj_system):
     
     spec = simulate.SimulationSpec(
         total_time_ns=0.0001,
-        step_size_fs=1.0,
+        physics=PhysicsSpec(dt=1.0),
     )
-    
+
     final_state = simulate.run_simulation(
         system=system_params,
         initial_positions=initial_positions,
         spec=spec
     )
-    
+
     pos = final_state.positions
     dist = jnp.linalg.norm(pos[0] - pos[1])
-    
+
     # Expected min is 2^(1/6) * sigma = 1.122
     assert jnp.abs(dist - 1.122) < 0.05
+
+
+def test_neighbor_list_minimization_dt_start_not_pinned(minimal_lj_system, caplog):
+    """#4623 Validation gate 4 / AC6: run_simulation's use_neighbor_list=True path.
+
+    `run_simulation` sizes FIRE's dt_start off `jax.grad` through the NL kernels
+    (simulate.py:647-653, the only jax.grad call site in the file) whenever
+    `spec.use_neighbor_list and spec.box is not None` (simulate.py:517). No
+    existing test in this file reached that path before this addition -- every
+    prior fixture left `box=None`/`use_pbc=False`, so `use_neighbor_list=True`
+    alone was never sufficient to build the NL branch.
+
+    Before the #4623 fix, `_chunked_lj_nl_bwd` returned an all-zero position
+    gradient, so `max_grad` here would be ~0 and dt_start would be clipped to
+    its ceiling (0.001 ps, since 0.001/(0+1e-8) clips down to 0.001). Post-fix,
+    a real initial force magnitude should size dt_start well below that ceiling.
+    We assert dt_start is NOT pinned at the ceiling, and (independently) that
+    FIRE minimization actually decreases the energy -- either alone could pass
+    by accident (e.g. a system already at equilibrium won't decrease energy
+    regardless of gradient correctness), but the two together can't.
+    """
+    system_params = minimal_lj_system
+
+    # 2 atoms, 1.5 A apart -- well inside the 9.0 A default neighbor cutoff
+    # (PhysicsSpec.neighbor_cutoff default), so the neighbor list is guaranteed
+    # non-empty at this geometry (checked explicitly below, not assumed).
+    initial_positions = jnp.array([
+        [0.0, 0.0, 0.0],
+        [1.5, 0.0, 0.0],
+    ])
+    box = jnp.array([30.0, 30.0, 30.0])  # >> 2*cutoff, avoids periodic self-interaction
+
+    spec = simulate.SimulationSpec(
+        total_time_ns=0.0001,
+        physics=PhysicsSpec(dt=1.0),
+        save_interval_ns=0.0001,
+        accumulate_steps=1,
+        use_pbc=True,
+        box=box,
+        use_neighbor_list=True,
+    )
+
+    # Precondition: the neighbor list at this geometry is genuinely non-empty --
+    # guards against a degenerate/empty-neighbor-list case coincidentally
+    # "passing" gate 4 without exercising the fixed kernels at all (round-3
+    # adversarial review finding on this gate).
+    displacement_fn, _ = create_periodic_space(box)
+    neighbor_fn = nl.make_neighbor_list_fn(displacement_fn, box, spec.neighbor_cutoff)
+    neighbor = neighbor_fn.allocate(initial_positions)
+    n_atoms = initial_positions.shape[0]
+    n_real_neighbors = int(jnp.sum(neighbor.idx < n_atoms))
+    assert n_real_neighbors > 0, (
+        "Neighbor list is empty at the tested geometry -- this test would "
+        "coincidentally pass without exercising the NL+jax.grad path at all."
+    )
+
+    caplog.set_level(logging.INFO, logger="prolix.simulate")
+
+    final_state = simulate.run_simulation(
+        system=system_params,
+        initial_positions=initial_positions,
+        spec=spec,
+    )
+
+    # Extract dt_start from the "Dynamic FIRE dt: dt_start=X ps, ..." log line
+    # (simulate.py:655-656) -- the only place dt_start is observable from here.
+    dt_start_lines = [
+        rec.message for rec in caplog.records if "Dynamic FIRE dt: dt_start=" in rec.message
+    ]
+    assert dt_start_lines, "Expected a 'Dynamic FIRE dt' log line from run_simulation's minimizer"
+    match = re.search(r"dt_start=([\d.eE+-]+)", dt_start_lines[0])
+    assert match is not None, f"Could not parse dt_start from log line: {dt_start_lines[0]!r}"
+    dt_start = float(match.group(1))
+
+    dt_start_ceiling = 0.001  # ps -- simulate.py:653's jnp.clip upper bound
+    assert dt_start < dt_start_ceiling * 0.5, (
+        f"dt_start={dt_start:.2e} ps is pinned near its ceiling ({dt_start_ceiling} ps), "
+        f"the symptom of the pre-#4623-fix broken zero-gradient custom_vjp -- "
+        f"max_grad from jax.grad through the NL kernels must have been ~0."
+    )
+
+    # Independently confirm genuine minimization progress: two clashing-ish
+    # atoms starting at 1.5 A (outside the LJ minimum at 2^(1/6)*sigma ~ 1.122 A)
+    # should relax toward the minimum, not stay put or diverge.
+    pos = final_state.positions
+    final_dist = float(jnp.linalg.norm(pos[0] - pos[1]))
+    assert jnp.isfinite(final_dist)
+    assert abs(final_dist - 1.122) < 0.1, (
+        f"Final separation {final_dist:.4f} A did not converge toward the LJ "
+        f"minimum (~1.122 A) -- minimization did not make real progress."
+    )
