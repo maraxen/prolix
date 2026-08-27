@@ -1,4 +1,4 @@
-# praxia Internal Docs
+# wt-20260807-132628 Internal Docs
 
 ## Daily
 - [260426_sprint5-kups-crossval](daily/260426_sprint5-kups-crossval.md)
@@ -55,8 +55,14 @@
 - [260410_phase4-solvation-implementation-plan](plans/260410_phase4-solvation-implementation-plan.md)
 
 ## Specs
+- [260827_nb-parity-1vii-nl-switch-energy-compare](specs/260827_nb-parity-1vii-nl-switch-energy-compare.md) — NB-PARITY-1VII-NL — Prolix NL+switch vs vendored 1vii gold (energy_fn_from_bundle)
 - [260824_neighbor-list-config](specs/260824_neighbor-list-config.md) — OpenMM-shaped NonbondedConfig / NL Verlet+LJ-switch; flash tile JAX; vendored OpenMM 8.3.1 gold campaign (Pallas deferred)
 - [260820_jax-profiling-skill-DRAFT](specs/260820_jax-profiling-skill-DRAFT.md) — DRAFT source for the xtrax `jax-profiling` skill (not P9; fill §Open after Stage-2 pull → rank → kernel decision)
+- [260817_jax-profiling-optimization-workflow](specs/260817_jax-profiling-optimization-workflow.md) — Layered split (jax-profiling skill for judgment, authored cross-repo in xtrax/agent_assets/skills/ + prolix-local scripts/profiling/ primitives + machine-checked stage/scale validity contract), with bathos scoped to the confirmation loop and the xtrax CODE upstream still deferred behind a named trigger; plus an ordered CPU-first implementation plan ending in one small-system H200 probe and one cross-repo skill-authoring step
+- [260817_where-should-a-reusable-staged-cpu-synth](specs/260817_where-should-a-reusable-staged-cpu-synth.md)
+- [260812_decide-the-fix-approach-for-prolix-backl-2](specs/260812_decide-the-fix-approach-for-prolix-backl-2.md)
+- [260812_decide-the-fix-approach-for-prolix-backl](specs/260812_decide-the-fix-approach-for-prolix-backl.md)
+- [260812_re-derive-stage-0d-reachability-for-prol](specs/260812_re-derive-stage-0d-reachability-for-prol.md)
 - [260718_xr-while-carry](specs/260718_xr-while-carry.md) — Scope a lax.while_loop-backed WhileCarry strategy for xtrax (upstream), motivated by debt 760's neighbor-list carry in prolix's EnsemblePlan inference dispatch
 - [260715_b1-nonbonded-parity](specs/260715_b1-nonbonded-parity.md) — B1-NONBONDED-PARITY
 - [260715_b1-settle-stack](specs/260715_b1-settle-stack.md) — B1-SETTLE-STACK
