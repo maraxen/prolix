@@ -20,7 +20,5 @@ NL 1vii gold: solvated 1VII (ff19SB + amber14/tip3p water, addHydrogens +
 addSolvent padding=0.8 nm), OpenMM Reference PME + NL cutoff/switch matching
 `REGRESSION_EXPLICIT_PME` (cutoff/alpha/grid), switch = cutoff - 1.0 Å,
 dispersion correction off. Vendored energy/forces/positions/box/charges/LJ
-params for later `energy_fn_from_bundle`/EnsemblePlan comparison — the
-prolix-side comparison itself (backlog #4383) is not yet implemented;
-`nl_omm_parity.py`'s `_compare_probe` currently returns a deliberate
-gate_pass=0 stub for probe="1vii" pending that wiring.
+params plus exception list (`omm_exceptions`) for later `energy_fn_from_bundle`/EnsemblePlan 
+comparison. The prolix-side comparison wiring is in backlog #4383.

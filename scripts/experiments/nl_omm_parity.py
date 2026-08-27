@@ -118,6 +118,7 @@ def _emit_1vii_gold() -> dict:
         box_vecs[2][2].value_in_unit(unit.angstrom),
     ]
     charges, sigmas, epsilons = [], [], []
+    omm_exceptions = []
     for i in range(omm_system.getNumForces()):
         force = omm_system.getForce(i)
         if isinstance(force, openmm.NonbondedForce):
@@ -126,6 +127,16 @@ def _emit_1vii_gold() -> dict:
                 charges.append(q.value_in_unit(unit.elementary_charge))
                 sigmas.append(sig.value_in_unit(unit.angstrom))
                 epsilons.append(eps.value_in_unit(unit.kilocalories_per_mole))
+            # Extract exception parameters (LJ and Coulomb modifications for bonded pairs)
+            for exc_idx in range(force.getNumExceptions()):
+                i_atom, j_atom, chargeProd, sigma_exc, epsilon_exc = force.getExceptionParameters(exc_idx)
+                omm_exceptions.append([
+                    int(i_atom),
+                    int(j_atom),
+                    float(chargeProd.value_in_unit(unit.elementary_charge**2)),
+                    float(sigma_exc.value_in_unit(unit.angstrom)),
+                    float(epsilon_exc.value_in_unit(unit.kilocalories_per_mole)),
+                ])
     return {
         "probe": "1vii",
         "openmm_version": getattr(openmm, "__version__", "unknown"),
@@ -143,6 +154,7 @@ def _emit_1vii_gold() -> dict:
         "sigmas_A": sigmas,
         "epsilons_kcal": epsilons,
         "n_atoms": int(positions_A.shape[0]),
+        "omm_exceptions": omm_exceptions,
         "compare_status": "gold_only",
     }
 
