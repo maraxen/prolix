@@ -1,4 +1,4 @@
-# wt-20260807-132628 Internal Docs
+# impl-4383-nb-parity Internal Docs
 
 ## Daily
 - [260426_sprint5-kups-crossval](daily/260426_sprint5-kups-crossval.md)
@@ -55,6 +55,7 @@
 - [260410_phase4-solvation-implementation-plan](plans/260410_phase4-solvation-implementation-plan.md)
 
 ## Specs
+- [260827_fix-nl-kernel-custom-vjp-position-gradient](specs/260827_fix-nl-kernel-custom-vjp-position-gradient.md) — NL-KERNEL-VJP-FIX — chunked_lj_energy_nl / chunked_coulomb_energy_nl position-gradient fix
 - [260827_nb-parity-1vii-nl-switch-energy-compare](specs/260827_nb-parity-1vii-nl-switch-energy-compare.md) — NB-PARITY-1VII-NL — Prolix NL+switch vs vendored 1vii gold (energy_fn_from_bundle)
 - [260824_neighbor-list-config](specs/260824_neighbor-list-config.md) — OpenMM-shaped NonbondedConfig / NL Verlet+LJ-switch; flash tile JAX; vendored OpenMM 8.3.1 gold campaign (Pallas deferred)
 - [260820_jax-profiling-skill-DRAFT](specs/260820_jax-profiling-skill-DRAFT.md) — DRAFT source for the xtrax `jax-profiling` skill (not P9; fill §Open after Stage-2 pull → rank → kernel decision)
