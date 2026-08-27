@@ -101,9 +101,21 @@
 - [260710_xtrax-rewire_audit_dag](audits/260710_xtrax-rewire_audit_dag.md)
 - [260710_xtrax-rewire_next_steps](audits/260710_xtrax-rewire_next_steps.md)
 - [260710_xtrax-rewire_triage](audits/260710_xtrax-rewire_triage.md)
+- [260710_xtrax-rewire_verify_checklist](audits/260710_xtrax-rewire_verify_checklist.toml) ⚠️ non-standard extension
 - [260623_hp2_make_bundle_field_audit](audits/260623_hp2_make_bundle_field_audit.md)
 - [260526_p2a-bonded-field-audit](audits/260526_p2a-bonded-field-audit.md) — PhysicsSystem field-access audit for bonded energy path; extended for P2b nonbonded fields (260527)
+- [ROLLUP](audits/xr_rewire_challenges/ROLLUP.json)
 - [ROLLUP](audits/xr_rewire_challenges/ROLLUP.md)
+- [XR-A2A3_challenge_summary](audits/xr_rewire_challenges/XR-A2A3_challenge_summary.json)
+- [XR-BUDGET_challenge_summary](audits/xr_rewire_challenges/XR-BUDGET_challenge_summary.json)
+- [XR-CARRY_challenge_summary](audits/xr_rewire_challenges/XR-CARRY_challenge_summary.json)
+- [XR-DISPATCH_challenge_summary](audits/xr_rewire_challenges/XR-DISPATCH_challenge_summary.json)
+- [XR-FIT-FLIP_challenge_summary](audits/xr_rewire_challenges/XR-FIT-FLIP_challenge_summary.json)
+- [XR-KILL-FORK_challenge_summary](audits/xr_rewire_challenges/XR-KILL-FORK_challenge_summary.json)
+- [XR-PARITY-OMM-WATER_challenge_summary](audits/xr_rewire_challenges/XR-PARITY-OMM-WATER_challenge_summary.json)
+- [XR-PIN_challenge_summary](audits/xr_rewire_challenges/XR-PIN_challenge_summary.json)
+- [XR-SHADOW_challenge_summary](audits/xr_rewire_challenges/XR-SHADOW_challenge_summary.json)
+- [praxia_id_map](audits/xr_rewire_challenges/praxia_id_map.json)
 
 ## Research
 - [260710_xtrax-rewire-epic-closeout-audit](research/260710_xtrax-rewire-epic-closeout-audit.md)
@@ -291,14 +303,6 @@
 - [251204_examples](misc/251204_examples.md)
 - [251204_index](misc/251204_index.md)
 - [251204_untitled](misc/251204_untitled.md)
-
-## Active (legacy)
-
-## Notes (legacy)
-- [260522_s71-external-baseline-api-verification](notes/260522_s71-external-baseline-api-verification.md)
-
-## Designs (legacy)
-- [260710_xtrax-rewire_audit_design](designs/260710_xtrax-rewire_audit_design.md)
 
 ## Superpowers
 > Skill outputs live in `.praxia/docs/superpowers/plans/` and `.praxia/docs/superpowers/specs/.

@@ -39,6 +39,7 @@ from proxide.physics.vdw import (
 
 # kUPS cross-validation unit conversion adapter (v1.1 Item 3)
 from prolix.physics import kups_adapter
+from prolix.typing import NPTState
 
 # Modular integrator builder (Phase 2.1, ADR-005; Phase 4 batching)
 from .integrator_builder import make_integrator, make_integrator_batched
@@ -51,7 +52,6 @@ from .pressure import instantaneous_pressure_akma
 
 # NPT integrators and supporting functions (Sprint 6)
 from .settle import settle_csvr_npt
-from prolix.typing import NPTState
 from .step_system import (
   IntegratorState,
   Step,
