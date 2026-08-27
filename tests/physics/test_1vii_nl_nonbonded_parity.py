@@ -69,7 +69,7 @@ class TestOneViiNLNonbondedParity:
         assert bundle.excl_dense_scales_elec is not None
         assert bundle.exception_pairs.shape[0] > 0  # Should have nonzero exceptions
 
-    def test_neighbor_list_no_overflow(self, gold, bundle):
+    def test_neighbor_list_no_overflow(self, bundle):
         """Verify neighbor list does not overflow (mandatory gate per spec C4)."""
         from prolix.physics import neighbor_list as nl
         from prolix.physics.pbc import create_periodic_space
@@ -150,8 +150,10 @@ class TestOneViiNLNonbondedParity:
             pme_grid_points=int(gold["pme_grid_points"]),
         )
 
+        # Force = -dE/dr (matches compare_nl_two_particle's -jax.grad convention
+        # in nonbonded_omm_parity/lj_oracle.py and force_fn_from_bundle's docstring).
         grad_fn = jax.grad(energy_fn)
-        f_prolix = grad_fn(bundle.positions, neighbor=nbr)
+        f_prolix = -grad_fn(bundle.positions, neighbor=nbr)
 
         # Compare to gold forces
         f_gold = jnp.asarray(gold["forces_kcal_mol_A"], dtype=jnp.float32)

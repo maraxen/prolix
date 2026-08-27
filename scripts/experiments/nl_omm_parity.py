@@ -308,9 +308,10 @@ def _compare_probe(probe: str, gold: Path) -> dict:
 
             e_prolix = float(energy_fn(bundle.positions, neighbor=nbr))
 
-            # Compute forces via jax.grad
+            # Force = -dE/dr (matches compare_nl_two_particle's -jax.grad convention
+            # in nonbonded_omm_parity/lj_oracle.py and force_fn_from_bundle's docstring).
             grad_fn = jax.grad(energy_fn)
-            f_prolix = grad_fn(bundle.positions, neighbor=nbr)
+            f_prolix = -grad_fn(bundle.positions, neighbor=nbr)
 
             # Compute deltas
             e_gold = float(rec["energy_kcal"])
