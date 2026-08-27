@@ -18,7 +18,8 @@ timing; keep ``dispatch_n_steps`` for trajectory / AD-compatible paths.
 
 from __future__ import annotations
 
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 
 import jax.numpy as jnp
 from xtrax.tiling.dispatch import DispatchRejected, make_axis_dispatch
@@ -238,7 +239,6 @@ def dispatch_n_steps_inference(
 
                 def _hook(i, positions):
                     on_step(i, positions)
-                    return None
 
                 payload = getattr(new_state, "position", new_state)
                 io_callback(_hook, None, step_i, payload)

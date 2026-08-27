@@ -24,7 +24,7 @@ def stub_step_transition(carry, x):
 def plan_n_steps_with_carry(
     n_steps: int,
     *,
-    budget_bytes: float | int = 1 << 40,
+    budget_bytes: float = 1 << 40,
 ) -> BatchPlan:
     """Plan the ``n_steps`` axis with a CarrySpec so xtrax pre-demotes to Scan.
 

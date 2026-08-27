@@ -55,7 +55,7 @@ def _pad_to_tile_multiple(
     sigmas: Array,
     epsilons: Array,
     atom_mask: Array,
-    sys: "PaddedSystem",
+    sys: PaddedSystem,
     T: int,
     include_elec: bool,
 ):
