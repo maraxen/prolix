@@ -505,3 +505,4 @@
 {"agent_type":"unknown","verdict":"unparsed","verdict_source":"unparsed","commit":"","event":"subagent_stop","telemetry_id":"subagent-stop-a8a569a745d5380c3","date":"2026-08-28"}
 {"agent_type":"unknown","verdict":"unparsed","verdict_source":"unparsed","commit":"","event":"subagent_stop","telemetry_id":"subagent-stop-ae885020dbaeff6e9","date":"2026-08-28"}
 {"agent_type":"unknown","verdict":"unparsed","verdict_source":"unparsed","commit":"","event":"subagent_stop","telemetry_id":"subagent-stop-ab47fb1ac331666bd","date":"2026-08-28"}
+{"event":"mcp_tool_call","telemetry_id":"mcp-transduction_log-toolu_016iJoQkr8XVArr5modutkZj","timestamp":"2026-08-28T18:02:51Z","tool_name":"mcp__plugin_praxia_core__transduction_log","praxia_tool":"transduction_log","action":"append_plan","outcome":"ok","surface":"unknown","task_id":"unknown","session_id":"23905d14-56b8-4cd2-b4cb-fd07997d018f","tool_use_id":"toolu_016iJoQkr8XVArr5modutkZj","date":"2026-08-28"}
