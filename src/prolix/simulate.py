@@ -754,7 +754,7 @@ def run_simulation(
   # Evaluate final energy with standard (non-soft-core) energy function
   fire_energy_fn = _make_fire_energy()  # standard, no soft-core
   if neighbor_fn is not None:
-    neighbor = neighbor_fn.update(positions_minimized)
+    neighbor = neighbor.update(positions_minimized)
     e_minimized = fire_energy_fn(positions_minimized, neighbor=neighbor)
   else:
     e_minimized = fire_energy_fn(positions_minimized)
@@ -850,7 +850,7 @@ def run_simulation(
   ]
 
   logger.info("Gentle-start equilibration...")
-  for phase in warmup_phases:
+  for warmup_phase_idx, phase in enumerate(warmup_phases):
     warmup_dt = dt * phase["dt_scale"]
     warmup_kT = kT  # same temperature
 
@@ -860,23 +860,45 @@ def run_simulation(
     )
 
     # Initialize from current state.positions
-    warmup_key = jax.random.fold_in(key, hash(phase["name"]))
+    # Python's hash() is a full-range signed 64-bit int (and randomized per
+    # process), which overflows fold_in's uint32 requirement almost always --
+    # the loop index is deterministic and only needs to be distinct per phase.
+    warmup_key = jax.random.fold_in(key, warmup_phase_idx)
     if neighbor is not None:
       warmup_state = warmup_init(warmup_key, state.positions, mass=masses, neighbor=neighbor)
     else:
       warmup_state = warmup_init(warmup_key, state.positions, mass=masses)
 
     # Run warmup phase
-    @jax.jit
-    def _warmup_loop(ws, _apply=warmup_apply, _n=phase["steps"]):
-      def body(i, s):
-        return _apply(s)
-      return jax.lax.fori_loop(0, _n, body, ws)
+    if neighbor is not None:
+      # Mirror the FIRE-stage neighbor-refresh pattern (Python loop with
+      # periodic nbr.update(), see the stage loop above): a fully-jitted
+      # fori_loop calling `_apply(s)` with no `neighbor=` kwarg silently fell
+      # back to make_energy_fn's dense (neighbor=None) path for the entire
+      # warmup phase, unlike FIRE minimization and the production scan.
+      # Numerically equivalent for tiny systems (dense == NL result there),
+      # but silently drops the neighbor list's cutoff restriction at
+      # production scale.
+      interval = max(1, int(spec.fire_neighbor_update_interval))
+      nbr = neighbor
+      for i in range(int(phase["steps"])):
+        if i % interval == 0:
+          nbr = nbr.update(warmup_state.position)
+          if nbr.did_buffer_overflow:
+            nbr = neighbor_fn.allocate(warmup_state.position)
+        warmup_state = warmup_apply(warmup_state, neighbor=nbr)
+      neighbor = nbr
+    else:
+      @jax.jit
+      def _warmup_loop(ws, _apply=warmup_apply, _n=phase["steps"]):
+        def body(i, s):
+          return _apply(s)
+        return jax.lax.fori_loop(0, _n, body, ws)
 
-    warmup_state = _warmup_loop(warmup_state)
+      warmup_state = _warmup_loop(warmup_state)
 
     # NaN check
-    has_nan = bool(jnp.any(~jnp.isfinite(warmup_state.positions)))
+    has_nan = bool(jnp.any(~jnp.isfinite(warmup_state.position)))
     if has_nan:
       logger.warning("  %s: NaN detected after %d steps! Reverting to minimized positions.",
                      phase["name"], phase["steps"])
@@ -888,9 +910,9 @@ def run_simulation(
       break
     # Update state with warmup results, reinitialize with production integrator
     if neighbor is not None:
-      state = init_fn(key, warmup_state.positions, mass=masses, neighbor=neighbor)
+      state = init_fn(key, warmup_state.position, mass=masses, neighbor=neighbor)
     else:
-      state = init_fn(key, warmup_state.positions, mass=masses)
+      state = init_fn(key, warmup_state.position, mass=masses)
     logger.info("  %s: %d steps OK (dt=%.4e τ)", phase["name"], phase["steps"], warmup_dt)
 
   # Compile and test the production step function

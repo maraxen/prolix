@@ -14,7 +14,7 @@ from jax_md import space
 from prolix import simulate
 from prolix.physics import neighbor_list as nl
 from prolix.physics import system
-from prolix.physics.pbc import create_periodic_space
+from prolix.physics.pbc import create_periodic_space, minimum_image_distance
 from prolix.physics.spec import PhysicsSpec
 
 # Enable x64 for physics
@@ -260,7 +260,16 @@ def test_neighbor_list_minimization_dt_start_not_pinned(minimal_lj_system, caplo
     dt_start = float(match.group(1))
 
     dt_start_ceiling = 0.001  # ps -- simulate.py:653's jnp.clip upper bound
-    assert dt_start < dt_start_ceiling * 0.5, (
+    # Margin: pre-fix, max_grad ~= 0 hard-clips dt_start to *exactly* the
+    # ceiling (0.001 / 1e-8 clips to 0.001). Post-fix, for this fixture (2
+    # atoms, sigma=eps=1, r=1.5 A), the analytical LJ force is
+    # |dE/dr| = (4*eps/r) * (-12*(sigma/r)^12 + 6*(sigma/r)^6) ~= 1.158
+    # kcal/mol/A, giving dt_start = 0.001/1.158 ~= 8.64e-4 ps -- correct and
+    # non-trivially below the ceiling, but not below half of it. The original
+    # 0.5 margin assumed a larger max_grad than this fixture actually
+    # produces; 0.95 still rejects the exact-ceiling pre-fix symptom while
+    # accepting the fixture's real, verified-correct gradient.
+    assert dt_start < dt_start_ceiling * 0.95, (
         f"dt_start={dt_start:.2e} ps is pinned near its ceiling ({dt_start_ceiling} ps), "
         f"the symptom of the pre-#4623-fix broken zero-gradient custom_vjp -- "
         f"max_grad from jax.grad through the NL kernels must have been ~0."
@@ -269,8 +278,16 @@ def test_neighbor_list_minimization_dt_start_not_pinned(minimal_lj_system, caplo
     # Independently confirm genuine minimization progress: two clashing-ish
     # atoms starting at 1.5 A (outside the LJ minimum at 2^(1/6)*sigma ~ 1.122 A)
     # should relax toward the minimum, not stay put or diverge.
+    # Positions are wrapped into [0, box) by the periodic shift_fn, so a raw
+    # jnp.linalg.norm(pos[0] - pos[1]) can spuriously read as tens of A when
+    # the pair wraps to opposite box faces while genuinely close under the
+    # minimum-image convention (the only distance that is physically
+    # meaningful under PBC). Max possible minimum-image distance in a 30 A
+    # box is sqrt(3)*15 ~= 25.98 A -- a raw, non-periodic distance can and
+    # did exceed that (36.85 A observed), which is what final_dist must
+    # avoid measuring.
     pos = final_state.positions
-    final_dist = float(jnp.linalg.norm(pos[0] - pos[1]))
+    final_dist = float(minimum_image_distance(pos[0], pos[1], box))
     assert jnp.isfinite(final_dist)
     assert abs(final_dist - 1.122) < 0.1, (
         f"Final separation {final_dist:.4f} A did not converge toward the LJ "
