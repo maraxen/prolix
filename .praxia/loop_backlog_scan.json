@@ -1,0 +1,7 @@
+{
+  "task_id": "260811_autonomous-loop",
+  "executable_count": 25,
+  "note": "Full P1/P2 executable-and-unblocked cohort as returned by mcp__plugin_praxia_core__backlog(action=list, payload={status:open, detail:with_deps}). See .praxia/loop_triage_cache.json for the pm-triaged prioritized/deferred split over this same set.",
+  "excluded_as_epic_gated": [3270, 3272, 3273, 3278, 3279, 3280, 3281, 3282, 3283, 3284, 3285, 3286, 3287],
+  "blocked_items": [172, 259, 262, 270, 277, 278, 306, 307, 308, 309, 310]
+}

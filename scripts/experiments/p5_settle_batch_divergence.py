@@ -1,23 +1,40 @@
-"""Phase 5 — batched SETTLE divergence repro (platform_precision hypothesis).
+"""Phase 5 — Stage 1 harness v2: Revised reachability diagnostic (4-atom test scale).
 
-Measures max absolute position diff between vmap-batched and loop-unbatched
-settle_langevin trajectories. Under the platform_precision hypothesis,
-`_settle_water_batch` PBC minimum-image at line ~237 (delta - box * round(delta/box))
-is FMA-sensitive near ±0.5, so GPU-accelerated XLA can produce a different image than
-CPU float64, displacing one constrained position by a full box-length.
+Extends prior A/B PBC-rounding verification with focused diagnostic modes targeting
+the small_water_system fixture (1 water + 1 solute, 10 steps, 4 atoms total).
+
+Evidence modes:
+  - G2 (seeded): Existing comparison with random seed + dynamics (gating mode)
+  - G1' (translated): Fixture with positions rigidly translated off wrap discontinuities
+  - G1'' (bitexact): ULP-exact comparison at step 0 for PBC rounding sites
+  - G1''' (idiom-toggle): Non-gating control measuring floor vs round modes
+
+Read the spec: `.praxia/docs/specs/260812_re-derive-stage-0d-reachability-for-prol.md`
+
+Metrics:
+  - max_abs_atom_position_delta: max over atoms i, components c of |x_loop[i,c] - x_vmap[i,c]|
+  - first_divergence_step: smallest step index exceeding TOL = 1e-10 Å
 
 Usage:
     # L1 dry-run
-    uv run python scripts/experiments/p5_settle_batch_divergence.py --dry-run --out /dev/null
-
-    # L2 smoke test (default: 2 waters, box 10 Å, 50 steps)
     uv run python scripts/experiments/p5_settle_batch_divergence.py \\
-        --batch-size 2 --n-waters 2 --steps 50 --out /tmp/p5_batch_smoke.json
+        --dry-run --out /dev/null
+
+    # L2 smoke test (seeded mode, 4-atom system, 10 steps)
+    uv run python scripts/experiments/p5_settle_batch_divergence.py \\
+        --mode seeded --steps 10 --out /tmp/p5_seeded.json
+
+    # Translated-fixture variant (G1')
+    uv run python scripts/experiments/p5_settle_batch_divergence.py \\
+        --mode translated --steps 10 --out /tmp/p5_translated.json
+
+    # Bit-exact ULP comparison (G1'')
+    uv run python scripts/experiments/p5_settle_batch_divergence.py \\
+        --mode bitexact --out /tmp/p5_bitexact.json
 
     # Cluster batch
     uv run bth run python scripts/experiments/p5_settle_batch_divergence.py \\
-        --batch-size 2 --n-waters 2 --box-size 10.0 --steps 50 \\
-        --out outputs/p5_batch_div.json --campaign cd2fa896
+        --mode seeded --steps 10 --out outputs/p5_seeded.json --campaign <id>
 """
 
 from __future__ import annotations
@@ -27,6 +44,10 @@ import json
 import logging
 import sys
 from pathlib import Path
+
+import jax
+import jax.numpy as jnp
+import numpy as np
 
 # ---------------------------------------------------------------------------
 # Path anchoring (CLUSTER.md: never use cwd / relative strings)
@@ -52,26 +73,71 @@ logging.basicConfig(
 )
 log = logging.getLogger("p5_settle_batch_divergence")
 
+# Tolerance for detecting divergence (Angstrom)
+TOL = 1e-10
+
+
+# ---------------------------------------------------------------------------
+# Argument parsing
+# ---------------------------------------------------------------------------
 
 def _parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(
-        description="Phase 5: batched SETTLE divergence repro (platform_precision)"
+        description="Phase 5 Stage 1 v2: Revised reachability diagnostic (small 4-atom test)"
     )
-    p.add_argument("--batch-size", type=int, default=2,
-                   help="Number of replicas in the vmap batch")
-    p.add_argument("--n-waters", type=int, default=2,
-                   help="Number of TIP3P water molecules per replica")
-    p.add_argument("--box-size", type=float, default=10.0,
-                   help="Cubic box side length in Angstrom (0 = free space / no box)")
-    p.add_argument("--steps", type=int, default=50,
-                   help="Number of integration steps to run")
-    p.add_argument("--seed", type=int, default=42,
-                   help="PRNG seed")
-    p.add_argument("--out", required=True,
-                   help="Output JSON path")
-    p.add_argument("--dry-run", action="store_true",
-                   help="Validate imports and exit 0 without running dynamics")
+    p.add_argument(
+        "--mode",
+        choices=["seeded", "translated", "bitexact", "idiom-toggle", "constructed", "seeds"],
+        required=True,
+        help="Diagnostic mode: seeded (G2), translated (G1'), bitexact (G1''), "
+             "idiom-toggle (G1'''), or legacy constructed/seeds",
+    )
+    p.add_argument(
+        "--pbc-round-mode",
+        choices=["floor", "round"],
+        default="floor",
+        help="PBC rounding idiom: floor(x+0.5) [default] or round(x) [comparison]",
+    )
+    p.add_argument(
+        "--n-waters",
+        type=int,
+        default=1,
+        help="Number of TIP3P water molecules (default 1 for small_water_system)",
+    )
+    p.add_argument(
+        "--box-size",
+        type=float,
+        default=10.0,
+        help="Cubic box side length in Angstrom (default 10.0 for small_water_system)",
+    )
+    p.add_argument(
+        "--steps",
+        type=int,
+        default=10,
+        help="Number of integration steps (default 10 for small_water_system)",
+    )
+    p.add_argument(
+        "--seed",
+        type=int,
+        default=42,
+        help="PRNG seed for reproducibility",
+    )
+    p.add_argument(
+        "--out",
+        required=True,
+        help="Output JSON path",
+    )
+    p.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Validate imports and exit 0 without running dynamics",
+    )
     return p.parse_args()
+
+
+# ---------------------------------------------------------------------------
+# Initialization & setup
+# ---------------------------------------------------------------------------
 
 
 def _validate_imports() -> None:
@@ -84,13 +150,10 @@ def _validate_imports() -> None:
 
 
 def _build_water_system(n_waters: int, box_size: float, seed: int):
-    """Build a minimal TIP3P-geometry water system with one dummy solute atom.
+    """Build a random TIP3P-geometry water system with one dummy solute atom.
 
-    Returns (positions, masses, water_indices, box_vec_or_None).
+    Returns (positions, masses, water_indices, box_vec).
     """
-    import jax.numpy as jnp
-    import numpy as np
-
     rng = np.random.default_rng(seed)
 
     # TIP3P geometry (Å)
@@ -102,19 +165,13 @@ def _build_water_system(n_waters: int, box_size: float, seed: int):
     # Build n_waters molecules, scattered randomly in a box
     atom_positions = []
     for i in range(n_waters):
-        if box_size > 0:
-            origin = rng.uniform(1.0, box_size - 1.0, size=3)
-        else:
-            origin = rng.uniform(-5.0, 5.0, size=3)
+        origin = rng.uniform(1.0, box_size - 1.0, size=3)
         atom_positions.append(origin)                               # O
         atom_positions.append(origin + np.array([hx, -hy, 0.0]))   # H1
         atom_positions.append(origin + np.array([-hx, -hy, 0.0]))  # H2
 
-    # Add one dummy solute atom in the middle of the box (or at origin)
-    if box_size > 0:
-        atom_positions.append(np.array([box_size / 2, box_size / 2, box_size / 2]))
-    else:
-        atom_positions.append(np.array([0.0, 0.0, 0.0]))
+    # Add one dummy solute atom in the middle of the box
+    atom_positions.append(np.array([box_size / 2, box_size / 2, box_size / 2]))
 
     positions = jnp.array(np.array(atom_positions, dtype=np.float64))
 
@@ -131,18 +188,72 @@ def _build_water_system(n_waters: int, box_size: float, seed: int):
         dtype=jnp.int32,
     )
 
-    box_vec = (
-        jnp.array([box_size, box_size, box_size], dtype=jnp.float64)
-        if box_size > 0 else None
-    )
+    box_vec = jnp.array([box_size, box_size, box_size], dtype=jnp.float64)
+
+    return positions, masses, water_indices, box_vec
+
+
+def _build_constructed_water_system(box_size: float, seed: int):
+    """Build adversarial case: water straddling a PBC face targeting L773/L776.
+
+    Oxygen positioned just inside the +x face; hydrogens positioned to create
+    a bond vector component dH_x / box near the half-integer 0.5 tie point.
+
+    Returns (positions, masses, water_indices, box_vec).
+    """
+    rng = np.random.default_rng(seed)
+
+    # TIP3P geometry
+    OH = 0.9572
+    angle_rad = np.deg2rad(104.52 / 2)
+    hx = OH * np.sin(angle_rad)
+    hy = OH * np.cos(angle_rad)
+
+    # Construct a single water molecule that straddles the x-face.
+    # O positioned just inside the +x face (at x = box - epsilon).
+    # H1 and H2 positioned on the "other side" so that shift_fn wraps them
+    # to the opposite face, creating a bond vector dH near the half-box tie point.
+
+    epsilon = 0.01  # distance from face
+    ox = box_size - epsilon
+    oy = box_size / 2
+    oz = box_size / 2
+
+    # H1 and H2: position them symmetrically on the "other side" in the unwrapped frame,
+    # differentiated in the y-direction to create a proper V-shaped water geometry.
+    # After independent shift_fn wrapping per atom, they'll end up ~box away from O,
+    # creating a bond vector dH_x ≈ box/2 which hits the tie point.
+    h1_x = epsilon  # wraps back to ~box - epsilon after shift_fn
+    h1_y = oy - hy  # H1 offset below oxygen
+    h1_z = oz
+
+    h2_x = epsilon
+    h2_y = oy + hy  # H2 offset above oxygen (symmetric but opposite to H1)
+    h2_z = oz
+
+    # Add one dummy solute in the center
+    atom_positions = [
+        np.array([ox, oy, oz], dtype=np.float64),      # O
+        np.array([h1_x, h1_y, h1_z], dtype=np.float64),  # H1
+        np.array([h2_x, h2_y, h2_z], dtype=np.float64),  # H2
+        np.array([box_size / 2, box_size / 2, box_size / 2], dtype=np.float64),  # solute
+    ]
+
+    positions = jnp.array(np.array(atom_positions, dtype=np.float64))
+
+    # Masses: 1 water + 1 solute
+    masses = jnp.array([15.999, 1.008, 1.008, 12.0], dtype=jnp.float64)
+
+    # Water indices: only 1 water, atoms [0, 1, 2]
+    water_indices = jnp.array([[0, 1, 2]], dtype=jnp.int32)
+
+    box_vec = jnp.array([box_size, box_size, box_size], dtype=jnp.float64)
 
     return positions, masses, water_indices, box_vec
 
 
 def _make_energy_fn(positions_ref):
     """Harmonic restoring energy (keeps system near initial config)."""
-    import jax.numpy as jnp
-
     k = 0.5  # kcal/(mol·Å²)
 
     def energy_fn(positions, box=None):
@@ -152,94 +263,784 @@ def _make_energy_fn(positions_ref):
 
 
 def _shift_fn(dR, box):
-    import jax.numpy as jnp
+    """PBC minimum-image shift (using round, not the instrumented _PBC_ROUND_FN)."""
     return dR - box * jnp.round(dR / box)
 
+
+# ---------------------------------------------------------------------------
+# Comparison logic
+# ---------------------------------------------------------------------------
 
 def _run_comparison(
     n_waters: int,
     box_size: float,
     steps: int,
     seed: int,
-) -> tuple[float, float]:
-    """Run vmap batch vs loop comparison.
+    pbc_round_mode: str,
+) -> dict:
+    """Run vmap batch vs loop comparison, return metrics and first-divergence info.
 
-    Returns (max_diff_with_box, max_diff_free_space).
+    Returns dict with:
+      - max_abs_atom_position_delta (float)
+      - first_divergence_step (int or None)
+      - offending_molecule_index (int or None)
+      - o_pos_loop_pre (list or None)
+      - o_pos_vmap_pre (list or None)
+      - o_pos_loop_post (list or None)
+      - o_pos_vmap_post (list or None)
+      - delta_over_box_at_five_sites (dict or None)
+      - primitive_error_classification (str or None)
+      - batch_size (int)
+      - n_waters (int)
+      - box_size (float)
+      - steps (int)
     """
-    import jax
-    import jax.numpy as jnp
+    import os
+    os.environ["PROLIX_PBC_ROUND_MODE"] = pbc_round_mode
 
-    jax.config.update("jax_enable_x64", True)
+    # Force reimport of settle to pick up the new env var
+    import importlib
+    import prolix.physics.settle
+    importlib.reload(prolix.physics.settle)
 
     from prolix.physics import settle
     from prolix.simulate import AKMA_TIME_UNIT_FS, BOLTZMANN_KCAL
+
+    jax.config.update("jax_enable_x64", True)
 
     dt_fs = 0.5
     dt_akma = dt_fs / AKMA_TIME_UNIT_FS
     kT = 300.0 * BOLTZMANN_KCAL
     gamma = 1.0 / AKMA_TIME_UNIT_FS
 
-    results = {}
+    log.info("Running comparison: n_waters=%d box=%.1f steps=%d pbc_mode=%s",
+             n_waters, box_size, steps, pbc_round_mode)
 
-    for label, box_s in [("with_box", box_size), ("free_space", 0.0)]:
-        log.info("Running %s (box_size=%.1f) …", label, box_s)
+    positions, masses, water_indices, box_vec = _build_water_system(n_waters, box_size, seed)
+    energy_fn = _make_energy_fn(positions)
 
-        positions, masses, water_indices, box_vec = _build_water_system(n_waters, box_s, seed)
-        energy_fn = _make_energy_fn(positions)
+    init_fn, apply_fn = settle.settle_langevin(
+        energy_fn,
+        _shift_fn,
+        dt=dt_akma,
+        kT=kT,
+        gamma=gamma,
+        mass=masses,
+        water_indices=water_indices,
+        box=box_vec,
+        project_ou_momentum_rigid=True,
+        projection_site="post_o",
+    )
 
-        init_fn, apply_fn = settle.settle_langevin(
-            energy_fn,
-            _shift_fn,
-            dt=dt_akma,
-            kT=kT,
-            gamma=gamma,
-            mass=masses,
-            water_indices=water_indices,
-            box=box_vec,
-            project_ou_momentum_rigid=True,
-            projection_site="post_o",
-        )
+    key = jax.random.key(seed)
+    ref_state = init_fn(key, positions, box=box_vec)
 
-        key = jax.random.key(seed)
-        kw = {"box": box_vec} if box_vec is not None else {}
-        ref_state = init_fn(key, positions, **kw)
+    # Build B=2 batch by stacking the same initial state twice
+    def _batch(s):
+        # B=1 (expand_dims), matching the actual repo regression test
+        # (test_settle_batched_vs_unbatched) exactly -- NOT a B=2 duplicate
+        # stack. B=2 exercises genuinely batched/vectorized XLA kernels with
+        # their own floating-point reduction order, which can differ from the
+        # unbatched path locally for reasons unrelated to anything under
+        # investigation here; B=1 is the near-trivial wrap the real bug
+        # (passes locally, diverges only on cluster) is actually defined by.
+        return jax.tree.map(lambda x: jnp.expand_dims(x, 0), s)
 
-        # Build B=2 batch by stacking the same initial state twice
-        def _batch(s):
-            return jax.tree.map(lambda x: jnp.stack([x, x], axis=0), s)
+    batched_state = _batch(ref_state)
 
-        batched_state = _batch(ref_state)
+    def apply_fn_step(state):
+        return apply_fn(state, box=box_vec)
 
-        def apply_fn_step(state):
-            return apply_fn(state, **kw)
+    vmapped_apply = jax.vmap(apply_fn_step)
 
-        vmapped_apply = jax.vmap(apply_fn_step)
+    # Run loop and compare positions
+    unbatched_curr = ref_state
+    batched_curr = batched_state
+    max_diff = 0.0
+    first_divergence_step = None
+    offending_molecule_index = None
+    o_pos_loop_pre = None
+    o_pos_vmap_pre = None
+    o_pos_loop_post = None
+    o_pos_vmap_post = None
+    delta_over_box_at_five_sites = None
+    primitive_error_classification = None
 
-        # Run loop and compare positions
-        unbatched_curr = ref_state
-        batched_curr = batched_state
-        max_diff = 0.0
+    for step in range(steps):
+        unbatched_curr = apply_fn_step(unbatched_curr)
+        batched_curr = vmapped_apply(batched_curr)
 
-        for step in range(steps):
-            unbatched_curr = apply_fn_step(unbatched_curr)
-            batched_curr = vmapped_apply(batched_curr)
+        # Compare positions per atom
+        pos_loop = unbatched_curr.positions
+        pos_vmap = batched_curr.positions[0]  # use first replica
 
-            # Compare unbatched positions to each replica in the batch
-            for replica in range(2):
-                diff = float(jnp.max(jnp.abs(unbatched_curr.positions - batched_curr.positions[replica])))
-                if diff > max_diff:
-                    max_diff = diff
-                    if diff > 1e-5:
-                        log.warning(
-                            "  step=%d replica=%d diff=%.3e — divergence detected",
-                            step, replica, diff,
-                        )
+        diff = jnp.abs(pos_loop - pos_vmap)
+        max_diff_step = float(jnp.max(diff))
 
-        log.info("  %s max_diff = %.3e Å", label, max_diff)
-        results[label] = max_diff
+        if max_diff_step > max_diff:
+            max_diff = max_diff_step
 
-    return results["with_box"], results["free_space"]
+        if max_diff > TOL and first_divergence_step is None:
+            first_divergence_step = step
 
+            # Find offending molecule and dump state
+            max_per_atom = jnp.max(diff, axis=1)
+            offending_atom = int(jnp.argmax(max_per_atom))
+            offending_molecule_index = offending_atom // 3
+
+            # Gather pre/post positions for the offending water (O, H1, H2)
+            water_idx = offending_molecule_index
+            o_idx = 3 * water_idx
+            h1_idx = 3 * water_idx + 1
+            h2_idx = 3 * water_idx + 2
+
+            o_pos_loop_pre = [float(x) for x in pos_loop[o_idx]]
+            o_pos_vmap_pre = [float(x) for x in pos_vmap[o_idx]]
+            h1_pos_loop_pre = [float(x) for x in pos_loop[h1_idx]]
+            h1_pos_vmap_pre = [float(x) for x in pos_vmap[h1_idx]]
+            h2_pos_loop_pre = [float(x) for x in pos_loop[h2_idx]]
+            h2_pos_vmap_pre = [float(x) for x in pos_vmap[h2_idx]]
+
+            # Note: we could compute post-step positions by calling settle_positions
+            # directly, but for simplicity we just record the current post-step values
+            o_pos_loop_post = [float(x) for x in unbatched_curr.positions[o_idx]]
+            o_pos_vmap_post = [float(x) for x in batched_curr.positions[0][o_idx]]
+            h1_pos_loop_post = [float(x) for x in unbatched_curr.positions[h1_idx]]
+            h1_pos_vmap_post = [float(x) for x in batched_curr.positions[0][h1_idx]]
+            h2_pos_loop_post = [float(x) for x in unbatched_curr.positions[h2_idx]]
+            h2_pos_vmap_post = [float(x) for x in batched_curr.positions[0][h2_idx]]
+
+            # Compute delta/box at the two recoverable sites (L773/L776: dH bond vectors).
+            # Other sites (L171/L318/L1276/L1328) require internal settle instrumentation.
+            box = float(box_vec[0]) if box_vec is not None else 1.0
+            dh1_loop = np.array(h1_pos_loop_post) - np.array(o_pos_loop_post)
+            dh1_vmap = np.array(h1_pos_vmap_post) - np.array(o_pos_vmap_post)
+            dh2_loop = np.array(h2_pos_loop_post) - np.array(o_pos_loop_post)
+            dh2_vmap = np.array(h2_pos_vmap_post) - np.array(o_pos_vmap_post)
+            delta_over_box_at_five_sites = {
+                "L171_delta_o_over_box": "not_recoverable_without_settle_instrumentation",
+                "L318_delta_over_box": "not_recoverable_without_settle_instrumentation",
+                "L773_dH1_over_box": {
+                    "loop": [float(x / box) for x in dh1_loop],
+                    "vmap": [float(x / box) for x in dh1_vmap],
+                },
+                "L776_dH2_over_box": {
+                    "loop": [float(x / box) for x in dh2_loop],
+                    "vmap": [float(x / box) for x in dh2_vmap],
+                },
+                "L1276_dx_1_over_box": "not_recoverable_without_settle_instrumentation",
+                "L1328_dx_2_over_box": "not_recoverable_without_settle_instrumentation",
+            }
+
+            # Classify primitive error magnitude
+            max_err = float(jnp.max(diff))
+            if max_err > 1.0:
+                primitive_error_classification = "box_quantised"
+            elif max_err > 1e-8:
+                primitive_error_classification = "large_arbitrary"
+            else:
+                primitive_error_classification = "small_arbitrary"
+
+    log.info("  max_diff = %.3e Å (step %s)", max_diff, first_divergence_step)
+
+    result = {
+        "max_abs_atom_position_delta": float(max_diff),
+        "first_divergence_step": first_divergence_step,
+        "offending_molecule_index": offending_molecule_index,
+        "o_pos_loop_pre": o_pos_loop_pre,
+        "o_pos_vmap_pre": o_pos_vmap_pre,
+        "o_pos_loop_post": o_pos_loop_post,
+        "o_pos_vmap_post": o_pos_vmap_post,
+        "h1_pos_loop_pre": None if first_divergence_step is None else h1_pos_loop_pre,
+        "h1_pos_vmap_pre": None if first_divergence_step is None else h1_pos_vmap_pre,
+        "h1_pos_loop_post": None if first_divergence_step is None else h1_pos_loop_post,
+        "h1_pos_vmap_post": None if first_divergence_step is None else h1_pos_vmap_post,
+        "h2_pos_loop_pre": None if first_divergence_step is None else h2_pos_loop_pre,
+        "h2_pos_vmap_pre": None if first_divergence_step is None else h2_pos_vmap_pre,
+        "h2_pos_loop_post": None if first_divergence_step is None else h2_pos_loop_post,
+        "h2_pos_vmap_post": None if first_divergence_step is None else h2_pos_vmap_post,
+        "delta_over_box_at_five_sites": delta_over_box_at_five_sites,
+        "primitive_error_classification": primitive_error_classification,
+        "batch_size": 2,
+        "n_waters": n_waters,
+        "box_size": float(box_size),
+        "steps": steps,
+    }
+
+    return result
+
+
+def _run_constructed_case(
+    box_size: float,
+    steps: int,
+    seed: int,
+    pbc_round_mode: str,
+) -> dict:
+    """Run the constructed adversarial case (G1).
+
+    Returns the same dict as _run_comparison.
+    """
+    import os
+    os.environ["PROLIX_PBC_ROUND_MODE"] = pbc_round_mode
+
+    import importlib
+    import prolix.physics.settle
+    importlib.reload(prolix.physics.settle)
+
+    from prolix.physics import settle
+    from prolix.simulate import AKMA_TIME_UNIT_FS, BOLTZMANN_KCAL
+
+    jax.config.update("jax_enable_x64", True)
+
+    dt_fs = 0.5
+    dt_akma = dt_fs / AKMA_TIME_UNIT_FS
+    kT = 300.0 * BOLTZMANN_KCAL
+    gamma = 0.0  # Deterministic for constructed case
+
+    log.info("Running constructed adversarial case: box=%.1f steps=%d pbc_mode=%s",
+             box_size, steps, pbc_round_mode)
+
+    positions, masses, water_indices, box_vec = _build_constructed_water_system(box_size, seed)
+    energy_fn = _make_energy_fn(positions)
+
+    init_fn, apply_fn = settle.settle_langevin(
+        energy_fn,
+        _shift_fn,
+        dt=dt_akma,
+        kT=kT,
+        gamma=gamma,  # No thermostat noise
+        mass=masses,
+        water_indices=water_indices,
+        box=box_vec,
+        project_ou_momentum_rigid=True,
+        projection_site="post_o",
+    )
+
+    key = jax.random.key(seed)
+    ref_state = init_fn(key, positions, box=box_vec)
+
+    # Build B=2 batch by stacking
+    def _batch(s):
+        # B=1 (expand_dims), matching the actual repo regression test
+        # (test_settle_batched_vs_unbatched) exactly -- NOT a B=2 duplicate
+        # stack. B=2 exercises genuinely batched/vectorized XLA kernels with
+        # their own floating-point reduction order, which can differ from the
+        # unbatched path locally for reasons unrelated to anything under
+        # investigation here; B=1 is the near-trivial wrap the real bug
+        # (passes locally, diverges only on cluster) is actually defined by.
+        return jax.tree.map(lambda x: jnp.expand_dims(x, 0), s)
+
+    batched_state = _batch(ref_state)
+
+    def apply_fn_step(state):
+        return apply_fn(state, box=box_vec)
+
+    vmapped_apply = jax.vmap(apply_fn_step)
+
+    unbatched_curr = ref_state
+    batched_curr = batched_state
+    max_diff = 0.0
+    first_divergence_step = None
+    offending_molecule_index = None
+    o_pos_loop_pre = None
+    o_pos_vmap_pre = None
+    o_pos_loop_post = None
+    o_pos_vmap_post = None
+    delta_over_box_at_five_sites = None
+    primitive_error_classification = None
+
+    for step in range(steps):
+        unbatched_curr = apply_fn_step(unbatched_curr)
+        batched_curr = vmapped_apply(batched_curr)
+
+        pos_loop = unbatched_curr.positions
+        pos_vmap = batched_curr.positions[0]
+
+        diff = jnp.abs(pos_loop - pos_vmap)
+        max_diff_step = float(jnp.max(diff))
+
+        if max_diff_step > max_diff:
+            max_diff = max_diff_step
+
+        if max_diff > TOL and first_divergence_step is None:
+            first_divergence_step = step
+            offending_molecule_index = 0  # Only 1 water in constructed case
+
+            o_idx = 0
+            h1_idx = 1
+            h2_idx = 2
+
+            o_pos_loop_pre = [float(x) for x in pos_loop[o_idx]]
+            o_pos_vmap_pre = [float(x) for x in pos_vmap[o_idx]]
+            h1_pos_loop_pre = [float(x) for x in pos_loop[h1_idx]]
+            h1_pos_vmap_pre = [float(x) for x in pos_vmap[h1_idx]]
+            h2_pos_loop_pre = [float(x) for x in pos_loop[h2_idx]]
+            h2_pos_vmap_pre = [float(x) for x in pos_vmap[h2_idx]]
+
+            o_pos_loop_post = [float(x) for x in unbatched_curr.positions[o_idx]]
+            o_pos_vmap_post = [float(x) for x in batched_curr.positions[0][o_idx]]
+            h1_pos_loop_post = [float(x) for x in unbatched_curr.positions[h1_idx]]
+            h1_pos_vmap_post = [float(x) for x in batched_curr.positions[0][h1_idx]]
+            h2_pos_loop_post = [float(x) for x in unbatched_curr.positions[h2_idx]]
+            h2_pos_vmap_post = [float(x) for x in batched_curr.positions[0][h2_idx]]
+
+            # Compute delta/box at the two recoverable sites (L773/L776: dH bond vectors).
+            box = float(box_vec[0])
+            dh1_loop = np.array(h1_pos_loop_post) - np.array(o_pos_loop_post)
+            dh1_vmap = np.array(h1_pos_vmap_post) - np.array(o_pos_vmap_post)
+            dh2_loop = np.array(h2_pos_loop_post) - np.array(o_pos_loop_post)
+            dh2_vmap = np.array(h2_pos_vmap_post) - np.array(o_pos_vmap_post)
+            delta_over_box_at_five_sites = {
+                "L171_delta_o_over_box": "not_recoverable_without_settle_instrumentation",
+                "L318_delta_over_box": "not_recoverable_without_settle_instrumentation",
+                "L773_dH1_over_box": {
+                    "loop": [float(x / box) for x in dh1_loop],
+                    "vmap": [float(x / box) for x in dh1_vmap],
+                },
+                "L776_dH2_over_box": {
+                    "loop": [float(x / box) for x in dh2_loop],
+                    "vmap": [float(x / box) for x in dh2_vmap],
+                },
+                "L1276_dx_1_over_box": "not_recoverable_without_settle_instrumentation",
+                "L1328_dx_2_over_box": "not_recoverable_without_settle_instrumentation",
+            }
+
+            max_err = float(jnp.max(diff))
+            if max_err > 1.0:
+                primitive_error_classification = "box_quantised"
+            elif max_err > 1e-8:
+                primitive_error_classification = "large_arbitrary"
+            else:
+                primitive_error_classification = "small_arbitrary"
+
+    log.info("  constructed case max_diff = %.3e Å (step %s)", max_diff, first_divergence_step)
+
+    result = {
+        "max_abs_atom_position_delta": float(max_diff),
+        "first_divergence_step": first_divergence_step,
+        "offending_molecule_index": offending_molecule_index,
+        "o_pos_loop_pre": o_pos_loop_pre,
+        "o_pos_vmap_pre": o_pos_vmap_pre,
+        "o_pos_loop_post": o_pos_loop_post,
+        "o_pos_vmap_post": o_pos_vmap_post,
+        "h1_pos_loop_pre": None if first_divergence_step is None else h1_pos_loop_pre,
+        "h1_pos_vmap_pre": None if first_divergence_step is None else h1_pos_vmap_pre,
+        "h1_pos_loop_post": None if first_divergence_step is None else h1_pos_loop_post,
+        "h1_pos_vmap_post": None if first_divergence_step is None else h1_pos_vmap_post,
+        "h2_pos_loop_pre": None if first_divergence_step is None else h2_pos_loop_pre,
+        "h2_pos_vmap_pre": None if first_divergence_step is None else h2_pos_vmap_pre,
+        "h2_pos_loop_post": None if first_divergence_step is None else h2_pos_loop_post,
+        "h2_pos_vmap_post": None if first_divergence_step is None else h2_pos_vmap_post,
+        "delta_over_box_at_five_sites": delta_over_box_at_five_sites,
+        "primitive_error_classification": primitive_error_classification,
+        "batch_size": 2,
+        "n_waters": 1,
+        "box_size": float(box_size),
+        "steps": steps,
+    }
+
+    return result
+
+
+# ---------------------------------------------------------------------------
+# New diagnostic modes (Stage 1 v2): G1', G1'', G1'''
+# ---------------------------------------------------------------------------
+
+def _build_small_water_system_fixture():
+    """Build the small_water_system fixture from test_settle_batched.py:48-74.
+
+    Returns (positions, masses, water_indices, box_vec).
+    """
+    # Positions: 1 water in staggered geometry + 1 solute atom
+    positions = jnp.array(
+        [
+            [0.0, 0.0, 0.0],      # O (oxygen at origin)
+            [0.9572, 0.0, 0.0],   # H1 (along x-axis)
+            [-0.2399, 0.9272, 0.0],  # H2 (bond angle ~104.52°)
+            [5.0, 5.0, 5.0],      # Solute atom (at box/2)
+        ],
+        dtype=jnp.float64,
+    )
+
+    # Masses: TIP3P O=15.999, H=1.008, solute=12.0
+    masses = jnp.array([15.999, 1.008, 1.008, 12.0], dtype=jnp.float64)
+
+    # Water indices: one water [O, H1, H2]
+    water_indices = jnp.array([[0, 1, 2]], dtype=jnp.int32)
+
+    # Box dimensions: 10 Å cubic
+    box_vec = jnp.array([10.0, 10.0, 10.0], dtype=jnp.float64)
+
+    return positions, masses, water_indices, box_vec
+
+
+def _make_translated_fixture(offset: list | np.ndarray):
+    """Rigidly translate all atoms by a constant offset.
+
+    Moves O off [0,0,0] and solute off [5,5,5] (wrap discontinuities).
+    Offset should keep all atoms inside [0, 10).
+    """
+    positions, masses, water_indices, box_vec = _build_small_water_system_fixture()
+
+    offset_arr = np.array(offset, dtype=np.float64)
+    translated_positions = (np.asarray(positions) + offset_arr) % 10.0
+
+    return jnp.array(translated_positions, dtype=jnp.float64), masses, water_indices, box_vec
+
+
+def _run_small_system_seeded(box_size: float, steps: int, seed: int) -> dict:
+    """G2: Run seeded comparison on small_water_system (4-atom, 10 steps).
+
+    Returns dict with max_diff, divergence_detected, first_divergence_step.
+    """
+    import os
+    os.environ["PROLIX_PBC_ROUND_MODE"] = "floor"
+    import importlib
+    import prolix.physics.settle
+    importlib.reload(prolix.physics.settle)
+
+    from prolix.physics import settle
+    from prolix.simulate import AKMA_TIME_UNIT_FS, BOLTZMANN_KCAL
+
+    jax.config.update("jax_enable_x64", True)
+
+    log.info("G2-SEEDED: Running small_water_system (4 atoms, %d steps, seed=%d) …", steps, seed)
+
+    dt_fs = 0.5
+    dt_akma = dt_fs / AKMA_TIME_UNIT_FS
+    kT = 300.0 * BOLTZMANN_KCAL
+    gamma = 1.0 / AKMA_TIME_UNIT_FS
+
+    positions, masses, water_indices, box_vec = _build_small_water_system_fixture()
+
+    # Harmonic energy (matches test fixture)
+    positions_ref = positions
+    def energy_fn(pos, box=None):
+        # Matches tests/physics/test_settle_batched.py's analytical_energy_fn
+        # fixture EXACTLY: harmonic restoring + weak LJ pair between O (atom 0)
+        # and the solute (atom 3). Omitting the LJ term (as an earlier version
+        # of this script did) changes the actual dynamics from what the real
+        # regression test simulates.
+        e_harmonic = 0.5 * 0.5 * jnp.sum((pos - positions_ref) ** 2)
+        r_oc = jnp.linalg.norm(pos[3] - pos[0])
+        sigma = 3.5
+        epsilon = 0.1
+        r6 = (sigma / r_oc) ** 6
+        e_lj = 4.0 * epsilon * (r6**2 - r6)
+        return e_harmonic + e_lj
+
+    init_fn, apply_fn = settle.settle_langevin(
+        energy_fn,
+        _shift_fn,
+        dt=dt_akma,
+        kT=kT,
+        gamma=gamma,
+        mass=masses,
+        water_indices=water_indices,
+        box=box_vec,
+        project_ou_momentum_rigid=True,
+        projection_site="post_o",
+    )
+
+    key = jax.random.key(seed)
+    ref_state = init_fn(key, positions, box=box_vec)
+
+    def _batch(s):
+        # B=1 (expand_dims), matching the actual repo regression test
+        # (test_settle_batched_vs_unbatched) exactly -- NOT a B=2 duplicate
+        # stack. B=2 exercises genuinely batched/vectorized XLA kernels with
+        # their own floating-point reduction order, which can differ from the
+        # unbatched path locally for reasons unrelated to anything under
+        # investigation here; B=1 is the near-trivial wrap the real bug
+        # (passes locally, diverges only on cluster) is actually defined by.
+        return jax.tree.map(lambda x: jnp.expand_dims(x, 0), s)
+
+    batched_state = _batch(ref_state)
+
+    def apply_fn_step(state):
+        return apply_fn(state, box=box_vec)
+
+    vmapped_apply = jax.vmap(apply_fn_step)
+
+    unbatched_curr = ref_state
+    batched_curr = batched_state
+    max_diff = 0.0
+    first_divergence_step = -1
+
+    for step in range(steps):
+        unbatched_curr = apply_fn_step(unbatched_curr)
+        batched_curr = vmapped_apply(batched_curr)
+
+        for replica in range(1):  # B=1: only one batch element
+            diff = float(jnp.max(jnp.abs(unbatched_curr.positions - batched_curr.positions[replica])))
+            if diff > max_diff:
+                max_diff = diff
+                if first_divergence_step < 0 and diff > TOL:
+                    first_divergence_step = step
+
+    log.info("  G2-SEEDED result: max_diff=%.3e, first_divergence_step=%d", max_diff, first_divergence_step)
+
+    return {
+        "max_abs_atom_position_delta": float(max_diff),
+        "divergence_detected": max_diff > TOL,
+        "first_divergence_step": first_divergence_step if first_divergence_step >= 0 else None,
+        "batch_size": 2,
+        "n_atoms": 4,
+        "box_size": 10.0,
+        "steps": steps,
+    }
+
+
+def _run_small_system_translated(box_size: float, steps: int, seed: int) -> dict:
+    """G1': Run seeded comparison with translated fixture (positions off discontinuities).
+
+    Translates all atoms by [3, 3, 3] to move oxygen off [0,0,0] and solute off [5,5,5].
+    """
+    import os
+    os.environ["PROLIX_PBC_ROUND_MODE"] = "floor"
+    import importlib
+    import prolix.physics.settle
+    importlib.reload(prolix.physics.settle)
+
+    from prolix.physics import settle
+    from prolix.simulate import AKMA_TIME_UNIT_FS, BOLTZMANN_KCAL
+
+    jax.config.update("jax_enable_x64", True)
+
+    log.info("G1'-TRANSLATED: Running with translated fixture (offset=[3,3,3], %d steps) …", steps)
+
+    dt_fs = 0.5
+    dt_akma = dt_fs / AKMA_TIME_UNIT_FS
+    kT = 300.0 * BOLTZMANN_KCAL
+    gamma = 1.0 / AKMA_TIME_UNIT_FS
+
+    positions, masses, water_indices, box_vec = _make_translated_fixture([3.0, 3.0, 3.0])
+
+    log.info("  Translated O: %s, solute: %s",
+             positions[0].tolist(), positions[3].tolist())
+
+    positions_ref = positions
+    def energy_fn(pos, box=None):
+        # Matches tests/physics/test_settle_batched.py's analytical_energy_fn
+        # fixture EXACTLY: harmonic restoring + weak LJ pair between O (atom 0)
+        # and the solute (atom 3). Omitting the LJ term (as an earlier version
+        # of this script did) changes the actual dynamics from what the real
+        # regression test simulates.
+        e_harmonic = 0.5 * 0.5 * jnp.sum((pos - positions_ref) ** 2)
+        r_oc = jnp.linalg.norm(pos[3] - pos[0])
+        sigma = 3.5
+        epsilon = 0.1
+        r6 = (sigma / r_oc) ** 6
+        e_lj = 4.0 * epsilon * (r6**2 - r6)
+        return e_harmonic + e_lj
+
+    init_fn, apply_fn = settle.settle_langevin(
+        energy_fn,
+        _shift_fn,
+        dt=dt_akma,
+        kT=kT,
+        gamma=gamma,
+        mass=masses,
+        water_indices=water_indices,
+        box=box_vec,
+        project_ou_momentum_rigid=True,
+        projection_site="post_o",
+    )
+
+    key = jax.random.key(seed)
+    ref_state = init_fn(key, positions, box=box_vec)
+
+    def _batch(s):
+        # B=1 (expand_dims), matching the actual repo regression test
+        # (test_settle_batched_vs_unbatched) exactly -- NOT a B=2 duplicate
+        # stack. B=2 exercises genuinely batched/vectorized XLA kernels with
+        # their own floating-point reduction order, which can differ from the
+        # unbatched path locally for reasons unrelated to anything under
+        # investigation here; B=1 is the near-trivial wrap the real bug
+        # (passes locally, diverges only on cluster) is actually defined by.
+        return jax.tree.map(lambda x: jnp.expand_dims(x, 0), s)
+
+    batched_state = _batch(ref_state)
+
+    def apply_fn_step(state):
+        return apply_fn(state, box=box_vec)
+
+    vmapped_apply = jax.vmap(apply_fn_step)
+
+    unbatched_curr = ref_state
+    batched_curr = batched_state
+    max_diff = 0.0
+    first_divergence_step = -1
+
+    for step in range(steps):
+        unbatched_curr = apply_fn_step(unbatched_curr)
+        batched_curr = vmapped_apply(batched_curr)
+
+        for replica in range(1):  # B=1: only one batch element
+            diff = float(jnp.max(jnp.abs(unbatched_curr.positions - batched_curr.positions[replica])))
+            if diff > max_diff:
+                max_diff = diff
+                if first_divergence_step < 0 and diff > TOL:
+                    first_divergence_step = step
+
+    log.info("  G1'-TRANSLATED result: max_diff=%.3e, first_divergence_step=%d",
+             max_diff, first_divergence_step)
+
+    return {
+        "translation_offset": [3.0, 3.0, 3.0],
+        "max_abs_atom_position_delta": float(max_diff),
+        "divergence_detected": max_diff > TOL,
+        "first_divergence_step": first_divergence_step if first_divergence_step >= 0 else None,
+        "batch_size": 2,
+        "n_atoms": 4,
+        "box_size": 10.0,
+        "steps": steps,
+    }
+
+
+def _run_small_system_bitexact(box_size: float, _seed: int) -> dict:
+    """G1'': Bit-exact ULP comparison at step 0.
+
+    Computes delta/box values at PBC rounding sites and converts to int64 bit view.
+    """
+    import os
+    os.environ["PROLIX_PBC_ROUND_MODE"] = "floor"
+    import importlib
+    import prolix.physics.settle
+    importlib.reload(prolix.physics.settle)
+
+    from prolix.physics import settle
+    from prolix.simulate import AKMA_TIME_UNIT_FS, BOLTZMANN_KCAL
+
+    jax.config.update("jax_enable_x64", True)
+
+    log.info("G1''-BITEXACT: Computing ULP-exact deltas at step 0 …")
+
+    dt_fs = 0.5
+    dt_akma = dt_fs / AKMA_TIME_UNIT_FS
+    kT = 300.0 * BOLTZMANN_KCAL
+    gamma = 1.0 / AKMA_TIME_UNIT_FS
+
+    positions, masses, water_indices, box_vec = _build_small_water_system_fixture()
+
+    positions_ref = positions
+    def energy_fn(pos, box=None):
+        # Matches tests/physics/test_settle_batched.py's analytical_energy_fn
+        # fixture EXACTLY: harmonic restoring + weak LJ pair between O (atom 0)
+        # and the solute (atom 3). Omitting the LJ term (as an earlier version
+        # of this script did) changes the actual dynamics from what the real
+        # regression test simulates.
+        e_harmonic = 0.5 * 0.5 * jnp.sum((pos - positions_ref) ** 2)
+        r_oc = jnp.linalg.norm(pos[3] - pos[0])
+        sigma = 3.5
+        epsilon = 0.1
+        r6 = (sigma / r_oc) ** 6
+        e_lj = 4.0 * epsilon * (r6**2 - r6)
+        return e_harmonic + e_lj
+
+    init_fn, apply_fn = settle.settle_langevin(
+        energy_fn,
+        _shift_fn,
+        dt=dt_akma,
+        kT=kT,
+        gamma=gamma,
+        mass=masses,
+        water_indices=water_indices,
+        box=box_vec,
+        project_ou_momentum_rigid=True,
+        projection_site="post_o",
+    )
+
+    key = jax.random.key(42)
+    unbatched_state = init_fn(key, positions, box=box_vec)
+
+    def _batch(s):
+        # B=1 (expand_dims), matching the actual repo regression test
+        # (test_settle_batched_vs_unbatched) exactly -- NOT a B=2 duplicate
+        # stack. B=2 exercises genuinely batched/vectorized XLA kernels with
+        # their own floating-point reduction order, which can differ from the
+        # unbatched path locally for reasons unrelated to anything under
+        # investigation here; B=1 is the near-trivial wrap the real bug
+        # (passes locally, diverges only on cluster) is actually defined by.
+        return jax.tree.map(lambda x: jnp.expand_dims(x, 0), s)
+
+    batched_state = _batch(unbatched_state)
+
+    def apply_fn_step(state):
+        return apply_fn(state, box=box_vec)
+
+    vmapped_apply = jax.vmap(apply_fn_step)
+
+    # Take one step
+    unbatched_after = apply_fn_step(unbatched_state)
+    batched_after = vmapped_apply(batched_state)
+
+    unbatched_pos = np.asarray(unbatched_after.positions, dtype=np.float64)
+    batched_pos_0 = np.asarray(batched_after.positions[0], dtype=np.float64)
+
+    def _bit_ulp_diff(a: np.ndarray, b: np.ndarray) -> np.ndarray:
+        """Elementwise |int64 bit-pattern difference| between two float64 arrays."""
+        return np.abs(a.view(np.int64) - b.view(np.int64))
+
+    # AGGREGATE (all 4 atoms' final post-step positions, both paths). This is
+    # NOT a per-site delta/box measurement -- it is the same quantity G2/G1'
+    # already report (in float form) here viewed as raw int64 bit patterns.
+    # It answers "do the two paths differ at all, down to the last bit?", not
+    # "which of the 6 rounding sites is responsible?".
+    aggregate_ulp = _bit_ulp_diff(unbatched_pos, batched_pos_0)
+
+    # PER-SITE (only the sites directly reconstructable from captured O/H1/H2
+    # positions without instrumenting settle.py's hot path -- see the prior
+    # remediation round's Bug 2 fix for the same approach and rationale).
+    # water_indices = [[0, 1, 2]]: O=atom 0, H1=atom 1, H2=atom 2, solute=atom 3.
+    o_loop, h1_loop, h2_loop = unbatched_pos[0], unbatched_pos[1], unbatched_pos[2]
+    o_vmap, h1_vmap, h2_vmap = batched_pos_0[0], batched_pos_0[1], batched_pos_0[2]
+    box_arr = np.asarray(box_vec, dtype=np.float64)
+
+    dh1_loop_over_box = (h1_loop - o_loop) / box_arr
+    dh1_vmap_over_box = (h1_vmap - o_vmap) / box_arr
+    dh2_loop_over_box = (h2_loop - o_loop) / box_arr
+    dh2_vmap_over_box = (h2_vmap - o_vmap) / box_arr
+
+    dh1_ulp = _bit_ulp_diff(dh1_loop_over_box, dh1_vmap_over_box)
+    dh2_ulp = _bit_ulp_diff(dh2_loop_over_box, dh2_vmap_over_box)
+
+    result = {
+        "step": 0,
+        "aggregate_final_position_ulp": {
+            "description": "post-step positions, all 4 atoms, both paths -- NOT per-site",
+            "max_ulp_difference": int(np.max(aggregate_ulp)),
+            "mean_ulp_difference": float(np.mean(aggregate_ulp)),
+            "bit_identical": bool(np.all(aggregate_ulp == 0)),
+        },
+        "per_site_delta_over_box_ulp": {
+            "L772_dH1_over_box": {
+                "max_ulp_difference": int(np.max(dh1_ulp)),
+                "bit_identical": bool(np.all(dh1_ulp == 0)),
+            },
+            "L775_dH2_over_box": {
+                "max_ulp_difference": int(np.max(dh2_ulp)),
+                "bit_identical": bool(np.all(dh2_ulp == 0)),
+            },
+            "L171_delta_o_over_box": "not_recoverable_without_settle_instrumentation",
+            "L318_unwrap_delta_over_box": "not_recoverable_without_settle_instrumentation",
+            "L1276_dx1_over_box": "not_recoverable_without_settle_instrumentation",
+            "L1328_dx2_over_box": "not_recoverable_without_settle_instrumentation",
+        },
+        "bit_identical": bool(np.all(aggregate_ulp == 0) and np.all(dh1_ulp == 0) and np.all(dh2_ulp == 0)),
+        "n_atoms": 4,
+        "box_size": 10.0,
+    }
+
+    log.info("  G1''-BITEXACT result: bit_identical=%s, aggregate_max_ulp=%d",
+             result["bit_identical"], result["aggregate_final_position_ulp"]["max_ulp_difference"])
+
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
 
 def main() -> None:
     args = _parse_args()
@@ -251,27 +1052,54 @@ def main() -> None:
             Path(args.out).write_text(json.dumps({"dry_run": True}))
         sys.exit(0)
 
-    log.info(
-        "Starting batch divergence repro: batch_size=%d n_waters=%d box_size=%.1f steps=%d seed=%d",
-        args.batch_size, args.n_waters, args.box_size, args.steps, args.seed,
-    )
+    log.info("Starting Phase 5 Stage 1 v2: mode=%s steps=%d out=%s",
+             args.mode, args.steps, args.out)
 
-    max_diff_with_box, max_diff_free_space = _run_comparison(
-        n_waters=args.n_waters,
-        box_size=args.box_size,
-        steps=args.steps,
-        seed=args.seed,
-    )
+    # Dispatch to appropriate mode
+    if args.mode == "seeded":
+        result = _run_small_system_seeded(
+            box_size=args.box_size,
+            steps=args.steps,
+            seed=args.seed,
+        )
+    elif args.mode == "translated":
+        result = _run_small_system_translated(
+            box_size=args.box_size,
+            steps=args.steps,
+            seed=args.seed,
+        )
+    elif args.mode == "bitexact":
+        result = _run_small_system_bitexact(
+            box_size=args.box_size,
+            _seed=args.seed,
+        )
+    elif args.mode == "idiom-toggle":
+        # Non-gating control: would require subprocess-based idiom comparison
+        log.warning("idiom-toggle mode not yet fully implemented; returning placeholder")
+        result = {
+            "mode": "idiom-toggle",
+            "note": "non-gating control mode for future idiom comparison",
+            "placeholder": True,
+        }
+    elif args.mode == "constructed":
+        # Legacy mode
+        result = _run_constructed_case(
+            box_size=args.box_size,
+            steps=args.steps,
+            seed=args.seed,
+            pbc_round_mode=args.pbc_round_mode,
+        )
+    else:  # legacy "seeds" mode
+        result = _run_comparison(
+            n_waters=args.n_waters,
+            box_size=args.box_size,
+            steps=args.steps,
+            seed=args.seed,
+            pbc_round_mode=args.pbc_round_mode,
+        )
 
-    result = {
-        "batch_size": args.batch_size,
-        "n_waters": args.n_waters,
-        "box_size": args.box_size,
-        "steps": args.steps,
-        "max_diff_with_box": max_diff_with_box,
-        "max_diff_free_space": max_diff_free_space,
-    }
-    log.info("Result: %s", json.dumps(result))
+    result["mode"] = args.mode
+    log.info("Result: %s", json.dumps(result, indent=2))
 
     out_path = Path(args.out)
     out_path.parent.mkdir(parents=True, exist_ok=True)

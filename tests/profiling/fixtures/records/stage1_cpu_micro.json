@@ -1,0 +1,38 @@
+{
+  "attribution_method": {
+    "bonded": "named_scope",
+    "pme_recip": "named_scope"
+  },
+  "config": {
+    "mode": "flash",
+    "protein": "1vii"
+  },
+  "contract_version": "3.0",
+  "device_kind": null,
+  "git_sha": "cafefeed",
+  "jax_version": "0.10.2",
+  "jaxlib_version": "0.10.2",
+  "metrics": {
+    "n_compilations": 1.0,
+    "n_executions": 1.0,
+    "n_jit_traces": 1.0,
+    "total_step_seconds": 0.01
+  },
+  "n_atoms": 64,
+  "platform": "cpu",
+  "probe_id": "p4_stage1_cpu",
+  "scopes": {
+    "bonded": [
+      0.004,
+      2
+    ],
+    "pme_recip": [
+      0.003,
+      1
+    ]
+  },
+  "stage": 1,
+  "timestamp": "2026-08-20T00:00:00+00:00",
+  "x64_enabled": false,
+  "xla_flags": ""
+}

@@ -1,26 +1,35 @@
 [experiment]
-hypothesis = "Batched SETTLE divergence is caused by FMA-sensitive PBC minimum-image rounding in _settle_water_batch (platform_precision): `delta - box * round(delta/box)` at settle.py:237 can select the wrong periodic image on GPU XLA paths, displacing constrained positions by one full box-length relative to the CPU/unbatched reference."
+hypothesis = "PBC rounding sites in settle.py are UNREACHABLE by the round-vs-floor tie-point mechanism. Real suspect is test fixture: small_water_system places O at [0,0,0] and solute at [5,5,5] with box=[10,10,10] — exactly at wrap discontinuities — combined with test's shift_fn using jnp.round (banker's rounding) vs settle.py's floor(x+0.5). Stage 1 v2 tests: (A) G1'-TRANSLATION to move atoms off discontinuities (expected: no divergence), (B) G1''-BITEXACT ULP comparison at step 0 (expected: bit-identical), (C) G2 seeded comparison retained, (D) G1''' idiom-toggle non-gating control."
 
 [outcomes.pass]
-condition   = "max_diff_with_box < 1e-5"
-decision    = "platform_precision root cause confirmed — divergence is below 1e-5 Å on CPU; cluster GPU run required to observe the ULP flip"
-reasoning   = "On CPU float64, FMA is not enabled so round() is exact; max_diff < 1e-5 means the box unwrap is numerically stable here and the bug only manifests on GPU"
+condition   = "max_abs_atom_position_delta < 1e-10"
+decision    = "Batched SETTLE produces identical dynamics to unbatched on CPU; fixture geometry or rounding idiom mismatch is not causing divergence"
+reasoning   = "Small 4-atom system on CPU float64 should produce machine-identical trajectories; any divergence >= 1e-10 indicates a real primitive error in constraint code"
 
 [outcomes.fail]
-condition   = "max_diff_with_box >= 1e-5"
-decision    = "divergence reproduces on CPU; investigate alternative root cause (rng_key_threading or non-PBC path)"
-reasoning   = "If CPU already diverges, the FMA-ULP hypothesis is not the only cause; need to check key threading or other batch-asymmetric paths"
+condition   = "max_abs_atom_position_delta >= 1e-10"
+decision    = "Divergence detected; classify by magnitude (box-quantized vs ULP vs arbitrary) and source (fixture vs batch vs code)"
+reasoning   = "Divergence at any scale is unexpected on CPU; investigate whether fixture geometry, batch asymmetry, or PBC rounding sites are responsible"
 is_residual = true
 
 [result_schema]
-batch_size            = "int"
-n_waters              = "int"
-box_size              = "float"
-steps                 = "int"
-max_diff_with_box     = "float"
-max_diff_free_space   = "float"
+mode                            = "str"
+batch_size                      = "int"
+n_atoms                         = "int"
+box_size                        = "float"
+steps                           = "int"
+max_abs_atom_position_delta     = "float"
+divergence_detected             = "bool"
+first_divergence_step           = "int or null"
+translation_offset              = "list or null"
+max_ulp_difference              = "int or null"
+mean_ulp_difference             = "float or null"
+std_ulp_difference              = "float or null"
+bit_identical                   = "bool or null"
+recovered_sites                 = "dict or null"
+unreachable_sites               = "dict or null"
 
 [metadata]
-campaign_id = "cd2fa896"
-task_id     = "260603_p5_settle_correctness"
-phase       = "C"
+campaign_id = "260812_p5c_stage1_v2"
+task_id     = "260811_autonomous-loop"
+phase       = "Stage_1_revised"

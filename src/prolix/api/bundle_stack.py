@@ -12,7 +12,7 @@ from typing import Any
 import jax
 import jax.numpy as jnp
 
-from prolix.types.bundles import ATOM_BUCKETS, MolecularBundle
+from prolix.types.bundles import MolecularBundle, atom_pad_length
 
 __all__ = [
     "can_jit_vmap_n_mols",
@@ -56,7 +56,7 @@ def integration_prefix_for_bundles(bundles: list[MolecularBundle]) -> int:
     """Host-static atom-bucket pad length for stacked integration (not ``n_atoms``)."""
     if not bundles:
         raise ValueError("bundles must be non-empty")
-    return int(ATOM_BUCKETS[bundles[0].shape_spec.atom_bucket_idx])
+    return atom_pad_length(bundles[0].shape_spec)
 
 
 def stack_molecular_bundles(bundles: list[MolecularBundle]) -> MolecularBundle:

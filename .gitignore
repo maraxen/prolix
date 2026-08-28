@@ -39,6 +39,7 @@ results/
 
 # Bathos per-run lock artifacts (ephemeral, regenerated per bth run; never tracked)
 *.bth.lock.toml
+.git_sha
 
 # Claude Code worktrees (ephemeral per-session)
 .claude/worktrees/
@@ -64,6 +65,9 @@ analysis/
 
 # fastembed model cache (downloaded at runtime, never commit — large blobs)
 .fastembed_cache/
+
+# Raw per-agent subagent transcript dumps (harness-local, never commit)
+.praxia/subagent_outputs/
 
 # myxcel local-state cache (coldify sidecar, githook bundle) -- regenerable,
 # never authoritative; see .praxia/docs/plans/260812_storage-tiering-standardization.md

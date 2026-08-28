@@ -12,5 +12,14 @@ source "$(dirname "${BASH_SOURCE[0]}")/_common_env.sh"
 
 # bath conventions
 export BTH_PROJECT_SLUG="${BTH_PROJECT_SLUG:-prolix}"
-# BTH_CATALOG_DIR defaults to ~/.bth/catalog/ — no override unless shared cluster catalog
-# SLURM_JOB_ID auto-captured by `bth run`
+# SLURM_JOB_ID auto-captured by `bth run`.
+#
+# `bth sync <remote>` rsyncs cool-tier fragments to
+#   {host}:{remote_root}/.bth/catalog/runs/{slug}/
+# (see bathos.sync.sync_catalog). Default `bth run` writes ~/.bth/catalog, which
+# that rsync never sees (rsync 11 / empty pull). On SLURM, pin the catalog to
+# this project's remote_root from .bth.toml (`~/projects/prolix`).
+if [[ -n "${SLURM_JOB_ID:-}" ]]; then
+    export BTH_CATALOG_DIR="${BTH_CATALOG_DIR:-${HOME}/projects/prolix/.bth/catalog}"
+    mkdir -p "${BTH_CATALOG_DIR}/runs/${BTH_PROJECT_SLUG}"
+fi

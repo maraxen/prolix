@@ -29,8 +29,9 @@ dependencies = [
     "jaxopt",
     "h5py>=3.16.0",
     "rdkit>=2024.3.0",
-    "xtrax>=0.4.0a5,<0.5",
+    "xtrax>=0.4.0a6,<0.5",
     "parmed>=4.3.1",
+    "openmmtools",
 ]
 
 [project.urls]
@@ -84,6 +85,10 @@ wasm = [
 [tool.pytest.ini_options]
 timeout = 900
 timeout_method = "thread"
+# scripts/profiling/ is imported as `scripts.profiling.*` from tests/profiling/ --
+# rootdir-relative, not under src/prolix (deliberate: keeps the seam import-clean
+# of prolix). See .praxia/docs/specs/260817_jax-profiling-optimization-workflow.md P1.
+pythonpath = ["."]
 # Default fast CI: pytest -m "not slow" (matches .github/workflows/ci.yml test step)
 # OpenMM parity (optional dep): pytest -m "openmm"
 markers = [
@@ -188,6 +193,9 @@ empty-body = "ignore"
 required-environments = [
     "sys_platform == 'linux' and platform_machine == 'x86_64'",
 ]
+
+[tool.uv.sources]
+openmmtools = { git = "https://github.com/choderalab/openmmtools" }
 
 [dependency-groups]
 # Keep in sync with [project.optional-dependencies] dev (no OpenMM here — see `openmm` extra).

@@ -12,6 +12,7 @@ References:
 
 from __future__ import annotations
 
+import os
 import warnings
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
@@ -20,6 +21,8 @@ import jax
 import jax.numpy as jnp
 from jax import random
 from jax_md import quantity, simulate
+
+from prolix.tiling.axis_dispatch import dispatch_n_waters
 
 from prolix.physics import (
   md_potential_bundle,
@@ -45,6 +48,23 @@ if TYPE_CHECKING:
   from jax_md.util import Array
 
 Array = Any
+
+# PBC rounding mode selection (A/B testing: round vs floor for banker's rounding)
+# Module-level constant bound at import time, never read inside a traced function.
+_PBC_ROUND_MODE = os.environ.get("PROLIX_PBC_ROUND_MODE", "floor")
+
+
+def _pbc_round_floor(x: Array) -> Array:
+  """Round-half-up via floor(x + 0.5) — project convention for A/B testing."""
+  return jnp.floor(x + 0.5)
+
+
+def _pbc_round_banker(x: Array) -> Array:
+  """Banker's rounding (round-half-to-even) — the pre-fix idiom, for A/B comparison."""
+  return jnp.round(x)
+
+
+_PBC_ROUND_FN = _pbc_round_banker if _PBC_ROUND_MODE == "round" else _pbc_round_floor
 
 # TIP3P water geometry constants
 TIP3P_ROH = 0.9572  # O-H bond length (Å)
@@ -157,18 +177,17 @@ def settle_positions(
   # unconstrained O position, which is already in [0, box) because the caller
   # wraps positions each step via shift_fn).  The SETTLE geometry correction is
   # sub-Ångström, so pos_oxygen_c is within a fraction of a bond-length of
-  # pos_oxygen_new, and the minimum-image delta is << 0.5 box.  The only
-  # exception is a genuine PBC crossing (|delta| ≈ box), handled by round().
-  # Crucially, the image decision is based on (pos_oxygen_c - pos_oxygen_new),
-  # NOT on pos_oxygen_c alone, so FMA-level differences in the Horn-SETTLE
-  # result (9.9999... vs 10.0000...) produce a delta difference of only ~1e-7,
-  # not the ±box discontinuity that jnp.mod exhibits.
+  # pos_oxygen_new, and the minimum-image delta is << 0.5 box. Crucially, the
+  # image decision is based on (pos_oxygen_c - pos_oxygen_new), NOT on
+  # pos_oxygen_c alone, so FMA-level differences in the Horn-SETTLE result
+  # (9.9999... vs 10.0000...) produce a delta difference of only ~1e-7, not the
+  # ±box discontinuity that jnp.mod exhibits.
   if box is not None:
     # Minimum-image of pos_oxygen_c relative to pos_oxygen_new.
     # All three constrained atoms get the same rigid integer-image shift so
     # the molecule's internal geometry is not distorted.
     delta_o = pos_oxygen_c - pos_oxygen_new
-    image_correction = -box * jnp.round(delta_o / box)
+    image_correction = -box * _PBC_ROUND_FN(delta_o / box)
 
     pos_oxygen_c = pos_oxygen_c + image_correction
     pos_h1_c = pos_h1_c + image_correction
@@ -291,12 +310,15 @@ def _settle_water_batch(
 
   NOTES:
   - PBC unwrap uses ``jnp.floor(delta/box + 0.5)`` rather than ``jnp.round``.
-    ``jnp.round`` applies banker's rounding (round-half-to-even); under XLA FMA
-    contraction on cluster hardware, values at ULP proximity to ±0.5 can round
-    in opposite directions on the loop path vs the vmap path, producing an
-    8.975 Å RMSD in ``test_settle_batched_vs_unbatched`` on the Engaging cluster
-    while passing locally.  ``floor(x + 0.5)`` gives deterministic round-half-up
-    regardless of FMA reassociation order.
+    This is a PROJECT CONVENTION adopted to enable A/B testing (a consistent
+    single idiom across all code). Both ``round(x)`` and ``floor(x+0.5)`` are
+    pure functions of float64 input and equally susceptible to ULP-level
+    differences between code paths; neither is inherently more deterministic
+    under FMA reassociation. In fact, ``floor(x+0.5)`` is marginally LESS
+    accurate due to double-rounding in the addition step. Historical note:
+    an 8.975 Å divergence was observed in looped vs vmapped paths on cluster
+    hardware, but this observation is unverified and not causally attributed
+    to this rounding site.
 
   Args:
       r_O_old, r_H1_old, r_H2_old: Old positions (used for PBC unwrap only).
@@ -310,13 +332,13 @@ def _settle_water_batch(
       Tuple of constrained positions (r_O_c, r_H1_c, r_H2_c).
   """
   # Apply minimum image convention if box is provided.
-  # floor(x + 0.5) instead of round(x): deterministic round-half-up avoids
-  # FMA ULP banker's rounding divergence between loop and vmap paths on cluster.
+  # Uses _PBC_ROUND_FN (floor(x+0.5) by default) as project convention;
+  # enables A/B testing of rounding modes (round vs floor).
   if box is not None:
 
     def unwrap(pos_new, pos_old):
       delta = pos_new - pos_old
-      delta = delta - box * jnp.floor(delta / box + 0.5)
+      delta = delta - box * _PBC_ROUND_FN(delta / box)
       return pos_old + delta
 
     pos_oxygen_new = unwrap(pos_oxygen_new, pos_oxygen_old)
@@ -770,10 +792,10 @@ def _r_step_conserve_angular_momentum(
   r_H2_unc = x_unc[indices.hydrogen2]  # (N_w, 3)
   if box is not None:
     dH1 = r_H1_unc - r_O_unc
-    dH1 = dH1 - box * jnp.round(dH1 / box)
+    dH1 = dH1 - box * _PBC_ROUND_FN(dH1 / box)
     r_H1_unc = r_O_unc + dH1
     dH2 = r_H2_unc - r_O_unc
-    dH2 = dH2 - box * jnp.round(dH2 / box)
+    dH2 = dH2 - box * _PBC_ROUND_FN(dH2 / box)
     r_H2_unc = r_O_unc + dH2
   r_unc_w = jnp.stack([r_O_unc, r_H1_unc, r_H2_unc], axis=1)  # (N_w, 3, 3)
   p_pre_a_w = jnp.stack(
@@ -984,12 +1006,37 @@ def _make_settle_compatible_force_fn(
   energy_or_force_fn: Callable[..., Array],
   mass: float | Array,
   box_template: Array | None,
+  *,
+  is_force_shaped: bool = False,
 ) -> Callable[..., Array]:
   """``jax_md.quantity.canonicalize_force``-compatible force fn using one ``value_and_grad`` when safe.
 
   If ``mass`` is a scalar, the atom count is unknown at integrator construction time;
   we fall back to ``canonicalize_force`` only.
+
+  Args:
+      is_force_shaped: When True, the caller already knows ``energy_or_force_fn``
+          returns an ``(N, 3)`` force array (not a scalar energy) -- e.g.
+          ``force_fn_from_bundle``'s FlashMD path (debt 761) -- and this skips
+          BOTH shape-auto-detection layers entirely rather than routing through
+          them. This matters because ``jax_md.quantity.canonicalize_force``'s
+          returned closure does its own lazy, UNPROTECTED ``eval_shape`` probe
+          on every first real call (jax_md/quantity.py's ``force_fn``, cached via
+          a ``nonlocal _force_fn`` -- not just once at construction time here).
+          That probe crashes with ``TracerArrayConversionError`` whenever
+          ``energy_or_force_fn`` touches a bundle's static ``box_size`` field via
+          the debt-770 PME-grid-sizing numpy workaround (confirmed via full
+          unfiltered traceback, job 20443232 local repro): our own eval_shape
+          probe below (``make_force_fn_like_canonicalize``) is try/except-
+          protected and correctly falls back to ``canonicalize_force`` on that
+          exception, but jax_md's *own* internal probe inside the fallback is
+          not protected by anything we control, so the crash still propagates
+          on the first real (non-probe) call. Skipping both probes when the
+          shape is already known sidesteps this rather than trying to fix a
+          third-party library's internal caching wrapper.
   """
+  if is_force_shaped:
+    return energy_or_force_fn
   mass_arr = jnp.asarray(mass)
   if mass_arr.ndim == 0:
     return quantity.canonicalize_force(energy_or_force_fn)
@@ -1026,6 +1073,7 @@ def settle_langevin(
   settle_velocity_tol: float | None = None,
   water_mask: Array | None = None,
   atom_mask: Array | None = None,
+  is_force_shaped: bool = False,
 ):
   r"""Langevin dynamics integrator with SETTLE constraints for water.
 
@@ -1113,7 +1161,9 @@ def settle_langevin(
   Returns:
       (init_fn, apply_fn) pair.
   """
-  force_fn = _make_settle_compatible_force_fn(energy_or_force_fn, mass, box)
+  force_fn = _make_settle_compatible_force_fn(
+    energy_or_force_fn, mass, box, is_force_shaped=is_force_shaped
+  )
   if projection_site not in ("post_o", "post_settle_vel", "both"):
     msg = f"invalid projection_site={projection_site!r}; expected post_o|post_settle_vel|both"
     raise ValueError(msg)
@@ -1172,14 +1222,15 @@ def settle_langevin(
       mass_flat = mass_arr.reshape(-1)
       r_water = jnp.stack([R[idx[:, 0]], R[idx[:, 1]], R[idx[:, 2]]], axis=1)
       m_water = jnp.stack([mass_flat[idx[:, 0]], mass_flat[idx[:, 1]], mass_flat[idx[:, 2]]], axis=1)
-
-      def init_one_water(carry, inputs):
-        key_w = carry
-        r_w, m_w = inputs
-        p_w, key_w = _init_momentum_one_water_rigid(key_w, r_w, m_w, _kT)
-        return key_w, p_w
-
-      key, p_water = jax.lax.scan(init_one_water, key, (r_water, m_water))
+      n_w = r_water.shape[0]
+      splits = jax.random.split(key, n_w + 1)
+      key, water_keys = splits[0], splits[1:]
+      p_water = dispatch_n_waters(
+        None,
+        n_w,
+        lambda pack: _init_momentum_one_water_rigid(pack[0], pack[1], pack[2], _kT)[0],
+        (water_keys, r_water, m_water),
+      )
       idx_flat = idx.reshape(-1)
       if water_mask is None:
         momenta = momenta.at[idx_flat].set(p_water.reshape(-1, 3))
@@ -1274,7 +1325,7 @@ def settle_langevin(
     # density (see scripts/explore/p5_rstep_substep_trace.py).
     dx_1 = x_con_1 - x_unc_1
     if box is not None:
-      dx_1 = dx_1 - box * jnp.round(dx_1 / box)
+      dx_1 = dx_1 - box * _PBC_ROUND_FN(dx_1 / box)
     dp_1 = state.mass * dx_1 / half_dt
     momentum = momentum + dp_1
 
@@ -1326,7 +1377,7 @@ def settle_langevin(
     # see R1 above for why the raw difference is unsafe under PBC wrapping).
     dx_2 = x_con_2 - x_unc_2
     if box is not None:
-      dx_2 = dx_2 - box * jnp.round(dx_2 / box)
+      dx_2 = dx_2 - box * _PBC_ROUND_FN(dx_2 / box)
     dp_2 = state.mass * dx_2 / half_dt
     momentum = momentum + dp_2
 
@@ -2045,6 +2096,7 @@ def settle_csvr(
         mass_hydrogen,
         n_iters=10,
         settle_velocity_tol=None,
+        remove_linear_com_momentum=remove_com,
       )
 
     # === CSVR velocity rescaling ===
@@ -2215,17 +2267,22 @@ def _langevin_step_o_constrained(
   r_water = jnp.stack([position[idx[:, 0]], position[idx[:, 1]], position[idx[:, 2]]], axis=1)
   m_water = jnp.stack([mass_flat[idx[:, 0]], mass_flat[idx[:, 1]], mass_flat[idx[:, 2]]], axis=1)
 
-  def step_one_water(carry, inputs):
-    key_w = carry
-    r_w, m_w, p_w = inputs
-    p_rigid = _project_one_water_momentum_rigid(p_w, r_w, m_w)
-    p_c1 = c1 * p_rigid
-    noise_w, key_w = _ou_noise_one_water_rigid(key_w, r_w, m_w, kT)
-    p_out = p_c1 + c2 * noise_w
-    return key_w, p_out
+  # Batched over waters via xtrax dispatch (Vmap/SafeMap), not lax.scan.
+  n_w = r_water.shape[0]
+  splits = jax.random.split(key, n_w + 1)
+  key, water_keys = splits[0], splits[1:]
 
-  key, p_water_out = jax.lax.scan(
-    step_one_water, key, (r_water, m_water, p_water_in)
+  def step_one_water(pack):
+    key_w, r_w, m_w, p_w = pack
+    p_rigid = _project_one_water_momentum_rigid(p_w, r_w, m_w)
+    noise_w, _ = _ou_noise_one_water_rigid(key_w, r_w, m_w, kT)
+    return c1 * p_rigid + c2 * noise_w
+
+  p_water_out = dispatch_n_waters(
+    None,
+    n_w,
+    step_one_water,
+    (water_keys, r_water, m_water, p_water_in),
   )
 
   idx_flat = idx.reshape(-1)
@@ -2306,8 +2363,31 @@ def _langevin_settle_vel(
   n_iters: int = 10,
   settle_velocity_tol: float | None = None,
   water_mask: Array | None = None,
+  remove_linear_com_momentum: bool = False,
 ) -> Array:
-  """Apply SETTLE velocity constraints and update momentum."""
+  """Apply SETTLE velocity constraints and update momentum.
+
+  Args:
+      momentum: Particle momenta (N, 3).
+      positions_old: Positions before integrator step.
+      positions_new: Constrained positions after SETTLE.
+      mass: Particle masses (N,) or (N, 1).
+      water_indices: (N_waters, 3) indices [O, H1, H2].
+      dt: Timestep.
+      mass_oxygen: Oxygen mass (amu).
+      mass_hydrogen: Hydrogen mass (amu).
+      n_iters: SETTLE velocity correction iterations.
+      settle_velocity_tol: SETTLE velocity tolerance.
+      water_mask: Optional (N_waters,) bool for padding rows.
+      remove_linear_com_momentum: If True, subtract center-of-mass momentum
+          after SETTLE velocity constraints: p <- p - m * v_com where
+          v_com = sum(p) / sum(m). This corrects a "flying ice cube" pattern
+          where the thermostat DOF count assumes COM removal but the velocity
+          constraint does not perform it.
+
+  Returns:
+      Updated momentum array.
+  """
   velocity = momentum / mass
   velocity = settle_velocities(
     velocity,
@@ -2321,7 +2401,17 @@ def _langevin_settle_vel(
     adaptive_tol=settle_velocity_tol,
     water_mask=water_mask,
   )
-  return velocity * mass
+  momentum = velocity * mass
+
+  # Optionally remove center-of-mass momentum to match CSVR DOF accounting
+  if remove_linear_com_momentum:
+    mass_col = mass
+    p_tot = jnp.sum(momentum, axis=0)
+    m_tot = jnp.sum(mass_col)
+    v_com = p_tot / jnp.maximum(m_tot, jnp.array(1e-30, dtype=m_tot.dtype))
+    momentum = momentum - mass_col * v_com
+
+  return momentum
 
 
 def settle_csvr_npt(
@@ -2607,6 +2697,7 @@ def settle_csvr_npt(
         mass_hydrogen,
         n_iters=10,
         settle_velocity_tol=None,
+        remove_linear_com_momentum=remove_com,
       )
 
     # === CSVR velocity rescaling ===

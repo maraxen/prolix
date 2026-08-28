@@ -1,0 +1,38 @@
+{
+  "attribution_method": {
+    "fft": "op_name",
+    "fusion": "op_name"
+  },
+  "config": {
+    "grid_spacing": "1.0",
+    "mode": "flash",
+    "pme": "on",
+    "protein": "1vii",
+    "scopes": "on"
+  },
+  "contract_version": "3.0",
+  "device_kind": "h200",
+  "git_sha": "cafefeed",
+  "jax_version": "0.10.2",
+  "jaxlib_version": "0.10.2",
+  "metrics": {
+    "total_step_seconds": 0.0011
+  },
+  "n_atoms": 1963,
+  "platform": "gpu",
+  "probe_id": "p7_stage2_op_name",
+  "scopes": {
+    "fft": [
+      8e-06,
+      4
+    ],
+    "fusion": [
+      4e-06,
+      2
+    ]
+  },
+  "stage": 2,
+  "timestamp": "2026-08-20T00:00:00+00:00",
+  "x64_enabled": false,
+  "xla_flags": ""
+}
