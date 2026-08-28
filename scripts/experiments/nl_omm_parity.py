@@ -289,9 +289,14 @@ def _compare_probe(probe: str, gold: Path) -> dict:
     )
 
     # Build neighbor list with overflow check (mandatory gate)
+    # CRITICAL FIX: disable_cell_list=True to work around jax_md cell-list silently
+    # dropping real pairs at high density (4383 root cause). This is scoped to this
+    # comparison only (not a global default change). For a static one-shot comparison,
+    # O(N²) brute-force construction is acceptable per spec C5.
     displacement_fn, _ = create_periodic_space(jnp.diag(bundle.box))
     neighbor_fn = nl.make_neighbor_list_fn(
-        displacement_fn, jnp.diag(bundle.box), float(bundle.cutoff_distance)
+        displacement_fn, jnp.diag(bundle.box), float(bundle.cutoff_distance),
+        disable_cell_list=True  # SCOPED FIX FOR #4383 ONLY
     )
     nbr0 = neighbor_fn.allocate(bundle.positions)
     nbr = neighbor_fn.update(bundle.positions, nbr0)
