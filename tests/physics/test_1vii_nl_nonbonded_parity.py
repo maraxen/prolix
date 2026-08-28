@@ -336,3 +336,5 @@ def test_1vii_nl_force_parity(gold_1vii):
     force_rmse = float(np.sqrt(np.mean((np.asarray(forces_prolix) - forces_gold) ** 2)))
 
     assert force_rmse < 3.0, f"Force RMSE too large: {force_rmse:.4f} kcal/(mol*A)"
+
+

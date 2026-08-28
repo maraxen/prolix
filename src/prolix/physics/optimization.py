@@ -126,8 +126,7 @@ def _chunked_lj_bwd(excl_indices, displacement_fn, cutoff, tile_size, res, g):
 
 chunked_lj_energy.defvjp(_chunked_lj_fwd, _chunked_lj_bwd)
 
-@functools.partial(jax.custom_vjp, nondiff_argnums=(6, 7, 8, 9))
-def chunked_lj_energy_nl(
+def _chunked_lj_energy_nl_core(
     r: jnp.ndarray,
     sigmas: jnp.ndarray,
     epsilons: jnp.ndarray,
@@ -139,7 +138,7 @@ def chunked_lj_energy_nl(
     tile_size: int = 32,
     switch_width: float = 0.0,
 ) -> jnp.ndarray:
-    """Computes LJ energy over neighbor list."""
+    """Core LJ energy computation (non-custom_vjp). Used by both forward and backward."""
     inner_tile_size = 1024
     r_pad, mask_pad = pad_to_tile(r, inner_tile_size)
     sig_pad, _ = pad_to_tile(sigmas, inner_tile_size)
@@ -147,7 +146,7 @@ def chunked_lj_energy_nl(
     excl_pad_dim = r_pad.shape[0]
     excl_i_pad = jnp.pad(excl_indices, ((0, excl_pad_dim - excl_indices.shape[0]), (0, 0)), constant_values=-1)
     excl_s_pad = jnp.pad(excl_scales, ((0, excl_pad_dim - excl_scales.shape[0]), (0, 0)), constant_values=1.0)
-    
+
     def f_tile(pos_i, pos_j, mask_i, mask_j, nb_idx_tile, start_i, start_j):
         dr = jax.vmap(jax.vmap(displacement_fn, (None, 0)), (0, 0))(pos_i, pos_j)
         dist = jnp.sqrt(jnp.sum(dr**2, axis=-1)); ds = dist
@@ -155,7 +154,7 @@ def chunked_lj_energy_nl(
         eps_i = jax.lax.dynamic_slice(eps_pad, (start_i,), (inner_tile_size,))
         sig_j = sig_pad[nb_idx_tile]
         eps_j = eps_pad[nb_idx_tile]
-        
+
         excl_i = jax.lax.dynamic_slice(excl_i_pad, (start_i, 0), (inner_tile_size, excl_indices.shape[1]))
         excl_s = jax.lax.dynamic_slice(excl_s_pad, (start_i, 0), (inner_tile_size, excl_indices.shape[1]))
 
@@ -176,26 +175,22 @@ def chunked_lj_energy_nl(
 
     return tile_reduction_nl(r_pad, neighbor_idx, mask_pad, f_tile, 0.0, tile_size, inner_tile_size=inner_tile_size)
 
-def _chunked_lj_nl_fwd(r, sigmas, epsilons, excl_indices, excl_scales, nb_idx, disp_fn, cutoff, tile_size, switch_width):
-    return chunked_lj_energy_nl(r, sigmas, epsilons, excl_indices, excl_scales, nb_idx, disp_fn, cutoff, tile_size, switch_width), (r, sigmas, epsilons, excl_indices, excl_scales, nb_idx)
 
-def _chunked_lj_nl_bwd(displacement_fn, cutoff, tile_size, switch_width, res, g):
-    # excl_indices and neighbor_idx (nb_idx) are differentiable-position
-    # arguments (not nondiff_argnums, debt 802) purely so they can be
-    # jax.vmap/jax.lax.while_loop tracers (per-replica topology under a
-    # stacked/vmapped EnsemblePlan dispatch, or a periodically-updated
-    # neighbor list) -- gradient w.r.t. an integer index array is always zero.
-    r, sigmas, epsilons, excl_indices, excl_scales, nb_idx = res
-    return (
-        -g * jnp.zeros_like(r),
-        g * jnp.zeros_like(sigmas),
-        g * jnp.zeros_like(epsilons),
-        jnp.zeros_like(excl_indices),
-        g * jnp.zeros_like(excl_scales),
-        jnp.zeros_like(nb_idx),
-    )
-
-chunked_lj_energy_nl.defvjp(_chunked_lj_nl_fwd, _chunked_lj_nl_bwd)
+def chunked_lj_energy_nl(
+    r: jnp.ndarray,
+    sigmas: jnp.ndarray,
+    epsilons: jnp.ndarray,
+    excl_indices: jnp.ndarray,
+    excl_scales: jnp.ndarray,
+    neighbor_idx: jnp.ndarray,
+    displacement_fn: Callable,
+    cutoff: float = 9.0,
+    tile_size: int = 32,
+    switch_width: float = 0.0,
+) -> jnp.ndarray:
+    """Computes LJ energy over neighbor list - now using JAX auto-diff (debt 4383 fixed)."""
+    return _chunked_lj_energy_nl_core(r, sigmas, epsilons, excl_indices, excl_scales, neighbor_idx,
+                                       displacement_fn, cutoff, tile_size, switch_width)
 
 # ============================================================================
 # Coulomb Kernels (Dense & NL)
@@ -300,8 +295,7 @@ def _chunked_coulomb_bwd(excl_indices, displacement_fn, pme_alpha, coulomb_const
 
 chunked_coulomb_energy.defvjp(_chunked_coulomb_fwd, _chunked_coulomb_bwd)
 
-@functools.partial(jax.custom_vjp, nondiff_argnums=(5, 6, 7, 8, 9))
-def chunked_coulomb_energy_nl(
+def _chunked_coulomb_energy_nl_core(
     r: jnp.ndarray,
     charges: jnp.ndarray,
     excl_indices: jnp.ndarray,
@@ -313,7 +307,7 @@ def chunked_coulomb_energy_nl(
     cutoff: float = 9.0,
     tile_size: int = 32
 ) -> jnp.ndarray:
-    """Computes direct-space Coulomb energy over neighbor list."""
+    """Core Coulomb energy computation (non-custom_vjp). Used by both forward and backward."""
     inner_tile_size = 1024
     r_pad, mask_pad = pad_to_tile(r, inner_tile_size)
     q_pad, _ = pad_to_tile(charges, inner_tile_size)
@@ -340,22 +334,18 @@ def chunked_coulomb_energy_nl(
 
     return tile_reduction_nl(r_pad, neighbor_idx, mask_pad, f_tile, 0.0, tile_size, inner_tile_size=inner_tile_size)
 
-def _chunked_coulomb_nl_fwd(r, charges, excl_indices, excl_scales, nb_idx, disp_fn, pme_alpha, coulomb_constant, cutoff, tile_size):
-    return chunked_coulomb_energy_nl(r, charges, excl_indices, excl_scales, nb_idx, disp_fn, pme_alpha, coulomb_constant, cutoff, tile_size), (r, charges, excl_indices, excl_scales, nb_idx, pme_alpha)
-
-def _chunked_coulomb_nl_bwd(displacement_fn, pme_alpha, coulomb_constant, cutoff, tile_size, res, g):
-    # excl_indices and neighbor_idx (nb_idx) are differentiable-position
-    # arguments (not nondiff_argnums, debt 802) purely so they can be
-    # jax.vmap/jax.lax.while_loop tracers (per-replica topology under a
-    # stacked/vmapped EnsemblePlan dispatch, or a periodically-updated
-    # neighbor list) -- gradient w.r.t. an integer index array is always zero.
-    r, charges, excl_indices, excl_scales, nb_idx, pme_alpha = res
-    return (
-        -g * jnp.zeros_like(r),
-        g * jnp.zeros_like(charges),
-        jnp.zeros_like(excl_indices),
-        g * jnp.zeros_like(excl_scales),
-        jnp.zeros_like(nb_idx),
-    )
-
-chunked_coulomb_energy_nl.defvjp(_chunked_coulomb_nl_fwd, _chunked_coulomb_nl_bwd)
+def chunked_coulomb_energy_nl(
+    r: jnp.ndarray,
+    charges: jnp.ndarray,
+    excl_indices: jnp.ndarray,
+    excl_scales: jnp.ndarray,
+    neighbor_idx: jnp.ndarray,
+    displacement_fn: Callable,
+    pme_alpha: float = 0.34,
+    coulomb_constant: float = 332.0637,
+    cutoff: float = 9.0,
+    tile_size: int = 32
+) -> jnp.ndarray:
+    """Computes direct-space Coulomb energy over neighbor list - now using JAX auto-diff (debt 4383 fixed)."""
+    return _chunked_coulomb_energy_nl_core(r, charges, excl_indices, excl_scales, neighbor_idx,
+                                           displacement_fn, pme_alpha, coulomb_constant, cutoff, tile_size)
