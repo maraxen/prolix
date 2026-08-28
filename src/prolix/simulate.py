@@ -871,15 +871,23 @@ def run_simulation(
 
     # Run warmup phase
     if neighbor is not None:
-      # Mirror the FIRE-stage neighbor-refresh pattern (Python loop with
-      # periodic nbr.update(), see the stage loop above): a fully-jitted
-      # fori_loop calling `_apply(s)` with no `neighbor=` kwarg silently fell
-      # back to make_energy_fn's dense (neighbor=None) path for the entire
-      # warmup phase, unlike FIRE minimization and the production scan.
-      # Numerically equivalent for tiny systems (dense == NL result there),
-      # but silently drops the neighbor list's cutoff restriction at
+      # A fully-jitted fori_loop calling `_apply(s)` with no `neighbor=` kwarg
+      # silently fell back to make_energy_fn's dense (neighbor=None) path for
+      # the entire warmup phase, unlike FIRE minimization and the production
+      # scan. Numerically equivalent for tiny systems (dense == NL result
+      # there), but silently drops the neighbor list's cutoff restriction at
       # production scale.
-      interval = max(1, int(spec.fire_neighbor_update_interval))
+      #
+      # Refresh cadence: use the *production* loop's fs-based cadence
+      # (neighbor_update_interval_fs, ~line 946), not FIRE's per-step
+      # fire_neighbor_update_interval=1. FIRE's per-step refresh fits fast
+      # energy-descent dynamics; warmup is stochastic Langevin dynamics like
+      # production, where refreshing every step is both wasteful and risks
+      # far more skin-buffer-overflow reallocations (each one a real,
+      # shape-changing XLA recompile, not just a cheap re-trace) than
+      # production's own cadence ever triggers.
+      warmup_dt_fs = spec.step_size_fs * phase["dt_scale"]
+      interval = max(1, round(spec.neighbor_update_interval_fs / warmup_dt_fs))
       nbr = neighbor
       for i in range(int(phase["steps"])):
         if i % interval == 0:
