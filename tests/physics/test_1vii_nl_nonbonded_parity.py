@@ -8,6 +8,7 @@ No OpenMM import needed — this test reads only the precomputed gold JSON.
 from __future__ import annotations
 
 import json
+import sys
 from pathlib import Path
 
 import jax
@@ -17,6 +18,13 @@ import pytest
 
 # Ensure float64 for PME precision
 jax.config.update("jax_enable_x64", True)
+
+# Import the dispersion correction helper from nl_omm_parity script
+_SCRIPTS_EXP = Path(__file__).resolve().parents[2] / "scripts" / "experiments"
+if str(_SCRIPTS_EXP) not in sys.path:
+    sys.path.insert(0, str(_SCRIPTS_EXP))
+
+from nl_omm_parity import _dispersion_correction_1vii
 
 
 @pytest.fixture
@@ -218,11 +226,11 @@ def test_1vii_nl_energy_parity(gold_1vii):
     e_prolix = float(energy_fn(bundle.positions, neighbor=nbr))
     e_gold = float(rec["energy_kcal"])
 
-    # WORKAROUND for dispersion tail bug (~156.8 kcal/mol, to be fixed separately)
+    # WORKAROUND for dispersion tail bug (to be fixed separately)
     # OpenMM gold was emitted with setUseDispersionCorrection(False), but Prolix
     # unconditionally adds lj_dispersion_tail_energy (making energy MORE negative).
     # This is a known issue tracked separately. For now, ADD back the correction.
-    dispersion_tail_correction = 156.8  # kcal/mol, measured for 1vii system
+    dispersion_tail_correction = _dispersion_correction_1vii()
     e_prolix_corrected = e_prolix + dispersion_tail_correction
 
     delta_e = abs(e_prolix_corrected - e_gold)
