@@ -19,17 +19,21 @@ import pytest
 # Ensure float64 for PME precision
 jax.config.update("jax_enable_x64", True)
 
-# Import the dispersion correction helper from nl_omm_parity script
+# Import helpers from nl_omm_parity script
 _SCRIPTS_EXP = Path(__file__).resolve().parents[2] / "scripts" / "experiments"
 if str(_SCRIPTS_EXP) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS_EXP))
 
-from nl_omm_parity import _dispersion_correction_1vii
+from nl_omm_parity import _dispersion_correction_1vii, _bundle_from_1vii_gold
 
 
-@pytest.fixture
+@pytest.fixture(scope="module")
 def gold_1vii():
-    """Load precomputed 1vii gold from vendored JSON."""
+    """Load precomputed 1vii gold from vendored JSON.
+
+    Scoped to module level so it can be shared with the module-scoped bundle_1vii fixture
+    and all tests in this module without redundant reloading.
+    """
     gold_path = Path(__file__).resolve().parents[2] / "data" / "oracles" / "openmm_8.3.1" / "nl_1vii.json"
     if not gold_path.is_file():
         pytest.skip(f"Gold file not found: {gold_path}")
@@ -42,81 +46,25 @@ def gold_1vii():
     return rec
 
 
-def test_1vii_bundle_construction_no_crash(gold_1vii):
+@pytest.fixture(scope="module")
+def bundle_1vii(gold_1vii):
+    """Build 1vii bundle once for all tests in this module.
+
+    Constructs the full periodic bundle (positions, PME grid, neighbor list)
+    from the vendored gold JSON. Scoped to module level to avoid rebuilding
+    across all three test functions.
+    """
+    return _bundle_from_1vii_gold(gold_1vii)
+
+
+def test_1vii_bundle_construction_no_crash(bundle_1vii, gold_1vii):
     """Smoke test: build bundle from gold, verify it doesn't crash.
 
     This isolates "does the bundle construction even run" from energy/force matching.
+    Uses the shared module-scoped bundle_1vii fixture to avoid redundant construction.
     """
-    # Must import here to allow test skip above
-    import types
-    from prolix.physics.neighbor_list import ExclusionSpec
-    from prolix.physics.system import make_bundle_from_system
-
-    rec = gold_1vii
-    n_atoms = int(rec["n_atoms"])
-    omm_exc_list = rec["omm_exceptions"]
-
-    # Build ExclusionSpec directly
-    idx_12_13_list = []
-    exc_pairs_list = []
-    exc_sigmas_list = []
-    exc_epsilons_list = []
-    exc_chargeprods_list = []
-
-    for i_exc, j_exc, q_prod, sig_exc, eps_exc in omm_exc_list:
-        idx_12_13_list.append([i_exc, j_exc])
-        if q_prod != 0.0 or eps_exc != 0.0:
-            exc_pairs_list.append([i_exc, j_exc])
-            exc_sigmas_list.append(sig_exc)
-            exc_epsilons_list.append(eps_exc)
-            exc_chargeprods_list.append(q_prod)
-
-    idx_12_13 = jnp.asarray(idx_12_13_list, dtype=jnp.int32) if idx_12_13_list else jnp.zeros((0, 2), dtype=jnp.int32)
-    exc_pairs = jnp.asarray(exc_pairs_list, dtype=jnp.int32) if exc_pairs_list else jnp.zeros((0, 2), dtype=jnp.int32)
-    exc_sigmas = jnp.asarray(exc_sigmas_list, dtype=jnp.float32) if exc_sigmas_list else jnp.zeros((0,), dtype=jnp.float32)
-    exc_epsilons = jnp.asarray(exc_epsilons_list, dtype=jnp.float32) if exc_epsilons_list else jnp.zeros((0,), dtype=jnp.float32)
-    exc_chargeprods = jnp.asarray(exc_chargeprods_list, dtype=jnp.float32) if exc_chargeprods_list else jnp.zeros((0,), dtype=jnp.float32)
-
-    idx_14 = jnp.zeros((0, 2), dtype=jnp.int32)
-
-    exclusion_spec = ExclusionSpec(
-        idx_12_13=idx_12_13,
-        idx_14=idx_14,
-        scale_14_elec=0.83333333,
-        scale_14_vdw=0.5,
-        n_atoms=n_atoms,
-        exception_pairs=exc_pairs,
-        exception_sigmas=exc_sigmas,
-        exception_epsilons=exc_epsilons,
-        exception_chargeprods=exc_chargeprods,
-    )
-
-    # Build proxy with only nonbonded params
-    positions_A = np.asarray(rec["positions_A"], dtype=np.float64)
-    box_A = np.asarray(rec["box_A"], dtype=np.float64)
-    charges = np.asarray(rec["charges"], dtype=np.float64)
-    sigmas_A = np.asarray(rec["sigmas_A"], dtype=np.float64)
-    epsilons_kcal = np.asarray(rec["epsilons_kcal"], dtype=np.float64)
-    pme_alpha = float(rec.get("pme_alpha_per_angstrom", 0.34))
-    cutoff = float(rec.get("cutoff_angstrom", 9.0))
-
-    proxy = types.SimpleNamespace(
-        positions=positions_A,
-        box_size=box_A,
-        charges=charges,
-        sigmas=sigmas_A,
-        epsilons=epsilons_kcal,
-        pme_alpha=pme_alpha,
-        nonbonded_cutoff=cutoff,
-    )
-
-    # Build bundle (must not crash)
-    bundle = make_bundle_from_system(
-        proxy,
-        boundary_condition="periodic",
-        exclusion_spec=exclusion_spec,
-        use_size_buckets=False,
-    )
+    bundle = bundle_1vii
+    n_atoms = int(gold_1vii["n_atoms"])
 
     # Verify bundle has required fields
     assert bundle.positions is not None
@@ -124,83 +72,18 @@ def test_1vii_bundle_construction_no_crash(gold_1vii):
     assert bundle.excl_dense_indices is not None, "Bundle should have excl_dense_indices populated by make_bundle_from_system"
 
 
-def test_1vii_nl_energy_parity(gold_1vii):
+def test_1vii_nl_energy_parity(bundle_1vii, gold_1vii):
     """Energy parity: NL+switch prolix vs gold within 0.1 kcal/mol.
 
     Requires the bundle construction AND energy_fn_from_bundle path.
+    Uses the shared module-scoped bundle_1vii fixture to avoid redundant construction.
     """
-    import types
     from prolix.api.bundle_md import energy_fn_from_bundle
     from prolix.physics import neighbor_list as nl
-    from prolix.physics.neighbor_list import ExclusionSpec
     from prolix.physics.pbc import create_periodic_space
-    from prolix.physics.system import make_bundle_from_system
 
     rec = gold_1vii
-    n_atoms = int(rec["n_atoms"])
-    omm_exc_list = rec["omm_exceptions"]
-
-    # Build ExclusionSpec
-    idx_12_13_list = []
-    exc_pairs_list = []
-    exc_sigmas_list = []
-    exc_epsilons_list = []
-    exc_chargeprods_list = []
-
-    for i_exc, j_exc, q_prod, sig_exc, eps_exc in omm_exc_list:
-        idx_12_13_list.append([i_exc, j_exc])
-        if q_prod != 0.0 or eps_exc != 0.0:
-            exc_pairs_list.append([i_exc, j_exc])
-            exc_sigmas_list.append(sig_exc)
-            exc_epsilons_list.append(eps_exc)
-            exc_chargeprods_list.append(q_prod)
-
-    idx_12_13 = jnp.asarray(idx_12_13_list, dtype=jnp.int32) if idx_12_13_list else jnp.zeros((0, 2), dtype=jnp.int32)
-    exc_pairs = jnp.asarray(exc_pairs_list, dtype=jnp.int32) if exc_pairs_list else jnp.zeros((0, 2), dtype=jnp.int32)
-    exc_sigmas = jnp.asarray(exc_sigmas_list, dtype=jnp.float32) if exc_sigmas_list else jnp.zeros((0,), dtype=jnp.float32)
-    exc_epsilons = jnp.asarray(exc_epsilons_list, dtype=jnp.float32) if exc_epsilons_list else jnp.zeros((0,), dtype=jnp.float32)
-    exc_chargeprods = jnp.asarray(exc_chargeprods_list, dtype=jnp.float32) if exc_chargeprods_list else jnp.zeros((0,), dtype=jnp.float32)
-
-    idx_14 = jnp.zeros((0, 2), dtype=jnp.int32)
-
-    exclusion_spec = ExclusionSpec(
-        idx_12_13=idx_12_13,
-        idx_14=idx_14,
-        scale_14_elec=0.83333333,
-        scale_14_vdw=0.5,
-        n_atoms=n_atoms,
-        exception_pairs=exc_pairs,
-        exception_sigmas=exc_sigmas,
-        exception_epsilons=exc_epsilons,
-        exception_chargeprods=exc_chargeprods,
-    )
-
-    # Build proxy
-    positions_A = np.asarray(rec["positions_A"], dtype=np.float64)
-    box_A = np.asarray(rec["box_A"], dtype=np.float64)
-    charges = np.asarray(rec["charges"], dtype=np.float64)
-    sigmas_A = np.asarray(rec["sigmas_A"], dtype=np.float64)
-    epsilons_kcal = np.asarray(rec["epsilons_kcal"], dtype=np.float64)
-    pme_alpha = float(rec.get("pme_alpha_per_angstrom", 0.34))
-    cutoff = float(rec.get("cutoff_angstrom", 9.0))
-
-    proxy = types.SimpleNamespace(
-        positions=positions_A,
-        box_size=box_A,
-        charges=charges,
-        sigmas=sigmas_A,
-        epsilons=epsilons_kcal,
-        pme_alpha=pme_alpha,
-        nonbonded_cutoff=cutoff,
-    )
-
-    # Build bundle
-    bundle = make_bundle_from_system(
-        proxy,
-        boundary_condition="periodic",
-        exclusion_spec=exclusion_spec,
-        use_size_buckets=False,
-    )
+    bundle = bundle_1vii
 
     # Build energy function with gold's PME grid
     energy_fn = energy_fn_from_bundle(
@@ -238,83 +121,18 @@ def test_1vii_nl_energy_parity(gold_1vii):
     assert delta_e <= 0.1, f"Energy mismatch too large: delta_e={delta_e:.4f} kcal/mol (prolix_corrected={e_prolix_corrected:.2f}, gold={e_gold:.2f})"
 
 
-def test_1vii_nl_force_parity(gold_1vii):
+def test_1vii_nl_force_parity(bundle_1vii, gold_1vii):
     """Force parity: NL+switch prolix vs gold with RMSE < 3.0 kcal/(mol*A).
 
     Requires jax.grad through the energy function on the same bundle.
+    Uses the shared module-scoped bundle_1vii fixture to avoid redundant construction.
     """
-    import types
     from prolix.api.bundle_md import energy_fn_from_bundle
     from prolix.physics import neighbor_list as nl
-    from prolix.physics.neighbor_list import ExclusionSpec
     from prolix.physics.pbc import create_periodic_space
-    from prolix.physics.system import make_bundle_from_system
 
     rec = gold_1vii
-    n_atoms = int(rec["n_atoms"])
-    omm_exc_list = rec["omm_exceptions"]
-
-    # Build ExclusionSpec
-    idx_12_13_list = []
-    exc_pairs_list = []
-    exc_sigmas_list = []
-    exc_epsilons_list = []
-    exc_chargeprods_list = []
-
-    for i_exc, j_exc, q_prod, sig_exc, eps_exc in omm_exc_list:
-        idx_12_13_list.append([i_exc, j_exc])
-        if q_prod != 0.0 or eps_exc != 0.0:
-            exc_pairs_list.append([i_exc, j_exc])
-            exc_sigmas_list.append(sig_exc)
-            exc_epsilons_list.append(eps_exc)
-            exc_chargeprods_list.append(q_prod)
-
-    idx_12_13 = jnp.asarray(idx_12_13_list, dtype=jnp.int32) if idx_12_13_list else jnp.zeros((0, 2), dtype=jnp.int32)
-    exc_pairs = jnp.asarray(exc_pairs_list, dtype=jnp.int32) if exc_pairs_list else jnp.zeros((0, 2), dtype=jnp.int32)
-    exc_sigmas = jnp.asarray(exc_sigmas_list, dtype=jnp.float32) if exc_sigmas_list else jnp.zeros((0,), dtype=jnp.float32)
-    exc_epsilons = jnp.asarray(exc_epsilons_list, dtype=jnp.float32) if exc_epsilons_list else jnp.zeros((0,), dtype=jnp.float32)
-    exc_chargeprods = jnp.asarray(exc_chargeprods_list, dtype=jnp.float32) if exc_chargeprods_list else jnp.zeros((0,), dtype=jnp.float32)
-
-    idx_14 = jnp.zeros((0, 2), dtype=jnp.int32)
-
-    exclusion_spec = ExclusionSpec(
-        idx_12_13=idx_12_13,
-        idx_14=idx_14,
-        scale_14_elec=0.83333333,
-        scale_14_vdw=0.5,
-        n_atoms=n_atoms,
-        exception_pairs=exc_pairs,
-        exception_sigmas=exc_sigmas,
-        exception_epsilons=exc_epsilons,
-        exception_chargeprods=exc_chargeprods,
-    )
-
-    # Build proxy
-    positions_A = np.asarray(rec["positions_A"], dtype=np.float64)
-    box_A = np.asarray(rec["box_A"], dtype=np.float64)
-    charges = np.asarray(rec["charges"], dtype=np.float64)
-    sigmas_A = np.asarray(rec["sigmas_A"], dtype=np.float64)
-    epsilons_kcal = np.asarray(rec["epsilons_kcal"], dtype=np.float64)
-    pme_alpha = float(rec.get("pme_alpha_per_angstrom", 0.34))
-    cutoff = float(rec.get("cutoff_angstrom", 9.0))
-
-    proxy = types.SimpleNamespace(
-        positions=positions_A,
-        box_size=box_A,
-        charges=charges,
-        sigmas=sigmas_A,
-        epsilons=epsilons_kcal,
-        pme_alpha=pme_alpha,
-        nonbonded_cutoff=cutoff,
-    )
-
-    # Build bundle
-    bundle = make_bundle_from_system(
-        proxy,
-        boundary_condition="periodic",
-        exclusion_spec=exclusion_spec,
-        use_size_buckets=False,
-    )
+    bundle = bundle_1vii
 
     # Build energy function
     energy_fn = energy_fn_from_bundle(

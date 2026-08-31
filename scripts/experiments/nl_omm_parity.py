@@ -44,7 +44,13 @@ def _dispersion_correction_1vii() -> float:
     This is a known issue being tracked separately (disable_dispersion_correction parameter).
     For now, return the measured correction so both _compare_probe and test can apply it.
 
-    Measured for 1vii solvated protein (895 waters, OpenMM 8.3.1 Reference platform).
+    IMPORTANT: This is a fixed magic-number workaround specific to the CURRENT 1vii gold
+    vendoring (895 waters, current box/padding, OpenMM 8.3.1 Reference platform).
+    If the gold JSON at data/oracles/openmm_8.3.1/nl_1vii.json is ever re-emitted with
+    different system parameters (water count, box size, padding), this constant will
+    silently go stale and energy comparisons will fail. The proper fix (a configurable
+    disable_dispersion_correction parameter threaded through energy_fn_from_bundle) is
+    deferred — see .praxia/handoffs/prolix_Sprint-113---nb-parity_20260828_191126_*.yaml
     """
     return 156.8  # kcal/mol
 
