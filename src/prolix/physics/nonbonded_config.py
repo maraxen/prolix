@@ -23,7 +23,7 @@ class NeighborListConfig:
     switch_width: float | None = None
     capacity_multiplier: float = 1.25
     safety_factor: float = 1.5
-    disable_cell_list: bool = False
+    disable_cell_list: bool = True  # backlog #4699: cell-list silently drops pairs at protein+solvent density
     max_exclusions: int = 32
     nl_update_every: int | None = None
     on_overflow: OverflowPolicy = "reallocate"

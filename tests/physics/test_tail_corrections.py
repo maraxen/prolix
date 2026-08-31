@@ -5,6 +5,15 @@ from prolix.physics import system, pressure, explicit_corrections
 from prolix.typing import PhysicsSystem, EnergyParams
 import pytest
 
+
+@pytest.fixture
+def enable_x64():
+    """Enable JAX x64 mode for this test and restore on teardown."""
+    old_value = jax.config.jax_enable_x64
+    jax.config.update("jax_enable_x64", True)
+    yield
+    jax.config.update("jax_enable_x64", old_value)
+
 def test_tail_pressure_derivative():
     # Setup a simple periodic system
     box_size = jnp.array([20.0, 20.0, 20.0])
@@ -58,3 +67,65 @@ def test_tail_pressure_derivative():
     )
     
     assert jnp.allclose(p_num, p_tail_val, atol=1e-3)
+
+
+def test_lj_tail_energy_f64_autodiff(enable_x64):
+    """Test that lj_dispersion_tail_energy supports f64 and autodiff without dtype crash.
+
+    Regression test for debt 832: hardcoded float32 casts caused:
+      TypeError: lax.add requires arguments to have the same dtypes, got float32, float64
+    when differentiating under jax_enable_x64=True.
+    """
+    box_size = jnp.array([20.0, 20.0, 20.0], dtype=jnp.float64)
+    N = 10
+    sigmas = jnp.ones(N, dtype=jnp.float64) * 0.3
+    epsilons = jnp.ones(N, dtype=jnp.float64) * 0.1
+    atom_mask = jnp.ones(N, dtype=jnp.bool_)
+    cutoff = 9.0
+
+    # Forward pass should work
+    e_tail = explicit_corrections.lj_dispersion_tail_energy(
+        box_size, sigmas, epsilons, cutoff, atom_mask
+    )
+    assert e_tail.dtype == jnp.float64
+
+    # Backward pass (autodiff) should NOT crash with dtype mismatch
+    def energy_fn(eps):
+        return explicit_corrections.lj_dispersion_tail_energy(
+            box_size, sigmas, eps, cutoff, atom_mask
+        )
+
+    grad_fn = jax.grad(energy_fn)
+    grad_e = grad_fn(epsilons)
+    assert grad_e.dtype == jnp.float64
+    assert jnp.all(jnp.isfinite(grad_e))
+
+
+def test_lj_tail_impulsive_pressure_f64_autodiff(enable_x64):
+    """Test that lj_dispersion_tail_impulsive_pressure supports f64 and autodiff.
+
+    Regression test for debt 832 in the impulsive pressure variant.
+    """
+    box_size = jnp.array([20.0, 20.0, 20.0], dtype=jnp.float64)
+    N = 10
+    sigmas = jnp.ones(N, dtype=jnp.float64) * 0.3
+    epsilons = jnp.ones(N, dtype=jnp.float64) * 0.1
+    atom_mask = jnp.ones(N, dtype=jnp.bool_)
+    cutoff = 9.0
+
+    # Forward pass should work
+    p_tail = explicit_corrections.lj_dispersion_tail_impulsive_pressure(
+        box_size, sigmas, epsilons, cutoff, atom_mask
+    )
+    assert p_tail.dtype == jnp.float64
+
+    # Backward pass (autodiff) should NOT crash with dtype mismatch
+    def pressure_fn(eps):
+        return explicit_corrections.lj_dispersion_tail_impulsive_pressure(
+            box_size, sigmas, eps, cutoff, atom_mask
+        )
+
+    grad_fn = jax.grad(pressure_fn)
+    grad_p = grad_fn(epsilons)
+    assert grad_p.dtype == jnp.float64
+    assert jnp.all(jnp.isfinite(grad_p))
