@@ -116,6 +116,8 @@ class VirtualSiteParams(NamedTuple):
             row: A 1D array of shape (12,) from `SystemParams["virtual_site_params"]`.
                  See Data Layout Definitions above for details.
 
+        Returns:
+            VirtualSiteParams instance constructed from the row.
         """
         return cls(
             p_local=row[VS_IDX_POS],
@@ -147,6 +149,8 @@ class CmapTorsionIndices(NamedTuple):
                  - Phi: i-j-k-l
                  - Psi: j-k-l-m
 
+        Returns:
+            CmapTorsionIndices instance constructed from the row.
         """
         return cls(
             phi_indices=row[CMAP_IDX_PHI],
@@ -167,7 +171,14 @@ class BondParams(NamedTuple):
 
     @classmethod
     def from_row(cls, row: Array) -> BondParams:
-        """Construct params from a packed parameter row."""
+        """Construct params from a packed parameter row.
+
+        Args:
+            row: A 1D array of shape (2,) with bond parameters [length, k].
+
+        Returns:
+            BondParams instance constructed from the row.
+        """
         return cls(
             length=row[BOND_IDX_LENGTH],
             k=row[BOND_IDX_K],
@@ -187,7 +198,14 @@ class AngleParams(NamedTuple):
 
     @classmethod
     def from_row(cls, row: Array) -> AngleParams:
-        """Construct params from a packed parameter row."""
+        """Construct params from a packed parameter row.
+
+        Args:
+            row: A 1D array of shape (2,) with angle parameters [theta0, k].
+
+        Returns:
+            AngleParams instance constructed from the row.
+        """
         return cls(
             theta0=row[ANGLE_IDX_THETA0],
             k=row[ANGLE_IDX_K],
@@ -209,7 +227,14 @@ class DihedralParams(NamedTuple):
 
     @classmethod
     def from_row(cls, row: Array) -> DihedralParams:
-        """Construct params from a packed parameter row."""
+        """Construct params from a packed parameter row.
+
+        Args:
+            row: A 1D array of shape (3,) with dihedral parameters [periodicity, phase, k].
+
+        Returns:
+            DihedralParams instance constructed from the row.
+        """
         return cls(
             periodicity=row[DIHEDRAL_IDX_PERIODICITY],
             phase=row[DIHEDRAL_IDX_PHASE],
@@ -232,7 +257,14 @@ class WaterIndices(NamedTuple):
 
     @classmethod
     def from_row(cls, row: Array) -> WaterIndices:
-        """Construct indices from a row/array of length 3."""
+        """Construct indices from a row/array of length 3.
+
+        Args:
+            row: A 1D array of shape (3,) with water atom indices [O, H1, H2].
+
+        Returns:
+            WaterIndices instance constructed from the row.
+        """
         return cls(
             oxygen=row[WATER_IDX_O],
             hydrogen1=row[WATER_IDX_H1],

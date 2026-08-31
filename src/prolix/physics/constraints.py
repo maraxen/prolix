@@ -214,7 +214,21 @@ class ConstraintDOFMask:
 
 
 def project_positions(R, pairs, lengths, mass, shift_fn, constraint_mask=None, tol=1e-5, max_iter=20):
-  """Iterative SHAKE projection for positions."""
+  """Iterative SHAKE projection for positions.
+
+  Args:
+      R: (N, 3) atom positions.
+      pairs: (n_constraints, 2) constraint atom index pairs.
+      lengths: (n_constraints,) target constraint lengths.
+      mass: (N, 1) per-atom masses for inverse mass weighting.
+      shift_fn: JAX-MD shift function for periodic boundary conditions.
+      constraint_mask: Optional (n_constraints,) mask for selective constraint application.
+      tol: Convergence tolerance (unused in iterative version).
+      max_iter: Maximum SHAKE iterations.
+
+  Returns:
+      (N, 3) positions with constraints projected.
+  """
   if constraint_mask is None:
     constraint_mask = jnp.ones(len(pairs), dtype=jnp.float32)
   else:
@@ -246,7 +260,21 @@ def project_positions(R, pairs, lengths, mass, shift_fn, constraint_mask=None, t
 
 
 def project_momenta(P, R, pairs, mass, shift_fn, constraint_mask=None, tol=1e-6, max_iter=20):
-  """Iterative RATTLE projection for momenta."""
+  """Iterative RATTLE projection for momenta.
+
+  Args:
+      P: (N, 3) momenta (p = m * v).
+      R: (N, 3) atom positions.
+      pairs: (n_constraints, 2) constraint atom index pairs.
+      mass: (N, 1) per-atom masses for inverse mass weighting.
+      shift_fn: JAX-MD shift function for periodic boundary conditions.
+      constraint_mask: Optional (n_constraints,) mask for selective constraint application.
+      tol: Convergence tolerance (unused in iterative version).
+      max_iter: Maximum RATTLE iterations.
+
+  Returns:
+      (N, 3) momenta projected orthogonal to constraint manifold.
+  """
   if constraint_mask is None:
     constraint_mask = jnp.ones(len(pairs), dtype=jnp.float32)
   else:
