@@ -385,25 +385,28 @@ def angle_forces_analytical(
     k = angle_params[:, 1]
 
     def total_angle_energy(pos):
-        """Compute total angle energy for all angles."""
-        energy = jnp.float32(0.0)
-        for a_idx in range(angle_indices.shape[0]):
-            i = angle_indices[a_idx, 0].astype(jnp.int32)
-            j = angle_indices[a_idx, 1].astype(jnp.int32)
-            k_atom = angle_indices[a_idx, 2].astype(jnp.int32)
+        """Compute total angle energy for all angles (vectorized)."""
+        # Extract indices for all angles
+        i_idxs = angle_indices[:, 0].astype(jnp.int32)
+        j_idxs = angle_indices[:, 1].astype(jnp.int32)
+        k_idxs = angle_indices[:, 2].astype(jnp.int32)
 
-            v_ji = displacement_fn(pos[i], pos[j])
-            v_jk = displacement_fn(pos[k_atom], pos[j])
+        # Compute displacement vectors for all angles using vmap
+        v_ji = jax.vmap(displacement_fn)(pos[i_idxs], pos[j_idxs])  # (A, 3)
+        v_jk = jax.vmap(displacement_fn)(pos[k_idxs], pos[j_idxs])  # (A, 3)
 
-            d_ji = jnp.linalg.norm(v_ji) + jnp.float32(1e-12)
-            d_jk = jnp.linalg.norm(v_jk) + jnp.float32(1e-12)
+        # Compute distances for all angles
+        d_ji = jnp.linalg.norm(v_ji, axis=-1) + jnp.float32(1e-12)  # (A,)
+        d_jk = jnp.linalg.norm(v_jk, axis=-1) + jnp.float32(1e-12)  # (A,)
 
-            cos_theta_a = jnp.sum(v_ji * v_jk) / (d_ji * d_jk)
-            cos_theta_a = jnp.clip(cos_theta_a, -0.999999, 0.999999)
-            theta_a = jnp.arccos(cos_theta_a)
+        # Compute cosine of angles
+        cos_theta = jnp.sum(v_ji * v_jk, axis=-1) / (d_ji * d_jk)  # (A,)
+        cos_theta = jnp.clip(cos_theta, -0.999999, 0.999999)
+        theta = jnp.arccos(cos_theta)  # (A,)
 
-            e_a = 0.5 * k[a_idx] * (theta_a - theta0[a_idx]) ** 2
-            energy = energy + angle_mask[a_idx] * e_a
+        # Compute energies for all angles
+        e = 0.5 * k * (theta - theta0) ** 2  # (A,)
+        energy = jnp.sum(angle_mask * e)
 
         return energy
 
@@ -498,47 +501,21 @@ def dihedral_forces_analytical(
         dihedral_mask = jnp.ones(dihedral_indices.shape[0])
 
     def total_dihedral_energy(pos):
-        """Compute total dihedral energy for all dihedrals."""
-        energy = jnp.float32(0.0)
-        for d_idx in range(dihedral_indices.shape[0]):
-            i = dihedral_indices[d_idx, 0].astype(jnp.int32)
-            j = dihedral_indices[d_idx, 1].astype(jnp.int32)
-            k = dihedral_indices[d_idx, 2].astype(jnp.int32)
-            l = dihedral_indices[d_idx, 3].astype(jnp.int32)
+        """Compute total dihedral energy for all dihedrals (vectorized)."""
+        # Compute dihedral angles for all dihedrals using vectorized helper
+        phi = _dihedral_angle_batched(pos, dihedral_indices, displacement_fn, dihedral_mask)  # (D,)
 
-            # Vectors
-            b0 = displacement_fn(pos[j], pos[i])
-            b1 = displacement_fn(pos[k], pos[j])
-            b2 = displacement_fn(pos[l], pos[k])
+        # Extract Fourier parameters for all dihedrals and terms
+        n = dihedral_params[:, :, 0]       # (D, N_terms)
+        phase = dihedral_params[:, :, 1]   # (D, N_terms)
+        k_term = dihedral_params[:, :, 2]  # (D, N_terms)
 
-            # Unit vector along b1
-            b1_norm = jnp.linalg.norm(b1) + jnp.float32(1e-12)
-            b1_unit = b1 / b1_norm
+        # Vectorized Fourier sum: compute energy for all terms at once
+        # phi[:, None] broadcasts (D,) → (D, 1), matching (D, N_terms)
+        e_per_term = k_term * (1.0 + jnp.cos(n * phi[:, None] - phase))  # (D, N_terms)
+        e_d = jnp.sum(e_per_term, axis=1)  # (D,)
 
-            # Project b0 and b2 onto plane perpendicular to b1
-            v = b0 - jnp.sum(b0 * b1_unit) * b1_unit
-            w = b2 - jnp.sum(b2 * b1_unit) * b1_unit
-
-            # Dihedral angle
-            x = jnp.sum(v * w)
-            y = jnp.sum(jnp.cross(b1_unit, v) * w)
-
-            # Safe values for padded
-            overlap = (dihedral_mask[d_idx] == 0) | ((x == 0.0) & (y == 0.0))
-            safe_x = jnp.where(overlap, 1.0, x)
-            safe_y = jnp.where(overlap, 0.0, y)
-
-            phi = jnp.arctan2(safe_y, safe_x) - jnp.pi
-
-            # Energy for this dihedral
-            e_d = jnp.float32(0.0)
-            for t_idx in range(dihedral_params.shape[1]):
-                n = dihedral_params[d_idx, t_idx, 0]
-                phase = dihedral_params[d_idx, t_idx, 1]
-                k = dihedral_params[d_idx, t_idx, 2]
-                e_d = e_d + k * (1.0 + jnp.cos(n * phi - phase))
-
-            energy = energy + dihedral_mask[d_idx] * e_d
+        energy = jnp.sum(dihedral_mask * e_d)
 
         return energy
 
