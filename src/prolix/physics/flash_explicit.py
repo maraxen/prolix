@@ -185,7 +185,11 @@ def chunked_explicit_nonbonded_energy(
                 # (previously ~5-7% off). Same convention as
                 # pbc.minimum_image_distance, inlined since only the wrapped
                 # delta (not the pbc module's returned norm) is needed here.
-                dr = dr - sys.box_size * jnp.round(dr / sys.box_size)
+                # backlog #4232: use deterministic tie-breaking (round-half-away-from-zero)
+                # instead of banker's rounding for PBC wrap to resolve ambiguity at box/2 boundary.
+                scaled = dr / sys.box_size
+                wrap_idx = jnp.sign(scaled) * jnp.floor(jnp.abs(scaled) + 0.5)
+                dr = dr - sys.box_size * wrap_idx
             dist_sq = jnp.sum(dr ** 2, axis=-1) + 1e-10
             dist = jnp.sqrt(dist_sq)
 
@@ -296,7 +300,11 @@ def _chunked_lj_only_energy(
       if sys.box_size is not None:
         # Minimum-image convention (debt 805) -- see chunked_explicit_nonbonded_energy's
         # identical fix for the full rationale/evidence.
-        dr = dr - sys.box_size * jnp.round(dr / sys.box_size)
+        # backlog #4232: use deterministic tie-breaking (round-half-away-from-zero)
+        # instead of banker's rounding for PBC wrap to resolve ambiguity at box/2 boundary.
+        scaled = dr / sys.box_size
+        wrap_idx = jnp.sign(scaled) * jnp.floor(jnp.abs(scaled) + 0.5)
+        dr = dr - sys.box_size * wrap_idx
       dist_sq = jnp.sum(dr ** 2, axis=-1) + 1e-10
       dist = jnp.sqrt(dist_sq)
 

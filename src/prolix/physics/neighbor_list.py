@@ -157,7 +157,7 @@ def make_neighbor_list_fn(
   box_size: Array,
   cutoff: float,
   capacity_multiplier: float = 1.25,
-  disable_cell_list: bool = False,
+  disable_cell_list: bool = True,  # backlog #4699: cell-list silently drops pairs at protein+solvent density
   dr_threshold: float = 0.5,
 ) -> Callable[..., partition.NeighborList]:
   """Creates a neighbor list function optimized for solvent systems."""
