@@ -210,7 +210,7 @@ def chunked_lj_energy_nl(
     tile_size: int = 32,
     switch_width: float = 0.0,
 ) -> jnp.ndarray:
-    """Computes LJ energy over neighbor list."""
+    """Core LJ energy computation (non-custom_vjp). Used by both forward and backward."""
     inner_tile_size = 1024
     r_pad, mask_pad = pad_to_tile(r, inner_tile_size)
     sig_pad, _ = pad_to_tile(sigmas, inner_tile_size)
@@ -503,7 +503,7 @@ def chunked_coulomb_energy_nl(
     cutoff: float = 9.0,
     tile_size: int = 32,
 ) -> jnp.ndarray:
-    """Computes direct-space Coulomb energy over neighbor list."""
+    """Core Coulomb energy computation (non-custom_vjp). Used by both forward and backward."""
     inner_tile_size = 1024
     r_pad, mask_pad = pad_to_tile(r, inner_tile_size)
     q_pad, _ = pad_to_tile(charges, inner_tile_size)

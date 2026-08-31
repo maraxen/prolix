@@ -347,12 +347,16 @@ def _dense_excl_matrices_from_bundle(
 def physics_system_from_bundle(
     bundle: MolecularBundle,
     positions: jnp.ndarray,
+    pme_grid_points: int = 64,
 ) -> PhysicsSystem:
     """Reconstruct a PhysicsSystem view for ``single_padded_energy``.
 
     ``positions.shape[0]`` must be host-static (integration prefix or host trim).
     Topology uses padded arrays + masks — never ``int(bundle.n_*)`` — so this
     path is safe under ``jax.vmap`` / stacked N_MOLS dispatch.
+
+    ``pme_grid_points`` sets the FFT grid resolution for PME electrostatics
+    (default 64; override for comparisons against simulations run with different grids).
     """
     n = int(positions.shape[0])
     n_real = jnp.asarray(bundle.n_atoms, dtype=jnp.int32)
@@ -482,7 +486,7 @@ def physics_system_from_bundle(
         n_padded_atoms=n,
         box_size=box_size,
         pme_alpha=pme_alpha,
-        pme_grid_points=64,
+        pme_grid_points=pme_grid_points,
         nonbonded_cutoff=nonbonded_cutoff,
         dense_excl_scale_vdw=dense_vdw,
         dense_excl_scale_elec=dense_elec,
@@ -500,17 +504,21 @@ def energy_fn_from_bundle(
     *,
     include_nonbonded: bool = True,
     lj_switch_width: float = 0.0,
+    pme_grid_points: int = 64,
 ) -> Callable[..., jnp.ndarray]:
     """Total energy from bundle fields (bonded + optional nonbonded via ``single_padded_energy``).
 
     Includes AMBER 1-4 ``exception_*`` pair energy when present (XR-PARITY-OMM-PROTEIN).
     ``lj_switch_width`` is closed over (OpenMM LJ switch; 0 disables).
+    ``pme_grid_points`` sets the FFT grid resolution for PME electrostatics
+    (default 64; override for comparisons against simulations run with different grids).
     """
     if not include_nonbonded:
         return bonded_energy_fn_from_bundle(bundle)
 
     disp_fn, _ = displacement_fn_for_bundle(bundle)
     _lj_sw = float(lj_switch_width)
+    _pme_grid = int(pme_grid_points)
 
     def energy_fn(positions: jnp.ndarray, **kwargs: object) -> jnp.ndarray:
         # `neighbor` (debt 760's NL path, see single_padded_energy's docstring)
@@ -521,7 +529,7 @@ def energy_fn_from_bundle(
         # doesn't use).
         neighbor = kwargs.pop("neighbor", None)
         del kwargs
-        sys = physics_system_from_bundle(bundle, positions)
+        sys = physics_system_from_bundle(bundle, positions, pme_grid_points=_pme_grid)
         e = single_padded_energy(
             sys,
             disp_fn,
