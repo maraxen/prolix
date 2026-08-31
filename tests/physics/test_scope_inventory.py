@@ -22,6 +22,7 @@ import importlib.util
 from pathlib import Path
 
 import jax
+import jax.numpy as jnp
 import pytest
 
 pytestmark = pytest.mark.slow
@@ -237,79 +238,75 @@ def test_flash_grad_label_appears_in_compiled_hlo():
 
 
 def test_settle_scopes_at_production_scale():
-    """Test settle_* named_scope labels at production scale (N≳895 waters).
+    """Test settle_* named_scope labels at production scale (N≈895 waters).
 
     This test addresses #4330 Fix 2c: investigate whether settle_* scope labels
     survive compilation at production scale, or whether they are absorbed into
     fusion at larger system sizes (vs. the N=64 tests above).
 
-    Hypothesis: at production scale (n_waters ≳ 895), XLA's fusion pass absorbs
+    Hypothesis: at production scale (n_waters ~ 895), XLA's fusion pass absorbs
     the small per-water settle_* operations into a larger surrounding fusion,
     losing the scope boundary.
 
-    Outcome: compile a settle_langevin integrator step at ~895 waters and report
-    which settle_* labels (settle_pos_eigh, settle_cramers_rule, settle_rattle_loop)
-    are present or absent in the resulting HLO text.
+    Outcome: compile a settle_langevin integrator step at ~895 waters (the same
+    scale as this project's validated dt=1.0fs production gate, see project
+    CLAUDE.md) and report which settle_* labels (settle_pos_eigh,
+    settle_cramers_rule, settle_rattle_loop) are present or absent in the
+    resulting HLO text.
+
+    Uses the same real-system construction pattern as
+    test_settle_temperature_control.py's _mean_rigid_t_after_burn (pre-
+    equilibrated TIP3P water box + a real PME energy function + the real
+    settle.get_water_indices helper), not a hand-rolled fixture -- a hand-rolled
+    n_waters-many-"atoms" grid would silently violate settle_langevin's actual
+    (N_waters, 3) water_indices / (n_atoms,) mass contract and either crash or
+    (worse) run a physically meaningless system.
 
     NOTE: This test compiles a real ~895-water JAX system and performs a real XLA
-    compilation (marked @pytest.mark.slow). Per project rules, this test MUST NOT
-    be executed locally -- only on cluster/titanix. It writes its HLO findings to
-    the test output; the finding (present/absent) confirms or denies the fusion
-    hypothesis and should be manually inspected from the cluster run logs.
+    compilation (module-level ``pytestmark = pytest.mark.slow`` above excludes it
+    from CI's default ``-m "not slow"`` run). Per project rules, this test MUST
+    NOT be executed locally -- only on cluster/titanix. It writes its HLO findings
+    to the test output; the finding (present/absent) confirms or denies the
+    fusion hypothesis and should be manually inspected from the cluster run logs.
     """
-    from prolix.physics import settle
-    from jax_md import space
-
-    # Construct a ~895-water system (production-representative scale)
-    # using a grid of 11×11×8 waters (968 waters, close to production gate scale)
-    n_per_side = 11
-    n_layers = 8
-    n_waters = n_per_side * n_per_side * n_layers
-    spacing = 3.0  # Angstroms, typical water spacing
-
-    # Generate positions as a regular 3D grid
-    x_coords = jnp.linspace(0, n_per_side * spacing, n_per_side)
-    y_coords = jnp.linspace(0, n_per_side * spacing, n_per_side)
-    z_coords = jnp.linspace(0, n_layers * spacing, n_layers)
-    xx, yy, zz = jnp.meshgrid(x_coords, y_coords, z_coords, indexing="ij")
-    positions = jnp.stack([xx.flatten(), yy.flatten(), zz.flatten()], axis=-1)
-    positions = positions[:n_waters]  # Trim to exact count
-
-    # Water masses and TIP3P parameters (fake but structurally correct)
-    mass = jnp.ones(n_waters * 3) * 18.0  # O: 16 u, H: 1 u each
-    mass = mass.at[::3].set(16.0)
-    masses = jnp.reshape(mass, (n_waters, 3))
-
-    # Water indices (rigid O-H-H geometry)
-    water_indices = jnp.arange(n_waters)
-
-    # Create a settle_langevin integrator
-    def dummy_energy_fn(pos):
-        return jnp.sum(pos ** 2)
-
-    # Minimal shift function (free boundary condition)
-    displacement_fn, _ = space.free()
-
-    init_fn, step_fn = settle.settle_langevin(
-        dummy_energy_fn,
-        displacement_fn,
-        dt=1.0,
-        kT=1.0,
-        gamma=10.0,
-        mass=masses,
-        water_indices=water_indices,
-        project_ou_momentum_rigid=True,
-        projection_site="post_o",
+    from prolix.physics import pbc, settle, system
+    from .test_explicit_langevin_tip3p_parity import (
+        _equil_water_positions,
+        _proxide_params_pure_water,
     )
 
-    # Initialize and run one step to get the step_fn jitted
-    state = init_fn(jax.random.PRNGKey(0), positions, mass=masses)
+    jax.config.update("jax_enable_x64", True)
+    n_waters = 895  # matches this project's validated dt=1.0fs production gate scale
+    n_atoms = n_waters * 3
 
-    def _step(state, key):
-        return step_fn(state, key)
+    positions_a, box_edge = _equil_water_positions(n_waters, seed=0)
+    box_vec = jnp.array([box_edge, box_edge, box_edge], dtype=jnp.float64)
+    positions = jnp.asarray(positions_a, dtype=jnp.float64)
 
-    # Compile the step and dump HLO
-    hlo_text = jax.jit(_step).lower(state, jax.random.PRNGKey(1)).compile().as_text()
+    sys_dict = _proxide_params_pure_water(n_waters)
+    displacement_fn, shift_fn = pbc.create_periodic_space(box_vec)
+    pme_grid = max(16, round(box_edge / 1.0))
+    energy_fn = system.make_energy_fn(
+        displacement_fn, sys_dict, box=box_vec, use_pbc=True,
+        implicit_solvent=False, pme_grid_points=pme_grid, pme_alpha=0.34,
+        cutoff_distance=9.0, strict_parameterization=False,
+    )
+
+    mass = jnp.array([[15.999], [1.008], [1.008]] * n_waters).reshape(n_atoms)
+    water_indices = settle.get_water_indices(0, n_waters)
+
+    init_fn, step_fn = settle.settle_langevin(
+        energy_fn, shift_fn, dt=1.0, kT=1.0, gamma=10.0, mass=mass,
+        water_indices=water_indices, box=box_vec,
+        project_ou_momentum_rigid=True, projection_site="post_o",
+    )
+
+    state = init_fn(jax.random.key(0), positions, mass=mass)
+
+    # Compile the step and dump HLO (apply_fn takes only state -- the RNG key is
+    # threaded internally via state.key, per settle_langevin's LangevinState contract;
+    # see test_settle_temperature_control.py's identical apply_j(state) call pattern).
+    hlo_text = jax.jit(step_fn).lower(state).compile().as_text()
 
     # Report findings for settle_* scopes (do not assert, only record)
     settle_labels = ("settle_pos_eigh", "settle_cramers_rule", "settle_rattle_loop")
