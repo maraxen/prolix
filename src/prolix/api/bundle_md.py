@@ -70,22 +70,52 @@ def _exception_energy_masked(
 
 
 def atom_bucket_size(bundle: MolecularBundle) -> int:
-    """Static padded atom count from shape_spec (compile-time constant per program)."""
+    """Static padded atom count from shape_spec (compile-time constant per program).
+
+    Args:
+        bundle: MolecularBundle instance.
+
+    Returns:
+        Padded atom count for JIT compilation.
+    """
     return atom_pad_length(bundle.shape_spec)
 
 
 def water_bucket_size(bundle: MolecularBundle) -> int:
-    """Static padded water slot count from shape_spec."""
+    """Static padded water slot count from shape_spec.
+
+    Args:
+        bundle: MolecularBundle instance.
+
+    Returns:
+        Padded water count for JIT compilation.
+    """
     return water_pad_length(bundle.shape_spec)
 
 
 def positions_with_prefix(bundle: MolecularBundle, prefix: int) -> jnp.ndarray:
-    """Prefix slice of positions; ``prefix`` must be a host static int (not traced)."""
+    """Prefix slice of positions; ``prefix`` must be a host static int (not traced).
+
+    Args:
+        bundle: MolecularBundle instance.
+        prefix: Host-static atom count (compile-time constant).
+
+    Returns:
+        (prefix, 3) position array.
+    """
     return bundle.positions[:prefix]
 
 
 def masses_with_prefix(bundle: MolecularBundle, prefix: int) -> jnp.ndarray:
-    """Prefix slice of real ``bundle.masses``; ``prefix`` is host static (atom bucket)."""
+    """Prefix slice of real ``bundle.masses``; ``prefix`` is host static (atom bucket).
+
+    Args:
+        bundle: MolecularBundle instance.
+        prefix: Host-static atom count (compile-time constant).
+
+    Returns:
+        (prefix,) mass array.
+    """
     return bundle.masses[:prefix]
 
 
