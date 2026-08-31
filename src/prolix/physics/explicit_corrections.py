@@ -74,7 +74,8 @@ def lj_dispersion_tail_energy(
     box = jnp.asarray(box)
     sigma = jnp.asarray(sigma)
     epsilon = jnp.asarray(epsilon)
-    atom_mask = jnp.asarray(atom_mask).astype(jnp.float32)
+    # debt 832: dtype follows epsilon (the ambient float precision) rather than hardcoding float32.
+    atom_mask = jnp.asarray(atom_mask).astype(epsilon.dtype)
     volume = box[0] * box[1] * box[2] if box.ndim == 1 else jnp.linalg.det(box)
 
     sum_c6 = jnp.sum(jnp.sqrt(epsilon) * (sigma**3) * atom_mask)
@@ -113,7 +114,8 @@ def lj_dispersion_tail_impulsive_pressure(
     box = jnp.asarray(box)
     sigma = jnp.asarray(sigma)
     epsilon = jnp.asarray(epsilon)
-    atom_mask = jnp.asarray(atom_mask).astype(jnp.float32)
+    # debt 832: dtype follows epsilon (the ambient float precision) rather than hardcoding float32.
+    atom_mask = jnp.asarray(atom_mask).astype(epsilon.dtype)
     volume = box[0] * box[1] * box[2] if box.ndim == 1 else jnp.linalg.det(box)
 
     sum_c6 = jnp.sum(jnp.sqrt(epsilon) * (sigma**3) * atom_mask)
