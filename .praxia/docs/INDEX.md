@@ -1,4 +1,4 @@
-# wt-20260807-132628 Internal Docs
+# wt-20260831-175312 Internal Docs
 
 ## Daily
 - [260426_sprint5-kups-crossval](daily/260426_sprint5-kups-crossval.md)
@@ -126,6 +126,7 @@
 - [praxia_id_map](audits/xr_rewire_challenges/praxia_id_map.json)
 
 ## Research
+- [260831_stage-2-profiling-sweep-synthesis-full-md-path-matrix-p7-stage2-full-md-production-defaults](research/260831_stage-2-profiling-sweep-synthesis-full-md-path-matrix-p7-stage2-full-md-production-defaults.md) — Synthesizes 3 open bathos campaigns (#4326): NL vs flash vs dense harness quality + preliminary ranking, a sidecar-schema-mismatch bug that made every p7-stage2 flash-vs-dense sweep run gate-fail regardless of content, and confirmation that full-md-production-defaults was pre-registered but never executed.
 - [260710_xtrax-rewire-epic-closeout-audit](research/260710_xtrax-rewire-epic-closeout-audit.md)
 - [260710_xtrax-rewire_audit](research/260710_xtrax-rewire_audit.md)
 - [260710_xtrax-rewire_postmortem](research/260710_xtrax-rewire_postmortem.md)
