@@ -59,50 +59,56 @@ def test_minimum_image_distance():
   assert jnp.isclose(dist, expected)
 
 
-def test_minimum_image_distance_at_box_half_boundary():
-  """Test tie-rounding at PBC boundary (backlog #4232).
+def test_round_half_away_from_zero_differs_from_bankers_rounding():
+  """Test the tie-breaking convention itself (backlog #4232).
 
-  When atom separation is exactly box/2 in one dimension, the PBC wrap
-  is ambiguous (two equally valid images). This test verifies that the
-  wrap is deterministic and follows round-half-away-from-zero convention.
+  `minimum_image_distance`'s scalar output can't distinguish the two
+  conventions at an exact box/2 tie: both bankers'-rounding and
+  round-half-away-from-zero wrap to a mirror-symmetric `dr`, so the
+  resulting *distance* is identical either way (verified: dr=[-5,0,0] vs
+  [5,0,0] for box=10, both norm 5.0). The only way to actually verify the
+  fix landed -- and guard against a future revert to `jnp.round` -- is to
+  test the tie-breaking helper directly against known half-integer ties.
+  """
+  # jnp.round uses round-half-to-even (banker's rounding): both +0.5 and
+  # -0.5 round to 0.0, since 0 is the nearest even integer to both.
+  assert jnp.round(0.5) == 0.0
+  assert jnp.round(-0.5) == 0.0
+  assert jnp.round(1.5) == 2.0  # 2 is even -> rounds up here instead
+
+  # round-half-away-from-zero must break every tie outward, unlike jnp.round.
+  assert pbc._round_half_away_from_zero(jnp.array(0.5)) == 1.0
+  assert pbc._round_half_away_from_zero(jnp.array(-0.5)) == -1.0
+  assert pbc._round_half_away_from_zero(jnp.array(1.5)) == 2.0
+  assert pbc._round_half_away_from_zero(jnp.array(-1.5)) == -2.0
+  # Non-tie values must round normally (same as jnp.round).
+  assert pbc._round_half_away_from_zero(jnp.array(0.3)) == 0.0
+  assert pbc._round_half_away_from_zero(jnp.array(0.7)) == 1.0
+
+
+def test_minimum_image_distance_at_box_half_boundary():
+  """Test PBC wrap at an exact box/2 tie (backlog #4232).
+
+  At this exact boundary the wrap is genuinely ambiguous (two equally
+  valid periodic images), so both tie-breaking conventions happen to
+  produce the same *distance* here -- see the dedicated tie-breaking
+  test above for the real discriminating check. This test just pins
+  down that `minimum_image_distance` itself is deterministic and stays
+  well-defined (finite, correct magnitude) at the tie point.
+
+  Note: `create_periodic_space`'s `displacement_fn` wraps jax_md's own
+  `space.periodic`, a separate implementation this fix does not touch --
+  do not use it here to probe `minimum_image_distance`'s behavior.
   """
   box = jnp.array([10.0, 10.0, 10.0])
 
   # Place atoms exactly box/2 apart in the x-dimension.
-  # In a 10 Angstrom box, 5.0 is the exact halfway point.
-  # Both [0, 5] and [5, 10] map to the same periodic cell distance,
-  # but the tie must be broken deterministically.
-  r1 = jnp.array([0.0, 0.0, 0.0])
-  r2 = jnp.array([5.0, 0.0, 0.0])
-
-  # Raw dr = [5.0, 0, 0] -> scaled dr/box = [0.5, 0, 0]
-  # Round-half-away-from-zero: 0.5 -> 1 (away from zero)
-  # So wrap_idx = 1, and minimum image = [5, 0, 0] - [10, 0, 0] = [-5, 0, 0]
-  # But we want the smallest image, so we take [-5, 0, 0] (distance 5.0)
-  # With banker's rounding (old), 0.5 rounds to 0 (nearest even), giving [5, 0, 0] (distance 5.0)
-  # Both happen to give distance 5.0, but the mechanism differs.
-  # Let's test a case that shows the difference more clearly:
-
-  # Actually, let's place atoms such that the tie-break direction matters:
-  # r1 = [0, 0, 0], r2 = [5.1, 0, 0]: scaled = 0.51 -> round = 1 -> wrap = -4.9 (distance 4.9)
-  # r1 = [0, 0, 0], r2 = [4.9, 0, 0]: scaled = 0.49 -> round = 0 -> wrap = 4.9 (distance 4.9)
-  # For 5.0 exactly: scaled = 0.5 -> banker's round = 0, new = 1
-
-  # Test a lattice-symmetric case where the ambiguity is real:
-  # Place at positions that differ by exactly box/2.
   r1 = jnp.array([2.5, 0.0, 0.0])  # center of 0-5 cell
   r2 = jnp.array([7.5, 0.0, 0.0])  # center of 5-10 cell
 
-  # Raw dr = [5.0, 0, 0] -> scaled = 0.5 -> should round away from zero = 1
-  # Wrapped dr = [5, 0, 0] - [10, 0, 0] = [-5, 0, 0]
-  # Distance = 5.0
-  # (Old banker's round would give 0, so dr = [5, 0, 0], distance 5.0 too, but for the wrong reason)
-
   dist = pbc.minimum_image_distance(r1, r2, box)
-  expected = 5.0
+  assert jnp.isclose(dist, 5.0)
 
-  assert jnp.isclose(dist, expected)
-
-  # Verify determinism: running it again should give the same result
+  # Verify determinism: running it again should give the same result.
   dist2 = pbc.minimum_image_distance(r1, r2, box)
   assert jnp.isclose(dist2, dist)
