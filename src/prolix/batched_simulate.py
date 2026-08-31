@@ -70,6 +70,9 @@ def recenter_com(
         masses: (N,) per-atom masses.
         mask: Optional (N,) boolean mask. If given, only masked atoms
             contribute to COM calculation but ALL atoms are shifted.
+
+    Returns:
+        (N, 3) positions shifted so the mass-weighted center of mass is at the origin.
     """
     m = masses[:, None]  # (N, 1)
     if mask is not None:
@@ -97,6 +100,9 @@ def remove_rotation_kabsch(
         reference: (N, 3) COM-centered reference frame.
         masses: (N,) per-atom masses.
         mask: Optional (N,) boolean mask for weighted alignment.
+
+    Returns:
+        (N, 3) positions rotated to maximize overlap with reference frame.
     """
     w = jnp.sqrt(masses[:, None])  # mass-weighting
     if mask is not None:
@@ -132,6 +138,18 @@ def apply_com_correction(
 
     Applied every `recenter_every` steps via lax.cond to avoid
     branching overhead. All operations are pure JAX — no JIT exit.
+
+    Args:
+        positions: (N, 3) atom coordinates.
+        masses: (N,) per-atom masses.
+        reference: (N, 3) COM-centered reference frame for rotation removal.
+        step_idx: Current integration step (checked against recenter_every).
+        recenter_every: Re-center every N steps.
+        remove_rotation: If True, also apply Kabsch rotation removal.
+        mask: Optional (N,) boolean mask for weighting.
+
+    Returns:
+        (N, 3) corrected positions (unchanged if not at a correction step).
     """
     def _do_correction(r):
         r_centered = recenter_com(r, masses, mask)
@@ -163,10 +181,20 @@ def check_position_sanity(
     system_names: list[str] | None = None,
 ) -> None:
     """Assert no real atom exceeds max_magnitude. Hard error if violated.
-    
+
     This runs on the host (Python side) using concrete arrays.
     Reports per-system diagnostics before raising so the user knows
     which system(s) exploded.
+
+    Args:
+        positions: (B, N, 3) or (N, 3) atom coordinates.
+        atom_mask: (B, N) or (N,) boolean mask for real atoms (padding_atoms=0).
+        max_magnitude: Maximum allowed coordinate magnitude (Å).
+        stage: Description of the simulation stage (for logging).
+        system_names: Optional list of system names for diagnostics.
+
+    Raises:
+        RuntimeError: If any real atom coordinate exceeds max_magnitude Å.
     """
     import logging as _logging
     _log = _logging.getLogger("check_position_sanity")
@@ -206,18 +234,36 @@ def check_position_sanity(
 
 
 def _temperature_schedule(start: float, end: float, n_steps: int) -> Array:
-    """Create a linear temperature ramp (K)."""
+    """Create a linear temperature ramp (K).
+
+    Args:
+        start: Initial temperature (K).
+        end: Final temperature (K).
+        n_steps: Number of steps in the schedule.
+
+    Returns:
+        (n_steps,) array of temperatures linearly interpolated from start to end.
+    """
     return jnp.linspace(start, end, n_steps)
 
 
 def _restraint_schedule(k_start: float, k_end: float, n_steps: int) -> Array:
-    """Create a linear restraint schedule (kcal/mol/Å²)."""
+    """Create a linear restraint schedule (kcal/mol/Å²).
+
+    Args:
+        k_start: Initial spring constant (kcal/mol/Å²).
+        k_end: Final spring constant (kcal/mol/Å²).
+        n_steps: Number of steps in the schedule.
+
+    Returns:
+        (n_steps,) array of spring constants linearly interpolated from k_start to k_end.
+    """
     return jnp.linspace(k_start, k_end, n_steps)
 
 
 def make_langevin_step(dt: float, kT: float, gamma: float) -> Callable[[PaddedSystem, _LangevinState], _LangevinState]:
     """Create a BAOAB Langevin step function with RATTLE constraints.
-    
+
     BAOAB scheme with SHAKE/RATTLE:
     B: p = p + 0.5 * dt * f
     A: r = r + 0.5 * dt * p / m
@@ -230,6 +276,14 @@ def make_langevin_step(dt: float, kT: float, gamma: float) -> Callable[[PaddedSy
 
     Uses analytical forces for LJ/Coulomb (no jax.grad on nonbonded terms)
     to avoid autodiff NaN from exclusion matrix scatter and padded-atom distances.
+
+    Args:
+        dt: Integration timestep (fs, in AKMA units).
+        kT: Boltzmann constant × temperature (kcal/mol).
+        gamma: Friction coefficient (1/ps).
+
+    Returns:
+        step_fn(padded_sys, state) -> _LangevinState: Integration step function.
     """
     from prolix.batched_energy import single_padded_force
     from prolix.physics.constraints import project_momenta, project_positions
@@ -395,11 +449,14 @@ def make_langevin_step_nl(
     since it's updated less frequently than the dynamics state.
 
     Args:
+        dt: Integration timestep (fs, in AKMA units).
+        kT: Boltzmann constant × temperature (kcal/mol).
+        gamma: Friction coefficient (1/ps).
         energy_fn: Optional custom energy function. If provided, used instead
             of single_padded_energy_nl. Useful for jax.checkpoint wrapping.
 
     Returns:
-        step_fn(padded_sys, state, neighbor_idx) -> _LangevinState
+        step_fn(padded_sys, state, neighbor_idx) -> _LangevinState: Integration step function.
     """
     if energy_fn is None:
         from prolix.batched_energy import single_padded_energy_nl_cvjp
@@ -501,8 +558,16 @@ def make_langevin_step_nl_fused(
 ) -> Callable:
     """Create a BAOAB Langevin step using the fused analytical energy+force kernel.
 
-    Bypasses jax.grad entirely for the dominant non-bonded terms, 
+    Bypasses jax.grad entirely for the dominant non-bonded terms,
     reducing VRAM bandwidth and yielding massive speedups.
+
+    Args:
+        dt: Integration timestep (fs, in AKMA units).
+        kT: Boltzmann constant × temperature (kcal/mol).
+        gamma: Friction coefficient (1/ps).
+
+    Returns:
+        step_fn(padded_sys, state, neighbor_idx) -> _LangevinState: Integration step function.
     """
     from prolix.fused_energy import fused_energy_and_forces_nl
 
@@ -602,6 +667,14 @@ def safe_map(fn: Callable[[T], Any], batch: T, chunk_size: int | None = 1) -> An
 
     Note: All pytree leaves MUST have the same leading (batch) dimension B.
     Static fields (e.g., scalar configs) should be marked static before calling safe_map.
+
+    Args:
+        fn: Function to map over the batch (callable taking a single batch element).
+        batch: Batched input pytree (with leading batch dimension B).
+        chunk_size: Number of elements per vmap chunk. None = full vmap (no chunking).
+
+    Returns:
+        Result pytree with mapped function applied to each element.
     """
     if chunk_size is None:
         return jax.vmap(fn)(batch)
@@ -673,7 +746,18 @@ def safe_map(fn: Callable[[T], Any], batch: T, chunk_size: int | None = 1) -> An
     return jax.tree_util.tree_map(unchunk, results)
 
 def _selective_restraint_energy(r, r_ref, k, atom_mask, selection_mask):
-    """Harmonic position restraint on a specific subset of atoms."""
+    """Harmonic position restraint on a specific subset of atoms.
+
+    Args:
+        r: (N, 3) current atomic positions.
+        r_ref: (N, 3) reference atomic positions.
+        k: Spring constant (kcal/mol/Å²).
+        atom_mask: (N,) boolean mask for real atoms (padding_atoms=0).
+        selection_mask: (N,) boolean mask for atoms to restrain.
+
+    Returns:
+        Scalar harmonic restraint energy.
+    """
     # dr: (N, 3)
     dr = (r - r_ref) * atom_mask[:, None] * selection_mask[:, None]
     return 0.5 * k * jnp.sum(dr ** 2)
