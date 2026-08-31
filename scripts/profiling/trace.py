@@ -104,6 +104,25 @@ def _unwrap_transform(segment: str) -> str:
 
 
 def _deepest_known_label(op_name: str, known_labels: frozenset[str]) -> str | None:
+    """Resolve the deepest named_scope label in an op_name path.
+
+    Known limitations (#4330 Fix 2b):
+    1. Scopes in certain optimization patterns may not resolve. Examples:
+       - Scopes wrapping scan(..., unroll=N) at the outer level may be absorbed
+         into fusion, e.g. flash_nonbonded_tiles (production flash_explicit.py:244)
+       - Scopes inside conditional branches (if/else) backed by control flow may
+         resolve inconsistently depending on the run (e.g. pme_bwd_gather appearing
+         in some production traces but not others). Root cause: control flow with
+         conditional execution patterns interacts with scope path rewriting in
+         unpredictable ways under the XLA backend's optimization passes.
+
+    Evidence: compiled HLO dump from a production-scale MD force computation shows
+    these scopes simply absent from the op_name metadata, even though the underlying
+    computation is verified correct and executes. No simple pattern (e.g.
+    "replace X wrapper with Y") has been found to recover the labels -- the issue
+    appears to be a structural fusion or control-flow interaction at the backend
+    level.
+    """
     parts = op_name.split("/")
     if parts and parts[0].startswith("jit("):
         parts = parts[1:]
