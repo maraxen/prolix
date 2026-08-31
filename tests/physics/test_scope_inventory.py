@@ -22,6 +22,7 @@ import importlib.util
 from pathlib import Path
 
 import jax
+import jax.numpy as jnp
 import pytest
 
 pytestmark = pytest.mark.slow
@@ -234,3 +235,86 @@ def test_flash_grad_label_appears_in_compiled_hlo():
     hlo_text = jax.jit(fn).lower(bundle.positions).compile().as_text()
 
     _assert_no_missing(_missing_labels(hlo_text, (_FLASH_GRAD_LABEL,)), "flash_explicit_forces")
+
+
+def test_settle_scopes_at_production_scale():
+    """Test settle_* named_scope labels at production scale (N≈895 waters).
+
+    This test addresses #4330 Fix 2c: investigate whether settle_* scope labels
+    survive compilation at production scale, or whether they are absorbed into
+    fusion at larger system sizes (vs. the N=64 tests above).
+
+    Hypothesis: at production scale (n_waters ~ 895), XLA's fusion pass absorbs
+    the small per-water settle_* operations into a larger surrounding fusion,
+    losing the scope boundary.
+
+    Outcome: compile a settle_langevin integrator step at ~895 waters (the same
+    scale as this project's validated dt=1.0fs production gate, see project
+    CLAUDE.md) and report which settle_* labels (settle_pos_eigh,
+    settle_cramers_rule, settle_rattle_loop) are present or absent in the
+    resulting HLO text.
+
+    Uses the same real-system construction pattern as
+    test_settle_temperature_control.py's _mean_rigid_t_after_burn (pre-
+    equilibrated TIP3P water box + a real PME energy function + the real
+    settle.get_water_indices helper), not a hand-rolled fixture -- a hand-rolled
+    n_waters-many-"atoms" grid would silently violate settle_langevin's actual
+    (N_waters, 3) water_indices / (n_atoms,) mass contract and either crash or
+    (worse) run a physically meaningless system.
+
+    NOTE: This test compiles a real ~895-water JAX system and performs a real XLA
+    compilation (module-level ``pytestmark = pytest.mark.slow`` above excludes it
+    from CI's default ``-m "not slow"`` run). Per project rules, this test MUST
+    NOT be executed locally -- only on cluster/titanix. It writes its HLO findings
+    to the test output; the finding (present/absent) confirms or denies the
+    fusion hypothesis and should be manually inspected from the cluster run logs.
+    """
+    from prolix.physics import pbc, settle, system
+    from .test_explicit_langevin_tip3p_parity import (
+        _equil_water_positions,
+        _proxide_params_pure_water,
+    )
+
+    jax.config.update("jax_enable_x64", True)
+    n_waters = 895  # matches this project's validated dt=1.0fs production gate scale
+    n_atoms = n_waters * 3
+
+    positions_a, box_edge = _equil_water_positions(n_waters, seed=0)
+    box_vec = jnp.array([box_edge, box_edge, box_edge], dtype=jnp.float64)
+    positions = jnp.asarray(positions_a, dtype=jnp.float64)
+
+    sys_dict = _proxide_params_pure_water(n_waters)
+    displacement_fn, shift_fn = pbc.create_periodic_space(box_vec)
+    pme_grid = max(16, round(box_edge / 1.0))
+    energy_fn = system.make_energy_fn(
+        displacement_fn, sys_dict, box=box_vec, use_pbc=True,
+        implicit_solvent=False, pme_grid_points=pme_grid, pme_alpha=0.34,
+        cutoff_distance=9.0, strict_parameterization=False,
+    )
+
+    mass = jnp.array([[15.999], [1.008], [1.008]] * n_waters).reshape(n_atoms)
+    water_indices = settle.get_water_indices(0, n_waters)
+
+    init_fn, step_fn = settle.settle_langevin(
+        energy_fn, shift_fn, dt=1.0, kT=1.0, gamma=10.0, mass=mass,
+        water_indices=water_indices, box=box_vec,
+        project_ou_momentum_rigid=True, projection_site="post_o",
+    )
+
+    state = init_fn(jax.random.key(0), positions, mass=mass)
+
+    # Compile the step and dump HLO (apply_fn takes only state -- the RNG key is
+    # threaded internally via state.key, per settle_langevin's LangevinState contract;
+    # see test_settle_temperature_control.py's identical apply_j(state) call pattern).
+    hlo_text = jax.jit(step_fn).lower(state).compile().as_text()
+
+    # Report findings for settle_* scopes (do not assert, only record)
+    settle_labels = ("settle_pos_eigh", "settle_cramers_rule", "settle_rattle_loop")
+    print(f"\n=== Production-scale settle_* scope inventory (N={n_waters}) ===")
+    for label in settle_labels:
+        present = label in hlo_text
+        print(f"{label}: {'PRESENT' if present else 'ABSENT'}")
+    print("=== End inventory ===\n")
+
+    # Optional: if a specific label is known to be required, add assertions here
+    # For now, just report the findings and let the user inspect them

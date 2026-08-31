@@ -337,6 +337,11 @@ def _chunked_lj_only_energy(
     tile_e = compute(positions, start)
     return carry + tile_e, None
 
+  # #4330 Fix 2a note: flash_lj_only is unreached under the default PME production
+  # path (_chunked_lj_only_energy is only called from EFA/EFA_LEBEDEV electrostatic
+  # branches in _total_energy_fn) -- but unlike flash_bonded/pme_greens_setup_standalone,
+  # this scope IS exercised and resolves correctly when the EFA path is actually used,
+  # and test_flash_lj_only_label_appears_under_efa_method asserts exactly that. Keep it.
   with jax.named_scope("flash_lj_only"):
     total_energy, _ = jax.lax.scan(
         tile_energy_outer,
@@ -643,6 +648,10 @@ def flash_explicit_total_energy(
         displacement_fn, _ = space.free()
 
     # --- Bonded terms (O(N), no N² operations) ---
+    # #4330 Fix 2a note: flash_bonded is unreached by the production force path
+    # (flash_explicit_forces uses _total_energy_fn, which excludes bonded terms) --
+    # but flash_explicit_total_energy is directly exercised and its flash_bonded label
+    # asserted present by test_flash_energy_labels_appear_in_compiled_hlo. Keep it.
     with jax.named_scope("flash_bonded"):
         e_bond = _bond_energy_masked(
             pos, sys.bonds, sys.bond_params, sys.bond_mask, displacement_fn)
