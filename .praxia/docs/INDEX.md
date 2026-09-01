@@ -126,6 +126,7 @@
 - [praxia_id_map](audits/xr_rewire_challenges/praxia_id_map.json)
 
 ## Research
+- [260901_nl-bucketing-runtime-tax-single-system-production](research/260901_nl-bucketing-runtime-tax-single-system-production.md) — Size-bucketing (meant to share compiled programs across differently-shaped systems) inflates neighbor-list capacity K by ~2.1x based on bucket padding, imposing a permanent ~2.7x per-step runtime tax on single-protein production trajectories that have no other shape to share a compile with.
 - [260831_stage-2-profiling-sweep-synthesis-full-md-path-matrix-p7-stage2-full-md-production-defaults](research/260831_stage-2-profiling-sweep-synthesis-full-md-path-matrix-p7-stage2-full-md-production-defaults.md) — Synthesizes 3 open bathos campaigns (#4326): NL vs flash vs dense harness quality + preliminary ranking, a sidecar-schema-mismatch bug that made every p7-stage2 flash-vs-dense sweep run gate-fail regardless of content, and confirmation that full-md-production-defaults was pre-registered but never executed.
 - [260710_xtrax-rewire-epic-closeout-audit](research/260710_xtrax-rewire-epic-closeout-audit.md)
 - [260710_xtrax-rewire_audit](research/260710_xtrax-rewire_audit.md)

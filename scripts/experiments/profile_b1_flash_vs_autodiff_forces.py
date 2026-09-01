@@ -154,7 +154,7 @@ def _capture_trace(fn, trace_dir: Path) -> tuple[dict, dict[str, float]]:
 
 def _timed_seconds(results: dict) -> float:
     candidates = []
-    for key in ("autodiff_forces", "flash_forces", "energy_only"):
+    for key in ("autodiff_forces", "flash_forces", "nl_forces", "energy_only"):
         if key in results:
             candidates.append(results[key]["mean_ms"] / 1000.0)
     if not candidates:
@@ -247,9 +247,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--emit-record", type=Path, default=None)
     parser.add_argument(
         "--mode",
-        choices=("dense", "flash", "both"),
+        choices=("dense", "flash", "nl", "both"),
         default="both",
-        help="which force path to time (P7 array passes dense|flash)",
+        help="which force path to time (P7 array passes dense|flash); "
+        "'both' also times 'nl' for a 3-way comparison",
     )
     parser.add_argument("--pme", choices=("on", "off"), default="on")
     parser.add_argument("--grid-spacing", type=float, default=1.0)
@@ -300,6 +301,7 @@ def main(argv: list[str] | None = None) -> int:
 
     from prolix.api.bundle_md import displacement_fn_for_bundle, physics_system_from_bundle
     from prolix.batched_energy import single_padded_energy, single_padded_force
+    from prolix.physics.neighbor_list import make_neighbor_list_fn
 
     disp_fn, _ = displacement_fn_for_bundle(bundle)
     positions = bundle.positions
@@ -323,9 +325,34 @@ def main(argv: list[str] | None = None) -> int:
             sys_obj, disp_fn, implicit_solvent=False, explicit_solvent=True, use_flash=True,
         )
 
+    # NL comparison (task #4793 follow-up): same dense energy path, but
+    # direct-space LJ/Coulomb via O(N*K) chunked_*_energy_nl instead of
+    # O(N^2) masked -- matches EnsemblePlan's use_neighbor_list=True branch
+    # (bundle_md.py force_fn_from_bundle uses flash, not NL, for forces;
+    # NL only exists on the energy/jax.grad side per single_padded_energy's
+    # own docstring -- debt 760).
+    import jax.numpy as jnp
+
+    cutoff = float(getattr(bundle, "cutoff_distance", 9.0))
+    box_vec = jnp.diag(bundle.box)
+    neighbor_fn = make_neighbor_list_fn(disp_fn, box_vec, cutoff)
+    nbr = neighbor_fn.allocate(positions)
+    log.info("NL allocated: k_max=%d (n_padded=%d, k/n=%.3f)", nbr.idx.shape[-1], positions.shape[0], nbr.idx.shape[-1] / positions.shape[0])
+
+    def nl_forces():
+        return jax.grad(
+            lambda r: single_padded_energy(
+                eqx.tree_at(lambda s: s.positions, sys_obj, r),
+                disp_fn,
+                implicit_solvent=False,
+                neighbor=nbr,
+            )
+        )(positions)
+
     energy_jit = jax.jit(energy_only)
     autodiff_jit = jax.jit(autodiff_forces)
     flash_jit = jax.jit(flash_forces)
+    nl_jit = jax.jit(nl_forces)
 
     log.info("Benchmarking (n_warmup=%d, n_trials=%d, n_inner=%d)...", args.n_warmup, args.n_trials, args.n_inner)
     results: dict = {}
@@ -349,12 +376,21 @@ def main(argv: list[str] | None = None) -> int:
         except Exception as e:
             flash_error = f"{type(e).__name__}: {str(e)[:300]}"
             log.error("flash_forces benchmark failed: %s", flash_error)
+        results["nl_forces"] = bench(
+            nl_jit, "single_padded_energy(neighbor=nbr) + jax.grad (#4793 NL comparison)",
+            args.n_warmup, args.n_trials, args.n_inner,
+        )
         timed_fn, timed_name = autodiff_jit, "autodiff_forces"
     elif args.mode == "dense":
         results["autodiff_forces"] = bench(
             autodiff_jit, "dense autodiff forces", args.n_warmup, args.n_trials, args.n_inner,
         )
         timed_fn, timed_name = autodiff_jit, "autodiff_forces"
+    elif args.mode == "nl":
+        results["nl_forces"] = bench(
+            nl_jit, "NL forces", args.n_warmup, args.n_trials, args.n_inner,
+        )
+        timed_fn, timed_name = nl_jit, "nl_forces"
     else:
         try:
             results["flash_forces"] = bench(
@@ -369,9 +405,13 @@ def main(argv: list[str] | None = None) -> int:
     flash_ms = results.get("flash_forces", {}).get("mean_ms") if "flash_forces" in results else None
     autodiff_ms = results.get("autodiff_forces", {}).get("mean_ms") if "autodiff_forces" in results else None
     energy_ms = results.get("energy_only", {}).get("mean_ms") if "energy_only" in results else None
+    nl_ms = results.get("nl_forces", {}).get("mean_ms") if "nl_forces" in results else None
     speedup = (autodiff_ms / flash_ms) if (autodiff_ms and flash_ms) else None
     if speedup is not None:
         log.info("Flash speedup over autodiff: %.3fx", speedup)
+    nl_speedup = (autodiff_ms / nl_ms) if (autodiff_ms and nl_ms) else None
+    if nl_speedup is not None:
+        log.info("NL speedup over dense autodiff: %.3fx", nl_speedup)
 
     summary = {
         "mode": args.mode,
@@ -382,6 +422,9 @@ def main(argv: list[str] | None = None) -> int:
         "flash_forces_ms": flash_ms,
         "flash_speedup": speedup,
         "flash_error": flash_error,
+        "nl_forces_ms": nl_ms,
+        "nl_speedup": nl_speedup,
+        "nl_k_max": int(nbr.idx.shape[-1]) if "nl_forces" in results or args.mode == "nl" else None,
         "pme": args.pme,
         "grid_spacing": grid_key,
         "raw_results": results,
