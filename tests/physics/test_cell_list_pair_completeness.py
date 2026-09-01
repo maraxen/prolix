@@ -49,6 +49,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
+from jax_md import partition
 
 jax.config.update("jax_enable_x64", True)
 
@@ -109,11 +110,6 @@ def _neighbor_list_pairs(nbr, n_real):
     return pairs
 
 
-def _wrap_into_box(positions, box_vec):
-    """Map positions into ``[0, box)`` -- the precondition jax_md's cell list assumes."""
-    return jnp.mod(positions, box_vec)
-
-
 def _build(bundle, positions, *, disable_cell_list):
     disp_fn, _ = displacement_fn_for_bundle(bundle)
     box_vec = jnp.diag(bundle.box)
@@ -162,8 +158,52 @@ def test_brute_force_path_is_complete(solvated_bundle):
     assert not missing, f"brute-force NL dropped {len(missing)} in-cutoff pairs"
 
 
-def test_cell_list_drops_pairs_on_unwrapped_positions(solvated_bundle):
-    """The #4699 bug itself, reproduced as a measurement rather than a claim."""
+def test_raw_jax_md_cell_list_drops_pairs_without_wrapping(solvated_bundle):
+    """Why the wrap in ``make_neighbor_list_fn`` exists -- demonstrated, not asserted.
+
+    Bypasses prolix's wrapper and drives ``jax_md.partition.neighbor_list``
+    directly on raw origin-centred coordinates: what prolix did before #4699
+    was fixed. If this ever stops dropping pairs, upstream binning changed and
+    the wrap can be revisited.
+    """
+    n_real = int(solvated_bundle.n_atoms)
+    box_vec = jnp.diag(solvated_bundle.box)
+    truth = _brute_force_pairs(
+        solvated_bundle.positions, box_vec, float(solvated_bundle.cutoff_distance), n_real
+    )
+    disp_fn, _ = displacement_fn_for_bundle(solvated_bundle)
+    raw_fns = partition.neighbor_list(
+        disp_fn,
+        box_vec,
+        r_cutoff=float(solvated_bundle.cutoff_distance),
+        dr_threshold=0.5,
+        capacity_multiplier=1.25,
+        disable_cell_list=False,
+        mask_self=True,
+        fractional_coordinates=False,
+    )
+    got = _neighbor_list_pairs(raw_fns.allocate(solvated_bundle.positions), n_real)
+    missing = truth - got
+    frac = len(missing) / max(len(truth), 1)
+    print(
+        f"\n[#4699] raw jax_md cell list, UNWRAPPED: truth={len(truth)} "
+        f"got={len(got)} missing={len(missing)} ({frac:.2%})"
+    )
+    if not missing:
+        pytest.skip(
+            "raw jax_md cell list lost no pairs on unwrapped input -- upstream "
+            "binning may have changed; re-check whether the wrap is still needed"
+        )
+
+
+def test_prolix_neighbor_list_is_complete_on_raw_coordinates(solvated_bundle):
+    """THE regression guard: the shipped default must never drop an in-cutoff pair.
+
+    Exercises ``make_neighbor_list_fn`` exactly as production calls it -- cell
+    list enabled, raw unwrapped bundle coordinates -- and requires a superset
+    of brute force. A neighbor list may carry extra candidates (that is what
+    the skin is for); it may never be missing one.
+    """
     n_real = int(solvated_bundle.n_atoms)
     box_vec = jnp.diag(solvated_bundle.box)
     truth = _brute_force_pairs(
@@ -172,42 +212,36 @@ def test_cell_list_drops_pairs_on_unwrapped_positions(solvated_bundle):
     nbr = _build(solvated_bundle, solvated_bundle.positions, disable_cell_list=False)
     got = _neighbor_list_pairs(nbr, n_real)
     missing = truth - got
-    frac = len(missing) / max(len(truth), 1)
     print(
-        f"\n[#4699] cell list, UNWRAPPED: truth={len(truth)} got={len(got)} "
-        f"missing={len(missing)} ({frac:.2%})"
-    )
-    # Recorded as an xfail-style measurement: this is the defect. If it ever
-    # passes, the cell list became safe on raw coordinates and #4699 can close.
-    if not missing:
-        pytest.skip(
-            "cell list lost no pairs on unwrapped input -- #4699 may no longer "
-            "reproduce here; re-check before relying on this guard"
-        )
-
-
-def test_cell_list_is_complete_once_positions_are_wrapped(solvated_bundle):
-    """The fix: wrapping into [0, box) must make the cell list a strict superset.
-
-    This is the assertion that gates flipping ``disable_cell_list`` back to
-    False. It must hold exactly -- a neighbor list may carry extra candidates,
-    never fewer.
-    """
-    n_real = int(solvated_bundle.n_atoms)
-    box_vec = jnp.diag(solvated_bundle.box)
-    truth = _brute_force_pairs(
-        solvated_bundle.positions, box_vec, float(solvated_bundle.cutoff_distance), n_real
-    )
-    wrapped = _wrap_into_box(solvated_bundle.positions, box_vec)
-    nbr = _build(solvated_bundle, wrapped, disable_cell_list=False)
-    got = _neighbor_list_pairs(nbr, n_real)
-    missing = truth - got
-    print(
-        f"\n[#4699] cell list, WRAPPED: truth={len(truth)} got={len(got)} "
-        f"missing={len(missing)}"
+        f"\n[#4699] prolix NL (cell list on, raw coords): truth={len(truth)} "
+        f"got={len(got)} missing={len(missing)}"
     )
     assert not missing, (
-        f"cell list still dropped {len(missing)} in-cutoff pairs after wrapping "
-        f"positions into [0, box); wrapping is not a sufficient fix for #4699. "
-        f"First few: {sorted(missing)[:10]}"
+        f"prolix's neighbor list dropped {len(missing)} in-cutoff pairs on raw "
+        f"coordinates -- the [0, box) wrap in make_neighbor_list_fn is not "
+        f"holding. First few: {sorted(missing)[:10]}"
+    )
+
+
+def test_cell_list_and_brute_force_agree(solvated_bundle):
+    """The two construction strategies must be interchangeable, not merely both valid.
+
+    Stronger than the superset guard above: a divergence means one of them is
+    wrong even if both happen to cover every true pair.
+    """
+    n_real = int(solvated_bundle.n_atoms)
+    cell = _neighbor_list_pairs(
+        _build(solvated_bundle, solvated_bundle.positions, disable_cell_list=False), n_real
+    )
+    brute = _neighbor_list_pairs(
+        _build(solvated_bundle, solvated_bundle.positions, disable_cell_list=True), n_real
+    )
+    only_brute = brute - cell
+    print(
+        f"\n[#4699] cell={len(cell)} brute={len(brute)} "
+        f"only_cell={len(cell - brute)} only_brute={len(only_brute)}"
+    )
+    assert not only_brute, (
+        f"brute force found {len(only_brute)} pairs the cell list missed: "
+        f"{sorted(only_brute)[:10]}"
     )
