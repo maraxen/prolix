@@ -47,6 +47,7 @@ KNOWN_LABELS = frozenset(
         "pme_fft_forward", "pme_fft_inverse", "pme_greens_setup",
         "pme_greens_setup_standalone", "settle_cramers_rule",
         "settle_pos_eigh", "settle_rattle_loop",
+        "nl_lj_forward", "nl_lj_backward", "nl_coulomb_forward", "nl_coulomb_backward",
     }
 )
 

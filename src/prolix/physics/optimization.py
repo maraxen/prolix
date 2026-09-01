@@ -173,7 +173,8 @@ def _chunked_lj_energy_nl_core(
         energy = jnp.where(m, 4.0 * e_ij * (inv_r6**2 - inv_r6) * switch, 0.0)
         return 0.5 * jnp.sum(energy * pair_scale)
 
-    return tile_reduction_nl(r_pad, neighbor_idx, mask_pad, f_tile, 0.0, tile_size, inner_tile_size=inner_tile_size)
+    with jax.named_scope("nl_lj_forward"):
+        return tile_reduction_nl(r_pad, neighbor_idx, mask_pad, f_tile, 0.0, tile_size, inner_tile_size=inner_tile_size)
 
 
 @functools.partial(jax.custom_vjp, nondiff_argnums=(6, 7, 8, 9))
@@ -290,7 +291,8 @@ def _chunked_lj_nl_bwd(displacement_fn, cutoff, tile_size, switch_width, res, g)
         f_on_i = jnp.sum(jnp.where(m[..., None], forces, 0.0), axis=1)
         return f_on_i
 
-    f_res = tile_reduction_nl(r_pad, nb_idx, mask_pad, f_tile_grad, jnp.zeros_like(r_pad), tile_size, inner_tile_size=inner_tile_size)
+    with jax.named_scope("nl_lj_backward"):
+        f_res = tile_reduction_nl(r_pad, nb_idx, mask_pad, f_tile_grad, jnp.zeros_like(r_pad), tile_size, inner_tile_size=inner_tile_size)
     return (
         -g * f_res[:N],
         g * jnp.zeros_like(sigmas),
@@ -443,7 +445,8 @@ def _chunked_coulomb_energy_nl_core(
         e_pair = coulomb_constant * q_ij * inv_ds * (pair_scale - jax.scipy.special.erf(pme_alpha * ds))
         return 0.5 * jnp.sum(jnp.where(m, e_pair, 0.0))
 
-    return tile_reduction_nl(r_pad, neighbor_idx, mask_pad, f_tile, 0.0, tile_size, inner_tile_size=inner_tile_size)
+    with jax.named_scope("nl_coulomb_forward"):
+        return tile_reduction_nl(r_pad, neighbor_idx, mask_pad, f_tile, 0.0, tile_size, inner_tile_size=inner_tile_size)
 
 @functools.partial(jax.custom_vjp, nondiff_argnums=(5, 6, 7, 8, 9))
 def chunked_coulomb_energy_nl(
@@ -519,7 +522,8 @@ def _chunked_coulomb_nl_bwd(displacement_fn, pme_alpha, coulomb_constant, cutoff
         f_on_i = jnp.sum(jnp.where(m[..., None], forces, 0.0), axis=1)
         return f_on_i
 
-    f_res = tile_reduction_nl(r_pad, nb_idx, mask_pad, f_tile_grad, jnp.zeros_like(r_pad), tile_size, inner_tile_size=inner_tile_size)
+    with jax.named_scope("nl_coulomb_backward"):
+        f_res = tile_reduction_nl(r_pad, nb_idx, mask_pad, f_tile_grad, jnp.zeros_like(r_pad), tile_size, inner_tile_size=inner_tile_size)
     return (
         g * f_res[:N],
         g * jnp.zeros_like(charges),
