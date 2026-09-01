@@ -378,6 +378,8 @@ def physics_system_from_bundle(
     bundle: MolecularBundle,
     positions: jnp.ndarray,
     pme_grid_points: int = 64,
+    *,
+    build_dense_exclusions: bool = True,
 ) -> PhysicsSystem:
     """Reconstruct a PhysicsSystem view for ``single_padded_energy``.
 
@@ -387,6 +389,14 @@ def physics_system_from_bundle(
 
     ``pme_grid_points`` sets the FFT grid resolution for PME electrostatics
     (default 64; override for comparisons against simulations run with different grids).
+
+    ``build_dense_exclusions`` controls whether to build (N, N) exclusion scale
+    matrices. These cost O(N²) memory (~4.4 GB at N=23,558) and are rebuilt on
+    every force call inside the jitted MD loop. Only the dense direct-space path
+    in ``batched_energy`` reads them; the flash and neighbor-list direct-space
+    kernels use the sparse ``excl_indices`` pair list instead. Set to False to
+    avoid the allocation when using flash or neighbor-list paths. Default is True
+    to preserve existing behavior for all callers.
     """
     n = int(positions.shape[0])
     n_real = jnp.asarray(bundle.n_atoms, dtype=jnp.int32)
@@ -419,7 +429,12 @@ def physics_system_from_bundle(
         if box_size.dtype != positions.dtype:
             box_size = box_size.astype(positions.dtype)
 
-    dense_vdw, dense_elec = _dense_excl_matrices_from_bundle(bundle, n)
+    # Build O(N²) exclusion matrices only if requested. Flash and NL kernels
+    # use sparse excl_indices; only dense direct-space path needs these.
+    if build_dense_exclusions:
+        dense_vdw, dense_elec = _dense_excl_matrices_from_bundle(bundle, n)
+    else:
+        dense_vdw, dense_elec = None, None
 
     # Padding-safe pair-list exclusions for the PME reciprocal-space correction
     # (_pme_reciprocal_and_corrections in batched_energy.py) -- the dense direct-
@@ -640,7 +655,8 @@ def force_fn_from_bundle(
         # (eval_shape/canonicalize_force), matching energy_fn_from_bundle's
         # own "everything else is dropped" contract.
         del kwargs
-        sys = physics_system_from_bundle(bundle, positions)
+        # Avoid per-step O(N²) allocation: flash kernel uses sparse excl_indices.
+        sys = physics_system_from_bundle(bundle, positions, build_dense_exclusions=False)
         f = single_padded_force(
             sys,
             disp_fn,
