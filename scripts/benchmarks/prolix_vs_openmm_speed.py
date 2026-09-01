@@ -45,7 +45,11 @@ DEFAULT_ALPHA = 0.34
 DEFAULT_GRID = 64 # Use larger grid for stability in larger boxes
 DEFAULT_CUTOFF_A = 9.0
 
-OPENMM_PLATFORM_ORDER = ("CUDA", "OpenCL", "HIP", "CPU", "Reference")
+# GPU platforms, in preference order. This module performs *speed* comparisons
+# against prolix-on-GPU, so a CPU/Reference platform is never an acceptable
+# fallback here -- it silently turns a GPU-vs-GPU benchmark into GPU-vs-CPU and
+# flatters prolix (#295). run_openmm_bench raises rather than falling back.
+OPENMM_GPU_PLATFORMS = ("CUDA", "OpenCL", "HIP")
 
 
 @dataclass
@@ -186,8 +190,7 @@ def run_openmm_bench(n_atoms: int, box: float, warmup: int, repeats: int) -> tup
 
     # Select best GPU platform (CUDA, OpenCL, or HIP)
     platform = None
-    gpu_platforms = ("CUDA", "OpenCL", "HIP")
-    for pname in gpu_platforms:
+    for pname in OPENMM_GPU_PLATFORMS:
         try:
             platform = openmm.Platform.getPlatformByName(pname)
             break
