@@ -522,8 +522,14 @@ def _run_openmm_comparator(pdb_path: Path, system_xml_path: Path, n_warmup_steps
         try:
             platform = openmm.Platform.getPlatformByName("CUDA")
         except Exception as e:
-            logger.warning("CUDA platform unavailable (%s); falling back to CPU.", e)
-    if platform is None:
+            raise RuntimeError(
+                f"CUDA platform unavailable for OpenMM (required for GPU-to-GPU speed comparison). "
+                f"Error: {e}. "
+                f"Fix: ensure CUDA-capable hardware is present, CUDA toolkit is installed, "
+                f"and OpenMM was built with CUDA support. "
+                f"Pass prefer_cuda=False to use CPU (not recommended for production benchmarks)."
+            )
+    else:
         platform = openmm.Platform.getPlatformByName("CPU")
 
     context = openmm.Context(omm_system, integrator, platform)

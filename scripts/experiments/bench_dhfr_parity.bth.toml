@@ -41,7 +41,7 @@ should not be expected in the catalog at all going forward.
 """
 
 [outcomes.pass]
-condition = "ratio IS NOT NULL AND ratio > 0 AND ratio < 1e6 AND per_step_corrected_s IS NOT NULL AND per_step_corrected_s > 0 AND r_squared IS NOT NULL AND r_squared > 0.8 AND prolix_ns_per_day IS NOT NULL AND openmm_ns_per_day IS NOT NULL"
+condition = "ratio IS NOT NULL AND ratio > 0 AND ratio < 1e6 AND per_step_corrected_s IS NOT NULL AND per_step_corrected_s > 0 AND r_squared IS NOT NULL AND r_squared > 0.8 AND prolix_ns_per_day IS NOT NULL AND openmm_ns_per_day IS NOT NULL AND openmm_platform = 'CUDA'"
 decision = "Harness produced a valid, finite throughput measurement backed by a well-fitting compile/compute regression for this (shim_mode, seed, gpu_tag) cell. Proceed to aggregate across cells in Phase 6 (bth campaign review / bth sql) to compute the RR5 3-tier verdict per the plan's gate rule."
 reasoning = "A finite positive ratio with a positive per-step slope and r_squared > 0.8 means the regression sweep produced a physically sensible, well-explained fit end-to-end (proxide parse -> box glue -> filtered bonded terms -> MolecularBundle -> EnsemblePlan production sweep; OpenMM System deserialize -> Context -> stepped production window) without NaN/Inf, crash, or a degenerate fit. The r_squared floor catches a measurement-pipeline failure (e.g. noisy/non-linear timings) that a raw ratio check alone would miss. The upper bound (1e6) is a sanity cap catching a degenerate near-zero openmm_ns_per_day (e.g. OpenMM stalled) rather than a real speed claim."
 
