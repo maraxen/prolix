@@ -103,6 +103,22 @@ This was explicitly *not* implemented this session (user directive,
 heterogeneous-batching default behavior and deserves a deliberate decision
 rather than a quick default flip.
 
+## Update 2026-09-01: a much larger confound was found and fixed first
+
+The isolated-force-call numbers used to motivate this doc (dense/flash/NL on
+H200 at 1VII) were originally measured with NL's `custom_vjp` backward pass
+missing (see backlog #4623) — NL was paying for generic autodiff through a
+gather-heavy forward pass on top of whatever bucketing tax it also paid.
+After restoring the analytic backward pass, NL forces dropped from 19.317ms
+to 2.321ms (8.3x) at the same bucketed config (n_padded=5000, K=895) — most
+of the earlier gap was the missing custom_vjp, not bucketing. Bucketing's
+own contribution is smaller in absolute terms than it first appeared, but
+the underlying argument in this doc is unchanged: K=895 (bucketed) vs. K=428
+(unbucketed) is still a real, deliberate inflation with no benefit for a
+single-system production trajectory, and remains worth fixing on its own
+terms. See [[project_debt4623_nl_custom_vjp_restored_260901]] and
+[[project_debt761_4793_resolved_260901]] for the full picture.
+
 ## Related
 
 - `.praxia/docs/decisions/260717_b1-connect-existing-engines-scope.md` (decision D1, NL capacity formula)
