@@ -107,14 +107,9 @@ import numpy as np
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
-# The validated dt=1.0 fs production configuration (gate jobs 15870804 /
-# 19774893) and the explicit-solvent test suite both run in float64 --
-# JAX defaults to float32, which would silently truncate positions/box/PME
-# grid math and is NOT the configuration CLAUDE.md's dt cap was validated
-# against. Must be set before any JAX array is created.
-import jax  # noqa: E402
-
-jax.config.update("jax_enable_x64", True)
+# Lazy JAX initialization moved to _init_jax() helper to allow running
+# OpenMM without JAX import (the CUDA-capable OpenMM env has no JAX/prolix).
+jax = None
 
 DATA_DIR = ROOT / "data" / "pdb"
 DHFR_PDB = DATA_DIR / "dhfr_jac_benchmark.pdb"
@@ -151,6 +146,24 @@ _OPENMM_WARMUP_STEPS = 500
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 logger = logging.getLogger(__name__)
+
+
+def _init_jax():
+    """Import JAX and enable float64. MUST run before any JAX array is created.
+
+    The validated dt=1.0 fs production configuration (gate jobs 15870804 /
+    19774893) and the explicit-solvent test suite both run in float64 --
+    JAX defaults to float32, which would silently truncate positions/box/PME
+    grid math and is NOT the configuration CLAUDE.md's dt cap was validated
+    against. Must be set before any JAX array is created.
+    """
+    global jax
+    if jax is not None:
+        return jax  # Already initialized
+    import jax as _jax
+    _jax.config.update("jax_enable_x64", True)
+    jax = _jax
+    return _jax
 
 
 def _resolve_ff_path(ff_name: str = "protein.ff14SB.xml") -> str:
@@ -557,6 +570,80 @@ def _run_openmm_comparator(pdb_path: Path, system_xml_path: Path, n_warmup_steps
     }
 
 
+def _combine_results(prolix_json_path: Path, openmm_json_path: Path) -> dict:
+    """Merge prolix and openmm benchmark results, validating consistency.
+
+    Raises RuntimeError if the runs are incompatible (different smoke modes, step
+    counts, or openmm was not on CUDA).
+    """
+    with prolix_json_path.open() as fh:
+        prolix = json.load(fh)
+    with openmm_json_path.open() as fh:
+        openmm = json.load(fh)
+
+    # Validate backend fields
+    if prolix.get("backend") != "prolix":
+        raise RuntimeError(
+            f"prolix result has unexpected backend field: {prolix.get('backend')} "
+            "(expected 'prolix'); was it created with --backend prolix?"
+        )
+    if openmm.get("backend") != "openmm":
+        raise RuntimeError(
+            f"openmm result has unexpected backend field: {openmm.get('backend')} "
+            "(expected 'openmm'); was it created with --backend openmm?"
+        )
+
+    # Validate smoke modes match
+    prolix_smoke = prolix.get("smoke", False)
+    openmm_smoke = openmm.get("smoke", False)
+    if prolix_smoke != openmm_smoke:
+        raise RuntimeError(
+            f"smoke modes do not match: prolix={prolix_smoke}, openmm={openmm_smoke} "
+            "-- both must be run with the same --smoke flag"
+        )
+
+    # Validate step counts match
+    prolix_max_steps = max(prolix.get("n_steps_list", []))
+    openmm_prod_steps = openmm.get("openmm_n_production_steps")
+    if prolix_max_steps != openmm_prod_steps:
+        raise RuntimeError(
+            f"step counts do not match: prolix max n_steps={prolix_max_steps}, "
+            f"openmm n_production_steps={openmm_prod_steps} -- both must run the same "
+            "number of steps so the ns/day comparison is apples-to-apples"
+        )
+
+    # Validate OpenMM was on CUDA
+    openmm_platform = openmm.get("openmm_platform")
+    if openmm_platform != "CUDA":
+        raise RuntimeError(
+            f"openmm platform is '{openmm_platform}', not 'CUDA' -- a CPU baseline "
+            "must never silently become the denominator. Fix: re-run with "
+            "--backend openmm in the CUDA-capable OpenMM environment"
+        )
+
+    # Compute ratio
+    prolix_ns = prolix.get("prolix_ns_per_day")
+    openmm_ns = openmm.get("openmm_ns_per_day")
+    ratio = (
+        prolix_ns / openmm_ns
+        if prolix_ns and openmm_ns and prolix_ns == prolix_ns and openmm_ns == openmm_ns
+        else float("nan")
+    )
+
+    # Merge results
+    merged = {
+        **prolix,
+        **openmm,
+        "backend": "combined",
+        "prolix_gpu_tag": prolix.get("gpu_tag"),
+        "openmm_gpu_tag": openmm.get("gpu_tag"),
+        "ratio": ratio,
+    }
+    # Remove the separate gpu_tag (ambiguous now that we have both)
+    merged.pop("gpu_tag", None)
+    return merged
+
+
 def _run_openmm_smoke_comparator(sys_data, n_warmup_steps: int, n_production_steps: int):
     """Build a matching tiny OpenMM system on the fly (no pre-built XML for the smoke
     fixture) using the SAME solvated positions/box, so the comparator exercises the
@@ -653,9 +740,51 @@ def main() -> int:
     parser.add_argument("--out", required=True)
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--smoke", action="store_true")
+    parser.add_argument(
+        "--backend", choices=["both", "prolix", "openmm"], default="both",
+        help=(
+            "Which backend to run: 'both' (default, byte-for-byte unchanged from original), "
+            "'prolix' (prolix only, openmm fields set to None), "
+            "'openmm' (openmm only, prolix fields set to None). "
+            "Use 'prolix' and 'openmm' separately with the appropriate environment "
+            "(CUDA-capable OpenMM env for 'openmm', prolix-installed env for 'prolix'), "
+            "then combine with --combine-prolix and --combine-openmm."
+        ),
+    )
+    parser.add_argument(
+        "--combine-prolix", default=None, type=Path,
+        help="Path to JSON from --backend prolix run. Must also provide --combine-openmm.",
+    )
+    parser.add_argument(
+        "--combine-openmm", default=None, type=Path,
+        help="Path to JSON from --backend openmm run. Must also provide --combine-prolix.",
+    )
     args = parser.parse_args()
 
     out = Path(args.out) if args.out != "/dev/null" else None
+
+    # Handle combine mode first (no run, just merge)
+    if args.combine_prolix or args.combine_openmm:
+        if not (args.combine_prolix and args.combine_openmm):
+            raise RuntimeError(
+                "--combine-prolix and --combine-openmm must both be provided together"
+            )
+        if not args.combine_prolix.exists():
+            raise FileNotFoundError(f"prolix result JSON not found: {args.combine_prolix}")
+        if not args.combine_openmm.exists():
+            raise FileNotFoundError(f"openmm result JSON not found: {args.combine_openmm}")
+        combined = _combine_results(args.combine_prolix, args.combine_openmm)
+        if out is not None:
+            out.write_text(json.dumps(combined, indent=2))
+        print(json.dumps(combined, indent=2))
+        return 0
+
+    # Validate that --backend is compatible with other flags
+    if args.backend == "openmm" and args.shim_mode == "analytical":
+        raise RuntimeError(
+            "--backend openmm is incompatible with --shim-mode analytical "
+            "(analytical mode does not exist in production EnsemblePlan)"
+        )
 
     if args.shim_mode == "analytical":
         # See module docstring "KNOWN BLOCKER": the production EnsemblePlan
@@ -676,28 +805,39 @@ def main() -> int:
             "Use --shim-mode autograd (the default)."
         )
 
+    # For openmm-only non-smoke mode, we don't need to resolve the force field
+    # (which would import proxide and transitively JAX). Smoke mode and prolix
+    # mode both need it.
+    need_ff_path = args.backend != "openmm" or args.smoke
+
     if args.dry_run:
-        import proxide  # noqa: F401
-        import openmm  # noqa: F401
-        from prolix.api import EnsemblePlan  # noqa: F401
-        from prolix.physics.system import make_bundle_from_system  # noqa: F401
+        if args.backend in ("prolix", "both"):
+            _init_jax()
+            import proxide  # noqa: F401
+            from prolix.api import EnsemblePlan  # noqa: F401
+            from prolix.physics.system import make_bundle_from_system  # noqa: F401
+
+        if args.backend in ("openmm", "both"):
+            import openmm  # noqa: F401
 
         for p in (DHFR_PDB, DHFR_SYSTEM_XML, SMOKE_PDB):
             if not p.exists():
                 raise FileNotFoundError(f"dry-run: expected fixture missing: {p}")
-        _resolve_ff_path()
-        result = {"dry_run": True, "shim_mode": args.shim_mode}
+        if need_ff_path:
+            _resolve_ff_path()
+        result = {"dry_run": True, "shim_mode": args.shim_mode, "backend": args.backend}
         if out is not None:
             out.write_text(json.dumps(result))
         print("dry-run ok")
         return 0
 
-    ff_path = _resolve_ff_path()
+    # Resolve force field path only if needed (prolix mode or smoke mode)
+    ff_path = _resolve_ff_path() if need_ff_path else None
 
+    # Determine which test fixtures and step lists to use
     if args.smoke:
         n_steps_list = list(_SMOKE_N_STEPS_LIST)
         pdb_path, system_xml_path = SMOKE_PDB, None
-        sys_data = _build_smoke_system_dict(ff_path)
     else:
         n_production_steps = round(args.n_production_ns * 1.0e6 / DT_FS)
         if args.n_steps_list:
@@ -705,57 +845,104 @@ def main() -> int:
         else:
             n_steps_list = sorted({*_FULL_CALIBRATION_STEPS, n_production_steps})
         pdb_path, system_xml_path = DHFR_PDB, DHFR_SYSTEM_XML
-        sys_data = _build_dhfr_system_dict(ff_path)
 
-    logger.info("shim_mode=%s smoke=%s n_steps_list=%s", args.shim_mode, args.smoke, n_steps_list)
+    logger.info("shim_mode=%s smoke=%s backend=%s n_steps_list=%s",
+                args.shim_mode, args.smoke, args.backend, n_steps_list)
 
-    prolix_result = _run_prolix_regression(sys_data, n_steps_list, args.seed)
-    logger.info(
-        "prolix: per_step=%.6e s compile_fixed=%.6e s R^2=%.4f ns_per_day=%.4f",
-        prolix_result["per_step_corrected_s"], prolix_result["compile_fixed_s"],
-        prolix_result["r_squared"], prolix_result["ns_per_day"],
-    )
-
-    # OpenMM comparator runs the SAME largest step count as the prolix sweep's
-    # top point, so the ns/day comparison is apples-to-apples against a real
-    # production-scale (or smoke-scale) run, not an extrapolated one.
-    n_production_steps_for_comparator = max(n_steps_list)
-    if args.smoke:
-        openmm_result = _run_openmm_smoke_comparator(
-            sys_data, n_warmup_steps=min(n_steps_list), n_production_steps=n_production_steps_for_comparator
+    # Run prolix if requested
+    prolix_result = None
+    if args.backend in ("prolix", "both"):
+        _init_jax()
+        if args.smoke:
+            sys_data = _build_smoke_system_dict(ff_path)
+        else:
+            sys_data = _build_dhfr_system_dict(ff_path)
+        prolix_result = _run_prolix_regression(sys_data, n_steps_list, args.seed)
+        logger.info(
+            "prolix: per_step=%.6e s compile_fixed=%.6e s R^2=%.4f ns_per_day=%.4f",
+            prolix_result["per_step_corrected_s"], prolix_result["compile_fixed_s"],
+            prolix_result["r_squared"], prolix_result["ns_per_day"],
         )
+
+    # Run OpenMM if requested
+    openmm_result = None
+    if args.backend in ("openmm", "both"):
+        # For non-smoke mode, OpenMM only needs the file paths, not the full sys_data
+        # which requires JAX. Smoke mode needs sys_data for the OpenMM system builder.
+        if args.smoke:
+            if prolix_result is None:
+                _init_jax()
+                sys_data = _build_smoke_system_dict(ff_path)
+            # else sys_data was already built above
+            n_production_steps_for_comparator = max(n_steps_list)
+            openmm_result = _run_openmm_smoke_comparator(
+                sys_data, n_warmup_steps=min(n_steps_list), n_production_steps=n_production_steps_for_comparator
+            )
+        else:
+            # Non-smoke: use the pre-built XML and PDB, no sys_data needed
+            n_production_steps_for_comparator = max(n_steps_list) if prolix_result else max([
+                round(args.n_production_ns * 1.0e6 / DT_FS)
+            ])
+            openmm_result = _run_openmm_comparator(
+                pdb_path, system_xml_path, _OPENMM_WARMUP_STEPS, n_production_steps_for_comparator,
+                prefer_cuda=True,
+            )
+        logger.info("openmm: %s", openmm_result)
+
+    # Build result dict with appropriate None values based on backend
+    if prolix_result is None:
+        result_prolix = {
+            "prolix_ns_per_day": None,
+            "per_step_corrected_s": None,
+            "compile_fixed_s": None,
+            "r_squared": None,
+            "n_atoms": None,
+            "n_steps_list": None,
+            "raw_results": None,
+        }
     else:
-        openmm_result = _run_openmm_comparator(
-            pdb_path, system_xml_path, _OPENMM_WARMUP_STEPS, n_production_steps_for_comparator,
-            prefer_cuda=True,
-        )
-    logger.info("openmm: %s", openmm_result)
+        result_prolix = {
+            "prolix_ns_per_day": prolix_result["ns_per_day"],
+            "per_step_corrected_s": prolix_result["per_step_corrected_s"],
+            "compile_fixed_s": prolix_result["compile_fixed_s"],
+            "r_squared": prolix_result["r_squared"],
+            "n_atoms": prolix_result["n_atoms"],
+            "n_steps_list": prolix_result["n_steps_list"],
+            "raw_results": prolix_result["raw_results"],
+        }
 
-    ratio = (
-        prolix_result["ns_per_day"] / openmm_result["ns_per_day"]
-        if openmm_result["ns_per_day"] and openmm_result["ns_per_day"] == openmm_result["ns_per_day"]
-        and prolix_result["ns_per_day"] == prolix_result["ns_per_day"]
-        else float("nan")
-    )
+    if openmm_result is None:
+        result_openmm = {
+            "openmm_ns_per_day": None,
+            "openmm_wallclock_s": None,
+            "openmm_platform": None,
+            "openmm_n_production_steps": None,
+        }
+    else:
+        result_openmm = {
+            "openmm_ns_per_day": openmm_result["ns_per_day"],
+            "openmm_wallclock_s": openmm_result["wallclock_s"],
+            "openmm_platform": openmm_result["platform"],
+            "openmm_n_production_steps": openmm_result["n_production_steps"],
+        }
+
+    ratio = float("nan")
+    if (prolix_result and openmm_result and
+        prolix_result["ns_per_day"] and openmm_result["ns_per_day"] and
+        prolix_result["ns_per_day"] == prolix_result["ns_per_day"] and
+        openmm_result["ns_per_day"] == openmm_result["ns_per_day"]):
+        ratio = prolix_result["ns_per_day"] / openmm_result["ns_per_day"]
 
     result = {
-        "prolix_ns_per_day": prolix_result["ns_per_day"],
-        "openmm_ns_per_day": openmm_result["ns_per_day"],
+        **result_prolix,
+        **result_openmm,
         "ratio": ratio,
         "shim_mode": args.shim_mode,
         "seed": args.seed,
         "gpu_tag": args.gpu_tag,
-        "n_atoms": prolix_result["n_atoms"],
-        "per_step_corrected_s": prolix_result["per_step_corrected_s"],
-        "compile_fixed_s": prolix_result["compile_fixed_s"],
-        "r_squared": prolix_result["r_squared"],
-        "n_steps_list": prolix_result["n_steps_list"],
-        "raw_results": prolix_result["raw_results"],
-        "openmm_wallclock_s": openmm_result["wallclock_s"],
-        "openmm_platform": openmm_result["platform"],
-        "openmm_n_production_steps": openmm_result["n_production_steps"],
         "dt_fs": DT_FS,
         "smoke": args.smoke,
+        "backend": args.backend,
     }
     if out is not None:
         out.write_text(json.dumps(result, indent=2))
