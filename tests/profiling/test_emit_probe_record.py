@@ -7,7 +7,7 @@ Cluster array 20762713: timing succeeded, then ClaimValidityError because
 from __future__ import annotations
 
 from scripts.experiments.profile_b1_flash_vs_autodiff_forces import _emit_probe_record
-from scripts.profiling.record import ProbeRecord
+from xtrax.profiling.record import ProbeRecord
 
 
 def test_emit_keeps_all_none_scopes(tmp_path):

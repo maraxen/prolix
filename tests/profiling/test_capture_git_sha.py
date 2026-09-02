@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from scripts.profiling import record as rec
+from xtrax.profiling import record as rec
 
 
 def test_capture_git_sha_from_env(monkeypatch):

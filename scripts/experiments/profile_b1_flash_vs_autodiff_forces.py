@@ -131,7 +131,7 @@ def _capture_trace(fn, trace_dir: Path) -> tuple[dict, dict[str, float]]:
 
     if str(ROOT) not in sys.path:
         sys.path.insert(0, str(ROOT))
-    from scripts.profiling.trace import parse_dispatch_counts, parse_scopes, scope_map_from_hlo_text
+    from xtrax.profiling.trace import parse_dispatch_counts, parse_scopes, scope_map_from_hlo_text
 
     hlo_text = fn.lower().compile().as_text()
     scope_map = scope_map_from_hlo_text(hlo_text, KNOWN_LABELS)
@@ -184,7 +184,7 @@ def _emit_probe_record(
 ) -> None:
     if str(ROOT) not in sys.path:
         sys.path.insert(0, str(ROOT))
-    from scripts.profiling.record import ProbeRecord
+    from xtrax.profiling.record import ProbeRecord
 
     metrics: dict[str, float] = {"total_step_seconds": _timed_seconds(results)}
     if "energy_only" in results:

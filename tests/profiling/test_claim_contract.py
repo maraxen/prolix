@@ -1,4 +1,8 @@
-"""Tests for scripts.profiling: ProbeRecord + the claim-validity contract.
+"""Tests for xtrax.profiling: ProbeRecord + the claim-validity contract.
+
+prolix consumes this package as a dependency (xtrax >= 0.4.0a7); these are
+integration checks of the contract prolix's probes rely on, not a second copy
+of xtrax's own unit tests.
 
 Assertion list mirrors .praxia/docs/specs/260817_jax-profiling-optimization-workflow.md
 section P1's Gate paragraph verbatim -- each test below is named after the
@@ -15,7 +19,7 @@ from pathlib import Path
 
 import pytest
 
-from scripts.profiling.claims import (
+from xtrax.profiling.claims import (
     CONTRACT_VERSION,
     ClaimClass,
     ClaimValidityError,
@@ -23,10 +27,7 @@ from scripts.profiling.claims import (
     paired_configs,
     select_sources,
 )
-from scripts.profiling.record import ProbeRecord, _normalize_device_kind
-
-PROFILING_PKG_DIR = Path(__file__).resolve().parents[2] / "scripts" / "profiling"
-
+from xtrax.profiling.record import ProbeRecord, _normalize_device_kind
 
 def _record(
     *,
@@ -74,38 +75,6 @@ def _end_to_end_record(n_atoms: int, **overrides) -> ProbeRecord:
     defaults = dict(metrics={"total_step_seconds": 1.0})
     defaults.update(overrides)
     return _record(stage=2, n_atoms=n_atoms, **defaults)
-
-
-# --- grep-level check: no file under scripts/profiling/ imports prolix -----
-
-
-def test_no_prolix_import_in_scripts_profiling():
-    py_files = sorted(PROFILING_PKG_DIR.rglob("*.py"))
-    assert py_files, f"expected .py files under {PROFILING_PKG_DIR}, found none"
-    for path in py_files:
-        tree = ast.parse(path.read_text(), filename=str(path))
-        for node in ast.walk(tree):
-            if isinstance(node, ast.Import):
-                names = [alias.name for alias in node.names]
-            elif isinstance(node, ast.ImportFrom):
-                if node.module is None:
-                    pytest.fail(
-                        f"{path} has a relative import (`from . import ...` "
-                        "or `from .. import ...`) with no resolvable module "
-                        "-- treated as unresolvable and therefore a failure; "
-                        "scripts/profiling/ must stay a flat, absolute-"
-                        "import-only package to remain a valid xtrax "
-                        "upstream seam"
-                    )
-                names = [node.module]
-            else:
-                continue
-            for name in names:
-                assert not name.split(".")[0] == "prolix", (
-                    f"{path} imports prolix ({name!r}) -- scripts/profiling/ "
-                    "must stay import-clean of prolix to remain a valid xtrax "
-                    "upstream seam"
-                )
 
 
 # --- ProbeRecord construction / validation ----------------------------------
