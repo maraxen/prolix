@@ -32,7 +32,22 @@
 # tests/bench/test_bench_dhfr_backend_split.py.
 
 set -uo pipefail
-cd "${SLURM_SUBMIT_DIR:-$HOME/projects/prolix}"
+# SLURM_SUBMIT_DIR is where sbatch was INVOKED, not the job cwd -- `sbatch -D`
+# sets the latter. Submitting over ssh from $HOME therefore lands outside the uv
+# project, where `uv run --extra cuda` degrades to a bare interpreter with no
+# prolix on the path (job 21804954: all three legs exit=2, file-not-found).
+# Validate each candidate instead of trusting it.
+_is_repo_root() { [[ -f "$1/pyproject.toml" ]] && [[ -d "$1/scripts/slurm" ]]; }
+if _is_repo_root "${PWD}"; then
+    _PROJ="${PWD}"
+elif [[ -n "${SLURM_SUBMIT_DIR:-}" ]] && _is_repo_root "${SLURM_SUBMIT_DIR}"; then
+    _PROJ="${SLURM_SUBMIT_DIR}"
+else
+    _PROJ="${HOME}/projects/prolix"
+fi
+_is_repo_root "${_PROJ}" || { echo "FATAL: no prolix repo root found (tried PWD=${PWD}, SLURM_SUBMIT_DIR=${SLURM_SUBMIT_DIR:-unset})" >&2; exit 1; }
+cd "${_PROJ}" || exit 1
+echo "repo root: $(pwd)"
 mkdir -p outputs/logs/slurm outputs/dhfr_parity
 echo "Host: $(hostname)  Job: ${SLURM_JOB_ID:-local}  Date: $(date -Is)"
 nvidia-smi --query-gpu=name,memory.total --format=csv,noheader | head -1
