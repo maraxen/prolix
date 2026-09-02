@@ -550,6 +550,7 @@ def energy_fn_from_bundle(
     include_nonbonded: bool = True,
     lj_switch_width: float = 0.0,
     pme_grid_points: int = 64,
+    build_dense_exclusions: bool = True,
 ) -> Callable[..., jnp.ndarray]:
     """Total energy from bundle fields (bonded + optional nonbonded via ``single_padded_energy``).
 
@@ -557,6 +558,15 @@ def energy_fn_from_bundle(
     ``lj_switch_width`` is closed over (OpenMM LJ switch; 0 disables).
     ``pme_grid_points`` sets the FFT grid resolution for PME electrostatics
     (default 64; override for comparisons against simulations run with different grids).
+
+    ``build_dense_exclusions=False`` skips the two ``(N, N)`` dense exclusion-scale
+    matrices (~4.4 GB at N=23,558, rebuilt on every call inside the jitted MD loop).
+    Only the dense direct-space branch reads them -- ``single_padded_energy``'s
+    ``neighbor is not None`` branch uses the sparse ``excl_indices``/``excl_scales_*``
+    instead (see ``batched_energy.py``: the dense reads are confined to the ``else``
+    arm). Pass ``False`` whenever this energy function will always be called with a
+    bound ``neighbor``; passing it while still using the dense path would silently
+    fall back to rebuilding the matrices per step via ``_build_dense_exclusion_scales``.
     """
     if not include_nonbonded:
         return bonded_energy_fn_from_bundle(bundle)
@@ -564,6 +574,7 @@ def energy_fn_from_bundle(
     disp_fn, _ = displacement_fn_for_bundle(bundle)
     _lj_sw = float(lj_switch_width)
     _pme_grid = int(pme_grid_points)
+    _build_dense = bool(build_dense_exclusions)
 
     def energy_fn(positions: jnp.ndarray, **kwargs: object) -> jnp.ndarray:
         # `neighbor` (debt 760's NL path, see single_padded_energy's docstring)
@@ -574,7 +585,10 @@ def energy_fn_from_bundle(
         # doesn't use).
         neighbor = kwargs.pop("neighbor", None)
         del kwargs
-        sys = physics_system_from_bundle(bundle, positions, pme_grid_points=_pme_grid)
+        sys = physics_system_from_bundle(
+            bundle, positions, pme_grid_points=_pme_grid,
+            build_dense_exclusions=_build_dense,
+        )
         e = single_padded_energy(
             sys,
             disp_fn,

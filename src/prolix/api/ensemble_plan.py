@@ -805,7 +805,16 @@ class EnsemblePlan:
             force_fn_from_bundle(bundle, flash_tile_size=tile, flash_remat=remat)
             if use_flash_forces
             else energy_fn_from_bundle(
-                bundle, lj_switch_width=lj_switch_width_from_config(nb_cfg)
+                bundle,
+                lj_switch_width=lj_switch_width_from_config(nb_cfg),
+                # When a neighbor list is bound below, single_padded_energy takes
+                # its `neighbor is not None` branch, which reads only the sparse
+                # excl_indices/excl_scales_*. The dense (N, N) exclusion matrices
+                # -- ~4.4 GB at DHFR scale, rebuilt every step -- are unreachable
+                # on that path, so skipping their construction cannot change a
+                # number. This is what made the NL path OOM at init (job 20528981)
+                # while flash, which already opted out, did not.
+                build_dense_exclusions=initial_neighbor is None,
             )
         )
         if initial_neighbor is not None:

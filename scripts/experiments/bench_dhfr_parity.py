@@ -424,18 +424,24 @@ def _run_prolix_regression(sys_data, n_steps_list, seed: int):
 
     bundle = _build_bundle_from_sys_data(sys_data)
     kT = TARGET_KELVIN * BOLTZMANN_KCAL
-    # use_flash_forces=True is required at full DHFR scale (23,558 atoms): the default
-    # dense all-pairs nonbonded path OOMs a single H200 on the very first init_fn call
-    # (job 20520003, RESOURCE_EXHAUSTED at ~4-12GiB single allocations). use_neighbor_list
-    # does NOT fix this -- EnsemblePlan._setup_integrator's one-time initial-force
-    # computation (settle_langevin's init_fn) is wired to branch only on
-    # use_flash_forces, not use_neighbor_list, so a neighbor-list stepping run still
-    # pays the dense O(N^2) cost once at init and OOMs identically (job 20528981,
-    # confirmed same failure site: settle.py init_fn's initial force call). flash_forces
-    # uses FlashMD's tiled, checkpointed kernel (force_fn_from_bundle ->
-    # single_padded_force(use_flash=True)) for BOTH init and stepping, avoiding the
-    # dense allocation entirely. Always enabling it keeps smoke and full runs on the
-    # same code path (mutually exclusive with use_neighbor_list, so only one is set).
+    # use_neighbor_list=True is the production default for this workload
+    # (_resolve_nonbonded_defaults: "NL inference+PBC, Flash trajectory+PBC"), and it
+    # is now the only path with correct asymptotics at DHFR scale. Flash evaluates all
+    # N^2 pairs with no distance cutoff at all (flash_explicit.py's tile body masks
+    # only self-pairs and padding), i.e. ~566M pair evaluations per step here, doubled
+    # again by remat's backward recompute. NL does O(N*K) with a real cutoff.
+    #
+    # This override previously read use_flash_forces=True, because the NL path OOMed a
+    # single H200 at init (job 20528981). That has two causes, both now fixed:
+    #   * the cell list silently dropped 19.6% of in-cutoff pairs (#4699), so NL had to
+    #     run with disable_cell_list=True -- brute-force O(N^2) list construction, which
+    #     threw away NL's whole asymptotic advantage;
+    #   * _setup_integrator built two dense (N, N) exclusion matrices (~4.4 GB here) that
+    #     the NL branch never reads. energy_fn_from_bundle now takes
+    #     build_dense_exclusions, and ensemble_plan passes False whenever a neighbor is
+    #     bound.
+    # NL and flash remain mutually exclusive (ensemble_plan raises if both are set), and
+    # NL requires run_mode="inference", which both legs below already use.
 
     def _block(traj) -> None:
         trajs = traj if isinstance(traj, list) else [traj]
@@ -448,7 +454,7 @@ def _run_prolix_regression(sys_data, n_steps_list, seed: int):
 
         t_first0 = time.perf_counter()
         first = plan.run(
-            n_steps=1, dt=DT_FS, kT=kT, seed=seed, gamma=GAMMA_PS, run_mode="inference", use_flash_forces=True
+            n_steps=1, dt=DT_FS, kT=kT, seed=seed, gamma=GAMMA_PS, run_mode="inference", use_neighbor_list=True
         )
         _block(first)
         t_first = time.perf_counter() - t_first0
@@ -464,7 +470,7 @@ def _run_prolix_regression(sys_data, n_steps_list, seed: int):
                 seed=seed + 1,
                 gamma=GAMMA_PS,
                 run_mode="inference",
-                use_flash_forces=True,
+                use_neighbor_list=True,
             )
             _block(last)
             t_ss = time.perf_counter() - t_ss0
