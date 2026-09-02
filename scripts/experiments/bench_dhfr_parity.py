@@ -630,17 +630,35 @@ def _combine_results(prolix_json_path: Path, openmm_json_path: Path) -> dict:
         else float("nan")
     )
 
-    # Merge results
+    # Take each field from the leg that actually produced it. A splat merge
+    # ({**prolix, **openmm}) is WRONG here: an --backend openmm result carries
+    # explicit None placeholders for every prolix-side field, so splatting it
+    # second overwrites the real prolix numbers with None and yields a valid
+    # ratio next to prolix_ns_per_day: null.
+    _PROLIX_FIELDS = (
+        "prolix_ns_per_day", "per_step_corrected_s", "compile_fixed_s",
+        "r_squared", "n_atoms", "n_steps_list", "raw_results",
+    )
+    _OPENMM_FIELDS = (
+        "openmm_ns_per_day", "openmm_wallclock_s", "openmm_platform",
+        "openmm_n_production_steps",
+    )
     merged = {
-        **prolix,
-        **openmm,
+        **{k: prolix.get(k) for k in _PROLIX_FIELDS},
+        **{k: openmm.get(k) for k in _OPENMM_FIELDS},
+        "ratio": ratio,
+        # Shared/run-identifying fields: taken from the prolix leg, having already
+        # asserted above that both legs agree on smoke mode and step count.
+        "shim_mode": prolix.get("shim_mode"),
+        "seed": prolix.get("seed"),
+        "dt_fs": prolix.get("dt_fs"),
+        "smoke": prolix.get("smoke"),
         "backend": "combined",
+        # gpu_tag is ambiguous once two runs are merged -- keep both, drop the
+        # singular key so nothing downstream reads it and gets one arbitrarily.
         "prolix_gpu_tag": prolix.get("gpu_tag"),
         "openmm_gpu_tag": openmm.get("gpu_tag"),
-        "ratio": ratio,
     }
-    # Remove the separate gpu_tag (ambiguous now that we have both)
-    merged.pop("gpu_tag", None)
     return merged
 
 
@@ -880,9 +898,14 @@ def main() -> int:
             )
         else:
             # Non-smoke: use the pre-built XML and PDB, no sys_data needed
-            n_production_steps_for_comparator = max(n_steps_list) if prolix_result else max([
-                round(args.n_production_ns * 1.0e6 / DT_FS)
-            ])
+            # max(n_steps_list) on EVERY path, not just when the prolix leg ran
+            # in-process: n_steps_list is computed above for all backends, and its
+            # max is max(*_FULL_CALIBRATION_STEPS, n_production_steps), which only
+            # coincides with round(n_production_ns * 1e6 / DT_FS) at the default
+            # --n-production-ns. Deriving it independently here made the openmm-only
+            # leg run a different step count than the prolix leg it is compared
+            # against (and ignored --n-steps-list entirely).
+            n_production_steps_for_comparator = max(n_steps_list)
             openmm_result = _run_openmm_comparator(
                 pdb_path, system_xml_path, _OPENMM_WARMUP_STEPS, n_production_steps_for_comparator,
                 prefer_cuda=True,
