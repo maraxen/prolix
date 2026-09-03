@@ -218,10 +218,10 @@ def _build_dhfr_system_dict(ff_path: str):
 
     Returns (sys_dict, positions, box_vec, water_indices, masses, exclusion_spec).
     """
-    import numpy as np
     import jax.numpy as jnp
-    from proxide import CoordFormat, OutputSpec, parse_structure
+    import numpy as np
     import proxide as proxide_mod
+    from proxide import CoordFormat, OutputSpec, parse_structure
 
     from prolix.physics.neighbor_list import ExclusionSpec
     from prolix.physics.water_models import WaterModelType, get_water_params
@@ -323,7 +323,6 @@ def _build_dhfr_system_dict(ff_path: str):
 
 def _build_smoke_system_dict(ff_path: str):
     """Solvate a small protein (1VII) for the L2 smoke fixture (same filtering as DHFR path)."""
-    import numpy as np
     import jax.numpy as jnp
     from proxide import CoordFormat, OutputSpec, parse_structure
 
@@ -420,6 +419,66 @@ def _build_bundle_from_sys_data(sys_data):
     return make_bundle_from_system(ns, boundary_condition="periodic", exclusion_spec=exclusion_spec)
 
 
+def _nl_stats_from(traj) -> dict:
+    """Neighbor-list capacity and host-side realloc count recorded by ``plan.run``.
+
+    ``EnsemblePlan._run_single_inference`` publishes these under the reserved
+    ``_nl_*`` observable keys. Absent keys mean the run was not on the NL path.
+    """
+    t = traj[0] if isinstance(traj, list) else traj
+    observables = getattr(t, "observable_values", None) or {}
+    capacity = observables.get("_nl_capacity")
+    retries = observables.get("_nl_retry_count")
+    return {
+        "nl_capacity": None if capacity is None else int(capacity),
+        "nl_retry_count": None if retries is None else int(retries),
+    }
+
+
+def _require_no_nl_retry(nl_stats: dict, n_steps: int) -> None:
+    """Fail the measurement if the neighbor list reallocated inside the timed region.
+
+    NL overflow is only detected on the host *after* the whole scan completes, so a
+    retry means the timed region contains a full discarded scan plus the retry --
+    roughly 2x the true per-step cost, which would otherwise be reported as a real
+    measurement. This is the measurement-pipeline sanity check that has to pass
+    before any number here is quotable.
+    """
+    retries = nl_stats.get("nl_retry_count")
+    if retries:
+        msg = (
+            f"neighbor list reallocated {retries}x inside the timed region at "
+            f"n_steps={n_steps}. The timing therefore includes a discarded scan "
+            "plus the retry and overstates per-step cost by roughly 2x. Fix the "
+            "capacity so the first allocation holds (see _nl_target_capacity / "
+            "compute_nl_capacity) and re-run; do not quote this number."
+        )
+        raise RuntimeError(msg)
+
+
+def _pair_counts(n_atoms: int, nl_capacity: int | None) -> dict:
+    """Candidate-pair work for the NL path against the dense/flash equivalent.
+
+    Counts *evaluated* pairs, not occupied ones: an O(N*K) kernel walks all K
+    slots per atom and masks the empty ones, exactly as the flash kernel walks all
+    N^2 and masks self-pairs and padding. Masking does not reduce FLOPs in either,
+    so the same standard has to apply to both or the comparison flatters NL.
+    """
+    dense = n_atoms * n_atoms
+    if not nl_capacity:
+        return {
+            "nl_candidate_pairs": None,
+            "dense_equivalent_pairs": dense,
+            "pair_reduction_factor": None,
+        }
+    candidate = n_atoms * nl_capacity
+    return {
+        "nl_candidate_pairs": candidate,
+        "dense_equivalent_pairs": dense,
+        "pair_reduction_factor": dense / candidate,
+    }
+
+
 def _run_prolix_regression(sys_data, n_steps_list, seed: int):
     """Time EnsemblePlan.run() across a step-count sweep and regress compile vs. compute.
 
@@ -441,8 +500,10 @@ def _run_prolix_regression(sys_data, n_steps_list, seed: int):
     # (_resolve_nonbonded_defaults: "NL inference+PBC, Flash trajectory+PBC"), and it
     # is now the only path with correct asymptotics at DHFR scale. Flash evaluates all
     # N^2 pairs with no distance cutoff at all (flash_explicit.py's tile body masks
-    # only self-pairs and padding), i.e. ~566M pair evaluations per step here, doubled
-    # again by remat's backward recompute. NL does O(N*K) with a real cutoff.
+    # only self-pairs and padding), doubled again by remat's backward recompute. NL
+    # does O(N*K) with a real cutoff. Both counts are measured and recorded per run
+    # (dense_equivalent_pairs / nl_candidate_pairs) rather than estimated in prose
+    # here, so the speedup is attributable to the pair-count drop, not asserted.
     #
     # This override previously read use_flash_forces=True, because the NL path OOMed a
     # single H200 at init (job 20528981). That has two causes, both now fixed:
@@ -462,6 +523,7 @@ def _run_prolix_regression(sys_data, n_steps_list, seed: int):
             jax.block_until_ready(t.positions)
 
     results = []
+    nl_capacity = None
     for n_steps in n_steps_list:
         plan = EnsemblePlan.from_bundle(bundle)
 
@@ -487,6 +549,12 @@ def _run_prolix_regression(sys_data, n_steps_list, seed: int):
             )
             _block(last)
             t_ss = time.perf_counter() - t_ss0
+            # Capture NL state before dropping the trajectory: a realloc inside the
+            # timed region invalidates this measurement (see _require_no_nl_retry).
+            nl_stats = _nl_stats_from(last)
+            _require_no_nl_retry(nl_stats, n_steps)
+            if nl_stats["nl_capacity"] is not None:
+                nl_capacity = nl_stats["nl_capacity"]
             del last
 
         results.append({"n_steps": n_steps, "t_first_step": t_first, "t_steady_state": t_ss})
@@ -508,24 +576,33 @@ def _run_prolix_regression(sys_data, n_steps_list, seed: int):
         logger.warning("n_steps_list had < 2 points with n_steps > 1 -- cannot fit a regression.")
 
     ns_per_day = (
-        DT_FS * 1e-6 / slope * 86400.0 if slope == slope and slope > 0 else float("nan")  # noqa: PLR0133 (NaN check)
+        DT_FS * 1e-6 / slope * 86400.0 if slope == slope and slope > 0 else float("nan")
     )
 
+    n_atoms = int(bundle.n_atoms)
     return {
         "per_step_corrected_s": slope,
         "compile_fixed_s": intercept,
         "r_squared": r_squared,
         "ns_per_day": ns_per_day,
-        "n_atoms": int(bundle.n_atoms),
+        "n_atoms": n_atoms,
         "n_steps_list": list(n_steps_list),
         "raw_results": results,
+        # Attribution: the wall-clock win has to be traceable to the drop in
+        # evaluated pairs, not to noise. nl_retry_count is 0 by construction here
+        # -- _require_no_nl_retry raises above if a realloc happened inside a
+        # timed region.
+        "nl_capacity": nl_capacity,
+        "nl_retry_count": 0,
+        **_pair_counts(n_atoms, nl_capacity),
     }
 
 
 def _run_openmm_comparator(pdb_path: Path, system_xml_path: Path, n_warmup_steps: int,
                             n_production_steps: int, prefer_cuda: bool):
     import openmm
-    from openmm import app, unit as omm_unit
+    from openmm import app
+    from openmm import unit as omm_unit
 
     with system_xml_path.open() as fh:
         omm_system = openmm.XmlSerializer.deserialize(fh.read())
@@ -638,6 +715,10 @@ def _combine_results(prolix_json_path: Path, openmm_json_path: Path) -> dict:
     _PROLIX_FIELDS = (
         "prolix_ns_per_day", "per_step_corrected_s", "compile_fixed_s",
         "r_squared", "n_atoms", "n_steps_list", "raw_results",
+        # Pair-count attribution -- these must travel with the wall-clock numbers
+        # so the speedup is readable as an algorithmic change, not as noise.
+        "nl_capacity", "nl_retry_count", "nl_candidate_pairs",
+        "dense_equivalent_pairs", "pair_reduction_factor",
     )
     _OPENMM_FIELDS = (
         "openmm_ns_per_day", "openmm_wallclock_s", "openmm_platform",
@@ -832,6 +913,7 @@ def main() -> int:
         if args.backend in ("prolix", "both"):
             _init_jax()
             import proxide  # noqa: F401
+
             from prolix.api import EnsemblePlan  # noqa: F401
             from prolix.physics.system import make_bundle_from_system  # noqa: F401
 
@@ -922,6 +1004,11 @@ def main() -> int:
             "n_atoms": None,
             "n_steps_list": None,
             "raw_results": None,
+            "nl_capacity": None,
+            "nl_retry_count": None,
+            "nl_candidate_pairs": None,
+            "dense_equivalent_pairs": None,
+            "pair_reduction_factor": None,
         }
     else:
         result_prolix = {
@@ -932,6 +1019,11 @@ def main() -> int:
             "n_atoms": prolix_result["n_atoms"],
             "n_steps_list": prolix_result["n_steps_list"],
             "raw_results": prolix_result["raw_results"],
+            "nl_capacity": prolix_result["nl_capacity"],
+            "nl_retry_count": prolix_result["nl_retry_count"],
+            "nl_candidate_pairs": prolix_result["nl_candidate_pairs"],
+            "dense_equivalent_pairs": prolix_result["dense_equivalent_pairs"],
+            "pair_reduction_factor": prolix_result["pair_reduction_factor"],
         }
 
     if openmm_result is None:
