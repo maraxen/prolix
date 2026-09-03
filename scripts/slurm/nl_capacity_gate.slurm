@@ -22,6 +22,10 @@
 #   * the two NL/flash parity suites, because changing how capacity is sized is a
 #     physics-path change, not a refactor: a larger K must not move a force or an
 #     energy. Both were green in job 21771771 and must stay green.
+#   * the benchmark's own measurement-integrity guard in test_bench_dhfr_backend_split
+#     -- that _require_no_nl_retry RAISES on a run whose neighbor list reallocated
+#     inside a timed region, checked by observing the failure rather than by
+#     asserting the happy path. These are JAX-free and cost nothing to include.
 
 set -uo pipefail
 # SLURM_SUBMIT_DIR is where sbatch was INVOKED, not the job cwd -- `sbatch -D`
@@ -60,6 +64,7 @@ uv run --extra cuda python -m pytest \
     tests/api/test_b1_stacked_neighbor_list.py \
     tests/physics/test_1vii_nl_nonbonded_parity.py \
     tests/physics/test_nl_kernel_exclusion_parity.py \
+    tests/bench/test_bench_dhfr_backend_split.py \
     -v --json-report --json-report-file="${REPORT}"
 RC=$?
 

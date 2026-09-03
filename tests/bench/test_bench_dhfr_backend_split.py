@@ -162,3 +162,50 @@ def test_combine_refuses_mislabelled_or_swapped_legs(tmp_path, prolix_backend, o
             _prolix_leg(backend=prolix_backend),
             _openmm_leg(backend=openmm_backend),
         )
+
+
+def test_require_no_nl_retry_accepts_a_clean_run():
+    """A run whose neighbor list never reallocated is a usable measurement."""
+    B._require_no_nl_retry({"nl_capacity": 768, "nl_retry_count": 0}, n_steps=5000)
+
+
+def test_require_no_nl_retry_accepts_a_non_nl_run():
+    """A flash/dense run publishes no _nl_* keys at all; that is not a failure."""
+    B._require_no_nl_retry({"nl_capacity": None, "nl_retry_count": None}, n_steps=5000)
+
+
+@pytest.mark.parametrize("retries", [1, 2, 3])
+def test_require_no_nl_retry_refuses_a_run_that_reallocated(retries):
+    """The measurement-integrity guard, checked by observing the failure.
+
+    NL overflow is only detected on the host after the whole scan completes, so a
+    realloc inside the timed region means the timing covers a full discarded scan
+    plus the retry -- roughly 2x the true per-step cost. Reporting that as a real
+    number is worse than reporting nothing, so the harness must raise. This is the
+    failure mode job 21835473 would have produced had its capacity been slightly
+    short rather than short enough to exhaust the retries and crash outright.
+    """
+    with pytest.raises(RuntimeError, match="reallocated"):
+        B._require_no_nl_retry({"nl_capacity": 542, "nl_retry_count": retries}, n_steps=5000)
+
+
+def test_pair_counts_report_the_reduction_against_the_dense_path():
+    """Pair counts must make the win attributable, and count both sides alike.
+
+    Both figures count pair slots *evaluated*, not occupied: an O(N*K) kernel walks
+    all K slots per atom and masks the empties exactly as the flash kernel walks all
+    N^2 and masks self-pairs and padding. Counting occupancy on the NL side only
+    would flatter NL by exactly the masking that costs it FLOPs anyway.
+    """
+    counts = B._pair_counts(23558, 768)
+    assert counts["dense_equivalent_pairs"] == 23558 * 23558
+    assert counts["nl_candidate_pairs"] == 23558 * 768
+    assert counts["pair_reduction_factor"] == pytest.approx(23558 / 768)
+
+
+def test_pair_counts_degrade_cleanly_without_a_neighbor_list():
+    """A flash/dense run still reports its own N^2 cost, with no NL fields invented."""
+    counts = B._pair_counts(23558, None)
+    assert counts["dense_equivalent_pairs"] == 23558 * 23558
+    assert counts["nl_candidate_pairs"] is None
+    assert counts["pair_reduction_factor"] is None
