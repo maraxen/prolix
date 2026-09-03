@@ -416,7 +416,37 @@ def _build_bundle_from_sys_data(sys_data):
         pme_alpha=PME_ALPHA,
         nonbonded_cutoff=NONBONDED_CUTOFF,
     )
-    return make_bundle_from_system(ns, boundary_condition="periodic", exclusion_spec=exclusion_spec)
+    # use_size_buckets=False: pad to exactly n_atoms, i.e. create no ghost atoms.
+    #
+    # Size bucketing exists so *heterogeneous* bundles can share a JIT key. This
+    # benchmark runs one system against one OpenMM process, so it buys nothing here
+    # and costs two ways.
+    #
+    # First, it biases the comparison against us: bucketing 23,558 atoms up to
+    # 25,000 makes prolix integrate 1,442 atoms that are not in the system OpenMM is
+    # timed on -- ~6% more work, charged to prolix's ns/day.
+    #
+    # Second, and fatally for the NL path, ghost atoms drift. They carry unit mass
+    # (masses_padded constant_values=1.0) and feel zero force, and settle_langevin's
+    # atom_mask is consulted ONLY on the no-water fallback path (and only at init),
+    # never on the SETTLE path this system takes. So every O-step gives each ghost a
+    # stochastic kick and nothing repels it from any other ghost: 1,442 free
+    # particles with no excluded volume, whose local density is unbounded over a
+    # trajectory. No neighbor-list capacity can be large enough -- job 21895491 grew
+    # 768 -> 5918 and still overflowed at n_steps=200 while n_steps=50 passed.
+    # _pad_positions_with_ghost_lattice's own docstring predicts exactly this and
+    # defers it to debt 760/772, noting the problem could not be observed until "a
+    # live, running trajectory with a real neighbor list actually exists" -- which is
+    # what this benchmark became once it moved onto the NL path.
+    #
+    # Removing the ghosts sidesteps that here; it does NOT fix it for the
+    # heterogeneous batching path, which still needs an atom_mask-aware O-step.
+    return make_bundle_from_system(
+        ns,
+        boundary_condition="periodic",
+        exclusion_spec=exclusion_spec,
+        use_size_buckets=False,
+    )
 
 
 def _nl_stats_from(traj) -> dict:
