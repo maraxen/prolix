@@ -127,6 +127,86 @@ def main() -> int:
         int(bundle.positions.shape[0]), cutoff,
     )
 
+    # Is SETTLE actually engaged? This benchmark deliberately strips water's
+    # harmonic bonds and angles because SETTLE is meant to enforce rigidity, so if
+    # SETTLE silently falls back to plain Langevin the water has NO intramolecular
+    # constraint at all and collapses immediately. _setup_integrator gates
+    # water_indices on shape_spec.has_real_water and settle_langevin itself falls
+    # back when water_indices is None or empty -- both are silent.
+    has_real_water = bool(getattr(bundle.shape_spec, "has_real_water", False))
+    wi = getattr(bundle, "water_indices", None)
+    wi_shape = None if wi is None else tuple(int(x) for x in wi.shape)
+    settle_expected = has_real_water and wi is not None and wi.shape[0] > 0
+    logger.info(
+        "SETTLE wiring: has_real_water=%s water_indices.shape=%s -> settle_expected=%s",
+        has_real_water, wi_shape, settle_expected,
+    )
+    if not settle_expected:
+        logger.error(
+            "SETTLE will NOT engage -- water has no harmonic bonds either (this "
+            "benchmark filters them), so water is entirely unconstrained."
+        )
+
+    # Nonbonded parameters on the water region. TIP3P gives hydrogens NO LJ at all
+    # (only O carries sigma/epsilon), so intermolecular H contacts are resisted by
+    # electrostatics alone. If the water charge override did not reach the bundle,
+    # H atoms are entirely non-interacting and will pass through everything --
+    # which is what a min_dist of ~0.08 A looks like. proxide's protein-only force
+    # field assigns zero charge/sigma/epsilon to HOH, so this override is load
+    # bearing, not cosmetic.
+    if wi is not None and wi.shape[0] > 0:
+        o_idx = wi[:, 0]
+        h_idx = jnp.concatenate([wi[:, 1], wi[:, 2]])
+        for label, sel in (("water_O", o_idx), ("water_H", h_idx)):
+            logger.info(
+                "%s: charge mean=%+.4f min=%+.4f max=%+.4f | sigma mean=%.4f | eps mean=%.5f",
+                label,
+                float(jnp.mean(bundle.charges[sel])),
+                float(jnp.min(bundle.charges[sel])),
+                float(jnp.max(bundle.charges[sel])),
+                float(jnp.mean(bundle.sigmas[sel])),
+                float(jnp.mean(bundle.epsilons[sel])),
+            )
+        if float(jnp.max(jnp.abs(bundle.charges[h_idx]))) == 0.0:
+            logger.error(
+                "water H charges are ALL ZERO and TIP3P H has no LJ -- hydrogens "
+                "are entirely non-interacting; interpenetration is guaranteed."
+            )
+        logger.info(
+            "net charge over all atoms: %+.4f (a neutral system should be ~0)",
+            float(jnp.sum(bundle.charges)),
+        )
+
+    # Water O-H distance is the sharpest SETTLE probe available: rigid water holds
+    # it at exactly 0.9572 A forever. If it moves at all, SETTLE is not acting.
+    # Rigid water needs THREE constraints, not two. If SETTLE pins both O-H bonds
+    # but leaves H-H free, the H-O-H angle can close with O-H staying perfect --
+    # and nothing else resists it, because the intramolecular H-H pair is
+    # nonbonded-excluded and this benchmark deliberately strips water's harmonic
+    # angle. So track H-H (TIP3P rigid = 1.5136 A) alongside O-H.
+    oh_ref = None
+    hh_ref = None
+    if wi is not None and wi.shape[0] > 0:
+        w0 = wi[0]
+        o_i, h1_i, h2_i = int(w0[0]), int(w0[1]), int(w0[2])
+        oh_ref = (o_i, h1_i)
+        hh_ref = (h1_i, h2_i)
+        d_oh = float(jnp.linalg.norm(bundle.positions[o_i] - bundle.positions[h1_i]))
+        d_hh = float(jnp.linalg.norm(bundle.positions[h1_i] - bundle.positions[h2_i]))
+        logger.info(
+            "water[0] at step 0: O-H=%.4f A (rigid 0.9572)  H-H=%.4f A (rigid 1.5136)",
+            d_oh, d_hh,
+        )
+        # Population-wide, not just water[0]: one molecule could be unrepresentative.
+        all_hh = jnp.linalg.norm(
+            bundle.positions[wi[:, 1]] - bundle.positions[wi[:, 2]], axis=-1
+        )
+        logger.info(
+            "all %d waters at step 0: H-H min=%.4f mean=%.4f max=%.4f",
+            int(wi.shape[0]), float(jnp.min(all_hh)),
+            float(jnp.mean(all_hh)), float(jnp.max(all_hh)),
+        )
+
     key, sub = jax.random.split(key)
     min_d, max_n, mean_n = _sample_geometry(
         bundle.positions, box_vec, cutoff, args.n_sample, sub
@@ -158,7 +238,32 @@ def main() -> int:
             break
 
         t = traj[0] if isinstance(traj, list) else traj
+        prev_positions = positions
         positions = t.positions[-1]
+
+        # How far did atoms actually move? At 300 K an oxygen's thermal speed is
+        # ~0.006 A/fs, so over a 20 fs chunk a few tenths of an Angstrom is normal
+        # and anything on the order of Angstroms per step means the system is far
+        # too hot -- atoms then tunnel straight through repulsive barriers in one
+        # step, which produces random close contacts and rising density while
+        # SETTLE still holds every water perfectly rigid. That is exactly the
+        # pattern observed, and displacement is the quantity that distinguishes
+        # "too hot" from "forces are wrong".
+        # MINIMUM IMAGE, mandatory. space.periodic wraps coordinates into [0, box)
+        # every step, so a raw difference reports a boundary crossing as a ~box-sized
+        # jump for an atom that actually moved a fraction of an Angstrom. Measuring
+        # it raw manufactures a spurious "the system is a million degrees" result.
+        # This caps the measurable displacement at box/2, which is fine: any real
+        # per-chunk motion above that is already unphysical.
+        raw = positions - prev_positions
+        d_vec = raw - box_vec[None, :] * jnp.round(raw / box_vec[None, :])
+        disp = jnp.linalg.norm(d_vec, axis=-1)
+        d_max = float(jnp.max(disp))
+        d_mean = float(jnp.mean(disp))
+        logger.info(
+            "step=%d displacement over %d steps: max=%.3f A mean=%.3f A (%.4f A/step mean)",
+            step, args.chunk_steps, d_max, d_mean, d_mean / max(args.chunk_steps, 1),
+        )
         finite = bool(jnp.all(jnp.isfinite(positions)))
         if not finite:
             logger.error("step=%d NON-FINITE positions -- trajectory diverged", step)
@@ -168,13 +273,26 @@ def main() -> int:
 
         key, sub = jax.random.split(key)
         min_d, max_n, mean_n = _sample_geometry(positions, box_vec, cutoff, args.n_sample, sub)
+        oh = hh = hh_min = None
+        if oh_ref is not None:
+            oh = float(jnp.linalg.norm(positions[oh_ref[0]] - positions[oh_ref[1]]))
+        if hh_ref is not None:
+            hh = float(jnp.linalg.norm(positions[hh_ref[0]] - positions[hh_ref[1]]))
+            hh_min = float(jnp.min(jnp.linalg.norm(
+                positions[wi[:, 1]] - positions[wi[:, 2]], axis=-1
+            )))
         logger.info(
-            "step=%d finite=True min_dist=%.3f max_neighbors=%d mean_neighbors=%.1f",
+            "step=%d finite=True min_dist=%.3f max_neighbors=%d mean_neighbors=%.1f "
+            "oh=%s hh=%s hh_min_all=%s",
             step, min_d, max_n, mean_n,
+            "n/a" if oh is None else f"{oh:.4f}",
+            "n/a" if hh is None else f"{hh:.4f}",
+            "n/a" if hh_min is None else f"{hh_min:.4f}",
         )
         rows.append({
             "step": step, "finite": True, "min_dist": min_d,
             "max_neighbors": max_n, "mean_neighbors": mean_n,
+            "water0_oh": oh, "water0_hh": hh, "hh_min_all": hh_min,
         })
 
     result = {
