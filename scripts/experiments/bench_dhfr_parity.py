@@ -486,6 +486,34 @@ def _require_no_nl_retry(nl_stats: dict, n_steps: int) -> None:
         raise RuntimeError(msg)
 
 
+def _require_finite_positions(traj, n_steps: int) -> None:
+    """Fail the measurement if the trajectory went non-finite.
+
+    Nothing else in this harness checks. ``_block()`` only waits on the array, so a
+    run that produced NaN positions still yields a perfectly plausible wall-clock
+    number -- and timing a diverged trajectory measures nothing.
+
+    NaN also *masquerades* as a neighbor-list capacity problem: jax_md bins on
+    ``position / cell_size`` cast to int32, so a non-finite coordinate produces a
+    garbage cell index and atoms can collapse into a single cell, which surfaces as
+    an overflow rather than as the divergence it actually is. Check finiteness
+    first, so the diagnosis is not made at the wrong layer.
+    """
+    import jax.numpy as jnp
+
+    trajs = traj if isinstance(traj, list) else [traj]
+    for t in trajs:
+        if not bool(jnp.all(jnp.isfinite(t.positions))):
+            n_bad = int(jnp.sum(~jnp.isfinite(t.positions)))
+            msg = (
+                f"trajectory went non-finite at n_steps={n_steps}: {n_bad} "
+                "non-finite position components. The run diverged, so its "
+                "wall-clock time measures nothing and must not be reported. "
+                "Investigate the force path before trusting any timing from it."
+            )
+            raise RuntimeError(msg)
+
+
 def _pair_counts(n_atoms: int, nl_capacity: int | None) -> dict:
     """Candidate-pair work for the NL path against the dense/flash equivalent.
 
@@ -563,6 +591,7 @@ def _run_prolix_regression(sys_data, n_steps_list, seed: int):
         )
         _block(first)
         t_first = time.perf_counter() - t_first0
+        _require_finite_positions(first, 1)
         del first
 
         t_ss = 0.0
@@ -582,6 +611,10 @@ def _run_prolix_regression(sys_data, n_steps_list, seed: int):
             # Capture NL state before dropping the trajectory: a realloc inside the
             # timed region invalidates this measurement (see _require_no_nl_retry).
             nl_stats = _nl_stats_from(last)
+            # Finiteness first: a diverged trajectory can surface as a neighbor-list
+            # overflow (see _require_finite_positions), so checking capacity first
+            # would diagnose it at the wrong layer.
+            _require_finite_positions(last, n_steps)
             _require_no_nl_retry(nl_stats, n_steps)
             if nl_stats["nl_capacity"] is not None:
                 nl_capacity = nl_stats["nl_capacity"]
