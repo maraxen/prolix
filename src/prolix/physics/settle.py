@@ -22,8 +22,6 @@ import jax.numpy as jnp
 from jax import random
 from jax_md import quantity, simulate
 
-from prolix.tiling.axis_dispatch import dispatch_n_waters
-
 from prolix.physics import (
   md_potential_bundle,
   rigid_water_ke,
@@ -41,6 +39,7 @@ from prolix.physics import (
   units as units_module,
 )
 from prolix.physics.constraints import project_momenta, project_positions
+from prolix.tiling.axis_dispatch import dispatch_n_waters
 from prolix.typing import NPTState, NVTLangevinState, WaterIndices, WaterIndicesArray
 
 if TYPE_CHECKING:

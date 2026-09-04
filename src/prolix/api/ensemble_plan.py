@@ -817,6 +817,7 @@ class EnsemblePlan:
             force_fn_from_bundle,
             masses_for_bundle,
             masses_with_prefix,
+            pbc_box_for_bundle,
             positions_with_prefix,
             water_indices_for_integration,
         )
@@ -913,6 +914,15 @@ class EnsemblePlan:
             project_ou_momentum_rigid=True,
             water_mask=water_mask,
             atom_mask=atom_mask,
+            # #4971: this MUST come from the same predicate as the shift_fn above.
+            # settle_langevin's `box` defaults to None, and every PBC protection in
+            # settle.py is gated on it being non-None -- the per-atom unwrap, both
+            # minimum-image corrections on the SETTLE displacement, and the
+            # post-solve re-wrap. Omitting it while shift_fn wraps atoms into
+            # [0, box) leaves water molecules straddling a face permanently split
+            # between two images, and SETTLE then fits a rigid body to an object up
+            # to a box across and launches it.
+            box=pbc_box_for_bundle(bundle),
             # use_flash_forces=True means energy_or_force_fn is
             # force_fn_from_bundle's already-force-shaped output -- tell
             # settle_langevin so it skips jax_md.quantity.canonicalize_force's

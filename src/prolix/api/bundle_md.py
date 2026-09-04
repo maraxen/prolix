@@ -148,13 +148,42 @@ def as_integration_scalars(
     )
 
 
+def pbc_box_for_bundle(bundle: MolecularBundle) -> jnp.ndarray | None:
+    """The box vector a bundle is periodic in, or ``None`` if it is not periodic.
+
+    Single source of truth for "is this bundle periodic, and in what box". Every
+    consumer that needs to know must ask here, because the answer has to be the same
+    everywhere at once.
+
+    #4971 is what happens when it is not. ``displacement_fn_for_bundle`` below said
+    "periodic" and handed back a ``shift_fn`` that wraps every atom independently into
+    [0, box), while ``EnsemblePlan`` passed no box to ``settle_langevin`` at all --
+    whose ``box`` parameter defaults to ``None``. That silently disabled *every* PBC
+    protection in ``settle.py``: the per-atom unwrap against the previous position,
+    both minimum-image corrections on the SETTLE displacement, and the post-solve
+    re-wrap. Water molecules straddling a box face were split by the wrap and never
+    made whole again, so SETTLE fitted a rigid body to an object up to a box across
+    and launched it -- exactly the "spurious ~box-sized impulse that detonates the
+    integrator at liquid density" that settle.py's own comment warns about.
+
+    Measured on DHFR (23558 atoms, job 21969535): 1011 atoms, exactly 3 x 337 whole
+    molecules, displaced 8-9 A in one step from rest with normal forces and the
+    thermostat off; water fraction among them 1.0000 against a system baseline of
+    0.8943, and nothing at all displaced between 0.01 and 1 A. A binary outcome,
+    because being split is itself binary.
+    """
+    spec = bundle.shape_spec
+    if spec.boundary_condition == "periodic" and spec.has_pbc:
+        return jnp.diag(bundle.box)
+    return None
+
+
 def displacement_fn_for_bundle(
     bundle: MolecularBundle,
 ) -> tuple[space.DisplacementFn, space.ShiftFn]:
     """Reconstruct JAX-MD displacement and shift from bundle shape_spec."""
-    spec = bundle.shape_spec
-    if spec.boundary_condition == "periodic" and spec.has_pbc:
-        box_vec = jnp.diag(bundle.box)
+    box_vec = pbc_box_for_bundle(bundle)
+    if box_vec is not None:
         return space.periodic(box_vec)
     return space.free()
 
