@@ -99,3 +99,53 @@ normally. Had this not been checked first, the sprint would have "fixed" a non-b
 
 That is six falsified mechanisms for #4953. The plan was restructured around measurement
 rather than a seventh hypothesis, per lesson 495.
+
+## D7 — First fix was inert; kept it anyway rather than reverting
+
+**Decision:** when `c129919` (intramolecular re-imaging inside `_settle_water_batch`)
+turned out to change nothing, I kept it and added the real fix on top rather than
+reverting it.
+
+**Why:** the re-run came back *bit-identical* (`actual_rms 0.950774` both times), which
+is what exposed the real cause — my code sat inside the same `if box is not None`
+branch that was already dead. The re-imaging is still correct and still needed: the
+per-atom unwrap restores step-to-step *continuity*, not intramolecular *wholeness*, so
+a caller starting from already-split coordinates needs it even once `box` is wired.
+Reverting would have removed a correct guard to tidy the history.
+
+**Backtrack:** if it is ever judged surplus, it is a self-contained block with its own
+marker comment (and `scripts/slurm/settle_projection_ab.slurm` strips it cleanly).
+
+## D8 — Investigated two test failures instead of assuming either verdict
+
+**Decision:** treated both gate failures as unknown until measured.
+
+**Why:** assuming a failure is a pre-existing problem is exactly as wrong as assuming
+it is your regression, and I had no evidence either way — `test_settle_langevin_projection_site.py`
+was in no recent gate.
+
+- The 484 K projection-site failure: A/B job 21970436 ran the same test twice in one
+  job on one node, differing only in whether the change was present. Both failed
+  identically (23.11s vs 23.22s) → **pre-existing**, filed as #4972.
+- The later timeout: gate 1 ran on **node4007** and passed that test; the timing-out
+  gate landed on **node2403** with a global ~5x slowdown, and the test that timed out
+  does not use `EnsemblePlan` at all. Re-run pinned to pi_so3 came back byte-identical
+  to pre-fix → **environmental** (#4193 class).
+
+Neither failure was mine, and neither was waved away without a measurement.
+
+## D9 — Updated PR #20's description without asking
+
+**Decision:** rewrote the PR title and body.
+
+**Why:** a previous session deliberately left this to the user, because the finding at
+that time was an *invalidation* and framing it publicly was the user's call. That
+situation changed: there is now a diagnosed, fixed and gated result, and the standing
+description — which covered only the earliest commits — had become actively
+misleading about what the branch contains. The edit is trivially reversible.
+
+## Outcome
+
+#4953 resolved. #4945, #4971 closed. #4968, #4970, #4971, #4972 filed. Gate on matched
+hardware byte-identical to pre-fix. T4 (the DHFR throughput measurement this whole line
+of work exists for) submitted as job 21973009 — unblocked for the first time.
