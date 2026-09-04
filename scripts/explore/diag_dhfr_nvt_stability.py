@@ -98,7 +98,7 @@ def main() -> int:
 
     logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 
-    import bench_dhfr_parity as B
+    import bench_dhfr_parity as B  # noqa: N812  (matches tests/bench/test_bench_dhfr_backend_split.py)
 
     B._init_jax()
     import jax
@@ -207,6 +207,30 @@ def main() -> int:
             float(jnp.mean(all_hh)), float(jnp.max(all_hh)),
         )
 
+    def _potential(pos):
+        """Potential energy (kcal/mol) at one configuration, via the NL+PME path.
+
+        Added after the box fix (#4953, commit 61de3d2). Geometry alone cannot say
+        whether a trajectory is being *heated* or merely rearranged: min_dist reports
+        that something collapsed, not how much energy went in. OpenMM's own run on
+        this fixture holds PE in a narrow band (-73104 -> -76276 kcal/mol over 100
+        steps while warming 0 -> 258 K), so a prolix PE that climbs instead is direct
+        evidence of injection, and its rate says how fast.
+        """
+        from prolix.api.bundle_md import energy_fn_from_bundle
+        from prolix.physics import neighbor_list as _nl
+        from prolix.physics.pbc import create_periodic_space
+
+        try:
+            efn = energy_fn_from_bundle(dataclasses.replace(bundle, positions=pos))
+            disp, _ = create_periodic_space(box_vec)
+            nfn = _nl.make_neighbor_list_fn(disp, box_vec, float(bundle.cutoff_distance))
+            nbr = nfn.update(pos, nfn.allocate(pos))
+            return float(efn(pos, neighbor=nbr))
+        except Exception as exc:  # a probe must never kill the run it is observing
+            logger.warning("potential probe failed: %s: %s", type(exc).__name__, exc)
+            return None
+
     key, sub = jax.random.split(key)
     min_d, max_n, mean_n = _sample_geometry(
         bundle.positions, box_vec, cutoff, args.n_sample, sub
@@ -215,9 +239,11 @@ def main() -> int:
         "step=0 finite=True min_dist=%.3f max_neighbors=%d mean_neighbors=%.1f",
         min_d, max_n, mean_n,
     )
+    pe0 = _potential(bundle.positions)
+    logger.info("step=0 potential=%s kcal/mol", "n/a" if pe0 is None else f"{pe0:.1f}")
     rows = [{
         "step": 0, "finite": True, "min_dist": min_d,
-        "max_neighbors": max_n, "mean_neighbors": mean_n,
+        "max_neighbors": max_n, "mean_neighbors": mean_n, "potential_kcal": pe0,
     }]
 
     positions = bundle.positions
@@ -289,10 +315,14 @@ def main() -> int:
             "n/a" if hh is None else f"{hh:.4f}",
             "n/a" if hh_min is None else f"{hh_min:.4f}",
         )
+        pe = _potential(positions)
+        logger.info("step=%d potential=%s kcal/mol", step, "n/a" if pe is None else f"{pe:.1f}")
         rows.append({
             "step": step, "finite": True, "min_dist": min_d,
             "max_neighbors": max_n, "mean_neighbors": mean_n,
             "water0_oh": oh, "water0_hh": hh, "hh_min_all": hh_min,
+            "potential_kcal": pe,
+            "disp_max": d_max, "disp_mean_per_step": d_mean / max(args.chunk_steps, 1),
         })
 
     result = {
