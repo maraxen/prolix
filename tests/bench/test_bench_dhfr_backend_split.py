@@ -29,7 +29,7 @@ _EXP = _ROOT / "scripts" / "experiments"
 if str(_EXP) not in sys.path:
     sys.path.insert(0, str(_EXP))
 
-import bench_dhfr_parity as B  # noqa: E402
+import bench_dhfr_parity as B  # noqa: E402, N812
 
 
 def _prolix_leg(**over):
@@ -209,3 +209,49 @@ def test_pair_counts_degrade_cleanly_without_a_neighbor_list():
     assert counts["dense_equivalent_pairs"] == 23558 * 23558
     assert counts["nl_candidate_pairs"] is None
     assert counts["pair_reduction_factor"] is None
+
+
+class TestDhfrBoxResolution:
+    """#4953: the box must come from the OpenMM System, never from CRYST1.
+
+    The DHFR fixture carries two disagreeing box records, and preferring the wrong one
+    is not a rounding nuisance -- its coordinates are unwrapped across roughly four box
+    lengths, so a 0.585 A error in the fold manufactures atomic clashes. Measured with
+    OpenMM alone, same coordinates, box the only variable:
+
+        61.6447 A (System)  ->  PE =  -73104.0 kcal/mol,  F_rms =   25.05
+        62.230  A (CRYST1)  ->  PE = +198340.2 kcal/mol,  F_rms = 4158.22
+
+    The second is what prolix integrated for the entire life of this benchmark. These
+    tests are pure XML/text parsing -- no JAX, no OpenMM, no GPU.
+    """
+
+    def test_the_two_box_records_really_do_disagree(self):
+        """Guards the premise. If this ever fails the fixture was regenerated."""
+        cryst1 = B._read_cryst1_box_edge(B.DHFR_PDB)
+        system = B._read_system_xml_box_edge(B.DHFR_SYSTEM_XML)
+        assert abs(cryst1 - system) > 0.5, (
+            f"CRYST1 ({cryst1}) and System XML ({system}) now agree. If the fixture was "
+            "regenerated that is good news -- retire this test and the warning in "
+            "_resolve_dhfr_box_edge rather than loosening the threshold."
+        )
+
+    def test_system_xml_box_is_read_in_angstrom(self):
+        """The XML stores nm; everything downstream of it is Angstrom."""
+        assert B._read_system_xml_box_edge(B.DHFR_SYSTEM_XML) == pytest.approx(61.6447, abs=1e-3)
+
+    def test_resolver_prefers_the_system_over_cryst1(self):
+        """The actual regression: the resolver must not return the CRYST1 value."""
+        resolved = B._resolve_dhfr_box_edge(B.DHFR_PDB, B.DHFR_SYSTEM_XML)
+        assert resolved == pytest.approx(B._read_system_xml_box_edge(B.DHFR_SYSTEM_XML))
+        assert resolved != pytest.approx(B._read_cryst1_box_edge(B.DHFR_PDB), abs=1e-3)
+
+    def test_resolver_warns_loudly_when_the_records_disagree(self, caplog):
+        """A silent preference would leave the next reader as blind as the last one."""
+        import logging
+
+        with caplog.at_level(logging.WARNING):
+            B._resolve_dhfr_box_edge(B.DHFR_PDB, B.DHFR_SYSTEM_XML)
+        assert any("DISAGREE" in r.message for r in caplog.records), (
+            f"expected a loud box-mismatch warning, got: {[r.message for r in caplog.records]}"
+        )

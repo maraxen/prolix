@@ -178,7 +178,12 @@ def _resolve_ff_path(ff_name: str = "protein.ff14SB.xml") -> str:
 
 
 def _read_cryst1_box_edge(pdb_path: Path) -> float:
-    """Read a cubic box edge length (Å) from a PDB's CRYST1 record."""
+    """Read a cubic box edge length (Å) from a PDB's CRYST1 record.
+
+    NOTE: for this fixture the CRYST1 record is NOT authoritative -- it disagrees with
+    the serialized OpenMM System by 0.585 Å. Use ``_resolve_dhfr_box_edge``, which
+    prefers the System. See #4953.
+    """
     with pdb_path.open() as fh:
         for line in fh:
             if line.startswith("CRYST1"):
@@ -187,6 +192,77 @@ def _read_cryst1_box_edge(pdb_path: Path) -> float:
                     raise ValueError(f"Expected cubic box in {pdb_path}, got a={a} b={b} c={c}")
                 return a
     raise ValueError(f"No CRYST1 record found in {pdb_path}")
+
+
+def _read_system_xml_box_edge(xml_path: Path) -> float:
+    """Cubic box edge (Å) from a serialized OpenMM System's default periodic box.
+
+    Parsed with ElementTree rather than ``XmlSerializer`` so the prolix leg does not
+    acquire an OpenMM import just to learn its box size. The element is plain nm:
+
+        <PeriodicBoxVectors><A x="6.164472315757705" y="0" z="0"/> ...
+    """
+    import xml.etree.ElementTree as ET
+
+    root = ET.parse(xml_path).getroot()  # noqa: S314  (repo-local fixture we ship, not untrusted input)
+    node = root.find(".//PeriodicBoxVectors")
+    if node is None:
+        raise ValueError(f"No PeriodicBoxVectors element in {xml_path}")
+    edges_nm = [
+        float(node.find(axis).get(comp))
+        for axis, comp in (("A", "x"), ("B", "y"), ("C", "z"))
+    ]
+    a, b, c = (e * 10.0 for e in edges_nm)  # nm -> Angstrom
+    if not (abs(a - b) < 1e-6 and abs(b - c) < 1e-6):
+        raise ValueError(f"Expected cubic box in {xml_path}, got a={a} b={b} c={c}")
+    return a
+
+
+def _resolve_dhfr_box_edge(pdb_path: Path, xml_path: Path) -> float:
+    """The box edge to simulate with (Å), taken from the OpenMM System, not CRYST1.
+
+    #4953: this benchmark read its box from the PDB's CRYST1 record (62.230 Å) while
+    the system OpenMM actually integrates is 61.6447 Å -- a 0.95% disagreement. That
+    is not a rounding nuisance, because the fixture's coordinates are **unwrapped**:
+    they span roughly -87 Å to +144 Å, about four box lengths. Minimum-image folding
+    with a box that is 0.585 Å too large therefore misplaces distant atoms by several
+    Å, which manufactures atomic clashes out of a perfectly good configuration.
+
+    Measured, same engine and same coordinates, box the only variable:
+
+        61.6447 Å (System)  ->  PE =  -73104.0 kcal/mol,  F_rms =   25.05
+        62.230  Å (CRYST1)  ->  PE = +198340.2 kcal/mol,  F_rms = 4158.22
+
+    The second is the configuration prolix has been integrating, and it explains #4953
+    entirely: forces ~166x too large, on both force paths (the box is upstream of the
+    kernel choice), with SETTLE still holding water rigid and a smaller dt merely
+    slowing the divergence rather than curing it. prolix's own forces were never wrong
+    -- job 21967097 puts them within 0.065% of OpenMM's on identical input.
+
+    The System is authoritative because it is what the comparator integrates. The
+    CRYST1 disagreement is reported loudly rather than silently preferred away: a
+    fixture whose two box records disagree is a defect in the fixture (see the
+    regeneration item filed against scripts/data_prep/fetch_dhfr_benchmark.py).
+    """
+    box_edge = _read_system_xml_box_edge(xml_path)
+    try:
+        cryst1 = _read_cryst1_box_edge(pdb_path)
+    except ValueError:
+        logger.warning("No usable CRYST1 record in %s; using System box %.6f Å", pdb_path, box_edge)
+        return box_edge
+
+    if abs(cryst1 - box_edge) > 1e-3:
+        logger.warning(
+            "DHFR fixture box records DISAGREE: CRYST1=%.6f Å vs System XML=%.6f Å "
+            "(%.3f Å, %.3f%%). Using the System value -- it is what OpenMM integrates. "
+            "Preferring CRYST1 here is #4953: with this fixture's unwrapped coordinates "
+            "it inflates forces ~166x and the trajectory explodes.",
+            cryst1,
+            box_edge,
+            abs(cryst1 - box_edge),
+            100.0 * abs(cryst1 - box_edge) / box_edge,
+        )
+    return box_edge
 
 
 def _filter_bonded_to_range(idx, params, n_keep_below: int):
@@ -312,7 +388,10 @@ def _build_dhfr_system_dict(ff_path: str):
         "improper_params": jnp.asarray(improper_params) if improper_params is not None else jnp.zeros((0, 4, 3)),
     }
 
-    box_edge = _read_cryst1_box_edge(DHFR_PDB)
+    # #4953: the System XML is authoritative, NOT CRYST1 -- they disagree by 0.585 Å
+    # and, with this fixture's unwrapped coordinates, that gap is what blew up every
+    # trajectory this benchmark ever timed. See _resolve_dhfr_box_edge.
+    box_edge = _resolve_dhfr_box_edge(DHFR_PDB, DHFR_SYSTEM_XML)
     box_vec = jnp.array([box_edge, box_edge, box_edge], dtype=jnp.float64)
     positions = jnp.asarray(np.asarray(protein.coordinates), dtype=jnp.float64)
     from prolix.physics.settle import get_water_indices
