@@ -142,7 +142,42 @@ def main() -> int:
         logger.info("  mass %7.3f  n=%6d  ratio_median=%.6g  (ratio*m=%.4g  ratio/m=%.4g)",
                     m, int(sel.sum()), r, r * m, r / m)
 
+    # WHICH atoms are launched? The by-mass medians are all sane (C/N/S land exactly
+    # on 1.000) while actual_rms/expected_rms is ~313, so the damage is a heavy tail,
+    # not a uniform scale error. Locating that tail is the whole question: water atoms
+    # would implicate SETTLE, protein atoms would implicate the bonded/constraint path.
+    n_prot = int(sys_data[6])
+    is_water = np.arange(n_atoms) >= n_prot
+    order = np.argsort(-a_norm)
+    worst = []
+    for i in order[:20]:
+        worst.append({
+            "index": int(i), "mass": float(mass[i]), "is_water": bool(is_water[i]),
+            "disp": float(a_norm[i]), "expected": float(e_norm[i]),
+            "force_norm": float(np.linalg.norm(force[i])),
+        })
+    logger.info("--- 20 largest displacements ---")
+    for w in worst:
+        logger.info(
+            "  idx=%6d m=%6.3f water=%-5s disp=%10.4f A  expected=%.3e  |F|=%9.3f",
+            w["index"], w["mass"], w["is_water"], w["disp"], w["expected"], w["force_norm"],
+        )
+
+    for thresh in (0.01, 0.1, 1.0):
+        sel = a_norm > thresh
+        frac_water = float(is_water[sel].mean()) if sel.sum() else float("nan")
+        logger.info(
+            "atoms with disp > %5.2f A: n=%6d (%.3f%% of system), water fraction=%.4f "
+            "(system water fraction=%.4f)",
+            thresh, int(sel.sum()), 100.0 * sel.mean(), frac_water, float(is_water.mean()),
+        )
+
     report = {
+        "n_protein_atoms": n_prot,
+        "worst_20": worst,
+        "frac_water_over_0p1A": float(is_water[a_norm > 0.1].mean())
+        if (a_norm > 0.1).sum() else None,
+        "n_over_0p1A": int((a_norm > 0.1).sum()),
         "task": "260903_dhfr_divergence_parity", "issue": 4953,
         "force_path": args.force_path, "dt_fs": args.dt, "steps": args.steps,
         "n_atoms": n_atoms, "energy0_kcal": float(e0),
