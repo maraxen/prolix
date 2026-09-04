@@ -107,14 +107,9 @@ import numpy as np
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
-# The validated dt=1.0 fs production configuration (gate jobs 15870804 /
-# 19774893) and the explicit-solvent test suite both run in float64 --
-# JAX defaults to float32, which would silently truncate positions/box/PME
-# grid math and is NOT the configuration CLAUDE.md's dt cap was validated
-# against. Must be set before any JAX array is created.
-import jax  # noqa: E402
-
-jax.config.update("jax_enable_x64", True)
+# Lazy JAX initialization moved to _init_jax() helper to allow running
+# OpenMM without JAX import (the CUDA-capable OpenMM env has no JAX/prolix).
+jax = None
 
 DATA_DIR = ROOT / "data" / "pdb"
 DHFR_PDB = DATA_DIR / "dhfr_jac_benchmark.pdb"
@@ -153,6 +148,24 @@ logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 logger = logging.getLogger(__name__)
 
 
+def _init_jax():
+    """Import JAX and enable float64. MUST run before any JAX array is created.
+
+    The validated dt=1.0 fs production configuration (gate jobs 15870804 /
+    19774893) and the explicit-solvent test suite both run in float64 --
+    JAX defaults to float32, which would silently truncate positions/box/PME
+    grid math and is NOT the configuration CLAUDE.md's dt cap was validated
+    against. Must be set before any JAX array is created.
+    """
+    global jax
+    if jax is not None:
+        return jax  # Already initialized
+    import jax as _jax
+    _jax.config.update("jax_enable_x64", True)
+    jax = _jax
+    return _jax
+
+
 def _resolve_ff_path(ff_name: str = "protein.ff14SB.xml") -> str:
     """Resolve a bundled proxide force-field XML by name (see scripts/benchmarks/_b1_paramize.py)."""
     import proxide
@@ -165,7 +178,12 @@ def _resolve_ff_path(ff_name: str = "protein.ff14SB.xml") -> str:
 
 
 def _read_cryst1_box_edge(pdb_path: Path) -> float:
-    """Read a cubic box edge length (Å) from a PDB's CRYST1 record."""
+    """Read a cubic box edge length (Å) from a PDB's CRYST1 record.
+
+    NOTE: for this fixture the CRYST1 record is NOT authoritative -- it disagrees with
+    the serialized OpenMM System by 0.585 Å. Use ``_resolve_dhfr_box_edge``, which
+    prefers the System. See #4953.
+    """
     with pdb_path.open() as fh:
         for line in fh:
             if line.startswith("CRYST1"):
@@ -174,6 +192,77 @@ def _read_cryst1_box_edge(pdb_path: Path) -> float:
                     raise ValueError(f"Expected cubic box in {pdb_path}, got a={a} b={b} c={c}")
                 return a
     raise ValueError(f"No CRYST1 record found in {pdb_path}")
+
+
+def _read_system_xml_box_edge(xml_path: Path) -> float:
+    """Cubic box edge (Å) from a serialized OpenMM System's default periodic box.
+
+    Parsed with ElementTree rather than ``XmlSerializer`` so the prolix leg does not
+    acquire an OpenMM import just to learn its box size. The element is plain nm:
+
+        <PeriodicBoxVectors><A x="6.164472315757705" y="0" z="0"/> ...
+    """
+    import xml.etree.ElementTree as ET
+
+    root = ET.parse(xml_path).getroot()  # noqa: S314  (repo-local fixture we ship, not untrusted input)
+    node = root.find(".//PeriodicBoxVectors")
+    if node is None:
+        raise ValueError(f"No PeriodicBoxVectors element in {xml_path}")
+    edges_nm = [
+        float(node.find(axis).get(comp))
+        for axis, comp in (("A", "x"), ("B", "y"), ("C", "z"))
+    ]
+    a, b, c = (e * 10.0 for e in edges_nm)  # nm -> Angstrom
+    if not (abs(a - b) < 1e-6 and abs(b - c) < 1e-6):
+        raise ValueError(f"Expected cubic box in {xml_path}, got a={a} b={b} c={c}")
+    return a
+
+
+def _resolve_dhfr_box_edge(pdb_path: Path, xml_path: Path) -> float:
+    """The box edge to simulate with (Å), taken from the OpenMM System, not CRYST1.
+
+    #4953: this benchmark read its box from the PDB's CRYST1 record (62.230 Å) while
+    the system OpenMM actually integrates is 61.6447 Å -- a 0.95% disagreement. That
+    is not a rounding nuisance, because the fixture's coordinates are **unwrapped**:
+    they span roughly -87 Å to +144 Å, about four box lengths. Minimum-image folding
+    with a box that is 0.585 Å too large therefore misplaces distant atoms by several
+    Å, which manufactures atomic clashes out of a perfectly good configuration.
+
+    Measured, same engine and same coordinates, box the only variable:
+
+        61.6447 Å (System)  ->  PE =  -73104.0 kcal/mol,  F_rms =   25.05
+        62.230  Å (CRYST1)  ->  PE = +198340.2 kcal/mol,  F_rms = 4158.22
+
+    The second is the configuration prolix has been integrating, and it explains #4953
+    entirely: forces ~166x too large, on both force paths (the box is upstream of the
+    kernel choice), with SETTLE still holding water rigid and a smaller dt merely
+    slowing the divergence rather than curing it. prolix's own forces were never wrong
+    -- job 21967097 puts them within 0.065% of OpenMM's on identical input.
+
+    The System is authoritative because it is what the comparator integrates. The
+    CRYST1 disagreement is reported loudly rather than silently preferred away: a
+    fixture whose two box records disagree is a defect in the fixture (see the
+    regeneration item filed against scripts/data_prep/fetch_dhfr_benchmark.py).
+    """
+    box_edge = _read_system_xml_box_edge(xml_path)
+    try:
+        cryst1 = _read_cryst1_box_edge(pdb_path)
+    except ValueError:
+        logger.warning("No usable CRYST1 record in %s; using System box %.6f Å", pdb_path, box_edge)
+        return box_edge
+
+    if abs(cryst1 - box_edge) > 1e-3:
+        logger.warning(
+            "DHFR fixture box records DISAGREE: CRYST1=%.6f Å vs System XML=%.6f Å "
+            "(%.3f Å, %.3f%%). Using the System value -- it is what OpenMM integrates. "
+            "Preferring CRYST1 here is #4953: with this fixture's unwrapped coordinates "
+            "it inflates forces ~166x and the trajectory explodes.",
+            cryst1,
+            box_edge,
+            abs(cryst1 - box_edge),
+            100.0 * abs(cryst1 - box_edge) / box_edge,
+        )
+    return box_edge
 
 
 def _filter_bonded_to_range(idx, params, n_keep_below: int):
@@ -205,10 +294,10 @@ def _build_dhfr_system_dict(ff_path: str):
 
     Returns (sys_dict, positions, box_vec, water_indices, masses, exclusion_spec).
     """
-    import numpy as np
     import jax.numpy as jnp
-    from proxide import CoordFormat, OutputSpec, parse_structure
+    import numpy as np
     import proxide as proxide_mod
+    from proxide import CoordFormat, OutputSpec, parse_structure
 
     from prolix.physics.neighbor_list import ExclusionSpec
     from prolix.physics.water_models import WaterModelType, get_water_params
@@ -299,7 +388,10 @@ def _build_dhfr_system_dict(ff_path: str):
         "improper_params": jnp.asarray(improper_params) if improper_params is not None else jnp.zeros((0, 4, 3)),
     }
 
-    box_edge = _read_cryst1_box_edge(DHFR_PDB)
+    # #4953: the System XML is authoritative, NOT CRYST1 -- they disagree by 0.585 Å
+    # and, with this fixture's unwrapped coordinates, that gap is what blew up every
+    # trajectory this benchmark ever timed. See _resolve_dhfr_box_edge.
+    box_edge = _resolve_dhfr_box_edge(DHFR_PDB, DHFR_SYSTEM_XML)
     box_vec = jnp.array([box_edge, box_edge, box_edge], dtype=jnp.float64)
     positions = jnp.asarray(np.asarray(protein.coordinates), dtype=jnp.float64)
     from prolix.physics.settle import get_water_indices
@@ -310,7 +402,6 @@ def _build_dhfr_system_dict(ff_path: str):
 
 def _build_smoke_system_dict(ff_path: str):
     """Solvate a small protein (1VII) for the L2 smoke fixture (same filtering as DHFR path)."""
-    import numpy as np
     import jax.numpy as jnp
     from proxide import CoordFormat, OutputSpec, parse_structure
 
@@ -404,7 +495,125 @@ def _build_bundle_from_sys_data(sys_data):
         pme_alpha=PME_ALPHA,
         nonbonded_cutoff=NONBONDED_CUTOFF,
     )
-    return make_bundle_from_system(ns, boundary_condition="periodic", exclusion_spec=exclusion_spec)
+    # use_size_buckets=False: pad to exactly n_atoms, i.e. create no ghost atoms.
+    #
+    # Size bucketing exists so *heterogeneous* bundles can share a JIT key. This
+    # benchmark runs one system against one OpenMM process, so it buys nothing here
+    # and costs two ways.
+    #
+    # First, it biases the comparison against us: bucketing 23,558 atoms up to
+    # 25,000 makes prolix integrate 1,442 atoms that are not in the system OpenMM is
+    # timed on -- ~6% more work, charged to prolix's ns/day.
+    #
+    # Second, and fatally for the NL path, ghost atoms drift. They carry unit mass
+    # (masses_padded constant_values=1.0) and feel zero force, and settle_langevin's
+    # atom_mask is consulted ONLY on the no-water fallback path (and only at init),
+    # never on the SETTLE path this system takes. So every O-step gives each ghost a
+    # stochastic kick and nothing repels it from any other ghost: 1,442 free
+    # particles with no excluded volume, whose local density is unbounded over a
+    # trajectory. No neighbor-list capacity can be large enough -- job 21895491 grew
+    # 768 -> 5918 and still overflowed at n_steps=200 while n_steps=50 passed.
+    # _pad_positions_with_ghost_lattice's own docstring predicts exactly this and
+    # defers it to debt 760/772, noting the problem could not be observed until "a
+    # live, running trajectory with a real neighbor list actually exists" -- which is
+    # what this benchmark became once it moved onto the NL path.
+    #
+    # Removing the ghosts sidesteps that here; it does NOT fix it for the
+    # heterogeneous batching path, which still needs an atom_mask-aware O-step.
+    return make_bundle_from_system(
+        ns,
+        boundary_condition="periodic",
+        exclusion_spec=exclusion_spec,
+        use_size_buckets=False,
+    )
+
+
+def _nl_stats_from(traj) -> dict:
+    """Neighbor-list capacity and host-side realloc count recorded by ``plan.run``.
+
+    ``EnsemblePlan._run_single_inference`` publishes these under the reserved
+    ``_nl_*`` observable keys. Absent keys mean the run was not on the NL path.
+    """
+    t = traj[0] if isinstance(traj, list) else traj
+    observables = getattr(t, "observable_values", None) or {}
+    capacity = observables.get("_nl_capacity")
+    retries = observables.get("_nl_retry_count")
+    return {
+        "nl_capacity": None if capacity is None else int(capacity),
+        "nl_retry_count": None if retries is None else int(retries),
+    }
+
+
+def _require_no_nl_retry(nl_stats: dict, n_steps: int) -> None:
+    """Fail the measurement if the neighbor list reallocated inside the timed region.
+
+    NL overflow is only detected on the host *after* the whole scan completes, so a
+    retry means the timed region contains a full discarded scan plus the retry --
+    roughly 2x the true per-step cost, which would otherwise be reported as a real
+    measurement. This is the measurement-pipeline sanity check that has to pass
+    before any number here is quotable.
+    """
+    retries = nl_stats.get("nl_retry_count")
+    if retries:
+        msg = (
+            f"neighbor list reallocated {retries}x inside the timed region at "
+            f"n_steps={n_steps}. The timing therefore includes a discarded scan "
+            "plus the retry and overstates per-step cost by roughly 2x. Fix the "
+            "capacity so the first allocation holds (see _nl_target_capacity / "
+            "compute_nl_capacity) and re-run; do not quote this number."
+        )
+        raise RuntimeError(msg)
+
+
+def _require_finite_positions(traj, n_steps: int) -> None:
+    """Fail the measurement if the trajectory went non-finite.
+
+    Nothing else in this harness checks. ``_block()`` only waits on the array, so a
+    run that produced NaN positions still yields a perfectly plausible wall-clock
+    number -- and timing a diverged trajectory measures nothing.
+
+    NaN also *masquerades* as a neighbor-list capacity problem: jax_md bins on
+    ``position / cell_size`` cast to int32, so a non-finite coordinate produces a
+    garbage cell index and atoms can collapse into a single cell, which surfaces as
+    an overflow rather than as the divergence it actually is. Check finiteness
+    first, so the diagnosis is not made at the wrong layer.
+    """
+    import jax.numpy as jnp
+
+    trajs = traj if isinstance(traj, list) else [traj]
+    for t in trajs:
+        if not bool(jnp.all(jnp.isfinite(t.positions))):
+            n_bad = int(jnp.sum(~jnp.isfinite(t.positions)))
+            msg = (
+                f"trajectory went non-finite at n_steps={n_steps}: {n_bad} "
+                "non-finite position components. The run diverged, so its "
+                "wall-clock time measures nothing and must not be reported. "
+                "Investigate the force path before trusting any timing from it."
+            )
+            raise RuntimeError(msg)
+
+
+def _pair_counts(n_atoms: int, nl_capacity: int | None) -> dict:
+    """Candidate-pair work for the NL path against the dense/flash equivalent.
+
+    Counts *evaluated* pairs, not occupied ones: an O(N*K) kernel walks all K
+    slots per atom and masks the empty ones, exactly as the flash kernel walks all
+    N^2 and masks self-pairs and padding. Masking does not reduce FLOPs in either,
+    so the same standard has to apply to both or the comparison flatters NL.
+    """
+    dense = n_atoms * n_atoms
+    if not nl_capacity:
+        return {
+            "nl_candidate_pairs": None,
+            "dense_equivalent_pairs": dense,
+            "pair_reduction_factor": None,
+        }
+    candidate = n_atoms * nl_capacity
+    return {
+        "nl_candidate_pairs": candidate,
+        "dense_equivalent_pairs": dense,
+        "pair_reduction_factor": dense / candidate,
+    }
 
 
 def _run_prolix_regression(sys_data, n_steps_list, seed: int):
@@ -424,18 +633,26 @@ def _run_prolix_regression(sys_data, n_steps_list, seed: int):
 
     bundle = _build_bundle_from_sys_data(sys_data)
     kT = TARGET_KELVIN * BOLTZMANN_KCAL
-    # use_flash_forces=True is required at full DHFR scale (23,558 atoms): the default
-    # dense all-pairs nonbonded path OOMs a single H200 on the very first init_fn call
-    # (job 20520003, RESOURCE_EXHAUSTED at ~4-12GiB single allocations). use_neighbor_list
-    # does NOT fix this -- EnsemblePlan._setup_integrator's one-time initial-force
-    # computation (settle_langevin's init_fn) is wired to branch only on
-    # use_flash_forces, not use_neighbor_list, so a neighbor-list stepping run still
-    # pays the dense O(N^2) cost once at init and OOMs identically (job 20528981,
-    # confirmed same failure site: settle.py init_fn's initial force call). flash_forces
-    # uses FlashMD's tiled, checkpointed kernel (force_fn_from_bundle ->
-    # single_padded_force(use_flash=True)) for BOTH init and stepping, avoiding the
-    # dense allocation entirely. Always enabling it keeps smoke and full runs on the
-    # same code path (mutually exclusive with use_neighbor_list, so only one is set).
+    # use_neighbor_list=True is the production default for this workload
+    # (_resolve_nonbonded_defaults: "NL inference+PBC, Flash trajectory+PBC"), and it
+    # is now the only path with correct asymptotics at DHFR scale. Flash evaluates all
+    # N^2 pairs with no distance cutoff at all (flash_explicit.py's tile body masks
+    # only self-pairs and padding), doubled again by remat's backward recompute. NL
+    # does O(N*K) with a real cutoff. Both counts are measured and recorded per run
+    # (dense_equivalent_pairs / nl_candidate_pairs) rather than estimated in prose
+    # here, so the speedup is attributable to the pair-count drop, not asserted.
+    #
+    # This override previously read use_flash_forces=True, because the NL path OOMed a
+    # single H200 at init (job 20528981). That has two causes, both now fixed:
+    #   * the cell list silently dropped 19.6% of in-cutoff pairs (#4699), so NL had to
+    #     run with disable_cell_list=True -- brute-force O(N^2) list construction, which
+    #     threw away NL's whole asymptotic advantage;
+    #   * _setup_integrator built two dense (N, N) exclusion matrices (~4.4 GB here) that
+    #     the NL branch never reads. energy_fn_from_bundle now takes
+    #     build_dense_exclusions, and ensemble_plan passes False whenever a neighbor is
+    #     bound.
+    # NL and flash remain mutually exclusive (ensemble_plan raises if both are set), and
+    # NL requires run_mode="inference", which both legs below already use.
 
     def _block(traj) -> None:
         trajs = traj if isinstance(traj, list) else [traj]
@@ -443,15 +660,17 @@ def _run_prolix_regression(sys_data, n_steps_list, seed: int):
             jax.block_until_ready(t.positions)
 
     results = []
+    nl_capacity = None
     for n_steps in n_steps_list:
         plan = EnsemblePlan.from_bundle(bundle)
 
         t_first0 = time.perf_counter()
         first = plan.run(
-            n_steps=1, dt=DT_FS, kT=kT, seed=seed, gamma=GAMMA_PS, run_mode="inference", use_flash_forces=True
+            n_steps=1, dt=DT_FS, kT=kT, seed=seed, gamma=GAMMA_PS, run_mode="inference", use_neighbor_list=True
         )
         _block(first)
         t_first = time.perf_counter() - t_first0
+        _require_finite_positions(first, 1)
         del first
 
         t_ss = 0.0
@@ -464,10 +683,20 @@ def _run_prolix_regression(sys_data, n_steps_list, seed: int):
                 seed=seed + 1,
                 gamma=GAMMA_PS,
                 run_mode="inference",
-                use_flash_forces=True,
+                use_neighbor_list=True,
             )
             _block(last)
             t_ss = time.perf_counter() - t_ss0
+            # Capture NL state before dropping the trajectory: a realloc inside the
+            # timed region invalidates this measurement (see _require_no_nl_retry).
+            nl_stats = _nl_stats_from(last)
+            # Finiteness first: a diverged trajectory can surface as a neighbor-list
+            # overflow (see _require_finite_positions), so checking capacity first
+            # would diagnose it at the wrong layer.
+            _require_finite_positions(last, n_steps)
+            _require_no_nl_retry(nl_stats, n_steps)
+            if nl_stats["nl_capacity"] is not None:
+                nl_capacity = nl_stats["nl_capacity"]
             del last
 
         results.append({"n_steps": n_steps, "t_first_step": t_first, "t_steady_state": t_ss})
@@ -489,24 +718,33 @@ def _run_prolix_regression(sys_data, n_steps_list, seed: int):
         logger.warning("n_steps_list had < 2 points with n_steps > 1 -- cannot fit a regression.")
 
     ns_per_day = (
-        DT_FS * 1e-6 / slope * 86400.0 if slope == slope and slope > 0 else float("nan")  # noqa: PLR0133 (NaN check)
+        DT_FS * 1e-6 / slope * 86400.0 if slope == slope and slope > 0 else float("nan")
     )
 
+    n_atoms = int(bundle.n_atoms)
     return {
         "per_step_corrected_s": slope,
         "compile_fixed_s": intercept,
         "r_squared": r_squared,
         "ns_per_day": ns_per_day,
-        "n_atoms": int(bundle.n_atoms),
+        "n_atoms": n_atoms,
         "n_steps_list": list(n_steps_list),
         "raw_results": results,
+        # Attribution: the wall-clock win has to be traceable to the drop in
+        # evaluated pairs, not to noise. nl_retry_count is 0 by construction here
+        # -- _require_no_nl_retry raises above if a realloc happened inside a
+        # timed region.
+        "nl_capacity": nl_capacity,
+        "nl_retry_count": 0,
+        **_pair_counts(n_atoms, nl_capacity),
     }
 
 
 def _run_openmm_comparator(pdb_path: Path, system_xml_path: Path, n_warmup_steps: int,
                             n_production_steps: int, prefer_cuda: bool):
     import openmm
-    from openmm import app, unit as omm_unit
+    from openmm import app
+    from openmm import unit as omm_unit
 
     with system_xml_path.open() as fh:
         omm_system = openmm.XmlSerializer.deserialize(fh.read())
@@ -522,8 +760,14 @@ def _run_openmm_comparator(pdb_path: Path, system_xml_path: Path, n_warmup_steps
         try:
             platform = openmm.Platform.getPlatformByName("CUDA")
         except Exception as e:
-            logger.warning("CUDA platform unavailable (%s); falling back to CPU.", e)
-    if platform is None:
+            raise RuntimeError(
+                f"CUDA platform unavailable for OpenMM (required for GPU-to-GPU speed comparison). "
+                f"Error: {e}. "
+                f"Fix: ensure CUDA-capable hardware is present, CUDA toolkit is installed, "
+                f"and OpenMM was built with CUDA support. "
+                f"Pass prefer_cuda=False to use CPU (not recommended for production benchmarks)."
+            )
+    else:
         platform = openmm.Platform.getPlatformByName("CPU")
 
     context = openmm.Context(omm_system, integrator, platform)
@@ -543,6 +787,102 @@ def _run_openmm_comparator(pdb_path: Path, system_xml_path: Path, n_warmup_steps
         "platform": platform.getName(), "n_atoms": omm_system.getNumParticles(),
         "n_production_steps": n_production_steps,
     }
+
+
+def _combine_results(prolix_json_path: Path, openmm_json_path: Path) -> dict:
+    """Merge prolix and openmm benchmark results, validating consistency.
+
+    Raises RuntimeError if the runs are incompatible (different smoke modes, step
+    counts, or openmm was not on CUDA).
+    """
+    with prolix_json_path.open() as fh:
+        prolix = json.load(fh)
+    with openmm_json_path.open() as fh:
+        openmm = json.load(fh)
+
+    # Validate backend fields
+    if prolix.get("backend") != "prolix":
+        raise RuntimeError(
+            f"prolix result has unexpected backend field: {prolix.get('backend')} "
+            "(expected 'prolix'); was it created with --backend prolix?"
+        )
+    if openmm.get("backend") != "openmm":
+        raise RuntimeError(
+            f"openmm result has unexpected backend field: {openmm.get('backend')} "
+            "(expected 'openmm'); was it created with --backend openmm?"
+        )
+
+    # Validate smoke modes match
+    prolix_smoke = prolix.get("smoke", False)
+    openmm_smoke = openmm.get("smoke", False)
+    if prolix_smoke != openmm_smoke:
+        raise RuntimeError(
+            f"smoke modes do not match: prolix={prolix_smoke}, openmm={openmm_smoke} "
+            "-- both must be run with the same --smoke flag"
+        )
+
+    # Validate step counts match
+    prolix_max_steps = max(prolix.get("n_steps_list", []))
+    openmm_prod_steps = openmm.get("openmm_n_production_steps")
+    if prolix_max_steps != openmm_prod_steps:
+        raise RuntimeError(
+            f"step counts do not match: prolix max n_steps={prolix_max_steps}, "
+            f"openmm n_production_steps={openmm_prod_steps} -- both must run the same "
+            "number of steps so the ns/day comparison is apples-to-apples"
+        )
+
+    # Validate OpenMM was on CUDA
+    openmm_platform = openmm.get("openmm_platform")
+    if openmm_platform != "CUDA":
+        raise RuntimeError(
+            f"openmm platform is '{openmm_platform}', not 'CUDA' -- a CPU baseline "
+            "must never silently become the denominator. Fix: re-run with "
+            "--backend openmm in the CUDA-capable OpenMM environment"
+        )
+
+    # Compute ratio
+    prolix_ns = prolix.get("prolix_ns_per_day")
+    openmm_ns = openmm.get("openmm_ns_per_day")
+    ratio = (
+        prolix_ns / openmm_ns
+        if prolix_ns and openmm_ns and prolix_ns == prolix_ns and openmm_ns == openmm_ns
+        else float("nan")
+    )
+
+    # Take each field from the leg that actually produced it. A splat merge
+    # ({**prolix, **openmm}) is WRONG here: an --backend openmm result carries
+    # explicit None placeholders for every prolix-side field, so splatting it
+    # second overwrites the real prolix numbers with None and yields a valid
+    # ratio next to prolix_ns_per_day: null.
+    _PROLIX_FIELDS = (
+        "prolix_ns_per_day", "per_step_corrected_s", "compile_fixed_s",
+        "r_squared", "n_atoms", "n_steps_list", "raw_results",
+        # Pair-count attribution -- these must travel with the wall-clock numbers
+        # so the speedup is readable as an algorithmic change, not as noise.
+        "nl_capacity", "nl_retry_count", "nl_candidate_pairs",
+        "dense_equivalent_pairs", "pair_reduction_factor",
+    )
+    _OPENMM_FIELDS = (
+        "openmm_ns_per_day", "openmm_wallclock_s", "openmm_platform",
+        "openmm_n_production_steps",
+    )
+    merged = {
+        **{k: prolix.get(k) for k in _PROLIX_FIELDS},
+        **{k: openmm.get(k) for k in _OPENMM_FIELDS},
+        "ratio": ratio,
+        # Shared/run-identifying fields: taken from the prolix leg, having already
+        # asserted above that both legs agree on smoke mode and step count.
+        "shim_mode": prolix.get("shim_mode"),
+        "seed": prolix.get("seed"),
+        "dt_fs": prolix.get("dt_fs"),
+        "smoke": prolix.get("smoke"),
+        "backend": "combined",
+        # gpu_tag is ambiguous once two runs are merged -- keep both, drop the
+        # singular key so nothing downstream reads it and gets one arbitrarily.
+        "prolix_gpu_tag": prolix.get("gpu_tag"),
+        "openmm_gpu_tag": openmm.get("gpu_tag"),
+    }
+    return merged
 
 
 def _run_openmm_smoke_comparator(sys_data, n_warmup_steps: int, n_production_steps: int):
@@ -641,9 +981,51 @@ def main() -> int:
     parser.add_argument("--out", required=True)
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--smoke", action="store_true")
+    parser.add_argument(
+        "--backend", choices=["both", "prolix", "openmm"], default="both",
+        help=(
+            "Which backend to run: 'both' (default, byte-for-byte unchanged from original), "
+            "'prolix' (prolix only, openmm fields set to None), "
+            "'openmm' (openmm only, prolix fields set to None). "
+            "Use 'prolix' and 'openmm' separately with the appropriate environment "
+            "(CUDA-capable OpenMM env for 'openmm', prolix-installed env for 'prolix'), "
+            "then combine with --combine-prolix and --combine-openmm."
+        ),
+    )
+    parser.add_argument(
+        "--combine-prolix", default=None, type=Path,
+        help="Path to JSON from --backend prolix run. Must also provide --combine-openmm.",
+    )
+    parser.add_argument(
+        "--combine-openmm", default=None, type=Path,
+        help="Path to JSON from --backend openmm run. Must also provide --combine-prolix.",
+    )
     args = parser.parse_args()
 
     out = Path(args.out) if args.out != "/dev/null" else None
+
+    # Handle combine mode first (no run, just merge)
+    if args.combine_prolix or args.combine_openmm:
+        if not (args.combine_prolix and args.combine_openmm):
+            raise RuntimeError(
+                "--combine-prolix and --combine-openmm must both be provided together"
+            )
+        if not args.combine_prolix.exists():
+            raise FileNotFoundError(f"prolix result JSON not found: {args.combine_prolix}")
+        if not args.combine_openmm.exists():
+            raise FileNotFoundError(f"openmm result JSON not found: {args.combine_openmm}")
+        combined = _combine_results(args.combine_prolix, args.combine_openmm)
+        if out is not None:
+            out.write_text(json.dumps(combined, indent=2))
+        print(json.dumps(combined, indent=2))
+        return 0
+
+    # Validate that --backend is compatible with other flags
+    if args.backend == "openmm" and args.shim_mode == "analytical":
+        raise RuntimeError(
+            "--backend openmm is incompatible with --shim-mode analytical "
+            "(analytical mode does not exist in production EnsemblePlan)"
+        )
 
     if args.shim_mode == "analytical":
         # See module docstring "KNOWN BLOCKER": the production EnsemblePlan
@@ -664,28 +1046,40 @@ def main() -> int:
             "Use --shim-mode autograd (the default)."
         )
 
+    # For openmm-only non-smoke mode, we don't need to resolve the force field
+    # (which would import proxide and transitively JAX). Smoke mode and prolix
+    # mode both need it.
+    need_ff_path = args.backend != "openmm" or args.smoke
+
     if args.dry_run:
-        import proxide  # noqa: F401
-        import openmm  # noqa: F401
-        from prolix.api import EnsemblePlan  # noqa: F401
-        from prolix.physics.system import make_bundle_from_system  # noqa: F401
+        if args.backend in ("prolix", "both"):
+            _init_jax()
+            import proxide  # noqa: F401
+
+            from prolix.api import EnsemblePlan  # noqa: F401
+            from prolix.physics.system import make_bundle_from_system  # noqa: F401
+
+        if args.backend in ("openmm", "both"):
+            import openmm  # noqa: F401
 
         for p in (DHFR_PDB, DHFR_SYSTEM_XML, SMOKE_PDB):
             if not p.exists():
                 raise FileNotFoundError(f"dry-run: expected fixture missing: {p}")
-        _resolve_ff_path()
-        result = {"dry_run": True, "shim_mode": args.shim_mode}
+        if need_ff_path:
+            _resolve_ff_path()
+        result = {"dry_run": True, "shim_mode": args.shim_mode, "backend": args.backend}
         if out is not None:
             out.write_text(json.dumps(result))
         print("dry-run ok")
         return 0
 
-    ff_path = _resolve_ff_path()
+    # Resolve force field path only if needed (prolix mode or smoke mode)
+    ff_path = _resolve_ff_path() if need_ff_path else None
 
+    # Determine which test fixtures and step lists to use
     if args.smoke:
         n_steps_list = list(_SMOKE_N_STEPS_LIST)
         pdb_path, system_xml_path = SMOKE_PDB, None
-        sys_data = _build_smoke_system_dict(ff_path)
     else:
         n_production_steps = round(args.n_production_ns * 1.0e6 / DT_FS)
         if args.n_steps_list:
@@ -693,57 +1087,119 @@ def main() -> int:
         else:
             n_steps_list = sorted({*_FULL_CALIBRATION_STEPS, n_production_steps})
         pdb_path, system_xml_path = DHFR_PDB, DHFR_SYSTEM_XML
-        sys_data = _build_dhfr_system_dict(ff_path)
 
-    logger.info("shim_mode=%s smoke=%s n_steps_list=%s", args.shim_mode, args.smoke, n_steps_list)
+    logger.info("shim_mode=%s smoke=%s backend=%s n_steps_list=%s",
+                args.shim_mode, args.smoke, args.backend, n_steps_list)
 
-    prolix_result = _run_prolix_regression(sys_data, n_steps_list, args.seed)
-    logger.info(
-        "prolix: per_step=%.6e s compile_fixed=%.6e s R^2=%.4f ns_per_day=%.4f",
-        prolix_result["per_step_corrected_s"], prolix_result["compile_fixed_s"],
-        prolix_result["r_squared"], prolix_result["ns_per_day"],
-    )
-
-    # OpenMM comparator runs the SAME largest step count as the prolix sweep's
-    # top point, so the ns/day comparison is apples-to-apples against a real
-    # production-scale (or smoke-scale) run, not an extrapolated one.
-    n_production_steps_for_comparator = max(n_steps_list)
-    if args.smoke:
-        openmm_result = _run_openmm_smoke_comparator(
-            sys_data, n_warmup_steps=min(n_steps_list), n_production_steps=n_production_steps_for_comparator
+    # Run prolix if requested
+    prolix_result = None
+    if args.backend in ("prolix", "both"):
+        _init_jax()
+        if args.smoke:
+            sys_data = _build_smoke_system_dict(ff_path)
+        else:
+            sys_data = _build_dhfr_system_dict(ff_path)
+        prolix_result = _run_prolix_regression(sys_data, n_steps_list, args.seed)
+        logger.info(
+            "prolix: per_step=%.6e s compile_fixed=%.6e s R^2=%.4f ns_per_day=%.4f",
+            prolix_result["per_step_corrected_s"], prolix_result["compile_fixed_s"],
+            prolix_result["r_squared"], prolix_result["ns_per_day"],
         )
+
+    # Run OpenMM if requested
+    openmm_result = None
+    if args.backend in ("openmm", "both"):
+        # For non-smoke mode, OpenMM only needs the file paths, not the full sys_data
+        # which requires JAX. Smoke mode needs sys_data for the OpenMM system builder.
+        if args.smoke:
+            if prolix_result is None:
+                _init_jax()
+                sys_data = _build_smoke_system_dict(ff_path)
+            # else sys_data was already built above
+            n_production_steps_for_comparator = max(n_steps_list)
+            openmm_result = _run_openmm_smoke_comparator(
+                sys_data, n_warmup_steps=min(n_steps_list), n_production_steps=n_production_steps_for_comparator
+            )
+        else:
+            # Non-smoke: use the pre-built XML and PDB, no sys_data needed
+            # max(n_steps_list) on EVERY path, not just when the prolix leg ran
+            # in-process: n_steps_list is computed above for all backends, and its
+            # max is max(*_FULL_CALIBRATION_STEPS, n_production_steps), which only
+            # coincides with round(n_production_ns * 1e6 / DT_FS) at the default
+            # --n-production-ns. Deriving it independently here made the openmm-only
+            # leg run a different step count than the prolix leg it is compared
+            # against (and ignored --n-steps-list entirely).
+            n_production_steps_for_comparator = max(n_steps_list)
+            openmm_result = _run_openmm_comparator(
+                pdb_path, system_xml_path, _OPENMM_WARMUP_STEPS, n_production_steps_for_comparator,
+                prefer_cuda=True,
+            )
+        logger.info("openmm: %s", openmm_result)
+
+    # Build result dict with appropriate None values based on backend
+    if prolix_result is None:
+        result_prolix = {
+            "prolix_ns_per_day": None,
+            "per_step_corrected_s": None,
+            "compile_fixed_s": None,
+            "r_squared": None,
+            "n_atoms": None,
+            "n_steps_list": None,
+            "raw_results": None,
+            "nl_capacity": None,
+            "nl_retry_count": None,
+            "nl_candidate_pairs": None,
+            "dense_equivalent_pairs": None,
+            "pair_reduction_factor": None,
+        }
     else:
-        openmm_result = _run_openmm_comparator(
-            pdb_path, system_xml_path, _OPENMM_WARMUP_STEPS, n_production_steps_for_comparator,
-            prefer_cuda=True,
-        )
-    logger.info("openmm: %s", openmm_result)
+        result_prolix = {
+            "prolix_ns_per_day": prolix_result["ns_per_day"],
+            "per_step_corrected_s": prolix_result["per_step_corrected_s"],
+            "compile_fixed_s": prolix_result["compile_fixed_s"],
+            "r_squared": prolix_result["r_squared"],
+            "n_atoms": prolix_result["n_atoms"],
+            "n_steps_list": prolix_result["n_steps_list"],
+            "raw_results": prolix_result["raw_results"],
+            "nl_capacity": prolix_result["nl_capacity"],
+            "nl_retry_count": prolix_result["nl_retry_count"],
+            "nl_candidate_pairs": prolix_result["nl_candidate_pairs"],
+            "dense_equivalent_pairs": prolix_result["dense_equivalent_pairs"],
+            "pair_reduction_factor": prolix_result["pair_reduction_factor"],
+        }
 
-    ratio = (
-        prolix_result["ns_per_day"] / openmm_result["ns_per_day"]
-        if openmm_result["ns_per_day"] and openmm_result["ns_per_day"] == openmm_result["ns_per_day"]
-        and prolix_result["ns_per_day"] == prolix_result["ns_per_day"]
-        else float("nan")
-    )
+    if openmm_result is None:
+        result_openmm = {
+            "openmm_ns_per_day": None,
+            "openmm_wallclock_s": None,
+            "openmm_platform": None,
+            "openmm_n_production_steps": None,
+        }
+    else:
+        result_openmm = {
+            "openmm_ns_per_day": openmm_result["ns_per_day"],
+            "openmm_wallclock_s": openmm_result["wallclock_s"],
+            "openmm_platform": openmm_result["platform"],
+            "openmm_n_production_steps": openmm_result["n_production_steps"],
+        }
+
+    ratio = float("nan")
+    if (prolix_result and openmm_result and
+        prolix_result["ns_per_day"] and openmm_result["ns_per_day"] and
+        prolix_result["ns_per_day"] == prolix_result["ns_per_day"] and
+        openmm_result["ns_per_day"] == openmm_result["ns_per_day"]):
+        ratio = prolix_result["ns_per_day"] / openmm_result["ns_per_day"]
 
     result = {
-        "prolix_ns_per_day": prolix_result["ns_per_day"],
-        "openmm_ns_per_day": openmm_result["ns_per_day"],
+        **result_prolix,
+        **result_openmm,
         "ratio": ratio,
         "shim_mode": args.shim_mode,
         "seed": args.seed,
         "gpu_tag": args.gpu_tag,
-        "n_atoms": prolix_result["n_atoms"],
-        "per_step_corrected_s": prolix_result["per_step_corrected_s"],
-        "compile_fixed_s": prolix_result["compile_fixed_s"],
-        "r_squared": prolix_result["r_squared"],
-        "n_steps_list": prolix_result["n_steps_list"],
-        "raw_results": prolix_result["raw_results"],
-        "openmm_wallclock_s": openmm_result["wallclock_s"],
-        "openmm_platform": openmm_result["platform"],
-        "openmm_n_production_steps": openmm_result["n_production_steps"],
         "dt_fs": DT_FS,
         "smoke": args.smoke,
+        "backend": args.backend,
     }
     if out is not None:
         out.write_text(json.dumps(result, indent=2))

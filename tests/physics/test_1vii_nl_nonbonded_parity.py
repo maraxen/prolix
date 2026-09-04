@@ -95,9 +95,10 @@ def test_1vii_nl_energy_parity(bundle_1vii, gold_1vii):
 
     # Build neighbor list
     displacement_fn, _ = create_periodic_space(jnp.diag(bundle.box))
+    # Cell list left at its default (on): #4699's [0, box) wrap makes it reproduce
+    # the brute-force candidate set exactly, so this also guards that fix.
     neighbor_fn = nl.make_neighbor_list_fn(
         displacement_fn, jnp.diag(bundle.box), float(bundle.cutoff_distance),
-        disable_cell_list=True  # SCOPED FIX: work around jax_md cell-list silent pair dropping
     )
     nbr0 = neighbor_fn.allocate(bundle.positions)
     nbr = neighbor_fn.update(bundle.positions, nbr0)
@@ -144,9 +145,10 @@ def test_1vii_nl_force_parity(bundle_1vii, gold_1vii):
 
     # Build neighbor list
     displacement_fn, _ = create_periodic_space(jnp.diag(bundle.box))
+    # Cell list left at its default (on): #4699's [0, box) wrap makes it reproduce
+    # the brute-force candidate set exactly, so this also guards that fix.
     neighbor_fn = nl.make_neighbor_list_fn(
         displacement_fn, jnp.diag(bundle.box), float(bundle.cutoff_distance),
-        disable_cell_list=True  # SCOPED FIX: work around jax_md cell-list silent pair dropping
     )
     nbr0 = neighbor_fn.allocate(bundle.positions)
     nbr = neighbor_fn.update(bundle.positions, nbr0)

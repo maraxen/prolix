@@ -1,4 +1,4 @@
-"""Parser ground-truth check for scripts/profiling/trace.py.
+"""Parser ground-truth check for xtrax.profiling.trace.
 
 See .praxia/docs/specs/260817_jax-profiling-optimization-workflow.md section
 P4. Two legs, per the spec: (1) synthetic -- a hand-constructed input with
@@ -17,7 +17,7 @@ import importlib.util
 import json
 from pathlib import Path
 
-from scripts.profiling.trace import (
+from xtrax.profiling.trace import (
     parse_dispatch_counts,
     parse_scopes,
     scope_map_from_hlo_text,
@@ -74,7 +74,7 @@ def test_parse_scopes_empty_when_no_events_match():
 
 def test_parse_hlo_op_times_includes_unmapped_thunks():
     """Op-name dump keeps thunks that parse_scopes drops (no known_label map)."""
-    from scripts.profiling.trace import parse_hlo_op_times
+    from xtrax.profiling.trace import parse_hlo_op_times
 
     events = [
         {"ph": "X", "name": "cb", "dur": 900.0, "args": {"hlo_op": "command_buffer_14"}},

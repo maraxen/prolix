@@ -204,7 +204,7 @@ def _run_child(arm: str, system_seed: int, target: str, out_path: Path) -> None:
     import jax
     import numpy as np
 
-    from scripts.profiling.record import ProbeRecord
+    from xtrax.profiling.record import ProbeRecord
 
     sys_obj = _synthetic_system(system_seed)
     # jax.jit is essential, not incidental: the whole point of this gate is
@@ -409,7 +409,7 @@ def _run_gate(
 
 
 def _emit_summary_record(result: dict, out_dir: Path) -> None:
-    from scripts.profiling.record import ProbeRecord
+    from xtrax.profiling.record import ProbeRecord
 
     record = ProbeRecord(
         probe_id=f"stage1_pert_summary_{result['target']}",

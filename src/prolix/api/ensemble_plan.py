@@ -60,6 +60,37 @@ def _bind_neighbor(energy_or_force_fn: Any, neighbor: Any) -> Any:
     return _bound
 
 
+#: Bounded geometric growth for host-side NL reallocation after an overflow.
+#: Each attempt roughly doubles total capacity, so 3 attempts cover an 8x
+#: underestimate before giving up with a diagnostic.
+_NL_MAX_REALLOC_ATTEMPTS = 3
+
+
+def _nl_target_capacity(
+    nl_mod: Any, n_atoms: int, box_vec: Any, cutoff: float, skin: float
+) -> int:
+    """Recommended NL capacity for a system, or 0 when the box has no usable volume.
+
+    Single source of truth for both NL construction sites, so the stacked and
+    single-bundle paths cannot size capacity by different rules. The single-bundle
+    path used to skip capacity planning entirely and take jax_md's data-dependent
+    ``allocate()`` sizing; at DHFR scale (23,558 atoms, 9 A cutoff) that came out
+    ~30% below this recommendation and overflowed mid-scan (job 21835473).
+
+    ``compute_nl_capacity``'s uniform-density estimate is only meaningful for a
+    periodic box. Free-space bundles carry a nominal or degenerate box where the
+    estimate is either an error (zero volume) or vanishingly small, so return 0
+    there and leave jax_md's own sizing in charge. Callers only ever top capacity
+    *up*, so a 0 here can never shrink an allocation.
+    """
+    import numpy as np
+
+    volume = float(np.prod(np.asarray(box_vec, dtype=np.float64)))
+    if volume <= 0.0:
+        return 0
+    return int(nl_mod.compute_nl_capacity(n_atoms, box_vec, cutoff, dr_threshold=skin))
+
+
 class EnsemblePlan:
     """Orchestrates batch MD simulations over multiple MolecularBundle instances.
 
@@ -727,12 +758,12 @@ class EnsemblePlan:
             dr_threshold=skin,
         )
 
-        target_capacity = nl_mod.compute_nl_capacity(
-            integration_prefix, box_vec, cutoff, dr_threshold=skin
-        )
         seed_positions = positions_with_prefix(ref, integration_prefix)
         seed = neighbor_fn.allocate(seed_positions)
-        extra_needed = max(0, target_capacity - seed.idx.shape[-1])
+        target_capacity = _nl_target_capacity(
+            nl_mod, int(seed_positions.shape[0]), box_vec, cutoff, skin
+        )
+        extra_needed = max(0, target_capacity - int(seed.idx.shape[-1]))
         if extra_needed > 0:
             seed = neighbor_fn.allocate(seed_positions, extra_capacity=extra_needed)
 
@@ -786,6 +817,7 @@ class EnsemblePlan:
             force_fn_from_bundle,
             masses_for_bundle,
             masses_with_prefix,
+            pbc_box_for_bundle,
             positions_with_prefix,
             water_indices_for_integration,
         )
@@ -805,7 +837,16 @@ class EnsemblePlan:
             force_fn_from_bundle(bundle, flash_tile_size=tile, flash_remat=remat)
             if use_flash_forces
             else energy_fn_from_bundle(
-                bundle, lj_switch_width=lj_switch_width_from_config(nb_cfg)
+                bundle,
+                lj_switch_width=lj_switch_width_from_config(nb_cfg),
+                # When a neighbor list is bound below, single_padded_energy takes
+                # its `neighbor is not None` branch, which reads only the sparse
+                # excl_indices/excl_scales_*. The dense (N, N) exclusion matrices
+                # -- ~4.4 GB at DHFR scale, rebuilt every step -- are unreachable
+                # on that path, so skipping their construction cannot change a
+                # number. This is what made the NL path OOM at init (job 20528981)
+                # while flash, which already opted out, did not.
+                build_dense_exclusions=initial_neighbor is None,
             )
         )
         if initial_neighbor is not None:
@@ -873,6 +914,15 @@ class EnsemblePlan:
             project_ou_momentum_rigid=True,
             water_mask=water_mask,
             atom_mask=atom_mask,
+            # #4971: this MUST come from the same predicate as the shift_fn above.
+            # settle_langevin's `box` defaults to None, and every PBC protection in
+            # settle.py is gated on it being non-None -- the per-atom unwrap, both
+            # minimum-image corrections on the SETTLE displacement, and the
+            # post-solve re-wrap. Omitting it while shift_fn wraps atoms into
+            # [0, box) leaves water molecules straddling a face permanently split
+            # between two images, and SETTLE then fits a rigid body to an object up
+            # to a box across and launches it.
+            box=pbc_box_for_bundle(bundle),
             # use_flash_forces=True means energy_or_force_fn is
             # force_fn_from_bundle's already-force-shaped output -- tell
             # settle_langevin so it skips jax_md.quantity.canonicalize_force's
@@ -1002,6 +1052,7 @@ class EnsemblePlan:
                 integration_prefix = int(bundle.positions.shape[0])
 
         neighbor_fn = None
+        target_capacity = 0
         nbr0 = initial_neighbor
         if use_neighbor_list and nbr0 is None:
             from prolix.api.bundle_md import (
@@ -1024,7 +1075,14 @@ class EnsemblePlan:
                 capacity_multiplier=cap_mult,
                 dr_threshold=skin,
             )
-            nbr0 = neighbor_fn.allocate(positions_with_prefix(bundle, integration_prefix))
+            seed_positions = positions_with_prefix(bundle, integration_prefix)
+            nbr0 = neighbor_fn.allocate(seed_positions)
+            target_capacity = _nl_target_capacity(
+                nl_mod, int(seed_positions.shape[0]), box_vec, cutoff, skin
+            )
+            extra_needed = max(0, target_capacity - int(nbr0.idx.shape[-1]))
+            if extra_needed > 0:
+                nbr0 = neighbor_fn.allocate(seed_positions, extra_capacity=extra_needed)
 
         state, apply_fn, dt_s, kT_s = self._setup_integrator(
             bundle,
@@ -1059,6 +1117,10 @@ class EnsemblePlan:
                     sink(pos)
 
         nl_overflow_for_caller = None
+        nl_retry_count = 0
+        nl_capacity_for_caller = (
+            int(nbr0.idx.shape[-1]) if nbr0 is not None and use_neighbor_list else None
+        )
         if use_neighbor_list:
             import equinox as eqx
 
@@ -1130,27 +1192,50 @@ class EnsemblePlan:
                 # on a tracer.
                 nl_overflow_for_caller = final_carry.did_overflow
             elif neighbor_fn is not None and bool(final_carry.did_overflow):
-                bumped_capacity = int(0.5 * nbr0.idx.shape[1])
-                retried_neighbor = neighbor_fn.allocate(
-                    _integrator_positions(final_carry.langevin_state),
-                    extra_capacity=bumped_capacity,
-                )
-                retry_carry = _NLDispatchCarry(
-                    state,
-                    retried_neighbor,
-                    jnp.array(False),
-                    _integrator_positions(state),
-                )
-                final_carry = dispatch_n_steps_inference(
-                    _nl_step_fn, retry_carry, int(n_steps)
-                )
-                if bool(final_carry.did_overflow):
-                    raise RuntimeError(
-                        "Neighbor list overflowed even after reallocating with "
-                        f"+{bumped_capacity} extra capacity -- capacity formula "
-                        "(compute_nl_capacity) likely needs a larger safety_factor "
-                        "for this system."
+                # Size every retry from `state` -- the configuration the scan
+                # actually restarts from. The old code sized from the overflowed
+                # trajectory's *final* positions, which were produced by a run with
+                # a known-broken neighbor list, and then restarted from `state`
+                # anyway: capacity fitted to coordinates it would never see.
+                #
+                # Grow geometrically over a bounded number of attempts rather than
+                # making one fixed +50% bump and giving up. At DHFR scale that
+                # single bump added 271 to an already-undersized 542 and still
+                # overflowed (job 21835473).
+                retry_positions = _integrator_positions(state)
+                base_capacity = int(nbr0.idx.shape[-1])
+                retried_neighbor = nbr0
+                for attempt in range(1, _NL_MAX_REALLOC_ATTEMPTS + 1):
+                    # total capacity ~= base * 2**attempt
+                    bumped_capacity = base_capacity * (2**attempt - 1)
+                    retried_neighbor = neighbor_fn.allocate(
+                        retry_positions, extra_capacity=bumped_capacity
                     )
+                    retry_carry = _NLDispatchCarry(
+                        state, retried_neighbor, jnp.array(False), retry_positions
+                    )
+                    final_carry = dispatch_n_steps_inference(
+                        _nl_step_fn, retry_carry, int(n_steps)
+                    )
+                    nl_retry_count = attempt
+                    if not bool(final_carry.did_overflow):
+                        break
+                else:
+                    raise RuntimeError(
+                        "Neighbor list overflowed on the single-bundle inference "
+                        f"path after {_NL_MAX_REALLOC_ATTEMPTS} reallocation "
+                        f"attempts (capacity {base_capacity} -> "
+                        f"{int(retried_neighbor.idx.shape[-1])}). "
+                        f"compute_nl_capacity recommended {target_capacity} for "
+                        f"this system ({int(retry_positions.shape[0])} atoms, "
+                        f"cutoff={cutoff}, skin={skin}). If that recommendation is "
+                        "itself too low, raise safety_factor in "
+                        "prolix/physics/neighbor_list.py::compute_nl_capacity; if "
+                        "it looks right but the allocated capacity is well below "
+                        "it, the capacity pre-planning block in "
+                        "_run_single_inference did not run."
+                    )
+                nl_capacity_for_caller = int(retried_neighbor.idx.shape[-1])
             state = final_carry.langevin_state
         else:
 
@@ -1186,6 +1271,14 @@ class EnsemblePlan:
                 observable_values[name] = observable.compute(state)
         if nl_overflow_for_caller is not None:
             observable_values["_nl_did_overflow"] = nl_overflow_for_caller
+        if nl_capacity_for_caller is not None:
+            # Capacity actually in force, and how many host-side reallocations it
+            # took to get there. A benchmark that times plan.run() must treat a
+            # non-zero retry count as a failed measurement: the overflow is only
+            # detected after the full scan completes, so the timed region contains
+            # a discarded scan plus the retry (roughly 2x the true per-step cost).
+            observable_values["_nl_capacity"] = nl_capacity_for_caller
+            observable_values["_nl_retry_count"] = nl_retry_count
 
         return Trajectory(
             positions=positions_array,

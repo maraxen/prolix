@@ -6,8 +6,8 @@ from pathlib import Path
 
 import pytest
 
-from scripts.profiling.claims import ClaimValidityError
-from scripts.profiling.record import ProbeRecord
+from xtrax.profiling.claims import ClaimValidityError
+from xtrax.profiling.record import ProbeRecord
 
 FIXTURE_DIR = Path(__file__).resolve().parent / "fixtures" / "records"
 
@@ -26,14 +26,14 @@ def test_every_committed_fixture_roundtrips_probe_record_read():
 
 
 def test_report_over_stage0_and_stage1_fixtures_raises_on_term_ranking():
-    from scripts.profiling.report import render_report
+    from xtrax.profiling.report import render_report
 
     with pytest.raises(ClaimValidityError, match="TERM_RANKING"):
         render_report(_paths("stage0_structural.json", "stage1_cpu_micro.json"))
 
 
 def test_report_over_stage0_stage1_and_stage2_fixtures_emits_ranking_table():
-    from scripts.profiling.report import render_report
+    from xtrax.profiling.report import render_report
 
     text = render_report(
         _paths(
@@ -56,7 +56,7 @@ def test_report_over_stage0_stage1_and_stage2_fixtures_emits_ranking_table():
 
 
 def test_mixed_attribution_fixture_set_emits_banner():
-    from scripts.profiling.report import render_report
+    from xtrax.profiling.report import render_report
 
     text = render_report(
         _paths("stage2_named_scope.json", "stage2_op_name.json")
@@ -68,14 +68,14 @@ def test_mixed_attribution_fixture_set_emits_banner():
 
 
 def test_single_method_fixture_set_omits_mixed_banner():
-    from scripts.profiling.report import render_report
+    from xtrax.profiling.report import render_report
 
     text = render_report(_paths("stage2_named_scope.json"))
     assert "MIXED ATTRIBUTION" not in text
 
 
 def test_none_scope_renders_as_absent_not_zero():
-    from scripts.profiling.report import render_report
+    from xtrax.profiling.report import render_report
 
     text = render_report(_paths("stage2_named_scope.json"))
     assert "absent" in text

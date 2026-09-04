@@ -23,7 +23,13 @@ class NeighborListConfig:
     switch_width: float | None = None
     capacity_multiplier: float = 1.25
     safety_factor: float = 1.5
-    disable_cell_list: bool = True  # backlog #4699: cell-list silently drops pairs at protein+solvent density
+    # backlog #4699 RESOLVED: the cell list dropped pairs because jax_md bins on
+    # raw position (truncating toward zero, no wrap), while prolix passes
+    # origin-centred coordinates. make_neighbor_list_fn now wraps into [0, box)
+    # before handing positions to jax_md, which restores the exact brute-force
+    # candidate set. Cell list is safe and on by default; True falls back to
+    # O(N^2) construction.
+    disable_cell_list: bool = False
     max_exclusions: int = 32
     nl_update_every: int | None = None
     on_overflow: OverflowPolicy = "reallocate"

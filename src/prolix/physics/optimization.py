@@ -173,9 +173,11 @@ def _chunked_lj_energy_nl_core(
         energy = jnp.where(m, 4.0 * e_ij * (inv_r6**2 - inv_r6) * switch, 0.0)
         return 0.5 * jnp.sum(energy * pair_scale)
 
-    return tile_reduction_nl(r_pad, neighbor_idx, mask_pad, f_tile, 0.0, tile_size, inner_tile_size=inner_tile_size)
+    with jax.named_scope("nl_lj_forward"):
+        return tile_reduction_nl(r_pad, neighbor_idx, mask_pad, f_tile, 0.0, tile_size, inner_tile_size=inner_tile_size)
 
 
+@functools.partial(jax.custom_vjp, nondiff_argnums=(6, 7, 8, 9))
 def chunked_lj_energy_nl(
     r: jnp.ndarray,
     sigmas: jnp.ndarray,
@@ -188,9 +190,120 @@ def chunked_lj_energy_nl(
     tile_size: int = 32,
     switch_width: float = 0.0,
 ) -> jnp.ndarray:
-    """Computes LJ energy over neighbor list - now using JAX auto-diff (debt 4383 fixed)."""
+    """Computes LJ energy over neighbor list.
+
+    custom_vjp backward (debt 760 / #4623 / #4793): an earlier attempt at
+    this analytic backward pass (commit 7f7e147) had a copy-paste bug
+    (hardcoded zero position gradient) that was correctly fixed and
+    validated (finite-difference, tests/physics/test_nl_kernel_gradient_correctness.py)
+    -- but that fix lived on a branch that a parallel debt-4383 branch's
+    "remove custom_vjp entirely" fix clobbered on merge without ever seeing
+    it (commit 223590b's "before" state matches 7f7e147's "before" state,
+    not its "after"). Restored 2026-09 (#4793/#4623): generic autodiff
+    through the gather-heavy tiled NL forward pass forces JAX to synthesize
+    an expensive scatter-add backward (measured ~20x slower than dense's
+    analytic-custom_vjp force path at n_padded=5000); this restores the
+    analytic rule, matching the dense kernel's own custom_vjp pattern.
+    """
     return _chunked_lj_energy_nl_core(r, sigmas, epsilons, excl_indices, excl_scales, neighbor_idx,
                                        displacement_fn, cutoff, tile_size, switch_width)
+
+
+def _chunked_lj_nl_fwd(r, sigmas, epsilons, excl_indices, excl_scales, nb_idx, disp_fn, cutoff, tile_size, switch_width):
+    return _chunked_lj_energy_nl_core(r, sigmas, epsilons, excl_indices, excl_scales, nb_idx, disp_fn, cutoff, tile_size, switch_width), (r, sigmas, epsilons, excl_indices, excl_scales, nb_idx)
+
+
+def _chunked_lj_nl_bwd(displacement_fn, cutoff, tile_size, switch_width, res, g):
+    # excl_indices and neighbor_idx (nb_idx) are differentiable-position
+    # arguments (not nondiff_argnums, debt 802) purely so they can be
+    # jax.vmap/jax.lax.while_loop tracers (per-replica topology under a
+    # stacked/vmapped EnsemblePlan dispatch, or a periodically-updated
+    # neighbor list) -- gradient w.r.t. an integer index array is always zero.
+    r, sigmas, epsilons, excl_indices, excl_scales, nb_idx = res
+    N = r.shape[0]
+    inner_tile_size = 1024
+    r_pad, mask_pad = pad_to_tile(r, inner_tile_size)
+    sig_pad, _ = pad_to_tile(sigmas, inner_tile_size)
+    eps_pad, _ = pad_to_tile(epsilons, inner_tile_size)
+    excl_pad_dim = r_pad.shape[0]
+    excl_i_pad = jnp.pad(excl_indices, ((0, excl_pad_dim - excl_indices.shape[0]), (0, 0)), constant_values=-1)
+    excl_s_pad = jnp.pad(excl_scales, ((0, excl_pad_dim - excl_scales.shape[0]), (0, 0)), constant_values=1.0)
+
+    def f_tile_grad(pos_i, pos_j, mask_i, mask_j, nb_idx_tile, start_i, start_j):
+        sig_i = jax.lax.dynamic_slice(sig_pad, (start_i,), (inner_tile_size,))
+        eps_i = jax.lax.dynamic_slice(eps_pad, (start_i,), (inner_tile_size,))
+        sig_j = sig_pad[nb_idx_tile]
+        eps_j = eps_pad[nb_idx_tile]
+
+        excl_i = jax.lax.dynamic_slice(excl_i_pad, (start_i, 0), (inner_tile_size, excl_indices.shape[1]))
+        excl_s = jax.lax.dynamic_slice(excl_s_pad, (start_i, 0), (inner_tile_size, excl_indices.shape[1]))
+
+        matches = (nb_idx_tile[:, None, :] == excl_i[:, :, None])
+        pair_scale = jnp.sum(jnp.where(matches, excl_s[:, :, None], 0.0), axis=1)
+        pair_scale = jnp.where(jnp.any(matches, axis=1), pair_scale, 1.0)
+
+        def pair_vals(ri, rj, si, sj, ei, ej, scale):
+            dr = displacement_fn(ri, rj); d2 = jnp.sum(dr**2); d = jnp.sqrt(d2)
+            inv_d = jnp.where(d > 0.0, 1.0 / d, 0.0)
+            inv_d2 = jnp.where(d > 0.0, 1.0 / d2, 0.0)
+            s = 0.5*(si+sj); e = jnp.sqrt(ei*ej)
+            inv_r6 = jnp.where(d > 0.0, (s/d)**6, 0.0)
+
+            # Unswitched LJ force
+            dE_ds = 4.0 * e / s * (12.0 * inv_r6**2 - 6.0 * inv_r6)
+            f_mag_unswitched = dE_ds * s * inv_d2 * scale
+            f_pair_unswitched = jnp.where(d > 0.0, f_mag_unswitched * dr, 0.0)
+
+            # Switch function chain-rule term
+            if switch_width is not None and switch_width > 0.0:
+                r_cut = jnp.asarray(cutoff, dtype=d.dtype)
+                width = jnp.asarray(switch_width, dtype=d.dtype)
+                r_switch = r_cut - width
+                z = (d - r_switch) / jnp.maximum(width, jnp.asarray(1e-12, dtype=d.dtype))
+
+                # dS_dd = (-30*z^2 + 60*z^3 - 30*z^4) / width
+                dS_dd = (-30.0 * z**2 + 60.0 * z**3 - 30.0 * z**4) / jnp.maximum(width, jnp.asarray(1e-12, dtype=d.dtype))
+                # dS_dd is nonzero only inside switch window: r_switch < d < r_cut
+                dS_dd = jnp.where((d > r_switch) & (d < r_cut), dS_dd, 0.0)
+
+                # Unswitched LJ pair energy
+                E_lj_unswitched = 4.0 * e * (inv_r6**2 - inv_r6)
+
+                # S(d) multiplier on the unswitched force
+                switch = lj_switch_weight(d, cutoff, switch_width)
+
+                # Full switched per-pair force: F_pair = S(d)*F_pair_unswitched - E_lj_unswitched * dS_dd * (dr/d)
+                f_pair_switched = switch * f_pair_unswitched - E_lj_unswitched * dS_dd * jnp.where(d > 0.0, dr * inv_d, 0.0)
+                return jnp.where(d > 0.0, f_pair_switched, 0.0)
+            else:
+                return f_pair_unswitched
+
+        forces = jax.vmap(jax.vmap(pair_vals, (None, 0, None, 0, None, 0, 0)), (0, 0, 0, 0, 0, 0, 0))(
+            pos_i, pos_j, sig_i, sig_j, eps_i, eps_j, pair_scale)
+
+        # Compute distance for cutoff check
+        dr = jax.vmap(jax.vmap(displacement_fn, (None, 0)), (0, 0))(pos_i, pos_j)
+        dist = jnp.sqrt(jnp.sum(dr**2, axis=-1)); ds = dist
+
+        m = mask_i[:, None] & mask_j & (ds > 0.0)
+        if cutoff > 0: m = m & (ds < cutoff)
+
+        f_on_i = jnp.sum(jnp.where(m[..., None], forces, 0.0), axis=1)
+        return f_on_i
+
+    with jax.named_scope("nl_lj_backward"):
+        f_res = tile_reduction_nl(r_pad, nb_idx, mask_pad, f_tile_grad, jnp.zeros_like(r_pad), tile_size, inner_tile_size=inner_tile_size)
+    return (
+        -g * f_res[:N],
+        g * jnp.zeros_like(sigmas),
+        g * jnp.zeros_like(epsilons),
+        jnp.zeros_like(excl_indices),
+        g * jnp.zeros_like(excl_scales),
+        jnp.zeros_like(nb_idx),
+    )
+
+
+chunked_lj_energy_nl.defvjp(_chunked_lj_nl_fwd, _chunked_lj_nl_bwd)
 
 # ============================================================================
 # Coulomb Kernels (Dense & NL)
@@ -332,8 +445,10 @@ def _chunked_coulomb_energy_nl_core(
         e_pair = coulomb_constant * q_ij * inv_ds * (pair_scale - jax.scipy.special.erf(pme_alpha * ds))
         return 0.5 * jnp.sum(jnp.where(m, e_pair, 0.0))
 
-    return tile_reduction_nl(r_pad, neighbor_idx, mask_pad, f_tile, 0.0, tile_size, inner_tile_size=inner_tile_size)
+    with jax.named_scope("nl_coulomb_forward"):
+        return tile_reduction_nl(r_pad, neighbor_idx, mask_pad, f_tile, 0.0, tile_size, inner_tile_size=inner_tile_size)
 
+@functools.partial(jax.custom_vjp, nondiff_argnums=(5, 6, 7, 8, 9))
 def chunked_coulomb_energy_nl(
     r: jnp.ndarray,
     charges: jnp.ndarray,
@@ -346,6 +461,76 @@ def chunked_coulomb_energy_nl(
     cutoff: float = 9.0,
     tile_size: int = 32
 ) -> jnp.ndarray:
-    """Computes direct-space Coulomb energy over neighbor list - now using JAX auto-diff (debt 4383 fixed)."""
+    """Computes direct-space Coulomb energy over neighbor list.
+
+    custom_vjp backward: see chunked_lj_energy_nl's docstring (#4623/#4793) --
+    same restoration, same rationale.
+    """
     return _chunked_coulomb_energy_nl_core(r, charges, excl_indices, excl_scales, neighbor_idx,
                                            displacement_fn, pme_alpha, coulomb_constant, cutoff, tile_size)
+
+
+def _chunked_coulomb_nl_fwd(r, charges, excl_indices, excl_scales, nb_idx, disp_fn, pme_alpha, coulomb_constant, cutoff, tile_size):
+    return _chunked_coulomb_energy_nl_core(r, charges, excl_indices, excl_scales, nb_idx, disp_fn, pme_alpha, coulomb_constant, cutoff, tile_size), (r, charges, excl_indices, excl_scales, nb_idx, pme_alpha)
+
+
+def _chunked_coulomb_nl_bwd(displacement_fn, pme_alpha, coulomb_constant, cutoff, tile_size, res, g):
+    # excl_indices and neighbor_idx (nb_idx) are differentiable-position
+    # arguments (not nondiff_argnums, debt 802) purely so they can be
+    # jax.vmap/jax.lax.while_loop tracers (per-replica topology under a
+    # stacked/vmapped EnsemblePlan dispatch, or a periodically-updated
+    # neighbor list) -- gradient w.r.t. an integer index array is always zero.
+    r, charges, excl_indices, excl_scales, nb_idx, pme_alpha = res
+    N = r.shape[0]
+    inner_tile_size = 1024
+    r_pad, mask_pad = pad_to_tile(r, inner_tile_size)
+    q_pad, _ = pad_to_tile(charges, inner_tile_size)
+    excl_pad_dim = r_pad.shape[0]
+    excl_i_pad = jnp.pad(excl_indices, ((0, excl_pad_dim - excl_indices.shape[0]), (0, 0)), constant_values=-1)
+    excl_s_pad = jnp.pad(excl_scales, ((0, excl_pad_dim - excl_scales.shape[0]), (0, 0)), constant_values=1.0)
+
+    def f_tile_grad(pos_i, pos_j, mask_i, mask_j, nb_idx_tile, start_i, start_j):
+        q_i = jax.lax.dynamic_slice(q_pad, (start_i,), (inner_tile_size,))
+        q_j = q_pad[nb_idx_tile]
+        excl_i = jax.lax.dynamic_slice(excl_i_pad, (start_i, 0), (inner_tile_size, excl_indices.shape[1]))
+        excl_s = jax.lax.dynamic_slice(excl_s_pad, (start_i, 0), (inner_tile_size, excl_indices.shape[1]))
+
+        matches = (nb_idx_tile[:, None, :] == excl_i[:, :, None])
+        pair_scale = jnp.sum(jnp.where(matches, excl_s[:, :, None], 0.0), axis=1)
+        pair_scale = jnp.where(jnp.any(matches, axis=1), pair_scale, 1.0)
+
+        def pair_vals(ri, rj, qi, qj, scale):
+            dr = displacement_fn(ri, rj); d2 = jnp.sum(dr**2); d = jnp.sqrt(d2)
+            inv_d = jnp.where(d > 0.0, 1.0/d, 0.0)
+            inv_d2 = jnp.where(d > 0.0, 1.0/d2, 0.0)
+            alpha_d = pme_alpha * d
+            erf_factor = jax.scipy.special.erf(alpha_d)
+            derf_factor = (2.0/jnp.sqrt(jnp.pi)) * jnp.exp(-alpha_d**2) * pme_alpha
+            dE_dd = coulomb_constant * qi * qj * (-scale * inv_d2 + erf_factor * inv_d2 - derf_factor * inv_d)
+            return jnp.where(d > 0.0, dE_dd * dr * inv_d, 0.0)
+
+        forces = jax.vmap(jax.vmap(pair_vals, (None, 0, None, 0, 0)), (0, 0, 0, 0, 0))(
+            pos_i, pos_j, q_i, q_j, pair_scale)
+
+        # Compute distance for cutoff check
+        dr = jax.vmap(jax.vmap(displacement_fn, (None, 0)), (0, 0))(pos_i, pos_j)
+        dist = jnp.sqrt(jnp.sum(dr**2, axis=-1)); ds = dist
+
+        m = mask_i[:, None] & mask_j & (ds > 0.0)
+        if cutoff > 0: m = m & (ds < cutoff)
+
+        f_on_i = jnp.sum(jnp.where(m[..., None], forces, 0.0), axis=1)
+        return f_on_i
+
+    with jax.named_scope("nl_coulomb_backward"):
+        f_res = tile_reduction_nl(r_pad, nb_idx, mask_pad, f_tile_grad, jnp.zeros_like(r_pad), tile_size, inner_tile_size=inner_tile_size)
+    return (
+        g * f_res[:N],
+        g * jnp.zeros_like(charges),
+        jnp.zeros_like(excl_indices),
+        g * jnp.zeros_like(excl_scales),
+        jnp.zeros_like(nb_idx),
+    )
+
+
+chunked_coulomb_energy_nl.defvjp(_chunked_coulomb_nl_fwd, _chunked_coulomb_nl_bwd)
