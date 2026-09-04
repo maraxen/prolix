@@ -345,6 +345,39 @@ def _settle_water_batch(
     pos_h1_new = unwrap(pos_h1_new, pos_h1_old)
     pos_h2_new = unwrap(pos_h2_new, pos_h2_old)
 
+    # Make each molecule WHOLE before the rigid-body fit below (#4971).
+    #
+    # The unwrap above is per-atom, against each atom's own previous position: it
+    # restores step-to-step continuity for an atom that crossed a face, which is
+    # necessary but says nothing about whether the three atoms are in the same
+    # periodic image as EACH OTHER. They frequently are not. `shift_fn` wraps every
+    # atom independently into [0, box), so any molecule straddling a face has its O
+    # sent to one side and an H to the other, and nothing downstream ever repairs it.
+    #
+    # That is fatal here rather than merely untidy, because `com_new` and the
+    # body-frame deltas immediately below are computed from these raw positions. A
+    # split molecule yields a COM in the middle of the box and an O-H separation of
+    # up to a full box length, so the template fit is solving for the orientation of
+    # something that is not a water molecule, and it launches it.
+    #
+    # Measured on DHFR (23558 atoms, job 21968919): from rest with the thermostat
+    # fully off, 1011 atoms move 8-9 A in a single step while their forces are
+    # normal. 1011 = 3 x 337 whole molecules, water fraction 1.0000 against a system
+    # baseline of 0.8943. Independently, wrapping that fixture's coordinates tears
+    # 334 of 7023 waters apart with a maximum O-H distance of 86.4 A. Carbon,
+    # nitrogen and sulfur meanwhile track Newton's 0.5*(F/m)*dt^2 to a ratio of
+    # exactly 1.000, so the integrator itself was never at fault.
+    #
+    # Re-imaging the hydrogens onto the oxygen costs two subtractions and makes the
+    # molecule whole in a single image. The post-solve re-wrap in `settle_positions`
+    # then returns the rigid result to the box as one unit, so nothing else changes.
+    def to_oxygen_image(pos_h, pos_o):
+      d = pos_h - pos_o
+      return pos_o + (d - box * _PBC_ROUND_FN(d / box))
+
+    pos_h1_new = to_oxygen_image(pos_h1_new, pos_oxygen_new)
+    pos_h2_new = to_oxygen_image(pos_h2_new, pos_oxygen_new)
+
   mass_total = mass_oxygen + 2 * mass_hydrogen
 
   # COM motion is preserved - only internal geometry is corrected
