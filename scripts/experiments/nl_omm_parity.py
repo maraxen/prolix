@@ -307,15 +307,16 @@ def _compare_probe(probe: str, gold: Path) -> dict:
         pme_grid_points=int(rec["pme_grid_points"]),
     )
 
-    # Build neighbor list with overflow check (mandatory gate)
-    # CRITICAL FIX: disable_cell_list=True to work around jax_md cell-list silently
-    # dropping real pairs at high density (4383 root cause). This is scoped to this
-    # comparison only (not a global default change). For a static one-shot comparison,
-    # O(N²) brute-force construction is acceptable per spec C5.
+    # Build neighbor list with overflow check (mandatory gate).
+    # This used disable_cell_list=True to work around jax_md's cell list silently
+    # dropping real pairs at high density. That was #4699: jax_md bins on raw
+    # position and so requires coordinates in [0, box), while bundles carry raw
+    # origin-centred ones. make_neighbor_list_fn now wraps before binning, and the
+    # cell list reproduces the brute-force candidate set exactly, so the default
+    # (cell list on) is both correct and asymptotically better here.
     displacement_fn, _ = create_periodic_space(jnp.diag(bundle.box))
     neighbor_fn = nl.make_neighbor_list_fn(
         displacement_fn, jnp.diag(bundle.box), float(bundle.cutoff_distance),
-        disable_cell_list=True  # SCOPED FIX FOR #4383 ONLY
     )
     nbr0 = neighbor_fn.allocate(bundle.positions)
     nbr = neighbor_fn.update(bundle.positions, nbr0)

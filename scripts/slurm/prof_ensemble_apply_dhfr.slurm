@@ -38,8 +38,27 @@ if [[ -z "${PROLIX_GIT_SHA:-}" && -f "${_PROJ}/.git_sha" ]]; then
     PROLIX_GIT_SHA="$(head -1 "${_PROJ}/.git_sha" | tr -d '[:space:]')"
     export PROLIX_GIT_SHA
 fi
+# xtrax.profiling.record reads XTRAX_GIT_SHA, not PROLIX_GIT_SHA -- the var was
+# renamed when scripts/profiling/ moved upstream. Export both: the local scripts
+# with their own _git_sha() (prof_ensemble_step.py, prof_flash_tile_checkpoint.py)
+# still read PROLIX_GIT_SHA. A missing XTRAX_GIT_SHA does not error -- it silently
+# records a blank sha on cluster scratch, where there is no .git to fall back to.
+export XTRAX_GIT_SHA="${PROLIX_GIT_SHA:-}"
 export JAX_PLATFORMS="${JAX_PLATFORMS:-cuda}"
 export XLA_PYTHON_CLIENT_PREALLOCATE="${XLA_PYTHON_CLIENT_PREALLOCATE:-false}"
+
+# PROLIX_CMDBUF_OFF=1 explodes the CUDA-graph command buffer into separately
+# timed thunks. Without it, XLA folds the whole step into one command_buffer_*
+# thunk and no per-component ranking exists to recover -- which is why no
+# DHFR-scale breakdown has ever been produced. DIAGNOSTIC ONLY: never pool these
+# timings with a normally-compiled run (the probe warns when the top thunk is a
+# command_buffer_* entry, and TAG below keeps the records in separate dirs).
+CMDBUF_SUFFIX=""
+if [[ "${PROLIX_CMDBUF_OFF:-0}" == "1" ]]; then
+    export XLA_FLAGS="${XLA_FLAGS:+${XLA_FLAGS} }--xla_gpu_enable_command_buffer="
+    CMDBUF_SUFFIX="_cmdbufoff"
+    echo "cmdbuf-off diagnostic compile: XLA_FLAGS=${XLA_FLAGS}"
+fi
 if [[ -n "${CUDA_VISIBLE_DEVICES:-}" ]]; then
     export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES%%,*}"
 fi
@@ -57,7 +76,7 @@ case "${TASK}" in
     *) exit 1 ;;
 esac
 
-TAG="h200_dhfr_${ARM}_${NONBONDED}_b${BUCKETS}"
+TAG="h200_dhfr_${ARM}_${NONBONDED}_b${BUCKETS}${CMDBUF_SUFFIX}"
 OUTDIR="outputs/profiling/stage2_apply_fn/${TAG}"
 RECORD="${OUTDIR}/record.json"
 mkdir -p "${OUTDIR}" outputs/logs/slurm

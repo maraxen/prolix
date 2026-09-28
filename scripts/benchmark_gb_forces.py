@@ -255,10 +255,13 @@ def test_openmm(protein, n_atoms):
     try:
         platform = mm.Platform.getPlatformByName("CUDA")
         properties = {"CudaPrecision": "single"}
-    except Exception:
-        platform = mm.Platform.getPlatformByName("CPU")
-        properties = {}
-        log.warning("CUDA platform not available for OpenMM, using CPU.")
+    except Exception as e:
+        raise RuntimeError(
+            f"CUDA platform unavailable for OpenMM (required for GPU-to-GPU speed comparison). "
+            f"Error: {e}. "
+            f"Fix: ensure CUDA-capable hardware is present, CUDA toolkit is installed, "
+            f"and OpenMM was built with CUDA support."
+        )
 
     integrator = mm.LangevinMiddleIntegrator(
         310.15 * unit.kelvin,

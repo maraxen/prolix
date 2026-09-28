@@ -20,7 +20,7 @@ ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from scripts.profiling.trace import parse_hlo_op_times  # noqa: E402
+from xtrax.profiling.trace import parse_hlo_op_times  # noqa: E402
 
 
 def load_events(path: Path) -> list[dict]:

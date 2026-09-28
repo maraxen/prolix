@@ -29,7 +29,7 @@ dependencies = [
     "jaxopt",
     "h5py>=3.16.0",
     "rdkit>=2024.3.0",
-    "xtrax>=0.4.0a6,<0.5",
+    "xtrax>=0.4.0a7,<0.5",
     "parmed>=4.3.1",
     "openmmtools",
 ]
@@ -85,9 +85,12 @@ wasm = [
 [tool.pytest.ini_options]
 timeout = 900
 timeout_method = "thread"
-# scripts/profiling/ is imported as `scripts.profiling.*` from tests/profiling/ --
-# rootdir-relative, not under src/prolix (deliberate: keeps the seam import-clean
-# of prolix). See .praxia/docs/specs/260817_jax-profiling-optimization-workflow.md P1.
+# Rootdir-relative so tests/ can import `scripts.experiments.*` helpers directly
+# (test_apply_pme_config, test_stage2_coverage_tags, test_emit_probe_record).
+# The former `scripts.profiling.*` seam this once justified was upstreamed to
+# xtrax.profiling (xtrax >= 0.4.0a7, 2026-09-01) and the local copy retired; see
+# .praxia/docs/reference/260901_named-scope-attribution-limits.md for the
+# prolix-specific attribution evidence preserved out of it.
 pythonpath = ["."]
 # Default fast CI: pytest -m "not slow" (matches .github/workflows/ci.yml test step)
 # OpenMM parity (optional dep): pytest -m "openmm"

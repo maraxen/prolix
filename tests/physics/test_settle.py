@@ -10,6 +10,7 @@ from jax import random
 
 from prolix.physics import settle
 
+
 # Enable f64 for physics precision
 class TestSETTLEPositions:
   """Test position constraint application."""
@@ -311,3 +312,62 @@ class TestGetWaterIndices:
     assert indices.shape == (0, 3)
 if __name__ == "__main__":
   pytest.main([__file__, "-v"])
+
+
+def test_settle_does_not_launch_a_water_split_across_the_boundary():
+  """#4971: a molecule whose atoms land in DIFFERENT periodic images must survive.
+
+  ``test_settle_with_pbc_crossing`` above covers a molecule that crosses a face as a
+  unit -- every atom wraps together, so the per-atom unwrap against each atom's own
+  previous position restores it. That is not the failing case.
+
+  The failing case is a molecule that is *split*: ``shift_fn`` wraps each atom
+  independently into [0, box), so a water straddling a face has its O on one side and
+  an H on the other, and the two are ~box apart in raw coordinates while being a
+  perfectly ordinary 0.9572 A bond in minimum-image terms. Nothing downstream repaired
+  that, and ``_settle_water_batch`` computed its COM and body-frame fit from the raw
+  positions -- so it solved for the orientation of an 86 A "water" and launched it.
+
+  Measured on DHFR before the fix (job 21968919): 1011 atoms, exactly 3 x 337 whole
+  molecules, displaced 8-9 A in a single step from rest with the thermostat off and
+  entirely normal forces; water fraction among them 1.0000 against a system baseline
+  of 0.8943.
+  """
+  box = jnp.array([10.0, 10.0, 10.0])
+
+  # A valid water, but split: O just inside the +x face, both H just past it and
+  # therefore wrapped to the -x side. Minimum-image O-H is ~0.96 A; raw is ~9.4 A.
+  R = jnp.array(
+    [
+      [9.8, 5.0, 5.0],  # O
+      [0.3, 5.45, 5.0],  # H1  (raw x-gap 9.5 -> min-image 0.5)
+      [0.3, 4.55, 5.0],  # H2
+    ]
+  )
+  water_indices = jnp.array([[0, 1, 2]])
+
+  # Old == new: the per-atom unwrap is a no-op here, isolating the intramolecular
+  # imaging as the only thing under test.
+  R_c = settle.settle_positions(R, R, water_indices, box=box)
+
+  def min_image(a, b):
+    d = a - b
+    return jnp.linalg.norm(d - box * jnp.round(d / box))
+
+  r_oh1 = float(min_image(R_c[1], R_c[0]))
+  r_oh2 = float(min_image(R_c[2], R_c[0]))
+  r_hh = float(min_image(R_c[2], R_c[1]))
+
+  assert abs(r_oh1 - settle.TIP3P_ROH) < 0.05, f"O-H1 = {r_oh1:.4f}"
+  assert abs(r_oh2 - settle.TIP3P_ROH) < 0.05, f"O-H2 = {r_oh2:.4f}"
+  assert abs(r_hh - settle.TIP3P_RHH) < 0.05, f"H-H = {r_hh:.4f}"
+
+  # The regression itself: SETTLE is a sub-Angstrom geometry correction, so no atom
+  # may be relocated across the box. Before the fix these moved several Angstrom.
+  for i in range(3):
+    moved = float(min_image(R_c[i], R[i]))
+    assert moved < 1.0, (
+      f"atom {i} was displaced {moved:.4f} A by a constraint solve that should move "
+      "it a fraction of a bond length -- the molecule was split across the boundary "
+      "and SETTLE fitted a rigid body to it (#4971)"
+    )

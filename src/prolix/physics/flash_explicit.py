@@ -125,8 +125,10 @@ def chunked_explicit_nonbonded_energy(
 ) -> Array:
     """Fused LJ + Direct-space Coulomb energy in one tiled O(N²) pass.
 
-    Uses dense exclusion matrices. jax.checkpoint (when remat=True) discards
-    intermediates so the backward pass recomputes the tile body.
+    Tiles the N² pair computation into L2-cache-resident T×T blocks.
+    jax.checkpoint (when remat=True) discards intermediates so the backward pass
+    recomputes the tile body, keeping working arrays in L2/SRAM instead of HBM.
+    Uses sparse pair-list exclusions from sys.
 
     Args:
         positions: (N, 3) atom positions.
@@ -134,8 +136,7 @@ def chunked_explicit_nonbonded_energy(
         sigmas: (N,) LJ sigma.
         epsilons: (N,) LJ epsilon.
         atom_mask: (N,) boolean mask.
-        dense_excl_scale_vdw: (N, N) precomputed VDW exclusion scale matrix.
-        dense_excl_scale_elec: (N, N) precomputed Coulomb exclusion scale matrix.
+        sys: PaddedSystem carrying sparse exclusion indices and scales.
         T: Tile size. N is padded internally to a multiple of T (debt 763)
             so this is safe for any N, including N < T.
         soft_core_lambda: Soft-core coupling (1.0=standard LJ).

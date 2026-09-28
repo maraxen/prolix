@@ -24,7 +24,7 @@ Generated only via `ProbeRecord.write` (never hand-authored JSON). Round-trip
 is asserted in `test_every_committed_fixture_roundtrips_probe_record_read`.
 
 The matching compiled-HLO text (needed to build the thunk-name -> scope-path
-map `scripts/profiling/trace.py`'s parser requires) is NOT committed here --
+map `xtrax.profiling.trace`'s parser requires) is NOT committed here --
 it is regenerated at test time by re-calling
 `profile_b1_water_trace.py`'s own `_build_water_plan`/`_build_batched_callable`
 helpers with the SAME `--replicas 2 --n-steps 5` parameters and

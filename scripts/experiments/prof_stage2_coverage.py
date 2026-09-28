@@ -143,7 +143,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--out", type=Path, default=None)
     args = parser.parse_args(argv)
 
-    from scripts.profiling.record import ProbeRecord
+    from xtrax.profiling.record import ProbeRecord
 
     paths = sorted(args.records_dir.glob("*.json"))
     records = []

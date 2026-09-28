@@ -31,12 +31,12 @@ _ROOT = Path(__file__).resolve().parents[2]
 if str(_ROOT) not in _sys.path:
     _sys.path.insert(0, str(_ROOT))
 
-from scripts.profiling.claims import (  # noqa: E402
+from xtrax.profiling.claims import (  # noqa: E402
     ClaimClass,
     ClaimValidityError,
     assert_claim_supported,
 )
-from scripts.profiling.record import ProbeRecord  # noqa: E402
+from xtrax.profiling.record import ProbeRecord  # noqa: E402
 
 N_SIZES = (4, 16, 64)
 BOX_SIZE = jnp.array([50.0, 50.0, 50.0], dtype=jnp.float32)

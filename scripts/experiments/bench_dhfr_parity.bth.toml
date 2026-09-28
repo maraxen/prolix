@@ -41,7 +41,7 @@ should not be expected in the catalog at all going forward.
 """
 
 [outcomes.pass]
-condition = "ratio IS NOT NULL AND ratio > 0 AND ratio < 1e6 AND per_step_corrected_s IS NOT NULL AND per_step_corrected_s > 0 AND r_squared IS NOT NULL AND r_squared > 0.8 AND prolix_ns_per_day IS NOT NULL AND openmm_ns_per_day IS NOT NULL"
+condition = "ratio IS NOT NULL AND ratio > 0 AND ratio < 1e6 AND per_step_corrected_s IS NOT NULL AND per_step_corrected_s > 0 AND r_squared IS NOT NULL AND r_squared > 0.8 AND prolix_ns_per_day IS NOT NULL AND openmm_ns_per_day IS NOT NULL AND openmm_platform = 'CUDA'"
 decision = "Harness produced a valid, finite throughput measurement backed by a well-fitting compile/compute regression for this (shim_mode, seed, gpu_tag) cell. Proceed to aggregate across cells in Phase 6 (bth campaign review / bth sql) to compute the RR5 3-tier verdict per the plan's gate rule."
 reasoning = "A finite positive ratio with a positive per-step slope and r_squared > 0.8 means the regression sweep produced a physically sensible, well-explained fit end-to-end (proxide parse -> box glue -> filtered bonded terms -> MolecularBundle -> EnsemblePlan production sweep; OpenMM System deserialize -> Context -> stepped production window) without NaN/Inf, crash, or a degenerate fit. The r_squared floor catches a measurement-pipeline failure (e.g. noisy/non-linear timings) that a raw ratio check alone would miss. The upper bound (1e6) is a sanity cap catching a degenerate near-zero openmm_ns_per_day (e.g. OpenMM stalled) rather than a real speed claim."
 
@@ -67,6 +67,23 @@ openmm_platform = "str"
 openmm_n_production_steps = "int"
 dt_fs = "float"
 smoke = "bool"
+# Pair-count attribution (task 260903_dhfr_nl_capacity). Recorded so a throughput
+# change can be read against the change in evaluated pairs rather than taken on
+# trust. nl_candidate_pairs = n_atoms * nl_capacity counts pair *slots evaluated*
+# by the O(N*K) kernel, matching how dense_equivalent_pairs (n_atoms^2) counts the
+# flash kernel -- masked slots still cost FLOPs in both, so both are counted the
+# same way. Null on an --backend openmm leg, as the other prolix-side fields are.
+#
+# NOTE: the outcomes conditions above are deliberately NOT extended with an
+# nl_retry_count = 0 clause. This is a confirmation-mode campaign and its gate is
+# pre-registered; the equivalent protection is enforced in the harness instead
+# (bench_dhfr_parity.py::_require_no_nl_retry raises), so a run whose timed region
+# contained a neighbor-list realloc never produces a row to gate in the first place.
+nl_capacity = "int"
+nl_retry_count = "int"
+nl_candidate_pairs = "int"
+dense_equivalent_pairs = "int"
+pair_reduction_factor = "float"
 
 [metadata]
 campaign_id = "s2-dhfr-rr5-parity"

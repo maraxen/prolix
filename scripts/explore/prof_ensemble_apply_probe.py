@@ -154,7 +154,7 @@ def _apply_step_fn(bundle, *, nonbonded: str, seed: int, dt: float, kT: float, g
 def _capture_trace(fn, trace_dir: Path) -> tuple[dict, dict[str, float], list[dict], str]:
     import jax
 
-    from scripts.profiling.trace import (
+    from xtrax.profiling.trace import (
         parse_dispatch_counts,
         parse_hlo_op_times,
         parse_scopes,
@@ -264,7 +264,7 @@ def main(argv: list[str] | None = None) -> int:
     import jax.numpy as jnp
 
     from prolix.simulate import BOLTZMANN_KCAL
-    from scripts.profiling.record import ProbeRecord
+    from xtrax.profiling.record import ProbeRecord
 
     _require_gpu()
 
