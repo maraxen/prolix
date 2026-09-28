@@ -157,11 +157,41 @@ def make_neighbor_list_fn(
   box_size: Array,
   cutoff: float,
   capacity_multiplier: float = 1.25,
-  disable_cell_list: bool = True,  # backlog #4699: cell-list silently drops pairs at protein+solvent density
+  disable_cell_list: bool = False,
   dr_threshold: float = 0.5,
 ) -> Callable[..., partition.NeighborList]:
-  """Creates a neighbor list function optimized for solvent systems."""
-  return partition.neighbor_list(
+  """Creates a neighbor list function optimized for solvent systems.
+
+  Positions are wrapped into ``[0, box)`` before being handed to jax_md
+  (backlog #4699). This is required for correctness, not just tidiness:
+  ``jax_md.partition.cell_list_fn`` bins particles with
+
+      indices = jnp.array(position / cell_size, dtype=i32)   # partition.py:391
+
+  which truncates *toward zero* with no wrapping and no bounds check, so the
+  cell list assumes positions already lie inside ``[0, box)``. prolix passes
+  raw frame coordinates, which for a solvated protein are typically centred on
+  the origin -- a negative coordinate then aliases onto the wrong cell
+  (``int32(-0.4) == int32(0.4) == 0``) and a coordinate past ``L`` hashes
+  outside ``cell_count``. Either way those particles' true neighbours are
+  never enumerated and the pairs vanish with no error.
+
+  Measured on solvated 1vii (43.3 A box, coords spanning -22.1 to +23.1):
+  the cell list dropped 207,717 of 1,059,926 in-cutoff pairs (**19.6%**);
+  with wrapping it returns exactly the brute-force candidate set (missing 0).
+  See ``tests/physics/test_cell_list_pair_completeness.py``.
+
+  Wrapping is physically a no-op for a periodic system -- it selects a
+  different periodic image of the same configuration -- and is invisible to
+  the neighbour list's own rebuild check, which measures displacement through
+  the periodic (minimum-image) ``displacement_fn``. The returned ``idx`` is a
+  list of atom *indices*, so callers may continue to evaluate forces with
+  their original unwrapped coordinates.
+
+  With the precondition now enforced, the cell list is safe and is enabled by
+  default; ``disable_cell_list=True`` falls back to O(N^2) construction.
+  """
+  fns = partition.neighbor_list(
     displacement_fn,
     box_size,
     r_cutoff=cutoff,
@@ -171,6 +201,21 @@ def make_neighbor_list_fn(
     mask_self=True,
     fractional_coordinates=False,
   )
+
+  box = jnp.asarray(box_size)
+
+  def _wrap(position: Array) -> Array:
+    return jnp.mod(position, box)
+
+  def allocate(position: Array, **kwargs) -> partition.NeighborList:
+    return fns.allocate(_wrap(position), **kwargs)
+
+  def update(
+    position: Array, neighbors: partition.NeighborList, **kwargs
+  ) -> partition.NeighborList:
+    return fns.update(_wrap(position), neighbors, **kwargs)
+
+  return partition.NeighborListFns(allocate, update)
 
 
 def compute_exclusion_mask_neighbor_list(

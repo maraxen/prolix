@@ -45,7 +45,11 @@ DEFAULT_ALPHA = 0.34
 DEFAULT_GRID = 64 # Use larger grid for stability in larger boxes
 DEFAULT_CUTOFF_A = 9.0
 
-OPENMM_PLATFORM_ORDER = ("CUDA", "OpenCL", "HIP", "CPU", "Reference")
+# GPU platforms, in preference order. This module performs *speed* comparisons
+# against prolix-on-GPU, so a CPU/Reference platform is never an acceptable
+# fallback here -- it silently turns a GPU-vs-GPU benchmark into GPU-vs-CPU and
+# flatters prolix (#295). run_openmm_bench raises rather than falling back.
+OPENMM_GPU_PLATFORMS = ("CUDA", "OpenCL", "HIP")
 
 
 @dataclass
@@ -177,44 +181,48 @@ def run_prolix_bench(n_atoms: int, box: float, warmup: int, repeats: int) -> tup
   return float(arr.mean()), float(arr.std()), get_vram_usage_gb()
 
 
-def run_openmm_bench(n_atoms: int, box: float, warmup: int, repeats: int) -> tuple[float, float]:
+def run_openmm_bench(n_atoms: int, box: float, warmup: int, repeats: int) -> tuple[float, float, str]:
     import openmm
     from openmm import app, unit
-    
+
     omm_system = build_openmm_system(n_atoms, box)
     integrator = openmm.VerletIntegrator(0.001)
-    
-    # Select best platform
+
+    # Select best GPU platform (CUDA, OpenCL, or HIP)
     platform = None
-    for pname in OPENMM_PLATFORM_ORDER:
+    for pname in OPENMM_GPU_PLATFORMS:
         try:
             platform = openmm.Platform.getPlatformByName(pname)
             break
         except:
             continue
-            
+
     if platform is None:
-        raise RuntimeError("No OpenMM platform found")
-        
+        raise RuntimeError(
+            "No GPU platform available for OpenMM (CUDA, OpenCL, or HIP required for "
+            "GPU-to-GPU speed comparison). Ensure CUDA-capable hardware, CUDA toolkit, "
+            "and OpenMM GPU plugins are installed."
+        )
+
     context = openmm.Context(omm_system, integrator, platform)
-    
+
     # Set positions
     rng = np.random.default_rng(42)
     positions = rng.uniform(0, box/10.0, (n_atoms, 3))
     context.setPositions(positions)
-    
+
     # Warmup
     for _ in range(warmup):
         context.getState(getEnergy=True, getForces=True)
-        
+
     samples = []
     for _ in range(repeats):
         t0 = time.perf_counter()
         context.getState(getEnergy=True, getForces=True)
         samples.append((time.perf_counter() - t0) * 1000.0)
-        
+
     arr = np.array(samples)
-    return float(arr.mean()), float(arr.std())
+    return float(arr.mean()), float(arr.std()), platform.getName()
 
 
 def main():
@@ -245,9 +253,9 @@ def main():
     # OpenMM
     if not args.skip_openmm:
       try:
-          m_o, s_o = run_openmm_bench(n, DEFAULT_BOX_A, args.warmup, args.repeats)
+          m_o, s_o, platform_name = run_openmm_bench(n, DEFAULT_BOX_A, args.warmup, args.repeats)
           print(f"{n:8d} | {'OpenMM':>8} | {m_o:10.3f} | {s_o:10.3f} | {'n/a':>8}")
-          results.append(TimingRow("OpenMM", "cuda", n, m_o, s_o, 1000.0/m_o, 0.0))
+          results.append(TimingRow("OpenMM", platform_name.lower(), n, m_o, s_o, 1000.0/m_o, 0.0))
       except Exception as e:
           print(f"{n:8d} | {'OpenMM':>8} | {'FAILED':>10} | {'-':>10} | {'-':>8}")
 
