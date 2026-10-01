@@ -24,7 +24,7 @@ _SCRIPTS_EXP = Path(__file__).resolve().parents[2] / "scripts" / "experiments"
 if str(_SCRIPTS_EXP) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS_EXP))
 
-from nl_omm_parity import _dispersion_correction_1vii, _bundle_from_1vii_gold
+from nl_omm_parity import _bundle_from_1vii_gold
 
 
 @pytest.fixture(scope="module")
@@ -72,6 +72,16 @@ def test_1vii_bundle_construction_no_crash(bundle_1vii, gold_1vii):
     assert bundle.excl_dense_indices is not None, "Bundle should have excl_dense_indices populated by make_bundle_from_system"
 
 
+@pytest.mark.xfail(
+    strict=True,
+    reason="Real residual, previously masked: with the dispersion tail removed exactly "
+    "(use_dispersion_correction=False) prolix is -9799.57 vs gold -9790.92 kcal/mol, "
+    "|dE|=8.65 kcal/mol (titanix CPU, 2026-10-01). The earlier PASS (|dE|=0.034) added "
+    "a hand-set +156.8 kcal/mol 'dispersion correction' whereas the actual 1vii tail is "
+    "~-148.2 kcal/mol, so the constant absorbed this residual. Same class as backlog "
+    "#5020 (NL bundle energy vs OpenMM residual). Band 0.1 kcal/mol is pre-registered in "
+    "nl_omm_parity.bth.toml and is NOT loosened here.",
+)
 def test_1vii_nl_energy_parity(bundle_1vii, gold_1vii):
     """Energy parity: NL+switch prolix vs gold within 0.1 kcal/mol.
 
@@ -91,6 +101,7 @@ def test_1vii_nl_energy_parity(bundle_1vii, gold_1vii):
         include_nonbonded=True,
         lj_switch_width=1.0,
         pme_grid_points=int(rec["pme_grid_points"]),
+        use_dispersion_correction=False,  # gold: setUseDispersionCorrection(False)
     )
 
     # Build neighbor list
@@ -110,16 +121,9 @@ def test_1vii_nl_energy_parity(bundle_1vii, gold_1vii):
     e_prolix = float(energy_fn(bundle.positions, neighbor=nbr))
     e_gold = float(rec["energy_kcal"])
 
-    # WORKAROUND for dispersion tail bug (to be fixed separately)
-    # OpenMM gold was emitted with setUseDispersionCorrection(False), but Prolix
-    # unconditionally adds lj_dispersion_tail_energy (making energy MORE negative).
-    # This is a known issue tracked separately. For now, ADD back the correction.
-    dispersion_tail_correction = _dispersion_correction_1vii()
-    e_prolix_corrected = e_prolix + dispersion_tail_correction
+    delta_e = abs(e_prolix - e_gold)
 
-    delta_e = abs(e_prolix_corrected - e_gold)
-
-    assert delta_e <= 0.1, f"Energy mismatch too large: delta_e={delta_e:.4f} kcal/mol (prolix_corrected={e_prolix_corrected:.2f}, gold={e_gold:.2f})"
+    assert delta_e <= 0.1, f"Energy mismatch too large: delta_e={delta_e:.4f} kcal/mol (prolix={e_prolix:.2f}, gold={e_gold:.2f})"
 
 
 def test_1vii_nl_force_parity(bundle_1vii, gold_1vii):
@@ -141,6 +145,7 @@ def test_1vii_nl_force_parity(bundle_1vii, gold_1vii):
         include_nonbonded=True,
         lj_switch_width=1.0,
         pme_grid_points=int(rec["pme_grid_points"]),
+        use_dispersion_correction=False,  # gold: setUseDispersionCorrection(False)
     )
 
     # Build neighbor list
@@ -166,3 +171,43 @@ def test_1vii_nl_force_parity(bundle_1vii, gold_1vii):
     assert force_rmse < 3.0, f"Force RMSE too large: {force_rmse:.4f} kcal/(mol*A)"
 
 
+
+
+def test_1vii_dispersion_correction_flag_removes_only_the_tail(bundle_1vii, gold_1vii):
+    """use_dispersion_correction toggles exactly the isotropic LJ tail.
+
+    The difference must equal ``explicit_corrections.lj_dispersion_tail_energy`` on
+    the same system. (nl_omm_parity.py used to add back a hand-set +156.8 kcal/mol
+    instead, which is not this tail -- see the xfail on test_1vii_nl_energy_parity.)
+    """
+    from prolix.api.bundle_md import energy_fn_from_bundle, physics_system_from_bundle
+    from prolix.physics import explicit_corrections
+    from prolix.physics import neighbor_list as nl
+    from prolix.physics.pbc import create_periodic_space
+
+    rec = gold_1vii
+    bundle = bundle_1vii
+    kw = {"include_nonbonded": True, "lj_switch_width": 1.0,
+          "pme_grid_points": int(rec["pme_grid_points"])}
+    e_on_fn = energy_fn_from_bundle(bundle, **kw)
+    e_off_fn = energy_fn_from_bundle(bundle, use_dispersion_correction=False, **kw)
+
+    displacement_fn, _ = create_periodic_space(jnp.diag(bundle.box))
+    neighbor_fn = nl.make_neighbor_list_fn(
+        displacement_fn, jnp.diag(bundle.box), float(bundle.cutoff_distance),
+    )
+    nbr = neighbor_fn.update(bundle.positions, neighbor_fn.allocate(bundle.positions))
+
+    diff = float(e_on_fn(bundle.positions, neighbor=nbr)) - float(
+        e_off_fn(bundle.positions, neighbor=nbr)
+    )
+    sys = physics_system_from_bundle(bundle, bundle.positions,
+                                     pme_grid_points=int(rec["pme_grid_points"]))
+    safe_sig = jnp.where(sys.atom_mask, sys.sigmas, 1.0)
+    safe_eps = jnp.where(sys.atom_mask, sys.epsilons, 0.0)
+    tail = float(explicit_corrections.lj_dispersion_tail_energy(
+        jnp.asarray(sys.box_size), safe_sig, safe_eps, float(sys.nonbonded_cutoff),
+        sys.atom_mask,
+    ))
+    assert tail < -100.0, f"1vii tail should be ~-157 kcal/mol, got {tail:.2f}"
+    assert diff == pytest.approx(tail, abs=1e-6)

@@ -36,25 +36,6 @@ from nonbonded_omm_parity.lj_oracle import (  # noqa: E402
 )
 
 
-def _dispersion_correction_1vii() -> float:
-    """Temporary workaround for dispersion-correction energy difference.
-
-    OpenMM gold was emitted with setUseDispersionCorrection(False), but Prolix
-    unconditionally adds lj_dispersion_tail_energy (~156.8 kcal/mol for 1vii system).
-    This is a known issue being tracked separately (disable_dispersion_correction parameter).
-    For now, return the measured correction so both _compare_probe and test can apply it.
-
-    IMPORTANT: This is a fixed magic-number workaround specific to the CURRENT 1vii gold
-    vendoring (895 waters, current box/padding, OpenMM 8.3.1 Reference platform).
-    If the gold JSON at data/oracles/openmm_8.3.1/nl_1vii.json is ever re-emitted with
-    different system parameters (water count, box size, padding), this constant will
-    silently go stale and energy comparisons will fail. The proper fix (a configurable
-    disable_dispersion_correction parameter threaded through energy_fn_from_bundle) is
-    deferred — see .praxia/handoffs/prolix_Sprint-113---nb-parity_20260828_191126_*.yaml
-    """
-    return 156.8  # kcal/mol
-
-
 def _bundle_from_1vii_gold(rec: dict):
     """Build a MolecularBundle from vendored 1vii gold (nonbonded-only).
 
@@ -305,6 +286,8 @@ def _compare_probe(probe: str, gold: Path) -> dict:
         include_nonbonded=True,
         lj_switch_width=1.0,
         pme_grid_points=int(rec["pme_grid_points"]),
+        # The gold was emitted with setUseDispersionCorrection(False).
+        use_dispersion_correction=False,
     )
 
     # Build neighbor list with overflow check (mandatory gate).
@@ -345,11 +328,7 @@ def _compare_probe(probe: str, gold: Path) -> dict:
     forces_gold = np.asarray(rec["forces_kcal_mol_A"], dtype=np.float64)
     force_rmse = float(np.sqrt(np.mean((np.asarray(forces_prolix) - forces_gold) ** 2)))
 
-    # WORKAROUND: dispersion-correction energy difference (gold emitted without it, Prolix adds it)
-    # See _dispersion_correction_1vii() for details. This is a known issue being fixed separately.
-    dispersion_correction = _dispersion_correction_1vii()
-    e_prolix_corrected = e_prolix + dispersion_correction
-    delta_e = e_prolix_corrected - float(rec["energy_kcal"])
+    delta_e = e_prolix - float(rec["energy_kcal"])
 
     return result_row(
         probe=rec.get("probe", probe),
@@ -359,7 +338,7 @@ def _compare_probe(probe: str, gold: Path) -> dict:
         repo=_REPO,
         delta_e=delta_e,
         force_rmse=force_rmse,
-        e_prolix=e_prolix_corrected,
+        e_prolix=e_prolix,
     )
 
 
