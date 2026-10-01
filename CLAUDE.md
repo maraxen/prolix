@@ -4,7 +4,7 @@ Prolix is a JAX-based molecular dynamics engine for protein folding and dynamics
 
 ## CURRENT STATE
 
-last-edit: 2026-08-07
+last-edit: 2026-10-01
 
 ongoing-work: P1a MolecularBundle (bucketed JIT boundary). NPT KE init bug resolved
 (settle.py:1944 `/mu` → `*mu`, 2026-06-01, commit b6e5bb9). LFMiddle campaign 89c9a900
@@ -20,9 +20,16 @@ job 19774893, T_rot=298.93±0.29 K; GPU fast-suite regression check, job 1987507
 clean). **Size sweep ba334c1f re-run at genuine dt=1.0 fs (2026-08-11, campaign
 46a4d737, jobs 19882395/19898460/19898934):** the crossover conclusion holds
 unchanged — N\*=16 (±15 K), N\*=64 (±5 K), T_rot faithful at every size (max |dev|
-3.6 K). The residual small-N warm bias is confirmed translational finite-size, not
-an artifact of the half_dt bug; see
-`.praxia/docs/research/260612_p5-dt1fs-size-crossover.md`.
+3.6 K). **Correction (2026-10-01):** the "small-N warm bias" is not physics — it is a
+DOF-counting artifact of the analysis estimator (system-COM KE left in T_trans but
+excluded from its 3N−3 DOF; +3T/(3N−3) = +300 K at n=2). The same runs recorded the
+COM-subtracted value, `t_trans_corrected`: 302.7 K (n=2), 301.2 (16), 300.4 (64),
+299.6 (216), 299.8 (512), 299.5 (895) — flat at the target. Use
+`prolix.physics.temperature_scan.rigid_tip3p_temperatures` (COM-subtracted) for
+temperatures; see `.praxia/docs/research/260612_p5-dt1fs-size-crossover.md`.
+**LFMiddle caveat (2026-10-01):** `settle_lfmiddle_langevin` and the modular
+`lfmiddle_langevin` sequence advanced positions 1.5·dt·v per step (three A(0.5) drifts;
+fixed), so campaign 89c9a900's "FALSIFIED" verdict measured a defective integrator.
 
 notes:
 - Tiling bug found in `src/prolix/physics/optimization.py`: `inner_tile_size` for the
@@ -63,9 +70,10 @@ Exploratory ideas for future sprints (electrostatics, allostery, spectral analys
 **Status**: v1.0 Release; dt cap lifted to ≤ 1.0 fs at production scale (2026-06-13)  
 **Decision**: Use SETTLE + Langevin thermostat  
 **Constraint**: dt ≤ 1.0 fs for production-scale NVT (n_waters ≳ 16, gamma ≈ 10 ps⁻¹);
-dt ≤ 0.5 fs for very small systems (n ≲ 16) or weak friction (gamma ≈ 1 ps⁻¹).
-Validated by gate job 15870804 + size sweep ba334c1f; the residual small-N warm bias
-is translational finite-size, not dt instability. See
+dt ≤ 0.5 fs for weak friction (gamma ≈ 1 ps⁻¹). Validated by gate job 15870804 + size
+sweep ba334c1f (re-run 46a4d737). The former "n ≲ 16" restriction rested on a small-N
+warm bias that turned out to be an estimator DOF artifact (corrected T_trans is within
+3 K of 300 K at every size, n=2–895), so it has no remaining evidential basis. See
 `.praxia/docs/research/260612_p5-dt1fs-size-crossover.md`.
 
 ### Background
@@ -89,11 +97,11 @@ At smaller timesteps (dt ≤ 0.5 fs), the per-step constraint impulse magnitude 
 
 **Resolution (2026-06-13):** the C3 AM-conservation correction (678c9cb) plus adequate
 friction (gamma ≈ 10 ps⁻¹) lifted this to **dt ≤ 1.0 fs at production scale**. Gate job
-15870804 (895 waters) holds T_rot = 299.6 K, and size sweep ba334c1f shows the residual
-warm bias is **translational finite-size** — concentrated in the 3·N−3 translational DOF,
-so it only bites for very small systems (n ≲ 16) and washes out by n ≳ 16 (T_total within
-±15 K) / n ≳ 64 (within ±5 K). T_rot is faithful at every size. Use dt ≤ 0.5 fs only for
-n ≲ 16 or weak friction (gamma ≈ 1 ps⁻¹). See
+15870804 (895 waters) holds T_rot = 299.6 K. The size sweep's apparent small-N warm bias
+(T_trans 615 K at n=2) was an analysis artifact: the system-COM mode's KE was counted in
+T_trans but its 3 DOF were not. COM-subtracted T_trans recorded by the same runs is
+299.5–302.7 K across n=2–895, and T_rot is faithful at every size. Use dt ≤ 0.5 fs only
+for weak friction (gamma ≈ 1 ps⁻¹, not covered by the sweep). See
 `.praxia/docs/research/260612_p5-dt1fs-size-crossover.md`.
 
 ### Production Usage
@@ -105,7 +113,7 @@ from prolix.physics import settle
 
 init_fn, apply_fn = settle.settle_langevin(
     energy_fn, shift_fn,
-    dt=1.0,  # AKMA units (1.0 fs) — validated at production scale (n≳16, gamma≈10); use 0.5 for n≲16 / weak friction
+    dt=1.0,  # AKMA units (1.0 fs) — validated n=2–895 waters at gamma≈10; use 0.5 for weak friction
     kT=kT,
     gamma=10.0,  # ps^-1 — adequate friction is required for the dt=1.0 fs lift
     mass=masses,
@@ -116,7 +124,7 @@ init_fn, apply_fn = settle.settle_langevin(
 ```
 
 **Key parameters**:
-- `dt=1.0`: Recommended timestep at production scale (n≳16, gamma≈10 ps⁻¹); use `dt=0.5` for very small systems (n≲16) or weak friction
+- `dt=1.0`: Recommended timestep (validated n=2–895 waters at gamma≈10 ps⁻¹); use `dt=0.5` for weak friction
 - `project_ou_momentum_rigid=True`: Samples noise in 6D rigid-body subspace per water
 - `projection_site="post_o"`: Apply projection after O-step (Ornstein-Uhlenbeck stochastic update)
 
@@ -201,7 +209,7 @@ equilibration, use `batched_equilibrate_nl`.
 
 ### Known Limitations (v1.0 / v1.1)
 
-1. **NVT timestep cap**: dt ≤ 1.0 fs at production scale (n_waters ≳ 16, gamma ≈ 10 ps⁻¹; gate job 15870804, sweep ba334c1f). dt ≤ 0.5 fs for n ≲ 16 or weak friction (gamma ≈ 1 ps⁻¹). Residual small-N warm bias is translational finite-size (3·N−3 DOF), not dt instability — see `.praxia/docs/research/260612_p5-dt1fs-size-crossover.md`.
+1. **NVT timestep cap**: dt ≤ 1.0 fs at production scale (n_waters ≳ 16, gamma ≈ 10 ps⁻¹; gate job 15870804, sweep ba334c1f). dt ≤ 0.5 fs for weak friction (gamma ≈ 1 ps⁻¹). The apparent small-N warm bias was an estimator DOF artifact, not dynamics (corrected 2026-10-01) — see `.praxia/docs/research/260612_p5-dt1fs-size-crossover.md`.
 2. **NPT long-trajectory divergence**: Temperature runaway (→ 10^115 K) beyond ~10 ps due to CSVR + rigid-water KE coupling. Use NVT for longer production runs. *KE init spike (T≈5000 K at step 0) fixed 2026-06-01: `settle.py:1944` `/ mu` → `* mu` (Bernetti-Bussi sign correction); `test_npt_20ps_liquid_water` xfail removed (commit b6e5bb9).* Long-trajectory divergence root cause (CSVR+SETTLE decoupling) addressed in Phase 6.
 3. **Batched SETTLE constraints**: `make_integrator(..., water_indices=...)` is not supported in v1.0. For batched simulations with SETTLE-constrained water, use `settle.settle_langevin` directly and wrap in `jax.vmap` (see v1.1 roadmap for full modular support).
 
@@ -233,8 +241,8 @@ A constraint-aware thermostat that only couples to unconstrained DOF could elimi
 ### Production Status
 
 **v1.0**: settle_langevin validated and production-ready (NVT only). dt ≤ 1.0 fs at
-production scale (n ≳ 16, gamma ≈ 10 ps⁻¹; gate 15870804 + sweep ba334c1f); dt ≤ 0.5 fs
-for n ≲ 16 / weak friction.
+gamma ≈ 10 ps⁻¹ (gate 15870804 + sweep ba334c1f, n=2–895 waters); dt ≤ 0.5 fs for weak
+friction.
 **v1.1+**: ~~LFMiddle hypothesis test~~ (falsified), constraint-aware thermostat, NPT fix planned
 
 ## Phase 2–4: Integrator Modular Architecture (v1.0 Release)
@@ -269,7 +277,7 @@ for n ≲ 16 / weak friction.
 
 ### Known Limitations (v1.0)
 
-- dt ≤ 1.0 fs at production scale (n ≳ 16, gamma ≈ 10 ps⁻¹); dt ≤ 0.5 fs for n ≲ 16 / weak friction (documented in Phase 2 section)
+- dt ≤ 1.0 fs at production scale (n ≳ 16, gamma ≈ 10 ps⁻¹); dt ≤ 0.5 fs for weak friction (documented in Phase 2 section)
 - NPT long-trajectory divergence (> 10 ps); use NVT for production (documented in Phase 2 section)
 - Batched SETTLE: smoke-tested but not exhaustively validated at scale (see v1.1 roadmap)
 
@@ -278,6 +286,11 @@ for n ≲ 16 / weak friction.
 ## v1.1 Roadmap (Deferred Features)
 
 ### Phase 3: LFMiddle Optimization & dt-Sweep Hypothesis — ~~FALSIFIED~~ (2026-06-01)
+
+**Caveat (2026-10-01):** the LFMiddle integrator tested here had three A(0.5) drifts and
+advanced positions 1.5·dt·v per step with a stale returned force (fixed in
+`settle_lfmiddle_langevin` and the modular `lfmiddle_langevin` sequence). The verdict
+below therefore applies to that defective scheme, not to LF-Middle splitting itself.
 
 **Result**: Hypothesis closed. Campaign 89c9a900 (46 runs, all dt ∈ {0.25, 0.5, 1.0} fs,
 both lfmiddle and baoab control, system sizes 2–895 waters) produced 0 passes. Mean T
@@ -306,9 +319,9 @@ show genuine thermal runaway independent of the tiling bug.*
 
 **Status**: The C3 AM-conservation correction (678c9cb) achieved stable dt=1.0 fs NVT at
 production scale — gate job 15870804 (895 waters, T_rot 299.6 K) + size sweep ba334c1f.
-The remaining sub-goal is the small-N regime: a translational finite-size warm bias
-(n ≲ 16, only 3·N−3 translational DOF) and the weak-friction (gamma ≈ 1 ps⁻¹) case still
-need dt ≤ 0.5 fs. See `.praxia/docs/research/260612_p5-dt1fs-size-crossover.md`.
+The apparent small-N warm bias was an estimator DOF artifact (corrected 2026-10-01), so
+the remaining sub-goal is the weak-friction (gamma ≈ 1 ps⁻¹) case, which still needs
+dt ≤ 0.5 fs. See `.praxia/docs/research/260612_p5-dt1fs-size-crossover.md`.
 
 **Objective**: Fix dt ≤ 0.5 fs limitation via constraint-aware thermostat that only couples to unconstrained DOF
 
@@ -365,7 +378,7 @@ None. New APIs are additive.
 
 ### Known Limitations
 
-1. dt ≤ 1.0 fs for NVT at production scale (n ≳ 16, gamma ≈ 10 ps⁻¹; gate 15870804 + sweep ba334c1f, 2026-06-13); dt ≤ 0.5 fs for n ≲ 16 or weak friction. LFMiddle hypothesis falsified (campaign 89c9a900, 2026-06-01); the cap was instead lifted by C3 AM conservation (678c9cb). Residual small-N warm bias is translational finite-size — see `.praxia/docs/research/260612_p5-dt1fs-size-crossover.md`.
+1. dt ≤ 1.0 fs for NVT at production scale (n ≳ 16, gamma ≈ 10 ps⁻¹; gate 15870804 + sweep ba334c1f, 2026-06-13); dt ≤ 0.5 fs for weak friction. LFMiddle hypothesis "falsified" (campaign 89c9a900, 2026-06-01) — but on a 1.5·dt-defective LFMiddle integrator, fixed 2026-10-01; the cap was instead lifted by C3 AM conservation (678c9cb). The apparent small-N warm bias was an estimator DOF artifact — see `.praxia/docs/research/260612_p5-dt1fs-size-crossover.md`.
 2. NPT long-trajectory divergence beyond ~10 ps (use NVT for production). *KE init spike fixed (commit b6e5bb9, 2026-06-01).*
 3. Batched SETTLE validated on small systems (4 waters, 100 steps); large-scale testing in v1.1
 

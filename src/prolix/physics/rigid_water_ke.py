@@ -13,7 +13,25 @@ def rigid_tip3p_box_ke_kcal(
   mass: Array,
   n_waters: int,
 ) -> Array:
-  """Total kinetic energy (kcal/mol) as sum of per-molecule COM + rotational rigid-body KE.
+  """Total rigid-body kinetic energy (kcal/mol); see :func:`rigid_tip3p_ke_components`.
+
+  This includes the kinetic energy of the *system* centre of mass. When that mode is
+  not removed by the integrator (``remove_linear_com_momentum=False``) it is a live,
+  thermalized 3-DOF mode, so dividing this total by ``6 N - 3`` overstates the
+  temperature by ``3 T / (6 N - 3)`` (+100 K at N=2). Use
+  :func:`prolix.physics.temperature_scan.rigid_tip3p_temperatures` for temperatures.
+  """
+  ke_trans, ke_rot = rigid_tip3p_ke_components(position, momentum, mass, n_waters)
+  return ke_trans + ke_rot
+
+
+def rigid_tip3p_ke_components(
+  position: Array,
+  momentum: Array,
+  mass: Array,
+  n_waters: int,
+) -> tuple[Array, Array]:
+  """Rigid-body kinetic energy (kcal/mol) split into ``(sum of per-molecule COM KE, rotational KE)``.
 
   Uses laboratory-frame positions ``r_i`` and conjugate momenta ``p_i`` with masses ``m_i``
   grouped as ``(O, H, H)`` per water. This matches the physical kinetic energy counted by
@@ -49,6 +67,7 @@ def rigid_tip3p_box_ke_kcal(
     )
     omega = jnp.linalg.solve(inertia, ang[:, None]).squeeze(-1)  # see NOTES in docstring
     ke_r = 0.5 * jnp.dot(ang, omega)
-    return ke_t + ke_r
+    return ke_t, ke_r
 
-  return jax.vmap(one_water)(pos, mom, mw).sum()
+  ke_t, ke_r = jax.vmap(one_water)(pos, mom, mw)
+  return ke_t.sum(), ke_r.sum()
