@@ -36,6 +36,10 @@ def rigid_tip3p_temperatures(position, momentum, mass, n_waters: int) -> dict:
 
   Rotational KE is the rigid-body ``L . omega / 2`` per water, so internal
   (constraint-violating) velocity components are excluded.
+
+  Positions are used as given (no minimum-image unwrapping): each water's atoms
+  must be contiguous in space, as SETTLE-maintained positions are. Per-atom-wrapped
+  coordinates (a water split across the box boundary) give wrong COM and inertia.
   """
   ke_trans, ke_rot = rigid_tip3p_ke_components(position, momentum, mass, n_waters)
   ke_com = system_com_ke_kcal(momentum, mass)
@@ -61,34 +65,54 @@ def scan_settle_rigid_temperatures(
     n_steps: int,
     burn: int,
     n_waters: int,
+    subtract_system_com: bool = False,
 ):
   r"""Advance ``apply_fn`` for ``n_steps`` inside ``jax.lax.scan``; return T(K) after burn.
 
-  T is the COM-subtracted rigid-body total temperature (see
-  :func:`rigid_tip3p_temperatures`).
+  By default T is the legacy estimator ``2 KE_rigid / ((6N - 3) kB)``, kept so that
+  pre-registered sidecars built on it (e.g. ``lfmiddle_dt_sweep.bth.toml``) keep
+  measuring the same quantity. It includes the system-COM kinetic energy but not its
+  3 DOF, so when the integrator does not remove COM momentum it reads high by
+  ``3 T / (6N - 3)`` (+100 K at N=2, +0.17 K at N=895). Pass
+  ``subtract_system_com=True`` for the unbiased total from
+  :func:`rigid_tip3p_temperatures`.
 
   Host supplies concrete ``n_steps``, ``burn``, and ``n_waters`` (static at compile time).
   Wrap the returned callable in ``jax.jit`` once; do not drive steps from a Python ``for``.
   """
 
+  dof_rigid = rigid_tip3p_dof(n_waters)
+
   def body(carry, _):
     carry = apply_fn(carry)
-    t_k = rigid_tip3p_temperatures(
-        carry.positions, carry.momentum, carry.mass, n_waters
-    )["t_total"]
+    if subtract_system_com:
+      t_k = rigid_tip3p_temperatures(
+          carry.positions, carry.momentum, carry.mass, n_waters
+      )["t_total"]
+    else:
+      ke_t, ke_r = rigid_tip3p_ke_components(
+          carry.positions, carry.momentum, carry.mass, n_waters
+      )
+      t_k = 2.0 * (ke_t + ke_r) / (dof_rigid * BOLTZMANN_KCAL)
     return carry, t_k
 
   _, temps = jax.lax.scan(body, state, None, length=n_steps)
   return temps[burn:]
 
 
-def make_jitted_temperature_scan(apply_fn, *, n_steps: int, burn: int, n_waters: int):
-  """Return ``jax.jit`` scan over a fixed horizon (compile once per shape/length)."""
+def make_jitted_temperature_scan(
+    apply_fn, *, n_steps: int, burn: int, n_waters: int, subtract_system_com: bool = False
+):
+  """Return ``jax.jit`` scan over a fixed horizon (compile once per shape/length).
+
+  See :func:`scan_settle_rigid_temperatures` for ``subtract_system_com``.
+  """
   fn = functools.partial(
       scan_settle_rigid_temperatures,
       apply_fn=apply_fn,
       n_steps=n_steps,
       burn=burn,
       n_waters=n_waters,
+      subtract_system_com=subtract_system_com,
   )
   return jax.jit(fn)

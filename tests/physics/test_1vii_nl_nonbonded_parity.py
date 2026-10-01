@@ -74,6 +74,7 @@ def test_1vii_bundle_construction_no_crash(bundle_1vii, gold_1vii):
 
 @pytest.mark.xfail(
     strict=True,
+    raises=AssertionError,  # a crash on this path must not count as the expected failure
     reason="Real residual, previously masked: with the dispersion tail removed exactly "
     "(use_dispersion_correction=False) prolix is -9799.57 vs gold -9790.92 kcal/mol, "
     "|dE|=8.65 kcal/mol (titanix CPU, 2026-10-01). The earlier PASS (|dE|=0.034) added "
@@ -209,5 +210,5 @@ def test_1vii_dispersion_correction_flag_removes_only_the_tail(bundle_1vii, gold
         jnp.asarray(sys.box_size), safe_sig, safe_eps, float(sys.nonbonded_cutoff),
         sys.atom_mask,
     ))
-    assert tail < -100.0, f"1vii tail should be ~-157 kcal/mol, got {tail:.2f}"
+    assert tail < -100.0, f"1vii tail should be ~-148 kcal/mol, got {tail:.2f}"
     assert diff == pytest.approx(tail, abs=1e-6)

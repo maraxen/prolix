@@ -352,14 +352,24 @@ def _library_temperatures(n_waters):
     return out
 
 
+def _tol(dof, n_draws=4000, n_sigma=4.0):
+    """n_sigma standard errors of a mean temperature over n_draws chi^2_dof draws."""
+    return n_sigma * T_TARGET * math.sqrt(2.0 / (dof * n_draws))
+
+
 @pytest.mark.parametrize("n_waters", [2, 16, 64])
 def test_library_estimator_recovers_target_temperature(n_waters):
-    """Positive control: exact 300 K rigid-body draws must read back as 300 K."""
+    """Positive control: exact 300 K rigid-body draws must read back as 300 K.
+
+    Tolerances are 4 analytic standard errors (T*sqrt(2/(dof*n_draws))), so the
+    test does not depend on the particular PRNG stream (n=2 t_trans has 3 DOF:
+    SE ~3.9 K, tol ~15.5 K).
+    """
     t = _library_temperatures(n_waters)
-    assert t["t_trans"] == pytest.approx(T_TARGET, abs=5.0), t
-    assert t["t_rot"] == pytest.approx(T_TARGET, abs=5.0), t
-    assert t["t_total"] == pytest.approx(T_TARGET, abs=5.0), t
-    assert t["t_com"] == pytest.approx(T_TARGET, abs=25.0), t
+    assert t["t_trans"] == pytest.approx(T_TARGET, abs=_tol(3 * n_waters - 3)), t
+    assert t["t_rot"] == pytest.approx(T_TARGET, abs=_tol(3 * n_waters)), t
+    assert t["t_total"] == pytest.approx(T_TARGET, abs=_tol(6 * n_waters - 3)), t
+    assert t["t_com"] == pytest.approx(T_TARGET, abs=_tol(3)), t
 
 
 @pytest.mark.parametrize("n_waters", [2, 16])

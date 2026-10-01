@@ -155,15 +155,20 @@ JSON (`mean_t_trans_corrected`, computed inside the job, not post hoc):
 | 895 | 19898460 | 299.87 | 299.54 ± 0.53 | 298.99 |
 
 (± is the spread over the 3 seeds: a convergence diagnostic, not a significance
-test.) Once COM-subtracted, T_trans is flat at the 300 K target from n=2 to n=895.
-There is no small-N translational bias left to explain, and the "n ≲ 16 needs
-dt ≤ 0.5 fs" carve-out has no remaining evidential basis from this sweep. The
+test.) Once COM-subtracted, the T_trans means sit at 299.5–302.7 K from n=2 to n=895,
+i.e. the large small-N excess is fully accounted for by the analytic artifact. This is
+**not yet a tracked finding**: the numbers come from result JSONs whose bathos
+`outcome` never evaluated (see below), and no pooled uncertainty or
+minimum-detectable-effect check has been done (the n=2 seed spread alone is ±13.7 K).
+The "n ≲ 16 needs dt ≤ 0.5 fs" carve-out is therefore no longer *supported* by this
+sweep but stays as the conservative default until a bathos-evaluated re-run. The
 weak-friction (gamma ≈ 1 ps⁻¹) carve-out was not tested here and stands.
 
 Library fix: `prolix.physics.temperature_scan.rigid_tip3p_temperatures` returns
-COM-subtracted `t_total`/`t_trans`/`t_rot`/`t_com`, and
-`scan_settle_rigid_temperatures` now reports the COM-subtracted total (it previously
-read high by `3T/(6N − 3)`, i.e. +100 K at n=2). Positive and negative controls on
+COM-subtracted `t_total`/`t_trans`/`t_rot`/`t_com`. `scan_settle_rigid_temperatures`
+keeps the legacy total by default (it reads high by `3T/(6N − 3)`, +100 K at n=2) so
+pre-registered sidecars keep measuring the same quantity; pass
+`subtract_system_com=True` for the unbiased value. Positive and negative controls on
 exact Maxwell-Boltzmann draws: `tests/physics/test_transrot_decomposition.py`.
 Bathos recorded these runs with `outcome='unknown'` because the Engaging bathos
 predated the `--out` result fallback; the numbers above are read from the result
