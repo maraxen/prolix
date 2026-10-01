@@ -207,8 +207,12 @@ def tile_reduction_nl(
             neighbor_idx, ((0, padding_needed_n), (0, 0)), constant_values=-1
         )
     elif n_atoms_real > n_padded:
-        # This shouldn't happen if optimization.py pads correctly
-        pass
+        # Rows past n_padded would never be scanned: their atoms' interactions
+        # would vanish silently (the #746 failure mode). Refuse instead.
+        raise ValueError(
+            f"tile_reduction_nl: neighbor_idx has {n_atoms_real} rows but positions "
+            f"are padded to only {n_padded}; pad positions to cover every atom"
+        )
 
     # 2. Ensure k is divisible by tile_size
     remainder_k = int(k % tile_size)

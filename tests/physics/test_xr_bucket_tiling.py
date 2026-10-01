@@ -9,6 +9,7 @@ from prolix.physics.tiling import (
     compute_dense_tiling_dims,
     round_up_to_multiple,
     tile_reduction,
+    tile_reduction_nl,
 )
 
 
@@ -51,6 +52,39 @@ def test_tile_reduction_raises_on_non_multiple():
 
     with pytest.raises(ValueError, match="#746"):
         tile_reduction(positions, mask, f_tile, 0.0, tile_size=128, inner_tile_size=1024)
+
+
+def test_tile_reduction_nl_raises_when_neighbor_rows_exceed_padding():
+    """XA-NL-DEBT: rows past the padded N would be skipped silently, so refuse."""
+    positions = jnp.zeros((1024, 3))
+    mask = jnp.ones(1024, dtype=bool)
+    neighbor_idx = jnp.zeros((1100, 32), dtype=jnp.int32)
+
+    def f_tile(*_a):
+        return 0.0
+
+    with pytest.raises(ValueError, match="neighbor_idx has 1100 rows"):
+        tile_reduction_nl(positions, neighbor_idx, mask, f_tile, 0.0, tile_size=32,
+                          inner_tile_size=1024)
+
+
+def test_tile_reduction_nl_only_requires_inner_tile_multiple():
+    """NL asymmetry is by design: tile_size chunks K (padded), N needs inner_tile_size only.
+
+    K=40 is not a multiple of tile_size=32 and must be accepted (padded to 64); every
+    real (i, j) neighbour slot must be visited exactly once.
+    """
+    n, k = 1024, 40
+    positions = jnp.zeros((n, 3))
+    mask = jnp.ones(n, dtype=bool)
+    neighbor_idx = jnp.zeros((n, k), dtype=jnp.int32)
+
+    def f_tile(pos_i, pos_j, mask_i, mask_j, *_a):
+        return jnp.sum(mask_i[:, None] & mask_j)
+
+    total = tile_reduction_nl(positions, neighbor_idx, mask, f_tile, 0, tile_size=32,
+                              inner_tile_size=1024)
+    assert int(total) == n * k
 
 
 def test_optimization_uses_compute_dense_tiling_dims():
