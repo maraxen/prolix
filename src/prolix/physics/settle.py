@@ -1490,7 +1490,13 @@ def settle_lfmiddle_langevin(
   Same as :func:`settle_langevin` but splits the stochastic O-step into two
   halves around the mid-step force recompute:
 
-  B(0.5) → A(0.5) → O(0.5) → A(0.5) → SETTLE_pos → Force → A(0.5) → O(0.5) → B(0.5) → SETTLE_vel
+  B(0.5) → A(0.5) → O(0.5) → A(0.5) → SETTLE_pos → Force → O(0.5) → B(0.5) → SETTLE_vel
+
+  The two O(0.5) halves compose to the full ``exp(-gamma*dt)`` friction, and the
+  two A(0.5) drifts advance positions by exactly ``dt*v``. Until 2026-10-01 a third
+  A(0.5) followed the force recompute, advancing ``1.5*dt*v`` per step with a force
+  evaluated at pre-drift positions; LFMiddle results produced before then (incl.
+  campaign 89c9a900) measured that defective scheme.
   """
   if projection_site not in ("post_o", "post_settle_vel", "both"):
     msg = f"invalid projection_site={projection_site!r}; expected post_o|post_settle_vel|both"
@@ -1549,18 +1555,11 @@ def settle_lfmiddle_langevin(
 
     force = force_fn(position, **kwargs)
 
-    # A(0.5) second half — mirrors first half for time-reversibility.
-    # Re-apply SETTLE so the returned state and next step's positions_old
-    # both satisfy constraints.
-    positions_pre_settle2 = position
-    position = _langevin_step_a(position, momentum, state.mass, _dt, shift_fn)
-    if constraints is not None:
-      pairs, lengths = constraints
-      position = project_positions(position, pairs, lengths, state.mass, shift_fn)
-    position = settle_positions(
-        position, positions_pre_settle2, water_indices, r_OH, r_HH,
-        mass_oxygen, mass_hydrogen, box,
-    )
+    # No position update after the force recompute: the returned ``force`` must be
+    # the force at the returned ``position`` (the next step's B half-kick uses it),
+    # and the two A(0.5) drifts above already advance positions by exactly dt*v.
+    # A former third A-step here advanced 1.5*dt*v per step and left state.force
+    # stale (tests/physics/test_transrot_decomposition.py).
     if project_ou_momentum_rigid:
       momentum, key = _langevin_step_o_constrained(
           momentum, position, state.mass, gamma, half_dt, _kT, key, water_indices
@@ -1651,7 +1650,7 @@ def settle_with_nhc(
       (init_fn, apply_fn) tuple for NVT dynamics with NHC + SETTLE.
   """
   # Get JAX MD's proven Nosé-Hoover Chain integrator
-  init_fn_nhc, apply_fn_nhc = simulate.nvt_nose_hoover(
+  nhc_init, nhc_apply = simulate.nvt_nose_hoover(
 
     energy_or_force_fn,
     shift_fn,
