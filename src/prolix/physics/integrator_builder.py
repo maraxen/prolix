@@ -508,6 +508,9 @@ def make_integrator(
       step_constructor_params["vs_def"] = vs_def
       step_constructor_params["vs_params"] = vs_params
     elif step_name == "a_step":
+      # Every sequence "a_step" is a half drift (BAOAB's A(0.5)), mirroring
+      # V_Step's 0.5 default; a sequence's two a_steps advance exactly dt*v.
+      step_constructor_params["fraction"] = 0.5
       if "shift_fn" in merged_params:
         step_constructor_params["shift_fn"] = merged_params["shift_fn"]
     elif step_name == "o_step":

@@ -1659,7 +1659,7 @@ def make_langevin_step_nl_dynamic(
         # A
         r = r + 0.5 * dt * p / m[:, None]
         # O
-        rng, subkey = jax.random.split(rng)
+        key, subkey = jax.random.split(key)
         noise = jax.random.normal(subkey, p.shape)
         p = c1 * p + jnp.sqrt(m[:, None] * kT) * c2 * noise
         # A
@@ -1802,7 +1802,7 @@ def batched_equilibrate_nl(
 
     leaves, _ = jax.tree_util.tree_flatten(batch)
     B = leaves[0].shape[0]
-    keys = jax.random.split(rng, B)
+    keys = jax.random.split(key, B)
 
     displacement_fn, _ = space.free()
 
@@ -1960,7 +1960,7 @@ def batched_equilibrate_nl_dynamic(
 
     leaves, _ = jax.tree_util.tree_flatten(batch)
     B = leaves[0].shape[0]
-    keys = jax.random.split(rng, B)
+    keys = jax.random.split(key, B)
 
     displacement_fn, _ = space.free()
 
@@ -2124,7 +2124,7 @@ def make_langevin_step_explicit(
                 soft_core_lambda=jnp.float32(1.0),
             )
         
-        r, p, f, m, rng, cap_count = (
+        r, p, f, m, key, cap_count = (
             state.positions, state.momentum, state.force,
             state.mass, state.key, state.cap_count
         )

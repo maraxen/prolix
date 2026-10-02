@@ -444,6 +444,7 @@ def _pme_reciprocal_and_corrections(
     displacement_fn: space.DisplacementFn,
     implicit_solvent: bool,
     direct_space_includes_exclusion_correction: bool = False,
+    use_dispersion_correction: bool = True,
 ) -> tuple[Array, Array]:
     """PME reciprocal-space energy + explicit-solvent corrections.
 
@@ -456,6 +457,9 @@ def _pme_reciprocal_and_corrections(
     PARITY, `.praxia/docs/specs/260715_b1-nonbonded-parity.md`).
 
     Args:
+        use_dispersion_correction: Add the isotropic LJ dispersion tail
+            (OpenMM ``NonbondedForce.setUseDispersionCorrection``). Default True;
+            pass False to compare against a system emitted without it.
         direct_space_includes_exclusion_correction: True when ``e_elec``'s
             direct-space term was computed by ``chunked_coulomb_energy_nl``
             (debt 760's NL path), which already sums ``pair_scale -
@@ -520,18 +524,19 @@ def _pme_reciprocal_and_corrections(
         # via the solvate_protein_to_bundle adapter verification against the
         # already-tested pad_solvated_system/single_padded_energy_nl_cvjp
         # reference pathway (1VII solvated, 32A box).
-        e_lj = e_lj + explicit_corrections.lj_dispersion_tail_energy(
-            box_arr,
-            safe_sigmas,
-            safe_epsilons,
-            float(sys.nonbonded_cutoff),
-            sys.atom_mask,
-        )
+        if use_dispersion_correction:
+            e_lj = e_lj + explicit_corrections.lj_dispersion_tail_energy(
+                box_arr,
+                safe_sigmas,
+                safe_epsilons,
+                float(sys.nonbonded_cutoff),
+                sys.atom_mask,
+            )
 
     return e_elec, e_lj
 
 
-def single_padded_energy(sys: PaddedSystem, displacement_fn: space.DisplacementFn, implicit_solvent: bool = True, soft_core_lambda: Array = jnp.array(1.0), neighbor: Any = None, lj_switch_width: float = 0.0) -> Array:
+def single_padded_energy(sys: PaddedSystem, displacement_fn: space.DisplacementFn, implicit_solvent: bool = True, soft_core_lambda: Array = jnp.array(1.0), neighbor: Any = None, lj_switch_width: float = 0.0, use_dispersion_correction: bool = True) -> Array:
     """Computes total potential energy for a single padded system.
 
     This is the public API for computing energy of one PaddedSystem.
@@ -547,6 +552,8 @@ def single_padded_energy(sys: PaddedSystem, displacement_fn: space.DisplacementF
         soft_core_lambda: JAX array for soft-core LJ coupling.
             λ=1.0 → standard LJ, λ<1.0 → soft-core (for staged minimization).
             None defaults to λ=1.0 (standard LJ).
+        use_dispersion_correction: Add the isotropic LJ dispersion tail on
+            the periodic PME path (OpenMM ``setUseDispersionCorrection``).
         neighbor: Optional jax_md ``NeighborList`` (or a raw ``(N, K)`` index
             array, matching ``physics.system.make_energy_fn``'s
             ``getattr(neighbor, "idx", neighbor)`` convention) — when given,
@@ -697,6 +704,7 @@ def single_padded_energy(sys: PaddedSystem, displacement_fn: space.DisplacementF
                 e_elec, e_lj = _pme_reciprocal_and_corrections(
                     r, sys, N, e_elec, e_lj, displacement_fn, implicit_solvent,
                     direct_space_includes_exclusion_correction=(neighbor is not None),
+                    use_dispersion_correction=use_dispersion_correction,
                 )
         except (TypeError, ValueError, jax.errors.ConcretizationTypeError):
             # jax_md.quantity.canonicalize_force / make_force_fn_like_canonicalize

@@ -130,3 +130,46 @@ log file — a task's own stderr can be silently clobbered by a sibling. The n=5
 retry (19898460 task 4) failed fast with an unreadable, clobbered log for exactly
 this reason; resubmitting it alone (job 19898934) as a single-task array avoided
 the race and completed cleanly.
+
+## Correction (2026-10-01): the small-N warm bias is an estimator artifact
+
+**Superseding** the "translational finite-size" reading above. The T_trans estimator
+used here took the kinetic energy of every per-water COM velocity *without*
+subtracting the system COM velocity, and divided by `3N − 3` DOF. With
+`remove_linear_com_momentum=False` (the setting used throughout) the system COM is a
+live, thermalized 3-DOF mode, so the estimator reads high by exactly `3T/(3N − 3)`:
++300 K at n=2, +20 K at n=16, +4.8 K at n=64, +0.34 K at n=895. The predicted
+artifact matches the recorded raw values (614.7 / 321.7 / 305.0 K) to within the
+seed spread.
+
+The 46a4d737 re-run already recorded the COM-subtracted quantity in every result
+JSON (`mean_t_trans_corrected`, computed inside the job, not post hoc):
+
+| n waters | job | raw T_trans (K) | COM-subtracted T_trans (K) | T_rot (K) |
+|---|---|---|---|---|
+| 2 | 19881756 / 19882395 | 614.72 | 302.66 ± 13.67 | 297.09 |
+| 16 | 19882395 | 321.70 | 301.15 ± 4.62 | 296.38 |
+| 64 | 19882395 | 304.98 | 300.36 ± 0.72 | 298.87 |
+| 216 | 19898460 | 301.02 | 299.63 ± 0.39 | 298.98 |
+| 512 | 19898934 | 300.45 | 299.82 ± 1.05 | 300.28 |
+| 895 | 19898460 | 299.87 | 299.54 ± 0.53 | 298.99 |
+
+(± is the spread over the 3 seeds: a convergence diagnostic, not a significance
+test.) Once COM-subtracted, the T_trans means sit at 299.5–302.7 K from n=2 to n=895,
+i.e. the large small-N excess is fully accounted for by the analytic artifact. This is
+**not yet a tracked finding**: the numbers come from result JSONs whose bathos
+`outcome` never evaluated (see below), and no pooled uncertainty or
+minimum-detectable-effect check has been done (the n=2 seed spread alone is ±13.7 K).
+The "n ≲ 16 needs dt ≤ 0.5 fs" carve-out is therefore no longer *supported* by this
+sweep but stays as the conservative default until a bathos-evaluated re-run. The
+weak-friction (gamma ≈ 1 ps⁻¹) carve-out was not tested here and stands.
+
+Library fix: `prolix.physics.temperature_scan.rigid_tip3p_temperatures` returns
+COM-subtracted `t_total`/`t_trans`/`t_rot`/`t_com`. `scan_settle_rigid_temperatures`
+keeps the legacy total by default (it reads high by `3T/(6N − 3)`, +100 K at n=2) so
+pre-registered sidecars keep measuring the same quantity; pass
+`subtract_system_com=True` for the unbiased value. Positive and negative controls on
+exact Maxwell-Boltzmann draws: `tests/physics/test_transrot_decomposition.py`.
+Bathos recorded these runs with `outcome='unknown'` because the Engaging bathos
+predated the `--out` result fallback; the numbers above are read from the result
+JSONs directly.

@@ -580,6 +580,7 @@ def energy_fn_from_bundle(
     lj_switch_width: float = 0.0,
     pme_grid_points: int = 64,
     build_dense_exclusions: bool = True,
+    use_dispersion_correction: bool = True,
 ) -> Callable[..., jnp.ndarray]:
     """Total energy from bundle fields (bonded + optional nonbonded via ``single_padded_energy``).
 
@@ -587,6 +588,8 @@ def energy_fn_from_bundle(
     ``lj_switch_width`` is closed over (OpenMM LJ switch; 0 disables).
     ``pme_grid_points`` sets the FFT grid resolution for PME electrostatics
     (default 64; override for comparisons against simulations run with different grids).
+    ``use_dispersion_correction=False`` omits the isotropic LJ dispersion tail, for
+    comparisons against OpenMM systems built with ``setUseDispersionCorrection(False)``.
 
     ``build_dense_exclusions=False`` skips the two ``(N, N)`` dense exclusion-scale
     matrices (~4.4 GB at N=23,558, rebuilt on every call inside the jitted MD loop).
@@ -604,6 +607,7 @@ def energy_fn_from_bundle(
     _lj_sw = float(lj_switch_width)
     _pme_grid = int(pme_grid_points)
     _build_dense = bool(build_dense_exclusions)
+    _use_disp = bool(use_dispersion_correction)
 
     def energy_fn(positions: jnp.ndarray, **kwargs: object) -> jnp.ndarray:
         # `neighbor` (debt 760's NL path, see single_padded_energy's docstring)
@@ -624,6 +628,7 @@ def energy_fn_from_bundle(
             implicit_solvent=False,
             neighbor=neighbor,
             lj_switch_width=_lj_sw,
+            use_dispersion_correction=_use_disp,
         )
         e = e + _exception_energy_masked(
             positions,
