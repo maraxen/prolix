@@ -40,13 +40,6 @@ AngleParamsPacked = Float[ArrayLike, "num_angles 2"]
 # aliases
 PRNGKey = PRNGKeyArray
 
-# PhysicsSystem and IntegratorState definitions
-class PhysicsSystem:
-    pass
-
-class IntegratorState:
-    pass
-
 # -----------------------------------------------------------------------------
 # Data Layout Definitions
 # -----------------------------------------------------------------------------

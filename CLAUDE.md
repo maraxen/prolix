@@ -36,8 +36,10 @@ Exploratory ideas for future sprints (electrostatics, allostery, spectral analys
 **Decision**: Use SETTLE + Langevin thermostat  
 **Constraint**: dt ≤ 1.0 fs for production-scale NVT (n_waters ≳ 16, gamma ≈ 10 ps⁻¹);
 dt ≤ 0.5 fs for very small systems (n ≲ 16) or weak friction (gamma ≈ 1 ps⁻¹).
-Validated by gate job 15870804 + size sweep ba334c1f; the residual small-N warm bias
-is translational finite-size, not dt instability. See
+Validated by gate job 15870804 + size sweep ba334c1f (re-run 46a4d737). The small-N
+warm bias that motivated the n ≲ 16 carve-out is an estimator DOF artifact
+(2026-10-01), so the carve-out is no longer *supported*; it stays as the conservative
+default until a bathos-evaluated re-run confirms it can be dropped. See
 `.praxia/docs/research/260612_p5-dt1fs-size-crossover.md`.
 
 - **Background** - explicit-solvent temperature-control approaches that were investigated -> `.praxia/docs/reference/261007_phase2-background.md`
@@ -54,7 +56,7 @@ The CSVR thermostat coupling with rigid-body water kinetic energy produces tempe
 
 ### Known Limitations (v1.0 / v1.1)
 
-1. **NVT timestep cap**: dt ≤ 1.0 fs at production scale (n_waters ≳ 16, gamma ≈ 10 ps⁻¹; gate job 15870804, sweep ba334c1f). dt ≤ 0.5 fs for n ≲ 16 or weak friction (gamma ≈ 1 ps⁻¹). Residual small-N warm bias is translational finite-size (3·N−3 DOF), not dt instability — see `.praxia/docs/research/260612_p5-dt1fs-size-crossover.md`.
+1. **NVT timestep cap**: dt ≤ 1.0 fs at production scale (n_waters ≳ 16, gamma ≈ 10 ps⁻¹; gate job 15870804, sweep ba334c1f). dt ≤ 0.5 fs for n ≲ 16 (conservative, pending a tracked re-run) or weak friction (gamma ≈ 1 ps⁻¹). The apparent small-N warm bias was an estimator DOF artifact, not dynamics (corrected 2026-10-01) — see `.praxia/docs/research/260612_p5-dt1fs-size-crossover.md`.
 2. **NPT long-trajectory divergence**: Temperature runaway (→ 10^115 K) beyond ~10 ps due to CSVR + rigid-water KE coupling. Use NVT for longer production runs. *KE init spike (T≈5000 K at step 0) fixed 2026-06-01: `settle.py:1944` `/ mu` → `* mu` (Bernetti-Bussi sign correction); `test_npt_20ps_liquid_water` xfail removed (commit b6e5bb9).* Long-trajectory divergence root cause (CSVR+SETTLE decoupling) addressed in Phase 6.
 3. **Batched SETTLE constraints**: `make_integrator(..., water_indices=...)` is not supported in v1.0. For batched simulations with SETTLE-constrained water, use `settle.settle_langevin` directly and wrap in `jax.vmap` (see v1.1 roadmap for full modular support).
 
