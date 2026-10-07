@@ -186,3 +186,7 @@ None. New APIs are additive.
 - **Phase 5: Constraint-aware thermostat** (only remaining path to dt ≥ 1.0 fs; P1 after P1a)
 - Large-scale SETTLE batching validation
 - ~~LFMiddle hypothesis test~~ (falsified 2026-06-01)
+
+### Focus and idea log
+
+Exploratory ideas for future sprints (electrostatics, allostery, spectral analysis) are logged in `.praxia/ideas.jsonl`. Current focus: stabilize core MD engine (Phase 2 constraints, NPT stability).
