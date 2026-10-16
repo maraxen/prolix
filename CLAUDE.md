@@ -14,16 +14,24 @@ notes:
 
 - **Testing & Validation** - pytest commands and CI JSON report queries -> `.praxia/docs/reference/261007_testing-and-validation.md`
 
+## Engineering standards
+
+- **Units**: Internal AKMA. Conversion via `kups_adapter`.
+- **Differentiability**: All kernels MUST support `jax.grad`.
+- **Export**: All energy functions MUST be exportable via `prolix.export` (StableHLO).
+- **Tiling**: Use `prolix.physics.tiling` primitives for all $O(N^2)$ and $O(N \cdot K)$ operations.
+- **Imports**: Avoid lazy-loading; use absolute imports and a flat `typing.py` for shared state.
+
 ## Project Documentation
 
 Extended docs, sprint notes, and architectural decisions live in `.praxia/docs/`:
 - `v1.1_next_steps.md` — prioritized candidate work items for v1.1 (LFMiddle, NPT init bug, batching)
 
-## Research Ideas & Roadmap
+## Research ideas
 
 Exploratory ideas for future sprints (electrostatics, allostery, spectral analysis) are logged in `.praxia/ideas.jsonl`.
 
-## Phase 2: Explicit Solvent Integration
+## Explicit solvent: SETTLE + Langevin constraints and limits
 
 **Decision**: Use SETTLE + Langevin thermostat  
 **Constraint**: dt ≤ 1.0 fs for production-scale NVT (n_waters ≳ 16, gamma ≈ 10 ps⁻¹);
@@ -53,9 +61,7 @@ The CSVR thermostat coupling with rigid-body water kinetic energy produces tempe
 - **Files Affected** - settle.py, simulate.py, and the temperature-control tests -> `.praxia/docs/reference/261007_phase2-files-affected.md`
 - **References** - SETTLE and stochastic cell rescaling citations -> `.praxia/docs/reference/261007_phase2-references.md`
 
-## Phase 2–4: Integrator Modular Architecture (v1.0 Release)
-
-### Backward Compatibility
+## Integrator API compatibility
 
 - settle_langevin, settle_csvr_npt APIs unchanged (wrappers around make_integrator)
 - Existing code continues to work without modification
@@ -130,11 +136,7 @@ This project uses **bathos** (`bth`) for experiment provenance, campaign trackin
 This project uses the Engaging SLURM cluster (SSH, rsync, sbatch) for large-scale MD simulations.
 
 **Configuration & Quick Start:**
-- Project-specific defaults: `.agent/docs/CLUSTER_CONFIG.md`
+- Project-specific defaults: `myxcel.toml` (slurm presets)
 - Global cluster reference: `~/.claude/CLUSTER_INFRASTRUCTURE.md`
-- Global recipes: `just -g cluster-*` (login, push-workspace, submit, logs, etc.)
-- Cluster rules: `~/.claude/rules/CLUSTER.md`
 
 - **Common Commands** - Engaging login, workspace sync, submit, and queue -> `.praxia/docs/reference/261007_cluster-common-commands.md`
-
-See `.agent/docs/CLUSTER_CONFIG.md` for project-specific settings (partition, GPU, array specs).

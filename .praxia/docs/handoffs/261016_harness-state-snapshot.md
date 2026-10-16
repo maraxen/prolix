@@ -1,3 +1,11 @@
+---
+title: 'Harness state snapshot (GEMINI.md status, 2026-05-03)'
+description: Verbatim relocation of the sprint-status, epic phase-plan and backlog-priority blocks from the retired root GEMINI.md; a dated snapshot, not a ledger.
+status: active
+task_id: 261016_harness-fleet-audit
+date: '261016'
+---
+
 # Workspace GEMINI.md: Prolix OODA v2 Orchestration
 
 **Current Phase**: Epic: v0.1.0-alpha Release Preparation
@@ -54,13 +62,3 @@
 | **P0** | **Release Validation** | Formalize the "Three-Tier" parity report. | Pending |
 | **P1** | **kUPS Benchmark** | High-precision comparison vs kUPS. | Pending |
 | **P2** | **NL Differentiability** | Analytical VJP for neighbor list updates. | Debt |
-
----
-
-## Engineering Standards
-
-- **Units**: Internal AKMA. Conversion via `kups_adapter`.
-- **Differentiability**: All kernels MUST support `jax.grad`.
-- **Export**: All energy functions MUST be exportable via `prolix.export` (StableHLO).
-- **Tiling**: Use `prolix.physics.tiling` primitives for all $O(N^2)$ and $O(N \cdot K)$ operations.
-- **Imports**: Avoid lazy-loading; use absolute imports and a flat `typing.py` for shared state.
