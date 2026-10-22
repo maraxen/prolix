@@ -15,5 +15,5 @@ export JAX_PLATFORMS=cuda JAX_ENABLE_X64=1 XLA_PYTHON_CLIENT_PREALLOCATE=false
 OUT="${PROLIX_ROOT}/outputs/results/baoab_loop_diag_${SLURM_JOB_ID}.json"
 mkdir -p "${PROLIX_ROOT}/outputs/results"
 export PROLIX_RESULT_PATH="${OUT}"
-uv run python scripts/experiments/baoab_loop_diag.py
+uv run python scripts/explore/baoab_loop_diag.py
 echo "=== result ==="; cat "${OUT}" 2>/dev/null || echo "(no result file)"

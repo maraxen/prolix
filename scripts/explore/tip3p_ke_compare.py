@@ -3,11 +3,11 @@
 
 Re-run examples (repo root)::
 
-  OPENMM_INSTALL_MODE=ephemeral uv run --with openmm python scripts/benchmarks/tip3p_ke_compare.py \\
+  OPENMM_INSTALL_MODE=ephemeral uv run --with openmm python scripts/explore/tip3p_ke_compare.py \\
     --engine openmm --n-waters 4 --steps 3000 --burn 1200 --sample-every 20 --replicas 1 \\
     --remove-cmmotion false --dt-fs 2.0 --temperature-k 300 --gamma-ps 1.0
 
-  uv run python scripts/benchmarks/tip3p_ke_compare.py \\
+  uv run python scripts/explore/tip3p_ke_compare.py \\
     --engine prolix --jax-x64 on --n-waters 33 --steps 30000 --burn 10000 --sample-every 10 --replicas 5 \\
     --remove-cmmotion false --dt-fs 2.0 --temperature-k 300 --gamma-ps 1.0
 """
@@ -28,7 +28,7 @@ from pathlib import Path
 import numpy as np
 
 _REPO = Path(__file__).resolve().parents[2]
-_BENCH = _REPO / "scripts" / "benchmarks"
+_BENCH = _REPO / "scripts" / "explore"
 if str(_BENCH) not in sys.path:
   sys.path.insert(0, str(_BENCH))
 import tip3p_ke_profile  # noqa: E402
@@ -113,7 +113,7 @@ def _configure_jax(mode: str) -> dict:
 
 
 def _load_tip3p_module():
-  path = _REPO / "scripts/benchmarks/tip3p_langevin_tightening.py"
+  path = _REPO / "scripts/explore/tip3p_langevin_tightening.py"
   spec = importlib.util.spec_from_file_location("tip3p_langevin_tightening", path)
   if spec is None or spec.loader is None:
     raise RuntimeError(f"cannot load {path}")

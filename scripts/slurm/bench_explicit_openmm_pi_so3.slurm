@@ -27,6 +27,6 @@ echo "=== T0 throughput JSON ==="
 python scripts/benchmarks/prolix_vs_openmm_speed.py --skip-reference --json "t0_bench_${SLURM_JOB_ID:-local}.json"
 
 echo "=== T1-scaled throughput JSON (minimal box, tier T1) ==="
-python scripts/benchmarks/prolix_vs_openmm_t1_solvated.py --skip-reference --json "t1_bench_${SLURM_JOB_ID:-local}.json"
+python scripts/explore/prolix_vs_openmm_t1_solvated.py --skip-reference --json "t1_bench_${SLURM_JOB_ID:-local}.json"
 
 echo "Done."

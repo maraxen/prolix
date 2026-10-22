@@ -39,7 +39,7 @@ export JAX_PLATFORMS="${JAX_PLATFORMS:-cuda}"
 }
 
 mkdir -p "${LOG_ROOT}/app"
-uv run python scripts/benchmarks/tip3p_ke_compare.py \
+uv run python scripts/explore/tip3p_ke_compare.py \
   --engine prolix \
   --n-waters "${NW}" \
   --steps "${ST}" \

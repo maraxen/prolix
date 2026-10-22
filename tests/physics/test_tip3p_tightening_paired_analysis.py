@@ -1,4 +1,4 @@
-"""Tests for ``scripts/benchmarks/tip3p_tightening_paired_analysis.py``."""
+"""Tests for ``scripts/explore/tip3p_tightening_paired_analysis.py``."""
 
 from __future__ import annotations
 
@@ -13,7 +13,7 @@ import pytest
 pytestmark = pytest.mark.slow
 
 _SCRIPT_PATH = (
-  Path(__file__).resolve().parents[2] / "scripts" / "benchmarks" / "tip3p_tightening_paired_analysis.py"
+  Path(__file__).resolve().parents[2] / "scripts" / "explore" / "tip3p_tightening_paired_analysis.py"
 )
 _FIXTURES_AGG = Path(__file__).resolve().parents[1] / "fixtures" / "tip3p_tightening_aggregate"
 

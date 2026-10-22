@@ -36,7 +36,7 @@ echo "engine=openmm workspace_root=${WORKSPACE_ROOT} job=${SLURM_JOB_ID:-} host=
 }
 
 mkdir -p "${LOG_ROOT}/app"
-uv run python scripts/benchmarks/tip3p_ke_compare.py \
+uv run python scripts/explore/tip3p_ke_compare.py \
   --engine openmm \
   --n-waters "${NW}" \
   --steps "${ST}" \
