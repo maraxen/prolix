@@ -3,6 +3,18 @@
 Each comparator gets its own bench script + bath sidecar (`.bth.toml`).
 All scripts share the campaign tag `hp4-s71-external-baseline`.
 
+> **Scope note: these numbers are NOT MD throughput.** The primary benchmark
+> (Scope A) times forward + backward of the *bonded* energy across N small
+> molecules plus one optimizer step (parameter-fitting throughput). It has no
+> PME, no neighbour list, no solvent and no integrator, and it is reported as
+> `per_mol_step_seconds`. Do not compare it with a solvated-protein ns/day
+> figure (e.g. the DHFR OpenMM ratio). The only MD comparator in this repo is
+> OpenMM, measured on identical hardware in `scripts/experiments/bench_dhfr_parity.py`.
+> The comparators also run on different hardware: DMFF and espaloma are pinned to
+> A100 sm_80 / CUDA 12.1 in `scripts/slurm/bench_external_baseline.slurm`, so they
+> cannot share the Blackwell/H200 hardware used for the DHFR measurements.
+> Backlog #4989.
+
 ## Slate (per recon, 2026-05-21)
 
 | Tool | Framework | Harness file | Status |
