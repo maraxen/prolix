@@ -180,9 +180,9 @@ def _resolve_ff_path(ff_name: str = "protein.ff14SB.xml") -> str:
 def _read_cryst1_box_edge(pdb_path: Path) -> float:
     """Read a cubic box edge length (Å) from a PDB's CRYST1 record.
 
-    NOTE: for this fixture the CRYST1 record is NOT authoritative -- it disagrees with
-    the serialized OpenMM System by 0.585 Å. Use ``_resolve_dhfr_box_edge``, which
-    prefers the System. See #4953.
+    NOTE: CRYST1 is not authoritative for this benchmark. The fixture before #4970
+    disagreed with the serialized OpenMM System by 0.585 Å; the regenerated one agrees
+    to 0.0003 Å. Use ``_resolve_dhfr_box_edge``, which prefers the System. See #4953.
     """
     with pdb_path.open() as fh:
         for line in fh:
@@ -241,8 +241,9 @@ def _resolve_dhfr_box_edge(pdb_path: Path, xml_path: Path) -> float:
 
     The System is authoritative because it is what the comparator integrates. The
     CRYST1 disagreement is reported loudly rather than silently preferred away: a
-    fixture whose two box records disagree is a defect in the fixture (see the
-    regeneration item filed against scripts/data_prep/fetch_dhfr_benchmark.py).
+    fixture whose two box records disagree is a defect in the fixture. #4970 fixed the
+    generator (scripts/data_prep/fetch_dhfr_benchmark.py) and regenerated the PDB, so
+    a warning here now means the fixture has drifted again.
     """
     box_edge = _read_system_xml_box_edge(xml_path)
     try:
