@@ -31,9 +31,10 @@ Usage:
         --out /tmp/p5_dt_scaling_smoke.json --seed 42
 
     # Cluster run (production scale)
-    uv run bth run python scripts/experiments/p5_dt_scaling_transrot.py \\
+    bth run --campaign-id <campaign-id> --output-paths outputs/p5_dt_scaling_transrot.json \\
+        -- uv run python scripts/experiments/p5_dt_scaling_transrot.py \\
         --n-waters 64 --steps 4000 --burn-in 500 --dt-fs-list 0.25,0.5,1.0 \\
-        --out outputs/p5_dt_scaling_transrot.json --campaign <campaign-id>
+        --out outputs/p5_dt_scaling_transrot.json
 """
 
 from __future__ import annotations

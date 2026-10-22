@@ -34,6 +34,6 @@ cd "${_PROJ}"
 source "scripts/slurm/_bth_env.sh"
 mkdir -p outputs/logs/slurm
 
-uv run bth campaign create "p7-stage2-h200" --mode exploration \
+bth campaign create "p7-stage2-h200" --mode exploration \
     --question "P7 Stage-2 H200 discovery sweep. Coverage pre-reg: prof_stage2_coverage.bth.toml. Cluster catalog (local 450f3583 was missing here)."
-uv run bth campaign ls
+bth campaign ls

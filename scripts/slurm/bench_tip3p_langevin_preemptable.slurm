@@ -97,7 +97,7 @@ SETTLE_ITERS="${TIP3P_SETTLE_VELOCITY_ITERS:-10}"
 DIAG_LEVEL="${TIP3P_DIAGNOSTICS_LEVEL:-off}"
 DIAG_DECIM="${TIP3P_DIAGNOSTICS_DECIMATION:-10}"
 
-uv run python scripts/benchmarks/tip3p_langevin_tightening.py \
+uv run python scripts/explore/tip3p_langevin_tightening.py \
   --engine "${ENGINE}" \
   --checkpoint-dir "${RUN_ROOT}" \
   --checkpoint-every "${CHK_EVERY}" \

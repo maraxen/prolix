@@ -82,17 +82,17 @@ echo "Host: $(hostname)  Job: ${SLURM_JOB_ID:-local}  Array: ${SLURM_ARRAY_JOB_I
 echo "GPU: $(nvidia-smi --query-gpu=name,memory.total --format=csv,noheader 2>&1 | head -1)"
 echo "Date: $(date -Is)"
 
-uv run bth run python scripts/explore/prof_flash_tile_checkpoint.py \
+bth run \
     --no-sidecar \
-    --tag tile-checkpoint-sweep \
-    --tag "protein:1vii" \
-    --tag "mode:flash" \
-    --tag "pme:on" \
-    --tag "grid:1.0" \
-    --tag "tile:${TILE}" \
-    --tag "remat:${REMAT}" \
-    --out "${OUT}" \
-    -- \
+    --tags tile-checkpoint-sweep \
+    --tags "protein:1vii" \
+    --tags "mode:flash" \
+    --tags "pme:on" \
+    --tags "grid:1.0" \
+    --tags "tile:${TILE}" \
+    --tags "remat:${REMAT}" \
+    --output-paths "${OUT}" \
+    -- uv run python scripts/explore/prof_flash_tile_checkpoint.py \
     --protein 1vii \
     --pme on \
     --grid-spacing 1.0 \

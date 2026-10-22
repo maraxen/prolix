@@ -86,14 +86,14 @@ echo "Host: $(hostname)  Job: ${SLURM_JOB_ID:-local}"
 echo "XLA_FLAGS_pre=${XLA_FLAGS:-}"
 echo "GPU: $(nvidia-smi --query-gpu=name,memory.total --format=csv,noheader 2>&1 | head -1)"
 
-uv run bth run python scripts/explore/prof_flash_tile_checkpoint.py \
+bth run \
     --no-sidecar \
-    --tag buckets-xla-sweep \
-    --tag "protein:1vii" \
-    --tag "buckets:${BUCKETS}" \
-    --tag "xla:${XLA}" \
-    --out "${OUT}" \
-    -- \
+    --tags buckets-xla-sweep \
+    --tags "protein:1vii" \
+    --tags "buckets:${BUCKETS}" \
+    --tags "xla:${XLA}" \
+    --output-paths "${OUT}" \
+    -- uv run python scripts/explore/prof_flash_tile_checkpoint.py \
     --protein 1vii \
     --pme on \
     --grid-spacing 1.0 \

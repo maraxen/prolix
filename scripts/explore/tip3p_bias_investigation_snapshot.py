@@ -7,7 +7,7 @@ fix PME/parameterization/constraints modeling before spending time on the BAOAB+
 If forces match but long-run T differs, treat the offset as **dynamics** (thermostat, operator
 split, constraint iteration, or sampling).
 
-  JAX_ENABLE_X64=1 uv run --extra openmm python scripts/benchmarks/tip3p_bias_investigation_snapshot.py \\
+  JAX_ENABLE_X64=1 uv run --extra openmm python scripts/explore/tip3p_bias_investigation_snapshot.py \\
     --n-waters 33
 """
 
@@ -25,7 +25,7 @@ _REPO = Path(__file__).resolve().parents[2]
 _SRC = _REPO / "src"
 if str(_SRC) not in sys.path:
   sys.path.insert(0, str(_SRC))
-_BENCH = _REPO / "scripts" / "benchmarks"
+_BENCH = _REPO / "scripts" / "explore"
 if str(_BENCH) not in sys.path:
   sys.path.insert(0, str(_BENCH))
 
@@ -36,7 +36,7 @@ import tip3p_ke_compare as tkc  # noqa: E402
 
 
 def _load_tip3p_langevin() -> object:
-  path = _REPO / "scripts" / "benchmarks" / "tip3p_langevin_tightening.py"
+  path = _REPO / "scripts" / "explore" / "tip3p_langevin_tightening.py"
   spec = importlib.util.spec_from_file_location("tip3p_langevin_tightening", path)
   if spec is None or spec.loader is None:
     raise RuntimeError(f"cannot load {path}")

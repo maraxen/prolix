@@ -3,10 +3,10 @@
 
 Examples::
 
-  JAX_ENABLE_X64=1 uv run python scripts/benchmarks/tip3p_ke_isolate.py \\
+  JAX_ENABLE_X64=1 uv run python scripts/explore/tip3p_ke_isolate.py \\
     --n-waters 8 --steps 4000 --burn 2000 --sample-every 20 --matrix
 
-  JAX_ENABLE_X64=1 uv run python scripts/benchmarks/tip3p_ke_isolate.py \\
+  JAX_ENABLE_X64=1 uv run python scripts/explore/tip3p_ke_isolate.py \\
     --projection-site post_settle_vel --settle-velocity-iters 20 --project-ou true
 """
 

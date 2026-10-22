@@ -5,10 +5,10 @@ Not a throughput benchmark. Emits durable JSON for bathos confirmation.
 
 Usage (via bathos on Titanix)::
 
-    CUDA_VISIBLE_DEVICES=0 uv run bth run python scripts/experiments/xr_parity_omm_tip3p.py \\
-      --tag xr-parity-omm-water --campaign <id> \\
-      --out outputs/xr_parity_omm_tip3p.json \\
-      -- --probe all
+    CUDA_VISIBLE_DEVICES=0 bth run --tags xr-parity-omm-water --campaign-id <id> \\
+      --output-paths outputs/xr_parity_omm_tip3p.json \\
+      -- uv run python scripts/experiments/xr_parity_omm_tip3p.py \\
+      --probe all --out outputs/xr_parity_omm_tip3p.json
 """
 
 from __future__ import annotations

@@ -4,7 +4,8 @@ Runs tests/physics/test_p2b_nvt_216water.py and extracts structured outcome
 from the pytest JSON report. Outputs a result JSON for bathos outcome evaluation.
 
 Usage (via bth run in SLURM script):
-    uv run bth run python scripts/experiments/p2b_nvt_gate.py --out outputs/p2b_nvt_gate.json
+    bth run --output-paths outputs/p2b_nvt_gate.json \\
+        -- uv run python scripts/experiments/p2b_nvt_gate.py --out outputs/p2b_nvt_gate.json
 """
 
 from __future__ import annotations

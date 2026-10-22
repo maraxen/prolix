@@ -79,12 +79,12 @@ echo "OUT: ${OUT}"
 # PROLIX_RESULT_PATH used instead of --out to avoid collision with bth's own --out flag
 export PROLIX_RESULT_PATH="${OUT}"
 
-uv run bth run \
-  --tag cluster --tag lfmiddle-dt-sweep --tag sprint5 \
-  --tag "dt_fs:${DT_FS}" --tag "integrator:${INTEGRATOR}" \
-  --campaign "${CAMPAIGN_ID}" \
-  --out "${OUT}" \
-  python scripts/experiments/lfmiddle_dt_sweep.py \
+bth run \
+  --tags cluster --tags lfmiddle-dt-sweep --tags sprint5 \
+  --tags "dt_fs:${DT_FS}" --tags "integrator:${INTEGRATOR}" \
+  --campaign-id "${CAMPAIGN_ID}" \
+  --output-paths "${OUT}" \
+  -- uv run python scripts/experiments/lfmiddle_dt_sweep.py \
   --dt-fs "${DT_FS}" \
   --integrator "${INTEGRATOR}" \
   --n-waters "${N_WATERS}" \

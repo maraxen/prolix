@@ -88,8 +88,9 @@ remains open upstream.
 Usage:
     uv run python scripts/experiments/bench_dhfr_parity.py --dry-run --out /dev/null
     uv run python scripts/experiments/bench_dhfr_parity.py --smoke --out /tmp/smoke.json
-    uv run bth run python scripts/experiments/bench_dhfr_parity.py \\
-        --gpu-tag h200 --out outputs/bench_dhfr_parity.json --campaign <id>
+    bth run --campaign-id <id> --output-paths outputs/bench_dhfr_parity.json \\
+        -- uv run python scripts/experiments/bench_dhfr_parity.py \\
+        --gpu-tag h200 --out outputs/bench_dhfr_parity.json
 """
 
 from __future__ import annotations
