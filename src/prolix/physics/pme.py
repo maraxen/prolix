@@ -182,28 +182,30 @@ def spread_charges(
 
 
 def influence_function(grid_dims: tuple[int, int, int], box_size: jnp.ndarray, alpha: float, order: int = 4) -> jnp.ndarray:
-    with jax.named_scope("pme_greens_setup_standalone"):
-        Kx, Ky, Kz = grid_dims
-        V = jnp.prod(box_size)
+    # Note: pme_greens_setup_standalone scope removed (#4330 Fix 2a) - influence_function
+    # is only called from spme_reciprocal_energy (primal energy path), never from the
+    # differentiable force/gradient path that runs in production.
+    Kx, Ky, Kz = grid_dims
+    V = jnp.prod(box_size)
 
-        mx = jnp.fft.fftfreq(Kx) * Kx / box_size[0]
-        my = jnp.fft.fftfreq(Ky) * Ky / box_size[1]
-        mz = jnp.fft.rfftfreq(Kz) * Kz / box_size[2]
-        m_sq = mx[:, None, None] ** 2 + my[None, :, None] ** 2 + mz[None, None, :] ** 2
+    mx = jnp.fft.fftfreq(Kx) * Kx / box_size[0]
+    my = jnp.fft.fftfreq(Ky) * Ky / box_size[1]
+    mz = jnp.fft.rfftfreq(Kz) * Kz / box_size[2]
+    m_sq = mx[:, None, None] ** 2 + my[None, :, None] ** 2 + mz[None, None, :] ** 2
 
-        gauss = jnp.exp(-jnp.pi**2 * m_sq / alpha**2)
-        m_sq_safe = jnp.where(m_sq > 0, m_sq, jnp.asarray(1.0, dtype=m_sq.dtype))
-        denom = jnp.pi * m_sq_safe * V
+    gauss = jnp.exp(-jnp.pi**2 * m_sq / alpha**2)
+    m_sq_safe = jnp.where(m_sq > 0, m_sq, jnp.asarray(1.0, dtype=m_sq.dtype))
+    denom = jnp.pi * m_sq_safe * V
 
-        bx = _bspline_modulation(jnp.fft.fftfreq(Kx, dtype=box_size.dtype), Kx, order)
-        by = _bspline_modulation(jnp.fft.fftfreq(Ky, dtype=box_size.dtype), Ky, order)
-        bz = _bspline_modulation(jnp.fft.rfftfreq(Kz, dtype=box_size.dtype), Kz, order)
-        b_sq = (bx[:, None, None] * by[None, :, None] * bz[None, None, :]) ** 2
-        b_sq_safe = jnp.maximum(b_sq, jnp.asarray(1e-10, dtype=b_sq.dtype))
+    bx = _bspline_modulation(jnp.fft.fftfreq(Kx, dtype=box_size.dtype), Kx, order)
+    by = _bspline_modulation(jnp.fft.fftfreq(Ky, dtype=box_size.dtype), Ky, order)
+    bz = _bspline_modulation(jnp.fft.rfftfreq(Kz, dtype=box_size.dtype), Kz, order)
+    b_sq = (bx[:, None, None] * by[None, :, None] * bz[None, None, :]) ** 2
+    b_sq_safe = jnp.maximum(b_sq, jnp.asarray(1e-10, dtype=b_sq.dtype))
 
-        G = gauss / (denom * b_sq_safe)
-        G = G.at[0, 0, 0].set(0.0)
-        return G
+    G = gauss / (denom * b_sq_safe)
+    G = G.at[0, 0, 0].set(0.0)
+    return G
 
 
 def _bspline_modulation(freq_frac: jnp.ndarray, K: int, order: int) -> jnp.ndarray:
