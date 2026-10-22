@@ -22,8 +22,6 @@ import jax.numpy as jnp
 from jax import random
 from jax_md import quantity, simulate
 
-from prolix.tiling.axis_dispatch import dispatch_n_waters
-
 from prolix.physics import (
   md_potential_bundle,
   rigid_water_ke,
@@ -41,6 +39,7 @@ from prolix.physics import (
   units as units_module,
 )
 from prolix.physics.constraints import project_momenta, project_positions
+from prolix.tiling.axis_dispatch import dispatch_n_waters
 from prolix.typing import NPTState, NVTLangevinState, WaterIndices, WaterIndicesArray
 
 if TYPE_CHECKING:
@@ -344,6 +343,39 @@ def _settle_water_batch(
     pos_oxygen_new = unwrap(pos_oxygen_new, pos_oxygen_old)
     pos_h1_new = unwrap(pos_h1_new, pos_h1_old)
     pos_h2_new = unwrap(pos_h2_new, pos_h2_old)
+
+    # Make each molecule WHOLE before the rigid-body fit below (#4971).
+    #
+    # The unwrap above is per-atom, against each atom's own previous position: it
+    # restores step-to-step continuity for an atom that crossed a face, which is
+    # necessary but says nothing about whether the three atoms are in the same
+    # periodic image as EACH OTHER. They frequently are not. `shift_fn` wraps every
+    # atom independently into [0, box), so any molecule straddling a face has its O
+    # sent to one side and an H to the other, and nothing downstream ever repairs it.
+    #
+    # That is fatal here rather than merely untidy, because `com_new` and the
+    # body-frame deltas immediately below are computed from these raw positions. A
+    # split molecule yields a COM in the middle of the box and an O-H separation of
+    # up to a full box length, so the template fit is solving for the orientation of
+    # something that is not a water molecule, and it launches it.
+    #
+    # Measured on DHFR (23558 atoms, job 21968919): from rest with the thermostat
+    # fully off, 1011 atoms move 8-9 A in a single step while their forces are
+    # normal. 1011 = 3 x 337 whole molecules, water fraction 1.0000 against a system
+    # baseline of 0.8943. Independently, wrapping that fixture's coordinates tears
+    # 334 of 7023 waters apart with a maximum O-H distance of 86.4 A. Carbon,
+    # nitrogen and sulfur meanwhile track Newton's 0.5*(F/m)*dt^2 to a ratio of
+    # exactly 1.000, so the integrator itself was never at fault.
+    #
+    # Re-imaging the hydrogens onto the oxygen costs two subtractions and makes the
+    # molecule whole in a single image. The post-solve re-wrap in `settle_positions`
+    # then returns the rigid result to the box as one unit, so nothing else changes.
+    def to_oxygen_image(pos_h, pos_o):
+      d = pos_h - pos_o
+      return pos_o + (d - box * _PBC_ROUND_FN(d / box))
+
+    pos_h1_new = to_oxygen_image(pos_h1_new, pos_oxygen_new)
+    pos_h2_new = to_oxygen_image(pos_h2_new, pos_oxygen_new)
 
   mass_total = mass_oxygen + 2 * mass_hydrogen
 
@@ -1458,7 +1490,18 @@ def settle_lfmiddle_langevin(
   Same as :func:`settle_langevin` but splits the stochastic O-step into two
   halves around the mid-step force recompute:
 
-  B(0.5) → A(0.5) → O(0.5) → A(0.5) → SETTLE_pos → Force → A(0.5) → O(0.5) → B(0.5) → SETTLE_vel
+  B(0.5) → A(0.5) → O(0.5) → A(0.5) → SETTLE_pos → Force → O(0.5) → B(0.5) → SETTLE_vel
+
+  The two O(0.5) halves compose to the full ``exp(-gamma*dt)`` friction, and the
+  two A(0.5) drifts advance positions by exactly ``dt*v``. Until 2026-10-01 a third
+  A(0.5) followed the force recompute, advancing ``1.5*dt*v`` per step with a force
+  evaluated at pre-drift positions; LFMiddle results produced before then (incl.
+  campaign 89c9a900) measured that defective scheme.
+
+  Note: nothing touches the momentum between the two O(0.5) halves, so this step is
+  algebraically BAOAB -- and a weaker one than :func:`settle_langevin` (no R-step
+  constraint impulse, no angular-momentum restoration, no ``water_mask``). It is not a
+  genuine Leimkuhler-Matthews LF-Middle splitting; do not use it to test that idea.
   """
   if projection_site not in ("post_o", "post_settle_vel", "both"):
     msg = f"invalid projection_site={projection_site!r}; expected post_o|post_settle_vel|both"
@@ -1517,18 +1560,11 @@ def settle_lfmiddle_langevin(
 
     force = force_fn(position, **kwargs)
 
-    # A(0.5) second half — mirrors first half for time-reversibility.
-    # Re-apply SETTLE so the returned state and next step's positions_old
-    # both satisfy constraints.
-    positions_pre_settle2 = position
-    position = _langevin_step_a(position, momentum, state.mass, _dt, shift_fn)
-    if constraints is not None:
-      pairs, lengths = constraints
-      position = project_positions(position, pairs, lengths, state.mass, shift_fn)
-    position = settle_positions(
-        position, positions_pre_settle2, water_indices, r_OH, r_HH,
-        mass_oxygen, mass_hydrogen, box,
-    )
+    # No position update after the force recompute: the returned ``force`` must be
+    # the force at the returned ``position`` (the next step's B half-kick uses it),
+    # and the two A(0.5) drifts above already advance positions by exactly dt*v.
+    # A former third A-step here advanced 1.5*dt*v per step and left state.force
+    # stale (tests/physics/test_transrot_decomposition.py).
     if project_ou_momentum_rigid:
       momentum, key = _langevin_step_o_constrained(
           momentum, position, state.mass, gamma, half_dt, _kT, key, water_indices
@@ -1619,7 +1655,7 @@ def settle_with_nhc(
       (init_fn, apply_fn) tuple for NVT dynamics with NHC + SETTLE.
   """
   # Get JAX MD's proven Nosé-Hoover Chain integrator
-  init_fn_nhc, apply_fn_nhc = simulate.nvt_nose_hoover(
+  nhc_init, nhc_apply = simulate.nvt_nose_hoover(
 
     energy_or_force_fn,
     shift_fn,
@@ -1639,16 +1675,22 @@ def settle_with_nhc(
 
   # Wrap NHC apply function with SETTLE constraints
   def apply_with_settle(state, **kwargs):
-    """Apply one NHC step, then enforce SETTLE constraints."""
+    """Apply one NHC step, then enforce SETTLE constraints.
+
+    jax_md's NVTNoseHooverState / NoseHooverChain name the field ``position``
+    (not ``positions``). NOTE: the chain is reset to zero every step below, which
+    discards the thermostat's state -- this is the abandoned Phase 2
+    "settle_with_nhc" approach, not a working NHC integrator (Phase 7, #4168).
+    """
     # Store old positions for SETTLE velocity correction
-    positions_old = state.positions
+    positions_old = state.position
 
     # Apply one step of JAX MD's NHC integrator
     state = nhc_apply(state, **kwargs)
 
     # Enforce SETTLE position constraints
     position = settle_positions(
-      state.positions,
+      state.position,
       positions_old,
       water_indices,
       r_OH,
@@ -1687,13 +1729,13 @@ def settle_with_nhc(
     # (position, momentum of fictitious particles) becomes desynchronized. Reset
     # to zero to allow thermostat to re-equilibrate smoothly on the next step.
     new_chain = state.chain.set(
-      positions=jnp.zeros_like(state.chain.positions),
+      position=jnp.zeros_like(state.chain.position),
       momentum=jnp.zeros_like(state.chain.momentum),
     )
 
     # Return updated state with constrained position, momentum, force, AND chain state
     return state.set(
-      positions=position,
+      position=position,
       momentum=momentum,
       force=force,
       chain=new_chain,

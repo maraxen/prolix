@@ -70,22 +70,52 @@ def _exception_energy_masked(
 
 
 def atom_bucket_size(bundle: MolecularBundle) -> int:
-    """Static padded atom count from shape_spec (compile-time constant per program)."""
+    """Static padded atom count from shape_spec (compile-time constant per program).
+
+    Args:
+        bundle: MolecularBundle instance.
+
+    Returns:
+        Padded atom count for JIT compilation.
+    """
     return atom_pad_length(bundle.shape_spec)
 
 
 def water_bucket_size(bundle: MolecularBundle) -> int:
-    """Static padded water slot count from shape_spec."""
+    """Static padded water slot count from shape_spec.
+
+    Args:
+        bundle: MolecularBundle instance.
+
+    Returns:
+        Padded water count for JIT compilation.
+    """
     return water_pad_length(bundle.shape_spec)
 
 
 def positions_with_prefix(bundle: MolecularBundle, prefix: int) -> jnp.ndarray:
-    """Prefix slice of positions; ``prefix`` must be a host static int (not traced)."""
+    """Prefix slice of positions; ``prefix`` must be a host static int (not traced).
+
+    Args:
+        bundle: MolecularBundle instance.
+        prefix: Host-static atom count (compile-time constant).
+
+    Returns:
+        (prefix, 3) position array.
+    """
     return bundle.positions[:prefix]
 
 
 def masses_with_prefix(bundle: MolecularBundle, prefix: int) -> jnp.ndarray:
-    """Prefix slice of real ``bundle.masses``; ``prefix`` is host static (atom bucket)."""
+    """Prefix slice of real ``bundle.masses``; ``prefix`` is host static (atom bucket).
+
+    Args:
+        bundle: MolecularBundle instance.
+        prefix: Host-static atom count (compile-time constant).
+
+    Returns:
+        (prefix,) mass array.
+    """
     return bundle.masses[:prefix]
 
 
@@ -118,13 +148,42 @@ def as_integration_scalars(
     )
 
 
+def pbc_box_for_bundle(bundle: MolecularBundle) -> jnp.ndarray | None:
+    """The box vector a bundle is periodic in, or ``None`` if it is not periodic.
+
+    Single source of truth for "is this bundle periodic, and in what box". Every
+    consumer that needs to know must ask here, because the answer has to be the same
+    everywhere at once.
+
+    #4971 is what happens when it is not. ``displacement_fn_for_bundle`` below said
+    "periodic" and handed back a ``shift_fn`` that wraps every atom independently into
+    [0, box), while ``EnsemblePlan`` passed no box to ``settle_langevin`` at all --
+    whose ``box`` parameter defaults to ``None``. That silently disabled *every* PBC
+    protection in ``settle.py``: the per-atom unwrap against the previous position,
+    both minimum-image corrections on the SETTLE displacement, and the post-solve
+    re-wrap. Water molecules straddling a box face were split by the wrap and never
+    made whole again, so SETTLE fitted a rigid body to an object up to a box across
+    and launched it -- exactly the "spurious ~box-sized impulse that detonates the
+    integrator at liquid density" that settle.py's own comment warns about.
+
+    Measured on DHFR (23558 atoms, job 21969535): 1011 atoms, exactly 3 x 337 whole
+    molecules, displaced 8-9 A in one step from rest with normal forces and the
+    thermostat off; water fraction among them 1.0000 against a system baseline of
+    0.8943, and nothing at all displaced between 0.01 and 1 A. A binary outcome,
+    because being split is itself binary.
+    """
+    spec = bundle.shape_spec
+    if spec.boundary_condition == "periodic" and spec.has_pbc:
+        return jnp.diag(bundle.box)
+    return None
+
+
 def displacement_fn_for_bundle(
     bundle: MolecularBundle,
 ) -> tuple[space.DisplacementFn, space.ShiftFn]:
     """Reconstruct JAX-MD displacement and shift from bundle shape_spec."""
-    spec = bundle.shape_spec
-    if spec.boundary_condition == "periodic" and spec.has_pbc:
-        box_vec = jnp.diag(bundle.box)
+    box_vec = pbc_box_for_bundle(bundle)
+    if box_vec is not None:
         return space.periodic(box_vec)
     return space.free()
 
@@ -347,12 +406,26 @@ def _dense_excl_matrices_from_bundle(
 def physics_system_from_bundle(
     bundle: MolecularBundle,
     positions: jnp.ndarray,
+    pme_grid_points: int = 64,
+    *,
+    build_dense_exclusions: bool = True,
 ) -> PhysicsSystem:
     """Reconstruct a PhysicsSystem view for ``single_padded_energy``.
 
     ``positions.shape[0]`` must be host-static (integration prefix or host trim).
     Topology uses padded arrays + masks — never ``int(bundle.n_*)`` — so this
     path is safe under ``jax.vmap`` / stacked N_MOLS dispatch.
+
+    ``pme_grid_points`` sets the FFT grid resolution for PME electrostatics
+    (default 64; override for comparisons against simulations run with different grids).
+
+    ``build_dense_exclusions`` controls whether to build (N, N) exclusion scale
+    matrices. These cost O(N²) memory (~4.4 GB at N=23,558) and are rebuilt on
+    every force call inside the jitted MD loop. Only the dense direct-space path
+    in ``batched_energy`` reads them; the flash and neighbor-list direct-space
+    kernels use the sparse ``excl_indices`` pair list instead. Set to False to
+    avoid the allocation when using flash or neighbor-list paths. Default is True
+    to preserve existing behavior for all callers.
     """
     n = int(positions.shape[0])
     n_real = jnp.asarray(bundle.n_atoms, dtype=jnp.int32)
@@ -385,7 +458,12 @@ def physics_system_from_bundle(
         if box_size.dtype != positions.dtype:
             box_size = box_size.astype(positions.dtype)
 
-    dense_vdw, dense_elec = _dense_excl_matrices_from_bundle(bundle, n)
+    # Build O(N²) exclusion matrices only if requested. Flash and NL kernels
+    # use sparse excl_indices; only dense direct-space path needs these.
+    if build_dense_exclusions:
+        dense_vdw, dense_elec = _dense_excl_matrices_from_bundle(bundle, n)
+    else:
+        dense_vdw, dense_elec = None, None
 
     # Padding-safe pair-list exclusions for the PME reciprocal-space correction
     # (_pme_reciprocal_and_corrections in batched_energy.py) -- the dense direct-
@@ -482,7 +560,7 @@ def physics_system_from_bundle(
         n_padded_atoms=n,
         box_size=box_size,
         pme_alpha=pme_alpha,
-        pme_grid_points=64,
+        pme_grid_points=pme_grid_points,
         nonbonded_cutoff=nonbonded_cutoff,
         dense_excl_scale_vdw=dense_vdw,
         dense_excl_scale_elec=dense_elec,
@@ -500,17 +578,36 @@ def energy_fn_from_bundle(
     *,
     include_nonbonded: bool = True,
     lj_switch_width: float = 0.0,
+    pme_grid_points: int = 64,
+    build_dense_exclusions: bool = True,
+    use_dispersion_correction: bool = True,
 ) -> Callable[..., jnp.ndarray]:
     """Total energy from bundle fields (bonded + optional nonbonded via ``single_padded_energy``).
 
     Includes AMBER 1-4 ``exception_*`` pair energy when present (XR-PARITY-OMM-PROTEIN).
     ``lj_switch_width`` is closed over (OpenMM LJ switch; 0 disables).
+    ``pme_grid_points`` sets the FFT grid resolution for PME electrostatics
+    (default 64; override for comparisons against simulations run with different grids).
+    ``use_dispersion_correction=False`` omits the isotropic LJ dispersion tail, for
+    comparisons against OpenMM systems built with ``setUseDispersionCorrection(False)``.
+
+    ``build_dense_exclusions=False`` skips the two ``(N, N)`` dense exclusion-scale
+    matrices (~4.4 GB at N=23,558, rebuilt on every call inside the jitted MD loop).
+    Only the dense direct-space branch reads them -- ``single_padded_energy``'s
+    ``neighbor is not None`` branch uses the sparse ``excl_indices``/``excl_scales_*``
+    instead (see ``batched_energy.py``: the dense reads are confined to the ``else``
+    arm). Pass ``False`` whenever this energy function will always be called with a
+    bound ``neighbor``; passing it while still using the dense path would silently
+    fall back to rebuilding the matrices per step via ``_build_dense_exclusion_scales``.
     """
     if not include_nonbonded:
         return bonded_energy_fn_from_bundle(bundle)
 
     disp_fn, _ = displacement_fn_for_bundle(bundle)
     _lj_sw = float(lj_switch_width)
+    _pme_grid = int(pme_grid_points)
+    _build_dense = bool(build_dense_exclusions)
+    _use_disp = bool(use_dispersion_correction)
 
     def energy_fn(positions: jnp.ndarray, **kwargs: object) -> jnp.ndarray:
         # `neighbor` (debt 760's NL path, see single_padded_energy's docstring)
@@ -521,13 +618,17 @@ def energy_fn_from_bundle(
         # doesn't use).
         neighbor = kwargs.pop("neighbor", None)
         del kwargs
-        sys = physics_system_from_bundle(bundle, positions)
+        sys = physics_system_from_bundle(
+            bundle, positions, pme_grid_points=_pme_grid,
+            build_dense_exclusions=_build_dense,
+        )
         e = single_padded_energy(
             sys,
             disp_fn,
             implicit_solvent=False,
             neighbor=neighbor,
             lj_switch_width=_lj_sw,
+            use_dispersion_correction=_use_disp,
         )
         e = e + _exception_energy_masked(
             positions,
@@ -602,7 +703,8 @@ def force_fn_from_bundle(
         # (eval_shape/canonicalize_force), matching energy_fn_from_bundle's
         # own "everything else is dropped" contract.
         del kwargs
-        sys = physics_system_from_bundle(bundle, positions)
+        # Avoid per-step O(N²) allocation: flash kernel uses sparse excl_indices.
+        sys = physics_system_from_bundle(bundle, positions, build_dense_exclusions=False)
         f = single_padded_force(
             sys,
             disp_fn,

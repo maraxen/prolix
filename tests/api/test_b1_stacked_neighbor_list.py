@@ -230,3 +230,91 @@ def test_stacked_use_neighbor_list_overflow_then_reallocate_recovers():
         assert bool(jnp.all(jnp.isfinite(traj.positions))), (
             "overflow-then-reallocate did not recover cleanly"
         )
+
+
+@pytest.mark.slow
+def test_single_bundle_nl_capacity_meets_recommendation():
+    """The single-bundle path must size NL capacity by ``compute_nl_capacity`` too.
+
+    Regression for the DHFR overflow (job 21835473). ``_run_single_inference``
+    used to take jax_md's data-dependent ``allocate()`` sizing and never consult
+    ``compute_nl_capacity``, while the stacked path at
+    ``_build_stacked_neighbor_seed`` did. At 23,558 atoms that came out ~30%
+    under the recommendation and overflowed mid-scan -- and the resulting error
+    told the reader to raise a ``safety_factor`` that the failing path never
+    read. Both sites now go through ``_nl_target_capacity``.
+    """
+    import prolix.physics.neighbor_list as nl_mod
+    from prolix.api.bundle_md import _host_float
+    from prolix.api.ensemble_plan import EnsemblePlan
+
+    bundle_a, _bundle_b = _load_vacuum_boxed_1vii_pair()
+    plan = EnsemblePlan.from_bundle(bundle_a)
+    trajs = plan.run(
+        n_steps=10, dt=0.5, kT=0.6, seed=0, run_mode="inference",
+        use_neighbor_list=True, nl_update_every=5,
+    )
+    traj = trajs[0] if isinstance(trajs, list) else trajs
+
+    recommended = nl_mod.compute_nl_capacity(
+        int(bundle_a.positions.shape[0]),
+        jnp.diag(bundle_a.box),
+        _host_float(bundle_a.cutoff_distance, 9.0),
+        dr_threshold=0.5,
+    )
+    allocated = traj.observable_values["_nl_capacity"]
+    assert allocated >= recommended, (
+        f"single-bundle NL allocated capacity {allocated} is below "
+        f"compute_nl_capacity's recommendation {recommended} -- the capacity "
+        "pre-planning block in _run_single_inference is not running"
+    )
+    assert traj.observable_values["_nl_retry_count"] == 0, (
+        "a correctly pre-sized neighbor list should never need a host-side realloc"
+    )
+
+
+@pytest.mark.slow
+def test_single_bundle_nl_overflow_then_reallocate_recovers():
+    """Defeating *both* capacity defenses still recovers via geometric realloc.
+
+    The single-bundle path now has two independent lines of defense: jax_md's
+    ``capacity_multiplier`` and the ``compute_nl_capacity`` top-up. Shrinking
+    only the multiplier no longer reaches the retry path -- the top-up rescues
+    it -- so this test disables both, then asserts the host-side reallocation
+    recovers rather than raising.
+    """
+    import prolix.physics.neighbor_list as nl_mod
+    from prolix.api import ensemble_plan as ep_mod
+    from prolix.api.ensemble_plan import EnsemblePlan
+
+    bundle_a, _bundle_b = _load_vacuum_boxed_1vii_pair()
+    plan = EnsemblePlan.from_bundle(bundle_a)
+
+    _orig_make = nl_mod.make_neighbor_list_fn
+    _orig_target = ep_mod._nl_target_capacity
+
+    def _tiny_capacity(displacement_fn, box_size, cutoff, **kwargs):
+        kwargs["capacity_multiplier"] = 0.5
+        return _orig_make(displacement_fn, box_size, cutoff, **kwargs)
+
+    nl_mod.make_neighbor_list_fn = _tiny_capacity
+    ep_mod._nl_target_capacity = lambda *_a, **_k: 0
+    try:
+        trajs = plan.run(
+            n_steps=10, dt=0.5, kT=0.6, seed=4, run_mode="inference",
+            use_neighbor_list=True, nl_update_every=2,
+        )
+    finally:
+        nl_mod.make_neighbor_list_fn = _orig_make
+        ep_mod._nl_target_capacity = _orig_target
+
+    traj = trajs[0] if isinstance(trajs, list) else trajs
+    retries = traj.observable_values["_nl_retry_count"]
+    if retries == 0:
+        pytest.skip(
+            "crushed capacity did not overflow for this fixture -- the retry "
+            "path was not exercised (assertion would be vacuous)"
+        )
+    assert bool(jnp.all(jnp.isfinite(traj.positions))), (
+        "overflow-then-reallocate did not recover cleanly"
+    )
