@@ -92,19 +92,16 @@ class TestStepPreservesPytreeUnbatched:
         assert isinstance(out, IntegratorState)
         assert out.positions.shape == base_state.positions.shape
 
-    @pytest.mark.xfail(strict=False, reason="SETTLE steps require water_indices fixture")
     def test_settle_velocity_step_preserves_fields(self, base_state, base_params):
         step = SETTLE_Velocity_Step()
         out = step.apply(base_state, base_params)
         assert isinstance(out, IntegratorState)
 
-    @pytest.mark.xfail(strict=False, reason="SETTLE steps require water_indices fixture")
     def test_settle_position_step_preserves_fields(self, base_state, base_params):
         step = SETTLE_Position_Step()
         out = step.apply(base_state, base_params)
         assert isinstance(out, IntegratorState)
 
-    @pytest.mark.xfail(strict=False, reason="CSVR step requires box and pressure params")
     def test_csvr_step_preserves_fields(self, base_state, base_params):
         step = CSVR_Step()
         out = step.apply(base_state, base_params)
@@ -208,7 +205,6 @@ class TestApplyFnBatchedDropsAuxiliaryFields:
     def _trivial_energy(self, pos, box=None, *args, **kw):
         return jnp.sum(pos ** 2) * 0.0
 
-    @pytest.mark.xfail(strict=False, reason="make_integrator_batched vmap out_axes pre-existing bug with mass=None")
     def test_batched_output_missing_auxiliary_fields(self):
         """apply_fn_batched output has None/default for all 5 auxiliary fields."""
         _, shift_fn = space.free()
@@ -243,7 +239,6 @@ class TestApplyFnBatchedDropsAuxiliaryFields:
                 f"{val}. apply_fn_batched should not propagate auxiliary fields."
             )
 
-    @pytest.mark.xfail(strict=False, reason="make_integrator_batched vmap out_axes pre-existing bug with mass=None")
     def test_batched_core_fields_preserved(self):
         """Core fields (positions, momentum, force, rng, box, step_count) ARE preserved."""
         _, shift_fn = space.free()
