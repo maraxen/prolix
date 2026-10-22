@@ -377,87 +377,36 @@ None. New APIs are additive.
 
 ## Experiment Tracking (bathos)
 
-This project uses **bathos** (`bth`) for experiment provenance, campaign tracking, and result aggregation. The rules below are HARD requirements derived from concrete failures — see the anti-patterns section for what NOT to do.
+Hard requirements, each from a concrete failure. Full CLI reference: the `using-bathos` skill.
+The catalog is in **log mode** (run-log cut-over: laptop 2026-10-16, Engaging 2026-10-17); runs
+append to `.bth/log/` under `.bth.toml`'s `[project] id`.
 
-### Hard rules
+1. **Scripts in `scripts/experiments/` and `scripts/benchmarks/` run through `bth run`**, never raw
+   `uv run python`, and as `bth`, not `uv run bth` (global rule; bathos is not a prolix dependency). Shape — bth
+   flags first, the whole command after `--`:
+   `bth run --tags X --campaign-id <id> --output-paths out.json -- uv run python scripts/experiments/foo.py --out out.json`.
+   The old `bth run python foo.py --tag X --out Y -- <args>` shape and `--tag`/`--out`/`--campaign`
+   no longer parse (fixed across `scripts/slurm/` 2026-10-21).
+2. **Every such script has a sidecar `<stem>.bth.toml` next to it**, `[experiment]` schema (not
+   `[benchmark]`: gate edge cases): `hypothesis`, `[outcomes.*]` each with `condition` (DuckDB SQL),
+   `decision`, `reasoning`, exactly one `is_residual = true`, `[result_schema]`, `[metadata]`.
+   Per-script sidecars only; shared notes go in a non-`.bth.toml` `campaign_design.toml`.
+3. **`bth campaign create "<slug>" --mode exploration --question "..."` BEFORE the first run**, then
+   `--campaign-id <id>` on every run, or `bth campaign review` shows nothing.
+4. **Slurm wrappers `source scripts/slurm/_bth_env.sh`, then `bth run ... -- uv run python ...`.** Do
+   not pin `BTH_CATALOG_DIR`: a per-project catalog never gets a cut-over marker and splits from
+   the run log. Reference wrapper: `scripts/slurm/fit_bonded_hp4.slurm`; sidecar:
+   `scripts/experiments/fit_bonded_hp4.bth.toml`.
+5. **Pull cluster runs with `bth sync engaging --pull`**, never a manual rsync of `outputs/` or of
+   the catalog.
+6. **When the gate fails, fix the sidecar — never `--no-sidecar`** (reserved for `scripts/explore/`;
+   wanting it elsewhere means the script belongs in `scripts/explore/`). The gate's stderr JSON
+   carries `errors[]` and `remediation`.
 
-1. **Every script in `scripts/experiments/` and `scripts/benchmarks/` MUST run through `bth run`, never raw `python` or `uv run python`.**
-   - Local: `uv run bth run python scripts/benchmarks/foo.py --tag X --out out.json -- <args>`
-   - Slurm: `uv run bth run python ...` *inside* the slurm script, AFTER sourcing `scripts/slurm/_bth_env.sh`
-   - `bth run` captures `SLURM_JOB_ID`, git state, exit code, output paths. Bypassing it loses all provenance.
-
-2. **Every script in those dirs MUST have a per-script sidecar `<stem>.bth.toml` next to it.**
-   - Use `[experiment]` schema (verified working). Avoid `[benchmark]` schema — it has gate edge cases.
-   - Required sections: `[experiment].hypothesis`, `[outcomes.pass]`, `[outcomes.fail]`, `[result_schema]`, `[metadata]`
-   - Each outcome MUST have `condition` (DuckDB SQL), `decision` (next action), `reasoning` (mechanistic justification — not bare narrative).
-   - Exactly one outcome MUST have `is_residual = true` (catch-all branch).
-   - Reference: `scripts/experiments/fit_bonded_hp4.bth.toml` is the canonical working pattern.
-
-3. **Create the campaign BEFORE running:**
-   ```bash
-   bth campaign create "campaign-slug" --mode exploration --question "..." 
-   # Returns campaign_id like "edbd0b84"
-   ```
-   Pass `--campaign <id>` to every `bth run` that belongs to the campaign. Without this, runs are orphaned and `bth campaign review` returns empty.
-
-4. **Slurm wrappers must source `_bth_env.sh` and use `bth run`:**
-   ```bash
-   source scripts/slurm/_bth_env.sh
-   uv run bth run python scripts/benchmarks/foo.py \
-       --tag cluster --tag <campaign-slug> \
-       ${CAMPAIGN_ID:+--campaign $CAMPAIGN_ID} \
-       --out "${OUT}" \
-       -- <script args>
-   ```
-   See `scripts/slurm/fit_bonded_hp4.slurm` and `scripts/slurm/bench_external_baseline.slurm` as references.
-
-5. **Sync from cluster via `bth sync`, not manual rsync:**
-   ```bash
-   bth remote add engaging engaging:~/projects/prolix  # one-time
-   bth sync engaging --pull                              # before each analysis
-   ```
-   If `bth sync` errors on path resolution, fall back to direct catalog rsync:
-   ```bash
-   rsync -az engaging:~/.bth/catalog/runs/prolix/ ~/.bth/catalog/runs/prolix/
-   ```
-   But always prefer `bth sync` — it handles incremental fragments correctly.
-
-6. **When the bath gate fails, fix the sidecar — never `--no-sidecar`.**
-   - Gate failure writes structured JSON to stderr with `errors[]` and `remediation`. Read it.
-   - `--no-sidecar` is reserved for ad-hoc exploration in `scripts/explore/` only.
-   - If you find yourself wanting to bypass the gate, that's a signal the experiment isn't ready for `scripts/experiments/` — move it to `scripts/explore/` instead.
-
-### Query patterns
-
-```bash
-# Recent runs by campaign tag (bath find can be finicky with multi-tag — use sql)
-bth sql "SELECT id, status, tags FROM read_parquet('~/.bth/catalog/runs/prolix/run_*.parquet') WHERE list_contains(tags, 's71-external-baseline') ORDER BY timestamp DESC LIMIT 10"
-
-# Campaign-level review
-bth campaign review <campaign_id>
-
-# After many fragments accumulate
-bth compact
-bth sql "SELECT tool, AVG(per_mol_step_seconds) FROM runs WHERE list_contains(tags, 'external-baseline') GROUP BY tool"
-```
-
-### Anti-patterns observed (don't repeat)
-
-| Anti-pattern | What happens | Fix |
-|---|---|---|
-| Slurm wrapper calls `uv run python foo.py` directly | No provenance, no SLURM_JOB_ID capture, no campaign association — run is invisible to bath | Wrap with `uv run bth run python foo.py --tag ... --campaign ...` |
-| Putting `[benchmark]` instead of `[experiment]` in the sidecar | Gate may reject "no [outcomes] section found" depending on bath version | Use `[experiment]` schema (verified) |
-| Single campaign-level TOML treated as a sidecar | Gate rejects (wrong file location/structure) | Per-script sidecars + a separate `campaign_design.toml` (non-`.bth.toml` extension) for shared design notes |
-| Manual `rsync` of `/outputs/` directly to local instead of bath catalog | Results visible but not tracked; can't query later | Use `bth sync` for catalog; direct rsync only for non-bath artifacts |
-| Running smoke without registering a campaign first | Run lands in catalog but `bth campaign review` shows nothing | `bth campaign create` BEFORE the first `bth run` |
-| Hand-editing sidecars to remove `is_residual = true` from `[outcomes.fail]` | Gate failure: "exactly one outcome must have is_residual=true" | Keep the residual on the catch-all fail branch |
-
-### Reference files
-
-- Canonical sidecar: `scripts/experiments/fit_bonded_hp4.bth.toml`
-- Canonical slurm wrapper: `scripts/slurm/fit_bonded_hp4.slurm`
-- Project bath config: `.bth.toml` (project slug + `[remotes.engaging]` block)
-- Skill (full reference): load `using-bathos` skill in Claude Code
+**Querying:** `bth sql` reads the `runs` index, where `tags` is a JSON-encoded VARCHAR —
+`WHERE list_contains(from_json(tags, '["VARCHAR"]'), 'my-tag')`; plain `list_contains(tags, …)`
+fails with a BinderError. The output is `{"rows": [[...]], "count": N}`, positional in SELECT
+order. `read_parquet('~/.bth/catalog/runs/prolix/...')` is frozen at cut-over and misses new runs.
 
 ---
 
