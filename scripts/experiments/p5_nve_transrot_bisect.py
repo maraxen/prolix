@@ -15,9 +15,9 @@ Usage:
         --gamma 0 --n-waters 8 --steps 100 --out /tmp/p5_bisect_smoke.json --seed 42
 
     # Cluster gate (895 waters, 500 steps)
-    uv run bth run python scripts/experiments/p5_nve_transrot_bisect.py \\
-        --gamma 0 --n-waters 895 --steps 500 --out outputs/p5_bisect_nve.json \\
-        --campaign cd2fa896
+    bth run --campaign-id cd2fa896 --output-paths outputs/p5_bisect_nve.json \\
+        -- uv run python scripts/experiments/p5_nve_transrot_bisect.py \\
+        --gamma 0 --n-waters 895 --steps 500 --out outputs/p5_bisect_nve.json
 """
 
 from __future__ import annotations

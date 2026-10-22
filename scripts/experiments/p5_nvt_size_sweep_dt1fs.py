@@ -19,9 +19,9 @@ One invocation = one system size (for SLURM-array parallelism). The wrapper maps
 array task id -> size.
 
 Usage (via bth run, one size):
-    uv run bth run python scripts/experiments/p5_nvt_size_sweep_dt1fs.py \\
-        --out outputs/p5_size_sweep_n216.json --campaign <id> \\
-        -- --n-waters 216 --seeds 42,43,44
+    bth run --campaign-id <id> --output-paths outputs/p5_size_sweep_n216.json \\
+        -- uv run python scripts/experiments/p5_nvt_size_sweep_dt1fs.py \\
+        --out outputs/p5_size_sweep_n216.json --n-waters 216 --seeds 42,43,44
 
 Local L2 smoke (fast, tiny system):
     uv run python scripts/experiments/p5_nvt_size_sweep_dt1fs.py --smoke --out /tmp/smoke.json

@@ -11,7 +11,7 @@ Defaults (override on the CLI after this wrapper's name)::
 
 Example::
 
-  uv run python scripts/benchmarks/prolix_vs_openmm_t1_solvated.py --json t1.json --skip-reference
+  uv run python scripts/explore/prolix_vs_openmm_t1_solvated.py --json t1.json --skip-reference
 """
 
 from __future__ import annotations

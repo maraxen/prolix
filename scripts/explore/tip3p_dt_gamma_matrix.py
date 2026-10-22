@@ -6,7 +6,7 @@ For each (dt, γ) cell, prints one row with replicate-mean rigid temperatures an
 
 Example (local, needs OpenMM)::
 
-  JAX_ENABLE_X64=1 uv run --extra openmm python scripts/benchmarks/tip3p_dt_gamma_matrix.py \\
+  JAX_ENABLE_X64=1 uv run --extra openmm python scripts/explore/tip3p_dt_gamma_matrix.py \\
     --dt-list 1,2 --gamma-list 0.5,1,2 --n-waters 8 --replicas 3 --steps 8000 --burn 2000
 """
 

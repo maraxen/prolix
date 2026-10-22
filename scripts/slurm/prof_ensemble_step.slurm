@@ -115,13 +115,13 @@ if [[ "${NONBONDED}" == "nl" ]]; then
     PROBE=nl-stats
 fi
 
-uv run --extra cuda bth run python scripts/experiments/prof_ensemble_step.py \
-    --tag cluster \
-    --tag full-md-path-matrix \
-    --tag stage1-l40s \
-    --campaign "${CAMPAIGN_ID}" \
-    --out "${OUT}" \
-    -- \
+bth run \
+    --tags cluster \
+    --tags full-md-path-matrix \
+    --tags stage1-l40s \
+    --campaign-id "${CAMPAIGN_ID}" \
+    --output-paths "${OUT}" \
+    -- uv run --extra cuda python scripts/experiments/prof_ensemble_step.py \
     --system "${SYSTEM}" \
     --nonbonded "${NONBONDED}" \
     --use-size-buckets "${BUCKETS}" \

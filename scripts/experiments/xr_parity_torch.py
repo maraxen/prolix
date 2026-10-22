@@ -6,10 +6,10 @@ require TorchMD/torch — comparator benches stay under scripts/benchmarks/.
 
 Usage::
 
-    uv run bth run python scripts/experiments/xr_parity_torch.py \\
-      --tag xr-parity-torch --campaign <id> \\
-      --out outputs/xr_parity_torch.json \\
-      -- --probe all --out outputs/xr_parity_torch.json
+    bth run --tags xr-parity-torch --campaign-id <id> \\
+      --output-paths outputs/xr_parity_torch.json \\
+      -- uv run python scripts/experiments/xr_parity_torch.py \\
+      --probe all --out outputs/xr_parity_torch.json
 """
 
 from __future__ import annotations

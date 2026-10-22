@@ -22,8 +22,9 @@ Usage (profile per-class, e.g., 1AKE protein)::
 
 Usage (profile full 4-class aggregate, cluster submission)::
 
-    uv run bth run python scripts/profile_b1_step_scaling.py \\
-        --tag phase4-scaling --out outputs/profile_full.json -- \\
+    bth run --tags phase4-scaling --output-paths outputs/profile_full.json \\
+        -- uv run python scripts/experiments/profile_b1_step_scaling.py \\
+        --out outputs/profile_full.json \\
         --mode full --replicas 16 --n-steps-list "2,10,50,200,800"
 """
 

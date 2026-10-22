@@ -71,9 +71,30 @@ The CSVR thermostat coupling with rigid-body water kinetic energy produces tempe
 
 ## Experiment Tracking (bathos)
 
-This project uses **bathos** (`bth`) for experiment provenance, campaign tracking, and result aggregation. The rules below are HARD requirements derived from concrete failures — see the anti-patterns section for what NOT to do.
+Hard requirements, each from a concrete failure. Full CLI reference: the `using-bathos` skill.
+The catalog is in **log mode** (run-log cut-over: laptop 2026-10-16, Engaging 2026-10-17); runs
+append to `.bth/log/` under `.bth.toml`'s `[project] id`.
 
-### Hard rules
+1. **Scripts in `scripts/experiments/` and `scripts/benchmarks/` run through `bth run`**, never raw
+   `uv run python`, and as `bth`, not `uv run bth` (global rule). Shape — bth
+   flags first, the whole command after `--`:
+   `bth run --tags X --campaign-id <id> --output-paths out.json -- uv run python scripts/experiments/foo.py --out out.json`.
+   The old `bth run python foo.py --tag X --out Y` shape no longer parses (scripts fixed 2026-10-21).
+2. **Every such script has a sidecar `<stem>.bth.toml` next to it**, `[experiment]` schema (not
+   `[benchmark]`: gate edge cases): `hypothesis`, `[outcomes.*]` each with `condition` (DuckDB SQL),
+   `decision`, `reasoning`, exactly one `is_residual = true`, `[result_schema]`, `[metadata]`.
+   Per-script sidecars only; shared notes go in a non-`.bth.toml` `campaign_design.toml`.
+3. **`bth campaign create "<slug>" --mode exploration --question "..."` BEFORE the first run**, then
+   `--campaign-id <id>` on every run, or `bth campaign review` shows nothing.
+4. **Slurm wrappers `source scripts/slurm/_bth_env.sh`, then `bth run ... -- uv run python ...`.** Do
+   not pin `BTH_CATALOG_DIR`: a per-project catalog never gets a cut-over marker and splits from
+   the run log. Reference wrapper: `scripts/slurm/fit_bonded_hp4.slurm`; sidecar:
+   `scripts/experiments/fit_bonded_hp4.bth.toml`.
+5. **Pull cluster runs with `bth sync engaging --pull`**, never a manual rsync of `outputs/` or of
+   the catalog.
+6. **When the gate fails, fix the sidecar — never `--no-sidecar`** (reserved for `scripts/explore/`;
+   needing it elsewhere means the script belongs there). The gate's stderr JSON
+   carries `errors[]` and `remediation`.
 
 1. **Every script in `scripts/experiments/` and `scripts/benchmarks/` MUST run through `bth run`, never raw `python` or `uv run python`.**
    - Local: `uv run bth run python scripts/benchmarks/foo.py --tag X --out out.json -- <args>`

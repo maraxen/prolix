@@ -8,9 +8,10 @@ Emit (requires OpenMM extra)::
 
 Parity vs committed gold (no OpenMM needed once gold exists)::
 
-    uv run bth run python scripts/experiments/nl_omm_parity.py \\
-      --tag nonbonded-omm-parity --campaign <id> \\
-      --out outputs/nonbonded_omm_parity/nl.json -- --probe water
+    bth run --tags nonbonded-omm-parity --campaign-id <id> \\
+      --output-paths outputs/nonbonded_omm_parity/nl.json \\
+      -- uv run --extra openmm python scripts/experiments/nl_omm_parity.py \\
+      --probe water --out outputs/nonbonded_omm_parity/nl.json
 """
 
 from __future__ import annotations

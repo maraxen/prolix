@@ -1,4 +1,4 @@
-"""Unit tests for ``scripts/benchmarks/tip3p_ke_gates.py`` (P2a-B2-R / P2a-B2-X)."""
+"""Unit tests for ``scripts/explore/tip3p_ke_gates.py`` (P2a-B2-R / P2a-B2-X)."""
 
 from __future__ import annotations
 
@@ -13,8 +13,8 @@ pytestmark = pytest.mark.slow
 
 _FIXTURES = Path(__file__).resolve().parents[1] / "fixtures" / "tip3p_ke_compare"
 _FIXTURES_AGG = Path(__file__).resolve().parents[1] / "fixtures" / "tip3p_tightening_aggregate"
-_GATES_PATH = Path(__file__).resolve().parents[2] / "scripts" / "benchmarks" / "tip3p_ke_gates.py"
-_AGGREGATE_PATH = Path(__file__).resolve().parents[2] / "scripts" / "benchmarks" / "aggregate_tip3p_tightening_logs.py"
+_GATES_PATH = Path(__file__).resolve().parents[2] / "scripts" / "explore" / "tip3p_ke_gates.py"
+_AGGREGATE_PATH = Path(__file__).resolve().parents[2] / "scripts" / "explore" / "aggregate_tip3p_tightening_logs.py"
 
 
 def _gates():

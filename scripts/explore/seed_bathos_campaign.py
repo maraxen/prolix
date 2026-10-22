@@ -52,6 +52,11 @@ def main() -> int:
     args = p.parse_args()
 
     catalog = Path(args.catalog).expanduser() if args.catalog else Path.home() / ".bth" / "catalog"
+    # Pre-cut-over workaround only: in log mode bathos.db is frozen and campaigns live in the
+    # run log, so planting a bathos.db row would re-create the legacy store (split brain).
+    marker = Path.home() / ".bth" / "catalog" / "cutover.json"
+    if marker.exists():
+        raise SystemExit(f"refusing: {marker} exists (run-log cut-over); use `bth campaign create`")
     catalog.mkdir(parents=True, exist_ok=True)
     db_path = catalog / "bathos.db"
     con = duckdb.connect(str(db_path))

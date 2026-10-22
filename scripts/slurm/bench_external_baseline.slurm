@@ -84,7 +84,7 @@ fi
 BENCH_DIR="scripts/benchmarks/external_baseline"
 case "${TOOL}" in
     prolix)
-        PYTHON_INTERP="python"  # project uv venv already active via outer 'uv run bth run'
+        PYTHON_INTERP="uv run python"  # project uv venv, entered after bth run's `--`
         ;;
     dmff)
         PYTHON_INTERP="${BENCH_DIR}/.venv-dmff/bin/python"
@@ -141,13 +141,17 @@ fi
 source "scripts/slurm/_bth_env.sh"
 
 CAMPAIGN_ID="${CAMPAIGN_ID:-edbd0b84-c0e2-4d2d-a89f-5f9fe8ae3aff}"
-CAMPAIGN_FLAG="--campaign ${CAMPAIGN_ID}"
+CAMPAIGN_FLAG="--campaign-id ${CAMPAIGN_ID}"
 
-uv run bth run ${PYTHON_INTERP} "${BENCH_SCRIPT}" \
-    --tag s71 --tag external-baseline --tag scope-a \
-    --tag "tool:${TOOL}" --tag "n_mols:${N_MOLS}" --tag "precision:${PRECISION}" \
-    --tag "hardware:${HARDWARE_TAG}" \
+# PYTHON_INTERP is word-split on purpose (e.g. "uv run python").
+# shellcheck disable=SC2086
+bth run \
+    --tags s71 --tags external-baseline --tags scope-a \
+    --tags "tool:${TOOL}" --tags "n_mols:${N_MOLS}" --tags "precision:${PRECISION}" \
+    --tags "hardware:${HARDWARE_TAG}" \
     ${CAMPAIGN_FLAG} \
+    --output-paths "${OUT}" \
+    -- ${PYTHON_INTERP} "${BENCH_SCRIPT}" \
     --out "${OUT}" \
     --n-mols "${N_MOLS}" \
     --n-conf-cap "${N_CONF_CAP}" \
