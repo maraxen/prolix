@@ -12,7 +12,7 @@ from prolix.api.ensemble_dispatch import (
 )
 from prolix.tiling.axes import N_WATERS
 from prolix.tiling.planner import AxisDecision, AxisSpec, BatchPlan
-from xtrax.tiling.strategy import SafeMap, Scan, Vmap
+from xtrax.tiling.strategy import ChunkedMap, Scan, Vmap
 
 
 def test_n_waters_strategy_vmap_default():
@@ -39,7 +39,7 @@ def _n_waters_plan(*, n: int, batch_size: int) -> BatchPlan:
 
 def test_n_waters_strategy_safemap_when_chunked():
     plan = _n_waters_plan(n=64, batch_size=8)
-    assert isinstance(n_waters_strategy(plan, 64), SafeMap)
+    assert isinstance(n_waters_strategy(plan, 64), ChunkedMap)
 
 
 def test_dispatch_n_waters_vmap_parity():

@@ -2267,7 +2267,7 @@ def _langevin_step_o_constrained(
   r_water = jnp.stack([position[idx[:, 0]], position[idx[:, 1]], position[idx[:, 2]]], axis=1)
   m_water = jnp.stack([mass_flat[idx[:, 0]], mass_flat[idx[:, 1]], mass_flat[idx[:, 2]]], axis=1)
 
-  # Batched over waters via xtrax dispatch (Vmap/SafeMap), not lax.scan.
+  # Batched over waters via xtrax dispatch (Vmap/ChunkedMap), not lax.scan.
   n_w = r_water.shape[0]
   splits = jax.random.split(key, n_w + 1)
   key, water_keys = splits[0], splits[1:]

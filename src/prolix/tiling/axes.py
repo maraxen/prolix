@@ -76,7 +76,7 @@ N_STEPS = AxisSpec(
 )
 
 # Homogeneous rigid-water axis (SETTLE / constrained OU). Vmap by default;
-# SafeMap when a BatchPlan chunks n_waters for memory (xtrax compose).
+# ChunkedMap when a BatchPlan chunks n_waters for memory (xtrax compose).
 N_WATERS = AxisSpec(
     name="n_waters",
     axis_index=7,
