@@ -1,7 +1,7 @@
 """Axis dispatch via xtrax make_axis_dispatch (#2645 / XR-DISPATCH / XR-DISPATCH-MULTI / XR-CARRY).
 
-N_MOLS (MVP 2A): ``Vmap`` / ``SafeMap`` only via ``dispatch_n_mols``.
-N_WATERS (SETTLE): ``dispatch_n_waters`` Vmap/SafeMap over rigid waters.
+N_MOLS (MVP 2A): ``Vmap`` / ``ChunkedMap`` only via ``dispatch_n_mols``.
+N_WATERS (SETTLE): ``dispatch_n_waters`` Vmap/ChunkedMap over rigid waters.
 ``Bucket``, ``DedupGather``, and ``Scan`` on mapped axes raise — Scan belongs on
 the step axis (XR-CARRY); ``DedupGather`` executes via
 ``prolix.api.ensemble_dedup.dispatch_n_mols_dedup`` for **topology-keyed**
@@ -77,32 +77,32 @@ def _vmap_or_safemap(
     return ChunkedMap(batch_size=batch_size)
 
 
-def n_mols_strategy(plan: BatchPlan | None, n_systems: int) -> Vmap | SafeMap:
+def n_mols_strategy(plan: BatchPlan | None, n_systems: int) -> Vmap | ChunkedMap:
     """Map prolix BatchPlan N_MOLS decision to an xtrax strategy."""
     return _vmap_or_safemap(plan, N_MOLS.name, n_systems)
 
 
-def n_atoms_strategy(plan: BatchPlan | None, n_atoms: int) -> Vmap | SafeMap:
+def n_atoms_strategy(plan: BatchPlan | None, n_atoms: int) -> Vmap | ChunkedMap:
     """Map prolix BatchPlan N_ATOMS decision to an xtrax strategy (XR-DISPATCH-MULTI)."""
     return _vmap_or_safemap(plan, N_ATOMS.name, n_atoms)
 
 
 def dispatch_vmap_safemap(
     axis_name: str,
-    strategy: Vmap | SafeMap,
+    strategy: Vmap | ChunkedMap,
     fn: Callable[..., Any],
     args: Any,
     *,
     in_axes: Any = 0,
 ) -> Any:
-    """Apply ``make_axis_dispatch`` Vmap/SafeMap iterator on ``axis_name``.
-
+    """Apply ``make_axis_dispatch`` Vmap/ChunkedMap iterator on ``axis_name``.
+    
     Rejects Bucket / DedupGather / Scan rather than silent-vmap.
     """
     if isinstance(strategy, (Bucket, DedupGather, Scan)):
         raise DispatchRejected(
             f"{axis_name} dispatch rejects {type(strategy).__name__}; "
-            "only Vmap/SafeMap are supported "
+            "only Vmap/ChunkedMap are supported "
             "(Scan → XR-CARRY; DedupGather → ensemble_dedup; Bucket → XR-BUCKET)."
         )
     if not isinstance(strategy, (Vmap, SafeMap, ChunkedMap)):
@@ -124,10 +124,10 @@ def dispatch_n_mols(
     extra_stacked: Any = None,
 ) -> Any:
     """Dispatch ``fn(bundle, seed)`` over stacked bundles on N_MOLS.
-
+    
     Applies the iterator returned by ``make_axis_dispatch`` (VmapIterator /
-    SafeMapIterator). Unsupported strategies raise rather than silent-vmap.
-
+    ChunkedMapIterator). Unsupported strategies raise rather than silent-vmap.
+    
     Args:
         extra_stacked: Optional additional stacked pytree (same leading batch
             axis as ``stacked_bundle``/``seeds``) to map alongside them --

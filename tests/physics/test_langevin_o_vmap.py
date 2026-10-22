@@ -1,4 +1,4 @@
-"""Constrained O-step maps waters via xtrax ``dispatch_n_waters`` (Vmap/SafeMap).
+"""Constrained O-step maps waters via xtrax ``dispatch_n_waters`` (Vmap/ChunkedMap).
 
 Replaces water-axis ``lax.scan`` (and a raw ``jax.vmap``) so 6×6 project + 3×3
 Cholesky are batched. Keys: ``split(n_waters+1)``.

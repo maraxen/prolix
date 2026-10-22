@@ -2,7 +2,7 @@
 
 Converts AxisSpec / BatchPlan between the two representations and delegates
 strategy selection to xtrax joint ``MemoryBudget`` planning. Heterogeneous
-axes are fixed to SafeMap before the joint plan; homogeneous axes are planned
+axes are fixed to ChunkedMap before the joint plan; homogeneous axes are planned
 under ``MemoryBudget``. No secondary host demotion loop.
 """
 
@@ -114,14 +114,14 @@ def plan_axes_with_xtrax(
     dedup_specs: list[DedupSpec] | None = None,
 ) -> BatchPlan:
     """Plan using xtrax ``BatchPlanner(budget=MemoryBudget(...))``.
-
-    Heterogeneous axes are fixed to SafeMap and excluded from joint demotion
+    
+    Heterogeneous axes are fixed to ChunkedMap and excluded from joint demotion
     candidates. Homogeneous axes are planned under the joint budget. Optional
     ``carry_specs`` pre-demote named axes to ``Scan`` (XR-CARRY). Optional
     ``dedup_specs`` pre-demote named axes to ``DedupGather`` (XR-DEDUP). The
     estimate callable bridges xtrax ``AxisDecision`` sequences back to the
     caller-supplied prolix estimator (typically ``estimate_memory_theoretical``).
-
+    
     Raises:
         BudgetInfeasibleError: If the joint estimate cannot fit ``budget_bytes``
             after demotion (or for hetero-only plans that already exceed budget).
@@ -136,7 +136,7 @@ def plan_axes_with_xtrax(
     dedup_names = {ds.axis_name for ds in dedup_list}
 
     # CarrySpec / DedupSpec axes must reach xtrax Phase-0/0b even if marked
-    # heterogeneous so the planner can fail loud rather than silent SafeMap.
+    # heterogeneous so the planner can fail loud rather than silent ChunkedMap.
     het_decisions: list[AxisDecision] = []
     plan_axes: list[AxisSpec] = []
     for ax in sorted_axes:

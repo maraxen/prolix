@@ -10,7 +10,7 @@ Run modes (B1-INFER / B1-XTRAX-WIRE):
 
 N_MOLS (using-xtrax):
   - Host ``partition_bundles_by_shape`` → K shape classes (Python over K only).
-  - Within class: Vmap/SafeMap over replicas with distinct seeds.
+  - Within class: Vmap/ChunkedMap over replicas with distinct seeds.
   - DedupGather only for topology-keyed bodies (see ``ensemble_dedup``), never
     seeded Langevin.
 """
@@ -470,8 +470,8 @@ class EnsemblePlan:
         use_flash_forces: bool = False,
         nb_cfg: Any = None,
     ) -> list[Trajectory]:
-        """Host-partition by shape_spec; Vmap/SafeMap within each class (xtrax).
-
+        """Host-partition by shape_spec; Vmap/ChunkedMap within each class (xtrax).
+        
         Python iterates only over distinct shape classes (K≪N). Within a
         stackable class there is no per-system Python loop. DedupGather is
         **not** used for seeded Langevin (would scatter identical trajs).
