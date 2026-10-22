@@ -1,6 +1,7 @@
 [project]
 slug = "prolix"
 root = "/home/marielle/projects/prolix"
+id = "77ce3b11-9658-467a-984a-c4840209fa9b"
 
 [remote]
 host = "engaging"

@@ -1,8 +1,8 @@
 """Batch planner for EnsemblePlan multi-bundle MD dispatch (#1842 / XR-BUDGET).
 
 After host ``partition_bundles_by_shape``, callers plan each homogeneous group
-with ``heterogeneous=False`` so xtrax selects Vmap/SafeMap (not a hetero
-SafeMap demotion of the full mixed batch). DedupSpec is **not** attached for
+with ``heterogeneous=False`` so xtrax selects Vmap/ChunkedMap (not a hetero
+ChunkedMap demotion of the full mixed batch). DedupSpec is **not** attached for
 seeded Langevin — use ``plan_n_mols_with_dedup`` only for topology-keyed maps.
 """
 

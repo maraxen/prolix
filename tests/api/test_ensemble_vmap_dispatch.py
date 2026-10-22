@@ -11,7 +11,7 @@ from prolix.api import EnsemblePlan
 from prolix.api.bundle_stack import can_stack_molecular_bundles, stack_molecular_bundles
 from prolix.api.ensemble_dispatch import DispatchRejected, dispatch_n_mols, n_mols_strategy
 from prolix.tiling.planner import AxisDecision, AxisSpec, BatchPlan
-from xtrax.tiling.strategy import Bucket, DedupGather, SafeMap, Scan, Vmap
+from xtrax.tiling.strategy import Bucket, DedupGather, ChunkedMap, Scan, Vmap
 
 _b1_path = Path(__file__).resolve().parent.parent / "bench" / "test_b1_smoke.py"
 _spec = importlib.util.spec_from_file_location("test_b1_smoke", _b1_path)
@@ -45,7 +45,7 @@ def test_n_mols_strategy_safemap_when_not_stackable(monkeypatch):
     plan = EnsemblePlan.from_bundles(bundles).batch_plan
     assert plan is not None
     strategy = n_mols_strategy(plan, len(bundles))
-    assert isinstance(strategy, SafeMap)
+    assert isinstance(strategy, ChunkedMap)
 
 
 def test_dispatch_n_mols_applies_make_axis_dispatch_iterator(monkeypatch):
