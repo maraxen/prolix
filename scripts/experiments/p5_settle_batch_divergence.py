@@ -33,8 +33,9 @@ Usage:
         --mode bitexact --out /tmp/p5_bitexact.json
 
     # Cluster batch
-    uv run bth run python scripts/experiments/p5_settle_batch_divergence.py \\
-        --mode seeded --steps 10 --out outputs/p5_seeded.json --campaign <id>
+    bth run --campaign-id <id> --output-paths outputs/p5_seeded.json \\
+        -- uv run python scripts/experiments/p5_settle_batch_divergence.py \\
+        --mode seeded --steps 10 --out outputs/p5_seeded.json
 """
 
 from __future__ import annotations

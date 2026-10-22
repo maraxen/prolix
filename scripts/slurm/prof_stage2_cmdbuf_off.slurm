@@ -66,15 +66,15 @@ echo "Host: $(hostname)  Job: ${SLURM_JOB_ID:-local}"
 echo "GPU: $(nvidia-smi --query-gpu=name,memory.total --format=csv,noheader 2>&1 | head -1)"
 echo "Date: $(date -Is)"
 
-uv run bth run python scripts/experiments/profile_b1_flash_vs_autodiff_forces.py \
+bth run \
     --no-sidecar \
-    --tag p7-stage2-cmdbuf-off \
-    --tag protein:1vii \
-    --tag mode:flash \
-    --tag pme:on \
-    --tag grid:1.0 \
-    --out outputs/profiling/stage2/cmdbuf_off/summary.json \
-    -- \
+    --tags p7-stage2-cmdbuf-off \
+    --tags protein:1vii \
+    --tags mode:flash \
+    --tags pme:on \
+    --tags grid:1.0 \
+    --output-paths outputs/profiling/stage2/cmdbuf_off/summary.json \
+    -- uv run python scripts/experiments/profile_b1_flash_vs_autodiff_forces.py \
     --protein 1vii \
     --mode flash \
     --pme on \

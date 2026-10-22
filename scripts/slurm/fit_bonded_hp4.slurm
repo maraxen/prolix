@@ -102,20 +102,20 @@ PRECISION_FLAG=""
 [[ "${PRECISION}" == "float64" ]] && PRECISION_FLAG="--float64"
 
 CAMPAIGN_FLAG=""
-[[ -n "${CAMPAIGN_ID}" ]] && CAMPAIGN_FLAG="--campaign ${CAMPAIGN_ID}"
+[[ -n "${CAMPAIGN_ID}" ]] && CAMPAIGN_FLAG="--campaign-id ${CAMPAIGN_ID}"
 
 SWEEP_FLAGS=""
 [[ -n "${N_MOLS_TARGET}" ]] && SWEEP_FLAGS+=" --n-mols-target ${N_MOLS_TARGET}"
 [[ -n "${N_CONF_CAP}" ]] && SWEEP_FLAGS+=" --n-conf-cap ${N_CONF_CAP}"
 
 # shellcheck disable=SC2086
-uv run bth run python scripts/experiments/fit_bonded_hp4.py \
-    --tag cluster --tag hp4 --tag s71 --tag fit \
-    --tag "mode:${MODE}" --tag "precision:${PRECISION}" \
-    ${N_MOLS_TARGET:+--tag "N:${N_MOLS_TARGET}"} \
-    ${SLURM_ARRAY_TASK_ID:+--tag "array_task:${SLURM_ARRAY_TASK_ID}"} \
+bth run \
+    --tags cluster --tags hp4 --tags s71 --tags fit \
+    --tags "mode:${MODE}" --tags "precision:${PRECISION}" \
+    ${N_MOLS_TARGET:+--tags "N:${N_MOLS_TARGET}"} \
+    ${SLURM_ARRAY_TASK_ID:+--tags "array_task:${SLURM_ARRAY_TASK_ID}"} \
     ${CAMPAIGN_FLAG} \
-    -- \
+    -- uv run python scripts/experiments/fit_bonded_hp4.py \
     --subset-dir "${DATA_DIR}" \
     --mode "${MODE}" \
     --n-steps "${N_STEPS}" \

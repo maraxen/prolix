@@ -72,11 +72,11 @@ source "scripts/slurm/_bth_env.sh"
 
 CAMPAIGN_ID="${CAMPAIGN_ID:?CAMPAIGN_ID env var required — pass via sbatch --export=ALL,CAMPAIGN_ID=<id>}"
 
-uv run bth run python scripts/experiments/p5_nvt_size_sweep_dt1fs.py \
-    --tag p5 --tag nvt-size-sweep --tag dt1fs --tag "n${N_WATERS}" \
-    --campaign "${CAMPAIGN_ID}" \
-    --out "${OUT}" \
-    -- --out "${OUT}" --n-waters "${N_WATERS}" --seeds 42,43,44 --steps 30000 --burn 10000
+bth run \
+    --tags p5 --tags nvt-size-sweep --tags dt1fs --tags "n${N_WATERS}" \
+    --campaign-id "${CAMPAIGN_ID}" \
+    --output-paths "${OUT}" \
+    -- uv run python scripts/experiments/p5_nvt_size_sweep_dt1fs.py --out "${OUT}" --n-waters "${N_WATERS}" --seeds 42,43,44 --steps 30000 --burn 10000
 
 EXIT=$?
 echo "=== output: ${OUT} ==="

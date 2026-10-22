@@ -64,12 +64,12 @@ CAMPAIGN_ID="${CAMPAIGN_ID:-dbb2cc17}"
 OUT="outputs/p5_nvt_gate_diag/result_${SLURM_JOB_ID:-local}.json"
 
 echo "=== P5 NVT gate diagnostic (campaign=${CAMPAIGN_ID}) ==="
-uv run bth run python scripts/experiments/p5_nvt_gate_diag.py \
-  --tag p5-nvt-gate-diag \
-  --tag "slurm_job=${SLURM_JOB_ID:-local}" \
-  --campaign "${CAMPAIGN_ID}" \
-  --out "${OUT}" \
-  -- --out "${OUT}" \
+bth run \
+  --tags p5-nvt-gate-diag \
+  --tags "slurm_job=${SLURM_JOB_ID:-local}" \
+  --campaign-id "${CAMPAIGN_ID}" \
+  --output-paths "${OUT}" \
+  -- uv run python scripts/experiments/p5_nvt_gate_diag.py --out "${OUT}" \
   2>&1 | tee "${LOG_ROOT}/app/p5_nvt_gate_diag_${SLURM_JOB_ID:-local}.log"
 
 echo "=== Done: exit $? ==="

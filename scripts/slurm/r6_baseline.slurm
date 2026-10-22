@@ -69,10 +69,10 @@ HP4_R6_CAMPAIGN_ID="845d1407-fc82-460c-892b-12d514f6382e"
 # bath run sets BTH_RESULTS_PATH env var for the subprocess; the Python script
 # defaults --out-json to that path, enabling sidecar outcome evaluation
 # (speedup_ratio >= 10 → pass, 5 <= ratio < 10 → marginal, < 5 → fail).
-uv run bth run python scripts/benchmarks/r6_baseline_wallclock.py \
-    --tag cluster --tag hp4 --tag r6 --tag benchmark \
-    --campaign "${HP4_R6_CAMPAIGN_ID}" \
-    -- \
+bth run \
+    --tags cluster --tags hp4 --tags r6 --tags benchmark \
+    --campaign-id "${HP4_R6_CAMPAIGN_ID}" \
+    -- uv run python scripts/benchmarks/r6_baseline_wallclock.py \
     --data-dir "${DATA_DIR}" \
     --n-molecules 16 \
     --n-trials 5 \

@@ -58,9 +58,9 @@ fi
 # bath run sets BTH_RESULTS_PATH env var for the subprocess; the Python script
 # defaults --out-json to that path, enabling sidecar outcome evaluation.
 # Don't pass --out-json explicitly — that would override BTH_RESULTS_PATH.
-uv run bth run python scripts/validation/l3_smoke_load_bundle.py \
-    --tag cluster --tag hp4 --tag l3 \
-    -- \
+bth run \
+    --tags cluster --tags hp4 --tags l3 \
+    -- uv run python scripts/validation/l3_smoke_load_bundle.py \
     --data-path "${DATA_PATH}"
 
 EXIT=$?

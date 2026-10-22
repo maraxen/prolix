@@ -53,12 +53,12 @@ CAMPAIGN_ID="${CAMPAIGN_ID:-72edf0c7}"
 OUT="outputs/p5_nve_transrot_bisect/result_${SLURM_JOB_ID:-local}.json"
 
 echo "=== P5-A NVE trans/rot bisect (campaign=${CAMPAIGN_ID}) ==="
-uv run bth run python scripts/experiments/p5_nve_transrot_bisect.py \
-  --tag p5-nve-transrot-bisect \
-  --tag "slurm_job=${SLURM_JOB_ID:-local}" \
-  --campaign "${CAMPAIGN_ID}" \
-  --out "${OUT}" \
-  -- --gamma 0 --n-waters 895 --steps 500 --seed 42 --out "${OUT}" \
+bth run \
+  --tags p5-nve-transrot-bisect \
+  --tags "slurm_job=${SLURM_JOB_ID:-local}" \
+  --campaign-id "${CAMPAIGN_ID}" \
+  --output-paths "${OUT}" \
+  -- uv run python scripts/experiments/p5_nve_transrot_bisect.py --gamma 0 --n-waters 895 --steps 500 --seed 42 --out "${OUT}" \
   2>&1 | tee "${LOG_ROOT}/app/p5_nve_transrot_bisect_${SLURM_JOB_ID:-local}.log"
 
 echo "=== Done: exit $? ==="
