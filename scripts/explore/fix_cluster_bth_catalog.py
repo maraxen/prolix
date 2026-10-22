@@ -51,7 +51,17 @@ _NEW = """        campaign_db = duckdb.connect(str(db_path), read_only=True)
 """
 
 
+def _refuse_after_cutover() -> None:
+    # Pre-cut-over workaround only. In log mode bathos.db is frozen (renamed away) and
+    # campaigns live in the run log; writing a bathos.db or patching the installed bathos
+    # source would re-create the legacy store beside the log (split brain).
+    marker = Path.home() / ".bth" / "catalog" / "cutover.json"
+    if marker.exists():
+        raise SystemExit(f"refusing: {marker} exists (run-log cut-over); use `bth campaign` instead")
+
+
 def _seed_catalog(catalog: Path) -> None:
+    _refuse_after_cutover()
     catalog.mkdir(parents=True, exist_ok=True)
     (catalog / "runs" / "prolix").mkdir(parents=True, exist_ok=True)
     con = duckdb.connect(str(catalog / "bathos.db"))
