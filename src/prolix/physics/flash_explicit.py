@@ -125,8 +125,10 @@ def chunked_explicit_nonbonded_energy(
 ) -> Array:
     """Fused LJ + Direct-space Coulomb energy in one tiled O(N²) pass.
 
-    Uses dense exclusion matrices. jax.checkpoint (when remat=True) discards
-    intermediates so the backward pass recomputes the tile body.
+    Tiles the N² pair computation into L2-cache-resident T×T blocks.
+    jax.checkpoint (when remat=True) discards intermediates so the backward pass
+    recomputes the tile body, keeping working arrays in L2/SRAM instead of HBM.
+    Uses sparse pair-list exclusions from sys.
 
     Args:
         positions: (N, 3) atom positions.
@@ -134,8 +136,7 @@ def chunked_explicit_nonbonded_energy(
         sigmas: (N,) LJ sigma.
         epsilons: (N,) LJ epsilon.
         atom_mask: (N,) boolean mask.
-        dense_excl_scale_vdw: (N, N) precomputed VDW exclusion scale matrix.
-        dense_excl_scale_elec: (N, N) precomputed Coulomb exclusion scale matrix.
+        sys: PaddedSystem carrying sparse exclusion indices and scales.
         T: Tile size. N is padded internally to a multiple of T (debt 763)
             so this is safe for any N, including N < T.
         soft_core_lambda: Soft-core coupling (1.0=standard LJ).
@@ -185,7 +186,11 @@ def chunked_explicit_nonbonded_energy(
                 # (previously ~5-7% off). Same convention as
                 # pbc.minimum_image_distance, inlined since only the wrapped
                 # delta (not the pbc module's returned norm) is needed here.
-                dr = dr - sys.box_size * jnp.round(dr / sys.box_size)
+                # backlog #4232: use deterministic tie-breaking (round-half-away-from-zero)
+                # instead of banker's rounding for PBC wrap to resolve ambiguity at box/2 boundary.
+                scaled = dr / sys.box_size
+                wrap_idx = jnp.sign(scaled) * jnp.floor(jnp.abs(scaled) + 0.5)
+                dr = dr - sys.box_size * wrap_idx
             dist_sq = jnp.sum(dr ** 2, axis=-1) + 1e-10
             dist = jnp.sqrt(dist_sq)
 
@@ -296,7 +301,11 @@ def _chunked_lj_only_energy(
       if sys.box_size is not None:
         # Minimum-image convention (debt 805) -- see chunked_explicit_nonbonded_energy's
         # identical fix for the full rationale/evidence.
-        dr = dr - sys.box_size * jnp.round(dr / sys.box_size)
+        # backlog #4232: use deterministic tie-breaking (round-half-away-from-zero)
+        # instead of banker's rounding for PBC wrap to resolve ambiguity at box/2 boundary.
+        scaled = dr / sys.box_size
+        wrap_idx = jnp.sign(scaled) * jnp.floor(jnp.abs(scaled) + 0.5)
+        dr = dr - sys.box_size * wrap_idx
       dist_sq = jnp.sum(dr ** 2, axis=-1) + 1e-10
       dist = jnp.sqrt(dist_sq)
 
@@ -329,6 +338,11 @@ def _chunked_lj_only_energy(
     tile_e = compute(positions, start)
     return carry + tile_e, None
 
+  # #4330 Fix 2a note: flash_lj_only is unreached under the default PME production
+  # path (_chunked_lj_only_energy is only called from EFA/EFA_LEBEDEV electrostatic
+  # branches in _total_energy_fn) -- but unlike flash_bonded/pme_greens_setup_standalone,
+  # this scope IS exercised and resolves correctly when the EFA path is actually used,
+  # and test_flash_lj_only_label_appears_under_efa_method asserts exactly that. Keep it.
   with jax.named_scope("flash_lj_only"):
     total_energy, _ = jax.lax.scan(
         tile_energy_outer,
@@ -635,6 +649,10 @@ def flash_explicit_total_energy(
         displacement_fn, _ = space.free()
 
     # --- Bonded terms (O(N), no N² operations) ---
+    # #4330 Fix 2a note: flash_bonded is unreached by the production force path
+    # (flash_explicit_forces uses _total_energy_fn, which excludes bonded terms) --
+    # but flash_explicit_total_energy is directly exercised and its flash_bonded label
+    # asserted present by test_flash_energy_labels_appear_in_compiled_hlo. Keep it.
     with jax.named_scope("flash_bonded"):
         e_bond = _bond_energy_masked(
             pos, sys.bonds, sys.bond_params, sys.bond_mask, displacement_fn)

@@ -34,7 +34,7 @@ _PROJ="$(_locate_root)" || exit 1
 cd "${_PROJ}"
 export JAX_PLATFORMS="${JAX_PLATFORMS:-cuda}"
 export XLA_PYTHON_CLIENT_PREALLOCATE="${XLA_PYTHON_CLIENT_PREALLOCATE:-false}"
-export XLA_FLAGS="${XLA_FLAGS:-} --xla_gpu_enable_command_buffer="
+export XLA_FLAGS="${XLA_FLAGS:+${XLA_FLAGS} }--xla_gpu_enable_command_buffer="
 if [[ -n "${CUDA_VISIBLE_DEVICES:-}" ]]; then
     export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES%%,*}"
 fi

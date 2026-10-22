@@ -32,6 +32,17 @@ def create_periodic_space(
   raise ValueError(msg)
 
 
+def _round_half_away_from_zero(x: Array) -> Array:
+  """Round with tie-breaking: round-half-away-from-zero (deterministic, standard MD convention).
+
+  jnp.round uses round-half-to-even (banker's rounding), which is non-deterministic for
+  ties (e.g. 0.5, 1.5). This function implements the standard MD convention where ties
+  are broken away from zero: 0.5→1, -0.5→-1. This resolves ambiguity at PBC boundary
+  (backlog #4232) when a pair separation is exactly box/2.
+  """
+  return jnp.sign(x) * jnp.floor(jnp.abs(x) + 0.5)
+
+
 def minimum_image_distance(r1: Array, r2: Array, box: Array) -> Array:
   """Computes distance between particles using minimum image convention.
 
@@ -47,7 +58,8 @@ def minimum_image_distance(r1: Array, r2: Array, box: Array) -> Array:
   # Simple implementation for orthogonal boxes
   # For triclinic, need to use space.periodic_general displacement
   dr = r1 - r2
-  dr = dr - jnp.round(dr / box) * box
+  # backlog #4232: use deterministic tie-breaking (round-half-away-from-zero) instead of banker's rounding
+  dr = dr - _round_half_away_from_zero(dr / box) * box
   return jnp.linalg.norm(dr, axis=-1)
 
 
