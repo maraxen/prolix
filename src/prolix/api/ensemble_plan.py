@@ -719,11 +719,13 @@ class EnsemblePlan:
         nlc = getattr(nb_cfg, "neighbor_list", None) if nb_cfg is not None else None
         skin = float(nlc.skin) if nlc is not None else 0.5
         cap_mult = float(nlc.capacity_multiplier) if nlc is not None else 1.25
+        disable_cl = bool(nlc.disable_cell_list) if nlc is not None else False
         neighbor_fn = nl_mod.make_neighbor_list_fn(
             displacement_fn,
             box_vec,
             cutoff,
             capacity_multiplier=cap_mult,
+            disable_cell_list=disable_cl,
             dr_threshold=skin,
         )
 
@@ -1017,11 +1019,13 @@ class EnsemblePlan:
             nlc = getattr(nb_cfg, "neighbor_list", None) if nb_cfg is not None else None
             skin = float(nlc.skin) if nlc is not None else 0.5
             cap_mult = float(nlc.capacity_multiplier) if nlc is not None else 1.25
+            disable_cl = bool(nlc.disable_cell_list) if nlc is not None else False
             neighbor_fn = nl_mod.make_neighbor_list_fn(
                 displacement_fn,
                 box_vec,
                 cutoff,
                 capacity_multiplier=cap_mult,
+                disable_cell_list=disable_cl,
                 dr_threshold=skin,
             )
             nbr0 = neighbor_fn.allocate(positions_with_prefix(bundle, integration_prefix))
