@@ -406,11 +406,10 @@ The catalog is in **log mode** (run-log cut-over: laptop 2026-10-16, Engaging 20
 append to `.bth/log/` under `.bth.toml`'s `[project] id`.
 
 1. **Scripts in `scripts/experiments/` and `scripts/benchmarks/` run through `bth run`**, never raw
-   `uv run python`, and as `bth`, not `uv run bth` (global rule; bathos is not a prolix dependency). Shape — bth
+   `uv run python`, and as `bth`, not `uv run bth` (global rule). Shape — bth
    flags first, the whole command after `--`:
    `bth run --tags X --campaign-id <id> --output-paths out.json -- uv run python scripts/experiments/foo.py --out out.json`.
-   The old `bth run python foo.py --tag X --out Y -- <args>` shape and `--tag`/`--out`/`--campaign`
-   no longer parse (fixed across `scripts/slurm/` 2026-10-21).
+   The old `bth run python foo.py --tag X --out Y` shape no longer parses (scripts fixed 2026-10-21).
 2. **Every such script has a sidecar `<stem>.bth.toml` next to it**, `[experiment]` schema (not
    `[benchmark]`: gate edge cases): `hypothesis`, `[outcomes.*]` each with `condition` (DuckDB SQL),
    `decision`, `reasoning`, exactly one `is_residual = true`, `[result_schema]`, `[metadata]`.
@@ -424,7 +423,7 @@ append to `.bth/log/` under `.bth.toml`'s `[project] id`.
 5. **Pull cluster runs with `bth sync engaging --pull`**, never a manual rsync of `outputs/` or of
    the catalog.
 6. **When the gate fails, fix the sidecar — never `--no-sidecar`** (reserved for `scripts/explore/`;
-   wanting it elsewhere means the script belongs in `scripts/explore/`). The gate's stderr JSON
+   needing it elsewhere means the script belongs there). The gate's stderr JSON
    carries `errors[]` and `remediation`.
 
 **Querying:** `bth sql` reads the `runs` index, where `tags` is a JSON-encoded VARCHAR —
