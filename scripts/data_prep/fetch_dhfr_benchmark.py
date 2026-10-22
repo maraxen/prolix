@@ -121,6 +121,12 @@ def fetch_dhfr_benchmark(force: bool = False) -> int:
   atom_count = test_system.topology.getNumAtoms()
   logger.info("Atom count: %d", atom_count)
 
+  # PDBFile.writeFile takes CRYST1 from the topology's unit cell (62.230 A for DHFRExplicit),
+  # which disagrees with the System's default box (61.6447 A) that the XML serializes.
+  # Readers that take the box from CRYST1 then run at the wrong density (backlog #4970), so
+  # make the System box authoritative for both files.
+  test_system.topology.setPeriodicBoxVectors(test_system.system.getDefaultPeriodicBoxVectors())
+
   logger.info("Writing PDB -> %s", PDB_PATH)
   with PDB_PATH.open("w") as fh:
     app.PDBFile.writeFile(test_system.topology, test_system.positions, fh)
