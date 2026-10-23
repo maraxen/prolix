@@ -203,15 +203,78 @@ def settle_positions(
     positions_constrained = positions_constrained.at[indices.hydrogen2].set(pos_h2_c)
     return positions_constrained
 
-  n_atoms = positions_unconstrained.shape[0]
-  oxygen_tgt = _scatter_water_target(indices.oxygen, water_mask, n_atoms)
-  h1_tgt = _scatter_water_target(indices.hydrogen1, water_mask, n_atoms)
-  h2_tgt = _scatter_water_target(indices.hydrogen2, water_mask, n_atoms)
-  positions_scratch = jnp.concatenate([positions_unconstrained, positions_unconstrained[:1]], axis=0)
-  positions_scratch = positions_scratch.at[oxygen_tgt].set(pos_oxygen_c)
-  positions_scratch = positions_scratch.at[h1_tgt].set(pos_h1_c)
-  positions_scratch = positions_scratch.at[h2_tgt].set(pos_h2_c)
-  return positions_scratch[:n_atoms]
+  mask_col = water_mask[:, None]
+  delta_o = jnp.where(mask_col, pos_oxygen_c - positions_unconstrained[indices.oxygen], 0.0)
+  delta_h1 = jnp.where(mask_col, pos_h1_c - positions_unconstrained[indices.hydrogen1], 0.0)
+  delta_h2 = jnp.where(mask_col, pos_h2_c - positions_unconstrained[indices.hydrogen2], 0.0)
+  positions_constrained = positions_unconstrained.at[indices.oxygen].add(delta_o)
+  positions_constrained = positions_constrained.at[indices.hydrogen1].add(delta_h1)
+  positions_constrained = positions_constrained.at[indices.hydrogen2].add(delta_h2)
+  return positions_constrained
+
+
+def _solve_3x3(A: Array, b: Array) -> Array:
+  """Solve a single 3x3 linear system A x = b via explicit Cramer's rule."""
+  a00, a01, a02 = A[0, 0], A[0, 1], A[0, 2]
+  a10, a11, a12 = A[1, 0], A[1, 1], A[1, 2]
+  a20, a21, a22 = A[2, 0], A[2, 1], A[2, 2]
+  det = (
+    a00 * (a11 * a22 - a12 * a21)
+    - a01 * (a10 * a22 - a12 * a20)
+    + a02 * (a10 * a21 - a11 * a20)
+  )
+  valid = jnp.abs(det) > 1e-30
+  safe_det = jnp.where(valid, det, jnp.ones_like(det))
+  inv = jnp.where(valid, 1.0 / safe_det, jnp.zeros_like(det))
+  bx, by, bz = b[0], b[1], b[2]
+  return jnp.stack(
+    [
+      inv * ((a11 * a22 - a12 * a21) * bx + (a02 * a21 - a01 * a22) * by + (a01 * a12 - a02 * a11) * bz),
+      inv * ((a12 * a20 - a10 * a22) * bx + (a00 * a22 - a02 * a20) * by + (a02 * a10 - a00 * a12) * bz),
+      inv * ((a10 * a21 - a11 * a20) * bx + (a01 * a20 - a00 * a21) * by + (a00 * a11 - a01 * a10) * bz),
+    ],
+    axis=-1,
+  )
+
+
+def _solve_3x3_batch(A: Array, b: Array) -> Array:
+  """Solve batched 3x3 linear systems A x = b via explicit Cramer's rule."""
+  a00, a01, a02 = A[:, 0, 0], A[:, 0, 1], A[:, 0, 2]
+  a10, a11, a12 = A[:, 1, 0], A[:, 1, 1], A[:, 1, 2]
+  a20, a21, a22 = A[:, 2, 0], A[:, 2, 1], A[:, 2, 2]
+  det = (
+    a00 * (a11 * a22 - a12 * a21)
+    - a01 * (a10 * a22 - a12 * a20)
+    + a02 * (a10 * a21 - a11 * a20)
+  )
+  valid = jnp.abs(det) > 1e-30
+  safe_det = jnp.where(valid, det, jnp.ones_like(det))
+  inv = jnp.where(valid, 1.0 / safe_det, jnp.zeros_like(det))
+  bx, by, bz = b[:, 0], b[:, 1], b[:, 2]
+  return jnp.stack(
+    [
+      inv * ((a11 * a22 - a12 * a21) * bx + (a02 * a21 - a01 * a22) * by + (a01 * a12 - a02 * a11) * bz),
+      inv * ((a12 * a20 - a10 * a22) * bx + (a00 * a22 - a02 * a20) * by + (a02 * a10 - a00 * a12) * bz),
+      inv * ((a10 * a21 - a11 * a20) * bx + (a01 * a20 - a00 * a21) * by + (a00 * a11 - a01 * a10) * bz),
+    ],
+    axis=-1,
+  )
+
+
+def _cholesky_upper_solve_3x3(A: Array, rhs: Array) -> Array:
+  """Solve L^T x = rhs where L L^T = A via closed-form 3x3 Cholesky + backward substitution."""
+  eps = jnp.array(1e-30, dtype=A.dtype)
+  l00 = jnp.sqrt(jnp.maximum(A[..., 0, 0], eps))
+  l10 = A[..., 1, 0] / l00
+  l20 = A[..., 2, 0] / l00
+  l11 = jnp.sqrt(jnp.maximum(A[..., 1, 1] - l10 * l10, eps))
+  l21 = (A[..., 2, 1] - l20 * l10) / l11
+  l22 = jnp.sqrt(jnp.maximum(A[..., 2, 2] - l20 * l20 - l21 * l21, eps))
+
+  x2 = rhs[..., 2] / l22
+  x1 = (rhs[..., 1] - l21 * x2) / l11
+  x0 = (rhs[..., 0] - l10 * x1 - l20 * x2) / l00
+  return jnp.stack([x0, x1, x2], axis=-1)
 
 
 def _skew_symmetric3(r: Array) -> Array:
@@ -235,21 +298,26 @@ def _project_one_water_momentum_rigid(
   """
   msum = jnp.sum(m_stack)
   eps = jnp.array(1e-30, dtype=msum.dtype)
-  com = jnp.sum(m_stack[:, None] * r_stack, axis=0) / jnp.maximum(msum, eps)
+  msum_safe = jnp.maximum(msum, eps)
+  com = jnp.sum(m_stack[:, None] * r_stack, axis=0) / msum_safe
   rrel = r_stack - com
-  v = p_stack / m_stack[:, None]
-  v_flat = v.reshape(9)
-  rows = []
-  for i in range(3):
-    rows.append(jnp.concatenate([jnp.eye(3, dtype=r_stack.dtype), -_skew_symmetric3(rrel[i])], axis=1))
-  jmat = jnp.vstack(rows)
-  m_rep = jnp.repeat(m_stack, 3)
-  g = (jmat.T * m_rep) @ jmat
-  rhs = jmat.T @ (m_rep * v_flat)
-  reg = jnp.array(1e-12, dtype=g.dtype) * (jnp.trace(g) / 6.0 + 1.0)
-  g_reg = g + reg * jnp.eye(6, dtype=g.dtype)
-  x6 = jnp.linalg.solve(g_reg, rhs)
-  v_proj = (jmat @ x6).reshape(3, 3)
+
+  m_safe = jnp.maximum(m_stack[:, None], eps)
+  v = p_stack / m_safe
+  v_com = jnp.sum(m_stack[:, None] * v, axis=0) / msum_safe
+  L_ang = jnp.sum(jnp.cross(rrel, p_stack), axis=0)
+
+  eye3 = jnp.eye(3, dtype=r_stack.dtype)
+  r_sq = jnp.einsum("ia,ia->i", rrel, rrel)
+  I_tensor = (
+    jnp.einsum("i,i->", m_stack, r_sq) * eye3
+    - jnp.einsum("i,ia,ib->ab", m_stack, rrel, rrel)
+  )
+  reg = jnp.array(1e-12, dtype=I_tensor.dtype) * (jnp.trace(I_tensor) / 3.0 + 1.0)
+  I_reg = I_tensor + reg * eye3
+  omega = _solve_3x3(I_reg, L_ang)
+
+  v_proj = v_com[None, :] + jnp.cross(omega[None, :], rrel)
   return v_proj * m_stack[:, None]
 
 
@@ -270,15 +338,12 @@ def project_tip3p_waters_momentum_rigid(
   m_stack = jnp.stack([mass_flat[idx[:, 0]], mass_flat[idx[:, 1]], mass_flat[idx[:, 2]]], axis=1)
   p_proj = jax.vmap(_project_one_water_momentum_rigid)(p_stack, r_stack, m_stack)
   idx_flat = idx.reshape(-1)
+  p_proj_flat = p_proj.reshape(-1, 3)
   if water_mask is None:
-    return momentum.at[idx_flat].set(p_proj.reshape(-1, 3))
-  n_atoms = momentum.shape[0]
-  # Broadcast the per-water mask to the flattened (N_w*3,) O/H1/H2 axis.
-  mask_flat = jnp.broadcast_to(water_mask[:, None], idx.shape).reshape(-1)
-  idx_flat_tgt = _scatter_water_target(idx_flat, mask_flat, n_atoms)
-  momentum_scratch = jnp.concatenate([momentum, momentum[:1]], axis=0)
-  momentum_scratch = momentum_scratch.at[idx_flat_tgt].set(p_proj.reshape(-1, 3))
-  return momentum_scratch[:n_atoms]
+    return momentum.at[idx_flat].set(p_proj_flat)
+  mask_flat = jnp.broadcast_to(water_mask[:, None], idx.shape).reshape(-1, 1)
+  delta_p = jnp.where(mask_flat, p_proj_flat - momentum[idx_flat], 0.0)
+  return momentum.at[idx_flat].add(delta_p)
 
 
 def _settle_water_batch(
@@ -513,15 +578,11 @@ def _apply_rattle_velocity_correction(
     vel_new = vel_new.at[indices.hydrogen1].add(dv_h1)
     vel_new = vel_new.at[indices.hydrogen2].add(dv_h2)
     return vel_new
-  n_atoms = vel_curr.shape[0]
-  oxygen_tgt = _scatter_water_target(indices.oxygen, water_mask, n_atoms)
-  h1_tgt = _scatter_water_target(indices.hydrogen1, water_mask, n_atoms)
-  h2_tgt = _scatter_water_target(indices.hydrogen2, water_mask, n_atoms)
-  vel_scratch = jnp.concatenate([vel_curr, vel_curr[:1]], axis=0)
-  vel_scratch = vel_scratch.at[oxygen_tgt].add(dv_oxygen)
-  vel_scratch = vel_scratch.at[h1_tgt].add(dv_h1)
-  vel_scratch = vel_scratch.at[h2_tgt].add(dv_h2)
-  return vel_scratch[:n_atoms]
+  mask_col = water_mask[:, None]
+  vel_new = vel_curr.at[indices.oxygen].add(jnp.where(mask_col, dv_oxygen, 0.0))
+  vel_new = vel_new.at[indices.hydrogen1].add(jnp.where(mask_col, dv_h1, 0.0))
+  vel_new = vel_new.at[indices.hydrogen2].add(jnp.where(mask_col, dv_h2, 0.0))
+  return vel_new
 
 
 def _apply_rattle_velocity_correction_with_residual(
@@ -561,15 +622,10 @@ def _apply_rattle_velocity_correction_with_residual(
     vel_new = vel_new.at[indices.hydrogen1].add(dv_h1)
     vel_new = vel_new.at[indices.hydrogen2].add(dv_h2)
   else:
-    n_atoms = vel_curr.shape[0]
-    oxygen_tgt = _scatter_water_target(indices.oxygen, water_mask, n_atoms)
-    h1_tgt = _scatter_water_target(indices.hydrogen1, water_mask, n_atoms)
-    h2_tgt = _scatter_water_target(indices.hydrogen2, water_mask, n_atoms)
-    vel_scratch = jnp.concatenate([vel_curr, vel_curr[:1]], axis=0)
-    vel_scratch = vel_scratch.at[oxygen_tgt].add(dv_oxygen)
-    vel_scratch = vel_scratch.at[h1_tgt].add(dv_h1)
-    vel_scratch = vel_scratch.at[h2_tgt].add(dv_h2)
-    vel_new = vel_scratch[:n_atoms]
+    mask_col = water_mask[:, None]
+    vel_new = vel_curr.at[indices.oxygen].add(jnp.where(mask_col, dv_oxygen, 0.0))
+    vel_new = vel_new.at[indices.hydrogen1].add(jnp.where(mask_col, dv_h1, 0.0))
+    vel_new = vel_new.at[indices.hydrogen2].add(jnp.where(mask_col, dv_h2, 0.0))
   residual = jnp.max(jnp.abs(jnp.stack([dot_oh1, dot_oh2, dot_h1h2])))
   return vel_new, residual
 
@@ -677,22 +733,7 @@ def _remove_angular_momentum_from_impulse(
 
   # omega = I^{-1} L via explicit 3×3 Cramer's rule (see NOTES in docstring).
   with jax.named_scope("settle_cramers_rule"):
-    # Extract elements for batched scalar arithmetic.
-    _a00, _a01, _a02 = I_tensor[:, 0, 0], I_tensor[:, 0, 1], I_tensor[:, 0, 2]
-    _a10, _a11, _a12 = I_tensor[:, 1, 0], I_tensor[:, 1, 1], I_tensor[:, 1, 2]
-    _a20, _a21, _a22 = I_tensor[:, 2, 0], I_tensor[:, 2, 1], I_tensor[:, 2, 2]
-    _det = (
-      _a00 * (_a11 * _a22 - _a12 * _a21)
-      - _a01 * (_a10 * _a22 - _a12 * _a20)
-      + _a02 * (_a10 * _a21 - _a11 * _a20)
-    )
-    _Lx, _Ly, _Lz = L[:, 0], L[:, 1], L[:, 2]
-    _inv = 1.0 / _det
-    omega = jnp.stack([  # (N_waters, 3)
-      _inv * ((_a11 * _a22 - _a12 * _a21) * _Lx + (_a02 * _a21 - _a01 * _a22) * _Ly + (_a01 * _a12 - _a02 * _a11) * _Lz),
-      _inv * ((_a12 * _a20 - _a10 * _a22) * _Lx + (_a00 * _a22 - _a02 * _a20) * _Ly + (_a02 * _a10 - _a00 * _a12) * _Lz),
-      _inv * ((_a10 * _a21 - _a11 * _a20) * _Lx + (_a01 * _a20 - _a00 * _a21) * _Ly + (_a00 * _a11 - _a01 * _a10) * _Lz),
-    ], axis=-1)
+    omega = _solve_3x3_batch(I_tensor, L)
 
   # Angular impulse to subtract: m_i * (omega x d_i) for each atom
   # omega broadcast over atom axis: (N_waters, 1, 3) x (N_waters, 3, 3)
@@ -710,24 +751,16 @@ def _remove_angular_momentum_from_impulse(
   dv_H1_cor = dp_corrected[:, 1, :] / mass_hydrogen
   dv_H2_cor = dp_corrected[:, 2, :] / mass_hydrogen
 
-  # Padding rows: d_con is exactly zero (all three "atoms" coincide at the
-  # fill index), making the inertia tensor singular and the Cramer's-rule
-  # omega an inf*0 = NaN indeterminate form. Redirect the scatter target so
-  # that NaN lands on a discarded scratch row rather than a real atom.
   if water_mask is None:
     vel_out = vel_unconstrained.at[indices.oxygen].add(dv_O_cor)
     vel_out = vel_out.at[indices.hydrogen1].add(dv_H1_cor)
     vel_out = vel_out.at[indices.hydrogen2].add(dv_H2_cor)
     return vel_out
-  n_atoms = vel_unconstrained.shape[0]
-  oxygen_tgt = _scatter_water_target(indices.oxygen, water_mask, n_atoms)
-  h1_tgt = _scatter_water_target(indices.hydrogen1, water_mask, n_atoms)
-  h2_tgt = _scatter_water_target(indices.hydrogen2, water_mask, n_atoms)
-  vel_scratch = jnp.concatenate([vel_unconstrained, vel_unconstrained[:1]], axis=0)
-  vel_scratch = vel_scratch.at[oxygen_tgt].add(dv_O_cor)
-  vel_scratch = vel_scratch.at[h1_tgt].add(dv_H1_cor)
-  vel_scratch = vel_scratch.at[h2_tgt].add(dv_H2_cor)
-  return vel_scratch[:n_atoms]
+  mask_col = water_mask[:, None]
+  vel_out = vel_unconstrained.at[indices.oxygen].add(jnp.where(mask_col, dv_O_cor, 0.0))
+  vel_out = vel_out.at[indices.hydrogen1].add(jnp.where(mask_col, dv_H1_cor, 0.0))
+  vel_out = vel_out.at[indices.hydrogen2].add(jnp.where(mask_col, dv_H2_cor, 0.0))
+  return vel_out
 
 
 def _r_step_conserve_angular_momentum(
@@ -828,45 +861,23 @@ def _r_step_conserve_angular_momentum(
 
   # omega = I^{-1} L_correct via explicit 3×3 Cramer's rule
   with jax.named_scope("settle_cramers_rule"):
-    _a00, _a01, _a02 = I_tensor[:, 0, 0], I_tensor[:, 0, 1], I_tensor[:, 0, 2]
-    _a10, _a11, _a12 = I_tensor[:, 1, 0], I_tensor[:, 1, 1], I_tensor[:, 1, 2]
-    _a20, _a21, _a22 = I_tensor[:, 2, 0], I_tensor[:, 2, 1], I_tensor[:, 2, 2]
-    _det = (
-      _a00 * (_a11 * _a22 - _a12 * _a21)
-      - _a01 * (_a10 * _a22 - _a12 * _a20)
-      + _a02 * (_a10 * _a21 - _a11 * _a20)
-    )
-    _Lx, _Ly, _Lz = L_correct[:, 0], L_correct[:, 1], L_correct[:, 2]
-    _inv = 1.0 / _det
-    omega = jnp.stack([
-      _inv * ((_a11 * _a22 - _a12 * _a21) * _Lx + (_a02 * _a21 - _a01 * _a22) * _Ly + (_a01 * _a12 - _a02 * _a11) * _Lz),
-      _inv * ((_a12 * _a20 - _a10 * _a22) * _Lx + (_a00 * _a22 - _a02 * _a20) * _Ly + (_a02 * _a10 - _a00 * _a12) * _Lz),
-      _inv * ((_a10 * _a21 - _a11 * _a20) * _Lx + (_a01 * _a20 - _a00 * _a21) * _Ly + (_a00 * _a11 - _a01 * _a10) * _Lz),
-    ], axis=-1)  # (N_w, 3)
+    omega = _solve_3x3_batch(I_tensor, L_correct)
 
   # Corrective impulse: m_i * (omega × d_con_i)
   omega_exp = omega[:, None, :]  # (N_w, 1, 3)
   omega_cross_d = jnp.cross(omega_exp * jnp.ones_like(d_con), d_con)  # (N_w, 3, 3)
   dp_correct = m_all[None, :, None] * omega_cross_d  # (N_w, 3, 3)
 
-  # Apply to momentum array
-  # Same padding degeneracy as `_remove_angular_momentum_from_impulse`
-  # (singular inertia tensor -> NaN omega for fill rows) — redirect scatter
-  # target to a discarded scratch row.
   if water_mask is None:
     mom_out = momentum.at[indices.oxygen].add(dp_correct[:, 0, :])
     mom_out = mom_out.at[indices.hydrogen1].add(dp_correct[:, 1, :])
     mom_out = mom_out.at[indices.hydrogen2].add(dp_correct[:, 2, :])
     return mom_out
-  n_atoms = momentum.shape[0]
-  oxygen_tgt = _scatter_water_target(indices.oxygen, water_mask, n_atoms)
-  h1_tgt = _scatter_water_target(indices.hydrogen1, water_mask, n_atoms)
-  h2_tgt = _scatter_water_target(indices.hydrogen2, water_mask, n_atoms)
-  mom_scratch = jnp.concatenate([momentum, momentum[:1]], axis=0)
-  mom_scratch = mom_scratch.at[oxygen_tgt].add(dp_correct[:, 0, :])
-  mom_scratch = mom_scratch.at[h1_tgt].add(dp_correct[:, 1, :])
-  mom_scratch = mom_scratch.at[h2_tgt].add(dp_correct[:, 2, :])
-  return mom_scratch[:n_atoms]
+  mask_col = water_mask[:, None]
+  mom_out = momentum.at[indices.oxygen].add(jnp.where(mask_col, dp_correct[:, 0, :], 0.0))
+  mom_out = mom_out.at[indices.hydrogen1].add(jnp.where(mask_col, dp_correct[:, 1, :], 0.0))
+  mom_out = mom_out.at[indices.hydrogen2].add(jnp.where(mask_col, dp_correct[:, 2, :], 0.0))
+  return mom_out
 
 
 def settle_velocities(
@@ -881,97 +892,77 @@ def settle_velocities(
   adaptive_tol: float | None = None,
   water_mask: Array | None = None,
 ) -> Array:
-  r"""Apply velocity constraints after position SETTLE.
-
-  Process:
-  1.  **Extract Indices**: Use `WaterIndices` for O, H1, H2.
-  2.  **Bond Vectors**: Compute normalized bond vectors $\hat{n}_{ij}$ from constrained positions.
-  3.  **RATTLE Loop**: Iterate velocity corrections to satisfy $\vec{v}_{ij} \cdot \hat{n}_{ij} = 0$.
-  4.  **AM Correction**: Remove the angular-momentum component from the RATTLE impulse
-      so that T_rot is not drained by constraint projection.
-
-  Notes:
-  This ensures velocities are consistent with the rigid constraints while
-  preserving angular momentum of each water molecule.
-  Typically converges in 1-5 iterations.
-
-  Args:
-      V: Unconstrained velocities (N, 3).
-      R_old, R_new: Old and constrained new positions.
-      water_indices: (N_waters, 3).
-      dt: Timestep.
-      m_O, m_H: Masses.
-
-  Returns:
-      Constrained velocities array with angular-momentum-conserving RATTLE projection.
-  """
+  r"""Apply velocity constraints after position SETTLE via 1-pass 3x3 Gram matrix RATTLE."""
+  del positions_old, dt, adaptive_tol
   if water_indices.shape[0] == 0:
     return velocities
 
   indices = WaterIndices.from_row(water_indices.T)
+  pos_O = positions_constrained[indices.oxygen]
+  pos_H1 = positions_constrained[indices.hydrogen1]
+  pos_H2 = positions_constrained[indices.hydrogen2]
 
-  # Get normalized bond vectors from constrained positions
-  norm_vec_oh1, norm_vec_oh2, norm_vec_h1h2 = _get_settle_bond_vectors(
-    positions_constrained[indices.oxygen],
-    positions_constrained[indices.hydrogen1],
-    positions_constrained[indices.hydrogen2],
-  )
-
-  # Inverse masses
-  inv_mass_oxygen = 1.0 / mass_oxygen
-  inv_mass_hydrogen = 1.0 / mass_hydrogen
-
-  # Iterate a few times for convergence.
-  n_iters = max(int(n_iters), 0)
-  if adaptive_tol is None:
-    with jax.named_scope("settle_rattle_loop"):
-      vel_rattle = jax.lax.fori_loop(
-        0,
-        n_iters,
-        lambda _i, v: _apply_rattle_velocity_correction(
-          v,
-          indices,
-          norm_vec_oh1,
-          norm_vec_oh2,
-          norm_vec_h1h2,
-          inv_mass_oxygen,
-          inv_mass_hydrogen,
-          water_mask,
-        ),
-        velocities,
-      )
+  if int(n_iters) <= 0:
+    vel_rattle = velocities
   else:
-    def body(carry):
-      i, vel, residual = carry
-      vel_new, res = _apply_rattle_velocity_correction_with_residual(
-        vel,
-        indices,
-        norm_vec_oh1,
-        norm_vec_oh2,
-        norm_vec_h1h2,
-        inv_mass_oxygen,
-        inv_mass_hydrogen,
-        water_mask,
-      )
-      return (i + jnp.int32(1), vel_new, res)
-    initial = (jnp.int32(0), velocities, jnp.array(jnp.inf, dtype=velocities.dtype))
-    cond = lambda carry: jnp.logical_and(
-      carry[0] < jnp.int32(n_iters),
-      carry[2] > jnp.array(adaptive_tol, dtype=velocities.dtype)
-    )
-    _, vel_rattle, _ = jax.lax.while_loop(cond, body, initial)
+    with jax.named_scope("settle_rattle_loop"):
+      n1, n2, n3 = _get_settle_bond_vectors(pos_O, pos_H1, pos_H2)
+      if water_mask is not None:
+        mask_col = water_mask[:, None]
+        n1 = jnp.where(mask_col, n1, 0.0)
+        n2 = jnp.where(mask_col, n2, 0.0)
+        n3 = jnp.where(mask_col, n3, 0.0)
 
-  # Angular-momentum-conserving post-correction:
-  # RATTLE bond projections can drain angular momentum from each water.
-  # Subtract the rotational component of the RATTLE impulse so that
-  # only the radial bond-stretch impulse remains (conserves T_rot).
+      v_O = velocities[indices.oxygen]
+      v_H1 = velocities[indices.hydrogen1]
+      v_H2 = velocities[indices.hydrogen2]
+
+      b1 = jnp.sum((v_H1 - v_O) * n1, axis=-1)
+      b2 = jnp.sum((v_H2 - v_O) * n2, axis=-1)
+      b3 = jnp.sum((v_H2 - v_H1) * n3, axis=-1)
+      rhs = -jnp.stack([b1, b2, b3], axis=-1)
+
+      dtype = velocities.dtype
+      mu_O = jnp.asarray(1.0 / mass_oxygen, dtype=dtype)
+      mu_H = jnp.asarray(1.0 / mass_hydrogen, dtype=dtype)
+      diag_OH = jnp.broadcast_to(mu_O + mu_H, b1.shape)
+      diag_HH = jnp.broadcast_to(2.0 * mu_H, b1.shape)
+
+      c12 = mu_O * jnp.sum(n1 * n2, axis=-1)
+      c13 = -mu_H * jnp.sum(n1 * n3, axis=-1)
+      c23 = mu_H * jnp.sum(n2 * n3, axis=-1)
+
+      row0 = jnp.stack([diag_OH, c12, c13], axis=-1)
+      row1 = jnp.stack([c12, diag_OH, c23], axis=-1)
+      row2 = jnp.stack([c13, c23, diag_HH], axis=-1)
+      G = jnp.stack([row0, row1, row2], axis=1)
+
+      lambdas = _solve_3x3_batch(G, rhs)
+      l1 = lambdas[:, 0:1]
+      l2 = lambdas[:, 1:2]
+      l3 = lambdas[:, 2:3]
+
+      dv_O = -mu_O * (l1 * n1 + l2 * n2)
+      dv_H1 = mu_H * (l1 * n1 - l3 * n3)
+      dv_H2 = mu_H * (l2 * n2 + l3 * n3)
+
+      if water_mask is not None:
+        mask_col = water_mask[:, None]
+        dv_O = jnp.where(mask_col, dv_O, 0.0)
+        dv_H1 = jnp.where(mask_col, dv_H1, 0.0)
+        dv_H2 = jnp.where(mask_col, dv_H2, 0.0)
+
+      vel_rattle = velocities.at[indices.oxygen].add(dv_O)
+      vel_rattle = vel_rattle.at[indices.hydrogen1].add(dv_H1)
+      vel_rattle = vel_rattle.at[indices.hydrogen2].add(dv_H2)
+
   return _remove_angular_momentum_from_impulse(
     velocities,
     vel_rattle,
     indices,
-    positions_constrained[indices.oxygen],
-    positions_constrained[indices.hydrogen1],
-    positions_constrained[indices.hydrogen2],
+    pos_O,
+    pos_H1,
+    pos_H2,
     mass_oxygen,
     mass_hydrogen,
     water_mask,
@@ -1236,17 +1227,10 @@ def settle_langevin(
         momenta = momenta.at[idx_flat].set(p_water.reshape(-1, 3))
         real_idx_flat = idx_flat
       else:
-        # Padding rows' scatter target is redirected to a discarded scratch
-        # row so they cannot overwrite a real atom sharing the padding fill
-        # index (see `_scatter_water_target`).
         mask_flat = jnp.broadcast_to(water_mask[:, None], idx.shape).reshape(-1)
-        idx_flat_tgt = _scatter_water_target(idx_flat, mask_flat, R.shape[0])
-        momenta_scratch = jnp.concatenate([momenta, momenta[:1]], axis=0)
-        momenta_scratch = momenta_scratch.at[idx_flat_tgt].set(p_water.reshape(-1, 3))
-        momenta = momenta_scratch[: R.shape[0]]
-        # Only real water rows count toward "is_water" below — padding rows'
-        # fill index would otherwise spuriously mark atom 0 as water in
-        # mixed protein+water systems where atom 0 is not actually water.
+        p_water_flat = p_water.reshape(-1, 3)
+        delta_p = jnp.where(mask_flat[:, None], p_water_flat - momenta[idx_flat], 0.0)
+        momenta = momenta.at[idx_flat].add(delta_p)
         real_idx_flat = jnp.where(mask_flat, idx_flat, -1)
 
       # Non-water atoms (solute): standard unconstrained noise
@@ -2179,14 +2163,15 @@ def _ou_noise_one_water_rigid(
     (p_noise, key_out) where p_noise is (3, 3) mass-weighted noise momenta.
   """
   msum = jnp.sum(m_stack)
-  com = jnp.sum(m_stack[:, None] * r_stack, axis=0) / msum
+  msum_safe = jnp.maximum(msum, jnp.array(1e-30, dtype=msum.dtype))
+  com = jnp.sum(m_stack[:, None] * r_stack, axis=0) / msum_safe
   rrel = r_stack - com  # (3, 3): COM-relative positions of O, H1, H2
 
   # --- translational block ---
   # Sample COM velocity noise: xi_trans ~ N(0, kT/M * I_3)
   key, k_trans, k_rot = jax.random.split(key, 3)
   z_trans = jax.random.normal(k_trans, (3,), dtype=r_stack.dtype)
-  xi_trans = z_trans * jnp.sqrt(kT / msum)          # (3,): COM velocity noise
+  xi_trans = z_trans * jnp.sqrt(kT / msum_safe)     # (3,): COM velocity noise
   p_trans = m_stack[:, None] * xi_trans[None, :]     # (3, 3): p_i = m_i * xi_trans
 
   # --- rotational block ---
@@ -2197,10 +2182,9 @@ def _ou_noise_one_water_rigid(
              - jnp.einsum("i,ia,ib->ab", m_stack, rrel, rrel)  # (3, 3)
   reg_r = jnp.array(1e-12, dtype=I_tensor.dtype) * (jnp.trace(I_tensor) / 3.0 + 1.0)
   I_reg = I_tensor + reg_r * eye3
-  L_I = jnp.linalg.cholesky(I_reg)
   z_rot = jax.random.normal(k_rot, (3,), dtype=r_stack.dtype)
-  # omega ~ N(0, kT * I^{-1}): solve L_I^T omega = sqrt(kT) * z_rot
-  omega = jnp.linalg.solve(L_I.T, jnp.sqrt(kT) * z_rot[:, None]).squeeze(-1)
+  # omega ~ N(0, kT * I^{-1}): solve L_I^T omega = sqrt(kT) * z_rot via closed-form 3x3 Cholesky
+  omega = _cholesky_upper_solve_3x3(I_reg, jnp.sqrt(kT) * z_rot)
   # p_rot_i = m_i * (omega × r_rel_i)
   p_rot = m_stack[:, None] * jnp.cross(omega[None, :], rrel)   # (3, 3)
 
@@ -2293,12 +2277,10 @@ def _langevin_step_o_constrained(
   if water_mask is None:
     p_out = p_ou.at[idx_flat].set(p_water_out.reshape(-1, 3))
     return p_out, key
-  n_atoms = p_ou.shape[0]
-  mask_flat = jnp.broadcast_to(water_mask[:, None], idx.shape).reshape(-1)
-  idx_flat_tgt = _scatter_water_target(idx_flat, mask_flat, n_atoms)
-  p_ou_scratch = jnp.concatenate([p_ou, p_ou[:1]], axis=0)
-  p_ou_scratch = p_ou_scratch.at[idx_flat_tgt].set(p_water_out.reshape(-1, 3))
-  return p_ou_scratch[:n_atoms], key
+  mask_flat = jnp.broadcast_to(water_mask[:, None], idx.shape).reshape(-1, 1)
+  p_water_flat = p_water_out.reshape(-1, 3)
+  delta_p = jnp.where(mask_flat, p_water_flat - p_ou[idx_flat], 0.0)
+  return p_ou.at[idx_flat].add(delta_p), key
 
 
 def _langevin_step_o_free_dof(
