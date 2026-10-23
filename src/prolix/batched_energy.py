@@ -370,6 +370,33 @@ def _lj_energy_neighbor_list(
     return 0.5 * jnp.sum(e_pair)
 
 
+def _coulomb_energy_neighbor_list(
+    r: Array,
+    charges: Array,
+    neighbor_idx: Array,
+    excl_scales_elec: Array | None = None,
+) -> Array:
+    """Computes Coulomb energy using neighbor list indices in O(N*K)."""
+    N = r.shape[0]
+    safe_idx = jnp.minimum(neighbor_idx, N - 1)
+    r_j = r[safe_idx]
+    r_i = r[:, None, :]
+    dr = r_i - r_j
+    dist = jnp.sqrt(jnp.sum(dr ** 2, axis=-1) + jnp.float32(1e-10))
+    dist_safe = jnp.where(dist < 1e-4, 1.0, dist)
+
+    q_i = charges[:, None]
+    q_j = charges[safe_idx]
+    e_pair = COULOMB_CONSTANT * (q_i * q_j) / dist_safe
+
+    i_idx = jnp.arange(N, dtype=neighbor_idx.dtype)[:, None]
+    mask = (neighbor_idx >= 0) & (neighbor_idx < N) & (neighbor_idx != i_idx) & (dist >= 1e-4)
+    e_pair = jnp.where(mask, e_pair, 0.0)
+    if excl_scales_elec is not None:
+        e_pair = e_pair * excl_scales_elec
+    return 0.5 * jnp.sum(e_pair)
+
+
 # ==============================================================================
 # BATCHED EVALUATION
 # ==============================================================================
@@ -963,6 +990,55 @@ def _make_lj_energy_nl_cvjp(neighbor_idx, soft_core_lambda=jnp.float32(1.0), exc
     return lj_energy_cvjp
 
 
+def _make_coulomb_energy_nl_cvjp(neighbor_idx, excl_scales_elec=None):
+    """Factory creating a custom-VJP O(N*K) Coulomb energy function over a symmetric neighbor list."""
+    N_sentinel = neighbor_idx.shape[0]
+    i_idx = jnp.arange(N_sentinel, dtype=neighbor_idx.dtype)[:, None]
+
+    def _compute_intermediates(r, charges):
+        safe_idx = jnp.minimum(neighbor_idx, N_sentinel - 1)
+        r_j = r[safe_idx]
+        r_i = r[:, None, :]
+        dr = r_i - r_j
+        dist = jnp.sqrt(jnp.sum(dr ** 2, axis=-1) + jnp.float32(1e-10))
+        dist_safe = jnp.where(dist < 1e-4, 1.0, dist)
+        q_i = charges[:, None]
+        q_j = charges[safe_idx]
+        mask = (neighbor_idx >= 0) & (neighbor_idx < N_sentinel) & (neighbor_idx != i_idx) & (dist >= 1e-4)
+        return dr, dist_safe, q_i, q_j, mask
+
+    @jax.custom_vjp
+    def coulomb_energy_cvjp(r, charges):
+        _, dist_safe, q_i, q_j, mask = _compute_intermediates(r, charges)
+        e_pair = COULOMB_CONSTANT * (q_i * q_j) / dist_safe
+        e_pair = jnp.where(mask, e_pair, 0.0)
+        if excl_scales_elec is not None:
+            e_pair = e_pair * excl_scales_elec
+        return 0.5 * jnp.sum(e_pair)
+
+    def _fwd(r, charges):
+        return coulomb_energy_cvjp(r, charges), (r, charges)
+
+    def _bwd(res, g):
+        r, charges = res
+        dr, dist_safe, q_i, q_j, mask = _compute_intermediates(r, charges)
+        scale = excl_scales_elec if excl_scales_elec is not None else 1.0
+        de_dr_over_r = jnp.where(
+            mask,
+            -COULOMB_CONSTANT * (q_i * q_j) * scale / (dist_safe ** 3),
+            0.0,
+        )
+        grad_r = jnp.sum(de_dr_over_r[..., None] * dr, axis=1)
+        grad_q = jnp.sum(
+            jnp.where(mask, COULOMB_CONSTANT * q_j * scale / dist_safe, 0.0),
+            axis=1,
+        )
+        return (g * grad_r, g * grad_q)
+
+    coulomb_energy_cvjp.defvjp(_fwd, _bwd)
+    return coulomb_energy_cvjp
+
+
 def single_padded_energy_nl_cvjp(
     sys: PaddedSystem,
     neighbor_idx: Array,
@@ -970,10 +1046,10 @@ def single_padded_energy_nl_cvjp(
     implicit_solvent: bool = True,
     soft_core_lambda: Array = jnp.array(1.0),
 ) -> Array:
-    """Like single_padded_energy_nl but with custom VJP for LJ + checkpoint for GB.
+    """Like single_padded_energy_nl but with custom VJP for LJ/Coulomb + checkpoint for GB.
 
     This variant:
-    1. Uses analytical LJ forces via custom_vjp (no scatter-add)
+    1. Uses analytical LJ and Coulomb forces via custom_vjp in O(N*K) (no scatter-add, no O(N^2))
     2. Wraps GB in jax.checkpoint (recompute forward during backward)
 
     Together this minimizes both compute and memory in the gradient pass.
@@ -988,26 +1064,29 @@ def single_padded_energy_nl_cvjp(
     e_imp = _dihedral_energy_masked(r, sys.impropers, sys.improper_params, sys.improper_mask, displacement_fn)
     e_cmap = _cmap_energy_masked(r, sys.cmap_torsions, sys.cmap_indices, sys.cmap_mask, sys.cmap_coeffs, displacement_fn)
 
+    N = len(sys.atom_mask)
+    nb_idx = jnp.where(
+        sys.atom_mask[:, None] & sys.atom_mask[jnp.minimum(neighbor_idx, N - 1)],
+        neighbor_idx,
+        N,
+    )
+
     # Compute (N, K) exclusion scales for neighbor list
-    excl_scales_vdw_nl, _excl_scales_elec_nl = get_neighbor_exclusion_scales(
-        sys.excl_indices, sys.excl_scales_vdw, sys.excl_scales_elec, neighbor_idx,
+    excl_scales_vdw_nl, excl_scales_elec_nl = get_neighbor_exclusion_scales(
+        sys.excl_indices, sys.excl_scales_vdw, sys.excl_scales_elec, nb_idx,
     )
 
     # LJ with custom VJP (analytical forces, no scatter-add)
     lj_fn = _make_lj_energy_nl_cvjp(
-        neighbor_idx, soft_core_lambda, excl_scales_vdw=excl_scales_vdw_nl,
+        nb_idx, soft_core_lambda, excl_scales_vdw=excl_scales_vdw_nl,
     )
     e_lj = lj_fn(r, sys.sigmas, sys.epsilons)
 
-    # Unconditionally compute dense Coulomb interaction (vacuum electrostatic)
-    N = len(sys.atom_mask)
-    excl_scale_elec = _build_dense_exclusion_scales(
-        sys.excl_indices, sys.excl_scales_elec, N,
+    # O(N*K) neighbor-list Coulomb with custom VJP
+    coul_fn = _make_coulomb_energy_nl_cvjp(
+        nb_idx, excl_scales_elec=excl_scales_elec_nl,
     )
-    e_elec = _coulomb_energy_masked(
-        r, sys.charges, sys.atom_mask, displacement_fn,
-        excl_scale_elec=excl_scale_elec,
-    )
+    e_elec = coul_fn(r, sys.charges)
 
     if implicit_solvent:
         from prolix.physics.generalized_born import (
@@ -1021,7 +1100,7 @@ def single_padded_energy_nl_cvjp(
                 positions=positions,
                 charges=charges,
                 radii=radii,
-                neighbor_idx=neighbor_idx,
+                neighbor_idx=nb_idx,
                 dielectric_offset=0.09,
                 scaled_radii=sys.scaled_radii,
             )
@@ -1046,7 +1125,7 @@ def single_padded_energy_nl(
 ) -> Array:
     """Computes total potential energy using neighbor lists for non-bonded terms.
 
-    O(N*K) scaling for LJ and GB instead of O(N^2).
+    O(N*K) scaling for LJ, Coulomb, and GB instead of O(N^2).
     Bonded terms remain identical to single_padded_energy.
 
     Args:
@@ -1069,25 +1148,27 @@ def single_padded_energy_nl(
     e_imp = _dihedral_energy_masked(r, sys.impropers, sys.improper_params, sys.improper_mask, displacement_fn)
     e_cmap = _cmap_energy_masked(r, sys.cmap_torsions, sys.cmap_indices, sys.cmap_mask, sys.cmap_coeffs, displacement_fn)
 
+    N = len(sys.atom_mask)
+    nb_idx = jnp.where(
+        sys.atom_mask[:, None] & sys.atom_mask[jnp.minimum(neighbor_idx, N - 1)],
+        neighbor_idx,
+        N,
+    )
+
     # Non-bonded: O(N*K) via neighbor list
-    excl_scales_vdw_nl, _excl_scales_elec_nl = get_neighbor_exclusion_scales(
-        sys.excl_indices, sys.excl_scales_vdw, sys.excl_scales_elec, neighbor_idx,
+    excl_scales_vdw_nl, excl_scales_elec_nl = get_neighbor_exclusion_scales(
+        sys.excl_indices, sys.excl_scales_vdw, sys.excl_scales_elec, nb_idx,
     )
 
     e_lj = _lj_energy_neighbor_list(
-        r, sys.sigmas, sys.epsilons, neighbor_idx,
+        r, sys.sigmas, sys.epsilons, nb_idx,
         soft_core_lambda=soft_core_lambda,
         excl_scales_vdw=excl_scales_vdw_nl,
     )
 
-    # Unconditionally compute dense Coulomb interaction (vacuum electrostatic)
-    N = len(sys.atom_mask)
-    excl_scale_elec = _build_dense_exclusion_scales(
-        sys.excl_indices, sys.excl_scales_elec, N,
-    )
-    e_elec = _coulomb_energy_masked(
-        r, sys.charges, sys.atom_mask, displacement_fn,
-        excl_scale_elec=excl_scale_elec,
+    e_elec = _coulomb_energy_neighbor_list(
+        r, sys.charges, nb_idx,
+        excl_scales_elec=excl_scales_elec_nl,
     )
 
     if implicit_solvent:
@@ -1099,7 +1180,7 @@ def single_padded_energy_nl(
             positions=r,
             charges=sys.charges,
             radii=sys.radii,
-            neighbor_idx=neighbor_idx,
+            neighbor_idx=nb_idx,
             dielectric_offset=0.09,
             scaled_radii=sys.scaled_radii,
         )

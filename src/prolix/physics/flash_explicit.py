@@ -14,7 +14,6 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-import equinox as eqx
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -87,10 +86,12 @@ def _pad_to_tile_multiple(
     sigmas = jnp.pad(sigmas, (0, pad_amt))
     epsilons = jnp.pad(epsilons, (0, pad_amt))
     atom_mask = jnp.pad(atom_mask, (0, pad_amt))
-    excl_indices = jnp.pad(sys.excl_indices, ((0, pad_amt), (0, 0)))
-    excl_scales_vdw = jnp.pad(sys.excl_scales_vdw, ((0, pad_amt), (0, 0)))
+    excl_indices = jnp.pad(sys.excl_indices, ((0, pad_amt), (0, 0)), constant_values=-1)
+    excl_scales_vdw = jnp.pad(sys.excl_scales_vdw, ((0, pad_amt), (0, 0)), constant_values=1.0)
     excl_scales_elec = (
-        jnp.pad(sys.excl_scales_elec, ((0, pad_amt), (0, 0))) if include_elec else None
+        jnp.pad(sys.excl_scales_elec, ((0, pad_amt), (0, 0)), constant_values=1.0)
+        if include_elec
+        else None
     )
     return (positions, charges, sigmas, epsilons, atom_mask,
             excl_indices, excl_scales_vdw, excl_scales_elec, n_tiles)
@@ -122,6 +123,7 @@ def chunked_explicit_nonbonded_energy(
     soft_core_lambda: float = 1.0,
     pme_alpha: float = 0.0,
     remat: bool = True,
+    use_pallas: bool | None = None,
 ) -> Array:
     """Fused LJ + Direct-space Coulomb energy in one tiled O(N²) pass.
 
@@ -142,10 +144,30 @@ def chunked_explicit_nonbonded_energy(
         pme_alpha: Ewald alpha for direct space damping. If 0, uses regular Coulomb.
         remat: If True (default), checkpoint the tile inner. False keeps
             intermediates for the backward pass (discovery / memory trade).
+        use_pallas: Optional override for Pallas kernel dispatch.
 
     Returns:
         Scalar total nonbonded energy (kcal/mol).
     """
+    from prolix.pallas_kernels import pallas_flash_explicit_nonbonded, resolve_pallas_mode
+
+    pallas_enabled, interpret = resolve_pallas_mode(use_pallas=use_pallas)
+    if pallas_enabled and not isinstance(soft_core_lambda, jax.core.Tracer):
+        return pallas_flash_explicit_nonbonded(
+            positions,
+            charges,
+            sigmas,
+            epsilons,
+            atom_mask,
+            sys.excl_indices,
+            sys.excl_scales_vdw,
+            sys.excl_scales_elec,
+            box=sys.box_size,
+            pme_alpha=float(pme_alpha),
+            soft_core_lambda=float(soft_core_lambda),
+            interpret=interpret,
+        )
+
     positions, charges, sigmas, epsilons, atom_mask, excl_indices, excl_scales_vdw, excl_scales_elec, n_tiles = (
         _pad_to_tile_multiple(positions, charges, sigmas, epsilons, atom_mask, sys, T, include_elec=True)
     )
@@ -340,7 +362,105 @@ def _chunked_lj_only_energy(
   return total_energy
 
 
-def _total_energy_fn(
+def _excl_correction_from_sys(
+    pos: Array,
+    safe_charges: Array,
+    sys: PaddedSystem,
+    displacement_fn,
+    pme_alpha_float: float,
+    coul_14_scale: float = 0.83333333,
+) -> Array:
+    """Compute PME/EFA bonded exclusion correction using precomputed exclusion tables.
+
+    Avoids calling host-only ``topology.find_bonded_exclusions`` inside traced
+    energy/force functions when ``sys.excl_pair_indices`` or ``sys.excl_indices``
+    is present.
+    """
+    n_atoms = pos.shape[0]
+    work_dtype = pos.dtype
+
+    excl_pair_indices = getattr(sys, "excl_pair_indices", None)
+    excl_pair_scales = getattr(sys, "excl_pair_scales_elec", None)
+    if (
+        excl_pair_indices is not None
+        and excl_pair_scales is not None
+        and excl_pair_indices.shape[0] > 0
+    ):
+        i_idx = excl_pair_indices[:, 0]
+        j_idx = excl_pair_indices[:, 1]
+        valid = (i_idx >= 0) & (i_idx < n_atoms) & (j_idx >= 0) & (j_idx < n_atoms) & (i_idx != j_idx)
+        i_safe = jnp.clip(i_idx, 0, max(n_atoms - 1, 0))
+        j_safe = jnp.clip(j_idx, 0, max(n_atoms - 1, 0))
+        valid = valid & sys.atom_mask[i_safe] & sys.atom_mask[j_safe]
+        r_i = pos[i_safe]
+        r_j = pos[j_safe]
+        dr = jax.vmap(displacement_fn)(r_i, r_j)
+        dist = jnp.sqrt(jnp.sum(dr ** 2, axis=-1) + jnp.asarray(1e-12, dtype=work_dtype))
+        dist_safe = dist + jnp.asarray(1e-6, dtype=work_dtype)
+        q_i = safe_charges[i_safe]
+        q_j = safe_charges[j_safe]
+        erf_term = jax.scipy.special.erf(jnp.asarray(pme_alpha_float, dtype=work_dtype) * dist)
+        e_pair_recip = jnp.asarray(COULOMB_CONSTANT, dtype=work_dtype) * (q_i * q_j / dist_safe) * erf_term
+        factor = jnp.where(valid, jnp.asarray(1.0, dtype=work_dtype) - excl_pair_scales.astype(work_dtype), jnp.asarray(0.0, dtype=work_dtype))
+        return -jnp.sum(e_pair_recip * factor)
+
+    excl_indices = getattr(sys, "excl_indices", None)
+    excl_scales_elec = getattr(sys, "excl_scales_elec", None)
+    if (
+        excl_indices is not None
+        and excl_scales_elec is not None
+        and excl_indices.ndim == 2
+        and excl_indices.shape[1] > 0
+    ):
+        M = excl_indices.shape[1]
+        i_grid = jnp.broadcast_to(jnp.arange(n_atoms, dtype=jnp.int32)[:, None], (n_atoms, M))
+        j_grid = excl_indices
+        valid = (j_grid >= 0) & (j_grid < n_atoms) & (i_grid != j_grid)
+        j_safe = jnp.clip(j_grid, 0, max(n_atoms - 1, 0))
+        valid = valid & sys.atom_mask[:, None] & sys.atom_mask[j_safe]
+
+        r_i = pos[:, None, :]
+        r_j = pos[j_safe]
+        if sys.box_size is not None:
+            dr = r_i - r_j
+            dr = dr - sys.box_size * jnp.round(dr / sys.box_size)
+        else:
+            dr = r_i - r_j
+        dist = jnp.sqrt(jnp.sum(dr ** 2, axis=-1) + jnp.asarray(1e-12, dtype=work_dtype))
+        dist_safe = dist + jnp.asarray(1e-6, dtype=work_dtype)
+        q_i = safe_charges[:, None]
+        q_j = safe_charges[j_safe]
+        erf_term = jax.scipy.special.erf(jnp.asarray(pme_alpha_float, dtype=work_dtype) * dist)
+        e_pair_recip = jnp.asarray(COULOMB_CONSTANT, dtype=work_dtype) * (q_i * q_j / dist_safe) * erf_term
+        factor = jnp.where(
+            valid,
+            jnp.asarray(1.0, dtype=work_dtype) - excl_scales_elec.astype(work_dtype),
+            jnp.asarray(0.0, dtype=work_dtype),
+        )
+        # Symmetry factor 0.5 because both (i, j) and (j, i) are stored in excl_indices
+        return -jnp.asarray(0.5, dtype=work_dtype) * jnp.sum(e_pair_recip * factor)
+
+    if sys.bonds is not None and sys.bonds.shape[0] > 0:
+        excl = topology.find_bonded_exclusions(sys.bonds, n_atoms)
+        idx_12, idx_13, idx_14 = excl.idx_12, excl.idx_13, excl.idx_14
+    else:
+        z = jnp.zeros((0, 2), dtype=jnp.int32)
+        idx_12 = idx_13 = idx_14 = z
+
+    return explicit_corrections.pme_exclusion_correction_energy(
+        pos,
+        displacement_fn,
+        idx_12,
+        idx_13,
+        idx_14,
+        safe_charges,
+        float(pme_alpha_float),
+        float(coul_14_scale),
+    )
+
+
+def _total_energy_from_positions(
+    pos: Array,
     sys: PaddedSystem,
     T: int = 256,
     soft_core_lambda: float = 1.0,
@@ -348,25 +468,12 @@ def _total_energy_fn(
     n_rff_features: int = 512,
     rff_seed: int = 0,
     remat: bool = True,
+    use_pallas: bool | None = None,
 ) -> Array:
-    """Internal energy implementation for gradients.
-
-    Args:
-        sys: PaddedSystem with topology and parameters.
-        T: Tile size for FlashMD.
-        soft_core_lambda: Soft-core coupling (1.0 = standard).
-        electrostatic_method: EFA or PME (default).
-        n_rff_features: Number of RFF features for EFA (default 512).
-        rff_seed: PRNG seed for RFF frequency sampling (default 0).
-        remat: If True (default), checkpoint tiled pair bodies.
-
-    Returns:
-        Scalar energy in kcal/mol.
-    """
+    """Internal energy implementation as a function of ``pos`` (arg 0) for ``jax.grad``."""
     if isinstance(electrostatic_method, str):
         electrostatic_method = ElectrostaticMethod(electrostatic_method)
 
-    pos = sys.positions
     # dtype follows each array's own precision (debt 770/832 pattern) rather
     # than hardcoding float32 -- a hardcoded fallback literal here silently
     # narrows the jnp.where result under x64/float64 bundles, which is fine
@@ -397,36 +504,15 @@ def _total_energy_fn(
             alpha=pme_alpha_float,
             n_features=n_rff_features,
             key=rng_key,
-        )
+        ).astype(pos.dtype)
         e_coul_rff = erfc_rff_coulomb_energy_diff(
             pos, safe_charges, sys.atom_mask, omega, pme_alpha_float
         )
 
         # Exclusion correction for bonded pairs
         displacement_fn, _ = pbc.create_periodic_space(sys.box_size)
-        n_atoms = pos.shape[0]
-        if sys.bonds is not None and sys.bonds.shape[0] > 0:
-            excl = topology.find_bonded_exclusions(sys.bonds, n_atoms)
-            idx_12, idx_13, idx_14 = excl.idx_12, excl.idx_13, excl.idx_14
-        else:
-            z = jnp.zeros((0, 2), dtype=jnp.int32)
-            idx_12 = idx_13 = idx_14 = z
-
-        # Single exclusion correction call: 1-2/1-3 are fully excluded (scale=0.0),
-        # 1-4 are scaled (scale=0.833). Avoids double-subtraction.
-        idx_12_13 = jnp.concatenate(
-            [idx_12, idx_13] if idx_12.shape[0] > 0 or idx_13.shape[0] > 0
-            else [jnp.zeros((0, 2), dtype=jnp.int32), jnp.zeros((0, 2), dtype=jnp.int32)]
-        )
-        e_excl = efa_exclusion_correction(
-            pos,
-            safe_charges,
-            sys.atom_mask,
-            displacement_fn,
-            idx_12_13,
-            idx_14,
-            0.83333333,
-            pme_alpha_float,
+        e_excl = _excl_correction_from_sys(
+            pos, safe_charges, sys, displacement_fn, pme_alpha_float, 0.83333333
         )
 
         # Short-range erfc(αr)/r for hybrid decomposition:
@@ -443,10 +529,6 @@ def _total_energy_fn(
         e_total = e_lj + e_coul_rff + e_short_range + e_excl
 
         # Dispersion tail correction (still needed for consistency).
-        # lj_dispersion_tail_energy's last parameter is `atom_mask` (an (N,)
-        # array), not an atom count -- passing a scalar count here gets
-        # squared inside the C6/C12 sums, inflating the term by ~n_atoms^2
-        # (see the identical, already-fixed bug in batched_energy.py:510-528).
         e_total += explicit_corrections.lj_dispersion_tail_energy(
             sys.box_size,
             safe_sigmas,
@@ -478,27 +560,8 @@ def _total_energy_fn(
 
         # Exclusion correction for bonded pairs (same as EFA)
         displacement_fn, _ = pbc.create_periodic_space(sys.box_size)
-        n_atoms = pos.shape[0]
-        if sys.bonds is not None and sys.bonds.shape[0] > 0:
-            excl = topology.find_bonded_exclusions(sys.bonds, n_atoms)
-            idx_12, idx_13, idx_14 = excl.idx_12, excl.idx_13, excl.idx_14
-        else:
-            z = jnp.zeros((0, 2), dtype=jnp.int32)
-            idx_12 = idx_13 = idx_14 = z
-
-        idx_12_13 = jnp.concatenate(
-            [idx_12, idx_13] if idx_12.shape[0] > 0 or idx_13.shape[0] > 0
-            else [jnp.zeros((0, 2), dtype=jnp.int32), jnp.zeros((0, 2), dtype=jnp.int32)]
-        )
-        e_excl = efa_exclusion_correction(
-            pos,
-            safe_charges,
-            sys.atom_mask,
-            displacement_fn,
-            idx_12_13,
-            idx_14,
-            0.83333333,
-            pme_alpha_float,
+        e_excl = _excl_correction_from_sys(
+            pos, safe_charges, sys, displacement_fn, pme_alpha_float, 0.83333333
         )
 
         # Short-range erfc(αr)/r for hybrid decomposition
@@ -513,10 +576,7 @@ def _total_energy_fn(
 
         e_total = e_lj + e_coul_efa + e_short_range + e_excl
 
-        # Dispersion tail correction. lj_dispersion_tail_energy's last
-        # parameter is `atom_mask` (an (N,) array), not an atom count -- see
-        # the EFA branch above / batched_energy.py:510-528 for the identical,
-        # already-fixed bug this mirrors.
+        # Dispersion tail correction.
         e_total += explicit_corrections.lj_dispersion_tail_energy(
             sys.box_size,
             safe_sigmas,
@@ -545,7 +605,7 @@ def _total_energy_fn(
             box_size=sys.box_size,
             alpha=float(sys.pme_alpha),
             grid_spacing=grid_spacing,
-            use_pallas_pme=None,
+            use_pallas_pme=use_pallas,
         )
 
     # Direct space (LJ + damped Coulomb)
@@ -561,6 +621,7 @@ def _total_energy_fn(
         T=T,
         soft_core_lambda=soft_core_lambda,
         remat=remat,
+        use_pallas=use_pallas,
     )
     # Add PME reciprocal and corrections
     if recip_energy_fn is not None:
@@ -569,24 +630,12 @@ def _total_energy_fn(
             safe_charges, sys.atom_mask, sys.pme_alpha, sys.box_size
         )
         displacement_fn, _ = pbc.create_periodic_space(sys.box_size)
-        n_atoms = pos.shape[0]
-        if sys.bonds is not None and sys.bonds.shape[0] > 0:
-            excl = topology.find_bonded_exclusions(sys.bonds, n_atoms)
-            idx_12, idx_13, idx_14 = excl.idx_12, excl.idx_13, excl.idx_14
-        else:
-            z = jnp.zeros((0, 2), dtype=jnp.int32)
-            idx_12 = idx_13 = idx_14 = z
-        # Plain Python float, not jnp.float32 -- immediately float()'d below,
-        # and constructing it via jnp would hit the same debt-770 tracer
-        # issue as mean_l above once this code path is reached under jit.
         coul_14 = 0.83333333
-        e_total += explicit_corrections.pme_exclusion_correction_energy(
+        e_total += _excl_correction_from_sys(
             pos,
-            displacement_fn,
-            idx_12,
-            idx_13,
-            idx_14,
             safe_charges,
+            sys,
+            displacement_fn,
             float(sys.pme_alpha),
             float(coul_14),
         )
@@ -604,6 +653,44 @@ def _total_energy_fn(
     return e_total
 
 
+def _total_energy_fn(
+    sys: PaddedSystem,
+    T: int = 256,
+    soft_core_lambda: float = 1.0,
+    electrostatic_method: ElectrostaticMethod | str = ElectrostaticMethod.PME,
+    n_rff_features: int = 512,
+    rff_seed: int = 0,
+    remat: bool = True,
+    use_pallas: bool | None = None,
+) -> Array:
+    """Internal energy implementation for gradients.
+
+    Args:
+        sys: PaddedSystem with topology and parameters.
+        T: Tile size for FlashMD.
+        soft_core_lambda: Soft-core coupling (1.0 = standard).
+        electrostatic_method: EFA or PME (default).
+        n_rff_features: Number of RFF features for EFA (default 512).
+        rff_seed: PRNG seed for RFF frequency sampling (default 0).
+        remat: If True (default), checkpoint tiled pair bodies.
+        use_pallas: Optional override for Pallas kernel dispatch.
+
+    Returns:
+        Scalar energy in kcal/mol.
+    """
+    return _total_energy_from_positions(
+        sys.positions,
+        sys,
+        T=T,
+        soft_core_lambda=soft_core_lambda,
+        electrostatic_method=electrostatic_method,
+        n_rff_features=n_rff_features,
+        rff_seed=rff_seed,
+        remat=remat,
+        use_pallas=use_pallas,
+    )
+
+
 def flash_explicit_total_energy(
     sys: PaddedSystem,
     T: int = 256,
@@ -612,6 +699,7 @@ def flash_explicit_total_energy(
     n_rff_features: int = 512,
     rff_seed: int = 0,
     remat: bool = True,
+    use_pallas: bool | None = None,
 ) -> Array:
     """Complete explicit solvent energy: bonded + FlashMD nonbonded + PME.
 
@@ -659,7 +747,8 @@ def flash_explicit_total_energy(
     e_nonbonded = _total_energy_fn(sys, T=T, soft_core_lambda=soft_core_lambda,
                                    electrostatic_method=electrostatic_method,
                                    n_rff_features=n_rff_features,
-                                   rff_seed=rff_seed, remat=remat)
+                                   rff_seed=rff_seed, remat=remat,
+                                   use_pallas=use_pallas)
 
     return e_bonded + e_nonbonded
 
@@ -672,12 +761,14 @@ def flash_explicit_energy(
     n_rff_features: int = 512,
     rff_seed: int = 0,
     remat: bool = True,
+    use_pallas: bool | None = None,
 ) -> Array:
     """Compute explicit solvent nonbonded energy via FlashMD architecture."""
     return _total_energy_fn(sys, T=T, soft_core_lambda=soft_core_lambda,
                             electrostatic_method=electrostatic_method,
                             n_rff_features=n_rff_features,
-                            rff_seed=rff_seed, remat=remat)
+                            rff_seed=rff_seed, remat=remat,
+                            use_pallas=use_pallas)
 
 
 def flash_explicit_forces(
@@ -688,6 +779,7 @@ def flash_explicit_forces(
     n_rff_features: int = 512,
     rff_seed: int = 0,
     remat: bool = True,
+    use_pallas: bool | None = None,
 ) -> Array:
     """Compute explicit solvent nonbonded forces via FlashMD architecture.
 
@@ -697,19 +789,21 @@ def flash_explicit_forces(
     Returns:
         Forces (N, 3) in kcal/mol/Å. Zero for padded atoms.
     """
-    # Use eqx.filter_grad instead of jax.grad to respect static fields (like box_size).
-    # This prevents Tracer Errors in the PME reciprocal kernel.
-    @eqx.filter_grad
-    def _grad_fn(s: PaddedSystem):
-        return _total_energy_fn(s, T=T, soft_core_lambda=soft_core_lambda,
-                                electrostatic_method=electrostatic_method,
-                                n_rff_features=n_rff_features,
-                                rff_seed=rff_seed, remat=remat)
+    def _energy_of_pos(pos: Array) -> Array:
+        return _total_energy_from_positions(
+            pos,
+            sys,
+            T=T,
+            soft_core_lambda=soft_core_lambda,
+            electrostatic_method=electrostatic_method,
+            n_rff_features=n_rff_features,
+            rff_seed=rff_seed,
+            remat=remat,
+            use_pallas=use_pallas,
+        )
 
     with jax.named_scope("flash_grad"):
-        grad_at_sys = _grad_fn(sys)
+        grad_pos = jax.grad(_energy_of_pos)(sys.positions)
 
-    # We want the forces on positions: F = -dE/dr
-    # eqx.filter_grad returns a PyTree of gradients for all dynamic leaves.
-    forces = -grad_at_sys.positions
+    forces = -grad_pos
     return forces * sys.atom_mask[:, None]
