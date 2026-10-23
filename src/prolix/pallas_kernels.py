@@ -1048,7 +1048,9 @@ def _nonbonded_nl_param_grads(
     r_j = positions[safe_j]
     dr = r_i - r_j
     if has_box:
-        dr = dr - box[None, None, :] * jnp.round(dr / box[None, None, :])
+        dr = dr - box[None, None, :] * jnp.floor(
+            dr / box[None, None, :] + jnp.asarray(0.5, dtype=dtype)
+        )
     r_sq = jnp.sum(dr ** 2, axis=-1) + jnp.asarray(1e-12, dtype=dtype)
     dist = jnp.sqrt(r_sq)
 
