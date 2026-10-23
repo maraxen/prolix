@@ -48,6 +48,11 @@ fi
 _is_repo_root "${_PROJ}" || { echo "FATAL: no prolix repo root found (tried PWD=${PWD}, SLURM_SUBMIT_DIR=${SLURM_SUBMIT_DIR:-unset})" >&2; exit 1; }
 cd "${_PROJ}" || exit 1
 echo "repo root: $(pwd)"
+# bathos provenance (CLAUDE.md "Experiment Tracking"): the combine step below is
+# the one that emits the sidecar's result_schema row, so it runs under `bth run`.
+# shellcheck source=/dev/null
+source "scripts/slurm/_bth_env.sh"
+CAMPAIGN_ID="${CAMPAIGN_ID:-s2-dhfr-rr5-parity}"
 mkdir -p outputs/logs/slurm outputs/dhfr_parity
 echo "Host: $(hostname)  Job: ${SLURM_JOB_ID:-local}  Date: $(date -Is)"
 nvidia-smi --query-gpu=name,memory.total --format=csv,noheader | head -1
@@ -121,7 +126,14 @@ RC2=$?
 echo "--- openmm leg exit=${RC2} ---"
 
 echo "=== [3/3] combine (validates CUDA + matching step counts) ==="
-uv run python scripts/experiments/bench_dhfr_parity.py \
+# Only the combined JSON is registered: it is the single result bathos evaluates
+# the sidecar against. The leg JSONs stay on disk next to it under the same TAG.
+bth run \
+    --tags cluster --tags s2 --tags dhfr --tags rr5 --tags split \
+    --tags "gpu:h200" \
+    ${CAMPAIGN_ID:+--campaign-id "${CAMPAIGN_ID}"} \
+    --output-paths "${C_JSON}" \
+    -- uv run --no-sync python scripts/experiments/bench_dhfr_parity.py \
     --combine-prolix "${P_JSON}" \
     --combine-openmm "${O_JSON}" \
     --out "${C_JSON}"
