@@ -2549,18 +2549,6 @@ wheels = [
 ]
 
 [[package]]
-name = "pytest-asyncio"
-version = "1.4.0"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "pytest" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/43/7c/d36d04db312ecf4298932ef77e6e4a9e8ad017906e24e34f0b0c361a2473/pytest_asyncio-1.4.0.tar.gz", hash = "sha256:c6c0d2259945122819f171a32ecea2c349ead889ee28176caaf492143424be42", size = 58514, upload-time = "2026-05-26T09:56:04.083Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/03/e2/08a497ef684b88559c9cc5f4ad53a37e7b99e727094a86d6ea32536d5d3c/pytest_asyncio-1.4.0-py3-none-any.whl", hash = "sha256:933ca923a23075a87fb7070c0ec272a6848489824d887c85c812670932835aa1", size = 16930, upload-time = "2026-05-26T09:56:02.576Z" },
-]
-
-[[package]]
 name = "pytest-cov"
 version = "7.0.0"
 source = { registry = "https://pypi.org/simple" }
@@ -3427,21 +3415,19 @@ wheels = [
 
 [[package]]
 name = "xtrax"
-version = "0.4.0a9"
+version = "0.4.1b3"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "equinox" },
-    { name = "grain" },
     { name = "jax" },
     { name = "jaxlib" },
     { name = "numpy" },
     { name = "optax" },
     { name = "orbax-checkpoint" },
-    { name = "pytest-asyncio" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/7a/66/9c38188b5eb0a3116fff06666a3aeb91953f7c93f97d00a2aae48d7a3d77/xtrax-0.4.0a9.tar.gz", hash = "sha256:6293bc95a0dec3478c68202bd6c12652f0085dc06c0692ee7117908908b92c63", size = 2348380, upload-time = "2026-09-07T19:46:36.191Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/5b/76/b507b87492915a50bc9bdf483744537f04005a26318f4fc60f6f3fbde16d/xtrax-0.4.1b3.tar.gz", hash = "sha256:75d9651cb03ebf42027d6a81a91e330febf781d4c74321ac36bd76b391f94403", size = 3292939, upload-time = "2026-10-23T16:23:24.822Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/f3/30/ca606df7c1ae9576e3b5959df1159b4b74a9870e499a89d94b9fd4bb5bed/xtrax-0.4.0a9-py3-none-any.whl", hash = "sha256:d780c7795ca847779c93412dc606e0c359db5125ee5bd3f6ff71362bddfc7dae", size = 384987, upload-time = "2026-09-07T19:46:34.05Z" },
+    { url = "https://files.pythonhosted.org/packages/84/c7/9ef75a635ce4f83315da1082d123d62f701de578fc5afc2bfa945755e76a/xtrax-0.4.1b3-py3-none-any.whl", hash = "sha256:47a91eba4cd1d56ea8c8be038e2f5f27c7b84a0bb233792f57d578d55be566d9", size = 677387, upload-time = "2026-10-23T16:23:23.179Z" },
 ]
 
 [[package]]
