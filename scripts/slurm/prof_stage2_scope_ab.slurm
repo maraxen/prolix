@@ -48,6 +48,12 @@ if [[ -z "${PROLIX_GIT_SHA:-}" ]]; then
     export PROLIX_GIT_SHA
 fi
 echo "PROLIX_GIT_SHA=${PROLIX_GIT_SHA:-unset}"
+# xtrax.profiling.record reads XTRAX_GIT_SHA, not PROLIX_GIT_SHA -- the var was
+# renamed when scripts/profiling/ moved upstream. Export both: the local scripts
+# with their own _git_sha() (prof_ensemble_step.py, prof_flash_tile_checkpoint.py)
+# still read PROLIX_GIT_SHA. A missing XTRAX_GIT_SHA does not error -- it silently
+# records a blank sha on cluster scratch, where there is no .git to fall back to.
+export XTRAX_GIT_SHA="${PROLIX_GIT_SHA:-}"
 source "scripts/slurm/_bth_env.sh"
 
 _NODE="${SLURM_JOB_NODELIST:-$(hostname -s)}"
@@ -58,7 +64,7 @@ fi
 
 CAMPAIGN_ID="${CAMPAIGN_ID:-}"
 CAMPAIGN_FLAG=()
-[[ -n "${CAMPAIGN_ID}" ]] && CAMPAIGN_FLAG=(--campaign "${CAMPAIGN_ID}")
+[[ -n "${CAMPAIGN_ID}" ]] && CAMPAIGN_FLAG=(--campaign-id "${CAMPAIGN_ID}")
 N_PAIRS_FLAG=()
 [[ -n "${N_PAIRS:-}" ]] && N_PAIRS_FLAG=(--n-pairs "${N_PAIRS}")
 
@@ -69,12 +75,12 @@ echo "Host: $(hostname)  Job: ${SLURM_JOB_ID:-local}"
 echo "GPU: $(nvidia-smi --query-gpu=name,memory.total --format=csv,noheader 2>&1 | head -1)"
 echo "Date: $(date -Is)"
 
-uv run bth run python scripts/experiments/prof_stage2_scope_ab.py \
+bth run \
     --no-sidecar \
-    --tag p7-stage2 --tag scope-ab \
+    --tags p7-stage2 --tags scope-ab \
     "${CAMPAIGN_FLAG[@]}" \
-    --out outputs/profiling/stage2/scope_ab/summary.json \
-    -- \
+    --output-paths outputs/profiling/stage2/scope_ab/summary.json \
+    -- uv run python scripts/experiments/prof_stage2_scope_ab.py \
     --out-dir outputs/profiling/stage2/scope_ab \
     --out outputs/profiling/stage2/scope_ab/summary.json \
     "${N_PAIRS_FLAG[@]}"

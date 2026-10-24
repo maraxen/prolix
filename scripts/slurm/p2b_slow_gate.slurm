@@ -67,12 +67,12 @@ CAMPAIGN_ID="${CAMPAIGN_ID:-ef45b8b4}"
 OUT="outputs/p2b_nvt_gate/result_${SLURM_JOB_ID:-local}.json"
 
 echo "=== Phase 5 R-step gate (campaign=${CAMPAIGN_ID}) ==="
-uv run bth run python scripts/experiments/p2b_nvt_gate.py \
-  --tag phase5-settle-rstep \
-  --tag "slurm_job=${SLURM_JOB_ID:-local}" \
-  --campaign "${CAMPAIGN_ID}" \
-  --out "${OUT}" \
-  -- --out "${OUT}" \
+bth run \
+  --tags phase5-settle-rstep \
+  --tags "slurm_job=${SLURM_JOB_ID:-local}" \
+  --campaign-id "${CAMPAIGN_ID}" \
+  --output-paths "${OUT}" \
+  -- uv run python scripts/experiments/p2b_nvt_gate.py --out "${OUT}" \
   2>&1 | tee "${LOG_ROOT}/app/p2b_slow_gate_${SLURM_JOB_ID:-local}.log"
 
 echo "=== Done: exit $? ==="

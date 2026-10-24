@@ -7,7 +7,7 @@ mkdir -p "$OUT"
 cd "$ROOT"
 export OPENMM_INSTALL_MODE="${OPENMM_INSTALL_MODE:-ephemeral}"
 
-COMMON=(python scripts/benchmarks/tip3p_ke_compare.py
+COMMON=(python scripts/explore/tip3p_ke_compare.py
   --engine both --jax-x64 on --n-waters 33 --steps 30000 --burn 10000 --sample-every 10
   --replicas 5 --timing-mode both --warmup-steps 100 --measure-steps 500
   --dt-fs 2.0 --temperature-k 300 --gamma-ps 1.0 --openmm-integrator middle)

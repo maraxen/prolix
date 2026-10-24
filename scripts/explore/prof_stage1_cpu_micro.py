@@ -5,7 +5,7 @@ See .praxia/docs/specs/260817_jax-profiling-optimization-workflow.md section
 P4. Executes real integrator steps (reusing
 scripts/experiments/profile_b1_water_trace.py's water-plan builder -- do not
 re-derive it) under jax.profiler.trace, parses the trace via
-scripts/profiling/trace.py into per-named_scope wall times + dispatch
+xtrax.profiling.trace into per-named_scope wall times + dispatch
 counts, and emits ProbeRecord(stage=1, platform="cpu", ...).
 
 Placed in scripts/explore/ (ad-hoc, no bathos sidecar required per the
@@ -31,13 +31,14 @@ _ROOT = Path(__file__).resolve().parents[2]
 if str(_ROOT) not in _sys.path:
     _sys.path.insert(0, str(_ROOT))
 
-from scripts.profiling.claims import (  # noqa: E402
+from xtrax.profiling.claims import (  # noqa: E402
     ClaimClass,
     ClaimValidityError,
     assert_claim_supported,
 )
-from scripts.profiling.record import ProbeRecord  # noqa: E402
-from scripts.profiling.trace import (  # noqa: E402
+from xtrax.profiling.emitters import attribution_from_scopes  # noqa: E402
+from xtrax.profiling.record import ProbeRecord  # noqa: E402
+from xtrax.profiling.trace import (  # noqa: E402
     parse_dispatch_counts,
     parse_scopes,
     scope_map_from_hlo_text,
@@ -113,9 +114,10 @@ def _probe(n_steps: int, trace_dir: Path) -> ProbeRecord:
     scopes: dict[str, tuple[float, int] | None] = {
         label: scopes_raw.get(label) for label in KNOWN_LABELS
     }
-    attribution_method = {
-        label: "named_scope" for label, value in scopes.items() if value is not None
-    }
+    # attribution_from_scopes returns {} (never None) when every label is
+    # absent -- "trace captured, all labels missing" must stay distinguishable
+    # from "no trace captured" (scopes=None). See #4330.
+    attribution_method = attribution_from_scopes(scopes)
 
     dispatch_counts = parse_dispatch_counts(events, fn_name="_batched")
     metrics: dict[str, float] = {
@@ -130,7 +132,7 @@ def _probe(n_steps: int, trace_dir: Path) -> ProbeRecord:
         platform="cpu",
         metrics=metrics,
         scopes=scopes,
-        attribution_method=attribution_method or None,
+        attribution_method=attribution_method,
         config={"n_steps": str(n_steps), "replicas": "1"},
     )
 

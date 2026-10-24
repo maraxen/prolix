@@ -196,9 +196,7 @@ def _chunked_lj_bwd(excl_indices, displacement_fn, cutoff, tile_size, res, g):
 
 chunked_lj_energy.defvjp(_chunked_lj_fwd, _chunked_lj_bwd)
 
-
-@functools.partial(jax.custom_vjp, nondiff_argnums=(6, 7, 8, 9))
-def chunked_lj_energy_nl(
+def _chunked_lj_energy_nl_core(
     r: jnp.ndarray,
     sigmas: jnp.ndarray,
     epsilons: jnp.ndarray,
@@ -210,7 +208,7 @@ def chunked_lj_energy_nl(
     tile_size: int = 32,
     switch_width: float = 0.0,
 ) -> jnp.ndarray:
-    """Computes LJ energy over neighbor list."""
+    """Core LJ energy computation (non-custom_vjp). Used by both forward and backward."""
     inner_tile_size = 1024
     r_pad, mask_pad = pad_to_tile(r, inner_tile_size)
     sig_pad, _ = pad_to_tile(sigmas, inner_tile_size)
@@ -249,12 +247,46 @@ def chunked_lj_energy_nl(
         energy = jnp.where(m, 4.0 * e_ij * (inv_r6 ** 2 - inv_r6) * switch, 0.0)
         return 0.5 * jnp.sum(energy * pair_scale)
 
-    return tile_reduction_nl(r_pad, neighbor_idx, mask_pad, f_tile, 0.0, tile_size, inner_tile_size=inner_tile_size)
+    with jax.named_scope("nl_lj_forward"):
+        return tile_reduction_nl(r_pad, neighbor_idx, mask_pad, f_tile, 0.0, tile_size, inner_tile_size=inner_tile_size)
+
+
+@functools.partial(jax.custom_vjp, nondiff_argnums=(6, 7, 8, 9))
+def chunked_lj_energy_nl(
+    r: jnp.ndarray,
+    sigmas: jnp.ndarray,
+    epsilons: jnp.ndarray,
+    excl_indices: jnp.ndarray,
+    excl_scales: jnp.ndarray,
+    neighbor_idx: jnp.ndarray,
+    displacement_fn: Callable,
+    cutoff: float = 9.0,
+    tile_size: int = 32,
+    switch_width: float = 0.0,
+) -> jnp.ndarray:
+    """Computes LJ energy over neighbor list.
+
+    custom_vjp backward (debt 760 / #4623 / #4793): an earlier attempt at
+    this analytic backward pass (commit 7f7e147) had a copy-paste bug
+    (hardcoded zero position gradient) that was correctly fixed and
+    validated (finite-difference, tests/physics/test_nl_kernel_gradient_correctness.py)
+    -- but that fix lived on a branch that a parallel debt-4383 branch's
+    "remove custom_vjp entirely" fix clobbered on merge without ever seeing
+    it (commit 223590b's "before" state matches 7f7e147's "before" state,
+    not its "after"). Restored 2026-09 (#4793/#4623): generic autodiff
+    through the gather-heavy tiled NL forward pass forces JAX to synthesize
+    an expensive scatter-add backward (measured ~20x slower than dense's
+    analytic-custom_vjp force path at n_padded=5000); this restores the
+    analytic rule, matching the dense kernel's own custom_vjp pattern.
+    """
+    return _chunked_lj_energy_nl_core(r, sigmas, epsilons, excl_indices, excl_scales, neighbor_idx,
+                                       displacement_fn, cutoff, tile_size, switch_width)
+
 
 
 def _chunked_lj_nl_fwd(r, sigmas, epsilons, excl_indices, excl_scales, nb_idx, disp_fn, cutoff, tile_size, switch_width):
     return (
-        chunked_lj_energy_nl(r, sigmas, epsilons, excl_indices, excl_scales, nb_idx, disp_fn, cutoff, tile_size, switch_width),
+        _chunked_lj_energy_nl_core(r, sigmas, epsilons, excl_indices, excl_scales, nb_idx, disp_fn, cutoff, tile_size, switch_width),
         (r, sigmas, epsilons, excl_indices, excl_scales, nb_idx),
     )
 
@@ -337,9 +369,10 @@ def _chunked_lj_nl_bwd(displacement_fn, cutoff, tile_size, switch_width, res, g)
         )
 
     init_combined = jnp.zeros((excl_pad_dim, 5 + M), dtype=dtype)
-    combined = tile_reduction_nl(
-        r_pad, nb_idx, mask_pad, f_tile_grad, init_combined, tile_size, inner_tile_size=inner_tile_size
-    )
+    with jax.named_scope("nl_lj_backward"):
+        combined = tile_reduction_nl(
+            r_pad, nb_idx, mask_pad, f_tile_grad, init_combined, tile_size, inner_tile_size=inner_tile_size
+        )
     grad_r = combined[:N, :3]
     grad_sig = combined[:N, 3]
     grad_eps = combined[:N, 4]
@@ -489,9 +522,7 @@ def _chunked_coulomb_bwd(excl_indices, displacement_fn, pme_alpha, coulomb_const
 
 chunked_coulomb_energy.defvjp(_chunked_coulomb_fwd, _chunked_coulomb_bwd)
 
-
-@functools.partial(jax.custom_vjp, nondiff_argnums=(5, 6, 7, 8, 9))
-def chunked_coulomb_energy_nl(
+def _chunked_coulomb_energy_nl_core(
     r: jnp.ndarray,
     charges: jnp.ndarray,
     excl_indices: jnp.ndarray,
@@ -503,7 +534,7 @@ def chunked_coulomb_energy_nl(
     cutoff: float = 9.0,
     tile_size: int = 32,
 ) -> jnp.ndarray:
-    """Computes direct-space Coulomb energy over neighbor list."""
+    """Core Coulomb energy computation (non-custom_vjp). Used by both forward and backward."""
     inner_tile_size = 1024
     r_pad, mask_pad = pad_to_tile(r, inner_tile_size)
     q_pad, _ = pad_to_tile(charges, inner_tile_size)
@@ -532,12 +563,35 @@ def chunked_coulomb_energy_nl(
         e_pair = coulomb_constant * q_ij * inv_ds * (pair_scale - jax.scipy.special.erf(pme_alpha * ds))
         return 0.5 * jnp.sum(jnp.where(m, e_pair, 0.0))
 
-    return tile_reduction_nl(r_pad, neighbor_idx, mask_pad, f_tile, 0.0, tile_size, inner_tile_size=inner_tile_size)
+    with jax.named_scope("nl_coulomb_forward"):
+        return tile_reduction_nl(r_pad, neighbor_idx, mask_pad, f_tile, 0.0, tile_size, inner_tile_size=inner_tile_size)
+
+
+@functools.partial(jax.custom_vjp, nondiff_argnums=(5, 6, 7, 8, 9))
+def chunked_coulomb_energy_nl(
+    r: jnp.ndarray,
+    charges: jnp.ndarray,
+    excl_indices: jnp.ndarray,
+    excl_scales: jnp.ndarray,
+    neighbor_idx: jnp.ndarray,
+    displacement_fn: Callable,
+    pme_alpha: float = 0.34,
+    coulomb_constant: float = 332.0637,
+    cutoff: float = 9.0,
+    tile_size: int = 32
+) -> jnp.ndarray:
+    """Computes direct-space Coulomb energy over neighbor list.
+
+    custom_vjp backward: see chunked_lj_energy_nl's docstring (#4623/#4793) --
+    same restoration, same rationale.
+    """
+    return _chunked_coulomb_energy_nl_core(r, charges, excl_indices, excl_scales, neighbor_idx,
+                                           displacement_fn, pme_alpha, coulomb_constant, cutoff, tile_size)
 
 
 def _chunked_coulomb_nl_fwd(r, charges, excl_indices, excl_scales, nb_idx, disp_fn, pme_alpha, coulomb_constant, cutoff, tile_size):
     return (
-        chunked_coulomb_energy_nl(r, charges, excl_indices, excl_scales, nb_idx, disp_fn, pme_alpha, coulomb_constant, cutoff, tile_size),
+        _chunked_coulomb_energy_nl_core(r, charges, excl_indices, excl_scales, nb_idx, disp_fn, pme_alpha, coulomb_constant, cutoff, tile_size),
         (r, charges, excl_indices, excl_scales, nb_idx, pme_alpha),
     )
 
@@ -600,9 +654,10 @@ def _chunked_coulomb_nl_bwd(displacement_fn, pme_alpha, coulomb_constant, cutoff
         return jnp.concatenate([grad_r_tile, grad_q_tile[:, None], grad_excl_tile], axis=1)
 
     init_combined = jnp.zeros((excl_pad_dim, 4 + M), dtype=dtype)
-    combined = tile_reduction_nl(
-        r_pad, nb_idx, mask_pad, f_tile_grad, init_combined, tile_size, inner_tile_size=inner_tile_size
-    )
+    with jax.named_scope("nl_coulomb_backward"):
+        combined = tile_reduction_nl(
+            r_pad, nb_idx, mask_pad, f_tile_grad, init_combined, tile_size, inner_tile_size=inner_tile_size
+        )
     grad_r = combined[:N, :3]
     grad_q = combined[:N, 3]
     grad_excl = combined[: excl_scales.shape[0], 4:]

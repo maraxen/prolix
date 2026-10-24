@@ -23,25 +23,23 @@ CELLS = [
 ]
 
 
+_SQL_COLUMNS = ("id", "status", "exit_code", "tags")
+
+
 def _bth_sql(campaign_tag: str) -> list[dict]:
+    # Post-cut-over (log mode) the `runs` view is the derived index; its `tags` column is a
+    # JSON-encoded VARCHAR, so decode it before list_contains. The legacy cool-tier
+    # read_parquet('~/.bth/catalog/runs/prolix/...') is frozen at cut-over and misses new runs.
     sql = (
-        "SELECT id, status, exit_code, tags FROM "
-        "read_parquet('~/.bth/catalog/runs/prolix/run_*.parquet') "
-        f"WHERE list_contains(tags, '{campaign_tag}')"
+        "SELECT id, status, exit_code, from_json(tags, '[\"VARCHAR\"]') AS tags FROM runs "
+        f"WHERE list_contains(from_json(tags, '[\"VARCHAR\"]'), '{campaign_tag}')"
     )
     proc = subprocess.run(
-        ["uv", "run", "bth", "sql", "--json", sql],
+        ["bth", "sql", sql],
         cwd=ROOT,
         capture_output=True,
         text=True,
     )
-    if proc.returncode != 0:
-        proc = subprocess.run(
-            ["uv", "run", "bth", "sql", sql],
-            cwd=ROOT,
-            capture_output=True,
-            text=True,
-        )
     if proc.returncode != 0:
         raise SystemExit(f"bathos catalog unreachable: {proc.stderr or proc.stdout}")
     text = proc.stdout.strip()
@@ -51,6 +49,9 @@ def _bth_sql(campaign_tag: str) -> list[dict]:
         parsed = json.loads(text)
         if isinstance(parsed, list):
             return parsed
+        if isinstance(parsed, dict) and isinstance(parsed.get("rows"), list):
+            # `bth sql` emits {"rows": [[...], ...], "count": N}, positional in SELECT order.
+            return [dict(zip(_SQL_COLUMNS, row)) for row in parsed["rows"]]
     except json.JSONDecodeError:
         pass
     rows = []
@@ -143,7 +144,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--out", type=Path, default=None)
     args = parser.parse_args(argv)
 
-    from scripts.profiling.record import ProbeRecord
+    from xtrax.profiling.record import ProbeRecord
 
     paths = sorted(args.records_dir.glob("*.json"))
     records = []

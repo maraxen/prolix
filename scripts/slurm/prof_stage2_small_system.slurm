@@ -77,6 +77,12 @@ if [[ -z "${PROLIX_GIT_SHA:-}" ]]; then
     export PROLIX_GIT_SHA
 fi
 echo "PROLIX_GIT_SHA=${PROLIX_GIT_SHA:-unset}"
+# xtrax.profiling.record reads XTRAX_GIT_SHA, not PROLIX_GIT_SHA -- the var was
+# renamed when scripts/profiling/ moved upstream. Export both: the local scripts
+# with their own _git_sha() (prof_ensemble_step.py, prof_flash_tile_checkpoint.py)
+# still read PROLIX_GIT_SHA. A missing XTRAX_GIT_SHA does not error -- it silently
+# records a blank sha on cluster scratch, where there is no .git to fall back to.
+export XTRAX_GIT_SHA="${PROLIX_GIT_SHA:-}"
 
 source "scripts/slurm/_bth_env.sh"
 
@@ -115,7 +121,7 @@ fi
 PROBE_ID="stage2_${PROTEIN}_${MODE}_pme${PME}_g${GRID}"
 CAMPAIGN_ID="${CAMPAIGN_ID:-}"
 CAMPAIGN_FLAG=()
-[[ -n "${CAMPAIGN_ID}" ]] && CAMPAIGN_FLAG=(--campaign "${CAMPAIGN_ID}")
+[[ -n "${CAMPAIGN_ID}" ]] && CAMPAIGN_FLAG=(--campaign-id "${CAMPAIGN_ID}")
 
 mkdir -p outputs/profiling/stage2 outputs/logs/slurm
 
@@ -129,17 +135,19 @@ echo "Date: $(date -Is)"
 # missing campaigns.negative_check; bth sync push failed rsync 11). Passing
 # --campaign 450f3583 killed tasks in ~30s. Omitting --campaign would attach
 # to the frozen sidecar campaign 32d6574e. --no-sidecar + tags only.
-uv run bth run python scripts/experiments/profile_b1_flash_vs_autodiff_forces.py \
+# (Pre-cut-over, 2026-09: Engaging has had no bathos.db since the 2026-10-17
+# run-log cut-over, so this workaround may no longer be needed.)
+bth run \
     --no-sidecar \
-    --tag p7-stage2 \
-    --tag "array_task:${T}" \
-    --tag "protein:${PROTEIN}" \
-    --tag "mode:${MODE}" \
-    --tag "pme:${PME}" \
-    --tag "grid:${GRID}" \
+    --tags p7-stage2 \
+    --tags "array_task:${T}" \
+    --tags "protein:${PROTEIN}" \
+    --tags "mode:${MODE}" \
+    --tags "pme:${PME}" \
+    --tags "grid:${GRID}" \
     "${CAMPAIGN_FLAG[@]}" \
-    --out "outputs/profiling/stage2/${PROBE_ID}_summary.json" \
-    -- \
+    --output-paths "outputs/profiling/stage2/${PROBE_ID}_summary.json" \
+    -- uv run python scripts/experiments/profile_b1_flash_vs_autodiff_forces.py \
     --protein "${PROTEIN}" \
     --mode "${MODE}" \
     --pme "${PME}" \

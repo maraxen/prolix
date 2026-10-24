@@ -10,7 +10,8 @@ Usage (standalone):
     uv run python scripts/experiments/openmm_oracle_tip3p.py --out /tmp/oracle.json --smoke
 
 Usage (via bathos):
-    uv run bth run python scripts/experiments/openmm_oracle_tip3p.py --out outputs/oracle.json --campaign ef45b8b4 -- (no extra args)
+    bth run --campaign-id ef45b8b4 --output-paths outputs/oracle.json \\
+        -- uv run python scripts/experiments/openmm_oracle_tip3p.py --out outputs/oracle.json
 """
 
 from __future__ import annotations

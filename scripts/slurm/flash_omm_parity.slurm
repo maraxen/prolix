@@ -15,8 +15,8 @@ cd "${_PROJ}"
 source scripts/slurm/_bth_env.sh
 OUT="${OUT:-outputs/nonbonded_omm_parity/flash_${SLURM_JOB_ID:-local}.json}"
 mkdir -p "$(dirname "${OUT}")"
-uv run --extra openmm bth run python scripts/experiments/flash_omm_parity.py \
-  --tag nonbonded-omm-parity \
-  ${CAMPAIGN_ID:+--campaign "$CAMPAIGN_ID"} \
-  --out "${OUT}" \
-  -- --probe "${PROBE:-water}"
+bth run \
+  --tags nonbonded-omm-parity \
+  ${CAMPAIGN_ID:+--campaign-id "$CAMPAIGN_ID"} \
+  --output-paths "${OUT}" \
+  -- uv run --extra openmm python scripts/experiments/flash_omm_parity.py --probe "${PROBE:-water}"

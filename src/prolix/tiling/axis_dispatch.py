@@ -1,4 +1,4 @@
-"""JIT-safe xtrax Vmap/SafeMap on N_WATERS.
+"""JIT-safe xtrax Vmap/ChunkedMap on N_WATERS.
 
 Imported from physics (settle) at module scope — not inside a jitted body.
 Does not import ``prolix.api`` (physics must not depend on the API layer).
@@ -34,7 +34,7 @@ def _vmap_or_safemap(
     plan: BatchPlan | None,
     axis_name: str,
     n: int,
-) -> Vmap | SafeMap:
+) -> Vmap | ChunkedMap:
     if plan is None or n <= 1:
         return Vmap()
     try:
@@ -47,7 +47,7 @@ def _vmap_or_safemap(
     return ChunkedMap(batch_size=batch_size)
 
 
-def n_waters_strategy(plan: BatchPlan | None, n_waters: int) -> Vmap | SafeMap:
+def n_waters_strategy(plan: BatchPlan | None, n_waters: int) -> Vmap | ChunkedMap:
     return _vmap_or_safemap(plan, N_WATERS.name, n_waters)
 
 
@@ -62,7 +62,7 @@ def dispatch_n_waters(
     if isinstance(strategy, (Bucket, DedupGather, Scan)):
         raise DispatchRejected(
             f"{N_WATERS.name} dispatch rejects {type(strategy).__name__}; "
-            "only Vmap/SafeMap are supported."
+            "only Vmap/ChunkedMap are supported."
         )
     if not isinstance(strategy, (Vmap, SafeMap, ChunkedMap)):
         raise TypeError(
@@ -75,7 +75,7 @@ def dispatch_n_waters(
         and n_waters % strategy.batch_size != 0
     ):
         raise ValueError(
-            f"N_WATERS SafeMap requires n_waters % batch_size == 0, "
+            f"N_WATERS ChunkedMap requires n_waters % batch_size == 0, "
             f"got n_waters={n_waters} batch_size={strategy.batch_size}. "
             "Pad water_indices to a multiple of the tile or keep plan=None (Vmap)."
         )

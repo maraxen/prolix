@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import warnings
 from dataclasses import dataclass
 from enum import Enum
 from typing import Literal
@@ -18,15 +19,46 @@ OverflowPolicy = Literal["reallocate", "raise"]
 
 @dataclass(frozen=True)
 class NeighborListConfig:
+    """Neighbor-list settings for ``NonbondedEngine.NEIGHBOR_LIST``.
+
+    Read by production construction: ``cutoff``, ``skin``, ``switch_width``,
+    ``capacity_multiplier``, ``disable_cell_list``, ``nl_update_every``.
+
+    Inert (accepted but not read by any production path; setting a non-default
+    value emits a ``UserWarning``): ``safety_factor``, ``max_exclusions``,
+    ``on_overflow``. They are kept for API stability and are not a tuning knob.
+    """
+
     cutoff: float
     skin: float = 1.0
     switch_width: float | None = None
     capacity_multiplier: float = 1.25
     safety_factor: float = 1.5
+    # backlog #4699 RESOLVED: the cell list dropped pairs because jax_md bins on
+    # raw position (truncating toward zero, no wrap), while prolix passes
+    # origin-centred coordinates. make_neighbor_list_fn now wraps into [0, box)
+    # before handing positions to jax_md, which restores the exact brute-force
+    # candidate set. Cell list is safe and on by default; True falls back to
+    # O(N^2) construction.
     disable_cell_list: bool = False
     max_exclusions: int = 32
     nl_update_every: int | None = None
     on_overflow: OverflowPolicy = "reallocate"
+
+    def __post_init__(self) -> None:
+        inert = {
+            "safety_factor": (self.safety_factor, 1.5),
+            "max_exclusions": (self.max_exclusions, 32),
+            "on_overflow": (self.on_overflow, "reallocate"),
+        }
+        for name, (value, default) in inert.items():
+            if value != default:
+                warnings.warn(
+                    f"NeighborListConfig.{name}={value!r} is inert and has no effect; "
+                    f"leave it at its default {default!r}.",
+                    UserWarning,
+                    stacklevel=3,
+                )
 
 
 @dataclass(frozen=True)

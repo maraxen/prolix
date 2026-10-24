@@ -40,7 +40,7 @@ source "scripts/slurm/_bth_env.sh"
 
 CAMPAIGN_ID="${CAMPAIGN_ID:-}"
 CAMPAIGN_FLAG=()
-[[ -n "${CAMPAIGN_ID}" ]] && CAMPAIGN_FLAG=(--campaign "${CAMPAIGN_ID}")
+[[ -n "${CAMPAIGN_ID}" ]] && CAMPAIGN_FLAG=(--campaign-id "${CAMPAIGN_ID}")
 
 mkdir -p outputs/profiling/stage2 outputs/logs/slurm
 
@@ -48,10 +48,10 @@ echo "=== P7 coverage ==="
 echo "Host: $(hostname)  Job: ${SLURM_JOB_ID:-local}"
 echo "Date: $(date -Is)"
 
-uv run bth run python scripts/experiments/prof_stage2_coverage.py \
-    --tag p7-stage2 --tag coverage \
-    --out outputs/profiling/stage2/coverage.json \
-    -- \
+bth run \
+    --tags p7-stage2 --tags coverage \
+    --output-paths outputs/profiling/stage2/coverage.json \
+    -- uv run python scripts/experiments/prof_stage2_coverage.py \
     --records-dir outputs/profiling/stage2 \
     --campaign-tag p7-stage2 \
     --out outputs/profiling/stage2/coverage.json

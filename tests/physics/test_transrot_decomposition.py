@@ -35,6 +35,8 @@ import numpy as np
 import pytest
 
 from prolix.physics import pbc, settle
+from prolix.physics.rigid_water_ke import rigid_tip3p_box_ke_kcal
+from prolix.physics.temperature_scan import rigid_tip3p_dof, rigid_tip3p_temperatures
 from prolix.simulate import BOLTZMANN_KCAL
 
 jax.config.update("jax_enable_x64", True)
@@ -173,6 +175,9 @@ def test_ke_rot_is_galilean_invariant():
 # --------------------------------------------------------------------------
 
 
+_MB_DRAWS: dict = {}
+
+
 def _mb_draw_temperatures(n_waters):
     """Mean temperatures from many exact rigid-body Maxwell-Boltzmann draws at 300 K."""
     pos = jnp.asarray(_ideal_water_geometry(n_waters), dtype=jnp.float64)
@@ -195,6 +200,7 @@ def _mb_draw_temperatures(n_waters):
         return p.reshape(-1, 3)
 
     draws = np.asarray(jax.jit(jax.vmap(one_draw))(keys))
+    _MB_DRAWS[n_waters] = (np.asarray(pos), mass, draws)
 
     cur = [_decompose_current(d, mass, n_waters) for d in draws]
     cor = [_decompose_corrected(d, mass, n_waters) for d in draws]
@@ -310,16 +316,6 @@ def test_settle_langevin_advances_positions_by_full_dt():
     )
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="LFMiddle has THREE A-steps (settle.py:1430, :1439, :1456), giving 1.5*dt*v "
-    "per cycle; measured ratio is exactly 1.5000 against the free-particle invariant. "
-    "NOT fixed alongside settle_langevin: its O-step is correctly split into two "
-    "half_dt halves (:1434 and :1466) that compose to exp(-gamma*dt), so which A-step "
-    "is spurious is a design question about the intended LF-Middle splitting, not a "
-    "typo. Campaign 89c9a900 ('LFMiddle FALSIFIED', 46 runs, 0 passes) tested this "
-    "propagator, so that falsification cannot be trusted until the scheme is settled.",
-)
 def test_lfmiddle_langevin_advances_positions_by_full_dt():
     """settle_lfmiddle_langevin must also advance a free particle by exactly dt*v."""
 
@@ -333,3 +329,119 @@ def test_lfmiddle_langevin_advances_positions_by_full_dt():
     assert ratio == pytest.approx(1.0, rel=1e-6), (
         f"settle_lfmiddle_langevin advanced positions by {ratio:.4f} * dt*v"
     )
+
+
+# --------------------------------------------------------------------------
+# Shared library estimator: prolix.physics.temperature_scan.rigid_tip3p_temperatures
+# --------------------------------------------------------------------------
+
+
+def _library_temperatures(n_waters):
+    if n_waters not in _MB_DRAWS:
+        _mb_draw_temperatures(n_waters)
+    pos, mass, draws = _MB_DRAWS[n_waters]
+    fn = jax.jit(jax.vmap(lambda p: rigid_tip3p_temperatures(pos, p, mass, n_waters)))
+    out = fn(jnp.asarray(draws))
+    legacy_total = jax.vmap(lambda p: rigid_tip3p_box_ke_kcal(pos, p, mass, n_waters))(
+        jnp.asarray(draws)
+    )
+    out = {k: float(np.mean(np.asarray(v))) for k, v in out.items()}
+    out["t_total_legacy"] = float(
+        2.0 * np.mean(np.asarray(legacy_total)) / (rigid_tip3p_dof(n_waters) * BOLTZMANN_KCAL)
+    )
+    return out
+
+
+def _tol(dof, n_draws=4000, n_sigma=4.0):
+    """n_sigma standard errors of a mean temperature over n_draws chi^2_dof draws."""
+    return n_sigma * T_TARGET * math.sqrt(2.0 / (dof * n_draws))
+
+
+@pytest.mark.parametrize("n_waters", [2, 16, 64])
+def test_library_estimator_recovers_target_temperature(n_waters):
+    """Positive control: exact 300 K rigid-body draws must read back as 300 K.
+
+    Tolerances are 4 analytic standard errors (T*sqrt(2/(dof*n_draws))), so the
+    test does not depend on the particular PRNG stream (n=2 t_trans has 3 DOF:
+    SE ~3.9 K, tol ~15.5 K).
+    """
+    t = _library_temperatures(n_waters)
+    assert t["t_trans"] == pytest.approx(T_TARGET, abs=_tol(3 * n_waters - 3)), t
+    assert t["t_rot"] == pytest.approx(T_TARGET, abs=_tol(3 * n_waters)), t
+    assert t["t_total"] == pytest.approx(T_TARGET, abs=_tol(6 * n_waters - 3)), t
+    assert t["t_com"] == pytest.approx(T_TARGET, abs=_tol(3)), t
+
+
+@pytest.mark.parametrize("n_waters", [2, 16])
+def test_legacy_total_temperature_shows_predicted_com_bias(n_waters):
+    """Negative control: KE incl. system COM over 6N-3 is inflated by 3T/(6N-3).
+
+    This is what ``scan_settle_rigid_temperatures`` reported before it switched to
+    the COM-subtracted estimator (+100 K at N=2). If this ever stops showing the
+    bias, the positive control above is no longer discriminating anything.
+    """
+    t = _library_temperatures(n_waters)
+    predicted = 3.0 * T_TARGET / (6 * n_waters - 3)
+    assert (t["t_total_legacy"] - t["t_total"]) == pytest.approx(predicted, rel=0.10), t
+
+
+def test_library_estimator_matches_reference_decomposition():
+    """Per-draw agreement with ``_decompose_corrected`` on rigid-consistent momenta."""
+    n_waters = 4
+    _mb_draw_temperatures(n_waters)
+    pos, mass, draws = _MB_DRAWS[n_waters]
+    for p in draws[:20]:
+        ref = _decompose_corrected(p, mass, n_waters)
+        lib = rigid_tip3p_temperatures(pos, jnp.asarray(p), mass, n_waters)
+        assert float(lib["t_trans"]) == pytest.approx(ref["t_trans"], rel=1e-8, abs=1e-8)
+        assert float(lib["t_com"]) == pytest.approx(ref["t_com"], rel=1e-8, abs=1e-8)
+        assert float(lib["t_rot"]) == pytest.approx(ref["t_rot"], rel=1e-6, abs=1e-6)
+
+
+def test_library_estimator_single_water_has_nan_trans():
+    """N=1 has 3N-3 = 0 relative translational DOF; t_trans must not be a finite lie."""
+    pos = jnp.asarray(_ideal_water_geometry(1))
+    mass = _masses(1)
+    p = jnp.asarray(mass[:, None] * np.array([0.01, 0.0, 0.0]))
+    t = rigid_tip3p_temperatures(pos, p, mass, 1)
+    assert np.isnan(float(t["t_trans"]))
+    assert float(t["t_total"]) == pytest.approx(0.0, abs=1e-8)
+
+
+# --------------------------------------------------------------------------
+# Force/position consistency: the returned force must belong to the returned positions
+# --------------------------------------------------------------------------
+
+
+def _harmonic_energy(anchor):
+    def energy(R, **_kwargs):
+        return 0.05 * jnp.sum((R - anchor) ** 2)
+
+    return energy
+
+
+@pytest.mark.parametrize("which", ["settle_langevin", "settle_lfmiddle_langevin"])
+def test_returned_force_is_evaluated_at_returned_positions(which):
+    """state.force after a step must equal -dE/dR at state.positions.
+
+    The next step's first B half-kick uses state.force; if positions moved after the
+    force recompute (LFMiddle's former third A-step), that kick uses a stale force.
+    """
+    n_waters = 2
+    pos_np = _ideal_water_geometry(n_waters, spacing=8.0) + 50.0
+    box_vec = jnp.array([200.0] * 3, dtype=jnp.float64)
+    _, shift_fn = pbc.create_periodic_space(box_vec)
+    mass = jnp.asarray(_masses(n_waters), dtype=jnp.float64)
+    anchor = jnp.asarray(pos_np) + 0.3
+    energy = _harmonic_energy(anchor)
+    factory = getattr(settle, which)
+    init_fn, apply_fn = factory(
+        energy, shift_fn, dt=0.02, kT=KT, gamma=0.0, mass=mass,
+        water_indices=settle.get_water_indices(0, n_waters), box=box_vec,
+    )
+    state = init_fn(jax.random.key(0), jnp.asarray(pos_np, dtype=jnp.float64), mass=mass)
+    step = jax.jit(apply_fn)
+    for _ in range(3):
+        state = step(state)
+    expected = -jax.grad(energy)(state.positions)
+    np.testing.assert_allclose(np.asarray(state.force), np.asarray(expected), atol=1e-10)

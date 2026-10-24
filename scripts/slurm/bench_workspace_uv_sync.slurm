@@ -11,10 +11,25 @@
 set -euo pipefail
 
 # SLURM copies scripts to spool dir — BASH_SOURCE[0] points there, not the repo.
-# Use SLURM_SUBMIT_DIR (set by sbatch) when running as a job; BASH_SOURCE fallback for
-# direct execution. Must submit from project root: cd ~/projects/<proj> && sbatch ...
-_PROJ="${SLURM_SUBMIT_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
+#
+# SLURM_SUBMIT_DIR is the directory sbatch was INVOKED from, which is NOT the job
+# working directory that `sbatch -D/--chdir` sets. Submitting over ssh from a home
+# directory therefore used to land here with SLURM_SUBMIT_DIR=$HOME and cd straight
+# out of the repo, after which `uv run` resolves an environment with neither the
+# project nor its dependencies -- a failure that reads as a broken install rather
+# than a wrong cwd. Validate each candidate instead of trusting the first one, so
+# both `sbatch -D <root> ...` and the original "submit from project root" pattern
+# work. Checking PWD first is what makes the -D form work.
+_is_repo_root() { [[ -f "$1/pyproject.toml" ]] && [[ -d "$1/scripts/slurm" ]]; }
+if _is_repo_root "${PWD}"; then
+    _PROJ="${PWD}"
+elif [[ -n "${SLURM_SUBMIT_DIR:-}" ]] && _is_repo_root "${SLURM_SUBMIT_DIR}"; then
+    _PROJ="${SLURM_SUBMIT_DIR}"
+else
+    _PROJ="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+fi
 cd "${_PROJ}"
+echo "repo root: $(pwd)"
 
 # shellcheck source=/dev/null
 source "scripts/slurm/_common_env.sh"

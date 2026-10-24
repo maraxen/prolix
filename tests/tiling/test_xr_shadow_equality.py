@@ -9,8 +9,8 @@ from __future__ import annotations
 import dataclasses
 
 from xtrax.tiling.dispatch import make_axis_dispatch
-from xtrax.tiling.iterator import SafeMapIterator, VmapIterator
-from xtrax.tiling.strategy import SafeMap, Vmap
+from xtrax.tiling.iterator import ChunkedMapIterator, VmapIterator
+from xtrax.tiling.strategy import ChunkedMap, Vmap
 
 from prolix.api.ensemble_dispatch import n_mols_strategy
 from prolix.tiling.axes import N_ATOMS, N_MOLS
@@ -68,12 +68,12 @@ def _plan_md(budget_bytes: int):
     )
 
 
-def _strategy_from_decision(decision: AxisDecision) -> Vmap | SafeMap:
+def _strategy_from_decision(decision: AxisDecision) -> Vmap | ChunkedMap:
     """Recover xtrax strategy object from prolix int collapse (AC4)."""
     batch_size = decision.batch_size
     if batch_size == 0 or batch_size >= decision.axis.cardinality:
         return Vmap()
-    return SafeMap(batch_size=batch_size)
+    return ChunkedMap(batch_size=batch_size)
 
 
 def _assert_plans_equal(fit_plan, md_plan) -> None:
@@ -88,27 +88,27 @@ def _assert_plans_equal(fit_plan, md_plan) -> None:
         fit_s = _strategy_from_decision(fit_d)
         md_s = _strategy_from_decision(md_d)
         # AC4: must compare strategy types, not ints alone.
-        assert isinstance(fit_s, (Vmap, SafeMap))
-        assert isinstance(md_s, (Vmap, SafeMap))
+        assert isinstance(fit_s, (Vmap, ChunkedMap))
+        assert isinstance(md_s, (Vmap, ChunkedMap))
         assert type(fit_s) is type(md_s), name
-        if isinstance(fit_s, SafeMap):
+        if isinstance(fit_s, ChunkedMap):
             assert fit_s.batch_size == md_s.batch_size, name
 
 
 def _assert_n_mols_dispatch(plan) -> None:
     n_systems = plan.decision_for("n_mols").axis.cardinality
     strategy = n_mols_strategy(plan, n_systems)
-    assert isinstance(strategy, (Vmap, SafeMap))
+    assert isinstance(strategy, (Vmap, ChunkedMap))
     planned = _strategy_from_decision(plan.decision_for("n_mols"))
     assert type(strategy) is type(planned)
-    if isinstance(strategy, SafeMap):
+    if isinstance(strategy, ChunkedMap):
         assert strategy.batch_size == planned.batch_size
 
     iterator = make_axis_dispatch(strategy, axis=N_MOLS.name)
     if isinstance(strategy, Vmap):
         assert isinstance(iterator, VmapIterator)
     else:
-        assert isinstance(iterator, SafeMapIterator)
+        assert isinstance(iterator, ChunkedMapIterator)
         assert iterator.tile == strategy.batch_size
 
 
@@ -126,8 +126,8 @@ def test_shadow_tight_budget_safemap_demotion_and_dispatch():
     md = _plan_md(_TIGHT_BUDGET)
     _assert_plans_equal(fit, md)
     # Both axes are demotion candidates under joint budget.
-    assert isinstance(_strategy_from_decision(fit.decision_for("n_atoms")), SafeMap)
-    assert isinstance(_strategy_from_decision(fit.decision_for("n_mols")), SafeMap)
+    assert isinstance(_strategy_from_decision(fit.decision_for("n_atoms")), ChunkedMap)
+    assert isinstance(_strategy_from_decision(fit.decision_for("n_mols")), ChunkedMap)
     _assert_n_mols_dispatch(md)
 
 
@@ -137,4 +137,4 @@ def test_shadow_ac4_rejects_int_only_comparison_helper():
     for d in md.decisions:
         strategy = _strategy_from_decision(d)
         assert not isinstance(strategy, int)
-        assert isinstance(strategy, (Vmap, SafeMap))
+        assert isinstance(strategy, (Vmap, ChunkedMap))

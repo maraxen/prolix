@@ -4,7 +4,7 @@ Prolix is a JAX-based molecular dynamics engine for protein folding and dynamics
 
 ## CURRENT STATE
 
-last-edit: 2026-08-07
+last-edit: 2026-10-01
 
 ongoing-work: P1a MolecularBundle (bucketed JIT boundary). NPT KE init bug resolved
 (settle.py:1944 `/mu` → `*mu`, 2026-06-01, commit b6e5bb9). LFMiddle campaign 89c9a900
@@ -20,9 +20,25 @@ job 19774893, T_rot=298.93±0.29 K; GPU fast-suite regression check, job 1987507
 clean). **Size sweep ba334c1f re-run at genuine dt=1.0 fs (2026-08-11, campaign
 46a4d737, jobs 19882395/19898460/19898934):** the crossover conclusion holds
 unchanged — N\*=16 (±15 K), N\*=64 (±5 K), T_rot faithful at every size (max |dev|
-3.6 K). The residual small-N warm bias is confirmed translational finite-size, not
-an artifact of the half_dt bug; see
+3.6 K). **Correction (2026-10-01):** the "small-N warm bias" is not physics — it is a
+DOF-counting artifact of the analysis estimator (system-COM KE left in T_trans but
+excluded from its 3N−3 DOF; +3T/(3N−3) = +300 K at n=2). The same runs recorded the
+COM-subtracted value, `t_trans_corrected` (mean ± 3-seed spread): 302.7 ± 13.7 K (n=2),
+301.2 ± 4.6 (16), 300.4 ± 0.7 (64), 299.6 ± 0.4 (216), 299.8 ± 1.1 (512),
+299.5 ± 0.5 (895). The size of the artifact is analytic and pinned by synthetic
+controls (`tests/physics/test_transrot_decomposition.py`); the run values are read from
+result JSONs whose bathos `outcome` is `unknown` (evaluation never ran, #5704), so they
+are **not yet a tracked finding**. Until a bathos-evaluated re-run with a pooled
+uncertainty and a minimum-detectable-effect check, keep the n ≲ 16 → dt ≤ 0.5 fs
+carve-out as the conservative default. For temperatures use
+`prolix.physics.temperature_scan.rigid_tip3p_temperatures` (COM-subtracted); see
 `.praxia/docs/research/260612_p5-dt1fs-size-crossover.md`.
+**LFMiddle caveat (2026-10-01):** `settle_lfmiddle_langevin` and the modular
+`lfmiddle_langevin` sequence advanced positions 1.5·dt·v per step (three A(0.5) drifts;
+fixed), so campaign 89c9a900's "FALSIFIED" verdict measured a defective integrator.
+With the extra drift removed, the step is algebraically BAOAB (its two O(½) halves are
+adjacent in momentum) and lacks `settle_langevin`'s R-step impulse / AM restoration, so
+**genuine LF-Middle splitting has never been tested** — do not re-run 89c9a900 as-is.
 
 notes:
 - Tiling bug found in `src/prolix/physics/optimization.py`: `inner_tile_size` for the
@@ -64,8 +80,10 @@ Exploratory ideas for future sprints (electrostatics, allostery, spectral analys
 **Decision**: Use SETTLE + Langevin thermostat  
 **Constraint**: dt ≤ 1.0 fs for production-scale NVT (n_waters ≳ 16, gamma ≈ 10 ps⁻¹);
 dt ≤ 0.5 fs for very small systems (n ≲ 16) or weak friction (gamma ≈ 1 ps⁻¹).
-Validated by gate job 15870804 + size sweep ba334c1f; the residual small-N warm bias
-is translational finite-size, not dt instability. See
+Validated by gate job 15870804 + size sweep ba334c1f (re-run 46a4d737). The small-N
+warm bias that motivated the n ≲ 16 carve-out is an estimator DOF artifact
+(2026-10-01), so the carve-out is no longer *supported*; it stays as the conservative
+default until a bathos-evaluated re-run confirms it can be dropped. See
 `.praxia/docs/research/260612_p5-dt1fs-size-crossover.md`.
 
 ### Background
@@ -89,11 +107,12 @@ At smaller timesteps (dt ≤ 0.5 fs), the per-step constraint impulse magnitude 
 
 **Resolution (2026-06-13):** the C3 AM-conservation correction (678c9cb) plus adequate
 friction (gamma ≈ 10 ps⁻¹) lifted this to **dt ≤ 1.0 fs at production scale**. Gate job
-15870804 (895 waters) holds T_rot = 299.6 K, and size sweep ba334c1f shows the residual
-warm bias is **translational finite-size** — concentrated in the 3·N−3 translational DOF,
-so it only bites for very small systems (n ≲ 16) and washes out by n ≳ 16 (T_total within
-±15 K) / n ≳ 64 (within ±5 K). T_rot is faithful at every size. Use dt ≤ 0.5 fs only for
-n ≲ 16 or weak friction (gamma ≈ 1 ps⁻¹). See
+15870804 (895 waters) holds T_rot = 299.6 K. The size sweep's apparent small-N warm bias
+(T_trans 615 K at n=2) was an analysis artifact: the system-COM mode's KE was counted in
+T_trans but its 3 DOF were not. COM-subtracted T_trans recorded by the same runs has
+means of 299.5–302.7 K across n=2–895 (n=2 seed spread ±13.7 K; untracked, see above),
+and T_rot is faithful at every size. Keep dt ≤ 0.5 fs for n ≲ 16 (conservative, pending
+a tracked re-run) and for weak friction (gamma ≈ 1 ps⁻¹, not covered by the sweep). See
 `.praxia/docs/research/260612_p5-dt1fs-size-crossover.md`.
 
 ### Production Usage
@@ -116,7 +135,7 @@ init_fn, apply_fn = settle.settle_langevin(
 ```
 
 **Key parameters**:
-- `dt=1.0`: Recommended timestep at production scale (n≳16, gamma≈10 ps⁻¹); use `dt=0.5` for very small systems (n≲16) or weak friction
+- `dt=1.0`: Recommended timestep at production scale (n≳16, gamma≈10 ps⁻¹); use `dt=0.5` for very small systems (n≲16, conservative pending re-run) or weak friction
 - `project_ou_momentum_rigid=True`: Samples noise in 6D rigid-body subspace per water
 - `projection_site="post_o"`: Apply projection after O-step (Ornstein-Uhlenbeck stochastic update)
 
@@ -201,7 +220,7 @@ equilibration, use `batched_equilibrate_nl`.
 
 ### Known Limitations (v1.0 / v1.1)
 
-1. **NVT timestep cap**: dt ≤ 1.0 fs at production scale (n_waters ≳ 16, gamma ≈ 10 ps⁻¹; gate job 15870804, sweep ba334c1f). dt ≤ 0.5 fs for n ≲ 16 or weak friction (gamma ≈ 1 ps⁻¹). Residual small-N warm bias is translational finite-size (3·N−3 DOF), not dt instability — see `.praxia/docs/research/260612_p5-dt1fs-size-crossover.md`.
+1. **NVT timestep cap**: dt ≤ 1.0 fs at production scale (n_waters ≳ 16, gamma ≈ 10 ps⁻¹; gate job 15870804, sweep ba334c1f). dt ≤ 0.5 fs for n ≲ 16 (conservative, pending a tracked re-run) or weak friction (gamma ≈ 1 ps⁻¹). The apparent small-N warm bias was an estimator DOF artifact, not dynamics (corrected 2026-10-01) — see `.praxia/docs/research/260612_p5-dt1fs-size-crossover.md`.
 2. **NPT long-trajectory divergence**: Temperature runaway (→ 10^115 K) beyond ~10 ps due to CSVR + rigid-water KE coupling. Use NVT for longer production runs. *KE init spike (T≈5000 K at step 0) fixed 2026-06-01: `settle.py:1944` `/ mu` → `* mu` (Bernetti-Bussi sign correction); `test_npt_20ps_liquid_water` xfail removed (commit b6e5bb9).* Long-trajectory divergence root cause (CSVR+SETTLE decoupling) addressed in Phase 6.
 3. **Batched SETTLE constraints**: `make_integrator(..., water_indices=...)` is not supported in v1.0. For batched simulations with SETTLE-constrained water, use `settle.settle_langevin` directly and wrap in `jax.vmap` (see v1.1 roadmap for full modular support).
 
@@ -234,8 +253,8 @@ A constraint-aware thermostat that only couples to unconstrained DOF could elimi
 
 **v1.0**: settle_langevin validated and production-ready (NVT only). dt ≤ 1.0 fs at
 production scale (n ≳ 16, gamma ≈ 10 ps⁻¹; gate 15870804 + sweep ba334c1f); dt ≤ 0.5 fs
-for n ≲ 16 / weak friction.
-**v1.1+**: ~~LFMiddle hypothesis test~~ (falsified), constraint-aware thermostat, NPT fix planned
+for n ≲ 16 (conservative) / weak friction.
+**v1.1+**: LFMiddle hypothesis test (89c9a900 "falsified" on a defective integrator; genuine LF-Middle untested), constraint-aware thermostat, NPT fix planned
 
 ## Phase 2–4: Integrator Modular Architecture (v1.0 Release)
 
@@ -269,7 +288,7 @@ for n ≲ 16 / weak friction.
 
 ### Known Limitations (v1.0)
 
-- dt ≤ 1.0 fs at production scale (n ≳ 16, gamma ≈ 10 ps⁻¹); dt ≤ 0.5 fs for n ≲ 16 / weak friction (documented in Phase 2 section)
+- dt ≤ 1.0 fs at production scale (n ≳ 16, gamma ≈ 10 ps⁻¹); dt ≤ 0.5 fs for n ≲ 16 (conservative) / weak friction (documented in Phase 2 section)
 - NPT long-trajectory divergence (> 10 ps); use NVT for production (documented in Phase 2 section)
 - Batched SETTLE: smoke-tested but not exhaustively validated at scale (see v1.1 roadmap)
 
@@ -278,6 +297,11 @@ for n ≲ 16 / weak friction.
 ## v1.1 Roadmap (Deferred Features)
 
 ### Phase 3: LFMiddle Optimization & dt-Sweep Hypothesis — ~~FALSIFIED~~ (2026-06-01)
+
+**Caveat (2026-10-01):** the LFMiddle integrator tested here had three A(0.5) drifts and
+advanced positions 1.5·dt·v per step with a stale returned force (fixed in
+`settle_lfmiddle_langevin` and the modular `lfmiddle_langevin` sequence). The verdict
+below therefore applies to that defective scheme, not to LF-Middle splitting itself.
 
 **Result**: Hypothesis closed. Campaign 89c9a900 (46 runs, all dt ∈ {0.25, 0.5, 1.0} fs,
 both lfmiddle and baoab control, system sizes 2–895 waters) produced 0 passes. Mean T
@@ -306,9 +330,9 @@ show genuine thermal runaway independent of the tiling bug.*
 
 **Status**: The C3 AM-conservation correction (678c9cb) achieved stable dt=1.0 fs NVT at
 production scale — gate job 15870804 (895 waters, T_rot 299.6 K) + size sweep ba334c1f.
-The remaining sub-goal is the small-N regime: a translational finite-size warm bias
-(n ≲ 16, only 3·N−3 translational DOF) and the weak-friction (gamma ≈ 1 ps⁻¹) case still
-need dt ≤ 0.5 fs. See `.praxia/docs/research/260612_p5-dt1fs-size-crossover.md`.
+The apparent small-N warm bias was an estimator DOF artifact (corrected 2026-10-01); a
+bathos-evaluated re-run is needed before dropping the n ≲ 16 carve-out. The weak-friction
+(gamma ≈ 1 ps⁻¹) case still needs dt ≤ 0.5 fs. See `.praxia/docs/research/260612_p5-dt1fs-size-crossover.md`.
 
 **Objective**: Fix dt ≤ 0.5 fs limitation via constraint-aware thermostat that only couples to unconstrained DOF
 
@@ -365,7 +389,7 @@ None. New APIs are additive.
 
 ### Known Limitations
 
-1. dt ≤ 1.0 fs for NVT at production scale (n ≳ 16, gamma ≈ 10 ps⁻¹; gate 15870804 + sweep ba334c1f, 2026-06-13); dt ≤ 0.5 fs for n ≲ 16 or weak friction. LFMiddle hypothesis falsified (campaign 89c9a900, 2026-06-01); the cap was instead lifted by C3 AM conservation (678c9cb). Residual small-N warm bias is translational finite-size — see `.praxia/docs/research/260612_p5-dt1fs-size-crossover.md`.
+1. dt ≤ 1.0 fs for NVT at production scale (n ≳ 16, gamma ≈ 10 ps⁻¹; gate 15870804 + sweep ba334c1f, 2026-06-13); dt ≤ 0.5 fs for n ≲ 16 (conservative) or weak friction. LFMiddle hypothesis "falsified" (campaign 89c9a900, 2026-06-01) — but on a 1.5·dt-defective LFMiddle integrator, fixed 2026-10-01; the cap was instead lifted by C3 AM conservation (678c9cb). The apparent small-N warm bias was an estimator DOF artifact — see `.praxia/docs/research/260612_p5-dt1fs-size-crossover.md`.
 2. NPT long-trajectory divergence beyond ~10 ps (use NVT for production). *KE init spike fixed (commit b6e5bb9, 2026-06-01).*
 3. Batched SETTLE validated on small systems (4 waters, 100 steps); large-scale testing in v1.1
 
@@ -373,91 +397,39 @@ None. New APIs are additive.
 
 - **Phase 5: Constraint-aware thermostat** (only remaining path to dt ≥ 1.0 fs; P1 after P1a)
 - Large-scale SETTLE batching validation
-- ~~LFMiddle hypothesis test~~ (falsified 2026-06-01)
+- LFMiddle hypothesis test ("falsified" 2026-06-01 on a 1.5·dt-defective integrator; genuine LF-Middle untested)
 
 ## Experiment Tracking (bathos)
 
-This project uses **bathos** (`bth`) for experiment provenance, campaign tracking, and result aggregation. The rules below are HARD requirements derived from concrete failures — see the anti-patterns section for what NOT to do.
+Hard requirements, each from a concrete failure. Full CLI reference: the `using-bathos` skill.
+The catalog is in **log mode** (run-log cut-over: laptop 2026-10-16, Engaging 2026-10-17); runs
+append to `.bth/log/` under `.bth.toml`'s `[project] id`.
 
-### Hard rules
+1. **Scripts in `scripts/experiments/` and `scripts/benchmarks/` run through `bth run`**, never raw
+   `uv run python`, and as `bth`, not `uv run bth` (global rule). Shape — bth
+   flags first, the whole command after `--`:
+   `bth run --tags X --campaign-id <id> --output-paths out.json -- uv run python scripts/experiments/foo.py --out out.json`.
+   The old `bth run python foo.py --tag X --out Y` shape no longer parses (scripts fixed 2026-10-21).
+2. **Every such script has a sidecar `<stem>.bth.toml` next to it**, `[experiment]` schema (not
+   `[benchmark]`: gate edge cases): `hypothesis`, `[outcomes.*]` each with `condition` (DuckDB SQL),
+   `decision`, `reasoning`, exactly one `is_residual = true`, `[result_schema]`, `[metadata]`.
+   Per-script sidecars only; shared notes go in a non-`.bth.toml` `campaign_design.toml`.
+3. **`bth campaign create "<slug>" --mode exploration --question "..."` BEFORE the first run**, then
+   `--campaign-id <id>` on every run, or `bth campaign review` shows nothing.
+4. **Slurm wrappers `source scripts/slurm/_bth_env.sh`, then `bth run ... -- uv run python ...`.** Do
+   not pin `BTH_CATALOG_DIR`: a per-project catalog never gets a cut-over marker and splits from
+   the run log. Reference wrapper: `scripts/slurm/fit_bonded_hp4.slurm`; sidecar:
+   `scripts/experiments/fit_bonded_hp4.bth.toml`.
+5. **Pull cluster runs with `bth sync engaging --pull`**, never a manual rsync of `outputs/` or of
+   the catalog.
+6. **When the gate fails, fix the sidecar — never `--no-sidecar`** (reserved for `scripts/explore/`;
+   needing it elsewhere means the script belongs there). The gate's stderr JSON
+   carries `errors[]` and `remediation`.
 
-1. **Every script in `scripts/experiments/` and `scripts/benchmarks/` MUST run through `bth run`, never raw `python` or `uv run python`.**
-   - Local: `uv run bth run python scripts/benchmarks/foo.py --tag X --out out.json -- <args>`
-   - Slurm: `uv run bth run python ...` *inside* the slurm script, AFTER sourcing `scripts/slurm/_bth_env.sh`
-   - `bth run` captures `SLURM_JOB_ID`, git state, exit code, output paths. Bypassing it loses all provenance.
-
-2. **Every script in those dirs MUST have a per-script sidecar `<stem>.bth.toml` next to it.**
-   - Use `[experiment]` schema (verified working). Avoid `[benchmark]` schema — it has gate edge cases.
-   - Required sections: `[experiment].hypothesis`, `[outcomes.pass]`, `[outcomes.fail]`, `[result_schema]`, `[metadata]`
-   - Each outcome MUST have `condition` (DuckDB SQL), `decision` (next action), `reasoning` (mechanistic justification — not bare narrative).
-   - Exactly one outcome MUST have `is_residual = true` (catch-all branch).
-   - Reference: `scripts/experiments/fit_bonded_hp4.bth.toml` is the canonical working pattern.
-
-3. **Create the campaign BEFORE running:**
-   ```bash
-   bth campaign create "campaign-slug" --mode exploration --question "..." 
-   # Returns campaign_id like "edbd0b84"
-   ```
-   Pass `--campaign <id>` to every `bth run` that belongs to the campaign. Without this, runs are orphaned and `bth campaign review` returns empty.
-
-4. **Slurm wrappers must source `_bth_env.sh` and use `bth run`:**
-   ```bash
-   source scripts/slurm/_bth_env.sh
-   uv run bth run python scripts/benchmarks/foo.py \
-       --tag cluster --tag <campaign-slug> \
-       ${CAMPAIGN_ID:+--campaign $CAMPAIGN_ID} \
-       --out "${OUT}" \
-       -- <script args>
-   ```
-   See `scripts/slurm/fit_bonded_hp4.slurm` and `scripts/slurm/bench_external_baseline.slurm` as references.
-
-5. **Sync from cluster via `bth sync`, not manual rsync:**
-   ```bash
-   bth remote add engaging engaging:~/projects/prolix  # one-time
-   bth sync engaging --pull                              # before each analysis
-   ```
-   If `bth sync` errors on path resolution, fall back to direct catalog rsync:
-   ```bash
-   rsync -az engaging:~/.bth/catalog/runs/prolix/ ~/.bth/catalog/runs/prolix/
-   ```
-   But always prefer `bth sync` — it handles incremental fragments correctly.
-
-6. **When the bath gate fails, fix the sidecar — never `--no-sidecar`.**
-   - Gate failure writes structured JSON to stderr with `errors[]` and `remediation`. Read it.
-   - `--no-sidecar` is reserved for ad-hoc exploration in `scripts/explore/` only.
-   - If you find yourself wanting to bypass the gate, that's a signal the experiment isn't ready for `scripts/experiments/` — move it to `scripts/explore/` instead.
-
-### Query patterns
-
-```bash
-# Recent runs by campaign tag (bath find can be finicky with multi-tag — use sql)
-bth sql "SELECT id, status, tags FROM read_parquet('~/.bth/catalog/runs/prolix/run_*.parquet') WHERE list_contains(tags, 's71-external-baseline') ORDER BY timestamp DESC LIMIT 10"
-
-# Campaign-level review
-bth campaign review <campaign_id>
-
-# After many fragments accumulate
-bth compact
-bth sql "SELECT tool, AVG(per_mol_step_seconds) FROM runs WHERE list_contains(tags, 'external-baseline') GROUP BY tool"
-```
-
-### Anti-patterns observed (don't repeat)
-
-| Anti-pattern | What happens | Fix |
-|---|---|---|
-| Slurm wrapper calls `uv run python foo.py` directly | No provenance, no SLURM_JOB_ID capture, no campaign association — run is invisible to bath | Wrap with `uv run bth run python foo.py --tag ... --campaign ...` |
-| Putting `[benchmark]` instead of `[experiment]` in the sidecar | Gate may reject "no [outcomes] section found" depending on bath version | Use `[experiment]` schema (verified) |
-| Single campaign-level TOML treated as a sidecar | Gate rejects (wrong file location/structure) | Per-script sidecars + a separate `campaign_design.toml` (non-`.bth.toml` extension) for shared design notes |
-| Manual `rsync` of `/outputs/` directly to local instead of bath catalog | Results visible but not tracked; can't query later | Use `bth sync` for catalog; direct rsync only for non-bath artifacts |
-| Running smoke without registering a campaign first | Run lands in catalog but `bth campaign review` shows nothing | `bth campaign create` BEFORE the first `bth run` |
-| Hand-editing sidecars to remove `is_residual = true` from `[outcomes.fail]` | Gate failure: "exactly one outcome must have is_residual=true" | Keep the residual on the catch-all fail branch |
-
-### Reference files
-
-- Canonical sidecar: `scripts/experiments/fit_bonded_hp4.bth.toml`
-- Canonical slurm wrapper: `scripts/slurm/fit_bonded_hp4.slurm`
-- Project bath config: `.bth.toml` (project slug + `[remotes.engaging]` block)
-- Skill (full reference): load `using-bathos` skill in Claude Code
+**Querying:** `bth sql` reads the `runs` index, where `tags` is a JSON-encoded VARCHAR —
+`WHERE list_contains(from_json(tags, '["VARCHAR"]'), 'my-tag')`; plain `list_contains(tags, …)`
+fails with a BinderError. The output is `{"rows": [[...]], "count": N}`, positional in SELECT
+order. `read_parquet('~/.bth/catalog/runs/prolix/...')` is frozen at cut-over and misses new runs.
 
 ---
 

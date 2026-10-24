@@ -116,7 +116,7 @@ def test_plan_axes_with_xtrax_joint_demotion_under_tight_budget():
     def estimate(decisions: list[AxisDecision]) -> float:
         return estimate_memory_theoretical(decisions, base_shape_bytes=10.0, activation_multiplier=1.0)
 
-    # Vmap product = 64*10 = 640; SafeMap tile=8 → 80. Budget between them.
+    # Vmap product = 64*10 = 640; ChunkedMap tile=8 → 80. Budget between them.
     plan = plan_axes_with_xtrax(
         axes=[atoms],
         budget_bytes=200,

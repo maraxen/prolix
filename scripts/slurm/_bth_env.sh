@@ -14,12 +14,10 @@ source "$(dirname "${BASH_SOURCE[0]}")/_common_env.sh"
 export BTH_PROJECT_SLUG="${BTH_PROJECT_SLUG:-prolix}"
 # SLURM_JOB_ID auto-captured by `bth run`.
 #
-# `bth sync <remote>` rsyncs cool-tier fragments to
-#   {host}:{remote_root}/.bth/catalog/runs/{slug}/
-# (see bathos.sync.sync_catalog). Default `bth run` writes ~/.bth/catalog, which
-# that rsync never sees (rsync 11 / empty pull). On SLURM, pin the catalog to
-# this project's remote_root from .bth.toml (`~/projects/prolix`).
-if [[ -n "${SLURM_JOB_ID:-}" ]]; then
-    export BTH_CATALOG_DIR="${BTH_CATALOG_DIR:-${HOME}/projects/prolix/.bth/catalog}"
-    mkdir -p "${BTH_CATALOG_DIR}/runs/${BTH_PROJECT_SLUG}"
-fi
+# Do NOT pin BTH_CATALOG_DIR here. Since the bathos run-log cut-over (Engaging
+# 2026-10-17), `bth run` appends to the project-local log (.bth/log/) of the
+# project named by .bth.toml's [project] id. A per-project catalog dir never gets
+# a cutover marker, so runs written there stay legacy-mode and are invisible to
+# the run log (bathos 0.13.0a5 "foreign catalog" split brain). The old pin's
+# ~/projects/prolix/.bth/catalog holds 21 pre-cut-over runs, all already in the
+# run log. Pull cluster runs home with `bth sync engaging --pull`.

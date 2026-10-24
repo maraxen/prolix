@@ -71,7 +71,7 @@ def _mean_rigid_t_nhc_after_burn(
   for step in range(steps):
     state = apply_j(state)
     if step >= burn:
-      ke_r = float(rigid_tip3p_box_ke_kcal(state.positions, state.momentum, state.mass, n_waters))
+      ke_r = float(rigid_tip3p_box_ke_kcal(state.position, state.momentum, state.mass, n_waters))
       temp = 2.0 * ke_r / (dof_rigid * BOLTZMANN_KCAL)
       temps.append(temp)
 

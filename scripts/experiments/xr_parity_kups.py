@@ -3,16 +3,16 @@
 
 Usage::
 
-    uv run bth run python scripts/experiments/xr_parity_kups.py \\
-      --tag xr-parity-kups --campaign <id> \\
-      --out outputs/xr_parity_kups.json \\
-      -- --probe adapter
+    bth run --tags xr-parity-kups --campaign-id <id> \\
+      --output-paths outputs/xr_parity_kups.json \\
+      -- uv run python scripts/experiments/xr_parity_kups.py \\
+      --probe adapter --out outputs/xr_parity_kups.json
 
     # Full BAOAB crossval (requires optional ``kups`` package):
-    uv run bth run python scripts/experiments/xr_parity_kups.py \\
-      --tag xr-parity-kups --campaign <id> \\
-      --out outputs/xr_parity_kups.json \\
-      -- --probe crossval --integrator BAOAB --dt-fs 0.5
+    bth run --tags xr-parity-kups --campaign-id <id> \\
+      --output-paths outputs/xr_parity_kups.json \\
+      -- uv run python scripts/experiments/xr_parity_kups.py \\
+      --probe crossval --integrator BAOAB --dt-fs 0.5 --out outputs/xr_parity_kups.json
 """
 
 from __future__ import annotations

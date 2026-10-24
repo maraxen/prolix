@@ -7,9 +7,9 @@ Hypothesis: C3 AM conservation + C1 ambient-temperature OU (both committed)
 together enable dt=1.0 fs operation with T_rot stable within ±5 K of 300 K.
 
 Usage (via bth run):
-    uv run bth run python scripts/experiments/p5_nvt_gate_dt1fs.py \\
-        --out outputs/p5_nvt_gate_dt1fs.json \\
-        --campaign <campaign-id>
+    bth run --campaign-id <campaign-id> --output-paths outputs/p5_nvt_gate_dt1fs.json \\
+        -- uv run python scripts/experiments/p5_nvt_gate_dt1fs.py \\
+        --out outputs/p5_nvt_gate_dt1fs.json
 
 Local L2 smoke (fast, small system):
     uv run python scripts/experiments/p5_nvt_gate_dt1fs.py --smoke --out /tmp/smoke.json

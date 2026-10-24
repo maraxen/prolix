@@ -21,12 +21,25 @@ def _load_bench():
   return mod
 
 
-def test_openmm_platform_order_is_nonempty_tuple():
+def test_openmm_platform_list_is_gpu_only():
+  """#295: a speed comparator must never silently land on a CPU platform.
+
+  The previous version of this test asserted CUDA sorted before "Reference" in
+  a list that *included* CPU/Reference -- which passed happily while the
+  benchmark fell back to CPU and reported a GPU-vs-CPU ratio as if it were
+  GPU-vs-GPU. The meaningful invariant is that no CPU-class platform is
+  reachable from this list at all.
+  """
   mod = _load_bench()
-  assert isinstance(mod.OPENMM_PLATFORM_ORDER, tuple)
-  assert len(mod.OPENMM_PLATFORM_ORDER) > 0
-  assert "CUDA" in mod.OPENMM_PLATFORM_ORDER
-  assert mod.OPENMM_PLATFORM_ORDER.index("CUDA") < mod.OPENMM_PLATFORM_ORDER.index("Reference")
+  assert isinstance(mod.OPENMM_GPU_PLATFORMS, tuple)
+  assert len(mod.OPENMM_GPU_PLATFORMS) > 0
+  assert "CUDA" in mod.OPENMM_GPU_PLATFORMS
+  assert mod.OPENMM_GPU_PLATFORMS[0] == "CUDA", "CUDA must be preferred first"
+  forbidden = {"CPU", "Reference"}
+  assert not (forbidden & set(mod.OPENMM_GPU_PLATFORMS)), (
+    f"CPU-class platform reachable in a speed comparator: "
+    f"{forbidden & set(mod.OPENMM_GPU_PLATFORMS)}"
+  )
 
 
 def test_timing_row_dataclass_fields():
