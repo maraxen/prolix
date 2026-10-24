@@ -9,12 +9,22 @@ from __future__ import annotations
 from typing import Any, Callable
 
 from xtrax.tiling.dispatch import DispatchRejected, make_axis_dispatch
-from xtrax.tiling.strategy import Bucket, DedupGather, ChunkedMap, Scan, Vmap
+from xtrax.tiling.strategy import Bucket, DedupGather, Scan, Vmap
+try:
+    from xtrax.tiling.strategy import ChunkedMap
+except ImportError:
+    from xtrax.tiling.strategy import SafeMap as ChunkedMap
+try:
+    from xtrax.tiling.strategy import SafeMap
+except ImportError:
+    SafeMap = ChunkedMap
 
 from prolix.tiling.axes import N_WATERS
 from prolix.tiling.planner import BatchPlan
 
 __all__ = [
+    "ChunkedMap",
+    "SafeMap",
     "dispatch_n_waters",
     "n_waters_strategy",
 ]
@@ -54,12 +64,16 @@ def dispatch_n_waters(
             f"{N_WATERS.name} dispatch rejects {type(strategy).__name__}; "
             "only Vmap/ChunkedMap are supported."
         )
-    if not isinstance(strategy, (Vmap, ChunkedMap)):
+    if not isinstance(strategy, (Vmap, SafeMap, ChunkedMap)):
         raise TypeError(
             f"{N_WATERS.name} dispatch unsupported strategy type: {type(strategy)!r}"
         )
     iterator = make_axis_dispatch(strategy, axis=N_WATERS.name)
-    if isinstance(strategy, ChunkedMap) and n_waters % strategy.batch_size != 0:
+    if (
+        isinstance(strategy, SafeMap)
+        and type(strategy).__name__ == "SafeMap"
+        and n_waters % strategy.batch_size != 0
+    ):
         raise ValueError(
             f"N_WATERS ChunkedMap requires n_waters % batch_size == 0, "
             f"got n_waters={n_waters} batch_size={strategy.batch_size}. "

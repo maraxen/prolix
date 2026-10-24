@@ -23,14 +23,30 @@ from typing import Any
 
 import jax.numpy as jnp
 from xtrax.tiling.dispatch import DispatchRejected, make_axis_dispatch
-from xtrax.tiling.strategy import Bucket, DedupGather, ChunkedMap, Scan, Vmap, WhileCarry
+from xtrax.tiling.strategy import (
+    Bucket,
+    DedupGather,
+    Scan,
+    Vmap,
+    WhileCarry,
+)
+try:
+    from xtrax.tiling.strategy import ChunkedMap
+except ImportError:
+    from xtrax.tiling.strategy import SafeMap as ChunkedMap
+try:
+    from xtrax.tiling.strategy import SafeMap
+except ImportError:
+    SafeMap = ChunkedMap
 
 from prolix.tiling.axis_dispatch import dispatch_n_waters, n_waters_strategy
 from prolix.tiling.axes import N_ATOMS, N_MOLS, N_STEPS
 from prolix.tiling.planner import BatchPlan
 
 __all__ = [
+    "ChunkedMap",
     "DispatchRejected",
+    "SafeMap",
     "dispatch_n_atoms",
     "dispatch_n_mols",
     "dispatch_n_steps",
@@ -48,7 +64,7 @@ def _vmap_or_safemap(
     axis_name: str,
     n: int,
 ) -> Vmap | ChunkedMap:
-    """Map a BatchPlan decision to Vmap (full) or ChunkedMap (chunked)."""
+    """Map a BatchPlan decision to Vmap (full) or SafeMap/ChunkedMap (chunked)."""
     if plan is None or n <= 1:
         return Vmap()
     try:
@@ -89,7 +105,7 @@ def dispatch_vmap_safemap(
             "only Vmap/ChunkedMap are supported "
             "(Scan → XR-CARRY; DedupGather → ensemble_dedup; Bucket → XR-BUCKET)."
         )
-    if not isinstance(strategy, (Vmap, ChunkedMap)):
+    if not isinstance(strategy, (Vmap, SafeMap, ChunkedMap)):
         raise TypeError(
             f"{axis_name} dispatch unsupported strategy type: {type(strategy)!r}"
         )

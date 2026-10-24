@@ -446,14 +446,13 @@ def get_neighbor_exclusion_scales(
 ) -> tuple[Array, Array]:
   r"""Compute scale factors for neighbors based on exclusion lists.
 
-  Process:
-  1.  **Broadcast**: Align neighbor and exclusion indices for comparison.
-  2.  **Compare**: Identify matches between neighbor list and exclusion list.
-  3.  **Select**: Extract the associated scale factors where matches exist.
-  4.  **Default**: Return 1.0 for neighbors not found in the exclusion list.
+  Uses a branchless $\lceil \log_2 M \rceil$-step binary search (5 steps for
+  ``M = 32``) over sorted per-atom exclusion rows ``excl_indices``, avoiding
+  both the $(N, K, M)$ broadcast tensor and the 32-step linear scan.
 
   Args:
-      excl_indices: (N, M) padded exclusion indices.
+      excl_indices: (N, M) padded exclusion indices (sorted ascending per row,
+          unused slots padded with -1).
       excl_scales_vdw, excl_scales_elec: (N, M) padded scales.
       neighbor_idx: (N, K) neighbor indices.
 
@@ -461,49 +460,38 @@ def get_neighbor_exclusion_scales(
       (scale_vdw, scale_elec) arrays of shape (N, K).
   """
   N, K = neighbor_idx.shape
-  M = excl_indices.shape[1]
+  M = int(excl_indices.shape[1]) if excl_indices.ndim == 2 else 0
+  vdw_dtype = excl_scales_vdw.dtype
+  elec_dtype = excl_scales_elec.dtype
 
-  # Optimization: Avoid creating (N, K, M) tensor which is huge (O(N^2) effectively).
-  # Instead, use a loop over M (exclusions) to update masks.
-  # Since M is small (32), this is efficient and memory scaling is O(N*K).
+  ones_vdw = jnp.ones((N, K), dtype=vdw_dtype)
+  ones_elec = jnp.ones((N, K), dtype=elec_dtype)
+  if M == 0:
+    return ones_vdw, ones_elec
 
-  final_vdw = jnp.ones((N, K), dtype=jnp.float32)
-  final_elec = jnp.ones((N, K), dtype=jnp.float32)
+  # Map -1 padding to INT_MAX so each row is monotonically non-decreasing.
+  int_max = jnp.int32(2**30)
+  excl_sorted = jnp.where(excl_indices >= 0, excl_indices.astype(jnp.int32), int_max)
+  nbr_i32 = neighbor_idx.astype(jnp.int32)
 
-  # Prepare exclusion data (N, M)
-  # broadcasting to (N, K) per iteration
+  pos = jnp.zeros((N, K), dtype=jnp.int32)
+  if M > 1:
+    step = 1 << ((M - 1).bit_length() - 1)
+    while step > 0:
+      cand = pos + step
+      cand_safe = jnp.minimum(cand, M - 1)
+      val = jnp.take_along_axis(excl_sorted, cand_safe, axis=1)
+      pos = jnp.where((cand < M) & (val <= nbr_i32), cand_safe, pos)
+      step >>= 1
 
-  def loop_body(i, carrier):
-    curr_vdw, curr_elec = carrier
+  matched_idx = jnp.take_along_axis(excl_indices, pos, axis=1)
+  is_match = (matched_idx == nbr_i32) & (matched_idx >= 0) & (nbr_i32 < N)
 
-    # Get i-th exclusion data for all atoms
-    excl_idx_i = excl_indices[:, i]  # (N,)
-    scale_v_i = excl_scales_vdw[:, i]  # (N,)
-    scale_e_i = excl_scales_elec[:, i]  # (N,)
+  gathered_vdw = jnp.take_along_axis(excl_scales_vdw, pos, axis=1)
+  gathered_elec = jnp.take_along_axis(excl_scales_elec, pos, axis=1)
 
-    # Broadcast to neighbors (N, K)
-    # Check if neighbor_idx matches this exclusion
-    # excl_idx_i[:, None] -> (N, 1)
-    is_match = (neighbor_idx == excl_idx_i[:, None]) & (excl_idx_i[:, None] != -1)
-
-    # Update scales where match found
-    # If match, take the scale. Else keep current value.
-    # Note: An atom appears only once in exclusion set for a given pair,
-    # so we can just overwrite or multiply (since default is 1.0 and collisions only happen on 1.0)
-    curr_vdw = jnp.where(is_match, scale_v_i[:, None], curr_vdw)
-    curr_elec = jnp.where(is_match, scale_e_i[:, None], curr_elec)
-
-    return curr_vdw, curr_elec
-
-  # We can unroll this loop if M is small constant, or use fori_loop.
-  # Since M is padded to 32, fori_loop is good to keep graph small?
-  # Or simple range loop which unrolls in Python (better for constant folding if M small).
-  # Let's use jax.lax.fori_loop for strictly static graph size,
-  # or standard python loop if we suspect it helps.
-  # For 32 iters, fori_loop is cleaner.
-
-  final_vdw, final_elec = jax.lax.fori_loop(0, M, loop_body, (final_vdw, final_elec))
-
+  final_vdw = jnp.where(is_match, gathered_vdw, ones_vdw)
+  final_elec = jnp.where(is_match, gathered_elec, ones_elec)
   return final_vdw, final_elec
 
 

@@ -16,15 +16,25 @@ from xtrax.tiling.dedup import DedupSpec
 from xtrax.tiling.plan import AxisDecision as XtraxAxisDecision
 from xtrax.tiling.plan import AxisSpec as XtraxAxisSpec
 from xtrax.tiling.plan import BatchPlanner as XtraxBatchPlanner
-from xtrax.tiling.strategy import Bucket, DedupGather, ChunkedMap, Scan, Vmap
+from xtrax.tiling.strategy import Bucket, DedupGather, Scan, Vmap
+try:
+    from xtrax.tiling.strategy import ChunkedMap
+except ImportError:
+    from xtrax.tiling.strategy import SafeMap as ChunkedMap
+try:
+    from xtrax.tiling.strategy import SafeMap
+except ImportError:
+    SafeMap = ChunkedMap
 
 from prolix.tiling.planner import AxisDecision, AxisSpec, BatchPlan
 
 __all__ = [
     "BudgetInfeasibleError",
     "CarrySpec",
+    "ChunkedMap",
     "DedupSpec",
     "MemoryBudget",
+    "SafeMap",
     "plan_axes_with_xtrax",
     "prolix_axis_to_xtrax",
     "xtrax_decision_to_prolix",
@@ -74,7 +84,7 @@ def _strategy_to_batch_size(
     strategy = decision.strategy
     if isinstance(strategy, Vmap):
         return 0
-    if isinstance(strategy, ChunkedMap):
+    if isinstance(strategy, (SafeMap, ChunkedMap)):
         return max(1, strategy.batch_size)
     if isinstance(strategy, Bucket):
         return max(1, decision.batch_size or axis.tile_granularity)

@@ -8,12 +8,33 @@ v1.1 Item 4: unblocked by EnergyParams / make_energy_fn_pure (Item 1).
 
 from __future__ import annotations
 
+import contextlib
+import contextvars
 import pathlib
 import shutil
 import subprocess
 from typing import Any
 
 import jax
+
+_IN_EXPORT_CONTEXT: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "_IN_EXPORT_CONTEXT", default=False
+)
+
+
+def in_export_context() -> bool:
+  """Return True when currently lowering inside export_context()."""
+  return _IN_EXPORT_CONTEXT.get()
+
+
+@contextlib.contextmanager
+def export_context():
+  """Context manager forcing pure-JAX HLO lowering (disabling Pallas/Triton calls)."""
+  token = _IN_EXPORT_CONTEXT.set(True)
+  try:
+    yield
+  finally:
+    _IN_EXPORT_CONTEXT.reset(token)
 
 # Claim 2 W3 gate (#277): roadmap target for browser-deployable artifacts.
 WASM_ARTIFACT_MAX_BYTES = 50 * 1024 * 1024
@@ -58,7 +79,8 @@ def export_energy_fn(
       compiled = lowered.compile()
       energy = compiled(params, positions)
   """
-  return jax.jit(fn).lower(params, example_positions)
+  with export_context():
+    return jax.jit(fn).lower(params, example_positions)
 
 
 def export_langevin_step(
@@ -100,7 +122,8 @@ def export_langevin_step(
   from prolix.types.integrators import LangevinState
 
   def exported(state: LangevinState) -> LangevinState:
-    return step_fn(state)
+    with export_context():
+      return step_fn(state)
 
   return exported
 
@@ -221,13 +244,16 @@ def assert_wasm_artifact_under_limit(
 
 
 __all__ = [
+    "_IN_EXPORT_CONTEXT",
     "WASM_ARTIFACT_MAX_BYTES",
     "assert_wasm_artifact_under_limit",
     "compile_lowered_to_wasm",
     "compile_stablehlo_mlir_to_wasm",
+    "export_context",
     "export_energy_fn",
     "export_langevin_step",
     "find_iree_compile",
+    "in_export_context",
     "load_artifact",
     "save_artifact",
 ]

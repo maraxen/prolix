@@ -109,8 +109,15 @@ class EnsemblePlan:
                     runs without an explicit planner.
     """
 
-    def __init__(self, bundles: list[Any], planner: Any = None) -> None:
+    def __init__(
+        self,
+        bundles: list[Any],
+        planner: Any = None,
+        *,
+        use_pallas: bool | None = None,
+    ) -> None:
         self.bundles = bundles
+        self.use_pallas = use_pallas
         if planner is None and len(bundles) > 1:
             from prolix.api.ensemble_planner import EnsembleMDPlanner
 
@@ -121,14 +128,24 @@ class EnsemblePlan:
             self.batch_plan = None
 
     @classmethod
-    def from_bundle(cls, bundle: Any, planner: Any = None) -> EnsemblePlan:
-        return cls([bundle], planner)
+    def from_bundle(
+        cls,
+        bundle: Any,
+        planner: Any = None,
+        *,
+        use_pallas: bool | None = None,
+    ) -> EnsemblePlan:
+        return cls([bundle], planner, use_pallas=use_pallas)
 
     @classmethod
     def from_bundles(
-        cls, bundles: list[Any], planner: Any = None
+        cls,
+        bundles: list[Any],
+        planner: Any = None,
+        *,
+        use_pallas: bool | None = None,
     ) -> EnsemblePlan:
-        return cls(bundles, planner)
+        return cls(bundles, planner, use_pallas=use_pallas)
 
     def _systems_chunk_size(self) -> int:
         """Chunk size for N_MOLS dispatch (0 = vmap intent)."""
@@ -184,6 +201,7 @@ class EnsemblePlan:
         nl_update_every: int = 20,
         use_flash_forces: bool | None = None,
         nonbonded: Any = None,
+        use_pallas: bool | None = None,
     ) -> Trajectory | list[Trajectory]:
         """Run MD simulation over all bundles.
 
