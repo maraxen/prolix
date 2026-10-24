@@ -75,7 +75,7 @@ def dispatch_n_waters(
         and n_waters % strategy.batch_size != 0
     ):
         raise ValueError(
-            f"N_WATERS ChunkedMap requires n_waters % batch_size == 0, "
+            f"N_WATERS {type(strategy).__name__} requires n_waters % batch_size == 0, "
             f"got n_waters={n_waters} batch_size={strategy.batch_size}. "
             "Pad water_indices to a multiple of the tile or keep plan=None (Vmap)."
         )
