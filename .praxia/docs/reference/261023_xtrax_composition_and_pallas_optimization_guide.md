@@ -122,3 +122,55 @@ Both Pallas `interpret=True` (`NDIndexer.validate_indices` in `jax/_src/pallas/c
      jax.jit(fn).trace(*args).lower(lowering_platforms=("cuda",))
      ```
 
+
+---
+
+## Part 5: Post-Merge Verification, Benchmarking & Remote-Run Lessons (2026-10-24)
+
+1. **Performance reality check — where Pallas pays in this repo**
+   - `pallas_nonbonded_nl` (fused O(N*K) LJ + Coulomb/PME-direct): 0.67x at 512 atoms,
+     1.2x at 2k, 2.1x at 8k, 3.2x at 33k, **3.8x at 131k** on an engaging GPU, float32
+     round-off parity. XLA wins below ~1k atoms (launch-bound).
+   - `use_pallas_pme` spread/gather: only **0.93–1.21x**, bit-identical energy. PME is FFT-
+     and scatter-dominated in XLA already. Do **not** spend further effort on PME Pallas;
+     target neighbor-list-side O(N*K) work. Full tables:
+     `.praxia/docs/reference/261024_pallas_vs_xla_scaling_results.md`.
+   - Always benchmark before expanding kernel coverage. Harness:
+     `scripts/benchmarks/pallas_vs_baseline.py --kernel nonbonded|pme`.
+2. **Benchmark hygiene**
+   - Use a physically spaced configuration (jittered lattice). Uniform-random placement makes
+     overlapping atoms, ~1e13 energies, and meaningless float32 "parity".
+   - `device.memory_stats()["peak_bytes_in_use"]` is a process-lifetime high-water mark; it
+     cannot attribute memory to one of two paths in the same process.
+   - The titanix GPUs have no Triton: Pallas there falls back to interpret mode (CPU jaxlib
+     too without `--extra cuda`). Take Pallas GPU numbers only from engaging.
+3. **Merge-conflict aftermath: always test the *test* side too.**
+   After merging a branch that migrated `SafeMap`->`ChunkedMap` (xtrax 0.4.1b2) with one that
+   made `ChunkedMap` accept ragged remainders, two assertions went stale: an error message that
+   hardcoded the class name (fix: `type(strategy).__name__`), and a `rejects_remainder` test
+   (replaced with `accepts_remainder`; xtrax `ChunkedMap` handles 455/32 correctly).
+4. **Sync/harness traps (not code bugs)**
+   - `myxcel.toml` `excludes = ["bench/", "profiling/"]` is unanchored, so it also dropped
+     `tests/bench` and `tests/profiling` on remote pushes -> 11 `tests/api` collection errors.
+     Root-anchor with a leading `/`.
+   - Some tests read a sibling `../proxide` checkout (force-field/structure files); they error on
+     titanix (no sibling repo). That is environment, not regression (21 errors + 3 dhfr-bench).
+   - `JAX_PLATFORMS=cuda` alone breaks `jax.io_callback` tests (`test_b1_infer`); use
+     `JAX_PLATFORMS=cuda,cpu`.
+   - Engaging node `/tmp` can fill (`No space left on device` writing PTX): set
+     `TMPDIR=$PWD/outputs/tmp`.
+   - pytest `--timeout` default is 900 s/test; a "wide" run should deselect
+     `slow/integration/openmm/kups/wasm/benchmark` and print a compact failure summary in the
+     job (`-rfE --tb=line`, then `grep '^(FAILED|ERROR)'`) because `job_logs` returns only a
+     500-line tail.
+5. **Baseline-before-blame.** Two failures (`test_v1_solvated_ake_1k_parity_vs_settle_langevin`
+   RMSD 0.27 A on CPU, `test_v4_hlo_hetero_b4_export_single_compile` 1 scan vs 4) fail
+   identically on the pre-merge commit `ec34653`. Check a baseline with
+   `git worktree add <path> <sha>` + `myxcel push` (auto-detects the worktree), run with the
+   main venv via `PYTHONPATH=<wt>/src`, before attributing failures to a PR.
+6. **Tooling.** The myxcel MCP server's `push_project`/`list_presets` can fail with
+   `Built-in tier registry not found` (stale install); the `myxcel` CLI
+   (`push|submit-job|cancel-job ... --apply --yes --json`) works. Never use mounts or raw ssh
+   to engaging; titanix ssh is fine. Agent permission rules live in
+   `~/.gemini/antigravity-cli/settings.json` (`permissions.allow` regex rules); the agent cannot
+   write that file.
