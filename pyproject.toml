@@ -32,6 +32,7 @@ dependencies = [
     "xtrax>=0.4.1b2,<0.5",
     "parmed>=4.3.1",
     "openmmtools",
+    "netcdf4",
 ]
 
 [project.urls]
