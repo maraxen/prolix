@@ -1,0 +1,88 @@
+{
+  "meta": {
+    "backend": "gpu",
+    "device": "cuda:0",
+    "pallas_interpret": false,
+    "kernel": "pme",
+    "jax": "0.10.2",
+    "host": "node4008",
+    "cutoff": 9.0,
+    "density": 0.1
+  },
+  "rows": [
+    {
+      "n_atoms": 512,
+      "k": 392,
+      "xla_compile_s": 0.7501199208199978,
+      "xla_median_s": 9.487010538578033e-05,
+      "pallas_compile_s": 1.2733384808525443,
+      "pallas_median_s": 0.00010176002979278564,
+      "speedup": 0.9322924293454385,
+      "peak_mem_after_xla_bytes": 85329408,
+      "peak_mem_after_pallas_bytes": 85329408,
+      "max_abs_dE": 0.0,
+      "rel_dE": 0.0,
+      "max_abs_dF": 2.47955322265625e-05
+    },
+    {
+      "n_atoms": 2048,
+      "k": 424,
+      "xla_compile_s": 0.5593359898775816,
+      "xla_median_s": 0.00012039672583341599,
+      "pallas_compile_s": 0.9836515337228775,
+      "pallas_median_s": 0.00011007115244865417,
+      "speedup": 1.0938081700341828,
+      "peak_mem_after_xla_bytes": 85329408,
+      "peak_mem_after_pallas_bytes": 85329408,
+      "max_abs_dE": 0.0009765625,
+      "rel_dE": 1.7744852698342584e-07,
+      "max_abs_dF": 5.626678466796875e-05
+    },
+    {
+      "n_atoms": 8192,
+      "k": 408,
+      "xla_compile_s": 0.6231057737022638,
+      "xla_median_s": 0.00014485884457826614,
+      "pallas_compile_s": 1.0094177182763815,
+      "pallas_median_s": 0.00014201458543539047,
+      "speedup": 1.0200279368077279,
+      "peak_mem_after_xla_bytes": 85329408,
+      "peak_mem_after_pallas_bytes": 85329408,
+      "max_abs_dE": 0.00390625,
+      "rel_dE": 2.3744689769955585e-07,
+      "max_abs_dF": 7.82012939453125e-05
+    },
+    {
+      "n_atoms": 32768,
+      "k": 448,
+      "xla_compile_s": 0.513976514339447,
+      "xla_median_s": 0.00018602516502141953,
+      "pallas_compile_s": 1.0250094486400485,
+      "pallas_median_s": 0.00016657914966344833,
+      "speedup": 1.1167373911876688,
+      "peak_mem_after_xla_bytes": 140110080,
+      "peak_mem_after_pallas_bytes": 140110080,
+      "max_abs_dE": 0.0,
+      "rel_dE": 0.0,
+      "max_abs_dF": 0.0001354217529296875
+    },
+    {
+      "n_atoms": 131072,
+      "k": 448,
+      "xla_compile_s": 0.521213716827333,
+      "xla_median_s": 0.00031081680208444595,
+      "pallas_compile_s": 0.9805400827899575,
+      "pallas_median_s": 0.00025664176791906357,
+      "speedup": 1.2110920393225604,
+      "peak_mem_after_xla_bytes": 565652224,
+      "peak_mem_after_pallas_bytes": 565652224,
+      "max_abs_dE": 0.0,
+      "rel_dE": 0.0,
+      "max_abs_dF": 0.0002079010009765625
+    }
+  ],
+  "summary": {
+    "xla_scaling_exponent": 0.20258898599039457,
+    "pallas_scaling_exponent": 0.16334706958390094
+  }
+}

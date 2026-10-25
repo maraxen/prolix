@@ -193,6 +193,7 @@ def main() -> None:
         "meta": {
             "backend": jax.default_backend(),
             "device": str(jax.devices()[0]),
+            "device_kind": getattr(jax.devices()[0], "device_kind", "unknown"),
             "pallas_interpret": interpret,
             "kernel": args.kernel,
             "jax": jax.__version__,
