@@ -136,7 +136,12 @@ Both Pallas `interpret=True` (`NDIndexer.validate_indices` in `jax/_src/pallas/c
      target neighbor-list-side O(N*K) work. Full tables:
      `.praxia/docs/reference/261024_pallas_vs_xla_scaling_results.md`.
    - Always benchmark before expanding kernel coverage. Harness:
-     `scripts/benchmarks/pallas_vs_baseline.py --kernel nonbonded|pme`.
+     `scripts/benchmarks/pallas_vs_baseline.py --kernel nonbonded|pme|nl_build`.
+   - Neighbor-list rebuild (jax_md cell list) costs ~2x one fused nonbonded step at >= 8k
+     atoms, but amortized over 10–50 steps a zero-cost builder saves only ~16% / <4%.
+     **No-go on a Pallas NL builder**; tune skin (`dr_threshold`) / `capacity_multiplier`
+     instead. Time a *real* rebuild (move atoms past `dr_threshold/2`); `update()` at
+     unchanged positions is the no-op branch.
 2. **Benchmark hygiene**
    - Use a physically spaced configuration (jittered lattice). Uniform-random placement makes
      overlapping atoms, ~1e13 energies, and meaningless float32 "parity".
