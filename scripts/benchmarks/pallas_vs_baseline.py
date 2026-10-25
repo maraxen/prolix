@@ -152,6 +152,46 @@ def fit_exponent(ns, ts):
     return float(np.polyfit(np.log(ns), np.log(ts), 1)[0])
 
 
+def bench_nl_build(sizes: list[int], repeats: int, interpret: bool) -> list[dict]:
+    """Neighbor-list (jax_md cell list) rebuild cost vs one Pallas nonbonded step.
+
+    Answers whether a Pallas NL builder could matter: the rebuild is amortized over
+    ``steps_per_rebuild`` force evaluations, so ``amortized_ratio`` is the fraction of
+    step time a perfect (zero-cost) builder could remove.
+    """
+    from prolix.physics.neighbor_list import make_neighbor_list_fn
+
+    rows = []
+    for n in sizes:
+        s = build_system(n)
+        disp, _ = space.periodic(s["box"])
+        nl_fns = make_neighbor_list_fn(disp, s["box"], CUTOFF)
+        nbrs = nl_fns.allocate(s["pos"])
+        upd = jax.jit(nl_fns.update)
+        # jax_md's update() only rebuilds (lax.cond) when some atom moved more than
+        # dr_threshold/2 from the reference positions; at the allocation positions it
+        # takes the cheap no-op branch. Shift every atom by 0.4 A (> 0.25 A) per axis
+        # (0.69 A total) so the timed call is a genuine cell-list rebuild.
+        moved = s["pos"] + jnp.float32(0.4)
+        out, _, t_upd = time_fn(lambda p: upd(p, nbrs).idx, moved, repeats)
+        _, _, t_chk = time_fn(lambda p: upd(p, nbrs).idx, s["pos"], repeats)
+        _, pal_vg = make_fns(s, interpret)
+        _, _, t_nb = time_fn(pal_vg, s["pos"], repeats)
+        row = {
+            "n_atoms": n,
+            "nl_capacity_k": int(nbrs.idx.shape[1]),
+            "nl_update_median_s": t_upd,
+            "nl_skin_check_only_median_s": t_chk,
+            "pallas_nonbonded_median_s": t_nb,
+            "rebuild_over_step": t_upd / t_nb,
+        }
+        for steps in (10, 20, 50):
+            row[f"amortized_ratio_{steps}"] = (t_upd / steps) / (t_nb + t_upd / steps)
+        print(json.dumps(row), flush=True)
+        rows.append(row)
+    return rows
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--sizes", default="512,2048,8192,32768")
@@ -159,13 +199,32 @@ def main() -> None:
     ap.add_argument("--out", default="outputs/bench/pallas_vs_baseline.json")
     ap.add_argument("--interpret", action="store_true", help="force Pallas interpret mode")
     ap.add_argument(
-        "--kernel", choices=("nonbonded", "pme"), default="nonbonded",
-        help="nonbonded: NL LJ+Coulomb kernel; pme: SPME spread/gather kernels",
+        "--kernel", choices=("nonbonded", "pme", "nl_build"), default="nonbonded",
+        help="nonbonded: NL LJ+Coulomb kernel; pme: SPME spread/gather kernels; "
+        "nl_build: jax_md neighbor-list rebuild cost vs the Pallas nonbonded step",
     )
     args = ap.parse_args()
     maker = make_pme_fns if args.kernel == "pme" else make_fns
 
     interpret = args.interpret or not _triton_gpu_available()
+    if args.kernel == "nl_build":
+        sizes = [int(x) for x in args.sizes.split(",")]
+        rows = bench_nl_build(sizes, args.repeats, interpret)
+        payload = {
+            "meta": {
+                "backend": jax.default_backend(),
+                "device_kind": getattr(jax.devices()[0], "device_kind", "unknown"),
+                "pallas_interpret": interpret,
+                "kernel": "nl_build",
+                "jax": jax.__version__,
+            },
+            "rows": rows,
+        }
+        out = Path(args.out)
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(json.dumps(payload, indent=2))
+        return
+
     rows = []
     for n in [int(x) for x in args.sizes.split(",")]:
         s = build_system(n)

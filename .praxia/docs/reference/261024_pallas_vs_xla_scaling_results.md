@@ -41,6 +41,33 @@ spread/gather speedup is within 0.93–1.21x. The nonbonded NL kernel is where P
 (up to 3.8x at 131k atoms), so further Pallas coverage effort should target
 neighbor-list-side O(N*K) work, not PME.
 
+## Neighbor-list rebuild cost vs the Pallas nonbonded step (`--kernel nl_build`)
+
+Raw JSON: `docs/benchmarks/261024_engaging_nl_build.json`. Times a `jax.jit`'d
+`make_neighbor_list_fn(...).update` (jax_md cell list, 9 Å cutoff, `dr_threshold` 0.5) on
+the same engaging GPU. The timed call is a **genuine rebuild** (all atoms shifted 0.4 Å per
+axis, past the skin); `nl_skin_check_only` is the no-op branch at unmoved positions.
+
+| atoms | rebuild ms | skin check ms | Pallas nonbonded step ms | rebuild / step | share of step @10 / 20 / 50 steps per rebuild |
+|---:|---:|---:|---:|---:|---|
+| 512 | 0.080 | 0.061 | 0.445 | 0.18 | 1.8% / 0.9% / 0.4% |
+| 2,048 | 0.101 | 0.063 | 0.471 | 0.21 | 2.1% / 1.1% / 0.4% |
+| 8,192 | 1.08 | 0.070 | 0.614 | 1.76 | 14.9% / 8.1% / 3.4% |
+| 32,768 | 4.27 | 0.074 | 2.14 | 1.99 | 16.6% / 9.1% / 3.8% |
+| 131,072 | 16.5 | 0.398 | 8.42 | 1.96 | 16.4% / 8.9% / 3.8% |
+
+**Decision: no-go on a Pallas neighbor-list builder (for now).** A rebuild costs ~2x one
+fused nonbonded step at >= 8k atoms, but it runs only every 10–50 steps, so even a
+zero-cost builder removes at most ~16% of step time (1.2x) at 10 steps/rebuild and under 4%
+at 50. A Pallas builder would also need a cell sort, a capacity-overflow protocol and
+dynamic shapes, none of which Pallas Triton supports natively. Cheaper levers first: a
+larger skin / `dr_threshold` to lengthen the rebuild interval, and tuning
+`capacity_multiplier`. Revisit only if profiling shows rebuilds every < 10 steps.
+
+**Pitfall recorded:** the first version of this benchmark timed `update()` at unchanged
+positions, which hits the no-op `lax.cond` branch and made the rebuild look 5–13% of a step
+instead of ~200%. Always move atoms past `dr_threshold / 2` to time a real rebuild.
+
 ## Caveats
 
 - `peak_mem_*` fields in the JSON are the device high-water mark, which is cumulative
