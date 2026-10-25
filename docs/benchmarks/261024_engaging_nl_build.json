@@ -1,0 +1,66 @@
+{
+  "meta": {
+    "backend": "gpu",
+    "device_kind": "NVIDIA RTX PRO 6000 Blackwell Server Edition",
+    "pallas_interpret": false,
+    "kernel": "nl_build",
+    "jax": "0.10.2"
+  },
+  "rows": [
+    {
+      "n_atoms": 512,
+      "nl_capacity_k": 431,
+      "nl_update_median_s": 7.967930287122726e-05,
+      "nl_skin_check_only_median_s": 6.133504211902618e-05,
+      "pallas_nonbonded_median_s": 0.0004450809210538864,
+      "rebuild_over_step": 0.17902205891584466,
+      "amortized_ratio_10": 0.017587353468699732,
+      "amortized_ratio_20": 0.008871691521678379,
+      "amortized_ratio_50": 0.0035676673552077704
+    },
+    {
+      "n_atoms": 2048,
+      "nl_capacity_k": 438,
+      "nl_update_median_s": 0.00010128971189260483,
+      "nl_skin_check_only_median_s": 6.274599581956863e-05,
+      "pallas_nonbonded_median_s": 0.0004712166264653206,
+      "rebuild_over_step": 0.2149536035101242,
+      "amortized_ratio_10": 0.021043032778559127,
+      "amortized_ratio_20": 0.010633395837861317,
+      "amortized_ratio_50": 0.004280669164953655
+    },
+    {
+      "n_atoms": 8192,
+      "nl_capacity_k": 426,
+      "nl_update_median_s": 0.0010786913335323334,
+      "nl_skin_check_only_median_s": 7.016677409410477e-05,
+      "pallas_nonbonded_median_s": 0.0006142733618617058,
+      "rebuild_over_step": 1.7560444592015112,
+      "amortized_ratio_10": 0.14937375111975246,
+      "amortized_ratio_20": 0.08071524502050781,
+      "amortized_ratio_50": 0.03392926328799671
+    },
+    {
+      "n_atoms": 32768,
+      "nl_capacity_k": 467,
+      "nl_update_median_s": 0.004265523515641689,
+      "nl_skin_check_only_median_s": 7.366202771663666e-05,
+      "pallas_nonbonded_median_s": 0.0021423902362585068,
+      "rebuild_over_step": 1.9910114616145027,
+      "amortized_ratio_10": 0.16604199470479258,
+      "amortized_ratio_20": 0.09053751188706487,
+      "amortized_ratio_50": 0.03829530154620067
+    },
+    {
+      "n_atoms": 131072,
+      "nl_capacity_k": 465,
+      "nl_update_median_s": 0.016483642160892487,
+      "nl_skin_check_only_median_s": 0.0003984058275818825,
+      "pallas_nonbonded_median_s": 0.008424961939454079,
+      "rebuild_over_step": 1.9565242287564084,
+      "amortized_ratio_10": 0.16363653778669301,
+      "amortized_ratio_20": 0.08910901417602123,
+      "amortized_ratio_50": 0.03765694987875132
+    }
+  ]
+}
