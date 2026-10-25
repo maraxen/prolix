@@ -80,9 +80,15 @@ def test_dispatch_n_waters_safemap_matches_vmap_when_divisible():
     assert jnp.allclose(chunk_out, vmap_out)
 
 
-def test_dispatch_n_waters_safemap_rejects_remainder():
-    """xtrax safe_map forbids n % batch_size != 0 (1vii ~455 waters, tile 32)."""
+def test_dispatch_n_waters_chunkedmap_accepts_remainder():
+    """xtrax ChunkedMap (>=0.4.1b2) handles a ragged final chunk (1vii ~455 waters, tile 32).
+
+    Supersedes the SafeMap-era ``rejects_remainder`` test: only the legacy
+    ``SafeMap`` strategy forbids ``n % batch_size != 0``; see
+    ``test_xtrax_pallas_boundary::test_axis_dispatch_chunked_map_and_non_multiple_waters``.
+    """
     n, bs = 455, 32
     xs = jnp.arange(n, dtype=jnp.float32)
-    with pytest.raises(ValueError, match="n_waters=455"):
-        dispatch_n_waters(_n_waters_plan(n=n, batch_size=bs), n, lambda x: x, xs)
+    out = dispatch_n_waters(_n_waters_plan(n=n, batch_size=bs), n, lambda x: x * 2.0, xs)
+    assert out.shape == (n,)
+    assert jnp.allclose(out, xs * 2.0)
