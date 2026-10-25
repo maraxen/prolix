@@ -108,6 +108,23 @@ def make_fns(s, interpret: bool):
     return jax.jit(jax.value_and_grad(xla_fn)), jax.jit(jax.value_and_grad(pallas_fn))
 
 
+def make_pme_fns(s, interpret: bool):
+    """SPME reciprocal+self energy ``value_and_grad``: XLA vs Pallas spread/gather."""
+    from prolix.physics.pme import compute_pme_grid_dims, spme_energy_with_forces
+
+    grid_dims = compute_pme_grid_dims(np.asarray(s["box"]), grid_spacing=1.0)
+
+    def make(use_pallas: bool):
+        def fn(p):
+            return spme_energy_with_forces(
+                p, s["q"], s["mask"], s["box"], grid_dims, PME_ALPHA, 4, use_pallas
+            )
+
+        return jax.jit(jax.value_and_grad(fn))
+
+    return make(False), make(True)
+
+
 def _peak_mem() -> int | None:
     try:
         st = jax.devices()[0].memory_stats()
@@ -141,13 +158,18 @@ def main() -> None:
     ap.add_argument("--repeats", type=int, default=5)
     ap.add_argument("--out", default="outputs/bench/pallas_vs_baseline.json")
     ap.add_argument("--interpret", action="store_true", help="force Pallas interpret mode")
+    ap.add_argument(
+        "--kernel", choices=("nonbonded", "pme"), default="nonbonded",
+        help="nonbonded: NL LJ+Coulomb kernel; pme: SPME spread/gather kernels",
+    )
     args = ap.parse_args()
+    maker = make_pme_fns if args.kernel == "pme" else make_fns
 
     interpret = args.interpret or not _triton_gpu_available()
     rows = []
     for n in [int(x) for x in args.sizes.split(",")]:
         s = build_system(n)
-        xla_vg, pal_vg = make_fns(s, interpret)
+        xla_vg, pal_vg = maker(s, interpret)
         row = {"n_atoms": n, "k": s["k"]}
         out_x, c_x, t_x = time_fn(xla_vg, s["pos"], args.repeats)
         row.update(xla_compile_s=c_x, xla_median_s=t_x)
@@ -172,6 +194,7 @@ def main() -> None:
             "backend": jax.default_backend(),
             "device": str(jax.devices()[0]),
             "pallas_interpret": interpret,
+            "kernel": args.kernel,
             "jax": jax.__version__,
             "host": platform.node(),
             "cutoff": CUTOFF,

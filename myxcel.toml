@@ -3,7 +3,8 @@
 
 [push]
 # Local GPU traces / scratch — not source; keep off worktree scratch.
-excludes = ["profiling/", "bench/", "p5c_stage1_v2/"]
+# Root-anchored (leading "/") so tests/bench and tests/profiling still sync.
+excludes = ["/profiling/", "/bench/", "/p5c_stage1_v2/"]
 
 [tier]
 kind = "research"
