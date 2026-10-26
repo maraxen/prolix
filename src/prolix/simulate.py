@@ -17,8 +17,13 @@ from jax_md import minimize as jax_md_minimize
 from jax_md import space, util
 
 from prolix import resource_guard
+from prolix.compat import system_params_to_protein
+from prolix.constants import DEFAULT_MASS, masses_from_elements
 from prolix.physics import neighbor_list as nl
+from prolix.physics import pbc
+from prolix.physics.constraints import make_constraint
 from prolix.physics.electrostatic_methods import ElectrostaticMethod
+from prolix.physics.settle import langevin_with_constraints
 
 if TYPE_CHECKING:
   from proxide.core.atomic_system import (
@@ -257,8 +262,6 @@ def run_simulation(
   """
   from proxide.core.containers import Protein as ProteinCls
 
-  from prolix.compat import system_params_to_protein
-
   # Handle backward compatibility: system_params= kwarg
   if system_params is not None:
     import warnings
@@ -448,7 +451,6 @@ def run_simulation(
     if spec.box is None:
       msg = "Must specify box when use_pbc=True"
       raise ValueError(msg)
-    from prolix.physics import pbc
 
     displacement_fn, shift_fn = pbc.create_periodic_space(spec.box)
   else:
@@ -541,7 +543,6 @@ def run_simulation(
 
   if raw_masses is None:
     # Derive masses from element symbols if available
-    from prolix.constants import DEFAULT_MASS, masses_from_elements
     elements = getattr(protein_system, "elements", None)
     if elements is not None and len(elements) == n_atoms:
       mass_list = masses_from_elements(list(elements))
@@ -790,9 +791,6 @@ def run_simulation(
   # Guards for constrained bonds (MergedTopology lacks these by default)
   constrained_bonds = getattr(protein_system, "constrained_bonds", None)
   constrained_lengths = getattr(protein_system, "constrained_bond_lengths", None)
-
-  from prolix.physics.constraints import make_constraint
-  from prolix.physics.settle import langevin_with_constraints
 
   # Build constraint algorithm from topology (returns NullConstraint if no constraints)
   constraint = (
@@ -1174,7 +1172,6 @@ def simulate_frames(
 
   if raw_masses is None:
     # Element-based derivation fallback
-    from prolix.constants import DEFAULT_MASS, masses_from_elements
     elements = getattr(protein, "elements", None)
     if elements is not None and len(elements) == n_atoms:
       masses = jnp.array(masses_from_elements(list(elements)), dtype=jnp.float32)

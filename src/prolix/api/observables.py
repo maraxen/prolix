@@ -12,6 +12,8 @@ import equinox as eqx
 import jax.numpy as jnp
 from jaxtyping import Array, Bool, Float
 
+from prolix.simulate import BOLTZMANN_KCAL
+
 
 @runtime_checkable
 class Observable(Protocol):
@@ -96,7 +98,6 @@ class Temperature(eqx.Module):
         Returns:
             Scalar temperature in Kelvin
         """
-        from prolix.simulate import BOLTZMANN_KCAL
 
         # Ensure masses are available
         if not hasattr(state, "mass") or state.mass is None:

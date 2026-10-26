@@ -17,7 +17,20 @@ from typing import Any
 
 import jax.numpy as jnp
 
+from prolix.api.bundle_md import (
+    active_positions,
+    as_integration_scalars,
+    bonded_energy_fn_from_bundle,
+    displacement_fn_for_bundle,
+    masses_for_bundle,
+    trim_trajectory_positions,
+    water_indices_for_integration,
+)
+from prolix.api.bundle_stack import can_jit_vmap_n_mols
 from prolix.api.ensemble_plan import EnsemblePlan
+from prolix.physics.kups_adapter import AKMA_TIME_UNIT_FS, gamma_ps_to_akma
+from prolix.physics.settle import settle_langevin
+from prolix.simulate import BOLTZMANN_KCAL
 
 
 def make_single_trajectory_fn(
@@ -58,8 +71,6 @@ def make_hetero_trajectory_fn(
     (V4-HLO compile-once / batched path, #266). Otherwise falls back to an
     unrolled tuple of single-system exports (one JIT compile, B scans).
     """
-    from prolix.api.bundle_stack import can_jit_vmap_n_mols
-    from prolix.api.ensemble_plan import EnsemblePlan
 
     if can_jit_vmap_n_mols(bundles):
         plan = EnsemblePlan.from_bundles(bundles)
@@ -111,19 +122,6 @@ def make_smoke_diagnostics_fn(
 
     import jax
     import jax.numpy as jnp
-
-    from prolix.api.bundle_md import (
-        active_positions,
-        as_integration_scalars,
-        bonded_energy_fn_from_bundle,
-        displacement_fn_for_bundle,
-        masses_for_bundle,
-        trim_trajectory_positions,
-        water_indices_for_integration,
-    )
-    from prolix.physics.kups_adapter import AKMA_TIME_UNIT_FS, gamma_ps_to_akma
-    from prolix.physics.settle import settle_langevin
-    from prolix.simulate import BOLTZMANN_KCAL
 
     n_atoms = int(jnp.asarray(bundle.n_atoms))
     dof = max(1, 3 * n_atoms - 6)
