@@ -20,6 +20,7 @@ from xtrax.tiling import _BatchPlanWrapper
 from prolix.fitting.bundles import TrainState
 from prolix.fitting.loss import bonded_loss
 from prolix.fitting.topology import BondedTopology
+from prolix.run.spec import FittingAxisNames
 
 if TYPE_CHECKING:
     from prolix.fitting.bundles import BatchedFittingBundle
@@ -156,7 +157,6 @@ class FittingPlan:
         plan = self.plan._plan if isinstance(self.plan, _BatchPlanWrapper) else self.plan
 
         # Look up N_MOLS decision from plan
-        from prolix.run.spec import FittingAxisNames
         try:
             decision = plan.decision_for(FittingAxisNames.N_MOLS)
         except (KeyError, AttributeError):

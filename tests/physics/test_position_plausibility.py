@@ -19,41 +19,17 @@ from jax_md import space
 from proxide import CoordFormat, OutputSpec, parse_structure
 
 from prolix.physics import system
+from tests._proxide_assets import proxide_asset
 
 # Enable x64 for physics
 
 # Paths
 DATA_DIR = Path(__file__).parent.parent.parent / "data" / "pdb"
-FF_PATH = (
-  Path(__file__).parent.parent.parent.parent
-  / "proxide"
-  / "src"
-  / "proxide"
-  / "assets"
-  / "protein.ff19SB.xml"
-)
+FF_PATH = proxide_asset("protein.ff19SB.xml")
 
 # OpenMM bundled force field paths (from proxide assets)
-OMM_FF_PATH = (
-  Path(__file__).parent.parent.parent.parent
-  / "proxide"
-  / "src"
-  / "proxide"
-  / "assets"
-  / "openmm_bundled"
-  / "amber19"
-  / "protein.ff19SB.xml"
-)
-OMM_IMPLICIT_PATH = (
-  Path(__file__).parent.parent.parent.parent
-  / "proxide"
-  / "src"
-  / "proxide"
-  / "assets"
-  / "openmm_bundled"
-  / "implicit"
-  / "obc2.xml"
-)
+OMM_FF_PATH = proxide_asset("openmm_bundled", "amber19", "protein.ff19SB.xml")
+OMM_IMPLICIT_PATH = proxide_asset("openmm_bundled", "implicit", "obc2.xml")
 def _load_parameterized_protein(pdb_name: str = "1UAO.pdb"):
   """Load and parameterize a protein via the Rust parser."""
   pdb_path = DATA_DIR / pdb_name

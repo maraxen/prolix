@@ -10,16 +10,17 @@ Provides:
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
 import functools
 import os
+from dataclasses import dataclass, field
 
 import jax
+import jax.numpy as jnp
 from jax import custom_vjp
-from jax._src.pallas.primitives import load as _pl_load, store as _pl_store
+from jax._src.pallas.primitives import load as _pl_load
+from jax._src.pallas.primitives import store as _pl_store
 from jax.experimental import pallas as pl
 from jax.experimental.pallas import triton as plt
-import jax.numpy as jnp
 from jax.scipy.special import erf, erfc
 from proxide.physics import constants
 
@@ -31,7 +32,7 @@ from prolix.physics.generalized_born import (
     compute_born_radii_neighbor_list,
     compute_pair_integral,
 )
-
+from prolix.physics.neighbor_list import get_neighbor_exclusion_scales
 
 # =============================================================================
 # R1: Post-Equinox Kernel Configuration & Backend Resolution
@@ -1039,7 +1040,6 @@ def _nonbonded_nl_param_grads(
     include_pme_excl_erf: bool,
 ) -> tuple[jax.Array, jax.Array, jax.Array]:
     """Analytical parameter gradients (grad_q, grad_sigma, grad_eps) over (N, K)."""
-    from prolix.physics.neighbor_list import get_neighbor_exclusion_scales
 
     N = positions.shape[0]
     dtype = positions.dtype

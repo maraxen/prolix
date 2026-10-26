@@ -15,7 +15,9 @@ from typing import Any
 import jax
 import jax.numpy as jnp
 
+from prolix import export
 from prolix.api.export_run import make_single_trajectory_fn, make_smoke_diagnostics_fn
+from prolix.simulate import BOLTZMANN_KCAL
 
 _BROWSER_HTML = """<!DOCTYPE html>
 <html lang="en">
@@ -206,15 +208,12 @@ def build_browser_smoke_demo(
     wasm_path = out / "trajectory.wasm"
     wasm_bytes: int | None = None
     if compile_wasm:
-        from prolix import export
 
         if export.find_iree_compile() is not None:
             traj_fn = make_single_trajectory_fn(bundle, n_steps=n_steps)
             lowered = jax.jit(traj_fn).lower(seed_arr, dt_arr, kT_arr)
             export.compile_lowered_to_wasm(lowered, wasm_path)
             wasm_bytes = export.assert_wasm_artifact_under_limit(wasm_path)
-
-    from prolix.simulate import BOLTZMANN_KCAL
 
     target_t_k = float(kT / BOLTZMANN_KCAL)
     trace_payload = {

@@ -19,6 +19,44 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any, Literal, NamedTuple
 
+from prolix.api.bundle_md import (
+    _host_float,
+    active_positions,
+    as_integration_scalars,
+    displacement_fn_for_bundle,
+    energy_fn_from_bundle,
+    force_fn_from_bundle,
+    masses_for_bundle,
+    masses_with_prefix,
+    pbc_box_for_bundle,
+    positions_with_prefix,
+    trim_trajectory_positions,
+    water_indices_for_integration,
+)
+from prolix.api.bundle_stack import (
+    can_jit_vmap_n_mols,
+    integration_prefix_for_bundles,
+    stack_molecular_bundles,
+    unstack_trajectories,
+)
+from prolix.api.ensemble_dedup import partition_bundles_by_shape
+from prolix.api.ensemble_dispatch import (
+    dispatch_n_mols,
+    dispatch_n_steps,
+    dispatch_n_steps_inference,
+)
+from prolix.api.ensemble_planner import EnsembleMDPlanner
+from prolix.api.observables import Energy, KineticEnergy, Pressure, Temperature, Trajectory
+from prolix.api.xtc_sink import XtcFrameSink, write_positions_xtc
+from prolix.physics import neighbor_list as nl_mod
+from prolix.physics.kups_adapter import AKMA_TIME_UNIT_FS, gamma_ps_to_akma
+from prolix.physics.nonbonded_config import (
+    engine_flags,
+    lj_switch_width_from_config,
+    resolve_nonbonded_config,
+)
+from prolix.physics.settle import settle_langevin
+
 if TYPE_CHECKING:
     from prolix.api.observables import Trajectory
 
@@ -119,7 +157,6 @@ class EnsemblePlan:
         self.bundles = bundles
         self.use_pallas = use_pallas
         if planner is None and len(bundles) > 1:
-            from prolix.api.ensemble_planner import EnsembleMDPlanner
 
             planner = EnsembleMDPlanner()
         if planner is not None:
@@ -279,9 +316,6 @@ class EnsemblePlan:
                 "xtc_path is supported for single-bundle EnsemblePlan runs only"
             )
 
-        from prolix.api.bundle_md import _host_float
-        from prolix.physics.nonbonded_config import engine_flags, resolve_nonbonded_config
-
         used_legacy = use_neighbor_list is not None or use_flash_forces is not None
         cutoff0 = _host_float(getattr(self.bundles[0], "cutoff_distance", 9.0), 9.0)
         if nonbonded is None:
@@ -385,7 +419,6 @@ class EnsemblePlan:
                 nb_cfg=nb_cfg,
             )
             if xtc_path is not None:
-                from prolix.api.xtc_sink import write_positions_xtc
 
                 write_positions_xtc(xtc_path, traj.positions)
             return traj
@@ -476,9 +509,6 @@ class EnsemblePlan:
         stackable class there is no per-system Python loop. DedupGather is
         **not** used for seeded Langevin (would scatter identical trajs).
         """
-        from prolix.api.bundle_stack import can_jit_vmap_n_mols
-        from prolix.api.ensemble_dedup import partition_bundles_by_shape
-        from prolix.api.ensemble_planner import EnsembleMDPlanner
 
         groups = partition_bundles_by_shape(self.bundles)
         out: list[Trajectory | None] = [None] * len(self.bundles)
@@ -619,14 +649,6 @@ class EnsemblePlan:
         """JIT vmap / safe_map over stack-compatible bundles (#2645)."""
         import jax.numpy as jnp
 
-        from prolix.api.bundle_stack import (
-            integration_prefix_for_bundles,
-            stack_molecular_bundles,
-            unstack_trajectories,
-        )
-        from prolix.api.ensemble_dispatch import dispatch_n_mols
-        from prolix.api.ensemble_planner import EnsembleMDPlanner
-
         bundles = bundles_override if bundles_override is not None else self.bundles
         stacked = stack_molecular_bundles(bundles)
         n_systems = len(bundles)
@@ -744,13 +766,6 @@ class EnsemblePlan:
         import jax
         import jax.numpy as jnp
 
-        from prolix.api.bundle_md import (
-            _host_float,
-            displacement_fn_for_bundle,
-            positions_with_prefix,
-        )
-        from prolix.physics import neighbor_list as nl_mod
-
         ref = bundles[0]
         box_vec = jnp.diag(ref.box)
         cutoff = _host_float(ref.cutoff_distance, 9.0)
@@ -801,8 +816,6 @@ class EnsemblePlan:
         import jax
         import jax.numpy as jnp
 
-        from prolix.api.bundle_md import positions_with_prefix
-
         ref = bundles[0]
         seed_positions = positions_with_prefix(ref, integration_prefix)
         seed = neighbor_fn.allocate(seed_positions, extra_capacity=extra_capacity)
@@ -828,22 +841,6 @@ class EnsemblePlan:
         """Shared settle_langevin init. Returns (state, apply_fn, dt, kT)."""
         import jax
         import jax.numpy as jnp
-
-        from prolix.api.bundle_md import (
-            active_positions,
-            as_integration_scalars,
-            displacement_fn_for_bundle,
-            energy_fn_from_bundle,
-            force_fn_from_bundle,
-            masses_for_bundle,
-            masses_with_prefix,
-            pbc_box_for_bundle,
-            positions_with_prefix,
-            water_indices_for_integration,
-        )
-        from prolix.physics.kups_adapter import AKMA_TIME_UNIT_FS, gamma_ps_to_akma
-        from prolix.physics.nonbonded_config import lj_switch_width_from_config
-        from prolix.physics.settle import settle_langevin
 
         # debt 761: force_fn_from_bundle returns an (N, 3) force array rather
         # than a scalar energy -- settle_langevin's energy_or_force_fn
@@ -975,9 +972,6 @@ class EnsemblePlan:
         use_flash_forces: bool = False,
         nb_cfg: Any = None,
     ) -> Trajectory:
-        from prolix.api.bundle_md import trim_trajectory_positions
-        from prolix.api.ensemble_dispatch import dispatch_n_steps
-        from prolix.api.observables import Trajectory
 
         state, apply_fn, dt_s, kT_s = self._setup_integrator(
             bundle,
@@ -1050,10 +1044,6 @@ class EnsemblePlan:
         import jax
         import jax.numpy as jnp
 
-        from prolix.api.bundle_md import trim_trajectory_positions
-        from prolix.api.ensemble_dispatch import dispatch_n_steps_inference
-        from prolix.api.observables import Trajectory
-
         if use_neighbor_list:
             if xtc_path is not None:
                 raise ValueError(
@@ -1075,12 +1065,6 @@ class EnsemblePlan:
         target_capacity = 0
         nbr0 = initial_neighbor
         if use_neighbor_list and nbr0 is None:
-            from prolix.api.bundle_md import (
-                _host_float,
-                displacement_fn_for_bundle,
-                positions_with_prefix,
-            )
-            from prolix.physics import neighbor_list as nl_mod
 
             displacement_fn, _shift_fn = displacement_fn_for_bundle(bundle)
             box_vec = jnp.diag(bundle.box)
@@ -1123,8 +1107,6 @@ class EnsemblePlan:
         on_step = None
         if xtc_path is not None:
             import numpy as np
-
-            from prolix.api.xtc_sink import XtcFrameSink
 
             stride = 1 if save_every is None else max(1, int(save_every))
             n_write = int(jnp.asarray(bundle.n_atoms))
@@ -1311,7 +1293,6 @@ class EnsemblePlan:
 
 def _group_indices_by_shape_spec(bundles: list[Any]) -> list[list[int]]:
     """Deprecated alias — use ``partition_bundles_by_shape``."""
-    from prolix.api.ensemble_dedup import partition_bundles_by_shape
 
     return partition_bundles_by_shape(bundles)
 
@@ -1331,8 +1312,6 @@ def _observables_for_bundle(
             momentum after the first integration step) -- debt 841.
     """
     import equinox as eqx
-
-    from prolix.api.observables import Energy, KineticEnergy, Pressure, Temperature
 
     rebound: dict[str, Any] = {}
     for name, observable in observables.items():

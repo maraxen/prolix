@@ -5,8 +5,8 @@ Backed by ``scripts/ci/import_graph.py`` (pure AST; needs no JAX). Fails when:
 1. a module-level import cycle appears among ``prolix.*`` modules;
 2. a *new* function-level import appears whose only purpose is to dodge a cycle (the
    target reaches the importer through module-level imports);
-3. a new function-level ``prolix.*`` import appears in ``prolix.physics`` outside the
-   documented allowlist of optional, heavy backends.
+3. a new function-level ``prolix.*`` import appears anywhere outside the documented
+   allowlist (optional, heavy Pallas backends and the types->physics late-binding pair).
 
 To add an exception, extend the allowlist below *with a reason*; the intent is that the
 lists only ever shrink.
@@ -64,15 +64,15 @@ def test_no_new_cycle_dodging_lazy_imports(graph):
     )
 
 
-def test_physics_has_no_unreviewed_lazy_imports(graph):
-    found = {
-        (m, t)
-        for m, lst in graph.lazy.items()
-        if m.startswith("prolix.physics")
-        for t, _ln in lst
-    }
-    new = sorted(found - ALLOWED_PHYSICS_LAZY)
-    assert not new, f"unreviewed lazy intra-package imports in prolix.physics: {new}"
+def test_no_unreviewed_lazy_imports_repo_wide(graph):
+    """After Phase 1 every function-level ``prolix.*`` import is reviewed and allowlisted."""
+    found = {(m, t) for m, lst in graph.lazy.items() for t, _ln in lst}
+    allowed = ALLOWED_PHYSICS_LAZY | ALLOWED_CYCLE_DODGES
+    new = sorted(found - allowed)
+    assert not new, (
+        "unreviewed lazy intra-package imports (hoist them to module level, or extract a "
+        f"leaf module if they dodge a cycle): {new}"
+    )
 
 
 def test_leaf_modules_stay_leaves(graph):

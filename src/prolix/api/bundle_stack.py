@@ -12,6 +12,8 @@ from typing import Any
 import jax
 import jax.numpy as jnp
 
+from prolix.api.bundle_md import trim_trajectory_positions
+from prolix.api.observables import Trajectory
 from prolix.types.bundles import MolecularBundle, atom_pad_length
 
 __all__ = [
@@ -73,8 +75,6 @@ def unstack_trajectories(
     bundles: list[MolecularBundle],
 ) -> list[Any]:
     """Split a vmapped Trajectory and trim each to real atom count on the host."""
-    from prolix.api.bundle_md import trim_trajectory_positions
-    from prolix.api.observables import Trajectory
 
     if not isinstance(batched, Trajectory):
         raise TypeError(f"Expected Trajectory, got {type(batched)}")

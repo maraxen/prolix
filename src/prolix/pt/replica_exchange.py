@@ -15,8 +15,8 @@ from jax import random
 from jax_md import quantity, simulate
 from proxide.physics.constants import BOLTZMANN_KCAL
 
+from prolix.physics import pbc, system
 from prolix.physics import simulate as physics_simulate
-from prolix.physics import system
 from prolix.pt import temperature
 
 if TYPE_CHECKING:
@@ -288,7 +288,6 @@ def run_replica_exchange(
     if spec.box is None:
       msg = "Box required for PBC"
       raise ValueError(msg)
-    from prolix.physics import pbc
 
     displacement_fn, shift_fn = pbc.create_periodic_space(spec.box)
     energy_fn = system.make_energy_fn(displacement_fn, system_params, use_pbc=True, box=spec.box)

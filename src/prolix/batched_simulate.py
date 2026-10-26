@@ -20,7 +20,17 @@ import jax.numpy as jnp
 from jax import lax
 from jax_md import partition, space
 
+from prolix.batched_energy import (
+    single_padded_energy,
+    single_padded_energy_nl_cvjp,
+    single_padded_force,
+)
+from prolix.fused_energy import fused_energy_and_forces_nl
 from prolix.padding import precompute_dense_exclusions
+from prolix.physics.constraints import project_momenta, project_positions
+from prolix.physics.md_potential_bundle import value_energy_and_grad_energy
+from prolix.physics.settle import settle_positions, settle_velocities
+from prolix.physics.solvation import fix_water_geometry_padded
 from prolix.simulate import AKMA_TIME_UNIT_FS, BOLTZMANN_KCAL
 from prolix.typing import IntegratorState as _LangevinState
 from prolix.typing import PaddedSystem
@@ -285,8 +295,6 @@ def make_langevin_step(dt: float, kT: float, gamma: float) -> Callable[[PaddedSy
     Returns:
         step_fn(padded_sys, state) -> _LangevinState: Integration step function.
     """
-    from prolix.batched_energy import single_padded_force
-    from prolix.physics.constraints import project_momenta, project_positions
     
     # Precompute constants
     c1 = jnp.exp(-gamma * dt)
@@ -459,10 +467,7 @@ def make_langevin_step_nl(
         step_fn(padded_sys, state, neighbor_idx) -> _LangevinState: Integration step function.
     """
     if energy_fn is None:
-        from prolix.batched_energy import single_padded_energy_nl_cvjp
         energy_fn = single_padded_energy_nl_cvjp
-
-    from prolix.physics.md_potential_bundle import value_energy_and_grad_energy
 
     # Precompute constants
     c1 = jnp.exp(-gamma * dt)
@@ -569,7 +574,6 @@ def make_langevin_step_nl_fused(
     Returns:
         step_fn(padded_sys, state, neighbor_idx) -> _LangevinState: Integration step function.
     """
-    from prolix.fused_energy import fused_energy_and_forces_nl
 
     # Precompute constants
     c1 = jnp.exp(-gamma * dt)
@@ -799,8 +803,6 @@ def batched_minimize(
         converged_mask: (B,) bool
     """
     from jax_md import minimize as jax_md_minimize
-
-    from prolix.batched_energy import single_padded_energy, single_padded_force
 
     displacement_fn, shift_fn = space.free()
 
@@ -1068,7 +1070,6 @@ def batched_equilibrate(
         DeprecationWarning,
         stacklevel=2,
     )
-    from prolix.batched_energy import single_padded_energy, single_padded_force
     
     n_stages = 10
     dt = 0.002 # 2 fs
@@ -1223,7 +1224,6 @@ def batched_produce(
         DeprecationWarning,
         stacklevel=2,
     )
-    from prolix.simulate import BOLTZMANN_KCAL
     
     dt = 2.0 / AKMA_TIME_UNIT_FS
     kT = temperature_k * BOLTZMANN_KCAL
@@ -1359,8 +1359,6 @@ def batched_produce_streaming(
         Final _LangevinState (no trajectory — it was streamed to disk).
     """
     from jax.experimental import io_callback
-
-    from prolix.simulate import BOLTZMANN_KCAL
 
     dt = 2.0 / AKMA_TIME_UNIT_FS
     kT = temperature_k * BOLTZMANN_KCAL
@@ -1627,10 +1625,7 @@ def make_langevin_step_nl_dynamic(
         step_fn(padded_sys, state, nbrs) -> (_LangevinState, NeighborList)
     """
     if energy_fn is None:
-        from prolix.batched_energy import single_padded_energy_nl_cvjp
         energy_fn = single_padded_energy_nl_cvjp
-
-    from prolix.physics.md_potential_bundle import value_energy_and_grad_energy
 
     c1 = jnp.exp(-gamma * dt)
     c2 = jnp.sqrt(1.0 - jnp.exp(-2.0 * gamma * dt))
@@ -1788,10 +1783,8 @@ def batched_equilibrate_nl(
         chunk_size: Chunk size for safe_map.
         energy_fn: Custom energy function (default: cvjp variant).
     """
-    from prolix.simulate import BOLTZMANN_KCAL
 
     if energy_fn is None:
-        from prolix.batched_energy import single_padded_energy_nl_cvjp
         energy_fn = single_padded_energy_nl_cvjp
 
     dt = 2.0 / AKMA_TIME_UNIT_FS
@@ -1814,8 +1807,6 @@ def batched_equilibrate_nl(
         def _energy_of_r(r):
             sys_with_r = dataclasses.replace(sys, positions=r)
             return energy_fn(sys_with_r, nbr, displacement_fn)
-
-        from prolix.physics.md_potential_bundle import value_energy_and_grad_energy
 
         e0, initial_f = value_energy_and_grad_energy(_energy_of_r, sys.positions)
 
@@ -1873,10 +1864,7 @@ def batched_produce_streaming_nl(
     """
     from jax.experimental import io_callback
 
-    from prolix.simulate import BOLTZMANN_KCAL
-
     if energy_fn is None:
-        from prolix.batched_energy import single_padded_energy_nl_cvjp
         energy_fn = single_padded_energy_nl_cvjp
 
     dt = 2.0 / AKMA_TIME_UNIT_FS
@@ -1946,10 +1934,8 @@ def batched_equilibrate_nl_dynamic(
     Returns:
         Tuple of (final _LangevinState, updated NeighborList).
     """
-    from prolix.simulate import BOLTZMANN_KCAL
 
     if energy_fn is None:
-        from prolix.batched_energy import single_padded_energy_nl_cvjp
         energy_fn = single_padded_energy_nl_cvjp
 
     dt = 2.0 / AKMA_TIME_UNIT_FS
@@ -1974,8 +1960,6 @@ def batched_equilibrate_nl_dynamic(
         def _energy_of_r(r):
             sys_with_r = dataclasses.replace(sys, positions=r)
             return energy_fn(sys_with_r, neighbor_idx, displacement_fn)
-
-        from prolix.physics.md_potential_bundle import value_energy_and_grad_energy
 
         e0, initial_f = value_energy_and_grad_energy(_energy_of_r, sys.positions)
 
@@ -2038,10 +2022,7 @@ def batched_produce_streaming_nl_dynamic(
     """
     from jax.experimental import io_callback
 
-    from prolix.simulate import BOLTZMANN_KCAL
-
     if energy_fn is None:
-        from prolix.batched_energy import single_padded_energy_nl_cvjp
         energy_fn = single_padded_energy_nl_cvjp
 
     dt = 2.0 / AKMA_TIME_UNIT_FS
@@ -2105,9 +2086,6 @@ def make_langevin_step_explicit(
     - PBC box wrapping for whole water molecules
     - Force dispatch to flash_explicit_forces (dense LJ/Coulomb, no GB)
     """
-    from prolix.batched_energy import single_padded_force
-    from prolix.physics.constraints import project_momenta, project_positions
-    from prolix.physics.settle import settle_positions, settle_velocities
     
     c1 = jnp.exp(-gamma * dt)
     c2 = jnp.sqrt(1.0 - jnp.exp(-2.0 * gamma * dt))
@@ -2188,7 +2166,6 @@ def make_langevin_step_explicit(
         
         # 3. PBC wrap (keep molecules whole)
         if box is not None:
-             from prolix.physics.solvation import fix_water_geometry_padded
              r = fix_water_geometry_padded(r, water_indices, box)
 
         # --- Momentum correction for SHAKE/Settling ---

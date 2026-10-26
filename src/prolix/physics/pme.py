@@ -322,7 +322,8 @@ def _spme_bwd(box_size, grid_dims, alpha, order, use_pallas_pme, residuals, g):
     # auto-promote), and this backward pass's internals stayed float32
     # regardless of the actual (float64-under-x64) primal dtype.
     dtype = positions.dtype
-    if use_pallas_pme:
+    # StableHLO guardrail: export_context() must force pure XLA in the backward pass too.
+    if use_pallas_pme and not in_export_context():
         from prolix.physics.pme_pallas import gather_pallas
 
         with jax.named_scope("pme_bwd_gather"):

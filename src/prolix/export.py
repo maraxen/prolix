@@ -17,6 +17,8 @@ from typing import Any
 
 import jax
 
+from prolix.types.integrators import LangevinState
+
 _IN_EXPORT_CONTEXT: contextvars.ContextVar[bool] = contextvars.ContextVar(
     "_IN_EXPORT_CONTEXT", default=False
 )
@@ -119,7 +121,6 @@ def export_langevin_step(
       exported = export_langevin_step(step, config)
       result = jax.jit(exported)(state)
   """
-  from prolix.types.integrators import LangevinState
 
   def exported(state: LangevinState) -> LangevinState:
     with export_context():

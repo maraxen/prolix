@@ -13,6 +13,7 @@ import jax.numpy as jnp
 import optax
 from jaxtyping import Array, Float
 
+from prolix.fitting.energy import bonded_energy
 from prolix.fitting.loss import bonded_loss, default_sigma
 from prolix.fitting.params import BondedParams
 from prolix.fitting.state import TrainState
@@ -95,7 +96,6 @@ def train_step_one_mol(
     sigma = default_sigma(params_init)
 
     def energy_fn(pos):
-        from prolix.fitting.energy import bonded_energy
         return bonded_energy(pos, state.params, topology)
 
     forces_fn = jax.grad(energy_fn)
