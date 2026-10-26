@@ -179,3 +179,32 @@ Both Pallas `interpret=True` (`NDIndexer.validate_indices` in `jax/_src/pallas/c
    to engaging; titanix ssh is fine. Agent permission rules live in
    `~/.gemini/antigravity-cli/settings.json` (`permissions.allow` regex rules); the agent cannot
    write that file.
+7. **Phase 3 Scaling Proofs & kUPS Benchmark Lessons (2026-10-26)**
+   - **Per-process isolated memory measurement (`--isolate-memory`, `--kernel mem_scaling`)**:
+     Spawn a fresh Python subprocess per `(path, N)` with `XLA_PYTHON_CLIENT_PREALLOCATE=false`
+     and `XLA_PYTHON_CLIENT_ALLOCATOR=platform`. Un-tiled `dense_xla` $O(N^2)$ blows up quadratically
+     (`275.3 MB` at 8k $\to$ `1,100.1 MB` at 16k), whereas `pallas_flash_explicit_nonbonded` stays
+     flat at `67.1 MB` up to 32k (`2.04x` lower than `flash_xla`'s `136.6 MB`), and `pallas_nonbonded_nl`
+     uses `536.9 MB` (`263.1 MB` activations) vs `nl_xla`'s `555.0 MB` (`281.2 MB` activations) at 131k atoms.
+   - **Dense $O(N^2)$ `pallas_flash_explicit_nonbonded` vs XLA `lax.scan` (`--kernel flash`)**:
+     `pallas_flash_explicit_nonbonded` saves $2\times$ peak memory at 32k, but XLA's `lax.scan` over
+     $(N, 256)$ tiles is $3.3\times\text{–}6.0\times$ faster because the $(32, 32)$ Pallas kernel executes
+     $N/32$ sequential inner loop iterations per program. Always prefer $O(N \cdot K)$ `pallas_nonbonded_nl`
+     ($9\times$ faster than Flash XLA and $54\times$ faster than Flash Pallas at 32k).
+   - **NL skin & `capacity_multiplier` tuning (`--kernel nl_skin`)**:
+     `capacity_multiplier = 1.15` + `dr_threshold = 0.5–1.0` Å minimizes net amortized step time
+     (`2.37 ms` at 32k on Blackwell); larger skins (`1.5–2.0` Å) inflate $(r_c + r_{\text{skin}})^3$ and
+     padded $K$ ($432 \to 656$), costing more on every step than they save in rebuild frequency.
+   - **Cross-GPU generation scaling (`sm_120` RTX PRO 6000 Blackwell vs `sm_89` L40S vs `sm_90` H200)**:
+     `pallas_nonbonded_nl` beats XLA across all three GPU generations for $N \ge 8,192$: up to **`4.23x`**
+     on RTX PRO 6000 (`sm_120`), **`2.59x`** on L40S (`sm_89`), and **`1.39x`** on H200 (`sm_90`).
+     GDDR6/GDDR7 architectures (`sm_89`, `sm_120`) see the largest relative speedup because Pallas
+     eliminates global-memory intermediate traffic that H200's `4.8 TB/s` HBM3e partially absorbs.
+   - **Prolix vs kUPS 3-tier parity & propagator throughput (`scripts/benchmarks/kups_benchmark.py`)**:
+     - Always register custom propagator containers (`EnergyForceBundle`, `SettleLangevinPotentialStepMetrics`)
+       with `@jax.tree_util.register_dataclass` so they can cross `jax.jit` and `jax.lax.scan` boundaries.
+     - With exact AKMA $\leftrightarrow$ kUPS (eV, Å, amu) constants (`KUPS_FEMTOSECOND = 0.09822694788464063`),
+       float64 single-step and harmonic/nonbonded parity is at machine precision (`rel_dE <= 1.96e-16`),
+       10k-step BAOAB/CSVR trajectories agree to `<= 1.14e-13` K, `prolix_bundle_xla` has zero adapter overhead
+       vs `kups_cached_xla` (`0.987–1.005x`), and `prolix_bundle_pallas` delivers **`4.08x`** (`82.5 ns/day`
+       vs `20.2 ns/day`) on RTX PRO 6000, **`2.63x`** on L40S, and **`1.30x`** on H200.

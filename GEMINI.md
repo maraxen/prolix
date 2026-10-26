@@ -41,8 +41,8 @@
 
 | Task | Description | Agent Needs | Status |
 | :--- | :--- | :--- | :--- |
-| **3.1** | **Apples-to-Apples Harness**| `staff` (coord), `librarian` | Pending |
-| **3.2** | **Scaling Proofs** | `generalist` (batch run) | Pending |
+| **3.1** | **Apples-to-Apples Harness**| `staff` (coord), `librarian` | Done (`scripts/benchmarks/pallas_vs_baseline.py` + `scripts/benchmarks/kups_benchmark.py`) |
+| **3.2** | **Scaling Proofs** | `generalist` (batch run) | Done (per-process $O(N\cdot K)$ memory scaling, Flash, NL skin sweep, and 3-GPU-gen `sm_89`/`sm_90`/`sm_120` scaling in `.praxia/docs/reference/261024_pallas_vs_xla_scaling_results.md`) |
 
 ---
 
@@ -52,7 +52,7 @@
 | :--- | :--- | :--- | :--- |
 | **P0** | **Architectural Hardening** | Clean up `prolix.physics` package structure. | Done (1.1, 1.2, 1.3). Only the Pallas and `types.bundles` late-binding imports remain, allowlisted |
 | **P0** | **Release Validation** | Formalize the "Three-Tier" parity report. | Pending |
-| **P1** | **kUPS Benchmark** | High-precision comparison vs kUPS. | Pending |
+| **P1** | **kUPS Benchmark** | High-precision comparison vs kUPS. | Done (3-tier float64/float32 parity, BAOAB/CSVR ensemble thermostat parity, and 20-step propagator throughput up to 4.08x on Blackwell in `docs/benchmarks/261026_engaging_kups_benchmark.json`) |
 | **P2** | **NL Differentiability** | Analytical VJP for neighbor list updates. | Debt |
 
 ---

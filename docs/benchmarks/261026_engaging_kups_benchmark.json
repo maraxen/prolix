@@ -1,0 +1,297 @@
+{
+  "meta": {
+    "backend": "gpu",
+    "device": "cuda:0",
+    "device_kind": "NVIDIA RTX PRO 6000 Blackwell Server Edition",
+    "pallas_interpret": false,
+    "kups_package_installed": false,
+    "jax": "0.10.2",
+    "host": "node4008",
+    "cutoff": 9.0,
+    "density": 0.1
+  },
+  "tier1_parity": {
+    "harmonic_single_step_f64": [
+      {
+        "n_atoms": 64,
+        "rel_dE_f64": 1.2798534394729291e-16,
+        "max_abs_dF_kcal_mol_A_f64": 1.3877787807814457e-17,
+        "baoab_max_pos_err_A_f64": 2.7755575615628914e-17,
+        "baoab_max_mom_err_akma_f64": 1.7763568394002505e-15,
+        "csvr_max_pos_err_A_f64": 1.3877787807814457e-17,
+        "csvr_max_mom_err_akma_f64": 1.7763568394002505e-15
+      },
+      {
+        "n_atoms": 512,
+        "rel_dE_f64": 0.0,
+        "max_abs_dF_kcal_mol_A_f64": 2.7755575615628914e-17,
+        "baoab_max_pos_err_A_f64": 5.551115123125783e-17,
+        "baoab_max_mom_err_akma_f64": 2.6645352591003757e-15,
+        "csvr_max_pos_err_A_f64": 5.551115123125783e-17,
+        "csvr_max_mom_err_akma_f64": 3.552713678800501e-15
+      },
+      {
+        "n_atoms": 2048,
+        "rel_dE_f64": 0.0,
+        "max_abs_dF_kcal_mol_A_f64": 2.7755575615628914e-17,
+        "baoab_max_pos_err_A_f64": 1.1102230246251565e-16,
+        "baoab_max_mom_err_akma_f64": 3.552713678800501e-15,
+        "csvr_max_pos_err_A_f64": 1.1102230246251565e-16,
+        "csvr_max_mom_err_akma_f64": 5.329070518200751e-15
+      }
+    ],
+    "nonbonded_parity": [
+      {
+        "n_atoms": 512,
+        "k": 392,
+        "xla_vs_kups_rel_dE_f64": 1.4341384791606792e-16,
+        "xla_vs_kups_max_abs_dF_f64": 2.1316282072803006e-14,
+        "pallas_vs_kups_rel_dE_f32": 3.0797853820758647e-07,
+        "pallas_vs_kups_max_abs_dF_f32": 4.38690185546875e-05
+      },
+      {
+        "n_atoms": 2048,
+        "k": 424,
+        "xla_vs_kups_rel_dE_f64": 1.9562177229374703e-16,
+        "xla_vs_kups_max_abs_dF_f64": 2.1316282072803006e-14,
+        "pallas_vs_kups_rel_dE_f32": 1.0502361561020612e-07,
+        "pallas_vs_kups_max_abs_dF_f32": 5.7220458984375e-05
+      },
+      {
+        "n_atoms": 8192,
+        "k": 408,
+        "xla_vs_kups_rel_dE_f64": 0.0,
+        "xla_vs_kups_max_abs_dF_f64": 2.842170943040401e-14,
+        "pallas_vs_kups_rel_dE_f32": 4.461081967027846e-07,
+        "pallas_vs_kups_max_abs_dF_f32": 9.1552734375e-05
+      }
+    ]
+  },
+  "tier2_thermostat": [
+    {
+      "integrator": "BAOAB",
+      "dt_fs": 0.5,
+      "n_particles": 256,
+      "n_equil": 4000,
+      "n_sample": 6000,
+      "t_prolix_k": 306.3502609168261,
+      "t_kups_k": 306.3502609168261,
+      "delta_t_k": 0.0,
+      "max_stepwise_temp_diff_k": 2.2737367544323206e-13,
+      "prolix_std_over_canonical": 0.9701669185978442,
+      "kups_std_over_canonical": 0.9701669185978438,
+      "tolerance_k": 2.0,
+      "gate_pass": true
+    },
+    {
+      "integrator": "BAOAB",
+      "dt_fs": 1.0,
+      "n_particles": 256,
+      "n_equil": 4000,
+      "n_sample": 6000,
+      "t_prolix_k": 300.9420166602215,
+      "t_kups_k": 300.94201666022144,
+      "delta_t_k": 5.684341886080802e-14,
+      "max_stepwise_temp_diff_k": 2.2737367544323206e-13,
+      "prolix_std_over_canonical": 0.9993307111579344,
+      "kups_std_over_canonical": 0.999330711157934,
+      "tolerance_k": 2.0,
+      "gate_pass": true
+    },
+    {
+      "integrator": "BAOAB",
+      "dt_fs": 2.0,
+      "n_particles": 256,
+      "n_equil": 4000,
+      "n_sample": 6000,
+      "t_prolix_k": 300.9968041867939,
+      "t_kups_k": 300.99680418679395,
+      "delta_t_k": 5.684341886080802e-14,
+      "max_stepwise_temp_diff_k": 1.7053025658242404e-13,
+      "prolix_std_over_canonical": 0.9911739506826449,
+      "kups_std_over_canonical": 0.9911739506826449,
+      "tolerance_k": 2.5,
+      "gate_pass": true
+    },
+    {
+      "integrator": "CSVR",
+      "dt_fs": 0.5,
+      "n_particles": 256,
+      "n_equil": 4000,
+      "n_sample": 6000,
+      "t_prolix_k": 294.4943485108576,
+      "t_kups_k": 294.4943485108575,
+      "delta_t_k": 1.1368683772161603e-13,
+      "max_stepwise_temp_diff_k": 4.547473508864641e-13,
+      "prolix_std_over_canonical": 0.9305222645970912,
+      "kups_std_over_canonical": 0.9305222645970903,
+      "tolerance_k": 2.0,
+      "gate_pass": true
+    },
+    {
+      "integrator": "CSVR",
+      "dt_fs": 1.0,
+      "n_particles": 256,
+      "n_equil": 4000,
+      "n_sample": 6000,
+      "t_prolix_k": 296.2004708252936,
+      "t_kups_k": 296.20047082529356,
+      "delta_t_k": 5.684341886080802e-14,
+      "max_stepwise_temp_diff_k": 6.252776074688882e-13,
+      "prolix_std_over_canonical": 0.9530983429409103,
+      "kups_std_over_canonical": 0.9530983429409098,
+      "tolerance_k": 5.0,
+      "gate_pass": true
+    }
+  ],
+  "tier3_throughput": {
+    "rows": [
+      {
+        "n_atoms": 512,
+        "k": 392,
+        "n_steps": 20,
+        "naive_split_xla": {
+          "compile_s": 0.7734559942036867,
+          "scan_median_s": 0.004156929440796375,
+          "step_ms": 0.20784647203981876,
+          "ns_per_day": 831.3828871095553
+        },
+        "kups_cached_xla": {
+          "compile_s": 0.8585797529667616,
+          "scan_median_s": 0.004169336520135403,
+          "step_ms": 0.20846682600677013,
+          "ns_per_day": 828.9088643503795
+        },
+        "prolix_bundle_xla": {
+          "compile_s": 0.863400163128972,
+          "scan_median_s": 0.004169267602264881,
+          "step_ms": 0.20846338011324406,
+          "ns_per_day": 828.9225661894642
+        },
+        "prolix_bundle_pallas": {
+          "compile_s": 1.7224356224760413,
+          "scan_median_s": 0.00834623258560896,
+          "step_ms": 0.41731162928044796,
+          "ns_per_day": 414.0790427957912
+        },
+        "bundle_vs_naive_split_speedup_xla": 0.997040688522415,
+        "prolix_xla_vs_kups_xla_ratio": 1.000016529970512,
+        "prolix_pallas_vs_kups_xla_speedup": 0.4995471282844916,
+        "prolix_pallas_vs_naive_split_speedup": 0.4980605798074673,
+        "trajectory_rel_dE_prolix_xla_vs_kups": 1.9311039523017826e-07,
+        "trajectory_rel_dE_prolix_pallas_vs_kups": 9.655527719587553e-07
+      },
+      {
+        "n_atoms": 2048,
+        "k": 424,
+        "n_steps": 20,
+        "naive_split_xla": {
+          "compile_s": 0.9513456569984555,
+          "scan_median_s": 0.010727874003350735,
+          "step_ms": 0.5363937001675367,
+          "ns_per_day": 322.15143456388057
+        },
+        "kups_cached_xla": {
+          "compile_s": 1.0207515861839056,
+          "scan_median_s": 0.010475617833435535,
+          "step_ms": 0.5237808916717768,
+          "ns_per_day": 329.9089423603558
+        },
+        "prolix_bundle_xla": {
+          "compile_s": 1.1937012933194637,
+          "scan_median_s": 0.010656747035682201,
+          "step_ms": 0.5328373517841101,
+          "ns_per_day": 324.3015892587302
+        },
+        "prolix_bundle_pallas": {
+          "compile_s": 1.7929254900664091,
+          "scan_median_s": 0.008681844919919968,
+          "step_ms": 0.4340922459959984,
+          "ns_per_day": 398.0720724543716
+        },
+        "bundle_vs_naive_split_speedup_xla": 1.006674360142957,
+        "prolix_xla_vs_kups_xla_ratio": 0.9830033309751852,
+        "prolix_pallas_vs_kups_xla_speedup": 1.2066119505774475,
+        "prolix_pallas_vs_naive_split_speedup": 1.2356675455854178,
+        "trajectory_rel_dE_prolix_xla_vs_kups": 1.9110812843337044e-07,
+        "trajectory_rel_dE_prolix_pallas_vs_kups": 7.644329684808326e-07
+      },
+      {
+        "n_atoms": 8192,
+        "k": 408,
+        "n_steps": 20,
+        "naive_split_xla": {
+          "compile_s": 1.5289562670513988,
+          "scan_median_s": 0.03849576413631439,
+          "step_ms": 1.9247882068157196,
+          "ns_per_day": 89.77611115244326
+        },
+        "kups_cached_xla": {
+          "compile_s": 1.569343608804047,
+          "scan_median_s": 0.03820990119129419,
+          "step_ms": 1.9104950595647097,
+          "ns_per_day": 90.44776071777491
+        },
+        "prolix_bundle_xla": {
+          "compile_s": 1.5553891826421022,
+          "scan_median_s": 0.038717709481716156,
+          "step_ms": 1.9358854740858078,
+          "ns_per_day": 89.26147869444712
+        },
+        "prolix_bundle_pallas": {
+          "compile_s": 1.9891893584281206,
+          "scan_median_s": 0.011267635971307755,
+          "step_ms": 0.5633817985653877,
+          "ns_per_day": 306.7191741728666
+        },
+        "bundle_vs_naive_split_speedup_xla": 0.9942676013541923,
+        "prolix_xla_vs_kups_xla_ratio": 0.986884340597117,
+        "prolix_pallas_vs_kups_xla_speedup": 3.3911196002953083,
+        "prolix_pallas_vs_naive_split_speedup": 3.4164898683575826,
+        "trajectory_rel_dE_prolix_xla_vs_kups": 1.9690752139922552e-07,
+        "trajectory_rel_dE_prolix_pallas_vs_kups": 8.860846492098062e-07
+      },
+      {
+        "n_atoms": 32768,
+        "k": 448,
+        "n_steps": 20,
+        "naive_split_xla": {
+          "compile_s": 4.136171935126185,
+          "scan_median_s": 0.17100779991596937,
+          "step_ms": 8.550389995798469,
+          "ns_per_day": 20.20960448411257
+        },
+        "kups_cached_xla": {
+          "compile_s": 4.187487038783729,
+          "scan_median_s": 0.17092139087617397,
+          "step_ms": 8.546069543808699,
+          "ns_per_day": 20.219821417810365
+        },
+        "prolix_bundle_xla": {
+          "compile_s": 4.164144066162407,
+          "scan_median_s": 0.17047761101275682,
+          "step_ms": 8.523880550637841,
+          "ns_per_day": 20.272456772880208
+        },
+        "prolix_bundle_pallas": {
+          "compile_s": 2.229535974562168,
+          "scan_median_s": 0.04191061481833458,
+          "step_ms": 2.095530740916729,
+          "ns_per_day": 82.46120976703277
+        },
+        "bundle_vs_naive_split_speedup_xla": 1.0031100207239112,
+        "prolix_xla_vs_kups_xla_ratio": 1.0026031562782982,
+        "prolix_pallas_vs_kups_xla_speedup": 4.078236304025806,
+        "prolix_pallas_vs_naive_split_speedup": 4.080298049962246,
+        "trajectory_rel_dE_prolix_xla_vs_kups": 2.676064525530819e-07,
+        "trajectory_rel_dE_prolix_pallas_vs_kups": 8.920221716834931e-07
+      }
+    ],
+    "summary": {
+      "naive_split_xla_time_exponent": 0.8965267844639196,
+      "kups_cached_xla_time_exponent": 0.8969512592452085,
+      "prolix_bundle_xla_time_exponent": 0.8961079987012415,
+      "prolix_bundle_pallas_time_exponent": 0.3680233634360196
+    }
+  }
+}

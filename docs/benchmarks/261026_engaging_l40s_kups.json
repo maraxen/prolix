@@ -1,0 +1,163 @@
+{
+  "meta": {
+    "backend": "gpu",
+    "device": "cuda:0",
+    "device_kind": "NVIDIA L40S",
+    "pallas_interpret": false,
+    "kups_package_installed": false,
+    "jax": "0.10.2",
+    "host": "node3202",
+    "cutoff": 9.0,
+    "density": 0.1
+  },
+  "tier3_throughput": {
+    "rows": [
+      {
+        "n_atoms": 512,
+        "k": 392,
+        "n_steps": 20,
+        "naive_split_xla": {
+          "compile_s": 1.1640496709999866,
+          "scan_median_s": 0.004394011999977465,
+          "step_ms": 0.21970059999887326,
+          "ns_per_day": 786.5249343920144
+        },
+        "kups_cached_xla": {
+          "compile_s": 1.1422676650000199,
+          "scan_median_s": 0.004763471000046593,
+          "step_ms": 0.23817355000232965,
+          "ns_per_day": 725.5213687595024
+        },
+        "prolix_bundle_xla": {
+          "compile_s": 1.22034469700003,
+          "scan_median_s": 0.004768694000006235,
+          "step_ms": 0.23843470000031175,
+          "ns_per_day": 724.7267281137101
+        },
+        "prolix_bundle_pallas": {
+          "compile_s": 12.086642617999985,
+          "scan_median_s": 0.008871703000011166,
+          "step_ms": 0.4435851500005583,
+          "ns_per_day": 389.5531669619294
+        },
+        "bundle_vs_naive_split_speedup_xla": 0.9214288020937641,
+        "prolix_xla_vs_kups_xla_ratio": 0.9989047315764787,
+        "prolix_pallas_vs_kups_xla_speedup": 0.5369285919558621,
+        "prolix_pallas_vs_naive_split_speedup": 0.4952839381539187,
+        "trajectory_rel_dE_prolix_xla_vs_kups": 1.4483278221177898e-07,
+        "trajectory_rel_dE_prolix_pallas_vs_kups": 8.689974606568285e-07
+      },
+      {
+        "n_atoms": 2048,
+        "k": 424,
+        "n_steps": 20,
+        "naive_split_xla": {
+          "compile_s": 1.184572442999979,
+          "scan_median_s": 0.01207558099997641,
+          "step_ms": 0.6037790499988205,
+          "ns_per_day": 286.19740946682
+        },
+        "kups_cached_xla": {
+          "compile_s": 1.2729614080000147,
+          "scan_median_s": 0.012068427000031079,
+          "step_ms": 0.603421350001554,
+          "ns_per_day": 286.3670634119177
+        },
+        "prolix_bundle_xla": {
+          "compile_s": 1.2624382989999958,
+          "scan_median_s": 0.012026958999967974,
+          "step_ms": 0.6013479499983987,
+          "ns_per_day": 287.35443431786894
+        },
+        "prolix_bundle_pallas": {
+          "compile_s": 12.146203775000004,
+          "scan_median_s": 0.009977402000004076,
+          "step_ms": 0.4988701000002039,
+          "ns_per_day": 346.3827557513056
+        },
+        "bundle_vs_naive_split_speedup_xla": 1.004042750957126,
+        "prolix_xla_vs_kups_xla_ratio": 1.0034479206309106,
+        "prolix_pallas_vs_kups_xla_speedup": 1.209576100073561,
+        "prolix_pallas_vs_naive_split_speedup": 1.2102931203906062,
+        "trajectory_rel_dE_prolix_xla_vs_kups": 1.9110814264422515e-07,
+        "trajectory_rel_dE_prolix_pallas_vs_kups": 7.644330821676704e-07
+      },
+      {
+        "n_atoms": 8192,
+        "k": 408,
+        "n_steps": 20,
+        "naive_split_xla": {
+          "compile_s": 2.0343553370000222,
+          "scan_median_s": 0.04465230799996789,
+          "step_ms": 2.2326153999983944,
+          "ns_per_day": 77.39801490221927
+        },
+        "kups_cached_xla": {
+          "compile_s": 2.0926648960000307,
+          "scan_median_s": 0.04480490800000325,
+          "step_ms": 2.2402454000001626,
+          "ns_per_day": 77.13440679310733
+        },
+        "prolix_bundle_xla": {
+          "compile_s": 2.0794192970000154,
+          "scan_median_s": 0.044572001999995337,
+          "step_ms": 2.228600099999767,
+          "ns_per_day": 77.53746398917332
+        },
+        "prolix_bundle_pallas": {
+          "compile_s": 12.721180901000025,
+          "scan_median_s": 0.017031396999982462,
+          "step_ms": 0.8515698499991231,
+          "ns_per_day": 202.9193494816402
+        },
+        "bundle_vs_naive_split_speedup_xla": 1.001801713999128,
+        "prolix_xla_vs_kups_xla_ratio": 1.005225387901758,
+        "prolix_pallas_vs_kups_xla_speedup": 2.6307241854587375,
+        "prolix_pallas_vs_naive_split_speedup": 2.621764262791471,
+        "trajectory_rel_dE_prolix_xla_vs_kups": 1.9690752139922552e-07,
+        "trajectory_rel_dE_prolix_pallas_vs_kups": 8.860845923663874e-07
+      },
+      {
+        "n_atoms": 32768,
+        "k": 448,
+        "n_steps": 20,
+        "naive_split_xla": {
+          "compile_s": 5.767000746999997,
+          "scan_median_s": 0.19839391300001807,
+          "step_ms": 9.919695650000904,
+          "ns_per_day": 17.41988928863803
+        },
+        "kups_cached_xla": {
+          "compile_s": 5.7998432750000575,
+          "scan_median_s": 0.19625641800007543,
+          "step_ms": 9.812820900003771,
+          "ns_per_day": 17.60961519229741
+        },
+        "prolix_bundle_xla": {
+          "compile_s": 5.825295818999962,
+          "scan_median_s": 0.1963859869999851,
+          "step_ms": 9.819299349999255,
+          "ns_per_day": 17.597996948734746
+        },
+        "prolix_bundle_pallas": {
+          "compile_s": 13.05276062300004,
+          "scan_median_s": 0.08347451400004502,
+          "step_ms": 4.173725700002251,
+          "ns_per_day": 41.40185829651115
+        },
+        "bundle_vs_naive_split_speedup_xla": 1.0102243853072528,
+        "prolix_xla_vs_kups_xla_ratio": 0.9993402329672856,
+        "prolix_pallas_vs_kups_xla_speedup": 2.3510938680034674,
+        "prolix_pallas_vs_naive_split_speedup": 2.3767004261912934,
+        "trajectory_rel_dE_prolix_xla_vs_kups": 3.5680861287801235e-07,
+        "trajectory_rel_dE_prolix_pallas_vs_kups": 9.8122450253868e-07
+      }
+    ],
+    "summary": {
+      "naive_split_xla_time_exponent": 0.91883487856526,
+      "kups_cached_xla_time_exponent": 0.8993083791215132,
+      "prolix_bundle_xla_time_exponent": 0.8990863884301826,
+      "prolix_bundle_pallas_time_exponent": 0.5236809556333714
+    }
+  }
+}
