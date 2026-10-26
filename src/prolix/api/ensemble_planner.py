@@ -1,8 +1,8 @@
 """Batch planner for EnsemblePlan multi-bundle MD dispatch (#1842 / XR-BUDGET).
 
 After host ``partition_bundles_by_shape``, callers plan each homogeneous group
-with ``heterogeneous=False`` so xtrax selects Vmap/SafeMap (not a hetero
-SafeMap demotion of the full mixed batch). DedupSpec is **not** attached for
+with ``heterogeneous=False`` so xtrax selects Vmap/ChunkedMap (not a hetero
+ChunkedMap demotion of the full mixed batch). DedupSpec is **not** attached for
 seeded Langevin — use ``plan_n_mols_with_dedup`` only for topology-keyed maps.
 """
 
@@ -13,11 +13,10 @@ from typing import Any
 
 from xtrax.tiling.estimators import device_memory_budget
 
+from prolix.api.bundle_stack import can_stack_molecular_bundles
 from prolix.tiling.axes import N_ATOMS, N_MOLS
 from prolix.tiling.planner import BatchPlan, estimate_memory_theoretical
 from prolix.tiling.xtrax_adapter import BudgetInfeasibleError, plan_axes_with_xtrax
-
-from prolix.api.bundle_stack import can_stack_molecular_bundles
 
 # CI / CPU backends without memory_stats: match historical _device_budget_bytes fallback.
 _CI_DEVICE_LIMIT_BYTES = 4 << 30

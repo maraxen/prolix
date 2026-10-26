@@ -577,7 +577,7 @@ def run_simulation(
       f"  - Hydrogen addition placed H on top of existing atoms (use add_hydrogens=False)\n"
       f"  - Unparameterized atoms have sigma=0.0 (check force field coverage)\n"
       f"  - Crystal structure has severe clashes requiring preprocessing\n"
-      f"Run diagnose_inf_energy.py for detailed energy decomposition."
+      f"Inspect the per-term energy decomposition (bonded/LJ/Coulomb) to isolate the cause."
     )
     raise RuntimeError(msg)
 

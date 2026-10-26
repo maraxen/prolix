@@ -723,11 +723,9 @@ def test_settle_padding_mask_matches_unpadded(
     # gamma=0 makes the O-step's noise coefficient (c2 = sqrt(1 - exp(-2*gamma*dt)))
     # exactly zero, so the comparison is deterministic. This isolates the SETTLE/
     # RATTLE/AM-correction masking path from an orthogonal confound: the padded
-    # config's water-axis lax.scan in `_langevin_step_o_constrained` advances the
-    # RNG key through 4 iterations (2 real + 2 padding) vs. 2 for the unpadded
-    # config, so with gamma>0 the two runs' noise draws (and hence trajectories)
-    # would diverge after step 1 even with fully correct masking -- that is a
-    # real RNG-consumption difference, not a masking bug.
+    # config's water-axis vmap in `_langevin_step_o_constrained` splits
+    # n_waters+1 keys, so a padded config (2 real + 2 pad rows) draws a
+    # different noise stream than the unpadded 2-row config when gamma>0.
     gamma = 0.0
 
     def make_integrator(water_indices, mask):

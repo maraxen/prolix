@@ -132,8 +132,15 @@ def chunked_born_radii(
     Returns:
         (N,) Born radii.
     """
+    N0 = positions.shape[0]
+    n_tiles = -(-N0 // T)
+    pad_amt = n_tiles * T - N0
+    if pad_amt:
+        positions = jnp.pad(positions, ((0, pad_amt), (0, 0)))
+        radii = jnp.pad(radii, (0, pad_amt))
+        scaled_radii = jnp.pad(scaled_radii, (0, pad_amt))
+        atom_mask = jnp.pad(atom_mask, (0, pad_amt))
     N = positions.shape[0]
-    n_tiles = N // T
 
     offset_radii = radii - dielectric_offset
     offset_radii_col = offset_radii[:, None]  # (N, 1) for broadcasting
@@ -155,11 +162,12 @@ def chunked_born_radii(
             # Self-exclusion: build self-mask for this tile
             i_indices = jnp.arange(N)[:, None]  # (N, 1)
             j_indices = jnp.arange(T)[None, :] + start_idx  # (1, T)
-            not_self = (i_indices != j_indices).astype(jnp.float32)
+            # debt 832: dtype follows positions rather than hardcoding float32
+            not_self = (i_indices != j_indices).astype(pos.dtype)
 
             # Pair mask
             mask_tile = (atom_mask[:, None] & mask_j[None, :]).astype(
-                jnp.float32
+                pos.dtype
             ) * not_self
 
             # Pair integrals for this tile
@@ -186,8 +194,7 @@ def chunked_born_radii(
 
     # Sanitize padding atoms
     born_radii = jnp.where(atom_mask, born_radii, 1.5)
-
-    return born_radii
+    return born_radii[:N0]
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -226,8 +233,17 @@ def chunked_fused_energy(
     Returns:
         Scalar total nonbonded energy (kcal/mol).
     """
+    N0 = positions.shape[0]
+    n_tiles = -(-N0 // T)
+    pad_amt = n_tiles * T - N0
+    if pad_amt:
+        positions = jnp.pad(positions, ((0, pad_amt), (0, 0)))
+        born_radii = jnp.pad(born_radii, (0, pad_amt), constant_values=1.5)
+        charges = jnp.pad(charges, (0, pad_amt))
+        sigmas = jnp.pad(sigmas, (0, pad_amt))
+        epsilons = jnp.pad(epsilons, (0, pad_amt))
+        atom_mask = jnp.pad(atom_mask, (0, pad_amt))
     N = positions.shape[0]
-    n_tiles = N // T
 
     lam = soft_core_lambda
     alpha = 0.5
@@ -256,11 +272,12 @@ def chunked_fused_energy(
             # Self-exclusion
             i_indices = jnp.arange(N)[:, None]
             j_indices = jnp.arange(T)[None, :] + start_idx
-            not_self = (i_indices != j_indices).astype(jnp.float32)
+            # debt 832: dtype follows positions rather than hardcoding float32
+            not_self = (i_indices != j_indices).astype(pos.dtype)
 
             # Pair mask (no exclusions: scale=1.0 assumed, corrections applied later)
             pair_mask = (atom_mask[:, None] & m_j[None, :]).astype(
-                jnp.float32
+                pos.dtype
             ) * not_self
 
             # --- LJ ---
@@ -289,7 +306,8 @@ def chunked_fused_energy(
             f_gb_d = jnp.sqrt(
                 dist_sq + br_prod * jnp.exp(-dist_sq / (4.0 * br_prod + 1e-12))
             )
-            gb_mask = (atom_mask[:, None] & m_j[None, :]).astype(jnp.float32)
+            # debt 832: dtype follows positions rather than hardcoding float32
+            gb_mask = (atom_mask[:, None] & m_j[None, :]).astype(pos.dtype)
             e_gb = qq / f_gb_d * gb_mask
 
             # 0.5× for LJ/Coulomb double-count, GB uses full sum with 0.5 in prefactor
@@ -333,7 +351,8 @@ def ace_energy(
     energy_kj = ACE_COEFF_KJ_NM * term1 * term2
     energy_kcal = energy_kj * KJ_TO_KCAL
 
-    return jnp.sum(energy_kcal * atom_mask.astype(jnp.float32))
+    # debt 832: dtype follows born_radii (the ambient float precision) rather than hardcoding float32
+    return jnp.sum(energy_kcal * atom_mask.astype(born_radii.dtype))
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -381,7 +400,8 @@ def _sparse_exclusion_energy(
     # Valid exclusion mask: index >= 0 AND real atoms
     valid = (excl_indices >= 0) & atom_mask[:, None]
     valid = valid & atom_mask[safe_idx]
-    valid_float = valid.astype(jnp.float32)
+    # debt 832: dtype follows positions rather than hardcoding float32
+    valid_float = valid.astype(positions.dtype)
 
     # LJ for excluded pairs
     sig_i = sigmas[:, None]  # (N, 1)

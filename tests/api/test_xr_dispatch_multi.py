@@ -13,7 +13,7 @@ from prolix.api.ensemble_dispatch import (
 )
 from prolix.tiling.axes import N_ATOMS
 from prolix.tiling.planner import AxisDecision, AxisSpec, BatchPlan
-from xtrax.tiling.strategy import Bucket, SafeMap, Scan, Vmap
+from xtrax.tiling.strategy import Bucket, ChunkedMap, Scan, Vmap
 
 
 def test_n_atoms_strategy_vmap_default():
@@ -36,7 +36,7 @@ def test_n_atoms_strategy_safemap_when_chunked():
         axes_by_index={0: axis},
         budget_exceeded=False,
     )
-    assert isinstance(n_atoms_strategy(plan, 16), SafeMap)
+    assert isinstance(n_atoms_strategy(plan, 16), ChunkedMap)
 
 
 def test_dispatch_n_atoms_applies_make_axis_dispatch_iterator(monkeypatch):

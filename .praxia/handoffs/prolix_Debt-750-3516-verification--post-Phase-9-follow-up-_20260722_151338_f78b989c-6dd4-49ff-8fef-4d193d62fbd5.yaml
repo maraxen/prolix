@@ -1,0 +1,55 @@
+---
+workspace: prolix
+session_id: cea0ee8f-e6bf-4867-9146-ca981015d132
+status: in_progress
+immediately_relevant:
+- file: scripts/experiments/verify_debt750_1ake_nan.py
+  lines:
+  - 1
+  - 40
+  reason: The repro script itself -- read the docstring for the full root-cause chain before interpreting results
+- file: scripts/experiments/verify_debt750_1ake_nan.bth.toml
+  lines:
+  - 1
+  - 40
+  reason: PASS/FAIL gate definition (finite_fraction >= 0.99) and reasoning -- apply this, don't eyeball the JSON
+- file: src/prolix/api/ensemble_plan.py
+  lines:
+  - 700
+  - 720
+  reason: _setup_integrator's has_real_water gate -- confirms 1AKE takes the debt-841-fixed no-water fallback path
+- file: src/prolix/physics/settle.py
+  lines:
+  - 1104
+  - 1135
+  reason: settle_langevin's no-water fallback (masked_init_fn) -- where debt 841's atom_mask fix lives
+active_dispatches:
+- slurm:engaging:18523653
+task_id: 260722_debt750_1ake_nan_verify
+phase: Debt 750/3516 verification (post-Phase-9 follow-up)
+goal_statement: Confirm or rule out whether debt 841's atom_mask fix (no-water fallback COM-momentum recentering in settle_langevin, commit a360a22) also resolves debt 750/3516's 1AKE (vacuum) B=16 NaN fragility (5/64 non-finite, job 17905437) -- the first of three next_steps queued in the Phase 9 handoff (task 260715_b1_physics_parity).
+context_refs:
+- phase: 'Phase 9 (PR #5 merge + debt 841 root-cause/fix)'
+  task_id: 260715_b1_physics_parity
+  summary: 'PR #5 merged (debt 841 fix, commit a360a22). Handoff queued 3 next_steps: (1) debt-750 connection check [this task], (2) debt 844 test-infra fix, (3) pick among debt 773/756/835/567.'
+failed_attempts:
+- attempt_id: a1
+  description: Waited on a manual bash until-loop polling `ssh engaging squeue -j <id>` every 30-60s to detect job completion
+  outcome: SSH control-master dropped mid-loop (ssh_askpass errors, then 'Connection timed out' to orcd-login.mit.edu); user had to manually re-auth (Duo) before connectivity was restored
+  reason_failed: Tight polling loops over raw ssh are exactly what the using-myxcel skill warns against (SSH rate-limit / ControlMaster instability on Engaging login nodes) -- should have used myxcel job_status / job_wait (60s min poll, single SSH call) or a ScheduleWakeup-based check-back instead from the start
+  do_not_retry: true
+  evidence_ref: session transcript, background tasks b0i3ha0ue/bl431e3zd/b3kk7tdoz
+open_questions:
+- Does SLURM job 18523653 actually reproduce non-finite positions at B=16/200k pre-fix conditions, or does the debt-841 fix already resolve it? (the core question this task exists to answer -- unresolved as of this handoff)
+deferred:
+- description: Debt 844 (count_jaxpr_scans naive substring-count test-infra fix) and picking among debt 773/756/835/567 for the next B1 architecture pass
+  rationale: Queued in the Phase 9 handoff as next_steps 2 and 3; not started this session -- session focus was entirely on next_step 1 (debt 750 connection)
+  recommended_phase: after this task's job 18523653 result lands
+lessons_refs: []
+next_steps:
+- 'Check SLURM job 18523653 status: myxcel job_status(remote=''engaging'', slurm_id=18523653) or ssh engaging ''sacct -j 18523653 --format=JobID,State,Elapsed,ExitCode -X'' (single call, not a loop -- see using-myxcel skill, avoid SSH rate-limit bans)'
+- 'Once COMPLETED: read outputs/logs/slurm/18523653.verify_debt750.out and outputs/bench/verify_debt750_1ake_nan_seed0_job18523653.json on the cluster worktree; apply the sidecar''s outcomes.pass/fail gate (finite_fraction >= 0.99) to get a PASS/FAIL verdict'
+- 'If PASS (finite_fraction >= 0.99): close/update debt 3516 and 750 via mcp__praxia__debt(action=''resolve'') referencing this run + campaign 5d56a7ff as duplicate-of-841; no code fix needed'
+- 'If FAIL (finite_fraction < 0.99): debt 750 has a distinct root cause -- keep it open, and per the original filing''s next step do a component-decomposition profiling pass (bonded vs GB/ACE vs LJ/Coulomb vs dispatch) using scripts/experiments/profile_b1_step_scaling.py --mode per-class --class 1ake as a starting point'
+- 'Either way: transduction_log(action=''append_daily'', task_id=''260722_debt750_1ake_nan_verify'', ...) to close this sub-investigation, then return to the Phase 9 handoff''s remaining next_steps: debt 844 (count_jaxpr_scans naive substring-count fix) and picking among debt 773/756/835/567 for the next B1 architecture pass'
+---

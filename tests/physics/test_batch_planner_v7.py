@@ -1,7 +1,7 @@
 """V7 / B5: BatchPlanner joint-budget decision contracts (XR-KILL-FORK).
 
 Validates xtrax MemoryBudget semantics via the thin ``BatchPlanner.plan()``
-facade: hetero SafeMap, generous Vmap retention, tight demotion, infeasible
+facade: hetero ChunkedMap, generous Vmap retention, tight demotion, infeasible
 raise, and determinism. Does not encode the deleted prolix greedy oracle.
 """
 
@@ -89,7 +89,7 @@ def test_tight_budget_joint_demotion_to_tile():
             decisions, base_shape_bytes=10.0, activation_multiplier=1.0
         )
 
-    # Vmap product = 64*10 = 640; SafeMap tile=8 → 80. Budget between them.
+    # Vmap product = 64*10 = 640; ChunkedMap tile=8 → 80. Budget between them.
     planner = BatchPlanner(
         axes=[atoms],
         budget_bytes=200,

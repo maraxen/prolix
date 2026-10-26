@@ -5,14 +5,15 @@ Prereg: ``.praxia/docs/specs/260528_b1-preregistration.md``
 
 Usage (via bathos — required for scripts/benchmarks/)::
 
-    uv run bth run python scripts/benchmarks/b1_init_exec.py \\
-        --tag smoke --tag path:inference --out tmp/b1_smoke_full.json -- \\
-        --smoke --path inference
+    bth run --tags smoke --tags path:inference --output-paths tmp/b1_smoke_full.json \\
+        -- uv run python scripts/benchmarks/b1_init_exec.py \\
+        --smoke --path inference --out-json tmp/b1_smoke_full.json
 
-    uv run bth run python scripts/benchmarks/b1_init_exec.py \\
-        --tag cluster --tag b1-full --tag path:inference --campaign <id> \\
-        --out outputs/bench/b1_full_prolix_seed0.json -- \\
-        --backend prolix --seed 0 --replicas 16 --ps 100 --path inference
+    bth run --tags cluster --tags b1-full --tags path:inference --campaign-id <id> \\
+        --output-paths outputs/bench/b1_full_prolix_seed0.json \\
+        -- uv run python scripts/benchmarks/b1_init_exec.py \\
+        --backend prolix --seed 0 --replicas 16 --ps 100 --path inference \\
+        --out-json outputs/bench/b1_full_prolix_seed0.json
 """
 
 from __future__ import annotations

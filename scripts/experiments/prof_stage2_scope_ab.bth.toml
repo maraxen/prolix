@@ -1,0 +1,38 @@
+[experiment]
+hypothesis = """
+P7 task 12: P2 named_scope wraps do not perturb fused flash-force timing on
+H200 at Stage-2 size (1vii, flash, PME on, 1.0 Å), replicating P5's TOST
+gate on the backend where attribution is believed.
+"""
+
+[outcomes.pass]
+condition = "verdict = 'PASS'"
+decision = "Per-scope attribution from P7 is citable."
+reasoning = "90% CI of median relative A/B delta is inside ±5% at Stage-2/H200."
+
+[outcomes.marginal]
+condition = "verdict = 'INSUFFICIENT_POWER' OR verdict = 'UNRESOLVED_ON_CPU'"
+decision = "Do not revert scopes; record CI width. Term ranking remains valid."
+reasoning = "Power failure is not a detected perturbation (P5 two-failure-mode rule)."
+
+[outcomes.fail]
+condition = "verdict IS NULL OR verdict = 'DETECTED_PERTURBATION'"
+decision = "Per-scope attribution from P7 is not citable; fall back to op-name. Ranking still valid if both arms share instrumentation."
+reasoning = "A detected fusion perturbation means named_scope labels cannot be trusted on this backend/size."
+is_residual = true
+
+[result_schema]
+verdict = "str"
+median_delta = "float"
+ci_lo = "float"
+ci_hi = "float"
+n_pairs = "int"
+pilot_s = "float"
+protein = "str"
+mode = "str"
+pme = "str"
+grid_spacing = "str"
+
+[metadata]
+campaign_mode = "exploration"
+tags = ["p7-stage2", "scope-ab", "not-citable-for-761"]

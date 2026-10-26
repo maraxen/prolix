@@ -1,0 +1,63 @@
+[experiment]
+hypothesis = """
+Task 260805_p5_rottrans_mechanism_c: after three candidate mechanisms for the
+residual T_rot/T_trans imbalance under NVT Langevin+SETTLE were ruled out or
+deprioritized (A: RATTLE-as-sink, ruled out via gamma=0 NVE bisect, backlog 932;
+B: OU noise-covariance mismatch, already inertia-weighted in production code
+since June, proven a no-op for this symptom; C: R1/R2 angular-momentum
+re-pinning to a biased intra-cycle reference, tested today at n=16 and n=64,
+found NOT dominant -- ~85% of the split is already present before any
+single-cycle correction step runs), the OpenMM reference-implementation
+comparison surfaced a fourth, literature-grounded candidate: Asthagiri & Beck
+report that rigid-water rot/trans equipartition genuinely breaks down at
+dt >= 1fs even in CORRECT integrators, worsening with dt.
+
+This experiment discriminates "genuine finite-dt discretization artifact"
+(the split should shrink substantially as dt -> 0) from "remaining
+implementation bug" (the split should stay roughly flat regardless of dt).
+Runs settle_langevin (unmodified production code) at n_waters=64 -- at or
+above the documented small-N finite-size warm-bias threshold
+(.praxia/docs/research/260612_p5-dt1fs-size-crossover.md), to avoid
+confounding with that already-characterized, separate artifact -- across
+dt in {0.25, 0.5, 1.0} fs at fixed gamma=10 ps^-1, and compares |split| at
+the largest vs smallest dt.
+
+This is a scoping experiment, not a confirmatory campaign: exploration mode,
+no claim-tier pre-registration required. The result decides whether further
+mechanism-hunting is warranted (implementation bug persists at all dt) or
+whether the residual is substantially explained by known integrator
+discretization limits (shrinks strongly toward zero as dt -> 0).
+"""
+
+[outcomes.pass]
+condition = "split_ratio_maxdt_over_mindt >= 2.0 AND abs_split_at_min_dt < 5.0"
+decision = "Residual imbalance is substantially a finite-dt discretization artifact, consistent with Asthagiri & Beck. Close out the code-bug-hunting thread on this mechanism; document the dt-dependence in the research doc; recommend production dt choice be informed by this tradeoff rather than further debugging."
+reasoning = "A discretization artifact should shrink toward zero as dt -> 0 (Leimkuhler & Matthews / Asthagiri & Beck). Ratio >= 2.0 means the split at the coarsest dt is at least double the split at the finest dt -- meaningful shrinkage. The absolute threshold (< 5K at the smallest dt) guards against a case where the split shrinks proportionally but is still practically large at every tested dt, which would mean dt-dependence exists but doesn't fully explain the phenomenon."
+
+[outcomes.marginal]
+condition = "split_ratio_maxdt_over_mindt >= 1.2 AND split_ratio_maxdt_over_mindt < 2.0"
+decision = "Some dt-dependence exists but is not dramatic. Widen the dt sweep (add a smaller dt, e.g. 0.1fs) before concluding either way; do not close the code-bug-hunting thread yet, but also do not treat this as strong evidence of an implementation bug."
+reasoning = "A ratio in this range is ambiguous -- consistent with either a weak discretization effect combined with a real residual bug, or genuine discretization behavior that hasn't been probed at small enough dt to see the full trend. More data resolves the ambiguity cheaply (this is a fast local-scale run)."
+
+[outcomes.fail]
+condition = "split_ratio_maxdt_over_mindt < 1.2 OR (split_ratio_maxdt_over_mindt >= 2.0 AND abs_split_at_min_dt >= 5.0)"
+decision = "The residual imbalance is NOT primarily a finite-dt discretization artifact -- it persists essentially unchanged (or remains large in absolute terms) even as dt shrinks toward zero. This means mechanisms A/B/C being ruled out still leaves a genuine, unidentified implementation-level cause. Continue mechanism-hunting: candidates not yet tested include the full composed-cycle steady-state behavior (per today's R1/R2 finding that the imbalance is already present entering each cycle) and a per-trajectory (not cross-sectional) accumulation diagnostic."
+reasoning = "Ratio < 1.2 means the split barely changes across a 4x dt range -- the signature of a bug, not a discretization limit (whose effect should scale strongly with dt, typically as dt or dt^2 depending on the specific error source). The second disjunct catches the edge case where dt-dependence exists (ratio >= 2.0) but the absolute residual at the smallest tested dt is still practically large (>= 5K) -- i.e. discretization is A factor but not sufficient to explain the phenomenon, so the bug-hunting thread should stay open regardless."
+is_residual = true
+
+[result_schema]
+n_waters = "int"
+steps = "int"
+burn_in = "int"
+gamma_ps = "float"
+seed = "int"
+n_dt_values = "int"
+dt_min_fs = "float"
+dt_max_fs = "float"
+abs_split_at_min_dt = "float"
+abs_split_at_max_dt = "float"
+split_ratio_maxdt_over_mindt = "float"
+
+[metadata]
+campaign_mode = "exploration"
+tags = ["cluster", "p5", "rottrans", "dt-scaling", "mechanism-d-discriminator"]

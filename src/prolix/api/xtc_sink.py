@@ -77,8 +77,8 @@ class MdtrajXtcWriter:
 @dataclass
 class XtcFrameSink:
     """xtrax ``Sink``-compatible terminal: positions → ``.xtc`` via backend.
-
-    ``ordered=True`` matches the Tap–Sink contract (SafeMap/Scan axes). Host
+    
+    ``ordered=True`` matches the Tap–Sink contract (ChunkedMap/Scan axes). Host
     ``__call__`` writes immediately; under a JAX trace callers should wrap with
     ``jax.experimental.io_callback`` (same pattern as ``ZarrStagingSink``
     consumers — the sink itself stays host-side).

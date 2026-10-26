@@ -140,7 +140,7 @@ mkdir -p outputs/bench outputs/logs/slurm
 OUT="outputs/bench/b1_full_${FOOTPRINT}_${BACKEND}_${PATH_MODE}_seed${SEED}_job${SLURM_JOB_ID:-local}.json"
 
 CAMPAIGN_FLAG=""
-[[ -n "${CAMPAIGN_ID}" ]] && CAMPAIGN_FLAG="--campaign ${CAMPAIGN_ID}"
+[[ -n "${CAMPAIGN_ID}" ]] && CAMPAIGN_FLAG="--campaign-id ${CAMPAIGN_ID}"
 
 # shellcheck disable=SC2086
 uv run --python "${UV_PYTHON}" "${UV_SYNC_EXTRAS[@]}" bth run "${PYTHON_RUN}" scripts/benchmarks/b1_init_exec.py \
@@ -148,8 +148,8 @@ uv run --python "${UV_PYTHON}" "${UV_SYNC_EXTRAS[@]}" bth run "${PYTHON_RUN}" sc
     --tag "footprint:${FOOTPRINT}" --tag "path:${PATH_MODE}" \
     ${SLURM_ARRAY_TASK_ID:+--tag "array_task:${SLURM_ARRAY_TASK_ID}"} \
     ${CAMPAIGN_FLAG} \
-    --out "${OUT}" \
-    -- \
+    --output-paths "${OUT}" \
+    -- uv run --python "${UV_PYTHON}" "${PYTHON_RUN}" scripts/benchmarks/b1_init_exec.py \
     --backend "${BACKEND}" \
     --seed "${SEED}" \
     --footprint "${FOOTPRINT}" \

@@ -15,11 +15,11 @@ import jax
 import jax.numpy as jnp
 import optax
 from jaxtyping import Array, Float
+from xtrax.tiling import _BatchPlanWrapper
 
 from prolix.fitting.bundles import TrainState
 from prolix.fitting.loss import bonded_loss
 from prolix.fitting.topology import BondedTopology
-from xtrax.tiling import _BatchPlanWrapper
 
 if TYPE_CHECKING:
     from prolix.fitting.bundles import BatchedFittingBundle

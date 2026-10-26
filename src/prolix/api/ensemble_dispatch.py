@@ -1,7 +1,7 @@
 """Axis dispatch via xtrax make_axis_dispatch (#2645 / XR-DISPATCH / XR-DISPATCH-MULTI / XR-CARRY).
 
-N_MOLS (MVP 2A): ``Vmap`` / ``SafeMap`` only via ``dispatch_n_mols``.
-N_ATOMS (XR-DISPATCH-MULTI): same Vmap/SafeMap policy via ``dispatch_n_atoms``.
+N_MOLS (MVP 2A): ``Vmap`` / ``ChunkedMap`` only via ``dispatch_n_mols``.
+N_WATERS (SETTLE): ``dispatch_n_waters`` Vmap/ChunkedMap over rigid waters.
 ``Bucket``, ``DedupGather``, and ``Scan`` on mapped axes raise — Scan belongs on
 the step axis (XR-CARRY); ``DedupGather`` executes via
 ``prolix.api.ensemble_dedup.dispatch_n_mols_dedup`` for **topology-keyed**
@@ -10,33 +10,52 @@ bodies only (never seeded Langevin).
 N_STEPS (XR-CARRY): ``dispatch_n_steps`` applies ``JaxScanIterator`` from
 ``make_axis_dispatch(Scan(), ...)``.
 
-N_STEPS inference (B1-INFER): ``dispatch_n_steps_inference`` uses
-``lax.while_loop`` carry-only — **not** reverse-mode AD safe. Prefer for
-throughput / Claim-1 cold-start timing; keep ``dispatch_n_steps`` for
-trajectory / AD-compatible paths.
+N_STEPS inference (B1-INFER): ``dispatch_n_steps_inference`` uses xtrax
+``WhileCarry`` / ``WhileLoopIterator`` (``lax.while_loop``, carry-only) —
+**not** reverse-mode AD safe. Prefer for throughput / Claim-1 cold-start
+timing; keep ``dispatch_n_steps`` for trajectory / AD-compatible paths.
 """
 
 from __future__ import annotations
 
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 
 import jax.numpy as jnp
-from jax import lax
 from xtrax.tiling.dispatch import DispatchRejected, make_axis_dispatch
-from xtrax.tiling.strategy import Bucket, DedupGather, SafeMap, Scan, Vmap
+from xtrax.tiling.strategy import (
+    Bucket,
+    DedupGather,
+    Scan,
+    Vmap,
+    WhileCarry,
+)
+try:
+    from xtrax.tiling.strategy import ChunkedMap
+except ImportError:
+    from xtrax.tiling.strategy import SafeMap as ChunkedMap
+try:
+    from xtrax.tiling.strategy import SafeMap
+except ImportError:
+    SafeMap = ChunkedMap
 
+from prolix.tiling.axis_dispatch import dispatch_n_waters, n_waters_strategy
 from prolix.tiling.axes import N_ATOMS, N_MOLS, N_STEPS
 from prolix.tiling.planner import BatchPlan
 
 __all__ = [
+    "ChunkedMap",
     "DispatchRejected",
+    "SafeMap",
     "dispatch_n_atoms",
     "dispatch_n_mols",
     "dispatch_n_steps",
     "dispatch_n_steps_inference",
+    "dispatch_n_waters",
     "dispatch_vmap_safemap",
     "n_atoms_strategy",
     "n_mols_strategy",
+    "n_waters_strategy",
 ]
 
 
@@ -45,7 +64,7 @@ def _vmap_or_safemap(
     axis_name: str,
     n: int,
 ) -> Vmap | SafeMap:
-    """Map a BatchPlan decision to Vmap (full) or SafeMap (chunked)."""
+    """Map a BatchPlan decision to Vmap (full) or SafeMap/ChunkedMap (chunked)."""
     if plan is None or n <= 1:
         return Vmap()
     try:
@@ -55,38 +74,38 @@ def _vmap_or_safemap(
     batch_size = decision.batch_size
     if batch_size == 0 or batch_size >= n:
         return Vmap()
-    return SafeMap(batch_size=batch_size)
+    return ChunkedMap(batch_size=batch_size)
 
 
-def n_mols_strategy(plan: BatchPlan | None, n_systems: int) -> Vmap | SafeMap:
+def n_mols_strategy(plan: BatchPlan | None, n_systems: int) -> Vmap | ChunkedMap:
     """Map prolix BatchPlan N_MOLS decision to an xtrax strategy."""
     return _vmap_or_safemap(plan, N_MOLS.name, n_systems)
 
 
-def n_atoms_strategy(plan: BatchPlan | None, n_atoms: int) -> Vmap | SafeMap:
+def n_atoms_strategy(plan: BatchPlan | None, n_atoms: int) -> Vmap | ChunkedMap:
     """Map prolix BatchPlan N_ATOMS decision to an xtrax strategy (XR-DISPATCH-MULTI)."""
     return _vmap_or_safemap(plan, N_ATOMS.name, n_atoms)
 
 
 def dispatch_vmap_safemap(
     axis_name: str,
-    strategy: Vmap | SafeMap,
+    strategy: Vmap | ChunkedMap,
     fn: Callable[..., Any],
     args: Any,
     *,
     in_axes: Any = 0,
 ) -> Any:
-    """Apply ``make_axis_dispatch`` Vmap/SafeMap iterator on ``axis_name``.
-
+    """Apply ``make_axis_dispatch`` Vmap/ChunkedMap iterator on ``axis_name``.
+    
     Rejects Bucket / DedupGather / Scan rather than silent-vmap.
     """
     if isinstance(strategy, (Bucket, DedupGather, Scan)):
         raise DispatchRejected(
             f"{axis_name} dispatch rejects {type(strategy).__name__}; "
-            "only Vmap/SafeMap are supported "
+            "only Vmap/ChunkedMap are supported "
             "(Scan → XR-CARRY; DedupGather → ensemble_dedup; Bucket → XR-BUCKET)."
         )
-    if not isinstance(strategy, (Vmap, SafeMap)):
+    if not isinstance(strategy, (Vmap, SafeMap, ChunkedMap)):
         raise TypeError(
             f"{axis_name} dispatch unsupported strategy type: {type(strategy)!r}"
         )
@@ -105,10 +124,10 @@ def dispatch_n_mols(
     extra_stacked: Any = None,
 ) -> Any:
     """Dispatch ``fn(bundle, seed)`` over stacked bundles on N_MOLS.
-
+    
     Applies the iterator returned by ``make_axis_dispatch`` (VmapIterator /
-    SafeMapIterator). Unsupported strategies raise rather than silent-vmap.
-
+    ChunkedMapIterator). Unsupported strategies raise rather than silent-vmap.
+    
     Args:
         extra_stacked: Optional additional stacked pytree (same leading batch
             axis as ``stacked_bundle``/``seeds``) to map alongside them --
@@ -187,12 +206,13 @@ def dispatch_n_steps_inference(
     *,
     on_step: Callable[[Any, Any], None] | None = None,
 ) -> Any:
-    """Carry-only N_STEPS dispatch via ``lax.while_loop`` (B1-INFER).
+    """Carry-only N_STEPS dispatch via xtrax ``WhileCarry`` (B1-INFER).
 
     Unlike ``dispatch_n_steps``, this does **not** materialize a
     ``(n_steps, ...)`` trajectory stack. ``step_fn(state, step_i) -> state``.
 
-    The step loop is an XLA ``while_loop`` (device-side). When invoked from
+    The step loop is an XLA ``while_loop`` (device-side) through
+    ``make_axis_dispatch(WhileCarry(), ...)``. When invoked from
     host Python (not already under a JAX transform), the whole loop is wrapped
     in ``jax.jit`` so compile/run is one program. Under ``vmap`` / outer
     ``jit``, the bare ``while_loop`` is embedded in that transform (no nested
@@ -235,13 +255,13 @@ def dispatch_n_steps_inference(
 
                 def _hook(i, positions):
                     on_step(i, positions)
-                    return None
 
                 payload = getattr(new_state, "position", new_state)
                 io_callback(_hook, None, step_i, payload)
             return (step_i + 1, new_state)
 
-        _final_i, final_state = lax.while_loop(cond, body, (0, init))
+        iterator = make_axis_dispatch(WhileCarry(), axis=N_STEPS.name)
+        _final_i, final_state = iterator(cond, body, (0, init))
         return final_state
 
     # Nested jit under vmap is wrong; host call sites want one jitted program.

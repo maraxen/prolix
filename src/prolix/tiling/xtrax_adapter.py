@@ -2,7 +2,7 @@
 
 Converts AxisSpec / BatchPlan between the two representations and delegates
 strategy selection to xtrax joint ``MemoryBudget`` planning. Heterogeneous
-axes are fixed to SafeMap before the joint plan; homogeneous axes are planned
+axes are fixed to ChunkedMap before the joint plan; homogeneous axes are planned
 under ``MemoryBudget``. No secondary host demotion loop.
 """
 
@@ -16,15 +16,25 @@ from xtrax.tiling.dedup import DedupSpec
 from xtrax.tiling.plan import AxisDecision as XtraxAxisDecision
 from xtrax.tiling.plan import AxisSpec as XtraxAxisSpec
 from xtrax.tiling.plan import BatchPlanner as XtraxBatchPlanner
-from xtrax.tiling.strategy import Bucket, DedupGather, SafeMap, Scan, Vmap
+from xtrax.tiling.strategy import Bucket, DedupGather, Scan, Vmap
+try:
+    from xtrax.tiling.strategy import ChunkedMap
+except ImportError:
+    from xtrax.tiling.strategy import SafeMap as ChunkedMap
+try:
+    from xtrax.tiling.strategy import SafeMap
+except ImportError:
+    SafeMap = ChunkedMap
 
 from prolix.tiling.planner import AxisDecision, AxisSpec, BatchPlan
 
 __all__ = [
     "BudgetInfeasibleError",
     "CarrySpec",
+    "ChunkedMap",
     "DedupSpec",
     "MemoryBudget",
+    "SafeMap",
     "plan_axes_with_xtrax",
     "prolix_axis_to_xtrax",
     "xtrax_decision_to_prolix",
@@ -74,7 +84,7 @@ def _strategy_to_batch_size(
     strategy = decision.strategy
     if isinstance(strategy, Vmap):
         return 0
-    if isinstance(strategy, SafeMap):
+    if isinstance(strategy, (SafeMap, ChunkedMap)):
         return max(1, strategy.batch_size)
     if isinstance(strategy, Bucket):
         return max(1, decision.batch_size or axis.tile_granularity)
@@ -98,20 +108,20 @@ def _hetero_safe_map_decision(axis: AxisSpec) -> AxisDecision:
 
 def plan_axes_with_xtrax(
     axes: list[AxisSpec],
-    budget_bytes: float | int,
+    budget_bytes: float,
     estimate_memory: Callable[[list[AxisDecision]], float],
     carry_specs: list[CarrySpec] | None = None,
     dedup_specs: list[DedupSpec] | None = None,
 ) -> BatchPlan:
     """Plan using xtrax ``BatchPlanner(budget=MemoryBudget(...))``.
-
-    Heterogeneous axes are fixed to SafeMap and excluded from joint demotion
+    
+    Heterogeneous axes are fixed to ChunkedMap and excluded from joint demotion
     candidates. Homogeneous axes are planned under the joint budget. Optional
     ``carry_specs`` pre-demote named axes to ``Scan`` (XR-CARRY). Optional
     ``dedup_specs`` pre-demote named axes to ``DedupGather`` (XR-DEDUP). The
     estimate callable bridges xtrax ``AxisDecision`` sequences back to the
     caller-supplied prolix estimator (typically ``estimate_memory_theoretical``).
-
+    
     Raises:
         BudgetInfeasibleError: If the joint estimate cannot fit ``budget_bytes``
             after demotion (or for hetero-only plans that already exceed budget).
@@ -126,7 +136,7 @@ def plan_axes_with_xtrax(
     dedup_names = {ds.axis_name for ds in dedup_list}
 
     # CarrySpec / DedupSpec axes must reach xtrax Phase-0/0b even if marked
-    # heterogeneous so the planner can fail loud rather than silent SafeMap.
+    # heterogeneous so the planner can fail loud rather than silent ChunkedMap.
     het_decisions: list[AxisDecision] = []
     plan_axes: list[AxisSpec] = []
     for ax in sorted_axes:

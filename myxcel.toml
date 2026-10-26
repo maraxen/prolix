@@ -1,6 +1,14 @@
 # Project-level myxcel configuration for prolix.
 # Override resolution: built-in → ~/.myxcel.toml → this file (env/extra_args merged).
 
+[push]
+# Local GPU traces / scratch — not source; keep off worktree scratch.
+# Root-anchored (leading "/") so tests/bench and tests/profiling still sync.
+excludes = ["/profiling/", "/bench/", "/p5c_stage1_v2/"]
+
+[tier]
+kind = "research"
+
 [slurm.presets.preempt_gpu]
 # Preemptable GPU jobs — long walltime, fault-tolerant workloads.
 # Use for multi-hour GPU runs that can tolerate preemption.

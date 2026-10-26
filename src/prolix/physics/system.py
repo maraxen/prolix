@@ -179,12 +179,21 @@ def make_energy_fn(
     box_arr = jnp.asarray(box)
     pme_grid = kwargs.get("pme_grid_points", 64)
     gs = kwargs.get("pme_grid_spacing") or float(jnp.mean(box_arr.astype(jnp.float64))) / float(max(int(pme_grid), 1))
-    _spme = pme.make_spme_energy_fn(box_arr, alpha=float(pme_alpha), grid_spacing=gs)
+    _spme = pme.make_spme_energy_fn(
+        box_arr,
+        alpha=float(pme_alpha),
+        grid_spacing=gs,
+        use_pallas_pme=kwargs.get("use_pallas_pme"),
+    )
+
+  _lj_sw = float(kwargs.get("lj_switch_width") or 0.0)
 
   def lj_energy_fn_bound(r, neighbor=None):
     if neighbor is not None:
         nb_idx = getattr(neighbor, "idx", neighbor)
-        e_lj = chunked_lj_energy_nl(r, sigmas, epsilons, excl_idx, excl_sv, nb_idx, displacement_fn, cutoff, 128)
+        e_lj = chunked_lj_energy_nl(
+            r, sigmas, epsilons, excl_idx, excl_sv, nb_idx, displacement_fn, cutoff, 128, _lj_sw
+        )
     else:
         e_lj = chunked_lj_energy(r, sigmas, epsilons, excl_idx, excl_sv, displacement_fn, cutoff, 128)
 
@@ -343,14 +352,17 @@ def make_energy_fn_pure(
 
     if neighbor is not None:
       nb_idx = getattr(neighbor, "idx", neighbor)
-      e_lj = chunked_lj_energy_nl(r, sigmas_p, epsilons_p, excl_idx, excl_sv, nb_idx, displacement_fn, cutoff_distance, tile_size)
+      e_lj = chunked_lj_energy_nl(r, sigmas_p, epsilons_p, excl_idx, excl_sv, nb_idx, displacement_fn, cutoff_distance, tile_size, float(kwargs.get("lj_switch_width") or 0.0))
       e_direct = chunked_coulomb_energy_nl(r, charges_p, excl_idx, excl_se, nb_idx, displacement_fn, pme_alpha, COULOMB_CONSTANT, cutoff_distance, tile_size)
     else:
       e_lj = chunked_lj_energy(r, sigmas_p, epsilons_p, excl_idx, excl_sv, displacement_fn, cutoff_distance, tile_size)
       e_direct = chunked_coulomb_energy(r, charges_p, excl_idx, excl_se, displacement_fn, pme_alpha, COULOMB_CONSTANT, cutoff_distance, tile_size)
 
     # PME Reciprocal
-    spme_fn = lambda pos, q, m: pme.spme_energy_with_forces(pos, q, m, box_arr, grid_dims, pme_alpha, 4)
+    _pallas = pme.resolve_use_pallas_pme(kwargs.get("use_pallas_pme"))
+    spme_fn = lambda pos, q, m: pme.spme_energy_with_forces(
+        pos, q, m, box_arr, grid_dims, pme_alpha, 4, _pallas
+    )
     e_recip = spme_fn(r, charges_p, physics_system.atom_mask) + pme.spme_background_energy(charges_p, physics_system.atom_mask, pme_alpha, box_arr)
 
     # ACE nonpolar term if implicit solvent
@@ -375,8 +387,10 @@ def make_energy_fn_pure(
 # ---------------------------------------------------------------------------
 
 
-def _next_bucket(n: int, buckets: tuple) -> int:
-    """Return the smallest bucket >= n, or the largest if n exceeds all."""
+def _next_bucket(n: int, buckets: tuple, *, use_size_buckets: bool = True) -> int:
+    """Return the smallest bucket >= n, or n itself when size-bucketing is off."""
+    if not use_size_buckets:
+        return int(n)
     for b in buckets:
         if n <= b:
             return b
@@ -857,6 +871,9 @@ def make_bundle_from_system(
         has_implicit_solvent=False,
         boundary_condition=boundary_condition,
         has_real_water=nw > 0,
+        use_size_buckets=use_size_buckets,
+        exact_n_atoms=0 if use_size_buckets else int(a),
+        exact_n_waters=0 if use_size_buckets else int(wb),
     )
 
     # --- per-atom helpers -------------------------------------------------

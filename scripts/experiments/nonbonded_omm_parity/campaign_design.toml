@@ -1,0 +1,15 @@
+# Shared design for campaign nonbonded-omm-parity (not a bathos sidecar).
+#
+# Create: bth campaign create "nonbonded-omm-parity" --mode confirmation \
+#   --question "Do Prolix NL+LJ-switch+PME and flash all-pairs match OpenMM 8.3.1 Reference gold?"
+# Then pass --campaign <id> on every bth run.
+
+[campaign]
+slug = "nonbonded-omm-parity"
+oracle_dir = "data/oracles/openmm_8.3.1"
+oracle_platform = "Reference"
+openmm_pin = "8.3.1"
+
+[probes]
+nl = "scripts/experiments/nl_omm_parity.py"
+flash = "scripts/experiments/flash_omm_parity.py"

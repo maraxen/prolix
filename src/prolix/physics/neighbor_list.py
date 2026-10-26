@@ -158,18 +158,64 @@ def make_neighbor_list_fn(
   cutoff: float,
   capacity_multiplier: float = 1.25,
   disable_cell_list: bool = False,
+  dr_threshold: float = 0.5,
 ) -> Callable[..., partition.NeighborList]:
-  """Creates a neighbor list function optimized for solvent systems."""
-  return partition.neighbor_list(
+  """Creates a neighbor list function optimized for solvent systems.
+
+  Positions are wrapped into ``[0, box)`` before being handed to jax_md
+  (backlog #4699). This is required for correctness, not just tidiness:
+  ``jax_md.partition.cell_list_fn`` bins particles with
+
+      indices = jnp.array(position / cell_size, dtype=i32)   # partition.py:391
+
+  which truncates *toward zero* with no wrapping and no bounds check, so the
+  cell list assumes positions already lie inside ``[0, box)``. prolix passes
+  raw frame coordinates, which for a solvated protein are typically centred on
+  the origin -- a negative coordinate then aliases onto the wrong cell
+  (``int32(-0.4) == int32(0.4) == 0``) and a coordinate past ``L`` hashes
+  outside ``cell_count``. Either way those particles' true neighbours are
+  never enumerated and the pairs vanish with no error.
+
+  Measured on solvated 1vii (43.3 A box, coords spanning -22.1 to +23.1):
+  the cell list dropped 207,717 of 1,059,926 in-cutoff pairs (**19.6%**);
+  with wrapping it returns exactly the brute-force candidate set (missing 0).
+  See ``tests/physics/test_cell_list_pair_completeness.py``.
+
+  Wrapping is physically a no-op for a periodic system -- it selects a
+  different periodic image of the same configuration -- and is invisible to
+  the neighbour list's own rebuild check, which measures displacement through
+  the periodic (minimum-image) ``displacement_fn``. The returned ``idx`` is a
+  list of atom *indices*, so callers may continue to evaluate forces with
+  their original unwrapped coordinates.
+
+  With the precondition now enforced, the cell list is safe and is enabled by
+  default; ``disable_cell_list=True`` falls back to O(N^2) construction.
+  """
+  fns = partition.neighbor_list(
     displacement_fn,
     box_size,
     r_cutoff=cutoff,
-    dr_threshold=0.5,  # buffer distance for updates
+    dr_threshold=dr_threshold,
     capacity_multiplier=capacity_multiplier,
     disable_cell_list=disable_cell_list,
     mask_self=True,
     fractional_coordinates=False,
   )
+
+  box = jnp.asarray(box_size)
+
+  def _wrap(position: Array) -> Array:
+    return jnp.mod(position, box)
+
+  def allocate(position: Array, **kwargs) -> partition.NeighborList:
+    return fns.allocate(_wrap(position), **kwargs)
+
+  def update(
+    position: Array, neighbors: partition.NeighborList, **kwargs
+  ) -> partition.NeighborList:
+    return fns.update(_wrap(position), neighbors, **kwargs)
+
+  return partition.NeighborListFns(allocate, update)
 
 
 def compute_exclusion_mask_neighbor_list(
@@ -246,12 +292,18 @@ def map_exclusions_to_dense_padded(
 
   Args:
       exclusion_spec: Sparse exclusion data.
-      max_exclusions: Capacity per atom for excluded neighbors. If too small,
-          entries are truncated — compare :func:`max_exclusion_slots_needed` first.
+      max_exclusions: Capacity per atom for excluded neighbors. If any atom
+          needs more slots, this raises (no silent truncation).
 
   Returns:
       (excl_indices, excl_scales_vdw, excl_scales_elec) arrays.
   """
+  needed = max_exclusion_slots_needed(exclusion_spec)
+  if needed > int(max_exclusions):
+    raise ValueError(
+        f"exclusion topology needs {needed} slots per atom, "
+        f"max_exclusions={max_exclusions}"
+    )
   N = exclusion_spec.n_atoms
 
   # Initialize with -1 (invalid index)
@@ -363,6 +415,13 @@ def pair_list_to_dense_padded(
     if 0 <= j < n_atoms:
       atom_excls[j].append((i, sv, se))
 
+  max_needed = max((len(x) for x in atom_excls), default=0)
+  if max_needed > int(max_exclusions):
+    raise ValueError(
+        f"exclusion topology needs {max_needed} slots per atom, "
+        f"max_exclusions={max_exclusions}"
+    )
+
   excl_indices_np = np.full((n_atoms, max_exclusions), -1, dtype=np.int32)
   scales_vdw_np = np.ones((n_atoms, max_exclusions), dtype=np.float32)
   scales_elec_np = np.ones((n_atoms, max_exclusions), dtype=np.float32)
@@ -387,14 +446,13 @@ def get_neighbor_exclusion_scales(
 ) -> tuple[Array, Array]:
   r"""Compute scale factors for neighbors based on exclusion lists.
 
-  Process:
-  1.  **Broadcast**: Align neighbor and exclusion indices for comparison.
-  2.  **Compare**: Identify matches between neighbor list and exclusion list.
-  3.  **Select**: Extract the associated scale factors where matches exist.
-  4.  **Default**: Return 1.0 for neighbors not found in the exclusion list.
+  Uses a branchless $\lceil \log_2 M \rceil$-step binary search (5 steps for
+  ``M = 32``) over sorted per-atom exclusion rows ``excl_indices``, avoiding
+  both the $(N, K, M)$ broadcast tensor and the 32-step linear scan.
 
   Args:
-      excl_indices: (N, M) padded exclusion indices.
+      excl_indices: (N, M) padded exclusion indices (sorted ascending per row,
+          unused slots padded with -1).
       excl_scales_vdw, excl_scales_elec: (N, M) padded scales.
       neighbor_idx: (N, K) neighbor indices.
 
@@ -402,49 +460,38 @@ def get_neighbor_exclusion_scales(
       (scale_vdw, scale_elec) arrays of shape (N, K).
   """
   N, K = neighbor_idx.shape
-  M = excl_indices.shape[1]
+  M = int(excl_indices.shape[1]) if excl_indices.ndim == 2 else 0
+  vdw_dtype = excl_scales_vdw.dtype
+  elec_dtype = excl_scales_elec.dtype
 
-  # Optimization: Avoid creating (N, K, M) tensor which is huge (O(N^2) effectively).
-  # Instead, use a loop over M (exclusions) to update masks.
-  # Since M is small (32), this is efficient and memory scaling is O(N*K).
+  ones_vdw = jnp.ones((N, K), dtype=vdw_dtype)
+  ones_elec = jnp.ones((N, K), dtype=elec_dtype)
+  if M == 0:
+    return ones_vdw, ones_elec
 
-  final_vdw = jnp.ones((N, K), dtype=jnp.float32)
-  final_elec = jnp.ones((N, K), dtype=jnp.float32)
+  # Map -1 padding to INT_MAX so each row is monotonically non-decreasing.
+  int_max = jnp.int32(2**30)
+  excl_sorted = jnp.where(excl_indices >= 0, excl_indices.astype(jnp.int32), int_max)
+  nbr_i32 = neighbor_idx.astype(jnp.int32)
 
-  # Prepare exclusion data (N, M)
-  # broadcasting to (N, K) per iteration
+  pos = jnp.zeros((N, K), dtype=jnp.int32)
+  if M > 1:
+    step = 1 << ((M - 1).bit_length() - 1)
+    while step > 0:
+      cand = pos + step
+      cand_safe = jnp.minimum(cand, M - 1)
+      val = jnp.take_along_axis(excl_sorted, cand_safe, axis=1)
+      pos = jnp.where((cand < M) & (val <= nbr_i32), cand_safe, pos)
+      step >>= 1
 
-  def loop_body(i, carrier):
-    curr_vdw, curr_elec = carrier
+  matched_idx = jnp.take_along_axis(excl_indices, pos, axis=1)
+  is_match = (matched_idx == nbr_i32) & (matched_idx >= 0) & (nbr_i32 < N)
 
-    # Get i-th exclusion data for all atoms
-    excl_idx_i = excl_indices[:, i]  # (N,)
-    scale_v_i = excl_scales_vdw[:, i]  # (N,)
-    scale_e_i = excl_scales_elec[:, i]  # (N,)
+  gathered_vdw = jnp.take_along_axis(excl_scales_vdw, pos, axis=1)
+  gathered_elec = jnp.take_along_axis(excl_scales_elec, pos, axis=1)
 
-    # Broadcast to neighbors (N, K)
-    # Check if neighbor_idx matches this exclusion
-    # excl_idx_i[:, None] -> (N, 1)
-    is_match = (neighbor_idx == excl_idx_i[:, None]) & (excl_idx_i[:, None] != -1)
-
-    # Update scales where match found
-    # If match, take the scale. Else keep current value.
-    # Note: An atom appears only once in exclusion set for a given pair,
-    # so we can just overwrite or multiply (since default is 1.0 and collisions only happen on 1.0)
-    curr_vdw = jnp.where(is_match, scale_v_i[:, None], curr_vdw)
-    curr_elec = jnp.where(is_match, scale_e_i[:, None], curr_elec)
-
-    return curr_vdw, curr_elec
-
-  # We can unroll this loop if M is small constant, or use fori_loop.
-  # Since M is padded to 32, fori_loop is good to keep graph small?
-  # Or simple range loop which unrolls in Python (better for constant folding if M small).
-  # Let's use jax.lax.fori_loop for strictly static graph size,
-  # or standard python loop if we suspect it helps.
-  # For 32 iters, fori_loop is cleaner.
-
-  final_vdw, final_elec = jax.lax.fori_loop(0, M, loop_body, (final_vdw, final_elec))
-
+  final_vdw = jnp.where(is_match, gathered_vdw, ones_vdw)
+  final_elec = jnp.where(is_match, gathered_elec, ones_elec)
   return final_vdw, final_elec
 
 

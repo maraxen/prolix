@@ -12,6 +12,7 @@ References:
 
 from __future__ import annotations
 
+import os
 import warnings
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
@@ -38,6 +39,7 @@ from prolix.physics import (
   units as units_module,
 )
 from prolix.physics.constraints import project_momenta, project_positions
+from prolix.tiling.axis_dispatch import dispatch_n_waters
 from prolix.typing import NPTState, NVTLangevinState, WaterIndices, WaterIndicesArray
 
 if TYPE_CHECKING:
@@ -45,6 +47,23 @@ if TYPE_CHECKING:
   from jax_md.util import Array
 
 Array = Any
+
+# PBC rounding mode selection (A/B testing: round vs floor for banker's rounding)
+# Module-level constant bound at import time, never read inside a traced function.
+_PBC_ROUND_MODE = os.environ.get("PROLIX_PBC_ROUND_MODE", "floor")
+
+
+def _pbc_round_floor(x: Array) -> Array:
+  """Round-half-up via floor(x + 0.5) — project convention for A/B testing."""
+  return jnp.floor(x + 0.5)
+
+
+def _pbc_round_banker(x: Array) -> Array:
+  """Banker's rounding (round-half-to-even) — the pre-fix idiom, for A/B comparison."""
+  return jnp.round(x)
+
+
+_PBC_ROUND_FN = _pbc_round_banker if _PBC_ROUND_MODE == "round" else _pbc_round_floor
 
 # TIP3P water geometry constants
 TIP3P_ROH = 0.9572  # O-H bond length (Å)
@@ -157,18 +176,17 @@ def settle_positions(
   # unconstrained O position, which is already in [0, box) because the caller
   # wraps positions each step via shift_fn).  The SETTLE geometry correction is
   # sub-Ångström, so pos_oxygen_c is within a fraction of a bond-length of
-  # pos_oxygen_new, and the minimum-image delta is << 0.5 box.  The only
-  # exception is a genuine PBC crossing (|delta| ≈ box), handled by round().
-  # Crucially, the image decision is based on (pos_oxygen_c - pos_oxygen_new),
-  # NOT on pos_oxygen_c alone, so FMA-level differences in the Horn-SETTLE
-  # result (9.9999... vs 10.0000...) produce a delta difference of only ~1e-7,
-  # not the ±box discontinuity that jnp.mod exhibits.
+  # pos_oxygen_new, and the minimum-image delta is << 0.5 box. Crucially, the
+  # image decision is based on (pos_oxygen_c - pos_oxygen_new), NOT on
+  # pos_oxygen_c alone, so FMA-level differences in the Horn-SETTLE result
+  # (9.9999... vs 10.0000...) produce a delta difference of only ~1e-7, not the
+  # ±box discontinuity that jnp.mod exhibits.
   if box is not None:
     # Minimum-image of pos_oxygen_c relative to pos_oxygen_new.
     # All three constrained atoms get the same rigid integer-image shift so
     # the molecule's internal geometry is not distorted.
     delta_o = pos_oxygen_c - pos_oxygen_new
-    image_correction = -box * jnp.round(delta_o / box)
+    image_correction = -box * _PBC_ROUND_FN(delta_o / box)
 
     pos_oxygen_c = pos_oxygen_c + image_correction
     pos_h1_c = pos_h1_c + image_correction
@@ -184,15 +202,78 @@ def settle_positions(
     positions_constrained = positions_constrained.at[indices.hydrogen2].set(pos_h2_c)
     return positions_constrained
 
-  n_atoms = positions_unconstrained.shape[0]
-  oxygen_tgt = _scatter_water_target(indices.oxygen, water_mask, n_atoms)
-  h1_tgt = _scatter_water_target(indices.hydrogen1, water_mask, n_atoms)
-  h2_tgt = _scatter_water_target(indices.hydrogen2, water_mask, n_atoms)
-  positions_scratch = jnp.concatenate([positions_unconstrained, positions_unconstrained[:1]], axis=0)
-  positions_scratch = positions_scratch.at[oxygen_tgt].set(pos_oxygen_c)
-  positions_scratch = positions_scratch.at[h1_tgt].set(pos_h1_c)
-  positions_scratch = positions_scratch.at[h2_tgt].set(pos_h2_c)
-  return positions_scratch[:n_atoms]
+  mask_col = water_mask[:, None]
+  delta_o = jnp.where(mask_col, pos_oxygen_c - positions_unconstrained[indices.oxygen], 0.0)
+  delta_h1 = jnp.where(mask_col, pos_h1_c - positions_unconstrained[indices.hydrogen1], 0.0)
+  delta_h2 = jnp.where(mask_col, pos_h2_c - positions_unconstrained[indices.hydrogen2], 0.0)
+  positions_constrained = positions_unconstrained.at[indices.oxygen].add(delta_o)
+  positions_constrained = positions_constrained.at[indices.hydrogen1].add(delta_h1)
+  positions_constrained = positions_constrained.at[indices.hydrogen2].add(delta_h2)
+  return positions_constrained
+
+
+def _solve_3x3(A: Array, b: Array) -> Array:
+  """Solve a single 3x3 linear system A x = b via explicit Cramer's rule."""
+  a00, a01, a02 = A[0, 0], A[0, 1], A[0, 2]
+  a10, a11, a12 = A[1, 0], A[1, 1], A[1, 2]
+  a20, a21, a22 = A[2, 0], A[2, 1], A[2, 2]
+  det = (
+    a00 * (a11 * a22 - a12 * a21)
+    - a01 * (a10 * a22 - a12 * a20)
+    + a02 * (a10 * a21 - a11 * a20)
+  )
+  valid = jnp.abs(det) > 1e-30
+  safe_det = jnp.where(valid, det, jnp.ones_like(det))
+  inv = jnp.where(valid, 1.0 / safe_det, jnp.zeros_like(det))
+  bx, by, bz = b[0], b[1], b[2]
+  return jnp.stack(
+    [
+      inv * ((a11 * a22 - a12 * a21) * bx + (a02 * a21 - a01 * a22) * by + (a01 * a12 - a02 * a11) * bz),
+      inv * ((a12 * a20 - a10 * a22) * bx + (a00 * a22 - a02 * a20) * by + (a02 * a10 - a00 * a12) * bz),
+      inv * ((a10 * a21 - a11 * a20) * bx + (a01 * a20 - a00 * a21) * by + (a00 * a11 - a01 * a10) * bz),
+    ],
+    axis=-1,
+  )
+
+
+def _solve_3x3_batch(A: Array, b: Array) -> Array:
+  """Solve batched 3x3 linear systems A x = b via explicit Cramer's rule."""
+  a00, a01, a02 = A[:, 0, 0], A[:, 0, 1], A[:, 0, 2]
+  a10, a11, a12 = A[:, 1, 0], A[:, 1, 1], A[:, 1, 2]
+  a20, a21, a22 = A[:, 2, 0], A[:, 2, 1], A[:, 2, 2]
+  det = (
+    a00 * (a11 * a22 - a12 * a21)
+    - a01 * (a10 * a22 - a12 * a20)
+    + a02 * (a10 * a21 - a11 * a20)
+  )
+  valid = jnp.abs(det) > 1e-30
+  safe_det = jnp.where(valid, det, jnp.ones_like(det))
+  inv = jnp.where(valid, 1.0 / safe_det, jnp.zeros_like(det))
+  bx, by, bz = b[:, 0], b[:, 1], b[:, 2]
+  return jnp.stack(
+    [
+      inv * ((a11 * a22 - a12 * a21) * bx + (a02 * a21 - a01 * a22) * by + (a01 * a12 - a02 * a11) * bz),
+      inv * ((a12 * a20 - a10 * a22) * bx + (a00 * a22 - a02 * a20) * by + (a02 * a10 - a00 * a12) * bz),
+      inv * ((a10 * a21 - a11 * a20) * bx + (a01 * a20 - a00 * a21) * by + (a00 * a11 - a01 * a10) * bz),
+    ],
+    axis=-1,
+  )
+
+
+def _cholesky_upper_solve_3x3(A: Array, rhs: Array) -> Array:
+  """Solve L^T x = rhs where L L^T = A via closed-form 3x3 Cholesky + backward substitution."""
+  eps = jnp.array(1e-30, dtype=A.dtype)
+  l00 = jnp.sqrt(jnp.maximum(A[..., 0, 0], eps))
+  l10 = A[..., 1, 0] / l00
+  l20 = A[..., 2, 0] / l00
+  l11 = jnp.sqrt(jnp.maximum(A[..., 1, 1] - l10 * l10, eps))
+  l21 = (A[..., 2, 1] - l20 * l10) / l11
+  l22 = jnp.sqrt(jnp.maximum(A[..., 2, 2] - l20 * l20 - l21 * l21, eps))
+
+  x2 = rhs[..., 2] / l22
+  x1 = (rhs[..., 1] - l21 * x2) / l11
+  x0 = (rhs[..., 0] - l10 * x1 - l20 * x2) / l00
+  return jnp.stack([x0, x1, x2], axis=-1)
 
 
 def _skew_symmetric3(r: Array) -> Array:
@@ -216,21 +297,26 @@ def _project_one_water_momentum_rigid(
   """
   msum = jnp.sum(m_stack)
   eps = jnp.array(1e-30, dtype=msum.dtype)
-  com = jnp.sum(m_stack[:, None] * r_stack, axis=0) / jnp.maximum(msum, eps)
+  msum_safe = jnp.maximum(msum, eps)
+  com = jnp.sum(m_stack[:, None] * r_stack, axis=0) / msum_safe
   rrel = r_stack - com
-  v = p_stack / m_stack[:, None]
-  v_flat = v.reshape(9)
-  rows = []
-  for i in range(3):
-    rows.append(jnp.concatenate([jnp.eye(3, dtype=r_stack.dtype), -_skew_symmetric3(rrel[i])], axis=1))
-  jmat = jnp.vstack(rows)
-  m_rep = jnp.repeat(m_stack, 3)
-  g = (jmat.T * m_rep) @ jmat
-  rhs = jmat.T @ (m_rep * v_flat)
-  reg = jnp.array(1e-12, dtype=g.dtype) * (jnp.trace(g) / 6.0 + 1.0)
-  g_reg = g + reg * jnp.eye(6, dtype=g.dtype)
-  x6 = jnp.linalg.solve(g_reg, rhs)
-  v_proj = (jmat @ x6).reshape(3, 3)
+
+  m_safe = jnp.maximum(m_stack[:, None], eps)
+  v = p_stack / m_safe
+  v_com = jnp.sum(m_stack[:, None] * v, axis=0) / msum_safe
+  L_ang = jnp.sum(jnp.cross(rrel, p_stack), axis=0)
+
+  eye3 = jnp.eye(3, dtype=r_stack.dtype)
+  r_sq = jnp.einsum("ia,ia->i", rrel, rrel)
+  I_tensor = (
+    jnp.einsum("i,i->", m_stack, r_sq) * eye3
+    - jnp.einsum("i,ia,ib->ab", m_stack, rrel, rrel)
+  )
+  reg = jnp.array(1e-12, dtype=I_tensor.dtype) * (jnp.trace(I_tensor) / 3.0 + 1.0)
+  I_reg = I_tensor + reg * eye3
+  omega = _solve_3x3(I_reg, L_ang)
+
+  v_proj = v_com[None, :] + jnp.cross(omega[None, :], rrel)
   return v_proj * m_stack[:, None]
 
 
@@ -251,15 +337,12 @@ def project_tip3p_waters_momentum_rigid(
   m_stack = jnp.stack([mass_flat[idx[:, 0]], mass_flat[idx[:, 1]], mass_flat[idx[:, 2]]], axis=1)
   p_proj = jax.vmap(_project_one_water_momentum_rigid)(p_stack, r_stack, m_stack)
   idx_flat = idx.reshape(-1)
+  p_proj_flat = p_proj.reshape(-1, 3)
   if water_mask is None:
-    return momentum.at[idx_flat].set(p_proj.reshape(-1, 3))
-  n_atoms = momentum.shape[0]
-  # Broadcast the per-water mask to the flattened (N_w*3,) O/H1/H2 axis.
-  mask_flat = jnp.broadcast_to(water_mask[:, None], idx.shape).reshape(-1)
-  idx_flat_tgt = _scatter_water_target(idx_flat, mask_flat, n_atoms)
-  momentum_scratch = jnp.concatenate([momentum, momentum[:1]], axis=0)
-  momentum_scratch = momentum_scratch.at[idx_flat_tgt].set(p_proj.reshape(-1, 3))
-  return momentum_scratch[:n_atoms]
+    return momentum.at[idx_flat].set(p_proj_flat)
+  mask_flat = jnp.broadcast_to(water_mask[:, None], idx.shape).reshape(-1, 1)
+  delta_p = jnp.where(mask_flat, p_proj_flat - momentum[idx_flat], 0.0)
+  return momentum.at[idx_flat].add(delta_p)
 
 
 def _settle_water_batch(
@@ -291,12 +374,15 @@ def _settle_water_batch(
 
   NOTES:
   - PBC unwrap uses ``jnp.floor(delta/box + 0.5)`` rather than ``jnp.round``.
-    ``jnp.round`` applies banker's rounding (round-half-to-even); under XLA FMA
-    contraction on cluster hardware, values at ULP proximity to ±0.5 can round
-    in opposite directions on the loop path vs the vmap path, producing an
-    8.975 Å RMSD in ``test_settle_batched_vs_unbatched`` on the Engaging cluster
-    while passing locally.  ``floor(x + 0.5)`` gives deterministic round-half-up
-    regardless of FMA reassociation order.
+    This is a PROJECT CONVENTION adopted to enable A/B testing (a consistent
+    single idiom across all code). Both ``round(x)`` and ``floor(x+0.5)`` are
+    pure functions of float64 input and equally susceptible to ULP-level
+    differences between code paths; neither is inherently more deterministic
+    under FMA reassociation. In fact, ``floor(x+0.5)`` is marginally LESS
+    accurate due to double-rounding in the addition step. Historical note:
+    an 8.975 Å divergence was observed in looped vs vmapped paths on cluster
+    hardware, but this observation is unverified and not causally attributed
+    to this rounding site.
 
   Args:
       r_O_old, r_H1_old, r_H2_old: Old positions (used for PBC unwrap only).
@@ -310,18 +396,51 @@ def _settle_water_batch(
       Tuple of constrained positions (r_O_c, r_H1_c, r_H2_c).
   """
   # Apply minimum image convention if box is provided.
-  # floor(x + 0.5) instead of round(x): deterministic round-half-up avoids
-  # FMA ULP banker's rounding divergence between loop and vmap paths on cluster.
+  # Uses _PBC_ROUND_FN (floor(x+0.5) by default) as project convention;
+  # enables A/B testing of rounding modes (round vs floor).
   if box is not None:
 
     def unwrap(pos_new, pos_old):
       delta = pos_new - pos_old
-      delta = delta - box * jnp.floor(delta / box + 0.5)
+      delta = delta - box * _PBC_ROUND_FN(delta / box)
       return pos_old + delta
 
     pos_oxygen_new = unwrap(pos_oxygen_new, pos_oxygen_old)
     pos_h1_new = unwrap(pos_h1_new, pos_h1_old)
     pos_h2_new = unwrap(pos_h2_new, pos_h2_old)
+
+    # Make each molecule WHOLE before the rigid-body fit below (#4971).
+    #
+    # The unwrap above is per-atom, against each atom's own previous position: it
+    # restores step-to-step continuity for an atom that crossed a face, which is
+    # necessary but says nothing about whether the three atoms are in the same
+    # periodic image as EACH OTHER. They frequently are not. `shift_fn` wraps every
+    # atom independently into [0, box), so any molecule straddling a face has its O
+    # sent to one side and an H to the other, and nothing downstream ever repairs it.
+    #
+    # That is fatal here rather than merely untidy, because `com_new` and the
+    # body-frame deltas immediately below are computed from these raw positions. A
+    # split molecule yields a COM in the middle of the box and an O-H separation of
+    # up to a full box length, so the template fit is solving for the orientation of
+    # something that is not a water molecule, and it launches it.
+    #
+    # Measured on DHFR (23558 atoms, job 21968919): from rest with the thermostat
+    # fully off, 1011 atoms move 8-9 A in a single step while their forces are
+    # normal. 1011 = 3 x 337 whole molecules, water fraction 1.0000 against a system
+    # baseline of 0.8943. Independently, wrapping that fixture's coordinates tears
+    # 334 of 7023 waters apart with a maximum O-H distance of 86.4 A. Carbon,
+    # nitrogen and sulfur meanwhile track Newton's 0.5*(F/m)*dt^2 to a ratio of
+    # exactly 1.000, so the integrator itself was never at fault.
+    #
+    # Re-imaging the hydrogens onto the oxygen costs two subtractions and makes the
+    # molecule whole in a single image. The post-solve re-wrap in `settle_positions`
+    # then returns the rigid result to the box as one unit, so nothing else changes.
+    def to_oxygen_image(pos_h, pos_o):
+      d = pos_h - pos_o
+      return pos_o + (d - box * _PBC_ROUND_FN(d / box))
+
+    pos_h1_new = to_oxygen_image(pos_h1_new, pos_oxygen_new)
+    pos_h2_new = to_oxygen_image(pos_h2_new, pos_oxygen_new)
 
   mass_total = mass_oxygen + 2 * mass_hydrogen
 
@@ -491,15 +610,11 @@ def _apply_rattle_velocity_correction(
     vel_new = vel_new.at[indices.hydrogen1].add(dv_h1)
     vel_new = vel_new.at[indices.hydrogen2].add(dv_h2)
     return vel_new
-  n_atoms = vel_curr.shape[0]
-  oxygen_tgt = _scatter_water_target(indices.oxygen, water_mask, n_atoms)
-  h1_tgt = _scatter_water_target(indices.hydrogen1, water_mask, n_atoms)
-  h2_tgt = _scatter_water_target(indices.hydrogen2, water_mask, n_atoms)
-  vel_scratch = jnp.concatenate([vel_curr, vel_curr[:1]], axis=0)
-  vel_scratch = vel_scratch.at[oxygen_tgt].add(dv_oxygen)
-  vel_scratch = vel_scratch.at[h1_tgt].add(dv_h1)
-  vel_scratch = vel_scratch.at[h2_tgt].add(dv_h2)
-  return vel_scratch[:n_atoms]
+  mask_col = water_mask[:, None]
+  vel_new = vel_curr.at[indices.oxygen].add(jnp.where(mask_col, dv_oxygen, 0.0))
+  vel_new = vel_new.at[indices.hydrogen1].add(jnp.where(mask_col, dv_h1, 0.0))
+  vel_new = vel_new.at[indices.hydrogen2].add(jnp.where(mask_col, dv_h2, 0.0))
+  return vel_new
 
 
 def _apply_rattle_velocity_correction_with_residual(
@@ -539,15 +654,10 @@ def _apply_rattle_velocity_correction_with_residual(
     vel_new = vel_new.at[indices.hydrogen1].add(dv_h1)
     vel_new = vel_new.at[indices.hydrogen2].add(dv_h2)
   else:
-    n_atoms = vel_curr.shape[0]
-    oxygen_tgt = _scatter_water_target(indices.oxygen, water_mask, n_atoms)
-    h1_tgt = _scatter_water_target(indices.hydrogen1, water_mask, n_atoms)
-    h2_tgt = _scatter_water_target(indices.hydrogen2, water_mask, n_atoms)
-    vel_scratch = jnp.concatenate([vel_curr, vel_curr[:1]], axis=0)
-    vel_scratch = vel_scratch.at[oxygen_tgt].add(dv_oxygen)
-    vel_scratch = vel_scratch.at[h1_tgt].add(dv_h1)
-    vel_scratch = vel_scratch.at[h2_tgt].add(dv_h2)
-    vel_new = vel_scratch[:n_atoms]
+    mask_col = water_mask[:, None]
+    vel_new = vel_curr.at[indices.oxygen].add(jnp.where(mask_col, dv_oxygen, 0.0))
+    vel_new = vel_new.at[indices.hydrogen1].add(jnp.where(mask_col, dv_h1, 0.0))
+    vel_new = vel_new.at[indices.hydrogen2].add(jnp.where(mask_col, dv_h2, 0.0))
   residual = jnp.max(jnp.abs(jnp.stack([dot_oh1, dot_oh2, dot_h1h2])))
   return vel_new, residual
 
@@ -655,22 +765,7 @@ def _remove_angular_momentum_from_impulse(
 
   # omega = I^{-1} L via explicit 3×3 Cramer's rule (see NOTES in docstring).
   with jax.named_scope("settle_cramers_rule"):
-    # Extract elements for batched scalar arithmetic.
-    _a00, _a01, _a02 = I_tensor[:, 0, 0], I_tensor[:, 0, 1], I_tensor[:, 0, 2]
-    _a10, _a11, _a12 = I_tensor[:, 1, 0], I_tensor[:, 1, 1], I_tensor[:, 1, 2]
-    _a20, _a21, _a22 = I_tensor[:, 2, 0], I_tensor[:, 2, 1], I_tensor[:, 2, 2]
-    _det = (
-      _a00 * (_a11 * _a22 - _a12 * _a21)
-      - _a01 * (_a10 * _a22 - _a12 * _a20)
-      + _a02 * (_a10 * _a21 - _a11 * _a20)
-    )
-    _Lx, _Ly, _Lz = L[:, 0], L[:, 1], L[:, 2]
-    _inv = 1.0 / _det
-    omega = jnp.stack([  # (N_waters, 3)
-      _inv * ((_a11 * _a22 - _a12 * _a21) * _Lx + (_a02 * _a21 - _a01 * _a22) * _Ly + (_a01 * _a12 - _a02 * _a11) * _Lz),
-      _inv * ((_a12 * _a20 - _a10 * _a22) * _Lx + (_a00 * _a22 - _a02 * _a20) * _Ly + (_a02 * _a10 - _a00 * _a12) * _Lz),
-      _inv * ((_a10 * _a21 - _a11 * _a20) * _Lx + (_a01 * _a20 - _a00 * _a21) * _Ly + (_a00 * _a11 - _a01 * _a10) * _Lz),
-    ], axis=-1)
+    omega = _solve_3x3_batch(I_tensor, L)
 
   # Angular impulse to subtract: m_i * (omega x d_i) for each atom
   # omega broadcast over atom axis: (N_waters, 1, 3) x (N_waters, 3, 3)
@@ -688,24 +783,16 @@ def _remove_angular_momentum_from_impulse(
   dv_H1_cor = dp_corrected[:, 1, :] / mass_hydrogen
   dv_H2_cor = dp_corrected[:, 2, :] / mass_hydrogen
 
-  # Padding rows: d_con is exactly zero (all three "atoms" coincide at the
-  # fill index), making the inertia tensor singular and the Cramer's-rule
-  # omega an inf*0 = NaN indeterminate form. Redirect the scatter target so
-  # that NaN lands on a discarded scratch row rather than a real atom.
   if water_mask is None:
     vel_out = vel_unconstrained.at[indices.oxygen].add(dv_O_cor)
     vel_out = vel_out.at[indices.hydrogen1].add(dv_H1_cor)
     vel_out = vel_out.at[indices.hydrogen2].add(dv_H2_cor)
     return vel_out
-  n_atoms = vel_unconstrained.shape[0]
-  oxygen_tgt = _scatter_water_target(indices.oxygen, water_mask, n_atoms)
-  h1_tgt = _scatter_water_target(indices.hydrogen1, water_mask, n_atoms)
-  h2_tgt = _scatter_water_target(indices.hydrogen2, water_mask, n_atoms)
-  vel_scratch = jnp.concatenate([vel_unconstrained, vel_unconstrained[:1]], axis=0)
-  vel_scratch = vel_scratch.at[oxygen_tgt].add(dv_O_cor)
-  vel_scratch = vel_scratch.at[h1_tgt].add(dv_H1_cor)
-  vel_scratch = vel_scratch.at[h2_tgt].add(dv_H2_cor)
-  return vel_scratch[:n_atoms]
+  mask_col = water_mask[:, None]
+  vel_out = vel_unconstrained.at[indices.oxygen].add(jnp.where(mask_col, dv_O_cor, 0.0))
+  vel_out = vel_out.at[indices.hydrogen1].add(jnp.where(mask_col, dv_H1_cor, 0.0))
+  vel_out = vel_out.at[indices.hydrogen2].add(jnp.where(mask_col, dv_H2_cor, 0.0))
+  return vel_out
 
 
 def _r_step_conserve_angular_momentum(
@@ -770,10 +857,10 @@ def _r_step_conserve_angular_momentum(
   r_H2_unc = x_unc[indices.hydrogen2]  # (N_w, 3)
   if box is not None:
     dH1 = r_H1_unc - r_O_unc
-    dH1 = dH1 - box * jnp.round(dH1 / box)
+    dH1 = dH1 - box * _PBC_ROUND_FN(dH1 / box)
     r_H1_unc = r_O_unc + dH1
     dH2 = r_H2_unc - r_O_unc
-    dH2 = dH2 - box * jnp.round(dH2 / box)
+    dH2 = dH2 - box * _PBC_ROUND_FN(dH2 / box)
     r_H2_unc = r_O_unc + dH2
   r_unc_w = jnp.stack([r_O_unc, r_H1_unc, r_H2_unc], axis=1)  # (N_w, 3, 3)
   p_pre_a_w = jnp.stack(
@@ -806,45 +893,23 @@ def _r_step_conserve_angular_momentum(
 
   # omega = I^{-1} L_correct via explicit 3×3 Cramer's rule
   with jax.named_scope("settle_cramers_rule"):
-    _a00, _a01, _a02 = I_tensor[:, 0, 0], I_tensor[:, 0, 1], I_tensor[:, 0, 2]
-    _a10, _a11, _a12 = I_tensor[:, 1, 0], I_tensor[:, 1, 1], I_tensor[:, 1, 2]
-    _a20, _a21, _a22 = I_tensor[:, 2, 0], I_tensor[:, 2, 1], I_tensor[:, 2, 2]
-    _det = (
-      _a00 * (_a11 * _a22 - _a12 * _a21)
-      - _a01 * (_a10 * _a22 - _a12 * _a20)
-      + _a02 * (_a10 * _a21 - _a11 * _a20)
-    )
-    _Lx, _Ly, _Lz = L_correct[:, 0], L_correct[:, 1], L_correct[:, 2]
-    _inv = 1.0 / _det
-    omega = jnp.stack([
-      _inv * ((_a11 * _a22 - _a12 * _a21) * _Lx + (_a02 * _a21 - _a01 * _a22) * _Ly + (_a01 * _a12 - _a02 * _a11) * _Lz),
-      _inv * ((_a12 * _a20 - _a10 * _a22) * _Lx + (_a00 * _a22 - _a02 * _a20) * _Ly + (_a02 * _a10 - _a00 * _a12) * _Lz),
-      _inv * ((_a10 * _a21 - _a11 * _a20) * _Lx + (_a01 * _a20 - _a00 * _a21) * _Ly + (_a00 * _a11 - _a01 * _a10) * _Lz),
-    ], axis=-1)  # (N_w, 3)
+    omega = _solve_3x3_batch(I_tensor, L_correct)
 
   # Corrective impulse: m_i * (omega × d_con_i)
   omega_exp = omega[:, None, :]  # (N_w, 1, 3)
   omega_cross_d = jnp.cross(omega_exp * jnp.ones_like(d_con), d_con)  # (N_w, 3, 3)
   dp_correct = m_all[None, :, None] * omega_cross_d  # (N_w, 3, 3)
 
-  # Apply to momentum array
-  # Same padding degeneracy as `_remove_angular_momentum_from_impulse`
-  # (singular inertia tensor -> NaN omega for fill rows) — redirect scatter
-  # target to a discarded scratch row.
   if water_mask is None:
     mom_out = momentum.at[indices.oxygen].add(dp_correct[:, 0, :])
     mom_out = mom_out.at[indices.hydrogen1].add(dp_correct[:, 1, :])
     mom_out = mom_out.at[indices.hydrogen2].add(dp_correct[:, 2, :])
     return mom_out
-  n_atoms = momentum.shape[0]
-  oxygen_tgt = _scatter_water_target(indices.oxygen, water_mask, n_atoms)
-  h1_tgt = _scatter_water_target(indices.hydrogen1, water_mask, n_atoms)
-  h2_tgt = _scatter_water_target(indices.hydrogen2, water_mask, n_atoms)
-  mom_scratch = jnp.concatenate([momentum, momentum[:1]], axis=0)
-  mom_scratch = mom_scratch.at[oxygen_tgt].add(dp_correct[:, 0, :])
-  mom_scratch = mom_scratch.at[h1_tgt].add(dp_correct[:, 1, :])
-  mom_scratch = mom_scratch.at[h2_tgt].add(dp_correct[:, 2, :])
-  return mom_scratch[:n_atoms]
+  mask_col = water_mask[:, None]
+  mom_out = momentum.at[indices.oxygen].add(jnp.where(mask_col, dp_correct[:, 0, :], 0.0))
+  mom_out = mom_out.at[indices.hydrogen1].add(jnp.where(mask_col, dp_correct[:, 1, :], 0.0))
+  mom_out = mom_out.at[indices.hydrogen2].add(jnp.where(mask_col, dp_correct[:, 2, :], 0.0))
+  return mom_out
 
 
 def settle_velocities(
@@ -859,97 +924,77 @@ def settle_velocities(
   adaptive_tol: float | None = None,
   water_mask: Array | None = None,
 ) -> Array:
-  r"""Apply velocity constraints after position SETTLE.
-
-  Process:
-  1.  **Extract Indices**: Use `WaterIndices` for O, H1, H2.
-  2.  **Bond Vectors**: Compute normalized bond vectors $\hat{n}_{ij}$ from constrained positions.
-  3.  **RATTLE Loop**: Iterate velocity corrections to satisfy $\vec{v}_{ij} \cdot \hat{n}_{ij} = 0$.
-  4.  **AM Correction**: Remove the angular-momentum component from the RATTLE impulse
-      so that T_rot is not drained by constraint projection.
-
-  Notes:
-  This ensures velocities are consistent with the rigid constraints while
-  preserving angular momentum of each water molecule.
-  Typically converges in 1-5 iterations.
-
-  Args:
-      V: Unconstrained velocities (N, 3).
-      R_old, R_new: Old and constrained new positions.
-      water_indices: (N_waters, 3).
-      dt: Timestep.
-      m_O, m_H: Masses.
-
-  Returns:
-      Constrained velocities array with angular-momentum-conserving RATTLE projection.
-  """
+  r"""Apply velocity constraints after position SETTLE via 1-pass 3x3 Gram matrix RATTLE."""
+  del positions_old, dt, adaptive_tol
   if water_indices.shape[0] == 0:
     return velocities
 
   indices = WaterIndices.from_row(water_indices.T)
+  pos_O = positions_constrained[indices.oxygen]
+  pos_H1 = positions_constrained[indices.hydrogen1]
+  pos_H2 = positions_constrained[indices.hydrogen2]
 
-  # Get normalized bond vectors from constrained positions
-  norm_vec_oh1, norm_vec_oh2, norm_vec_h1h2 = _get_settle_bond_vectors(
-    positions_constrained[indices.oxygen],
-    positions_constrained[indices.hydrogen1],
-    positions_constrained[indices.hydrogen2],
-  )
-
-  # Inverse masses
-  inv_mass_oxygen = 1.0 / mass_oxygen
-  inv_mass_hydrogen = 1.0 / mass_hydrogen
-
-  # Iterate a few times for convergence.
-  n_iters = max(int(n_iters), 0)
-  if adaptive_tol is None:
-    with jax.named_scope("settle_rattle_loop"):
-      vel_rattle = jax.lax.fori_loop(
-        0,
-        n_iters,
-        lambda _i, v: _apply_rattle_velocity_correction(
-          v,
-          indices,
-          norm_vec_oh1,
-          norm_vec_oh2,
-          norm_vec_h1h2,
-          inv_mass_oxygen,
-          inv_mass_hydrogen,
-          water_mask,
-        ),
-        velocities,
-      )
+  if int(n_iters) <= 0:
+    vel_rattle = velocities
   else:
-    def body(carry):
-      i, vel, residual = carry
-      vel_new, res = _apply_rattle_velocity_correction_with_residual(
-        vel,
-        indices,
-        norm_vec_oh1,
-        norm_vec_oh2,
-        norm_vec_h1h2,
-        inv_mass_oxygen,
-        inv_mass_hydrogen,
-        water_mask,
-      )
-      return (i + jnp.int32(1), vel_new, res)
-    initial = (jnp.int32(0), velocities, jnp.array(jnp.inf, dtype=velocities.dtype))
-    cond = lambda carry: jnp.logical_and(
-      carry[0] < jnp.int32(n_iters),
-      carry[2] > jnp.array(adaptive_tol, dtype=velocities.dtype)
-    )
-    _, vel_rattle, _ = jax.lax.while_loop(cond, body, initial)
+    with jax.named_scope("settle_rattle_loop"):
+      n1, n2, n3 = _get_settle_bond_vectors(pos_O, pos_H1, pos_H2)
+      if water_mask is not None:
+        mask_col = water_mask[:, None]
+        n1 = jnp.where(mask_col, n1, 0.0)
+        n2 = jnp.where(mask_col, n2, 0.0)
+        n3 = jnp.where(mask_col, n3, 0.0)
 
-  # Angular-momentum-conserving post-correction:
-  # RATTLE bond projections can drain angular momentum from each water.
-  # Subtract the rotational component of the RATTLE impulse so that
-  # only the radial bond-stretch impulse remains (conserves T_rot).
+      v_O = velocities[indices.oxygen]
+      v_H1 = velocities[indices.hydrogen1]
+      v_H2 = velocities[indices.hydrogen2]
+
+      b1 = jnp.sum((v_H1 - v_O) * n1, axis=-1)
+      b2 = jnp.sum((v_H2 - v_O) * n2, axis=-1)
+      b3 = jnp.sum((v_H2 - v_H1) * n3, axis=-1)
+      rhs = -jnp.stack([b1, b2, b3], axis=-1)
+
+      dtype = velocities.dtype
+      mu_O = jnp.asarray(1.0 / mass_oxygen, dtype=dtype)
+      mu_H = jnp.asarray(1.0 / mass_hydrogen, dtype=dtype)
+      diag_OH = jnp.broadcast_to(mu_O + mu_H, b1.shape)
+      diag_HH = jnp.broadcast_to(2.0 * mu_H, b1.shape)
+
+      c12 = mu_O * jnp.sum(n1 * n2, axis=-1)
+      c13 = -mu_H * jnp.sum(n1 * n3, axis=-1)
+      c23 = mu_H * jnp.sum(n2 * n3, axis=-1)
+
+      row0 = jnp.stack([diag_OH, c12, c13], axis=-1)
+      row1 = jnp.stack([c12, diag_OH, c23], axis=-1)
+      row2 = jnp.stack([c13, c23, diag_HH], axis=-1)
+      G = jnp.stack([row0, row1, row2], axis=1)
+
+      lambdas = _solve_3x3_batch(G, rhs)
+      l1 = lambdas[:, 0:1]
+      l2 = lambdas[:, 1:2]
+      l3 = lambdas[:, 2:3]
+
+      dv_O = -mu_O * (l1 * n1 + l2 * n2)
+      dv_H1 = mu_H * (l1 * n1 - l3 * n3)
+      dv_H2 = mu_H * (l2 * n2 + l3 * n3)
+
+      if water_mask is not None:
+        mask_col = water_mask[:, None]
+        dv_O = jnp.where(mask_col, dv_O, 0.0)
+        dv_H1 = jnp.where(mask_col, dv_H1, 0.0)
+        dv_H2 = jnp.where(mask_col, dv_H2, 0.0)
+
+      vel_rattle = velocities.at[indices.oxygen].add(dv_O)
+      vel_rattle = vel_rattle.at[indices.hydrogen1].add(dv_H1)
+      vel_rattle = vel_rattle.at[indices.hydrogen2].add(dv_H2)
+
   return _remove_angular_momentum_from_impulse(
     velocities,
     vel_rattle,
     indices,
-    positions_constrained[indices.oxygen],
-    positions_constrained[indices.hydrogen1],
-    positions_constrained[indices.hydrogen2],
+    pos_O,
+    pos_H1,
+    pos_H2,
     mass_oxygen,
     mass_hydrogen,
     water_mask,
@@ -984,12 +1029,37 @@ def _make_settle_compatible_force_fn(
   energy_or_force_fn: Callable[..., Array],
   mass: float | Array,
   box_template: Array | None,
+  *,
+  is_force_shaped: bool = False,
 ) -> Callable[..., Array]:
   """``jax_md.quantity.canonicalize_force``-compatible force fn using one ``value_and_grad`` when safe.
 
   If ``mass`` is a scalar, the atom count is unknown at integrator construction time;
   we fall back to ``canonicalize_force`` only.
+
+  Args:
+      is_force_shaped: When True, the caller already knows ``energy_or_force_fn``
+          returns an ``(N, 3)`` force array (not a scalar energy) -- e.g.
+          ``force_fn_from_bundle``'s FlashMD path (debt 761) -- and this skips
+          BOTH shape-auto-detection layers entirely rather than routing through
+          them. This matters because ``jax_md.quantity.canonicalize_force``'s
+          returned closure does its own lazy, UNPROTECTED ``eval_shape`` probe
+          on every first real call (jax_md/quantity.py's ``force_fn``, cached via
+          a ``nonlocal _force_fn`` -- not just once at construction time here).
+          That probe crashes with ``TracerArrayConversionError`` whenever
+          ``energy_or_force_fn`` touches a bundle's static ``box_size`` field via
+          the debt-770 PME-grid-sizing numpy workaround (confirmed via full
+          unfiltered traceback, job 20443232 local repro): our own eval_shape
+          probe below (``make_force_fn_like_canonicalize``) is try/except-
+          protected and correctly falls back to ``canonicalize_force`` on that
+          exception, but jax_md's *own* internal probe inside the fallback is
+          not protected by anything we control, so the crash still propagates
+          on the first real (non-probe) call. Skipping both probes when the
+          shape is already known sidesteps this rather than trying to fix a
+          third-party library's internal caching wrapper.
   """
+  if is_force_shaped:
+    return energy_or_force_fn
   mass_arr = jnp.asarray(mass)
   if mass_arr.ndim == 0:
     return quantity.canonicalize_force(energy_or_force_fn)
@@ -1026,6 +1096,7 @@ def settle_langevin(
   settle_velocity_tol: float | None = None,
   water_mask: Array | None = None,
   atom_mask: Array | None = None,
+  is_force_shaped: bool = False,
 ):
   r"""Langevin dynamics integrator with SETTLE constraints for water.
 
@@ -1046,10 +1117,21 @@ def settle_langevin(
   Cartesian noise does not over-drive ``6 N_w-3`` kinetic degrees of freedom.
 
   **IMPORTANT (timestep)**: **dt ≤ 1.0 fs** is validated for production-scale systems
-  (n_waters ≳ 16 with gamma ≈ 10 ps⁻¹). The dt=1.0 fs gate (895 waters, job 15870804)
-  holds T_rot = 299.6 K, and a system-size sweep (campaign ba334c1f) shows T_total within
-  ±15 K for n ≥ 16 and within ±5 K for n ≥ 64; T_rot is faithful at every size. Below
-  n ≈ 16 a **translational finite-size warm bias** appears (only 3·N−3 translational DOF
+  (n_waters ≳ 16 with gamma ≈ 10 ps⁻¹). The original dt=1.0 fs gate (895 waters, job
+  15870804) held T_rot = 299.6 K, but its propagator had a bug (fixed in cfd2b85,
+  task 260806_p5_measurement_pipeline_audit): the A-step was passed `half_dt` where
+  `_langevin_step_a` already halves internally, so positions actually advanced at an
+  *effective* dt ≈ 0.5 fs, not the requested 1.0 fs. Job 15870804's pass is therefore
+  not evidence about the corrected propagator at a genuine 1.0 fs step. The corrected
+  propagator was independently re-gated at genuine dt=1.0 fs (job 19774893,
+  T_rot=298.93±0.29 K) and confirmed clean on GPU with no correctness or performance
+  regression in the fast test suite (job 19875071). The system-size sweep (campaign
+  ba334c1f) showing T_total within ±15 K for n ≥ 16 and within ±5 K for n ≥ 64 was
+  originally run under the same effective-0.5-fs propagator as job 15870804, but has
+  since been re-run at genuine dt=1.0 fs (2026-08-11, campaign 46a4d737) and the
+  crossover conclusion is unchanged: N*=16 (±15 K), N*=64 (±5 K). T_rot is faithful at
+  every size in both gates. Below n ≈ 16 a
+  **translational finite-size warm bias** appears (only 3·N−3 translational DOF
   at small N, under-regulated against the SETTLE constraint impulse). For very small
   systems (n ≲ 16) or weak friction (gamma ≈ 1 ps⁻¹), use **dt ≤ 0.5 fs**. See
   .praxia/docs/research/260612_p5-dt1fs-size-crossover.md.
@@ -1102,7 +1184,9 @@ def settle_langevin(
   Returns:
       (init_fn, apply_fn) pair.
   """
-  force_fn = _make_settle_compatible_force_fn(energy_or_force_fn, mass, box)
+  force_fn = _make_settle_compatible_force_fn(
+    energy_or_force_fn, mass, box, is_force_shaped=is_force_shaped
+  )
   if projection_site not in ("post_o", "post_settle_vel", "both"):
     msg = f"invalid projection_site={projection_site!r}; expected post_o|post_settle_vel|both"
     raise ValueError(msg)
@@ -1161,30 +1245,24 @@ def settle_langevin(
       mass_flat = mass_arr.reshape(-1)
       r_water = jnp.stack([R[idx[:, 0]], R[idx[:, 1]], R[idx[:, 2]]], axis=1)
       m_water = jnp.stack([mass_flat[idx[:, 0]], mass_flat[idx[:, 1]], mass_flat[idx[:, 2]]], axis=1)
-
-      def init_one_water(carry, inputs):
-        key_w = carry
-        r_w, m_w = inputs
-        p_w, key_w = _init_momentum_one_water_rigid(key_w, r_w, m_w, _kT)
-        return key_w, p_w
-
-      key, p_water = jax.lax.scan(init_one_water, key, (r_water, m_water))
+      n_w = r_water.shape[0]
+      splits = jax.random.split(key, n_w + 1)
+      key, water_keys = splits[0], splits[1:]
+      p_water = dispatch_n_waters(
+        None,
+        n_w,
+        lambda pack: _init_momentum_one_water_rigid(pack[0], pack[1], pack[2], _kT)[0],
+        (water_keys, r_water, m_water),
+      )
       idx_flat = idx.reshape(-1)
       if water_mask is None:
         momenta = momenta.at[idx_flat].set(p_water.reshape(-1, 3))
         real_idx_flat = idx_flat
       else:
-        # Padding rows' scatter target is redirected to a discarded scratch
-        # row so they cannot overwrite a real atom sharing the padding fill
-        # index (see `_scatter_water_target`).
         mask_flat = jnp.broadcast_to(water_mask[:, None], idx.shape).reshape(-1)
-        idx_flat_tgt = _scatter_water_target(idx_flat, mask_flat, R.shape[0])
-        momenta_scratch = jnp.concatenate([momenta, momenta[:1]], axis=0)
-        momenta_scratch = momenta_scratch.at[idx_flat_tgt].set(p_water.reshape(-1, 3))
-        momenta = momenta_scratch[: R.shape[0]]
-        # Only real water rows count toward "is_water" below — padding rows'
-        # fill index would otherwise spuriously mark atom 0 as water in
-        # mixed protein+water systems where atom 0 is not actually water.
+        p_water_flat = p_water.reshape(-1, 3)
+        delta_p = jnp.where(mask_flat[:, None], p_water_flat - momenta[idx_flat], 0.0)
+        momenta = momenta.at[idx_flat].add(delta_p)
         real_idx_flat = jnp.where(mask_flat, idx_flat, -1)
 
       # Non-water atoms (solute): standard unconstrained noise
@@ -1230,7 +1308,11 @@ def settle_langevin(
     p_pre_a1 = momentum
 
     # R1: first half-step (A + SETTLE + dp-correction + SETTLE_vel)
-    x_unc_1 = _langevin_step_a(state.positions, momentum, state.mass, half_dt, shift_fn)
+    # Pass the FULL _dt: _langevin_step_a already halves internally (it advances
+    # 0.5*dt*v), so this is the A(dt/2) half-step. Passing half_dt here would
+    # advance only 0.25*dt*v, making the full cycle cover 0.5*dt*v instead of
+    # BAOAB's dt*v (task 260806_p5_measurement_pipeline_audit).
+    x_unc_1 = _langevin_step_a(state.positions, momentum, state.mass, _dt, shift_fn)
 
     # Solute RATTLE (SHAKE) before SETTLE
     if constraints is not None:
@@ -1259,7 +1341,7 @@ def settle_langevin(
     # density (see scripts/explore/p5_rstep_substep_trace.py).
     dx_1 = x_con_1 - x_unc_1
     if box is not None:
-      dx_1 = dx_1 - box * jnp.round(dx_1 / box)
+      dx_1 = dx_1 - box * _PBC_ROUND_FN(dx_1 / box)
     dp_1 = state.mass * dx_1 / half_dt
     momentum = momentum + dp_1
 
@@ -1285,7 +1367,9 @@ def settle_langevin(
     p_pre_a2 = momentum
 
     # R2: second half-step (A + SETTLE + dp-correction + SETTLE_vel)
-    x_unc_2 = _langevin_step_a(position, momentum, state.mass, half_dt, shift_fn)
+    # Full _dt for the same reason as R1 above; the sub-step duration this A-step
+    # represents is half_dt, which is what the dp_2 impulse below divides by.
+    x_unc_2 = _langevin_step_a(position, momentum, state.mass, _dt, shift_fn)
 
     # Solute RATTLE (SHAKE) before SETTLE
     if constraints is not None:
@@ -1309,7 +1393,7 @@ def settle_langevin(
     # see R1 above for why the raw difference is unsafe under PBC wrapping).
     dx_2 = x_con_2 - x_unc_2
     if box is not None:
-      dx_2 = dx_2 - box * jnp.round(dx_2 / box)
+      dx_2 = dx_2 - box * _PBC_ROUND_FN(dx_2 / box)
     dp_2 = state.mass * dx_2 / half_dt
     momentum = momentum + dp_2
 
@@ -1390,7 +1474,18 @@ def settle_lfmiddle_langevin(
   Same as :func:`settle_langevin` but splits the stochastic O-step into two
   halves around the mid-step force recompute:
 
-  B(0.5) → A(0.5) → O(0.5) → A(0.5) → SETTLE_pos → Force → A(0.5) → O(0.5) → B(0.5) → SETTLE_vel
+  B(0.5) → A(0.5) → O(0.5) → A(0.5) → SETTLE_pos → Force → O(0.5) → B(0.5) → SETTLE_vel
+
+  The two O(0.5) halves compose to the full ``exp(-gamma*dt)`` friction, and the
+  two A(0.5) drifts advance positions by exactly ``dt*v``. Until 2026-10-01 a third
+  A(0.5) followed the force recompute, advancing ``1.5*dt*v`` per step with a force
+  evaluated at pre-drift positions; LFMiddle results produced before then (incl.
+  campaign 89c9a900) measured that defective scheme.
+
+  Note: nothing touches the momentum between the two O(0.5) halves, so this step is
+  algebraically BAOAB -- and a weaker one than :func:`settle_langevin` (no R-step
+  constraint impulse, no angular-momentum restoration, no ``water_mask``). It is not a
+  genuine Leimkuhler-Matthews LF-Middle splitting; do not use it to test that idea.
   """
   if projection_site not in ("post_o", "post_settle_vel", "both"):
     msg = f"invalid projection_site={projection_site!r}; expected post_o|post_settle_vel|both"
@@ -1449,18 +1544,11 @@ def settle_lfmiddle_langevin(
 
     force = force_fn(position, **kwargs)
 
-    # A(0.5) second half — mirrors first half for time-reversibility.
-    # Re-apply SETTLE so the returned state and next step's positions_old
-    # both satisfy constraints.
-    positions_pre_settle2 = position
-    position = _langevin_step_a(position, momentum, state.mass, _dt, shift_fn)
-    if constraints is not None:
-      pairs, lengths = constraints
-      position = project_positions(position, pairs, lengths, state.mass, shift_fn)
-    position = settle_positions(
-        position, positions_pre_settle2, water_indices, r_OH, r_HH,
-        mass_oxygen, mass_hydrogen, box,
-    )
+    # No position update after the force recompute: the returned ``force`` must be
+    # the force at the returned ``position`` (the next step's B half-kick uses it),
+    # and the two A(0.5) drifts above already advance positions by exactly dt*v.
+    # A former third A-step here advanced 1.5*dt*v per step and left state.force
+    # stale (tests/physics/test_transrot_decomposition.py).
     if project_ou_momentum_rigid:
       momentum, key = _langevin_step_o_constrained(
           momentum, position, state.mass, gamma, half_dt, _kT, key, water_indices
@@ -1551,7 +1639,7 @@ def settle_with_nhc(
       (init_fn, apply_fn) tuple for NVT dynamics with NHC + SETTLE.
   """
   # Get JAX MD's proven Nosé-Hoover Chain integrator
-  init_fn_nhc, apply_fn_nhc = simulate.nvt_nose_hoover(
+  nhc_init, nhc_apply = simulate.nvt_nose_hoover(
 
     energy_or_force_fn,
     shift_fn,
@@ -1571,16 +1659,22 @@ def settle_with_nhc(
 
   # Wrap NHC apply function with SETTLE constraints
   def apply_with_settle(state, **kwargs):
-    """Apply one NHC step, then enforce SETTLE constraints."""
+    """Apply one NHC step, then enforce SETTLE constraints.
+
+    jax_md's NVTNoseHooverState / NoseHooverChain name the field ``position``
+    (not ``positions``). NOTE: the chain is reset to zero every step below, which
+    discards the thermostat's state -- this is the abandoned Phase 2
+    "settle_with_nhc" approach, not a working NHC integrator (Phase 7, #4168).
+    """
     # Store old positions for SETTLE velocity correction
-    positions_old = state.positions
+    positions_old = state.position
 
     # Apply one step of JAX MD's NHC integrator
     state = nhc_apply(state, **kwargs)
 
     # Enforce SETTLE position constraints
     position = settle_positions(
-      state.positions,
+      state.position,
       positions_old,
       water_indices,
       r_OH,
@@ -1619,13 +1713,13 @@ def settle_with_nhc(
     # (position, momentum of fictitious particles) becomes desynchronized. Reset
     # to zero to allow thermostat to re-equilibrate smoothly on the next step.
     new_chain = state.chain.set(
-      positions=jnp.zeros_like(state.chain.positions),
+      position=jnp.zeros_like(state.chain.position),
       momentum=jnp.zeros_like(state.chain.momentum),
     )
 
     # Return updated state with constrained position, momentum, force, AND chain state
     return state.set(
-      positions=position,
+      position=position,
       momentum=momentum,
       force=force,
       chain=new_chain,
@@ -2028,6 +2122,7 @@ def settle_csvr(
         mass_hydrogen,
         n_iters=10,
         settle_velocity_tol=None,
+        remove_linear_com_momentum=remove_com,
       )
 
     # === CSVR velocity rescaling ===
@@ -2110,14 +2205,15 @@ def _ou_noise_one_water_rigid(
     (p_noise, key_out) where p_noise is (3, 3) mass-weighted noise momenta.
   """
   msum = jnp.sum(m_stack)
-  com = jnp.sum(m_stack[:, None] * r_stack, axis=0) / msum
+  msum_safe = jnp.maximum(msum, jnp.array(1e-30, dtype=msum.dtype))
+  com = jnp.sum(m_stack[:, None] * r_stack, axis=0) / msum_safe
   rrel = r_stack - com  # (3, 3): COM-relative positions of O, H1, H2
 
   # --- translational block ---
   # Sample COM velocity noise: xi_trans ~ N(0, kT/M * I_3)
   key, k_trans, k_rot = jax.random.split(key, 3)
   z_trans = jax.random.normal(k_trans, (3,), dtype=r_stack.dtype)
-  xi_trans = z_trans * jnp.sqrt(kT / msum)          # (3,): COM velocity noise
+  xi_trans = z_trans * jnp.sqrt(kT / msum_safe)     # (3,): COM velocity noise
   p_trans = m_stack[:, None] * xi_trans[None, :]     # (3, 3): p_i = m_i * xi_trans
 
   # --- rotational block ---
@@ -2128,10 +2224,9 @@ def _ou_noise_one_water_rigid(
              - jnp.einsum("i,ia,ib->ab", m_stack, rrel, rrel)  # (3, 3)
   reg_r = jnp.array(1e-12, dtype=I_tensor.dtype) * (jnp.trace(I_tensor) / 3.0 + 1.0)
   I_reg = I_tensor + reg_r * eye3
-  L_I = jnp.linalg.cholesky(I_reg)
   z_rot = jax.random.normal(k_rot, (3,), dtype=r_stack.dtype)
-  # omega ~ N(0, kT * I^{-1}): solve L_I^T omega = sqrt(kT) * z_rot
-  omega = jnp.linalg.solve(L_I.T, jnp.sqrt(kT) * z_rot[:, None]).squeeze(-1)
+  # omega ~ N(0, kT * I^{-1}): solve L_I^T omega = sqrt(kT) * z_rot via closed-form 3x3 Cholesky
+  omega = _cholesky_upper_solve_3x3(I_reg, jnp.sqrt(kT) * z_rot)
   # p_rot_i = m_i * (omega × r_rel_i)
   p_rot = m_stack[:, None] * jnp.cross(omega[None, :], rrel)   # (3, 3)
 
@@ -2198,17 +2293,22 @@ def _langevin_step_o_constrained(
   r_water = jnp.stack([position[idx[:, 0]], position[idx[:, 1]], position[idx[:, 2]]], axis=1)
   m_water = jnp.stack([mass_flat[idx[:, 0]], mass_flat[idx[:, 1]], mass_flat[idx[:, 2]]], axis=1)
 
-  def step_one_water(carry, inputs):
-    key_w = carry
-    r_w, m_w, p_w = inputs
-    p_rigid = _project_one_water_momentum_rigid(p_w, r_w, m_w)
-    p_c1 = c1 * p_rigid
-    noise_w, key_w = _ou_noise_one_water_rigid(key_w, r_w, m_w, kT)
-    p_out = p_c1 + c2 * noise_w
-    return key_w, p_out
+  # Batched over waters via xtrax dispatch (Vmap/ChunkedMap), not lax.scan.
+  n_w = r_water.shape[0]
+  splits = jax.random.split(key, n_w + 1)
+  key, water_keys = splits[0], splits[1:]
 
-  key, p_water_out = jax.lax.scan(
-    step_one_water, key, (r_water, m_water, p_water_in)
+  def step_one_water(pack):
+    key_w, r_w, m_w, p_w = pack
+    p_rigid = _project_one_water_momentum_rigid(p_w, r_w, m_w)
+    noise_w, _ = _ou_noise_one_water_rigid(key_w, r_w, m_w, kT)
+    return c1 * p_rigid + c2 * noise_w
+
+  p_water_out = dispatch_n_waters(
+    None,
+    n_w,
+    step_one_water,
+    (water_keys, r_water, m_water, p_water_in),
   )
 
   idx_flat = idx.reshape(-1)
@@ -2219,12 +2319,10 @@ def _langevin_step_o_constrained(
   if water_mask is None:
     p_out = p_ou.at[idx_flat].set(p_water_out.reshape(-1, 3))
     return p_out, key
-  n_atoms = p_ou.shape[0]
-  mask_flat = jnp.broadcast_to(water_mask[:, None], idx.shape).reshape(-1)
-  idx_flat_tgt = _scatter_water_target(idx_flat, mask_flat, n_atoms)
-  p_ou_scratch = jnp.concatenate([p_ou, p_ou[:1]], axis=0)
-  p_ou_scratch = p_ou_scratch.at[idx_flat_tgt].set(p_water_out.reshape(-1, 3))
-  return p_ou_scratch[:n_atoms], key
+  mask_flat = jnp.broadcast_to(water_mask[:, None], idx.shape).reshape(-1, 1)
+  p_water_flat = p_water_out.reshape(-1, 3)
+  delta_p = jnp.where(mask_flat, p_water_flat - p_ou[idx_flat], 0.0)
+  return p_ou.at[idx_flat].add(delta_p), key
 
 
 def _langevin_step_o_free_dof(
@@ -2289,8 +2387,31 @@ def _langevin_settle_vel(
   n_iters: int = 10,
   settle_velocity_tol: float | None = None,
   water_mask: Array | None = None,
+  remove_linear_com_momentum: bool = False,
 ) -> Array:
-  """Apply SETTLE velocity constraints and update momentum."""
+  """Apply SETTLE velocity constraints and update momentum.
+
+  Args:
+      momentum: Particle momenta (N, 3).
+      positions_old: Positions before integrator step.
+      positions_new: Constrained positions after SETTLE.
+      mass: Particle masses (N,) or (N, 1).
+      water_indices: (N_waters, 3) indices [O, H1, H2].
+      dt: Timestep.
+      mass_oxygen: Oxygen mass (amu).
+      mass_hydrogen: Hydrogen mass (amu).
+      n_iters: SETTLE velocity correction iterations.
+      settle_velocity_tol: SETTLE velocity tolerance.
+      water_mask: Optional (N_waters,) bool for padding rows.
+      remove_linear_com_momentum: If True, subtract center-of-mass momentum
+          after SETTLE velocity constraints: p <- p - m * v_com where
+          v_com = sum(p) / sum(m). This corrects a "flying ice cube" pattern
+          where the thermostat DOF count assumes COM removal but the velocity
+          constraint does not perform it.
+
+  Returns:
+      Updated momentum array.
+  """
   velocity = momentum / mass
   velocity = settle_velocities(
     velocity,
@@ -2304,7 +2425,17 @@ def _langevin_settle_vel(
     adaptive_tol=settle_velocity_tol,
     water_mask=water_mask,
   )
-  return velocity * mass
+  momentum = velocity * mass
+
+  # Optionally remove center-of-mass momentum to match CSVR DOF accounting
+  if remove_linear_com_momentum:
+    mass_col = mass
+    p_tot = jnp.sum(momentum, axis=0)
+    m_tot = jnp.sum(mass_col)
+    v_com = p_tot / jnp.maximum(m_tot, jnp.array(1e-30, dtype=m_tot.dtype))
+    momentum = momentum - mass_col * v_com
+
+  return momentum
 
 
 def settle_csvr_npt(
@@ -2590,6 +2721,7 @@ def settle_csvr_npt(
         mass_hydrogen,
         n_iters=10,
         settle_velocity_tol=None,
+        remove_linear_com_momentum=remove_com,
       )
 
     # === CSVR velocity rescaling ===

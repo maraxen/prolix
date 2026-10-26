@@ -56,11 +56,11 @@ source "scripts/slurm/_bth_env.sh"
 
 CAMPAIGN_ID="${CAMPAIGN_ID:?CAMPAIGN_ID env var required — pass via sbatch --export=ALL,CAMPAIGN_ID=<id>}"
 
-uv run bth run python scripts/experiments/p5_nvt_gate_dt1fs.py \
-    --tag p5 --tag nvt-gate --tag dt1fs \
-    --campaign "${CAMPAIGN_ID}" \
-    --out "${OUT}" \
-    -- --out "${OUT}"
+bth run \
+    --tags p5 --tags nvt-gate --tags dt1fs \
+    --campaign-id "${CAMPAIGN_ID}" \
+    --output-paths "${OUT}" \
+    -- uv run python scripts/experiments/p5_nvt_gate_dt1fs.py --out "${OUT}"
 
 EXIT=$?
 echo "=== output: ${OUT} ==="

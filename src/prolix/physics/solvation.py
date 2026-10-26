@@ -583,6 +583,9 @@ def solvate_protein_to_bundle(
     EnsemblePlan and B1's shape-class dispatch actually use. No existing
     function connected these two representations before this one.
 
+    ``use_size_buckets=False`` pads to exact atom/water counts (one long
+    homogeneous trajectory) instead of ATOM_BUCKETS.
+
     Two correctness traps guarded against explicitly here, rather than left
     to a shared implicit default -- the second is the exact same failure
     mode as the box_size bug fixed in commit 395995b (research record

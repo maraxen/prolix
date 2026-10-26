@@ -9,7 +9,8 @@ Answers three questions in one cluster run:
       Constrained vs unconstrained OU at same seed/config.
 
 Usage (via bth run):
-    uv run bth run python scripts/experiments/p5_nvt_gate_diag.py \\
+    bth run --output-paths outputs/p5_nvt_gate_diag.json \\
+        -- uv run python scripts/experiments/p5_nvt_gate_diag.py \\
         --out outputs/p5_nvt_gate_diag.json
 
 Local L2 smoke (fast, small system):

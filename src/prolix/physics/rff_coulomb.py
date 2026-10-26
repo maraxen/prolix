@@ -87,8 +87,8 @@ def erfc_rff_features(
   features = jnp.stack([cos_feat, sin_feat], axis=-1).reshape(n_atoms, 2 * d2)
 
   # Apply prefactor sqrt(2α/sqrt(π)) for correct kernel normalization
-  prefactor = jnp.sqrt(2.0 * alpha / jnp.sqrt(jnp.pi))
-  return features * prefactor
+  prefactor = jnp.sqrt(2.0 * alpha / jnp.sqrt(jnp.pi)).astype(positions.dtype)
+  return (features * prefactor).astype(positions.dtype)
 
 
 def erfc_rff_coulomb_energy(
@@ -135,7 +135,7 @@ def erfc_rff_coulomb_energy(
   # Result: (||sum||^2 - self) / 2 to account for symmetry
   energy = (quad_form - self_term) / 2.0
 
-  return COULOMB_CONSTANT * energy
+  return (COULOMB_CONSTANT * energy).astype(positions.dtype)
 
 
 @custom_vjp
@@ -214,8 +214,8 @@ def _erfc_rff_bwd(residuals, g):
   grad_x = 2.0 * jnp.einsum("nkj,nk->nj", grad_phi, diff_masked)
 
   # Apply prefactors
-  grad_x = grad_x * norm_pref * COULOMB_CONSTANT / 2.0
-  grad_x = grad_x * atom_mask[:, None]
+  grad_x = g * grad_x * norm_pref * COULOMB_CONSTANT / 2.0
+  grad_x = (grad_x * atom_mask[:, None]).astype(positions.dtype)
 
   # No gradient w.r.t. charges, omega, alpha
   return (grad_x, None, None, None, None)

@@ -6,7 +6,7 @@
 Scope (B1-XTRAX-WIRE / using-xtrax):
   - ``DedupGather`` / ``dispatch_n_mols_dedup``: **topology-keyed** bodies only
     (energy, compile probes, identical-input duplicates).
-  - Seeded Langevin MD: **never** DedupGather — distinct seeds ⇒ Vmap/SafeMap
+  - Seeded Langevin MD: **never** DedupGather — distinct seeds ⇒ Vmap/ChunkedMap
     within a ``shape_spec`` class after host ``partition_bundles_by_shape``.
   - ``partition_bundles_by_shape`` is the host Bucket-analogue for variable
     topology classes (K≪N Python groups); it is not device DedupGather.
@@ -15,7 +15,8 @@ Scope (B1-XTRAX-WIRE / using-xtrax):
 from __future__ import annotations
 
 import dataclasses
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 
 import numpy as np
 from xtrax.tiling.dedup import DedupSpec
@@ -35,8 +36,8 @@ __all__ = [
 
 def partition_bundles_by_shape(bundles: list[Any]) -> list[list[int]]:
     """Stable host partition of bundle indices by ``shape_spec`` equality.
-
-    Use this to form homogeneous N_MOLS groups before Vmap/SafeMap. Distinct
+    
+    Use this to form homogeneous N_MOLS groups before Vmap/ChunkedMap. Distinct
     shape classes cannot share one device map; Python over K classes is
     intentional (K≪N). This is **not** DedupGather execute.
     """
@@ -81,7 +82,7 @@ def plan_n_mols_with_dedup(
     n_mols: int,
     dedup_spec: DedupSpec,
     *,
-    budget_bytes: float | int = 1 << 40,
+    budget_bytes: float = 1 << 40,
 ) -> BatchPlan:
     """Plan ``n_mols`` with a DedupSpec so xtrax pre-demotes to DedupGather.
 

@@ -1,4 +1,4 @@
-# praxia Internal Docs
+# prolix Internal Docs
 
 ## Daily
 - [260426_sprint5-kups-crossval](daily/260426_sprint5-kups-crossval.md)
@@ -55,6 +55,14 @@
 - [260410_phase4-solvation-implementation-plan](plans/260410_phase4-solvation-implementation-plan.md)
 
 ## Specs
+- [260827_nb-parity-1vii-nl-switch-energy-compare](specs/260827_nb-parity-1vii-nl-switch-energy-compare.md) — NB-PARITY-1VII-NL — Prolix NL+switch vs vendored 1vii gold (energy_fn_from_bundle)
+- [260824_neighbor-list-config](specs/260824_neighbor-list-config.md) — OpenMM-shaped NonbondedConfig / NL Verlet+LJ-switch; flash tile JAX; vendored OpenMM 8.3.1 gold campaign (Pallas deferred)
+- [260820_jax-profiling-skill-DRAFT](specs/260820_jax-profiling-skill-DRAFT.md) — DRAFT source for the xtrax `jax-profiling` skill (not P9; fill §Open after Stage-2 pull → rank → kernel decision)
+- [260817_jax-profiling-optimization-workflow](specs/260817_jax-profiling-optimization-workflow.md) — Layered split (jax-profiling skill for judgment, authored cross-repo in xtrax/agent_assets/skills/ + prolix-local scripts/profiling/ primitives + machine-checked stage/scale validity contract), with bathos scoped to the confirmation loop and the xtrax CODE upstream still deferred behind a named trigger; plus an ordered CPU-first implementation plan ending in one small-system H200 probe and one cross-repo skill-authoring step
+- [260817_where-should-a-reusable-staged-cpu-synth](specs/260817_where-should-a-reusable-staged-cpu-synth.md)
+- [260812_decide-the-fix-approach-for-prolix-backl-2](specs/260812_decide-the-fix-approach-for-prolix-backl-2.md)
+- [260812_decide-the-fix-approach-for-prolix-backl](specs/260812_decide-the-fix-approach-for-prolix-backl.md)
+- [260812_re-derive-stage-0d-reachability-for-prol](specs/260812_re-derive-stage-0d-reachability-for-prol.md)
 - [260718_xr-while-carry](specs/260718_xr-while-carry.md) — Scope a lax.while_loop-backed WhileCarry strategy for xtrax (upstream), motivated by debt 760's neighbor-list carry in prolix's EnsemblePlan inference dispatch
 - [260715_b1-nonbonded-parity](specs/260715_b1-nonbonded-parity.md) — B1-NONBONDED-PARITY
 - [260715_b1-settle-stack](specs/260715_b1-settle-stack.md) — B1-SETTLE-STACK
@@ -101,11 +109,25 @@
 - [260710_xtrax-rewire_audit_dag](audits/260710_xtrax-rewire_audit_dag.md)
 - [260710_xtrax-rewire_next_steps](audits/260710_xtrax-rewire_next_steps.md)
 - [260710_xtrax-rewire_triage](audits/260710_xtrax-rewire_triage.md)
+- [260710_xtrax-rewire_verify_checklist](audits/260710_xtrax-rewire_verify_checklist.toml) ⚠️ non-standard extension
 - [260623_hp2_make_bundle_field_audit](audits/260623_hp2_make_bundle_field_audit.md)
 - [260526_p2a-bonded-field-audit](audits/260526_p2a-bonded-field-audit.md) — PhysicsSystem field-access audit for bonded energy path; extended for P2b nonbonded fields (260527)
+- [ROLLUP](audits/xr_rewire_challenges/ROLLUP.json)
 - [ROLLUP](audits/xr_rewire_challenges/ROLLUP.md)
+- [XR-A2A3_challenge_summary](audits/xr_rewire_challenges/XR-A2A3_challenge_summary.json)
+- [XR-BUDGET_challenge_summary](audits/xr_rewire_challenges/XR-BUDGET_challenge_summary.json)
+- [XR-CARRY_challenge_summary](audits/xr_rewire_challenges/XR-CARRY_challenge_summary.json)
+- [XR-DISPATCH_challenge_summary](audits/xr_rewire_challenges/XR-DISPATCH_challenge_summary.json)
+- [XR-FIT-FLIP_challenge_summary](audits/xr_rewire_challenges/XR-FIT-FLIP_challenge_summary.json)
+- [XR-KILL-FORK_challenge_summary](audits/xr_rewire_challenges/XR-KILL-FORK_challenge_summary.json)
+- [XR-PARITY-OMM-WATER_challenge_summary](audits/xr_rewire_challenges/XR-PARITY-OMM-WATER_challenge_summary.json)
+- [XR-PIN_challenge_summary](audits/xr_rewire_challenges/XR-PIN_challenge_summary.json)
+- [XR-SHADOW_challenge_summary](audits/xr_rewire_challenges/XR-SHADOW_challenge_summary.json)
+- [praxia_id_map](audits/xr_rewire_challenges/praxia_id_map.json)
 
 ## Research
+- [260901_nl-bucketing-runtime-tax-single-system-production](research/260901_nl-bucketing-runtime-tax-single-system-production.md) — Size-bucketing (meant to share compiled programs across differently-shaped systems) inflates neighbor-list capacity K by ~2.1x based on bucket padding, imposing a permanent ~2.7x per-step runtime tax on single-protein production trajectories that have no other shape to share a compile with.
+- [260831_stage-2-profiling-sweep-synthesis-full-md-path-matrix-p7-stage2-full-md-production-defaults](research/260831_stage-2-profiling-sweep-synthesis-full-md-path-matrix-p7-stage2-full-md-production-defaults.md) — Synthesizes 3 open bathos campaigns (#4326): NL vs flash vs dense harness quality + preliminary ranking, a sidecar-schema-mismatch bug that made every p7-stage2 flash-vs-dense sweep run gate-fail regardless of content, and confirmation that full-md-production-defaults was pre-registered but never executed.
 - [260710_xtrax-rewire-epic-closeout-audit](research/260710_xtrax-rewire-epic-closeout-audit.md)
 - [260710_xtrax-rewire_audit](research/260710_xtrax-rewire_audit.md)
 - [260710_xtrax-rewire_postmortem](research/260710_xtrax-rewire_postmortem.md)
@@ -140,6 +162,7 @@
 - [260124_task-system-analysis](research/260124_task-system-analysis.md)
 
 ## Decisions
+- [260824_adr-006-pallas-pme-spline](decisions/260824_adr-006-pallas-pme-spline.md) — ADR 006: atom-parallel Pallas SPME spread/gather (**deferred** 2026-08-24 until high-level JAX bottlenecks on implicit/explicit paths are exhausted; XLA stencil remains production)
 - [260717_b1-connect-existing-engines-scope](decisions/260717_b1-connect-existing-engines-scope.md) — Phase 5 scoping of debt 760 (NL+PME) and 761 (analytical/flash forces) connection work for EnsemblePlan, with concrete technical designs and recommended sequencing
 - [260501_adr-001-kups-prolix-potential-eval](decisions/260501_adr-001-kups-prolix-potential-eval.md)
 - [260501_adr-002-neighbor-list-invalidation](decisions/260501_adr-002-neighbor-list-invalidation.md)
@@ -152,6 +175,7 @@
 ## Preregistration
 
 ## Reference
+- [261023_xtrax_composition_and_pallas_optimization_guide](reference/261023_xtrax_composition_and_pallas_optimization_guide.md)
 - [260415_explicit-solvent-runbook](reference/260415_explicit-solvent-runbook.md)
 - [230912_dmff](reference/230912_dmff.md) — DMFF: An Open-Source Automatic Differentiable Platform for Molecular Force Field Development and MD Simulation — Wang, Li, Yang et al., JCTC, 2023
 - [221107_espaloma](reference/221107_espaloma.md) — End-to-End Differentiable Construction of Molecular Mechanics Force Fields — Wang et al., Chemical Science, 2022; espaloma-0.3.0 Takaba et al., Chemical Science, 2024
@@ -291,14 +315,6 @@
 - [251204_examples](misc/251204_examples.md)
 - [251204_index](misc/251204_index.md)
 - [251204_untitled](misc/251204_untitled.md)
-
-## Active (legacy)
-
-## Notes (legacy)
-- [260522_s71-external-baseline-api-verification](notes/260522_s71-external-baseline-api-verification.md)
-
-## Designs (legacy)
-- [260710_xtrax-rewire_audit_design](designs/260710_xtrax-rewire_audit_design.md)
 
 ## Superpowers
 > Skill outputs live in `.praxia/docs/superpowers/plans/` and `.praxia/docs/superpowers/specs/.

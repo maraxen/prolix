@@ -13,6 +13,7 @@ from prolix.tiling.axes import (
     N_STEPS,
     N_SYSTEMS,
     N_TORSIONS,
+    N_WATERS,
 )
 from prolix.tiling.buckets import get_length_bucket, pad_to_bucket
 from prolix.tiling.planner import AxisDecision, AxisSpec, BatchPlan, BatchPlanner
@@ -32,5 +33,6 @@ __all__ = [
     "N_MOLS",
     "N_STEPS",
     "N_SYSTEMS",
+    "N_WATERS",
     "ALL_AXES",
 ]

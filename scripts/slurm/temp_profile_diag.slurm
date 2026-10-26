@@ -14,4 +14,4 @@ cd "${PROLIX_ROOT}"
 export JAX_PLATFORMS=cuda JAX_ENABLE_X64=1 XLA_PYTHON_CLIENT_PREALLOCATE=false
 export PROLIX_RESULT_PATH="${PROLIX_ROOT}/outputs/results/temp_profile_${SLURM_JOB_ID}.json"
 mkdir -p "${PROLIX_ROOT}/outputs/results"
-uv run python scripts/experiments/temp_profile_diag.py
+uv run python scripts/explore/temp_profile_diag.py

@@ -3,7 +3,8 @@ revision = 3
 requires-python = "==3.13.*"
 resolution-markers = [
     "platform_machine == 'x86_64' and sys_platform == 'linux'",
-    "sys_platform == 'win32'",
+    "platform_machine == 'ARM64' and sys_platform == 'win32'",
+    "platform_machine != 'ARM64' and sys_platform == 'win32'",
     "(platform_machine != 'x86_64' and sys_platform == 'linux') or (sys_platform != 'linux' and sys_platform != 'win32')",
 ]
 required-markers = [
@@ -205,6 +206,23 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/eb/6d/bf9bda840d5f1dfdbf0feca87fbdb64a918a69bca42cfa0ba7b137c48cb8/cffi-2.0.0-cp313-cp313-win32.whl", hash = "sha256:74a03b9698e198d47562765773b4a8309919089150a0bb17d829ad7b44b60d27", size = 172909, upload-time = "2025-09-08T23:23:14.32Z" },
     { url = "https://files.pythonhosted.org/packages/37/18/6519e1ee6f5a1e579e04b9ddb6f1676c17368a7aba48299c3759bbc3c8b3/cffi-2.0.0-cp313-cp313-win_amd64.whl", hash = "sha256:19f705ada2530c1167abacb171925dd886168931e0a7b78f5bffcae5c6b5be75", size = 183402, upload-time = "2025-09-08T23:23:15.535Z" },
     { url = "https://files.pythonhosted.org/packages/cb/0e/02ceeec9a7d6ee63bb596121c2c8e9b3a9e150936f4fbef6ca1943e6137c/cffi-2.0.0-cp313-cp313-win_arm64.whl", hash = "sha256:256f80b80ca3853f90c21b23ee78cd008713787b1b1e93eae9f3d6a7134abd91", size = 177780, upload-time = "2025-09-08T23:23:16.761Z" },
+]
+
+[[package]]
+name = "cftime"
+version = "1.6.6.1"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "numpy" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/4f/bb/64c8afb966ca9482ef7961b606bfe8615f7948e7ea70e737159f9a940064/cftime-1.6.6.1.tar.gz", hash = "sha256:3eff428a229169c2632c093b554e36dd5277dacc0f7aae8ad73ce6a93304d58d", size = 381552, upload-time = "2026-10-14T18:50:47.589Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/dd/28/0239c934ddcf555ba718c1b971aa8e241a241f80c92bead219eefd76b82c/cftime-1.6.6.1-cp311-abi3-macosx_10_9_x86_64.whl", hash = "sha256:dd42f26a5ec493ac6ffe83eabc173625d2954cc6993de150ef60bab7599dc10e", size = 549727, upload-time = "2026-10-14T18:50:18.032Z" },
+    { url = "https://files.pythonhosted.org/packages/e3/98/2906f59bb8fb11dd47133fcf40d1d01c2e7a00f5f00701a80cfb6cc1f498/cftime-1.6.6.1-cp311-abi3-macosx_11_0_arm64.whl", hash = "sha256:6afab9967fe9635eb16569cd670619a7beed09bbea7982f9c6f61001d06c62a1", size = 543813, upload-time = "2026-10-14T18:50:19.916Z" },
+    { url = "https://files.pythonhosted.org/packages/a1/f5/84eb544579f55452df65a47bcc86147deaddf0e568725987bc69a1bc4cf6/cftime-1.6.6.1-cp311-abi3-manylinux1_x86_64.manylinux_2_28_x86_64.manylinux_2_5_x86_64.whl", hash = "sha256:92566dd8c3213b824f8b2e86904efa7f0d8db6a51017cc5ad365b1d20b579617", size = 1673835, upload-time = "2026-10-14T18:50:21.438Z" },
+    { url = "https://files.pythonhosted.org/packages/dd/29/563ff54069998e89cd74e410e862017131690e4f595a06820172335a9c1b/cftime-1.6.6.1-cp311-abi3-manylinux2014_aarch64.manylinux_2_17_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:2d1e68e14537e16db8d3a48c95aa617556247d3f8e6e3a864eca302427dc1e4c", size = 1642106, upload-time = "2026-10-14T18:50:23.441Z" },
+    { url = "https://files.pythonhosted.org/packages/a8/3a/ad6e96204d85ea6abf3721393ec2e830e025854b51402cfc081a670b61f5/cftime-1.6.6.1-cp311-abi3-win_amd64.whl", hash = "sha256:e4ed505118cbffec8ca6b59636f283d55df1675a3f092bc2d276f917a04af68a", size = 512994, upload-time = "2026-10-14T18:50:25.098Z" },
+    { url = "https://files.pythonhosted.org/packages/c4/c5/a5eb6e8b11d8b603af51827c9afb42598d0eda1a2cbd5c0190e31f701348/cftime-1.6.6.1-cp311-abi3-win_arm64.whl", hash = "sha256:f0cf93b58005e8dd012d2c7c10428d405b1afb19384d12de66782fad46df2b39", size = 499638, upload-time = "2026-10-14T18:50:26.658Z" },
 ]
 
 [[package]]
@@ -1233,6 +1251,19 @@ wheels = [
 ]
 
 [[package]]
+name = "llvmlite"
+version = "0.50.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/11/c5/907cec40688a34eb489cded74d555e1ee4af8cf49d83e03dba2c2d4cfe27/llvmlite-0.50.0.tar.gz", hash = "sha256:f2a2cd6ec9ffcc1b7147dea0d7a49efebf17a2b434e0c2844fe175999d571eb4", size = 194522, upload-time = "2026-09-29T18:44:46.782Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/b8/1f/1d585b2122bcc9fe1615c0097730baebdef1b80e6acd07fe921ee501576b/llvmlite-0.50.0-cp313-cp313-macosx_12_0_arm64.whl", hash = "sha256:a32980e3d727b0e56974ad89d0764920048602a75805b8917cc0298e798b0ced", size = 40534276, upload-time = "2026-09-29T18:43:16.012Z" },
+    { url = "https://files.pythonhosted.org/packages/21/3e/d5dbbc80bd87c3530bae1127cefce56b36434cc8a7fbbac281309e2af435/llvmlite-0.50.0-cp313-cp313-manylinux_2_27_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:7dde9836d144c446a303b57b2dd906c35308411eb07f1279c1db581d3d774048", size = 58344486, upload-time = "2026-09-29T18:43:20.663Z" },
+    { url = "https://files.pythonhosted.org/packages/ed/c2/5e9d0773f1589397a3ea3dcfa4bbee36e2855ad938d738dd6ff9f505a59b/llvmlite-0.50.0-cp313-cp313-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:425845f415a06dc50db08db033c6b568e0d85c4937e932c605a4d49e1514b2da", size = 59696589, upload-time = "2026-09-29T18:43:25.605Z" },
+    { url = "https://files.pythonhosted.org/packages/d5/17/894321d44cf94fa5cf921eff4e7ff24c7732c3d702236d40d6055b68a693/llvmlite-0.50.0-cp313-cp313-win_amd64.whl", hash = "sha256:266a6a29be71c3e3a22960ddcedf66b4e0388e5abb6cc4991cc093d6df402ad7", size = 41865552, upload-time = "2026-09-29T18:43:29.755Z" },
+    { url = "https://files.pythonhosted.org/packages/b1/d7/c3c3a70f057c18313515af3bd970c1faa348121e2545d6074f22011feca9/llvmlite-0.50.0-cp313-cp313-win_arm64.whl", hash = "sha256:1cb21c420a47dcfa56223228d013c6f9d234e05e06e6819a41638d78bbd78e6c", size = 37441843, upload-time = "2026-09-29T18:43:33.292Z" },
+]
+
+[[package]]
 name = "markdown-it-py"
 version = "3.0.0"
 source = { registry = "https://pypi.org/simple" }
@@ -1428,6 +1459,18 @@ wheels = [
 ]
 
 [[package]]
+name = "mpiplus"
+version = "0.0.3"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "numpy" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/86/de/6429553c75262fdfd79bd2798cfc140bf16bebd3ebeccc2500be0fe84fd7/mpiplus-0.0.3.tar.gz", hash = "sha256:f453ecb8701aad00f189e08c8542ce559219db946a1534cdcb7242576f73520b", size = 31786, upload-time = "2026-10-08T20:42:59.263Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/a0/82/28ca1f19c2c37fb9814b2379511fdb4a537d1b07f003d90b9c76bfc590b4/mpiplus-0.0.3-py3-none-any.whl", hash = "sha256:b6747dcab1ea5633d61a80104d2f798c94a430f67fac494c1645bcc7faa9cf29", size = 13224, upload-time = "2026-10-08T20:42:58.233Z" },
+]
+
+[[package]]
 name = "mpmath"
 version = "1.3.0"
 source = { registry = "https://pypi.org/simple" }
@@ -1553,12 +1596,49 @@ wheels = [
 ]
 
 [[package]]
+name = "netcdf4"
+version = "1.7.5.1.post1"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "certifi" },
+    { name = "cftime" },
+    { name = "numpy" },
+    { name = "packaging" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/84/a6/816e4887fc132ce62b055cd2aecc47f0273e6bcf870cda250ed1323d93be/netcdf4-1.7.5.1.post1.tar.gz", hash = "sha256:9823076013fd54e7984d3ae8f431671fd199b15eeb267f91b8c4b057fd8324ab", size = 849840, upload-time = "2026-10-23T16:47:18.246Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/f7/85/4bf2ff1dc7ab58e777e44f6a25d196f3104b916b8836e4f749fe9e77b158/netcdf4-1.7.5.1.post1-cp311-abi3-macosx_15_0_arm64.whl", hash = "sha256:e241c3e8c3af6a2e04a989bf80db31c580e4692ea6fc8f41d998ef1b2010fbcc", size = 10346992, upload-time = "2026-10-23T16:46:32.361Z" },
+    { url = "https://files.pythonhosted.org/packages/95/cd/22874a17787224f6b806224091ae898607762db8f2028ae3cee95bfde498/netcdf4-1.7.5.1.post1-cp311-abi3-macosx_15_0_x86_64.whl", hash = "sha256:3fc1e1820b889b78f5777e18f828e1373ac497798a1e207d4723f21dac5271ed", size = 11089349, upload-time = "2026-10-23T16:46:34.821Z" },
+    { url = "https://files.pythonhosted.org/packages/34/b6/ffb022b635490f884cc32b30e3f280fb36a41f35d424213d88a5beddec4d/netcdf4-1.7.5.1.post1-cp311-abi3-manylinux_2_28_aarch64.whl", hash = "sha256:544316a1f712aa9f0a29a57ba835c9a8e640f9a5724b37d5cdf8a919e54427df", size = 10695626, upload-time = "2026-10-23T16:46:37.148Z" },
+    { url = "https://files.pythonhosted.org/packages/4b/eb/dfbce2a6028198d65d238370f42ced033a506d61804fcb3b882e08f2d930/netcdf4-1.7.5.1.post1-cp311-abi3-manylinux_2_28_x86_64.whl", hash = "sha256:fde13b1fc71bf2b0f684a272fe279fa7d01ee45e6098b4711840a4ab6ae42130", size = 10552948, upload-time = "2026-10-23T16:46:39.139Z" },
+    { url = "https://files.pythonhosted.org/packages/75/2c/145c4e8d5c2870930d4d9d7faebc4bc8d4a9a7036534113b57528d78982e/netcdf4-1.7.5.1.post1-cp313-cp313-win_amd64.whl", hash = "sha256:2d8cff389ca9d49f83f3faebc2cf1abfebf2a023d8a168ee0dc8234de4504371", size = 22443432, upload-time = "2026-10-23T16:46:48.92Z" },
+    { url = "https://files.pythonhosted.org/packages/a6/0f/3237cb3dc72c966a5322282b3ac059ee52dc783a69aa1a9601d532388789/netcdf4-1.7.5.1.post1-cp313-cp313-win_arm64.whl", hash = "sha256:2faeb065a16cd60841e7c3930526222f5f8345c3abeed25de34565ee73fe48a4", size = 2813718, upload-time = "2026-10-23T16:46:50.82Z" },
+]
+
+[[package]]
 name = "networkx"
 version = "3.6"
 source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/e8/fc/7b6fd4d22c8c4dc5704430140d8b3f520531d4fe7328b8f8d03f5a7950e8/networkx-3.6.tar.gz", hash = "sha256:285276002ad1f7f7da0f7b42f004bcba70d381e936559166363707fdad3d72ad", size = 2511464, upload-time = "2025-11-24T03:03:47.158Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/07/c7/d64168da60332c17d24c0d2f08bdf3987e8d1ae9d84b5bbd0eec2eb26a55/networkx-3.6-py3-none-any.whl", hash = "sha256:cdb395b105806062473d3be36458d8f1459a4e4b98e236a66c3a48996e07684f", size = 2063713, upload-time = "2025-11-24T03:03:45.21Z" },
+]
+
+[[package]]
+name = "numba"
+version = "0.68.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "llvmlite" },
+    { name = "numpy" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/4e/cd/e8280f9ffa30fea9fabc5341223701231fcc5d53a31f51419d42d4bec3a6/numba-0.68.0.tar.gz", hash = "sha256:8a781de54b980b98f43bff7f1093701b5f07c80d031c7cfa8a87493d8bf73f2d", size = 2855363, upload-time = "2026-09-30T15:05:44.721Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/a2/4d/42754c94f8f909b9981fd44d28292a93bca6429d93f3e1ae58ac7de9b08b/numba-0.68.0-cp313-cp313-macosx_12_0_arm64.whl", hash = "sha256:b8b29602f57df06c724fc53b1740887bc4332f202206771d46e47b25b485e904", size = 2760360, upload-time = "2026-09-30T15:05:04.386Z" },
+    { url = "https://files.pythonhosted.org/packages/b3/1c/8bae32109a826a49666a9645012b98d6e09ad496932a877c97a2c39dde50/numba-0.68.0-cp313-cp313-manylinux_2_27_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:df6f881c5695f472873d0979bab54261959b3174b6c98a71f6f8a43c3e088985", size = 3560908, upload-time = "2026-09-30T15:05:06.832Z" },
+    { url = "https://files.pythonhosted.org/packages/aa/b1/0b504ae34d1b79a6482a0ffcbfd1b103dde02329c11525033e02633f7984/numba-0.68.0-cp313-cp313-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:be647fbc60c18c0323b34479f80173879654894eec58ad061f4b1901e294d854", size = 3848615, upload-time = "2026-09-30T15:05:08.976Z" },
+    { url = "https://files.pythonhosted.org/packages/8d/a5/06d1dd4553dcc71a3a18defe9e6e26e3c011b566bc9060d4f6e4bca0e0ed/numba-0.68.0-cp313-cp313-win_amd64.whl", hash = "sha256:bf7435c81912e271a28a19c348ada5b3986e2409f95a067533c5f4aab8709295", size = 2830730, upload-time = "2026-09-30T15:05:11.232Z" },
+    { url = "https://files.pythonhosted.org/packages/93/d8/6b01de5fa7b4c3866c0fb680833fd58b4fc48d1e7febb46e992f0b0f0e7b/numba-0.68.0-cp313-cp313-win_arm64.whl", hash = "sha256:50e3c81d8bf6956c7d7330a985bf1468efaa9e4c4539c9fa0ac6c7866ea6e369", size = 2812090, upload-time = "2026-09-30T15:05:13.455Z" },
 ]
 
 [[package]]
@@ -1926,7 +2006,8 @@ name = "openmm"
 version = "8.4.0.post2"
 source = { registry = "https://pypi.org/simple" }
 resolution-markers = [
-    "sys_platform == 'win32'",
+    "platform_machine == 'ARM64' and sys_platform == 'win32'",
+    "platform_machine != 'ARM64' and sys_platform == 'win32'",
     "(platform_machine != 'x86_64' and sys_platform == 'linux') or (sys_platform != 'linux' and sys_platform != 'win32')",
 ]
 dependencies = [
@@ -1938,6 +2019,11 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/2e/da/5534914daa40455f5ed92b4d82c980e5f346922841c4d86b32ed6cb1382b/openmm-8.4.0.post2-cp313-cp313-manylinux_2_34_x86_64.whl", hash = "sha256:70cdd3309064b95bd304af1f195377e54b6f7060b15b37af725d15764b756b09", size = 14251710, upload-time = "2025-11-24T21:42:22.865Z" },
     { url = "https://files.pythonhosted.org/packages/34/9e/e42c8c6d29050dd8188d33c79c9a40291bf8885d1588f755246bb734effe/openmm-8.4.0.post2-cp313-cp313-win_amd64.whl", hash = "sha256:e2912d803e7473048351cddb59176df191db3cbe21d0ab1a6f83e7020b92f01f", size = 13096685, upload-time = "2025-11-24T21:42:29.885Z" },
 ]
+
+[[package]]
+name = "openmmtools"
+version = "0.26.0"
+source = { git = "https://github.com/choderalab/openmmtools#ba4031da49981fe9e8b0bcec010ab53e18a03ba2" }
 
 [[package]]
 name = "opt-einsum"
@@ -2189,10 +2275,20 @@ dependencies = [
     { name = "jaxtyping" },
     { name = "matplotlib" },
     { name = "mdtraj" },
+    { name = "mpiplus" },
+    { name = "netcdf4" },
+    { name = "numba" },
     { name = "numpy" },
+    { name = "openmm", version = "8.3.1", source = { registry = "https://pypi.org/simple" }, marker = "platform_machine == 'x86_64' and sys_platform == 'linux'" },
+    { name = "openmm", version = "8.4.0.post2", source = { registry = "https://pypi.org/simple" }, marker = "platform_machine != 'x86_64' or sys_platform != 'linux'" },
+    { name = "openmmtools" },
+    { name = "pandas" },
     { name = "parmed" },
+    { name = "pdbfixer" },
     { name = "proxide" },
     { name = "py2dmol" },
+    { name = "pymbar" },
+    { name = "pyyaml" },
     { name = "rdkit" },
     { name = "scipy" },
     { name = "xtrax" },
@@ -2281,17 +2377,26 @@ requires-dist = [
     { name = "jaxtyping" },
     { name = "matplotlib", specifier = ">=3.10.7" },
     { name = "mdtraj" },
+    { name = "mpiplus" },
     { name = "myst-nb", marker = "extra == 'docs'" },
+    { name = "netcdf4" },
+    { name = "numba" },
     { name = "numpy" },
+    { name = "openmm" },
     { name = "openmm", marker = "platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'openmm'", specifier = ">=8.3.1,<8.4.0" },
     { name = "openmm", marker = "(platform_machine != 'x86_64' and extra == 'openmm') or (sys_platform != 'linux' and extra == 'openmm')", specifier = ">=8.4.0" },
+    { name = "openmmtools", git = "https://github.com/choderalab/openmmtools" },
+    { name = "pandas" },
     { name = "parmed", specifier = ">=4.3.1" },
+    { name = "pdbfixer" },
     { name = "proxide", specifier = ">=0.1.0a8" },
     { name = "py2dmol", specifier = ">=1.5.1" },
     { name = "py2dmol", marker = "extra == 'viz'", specifier = ">=1.5.0" },
+    { name = "pymbar" },
     { name = "pytest", marker = "extra == 'dev'" },
     { name = "pytest-cov", marker = "extra == 'dev'" },
     { name = "pytest-xdist", marker = "extra == 'dev'" },
+    { name = "pyyaml" },
     { name = "rdkit", specifier = ">=2024.3.0" },
     { name = "ruff", marker = "extra == 'dev'" },
     { name = "scipy" },
@@ -2302,7 +2407,7 @@ requires-dist = [
     { name = "sphinx-design", marker = "extra == 'docs'" },
     { name = "sphinxext-rediraffe", marker = "extra == 'docs'" },
     { name = "ty", marker = "extra == 'dev'" },
-    { name = "xtrax", specifier = ">=0.4.0a5,<0.5" },
+    { name = "xtrax", specifier = ">=0.4.1b2,<0.5" },
 ]
 provides-extras = ["cuda", "tpu", "cpu", "dev", "openmm", "docs", "viz", "wasm"]
 

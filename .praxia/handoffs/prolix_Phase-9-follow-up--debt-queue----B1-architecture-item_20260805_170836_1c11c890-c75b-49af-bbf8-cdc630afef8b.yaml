@@ -1,0 +1,47 @@
+---
+workspace: prolix
+session_id: session_016h2c757y2nQ5SKyfXr2sA2
+status: complete
+immediately_relevant:
+- file: src/prolix/physics/system.py
+  lines:
+  - 401
+  - 431
+  reason: _validate_target_bucket_counts + _AXIS_LADDERS -- the input-validation gate for target_bucket_counts, added in the final-review fix round; unknown keys and overflow now raise clear ValueErrors instead of silently no-op'ing or crashing later
+- file: src/prolix/physics/system.py
+  lines:
+  - 534
+  - 560
+  reason: '_pad_3d -- the CMAP padding helper implicated in debt #1170''s negative-pad crash; starting point for whoever picks that debt item up'
+- file: src/prolix/api/ensemble_dispatch.py
+  lines:
+  - 1
+  - 30
+  reason: dispatch_n_atoms/n_atoms_strategy already implemented (tagged XR-DISPATCH-MULTI in the docstring) but has zero call sites in ensemble_plan.py -- the real scope of debt 567 if picked up next
+active_dispatches: []
+task_id: 260805_b1_debt756_773_bucket_recon
+phase: Phase 9 follow-up (debt queue) + B1 architecture item
+goal_statement: 'Review + merge PR #7 (debt 937) and PR #8 (debt 844), then pick and implement one B1 architecture item. Result: PR #7/#8 reviewed and merged. Recon on debt 756+773 found both cheaper than scoped. Implemented via Subagent-Driven Development (4 tasks, each independently reviewed, one fix round on Task 2). Final whole-branch review (Opus) found 4 real cross-task Important findings, fixed in one pass, scoped re-review confirmed clean. Merged to main (fast-forward, 49ced0a) and pushed to origin. All 4 debt items (937, 844, 756, 773) marked resolved. One new debt item filed (1170) for a genuine pre-existing bug discovered mid-implementation.'
+context_refs:
+- phase: Phase 9 follow-up (debt queue)
+  task_id: 260728_prolix_debt937_debt844_prs
+  summary: 'Prior session queued debt 937 (PR #7) and debt 844 (PR #8) plus a B1 architecture item pick; this session closed all of it'
+failed_attempts:
+- attempt_id: a1
+  description: Dispatching praxia:reviewer or any praxia:* agent for code review / planning / recon
+  outcome: Fabricates plausible-looking tool-call-shaped output instead of actually reading the diff
+  reason_failed: Every praxia:* agent .md has duplicate frontmatter; the first (authoritative) block sets tools:[], starving the dispatch of all real tools. Confirmed via controlled diagnostic in a prior session.
+  do_not_retry: true
+  evidence_ref: 'memory: project_praxia_agent_tools_empty_bug_260728.md'
+open_questions: []
+deferred:
+- description: Fix the praxia plugin's duplicate-frontmatter tools:[] bug across all 22 agent .md files
+  rationale: Different project (~/projects/praxia), user investigating separately
+  recommended_phase: separate praxia-project session
+lessons_refs: []
+next_steps:
+- 'Consider prioritizing debt #1170 (solvate_protein_to_bundle crashes on 1UAO in make_bundle_from_system''s CMAP padding) -- the final whole-branch review added a research lead suggesting the crash may indicate CMAP energy being silently masked/dropped for some proteins, not just a padding-arithmetic bug; worth a priority bump from its current P3 given that implication'
+- 'Pick the next B1 architecture item from the remaining candidates: debt 835 (flash_explicit.py x64 dtype scope beyond pme.py, 20+ hardcoded float32 sites confirmed still present) or debt 567 (XR-DISPATCH-MULTI -- note: recon during this session found the debt tool''s description is STALE; dispatch_n_atoms already exists in src/prolix/api/ensemble_dispatch.py but has zero callers in ensemble_plan.py, so the real remaining scope is narrower than the debt text implies -- wiring an already-built primitive into EnsemblePlan.run, not building N_ATOMS dispatch from scratch)'
+- Run the L2 CPU smoke test for scripts/experiments/profile_b1_heterogeneous_solvated_compile.py --mode three_way on a remote (titanix or Engaging) once memory headroom is available -- it never completed locally (killed by earlyoom, host-level memory pressure, not a code bug); the sidecar's L3 evidence standard for three_way is n_groups_from_partition=1 plus three_way-vs-three_way comparisons only (documented as of this session, since no --mode single/combined control exists at the same forced bucket)
+- Clean up leftover worktree directory at .claude/worktrees/wt-20260805-150117 and local branch b1-debt756-773-bucket-padding once the 'device or resource busy' filesystem lock clears (non-blocking, cosmetic -- branch is fully merged and pushed)
+---

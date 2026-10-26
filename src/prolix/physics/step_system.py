@@ -71,7 +71,6 @@ from prolix.physics.constraints import ConstraintDOFMask
 from prolix.physics.settle import (
   _DEFAULT_CSVR_TAU_AKMA,
   _csvr_rescale_momenta,
-  _langevin_step_a,
   _langevin_step_o,
   _langevin_step_o_constrained,
   _langevin_step_o_free_dof,
@@ -381,9 +380,9 @@ class A_Step(Step):
       velocity = state.momentum / state.mass
       position_new = state.positions + dt * velocity
     else:
-      position_new = _langevin_step_a(
-          state.positions, state.momentum, state.mass, dt, self.shift_fn
-      )
+      # Not _langevin_step_a: that helper halves dt internally, which made
+      # A_Step(fraction=f) drift f*dt*v without a shift_fn but f*dt*v/2 with one.
+      position_new = self.shift_fn(state.positions, dt * state.momentum / state.mass)
 
     return state.__replace__(positions=position_new)
 
@@ -767,7 +766,6 @@ def _initialize_step_sequences() -> None:
               "o_step_half",
               "a_step",
               "force_step",
-              "a_step",
               "o_step_half",
               "v_step",
           ],
@@ -778,7 +776,7 @@ def _initialize_step_sequences() -> None:
           },
           description=(
               "LFMiddle Langevin: O-step split around mid-step force. "
-              "V(0.5)→A(0.5)→O(0.5)→A(0.5)→Force→A(0.5)→O(0.5)→V(0.5). "
+              "V(0.5)→A(0.5)→O(0.5)→A(0.5)→Force→O(0.5)→V(0.5). "
               "For SETTLE water use settle_lfmiddle_langevin monolithic path."
           ),
       ),
