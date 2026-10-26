@@ -9,17 +9,11 @@ from pathlib import Path
 import jax.numpy as jnp
 import pytest
 from proxide import OutputSpec, parse_structure
+from tests._proxide_assets import proxide_asset
 
 # Paths
 DATA_DIR = Path(__file__).parent.parent.parent / "data"
-FF_PATH = (
-  Path(__file__).parent.parent.parent.parent
-  / "proxide"
-  / "src"
-  / "proxide"
-  / "assets"
-  / "protein.ff19SB.xml"
-)
+FF_PATH = proxide_asset("protein.ff19SB.xml")
 
 
 @pytest.fixture

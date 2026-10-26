@@ -9,12 +9,13 @@ from jax_md import space
 from prolix import pad_protein, collate_batch, make_batched_energy_fn
 from prolix.physics.system import make_energy_fn
 from proxide import OutputSpec, parse_structure
+from tests._proxide_assets import proxide_asset, proxide_test_data
 
 @pytest.fixture
 def test_protein():
     from pathlib import Path
-    pdb_path = Path(__file__).parent.parent.parent.parent / "proxide" / "tests" / "data" / "1uao.pdb"
-    ff_path = Path(__file__).parent.parent.parent.parent / "proxide" / "src" / "proxide" / "assets" / "protein.ff19SB.xml"
+    pdb_path = proxide_test_data("1uao.pdb")
+    ff_path = proxide_asset("protein.ff19SB.xml")
     spec = OutputSpec(parameterize_md=True, force_field=str(ff_path))
     # 1uao is a simple valid test structure
     protein = parse_structure(str(pdb_path), spec)
