@@ -1,0 +1,376 @@
+{
+  "meta": {
+    "backend": "gpu",
+    "device": "cuda:0",
+    "device_kind": "NVIDIA RTX PRO 6000 Blackwell Server Edition",
+    "pallas_interpret": false,
+    "kernel": "nl_skin",
+    "jax": "0.10.2",
+    "host": "node4008",
+    "cutoff": 9.0,
+    "density": 0.1
+  },
+  "rows": [
+    {
+      "n_atoms": 2048,
+      "dr_threshold": 0.5,
+      "capacity_multiplier": 1.15,
+      "nl_capacity_k": 408,
+      "est_steps_per_rebuild": 16.7,
+      "nl_update_median_s": 8.812081068754196e-05,
+      "pallas_nonbonded_median_s": 0.0004183650016784668,
+      "amortized_step_median_s": 0.00042365225031971933
+    },
+    {
+      "n_atoms": 2048,
+      "dr_threshold": 0.5,
+      "capacity_multiplier": 1.25,
+      "nl_capacity_k": 440,
+      "est_steps_per_rebuild": 16.7,
+      "nl_update_median_s": 9.275693446397781e-05,
+      "pallas_nonbonded_median_s": 0.00045127980411052704,
+      "amortized_step_median_s": 0.0004568452201783657
+    },
+    {
+      "n_atoms": 2048,
+      "dr_threshold": 0.5,
+      "capacity_multiplier": 1.5,
+      "nl_capacity_k": 528,
+      "est_steps_per_rebuild": 16.7,
+      "nl_update_median_s": 0.00010307133197784424,
+      "pallas_nonbonded_median_s": 0.0005477219820022583,
+      "amortized_step_median_s": 0.0005539062619209289
+    },
+    {
+      "n_atoms": 2048,
+      "dr_threshold": 1.0,
+      "capacity_multiplier": 1.15,
+      "nl_capacity_k": 488,
+      "est_steps_per_rebuild": 33.3,
+      "nl_update_median_s": 0.00010382197797298431,
+      "pallas_nonbonded_median_s": 0.000520545057952404,
+      "amortized_step_median_s": 0.0005236597172915935
+    },
+    {
+      "n_atoms": 2048,
+      "dr_threshold": 1.0,
+      "capacity_multiplier": 1.25,
+      "nl_capacity_k": 528,
+      "est_steps_per_rebuild": 33.3,
+      "nl_update_median_s": 0.00010389275848865509,
+      "pallas_nonbonded_median_s": 0.0005522081628441811,
+      "amortized_step_median_s": 0.0005553249455988407
+    },
+    {
+      "n_atoms": 2048,
+      "dr_threshold": 1.0,
+      "capacity_multiplier": 1.5,
+      "nl_capacity_k": 632,
+      "est_steps_per_rebuild": 33.3,
+      "nl_update_median_s": 0.00010473467409610748,
+      "pallas_nonbonded_median_s": 0.0006338302046060562,
+      "amortized_step_median_s": 0.0006369722448289394
+    },
+    {
+      "n_atoms": 2048,
+      "dr_threshold": 1.5,
+      "capacity_multiplier": 1.15,
+      "nl_capacity_k": 528,
+      "est_steps_per_rebuild": 50.0,
+      "nl_update_median_s": 0.0001008789986371994,
+      "pallas_nonbonded_median_s": 0.0005488339811563492,
+      "amortized_step_median_s": 0.0005508515611290932
+    },
+    {
+      "n_atoms": 2048,
+      "dr_threshold": 1.5,
+      "capacity_multiplier": 1.25,
+      "nl_capacity_k": 568,
+      "est_steps_per_rebuild": 50.0,
+      "nl_update_median_s": 9.924639016389847e-05,
+      "pallas_nonbonded_median_s": 0.0005757110193371773,
+      "amortized_step_median_s": 0.0005776959471404553
+    },
+    {
+      "n_atoms": 2048,
+      "dr_threshold": 1.5,
+      "capacity_multiplier": 1.5,
+      "nl_capacity_k": 688,
+      "est_steps_per_rebuild": 50.0,
+      "nl_update_median_s": 0.0001012999564409256,
+      "pallas_nonbonded_median_s": 0.0006966572254896164,
+      "amortized_step_median_s": 0.0006986832246184349
+    },
+    {
+      "n_atoms": 2048,
+      "dr_threshold": 2.0,
+      "capacity_multiplier": 1.15,
+      "nl_capacity_k": 616,
+      "est_steps_per_rebuild": 66.7,
+      "nl_update_median_s": 9.945686906576157e-05,
+      "pallas_nonbonded_median_s": 0.0006376458331942558,
+      "amortized_step_median_s": 0.0006391376862302422
+    },
+    {
+      "n_atoms": 2048,
+      "dr_threshold": 2.0,
+      "capacity_multiplier": 1.25,
+      "nl_capacity_k": 672,
+      "est_steps_per_rebuild": 66.7,
+      "nl_update_median_s": 0.0001027202233672142,
+      "pallas_nonbonded_median_s": 0.0006648227572441101,
+      "amortized_step_median_s": 0.0006663635605946184
+    },
+    {
+      "n_atoms": 2048,
+      "dr_threshold": 2.0,
+      "capacity_multiplier": 1.5,
+      "nl_capacity_k": 808,
+      "est_steps_per_rebuild": 66.7,
+      "nl_update_median_s": 0.00010002776980400085,
+      "pallas_nonbonded_median_s": 0.0008018212392926216,
+      "amortized_step_median_s": 0.0008033216558396817
+    },
+    {
+      "n_atoms": 8192,
+      "dr_threshold": 0.5,
+      "capacity_multiplier": 1.15,
+      "nl_capacity_k": 392,
+      "est_steps_per_rebuild": 16.7,
+      "nl_update_median_s": 0.0009732265025377274,
+      "pallas_nonbonded_median_s": 0.000711146742105484,
+      "amortized_step_median_s": 0.0007695403322577477
+    },
+    {
+      "n_atoms": 8192,
+      "dr_threshold": 0.5,
+      "capacity_multiplier": 1.25,
+      "nl_capacity_k": 432,
+      "est_steps_per_rebuild": 16.7,
+      "nl_update_median_s": 0.0010817255824804306,
+      "pallas_nonbonded_median_s": 0.0007294919341802597,
+      "amortized_step_median_s": 0.0007943954691290856
+    },
+    {
+      "n_atoms": 8192,
+      "dr_threshold": 0.5,
+      "capacity_multiplier": 1.5,
+      "nl_capacity_k": 512,
+      "est_steps_per_rebuild": 16.7,
+      "nl_update_median_s": 0.0013182014226913452,
+      "pallas_nonbonded_median_s": 0.0008083097636699677,
+      "amortized_step_median_s": 0.0008874018490314483
+    },
+    {
+      "n_atoms": 8192,
+      "dr_threshold": 1.0,
+      "capacity_multiplier": 1.15,
+      "nl_capacity_k": 464,
+      "est_steps_per_rebuild": 33.3,
+      "nl_update_median_s": 0.0009689908474683762,
+      "pallas_nonbonded_median_s": 0.0007940912619233131,
+      "amortized_step_median_s": 0.0008231609873473644
+    },
+    {
+      "n_atoms": 8192,
+      "dr_threshold": 1.0,
+      "capacity_multiplier": 1.25,
+      "nl_capacity_k": 504,
+      "est_steps_per_rebuild": 33.3,
+      "nl_update_median_s": 0.0010855598375201225,
+      "pallas_nonbonded_median_s": 0.0008314223960042,
+      "amortized_step_median_s": 0.0008639891911298036
+    },
+    {
+      "n_atoms": 8192,
+      "dr_threshold": 1.0,
+      "capacity_multiplier": 1.5,
+      "nl_capacity_k": 608,
+      "est_steps_per_rebuild": 33.3,
+      "nl_update_median_s": 0.0013178596273064613,
+      "pallas_nonbonded_median_s": 0.0009401403367519379,
+      "amortized_step_median_s": 0.0009796761255711317
+    },
+    {
+      "n_atoms": 8192,
+      "dr_threshold": 1.5,
+      "capacity_multiplier": 1.15,
+      "nl_capacity_k": 512,
+      "est_steps_per_rebuild": 50.0,
+      "nl_update_median_s": 0.000958496704697609,
+      "pallas_nonbonded_median_s": 0.0008411863818764687,
+      "amortized_step_median_s": 0.0008603563159704209
+    },
+    {
+      "n_atoms": 8192,
+      "dr_threshold": 1.5,
+      "capacity_multiplier": 1.25,
+      "nl_capacity_k": 552,
+      "est_steps_per_rebuild": 50.0,
+      "nl_update_median_s": 0.0010844795033335686,
+      "pallas_nonbonded_median_s": 0.0009216358885169029,
+      "amortized_step_median_s": 0.0009433254785835743
+    },
+    {
+      "n_atoms": 8192,
+      "dr_threshold": 1.5,
+      "capacity_multiplier": 1.5,
+      "nl_capacity_k": 664,
+      "est_steps_per_rebuild": 50.0,
+      "nl_update_median_s": 0.0013191411271691322,
+      "pallas_nonbonded_median_s": 0.0010386360809206963,
+      "amortized_step_median_s": 0.001065018903464079
+    },
+    {
+      "n_atoms": 8192,
+      "dr_threshold": 2.0,
+      "capacity_multiplier": 1.15,
+      "nl_capacity_k": 592,
+      "est_steps_per_rebuild": 66.7,
+      "nl_update_median_s": 0.0009667482227087021,
+      "pallas_nonbonded_median_s": 0.0009844135493040085,
+      "amortized_step_median_s": 0.000998914772644639
+    },
+    {
+      "n_atoms": 8192,
+      "dr_threshold": 2.0,
+      "capacity_multiplier": 1.25,
+      "nl_capacity_k": 648,
+      "est_steps_per_rebuild": 66.7,
+      "nl_update_median_s": 0.0010898271575570107,
+      "pallas_nonbonded_median_s": 0.0010700784623622894,
+      "amortized_step_median_s": 0.0010864258697256446
+    },
+    {
+      "n_atoms": 8192,
+      "dr_threshold": 2.0,
+      "capacity_multiplier": 1.5,
+      "nl_capacity_k": 776,
+      "est_steps_per_rebuild": 66.7,
+      "nl_update_median_s": 0.0013248398900032043,
+      "pallas_nonbonded_median_s": 0.001226283609867096,
+      "amortized_step_median_s": 0.001246156208217144
+    },
+    {
+      "n_atoms": 32768,
+      "dr_threshold": 0.5,
+      "capacity_multiplier": 1.15,
+      "nl_capacity_k": 432,
+      "est_steps_per_rebuild": 16.7,
+      "nl_update_median_s": 0.004005972295999527,
+      "pallas_nonbonded_median_s": 0.0021340707316994667,
+      "amortized_step_median_s": 0.002374429069459438
+    },
+    {
+      "n_atoms": 32768,
+      "dr_threshold": 0.5,
+      "capacity_multiplier": 1.25,
+      "nl_capacity_k": 472,
+      "est_steps_per_rebuild": 16.7,
+      "nl_update_median_s": 0.00400171522051096,
+      "pallas_nonbonded_median_s": 0.0022602854296565056,
+      "amortized_step_median_s": 0.002500388342887163
+    },
+    {
+      "n_atoms": 32768,
+      "dr_threshold": 0.5,
+      "capacity_multiplier": 1.5,
+      "nl_capacity_k": 568,
+      "est_steps_per_rebuild": 16.7,
+      "nl_update_median_s": 0.004614869132637978,
+      "pallas_nonbonded_median_s": 0.00270122941583395,
+      "amortized_step_median_s": 0.002978121563792229
+    },
+    {
+      "n_atoms": 32768,
+      "dr_threshold": 1.0,
+      "capacity_multiplier": 1.15,
+      "nl_capacity_k": 512,
+      "est_steps_per_rebuild": 33.3,
+      "nl_update_median_s": 0.006879167631268501,
+      "pallas_nonbonded_median_s": 0.002436376176774502,
+      "amortized_step_median_s": 0.002642751205712557
+    },
+    {
+      "n_atoms": 32768,
+      "dr_threshold": 1.0,
+      "capacity_multiplier": 1.25,
+      "nl_capacity_k": 560,
+      "est_steps_per_rebuild": 33.3,
+      "nl_update_median_s": 0.006783816963434219,
+      "pallas_nonbonded_median_s": 0.0027600396424531937,
+      "amortized_step_median_s": 0.0029635541513562203
+    },
+    {
+      "n_atoms": 32768,
+      "dr_threshold": 1.0,
+      "capacity_multiplier": 1.5,
+      "nl_capacity_k": 664,
+      "est_steps_per_rebuild": 33.3,
+      "nl_update_median_s": 0.006528967991471291,
+      "pallas_nonbonded_median_s": 0.003068985417485237,
+      "amortized_step_median_s": 0.0032648544572293756
+    },
+    {
+      "n_atoms": 32768,
+      "dr_threshold": 1.5,
+      "capacity_multiplier": 1.15,
+      "nl_capacity_k": 560,
+      "est_steps_per_rebuild": 50.0,
+      "nl_update_median_s": 0.006516549736261368,
+      "pallas_nonbonded_median_s": 0.0028168894350528717,
+      "amortized_step_median_s": 0.002947220429778099
+    },
+    {
+      "n_atoms": 32768,
+      "dr_threshold": 1.5,
+      "capacity_multiplier": 1.25,
+      "nl_capacity_k": 608,
+      "est_steps_per_rebuild": 50.0,
+      "nl_update_median_s": 0.006775686517357826,
+      "pallas_nonbonded_median_s": 0.0029220739379525185,
+      "amortized_step_median_s": 0.0030575876682996748
+    },
+    {
+      "n_atoms": 32768,
+      "dr_threshold": 1.5,
+      "capacity_multiplier": 1.5,
+      "nl_capacity_k": 728,
+      "est_steps_per_rebuild": 50.0,
+      "nl_update_median_s": 0.0064927879720926285,
+      "pallas_nonbonded_median_s": 0.0034436192363500595,
+      "amortized_step_median_s": 0.003573474995791912
+    },
+    {
+      "n_atoms": 32768,
+      "dr_threshold": 2.0,
+      "capacity_multiplier": 1.15,
+      "nl_capacity_k": 656,
+      "est_steps_per_rebuild": 66.7,
+      "nl_update_median_s": 0.0065427664667367935,
+      "pallas_nonbonded_median_s": 0.003264433704316616,
+      "amortized_step_median_s": 0.003362575201317668
+    },
+    {
+      "n_atoms": 32768,
+      "dr_threshold": 2.0,
+      "capacity_multiplier": 1.25,
+      "nl_capacity_k": 712,
+      "est_steps_per_rebuild": 66.7,
+      "nl_update_median_s": 0.006992645561695099,
+      "pallas_nonbonded_median_s": 0.003422580659389496,
+      "amortized_step_median_s": 0.0035274703428149223
+    },
+    {
+      "n_atoms": 32768,
+      "dr_threshold": 2.0,
+      "capacity_multiplier": 1.5,
+      "nl_capacity_k": 856,
+      "est_steps_per_rebuild": 66.7,
+      "nl_update_median_s": 0.0065345847979187965,
+      "pallas_nonbonded_median_s": 0.004032007418572903,
+      "amortized_step_median_s": 0.004130026190541685
+    }
+  ],
+  "summary": {}
+}

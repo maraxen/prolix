@@ -11,6 +11,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
+import jax
 import jax.numpy as jnp
 
 from prolix.physics import settle
@@ -18,6 +19,7 @@ from prolix.physics.md_potential_bundle import value_energy_and_forces
 from prolix.physics.simulate import NVTLangevinState
 
 
+@jax.tree_util.register_dataclass
 @dataclass(frozen=True)
 class SettleLangevinPotentialStepMetrics:
   """Per-step diagnostics from the propagator (same AD site as cached forces)."""

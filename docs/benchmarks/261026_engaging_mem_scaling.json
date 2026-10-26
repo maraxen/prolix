@@ -1,0 +1,264 @@
+{
+  "meta": {
+    "backend": "gpu",
+    "device": "cuda:0",
+    "device_kind": "NVIDIA RTX PRO 6000 Blackwell Server Edition",
+    "pallas_interpret": false,
+    "kernel": "mem_scaling",
+    "jax": "0.10.2",
+    "host": "node5204",
+    "cutoff": 9.0,
+    "density": 0.1
+  },
+  "rows": [
+    {
+      "n_atoms": 512,
+      "dense_xla": {
+        "median_s": 0.0007758522406220436,
+        "compile_s": 0.43746765330433846,
+        "peak_bytes": 67116288,
+        "working_peak_bytes": 67105792,
+        "activation_peak_bytes": 67086592,
+        "error": null
+      },
+      "flash_xla": {
+        "median_s": 0.0009623635560274124,
+        "compile_s": 0.796583610586822,
+        "peak_bytes": 67116288,
+        "working_peak_bytes": 67105792,
+        "activation_peak_bytes": 67086592,
+        "error": null
+      },
+      "flash_pallas": {
+        "median_s": 0.0013825297355651855,
+        "compile_s": 2.3521313071250916,
+        "peak_bytes": 67116288,
+        "working_peak_bytes": 67105792,
+        "activation_peak_bytes": 67086592,
+        "error": null
+      },
+      "k": 392,
+      "nl_xla": {
+        "median_s": 0.0008941460400819778,
+        "compile_s": 1.021014186553657,
+        "peak_bytes": 67116288,
+        "working_peak_bytes": 67105792,
+        "activation_peak_bytes": 65803776,
+        "error": null
+      },
+      "nl_pallas": {
+        "median_s": 0.0010278932750225067,
+        "compile_s": 2.666049750521779,
+        "peak_bytes": 67116288,
+        "working_peak_bytes": 67105792,
+        "activation_peak_bytes": 65803776,
+        "error": null
+      }
+    },
+    {
+      "n_atoms": 2048,
+      "dense_xla": {
+        "median_s": 0.0007761092856526375,
+        "compile_s": 0.3719435101374984,
+        "peak_bytes": 67116288,
+        "working_peak_bytes": 67105792,
+        "activation_peak_bytes": 67029760,
+        "error": null
+      },
+      "flash_xla": {
+        "median_s": 0.0010239994153380394,
+        "compile_s": 0.8397333640605211,
+        "peak_bytes": 67116288,
+        "working_peak_bytes": 67105792,
+        "activation_peak_bytes": 67029760,
+        "error": null
+      },
+      "flash_pallas": {
+        "median_s": 0.0027458714321255684,
+        "compile_s": 2.3123302794992924,
+        "peak_bytes": 67116288,
+        "working_peak_bytes": 67105792,
+        "activation_peak_bytes": 67029760,
+        "error": null
+      },
+      "k": 424,
+      "nl_xla": {
+        "median_s": 0.0014111688360571861,
+        "compile_s": 1.1032158210873604,
+        "peak_bytes": 67116288,
+        "working_peak_bytes": 67105792,
+        "activation_peak_bytes": 63556352,
+        "error": null
+      },
+      "nl_pallas": {
+        "median_s": 0.001308719627559185,
+        "compile_s": 2.6207776721566916,
+        "peak_bytes": 67116288,
+        "working_peak_bytes": 67105792,
+        "activation_peak_bytes": 63556352,
+        "error": null
+      }
+    },
+    {
+      "n_atoms": 8192,
+      "dense_xla": {
+        "median_s": 0.001924639567732811,
+        "compile_s": 0.43390590976923704,
+        "peak_bytes": 275336704,
+        "working_peak_bytes": 275326208,
+        "activation_peak_bytes": 275022592,
+        "error": null
+      },
+      "flash_xla": {
+        "median_s": 0.003810672089457512,
+        "compile_s": 0.7657131720334291,
+        "peak_bytes": 67116288,
+        "working_peak_bytes": 67105792,
+        "activation_peak_bytes": 66802432,
+        "error": null
+      },
+      "flash_pallas": {
+        "median_s": 0.011001440696418285,
+        "compile_s": 2.2942200945690274,
+        "peak_bytes": 67116288,
+        "working_peak_bytes": 67105792,
+        "activation_peak_bytes": 66802176,
+        "error": null
+      },
+      "k": 408,
+      "nl_xla": {
+        "median_s": 0.002845541574060917,
+        "compile_s": 1.5780859151855111,
+        "peak_bytes": 67116288,
+        "working_peak_bytes": 67105792,
+        "activation_peak_bytes": 46617344,
+        "error": null
+      },
+      "nl_pallas": {
+        "median_s": 0.0012941211462020874,
+        "compile_s": 2.8637362476438284,
+        "peak_bytes": 67116288,
+        "working_peak_bytes": 67105792,
+        "activation_peak_bytes": 46617344,
+        "error": null
+      }
+    },
+    {
+      "n_atoms": 16384,
+      "dense_xla": {
+        "median_s": 0.004367494955658913,
+        "compile_s": 0.5158882830291986,
+        "peak_bytes": 1100115456,
+        "working_peak_bytes": 1100104960,
+        "activation_peak_bytes": 1099498496,
+        "error": null
+      },
+      "flash_xla": {
+        "median_s": 0.011195155791938305,
+        "compile_s": 0.7799253156408668,
+        "peak_bytes": 68119552,
+        "working_peak_bytes": 68109056,
+        "activation_peak_bytes": 67502336,
+        "error": null
+      },
+      "flash_pallas": {
+        "median_s": 0.03735354449599981,
+        "compile_s": 2.344314265064895,
+        "peak_bytes": 67116288,
+        "working_peak_bytes": 67105792,
+        "activation_peak_bytes": 66499328,
+        "error": null
+      },
+      "k": 424,
+      "nl_xla": {
+        "median_s": 0.005045761354267597,
+        "compile_s": 2.202053517103195,
+        "peak_bytes": 67726080,
+        "working_peak_bytes": 67715584,
+        "activation_peak_bytes": 33554688,
+        "error": null
+      },
+      "nl_pallas": {
+        "median_s": 0.0018361378461122513,
+        "compile_s": 3.057147493585944,
+        "peak_bytes": 67726080,
+        "working_peak_bytes": 67715584,
+        "activation_peak_bytes": 33554688,
+        "error": null
+      }
+    },
+    {
+      "n_atoms": 32768,
+      "flash_xla": {
+        "median_s": 0.021792815066874027,
+        "compile_s": 0.831576862372458,
+        "peak_bytes": 136314624,
+        "working_peak_bytes": 136304128,
+        "activation_peak_bytes": 135091200,
+        "error": null
+      },
+      "flash_pallas": {
+        "median_s": 0.12779270857572556,
+        "compile_s": 2.4147999631240964,
+        "peak_bytes": 67116288,
+        "working_peak_bytes": 67105792,
+        "activation_peak_bytes": 65892864,
+        "error": null
+      },
+      "k": 448,
+      "nl_xla": {
+        "median_s": 0.009786770679056644,
+        "compile_s": 3.562288027256727,
+        "peak_bytes": 125839616,
+        "working_peak_bytes": 125829120,
+        "activation_peak_bytes": 65896192,
+        "error": null
+      },
+      "nl_pallas": {
+        "median_s": 0.003030589781701565,
+        "compile_s": 2.8986337408423424,
+        "peak_bytes": 125839616,
+        "working_peak_bytes": 125829120,
+        "activation_peak_bytes": 65896192,
+        "error": null
+      }
+    },
+    {
+      "n_atoms": 131072,
+      "k": 448,
+      "nl_xla": {
+        "median_s": 0.03714434988796711,
+        "compile_s": 2.7448260821402073,
+        "peak_bytes": 554993408,
+        "working_peak_bytes": 554982912,
+        "activation_peak_bytes": 281184768,
+        "error": null
+      },
+      "nl_pallas": {
+        "median_s": 0.009230424650013447,
+        "compile_s": 4.277920117601752,
+        "peak_bytes": 536881408,
+        "working_peak_bytes": 536870912,
+        "activation_peak_bytes": 263072768,
+        "error": null
+      }
+    }
+  ],
+  "summary": {
+    "dense_xla_working_mem_exponent": 0.7881136338152179,
+    "dense_xla_activation_mem_exponent": 0.7880175119810348,
+    "dense_xla_time_exponent": 0.4913357382613886,
+    "flash_xla_working_mem_exponent": 0.11604685766936113,
+    "flash_xla_activation_mem_exponent": 0.11370152147251954,
+    "flash_xla_time_exponent": 0.7945266018813741,
+    "flash_pallas_working_mem_exponent": 8.473212280069085e-16,
+    "flash_pallas_activation_mem_exponent": -0.0038623768138033553,
+    "flash_pallas_time_exponent": 1.0774889885604817,
+    "nl_xla_working_mem_exponent": 0.3271194348857175,
+    "nl_xla_activation_mem_exponent": 0.18165057113239733,
+    "nl_xla_time_exponent": 0.6689318810491413,
+    "nl_pallas_working_mem_exponent": 0.32262569390307744,
+    "nl_pallas_activation_mem_exponent": 0.17263301942382073,
+    "nl_pallas_time_exponent": 0.36455438524579065
+  }
+}
