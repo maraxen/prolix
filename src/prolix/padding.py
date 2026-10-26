@@ -9,6 +9,16 @@ import jax.numpy as jnp
 import numpy as np
 from jax_md import util
 
+from prolix.constants import (
+  DEFAULT_MASS,
+  atomic_numbers_from_elements,
+  masses_from_elements,
+)
+from prolix.physics.neighbor_list import (
+  ExclusionSpec,
+  build_dense_exclusion_scales,
+  map_exclusions_to_dense_padded,
+)
 from prolix.typing import PhysicsSystem
 
 if TYPE_CHECKING:
@@ -115,8 +125,6 @@ def pad_protein(
   padded_scaled_radii = pad_array(jnp.asarray(scaled_radii), target_atoms, 0.8) # Standard OBC2 default
   
   # Derive masses if none
-  from prolix.constants import DEFAULT_MASS, masses_from_elements
-
   masses = protein.masses
   elements_list = getattr(protein, "elements", None)
   if masses is None or jnp.all(jnp.asarray(masses) == 0):
@@ -132,8 +140,6 @@ def pad_protein(
   if element_ids_raw is not None:
     element_ids = jnp.asarray(element_ids_raw, dtype=jnp.int32).reshape(-1)
   elif elements_list is not None and len(elements_list) == n_real:
-    from prolix.constants import atomic_numbers_from_elements
-
     element_ids = jnp.array(atomic_numbers_from_elements(list(elements_list)), dtype=jnp.int32)
   else:
     element_ids = jnp.ones(n_real, dtype=jnp.int32) * 6
@@ -163,7 +169,6 @@ def pad_protein(
   padded_is_heavy = atom_mask & ~padded_is_hydrogen
 
   # Exclusion data — sparse (N, max_excl) arrays
-  from prolix.physics.neighbor_list import ExclusionSpec, map_exclusions_to_dense_padded
   MAX_EXCL = 32
   try:
     excl_spec = ExclusionSpec.from_protein(protein)
@@ -388,7 +393,6 @@ def pad_solvated_system(
     padded_is_heavy = pad_array(is_hv, target_atoms, False)
 
     # 2. Exclusions
-    from prolix.physics.neighbor_list import map_exclusions_to_dense_padded
     MAX_EXCL = 32
     ei, sv, se = map_exclusions_to_dense_padded(topology.exclusion_spec, max_exclusions=MAX_EXCL)
     padded_excl_indices = pad_array(ei, target_atoms, -1)
@@ -559,13 +563,11 @@ def precompute_dense_exclusions(sys: PhysicsSystem) -> PhysicsSystem:
     This gave a measured ~4x speedup in per-step force evaluation
     (0.437ms → 0ms for exclusion construction).
     """
-    from prolix.batched_energy import _build_dense_exclusion_scales
-
     N = sys.n_padded_atoms
-    dense_vdw = _build_dense_exclusion_scales(
+    dense_vdw = build_dense_exclusion_scales(
         sys.excl_indices, sys.excl_scales_vdw, N,
     )
-    dense_elec = _build_dense_exclusion_scales(
+    dense_elec = build_dense_exclusion_scales(
         sys.excl_indices, sys.excl_scales_elec, N,
     )
     return sys.replace(dense_excl_scale_vdw=dense_vdw, dense_excl_scale_elec=dense_elec)

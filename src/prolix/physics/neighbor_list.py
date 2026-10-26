@@ -10,6 +10,7 @@ import jax.numpy as jnp
 import numpy as np
 from jax_md import partition, space, util
 
+from prolix.compat import system_params_to_protein
 from prolix.utils import topology
 
 if TYPE_CHECKING:
@@ -146,7 +147,6 @@ class ExclusionSpec:
     cls, system_params: SystemParams, coulomb14scale: float = 0.83333333, lj14scale: float = 0.5
   ) -> ExclusionSpec:
     """Build ExclusionSpec from standard system parameters (deprecated)."""
-    from prolix.compat import system_params_to_protein
 
     protein = system_params_to_protein(system_params)
     return cls.from_protein(protein, coulomb14scale=coulomb14scale, lj14scale=lj14scale)
@@ -575,3 +575,39 @@ def compute_nl_capacity(
   k_raw = safety_factor * rho_padded * sphere_volume
 
   return int(math.ceil(k_raw / round_to) * round_to)
+
+
+def build_dense_exclusion_scales(
+    excl_indices: Array,
+    excl_scales: Array,
+    N: int,
+) -> Array:
+    """Convert sparse (N, M) exclusion arrays to dense (N, N) scale matrix.
+
+    Uses fori_loop over M (typically 32) exclusion slots. Each iteration
+    scatters one column of exclusion data into the N×N output.
+
+    Returns:
+        (N, N) float32 scale matrix. 1.0 = full interaction, 0.0 = excluded,
+        0.5 = 1-4 scaled (for vdw), 1/1.2 = 1-4 scaled (for elec).
+    """
+    M = excl_indices.shape[1]
+    scale = jnp.ones((N, N), dtype=jnp.float32)
+
+    row_idx = jnp.arange(N)
+
+    def body(i, s):
+        idx_col = excl_indices[:, i]   # (N,)
+        sc = excl_scales[:, i]         # (N,)
+        valid = idx_col >= 0           # (N,) bool
+        safe_col = jnp.where(valid, idx_col, 0)
+        # Scatter: for each row n, set s[n, safe_col[n]] = sc[n] if valid
+        new_vals = jnp.where(valid, sc, s[row_idx, safe_col])
+        s = s.at[row_idx, safe_col].set(new_vals)
+        return s
+
+    return jax.lax.fori_loop(0, M, body, scale)
+
+
+# Backward-compatible private alias (previously defined in ``prolix.batched_energy``).
+_build_dense_exclusion_scales = build_dense_exclusion_scales

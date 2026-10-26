@@ -74,6 +74,13 @@ def test_v4_hlo_hetero_b4_export_single_compile():
     assert compiles == 1, f"V4-HLO hetero: expected 1 compile, got {compiles}"
 
     scans = count_jaxpr_scans(run_all, seed_base, dt, kT)
-    assert scans == len(bundles), (
-        f"V4-HLO hetero unrolled: expected {len(bundles)} scans, got {scans}"
+    # Bundles that share a shape_spec / atom bucket stack even with differing real
+    # n_atoms (Claim-1 substrate: static bucket prefix + masks), giving one batched
+    # scan. Only stack-incompatible bundles fall back to the unrolled B-scan path.
+    from prolix.api.bundle_stack import can_jit_vmap_n_mols
+
+    expected = 1 if can_jit_vmap_n_mols(bundles) else len(bundles)
+    assert scans == expected, (
+        f"V4-HLO hetero: expected {expected} scans "
+        f"({'stacked' if expected == 1 else 'unrolled'}), got {scans}"
     )

@@ -12,6 +12,7 @@ from jax_md import util
 from scipy.spatial.distance import cdist
 
 from prolix.physics.ion_params import get_ion_params
+from prolix.physics.system import make_bundle_from_system
 from prolix.physics.topology_merger import MergedTopology, merge_solvated_topology
 from prolix.physics.water_models import WaterModelType, get_water_params
 
@@ -611,8 +612,6 @@ def solvate_protein_to_bundle(
         neutralize=neutralize,
         target_box_size=target_box_size,
     )
-
-    from prolix.physics.system import make_bundle_from_system
 
     class _BundleSourceProxy:
         """Delegates to `merged` for everything except the fields it lacks.

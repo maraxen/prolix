@@ -23,6 +23,8 @@ from typing import Any
 import jax.numpy as jnp
 from jax_md import space
 
+from prolix.physics import bonded
+
 
 class FieldAuditProxy:
     """Non-intrusive proxy wrapper around PhysicsSystem for field-access logging.
@@ -107,7 +109,6 @@ def audit_bonded_fields(system: Any, displacement_fn: space.DisplacementFn,
     proxy = FieldAuditProxy(system)
 
     # Import bonded energy factories
-    from prolix.physics import bonded
 
     # Define a combined bonded energy function that accesses fields via proxy
     def total_bonded_energy(r):

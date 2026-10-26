@@ -30,6 +30,7 @@ from xtrax.tiling.strategy import (
     Vmap,
     WhileCarry,
 )
+
 try:
     from xtrax.tiling.strategy import ChunkedMap
 except ImportError:
@@ -39,9 +40,9 @@ try:
 except ImportError:
     SafeMap = ChunkedMap
 
-from prolix.tiling.axis_dispatch import dispatch_n_waters, n_waters_strategy
 from prolix.tiling.axes import N_ATOMS, N_MOLS, N_STEPS
-from prolix.tiling.planner import BatchPlan
+from prolix.tiling.axis_dispatch import dispatch_n_waters, n_waters_strategy
+from prolix.tiling.plan_types import BatchPlan
 
 __all__ = [
     "ChunkedMap",

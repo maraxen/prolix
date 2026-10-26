@@ -11,92 +11,29 @@ See ``prolix.tiling.xtrax_adapter`` and
 
 from __future__ import annotations
 
-import logging
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
+
+from prolix.tiling.plan_types import (
+    AxisDecision,
+    AxisSpec,
+    BatchPlan,
+    ceil_to_granularity,
+    estimate_memory_theoretical,
+)
+from prolix.tiling.xtrax_adapter import plan_axes_with_xtrax
 
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-
-logger = logging.getLogger(__name__)
-
-# TODO: introduce bucketing management in here
-
-def ceil_to_granularity(n: int, g: int) -> int:
-    """Round n up to the nearest multiple of g. If g <= 1 or n == 0, returns n unchanged."""
-    if g <= 1 or n == 0:
-        return n
-    return ((n + g - 1) // g) * g
-
-
-def estimate_memory_theoretical(
-    decisions: list[AxisDecision],
-    base_shape_bytes: float,
-    activation_multiplier: float,
-) -> float:
-    """Estimate peak memory for a set of axis decisions.
-
-    Axes with batch_size=0 (vmap) contribute their full cardinality to the
-    memory product. Axes with batch_size>0 (safe_map) contribute only their
-    tile size — one tile is live at a time.
-
-    activation_multiplier must be supplied by the caller (no default).
-    """
-    product = 1
-    for d in decisions:
-        if d.batch_size == 0:
-            product *= d.axis.cardinality
-        else:
-            product *= d.batch_size
-    return base_shape_bytes * product * activation_multiplier
-
-
-@dataclass(frozen=True)
-class AxisSpec:
-    """Describes one mappable axis for the batch planner."""
-    name: str
-    axis_index: int        # lower = innermost; demotion order follows ascending index
-    cardinality: int       # typical/max size of this axis
-    default_batch_size: int  # 0 = vmap; positive = safe_map tile size
-    tile_granularity: int  # safe_map tile sizes are rounded up to multiples of this
-    heterogeneous: bool    # if True, element shapes may vary; vmap invalid; always safe_map
-    doc: str
-
-
-@dataclass(frozen=True)
-class AxisDecision:
-    """Planner output for one axis."""
-    axis: AxisSpec
-    batch_size: int        # 0 = vmap; positive = safe_map tile size
-    reasoning: str
-
-
-@dataclass(frozen=True)
-class BatchPlan:
-    """Planner output for a full set of axes."""
-    decisions: list[AxisDecision]
-    total_memory_estimate: float
-    axes_by_index: dict[int, AxisSpec]
-    budget_exceeded: bool
-
-    def exceeded_budget(self) -> bool:
-        """True when even minimum-tile decisions exceed the budget. Never raises."""
-        return self.budget_exceeded
-
-    def decision_for(self, name: str) -> AxisDecision:
-        for d in self.decisions:
-            if d.axis.name == name:
-                return d
-        raise KeyError(name)
-
-    def log_summary(self) -> None:
-        parts = [f"{d.axis.name}=bs:{d.batch_size}" for d in self.decisions]
-        status = "EXCEEDED" if self.budget_exceeded else "ok"
-        logger.debug(
-            "BatchPlan [%s]: %s | estimate=%.1f bytes",
-            status, ", ".join(parts), self.total_memory_estimate,
-        )
+__all__ = [
+    "AxisDecision",
+    "AxisSpec",
+    "BatchPlan",
+    "BatchPlanner",
+    "ceil_to_granularity",
+    "estimate_memory_theoretical",
+]
 
 
 @dataclass(frozen=True)
@@ -123,8 +60,6 @@ class BatchPlanner:
 
     def plan_with_xtrax(self) -> BatchPlan:
         """Plan using xtrax joint MemoryBudget via the adapter (XR-BUDGET / XR-KILL-FORK)."""
-        from prolix.tiling.xtrax_adapter import plan_axes_with_xtrax
-
         return plan_axes_with_xtrax(
             axes=self.axes,
             budget_bytes=self.budget_bytes,

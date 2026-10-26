@@ -23,8 +23,8 @@
 
 | Task | Description | Agent Needs | Status |
 | :--- | :--- | :--- | :--- |
-| **1.1** | **Core Type Extraction** | `recon` (map), `fixer` (extract) | Pending |
-| **1.2** | **Resolve Circularities** | `fixer` (refactor) | Pending |
+| **1.1** | **Core Type Extraction** | `recon` (map), `fixer` (extract) | Done (typing.py already a 0-dep leaf; enforced by `tests/test_import_architecture.py`) |
+| **1.2** | **Resolve Circularities** | `fixer` (refactor) | Done (cycle-dodging lazy imports 10 -> 2; physics lazies = optional Pallas only; see `.praxia/docs/reference/261025_import_architecture_hardening.md`) |
 | **1.3** | **StableHLO Guardrails** | `reviewer` (CI tests) | Pending |
 
 ### Phase 2: Validation Storytelling
@@ -50,7 +50,7 @@
 
 | Priority | Feature | Description | Status |
 | :--- | :--- | :--- | :--- |
-| **P0** | **Architectural Hardening** | Clean up `prolix.physics` package structure. | **Next** |
+| **P0** | **Architectural Hardening** | Clean up `prolix.physics` package structure. | Done for physics (1.1, 1.2); 1.3 StableHLO guardrails + repo-wide lazy imports remain |
 | **P0** | **Release Validation** | Formalize the "Three-Tier" parity report. | Pending |
 | **P1** | **kUPS Benchmark** | High-precision comparison vs kUPS. | Pending |
 | **P2** | **NL Differentiability** | Analytical VJP for neighbor list updates. | Debt |
