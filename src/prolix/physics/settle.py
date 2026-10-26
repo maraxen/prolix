@@ -38,7 +38,7 @@ from prolix.physics import (
 from prolix.physics import (
   units as units_module,
 )
-from prolix.physics.constraints import project_momenta, project_positions
+from prolix.physics.constraint_projection import project_momenta, project_positions
 from prolix.tiling.axis_dispatch import dispatch_n_waters
 from prolix.typing import NPTState, NVTLangevinState, WaterIndices, WaterIndicesArray
 

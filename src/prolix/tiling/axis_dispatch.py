@@ -10,6 +10,7 @@ from typing import Any, Callable
 
 from xtrax.tiling.dispatch import DispatchRejected, make_axis_dispatch
 from xtrax.tiling.strategy import Bucket, DedupGather, Scan, Vmap
+
 try:
     from xtrax.tiling.strategy import ChunkedMap
 except ImportError:
@@ -20,7 +21,7 @@ except ImportError:
     SafeMap = ChunkedMap
 
 from prolix.tiling.axes import N_WATERS
-from prolix.tiling.planner import BatchPlan
+from prolix.tiling.plan_types import BatchPlan
 
 __all__ = [
     "ChunkedMap",

@@ -10,6 +10,8 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
+from prolix.export import in_export_context
+
 # kcal*A/(mol*e^2)
 COULOMB_CONSTANT = 332.0637
 
@@ -129,7 +131,6 @@ def _bspline4_stencil(positions, charges, atom_mask, box_size, grid_dims, order:
 
 def resolve_use_pallas_pme(explicit: bool | None = None) -> bool:
     """Host-side opt-in (construction time). Never call inside a jitted body."""
-    from prolix.export import in_export_context
 
     if in_export_context():
         return False
@@ -162,7 +163,6 @@ def spread_charges(
     use_pallas_pme: bool = False,
 ) -> jnp.ndarray:
     """Spread charges onto FFT grid using B-spline interpolation."""
-    from prolix.export import in_export_context
 
     if use_pallas_pme and not in_export_context():
         from prolix.physics.pme_pallas import spread_charges_pallas
@@ -465,7 +465,6 @@ def make_spme_energy_fn(
             G_cached = influence_function(grid_dims, box_arr, alpha, order)
 
             def _cached_fn(positions, charges, atom_mask):
-                from prolix.export import in_export_context
 
                 use_p = pallas and not in_export_context()
                 return _spme_energy_with_forces_cached(

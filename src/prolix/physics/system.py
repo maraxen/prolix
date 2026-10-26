@@ -8,8 +8,15 @@ import jax.numpy as jnp
 from jax_md import space
 from jaxtyping import Array
 
-from prolix.physics import bonded, cmap, explicit_corrections, generalized_born, pme
+from prolix.physics import bonded, cmap, explicit_corrections, generalized_born, neighbor_list, pme
 from prolix.physics.bonded import compute_dihedral_angles
+from prolix.physics.neighbor_list import map_exclusions_to_dense_padded, pair_list_to_dense_padded
+from prolix.physics.optimization import (
+  chunked_coulomb_energy,
+  chunked_coulomb_energy_nl,
+  chunked_lj_energy,
+  chunked_lj_energy_nl,
+)
 from prolix.types.bundles import (
   ANGLE_BUCKETS,
   ATOM_BUCKETS,
@@ -135,13 +142,6 @@ def make_energy_fn(
   COULOMB_CONSTANT = 332.0637
 
   # Sparse Non-bonded Setup
-  from prolix.physics import neighbor_list
-  from prolix.physics.optimization import (
-    chunked_coulomb_energy,
-    chunked_coulomb_energy_nl,
-    chunked_lj_energy,
-    chunked_lj_energy_nl,
-  )
 
   excl_idx = getattr(system, "excl_indices", None)
   n_atoms = system.charges.shape[0]
@@ -290,12 +290,6 @@ def make_energy_fn_pure(
   **kwargs
 ) -> tuple[DifferentiableParams, Callable]:
   """Exportable energy factory with memory-efficient kernels."""
-  from prolix.physics.optimization import (
-    chunked_coulomb_energy,
-    chunked_coulomb_energy_nl,
-    chunked_lj_energy,
-    chunked_lj_energy_nl,
-  )
 
   # Use system's pme_alpha if not provided
   if pme_alpha is None:
@@ -701,7 +695,6 @@ def make_bundle_from_system(
     excl_sv = _get("excl_scales_vdw")
     excl_se = _get("excl_scales_elec")
     if exclusion_spec is not None:
-        from prolix.physics.neighbor_list import map_exclusions_to_dense_padded
 
         dense_i, dense_sv, dense_se = map_exclusions_to_dense_padded(exclusion_spec)
         excl, excl_sv, excl_se, ne = _dense_excl_to_pair_list(
@@ -732,7 +725,6 @@ def make_bundle_from_system(
     _EXCL_DENSE_MAX = 32
     excl_dense_indices = excl_dense_scales_vdw = excl_dense_scales_elec = None
     if exclusion_spec is not None:
-        from prolix.physics.neighbor_list import map_exclusions_to_dense_padded
 
         dense_idx, dense_sv, dense_se = map_exclusions_to_dense_padded(
             exclusion_spec, max_exclusions=_EXCL_DENSE_MAX
@@ -748,7 +740,6 @@ def make_bundle_from_system(
             dense_se, ((0, pad_rows), (0, 0)), constant_values=1.0
         )
     elif ne > 0:
-        from prolix.physics.neighbor_list import pair_list_to_dense_padded
 
         dense_idx, dense_sv, dense_se = pair_list_to_dense_padded(
             excl, excl_sv, excl_se, jnp.ones(ne, dtype=bool), a,

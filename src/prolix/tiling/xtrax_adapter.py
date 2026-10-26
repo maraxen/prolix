@@ -17,6 +17,7 @@ from xtrax.tiling.plan import AxisDecision as XtraxAxisDecision
 from xtrax.tiling.plan import AxisSpec as XtraxAxisSpec
 from xtrax.tiling.plan import BatchPlanner as XtraxBatchPlanner
 from xtrax.tiling.strategy import Bucket, DedupGather, Scan, Vmap
+
 try:
     from xtrax.tiling.strategy import ChunkedMap
 except ImportError:
@@ -26,7 +27,7 @@ try:
 except ImportError:
     SafeMap = ChunkedMap
 
-from prolix.tiling.planner import AxisDecision, AxisSpec, BatchPlan
+from prolix.tiling.plan_types import AxisDecision, AxisSpec, BatchPlan
 
 __all__ = [
     "BudgetInfeasibleError",

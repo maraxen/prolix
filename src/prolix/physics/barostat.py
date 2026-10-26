@@ -6,8 +6,10 @@ import equinox as eqx
 import jax
 import jax.numpy as jnp
 
-from prolix.physics.step_system import IntegratorState, Step
-from prolix.typing import IntegratorParams
+from prolix.physics import explicit_corrections
+from prolix.physics.step_base import Step
+from prolix.physics.units import AKMA_PRESSURE_PER_BAR, BAR_PER_AKMA_PRESSURE
+from prolix.typing import IntegratorParams, IntegratorState
 
 
 class MC_Barostat_Step(Step):
@@ -164,7 +166,6 @@ class SCR_Barostat_Step(Step):
         target_pressure_bar = params.target_pressure_bar
         
         # AKMA pressure unit: kcal/mol/Å³
-        from prolix.physics.units import AKMA_PRESSURE_PER_BAR
         target_pressure_akma = target_pressure_bar * AKMA_PRESSURE_PER_BAR
         
         # 2. Kinetic Energy (kcal/mol)
@@ -180,7 +181,6 @@ class SCR_Barostat_Step(Step):
         volume = state.box[0] * state.box[1] * state.box[2]
         
         # Optional tail corrections
-        from prolix.physics import explicit_corrections
         sigmas = jnp.maximum(params.energy_params.sigmas, 1e-6)
         epsilons = params.energy_params.epsilons
         
@@ -203,7 +203,6 @@ class SCR_Barostat_Step(Step):
         pressure_deviation = pressure - target_pressure_akma
         
         # Convert compressibility from bar^-1 to AKMA^-1
-        from prolix.physics.units import BAR_PER_AKMA_PRESSURE
         compressibility_akma = compressibility * BAR_PER_AKMA_PRESSURE
         
         key, split = jax.random.split(state.rng)

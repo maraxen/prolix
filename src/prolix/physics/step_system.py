@@ -67,6 +67,7 @@ import numpy as np
 from jaxtyping import Array as ArrayType
 from jaxtyping import PRNGKeyArray
 
+from prolix.physics.barostat import MC_Barostat_Step, SCR_Barostat_Step
 from prolix.physics.constraints import ConstraintDOFMask
 from prolix.physics.settle import (
   _DEFAULT_CSVR_TAU_AKMA,
@@ -77,6 +78,8 @@ from prolix.physics.settle import (
   settle_positions,
   settle_velocities,
 )
+from prolix.physics.step_base import Step
+from prolix.physics.virtual_sites_step import VirtualSiteReconstructionStep
 from prolix.typing import Array, IntegratorParams, IntegratorState
 
 
@@ -147,37 +150,6 @@ def _csvr_compute_lambda_jit_safe(
   lambda_factor = jnp.where(ke_current <= 0.0, 1.0, jnp.sqrt(lambda_sq_safe))
 
   return lambda_factor, key
-
-
-class Step(eqx.Module, ABC):
-
-  """Abstract base class for integrator steps.
-
-  All steps are Equinox Modules that implement a pure `apply` method.
-  This ensures they are valid JAX PyTrees and can capture static configuration.
-
-  Purity Guarantee:
-  - No side effects (no global state mutation)
-  - No Python control flow (use jax.lax.cond, jax.lax.scan, etc.)
-  - Output deterministic given input state
-  """
-
-  @abstractmethod
-  def apply(
-      self,
-      state: IntegratorState,
-      params: IntegratorParams,
-  ) -> IntegratorState:
-    """Apply one step of the integrator.
-
-    Args:
-        state: Current integrator state.
-        params: Standardized integrator parameters (dt, kT, etc.).
-
-    Returns:
-        Updated state (including updated PRNGKey if stochastic).
-    """
-    raise NotImplementedError
 
 
 class O_Step(Step):
@@ -668,13 +640,10 @@ def make_step(name: str, **kwargs) -> Step:
       KeyError: If step name not found in registry.
   """
   if name == "mc_barostat_step":
-    from prolix.physics.barostat import MC_Barostat_Step
     return MC_Barostat_Step(**kwargs)
   if name == "scr_barostat_step":
-    from prolix.physics.barostat import SCR_Barostat_Step
     return SCR_Barostat_Step(**kwargs)
   if name == "virtual_site_reconstruction_step":
-    from prolix.physics.virtual_sites_step import VirtualSiteReconstructionStep
     return VirtualSiteReconstructionStep(**kwargs)
   if name == "o_step_half":
     return O_Step(fraction=0.5, **kwargs)

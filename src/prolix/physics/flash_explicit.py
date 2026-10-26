@@ -23,6 +23,12 @@ from proxide.physics.constants import COULOMB_CONSTANT
 
 from prolix.padding import PaddedSystem
 from prolix.physics import explicit_corrections, pbc
+from prolix.physics.bonded_masked import (
+    _angle_energy_masked,
+    _bond_energy_masked,
+    _cmap_energy_masked,
+    _dihedral_energy_masked,
+)
 from prolix.physics.efa_coulomb import (
     efa_lebedev_coulomb_energy,
     efa_lebedev_params,
@@ -722,13 +728,6 @@ def flash_explicit_total_energy(
     terms needed for structural integrity during energy minimization.
     """
     from jax_md import space
-
-    from prolix.batched_energy import (
-        _angle_energy_masked,
-        _bond_energy_masked,
-        _cmap_energy_masked,
-        _dihedral_energy_masked,
-    )
 
     pos = sys.positions
     if sys.box_size is not None:

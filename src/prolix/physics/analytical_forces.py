@@ -16,6 +16,13 @@ import jax.numpy as jnp
 from proxide.physics import constants
 from proxide.physics.constants import COULOMB_CONSTANT
 
+from prolix.physics.generalized_born import (
+    compute_ace_nonpolar_energy,
+    compute_born_radii,
+    f_gb,
+    safe_norm,
+)
+
 if TYPE_CHECKING:
     from jax_md.util import Array
 
@@ -204,12 +211,6 @@ def gb_ace_forces_dense(
     Returns:
         Forces (N, 3) in kcal/mol/Å. Zero for padded atoms.
     """
-    from prolix.physics.generalized_born import (
-        compute_ace_nonpolar_energy,
-        compute_born_radii,
-        f_gb,
-        safe_norm,
-    )
 
     N = positions.shape[0]
     mask_ij = atom_mask[:, None] & atom_mask[None, :]
