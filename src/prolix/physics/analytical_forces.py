@@ -261,8 +261,8 @@ def gb_ace_forces_dense(
         return prefactor * jnp.sum(energy_terms)
 
     # VJP gives us dE_gb/dr_direct and dE_gb/dB in one call
-    _, gb_vjp_fn = jax.vjp(_gb_coulomb_fn, positions, born_radii)
-    dE_gb_dr_direct, dE_gb_dB = gb_vjp_fn(jnp.ones((), dtype=positions.dtype))
+    e_gb_val, gb_vjp_fn = jax.vjp(_gb_coulomb_fn, positions, born_radii)
+    dE_gb_dr_direct, dE_gb_dB = gb_vjp_fn(jnp.ones((), dtype=e_gb_val.dtype))
 
     # --- Stage 2: ACE gradient w.r.t. Born radii (analytical) ---
     # ACE: E_i = C * (R_i + 0.14)^2 * (R_i / B_i)^6
@@ -274,12 +274,12 @@ def gb_ace_forces_dense(
         )
 
     # Use vjp for robustness (ACE formula has unit conversions)
-    _, ace_vjp_fn = jax.vjp(_ace_fn, born_radii)
-    dE_ace_dB = ace_vjp_fn(jnp.ones((), dtype=positions.dtype))[0]
+    e_ace_val, ace_vjp_fn = jax.vjp(_ace_fn, born_radii)
+    dE_ace_dB = ace_vjp_fn(jnp.ones((), dtype=e_ace_val.dtype))[0]
 
     # --- Stage 3: VJP of Born radii w.r.t. positions ---
     # Total dE/dB = GB contribution + ACE contribution
-    total_dE_dB = dE_gb_dB + dE_ace_dB
+    total_dE_dB = (dE_gb_dB + dE_ace_dB).astype(born_radii.dtype)
 
     _, born_vjp_fn = jax.vjp(_born_radii_fn, positions)
     dE_dr_via_born = born_vjp_fn(total_dE_dB)[0]

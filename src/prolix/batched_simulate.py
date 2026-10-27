@@ -27,6 +27,7 @@ from prolix.batched_energy import (
 )
 from prolix.fused_energy import fused_energy_and_forces_nl
 from prolix.padding import precompute_dense_exclusions
+from prolix.physics import pbc
 from prolix.physics.constraints import project_momenta, project_positions
 from prolix.physics.md_potential_bundle import value_energy_and_grad_energy
 from prolix.physics.settle import settle_positions, settle_velocities
@@ -271,7 +272,12 @@ def _restraint_schedule(k_start: float, k_end: float, n_steps: int) -> Array:
     return jnp.linspace(k_start, k_end, n_steps)
 
 
-def make_langevin_step(dt: float, kT: float, gamma: float) -> Callable[[PaddedSystem, _LangevinState], _LangevinState]:
+def make_langevin_step(
+    dt: float,
+    kT: float,
+    gamma: float,
+    use_pallas: bool | None = None,
+) -> Callable[[PaddedSystem, _LangevinState], _LangevinState]:
     """Create a BAOAB Langevin step function with RATTLE constraints.
 
     BAOAB scheme with SHAKE/RATTLE:
@@ -308,6 +314,7 @@ def make_langevin_step(dt: float, kT: float, gamma: float) -> Callable[[PaddedSy
             return single_padded_force(
                 sys_with_r, displacement_fn,
                 soft_core_lambda=jnp.float32(1.0),
+                use_pallas=use_pallas,
             )
         
         r, p, f, m, rng, cap_count = (
@@ -447,6 +454,7 @@ def make_langevin_step(dt: float, kT: float, gamma: float) -> Callable[[PaddedSy
 def make_langevin_step_nl(
     dt: float, kT: float, gamma: float,
     energy_fn: Callable | None = None,
+    use_pallas: bool | None = None,
 ) -> Callable:
     """Create a BAOAB Langevin step using neighbor-list energy.
 
@@ -467,7 +475,11 @@ def make_langevin_step_nl(
         step_fn(padded_sys, state, neighbor_idx) -> _LangevinState: Integration step function.
     """
     if energy_fn is None:
-        energy_fn = single_padded_energy_nl_cvjp
+        def _default_energy_fn(sys_arg, nbr_arg, disp_arg):
+            return single_padded_energy_nl_cvjp(
+                sys_arg, nbr_arg, disp_arg, use_pallas=use_pallas,
+            )
+        energy_fn = _default_energy_fn
 
     # Precompute constants
     c1 = jnp.exp(-gamma * dt)
@@ -804,13 +816,15 @@ def batched_minimize(
     """
     from jax_md import minimize as jax_md_minimize
 
-    displacement_fn, shift_fn = space.free()
-
     # Validate fire_stage_steps
     if len(fire_stage_steps) != 4:
         raise ValueError(f"fire_stage_steps must have 4 values, got {len(fire_stage_steps)}")
 
     def minimize_single(sys: PaddedSystem) -> tuple[Array, Array]:
+        if sys.box_size is not None:
+            displacement_fn, shift_fn = pbc.create_periodic_space(jnp.asarray(sys.box_size))
+        else:
+            displacement_fn, shift_fn = space.free()
         sys = precompute_dense_exclusions(sys)
         r_ref = sys.positions  # Reference geometry for restraints
         atom_mask = sys.atom_mask
@@ -818,10 +832,11 @@ def batched_minimize(
 
         def energy_fn(r, k_restraint=jnp.float32(0.0), selection_mask=None):
             if selection_mask is None: selection_mask = atom_mask
-            sys_with_r = dataclasses.replace(sys, positions=r)
+            sys_with_r = sys.replace(positions=r)
             e = single_padded_energy(sys_with_r, displacement_fn, soft_core_lambda=jnp.float32(1.0), implicit_solvent=not explicit_solvent)
-            e = e + _selective_restraint_energy(r, r_ref, k_restraint, atom_mask, selection_mask)
-            return e
+            dr_rest = jax.vmap(displacement_fn)(r, r_ref)
+            e_rest = 0.5 * k_restraint * jnp.sum(jnp.sum(dr_rest ** 2, axis=-1) * atom_mask * selection_mask)
+            return e + e_rest
 
         # =================================================================
         # Phase 1: Steepest Descent — single stage, max restraints
@@ -831,9 +846,10 @@ def batched_minimize(
         # release schedule."
         def sd_step(carry, _):
             i, r, k_rest, sel_mask, max_dx = carry
-            sys_with_r = dataclasses.replace(sys, positions=r)
+            sys_with_r = sys.replace(positions=r)
             f_phys = single_padded_force(sys_with_r, displacement_fn, soft_core_lambda=jnp.float32(1.0), explicit_solvent=explicit_solvent)
-            f_rest = -k_rest * (r - r_ref) * atom_mask[:, None] * sel_mask[:, None]
+            dr_rest = jax.vmap(displacement_fn)(r, r_ref)
+            f_rest = -k_rest * dr_rest * atom_mask[:, None] * sel_mask[:, None]
             forces = f_phys + f_rest
 
             # Mask padding atoms + NaN guard
@@ -845,7 +861,7 @@ def batched_minimize(
             rms = jnp.sqrt(jnp.sum(f_mag**2 * atom_mask) / jnp.maximum(jnp.sum(atom_mask), 1.0))
 
             # Also compute energy for diagnostics
-            sys_diag = dataclasses.replace(sys, positions=r)
+            sys_diag = sys.replace(positions=r)
             e_diag = single_padded_energy(sys_diag, displacement_fn, soft_core_lambda=jnp.float32(1.0), implicit_solvent=not explicit_solvent)
 
             def _log_sd(rms_val, step_val, e_val):

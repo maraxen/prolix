@@ -1,0 +1,66 @@
+[experiment]
+hypothesis = "All 72 canonical KnobSurface leaf knobs and 16 vendor/reference schemas satisfy consumer-only U1 reachability, U5 superset parity, and runtime FieldAuditProxy consumption with zero silent drops, while a synthetic mutated-knob drop negative control is reliably detected."
+stage_name = "validation"
+novel = true
+claim_discriminates = ["H_zero_silent_drop", "H_null_silent_drop"]
+claim_isolates = ["C_inert_metadata_fields"]
+
+[controls]
+positive_outcome = ["pass"]
+negative_outcome = ["fail", "marginal"]
+
+[differential]
+knob = "PROLIX_NEG_CONTROL_DROP"
+off = "0"
+on = "1"
+expect = "differs"
+metric = "n_silent_drops"
+min_effect = 1.0
+
+[[review.implementation]]
+source = "src/prolix/governance/redsox_adapter.py"
+commit = "95ec2de00f733fc5838ed3da1c9442a1b76199ae"
+what_was_checked = "Consumer-only U1 AST reachability excludes declaration modules and U5 superset parity checks all 16 reference schemas"
+bears_on = "H_zero_silent_drop"
+disposition = "matches"
+
+[[review.implementation]]
+source = "scripts/experiments/knob_parity_matrix.py"
+commit = "95ec2de00f733fc5838ed3da1c9442a1b76199ae"
+what_was_checked = "Synthetic negative control injects a dropped knob in a shadow consumer proxy and verifies FieldAuditProxy and energy-delta detection reject H_null_silent_drop"
+bears_on = "H_null_silent_drop"
+disposition = "matches"
+
+[[review.implementation]]
+source = "src/prolix/physics/field_audit.py"
+commit = "95ec2de00f733fc5838ed3da1c9442a1b76199ae"
+what_was_checked = "FieldAuditProxy tracks runtime leaf attribute access without logging failed getattr probes, callable methods, or sub-dataclass containers"
+bears_on = "C_inert_metadata_fields"
+disposition = "matches"
+
+[outcomes.pass]
+condition = "n_silent_drops = 0 AND n_parity_failures = 0 AND n_untracked_gaps = 0 AND max_rel_energy_err < 0.00001 AND negative_control_detected = true"
+decision = "accept knob governance and numerical parity matrix"
+reasoning = "Zero silent knob drops, zero untracked gaps, <1e-5 relative energy error, and negative control detected"
+is_residual = false
+
+[outcomes.marginal]
+condition = "n_silent_drops = 0 AND n_parity_failures = 0 AND n_untracked_gaps = 0 AND max_rel_energy_err >= 0.00001 AND max_rel_energy_err < 0.001 AND negative_control_detected = true"
+decision = "accept governance with float32 numerical tolerance review"
+reasoning = "Zero silent drops and negative control detected, with float32 energy drift between 1e-5 and 1e-3"
+is_residual = false
+
+[outcomes.fail]
+condition = "n_silent_drops > 0 OR n_parity_failures > 0 OR n_untracked_gaps > 0 OR max_rel_energy_err >= 0.001 OR negative_control_detected = false"
+decision = "reject governance or parity regression"
+reasoning = "At least one silent drop, untracked schema gap, parity failure, or failed negative control"
+is_residual = true
+
+[result_schema]
+n_silent_drops = "int"
+n_parity_failures = "int"
+n_untracked_gaps = "int"
+max_rel_energy_err = "float"
+negative_control_detected = "bool"
+n_total_knobs = "int"
+n_pending_epic_knobs = "int"

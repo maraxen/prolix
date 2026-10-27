@@ -18,73 +18,122 @@ Usage:
     print(f"Accessed fields: {fields_accessed}")
 """
 
+from __future__ import annotations
+
+import dataclasses
 from typing import Any
 
-import jax.numpy as jnp
-from jax_md import space
+try:
+    import equinox as eqx
+    import jax.numpy as jnp
+    from jax_md import space
 
-from prolix.physics import bonded
+    from prolix.physics import bonded
+except ImportError:
+    eqx = None  # type: ignore[assignment]
+    jnp = None  # type: ignore[assignment]
+    space = None  # type: ignore[assignment]
+    bonded = None  # type: ignore[assignment]
 
 
 class FieldAuditProxy:
-    """Non-intrusive proxy wrapper around PhysicsSystem for field-access logging.
+    """Non-intrusive proxy wrapper around PhysicsSystem / MolecularBundle / KnobSurface for field-access logging.
 
-    Intercepts __getattr__ calls to record which attributes are read.
+    Intercepts __getattr__ calls to record which attributes are read, recursively wraps nested
+    dataclass/bundle objects with a shared access log, and preserves proxy tracking across
+    ``replace`` / ``_replace`` calls.
     """
 
-    def __init__(self, system: Any):
-        """Initialize proxy wrapping a PhysicsSystem.
-
-        Args:
-            system: PhysicsSystem instance to wrap.
-        """
+    def __init__(
+        self,
+        system: Any,
+        *,
+        _accessed: set[str] | None = None,
+        _prefix: str = "",
+    ):
+        """Initialize proxy wrapping a PhysicsSystem or config object."""
         object.__setattr__(self, "_system", system)
-        object.__setattr__(self, "_accessed_fields", set())
+        object.__setattr__(
+            self,
+            "_accessed_fields",
+            _accessed if _accessed is not None else set(),
+        )
+        object.__setattr__(self, "_prefix", _prefix)
 
     def __getattr__(self, name: str) -> Any:
-        """Intercept attribute access and log field reads.
-
-        Args:
-            name: Attribute name being accessed.
-
-        Returns:
-            The attribute value from the wrapped system.
-        """
-        # Avoid recursion on special attributes
-        if name in ("_system", "_accessed_fields"):
+        """Intercept attribute access and log field reads."""
+        if name in ("_system", "_accessed_fields", "_prefix"):
             return object.__getattribute__(self, name)
 
-        # Log the access
-        accessed = object.__getattribute__(self, "_accessed_fields")
-        accessed.add(name)
-
-        # Return the attribute from the wrapped system
         system = object.__getattribute__(self, "_system")
-        return getattr(system, name)
+        accessed = object.__getattribute__(self, "_accessed_fields")
+        prefix = object.__getattribute__(self, "_prefix")
+
+        if name in ("replace", "_replace", "__replace__"):
+            def _replace_wrapper(**changes: Any) -> FieldAuditProxy:
+                if hasattr(system, "replace"):
+                    new_sys = system.replace(**changes)
+                elif hasattr(system, "_replace"):
+                    new_sys = system._replace(**changes)
+                elif dataclasses.is_dataclass(system):
+                    new_sys = dataclasses.replace(system, **changes)
+                else:
+                    new_sys = eqx.tree_at(
+                        lambda t: [getattr(t, k) for k in changes],
+                        system,
+                        list(changes.values()),
+                    )
+                return FieldAuditProxy(new_sys, _accessed=accessed, _prefix=prefix)
+
+            return _replace_wrapper
+
+        val = getattr(system, name)
+        if callable(val):
+            return val
+        if (
+            not name.startswith("_")
+            and dataclasses.is_dataclass(val)
+            and not isinstance(val, type)
+            and (jnp is None or not isinstance(val, jnp.ndarray))
+        ):
+            sub_prefix = f"{prefix}.{name}" if prefix else name
+            return FieldAuditProxy(val, _accessed=accessed, _prefix=sub_prefix)
+        if not name.startswith("_"):
+            key = f"{prefix}.{name}" if prefix else name
+            accessed.add(key)
+            if prefix:
+                accessed.add(name)
+        return val
 
     def __setattr__(self, name: str, value: Any) -> None:
-        """Prevent modification of wrapped system.
-
-        Args:
-            name: Attribute name.
-            value: Attribute value.
-
-        Raises:
-            AttributeError: Always, to prevent modification.
-        """
-        if name in ("_system", "_accessed_fields"):
+        """Prevent modification of wrapped system."""
+        if name in ("_system", "_accessed_fields", "_prefix"):
             object.__setattr__(self, name, value)
         else:
             raise AttributeError("Proxy is read-only; cannot set attributes")
 
     def get_accessed_fields(self) -> frozenset[str]:
-        """Return the set of fields accessed so far.
-
-        Returns:
-            Frozenset of field names.
-        """
+        """Return the set of fields accessed so far."""
         accessed = object.__getattribute__(self, "_accessed_fields")
         return frozenset(accessed)
+
+    @property
+    def accessed_fields(self) -> set[str]:
+        """Mutable set of accessed field names (compatible with redsox FieldAuditProxy)."""
+        return object.__getattribute__(self, "_accessed_fields")
+
+    def unread_fields(self, candidate_fields: set[str] | frozenset[str] | None = None) -> set[str]:
+        """Return fields on the wrapped dataclass that were never read."""
+        system = object.__getattribute__(self, "_system")
+        accessed = object.__getattribute__(self, "_accessed_fields")
+        if candidate_fields is None:
+            if dataclasses.is_dataclass(system):
+                candidate_fields = {f.name for f in dataclasses.fields(system)}
+            else:
+                candidate_fields = {
+                    k for k in dir(system) if not k.startswith("_") and not callable(getattr(system, k, None))
+                }
+        return set(candidate_fields) - accessed
 
 
 def audit_bonded_fields(system: Any, displacement_fn: space.DisplacementFn,

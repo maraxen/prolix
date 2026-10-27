@@ -11,6 +11,7 @@ import numpy as np
 from jax_md import partition, space, util
 
 from prolix.compat import system_params_to_protein
+from prolix.physics.pbc import wrap_positions
 from prolix.utils import topology
 
 if TYPE_CHECKING:
@@ -191,29 +192,52 @@ def make_neighbor_list_fn(
   With the precondition now enforced, the cell list is safe and is enabled by
   default; ``disable_cell_list=True`` falls back to O(N^2) construction.
   """
+  box = jnp.asarray(box_size)
+  box_diag = jnp.diag(box) if box.ndim == 2 else box
+  if not isinstance(box, jax.core.Tracer):
+    box_np = np.asarray(box)
+    diag_np = np.diag(box_np) if box_np.ndim == 2 else box_np
+    min_half_height = 0.5 * float(np.min(diag_np))
+    if float(cutoff) > min_half_height + 1e-6:
+      raise ValueError(
+        f"Minimum-image violation: cutoff ({cutoff}) exceeds half the minimum box height ({min_half_height})"
+      )
+    if box_np.ndim == 2:
+      if (
+        abs(float(box_np[1, 0])) > 0.5 * float(box_np[0, 0]) + 1e-5
+        or abs(float(box_np[2, 0])) > 0.5 * float(box_np[0, 0]) + 1e-5
+        or abs(float(box_np[2, 1])) > 0.5 * float(box_np[1, 1]) + 1e-5
+      ):
+        raise ValueError(
+          f"Triclinic box violates OpenMM reduced-basis conditions: {box_np}"
+        )
+
   fns = partition.neighbor_list(
     displacement_fn,
-    box_size,
+    box_diag,
     r_cutoff=cutoff,
     dr_threshold=dr_threshold,
     capacity_multiplier=capacity_multiplier,
-    disable_cell_list=disable_cell_list,
+    disable_cell_list=disable_cell_list or (box.ndim == 2),
     mask_self=True,
     fractional_coordinates=False,
   )
 
-  box = jnp.asarray(box_size)
-
-  def _wrap(position: Array) -> Array:
-    return jnp.mod(position, box)
+  def _wrap(position: Array, dyn_box: Array | None = None) -> Array:
+    b = jnp.asarray(dyn_box) if dyn_box is not None else box
+    if b.ndim == 2:
+      return wrap_positions(position, b)
+    return jnp.mod(position, b)
 
   def allocate(position: Array, **kwargs) -> partition.NeighborList:
-    return fns.allocate(_wrap(position), **kwargs)
+    b = kwargs.get("box", None)
+    return fns.allocate(_wrap(position, b), **kwargs)
 
   def update(
     position: Array, neighbors: partition.NeighborList, **kwargs
   ) -> partition.NeighborList:
-    return fns.update(_wrap(position), neighbors, **kwargs)
+    b = kwargs.get("box", None)
+    return fns.update(_wrap(position, b), neighbors, **kwargs)
 
   return partition.NeighborListFns(allocate, update)
 
@@ -565,6 +589,8 @@ def compute_nl_capacity(
   import numpy as np
 
   box_np = np.asarray(box_size, dtype=np.float64)
+  if box_np.ndim == 2:
+    box_np = np.diag(box_np)
   box_volume = float(np.prod(box_np))
   if box_volume <= 0:
     msg = f"compute_nl_capacity: box_size must describe a positive-volume periodic box, got {box_size}"

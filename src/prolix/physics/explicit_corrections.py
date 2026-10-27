@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import jax
 import jax.numpy as jnp
+from prolix.physics import pbc
 from jax_md import space
 from jax_md.util import Array
 from proxide.physics.constants import COULOMB_CONSTANT
@@ -76,7 +77,7 @@ def lj_dispersion_tail_energy(
     epsilon = jnp.asarray(epsilon)
     # debt 832: dtype follows epsilon (the ambient float precision) rather than hardcoding float32.
     atom_mask = jnp.asarray(atom_mask).astype(epsilon.dtype)
-    volume = box[0] * box[1] * box[2] if box.ndim == 1 else jnp.linalg.det(box)
+    volume = pbc.box_volume(box)
 
     sum_c6 = jnp.sum(jnp.sqrt(epsilon) * (sigma**3) * atom_mask)
     sum_c12 = jnp.sum(jnp.sqrt(epsilon) * (sigma**6) * atom_mask)
@@ -98,7 +99,7 @@ def lj_dispersion_tail_pressure(
 
     P_tail = E_tail / V.
     """
-    volume = box[0] * box[1] * box[2] if box.ndim == 1 else jnp.linalg.det(box)
+    volume = pbc.box_volume(box)
     e_tail = lj_dispersion_tail_energy(box, sigma, epsilon, cutoff, atom_mask)
     return e_tail / volume
 
@@ -116,7 +117,7 @@ def lj_dispersion_tail_impulsive_pressure(
     epsilon = jnp.asarray(epsilon)
     # debt 832: dtype follows epsilon (the ambient float precision) rather than hardcoding float32.
     atom_mask = jnp.asarray(atom_mask).astype(epsilon.dtype)
-    volume = box[0] * box[1] * box[2] if box.ndim == 1 else jnp.linalg.det(box)
+    volume = pbc.box_volume(box)
 
     sum_c6 = jnp.sum(jnp.sqrt(epsilon) * (sigma**3) * atom_mask)
     sum_c12 = jnp.sum(jnp.sqrt(epsilon) * (sigma**6) * atom_mask)
@@ -130,4 +131,4 @@ def lj_dispersion_tail_impulsive_pressure(
     inv_vol2 = 1.0 / (volume**2)
     sum_u = 4.0 * ( (sum_c12**2) * (cutoff**-12) - (sum_c6**2) * (cutoff**-6) )
     
-    return - (2.0 * jnp.pi / 3.0) * inv_vol2 * (cutoff**3) * sum_u
+    return (2.0 * jnp.pi / 3.0) * inv_vol2 * (cutoff**3) * sum_u

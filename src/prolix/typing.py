@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import dataclasses
+
 from typing import Any, NamedTuple
 
 import equinox as eqx
@@ -136,15 +138,21 @@ class CmapTorsionIndices(NamedTuple):
         """Construct indices from a packed CMAP torsion row.
 
         Args:
-            row: A 1D array of shape (5,) from `SystemParams["cmap_torsions"]`.
-                 Format: [atom_i, atom_j, atom_k, atom_l, atom_m]
-                 Defines two sharing torsions:
-                 - Phi: i-j-k-l
-                 - Psi: j-k-l-m
+            row: A 1D array of shape (5,) or (8,) from `SystemParams["cmap_torsions"]`
+                 or `MolecularBundle.cmap_torsion_idx`.
+                 - Shape (5,): [atom_i, atom_j, atom_k, atom_l, atom_m]
+                   (Phi: i-j-k-l, Psi: j-k-l-m)
+                 - Shape (8,): [a1, a2, a3, a4, b1, b2, b3, b4]
+                   (Phi: a1-a2-a3-a4, Psi: b1-b2-b3-b4)
 
         Returns:
             CmapTorsionIndices instance constructed from the row.
         """
+        if row.shape[-1] == 8:
+            return cls(
+                phi_indices=row[0:4],
+                psi_indices=row[4:8],
+            )
         return cls(
             phi_indices=row[CMAP_IDX_PHI],
             psi_indices=row[CMAP_IDX_PSI],
@@ -348,6 +356,17 @@ class PhysicsSystem(eqx.Module):
     constraint_lengths: Array | None = None  # (N_constr_padded,) float
     constraint_mask: Array | None = None  # (N_constr_padded,) bool
 
+    # Explicit 1-4 exception pairs (padded to EXCEPTION_BUCKETS)
+    exception_pairs: Array | None = None  # (E_exc, 2) int32
+    exception_sigmas: Array | None = None  # (E_exc,) float32
+    exception_epsilons: Array | None = None  # (E_exc,) float32
+    exception_chargeprods: Array | None = None  # (E_exc,) float32
+    exception_mask: Array | None = None  # (E_exc,) bool
+
+    # Cosolvent repulsive group / molecule IDs (optional)
+    cosolvent_group_id: Array | None = None  # (N_padded,) int32
+    cosolvent_mol_id: Array | None = None  # (N_padded,) int32
+
     # Metadata
     n_real_atoms: Array | None = None
     n_padded_atoms: int | Array = eqx.field(static=True, default=0)
@@ -356,23 +375,39 @@ class PhysicsSystem(eqx.Module):
     # Water molecule indices for SETTLE
     water_indices: Array | None = None  # (N_waters_padded, 3) int
     water_mask: Array | None = None  # (N_waters_padded,) bool
-    box_size: Array | None = eqx.field(static=True, default=None)  # (3,)
+    water_r_OH: float = 0.9572
+    water_r_HH: float = 1.5139
+    cmap_energy_grids: Array | None = None
+    box_size: Array | None = eqx.field(static=True, default=None)  # (3,) or (3, 3)
     pme_alpha: float = eqx.field(static=True, default=0.0)
     pme_grid_points: int = eqx.field(static=True, default=64)
+    pme_grid_dims: tuple[int, int, int] | None = eqx.field(static=True, default=None)
     nonbonded_cutoff: float = eqx.field(static=True, default=9.0)
+    lj_switch_width: float = eqx.field(static=True, default=0.0)
+    electrostatic_method: str = eqx.field(static=True, default="pme")
+    reaction_field_dielectric: float = eqx.field(static=True, default=78.3)
+    dsf_alpha: float = eqx.field(static=True, default=0.2)
+    use_dispersion_correction: bool = eqx.field(static=True, default=True)
+    solvent_dielectric: float = eqx.field(static=True, default=78.5)
+    solute_dielectric: float = eqx.field(static=True, default=1.0)
+    surface_tension: float = eqx.field(static=True, default=0.0054)
+    dielectric_offset: float = eqx.field(static=True, default=0.09)
+    softcore_alpha: float = eqx.field(static=True, default=0.5)
+    softcore_exponent: int = eqx.field(static=True, default=2)
 
     # Precomputed dense exclusion matrices
     dense_excl_scale_vdw: Array | None = None  # (N_padded, N_padded) float32
     dense_excl_scale_elec: Array | None = None  # (N_padded, N_padded) float32
 
+    # Multi-component cosolvent repulsive potential metadata (FR-7)
+    cosolvent_repulsive_eps: float = eqx.field(static=True, default=0.01)
+    cosolvent_repulsive_r0: float = eqx.field(static=True, default=10.0)
+    cosolvent_repulsive_cutoff: float = eqx.field(static=True, default=9.0)
+    deduplicate_interaction_groups: bool = eqx.field(static=True, default=False)
+
     def replace(self: T, **kwargs) -> T:
         """Return a copy with specified fields replaced."""
-        return eqx.tree_at(
-            lambda s: tuple(getattr(s, k) for k in kwargs.keys()),
-            self,
-            tuple(kwargs.values()),
-            is_leaf=lambda x: x is None,
-        )
+        return dataclasses.replace(self, **kwargs)
 
     def __replace__(self: T, **kwargs) -> T:
         """Python 3.13+ compatibility."""
@@ -463,6 +498,9 @@ class DifferentiableParams(eqx.Module):
     urey_bradley_params: Array
     pme_alpha: Array
     box_size: Array
+    exception_sigmas: Array | None = None
+    exception_epsilons: Array | None = None
+    exception_chargeprods: Array | None = None
 
     @classmethod
     def from_system(cls, system: PhysicsSystem) -> DifferentiableParams:
@@ -480,6 +518,9 @@ class DifferentiableParams(eqx.Module):
             else jnp.zeros((0, 2)),
             pme_alpha=jnp.array(system.pme_alpha),
             box_size=system.box_size if system.box_size is not None else jnp.zeros((3,)),
+            exception_sigmas=system.exception_sigmas,
+            exception_epsilons=system.exception_epsilons,
+            exception_chargeprods=system.exception_chargeprods,
         )
 
 
@@ -565,6 +606,7 @@ class IntegratorState(eqx.Module):
     last_update_positions: Array | None = eqx.field(default=None)
     box: Array | None = eqx.field(default=None)
     step_count: Array = eqx.field(default_factory=lambda: jnp.array(0, dtype=jnp.int32))
+    bias_state: Any = eqx.field(default=None)
 
     def __post_init__(self):
         """Auto-init warn_counts when explicitly passed as None (batch-aware)."""
@@ -641,6 +683,7 @@ class NVTLangevinState(eqx.Module):
     force: Array
     mass: Array
     rng: PRNGKey
+    bias_state: Any = eqx.field(default=None)
 
     @property
     def position(self) -> Array:
@@ -651,6 +694,24 @@ class NVTLangevinState(eqx.Module):
     def key(self) -> PRNGKey:
         """Alias for rng (JAX-MD compatibility)."""
         return self.rng
+
+    def replace(self, **kwargs):
+        if "key" in kwargs:
+            kwargs["rng"] = kwargs.pop("key")
+        if "position" in kwargs:
+            kwargs["positions"] = kwargs.pop("position")
+        return eqx.tree_at(
+            lambda s: tuple(getattr(s, k) for k in kwargs.keys()),
+            self,
+            tuple(kwargs.values()),
+            is_leaf=lambda x: x is None,
+        )
+
+    def set(self, **kwargs):
+        return self.replace(**kwargs)
+
+    def __replace__(self, **kwargs):
+        return self.replace(**kwargs)
 
 
 @eqx.filter_jit
@@ -663,6 +724,7 @@ class NPTState(eqx.Module):
     mass: Array
     rng: PRNGKey
     box: Array
+    bias_state: Any = eqx.field(default=None)
 
     @property
     def position(self) -> Array:
@@ -673,6 +735,24 @@ class NPTState(eqx.Module):
     def key(self) -> PRNGKey:
         """Alias for rng (JAX-MD compatibility)."""
         return self.rng
+
+    def replace(self, **kwargs):
+        if "key" in kwargs:
+            kwargs["rng"] = kwargs.pop("key")
+        if "position" in kwargs:
+            kwargs["positions"] = kwargs.pop("position")
+        return eqx.tree_at(
+            lambda s: tuple(getattr(s, k) for k in kwargs.keys()),
+            self,
+            tuple(kwargs.values()),
+            is_leaf=lambda x: x is None,
+        )
+
+    def set(self, **kwargs):
+        return self.replace(**kwargs)
+
+    def __replace__(self, **kwargs):
+        return self.replace(**kwargs)
 
 
 class SimulationState(eqx.Module):

@@ -90,6 +90,8 @@ def _csvr_compute_lambda_jit_safe(
     kT: float | ArrayType,
     dt: float | ArrayType,
     tau: float | ArrayType | None = None,
+    max_chi_dof: int = 512,
+    max_chi: int | None = None,
 ) -> tuple[ArrayType, PRNGKeyArray]:
   r"""JIT-safe CSVR lambda computation (Bussi et al. 2007).
 
@@ -125,9 +127,10 @@ def _csvr_compute_lambda_jit_safe(
   key, split = jax.random.split(key)
   # Sample (n_dof - 1) chi-squared components as sum of squares of standard normals
   n_chi = jnp.asarray(jnp.maximum(n_dof - 1, 1), dtype=jnp.int32)
-  # To avoid dynamic shape issues, we use a sufficiently large fixed shape
-  # and mask the excess samples
-  max_chi = 512
+  # Use static upper bound 3 * N_atoms (default min 512) so systems with >171 atoms
+  # never under-sample chi-squared DOF (CB-4).
+  eff_max_chi = int(max_chi) if max_chi is not None else int(max_chi_dof)
+  max_chi = max(eff_max_chi, 512)
   chi_samples = jax.random.normal(split, (max_chi,), dtype=ke_current.dtype)
   chi_mask = jnp.arange(max_chi) < n_chi
   s_chi_squared = jnp.sum(jnp.where(chi_mask, chi_samples**2, 0.0))
@@ -490,9 +493,10 @@ class SETTLE_Position_Step(Step):
       return state
 
     # Reference positions for SETTLE (used to fix orientation)
-    r_old = jnp.where(
-        params.positions_old is not None, params.positions_old, state.positions
-    )
+    if params.positions_old is not None and params.positions_old.shape == state.positions.shape:
+      r_old = params.positions_old
+    else:
+      r_old = state.positions
 
     position_constrained = settle_positions(
         state.positions,
@@ -562,7 +566,13 @@ class CSVR_Step(Step):
 
     # Compute rescaling factor and new RNG using JIT-safe version
     lambda_factor, key_out = _csvr_compute_lambda_jit_safe(
-        state.rng, ke, n_dof, kT, dt, tau=self.tau
+        state.rng,
+        ke,
+        n_dof,
+        kT,
+        dt,
+        tau=self.tau,
+        max_chi_dof=3 * int(state.momentum.shape[0]),
     )
 
     # Rescale momenta
