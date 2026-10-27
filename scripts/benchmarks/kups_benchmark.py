@@ -613,7 +613,7 @@ def run_tier4_full_potential_throughput(
 ) -> tuple[list[dict], dict]:
     """Compare BAOAB lax.scan propagator throughput on the full molecular mechanics potential."""
     jax.config.update("jax_enable_x64", False)
-    dt_fs = 2.0
+    dt_fs = 1.0
     dt_akma = kups_adapter.dt_fs_to_akma(dt_fs)
     gamma_akma = kups_adapter.gamma_ps_to_akma(GAMMA_PS)
     kT_kcal = T_TARGET_K * BOLTZMANN_KCAL

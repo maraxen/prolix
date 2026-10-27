@@ -209,14 +209,22 @@ def build_full_potential_topology(s: dict, seed: int = 0) -> dict:
 
     rng = np.random.default_rng(seed + 17)
     n = int(s["pos"].shape[0])
+    pos_np = np.asarray(s["pos"], dtype=np.float32)
+    box_np = np.asarray(s["box"], dtype=np.float32)
     idx = np.arange(n, dtype=np.int32)
+
+    def _pbc_dist(idx_a: np.ndarray, idx_b: np.ndarray) -> np.ndarray:
+        dr = pos_np[idx_a] - pos_np[idx_b]
+        dr = dr - box_np * np.round(dr / box_np)
+        return np.sqrt(np.sum(dr * dr, axis=-1) + 1e-10).astype(np.float32)
 
     n_bonds = n
     b_i = idx[:n_bonds]
     b_j = (b_i + 1) % n
     bonds = jnp.asarray(np.stack([b_i, b_j], axis=-1), dtype=jnp.int32)
+    b_r0 = _pbc_dist(b_i, b_j) + rng.normal(0.0, 0.04, size=n_bonds).astype(np.float32)
     bond_params = jnp.asarray(
-        np.column_stack([np.full(n_bonds, 1.52, np.float32), np.full(n_bonds, 300.0, np.float32)])
+        np.column_stack([b_r0, np.full(n_bonds, 300.0, np.float32)])
     )
     bond_mask = jnp.ones((n_bonds,), dtype=jnp.float32)
 
@@ -224,8 +232,9 @@ def build_full_potential_topology(s: dict, seed: int = 0) -> dict:
     u_i = idx[:n_ub]
     u_j = (u_i + 2) % n
     ub_bonds = jnp.asarray(np.stack([u_i, u_j], axis=-1), dtype=jnp.int32)
+    u_r0 = _pbc_dist(u_i, u_j) + rng.normal(0.0, 0.04, size=n_ub).astype(np.float32)
     ub_params = jnp.asarray(
-        np.column_stack([np.full(n_ub, 2.45, np.float32), np.full(n_ub, 50.0, np.float32)])
+        np.column_stack([u_r0, np.full(n_ub, 50.0, np.float32)])
     )
     ub_mask = jnp.ones((n_ub,), dtype=jnp.float32)
 
