@@ -1,0 +1,50 @@
+[experiment]
+hypothesis = """
+Spike (task 261027_xtrax-op-prolix-spike): prolix's SPME backward gather kernel
+(pme_pallas.gather_pallas) can sit behind xtrax.op beside a plain-JAX reference
+lifted from _spme_bwd (prolix.physics.pme_op), with no loss of correctness and no
+wrapper cost. On one random system per atom count (N = 512, 2048, 8192, 23558
+-- the last is the JAC/DHFR size; 64^3 mesh, the pme_grid_points default;
+0.1 atoms/A^3; ~2% ghost atoms; seed 0), the op under Context(kernels=True):
+
+1. matches the reference to scale-relative error <= 1e-4 on both outputs;
+2. actually runs the Pallas kernel (a pallas_call in its jaxpr);
+3. has a parity check that can fail: a 1% bump to one force exceeds the tolerance;
+4. on a GPU backend, costs no more than 1.10x the raw gather_pallas call at the
+   largest N (median of the steady-state repeats).
+
+Legs: CPU (Pallas interpret mode; checks the kernel's math only, timing not
+meaningful, criterion 4 exempt) and GPU (compiled Triton, Engaging H200,
+--repeats 20). The gather has no atomic_add, so the sm120/interpret-mode atomic
+hazard does not apply. speedup_largest_n (reference median / op median) is
+recorded DESCRIPTIVELY only: no criterion is registered on it, and no speed
+claim follows from this sidecar.
+
+Wall-time estimate: CPU leg < 2 min; GPU leg < 5 min plus queue. Environment
+is the clone's lock (jax 0.10.2, xtrax 0.4.1b5); the result records both.
+"""
+
+[outcomes.pass]
+condition = "max_rel_err <= 1e-4 AND kernel_ran AND control_red AND (backend = 'cpu' OR op_overhead_ratio <= 1.10)"
+decision = "xtrax.op carries the gather kernel: proceed to wire make_gather_op into _spme_bwd behind the existing PROLIX_USE_PALLAS_PME switch (separate PR), then consider spread after an on-GPU atomic_add check."
+reasoning = "Parity, a kernel that demonstrably ran, a control that can fail, and (on GPU) a wrapper within 10% of the raw kernel together show the seam adds nothing but selection."
+
+[outcomes.fail]
+condition = "max_rel_err IS NULL OR max_rel_err > 1e-4 OR NOT kernel_ran OR NOT control_red OR (backend <> 'cpu' AND op_overhead_ratio > 1.10)"
+decision = "Investigate per field: parity (kernel or lifted reference differs), kernel_ran false (silent fallback to the reference), control_red false (the check cannot fail), overhead (the custom_jvp wrapper or a recompile costs time)."
+reasoning = "Any one of these makes the op unfit to replace the hand-rolled switch."
+is_residual = true
+
+[breakdown]
+waive = "max_rel_err is already the worst case over the four atom counts; the result's per_size rows hold each count's error, control error and timings."
+
+[result_schema]
+backend = "str"
+device_kind = "str"
+jax_version = "str"
+xtrax_version = "str"
+max_rel_err = "float"
+kernel_ran = "bool"
+control_red = "bool"
+op_overhead_ratio = "float"
+speedup_largest_n = "float"
