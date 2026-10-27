@@ -159,7 +159,7 @@ def chunked_explicit_nonbonded_energy(
     from prolix.pallas_kernels import pallas_flash_explicit_nonbonded, resolve_pallas_mode
 
     pallas_enabled, interpret = resolve_pallas_mode(use_pallas=use_pallas)
-    if pallas_enabled and not isinstance(soft_core_lambda, jax.core.Tracer):
+    if pallas_enabled:
         return pallas_flash_explicit_nonbonded(
             positions,
             charges,
@@ -171,7 +171,7 @@ def chunked_explicit_nonbonded_energy(
             sys.excl_scales_elec,
             box=sys.box_size,
             pme_alpha=float(pme_alpha),
-            soft_core_lambda=float(soft_core_lambda),
+            soft_core_lambda=soft_core_lambda,
             interpret=interpret,
         )
 
@@ -389,6 +389,7 @@ def _excl_correction_from_sys(
     displacement_fn,
     pme_alpha_float: float,
     coul_14_scale: float = 0.83333333,
+    use_pallas: bool | None = None,
 ) -> Array:
     """Compute PME/EFA bonded exclusion correction using precomputed exclusion tables.
 
@@ -396,8 +397,11 @@ def _excl_correction_from_sys(
     energy/force functions when ``sys.excl_pair_indices`` or ``sys.excl_indices``
     is present.
     """
+    from prolix.pallas_kernels import pallas_pme_exclusion_pairs, resolve_pallas_mode
+
     n_atoms = pos.shape[0]
     work_dtype = pos.dtype
+    pallas_enabled, interpret = resolve_pallas_mode(use_pallas=use_pallas)
 
     excl_pair_indices = getattr(sys, "excl_pair_indices", None)
     excl_pair_scales = getattr(sys, "excl_pair_scales_elec", None)
@@ -406,6 +410,19 @@ def _excl_correction_from_sys(
         and excl_pair_scales is not None
         and excl_pair_indices.shape[0] > 0
     ):
+        if pallas_enabled:
+            return pallas_pme_exclusion_pairs(
+                pos,
+                excl_pair_indices,
+                excl_pair_scales,
+                safe_charges,
+                pme_alpha=float(pme_alpha_float),
+                n_atoms=n_atoms,
+                box=sys.box_size,
+                atom_mask=sys.atom_mask,
+                is_row_format=False,
+                interpret=interpret,
+            )
         i_idx = excl_pair_indices[:, 0]
         j_idx = excl_pair_indices[:, 1]
         valid = (i_idx >= 0) & (i_idx < n_atoms) & (j_idx >= 0) & (j_idx < n_atoms) & (i_idx != j_idx)
@@ -432,6 +449,19 @@ def _excl_correction_from_sys(
         and excl_indices.ndim == 2
         and excl_indices.shape[1] > 0
     ):
+        if pallas_enabled:
+            return pallas_pme_exclusion_pairs(
+                pos,
+                excl_indices,
+                excl_scales_elec,
+                safe_charges,
+                pme_alpha=float(pme_alpha_float),
+                n_atoms=n_atoms,
+                box=sys.box_size,
+                atom_mask=sys.atom_mask,
+                is_row_format=True,
+                interpret=interpret,
+            )
         M = excl_indices.shape[1]
         i_grid = jnp.broadcast_to(jnp.arange(n_atoms, dtype=jnp.int32)[:, None], (n_atoms, M))
         j_grid = excl_indices
@@ -532,7 +562,8 @@ def _total_energy_from_positions(
         # Exclusion correction for bonded pairs
         displacement_fn, _ = pbc.create_periodic_space(sys.box_size)
         e_excl = _excl_correction_from_sys(
-            pos, safe_charges, sys, displacement_fn, pme_alpha_float, 0.83333333
+            pos, safe_charges, sys, displacement_fn, pme_alpha_float, 0.83333333,
+            use_pallas=use_pallas,
         )
 
         # Short-range erfc(αr)/r for hybrid decomposition:
@@ -581,7 +612,8 @@ def _total_energy_from_positions(
         # Exclusion correction for bonded pairs (same as EFA)
         displacement_fn, _ = pbc.create_periodic_space(sys.box_size)
         e_excl = _excl_correction_from_sys(
-            pos, safe_charges, sys, displacement_fn, pme_alpha_float, 0.83333333
+            pos, safe_charges, sys, displacement_fn, pme_alpha_float, 0.83333333,
+            use_pallas=use_pallas,
         )
 
         # Short-range erfc(αr)/r for hybrid decomposition
@@ -658,6 +690,7 @@ def _total_energy_from_positions(
             displacement_fn,
             float(sys.pme_alpha),
             float(coul_14),
+            use_pallas=use_pallas,
         )
         # lj_dispersion_tail_energy's last parameter is `atom_mask` (an (N,)
         # array), not an atom count -- see the EFA branch above /
@@ -729,11 +762,21 @@ def flash_explicit_total_energy(
     """
     from jax_md import space
 
+    from prolix.pallas_kernels import (
+        pallas_angles_harmonic,
+        pallas_bonds_2body,
+        pallas_cmap_torsions,
+        pallas_torsions_4body,
+        resolve_pallas_mode,
+    )
+
     pos = sys.positions
     if sys.box_size is not None:
         displacement_fn, _ = pbc.create_periodic_space(sys.box_size)
     else:
         displacement_fn, _ = space.free()
+
+    pallas_enabled, interpret = resolve_pallas_mode(use_pallas=use_pallas)
 
     # --- Bonded terms (O(N), no N² operations) ---
     # #4330 Fix 2a note: flash_bonded is unreached by the production force path
@@ -741,22 +784,42 @@ def flash_explicit_total_energy(
     # but flash_explicit_total_energy is directly exercised and its flash_bonded label
     # asserted present by test_flash_energy_labels_appear_in_compiled_hlo. Keep it.
     with jax.named_scope("flash_bonded"):
-        e_bond = _bond_energy_masked(
-            pos, sys.bonds, sys.bond_params, sys.bond_mask, displacement_fn)
-        e_ub = _bond_energy_masked(
-            pos, sys.urey_bradley_bonds, sys.urey_bradley_params,
-            sys.urey_bradley_mask, displacement_fn)
-        e_angle = _angle_energy_masked(
-            pos, sys.angles, sys.angle_params, sys.angle_mask, displacement_fn)
-        e_dih = _dihedral_energy_masked(
-            pos, sys.dihedrals, sys.dihedral_params,
-            sys.dihedral_mask, displacement_fn)
-        e_imp = _dihedral_energy_masked(
-            pos, sys.impropers, sys.improper_params,
-            sys.improper_mask, displacement_fn)
-        e_cmap = _cmap_energy_masked(
-            pos, sys.cmap_torsions, sys.cmap_indices,
-            sys.cmap_mask, sys.cmap_coeffs, displacement_fn)
+        if pallas_enabled:
+            e_bond = pallas_bonds_2body(
+                pos, sys.bonds, sys.bond_params, sys.bond_mask,
+                box=sys.box_size, dist_eps=1e-10, interpret=interpret)
+            e_ub = pallas_bonds_2body(
+                pos, sys.urey_bradley_bonds, sys.urey_bradley_params,
+                sys.urey_bradley_mask, box=sys.box_size, dist_eps=1e-10, interpret=interpret)
+            e_angle = pallas_angles_harmonic(
+                pos, sys.angles, sys.angle_params, sys.angle_mask,
+                box=sys.box_size, dist_eps=1e-10, interpret=interpret)
+            e_dih = pallas_torsions_4body(
+                pos, sys.dihedrals, sys.dihedral_params,
+                sys.dihedral_mask, box=sys.box_size, b0_is_ji=True, is_harmonic=False, interpret=interpret)
+            e_imp = pallas_torsions_4body(
+                pos, sys.impropers, sys.improper_params,
+                sys.improper_mask, box=sys.box_size, b0_is_ji=True, is_harmonic=False, interpret=interpret)
+            e_cmap = pallas_cmap_torsions(
+                pos, sys.cmap_torsions, sys.cmap_indices,
+                sys.cmap_mask, sys.cmap_coeffs, box=sys.box_size, first_is_psi=True, interpret=interpret)
+        else:
+            e_bond = _bond_energy_masked(
+                pos, sys.bonds, sys.bond_params, sys.bond_mask, displacement_fn)
+            e_ub = _bond_energy_masked(
+                pos, sys.urey_bradley_bonds, sys.urey_bradley_params,
+                sys.urey_bradley_mask, displacement_fn)
+            e_angle = _angle_energy_masked(
+                pos, sys.angles, sys.angle_params, sys.angle_mask, displacement_fn)
+            e_dih = _dihedral_energy_masked(
+                pos, sys.dihedrals, sys.dihedral_params,
+                sys.dihedral_mask, displacement_fn)
+            e_imp = _dihedral_energy_masked(
+                pos, sys.impropers, sys.improper_params,
+                sys.improper_mask, displacement_fn)
+            e_cmap = _cmap_energy_masked(
+                pos, sys.cmap_torsions, sys.cmap_indices,
+                sys.cmap_mask, sys.cmap_coeffs, displacement_fn)
 
         e_bonded = e_bond + e_ub + e_angle + e_dih + e_imp + e_cmap
 

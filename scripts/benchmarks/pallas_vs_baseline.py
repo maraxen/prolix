@@ -203,6 +203,223 @@ def make_pme_fns(s, interpret: bool):
     return make(False), make(True)
 
 
+def build_full_potential_topology(s: dict, seed: int = 0) -> dict:
+    """Populate realistic protein+solvent bonded, CMAP, and 1-4 exception tables for size N."""
+    from prolix.physics.cmap import precompute_cmap_coefficients
+
+    rng = np.random.default_rng(seed + 17)
+    n = int(s["pos"].shape[0])
+    idx = np.arange(n, dtype=np.int32)
+
+    n_bonds = n
+    b_i = idx[:n_bonds]
+    b_j = (b_i + 1) % n
+    bonds = jnp.asarray(np.stack([b_i, b_j], axis=-1), dtype=jnp.int32)
+    bond_params = jnp.asarray(
+        np.column_stack([np.full(n_bonds, 1.52, np.float32), np.full(n_bonds, 300.0, np.float32)])
+    )
+    bond_mask = jnp.ones((n_bonds,), dtype=jnp.float32)
+
+    n_ub = max(4, n // 4)
+    u_i = idx[:n_ub]
+    u_j = (u_i + 2) % n
+    ub_bonds = jnp.asarray(np.stack([u_i, u_j], axis=-1), dtype=jnp.int32)
+    ub_params = jnp.asarray(
+        np.column_stack([np.full(n_ub, 2.45, np.float32), np.full(n_ub, 50.0, np.float32)])
+    )
+    ub_mask = jnp.ones((n_ub,), dtype=jnp.float32)
+
+    n_angles = max(8, int(0.7 * n))
+    a_i = idx[:n_angles] % n
+    angles = jnp.asarray(np.stack([a_i, (a_i + 1) % n, (a_i + 2) % n], axis=-1), dtype=jnp.int32)
+    angle_params = jnp.asarray(
+        np.column_stack([np.full(n_angles, 1.91, np.float32), np.full(n_angles, 60.0, np.float32)])
+    )
+    angle_mask = jnp.ones((n_angles,), dtype=jnp.float32)
+
+    n_dih = max(8, int(1.2 * n))
+    d_i = np.arange(n_dih, dtype=np.int32) % n
+    dihedrals = jnp.asarray(
+        np.stack([d_i, (d_i + 1) % n, (d_i + 2) % n, (d_i + 3) % n], axis=-1), dtype=jnp.int32
+    )
+    dihedral_params = jnp.asarray(
+        np.column_stack(
+            [
+                np.full(n_dih, 2.0, np.float32),
+                np.full(n_dih, 0.3, np.float32),
+                np.full(n_dih, 1.2, np.float32),
+            ]
+        )
+    )
+    dihedral_mask = jnp.ones((n_dih,), dtype=jnp.float32)
+
+    n_imp = max(4, int(0.1 * n))
+    im_i = np.arange(n_imp, dtype=np.int32) % n
+    impropers = jnp.asarray(
+        np.stack([(im_i + 1) % n, im_i, (im_i + 2) % n, (im_i + 3) % n], axis=-1), dtype=jnp.int32
+    )
+    improper_params = jnp.asarray(
+        np.column_stack(
+            [
+                np.full(n_imp, 2.0, np.float32),
+                np.full(n_imp, 3.1415927, np.float32),
+                np.full(n_imp, 2.0, np.float32),
+            ]
+        )
+    )
+    improper_mask = jnp.ones((n_imp,), dtype=jnp.float32)
+
+    n_cmap = max(4, n // 20)
+    c_i = np.arange(n_cmap, dtype=np.int32) % n
+    cmap_torsions = jnp.asarray(
+        np.stack([c_i, (c_i + 1) % n, (c_i + 2) % n, (c_i + 3) % n, (c_i + 4) % n], axis=-1),
+        dtype=jnp.int32,
+    )
+    cmap_indices = jnp.zeros((n_cmap,), dtype=jnp.int32)
+    cmap_mask = jnp.ones((n_cmap,), dtype=jnp.float32)
+    raw_grids = jnp.asarray(rng.normal(0.0, 0.5, size=(2, 24, 24)).astype(np.float32))
+    cmap_coeffs = precompute_cmap_coefficients(raw_grids)
+
+    n_exc = max(8, int(0.8 * n))
+    ex_i = np.arange(n_exc, dtype=np.int32) % n
+    exception_pairs = jnp.asarray(np.stack([ex_i, (ex_i + 3) % n], axis=-1), dtype=jnp.int32)
+    exception_sigmas = jnp.full((n_exc,), 1.8, dtype=jnp.float32)
+    exception_epsilons = jnp.full((n_exc,), 0.08, dtype=jnp.float32)
+    exception_chargeprods = jnp.full((n_exc,), -0.04, dtype=jnp.float32)
+    exception_mask = jnp.ones((n_exc,), dtype=jnp.float32)
+
+    return {
+        **s,
+        "bonds": bonds,
+        "bond_params": bond_params,
+        "bond_mask": bond_mask,
+        "ub_bonds": ub_bonds,
+        "ub_params": ub_params,
+        "ub_mask": ub_mask,
+        "angles": angles,
+        "angle_params": angle_params,
+        "angle_mask": angle_mask,
+        "dihedrals": dihedrals,
+        "dihedral_params": dihedral_params,
+        "dihedral_mask": dihedral_mask,
+        "impropers": impropers,
+        "improper_params": improper_params,
+        "improper_mask": improper_mask,
+        "cmap_torsions": cmap_torsions,
+        "cmap_indices": cmap_indices,
+        "cmap_mask": cmap_mask,
+        "cmap_coeffs": cmap_coeffs,
+        "exception_pairs": exception_pairs,
+        "exception_sigmas": exception_sigmas,
+        "exception_epsilons": exception_epsilons,
+        "exception_chargeprods": exception_chargeprods,
+        "exception_mask": exception_mask,
+    }
+
+
+def make_full_potential_fns(s: dict, interpret: bool):
+    """Full molecular mechanics potential (bonded + CMAP + 1-4 + NL nonbonded + SPME): XLA vs Pallas."""
+    from prolix.batched_energy import (
+        _angle_energy_masked,
+        _bond_energy_masked,
+        _cmap_energy_masked,
+        _dihedral_energy_masked,
+        _exception_energy_masked,
+    )
+    from prolix.pallas_kernels import (
+        pallas_angles_harmonic,
+        pallas_bonds_2body,
+        pallas_cmap_torsions,
+        pallas_exceptions_14,
+        pallas_torsions_4body,
+    )
+    from prolix.physics import explicit_corrections
+    from prolix.physics.pme import compute_pme_grid_dims, spme_background_energy, spme_energy_with_forces
+
+    if "bonds" not in s:
+        s = build_full_potential_topology(s)
+    box = s["box"]
+    disp, _ = space.periodic(box)
+    grid_dims = compute_pme_grid_dims(np.asarray(box), grid_spacing=1.0)
+
+    def xla_fn(p):
+        e_bond = _bond_energy_masked(p, s["bonds"], s["bond_params"], s["bond_mask"], disp)
+        e_ub = _bond_energy_masked(p, s["ub_bonds"], s["ub_params"], s["ub_mask"], disp)
+        e_ang = _angle_energy_masked(p, s["angles"], s["angle_params"], s["angle_mask"], disp)
+        e_dih = _dihedral_energy_masked(p, s["dihedrals"], s["dihedral_params"], s["dihedral_mask"], disp)
+        e_imp = _dihedral_energy_masked(p, s["impropers"], s["improper_params"], s["improper_mask"], disp)
+        e_cmap = _cmap_energy_masked(
+            p, s["cmap_torsions"], s["cmap_indices"], s["cmap_mask"], s["cmap_coeffs"], disp
+        )
+        e_exc = _exception_energy_masked(
+            p,
+            s["exception_pairs"],
+            s["exception_sigmas"],
+            s["exception_epsilons"],
+            s["exception_chargeprods"],
+            s["exception_mask"],
+            disp,
+        )
+        e_lj = chunked_lj_energy_nl(
+            p, s["sigma"], s["eps"], s["excl_idx"], s["excl_vdw"], s["nbr"], disp,
+            cutoff=CUTOFF, tile_size=256, switch_width=SWITCH_WIDTH,
+        )
+        e_c = chunked_coulomb_energy_nl(
+            p, s["q"], s["excl_idx"], s["excl_elec"], s["nbr"], disp,
+            pme_alpha=PME_ALPHA, cutoff=CUTOFF, tile_size=256,
+        )
+        e_pme = spme_energy_with_forces(p, s["q"], s["mask"], box, grid_dims, PME_ALPHA, 4, False)
+        e_bg = spme_background_energy(s["q"], s["mask"], PME_ALPHA, box)
+        e_tail = explicit_corrections.lj_dispersion_tail_energy(box, s["sigma"], s["eps"], CUTOFF, s["mask"])
+        return e_bond + e_ub + e_ang + e_dih + e_imp + e_cmap + e_exc + e_lj + e_c + e_pme + e_bg + e_tail
+
+    def pallas_fn(p):
+        e_bond = pallas_bonds_2body(
+            p, s["bonds"], s["bond_params"], s["bond_mask"], box=box, dist_eps=1e-10, interpret=interpret
+        )
+        e_ub = pallas_bonds_2body(
+            p, s["ub_bonds"], s["ub_params"], s["ub_mask"], box=box, dist_eps=1e-10, interpret=interpret
+        )
+        e_ang = pallas_angles_harmonic(
+            p, s["angles"], s["angle_params"], s["angle_mask"], box=box, dist_eps=1e-10, interpret=interpret
+        )
+        e_dih = pallas_torsions_4body(
+            p, s["dihedrals"], s["dihedral_params"], s["dihedral_mask"],
+            box=box, b0_is_ji=True, is_harmonic=False, interpret=interpret,
+        )
+        e_imp = pallas_torsions_4body(
+            p, s["impropers"], s["improper_params"], s["improper_mask"],
+            box=box, b0_is_ji=True, is_harmonic=False, interpret=interpret,
+        )
+        e_cmap = pallas_cmap_torsions(
+            p, s["cmap_torsions"], s["cmap_indices"], s["cmap_mask"], s["cmap_coeffs"],
+            box=box, first_is_psi=True, interpret=interpret,
+        )
+        e_exc = pallas_exceptions_14(
+            p,
+            s["exception_pairs"],
+            s["exception_sigmas"],
+            s["exception_epsilons"],
+            s["exception_chargeprods"],
+            s["exception_mask"],
+            box=box,
+            soft_core_lambda=1.0,
+            interpret=interpret,
+        )
+        e_nb = pallas_nonbonded_nl(
+            p, s["q"], s["sigma"], s["eps"], s["mask"], s["nbr"], s["excl_idx"],
+            s["excl_vdw"], s["excl_elec"], box=box, pme_alpha=PME_ALPHA,
+            cutoff=CUTOFF, lj_switch_width=SWITCH_WIDTH, soft_core_lambda=1.0,
+            include_pme_excl_erf=True, interpret=interpret,
+        )
+        e_pme = spme_energy_with_forces(p, s["q"], s["mask"], box, grid_dims, PME_ALPHA, 4, True)
+        e_bg = spme_background_energy(s["q"], s["mask"], PME_ALPHA, box)
+        e_tail = explicit_corrections.lj_dispersion_tail_energy(box, s["sigma"], s["eps"], CUTOFF, s["mask"])
+        return e_bond + e_ub + e_ang + e_dih + e_imp + e_cmap + e_exc + e_nb + e_pme + e_bg + e_tail
+
+    return jax.jit(jax.value_and_grad(xla_fn)), jax.jit(jax.value_and_grad(pallas_fn))
+
+
 def _mem_stats() -> dict[str, int] | None:
     try:
         st = jax.devices()[0].memory_stats()
@@ -252,8 +469,17 @@ def _run_isolated_worker(spec: str, repeats: int, interpret: bool) -> dict:
     m0 = _mem_stats()
     base_bytes = m0["bytes_in_use"] if m0 else None
 
-    needs_nl = path_name in ("nl_xla", "nl_pallas", "nonbonded_xla", "nonbonded_pallas")
+    needs_nl = path_name in (
+        "nl_xla",
+        "nl_pallas",
+        "nonbonded_xla",
+        "nonbonded_pallas",
+        "full_potential_xla",
+        "full_potential_pallas",
+    )
     s = build_system(n, include_nl=needs_nl)
+    if path_name in ("full_potential_xla", "full_potential_pallas"):
+        s = build_full_potential_topology(s)
     jax.block_until_ready(s["pos"])
     if s["nbr"] is not None:
         jax.block_until_ready(s["nbr"])
@@ -264,6 +490,10 @@ def _run_isolated_worker(spec: str, repeats: int, interpret: bool) -> dict:
         fn, _ = make_fns(s, interpret)
     elif path_name in ("nl_pallas", "nonbonded_pallas"):
         _, fn = make_fns(s, interpret)
+    elif path_name == "full_potential_xla":
+        fn, _ = make_full_potential_fns(s, interpret)
+    elif path_name == "full_potential_pallas":
+        _, fn = make_full_potential_fns(s, interpret)
     elif path_name == "flash_xla":
         fn, _ = make_flash_fns(s, interpret)
     elif path_name == "flash_pallas":
@@ -456,7 +686,7 @@ def main() -> None:
     ap.add_argument("--_worker", default="", help=argparse.SUPPRESS)
     ap.add_argument(
         "--kernel",
-        choices=("nonbonded", "flash", "pme", "nl_build", "nl_skin", "mem_scaling"),
+        choices=("nonbonded", "flash", "pme", "full_potential", "nl_build", "nl_skin", "mem_scaling"),
         default="nonbonded",
         help="kernel/experiment family to benchmark",
     )
@@ -506,6 +736,10 @@ def main() -> None:
         maker = make_flash_fns
         worker_prefix = "flash"
         needs_nl = False
+    elif args.kernel == "full_potential":
+        maker = make_full_potential_fns
+        worker_prefix = "full_potential"
+        needs_nl = True
     else:
         maker = make_fns
         worker_prefix = "nonbonded"
@@ -514,6 +748,8 @@ def main() -> None:
     rows = []
     for n in sizes:
         s = build_system(n, include_nl=needs_nl)
+        if args.kernel == "full_potential":
+            s = build_full_potential_topology(s)
         xla_vg, pal_vg = maker(s, interpret)
         row = {"n_atoms": n, "k": s["k"]}
         out_x, c_x, t_x = time_fn(xla_vg, s["pos"], args.repeats)

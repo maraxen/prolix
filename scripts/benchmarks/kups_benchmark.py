@@ -71,8 +71,10 @@ from scripts.benchmarks.pallas_vs_baseline import (
     DENSITY,
     PME_ALPHA,
     SWITCH_WIDTH,
+    build_full_potential_topology,
     build_system,
     fit_exponent,
+    make_full_potential_fns,
     time_fn,
 )
 
@@ -601,6 +603,102 @@ def run_tier3_throughput(sizes: list[int], n_steps: int, repeats: int, interpret
     return rows, summary
 
 
+# =============================================================================
+# Tier 4: Full-Potential Propagator Throughput (Bonded + CMAP + 1-4 + NL + SPME)
+# =============================================================================
+
+
+def run_tier4_full_potential_throughput(
+    sizes: list[int], n_steps: int, repeats: int, interpret: bool
+) -> tuple[list[dict], dict]:
+    """Compare BAOAB lax.scan propagator throughput on the full molecular mechanics potential."""
+    jax.config.update("jax_enable_x64", False)
+    dt_fs = 2.0
+    dt_akma = kups_adapter.dt_fs_to_akma(dt_fs)
+    gamma_akma = kups_adapter.gamma_ps_to_akma(GAMMA_PS)
+    kT_kcal = T_TARGET_K * BOLTZMANN_KCAL
+    ns_per_step = dt_fs * 1e-6
+    steps_per_day_factor = 86400.0 * ns_per_step
+
+    rows = []
+    for n in sizes:
+        s = build_full_potential_topology(build_system(n, include_nl=True))
+        mass = jnp.full((n,), M_AMU, dtype=jnp.float32)
+        key = jax.random.PRNGKey(19)
+        mom0_akma = jax.random.normal(key, (n, 3), dtype=jnp.float32) * jnp.sqrt(
+            jnp.float32(M_AMU * kT_kcal)
+        )
+        box = s["box"]
+        xla_vg, pal_vg = make_full_potential_fns(s, interpret=interpret)
+
+        def make_scan_propagator(vg_fn):
+            def ef_fn(r):
+                pe, g = vg_fn(r)
+                return pe, -g
+
+            def scan_fn(pos_init, mom_init):
+                pe0, f0 = ef_fn(pos_init)
+
+                def body(carry, step_idx):
+                    p, m, f, pe = carry
+                    sub = jax.random.fold_in(key, step_idx)
+                    noise = jax.random.normal(sub, (n, 3), dtype=jnp.float32)
+                    p, m, f, pe = baoab_step_with_noise(
+                        p, m, f, pe, mass, dt_akma, gamma_akma, kT_kcal, noise, ef_fn, box=box
+                    )
+                    ke = 0.5 * jnp.sum((m * m) / mass[:, None])
+                    return (p, m, f, pe), (pe, ke)
+
+                (p_fin, m_fin, f_fin, pe_fin), (pes, kes) = jax.lax.scan(
+                    body, (pos_init, mom_init, f0, pe0), jnp.arange(n_steps)
+                )
+                return p_fin, pes, kes
+
+            return jax.jit(scan_fn)
+
+        row: dict = {"n_atoms": n, "k": int(s["k"]), "n_steps": n_steps}
+        outs = {}
+        for mode, vg_fn in (("prolix_full_xla", xla_vg), ("prolix_full_pallas", pal_vg)):
+            fn = make_scan_propagator(vg_fn)
+            t0 = time.perf_counter()
+            out = fn(s["pos"], mom0_akma)
+            jax.block_until_ready(out)
+            compile_s = time.perf_counter() - t0
+            times = []
+            for _ in range(repeats):
+                t0 = time.perf_counter()
+                jax.block_until_ready(fn(s["pos"], mom0_akma))
+                times.append(time.perf_counter() - t0)
+            med_total_s = statistics.median(times)
+            step_ms = (med_total_s / n_steps) * 1000.0
+            ns_per_day = (n_steps / med_total_s) * steps_per_day_factor
+            row[mode] = {
+                "compile_s": compile_s,
+                "scan_median_s": med_total_s,
+                "step_ms": step_ms,
+                "ns_per_day": ns_per_day,
+            }
+            outs[mode] = out
+
+        t_xla = row["prolix_full_xla"]["step_ms"]
+        t_pal = row["prolix_full_pallas"]["step_ms"]
+        row["prolix_full_pallas_vs_xla_speedup"] = t_xla / t_pal
+        xla_pes = np.asarray(outs["prolix_full_xla"][1])
+        pal_pes = np.asarray(outs["prolix_full_pallas"][1])
+        row["trajectory_rel_dE_full_pallas_vs_xla"] = float(
+            np.max(np.abs(pal_pes - xla_pes)) / max(float(np.max(np.abs(xla_pes))), 1e-12)
+        )
+        print(json.dumps({"tier": "4_full_potential_throughput", **row}), flush=True)
+        rows.append(row)
+
+    ns = [r["n_atoms"] for r in rows]
+    summary = {
+        "prolix_full_xla_time_exponent": fit_exponent(ns, [r["prolix_full_xla"]["step_ms"] for r in rows]),
+        "prolix_full_pallas_time_exponent": fit_exponent(ns, [r["prolix_full_pallas"]["step_ms"] for r in rows]),
+    }
+    return rows, summary
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--sizes", default="512,2048,8192,32768")
@@ -608,7 +706,7 @@ def main() -> None:
     ap.add_argument("--repeats", type=int, default=5)
     ap.add_argument("--n-equil", type=int, default=4000)
     ap.add_argument("--n-sample", type=int, default=6000)
-    ap.add_argument("--tier", choices=("1", "2", "3", "all"), default="all")
+    ap.add_argument("--tier", choices=("1", "2", "3", "4", "all"), default="all")
     ap.add_argument("--interpret", action="store_true")
     ap.add_argument("--out", default="outputs/bench/kups_benchmark.json")
     args = ap.parse_args()
@@ -637,6 +735,9 @@ def main() -> None:
     if args.tier in ("3", "all"):
         rows3, sum3 = run_tier3_throughput(sizes, args.n_steps, args.repeats, interpret)
         payload["tier3_throughput"] = {"rows": rows3, "summary": sum3}
+    if args.tier in ("4", "all"):
+        rows4, sum4 = run_tier4_full_potential_throughput(sizes, args.n_steps, args.repeats, interpret)
+        payload["tier4_full_potential_throughput"] = {"rows": rows4, "summary": sum4}
 
     out = Path(args.out)
     out.parent.mkdir(parents=True, exist_ok=True)

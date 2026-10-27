@@ -33,6 +33,20 @@ from prolix.physics.generalized_born import (
     compute_pair_integral,
 )
 from prolix.physics.neighbor_list import get_neighbor_exclusion_scales
+from prolix.physics.pallas_bonded import (
+    _min_image_1d,
+    _normalize_box,
+    pallas_angles_harmonic,
+    pallas_bonds_2body,
+    pallas_cmap_torsions,
+    pallas_exceptions_14,
+    pallas_pme_exclusion_pairs,
+    pallas_torsions_4body,
+)
+from prolix.physics.pallas_implicit import (
+    pallas_gb_ace_nl,
+    pallas_sasa_nl,
+)
 
 # =============================================================================
 # R1: Post-Equinox Kernel Configuration & Backend Resolution
@@ -672,11 +686,11 @@ def _pallas_nonbonded_nl_single(
     excl_scales_vdw: jax.Array,
     excl_scales_elec: jax.Array,
     box: jax.Array,
+    lam_arr: jax.Array,
     has_box: bool,
     pme_alpha: float,
     cutoff: float,
     lj_switch_width: float,
-    soft_core_lambda: float,
     include_pme_excl_erf: bool,
     interpret: bool,
 ) -> tuple[jax.Array, jax.Array]:
@@ -694,6 +708,8 @@ def _pallas_nonbonded_nl_single(
     pad_k = K_pad - K
 
     pad_m = max(0, _NB_MAX_EXCL - M)
+    pad_n_excl = N_pad - excl_indices.shape[0]
+    pad_n_nbr = N_pad - neighbor_idx.shape[0]
 
     if pad_n > 0:
         pos_pad = jnp.pad(positions, ((0, pad_n), (0, 0)))
@@ -711,14 +727,14 @@ def _pallas_nonbonded_nl_single(
     excl_idx_pad = excl_indices[:, :_NB_MAX_EXCL].astype(jnp.int32)
     excl_vdw_pad = excl_scales_vdw[:, :_NB_MAX_EXCL].astype(dtype)
     excl_elec_pad = excl_scales_elec[:, :_NB_MAX_EXCL].astype(dtype)
-    if pad_n > 0 or pad_m > 0:
-        excl_idx_pad = jnp.pad(excl_idx_pad, ((0, pad_n), (0, pad_m)), constant_values=-1)
-        excl_vdw_pad = jnp.pad(excl_vdw_pad, ((0, pad_n), (0, pad_m)), constant_values=1.0)
-        excl_elec_pad = jnp.pad(excl_elec_pad, ((0, pad_n), (0, pad_m)), constant_values=1.0)
+    if pad_n_excl > 0 or pad_m > 0:
+        excl_idx_pad = jnp.pad(excl_idx_pad, ((0, pad_n_excl), (0, pad_m)), constant_values=-1)
+        excl_vdw_pad = jnp.pad(excl_vdw_pad, ((0, pad_n_excl), (0, pad_m)), constant_values=1.0)
+        excl_elec_pad = jnp.pad(excl_elec_pad, ((0, pad_n_excl), (0, pad_m)), constant_values=1.0)
 
     nbr_pad = neighbor_idx.astype(jnp.int32)
-    if pad_n > 0 or pad_k > 0:
-        nbr_pad = jnp.pad(nbr_pad, ((0, pad_n), (0, pad_k)), constant_values=N)
+    if pad_n_nbr > 0 or pad_k > 0:
+        nbr_pad = jnp.pad(nbr_pad, ((0, pad_n_nbr), (0, pad_k)), constant_values=N)
 
     pos_x = jnp.asarray(pos_pad[:, 0])
     pos_y = jnp.asarray(pos_pad[:, 1])
@@ -728,6 +744,7 @@ def _pallas_nonbonded_nl_single(
     excl_vdw_flat = jnp.asarray(excl_vdw_pad.reshape(N_pad * _NB_MAX_EXCL))
     excl_elec_flat = jnp.asarray(excl_elec_pad.reshape(N_pad * _NB_MAX_EXCL))
     box_vec = jnp.asarray(box.astype(dtype))
+    lam_vec = jnp.asarray(lam_arr.reshape((1,)).astype(dtype))
 
     def _nb_nl_kernel(
         px_ref,
@@ -742,6 +759,7 @@ def _pallas_nonbonded_nl_single(
         excl_vdw_flat_ref,
         excl_elec_flat_ref,
         box_ref,
+        lam_ref,
         e_out_ref,
         fx_out_ref,
         fy_out_ref,
@@ -772,14 +790,20 @@ def _pallas_nonbonded_nl_single(
         excl_elec_i = _pl_load(excl_elec_flat_ref, (flat_excl_offs,)).reshape(
             _NB_BLOCK_N, _NB_MAX_EXCL
         )
-        valid_excl_i = excl_idx_i >= 0
+        valid_excl_i = (excl_idx_i >= 0) & (excl_idx_i < N)
 
         bx = _pl_load(box_ref, (jnp.zeros((1,), dtype=jnp.int32),))[0]
         by = _pl_load(box_ref, (jnp.ones((1,), dtype=jnp.int32),))[0]
         bz = _pl_load(box_ref, (jnp.full((1,), 2, dtype=jnp.int32),))[0]
 
-        lam = jnp.asarray(soft_core_lambda, dtype=dtype)
-        soft_alpha_lj = jnp.asarray(0.5, dtype=dtype) * (jnp.asarray(1.0, dtype=dtype) - lam)
+        zero_sc = jnp.asarray(0.0, dtype=dtype)
+        one_sc = jnp.asarray(1.0, dtype=dtype)
+        lam = _pl_load(lam_ref, (jnp.zeros((1,), dtype=jnp.int32),))[0]
+        soft_alpha_lj = jnp.asarray(0.5, dtype=dtype) * jnp.where(
+            lam < one_sc,
+            jnp.maximum(one_sc - lam, jnp.asarray(1e-8, dtype=dtype)),
+            zero_sc,
+        )
         coul_const = jnp.asarray(constants.COULOMB_CONSTANT, dtype=dtype)
         alpha_val = jnp.asarray(pme_alpha, dtype=dtype)
         two_over_sqrt_pi = jnp.asarray(1.1283791670955126, dtype=dtype)
@@ -810,14 +834,9 @@ def _pallas_nonbonded_nl_single(
                 & (j_idx != offs_i[:, None])
             )
 
-            dx = px_i[:, None] - px_j
-            dy = py_i[:, None] - py_j
-            dz = pz_i[:, None] - pz_j
-            if has_box:
-                half = jnp.asarray(0.5, dtype=dtype)
-                dx = dx - bx * jnp.floor(dx / bx + half)
-                dy = dy - by * jnp.floor(dy / by + half)
-                dz = dz - bz * jnp.floor(dz / bz + half)
+            dx = _min_image_1d(px_i[:, None] - px_j, bx, has_box)
+            dy = _min_image_1d(py_i[:, None] - py_j, by, has_box)
+            dz = _min_image_1d(pz_i[:, None] - pz_j, bz, has_box)
 
             r_sq = dx * dx + dy * dy + dz * dz + jnp.asarray(1e-12, dtype=dtype)
             dist = jnp.sqrt(r_sq)
@@ -869,22 +888,24 @@ def _pallas_nonbonded_nl_single(
                 alpha_r = alpha_val * dist
                 exp_term = jnp.exp(zero - (alpha_r * alpha_r))
                 if include_pme_excl_erf:
-                    eff_w = w_elec - _triton_erf(alpha_r)
+                    erf_v = erf(alpha_r) if (interpret and dtype == jnp.float64) else _triton_erf(alpha_r)
+                    eff_w = w_elec - erf_v
                     e_coul = qq * eff_w / dist
                     de_coul_dr = qq * (
                         (zero - eff_w) / r_sq
                         - (alpha_val * two_over_sqrt_pi * exp_term) / dist
                     )
                 else:
-                    erfc_val = _triton_erfc(alpha_r)
+                    erfc_val = erfc(alpha_r) if (interpret and dtype == jnp.float64) else _triton_erfc(alpha_r)
                     e_coul = qq * w_elec * erfc_val / dist
                     de_coul_dr = qq * w_elec * (
                         (zero - erfc_val) / r_sq
                         - (alpha_val * two_over_sqrt_pi * exp_term) / dist
                     )
             else:
-                e_coul = qq * w_elec / dist
-                de_coul_dr = (zero - qq) * w_elec / r_sq
+                valid_coul = dist >= jnp.asarray(1e-4, dtype=dtype)
+                e_coul = jnp.where(valid_coul, qq * w_elec / dist, zero)
+                de_coul_dr = jnp.where(valid_coul, (zero - qq) * w_elec / r_sq, zero)
 
             e_pair = jnp.where(active, e_lj + e_coul, zero)
             # Force F_i = -grad_{r_i} E = - sum_j (de_pair / dr_ij) * (r_i - r_j) / r_ij
@@ -908,7 +929,7 @@ def _pallas_nonbonded_nl_single(
         _pl_store(fy_out_ref, (offs_i,), fy_blk)
         _pl_store(fz_out_ref, (offs_i,), fz_blk)
 
-    in_specs = [pl.BlockSpec(memory_space=pl.ANY) for _ in range(12)]
+    in_specs = [pl.BlockSpec(memory_space=pl.ANY) for _ in range(13)]
     out_specs = [pl.BlockSpec(memory_space=pl.ANY) for _ in range(4)]
     out_shapes = [jax.ShapeDtypeStruct((N_pad,), dtype) for _ in range(4)]
 
@@ -934,6 +955,7 @@ def _pallas_nonbonded_nl_single(
         excl_vdw_flat,
         excl_elec_flat,
         box_vec,
+        lam_vec,
     )
     forces = jnp.stack([fx_pad[:N], fy_pad[:N], fz_pad[:N]], axis=-1)
     return jnp.sum(e_pad[:N]), forces
@@ -950,11 +972,11 @@ def _pallas_nonbonded_nl_vmappable(
     excl_scales_vdw: jax.Array,
     excl_scales_elec: jax.Array,
     box: jax.Array,
+    lam_arr: jax.Array,
     has_box: bool,
     pme_alpha: float,
     cutoff: float,
     lj_switch_width: float,
-    soft_core_lambda: float,
     include_pme_excl_erf: bool,
     interpret: bool,
 ) -> tuple[jax.Array, jax.Array]:
@@ -962,12 +984,11 @@ def _pallas_nonbonded_nl_vmappable(
     pa = float(pme_alpha)
     co = float(cutoff)
     sw = float(lj_switch_width)
-    lam = float(soft_core_lambda)
     inc_erf = bool(include_pme_excl_erf)
     interp = bool(interpret)
 
     @jax.custom_batching.custom_vmap
-    def _vmappable(pos, q, sig, eps, mask, nbr, ei, ev, ee, bx):
+    def _vmappable(pos, q, sig, eps, mask, nbr, ei, ev, ee, bx, lam):
         return _pallas_nonbonded_nl_single(
             pos,
             q,
@@ -979,17 +1000,17 @@ def _pallas_nonbonded_nl_vmappable(
             ev,
             ee,
             bx,
+            lam,
             hb,
             pa,
             co,
             sw,
-            lam,
             inc_erf,
             interp,
         )
 
     @_vmappable.def_vmap
-    def _vmap_rule(axis_size, in_batched, pos, q, sig, eps, mask, nbr, ei, ev, ee, bx):
+    def _vmap_rule(axis_size, in_batched, pos, q, sig, eps, mask, nbr, ei, ev, ee, bx, lam):
         def _step(b_idx):
             return _vmappable(
                 pos[b_idx] if in_batched[0] else pos,
@@ -1002,6 +1023,7 @@ def _pallas_nonbonded_nl_vmappable(
                 ev[b_idx] if in_batched[7] else ev,
                 ee[b_idx] if in_batched[8] else ee,
                 bx[b_idx] if in_batched[9] else bx,
+                lam[b_idx] if in_batched[10] else lam,
             )
 
         e_batch, f_batch = jax.lax.map(_step, jnp.arange(axis_size))
@@ -1018,6 +1040,7 @@ def _pallas_nonbonded_nl_vmappable(
         excl_scales_vdw,
         excl_scales_elec,
         box,
+        lam_arr,
     )
 
 
@@ -1032,99 +1055,173 @@ def _nonbonded_nl_param_grads(
     excl_scales_vdw: jax.Array,
     excl_scales_elec: jax.Array,
     box: jax.Array,
+    lam_arr: jax.Array,
     has_box: bool,
     pme_alpha: float,
     cutoff: float,
     lj_switch_width: float,
-    soft_core_lambda: float,
     include_pme_excl_erf: bool,
-) -> tuple[jax.Array, jax.Array, jax.Array]:
-    """Analytical parameter gradients (grad_q, grad_sigma, grad_eps) over (N, K)."""
-
-    N = positions.shape[0]
+) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array, jax.Array, jax.Array]:
+    """Chunked O(chunk_size*K) analytical parameter gradients (grad_q, grad_sig, grad_eps, grad_excl_vdw, grad_excl_elec, grad_lam)."""
+    N, K = neighbor_idx.shape
+    M_excl = excl_indices.shape[1]
     dtype = positions.dtype
-    safe_j = jnp.clip(neighbor_idx, 0, N - 1)
-    r_i = positions[:, None, :]
-    r_j = positions[safe_j]
-    dr = r_i - r_j
-    if has_box:
-        dr = dr - box[None, None, :] * jnp.floor(
-            dr / box[None, None, :] + jnp.asarray(0.5, dtype=dtype)
+    zero = jnp.asarray(0.0, dtype=dtype)
+    one = jnp.asarray(1.0, dtype=dtype)
+    half = jnp.asarray(0.5, dtype=dtype)
+
+    if N == 0 or K == 0:
+        return (
+            jnp.zeros_like(charges),
+            jnp.zeros_like(sigmas),
+            jnp.zeros_like(epsilons),
+            jnp.zeros_like(excl_scales_vdw),
+            jnp.zeros_like(excl_scales_elec),
+            jnp.zeros_like(lam_arr),
         )
-    r_sq = jnp.sum(dr ** 2, axis=-1) + jnp.asarray(1e-12, dtype=dtype)
-    dist = jnp.sqrt(r_sq)
 
-    i_idx = jnp.arange(N, dtype=jnp.int32)[:, None]
-    active = (
-        atom_mask[:, None]
-        & atom_mask[safe_j]
-        & (neighbor_idx >= 0)
-        & (neighbor_idx < N)
-        & (neighbor_idx != i_idx)
-        & (dist < jnp.asarray(cutoff, dtype=dtype))
-    )
+    chunk_size = min(max(((N + 31) // 32) * 32, 32), 256)
+    n_chunks = (N + chunk_size - 1) // chunk_size
+    N_pad = n_chunks * chunk_size
+    pad_n = N_pad - N
+    pad_n_excl = N_pad - excl_indices.shape[0]
+    pad_n_nbr = N_pad - neighbor_idx.shape[0]
 
-    w_vdw, w_elec = get_neighbor_exclusion_scales(
-        excl_indices, excl_scales_vdw, excl_scales_elec, neighbor_idx
-    )
-    w_vdw = w_vdw.astype(dtype)
-    w_elec = w_elec.astype(dtype)
+    pos_pad = jnp.pad(positions, ((0, pad_n), (0, 0))) if pad_n > 0 else positions
+    q_pad = jnp.pad(charges.astype(dtype), (0, pad_n)) if pad_n > 0 else charges.astype(dtype)
+    sig_pad = jnp.pad(sigmas.astype(dtype), (0, pad_n), constant_values=1.0) if pad_n > 0 else sigmas.astype(dtype)
+    eps_pad = jnp.pad(epsilons.astype(dtype), (0, pad_n)) if pad_n > 0 else epsilons.astype(dtype)
+    mask_pad = jnp.pad(jnp.asarray(atom_mask, dtype=jnp.bool_), (0, pad_n), constant_values=False) if pad_n > 0 else jnp.asarray(atom_mask, dtype=jnp.bool_)
+    nbr_pad = jnp.pad(neighbor_idx.astype(jnp.int32), ((0, pad_n_nbr), (0, 0)), constant_values=N) if pad_n_nbr > 0 else neighbor_idx.astype(jnp.int32)
+    ei_pad = jnp.pad(excl_indices.astype(jnp.int32), ((0, pad_n_excl), (0, 0)), constant_values=-1) if pad_n_excl > 0 else excl_indices.astype(jnp.int32)
+    ev_pad = jnp.pad(excl_scales_vdw.astype(dtype), ((0, pad_n_excl), (0, 0)), constant_values=1.0) if pad_n_excl > 0 else excl_scales_vdw.astype(dtype)
+    ee_pad = jnp.pad(excl_scales_elec.astype(dtype), ((0, pad_n_excl), (0, 0)), constant_values=1.0) if pad_n_excl > 0 else excl_scales_elec.astype(dtype)
 
-    sig_ij = jnp.asarray(0.5, dtype=dtype) * (sigmas[:, None] + sigmas[safe_j])
-    sig_safe = jnp.where(active, jnp.maximum(sig_ij, jnp.asarray(1e-4, dtype=dtype)), jnp.asarray(1.0, dtype=dtype))
-    eps_ij = jnp.sqrt(jnp.maximum(epsilons[:, None] * epsilons[safe_j], jnp.asarray(0.0, dtype=dtype)) + jnp.asarray(1e-30, dtype=dtype))
-
-    lam = jnp.asarray(soft_core_lambda, dtype=dtype)
-    soft_alpha_lj = jnp.asarray(0.5, dtype=dtype) * (jnp.asarray(1.0, dtype=dtype) - lam)
-    u = dist / sig_safe
-    u6 = u ** 6
-    x_inv6 = jnp.asarray(1.0, dtype=dtype) / jnp.maximum(soft_alpha_lj + u6, jnp.asarray(1e-6, dtype=dtype))
-    s_w, _ = _lj_switch_weight_and_deriv(dist, cutoff, lj_switch_width)
-
-    # dE_LJ / d(sigma_i):
-    # de_ij / ds_ij = 24 * eps_ij * lam * (2 * x_inv6 - 1) * x_inv6^2 * u^6 / s_ij
-    # ds_ij / d(sigma_i) = 1/2, and summing row i + col i cancels 1/2 from total energy!
-    de_ds_ij = (
-        jnp.asarray(24.0, dtype=dtype)
-        * eps_ij
-        * lam
-        * (jnp.asarray(2.0, dtype=dtype) * x_inv6 - jnp.asarray(1.0, dtype=dtype))
-        * (x_inv6 * x_inv6)
-        * u6
-        / sig_safe
-    )
-    grad_sig = jnp.sum(
-        jnp.where(active, jnp.asarray(0.5, dtype=dtype) * w_vdw * s_w * de_ds_ij, jnp.asarray(0.0, dtype=dtype)),
-        axis=1,
-    )
-
-    # dE_LJ / d(eps_i):
-    # e_ij = 4 * eps_ij * lam * (x_inv6^2 - x_inv6), d(eps_ij)/d(eps_i) = 0.5 * eps_j / eps_ij
-    v_shape = jnp.asarray(4.0, dtype=dtype) * lam * (x_inv6 * x_inv6 - x_inv6)
-    deps_ij_depsi = jnp.asarray(0.5, dtype=dtype) * epsilons[safe_j] / jnp.maximum(eps_ij, jnp.asarray(1e-15, dtype=dtype))
-    grad_eps = jnp.sum(
-        jnp.where(active, w_vdw * s_w * v_shape * deps_ij_depsi, jnp.asarray(0.0, dtype=dtype)),
-        axis=1,
-    )
-
-    # dE_coul / d(q_i):
+    lam = lam_arr.reshape(())
+    soft_alpha_lj = half * jnp.where(lam < one, jnp.maximum(one - lam, jnp.asarray(1e-8, dtype=dtype)), zero)
     coul_const = jnp.asarray(constants.COULOMB_CONSTANT, dtype=dtype)
     alpha_val = jnp.asarray(pme_alpha, dtype=dtype)
-    if pme_alpha > 0.0:
-        if include_pme_excl_erf:
-            coul_kernel = (w_elec - erf(alpha_val * dist)) / dist
+
+    def _chunk_fn(carry_lam, c_idx):
+        i_start = jnp.int32(c_idx * chunk_size)
+        z_i32 = jnp.int32(0)
+        i_offs = i_start + jnp.arange(chunk_size, dtype=jnp.int32)
+        pos_i = jax.lax.dynamic_slice(pos_pad, (i_start, z_i32), (chunk_size, 3))
+        q_i = jax.lax.dynamic_slice(q_pad, (i_start,), (chunk_size,))
+        sig_i = jax.lax.dynamic_slice(sig_pad, (i_start,), (chunk_size,))
+        eps_i = jax.lax.dynamic_slice(eps_pad, (i_start,), (chunk_size,))
+        mask_i = jax.lax.dynamic_slice(mask_pad, (i_start,), (chunk_size,)) & (i_offs < N)
+        nbr_i = jax.lax.dynamic_slice(nbr_pad, (i_start, z_i32), (chunk_size, K))
+        ei_i = jax.lax.dynamic_slice(ei_pad, (i_start, z_i32), (chunk_size, M_excl))
+        ev_i = jax.lax.dynamic_slice(ev_pad, (i_start, z_i32), (chunk_size, M_excl))
+        ee_i = jax.lax.dynamic_slice(ee_pad, (i_start, z_i32), (chunk_size, M_excl))
+
+        safe_j = jnp.clip(nbr_i, 0, max(N - 1, 0))
+        dr = pos_i[:, None, :] - pos_pad[safe_j]
+        if has_box:
+            b = box[None, None, :]
+            b_safe = jnp.where(b > zero, b, one)
+            dr = jnp.where(b > zero, dr - b * jnp.floor(dr / b_safe + half), dr)
+
+        r_sq = jnp.sum(dr * dr, axis=-1) + jnp.asarray(1e-12, dtype=dtype)
+        dist = jnp.sqrt(r_sq)
+        active = (
+            mask_i[:, None]
+            & mask_pad[safe_j]
+            & (nbr_i >= 0)
+            & (nbr_i < N)
+            & (nbr_i != i_offs[:, None])
+            & (dist < jnp.asarray(cutoff, dtype=dtype))
+        )
+
+        if M_excl > 0:
+            matches = (nbr_i[:, :, None] == ei_i[:, None, :]) & (ei_i[:, None, :] >= 0)
+            any_match = jnp.any(matches, axis=2)
+            w_vdw = jnp.where(any_match, jnp.sum(jnp.where(matches, ev_i[:, None, :], zero), axis=2), one)
+            w_elec = jnp.where(any_match, jnp.sum(jnp.where(matches, ee_i[:, None, :], zero), axis=2), one)
         else:
-            coul_kernel = (w_elec * erfc(alpha_val * dist)) / dist
-    else:
-        coul_kernel = w_elec / dist
-    grad_q = jnp.sum(
-        jnp.where(active, coul_const * charges[safe_j] * coul_kernel, jnp.asarray(0.0, dtype=dtype)),
-        axis=1,
+            matches = jnp.zeros((chunk_size, K, 0), dtype=jnp.bool_)
+            w_vdw = jnp.ones((chunk_size, K), dtype=dtype)
+            w_elec = jnp.ones((chunk_size, K), dtype=dtype)
+
+        sig_ij = half * (sig_i[:, None] + sig_pad[safe_j])
+        sig_safe = jnp.where(active, jnp.maximum(sig_ij, jnp.asarray(1e-4, dtype=dtype)), one)
+        eps_ij = jnp.sqrt(jnp.maximum(eps_i[:, None] * eps_pad[safe_j], zero) + jnp.asarray(1e-30, dtype=dtype))
+
+        u = dist / sig_safe
+        u6 = u ** 6
+        denom_lj = jnp.maximum(soft_alpha_lj + u6, jnp.asarray(1e-6, dtype=dtype))
+        x_inv6 = one / denom_lj
+        s_w, _ = _lj_switch_weight_and_deriv(dist, cutoff, lj_switch_width)
+
+        v_unsw = jnp.asarray(4.0, dtype=dtype) * eps_ij * lam * (x_inv6 * x_inv6 - x_inv6)
+        e_lj_unweighted = v_unsw * s_w
+
+        de_ds_ij = (
+            jnp.asarray(24.0, dtype=dtype)
+            * eps_ij
+            * lam
+            * (jnp.asarray(2.0, dtype=dtype) * x_inv6 - one)
+            * (x_inv6 * x_inv6)
+            * u6
+            / sig_safe
+        )
+        grad_sig_i = jnp.sum(jnp.where(active, half * w_vdw * s_w * de_ds_ij, zero), axis=1)
+
+        v_shape = jnp.asarray(4.0, dtype=dtype) * lam * (x_inv6 * x_inv6 - x_inv6)
+        deps_ij_depsi = half * eps_pad[safe_j] / jnp.maximum(eps_ij, jnp.asarray(1e-15, dtype=dtype))
+        grad_eps_i = jnp.sum(jnp.where(active, w_vdw * s_w * v_shape * deps_ij_depsi, zero), axis=1)
+
+        # dE_LJ / d(lam)
+        dalpha_dlam = jnp.where((lam < one) & ((one - lam) > jnp.asarray(1e-8, dtype=dtype)), -half, zero)
+        dv_dlam = jnp.asarray(4.0, dtype=dtype) * eps_ij * (
+            (x_inv6 * x_inv6 - x_inv6)
+            + lam * (jnp.asarray(2.0, dtype=dtype) * x_inv6 - one) * (-(x_inv6 * x_inv6) * dalpha_dlam)
+        )
+        dlam_chunk = jnp.sum(jnp.where(active, half * w_vdw * s_w * dv_dlam, zero))
+
+        q_j = q_pad[safe_j]
+        if pme_alpha > 0.0:
+            if include_pme_excl_erf:
+                coul_kernel = (w_elec - erf(alpha_val * dist)) / dist
+                dcoul_dw_elec = one / dist
+            else:
+                erfc_v = erfc(alpha_val * dist)
+                coul_kernel = (w_elec * erfc_v) / dist
+                dcoul_dw_elec = erfc_v / dist
+        else:
+            valid_coul = dist >= jnp.asarray(1e-4, dtype=dtype)
+            coul_kernel = jnp.where(valid_coul, w_elec / dist, zero)
+            dcoul_dw_elec = jnp.where(valid_coul, one / dist, zero)
+
+        grad_q_i = jnp.sum(jnp.where(active, coul_const * q_j * coul_kernel, zero), axis=1)
+
+        if M_excl > 0:
+            de_dw_vdw = jnp.where(active, half * e_lj_unweighted, zero)
+            de_dw_elec = jnp.where(active, half * coul_const * q_i[:, None] * q_j * dcoul_dw_elec, zero)
+            grad_ev_i = jnp.sum(jnp.where(matches, de_dw_vdw[:, :, None], zero), axis=1)
+            grad_ee_i = jnp.sum(jnp.where(matches, de_dw_elec[:, :, None], zero), axis=1)
+        else:
+            grad_ev_i = jnp.zeros((chunk_size, 0), dtype=dtype)
+            grad_ee_i = jnp.zeros((chunk_size, 0), dtype=dtype)
+
+        return carry_lam + dlam_chunk, (grad_q_i, grad_sig_i, grad_eps_i, grad_ev_i, grad_ee_i)
+
+    grad_lam_tot, (gq_c, gs_c, ge_c, gev_c, gee_c) = jax.lax.scan(
+        _chunk_fn, zero, jnp.arange(n_chunks, dtype=jnp.int32)
     )
-    return grad_q, grad_sig, grad_eps
+    n_excl_orig = excl_indices.shape[0]
+    return (
+        gq_c.reshape(N_pad)[:N].astype(charges.dtype),
+        gs_c.reshape(N_pad)[:N].astype(sigmas.dtype),
+        ge_c.reshape(N_pad)[:N].astype(epsilons.dtype),
+        gev_c.reshape(N_pad, M_excl)[:n_excl_orig].astype(excl_scales_vdw.dtype),
+        gee_c.reshape(N_pad, M_excl)[:n_excl_orig].astype(excl_scales_elec.dtype),
+        grad_lam_tot.reshape(lam_arr.shape).astype(lam_arr.dtype),
+    )
 
 
-@functools.partial(custom_vjp, nondiff_argnums=(10, 11, 12, 13, 14, 15, 16))
+@functools.partial(custom_vjp, nondiff_argnums=(11, 12, 13, 14, 15, 16))
 def _pallas_nonbonded_nl_diff(
     positions: jax.Array,
     charges: jax.Array,
@@ -1136,11 +1233,11 @@ def _pallas_nonbonded_nl_diff(
     excl_scales_vdw: jax.Array,
     excl_scales_elec: jax.Array,
     box: jax.Array,
+    lam_arr: jax.Array,
     has_box: bool,
     pme_alpha: float,
     cutoff: float,
     lj_switch_width: float,
-    soft_core_lambda: float,
     include_pme_excl_erf: bool,
     interpret: bool,
 ) -> jax.Array:
@@ -1155,11 +1252,11 @@ def _pallas_nonbonded_nl_diff(
         excl_scales_vdw,
         excl_scales_elec,
         box,
+        lam_arr,
         has_box,
         pme_alpha,
         cutoff,
         lj_switch_width,
-        soft_core_lambda,
         include_pme_excl_erf,
         interpret,
     )
@@ -1177,11 +1274,11 @@ def _pallas_nonbonded_nl_fwd(
     excl_scales_vdw,
     excl_scales_elec,
     box,
+    lam_arr,
     has_box,
     pme_alpha,
     cutoff,
     lj_switch_width,
-    soft_core_lambda,
     include_pme_excl_erf,
     interpret,
 ):
@@ -1196,11 +1293,11 @@ def _pallas_nonbonded_nl_fwd(
         excl_scales_vdw,
         excl_scales_elec,
         box,
+        lam_arr,
         has_box,
         pme_alpha,
         cutoff,
         lj_switch_width,
-        soft_core_lambda,
         include_pme_excl_erf,
         interpret,
     )
@@ -1216,6 +1313,7 @@ def _pallas_nonbonded_nl_fwd(
         excl_scales_vdw,
         excl_scales_elec,
         box,
+        lam_arr,
     )
     return energy, res
 
@@ -1225,12 +1323,12 @@ def _pallas_nonbonded_nl_bwd(
     pme_alpha,
     cutoff,
     lj_switch_width,
-    soft_core_lambda,
     include_pme_excl_erf,
     interpret,
     res,
     g,
 ):
+    del interpret
     (
         forces,
         positions,
@@ -1243,11 +1341,12 @@ def _pallas_nonbonded_nl_bwd(
         excl_scales_vdw,
         excl_scales_elec,
         box,
+        lam_arr,
     ) = res
     grad_pos = -g[..., None, None] * forces if g.ndim > 0 else -g * forces
 
     if positions.ndim == 2:
-        grad_q, grad_sig, grad_eps = _nonbonded_nl_param_grads(
+        gq, gs, ge, gev, gee, glam = _nonbonded_nl_param_grads(
             positions,
             charges,
             sigmas,
@@ -1258,29 +1357,68 @@ def _pallas_nonbonded_nl_bwd(
             excl_scales_vdw,
             excl_scales_elec,
             box,
+            lam_arr,
             has_box,
             pme_alpha,
             cutoff,
             lj_switch_width,
-            soft_core_lambda,
             include_pme_excl_erf,
         )
-        grad_q = g * grad_q
-        grad_sig = g * grad_sig
-        grad_eps = g * grad_eps
+        grad_q = (g * gq).astype(charges.dtype)
+        grad_sig = (g * gs).astype(sigmas.dtype)
+        grad_eps = (g * ge).astype(epsilons.dtype)
+        grad_ev = (g * gev).astype(excl_scales_vdw.dtype)
+        grad_ee = (g * gee).astype(excl_scales_elec.dtype)
+        grad_lam = (g * glam).astype(lam_arr.dtype)
     else:
-        grad_q, grad_sig, grad_eps = jax.vmap(
-            lambda p, q, s, e, m, nb, ei, ev, ee, b, g_i: tuple(
-                g_i * x
-                for x in _nonbonded_nl_param_grads(
-                    p, q, s, e, m, nb, ei, ev, ee, b,
-                    has_box, pme_alpha, cutoff, lj_switch_width, soft_core_lambda, include_pme_excl_erf
-                )
+        B = positions.shape[0]
+        b_q = charges.ndim > 1
+        b_sig = sigmas.ndim > 1
+        b_eps = epsilons.ndim > 1
+        b_msk = atom_mask.ndim > 1
+        b_nbr = neighbor_idx.ndim > 2
+        b_ei = excl_indices.ndim > 2
+        b_ev = excl_scales_vdw.ndim > 2
+        b_ee = excl_scales_elec.ndim > 2
+        b_box = box.ndim > 1
+        b_lam = lam_arr.ndim > 1
+
+        def _step(b):
+            gq_b, gs_b, ge_b, gev_b, gee_b, glam_b = _nonbonded_nl_param_grads(
+                positions[b],
+                charges[b] if b_q else charges,
+                sigmas[b] if b_sig else sigmas,
+                epsilons[b] if b_eps else epsilons,
+                atom_mask[b] if b_msk else atom_mask,
+                neighbor_idx[b] if b_nbr else neighbor_idx,
+                excl_indices[b] if b_ei else excl_indices,
+                excl_scales_vdw[b] if b_ev else excl_scales_vdw,
+                excl_scales_elec[b] if b_ee else excl_scales_elec,
+                box[b] if b_box else box,
+                lam_arr[b] if b_lam else lam_arr,
+                has_box,
+                pme_alpha,
+                cutoff,
+                lj_switch_width,
+                include_pme_excl_erf,
             )
-        )(
-            positions, charges, sigmas, epsilons, atom_mask, neighbor_idx,
-            excl_indices, excl_scales_vdw, excl_scales_elec, box, g
-        )
+            g_b = g[b] if g.ndim > 0 else g
+            return (
+                (g_b * gq_b).astype(charges.dtype),
+                (g_b * gs_b).astype(sigmas.dtype),
+                (g_b * ge_b).astype(epsilons.dtype),
+                (g_b * gev_b).astype(excl_scales_vdw.dtype),
+                (g_b * gee_b).astype(excl_scales_elec.dtype),
+                (g_b * glam_b).astype(lam_arr.dtype),
+            )
+
+        gq_all, gs_all, ge_all, gev_all, gee_all, glam_all = jax.lax.map(_step, jnp.arange(B))
+        grad_q = gq_all if b_q else jnp.sum(gq_all, axis=0)
+        grad_sig = gs_all if b_sig else jnp.sum(gs_all, axis=0)
+        grad_eps = ge_all if b_eps else jnp.sum(ge_all, axis=0)
+        grad_ev = gev_all if b_ev else jnp.sum(gev_all, axis=0)
+        grad_ee = gee_all if b_ee else jnp.sum(gee_all, axis=0)
+        grad_lam = glam_all if b_lam else jnp.sum(glam_all, axis=0)
 
     return (
         grad_pos,
@@ -1290,16 +1428,17 @@ def _pallas_nonbonded_nl_bwd(
         jnp.zeros_like(atom_mask),
         jnp.zeros_like(neighbor_idx),
         jnp.zeros_like(excl_indices),
-        jnp.zeros_like(excl_scales_vdw),
-        jnp.zeros_like(excl_scales_elec),
+        grad_ev,
+        grad_ee,
         jnp.zeros_like(box),
+        grad_lam,
     )
 
 
 _pallas_nonbonded_nl_diff.defvjp(_pallas_nonbonded_nl_fwd, _pallas_nonbonded_nl_bwd)
 
 
-def pallas_nonbonded_nl(
+def _export_nonbonded_nl_one(
     positions: jax.Array,
     charges: jax.Array,
     sigmas: jax.Array,
@@ -1309,42 +1448,202 @@ def pallas_nonbonded_nl(
     excl_indices: jax.Array,
     excl_scales_vdw: jax.Array,
     excl_scales_elec: jax.Array,
+    box: jax.Array,
+    lam: jax.Array,
+    has_box: bool,
+    pme_alpha: float,
+    cutoff: float,
+    lj_switch_width: float,
+    include_pme_excl_erf: bool,
+) -> jax.Array:
+    """Portable XLA fallback for pallas_nonbonded_nl under export_context()."""
+    N, K = neighbor_idx.shape
+    dtype = positions.dtype
+    zero = jnp.asarray(0.0, dtype=dtype)
+    one = jnp.asarray(1.0, dtype=dtype)
+    half = jnp.asarray(0.5, dtype=dtype)
+    if N == 0 or K == 0:
+        return zero
+
+    safe_j = jnp.clip(neighbor_idx, 0, max(N - 1, 0))
+    dr = positions[:, None, :] - positions[safe_j]
+    if has_box:
+        b = box[None, None, :]
+        b_safe = jnp.where(b > zero, b, one)
+        dr = jnp.where(b > zero, dr - b * jnp.floor(dr / b_safe + half), dr)
+
+    dist = jnp.sqrt(jnp.sum(dr * dr, axis=-1) + jnp.asarray(1e-12, dtype=dtype))
+    m_bool = jnp.asarray(atom_mask, dtype=jnp.bool_)
+    active = (
+        m_bool[:, None]
+        & m_bool[safe_j]
+        & (neighbor_idx >= 0)
+        & (neighbor_idx < N)
+        & (neighbor_idx != jnp.arange(N, dtype=jnp.int32)[:, None])
+        & (dist < jnp.asarray(cutoff, dtype=dtype))
+    )
+    w_vdw, w_elec = get_neighbor_exclusion_scales(
+        excl_indices, excl_scales_vdw, excl_scales_elec, neighbor_idx
+    )
+    w_vdw = w_vdw.astype(dtype)
+    w_elec = w_elec.astype(dtype)
+
+    sig_ij = half * (sigmas[:, None] + sigmas[safe_j])
+    sig_safe = jnp.where(active, jnp.maximum(sig_ij, jnp.asarray(1e-4, dtype=dtype)), one)
+    eps_ij = jnp.sqrt(jnp.maximum(epsilons[:, None] * epsilons[safe_j], zero) + jnp.asarray(1e-30, dtype=dtype))
+    lam_val = lam.reshape(())
+    soft_alpha_lj = half * jnp.where(lam_val < one, jnp.maximum(one - lam_val, jnp.asarray(1e-8, dtype=dtype)), zero)
+    u6 = (dist / sig_safe) ** 6
+    x_inv6 = one / jnp.maximum(soft_alpha_lj + u6, jnp.asarray(1e-6, dtype=dtype))
+    s_w, _ = _lj_switch_weight_and_deriv(dist, cutoff, lj_switch_width)
+    e_lj = w_vdw * jnp.asarray(4.0, dtype=dtype) * eps_ij * lam_val * (x_inv6 * x_inv6 - x_inv6) * s_w
+
+    qq = jnp.asarray(constants.COULOMB_CONSTANT, dtype=dtype) * charges[:, None] * charges[safe_j]
+    if pme_alpha > 0.0:
+        alpha_r = jnp.asarray(pme_alpha, dtype=dtype) * dist
+        if include_pme_excl_erf:
+            e_coul = qq * (w_elec - erf(alpha_r)) / dist
+        else:
+            e_coul = qq * w_elec * erfc(alpha_r) / dist
+    else:
+        e_coul = jnp.where(dist >= jnp.asarray(1e-4, dtype=dtype), qq * w_elec / dist, zero)
+
+    return half * jnp.sum(jnp.where(active, e_lj + e_coul, zero))
+
+
+def pallas_nonbonded_nl(
+    positions: jax.Array,
+    charges: jax.Array,
+    sigmas: jax.Array,
+    epsilons: jax.Array,
+    atom_mask: jax.Array | None,
+    neighbor_idx: jax.Array | None = None,
+    excl_indices: jax.Array | None = None,
+    excl_scales_vdw: jax.Array | None = None,
+    excl_scales_elec: jax.Array | None = None,
     box: jax.Array | None = None,
     pme_alpha: float = 0.0,
     cutoff: float = 10.0,
+    coulomb_constant: float = constants.COULOMB_CONSTANT,
     lj_switch_width: float = 0.0,
-    soft_core_lambda: float = 1.0,
+    soft_core_lambda: float | jax.Array = 1.0,
     include_pme_excl_erf: bool = True,
     interpret: bool | None = None,
 ) -> jax.Array:
     """Fused O(N*K) neighbor-list LJ + Coulomb/PME direct-space Pallas kernel."""
+    del coulomb_constant
+    if (
+        atom_mask is not None
+        and jnp.issubdtype(jnp.asarray(atom_mask).dtype, jnp.integer)
+        and jnp.asarray(atom_mask).ndim == positions.ndim
+        and (
+            excl_scales_elec is None
+            or jnp.issubdtype(jnp.asarray(excl_scales_elec).dtype, jnp.floating)
+        )
+        and (
+            neighbor_idx is None
+            or jnp.issubdtype(jnp.asarray(neighbor_idx).dtype, jnp.integer)
+        )
+        and (
+            excl_indices is None
+            or jnp.issubdtype(jnp.asarray(excl_indices).dtype, jnp.floating)
+        )
+    ):
+        # Called with 8-arg signature: (pos, q, sig, eps, neighbor_idx, excl_indices, excl_vdw, excl_elec)
+        excl_scales_elec = excl_scales_vdw
+        excl_scales_vdw = excl_indices
+        excl_indices = neighbor_idx
+        neighbor_idx = atom_mask
+        atom_mask = None
+
+    dtype = positions.dtype
+    N = positions.shape[-2]
+    msk_arr = (
+        jnp.ones(positions.shape[:-1], dtype=jnp.bool_)
+        if atom_mask is None
+        else jnp.asarray(atom_mask)
+    )
+    if excl_indices is None:
+        ei_arr = jnp.zeros((N, 0), dtype=jnp.int32)
+        ev_arr = jnp.zeros((N, 0), dtype=dtype)
+        ee_arr = jnp.zeros((N, 0), dtype=dtype)
+    else:
+        ei_arr = jnp.asarray(excl_indices, dtype=jnp.int32)
+        ev_arr = (
+            jnp.zeros_like(ei_arr, dtype=dtype)
+            if excl_scales_vdw is None
+            else jnp.asarray(excl_scales_vdw, dtype=dtype)
+        )
+        ee_arr = (
+            jnp.zeros_like(ei_arr, dtype=dtype)
+            if excl_scales_elec is None
+            else jnp.asarray(excl_scales_elec, dtype=dtype)
+        )
+
+    box_arr, has_box = _normalize_box(box, positions)
+    lam_raw = jnp.asarray(soft_core_lambda, dtype=dtype)
+    lam_arr = lam_raw.reshape((1,)) if lam_raw.ndim == 0 else lam_raw.reshape((-1, 1))
+
+    if in_export_context():
+        if positions.ndim == 3:
+            return jax.vmap(
+                lambda b: _export_nonbonded_nl_one(
+                    positions[b],
+                    charges[b] if charges.ndim == 2 else charges,
+                    sigmas[b] if sigmas.ndim == 2 else sigmas,
+                    epsilons[b] if epsilons.ndim == 2 else epsilons,
+                    msk_arr[b] if msk_arr.ndim == 2 else msk_arr,
+                    neighbor_idx[b] if neighbor_idx.ndim == 3 else neighbor_idx,
+                    ei_arr[b] if ei_arr.ndim == 3 else ei_arr,
+                    ev_arr[b] if ev_arr.ndim == 3 else ev_arr,
+                    ee_arr[b] if ee_arr.ndim == 3 else ee_arr,
+                    box_arr[b],
+                    lam_arr[b] if lam_arr.ndim == 2 else lam_arr,
+                    has_box,
+                    float(pme_alpha),
+                    float(cutoff),
+                    float(lj_switch_width),
+                    bool(include_pme_excl_erf),
+                )
+            )(jnp.arange(positions.shape[0]))
+        return _export_nonbonded_nl_one(
+            positions,
+            charges,
+            sigmas,
+            epsilons,
+            msk_arr,
+            neighbor_idx,
+            ei_arr,
+            ev_arr,
+            ee_arr,
+            box_arr,
+            lam_arr,
+            has_box,
+            float(pme_alpha),
+            float(cutoff),
+            float(lj_switch_width),
+            bool(include_pme_excl_erf),
+        )
+
     if interpret is None:
         interpret = not _triton_gpu_available()
-    has_box = box is not None
-    box_arr = (
-        jnp.asarray(box, dtype=positions.dtype)
-        if box is not None
-        else jnp.ones((3,), dtype=positions.dtype)
-    )
-    if box_arr.ndim == 1 and positions.ndim == 3:
-        box_arr = jnp.broadcast_to(box_arr[None, :], (positions.shape[0], 3))
 
     return _pallas_nonbonded_nl_diff(
         positions,
-        charges,
-        sigmas,
-        epsilons,
-        atom_mask,
-        neighbor_idx,
-        excl_indices,
-        excl_scales_vdw,
-        excl_scales_elec,
+        jnp.asarray(charges, dtype=dtype),
+        jnp.asarray(sigmas, dtype=dtype),
+        jnp.asarray(epsilons, dtype=dtype),
+        msk_arr,
+        jnp.asarray(neighbor_idx, dtype=jnp.int32),
+        ei_arr,
+        ev_arr,
+        ee_arr,
         box_arr,
+        lam_arr,
         bool(has_box),
         float(pme_alpha),
         float(cutoff),
         float(lj_switch_width),
-        float(soft_core_lambda),
         bool(include_pme_excl_erf),
         bool(interpret),
     )
@@ -1368,9 +1667,9 @@ def _pallas_flash_explicit_single(
     excl_scales_vdw: jax.Array,
     excl_scales_elec: jax.Array,
     box: jax.Array,
+    lam_arr: jax.Array,
     has_box: bool,
     pme_alpha: float,
-    soft_core_lambda: float,
     interpret: bool,
 ) -> tuple[jax.Array, jax.Array]:
     """Single-system 2D-tiled (32, 32) Pallas dense explicit nonbonded energy & forces."""
@@ -1382,6 +1681,7 @@ def _pallas_flash_explicit_single(
     N_pad = n_blocks * _FLASH_BLOCK_I
     pad_n = N_pad - N
     pad_m = max(0, _NB_MAX_EXCL - M)
+    pad_n_excl = N_pad - excl_indices.shape[0]
 
     if pad_n > 0:
         pos_pad = jnp.pad(positions, ((0, pad_n), (0, 0)))
@@ -1399,10 +1699,10 @@ def _pallas_flash_explicit_single(
     excl_idx_pad = excl_indices[:, :_NB_MAX_EXCL].astype(jnp.int32)
     excl_vdw_pad = excl_scales_vdw[:, :_NB_MAX_EXCL].astype(dtype)
     excl_elec_pad = excl_scales_elec[:, :_NB_MAX_EXCL].astype(dtype)
-    if pad_n > 0 or pad_m > 0:
-        excl_idx_pad = jnp.pad(excl_idx_pad, ((0, pad_n), (0, pad_m)), constant_values=-1)
-        excl_vdw_pad = jnp.pad(excl_vdw_pad, ((0, pad_n), (0, pad_m)), constant_values=1.0)
-        excl_elec_pad = jnp.pad(excl_elec_pad, ((0, pad_n), (0, pad_m)), constant_values=1.0)
+    if pad_n_excl > 0 or pad_m > 0:
+        excl_idx_pad = jnp.pad(excl_idx_pad, ((0, pad_n_excl), (0, pad_m)), constant_values=-1)
+        excl_vdw_pad = jnp.pad(excl_vdw_pad, ((0, pad_n_excl), (0, pad_m)), constant_values=1.0)
+        excl_elec_pad = jnp.pad(excl_elec_pad, ((0, pad_n_excl), (0, pad_m)), constant_values=1.0)
 
     pos_x = jnp.asarray(pos_pad[:, 0])
     pos_y = jnp.asarray(pos_pad[:, 1])
@@ -1411,6 +1711,7 @@ def _pallas_flash_explicit_single(
     excl_vdw_flat = jnp.asarray(excl_vdw_pad.reshape(N_pad * _NB_MAX_EXCL))
     excl_elec_flat = jnp.asarray(excl_elec_pad.reshape(N_pad * _NB_MAX_EXCL))
     box_vec = jnp.asarray(box.astype(dtype))
+    lam_vec = jnp.asarray(lam_arr.reshape((1,)).astype(dtype))
 
     def _flash_kernel(
         px_ref,
@@ -1424,6 +1725,7 @@ def _pallas_flash_explicit_single(
         excl_vdw_flat_ref,
         excl_elec_flat_ref,
         box_ref,
+        lam_ref,
         e_out_ref,
         fx_out_ref,
         fy_out_ref,
@@ -1453,13 +1755,13 @@ def _pallas_flash_explicit_single(
         excl_elec_i = _pl_load(excl_elec_flat_ref, (flat_excl_offs,)).reshape(
             _FLASH_BLOCK_I, _NB_MAX_EXCL
         )
-        valid_excl_i = excl_idx_i >= 0
+        valid_excl_i = (excl_idx_i >= 0) & (excl_idx_i < N)
 
         bx = _pl_load(box_ref, (jnp.zeros((1,), dtype=jnp.int32),))[0]
         by = _pl_load(box_ref, (jnp.ones((1,), dtype=jnp.int32),))[0]
         bz = _pl_load(box_ref, (jnp.full((1,), 2, dtype=jnp.int32),))[0]
 
-        lam = jnp.asarray(soft_core_lambda, dtype=dtype)
+        lam = _pl_load(lam_ref, (jnp.zeros((1,), dtype=jnp.int32),))[0]
         soft_alpha_lj = jnp.asarray(0.5, dtype=dtype) * (jnp.asarray(1.0, dtype=dtype) - lam)
         soft_alpha_coul = jnp.asarray(2.0, dtype=dtype) * (jnp.asarray(1.0, dtype=dtype) - lam)
         coul_const = jnp.asarray(constants.COULOMB_CONSTANT, dtype=dtype)
@@ -1480,14 +1782,9 @@ def _pallas_flash_explicit_single(
 
             active = mask_i[:, None] & mask_j[None, :] & (offs_i[:, None] != offs_j[None, :])
 
-            dx = px_i[:, None] - px_j[None, :]
-            dy = py_i[:, None] - py_j[None, :]
-            dz = pz_i[:, None] - pz_j[None, :]
-            if has_box:
-                half = jnp.asarray(0.5, dtype=dtype)
-                dx = dx - bx * jnp.floor(dx / bx + half)
-                dy = dy - by * jnp.floor(dy / by + half)
-                dz = dz - bz * jnp.floor(dz / bz + half)
+            dx = _min_image_1d(px_i[:, None] - px_j[None, :], bx, has_box)
+            dy = _min_image_1d(py_i[:, None] - py_j[None, :], by, has_box)
+            dz = _min_image_1d(pz_i[:, None] - pz_j[None, :], bz, has_box)
 
             dist_sq = dx * dx + dy * dy + dz * dz + jnp.asarray(1e-10, dtype=dtype)
             dist = jnp.sqrt(dist_sq)
@@ -1529,7 +1826,7 @@ def _pallas_flash_explicit_single(
             qq = q_i[:, None] * q_j[None, :] * coul_const * w_elec
             if pme_alpha > 0.0:
                 alpha_rc = alpha_val * dist_coul
-                erfc_val = _triton_erfc(alpha_rc)
+                erfc_val = erfc(alpha_rc) if (interpret and dtype == jnp.float64) else _triton_erfc(alpha_rc)
                 e_coul = qq * erfc_val / dist_coul
                 de_coul_over_r = (zero - qq) * (
                     erfc_val / (dist_coul * dist_coul_sq)
@@ -1560,7 +1857,7 @@ def _pallas_flash_explicit_single(
         _pl_store(fy_out_ref, (offs_i,), fy_blk)
         _pl_store(fz_out_ref, (offs_i,), fz_blk)
 
-    in_specs = [pl.BlockSpec(memory_space=pl.ANY) for _ in range(11)]
+    in_specs = [pl.BlockSpec(memory_space=pl.ANY) for _ in range(12)]
     out_specs = [pl.BlockSpec(memory_space=pl.ANY) for _ in range(4)]
     out_shapes = [jax.ShapeDtypeStruct((N_pad,), dtype) for _ in range(4)]
 
@@ -1585,6 +1882,7 @@ def _pallas_flash_explicit_single(
         excl_vdw_flat,
         excl_elec_flat,
         box_vec,
+        lam_vec,
     )
     forces = jnp.stack([fx_pad[:N], fy_pad[:N], fz_pad[:N]], axis=-1)
     return jnp.sum(e_pad[:N]), forces
@@ -1600,18 +1898,17 @@ def _pallas_flash_explicit_vmappable(
     excl_scales_vdw: jax.Array,
     excl_scales_elec: jax.Array,
     box: jax.Array,
+    lam_arr: jax.Array,
     has_box: bool,
     pme_alpha: float,
-    soft_core_lambda: float,
     interpret: bool,
 ) -> tuple[jax.Array, jax.Array]:
     hb = bool(has_box)
     pa = float(pme_alpha)
-    lam = float(soft_core_lambda)
     interp = bool(interpret)
 
     @jax.custom_batching.custom_vmap
-    def _vmappable(pos, q, sig, eps, mask, ei, ev, ee, bx):
+    def _vmappable(pos, q, sig, eps, mask, ei, ev, ee, bx, lam):
         return _pallas_flash_explicit_single(
             pos,
             q,
@@ -1622,14 +1919,14 @@ def _pallas_flash_explicit_vmappable(
             ev,
             ee,
             bx,
+            lam,
             hb,
             pa,
-            lam,
             interp,
         )
 
     @_vmappable.def_vmap
-    def _vmap_rule(axis_size, in_batched, pos, q, sig, eps, mask, ei, ev, ee, bx):
+    def _vmap_rule(axis_size, in_batched, pos, q, sig, eps, mask, ei, ev, ee, bx, lam):
         def _step(b_idx):
             return _vmappable(
                 pos[b_idx] if in_batched[0] else pos,
@@ -1641,6 +1938,7 @@ def _pallas_flash_explicit_vmappable(
                 ev[b_idx] if in_batched[6] else ev,
                 ee[b_idx] if in_batched[7] else ee,
                 bx[b_idx] if in_batched[8] else bx,
+                lam[b_idx] if in_batched[9] else lam,
             )
 
         e_batch, f_batch = jax.lax.map(_step, jnp.arange(axis_size))
@@ -1656,10 +1954,11 @@ def _pallas_flash_explicit_vmappable(
         excl_scales_vdw,
         excl_scales_elec,
         box,
+        lam_arr,
     )
 
 
-@functools.partial(custom_vjp, nondiff_argnums=(9, 10, 11, 12))
+@functools.partial(custom_vjp, nondiff_argnums=(10, 11, 12))
 def _pallas_flash_explicit_diff(
     positions: jax.Array,
     charges: jax.Array,
@@ -1670,9 +1969,9 @@ def _pallas_flash_explicit_diff(
     excl_scales_vdw: jax.Array,
     excl_scales_elec: jax.Array,
     box: jax.Array,
+    lam_arr: jax.Array,
     has_box: bool,
     pme_alpha: float,
-    soft_core_lambda: float,
     interpret: bool,
 ) -> jax.Array:
     energy, _ = _pallas_flash_explicit_vmappable(
@@ -1685,9 +1984,9 @@ def _pallas_flash_explicit_diff(
         excl_scales_vdw,
         excl_scales_elec,
         box,
+        lam_arr,
         has_box,
         pme_alpha,
-        soft_core_lambda,
         interpret,
     )
     return energy
@@ -1703,9 +2002,9 @@ def _pallas_flash_explicit_fwd(
     excl_scales_vdw,
     excl_scales_elec,
     box,
+    lam_arr,
     has_box,
     pme_alpha,
-    soft_core_lambda,
     interpret,
 ):
     energy, forces = _pallas_flash_explicit_vmappable(
@@ -1718,23 +2017,26 @@ def _pallas_flash_explicit_fwd(
         excl_scales_vdw,
         excl_scales_elec,
         box,
+        lam_arr,
         has_box,
         pme_alpha,
-        soft_core_lambda,
         interpret,
     )
-    return energy, (forces, charges, sigmas, epsilons, atom_mask, excl_indices, excl_scales_vdw, excl_scales_elec, box)
+    return (
+        energy,
+        (forces, charges, sigmas, epsilons, atom_mask, excl_indices, excl_scales_vdw, excl_scales_elec, box, lam_arr),
+    )
 
 
 def _pallas_flash_explicit_bwd(
     has_box,
     pme_alpha,
-    soft_core_lambda,
     interpret,
     res,
     g,
 ):
-    forces, charges, sigmas, epsilons, atom_mask, excl_indices, excl_scales_vdw, excl_scales_elec, box = res
+    del has_box, pme_alpha, interpret
+    forces, charges, sigmas, epsilons, atom_mask, excl_indices, excl_scales_vdw, excl_scales_elec, box, lam_arr = res
     grad_pos = -g[..., None, None] * forces if g.ndim > 0 else -g * forces
     return (
         grad_pos,
@@ -1746,6 +2048,7 @@ def _pallas_flash_explicit_bwd(
         jnp.zeros_like(excl_scales_vdw),
         jnp.zeros_like(excl_scales_elec),
         jnp.zeros_like(box),
+        jnp.zeros_like(lam_arr),
     )
 
 
@@ -1757,40 +2060,80 @@ def pallas_flash_explicit_nonbonded(
     charges: jax.Array,
     sigmas: jax.Array,
     epsilons: jax.Array,
-    atom_mask: jax.Array,
-    excl_indices: jax.Array,
-    excl_scales_vdw: jax.Array,
-    excl_scales_elec: jax.Array,
+    atom_mask: jax.Array | None,
+    excl_indices: jax.Array | None,
+    excl_scales_vdw: jax.Array | None,
+    excl_scales_elec: jax.Array | None,
     box: jax.Array | None = None,
     pme_alpha: float = 0.0,
-    soft_core_lambda: float = 1.0,
+    soft_core_lambda: float | jax.Array = 1.0,
     interpret: bool | None = None,
 ) -> jax.Array:
     """2D-tiled (32, 32) FlashMD explicit nonbonded Pallas kernel with forward-force custom_vjp."""
+    dtype = positions.dtype
+    N = positions.shape[-2]
+    msk_arr = (
+        jnp.ones(positions.shape[:-1], dtype=jnp.bool_)
+        if atom_mask is None
+        else jnp.asarray(atom_mask)
+    )
+    if excl_indices is None:
+        ei_arr = jnp.zeros((N, 0), dtype=jnp.int32)
+        ev_arr = jnp.zeros((N, 0), dtype=dtype)
+        ee_arr = jnp.zeros((N, 0), dtype=dtype)
+    else:
+        ei_arr = jnp.asarray(excl_indices, dtype=jnp.int32)
+        ev_arr = (
+            jnp.zeros_like(ei_arr, dtype=dtype)
+            if excl_scales_vdw is None
+            else jnp.asarray(excl_scales_vdw, dtype=dtype)
+        )
+        ee_arr = (
+            jnp.zeros_like(ei_arr, dtype=dtype)
+            if excl_scales_elec is None
+            else jnp.asarray(excl_scales_elec, dtype=dtype)
+        )
+
+    box_arr, has_box = _normalize_box(box, positions)
+    lam_raw = jnp.asarray(soft_core_lambda, dtype=dtype)
+    lam_arr = lam_raw.reshape((1,)) if lam_raw.ndim == 0 else lam_raw.reshape((-1, 1))
+
+    if in_export_context():
+        nbr_dense = jnp.broadcast_to(jnp.arange(N, dtype=jnp.int32)[None, :], (N, N))
+        return pallas_nonbonded_nl(
+            positions,
+            charges,
+            sigmas,
+            epsilons,
+            msk_arr,
+            nbr_dense,
+            ei_arr,
+            ev_arr,
+            ee_arr,
+            box=box,
+            pme_alpha=pme_alpha,
+            cutoff=1e9,
+            lj_switch_width=0.0,
+            soft_core_lambda=soft_core_lambda,
+            include_pme_excl_erf=False,
+        )
+
     if interpret is None:
         interpret = not _triton_gpu_available()
-    has_box = box is not None
-    box_arr = (
-        jnp.asarray(box, dtype=positions.dtype)
-        if box is not None
-        else jnp.ones((3,), dtype=positions.dtype)
-    )
-    if box_arr.ndim == 1 and positions.ndim == 3:
-        box_arr = jnp.broadcast_to(box_arr[None, :], (positions.shape[0], 3))
 
     return _pallas_flash_explicit_diff(
         positions,
-        charges,
-        sigmas,
-        epsilons,
-        atom_mask,
-        excl_indices,
-        excl_scales_vdw,
-        excl_scales_elec,
+        jnp.asarray(charges, dtype=dtype),
+        jnp.asarray(sigmas, dtype=dtype),
+        jnp.asarray(epsilons, dtype=dtype),
+        msk_arr,
+        ei_arr,
+        ev_arr,
+        ee_arr,
         box_arr,
+        lam_arr,
         bool(has_box),
         float(pme_alpha),
-        float(soft_core_lambda),
         bool(interpret),
     )
 
@@ -1799,8 +2142,16 @@ __all__ = [
     "PallasKernelConfig",
     "gb_coulomb_energy_dense",
     "gb_energy_split_cutoff",
+    "pallas_angles_harmonic",
+    "pallas_bonds_2body",
     "pallas_born_radii",
+    "pallas_cmap_torsions",
+    "pallas_exceptions_14",
     "pallas_flash_explicit_nonbonded",
+    "pallas_gb_ace_nl",
     "pallas_nonbonded_nl",
+    "pallas_pme_exclusion_pairs",
+    "pallas_sasa_nl",
+    "pallas_torsions_4body",
     "resolve_pallas_mode",
 ]

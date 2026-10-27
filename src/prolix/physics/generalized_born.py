@@ -500,6 +500,7 @@ def compute_sasa_neighbor_list(
   radii: Array,
   neighbor_idx: Array,
   probe_radius: float = constants.PROBE_RADIUS,
+  atom_mask: Array | None = None,
 ) -> Array:
   """Computes SASA using neighbor lists.
 
@@ -508,6 +509,7 @@ def compute_sasa_neighbor_list(
       radii: Atom radii (N,).
       neighbor_idx: Neighbor list indices (N, K).
       probe_radius: Solvent probe radius.
+      atom_mask: Optional boolean/numeric mask (N,) for valid atoms.
 
   Returns:
       Total SASA (scalar).
@@ -522,8 +524,16 @@ def compute_sasa_neighbor_list(
   # Surface area of isolated spheres
   S_i = 4.0 * jnp.pi * r_i**2
 
+  safe_nbr = jnp.clip(neighbor_idx, 0, max(N - 1, 0))
+  valid_nbr = (neighbor_idx >= 0) & (neighbor_idx < N) & (
+      neighbor_idx != jnp.arange(N, dtype=neighbor_idx.dtype)[:, None]
+  )
+  if atom_mask is not None:
+    mask_bool = jnp.asarray(atom_mask, dtype=jnp.bool_)
+    valid_nbr = valid_nbr & mask_bool[:, None] & mask_bool[safe_nbr]
+
   # Neighbor positions
-  neighbor_positions = positions[neighbor_idx]  # (N, K, 3)
+  neighbor_positions = positions[safe_nbr]  # (N, K, 3)
   central_positions = positions[:, None, :]  # (N, 1, 3)
 
   delta_positions = central_positions - neighbor_positions
@@ -531,7 +541,7 @@ def compute_sasa_neighbor_list(
 
   # Radii
   r_i_mat = r_i[:, None]  # (N, 1)
-  r_j_mat = r_j_all[neighbor_idx]  # (N, K)
+  r_j_mat = r_j_all[safe_nbr]  # (N, K)
 
   # Calculate buried area b_ij
   term1 = r_j_mat**2 - (d_ij - r_i_mat) ** 2
@@ -551,8 +561,7 @@ def compute_sasa_neighbor_list(
   b_ij = jnp.where(j_inside_i, 0.0, b_ij)
 
   # Mask neighbors
-  mask_neighbors = neighbor_idx < N
-  b_ij = jnp.where(mask_neighbors, b_ij, 0.0)
+  b_ij = jnp.where(valid_nbr, b_ij, 0.0)
 
   # Fraction exposed
   fraction_covered = b_ij / S_i[:, None]
@@ -561,6 +570,8 @@ def compute_sasa_neighbor_list(
   total_fraction_exposed = jnp.prod(fraction_exposed_pair, axis=1)
 
   A_i = S_i * total_fraction_exposed
+  if atom_mask is not None:
+    A_i = jnp.where(jnp.asarray(atom_mask, dtype=jnp.bool_), A_i, 0.0)
 
   return jnp.sum(A_i)
 
@@ -571,6 +582,7 @@ def compute_nonpolar_energy(
   surface_tension: float = SURFACE_TENSION,
   probe_radius: float = constants.PROBE_RADIUS,
   neighbor_idx: Array | None = None,
+  atom_mask: Array | None = None,
 ) -> Array:
   r"""Computes the non-polar solvation energy (SASA term).
 
@@ -584,6 +596,7 @@ def compute_nonpolar_energy(
       surface_tension: Surface tension parameter (gamma).
       probe_radius: Solvent probe radius.
       neighbor_idx: Optional neighbor list indices.
+      atom_mask: Optional boolean/numeric mask (N,) for valid atoms.
 
   Returns:
       Non-polar energy (scalar).
@@ -592,7 +605,9 @@ def compute_nonpolar_energy(
   if neighbor_idx is None:
     sasa = compute_sasa(positions, radii, probe_radius)
   else:
-    sasa = compute_sasa_neighbor_list(positions, radii, neighbor_idx, probe_radius)
+    sasa = compute_sasa_neighbor_list(
+        positions, radii, neighbor_idx, probe_radius, atom_mask=atom_mask
+    )
 
   return surface_tension * sasa
 
