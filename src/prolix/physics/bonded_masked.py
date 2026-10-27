@@ -14,8 +14,8 @@ import jax
 import jax.numpy as jnp
 from jax_md import space
 
+from prolix.physics.bonded import compute_dihedral_angles
 from prolix.physics.cmap import compute_cmap_energies
-from prolix.physics.system import compute_dihedral_angles
 from prolix.typing import CmapTorsionIndices
 
 if TYPE_CHECKING:
@@ -117,18 +117,30 @@ def _dihedral_energy_masked(r: Array, indices: Array, params: Array, mask: Array
     return jnp.sum(jnp.where(mask != 0, e_per_dih, 0.0))
 
 
-def _cmap_energy_masked(r: Array, indices: Array, map_indices: Array, mask: Array, coeffs: Array | None, displacement_fn: space.DisplacementFn) -> Array:
+def _cmap_energy_masked(
+    r: Array,
+    indices: Array,
+    map_indices: Array,
+    mask: Array,
+    coeffs: Array | None,
+    displacement_fn: space.DisplacementFn,
+    *,
+    first_is_psi: bool = True,
+) -> Array:
     """Computes CMAP energy with per-torsion masking."""
     if indices is None or coeffs is None or len(indices) == 0:
-        return jnp.array(0.0)
-        
+        return jnp.array(0.0, dtype=r.dtype)
+
     indices = indices.astype(jnp.int32)
     torsion_indices = jax.vmap(CmapTorsionIndices.from_row)(indices)
-    
+
     phi = compute_dihedral_angles(r, jnp.asarray(torsion_indices.phi_indices), displacement_fn)
     psi = compute_dihedral_angles(r, jnp.asarray(torsion_indices.psi_indices), displacement_fn)
-    
-    e_per_torsion = compute_cmap_energies(psi, phi, map_indices, coeffs)
-    return jnp.sum(e_per_torsion * mask)
+
+    if first_is_psi:
+        e_per_torsion = compute_cmap_energies(psi, phi, map_indices, coeffs)
+    else:
+        e_per_torsion = compute_cmap_energies(phi, psi, map_indices, coeffs)
+    return jnp.sum(jnp.where(mask != 0, e_per_torsion * mask, 0.0))
 
 

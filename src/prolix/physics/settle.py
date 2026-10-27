@@ -38,7 +38,11 @@ from prolix.physics import (
 from prolix.physics import (
   units as units_module,
 )
-from prolix.physics.constraint_projection import project_momenta, project_positions
+from prolix.physics.constraint_projection import (
+  project_momenta,
+  project_positions,
+  unpack_constraints,
+)
 from prolix.tiling.axis_dispatch import dispatch_n_waters
 from prolix.typing import NPTState, NVTLangevinState, WaterIndices, WaterIndicesArray
 
@@ -64,6 +68,14 @@ def _pbc_round_banker(x: Array) -> Array:
 
 
 _PBC_ROUND_FN = _pbc_round_banker if _PBC_ROUND_MODE == "round" else _pbc_round_floor
+
+
+def _min_image_delta(delta: Array, box: Array) -> Array:
+  """Minimum-image displacement for 1D orthorhombic (3,) or 2D triclinic (3, 3) box."""
+  box_arr = jnp.asarray(box, dtype=delta.dtype)
+  if box_arr.ndim == 2:
+    return pbc_module.minimum_image_displacement(delta, jnp.zeros_like(delta), box_arr)
+  return delta - box_arr * _PBC_ROUND_FN(delta / box_arr)
 
 # TIP3P water geometry constants
 TIP3P_ROH = 0.9572  # O-H bond length (Å)
@@ -186,7 +198,7 @@ def settle_positions(
     # All three constrained atoms get the same rigid integer-image shift so
     # the molecule's internal geometry is not distorted.
     delta_o = pos_oxygen_c - pos_oxygen_new
-    image_correction = -box * _PBC_ROUND_FN(delta_o / box)
+    image_correction = _min_image_delta(delta_o, box) - delta_o
 
     pos_oxygen_c = pos_oxygen_c + image_correction
     pos_h1_c = pos_h1_c + image_correction
@@ -402,8 +414,7 @@ def _settle_water_batch(
 
     def unwrap(pos_new, pos_old):
       delta = pos_new - pos_old
-      delta = delta - box * _PBC_ROUND_FN(delta / box)
-      return pos_old + delta
+      return pos_old + _min_image_delta(delta, box)
 
     pos_oxygen_new = unwrap(pos_oxygen_new, pos_oxygen_old)
     pos_h1_new = unwrap(pos_h1_new, pos_h1_old)
@@ -437,7 +448,7 @@ def _settle_water_batch(
     # then returns the rigid result to the box as one unit, so nothing else changes.
     def to_oxygen_image(pos_h, pos_o):
       d = pos_h - pos_o
-      return pos_o + (d - box * _PBC_ROUND_FN(d / box))
+      return pos_o + _min_image_delta(d, box)
 
     pos_h1_new = to_oxygen_image(pos_h1_new, pos_oxygen_new)
     pos_h2_new = to_oxygen_image(pos_h2_new, pos_oxygen_new)
@@ -461,10 +472,11 @@ def _settle_water_batch(
   dist_H_mid_to_COM = mass_oxygen * dist_oh_mid / mass_total
   half_hh = r_HH / 2
 
-  # Body frame coordinates (fixed template, shape (3,))
-  b_O = jnp.array([0.0, dist_O_to_COM, 0.0])
-  b_H1 = jnp.array([half_hh, -dist_H_mid_to_COM, 0.0])
-  b_H2 = jnp.array([-half_hh, -dist_H_mid_to_COM, 0.0])
+  dtype = pos_oxygen_new.dtype
+  zero = jnp.zeros((), dtype=dtype)
+  b_O = jnp.stack([zero, jnp.asarray(dist_O_to_COM, dtype=dtype), zero])
+  b_H1 = jnp.stack([jnp.asarray(half_hh, dtype=dtype), -jnp.asarray(dist_H_mid_to_COM, dtype=dtype), zero])
+  b_H2 = jnp.stack([-jnp.asarray(half_hh, dtype=dtype), -jnp.asarray(dist_H_mid_to_COM, dtype=dtype), zero])
 
   # Stack into (3, 3) array: [b_O; b_H1; b_H2]
   b_all = jnp.stack([b_O, b_H1, b_H2], axis=0)  # (3, 3)
@@ -473,7 +485,7 @@ def _settle_water_batch(
   y_all = jnp.stack([delta_O_new, delta_H1_new, delta_H2_new], axis=1)  # (N_waters, 3, 3)
 
   # Mass weights
-  m_all = jnp.array([mass_oxygen, mass_hydrogen, mass_hydrogen])  # (3,)
+  m_all = jnp.asarray([mass_oxygen, mass_hydrogen, mass_hydrogen], dtype=dtype)  # (3,)
 
   # Optimal rotation via Horn's (1987) unit-quaternion method. We deliberately
   # use the 4x4 eigenvalue formulation rather than SVD/Kabsch: TIP3P water is
@@ -856,11 +868,9 @@ def _r_step_conserve_angular_momentum(
   r_H1_unc = x_unc[indices.hydrogen1]  # (N_w, 3)
   r_H2_unc = x_unc[indices.hydrogen2]  # (N_w, 3)
   if box is not None:
-    dH1 = r_H1_unc - r_O_unc
-    dH1 = dH1 - box * _PBC_ROUND_FN(dH1 / box)
+    dH1 = _min_image_delta(r_H1_unc - r_O_unc, box)
     r_H1_unc = r_O_unc + dH1
-    dH2 = r_H2_unc - r_O_unc
-    dH2 = dH2 - box * _PBC_ROUND_FN(dH2 / box)
+    dH2 = _min_image_delta(r_H2_unc - r_O_unc, box)
     r_H2_unc = r_O_unc + dH2
   r_unc_w = jnp.stack([r_O_unc, r_H1_unc, r_H2_unc], axis=1)  # (N_w, 3, 3)
   p_pre_a_w = jnp.stack(
@@ -1097,6 +1107,10 @@ def settle_langevin(
   water_mask: Array | None = None,
   atom_mask: Array | None = None,
   is_force_shaped: bool = False,
+  shake_tol: float = 1e-5,
+  rattle_tol: float = 1e-5,
+  max_shake_iter: int = 25,
+  displacement_fn: Callable[..., Array] | None = None,
 ):
   r"""Langevin dynamics integrator with SETTLE constraints for water.
 
@@ -1282,14 +1296,31 @@ def settle_langevin(
       non_water_noise_full = jnp.sqrt(mass_arr[:, None] * _kT) * jax.random.normal(
         split, R.shape, dtype=R.dtype
       )
+      if atom_mask is not None:
+        non_water_mask = non_water_mask & jnp.asarray(atom_mask, dtype=jnp.bool_)
       momenta = jnp.where(non_water_mask[:, None], non_water_noise_full, momenta)
     else:
       # Standard unconstrained initialization
       key, split = jax.random.split(key)
       momenta = jnp.sqrt(mass_arr[:, None] * _kT) * jax.random.normal(split, R.shape, dtype=R.dtype)
+      if atom_mask is not None:
+        momenta = jnp.where(jnp.asarray(atom_mask, dtype=jnp.bool_)[:, None], momenta, 0.0)
 
     # Store mass for broadcasting
     mass_state = mass_arr[:, None]
+    if constraints is not None:
+      c_pairs, _c_lengths, c_mask = unpack_constraints(constraints)
+      momenta = project_momenta(
+        momenta,
+        R,
+        c_pairs,
+        mass_state,
+        shift_fn,
+        tol=rattle_tol,
+        max_iter=max_shake_iter,
+        constraint_mask=c_mask,
+        displacement_fn=displacement_fn,
+      )
 
     return NVTLangevinState(R, momenta, force, mass_state, key)
 
@@ -1313,11 +1344,22 @@ def settle_langevin(
     # advance only 0.25*dt*v, making the full cycle cover 0.5*dt*v instead of
     # BAOAB's dt*v (task 260806_p5_measurement_pipeline_audit).
     x_unc_1 = _langevin_step_a(state.positions, momentum, state.mass, _dt, shift_fn)
+    x_before_constraints_1 = x_unc_1
 
     # Solute RATTLE (SHAKE) before SETTLE
     if constraints is not None:
-      pairs, lengths = constraints
-      x_unc_1 = project_positions(x_unc_1, pairs, lengths, state.mass, shift_fn)
+      c_pairs, c_lengths, c_mask = unpack_constraints(constraints)
+      x_unc_1 = project_positions(
+        x_unc_1,
+        c_pairs,
+        c_lengths,
+        state.mass,
+        shift_fn,
+        tol=shake_tol,
+        max_iter=max_shake_iter,
+        constraint_mask=c_mask,
+        displacement_fn=displacement_fn,
+      )
 
     # SETTLE position constraints
     x_con_1 = settle_positions(
@@ -1333,15 +1375,17 @@ def settle_langevin(
     )
 
     # OpenMM R-step: momentum correction from constraint impulse.
-    # Use the minimum-image displacement: shift_fn may wrap x_unc across a
-    # periodic boundary while settle_positions reconstructs x_con in the
-    # unwrapped frame of positions_old, so the raw difference can jump by a full
-    # box vector for any atom starting near/outside the primary cell -> a
-    # spurious ~box-sized impulse that detonates the integrator at liquid
-    # density (see scripts/explore/p5_rstep_substep_trace.py).
-    dx_1 = x_con_1 - x_unc_1
-    if box is not None:
-      dx_1 = dx_1 - box * _PBC_ROUND_FN(dx_1 / box)
+    # Use x_before_constraints_1 (saved prior to project_positions) so solute
+    # SHAKE positional corrections also contribute to the R-step velocity impulse.
+    if displacement_fn is not None:
+      dx_1 = jax.vmap(displacement_fn)(x_con_1, x_before_constraints_1)
+    else:
+      dx_1 = x_con_1 - x_before_constraints_1
+      if box is not None:
+        if jnp.asarray(box).ndim == 2:
+          dx_1 = pbc_module.minimum_image_displacement(x_con_1, x_before_constraints_1, box)
+        else:
+          dx_1 = dx_1 - box * _PBC_ROUND_FN(dx_1 / box)
     dp_1 = state.mass * dx_1 / half_dt
     momentum = momentum + dp_1
 
@@ -1370,11 +1414,22 @@ def settle_langevin(
     # Full _dt for the same reason as R1 above; the sub-step duration this A-step
     # represents is half_dt, which is what the dp_2 impulse below divides by.
     x_unc_2 = _langevin_step_a(position, momentum, state.mass, _dt, shift_fn)
+    x_before_constraints_2 = x_unc_2
 
     # Solute RATTLE (SHAKE) before SETTLE
     if constraints is not None:
-      pairs, lengths = constraints
-      x_unc_2 = project_positions(x_unc_2, pairs, lengths, state.mass, shift_fn)
+      c_pairs, c_lengths, c_mask = unpack_constraints(constraints)
+      x_unc_2 = project_positions(
+        x_unc_2,
+        c_pairs,
+        c_lengths,
+        state.mass,
+        shift_fn,
+        tol=shake_tol,
+        max_iter=max_shake_iter,
+        constraint_mask=c_mask,
+        displacement_fn=displacement_fn,
+      )
 
     # SETTLE position constraints
     x_con_2 = settle_positions(
@@ -1391,9 +1446,15 @@ def settle_langevin(
 
     # OpenMM R-step: momentum correction from constraint impulse (minimum-image;
     # see R1 above for why the raw difference is unsafe under PBC wrapping).
-    dx_2 = x_con_2 - x_unc_2
-    if box is not None:
-      dx_2 = dx_2 - box * _PBC_ROUND_FN(dx_2 / box)
+    if displacement_fn is not None:
+      dx_2 = jax.vmap(displacement_fn)(x_con_2, x_before_constraints_2)
+    else:
+      dx_2 = x_con_2 - x_before_constraints_2
+      if box is not None:
+        if jnp.asarray(box).ndim == 2:
+          dx_2 = pbc_module.minimum_image_displacement(x_con_2, x_before_constraints_2, box)
+        else:
+          dx_2 = dx_2 - box * _PBC_ROUND_FN(dx_2 / box)
     dp_2 = state.mass * dx_2 / half_dt
     momentum = momentum + dp_2
 
@@ -1414,8 +1475,18 @@ def settle_langevin(
 
     # Final velocity constraint (catches residual from force kick)
     if constraints is not None:
-      pairs, _ = constraints
-      momentum = project_momenta(momentum, position, pairs, state.mass, shift_fn)
+      c_pairs, _, c_mask = unpack_constraints(constraints)
+      momentum = project_momenta(
+        momentum,
+        position,
+        c_pairs,
+        state.mass,
+        shift_fn,
+        tol=rattle_tol,
+        max_iter=max_shake_iter,
+        constraint_mask=c_mask,
+        displacement_fn=displacement_fn,
+      )
 
     momentum = _langevin_settle_vel(
       momentum,
@@ -1468,6 +1539,13 @@ def settle_lfmiddle_langevin(
   projection_site: str = "post_o",
   settle_velocity_iters: int = 10,
   settle_velocity_tol: float | None = None,
+  water_mask: Array | None = None,
+  atom_mask: Array | None = None,
+  is_force_shaped: bool = False,
+  shake_tol: float = 1e-5,
+  rattle_tol: float = 1e-5,
+  max_shake_iter: int = 25,
+  displacement_fn: Callable[..., Array] | None = None,
 ):
   r"""Langevin + SETTLE with Leimkuhler-Matthews O-step splitting (LFMiddle).
 
@@ -1510,8 +1588,17 @@ def settle_lfmiddle_langevin(
       projection_site=projection_site,
       settle_velocity_iters=settle_velocity_iters,
       settle_velocity_tol=settle_velocity_tol,
+      water_mask=water_mask,
+      atom_mask=atom_mask,
+      is_force_shaped=is_force_shaped,
+      shake_tol=shake_tol,
+      rattle_tol=rattle_tol,
+      max_shake_iter=max_shake_iter,
+      displacement_fn=displacement_fn,
   )
-  force_fn = _make_settle_compatible_force_fn(energy_or_force_fn, mass, box)
+  force_fn = _make_settle_compatible_force_fn(
+    energy_or_force_fn, mass, box, is_force_shaped=is_force_shaped
+  )
   if water_indices is None or water_indices.shape[0] == 0:
     return simulate.nvt_langevin(energy_or_force_fn, shift_fn, dt, kT, gamma=gamma, mass=mass)
 
@@ -1526,7 +1613,7 @@ def settle_lfmiddle_langevin(
 
     if project_ou_momentum_rigid:
       momentum, key = _langevin_step_o_constrained(
-          momentum, position, state.mass, gamma, half_dt, _kT, state.key, water_indices
+          momentum, position, state.mass, gamma, half_dt, _kT, state.key, water_indices, water_mask
       )
     else:
       momentum, key = _langevin_step_o(momentum, state.mass, gamma, half_dt, _kT, state.key)
@@ -1534,12 +1621,22 @@ def settle_lfmiddle_langevin(
     position = _langevin_step_a(position, momentum, state.mass, _dt, shift_fn)
 
     if constraints is not None:
-      pairs, lengths = constraints
-      position = project_positions(position, pairs, lengths, state.mass, shift_fn)
+      c_pairs, c_lengths, c_mask = unpack_constraints(constraints)
+      position = project_positions(
+        position,
+        c_pairs,
+        c_lengths,
+        state.mass,
+        shift_fn,
+        tol=shake_tol,
+        max_iter=max_shake_iter,
+        constraint_mask=c_mask,
+        displacement_fn=displacement_fn,
+      )
 
     position = settle_positions(
         position, positions_old, water_indices, r_OH, r_HH,
-        mass_oxygen, mass_hydrogen, box,
+        mass_oxygen, mass_hydrogen, box, water_mask,
     )
 
     force = force_fn(position, **kwargs)
@@ -1551,7 +1648,7 @@ def settle_lfmiddle_langevin(
     # stale (tests/physics/test_transrot_decomposition.py).
     if project_ou_momentum_rigid:
       momentum, key = _langevin_step_o_constrained(
-          momentum, position, state.mass, gamma, half_dt, _kT, key, water_indices
+          momentum, position, state.mass, gamma, half_dt, _kT, key, water_indices, water_mask
       )
     else:
       momentum, key = _langevin_step_o(momentum, state.mass, gamma, half_dt, _kT, key)
@@ -1559,17 +1656,27 @@ def settle_lfmiddle_langevin(
     momentum = _langevin_step_b(momentum, force, _dt)
 
     if constraints is not None:
-      pairs, _ = constraints
-      momentum = project_momenta(momentum, position, pairs, state.mass, shift_fn)
+      c_pairs, _, c_mask = unpack_constraints(constraints)
+      momentum = project_momenta(
+        momentum,
+        position,
+        c_pairs,
+        state.mass,
+        shift_fn,
+        tol=rattle_tol,
+        max_iter=max_shake_iter,
+        constraint_mask=c_mask,
+        displacement_fn=displacement_fn,
+      )
 
     momentum = _langevin_settle_vel(
         momentum, positions_old, position, state.mass, water_indices, _dt,
         mass_oxygen, mass_hydrogen, n_iters=settle_velocity_iters,
-        settle_velocity_tol=settle_velocity_tol,
+        settle_velocity_tol=settle_velocity_tol, water_mask=water_mask,
     )
     if project_ou_momentum_rigid and projection_site in ("post_settle_vel", "both"):
       momentum = project_tip3p_waters_momentum_rigid(
-          momentum, position, state.mass, water_indices
+          momentum, position, state.mass, water_indices, water_mask
       )
     if remove_linear_com_momentum:
       mass_col = state.mass
@@ -1843,32 +1950,15 @@ def langevin_with_constraints(
 def _csvr_compute_lambda(
   key: Array,
   ke_current: Array,
-  n_dof: int,
+  n_dof: int | Array,
   kT: float,
   dt: float,
   tau: float = None,
+  max_chi_dof: int | None = None,
 ) -> tuple[Array, Array]:
-  r"""Compute CSVR (Bussi velocity-rescaling) lambda factor.
-
-  Implements Bussi et al. 2007 velocity rescaling thermostat.
-  Draws random samples from chi-squared distribution to stochastically
-  rescale velocities toward the target kinetic energy.
-
-  Args:
-    key: JAX PRNGKey for random sampling.
-    ke_current: Current total kinetic energy (kcal/mol).
-    n_dof: Number of thermostated degrees of freedom.
-    kT: Target thermal energy (kcal/mol).
-    dt: Timestep in AKMA units.
-    tau: Relaxation time in AKMA units. Default ~0.1ps equivalent.
-
-  Returns:
-    (lambda_factor, new_key) where lambda_factor rescales all momenta.
-  """
+  r"""Compute CSVR (Bussi velocity-rescaling) lambda factor."""
   if tau is None:
     tau = _DEFAULT_CSVR_TAU_AKMA
-
-  n_dof = max(int(n_dof), 1)
 
   # Coupling strength: exp(-dt/tau)
   c1 = jnp.exp(-dt / tau)
@@ -1879,26 +1969,25 @@ def _csvr_compute_lambda(
   r_gaussian = jax.random.normal(split, dtype=ke_current.dtype)
 
   key, split = jax.random.split(key)
-  # Sum of (n_dof - 1) chi-squared components = sum of squares of (n_dof-1) gaussians
-  s_chi_squared = jnp.sum(
-    jax.random.normal(split, (n_dof - 1,), dtype=ke_current.dtype) ** 2
-  )
+  if isinstance(n_dof, (int, float)):
+    n_dof_int = max(int(n_dof), 1)
+    s_chi_squared = jnp.sum(
+      jax.random.normal(split, (max(n_dof_int - 1, 0),), dtype=ke_current.dtype) ** 2
+    )
+    n_dof_f = jnp.asarray(float(n_dof_int), dtype=ke_current.dtype)
+  else:
+    n_dof_safe = jnp.maximum(jnp.asarray(n_dof, dtype=ke_current.dtype), 1.0)
+    upper_dof = max(int(max_chi_dof if max_chi_dof is not None else 512), 1)
+    chi_draws = jax.random.normal(split, (upper_dof,), dtype=ke_current.dtype) ** 2
+    chi_mask = jnp.arange(upper_dof) < jnp.maximum(jnp.asarray(n_dof, dtype=jnp.int32) - 1, 0)
+    s_chi_squared = jnp.sum(jnp.where(chi_mask, chi_draws, 0.0))
+    n_dof_f = n_dof_safe
 
-  target_ke = 0.5 * n_dof * kT
+  target_ke = 0.5 * n_dof_f * kT
   ke_safe = jnp.maximum(ke_current, 1e-10)
 
-  # Bussi et al. 2007 eq. A7:
-  # lambda^2 = c1 + c2*(R^2 + S) + 2*R*sqrt(c1*c2)
-  # where c1 = exp(-dt/tau), c2 = (1-c1)*(target_ke)/(ke_current*n_dof)
-  # R ~ N(0,1), S ~ chi^2(n_dof - 1)
-  # The n_dof in target_ke = 0.5*n_dof*kT partially cancels, but we need n_dof in denominator of c2.
-
-  # Compute the corrected c2 factor: (1-c1) * K_target / (K_current * n_dof)
-  # where K_target = 0.5 * n_dof * kT, so this gives (1-c1) * 0.5 * kT / K_current
-  n_dof_f = float(n_dof)
   c2_corrected = c2_sq * (target_ke / ke_safe) / n_dof_f
 
-  # Full Bussi formula with cross term
   lambda_sq = (
     c1
     + c2_corrected * (r_gaussian**2 + s_chi_squared)
@@ -1906,7 +1995,6 @@ def _csvr_compute_lambda(
   )
   lambda_sq_safe = jnp.maximum(lambda_sq, 0.0)
 
-  # Edge case: if ke_current <= 0, return lambda=1.0 (no rescaling)
   lambda_factor = jnp.where(ke_current <= 0.0, 1.0, jnp.sqrt(lambda_sq_safe))
 
   return lambda_factor, key
@@ -1986,6 +2074,14 @@ def settle_csvr(
   n_constraint_pairs: int = 0,
   remove_com: bool = True,
   box: Array | None = None,
+  water_mask: Array | None = None,
+  atom_mask: Array | None = None,
+  constraints: tuple | None = None,
+  shake_tol: float = 1e-5,
+  rattle_tol: float = 1e-5,
+  max_shake_iter: int = 25,
+  displacement_fn: Callable[..., Array] | None = None,
+  is_force_shaped: bool = False,
   **kwargs,
 ) -> tuple[Callable, Callable]:
   r"""CSVR (Bussi velocity-rescaling) thermostat integrator with SETTLE constraints.
@@ -2050,7 +2146,9 @@ def settle_csvr(
       stacklevel=2,
     )
 
-  force_fn = _make_settle_compatible_force_fn(energy_or_force_fn, mass, box)
+  force_fn = _make_settle_compatible_force_fn(
+    energy_or_force_fn, mass, box, is_force_shaped=is_force_shaped
+  )
   if tau is None:
     tau = _DEFAULT_CSVR_TAU_AKMA
 
@@ -2070,9 +2168,24 @@ def settle_csvr(
     momenta = jnp.sqrt(mass_arr[:, jnp.newaxis] * _kT) * jax.random.normal(
       split, R.shape, dtype=R.dtype
     )
+    if atom_mask is not None:
+      momenta = jnp.where(jnp.asarray(atom_mask, dtype=jnp.bool_)[:, None], momenta, 0.0)
 
     # Store mass as (N, 1) for broadcasting
     mass_for_state = mass_arr[:, jnp.newaxis]
+    if constraints is not None:
+      c_pairs, _c_lengths, c_mask = unpack_constraints(constraints)
+      momenta = project_momenta(
+        momenta,
+        R,
+        c_pairs,
+        mass_for_state,
+        shift_fn,
+        tol=rattle_tol,
+        max_iter=max_shake_iter,
+        constraint_mask=c_mask,
+        displacement_fn=displacement_fn,
+      )
 
     return NVTLangevinState(R, momenta, force, mass_for_state, key)
 
@@ -2090,6 +2203,20 @@ def settle_csvr(
     position = _langevin_step_a(state.positions, momentum, state.mass, _dt, shift_fn)
     position = _langevin_step_a(position, momentum, state.mass, _dt, shift_fn)
 
+    if constraints is not None:
+      c_pairs, c_lengths, c_mask = unpack_constraints(constraints)
+      position = project_positions(
+        position,
+        c_pairs,
+        c_lengths,
+        state.mass,
+        shift_fn,
+        tol=shake_tol,
+        max_iter=max_shake_iter,
+        constraint_mask=c_mask,
+        displacement_fn=displacement_fn,
+      )
+
     # === SETTLE position constraints ===
     if water_indices is not None:
       position = settle_positions(
@@ -2101,6 +2228,7 @@ def settle_csvr(
         mass_oxygen,
         mass_hydrogen,
         box,
+        water_mask,
       )
 
     # === Force eval (at constrained positions) ===
@@ -2108,6 +2236,20 @@ def settle_csvr(
 
     # === B-step (final half-kick) ===
     momentum = _langevin_step_b(momentum, force, _dt)
+
+    if constraints is not None:
+      c_pairs, _, c_mask = unpack_constraints(constraints)
+      momentum = project_momenta(
+        momentum,
+        position,
+        c_pairs,
+        state.mass,
+        shift_fn,
+        tol=rattle_tol,
+        max_iter=max_shake_iter,
+        constraint_mask=c_mask,
+        displacement_fn=displacement_fn,
+      )
 
     # === SETTLE velocity constraints ===
     if water_indices is not None:
@@ -2122,33 +2264,55 @@ def settle_csvr(
         mass_hydrogen,
         n_iters=10,
         settle_velocity_tol=None,
+        water_mask=water_mask,
         remove_linear_com_momentum=remove_com,
+        atom_mask=atom_mask,
       )
 
     # === CSVR velocity rescaling ===
-    # Compute total kinetic energy in the constrained system
-    if water_indices is not None and water_indices.shape[0] > 0:
-      n_waters = water_indices.shape[0]
-      ke_total = rigid_water_ke.rigid_tip3p_box_ke_kcal(position, momentum, state.mass, n_waters)
-    else:
-      # No water: standard KE formula
-      velocity = momentum / state.mass
-      ke_total = 0.5 * jnp.sum(state.mass * velocity**2)
-
-    # Compute DOF for this system
     n_atoms = state.positions.shape[0]
     n_waters = water_indices.shape[0] if water_indices is not None else 0
-    n_dof = _n_dof_thermostated(
-      n_atoms, n_waters, n_constraint_pairs=n_constraint_pairs, remove_com=remove_com
+    safe_mass = jnp.maximum(state.mass, 1e-30)
+    if atom_mask is not None:
+      mask_col = jnp.asarray(atom_mask, dtype=jnp.bool_)[:, None]
+      ke_total = 0.5 * jnp.sum(jnp.where(mask_col, momentum**2 / safe_mass, 0.0))
+      n_real_atoms = jnp.sum(jnp.asarray(atom_mask, dtype=jnp.int32))
+    else:
+      ke_total = 0.5 * jnp.sum(momentum**2 / safe_mass)
+      n_real_atoms = n_atoms
+    if water_indices is not None and n_waters > 0:
+      n_real_waters = (
+        jnp.sum(jnp.asarray(water_mask, dtype=jnp.int32))
+        if water_mask is not None
+        else n_waters
+      )
+    else:
+      n_real_waters = 0
+    if constraints is not None:
+      c_pairs, _, c_mask = unpack_constraints(constraints)
+      n_active_constraints = (
+        jnp.sum(jnp.asarray(c_mask, dtype=jnp.int32))
+        if c_mask is not None
+        else c_pairs.shape[0]
+      )
+    else:
+      n_active_constraints = n_constraint_pairs
+    n_dof = (
+      3 * n_real_atoms
+      - 3 * n_real_waters
+      - n_active_constraints
+      - (3 if remove_com else 0)
     )
-
-    # Draw chi-squared and compute lambda
     lambda_factor, key_out = _csvr_compute_lambda(
-      state.key, ke_total, n_dof, _kT, _dt, tau
+      state.key, ke_total, n_dof, _kT, _dt, tau, max_chi_dof=3 * n_atoms
     )
 
     # Apply rescaling
     momentum = _csvr_rescale_momenta(momentum, lambda_factor)
+    if atom_mask is not None:
+      mask_col = jnp.asarray(atom_mask, dtype=jnp.bool_)[:, None]
+      momentum = jnp.where(mask_col, momentum, 0.0)
+      position = jnp.where(mask_col, position, state.positions)
 
     # Return updated state
     return NVTLangevinState(position, momentum, force, state.mass, key_out)
@@ -2388,6 +2552,7 @@ def _langevin_settle_vel(
   settle_velocity_tol: float | None = None,
   water_mask: Array | None = None,
   remove_linear_com_momentum: bool = False,
+  atom_mask: Array | None = None,
 ) -> Array:
   """Apply SETTLE velocity constraints and update momentum.
 
@@ -2427,13 +2592,24 @@ def _langevin_settle_vel(
   )
   momentum = velocity * mass
 
+  if atom_mask is not None:
+    mask_col = jnp.asarray(atom_mask, dtype=jnp.bool_)[:, None]
+    momentum = jnp.where(mask_col, momentum, 0.0)
+
   # Optionally remove center-of-mass momentum to match CSVR DOF accounting
   if remove_linear_com_momentum:
     mass_col = mass
-    p_tot = jnp.sum(momentum, axis=0)
-    m_tot = jnp.sum(mass_col)
-    v_com = p_tot / jnp.maximum(m_tot, jnp.array(1e-30, dtype=m_tot.dtype))
-    momentum = momentum - mass_col * v_com
+    if atom_mask is not None:
+      mask_col = jnp.asarray(atom_mask, dtype=jnp.bool_)[:, None]
+      p_tot = jnp.sum(jnp.where(mask_col, momentum, 0.0), axis=0)
+      m_tot = jnp.sum(jnp.where(mask_col, mass_col, 0.0))
+      v_com = p_tot / jnp.maximum(m_tot, jnp.array(1e-30, dtype=m_tot.dtype))
+      momentum = jnp.where(mask_col, momentum - mass_col * v_com, 0.0)
+    else:
+      p_tot = jnp.sum(momentum, axis=0)
+      m_tot = jnp.sum(mass_col)
+      v_com = p_tot / jnp.maximum(m_tot, jnp.array(1e-30, dtype=m_tot.dtype))
+      momentum = momentum - mass_col * v_com
 
   return momentum
 
@@ -2459,6 +2635,14 @@ def settle_csvr_npt(
   mu_min: float = 0.999,
   project_ou_momentum_rigid: bool = True,
   projection_site: str = "post_o",
+  water_mask: Array | None = None,
+  atom_mask: Array | None = None,
+  constraints: tuple | None = None,
+  shake_tol: float = 1e-5,
+  rattle_tol: float = 1e-5,
+  max_shake_iter: int = 25,
+  displacement_fn: Callable[..., Array] | None = None,
+  is_force_shaped: bool = False,
   **kwargs,
 ) -> tuple[Callable, Callable]:
   r"""NPT barostat integrator combining CSVR thermostat with stochastic cell rescaling.
@@ -2528,7 +2712,7 @@ def settle_csvr_npt(
       and RATTLE algorithm for rigid water models. J. Comput. Chem., 13(8), 952-962.
   """
 
-  force_fn = _make_settle_compatible_force_fn(energy_or_force_fn, mass, box_init)
+  force_fn = _make_settle_compatible_force_fn(energy_or_force_fn, mass, box_init, is_force_shaped=is_force_shaped)
 
   # Default tau_thermostat if not provided
   if tau_thermostat_akma is None:
@@ -2584,9 +2768,24 @@ def settle_csvr_npt(
       momenta = jnp.sqrt(mass_arr[:, jnp.newaxis] * _kT) * jax.random.normal(
         split, R.shape, dtype=R.dtype
       )
+    if atom_mask is not None:
+      momenta = jnp.where(jnp.asarray(atom_mask, dtype=jnp.bool_)[:, None], momenta, 0.0)
 
     # Store mass as (N, 1) for broadcasting
     mass_for_state = mass_arr[:, jnp.newaxis]
+    if constraints is not None:
+      c_pairs, _c_lengths, c_mask = unpack_constraints(constraints)
+      momenta = project_momenta(
+        momenta,
+        R,
+        c_pairs,
+        mass_for_state,
+        shift_fn,
+        tol=rattle_tol,
+        max_iter=max_shake_iter,
+        constraint_mask=c_mask,
+        displacement_fn=displacement_fn,
+      )
 
     # Validate and store box
     if _box is None:
@@ -2608,13 +2807,14 @@ def settle_csvr_npt(
     # === Compute instantaneous pressure for barostat (from pre-step config) ===
     # Use positions and forces from the same configuration (start of step)
     # Kinetic energy (using rigid-body KE if water is present)
-    if water_indices is not None and water_indices.shape[0] > 0:
-      n_waters = water_indices.shape[0]
-      ke_total = rigid_water_ke.rigid_tip3p_box_ke_kcal(positions_old, state.momentum, state.mass, n_waters)
+    n_atoms = positions_old.shape[0]
+    n_waters = water_indices.shape[0] if water_indices is not None else 0
+    safe_mass = jnp.maximum(state.mass, 1e-30)
+    if atom_mask is not None:
+      mask_col = jnp.asarray(atom_mask, dtype=jnp.bool_)[:, None]
+      ke_total = 0.5 * jnp.sum(jnp.where(mask_col, state.momentum**2 / safe_mass, 0.0))
     else:
-      # Standard KE: 0.5 * sum(p² / m)
-      velocity = state.momentum / state.mass
-      ke_total = 0.5 * jnp.sum(state.mass * velocity**2)
+      ke_total = 0.5 * jnp.sum(state.momentum**2 / safe_mass)
 
     # Virial trace (use forces from current state, positions before A-step)
     virial = stress_module.virial_trace(positions_old, state.force)
@@ -2625,6 +2825,20 @@ def settle_csvr_npt(
     # === A-step (full position advance via two half-steps) ===
     position = _langevin_step_a(state.positions, momentum, state.mass, _dt, shift_fn)
     position = _langevin_step_a(position, momentum, state.mass, _dt, shift_fn)
+
+    if constraints is not None:
+      c_pairs, c_lengths, c_mask = unpack_constraints(constraints)
+      position = project_positions(
+        position,
+        c_pairs,
+        c_lengths,
+        state.mass,
+        shift_fn,
+        tol=shake_tol,
+        max_iter=max_shake_iter,
+        constraint_mask=c_mask,
+        displacement_fn=displacement_fn,
+      )
 
     # === SETTLE position constraints ===
     if water_indices is not None and water_indices.shape[0] > 0:
@@ -2637,6 +2851,7 @@ def settle_csvr_npt(
         mass_oxygen,
         mass_hydrogen,
         _box,
+        water_mask,
       )
 
     # Box volume
@@ -2678,6 +2893,19 @@ def settle_csvr_npt(
 
     # Scale positions
     scaled_positions = position * mu
+    if constraints is not None:
+      c_pairs, c_lengths, c_mask = unpack_constraints(constraints)
+      scaled_positions = project_positions(
+        scaled_positions,
+        c_pairs,
+        c_lengths,
+        state.mass,
+        shift_fn,
+        tol=shake_tol,
+        max_iter=max_shake_iter,
+        constraint_mask=c_mask,
+        displacement_fn=displacement_fn,
+      )
 
     # === SETTLE position re-projection (after box scaling) ===
     if water_indices is not None and water_indices.shape[0] > 0:
@@ -2690,6 +2918,7 @@ def settle_csvr_npt(
         mass_oxygen=mass_oxygen,
         mass_hydrogen=mass_hydrogen,
         box=new_box,
+        water_mask=water_mask,
       )
     else:
       position = scaled_positions
@@ -2708,6 +2937,20 @@ def settle_csvr_npt(
     # === B-step (final half-kick) ===
     momentum = _langevin_step_b(momentum, force, _dt)
 
+    if constraints is not None:
+      c_pairs, _, c_mask = unpack_constraints(constraints)
+      momentum = project_momenta(
+        momentum,
+        position,
+        c_pairs,
+        state.mass,
+        shift_fn,
+        tol=rattle_tol,
+        max_iter=max_shake_iter,
+        constraint_mask=c_mask,
+        displacement_fn=displacement_fn,
+      )
+
     # === SETTLE velocity constraints ===
     if water_indices is not None and water_indices.shape[0] > 0:
       momentum = _langevin_settle_vel(
@@ -2721,31 +2964,53 @@ def settle_csvr_npt(
         mass_hydrogen,
         n_iters=10,
         settle_velocity_tol=None,
+        water_mask=water_mask,
         remove_linear_com_momentum=remove_com,
+        atom_mask=atom_mask,
       )
 
     # === CSVR velocity rescaling ===
-    if water_indices is not None and water_indices.shape[0] > 0:
-      n_waters = water_indices.shape[0]
-      ke_total = rigid_water_ke.rigid_tip3p_box_ke_kcal(position, momentum, state.mass, n_waters)
+    safe_mass = jnp.maximum(state.mass, 1e-30)
+    if atom_mask is not None:
+      mask_col = jnp.asarray(atom_mask, dtype=jnp.bool_)[:, None]
+      ke_total = 0.5 * jnp.sum(jnp.where(mask_col, momentum**2 / safe_mass, 0.0))
+      n_real_atoms = jnp.sum(jnp.asarray(atom_mask, dtype=jnp.int32))
     else:
-      velocity = momentum / state.mass
-      ke_total = 0.5 * jnp.sum(state.mass * velocity**2)
-
-    # Compute DOF
-    n_atoms = position.shape[0]
-    n_waters = water_indices.shape[0] if water_indices is not None else 0
-    n_dof = _n_dof_thermostated(
-      n_atoms, n_waters, n_constraint_pairs=n_constraint_pairs, remove_com=remove_com
+      ke_total = 0.5 * jnp.sum(momentum**2 / safe_mass)
+      n_real_atoms = n_atoms
+    if water_indices is not None and n_waters > 0:
+      n_real_waters = (
+        jnp.sum(jnp.asarray(water_mask, dtype=jnp.int32))
+        if water_mask is not None
+        else n_waters
+      )
+    else:
+      n_real_waters = 0
+    if constraints is not None:
+      c_pairs, _, c_mask = unpack_constraints(constraints)
+      n_active_constraints = (
+        jnp.sum(jnp.asarray(c_mask, dtype=jnp.int32))
+        if c_mask is not None
+        else c_pairs.shape[0]
+      )
+    else:
+      n_active_constraints = n_constraint_pairs
+    n_dof = (
+      3 * n_real_atoms
+      - 3 * n_real_waters
+      - n_active_constraints
+      - (3 if remove_com else 0)
     )
-
-    # Draw chi-squared and compute lambda (use 'key' from barostat split, not state.key)
     lambda_factor, key_out = _csvr_compute_lambda(
-      key, ke_total, n_dof, _kT, _dt, tau_thermostat_akma
+      key, ke_total, n_dof, _kT, _dt, tau_thermostat_akma, max_chi_dof=3 * n_atoms
     )
 
     # Apply rescaling
     momentum = _csvr_rescale_momenta(momentum, lambda_factor)
+    if atom_mask is not None:
+      mask_col = jnp.asarray(atom_mask, dtype=jnp.bool_)[:, None]
+      momentum = jnp.where(mask_col, momentum, 0.0)
+      position = jnp.where(mask_col, position, positions_old)
 
     return NPTState(position, momentum, force, state.mass, key_out, new_box)
 

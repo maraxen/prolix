@@ -31,10 +31,29 @@ from jax_md import space
 from prolix.batched_energy import (
     _angle_energy_masked,
     _bond_energy_masked,
+    _cmap_energy_masked,
     _dihedral_energy_masked,
     single_padded_energy,
     single_padded_force,
+    solve_ewald_alpha,
 )
+from prolix.pallas_kernels import resolve_pallas_mode
+
+try:
+    from prolix.pallas_kernels import (
+        pallas_angles_harmonic,
+        pallas_bonds_2body,
+        pallas_cmap_torsions,
+        pallas_exceptions_14,
+        pallas_torsions_4body,
+    )
+except ImportError:
+    pallas_angles_harmonic = None  # type: ignore[assignment]
+    pallas_bonds_2body = None  # type: ignore[assignment]
+    pallas_cmap_torsions = None  # type: ignore[assignment]
+    pallas_exceptions_14 = None  # type: ignore[assignment]
+    pallas_torsions_4body = None  # type: ignore[assignment]
+from prolix.physics.pbc import create_periodic_space
 from prolix.types.bundles import MolecularBundle, atom_pad_length, water_pad_length
 from prolix.typing import PhysicsSystem
 
@@ -50,8 +69,24 @@ def _exception_energy_masked(
     chargeprods: jnp.ndarray,
     mask: jnp.ndarray,
     displacement_fn: space.DisplacementFn,
+    *,
+    use_pallas: bool | None = None,
+    box: jnp.ndarray | None = None,
 ) -> jnp.ndarray:
     """1-4 exception LJ+Coulomb with per-pair mask (padded EXCEPTION_BUCKETS)."""
+    pallas_enabled, interpret = resolve_pallas_mode(use_pallas=use_pallas)
+    if pallas_enabled and pallas_exceptions_14 is not None:
+        return pallas_exceptions_14(
+            r,
+            pairs,
+            sigmas,
+            epsilons,
+            chargeprods,
+            mask,
+            box=box,
+            soft_core_lambda=1.0,
+            interpret=interpret,
+        )
     i = pairs[:, 0].astype(jnp.int32)
     j = pairs[:, 1].astype(jnp.int32)
     n = r.shape[0]
@@ -61,12 +96,14 @@ def _exception_energy_masked(
     ri = r[i_safe]
     rj = r[j_safe]
     dr = jax.vmap(displacement_fn)(ri, rj)
-    dist = jnp.sqrt(jnp.sum(dr**2, axis=-1) + jnp.float32(1e-12))
+    active = (mask > 0) & (i >= 0) & (j >= 0) & (i < n) & (j < n) & (i != j)
+    dist_raw = jnp.sqrt(jnp.sum(dr**2, axis=-1) + jnp.asarray(1e-12, dtype=r.dtype))
+    dist = jnp.where(active, dist_raw, jnp.ones_like(dist_raw))
     inv_r = sigmas / dist
     inv_r6 = inv_r**6
-    e_lj = jnp.float32(4.0) * epsilons * (inv_r6**2 - inv_r6)
-    e_coul = jnp.float32(_EXCEPTION_COULOMB) * chargeprods / dist
-    return jnp.sum((e_lj + e_coul) * mask.astype(r.dtype))
+    e_lj = jnp.asarray(4.0, dtype=r.dtype) * epsilons * (inv_r6**2 - inv_r6)
+    e_coul = jnp.asarray(_EXCEPTION_COULOMB, dtype=r.dtype) * chargeprods / dist
+    return jnp.sum(jnp.where(active, (e_lj + e_coul) * mask.astype(r.dtype), 0.0))
 
 
 def atom_bucket_size(bundle: MolecularBundle) -> int:
@@ -174,6 +211,8 @@ def pbc_box_for_bundle(bundle: MolecularBundle) -> jnp.ndarray | None:
     """
     spec = bundle.shape_spec
     if spec.boundary_condition == "periodic" and spec.has_pbc:
+        if getattr(spec, "is_triclinic", False):
+            return bundle.box
         return jnp.diag(bundle.box)
     return None
 
@@ -184,6 +223,8 @@ def displacement_fn_for_bundle(
     """Reconstruct JAX-MD displacement and shift from bundle shape_spec."""
     box_vec = pbc_box_for_bundle(bundle)
     if box_vec is not None:
+        if box_vec.ndim == 2:
+            return create_periodic_space(box_vec)
         return space.periodic(box_vec)
     return space.free()
 
@@ -222,24 +263,108 @@ def water_indices_for_integration(bundle: MolecularBundle) -> jnp.ndarray | None
 
 def bonded_energy_fn_from_bundle(
     bundle: MolecularBundle,
+    *,
+    use_pallas: bool | None = None,
 ) -> Callable[..., jnp.ndarray]:
     """Bonded-only energy callable compatible with settle_langevin."""
-    return _bonded_energy_core(bundle)
+    return _bonded_energy_core(bundle, use_pallas=use_pallas)
 
 
-def _bonded_energy_core(bundle: MolecularBundle) -> Callable[..., jnp.ndarray]:
+def _bonded_energy_core(
+    bundle: MolecularBundle,
+    *,
+    use_pallas: bool | None = None,
+) -> Callable[..., jnp.ndarray]:
     disp_fn, _ = displacement_fn_for_bundle(bundle)
+    pallas_enabled, interpret = resolve_pallas_mode(use_pallas=use_pallas)
+    _has_pallas_bonded = (
+        pallas_bonds_2body is not None
+        and pallas_angles_harmonic is not None
+        and pallas_torsions_4body is not None
+        and pallas_cmap_torsions is not None
+    )
 
     def energy_fn(positions: jnp.ndarray, **kwargs: object) -> jnp.ndarray:
         del kwargs
         r = positions
         mask_dtype = r.dtype
         e = jnp.array(0.0, dtype=r.dtype)
+        if pallas_enabled and _has_pallas_bonded:
+            box_vec = pbc_box_for_bundle(bundle)
+            e = e + pallas_bonds_2body(
+                r,
+                bundle.bond_idx,
+                bundle.bond_params,
+                bundle.bond_mask.astype(mask_dtype),
+                box=box_vec,
+                dist_eps=1e-10,
+                interpret=interpret,
+            )
+            e = e + pallas_angles_harmonic(
+                r,
+                bundle.angle_idx,
+                bundle.angle_params,
+                bundle.angle_mask.astype(mask_dtype),
+                box=box_vec,
+                dist_eps=1e-10,
+                interpret=interpret,
+            )
+            dih_params = bundle.dihedral_params[..., :3]
+            e = e + pallas_torsions_4body(
+                r,
+                bundle.dihedral_idx,
+                dih_params,
+                bundle.dihedral_mask.astype(mask_dtype),
+                box=box_vec,
+                b0_is_ji=True,
+                is_harmonic=False,
+                interpret=interpret,
+            )
+            e = e + pallas_torsions_4body(
+                r,
+                bundle.improper_idx,
+                bundle.improper_params,
+                bundle.improper_mask.astype(mask_dtype),
+                box=box_vec,
+                b0_is_ji=True,
+                is_harmonic=False,
+                interpret=interpret,
+            )
+            ub_idx_2 = bundle.urey_bradley_idx[:, ::2] if bundle.urey_bradley_idx.shape[-1] == 3 else bundle.urey_bradley_idx[:, :2]
+            e = e + pallas_bonds_2body(
+                r,
+                ub_idx_2,
+                bundle.urey_bradley_params,
+                bundle.urey_bradley_mask.astype(mask_dtype),
+                box=box_vec,
+                dist_eps=1e-10,
+                interpret=interpret,
+            )
+            if bundle.cmap_coeffs is not None and bundle.cmap_indices is not None:
+                e = e + pallas_cmap_torsions(
+                    r,
+                    bundle.cmap_torsion_idx,
+                    bundle.cmap_indices,
+                    bundle.cmap_mask.astype(mask_dtype),
+                    bundle.cmap_coeffs,
+                    box=box_vec,
+                    first_is_psi=False,
+                    interpret=interpret,
+                )
+            return e
         e = e + _bond_energy_masked(
             r,
             bundle.bond_idx,
             bundle.bond_params,
             bundle.bond_mask.astype(mask_dtype),
+            disp_fn,
+        )
+        ub_idx_2 = bundle.urey_bradley_idx[:, ::2] if bundle.urey_bradley_idx.shape[-1] == 3 else bundle.urey_bradley_idx[:, :2]
+        e = e + _bond_energy_masked(
+            r,
+            ub_idx_2,
+            bundle.urey_bradley_params,
+            bundle.urey_bradley_mask.astype(mask_dtype),
             disp_fn,
         )
         e = e + _angle_energy_masked(
@@ -264,6 +389,16 @@ def _bonded_energy_core(bundle: MolecularBundle) -> Callable[..., jnp.ndarray]:
             bundle.improper_mask.astype(mask_dtype),
             disp_fn,
         )
+        if bundle.cmap_coeffs is not None and bundle.cmap_indices is not None:
+            e = e + _cmap_energy_masked(
+                r,
+                bundle.cmap_torsion_idx,
+                bundle.cmap_indices,
+                bundle.cmap_mask.astype(mask_dtype),
+                bundle.cmap_coeffs,
+                disp_fn,
+                first_is_psi=False,
+            )
         return e
 
     return energy_fn
@@ -335,6 +470,15 @@ def _host_box_size(bundle: MolecularBundle, default: tuple[float, float, float])
     every periodic system this codebase currently constructs, not a general
     fix for arbitrarily-varying box sizes within one stacked group.
     """
+    if getattr(bundle.shape_spec, "is_triclinic", False):
+        box_arr = jnp.asarray(bundle.box)
+        try:
+            return np.array(
+                [[float(box_arr[i, j]) for j in range(3)] for i in range(3)],
+                dtype=np.float64,
+            )
+        except (TypeError, ValueError, jax.errors.ConcretizationTypeError):
+            return np.diag(np.array(default, dtype=np.float64))
     diag = jnp.diag(jnp.asarray(bundle.box))
     try:
         # jnp.diag itself never raises under tracing (it's a normal traced op)
@@ -405,10 +549,11 @@ def _dense_excl_matrices_from_bundle(
 
 def physics_system_from_bundle(
     bundle: MolecularBundle,
-    positions: jnp.ndarray,
+    positions: jnp.ndarray | None = None,
     pme_grid_points: int = 64,
     *,
     build_dense_exclusions: bool = True,
+    knob_surface: object | None = None,
 ) -> PhysicsSystem:
     """Reconstruct a PhysicsSystem view for ``single_padded_energy``.
 
@@ -427,6 +572,9 @@ def physics_system_from_bundle(
     avoid the allocation when using flash or neighbor-list paths. Default is True
     to preserve existing behavior for all callers.
     """
+    bundle_pos = bundle.positions
+    if positions is None:
+        positions = bundle_pos
     n = int(positions.shape[0])
     n_real = jnp.asarray(bundle.n_atoms, dtype=jnp.int32)
 
@@ -445,8 +593,12 @@ def physics_system_from_bundle(
     else:
         flat_imp = imp_params[..., :3]
 
+    is_periodic = (
+        bundle.shape_spec.boundary_condition == "periodic"
+        and bundle.shape_spec.has_pbc
+    )
     box_size = None
-    if bundle.shape_spec.has_pbc:
+    if is_periodic:
         box_size = _host_box_size(bundle, _DEFAULT_PBC_BOX_SIZE)
         # _host_box_size now returns plain numpy (debt 770 follow-up), so
         # this dtype check/cast is host-side numpy, not a jax op -- it never
@@ -521,8 +673,41 @@ def physics_system_from_bundle(
     # a parity test validated 0.34 through a non-vmapped single-bundle call, which does
     # not exercise this fallback at all, so it did not catch that the real vmapped B1
     # dispatch would silently use a different (and disagreeing-with-OpenMM) alpha.
-    pme_alpha = _host_float(bundle.pme_alpha, 0.0 if not bundle.shape_spec.has_pbc else 0.34)
+    pme_alpha = _host_float(bundle.pme_alpha, 0.0 if not is_periodic else 0.34)
     nonbonded_cutoff = _host_float(bundle.cutoff_distance, 9.0)
+    ub_idx_2 = (
+        bundle.urey_bradley_idx[:, ::2]
+        if bundle.urey_bradley_idx.shape[-1] == 3
+        else bundle.urey_bradley_idx[:, :2]
+    )
+    water_r_oh = _host_float(bundle.water_r_OH, 0.9572) if bundle.water_r_OH is not None else 0.9572
+    water_r_hh = _host_float(bundle.water_r_HH, 1.5139) if bundle.water_r_HH is not None else 1.5139
+
+    extra_kwargs: dict[str, object] = {}
+    if knob_surface is not None:
+        lowered = lower_knob_surface(knob_surface)
+        nonbonded_cutoff = float(lowered.get("cutoff_angstrom", nonbonded_cutoff))
+        pme_alpha = float(lowered.get("pme_alpha", pme_alpha))
+        extra_kwargs.update(
+            {
+                "lj_switch_width": float(lowered.get("switch_width_angstrom", 0.0)),
+                "use_dispersion_correction": bool(lowered.get("dispersion_correction", True)),
+                "electrostatic_method": str(lowered.get("nonbonded_method", "pme")),
+                "reaction_field_dielectric": float(lowered.get("reaction_field_dielectric", 78.3)),
+                "dsf_alpha": float(lowered.get("dsf_alpha") or 0.2),
+                "solvent_dielectric": float(lowered.get("solvent_dielectric", 78.5)),
+                "solute_dielectric": float(lowered.get("solute_dielectric", 1.0)),
+                "dielectric_offset": float(lowered.get("dielectric_offset_angstrom", 0.09)),
+                "surface_tension": float(lowered.get("surface_tension_kcal_mol_a2", 0.005)),
+                "softcore_alpha": float(lowered.get("softcore_alpha", 0.5)),
+                "softcore_exponent": int(lowered.get("softcore_exponent", 2)),
+                "cosolvent_repulsive_eps": float(lowered.get("repulsive_eps_kcal", 0.01)),
+                "cosolvent_repulsive_r0": float(lowered.get("repulsive_r0_angstrom", 10.0)),
+                "cosolvent_repulsive_cutoff": float(lowered.get("repulsive_cutoff_angstrom", 9.0)),
+                "deduplicate_interaction_groups": bool(lowered.get("deduplicate_interaction_groups", False)),
+                "pme_grid_dims": lowered.get("pme_grid_dims"),
+            }
+        )
 
     return PhysicsSystem(
         positions=positions,
@@ -551,11 +736,13 @@ def physics_system_from_bundle(
         impropers=bundle.improper_idx,
         improper_params=flat_imp,
         improper_mask=bundle.improper_mask,
-        urey_bradley_bonds=bundle.urey_bradley_idx,
+        urey_bradley_bonds=ub_idx_2,
         urey_bradley_params=bundle.urey_bradley_params,
         urey_bradley_mask=bundle.urey_bradley_mask,
         water_indices=bundle.water_indices,
         water_mask=bundle.water_mask,
+        water_r_OH=water_r_oh,
+        water_r_HH=water_r_hh,
         n_real_atoms=jnp.minimum(jnp.asarray(n, dtype=jnp.int32), n_real),
         n_padded_atoms=n,
         box_size=box_size,
@@ -570,6 +757,22 @@ def physics_system_from_bundle(
         excl_pair_indices=excl_pair_indices,
         excl_pair_scales_vdw=bundle.excl_scales_vdw,
         excl_pair_scales_elec=bundle.excl_scales_elec,
+        exception_pairs=bundle.exception_pairs,
+        exception_sigmas=bundle.exception_sigmas,
+        exception_epsilons=bundle.exception_epsilons,
+        exception_chargeprods=bundle.exception_chargeprods,
+        exception_mask=bundle.exception_mask,
+        cmap_torsions=bundle.cmap_torsion_idx,
+        cmap_energy_grids=bundle.cmap_energy_grids,
+        cmap_indices=bundle.cmap_indices,
+        cmap_mask=bundle.cmap_mask,
+        cmap_coeffs=bundle.cmap_coeffs,
+        constraint_pairs=bundle.constraint_pairs,
+        constraint_lengths=bundle.constraint_lengths,
+        constraint_mask=bundle.constraint_mask,
+        cosolvent_mol_id=_slice1(bundle.molecule_id) if bundle.molecule_id is not None else None,
+        cosolvent_group_id=_slice1(bundle.cosolvent_group_id) if bundle.cosolvent_group_id is not None else None,
+        **extra_kwargs,
     )
 
 
@@ -581,6 +784,8 @@ def energy_fn_from_bundle(
     pme_grid_points: int = 64,
     build_dense_exclusions: bool = True,
     use_dispersion_correction: bool = True,
+    use_pallas: bool | None = None,
+    use_pallas_pme: bool | None = None,
 ) -> Callable[..., jnp.ndarray]:
     """Total energy from bundle fields (bonded + optional nonbonded via ``single_padded_energy``).
 
@@ -601,7 +806,7 @@ def energy_fn_from_bundle(
     fall back to rebuilding the matrices per step via ``_build_dense_exclusion_scales``.
     """
     if not include_nonbonded:
-        return bonded_energy_fn_from_bundle(bundle)
+        return bonded_energy_fn_from_bundle(bundle, use_pallas=use_pallas)
 
     disp_fn, _ = displacement_fn_for_bundle(bundle)
     _lj_sw = float(lj_switch_width)
@@ -617,29 +822,31 @@ def energy_fn_from_bundle(
         # which may pass conventional extra kwargs like `t`/`box` this function
         # doesn't use).
         neighbor = kwargs.pop("neighbor", None)
+        dyn_box = kwargs.pop("box", None)
         del kwargs
         sys = physics_system_from_bundle(
             bundle, positions, pme_grid_points=_pme_grid,
             build_dense_exclusions=_build_dense,
         )
-        e = single_padded_energy(
+        cur_disp_fn = disp_fn
+        if dyn_box is not None:
+            dyn_box_arr = jnp.asarray(dyn_box)
+            cur_disp_fn, _ = (
+                create_periodic_space(dyn_box_arr)
+                if dyn_box_arr.ndim == 2
+                else space.periodic(dyn_box_arr)
+            )
+            sys = sys.replace(box_size=dyn_box)
+        return single_padded_energy(
             sys,
-            disp_fn,
-            implicit_solvent=False,
+            cur_disp_fn,
+            implicit_solvent=bool(bundle.shape_spec.has_implicit_solvent),
             neighbor=neighbor,
             lj_switch_width=_lj_sw,
             use_dispersion_correction=_use_disp,
+            use_pallas=use_pallas,
+            use_pallas_pme=use_pallas_pme,
         )
-        e = e + _exception_energy_masked(
-            positions,
-            bundle.exception_pairs,
-            bundle.exception_sigmas,
-            bundle.exception_epsilons,
-            bundle.exception_chargeprods,
-            bundle.exception_mask,
-            disp_fn,
-        )
-        return e
 
     return energy_fn
 
@@ -649,6 +856,7 @@ def force_fn_from_bundle(
     *,
     flash_tile_size: int = 256,
     flash_remat: bool = True,
+    use_pallas: bool | None = None,
 ) -> Callable[..., jnp.ndarray]:
     """Analytical/FlashMD forces from bundle fields (debt 761).
 
@@ -660,10 +868,8 @@ def force_fn_from_bundle(
     ``single_padded_force(..., use_flash=True)`` -- FlashMD's tiled,
     checkpointed direct-space kernel (``flash_explicit_forces``) -- instead
     of ``jax.grad`` through ``single_padded_energy``'s dense O(N^2) energy.
-    The AMBER 1-4 exception term (absent from ``single_padded_force`` itself)
-    is added back via a cheap ``jax.grad`` pass, mirroring
-    ``energy_fn_from_bundle``'s own handling, so this is a faithful,
-    physics-complete substitute -- not merely the non-bonded term.
+    The AMBER 1-4 exception term is evaluated directly inside
+    ``single_padded_force`` via ``sys.exception_*``.
 
     Verified (2026-07-19) to float32 precision (rel diff ~1.3e-5) against
     ``-jax.grad(energy_fn_from_bundle(bundle))`` on real periodic,
@@ -705,7 +911,7 @@ def force_fn_from_bundle(
         del kwargs
         # Avoid per-step O(N²) allocation: flash kernel uses sparse excl_indices.
         sys = physics_system_from_bundle(bundle, positions, build_dense_exclusions=False)
-        f = single_padded_force(
+        return single_padded_force(
             sys,
             disp_fn,
             implicit_solvent=False,
@@ -713,18 +919,159 @@ def force_fn_from_bundle(
             use_flash=True,
             flash_tile_size=flash_tile_size,
             flash_remat=flash_remat,
+            use_pallas=use_pallas,
         )
-        f_exception = -jax.grad(
-            lambda r: _exception_energy_masked(
-                r,
-                bundle.exception_pairs,
-                bundle.exception_sigmas,
-                bundle.exception_epsilons,
-                bundle.exception_chargeprods,
-                bundle.exception_mask,
-                disp_fn,
-            )
-        )(positions)
-        return f + f_exception
 
     return force_fn
+
+
+def lower_knob_surface(
+    surface: object,
+    *,
+    nonbonded_config: object | None = None,
+) -> dict[str, object]:
+    """Lower a :class:`~prolix.knob_surface.KnobSurface` into consumer runtime kwargs.
+
+    Reads all 9 sub-surfaces of ``KnobSurface`` (plus optional ``NonbondedConfig`` /
+    ``NeighborListConfig`` overrides) and returns a normalized dictionary of
+    consumer configuration kwargs for ``PhysicsSystem``, ``EnsemblePlan``,
+    barostats, softcore minimizers, cosolvent packers, and collective-variable
+    biases. Raises ``NotImplementedError`` if ``barostat.anisotropic`` is ``True``.
+    """
+    thermostat = getattr(surface, "thermostat", surface)
+    barostat = getattr(surface, "barostat", surface)
+    nonbonded = getattr(surface, "nonbonded", surface)
+    implicit_solvent = getattr(surface, "implicit_solvent", surface)
+    constraints = getattr(surface, "constraints", surface)
+    cosolvent = getattr(surface, "cosolvent", surface)
+    softcore = getattr(surface, "softcore_restraints", surface)
+    cv_bias = getattr(surface, "cv_bias", surface)
+    pallas = getattr(surface, "pallas", surface)
+
+    if bool(getattr(barostat, "anisotropic", False)):
+        raise NotImplementedError(
+            "Anisotropic barostat is not supported in Prolix; set anisotropic=False."
+        )
+
+    nb_engine = getattr(nonbonded_config, "engine", None)
+    nl_cfg = getattr(nonbonded_config, "neighbor_list", None)
+    nl_switch = (
+        getattr(nl_cfg, "switch_width", None)
+        if nl_cfg is not None
+        else None
+    )
+    eff_switch_width = (
+        float(nl_switch)
+        if nl_switch is not None
+        else float(getattr(nonbonded, "switch_width_angstrom", 0.0))
+    )
+
+    return {
+        # ThermostatControls
+        "integrator_method": str(getattr(thermostat, "integrator_method", "settle_langevin")),
+        "temperature_k": float(getattr(thermostat, "temperature_k", 300.0)),
+        "gamma_inv_ps": float(getattr(thermostat, "gamma_inv_ps", 1.0)),
+        "timestep_fs": float(getattr(thermostat, "timestep_fs", 2.0)),
+        "n_steps": int(getattr(thermostat, "n_steps", 1000)),
+        "save_interval": int(getattr(thermostat, "save_interval", 500)),
+        "seed": int(getattr(thermostat, "seed", 0)),
+        # BarostatControls
+        "pressure_atm": getattr(barostat, "pressure_atm", None),
+        "barostat_method": str(getattr(barostat, "barostat_method", "mc")),
+        "barostat_interval": int(getattr(barostat, "barostat_interval", 25)),
+        "anisotropic": bool(getattr(barostat, "anisotropic", False)),
+        "compressibility_inv_bar": float(getattr(barostat, "compressibility_inv_bar", 4.5e-5)),
+        "tau_p_ps": float(getattr(barostat, "tau_p_ps", 1.0)),
+        # NonbondedControls & NonbondedConfig
+        "nonbonded_method": str(getattr(nonbonded, "nonbonded_method", "pme")),
+        "engine": str(nb_engine.value if hasattr(nb_engine, "value") else (nb_engine or "dense")),
+        "cutoff_angstrom": float(getattr(nonbonded, "cutoff_angstrom", 9.0)),
+        "switch_width_angstrom": eff_switch_width,
+        "ewald_error_tolerance": float(getattr(nonbonded, "ewald_error_tolerance", 5e-4)),
+        "pme_alpha": (
+            solve_ewald_alpha(
+                float(getattr(nonbonded, "cutoff_angstrom", 9.0)),
+                float(getattr(nonbonded, "ewald_error_tolerance", 5e-4)),
+            )
+            if getattr(nonbonded, "pme_alpha", None) is None
+            or (
+                abs(float(getattr(nonbonded, "pme_alpha", 0.34)) - 0.34) < 1e-9
+                and abs(float(getattr(nonbonded, "ewald_error_tolerance", 5e-4)) - 5e-4) > 1e-12
+            )
+            else float(getattr(nonbonded, "pme_alpha", 0.34))
+        ),
+        "solved_ewald_alpha": solve_ewald_alpha(
+            float(getattr(nonbonded, "cutoff_angstrom", 9.0)),
+            float(getattr(nonbonded, "ewald_error_tolerance", 5e-4)),
+        ),
+        "pme_grid_dims": getattr(nonbonded, "pme_grid_dims", None),
+        "dispersion_correction": bool(getattr(nonbonded, "dispersion_correction", True)),
+        "reaction_field_dielectric": float(getattr(nonbonded, "reaction_field_dielectric", 78.3)),
+        "dsf_alpha": getattr(nonbonded, "dsf_alpha", None),
+        "coulomb_constant": float(getattr(nonbonded, "coulomb_constant", 332.0637)),
+        "scale_14_lj": float(getattr(nonbonded, "scale_14_lj", 0.5)),
+        "scale_14_elec": float(getattr(nonbonded, "scale_14_elec", 0.8333333333333334)),
+        # ImplicitSolventControls
+        "solvent_model": getattr(implicit_solvent, "solvent_model", None),
+        "solvent_dielectric": float(getattr(implicit_solvent, "solvent_dielectric", 78.5)),
+        "solute_dielectric": float(getattr(implicit_solvent, "solute_dielectric", 1.0)),
+        "obc_alpha": float(getattr(implicit_solvent, "obc_alpha", 1.0)),
+        "obc_beta": float(getattr(implicit_solvent, "obc_beta", 0.8)),
+        "obc_gamma": float(getattr(implicit_solvent, "obc_gamma", 4.85)),
+        "surface_tension_kcal_mol_a2": float(
+            getattr(implicit_solvent, "surface_tension_kcal_mol_a2", 0.005)
+        ),
+        "probe_radius_angstrom": float(getattr(implicit_solvent, "probe_radius_angstrom", 1.4)),
+        "dielectric_offset_angstrom": float(
+            getattr(implicit_solvent, "dielectric_offset_angstrom", 0.09)
+        ),
+        "salt_concentration_m": float(getattr(implicit_solvent, "salt_concentration_m", 0.0)),
+        "kappa_inv_angstrom": float(getattr(implicit_solvent, "kappa_inv_angstrom", 0.0)),
+        # ConstraintControls
+        "constraint_mode": str(getattr(constraints, "constraint_mode", "hbonds")),
+        "rigid_water": bool(getattr(constraints, "rigid_water", True)),
+        "r_oh_angstrom": float(getattr(constraints, "r_oh_angstrom", 0.9572)),
+        "r_hh_angstrom": float(getattr(constraints, "r_hh_angstrom", 1.5139)),
+        "shake_tolerance": float(getattr(constraints, "shake_tolerance", 1e-5)),
+        "rattle_tolerance": float(getattr(constraints, "rattle_tolerance", 1e-5)),
+        "max_shake_iterations": int(getattr(constraints, "max_shake_iterations", 50)),
+        # CosolventControls
+        "cosolvent_entries": tuple(getattr(cosolvent, "cosolvent_entries", ())),
+        "protein_radius_angstrom": float(getattr(cosolvent, "protein_radius_angstrom", 5.5)),
+        "cosolvent_placement_radius_angstrom": float(
+            getattr(cosolvent, "cosolvent_placement_radius_angstrom", 2.5)
+        ),
+        "repulsive_eps_kcal": float(getattr(cosolvent, "repulsive_eps_kcal", 0.01)),
+        "repulsive_r0_angstrom": float(getattr(cosolvent, "repulsive_r0_angstrom", 10.0)),
+        "repulsive_cutoff_angstrom": float(getattr(cosolvent, "repulsive_cutoff_angstrom", 9.0)),
+        "deduplicate_interaction_groups": bool(
+            getattr(cosolvent, "deduplicate_interaction_groups", False)
+        ),
+        # SoftcoreRestraintControls
+        "lambda_schedule": tuple(getattr(softcore, "lambda_schedule", ())),
+        "softcore_alpha": float(getattr(softcore, "softcore_alpha", 0.5)),
+        "softcore_exponent": int(getattr(softcore, "softcore_exponent", 2)),
+        "soft_coulomb": bool(getattr(softcore, "soft_coulomb", False)),
+        "restraint_selection": str(getattr(softcore, "restraint_selection", "none")),
+        "restraint_k_kcal_mol_a2": float(getattr(softcore, "restraint_k_kcal_mol_a2", 0.0)),
+        "flat_bottom_radius_angstrom": float(
+            getattr(softcore, "flat_bottom_radius_angstrom", 0.0)
+        ),
+        "per_stage_max_iterations": int(getattr(softcore, "per_stage_max_iterations", 500)),
+        "tolerance_kcal_mol_a": float(getattr(softcore, "tolerance_kcal_mol_a", 2.390057)),
+        # CollectiveVariableBiasControls
+        "cv_specs": tuple(getattr(cv_bias, "cv_specs", ())),
+        "bias_mode": str(getattr(cv_bias, "bias_mode", "none")),
+        "umbrella_k": float(getattr(cv_bias, "umbrella_k", 0.0)),
+        "umbrella_center": float(getattr(cv_bias, "umbrella_center", 0.0)),
+        "smd_velocity": float(getattr(cv_bias, "smd_velocity", 0.0)),
+        "metad_height": float(getattr(cv_bias, "metad_height", 0.0)),
+        "metad_sigma": float(getattr(cv_bias, "metad_sigma", 0.05)),
+        "metad_bias_factor": float(getattr(cv_bias, "metad_bias_factor", 10.0)),
+        "metad_pace": int(getattr(cv_bias, "metad_pace", 500)),
+        "plumed_min_beta_nm": float(getattr(cv_bias, "plumed_min_beta_nm", 20.0)),
+        # PallasControls
+        "use_pallas": getattr(pallas, "use_pallas", None),
+        "use_pallas_pme": getattr(pallas, "use_pallas_pme", None),
+        "gb_use_neighbor_list": bool(getattr(pallas, "gb_use_neighbor_list", False)),
+    }

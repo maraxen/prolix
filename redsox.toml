@@ -1,0 +1,257 @@
+# redsox Tier B Static Control-Knob Governance Configuration (U1 + U5)
+target_package = "prolix"
+target_source_root = "src/prolix"
+target_dataclasses = [
+    "prolix.knob_surface.KnobSurface",
+    "prolix.simulate.SimulationSpec",
+    "prolix.physics.spec.PhysicsSpec",
+    "prolix.physics.nonbonded_config.NonbondedConfig",
+    "prolix.physics.nonbonded_config.NeighborListConfig",
+]
+consumer_module_globs = [
+    "src/prolix/physics/**/*.py",
+    "src/prolix/api/**/*.py",
+    "src/prolix/pallas_kernels.py",
+    "src/prolix/batched_energy.py",
+    "src/prolix/batched_simulate.py",
+]
+vendor_source_root = "../naurmalade/src"
+vendor_reference_classes = [
+    "naurmalade.simulation.config.SimulationConfig",
+    "naurmalade.simulation.config.EquilibrationConfig",
+    "naurmalade.simulation.config.MinimizationConfig",
+    "naurmalade.simulation.config.ProductionConfig",
+    "naurmalade.simulation.config.ImplicitSolventConfig",
+    "naurmalade.simulation.config.HMRConfig",
+    "naurmalade.simulation.config.EnsembleConfig",
+    "naurmalade.simulation.config.IntegratorConfig",
+    "naurmalade.simulation.config.ForceFieldConfig",
+    "naurmalade.simulation.config.NonbondedConfig",
+    "naurmalade.simulation.config.BiasSpec",
+    "naurmalade.minimization.restraints.RestraintSpec",
+    "naurmalade.minimization.softcore.LambdaSchedule",
+    "naurmalade.minimization.softcore.SoftcoreSweepStep",
+    "naurmalade.cosolv.config.CosolvConfig",
+    "naurmalade.cosolv.config.CosolvEntry",
+]
+sibling_parity_governed = false
+
+[reachability]
+config_classes = [
+    "prolix.knob_surface.KnobSurface",
+    "prolix.knob_surface.ThermostatControls",
+    "prolix.knob_surface.BarostatControls",
+    "prolix.knob_surface.NonbondedControls",
+    "prolix.knob_surface.ImplicitSolventControls",
+    "prolix.knob_surface.ConstraintControls",
+    "prolix.knob_surface.CosolventControls",
+    "prolix.knob_surface.SoftcoreRestraintControls",
+    "prolix.knob_surface.CollectiveVariableBiasControls",
+    "prolix.knob_surface.PallasControls",
+    "prolix.simulate.SimulationSpec",
+    "prolix.physics.spec.PhysicsSpec",
+    "prolix.physics.nonbonded_config.NonbondedConfig",
+    "prolix.physics.nonbonded_config.NeighborListConfig",
+]
+consumer_paths = [
+    "src/prolix/physics",
+    "src/prolix/api",
+    "src/prolix/pallas_kernels.py",
+    "src/prolix/batched_energy.py",
+    "src/prolix/batched_simulate.py",
+]
+exclude_files = [
+    "knob_surface.py",
+    "nonbonded_config.py",
+    "spec.py",
+    "simulate.py",
+]
+
+[superset_parity]
+target_dataclass = "prolix.knob_surface.KnobSurface"
+sibling_parity_governed = false
+vendor_reference_classes = [
+    "naurmalade.simulation.config.SimulationConfig",
+    "naurmalade.simulation.config.EquilibrationConfig",
+    "naurmalade.simulation.config.MinimizationConfig",
+    "naurmalade.simulation.config.ProductionConfig",
+    "naurmalade.simulation.config.ImplicitSolventConfig",
+    "naurmalade.simulation.config.HMRConfig",
+    "naurmalade.simulation.config.EnsembleConfig",
+    "naurmalade.simulation.config.IntegratorConfig",
+    "naurmalade.simulation.config.ForceFieldConfig",
+    "naurmalade.simulation.config.NonbondedConfig",
+    "naurmalade.simulation.config.BiasSpec",
+    "naurmalade.minimization.restraints.RestraintSpec",
+    "naurmalade.minimization.softcore.LambdaSchedule",
+    "naurmalade.minimization.softcore.SoftcoreSweepStep",
+    "naurmalade.cosolv.config.CosolvConfig",
+    "naurmalade.cosolv.config.CosolvEntry",
+    "prolix.simulate.SimulationSpec",
+    "prolix.physics.nonbonded_config.NonbondedConfig",
+    "prolix.governance.redsox_adapter.PMEParams",
+    "prolix.governance.redsox_adapter.ImplicitSolventParams",
+]
+
+[superset_alias_map]
+integrator = "integrator_method"
+thermostat = "integrator_method"
+ensemble = "integrator_method"
+temperature = "temperature_k"
+temp_k = "temperature_k"
+kT = "temperature_k"
+temp_start_k = "temperature_k"
+temp_end_k = "temperature_k"
+heating_steps = "n_steps"
+equilibration_steps = "n_steps"
+production_steps = "n_steps"
+equilibration_phase_ps = "n_steps"
+total_time_ns = "n_steps"
+duration_ns = "n_steps"
+duration_ps = "n_steps"
+friction = "gamma_inv_ps"
+friction_per_ps = "gamma_inv_ps"
+gamma = "gamma_inv_ps"
+tau = "gamma_inv_ps"
+chain_length = "integrator_method"
+chain_steps = "integrator_method"
+n_nhc_chains = "integrator_method"
+timestep = "timestep_fs"
+dt = "timestep_fs"
+dt_fs = "timestep_fs"
+step_size_fs = "timestep_fs"
+n_report = "save_interval"
+report_interval = "save_interval"
+save_every = "save_interval"
+save_interval_ns = "save_interval"
+trajectory_interval_ps = "save_interval"
+random_seed = "seed"
+pressure = "pressure_atm"
+pressure_bar = "pressure_atm"
+target_pressure_bar = "pressure_atm"
+barostat = "barostat_method"
+compressibility = "compressibility_inv_bar"
+tau_barostat = "tau_p_ps"
+method = "nonbonded_method"
+electrostatic_method = "nonbonded_method"
+engine = "nonbonded_method"
+use_pbc = "nonbonded_method"
+has_pbc = "nonbonded_method"
+box = "nonbonded_method"
+cutoff = "cutoff_angstrom"
+cutoff_nm = "cutoff_angstrom"
+neighbor_cutoff = "cutoff_angstrom"
+cutoff_distance = "cutoff_angstrom"
+switch_width = "switch_width_angstrom"
+switching_distance_nm = "switch_width_angstrom"
+switch_distance_angstrom = "switch_width_angstrom"
+use_switching_function = "switch_width_angstrom"
+alpha = "pme_alpha"
+grid_spacing = "pme_grid_dims"
+pme_grid_spacing = "pme_grid_dims"
+pme_grid_size = "pme_grid_dims"
+pme_grid_points = "pme_grid_dims"
+grid_dims = "pme_grid_dims"
+order = "pme_grid_dims"
+pme_order = "pme_grid_dims"
+use_dispersion_correction = "dispersion_correction"
+long_range_dispersion = "dispersion_correction"
+exclusion_spec = "scale_14_lj"
+coulomb14scale = "scale_14_elec"
+lj14scale = "scale_14_lj"
+neighbor_list = "nonbonded_method"
+use_neighbor_list = "nonbonded_method"
+nl_update_every = "nonbonded_method"
+neighbor_update_interval_fs = "nonbonded_method"
+fire_neighbor_update_interval = "nonbonded_method"
+skin = "cutoff_angstrom"
+capacity_multiplier = "cutoff_angstrom"
+disable_cell_list = "nonbonded_method"
+flash_tile_size = "nonbonded_method"
+flash_remat = "nonbonded_method"
+implicit_solvent = "solvent_model"
+gb_model = "solvent_model"
+model = "solvent_model"
+epsilon_solvent = "solvent_dielectric"
+epsilon_solute = "solute_dielectric"
+alpha_obc = "obc_alpha"
+beta_obc = "obc_beta"
+gamma_obc = "obc_gamma"
+surface_tension = "surface_tension_kcal_mol_a2"
+sasa_penalty = "surface_tension_kcal_mol_a2"
+probe_radius = "probe_radius_angstrom"
+dielectric_offset = "dielectric_offset_angstrom"
+ionic_strength_molar = "salt_concentration_m"
+salt_conc = "salt_concentration_m"
+debye_kappa = "kappa_inv_angstrom"
+constraints = "constraint_mode"
+constraint_algorithm = "constraint_mode"
+use_shake = "constraint_mode"
+constraint_tolerance = "shake_tolerance"
+settle_velocity_tol = "rattle_tolerance"
+water_model = "rigid_water"
+r_OH = "r_oh_angstrom"
+r_HH = "r_hh_angstrom"
+theta_HOH = "r_hh_angstrom"
+charge_O = "coulomb_constant"
+charge_H = "coulomb_constant"
+sigma_O = "cutoff_angstrom"
+epsilon_O = "cutoff_angstrom"
+k_bond = "r_oh_angstrom"
+k_angle = "r_hh_angstrom"
+remove_cm_motion = "constraint_mode"
+remove_linear_com_momentum = "constraint_mode"
+hydrogen_mass_repartition = "constraint_mode"
+hydrogen_mass_amu = "constraint_mode"
+target_h_mass = "constraint_mode"
+min_heavy_mass = "constraint_mode"
+hmr = "constraint_mode"
+enabled = "constraint_mode"
+forcefield = "nonbonded_method"
+cosolvents = "cosolvent_entries"
+cosolv_system_xml_path = "cosolvent_entries"
+smiles = "cosolvent_entries"
+concentration_molar = "cosolvent_entries"
+copies = "cosolvent_entries"
+resname = "cosolvent_entries"
+padding_nm = "protein_radius_angstrom"
+add_repulsive = "repulsive_eps_kcal"
+repulsive_residues = "cosolvent_entries"
+repulsive_epsilon = "repulsive_eps_kcal"
+repulsive_sigma = "repulsive_r0_angstrom"
+repulsive_cutoff = "repulsive_cutoff_angstrom"
+cosolvent_clash_distance_angstrom = "cosolvent_placement_radius_angstrom"
+solvent_clash_distance_angstrom = "cosolvent_placement_radius_angstrom"
+max_placement_attempts = "cosolvent_placement_radius_angstrom"
+windows = "lambda_schedule"
+schedule = "lambda_schedule"
+max_iterations_per_window = "per_stage_max_iterations"
+max_iterations = "per_stage_max_iterations"
+tolerance_kj_per_mol_per_nm = "tolerance_kcal_mol_a"
+tolerance = "tolerance_kcal_mol_a"
+adaptive_scale = "per_stage_max_iterations"
+restraint = "restraint_selection"
+atom_names = "restraint_selection"
+exclude_residue_names = "restraint_selection"
+anchor = "restraint_selection"
+force_constant_kcal_per_mol_per_A2 = "restraint_k_kcal_mol_a2"
+restraint_k = "restraint_k_kcal_mol_a2"
+flat_bottom_radius = "flat_bottom_radius_angstrom"
+bias = "bias_mode"
+cvs = "cv_specs"
+sigma = "metad_sigma"
+pace = "metad_pace"
+biasfactor = "metad_bias_factor"
+barrier = "metad_bias_factor"
+height = "metad_height"
+kappa = "umbrella_k"
+kernel = "bias_mode"
+grid_min = "umbrella_center"
+grid_max = "umbrella_center"
+grid_bin = "metad_pace"
+min_beta_nm = "plumed_min_beta_nm"
+physics = "integrator_method"
+nonbonded = "nonbonded_method"
+minimization = "per_stage_max_iterations"
+equilibration = "n_steps"
+production = "n_steps"

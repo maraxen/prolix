@@ -145,6 +145,29 @@ class SimulationSpec:
     if self.accumulate_steps <= 0:
       msg = "accumulate_steps must be positive"
       raise ValueError(msg)
+    if self.box is not None:
+      box_np = np.asarray(self.box)
+      if box_np.shape == (3,):
+        if np.any(box_np <= 0):
+          msg = f"SimulationSpec.box (3,) must have positive lengths, got {box_np}"
+          raise ValueError(msg)
+      elif box_np.shape == (3, 3):
+        if np.any(np.diag(box_np) <= 0):
+          msg = f"SimulationSpec.box (3, 3) must have positive diagonal entries, got {box_np}"
+          raise ValueError(msg)
+        if not np.allclose(np.triu(box_np, k=1), 0.0, atol=1e-6):
+          msg = f"SimulationSpec.box (3, 3) must be lower-triangular, got {box_np}"
+          raise ValueError(msg)
+        if (
+          abs(float(box_np[1, 0])) > 0.5 * float(box_np[0, 0]) + 1e-5
+          or abs(float(box_np[2, 0])) > 0.5 * float(box_np[0, 0]) + 1e-5
+          or abs(float(box_np[2, 1])) > 0.5 * float(box_np[1, 1]) + 1e-5
+        ):
+          msg = f"SimulationSpec.box (3, 3) violates OpenMM reduced-basis conditions: {box_np}"
+          raise ValueError(msg)
+      else:
+        msg = f"SimulationSpec.box must have shape (3,) or (3, 3), got {box_np.shape}"
+        raise ValueError(msg)
 
 
 from prolix.typing import SimulationState

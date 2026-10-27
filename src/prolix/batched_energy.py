@@ -11,6 +11,29 @@ from jax_md import space
 from proxide.physics.constants import COULOMB_CONSTANT
 
 from prolix.padding import PaddedSystem
+from prolix.pallas_kernels import (
+    pallas_nonbonded_nl,
+    resolve_pallas_mode,
+)
+
+try:
+    from prolix.pallas_kernels import (
+        pallas_angles_harmonic,
+        pallas_bonds_2body,
+        pallas_cmap_torsions,
+        pallas_exceptions_14,
+        pallas_gb_ace_nl,
+        pallas_pme_exclusion_pairs,
+        pallas_torsions_4body,
+    )
+except ImportError:
+    pallas_angles_harmonic = None  # type: ignore[assignment]
+    pallas_bonds_2body = None  # type: ignore[assignment]
+    pallas_cmap_torsions = None  # type: ignore[assignment]
+    pallas_exceptions_14 = None  # type: ignore[assignment]
+    pallas_gb_ace_nl = None  # type: ignore[assignment]
+    pallas_pme_exclusion_pairs = None  # type: ignore[assignment]
+    pallas_torsions_4body = None  # type: ignore[assignment]
 from prolix.physics import explicit_corrections
 from prolix.physics.analytical_forces import (
     coulomb_forces_dense,
@@ -23,6 +46,7 @@ from prolix.physics.bonded_masked import (
     _cmap_energy_masked,
     _dihedral_energy_masked,
 )
+from prolix.physics.cosolvent import cosolvent_repulsive_energy
 from prolix.physics.flash_explicit import flash_explicit_forces
 from prolix.physics.flash_nonbonded import flash_nonbonded_forces
 from prolix.physics.generalized_born import (
@@ -73,11 +97,118 @@ def _position_restraint_energy(
 # ==============================================================================
 
 
+def solve_ewald_alpha(cutoff_angstrom: float, error_tolerance: float = 5e-4) -> float:
+    """Solve erfc(alpha * r_cut) / r_cut = delta via log-space Newton-Raphson."""
+    import math
+
+    r_cut = float(cutoff_angstrom)
+    if not math.isfinite(r_cut) or r_cut <= 0.0:
+        raise ValueError(f"cutoff_angstrom must be > 0, got {cutoff_angstrom}")
+    delta = float(error_tolerance)
+    if not math.isfinite(delta) or delta <= 0.0 or delta >= 1.0:
+        raise ValueError(f"error_tolerance must be in (0, 1), got {error_tolerance}")
+    target = delta * r_cut
+    if target >= 1.0:
+        return 1e-6
+    log_target = math.log(target)
+    x = math.sqrt(max(-math.log(min(2.0 * delta, 0.999999)), 1e-12))
+    for _ in range(20):
+        erfc_x = math.erfc(x)
+        if erfc_x <= 0.0:
+            x *= 0.5
+            continue
+        g_val = math.log(erfc_x) - log_target
+        if abs(g_val) < 1e-13:
+            break
+        dg_dx = -2.0 * math.exp(-(x * x)) / (math.sqrt(math.pi) * erfc_x)
+        step = g_val / dg_dx
+        x = max(x - max(min(step, 1.0), -0.5 * x), 1e-9)
+    return float(x / r_cut)
+
+
+def _lj_quintic_switch_weight(dist: Array, cutoff: float, switch_width: float) -> Array:
+    """OpenMM quintic switching function S(r) = 1 - 10x^3 + 15x^4 - 6x^5 on [r_cut - w, r_cut]."""
+    if switch_width <= 0.0:
+        return jnp.ones_like(dist)
+    r_switch = max(float(cutoff) - float(switch_width), 0.0)
+    w_safe = max(float(cutoff) - r_switch, 1e-8)
+    x = jnp.clip((dist - r_switch) / w_safe, 0.0, 1.0)
+    s_poly = 1.0 - 10.0 * (x**3) + 15.0 * (x**4) - 6.0 * (x**5)
+    return jnp.where(dist <= r_switch, 1.0, jnp.where(dist >= cutoff, 0.0, s_poly))
+
+
+def _exception_energy_masked(
+    r: Array,
+    pairs: Array | None,
+    sigmas: Array | None,
+    epsilons: Array | None,
+    chargeprods: Array | None,
+    mask: Array | None,
+    displacement_fn: space.DisplacementFn,
+    *,
+    soft_core_lambda: Array | None = None,
+    softcore_alpha: float = 0.5,
+    softcore_exponent: int = 2,
+    lambda_elec: Array | float | None = None,
+    soft_coulomb: bool = False,
+) -> Array:
+    """Explicit 1-4 exception LJ + bare Coulomb energy with optional Beutler softcore."""
+    if pairs is None or pairs.shape[0] == 0:
+        return jnp.array(0.0, dtype=r.dtype)
+    n = r.shape[0]
+    i_safe = jnp.clip(pairs[:, 0].astype(jnp.int32), 0, max(n - 1, 0))
+    j_safe = jnp.clip(pairs[:, 1].astype(jnp.int32), 0, max(n - 1, 0))
+    mask_f = (
+        jnp.asarray(mask, dtype=r.dtype)
+        if mask is not None
+        else jnp.ones((pairs.shape[0],), dtype=r.dtype)
+    )
+    active = (mask_f > 0) & (i_safe != j_safe)
+    ri = r[i_safe]
+    rj = r[j_safe]
+    dr = jax.vmap(displacement_fn)(ri, rj)
+    dr_safe = jnp.where(active[:, None], dr, jnp.ones_like(dr))
+    dist_raw = jnp.sqrt(jnp.sum(dr_safe**2, axis=-1) + jnp.asarray(1e-12, dtype=r.dtype))
+    dist = jnp.where(active, dist_raw, jnp.ones_like(dist_raw))
+
+    sig_safe = jnp.where(active, jnp.maximum(sigmas, 1e-4), 1.0)
+    eps_safe = jnp.where(active, epsilons, 0.0)
+    qprod_safe = jnp.where(active, chargeprods, 0.0)
+
+    lam = (
+        jnp.asarray(soft_core_lambda, dtype=r.dtype)
+        if soft_core_lambda is not None
+        else jnp.asarray(1.0, dtype=r.dtype)
+    )
+    one_minus_lam = jnp.maximum(jnp.asarray(1.0, dtype=r.dtype) - lam, 0.0)
+    soft_term = jnp.asarray(softcore_alpha, dtype=r.dtype) * (one_minus_lam ** int(softcore_exponent))
+    r6 = jnp.where(active, (dist / sig_safe) ** 6, jnp.ones_like(dist))
+    denom = soft_term + r6 + jnp.asarray(1e-12, dtype=r.dtype)
+    e_lj = 4.0 * eps_safe * lam * (1.0 / (denom * denom) - 1.0 / denom)
+    lam_q = (
+        jnp.asarray(lambda_elec, dtype=r.dtype)
+        if lambda_elec is not None
+        else jnp.asarray(1.0, dtype=r.dtype)
+    )
+    if soft_coulomb:
+        alpha_q = jnp.asarray(0.01, dtype=r.dtype)
+        denom_q = jnp.sqrt(dist * dist + alpha_q * jnp.maximum(1.0 - lam_q, 0.0) ** 2 + 1e-12)
+        e_coul = COULOMB_CONSTANT * lam_q * qprod_safe / denom_q
+    else:
+        e_coul = COULOMB_CONSTANT * lam_q * qprod_safe / dist
+    pair_e = jnp.where(active, (e_lj + e_coul) * mask_f, jnp.zeros_like(dist))
+    return jnp.sum(pair_e)
+
+
 def _lj_energy_masked(
     r: Array, sigmas: Array, epsilons: Array, atom_mask: Array,
     displacement_fn: space.DisplacementFn,
     soft_core_lambda: Array | None = None,
     excl_scale_vdw: Array | None = None,
+    cutoff: float | None = None,
+    lj_switch_width: float = 0.0,
+    softcore_alpha: float = 0.5,
+    softcore_exponent: int = 2,
 ) -> Array:
     """Computes Lennard-Jones energy with atom masking and exclusion scaling.
     
@@ -113,18 +244,23 @@ def _lj_energy_masked(
     mask_bool = mask_ij > 0.0
     sigma_ij = 0.5 * (sigmas[:, None] + sigmas[None, :])
     sigma_ij_safe = jnp.where(mask_bool, jnp.maximum(sigma_ij, jnp.float32(1e-4)), jnp.float32(1.0))
+    dist_safe = jnp.where(mask_bool, jnp.maximum(dist, jnp.float32(1e-2)), jnp.float32(1.0))
     epsilon_ij = jnp.sqrt(jnp.maximum(epsilons[:, None] * epsilons[None, :], jnp.float32(0.0)))
     
-    # Soft-core LJ: U(r,λ) = 4ελ[1/(α(1-λ)+(r/σ)⁶)² - 1/(α(1-λ)+(r/σ)⁶)]
+    # Soft-core LJ: U(r,λ) = 4ελ[1/(α(1-λ)^p+(r/σ)⁶)² - 1/(α(1-λ)^p+(r/σ)⁶)]
     lam = jnp.float32(soft_core_lambda) if soft_core_lambda is not None else jnp.float32(1.0)
-    alpha = jnp.float32(0.5)
-    soft_term = alpha * jnp.maximum(jnp.float32(1.0) - lam, jnp.float32(1e-8))
-    r_over_sig = dist / sigma_ij_safe
+    alpha = jnp.float32(softcore_alpha)
+    one_minus_lam = jnp.maximum(jnp.float32(1.0) - lam, jnp.float32(0.0))
+    soft_term = alpha * (one_minus_lam ** int(softcore_exponent))
+    r_over_sig = dist_safe / sigma_ij_safe
     r6 = r_over_sig ** 6
     denom = soft_term + r6 + jnp.float32(1e-12)
     e_pair = jnp.float32(4.0) * epsilon_ij * lam * (
         jnp.float32(1.0) / (denom * denom) - jnp.float32(1.0) / denom
     )
+    if cutoff is not None and cutoff > 0.0:
+        sw = _lj_quintic_switch_weight(dist, float(cutoff), float(lj_switch_width))
+        e_pair = jnp.where(dist < float(cutoff), e_pair * sw, jnp.float32(0.0))
     
     # Apply combined mask (real pairs, no-self, exclusion scales)
     # Use jnp.where instead of multiplication to prevent NaN * 0 = NaN
@@ -138,47 +274,57 @@ def _coulomb_energy_masked(
     displacement_fn: space.DisplacementFn,
     excl_scale_elec: Array | None = None,
     pme_alpha: float = 0.0,
+    electrostatic_method: str = "pme",
+    cutoff: float | None = None,
+    reaction_field_dielectric: float = 78.3,
+    dsf_alpha: float = 0.2,
 ) -> Array:
-    """Computes Coulomb energy with atom masking, exclusion scaling, and damping.
-
-    When ``pme_alpha > 0`` and ``excl_scale_elec`` is given, this applies
-    ``erfc(alpha * r) * scale`` — NOT the self-contained ``(scale - erf(alpha
-    * r))`` convention ``optimization.chunked_coulomb_energy``/
-    ``chunked_coulomb_energy_nl`` use. That means excluded/scaled pairs are
-    *incomplete* on their own: the caller (``single_padded_energy``'s dense
-    branch) must also add ``_pme_exclusion_correction_from_pairs`` via
-    ``_pme_reciprocal_and_corrections`` to get the correct total. Do not call
-    this standalone under PME and treat the result as final (debt 790).
-
-    Args:
-        excl_scale_elec: (N, N) scale matrix for excluded/scaled pairs.
-            If None, no exclusions are applied (legacy behavior).
-        pme_alpha: Ewald splitting parameter. If > 0, computes ERFC-damped
-            direct space Coulomb.
-    """
+    """Computes Coulomb energy with atom masking, exclusion scaling, and PME / RF / DSF damping."""
     mask_ij = atom_mask[:, None] & atom_mask[None, :]
     
     dr = space.map_product(displacement_fn)(r, r)
-    # Gradient-safe distance (same rationale as LJ — sqrt(0) = NaN gradient)
     dist = jnp.sqrt(jnp.sum(dr ** 2, axis=-1) + jnp.float32(1e-10))
-    
-    dist = jnp.where(dist < 1e-4, 1.0, dist)
-    
-    e_pair = COULOMB_CONSTANT * (charges[:, None] * charges[None, :]) / dist
+    dist_safe = jnp.where(dist < 1e-4, 1.0, dist)
+    q_prod = charges[:, None] * charges[None, :]
 
-    # Apply PME direct-space damping (erfc(alpha * r))
-    if pme_alpha > 0.0:
+    method = str(electrostatic_method).lower()
+    if method in ("reaction_field", "rf") and cutoff is not None and cutoff > 0.0:
+        rc = float(cutoff)
+        eps_rf = float(reaction_field_dielectric)
+        k_rf = (eps_rf - 1.0) / ((2.0 * eps_rf + 1.0) * (rc**3))
+        c_rf = (3.0 * eps_rf) / ((2.0 * eps_rf + 1.0) * rc)
+        e_pair = COULOMB_CONSTANT * q_prod * (1.0 / dist_safe + k_rf * (dist_safe**2) - c_rf)
+        e_pair = jnp.where(dist < rc, e_pair, 0.0)
+    elif method in ("dsf", "damped_shifted_force") and cutoff is not None and cutoff > 0.0:
         from jax.scipy.special import erfc
-        e_pair = e_pair * erfc(pme_alpha * dist)
+        rc = float(cutoff)
+        a_dsf = float(dsf_alpha)
+        erfc_rc = erfc(a_dsf * rc)
+        term_shift = erfc_rc / rc
+        term_force = (
+            erfc_rc / (rc * rc)
+            + (2.0 * a_dsf / jnp.sqrt(jnp.pi)) * jnp.exp(-(a_dsf * a_dsf) * (rc * rc)) / rc
+        )
+        e_pair = COULOMB_CONSTANT * q_prod * (
+            erfc(a_dsf * dist_safe) / dist_safe - term_shift + term_force * (dist_safe - rc)
+        )
+        e_pair = jnp.where(dist < rc, e_pair, 0.0)
+    else:
+        e_pair = COULOMB_CONSTANT * q_prod / dist_safe
+        if pme_alpha > 0.0:
+            from jax.scipy.special import erfc
+            e_pair = e_pair * erfc(pme_alpha * dist_safe)
+        if method == "cutoff" and cutoff is not None and cutoff > 0.0:
+            e_pair = jnp.where(dist < float(cutoff), e_pair, 0.0)
     
     n = len(charges)
     no_self = 1.0 - jnp.eye(n)
-    
-    e_pair = e_pair * mask_ij * no_self
-
-    # Apply exclusion scales (1-2/1-3 zeroed, 1-4 scaled)
+    active_pair = (mask_ij > 0) & (no_self > 0)
     if excl_scale_elec is not None:
-        e_pair = e_pair * excl_scale_elec
+        active_pair = active_pair & (excl_scale_elec > 0)
+        e_pair = jnp.where(active_pair, e_pair * mask_ij * no_self * excl_scale_elec, jnp.float32(0.0))
+    else:
+        e_pair = jnp.where(active_pair, e_pair * mask_ij * no_self, jnp.float32(0.0))
 
     return 0.5 * jnp.sum(e_pair)
 
@@ -231,7 +377,8 @@ def _lj_energy_neighbor_list(
     # Soft-core LJ (same formula as _lj_energy_masked)
     lam = jnp.float32(soft_core_lambda) if soft_core_lambda is not None else jnp.float32(1.0)
     alpha = jnp.float32(0.5)
-    soft_term = alpha * jnp.maximum(jnp.float32(1.0) - lam, jnp.float32(1e-8))
+    one_minus_lam = jnp.maximum(jnp.float32(1.0) - lam, jnp.float32(0.0))
+    soft_term = alpha * (one_minus_lam ** 2)
     r_over_sig = dist / jnp.maximum(sigma_ij, jnp.float32(1e-8))
     r6 = r_over_sig ** 6
     denom = soft_term + r6 + jnp.float32(1e-12)
@@ -343,6 +490,16 @@ def _pme_exclusion_correction_from_pairs(
     return -jnp.sum(e_pair_recip * factor)
 
 
+def _box_for_displacement_fn(
+    sys_box: Array | None,
+    displacement_fn: space.DisplacementFn,
+) -> Array | None:
+    """Return periodic box array iff displacement_fn has a periodic closure."""
+    if sys_box is not None and getattr(displacement_fn, "__closure__", None) is not None:
+        return jnp.asarray(sys_box)
+    return None
+
+
 def _pme_reciprocal_and_corrections(
     r: Array,
     sys: PaddedSystem,
@@ -353,6 +510,8 @@ def _pme_reciprocal_and_corrections(
     implicit_solvent: bool,
     direct_space_includes_exclusion_correction: bool = False,
     use_dispersion_correction: bool = True,
+    use_pallas: bool | None = None,
+    use_pallas_pme: bool | None = None,
 ) -> tuple[Array, Array]:
     """PME reciprocal-space energy + explicit-solvent corrections.
 
@@ -388,11 +547,12 @@ def _pme_reciprocal_and_corrections(
     mean_l = jnp.mean(box_arr.astype(jnp.float64))
     grid_points = int(sys.pme_grid_points)
     grid_spacing = float(mean_l) / float(max(grid_points, 1))
+    eff_pallas_pme = use_pallas_pme if use_pallas_pme is not None else use_pallas
     pme_recip_fn = make_spme_energy_fn(
         box_size=box_arr,
         alpha=float(sys.pme_alpha),
         grid_spacing=grid_spacing,
-        use_pallas_pme=None,
+        use_pallas_pme=eff_pallas_pme,
     )
     e_elec = e_elec + pme_recip_fn(r, sys.charges, sys.atom_mask)
     e_elec = e_elec + spme_background_energy(
@@ -409,15 +569,30 @@ def _pme_reciprocal_and_corrections(
             and sys.excl_pair_indices is not None
             and sys.excl_pair_indices.shape[0] > 0
         ):
-            e_elec = e_elec + _pme_exclusion_correction_from_pairs(
-                r,
-                displacement_fn,
-                sys.excl_pair_indices,
-                sys.excl_pair_scales_elec,
-                safe_charges,
-                float(sys.pme_alpha),
-                N,
-            )
+            pallas_enabled, interpret = resolve_pallas_mode(use_pallas=use_pallas)
+            if pallas_enabled and pallas_pme_exclusion_pairs is not None:
+                e_elec = e_elec + pallas_pme_exclusion_pairs(
+                    r,
+                    sys.excl_pair_indices,
+                    sys.excl_pair_scales_elec,
+                    safe_charges,
+                    pme_alpha=float(sys.pme_alpha),
+                    n_atoms=N,
+                    box=_box_for_displacement_fn(sys.box_size, displacement_fn),
+                    atom_mask=None,
+                    is_row_format=False,
+                    interpret=interpret,
+                )
+            else:
+                e_elec = e_elec + _pme_exclusion_correction_from_pairs(
+                    r,
+                    displacement_fn,
+                    sys.excl_pair_indices,
+                    sys.excl_pair_scales_elec,
+                    safe_charges,
+                    float(sys.pme_alpha),
+                    N,
+                )
         safe_sigmas = jnp.where(sys.atom_mask, sys.sigmas, jnp.float32(1.0))
         safe_epsilons = jnp.where(sys.atom_mask, sys.epsilons, jnp.float32(0.0))
         # lj_dispersion_tail_energy's last parameter is `atom_mask` (an (N,)
@@ -442,7 +617,17 @@ def _pme_reciprocal_and_corrections(
     return e_elec, e_lj
 
 
-def single_padded_energy(sys: PaddedSystem, displacement_fn: space.DisplacementFn, implicit_solvent: bool = True, soft_core_lambda: Array = jnp.array(1.0), neighbor: Any = None, lj_switch_width: float = 0.0, use_dispersion_correction: bool = True) -> Array:
+def single_padded_energy(
+    sys: PaddedSystem,
+    displacement_fn: space.DisplacementFn,
+    implicit_solvent: bool = True,
+    soft_core_lambda: Array = jnp.array(1.0),
+    neighbor: Any = None,
+    lj_switch_width: float = 0.0,
+    use_dispersion_correction: bool = True,
+    use_pallas: bool | None = None,
+    use_pallas_pme: bool | None = None,
+) -> Array:
     """Computes total potential energy for a single padded system.
 
     This is the public API for computing energy of one PaddedSystem.
@@ -505,63 +690,101 @@ def single_padded_energy(sys: PaddedSystem, displacement_fn: space.DisplacementF
             ruled out; see the decision doc for the full trail.)
     """
     r = sys.positions
+    pallas_enabled, interpret = resolve_pallas_mode(use_pallas=use_pallas)
+    box_pbc = _box_for_displacement_fn(sys.box_size, displacement_fn)
+    _has_pallas_bonded = (
+        pallas_bonds_2body is not None
+        and pallas_angles_harmonic is not None
+        and pallas_torsions_4body is not None
+        and pallas_cmap_torsions is not None
+    )
 
     # Bonded terms
-    with jax.named_scope("dense_bonded_bond"):
-        e_bond = _bond_energy_masked(r, sys.bonds, sys.bond_params, sys.bond_mask, displacement_fn)
-    with jax.named_scope("dense_bonded_urey_bradley"):
-        e_ub = _bond_energy_masked(r, sys.urey_bradley_bonds, sys.urey_bradley_params, sys.urey_bradley_mask, displacement_fn)
-    with jax.named_scope("dense_bonded_angle"):
-        e_angle = _angle_energy_masked(r, sys.angles, sys.angle_params, sys.angle_mask, displacement_fn)
-    with jax.named_scope("dense_bonded_dihedral"):
-        e_dih = _dihedral_energy_masked(r, sys.dihedrals, sys.dihedral_params, sys.dihedral_mask, displacement_fn)
-    with jax.named_scope("dense_bonded_improper"):
-        e_imp = _dihedral_energy_masked(r, sys.impropers, sys.improper_params, sys.improper_mask, displacement_fn)
-
-    with jax.named_scope("dense_bonded_cmap"):
-        e_cmap = _cmap_energy_masked(r, sys.cmap_torsions, sys.cmap_indices, sys.cmap_mask, sys.cmap_coeffs, displacement_fn)
+    if pallas_enabled and _has_pallas_bonded:
+        with jax.named_scope("dense_bonded_bond"):
+            e_bond = pallas_bonds_2body(
+                r, sys.bonds, sys.bond_params, sys.bond_mask,
+                box=box_pbc, dist_eps=1e-10, interpret=interpret,
+            )
+        with jax.named_scope("dense_bonded_urey_bradley"):
+            e_ub = pallas_bonds_2body(
+                r, sys.urey_bradley_bonds, sys.urey_bradley_params, sys.urey_bradley_mask,
+                box=box_pbc, dist_eps=1e-10, interpret=interpret,
+            )
+        with jax.named_scope("dense_bonded_angle"):
+            e_angle = pallas_angles_harmonic(
+                r, sys.angles, sys.angle_params, sys.angle_mask,
+                box=box_pbc, dist_eps=1e-10, interpret=interpret,
+            )
+        with jax.named_scope("dense_bonded_dihedral"):
+            e_dih = pallas_torsions_4body(
+                r, sys.dihedrals, sys.dihedral_params, sys.dihedral_mask,
+                box=box_pbc, b0_is_ji=True, is_harmonic=False, interpret=interpret,
+            )
+        with jax.named_scope("dense_bonded_improper"):
+            e_imp = pallas_torsions_4body(
+                r, sys.impropers, sys.improper_params, sys.improper_mask,
+                box=box_pbc, b0_is_ji=True, is_harmonic=False, interpret=interpret,
+            )
+        with jax.named_scope("dense_bonded_cmap"):
+            e_cmap = pallas_cmap_torsions(
+                r, sys.cmap_torsions, sys.cmap_indices, sys.cmap_mask, sys.cmap_coeffs,
+                box=box_pbc, first_is_psi=True, interpret=interpret,
+            )
+    else:
+        with jax.named_scope("dense_bonded_bond"):
+            e_bond = _bond_energy_masked(r, sys.bonds, sys.bond_params, sys.bond_mask, displacement_fn)
+        with jax.named_scope("dense_bonded_urey_bradley"):
+            e_ub = _bond_energy_masked(r, sys.urey_bradley_bonds, sys.urey_bradley_params, sys.urey_bradley_mask, displacement_fn)
+        with jax.named_scope("dense_bonded_angle"):
+            e_angle = _angle_energy_masked(r, sys.angles, sys.angle_params, sys.angle_mask, displacement_fn)
+        with jax.named_scope("dense_bonded_dihedral"):
+            e_dih = _dihedral_energy_masked(r, sys.dihedrals, sys.dihedral_params, sys.dihedral_mask, displacement_fn)
+        with jax.named_scope("dense_bonded_improper"):
+            e_imp = _dihedral_energy_masked(r, sys.impropers, sys.improper_params, sys.improper_mask, displacement_fn)
+        with jax.named_scope("dense_bonded_cmap"):
+            e_cmap = _cmap_energy_masked(r, sys.cmap_torsions, sys.cmap_indices, sys.cmap_mask, sys.cmap_coeffs, displacement_fn)
 
     N = len(sys.atom_mask)
 
     if neighbor is not None:
-        # O(N*K) direct-space path (debt 760) -- mirrors system.py's own
-        # NL branch (chunked_lj_energy_nl/chunked_coulomb_energy_nl,
-        # system.py:175-220) exactly. excl_indices/excl_scales_vdw/
-        # excl_scales_elec are per-atom-row (N, max_excl) since debt 765;
-        # soft_core_lambda is not yet threaded through the NL kernels
-        # (no caller needs soft-core + NL simultaneously today -- staged
-        # minimization uses the dense path).
-
         nb_idx = getattr(neighbor, "idx", neighbor)
-        # chunked_lj_energy_nl/chunked_coulomb_energy_nl have no atom_mask
-        # parameter -- they only exclude jax_md's own "no neighbor" sentinel
-        # (index == N, via pad_to_tile's internal tile-alignment mask), which
-        # is unrelated to bundle padding. This redirects any neighbor-list
-        # entry involving a ghost/padding atom to that same sentinel, so
-        # ghost-involving pairs are structurally excluded regardless of what
-        # charge/sigma/epsilon values ghost atoms happen to carry -- a
-        # correct, defensive measure. NOTE: this was NOT the cause of debt
-        # 790's energy-correctness bug (ruled out empirically -- ghost atoms
-        # already have charge=sigma=epsilon=0, so ghost-involving pairs
-        # already contributed exactly zero with or without this redirect;
-        # the actual bug is in the kernels' exclusion-matching logic itself,
-        # unrelated to ghosts). Kept because it's still correct in principle
-        # and costs nothing.
         nb_idx = jnp.where(
             sys.atom_mask[:, None] & sys.atom_mask[jnp.minimum(nb_idx, N - 1)],
             nb_idx,
             N,
         )
-        e_lj = chunked_lj_energy_nl(
-            r, sys.sigmas, sys.epsilons, sys.excl_indices, sys.excl_scales_vdw,
-            nb_idx, displacement_fn, float(sys.nonbonded_cutoff), 128,
-            float(lj_switch_width),
-        )
-        e_elec = chunked_coulomb_energy_nl(
-            r, sys.charges, sys.excl_indices, sys.excl_scales_elec,
-            nb_idx, displacement_fn, float(sys.pme_alpha), 332.0637,
-            float(sys.nonbonded_cutoff), 128,
-        )
+        if pallas_enabled and pallas_nonbonded_nl is not None:
+            e_lj = pallas_nonbonded_nl(
+                r,
+                sys.charges,
+                sys.sigmas,
+                sys.epsilons,
+                sys.atom_mask,
+                nb_idx,
+                sys.excl_indices,
+                sys.excl_scales_vdw,
+                sys.excl_scales_elec,
+                box=box_pbc,
+                pme_alpha=float(sys.pme_alpha),
+                cutoff=float(sys.nonbonded_cutoff),
+                lj_switch_width=float(lj_switch_width),
+                soft_core_lambda=soft_core_lambda,
+                include_pme_excl_erf=True,
+                interpret=interpret,
+            )
+            e_elec = jnp.asarray(0.0, dtype=r.dtype)
+        else:
+            e_lj = chunked_lj_energy_nl(
+                r, sys.sigmas, sys.epsilons, sys.excl_indices, sys.excl_scales_vdw,
+                nb_idx, displacement_fn, float(sys.nonbonded_cutoff), 128,
+                float(lj_switch_width),
+            )
+            e_elec = chunked_coulomb_energy_nl(
+                r, sys.charges, sys.excl_indices, sys.excl_scales_elec,
+                nb_idx, displacement_fn, float(sys.pme_alpha), 332.0637,
+                float(sys.nonbonded_cutoff), 128,
+            )
     else:
         # Dense O(N^2) path — use precomputed dense exclusion scale matrices
         # if available. These are topology constants (independent of r).
@@ -585,45 +808,91 @@ def single_padded_energy(sys: PaddedSystem, displacement_fn: space.DisplacementF
                 sys.excl_indices, sys.excl_scales_elec, N,
             ))
 
+        elec_method = str(getattr(sys, "electrostatic_method", "pme")).lower()
         with jax.named_scope("dense_lj_direct"):
+            eff_switch = float(lj_switch_width) if lj_switch_width > 0.0 else float(getattr(sys, "lj_switch_width", 0.0))
+            raw_cutoff = float(getattr(sys, "nonbonded_cutoff", 0.0))
+            needs_cutoff = (
+                sys.box_size is not None
+                or eff_switch > 0.0
+                or elec_method in ("reaction_field", "rf", "dsf", "damped_shifted_force", "cutoff")
+            )
+            eff_cutoff = raw_cutoff if (needs_cutoff and raw_cutoff > 0.0) else None
             e_lj = _lj_energy_masked(
                 r, sys.sigmas, sys.epsilons, sys.atom_mask, displacement_fn,
                 soft_core_lambda=soft_core_lambda, excl_scale_vdw=excl_scale_vdw,
+                cutoff=eff_cutoff, lj_switch_width=eff_switch,
+                softcore_alpha=float(getattr(sys, "softcore_alpha", 0.5)),
+                softcore_exponent=int(getattr(sys, "softcore_exponent", 2)),
             )
 
-        # Coulomb interaction (direct space, optionally damped for PME)
+        # Coulomb interaction (direct space, optionally damped for PME / RF / DSF)
         with jax.named_scope("dense_coulomb_direct"):
+            elec_method = str(getattr(sys, "electrostatic_method", "pme")).lower()
             e_elec = _coulomb_energy_masked(
                 r, sys.charges, sys.atom_mask, displacement_fn,
                 excl_scale_elec=excl_scale_elec,
-                pme_alpha=sys.pme_alpha,
+                pme_alpha=sys.pme_alpha if elec_method == "pme" else 0.0,
+                electrostatic_method=elec_method,
+                cutoff=eff_cutoff,
+                reaction_field_dielectric=float(getattr(sys, "reaction_field_dielectric", 78.3)),
+                dsf_alpha=float(getattr(sys, "dsf_alpha", 0.2)),
             )
 
+    # Explicit 1-4 exception energy (FR-6 / CA-3)
+    if pallas_enabled and pallas_exceptions_14 is not None:
+        e_exc = pallas_exceptions_14(
+            r,
+            getattr(sys, "exception_pairs", None),
+            getattr(sys, "exception_sigmas", None),
+            getattr(sys, "exception_epsilons", None),
+            getattr(sys, "exception_chargeprods", None),
+            getattr(sys, "exception_mask", None),
+            box=box_pbc,
+            soft_core_lambda=soft_core_lambda,
+            softcore_alpha=float(getattr(sys, "softcore_alpha", 0.5)),
+            softcore_exponent=int(getattr(sys, "softcore_exponent", 2)),
+            interpret=interpret,
+        )
+    else:
+        e_exc = _exception_energy_masked(
+            r,
+            getattr(sys, "exception_pairs", None),
+            getattr(sys, "exception_sigmas", None),
+            getattr(sys, "exception_epsilons", None),
+            getattr(sys, "exception_chargeprods", None),
+            getattr(sys, "exception_mask", None),
+            displacement_fn,
+            soft_core_lambda=soft_core_lambda,
+            softcore_alpha=float(getattr(sys, "softcore_alpha", 0.5)),
+            softcore_exponent=int(getattr(sys, "softcore_exponent", 2)),
+        )
+    e_lj = e_lj + e_exc
+
     # Reciprocal Space (PME) + explicit-solvent corrections (aligned with system / Flash)
-    if sys.box_size is not None and sys.pme_alpha > 0.0:
+    elec_method = str(getattr(sys, "electrostatic_method", "pme")).lower()
+    eff_disp_corr = bool(use_dispersion_correction and getattr(sys, "use_dispersion_correction", True))
+    if sys.box_size is not None and sys.pme_alpha > 0.0 and elec_method == "pme":
         try:
             with jax.named_scope("dense_pme_reciprocal"):
                 e_elec, e_lj = _pme_reciprocal_and_corrections(
                     r, sys, N, e_elec, e_lj, displacement_fn, implicit_solvent,
                     direct_space_includes_exclusion_correction=(neighbor is not None),
-                    use_dispersion_correction=use_dispersion_correction,
+                    use_dispersion_correction=eff_disp_corr,
+                    use_pallas=use_pallas,
+                    use_pallas_pme=use_pallas_pme,
                 )
         except (TypeError, ValueError, jax.errors.ConcretizationTypeError):
-            # jax_md.quantity.canonicalize_force / make_force_fn_like_canonicalize
-            # (md_potential_bundle.py) probe energy_or_force_fn via jax.eval_shape
-            # to detect scalar (energy) vs array (force) output -- a fully
-            # abstract trace where box_size-derived grid dimensions (real FFT
-            # array shapes, genuinely dependent on box_size's concrete value,
-            # not just dtype/shape) can never be concretized, regardless of
-            # vmap. Only e_elec/e_lj's final *shape* (always scalar) matters
-            # during that probe, not their value -- skipping the PME
-            # reciprocal contribution here leaves them unchanged (still
-            # scalar), which is all eval_shape checks. Every real evaluation
-            # (outside eval_shape) has concrete box_size and takes the
-            # unwrapped path via _pme_reciprocal_and_corrections directly
-            # below on the *next* call, since eval_shape only traces once to
-            # determine output shape -- the actual force/energy computation
-            # that follows always runs on real inputs.
+            pass
+    elif sys.box_size is not None and not implicit_solvent and eff_disp_corr:
+        try:
+            box_arr = jnp.asarray(sys.box_size)
+            safe_sigmas = jnp.where(sys.atom_mask, sys.sigmas, jnp.float32(1.0))
+            safe_epsilons = jnp.where(sys.atom_mask, sys.epsilons, jnp.float32(0.0))
+            e_lj = e_lj + explicit_corrections.lj_dispersion_tail_energy(
+                box_arr, safe_sigmas, safe_epsilons, float(sys.nonbonded_cutoff), sys.atom_mask
+            )
+        except (TypeError, ValueError, jax.errors.ConcretizationTypeError):
             pass
 
     if implicit_solvent:
@@ -636,16 +905,37 @@ def single_padded_energy(sys: PaddedSystem, displacement_fn: space.DisplacementF
             scaled_radii=sys.scaled_radii,
             mask=sys.atom_mask,
             energy_mask=energy_mask,
-            dielectric_offset=0.09,
+            solvent_dielectric=float(getattr(sys, "solvent_dielectric", 78.5)),
+            solute_dielectric=float(getattr(sys, "solute_dielectric", 1.0)),
+            dielectric_offset=float(getattr(sys, "dielectric_offset", 0.09)),
         )
-        e_np = compute_ace_nonpolar_energy(sys.radii, born_radii)
+        e_np = compute_ace_nonpolar_energy(
+            sys.radii,
+            born_radii,
+            surface_tension=float(getattr(sys, "surface_tension", 0.0054)),
+            dielectric_offset=float(getattr(sys, "dielectric_offset", 0.09)),
+        )
         # Mask out nonpolar energy for padding atoms (ACE is per-atom)
         e_np = jnp.sum(e_np * sys.atom_mask)
         e_solv = e_gb + e_np
     else:
         e_solv = 0.0
 
-    return e_bond + e_ub + e_angle + e_dih + e_imp + e_cmap + e_lj + e_elec + e_solv
+    e_cosolv_rep = jnp.float32(0.0)
+    if getattr(sys, "cosolvent_group_id", None) is not None and getattr(sys, "cosolvent_mol_id", None) is not None:
+        e_cosolv_rep = cosolvent_repulsive_energy(
+            r,
+            sys.cosolvent_group_id,
+            sys.cosolvent_mol_id,
+            displacement_fn,
+            eps_kcal=float(getattr(sys, "cosolvent_repulsive_eps", 0.01)),
+            r0_angstrom=float(getattr(sys, "cosolvent_repulsive_r0", 10.0)),
+            cutoff_angstrom=float(getattr(sys, "cosolvent_repulsive_cutoff", 9.0)),
+            deduplicate_interaction_groups=bool(getattr(sys, "deduplicate_interaction_groups", False)),
+            atom_mask=sys.atom_mask,
+        )
+
+    return e_bond + e_ub + e_angle + e_dih + e_imp + e_cmap + e_lj + e_elec + e_solv + e_cosolv_rep
 
 
 def single_padded_force(
@@ -657,12 +947,13 @@ def single_padded_force(
     use_flash: bool = True,
     flash_tile_size: int = 256,
     flash_remat: bool = True,
+    use_pallas: bool | None = None,
 ) -> Array:
     """Compute forces for a padded system.
 
     Two paths:
       - FlashMD (use_flash=True, default): Chunked+checkpointed nonbonded
-        energy via tiled O(N²) with sparse exclusion correction. No dense
+        energy via tiled O(N²) with sparse exclusions. No dense
         (N,N) exclusion matrices needed — memory is O(N) per replica.
       - Legacy (use_flash=False): Separate analytical LJ, Coulomb, GB
         force functions using dense (N,N) exclusion matrices.
@@ -683,38 +974,106 @@ def single_padded_force(
     """
     r = sys.positions
     N = len(sys.atom_mask)
+    pallas_enabled, interpret = resolve_pallas_mode(use_pallas=use_pallas)
+    box_pbc = _box_for_displacement_fn(sys.box_size, displacement_fn)
+    _has_pallas_bonded_force = (
+        pallas_bonds_2body is not None
+        and pallas_angles_harmonic is not None
+        and pallas_torsions_4body is not None
+        and pallas_cmap_torsions is not None
+        and pallas_exceptions_14 is not None
+    )
 
     # --- Bonded energy only (safe for jax.grad — no N² operations) ---
     def bonded_energy(positions):
-        e_bond = _bond_energy_masked(
-            positions, sys.bonds, sys.bond_params, sys.bond_mask, displacement_fn,
-        )
-        e_ub = _bond_energy_masked(
-            positions, sys.urey_bradley_bonds, sys.urey_bradley_params,
-            sys.urey_bradley_mask, displacement_fn,
-        )
-        e_angle = _angle_energy_masked(
-            positions, sys.angles, sys.angle_params, sys.angle_mask, displacement_fn,
-        )
-        e_dih = _dihedral_energy_masked(
-            positions, sys.dihedrals, sys.dihedral_params,
-            sys.dihedral_mask, displacement_fn,
-        )
-        e_imp = _dihedral_energy_masked(
-            positions, sys.impropers, sys.improper_params,
-            sys.improper_mask, displacement_fn,
-        )
-        e_cmap = _cmap_energy_masked(
-            positions, sys.cmap_torsions, sys.cmap_indices, sys.cmap_mask,
-            sys.cmap_coeffs, displacement_fn,
-        )
+        if pallas_enabled and _has_pallas_bonded_force:
+            e_bond = pallas_bonds_2body(
+                positions, sys.bonds, sys.bond_params, sys.bond_mask,
+                box=box_pbc, dist_eps=1e-10, interpret=interpret,
+            )
+            e_ub = pallas_bonds_2body(
+                positions, sys.urey_bradley_bonds, sys.urey_bradley_params,
+                sys.urey_bradley_mask, box=box_pbc, dist_eps=1e-10, interpret=interpret,
+            )
+            e_angle = pallas_angles_harmonic(
+                positions, sys.angles, sys.angle_params, sys.angle_mask,
+                box=box_pbc, dist_eps=1e-10, interpret=interpret,
+            )
+            e_dih = pallas_torsions_4body(
+                positions, sys.dihedrals, sys.dihedral_params,
+                sys.dihedral_mask, box=box_pbc, b0_is_ji=True, is_harmonic=False, interpret=interpret,
+            )
+            e_imp = pallas_torsions_4body(
+                positions, sys.impropers, sys.improper_params,
+                sys.improper_mask, box=box_pbc, b0_is_ji=True, is_harmonic=False, interpret=interpret,
+            )
+            e_cmap = pallas_cmap_torsions(
+                positions, sys.cmap_torsions, sys.cmap_indices, sys.cmap_mask,
+                sys.cmap_coeffs, box=box_pbc, first_is_psi=True, interpret=interpret,
+            )
+            e_exc = pallas_exceptions_14(
+                positions,
+                getattr(sys, "exception_pairs", None),
+                getattr(sys, "exception_sigmas", None),
+                getattr(sys, "exception_epsilons", None),
+                getattr(sys, "exception_chargeprods", None),
+                getattr(sys, "exception_mask", None),
+                box=box_pbc,
+                soft_core_lambda=soft_core_lambda,
+                softcore_alpha=float(getattr(sys, "softcore_alpha", 0.5)),
+                softcore_exponent=int(getattr(sys, "softcore_exponent", 2)),
+                interpret=interpret,
+            )
+        else:
+            e_bond = _bond_energy_masked(
+                positions, sys.bonds, sys.bond_params, sys.bond_mask, displacement_fn,
+            )
+            e_ub = _bond_energy_masked(
+                positions, sys.urey_bradley_bonds, sys.urey_bradley_params,
+                sys.urey_bradley_mask, displacement_fn,
+            )
+            e_angle = _angle_energy_masked(
+                positions, sys.angles, sys.angle_params, sys.angle_mask, displacement_fn,
+            )
+            e_dih = _dihedral_energy_masked(
+                positions, sys.dihedrals, sys.dihedral_params,
+                sys.dihedral_mask, displacement_fn,
+            )
+            e_imp = _dihedral_energy_masked(
+                positions, sys.impropers, sys.improper_params,
+                sys.improper_mask, displacement_fn,
+            )
+            e_cmap = _cmap_energy_masked(
+                positions, sys.cmap_torsions, sys.cmap_indices, sys.cmap_mask,
+                sys.cmap_coeffs, displacement_fn,
+            )
+            e_exc = _exception_energy_masked(
+                positions,
+                getattr(sys, "exception_pairs", None),
+                getattr(sys, "exception_sigmas", None),
+                getattr(sys, "exception_epsilons", None),
+                getattr(sys, "exception_chargeprods", None),
+                getattr(sys, "exception_mask", None),
+                displacement_fn,
+                soft_core_lambda=soft_core_lambda,
+                softcore_alpha=float(getattr(sys, "softcore_alpha", 0.5)),
+                softcore_exponent=int(getattr(sys, "softcore_exponent", 2)),
+            )
 
-        return e_bond + e_ub + e_angle + e_dih + e_imp + e_cmap
+        return e_bond + e_ub + e_angle + e_dih + e_imp + e_cmap + e_exc
 
-    # Bonded forces via autodiff (safe path — no N² operations)
+    # Bonded + 1-4 exception forces via autodiff (safe path — no N² operations)
     bonded_force = -jax.grad(bonded_energy)(r)
 
-    if use_flash:
+    eff_elec_method = str(getattr(sys, "electrostatic_method", "pme")).lower()
+    eff_lj_sw = float(getattr(sys, "lj_switch_width", 0.0))
+    use_flash_eff = (
+        use_flash
+        and getattr(sys, "excl_indices", None) is not None
+        and eff_elec_method not in ("reaction_field", "rf", "dsf", "damped_shifted_force", "cutoff")
+        and eff_lj_sw <= 0.0
+    )
+    if use_flash_eff:
         # --- FlashMD path: O(N) memory, sparse exclusions ---
         if explicit_solvent:
             f_nonbonded = flash_explicit_forces(
@@ -722,6 +1081,7 @@ def single_padded_force(
                 T=flash_tile_size,
                 soft_core_lambda=soft_core_lambda,
                 remat=flash_remat,
+                use_pallas=use_pallas,
             )
         else:
             f_nonbonded = flash_nonbonded_forces(
@@ -746,35 +1106,81 @@ def single_padded_force(
                 sys.excl_indices, sys.excl_scales_elec, N,
             ))
 
-        f_lj = lj_forces_dense(
-            r, sys.sigmas, sys.epsilons, sys.atom_mask,
-            soft_core_lambda=soft_core_lambda,
-            excl_scale_vdw=excl_scale_vdw,
-        )
-        f_coulomb = coulomb_forces_dense(
-            r, sys.charges, sys.atom_mask,
-            excl_scale_elec=excl_scale_elec,
-        )
+        if explicit_solvent or eff_elec_method in ("reaction_field", "rf", "dsf", "damped_shifted_force", "cutoff") or eff_lj_sw > 0.0:
+            eff_cutoff = float(sys.nonbonded_cutoff)
+            f_lj = -jax.grad(
+                lambda pos: _lj_energy_masked(
+                    pos, sys.sigmas, sys.epsilons, sys.atom_mask, displacement_fn,
+                    soft_core_lambda=soft_core_lambda, excl_scale_vdw=excl_scale_vdw,
+                    cutoff=eff_cutoff, lj_switch_width=eff_lj_sw,
+                    softcore_alpha=float(getattr(sys, "softcore_alpha", 0.5)),
+                    softcore_exponent=int(getattr(sys, "softcore_exponent", 2)),
+                )
+            )(r)
+            f_coulomb = -jax.grad(
+                lambda pos: _coulomb_energy_masked(
+                    pos, sys.charges, sys.atom_mask, displacement_fn,
+                    excl_scale_elec=excl_scale_elec,
+                    pme_alpha=sys.pme_alpha if eff_elec_method == "pme" else 0.0,
+                    electrostatic_method=eff_elec_method,
+                    cutoff=eff_cutoff,
+                    reaction_field_dielectric=float(getattr(sys, "reaction_field_dielectric", 78.3)),
+                    dsf_alpha=float(getattr(sys, "dsf_alpha", 0.2)),
+                )
+            )(r)
+        else:
+            f_lj = lj_forces_dense(
+                r, sys.sigmas, sys.epsilons, sys.atom_mask,
+                soft_core_lambda=soft_core_lambda,
+                excl_scale_vdw=excl_scale_vdw,
+            )
+            f_coulomb = coulomb_forces_dense(
+                r, sys.charges, sys.atom_mask,
+                excl_scale_elec=excl_scale_elec,
+            )
 
         f_solv = jnp.zeros_like(r)
         if implicit_solvent:
             f_solv = gb_ace_forces_dense(
                 r, sys.charges, sys.radii, sys.scaled_radii, sys.atom_mask,
+                dielectric_offset=float(getattr(sys, "dielectric_offset", 0.09)),
+                solvent_dielectric=float(getattr(sys, "solvent_dielectric", 78.5)),
+                solute_dielectric=float(getattr(sys, "solute_dielectric", 1.0)),
             )
 
         total_force = bonded_force + f_lj + f_coulomb + f_solv
+
+    if getattr(sys, "cosolvent_group_id", None) is not None and getattr(sys, "cosolvent_mol_id", None) is not None:
+        f_cosolv_rep = -jax.grad(
+            lambda pos: cosolvent_repulsive_energy(
+                pos,
+                sys.cosolvent_group_id,
+                sys.cosolvent_mol_id,
+                displacement_fn,
+                eps_kcal=float(getattr(sys, "cosolvent_repulsive_eps", 0.01)),
+                r0_angstrom=float(getattr(sys, "cosolvent_repulsive_r0", 10.0)),
+                cutoff_angstrom=float(getattr(sys, "cosolvent_repulsive_cutoff", 9.0)),
+                deduplicate_interaction_groups=bool(getattr(sys, "deduplicate_interaction_groups", False)),
+                atom_mask=sys.atom_mask,
+            )
+        )(r)
+        total_force = total_force + f_cosolv_rep
 
     # Belt-and-suspenders: zero forces on padding atoms.
     total_force = total_force * sys.atom_mask[:, None]
     return total_force.astype(r.dtype)
 
-def make_batched_energy_fn(displacement_fn: space.DisplacementFn, implicit_solvent: bool = True) -> Callable[[PaddedSystem], Array]:
+def make_batched_energy_fn(
+    displacement_fn: space.DisplacementFn,
+    implicit_solvent: bool = True,
+    use_pallas: bool | None = None,
+) -> Callable[[PaddedSystem], Array]:
     """Create a vmap-compatible energy function for padded systems.
     
     Currently implements the full N^2 pairwise computation. Designed for batched
     execution of heterogeneous small systems.
     """
-    return jax.vmap(lambda sys: single_padded_energy(sys, displacement_fn, implicit_solvent))
+    return jax.vmap(lambda sys: single_padded_energy(sys, displacement_fn, implicit_solvent, use_pallas=use_pallas))
 
 
 # ==============================================================================
@@ -810,7 +1216,8 @@ def _make_lj_energy_nl_cvjp(neighbor_idx, soft_core_lambda=jnp.float32(1.0), exc
 
         lam = jnp.float32(soft_core_lambda)
         alpha = jnp.float32(0.5)
-        soft_term = alpha * jnp.maximum(jnp.float32(1.0) - lam, jnp.float32(1e-8))
+        one_minus_lam = jnp.maximum(jnp.float32(1.0) - lam, jnp.float32(0.0))
+        soft_term = alpha * (one_minus_lam ** 2)
         r_over_sig = dist / jnp.maximum(sigma_ij, jnp.float32(1e-8))
         r6 = r_over_sig ** 6
         denom = soft_term + r6 + jnp.float32(1e-12)
@@ -921,6 +1328,7 @@ def single_padded_energy_nl_cvjp(
     displacement_fn: space.DisplacementFn,
     implicit_solvent: bool = True,
     soft_core_lambda: Array = jnp.array(1.0),
+    use_pallas: bool | None = None,
 ) -> Array:
     """Like single_padded_energy_nl but with custom VJP for LJ/Coulomb + checkpoint for GB.
 
@@ -931,14 +1339,48 @@ def single_padded_energy_nl_cvjp(
     Together this minimizes both compute and memory in the gradient pass.
     """
     r = sys.positions
+    pallas_enabled, interpret = resolve_pallas_mode(use_pallas=use_pallas)
+    box_pbc = _box_for_displacement_fn(sys.box_size, displacement_fn)
+    _has_pallas_bonded = (
+        pallas_bonds_2body is not None
+        and pallas_angles_harmonic is not None
+        and pallas_torsions_4body is not None
+        and pallas_cmap_torsions is not None
+    )
 
     # Bonded terms (unchanged — already O(N))
-    e_bond = _bond_energy_masked(r, sys.bonds, sys.bond_params, sys.bond_mask, displacement_fn)
-    e_ub = _bond_energy_masked(r, sys.urey_bradley_bonds, sys.urey_bradley_params, sys.urey_bradley_mask, displacement_fn)
-    e_angle = _angle_energy_masked(r, sys.angles, sys.angle_params, sys.angle_mask, displacement_fn)
-    e_dih = _dihedral_energy_masked(r, sys.dihedrals, sys.dihedral_params, sys.dihedral_mask, displacement_fn)
-    e_imp = _dihedral_energy_masked(r, sys.impropers, sys.improper_params, sys.improper_mask, displacement_fn)
-    e_cmap = _cmap_energy_masked(r, sys.cmap_torsions, sys.cmap_indices, sys.cmap_mask, sys.cmap_coeffs, displacement_fn)
+    if pallas_enabled and _has_pallas_bonded:
+        e_bond = pallas_bonds_2body(
+            r, sys.bonds, sys.bond_params, sys.bond_mask,
+            box=box_pbc, dist_eps=1e-10, interpret=interpret,
+        )
+        e_ub = pallas_bonds_2body(
+            r, sys.urey_bradley_bonds, sys.urey_bradley_params, sys.urey_bradley_mask,
+            box=box_pbc, dist_eps=1e-10, interpret=interpret,
+        )
+        e_angle = pallas_angles_harmonic(
+            r, sys.angles, sys.angle_params, sys.angle_mask,
+            box=box_pbc, dist_eps=1e-10, interpret=interpret,
+        )
+        e_dih = pallas_torsions_4body(
+            r, sys.dihedrals, sys.dihedral_params, sys.dihedral_mask,
+            box=box_pbc, b0_is_ji=True, is_harmonic=False, interpret=interpret,
+        )
+        e_imp = pallas_torsions_4body(
+            r, sys.impropers, sys.improper_params, sys.improper_mask,
+            box=box_pbc, b0_is_ji=True, is_harmonic=False, interpret=interpret,
+        )
+        e_cmap = pallas_cmap_torsions(
+            r, sys.cmap_torsions, sys.cmap_indices, sys.cmap_mask, sys.cmap_coeffs,
+            box=box_pbc, first_is_psi=True, interpret=interpret,
+        )
+    else:
+        e_bond = _bond_energy_masked(r, sys.bonds, sys.bond_params, sys.bond_mask, displacement_fn)
+        e_ub = _bond_energy_masked(r, sys.urey_bradley_bonds, sys.urey_bradley_params, sys.urey_bradley_mask, displacement_fn)
+        e_angle = _angle_energy_masked(r, sys.angles, sys.angle_params, sys.angle_mask, displacement_fn)
+        e_dih = _dihedral_energy_masked(r, sys.dihedrals, sys.dihedral_params, sys.dihedral_mask, displacement_fn)
+        e_imp = _dihedral_energy_masked(r, sys.impropers, sys.improper_params, sys.improper_mask, displacement_fn)
+        e_cmap = _cmap_energy_masked(r, sys.cmap_torsions, sys.cmap_indices, sys.cmap_mask, sys.cmap_coeffs, displacement_fn)
 
     N = len(sys.atom_mask)
     nb_idx = jnp.where(
@@ -947,45 +1389,118 @@ def single_padded_energy_nl_cvjp(
         N,
     )
 
-    # Compute (N, K) exclusion scales for neighbor list
-    excl_scales_vdw_nl, excl_scales_elec_nl = get_neighbor_exclusion_scales(
-        sys.excl_indices, sys.excl_scales_vdw, sys.excl_scales_elec, nb_idx,
-    )
+    if pallas_enabled and pallas_nonbonded_nl is not None:
+        e_lj = pallas_nonbonded_nl(
+            r,
+            sys.charges,
+            sys.sigmas,
+            sys.epsilons,
+            sys.atom_mask,
+            nb_idx,
+            sys.excl_indices,
+            sys.excl_scales_vdw,
+            sys.excl_scales_elec,
+            box=None,
+            pme_alpha=0.0,
+            cutoff=1e9,
+            lj_switch_width=0.0,
+            soft_core_lambda=soft_core_lambda,
+            include_pme_excl_erf=False,
+            interpret=interpret,
+        )
+        e_elec = jnp.asarray(0.0, dtype=r.dtype)
+    else:
+        # Compute (N, K) exclusion scales for neighbor list
+        excl_scales_vdw_nl, excl_scales_elec_nl = get_neighbor_exclusion_scales(
+            sys.excl_indices, sys.excl_scales_vdw, sys.excl_scales_elec, nb_idx,
+        )
 
-    # LJ with custom VJP (analytical forces, no scatter-add)
-    lj_fn = _make_lj_energy_nl_cvjp(
-        nb_idx, soft_core_lambda, excl_scales_vdw=excl_scales_vdw_nl,
-    )
-    e_lj = lj_fn(r, sys.sigmas, sys.epsilons)
+        # LJ with custom VJP (analytical forces, no scatter-add)
+        lj_fn = _make_lj_energy_nl_cvjp(
+            nb_idx, soft_core_lambda, excl_scales_vdw=excl_scales_vdw_nl,
+        )
+        e_lj = lj_fn(r, sys.sigmas, sys.epsilons)
 
-    # O(N*K) neighbor-list Coulomb with custom VJP
-    coul_fn = _make_coulomb_energy_nl_cvjp(
-        nb_idx, excl_scales_elec=excl_scales_elec_nl,
-    )
-    e_elec = coul_fn(r, sys.charges)
+        # O(N*K) neighbor-list Coulomb with custom VJP
+        coul_fn = _make_coulomb_energy_nl_cvjp(
+            nb_idx, excl_scales_elec=excl_scales_elec_nl,
+        )
+        e_elec = coul_fn(r, sys.charges)
 
     if implicit_solvent:
-        # Checkpoint GB to save memory (recompute forward during backward)
-        @jax.checkpoint
-        def _gb_energy(positions, charges, radii):
-            e_gb, born_radii = compute_gb_energy_neighbor_list(
-                positions=positions,
-                charges=charges,
-                radii=radii,
-                neighbor_idx=nb_idx,
-                dielectric_offset=0.09,
+        if pallas_enabled and pallas_gb_ace_nl is not None:
+            e_solv = pallas_gb_ace_nl(
+                r,
+                sys.charges,
+                sys.radii,
+                nb_idx,
+                atom_mask=sys.atom_mask,
                 scaled_radii=sys.scaled_radii,
+                dielectric_offset=0.09,
+                solvent_dielectric=78.5,
+                solute_dielectric=1.0,
+                surface_tension=0.0054,
+                box=None,
+                interpret=interpret,
             )
-            e_np = compute_ace_nonpolar_energy(radii, born_radii)
-            e_np = jnp.sum(e_np * sys.atom_mask)
-            return e_gb + e_np
+        else:
+            # Checkpoint GB to save memory (recompute forward during backward)
+            @jax.checkpoint
+            def _gb_energy(positions, charges, radii):
+                e_gb, born_radii = compute_gb_energy_neighbor_list(
+                    positions=positions,
+                    charges=charges,
+                    radii=radii,
+                    neighbor_idx=nb_idx,
+                    dielectric_offset=0.09,
+                    scaled_radii=sys.scaled_radii,
+                )
+                e_np = compute_ace_nonpolar_energy(radii, born_radii)
+                e_np = jnp.sum(e_np * sys.atom_mask)
+                return e_gb + e_np
 
-        e_solv = _gb_energy(r, sys.charges, sys.radii)
+            e_solv = _gb_energy(r, sys.charges, sys.radii)
     else:
         e_solv = 0.0
 
-    return e_bond + e_ub + e_angle + e_dih + e_imp + e_cmap + e_lj + e_elec + e_solv
+    e_cosolv_rep = jnp.float32(0.0)
+    if getattr(sys, "cosolvent_group_id", None) is not None and getattr(sys, "cosolvent_mol_id", None) is not None:
+        e_cosolv_rep = cosolvent_repulsive_energy(
+            r,
+            sys.cosolvent_group_id,
+            sys.cosolvent_mol_id,
+            displacement_fn,
+            eps_kcal=float(getattr(sys, "cosolvent_repulsive_eps", 0.01)),
+            r0_angstrom=float(getattr(sys, "cosolvent_repulsive_r0", 10.0)),
+            cutoff_angstrom=float(getattr(sys, "cosolvent_repulsive_cutoff", 9.0)),
+            deduplicate_interaction_groups=bool(getattr(sys, "deduplicate_interaction_groups", False)),
+            atom_mask=sys.atom_mask,
+        )
 
+    if pallas_enabled and pallas_exceptions_14 is not None:
+        e_exc = pallas_exceptions_14(
+            r,
+            getattr(sys, "exception_pairs", None),
+            getattr(sys, "exception_sigmas", None),
+            getattr(sys, "exception_epsilons", None),
+            getattr(sys, "exception_chargeprods", None),
+            getattr(sys, "exception_mask", None),
+            box=box_pbc,
+            soft_core_lambda=1.0,
+            interpret=interpret,
+        )
+    else:
+        e_exc = _exception_energy_masked(
+            r,
+            getattr(sys, "exception_pairs", None),
+            getattr(sys, "exception_sigmas", None),
+            getattr(sys, "exception_epsilons", None),
+            getattr(sys, "exception_chargeprods", None),
+            getattr(sys, "exception_mask", None),
+            displacement_fn,
+        )
+
+    return e_bond + e_ub + e_angle + e_dih + e_imp + e_cmap + e_lj + e_elec + e_solv + e_cosolv_rep + e_exc
 
 
 def single_padded_energy_nl(
@@ -994,6 +1509,7 @@ def single_padded_energy_nl(
     displacement_fn: space.DisplacementFn,
     implicit_solvent: bool = True,
     soft_core_lambda: Array = jnp.array(1.0),
+    use_pallas: bool | None = None,
 ) -> Array:
     """Computes total potential energy using neighbor lists for non-bonded terms.
 
@@ -1011,14 +1527,48 @@ def single_padded_energy_nl(
         Total potential energy (scalar).
     """
     r = sys.positions
+    pallas_enabled, interpret = resolve_pallas_mode(use_pallas=use_pallas)
+    box_pbc = _box_for_displacement_fn(sys.box_size, displacement_fn)
+    _has_pallas_bonded = (
+        pallas_bonds_2body is not None
+        and pallas_angles_harmonic is not None
+        and pallas_torsions_4body is not None
+        and pallas_cmap_torsions is not None
+    )
 
     # Bonded terms (unchanged — already O(N))
-    e_bond = _bond_energy_masked(r, sys.bonds, sys.bond_params, sys.bond_mask, displacement_fn)
-    e_ub = _bond_energy_masked(r, sys.urey_bradley_bonds, sys.urey_bradley_params, sys.urey_bradley_mask, displacement_fn)
-    e_angle = _angle_energy_masked(r, sys.angles, sys.angle_params, sys.angle_mask, displacement_fn)
-    e_dih = _dihedral_energy_masked(r, sys.dihedrals, sys.dihedral_params, sys.dihedral_mask, displacement_fn)
-    e_imp = _dihedral_energy_masked(r, sys.impropers, sys.improper_params, sys.improper_mask, displacement_fn)
-    e_cmap = _cmap_energy_masked(r, sys.cmap_torsions, sys.cmap_indices, sys.cmap_mask, sys.cmap_coeffs, displacement_fn)
+    if pallas_enabled and _has_pallas_bonded:
+        e_bond = pallas_bonds_2body(
+            r, sys.bonds, sys.bond_params, sys.bond_mask,
+            box=box_pbc, dist_eps=1e-10, interpret=interpret,
+        )
+        e_ub = pallas_bonds_2body(
+            r, sys.urey_bradley_bonds, sys.urey_bradley_params, sys.urey_bradley_mask,
+            box=box_pbc, dist_eps=1e-10, interpret=interpret,
+        )
+        e_angle = pallas_angles_harmonic(
+            r, sys.angles, sys.angle_params, sys.angle_mask,
+            box=box_pbc, dist_eps=1e-10, interpret=interpret,
+        )
+        e_dih = pallas_torsions_4body(
+            r, sys.dihedrals, sys.dihedral_params, sys.dihedral_mask,
+            box=box_pbc, b0_is_ji=True, is_harmonic=False, interpret=interpret,
+        )
+        e_imp = pallas_torsions_4body(
+            r, sys.impropers, sys.improper_params, sys.improper_mask,
+            box=box_pbc, b0_is_ji=True, is_harmonic=False, interpret=interpret,
+        )
+        e_cmap = pallas_cmap_torsions(
+            r, sys.cmap_torsions, sys.cmap_indices, sys.cmap_mask, sys.cmap_coeffs,
+            box=box_pbc, first_is_psi=True, interpret=interpret,
+        )
+    else:
+        e_bond = _bond_energy_masked(r, sys.bonds, sys.bond_params, sys.bond_mask, displacement_fn)
+        e_ub = _bond_energy_masked(r, sys.urey_bradley_bonds, sys.urey_bradley_params, sys.urey_bradley_mask, displacement_fn)
+        e_angle = _angle_energy_masked(r, sys.angles, sys.angle_params, sys.angle_mask, displacement_fn)
+        e_dih = _dihedral_energy_masked(r, sys.dihedrals, sys.dihedral_params, sys.dihedral_mask, displacement_fn)
+        e_imp = _dihedral_energy_masked(r, sys.impropers, sys.improper_params, sys.improper_mask, displacement_fn)
+        e_cmap = _cmap_energy_masked(r, sys.cmap_torsions, sys.cmap_indices, sys.cmap_mask, sys.cmap_coeffs, displacement_fn)
 
     N = len(sys.atom_mask)
     nb_idx = jnp.where(
@@ -1027,43 +1577,118 @@ def single_padded_energy_nl(
         N,
     )
 
-    # Non-bonded: O(N*K) via neighbor list
-    excl_scales_vdw_nl, excl_scales_elec_nl = get_neighbor_exclusion_scales(
-        sys.excl_indices, sys.excl_scales_vdw, sys.excl_scales_elec, nb_idx,
-    )
+    if pallas_enabled and pallas_nonbonded_nl is not None:
+        e_lj = pallas_nonbonded_nl(
+            r,
+            sys.charges,
+            sys.sigmas,
+            sys.epsilons,
+            sys.atom_mask,
+            nb_idx,
+            sys.excl_indices,
+            sys.excl_scales_vdw,
+            sys.excl_scales_elec,
+            box=None,
+            pme_alpha=0.0,
+            cutoff=1e9,
+            lj_switch_width=0.0,
+            soft_core_lambda=soft_core_lambda,
+            include_pme_excl_erf=False,
+            interpret=interpret,
+        )
+        e_elec = jnp.asarray(0.0, dtype=r.dtype)
+    else:
+        # Non-bonded: O(N*K) via neighbor list
+        excl_scales_vdw_nl, excl_scales_elec_nl = get_neighbor_exclusion_scales(
+            sys.excl_indices, sys.excl_scales_vdw, sys.excl_scales_elec, nb_idx,
+        )
 
-    e_lj = _lj_energy_neighbor_list(
-        r, sys.sigmas, sys.epsilons, nb_idx,
-        soft_core_lambda=soft_core_lambda,
-        excl_scales_vdw=excl_scales_vdw_nl,
-    )
+        e_lj = _lj_energy_neighbor_list(
+            r, sys.sigmas, sys.epsilons, nb_idx,
+            soft_core_lambda=soft_core_lambda,
+            excl_scales_vdw=excl_scales_vdw_nl,
+        )
 
-    e_elec = _coulomb_energy_neighbor_list(
-        r, sys.charges, nb_idx,
-        excl_scales_elec=excl_scales_elec_nl,
-    )
+        e_elec = _coulomb_energy_neighbor_list(
+            r, sys.charges, nb_idx,
+            excl_scales_elec=excl_scales_elec_nl,
+        )
 
     if implicit_solvent:
-        e_gb, born_radii = compute_gb_energy_neighbor_list(
-            positions=r,
-            charges=sys.charges,
-            radii=sys.radii,
-            neighbor_idx=nb_idx,
-            dielectric_offset=0.09,
-            scaled_radii=sys.scaled_radii,
-        )
-        e_np = compute_ace_nonpolar_energy(sys.radii, born_radii)
-        e_np = jnp.sum(e_np * sys.atom_mask)
-        e_solv = e_gb + e_np
+        if pallas_enabled and pallas_gb_ace_nl is not None:
+            e_solv = pallas_gb_ace_nl(
+                r,
+                sys.charges,
+                sys.radii,
+                nb_idx,
+                atom_mask=sys.atom_mask,
+                scaled_radii=sys.scaled_radii,
+                dielectric_offset=0.09,
+                solvent_dielectric=78.5,
+                solute_dielectric=1.0,
+                surface_tension=0.0054,
+                box=None,
+                interpret=interpret,
+            )
+        else:
+            e_gb, born_radii = compute_gb_energy_neighbor_list(
+                positions=r,
+                charges=sys.charges,
+                radii=sys.radii,
+                neighbor_idx=nb_idx,
+                dielectric_offset=0.09,
+                scaled_radii=sys.scaled_radii,
+            )
+            e_np = compute_ace_nonpolar_energy(sys.radii, born_radii)
+            e_np = jnp.sum(e_np * sys.atom_mask)
+            e_solv = e_gb + e_np
     else:
         e_solv = 0.0
 
-    return e_bond + e_ub + e_angle + e_dih + e_imp + e_cmap + e_lj + e_elec + e_solv
+    e_cosolv_rep = jnp.float32(0.0)
+    if getattr(sys, "cosolvent_group_id", None) is not None and getattr(sys, "cosolvent_mol_id", None) is not None:
+        e_cosolv_rep = cosolvent_repulsive_energy(
+            r,
+            sys.cosolvent_group_id,
+            sys.cosolvent_mol_id,
+            displacement_fn,
+            eps_kcal=float(getattr(sys, "cosolvent_repulsive_eps", 0.01)),
+            r0_angstrom=float(getattr(sys, "cosolvent_repulsive_r0", 10.0)),
+            cutoff_angstrom=float(getattr(sys, "cosolvent_repulsive_cutoff", 9.0)),
+            deduplicate_interaction_groups=bool(getattr(sys, "deduplicate_interaction_groups", False)),
+            atom_mask=sys.atom_mask,
+        )
+
+    if pallas_enabled and pallas_exceptions_14 is not None:
+        e_exc = pallas_exceptions_14(
+            r,
+            getattr(sys, "exception_pairs", None),
+            getattr(sys, "exception_sigmas", None),
+            getattr(sys, "exception_epsilons", None),
+            getattr(sys, "exception_chargeprods", None),
+            getattr(sys, "exception_mask", None),
+            box=box_pbc,
+            soft_core_lambda=1.0,
+            interpret=interpret,
+        )
+    else:
+        e_exc = _exception_energy_masked(
+            r,
+            getattr(sys, "exception_pairs", None),
+            getattr(sys, "exception_sigmas", None),
+            getattr(sys, "exception_epsilons", None),
+            getattr(sys, "exception_chargeprods", None),
+            getattr(sys, "exception_mask", None),
+            displacement_fn,
+        )
+
+    return e_bond + e_ub + e_angle + e_dih + e_imp + e_cmap + e_lj + e_elec + e_solv + e_cosolv_rep + e_exc
 
 
 def make_batched_energy_fn_nl(
     displacement_fn: space.DisplacementFn,
     implicit_solvent: bool = True,
+    use_pallas: bool | None = None,
 ) -> Callable:
     """Create a vmap-compatible energy function using neighbor lists.
 
@@ -1074,6 +1699,8 @@ def make_batched_energy_fn_nl(
         Function(sys_batch: PaddedSystem, neighbor_idx: Array) -> Array[B]
     """
     def _energy_single(sys, nbr_idx):
-        return single_padded_energy_nl(sys, nbr_idx, displacement_fn, implicit_solvent)
+        return single_padded_energy_nl(
+            sys, nbr_idx, displacement_fn, implicit_solvent, use_pallas=use_pallas,
+        )
 
     return jax.vmap(_energy_single)
