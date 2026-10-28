@@ -14,6 +14,7 @@ from prolix.padding import PaddedSystem
 try:
     from prolix.pallas_kernels import (
         pallas_angles_harmonic,
+        pallas_bonded_all_fused,
         pallas_bonds_2body,
         pallas_cmap_torsions,
         pallas_exceptions_14,
@@ -25,6 +26,7 @@ try:
     )
 except ImportError:
     pallas_angles_harmonic = None  # type: ignore[assignment]
+    pallas_bonded_all_fused = None  # type: ignore[assignment]
     pallas_bonds_2body = None  # type: ignore[assignment]
     pallas_cmap_torsions = None  # type: ignore[assignment]
     pallas_exceptions_14 = None  # type: ignore[assignment]
@@ -720,9 +722,56 @@ def single_padded_energy(
         and pallas_torsions_4body is not None
         and pallas_cmap_torsions is not None
     )
+    _use_fused_bonded = pallas_enabled and pallas_bonded_all_fused is not None
 
     # Bonded terms
-    if pallas_enabled and _has_pallas_bonded:
+    if _use_fused_bonded:
+        with jax.named_scope("dense_bonded_all_fused"):
+            imp_is_harm = sys.improper_params is not None and (
+                sys.improper_params.shape[-1] == 2 or not bool(getattr(sys, "improper_is_periodic", True))
+            )
+            e_bond = pallas_bonded_all_fused(
+                r,
+                bonds=sys.bonds,
+                bond_params=sys.bond_params,
+                bond_mask=sys.bond_mask,
+                urey_bradley_bonds=sys.urey_bradley_bonds,
+                urey_bradley_params=sys.urey_bradley_params,
+                urey_bradley_mask=sys.urey_bradley_mask,
+                angles=sys.angles,
+                angle_params=sys.angle_params,
+                angle_mask=sys.angle_mask,
+                dihedrals=sys.dihedrals,
+                dihedral_params=sys.dihedral_params,
+                dihedral_mask=sys.dihedral_mask,
+                impropers=sys.impropers,
+                improper_params=sys.improper_params,
+                improper_mask=sys.improper_mask,
+                improper_is_harmonic=imp_is_harm,
+                exception_pairs=getattr(sys, "exception_pairs", None),
+                exception_sigmas=getattr(sys, "exception_sigmas", None),
+                exception_epsilons=getattr(sys, "exception_epsilons", None),
+                exception_chargeprods=getattr(sys, "exception_chargeprods", None),
+                exception_mask=getattr(sys, "exception_mask", None),
+                cmap_torsions=sys.cmap_torsions,
+                cmap_indices=sys.cmap_indices,
+                cmap_mask=sys.cmap_mask,
+                cmap_coeffs=sys.cmap_coeffs,
+                box=box_pbc,
+                dist_eps=1e-10,
+                b0_is_ji=True,
+                cmap_first_is_psi=True,
+                soft_core_lambda=soft_core_lambda,
+                softcore_alpha=float(getattr(sys, "softcore_alpha", 0.5)),
+                softcore_exponent=int(getattr(sys, "softcore_exponent", 2)),
+                interpret=interpret,
+            )
+            e_ub = jnp.asarray(0.0, dtype=r.dtype)
+            e_angle = jnp.asarray(0.0, dtype=r.dtype)
+            e_dih = jnp.asarray(0.0, dtype=r.dtype)
+            e_imp = jnp.asarray(0.0, dtype=r.dtype)
+            e_cmap = jnp.asarray(0.0, dtype=r.dtype)
+    elif pallas_enabled and _has_pallas_bonded:
         with jax.named_scope("dense_bonded_bond"):
             e_bond = pallas_bonds_2body(
                 r, sys.bonds, sys.bond_params, sys.bond_mask,
@@ -914,7 +963,9 @@ def single_padded_energy(
             )
 
     # Explicit 1-4 exception energy (FR-6 / CA-3)
-    if pallas_enabled and pallas_exceptions_14 is not None:
+    if _use_fused_bonded:
+        e_exc = jnp.asarray(0.0, dtype=r.dtype)
+    elif pallas_enabled and pallas_exceptions_14 is not None:
         e_exc = pallas_exceptions_14(
             r,
             getattr(sys, "exception_pairs", None),
@@ -1059,88 +1110,130 @@ def single_padded_force(
     )
 
     # --- Bonded energy only (safe for jax.grad — no N² operations) ---
-    def bonded_energy(positions):
-        if pallas_enabled and _has_pallas_bonded_force:
-            e_bond = pallas_bonds_2body(
-                positions, sys.bonds, sys.bond_params, sys.bond_mask,
-                box=box_pbc, dist_eps=1e-10, interpret=interpret,
-            )
-            e_ub = pallas_bonds_2body(
-                positions, sys.urey_bradley_bonds, sys.urey_bradley_params,
-                sys.urey_bradley_mask, box=box_pbc, dist_eps=1e-10, interpret=interpret,
-            )
-            e_angle = pallas_angles_harmonic(
-                positions, sys.angles, sys.angle_params, sys.angle_mask,
-                box=box_pbc, dist_eps=1e-10, interpret=interpret,
-            )
-            e_dih = pallas_torsions_4body(
-                positions, sys.dihedrals, sys.dihedral_params,
-                sys.dihedral_mask, box=box_pbc, b0_is_ji=True, is_harmonic=False, interpret=interpret,
-            )
-            imp_is_harm = sys.improper_params is not None and (
-                sys.improper_params.shape[-1] == 2 or not bool(getattr(sys, "improper_is_periodic", True))
-            )
-            e_imp = pallas_torsions_4body(
-                positions, sys.impropers, sys.improper_params,
-                sys.improper_mask, box=box_pbc, b0_is_ji=True, is_harmonic=imp_is_harm, interpret=interpret,
-            )
-            e_cmap = pallas_cmap_torsions(
-                positions, sys.cmap_torsions, sys.cmap_indices, sys.cmap_mask,
-                sys.cmap_coeffs, box=box_pbc, first_is_psi=True, interpret=interpret,
-            )
-            e_exc = pallas_exceptions_14(
-                positions,
-                getattr(sys, "exception_pairs", None),
-                getattr(sys, "exception_sigmas", None),
-                getattr(sys, "exception_epsilons", None),
-                getattr(sys, "exception_chargeprods", None),
-                getattr(sys, "exception_mask", None),
-                box=box_pbc,
-                soft_core_lambda=soft_core_lambda,
-                softcore_alpha=float(getattr(sys, "softcore_alpha", 0.5)),
-                softcore_exponent=int(getattr(sys, "softcore_exponent", 2)),
-                interpret=interpret,
-            )
-        else:
-            e_bond = _bond_energy_masked(
-                positions, sys.bonds, sys.bond_params, sys.bond_mask, displacement_fn,
-            )
-            e_ub = _bond_energy_masked(
-                positions, sys.urey_bradley_bonds, sys.urey_bradley_params,
-                sys.urey_bradley_mask, displacement_fn,
-            )
-            e_angle = _angle_energy_masked(
-                positions, sys.angles, sys.angle_params, sys.angle_mask, displacement_fn,
-            )
-            e_dih = _dihedral_energy_masked(
-                positions, sys.dihedrals, sys.dihedral_params,
-                sys.dihedral_mask, displacement_fn,
-            )
-            e_imp = _dihedral_energy_masked(
-                positions, sys.impropers, sys.improper_params,
-                sys.improper_mask, displacement_fn,
-            )
-            e_cmap = _cmap_energy_masked(
-                positions, sys.cmap_torsions, sys.cmap_indices, sys.cmap_mask,
-                sys.cmap_coeffs, displacement_fn,
-            )
-            e_exc = _exception_energy_masked(
-                positions,
-                getattr(sys, "exception_pairs", None),
-                getattr(sys, "exception_sigmas", None),
-                getattr(sys, "exception_epsilons", None),
-                getattr(sys, "exception_chargeprods", None),
-                getattr(sys, "exception_mask", None),
-                displacement_fn,
-                soft_core_lambda=soft_core_lambda,
-                softcore_alpha=float(getattr(sys, "softcore_alpha", 0.5)),
-                softcore_exponent=int(getattr(sys, "softcore_exponent", 2)),
-            )
+    if pallas_enabled and pallas_bonded_all_fused is not None:
+        imp_is_harm_f = sys.improper_params is not None and (
+            sys.improper_params.shape[-1] == 2 or not bool(getattr(sys, "improper_is_periodic", True))
+        )
+        _, bonded_force = pallas_bonded_all_fused(
+            r,
+            bonds=sys.bonds,
+            bond_params=sys.bond_params,
+            bond_mask=sys.bond_mask,
+            urey_bradley_bonds=sys.urey_bradley_bonds,
+            urey_bradley_params=sys.urey_bradley_params,
+            urey_bradley_mask=sys.urey_bradley_mask,
+            angles=sys.angles,
+            angle_params=sys.angle_params,
+            angle_mask=sys.angle_mask,
+            dihedrals=sys.dihedrals,
+            dihedral_params=sys.dihedral_params,
+            dihedral_mask=sys.dihedral_mask,
+            impropers=sys.impropers,
+            improper_params=sys.improper_params,
+            improper_mask=sys.improper_mask,
+            improper_is_harmonic=imp_is_harm_f,
+            exception_pairs=getattr(sys, "exception_pairs", None),
+            exception_sigmas=getattr(sys, "exception_sigmas", None),
+            exception_epsilons=getattr(sys, "exception_epsilons", None),
+            exception_chargeprods=getattr(sys, "exception_chargeprods", None),
+            exception_mask=getattr(sys, "exception_mask", None),
+            cmap_torsions=sys.cmap_torsions,
+            cmap_indices=sys.cmap_indices,
+            cmap_mask=sys.cmap_mask,
+            cmap_coeffs=sys.cmap_coeffs,
+            box=box_pbc,
+            dist_eps=1e-10,
+            b0_is_ji=True,
+            cmap_first_is_psi=True,
+            soft_core_lambda=soft_core_lambda,
+            softcore_alpha=float(getattr(sys, "softcore_alpha", 0.5)),
+            softcore_exponent=int(getattr(sys, "softcore_exponent", 2)),
+            return_forces=True,
+            interpret=interpret,
+        )
+    else:
+        def bonded_energy(positions):
+            if pallas_enabled and _has_pallas_bonded_force:
+                e_bond = pallas_bonds_2body(
+                    positions, sys.bonds, sys.bond_params, sys.bond_mask,
+                    box=box_pbc, dist_eps=1e-10, interpret=interpret,
+                )
+                e_ub = pallas_bonds_2body(
+                    positions, sys.urey_bradley_bonds, sys.urey_bradley_params,
+                    sys.urey_bradley_mask, box=box_pbc, dist_eps=1e-10, interpret=interpret,
+                )
+                e_angle = pallas_angles_harmonic(
+                    positions, sys.angles, sys.angle_params, sys.angle_mask,
+                    box=box_pbc, dist_eps=1e-10, interpret=interpret,
+                )
+                e_dih = pallas_torsions_4body(
+                    positions, sys.dihedrals, sys.dihedral_params,
+                    sys.dihedral_mask, box=box_pbc, b0_is_ji=True, is_harmonic=False, interpret=interpret,
+                )
+                imp_is_harm = sys.improper_params is not None and (
+                    sys.improper_params.shape[-1] == 2 or not bool(getattr(sys, "improper_is_periodic", True))
+                )
+                e_imp = pallas_torsions_4body(
+                    positions, sys.impropers, sys.improper_params,
+                    sys.improper_mask, box=box_pbc, b0_is_ji=True, is_harmonic=imp_is_harm, interpret=interpret,
+                )
+                e_cmap = pallas_cmap_torsions(
+                    positions, sys.cmap_torsions, sys.cmap_indices, sys.cmap_mask,
+                    sys.cmap_coeffs, box=box_pbc, first_is_psi=True, interpret=interpret,
+                )
+                e_exc = pallas_exceptions_14(
+                    positions,
+                    getattr(sys, "exception_pairs", None),
+                    getattr(sys, "exception_sigmas", None),
+                    getattr(sys, "exception_epsilons", None),
+                    getattr(sys, "exception_chargeprods", None),
+                    getattr(sys, "exception_mask", None),
+                    box=box_pbc,
+                    soft_core_lambda=soft_core_lambda,
+                    softcore_alpha=float(getattr(sys, "softcore_alpha", 0.5)),
+                    softcore_exponent=int(getattr(sys, "softcore_exponent", 2)),
+                    interpret=interpret,
+                )
+            else:
+                e_bond = _bond_energy_masked(
+                    positions, sys.bonds, sys.bond_params, sys.bond_mask, displacement_fn,
+                )
+                e_ub = _bond_energy_masked(
+                    positions, sys.urey_bradley_bonds, sys.urey_bradley_params,
+                    sys.urey_bradley_mask, displacement_fn,
+                )
+                e_angle = _angle_energy_masked(
+                    positions, sys.angles, sys.angle_params, sys.angle_mask, displacement_fn,
+                )
+                e_dih = _dihedral_energy_masked(
+                    positions, sys.dihedrals, sys.dihedral_params,
+                    sys.dihedral_mask, displacement_fn,
+                )
+                e_imp = _dihedral_energy_masked(
+                    positions, sys.impropers, sys.improper_params,
+                    sys.improper_mask, displacement_fn,
+                )
+                e_cmap = _cmap_energy_masked(
+                    positions, sys.cmap_torsions, sys.cmap_indices, sys.cmap_mask,
+                    sys.cmap_coeffs, displacement_fn,
+                )
+                e_exc = _exception_energy_masked(
+                    positions,
+                    getattr(sys, "exception_pairs", None),
+                    getattr(sys, "exception_sigmas", None),
+                    getattr(sys, "exception_epsilons", None),
+                    getattr(sys, "exception_chargeprods", None),
+                    getattr(sys, "exception_mask", None),
+                    displacement_fn,
+                    soft_core_lambda=soft_core_lambda,
+                    softcore_alpha=float(getattr(sys, "softcore_alpha", 0.5)),
+                    softcore_exponent=int(getattr(sys, "softcore_exponent", 2)),
+                )
 
-        return e_bond + e_ub + e_angle + e_dih + e_imp + e_cmap + e_exc
+            return e_bond + e_ub + e_angle + e_dih + e_imp + e_cmap + e_exc
 
-    # Bonded + 1-4 exception forces via autodiff (safe path — no N² operations)
-    bonded_force = -jax.grad(bonded_energy)(r)
+        # Bonded + 1-4 exception forces via autodiff (safe path — no N² operations)
+        bonded_force = -jax.grad(bonded_energy)(r)
 
     eff_elec_method = str(getattr(sys, "electrostatic_method", "pme")).lower()
     eff_lj_sw = float(getattr(sys, "lj_switch_width", 0.0))

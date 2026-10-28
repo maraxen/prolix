@@ -178,12 +178,29 @@ def spread_charges_pallas(
     grid_dims: tuple[int, int, int],
     order: int = 4,
     *,
+    atom_perm: jax.Array | None = None,
     interpret: bool = False,
 ) -> jax.Array:
     """Spread charges onto the PME mesh with a vectorized ``(BLOCK_N=32, 64)`` stencil."""
     if order != 4:
         raise NotImplementedError("Pallas SPME stencil is order-4 only")
     grid_tuple = (int(grid_dims[0]), int(grid_dims[1]), int(grid_dims[2]))
+    if atom_perm is not None:
+        perm = jnp.asarray(atom_perm, dtype=jnp.int32)
+        if positions.ndim == 3:
+            positions = positions[:, perm, :]
+            if charges.ndim == 2:
+                charges = charges[:, perm]
+            else:
+                charges = charges[perm]
+            if atom_mask.ndim == 2:
+                atom_mask = atom_mask[:, perm]
+            else:
+                atom_mask = atom_mask[perm]
+        else:
+            positions = positions[perm]
+            charges = charges[perm]
+            atom_mask = atom_mask[perm]
 
     @jax.custom_batching.custom_vmap
     def _vmappable(pos, q, mask, box):
@@ -379,6 +396,8 @@ def gather_pallas(
     grid_dims: tuple[int, int, int],
     order: int = 4,
     *,
+    atom_perm: jax.Array | None = None,
+    atom_inv_perm: jax.Array | None = None,
     interpret: bool = False,
 ) -> tuple[jax.Array, jax.Array]:
     """Gather potential and dE/dr contributions from ``theta_norm``.
@@ -389,6 +408,23 @@ def gather_pallas(
     if order != 4:
         raise NotImplementedError("Pallas SPME stencil is order-4 only")
     grid_tuple = (int(grid_dims[0]), int(grid_dims[1]), int(grid_dims[2]))
+
+    inv_p = None
+    if atom_perm is not None:
+        perm = jnp.asarray(atom_perm, dtype=jnp.int32)
+        inv_p = (
+            jnp.argsort(perm).astype(jnp.int32)
+            if atom_inv_perm is None
+            else jnp.asarray(atom_inv_perm, dtype=jnp.int32)
+        )
+        if positions.ndim == 3:
+            positions = positions[:, perm, :]
+            charges = charges[:, perm] if charges.ndim == 2 else charges[perm]
+            atom_mask = atom_mask[:, perm] if atom_mask.ndim == 2 else atom_mask[perm]
+        else:
+            positions = positions[perm]
+            charges = charges[perm]
+            atom_mask = atom_mask[perm]
 
     @jax.custom_batching.custom_vmap
     def _vmappable(pos, q, mask, box, dE_dmesh):
@@ -415,7 +451,7 @@ def gather_pallas(
         b_m = atom_mask.ndim == 2
         b_box = jnp.asarray(box_size).ndim >= 2
         b_mesh = theta_norm.ndim == 4
-        return jax.vmap(
+        dpos_s, dq_s = jax.vmap(
             lambda b: _vmappable(
                 positions[b],
                 charges[b] if b_q else charges,
@@ -424,8 +460,14 @@ def gather_pallas(
                 theta_norm[b] if b_mesh else theta_norm,
             )
         )(jnp.arange(B))
+        if inv_p is not None:
+            return dpos_s[:, inv_p, :], dq_s[:, inv_p]
+        return dpos_s, dq_s
 
-    return _vmappable(positions, charges, atom_mask, box_size, theta_norm)
+    dpos_s, dq_s = _vmappable(positions, charges, atom_mask, box_size, theta_norm)
+    if inv_p is not None:
+        return dpos_s[inv_p], dq_s[inv_p]
+    return dpos_s, dq_s
 
 
 def make_spread_op(

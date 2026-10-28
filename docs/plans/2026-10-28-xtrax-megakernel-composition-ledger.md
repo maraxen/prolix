@@ -143,4 +143,43 @@ Every entry added to this ledger must record:
   2. Strip tag bits (`tag = raw & ~MASK`, `j = raw & MASK`), guard `valid = (j >= 0) & (j < N)`, map `j_new = jnp.where(valid, inv_perm[jnp.clip(j, 0, N - 1)], N)`, and re-attach `j_new | tag`.
   3. Re-sort per-atom exclusion rows ascending after mapping through `inv_perm`.
 
+### MK-14: Compile-Time Dead-Group Pruning in Uniform-CTA Megakernels
+- **Category**: `Grid & Work-Unit Dispatch` / `Lowering & Triton Constraints`
+- **Symptom / Failure Mode**: If a megakernel unconditionally pads absent force-field groups (e.g., CMAP on AMBER ff19SB without CMAP, or Urey-Bradley on a non-CHARMM system) to `1` dummy CTA block (`max(M, 1)`) and includes all 6 term branches in `jax.lax.cond`, the Triton compiler still compiles the heaviest branch (e.g., 5-body CMAP with 16-term bicubic spline loads) into the kernel binary, inflating register pressure for *every* CTA in the megakernel even when `M_cmap == 0`!
+- **Root Cause**: Triton's register allocator sizes the kernel to the maximum register demand across all reachable CFG branches in the compiled module. A branch guarded by `jax.lax.cond(pid < O_g, ...)` where `O_g == O_{g-1}` is still traced and lowered by JAX/Pallas into the Triton IR unless pruned in Python at trace time.
+- **Generalizable Rule for `xtrax` Skill**:
+  1. Inspect static array counts `count_g = table_g.shape[0]` in Python at trace time and set `n_blk_g = (count_g + B - 1) // B if count_g > 0 else 0`.
+  2. Build the `active_groups: list[tuple[int, Callable[[], None]]]` list containing *only* groups with `n_blk_g > 0`, and construct the right-nested `jax.lax.cond(pid < o_end, fn_g, next_branch)` chain exclusively over `active_groups`.
+  3. Absent groups contribute `0` CTAs and `0` instructions to the lowered Triton IR, so a system without CMAP or Urey-Bradley never pays register pressure for unused stencil families.
+
+### MK-15: Direct Forward-Force Bypass (`return_forces=True`) for Non-Differentiable Force Evaluation
+- **Category**: `Differentiation (JVP/VJP)` / `xtrax.op Seam`
+- **Symptom / Failure Mode**: In force-only MD integrators (e.g., `single_padded_force` or velocity-Verlet step functions that call `force_fn(r)` directly without needing an AD tape), computing bonded forces via `-jax.grad(bonded_energy)(r)` traces the forward pass, builds a `custom_vjp` residual tuple, and runs the backward rule just to negate `-fx_pad` that the Pallas forward kernel already computed!
+- **Root Cause**: A Pallas energy+force kernel computes `(energy, forces)` in a single GPU launch during the forward pass. Wrapping it exclusively behind a scalar-returning `energy_fn` forces callers that want `forces` to go through `jax.grad`.
+- **Generalizable Rule for `xtrax` Skill**:
+  1. Expose `return_forces: bool = False` on the public kernel entry point (`pallas_bonded_all_fused(..., return_forces=True) -> (energy, forces)`).
+  2. When `return_forces=True`, call the `@custom_vmap` vmappable kernel directly and return `(energy, forces)` without constructing a `custom_vjp` residual frame or running a VJP backward pass.
+
+### MK-16: Zero-Leaf `@jax.tree_util.register_static` Shape Metadata in `custom_vjp` Residuals Across `jax.grad(jax.jit(f))`
+- **Category**: `Differentiation (JVP/VJP)` / `xtrax.op Seam`
+- **Symptom / Failure Mode**: `TypeError: A ShapeDtypeStruct does not have a value and cannot be used as a constant in a JAX function` when differentiating across a JIT boundary (`jax.grad(jax.jit(fn))(pos)`) if `custom_vjp` forward residuals store `jax.ShapeDtypeStruct(t.shape, t.dtype)` instances to avoid saving unperturbed parameter buffers.
+- **Root Cause**: `jax.ShapeDtypeStruct` is registered in JAX's PyTree registry as a **leaf** (not a static auxiliary node). When `jax.grad(jax.jit(fn))` linearizes across the `pjit` boundary, JAX returns all PyTree leaves of the `custom_vjp` residuals as runtime output values of the compiled `pjit` computation, which fails because `ShapeDtypeStruct` has no backing buffer.
+- **Generalizable Rule for `xtrax` Skill**: Wrap static `(shape, dtype)` metadata in a `@jax.tree_util.register_static` frozen dataclass (`_StaticShapesMeta`) before returning it in `custom_vjp` / `VjpKernel` residuals. Because `@jax.tree_util.register_static` registers the container with **0 PyTree leaves** (`tree_flatten` returns `leaves = []`), `pjit` passes it purely via static PyTree AuxData with zero device buffers and zero `ShapeDtypeStruct` leaf errors under both `jax.jit(jax.grad(fn))` and `jax.grad(jax.jit(fn))`.
+
+### MK-17: Pallas Triton Lowering Primitive Traps (`reduce_or` from `jnp.any` and `int64` `argmax` under `x64`)
+- **Category**: `Lowering & Triton Constraints` / `Verification & Negative Controls`
+- **Symptom / Failure Mode**:
+  1. `NotImplementedError: Unimplemented primitive in Pallas Triton lowering: reduce_or` when using `jnp.any(mask)` inside a Pallas kernel (e.g., as a `jax.lax.cond` predicate). Note that `interpret=True` on CPU succeeds, hiding this failure unless CUDA Triton MLIR lowering is explicitly tested!
+  2. `ValueError: index_type must be i32` in `_argreduce_lowering` when calling `jnp.argmax(...)` inside a Pallas kernel while `jax_enable_x64=True`.
+- **Root Cause**:
+  1. `jax._src.pallas.triton.lowering` registers `reduce_sum`, `reduce_max`, `reduce_min`, and `reduce_xor`, but does **not** register a lowering rule for `reduce_or` or `reduce_and`.
+  2. Under `jax_enable_x64=True`, `jnp.argmax` defaults to `index_dtype=jnp.int64`, which Pallas Triton's `_argreduce_lowering` rejects.
+- **Generalizable Rule for `xtrax` Skill**:
+  1. Never use `jnp.any(b)` or `jnp.all(b)` inside a Pallas Triton kernel; always write `jnp.sum(b.astype(jnp.int32)) > 0` (for `any`) or `jnp.sum(b.astype(jnp.int32)) == b.size` (for `all`).
+  2. Avoid `jnp.argmax` for masked bounding-box reductions; instead use sentinel values `r_min = jnp.min(jnp.where(mask, x, 1e30))` and `r_max = jnp.max(jnp.where(mask, x, -1e30))`.
+  3. Always include a CPU-executable `.trace(...).lower(lowering_platforms=("cuda",))` test with `interpret=False` in CI so unimplemented Triton primitives are caught even on CPU-only test runners.
+
+
+
+
 
