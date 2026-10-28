@@ -37,7 +37,7 @@ from prolix.physics.pme_pallas import gather_pallas
 
 log = logging.getLogger("pme_gather_xtrax_op")
 
-TOLERANCE = 1e-4
+TOLERANCE = 1e-5
 GHOST_FRACTION = 0.02
 
 
