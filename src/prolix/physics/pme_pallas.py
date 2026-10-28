@@ -203,6 +203,20 @@ def spread_charges_pallas(
         out = jax.lax.map(_body, jnp.arange(axis_size))
         return out, True
 
+    if positions.ndim == 3:
+        B = positions.shape[0]
+        b_q = charges.ndim == 2
+        b_m = atom_mask.ndim == 2
+        b_box = jnp.asarray(box_size).ndim >= 2
+        return jax.vmap(
+            lambda b: _vmappable(
+                positions[b],
+                charges[b] if b_q else charges,
+                atom_mask[b] if b_m else atom_mask,
+                box_size[b] if b_box else box_size,
+            )
+        )(jnp.arange(B))
+
     return _vmappable(positions, charges, atom_mask, box_size)
 
 
@@ -395,4 +409,160 @@ def gather_pallas(
         dpos_out, dq_out = jax.lax.map(_body, jnp.arange(axis_size))
         return (dpos_out, dq_out), (True, True)
 
+    if positions.ndim == 3:
+        B = positions.shape[0]
+        b_q = charges.ndim == 2
+        b_m = atom_mask.ndim == 2
+        b_box = jnp.asarray(box_size).ndim >= 2
+        b_mesh = theta_norm.ndim == 4
+        return jax.vmap(
+            lambda b: _vmappable(
+                positions[b],
+                charges[b] if b_q else charges,
+                atom_mask[b] if b_m else atom_mask,
+                box_size[b] if b_box else box_size,
+                theta_norm[b] if b_mesh else theta_norm,
+            )
+        )(jnp.arange(B))
+
     return _vmappable(positions, charges, atom_mask, box_size, theta_norm)
+
+
+def make_spread_op(
+    grid_dims: tuple[int, int, int],
+    order: int = 4,
+    *,
+    context: object | None = None,
+):
+    """Build the SPME charge spread op for one mesh shape."""
+    import functools
+
+    import xtrax
+
+    dims = (int(grid_dims[0]), int(grid_dims[1]), int(grid_dims[2]))
+
+    def _spread_ref_one(pos_1, q_1, mask_1, box_1):
+        dtype = pos_1.dtype
+        K_arr = jnp.array(dims, dtype=dtype)
+        box_arr = jnp.asarray(box_1, dtype=dtype)
+        frac = (pos_1 / box_arr) * K_arr
+        grid_idx = jnp.floor(frac).astype(jnp.int32)
+        u = frac - grid_idx.astype(dtype)
+        wx = _bspline4_vec(u[:, 0])
+        wy = _bspline4_vec(u[:, 1])
+        wz = _bspline4_vec(u[:, 2])
+        s_idx = jnp.arange(64, dtype=jnp.int32)
+        ox = (s_idx // 16)[None, :]
+        oy = ((s_idx // 4) % 4)[None, :]
+        oz = (s_idx % 4)[None, :]
+        ix = (grid_idx[:, None, 0] + ox - 1) % dims[0]
+        iy = (grid_idx[:, None, 1] + oy - 1) % dims[1]
+        iz = (grid_idx[:, None, 2] + oz - 1) % dims[2]
+        w = (_select_stencil(wx, ox) * _select_stencil(wy, oy) * _select_stencil(wz, oz)) * (
+            q_1 * (mask_1 > 0).astype(q_1.dtype)
+        ).astype(dtype)[:, None]
+        return jnp.zeros(dims, dtype=dtype).at[ix, iy, iz].add(w)
+
+    def _spread_ref(pos, q, mask, box):
+        if pos.ndim == 3:
+            B = pos.shape[0]
+            b_q = q.ndim == 2
+            b_m = mask.ndim == 2
+            b_box = jnp.asarray(box).ndim >= 2
+            return jax.vmap(
+                lambda b: _spread_ref_one(
+                    pos[b],
+                    q[b] if b_q else q,
+                    mask[b] if b_m else mask,
+                    box[b] if b_box else box,
+                )
+            )(jnp.arange(B))
+        return _spread_ref_one(pos, q, mask, box)
+
+    return xtrax.op(
+        _spread_ref,
+        kernels={
+            "gpu": functools.partial(spread_charges_pallas, grid_dims=dims, order=order, interpret=False),
+            "cpu": functools.partial(spread_charges_pallas, grid_dims=dims, order=order, interpret=True),
+        },
+        name="pme_spread",
+        context=context,
+    )
+
+
+def make_gather_op(
+    grid_dims: tuple[int, int, int],
+    order: int = 4,
+    *,
+    context: object | None = None,
+):
+    """Build the SPME backward gather op for one mesh shape."""
+    import functools
+
+    import xtrax
+
+    dims = (int(grid_dims[0]), int(grid_dims[1]), int(grid_dims[2]))
+
+    def _gather_ref_one(pos_1, q_1, mask_1, box_1, theta_1):
+        dtype = pos_1.dtype
+        K_arr = jnp.array(dims, dtype=dtype)
+        box_arr = jnp.asarray(box_1, dtype=dtype)
+        frac = (pos_1 / box_arr) * K_arr
+        grid_idx = jnp.floor(frac).astype(jnp.int32)
+        u = frac - grid_idx.astype(dtype)
+        wx = _bspline4_vec(u[:, 0])
+        wy = _bspline4_vec(u[:, 1])
+        wz = _bspline4_vec(u[:, 2])
+        dwx = _bspline4_deriv_vec(u[:, 0])
+        dwy = _bspline4_deriv_vec(u[:, 1])
+        dwz = _bspline4_deriv_vec(u[:, 2])
+        s_idx = jnp.arange(64, dtype=jnp.int32)
+        ox = (s_idx // 16)[None, :]
+        oy = ((s_idx // 4) % 4)[None, :]
+        oz = (s_idx % 4)[None, :]
+        ix = (grid_idx[:, None, 0] + ox - 1) % dims[0]
+        iy = (grid_idx[:, None, 1] + oy - 1) % dims[1]
+        iz = (grid_idx[:, None, 2] + oz - 1) % dims[2]
+        t_val = theta_1[ix, iy, iz]
+        wx_s = _select_stencil(wx, ox)
+        wy_s = _select_stencil(wy, oy)
+        wz_s = _select_stencil(wz, oz)
+        dwx_s = _select_stencil(dwx, ox)
+        dwy_s = _select_stencil(dwy, oy)
+        dwz_s = _select_stencil(dwz, oz)
+        pot = jnp.where(mask_1 > 0, jnp.sum(wx_s * wy_s * wz_s * t_val, axis=1), 0.0).astype(dtype)
+        q_masked = (q_1 * (mask_1 > 0).astype(q_1.dtype)).astype(dtype)
+        scale = K_arr / box_arr
+        fx = q_masked * scale[0] * jnp.sum(dwx_s * wy_s * wz_s * t_val, axis=1)
+        fy = q_masked * scale[1] * jnp.sum(wx_s * dwy_s * wz_s * t_val, axis=1)
+        fz = q_masked * scale[2] * jnp.sum(wx_s * wy_s * dwz_s * t_val, axis=1)
+        return jnp.stack([fx, fy, fz], axis=-1).astype(dtype), pot
+
+    def _gather_ref(pos, q, mask, box, theta):
+        if pos.ndim == 3:
+            B = pos.shape[0]
+            b_q = q.ndim == 2
+            b_m = mask.ndim == 2
+            b_box = jnp.asarray(box).ndim >= 2
+            b_th = theta.ndim == 4
+            return jax.vmap(
+                lambda b: _gather_ref_one(
+                    pos[b],
+                    q[b] if b_q else q,
+                    mask[b] if b_m else mask,
+                    box[b] if b_box else box,
+                    theta[b] if b_th else theta,
+                )
+            )(jnp.arange(B))
+        return _gather_ref_one(pos, q, mask, box, theta)
+
+    return xtrax.op(
+        _gather_ref,
+        kernels={
+            "gpu": functools.partial(gather_pallas, grid_dims=dims, order=order, interpret=False),
+            "cpu": functools.partial(gather_pallas, grid_dims=dims, order=order, interpret=True),
+        },
+        name="pme_gather",
+        context=context,
+    )
+
