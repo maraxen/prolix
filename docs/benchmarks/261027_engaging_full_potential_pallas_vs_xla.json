@@ -1,0 +1,75 @@
+{
+  "meta": {
+    "backend": "gpu",
+    "device": "cuda:0",
+    "device_kind": "NVIDIA RTX PRO 6000 Blackwell Server Edition",
+    "pallas_interpret": false,
+    "kernel": "full_potential",
+    "jax": "0.10.2",
+    "host": "node5104",
+    "cutoff": 9.0,
+    "density": 0.1
+  },
+  "rows": [
+    {
+      "n_atoms": 512,
+      "k": 392,
+      "xla_compile_s": 2.4309385353699327,
+      "xla_median_s": 0.0004056161269545555,
+      "pallas_compile_s": 2.309831111691892,
+      "pallas_median_s": 0.0005793347954750061,
+      "speedup": 0.7001411448486953,
+      "peak_mem_after_xla_bytes": 85041408,
+      "peak_mem_after_pallas_bytes": 151966976,
+      "max_abs_dE": 0.0009765625,
+      "rel_dE": 1.9422297725668614e-07,
+      "max_abs_dF": 0.0010385513305664062
+    },
+    {
+      "n_atoms": 2048,
+      "k": 424,
+      "xla_compile_s": 2.5941739194095135,
+      "xla_median_s": 0.0007167542353272438,
+      "pallas_compile_s": 2.1902994690462947,
+      "pallas_median_s": 0.0006135422736406326,
+      "speedup": 1.168223064849587,
+      "peak_mem_after_xla_bytes": 151966976,
+      "peak_mem_after_pallas_bytes": 154885632,
+      "max_abs_dE": 0.00390625,
+      "rel_dE": 1.8095276743679278e-07,
+      "max_abs_dF": 0.002899169921875
+    },
+    {
+      "n_atoms": 8192,
+      "k": 408,
+      "xla_compile_s": 2.859452120028436,
+      "xla_median_s": 0.002121361903846264,
+      "pallas_compile_s": 2.3733884263783693,
+      "pallas_median_s": 0.0007733916863799095,
+      "speedup": 2.7429334206783773,
+      "peak_mem_after_xla_bytes": 154885632,
+      "peak_mem_after_pallas_bytes": 169247232,
+      "max_abs_dE": 0.0,
+      "rel_dE": 0.0,
+      "max_abs_dF": 0.00316619873046875
+    },
+    {
+      "n_atoms": 32768,
+      "k": 448,
+      "xla_compile_s": 4.3839546432718635,
+      "xla_median_s": 0.009028082713484764,
+      "pallas_compile_s": 2.550145451910794,
+      "pallas_median_s": 0.0025766072794795036,
+      "speedup": 3.503864475345468,
+      "peak_mem_after_xla_bytes": 169247232,
+      "peak_mem_after_pallas_bytes": 169247232,
+      "max_abs_dE": 0.03125,
+      "rel_dE": 7.879734909010949e-08,
+      "max_abs_dF": 0.0058135986328125
+    }
+  ],
+  "summary": {
+    "xla_scaling_exponent": 0.7497069243894771,
+    "pallas_scaling_exponent": 0.33965234116474835
+  }
+}

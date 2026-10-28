@@ -8,11 +8,6 @@ import jax.numpy as jnp
 from jax_md import space
 from jaxtyping import Array
 
-from prolix.pallas_kernels import (
-  pallas_nonbonded_nl,
-  resolve_pallas_mode,
-)
-
 try:
   from prolix.pallas_kernels import (
     pallas_angles_harmonic,
@@ -20,7 +15,9 @@ try:
     pallas_cmap_torsions,
     pallas_exceptions_14,
     pallas_gb_ace_nl,
+    pallas_nonbonded_nl,
     pallas_torsions_4body,
+    resolve_pallas_mode,
   )
 except ImportError:
   pallas_angles_harmonic = None  # type: ignore[assignment]
@@ -28,7 +25,12 @@ except ImportError:
   pallas_cmap_torsions = None  # type: ignore[assignment]
   pallas_exceptions_14 = None  # type: ignore[assignment]
   pallas_gb_ace_nl = None  # type: ignore[assignment]
+  pallas_nonbonded_nl = None  # type: ignore[assignment]
   pallas_torsions_4body = None  # type: ignore[assignment]
+
+  def resolve_pallas_mode(*, use_pallas: bool | None = None, interpret: bool | None = None) -> tuple[bool, bool]:
+    del use_pallas, interpret
+    return False, False
 from prolix.physics import bonded, cmap, explicit_corrections, generalized_born, neighbor_list, pme
 from prolix.physics.bonded import compute_dihedral_angles
 from prolix.physics.neighbor_list import map_exclusions_to_dense_padded, pair_list_to_dense_padded
@@ -283,7 +285,7 @@ def make_energy_fn(
     else:
         e_lj = chunked_lj_energy(r, sigmas, epsilons, excl_idx, excl_sv, displacement_fn, cutoff, 128)
 
-    if use_pbc and box is not None:
+    if use_pbc and box is not None and not implicit_solvent and bool(getattr(system, "use_dispersion_correction", True)):
         mask = getattr(system, "atom_mask", jnp.ones(r.shape[0], bool))
         e_lj += explicit_corrections.lj_dispersion_tail_energy(jnp.asarray(box), sigmas, epsilons, cutoff, mask)
     return e_lj
@@ -354,7 +356,7 @@ def make_energy_fn(
             explicit_corrections.lj_dispersion_tail_energy(
                 jnp.asarray(box), sigmas, epsilons, cutoff, mask
             )
-            if (use_pbc and box is not None)
+            if (use_pbc and box is not None and not implicit_solvent and bool(getattr(system, "use_dispersion_correction", True)))
             else 0.0
         )
         if implicit_solvent:
@@ -579,34 +581,49 @@ def make_energy_fn_pure(
             if imp_idx.size > 0
             else 0.0
         )
+        cmap_src = getattr(params, "cmap_coeffs", None)
+        if cmap_src is None or cmap_src.size == 0:
+            cmap_src = getattr(params, "cmap_energy_grids", None)
+        if cmap_src is None or cmap_src.size == 0:
+            cmap_src = getattr(physics_system, "cmap_coeffs", None)
+        if cmap_src is None or cmap_src.size == 0:
+            cmap_src = getattr(physics_system, "cmap_energy_grids", None)
         e_cmap = (
             pallas_cmap_torsions(
                 r,
                 physics_system.cmap_torsions,
                 physics_system.cmap_indices,
-                params.cmap_coeffs
-                if getattr(params, "cmap_coeffs", None) is not None and params.cmap_coeffs.size > 0
-                else physics_system.cmap_energy_grids,
+                getattr(physics_system, "cmap_mask", None),
+                cmap_src,
                 box=pallas_box,
                 first_is_psi=False,
             )
-            if getattr(physics_system, "cmap_torsions", None) is not None
+            if getattr(physics_system, "cmap_torsions", None) is not None and cmap_src is not None
             else 0.0
         )
         e_total = e_bond + e_angle + e_ub + e_dih + e_imp + e_cmap + e_exc
     else:
         e_cmap = 0.0
-        if getattr(physics_system, "cmap_torsions", None) is not None:
+        cmap_src = getattr(params, "cmap_coeffs", None)
+        if cmap_src is None or cmap_src.size == 0:
+            cmap_src = getattr(params, "cmap_energy_grids", None)
+        if cmap_src is None or cmap_src.size == 0:
+            cmap_src = getattr(physics_system, "cmap_coeffs", None)
+        if cmap_src is None or cmap_src.size == 0:
+            cmap_src = getattr(physics_system, "cmap_energy_grids", None)
+        if getattr(physics_system, "cmap_torsions", None) is not None and cmap_src is not None:
             phi_idx = physics_system.cmap_torsions[:, 0:4]
             psi_idx = physics_system.cmap_torsions[:, 4:8] if physics_system.cmap_torsions.shape[-1] == 8 else physics_system.cmap_torsions[:, 1:5]
             phi = compute_dihedral_angles(r, phi_idx, displacement_fn)
             psi = compute_dihedral_angles(r, psi_idx, displacement_fn)
-            cmap_src = (
-                params.cmap_coeffs
-                if getattr(params, "cmap_coeffs", None) is not None and params.cmap_coeffs.size > 0
-                else physics_system.cmap_energy_grids
+            cmap_coeffs_val = (
+                cmap.precompute_cmap_coefficients(cmap_src)
+                if cmap_src.shape[-1] != 16
+                else cmap_src
             )
-            e_cmap = cmap.compute_cmap_energy(phi, psi, physics_system.cmap_indices, cmap_src)
+            e_cmap_per = cmap.compute_cmap_energies(phi, psi, physics_system.cmap_indices, cmap_coeffs_val)
+            cmap_msk = getattr(physics_system, "cmap_mask", None)
+            e_cmap = jnp.sum(e_cmap_per * cmap_msk) if cmap_msk is not None else jnp.sum(e_cmap_per)
         e_total = (
             bond_energy_fn(r, params.bond_params) +
             angle_energy_fn(r, params.angle_params) +
@@ -687,7 +704,7 @@ def make_energy_fn_pure(
             e_solv = e_gb + e_ace
 
     e_tail = jnp.array(0.0, dtype=r.dtype)
-    if has_pbc and not is_implicit:
+    if has_pbc and not is_implicit and bool(getattr(physics_system, "use_dispersion_correction", True)):
         e_tail = explicit_corrections.lj_dispersion_tail_energy(
             box_arr, sigmas_p, epsilons_p, cutoff_distance, mask
         )
@@ -1262,7 +1279,7 @@ def make_bundle_from_system(
         ),
         n_impropers=jnp.array(ni, dtype=jnp.int32),
         # Urey-Bradley
-        urey_bradley_idx=_pad_2d(ub, ab, 3, dtype=jnp.int32),
+        urey_bradley_idx=_pad_2d(ub, ab, 2, dtype=jnp.int32),
         urey_bradley_params=_pad_2d(ub_p, ab, 2, dtype=jnp.float32),
         urey_bradley_mask=_mask(nub, ab),
         n_urey_bradley=jnp.array(nub, dtype=jnp.int32),

@@ -16,6 +16,115 @@ from prolix.physics.pbc import box_volume, invert_box_lower_triangular
 # kcal*A/(mol*e^2)
 COULOMB_CONSTANT = 332.0637
 
+
+def _spread_charges_reference(
+    positions: jnp.ndarray,
+    charges: jnp.ndarray,
+    atom_mask: jnp.ndarray,
+    box_size: jnp.ndarray,
+    *,
+    grid_dims: tuple[int, int, int],
+    order: int = 4,
+) -> jnp.ndarray:
+    """Spread charges onto the PME mesh in plain JAX."""
+
+    def _spread_single(pos_1, q_1, mask_1, box_1):
+        st = _bspline4_stencil(pos_1, q_1, mask_1, box_1, grid_dims, order)
+        Q_1 = jnp.zeros(grid_dims, dtype=st["work_dtype"])
+        with jax.named_scope("pme_charge_spread"):
+            Q_1 = Q_1.at[st["ix"], st["iy"], st["iz"]].add(st["w"])
+        return Q_1
+
+    if positions.ndim == 3:
+        B = positions.shape[0]
+        b_q = charges.ndim == 2
+        b_m = atom_mask.ndim == 2
+        box_arr = jnp.asarray(box_size)
+        b_box = box_arr.ndim >= 2 and box_arr.shape[0] == B and box_arr.shape[-2:] != (3, 3)
+        return jax.vmap(
+            lambda b: _spread_single(
+                positions[b],
+                charges[b] if b_q else charges,
+                atom_mask[b] if b_m else atom_mask,
+                box_size[b] if b_box else box_size,
+            )
+        )(jnp.arange(B))
+    return _spread_single(positions, charges, atom_mask, box_size)
+
+
+def _gather_reference(
+    positions: jnp.ndarray,
+    charges: jnp.ndarray,
+    atom_mask: jnp.ndarray,
+    box_size: jnp.ndarray,
+    theta_norm: jnp.ndarray,
+    *,
+    grid_dims: tuple[int, int, int],
+    order: int = 4,
+) -> tuple[jnp.ndarray, jnp.ndarray]:
+    """Gather ``(forces, potentials)`` from ``theta_norm`` in plain JAX."""
+
+    def _gather_single(pos_1, q_1, mask_1, box_1, theta_1):
+        dtype = pos_1.dtype
+        box_arr = jnp.asarray(box_1, dtype=dtype)
+        st = _bspline4_stencil(pos_1, q_1, mask_1, box_arr, grid_dims, order)
+        K_arr = st["K_arr"]
+        wx, wy, wz = st["wx"], st["wy"], st["wz"]
+        ox, oy, oz = st["ox"], st["oy"], st["oz"]
+        u = st["u"]
+        dwx = _bspline4_deriv(u[:, 0])
+        dwy = _bspline4_deriv(u[:, 1])
+        dwz = _bspline4_deriv(u[:, 2])
+        q_masked = st["q"].astype(dtype)
+
+        with jax.named_scope("pme_bwd_gather"):
+            t_val = theta_1[st["ix"], st["iy"], st["iz"]]
+            w_unit = jnp.transpose(wx[ox] * wy[oy] * wz[oz], (1, 0))
+            pot_1 = jnp.where(mask_1 > 0, jnp.sum(w_unit * t_val, axis=1), 0.0)
+            du_x = q_masked[:, None] * jnp.transpose(dwx[ox] * wy[oy] * wz[oz], (1, 0)) * t_val
+            du_y = q_masked[:, None] * jnp.transpose(wx[ox] * dwy[oy] * wz[oz], (1, 0)) * t_val
+            du_z = q_masked[:, None] * jnp.transpose(wx[ox] * wy[oy] * dwz[oz], (1, 0)) * t_val
+            if box_arr.ndim == 2:
+                B_mat = invert_box_lower_triangular(box_arr)
+                dE_ds = jnp.stack(
+                    [
+                        jnp.sum(du_x, axis=1) * K_arr[0],
+                        jnp.sum(du_y, axis=1) * K_arr[1],
+                        jnp.sum(du_z, axis=1) * K_arr[2],
+                    ],
+                    axis=-1,
+                )
+                f_1 = dE_ds @ B_mat.T
+            else:
+                scale = K_arr / box_arr
+                f_1 = jnp.stack(
+                    [
+                        jnp.sum(du_x, axis=1) * scale[0],
+                        jnp.sum(du_y, axis=1) * scale[1],
+                        jnp.sum(du_z, axis=1) * scale[2],
+                    ],
+                    axis=-1,
+                )
+        return f_1.astype(dtype), pot_1.astype(dtype)
+
+    if positions.ndim == 3:
+        B = positions.shape[0]
+        b_q = charges.ndim == 2
+        b_m = atom_mask.ndim == 2
+        box_arr_top = jnp.asarray(box_size)
+        b_box = box_arr_top.ndim >= 2 and box_arr_top.shape[0] == B and box_arr_top.shape[-2:] != (3, 3)
+        b_theta = theta_norm.ndim == 4
+        return jax.vmap(
+            lambda b: _gather_single(
+                positions[b],
+                charges[b] if b_q else charges,
+                atom_mask[b] if b_m else atom_mask,
+                box_size[b] if b_box else box_size,
+                theta_norm[b] if b_theta else theta_norm,
+            )
+        )(jnp.arange(B))
+    return _gather_single(positions, charges, atom_mask, box_size, theta_norm)
+
 # ===========================================================================
 # Configuration
 # ===========================================================================
@@ -182,44 +291,18 @@ def spread_charges(
     """Spread charges onto FFT grid using B-spline interpolation."""
 
     if use_pallas_pme and not in_export_context() and jnp.asarray(box_size).ndim == 1:
-        from prolix.physics.pme_pallas import spread_charges_pallas
+        from prolix.physics.pme_pallas import make_spread_op
+        from xtrax.intent import Context
 
+        backend = "gpu" if not _pallas_interpret() else "cpu"
+        spread_op = make_spread_op(
+            grid_dims, order, context=Context(kernels=True, backend=backend)
+        )
         with jax.named_scope("pme_charge_spread"):
-            return spread_charges_pallas(
-                positions,
-                charges,
-                atom_mask,
-                box_size,
-                grid_dims,
-                order,
-                interpret=_pallas_interpret(),
-            )
-    # Match positions' working precision rather than hardcoding float32 --
-    # mixing a float32 grid with float64 positions/box_size works fine in the
-    # forward pass (jnp operators auto-promote), but under jax.grad the
-    # cotangent-accumulation machinery (ad_util.py's add_jaxvals) uses raw
-    # lax.add, which does NOT auto-promote and raises a hard TypeError on any
-    # dtype mismatch in the backward pass. Confirmed via a real DHFR-scale
-    # gradient call (flash_explicit_forces -> spme_reciprocal_energy) that
-    # never previously executed successfully end-to-end (blocked upstream by
-    # the eval_shape/box_size bug this benchmark redesign also fixed).
-    def _spread_single(pos_1, q_1, mask_1):
-        st = _bspline4_stencil(pos_1, q_1, mask_1, box_size, grid_dims, order)
-        Q_1 = jnp.zeros(grid_dims, dtype=st["work_dtype"])
-        with jax.named_scope("pme_charge_spread"):
-            Q_1 = Q_1.at[st["ix"], st["iy"], st["iz"]].add(st["w"])
-        return Q_1
-
-    if positions.ndim == 3:
-        B = positions.shape[0]
-        return jax.vmap(
-            lambda b: _spread_single(
-                positions[b],
-                charges[b] if charges.ndim == 2 else charges,
-                atom_mask[b] if atom_mask.ndim == 2 else atom_mask,
-            )
-        )(jnp.arange(B))
-    return _spread_single(positions, charges, atom_mask)
+            return spread_op(positions, charges, atom_mask, box_size)
+    return _spread_charges_reference(
+        positions, charges, atom_mask, box_size, grid_dims=grid_dims, order=order
+    )
 
 
 def influence_function(grid_dims: tuple[int, int, int], box_size: jnp.ndarray, alpha: float, order: int = 4) -> jnp.ndarray:
@@ -358,73 +441,31 @@ def _spme_bwd(grid_dims, alpha, order, use_pallas_pme, residuals, g):
     # StableHLO guardrail: export_context() must force pure XLA in the backward pass too.
     box_arr = jnp.asarray(box_size, dtype=dtype)
     if use_pallas_pme and not in_export_context() and box_arr.ndim == 1:
-        from prolix.physics.pme_pallas import gather_pallas
+        from prolix.physics.pme_pallas import make_gather_op
+        from xtrax.intent import Context
 
+        backend = "gpu" if not _pallas_interpret() else "cpu"
+        gather_op = make_gather_op(
+            grid_dims, order, context=Context(kernels=True, backend=backend)
+        )
         with jax.named_scope("pme_bwd_gather"):
-            forces, potentials = gather_pallas(
+            forces, potentials = gather_op(
                 positions,
                 charges,
                 atom_mask,
                 box_size,
                 theta_norm,
-                grid_dims,
-                order,
-                interpret=_pallas_interpret(),
             )
     else:
-        def _gather_single(pos_1, q_1, mask_1, theta_1):
-            st = _bspline4_stencil(pos_1, q_1, mask_1, box_size, grid_dims, order)
-            K_arr = st["K_arr"]
-            wx, wy, wz = st["wx"], st["wy"], st["wz"]
-            ox, oy, oz = st["ox"], st["oy"], st["oz"]
-            u = st["u"]
-            dwx = _bspline4_deriv(u[:, 0])
-            dwy = _bspline4_deriv(u[:, 1])
-            dwz = _bspline4_deriv(u[:, 2])
-            q_masked = st["q"].astype(dtype)
-
-            with jax.named_scope("pme_bwd_gather"):
-                t_val = theta_1[st["ix"], st["iy"], st["iz"]]
-                w_unit = jnp.transpose(wx[ox] * wy[oy] * wz[oz], (1, 0))
-                pot_1 = jnp.sum(w_unit * t_val, axis=1)
-                du_x = q_masked[:, None] * jnp.transpose(dwx[ox] * wy[oy] * wz[oz], (1, 0)) * t_val
-                du_y = q_masked[:, None] * jnp.transpose(wx[ox] * dwy[oy] * wz[oz], (1, 0)) * t_val
-                du_z = q_masked[:, None] * jnp.transpose(wx[ox] * wy[oy] * dwz[oz], (1, 0)) * t_val
-                if box_arr.ndim == 2:
-                    B_mat = invert_box_lower_triangular(box_arr)
-                    dE_ds = jnp.stack(
-                        [
-                            jnp.sum(du_x, axis=1) * K_arr[0],
-                            jnp.sum(du_y, axis=1) * K_arr[1],
-                            jnp.sum(du_z, axis=1) * K_arr[2],
-                        ],
-                        axis=-1,
-                    )
-                    f_1 = dE_ds @ B_mat.T
-                else:
-                    scale = K_arr / box_arr
-                    f_1 = jnp.stack(
-                        [
-                            jnp.sum(du_x, axis=1) * scale[0],
-                            jnp.sum(du_y, axis=1) * scale[1],
-                            jnp.sum(du_z, axis=1) * scale[2],
-                        ],
-                        axis=-1,
-                    )
-            return f_1, pot_1
-
-        if positions.ndim == 3:
-            B = positions.shape[0]
-            forces, potentials = jax.vmap(
-                lambda b: _gather_single(
-                    positions[b],
-                    charges[b] if charges.ndim == 2 else charges,
-                    atom_mask[b] if atom_mask.ndim == 2 else atom_mask,
-                    theta_norm[b],
-                )
-            )(jnp.arange(B))
-        else:
-            forces, potentials = _gather_single(positions, charges, atom_mask, theta_norm)
+        forces, potentials = _gather_reference(
+            positions,
+            charges,
+            atom_mask,
+            box_size,
+            theta_norm,
+            grid_dims=grid_dims,
+            order=order,
+        )
 
     g_pos = jnp.expand_dims(g, axis=(-2, -1)) if g.ndim > 0 else g
     g_q = jnp.expand_dims(g, axis=-1) if g.ndim > 0 else g
