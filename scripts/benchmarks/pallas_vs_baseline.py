@@ -67,7 +67,7 @@ def build_system(n: int, seed: int = 0, include_nl: bool = True):
     # placement, whose ~1e13 energies make float32 parity meaningless.
     spacing = (1.0 / DENSITY) ** (1.0 / 3.0)
     m = int(np.ceil(n ** (1.0 / 3.0)))
-    box_len = float(m * spacing)
+    box_len = max(float(m * spacing), float(2.0 * CUTOFF + 2.0))
     grid = np.stack(np.meshgrid(*[np.arange(m)] * 3, indexing="ij"), -1).reshape(-1, 3)
     grid = grid[rng.permutation(len(grid))[:n]]
     pos = ((grid + 0.5) * spacing + rng.uniform(-0.1, 0.1, (n, 3)) * spacing).astype(np.float32)
@@ -355,11 +355,14 @@ def make_full_potential_fns(s: dict, interpret: bool):
         _exception_energy_masked,
     )
     from prolix.pallas_kernels import (
+        encode_nl_exclusions,
         pallas_angles_harmonic,
+        pallas_bonded_all_fused,
         pallas_bonds_2body,
         pallas_cmap_torsions,
         pallas_exceptions_14,
         pallas_torsions_4body,
+        permute_and_sort_exclusions,
     )
     from prolix.physics import explicit_corrections
     from prolix.physics.pme import compute_pme_grid_dims, spme_background_energy, spme_energy_with_forces
@@ -369,6 +372,14 @@ def make_full_potential_fns(s: dict, interpret: bool):
     box = s["box"]
     disp, _ = space.periodic(box)
     grid_dims = compute_pme_grid_dims(np.asarray(box), grid_spacing=1.0)
+    n_atoms = int(s["pos"].shape[0])
+    perm_ident = jnp.arange(n_atoms, dtype=jnp.int32)
+    excl_idx_sorted, excl_vdw_sorted, excl_elec_sorted = permute_and_sort_exclusions(
+        s["excl_idx"], s["excl_vdw"], s["excl_elec"], perm_ident, perm_ident, n_atoms=n_atoms
+    )
+    nbr_encoded = encode_nl_exclusions(
+        s["nbr"], excl_idx_sorted, excl_vdw_sorted, excl_elec_sorted, n_atoms=n_atoms
+    )
 
     def xla_fn(p):
         e_bond = _bond_energy_masked(p, s["bonds"], s["bond_params"], s["bond_mask"], disp)
@@ -402,48 +413,51 @@ def make_full_potential_fns(s: dict, interpret: bool):
         return e_bond + e_ub + e_ang + e_dih + e_imp + e_cmap + e_exc + e_lj + e_c + e_pme + e_bg + e_tail
 
     def pallas_fn(p):
-        e_bond = pallas_bonds_2body(
-            p, s["bonds"], s["bond_params"], s["bond_mask"], box=box, dist_eps=1e-10, interpret=interpret
-        )
-        e_ub = pallas_bonds_2body(
-            p, s["ub_bonds"], s["ub_params"], s["ub_mask"], box=box, dist_eps=1e-10, interpret=interpret
-        )
-        e_ang = pallas_angles_harmonic(
-            p, s["angles"], s["angle_params"], s["angle_mask"], box=box, dist_eps=1e-10, interpret=interpret
-        )
-        e_dih = pallas_torsions_4body(
-            p, s["dihedrals"], s["dihedral_params"], s["dihedral_mask"],
-            box=box, b0_is_ji=True, is_harmonic=False, interpret=interpret,
-        )
-        e_imp = pallas_torsions_4body(
-            p, s["impropers"], s["improper_params"], s["improper_mask"],
-            box=box, b0_is_ji=True, is_harmonic=False, interpret=interpret,
-        )
-        e_cmap = pallas_cmap_torsions(
-            p, s["cmap_torsions"], s["cmap_indices"], s["cmap_mask"], s["cmap_coeffs"],
-            box=box, first_is_psi=True, interpret=interpret,
-        )
-        e_exc = pallas_exceptions_14(
+        e_bonded = pallas_bonded_all_fused(
             p,
-            s["exception_pairs"],
-            s["exception_sigmas"],
-            s["exception_epsilons"],
-            s["exception_chargeprods"],
-            s["exception_mask"],
+            bonds=s["bonds"],
+            bond_params=s["bond_params"],
+            bond_mask=s["bond_mask"],
+            urey_bradley_bonds=s["ub_bonds"],
+            urey_bradley_params=s["ub_params"],
+            urey_bradley_mask=s["ub_mask"],
+            angles=s["angles"],
+            angle_params=s["angle_params"],
+            angle_mask=s["angle_mask"],
+            dihedrals=s["dihedrals"],
+            dihedral_params=s["dihedral_params"],
+            dihedral_mask=s["dihedral_mask"],
+            impropers=s["impropers"],
+            improper_params=s["improper_params"],
+            improper_mask=s["improper_mask"],
+            improper_is_harmonic=False,
+            exception_pairs=s["exception_pairs"],
+            exception_sigmas=s["exception_sigmas"],
+            exception_epsilons=s["exception_epsilons"],
+            exception_chargeprods=s["exception_chargeprods"],
+            exception_mask=s["exception_mask"],
+            cmap_torsions=s["cmap_torsions"],
+            cmap_indices=s["cmap_indices"],
+            cmap_mask=s["cmap_mask"],
+            cmap_coeffs=s["cmap_coeffs"],
             box=box,
+            dist_eps=1e-10,
+            b0_is_ji=True,
+            cmap_first_is_psi=True,
             soft_core_lambda=1.0,
             interpret=interpret,
         )
         e_nb = pallas_nonbonded_nl(
-            p, s["q"], s["sigma"], s["eps"], s["mask"], s["nbr"], s["excl_idx"],
-            s["excl_vdw"], s["excl_elec"], box=box, pme_alpha=PME_ALPHA,
+            p, s["q"], s["sigma"], s["eps"], s["mask"], nbr_encoded, excl_idx_sorted,
+            excl_vdw_sorted, excl_elec_sorted, box=box, pme_alpha=PME_ALPHA,
             cutoff=CUTOFF, lj_switch_width=SWITCH_WIDTH, soft_core_lambda=1.0,
-            include_pme_excl_erf=True, interpret=interpret,
+            include_pme_excl_erf=True, excl_mode="pre_encoded",
+            scale_14_vdw=0.5, scale_14_elec=0.8333333, interpret=interpret,
         )
         e_pme = spme_energy_with_forces(p, s["q"], s["mask"], box, grid_dims, PME_ALPHA, 4, True)
         e_bg = spme_background_energy(s["q"], s["mask"], PME_ALPHA, box)
         e_tail = explicit_corrections.lj_dispersion_tail_energy(box, s["sigma"], s["eps"], CUTOFF, s["mask"])
-        return e_bond + e_ub + e_ang + e_dih + e_imp + e_cmap + e_exc + e_nb + e_pme + e_bg + e_tail
+        return e_bonded + e_nb + e_pme + e_bg + e_tail
 
     return jax.jit(jax.value_and_grad(xla_fn)), jax.jit(jax.value_and_grad(pallas_fn))
 
@@ -458,13 +472,16 @@ def make_full_implicit_fns(s: dict, interpret: bool):
         _exception_energy_masked,
     )
     from prolix.pallas_kernels import (
+        encode_nl_exclusions,
         pallas_angles_harmonic,
+        pallas_bonded_all_fused,
         pallas_bonds_2body,
         pallas_cmap_torsions,
         pallas_exceptions_14,
         pallas_gb_ace_nl,
         pallas_sasa_nl,
         pallas_torsions_4body,
+        permute_and_sort_exclusions,
     )
     from prolix.physics.generalized_born import (
         compute_ace_nonpolar_energy,
@@ -476,6 +493,14 @@ def make_full_implicit_fns(s: dict, interpret: bool):
         s = build_full_potential_topology(s)
     box = s["box"]
     disp, _ = space.periodic(box)
+    n_atoms = int(s["pos"].shape[0])
+    perm_ident = jnp.arange(n_atoms, dtype=jnp.int32)
+    excl_idx_sorted, excl_vdw_sorted, excl_elec_sorted = permute_and_sort_exclusions(
+        s["excl_idx"], s["excl_vdw"], s["excl_elec"], perm_ident, perm_ident, n_atoms=n_atoms
+    )
+    nbr_encoded = encode_nl_exclusions(
+        s["nbr"], excl_idx_sorted, excl_vdw_sorted, excl_elec_sorted, n_atoms=n_atoms
+    )
 
     def xla_fn(p):
         e_bond = _bond_energy_masked(p, s["bonds"], s["bond_params"], s["bond_mask"], disp)
@@ -506,36 +531,46 @@ def make_full_implicit_fns(s: dict, interpret: bool):
         return e_bond + e_ub + e_ang + e_dih + e_imp + e_cmap + e_exc + e_lj + e_c + e_gb + e_ace + e_sasa
 
     def pallas_fn(p):
-        e_bond = pallas_bonds_2body(
-            p, s["bonds"], s["bond_params"], s["bond_mask"], box=box, dist_eps=1e-10, interpret=interpret
-        )
-        e_ub = pallas_bonds_2body(
-            p, s["ub_bonds"], s["ub_params"], s["ub_mask"], box=box, dist_eps=1e-10, interpret=interpret
-        )
-        e_ang = pallas_angles_harmonic(
-            p, s["angles"], s["angle_params"], s["angle_mask"], box=box, dist_eps=1e-10, interpret=interpret
-        )
-        e_dih = pallas_torsions_4body(
-            p, s["dihedrals"], s["dihedral_params"], s["dihedral_mask"],
-            box=box, b0_is_ji=True, is_harmonic=False, interpret=interpret,
-        )
-        e_imp = pallas_torsions_4body(
-            p, s["impropers"], s["improper_params"], s["improper_mask"],
-            box=box, b0_is_ji=True, is_harmonic=False, interpret=interpret,
-        )
-        e_cmap = pallas_cmap_torsions(
-            p, s["cmap_torsions"], s["cmap_indices"], s["cmap_mask"], s["cmap_coeffs"],
-            box=box, first_is_psi=True, interpret=interpret,
-        )
-        e_exc = pallas_exceptions_14(
-            p, s["exception_pairs"], s["exception_sigmas"], s["exception_epsilons"],
-            s["exception_chargeprods"], s["exception_mask"], box=box, soft_core_lambda=1.0, interpret=interpret,
+        e_bonded = pallas_bonded_all_fused(
+            p,
+            bonds=s["bonds"],
+            bond_params=s["bond_params"],
+            bond_mask=s["bond_mask"],
+            urey_bradley_bonds=s["ub_bonds"],
+            urey_bradley_params=s["ub_params"],
+            urey_bradley_mask=s["ub_mask"],
+            angles=s["angles"],
+            angle_params=s["angle_params"],
+            angle_mask=s["angle_mask"],
+            dihedrals=s["dihedrals"],
+            dihedral_params=s["dihedral_params"],
+            dihedral_mask=s["dihedral_mask"],
+            impropers=s["impropers"],
+            improper_params=s["improper_params"],
+            improper_mask=s["improper_mask"],
+            improper_is_harmonic=False,
+            exception_pairs=s["exception_pairs"],
+            exception_sigmas=s["exception_sigmas"],
+            exception_epsilons=s["exception_epsilons"],
+            exception_chargeprods=s["exception_chargeprods"],
+            exception_mask=s["exception_mask"],
+            cmap_torsions=s["cmap_torsions"],
+            cmap_indices=s["cmap_indices"],
+            cmap_mask=s["cmap_mask"],
+            cmap_coeffs=s["cmap_coeffs"],
+            box=box,
+            dist_eps=1e-10,
+            b0_is_ji=True,
+            cmap_first_is_psi=True,
+            soft_core_lambda=1.0,
+            interpret=interpret,
         )
         e_nb = pallas_nonbonded_nl(
-            p, s["q"], s["sigma"], s["eps"], s["mask"], s["nbr"], s["excl_idx"],
-            s["excl_vdw"], s["excl_elec"], box=box, pme_alpha=0.0,
+            p, s["q"], s["sigma"], s["eps"], s["mask"], nbr_encoded, excl_idx_sorted,
+            excl_vdw_sorted, excl_elec_sorted, box=box, pme_alpha=0.0,
             cutoff=CUTOFF, lj_switch_width=SWITCH_WIDTH, soft_core_lambda=1.0,
-            include_pme_excl_erf=False, interpret=interpret,
+            include_pme_excl_erf=False, excl_mode="pre_encoded",
+            scale_14_vdw=0.5, scale_14_elec=0.8333333, interpret=interpret,
         )
         e_gb_ace = pallas_gb_ace_nl(
             p, s["q"], s["radii"], s["nbr"], atom_mask=s["mask"],
@@ -544,7 +579,7 @@ def make_full_implicit_fns(s: dict, interpret: bool):
         e_sasa = pallas_sasa_nl(
             p, s["radii"], s["nbr"], atom_mask=s["mask"], box=box, interpret=interpret
         )
-        return e_bond + e_ub + e_ang + e_dih + e_imp + e_cmap + e_exc + e_nb + e_gb_ace + e_sasa
+        return e_bonded + e_nb + e_gb_ace + e_sasa
 
     return jax.jit(jax.value_and_grad(xla_fn)), jax.jit(jax.value_and_grad(pallas_fn))
 
@@ -809,6 +844,471 @@ def bench_nl_skin(sizes: list[int], repeats: int, interpret: bool) -> list[dict]
     return rows
 
 
+def bench_bonded(sizes: list[int], repeats: int, interpret: bool) -> tuple[list[dict], dict]:
+    """Compare XLA bonded vs Pallas v1 (7 separate launches) vs Pallas v2 fused megakernel (1 launch)."""
+    from prolix.batched_energy import (
+        _angle_energy_masked,
+        _bond_energy_masked,
+        _cmap_energy_masked,
+        _dihedral_energy_masked,
+        _exception_energy_masked,
+    )
+    from prolix.pallas_kernels import (
+        pallas_angles_harmonic,
+        pallas_bonded_all_fused,
+        pallas_bonds_2body,
+        pallas_cmap_torsions,
+        pallas_exceptions_14,
+        pallas_torsions_4body,
+    )
+
+    rows = []
+    for n in sizes:
+        s = build_full_potential_topology(build_system(n, include_nl=False))
+        box = s["box"]
+        disp, _ = space.periodic(box)
+
+        def xla_bonded(p):
+            e_bond = _bond_energy_masked(p, s["bonds"], s["bond_params"], s["bond_mask"], disp)
+            e_ub = _bond_energy_masked(p, s["ub_bonds"], s["ub_params"], s["ub_mask"], disp)
+            e_ang = _angle_energy_masked(p, s["angles"], s["angle_params"], s["angle_mask"], disp)
+            e_dih = _dihedral_energy_masked(p, s["dihedrals"], s["dihedral_params"], s["dihedral_mask"], disp)
+            e_imp = _dihedral_energy_masked(p, s["impropers"], s["improper_params"], s["improper_mask"], disp)
+            e_cmap = _cmap_energy_masked(
+                p, s["cmap_torsions"], s["cmap_indices"], s["cmap_mask"], s["cmap_coeffs"], disp
+            )
+            e_exc = _exception_energy_masked(
+                p, s["exception_pairs"], s["exception_sigmas"], s["exception_epsilons"],
+                s["exception_chargeprods"], s["exception_mask"], disp,
+            )
+            return e_bond + e_ub + e_ang + e_dih + e_imp + e_cmap + e_exc
+
+        def pallas_v1_bonded(p):
+            e_bond = pallas_bonds_2body(
+                p, s["bonds"], s["bond_params"], s["bond_mask"], box=box, dist_eps=1e-10, interpret=interpret
+            )
+            e_ub = pallas_bonds_2body(
+                p, s["ub_bonds"], s["ub_params"], s["ub_mask"], box=box, dist_eps=1e-10, interpret=interpret
+            )
+            e_ang = pallas_angles_harmonic(
+                p, s["angles"], s["angle_params"], s["angle_mask"], box=box, dist_eps=1e-10, interpret=interpret
+            )
+            e_dih = pallas_torsions_4body(
+                p, s["dihedrals"], s["dihedral_params"], s["dihedral_mask"],
+                box=box, b0_is_ji=True, is_harmonic=False, interpret=interpret,
+            )
+            e_imp = pallas_torsions_4body(
+                p, s["impropers"], s["improper_params"], s["improper_mask"],
+                box=box, b0_is_ji=True, is_harmonic=False, interpret=interpret,
+            )
+            e_cmap = pallas_cmap_torsions(
+                p, s["cmap_torsions"], s["cmap_indices"], s["cmap_mask"], s["cmap_coeffs"],
+                box=box, first_is_psi=True, interpret=interpret,
+            )
+            e_exc = pallas_exceptions_14(
+                p, s["exception_pairs"], s["exception_sigmas"], s["exception_epsilons"],
+                s["exception_chargeprods"], s["exception_mask"], box=box, soft_core_lambda=1.0, interpret=interpret,
+            )
+            return e_bond + e_ub + e_ang + e_dih + e_imp + e_cmap + e_exc
+
+        def pallas_v2_megakernel(p, return_forces: bool = False):
+            return pallas_bonded_all_fused(
+                p,
+                bonds=s["bonds"],
+                bond_params=s["bond_params"],
+                bond_mask=s["bond_mask"],
+                urey_bradley_bonds=s["ub_bonds"],
+                urey_bradley_params=s["ub_params"],
+                urey_bradley_mask=s["ub_mask"],
+                angles=s["angles"],
+                angle_params=s["angle_params"],
+                angle_mask=s["angle_mask"],
+                dihedrals=s["dihedrals"],
+                dihedral_params=s["dihedral_params"],
+                dihedral_mask=s["dihedral_mask"],
+                impropers=s["impropers"],
+                improper_params=s["improper_params"],
+                improper_mask=s["improper_mask"],
+                improper_is_harmonic=False,
+                exception_pairs=s["exception_pairs"],
+                exception_sigmas=s["exception_sigmas"],
+                exception_epsilons=s["exception_epsilons"],
+                exception_chargeprods=s["exception_chargeprods"],
+                exception_mask=s["exception_mask"],
+                cmap_torsions=s["cmap_torsions"],
+                cmap_indices=s["cmap_indices"],
+                cmap_mask=s["cmap_mask"],
+                cmap_coeffs=s["cmap_coeffs"],
+                box=box,
+                dist_eps=1e-10,
+                b0_is_ji=True,
+                cmap_first_is_psi=True,
+                soft_core_lambda=1.0,
+                return_forces=return_forces,
+                interpret=interpret,
+            )
+
+        xla_vg = jax.jit(jax.value_and_grad(xla_bonded))
+        v1_vg = jax.jit(jax.value_and_grad(pallas_v1_bonded))
+        v2_vg = jax.jit(jax.value_and_grad(lambda p: pallas_v2_megakernel(p, return_forces=False)))
+        v2_rf = jax.jit(lambda p: pallas_v2_megakernel(p, return_forces=True))
+
+        out_x, c_x, t_x = time_fn(xla_vg, s["pos"], repeats)
+        out_v1, c_v1, t_v1 = time_fn(v1_vg, s["pos"], repeats)
+        out_v2, c_v2, t_v2 = time_fn(v2_vg, s["pos"], repeats)
+        out_rf, c_rf, t_rf = time_fn(v2_rf, s["pos"], repeats)
+
+        row = {
+            "n_atoms": n,
+            "xla_compile_s": c_x,
+            "xla_median_s": t_x,
+            "pallas_v1_7launch_compile_s": c_v1,
+            "pallas_v1_7launch_median_s": t_v1,
+            "pallas_v2_megakernel_compile_s": c_v2,
+            "pallas_v2_megakernel_median_s": t_v2,
+            "pallas_v2_return_forces_median_s": t_rf,
+            "speedup_v2_vs_xla": t_x / t_v2,
+            "speedup_v2_vs_v1": t_v1 / t_v2,
+            "speedup_v2_rf_vs_xla": t_x / t_rf,
+            "max_abs_dE_v2_vs_xla": float(abs(out_v2[0] - out_x[0])),
+            "max_abs_dF_v2_vs_xla": float(jnp.max(jnp.abs(out_v2[1] - out_x[1]))),
+            "max_abs_dF_rf_vs_xla": float(jnp.max(jnp.abs(-out_rf[1] - out_x[1]))),
+        }
+        print(json.dumps(row), flush=True)
+        rows.append(row)
+
+    ns = [r["n_atoms"] for r in rows]
+    summary = {
+        "xla_scaling_exponent": fit_exponent(ns, [r["xla_median_s"] for r in rows]),
+        "pallas_v1_scaling_exponent": fit_exponent(ns, [r["pallas_v1_7launch_median_s"] for r in rows]),
+        "pallas_v2_megakernel_scaling_exponent": fit_exponent(ns, [r["pallas_v2_megakernel_median_s"] for r in rows]),
+    }
+    return rows, summary
+
+
+def bench_openmm_comparison(sizes: list[int], repeats: int, interpret: bool) -> tuple[list[dict], dict]:
+    """Apples-to-apples comparison: Prolix XLA vs Prolix Pallas v1 vs Prolix Pallas v2 vs OpenMM."""
+    import openmm
+    import openmm.unit as omm_unit
+    from prolix.batched_energy import (
+        _angle_energy_masked,
+        _bond_energy_masked,
+        _dihedral_energy_masked,
+        _exception_energy_masked,
+    )
+    from prolix.pallas_kernels import (
+        encode_nl_exclusions,
+        pallas_angles_harmonic,
+        pallas_bonded_all_fused,
+        pallas_bonds_2body,
+        pallas_exceptions_14,
+        pallas_torsions_4body,
+        permute_and_sort_exclusions,
+    )
+    from prolix.physics.pme import compute_pme_grid_dims, spme_background_energy, spme_energy_with_forces
+
+    # Pick highest-throughput OpenMM platform available (CUDA > OpenCL > CPU)
+    avail = [openmm.Platform.getPlatform(i).getName() for i in range(openmm.Platform.getNumPlatforms())]
+    if "CUDA" in avail:
+        omm_platform_name = "CUDA"
+        omm_props = {"Precision": "single"}
+    elif "CPU" in avail:
+        omm_platform_name = "CPU"
+        omm_props = {}
+    else:
+        omm_platform_name = avail[0]
+        omm_props = {}
+
+    rows = []
+    for n in sizes:
+        s = build_full_potential_topology(build_system(n, include_nl=True))
+        box = s["box"]
+        box_len_a = float(box[0])
+        disp, _ = space.periodic(box)
+        grid_dims = compute_pme_grid_dims(np.asarray(box), grid_spacing=1.0)
+        kx, ky, kz = int(grid_dims[0]), int(grid_dims[1]), int(grid_dims[2])
+
+        perm_ident = jnp.arange(n, dtype=jnp.int32)
+        excl_idx_sorted, excl_vdw_sorted, excl_elec_sorted = permute_and_sort_exclusions(
+            s["excl_idx"], s["excl_vdw"], s["excl_elec"], perm_ident, perm_ident, n_atoms=n
+        )
+        nbr_encoded = encode_nl_exclusions(
+            s["nbr"], excl_idx_sorted, excl_vdw_sorted, excl_elec_sorted, n_atoms=n
+        )
+
+        # Common physical subset shared by OpenMM standard forces & Prolix:
+        # Harmonic bonds + Urey-Bradley + Harmonic angles + Periodic dihedrals + Periodic impropers +
+        # 1-4 exceptions + Direct-space LJ (switched) + PME (order=4 in Prolix, locked grid & alpha)
+        def prolix_xla_fn(p):
+            e_bond = _bond_energy_masked(p, s["bonds"], s["bond_params"], s["bond_mask"], disp)
+            e_ub = _bond_energy_masked(p, s["ub_bonds"], s["ub_params"], s["ub_mask"], disp)
+            e_ang = _angle_energy_masked(p, s["angles"], s["angle_params"], s["angle_mask"], disp)
+            e_dih = _dihedral_energy_masked(p, s["dihedrals"], s["dihedral_params"], s["dihedral_mask"], disp)
+            e_imp = _dihedral_energy_masked(p, s["impropers"], s["improper_params"], s["improper_mask"], disp)
+            e_exc = _exception_energy_masked(
+                p, s["exception_pairs"], s["exception_sigmas"], s["exception_epsilons"],
+                s["exception_chargeprods"], s["exception_mask"], disp,
+            )
+            e_lj = chunked_lj_energy_nl(
+                p, s["sigma"], s["eps"], s["excl_idx"], s["excl_vdw"], s["nbr"], disp,
+                cutoff=CUTOFF, tile_size=256, switch_width=SWITCH_WIDTH,
+            )
+            e_c = chunked_coulomb_energy_nl(
+                p, s["q"], s["excl_idx"], s["excl_elec"], s["nbr"], disp,
+                pme_alpha=PME_ALPHA, cutoff=CUTOFF, tile_size=256,
+            )
+            e_pme = spme_energy_with_forces(p, s["q"], s["mask"], box, grid_dims, PME_ALPHA, 4, False)
+            e_bg = spme_background_energy(s["q"], s["mask"], PME_ALPHA, box)
+            return e_bond + e_ub + e_ang + e_dih + e_imp + e_exc + e_lj + e_c + e_pme + e_bg
+
+        def prolix_pallas_v1_fn(p):
+            e_bond = pallas_bonds_2body(
+                p, s["bonds"], s["bond_params"], s["bond_mask"], box=box, dist_eps=1e-10, interpret=interpret
+            )
+            e_ub = pallas_bonds_2body(
+                p, s["ub_bonds"], s["ub_params"], s["ub_mask"], box=box, dist_eps=1e-10, interpret=interpret
+            )
+            e_ang = pallas_angles_harmonic(
+                p, s["angles"], s["angle_params"], s["angle_mask"], box=box, dist_eps=1e-10, interpret=interpret
+            )
+            e_dih = pallas_torsions_4body(
+                p, s["dihedrals"], s["dihedral_params"], s["dihedral_mask"],
+                box=box, b0_is_ji=True, is_harmonic=False, interpret=interpret,
+            )
+            e_imp = pallas_torsions_4body(
+                p, s["impropers"], s["improper_params"], s["improper_mask"],
+                box=box, b0_is_ji=True, is_harmonic=False, interpret=interpret,
+            )
+            e_exc = pallas_exceptions_14(
+                p, s["exception_pairs"], s["exception_sigmas"], s["exception_epsilons"],
+                s["exception_chargeprods"], s["exception_mask"], box=box, soft_core_lambda=1.0, interpret=interpret,
+            )
+            e_nb = pallas_nonbonded_nl(
+                p, s["q"], s["sigma"], s["eps"], s["mask"], s["nbr"], s["excl_idx"],
+                s["excl_vdw"], s["excl_elec"], box=box, pme_alpha=PME_ALPHA,
+                cutoff=CUTOFF, lj_switch_width=SWITCH_WIDTH, soft_core_lambda=1.0,
+                include_pme_excl_erf=True, excl_mode="table", interpret=interpret,
+            )
+            e_pme = spme_energy_with_forces(p, s["q"], s["mask"], box, grid_dims, PME_ALPHA, 4, True)
+            e_bg = spme_background_energy(s["q"], s["mask"], PME_ALPHA, box)
+            return e_bond + e_ub + e_ang + e_dih + e_imp + e_exc + e_nb + e_pme + e_bg
+
+        def prolix_pallas_v2_fn(p):
+            e_bonded = pallas_bonded_all_fused(
+                p,
+                bonds=s["bonds"],
+                bond_params=s["bond_params"],
+                bond_mask=s["bond_mask"],
+                urey_bradley_bonds=s["ub_bonds"],
+                urey_bradley_params=s["ub_params"],
+                urey_bradley_mask=s["ub_mask"],
+                angles=s["angles"],
+                angle_params=s["angle_params"],
+                angle_mask=s["angle_mask"],
+                dihedrals=s["dihedrals"],
+                dihedral_params=s["dihedral_params"],
+                dihedral_mask=s["dihedral_mask"],
+                impropers=s["impropers"],
+                improper_params=s["improper_params"],
+                improper_mask=s["improper_mask"],
+                improper_is_harmonic=False,
+                exception_pairs=s["exception_pairs"],
+                exception_sigmas=s["exception_sigmas"],
+                exception_epsilons=s["exception_epsilons"],
+                exception_chargeprods=s["exception_chargeprods"],
+                exception_mask=s["exception_mask"],
+                box=box,
+                dist_eps=1e-10,
+                b0_is_ji=True,
+                soft_core_lambda=1.0,
+                interpret=interpret,
+            )
+            e_nb = pallas_nonbonded_nl(
+                p, s["q"], s["sigma"], s["eps"], s["mask"], nbr_encoded, excl_idx_sorted,
+                excl_vdw_sorted, excl_elec_sorted, box=box, pme_alpha=PME_ALPHA,
+                cutoff=CUTOFF, lj_switch_width=SWITCH_WIDTH, soft_core_lambda=1.0,
+                include_pme_excl_erf=True, excl_mode="pre_encoded",
+                scale_14_vdw=0.5, scale_14_elec=0.8333333, interpret=interpret,
+            )
+            e_pme = spme_energy_with_forces(p, s["q"], s["mask"], box, grid_dims, PME_ALPHA, 4, True)
+            e_bg = spme_background_energy(s["q"], s["mask"], PME_ALPHA, box)
+            return e_bonded + e_nb + e_pme + e_bg
+
+        xla_vg = jax.jit(jax.value_and_grad(prolix_xla_fn))
+        v1_vg = jax.jit(jax.value_and_grad(prolix_pallas_v1_fn))
+        v2_vg = jax.jit(jax.value_and_grad(prolix_pallas_v2_fn))
+
+        out_x, c_x, t_x = time_fn(xla_vg, s["pos"], repeats)
+        out_v1, c_v1, t_v1 = time_fn(v1_vg, s["pos"], repeats)
+        out_v2, c_v2, t_v2 = time_fn(v2_vg, s["pos"], repeats)
+
+        # Build OpenMM System with identical settings (in nm, kJ/mol)
+        kcal_to_kj = 4.184
+        a_to_nm = 0.1
+        omm_sys = openmm.System()
+        box_nm = box_len_a * a_to_nm
+        omm_sys.setDefaultPeriodicBoxVectors(
+            openmm.Vec3(box_nm, 0.0, 0.0),
+            openmm.Vec3(0.0, box_nm, 0.0),
+            openmm.Vec3(0.0, 0.0, box_nm),
+        )
+        for _ in range(n):
+            omm_sys.addParticle(12.0)
+
+        # HarmonicBondForce (bonds + Urey-Bradley): Prolix E = 0.5 * k * (r - r0)^2 kcal/mol
+        hb_force = openmm.HarmonicBondForce()
+        hb_force.setUsesPeriodicBoundaryConditions(True)
+        for b_arr, bp_arr in ((np.asarray(s["bonds"]), np.asarray(s["bond_params"])), (np.asarray(s["ub_bonds"]), np.asarray(s["ub_params"]))):
+            for (ai, aj), (r0_a, k_kcal_a2) in zip(b_arr, bp_arr):
+                hb_force.addBond(int(ai), int(aj), float(r0_a) * a_to_nm, float(k_kcal_a2) * kcal_to_kj / (a_to_nm * a_to_nm))
+        omm_sys.addForce(hb_force)
+
+        # HarmonicAngleForce: Prolix E = 0.5 * k * (theta - theta0)^2 kcal/mol
+        ha_force = openmm.HarmonicAngleForce()
+        ha_force.setUsesPeriodicBoundaryConditions(True)
+        for (ai, aj, ak), (th0, k_kcal) in zip(np.asarray(s["angles"]), np.asarray(s["angle_params"])):
+            ha_force.addAngle(int(ai), int(aj), int(ak), float(th0), float(k_kcal) * kcal_to_kj)
+        omm_sys.addForce(ha_force)
+
+        # PeriodicTorsionForce: Prolix E = k * (1 + cos(periodicity * phi - phase))
+        pt_force = openmm.PeriodicTorsionForce()
+        pt_force.setUsesPeriodicBoundaryConditions(True)
+        for t_arr, tp_arr in ((np.asarray(s["dihedrals"]), np.asarray(s["dihedral_params"])), (np.asarray(s["impropers"]), np.asarray(s["improper_params"]))):
+            for (ai, aj, ak, al), (per, phase, k_kcal) in zip(t_arr, tp_arr):
+                pt_force.addTorsion(int(ai), int(aj), int(ak), int(al), int(round(float(per))), float(phase), float(k_kcal) * kcal_to_kj)
+        omm_sys.addForce(pt_force)
+
+        # NonbondedForce (PME with locked alpha, (kx, ky, kz), cutoff, switch)
+        nb_force = openmm.NonbondedForce()
+        nb_force.setNonbondedMethod(openmm.NonbondedForce.PME)
+        nb_force.setCutoffDistance(CUTOFF * a_to_nm)
+        nb_force.setUseSwitchingFunction(True)
+        nb_force.setSwitchingDistance((CUTOFF - SWITCH_WIDTH) * a_to_nm)
+        nb_force.setUseDispersionCorrection(False)
+        nb_force.setPMEParameters(PME_ALPHA / a_to_nm, kx, ky, kz)
+
+        q_np = np.asarray(s["q"])
+        sig_np = np.asarray(s["sigma"])
+        eps_np = np.asarray(s["eps"])
+        for i in range(n):
+            nb_force.addParticle(float(q_np[i]), float(sig_np[i]) * a_to_nm, float(eps_np[i]) * kcal_to_kj)
+
+        # Add full exclusions (1-2 and 1-3) and 1-4 scaled exceptions + explicit exception_pairs
+        # In build_full_potential_topology, 1-2 is i+1, 1-3 is i+2, and 1-4 is i+3 (with 0.5/0.8333333 in NL + explicit exception_pairs)
+        seen_pairs: dict[tuple[int, int], tuple[float, float, float]] = {}
+        for i in range(n):
+            for delta in (1, 2):
+                j = (i + delta) % n
+                pair = (min(i, j), max(i, j))
+                seen_pairs[pair] = (0.0, 0.1, 0.0)
+            j14 = (i + 3) % n
+            pair14 = (min(i, j14), max(i, j14))
+            sig_ij = 0.5 * (float(sig_np[i]) + float(sig_np[j14])) * a_to_nm
+            eps_ij = float(np.sqrt(eps_np[i] * eps_np[j14])) * 0.5 * kcal_to_kj
+            qp_ij = float(q_np[i] * q_np[j14]) * 0.8333333
+            seen_pairs[pair14] = (qp_ij, sig_ij, eps_ij)
+
+        for (ai, aj), sig_e, eps_e, qp_e in zip(
+            np.asarray(s["exception_pairs"]),
+            np.asarray(s["exception_sigmas"]),
+            np.asarray(s["exception_epsilons"]),
+            np.asarray(s["exception_chargeprods"]),
+        ):
+            pair = (min(int(ai), int(aj)), max(int(ai), int(aj)))
+            prev_qp, prev_sig, prev_eps = seen_pairs.get(pair, (0.0, float(sig_e) * a_to_nm, 0.0))
+            seen_pairs[pair] = (prev_qp + float(qp_e), float(sig_e) * a_to_nm, prev_eps + float(eps_e) * kcal_to_kj)
+
+        for (p_i, p_j), (qp_v, sig_v, eps_v) in seen_pairs.items():
+            nb_force.addException(p_i, p_j, qp_v, sig_v, eps_v, True)
+
+        omm_sys.addForce(nb_force)
+
+        integrator = openmm.LangevinMiddleIntegrator(
+            300.0 * omm_unit.kelvin,
+            1.0 / omm_unit.picosecond,
+            0.001 * omm_unit.picoseconds,
+        )
+        platform_obj = openmm.Platform.getPlatformByName(omm_platform_name)
+        ctx = openmm.Context(omm_sys, integrator, platform_obj, omm_props)
+        pos_nm = np.asarray(s["pos"], dtype=np.float64) * a_to_nm
+        ctx.setPositions(pos_nm)
+
+        # Warmup + time OpenMM single-step energy+forces
+        st0 = ctx.getState(getEnergy=True, getForces=True)
+        e_omm_kcal = st0.getPotentialEnergy().value_in_unit(omm_unit.kilocalories_per_mole)
+        f_omm_kcal_a = st0.getForces(asNumpy=True).value_in_unit(
+            omm_unit.kilocalories_per_mole / omm_unit.angstrom
+        )
+        omm_times = []
+        for _ in range(repeats):
+            t0 = time.perf_counter()
+            _ = ctx.getState(getEnergy=True, getForces=True)
+            omm_times.append(time.perf_counter() - t0)
+        t_omm_step = statistics.median(omm_times)
+
+        # Also time a 20-step integration rollout in OpenMM vs Prolix lax.scan
+        n_rollout = 20
+        integrator.step(2)
+        t0 = time.perf_counter()
+        integrator.step(n_rollout)
+        _ = ctx.getState(getPositions=True)
+        t_omm_rollout_per_step = (time.perf_counter() - t0) / n_rollout
+
+        @jax.jit
+        def prolix_v2_rollout(p0):
+            def body(_, p_cur):
+                _, g = jax.value_and_grad(prolix_pallas_v2_fn)(p_cur)
+                return p_cur - jnp.float32(1e-5) * g
+            return jax.lax.fori_loop(0, n_rollout, body, p0)
+
+        jax.block_until_ready(prolix_v2_rollout(s["pos"]))
+        t0 = time.perf_counter()
+        jax.block_until_ready(prolix_v2_rollout(s["pos"]))
+        t_v2_rollout_per_step = (time.perf_counter() - t0) / n_rollout
+
+        # Convert step time (dt = 2 fs = 2e-6 ns) to ns/day: (0.002 ps * 86400 s/day) / step_s = 172.8 / step_s
+        ns_per_day_xla = 0.1728 / t_x
+        ns_per_day_v1 = 0.1728 / t_v1
+        ns_per_day_v2 = 0.1728 / t_v2
+        ns_per_day_v2_rollout = 0.1728 / t_v2_rollout_per_step
+        ns_per_day_omm_rollout = 0.1728 / t_omm_rollout_per_step
+
+        row = {
+            "n_atoms": n,
+            "k": int(s["k"]),
+            "pme_grid": [kx, ky, kz],
+            "openmm_platform": omm_platform_name,
+            "xla_median_s": t_x,
+            "pallas_v1_median_s": t_v1,
+            "pallas_v2_median_s": t_v2,
+            "pallas_v2_rollout_per_step_s": t_v2_rollout_per_step,
+            "openmm_getstate_median_s": t_omm_step,
+            "openmm_rollout_per_step_s": t_omm_rollout_per_step,
+            "ns_per_day_xla_2fs": ns_per_day_xla,
+            "ns_per_day_pallas_v1_2fs": ns_per_day_v1,
+            "ns_per_day_pallas_v2_2fs": ns_per_day_v2,
+            "ns_per_day_pallas_v2_rollout_2fs": ns_per_day_v2_rollout,
+            "ns_per_day_openmm_rollout_2fs": ns_per_day_omm_rollout,
+            "speedup_v2_vs_xla": t_x / t_v2,
+            "speedup_v2_vs_v1": t_v1 / t_v2,
+            "speedup_v2_rollout_vs_openmm": t_omm_rollout_per_step / t_v2_rollout_per_step,
+            "prolix_v2_energy_kcal": float(out_v2[0]),
+            "openmm_energy_kcal": float(e_omm_kcal),
+            "rel_dE_v2_vs_xla": float(abs(out_v2[0] - out_x[0]) / max(abs(float(out_x[0])), 1e-12)),
+            "max_abs_dF_v2_vs_xla": float(jnp.max(jnp.abs(out_v2[1] - out_x[1]))),
+            "rms_dF_v2_vs_openmm": float(np.sqrt(np.mean((np.asarray(-out_v2[1]) - f_omm_kcal_a) ** 2))),
+        }
+        print(json.dumps(row), flush=True)
+        rows.append(row)
+
+    summary = {
+        "openmm_platform": omm_platform_name,
+        "mean_speedup_v2_vs_xla": float(np.mean([r["speedup_v2_vs_xla"] for r in rows])),
+        "mean_speedup_v2_vs_v1": float(np.mean([r["speedup_v2_vs_v1"] for r in rows])),
+    }
+    return rows, summary
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--sizes", default="512,2048,8192,32768")
@@ -823,7 +1323,18 @@ def main() -> None:
     ap.add_argument("--_worker", default="", help=argparse.SUPPRESS)
     ap.add_argument(
         "--kernel",
-        choices=("nonbonded", "flash", "pme", "full_potential", "full_implicit", "nl_build", "nl_skin", "mem_scaling"),
+        choices=(
+            "nonbonded",
+            "bonded",
+            "flash",
+            "pme",
+            "full_potential",
+            "full_implicit",
+            "openmm_comparison",
+            "nl_build",
+            "nl_skin",
+            "mem_scaling",
+        ),
         default="nonbonded",
         help="kernel/experiment family to benchmark",
     )
@@ -848,13 +1359,17 @@ def main() -> None:
         "density": DENSITY,
     }
 
-    if args.kernel in ("nl_build", "nl_skin", "mem_scaling"):
+    if args.kernel in ("nl_build", "nl_skin", "mem_scaling", "bonded", "openmm_comparison"):
         if args.kernel == "nl_build":
             rows = bench_nl_build(sizes, args.repeats, interpret)
             summary = {}
         elif args.kernel == "nl_skin":
             rows = bench_nl_skin(sizes, args.repeats, interpret)
             summary = {}
+        elif args.kernel == "bonded":
+            rows, summary = bench_bonded(sizes, args.repeats, interpret)
+        elif args.kernel == "openmm_comparison":
+            rows, summary = bench_openmm_comparison(sizes, args.repeats, interpret)
         else:
             rows, summary = bench_mem_scaling(sizes, args.repeats, interpret)
         payload = {"meta": meta, "rows": rows, "summary": summary}
