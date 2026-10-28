@@ -56,10 +56,17 @@ def make_system(n_atoms: int, grid: int, density: float, seed: int):
 
 
 def scale_relative_error(got, want) -> float:
-    """Worst ``max|got - want| / max(1, max|want|)`` over matching leaves."""
+    """Worst ``max|got - want| / max(1, max|want|)`` over matching leaves.
+
+    A non-finite value in either tree returns ``inf``, so it fails any tolerance:
+    Python ``max`` silently drops a NaN that is not first, and NaN does not
+    survive JSON.
+    """
     errs = []
     for g, w in zip(jax.tree.leaves(got), jax.tree.leaves(want), strict=True):
         g, w = np.asarray(g, np.float64), np.asarray(w, np.float64)
+        if not (np.all(np.isfinite(g)) and np.all(np.isfinite(w))):
+            return float("inf")
         errs.append(float(np.max(np.abs(g - w)) / max(1.0, float(np.max(np.abs(w))))))
     return max(errs)
 
