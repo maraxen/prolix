@@ -17,6 +17,9 @@ from jax._src.pallas.primitives import store as _pl_store
 from jax.experimental import pallas as pl
 from jax.experimental.pallas import triton as plt
 from proxide.physics import constants
+import xtrax
+from xtrax.intent import Context
+from xtrax.kernel_seam import VjpKernel
 
 from prolix.export import in_export_context
 from prolix.physics.generalized_born import (
@@ -545,8 +548,8 @@ def _gb_ace_nl_ref_one(
                 0.0,
             )
         )
-        return e_gb + e_ace
-    return e_gb
+        return (e_gb + e_ace).astype(pos_1.dtype)
+    return e_gb.astype(pos_1.dtype)
 
 
 def _pallas_gb_ace_nl_vmappable(
@@ -750,6 +753,124 @@ def _pallas_gb_ace_nl_bwd(
 _pallas_gb_ace_nl_diff.defvjp(_pallas_gb_ace_nl_fwd, _pallas_gb_ace_nl_bwd)
 
 
+def gb_ace_nl_reference(
+    positions: jax.Array,
+    charges: jax.Array,
+    radii: jax.Array,
+    scaled_radii: jax.Array,
+    atom_mask: jax.Array,
+    neighbor_idx: jax.Array,
+    box: jax.Array,
+    *,
+    has_box: bool = False,
+    solvent_dielectric: float = constants.DIELECTRIC_WATER,
+    solute_dielectric: float = constants.DIELECTRIC_PROTEIN,
+    dielectric_offset: float = 0.09,
+    surface_tension: float = SURFACE_TENSION,
+    include_ace: bool = True,
+) -> jax.Array:
+    """Plain-JAX OBC-II GB + ACE nonpolar reference matching ``pallas_gb_ace_nl``."""
+    del box, has_box
+    if positions.ndim == 3:
+        return jax.vmap(
+            lambda b: _gb_ace_nl_ref_one(
+                positions[b],
+                charges[b] if charges.ndim == 2 else charges,
+                radii[b] if radii.ndim == 2 else radii,
+                scaled_radii[b] if scaled_radii.ndim == 2 else scaled_radii,
+                atom_mask[b] if atom_mask.ndim == 2 else atom_mask,
+                neighbor_idx[b] if neighbor_idx.ndim == 3 else neighbor_idx,
+                solvent_dielectric,
+                solute_dielectric,
+                dielectric_offset,
+                surface_tension,
+                include_ace,
+            )
+        )(jnp.arange(positions.shape[0]))
+    return _gb_ace_nl_ref_one(
+        positions,
+        charges,
+        radii,
+        scaled_radii,
+        atom_mask,
+        neighbor_idx,
+        solvent_dielectric,
+        solute_dielectric,
+        dielectric_offset,
+        surface_tension,
+        include_ace,
+    )
+
+
+def make_gb_ace_nl_op(
+    *,
+    has_box: bool = False,
+    solvent_dielectric: float = constants.DIELECTRIC_WATER,
+    solute_dielectric: float = constants.DIELECTRIC_PROTEIN,
+    dielectric_offset: float = 0.09,
+    surface_tension: float = SURFACE_TENSION,
+    include_ace: bool = True,
+    context: Context | None = None,
+) -> xtrax.Op:
+    """Build an ``xtrax.Op`` for 3-pass OBC-II GB + ACE nonpolar over a symmetric neighbor list.
+
+    Signature of the returned op:
+    ``(positions, charges, radii, scaled_radii, atom_mask, neighbor_idx, box) -> energy``.
+    """
+    hb = bool(has_box)
+    sd = float(solvent_dielectric)
+    ud = float(solute_dielectric)
+    do = float(dielectric_offset)
+    st = float(surface_tension)
+    ia = bool(include_ace)
+    ref = functools.partial(
+        gb_ace_nl_reference,
+        has_box=hb,
+        solvent_dielectric=sd,
+        solute_dielectric=ud,
+        dielectric_offset=do,
+        surface_tension=st,
+        include_ace=ia,
+    )
+
+    def _make_vk(interp: bool) -> VjpKernel:
+        def _fwd(pos, q, rad, sr, msk, nbr, bx):
+            if pos.ndim == 3:
+                B = pos.shape[0]
+                e_b, f_b, gq_b = jax.vmap(
+                    lambda b: _pallas_gb_ace_nl_vmappable(
+                        pos[b],
+                        q[b] if q.ndim == 2 else q,
+                        rad[b] if rad.ndim == 2 else rad,
+                        sr[b] if sr.ndim == 2 else sr,
+                        msk[b] if msk.ndim == 2 else msk,
+                        nbr[b] if nbr.ndim == 3 else nbr,
+                        bx[b] if bx.ndim == 2 else bx,
+                        hb,
+                        sd,
+                        ud,
+                        do,
+                        st,
+                        ia,
+                        interp,
+                    )
+                )(jnp.arange(B))
+                return e_b, (f_b, gq_b, pos, q, rad, sr, msk, nbr, bx)
+            return _pallas_gb_ace_nl_fwd(pos, q, rad, sr, msk, nbr, bx, hb, sd, ud, do, st, ia, interp)
+
+        def _bwd(res, ct):
+            return _pallas_gb_ace_nl_bwd(hb, sd, ud, do, st, ia, interp, res, ct)
+
+        return VjpKernel(_fwd, _bwd)
+
+    return xtrax.op(
+        ref,
+        vjp_kernels={"gpu": _make_vk(False), "cpu": _make_vk(True)},
+        name="pallas_gb_ace_nl",
+        context=context,
+    )
+
+
 def pallas_gb_ace_nl(
     positions: jax.Array,
     charges: jax.Array,
@@ -780,57 +901,25 @@ def pallas_gb_ace_nl(
     q_arr = jnp.asarray(charges, dtype=positions.dtype)
     nbr_arr = jnp.asarray(neighbor_idx, dtype=jnp.int32)
     nbr_arr = jnp.where(nbr_arr >= 0, nbr_arr & _NB_INDEX_MASK, nbr_arr)
+    box_arr, has_box = _normalize_box(box, positions)
 
     if in_export_context():
-        if positions.ndim == 3:
-            return jax.vmap(
-                lambda b: _gb_ace_nl_ref_one(
-                    positions[b],
-                    q_arr[b] if q_arr.ndim == 2 else q_arr,
-                    rad_arr[b] if rad_arr.ndim == 2 else rad_arr,
-                    sr_arr[b] if sr_arr.ndim == 2 else sr_arr,
-                    msk_arr[b] if msk_arr.ndim == 2 else msk_arr,
-                    nbr_arr[b] if nbr_arr.ndim == 3 else nbr_arr,
-                    solvent_dielectric,
-                    solute_dielectric,
-                    dielectric_offset,
-                    surface_tension,
-                    include_ace,
-                )
-            )(jnp.arange(positions.shape[0]))
-        return _gb_ace_nl_ref_one(
-            positions,
-            q_arr,
-            rad_arr,
-            sr_arr,
-            msk_arr,
-            nbr_arr,
-            solvent_dielectric,
-            solute_dielectric,
-            dielectric_offset,
-            surface_tension,
-            include_ace,
-        )
+        ctx = Context(kernels=True, target="export", export_format="stablehlo")
+    else:
+        if interpret is None:
+            interpret = not _triton_gpu_available()
+        ctx = Context(kernels=True, backend="cpu" if interpret else "gpu")
 
-    if interpret is None:
-        interpret = not _triton_gpu_available()
-    box_arr, has_box = _normalize_box(box, positions)
-    return _pallas_gb_ace_nl_diff(
-        positions,
-        q_arr,
-        rad_arr,
-        sr_arr,
-        msk_arr,
-        nbr_arr,
-        box_arr,
-        bool(has_box),
-        float(solvent_dielectric),
-        float(solute_dielectric),
-        float(dielectric_offset),
-        float(surface_tension),
-        bool(include_ace),
-        bool(interpret),
+    op = make_gb_ace_nl_op(
+        has_box=bool(has_box),
+        solvent_dielectric=float(solvent_dielectric),
+        solute_dielectric=float(solute_dielectric),
+        dielectric_offset=float(dielectric_offset),
+        surface_tension=float(surface_tension),
+        include_ace=bool(include_ace),
+        context=ctx,
     )
+    return op(positions, q_arr, rad_arr, sr_arr, msk_arr, nbr_arr, box_arr)
 
 
 # =============================================================================
@@ -1140,7 +1229,7 @@ def _sasa_nl_ref_one(pos_1, rad_1, m_1, nbr_1, surface_tension, probe_radius):
         probe_radius=probe_radius,
         neighbor_idx=nbr_clean,
         atom_mask=m_1,
-    )
+    ).astype(pos_1.dtype)
 
 
 def _pallas_sasa_nl_vmappable(
@@ -1263,6 +1352,84 @@ def _pallas_sasa_nl_bwd(has_box, surface_tension, probe_radius, interpret, res, 
 _pallas_sasa_nl_diff.defvjp(_pallas_sasa_nl_fwd, _pallas_sasa_nl_bwd)
 
 
+def sasa_nl_reference(
+    positions: jax.Array,
+    radii: jax.Array,
+    atom_mask: jax.Array,
+    neighbor_idx: jax.Array,
+    box: jax.Array,
+    *,
+    has_box: bool = False,
+    surface_tension: float = SURFACE_TENSION,
+    probe_radius: float = constants.PROBE_RADIUS,
+) -> jax.Array:
+    """Plain-JAX SASA nonpolar reference matching ``pallas_sasa_nl``."""
+    del box, has_box
+    if positions.ndim == 3:
+        return jax.vmap(
+            lambda b: _sasa_nl_ref_one(
+                positions[b],
+                radii[b] if radii.ndim == 2 else radii,
+                atom_mask[b] if atom_mask.ndim == 2 else atom_mask,
+                neighbor_idx[b] if neighbor_idx.ndim == 3 else neighbor_idx,
+                surface_tension,
+                probe_radius,
+            )
+        )(jnp.arange(positions.shape[0]))
+    return _sasa_nl_ref_one(positions, radii, atom_mask, neighbor_idx, surface_tension, probe_radius)
+
+
+def make_sasa_nl_op(
+    *,
+    has_box: bool = False,
+    surface_tension: float = SURFACE_TENSION,
+    probe_radius: float = constants.PROBE_RADIUS,
+    context: Context | None = None,
+) -> xtrax.Op:
+    """Build an ``xtrax.Op`` for 2-pass SASA nonpolar over a symmetric neighbor list.
+
+    Signature of the returned op: ``(positions, radii, atom_mask, neighbor_idx, box) -> energy``.
+    """
+    hb = bool(has_box)
+    st = float(surface_tension)
+    pr = float(probe_radius)
+    ref = functools.partial(
+        sasa_nl_reference, has_box=hb, surface_tension=st, probe_radius=pr
+    )
+
+    def _make_vk(interp: bool) -> VjpKernel:
+        def _fwd(pos, rad, msk, nbr, bx):
+            if pos.ndim == 3:
+                B = pos.shape[0]
+                e_b, f_b = jax.vmap(
+                    lambda b: _pallas_sasa_nl_vmappable(
+                        pos[b],
+                        rad[b] if rad.ndim == 2 else rad,
+                        msk[b] if msk.ndim == 2 else msk,
+                        nbr[b] if nbr.ndim == 3 else nbr,
+                        bx[b] if bx.ndim == 2 else bx,
+                        hb,
+                        st,
+                        pr,
+                        interp,
+                    )
+                )(jnp.arange(B))
+                return e_b, (f_b, pos, rad, msk, nbr, bx)
+            return _pallas_sasa_nl_fwd(pos, rad, msk, nbr, bx, hb, st, pr, interp)
+
+        def _bwd(res, ct):
+            return _pallas_sasa_nl_bwd(hb, st, pr, interp, res, ct)
+
+        return VjpKernel(_fwd, _bwd)
+
+    return xtrax.op(
+        ref,
+        vjp_kernels={"gpu": _make_vk(False), "cpu": _make_vk(True)},
+        name="pallas_sasa_nl",
+        context=context,
+    )
+
+
 def pallas_sasa_nl(
     positions: jax.Array,
     radii: jax.Array,
@@ -1288,38 +1455,29 @@ def pallas_sasa_nl(
     )
     nbr_arr = jnp.asarray(neighbor_idx, dtype=jnp.int32)
     nbr_arr = jnp.where(nbr_arr >= 0, nbr_arr & _NB_INDEX_MASK, nbr_arr)
+    box_arr, has_box = _normalize_box(box, positions)
 
     if in_export_context():
-        if positions.ndim == 3:
-            return jax.vmap(
-                lambda b: _sasa_nl_ref_one(
-                    positions[b],
-                    rad_arr[b] if rad_arr.ndim == 2 else rad_arr,
-                    msk_arr[b] if msk_arr.ndim == 2 else msk_arr,
-                    nbr_arr[b] if nbr_arr.ndim == 3 else nbr_arr,
-                    surface_tension,
-                    probe_radius,
-                )
-            )(jnp.arange(positions.shape[0]))
-        return _sasa_nl_ref_one(positions, rad_arr, msk_arr, nbr_arr, surface_tension, probe_radius)
+        ctx = Context(kernels=True, target="export", export_format="stablehlo")
+    else:
+        if interpret is None:
+            interpret = not _triton_gpu_available()
+        ctx = Context(kernels=True, backend="cpu" if interpret else "gpu")
 
-    if interpret is None:
-        interpret = not _triton_gpu_available()
-    box_arr, has_box = _normalize_box(box, positions)
-    return _pallas_sasa_nl_diff(
-        positions,
-        rad_arr,
-        msk_arr,
-        nbr_arr,
-        box_arr,
-        bool(has_box),
-        float(surface_tension),
-        float(probe_radius),
-        bool(interpret),
+    op = make_sasa_nl_op(
+        has_box=bool(has_box),
+        surface_tension=float(surface_tension),
+        probe_radius=float(probe_radius),
+        context=ctx,
     )
+    return op(positions, rad_arr, msk_arr, nbr_arr, box_arr)
 
 
 __all__ = [
+    "gb_ace_nl_reference",
+    "make_gb_ace_nl_op",
+    "make_sasa_nl_op",
     "pallas_gb_ace_nl",
     "pallas_sasa_nl",
+    "sasa_nl_reference",
 ]

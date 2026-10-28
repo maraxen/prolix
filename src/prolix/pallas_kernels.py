@@ -23,6 +23,11 @@ from jax.experimental import pallas as pl
 from jax.experimental.pallas import triton as plt
 from jax.scipy.special import erf, erfc
 from proxide.physics import constants
+import xtrax
+from xtrax.intent import Context
+from xtrax.kernel_seam import VjpKernel
+
+xtrax_op = xtrax.op
 
 from prolix.export import in_export_context
 from prolix.physics.generalized_born import (
@@ -35,16 +40,32 @@ from prolix.physics.generalized_born import (
 from prolix.physics.neighbor_list import get_neighbor_exclusion_scales
 from prolix.physics.pallas_bonded import (
     _min_image_1d,
+    angles_harmonic_reference,
+    bonds_2body_reference,
+    cmap_torsions_reference,
+    exceptions_14_reference,
+    make_angles_harmonic_op,
+    make_bonds_2body_op,
+    make_cmap_torsions_op,
+    make_exceptions_14_op,
+    make_pme_exclusion_pairs_op,
+    make_torsions_4body_op,
     pallas_angles_harmonic,
     pallas_bonds_2body,
     pallas_cmap_torsions,
     pallas_exceptions_14,
     pallas_pme_exclusion_pairs,
     pallas_torsions_4body,
+    pme_exclusion_pairs_reference,
+    torsions_4body_reference,
 )
 from prolix.physics.pallas_implicit import (
+    gb_ace_nl_reference,
+    make_gb_ace_nl_op,
+    make_sasa_nl_op,
     pallas_gb_ace_nl,
     pallas_sasa_nl,
+    sasa_nl_reference,
 )
 
 
@@ -680,6 +701,80 @@ def _pallas_born_radii_bwd(dielectric_offset, interpret, res, g):
 _pallas_born_radii_diff.defvjp(_pallas_born_radii_fwd, _pallas_born_radii_bwd)
 
 
+def born_radii_reference(
+    positions: jax.Array,
+    radii: jax.Array,
+    scaled_radii: jax.Array,
+    neighbor_idx: jax.Array,
+    *,
+    dielectric_offset: float = 0.09,
+) -> jax.Array:
+    """Plain-JAX reference for OBC-II Born radii (2D or 3D batched)."""
+    if positions.ndim == 3:
+        B = positions.shape[0]
+        return jax.vmap(
+            lambda b: compute_born_radii_neighbor_list(
+                positions[b],
+                radii[b] if radii.ndim > 1 else radii,
+                neighbor_idx[b] if neighbor_idx.ndim > 2 else neighbor_idx,
+                dielectric_offset=dielectric_offset,
+                scaled_radii=scaled_radii[b] if scaled_radii.ndim > 1 else scaled_radii,
+            )
+        )(jnp.arange(B))
+    return compute_born_radii_neighbor_list(
+        positions,
+        radii,
+        neighbor_idx,
+        dielectric_offset=dielectric_offset,
+        scaled_radii=scaled_radii,
+    )
+
+
+def make_born_radii_op(
+    *,
+    dielectric_offset: float = 0.09,
+    context: Context | None = None,
+):
+    """Build an ``xtrax.op`` for OBC-II Born radii."""
+    d_off = float(dielectric_offset)
+    ref = functools.partial(born_radii_reference, dielectric_offset=d_off)
+
+    def _make_vjp_kernel(*, interpret: bool) -> VjpKernel:
+        def _fwd(pos, rad, sc_rad, nbr):
+            if pos.ndim == 3:
+                B = pos.shape[0]
+                b_rad = rad.ndim > 1
+                b_sc = sc_rad.ndim > 1
+                b_nbr = nbr.ndim > 2
+                out = jax.vmap(
+                    lambda b: _pallas_born_radii_vmappable(
+                        pos[b],
+                        rad[b] if b_rad else rad,
+                        sc_rad[b] if b_sc else sc_rad,
+                        nbr[b] if b_nbr else nbr,
+                        d_off,
+                        interpret,
+                    )
+                )(jnp.arange(B))
+                return out, (pos, rad, sc_rad, nbr)
+            return _pallas_born_radii_fwd(pos, rad, sc_rad, d_off, nbr, interpret)
+
+        def _bwd(res, g):
+            return _pallas_born_radii_bwd(d_off, interpret, res, g)
+
+        return VjpKernel(fwd=_fwd, bwd=_bwd)
+
+    return xtrax_op(
+        ref,
+        vjp_kernels={
+            "gpu": _make_vjp_kernel(interpret=False),
+            "cpu": _make_vjp_kernel(interpret=True),
+        },
+        name="prolix.born_radii",
+        context=context,
+    )
+
+
 def pallas_born_radii(
     positions: jax.Array,
     radii: jax.Array,
@@ -690,40 +785,19 @@ def pallas_born_radii(
 ) -> jax.Array:
     """Computes OBC-II Born radii using a vectorized (32, 32) Pallas kernel.
 
-    Supports ``jax.grad`` (via ``custom_vjp``), ``jax.vmap`` (via ``custom_vmap``),
+    Supports ``jax.grad`` (via ``xtrax.op`` ``VjpKernel``), ``jax.vmap`` (via ``custom_vmap``),
     and automatic ``interpret=True`` fallback on CPU.
     """
     if scaled_radii is None:
         scaled_radii = radii
-    if interpret is None:
-        interpret = not _triton_gpu_available()
     if in_export_context():
-        if positions.ndim == 3:
-            B = positions.shape[0]
-            return jax.vmap(
-                lambda b: compute_born_radii_neighbor_list(
-                    positions[b],
-                    radii[b] if radii.ndim > 1 else radii,
-                    neighbor_idx[b] if neighbor_idx.ndim > 2 else neighbor_idx,
-                    dielectric_offset=dielectric_offset,
-                    scaled_radii=scaled_radii[b] if scaled_radii.ndim > 1 else scaled_radii,
-                )
-            )(jnp.arange(B))
-        return compute_born_radii_neighbor_list(
-            positions,
-            radii,
-            neighbor_idx,
-            dielectric_offset=dielectric_offset,
-            scaled_radii=scaled_radii,
-        )
-    return _pallas_born_radii_diff(
-        positions,
-        radii,
-        scaled_radii,
-        float(dielectric_offset),
-        neighbor_idx,
-        bool(interpret),
-    )
+        ctx = Context(kernels=False, target="export", export_format="stablehlo")
+    else:
+        if interpret is None:
+            interpret = not _triton_gpu_available()
+        ctx = Context(kernels=True, backend="cpu" if interpret else "gpu")
+    op = make_born_radii_op(dielectric_offset=float(dielectric_offset), context=ctx)
+    return op(positions, radii, scaled_radii, neighbor_idx)
 
 
 # =============================================================================
@@ -1682,6 +1756,161 @@ def _export_nonbonded_nl_one(
     return half * jnp.sum(jnp.where(active, e_lj + e_coul, zero))
 
 
+def nonbonded_nl_reference(
+    positions: jax.Array,
+    charges: jax.Array,
+    sigmas: jax.Array,
+    epsilons: jax.Array,
+    atom_mask: jax.Array,
+    neighbor_idx: jax.Array,
+    excl_indices: jax.Array,
+    excl_scales_vdw: jax.Array,
+    excl_scales_elec: jax.Array,
+    box: jax.Array,
+    lam_arr: jax.Array,
+    *,
+    has_box: bool = False,
+    pme_alpha: float = 0.0,
+    cutoff: float = 10.0,
+    coulomb_constant: float = constants.COULOMB_CONSTANT,
+    lj_switch_width: float = 0.0,
+    softcore_alpha: float = 0.5,
+    softcore_exponent: int = 2,
+    include_pme_excl_erf: bool = True,
+) -> jax.Array:
+    """Plain-JAX reference for O(N*K) neighbor-list nonbonded energy (2D or 3D batched)."""
+    if positions.ndim == 3:
+        return jax.vmap(
+            lambda b: _export_nonbonded_nl_one(
+                positions[b],
+                charges[b] if charges.ndim == 2 else charges,
+                sigmas[b] if sigmas.ndim == 2 else sigmas,
+                epsilons[b] if epsilons.ndim == 2 else epsilons,
+                atom_mask[b] if atom_mask.ndim == 2 else atom_mask,
+                neighbor_idx[b] if neighbor_idx.ndim == 3 else neighbor_idx,
+                excl_indices[b] if excl_indices.ndim == 3 else excl_indices,
+                excl_scales_vdw[b] if excl_scales_vdw.ndim == 3 else excl_scales_vdw,
+                excl_scales_elec[b] if excl_scales_elec.ndim == 3 else excl_scales_elec,
+                box[b] if box.ndim == 2 else box,
+                lam_arr[b] if lam_arr.ndim == 2 else lam_arr,
+                bool(has_box),
+                float(pme_alpha),
+                float(cutoff),
+                float(coulomb_constant),
+                float(lj_switch_width),
+                float(softcore_alpha),
+                int(softcore_exponent),
+                bool(include_pme_excl_erf),
+            )
+        )(jnp.arange(positions.shape[0]))
+    return _export_nonbonded_nl_one(
+        positions,
+        charges,
+        sigmas,
+        epsilons,
+        atom_mask,
+        neighbor_idx,
+        excl_indices,
+        excl_scales_vdw,
+        excl_scales_elec,
+        box,
+        lam_arr,
+        bool(has_box),
+        float(pme_alpha),
+        float(cutoff),
+        float(coulomb_constant),
+        float(lj_switch_width),
+        float(softcore_alpha),
+        int(softcore_exponent),
+        bool(include_pme_excl_erf),
+    )
+
+
+def make_nonbonded_nl_op(
+    *,
+    has_box: bool = False,
+    pme_alpha: float = 0.0,
+    cutoff: float = 10.0,
+    coulomb_constant: float = constants.COULOMB_CONSTANT,
+    lj_switch_width: float = 0.0,
+    softcore_alpha: float = 0.5,
+    softcore_exponent: int = 2,
+    include_pme_excl_erf: bool = True,
+    context: Context | None = None,
+):
+    """Build an ``xtrax.op`` for O(N*K) neighbor-list nonbonded energy."""
+    hb = bool(has_box)
+    pa = float(pme_alpha)
+    co = float(cutoff)
+    cc = float(coulomb_constant)
+    sw = float(lj_switch_width)
+    sca = float(softcore_alpha)
+    sce = int(softcore_exponent)
+    inc_erf = bool(include_pme_excl_erf)
+    ref = functools.partial(
+        nonbonded_nl_reference,
+        has_box=hb,
+        pme_alpha=pa,
+        cutoff=co,
+        coulomb_constant=cc,
+        lj_switch_width=sw,
+        softcore_alpha=sca,
+        softcore_exponent=sce,
+        include_pme_excl_erf=inc_erf,
+    )
+
+    def _make_vjp_kernel(*, interpret: bool) -> VjpKernel:
+        def _fwd(pos, q, sig, eps, msk, nbr, ei, ev, ee, bx, lam):
+            if pos.ndim == 3:
+                B = pos.shape[0]
+                e, f = jax.vmap(
+                    lambda b: _pallas_nonbonded_nl_vmappable(
+                        pos[b],
+                        q[b] if q.ndim == 2 else q,
+                        sig[b] if sig.ndim == 2 else sig,
+                        eps[b] if eps.ndim == 2 else eps,
+                        msk[b] if msk.ndim == 2 else msk,
+                        nbr[b] if nbr.ndim == 3 else nbr,
+                        ei[b] if ei.ndim == 3 else ei,
+                        ev[b] if ev.ndim == 3 else ev,
+                        ee[b] if ee.ndim == 3 else ee,
+                        bx[b] if bx.ndim == 2 else bx,
+                        lam[b] if lam.ndim == 2 else lam,
+                        hb,
+                        pa,
+                        co,
+                        cc,
+                        sw,
+                        sca,
+                        sce,
+                        inc_erf,
+                        interpret,
+                    )
+                )(jnp.arange(B))
+                return e, (f, pos, q, sig, eps, msk, nbr, ei, ev, ee, bx, lam)
+            return _pallas_nonbonded_nl_fwd(
+                pos, q, sig, eps, msk, nbr, ei, ev, ee, bx, lam,
+                hb, pa, co, cc, sw, sca, sce, inc_erf, interpret,
+            )
+
+        def _bwd(res, g):
+            return _pallas_nonbonded_nl_bwd(
+                hb, pa, co, cc, sw, sca, sce, inc_erf, interpret, res, g
+            )
+
+        return VjpKernel(fwd=_fwd, bwd=_bwd)
+
+    return xtrax_op(
+        ref,
+        vjp_kernels={
+            "gpu": _make_vjp_kernel(interpret=False),
+            "cpu": _make_vjp_kernel(interpret=True),
+        },
+        name="prolix.nonbonded_nl",
+        context=context,
+    )
+
+
 def pallas_nonbonded_nl(
     positions: jax.Array,
     charges: jax.Array,
@@ -1754,56 +1983,24 @@ def pallas_nonbonded_nl(
     lam_arr = lam_raw.reshape((1,)) if lam_raw.ndim == 0 else lam_raw.reshape((-1, 1))
 
     if in_export_context():
-        if positions.ndim == 3:
-            return jax.vmap(
-                lambda b: _export_nonbonded_nl_one(
-                    positions[b],
-                    charges[b] if charges.ndim == 2 else charges,
-                    sigmas[b] if sigmas.ndim == 2 else sigmas,
-                    epsilons[b] if epsilons.ndim == 2 else epsilons,
-                    msk_arr[b] if msk_arr.ndim == 2 else msk_arr,
-                    neighbor_idx[b] if neighbor_idx.ndim == 3 else neighbor_idx,
-                    ei_arr[b] if ei_arr.ndim == 3 else ei_arr,
-                    ev_arr[b] if ev_arr.ndim == 3 else ev_arr,
-                    ee_arr[b] if ee_arr.ndim == 3 else ee_arr,
-                    box_arr[b],
-                    lam_arr[b] if lam_arr.ndim == 2 else lam_arr,
-                    has_box,
-                    float(pme_alpha),
-                    float(cutoff),
-                    float(coulomb_constant),
-                    float(lj_switch_width),
-                    float(softcore_alpha),
-                    int(softcore_exponent),
-                    bool(include_pme_excl_erf),
-                )
-            )(jnp.arange(positions.shape[0]))
-        return _export_nonbonded_nl_one(
-            positions,
-            charges,
-            sigmas,
-            epsilons,
-            msk_arr,
-            neighbor_idx,
-            ei_arr,
-            ev_arr,
-            ee_arr,
-            box_arr,
-            lam_arr,
-            has_box,
-            float(pme_alpha),
-            float(cutoff),
-            float(coulomb_constant),
-            float(lj_switch_width),
-            float(softcore_alpha),
-            int(softcore_exponent),
-            bool(include_pme_excl_erf),
-        )
+        ctx = Context(kernels=False, target="export", export_format="stablehlo")
+    else:
+        if interpret is None:
+            interpret = not _triton_gpu_available()
+        ctx = Context(kernels=True, backend="cpu" if interpret else "gpu")
 
-    if interpret is None:
-        interpret = not _triton_gpu_available()
-
-    return _pallas_nonbonded_nl_diff(
+    op = make_nonbonded_nl_op(
+        has_box=bool(has_box),
+        pme_alpha=float(pme_alpha),
+        cutoff=float(cutoff),
+        coulomb_constant=float(coulomb_constant),
+        lj_switch_width=float(lj_switch_width),
+        softcore_alpha=float(softcore_alpha),
+        softcore_exponent=int(softcore_exponent),
+        include_pme_excl_erf=bool(include_pme_excl_erf),
+        context=ctx,
+    )
+    return op(
         positions,
         jnp.asarray(charges, dtype=dtype),
         jnp.asarray(sigmas, dtype=dtype),
@@ -1815,15 +2012,6 @@ def pallas_nonbonded_nl(
         ee_arr,
         box_arr,
         lam_arr,
-        bool(has_box),
-        float(pme_alpha),
-        float(cutoff),
-        float(coulomb_constant),
-        float(lj_switch_width),
-        float(softcore_alpha),
-        int(softcore_exponent),
-        bool(include_pme_excl_erf),
-        bool(interpret),
     )
 
 
@@ -2474,6 +2662,129 @@ def _pallas_flash_explicit_bwd(
 _pallas_flash_explicit_diff.defvjp(_pallas_flash_explicit_fwd, _pallas_flash_explicit_bwd)
 
 
+def flash_explicit_nonbonded_reference(
+    positions: jax.Array,
+    charges: jax.Array,
+    sigmas: jax.Array,
+    epsilons: jax.Array,
+    atom_mask: jax.Array,
+    excl_indices: jax.Array,
+    excl_scales_vdw: jax.Array,
+    excl_scales_elec: jax.Array,
+    box: jax.Array,
+    lam_arr: jax.Array,
+    *,
+    has_box: bool = False,
+    pme_alpha: float = 0.0,
+    softcore_alpha: float = 0.5,
+    softcore_exponent: int = 2,
+) -> jax.Array:
+    """Plain-JAX reference for 2D-tiled FlashMD explicit nonbonded energy (2D or 3D batched)."""
+    if positions.ndim == 3:
+        return jax.vmap(
+            lambda b: _export_flash_one(
+                positions[b],
+                charges[b] if charges.ndim == 2 else charges,
+                sigmas[b] if sigmas.ndim == 2 else sigmas,
+                epsilons[b] if epsilons.ndim == 2 else epsilons,
+                atom_mask[b] if atom_mask.ndim == 2 else atom_mask,
+                excl_indices[b] if excl_indices.ndim == 3 else excl_indices,
+                excl_scales_vdw[b] if excl_scales_vdw.ndim == 3 else excl_scales_vdw,
+                excl_scales_elec[b] if excl_scales_elec.ndim == 3 else excl_scales_elec,
+                box[b] if box.ndim == 2 else box,
+                lam_arr[b] if lam_arr.ndim == 2 else lam_arr,
+                bool(has_box),
+                float(pme_alpha),
+                float(softcore_alpha),
+                int(softcore_exponent),
+            )
+        )(jnp.arange(positions.shape[0]))
+    return _export_flash_one(
+        positions,
+        charges,
+        sigmas,
+        epsilons,
+        atom_mask,
+        excl_indices,
+        excl_scales_vdw,
+        excl_scales_elec,
+        box,
+        lam_arr,
+        bool(has_box),
+        float(pme_alpha),
+        float(softcore_alpha),
+        int(softcore_exponent),
+    )
+
+
+def make_flash_explicit_nonbonded_op(
+    *,
+    has_box: bool = False,
+    pme_alpha: float = 0.0,
+    softcore_alpha: float = 0.5,
+    softcore_exponent: int = 2,
+    context: Context | None = None,
+):
+    """Build an ``xtrax.op`` for 2D-tiled FlashMD explicit nonbonded energy."""
+    hb = bool(has_box)
+    pa = float(pme_alpha)
+    sca = float(softcore_alpha)
+    sce = int(softcore_exponent)
+    ref = functools.partial(
+        flash_explicit_nonbonded_reference,
+        has_box=hb,
+        pme_alpha=pa,
+        softcore_alpha=sca,
+        softcore_exponent=sce,
+    )
+
+    def _make_vjp_kernel(*, interpret: bool) -> VjpKernel:
+        def _fwd(pos, q, sig, eps, msk, ei, ev, ee, bx, lam):
+            if pos.ndim == 3:
+                B = pos.shape[0]
+                e, f = jax.vmap(
+                    lambda b: _pallas_flash_explicit_vmappable(
+                        pos[b],
+                        q[b] if q.ndim == 2 else q,
+                        sig[b] if sig.ndim == 2 else sig,
+                        eps[b] if eps.ndim == 2 else eps,
+                        msk[b] if msk.ndim == 2 else msk,
+                        ei[b] if ei.ndim == 3 else ei,
+                        ev[b] if ev.ndim == 3 else ev,
+                        ee[b] if ee.ndim == 3 else ee,
+                        bx[b] if bx.ndim == 2 else bx,
+                        lam[b] if lam.ndim == 2 else lam,
+                        hb,
+                        pa,
+                        sca,
+                        sce,
+                        interpret,
+                    )
+                )(jnp.arange(B))
+                return e, (f, pos, q, sig, eps, msk, ei, ev, ee, bx, lam)
+            return _pallas_flash_explicit_fwd(
+                pos, q, sig, eps, msk, ei, ev, ee, bx, lam,
+                hb, pa, sca, sce, interpret,
+            )
+
+        def _bwd(res, g):
+            return _pallas_flash_explicit_bwd(
+                hb, pa, sca, sce, interpret, res, g
+            )
+
+        return VjpKernel(fwd=_fwd, bwd=_bwd)
+
+    return xtrax_op(
+        ref,
+        vjp_kernels={
+            "gpu": _make_vjp_kernel(interpret=False),
+            "cpu": _make_vjp_kernel(interpret=True),
+        },
+        name="prolix.flash_explicit_nonbonded",
+        context=context,
+    )
+
+
 def pallas_flash_explicit_nonbonded(
     positions: jax.Array,
     charges: jax.Array,
@@ -2520,46 +2831,20 @@ def pallas_flash_explicit_nonbonded(
     lam_arr = lam_raw.reshape((1,)) if lam_raw.ndim == 0 else lam_raw.reshape((-1, 1))
 
     if in_export_context():
-        if positions.ndim == 3:
-            return jax.vmap(
-                lambda b: _export_flash_one(
-                    positions[b],
-                    charges[b] if charges.ndim == 2 else charges,
-                    sigmas[b] if sigmas.ndim == 2 else sigmas,
-                    epsilons[b] if epsilons.ndim == 2 else epsilons,
-                    msk_arr[b] if msk_arr.ndim == 2 else msk_arr,
-                    ei_arr[b] if ei_arr.ndim == 3 else ei_arr,
-                    ev_arr[b] if ev_arr.ndim == 3 else ev_arr,
-                    ee_arr[b] if ee_arr.ndim == 3 else ee_arr,
-                    box_arr[b],
-                    lam_arr[b] if lam_arr.ndim == 2 else lam_arr,
-                    bool(has_box),
-                    float(pme_alpha),
-                    float(softcore_alpha),
-                    int(softcore_exponent),
-                )
-            )(jnp.arange(positions.shape[0]))
-        return _export_flash_one(
-            positions,
-            charges,
-            sigmas,
-            epsilons,
-            msk_arr,
-            ei_arr,
-            ev_arr,
-            ee_arr,
-            box_arr,
-            lam_arr,
-            bool(has_box),
-            float(pme_alpha),
-            float(softcore_alpha),
-            int(softcore_exponent),
-        )
+        ctx = Context(kernels=False, target="export", export_format="stablehlo")
+    else:
+        if interpret is None:
+            interpret = not _triton_gpu_available()
+        ctx = Context(kernels=True, backend="cpu" if interpret else "gpu")
 
-    if interpret is None:
-        interpret = not _triton_gpu_available()
-
-    return _pallas_flash_explicit_diff(
+    op = make_flash_explicit_nonbonded_op(
+        has_box=bool(has_box),
+        pme_alpha=float(pme_alpha),
+        softcore_alpha=float(softcore_alpha),
+        softcore_exponent=int(softcore_exponent),
+        context=ctx,
+    )
+    return op(
         positions,
         jnp.asarray(charges, dtype=dtype),
         jnp.asarray(sigmas, dtype=dtype),
@@ -2570,18 +2855,32 @@ def pallas_flash_explicit_nonbonded(
         ee_arr,
         box_arr,
         lam_arr,
-        bool(has_box),
-        float(pme_alpha),
-        float(softcore_alpha),
-        int(softcore_exponent),
-        bool(interpret),
     )
 
 
 __all__ = [
     "PallasKernelConfig",
+    "angles_harmonic_reference",
+    "bonds_2body_reference",
+    "born_radii_reference",
+    "cmap_torsions_reference",
+    "exceptions_14_reference",
+    "flash_explicit_nonbonded_reference",
+    "gb_ace_nl_reference",
     "gb_coulomb_energy_dense",
     "gb_energy_split_cutoff",
+    "make_angles_harmonic_op",
+    "make_bonds_2body_op",
+    "make_born_radii_op",
+    "make_cmap_torsions_op",
+    "make_exceptions_14_op",
+    "make_flash_explicit_nonbonded_op",
+    "make_gb_ace_nl_op",
+    "make_nonbonded_nl_op",
+    "make_pme_exclusion_pairs_op",
+    "make_sasa_nl_op",
+    "make_torsions_4body_op",
+    "nonbonded_nl_reference",
     "pallas_angles_harmonic",
     "pallas_bonds_2body",
     "pallas_born_radii",
@@ -2593,5 +2892,8 @@ __all__ = [
     "pallas_pme_exclusion_pairs",
     "pallas_sasa_nl",
     "pallas_torsions_4body",
+    "pme_exclusion_pairs_reference",
     "resolve_pallas_mode",
+    "sasa_nl_reference",
+    "torsions_4body_reference",
 ]

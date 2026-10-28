@@ -1255,3 +1255,190 @@ def test_bundle_md_energy_force_and_bonded_parity():
     ff_r = force_fn_from_bundle(bundle_pbc, use_pallas=False)
     np.testing.assert_allclose(ff_p(pos), ff_r(pos), rtol=1e-4, atol=1e-4)
 
+
+def test_xtrax_op_vjp_kernel_contracts_all_pallas_v1_ops():
+    """Verify xtrax.op VjpKernel selection, assert_kernel_ran, and assert_kernel_parity across all 11 Pallas v1 ops."""
+    from xtrax.intent import Context
+    from xtrax.testing.kernel_parity import assert_kernel_parity, assert_kernel_ran
+
+    from prolix.pallas_kernels import (
+        make_angles_harmonic_op,
+        make_bonds_2body_op,
+        make_born_radii_op,
+        make_cmap_torsions_op,
+        make_exceptions_14_op,
+        make_flash_explicit_nonbonded_op,
+        make_gb_ace_nl_op,
+        make_nonbonded_nl_op,
+        make_pme_exclusion_pairs_op,
+        make_sasa_nl_op,
+        make_torsions_4body_op,
+    )
+
+    cpu_ctx = Context(kernels=True, backend="cpu")
+    ref_ctx = Context(kernels=False)
+    exp_ctx = Context(kernels=True, target="export", export_format="stablehlo")
+
+    rng = np.random.default_rng(805)
+    N = 8
+    pos = jnp.asarray(rng.uniform(2.0, 12.0, size=(N, 3)).astype(np.float32))
+    box = jnp.array([20.0, 20.0, 20.0, 0.0, 0.0, 0.0], dtype=jnp.float32)
+
+    def _check_vjp_op(factory, *args, **kwargs):
+        op_k = factory(*args, context=cpu_ctx, **kwargs)
+        op_r = factory(*args, context=ref_ctx, **kwargs)
+        op_e = factory(*args, context=exp_ctx, **kwargs)
+        assert op_k.select().primal == "kernel:cpu"
+        assert op_r.select().primal == "reference"
+        assert op_e.select().primal == "reference"
+        return op_k, op_r
+
+    # 1. bonds_2body
+    bonds = jnp.array([[0, 1], [1, 2]], dtype=jnp.int32)
+    bpar = jnp.array([[1.5, 300.0], [1.4, 280.0]], dtype=jnp.float32)
+    bmask = jnp.ones((2,), dtype=jnp.float32)
+    op_b, ref_b = _check_vjp_op(make_bonds_2body_op, has_box=True)
+    assert_kernel_ran(op_b, pos, bonds, bpar, bmask, box)
+    assert_kernel_parity(op_b, ref_b, pos, bonds, bpar, bmask, box, rel=1e-4)
+    np.testing.assert_allclose(
+        jax.grad(lambda r: op_b(r, bonds, bpar, bmask, box))(pos),
+        jax.grad(lambda r: ref_b(r, bonds, bpar, bmask, box))(pos),
+        rtol=1e-4, atol=1e-4,
+    )
+
+    # 2. exceptions_14
+    pairs_14 = jnp.array([[0, 3]], dtype=jnp.int32)
+    sig_14 = jnp.array([3.0], dtype=jnp.float32)
+    eps_14 = jnp.array([0.1], dtype=jnp.float32)
+    qp_14 = jnp.array([-0.15], dtype=jnp.float32)
+    m_14 = jnp.ones((1,), dtype=jnp.float32)
+    lam_1 = jnp.array([1.0], dtype=jnp.float32)
+    op_e14, ref_e14 = _check_vjp_op(make_exceptions_14_op, has_box=True)
+    assert_kernel_ran(op_e14, pos, pairs_14, sig_14, eps_14, qp_14, m_14, box, lam_1)
+    assert_kernel_parity(op_e14, ref_e14, pos, pairs_14, sig_14, eps_14, qp_14, m_14, box, lam_1, rel=1e-4)
+    np.testing.assert_allclose(
+        jax.grad(lambda r: op_e14(r, pairs_14, sig_14, eps_14, qp_14, m_14, box, lam_1))(pos),
+        jax.grad(lambda r: ref_e14(r, pairs_14, sig_14, eps_14, qp_14, m_14, box, lam_1))(pos),
+        rtol=1e-4, atol=1e-4,
+    )
+
+    # 3. pme_exclusion_pairs
+    q_arr = jnp.asarray(rng.uniform(-0.4, 0.4, size=(N,)).astype(np.float32))
+    excl_pairs = jnp.array([[0, 1], [1, 2]], dtype=jnp.int32)
+    excl_scales = jnp.zeros((2,), dtype=jnp.float32)
+    atom_m = jnp.ones((N,), dtype=jnp.bool_)
+    op_pme_ex, ref_pme_ex = _check_vjp_op(make_pme_exclusion_pairs_op, has_box=True, pme_alpha=0.34)
+    assert_kernel_ran(op_pme_ex, pos, excl_pairs, excl_scales, q_arr, atom_m, box)
+    assert_kernel_parity(op_pme_ex, ref_pme_ex, pos, excl_pairs, excl_scales, q_arr, atom_m, box, rel=1e-4)
+    np.testing.assert_allclose(
+        jax.grad(lambda r: op_pme_ex(r, excl_pairs, excl_scales, q_arr, atom_m, box))(pos),
+        jax.grad(lambda r: ref_pme_ex(r, excl_pairs, excl_scales, q_arr, atom_m, box))(pos),
+        rtol=1e-4, atol=1e-4,
+    )
+
+    # 4. angles_harmonic
+    angles = jnp.array([[0, 1, 2], [1, 2, 3]], dtype=jnp.int32)
+    apar = jnp.array([[1.9, 60.0], [1.85, 55.0]], dtype=jnp.float32)
+    amask = jnp.ones((2,), dtype=jnp.float32)
+    op_ang, ref_ang = _check_vjp_op(make_angles_harmonic_op, has_box=True)
+    assert_kernel_ran(op_ang, pos, angles, apar, amask, box)
+    assert_kernel_parity(op_ang, ref_ang, pos, angles, apar, amask, box, rel=1e-4)
+    np.testing.assert_allclose(
+        jax.grad(lambda r: op_ang(r, angles, apar, amask, box))(pos),
+        jax.grad(lambda r: ref_ang(r, angles, apar, amask, box))(pos),
+        rtol=1e-4, atol=1e-4,
+    )
+
+    # 5. torsions_4body
+    dih = jnp.array([[0, 1, 2, 3]], dtype=jnp.int32)
+    dpar = jnp.array([[2.0, 0.3, 1.5]], dtype=jnp.float32)
+    dmask = jnp.ones((1,), dtype=jnp.float32)
+    op_tor, ref_tor = _check_vjp_op(make_torsions_4body_op, has_box=True)
+    assert_kernel_ran(op_tor, pos, dih, dpar, dmask, box)
+    assert_kernel_parity(op_tor, ref_tor, pos, dih, dpar, dmask, box, rel=1e-4)
+    np.testing.assert_allclose(
+        jax.grad(lambda r: op_tor(r, dih, dpar, dmask, box))(pos),
+        jax.grad(lambda r: ref_tor(r, dih, dpar, dmask, box))(pos),
+        rtol=1e-4, atol=1e-4,
+    )
+
+    # 6. cmap_torsions
+    from prolix.physics.cmap import precompute_cmap_coefficients
+
+    cmap_idx = jnp.array([[0, 1, 2, 3, 4]], dtype=jnp.int32)
+    cmap_map = jnp.array([0], dtype=jnp.int32)
+    cmap_grid = jnp.asarray(rng.normal(0.0, 0.5, size=(1, 24, 24)).astype(np.float32))
+    cmap_coeffs = jnp.asarray(precompute_cmap_coefficients(cmap_grid), dtype=jnp.float32)
+    cmap_m = jnp.ones((1,), dtype=jnp.float32)
+    op_cmap, ref_cmap = _check_vjp_op(make_cmap_torsions_op, has_box=True)
+    assert_kernel_ran(op_cmap, pos, cmap_idx, cmap_map, cmap_coeffs, cmap_m, box)
+    assert_kernel_parity(op_cmap, ref_cmap, pos, cmap_idx, cmap_map, cmap_coeffs, cmap_m, box, rel=1e-4)
+    np.testing.assert_allclose(
+        jax.grad(lambda r: op_cmap(r, cmap_idx, cmap_map, cmap_coeffs, cmap_m, box))(pos),
+        jax.grad(lambda r: ref_cmap(r, cmap_idx, cmap_map, cmap_coeffs, cmap_m, box))(pos),
+        rtol=1e-4, atol=1e-4,
+    )
+
+    # 7. gb_ace_nl, 8. sasa_nl, 9. born_radii
+    rad = jnp.asarray(rng.uniform(1.4, 1.8, size=(N,)).astype(np.float32))
+    sc_rad = jnp.asarray(rng.uniform(1.1, 1.5, size=(N,)).astype(np.float32))
+    atom_m = jnp.ones((N,), dtype=jnp.bool_)
+    nbr_np = np.full((N, N - 1), N, dtype=np.int32)
+    for i in range(N):
+        nbr_np[i] = [j for j in range(N) if j != i]
+    nbr_idx = jnp.asarray(nbr_np)
+
+    op_gb, ref_gb = _check_vjp_op(make_gb_ace_nl_op, has_box=True)
+    assert_kernel_ran(op_gb, pos, q_arr, rad, sc_rad, atom_m, nbr_idx, box)
+    assert_kernel_parity(op_gb, ref_gb, pos, q_arr, rad, sc_rad, atom_m, nbr_idx, box, rel=1e-4)
+    np.testing.assert_allclose(
+        jax.grad(lambda r: op_gb(r, q_arr, rad, sc_rad, atom_m, nbr_idx, box))(pos),
+        jax.grad(lambda r: ref_gb(r, q_arr, rad, sc_rad, atom_m, nbr_idx, box))(pos),
+        rtol=1e-4, atol=1e-4,
+    )
+
+    op_sasa, ref_sasa = _check_vjp_op(make_sasa_nl_op, has_box=True)
+    assert_kernel_ran(op_sasa, pos, rad, atom_m, nbr_idx, box)
+    assert_kernel_parity(op_sasa, ref_sasa, pos, rad, atom_m, nbr_idx, box, rel=1e-4)
+    np.testing.assert_allclose(
+        jax.grad(lambda r: op_sasa(r, rad, atom_m, nbr_idx, box))(pos),
+        jax.grad(lambda r: ref_sasa(r, rad, atom_m, nbr_idx, box))(pos),
+        rtol=1e-4, atol=1e-4,
+    )
+
+    op_born, ref_born = _check_vjp_op(make_born_radii_op)
+    assert_kernel_ran(op_born, pos, rad, sc_rad, nbr_idx)
+    assert_kernel_parity(op_born, ref_born, pos, rad, sc_rad, nbr_idx, rel=1e-4)
+    np.testing.assert_allclose(
+        jax.grad(lambda r: jnp.sum(op_born(r, rad, sc_rad, nbr_idx)))(pos),
+        jax.grad(lambda r: jnp.sum(ref_born(r, rad, sc_rad, nbr_idx)))(pos),
+        rtol=1e-4, atol=1e-4,
+    )
+
+    # 10. nonbonded_nl, 11. flash_explicit_nonbonded
+    sig = jnp.asarray(rng.uniform(2.5, 3.1, size=(N,)).astype(np.float32))
+    eps = jnp.asarray(rng.uniform(0.05, 0.15, size=(N,)).astype(np.float32))
+    excl_i = jnp.full((N, 2), -1, dtype=jnp.int32)
+    excl_v = jnp.ones((N, 2), dtype=jnp.float32)
+    excl_e = jnp.ones((N, 2), dtype=jnp.float32)
+
+    op_nb, ref_nb = _check_vjp_op(make_nonbonded_nl_op, has_box=True, pme_alpha=0.34, cutoff=9.0)
+    assert_kernel_ran(op_nb, pos, q_arr, sig, eps, atom_m, nbr_idx, excl_i, excl_v, excl_e, box, lam_1)
+    assert_kernel_parity(op_nb, ref_nb, pos, q_arr, sig, eps, atom_m, nbr_idx, excl_i, excl_v, excl_e, box, lam_1, rel=1e-4)
+    np.testing.assert_allclose(
+        jax.grad(lambda r: op_nb(r, q_arr, sig, eps, atom_m, nbr_idx, excl_i, excl_v, excl_e, box, lam_1))(pos),
+        jax.grad(lambda r: ref_nb(r, q_arr, sig, eps, atom_m, nbr_idx, excl_i, excl_v, excl_e, box, lam_1))(pos),
+        rtol=1e-4, atol=1e-4,
+    )
+
+    op_flash, ref_flash = _check_vjp_op(make_flash_explicit_nonbonded_op, has_box=True, pme_alpha=0.34)
+    assert_kernel_ran(op_flash, pos, q_arr, sig, eps, atom_m, excl_i, excl_v, excl_e, box, lam_1)
+    assert_kernel_parity(op_flash, ref_flash, pos, q_arr, sig, eps, atom_m, excl_i, excl_v, excl_e, box, lam_1, rel=1e-4)
+    np.testing.assert_allclose(
+        jax.grad(lambda r: op_flash(r, q_arr, sig, eps, atom_m, excl_i, excl_v, excl_e, box, lam_1))(pos),
+        jax.grad(lambda r: ref_flash(r, q_arr, sig, eps, atom_m, excl_i, excl_v, excl_e, box, lam_1))(pos),
+        rtol=1e-4, atol=1e-4,
+    )
+
+
+

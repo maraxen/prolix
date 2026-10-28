@@ -22,6 +22,9 @@ from jax.experimental import pallas as pl
 from jax.experimental.pallas import triton as plt
 from jax.scipy.special import erf
 from jax_md import space
+import xtrax
+from xtrax.intent import Context
+from xtrax.kernel_seam import VjpKernel
 
 from prolix.export import in_export_context
 from prolix.physics.bonded import compute_dihedral_angles
@@ -508,6 +511,109 @@ def _pallas_bonds_2body_bwd(has_box, dist_eps, interpret, res, g):
 _pallas_bonds_2body_diff.defvjp(_pallas_bonds_2body_fwd, _pallas_bonds_2body_bwd)
 
 
+def bonds_2body_reference(
+    positions: jax.Array,
+    indices: jax.Array,
+    params: jax.Array,
+    mask: jax.Array,
+    box: jax.Array,
+    *,
+    has_box: bool = False,
+    dist_eps: float = 1e-10,
+) -> jax.Array:
+    """Plain-JAX 2-body harmonic bond & Urey-Bradley reference matching ``pallas_bonds_2body``."""
+
+    def _one(pos_1: jax.Array, idx_1: jax.Array, prm_1: jax.Array, msk_1: jax.Array, bx_1: jax.Array) -> jax.Array:
+        N = pos_1.shape[0]
+        dtype = pos_1.dtype
+        zero = jnp.asarray(0.0, dtype=dtype)
+        one = jnp.asarray(1.0, dtype=dtype)
+        a_i = idx_1[:, 0].astype(jnp.int32)
+        a_j = idx_1[:, 1].astype(jnp.int32)
+        m_f = msk_1.astype(dtype)
+        valid = (m_f > zero) & (a_i >= 0) & (a_i < N) & (a_j >= 0) & (a_j < N)
+        m_eff = jnp.where(valid, m_f, zero)
+        max_atom = max(N - 1, 0)
+        safe_i = jnp.where(valid, jnp.clip(a_i, 0, max_atom), 0)
+        safe_j = jnp.where(valid, jnp.clip(a_j, 0, max_atom), 0)
+        dr = _min_image_host(pos_1[safe_i] - pos_1[safe_j], bx_1, has_box)
+        d_sq = jnp.sum(dr * dr, axis=-1)
+        if dist_eps > 0.0:
+            dist = jnp.sqrt(d_sq + jnp.asarray(dist_eps, dtype=dtype))
+        else:
+            d_sq_safe = jnp.where(d_sq > zero, d_sq, one)
+            dist = jnp.where(d_sq > zero, jnp.sqrt(d_sq_safe), zero)
+        diff = dist - prm_1[:, 0].astype(dtype)
+        return jnp.sum(jnp.asarray(0.5, dtype=dtype) * m_eff * prm_1[:, 1].astype(dtype) * diff * diff)
+
+    if positions.ndim == 3:
+        B = positions.shape[0]
+        b_idx = indices.ndim == 3
+        b_prm = params.ndim == 3
+        b_msk = mask.ndim == 2
+        b_box = box.ndim == 2
+        return jax.vmap(
+            lambda b: _one(
+                positions[b],
+                indices[b] if b_idx else indices,
+                params[b] if b_prm else params,
+                mask[b] if b_msk else mask,
+                box[b] if b_box else box,
+            )
+        )(jnp.arange(B))
+    return _one(positions, indices, params, mask, box)
+
+
+def make_bonds_2body_op(
+    *,
+    has_box: bool = False,
+    dist_eps: float = 1e-10,
+    context: Context | None = None,
+) -> xtrax.Op:
+    """Build an ``xtrax.Op`` for 2-body harmonic bonds & Urey-Bradley.
+
+    Signature of the returned op: ``(positions, indices, params, mask, box) -> energy``.
+    """
+    hb = bool(has_box)
+    de = float(dist_eps)
+    ref = functools.partial(bonds_2body_reference, has_box=hb, dist_eps=de)
+
+    def _make_vk(interp: bool) -> VjpKernel:
+        def _fwd(pos, idx, prm, msk, bx):
+            if pos.ndim == 3:
+                B = pos.shape[0]
+                b_idx = idx.ndim == 3
+                b_prm = prm.ndim == 3
+                b_msk = msk.ndim == 2
+                b_box = bx.ndim == 2
+                e_b, f_b = jax.vmap(
+                    lambda b: _pallas_bonds_2body_vmappable(
+                        pos[b],
+                        idx[b] if b_idx else idx,
+                        prm[b] if b_prm else prm,
+                        msk[b] if b_msk else msk,
+                        bx[b] if b_box else bx,
+                        hb,
+                        de,
+                        interp,
+                    )
+                )(jnp.arange(B))
+                return e_b, (f_b, pos, idx, prm, msk, bx)
+            return _pallas_bonds_2body_fwd(pos, idx, prm, msk, bx, hb, de, interp)
+
+        def _bwd(res, ct):
+            return _pallas_bonds_2body_bwd(hb, de, interp, res, ct)
+
+        return VjpKernel(_fwd, _bwd)
+
+    return xtrax.op(
+        ref,
+        vjp_kernels={"gpu": _make_vk(False), "cpu": _make_vk(True)},
+        name="pallas_bonds_2body",
+        context=context,
+    )
+
+
 def pallas_bonds_2body(
     positions: jax.Array,
     indices: jax.Array | None,
@@ -529,51 +635,17 @@ def pallas_bonds_2body(
         if mask is None
         else jnp.asarray(mask, dtype=positions.dtype)
     )
+    box_arr, has_box = _normalize_box(box, positions)
 
     if in_export_context():
-        disp_fn = _make_disp_fn(box)
+        ctx = Context(kernels=True, target="export", export_format="stablehlo")
+    else:
+        if interpret is None:
+            interpret = not _triton_gpu_available()
+        ctx = Context(kernels=True, backend="cpu" if interpret else "gpu")
 
-        def _export_one(pos_1, idx_1, prm_1, msk_1):
-            N = pos_1.shape[0]
-            a_i = idx_1[:, 0]
-            a_j = idx_1[:, 1]
-            valid = (msk_1 > 0) & (a_i >= 0) & (a_i < N) & (a_j >= 0) & (a_j < N)
-            m_eff = jnp.where(valid, msk_1, 0.0)
-            max_atom = max(N - 1, 0)
-            safe_i = jnp.clip(a_i, 0, max_atom)
-            safe_j = jnp.clip(a_j, 0, max_atom)
-            dr = jax.vmap(disp_fn)(pos_1[safe_i], pos_1[safe_j])
-            d_sq = jnp.sum(dr * dr, axis=-1)
-            if dist_eps > 0.0:
-                dist = jnp.sqrt(d_sq + jnp.asarray(dist_eps, dtype=pos_1.dtype))
-            else:
-                dist = space.distance(dr)
-            return jnp.sum(0.5 * m_eff * prm_1[:, 1] * (dist - prm_1[:, 0]) ** 2)
-
-        if positions.ndim == 3:
-            return jax.vmap(
-                lambda b: _export_one(
-                    positions[b],
-                    idx_2col[b] if idx_2col.ndim == 3 else idx_2col,
-                    prm_arr[b] if prm_arr.ndim == 3 else prm_arr,
-                    msk_arr[b] if msk_arr.ndim == 2 else msk_arr,
-                )
-            )(jnp.arange(positions.shape[0]))
-        return _export_one(positions, idx_2col, prm_arr, msk_arr)
-
-    if interpret is None:
-        interpret = not _triton_gpu_available()
-    box_arr, has_box = _normalize_box(box, positions)
-    return _pallas_bonds_2body_diff(
-        positions,
-        idx_2col,
-        prm_arr,
-        msk_arr,
-        box_arr,
-        bool(has_box),
-        float(dist_eps),
-        bool(interpret),
-    )
+    op = make_bonds_2body_op(has_box=bool(has_box), dist_eps=float(dist_eps), context=ctx)
+    return op(positions, idx_2col, prm_arr, msk_arr, box_arr)
 
 
 # =============================================================================
@@ -984,6 +1056,127 @@ def _pallas_exceptions_14_bwd(
 _pallas_exceptions_14_diff.defvjp(_pallas_exceptions_14_fwd, _pallas_exceptions_14_bwd)
 
 
+def exceptions_14_reference(
+    positions: jax.Array,
+    pairs: jax.Array,
+    sigmas: jax.Array,
+    epsilons: jax.Array,
+    chargeprods: jax.Array,
+    mask: jax.Array,
+    box: jax.Array,
+    lam: jax.Array,
+    *,
+    has_box: bool = False,
+    coulomb_constant: float = 332.0637,
+    softcore_alpha: float = 0.5,
+    softcore_exponent: int = 2,
+) -> jax.Array:
+    """Plain-JAX AMBER 1-4 exception pair reference matching ``pallas_exceptions_14``."""
+
+    def _one(pos_1, pr_1, s_1, e_1, qp_1, m_1, bx_1, l_1):
+        N = pos_1.shape[0]
+        dtype = pos_1.dtype
+        zero = jnp.asarray(0.0, dtype=dtype)
+        one = jnp.asarray(1.0, dtype=dtype)
+        a_i = pr_1[:, 0].astype(jnp.int32)
+        a_j = pr_1[:, 1].astype(jnp.int32)
+        m_f = m_1.astype(dtype)
+        valid = (m_f > zero) & (a_i >= 0) & (a_i < N) & (a_j >= 0) & (a_j < N) & (a_i != a_j)
+        m_eff = jnp.where(valid, m_f, zero)
+        max_atom = max(N - 1, 0)
+        safe_i = jnp.where(valid, jnp.clip(a_i, 0, max_atom), 0)
+        safe_j = jnp.where(valid, jnp.clip(a_j, 0, max_atom), 0)
+        dr = _min_image_host(pos_1[safe_i] - pos_1[safe_j], bx_1, has_box)
+        dist = jnp.sqrt(jnp.sum(dr * dr, axis=-1) + jnp.asarray(1e-12, dtype=dtype))
+        sig_safe = jnp.where(valid, jnp.maximum(s_1.astype(dtype), jnp.asarray(1e-4, dtype=dtype)), one)
+        lam_v = l_1.reshape(()).astype(dtype)
+        one_minus_lam = jnp.maximum(one - lam_v, zero)
+        soft_term = jnp.asarray(softcore_alpha, dtype=dtype) * (one_minus_lam ** int(softcore_exponent))
+        r6 = (dist / sig_safe) ** 6
+        denom = soft_term + r6 + jnp.asarray(1e-12, dtype=dtype)
+        e_lj = jnp.asarray(4.0, dtype=dtype) * e_1.astype(dtype) * lam_v * (one / (denom * denom) - one / denom)
+        e_coul = jnp.asarray(coulomb_constant, dtype=dtype) * qp_1.astype(dtype) / dist
+        return jnp.sum((e_lj + e_coul) * m_eff)
+
+    if positions.ndim == 3:
+        B = positions.shape[0]
+        return jax.vmap(
+            lambda b: _one(
+                positions[b],
+                pairs[b] if pairs.ndim == 3 else pairs,
+                sigmas[b] if sigmas.ndim == 2 else sigmas,
+                epsilons[b] if epsilons.ndim == 2 else epsilons,
+                chargeprods[b] if chargeprods.ndim == 2 else chargeprods,
+                mask[b] if mask.ndim == 2 else mask,
+                box[b] if box.ndim == 2 else box,
+                lam[b] if lam.ndim >= 1 else lam,
+            )
+        )(jnp.arange(B))
+    return _one(positions, pairs, sigmas, epsilons, chargeprods, mask, box, lam)
+
+
+def make_exceptions_14_op(
+    *,
+    has_box: bool = False,
+    coulomb_constant: float = 332.0637,
+    softcore_alpha: float = 0.5,
+    softcore_exponent: int = 2,
+    context: Context | None = None,
+) -> xtrax.Op:
+    """Build an ``xtrax.Op`` for AMBER 1-4 exception pairs.
+
+    Signature of the returned op:
+    ``(positions, pairs, sigmas, epsilons, chargeprods, mask, box, lam) -> energy``.
+    """
+    hb = bool(has_box)
+    cc = float(coulomb_constant)
+    sa = float(softcore_alpha)
+    se = int(softcore_exponent)
+    ref = functools.partial(
+        exceptions_14_reference,
+        has_box=hb,
+        coulomb_constant=cc,
+        softcore_alpha=sa,
+        softcore_exponent=se,
+    )
+
+    def _make_vk(interp: bool) -> VjpKernel:
+        def _fwd(pos, pr, sig, eps, qp, msk, bx, lm):
+            if pos.ndim == 3:
+                B = pos.shape[0]
+                e_b, f_b = jax.vmap(
+                    lambda b: _pallas_exceptions_14_vmappable(
+                        pos[b],
+                        pr[b] if pr.ndim == 3 else pr,
+                        sig[b] if sig.ndim == 2 else sig,
+                        eps[b] if eps.ndim == 2 else eps,
+                        qp[b] if qp.ndim == 2 else qp,
+                        msk[b] if msk.ndim == 2 else msk,
+                        bx[b] if bx.ndim == 2 else bx,
+                        lm[b] if lm.ndim >= 1 else lm,
+                        hb,
+                        cc,
+                        sa,
+                        se,
+                        interp,
+                    )
+                )(jnp.arange(B))
+                return e_b, (f_b, pos, pr, sig, eps, qp, msk, bx, lm)
+            return _pallas_exceptions_14_fwd(pos, pr, sig, eps, qp, msk, bx, lm, hb, cc, sa, se, interp)
+
+        def _bwd(res, ct):
+            return _pallas_exceptions_14_bwd(hb, cc, sa, se, interp, res, ct)
+
+        return VjpKernel(_fwd, _bwd)
+
+    return xtrax.op(
+        ref,
+        vjp_kernels={"gpu": _make_vk(False), "cpu": _make_vk(True)},
+        name="pallas_exceptions_14",
+        context=context,
+    )
+
+
 def pallas_exceptions_14(
     positions: jax.Array,
     exception_pairs: jax.Array | None,
@@ -1021,62 +1214,23 @@ def pallas_exceptions_14(
         if mask is None
         else jnp.asarray(mask, dtype=positions.dtype)
     )
+    box_arr, has_box = _normalize_box(box, positions)
 
     if in_export_context():
-        disp_fn = _make_disp_fn(box)
+        ctx = Context(kernels=True, target="export", export_format="stablehlo")
+    else:
+        if interpret is None:
+            interpret = not _triton_gpu_available()
+        ctx = Context(kernels=True, backend="cpu" if interpret else "gpu")
 
-        def _export_one(pos_1, pr_1, s_1, e_1, qp_1, m_1, l_1):
-            N = pos_1.shape[0]
-            a_i = pr_1[:, 0]
-            a_j = pr_1[:, 1]
-            valid = (m_1 > 0) & (a_i >= 0) & (a_i < N) & (a_j >= 0) & (a_j < N) & (a_i != a_j)
-            m_eff = jnp.where(valid, m_1, 0.0)
-            max_atom = max(N - 1, 0)
-            safe_i = jnp.clip(a_i, 0, max_atom)
-            safe_j = jnp.clip(a_j, 0, max_atom)
-            dr = jax.vmap(disp_fn)(pos_1[safe_i], pos_1[safe_j])
-            dist = jnp.sqrt(jnp.sum(dr * dr, axis=-1) + jnp.asarray(1e-12, dtype=pos_1.dtype))
-            sig_safe = jnp.where(valid, jnp.maximum(s_1, 1e-4), 1.0)
-            one_minus_lam = jnp.maximum(1.0 - l_1, 0.0)
-            soft_term = jnp.asarray(softcore_alpha, dtype=pos_1.dtype) * (one_minus_lam ** int(softcore_exponent))
-            r6 = (dist / sig_safe) ** 6
-            denom = soft_term + r6 + jnp.asarray(1e-12, dtype=pos_1.dtype)
-            e_lj = 4.0 * e_1 * l_1 * (1.0 / (denom * denom) - 1.0 / denom)
-            e_coul = coulomb_constant * qp_1 / dist
-            return jnp.sum((e_lj + e_coul) * m_eff)
-
-        if positions.ndim == 3:
-            return jax.vmap(
-                lambda b: _export_one(
-                    positions[b],
-                    pairs_arr[b] if pairs_arr.ndim == 3 else pairs_arr,
-                    sig_arr[b] if sig_arr.ndim == 2 else sig_arr,
-                    eps_arr[b] if eps_arr.ndim == 2 else eps_arr,
-                    qp_arr[b] if qp_arr.ndim == 2 else qp_arr,
-                    msk_arr[b] if msk_arr.ndim == 2 else msk_arr,
-                    lam_arr[b] if lam_arr.ndim >= 1 else lam_arr,
-                )
-            )(jnp.arange(positions.shape[0]))
-        return _export_one(positions, pairs_arr, sig_arr, eps_arr, qp_arr, msk_arr, lam_arr)
-
-    if interpret is None:
-        interpret = not _triton_gpu_available()
-    box_arr, has_box = _normalize_box(box, positions)
-    return _pallas_exceptions_14_diff(
-        positions,
-        pairs_arr,
-        sig_arr,
-        eps_arr,
-        qp_arr,
-        msk_arr,
-        box_arr,
-        lam_arr,
-        bool(has_box),
-        float(coulomb_constant),
-        float(softcore_alpha),
-        int(softcore_exponent),
-        bool(interpret),
+    op = make_exceptions_14_op(
+        has_box=bool(has_box),
+        coulomb_constant=float(coulomb_constant),
+        softcore_alpha=float(softcore_alpha),
+        softcore_exponent=int(softcore_exponent),
+        context=ctx,
     )
+    return op(positions, pairs_arr, sig_arr, eps_arr, qp_arr, msk_arr, box_arr, lam_arr)
 
 
 # =============================================================================
@@ -1431,6 +1585,118 @@ _pallas_pme_exclusion_pairs_diff.defvjp(
 )
 
 
+def pme_exclusion_pairs_reference(
+    positions: jax.Array,
+    excl_pair_indices: jax.Array,
+    excl_pair_scales_elec: jax.Array,
+    charges: jax.Array,
+    atom_mask: jax.Array,
+    box: jax.Array,
+    *,
+    has_box: bool = False,
+    pme_alpha: float = 0.34,
+    coulomb_constant: float = 332.0637,
+) -> jax.Array:
+    """Plain-JAX PME bonded exclusion pair reference matching ``pallas_pme_exclusion_pairs``."""
+
+    def _one(pos_1, pr_1, sc_1, q_1, m_1, bx_1):
+        N = pos_1.shape[0]
+        dtype = pos_1.dtype
+        zero = jnp.asarray(0.0, dtype=dtype)
+        one = jnp.asarray(1.0, dtype=dtype)
+        a_i = pr_1[:, 0].astype(jnp.int32)
+        a_j = pr_1[:, 1].astype(jnp.int32)
+        in_r = (a_i >= 0) & (a_i < N) & (a_j >= 0) & (a_j < N) & (a_i != a_j)
+        max_atom = max(N - 1, 0)
+        safe_i = jnp.where(in_r, jnp.clip(a_i, 0, max_atom), 0)
+        safe_j = jnp.where(in_r, jnp.clip(a_j, 0, max_atom), 0)
+        m_bool = jnp.asarray(m_1, dtype=jnp.bool_)
+        valid = in_r & m_bool[safe_i] & m_bool[safe_j]
+        dr = _min_image_host(pos_1[safe_i] - pos_1[safe_j], bx_1, has_box)
+        d_sq = jnp.sum(dr * dr, axis=-1)
+        r_raw = jnp.where(d_sq > zero, jnp.sqrt(jnp.where(d_sq > zero, d_sq, one)), zero)
+        dist = r_raw + jnp.asarray(1e-6, dtype=dtype)
+        e_pair = (
+            -(one - sc_1.astype(dtype))
+            * jnp.asarray(coulomb_constant, dtype=dtype)
+            * q_1.astype(dtype)[safe_i]
+            * q_1.astype(dtype)[safe_j]
+            * erf(jnp.asarray(pme_alpha, dtype=dtype) * dist)
+            / dist
+        )
+        return jnp.sum(jnp.where(valid, e_pair, zero))
+
+    if positions.ndim == 3:
+        B = positions.shape[0]
+        return jax.vmap(
+            lambda b: _one(
+                positions[b],
+                excl_pair_indices[b] if excl_pair_indices.ndim == 3 else excl_pair_indices,
+                excl_pair_scales_elec[b] if excl_pair_scales_elec.ndim == 2 else excl_pair_scales_elec,
+                charges[b] if charges.ndim == 2 else charges,
+                atom_mask[b] if atom_mask.ndim == 2 else atom_mask,
+                box[b] if box.ndim == 2 else box,
+            )
+        )(jnp.arange(B))
+    return _one(positions, excl_pair_indices, excl_pair_scales_elec, charges, atom_mask, box)
+
+
+def make_pme_exclusion_pairs_op(
+    *,
+    has_box: bool = False,
+    pme_alpha: float = 0.34,
+    coulomb_constant: float = 332.0637,
+    context: Context | None = None,
+) -> xtrax.Op:
+    """Build an ``xtrax.Op`` for PME reciprocal-space bonded exclusion pairs.
+
+    Signature of the returned op:
+    ``(positions, excl_pair_indices, excl_pair_scales_elec, charges, atom_mask, box) -> energy``.
+    """
+    hb = bool(has_box)
+    pa = float(pme_alpha)
+    cc = float(coulomb_constant)
+    ref = functools.partial(
+        pme_exclusion_pairs_reference,
+        has_box=hb,
+        pme_alpha=pa,
+        coulomb_constant=cc,
+    )
+
+    def _make_vk(interp: bool) -> VjpKernel:
+        def _fwd(pos, pairs, scales, q, msk, bx):
+            if pos.ndim == 3:
+                B = pos.shape[0]
+                e_b, f_b = jax.vmap(
+                    lambda b: _pallas_pme_exclusion_pairs_vmappable(
+                        pos[b],
+                        pairs[b] if pairs.ndim == 3 else pairs,
+                        scales[b] if scales.ndim == 2 else scales,
+                        q[b] if q.ndim == 2 else q,
+                        msk[b] if msk.ndim == 2 else msk,
+                        bx[b] if bx.ndim == 2 else bx,
+                        hb,
+                        pa,
+                        cc,
+                        interp,
+                    )
+                )(jnp.arange(B))
+                return e_b, (f_b, pos, pairs, scales, q, msk, bx)
+            return _pallas_pme_exclusion_pairs_fwd(pos, pairs, scales, q, msk, bx, hb, pa, cc, interp)
+
+        def _bwd(res, ct):
+            return _pallas_pme_exclusion_pairs_bwd(hb, pa, cc, interp, res, ct)
+
+        return VjpKernel(_fwd, _bwd)
+
+    return xtrax.op(
+        ref,
+        vjp_kernels={"gpu": _make_vk(False), "cpu": _make_vk(True)},
+        name="pallas_pme_exclusion_pairs",
+        context=context,
+    )
+
+
 def pallas_pme_exclusion_pairs(
     positions: jax.Array,
     excl_pair_indices: jax.Array | None,
@@ -1482,59 +1748,22 @@ def pallas_pme_exclusion_pairs(
     if n_atoms is not None:
         bound_mask = jnp.arange(positions.shape[-2]) < int(n_atoms)
         msk_arr = msk_arr & bound_mask
+    box_arr, has_box = _normalize_box(box, positions)
 
     if in_export_context():
-        disp_fn = _make_disp_fn(box)
+        ctx = Context(kernels=True, target="export", export_format="stablehlo")
+    else:
+        if interpret is None:
+            interpret = not _triton_gpu_available()
+        ctx = Context(kernels=True, backend="cpu" if interpret else "gpu")
 
-        def _export_one(pos_1, pr_1, sc_1, q_1, m_1):
-            N = pos_1.shape[0]
-            a_i = pr_1[:, 0]
-            a_j = pr_1[:, 1]
-            in_r = (a_i >= 0) & (a_i < N) & (a_j >= 0) & (a_j < N) & (a_i != a_j)
-            max_atom = max(N - 1, 0)
-            safe_i = jnp.where(in_r, jnp.clip(a_i, 0, max_atom), 0)
-            safe_j = jnp.where(in_r, jnp.clip(a_j, 0, max_atom), 0)
-            m_bool = jnp.asarray(m_1, dtype=jnp.bool_)
-            valid = in_r & m_bool[safe_i] & m_bool[safe_j]
-            dr = jax.vmap(disp_fn)(pos_1[safe_i], pos_1[safe_j])
-            dist = space.distance(dr) + jnp.asarray(1e-6, dtype=pos_1.dtype)
-            e_pair = (
-                -(1.0 - sc_1)
-                * eff_coul
-                * q_1[safe_i]
-                * q_1[safe_j]
-                * erf(pme_alpha * dist)
-                / dist
-            )
-            return jnp.sum(jnp.where(valid, e_pair, 0.0))
-
-        if positions.ndim == 3:
-            return jax.vmap(
-                lambda b: _export_one(
-                    positions[b],
-                    pairs_arr[b] if pairs_arr.ndim == 3 else pairs_arr,
-                    scales_arr[b] if scales_arr.ndim == 2 else scales_arr,
-                    q_arr[b] if q_arr.ndim == 2 else q_arr,
-                    msk_arr[b] if msk_arr.ndim == 2 else msk_arr,
-                )
-            )(jnp.arange(positions.shape[0]))
-        return _export_one(positions, pairs_arr, scales_arr, q_arr, msk_arr)
-
-    if interpret is None:
-        interpret = not _triton_gpu_available()
-    box_arr, has_box = _normalize_box(box, positions)
-    return _pallas_pme_exclusion_pairs_diff(
-        positions,
-        pairs_arr,
-        scales_arr,
-        q_arr,
-        msk_arr,
-        box_arr,
-        bool(has_box),
-        float(pme_alpha),
-        float(eff_coul),
-        bool(interpret),
+    op = make_pme_exclusion_pairs_op(
+        has_box=bool(has_box),
+        pme_alpha=float(pme_alpha),
+        coulomb_constant=float(eff_coul),
+        context=ctx,
     )
+    return op(positions, pairs_arr, scales_arr, q_arr, msk_arr, box_arr)
 
 
 # =============================================================================
@@ -1865,6 +2094,118 @@ def _pallas_angles_harmonic_bwd(has_box, dist_eps, interpret, res, g):
 _pallas_angles_harmonic_diff.defvjp(_pallas_angles_harmonic_fwd, _pallas_angles_harmonic_bwd)
 
 
+def angles_harmonic_reference(
+    positions: jax.Array,
+    indices: jax.Array,
+    params: jax.Array,
+    mask: jax.Array,
+    box: jax.Array,
+    *,
+    has_box: bool = False,
+    dist_eps: float = 1e-10,
+) -> jax.Array:
+    """Plain-JAX 3-body harmonic angle reference matching ``pallas_angles_harmonic``."""
+
+    def _one(pos_1, idx_1, prm_1, msk_1, bx_1):
+        N = pos_1.shape[0]
+        dtype = pos_1.dtype
+        zero = jnp.asarray(0.0, dtype=dtype)
+        one = jnp.asarray(1.0, dtype=dtype)
+        a_i, a_j, a_k = idx_1[:, 0].astype(jnp.int32), idx_1[:, 1].astype(jnp.int32), idx_1[:, 2].astype(jnp.int32)
+        m_f = msk_1.astype(dtype)
+        valid = (
+            (m_f > zero)
+            & (a_i >= 0)
+            & (a_i < N)
+            & (a_j >= 0)
+            & (a_j < N)
+            & (a_k >= 0)
+            & (a_k < N)
+        )
+        m_eff = jnp.where(valid, m_f, zero)
+        max_atom = max(N - 1, 0)
+        safe_i = jnp.where(valid, jnp.clip(a_i, 0, max_atom), 0)
+        safe_j = jnp.where(valid, jnp.clip(a_j, 0, max_atom), 0)
+        safe_k = jnp.where(valid, jnp.clip(a_k, 0, max_atom), 0)
+        v_ji = _min_image_host(pos_1[safe_i] - pos_1[safe_j], bx_1, has_box)
+        v_jk = _min_image_host(pos_1[safe_k] - pos_1[safe_j], bx_1, has_box)
+        d_ji_sq = jnp.sum(v_ji * v_ji, axis=-1)
+        d_jk_sq = jnp.sum(v_jk * v_jk, axis=-1)
+        if dist_eps > 0.0:
+            d_ji = jnp.sqrt(d_ji_sq + jnp.asarray(dist_eps, dtype=dtype))
+            d_jk = jnp.sqrt(d_jk_sq + jnp.asarray(dist_eps, dtype=dtype))
+        else:
+            d_ji = jnp.where(d_ji_sq > zero, jnp.sqrt(jnp.where(d_ji_sq > zero, d_ji_sq, one)), zero)
+            d_jk = jnp.where(d_jk_sq > zero, jnp.sqrt(jnp.where(d_jk_sq > zero, d_jk_sq, one)), zero)
+        cos_th = jnp.clip(
+            jnp.sum(v_ji * v_jk, axis=-1) / (d_ji * d_jk + jnp.asarray(1e-8, dtype=dtype)),
+            jnp.asarray(-0.999999, dtype=dtype),
+            jnp.asarray(0.999999, dtype=dtype),
+        )
+        th = jnp.arccos(cos_th)
+        diff = th - prm_1[:, 0].astype(dtype)
+        return jnp.sum(jnp.asarray(0.5, dtype=dtype) * m_eff * prm_1[:, 1].astype(dtype) * diff * diff)
+
+    if positions.ndim == 3:
+        B = positions.shape[0]
+        return jax.vmap(
+            lambda b: _one(
+                positions[b],
+                indices[b] if indices.ndim == 3 else indices,
+                params[b] if params.ndim == 3 else params,
+                mask[b] if mask.ndim == 2 else mask,
+                box[b] if box.ndim == 2 else box,
+            )
+        )(jnp.arange(B))
+    return _one(positions, indices, params, mask, box)
+
+
+def make_angles_harmonic_op(
+    *,
+    has_box: bool = False,
+    dist_eps: float = 1e-10,
+    context: Context | None = None,
+) -> xtrax.Op:
+    """Build an ``xtrax.Op`` for 3-body harmonic angles.
+
+    Signature of the returned op: ``(positions, indices, params, mask, box) -> energy``.
+    """
+    hb = bool(has_box)
+    de = float(dist_eps)
+    ref = functools.partial(angles_harmonic_reference, has_box=hb, dist_eps=de)
+
+    def _make_vk(interp: bool) -> VjpKernel:
+        def _fwd(pos, idx, prm, msk, bx):
+            if pos.ndim == 3:
+                B = pos.shape[0]
+                e_b, f_b = jax.vmap(
+                    lambda b: _pallas_angles_harmonic_vmappable(
+                        pos[b],
+                        idx[b] if idx.ndim == 3 else idx,
+                        prm[b] if prm.ndim == 3 else prm,
+                        msk[b] if msk.ndim == 2 else msk,
+                        bx[b] if bx.ndim == 2 else bx,
+                        hb,
+                        de,
+                        interp,
+                    )
+                )(jnp.arange(B))
+                return e_b, (f_b, pos, idx, prm, msk, bx)
+            return _pallas_angles_harmonic_fwd(pos, idx, prm, msk, bx, hb, de, interp)
+
+        def _bwd(res, ct):
+            return _pallas_angles_harmonic_bwd(hb, de, interp, res, ct)
+
+        return VjpKernel(_fwd, _bwd)
+
+    return xtrax.op(
+        ref,
+        vjp_kernels={"gpu": _make_vk(False), "cpu": _make_vk(True)},
+        name="pallas_angles_harmonic",
+        context=context,
+    )
+
+
 def pallas_angles_harmonic(
     positions: jax.Array,
     indices: jax.Array | None,
@@ -1886,63 +2227,17 @@ def pallas_angles_harmonic(
         if mask is None
         else jnp.asarray(mask, dtype=positions.dtype)
     )
+    box_arr, has_box = _normalize_box(box, positions)
 
     if in_export_context():
-        disp_fn = _make_disp_fn(box)
+        ctx = Context(kernels=True, target="export", export_format="stablehlo")
+    else:
+        if interpret is None:
+            interpret = not _triton_gpu_available()
+        ctx = Context(kernels=True, backend="cpu" if interpret else "gpu")
 
-        def _export_one(pos_1, idx_1, prm_1, msk_1):
-            N = pos_1.shape[0]
-            a_i, a_j, a_k = idx_1[:, 0], idx_1[:, 1], idx_1[:, 2]
-            valid = (
-                (msk_1 > 0)
-                & (a_i >= 0)
-                & (a_i < N)
-                & (a_j >= 0)
-                & (a_j < N)
-                & (a_k >= 0)
-                & (a_k < N)
-            )
-            m_eff = jnp.where(valid, msk_1, 0.0)
-            max_atom = max(N - 1, 0)
-            safe_i = jnp.clip(a_i, 0, max_atom)
-            safe_j = jnp.clip(a_j, 0, max_atom)
-            safe_k = jnp.clip(a_k, 0, max_atom)
-            v_ji = jax.vmap(disp_fn)(pos_1[safe_i], pos_1[safe_j])
-            v_jk = jax.vmap(disp_fn)(pos_1[safe_k], pos_1[safe_j])
-            if dist_eps > 0.0:
-                d_ji = jnp.sqrt(jnp.sum(v_ji ** 2, axis=-1) + dist_eps)
-                d_jk = jnp.sqrt(jnp.sum(v_jk ** 2, axis=-1) + dist_eps)
-            else:
-                d_ji = space.distance(v_ji)
-                d_jk = space.distance(v_jk)
-            cos_th = jnp.clip(jnp.sum(v_ji * v_jk, axis=-1) / (d_ji * d_jk + 1e-8), -0.999999, 0.999999)
-            th = jnp.arccos(cos_th)
-            return jnp.sum(0.5 * m_eff * prm_1[:, 1] * (th - prm_1[:, 0]) ** 2)
-
-        if positions.ndim == 3:
-            return jax.vmap(
-                lambda b: _export_one(
-                    positions[b],
-                    idx_3col[b] if idx_3col.ndim == 3 else idx_3col,
-                    prm_arr[b] if prm_arr.ndim == 3 else prm_arr,
-                    msk_arr[b] if msk_arr.ndim == 2 else msk_arr,
-                )
-            )(jnp.arange(positions.shape[0]))
-        return _export_one(positions, idx_3col, prm_arr, msk_arr)
-
-    if interpret is None:
-        interpret = not _triton_gpu_available()
-    box_arr, has_box = _normalize_box(box, positions)
-    return _pallas_angles_harmonic_diff(
-        positions,
-        idx_3col,
-        prm_arr,
-        msk_arr,
-        box_arr,
-        bool(has_box),
-        float(dist_eps),
-        bool(interpret),
-    )
+    op = make_angles_harmonic_op(has_box=bool(has_box), dist_eps=float(dist_eps), context=ctx)
+    return op(positions, idx_3col, prm_arr, msk_arr, box_arr)
 
 
 # =============================================================================
@@ -2389,6 +2684,132 @@ def _pallas_torsions_4body_bwd(has_box, b0_is_ji, is_harmonic, interpret, res, g
 _pallas_torsions_4body_diff.defvjp(_pallas_torsions_4body_fwd, _pallas_torsions_4body_bwd)
 
 
+def torsions_4body_reference(
+    positions: jax.Array,
+    indices: jax.Array,
+    params: jax.Array,
+    mask: jax.Array,
+    box: jax.Array,
+    *,
+    has_box: bool = False,
+    b0_is_ji: bool = True,
+    is_harmonic: bool = False,
+) -> jax.Array:
+    """Plain-JAX 4-body torsion reference matching ``pallas_torsions_4body``."""
+
+    def _one(pos_1, idx_1, prm_1, msk_1, bx_1):
+        N = pos_1.shape[0]
+        dtype = pos_1.dtype
+        zero = jnp.asarray(0.0, dtype=dtype)
+        one = jnp.asarray(1.0, dtype=dtype)
+        pi = jnp.asarray(jnp.pi, dtype=dtype)
+        two_pi = jnp.asarray(2.0 * jnp.pi, dtype=dtype)
+        a_i, a_j, a_k, a_l = (
+            idx_1[:, 0].astype(jnp.int32),
+            idx_1[:, 1].astype(jnp.int32),
+            idx_1[:, 2].astype(jnp.int32),
+            idx_1[:, 3].astype(jnp.int32),
+        )
+        m_f = msk_1.astype(dtype)
+        valid = (
+            (m_f > zero)
+            & (a_i >= 0)
+            & (a_i < N)
+            & (a_j >= 0)
+            & (a_j < N)
+            & (a_k >= 0)
+            & (a_k < N)
+            & (a_l >= 0)
+            & (a_l < N)
+        )
+        m_eff = jnp.where(valid, m_f, zero)
+        max_atom = max(N - 1, 0)
+        safe_i = jnp.where(valid, jnp.clip(a_i, 0, max_atom), 0)
+        safe_j = jnp.where(valid, jnp.clip(a_j, 0, max_atom), 0)
+        safe_k = jnp.where(valid, jnp.clip(a_k, 0, max_atom), 0)
+        safe_l = jnp.where(valid, jnp.clip(a_l, 0, max_atom), 0)
+        r_i = (pos_1[safe_i, 0], pos_1[safe_i, 1], pos_1[safe_i, 2])
+        r_j = (pos_1[safe_j, 0], pos_1[safe_j, 1], pos_1[safe_j, 2])
+        r_k = (pos_1[safe_k, 0], pos_1[safe_k, 1], pos_1[safe_k, 2])
+        r_l = (pos_1[safe_l, 0], pos_1[safe_l, 1], pos_1[safe_l, 2])
+        phi, _, _, _, _ = _torsion_angle_and_atom_grads_vec3(
+            r_i, r_j, r_k, r_l, valid, bx_1, has_box, b0_is_ji
+        )
+        if is_harmonic or prm_1.shape[-1] < 3:
+            diff_raw = phi - prm_1[:, 1].astype(dtype) + pi
+            dphi = diff_raw - two_pi * jnp.floor(diff_raw / two_pi) - pi
+            return jnp.sum(m_eff * prm_1[:, 0].astype(dtype) * dphi * dphi)
+        return jnp.sum(
+            m_eff
+            * prm_1[:, 2].astype(dtype)
+            * (one + jnp.cos(prm_1[:, 0].astype(dtype) * phi - prm_1[:, 1].astype(dtype)))
+        )
+
+    if positions.ndim == 3:
+        B = positions.shape[0]
+        return jax.vmap(
+            lambda b: _one(
+                positions[b],
+                indices[b] if indices.ndim == 3 else indices,
+                params[b] if params.ndim == 3 else params,
+                mask[b] if mask.ndim == 2 else mask,
+                box[b] if box.ndim == 2 else box,
+            )
+        )(jnp.arange(B))
+    return _one(positions, indices, params, mask, box)
+
+
+def make_torsions_4body_op(
+    *,
+    has_box: bool = False,
+    b0_is_ji: bool = True,
+    is_harmonic: bool = False,
+    context: Context | None = None,
+) -> xtrax.Op:
+    """Build an ``xtrax.Op`` for 4-body torsions (dihedrals & periodic/harmonic impropers).
+
+    Signature of the returned op: ``(positions, indices, params, mask, box) -> energy``.
+    """
+    hb = bool(has_box)
+    b0_ji = bool(b0_is_ji)
+    harm = bool(is_harmonic)
+    ref = functools.partial(
+        torsions_4body_reference, has_box=hb, b0_is_ji=b0_ji, is_harmonic=harm
+    )
+
+    def _make_vk(interp: bool) -> VjpKernel:
+        def _fwd(pos, idx, prm, msk, bx):
+            if pos.ndim == 3:
+                B = pos.shape[0]
+                e_b, f_b = jax.vmap(
+                    lambda b: _pallas_torsions_4body_vmappable(
+                        pos[b],
+                        idx[b] if idx.ndim == 3 else idx,
+                        prm[b] if prm.ndim == 3 else prm,
+                        msk[b] if msk.ndim == 2 else msk,
+                        bx[b] if bx.ndim == 2 else bx,
+                        hb,
+                        b0_ji,
+                        harm,
+                        interp,
+                    )
+                )(jnp.arange(B))
+                return e_b, (f_b, pos, idx, prm, msk, bx)
+            return _pallas_torsions_4body_fwd(pos, idx, prm, msk, bx, hb, b0_ji, harm, interp)
+
+        def _bwd(res, ct):
+            return _pallas_torsions_4body_bwd(hb, b0_ji, harm, interp, res, ct)
+
+        return VjpKernel(_fwd, _bwd)
+
+    return xtrax.op(
+        ref,
+        vjp_kernels={"gpu": _make_vk(False), "cpu": _make_vk(True)},
+        name="pallas_torsions_4body",
+        context=context,
+    )
+
+
 def pallas_torsions_4body(
     positions: jax.Array,
     indices: jax.Array | None,
@@ -2429,67 +2850,23 @@ def pallas_torsions_4body(
         prm_arr = prm_arr.reshape(*prm_arr.shape[:-3], prm_arr.shape[-3] * T, P)
         msk_arr = jnp.repeat(msk_arr, T, axis=-1)
 
-    if in_export_context():
-        box_arr, has_box = _normalize_box(box, positions)
-
-        def _export_one(pos_1, idx_1, prm_1, msk_1, bx_1):
-            N = pos_1.shape[0]
-            a_i, a_j, a_k, a_l = idx_1[:, 0], idx_1[:, 1], idx_1[:, 2], idx_1[:, 3]
-            valid = (
-                (msk_1 > 0)
-                & (a_i >= 0)
-                & (a_i < N)
-                & (a_j >= 0)
-                & (a_j < N)
-                & (a_k >= 0)
-                & (a_k < N)
-                & (a_l >= 0)
-                & (a_l < N)
-            )
-            m_eff = jnp.where(valid, msk_1, 0.0)
-            max_atom = max(N - 1, 0)
-            safe_i = jnp.clip(a_i, 0, max_atom)
-            safe_j = jnp.clip(a_j, 0, max_atom)
-            safe_k = jnp.clip(a_k, 0, max_atom)
-            safe_l = jnp.clip(a_l, 0, max_atom)
-            r_i = (pos_1[safe_i, 0], pos_1[safe_i, 1], pos_1[safe_i, 2])
-            r_j = (pos_1[safe_j, 0], pos_1[safe_j, 1], pos_1[safe_j, 2])
-            r_k = (pos_1[safe_k, 0], pos_1[safe_k, 1], pos_1[safe_k, 2])
-            r_l = (pos_1[safe_l, 0], pos_1[safe_l, 1], pos_1[safe_l, 2])
-            phi, _, _, _, _ = _torsion_angle_and_atom_grads_vec3(
-                r_i, r_j, r_k, r_l, valid, bx_1, has_box, b0_is_ji
-            )
-            if is_harmonic or prm_1.shape[-1] < 3:
-                diff = (phi - prm_1[:, 1] + jnp.pi) % (2.0 * jnp.pi) - jnp.pi
-                return jnp.sum(m_eff * prm_1[:, 0] * diff * diff)
-            return jnp.sum(m_eff * prm_1[:, 2] * (1.0 + jnp.cos(prm_1[:, 0] * phi - prm_1[:, 1])))
-
-        if positions.ndim == 3:
-            return jax.vmap(
-                lambda b: _export_one(
-                    positions[b],
-                    idx_4col[b] if idx_4col.ndim == 3 else idx_4col,
-                    prm_arr[b] if prm_arr.ndim == 3 else prm_arr,
-                    msk_arr[b] if msk_arr.ndim == 2 else msk_arr,
-                    box_arr[b],
-                )
-            )(jnp.arange(positions.shape[0]))
-        return _export_one(positions, idx_4col, prm_arr, msk_arr, box_arr)
-
-    if interpret is None:
-        interpret = not _triton_gpu_available()
     box_arr, has_box = _normalize_box(box, positions)
-    return _pallas_torsions_4body_diff(
-        positions,
-        idx_4col,
-        prm_arr,
-        msk_arr,
-        box_arr,
-        bool(has_box),
-        bool(b0_is_ji),
-        bool(is_harmonic),
-        bool(interpret),
+    eff_harm = bool(is_harmonic) or (prm_arr.shape[-1] < 3)
+
+    if in_export_context():
+        ctx = Context(kernels=True, target="export", export_format="stablehlo")
+    else:
+        if interpret is None:
+            interpret = not _triton_gpu_available()
+        ctx = Context(kernels=True, backend="cpu" if interpret else "gpu")
+
+    op = make_torsions_4body_op(
+        has_box=bool(has_box),
+        b0_is_ji=bool(b0_is_ji),
+        is_harmonic=eff_harm,
+        context=ctx,
     )
+    return op(positions, idx_4col, prm_arr, msk_arr, box_arr)
 
 
 # =============================================================================
@@ -2933,6 +3310,110 @@ def _pallas_cmap_torsions_bwd(has_box, first_is_psi, interpret, res, g):
 _pallas_cmap_torsions_diff.defvjp(_pallas_cmap_torsions_fwd, _pallas_cmap_torsions_bwd)
 
 
+def cmap_torsions_reference(
+    positions: jax.Array,
+    cmap_torsions: jax.Array,
+    map_indices: jax.Array,
+    cmap_coeffs: jax.Array,
+    mask: jax.Array,
+    box: jax.Array,
+    *,
+    has_box: bool = False,
+    first_is_psi: bool = False,
+) -> jax.Array:
+    """Plain-JAX 5-body CMAP bicubic spline reference matching ``pallas_cmap_torsions``."""
+
+    def _one(pos_1, t_1, mi_1, c_1, m_1, bx_1):
+        N = pos_1.shape[0]
+        dtype = pos_1.dtype
+        zero = jnp.asarray(0.0, dtype=dtype)
+        m_f = m_1.astype(dtype)
+        valid = m_f > zero
+        for col in range(5):
+            valid = valid & (t_1[:, col] >= 0) & (t_1[:, col] < N)
+        m_eff = jnp.where(valid, m_f, zero)
+        max_atom = max(N - 1, 0)
+        t_safe = jnp.where(valid[:, None], jnp.clip(t_1, 0, max_atom), 0)
+
+        def _angle4(i0, i1, i2, i3):
+            r0 = (pos_1[i0, 0], pos_1[i0, 1], pos_1[i0, 2])
+            r1 = (pos_1[i1, 0], pos_1[i1, 1], pos_1[i1, 2])
+            r2 = (pos_1[i2, 0], pos_1[i2, 1], pos_1[i2, 2])
+            r3 = (pos_1[i3, 0], pos_1[i3, 1], pos_1[i3, 2])
+            ang, _, _, _, _ = _torsion_angle_and_atom_grads_vec3(
+                r0, r1, r2, r3, valid, bx_1, has_box, False
+            )
+            return ang
+
+        phi = _angle4(t_safe[:, 0], t_safe[:, 1], t_safe[:, 2], t_safe[:, 3])
+        psi = _angle4(t_safe[:, 1], t_safe[:, 2], t_safe[:, 3], t_safe[:, 4])
+        th1, th2 = (psi, phi) if first_is_psi else (phi, psi)
+        e_per = compute_cmap_energies(th1, th2, mi_1, c_1.astype(dtype))
+        return jnp.sum(e_per * m_eff).astype(dtype)
+
+    if positions.ndim == 3:
+        B = positions.shape[0]
+        return jax.vmap(
+            lambda b: _one(
+                positions[b],
+                cmap_torsions[b] if cmap_torsions.ndim == 3 else cmap_torsions,
+                map_indices[b] if map_indices.ndim == 2 else map_indices,
+                cmap_coeffs[b] if cmap_coeffs.ndim == 5 else cmap_coeffs,
+                mask[b] if mask.ndim == 2 else mask,
+                box[b] if box.ndim == 2 else box,
+            )
+        )(jnp.arange(B))
+    return _one(positions, cmap_torsions, map_indices, cmap_coeffs, mask, box)
+
+
+def make_cmap_torsions_op(
+    *,
+    has_box: bool = False,
+    first_is_psi: bool = False,
+    context: Context | None = None,
+) -> xtrax.Op:
+    """Build an ``xtrax.Op`` for 5-body CMAP bicubic spline torsions.
+
+    Signature of the returned op:
+    ``(positions, cmap_torsions, map_indices, cmap_coeffs, mask, box) -> energy``.
+    """
+    hb = bool(has_box)
+    fpsi = bool(first_is_psi)
+    ref = functools.partial(cmap_torsions_reference, has_box=hb, first_is_psi=fpsi)
+
+    def _make_vk(interp: bool) -> VjpKernel:
+        def _fwd(pos, tors, midx, coeffs, msk, bx):
+            if pos.ndim == 3:
+                B = pos.shape[0]
+                e_b, f_b = jax.vmap(
+                    lambda b: _pallas_cmap_torsions_vmappable(
+                        pos[b],
+                        tors[b] if tors.ndim == 3 else tors,
+                        midx[b] if midx.ndim == 2 else midx,
+                        coeffs[b] if coeffs.ndim == 5 else coeffs,
+                        msk[b] if msk.ndim == 2 else msk,
+                        bx[b] if bx.ndim == 2 else bx,
+                        hb,
+                        fpsi,
+                        interp,
+                    )
+                )(jnp.arange(B))
+                return e_b, (f_b, pos, tors, midx, coeffs, msk, bx)
+            return _pallas_cmap_torsions_fwd(pos, tors, midx, coeffs, msk, bx, hb, fpsi, interp)
+
+        def _bwd(res, ct):
+            return _pallas_cmap_torsions_bwd(hb, fpsi, interp, res, ct)
+
+        return VjpKernel(_fwd, _bwd)
+
+    return xtrax.op(
+        ref,
+        vjp_kernels={"gpu": _make_vk(False), "cpu": _make_vk(True)},
+        name="pallas_cmap_torsions",
+        context=context,
+    )
+
+
 def pallas_cmap_torsions(
     positions: jax.Array,
     cmap_torsions: jax.Array | None,
@@ -2985,48 +3466,21 @@ def pallas_cmap_torsions(
         elif coeffs_arr.ndim == 4:
             coeffs_arr = jax.vmap(precompute_cmap_coefficients)(coeffs_arr).astype(positions.dtype)
 
-    if in_export_context():
-        disp_fn = _make_disp_fn(box)
-
-        def _export_one(pos_1, t_1, mi_1, c_1, m_1):
-            N = pos_1.shape[0]
-            valid = m_1 > 0
-            for col in range(5):
-                valid = valid & (t_1[:, col] >= 0) & (t_1[:, col] < N)
-            m_eff = jnp.where(valid, m_1, 0.0)
-            t_safe = jnp.clip(t_1, 0, max(N - 1, 0))
-            phi = compute_dihedral_angles(pos_1, t_safe[:, 0:4], disp_fn)
-            psi = compute_dihedral_angles(pos_1, t_safe[:, 1:5], disp_fn)
-            th1, th2 = (psi, phi) if first_is_psi else (phi, psi)
-            e_per = compute_cmap_energies(th1, th2, mi_1, c_1)
-            return jnp.sum(e_per * m_eff)
-
-        if positions.ndim == 3:
-            return jax.vmap(
-                lambda b: _export_one(
-                    positions[b],
-                    tors_5col[b] if tors_5col.ndim == 3 else tors_5col,
-                    midx_arr[b] if midx_arr.ndim == 2 else midx_arr,
-                    coeffs_arr[b] if coeffs_arr.ndim == 5 else coeffs_arr,
-                    msk_arr[b] if msk_arr.ndim == 2 else msk_arr,
-                )
-            )(jnp.arange(positions.shape[0]))
-        return _export_one(positions, tors_5col, midx_arr, coeffs_arr, msk_arr)
-
-    if interpret is None:
-        interpret = not _triton_gpu_available()
     box_arr, has_box = _normalize_box(box, positions)
-    return _pallas_cmap_torsions_diff(
-        positions,
-        tors_5col,
-        midx_arr,
-        coeffs_arr,
-        msk_arr,
-        box_arr,
-        bool(has_box),
-        bool(first_is_psi),
-        bool(interpret),
+
+    if in_export_context():
+        ctx = Context(kernels=True, target="export", export_format="stablehlo")
+    else:
+        if interpret is None:
+            interpret = not _triton_gpu_available()
+        ctx = Context(kernels=True, backend="cpu" if interpret else "gpu")
+
+    op = make_cmap_torsions_op(
+        has_box=bool(has_box),
+        first_is_psi=bool(first_is_psi),
+        context=ctx,
     )
+    return op(positions, tors_5col, midx_arr, coeffs_arr, msk_arr, box_arr)
 
 
 __all__ = [
@@ -3039,10 +3493,22 @@ __all__ = [
     "_triton_erf",
     "_triton_erfc",
     "_triton_gpu_available",
+    "angles_harmonic_reference",
+    "bonds_2body_reference",
+    "cmap_torsions_reference",
+    "exceptions_14_reference",
+    "make_angles_harmonic_op",
+    "make_bonds_2body_op",
+    "make_cmap_torsions_op",
+    "make_exceptions_14_op",
+    "make_pme_exclusion_pairs_op",
+    "make_torsions_4body_op",
     "pallas_angles_harmonic",
     "pallas_bonds_2body",
     "pallas_cmap_torsions",
     "pallas_exceptions_14",
     "pallas_pme_exclusion_pairs",
     "pallas_torsions_4body",
+    "pme_exclusion_pairs_reference",
+    "torsions_4body_reference",
 ]
