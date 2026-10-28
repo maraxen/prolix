@@ -29,10 +29,16 @@ from prolix.physics.generalized_born import (
     compute_nonpolar_energy,
     compute_pair_integral,
 )
-from prolix.physics.pallas_bonded import _triton_gpu_available
+from prolix.physics.pallas_bonded import (
+    _load_box6,
+    _min_image3,
+    _normalize_box,
+    _triton_gpu_available,
+)
 
 _GB_BLOCK_N = 32
 _GB_BLOCK_K = 32
+_NB_INDEX_MASK = (1 << 29) - 1
 
 
 def _pair_integral_deriv(r: jax.Array, or_a: jax.Array, sr_b: jax.Array) -> jax.Array:
@@ -104,9 +110,12 @@ def _pallas_gb_ace_nl_single(
     scaled_radii: jax.Array,
     atom_mask: jax.Array,
     neighbor_idx: jax.Array,
+    box: jax.Array,
+    has_box: bool,
     solvent_dielectric: float,
     solute_dielectric: float,
     dielectric_offset: float,
+    surface_tension: float,
     include_ace: bool,
     interpret: bool,
 ) -> tuple[jax.Array, jax.Array, jax.Array]:
@@ -136,7 +145,12 @@ def _pallas_gb_ace_nl_single(
         sr_pad = scaled_radii.astype(dtype)
         mask_pad = atom_mask.astype(jnp.int32)
 
-    nbr_pad = neighbor_idx.astype(jnp.int32)
+    nbr_clean = jnp.where(
+        neighbor_idx >= 0,
+        neighbor_idx.astype(jnp.int32) & _NB_INDEX_MASK,
+        neighbor_idx.astype(jnp.int32),
+    )
+    nbr_pad = nbr_clean
     if pad_n_nbr > 0 or pad_k > 0:
         nbr_pad = jnp.pad(nbr_pad, ((0, pad_n_nbr), (0, pad_k)), constant_values=N)
 
@@ -144,6 +158,7 @@ def _pallas_gb_ace_nl_single(
     py = jnp.asarray(pos_pad[:, 1])
     pz = jnp.asarray(pos_pad[:, 2])
     nbr_flat = jnp.asarray(nbr_pad.reshape(N_pad * K_pad))
+    box_vec = jnp.asarray(box.astype(dtype))
 
     # --- Pass 1: Born radii B_i and dB_i / dI_i ---
     def _pass1_born_kernel(
@@ -154,6 +169,7 @@ def _pallas_gb_ace_nl_single(
         sr_ref,
         mask_ref,
         nbr_flat_ref,
+        box_ref,
         b_out_ref,
         db_di_out_ref,
     ):
@@ -165,6 +181,7 @@ def _pallas_gb_ace_nl_single(
         eps6 = jnp.asarray(1e-6, dtype=dtype)
         eps12 = jnp.asarray(1e-12, dtype=dtype)
         offset = jnp.asarray(dielectric_offset, dtype=dtype)
+        box6 = _load_box6(box_ref)
 
         mask_i = (_pl_load(mask_ref, (offs_i,)) > 0) & (offs_i < N)
         px_i = _pl_load(px_ref, (offs_i,))
@@ -194,9 +211,11 @@ def _pallas_gb_ace_nl_single(
                 & (j_idx != offs_i[:, None])
             )
 
-            dx = px_i[:, None] - px_j
-            dy = py_i[:, None] - py_j
-            dz = pz_i[:, None] - pz_j
+            dx, dy, dz = _min_image3(
+                (px_i[:, None] - px_j, py_i[:, None] - py_j, pz_i[:, None] - pz_j),
+                box6,
+                has_box,
+            )
             dist = jnp.sqrt(dx * dx + dy * dy + dz * dz + eps12)
             I_ij = compute_pair_integral(dist, or_i[:, None], sr_j)
             return acc_I + jnp.sum(jnp.where(active, I_ij, zero), axis=1)
@@ -225,13 +244,13 @@ def _pallas_gb_ace_nl_single(
     born_pad, db_di_pad = pl.pallas_call(
         _pass1_born_kernel,
         out_shape=[jax.ShapeDtypeStruct((N_pad,), dtype), jax.ShapeDtypeStruct((N_pad,), dtype)],
-        in_specs=[pl.BlockSpec(memory_space=pl.ANY) for _ in range(7)],
+        in_specs=[pl.BlockSpec(memory_space=pl.ANY) for _ in range(8)],
         out_specs=[pl.BlockSpec(memory_space=pl.ANY) for _ in range(2)],
         grid=(n_blocks,),
         interpret=interpret,
         compiler_params=plt.CompilerParams() if not interpret else None,
         name="pallas_gb_pass1_born_nl",
-    )(px, py, pz, rad_pad, sr_pad, mask_pad, nbr_flat)
+    )(px, py, pz, rad_pad, sr_pad, mask_pad, nbr_flat, box_vec)
 
     # --- Pass 2: Host O(N) self GB + ACE, plus Pallas O(N*K) pair GB, direct forces, dE_pair/dB, grad_q ---
     tau = (1.0 / solute_dielectric) - (1.0 / solvent_dielectric)
@@ -242,11 +261,12 @@ def _pallas_gb_ace_nl_single(
     de_self_db = -e_gb_self_vec / born_pad
 
     if include_ace:
+        st_scale = float(surface_tension) / float(SURFACE_TENSION) if SURFACE_TENSION > 0.0 else 1.0
         radius_nm = (rad_pad - jnp.asarray(dielectric_offset, dtype=dtype)) * jnp.asarray(0.1, dtype=dtype) + jnp.asarray(0.009, dtype=dtype)
         born_nm = born_pad * jnp.asarray(0.1, dtype=dtype)
         e_ace_vec = (
             mask_f
-            * jnp.asarray(28.3919551 * 0.239006, dtype=dtype)
+            * jnp.asarray(28.3919551 * 0.239006 * st_scale, dtype=dtype)
             * ((radius_nm + jnp.asarray(0.14, dtype=dtype)) ** 2)
             * ((radius_nm / born_nm) ** 6)
         )
@@ -263,6 +283,7 @@ def _pallas_gb_ace_nl_single(
         born_ref,
         mask_ref,
         nbr_flat_ref,
+        box_ref,
         e_pair_out_ref,
         fx_dir_out_ref,
         fy_dir_out_ref,
@@ -279,6 +300,7 @@ def _pallas_gb_ace_nl_single(
         quarter = jnp.asarray(0.25, dtype=dtype)
         eps12 = jnp.asarray(1e-12, dtype=dtype)
         pref = jnp.asarray(-0.5 * constants.COULOMB_CONSTANT * tau, dtype=dtype)
+        box6 = _load_box6(box_ref)
 
         mask_i = (_pl_load(mask_ref, (offs_i,)) > 0) & (offs_i < N)
         px_i = _pl_load(px_ref, (offs_i,))
@@ -310,9 +332,11 @@ def _pallas_gb_ace_nl_single(
                 & (j_idx != offs_i[:, None])
             )
 
-            dx = px_i[:, None] - px_j
-            dy = py_i[:, None] - py_j
-            dz = pz_i[:, None] - pz_j
+            dx, dy, dz = _min_image3(
+                (px_i[:, None] - px_j, py_i[:, None] - py_j, pz_i[:, None] - pz_j),
+                box6,
+                has_box,
+            )
             r_sq = dx * dx + dy * dy + dz * dz + eps12
 
             p_ij = b_i[:, None] * b_j
@@ -359,13 +383,13 @@ def _pallas_gb_ace_nl_single(
     e_pair_pad, fx_dir_pad, fy_dir_pad, fz_dir_pad, de_pair_db_pad, grad_q_pad = pl.pallas_call(
         _pass2_gb_pair_kernel,
         out_shape=[jax.ShapeDtypeStruct((N_pad,), dtype) for _ in range(6)],
-        in_specs=[pl.BlockSpec(memory_space=pl.ANY) for _ in range(7)],
+        in_specs=[pl.BlockSpec(memory_space=pl.ANY) for _ in range(8)],
         out_specs=[pl.BlockSpec(memory_space=pl.ANY) for _ in range(6)],
         grid=(n_blocks,),
         interpret=interpret,
         compiler_params=plt.CompilerParams() if not interpret else None,
         name="pallas_gb_pass2_pair_nl",
-    )(px, py, pz, q_pad, born_pad, mask_pad, nbr_flat)
+    )(px, py, pz, q_pad, born_pad, mask_pad, nbr_flat, box_vec)
 
     # --- Pass 3: Atomic-Free Symmetric-NL Born Chain-Rule Forces ---
     w_pad = (de_self_db + de_ace_db + de_pair_db_pad) * db_di_pad
@@ -383,6 +407,7 @@ def _pallas_gb_ace_nl_single(
         w_ref,
         mask_ref,
         nbr_flat_ref,
+        box_ref,
         fx_born_out_ref,
         fy_born_out_ref,
         fz_born_out_ref,
@@ -391,6 +416,7 @@ def _pallas_gb_ace_nl_single(
         offs_i = pid * _GB_BLOCK_N + jnp.arange(_GB_BLOCK_N, dtype=jnp.int32)
         zero = jnp.asarray(0.0, dtype=dtype)
         eps12 = jnp.asarray(1e-12, dtype=dtype)
+        box6 = _load_box6(box_ref)
 
         mask_i = (_pl_load(mask_ref, (offs_i,)) > 0) & (offs_i < N)
         px_i = _pl_load(px_ref, (offs_i,))
@@ -424,9 +450,11 @@ def _pallas_gb_ace_nl_single(
                 & (j_idx != offs_i[:, None])
             )
 
-            dx = px_i[:, None] - px_j
-            dy = py_i[:, None] - py_j
-            dz = pz_i[:, None] - pz_j
+            dx, dy, dz = _min_image3(
+                (px_i[:, None] - px_j, py_i[:, None] - py_j, pz_i[:, None] - pz_j),
+                box6,
+                has_box,
+            )
             dist = jnp.sqrt(dx * dx + dy * dy + dz * dz + eps12)
 
             dI_ij_dr = _pair_integral_deriv(dist, or_i[:, None], sr_j)
@@ -452,13 +480,13 @@ def _pallas_gb_ace_nl_single(
     fx_born_pad, fy_born_pad, fz_born_pad = pl.pallas_call(
         _pass3_born_chain_kernel,
         out_shape=[jax.ShapeDtypeStruct((N_pad,), dtype) for _ in range(3)],
-        in_specs=[pl.BlockSpec(memory_space=pl.ANY) for _ in range(8)],
+        in_specs=[pl.BlockSpec(memory_space=pl.ANY) for _ in range(9)],
         out_specs=[pl.BlockSpec(memory_space=pl.ANY) for _ in range(3)],
         grid=(n_blocks,),
         interpret=interpret,
         compiler_params=plt.CompilerParams() if not interpret else None,
         name="pallas_gb_pass3_born_chain_nl",
-    )(px, py, pz, or_pad, sr_pad, w_pad, mask_pad, nbr_flat)
+    )(px, py, pz, or_pad, sr_pad, w_pad, mask_pad, nbr_flat, box_vec)
 
     total_energy = jnp.sum(e_gb_self_vec[:N] + e_ace_vec[:N] + e_pair_pad[:N])
     forces = jnp.stack(
@@ -472,6 +500,55 @@ def _pallas_gb_ace_nl_single(
     return total_energy, forces, grad_q_pad[:N].astype(charges.dtype)
 
 
+def _gb_ace_nl_ref_one(
+    pos_1,
+    q_1,
+    rad_1,
+    sr_1,
+    m_1,
+    nbr_1,
+    solvent_dielectric,
+    solute_dielectric,
+    dielectric_offset,
+    surface_tension,
+    include_ace,
+):
+    N = pos_1.shape[0]
+    m_bool = jnp.asarray(m_1, dtype=jnp.bool_)
+    nbr_clean = jnp.where(nbr_1 >= 0, nbr_1 & _NB_INDEX_MASK, nbr_1)
+    safe_j = jnp.clip(nbr_clean, 0, max(N - 1, 0))
+    valid_pair = (
+        (nbr_clean >= 0)
+        & (nbr_clean < N)
+        & (nbr_clean != jnp.arange(N, dtype=jnp.int32)[:, None])
+        & m_bool[:, None]
+        & m_bool[safe_j]
+    )
+    nbr_masked = jnp.where(valid_pair, nbr_clean, N)
+    q_masked = jnp.where(m_bool, q_1, 0.0)
+    e_gb, born_r = compute_gb_energy_neighbor_list(
+        pos_1,
+        q_masked,
+        rad_1,
+        nbr_masked,
+        solvent_dielectric=solvent_dielectric,
+        solute_dielectric=solute_dielectric,
+        dielectric_offset=dielectric_offset,
+        scaled_radii=sr_1,
+    )
+    if include_ace:
+        st_scale = float(surface_tension) / float(SURFACE_TENSION) if SURFACE_TENSION > 0.0 else 1.0
+        e_ace = st_scale * jnp.sum(
+            jnp.where(
+                m_bool,
+                compute_ace_nonpolar_energy(rad_1, born_r, dielectric_offset=dielectric_offset),
+                0.0,
+            )
+        )
+        return e_gb + e_ace
+    return e_gb
+
+
 def _pallas_gb_ace_nl_vmappable(
     positions,
     charges,
@@ -479,24 +556,29 @@ def _pallas_gb_ace_nl_vmappable(
     scaled_radii,
     atom_mask,
     neighbor_idx,
+    box,
+    has_box,
     solvent_dielectric,
     solute_dielectric,
     dielectric_offset,
+    surface_tension,
     include_ace,
     interpret,
 ):
+    hb = bool(has_box)
     sd = float(solvent_dielectric)
     ud = float(solute_dielectric)
     do = float(dielectric_offset)
+    st = float(surface_tension)
     ia = bool(include_ace)
     interp = bool(interpret)
 
     @jax.custom_batching.custom_vmap
-    def _vmappable(pos, q, rad, sr, msk, nbr):
-        return _pallas_gb_ace_nl_single(pos, q, rad, sr, msk, nbr, sd, ud, do, ia, interp)
+    def _vmappable(pos, q, rad, sr, msk, nbr, bx):
+        return _pallas_gb_ace_nl_single(pos, q, rad, sr, msk, nbr, bx, hb, sd, ud, do, st, ia, interp)
 
     @_vmappable.def_vmap
-    def _vmap_rule(axis_size, in_batched, pos, q, rad, sr, msk, nbr):
+    def _vmap_rule(axis_size, in_batched, pos, q, rad, sr, msk, nbr, bx):
         def _step(b_idx):
             return _vmappable(
                 pos[b_idx] if in_batched[0] else pos,
@@ -505,15 +587,16 @@ def _pallas_gb_ace_nl_vmappable(
                 sr[b_idx] if in_batched[3] else sr,
                 msk[b_idx] if in_batched[4] else msk,
                 nbr[b_idx] if in_batched[5] else nbr,
+                bx[b_idx] if in_batched[6] else bx,
             )
 
         e_b, f_b, gq_b = jax.lax.map(_step, jnp.arange(axis_size))
         return (e_b, f_b, gq_b), (True, True, True)
 
-    return _vmappable(positions, charges, radii, scaled_radii, atom_mask, neighbor_idx)
+    return _vmappable(positions, charges, radii, scaled_radii, atom_mask, neighbor_idx, box)
 
 
-@functools.partial(custom_vjp, nondiff_argnums=(6, 7, 8, 9, 10))
+@functools.partial(custom_vjp, nondiff_argnums=(7, 8, 9, 10, 11, 12, 13))
 def _pallas_gb_ace_nl_diff(
     positions,
     charges,
@@ -521,9 +604,12 @@ def _pallas_gb_ace_nl_diff(
     scaled_radii,
     atom_mask,
     neighbor_idx,
+    box,
+    has_box,
     solvent_dielectric,
     solute_dielectric,
     dielectric_offset,
+    surface_tension,
     include_ace,
     interpret,
 ):
@@ -534,9 +620,12 @@ def _pallas_gb_ace_nl_diff(
         scaled_radii,
         atom_mask,
         neighbor_idx,
+        box,
+        has_box,
         solvent_dielectric,
         solute_dielectric,
         dielectric_offset,
+        surface_tension,
         include_ace,
         interpret,
     )
@@ -550,9 +639,12 @@ def _pallas_gb_ace_nl_fwd(
     scaled_radii,
     atom_mask,
     neighbor_idx,
+    box,
+    has_box,
     solvent_dielectric,
     solute_dielectric,
     dielectric_offset,
+    surface_tension,
     include_ace,
     interpret,
 ):
@@ -563,37 +655,95 @@ def _pallas_gb_ace_nl_fwd(
         scaled_radii,
         atom_mask,
         neighbor_idx,
+        box,
+        has_box,
         solvent_dielectric,
         solute_dielectric,
         dielectric_offset,
+        surface_tension,
         include_ace,
         interpret,
     )
-    return energy, (forces, grad_q, charges, radii, scaled_radii, atom_mask, neighbor_idx)
+    return energy, (forces, grad_q, positions, charges, radii, scaled_radii, atom_mask, neighbor_idx, box)
 
 
 def _pallas_gb_ace_nl_bwd(
+    has_box,
     solvent_dielectric,
     solute_dielectric,
     dielectric_offset,
+    surface_tension,
     include_ace,
     interpret,
     res,
     g,
 ):
-    del solvent_dielectric, solute_dielectric, dielectric_offset, include_ace, interpret
-    forces, grad_q, charges, radii, scaled_radii, atom_mask, neighbor_idx = res
+    del has_box, interpret
+    forces, grad_q, positions, charges, radii, scaled_radii, atom_mask, neighbor_idx, box = res
     grad_pos = -g[..., None, None] * forces if g.ndim > 0 else -g * forces
     gq_scaled = g[..., None] * grad_q if g.ndim > 0 else g * grad_q
     while gq_scaled.ndim > charges.ndim:
         gq_scaled = jnp.sum(gq_scaled, axis=0)
+
+    if positions.ndim == 2:
+        _, vjp_fn = jax.vjp(
+            lambda r_in, sr_in: _gb_ace_nl_ref_one(
+                positions,
+                charges,
+                r_in,
+                sr_in,
+                atom_mask,
+                neighbor_idx,
+                solvent_dielectric,
+                solute_dielectric,
+                dielectric_offset,
+                surface_tension,
+                include_ace,
+            ),
+            radii,
+            scaled_radii,
+        )
+        drad, dsr = vjp_fn(g)
+    else:
+        B = positions.shape[0]
+        b_q = charges.ndim > 1
+        b_rad = radii.ndim > 1
+        b_sr = scaled_radii.ndim > 1
+        b_msk = atom_mask.ndim > 1
+        b_nbr = neighbor_idx.ndim > 2
+
+        def _step(b):
+            _, vjp_b = jax.vjp(
+                lambda r_in, sr_in: _gb_ace_nl_ref_one(
+                    positions[b],
+                    charges[b] if b_q else charges,
+                    r_in,
+                    sr_in,
+                    atom_mask[b] if b_msk else atom_mask,
+                    neighbor_idx[b] if b_nbr else neighbor_idx,
+                    solvent_dielectric,
+                    solute_dielectric,
+                    dielectric_offset,
+                    surface_tension,
+                    include_ace,
+                ),
+                radii[b] if b_rad else radii,
+                scaled_radii[b] if b_sr else scaled_radii,
+            )
+            return vjp_b(g[b] if g.ndim > 0 else g)
+
+        drad_all, dsr_all = jax.lax.map(_step, jnp.arange(B))
+        drad = drad_all if b_rad else jnp.sum(drad_all, axis=0)
+        dsr = dsr_all if b_sr else jnp.sum(dsr_all, axis=0)
+
     return (
         grad_pos,
         gq_scaled.astype(charges.dtype),
-        jnp.zeros_like(radii),
-        jnp.zeros_like(scaled_radii),
+        drad.astype(radii.dtype),
+        dsr.astype(scaled_radii.dtype),
         jnp.zeros_like(atom_mask),
         jnp.zeros_like(neighbor_idx),
+        jnp.zeros_like(box),
     )
 
 
@@ -617,7 +767,9 @@ def pallas_gb_ace_nl(
     interpret: bool | None = None,
 ) -> jax.Array:
     """3-pass atomic-free (32, 32) OBC-II GB + ACE nonpolar Pallas kernel over symmetric neighbor list."""
-    del surface_tension, box
+    if positions.shape[-2] == 0:
+        return jnp.zeros(positions.shape[:-2], dtype=positions.dtype)
+
     rad_arr = jnp.asarray(radii, dtype=positions.dtype)
     sr_arr = rad_arr if scaled_radii is None else jnp.asarray(scaled_radii, dtype=positions.dtype)
     msk_arr = (
@@ -627,57 +779,42 @@ def pallas_gb_ace_nl(
     )
     q_arr = jnp.asarray(charges, dtype=positions.dtype)
     nbr_arr = jnp.asarray(neighbor_idx, dtype=jnp.int32)
+    nbr_arr = jnp.where(nbr_arr >= 0, nbr_arr & _NB_INDEX_MASK, nbr_arr)
 
     if in_export_context():
-        def _export_one(pos_1, q_1, rad_1, sr_1, m_1, nbr_1):
-            N = pos_1.shape[0]
-            m_bool = jnp.asarray(m_1, dtype=jnp.bool_)
-            safe_j = jnp.clip(nbr_1, 0, max(N - 1, 0))
-            valid_pair = (
-                (nbr_1 >= 0)
-                & (nbr_1 < N)
-                & (nbr_1 != jnp.arange(N, dtype=jnp.int32)[:, None])
-                & m_bool[:, None]
-                & m_bool[safe_j]
-            )
-            nbr_masked = jnp.where(valid_pair, nbr_1, N)
-            q_masked = jnp.where(m_bool, q_1, 0.0)
-            e_gb, born_r = compute_gb_energy_neighbor_list(
-                pos_1,
-                q_masked,
-                rad_1,
-                nbr_masked,
-                solvent_dielectric=solvent_dielectric,
-                solute_dielectric=solute_dielectric,
-                dielectric_offset=dielectric_offset,
-                scaled_radii=sr_1,
-            )
-            if include_ace:
-                e_ace = jnp.sum(
-                    jnp.where(
-                        m_bool,
-                        compute_ace_nonpolar_energy(rad_1, born_r, dielectric_offset=dielectric_offset),
-                        0.0,
-                    )
-                )
-                return e_gb + e_ace
-            return e_gb
-
         if positions.ndim == 3:
             return jax.vmap(
-                lambda b: _export_one(
+                lambda b: _gb_ace_nl_ref_one(
                     positions[b],
                     q_arr[b] if q_arr.ndim == 2 else q_arr,
                     rad_arr[b] if rad_arr.ndim == 2 else rad_arr,
                     sr_arr[b] if sr_arr.ndim == 2 else sr_arr,
                     msk_arr[b] if msk_arr.ndim == 2 else msk_arr,
                     nbr_arr[b] if nbr_arr.ndim == 3 else nbr_arr,
+                    solvent_dielectric,
+                    solute_dielectric,
+                    dielectric_offset,
+                    surface_tension,
+                    include_ace,
                 )
             )(jnp.arange(positions.shape[0]))
-        return _export_one(positions, q_arr, rad_arr, sr_arr, msk_arr, nbr_arr)
+        return _gb_ace_nl_ref_one(
+            positions,
+            q_arr,
+            rad_arr,
+            sr_arr,
+            msk_arr,
+            nbr_arr,
+            solvent_dielectric,
+            solute_dielectric,
+            dielectric_offset,
+            surface_tension,
+            include_ace,
+        )
 
     if interpret is None:
         interpret = not _triton_gpu_available()
+    box_arr, has_box = _normalize_box(box, positions)
     return _pallas_gb_ace_nl_diff(
         positions,
         q_arr,
@@ -685,9 +822,12 @@ def pallas_gb_ace_nl(
         sr_arr,
         msk_arr,
         nbr_arr,
+        box_arr,
+        bool(has_box),
         float(solvent_dielectric),
         float(solute_dielectric),
         float(dielectric_offset),
+        float(surface_tension),
         bool(include_ace),
         bool(interpret),
     )
@@ -703,6 +843,8 @@ def _pallas_sasa_nl_single(
     radii: jax.Array,
     atom_mask: jax.Array,
     neighbor_idx: jax.Array,
+    box: jax.Array,
+    has_box: bool,
     surface_tension: float,
     probe_radius: float,
     interpret: bool,
@@ -729,7 +871,12 @@ def _pallas_sasa_nl_single(
         rad_pad = radii.astype(dtype)
         mask_pad = atom_mask.astype(jnp.int32)
 
-    nbr_pad = neighbor_idx.astype(jnp.int32)
+    nbr_clean = jnp.where(
+        neighbor_idx >= 0,
+        neighbor_idx.astype(jnp.int32) & _NB_INDEX_MASK,
+        neighbor_idx.astype(jnp.int32),
+    )
+    nbr_pad = nbr_clean
     if pad_n_nbr > 0 or pad_k > 0:
         nbr_pad = jnp.pad(nbr_pad, ((0, pad_n_nbr), (0, pad_k)), constant_values=N)
 
@@ -737,6 +884,7 @@ def _pallas_sasa_nl_single(
     py = jnp.asarray(pos_pad[:, 1])
     pz = jnp.asarray(pos_pad[:, 2])
     nbr_flat = jnp.asarray(nbr_pad.reshape(N_pad * K_pad))
+    box_vec = jnp.asarray(box.astype(dtype))
     R_pad = rad_pad + jnp.asarray(probe_radius, dtype=dtype)
     S_pad = jnp.asarray(4.0 * jnp.pi, dtype=dtype) * (R_pad * R_pad)
 
@@ -749,6 +897,7 @@ def _pallas_sasa_nl_single(
         S_ref,
         mask_ref,
         nbr_flat_ref,
+        box_ref,
         area_out_ref,
         zcount_out_ref,
     ):
@@ -759,6 +908,7 @@ def _pallas_sasa_nl_single(
         pi = jnp.asarray(jnp.pi, dtype=dtype)
         eps6 = jnp.asarray(1e-6, dtype=dtype)
         eps12 = jnp.asarray(1e-12, dtype=dtype)
+        box6 = _load_box6(box_ref)
 
         mask_i = (_pl_load(mask_ref, (offs_i,)) > 0) & (offs_i < N)
         px_i = _pl_load(px_ref, (offs_i,))
@@ -789,9 +939,11 @@ def _pallas_sasa_nl_single(
                 & (j_idx != offs_i[:, None])
             )
 
-            dx = px_i[:, None] - px_j
-            dy = py_i[:, None] - py_j
-            dz = pz_i[:, None] - pz_j
+            dx, dy, dz = _min_image3(
+                (px_i[:, None] - px_j, py_i[:, None] - py_j, pz_i[:, None] - pz_j),
+                box6,
+                has_box,
+            )
             d_ij = jnp.sqrt(dx * dx + dy * dy + dz * dz + eps12)
             d_safe = d_ij + eps6
 
@@ -828,13 +980,13 @@ def _pallas_sasa_nl_single(
     area_pad, zcount_pad = pl.pallas_call(
         _pass1_sasa_area_kernel,
         out_shape=[jax.ShapeDtypeStruct((N_pad,), dtype), jax.ShapeDtypeStruct((N_pad,), jnp.int32)],
-        in_specs=[pl.BlockSpec(memory_space=pl.ANY) for _ in range(7)],
+        in_specs=[pl.BlockSpec(memory_space=pl.ANY) for _ in range(8)],
         out_specs=[pl.BlockSpec(memory_space=pl.ANY) for _ in range(2)],
         grid=(n_blocks,),
         interpret=interpret,
         compiler_params=plt.CompilerParams() if not interpret else None,
         name="pallas_sasa_pass1_area_nl",
-    )(px, py, pz, R_pad, S_pad, mask_pad, nbr_flat)
+    )(px, py, pz, R_pad, S_pad, mask_pad, nbr_flat, box_vec)
 
     # --- Pass 2: Atomic-Free Symmetric-NL SASA Forces ---
     def _pass2_sasa_forces_kernel(
@@ -847,6 +999,7 @@ def _pallas_sasa_nl_single(
         zcount_ref,
         mask_ref,
         nbr_flat_ref,
+        box_ref,
         fx_out_ref,
         fy_out_ref,
         fz_out_ref,
@@ -860,6 +1013,7 @@ def _pallas_sasa_nl_single(
         eps6 = jnp.asarray(1e-6, dtype=dtype)
         eps12 = jnp.asarray(1e-12, dtype=dtype)
         gamma = jnp.asarray(surface_tension, dtype=dtype)
+        box6 = _load_box6(box_ref)
 
         mask_i = (_pl_load(mask_ref, (offs_i,)) > 0) & (offs_i < N)
         px_i = _pl_load(px_ref, (offs_i,))
@@ -895,9 +1049,11 @@ def _pallas_sasa_nl_single(
                 & (j_idx != offs_i[:, None])
             )
 
-            dx = px_i[:, None] - px_j
-            dy = py_i[:, None] - py_j
-            dz = pz_i[:, None] - pz_j
+            dx, dy, dz = _min_image3(
+                (px_i[:, None] - px_j, py_i[:, None] - py_j, pz_i[:, None] - pz_j),
+                box6,
+                has_box,
+            )
             d_ij = jnp.sqrt(dx * dx + dy * dy + dz * dz + eps12)
             d_safe = d_ij + eps6
             d_safe_sq = d_safe * d_safe
@@ -962,17 +1118,29 @@ def _pallas_sasa_nl_single(
     fx_pad, fy_pad, fz_pad = pl.pallas_call(
         _pass2_sasa_forces_kernel,
         out_shape=[jax.ShapeDtypeStruct((N_pad,), dtype) for _ in range(3)],
-        in_specs=[pl.BlockSpec(memory_space=pl.ANY) for _ in range(9)],
+        in_specs=[pl.BlockSpec(memory_space=pl.ANY) for _ in range(10)],
         out_specs=[pl.BlockSpec(memory_space=pl.ANY) for _ in range(3)],
         grid=(n_blocks,),
         interpret=interpret,
         compiler_params=plt.CompilerParams() if not interpret else None,
         name="pallas_sasa_pass2_forces_nl",
-    )(px, py, pz, R_pad, S_pad, area_pad, zcount_pad, mask_pad, nbr_flat)
+    )(px, py, pz, R_pad, S_pad, area_pad, zcount_pad, mask_pad, nbr_flat, box_vec)
 
     total_energy = jnp.asarray(surface_tension, dtype=dtype) * jnp.sum(area_pad[:N])
     forces = jnp.stack([fx_pad[:N], fy_pad[:N], fz_pad[:N]], axis=-1)
     return total_energy, forces
+
+
+def _sasa_nl_ref_one(pos_1, rad_1, m_1, nbr_1, surface_tension, probe_radius):
+    nbr_clean = jnp.where(nbr_1 >= 0, nbr_1 & _NB_INDEX_MASK, nbr_1)
+    return compute_nonpolar_energy(
+        pos_1,
+        rad_1,
+        surface_tension=surface_tension,
+        probe_radius=probe_radius,
+        neighbor_idx=nbr_clean,
+        atom_mask=m_1,
+    )
 
 
 def _pallas_sasa_nl_vmappable(
@@ -980,46 +1148,52 @@ def _pallas_sasa_nl_vmappable(
     radii,
     atom_mask,
     neighbor_idx,
+    box,
+    has_box,
     surface_tension,
     probe_radius,
     interpret,
 ):
+    hb = bool(has_box)
     st = float(surface_tension)
     pr = float(probe_radius)
     interp = bool(interpret)
 
     @jax.custom_batching.custom_vmap
-    def _vmappable(pos, rad, msk, nbr):
-        return _pallas_sasa_nl_single(pos, rad, msk, nbr, st, pr, interp)
+    def _vmappable(pos, rad, msk, nbr, bx):
+        return _pallas_sasa_nl_single(pos, rad, msk, nbr, bx, hb, st, pr, interp)
 
     @_vmappable.def_vmap
-    def _vmap_rule(axis_size, in_batched, pos, rad, msk, nbr):
+    def _vmap_rule(axis_size, in_batched, pos, rad, msk, nbr, bx):
         def _step(b_idx):
             return _vmappable(
                 pos[b_idx] if in_batched[0] else pos,
                 rad[b_idx] if in_batched[1] else rad,
                 msk[b_idx] if in_batched[2] else msk,
                 nbr[b_idx] if in_batched[3] else nbr,
+                bx[b_idx] if in_batched[4] else bx,
             )
 
         e_b, f_b = jax.lax.map(_step, jnp.arange(axis_size))
         return (e_b, f_b), (True, True)
 
-    return _vmappable(positions, radii, atom_mask, neighbor_idx)
+    return _vmappable(positions, radii, atom_mask, neighbor_idx, box)
 
 
-@functools.partial(custom_vjp, nondiff_argnums=(4, 5, 6))
+@functools.partial(custom_vjp, nondiff_argnums=(5, 6, 7, 8))
 def _pallas_sasa_nl_diff(
     positions,
     radii,
     atom_mask,
     neighbor_idx,
+    box,
+    has_box,
     surface_tension,
     probe_radius,
     interpret,
 ):
     energy, _ = _pallas_sasa_nl_vmappable(
-        positions, radii, atom_mask, neighbor_idx, surface_tension, probe_radius, interpret
+        positions, radii, atom_mask, neighbor_idx, box, has_box, surface_tension, probe_radius, interpret
     )
     return energy
 
@@ -1029,25 +1203,60 @@ def _pallas_sasa_nl_fwd(
     radii,
     atom_mask,
     neighbor_idx,
+    box,
+    has_box,
     surface_tension,
     probe_radius,
     interpret,
 ):
     energy, forces = _pallas_sasa_nl_vmappable(
-        positions, radii, atom_mask, neighbor_idx, surface_tension, probe_radius, interpret
+        positions, radii, atom_mask, neighbor_idx, box, has_box, surface_tension, probe_radius, interpret
     )
-    return energy, (forces, radii, atom_mask, neighbor_idx)
+    return energy, (forces, positions, radii, atom_mask, neighbor_idx, box)
 
 
-def _pallas_sasa_nl_bwd(surface_tension, probe_radius, interpret, res, g):
-    del surface_tension, probe_radius, interpret
-    forces, radii, atom_mask, neighbor_idx = res
+def _pallas_sasa_nl_bwd(has_box, surface_tension, probe_radius, interpret, res, g):
+    del has_box, interpret
+    forces, positions, radii, atom_mask, neighbor_idx, box = res
     grad_pos = -g[..., None, None] * forces if g.ndim > 0 else -g * forces
+
+    if positions.ndim == 2:
+        _, vjp_fn = jax.vjp(
+            lambda r_in: _sasa_nl_ref_one(
+                positions, r_in, atom_mask, neighbor_idx, surface_tension, probe_radius
+            ),
+            radii,
+        )
+        (drad,) = vjp_fn(g)
+    else:
+        B = positions.shape[0]
+        b_rad = radii.ndim > 1
+        b_msk = atom_mask.ndim > 1
+        b_nbr = neighbor_idx.ndim > 2
+
+        def _step(b):
+            _, vjp_b = jax.vjp(
+                lambda r_in: _sasa_nl_ref_one(
+                    positions[b],
+                    r_in,
+                    atom_mask[b] if b_msk else atom_mask,
+                    neighbor_idx[b] if b_nbr else neighbor_idx,
+                    surface_tension,
+                    probe_radius,
+                ),
+                radii[b] if b_rad else radii,
+            )
+            return vjp_b(g[b] if g.ndim > 0 else g)[0]
+
+        drad_all = jax.lax.map(_step, jnp.arange(B))
+        drad = drad_all if b_rad else jnp.sum(drad_all, axis=0)
+
     return (
         grad_pos,
-        jnp.zeros_like(radii),
+        drad.astype(radii.dtype),
         jnp.zeros_like(atom_mask),
         jnp.zeros_like(neighbor_idx),
+        jnp.zeros_like(box),
     )
 
 
@@ -1067,7 +1276,10 @@ def pallas_sasa_nl(
     interpret: bool | None = None,
 ) -> jax.Array:
     """2-pass atomic-free (32, 32) SASA nonpolar Pallas kernel over symmetric neighbor list."""
-    del dielectric_offset, box
+    del dielectric_offset
+    if positions.shape[-2] == 0:
+        return jnp.zeros(positions.shape[:-2], dtype=positions.dtype)
+
     rad_arr = jnp.asarray(radii, dtype=positions.dtype)
     msk_arr = (
         jnp.ones(positions.shape[:-1], dtype=jnp.bool_)
@@ -1075,36 +1287,32 @@ def pallas_sasa_nl(
         else jnp.asarray(atom_mask)
     )
     nbr_arr = jnp.asarray(neighbor_idx, dtype=jnp.int32)
+    nbr_arr = jnp.where(nbr_arr >= 0, nbr_arr & _NB_INDEX_MASK, nbr_arr)
 
     if in_export_context():
-        def _export_one(pos_1, rad_1, m_1, nbr_1):
-            return compute_nonpolar_energy(
-                pos_1,
-                rad_1,
-                surface_tension=surface_tension,
-                probe_radius=probe_radius,
-                neighbor_idx=nbr_1,
-                atom_mask=m_1,
-            )
-
         if positions.ndim == 3:
             return jax.vmap(
-                lambda b: _export_one(
+                lambda b: _sasa_nl_ref_one(
                     positions[b],
                     rad_arr[b] if rad_arr.ndim == 2 else rad_arr,
                     msk_arr[b] if msk_arr.ndim == 2 else msk_arr,
                     nbr_arr[b] if nbr_arr.ndim == 3 else nbr_arr,
+                    surface_tension,
+                    probe_radius,
                 )
             )(jnp.arange(positions.shape[0]))
-        return _export_one(positions, rad_arr, msk_arr, nbr_arr)
+        return _sasa_nl_ref_one(positions, rad_arr, msk_arr, nbr_arr, surface_tension, probe_radius)
 
     if interpret is None:
         interpret = not _triton_gpu_available()
+    box_arr, has_box = _normalize_box(box, positions)
     return _pallas_sasa_nl_diff(
         positions,
         rad_arr,
         msk_arr,
         nbr_arr,
+        box_arr,
+        bool(has_box),
         float(surface_tension),
         float(probe_radius),
         bool(interpret),

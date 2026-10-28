@@ -28,17 +28,14 @@ Benchmarking on Engaging `RTX PRO 6000 Blackwell Server Edition` (`sm_120`, 96 G
 
 | Atoms ($N$) | Max Neighbors ($K$) | XLA E+F (`ms`) | Pallas v1 E+F (`ms`) | E+F Speedup | XLA 20-Step Propagator (`ns/day`) | Pallas v1 20-Step Propagator (`ns/day`) | Propagator Speedup |
 | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| 512 | 392 | 0.406 | 0.579 | **0.70x** | 253.34 | 150.47 | **0.59x** |
-| 1,024 | 420 | 0.650 | 0.640 | **1.02x** | 139.20 | 127.62 | **0.92x** |
-| 2,048 | 418 | 1.158 | 0.727 | **1.59x** | 95.36 | 115.67 | **1.21x** |
-| 4,096 | 428 | 1.884 | 0.903 | **2.09x** | 67.32 | 92.54 | **1.37x** |
-| 8,192 | 440 | 2.665 | 1.242 | **2.15x** | 34.48 | 66.15 | **1.92x** |
-| 16,384 | 436 | 4.925 | 1.919 | **2.57x** | 18.89 | 44.31 | **2.35x** |
-| 32,768 | 448 | 9.033 | 2.581 | **3.50x** | 9.77 | 33.03 | **3.38x** |
+| 512 | 392 | 0.406 | 0.579 | **0.70x** | 253.30 | 150.48 | **0.59x** |
+| 2,048 | 424 | 0.717 | 0.614 | **1.17x** | 125.77 | 139.22 | **1.11x** |
+| 8,192 | 408 | 2.121 | 0.773 | **2.74x** | 40.26 | 112.47 | **2.79x** |
+| 32,768 | 448 | 9.028 | 2.577 | **3.50x** | 9.77 | 33.03 | **3.38x** |
 
 Power-law scaling fits ($t(N) \propto N^\alpha$):
-- **XLA Baseline**: $\alpha_{\text{XLA}} = 0.750$ ($R^2 = 0.994$)
-- **Pallas v1**: $\alpha_{\text{Pallas}} = 0.340$ ($R^2 = 0.931$)
+- **XLA Baseline**: $\alpha_{\text{XLA}} = 0.761$ (20-step propagator $\alpha_{\text{XLA}} = 0.802$)
+- **Pallas v1**: $\alpha_{\text{Pallas}} = 0.351$ (20-step propagator $\alpha_{\text{Pallas}} = 0.356$)
 
 ### 1.2 Diagnosis of Remaining Performance Bottlenecks vs OpenMM
 
@@ -93,7 +90,7 @@ We move the exclusion lookup **out of the every-step nonbonded force kernel** an
      - Using the 5-step branchless binary search in [`get_neighbor_exclusion_scales`](file:///home/marielle/projects/prolix/src/prolix/physics/neighbor_list.py#L465-L520) (`O(N * K * log2 M)` executed only on NL rebuild steps), look up `(w_vdw, w_elec)` for each entry `j = neighbor_idx[i, k] & _NB_INDEX_MASK`.
      - Tag full exclusions (`(w_vdw == 0.0) & (w_elec == 0.0)`) as `j | _NB_EXCL_FULL_BIT` and 1-4 scaled exclusions as `j | _NB_EXCL_14_BIT`, **always preserving the underlying atom index `j` in the lower 29 bits (`j & _NB_INDEX_MASK`)**.
      - *Why lossless tagging instead of overwriting `j` with `n_atoms`*:
-       1. In implicit solvent (`batched_energy.py:1432`, `system.py:210`), the same `neighbor_idx` is passed to [`pallas_gb_ace_nl`](file:///home/marielle/projects/prolix/src/prolix/physics/pallas_implicit.py) and `pallas_sasa_nl`, where covalently bonded 1-2/1-3/1-4 neighbors **must not** be excluded from Born radii descreening or SASA burial! Preserving `j` in `raw_j & _NB_INDEX_MASK` lets `pallas_gb_ace_nl` and `pallas_sasa_nl` mask off the upper 2 bits (`j_idx = raw_j & _NB_INDEX_MASK`) without losing any bonded neighbors.
+       1. In implicit solvent (`batched_energy.py:1432`, `system.py:210`), the same `neighbor_idx` is passed to [`pallas_gb_ace_nl`](file:///home/marielle/projects/prolix/src/prolix/physics/pallas_implicit.py), `pallas_sasa_nl`, and `generalized_born.py`, where covalently bonded 1-2/1-3/1-4 neighbors **must not** be excluded from Born radii descreening or SASA burial! Preserving `j` in `raw_j & _NB_INDEX_MASK` lets `batched_energy.py` (`jnp.minimum(nb_idx & _NB_INDEX_MASK, N - 1)`), `pallas_gb_ace_nl`, `pallas_sasa_nl`, and `generalized_born.py` mask off the upper 2 bits (`j_idx = raw_j & _NB_INDEX_MASK`) without losing any bonded neighbors or indexing `sys.atom_mask[N - 1]`.
        2. In `_nonbonded_nl_param_grads` ([`pallas_kernels.py:1131-1138`](file:///home/marielle/projects/prolix/src/prolix/pallas_kernels.py#L1131-L1138)), masking `nbr_i = raw_nbr_i & _NB_INDEX_MASK` ensures `nbr_i < N` remains true on tagged PME exclusion pairs when `compute_param_grads=True`.
 
 2. **Zero-Lookup In-Kernel Decoding (`excl_mode = "pre_encoded"` in `_nb_nl_kernel`)**:
@@ -205,6 +202,8 @@ At $N = 512$, Pallas v1 takes `0.579 ms` vs XLA's `0.406 ms` ([261027_engaging_f
        ```
      - In `_pallas_nonbonded_nl_bwd(..., res, g)`:
        ```python
+       if isinstance(g, jax.custom_derivatives.SymbolicZero):
+           return (None,) * 11
        forces, pos_dtype, param_res = res
        grad_pos = (-g[..., None, None] * forces if g.ndim > 0 else -g * forces).astype(pos_dtype)
        if param_res is None:
@@ -333,9 +332,9 @@ Crucially, because `px_j` has shape `(32, 32)` in a per-atom `(N, K)` neighbor l
 ### 5.2 Tier A (O4.1 — For `(N, K)` Per-Atom Neighbor Lists): Primary-Cell Pre-Wrapping + Interior-Block Zero-Wrap Bypass
 
 1. **Host/Pre-Kernel Primary-Cell Coordinate Wrapping ($3N$ Ops Total)**:
-   - Before launching `_nb_nl_kernel` in `_pallas_nonbonded_nl_single` (when `has_box=True`), wrap all $N$ atom coordinates once into the primary periodic cell $[0, L_x) \times [0, L_y) \times [0, L_z)$:
-     $$\mathbf{r}^{\text{cell}}_m = \mathbf{r}_m - \mathbf{L} \odot \lfloor \mathbf{r}_m \oslash \mathbf{L} \rfloor \in [0, \mathbf{L}) \qquad \forall m \in \{0, \dots, N-1\}$$
-   - This costs only $3N$ `floor` ops across the entire system (vs $3 N K$ inside the kernel—a $K \approx 448\times$ reduction).
+   - Before launching `_nb_nl_kernel` in `_pallas_nonbonded_nl_single` (when `has_box=True` and the box is orthogonal `bx == cx == cy == 0`), wrap all $N$ atom coordinates once into the primary periodic cell $[0, L_x) \times [0, L_y) \times [0, L_z)$ using zero-safe division `safe_L = jnp.where(L > 0, L, 1.0)`:
+     $$\mathbf{r}^{\text{cell}}_m = \text{where}(\mathbf{L} > 0,\; \mathbf{r}_m - \mathbf{L} \odot \lfloor \mathbf{r}_m \oslash \text{safe\_L} \rfloor,\; \mathbf{r}_m) \in [0, \mathbf{L}) \qquad \forall m \in \{0, \dots, N-1\}$$
+   - This costs only $3N$ `floor` ops across the entire system (vs $3 N K$ inside the kernel—a $K \approx 448\times$ reduction). When `box` is triclinic (`bx != 0` or `cx != 0` or `cy != 0`), `interior_d` is set to `False` so the full 3-step sequential triclinic reduction runs inside `_min_image3`.
 
 2. **Triton-Legal Pre-Loop Block Bounding Box & Interior-Axis Theorem**:
    - Inside `_nb_nl_kernel`, let `valid_i = mask_i` (`(32,)` bool) and `lane_id = jnp.arange(_NB_BLOCK_N, dtype=jnp.int32)`.
@@ -473,9 +472,9 @@ Every optimization O1–O5 must pass automated float32 parity tests against the 
 
 ### 8.2 Engaging GPU Performance Targets (`RTX PRO 6000 Blackwell`)
 
-Re-run `scripts/benchmarks/full_potential_pallas_vs_xla.py` and `scripts/benchmarks/kups_benchmark.py --tiers tier4` on Engaging via `myxcel`:
+Re-run `scripts/benchmarks/pallas_vs_baseline.py --kernel full_potential` and `scripts/benchmarks/kups_benchmark.py --tier 4` on Engaging via `myxcel`:
 - **$N = 512$ Small-System Target**: Reduce Pallas E+F step time from `0.579 ms` to `< 0.35 ms` (**>1.15x faster than XLA even at $N = 512$**, eliminating the v1 small-N crossover penalty).
-- **$N = 32,768$ Large-System Target**: Reduce Pallas E+F step time from `2.581 ms` to `< 1.85 ms` (**>4.8x faster than XLA**, reaching **>45 ns/day** on the 20-step BAOAB+SETTLE explicit-PME propagator).
+- **$N = 32,768$ Large-System Target**: Reduce Pallas E+F step time from `2.577 ms` to `< 1.85 ms` (**>4.8x faster than XLA**, reaching **>45 ns/day** on the 20-step BAOAB+SETTLE explicit-PME propagator).
 
 ---
 

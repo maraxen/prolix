@@ -117,11 +117,59 @@ def _min_image_1d(d: jax.Array, box_len: jax.Array, has_box: bool) -> jax.Array:
     return jnp.where(box_len > zero, d - box_len * jnp.floor(d / b_safe + half), d)
 
 
-def _min_image3(d: Vec3, box_xyz: Vec3, has_box: bool) -> Vec3:
-    return (
-        _min_image_1d(d[0], box_xyz[0], has_box),
-        _min_image_1d(d[1], box_xyz[1], has_box),
-        _min_image_1d(d[2], box_xyz[2], has_box),
+def _min_image3(
+    d: Vec3,
+    box_vec: tuple[jax.Array, ...] | jax.Array,
+    has_box: bool,
+) -> Vec3:
+    if not has_box:
+        return d
+    n_b = len(box_vec) if isinstance(box_vec, tuple) else box_vec.shape[-1]
+    if n_b == 3:
+        return (
+            _min_image_1d(d[0], box_vec[0], has_box),
+            _min_image_1d(d[1], box_vec[1], has_box),
+            _min_image_1d(d[2], box_vec[2], has_box),
+        )
+    dtype = d[0].dtype
+    zero = jnp.asarray(0.0, dtype=dtype)
+    half = jnp.asarray(0.5, dtype=dtype)
+    one = jnp.asarray(1.0, dtype=dtype)
+    ax, by, cz, bx, cx, cy = (
+        box_vec[0],
+        box_vec[1],
+        box_vec[2],
+        box_vec[3],
+        box_vec[4],
+        box_vec[5],
+    )
+    dx, dy, dz = d[0], d[1], d[2]
+
+    cz_pos = cz > zero
+    cz_s = jnp.where(cz_pos, cz, one)
+    sz = jnp.where(cz_pos, jnp.floor(dz / cz_s + half), zero)
+    dz = dz - sz * cz
+    dy = dy - sz * cy
+    dx = dx - sz * cx
+
+    by_pos = by > zero
+    by_s = jnp.where(by_pos, by, one)
+    sy = jnp.where(by_pos, jnp.floor(dy / by_s + half), zero)
+    dy = dy - sy * by
+    dx = dx - sy * bx
+
+    ax_pos = ax > zero
+    ax_s = jnp.where(ax_pos, ax, one)
+    sx = jnp.where(ax_pos, jnp.floor(dx / ax_s + half), zero)
+    dx = dx - sx * ax
+    return (dx, dy, dz)
+
+
+def _load_box6(box_ref) -> tuple[jax.Array, ...]:
+    """Load all (3 or 6) box components from a 1D Pallas box_ref."""
+    return tuple(
+        _pl_load(box_ref, (jnp.full((1,), k, dtype=jnp.int32),))[0]
+        for k in range(box_ref.shape[0])
     )
 
 
@@ -148,20 +196,28 @@ def _pl_atomic_add_1d(
 
 
 def _normalize_box(box: jax.Array | None, positions: jax.Array) -> tuple[jax.Array, bool]:
-    """Normalize optional box (None, (3,), or diagonal (3, 3)) to (3,) or (B, 3) array."""
+    """Normalize optional box (None, (3,), (6,), or lower-triangular (3, 3)) to (6,) or (B, 6) array [ax, by, cz, bx, cx, cy]."""
     dtype = positions.dtype
     if box is None:
-        b = jnp.zeros((3,), dtype=dtype)
+        b = jnp.zeros((6,), dtype=dtype)
         has_box = False
     else:
         b_raw = jnp.asarray(box, dtype=dtype)
         if b_raw.ndim >= 2 and b_raw.shape[-2:] == (3, 3):
-            b = jnp.diagonal(b_raw, axis1=-2, axis2=-1)
+            ax = b_raw[..., 0, 0]
+            by = b_raw[..., 1, 1]
+            cz = b_raw[..., 2, 2]
+            bx = b_raw[..., 1, 0]
+            cx = b_raw[..., 2, 0]
+            cy = b_raw[..., 2, 1]
+            b = jnp.stack([ax, by, cz, bx, cx, cy], axis=-1)
+        elif b_raw.shape[-1] == 3:
+            b = jnp.concatenate([b_raw, jnp.zeros_like(b_raw)], axis=-1)
         else:
             b = b_raw
         has_box = True
     if b.ndim == 1 and positions.ndim == 3:
-        b = jnp.broadcast_to(b[None, :], (positions.shape[0], 3))
+        b = jnp.broadcast_to(b[None, :], (positions.shape[0], b.shape[-1]))
     return b, has_box
 
 
@@ -177,13 +233,8 @@ def _min_image_host(dr: jax.Array, box: jax.Array, has_box: bool) -> jax.Array:
     """Host-side zero-box-safe minimum image displacement for parameter gradients."""
     if not has_box:
         return dr
-    dtype = dr.dtype
-    zero = jnp.asarray(0.0, dtype=dtype)
-    half = jnp.asarray(0.5, dtype=dtype)
-    one = jnp.asarray(1.0, dtype=dtype)
-    b = box[None, :]
-    b_safe = jnp.where(b > zero, b, one)
-    return jnp.where(b > zero, dr - b * jnp.floor(dr / b_safe + half), dr)
+    dx, dy, dz = _min_image3((dr[..., 0], dr[..., 1], dr[..., 2]), box, has_box)
+    return jnp.stack([dx, dy, dz], axis=-1)
 
 
 # =============================================================================
@@ -271,11 +322,7 @@ def _pallas_bonds_2body_single(
         r_i = (_pl_load(px_ref, (safe_i,)), _pl_load(py_ref, (safe_i,)), _pl_load(pz_ref, (safe_i,)))
         r_j = (_pl_load(px_ref, (safe_j,)), _pl_load(py_ref, (safe_j,)), _pl_load(pz_ref, (safe_j,)))
 
-        bx = _pl_load(box_ref, (jnp.zeros((1,), dtype=jnp.int32),))[0]
-        by = _pl_load(box_ref, (jnp.ones((1,), dtype=jnp.int32),))[0]
-        bz = _pl_load(box_ref, (jnp.full((1,), 2, dtype=jnp.int32),))[0]
-
-        d_vec = _min_image3(_sub3(r_i, r_j), (bx, by, bz), has_box)
+        d_vec = _min_image3(_sub3(r_i, r_j), _load_box6(box_ref), has_box)
         d_sq = _dot3(d_vec, d_vec)
         if dist_eps > 0.0:
             dist = jnp.sqrt(d_sq + jnp.asarray(dist_eps, dtype=dtype))
@@ -617,7 +664,7 @@ def _pallas_exceptions_14_single(
         a_i = _pl_load(idx_i_ref, (offs,))
         a_j = _pl_load(idx_j_ref, (offs,))
         m_val = _pl_load(mask_ref, (offs,))
-        valid = (offs < E_real) & (m_val > zero) & (a_i >= 0) & (a_i < N) & (a_j >= 0) & (a_j < N)
+        valid = (offs < E_real) & (m_val > zero) & (a_i >= 0) & (a_i < N) & (a_j >= 0) & (a_j < N) & (a_i != a_j)
         m_eff = jnp.where(valid, m_val, zero)
 
         max_atom = max(N - 1, 0)
@@ -627,12 +674,9 @@ def _pallas_exceptions_14_single(
         r_i = (_pl_load(px_ref, (safe_i,)), _pl_load(py_ref, (safe_i,)), _pl_load(pz_ref, (safe_i,)))
         r_j = (_pl_load(px_ref, (safe_j,)), _pl_load(py_ref, (safe_j,)), _pl_load(pz_ref, (safe_j,)))
 
-        bx = _pl_load(box_ref, (jnp.zeros((1,), dtype=jnp.int32),))[0]
-        by = _pl_load(box_ref, (jnp.ones((1,), dtype=jnp.int32),))[0]
-        bz = _pl_load(box_ref, (jnp.full((1,), 2, dtype=jnp.int32),))[0]
         lam_v = _pl_load(lam_ref, (jnp.zeros((1,), dtype=jnp.int32),))[0]
 
-        d_vec = _min_image3(_sub3(r_i, r_j), (bx, by, bz), has_box)
+        d_vec = _min_image3(_sub3(r_i, r_j), _load_box6(box_ref), has_box)
         r_sq = _dot3(d_vec, d_vec) + jnp.asarray(1e-12, dtype=dtype)
         dist = jnp.sqrt(r_sq)
 
@@ -712,7 +756,7 @@ def _exceptions_14_param_grads(
     a_i = pairs[:, 0].astype(jnp.int32)
     a_j = pairs[:, 1].astype(jnp.int32)
     m_f = mask.astype(dtype)
-    valid = (m_f > zero) & (a_i >= 0) & (a_i < N) & (a_j >= 0) & (a_j < N)
+    valid = (m_f > zero) & (a_i >= 0) & (a_i < N) & (a_j >= 0) & (a_j < N) & (a_i != a_j)
     m_eff = jnp.where(valid, m_f, zero)
     max_atom = max(N - 1, 0)
     safe_i = jnp.where(valid, jnp.clip(a_i, 0, max_atom), 0)
@@ -985,7 +1029,7 @@ def pallas_exceptions_14(
             N = pos_1.shape[0]
             a_i = pr_1[:, 0]
             a_j = pr_1[:, 1]
-            valid = (m_1 > 0) & (a_i >= 0) & (a_i < N) & (a_j >= 0) & (a_j < N)
+            valid = (m_1 > 0) & (a_i >= 0) & (a_i < N) & (a_j >= 0) & (a_j < N) & (a_i != a_j)
             m_eff = jnp.where(valid, m_1, 0.0)
             max_atom = max(N - 1, 0)
             safe_i = jnp.clip(a_i, 0, max_atom)
@@ -1127,11 +1171,7 @@ def _pallas_pme_exclusion_pairs_single(
         r_i = (_pl_load(px_ref, (safe_i,)), _pl_load(py_ref, (safe_i,)), _pl_load(pz_ref, (safe_i,)))
         r_j = (_pl_load(px_ref, (safe_j,)), _pl_load(py_ref, (safe_j,)), _pl_load(pz_ref, (safe_j,)))
 
-        bx = _pl_load(box_ref, (jnp.zeros((1,), dtype=jnp.int32),))[0]
-        by = _pl_load(box_ref, (jnp.ones((1,), dtype=jnp.int32),))[0]
-        bz = _pl_load(box_ref, (jnp.full((1,), 2, dtype=jnp.int32),))[0]
-
-        d_vec = _min_image3(_sub3(r_i, r_j), (bx, by, bz), has_box)
+        d_vec = _min_image3(_sub3(r_i, r_j), _load_box6(box_ref), has_box)
         r_sq_raw = _dot3(d_vec, d_vec)
         r_raw = jnp.where(r_sq_raw > zero, jnp.sqrt(jnp.where(r_sq_raw > zero, r_sq_raw, one)), zero)
         r_p = r_raw + jnp.asarray(1e-6, dtype=dtype)
@@ -1147,7 +1187,15 @@ def _pallas_pme_exclusion_pairs_single(
         _pl_store(e_out_ref, (jnp.full((1,), pid, dtype=jnp.int32),), jnp.sum(e_p)[None])
 
         # dE_p / dr_p = pref * (2*alpha/sqrt(pi) * r_p * exp(-alpha^2 r_p^2) - erf(alpha r_p)) / r_p^2
-        de_dr = pref * (alpha * two_over_sqrt_pi * r_p * jnp.exp(zero - alpha_r * alpha_r) - erf_val) / (r_p * r_p)
+        de_dr_full = pref * (alpha * two_over_sqrt_pi * r_p * jnp.exp(zero - alpha_r * alpha_r) - erf_val) / (r_p * r_p)
+        de_dr_taylor = (
+            pref
+            * (alpha ** 3)
+            * two_over_sqrt_pi
+            * (zero - r_p)
+            * (jnp.asarray(2.0 / 3.0, dtype=dtype) - jnp.asarray(2.0 / 5.0, dtype=dtype) * (alpha_r * alpha_r))
+        )
+        de_dr = jnp.where(alpha_r < jnp.asarray(0.05, dtype=dtype), de_dr_taylor, de_dr_full)
         r_denom = jnp.maximum(r_raw, jnp.asarray(1e-12, dtype=dtype))
         f_coeff = jnp.where(valid & (r_raw > zero), (zero - de_dr) / r_denom, zero)
         f_i = _scale3(f_coeff, d_vec)
@@ -1589,10 +1637,7 @@ def _pallas_angles_harmonic_single(
         r_j = (_pl_load(px_ref, (safe_j,)), _pl_load(py_ref, (safe_j,)), _pl_load(pz_ref, (safe_j,)))
         r_k = (_pl_load(px_ref, (safe_k,)), _pl_load(py_ref, (safe_k,)), _pl_load(pz_ref, (safe_k,)))
 
-        bx = _pl_load(box_ref, (jnp.zeros((1,), dtype=jnp.int32),))[0]
-        by = _pl_load(box_ref, (jnp.ones((1,), dtype=jnp.int32),))[0]
-        bz = _pl_load(box_ref, (jnp.full((1,), 2, dtype=jnp.int32),))[0]
-        box_xyz = (bx, by, bz)
+        box_xyz = _load_box6(box_ref)
 
         v_ji = _min_image3(_sub3(r_i, r_j), box_xyz, has_box)
         v_jk = _min_image3(_sub3(r_k, r_j), box_xyz, has_box)
@@ -1721,7 +1766,8 @@ def _angles_harmonic_param_grads(
         d_jk = jnp.where(d_sq_jk > zero, jnp.sqrt(jnp.where(d_sq_jk > zero, d_sq_jk, one)), zero)
 
     denom = d_ji * d_jk + jnp.asarray(1e-8, dtype=dtype)
-    cos_th = jnp.clip(jnp.sum(v_ji * v_jk, axis=-1) / denom, -0.999999, 0.999999)
+    c_lim = jnp.asarray(0.999999, dtype=dtype)
+    cos_th = jnp.clip(jnp.sum(v_ji * v_jk, axis=-1) / denom, -c_lim, c_lim)
     theta = jnp.arccos(cos_th)
     dtheta = theta - params[:, 0].astype(dtype)
     k_a = params[:, 1].astype(dtype)
@@ -1948,13 +1994,14 @@ def _torsion_angle_and_atom_grads_vec3(
     x = _dot3(v, w)
     y = _dot3(_cross3(b1_hat, v), w)
 
-    overlap = (~valid) | ((x == zero) & (y == zero))
+    r_xy_sq_raw = x * x + y * y
+    overlap = (~valid) | (r_xy_sq_raw < jnp.asarray(1e-20, dtype=dtype))
     x_s = jnp.where(overlap, one, x)
     y_s = jnp.where(overlap, zero, y)
     phi_raw = jnp.arctan2(y_s, x_s)
     phi = (phi_raw - pi) if b0_is_ji else phi_raw
 
-    r_xy_sq = x_s * x_s + y_s * y_s
+    r_xy_sq = jnp.where(overlap, one, r_xy_sq_raw)
     dphi_dx = jnp.where(overlap, zero, (zero - y_s) / r_xy_sq)
     dphi_dy = jnp.where(overlap, zero, x_s / r_xy_sq)
 
@@ -2096,12 +2143,8 @@ def _pallas_torsions_4body_single(
         r_k = (_pl_load(px_ref, (safe_k,)), _pl_load(py_ref, (safe_k,)), _pl_load(pz_ref, (safe_k,)))
         r_l = (_pl_load(px_ref, (safe_l,)), _pl_load(py_ref, (safe_l,)), _pl_load(pz_ref, (safe_l,)))
 
-        bx = _pl_load(box_ref, (jnp.zeros((1,), dtype=jnp.int32),))[0]
-        by = _pl_load(box_ref, (jnp.ones((1,), dtype=jnp.int32),))[0]
-        bz = _pl_load(box_ref, (jnp.full((1,), 2, dtype=jnp.int32),))[0]
-
         phi, dphi_dri, dphi_drj, dphi_drk, dphi_drl = _torsion_angle_and_atom_grads_vec3(
-            r_i, r_j, r_k, r_l, valid, (bx, by, bz), has_box, b0_is_ji
+            r_i, r_j, r_k, r_l, valid, _load_box6(box_ref), has_box, b0_is_ji
         )
 
         prm0 = _pl_load(p0_ref, (offs,))
@@ -2225,7 +2268,7 @@ def _torsions_4body_param_grads(
     r_k = (positions[safe_k, 0], positions[safe_k, 1], positions[safe_k, 2])
     r_l = (positions[safe_l, 0], positions[safe_l, 1], positions[safe_l, 2])
     phi, _, _, _, _ = _torsion_angle_and_atom_grads_vec3(
-        r_i, r_j, r_k, r_l, valid, (box[0], box[1], box[2]), has_box, b0_is_ji
+        r_i, r_j, r_k, r_l, valid, box, has_box, b0_is_ji
     )
 
     P = params.shape[-1]
@@ -2370,8 +2413,16 @@ def pallas_torsions_4body(
     )
 
     # Flatten multi-term (..., N_dih, T, P) params along the torsion axis
-    unbatched_prm_ndim = prm_arr.ndim - (1 if (positions.ndim == 3 and prm_arr.ndim == 4) else 0)
-    if unbatched_prm_ndim == 3:
+    n_dih = idx_4col.shape[-2]
+    is_multi_term = (prm_arr.ndim == 4) or (
+        prm_arr.ndim == 3
+        and not (
+            positions.ndim == 3
+            and prm_arr.shape[0] == positions.shape[0]
+            and prm_arr.shape[1] == n_dih
+        )
+    )
+    if is_multi_term:
         T = prm_arr.shape[-2]
         P = prm_arr.shape[-1]
         idx_4col = jnp.repeat(idx_4col, T, axis=-2)
@@ -2406,9 +2457,9 @@ def pallas_torsions_4body(
             r_k = (pos_1[safe_k, 0], pos_1[safe_k, 1], pos_1[safe_k, 2])
             r_l = (pos_1[safe_l, 0], pos_1[safe_l, 1], pos_1[safe_l, 2])
             phi, _, _, _, _ = _torsion_angle_and_atom_grads_vec3(
-                r_i, r_j, r_k, r_l, valid, (bx_1[0], bx_1[1], bx_1[2]), has_box, b0_is_ji
+                r_i, r_j, r_k, r_l, valid, bx_1, has_box, b0_is_ji
             )
-            if is_harmonic:
+            if is_harmonic or prm_1.shape[-1] < 3:
                 diff = (phi - prm_1[:, 1] + jnp.pi) % (2.0 * jnp.pi) - jnp.pi
                 return jnp.sum(m_eff * prm_1[:, 0] * diff * diff)
             return jnp.sum(m_eff * prm_1[:, 2] * (1.0 + jnp.cos(prm_1[:, 0] * phi - prm_1[:, 1])))
@@ -2561,10 +2612,7 @@ def _pallas_cmap_torsions_single(
         r3 = (_pl_load(px_ref, (s3,)), _pl_load(py_ref, (s3,)), _pl_load(pz_ref, (s3,)))
         r4 = (_pl_load(px_ref, (s4,)), _pl_load(py_ref, (s4,)), _pl_load(pz_ref, (s4,)))
 
-        bx = _pl_load(box_ref, (jnp.zeros((1,), dtype=jnp.int32),))[0]
-        by = _pl_load(box_ref, (jnp.ones((1,), dtype=jnp.int32),))[0]
-        bz = _pl_load(box_ref, (jnp.full((1,), 2, dtype=jnp.int32),))[0]
-        box_xyz = (bx, by, bz)
+        box_xyz = _load_box6(box_ref)
 
         phi, dphi_0, dphi_1, dphi_2, dphi_3 = _torsion_angle_and_atom_grads_vec3(
             r0, r1, r2, r3, valid, box_xyz, has_box, False
@@ -2724,7 +2772,7 @@ def _cmap_coeffs_grad(
     r2 = (positions[s2, 0], positions[s2, 1], positions[s2, 2])
     r3 = (positions[s3, 0], positions[s3, 1], positions[s3, 2])
     r4 = (positions[s4, 0], positions[s4, 1], positions[s4, 2])
-    box_xyz = (box[0], box[1], box[2])
+    box_xyz = box
     phi, _, _, _, _ = _torsion_angle_and_atom_grads_vec3(r0, r1, r2, r3, valid, box_xyz, has_box, False)
     psi, _, _, _, _ = _torsion_angle_and_atom_grads_vec3(r1, r2, r3, r4, valid, box_xyz, has_box, False)
 
@@ -2931,8 +2979,11 @@ def pallas_cmap_torsions(
         else jnp.asarray(eff_mask, dtype=positions.dtype)
     )
     coeffs_arr = jnp.asarray(eff_coeffs, dtype=positions.dtype)
-    if coeffs_arr.ndim == 3:
-        coeffs_arr = precompute_cmap_coefficients(coeffs_arr).astype(positions.dtype)
+    if coeffs_arr.shape[-1] != 16:
+        if coeffs_arr.ndim == 3:
+            coeffs_arr = precompute_cmap_coefficients(coeffs_arr).astype(positions.dtype)
+        elif coeffs_arr.ndim == 4:
+            coeffs_arr = jax.vmap(precompute_cmap_coefficients)(coeffs_arr).astype(positions.dtype)
 
     if in_export_context():
         disp_fn = _make_disp_fn(box)
@@ -2979,8 +3030,10 @@ def pallas_cmap_torsions(
 
 
 __all__ = [
+    "_load_box6",
     "_min_image3",
     "_min_image_1d",
+    "_min_image_host",
     "_normalize_box",
     "_pl_atomic_add_1d",
     "_triton_erf",

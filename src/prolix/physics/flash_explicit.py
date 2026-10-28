@@ -81,10 +81,25 @@ def _pad_to_tile_multiple(
     N = positions.shape[0]
     n_tiles = -(-N // T)  # ceil division -- N, T are static Python ints (shapes), never traced
     pad_amt = n_tiles * T - N
+    raw_excl_idx = (
+        sys.excl_indices
+        if getattr(sys, "excl_indices", None) is not None
+        else jnp.full((N, 1), -1, dtype=jnp.int32)
+    )
+    raw_excl_vdw = (
+        sys.excl_scales_vdw
+        if getattr(sys, "excl_scales_vdw", None) is not None
+        else jnp.ones((N, raw_excl_idx.shape[1]), dtype=positions.dtype)
+    )
+    raw_excl_elec = (
+        sys.excl_scales_elec
+        if getattr(sys, "excl_scales_elec", None) is not None
+        else jnp.ones((N, raw_excl_idx.shape[1]), dtype=positions.dtype)
+    )
     if pad_amt == 0:
-        excl_scales_elec = sys.excl_scales_elec if include_elec else None
+        excl_scales_elec = raw_excl_elec if include_elec else None
         return (positions, charges, sigmas, epsilons, atom_mask,
-                sys.excl_indices, sys.excl_scales_vdw, excl_scales_elec, n_tiles)
+                raw_excl_idx, raw_excl_vdw, excl_scales_elec, n_tiles)
 
     positions = jnp.pad(positions, ((0, pad_amt), (0, 0)))
     if charges is not None:
@@ -92,10 +107,10 @@ def _pad_to_tile_multiple(
     sigmas = jnp.pad(sigmas, (0, pad_amt))
     epsilons = jnp.pad(epsilons, (0, pad_amt))
     atom_mask = jnp.pad(atom_mask, (0, pad_amt))
-    excl_indices = jnp.pad(sys.excl_indices, ((0, pad_amt), (0, 0)), constant_values=-1)
-    excl_scales_vdw = jnp.pad(sys.excl_scales_vdw, ((0, pad_amt), (0, 0)), constant_values=1.0)
+    excl_indices = jnp.pad(raw_excl_idx, ((0, pad_amt), (0, 0)), constant_values=-1)
+    excl_scales_vdw = jnp.pad(raw_excl_vdw, ((0, pad_amt), (0, 0)), constant_values=1.0)
     excl_scales_elec = (
-        jnp.pad(sys.excl_scales_elec, ((0, pad_amt), (0, 0)), constant_values=1.0)
+        jnp.pad(raw_excl_elec, ((0, pad_amt), (0, 0)), constant_values=1.0)
         if include_elec
         else None
     )
@@ -159,6 +174,8 @@ def chunked_explicit_nonbonded_energy(
     from prolix.pallas_kernels import pallas_flash_explicit_nonbonded, resolve_pallas_mode
 
     pallas_enabled, interpret = resolve_pallas_mode(use_pallas=use_pallas)
+    sc_alpha = float(getattr(sys, "softcore_alpha", 0.5))
+    sc_exp = int(getattr(sys, "softcore_exponent", 2))
     if pallas_enabled:
         return pallas_flash_explicit_nonbonded(
             positions,
@@ -172,6 +189,8 @@ def chunked_explicit_nonbonded_energy(
             box=sys.box_size,
             pme_alpha=float(pme_alpha),
             soft_core_lambda=soft_core_lambda,
+            softcore_alpha=sc_alpha,
+            softcore_exponent=sc_exp,
             interpret=interpret,
         )
 
@@ -186,8 +205,8 @@ def chunked_explicit_nonbonded_energy(
     # cotangent accumulation.
     work_dtype = positions.dtype
     lam = jnp.asarray(soft_core_lambda, dtype=work_dtype)
-    alpha_sc = jnp.asarray(0.5, dtype=work_dtype)
-    soft_term = alpha_sc * jnp.maximum(1.0 - lam, jnp.asarray(1e-8, dtype=work_dtype))
+    alpha_sc = jnp.asarray(sc_alpha, dtype=work_dtype)
+    soft_term = alpha_sc * (jnp.maximum(1.0 - lam, jnp.asarray(1e-8, dtype=work_dtype)) ** sc_exp)
 
     def tile_energy_outer(carry, j_idx):
         start = j_idx * T
@@ -200,25 +219,10 @@ def chunked_explicit_nonbonded_energy(
             m_j = jax.lax.dynamic_slice(atom_mask, (start_idx,), (T,))
 
             # Shared distances (N, T)
-            dr = pos[:, None, :] - r_j[None, :, :]
             if sys.box_size is not None:
-                # Minimum-image convention (debt 805) -- unlike the dense path
-                # (_lj_energy_masked/_coulomb_energy_masked), which computes dr
-                # via displacement_fn (jax_md's periodic space, itself
-                # minimum-image), this tiled kernel computed dr as a raw
-                # Cartesian subtraction with NO periodic wrapping at all. For
-                # a periodic box this is wrong for any pair whose true nearest
-                # image isn't the raw delta -- confirmed on the real 1VII
-                # bundle that 54% of real-atom pairs need wrapping, and that
-                # applying it here reproduces the dense reference to <1e-3
-                # (previously ~5-7% off). Same convention as
-                # pbc.minimum_image_distance, inlined since only the wrapped
-                # delta (not the pbc module's returned norm) is needed here.
-                # backlog #4232: use deterministic tie-breaking (round-half-away-from-zero)
-                # instead of banker's rounding for PBC wrap to resolve ambiguity at box/2 boundary.
-                scaled = dr / sys.box_size
-                wrap_idx = jnp.sign(scaled) * jnp.floor(jnp.abs(scaled) + 0.5)
-                dr = dr - sys.box_size * wrap_idx
+                dr = pbc.minimum_image_displacement(pos[:, None, :], r_j[None, :, :], sys.box_size)
+            else:
+                dr = pos[:, None, :] - r_j[None, :, :]
             dist_sq = jnp.sum(dr ** 2, axis=-1) + 1e-10
             dist = jnp.sqrt(dist_sq)
 
@@ -241,7 +245,7 @@ def chunked_explicit_nonbonded_energy(
             eps_ij = jnp.sqrt(jnp.maximum(epsilons[:, None] * e_j[None, :], 0.0)) * vdw_w
 
             # --- LJ Soft Core (Beutler formulation) ---
-            soft_alpha_lj = jnp.asarray(0.5, dtype=work_dtype) * (1.0 - lam)
+            soft_alpha_lj = jnp.asarray(sc_alpha, dtype=work_dtype) * ((1.0 - lam) ** sc_exp)
             r_over_sig = dist / sig_ij_safe
             r_over_sig_6 = r_over_sig ** 6
             denom_lj = soft_alpha_lj + r_over_sig_6
@@ -290,6 +294,7 @@ def _chunked_lj_only_energy(
     T: int = 256,
     soft_core_lambda: float = 1.0,
     remat: bool = True,
+    use_pallas: bool | None = None,
 ) -> Array:
   """Compute LJ energy only, skipping Coulomb (for EFA integration).
 
@@ -305,10 +310,35 @@ def _chunked_lj_only_energy(
       T: Tile size.
       soft_core_lambda: Soft-core coupling (1.0 = standard).
       remat: If True (default), checkpoint the tile inner.
+      use_pallas: Optional override for Pallas kernel dispatch.
 
   Returns:
       Scalar LJ energy.
   """
+  from prolix.pallas_kernels import pallas_flash_explicit_nonbonded, resolve_pallas_mode
+
+  pallas_enabled, interpret = resolve_pallas_mode(use_pallas=use_pallas)
+  sc_alpha = float(getattr(sys, "softcore_alpha", 0.5))
+  sc_exp = int(getattr(sys, "softcore_exponent", 2))
+  if pallas_enabled:
+    with jax.named_scope("flash_lj_only"):
+      return pallas_flash_explicit_nonbonded(
+          positions,
+          jnp.zeros_like(sigmas),
+          sigmas,
+          epsilons,
+          atom_mask,
+          sys.excl_indices,
+          sys.excl_scales_vdw,
+          sys.excl_scales_elec,
+          box=sys.box_size,
+          pme_alpha=0.0,
+          soft_core_lambda=soft_core_lambda,
+          softcore_alpha=sc_alpha,
+          softcore_exponent=sc_exp,
+          interpret=interpret,
+      )
+
   positions, _, sigmas, epsilons, atom_mask, excl_indices, excl_scales_vdw, _, n_tiles = (
       _pad_to_tile_multiple(positions, None, sigmas, epsilons, atom_mask, sys, T, include_elec=False)
   )
@@ -325,15 +355,10 @@ def _chunked_lj_only_energy(
       e_j = jax.lax.dynamic_slice(epsilons, (start_idx,), (T,))
       m_j = jax.lax.dynamic_slice(atom_mask, (start_idx,), (T,))
 
-      dr = pos[:, None, :] - r_j[None, :, :]
       if sys.box_size is not None:
-        # Minimum-image convention (debt 805) -- see chunked_explicit_nonbonded_energy's
-        # identical fix for the full rationale/evidence.
-        # backlog #4232: use deterministic tie-breaking (round-half-away-from-zero)
-        # instead of banker's rounding for PBC wrap to resolve ambiguity at box/2 boundary.
-        scaled = dr / sys.box_size
-        wrap_idx = jnp.sign(scaled) * jnp.floor(jnp.abs(scaled) + 0.5)
-        dr = dr - sys.box_size * wrap_idx
+        dr = pbc.minimum_image_displacement(pos[:, None, :], r_j[None, :, :], sys.box_size)
+      else:
+        dr = pos[:, None, :] - r_j[None, :, :]
       dist_sq = jnp.sum(dr ** 2, axis=-1) + 1e-10
       dist = jnp.sqrt(dist_sq)
 
@@ -352,7 +377,7 @@ def _chunked_lj_only_energy(
       eps_ij = jnp.sqrt(jnp.maximum(epsilons[:, None] * e_j[None, :], 0.0)) * vdw_w
 
       # LJ Soft Core (Beutler)
-      soft_alpha_lj = jnp.asarray(0.5, dtype=work_dtype) * (1.0 - lam)
+      soft_alpha_lj = jnp.asarray(sc_alpha, dtype=work_dtype) * ((1.0 - lam) ** sc_exp)
       r_over_sig = dist / sig_ij_safe
       r_over_sig_6 = r_over_sig ** 6
       denom_lj = soft_alpha_lj + r_over_sig_6
@@ -472,8 +497,7 @@ def _excl_correction_from_sys(
         r_i = pos[:, None, :]
         r_j = pos[j_safe]
         if sys.box_size is not None:
-            dr = r_i - r_j
-            dr = dr - sys.box_size * jnp.round(dr / sys.box_size)
+            dr = pbc.minimum_image_displacement(r_i, r_j, sys.box_size)
         else:
             dr = r_i - r_j
         dist = jnp.sqrt(jnp.sum(dr ** 2, axis=-1) + jnp.asarray(1e-12, dtype=work_dtype))

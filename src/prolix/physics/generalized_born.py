@@ -299,21 +299,25 @@ def compute_born_radii_neighbor_list(
   """
   radii = jnp.maximum(radii, 1e-6)
   N, _K = neighbor_idx.shape
+  idx_clean = jnp.where(neighbor_idx >= 0, neighbor_idx & ((1 << 29) - 1), neighbor_idx)
+  safe_idx = jnp.clip(idx_clean, 0, max(N - 1, 0))
 
-  neighbor_positions = positions[neighbor_idx]  # (N, K, 3)
+  neighbor_positions = positions[safe_idx]  # (N, K, 3)
   central_positions = positions[:, None, :]  # (N, 1, 3)
 
   delta_positions = central_positions - neighbor_positions  # (N, K, 3)
   distances = safe_norm(delta_positions, axis=-1)  # (N, K)
 
-  mask_neighbors = neighbor_idx < N  # Mask padding
+  mask_neighbors = (
+    (idx_clean >= 0)
+    & (idx_clean < N)
+    & (idx_clean != jnp.arange(N, dtype=neighbor_idx.dtype)[:, None])
+  )
 
   offset_radii = jnp.maximum(radii - dielectric_offset, 1e-4)
 
   # Use scaled_radii for descreening if provided (matches dense path)
   radii_j_raw = scaled_radii if scaled_radii is not None else radii
-  # Clamp neighbor indices for safe gather
-  safe_idx = jnp.minimum(neighbor_idx, N - 1)
   radii_j = radii_j_raw[safe_idx]  # (N, K)
 
   radii_i_broadcast = offset_radii[:, None]  # (N, 1)
@@ -382,13 +386,17 @@ def compute_gb_energy_neighbor_list(
     pair_mask=pair_mask_born,
   )
 
-  neighbor_positions = positions[neighbor_idx]  # (N, K, 3)
+  N = positions.shape[0]
+  idx_clean = jnp.where(neighbor_idx >= 0, neighbor_idx & ((1 << 29) - 1), neighbor_idx)
+  safe_idx = jnp.clip(idx_clean, 0, max(N - 1, 0))
+
+  neighbor_positions = positions[safe_idx]  # (N, K, 3)
   central_positions = positions[:, None, :]  # (N, 1, 3)
   delta_positions = central_positions - neighbor_positions  # (N, K, 3)
   distances = safe_norm(delta_positions, axis=-1)  # (N, K)
 
   born_radii_i = born_radii[:, None]  # (N, 1)
-  born_radii_j = born_radii[neighbor_idx]  # (N, K)
+  born_radii_j = born_radii[safe_idx]  # (N, K)
 
   effective_distances = f_gb(distances, born_radii_i, born_radii_j)
 
@@ -396,13 +404,16 @@ def compute_gb_energy_neighbor_list(
   prefactor = -0.5 * constants.COULOMB_CONSTANT * tau
 
   charges_i = charges[:, None]  # (N, 1)
-  charges_j = charges[neighbor_idx]  # (N, K)
+  charges_j = charges[safe_idx]  # (N, K)
   charge_products = charges_i * charges_j
 
   energy_terms = charge_products / effective_distances
 
-  N = positions.shape[0]
-  mask_neighbors = neighbor_idx < N
+  mask_neighbors = (
+    (idx_clean >= 0)
+    & (idx_clean < N)
+    & (idx_clean != jnp.arange(N, dtype=neighbor_idx.dtype)[:, None])
+  )
   energy_terms = jnp.where(mask_neighbors, energy_terms, 0.0)
   if pair_mask_energy is not None:
     energy_terms = energy_terms * pair_mask_energy
@@ -798,35 +809,56 @@ def _gb_split_bwd(residuals, g):
         scaled_radii, dielectric_offset, solvent_dielectric, solute_dielectric,
     ) = residuals
 
-    # Stage 1: VJP of dense Coulomb w.r.t. (positions, born_radii)
-    # This gives us dE/dr_direct AND dE/dB in one backward pass
+    # Stage 1: VJP of dense Coulomb w.r.t. (positions, charges, born_radii)
+    # This gives us dE/dr_direct, dE/dq, AND dE/dB in one backward pass
     _, coulomb_vjp_fn = jax.vjp(
-        lambda pos, br: _dense_coulomb_from_born_radii(
-            pos, charges, br,
+        lambda pos, q, br: _dense_coulomb_from_born_radii(
+            pos, q, br,
             solvent_dielectric=solvent_dielectric,
             solute_dielectric=solute_dielectric,
         ),
-        positions, born_radii,
+        positions, charges, born_radii,
     )
-    dE_dr_direct, dE_dB = coulomb_vjp_fn(jnp.ones((), dtype=positions.dtype))
+    dE_dr_direct, dE_dq, dE_dB = coulomb_vjp_fn(jnp.ones((), dtype=positions.dtype))
 
-    # Stage 2: VJP of NL Born radii w.r.t. positions
+    # Stage 2: VJP of NL Born radii w.r.t. (positions, radii, scaled_radii)
     # Computes dB/dr · dE/dB (chain rule product) via NL — cheap!
-    _, born_vjp_fn = jax.vjp(
-        lambda pos: compute_born_radii_neighbor_list(
-            pos, radii, neighbor_idx,
-            dielectric_offset=dielectric_offset,
-            scaled_radii=scaled_radii,
-        ),
-        positions,
-    )
-    dE_dr_via_born = born_vjp_fn(dE_dB)[0]
+    if scaled_radii is not None:
+        _, born_vjp_fn = jax.vjp(
+            lambda pos, r, sr: compute_born_radii_neighbor_list(
+                pos, r, neighbor_idx,
+                dielectric_offset=dielectric_offset,
+                scaled_radii=sr,
+            ),
+            positions, radii, scaled_radii,
+        )
+        dE_dr_via_born, dE_drad, dE_dsr = born_vjp_fn(dE_dB)
+        grad_sr = g * dE_dsr
+    else:
+        _, born_vjp_fn = jax.vjp(
+            lambda pos, r: compute_born_radii_neighbor_list(
+                pos, r, neighbor_idx,
+                dielectric_offset=dielectric_offset,
+                scaled_radii=None,
+            ),
+            positions, radii,
+        )
+        dE_dr_via_born, dE_drad = born_vjp_fn(dE_dB)
+        grad_sr = None
 
     # Stage 3: Total = direct term + chain rule term
     total_grad = dE_dr_direct + dE_dr_via_born
 
-    # Only positions gets gradient
-    return (g * total_grad, None, None, None, None, None, None, None)
+    return (
+        g * total_grad,
+        g * dE_dq,
+        g * dE_drad,
+        jnp.zeros_like(neighbor_idx),
+        grad_sr,
+        None,
+        None,
+        None,
+    )
 
 
 gb_energy_split_vjp.defvjp(_gb_split_fwd, _gb_split_bwd)

@@ -557,6 +557,7 @@ def run_tier3_throughput(sizes: list[int], n_steps: int, repeats: int, interpret
             out = fn(s["pos"], m_init)
             jax.block_until_ready(out)
             compile_s = time.perf_counter() - t0
+            jax.block_until_ready(fn(s["pos"], m_init))
             times = []
             for _ in range(repeats):
                 t0 = time.perf_counter()
@@ -664,6 +665,7 @@ def run_tier4_full_potential_throughput(
             out = fn(s["pos"], mom0_akma)
             jax.block_until_ready(out)
             compile_s = time.perf_counter() - t0
+            jax.block_until_ready(fn(s["pos"], mom0_akma))
             times = []
             for _ in range(repeats):
                 t0 = time.perf_counter()

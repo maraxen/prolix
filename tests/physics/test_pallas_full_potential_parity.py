@@ -669,6 +669,19 @@ def test_full_system_wiring_parity():
     impropers = jnp.array([[1, 0, 2, 3]], dtype=jnp.int32)
     improper_params = jnp.array([[2.0, 3.14159265, 2.0]], dtype=jnp.float32)
     improper_mask = jnp.array([True])
+    ub_bonds = jnp.array([[0, 2], [3, 5]], dtype=jnp.int32)
+    ub_params = jnp.array([[2.4, 50.0], [2.5, 45.0]], dtype=jnp.float32)
+    ub_mask = jnp.array([True, True])
+    cmap_torsions = jnp.array([[0, 1, 2, 3, 1, 2, 3, 4]], dtype=jnp.int32)
+    cmap_indices = jnp.array([0], dtype=jnp.int32)
+    cmap_mask = jnp.array([True])
+    raw_grids = jnp.asarray(rng.normal(0.0, 0.5, size=(1, 24, 24)).astype(np.float32))
+    cmap_coeffs = precompute_cmap_coefficients(raw_grids)
+    exception_pairs = jnp.array([[0, 3], [1, 4]], dtype=jnp.int32)
+    exception_sigmas = jnp.array([2.8, 2.9], dtype=jnp.float32)
+    exception_epsilons = jnp.array([0.08, 0.09], dtype=jnp.float32)
+    exception_chargeprods = jnp.array([-0.05, 0.04], dtype=jnp.float32)
+    exception_mask = jnp.array([True, True])
 
     sys = dataclasses.replace(
         sys,
@@ -683,6 +696,18 @@ def test_full_system_wiring_parity():
         impropers=impropers,
         improper_params=improper_params,
         improper_mask=improper_mask,
+        urey_bradley_bonds=ub_bonds,
+        urey_bradley_params=ub_params,
+        urey_bradley_mask=ub_mask,
+        cmap_torsions=cmap_torsions,
+        cmap_indices=cmap_indices,
+        cmap_mask=cmap_mask,
+        cmap_coeffs=cmap_coeffs,
+        exception_pairs=exception_pairs,
+        exception_sigmas=exception_sigmas,
+        exception_epsilons=exception_epsilons,
+        exception_chargeprods=exception_chargeprods,
+        exception_mask=exception_mask,
     )
 
     disp_pbc, _ = space.periodic(jnp.asarray(sys.box_size))
@@ -768,6 +793,29 @@ def test_full_system_wiring_parity():
     )(sys.positions, jnp.array(0.8, dtype=jnp.float32))
     np.testing.assert_allclose(e_fet_p, e_fet_r, rtol=1e-4, atol=1e-4)
     np.testing.assert_allclose(gf_r_p[:n_real], gf_r_r[:n_real], rtol=1e-4, atol=1e-4)
+    np.testing.assert_allclose(gf_l_p, gf_l_r, rtol=1e-4, atol=1e-4)
+
+    # 4b. single_padded_energy with neighbor=None (dense O(N^2) implicit solvent path)
+    e_dense_p, g_dense_p = jax.value_and_grad(
+        lambda r: single_padded_energy(
+            dataclasses.replace(sys, positions=r),
+            disp_free,
+            implicit_solvent=True,
+            neighbor=None,
+            use_pallas=True,
+        )
+    )(sys.positions)
+    e_dense_r, g_dense_r = jax.value_and_grad(
+        lambda r: single_padded_energy(
+            dataclasses.replace(sys, positions=r),
+            disp_free,
+            implicit_solvent=True,
+            neighbor=None,
+            use_pallas=False,
+        )
+    )(sys.positions)
+    np.testing.assert_allclose(e_dense_p, e_dense_r, rtol=1e-4, atol=1e-4)
+    np.testing.assert_allclose(g_dense_p[:n_real], g_dense_r[:n_real], rtol=1e-4, atol=1e-4)
 
     # 5. make_langevin_step and make_langevin_step_nl
     state0 = IntegratorState(
@@ -784,6 +832,13 @@ def test_full_system_wiring_parity():
     st_r = step_nl_r(sys, state0, nbr_idx)
     np.testing.assert_allclose(st_p.positions[:n_real], st_r.positions[:n_real], rtol=1e-4, atol=1e-4)
     np.testing.assert_allclose(st_p.force[:n_real], st_r.force[:n_real], rtol=1e-4, atol=1e-4)
+
+    step_dense_p = make_langevin_step(0.001, 0.6, 1.0, use_pallas=True)
+    step_dense_r = make_langevin_step(0.001, 0.6, 1.0, use_pallas=False)
+    st_dp = step_dense_p(sys, state0)
+    st_dr = step_dense_r(sys, state0)
+    np.testing.assert_allclose(st_dp.positions[:n_real], st_dr.positions[:n_real], rtol=1e-4, atol=1e-4)
+    np.testing.assert_allclose(st_dp.force[:n_real], st_dr.force[:n_real], rtol=1e-4, atol=1e-4)
 
 
 def test_system_make_energy_fn_and_pure_parity():
@@ -811,6 +866,12 @@ def test_system_make_energy_fn_and_pure_parity():
     dihedral_params = jnp.array([[[2.0, 0.4, 1.8]]], dtype=jnp.float32)
     impropers = jnp.array([[1, 0, 2, 3]], dtype=jnp.int32)
     harm_imp_params = jnp.array([[[40.0, 0.1]]], dtype=jnp.float32)
+    ub_bonds = jnp.array([[0, 2]], dtype=jnp.int32)
+    ub_params = jnp.array([[2.4, 55.0]], dtype=jnp.float32)
+    cmap_torsions = jnp.array([[0, 1, 2, 3, 4]], dtype=jnp.int32)
+    cmap_indices = jnp.array([0], dtype=jnp.int32)
+    raw_grids = jnp.asarray(rng.normal(0.0, 0.5, size=(1, 24, 24)).astype(np.float32))
+    cmap_coeffs = precompute_cmap_coefficients(raw_grids)
 
     excl = topology.find_bonded_exclusions(np.asarray(bonds), N)
     excl_spec = ExclusionSpec(
@@ -819,10 +880,10 @@ def test_system_make_energy_fn_and_pure_parity():
         scale_14_elec=0.83333333,
         scale_14_vdw=0.5,
         n_atoms=N,
-        exception_pairs=jnp.zeros((0, 2), dtype=jnp.int32),
-        exception_sigmas=jnp.zeros((0,), dtype=jnp.float32),
-        exception_epsilons=jnp.zeros((0,), dtype=jnp.float32),
-        exception_chargeprods=jnp.zeros((0,), dtype=jnp.float32),
+        exception_pairs=jnp.array([[0, 3]], dtype=jnp.int32),
+        exception_sigmas=jnp.array([2.8], dtype=jnp.float32),
+        exception_epsilons=jnp.array([0.08], dtype=jnp.float32),
+        exception_chargeprods=jnp.array([-0.05], dtype=jnp.float32),
     )
 
     K = 9
@@ -849,6 +910,11 @@ def test_system_make_energy_fn_and_pure_parity():
         "dihedral_params": dihedral_params,
         "impropers": impropers,
         "improper_params": harm_imp_params,
+        "urey_bradley_bonds": ub_bonds,
+        "urey_bradley_params": ub_params,
+        "cmap_torsions": cmap_torsions,
+        "cmap_indices": cmap_indices,
+        "cmap_coeffs": cmap_coeffs,
     }
 
     # 1. make_energy_fn (implicit solvent + neighbor list + return_decomposed=True)
@@ -944,3 +1010,248 @@ def test_system_make_energy_fn_and_pure_parity():
     np.testing.assert_allclose(vp_pme, vr_pme, rtol=1e-4, atol=1e-4)
     np.testing.assert_allclose(gp_pme_r, gr_pme_r, rtol=1e-4, atol=1e-4)
     np.testing.assert_allclose(gp_pme_dp.charges, gr_pme_dp.charges, rtol=1e-4, atol=1e-4)
+
+
+def test_pallas_nonbonded_nl_param_grads_multichunk_and_edge_cases():
+    """Verify pallas_nonbonded_nl 6-tuple param grads, N > 256 multi-chunk scan, K=0, M_excl=0, and export reference."""
+    rng = np.random.default_rng(801)
+    N = 16
+    K = 14
+    box = jnp.array([20.0, 20.0, 20.0], dtype=jnp.float32)
+    pos = jnp.asarray(rng.uniform(1.0, 18.0, size=(N, 3)).astype(np.float32))
+    q = jnp.asarray(rng.uniform(-0.5, 0.5, size=(N,)).astype(np.float32))
+    sig = jnp.asarray(rng.uniform(2.4, 3.2, size=(N,)).astype(np.float32))
+    eps = jnp.asarray(rng.uniform(0.05, 0.2, size=(N,)).astype(np.float32))
+    mask = jnp.arange(N) < 14
+
+    nbr_np = np.full((N, K), N, dtype=np.int32)
+    for i in range(14):
+        col = 0
+        for j in range(14):
+            if i != j and col < K:
+                nbr_np[i, col] = j
+                col += 1
+    nbr_idx = jnp.asarray(nbr_np)
+
+    excl_idx = jnp.full((N, 4), -1, dtype=jnp.int32)
+    excl_idx = excl_idx.at[0, 0].set(1).at[1, 0].set(0).at[2, 0].set(3).at[3, 0].set(2)
+    excl_vdw = jnp.ones((N, 4), dtype=jnp.float32).at[0, 0].set(0.5).at[1, 0].set(0.5).at[2, 0].set(0.0).at[3, 0].set(0.0)
+    excl_elec = jnp.ones((N, 4), dtype=jnp.float32).at[0, 0].set(0.8333333).at[1, 0].set(0.8333333).at[2, 0].set(0.0).at[3, 0].set(0.0)
+    lam = jnp.array(0.75, dtype=jnp.float32)
+
+    def _ref_nb_nl(r, q_, s_, e_, sv, se, l_, *, box_arg, inc_erf, pme_a=0.34):
+        with export_context():
+            return pallas_nonbonded_nl(
+                r, q_, s_, e_, mask, nbr_idx, excl_idx, sv, se,
+                box=box_arg, pme_alpha=pme_a, cutoff=9.0, lj_switch_width=1.5,
+                soft_core_lambda=l_, include_pme_excl_erf=inc_erf,
+            )
+
+    for inc_erf in (True, False):
+        vp, gp = jax.value_and_grad(
+            lambda r, q_, s_, e_, sv, se, l_: pallas_nonbonded_nl(
+                r, q_, s_, e_, mask, nbr_idx, excl_idx, sv, se,
+                box=box, pme_alpha=0.34, cutoff=9.0, lj_switch_width=1.5,
+                soft_core_lambda=l_, include_pme_excl_erf=inc_erf,
+            ),
+            argnums=(0, 1, 2, 3, 4, 5, 6),
+        )(pos, q, sig, eps, excl_vdw, excl_elec, lam)
+
+        vr, gr = jax.value_and_grad(
+            lambda r, q_, s_, e_, sv, se, l_: _ref_nb_nl(
+                r, q_, s_, e_, sv, se, l_, box_arg=box, inc_erf=inc_erf
+            ),
+            argnums=(0, 1, 2, 3, 4, 5, 6),
+        )(pos, q, sig, eps, excl_vdw, excl_elec, lam)
+
+        np.testing.assert_allclose(vp, vr, rtol=1e-4, atol=1e-4)
+        for idx_g in range(7):
+            np.testing.assert_allclose(gp[idx_g], gr[idx_g], rtol=1e-4, atol=1e-4)
+
+    # Multi-chunk N = 300 (> _NB_ATOM_CHUNK = 256) with symmetric neighbor pairs
+    N_mc = 300
+    box_mc = jnp.array([40.0, 40.0, 40.0], dtype=jnp.float32)
+    pos_mc = jnp.asarray(rng.uniform(1.0, 38.0, size=(N_mc, 3)).astype(np.float32))
+    q_mc = jnp.asarray(rng.uniform(-0.4, 0.4, size=(N_mc,)).astype(np.float32))
+    sig_mc = jnp.asarray(rng.uniform(2.5, 3.1, size=(N_mc,)).astype(np.float32))
+    eps_mc = jnp.asarray(rng.uniform(0.05, 0.15, size=(N_mc,)).astype(np.float32))
+    mask_mc = jnp.ones((N_mc,), dtype=bool)
+    shifts = np.array([1, -1, 2, -2, 3, -3, 4, -4], dtype=np.int32)
+    nbr_mc = jnp.asarray((np.arange(N_mc, dtype=np.int32)[:, None] + shifts[None, :]) % N_mc)
+    excl_mc_idx = jnp.full((N_mc, 2), -1, dtype=jnp.int32)
+    excl_mc_s = jnp.ones((N_mc, 2), dtype=jnp.float32)
+
+    vp_mc, gp_mc = jax.value_and_grad(
+        lambda r: pallas_nonbonded_nl(
+            r, q_mc, sig_mc, eps_mc, mask_mc, nbr_mc, excl_mc_idx, excl_mc_s, excl_mc_s,
+            box=box_mc, pme_alpha=0.34, cutoff=9.0,
+        )
+    )(pos_mc)
+    def _ref_mc(r):
+        with export_context():
+            return pallas_nonbonded_nl(
+                r, q_mc, sig_mc, eps_mc, mask_mc, nbr_mc, excl_mc_idx, excl_mc_s, excl_mc_s,
+                box=box_mc, pme_alpha=0.34, cutoff=9.0,
+            )
+    vr_mc, gr_mc = jax.value_and_grad(_ref_mc)(pos_mc)
+    np.testing.assert_allclose(vp_mc, vr_mc, rtol=1e-4, atol=1e-4)
+    np.testing.assert_allclose(gp_mc, gr_mc, rtol=1e-4, atol=1e-4)
+
+    # K == 0 and M_excl == 0 edge cases
+    nbr_k0 = jnp.full((N, 0), N, dtype=jnp.int32)
+    excl_m0_idx = jnp.zeros((N, 0), dtype=jnp.int32)
+    excl_m0_s = jnp.zeros((N, 0), dtype=jnp.float32)
+    vp_0, gp_0 = jax.value_and_grad(
+        lambda r: pallas_nonbonded_nl(
+            r, q, sig, eps, mask, nbr_k0, excl_m0_idx, excl_m0_s, excl_m0_s, box=box
+        )
+    )(pos)
+    assert float(vp_0) == 0.0
+    np.testing.assert_allclose(gp_0, 0.0, atol=1e-7)
+
+
+def test_pallas_flash_explicit_nonbonded_param_grads_and_softcore():
+    """Verify pallas_flash_explicit_nonbonded gradients wrt pos, charges, sigmas, epsilons, and soft_core_lambda."""
+    from types import SimpleNamespace
+
+    rng = np.random.default_rng(802)
+    N = 16
+    box = jnp.array([20.0, 20.0, 20.0], dtype=jnp.float32)
+    pos = jnp.asarray(rng.uniform(1.0, 18.0, size=(N, 3)).astype(np.float32))
+    q = jnp.asarray(rng.uniform(-0.5, 0.5, size=(N,)).astype(np.float32))
+    sig = jnp.asarray(rng.uniform(2.4, 3.2, size=(N,)).astype(np.float32))
+    eps = jnp.asarray(rng.uniform(0.05, 0.2, size=(N,)).astype(np.float32))
+    mask = jnp.arange(N) < 12
+    excl_idx = jnp.full((N, 4), -1, dtype=jnp.int32).at[0, 0].set(1).at[1, 0].set(0)
+    excl_vdw = jnp.ones((N, 4), dtype=jnp.float32).at[0, 0].set(0.5).at[1, 0].set(0.5)
+    excl_elec = jnp.ones((N, 4), dtype=jnp.float32).at[0, 0].set(0.8333333).at[1, 0].set(0.8333333)
+    lam = jnp.array(0.7, dtype=jnp.float32)
+
+    sys_stub = SimpleNamespace(
+        excl_indices=excl_idx,
+        excl_scales_vdw=excl_vdw,
+        excl_scales_elec=excl_elec,
+        box_size=box,
+    )
+
+    vp, gp = jax.value_and_grad(
+        lambda r, q_, s_, e_, l_: pallas_flash_explicit_nonbonded(
+            r, q_, s_, e_, mask, excl_idx, excl_vdw, excl_elec,
+            box=box, pme_alpha=0.34, soft_core_lambda=l_,
+        ),
+        argnums=(0, 1, 2, 3, 4),
+    )(pos, q, sig, eps, lam)
+
+    vr, gr = jax.value_and_grad(
+        lambda r, q_, s_, e_, l_: chunked_explicit_nonbonded_energy(
+            r, q_, s_, e_, mask, sys_stub, T=16, soft_core_lambda=l_, pme_alpha=0.34, use_pallas=False
+        ),
+        argnums=(0, 1, 2, 3, 4),
+    )(pos, q, sig, eps, lam)
+
+    np.testing.assert_allclose(vp, vr, rtol=1e-4, atol=1e-4)
+    for idx_g in range(5):
+        np.testing.assert_allclose(gp[idx_g], gr[idx_g], rtol=1e-4, atol=1e-4)
+
+
+def test_multiblock_collinear_torsion_and_triclinic_box_parity():
+    """Verify multi-block M=100 (> 64), collinear torsion (x=y=0), and lower-triangular (3, 3) triclinic box parity."""
+    from prolix.physics.pbc import minimum_image_displacement
+
+    rng = np.random.default_rng(803)
+    N = 50
+    M = 100
+    pos = jnp.asarray(rng.uniform(1.0, 18.0, size=(N, 3)).astype(np.float32))
+
+    # 1. Multi-block M = 100 > _BONDED_BLOCK_M (64)
+    idx_i = rng.integers(0, N, size=M, dtype=np.int32)
+    idx_j = (idx_i + 1) % N
+    bonds_m = jnp.asarray(np.stack([idx_i, idx_j], axis=-1))
+    bpar_m = jnp.asarray(np.column_stack([np.full(M, 1.5, np.float32), np.full(M, 250.0, np.float32)]))
+    bmask_m = jnp.ones((M,), dtype=jnp.float32)
+
+    disp_free, _ = space.free()
+    vp_b, gp_b = jax.value_and_grad(lambda r: pallas_bonds_2body(r, bonds_m, bpar_m, bmask_m, dist_eps=1e-10))(pos)
+    vr_b, gr_b = jax.value_and_grad(lambda r: _bond_energy_masked(r, bonds_m, bpar_m, bmask_m, disp_free))(pos)
+    np.testing.assert_allclose(vp_b, vr_b, rtol=1e-5, atol=1e-5)
+    np.testing.assert_allclose(gp_b, gr_b, rtol=1e-4, atol=1e-5)
+
+    # 2. Collinear torsion (atoms 0,1,2,3 on x-axis so cross products n1=0, n2=0 => x=0, y=0)
+    pos_col = jnp.array(
+        [[0.0, 0.0, 0.0], [1.5, 0.0, 0.0], [3.0, 0.0, 0.0], [4.5, 0.0, 0.0]],
+        dtype=jnp.float32,
+    )
+    dih_col = jnp.array([[0, 1, 2, 3]], dtype=jnp.int32)
+    dpar_col = jnp.array([[2.0, 0.5, 1.5]], dtype=jnp.float32)
+    _, g_dih_col = jax.value_and_grad(lambda r: pallas_torsions_4body(r, dih_col, dpar_col))(pos_col)
+    assert bool(jnp.all(jnp.isfinite(g_dih_col)))
+    np.testing.assert_allclose(g_dih_col, 0.0, atol=1e-6)
+
+    # 3. Lower-triangular (3, 3) triclinic box parity across bonded & nonbonded kernels
+    triclinic_box = jnp.array(
+        [[20.0, 0.0, 0.0], [3.5, 21.0, 0.0], [2.0, -2.5, 22.0]],
+        dtype=jnp.float32,
+    )
+    disp_tri = lambda r1, r2: minimum_image_displacement(r1, r2, triclinic_box)
+    pos_tri = jnp.asarray(rng.uniform(0.5, 19.5, size=(12, 3)).astype(np.float32))
+    bonds_tri = jnp.array([[0, 1], [2, 3], [4, 5], [6, 7]], dtype=jnp.int32)
+    bpar_tri = jnp.array([[1.5, 300.0], [1.4, 280.0], [1.6, 310.0], [1.5, 290.0]], dtype=jnp.float32)
+    bmask_tri = jnp.ones((4,), dtype=jnp.float32)
+
+    vp_tri, gp_tri = jax.value_and_grad(
+        lambda r: pallas_bonds_2body(r, bonds_tri, bpar_tri, bmask_tri, box=triclinic_box, dist_eps=1e-10)
+    )(pos_tri)
+    vr_tri, gr_tri = jax.value_and_grad(
+        lambda r: _bond_energy_masked(r, bonds_tri, bpar_tri, bmask_tri, disp_tri)
+    )(pos_tri)
+    np.testing.assert_allclose(vp_tri, vr_tri, rtol=1e-5, atol=1e-5)
+    np.testing.assert_allclose(gp_tri, gr_tri, rtol=1e-4, atol=1e-5)
+
+
+def test_bundle_md_energy_force_and_bonded_parity():
+    """Verify energy_fn_from_bundle, force_fn_from_bundle, and bonded_energy_fn_from_bundle parity."""
+    from prolix.physics.system import make_bundle_from_system
+    from prolix.typing import PhysicsSystem
+
+    rng = np.random.default_rng(804)
+    N = 8
+    pos = jnp.asarray(rng.uniform(2.0, 12.0, size=(N, 3)).astype(np.float32))
+    sys_dict = {
+        "charges": jnp.asarray(rng.uniform(-0.3, 0.3, size=(N,)).astype(np.float32)),
+        "sigmas": jnp.asarray(rng.uniform(2.5, 3.1, size=(N,)).astype(np.float32)),
+        "epsilons": jnp.asarray(rng.uniform(0.05, 0.15, size=(N,)).astype(np.float32)),
+        "radii": jnp.asarray(rng.uniform(1.4, 1.8, size=(N,)).astype(np.float32)),
+        "scaled_radii": jnp.asarray(rng.uniform(1.1, 1.5, size=(N,)).astype(np.float32)),
+        "bonds": jnp.array([[0, 1], [1, 2], [2, 3]], dtype=jnp.int32),
+        "bond_params": jnp.array([[1.5, 300.0], [1.4, 280.0], [1.5, 310.0]], dtype=jnp.float32),
+        "angles": jnp.array([[0, 1, 2], [1, 2, 3]], dtype=jnp.int32),
+        "angle_params": jnp.array([[1.9, 60.0], [1.85, 55.0]], dtype=jnp.float32),
+        "dihedrals": jnp.array([[0, 1, 2, 3]], dtype=jnp.int32),
+        "dihedral_params": jnp.array([[[2.0, 0.3, 1.5]]], dtype=jnp.float32),
+        "impropers": jnp.array([[1, 0, 2, 3]], dtype=jnp.int32),
+        "improper_params": jnp.array([[[2.0, 3.1415927, 2.0]]], dtype=jnp.float32),
+        "urey_bradley_bonds": jnp.array([[0, 2]], dtype=jnp.int32),
+        "urey_bradley_params": jnp.array([[2.4, 50.0]], dtype=jnp.float32),
+    }
+    psys = PhysicsSystem.from_dict(sys_dict, pos, box_size=None, cutoff_distance=9.0)
+    bundle = make_bundle_from_system(psys, pos)
+
+    bef_p = bonded_energy_fn_from_bundle(bundle, use_pallas=True)
+    bef_r = bonded_energy_fn_from_bundle(bundle, use_pallas=False)
+    np.testing.assert_allclose(bef_p(pos), bef_r(pos), rtol=1e-5, atol=1e-5)
+
+    ef_p = energy_fn_from_bundle(bundle, use_pallas=True)
+    ef_r = energy_fn_from_bundle(bundle, use_pallas=False)
+    np.testing.assert_allclose(ef_p(pos), ef_r(pos), rtol=1e-4, atol=1e-4)
+
+    box = jnp.array([20.0, 20.0, 20.0], dtype=jnp.float32)
+    psys_pbc = PhysicsSystem.from_dict(sys_dict, pos, box_size=box, cutoff_distance=9.0)
+    bundle_pbc = make_bundle_from_system(psys_pbc, pos)
+    bundle_pbc = dataclasses.replace(
+        bundle_pbc,
+        shape_spec=dataclasses.replace(bundle_pbc.shape_spec, has_pbc=True, has_implicit_solvent=False),
+    )
+    ff_p = force_fn_from_bundle(bundle_pbc, use_pallas=True)
+    ff_r = force_fn_from_bundle(bundle_pbc, use_pallas=False)
+    np.testing.assert_allclose(ff_p(pos), ff_r(pos), rtol=1e-4, atol=1e-4)
+

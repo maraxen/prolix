@@ -153,7 +153,7 @@ def test_flash_explicit_energy_lowers_portably_with_pallas_requested(padded_sys)
 
 
 def test_batched_nl_energy_and_grad_lower_portably(padded_sys):
-    from prolix.batched_energy import single_padded_energy_nl
+    from prolix.batched_energy import single_padded_energy, single_padded_energy_nl
 
     sys = padded_sys
     n = sys.n_padded_atoms
@@ -169,11 +169,24 @@ def test_batched_nl_energy_and_grad_lower_portably(padded_sys):
 
     def e(p):
         return single_padded_energy_nl(
-            sys.replace(positions=p), nbr, disp, implicit_solvent=False
+            sys.replace(positions=p), nbr, disp, implicit_solvent=False, use_pallas=True
         )
 
-    assert_portable(lowered_text(e, sys.positions), "single_padded_energy_nl")
-    assert_portable(lowered_text(jax.grad(e), sys.positions), "single_padded_energy_nl grad")
+    assert_portable(lowered_text(e, sys.positions), "single_padded_energy_nl (use_pallas=True)")
+    assert_portable(lowered_text(jax.grad(e), sys.positions), "single_padded_energy_nl grad (use_pallas=True)")
+
+    def e_spe(p):
+        return single_padded_energy(
+            sys.replace(positions=p),
+            disp,
+            implicit_solvent=False,
+            neighbor=nbr,
+            use_pallas=True,
+            use_pallas_pme=True,
+        )
+
+    assert_portable(lowered_text(e_spe, sys.positions), "single_padded_energy (use_pallas=True)")
+    assert_portable(lowered_text(jax.grad(e_spe), sys.positions), "single_padded_energy grad (use_pallas=True)")
 
 
 def test_export_energy_fn_artifact_is_portable_and_matches_jit():
@@ -210,7 +223,7 @@ def test_jax_export_serialize_roundtrip_matches(padded_sys):
 
     def e(p):
         return single_padded_energy_nl(
-            sys.replace(positions=p), nbr, disp, implicit_solvent=False
+            sys.replace(positions=p), nbr, disp, implicit_solvent=False, use_pallas=True
         )
 
     vg = jax.value_and_grad(e)

@@ -297,8 +297,27 @@ def build_full_potential_topology(s: dict, seed: int = 0) -> dict:
     exception_chargeprods = jnp.full((n_exc,), -0.04, dtype=jnp.float32)
     exception_mask = jnp.ones((n_exc,), dtype=jnp.float32)
 
+    # Realistic (N, 32) exclusion table matching 1-2, 1-3, and 1-4 chain neighbors
+    max_excl = 32
+    excl_idx_np = np.full((n, max_excl), -1, dtype=np.int32)
+    excl_vdw_np = np.ones((n, max_excl), dtype=np.float32)
+    excl_elec_np = np.ones((n, max_excl), dtype=np.float32)
+    for delta, col_base, s_v, s_e in ((1, 0, 0.0, 0.0), (2, 2, 0.0, 0.0), (3, 4, 0.5, 0.8333333)):
+        excl_idx_np[:, col_base] = (idx + delta) % n
+        excl_idx_np[:, col_base + 1] = (idx - delta) % n
+        excl_vdw_np[:, col_base : col_base + 2] = s_v
+        excl_elec_np[:, col_base : col_base + 2] = s_e
+
+    radii = jnp.asarray(rng.uniform(1.4, 1.85, size=n).astype(np.float32))
+    scaled_radii = radii * 0.85
+
     return {
         **s,
+        "excl_idx": jnp.asarray(excl_idx_np),
+        "excl_vdw": jnp.asarray(excl_vdw_np),
+        "excl_elec": jnp.asarray(excl_elec_np),
+        "radii": radii,
+        "scaled_radii": scaled_radii,
         "bonds": bonds,
         "bond_params": bond_params,
         "bond_mask": bond_mask,
@@ -429,6 +448,107 @@ def make_full_potential_fns(s: dict, interpret: bool):
     return jax.jit(jax.value_and_grad(xla_fn)), jax.jit(jax.value_and_grad(pallas_fn))
 
 
+def make_full_implicit_fns(s: dict, interpret: bool):
+    """Full implicit-solvent potential (bonded + CMAP + 1-4 + OBC-II GB/ACE + SASA + NL nonbonded): XLA vs Pallas."""
+    from prolix.batched_energy import (
+        _angle_energy_masked,
+        _bond_energy_masked,
+        _cmap_energy_masked,
+        _dihedral_energy_masked,
+        _exception_energy_masked,
+    )
+    from prolix.pallas_kernels import (
+        pallas_angles_harmonic,
+        pallas_bonds_2body,
+        pallas_cmap_torsions,
+        pallas_exceptions_14,
+        pallas_gb_ace_nl,
+        pallas_sasa_nl,
+        pallas_torsions_4body,
+    )
+    from prolix.physics.generalized_born import (
+        compute_ace_nonpolar_energy,
+        compute_gb_energy_neighbor_list,
+        compute_nonpolar_energy,
+    )
+
+    if "bonds" not in s:
+        s = build_full_potential_topology(s)
+    box = s["box"]
+    disp, _ = space.periodic(box)
+
+    def xla_fn(p):
+        e_bond = _bond_energy_masked(p, s["bonds"], s["bond_params"], s["bond_mask"], disp)
+        e_ub = _bond_energy_masked(p, s["ub_bonds"], s["ub_params"], s["ub_mask"], disp)
+        e_ang = _angle_energy_masked(p, s["angles"], s["angle_params"], s["angle_mask"], disp)
+        e_dih = _dihedral_energy_masked(p, s["dihedrals"], s["dihedral_params"], s["dihedral_mask"], disp)
+        e_imp = _dihedral_energy_masked(p, s["impropers"], s["improper_params"], s["improper_mask"], disp)
+        e_cmap = _cmap_energy_masked(
+            p, s["cmap_torsions"], s["cmap_indices"], s["cmap_mask"], s["cmap_coeffs"], disp
+        )
+        e_exc = _exception_energy_masked(
+            p, s["exception_pairs"], s["exception_sigmas"], s["exception_epsilons"],
+            s["exception_chargeprods"], s["exception_mask"], disp,
+        )
+        e_lj = chunked_lj_energy_nl(
+            p, s["sigma"], s["eps"], s["excl_idx"], s["excl_vdw"], s["nbr"], disp,
+            cutoff=CUTOFF, tile_size=256, switch_width=SWITCH_WIDTH,
+        )
+        e_c = chunked_coulomb_energy_nl(
+            p, s["q"], s["excl_idx"], s["excl_elec"], s["nbr"], disp,
+            pme_alpha=0.0, cutoff=CUTOFF, tile_size=256,
+        )
+        e_gb, br = compute_gb_energy_neighbor_list(
+            p, s["q"], s["radii"], s["nbr"], scaled_radii=s["scaled_radii"]
+        )
+        e_ace = jnp.sum(compute_ace_nonpolar_energy(s["radii"], br) * s["mask"])
+        e_sasa = compute_nonpolar_energy(p, s["radii"], neighbor_idx=s["nbr"], atom_mask=s["mask"])
+        return e_bond + e_ub + e_ang + e_dih + e_imp + e_cmap + e_exc + e_lj + e_c + e_gb + e_ace + e_sasa
+
+    def pallas_fn(p):
+        e_bond = pallas_bonds_2body(
+            p, s["bonds"], s["bond_params"], s["bond_mask"], box=box, dist_eps=1e-10, interpret=interpret
+        )
+        e_ub = pallas_bonds_2body(
+            p, s["ub_bonds"], s["ub_params"], s["ub_mask"], box=box, dist_eps=1e-10, interpret=interpret
+        )
+        e_ang = pallas_angles_harmonic(
+            p, s["angles"], s["angle_params"], s["angle_mask"], box=box, dist_eps=1e-10, interpret=interpret
+        )
+        e_dih = pallas_torsions_4body(
+            p, s["dihedrals"], s["dihedral_params"], s["dihedral_mask"],
+            box=box, b0_is_ji=True, is_harmonic=False, interpret=interpret,
+        )
+        e_imp = pallas_torsions_4body(
+            p, s["impropers"], s["improper_params"], s["improper_mask"],
+            box=box, b0_is_ji=True, is_harmonic=False, interpret=interpret,
+        )
+        e_cmap = pallas_cmap_torsions(
+            p, s["cmap_torsions"], s["cmap_indices"], s["cmap_mask"], s["cmap_coeffs"],
+            box=box, first_is_psi=True, interpret=interpret,
+        )
+        e_exc = pallas_exceptions_14(
+            p, s["exception_pairs"], s["exception_sigmas"], s["exception_epsilons"],
+            s["exception_chargeprods"], s["exception_mask"], box=box, soft_core_lambda=1.0, interpret=interpret,
+        )
+        e_nb = pallas_nonbonded_nl(
+            p, s["q"], s["sigma"], s["eps"], s["mask"], s["nbr"], s["excl_idx"],
+            s["excl_vdw"], s["excl_elec"], box=box, pme_alpha=0.0,
+            cutoff=CUTOFF, lj_switch_width=SWITCH_WIDTH, soft_core_lambda=1.0,
+            include_pme_excl_erf=False, interpret=interpret,
+        )
+        e_gb_ace = pallas_gb_ace_nl(
+            p, s["q"], s["radii"], s["nbr"], atom_mask=s["mask"],
+            scaled_radii=s["scaled_radii"], box=box, interpret=interpret,
+        )
+        e_sasa = pallas_sasa_nl(
+            p, s["radii"], s["nbr"], atom_mask=s["mask"], box=box, interpret=interpret
+        )
+        return e_bond + e_ub + e_ang + e_dih + e_imp + e_cmap + e_exc + e_nb + e_gb_ace + e_sasa
+
+    return jax.jit(jax.value_and_grad(xla_fn)), jax.jit(jax.value_and_grad(pallas_fn))
+
+
 def _mem_stats() -> dict[str, int] | None:
     try:
         st = jax.devices()[0].memory_stats()
@@ -452,6 +572,8 @@ def time_fn(fn, pos, repeats: int):
     out = fn(pos)
     jax.block_until_ready(out)
     compile_s = time.perf_counter() - t0
+    # One untimed post-compile warmup iteration
+    jax.block_until_ready(fn(pos))
     times = []
     for _ in range(repeats):
         t0 = time.perf_counter()
@@ -485,9 +607,11 @@ def _run_isolated_worker(spec: str, repeats: int, interpret: bool) -> dict:
         "nonbonded_pallas",
         "full_potential_xla",
         "full_potential_pallas",
+        "full_implicit_xla",
+        "full_implicit_pallas",
     )
     s = build_system(n, include_nl=needs_nl)
-    if path_name in ("full_potential_xla", "full_potential_pallas"):
+    if path_name in ("full_potential_xla", "full_potential_pallas", "full_implicit_xla", "full_implicit_pallas"):
         s = build_full_potential_topology(s)
     jax.block_until_ready(s["pos"])
     if s["nbr"] is not None:
@@ -503,6 +627,10 @@ def _run_isolated_worker(spec: str, repeats: int, interpret: bool) -> dict:
         fn, _ = make_full_potential_fns(s, interpret)
     elif path_name == "full_potential_pallas":
         _, fn = make_full_potential_fns(s, interpret)
+    elif path_name == "full_implicit_xla":
+        fn, _ = make_full_implicit_fns(s, interpret)
+    elif path_name == "full_implicit_pallas":
+        _, fn = make_full_implicit_fns(s, interpret)
     elif path_name == "flash_xla":
         fn, _ = make_flash_fns(s, interpret)
     elif path_name == "flash_pallas":
@@ -695,7 +823,7 @@ def main() -> None:
     ap.add_argument("--_worker", default="", help=argparse.SUPPRESS)
     ap.add_argument(
         "--kernel",
-        choices=("nonbonded", "flash", "pme", "full_potential", "nl_build", "nl_skin", "mem_scaling"),
+        choices=("nonbonded", "flash", "pme", "full_potential", "full_implicit", "nl_build", "nl_skin", "mem_scaling"),
         default="nonbonded",
         help="kernel/experiment family to benchmark",
     )
@@ -749,6 +877,10 @@ def main() -> None:
         maker = make_full_potential_fns
         worker_prefix = "full_potential"
         needs_nl = True
+    elif args.kernel == "full_implicit":
+        maker = make_full_implicit_fns
+        worker_prefix = "full_implicit"
+        needs_nl = True
     else:
         maker = make_fns
         worker_prefix = "nonbonded"
@@ -757,7 +889,7 @@ def main() -> None:
     rows = []
     for n in sizes:
         s = build_system(n, include_nl=needs_nl)
-        if args.kernel == "full_potential":
+        if args.kernel in ("full_potential", "full_implicit"):
             s = build_full_potential_topology(s)
         xla_vg, pal_vg = maker(s, interpret)
         row = {"n_atoms": n, "k": s["k"]}
