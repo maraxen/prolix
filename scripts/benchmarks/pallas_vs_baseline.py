@@ -1012,6 +1012,9 @@ def bench_openmm_comparison(sizes: list[int], repeats: int, interpret: bool) -> 
     if "CUDA" in avail:
         omm_platform_name = "CUDA"
         omm_props = {"Precision": "single"}
+    elif "OpenCL" in avail:
+        omm_platform_name = "OpenCL"
+        omm_props = {"Precision": "single"}
     elif "CPU" in avail:
         omm_platform_name = "CPU"
         omm_props = {}
