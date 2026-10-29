@@ -651,6 +651,7 @@ def single_padded_energy(
     use_dispersion_correction: bool = True,
     use_pallas: bool | None = None,
     use_pallas_pme: bool | None = None,
+    excl_mode: str = "table",
 ) -> Array:
     """Computes total potential energy for a single padded system.
 
@@ -853,6 +854,7 @@ def single_padded_energy(
                     softcore_alpha=sc_alpha,
                     softcore_exponent=sc_exp,
                     include_pme_excl_erf=False,
+                    excl_mode=excl_mode,
                     interpret=interpret,
                 )
                 excl_scale_elec = (
@@ -894,6 +896,7 @@ def single_padded_energy(
                     softcore_alpha=sc_alpha,
                     softcore_exponent=sc_exp,
                     include_pme_excl_erf=is_pme,
+                    excl_mode=excl_mode,
                     interpret=interpret,
                 )
                 e_elec = jnp.asarray(0.0, dtype=r.dtype)
@@ -1060,7 +1063,9 @@ def single_padded_energy(
             atom_mask=sys.atom_mask,
         )
 
-    return e_bond + e_ub + e_angle + e_dih + e_imp + e_cmap + e_lj + e_elec + e_solv + e_cosolv_rep
+    return (
+        e_bond + e_ub + e_angle + e_dih + e_imp + e_cmap + e_lj + e_elec + e_solv + e_cosolv_rep
+    ).astype(r.dtype)
 
 
 def single_padded_force(
@@ -1509,6 +1514,7 @@ def single_padded_energy_nl_cvjp(
     implicit_solvent: bool = True,
     soft_core_lambda: Array = jnp.array(1.0),
     use_pallas: bool | None = None,
+    excl_mode: str = "table",
 ) -> Array:
     """Like single_padded_energy_nl but with custom VJP for LJ/Coulomb + checkpoint for GB.
 
@@ -1527,9 +1533,57 @@ def single_padded_energy_nl_cvjp(
         and pallas_torsions_4body is not None
         and pallas_cmap_torsions is not None
     )
+    _use_fused_bonded = pallas_enabled and pallas_bonded_all_fused is not None
+    sc_alpha = float(getattr(sys, "softcore_alpha", 0.5))
+    sc_exp = int(getattr(sys, "softcore_exponent", 2))
 
     # Bonded terms (unchanged — already O(N))
-    if pallas_enabled and _has_pallas_bonded:
+    if _use_fused_bonded:
+        imp_is_harm = sys.improper_params is not None and (
+            sys.improper_params.shape[-1] == 2 or not bool(getattr(sys, "improper_is_periodic", True))
+        )
+        e_bond = pallas_bonded_all_fused(
+            r,
+            bonds=sys.bonds,
+            bond_params=sys.bond_params,
+            bond_mask=sys.bond_mask,
+            urey_bradley_bonds=sys.urey_bradley_bonds,
+            urey_bradley_params=sys.urey_bradley_params,
+            urey_bradley_mask=sys.urey_bradley_mask,
+            angles=sys.angles,
+            angle_params=sys.angle_params,
+            angle_mask=sys.angle_mask,
+            dihedrals=sys.dihedrals,
+            dihedral_params=sys.dihedral_params,
+            dihedral_mask=sys.dihedral_mask,
+            impropers=sys.impropers,
+            improper_params=sys.improper_params,
+            improper_mask=sys.improper_mask,
+            improper_is_harmonic=imp_is_harm,
+            exception_pairs=getattr(sys, "exception_pairs", None),
+            exception_sigmas=getattr(sys, "exception_sigmas", None),
+            exception_epsilons=getattr(sys, "exception_epsilons", None),
+            exception_chargeprods=getattr(sys, "exception_chargeprods", None),
+            exception_mask=getattr(sys, "exception_mask", None),
+            cmap_torsions=sys.cmap_torsions,
+            cmap_indices=sys.cmap_indices,
+            cmap_mask=sys.cmap_mask,
+            cmap_coeffs=sys.cmap_coeffs,
+            box=box_pbc,
+            dist_eps=1e-10,
+            b0_is_ji=True,
+            cmap_first_is_psi=True,
+            soft_core_lambda=soft_core_lambda,
+            softcore_alpha=sc_alpha,
+            softcore_exponent=sc_exp,
+            interpret=interpret,
+        )
+        e_ub = jnp.asarray(0.0, dtype=r.dtype)
+        e_angle = jnp.asarray(0.0, dtype=r.dtype)
+        e_dih = jnp.asarray(0.0, dtype=r.dtype)
+        e_imp = jnp.asarray(0.0, dtype=r.dtype)
+        e_cmap = jnp.asarray(0.0, dtype=r.dtype)
+    elif pallas_enabled and _has_pallas_bonded:
         e_bond = pallas_bonds_2body(
             r, sys.bonds, sys.bond_params, sys.bond_mask,
             box=box_pbc, dist_eps=1e-10, interpret=interpret,
@@ -1572,8 +1626,6 @@ def single_padded_energy_nl_cvjp(
         neighbor_idx,
         N,
     )
-    sc_alpha = float(getattr(sys, "softcore_alpha", 0.5))
-    sc_exp = int(getattr(sys, "softcore_exponent", 2))
 
     if pallas_enabled and pallas_nonbonded_nl is not None:
         e_lj = pallas_nonbonded_nl(
@@ -1594,6 +1646,7 @@ def single_padded_energy_nl_cvjp(
             softcore_alpha=sc_alpha,
             softcore_exponent=sc_exp,
             include_pme_excl_erf=False,
+            excl_mode=excl_mode,
             interpret=interpret,
         )
         e_elec = jnp.asarray(0.0, dtype=r.dtype)
@@ -1671,7 +1724,9 @@ def single_padded_energy_nl_cvjp(
             atom_mask=sys.atom_mask,
         )
 
-    if pallas_enabled and pallas_exceptions_14 is not None:
+    if _use_fused_bonded:
+        e_exc = jnp.asarray(0.0, dtype=r.dtype)
+    elif pallas_enabled and pallas_exceptions_14 is not None:
         e_exc = pallas_exceptions_14(
             r,
             getattr(sys, "exception_pairs", None),
@@ -1699,7 +1754,9 @@ def single_padded_energy_nl_cvjp(
             softcore_exponent=sc_exp,
         )
 
-    return e_bond + e_ub + e_angle + e_dih + e_imp + e_cmap + e_lj + e_elec + e_solv + e_cosolv_rep + e_exc
+    return (
+        e_bond + e_ub + e_angle + e_dih + e_imp + e_cmap + e_lj + e_elec + e_solv + e_cosolv_rep + e_exc
+    ).astype(r.dtype)
 
 
 def single_padded_energy_nl(
@@ -1709,6 +1766,7 @@ def single_padded_energy_nl(
     implicit_solvent: bool = True,
     soft_core_lambda: Array = jnp.array(1.0),
     use_pallas: bool | None = None,
+    excl_mode: str = "table",
 ) -> Array:
     """Computes total potential energy using neighbor lists for non-bonded terms.
 
@@ -1734,9 +1792,57 @@ def single_padded_energy_nl(
         and pallas_torsions_4body is not None
         and pallas_cmap_torsions is not None
     )
+    _use_fused_bonded = pallas_enabled and pallas_bonded_all_fused is not None
+    sc_alpha = float(getattr(sys, "softcore_alpha", 0.5))
+    sc_exp = int(getattr(sys, "softcore_exponent", 2))
 
     # Bonded terms (unchanged — already O(N))
-    if pallas_enabled and _has_pallas_bonded:
+    if _use_fused_bonded:
+        imp_is_harm = sys.improper_params is not None and (
+            sys.improper_params.shape[-1] == 2 or not bool(getattr(sys, "improper_is_periodic", True))
+        )
+        e_bond = pallas_bonded_all_fused(
+            r,
+            bonds=sys.bonds,
+            bond_params=sys.bond_params,
+            bond_mask=sys.bond_mask,
+            urey_bradley_bonds=sys.urey_bradley_bonds,
+            urey_bradley_params=sys.urey_bradley_params,
+            urey_bradley_mask=sys.urey_bradley_mask,
+            angles=sys.angles,
+            angle_params=sys.angle_params,
+            angle_mask=sys.angle_mask,
+            dihedrals=sys.dihedrals,
+            dihedral_params=sys.dihedral_params,
+            dihedral_mask=sys.dihedral_mask,
+            impropers=sys.impropers,
+            improper_params=sys.improper_params,
+            improper_mask=sys.improper_mask,
+            improper_is_harmonic=imp_is_harm,
+            exception_pairs=getattr(sys, "exception_pairs", None),
+            exception_sigmas=getattr(sys, "exception_sigmas", None),
+            exception_epsilons=getattr(sys, "exception_epsilons", None),
+            exception_chargeprods=getattr(sys, "exception_chargeprods", None),
+            exception_mask=getattr(sys, "exception_mask", None),
+            cmap_torsions=sys.cmap_torsions,
+            cmap_indices=sys.cmap_indices,
+            cmap_mask=sys.cmap_mask,
+            cmap_coeffs=sys.cmap_coeffs,
+            box=box_pbc,
+            dist_eps=1e-10,
+            b0_is_ji=True,
+            cmap_first_is_psi=True,
+            soft_core_lambda=soft_core_lambda,
+            softcore_alpha=sc_alpha,
+            softcore_exponent=sc_exp,
+            interpret=interpret,
+        )
+        e_ub = jnp.asarray(0.0, dtype=r.dtype)
+        e_angle = jnp.asarray(0.0, dtype=r.dtype)
+        e_dih = jnp.asarray(0.0, dtype=r.dtype)
+        e_imp = jnp.asarray(0.0, dtype=r.dtype)
+        e_cmap = jnp.asarray(0.0, dtype=r.dtype)
+    elif pallas_enabled and _has_pallas_bonded:
         e_bond = pallas_bonds_2body(
             r, sys.bonds, sys.bond_params, sys.bond_mask,
             box=box_pbc, dist_eps=1e-10, interpret=interpret,
@@ -1779,8 +1885,6 @@ def single_padded_energy_nl(
         neighbor_idx,
         N,
     )
-    sc_alpha = float(getattr(sys, "softcore_alpha", 0.5))
-    sc_exp = int(getattr(sys, "softcore_exponent", 2))
 
     if pallas_enabled and pallas_nonbonded_nl is not None:
         e_lj = pallas_nonbonded_nl(
@@ -1801,6 +1905,7 @@ def single_padded_energy_nl(
             softcore_alpha=sc_alpha,
             softcore_exponent=sc_exp,
             include_pme_excl_erf=False,
+            excl_mode=excl_mode,
             interpret=interpret,
         )
         e_elec = jnp.asarray(0.0, dtype=r.dtype)
@@ -1874,7 +1979,9 @@ def single_padded_energy_nl(
             atom_mask=sys.atom_mask,
         )
 
-    if pallas_enabled and pallas_exceptions_14 is not None:
+    if _use_fused_bonded:
+        e_exc = jnp.asarray(0.0, dtype=r.dtype)
+    elif pallas_enabled and pallas_exceptions_14 is not None:
         e_exc = pallas_exceptions_14(
             r,
             getattr(sys, "exception_pairs", None),
@@ -1902,7 +2009,9 @@ def single_padded_energy_nl(
             softcore_exponent=sc_exp,
         )
 
-    return e_bond + e_ub + e_angle + e_dih + e_imp + e_cmap + e_lj + e_elec + e_solv + e_cosolv_rep + e_exc
+    return (
+        e_bond + e_ub + e_angle + e_dih + e_imp + e_cmap + e_lj + e_elec + e_solv + e_cosolv_rep + e_exc
+    ).astype(r.dtype)
 
 
 def make_batched_energy_fn_nl(

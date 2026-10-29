@@ -1226,36 +1226,101 @@ def bench_openmm_comparison(sizes: list[int], repeats: int, interpret: bool) -> 
 
         omm_sys.addForce(nb_force)
 
-        integrator = openmm.LangevinMiddleIntegrator(
-            300.0 * omm_unit.kelvin,
-            1.0 / omm_unit.picosecond,
-            0.001 * omm_unit.picoseconds,
-        )
-        platform_obj = openmm.Platform.getPlatformByName(omm_platform_name)
-        ctx = openmm.Context(omm_sys, integrator, platform_obj, omm_props)
         pos_nm = np.asarray(s["pos"], dtype=np.float64) * a_to_nm
-        ctx.setPositions(pos_nm)
-
-        # Warmup + time OpenMM single-step energy+forces
-        st0 = ctx.getState(getEnergy=True, getForces=True)
-        e_omm_kcal = st0.getPotentialEnergy().value_in_unit(omm_unit.kilocalories_per_mole)
-        f_omm_kcal_a = st0.getForces(asNumpy=True).value_in_unit(
-            omm_unit.kilocalories_per_mole / omm_unit.angstrom
+        ext_omm_py = os.environ.get(
+            "OPENMM_PYTHON",
+            "/orcd/pool/007/maarxaru/local/share/mamba/envs/b1-openmm/bin/python",
         )
-        omm_times = []
-        for _ in range(repeats):
-            t0 = time.perf_counter()
-            _ = ctx.getState(getEnergy=True, getForces=True)
-            omm_times.append(time.perf_counter() - t0)
-        t_omm_step = statistics.median(omm_times)
-
-        # Also time a 20-step integration rollout in OpenMM vs Prolix lax.scan
         n_rollout = 20
-        integrator.step(2)
-        t0 = time.perf_counter()
-        integrator.step(n_rollout)
-        _ = ctx.getState(getPositions=True)
-        t_omm_rollout_per_step = (time.perf_counter() - t0) / n_rollout
+        t_omm_step_mixed = None
+        t_omm_rollout_mixed = None
+
+        if omm_platform_name != "CUDA" and os.path.isfile(ext_omm_py):
+            import tempfile
+
+            with tempfile.TemporaryDirectory() as tmpd:
+                xml_p = os.path.join(tmpd, "sys.xml")
+                pos_p = os.path.join(tmpd, "pos.npy")
+                frc_p = os.path.join(tmpd, "forces.npy")
+                with open(xml_p, "w", encoding="utf-8") as fh:
+                    fh.write(openmm.XmlSerializer.serialize(omm_sys))
+                np.save(pos_p, pos_nm)
+                worker_code = (
+                    "import json, sys, time, statistics, numpy as np, openmm, openmm.unit as u\n"
+                    "xml_p, pos_p, frc_p, repeats, n_roll = sys.argv[1], sys.argv[2], sys.argv[3], int(sys.argv[4]), int(sys.argv[5])\n"
+                    "with open(xml_p) as f: sys_obj = openmm.XmlSerializer.deserialize(f.read())\n"
+                    "pos_nm = np.load(pos_p)\n"
+                    "plat = openmm.Platform.getPlatformByName('CUDA')\n"
+                    "out = {'platform': 'CUDA'}\n"
+                    "for prec in ('single', 'mixed'):\n"
+                    "    integ = openmm.LangevinMiddleIntegrator(300.0*u.kelvin, 1.0/u.picosecond, 0.001*u.picoseconds)\n"
+                    "    ctx = openmm.Context(sys_obj, integ, plat, {'Precision': prec})\n"
+                    "    ctx.setPositions(pos_nm)\n"
+                    "    st0 = ctx.getState(getEnergy=True, getForces=True)\n"
+                    "    if prec == 'single':\n"
+                    "        out['e_kcal'] = float(st0.getPotentialEnergy().value_in_unit(u.kilocalories_per_mole))\n"
+                    "        np.save(frc_p, st0.getForces(asNumpy=True).value_in_unit(u.kilocalories_per_mole / u.angstrom))\n"
+                    "    ts = []\n"
+                    "    for _ in range(repeats):\n"
+                    "        t0 = time.perf_counter()\n"
+                    "        _ = ctx.getState(getEnergy=True, getForces=True)\n"
+                    "        ts.append(time.perf_counter() - t0)\n"
+                    "    out[f't_step_{prec}'] = statistics.median(ts)\n"
+                    "    integ.step(2)\n"
+                    "    t0 = time.perf_counter()\n"
+                    "    integ.step(n_roll)\n"
+                    "    _ = ctx.getState(getPositions=True)\n"
+                    "    out[f't_roll_{prec}'] = (time.perf_counter() - t0) / n_roll\n"
+                    "    del ctx, integ\n"
+                    "print(json.dumps(out))\n"
+                )
+                env_sub = os.environ.copy()
+                omm_root = os.path.dirname(os.path.dirname(ext_omm_py))
+                env_sub["OPENMM_PLUGIN_DIR"] = os.path.join(omm_root, "lib", "plugins")
+                proc = subprocess.run(
+                    [ext_omm_py, "-c", worker_code, xml_p, pos_p, frc_p, str(repeats), str(n_rollout)],
+                    capture_output=True,
+                    text=True,
+                    check=True,
+                    env=env_sub,
+                )
+                omm_res = json.loads(proc.stdout.strip().splitlines()[-1])
+                omm_platform_name = "CUDA"
+                e_omm_kcal = float(omm_res["e_kcal"])
+                f_omm_kcal_a = np.load(frc_p)
+                t_omm_step = float(omm_res["t_step_single"])
+                t_omm_rollout_per_step = float(omm_res["t_roll_single"])
+                t_omm_step_mixed = float(omm_res["t_step_mixed"])
+                t_omm_rollout_mixed = float(omm_res["t_roll_mixed"])
+        else:
+            integrator = openmm.LangevinMiddleIntegrator(
+                300.0 * omm_unit.kelvin,
+                1.0 / omm_unit.picosecond,
+                0.001 * omm_unit.picoseconds,
+            )
+            platform_obj = openmm.Platform.getPlatformByName(omm_platform_name)
+            ctx = openmm.Context(omm_sys, integrator, platform_obj, omm_props)
+            ctx.setPositions(pos_nm)
+
+            # Warmup + time OpenMM single-step energy+forces
+            st0 = ctx.getState(getEnergy=True, getForces=True)
+            e_omm_kcal = st0.getPotentialEnergy().value_in_unit(omm_unit.kilocalories_per_mole)
+            f_omm_kcal_a = st0.getForces(asNumpy=True).value_in_unit(
+                omm_unit.kilocalories_per_mole / omm_unit.angstrom
+            )
+            omm_times = []
+            for _ in range(repeats):
+                t0 = time.perf_counter()
+                _ = ctx.getState(getEnergy=True, getForces=True)
+                omm_times.append(time.perf_counter() - t0)
+            t_omm_step = statistics.median(omm_times)
+
+            # Also time a 20-step integration rollout in OpenMM vs Prolix lax.scan
+            integrator.step(2)
+            t0 = time.perf_counter()
+            integrator.step(n_rollout)
+            _ = ctx.getState(getPositions=True)
+            t_omm_rollout_per_step = (time.perf_counter() - t0) / n_rollout
 
         @jax.jit
         def prolix_v2_rollout(p0):
@@ -1275,6 +1340,9 @@ def bench_openmm_comparison(sizes: list[int], repeats: int, interpret: bool) -> 
         ns_per_day_v2 = 0.1728 / t_v2
         ns_per_day_v2_rollout = 0.1728 / t_v2_rollout_per_step
         ns_per_day_omm_rollout = 0.1728 / t_omm_rollout_per_step
+        ns_per_day_omm_rollout_mixed = (
+            0.1728 / t_omm_rollout_mixed if t_omm_rollout_mixed is not None else None
+        )
 
         row = {
             "n_atoms": n,
@@ -1287,14 +1355,22 @@ def bench_openmm_comparison(sizes: list[int], repeats: int, interpret: bool) -> 
             "pallas_v2_rollout_per_step_s": t_v2_rollout_per_step,
             "openmm_getstate_median_s": t_omm_step,
             "openmm_rollout_per_step_s": t_omm_rollout_per_step,
+            "openmm_getstate_mixed_median_s": t_omm_step_mixed,
+            "openmm_rollout_mixed_per_step_s": t_omm_rollout_mixed,
             "ns_per_day_xla_2fs": ns_per_day_xla,
             "ns_per_day_pallas_v1_2fs": ns_per_day_v1,
             "ns_per_day_pallas_v2_2fs": ns_per_day_v2,
             "ns_per_day_pallas_v2_rollout_2fs": ns_per_day_v2_rollout,
             "ns_per_day_openmm_rollout_2fs": ns_per_day_omm_rollout,
+            "ns_per_day_openmm_rollout_mixed_2fs": ns_per_day_omm_rollout_mixed,
             "speedup_v2_vs_xla": t_x / t_v2,
             "speedup_v2_vs_v1": t_v1 / t_v2,
             "speedup_v2_rollout_vs_openmm": t_omm_rollout_per_step / t_v2_rollout_per_step,
+            "speedup_v2_rollout_vs_openmm_mixed": (
+                t_omm_rollout_mixed / t_v2_rollout_per_step
+                if t_omm_rollout_mixed is not None
+                else None
+            ),
             "prolix_v2_energy_kcal": float(out_v2[0]),
             "openmm_energy_kcal": float(e_omm_kcal),
             "rel_dE_v2_vs_xla": float(abs(out_v2[0] - out_x[0]) / max(abs(float(out_x[0])), 1e-12)),
@@ -1308,6 +1384,9 @@ def bench_openmm_comparison(sizes: list[int], repeats: int, interpret: bool) -> 
         "openmm_platform": omm_platform_name,
         "mean_speedup_v2_vs_xla": float(np.mean([r["speedup_v2_vs_xla"] for r in rows])),
         "mean_speedup_v2_vs_v1": float(np.mean([r["speedup_v2_vs_v1"] for r in rows])),
+        "mean_speedup_v2_rollout_vs_openmm": float(
+            np.mean([r["speedup_v2_rollout_vs_openmm"] for r in rows])
+        ),
     }
     return rows, summary
 

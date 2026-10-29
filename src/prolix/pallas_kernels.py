@@ -910,7 +910,12 @@ def _pallas_nonbonded_nl_single(
     M = excl_indices.shape[1]
     if M > _NB_MAX_EXCL:
         raise ValueError(f"excl_indices width {M} exceeds _NB_MAX_EXCL={_NB_MAX_EXCL}")
-    dtype = positions.dtype
+    orig_dtype = positions.dtype
+    dtype = jnp.float32
+    positions = positions.astype(dtype)
+    charges = charges.astype(dtype)
+    sigmas = sigmas.astype(dtype)
+    epsilons = epsilons.astype(dtype)
     use_pre_encoded = excl_mode == "pre_encoded"
 
     n_blocks = max(1, (N + _NB_BLOCK_N - 1) // _NB_BLOCK_N)
@@ -1269,8 +1274,8 @@ def _pallas_nonbonded_nl_single(
         box_vec,
         lam_vec,
     )
-    forces = jnp.stack([fx_pad[:N], fy_pad[:N], fz_pad[:N]], axis=-1)
-    return jnp.sum(e_pad[:N]), forces
+    forces = jnp.stack([fx_pad[:N], fy_pad[:N], fz_pad[:N]], axis=-1).astype(orig_dtype)
+    return jnp.sum(e_pad[:N]).astype(orig_dtype), forces
 
 
 def _pallas_nonbonded_nl_vmappable(
@@ -2380,7 +2385,12 @@ def _pallas_flash_explicit_single(
     M = excl_indices.shape[1]
     if M > _NB_MAX_EXCL:
         raise ValueError(f"excl_indices width {M} exceeds _NB_MAX_EXCL={_NB_MAX_EXCL}")
-    dtype = positions.dtype
+    orig_dtype = positions.dtype
+    dtype = jnp.float32
+    positions = positions.astype(dtype)
+    charges = charges.astype(dtype)
+    sigmas = sigmas.astype(dtype)
+    epsilons = epsilons.astype(dtype)
 
     n_blocks = max(1, (N + _FLASH_BLOCK_I - 1) // _FLASH_BLOCK_I)
     N_pad = n_blocks * _FLASH_BLOCK_I
@@ -2604,8 +2614,8 @@ def _pallas_flash_explicit_single(
         box_vec,
         lam_vec,
     )
-    forces = jnp.stack([fx_pad[:N], fy_pad[:N], fz_pad[:N]], axis=-1)
-    return jnp.sum(e_pad[:N]), forces
+    forces = jnp.stack([fx_pad[:N], fy_pad[:N], fz_pad[:N]], axis=-1).astype(orig_dtype)
+    return jnp.sum(e_pad[:N]).astype(orig_dtype), forces
 
 
 def _pallas_flash_explicit_vmappable(

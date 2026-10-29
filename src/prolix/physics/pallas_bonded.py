@@ -294,7 +294,9 @@ def _pallas_bonds_2body_single(
 ) -> tuple[jax.Array, jax.Array]:
     N = positions.shape[0]
     B_real = indices.shape[0]
-    dtype = positions.dtype
+    orig_dtype = positions.dtype
+    dtype = jnp.float32
+    positions = positions.astype(dtype)
 
     n_atom_blocks = max(1, (N + 31) // 32)
     N_pad = n_atom_blocks * 32
@@ -407,8 +409,8 @@ def _pallas_bonds_2body_single(
         compiler_params=plt.CompilerParams() if not interpret else None,
         name="pallas_bonds_2body",
     )(px, py, pz, idx_i, idx_j, r0, k_val, mask_f, box_vec, zero_f, zero_f, zero_f)
-    forces = jnp.stack([fx_pad[:N], fy_pad[:N], fz_pad[:N]], axis=-1)
-    return jnp.sum(e_blk), forces
+    forces = jnp.stack([fx_pad[:N], fy_pad[:N], fz_pad[:N]], axis=-1).astype(orig_dtype)
+    return jnp.sum(e_blk).astype(orig_dtype), forces
 
 
 def _bonds_2body_param_grads(
@@ -765,7 +767,9 @@ def _pallas_exceptions_14_single(
 ) -> tuple[jax.Array, jax.Array]:
     N = positions.shape[0]
     E_real = pairs.shape[0]
-    dtype = positions.dtype
+    orig_dtype = positions.dtype
+    dtype = jnp.float32
+    positions = positions.astype(dtype)
 
     n_atom_blocks = max(1, (N + 31) // 32)
     N_pad = n_atom_blocks * 32
@@ -898,8 +902,8 @@ def _pallas_exceptions_14_single(
         compiler_params=plt.CompilerParams() if not interpret else None,
         name="pallas_exceptions_14",
     )(px, py, pz, idx_i, idx_j, sig_f, eps_f, qp_f, mask_f, box_vec, lam_vec, zero_f, zero_f, zero_f)
-    forces = jnp.stack([fx_pad[:N], fy_pad[:N], fz_pad[:N]], axis=-1)
-    return jnp.sum(e_blk), forces
+    forces = jnp.stack([fx_pad[:N], fy_pad[:N], fz_pad[:N]], axis=-1).astype(orig_dtype)
+    return jnp.sum(e_blk).astype(orig_dtype), forces
 
 
 def _exceptions_14_param_grads(
@@ -1413,7 +1417,9 @@ def _pallas_pme_exclusion_pairs_single(
 ) -> tuple[jax.Array, jax.Array]:
     N = positions.shape[0]
     P_real = excl_pair_indices.shape[0]
-    dtype = positions.dtype
+    orig_dtype = positions.dtype
+    dtype = jnp.float32
+    positions = positions.astype(dtype)
 
     n_atom_blocks = max(1, (N + 31) // 32)
     N_pad = n_atom_blocks * 32
@@ -1542,8 +1548,8 @@ def _pallas_pme_exclusion_pairs_single(
         compiler_params=plt.CompilerParams() if not interpret else None,
         name="pallas_pme_exclusion_pairs",
     )(px, py, pz, q_pad, mask_pad, idx_i, idx_j, s_elec, box_vec, zero_f, zero_f, zero_f)
-    forces = jnp.stack([fx_pad[:N], fy_pad[:N], fz_pad[:N]], axis=-1)
-    return jnp.sum(e_blk), forces
+    forces = jnp.stack([fx_pad[:N], fy_pad[:N], fz_pad[:N]], axis=-1).astype(orig_dtype)
+    return jnp.sum(e_blk).astype(orig_dtype), forces
 
 
 def _pme_excl_pairs_param_grads(
@@ -1996,7 +2002,9 @@ def _pallas_angles_harmonic_single(
 ) -> tuple[jax.Array, jax.Array]:
     N = positions.shape[0]
     A_real = indices.shape[0]
-    dtype = positions.dtype
+    orig_dtype = positions.dtype
+    dtype = jnp.float32
+    positions = positions.astype(dtype)
 
     n_atom_blocks = max(1, (N + 31) // 32)
     N_pad = n_atom_blocks * 32
@@ -2172,8 +2180,8 @@ def _pallas_angles_harmonic_single(
         compiler_params=plt.CompilerParams() if not interpret else None,
         name="pallas_angles_harmonic",
     )(px, py, pz, idx_i, idx_j, idx_k, theta0, k_val, mask_f, box_vec, zero_f, zero_f, zero_f)
-    forces = jnp.stack([fx_pad[:N], fy_pad[:N], fz_pad[:N]], axis=-1)
-    return jnp.sum(e_blk), forces
+    forces = jnp.stack([fx_pad[:N], fy_pad[:N], fz_pad[:N]], axis=-1).astype(orig_dtype)
+    return jnp.sum(e_blk).astype(orig_dtype), forces
 
 
 def _angles_harmonic_param_grads(
@@ -2646,7 +2654,9 @@ def _pallas_torsions_4body_single(
 ) -> tuple[jax.Array, jax.Array]:
     N = positions.shape[0]
     D_real = indices.shape[0]
-    dtype = positions.dtype
+    orig_dtype = positions.dtype
+    dtype = jnp.float32
+    positions = positions.astype(dtype)
 
     n_atom_blocks = max(1, (N + 31) // 32)
     N_pad = n_atom_blocks * 32
@@ -2818,8 +2828,8 @@ def _pallas_torsions_4body_single(
         zero_f,
         zero_f,
     )
-    forces = jnp.stack([fx_pad[:N], fy_pad[:N], fz_pad[:N]], axis=-1)
-    return jnp.sum(e_blk), forces
+    forces = jnp.stack([fx_pad[:N], fy_pad[:N], fz_pad[:N]], axis=-1).astype(orig_dtype)
+    return jnp.sum(e_blk).astype(orig_dtype), forces
 
 
 def _torsions_4body_param_grads(
@@ -3283,7 +3293,9 @@ def _pallas_cmap_torsions_single(
     C_real = cmap_torsions.shape[0]
     N_maps = cmap_coeffs.shape[0]
     G = cmap_coeffs.shape[1]
-    dtype = positions.dtype
+    orig_dtype = positions.dtype
+    dtype = jnp.float32
+    positions = positions.astype(dtype)
 
     n_atom_blocks = max(1, (N + 31) // 32)
     N_pad = n_atom_blocks * 32
@@ -3478,8 +3490,8 @@ def _pallas_cmap_torsions_single(
         zero_f,
         zero_f,
     )
-    forces = jnp.stack([fx_pad[:N], fy_pad[:N], fz_pad[:N]], axis=-1)
-    return jnp.sum(e_blk), forces
+    forces = jnp.stack([fx_pad[:N], fy_pad[:N], fz_pad[:N]], axis=-1).astype(orig_dtype)
+    return jnp.sum(e_blk).astype(orig_dtype), forces
 
 
 def _cmap_coeffs_grad(
@@ -3968,7 +3980,9 @@ def _pallas_bonded_all_fused_single(
     interpret: bool,
 ) -> tuple[jax.Array, jax.Array]:
     N = positions.shape[0]
-    dtype = positions.dtype
+    orig_dtype = positions.dtype
+    dtype = jnp.float32
+    positions = positions.astype(dtype)
 
     B_real = int(bond_indices.shape[0])
     A_real = int(angle_indices.shape[0])
@@ -3986,7 +4000,7 @@ def _pallas_bonded_all_fused_single(
 
     total_blocks = n_blk_b + n_blk_a + n_blk_d + n_blk_h + n_blk_e + n_blk_c
     if total_blocks == 0:
-        return jnp.zeros((), dtype=dtype), jnp.zeros((N, 3), dtype=dtype)
+        return jnp.zeros((), dtype=orig_dtype), jnp.zeros((N, 3), dtype=orig_dtype)
 
     o_b0, o_b1 = 0, n_blk_b
     o_a0, o_a1 = o_b1, o_b1 + n_blk_a
@@ -4578,8 +4592,8 @@ def _pallas_bonded_all_fused_single(
         zero_f,
         zero_f,
     )
-    forces = jnp.stack([fx_pad[:N], fy_pad[:N], fz_pad[:N]], axis=-1)
-    return jnp.sum(e_blk), forces
+    forces = jnp.stack([fx_pad[:N], fy_pad[:N], fz_pad[:N]], axis=-1).astype(orig_dtype)
+    return jnp.sum(e_blk).astype(orig_dtype), forces
 
 
 def _bonded_all_fused_param_grads(

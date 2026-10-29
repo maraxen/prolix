@@ -17,6 +17,7 @@ N_MOLS (using-xtrax):
 
 from __future__ import annotations
 
+import dataclasses
 from typing import TYPE_CHECKING, Any, Literal, NamedTuple
 
 from prolix.api.bundle_md import (
@@ -129,6 +130,26 @@ def _nl_target_capacity(
     return int(nl_mod.compute_nl_capacity(n_atoms, box_vec, cutoff, dr_threshold=skin))
 
 
+def _encode_bundle_nl(nbr: Any, bundle: Any) -> Any:
+    """Pre-encode 1-2/1-3/1-4 exclusion bits into ``nbr.idx`` (O1.1, idempotent)."""
+    if nbr is None:
+        return None
+    excl_idx = getattr(bundle, "excl_dense_indices", None)
+    excl_sv = getattr(bundle, "excl_dense_scales_vdw", None)
+    excl_se = getattr(bundle, "excl_dense_scales_elec", None)
+    if excl_idx is None or excl_sv is None or excl_se is None:
+        return nbr
+    n_rows = int(nbr.idx.shape[0])
+    encoded_idx = nl_mod.encode_nl_exclusions(
+        nbr.idx,
+        excl_idx[:n_rows],
+        excl_sv[:n_rows],
+        excl_se[:n_rows],
+        n_atoms=n_rows,
+    )
+    return dataclasses.replace(nbr, idx=encoded_idx)
+
+
 class EnsemblePlan:
     """Orchestrates batch MD simulations over multiple MolecularBundle instances.
 
@@ -149,13 +170,17 @@ class EnsemblePlan:
 
     def __init__(
         self,
-        bundles: list[Any],
+        bundles: list[Any] | Any,
         planner: Any = None,
         *,
         use_pallas: bool | None = None,
+        use_pallas_pme: bool | None = None,
     ) -> None:
+        if not isinstance(bundles, (list, tuple)):
+            bundles = [bundles]
         self.bundles = bundles
         self.use_pallas = use_pallas
+        self.use_pallas_pme = use_pallas_pme
         if planner is None and len(bundles) > 1:
 
             planner = EnsembleMDPlanner()
@@ -171,8 +196,14 @@ class EnsemblePlan:
         planner: Any = None,
         *,
         use_pallas: bool | None = None,
+        use_pallas_pme: bool | None = None,
     ) -> EnsemblePlan:
-        return cls([bundle], planner, use_pallas=use_pallas)
+        return cls(
+            [bundle],
+            planner,
+            use_pallas=use_pallas,
+            use_pallas_pme=use_pallas_pme,
+        )
 
     @classmethod
     def from_bundles(
@@ -181,8 +212,14 @@ class EnsemblePlan:
         planner: Any = None,
         *,
         use_pallas: bool | None = None,
+        use_pallas_pme: bool | None = None,
     ) -> EnsemblePlan:
-        return cls(bundles, planner, use_pallas=use_pallas)
+        return cls(
+            bundles,
+            planner,
+            use_pallas=use_pallas,
+            use_pallas_pme=use_pallas_pme,
+        )
 
     def _systems_chunk_size(self) -> int:
         """Chunk size for N_MOLS dispatch (0 = vmap intent)."""
@@ -239,6 +276,7 @@ class EnsemblePlan:
         use_flash_forces: bool | None = None,
         nonbonded: Any = None,
         use_pallas: bool | None = None,
+        use_pallas_pme: bool | None = None,
     ) -> Trajectory | list[Trajectory]:
         """Run MD simulation over all bundles.
 
@@ -296,6 +334,10 @@ class EnsemblePlan:
             nonbonded: Optional ``NonbondedConfig``. Mutually exclusive with
                 passing ``use_neighbor_list`` / ``use_flash_forces`` (legacy
                 flags). When omitted, production defaults are unchanged.
+            use_pallas: Optional override for Pallas kernels (bonded megakernel +
+                direct-space nonbonded). Defaults to ``self.use_pallas``.
+            use_pallas_pme: Optional override for Pallas PME charge spread/gather.
+                Defaults to ``self.use_pallas_pme`` (which falls back to ``use_pallas``).
 
         Returns:
             Trajectory for a single bundle, or list[Trajectory] when
@@ -315,6 +357,11 @@ class EnsemblePlan:
             raise ValueError(
                 "xtc_path is supported for single-bundle EnsemblePlan runs only"
             )
+
+        eff_use_pallas = use_pallas if use_pallas is not None else self.use_pallas
+        eff_use_pallas_pme = (
+            use_pallas_pme if use_pallas_pme is not None else self.use_pallas_pme
+        )
 
         used_legacy = use_neighbor_list is not None or use_flash_forces is not None
         cutoff0 = _host_float(getattr(self.bundles[0], "cutoff_distance", 9.0), 9.0)
@@ -375,6 +422,8 @@ class EnsemblePlan:
                 nl_update_every=nl_update_every,
                 use_flash_forces=use_flash_forces,
                 nb_cfg=nb_cfg,
+                use_pallas=eff_use_pallas,
+                use_pallas_pme=eff_use_pallas_pme,
             )
 
         return self._run_trajectory(
@@ -388,6 +437,8 @@ class EnsemblePlan:
             gamma=gamma,
             use_flash_forces=use_flash_forces,
             nb_cfg=nb_cfg,
+            use_pallas=eff_use_pallas,
+            use_pallas_pme=eff_use_pallas_pme,
         )
 
     def _run_trajectory(
@@ -403,6 +454,8 @@ class EnsemblePlan:
         gamma: float,
         use_flash_forces: bool = False,
         nb_cfg: Any = None,
+        use_pallas: bool | None = None,
+        use_pallas_pme: bool | None = None,
     ) -> Trajectory | list[Trajectory]:
         """Pathological / baseline path: scan + full trajectory stack."""
         if len(self.bundles) == 1:
@@ -417,6 +470,8 @@ class EnsemblePlan:
                 gamma=gamma,
                 use_flash_forces=use_flash_forces,
                 nb_cfg=nb_cfg,
+                use_pallas=use_pallas,
+                use_pallas_pme=use_pallas_pme,
             )
             if xtc_path is not None:
 
@@ -434,6 +489,8 @@ class EnsemblePlan:
             run_mode="trajectory",
             use_flash_forces=use_flash_forces,
             nb_cfg=nb_cfg,
+            use_pallas=use_pallas,
+            use_pallas_pme=use_pallas_pme,
         )
 
     def _run_inference(
@@ -452,6 +509,8 @@ class EnsemblePlan:
         nl_update_every: int = 20,
         use_flash_forces: bool = False,
         nb_cfg: Any = None,
+        use_pallas: bool | None = None,
+        use_pallas_pme: bool | None = None,
     ) -> Trajectory | list[Trajectory]:
         """Inference path: while_loop carry-only; group-by-shape for multi-bundle."""
         if len(self.bundles) == 1:
@@ -470,6 +529,8 @@ class EnsemblePlan:
                 nl_update_every=nl_update_every,
                 use_flash_forces=use_flash_forces,
                 nb_cfg=nb_cfg,
+                use_pallas=use_pallas,
+                use_pallas_pme=use_pallas_pme,
             )
 
         return self._run_grouped(
@@ -485,6 +546,8 @@ class EnsemblePlan:
             nl_update_every=nl_update_every,
             use_flash_forces=use_flash_forces,
             nb_cfg=nb_cfg,
+            use_pallas=use_pallas,
+            use_pallas_pme=use_pallas_pme,
         )
 
     def _run_grouped(
@@ -502,6 +565,8 @@ class EnsemblePlan:
         nl_update_every: int = 20,
         use_flash_forces: bool = False,
         nb_cfg: Any = None,
+        use_pallas: bool | None = None,
+        use_pallas_pme: bool | None = None,
     ) -> list[Trajectory]:
         """Host-partition by shape_spec; Vmap/ChunkedMap within each class (xtrax).
         
@@ -538,6 +603,8 @@ class EnsemblePlan:
                         nl_update_every=nl_update_every,
                         use_flash_forces=use_flash_forces,
                         nb_cfg=nb_cfg,
+                        use_pallas=use_pallas,
+                        use_pallas_pme=use_pallas_pme,
                     )
                 else:
                     traj = self._run_single(
@@ -551,6 +618,8 @@ class EnsemblePlan:
                         gamma=gamma,
                         use_flash_forces=use_flash_forces,
                         nb_cfg=nb_cfg,
+                        use_pallas=use_pallas,
+                        use_pallas_pme=use_pallas_pme,
                     )
                 trajs = [traj]
             elif can_jit_vmap_n_mols(group):
@@ -569,6 +638,8 @@ class EnsemblePlan:
                     nl_update_every=nl_update_every,
                     use_flash_forces=use_flash_forces,
                     nb_cfg=nb_cfg,
+                    use_pallas=use_pallas,
+                    use_pallas_pme=use_pallas_pme,
                 )
             else:
                 # Defensive: same shape_spec should always stack; fall back
@@ -605,6 +676,8 @@ class EnsemblePlan:
                                 gamma=gamma,
                                 use_flash_forces=use_flash_forces,
                                 nb_cfg=nb_cfg,
+                                use_pallas=use_pallas,
+                                use_pallas_pme=use_pallas_pme,
                             )
                         )
                     else:
@@ -620,6 +693,8 @@ class EnsemblePlan:
                                 gamma=gamma,
                                 use_flash_forces=use_flash_forces,
                                 nb_cfg=nb_cfg,
+                                use_pallas=use_pallas,
+                                use_pallas_pme=use_pallas_pme,
                             )
                         )
             for idx, traj in zip(indices, trajs, strict=True):
@@ -645,6 +720,8 @@ class EnsemblePlan:
         nl_update_every: int = 20,
         use_flash_forces: bool = False,
         nb_cfg: Any = None,
+        use_pallas: bool | None = None,
+        use_pallas_pme: bool | None = None,
     ) -> list[Trajectory]:
         """JIT vmap / safe_map over stack-compatible bundles (#2645)."""
         import jax.numpy as jnp
@@ -685,6 +762,8 @@ class EnsemblePlan:
                     initial_neighbor=neighbor,
                     use_flash_forces=use_flash_forces,
                     nb_cfg=nb_cfg,
+                    use_pallas=use_pallas,
+                    use_pallas_pme=use_pallas_pme,
                 )
             return self._run_single(
                 bundle,
@@ -699,6 +778,8 @@ class EnsemblePlan:
                 gamma=gamma,
                 use_flash_forces=use_flash_forces,
                 nb_cfg=nb_cfg,
+                use_pallas=use_pallas,
+                use_pallas_pme=use_pallas_pme,
             )
 
         import jax
@@ -763,6 +844,7 @@ class EnsemblePlan:
         seed and with each other — directly stackable via
         ``jax.tree.map(jnp.stack)`` and safe to slice per-replica under vmap.
         """
+        import dataclasses
         import jax
         import jax.numpy as jnp
 
@@ -802,8 +884,15 @@ class EnsemblePlan:
         if extra_needed > 0:
             seed = neighbor_fn.allocate(seed_positions, extra_capacity=extra_needed)
 
+        seed_invalidated = dataclasses.replace(
+            seed,
+            reference_position=seed.reference_position + jnp.asarray(1e6, dtype=seed.reference_position.dtype),
+        )
         per_bundle = [
-            seed.update(positions_with_prefix(b, integration_prefix)) for b in bundles
+            _encode_bundle_nl(
+                seed_invalidated.update(positions_with_prefix(b, integration_prefix)), b
+            )
+            for b in bundles
         ]
         stacked_neighbor = jax.tree.map(lambda *xs: jnp.stack(xs, axis=0), *per_bundle)
         return stacked_neighbor, neighbor_fn
@@ -813,14 +902,22 @@ class EnsemblePlan:
         neighbor_fn: Any, bundles: list[Any], integration_prefix: int, *, extra_capacity: int
     ) -> Any:
         """Host-side reallocate-and-restack after an overflow (debt 802)."""
+        import dataclasses
         import jax
         import jax.numpy as jnp
 
         ref = bundles[0]
         seed_positions = positions_with_prefix(ref, integration_prefix)
         seed = neighbor_fn.allocate(seed_positions, extra_capacity=extra_capacity)
+        seed_invalidated = dataclasses.replace(
+            seed,
+            reference_position=seed.reference_position + jnp.asarray(1e6, dtype=seed.reference_position.dtype),
+        )
         per_bundle = [
-            seed.update(positions_with_prefix(b, integration_prefix)) for b in bundles
+            _encode_bundle_nl(
+                seed_invalidated.update(positions_with_prefix(b, integration_prefix)), b
+            )
+            for b in bundles
         ]
         return jax.tree.map(lambda *xs: jnp.stack(xs, axis=0), *per_bundle)
 
@@ -837,6 +934,9 @@ class EnsemblePlan:
         use_flash_forces: bool = False,
         initial_neighbor: Any = None,
         nb_cfg: Any = None,
+        use_pallas: bool | None = None,
+        use_pallas_pme: bool | None = None,
+        excl_mode: str = "table",
     ) -> tuple[Any, Any, Any, Any]:
         """Shared settle_langevin init. Returns (state, apply_fn, dt, kT)."""
         import jax
@@ -851,7 +951,12 @@ class EnsemblePlan:
         tile = int(getattr(nb_cfg, "flash_tile_size", 256) or 256) if nb_cfg is not None else 256
         remat = bool(getattr(nb_cfg, "flash_remat", True)) if nb_cfg is not None else True
         energy_or_force_fn = (
-            force_fn_from_bundle(bundle, flash_tile_size=tile, flash_remat=remat)
+            force_fn_from_bundle(
+                bundle,
+                flash_tile_size=tile,
+                flash_remat=remat,
+                use_pallas=use_pallas,
+            )
             if use_flash_forces
             else energy_fn_from_bundle(
                 bundle,
@@ -864,6 +969,9 @@ class EnsemblePlan:
                 # number. This is what made the NL path OOM at init (job 20528981)
                 # while flash, which already opted out, did not.
                 build_dense_exclusions=initial_neighbor is None,
+                use_pallas=use_pallas,
+                use_pallas_pme=use_pallas_pme,
+                excl_mode=excl_mode,
             )
         )
         if initial_neighbor is not None:
@@ -971,6 +1079,8 @@ class EnsemblePlan:
         gamma: float = 10.0,
         use_flash_forces: bool = False,
         nb_cfg: Any = None,
+        use_pallas: bool | None = None,
+        use_pallas_pme: bool | None = None,
     ) -> Trajectory:
 
         state, apply_fn, dt_s, kT_s = self._setup_integrator(
@@ -983,6 +1093,8 @@ class EnsemblePlan:
             gamma=gamma,
             use_flash_forces=use_flash_forces,
             nb_cfg=nb_cfg,
+            use_pallas=use_pallas,
+            use_pallas_pme=use_pallas_pme,
         )
 
         def step_fn(carry: Any, _: Any) -> tuple[Any, Any]:
@@ -1024,6 +1136,8 @@ class EnsemblePlan:
         initial_neighbor: Any = None,
         use_flash_forces: bool = False,
         nb_cfg: Any = None,
+        use_pallas: bool | None = None,
+        use_pallas_pme: bool | None = None,
     ) -> Trajectory:
         """Carry-only MD via while_loop; Trajectory holds final frame only.
 
@@ -1041,6 +1155,7 @@ class EnsemblePlan:
                 preserves the original single-bundle behavior exactly
                 (internal allocation + retry, as verified in Phase 6 steps 4-5).
         """
+        import dataclasses
         import jax
         import jax.numpy as jnp
 
@@ -1089,6 +1204,13 @@ class EnsemblePlan:
             extra_needed = max(0, target_capacity - int(nbr0.idx.shape[-1]))
             if extra_needed > 0:
                 nbr0 = neighbor_fn.allocate(seed_positions, extra_capacity=extra_needed)
+            nbr0 = _encode_bundle_nl(nbr0, bundle)
+
+        eff_excl_mode = (
+            "pre_encoded"
+            if (nbr0 is not None and getattr(bundle, "excl_dense_indices", None) is not None)
+            else "table"
+        )
 
         state, apply_fn, dt_s, kT_s = self._setup_integrator(
             bundle,
@@ -1101,6 +1223,9 @@ class EnsemblePlan:
             use_flash_forces=use_flash_forces,
             initial_neighbor=nbr0,
             nb_cfg=nb_cfg,
+            use_pallas=use_pallas,
+            use_pallas_pme=use_pallas_pme,
+            excl_mode=eff_excl_mode,
         )
 
         sink_cm = None
@@ -1150,7 +1275,14 @@ class EnsemblePlan:
                     should_update = verlet
                 new_neighbor = jax.lax.cond(
                     should_update,
-                    lambda n: n.update(pos),
+                    lambda n: _encode_bundle_nl(
+                        dataclasses.replace(
+                            n,
+                            reference_position=n.reference_position
+                            + jnp.asarray(1e6, dtype=n.reference_position.dtype),
+                        ).update(pos),
+                        bundle,
+                    ),
                     lambda n: n,
                     neighbor,
                 )
@@ -1212,8 +1344,11 @@ class EnsemblePlan:
                 for attempt in range(1, _NL_MAX_REALLOC_ATTEMPTS + 1):
                     # total capacity ~= base * 2**attempt
                     bumped_capacity = base_capacity * (2**attempt - 1)
-                    retried_neighbor = neighbor_fn.allocate(
-                        retry_positions, extra_capacity=bumped_capacity
+                    retried_neighbor = _encode_bundle_nl(
+                        neighbor_fn.allocate(
+                            retry_positions, extra_capacity=bumped_capacity
+                        ),
+                        bundle,
                     )
                     retry_carry = _NLDispatchCarry(
                         state, retried_neighbor, jnp.array(False), retry_positions

@@ -365,14 +365,21 @@ def spme_reciprocal_energy(
     order: int = 4,
     use_pallas_pme: bool = False,
 ) -> jnp.ndarray:
+    orig_dtype = positions.dtype
+    if use_pallas_pme and not in_export_context() and jnp.asarray(box_size).ndim == 1:
+        pos_w = positions.astype(jnp.float32)
+        q_w = charges.astype(jnp.float32)
+        box_w = jnp.asarray(box_size, dtype=jnp.float32)
+    else:
+        pos_w, q_w, box_w = positions, charges, box_size
     Q = spread_charges(
-        positions, charges, atom_mask, box_size, grid_dims, order, use_pallas_pme
+        pos_w, q_w, atom_mask, box_w, grid_dims, order, use_pallas_pme
     )
     Q_hat = jnp.fft.rfftn(Q, s=grid_dims, axes=(-3, -2, -1))
-    G = influence_function(grid_dims, box_size, alpha, order).astype(Q.dtype)
+    G = influence_function(grid_dims, box_w, alpha, order).astype(Q.dtype)
     theta = jnp.fft.irfftn(Q_hat * G, s=grid_dims, axes=(-3, -2, -1)).astype(Q.dtype)
     N_grid = float(grid_dims[0] * grid_dims[1] * grid_dims[2])
-    return (0.5 * COULOMB_CONSTANT * jnp.sum(Q * theta, axis=(-3, -2, -1)) * N_grid).astype(positions.dtype)
+    return (0.5 * COULOMB_CONSTANT * jnp.sum(Q * theta, axis=(-3, -2, -1)) * N_grid).astype(orig_dtype)
 
 
 def spme_self_energy(charges: jnp.ndarray, atom_mask: jnp.ndarray, alpha: float = 0.34) -> jnp.ndarray:
@@ -408,20 +415,27 @@ def spme_energy_with_forces(
             order,
             use_pallas_pme,
         )
-        + spme_self_energy(charges, atom_mask, alpha)
-    )
+        + spme_self_energy(charges, atom_mask, alpha).astype(positions.dtype)
+    ).astype(positions.dtype)
 
 
 def _spme_fwd(positions, charges, atom_mask, box_size, grid_dims, alpha, order, use_pallas_pme):
     Kx, Ky, Kz = grid_dims
+    orig_dtype = positions.dtype
+    if use_pallas_pme and not in_export_context() and jnp.asarray(box_size).ndim == 1:
+        pos_w = positions.astype(jnp.float32)
+        q_w = charges.astype(jnp.float32)
+        box_w = jnp.asarray(box_size, dtype=jnp.float32)
+    else:
+        pos_w, q_w, box_w = positions, charges, box_size
     Q = spread_charges(
-        positions, charges, atom_mask, box_size, grid_dims, order, use_pallas_pme
+        pos_w, q_w, atom_mask, box_w, grid_dims, order, use_pallas_pme
     )
     with jax.named_scope("pme_fft_forward"):
         Q_hat = jnp.fft.rfftn(Q, s=grid_dims, axes=(-3, -2, -1))
 
     with jax.named_scope("pme_greens_setup"):
-        G = influence_function(grid_dims, box_size, alpha, order).astype(Q.dtype)
+        G = influence_function(grid_dims, box_w, alpha, order).astype(Q.dtype)
 
     # irfftn normalization
     with jax.named_scope("pme_fft_inverse"):
@@ -429,8 +443,8 @@ def _spme_fwd(positions, charges, atom_mask, box_size, grid_dims, alpha, order, 
     N_grid = float(Kx * Ky * Kz)
     theta_norm = (theta * N_grid).astype(Q.dtype)
 
-    e_recip = (0.5 * COULOMB_CONSTANT * jnp.sum(Q * theta_norm, axis=(-3, -2, -1))).astype(Q.dtype)
-    e_self = spme_self_energy(charges, atom_mask, alpha).astype(Q.dtype)
+    e_recip = (0.5 * COULOMB_CONSTANT * jnp.sum(Q * theta_norm, axis=(-3, -2, -1))).astype(orig_dtype)
+    e_self = spme_self_energy(charges, atom_mask, alpha).astype(orig_dtype)
 
     return e_recip + e_self, (positions, charges, atom_mask, box_size, theta_norm)
 
@@ -450,19 +464,21 @@ def _spme_bwd(grid_dims, alpha, order, use_pallas_pme, residuals, g):
         )
         with jax.named_scope("pme_bwd_gather"):
             forces, potentials = gather_op(
-                positions,
-                charges,
+                positions.astype(jnp.float32),
+                charges.astype(jnp.float32),
                 atom_mask,
-                box_size,
-                theta_norm,
+                box_arr.astype(jnp.float32),
+                theta_norm.astype(jnp.float32),
             )
+            forces = forces.astype(dtype)
+            potentials = potentials.astype(dtype)
     else:
         forces, potentials = _gather_reference(
             positions,
             charges,
             atom_mask,
             box_size,
-            theta_norm,
+            theta_norm.astype(dtype),
             grid_dims=grid_dims,
             order=order,
         )
@@ -509,21 +525,35 @@ def _spme_energy_with_forces_cached(
     use_pallas_pme: bool = False,
 ) -> jnp.ndarray:
     Kx, Ky, Kz = grid_dims
+    orig_dtype = positions.dtype
+    if use_pallas_pme and not in_export_context() and jnp.asarray(box_size).ndim == 1:
+        pos_w = positions.astype(jnp.float32)
+        q_w = charges.astype(jnp.float32)
+        box_w = jnp.asarray(box_size, dtype=jnp.float32)
+    else:
+        pos_w, q_w, box_w = positions, charges, box_size
     Q = spread_charges(
-        positions, charges, atom_mask, box_size, grid_dims, order, use_pallas_pme
+        pos_w, q_w, atom_mask, box_w, grid_dims, order, use_pallas_pme
     )
     Q_hat = jnp.fft.rfftn(Q, s=grid_dims, axes=(-3, -2, -1))
     G = G_cached.astype(Q.dtype)
     theta = jnp.fft.irfftn(Q_hat * G, s=grid_dims, axes=(-3, -2, -1))
     N_grid = float(Kx * Ky * Kz)
-    e_recip = 0.5 * COULOMB_CONSTANT * jnp.sum(Q * theta, axis=(-3, -2, -1)) * N_grid
-    return e_recip + spme_self_energy(charges, atom_mask, alpha)
+    e_recip = (0.5 * COULOMB_CONSTANT * jnp.sum(Q * theta, axis=(-3, -2, -1)) * N_grid).astype(orig_dtype)
+    return e_recip + spme_self_energy(charges, atom_mask, alpha).astype(orig_dtype)
 
 
 def _spme_cached_fwd(positions, charges, atom_mask, G_cached, box_size, grid_dims, alpha, order, use_pallas_pme):
     Kx, Ky, Kz = grid_dims
+    orig_dtype = positions.dtype
+    if use_pallas_pme and not in_export_context() and jnp.asarray(box_size).ndim == 1:
+        pos_w = positions.astype(jnp.float32)
+        q_w = charges.astype(jnp.float32)
+        box_w = jnp.asarray(box_size, dtype=jnp.float32)
+    else:
+        pos_w, q_w, box_w = positions, charges, box_size
     Q = spread_charges(
-        positions, charges, atom_mask, box_size, grid_dims, order, use_pallas_pme
+        pos_w, q_w, atom_mask, box_w, grid_dims, order, use_pallas_pme
     )
     with jax.named_scope("pme_fft_forward"):
         Q_hat = jnp.fft.rfftn(Q, s=grid_dims, axes=(-3, -2, -1))
@@ -531,9 +561,9 @@ def _spme_cached_fwd(positions, charges, atom_mask, G_cached, box_size, grid_dim
     with jax.named_scope("pme_fft_inverse"):
         theta = jnp.fft.irfftn(Q_hat * G, s=grid_dims, axes=(-3, -2, -1))
     N_grid = float(Kx * Ky * Kz)
-    theta_norm = theta * N_grid
-    e_recip = 0.5 * COULOMB_CONSTANT * jnp.sum(Q * theta_norm, axis=(-3, -2, -1))
-    e_self = spme_self_energy(charges, atom_mask, alpha)
+    theta_norm = (theta * N_grid).astype(Q.dtype)
+    e_recip = (0.5 * COULOMB_CONSTANT * jnp.sum(Q * theta_norm, axis=(-3, -2, -1))).astype(orig_dtype)
+    e_self = spme_self_energy(charges, atom_mask, alpha).astype(orig_dtype)
     return e_recip + e_self, (positions, charges, atom_mask, box_size, theta_norm, G_cached)
 
 

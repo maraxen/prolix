@@ -77,8 +77,9 @@ def _spread_charges_pallas_single(
     n_pad = n_blocks * BLOCK_N
     pad = n_pad - n_atoms
 
-    dtype = positions.dtype
-    pos_in = positions
+    orig_dtype = positions.dtype
+    dtype = jnp.float32
+    pos_in = positions.astype(dtype)
     q_in = charges.astype(dtype)
     mask_in = jnp.asarray(atom_mask, dtype=jnp.int32)
     if pad > 0:
@@ -86,9 +87,9 @@ def _spread_charges_pallas_single(
         q_in = jnp.pad(q_in, (0, pad), constant_values=0.0)
         mask_in = jnp.pad(mask_in, (0, pad), constant_values=0)
 
-    pos_x = jnp.asarray(pos_in[:, 0])
-    pos_y = jnp.asarray(pos_in[:, 1])
-    pos_z = jnp.asarray(pos_in[:, 2])
+    pos_x = jnp.asarray(pos_in[:, 0], dtype=dtype)
+    pos_y = jnp.asarray(pos_in[:, 1], dtype=dtype)
+    pos_z = jnp.asarray(pos_in[:, 2], dtype=dtype)
     box = jnp.asarray(box_size, dtype=dtype)
     mesh0_flat = jnp.zeros((Kx * Ky * Kz,), dtype=dtype)
 
@@ -167,7 +168,7 @@ def _spread_charges_pallas_single(
         input_output_aliases={6: 0},
         name="pme_charge_spread",
     )(pos_x, pos_y, pos_z, q_in, mask_in, box, mesh0_flat)
-    return mesh_flat.reshape((Kx, Ky, Kz))
+    return mesh_flat.reshape((Kx, Ky, Kz)).astype(orig_dtype)
 
 
 def spread_charges_pallas(
@@ -252,8 +253,9 @@ def _gather_pallas_single(
     n_pad = n_blocks * BLOCK_N
     pad = n_pad - n_atoms
 
-    dtype = positions.dtype
-    pos_in = positions
+    orig_dtype = positions.dtype
+    dtype = jnp.float32
+    pos_in = positions.astype(dtype)
     q_in = charges.astype(dtype)
     mask_in = jnp.asarray(atom_mask, dtype=jnp.int32)
     if pad > 0:
@@ -261,9 +263,9 @@ def _gather_pallas_single(
         q_in = jnp.pad(q_in, (0, pad), constant_values=0.0)
         mask_in = jnp.pad(mask_in, (0, pad), constant_values=0)
 
-    pos_x = jnp.asarray(pos_in[:, 0])
-    pos_y = jnp.asarray(pos_in[:, 1])
-    pos_z = jnp.asarray(pos_in[:, 2])
+    pos_x = jnp.asarray(pos_in[:, 0], dtype=dtype)
+    pos_y = jnp.asarray(pos_in[:, 1], dtype=dtype)
+    pos_z = jnp.asarray(pos_in[:, 2], dtype=dtype)
     box = jnp.asarray(box_size, dtype=dtype)
     theta_flat = jnp.asarray(theta_norm, dtype=dtype).reshape(-1)
 
@@ -384,7 +386,7 @@ def _gather_pallas_single(
         name="pme_bwd_gather",
     )(pos_x, pos_y, pos_z, q_in, mask_in, box, theta_flat)
     dpos = jnp.stack([fx_pad[:n_atoms], fy_pad[:n_atoms], fz_pad[:n_atoms]], axis=-1)
-    return dpos, dq_pad[:n_atoms]
+    return dpos.astype(orig_dtype), dq_pad[:n_atoms].astype(orig_dtype)
 
 
 def gather_pallas(

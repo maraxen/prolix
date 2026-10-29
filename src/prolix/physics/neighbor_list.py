@@ -229,15 +229,17 @@ def make_neighbor_list_fn(
       return wrap_positions(position, b)
     return jnp.mod(position, b)
 
-  def allocate(position: Array, **kwargs) -> partition.NeighborList:
-    b = kwargs.get("box", None)
-    return fns.allocate(_wrap(position, b), **kwargs)
-
   def update(
     position: Array, neighbors: partition.NeighborList, **kwargs
   ) -> partition.NeighborList:
     b = kwargs.get("box", None)
-    return fns.update(_wrap(position, b), neighbors, **kwargs)
+    nbr = fns.update(_wrap(position, b), neighbors, **kwargs)
+    return dataclasses.replace(nbr, update_fn=update)
+
+  def allocate(position: Array, **kwargs) -> partition.NeighborList:
+    b = kwargs.get("box", None)
+    nbr = fns.allocate(_wrap(position, b), **kwargs)
+    return dataclasses.replace(nbr, update_fn=update)
 
   return partition.NeighborListFns(allocate, update)
 

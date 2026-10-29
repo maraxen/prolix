@@ -179,7 +179,24 @@ Every entry added to this ledger must record:
   2. Avoid `jnp.argmax` for masked bounding-box reductions; instead use sentinel values `r_min = jnp.min(jnp.where(mask, x, 1e30))` and `r_max = jnp.max(jnp.where(mask, x, -1e30))`.
   3. Always include a CPU-executable `.trace(...).lower(lowering_platforms=("cuda",))` test with `interpret=False` in CI so unimplemented Triton primitives are caught even on CPU-only test runners.
 
+### MK-18: Mixed-Precision Boundary (`float64` BAOAB/SETTLE Integrator + `float32` Pallas Triton Kernels)
+- **Category**: `xtrax.op Seam` / `Lowering & Triton Constraints`
+- **Symptom / Failure Mode**:
+  1. Production explicit-solvent MD (`EnsemblePlan`, BAOAB Langevin + analytical SETTLE water constraints) requires `jax_enable_x64=True` and `float64` positions/velocities/box so rigid-water holonomic projection and coordinate wrapping do not suffer `float32` precision drift.
+  2. Passing `float64` positions directly into Pallas Triton kernels (`pallas_bonded_all_fused`, `pallas_nonbonded_nl`, `spread_charges_pallas`, `gather_forces_pallas`) either fails `float64` atomic scatter-add (`tl.atomic_add` on `fp64` vectors) or executes `fp64` math at 1/32nd hardware throughput on consumer/datacenter GPUs and forces `complex128` 3D FFTs in SPME.
+  3. Casting only the kernel output without matching `orig_dtype = positions.dtype` at the `_single` kernel boundary triggers `xtrax.intent.errors.IntentError` in `xtrax.op._check_signature` when `reference(positions)` returns `float64` and `kernel(positions)` returns `float32`.
+- **Root Cause**: OpenMM's `"mixed"` precision mode achieves both integration stability and GPU Tensor/FP32 throughput by computing forces in `float32` and accumulating/integrating coordinates and constraints in `float64`. In `xtrax.op`, both `kernel` and `reference` must agree on output `ShapeDtypeStruct`.
+- **Generalizable Rule for `xtrax` Skill**:
+  1. Inside every `_pallas_*_single` entry point (and Pallas PME path), record `orig_dtype = positions.dtype`, cast all floating-point kernel inputs to `jnp.float32` before `pl.pallas_call` (and run 3D SPME `rfftn`/`irfftn` in `float32`/`complex64`), and cast the returned `(energy, forces)` back to `orig_dtype` via `.astype(orig_dtype)`.
+  2. Cast `single_padded_energy` / `single_padded_energy_nl` outputs to `r.dtype` so both `xtrax.op._check_signature` and `jax.grad` see exact `float64` primal and cotangent dtypes while 100% of GPU force/FFT compute executes in `float32`.
 
-
-
-
+### MK-19: Dynamic Neighbor-List Bit-Tag Re-Encoding & `update_fn` PyTree Invariance Across `jax.lax.cond`
+- **Category**: `Buffer Aliasing & Atomics` / `Grid & Work-Unit Dispatch`
+- **Symptom / Failure Mode**:
+  1. If `encode_nl_exclusions` is only applied at initial neighbor-list allocation (`nbr0`), the first `jax.lax.cond(should_update, ...)` skin rebuild inside `EnsemblePlan._run_single_inference` overwrites `nbr.idx` with raw untagged `jax_md` cell-list indices, silently dropping all 1-2/1-3/1-4 exclusions on step $k > 0$ when `excl_mode="pre_encoded"`!
+  2. Calling `_encode_bundle_nl(n.update(pos), bundle)` inside the `True` branch of `jax.lax.cond` *without* invalidating `n.reference_position` is unsafe because `jax_md`'s `neighbor_fn.update` has its own internal `max_dr < threshold` short-circuit (`lax.cond`) that returns the already-encoded `n.idx` on one branch and a raw `idx` on the rebuild branch.
+  3. Wrapping `allocate` / `update` in `make_neighbor_list_fn` without re-binding `dataclasses.replace(nbr, update_fn=update)` causes `n.update(pos)` inside `EnsemblePlan` to bypass periodic coordinate wrapping (`jnp.mod(pos, box)`) and can produce a `TypeError` from mismatched static `update_fn` PyTree treedefs across `lax.cond` branches.
+- **Root Cause**: `jax_md.partition.NeighborList` stores `update_fn` as a static metadata field (`static_fields`) initialized to the inner `neighbor_list_fn` closure, and `n.update(pos)` delegates to `self.update_fn(pos, self)`.
+- **Generalizable Rule for `xtrax` Skill**:
+  1. In any custom `make_neighbor_list_fn` wrapper, always return `dataclasses.replace(nbr, update_fn=update)` from both `allocate` and `update` so `nbr.update(pos)` preserves both coordinate wrapping and static PyTree identity across `lax.cond` / `while_loop` steps.
+  2. Make `encode_nl_exclusions` idempotent (`clean_nbr = jnp.where(neighbor_idx >= 0, neighbor_idx & _NB_INDEX_MASK, neighbor_idx)` before matching) and, when forcing a rebuild inside an outer `should_update` branch, invalidate `reference_position` (`+ 1e6`) before calling `.update(pos)` and re-encoding.
