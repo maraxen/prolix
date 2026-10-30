@@ -118,6 +118,7 @@ class MolecularShapeSpec:
     constraint_bucket_idx: int = 0
     has_real_constraints: bool = False
     is_triclinic: bool = False
+    has_real_cosolvents: bool = False
 
 
 def cmap_map_pad_length(spec: MolecularShapeSpec) -> int:

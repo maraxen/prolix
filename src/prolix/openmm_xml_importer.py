@@ -17,10 +17,10 @@ Unit conversions (OpenMM XML -> Prolix AKMA):
 
 from __future__ import annotations
 
+import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
-import xml.etree.ElementTree as ET
 
 import jax.numpy as jnp
 import numpy as np
@@ -1118,6 +1118,7 @@ def bundle_from_openmm_system_xml(
         constraint_bucket_idx=constraint_bucket_idx,
         has_real_constraints=n_constr > 0,
         is_triclinic=data.is_triclinic,
+        has_real_cosolvents=bool(np.any(np.asarray(data.cosolvent_group_id) > 0)),
     )
 
     masses_padded = jnp.pad(
@@ -1316,8 +1317,16 @@ def physics_system_from_openmm_xml(
         exception_epsilons=bundle.exception_epsilons,
         exception_chargeprods=bundle.exception_chargeprods,
         exception_mask=bundle.exception_mask,
-        cosolvent_group_id=_pad_1d(data.cosolvent_group_id, n, dtype=jnp.int32),
-        cosolvent_mol_id=_pad_1d(data.molecule_id, n, dtype=jnp.int32),
+        cosolvent_group_id=(
+            _pad_1d(data.cosolvent_group_id, n, dtype=jnp.int32)
+            if bool(np.any(np.asarray(data.cosolvent_group_id) > 0))
+            else None
+        ),
+        cosolvent_mol_id=(
+            _pad_1d(data.molecule_id, n, dtype=jnp.int32)
+            if bool(np.any(np.asarray(data.cosolvent_group_id) > 0))
+            else None
+        ),
         n_real_atoms=bundle.n_atoms,
         n_padded_atoms=n,
         bucket_size=n,

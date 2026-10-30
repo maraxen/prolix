@@ -229,15 +229,17 @@ def make_neighbor_list_fn(
       return wrap_positions(position, b)
     return jnp.mod(position, b)
 
-  def allocate(position: Array, **kwargs) -> partition.NeighborList:
-    b = kwargs.get("box", None)
-    return fns.allocate(_wrap(position, b), **kwargs)
-
   def update(
     position: Array, neighbors: partition.NeighborList, **kwargs
   ) -> partition.NeighborList:
     b = kwargs.get("box", None)
-    return fns.update(_wrap(position, b), neighbors, **kwargs)
+    nbr = fns.update(_wrap(position, b), neighbors, **kwargs)
+    return dataclasses.replace(nbr, update_fn=update)
+
+  def allocate(position: Array, **kwargs) -> partition.NeighborList:
+    b = kwargs.get("box", None)
+    nbr = fns.allocate(_wrap(position, b), **kwargs)
+    return dataclasses.replace(nbr, update_fn=update)
 
   return partition.NeighborListFns(allocate, update)
 
@@ -637,3 +639,159 @@ def build_dense_exclusion_scales(
 
 # Backward-compatible private alias (previously defined in ``prolix.batched_energy``).
 _build_dense_exclusion_scales = build_dense_exclusion_scales
+
+# =============================================================================
+# O1.1 & O5: Lossless 2-Bit Neighbor-List Exclusion Tagging & 3D Morton Sorting
+# =============================================================================
+
+_NB_EXCL_FULL_BIT: int = 1 << 30
+_NB_EXCL_14_BIT: int = 1 << 29
+_NB_INDEX_MASK: int = (1 << 29) - 1
+
+
+def encode_nl_exclusions(
+    neighbor_idx: Array,
+    excl_indices: Array,
+    excl_scales_vdw: Array,
+    excl_scales_elec: Array,
+    n_atoms: int | None = None,
+    *,
+    scale_14_vdw: float = 0.5,
+    scale_14_elec: float = 0.83333333,
+    tol: float = 1e-4,
+) -> Array:
+    """Losslessly pre-encode 1-2/1-3 full exclusions and 1-4 scaled exclusions into ``neighbor_idx``.
+
+    Preserves the underlying atom index ``j = raw_j & _NB_INDEX_MASK`` in the
+    lower 29 bits while setting ``_NB_EXCL_FULL_BIT`` (bit 30) on full
+    exclusions ``(w_vdw == 0, w_elec == 0)`` and ``_NB_EXCL_14_BIT`` (bit 29)
+    on standard 1-4 exclusions ``(scale_14_vdw, scale_14_elec)``.
+    """
+    nbr_i32 = jnp.asarray(neighbor_idx, dtype=jnp.int32)
+    N = int(nbr_i32.shape[0]) if n_atoms is None else int(n_atoms)
+    if N > _NB_INDEX_MASK:
+        raise ValueError(
+            f"encode_nl_exclusions requires n_atoms <= 2^29 - 1 ({_NB_INDEX_MASK}), got {N}"
+        )
+    j_clean = jnp.where(nbr_i32 >= 0, nbr_i32 & jnp.int32(_NB_INDEX_MASK), nbr_i32)
+    valid_j = (j_clean >= 0) & (j_clean < N)
+
+    w_vdw, w_elec = get_neighbor_exclusion_scales(
+        excl_indices, excl_scales_vdw, excl_scales_elec, j_clean
+    )
+    is_full = valid_j & (jnp.abs(w_vdw) <= tol) & (jnp.abs(w_elec) <= tol)
+    is_14 = (
+        valid_j
+        & (~is_full)
+        & (jnp.abs(w_vdw - scale_14_vdw) <= tol)
+        & (jnp.abs(w_elec - scale_14_elec) <= tol)
+    )
+    tagged = jnp.where(
+        is_full,
+        j_clean | jnp.int32(_NB_EXCL_FULL_BIT),
+        jnp.where(is_14, j_clean | jnp.int32(_NB_EXCL_14_BIT), j_clean),
+    )
+    return jnp.where(valid_j, tagged, nbr_i32)
+
+
+def _expand_bits_10(v: Array) -> Array:
+    """Expand a 10-bit integer in [0, 1023] to 30 interleaved bits."""
+    v = v.astype(jnp.int32) & jnp.int32(0x3FF)
+    v = (v | (v << 16)) & jnp.int32(0x030000FF)
+    v = (v | (v << 8)) & jnp.int32(0x0300F00F)
+    v = (v | (v << 4)) & jnp.int32(0x030C30C3)
+    v = (v | (v << 2)) & jnp.int32(0x09249249)
+    return v
+
+
+def compute_morton_codes_3d(
+    positions: Array,
+    box: Array | None = None,
+    atom_mask: Array | None = None,
+) -> tuple[Array, Array]:
+    """Compute 30-bit 3D Morton (Z-order) permutation ``(perm, inv_perm)``.
+
+    Padded/ghost atoms (``~atom_mask``) receive key ``0x7FFFFFFF`` so all real
+    atoms sort contiguously into ``[0, N_real - 1]`` and ghost atoms remain at
+    the tail ``[N_real, N - 1]``.
+    """
+    pos = jnp.asarray(positions)
+    N = pos.shape[0]
+    dtype = pos.dtype
+    if atom_mask is None:
+        mask_b = jnp.ones((N,), dtype=jnp.bool_)
+    else:
+        mask_b = jnp.asarray(atom_mask, dtype=jnp.bool_)
+
+    if box is not None:
+        b_arr = jnp.asarray(box, dtype=dtype)
+        if b_arr.ndim == 2 and b_arr.shape == (3, 3):
+            L = jnp.diag(b_arr)
+        else:
+            L = b_arr[:3]
+        safe_L = jnp.where(L > 0, L, jnp.ones_like(L))
+        pos_wrapped = jnp.where(L > 0, pos - L * jnp.floor(pos / safe_L), pos)
+        u = jnp.clip(pos_wrapped / safe_L, 0.0, jnp.asarray(1.0 - 1e-7, dtype=dtype))
+    else:
+        first_valid = jnp.argmax(mask_b.astype(jnp.int32))
+        anchor = pos[first_valid]
+        pos_v = jnp.where(mask_b[:, None], pos, anchor[None, :])
+        r_min = jnp.min(pos_v, axis=0)
+        r_max = jnp.max(pos_v, axis=0)
+        span = jnp.maximum(r_max - r_min, jnp.asarray(1e-4, dtype=dtype))
+        u = jnp.clip((pos_v - r_min[None, :]) / span[None, :], 0.0, jnp.asarray(1.0 - 1e-7, dtype=dtype))
+
+    q = jnp.clip(jnp.floor(u * jnp.asarray(1024.0, dtype=dtype)).astype(jnp.int32), 0, 1023)
+    morton = (_expand_bits_10(q[:, 0]) << 2) | (_expand_bits_10(q[:, 1]) << 1) | _expand_bits_10(q[:, 2])
+    morton = jnp.where(mask_b, morton, jnp.int32(0x7FFFFFFF))
+    perm = jnp.argsort(morton, stable=True).astype(jnp.int32)
+    inv_perm = jnp.argsort(perm).astype(jnp.int32)
+    return perm, inv_perm
+
+
+def permute_neighbor_list_morton(
+    neighbor_idx: Array,
+    perm: Array,
+    inv_perm: Array,
+    n_atoms: int | None = None,
+) -> Array:
+    """Permute ``neighbor_idx`` into Morton order while preserving sentinels and O1.1 tag bits."""
+    nbr = jnp.asarray(neighbor_idx, dtype=jnp.int32)
+    N = int(nbr.shape[0]) if n_atoms is None else int(n_atoms)
+    nbr_rows = nbr[perm]
+    tag_bits = jnp.where(nbr_rows >= 0, nbr_rows & (~jnp.int32(_NB_INDEX_MASK)), jnp.int32(0))
+    j_raw = jnp.where(nbr_rows >= 0, nbr_rows & jnp.int32(_NB_INDEX_MASK), nbr_rows)
+    valid_j = (j_raw >= 0) & (j_raw < N)
+    j_mapped = jnp.where(valid_j, inv_perm[jnp.clip(j_raw, 0, max(N - 1, 0))], nbr_rows)
+    return jnp.where(valid_j, j_mapped | tag_bits, nbr_rows)
+
+
+def permute_and_sort_exclusions(
+    excl_indices: Array,
+    excl_scales_vdw: Array,
+    excl_scales_elec: Array,
+    perm: Array,
+    inv_perm: Array,
+    n_atoms: int | None = None,
+) -> tuple[Array, Array, Array]:
+    """Permute per-atom exclusion tables by ``(perm, inv_perm)`` and re-sort each row ascending."""
+    ei = jnp.asarray(excl_indices, dtype=jnp.int32)
+    ev = jnp.asarray(excl_scales_vdw)
+    ee = jnp.asarray(excl_scales_elec)
+    N = int(ei.shape[0]) if n_atoms is None else int(n_atoms)
+    if ei.shape[1] == 0:
+        return ei[perm], ev[perm], ee[perm]
+
+    ei_p = ei[perm]
+    ev_p = ev[perm]
+    ee_p = ee[perm]
+    valid = (ei_p >= 0) & (ei_p < N)
+    int_max = jnp.int32(0x7FFFFFFF)
+    ei_mapped = jnp.where(valid, inv_perm[jnp.clip(ei_p, 0, max(N - 1, 0))], int_max)
+    order = jnp.argsort(ei_mapped, axis=-1)
+    ei_sorted = jnp.take_along_axis(ei_mapped, order, axis=-1)
+    ei_final = jnp.where(ei_sorted < int_max, ei_sorted, jnp.int32(-1))
+    ev_final = jnp.take_along_axis(ev_p, order, axis=-1)
+    ee_final = jnp.take_along_axis(ee_p, order, axis=-1)
+    return ei_final, ev_final, ee_final
+

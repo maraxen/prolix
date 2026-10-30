@@ -8,27 +8,31 @@ import jax.numpy as jnp
 from jax_md import space
 from jaxtyping import Array
 
-from prolix.pallas_kernels import (
-  pallas_nonbonded_nl,
-  resolve_pallas_mode,
-)
-
 try:
   from prolix.pallas_kernels import (
     pallas_angles_harmonic,
+    pallas_bonded_all_fused,
     pallas_bonds_2body,
     pallas_cmap_torsions,
     pallas_exceptions_14,
     pallas_gb_ace_nl,
+    pallas_nonbonded_nl,
     pallas_torsions_4body,
+    resolve_pallas_mode,
   )
 except ImportError:
   pallas_angles_harmonic = None  # type: ignore[assignment]
+  pallas_bonded_all_fused = None  # type: ignore[assignment]
   pallas_bonds_2body = None  # type: ignore[assignment]
   pallas_cmap_torsions = None  # type: ignore[assignment]
   pallas_exceptions_14 = None  # type: ignore[assignment]
   pallas_gb_ace_nl = None  # type: ignore[assignment]
+  pallas_nonbonded_nl = None  # type: ignore[assignment]
   pallas_torsions_4body = None  # type: ignore[assignment]
+
+  def resolve_pallas_mode(*, use_pallas: bool | None = None, interpret: bool | None = None) -> tuple[bool, bool]:
+    del use_pallas, interpret
+    return False, False
 from prolix.physics import bonded, cmap, explicit_corrections, generalized_born, neighbor_list, pme
 from prolix.physics.bonded import compute_dihedral_angles
 from prolix.physics.neighbor_list import map_exclusions_to_dense_padded, pair_list_to_dense_padded
@@ -283,7 +287,7 @@ def make_energy_fn(
     else:
         e_lj = chunked_lj_energy(r, sigmas, epsilons, excl_idx, excl_sv, displacement_fn, cutoff, 128)
 
-    if use_pbc and box is not None:
+    if use_pbc and box is not None and not implicit_solvent and bool(getattr(system, "use_dispersion_correction", True)):
         mask = getattr(system, "atom_mask", jnp.ones(r.shape[0], bool))
         e_lj += explicit_corrections.lj_dispersion_tail_energy(jnp.asarray(box), sigmas, epsilons, cutoff, mask)
     return e_lj
@@ -319,15 +323,59 @@ def make_energy_fn(
     return e_direct
 
   def total_energy(r, neighbor=None, **kwargs_run):
-    e_bonded = (
-        bond_energy_fn_bound(r, neighbor) +
-        angle_energy_fn_bound(r, neighbor) +
-        ub_energy_fn_bound(r, neighbor) +
-        dihedral_energy_fn_bound(r, neighbor) +
-        improper_energy_fn_bound(r, neighbor) +
-        cmap_energy_fn_bound(r, neighbor) +
-        exception_energy_fn_bound(r, neighbor)
-    )
+    if resolve_pallas_mode(use_pallas)[0] and pallas_bonded_all_fused is not None:
+        has_cmap = (
+            hasattr(system, "cmap_torsions")
+            and system.cmap_torsions is not None
+            and getattr(system.cmap_torsions, "size", 0) > 0
+        )
+        cmap_src_tot = (
+            (
+                system.cmap_coeffs
+                if getattr(system, "cmap_coeffs", None) is not None
+                and getattr(system.cmap_coeffs, "size", 0) > 0
+                else system.cmap_energy_grids
+            )
+            if has_cmap
+            else None
+        )
+        e_bonded = pallas_bonded_all_fused(
+            r,
+            bond_indices=bond_idx,
+            bond_params=bond_prm,
+            urey_bradley_indices=ub_idx,
+            urey_bradley_params=ub_prm,
+            angle_indices=angle_idx,
+            angle_params=angle_prm,
+            dihedral_indices=dih_idx if _dihedral_energy_fn is not None else None,
+            dihedral_params=dih_prm if _dihedral_energy_fn is not None else None,
+            improper_indices=imp_idx if _improper_energy_fn is not None else None,
+            improper_params=imp_prm if _improper_energy_fn is not None else None,
+            impropers_are_harmonic=_imp_is_harmonic,
+            exception_pairs=_exc_pairs,
+            exception_sigmas=_exc_sigmas,
+            exception_epsilons=_exc_epsilons,
+            exception_chargeprods=_exc_qprods,
+            exception_mask=_exc_mask,
+            cmap_torsions=system.cmap_torsions if has_cmap else None,
+            cmap_map_indices=system.cmap_indices if has_cmap else None,
+            cmap_coeffs=cmap_src_tot,
+            cmap_mask=getattr(system, "cmap_mask", None) if has_cmap else None,
+            cmap_first_is_psi=False,
+            box=pallas_box,
+            dist_eps=0.0,
+            b0_is_ji=False,
+        )
+    else:
+        e_bonded = (
+            bond_energy_fn_bound(r, neighbor) +
+            angle_energy_fn_bound(r, neighbor) +
+            ub_energy_fn_bound(r, neighbor) +
+            dihedral_energy_fn_bound(r, neighbor) +
+            improper_energy_fn_bound(r, neighbor) +
+            cmap_energy_fn_bound(r, neighbor) +
+            exception_energy_fn_bound(r, neighbor)
+        )
     if resolve_pallas_mode(use_pallas)[0] and neighbor is not None and pallas_nonbonded_nl is not None:
         nb_idx = getattr(neighbor, "idx", neighbor)
         mask = getattr(system, "atom_mask", None)
@@ -354,7 +402,7 @@ def make_energy_fn(
             explicit_corrections.lj_dispersion_tail_energy(
                 jnp.asarray(box), sigmas, epsilons, cutoff, mask
             )
-            if (use_pbc and box is not None)
+            if (use_pbc and box is not None and not implicit_solvent and bool(getattr(system, "use_dispersion_correction", True)))
             else 0.0
         )
         if implicit_solvent:
@@ -511,30 +559,63 @@ def make_energy_fn_pure(
     pallas_box = box_arr if has_pbc else None
     pallas_enabled, _ = resolve_pallas_mode(use_pallas)
 
-    # 1-4 exception pair energy
-    e_exc = jnp.array(0.0, dtype=r.dtype)
+    # Bonded + 1-4 exception terms
     exc_pairs = getattr(physics_system, "exception_pairs", None)
-    if (
+    has_exc = (
         exc_pairs is not None
         and getattr(exc_pairs, "size", 0) > 0
         and params.exception_sigmas is not None
         and params.exception_epsilons is not None
         and params.exception_chargeprods is not None
-    ):
-        exc_sig = jnp.maximum(params.exception_sigmas, 1e-6)
-        exc_mask = getattr(physics_system, "exception_mask", None)
-        if pallas_enabled and pallas_exceptions_14 is not None:
-            e_exc = pallas_exceptions_14(
-                r,
-                exc_pairs,
-                exc_sig,
-                params.exception_epsilons,
-                params.exception_chargeprods,
-                mask=exc_mask,
-                box=pallas_box,
-                coulomb_constant=COULOMB_CONSTANT,
-            )
-        else:
+    )
+    exc_sig = jnp.maximum(params.exception_sigmas, 1e-6) if has_exc else None
+    exc_mask = getattr(physics_system, "exception_mask", None) if has_exc else None
+
+    cmap_src = getattr(params, "cmap_coeffs", None)
+    if cmap_src is None or cmap_src.size == 0:
+        cmap_src = getattr(params, "cmap_energy_grids", None)
+    if cmap_src is None or cmap_src.size == 0:
+        cmap_src = getattr(physics_system, "cmap_coeffs", None)
+    if cmap_src is None or cmap_src.size == 0:
+        cmap_src = getattr(physics_system, "cmap_energy_grids", None)
+    has_cmap_pure = (
+        getattr(physics_system, "cmap_torsions", None) is not None
+        and getattr(physics_system.cmap_torsions, "size", 0) > 0
+        and cmap_src is not None
+    )
+
+    if pallas_enabled and pallas_bonded_all_fused is not None:
+        e_total = pallas_bonded_all_fused(
+            r,
+            bond_indices=bond_idx,
+            bond_params=params.bond_params,
+            urey_bradley_indices=ub_idx,
+            urey_bradley_params=params.urey_bradley_params,
+            angle_indices=angle_idx,
+            angle_params=params.angle_params,
+            dihedral_indices=dih_idx if dih_idx.size > 0 else None,
+            dihedral_params=params.dihedral_params if dih_idx.size > 0 else None,
+            improper_indices=imp_idx if imp_idx.size > 0 else None,
+            improper_params=params.improper_params if imp_idx.size > 0 else None,
+            impropers_are_harmonic=(params.improper_params.shape[-1] == 2) if imp_idx.size > 0 else False,
+            exception_pairs=exc_pairs if has_exc else None,
+            exception_sigmas=exc_sig,
+            exception_epsilons=params.exception_epsilons if has_exc else None,
+            exception_chargeprods=params.exception_chargeprods if has_exc else None,
+            exception_mask=exc_mask,
+            cmap_torsions=physics_system.cmap_torsions if has_cmap_pure else None,
+            cmap_map_indices=physics_system.cmap_indices if has_cmap_pure else None,
+            cmap_coeffs=cmap_src if has_cmap_pure else None,
+            cmap_mask=getattr(physics_system, "cmap_mask", None) if has_cmap_pure else None,
+            cmap_first_is_psi=False,
+            box=pallas_box,
+            dist_eps=0.0,
+            b0_is_ji=False,
+            coulomb_constant=COULOMB_CONSTANT,
+        )
+    else:
+        e_exc = jnp.array(0.0, dtype=r.dtype)
+        if has_exc:
             exc_i = jnp.clip(exc_pairs[:, 0].astype(jnp.int32), 0, max(r.shape[0] - 1, 0))
             exc_j = jnp.clip(exc_pairs[:, 1].astype(jnp.int32), 0, max(r.shape[0] - 1, 0))
             exc_dr = jax.vmap(displacement_fn)(r[exc_i], r[exc_j])
@@ -543,70 +624,27 @@ def make_energy_fn_pure(
             exc_inv6 = exc_inv ** 6
             exc_lj = 4.0 * params.exception_epsilons * (exc_inv6 ** 2 - exc_inv6)
             exc_coul = COULOMB_CONSTANT * params.exception_chargeprods / exc_dist
-            if exc_mask is None:
-                exc_mask = jnp.ones(exc_pairs.shape[0], dtype=r.dtype)
-            else:
-                exc_mask = exc_mask.astype(r.dtype)
-            e_exc = jnp.sum((exc_lj + exc_coul) * exc_mask)
+            eff_exc_mask = (
+                jnp.ones(exc_pairs.shape[0], dtype=r.dtype)
+                if exc_mask is None
+                else exc_mask.astype(r.dtype)
+            )
+            e_exc = jnp.sum((exc_lj + exc_coul) * eff_exc_mask)
 
-    _has_pallas_bonded = (
-        pallas_bonds_2body is not None
-        and pallas_angles_harmonic is not None
-        and pallas_torsions_4body is not None
-        and pallas_cmap_torsions is not None
-    )
-    # Bonded terms
-    if pallas_enabled and _has_pallas_bonded:
-        e_bond = pallas_bonds_2body(r, bond_idx, params.bond_params, box=pallas_box, dist_eps=0.0)
-        e_angle = pallas_angles_harmonic(r, angle_idx, params.angle_params, box=pallas_box, dist_eps=0.0)
-        e_ub = pallas_bonds_2body(r, ub_idx, params.urey_bradley_params, box=pallas_box, dist_eps=0.0)
-        e_dih = (
-            pallas_torsions_4body(
-                r, dih_idx, params.dihedral_params, box=pallas_box, b0_is_ji=False, is_harmonic=False
-            )
-            if dih_idx.size > 0
-            else 0.0
-        )
-        e_imp = (
-            pallas_torsions_4body(
-                r,
-                imp_idx,
-                params.improper_params,
-                box=pallas_box,
-                b0_is_ji=False,
-                is_harmonic=(params.improper_params.shape[-1] == 2),
-            )
-            if imp_idx.size > 0
-            else 0.0
-        )
-        e_cmap = (
-            pallas_cmap_torsions(
-                r,
-                physics_system.cmap_torsions,
-                physics_system.cmap_indices,
-                params.cmap_coeffs
-                if getattr(params, "cmap_coeffs", None) is not None and params.cmap_coeffs.size > 0
-                else physics_system.cmap_energy_grids,
-                box=pallas_box,
-                first_is_psi=False,
-            )
-            if getattr(physics_system, "cmap_torsions", None) is not None
-            else 0.0
-        )
-        e_total = e_bond + e_angle + e_ub + e_dih + e_imp + e_cmap + e_exc
-    else:
         e_cmap = 0.0
-        if getattr(physics_system, "cmap_torsions", None) is not None:
+        if has_cmap_pure:
             phi_idx = physics_system.cmap_torsions[:, 0:4]
             psi_idx = physics_system.cmap_torsions[:, 4:8] if physics_system.cmap_torsions.shape[-1] == 8 else physics_system.cmap_torsions[:, 1:5]
             phi = compute_dihedral_angles(r, phi_idx, displacement_fn)
             psi = compute_dihedral_angles(r, psi_idx, displacement_fn)
-            cmap_src = (
-                params.cmap_coeffs
-                if getattr(params, "cmap_coeffs", None) is not None and params.cmap_coeffs.size > 0
-                else physics_system.cmap_energy_grids
+            cmap_coeffs_val = (
+                cmap.precompute_cmap_coefficients(cmap_src)
+                if cmap_src.shape[-1] != 16
+                else cmap_src
             )
-            e_cmap = cmap.compute_cmap_energy(phi, psi, physics_system.cmap_indices, cmap_src)
+            e_cmap_per = cmap.compute_cmap_energies(phi, psi, physics_system.cmap_indices, cmap_coeffs_val)
+            cmap_msk = getattr(physics_system, "cmap_mask", None)
+            e_cmap = jnp.sum(e_cmap_per * cmap_msk) if cmap_msk is not None else jnp.sum(e_cmap_per)
         e_total = (
             bond_energy_fn(r, params.bond_params) +
             angle_energy_fn(r, params.angle_params) +
@@ -687,7 +725,7 @@ def make_energy_fn_pure(
             e_solv = e_gb + e_ace
 
     e_tail = jnp.array(0.0, dtype=r.dtype)
-    if has_pbc and not is_implicit:
+    if has_pbc and not is_implicit and bool(getattr(physics_system, "use_dispersion_correction", True)):
         e_tail = explicit_corrections.lj_dispersion_tail_energy(
             box_arr, sigmas_p, epsilons_p, cutoff_distance, mask
         )
@@ -1173,6 +1211,13 @@ def make_bundle_from_system(
     cmap_map_bucket_idx = _bucket_idx(max(n_maps, 1), CMAP_MAP_BUCKETS)
     exception_bucket_idx = _bucket_idx(max(nx, 1), EXCEPTION_BUCKETS)
 
+    cosolv_gid_in = _get("cosolvent_group_id")
+    has_real_cosolvents = (
+        cosolv_gid_in is not None
+        and getattr(cosolv_gid_in, "size", 0) > 0
+        and bool(np.any(np.asarray(cosolv_gid_in) > 0))
+    )
+
     spec = MolecularShapeSpec(
         atom_bucket_idx=atom_bucket_idx,
         bond_bucket_idx=bond_bucket_idx,
@@ -1193,6 +1238,7 @@ def make_bundle_from_system(
         constraint_bucket_idx=constraint_bucket_idx,
         has_real_constraints=has_real_constraints,
         is_triclinic=is_triclinic,
+        has_real_cosolvents=has_real_cosolvents,
     )
 
     # --- per-atom helpers -------------------------------------------------
@@ -1262,7 +1308,7 @@ def make_bundle_from_system(
         ),
         n_impropers=jnp.array(ni, dtype=jnp.int32),
         # Urey-Bradley
-        urey_bradley_idx=_pad_2d(ub, ab, 3, dtype=jnp.int32),
+        urey_bradley_idx=_pad_2d(ub, ab, 2, dtype=jnp.int32),
         urey_bradley_params=_pad_2d(ub_p, ab, 2, dtype=jnp.float32),
         urey_bradley_mask=_mask(nub, ab),
         n_urey_bradley=jnp.array(nub, dtype=jnp.int32),
