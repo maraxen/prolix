@@ -445,7 +445,7 @@ def _bonded_energy_core(
 def _host_float(x: object, default: float) -> float:
     """Concrete float for PhysicsSystem static fields; default when traced."""
     try:
-        return float(jnp.asarray(x))
+        return float(np.asarray(x))
     except (TypeError, ValueError, jax.errors.ConcretizationTypeError):
         return default
 
@@ -509,36 +509,17 @@ def _host_box_size(bundle: MolecularBundle, default: tuple[float, float, float])
     fix for arbitrarily-varying box sizes within one stacked group.
     """
     if getattr(bundle.shape_spec, "is_triclinic", False):
-        box_arr = jnp.asarray(bundle.box)
         try:
+            box_arr = np.asarray(bundle.box, dtype=np.float64)
             return np.array(
                 [[float(box_arr[i, j]) for j in range(3)] for i in range(3)],
                 dtype=np.float64,
             )
         except (TypeError, ValueError, jax.errors.ConcretizationTypeError):
             return np.diag(np.array(default, dtype=np.float64))
-    diag = jnp.diag(jnp.asarray(bundle.box))
     try:
-        # jnp.diag itself never raises under tracing (it's a normal traced op)
-        # -- force concretization per-element via float(), mirroring
-        # _host_float, so a traced bundle.box is actually detected here
-        # rather than silently propagating as a "static" tracer.
-        #
-        # Returns a plain numpy array, NOT jnp.array (debt 770 follow-up):
-        # constructing via jnp.array here still produces a DynamicJaxprTracer
-        # Python object whenever this runs inside an active trace (e.g. every
-        # single MD step, since physics_system_from_bundle -> _host_box_size
-        # is called fresh inside lax.while_loop's per-step body) -- even
-        # though its inputs (float(diag[i])) are genuinely concrete Python
-        # floats by this point. np.asarray()/float() calls downstream (the
-        # debt-770 PME-grid-sizing workaround) then fail with
-        # TracerArrayConversionError regardless of the underlying value's
-        # concreteness. A plain numpy array has no such tracer wrapping --
-        # jax arithmetic downstream (dr / sys.box_size etc.) accepts numpy
-        # operands transparently, and this matches box_size's actual intent
-        # as PhysicsSystem's eqx.field(static=True) value (a static Python/
-        # numpy value, not a live jax array -- exactly what equinox's own
-        # "A JAX array is being set as static!" warning was flagging).
+        box_np = np.asarray(bundle.box, dtype=np.float64)
+        diag = np.diag(box_np) if box_np.ndim == 2 else box_np
         return np.array([float(diag[0]), float(diag[1]), float(diag[2])])
     except (TypeError, ValueError, jax.errors.ConcretizationTypeError):
         return np.array(default)
@@ -808,8 +789,16 @@ def physics_system_from_bundle(
         constraint_pairs=bundle.constraint_pairs,
         constraint_lengths=bundle.constraint_lengths,
         constraint_mask=bundle.constraint_mask,
-        cosolvent_mol_id=_slice1(bundle.molecule_id) if bundle.molecule_id is not None else None,
-        cosolvent_group_id=_slice1(bundle.cosolvent_group_id) if bundle.cosolvent_group_id is not None else None,
+        cosolvent_mol_id=(
+            _slice1(bundle.molecule_id)
+            if (bool(getattr(bundle.shape_spec, "has_real_cosolvents", False)) and bundle.molecule_id is not None)
+            else None
+        ),
+        cosolvent_group_id=(
+            _slice1(bundle.cosolvent_group_id)
+            if (bool(getattr(bundle.shape_spec, "has_real_cosolvents", False)) and bundle.cosolvent_group_id is not None)
+            else None
+        ),
         **extra_kwargs,
     )
 
@@ -898,6 +887,8 @@ def force_fn_from_bundle(
     flash_tile_size: int = 256,
     flash_remat: bool = True,
     use_pallas: bool | None = None,
+    use_pallas_pme: bool | None = None,
+    excl_mode: str = "table",
 ) -> Callable[..., jnp.ndarray]:
     """Analytical/FlashMD forces from bundle fields (debt 761).
 
@@ -940,6 +931,7 @@ def force_fn_from_bundle(
         )
 
     disp_fn, _ = displacement_fn_for_bundle(bundle)
+    del use_pallas_pme, excl_mode
 
     def force_fn(positions: jnp.ndarray, **kwargs: object) -> jnp.ndarray:
         # single_padded_force has no neighbor-list branch (debt 761 is scoped

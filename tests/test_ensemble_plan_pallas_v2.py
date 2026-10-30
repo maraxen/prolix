@@ -189,9 +189,15 @@ def test_ensemble_plan_use_pallas_dispatches_megakernel_and_pre_encoded_nl(monke
 
         bonded_calls: list[int] = []
         nl_excl_modes: list[str] = []
+        spread_calls: list[int] = []
+        gather_calls: list[int] = []
+
+        import prolix.physics.pme_pallas as pme_pallas
 
         real_bonded_fused = bundle_md.pallas_bonded_all_fused
         real_nonbonded_nl = batched_energy.pallas_nonbonded_nl
+        real_spread = pme_pallas._spread_charges_pallas_single
+        real_gather = pme_pallas._gather_pallas_single
         assert real_bonded_fused is not None
         assert real_nonbonded_nl is not None
 
@@ -203,9 +209,19 @@ def test_ensemble_plan_use_pallas_dispatches_megakernel_and_pre_encoded_nl(monke
             nl_excl_modes.append(kwargs.get("excl_mode", "table"))
             return real_nonbonded_nl(*args, **kwargs)
 
+        def spy_spread(*args, **kwargs):
+            spread_calls.append(1)
+            return real_spread(*args, **kwargs)
+
+        def spy_gather(*args, **kwargs):
+            gather_calls.append(1)
+            return real_gather(*args, **kwargs)
+
         monkeypatch.setattr(bundle_md, "pallas_bonded_all_fused", spy_bonded)
         monkeypatch.setattr(batched_energy, "pallas_bonded_all_fused", spy_bonded)
         monkeypatch.setattr(batched_energy, "pallas_nonbonded_nl", spy_nonbonded_nl)
+        monkeypatch.setattr(pme_pallas, "_spread_charges_pallas_single", spy_spread)
+        monkeypatch.setattr(pme_pallas, "_gather_pallas_single", spy_gather)
 
         plan = EnsemblePlan(bundle, use_pallas=True)
         traj = plan.run(
@@ -217,8 +233,10 @@ def test_ensemble_plan_use_pallas_dispatches_megakernel_and_pre_encoded_nl(monke
             use_neighbor_list=True,
             nl_update_every=2,
         )
-        assert len(bonded_calls) >= 1, "Expected pallas_bonded_all_fused to be traced/called"
-        assert len(nl_excl_modes) >= 1, "Expected pallas_nonbonded_nl to be traced/called"
+        assert len(bonded_calls) >= 2, "Expected pallas_bonded_all_fused to be traced in init + while_loop"
+        assert len(nl_excl_modes) >= 2, "Expected pallas_nonbonded_nl to be traced in init + while_loop"
+        assert len(spread_calls) >= 2, "Expected PME spread_charges_pallas to be traced in init + while_loop"
+        assert len(gather_calls) >= 2, "Expected PME gather_pallas to be traced in init + while_loop"
         assert all(m == "pre_encoded" for m in nl_excl_modes), (
             f"Expected excl_mode='pre_encoded', got {nl_excl_modes}"
         )
@@ -260,8 +278,19 @@ def test_pallas_v2_mixed_precision_energy_force_and_fd_parity():
         e_pallas, g_pallas = jax.value_and_grad(lambda r: e_fn_pallas(r, neighbor=nbr_enc))(
             bundle.positions
         )
-        e_xla, g_xla = jax.value_and_grad(lambda r: e_fn_xla(r, neighbor=nbr_raw))(
-            bundle.positions
+        e_pallas_jit, g_pallas_jit = jax.jit(
+            jax.value_and_grad(lambda r: e_fn_pallas(r, neighbor=nbr_enc))
+        )(bundle.positions)
+        e_xla, g_xla = jax.jit(
+            jax.value_and_grad(lambda r: e_fn_xla(r, neighbor=nbr_raw))
+        )(bundle.positions)
+
+        # Verify JIT vs eager parity (ensuring PME reciprocal is never dropped under jax.jit)
+        np.testing.assert_allclose(
+            np.asarray(e_pallas_jit), np.asarray(e_pallas), rtol=1e-6, atol=1e-6
+        )
+        np.testing.assert_allclose(
+            np.asarray(g_pallas_jit), np.asarray(g_pallas), rtol=1e-5, atol=1e-5
         )
 
         # Verify G2 dtype preservation

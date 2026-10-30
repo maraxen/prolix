@@ -1,0 +1,149 @@
+{
+  "system": "DHFR_JAC_23558",
+  "gpu": "NVIDIA L40S (sm_89, 46068 MiB)",
+  "slurm_job_id": 27373634,
+  "n_atoms": 23558,
+  "dt_fs": 1.0,
+  "n_steps_list": [
+    100,
+    500,
+    2000,
+    5000
+  ],
+  "xla": {
+    "prolix_ns_per_day": 1.3498448411076018,
+    "per_step_corrected_s": 0.06400735652632886,
+    "compile_fixed_s": 11.033179916533156,
+    "r_squared": 0.9999979241874108,
+    "n_atoms": 23558,
+    "n_steps_list": [
+      100,
+      500,
+      2000,
+      5000
+    ],
+    "raw_results": [
+      {
+        "n_steps": 100,
+        "t_first_step": 38.42963891662657,
+        "t_steady_state": 17.57791403029114
+      },
+      {
+        "n_steps": 500,
+        "t_first_step": 11.100953851826489,
+        "t_steady_state": 42.92132842261344
+      },
+      {
+        "n_steps": 2000,
+        "t_first_step": 11.146224561147392,
+        "t_steady_state": 138.72142637800425
+      },
+      {
+        "n_steps": 5000,
+        "t_first_step": 11.298442097380757,
+        "t_steady_state": 331.1119310092181
+      }
+    ],
+    "use_pallas": false,
+    "peak_vram_mb": 3321.61865234375,
+    "nl_capacity": 768,
+    "nl_retry_count": 0,
+    "nl_candidate_pairs": 18092544,
+    "dense_equivalent_pairs": 554979364,
+    "pair_reduction_factor": 30.674479166666668,
+    "openmm_ns_per_day": null,
+    "openmm_wallclock_s": null,
+    "openmm_platform": null,
+    "openmm_n_production_steps": null,
+    "ratio": null,
+    "shim_mode": "autograd",
+    "seed": 0,
+    "gpu_tag": "l40s",
+    "dt_fs": 1.0,
+    "smoke": false,
+    "backend": "prolix"
+  },
+  "pallas_v2": {
+    "prolix_ns_per_day": 4.747366458957401,
+    "per_step_corrected_s": 0.01819956406292992,
+    "compile_fixed_s": 20.13136164730972,
+    "r_squared": 0.9999848140349173,
+    "n_atoms": 23558,
+    "n_steps_list": [
+      100,
+      500,
+      2000,
+      5000
+    ],
+    "raw_results": [
+      {
+        "n_steps": 100,
+        "t_first_step": 37.844098407775164,
+        "t_steady_state": 22.12044425494969
+      },
+      {
+        "n_steps": 500,
+        "t_first_step": 20.063045162707567,
+        "t_steady_state": 29.114169251173735
+      },
+      {
+        "n_steps": 2000,
+        "t_first_step": 20.214980939403176,
+        "t_steady_state": 56.35448708757758
+      },
+      {
+        "n_steps": 5000,
+        "t_first_step": 20.31784783490002,
+        "t_steady_state": 111.18023461755365
+      }
+    ],
+    "use_pallas": true,
+    "peak_vram_mb": 3321.61865234375,
+    "nl_capacity": 768,
+    "nl_retry_count": 0,
+    "nl_candidate_pairs": 18092544,
+    "dense_equivalent_pairs": 554979364,
+    "pair_reduction_factor": 30.674479166666668,
+    "openmm_ns_per_day": null,
+    "openmm_wallclock_s": null,
+    "openmm_platform": null,
+    "openmm_n_production_steps": null,
+    "ratio": null,
+    "shim_mode": "autograd",
+    "seed": 0,
+    "gpu_tag": "l40s",
+    "dt_fs": 1.0,
+    "smoke": false,
+    "backend": "prolix"
+  },
+  "openmm_cuda": {
+    "prolix_ns_per_day": null,
+    "per_step_corrected_s": null,
+    "compile_fixed_s": null,
+    "r_squared": null,
+    "n_atoms": null,
+    "n_steps_list": null,
+    "raw_results": null,
+    "use_pallas": null,
+    "peak_vram_mb": null,
+    "nl_capacity": null,
+    "nl_retry_count": null,
+    "nl_candidate_pairs": null,
+    "dense_equivalent_pairs": null,
+    "pair_reduction_factor": null,
+    "openmm_ns_per_day": 366.23058088475597,
+    "openmm_wallclock_s": 1.1795847276225686,
+    "openmm_platform": "CUDA",
+    "openmm_n_production_steps": 5000,
+    "ratio": null,
+    "shim_mode": "autograd",
+    "seed": 0,
+    "gpu_tag": "l40s",
+    "dt_fs": 1.0,
+    "smoke": false,
+    "backend": "openmm"
+  },
+  "speedup_pallas_v2_vs_xla": 3.5169719618011777,
+  "ratio_pallas_v2_vs_openmm_cuda": 0.012962780026420798,
+  "ratio_xla_vs_openmm_cuda": 0.0036857786093301855
+}

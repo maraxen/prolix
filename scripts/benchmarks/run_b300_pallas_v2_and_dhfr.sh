@@ -8,8 +8,20 @@ nvidia-smi --query-gpu=name,memory.total,compute_cap --format=csv,noheader | hea
 echo "========================================================================"
 
 export XLA_PYTHON_CLIENT_PREALLOCATE=false
+export UV_CACHE_DIR="/tmp/uv_cache_prolix_${SLURM_JOB_ID:-$$}"
+if [[ -d "/orcd/pool/008/so3_shared/marielle/projects/prolix/tmp_xtrax_pkg" ]]; then
+    export PYTHONPATH="/orcd/pool/008/so3_shared/marielle/projects/prolix/tmp_xtrax_pkg:/orcd/pool/008/so3_shared/marielle/projects/prolix/src:${PYTHONPATH:-}"
+else
+    export PYTHONPATH="${PWD}/src:${PYTHONPATH:-}"
+fi
 if [[ -n "${CUDA_VISIBLE_DEVICES:-}" ]]; then
     export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES%%,*}"
+fi
+
+if [[ -x "/orcd/pool/008/so3_shared/marielle/projects/.venv/bin/python" ]]; then
+    PROLIX_PY="/orcd/pool/008/so3_shared/marielle/projects/.venv/bin/python"
+else
+    PROLIX_PY="${PWD}/.venv/bin/python"
 fi
 
 B1_OPENMM_ENV="${B1_OPENMM_ENV:-/orcd/pool/007/maarxaru/local/share/mamba/envs/b1-openmm}"
@@ -20,10 +32,10 @@ module load cuda/12.9.1 2>/dev/null || true
 mkdir -p outputs/bench outputs/dhfr_parity
 
 echo "=== [1/4] Verify tests/test_ensemble_plan_pallas_v2.py on B300 Triton GPU ==="
-uv run --extra cuda pytest tests/test_ensemble_plan_pallas_v2.py -v
+"${PROLIX_PY}" -m pytest tests/test_ensemble_plan_pallas_v2.py -v
 
 echo "=== [2/4] Synthetic Scaling vs Native OpenMM CUDA (N=128..16384) ==="
-uv run --extra cuda python scripts/benchmarks/pallas_vs_baseline.py \
+"${PROLIX_PY}" scripts/benchmarks/pallas_vs_baseline.py \
     --kernel openmm_comparison \
     --sizes 128,512,1024,2048,4096,8192,16384 \
     --repeats 9 \
@@ -33,14 +45,14 @@ echo "=== [3/4] Solvated DHFR 23,558-Atom Benchmark (Prolix XLA vs Pallas v2 vs 
 N_STEPS_LIST="${N_STEPS_LIST:-100,500,2000,5000}"
 
 echo "--- [3a] Prolix XLA (use_pallas=False) ---"
-uv run --extra cuda python scripts/experiments/bench_dhfr_parity.py \
+"${PROLIX_PY}" scripts/experiments/bench_dhfr_parity.py \
     --backend prolix \
     --n-steps-list "${N_STEPS_LIST}" \
     --gpu-tag b300 \
     --out outputs/dhfr_parity/prolix_xla_b300.json
 
 echo "--- [3b] Prolix Pallas v2 (use_pallas=True) ---"
-uv run --extra cuda python scripts/experiments/bench_dhfr_parity.py \
+"${PROLIX_PY}" scripts/experiments/bench_dhfr_parity.py \
     --backend prolix \
     --use-pallas \
     --n-steps-list "${N_STEPS_LIST}" \
@@ -55,18 +67,18 @@ echo "--- [3c] Native OpenMM CUDA (b1-openmm env) ---"
     --out outputs/dhfr_parity/openmm_cuda_b300.json
 
 echo "--- [3d] Combine XLA + OpenMM CUDA and Pallas v2 + OpenMM CUDA ---"
-uv run --no-sync python scripts/experiments/bench_dhfr_parity.py \
+"${PROLIX_PY}" scripts/experiments/bench_dhfr_parity.py \
     --combine-prolix outputs/dhfr_parity/prolix_xla_b300.json \
     --combine-openmm outputs/dhfr_parity/openmm_cuda_b300.json \
     --out outputs/dhfr_parity/combined_xla_b300.json
 
-uv run --no-sync python scripts/experiments/bench_dhfr_parity.py \
+"${PROLIX_PY}" scripts/experiments/bench_dhfr_parity.py \
     --combine-prolix outputs/dhfr_parity/prolix_pallas_v2_b300.json \
     --combine-openmm outputs/dhfr_parity/openmm_cuda_b300.json \
     --out outputs/dhfr_parity/combined_pallas_v2_b300.json
 
 echo "=== [4/4] Single-Step DHFR 23,558-Atom Energy/Force Parity & Consolidated Report ==="
-uv run --extra cuda python -c '
+"${PROLIX_PY}" -c '
 import json, time
 from pathlib import Path
 import numpy as np

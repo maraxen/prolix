@@ -845,6 +845,7 @@ class EnsemblePlan:
         ``jax.tree.map(jnp.stack)`` and safe to slice per-replica under vmap.
         """
         import dataclasses
+
         import jax
         import jax.numpy as jnp
 
@@ -903,6 +904,7 @@ class EnsemblePlan:
     ) -> Any:
         """Host-side reallocate-and-restack after an overflow (debt 802)."""
         import dataclasses
+
         import jax
         import jax.numpy as jnp
 
@@ -1156,6 +1158,7 @@ class EnsemblePlan:
                 (internal allocation + retry, as verified in Phase 6 steps 4-5).
         """
         import dataclasses
+
         import jax
         import jax.numpy as jnp
 
@@ -1269,7 +1272,7 @@ class EnsemblePlan:
                 max_dr_sq = jnp.max(jnp.sum(d_pos * d_pos, axis=-1))
                 verlet = max_dr_sq > thresh_sq
                 if stride > 0:
-                    by_stride = (step_i % stride) == 0
+                    by_stride = (step_i > 0) & ((step_i % stride) == 0)
                     should_update = verlet | by_stride
                 else:
                     should_update = verlet

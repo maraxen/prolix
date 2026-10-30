@@ -200,3 +200,20 @@ Every entry added to this ledger must record:
 - **Generalizable Rule for `xtrax` Skill**:
   1. In any custom `make_neighbor_list_fn` wrapper, always return `dataclasses.replace(nbr, update_fn=update)` from both `allocate` and `update` so `nbr.update(pos)` preserves both coordinate wrapping and static PyTree identity across `lax.cond` / `while_loop` steps.
   2. Make `encode_nl_exclusions` idempotent (`clean_nbr = jnp.where(neighbor_idx >= 0, neighbor_idx & _NB_INDEX_MASK, neighbor_idx)` before matching) and, when forcing a rebuild inside an outer `should_update` branch, invalidate `reference_position` (`+ 1e6`) before calling `.update(pos)` and re-encoding.
+
+### MK-20: Pre-Encoded Neighbor-List Bit-Tag Stripping for XLA Fallback & GB/SASA Kernels
+- **Category**: `Buffer Aliasing & Atomics` / `Verification & Negative Controls`
+- **Symptom / Failure Mode**:
+  1. When `EnsemblePlan` pre-encodes `nbr.idx` with `_NB_EXCL_14_BIT` (`1 << 29`) and `_NB_EXCL_FULL_BIT` (`1 << 30`) and passes the encoded `nb_idx` to XLA fallback neighbor-list kernels (`chunked_lj_energy_nl`, `chunked_coulomb_energy_nl`, `get_neighbor_exclusion_scales`, `compute_gb_energy_neighbor_list`), the XLA kernels index `r[nb_idx]` directly without stripping bits 29/30, treating 1-2/1-3/1-4 pairs (`>= 2^29 > N`) as out-of-bounds padding slots (`valid_pair = nb_idx < N == False`) and silently dropping the 1-4 scaled LJ/Coulomb interaction and the PME direct-space $-\text{erf}(\alpha r)/r$ exclusion term!
+- **Root Cause**: `pallas_nonbonded_nl(..., excl_mode="pre_encoded")` decodes bits 29 and 30 in registers, whereas XLA reference neighbor-list kernels and GB/SASA kernels expect clean `[0, N]` atom indices and use `nb_idx < N` as the valid-neighbor predicate.
+- **Generalizable Rule for `xtrax` Skill**:
+  1. Strip upper tag bits at the energy dispatcher entry point (`nb_clean = jnp.where(nb_raw == -1, N, nb_raw & ((1 << 29) - 1))`).
+  2. Maintain two views at the energy dispatcher boundary: `nb_idx` (retaining bits 29 & 30 for `pallas_nonbonded_nl(..., excl_mode="pre_encoded")`) and `nb_clean` (stripped `[0, N]` indices for XLA reference kernels and GB/SASA neighbor-list consumers).
+
+### MK-21: Static `MolecularShapeSpec` Feature Gating vs Unconditional Zero-Padded Array Allocation ($O(N^2)$ Memory Cliff)
+- **Category**: `Grid & Work-Unit Dispatch` / `Verification & Negative Controls`
+- **Symptom / Failure Mode**: `RESOURCE_EXHAUSTED: Out of memory while trying to allocate 12.40GiB (13319504896 bytes)` on 23,558-atom solvated DHFR inside `init_fn` (`single_padded_energy`) even when `use_neighbor_list=True` and `build_dense_exclusions=False`.
+- **Root Cause**: `MolecularBundle` pre-allocates concrete zero-padded arrays for all optional per-atom features (such as `cosolvent_group_id = jnp.zeros(N, dtype=jnp.int32)`) so heterogeneous bundles can be stacked in a uniform PyTree. Forwarding `bundle.cosolvent_group_id` unconditionally to `PhysicsSystem.cosolvent_group_id` caused `if sys.cosolvent_group_id is not None:` in `single_padded_energy` to evaluate `cosolvent_repulsive_energy` (`dr = space.map_product(displacement_fn)(r, r)`), materializing a dense `(23558, 23558, 3)` `float64` tensor (`12.40 GiB`) + `(23558, 23558)` distance matrix (`4.13 GiB`) to compute `0.0` energy on a system with zero cosolvents!
+- **Generalizable Rule for `xtrax` Skill**:
+  1. Never gate an $O(N^2)$ or optional physics term on `tensor is not None` when upstream bundle builders zero-pad optional tensors for PyTree uniformity.
+  2. Always record a host-static boolean capability flag (`has_real_cosolvents: bool = False`, `has_real_water: bool = False`, `has_real_constraints: bool = False`) on the static `ShapeSpec` at bundle construction time (`bool(np.any(np.asarray(gid) > 0))`) and gate the corresponding `PhysicsSystem` field / kernel dispatch on that static flag so zero-count features compile to zero ops and zero memory.

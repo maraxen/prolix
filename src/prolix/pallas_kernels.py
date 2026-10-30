@@ -16,6 +16,7 @@ from dataclasses import dataclass, field
 
 import jax
 import jax.numpy as jnp
+import xtrax
 from jax import custom_vjp
 from jax._src.pallas.primitives import load as _pl_load
 from jax._src.pallas.primitives import store as _pl_store
@@ -23,7 +24,6 @@ from jax.experimental import pallas as pl
 from jax.experimental.pallas import triton as plt
 from jax.scipy.special import erf, erfc
 from proxide.physics import constants
-import xtrax
 from xtrax.intent import Context
 from xtrax.kernel_seam import VjpKernel
 
@@ -49,7 +49,6 @@ from prolix.physics.neighbor_list import (
 )
 from prolix.physics.pallas_bonded import (
     _make_shapes_meta,
-    _min_image_1d,
     angles_harmonic_reference,
     bonded_all_fused_reference,
     bonds_2body_reference,

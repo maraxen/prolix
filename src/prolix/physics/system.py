@@ -1211,6 +1211,13 @@ def make_bundle_from_system(
     cmap_map_bucket_idx = _bucket_idx(max(n_maps, 1), CMAP_MAP_BUCKETS)
     exception_bucket_idx = _bucket_idx(max(nx, 1), EXCEPTION_BUCKETS)
 
+    cosolv_gid_in = _get("cosolvent_group_id")
+    has_real_cosolvents = (
+        cosolv_gid_in is not None
+        and getattr(cosolv_gid_in, "size", 0) > 0
+        and bool(np.any(np.asarray(cosolv_gid_in) > 0))
+    )
+
     spec = MolecularShapeSpec(
         atom_bucket_idx=atom_bucket_idx,
         bond_bucket_idx=bond_bucket_idx,
@@ -1231,6 +1238,7 @@ def make_bundle_from_system(
         constraint_bucket_idx=constraint_bucket_idx,
         has_real_constraints=has_real_constraints,
         is_triclinic=is_triclinic,
+        has_real_cosolvents=has_real_cosolvents,
     )
 
     # --- per-atom helpers -------------------------------------------------

@@ -8,7 +8,8 @@ from __future__ import annotations
 
 import jax
 import jax.numpy as jnp
-from jax._src.pallas.primitives import load as _pl_load, store as _pl_store
+from jax._src.pallas.primitives import load as _pl_load
+from jax._src.pallas.primitives import store as _pl_store
 from jax.experimental import pallas as pl
 from jax.experimental.pallas import triton as plt
 
@@ -150,7 +151,6 @@ def _spread_charges_pallas_single(
         if interpret:
             def _serial_atomic(k, _):
                 plt.atomic_add(mesh_out_ref, (flat_idx_1d[k],), w_1d[k])
-                return None
 
             jax.lax.fori_loop(0, BLOCK_N * 64, _serial_atomic, None)
         else:

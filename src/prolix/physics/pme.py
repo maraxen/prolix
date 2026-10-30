@@ -291,8 +291,9 @@ def spread_charges(
     """Spread charges onto FFT grid using B-spline interpolation."""
 
     if use_pallas_pme and not in_export_context() and jnp.asarray(box_size).ndim == 1:
-        from prolix.physics.pme_pallas import make_spread_op
         from xtrax.intent import Context
+
+        from prolix.physics.pme_pallas import make_spread_op
 
         backend = "gpu" if not _pallas_interpret() else "cpu"
         spread_op = make_spread_op(
@@ -455,8 +456,9 @@ def _spme_bwd(grid_dims, alpha, order, use_pallas_pme, residuals, g):
     # StableHLO guardrail: export_context() must force pure XLA in the backward pass too.
     box_arr = jnp.asarray(box_size, dtype=dtype)
     if use_pallas_pme and not in_export_context() and box_arr.ndim == 1:
-        from prolix.physics.pme_pallas import make_gather_op
         from xtrax.intent import Context
+
+        from prolix.physics.pme_pallas import make_gather_op
 
         backend = "gpu" if not _pallas_interpret() else "cpu"
         gather_op = make_gather_op(

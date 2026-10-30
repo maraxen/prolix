@@ -17,6 +17,7 @@ from typing import Any
 
 import jax
 import jax.numpy as jnp
+import xtrax
 from jax import custom_vjp
 from jax._src.pallas.primitives import load as _pl_load
 from jax._src.pallas.primitives import store as _pl_store
@@ -24,12 +25,10 @@ from jax.experimental import pallas as pl
 from jax.experimental.pallas import triton as plt
 from jax.scipy.special import erf
 from jax_md import space
-import xtrax
 from xtrax.intent import Context
 from xtrax.kernel_seam import VjpKernel
 
 from prolix.export import in_export_context
-from prolix.physics.bonded import compute_dihedral_angles
 from prolix.physics.cmap import compute_cmap_energies, precompute_cmap_coefficients
 from prolix.physics.pbc import create_periodic_space
 
@@ -193,7 +192,6 @@ def _pl_atomic_add_1d(
 
         def _serial_body(k, _):
             plt.atomic_add(ref, (idx_1d[k],), val_masked[k])
-            return None
 
         jax.lax.fori_loop(0, block_size, _serial_body, None)
     else:

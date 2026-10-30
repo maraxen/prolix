@@ -1235,7 +1235,7 @@ def bench_openmm_comparison(sizes: list[int], repeats: int, interpret: bool) -> 
         t_omm_step_mixed = None
         t_omm_rollout_mixed = None
 
-        if omm_platform_name != "CUDA" and os.path.isfile(ext_omm_py):
+        if "CUDA" not in avail and os.path.isfile(ext_omm_py):
             import tempfile
 
             with tempfile.TemporaryDirectory() as tmpd:

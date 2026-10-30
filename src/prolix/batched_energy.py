@@ -7,10 +7,12 @@ from typing import TYPE_CHECKING, Any
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 from jax_md import space
 from proxide.physics.constants import COULOMB_CONSTANT
 
 from prolix.padding import PaddedSystem
+
 try:
     from prolix.pallas_kernels import (
         pallas_angles_harmonic,
@@ -64,7 +66,6 @@ from prolix.physics.neighbor_list import (
 )
 from prolix.physics.optimization import chunked_coulomb_energy_nl, chunked_lj_energy_nl
 from prolix.physics.pme import make_spme_energy_fn, spme_background_energy
-from prolix.typing import CmapTorsionIndices
 
 if TYPE_CHECKING:
     from jax_md.util import Array
@@ -549,17 +550,19 @@ def _pme_reciprocal_and_corrections(
             correct, see test_nl_kernel_exclusion_parity.py).
     """
 
-    box_arr = jnp.asarray(sys.box_size)
-    mean_l = jnp.mean(box_arr.astype(jnp.float64))
+    box_np = np.asarray(sys.box_size, dtype=np.float64)
+    diag_np = np.diag(box_np) if box_np.ndim == 2 else box_np
+    mean_l = float(np.mean(diag_np))
     grid_points = int(sys.pme_grid_points)
-    grid_spacing = float(mean_l) / float(max(grid_points, 1))
+    grid_spacing = mean_l / float(max(grid_points, 1))
     eff_pallas_pme = use_pallas_pme if use_pallas_pme is not None else use_pallas
     pme_recip_fn = make_spme_energy_fn(
-        box_size=box_arr,
+        box_size=sys.box_size,
         alpha=float(sys.pme_alpha),
         grid_spacing=grid_spacing,
         use_pallas_pme=eff_pallas_pme,
     )
+    box_arr = jnp.asarray(sys.box_size)
     e_elec = e_elec + pme_recip_fn(r, sys.charges, sys.atom_mask)
     e_elec = e_elec + spme_background_energy(
         sys.charges, sys.atom_mask, sys.pme_alpha, sys.box_size
@@ -827,13 +830,16 @@ def single_padded_energy(
     sc_exp = int(getattr(sys, "softcore_exponent", 2))
 
     if neighbor is not None:
-        nb_idx = getattr(neighbor, "idx", neighbor)
-        nb_clean = jnp.where(nb_idx >= 0, nb_idx & ((1 << 29) - 1), nb_idx)
-        nb_idx = jnp.where(
-            sys.atom_mask[:, None] & sys.atom_mask[jnp.minimum(nb_clean, N - 1)],
-            nb_idx,
-            N,
+        nb_raw = getattr(neighbor, "idx", neighbor)
+        nb_clean = jnp.where(nb_raw == -1, N, nb_raw & ((1 << 29) - 1))
+        valid_nb = (
+            (nb_raw != -1)
+            & (nb_clean < N)
+            & sys.atom_mask[:, None]
+            & sys.atom_mask[jnp.minimum(nb_clean, N - 1)]
         )
+        nb_idx = jnp.where(valid_nb, nb_raw, N)
+        nb_clean = jnp.where(valid_nb, nb_clean, N)
         if pallas_enabled and pallas_nonbonded_nl is not None:
             if elec_method in ("reaction_field", "rf", "dsf", "damped_shifted_force"):
                 e_lj = pallas_nonbonded_nl(
@@ -903,12 +909,12 @@ def single_padded_energy(
         else:
             e_lj = chunked_lj_energy_nl(
                 r, sys.sigmas, sys.epsilons, sys.excl_indices, sys.excl_scales_vdw,
-                nb_idx, displacement_fn, float(sys.nonbonded_cutoff), 128,
+                nb_clean, displacement_fn, float(sys.nonbonded_cutoff), 128,
                 eff_switch,
             )
             e_elec = chunked_coulomb_energy_nl(
                 r, sys.charges, sys.excl_indices, sys.excl_scales_elec,
-                nb_idx, displacement_fn, float(sys.pme_alpha) if elec_method == "pme" else 0.0, COULOMB_CONSTANT,
+                nb_clean, displacement_fn, float(sys.pme_alpha) if elec_method == "pme" else 0.0, COULOMB_CONSTANT,
                 float(sys.nonbonded_cutoff), 128,
             )
     else:
@@ -1620,12 +1626,15 @@ def single_padded_energy_nl_cvjp(
         e_cmap = _cmap_energy_masked(r, sys.cmap_torsions, sys.cmap_indices, sys.cmap_mask, sys.cmap_coeffs, displacement_fn)
 
     N = len(sys.atom_mask)
-    nb_clean = jnp.where(neighbor_idx >= 0, neighbor_idx & ((1 << 29) - 1), neighbor_idx)
-    nb_idx = jnp.where(
-        sys.atom_mask[:, None] & sys.atom_mask[jnp.minimum(nb_clean, N - 1)],
-        neighbor_idx,
-        N,
+    nb_clean = jnp.where(neighbor_idx == -1, N, neighbor_idx & ((1 << 29) - 1))
+    valid_nb = (
+        (neighbor_idx != -1)
+        & (nb_clean < N)
+        & sys.atom_mask[:, None]
+        & sys.atom_mask[jnp.minimum(nb_clean, N - 1)]
     )
+    nb_idx = jnp.where(valid_nb, neighbor_idx, N)
+    nb_clean = jnp.where(valid_nb, nb_clean, N)
 
     if pallas_enabled and pallas_nonbonded_nl is not None:
         e_lj = pallas_nonbonded_nl(
@@ -1653,18 +1662,18 @@ def single_padded_energy_nl_cvjp(
     else:
         # Compute (N, K) exclusion scales for neighbor list
         excl_scales_vdw_nl, excl_scales_elec_nl = get_neighbor_exclusion_scales(
-            sys.excl_indices, sys.excl_scales_vdw, sys.excl_scales_elec, nb_idx,
+            sys.excl_indices, sys.excl_scales_vdw, sys.excl_scales_elec, nb_clean,
         )
 
         # LJ with custom VJP (analytical forces, no scatter-add)
         lj_fn = _make_lj_energy_nl_cvjp(
-            nb_idx, soft_core_lambda, excl_scales_vdw=excl_scales_vdw_nl,
+            nb_clean, soft_core_lambda, excl_scales_vdw=excl_scales_vdw_nl,
         )
         e_lj = lj_fn(r, sys.sigmas, sys.epsilons)
 
         # O(N*K) neighbor-list Coulomb with custom VJP
         coul_fn = _make_coulomb_energy_nl_cvjp(
-            nb_idx, excl_scales_elec=excl_scales_elec_nl,
+            nb_clean, excl_scales_elec=excl_scales_elec_nl,
         )
         e_elec = coul_fn(r, sys.charges)
 
@@ -1678,7 +1687,7 @@ def single_padded_energy_nl_cvjp(
                 r,
                 sys.charges,
                 sys.radii,
-                nb_idx,
+                nb_clean,
                 atom_mask=sys.atom_mask,
                 scaled_radii=sys.scaled_radii,
                 dielectric_offset=diel_off,
@@ -1696,7 +1705,7 @@ def single_padded_energy_nl_cvjp(
                     positions=positions,
                     charges=charges,
                     radii=radii,
-                    neighbor_idx=nb_idx,
+                    neighbor_idx=nb_clean,
                     solvent_dielectric=solv_diel,
                     solute_dielectric=solu_diel,
                     dielectric_offset=diel_off,
@@ -1879,12 +1888,15 @@ def single_padded_energy_nl(
         e_cmap = _cmap_energy_masked(r, sys.cmap_torsions, sys.cmap_indices, sys.cmap_mask, sys.cmap_coeffs, displacement_fn)
 
     N = len(sys.atom_mask)
-    nb_clean = jnp.where(neighbor_idx >= 0, neighbor_idx & ((1 << 29) - 1), neighbor_idx)
-    nb_idx = jnp.where(
-        sys.atom_mask[:, None] & sys.atom_mask[jnp.minimum(nb_clean, N - 1)],
-        neighbor_idx,
-        N,
+    nb_clean = jnp.where(neighbor_idx == -1, N, neighbor_idx & ((1 << 29) - 1))
+    valid_nb = (
+        (neighbor_idx != -1)
+        & (nb_clean < N)
+        & sys.atom_mask[:, None]
+        & sys.atom_mask[jnp.minimum(nb_clean, N - 1)]
     )
+    nb_idx = jnp.where(valid_nb, neighbor_idx, N)
+    nb_clean = jnp.where(valid_nb, nb_clean, N)
 
     if pallas_enabled and pallas_nonbonded_nl is not None:
         e_lj = pallas_nonbonded_nl(
@@ -1912,11 +1924,11 @@ def single_padded_energy_nl(
     else:
         # Non-bonded: O(N*K) via neighbor list
         excl_scales_vdw_nl, excl_scales_elec_nl = get_neighbor_exclusion_scales(
-            sys.excl_indices, sys.excl_scales_vdw, sys.excl_scales_elec, nb_idx,
+            sys.excl_indices, sys.excl_scales_vdw, sys.excl_scales_elec, nb_clean,
         )
 
         e_lj = _lj_energy_neighbor_list(
-            r, sys.sigmas, sys.epsilons, nb_idx,
+            r, sys.sigmas, sys.epsilons, nb_clean,
             soft_core_lambda=soft_core_lambda,
             excl_scales_vdw=excl_scales_vdw_nl,
             softcore_alpha=sc_alpha,
@@ -1924,7 +1936,7 @@ def single_padded_energy_nl(
         )
 
         e_elec = _coulomb_energy_neighbor_list(
-            r, sys.charges, nb_idx,
+            r, sys.charges, nb_clean,
             excl_scales_elec=excl_scales_elec_nl,
         )
 
@@ -1938,7 +1950,7 @@ def single_padded_energy_nl(
                 r,
                 sys.charges,
                 sys.radii,
-                nb_idx,
+                nb_clean,
                 atom_mask=sys.atom_mask,
                 scaled_radii=sys.scaled_radii,
                 dielectric_offset=diel_off,
@@ -1953,7 +1965,7 @@ def single_padded_energy_nl(
                 positions=r,
                 charges=sys.charges,
                 radii=sys.radii,
-                neighbor_idx=nb_idx,
+                neighbor_idx=nb_clean,
                 solvent_dielectric=solv_diel,
                 solute_dielectric=solu_diel,
                 dielectric_offset=diel_off,
