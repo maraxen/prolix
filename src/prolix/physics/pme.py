@@ -394,6 +394,31 @@ def spme_background_energy(charges: jnp.ndarray, atom_mask: jnp.ndarray, alpha: 
     return (-jnp.pi * Q**2 / (2.0 * alpha**2 * V) * COULOMB_CONSTANT).astype(charges.dtype)
 
 
+def _unwrap_primal(x):
+    return x.value if hasattr(x, "perturbed") else x
+
+
+def _is_perturbed(x, default: bool = True) -> bool:
+    return bool(x.perturbed) if hasattr(x, "perturbed") else bool(default)
+
+
+@functools.lru_cache(maxsize=64)
+def _cached_host_influence_function_np(
+    grid_dims: tuple[int, int, int],
+    box_key: tuple[float, ...],
+    box_shape: tuple[int, ...],
+    box_dtype_str: str,
+    alpha: float,
+    order: int,
+) -> np.ndarray:
+    with jax.ensure_compile_time_eval():
+        box_arr = jnp.asarray(
+            np.asarray(box_key, dtype=np.dtype(box_dtype_str)).reshape(box_shape)
+        )
+        G = influence_function(grid_dims, box_arr, alpha, order)
+        return np.asarray(G)
+
+
 @functools.partial(jax.custom_vjp, nondiff_argnums=(4, 5, 6, 7))
 def spme_energy_with_forces(
     positions: jnp.ndarray,
@@ -421,16 +446,22 @@ def spme_energy_with_forces(
 
 
 def _spme_fwd(positions, charges, atom_mask, box_size, grid_dims, alpha, order, use_pallas_pme):
+    positions_v = _unwrap_primal(positions)
+    charges_v = _unwrap_primal(charges)
+    atom_mask_v = _unwrap_primal(atom_mask)
+    box_size_v = _unwrap_primal(box_size)
+    box_perturbed = _is_perturbed(box_size)
+
     Kx, Ky, Kz = grid_dims
-    orig_dtype = positions.dtype
-    if use_pallas_pme and not in_export_context() and jnp.asarray(box_size).ndim == 1:
-        pos_w = positions.astype(jnp.float32)
-        q_w = charges.astype(jnp.float32)
-        box_w = jnp.asarray(box_size, dtype=jnp.float32)
+    orig_dtype = positions_v.dtype
+    if use_pallas_pme and not in_export_context() and jnp.asarray(box_size_v).ndim == 1:
+        pos_w = positions_v.astype(jnp.float32)
+        q_w = charges_v.astype(jnp.float32)
+        box_w = jnp.asarray(box_size_v, dtype=jnp.float32)
     else:
-        pos_w, q_w, box_w = positions, charges, box_size
+        pos_w, q_w, box_w = positions_v, charges_v, box_size_v
     Q = spread_charges(
-        pos_w, q_w, atom_mask, box_w, grid_dims, order, use_pallas_pme
+        pos_w, q_w, atom_mask_v, box_w, grid_dims, order, use_pallas_pme
     )
     with jax.named_scope("pme_fft_forward"):
         Q_hat = jnp.fft.rfftn(Q, s=grid_dims, axes=(-3, -2, -1))
@@ -445,16 +476,30 @@ def _spme_fwd(positions, charges, atom_mask, box_size, grid_dims, alpha, order, 
     theta_norm = (theta * N_grid).astype(Q.dtype)
 
     e_recip = (0.5 * COULOMB_CONSTANT * jnp.sum(Q * theta_norm, axis=(-3, -2, -1))).astype(orig_dtype)
-    e_self = spme_self_energy(charges, atom_mask, alpha).astype(orig_dtype)
+    e_self = spme_self_energy(charges_v, atom_mask_v, alpha).astype(orig_dtype)
 
-    return e_recip + e_self, (positions, charges, atom_mask, box_size, theta_norm)
+    return e_recip + e_self, (positions_v, charges_v, atom_mask_v, box_size_v, theta_norm, box_perturbed)
 
 
 def _spme_bwd(grid_dims, alpha, order, use_pallas_pme, residuals, g):
-    positions, charges, atom_mask, box_size, theta_norm = residuals
+    if len(residuals) == 6:
+        positions, charges, atom_mask, box_size, theta_norm, box_perturbed = residuals
+    else:
+        positions, charges, atom_mask, box_size, theta_norm = residuals
+        box_perturbed = True
     dtype = positions.dtype
-    # StableHLO guardrail: export_context() must force pure XLA in the backward pass too.
     box_arr = jnp.asarray(box_size, dtype=dtype)
+    if hasattr(jax.custom_derivatives, "SymbolicZero") and isinstance(
+        g, jax.custom_derivatives.SymbolicZero
+    ):
+        return (
+            jnp.zeros_like(positions),
+            jnp.zeros_like(charges),
+            jnp.zeros_like(atom_mask, dtype=dtype),
+            jnp.zeros_like(box_arr),
+        )
+
+    # StableHLO guardrail: export_context() must force pure XLA in the backward pass too.
     if use_pallas_pme and not in_export_context() and box_arr.ndim == 1:
         from xtrax.intent import Context
 
@@ -501,18 +546,23 @@ def _spme_bwd(grid_dims, alpha, order, use_pallas_pme, residuals, g):
         dE_dq = jnp.sum(dE_dq, axis=0)
 
     # 3. Box gradient via pure-XLA VJP of spme_reciprocal_energy w.r.t. box_size
-    _, vjp_box = jax.vjp(
-        lambda b: spme_reciprocal_energy(
-            positions, charges, atom_mask, b, grid_dims, alpha, order, False
-        ),
-        box_arr,
-    )
-    (dE_dbox,) = vjp_box(g.astype(dtype))
-    dE_dbox = dE_dbox.astype(box_arr.dtype)
+    # Skip when box_size is not perturbed (e.g. all NVT/NPT MD force evaluations),
+    # avoiding a redundant pure-XLA float64 SPME forward+backward pass every step.
+    if box_perturbed:
+        _, vjp_box = jax.vjp(
+            lambda b: spme_reciprocal_energy(
+                positions, charges, atom_mask, b, grid_dims, alpha, order, False
+            ),
+            box_arr,
+        )
+        (dE_dbox,) = vjp_box(g.astype(dtype))
+        dE_dbox = dE_dbox.astype(box_arr.dtype)
+    else:
+        dE_dbox = jnp.zeros_like(box_arr)
 
     return dE_dpos, dE_dq, jnp.zeros_like(atom_mask, dtype=dtype), dE_dbox
 
-spme_energy_with_forces.defvjp(_spme_fwd, _spme_bwd)
+spme_energy_with_forces.defvjp(_spme_fwd, _spme_bwd, symbolic_zeros=True)
 
 @functools.partial(jax.custom_vjp, nondiff_argnums=(5, 6, 7, 8))
 def _spme_energy_with_forces_cached(
@@ -546,39 +596,50 @@ def _spme_energy_with_forces_cached(
 
 
 def _spme_cached_fwd(positions, charges, atom_mask, G_cached, box_size, grid_dims, alpha, order, use_pallas_pme):
+    positions_v = _unwrap_primal(positions)
+    charges_v = _unwrap_primal(charges)
+    atom_mask_v = _unwrap_primal(atom_mask)
+    G_cached_v = _unwrap_primal(G_cached)
+    box_size_v = _unwrap_primal(box_size)
+    box_perturbed = _is_perturbed(box_size)
+
     Kx, Ky, Kz = grid_dims
-    orig_dtype = positions.dtype
-    if use_pallas_pme and not in_export_context() and jnp.asarray(box_size).ndim == 1:
-        pos_w = positions.astype(jnp.float32)
-        q_w = charges.astype(jnp.float32)
-        box_w = jnp.asarray(box_size, dtype=jnp.float32)
+    orig_dtype = positions_v.dtype
+    if use_pallas_pme and not in_export_context() and jnp.asarray(box_size_v).ndim == 1:
+        pos_w = positions_v.astype(jnp.float32)
+        q_w = charges_v.astype(jnp.float32)
+        box_w = jnp.asarray(box_size_v, dtype=jnp.float32)
     else:
-        pos_w, q_w, box_w = positions, charges, box_size
+        pos_w, q_w, box_w = positions_v, charges_v, box_size_v
     Q = spread_charges(
-        pos_w, q_w, atom_mask, box_w, grid_dims, order, use_pallas_pme
+        pos_w, q_w, atom_mask_v, box_w, grid_dims, order, use_pallas_pme
     )
     with jax.named_scope("pme_fft_forward"):
         Q_hat = jnp.fft.rfftn(Q, s=grid_dims, axes=(-3, -2, -1))
-    G = G_cached.astype(Q.dtype)
+    G = G_cached_v.astype(Q.dtype)
     with jax.named_scope("pme_fft_inverse"):
         theta = jnp.fft.irfftn(Q_hat * G, s=grid_dims, axes=(-3, -2, -1))
     N_grid = float(Kx * Ky * Kz)
     theta_norm = (theta * N_grid).astype(Q.dtype)
     e_recip = (0.5 * COULOMB_CONSTANT * jnp.sum(Q * theta_norm, axis=(-3, -2, -1))).astype(orig_dtype)
-    e_self = spme_self_energy(charges, atom_mask, alpha).astype(orig_dtype)
-    return e_recip + e_self, (positions, charges, atom_mask, box_size, theta_norm, G_cached)
+    e_self = spme_self_energy(charges_v, atom_mask_v, alpha).astype(orig_dtype)
+    return e_recip + e_self, (positions_v, charges_v, atom_mask_v, box_size_v, theta_norm, G_cached_v, box_perturbed)
 
 
 def _spme_cached_bwd(grid_dims, alpha, order, use_pallas_pme, residuals, g):
-    positions, charges, atom_mask, box_size, theta_norm, G_cached = residuals
+    if len(residuals) == 7:
+        positions, charges, atom_mask, box_size, theta_norm, G_cached, box_perturbed = residuals
+    else:
+        positions, charges, atom_mask, box_size, theta_norm, G_cached = residuals
+        box_perturbed = True
     dE_dpos, dE_dq, d_mask, dE_dbox = _spme_bwd(
         grid_dims, alpha, order, use_pallas_pme,
-        (positions, charges, atom_mask, box_size, theta_norm), g
+        (positions, charges, atom_mask, box_size, theta_norm, box_perturbed), g
     )
     return dE_dpos, dE_dq, d_mask, jnp.zeros_like(G_cached), dE_dbox
 
 
-_spme_energy_with_forces_cached.defvjp(_spme_cached_fwd, _spme_cached_bwd)
+_spme_energy_with_forces_cached.defvjp(_spme_cached_fwd, _spme_cached_bwd, symbolic_zeros=True)
 
 
 def make_spme_energy_fn(
@@ -599,27 +660,32 @@ def make_spme_energy_fn(
     pallas = resolve_use_pallas_pme(effective_pallas, box=box_size)
     if not isinstance(box_size, jax.core.Tracer):
         box_np = np.asarray(box_size)
-        box_arr = jnp.asarray(box_np)
-        if not isinstance(box_arr, jax.core.Tracer):
-            G_cached = influence_function(grid_dims, box_arr, alpha, order)
+        G_cached_np = _cached_host_influence_function_np(
+            grid_dims,
+            tuple(float(x) for x in box_np.reshape(-1)),
+            box_np.shape,
+            str(box_np.dtype),
+            float(alpha),
+            int(order),
+        )
 
-            def _cached_fn(positions, charges, atom_mask):
+        def _cached_fn(positions, charges, atom_mask):
+            use_p = pallas and not in_export_context()
+            return _spme_energy_with_forces_cached(
+                positions,
+                charges,
+                atom_mask,
+                jnp.asarray(G_cached_np, dtype=positions.dtype),
+                box_np.astype(np.dtype(positions.dtype)),
+                grid_dims,
+                alpha,
+                order,
+                use_p,
+            )
 
-                use_p = pallas and not in_export_context()
-                return _spme_energy_with_forces_cached(
-                    positions,
-                    charges,
-                    atom_mask,
-                    G_cached.astype(positions.dtype),
-                    box_np.astype(np.dtype(positions.dtype)),
-                    grid_dims,
-                    alpha,
-                    order,
-                    use_p,
-                )
-
-            _cached_fn.G_cached = G_cached  # type: ignore[attr-defined]
-            return _cached_fn
+        with jax.ensure_compile_time_eval():
+            _cached_fn.G_cached = jnp.asarray(G_cached_np)  # type: ignore[attr-defined]
+        return _cached_fn
 
     return lambda positions, charges, atom_mask: spme_energy_with_forces(
         positions, charges, atom_mask, box_size, grid_dims, alpha, order, pallas

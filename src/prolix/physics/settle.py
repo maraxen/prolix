@@ -509,10 +509,59 @@ def _settle_water_batch(
   row3 = jnp.stack([sxy - syx, szx + sxz, syz + szy, -sxx - syy + szz], axis=-1)
   n_mat = jnp.stack([row0, row1, row2, row3], axis=1)  # (N_waters, 4, 4)
 
-  # Largest-eigenvalue eigenvector is the optimal quaternion (eigh: ascending).
+  # Largest-eigenvalue eigenvector is the optimal quaternion.
+  # Because the body-frame water template b_all lies in the xy-plane (b_{i,z} == 0),
+  # the 3rd row of S is identically zero (det(S) == 0, sigma_3 == 0). The 4x4 Horn
+  # matrix N therefore has a pure biquadratic characteristic polynomial
+  # (lambda^2 - lam_max^2)(lambda^2 - lam_2^2) = 0 with exact closed-form roots
+  # lam_max = sqrt(||u||^2 + ||v||^2 + 2||u x v||) and lam_2^2 = ||u||^2 + ||v||^2 - 2||u x v||,
+  # where u = S[0, :] and v = S[1, :]. By Cayley-Hamilton, M = (N + lam_max I)(N^2 - lam_2^2 I)
+  # is an exact rank-1 projector onto the lam_max eigenvector, eliminating cuSOLVER eigh.
   with jax.named_scope("settle_pos_eigh"):
-    _, eigvecs = jnp.linalg.eigh(n_mat)
-  quat = eigvecs[:, :, -1]  # (N_waters, 4): (q0, q1, q2, q3)
+    u_vec = s_mat[:, 0, :]
+    v_vec = s_mat[:, 1, :]
+    p_tr = jnp.sum(u_vec * u_vec, axis=-1) + jnp.sum(v_vec * v_vec, axis=-1)
+    cross_uv = jnp.cross(u_vec, v_vec)
+    c_sq = jnp.sum(cross_uv * cross_uv, axis=-1)
+    q_val = jnp.where(
+      c_sq > 0.0,
+      jnp.sqrt(jnp.where(c_sq > 0.0, c_sq, jnp.ones_like(c_sq))),
+      jnp.zeros_like(c_sq),
+    )
+    lam_max_sq = jnp.maximum(p_tr + 2.0 * q_val, jnp.zeros_like(p_tr))
+    lam_max = jnp.where(
+      lam_max_sq > 0.0,
+      jnp.sqrt(jnp.where(lam_max_sq > 0.0, lam_max_sq, jnp.ones_like(lam_max_sq))),
+      jnp.zeros_like(lam_max_sq),
+    )
+    eye4 = jnp.eye(4, dtype=dtype)[None, :, :]
+    p1 = n_mat + lam_max[:, None, None] * eye4
+    # Exact algebraic identity: N^2 - p_tr * I_4 = 2 * C(u x v), so
+    # N^2 - lam2_sq * I_4 = 2 * q_val * (I_4 + C(c_hat)). Using the scale-free
+    # projector P2_hat = I_4 + C(c_hat) eliminates the O(||u||^4) matmul
+    # N @ N and avoids float32 catastrophic cancellation when q_val << p_tr.
+    c_hat = cross_uv / jnp.maximum(q_val[:, None], jnp.asarray(1e-12, dtype=dtype))
+    cx, cy, cz = c_hat[:, 0], c_hat[:, 1], c_hat[:, 2]
+    z = jnp.zeros_like(cx)
+    c_row0 = jnp.stack([cz, -cy, cx, z], axis=-1)
+    c_row1 = jnp.stack([-cy, -cz, z, cx], axis=-1)
+    c_row2 = jnp.stack([cx, z, -cz, cy], axis=-1)
+    c_row3 = jnp.stack([z, cx, cy, cz], axis=-1)
+    c_skew = jnp.stack([c_row0, c_row1, c_row2, c_row3], axis=-2)
+    p2 = eye4 + c_skew
+    proj = jnp.where((q_val > jnp.asarray(1e-12, dtype=dtype))[:, None, None], jnp.matmul(p1, p2), p1)
+    col_norms_sq = jnp.sum(proj * proj, axis=1)
+    best_col = jnp.argmax(col_norms_sq, axis=-1)
+    quat_raw = jnp.take_along_axis(proj, best_col[:, None, None], axis=2)[:, :, 0]
+    norm_sq = jnp.sum(quat_raw * quat_raw, axis=-1, keepdims=True)
+    valid_q = norm_sq > jnp.asarray(1e-30, dtype=dtype)
+    inv_norm = jnp.where(
+      valid_q,
+      jax.lax.rsqrt(jnp.where(valid_q, norm_sq, jnp.ones_like(norm_sq))),
+      jnp.zeros_like(norm_sq),
+    )
+    default_q = jnp.asarray([1.0, 0.0, 0.0, 0.0], dtype=dtype)[None, :]
+    quat = jnp.where(valid_q, quat_raw * inv_norm, default_q)
   q0, q1, q2, q3 = quat[:, 0], quat[:, 1], quat[:, 2], quat[:, 3]
 
   # Quaternion -> rotation matrix (proper rotation by construction).

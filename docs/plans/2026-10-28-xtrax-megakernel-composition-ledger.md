@@ -217,3 +217,91 @@ Every entry added to this ledger must record:
 - **Generalizable Rule for `xtrax` Skill**:
   1. Never gate an $O(N^2)$ or optional physics term on `tensor is not None` when upstream bundle builders zero-pad optional tensors for PyTree uniformity.
   2. Always record a host-static boolean capability flag (`has_real_cosolvents: bool = False`, `has_real_water: bool = False`, `has_real_constraints: bool = False`) on the static `ShapeSpec` at bundle construction time (`bool(np.any(np.asarray(gid) > 0))`) and gate the corresponding `PhysicsSystem` field / kernel dispatch on that static flag so zero-count features compile to zero ops and zero memory.
+
+### MK-22: Scale-Free Unit Cross-Product Skew Projector in Analytical 4x4 Horn Quaternion (`settle.py`)
+- **Category**: `Verification & Negative Controls` / `Mixed-Precision Stability`
+- **Symptom / Failure Mode**: In `_settle_water_batch`, computing the rank-1 Cayley-Hamilton projector M = (N + lam_max I_4)(N^2 - lam_2^2 I_4) via explicit 4x4 matrix multiplication `n_sq = jnp.matmul(n_mat, n_mat); p2 = n_sq - lam2_sq * eye4` incurs O(||u||^4) scaling and suffers catastrophic `float32` cancellation when target water geometry is near-collinear (||u x v|| << ||u||^2 + ||v||^2).
+- **Root Cause**: Because S has a zero 3rd row, N^2 - p_tr I_4 = 2 C(u x v) identically, where C(c) is the symmetric zero-diagonal 4x4 cross-product skew matrix. Thus N^2 - lam_2^2 I_4 = 2 q (I_4 + C(c_hat)) where c_hat = (u x v) / ||u x v||.
+- **Generalizable Rule for `xtrax` Skill**:
+  1. Replace explicit N^2 - lam_2^2 I_4 matrix squaring with the scale-free unit projector P2_hat = I_4 + C(c_hat), which is O(1)-bounded in `float32`/`float64` and saves a 4x4 batched matmul per water molecule per step.
+
+### MK-23: Empty-Dimension (`N == 0` or `K == 0`) Early Return and Direct 3D Batch Dispatch in `pallas_nonbonded_nl`
+- **Category**: `Grid & Work-Unit Dispatch` / `Buffer Aliasing & Atomics`
+- **Symptom / Failure Mode**:
+  1. Calling `_pallas_nonbonded_nl_batch` with `N == 0` or `K == 0` allocates a 0-length `nbr_flat` buffer while launching `grid=(B, 1)`, causing out-of-bounds DMA reads at offset 0.
+  2. Calling `_pallas_nonbonded_nl_vmappable` with an explicit 3D `positions` tensor `(B, N, 3)` previously routed through `jax.vmap(lambda b: _vmappable(positions[b], ...))(jnp.arange(B))`, adding unnecessary dynamic gather slice ops before entering `def_vmap`.
+- **Root Cause**: `max(1, (N + BLOCK_N - 1) // BLOCK_N)` clamps grid dimensions to >= 1 even when `N == 0` or `K == 0`.
+- **Generalizable Rule for `xtrax` Skill**:
+  1. Always guard `_pallas_*_batch` entry points with an early `if N == 0 or K == 0: return zeros` before computing `max(1, ...)` grid dimensions.
+  2. When a vmappable entry point receives already-batched 3D inputs `(B, N, 3)`, dispatch directly to `_pallas_*_batch(B, in_batched, ...)`.
+
+### MK-24: Dynamic Scalar Loop Limit in `dispatch_n_steps_inference` (`WhileCarry`)
+- **Category**: `Grid & Work-Unit Dispatch` / `Compilation Cache Sharing`
+- **Symptom / Failure Mode**: Calling `EnsemblePlan.run(..., n_steps=N1)` followed by `EnsemblePlan.run(..., n_steps=N2)` with different `n_steps` triggered a full ~30-second XLA recompilation of the entire BAOAB + PME + Pallas step graph.
+- **Root Cause**: `dispatch_n_steps_inference` captured Python `n = int(n_steps)` as a compile-time constant inside the `cond` closure of `jax.jit(_while)(init_state)`.
+- **Generalizable Rule for `xtrax` Skill**:
+  1. Pass `n_limit = jnp.asarray(int(n_steps), dtype=jnp.int32)` as a traced dynamic scalar argument to `jax.jit(_while)(init_state, n_limit)` so varying `n_steps` (e.g. warmup vs production) reuses the same compiled XLA executable with zero recompilation.
+
+### MK-25: Box-Aware Antipodal Reference-Position Invalidation (`+ 0.5 * box_vec`) Under Minimum-Image PBC
+- **Category**: `Verification & Negative Controls` / `Periodic Boundary Conditions`
+- **Symptom / Failure Mode**: Forcing a neighbor-list rebuild by shifting `reference_position + 1e6` silently fails to trigger a rebuild whenever any periodic box side length L divides 10^6 (such as L = 32.0 A where 10^6 / 32 = 31,250 exactly, giving minimum-image displacement 0.0!).
+- **Root Cause**: Under periodic minimum-image convention, displacement is evaluated modulo L, so any fixed constant shift + C aliases to 0 (mod L) when C / L is an integer.
+- **Generalizable Rule for `xtrax` Skill**:
+  1. Never invalidate a periodic reference position by adding a magic constant like `+ 1e6`. Always shift by the antipodal half-box vector `+ 0.5 * box_vec`, which maximizes minimum-image displacement for every valid periodic box.
+
+### MK-26: Prefix-Sliced `pad_mask_3d` When `integration_prefix < N_padded`
+- **Category**: `Grid & Work-Unit Dispatch`
+- **Symptom / Failure Mode**: When `integration_prefix < bundle.positions.shape[0]`, `pos = _integrator_positions(langevin_state)` has shape `(integration_prefix, 3)` whereas `bundle.atom_mask[:, None]` has shape `(N_padded, 1)`, raising a broadcast shape mismatch in `jnp.where(pad_mask_3d, ...)`.
+- **Root Cause**: `pad_mask_3d` was constructed from unsliced `bundle.atom_mask[:, None]` instead of slicing to `n_nl_rows = int(ghost_target_positions.shape[0])`.
+- **Generalizable Rule for `xtrax` Skill**:
+  1. Always slice per-atom masks to the active integrator prefix `bundle.atom_mask[:n_nl_rows, None]`.
+
+### MK-27: `@jax.custom_batching.custom_vmap` Scalar `any_update` Gate for Conditional Neighbor-List Rebuilds Under `jax.vmap`
+- **Category**: `Grid & Work-Unit Dispatch` / `Lowering & Triton Constraints`
+- **Symptom / Failure Mode**: Under `jax.vmap` across B > 1 replicas (e.g. B = 8 DHFR or B = 32 ragged buckets), `jax.lax.cond(should_update, rebuild_fn, noop_fn, neighbor)` inside `_nl_step_fn` has a batched boolean predicate `should_update` of shape `(B,)`. JAX lowers `vmap(lax.cond)` with a batched predicate into `lax.select_n` after unconditionally executing both branches on every MD step (~15x more rebuild work!).
+- **Root Cause**: Standard `jax.vmap` cannot branch on a vector predicate without evaluating both branches unless a `custom_vmap` rule reduces the vector predicate to a scalar `any_update = jnp.any(should_update_b)`.
+- **Generalizable Rule for `xtrax` Skill**:
+  1. Wrap conditional neighbor-list rebuilds in `@jax.custom_batching.custom_vmap` and, inside `def_vmap`, reduce `any_upd = jnp.any(su_b)` to a scalar boolean before calling `jax.lax.cond(any_upd, _do_batch, _keep_batch, ...)`.
+  2. When `any_upd` is `True`, rebuild all B replicas simultaneously in a single 2D-grid `(N, B)` Pallas launch and reset `last_pos = pos_b` across all B replicas so their Verlet skin clocks stay synchronized.
+
+### MK-28: Cell-Level Stencil + Pallas 2D-Grid `(N, B)` Neighbor-List Pruning & In-Register Exclusion Tagging (v2.2 / v2.3)
+- **Category**: `Grid & Work-Unit Dispatch` / `Buffer Aliasing & Atomics`
+- **Symptom / Failure Mode**: On 23,558-atom solvated DHFR, Pallas v2.1 single-step force evaluation took only `0.537 ms/step` (`0.427 ms` direct-space nonbonded + `0.110 ms` fused bonded + `0.163 ms` SPME) + `0.227 ms` SETTLE, but `jax_md` neighbor-list rebuild + exclusion encoding consumed `2.999 ms` (`2.923 ms` device time) due to scattering 27 cells per atom into an `(N, 27 * C, 3)` candidate buffer (~6.4 GB HBM traffic) and `encode_nl_exclusions` materializing `(N, K)` float32 scale arrays (144 MB HBM traffic).
+- **Root Cause**: Building the 27-cell stencil at the atom level `(N, 27 * C)` duplicates every cell candidate list across all atoms in that cell, and post-hoc exclusion encoding re-reads and re-writes the entire `(B, N, K)` neighbor list in HBM.
+- **Generalizable Rule for `xtrax` Skill**:
+  1. Build the 27-cell stencil at the cell level `(B, G_cells, 27, C)` via 26 periodic `jnp.roll` shifts of the binned `(nx, ny, nz, C)` cell grid (~1.2 MB for DHFR instead of 6.4 GB).
+  2. Launch a single 2D-grid `(N, B)` Pallas kernel (`pallas_prune_and_encode_cell_list`) where each program `(i_atom, b_id)` streams its cell `27 * C` candidates in `BLOCK_C = 64` tiles, filters r^2 < (r_cut + r_skin)^2 under minimum-image PBC, matches valid hits against the atom `(M=32,)` exclusion row in registers, bitwise-ORs `_NB_EXCL_FULL_BIT` / `_NB_EXCL_14_BIT` before storing to `nbr_out_ref`, and updates `max_occupancy` via `pl.atomic_max`.
+  3. **Verified Engaging GPU Impact**:
+     - On **NVIDIA H100 80GB HBM3 (`node2900`, Job `27692626`)**: `pallas_prune_and_encode_cell_list` reduces full DHFR neighbor-list rebuild + 2-bit exclusion encoding from `2.999 ms` to `1.178 ms` (`1.066 ms` device time, **`2.55x` speedup**), bringing steady-state 23,558-atom solvated DHFR rollout to **`1.063 ms/step`** (**`81.28 ns/day`** at `dt = 1.0 fs`, **`17.1x` faster** than Pallas v2.0's `18.202 ms/step` / `4.75 ns/day` and **`60.2x` faster** than pure XLA's `64.007 ms/step` / `1.35 ns/day`). Across $B=8$ multi-replica DHFR (`2D` grid batching), per-replica force evaluation drops from `0.573 ms` ($B=1$) to **`0.377 ms/replica`** (**`229.3 ns/day`** aggregate throughput), and on $N=1,024, B=32$ ragged buckets 2D-grid batching reaches `0.271 ms` (`0.0085 ms/replica`, **`6.43x` faster** than `lax.map`).
+     - On **NVIDIA RTX PRO 6000 Blackwell Server Edition (`node5204`, Job `27727006`)**: With `MK-30` applied, the full 4-point `bench_dhfr_parity.py` regression (`n_steps = [100, 500, 2000, 5000]`) achieves **`1.187 ms/step`** (**`72.78 ns/day`**, $R^2 = 0.9981$, `15.33x` speedup over Pallas v2.0's `18.202 ms/step` on the exact same Blackwell SKU) with zero Call-2 recompilation (`t_steady_state = 0.399 s` on `n_steps=100`, `0.616 s` on `500`, `2.445 s` on `2000`, `6.107 s` on `5000`).
+
+### MK-29: Six Pallas Triton / CPU-Interpret Traps in Dynamic Compaction Kernels (`pallas_prune_and_encode_cell_list`)
+- **Category**: `Lowering & Triton Constraints` / `Buffer Aliasing & Atomics`
+- **Symptom / Failure Mode**:
+  1. `TypeError: _kernel() takes 15 positional arguments but 16 were given` when using `input_output_aliases={13: 0}` with 2 outputs `(nbr_out, occ_out)`.
+  2. `TypeError: cond branches must have equal output types (int64[] vs int32[])` when accumulating `count_acc + jnp.sum(valid_i32)` inside `jax.lax.cond` under `jax_enable_x64=True`.
+  3. `ValueError: The kernel function in the pallas_call _kernel captures constants [i32[32], i32[64]]` when `jnp.arange(64)` is hoisted outside `_kernel`.
+  4. `ValueError: Mosaic GPU kernel exceeds available shared memory` when `compiler_params=plt.CompilerParams()` is omitted on `pl.pallas_call`.
+  5. `NotImplementedError: Unimplemented primitive in Pallas Triton lowering: round` when using `jnp.rint(dx * inv_Lx)` for minimum-image PBC inside `_kernel`.
+  6. `ValueError` when inspecting `box` inside `@jax.custom_batching.custom_vmap` because `custom_vmap` traces all positional arguments as `JitTracer`s.
+- **Root Cause**:
+  1. Every input argument in `pl.pallas_call` (including aliased inputs in `input_output_aliases`) receives its own input `Ref` parameter in `_kernel` in addition to the output `Ref` parameters.
+  2. Under `jax_enable_x64=True`, `jnp.sum(int32_arr)` and `jnp.cumsum(int32_arr)` promote their accumulator dtype to `int64` unless `dtype=jnp.int32` is passed explicitly.
+  3. Pallas forbids closed-over constant arrays; `jnp.arange` index vectors must be constructed inside `_kernel`.
+  4. Modern JAX defaults `pallas_call` on CUDA to Mosaic GPU unless `plt.CompilerParams()` is passed.
+  5. Pallas Triton does not lower `lax.round` (`jnp.rint`), whereas `jnp.floor(x + jnp.float32(0.5))` lowers to `tl.floor`.
+  6. Static grid dimensions `(nx, ny, nz)` must be computed before entering `custom_vmap` (or passed from host `self.bundles[0].box`).
+- **Generalizable Rule for `xtrax` Skill**:
+  1. Always pass `dtype=jnp.int32` explicitly to `jnp.sum(..., dtype=jnp.int32)` and `jnp.cumsum(..., dtype=jnp.int32)` inside Pallas kernels.
+  2. Construct `jnp.arange` lane vectors inside `_kernel`, pass `compiler_params=plt.CompilerParams() if not interpret else None`, use `jnp.floor(x + jnp.float32(0.5))` for nearest-integer PBC wrapping, precompute static `grid_dims=(nx, ny, nz)` before `custom_vmap`, and route masked-out `_pl_store` lanes to a valid dummy sentinel slot (`B * N * K`) so CPU `interpret=True` never overwrites slot 0.
+
+### MK-30: Canonicalizing Initial Carry Through `@jax.jit` Reseeder & Recomputing Cache Keys After Lazy Imports (`_cache_size() == 1`)
+- **Category**: `Grid & Work-Unit Dispatch` / `Compilation Cache Sharing`
+- **Symptom / Failure Mode**: When caching a single-bundle inference runner (`_SINGLE_INFERENCE_CACHE` + `_JITTED_WHILE_CACHE`), Call 1 (`cached_entry is None`, e.g. `n_steps=1` warmup) compiled `jitted_while`, and Call 2 (`cached_entry is not None`, e.g. `n_steps=99`) triggered a second `23.66 s` compilation of `jitted_while`, whereas Calls 3+ hit Call 2's cache in `0.0028 s`.
+- **Root Cause**: Two distinct mechanisms can cause a Call-2 cache miss:
+  1. **Leaf commitment mismatch**: On Call 1 (`cached_entry is None`), `state` came from eager/unjitted `self._setup_integrator(...)` while the warmup output of `@jax.jit`-compiled `fast_reseed_fn` was discarded (`_ = fast_reseed_fn(seed, kT_s)`). On Call 2 (`cached_entry is not None`), `state` came from `cached_entry["fast_reseed_fn"](seed, kT_s)`. Because JAX's C++ `pjit` cache key includes per-leaf device commitment (`committed`) and weak-type metadata, passing unjitted `init_fn` leaves on Call 1 vs `@jax.jit` `fast_reseed_fn` leaves on Call 2 caused a single `pjit` cache miss on Call 2.
+  2. **Lazy-import `sys.modules` drift in `_SINGLE_INFERENCE_CACHE` key**: On Call 1 of a fresh Python process with `use_pallas=True`, `cache_key` was computed *before* `self._setup_integrator(...)` lazily imported `prolix.physics.pme_pallas` into `sys.modules` (so `sys.modules.get("prolix.physics.pme_pallas")` returned `None` when constructing `cache_key`). When `cached_entry` was stored under that pre-import `cache_key`, Call 2 saw `prolix.physics.pme_pallas` populated in `sys.modules`, computed a different `cache_key` containing the actual `_spread_charges_pallas_single` / `_gather_pallas_single` function objects, missed `_SINGLE_INFERENCE_CACHE`, created a brand-new `_nl_step_fn` closure, and compiled a second `jitted_while` in `_JITTED_WHILE_CACHE`.
+- **Generalizable Rule for `xtrax` Skill**:
+  1. Whenever a cached runner uses a `@jax.jit` reseeder (`fast_reseed_fn`) on warm calls (`cached_entry is not None`), assign `state = fast_reseed_fn(seed, kT_s)` on the initial cache-populating call (`cached_entry is None`) as well rather than discarding the warmup output. This guarantees identical PyTree leaf metadata (`aval`, `weak_type`, `sharding`, `committed`) across Call 1 and all subsequent calls (`jitted_while._cache_size() == 1`).
+  2. When a runner cache key inspects `sys.modules` for monkeypatchable kernel references that may be lazily imported during setup, gate optional module attributes on whether that backend is active and recompute `cache_key = _make_cache_key()` *after* setup right before inserting into the cache (`len(_JITTED_WHILE_CACHE) == 1`).
+

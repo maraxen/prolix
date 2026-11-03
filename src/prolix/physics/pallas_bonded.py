@@ -3942,7 +3942,9 @@ def _pad_1d_flt(arr: jax.Array, pad_len: int, val: float = 0.0) -> jax.Array:
     return jnp.pad(arr, (0, pad_len), constant_values=val)
 
 
-def _pallas_bonded_all_fused_single(
+def _pallas_bonded_all_fused_batch(
+    B: int,
+    in_batched: tuple[bool, ...],
     positions: jax.Array,
     bond_indices: jax.Array,
     bond_params: jax.Array,
@@ -3977,17 +3979,48 @@ def _pallas_bonded_all_fused_single(
     cmap_first_is_psi: bool,
     interpret: bool,
 ) -> tuple[jax.Array, jax.Array]:
-    N = positions.shape[0]
+    (
+        b_pos,
+        b_bi,
+        b_bp,
+        b_bm,
+        b_ai,
+        b_ap,
+        b_am,
+        b_di,
+        b_dp,
+        b_dm,
+        b_hi,
+        b_hp,
+        b_hm,
+        b_ep,
+        b_es,
+        b_ee,
+        b_eq,
+        b_em,
+        b_ct,
+        b_cmi,
+        b_cc,
+        b_cm,
+        b_bx,
+        b_lm,
+    ) = in_batched
+
+    N = int(positions.shape[1] if b_pos else positions.shape[0])
     orig_dtype = positions.dtype
     dtype = jnp.float32
     positions = positions.astype(dtype)
 
-    B_real = int(bond_indices.shape[0])
-    A_real = int(angle_indices.shape[0])
-    D_real = int(dih_indices.shape[0])
-    H_real = int(harm_imp_indices.shape[0])
-    E_real = int(exc14_pairs.shape[0])
-    C_real = int(cmap_torsions.shape[0]) if cmap_coeffs.size > 0 else 0
+    B_real = int(bond_indices.shape[1] if b_bi else bond_indices.shape[0])
+    A_real = int(angle_indices.shape[1] if b_ai else angle_indices.shape[0])
+    D_real = int(dih_indices.shape[1] if b_di else dih_indices.shape[0])
+    H_real = int(harm_imp_indices.shape[1] if b_hi else harm_imp_indices.shape[0])
+    E_real = int(exc14_pairs.shape[1] if b_ep else exc14_pairs.shape[0])
+    C_real = (
+        int(cmap_torsions.shape[1] if b_ct else cmap_torsions.shape[0])
+        if cmap_coeffs.size > 0
+        else 0
+    )
 
     n_blk_b = (B_real + _BLOCK_B - 1) // _BLOCK_B if B_real > 0 else 0
     n_blk_a = (A_real + _BLOCK_B - 1) // _BLOCK_B if A_real > 0 else 0
@@ -3998,7 +4031,7 @@ def _pallas_bonded_all_fused_single(
 
     total_blocks = n_blk_b + n_blk_a + n_blk_d + n_blk_h + n_blk_e + n_blk_c
     if total_blocks == 0:
-        return jnp.zeros((), dtype=orig_dtype), jnp.zeros((N, 3), dtype=orig_dtype)
+        return jnp.zeros((B,), dtype=orig_dtype), jnp.zeros((B, N, 3), dtype=orig_dtype)
 
     o_b0, o_b1 = 0, n_blk_b
     o_a0, o_a1 = o_b1, o_b1 + n_blk_a
@@ -4010,81 +4043,129 @@ def _pallas_bonded_all_fused_single(
     n_atom_blocks = max(1, (N + 31) // 32)
     N_pad = n_atom_blocks * 32
     pad_n = N_pad - N
-    pos_pad = jnp.pad(positions, ((0, pad_n), (0, 0))) if pad_n > 0 else positions
-    px = jnp.asarray(pos_pad[:, 0])
-    py = jnp.asarray(pos_pad[:, 1])
-    pz = jnp.asarray(pos_pad[:, 2])
+    if b_pos:
+        pos_pad = jnp.pad(positions, ((0, 0), (0, pad_n), (0, 0))) if pad_n > 0 else positions
+        px = jnp.asarray(pos_pad[:, :, 0].reshape(-1))
+        py = jnp.asarray(pos_pad[:, :, 1].reshape(-1))
+        pz = jnp.asarray(pos_pad[:, :, 2].reshape(-1))
+        s_pos = N_pad
+    else:
+        pos_pad = jnp.pad(positions, ((0, pad_n), (0, 0))) if pad_n > 0 else positions
+        px = jnp.asarray(pos_pad[:, 0].reshape(-1))
+        py = jnp.asarray(pos_pad[:, 1].reshape(-1))
+        pz = jnp.asarray(pos_pad[:, 2].reshape(-1))
+        s_pos = 0
+
+    def _prep_int(
+        arr: jax.Array, is_b: bool, real_n: int, pad_len: int, pad_val: int, col: int | None = None
+    ) -> tuple[jax.Array, int]:
+        stride = real_n + pad_len
+        if real_n == 0:
+            return jnp.full((stride,), pad_val, dtype=jnp.int32), 0
+        x = arr[..., col].astype(jnp.int32) if col is not None else arr.astype(jnp.int32)
+        if is_b:
+            if pad_len > 0:
+                x = jnp.pad(x, ((0, 0), (0, pad_len)), constant_values=pad_val)
+            return jnp.asarray(x.reshape(-1), dtype=jnp.int32), stride
+        if pad_len > 0:
+            x = jnp.pad(x, (0, pad_len), constant_values=pad_val)
+        return jnp.asarray(x.reshape(-1), dtype=jnp.int32), 0
+
+    def _prep_flt(
+        arr: jax.Array, is_b: bool, real_n: int, pad_len: int, pad_val: float, col: int | None = None
+    ) -> tuple[jax.Array, int]:
+        stride = real_n + pad_len
+        if real_n == 0:
+            return jnp.full((stride,), pad_val, dtype=dtype), 0
+        if col is not None and arr.shape[-1] <= col:
+            return jnp.full((stride,), pad_val, dtype=dtype), 0
+        x = arr[..., col].astype(dtype) if col is not None else arr.astype(dtype)
+        if is_b:
+            if pad_len > 0:
+                x = jnp.pad(x, ((0, 0), (0, pad_len)), constant_values=pad_val)
+            return jnp.asarray(x.reshape(-1), dtype=dtype), stride
+        if pad_len > 0:
+            x = jnp.pad(x, (0, pad_len), constant_values=pad_val)
+        return jnp.asarray(x.reshape(-1), dtype=dtype), 0
 
     # Pad each group to at least 1 block (_BLOCK_B) so Pallas Ref shapes are non-empty
     B_pad = max(1, n_blk_b) * _BLOCK_B
     pad_b = B_pad - B_real
-    b_i = _pad_1d_int(bond_indices[:, 0].astype(jnp.int32) if B_real > 0 else jnp.zeros((0,), jnp.int32), pad_b, -1)
-    b_j = _pad_1d_int(bond_indices[:, 1].astype(jnp.int32) if B_real > 0 else jnp.zeros((0,), jnp.int32), pad_b, -1)
-    b_r0 = _pad_1d_flt(bond_params[:, 0].astype(dtype) if B_real > 0 else jnp.zeros((0,), dtype), pad_b, 0.0)
-    b_k = _pad_1d_flt(bond_params[:, 1].astype(dtype) if B_real > 0 else jnp.zeros((0,), dtype), pad_b, 0.0)
-    b_msk = _pad_1d_flt(bond_mask.astype(dtype) if B_real > 0 else jnp.zeros((0,), dtype), pad_b, 0.0)
+    b_i, s_bi = _prep_int(bond_indices, b_bi, B_real, pad_b, -1, 0)
+    b_j, _ = _prep_int(bond_indices, b_bi, B_real, pad_b, -1, 1)
+    b_r0, s_bp = _prep_flt(bond_params, b_bp, B_real, pad_b, 0.0, 0)
+    b_k, _ = _prep_flt(bond_params, b_bp, B_real, pad_b, 0.0, 1)
+    b_msk, s_bm = _prep_flt(bond_mask, b_bm, B_real, pad_b, 0.0, None)
 
     A_pad = max(1, n_blk_a) * _BLOCK_B
     pad_a = A_pad - A_real
-    a_i = _pad_1d_int(angle_indices[:, 0].astype(jnp.int32) if A_real > 0 else jnp.zeros((0,), jnp.int32), pad_a, -1)
-    a_j = _pad_1d_int(angle_indices[:, 1].astype(jnp.int32) if A_real > 0 else jnp.zeros((0,), jnp.int32), pad_a, -1)
-    a_k = _pad_1d_int(angle_indices[:, 2].astype(jnp.int32) if A_real > 0 else jnp.zeros((0,), jnp.int32), pad_a, -1)
-    a_th0 = _pad_1d_flt(angle_params[:, 0].astype(dtype) if A_real > 0 else jnp.zeros((0,), dtype), pad_a, 0.0)
-    a_kval = _pad_1d_flt(angle_params[:, 1].astype(dtype) if A_real > 0 else jnp.zeros((0,), dtype), pad_a, 0.0)
-    a_msk = _pad_1d_flt(angle_mask.astype(dtype) if A_real > 0 else jnp.zeros((0,), dtype), pad_a, 0.0)
+    a_i, s_ai = _prep_int(angle_indices, b_ai, A_real, pad_a, -1, 0)
+    a_j, _ = _prep_int(angle_indices, b_ai, A_real, pad_a, -1, 1)
+    a_k, _ = _prep_int(angle_indices, b_ai, A_real, pad_a, -1, 2)
+    a_th0, s_ap = _prep_flt(angle_params, b_ap, A_real, pad_a, 0.0, 0)
+    a_kval, _ = _prep_flt(angle_params, b_ap, A_real, pad_a, 0.0, 1)
+    a_msk, s_am = _prep_flt(angle_mask, b_am, A_real, pad_a, 0.0, None)
 
     D_pad = max(1, n_blk_d) * _BLOCK_B
     pad_d = D_pad - D_real
-    d_i = _pad_1d_int(dih_indices[:, 0].astype(jnp.int32) if D_real > 0 else jnp.zeros((0,), jnp.int32), pad_d, -1)
-    d_j = _pad_1d_int(dih_indices[:, 1].astype(jnp.int32) if D_real > 0 else jnp.zeros((0,), jnp.int32), pad_d, -1)
-    d_k = _pad_1d_int(dih_indices[:, 2].astype(jnp.int32) if D_real > 0 else jnp.zeros((0,), jnp.int32), pad_d, -1)
-    d_l = _pad_1d_int(dih_indices[:, 3].astype(jnp.int32) if D_real > 0 else jnp.zeros((0,), jnp.int32), pad_d, -1)
-    d_p0 = _pad_1d_flt(dih_params[:, 0].astype(dtype) if D_real > 0 else jnp.zeros((0,), dtype), pad_d, 0.0)
-    d_p1 = _pad_1d_flt(dih_params[:, 1].astype(dtype) if D_real > 0 else jnp.zeros((0,), dtype), pad_d, 0.0)
-    d_p2 = _pad_1d_flt(dih_params[:, 2].astype(dtype) if (D_real > 0 and dih_params.shape[-1] >= 3) else jnp.zeros((0,), dtype), pad_d, 0.0)
-    d_msk = _pad_1d_flt(dih_mask.astype(dtype) if D_real > 0 else jnp.zeros((0,), dtype), pad_d, 0.0)
+    d_i, s_di = _prep_int(dih_indices, b_di, D_real, pad_d, -1, 0)
+    d_j, _ = _prep_int(dih_indices, b_di, D_real, pad_d, -1, 1)
+    d_k, _ = _prep_int(dih_indices, b_di, D_real, pad_d, -1, 2)
+    d_l, _ = _prep_int(dih_indices, b_di, D_real, pad_d, -1, 3)
+    d_p0, s_dp = _prep_flt(dih_params, b_dp, D_real, pad_d, 0.0, 0)
+    d_p1, _ = _prep_flt(dih_params, b_dp, D_real, pad_d, 0.0, 1)
+    d_p2, _ = _prep_flt(dih_params, b_dp, D_real, pad_d, 0.0, 2)
+    d_msk, s_dm = _prep_flt(dih_mask, b_dm, D_real, pad_d, 0.0, None)
 
     H_pad = max(1, n_blk_h) * _BLOCK_B
     pad_h = H_pad - H_real
-    h_i = _pad_1d_int(harm_imp_indices[:, 0].astype(jnp.int32) if H_real > 0 else jnp.zeros((0,), jnp.int32), pad_h, -1)
-    h_j = _pad_1d_int(harm_imp_indices[:, 1].astype(jnp.int32) if H_real > 0 else jnp.zeros((0,), jnp.int32), pad_h, -1)
-    h_k = _pad_1d_int(harm_imp_indices[:, 2].astype(jnp.int32) if H_real > 0 else jnp.zeros((0,), jnp.int32), pad_h, -1)
-    h_l = _pad_1d_int(harm_imp_indices[:, 3].astype(jnp.int32) if H_real > 0 else jnp.zeros((0,), jnp.int32), pad_h, -1)
-    h_kval = _pad_1d_flt(harm_imp_params[:, 0].astype(dtype) if H_real > 0 else jnp.zeros((0,), dtype), pad_h, 0.0)
-    h_phi0 = _pad_1d_flt(harm_imp_params[:, 1].astype(dtype) if H_real > 0 else jnp.zeros((0,), dtype), pad_h, 0.0)
-    h_msk = _pad_1d_flt(harm_imp_mask.astype(dtype) if H_real > 0 else jnp.zeros((0,), dtype), pad_h, 0.0)
+    h_i, s_hi = _prep_int(harm_imp_indices, b_hi, H_real, pad_h, -1, 0)
+    h_j, _ = _prep_int(harm_imp_indices, b_hi, H_real, pad_h, -1, 1)
+    h_k, _ = _prep_int(harm_imp_indices, b_hi, H_real, pad_h, -1, 2)
+    h_l, _ = _prep_int(harm_imp_indices, b_hi, H_real, pad_h, -1, 3)
+    h_kval, s_hp = _prep_flt(harm_imp_params, b_hp, H_real, pad_h, 0.0, 0)
+    h_phi0, _ = _prep_flt(harm_imp_params, b_hp, H_real, pad_h, 0.0, 1)
+    h_msk, s_hm = _prep_flt(harm_imp_mask, b_hm, H_real, pad_h, 0.0, None)
 
     E_pad = max(1, n_blk_e) * _BLOCK_B
     pad_e = E_pad - E_real
-    e_i = _pad_1d_int(exc14_pairs[:, 0].astype(jnp.int32) if E_real > 0 else jnp.zeros((0,), jnp.int32), pad_e, -1)
-    e_j = _pad_1d_int(exc14_pairs[:, 1].astype(jnp.int32) if E_real > 0 else jnp.zeros((0,), jnp.int32), pad_e, -1)
-    e_sig = _pad_1d_flt(exc14_sigmas.astype(dtype) if E_real > 0 else jnp.zeros((0,), dtype), pad_e, 1.0)
-    e_eps = _pad_1d_flt(exc14_epsilons.astype(dtype) if E_real > 0 else jnp.zeros((0,), dtype), pad_e, 0.0)
-    e_qp = _pad_1d_flt(exc14_chargeprods.astype(dtype) if E_real > 0 else jnp.zeros((0,), dtype), pad_e, 0.0)
-    e_msk = _pad_1d_flt(exc14_mask.astype(dtype) if E_real > 0 else jnp.zeros((0,), dtype), pad_e, 0.0)
+    e_i, s_ep = _prep_int(exc14_pairs, b_ep, E_real, pad_e, -1, 0)
+    e_j, _ = _prep_int(exc14_pairs, b_ep, E_real, pad_e, -1, 1)
+    e_sig, s_es = _prep_flt(exc14_sigmas, b_es, E_real, pad_e, 1.0, None)
+    e_eps, s_ee = _prep_flt(exc14_epsilons, b_ee, E_real, pad_e, 0.0, None)
+    e_qp, s_eq = _prep_flt(exc14_chargeprods, b_eq, E_real, pad_e, 0.0, None)
+    e_msk, s_em = _prep_flt(exc14_mask, b_em, E_real, pad_e, 0.0, None)
 
     C_pad = max(1, n_blk_c) * _BLOCK_B
     pad_c = C_pad - C_real
-    c_0 = _pad_1d_int(cmap_torsions[:, 0].astype(jnp.int32) if C_real > 0 else jnp.zeros((0,), jnp.int32), pad_c, -1)
-    c_1 = _pad_1d_int(cmap_torsions[:, 1].astype(jnp.int32) if C_real > 0 else jnp.zeros((0,), jnp.int32), pad_c, -1)
-    c_2 = _pad_1d_int(cmap_torsions[:, 2].astype(jnp.int32) if C_real > 0 else jnp.zeros((0,), jnp.int32), pad_c, -1)
-    c_3 = _pad_1d_int(cmap_torsions[:, 3].astype(jnp.int32) if C_real > 0 else jnp.zeros((0,), jnp.int32), pad_c, -1)
-    c_4 = _pad_1d_int(cmap_torsions[:, 4].astype(jnp.int32) if C_real > 0 else jnp.zeros((0,), jnp.int32), pad_c, -1)
-    c_midx = _pad_1d_int(cmap_map_indices.astype(jnp.int32) if C_real > 0 else jnp.zeros((0,), jnp.int32), pad_c, 0)
-    c_msk = _pad_1d_flt(cmap_mask.astype(dtype) if C_real > 0 else jnp.zeros((0,), dtype), pad_c, 0.0)
+    c_0, s_ct = _prep_int(cmap_torsions, b_ct, C_real, pad_c, -1, 0)
+    c_1, _ = _prep_int(cmap_torsions, b_ct, C_real, pad_c, -1, 1)
+    c_2, _ = _prep_int(cmap_torsions, b_ct, C_real, pad_c, -1, 2)
+    c_3, _ = _prep_int(cmap_torsions, b_ct, C_real, pad_c, -1, 3)
+    c_4, _ = _prep_int(cmap_torsions, b_ct, C_real, pad_c, -1, 4)
+    c_midx, s_cmi = _prep_int(cmap_map_indices, b_cmi, C_real, pad_c, 0, None)
+    c_msk, s_cm = _prep_flt(cmap_mask, b_cm, C_real, pad_c, 0.0, None)
 
-    if cmap_coeffs.size > 0 and cmap_coeffs.ndim >= 4:
-        N_maps = int(cmap_coeffs.shape[0])
-        G_cmap = int(cmap_coeffs.shape[1])
+    cmap_base_ndim = 5 if b_cc else 4
+    if cmap_coeffs.size > 0 and cmap_coeffs.ndim >= cmap_base_ndim:
+        N_maps = int(cmap_coeffs.shape[1] if b_cc else cmap_coeffs.shape[0])
+        G_cmap = int(cmap_coeffs.shape[2] if b_cc else cmap_coeffs.shape[1])
         c_coeffs_flat = jnp.asarray(cmap_coeffs.astype(dtype).reshape(-1))
+        s_cc = (N_maps * G_cmap * G_cmap * 16) if b_cc else 0
     else:
         N_maps = 1
         G_cmap = 24
         c_coeffs_flat = jnp.zeros((16,), dtype=dtype)
+        s_cc = 0
 
-    box_vec = jnp.asarray(box.astype(dtype))
-    lam_vec = jnp.asarray(lam.reshape((1,)).astype(dtype))
-    zero_f = jnp.zeros((N_pad,), dtype=dtype)
+    box_len = int(box.shape[-1])
+    box_vec = jnp.asarray(box.astype(dtype).reshape(-1))
+    s_box = box_len if b_bx else 0
+
+    lam_vec = jnp.asarray(lam.astype(dtype).reshape(-1))
+    s_lam = 1 if b_lm else 0
+
+    zero_f = jnp.zeros((B * N_pad,), dtype=dtype)
 
     def _bonded_all_fused_kernel(
         px_ref,
@@ -4141,7 +4222,11 @@ def _pallas_bonded_all_fused_single(
         fz_out_ref,
     ):
         del fx_in_ref, fy_in_ref, fz_in_ref
-        pid = pl.program_id(0)
+        b_id = pl.program_id(0)
+        pid = pl.program_id(1)
+        pos_base = b_id * s_pos
+        f_base = b_id * N_pad
+
         zero = jnp.asarray(0.0, dtype=dtype)
         one = jnp.asarray(1.0, dtype=dtype)
         half = jnp.asarray(0.5, dtype=dtype)
@@ -4152,46 +4237,53 @@ def _pallas_bonded_all_fused_single(
         two_pi = jnp.asarray(2.0 * jnp.pi, dtype=dtype)
         max_atom = max(N - 1, 0)
 
+        def _load_box_b():
+            base = b_id * s_box
+            return tuple(
+                _pl_load(box_ref, (base + jnp.full((1,), k, dtype=jnp.int32),))[0]
+                for k in range(box_len)
+            )
+
         def _do_bonds(p_val):
             offs = (p_val - o_b0) * _BLOCK_B + jnp.arange(_BLOCK_B, dtype=jnp.int32)
-            ai = _pl_load(b_i_ref, (offs,))
-            aj = _pl_load(b_j_ref, (offs,))
-            mv = _pl_load(b_msk_ref, (offs,))
+            ai = _pl_load(b_i_ref, (b_id * s_bi + offs,))
+            aj = _pl_load(b_j_ref, (b_id * s_bi + offs,))
+            mv = _pl_load(b_msk_ref, (b_id * s_bm + offs,))
             valid = (offs < B_real) & (mv > zero) & (ai >= 0) & (ai < N) & (aj >= 0) & (aj < N)
             m_eff = jnp.where(valid, mv, zero)
             si = jnp.where(valid, jnp.clip(ai, 0, max_atom), 0)
             sj = jnp.where(valid, jnp.clip(aj, 0, max_atom), 0)
-            ri = (_pl_load(px_ref, (si,)), _pl_load(py_ref, (si,)), _pl_load(pz_ref, (si,)))
-            rj = (_pl_load(px_ref, (sj,)), _pl_load(py_ref, (sj,)), _pl_load(pz_ref, (sj,)))
-            d_vec = _min_image3(_sub3(ri, rj), _load_box6(box_ref), has_box)
+            ri = (_pl_load(px_ref, (pos_base + si,)), _pl_load(py_ref, (pos_base + si,)), _pl_load(pz_ref, (pos_base + si,)))
+            rj = (_pl_load(px_ref, (pos_base + sj,)), _pl_load(py_ref, (pos_base + sj,)), _pl_load(pz_ref, (pos_base + sj,)))
+            d_vec = _min_image3(_sub3(ri, rj), _load_box_b(), has_box)
             d_sq = _dot3(d_vec, d_vec)
             if dist_eps > 0.0:
                 dist = jnp.sqrt(d_sq + jnp.asarray(dist_eps, dtype=dtype))
             else:
                 d_sq_s = jnp.where(d_sq > zero, d_sq, one)
                 dist = jnp.where(d_sq > zero, jnp.sqrt(d_sq_s), zero)
-            r0_b = _pl_load(b_r0_ref, (offs,))
-            k_b = _pl_load(b_k_ref, (offs,))
+            r0_b = _pl_load(b_r0_ref, (b_id * s_bp + offs,))
+            k_b = _pl_load(b_k_ref, (b_id * s_bp + offs,))
             diff = dist - r0_b
             e_b = half * m_eff * k_b * diff * diff
             dist_denom = jnp.where(dist > zero, dist, one)
             f_coeff = jnp.where(valid & (dist > zero), (zero - m_eff * k_b * diff) / dist_denom, zero)
             fi = _scale3(f_coeff, d_vec)
             fj = _scale3(zero - one, fi)
-            _pl_atomic_add_1d(fx_out_ref, si, fi[0], valid, interpret)
-            _pl_atomic_add_1d(fy_out_ref, si, fi[1], valid, interpret)
-            _pl_atomic_add_1d(fz_out_ref, si, fi[2], valid, interpret)
-            _pl_atomic_add_1d(fx_out_ref, sj, fj[0], valid, interpret)
-            _pl_atomic_add_1d(fy_out_ref, sj, fj[1], valid, interpret)
-            _pl_atomic_add_1d(fz_out_ref, sj, fj[2], valid, interpret)
+            _pl_atomic_add_1d(fx_out_ref, f_base + si, fi[0], valid, interpret)
+            _pl_atomic_add_1d(fy_out_ref, f_base + si, fi[1], valid, interpret)
+            _pl_atomic_add_1d(fz_out_ref, f_base + si, fi[2], valid, interpret)
+            _pl_atomic_add_1d(fx_out_ref, f_base + sj, fj[0], valid, interpret)
+            _pl_atomic_add_1d(fy_out_ref, f_base + sj, fj[1], valid, interpret)
+            _pl_atomic_add_1d(fz_out_ref, f_base + sj, fj[2], valid, interpret)
             return jnp.sum(e_b)
 
         def _do_angles(p_val):
             offs = (p_val - o_a0) * _BLOCK_B + jnp.arange(_BLOCK_B, dtype=jnp.int32)
-            ai = _pl_load(a_i_ref, (offs,))
-            aj = _pl_load(a_j_ref, (offs,))
-            ak = _pl_load(a_k_ref, (offs,))
-            mv = _pl_load(a_msk_ref, (offs,))
+            ai = _pl_load(a_i_ref, (b_id * s_ai + offs,))
+            aj = _pl_load(a_j_ref, (b_id * s_ai + offs,))
+            ak = _pl_load(a_k_ref, (b_id * s_ai + offs,))
+            mv = _pl_load(a_msk_ref, (b_id * s_am + offs,))
             valid = (
                 (offs < A_real)
                 & (mv > zero)
@@ -4206,10 +4298,10 @@ def _pallas_bonded_all_fused_single(
             si = jnp.where(valid, jnp.clip(ai, 0, max_atom), 0)
             sj = jnp.where(valid, jnp.clip(aj, 0, max_atom), 0)
             sk = jnp.where(valid, jnp.clip(ak, 0, max_atom), 0)
-            ri = (_pl_load(px_ref, (si,)), _pl_load(py_ref, (si,)), _pl_load(pz_ref, (si,)))
-            rj = (_pl_load(px_ref, (sj,)), _pl_load(py_ref, (sj,)), _pl_load(pz_ref, (sj,)))
-            rk = (_pl_load(px_ref, (sk,)), _pl_load(py_ref, (sk,)), _pl_load(pz_ref, (sk,)))
-            box_xyz = _load_box6(box_ref)
+            ri = (_pl_load(px_ref, (pos_base + si,)), _pl_load(py_ref, (pos_base + si,)), _pl_load(pz_ref, (pos_base + si,)))
+            rj = (_pl_load(px_ref, (pos_base + sj,)), _pl_load(py_ref, (pos_base + sj,)), _pl_load(pz_ref, (pos_base + sj,)))
+            rk = (_pl_load(px_ref, (pos_base + sk,)), _pl_load(py_ref, (pos_base + sk,)), _pl_load(pz_ref, (pos_base + sk,)))
+            box_xyz = _load_box_b()
             v_ji = _min_image3(_sub3(ri, rj), box_xyz, has_box)
             v_jk = _min_image3(_sub3(rk, rj), box_xyz, has_box)
             d_sq_ji = _dot3(v_ji, v_ji)
@@ -4224,11 +4316,11 @@ def _pallas_bonded_all_fused_single(
                 d_ji_sq_eff = jnp.where(d_sq_ji > zero, d_sq_ji, one)
                 d_jk_sq_eff = jnp.where(d_sq_jk > zero, d_sq_jk, one)
                 d_ji = jnp.where(d_sq_ji > zero, jnp.sqrt(d_ji_sq_eff), zero)
-                d_jk = jnp.where(d_sq_jk > zero, jnp.sqrt(d_jk_sq_eff), zero)
+                d_jk = jnp.where(d_sq_jk > zero, jnp.sqrt(d_sq_jk_eff), zero)
             dot_ik = _dot3(v_ji, v_jk)
             cp = _cross3(v_ji, v_jk)
-            th0 = _pl_load(a_th0_ref, (offs,))
-            k_a = _pl_load(a_kval_ref, (offs,))
+            th0 = _pl_load(a_th0_ref, (b_id * s_ap + offs,))
+            k_a = _pl_load(a_kval_ref, (b_id * s_ap + offs,))
             if angle_regularization_mode == "openmm_cross":
                 cp_sq = _dot3(cp, cp)
                 r_cp = jnp.sqrt(jnp.maximum(cp_sq, jnp.asarray(1e-24, dtype=dtype)))
@@ -4262,24 +4354,24 @@ def _pallas_bonded_all_fused_single(
                 fi = _scale3(neg_de_dth / (d_ji_sq_eff * r_cp_reg), _cross3(v_ji, cp))
                 fk = _scale3(neg_de_dth / (d_jk_sq_eff * r_cp_reg), _cross3(cp, v_jk))
                 fj = _scale3(zero - one, _add3(fi, fk))
-            _pl_atomic_add_1d(fx_out_ref, si, fi[0], valid, interpret)
-            _pl_atomic_add_1d(fy_out_ref, si, fi[1], valid, interpret)
-            _pl_atomic_add_1d(fz_out_ref, si, fi[2], valid, interpret)
-            _pl_atomic_add_1d(fx_out_ref, sj, fj[0], valid, interpret)
-            _pl_atomic_add_1d(fy_out_ref, sj, fj[1], valid, interpret)
-            _pl_atomic_add_1d(fz_out_ref, sj, fj[2], valid, interpret)
-            _pl_atomic_add_1d(fx_out_ref, sk, fk[0], valid, interpret)
-            _pl_atomic_add_1d(fy_out_ref, sk, fk[1], valid, interpret)
-            _pl_atomic_add_1d(fz_out_ref, sk, fk[2], valid, interpret)
+            _pl_atomic_add_1d(fx_out_ref, f_base + si, fi[0], valid, interpret)
+            _pl_atomic_add_1d(fy_out_ref, f_base + si, fi[1], valid, interpret)
+            _pl_atomic_add_1d(fz_out_ref, f_base + si, fi[2], valid, interpret)
+            _pl_atomic_add_1d(fx_out_ref, f_base + sj, fj[0], valid, interpret)
+            _pl_atomic_add_1d(fy_out_ref, f_base + sj, fj[1], valid, interpret)
+            _pl_atomic_add_1d(fz_out_ref, f_base + sj, fj[2], valid, interpret)
+            _pl_atomic_add_1d(fx_out_ref, f_base + sk, fk[0], valid, interpret)
+            _pl_atomic_add_1d(fy_out_ref, f_base + sk, fk[1], valid, interpret)
+            _pl_atomic_add_1d(fz_out_ref, f_base + sk, fk[2], valid, interpret)
             return jnp.sum(e_a)
 
         def _do_torsions_periodic(p_val):
             offs = (p_val - o_d0) * _BLOCK_B + jnp.arange(_BLOCK_B, dtype=jnp.int32)
-            ai = _pl_load(d_i_ref, (offs,))
-            aj = _pl_load(d_j_ref, (offs,))
-            ak = _pl_load(d_k_ref, (offs,))
-            al = _pl_load(d_l_ref, (offs,))
-            mv = _pl_load(d_msk_ref, (offs,))
+            ai = _pl_load(d_i_ref, (b_id * s_di + offs,))
+            aj = _pl_load(d_j_ref, (b_id * s_di + offs,))
+            ak = _pl_load(d_k_ref, (b_id * s_di + offs,))
+            al = _pl_load(d_l_ref, (b_id * s_di + offs,))
+            mv = _pl_load(d_msk_ref, (b_id * s_dm + offs,))
             valid = (
                 (offs < D_real)
                 & (mv > zero)
@@ -4297,16 +4389,16 @@ def _pallas_bonded_all_fused_single(
             sj = jnp.where(valid, jnp.clip(aj, 0, max_atom), 0)
             sk = jnp.where(valid, jnp.clip(ak, 0, max_atom), 0)
             sl = jnp.where(valid, jnp.clip(al, 0, max_atom), 0)
-            ri = (_pl_load(px_ref, (si,)), _pl_load(py_ref, (si,)), _pl_load(pz_ref, (si,)))
-            rj = (_pl_load(px_ref, (sj,)), _pl_load(py_ref, (sj,)), _pl_load(pz_ref, (sj,)))
-            rk = (_pl_load(px_ref, (sk,)), _pl_load(py_ref, (sk,)), _pl_load(pz_ref, (sk,)))
-            rl = (_pl_load(px_ref, (sl,)), _pl_load(py_ref, (sl,)), _pl_load(pz_ref, (sl,)))
+            ri = (_pl_load(px_ref, (pos_base + si,)), _pl_load(py_ref, (pos_base + si,)), _pl_load(pz_ref, (pos_base + si,)))
+            rj = (_pl_load(px_ref, (pos_base + sj,)), _pl_load(py_ref, (pos_base + sj,)), _pl_load(pz_ref, (pos_base + sj,)))
+            rk = (_pl_load(px_ref, (pos_base + sk,)), _pl_load(py_ref, (pos_base + sk,)), _pl_load(pz_ref, (pos_base + sk,)))
+            rl = (_pl_load(px_ref, (pos_base + sl,)), _pl_load(py_ref, (pos_base + sl,)), _pl_load(pz_ref, (pos_base + sl,)))
             phi, dphi_dri, dphi_drj, dphi_drk, dphi_drl = _torsion_angle_and_atom_grads_vec3(
-                ri, rj, rk, rl, valid, _load_box6(box_ref), has_box, b0_is_ji
+                ri, rj, rk, rl, valid, _load_box_b(), has_box, b0_is_ji
             )
-            prm0 = _pl_load(d_p0_ref, (offs,))
-            prm1 = _pl_load(d_p1_ref, (offs,))
-            prm2 = _pl_load(d_p2_ref, (offs,))
+            prm0 = _pl_load(d_p0_ref, (b_id * s_dp + offs,))
+            prm1 = _pl_load(d_p1_ref, (b_id * s_dp + offs,))
+            prm2 = _pl_load(d_p2_ref, (b_id * s_dp + offs,))
             arg = prm0 * phi - prm1
             e_d = m_eff * prm2 * (one + jnp.cos(arg))
             g_phi = (zero - m_eff) * prm2 * prm0 * jnp.sin(arg)
@@ -4316,18 +4408,18 @@ def _pallas_bonded_all_fused_single(
             fk = _scale3(neg_g_phi, dphi_drk)
             fl = _scale3(neg_g_phi, dphi_drl)
             for s_atom, f_atom in ((si, fi), (sj, fj), (sk, fk), (sl, fl)):
-                _pl_atomic_add_1d(fx_out_ref, s_atom, f_atom[0], valid, interpret)
-                _pl_atomic_add_1d(fy_out_ref, s_atom, f_atom[1], valid, interpret)
-                _pl_atomic_add_1d(fz_out_ref, s_atom, f_atom[2], valid, interpret)
+                _pl_atomic_add_1d(fx_out_ref, f_base + s_atom, f_atom[0], valid, interpret)
+                _pl_atomic_add_1d(fy_out_ref, f_base + s_atom, f_atom[1], valid, interpret)
+                _pl_atomic_add_1d(fz_out_ref, f_base + s_atom, f_atom[2], valid, interpret)
             return jnp.sum(e_d)
 
         def _do_impropers_harmonic(p_val):
             offs = (p_val - o_h0) * _BLOCK_B + jnp.arange(_BLOCK_B, dtype=jnp.int32)
-            ai = _pl_load(h_i_ref, (offs,))
-            aj = _pl_load(h_j_ref, (offs,))
-            ak = _pl_load(h_k_ref, (offs,))
-            al = _pl_load(h_l_ref, (offs,))
-            mv = _pl_load(h_msk_ref, (offs,))
+            ai = _pl_load(h_i_ref, (b_id * s_hi + offs,))
+            aj = _pl_load(h_j_ref, (b_id * s_hi + offs,))
+            ak = _pl_load(h_k_ref, (b_id * s_hi + offs,))
+            al = _pl_load(h_l_ref, (b_id * s_hi + offs,))
+            mv = _pl_load(h_msk_ref, (b_id * s_hm + offs,))
             valid = (
                 (offs < H_real)
                 & (mv > zero)
@@ -4345,15 +4437,15 @@ def _pallas_bonded_all_fused_single(
             sj = jnp.where(valid, jnp.clip(aj, 0, max_atom), 0)
             sk = jnp.where(valid, jnp.clip(ak, 0, max_atom), 0)
             sl = jnp.where(valid, jnp.clip(al, 0, max_atom), 0)
-            ri = (_pl_load(px_ref, (si,)), _pl_load(py_ref, (si,)), _pl_load(pz_ref, (si,)))
-            rj = (_pl_load(px_ref, (sj,)), _pl_load(py_ref, (sj,)), _pl_load(pz_ref, (sj,)))
-            rk = (_pl_load(px_ref, (sk,)), _pl_load(py_ref, (sk,)), _pl_load(pz_ref, (sk,)))
-            rl = (_pl_load(px_ref, (sl,)), _pl_load(py_ref, (sl,)), _pl_load(pz_ref, (sl,)))
+            ri = (_pl_load(px_ref, (pos_base + si,)), _pl_load(py_ref, (pos_base + si,)), _pl_load(pz_ref, (pos_base + si,)))
+            rj = (_pl_load(px_ref, (pos_base + sj,)), _pl_load(py_ref, (pos_base + sj,)), _pl_load(pz_ref, (pos_base + sj,)))
+            rk = (_pl_load(px_ref, (pos_base + sk,)), _pl_load(py_ref, (pos_base + sk,)), _pl_load(pz_ref, (pos_base + sk,)))
+            rl = (_pl_load(px_ref, (pos_base + sl,)), _pl_load(py_ref, (pos_base + sl,)), _pl_load(pz_ref, (pos_base + sl,)))
             phi, dphi_dri, dphi_drj, dphi_drk, dphi_drl = _torsion_angle_and_atom_grads_vec3(
-                ri, rj, rk, rl, valid, _load_box6(box_ref), has_box, b0_is_ji
+                ri, rj, rk, rl, valid, _load_box_b(), has_box, b0_is_ji
             )
-            k_h = _pl_load(h_kval_ref, (offs,))
-            phi0_h = _pl_load(h_phi0_ref, (offs,))
+            k_h = _pl_load(h_kval_ref, (b_id * s_hp + offs,))
+            phi0_h = _pl_load(h_phi0_ref, (b_id * s_hp + offs,))
             diff_raw = phi - phi0_h + pi
             dphi = diff_raw - two_pi * jnp.floor(diff_raw / two_pi) - pi
             e_h = m_eff * k_h * dphi * dphi
@@ -4364,30 +4456,30 @@ def _pallas_bonded_all_fused_single(
             fk = _scale3(neg_g_phi, dphi_drk)
             fl = _scale3(neg_g_phi, dphi_drl)
             for s_atom, f_atom in ((si, fi), (sj, fj), (sk, fk), (sl, fl)):
-                _pl_atomic_add_1d(fx_out_ref, s_atom, f_atom[0], valid, interpret)
-                _pl_atomic_add_1d(fy_out_ref, s_atom, f_atom[1], valid, interpret)
-                _pl_atomic_add_1d(fz_out_ref, s_atom, f_atom[2], valid, interpret)
+                _pl_atomic_add_1d(fx_out_ref, f_base + s_atom, f_atom[0], valid, interpret)
+                _pl_atomic_add_1d(fy_out_ref, f_base + s_atom, f_atom[1], valid, interpret)
+                _pl_atomic_add_1d(fz_out_ref, f_base + s_atom, f_atom[2], valid, interpret)
             return jnp.sum(e_h)
 
         def _do_exceptions_14(p_val):
             offs = (p_val - o_e0) * _BLOCK_B + jnp.arange(_BLOCK_B, dtype=jnp.int32)
             coul = jnp.asarray(coulomb_constant, dtype=dtype)
-            ai = _pl_load(e_i_ref, (offs,))
-            aj = _pl_load(e_j_ref, (offs,))
-            mv = _pl_load(e_msk_ref, (offs,))
+            ai = _pl_load(e_i_ref, (b_id * s_ep + offs,))
+            aj = _pl_load(e_j_ref, (b_id * s_ep + offs,))
+            mv = _pl_load(e_msk_ref, (b_id * s_em + offs,))
             valid = (offs < E_real) & (mv > zero) & (ai >= 0) & (ai < N) & (aj >= 0) & (aj < N) & (ai != aj)
             m_eff = jnp.where(valid, mv, zero)
             si = jnp.where(valid, jnp.clip(ai, 0, max_atom), 0)
             sj = jnp.where(valid, jnp.clip(aj, 0, max_atom), 0)
-            ri = (_pl_load(px_ref, (si,)), _pl_load(py_ref, (si,)), _pl_load(pz_ref, (si,)))
-            rj = (_pl_load(px_ref, (sj,)), _pl_load(py_ref, (sj,)), _pl_load(pz_ref, (sj,)))
-            lam_v = _pl_load(lam_ref, (jnp.zeros((1,), dtype=jnp.int32),))[0]
-            d_vec = _min_image3(_sub3(ri, rj), _load_box6(box_ref), has_box)
+            ri = (_pl_load(px_ref, (pos_base + si,)), _pl_load(py_ref, (pos_base + si,)), _pl_load(pz_ref, (pos_base + si,)))
+            rj = (_pl_load(px_ref, (pos_base + sj,)), _pl_load(py_ref, (pos_base + sj,)), _pl_load(pz_ref, (pos_base + sj,)))
+            lam_v = _pl_load(lam_ref, (b_id * s_lam + jnp.zeros((1,), dtype=jnp.int32),))[0]
+            d_vec = _min_image3(_sub3(ri, rj), _load_box_b(), has_box)
             r_sq = _dot3(d_vec, d_vec) + jnp.asarray(1e-12, dtype=dtype)
             dist = jnp.sqrt(r_sq)
-            sig_e = _pl_load(e_sig_ref, (offs,))
-            eps_e = _pl_load(e_eps_ref, (offs,))
-            qp_e = _pl_load(e_qp_ref, (offs,))
+            sig_e = _pl_load(e_sig_ref, (b_id * s_es + offs,))
+            eps_e = _pl_load(e_eps_ref, (b_id * s_ee + offs,))
+            qp_e = _pl_load(e_qp_ref, (b_id * s_eq + offs,))
             sig_safe = jnp.where(valid, jnp.maximum(sig_e, jnp.asarray(1e-4, dtype=dtype)), one)
             one_minus_lam = jnp.maximum(one - lam_v, zero)
             soft_term = jnp.asarray(softcore_alpha, dtype=dtype) * (one_minus_lam ** int(softcore_exponent))
@@ -4405,24 +4497,24 @@ def _pallas_bonded_all_fused_single(
             f_coeff = jnp.where(valid, zero - de_dr_over_r, zero)
             fi = _scale3(f_coeff, d_vec)
             fj = _scale3(zero - one, fi)
-            _pl_atomic_add_1d(fx_out_ref, si, fi[0], valid, interpret)
-            _pl_atomic_add_1d(fy_out_ref, si, fi[1], valid, interpret)
-            _pl_atomic_add_1d(fz_out_ref, si, fi[2], valid, interpret)
-            _pl_atomic_add_1d(fx_out_ref, sj, fj[0], valid, interpret)
-            _pl_atomic_add_1d(fy_out_ref, sj, fj[1], valid, interpret)
-            _pl_atomic_add_1d(fz_out_ref, sj, fj[2], valid, interpret)
+            _pl_atomic_add_1d(fx_out_ref, f_base + si, fi[0], valid, interpret)
+            _pl_atomic_add_1d(fy_out_ref, f_base + si, fi[1], valid, interpret)
+            _pl_atomic_add_1d(fz_out_ref, f_base + si, fi[2], valid, interpret)
+            _pl_atomic_add_1d(fx_out_ref, f_base + sj, fj[0], valid, interpret)
+            _pl_atomic_add_1d(fy_out_ref, f_base + sj, fj[1], valid, interpret)
+            _pl_atomic_add_1d(fz_out_ref, f_base + sj, fj[2], valid, interpret)
             return jnp.sum(e_pair)
 
         def _do_cmap(p_val):
             offs = (p_val - o_c0) * _BLOCK_B + jnp.arange(_BLOCK_B, dtype=jnp.int32)
             delta = jnp.asarray(2.0 * jnp.pi / G_cmap, dtype=dtype)
             inv_delta = one / delta
-            i0 = _pl_load(c_0_ref, (offs,))
-            i1 = _pl_load(c_1_ref, (offs,))
-            i2 = _pl_load(c_2_ref, (offs,))
-            i3 = _pl_load(c_3_ref, (offs,))
-            i4 = _pl_load(c_4_ref, (offs,))
-            mv = _pl_load(c_msk_ref, (offs,))
+            i0 = _pl_load(c_0_ref, (b_id * s_ct + offs,))
+            i1 = _pl_load(c_1_ref, (b_id * s_ct + offs,))
+            i2 = _pl_load(c_2_ref, (b_id * s_ct + offs,))
+            i3 = _pl_load(c_3_ref, (b_id * s_ct + offs,))
+            i4 = _pl_load(c_4_ref, (b_id * s_ct + offs,))
+            mv = _pl_load(c_msk_ref, (b_id * s_cm + offs,))
             valid = (
                 (offs < C_real)
                 & (mv > zero)
@@ -4443,12 +4535,12 @@ def _pallas_bonded_all_fused_single(
             s2 = jnp.where(valid, jnp.clip(i2, 0, max_atom), 0)
             s3 = jnp.where(valid, jnp.clip(i3, 0, max_atom), 0)
             s4 = jnp.where(valid, jnp.clip(i4, 0, max_atom), 0)
-            r0 = (_pl_load(px_ref, (s0,)), _pl_load(py_ref, (s0,)), _pl_load(pz_ref, (s0,)))
-            r1 = (_pl_load(px_ref, (s1,)), _pl_load(py_ref, (s1,)), _pl_load(pz_ref, (s1,)))
-            r2 = (_pl_load(px_ref, (s2,)), _pl_load(py_ref, (s2,)), _pl_load(pz_ref, (s2,)))
-            r3 = (_pl_load(px_ref, (s3,)), _pl_load(py_ref, (s3,)), _pl_load(pz_ref, (s3,)))
-            r4 = (_pl_load(px_ref, (s4,)), _pl_load(py_ref, (s4,)), _pl_load(pz_ref, (s4,)))
-            box_xyz = _load_box6(box_ref)
+            r0 = (_pl_load(px_ref, (pos_base + s0,)), _pl_load(py_ref, (pos_base + s0,)), _pl_load(pz_ref, (pos_base + s0,)))
+            r1 = (_pl_load(px_ref, (pos_base + s1,)), _pl_load(py_ref, (pos_base + s1,)), _pl_load(pz_ref, (pos_base + s1,)))
+            r2 = (_pl_load(px_ref, (pos_base + s2,)), _pl_load(py_ref, (pos_base + s2,)), _pl_load(pz_ref, (pos_base + s2,)))
+            r3 = (_pl_load(px_ref, (pos_base + s3,)), _pl_load(py_ref, (pos_base + s3,)), _pl_load(pz_ref, (pos_base + s3,)))
+            r4 = (_pl_load(px_ref, (pos_base + s4,)), _pl_load(py_ref, (pos_base + s4,)), _pl_load(pz_ref, (pos_base + s4,)))
+            box_xyz = _load_box_b()
             phi, dphi_0, dphi_1, dphi_2, dphi_3 = _torsion_angle_and_atom_grads_vec3(
                 r0, r1, r2, r3, valid, box_xyz, has_box, False
             )
@@ -4468,9 +4560,9 @@ def _pallas_bonded_all_fused_single(
             g2 = g2_raw % G_cmap
             u = q1 - g1_raw.astype(dtype)
             v = q2 - g2_raw.astype(dtype)
-            m_raw = _pl_load(c_midx_ref, (offs,))
+            m_raw = _pl_load(c_midx_ref, (b_id * s_cmi + offs,))
             m_safe = jnp.where(valid, jnp.clip(m_raw, 0, max(N_maps - 1, 0)), 0)
-            base_idx = ((m_safe * G_cmap + g1) * G_cmap + g2) * 16
+            base_idx = (b_id * s_cc) + ((m_safe * G_cmap + g1) * G_cmap + g2) * 16
             e_poly, de_du, de_dv = _eval_cmap_horner_cell(
                 c_coeffs_flat_ref, base_idx, u, v, dtype
             )
@@ -4489,9 +4581,9 @@ def _pallas_bonded_all_fused_single(
             f3 = _add3(_scale3(neg_dphi, dphi_3), _scale3(neg_dpsi, dpsi_3))
             f4 = _scale3(neg_dpsi, dpsi_4)
             for s_atom, f_atom in ((s0, f0), (s1, f1), (s2, f2), (s3, f3), (s4, f4)):
-                _pl_atomic_add_1d(fx_out_ref, s_atom, f_atom[0], valid, interpret)
-                _pl_atomic_add_1d(fy_out_ref, s_atom, f_atom[1], valid, interpret)
-                _pl_atomic_add_1d(fz_out_ref, s_atom, f_atom[2], valid, interpret)
+                _pl_atomic_add_1d(fx_out_ref, f_base + s_atom, f_atom[0], valid, interpret)
+                _pl_atomic_add_1d(fy_out_ref, f_base + s_atom, f_atom[1], valid, interpret)
+                _pl_atomic_add_1d(fz_out_ref, f_base + s_atom, f_atom[2], valid, interpret)
             return jnp.sum(e_c)
 
         active_groups = []
@@ -4520,22 +4612,22 @@ def _pallas_bonded_all_fused_single(
             )
 
         e_sum = _dispatch_group(0, pid)
-        _pl_store(e_out_ref, (jnp.full((1,), pid, dtype=jnp.int32),), e_sum[None])
+        _pl_store(e_out_ref, (jnp.full((1,), b_id * total_blocks + pid, dtype=jnp.int32),), e_sum[None])
 
     in_specs = [pl.BlockSpec(memory_space=pl.ANY) for _ in range(48)]
     out_specs = [pl.BlockSpec(memory_space=pl.ANY) for _ in range(4)]
     out_shapes = [
-        jax.ShapeDtypeStruct((total_blocks,), dtype),
-        jax.ShapeDtypeStruct((N_pad,), dtype),
-        jax.ShapeDtypeStruct((N_pad,), dtype),
-        jax.ShapeDtypeStruct((N_pad,), dtype),
+        jax.ShapeDtypeStruct((B * total_blocks,), dtype),
+        jax.ShapeDtypeStruct((B * N_pad,), dtype),
+        jax.ShapeDtypeStruct((B * N_pad,), dtype),
+        jax.ShapeDtypeStruct((B * N_pad,), dtype),
     ]
     e_blk, fx_pad, fy_pad, fz_pad = pl.pallas_call(
         _bonded_all_fused_kernel,
         out_shape=out_shapes,
         in_specs=in_specs,
         out_specs=out_specs,
-        grid=(total_blocks,),
+        grid=(B, total_blocks),
         input_output_aliases={45: 1, 46: 2, 47: 3},
         interpret=interpret,
         compiler_params=plt.CompilerParams() if not interpret else None,
@@ -4590,8 +4682,87 @@ def _pallas_bonded_all_fused_single(
         zero_f,
         zero_f,
     )
-    forces = jnp.stack([fx_pad[:N], fy_pad[:N], fz_pad[:N]], axis=-1).astype(orig_dtype)
-    return jnp.sum(e_blk).astype(orig_dtype), forces
+    fx_b = fx_pad.reshape((B, N_pad))[:, :N]
+    fy_b = fy_pad.reshape((B, N_pad))[:, :N]
+    fz_b = fz_pad.reshape((B, N_pad))[:, :N]
+    forces = jnp.stack([fx_b, fy_b, fz_b], axis=-1).astype(orig_dtype)
+    energies = jnp.sum(e_blk.reshape((B, total_blocks)), axis=-1).astype(orig_dtype)
+    return energies, forces
+
+
+def _pallas_bonded_all_fused_single(
+    positions: jax.Array,
+    bond_indices: jax.Array,
+    bond_params: jax.Array,
+    bond_mask: jax.Array,
+    angle_indices: jax.Array,
+    angle_params: jax.Array,
+    angle_mask: jax.Array,
+    dih_indices: jax.Array,
+    dih_params: jax.Array,
+    dih_mask: jax.Array,
+    harm_imp_indices: jax.Array,
+    harm_imp_params: jax.Array,
+    harm_imp_mask: jax.Array,
+    exc14_pairs: jax.Array,
+    exc14_sigmas: jax.Array,
+    exc14_epsilons: jax.Array,
+    exc14_chargeprods: jax.Array,
+    exc14_mask: jax.Array,
+    cmap_torsions: jax.Array,
+    cmap_map_indices: jax.Array,
+    cmap_coeffs: jax.Array,
+    cmap_mask: jax.Array,
+    box: jax.Array,
+    lam: jax.Array,
+    has_box: bool,
+    dist_eps: float,
+    b0_is_ji: bool,
+    angle_regularization_mode: str,
+    coulomb_constant: float,
+    softcore_alpha: float,
+    softcore_exponent: int,
+    cmap_first_is_psi: bool,
+    interpret: bool,
+) -> tuple[jax.Array, jax.Array]:
+    e_b, f_b = _pallas_bonded_all_fused_batch(
+        1,
+        (False,) * 24,
+        positions,
+        bond_indices,
+        bond_params,
+        bond_mask,
+        angle_indices,
+        angle_params,
+        angle_mask,
+        dih_indices,
+        dih_params,
+        dih_mask,
+        harm_imp_indices,
+        harm_imp_params,
+        harm_imp_mask,
+        exc14_pairs,
+        exc14_sigmas,
+        exc14_epsilons,
+        exc14_chargeprods,
+        exc14_mask,
+        cmap_torsions,
+        cmap_map_indices,
+        cmap_coeffs,
+        cmap_mask,
+        box,
+        lam,
+        has_box,
+        dist_eps,
+        b0_is_ji,
+        angle_regularization_mode,
+        coulomb_constant,
+        softcore_alpha,
+        softcore_exponent,
+        cmap_first_is_psi,
+        interpret,
+    )
+    return e_b[0], f_b[0]
 
 
 def _bonded_all_fused_param_grads(
@@ -4740,11 +4911,20 @@ def _pallas_bonded_all_fused_vmappable(
 
     @_vmappable.def_vmap
     def _vmap_rule(axis_size, in_batched, *args):
-        def _step(b_idx):
-            step_args = [a[b_idx] if ib else a for a, ib in zip(args, in_batched)]
-            return _vmappable(*step_args)
-
-        e_batch, f_batch = jax.lax.map(_step, jnp.arange(axis_size))
+        e_batch, f_batch = _pallas_bonded_all_fused_batch(
+            int(axis_size),
+            tuple(bool(ib) for ib in in_batched),
+            *args,
+            hb,
+            de,
+            b0_ji,
+            arm,
+            cc,
+            sa,
+            se,
+            fpsi,
+            interp,
+        )
         return (e_batch, f_batch), (True, True)
 
     all_args = (
@@ -4774,13 +4954,23 @@ def _pallas_bonded_all_fused_vmappable(
         lam,
     )
     if positions.ndim == 3:
-        B = positions.shape[0]
+        B = int(positions.shape[0])
         base_ndims = (2, 2, 2, 1, 2, 2, 1, 2, 2, 1, 2, 2, 1, 2, 1, 1, 1, 1, 2, 1, 4, 1, 1, 0)
-        return jax.vmap(
-            lambda b: _vmappable(
-                *[a[b] if a.ndim > bn else a for a, bn in zip(all_args, base_ndims)]
-            )
-        )(jnp.arange(B))
+        in_b = tuple(bool(a.ndim > bn) for a, bn in zip(all_args, base_ndims))
+        return _pallas_bonded_all_fused_batch(
+            B,
+            in_b,
+            *all_args,
+            hb,
+            de,
+            b0_ji,
+            arm,
+            cc,
+            sa,
+            se,
+            fpsi,
+            interp,
+        )
     return _vmappable(*all_args)
 
 

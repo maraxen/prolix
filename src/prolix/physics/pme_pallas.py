@@ -64,7 +64,9 @@ def _select_stencil(
     )
 
 
-def _spread_charges_pallas_single(
+def _spread_charges_pallas_batch(
+    B: int,
+    in_batched: tuple[bool, bool, bool, bool],
     positions: jax.Array,
     charges: jax.Array,
     atom_mask: jax.Array,
@@ -72,8 +74,10 @@ def _spread_charges_pallas_single(
     grid_dims: tuple[int, int, int],
     interpret: bool,
 ) -> jax.Array:
+    b_pos, b_q, b_m, b_box = in_batched
     Kx, Ky, Kz = (int(grid_dims[0]), int(grid_dims[1]), int(grid_dims[2]))
-    n_atoms = int(positions.shape[0])
+    mesh_stride = Kx * Ky * Kz
+    n_atoms = int(positions.shape[1] if b_pos else positions.shape[0])
     n_blocks = max(1, (n_atoms + BLOCK_N - 1) // BLOCK_N)
     n_pad = n_blocks * BLOCK_N
     pad = n_pad - n_atoms
@@ -83,29 +87,51 @@ def _spread_charges_pallas_single(
     pos_in = positions.astype(dtype)
     q_in = charges.astype(dtype)
     mask_in = jnp.asarray(atom_mask, dtype=jnp.int32)
-    if pad > 0:
-        pos_in = jnp.pad(pos_in, ((0, pad), (0, 0)), constant_values=0.0)
-        q_in = jnp.pad(q_in, (0, pad), constant_values=0.0)
-        mask_in = jnp.pad(mask_in, (0, pad), constant_values=0)
+    box_in = jnp.asarray(box_size, dtype=dtype)
 
-    pos_x = jnp.asarray(pos_in[:, 0], dtype=dtype)
-    pos_y = jnp.asarray(pos_in[:, 1], dtype=dtype)
-    pos_z = jnp.asarray(pos_in[:, 2], dtype=dtype)
-    box = jnp.asarray(box_size, dtype=dtype)
-    mesh0_flat = jnp.zeros((Kx * Ky * Kz,), dtype=dtype)
+    if not b_pos:
+        pos_in = pos_in[None, ...]
+    if not b_q:
+        q_in = q_in[None, ...]
+    if not b_m:
+        mask_in = mask_in[None, ...]
+    if not b_box:
+        box_in = box_in[None, ...]
+
+    if pad > 0:
+        pos_in = jnp.pad(pos_in, ((0, 0), (0, pad), (0, 0)), constant_values=0.0)
+        q_in = jnp.pad(q_in, ((0, 0), (0, pad)), constant_values=0.0)
+        mask_in = jnp.pad(mask_in, ((0, 0), (0, pad)), constant_values=0)
+
+    pos_x = jnp.asarray(pos_in[:, :, 0], dtype=dtype).reshape(-1)
+    pos_y = jnp.asarray(pos_in[:, :, 1], dtype=dtype).reshape(-1)
+    pos_z = jnp.asarray(pos_in[:, :, 2], dtype=dtype).reshape(-1)
+    q_flat = q_in.reshape(-1)
+    mask_flat = mask_in.reshape(-1)
+    box_flat = box_in.reshape(-1)
+    mesh0_flat = jnp.zeros((B * mesh_stride,), dtype=dtype)
 
     def _spread_kernel(px_ref, py_ref, pz_ref, charges_ref, mask_ref, box_ref, mesh_in_ref, mesh_out_ref):
         del mesh_in_ref
-        offs = pl.program_id(0) * BLOCK_N + jnp.arange(BLOCK_N, dtype=jnp.int32)
-        px = _pl_load(px_ref, (offs,))
-        py = _pl_load(py_ref, (offs,))
-        pz = _pl_load(pz_ref, (offs,))
-        qi = _pl_load(charges_ref, (offs,))
-        is_real = (_pl_load(mask_ref, (offs,)) > 0) & (offs < n_atoms)
+        b_id = pl.program_id(0)
+        pid = pl.program_id(1)
+        offs = pid * BLOCK_N + jnp.arange(BLOCK_N, dtype=jnp.int32)
 
-        bx = _pl_load(box_ref, (jnp.zeros((1,), dtype=jnp.int32),))[0]
-        by = _pl_load(box_ref, (jnp.ones((1,), dtype=jnp.int32),))[0]
-        bz = _pl_load(box_ref, (jnp.full((1,), 2, dtype=jnp.int32),))[0]
+        pos_base = (b_id if b_pos else 0) * n_pad
+        q_base = (b_id if b_q else 0) * n_pad
+        m_base = (b_id if b_m else 0) * n_pad
+        box_base = (b_id if b_box else 0) * 3
+        mesh_base = b_id * mesh_stride
+
+        px = _pl_load(px_ref, (pos_base + offs,))
+        py = _pl_load(py_ref, (pos_base + offs,))
+        pz = _pl_load(pz_ref, (pos_base + offs,))
+        qi = _pl_load(charges_ref, (q_base + offs,))
+        is_real = (_pl_load(mask_ref, (m_base + offs,)) > 0) & (offs < n_atoms)
+
+        bx = _pl_load(box_ref, (box_base + jnp.zeros((1,), dtype=jnp.int32),))[0]
+        by = _pl_load(box_ref, (box_base + jnp.ones((1,), dtype=jnp.int32),))[0]
+        bz = _pl_load(box_ref, (box_base + jnp.full((1,), 2, dtype=jnp.int32),))[0]
         kx = jnp.asarray(Kx, dtype=dtype)
         ky = jnp.asarray(Ky, dtype=dtype)
         kz = jnp.asarray(Kz, dtype=dtype)
@@ -136,7 +162,7 @@ def _spread_charges_pallas_single(
         ix = jnp.mod(gxi[:, None] + ox - 1, Kx)
         iy = jnp.mod(gyi[:, None] + oy - 1, Ky)
         iz = jnp.mod(gzi[:, None] + oz - 1, Kz)
-        flat_idx = (ix * Ky + iy) * Kz + iz
+        flat_idx = mesh_base + (ix * Ky + iy) * Kz + iz
 
         wx_s = _select_stencil(wx, ox)
         wy_s = _select_stencil(wy, oy)
@@ -159,16 +185,37 @@ def _spread_charges_pallas_single(
     any_spec = pl.BlockSpec(memory_space=pl.ANY)
     mesh_flat = pl.pallas_call(
         _spread_kernel,
-        out_shape=jax.ShapeDtypeStruct((Kx * Ky * Kz,), dtype),
+        out_shape=jax.ShapeDtypeStruct((B * mesh_stride,), dtype),
         in_specs=[any_spec] * 7,
         out_specs=any_spec,
-        grid=(n_blocks,),
+        grid=(B, n_blocks),
         interpret=interpret,
         compiler_params=plt.CompilerParams() if not interpret else None,
         input_output_aliases={6: 0},
         name="pme_charge_spread",
-    )(pos_x, pos_y, pos_z, q_in, mask_in, box, mesh0_flat)
-    return mesh_flat.reshape((Kx, Ky, Kz)).astype(orig_dtype)
+    )(pos_x, pos_y, pos_z, q_flat, mask_flat, box_flat, mesh0_flat)
+    return mesh_flat.reshape((B, Kx, Ky, Kz)).astype(orig_dtype)
+
+
+def _spread_charges_pallas_single(
+    positions: jax.Array,
+    charges: jax.Array,
+    atom_mask: jax.Array,
+    box_size: jax.Array,
+    grid_dims: tuple[int, int, int],
+    interpret: bool,
+) -> jax.Array:
+    out = _spread_charges_pallas_batch(
+        1,
+        (False, False, False, False),
+        positions,
+        charges,
+        atom_mask,
+        box_size,
+        grid_dims,
+        interpret,
+    )
+    return out[0]
 
 
 def spread_charges_pallas(
@@ -209,16 +256,16 @@ def spread_charges_pallas(
 
     @_vmappable.def_vmap
     def _vmap_rule(axis_size, in_batched, pos, q, mask, box):
-        pos_b, q_b, mask_b, box_b = in_batched
-
-        def _body(idx):
-            p_i = pos[idx] if pos_b else pos
-            q_i = q[idx] if q_b else q
-            m_i = mask[idx] if mask_b else mask
-            b_i = box[idx] if box_b else box
-            return _vmappable(p_i, q_i, m_i, b_i)
-
-        out = jax.lax.map(_body, jnp.arange(axis_size))
+        out = _spread_charges_pallas_batch(
+            int(axis_size),
+            tuple(bool(b) for b in in_batched),
+            pos,
+            q,
+            mask,
+            box,
+            grid_tuple,
+            interpret,
+        )
         return out, True
 
     if positions.ndim == 3:
@@ -226,19 +273,23 @@ def spread_charges_pallas(
         b_q = charges.ndim == 2
         b_m = atom_mask.ndim == 2
         b_box = jnp.asarray(box_size).ndim >= 2
-        return jax.vmap(
-            lambda b: _vmappable(
-                positions[b],
-                charges[b] if b_q else charges,
-                atom_mask[b] if b_m else atom_mask,
-                box_size[b] if b_box else box_size,
-            )
-        )(jnp.arange(B))
+        return _spread_charges_pallas_batch(
+            int(B),
+            (True, b_q, b_m, b_box),
+            positions,
+            charges,
+            atom_mask,
+            box_size,
+            grid_tuple,
+            interpret,
+        )
 
     return _vmappable(positions, charges, atom_mask, box_size)
 
 
-def _gather_pallas_single(
+def _gather_pallas_batch(
+    B: int,
+    in_batched: tuple[bool, bool, bool, bool, bool],
     positions: jax.Array,
     charges: jax.Array,
     atom_mask: jax.Array,
@@ -247,8 +298,10 @@ def _gather_pallas_single(
     grid_dims: tuple[int, int, int],
     interpret: bool,
 ) -> tuple[jax.Array, jax.Array]:
+    b_pos, b_q, b_m, b_box, b_mesh = in_batched
     Kx, Ky, Kz = (int(grid_dims[0]), int(grid_dims[1]), int(grid_dims[2]))
-    n_atoms = int(positions.shape[0])
+    mesh_stride = Kx * Ky * Kz
+    n_atoms = int(positions.shape[1] if b_pos else positions.shape[0])
     n_blocks = max(1, (n_atoms + BLOCK_N - 1) // BLOCK_N)
     n_pad = n_blocks * BLOCK_N
     pad = n_pad - n_atoms
@@ -258,16 +311,32 @@ def _gather_pallas_single(
     pos_in = positions.astype(dtype)
     q_in = charges.astype(dtype)
     mask_in = jnp.asarray(atom_mask, dtype=jnp.int32)
-    if pad > 0:
-        pos_in = jnp.pad(pos_in, ((0, pad), (0, 0)), constant_values=0.0)
-        q_in = jnp.pad(q_in, (0, pad), constant_values=0.0)
-        mask_in = jnp.pad(mask_in, (0, pad), constant_values=0)
+    box_in = jnp.asarray(box_size, dtype=dtype)
+    theta_in = jnp.asarray(theta_norm, dtype=dtype)
 
-    pos_x = jnp.asarray(pos_in[:, 0], dtype=dtype)
-    pos_y = jnp.asarray(pos_in[:, 1], dtype=dtype)
-    pos_z = jnp.asarray(pos_in[:, 2], dtype=dtype)
-    box = jnp.asarray(box_size, dtype=dtype)
-    theta_flat = jnp.asarray(theta_norm, dtype=dtype).reshape(-1)
+    if not b_pos:
+        pos_in = pos_in[None, ...]
+    if not b_q:
+        q_in = q_in[None, ...]
+    if not b_m:
+        mask_in = mask_in[None, ...]
+    if not b_box:
+        box_in = box_in[None, ...]
+    if not b_mesh:
+        theta_in = theta_in[None, ...]
+
+    if pad > 0:
+        pos_in = jnp.pad(pos_in, ((0, 0), (0, pad), (0, 0)), constant_values=0.0)
+        q_in = jnp.pad(q_in, ((0, 0), (0, pad)), constant_values=0.0)
+        mask_in = jnp.pad(mask_in, ((0, 0), (0, pad)), constant_values=0)
+
+    pos_x = jnp.asarray(pos_in[:, :, 0], dtype=dtype).reshape(-1)
+    pos_y = jnp.asarray(pos_in[:, :, 1], dtype=dtype).reshape(-1)
+    pos_z = jnp.asarray(pos_in[:, :, 2], dtype=dtype).reshape(-1)
+    q_flat = q_in.reshape(-1)
+    mask_flat = mask_in.reshape(-1)
+    box_flat = box_in.reshape(-1)
+    theta_flat = theta_in.reshape(-1)
 
     def _gather_kernel(
         px_ref,
@@ -282,16 +351,26 @@ def _gather_pallas_single(
         fz_out_ref,
         dq_out_ref,
     ):
-        offs = pl.program_id(0) * BLOCK_N + jnp.arange(BLOCK_N, dtype=jnp.int32)
-        px = _pl_load(px_ref, (offs,))
-        py = _pl_load(py_ref, (offs,))
-        pz = _pl_load(pz_ref, (offs,))
-        qi = _pl_load(charges_ref, (offs,))
-        is_real = (_pl_load(mask_ref, (offs,)) > 0) & (offs < n_atoms)
+        b_id = pl.program_id(0)
+        pid = pl.program_id(1)
+        offs = pid * BLOCK_N + jnp.arange(BLOCK_N, dtype=jnp.int32)
 
-        bx = _pl_load(box_ref, (jnp.zeros((1,), dtype=jnp.int32),))[0]
-        by = _pl_load(box_ref, (jnp.ones((1,), dtype=jnp.int32),))[0]
-        bz = _pl_load(box_ref, (jnp.full((1,), 2, dtype=jnp.int32),))[0]
+        pos_base = (b_id if b_pos else 0) * n_pad
+        q_base = (b_id if b_q else 0) * n_pad
+        m_base = (b_id if b_m else 0) * n_pad
+        box_base = (b_id if b_box else 0) * 3
+        mesh_base = (b_id if b_mesh else 0) * mesh_stride
+        out_base = b_id * n_pad
+
+        px = _pl_load(px_ref, (pos_base + offs,))
+        py = _pl_load(py_ref, (pos_base + offs,))
+        pz = _pl_load(pz_ref, (pos_base + offs,))
+        qi = _pl_load(charges_ref, (q_base + offs,))
+        is_real = (_pl_load(mask_ref, (m_base + offs,)) > 0) & (offs < n_atoms)
+
+        bx = _pl_load(box_ref, (box_base + jnp.zeros((1,), dtype=jnp.int32),))[0]
+        by = _pl_load(box_ref, (box_base + jnp.ones((1,), dtype=jnp.int32),))[0]
+        bz = _pl_load(box_ref, (box_base + jnp.full((1,), 2, dtype=jnp.int32),))[0]
         kx = jnp.asarray(Kx, dtype=dtype)
         ky = jnp.asarray(Ky, dtype=dtype)
         kz = jnp.asarray(Kz, dtype=dtype)
@@ -325,7 +404,7 @@ def _gather_pallas_single(
         ix = jnp.mod(gxi[:, None] + ox - 1, Kx)
         iy = jnp.mod(gyi[:, None] + oy - 1, Ky)
         iz = jnp.mod(gzi[:, None] + oz - 1, Kz)
-        flat_idx = (ix * Ky + iy) * Kz + iz
+        flat_idx = mesh_base + (ix * Ky + iy) * Kz + iz
 
         wx_s = _select_stencil(wx, ox)
         wy_s = _select_stencil(wy, oy)
@@ -364,29 +443,56 @@ def _gather_pallas_single(
             zero,
         ).astype(dtype)
 
-        _pl_store(fx_out_ref, (offs,), dpx)
-        _pl_store(fy_out_ref, (offs,), dpy)
-        _pl_store(fz_out_ref, (offs,), dpz)
-        _pl_store(dq_out_ref, (offs,), dq)
+        _pl_store(fx_out_ref, (out_base + offs,), dpx)
+        _pl_store(fy_out_ref, (out_base + offs,), dpy)
+        _pl_store(fz_out_ref, (out_base + offs,), dpz)
+        _pl_store(dq_out_ref, (out_base + offs,), dq)
 
     any_spec = pl.BlockSpec(memory_space=pl.ANY)
     fx_pad, fy_pad, fz_pad, dq_pad = pl.pallas_call(
         _gather_kernel,
         out_shape=[
-            jax.ShapeDtypeStruct((n_pad,), dtype),
-            jax.ShapeDtypeStruct((n_pad,), dtype),
-            jax.ShapeDtypeStruct((n_pad,), dtype),
-            jax.ShapeDtypeStruct((n_pad,), dtype),
+            jax.ShapeDtypeStruct((B * n_pad,), dtype),
+            jax.ShapeDtypeStruct((B * n_pad,), dtype),
+            jax.ShapeDtypeStruct((B * n_pad,), dtype),
+            jax.ShapeDtypeStruct((B * n_pad,), dtype),
         ],
         in_specs=[any_spec] * 7,
         out_specs=[any_spec] * 4,
-        grid=(n_blocks,),
+        grid=(B, n_blocks),
         interpret=interpret,
         compiler_params=plt.CompilerParams() if not interpret else None,
         name="pme_bwd_gather",
-    )(pos_x, pos_y, pos_z, q_in, mask_in, box, theta_flat)
-    dpos = jnp.stack([fx_pad[:n_atoms], fy_pad[:n_atoms], fz_pad[:n_atoms]], axis=-1)
-    return dpos.astype(orig_dtype), dq_pad[:n_atoms].astype(orig_dtype)
+    )(pos_x, pos_y, pos_z, q_flat, mask_flat, box_flat, theta_flat)
+    fx_b = fx_pad.reshape((B, n_pad))[:, :n_atoms]
+    fy_b = fy_pad.reshape((B, n_pad))[:, :n_atoms]
+    fz_b = fz_pad.reshape((B, n_pad))[:, :n_atoms]
+    dq_b = dq_pad.reshape((B, n_pad))[:, :n_atoms]
+    dpos = jnp.stack([fx_b, fy_b, fz_b], axis=-1)
+    return dpos.astype(orig_dtype), dq_b.astype(orig_dtype)
+
+
+def _gather_pallas_single(
+    positions: jax.Array,
+    charges: jax.Array,
+    atom_mask: jax.Array,
+    box_size: jax.Array,
+    theta_norm: jax.Array,
+    grid_dims: tuple[int, int, int],
+    interpret: bool,
+) -> tuple[jax.Array, jax.Array]:
+    dpos_b, dq_b = _gather_pallas_batch(
+        1,
+        (False, False, False, False, False),
+        positions,
+        charges,
+        atom_mask,
+        box_size,
+        theta_norm,
+        grid_dims,
+        interpret,
+    )
+    return dpos_b[0], dq_b[0]
 
 
 def gather_pallas(
@@ -434,34 +540,36 @@ def gather_pallas(
 
     @_vmappable.def_vmap
     def _vmap_rule(axis_size, in_batched, pos, q, mask, box, dE_dmesh):
-        pos_b, q_b, mask_b, box_b, mesh_b = in_batched
-
-        def _body(idx):
-            p_i = pos[idx] if pos_b else pos
-            q_i = q[idx] if q_b else q
-            m_i = mask[idx] if mask_b else mask
-            b_i = box[idx] if box_b else box
-            t_i = dE_dmesh[idx] if mesh_b else dE_dmesh
-            return _vmappable(p_i, q_i, m_i, b_i, t_i)
-
-        dpos_out, dq_out = jax.lax.map(_body, jnp.arange(axis_size))
+        dpos_out, dq_out = _gather_pallas_batch(
+            int(axis_size),
+            tuple(bool(b) for b in in_batched),
+            pos,
+            q,
+            mask,
+            box,
+            dE_dmesh,
+            grid_tuple,
+            interpret,
+        )
         return (dpos_out, dq_out), (True, True)
 
     if positions.ndim == 3:
-        B = positions.shape[0]
+        B = int(positions.shape[0])
         b_q = charges.ndim == 2
         b_m = atom_mask.ndim == 2
         b_box = jnp.asarray(box_size).ndim >= 2
         b_mesh = theta_norm.ndim == 4
-        dpos_s, dq_s = jax.vmap(
-            lambda b: _vmappable(
-                positions[b],
-                charges[b] if b_q else charges,
-                atom_mask[b] if b_m else atom_mask,
-                box_size[b] if b_box else box_size,
-                theta_norm[b] if b_mesh else theta_norm,
-            )
-        )(jnp.arange(B))
+        dpos_s, dq_s = _gather_pallas_batch(
+            B,
+            (True, b_q, b_m, b_box, b_mesh),
+            positions,
+            charges,
+            atom_mask,
+            box_size,
+            theta_norm,
+            grid_tuple,
+            interpret,
+        )
         if inv_p is not None:
             return dpos_s[:, inv_p, :], dq_s[:, inv_p]
         return dpos_s, dq_s

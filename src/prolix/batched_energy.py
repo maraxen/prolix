@@ -568,12 +568,12 @@ def _pme_reciprocal_and_corrections(
         sys.charges, sys.atom_mask, sys.pme_alpha, sys.box_size
     )
 
-    if not implicit_solvent:
+    if not implicit_solvent and not direct_space_includes_exclusion_correction:
         safe_charges = jnp.where(sys.atom_mask, sys.charges, jnp.float32(0.0))
         # excl_pair_indices/excl_pair_scales_elec (pair-list, (E,2)/(E,)) --
         # NOT excl_indices/excl_scales_elec, which since debt 765 hold the
         # per-atom-row (N, max_excl) layout NL/flash kernels need.
-        if not direct_space_includes_exclusion_correction:
+        if True:
             pallas_enabled, interpret = resolve_pallas_mode(use_pallas=use_pallas)
             if (
                 sys.excl_pair_indices is not None
@@ -831,15 +831,6 @@ def single_padded_energy(
 
     if neighbor is not None:
         nb_raw = getattr(neighbor, "idx", neighbor)
-        nb_clean = jnp.where(nb_raw == -1, N, nb_raw & ((1 << 29) - 1))
-        valid_nb = (
-            (nb_raw != -1)
-            & (nb_clean < N)
-            & sys.atom_mask[:, None]
-            & sys.atom_mask[jnp.minimum(nb_clean, N - 1)]
-        )
-        nb_idx = jnp.where(valid_nb, nb_raw, N)
-        nb_clean = jnp.where(valid_nb, nb_clean, N)
         if pallas_enabled and pallas_nonbonded_nl is not None:
             if elec_method in ("reaction_field", "rf", "dsf", "damped_shifted_force"):
                 e_lj = pallas_nonbonded_nl(
@@ -848,7 +839,7 @@ def single_padded_energy(
                     sys.sigmas,
                     sys.epsilons,
                     sys.atom_mask,
-                    nb_idx,
+                    nb_raw,
                     sys.excl_indices,
                     sys.excl_scales_vdw,
                     sys.excl_scales_elec,
@@ -890,7 +881,7 @@ def single_padded_energy(
                     sys.sigmas,
                     sys.epsilons,
                     sys.atom_mask,
-                    nb_idx,
+                    nb_raw,
                     sys.excl_indices,
                     sys.excl_scales_vdw,
                     sys.excl_scales_elec,
@@ -907,6 +898,14 @@ def single_padded_energy(
                 )
                 e_elec = jnp.asarray(0.0, dtype=r.dtype)
         else:
+            nb_clean = jnp.where(nb_raw == -1, N, nb_raw & ((1 << 29) - 1))
+            valid_nb = (
+                (nb_raw != -1)
+                & (nb_clean < N)
+                & sys.atom_mask[:, None]
+                & sys.atom_mask[jnp.minimum(nb_clean, N - 1)]
+            )
+            nb_clean = jnp.where(valid_nb, nb_clean, N)
             e_lj = chunked_lj_energy_nl(
                 r, sys.sigmas, sys.epsilons, sys.excl_indices, sys.excl_scales_vdw,
                 nb_clean, displacement_fn, float(sys.nonbonded_cutoff), 128,
