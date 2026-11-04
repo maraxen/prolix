@@ -241,10 +241,10 @@ def dispatch_n_steps_inference(
     """
     import jax
 
-    if n_steps < 1:
+    if not isinstance(n_steps, jax.core.Tracer) and int(n_steps) < 1:
         raise ValueError(f"n_steps must be >= 1, got {n_steps}")
 
-    n_limit = jnp.asarray(int(n_steps), dtype=jnp.int32)
+    n_limit = jnp.asarray(n_steps, dtype=jnp.int32)
 
     def _while(init: Any, limit: jax.Array) -> Any:
         def cond(carry: tuple[Any, Any]) -> Any:

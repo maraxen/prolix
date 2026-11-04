@@ -28,7 +28,7 @@ from jax_md import space
 from xtrax.intent import Context
 from xtrax.kernel_seam import VjpKernel
 
-from prolix.export import in_export_context
+from prolix.export import in_export_context, resolve_pallas_compiler_params
 from prolix.physics.cmap import compute_cmap_energies, precompute_cmap_coefficients
 from prolix.physics.pbc import create_periodic_space
 
@@ -4165,7 +4165,9 @@ def _pallas_bonded_all_fused_batch(
     lam_vec = jnp.asarray(lam.astype(dtype).reshape(-1))
     s_lam = 1 if b_lm else 0
 
-    zero_f = jnp.zeros((B * N_pad,), dtype=dtype)
+    zero_fx = jnp.zeros((B * N_pad,), dtype=dtype)
+    zero_fy = jnp.zeros((B * N_pad,), dtype=dtype)
+    zero_fz = jnp.zeros((B * N_pad,), dtype=dtype)
 
     def _bonded_all_fused_kernel(
         px_ref,
@@ -4246,345 +4248,381 @@ def _pallas_bonded_all_fused_batch(
 
         def _do_bonds(p_val):
             offs = (p_val - o_b0) * _BLOCK_B + jnp.arange(_BLOCK_B, dtype=jnp.int32)
-            ai = _pl_load(b_i_ref, (b_id * s_bi + offs,))
-            aj = _pl_load(b_j_ref, (b_id * s_bi + offs,))
             mv = _pl_load(b_msk_ref, (b_id * s_bm + offs,))
-            valid = (offs < B_real) & (mv > zero) & (ai >= 0) & (ai < N) & (aj >= 0) & (aj < N)
-            m_eff = jnp.where(valid, mv, zero)
-            si = jnp.where(valid, jnp.clip(ai, 0, max_atom), 0)
-            sj = jnp.where(valid, jnp.clip(aj, 0, max_atom), 0)
-            ri = (_pl_load(px_ref, (pos_base + si,)), _pl_load(py_ref, (pos_base + si,)), _pl_load(pz_ref, (pos_base + si,)))
-            rj = (_pl_load(px_ref, (pos_base + sj,)), _pl_load(py_ref, (pos_base + sj,)), _pl_load(pz_ref, (pos_base + sj,)))
-            d_vec = _min_image3(_sub3(ri, rj), _load_box_b(), has_box)
-            d_sq = _dot3(d_vec, d_vec)
-            if dist_eps > 0.0:
-                dist = jnp.sqrt(d_sq + jnp.asarray(dist_eps, dtype=dtype))
-            else:
-                d_sq_s = jnp.where(d_sq > zero, d_sq, one)
-                dist = jnp.where(d_sq > zero, jnp.sqrt(d_sq_s), zero)
-            r0_b = _pl_load(b_r0_ref, (b_id * s_bp + offs,))
-            k_b = _pl_load(b_k_ref, (b_id * s_bp + offs,))
-            diff = dist - r0_b
-            e_b = half * m_eff * k_b * diff * diff
-            dist_denom = jnp.where(dist > zero, dist, one)
-            f_coeff = jnp.where(valid & (dist > zero), (zero - m_eff * k_b * diff) / dist_denom, zero)
-            fi = _scale3(f_coeff, d_vec)
-            fj = _scale3(zero - one, fi)
-            _pl_atomic_add_1d(fx_out_ref, f_base + si, fi[0], valid, interpret)
-            _pl_atomic_add_1d(fy_out_ref, f_base + si, fi[1], valid, interpret)
-            _pl_atomic_add_1d(fz_out_ref, f_base + si, fi[2], valid, interpret)
-            _pl_atomic_add_1d(fx_out_ref, f_base + sj, fj[0], valid, interpret)
-            _pl_atomic_add_1d(fy_out_ref, f_base + sj, fj[1], valid, interpret)
-            _pl_atomic_add_1d(fz_out_ref, f_base + sj, fj[2], valid, interpret)
-            return jnp.sum(e_b)
+            has_any = jnp.max(((offs < B_real) & (mv > zero)).astype(jnp.int32)) > 0
+            zero_e_val = (p_val - p_val).astype(dtype)
+
+            def _eval_bonds(_):
+                ai = _pl_load(b_i_ref, (b_id * s_bi + offs,))
+                aj = _pl_load(b_j_ref, (b_id * s_bi + offs,))
+                valid = (offs < B_real) & (mv > zero) & (ai >= 0) & (ai < N) & (aj >= 0) & (aj < N)
+                m_eff = jnp.where(valid, mv, zero)
+                si = jnp.where(valid, jnp.clip(ai, 0, max_atom), 0)
+                sj = jnp.where(valid, jnp.clip(aj, 0, max_atom), 0)
+                ri = (_pl_load(px_ref, (pos_base + si,)), _pl_load(py_ref, (pos_base + si,)), _pl_load(pz_ref, (pos_base + si,)))
+                rj = (_pl_load(px_ref, (pos_base + sj,)), _pl_load(py_ref, (pos_base + sj,)), _pl_load(pz_ref, (pos_base + sj,)))
+                d_vec = _min_image3(_sub3(ri, rj), _load_box_b(), has_box)
+                d_sq = _dot3(d_vec, d_vec)
+                if dist_eps > 0.0:
+                    dist = jnp.sqrt(d_sq + jnp.asarray(dist_eps, dtype=dtype))
+                else:
+                    d_sq_s = jnp.where(d_sq > zero, d_sq, one)
+                    dist = jnp.where(d_sq > zero, jnp.sqrt(d_sq_s), zero)
+                r0_b = _pl_load(b_r0_ref, (b_id * s_bp + offs,))
+                k_b = _pl_load(b_k_ref, (b_id * s_bp + offs,))
+                diff = dist - r0_b
+                e_b = half * m_eff * k_b * diff * diff
+                dist_denom = jnp.where(dist > zero, dist, one)
+                f_coeff = jnp.where(valid & (dist > zero), (zero - m_eff * k_b * diff) / dist_denom, zero)
+                fi = _scale3(f_coeff, d_vec)
+                fj = _scale3(zero - one, fi)
+                _pl_atomic_add_1d(fx_out_ref, f_base + si, fi[0], valid, interpret)
+                _pl_atomic_add_1d(fy_out_ref, f_base + si, fi[1], valid, interpret)
+                _pl_atomic_add_1d(fz_out_ref, f_base + si, fi[2], valid, interpret)
+                _pl_atomic_add_1d(fx_out_ref, f_base + sj, fj[0], valid, interpret)
+                _pl_atomic_add_1d(fy_out_ref, f_base + sj, fj[1], valid, interpret)
+                _pl_atomic_add_1d(fz_out_ref, f_base + sj, fj[2], valid, interpret)
+                return jnp.sum(e_b)
+
+            return jax.lax.cond(has_any, _eval_bonds, lambda z: z, zero_e_val)
 
         def _do_angles(p_val):
             offs = (p_val - o_a0) * _BLOCK_B + jnp.arange(_BLOCK_B, dtype=jnp.int32)
-            ai = _pl_load(a_i_ref, (b_id * s_ai + offs,))
-            aj = _pl_load(a_j_ref, (b_id * s_ai + offs,))
-            ak = _pl_load(a_k_ref, (b_id * s_ai + offs,))
             mv = _pl_load(a_msk_ref, (b_id * s_am + offs,))
-            valid = (
-                (offs < A_real)
-                & (mv > zero)
-                & (ai >= 0)
-                & (ai < N)
-                & (aj >= 0)
-                & (aj < N)
-                & (ak >= 0)
-                & (ak < N)
-            )
-            m_eff = jnp.where(valid, mv, zero)
-            si = jnp.where(valid, jnp.clip(ai, 0, max_atom), 0)
-            sj = jnp.where(valid, jnp.clip(aj, 0, max_atom), 0)
-            sk = jnp.where(valid, jnp.clip(ak, 0, max_atom), 0)
-            ri = (_pl_load(px_ref, (pos_base + si,)), _pl_load(py_ref, (pos_base + si,)), _pl_load(pz_ref, (pos_base + si,)))
-            rj = (_pl_load(px_ref, (pos_base + sj,)), _pl_load(py_ref, (pos_base + sj,)), _pl_load(pz_ref, (pos_base + sj,)))
-            rk = (_pl_load(px_ref, (pos_base + sk,)), _pl_load(py_ref, (pos_base + sk,)), _pl_load(pz_ref, (pos_base + sk,)))
-            box_xyz = _load_box_b()
-            v_ji = _min_image3(_sub3(ri, rj), box_xyz, has_box)
-            v_jk = _min_image3(_sub3(rk, rj), box_xyz, has_box)
-            d_sq_ji = _dot3(v_ji, v_ji)
-            d_sq_jk = _dot3(v_jk, v_jk)
-            if dist_eps > 0.0:
-                eps_val = jnp.asarray(dist_eps, dtype=dtype)
-                d_ji_sq_eff = d_sq_ji + eps_val
-                d_jk_sq_eff = d_sq_jk + eps_val
-                d_ji = jnp.sqrt(d_ji_sq_eff)
-                d_jk = jnp.sqrt(d_jk_sq_eff)
-            else:
-                d_ji_sq_eff = jnp.where(d_sq_ji > zero, d_sq_ji, one)
-                d_jk_sq_eff = jnp.where(d_sq_jk > zero, d_sq_jk, one)
-                d_ji = jnp.where(d_sq_ji > zero, jnp.sqrt(d_ji_sq_eff), zero)
-                d_jk = jnp.where(d_sq_jk > zero, jnp.sqrt(d_sq_jk_eff), zero)
-            dot_ik = _dot3(v_ji, v_jk)
-            cp = _cross3(v_ji, v_jk)
-            th0 = _pl_load(a_th0_ref, (b_id * s_ap + offs,))
-            k_a = _pl_load(a_kval_ref, (b_id * s_ap + offs,))
-            if angle_regularization_mode == "openmm_cross":
-                cp_sq = _dot3(cp, cp)
-                r_cp = jnp.sqrt(jnp.maximum(cp_sq, jnp.asarray(1e-24, dtype=dtype)))
-                theta = jnp.arctan2(r_cp, dot_ik)
-                dtheta = theta - th0
-                e_a = half * m_eff * k_a * dtheta * dtheta
-                neg_de_dth = jnp.where(
-                    valid & (cp_sq > jnp.asarray(1e-24, dtype=dtype)) & (d_ji > zero) & (d_jk > zero),
-                    zero - m_eff * k_a * dtheta,
-                    zero,
+            has_any = jnp.max(((offs < A_real) & (mv > zero)).astype(jnp.int32)) > 0
+            zero_e_val = (p_val - p_val).astype(dtype)
+
+            def _eval_angles(_):
+                ai = _pl_load(a_i_ref, (b_id * s_ai + offs,))
+                aj = _pl_load(a_j_ref, (b_id * s_ai + offs,))
+                ak = _pl_load(a_k_ref, (b_id * s_ai + offs,))
+                valid = (
+                    (offs < A_real)
+                    & (mv > zero)
+                    & (ai >= 0)
+                    & (ai < N)
+                    & (aj >= 0)
+                    & (aj < N)
+                    & (ak >= 0)
+                    & (ak < N)
                 )
-                fi = _scale3(neg_de_dth / (d_ji_sq_eff * r_cp), _cross3(v_ji, cp))
-                fk = _scale3(neg_de_dth / (d_jk_sq_eff * r_cp), _cross3(cp, v_jk))
-                fj = _scale3(zero - one, _add3(fi, fk))
-            else:
-                denom = d_ji * d_jk + jnp.asarray(1e-8, dtype=dtype)
-                c_raw = dot_ik / denom
-                c_lim = jnp.asarray(0.999999, dtype=dtype)
-                c = jnp.clip(c_raw, zero - c_lim, c_lim)
-                theta = jnp.arccos(c)
-                dtheta = theta - th0
-                e_a = half * m_eff * k_a * dtheta * dtheta
-                in_clip = (c_raw > (zero - c_lim)) & (c_raw < c_lim)
-                sin_th = jnp.sqrt(jnp.maximum(one - c * c, jnp.asarray(1e-12, dtype=dtype)))
-                neg_de_dth = jnp.where(
-                    valid & in_clip & (d_ji > zero) & (d_jk > zero),
-                    zero - m_eff * k_a * dtheta,
-                    zero,
-                )
-                r_cp_reg = denom * sin_th
-                fi = _scale3(neg_de_dth / (d_ji_sq_eff * r_cp_reg), _cross3(v_ji, cp))
-                fk = _scale3(neg_de_dth / (d_jk_sq_eff * r_cp_reg), _cross3(cp, v_jk))
-                fj = _scale3(zero - one, _add3(fi, fk))
-            _pl_atomic_add_1d(fx_out_ref, f_base + si, fi[0], valid, interpret)
-            _pl_atomic_add_1d(fy_out_ref, f_base + si, fi[1], valid, interpret)
-            _pl_atomic_add_1d(fz_out_ref, f_base + si, fi[2], valid, interpret)
-            _pl_atomic_add_1d(fx_out_ref, f_base + sj, fj[0], valid, interpret)
-            _pl_atomic_add_1d(fy_out_ref, f_base + sj, fj[1], valid, interpret)
-            _pl_atomic_add_1d(fz_out_ref, f_base + sj, fj[2], valid, interpret)
-            _pl_atomic_add_1d(fx_out_ref, f_base + sk, fk[0], valid, interpret)
-            _pl_atomic_add_1d(fy_out_ref, f_base + sk, fk[1], valid, interpret)
-            _pl_atomic_add_1d(fz_out_ref, f_base + sk, fk[2], valid, interpret)
-            return jnp.sum(e_a)
+                m_eff = jnp.where(valid, mv, zero)
+                si = jnp.where(valid, jnp.clip(ai, 0, max_atom), 0)
+                sj = jnp.where(valid, jnp.clip(aj, 0, max_atom), 0)
+                sk = jnp.where(valid, jnp.clip(ak, 0, max_atom), 0)
+                ri = (_pl_load(px_ref, (pos_base + si,)), _pl_load(py_ref, (pos_base + si,)), _pl_load(pz_ref, (pos_base + si,)))
+                rj = (_pl_load(px_ref, (pos_base + sj,)), _pl_load(py_ref, (pos_base + sj,)), _pl_load(pz_ref, (pos_base + sj,)))
+                rk = (_pl_load(px_ref, (pos_base + sk,)), _pl_load(py_ref, (pos_base + sk,)), _pl_load(pz_ref, (pos_base + sk,)))
+                box_xyz = _load_box_b()
+                v_ji = _min_image3(_sub3(ri, rj), box_xyz, has_box)
+                v_jk = _min_image3(_sub3(rk, rj), box_xyz, has_box)
+                d_sq_ji = _dot3(v_ji, v_ji)
+                d_sq_jk = _dot3(v_jk, v_jk)
+                if dist_eps > 0.0:
+                    eps_val = jnp.asarray(dist_eps, dtype=dtype)
+                    d_ji_sq_eff = d_sq_ji + eps_val
+                    d_jk_sq_eff = d_sq_jk + eps_val
+                    d_ji = jnp.sqrt(d_ji_sq_eff)
+                    d_jk = jnp.sqrt(d_jk_sq_eff)
+                else:
+                    d_ji_sq_eff = jnp.where(d_sq_ji > zero, d_sq_ji, one)
+                    d_jk_sq_eff = jnp.where(d_sq_jk > zero, d_sq_jk, one)
+                    d_ji = jnp.where(d_sq_ji > zero, jnp.sqrt(d_ji_sq_eff), zero)
+                    d_jk = jnp.where(d_sq_jk > zero, jnp.sqrt(d_jk_sq_eff), zero)
+                dot_ik = _dot3(v_ji, v_jk)
+                cp = _cross3(v_ji, v_jk)
+                th0 = _pl_load(a_th0_ref, (b_id * s_ap + offs,))
+                k_a = _pl_load(a_kval_ref, (b_id * s_ap + offs,))
+                if angle_regularization_mode == "openmm_cross":
+                    cp_sq = _dot3(cp, cp)
+                    r_cp = jnp.sqrt(jnp.maximum(cp_sq, jnp.asarray(1e-24, dtype=dtype)))
+                    theta = jnp.arctan2(r_cp, dot_ik)
+                    dtheta = theta - th0
+                    e_a = half * m_eff * k_a * dtheta * dtheta
+                    neg_de_dth = jnp.where(
+                        valid & (cp_sq > jnp.asarray(1e-24, dtype=dtype)) & (d_ji > zero) & (d_jk > zero),
+                        zero - m_eff * k_a * dtheta,
+                        zero,
+                    )
+                    fi = _scale3(neg_de_dth / (d_ji_sq_eff * r_cp), _cross3(v_ji, cp))
+                    fk = _scale3(neg_de_dth / (d_jk_sq_eff * r_cp), _cross3(cp, v_jk))
+                    fj = _scale3(zero - one, _add3(fi, fk))
+                else:
+                    denom = d_ji * d_jk + jnp.asarray(1e-8, dtype=dtype)
+                    c_raw = dot_ik / denom
+                    c_lim = jnp.asarray(0.999999, dtype=dtype)
+                    c = jnp.clip(c_raw, zero - c_lim, c_lim)
+                    theta = jnp.arccos(c)
+                    dtheta = theta - th0
+                    e_a = half * m_eff * k_a * dtheta * dtheta
+                    in_clip = (c_raw > (zero - c_lim)) & (c_raw < c_lim)
+                    sin_th = jnp.sqrt(jnp.maximum(one - c * c, jnp.asarray(1e-12, dtype=dtype)))
+                    neg_de_dth = jnp.where(
+                        valid & in_clip & (d_ji > zero) & (d_jk > zero),
+                        zero - m_eff * k_a * dtheta,
+                        zero,
+                    )
+                    r_cp_reg = denom * sin_th
+                    fi = _scale3(neg_de_dth / (d_ji_sq_eff * r_cp_reg), _cross3(v_ji, cp))
+                    fk = _scale3(neg_de_dth / (d_jk_sq_eff * r_cp_reg), _cross3(cp, v_jk))
+                    fj = _scale3(zero - one, _add3(fi, fk))
+                _pl_atomic_add_1d(fx_out_ref, f_base + si, fi[0], valid, interpret)
+                _pl_atomic_add_1d(fy_out_ref, f_base + si, fi[1], valid, interpret)
+                _pl_atomic_add_1d(fz_out_ref, f_base + si, fi[2], valid, interpret)
+                _pl_atomic_add_1d(fx_out_ref, f_base + sj, fj[0], valid, interpret)
+                _pl_atomic_add_1d(fy_out_ref, f_base + sj, fj[1], valid, interpret)
+                _pl_atomic_add_1d(fz_out_ref, f_base + sj, fj[2], valid, interpret)
+                _pl_atomic_add_1d(fx_out_ref, f_base + sk, fk[0], valid, interpret)
+                _pl_atomic_add_1d(fy_out_ref, f_base + sk, fk[1], valid, interpret)
+                _pl_atomic_add_1d(fz_out_ref, f_base + sk, fk[2], valid, interpret)
+                return jnp.sum(e_a)
+
+            return jax.lax.cond(has_any, _eval_angles, lambda z: z, zero_e_val)
 
         def _do_torsions_periodic(p_val):
             offs = (p_val - o_d0) * _BLOCK_B + jnp.arange(_BLOCK_B, dtype=jnp.int32)
-            ai = _pl_load(d_i_ref, (b_id * s_di + offs,))
-            aj = _pl_load(d_j_ref, (b_id * s_di + offs,))
-            ak = _pl_load(d_k_ref, (b_id * s_di + offs,))
-            al = _pl_load(d_l_ref, (b_id * s_di + offs,))
             mv = _pl_load(d_msk_ref, (b_id * s_dm + offs,))
-            valid = (
-                (offs < D_real)
-                & (mv > zero)
-                & (ai >= 0)
-                & (ai < N)
-                & (aj >= 0)
-                & (aj < N)
-                & (ak >= 0)
-                & (ak < N)
-                & (al >= 0)
-                & (al < N)
-            )
-            m_eff = jnp.where(valid, mv, zero)
-            si = jnp.where(valid, jnp.clip(ai, 0, max_atom), 0)
-            sj = jnp.where(valid, jnp.clip(aj, 0, max_atom), 0)
-            sk = jnp.where(valid, jnp.clip(ak, 0, max_atom), 0)
-            sl = jnp.where(valid, jnp.clip(al, 0, max_atom), 0)
-            ri = (_pl_load(px_ref, (pos_base + si,)), _pl_load(py_ref, (pos_base + si,)), _pl_load(pz_ref, (pos_base + si,)))
-            rj = (_pl_load(px_ref, (pos_base + sj,)), _pl_load(py_ref, (pos_base + sj,)), _pl_load(pz_ref, (pos_base + sj,)))
-            rk = (_pl_load(px_ref, (pos_base + sk,)), _pl_load(py_ref, (pos_base + sk,)), _pl_load(pz_ref, (pos_base + sk,)))
-            rl = (_pl_load(px_ref, (pos_base + sl,)), _pl_load(py_ref, (pos_base + sl,)), _pl_load(pz_ref, (pos_base + sl,)))
-            phi, dphi_dri, dphi_drj, dphi_drk, dphi_drl = _torsion_angle_and_atom_grads_vec3(
-                ri, rj, rk, rl, valid, _load_box_b(), has_box, b0_is_ji
-            )
-            prm0 = _pl_load(d_p0_ref, (b_id * s_dp + offs,))
-            prm1 = _pl_load(d_p1_ref, (b_id * s_dp + offs,))
-            prm2 = _pl_load(d_p2_ref, (b_id * s_dp + offs,))
-            arg = prm0 * phi - prm1
-            e_d = m_eff * prm2 * (one + jnp.cos(arg))
-            g_phi = (zero - m_eff) * prm2 * prm0 * jnp.sin(arg)
-            neg_g_phi = jnp.where(valid, zero - g_phi, zero)
-            fi = _scale3(neg_g_phi, dphi_dri)
-            fj = _scale3(neg_g_phi, dphi_drj)
-            fk = _scale3(neg_g_phi, dphi_drk)
-            fl = _scale3(neg_g_phi, dphi_drl)
-            for s_atom, f_atom in ((si, fi), (sj, fj), (sk, fk), (sl, fl)):
-                _pl_atomic_add_1d(fx_out_ref, f_base + s_atom, f_atom[0], valid, interpret)
-                _pl_atomic_add_1d(fy_out_ref, f_base + s_atom, f_atom[1], valid, interpret)
-                _pl_atomic_add_1d(fz_out_ref, f_base + s_atom, f_atom[2], valid, interpret)
-            return jnp.sum(e_d)
+            has_any = jnp.max(((offs < D_real) & (mv > zero)).astype(jnp.int32)) > 0
+            zero_e_val = (p_val - p_val).astype(dtype)
+
+            def _eval_torsions(_):
+                ai = _pl_load(d_i_ref, (b_id * s_di + offs,))
+                aj = _pl_load(d_j_ref, (b_id * s_di + offs,))
+                ak = _pl_load(d_k_ref, (b_id * s_di + offs,))
+                al = _pl_load(d_l_ref, (b_id * s_di + offs,))
+                valid = (
+                    (offs < D_real)
+                    & (mv > zero)
+                    & (ai >= 0)
+                    & (ai < N)
+                    & (aj >= 0)
+                    & (aj < N)
+                    & (ak >= 0)
+                    & (ak < N)
+                    & (al >= 0)
+                    & (al < N)
+                )
+                m_eff = jnp.where(valid, mv, zero)
+                si = jnp.where(valid, jnp.clip(ai, 0, max_atom), 0)
+                sj = jnp.where(valid, jnp.clip(aj, 0, max_atom), 0)
+                sk = jnp.where(valid, jnp.clip(ak, 0, max_atom), 0)
+                sl = jnp.where(valid, jnp.clip(al, 0, max_atom), 0)
+                ri = (_pl_load(px_ref, (pos_base + si,)), _pl_load(py_ref, (pos_base + si,)), _pl_load(pz_ref, (pos_base + si,)))
+                rj = (_pl_load(px_ref, (pos_base + sj,)), _pl_load(py_ref, (pos_base + sj,)), _pl_load(pz_ref, (pos_base + sj,)))
+                rk = (_pl_load(px_ref, (pos_base + sk,)), _pl_load(py_ref, (pos_base + sk,)), _pl_load(pz_ref, (pos_base + sk,)))
+                rl = (_pl_load(px_ref, (pos_base + sl,)), _pl_load(py_ref, (pos_base + sl,)), _pl_load(pz_ref, (pos_base + sl,)))
+                phi, dphi_dri, dphi_drj, dphi_drk, dphi_drl = _torsion_angle_and_atom_grads_vec3(
+                    ri, rj, rk, rl, valid, _load_box_b(), has_box, b0_is_ji
+                )
+                prm0 = _pl_load(d_p0_ref, (b_id * s_dp + offs,))
+                prm1 = _pl_load(d_p1_ref, (b_id * s_dp + offs,))
+                prm2 = _pl_load(d_p2_ref, (b_id * s_dp + offs,))
+                arg = prm0 * phi - prm1
+                e_d = m_eff * prm2 * (one + jnp.cos(arg))
+                g_phi = (zero - m_eff) * prm2 * prm0 * jnp.sin(arg)
+                neg_g_phi = jnp.where(valid, zero - g_phi, zero)
+                fi = _scale3(neg_g_phi, dphi_dri)
+                fj = _scale3(neg_g_phi, dphi_drj)
+                fk = _scale3(neg_g_phi, dphi_drk)
+                fl = _scale3(neg_g_phi, dphi_drl)
+                for s_atom, f_atom in ((si, fi), (sj, fj), (sk, fk), (sl, fl)):
+                    _pl_atomic_add_1d(fx_out_ref, f_base + s_atom, f_atom[0], valid, interpret)
+                    _pl_atomic_add_1d(fy_out_ref, f_base + s_atom, f_atom[1], valid, interpret)
+                    _pl_atomic_add_1d(fz_out_ref, f_base + s_atom, f_atom[2], valid, interpret)
+                return jnp.sum(e_d)
+
+            return jax.lax.cond(has_any, _eval_torsions, lambda z: z, zero_e_val)
 
         def _do_impropers_harmonic(p_val):
             offs = (p_val - o_h0) * _BLOCK_B + jnp.arange(_BLOCK_B, dtype=jnp.int32)
-            ai = _pl_load(h_i_ref, (b_id * s_hi + offs,))
-            aj = _pl_load(h_j_ref, (b_id * s_hi + offs,))
-            ak = _pl_load(h_k_ref, (b_id * s_hi + offs,))
-            al = _pl_load(h_l_ref, (b_id * s_hi + offs,))
             mv = _pl_load(h_msk_ref, (b_id * s_hm + offs,))
-            valid = (
-                (offs < H_real)
-                & (mv > zero)
-                & (ai >= 0)
-                & (ai < N)
-                & (aj >= 0)
-                & (aj < N)
-                & (ak >= 0)
-                & (ak < N)
-                & (al >= 0)
-                & (al < N)
-            )
-            m_eff = jnp.where(valid, mv, zero)
-            si = jnp.where(valid, jnp.clip(ai, 0, max_atom), 0)
-            sj = jnp.where(valid, jnp.clip(aj, 0, max_atom), 0)
-            sk = jnp.where(valid, jnp.clip(ak, 0, max_atom), 0)
-            sl = jnp.where(valid, jnp.clip(al, 0, max_atom), 0)
-            ri = (_pl_load(px_ref, (pos_base + si,)), _pl_load(py_ref, (pos_base + si,)), _pl_load(pz_ref, (pos_base + si,)))
-            rj = (_pl_load(px_ref, (pos_base + sj,)), _pl_load(py_ref, (pos_base + sj,)), _pl_load(pz_ref, (pos_base + sj,)))
-            rk = (_pl_load(px_ref, (pos_base + sk,)), _pl_load(py_ref, (pos_base + sk,)), _pl_load(pz_ref, (pos_base + sk,)))
-            rl = (_pl_load(px_ref, (pos_base + sl,)), _pl_load(py_ref, (pos_base + sl,)), _pl_load(pz_ref, (pos_base + sl,)))
-            phi, dphi_dri, dphi_drj, dphi_drk, dphi_drl = _torsion_angle_and_atom_grads_vec3(
-                ri, rj, rk, rl, valid, _load_box_b(), has_box, b0_is_ji
-            )
-            k_h = _pl_load(h_kval_ref, (b_id * s_hp + offs,))
-            phi0_h = _pl_load(h_phi0_ref, (b_id * s_hp + offs,))
-            diff_raw = phi - phi0_h + pi
-            dphi = diff_raw - two_pi * jnp.floor(diff_raw / two_pi) - pi
-            e_h = m_eff * k_h * dphi * dphi
-            g_phi = two * m_eff * k_h * dphi
-            neg_g_phi = jnp.where(valid, zero - g_phi, zero)
-            fi = _scale3(neg_g_phi, dphi_dri)
-            fj = _scale3(neg_g_phi, dphi_drj)
-            fk = _scale3(neg_g_phi, dphi_drk)
-            fl = _scale3(neg_g_phi, dphi_drl)
-            for s_atom, f_atom in ((si, fi), (sj, fj), (sk, fk), (sl, fl)):
-                _pl_atomic_add_1d(fx_out_ref, f_base + s_atom, f_atom[0], valid, interpret)
-                _pl_atomic_add_1d(fy_out_ref, f_base + s_atom, f_atom[1], valid, interpret)
-                _pl_atomic_add_1d(fz_out_ref, f_base + s_atom, f_atom[2], valid, interpret)
-            return jnp.sum(e_h)
+            has_any = jnp.max(((offs < H_real) & (mv > zero)).astype(jnp.int32)) > 0
+            zero_e_val = (p_val - p_val).astype(dtype)
+
+            def _eval_impropers(_):
+                ai = _pl_load(h_i_ref, (b_id * s_hi + offs,))
+                aj = _pl_load(h_j_ref, (b_id * s_hi + offs,))
+                ak = _pl_load(h_k_ref, (b_id * s_hi + offs,))
+                al = _pl_load(h_l_ref, (b_id * s_hi + offs,))
+                valid = (
+                    (offs < H_real)
+                    & (mv > zero)
+                    & (ai >= 0)
+                    & (ai < N)
+                    & (aj >= 0)
+                    & (aj < N)
+                    & (ak >= 0)
+                    & (ak < N)
+                    & (al >= 0)
+                    & (al < N)
+                )
+                m_eff = jnp.where(valid, mv, zero)
+                si = jnp.where(valid, jnp.clip(ai, 0, max_atom), 0)
+                sj = jnp.where(valid, jnp.clip(aj, 0, max_atom), 0)
+                sk = jnp.where(valid, jnp.clip(ak, 0, max_atom), 0)
+                sl = jnp.where(valid, jnp.clip(al, 0, max_atom), 0)
+                ri = (_pl_load(px_ref, (pos_base + si,)), _pl_load(py_ref, (pos_base + si,)), _pl_load(pz_ref, (pos_base + si,)))
+                rj = (_pl_load(px_ref, (pos_base + sj,)), _pl_load(py_ref, (pos_base + sj,)), _pl_load(pz_ref, (pos_base + sj,)))
+                rk = (_pl_load(px_ref, (pos_base + sk,)), _pl_load(py_ref, (pos_base + sk,)), _pl_load(pz_ref, (pos_base + sk,)))
+                rl = (_pl_load(px_ref, (pos_base + sl,)), _pl_load(py_ref, (pos_base + sl,)), _pl_load(pz_ref, (pos_base + sl,)))
+                phi, dphi_dri, dphi_drj, dphi_drk, dphi_drl = _torsion_angle_and_atom_grads_vec3(
+                    ri, rj, rk, rl, valid, _load_box_b(), has_box, b0_is_ji
+                )
+                k_h = _pl_load(h_kval_ref, (b_id * s_hp + offs,))
+                phi0_h = _pl_load(h_phi0_ref, (b_id * s_hp + offs,))
+                diff_raw = phi - phi0_h + pi
+                dphi = diff_raw - two_pi * jnp.floor(diff_raw / two_pi) - pi
+                e_h = m_eff * k_h * dphi * dphi
+                g_phi = two * m_eff * k_h * dphi
+                neg_g_phi = jnp.where(valid, zero - g_phi, zero)
+                fi = _scale3(neg_g_phi, dphi_dri)
+                fj = _scale3(neg_g_phi, dphi_drj)
+                fk = _scale3(neg_g_phi, dphi_drk)
+                fl = _scale3(neg_g_phi, dphi_drl)
+                for s_atom, f_atom in ((si, fi), (sj, fj), (sk, fk), (sl, fl)):
+                    _pl_atomic_add_1d(fx_out_ref, f_base + s_atom, f_atom[0], valid, interpret)
+                    _pl_atomic_add_1d(fy_out_ref, f_base + s_atom, f_atom[1], valid, interpret)
+                    _pl_atomic_add_1d(fz_out_ref, f_base + s_atom, f_atom[2], valid, interpret)
+                return jnp.sum(e_h)
+
+            return jax.lax.cond(has_any, _eval_impropers, lambda z: z, zero_e_val)
 
         def _do_exceptions_14(p_val):
             offs = (p_val - o_e0) * _BLOCK_B + jnp.arange(_BLOCK_B, dtype=jnp.int32)
-            coul = jnp.asarray(coulomb_constant, dtype=dtype)
-            ai = _pl_load(e_i_ref, (b_id * s_ep + offs,))
-            aj = _pl_load(e_j_ref, (b_id * s_ep + offs,))
             mv = _pl_load(e_msk_ref, (b_id * s_em + offs,))
-            valid = (offs < E_real) & (mv > zero) & (ai >= 0) & (ai < N) & (aj >= 0) & (aj < N) & (ai != aj)
-            m_eff = jnp.where(valid, mv, zero)
-            si = jnp.where(valid, jnp.clip(ai, 0, max_atom), 0)
-            sj = jnp.where(valid, jnp.clip(aj, 0, max_atom), 0)
-            ri = (_pl_load(px_ref, (pos_base + si,)), _pl_load(py_ref, (pos_base + si,)), _pl_load(pz_ref, (pos_base + si,)))
-            rj = (_pl_load(px_ref, (pos_base + sj,)), _pl_load(py_ref, (pos_base + sj,)), _pl_load(pz_ref, (pos_base + sj,)))
-            lam_v = _pl_load(lam_ref, (b_id * s_lam + jnp.zeros((1,), dtype=jnp.int32),))[0]
-            d_vec = _min_image3(_sub3(ri, rj), _load_box_b(), has_box)
-            r_sq = _dot3(d_vec, d_vec) + jnp.asarray(1e-12, dtype=dtype)
-            dist = jnp.sqrt(r_sq)
-            sig_e = _pl_load(e_sig_ref, (b_id * s_es + offs,))
-            eps_e = _pl_load(e_eps_ref, (b_id * s_ee + offs,))
-            qp_e = _pl_load(e_qp_ref, (b_id * s_eq + offs,))
-            sig_safe = jnp.where(valid, jnp.maximum(sig_e, jnp.asarray(1e-4, dtype=dtype)), one)
-            one_minus_lam = jnp.maximum(one - lam_v, zero)
-            soft_term = jnp.asarray(softcore_alpha, dtype=dtype) * (one_minus_lam ** int(softcore_exponent))
-            r6 = (dist / sig_safe) ** 6
-            denom = soft_term + r6 + jnp.asarray(1e-12, dtype=dtype)
-            inv_d = one / denom
-            inv_d2 = inv_d * inv_d
-            inv_d3 = inv_d2 * inv_d
-            e_lj = four * eps_e * lam_v * (inv_d2 - inv_d)
-            e_coul = coul * qp_e / dist
-            e_pair = m_eff * (e_lj + e_coul)
-            de_dr_over_r = (m_eff / r_sq) * (
-                four * eps_e * lam_v * (inv_d2 - two * inv_d3) * (six * r6) - e_coul
-            )
-            f_coeff = jnp.where(valid, zero - de_dr_over_r, zero)
-            fi = _scale3(f_coeff, d_vec)
-            fj = _scale3(zero - one, fi)
-            _pl_atomic_add_1d(fx_out_ref, f_base + si, fi[0], valid, interpret)
-            _pl_atomic_add_1d(fy_out_ref, f_base + si, fi[1], valid, interpret)
-            _pl_atomic_add_1d(fz_out_ref, f_base + si, fi[2], valid, interpret)
-            _pl_atomic_add_1d(fx_out_ref, f_base + sj, fj[0], valid, interpret)
-            _pl_atomic_add_1d(fy_out_ref, f_base + sj, fj[1], valid, interpret)
-            _pl_atomic_add_1d(fz_out_ref, f_base + sj, fj[2], valid, interpret)
-            return jnp.sum(e_pair)
+            has_any = jnp.max(((offs < E_real) & (mv > zero)).astype(jnp.int32)) > 0
+            zero_e_val = (p_val - p_val).astype(dtype)
+
+            def _eval_exceptions(_):
+                coul = jnp.asarray(coulomb_constant, dtype=dtype)
+                ai = _pl_load(e_i_ref, (b_id * s_ep + offs,))
+                aj = _pl_load(e_j_ref, (b_id * s_ep + offs,))
+                valid = (offs < E_real) & (mv > zero) & (ai >= 0) & (ai < N) & (aj >= 0) & (aj < N) & (ai != aj)
+                m_eff = jnp.where(valid, mv, zero)
+                si = jnp.where(valid, jnp.clip(ai, 0, max_atom), 0)
+                sj = jnp.where(valid, jnp.clip(aj, 0, max_atom), 0)
+                ri = (_pl_load(px_ref, (pos_base + si,)), _pl_load(py_ref, (pos_base + si,)), _pl_load(pz_ref, (pos_base + si,)))
+                rj = (_pl_load(px_ref, (pos_base + sj,)), _pl_load(py_ref, (pos_base + sj,)), _pl_load(pz_ref, (pos_base + sj,)))
+                lam_v = _pl_load(lam_ref, (b_id * s_lam + jnp.zeros((1,), dtype=jnp.int32),))[0]
+                d_vec = _min_image3(_sub3(ri, rj), _load_box_b(), has_box)
+                r_sq = _dot3(d_vec, d_vec) + jnp.asarray(1e-12, dtype=dtype)
+                dist = jnp.sqrt(r_sq)
+                sig_e = _pl_load(e_sig_ref, (b_id * s_es + offs,))
+                eps_e = _pl_load(e_eps_ref, (b_id * s_ee + offs,))
+                qp_e = _pl_load(e_qp_ref, (b_id * s_eq + offs,))
+                sig_safe = jnp.where(valid, jnp.maximum(sig_e, jnp.asarray(1e-4, dtype=dtype)), one)
+                one_minus_lam = jnp.maximum(one - lam_v, zero)
+                soft_term = jnp.asarray(softcore_alpha, dtype=dtype) * (one_minus_lam ** int(softcore_exponent))
+                r6 = (dist / sig_safe) ** 6
+                denom = soft_term + r6 + jnp.asarray(1e-12, dtype=dtype)
+                inv_d = one / denom
+                inv_d2 = inv_d * inv_d
+                inv_d3 = inv_d2 * inv_d
+                e_lj = four * eps_e * lam_v * (inv_d2 - inv_d)
+                e_coul = coul * qp_e / dist
+                e_pair = m_eff * (e_lj + e_coul)
+                de_dr_over_r = (m_eff / r_sq) * (
+                    four * eps_e * lam_v * (inv_d2 - two * inv_d3) * (six * r6) - e_coul
+                )
+                f_coeff = jnp.where(valid, zero - de_dr_over_r, zero)
+                fi = _scale3(f_coeff, d_vec)
+                fj = _scale3(zero - one, fi)
+                _pl_atomic_add_1d(fx_out_ref, f_base + si, fi[0], valid, interpret)
+                _pl_atomic_add_1d(fy_out_ref, f_base + si, fi[1], valid, interpret)
+                _pl_atomic_add_1d(fz_out_ref, f_base + si, fi[2], valid, interpret)
+                _pl_atomic_add_1d(fx_out_ref, f_base + sj, fj[0], valid, interpret)
+                _pl_atomic_add_1d(fy_out_ref, f_base + sj, fj[1], valid, interpret)
+                _pl_atomic_add_1d(fz_out_ref, f_base + sj, fj[2], valid, interpret)
+                return jnp.sum(e_pair)
+
+            return jax.lax.cond(has_any, _eval_exceptions, lambda z: z, zero_e_val)
 
         def _do_cmap(p_val):
             offs = (p_val - o_c0) * _BLOCK_B + jnp.arange(_BLOCK_B, dtype=jnp.int32)
-            delta = jnp.asarray(2.0 * jnp.pi / G_cmap, dtype=dtype)
-            inv_delta = one / delta
-            i0 = _pl_load(c_0_ref, (b_id * s_ct + offs,))
-            i1 = _pl_load(c_1_ref, (b_id * s_ct + offs,))
-            i2 = _pl_load(c_2_ref, (b_id * s_ct + offs,))
-            i3 = _pl_load(c_3_ref, (b_id * s_ct + offs,))
-            i4 = _pl_load(c_4_ref, (b_id * s_ct + offs,))
             mv = _pl_load(c_msk_ref, (b_id * s_cm + offs,))
-            valid = (
-                (offs < C_real)
-                & (mv > zero)
-                & (i0 >= 0)
-                & (i0 < N)
-                & (i1 >= 0)
-                & (i1 < N)
-                & (i2 >= 0)
-                & (i2 < N)
-                & (i3 >= 0)
-                & (i3 < N)
-                & (i4 >= 0)
-                & (i4 < N)
-            )
-            m_eff = jnp.where(valid, mv, zero)
-            s0 = jnp.where(valid, jnp.clip(i0, 0, max_atom), 0)
-            s1 = jnp.where(valid, jnp.clip(i1, 0, max_atom), 0)
-            s2 = jnp.where(valid, jnp.clip(i2, 0, max_atom), 0)
-            s3 = jnp.where(valid, jnp.clip(i3, 0, max_atom), 0)
-            s4 = jnp.where(valid, jnp.clip(i4, 0, max_atom), 0)
-            r0 = (_pl_load(px_ref, (pos_base + s0,)), _pl_load(py_ref, (pos_base + s0,)), _pl_load(pz_ref, (pos_base + s0,)))
-            r1 = (_pl_load(px_ref, (pos_base + s1,)), _pl_load(py_ref, (pos_base + s1,)), _pl_load(pz_ref, (pos_base + s1,)))
-            r2 = (_pl_load(px_ref, (pos_base + s2,)), _pl_load(py_ref, (pos_base + s2,)), _pl_load(pz_ref, (pos_base + s2,)))
-            r3 = (_pl_load(px_ref, (pos_base + s3,)), _pl_load(py_ref, (pos_base + s3,)), _pl_load(pz_ref, (pos_base + s3,)))
-            r4 = (_pl_load(px_ref, (pos_base + s4,)), _pl_load(py_ref, (pos_base + s4,)), _pl_load(pz_ref, (pos_base + s4,)))
-            box_xyz = _load_box_b()
-            phi, dphi_0, dphi_1, dphi_2, dphi_3 = _torsion_angle_and_atom_grads_vec3(
-                r0, r1, r2, r3, valid, box_xyz, has_box, False
-            )
-            psi, dpsi_1, dpsi_2, dpsi_3, dpsi_4 = _torsion_angle_and_atom_grads_vec3(
-                r1, r2, r3, r4, valid, box_xyz, has_box, False
-            )
-            theta1, theta2 = (psi, phi) if cmap_first_is_psi else (phi, psi)
-            th1_shift = theta1 + two_pi
-            th1_norm = th1_shift - two_pi * jnp.floor(th1_shift / two_pi)
-            th2_shift = theta2 + two_pi
-            th2_norm = th2_shift - two_pi * jnp.floor(th2_shift / two_pi)
-            q1 = th1_norm * inv_delta
-            q2 = th2_norm * inv_delta
-            g1_raw = jnp.floor(q1).astype(jnp.int32)
-            g2_raw = jnp.floor(q2).astype(jnp.int32)
-            g1 = g1_raw % G_cmap
-            g2 = g2_raw % G_cmap
-            u = q1 - g1_raw.astype(dtype)
-            v = q2 - g2_raw.astype(dtype)
-            m_raw = _pl_load(c_midx_ref, (b_id * s_cmi + offs,))
-            m_safe = jnp.where(valid, jnp.clip(m_raw, 0, max(N_maps - 1, 0)), 0)
-            base_idx = (b_id * s_cc) + ((m_safe * G_cmap + g1) * G_cmap + g2) * 16
-            e_poly, de_du, de_dv = _eval_cmap_horner_cell(
-                c_coeffs_flat_ref, base_idx, u, v, dtype
-            )
-            e_c = m_eff * e_poly
-            de_dtheta1 = m_eff * de_du * inv_delta
-            de_dtheta2 = m_eff * de_dv * inv_delta
-            if cmap_first_is_psi:
-                de_dpsi, de_dphi = de_dtheta1, de_dtheta2
-            else:
-                de_dphi, de_dpsi = de_dtheta1, de_dtheta2
-            neg_dphi = jnp.where(valid, zero - de_dphi, zero)
-            neg_dpsi = jnp.where(valid, zero - de_dpsi, zero)
-            f0 = _scale3(neg_dphi, dphi_0)
-            f1 = _add3(_scale3(neg_dphi, dphi_1), _scale3(neg_dpsi, dpsi_1))
-            f2 = _add3(_scale3(neg_dphi, dphi_2), _scale3(neg_dpsi, dpsi_2))
-            f3 = _add3(_scale3(neg_dphi, dphi_3), _scale3(neg_dpsi, dpsi_3))
-            f4 = _scale3(neg_dpsi, dpsi_4)
-            for s_atom, f_atom in ((s0, f0), (s1, f1), (s2, f2), (s3, f3), (s4, f4)):
-                _pl_atomic_add_1d(fx_out_ref, f_base + s_atom, f_atom[0], valid, interpret)
-                _pl_atomic_add_1d(fy_out_ref, f_base + s_atom, f_atom[1], valid, interpret)
-                _pl_atomic_add_1d(fz_out_ref, f_base + s_atom, f_atom[2], valid, interpret)
-            return jnp.sum(e_c)
+            has_any = jnp.max(((offs < C_real) & (mv > zero)).astype(jnp.int32)) > 0
+            zero_e_val = (p_val - p_val).astype(dtype)
+
+            def _eval_cmap(_):
+                delta = jnp.asarray(2.0 * jnp.pi / G_cmap, dtype=dtype)
+                inv_delta = one / delta
+                i0 = _pl_load(c_0_ref, (b_id * s_ct + offs,))
+                i1 = _pl_load(c_1_ref, (b_id * s_ct + offs,))
+                i2 = _pl_load(c_2_ref, (b_id * s_ct + offs,))
+                i3 = _pl_load(c_3_ref, (b_id * s_ct + offs,))
+                i4 = _pl_load(c_4_ref, (b_id * s_ct + offs,))
+                valid = (
+                    (offs < C_real)
+                    & (mv > zero)
+                    & (i0 >= 0)
+                    & (i0 < N)
+                    & (i1 >= 0)
+                    & (i1 < N)
+                    & (i2 >= 0)
+                    & (i2 < N)
+                    & (i3 >= 0)
+                    & (i3 < N)
+                    & (i4 >= 0)
+                    & (i4 < N)
+                )
+                m_eff = jnp.where(valid, mv, zero)
+                s0 = jnp.where(valid, jnp.clip(i0, 0, max_atom), 0)
+                s1 = jnp.where(valid, jnp.clip(i1, 0, max_atom), 0)
+                s2 = jnp.where(valid, jnp.clip(i2, 0, max_atom), 0)
+                s3 = jnp.where(valid, jnp.clip(i3, 0, max_atom), 0)
+                s4 = jnp.where(valid, jnp.clip(i4, 0, max_atom), 0)
+                r0 = (_pl_load(px_ref, (pos_base + s0,)), _pl_load(py_ref, (pos_base + s0,)), _pl_load(pz_ref, (pos_base + s0,)))
+                r1 = (_pl_load(px_ref, (pos_base + s1,)), _pl_load(py_ref, (pos_base + s1,)), _pl_load(pz_ref, (pos_base + s1,)))
+                r2 = (_pl_load(px_ref, (pos_base + s2,)), _pl_load(py_ref, (pos_base + s2,)), _pl_load(pz_ref, (pos_base + s2,)))
+                r3 = (_pl_load(px_ref, (pos_base + s3,)), _pl_load(py_ref, (pos_base + s3,)), _pl_load(pz_ref, (pos_base + s3,)))
+                r4 = (_pl_load(px_ref, (pos_base + s4,)), _pl_load(py_ref, (pos_base + s4,)), _pl_load(pz_ref, (pos_base + s4,)))
+                box_xyz = _load_box_b()
+                phi, dphi_0, dphi_1, dphi_2, dphi_3 = _torsion_angle_and_atom_grads_vec3(
+                    r0, r1, r2, r3, valid, box_xyz, has_box, False
+                )
+                psi, dpsi_1, dpsi_2, dpsi_3, dpsi_4 = _torsion_angle_and_atom_grads_vec3(
+                    r1, r2, r3, r4, valid, box_xyz, has_box, False
+                )
+                theta1, theta2 = (psi, phi) if cmap_first_is_psi else (phi, psi)
+                th1_shift = theta1 + two_pi
+                th1_norm = th1_shift - two_pi * jnp.floor(th1_shift / two_pi)
+                th2_shift = theta2 + two_pi
+                th2_norm = th2_shift - two_pi * jnp.floor(th2_shift / two_pi)
+                q1 = th1_norm * inv_delta
+                q2 = th2_norm * inv_delta
+                g1_raw = jnp.floor(q1).astype(jnp.int32)
+                g2_raw = jnp.floor(q2).astype(jnp.int32)
+                g1 = g1_raw % G_cmap
+                g2 = g2_raw % G_cmap
+                u = q1 - g1_raw.astype(dtype)
+                v = q2 - g2_raw.astype(dtype)
+                m_raw = _pl_load(c_midx_ref, (b_id * s_cmi + offs,))
+                m_safe = jnp.where(valid, jnp.clip(m_raw, 0, max(N_maps - 1, 0)), 0)
+                base_idx = (b_id * s_cc) + ((m_safe * G_cmap + g1) * G_cmap + g2) * 16
+                e_poly, de_du, de_dv = _eval_cmap_horner_cell(
+                    c_coeffs_flat_ref, base_idx, u, v, dtype
+                )
+                e_c = m_eff * e_poly
+                de_dtheta1 = m_eff * de_du * inv_delta
+                de_dtheta2 = m_eff * de_dv * inv_delta
+                if cmap_first_is_psi:
+                    de_dpsi, de_dphi = de_dtheta1, de_dtheta2
+                else:
+                    de_dphi, de_dpsi = de_dtheta1, de_dtheta2
+                neg_dphi = jnp.where(valid, zero - de_dphi, zero)
+                neg_dpsi = jnp.where(valid, zero - de_dpsi, zero)
+                f0 = _scale3(neg_dphi, dphi_0)
+                f1 = _add3(_scale3(neg_dphi, dphi_1), _scale3(neg_dpsi, dpsi_1))
+                f2 = _add3(_scale3(neg_dphi, dphi_2), _scale3(neg_dpsi, dpsi_2))
+                f3 = _add3(_scale3(neg_dphi, dphi_3), _scale3(neg_dpsi, dpsi_3))
+                f4 = _scale3(neg_dpsi, dpsi_4)
+                for s_atom, f_atom in ((s0, f0), (s1, f1), (s2, f2), (s3, f3), (s4, f4)):
+                    _pl_atomic_add_1d(fx_out_ref, f_base + s_atom, f_atom[0], valid, interpret)
+                    _pl_atomic_add_1d(fy_out_ref, f_base + s_atom, f_atom[1], valid, interpret)
+                    _pl_atomic_add_1d(fz_out_ref, f_base + s_atom, f_atom[2], valid, interpret)
+                return jnp.sum(e_c)
+
+            return jax.lax.cond(has_any, _eval_cmap, lambda z: z, zero_e_val)
 
         active_groups = []
         if n_blk_b > 0:
@@ -4630,7 +4668,9 @@ def _pallas_bonded_all_fused_batch(
         grid=(B, total_blocks),
         input_output_aliases={45: 1, 46: 2, 47: 3},
         interpret=interpret,
-        compiler_params=plt.CompilerParams() if not interpret else None,
+        compiler_params=resolve_pallas_compiler_params("bonded_fused", grid_blocks=B * total_blocks)
+        if not interpret
+        else None,
         name="pallas_bonded_all_fused",
     )(
         px,
@@ -4678,9 +4718,9 @@ def _pallas_bonded_all_fused_batch(
         c_msk,
         box_vec,
         lam_vec,
-        zero_f,
-        zero_f,
-        zero_f,
+        zero_fx,
+        zero_fy,
+        zero_fz,
     )
     fx_b = fx_pad.reshape((B, N_pad))[:, :N]
     fy_b = fy_pad.reshape((B, N_pad))[:, :N]

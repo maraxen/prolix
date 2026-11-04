@@ -29,7 +29,7 @@ from xtrax.kernel_seam import VjpKernel
 
 xtrax_op = xtrax.op
 
-from prolix.export import in_export_context
+from prolix.export import in_export_context, resolve_pallas_compiler_params
 from prolix.physics.generalized_born import (
     ALPHA_OBC,
     BETA_OBC,
@@ -1313,7 +1313,11 @@ def _pallas_nonbonded_nl_batch(
         out_specs=out_specs,
         grid=(B, n_blocks),
         interpret=interpret,
-        compiler_params=plt.CompilerParams() if not interpret else None,
+        compiler_params=(
+            resolve_pallas_compiler_params("nonbonded_nl", grid_blocks=B * n_blocks)
+            if not interpret
+            else None
+        ),
         name="pallas_nonbonded_nl",
     )(
         pos_x,

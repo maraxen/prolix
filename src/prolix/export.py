@@ -10,12 +10,14 @@ from __future__ import annotations
 
 import contextlib
 import contextvars
+import os
 import pathlib
 import shutil
 import subprocess
 from typing import Any
 
 import jax
+from jax.experimental.pallas import triton as plt
 
 from prolix.types.integrators import LangevinState
 
@@ -37,6 +39,75 @@ def export_context():
     yield
   finally:
     _IN_EXPORT_CONTEXT.reset(token)
+
+
+def resolve_pallas_compiler_params(
+    kernel_kind: str = "default",
+    grid_blocks: int = 0,
+    *,
+    device_kind: str | None = None,
+    compute_capability: float | None = None,
+) -> Any:
+  """Resolve Triton ``CompilerParams`` across GPU architectures (Ampere, Ada, Hopper, Blackwell).
+
+  Adapts ``num_warps`` and ``num_stages`` based on ``kernel_kind``, total launched CTAs
+  (``grid_blocks``), and GPU architecture so kernels neither over-allocate pipeline stages
+  on small-grid buckets nor under-utilize warp schedulers on large multi-replica batches.
+  Supports explicit environment overrides via ``PROLIX_PALLAS_NUM_WARPS`` and
+  ``PROLIX_PALLAS_NUM_STAGES``.
+  """
+  env_warps = os.environ.get("PROLIX_PALLAS_NUM_WARPS", "").strip()
+  env_stages = os.environ.get("PROLIX_PALLAS_NUM_STAGES", "").strip()
+
+  cc = compute_capability
+  dk = (device_kind or "").upper()
+  if cc is None or not dk:
+    try:
+      if jax.default_backend() == "gpu":
+        dev = jax.devices("gpu")[0]
+        if cc is None:
+          raw_cc = getattr(dev, "compute_capability", None)
+          if raw_cc is not None:
+            cc = float(raw_cc)
+        if not dk:
+          dk = str(getattr(dev, "device_kind", "")).upper()
+    except Exception:
+      pass
+
+  if cc is None:
+    if any(k in dk for k in ("B100", "B200", "B300", "GB200", "BLACKWELL", "RTX 50", "PRO 6000")):
+      cc = 10.0
+    elif any(k in dk for k in ("H100", "H200", "GH200", "HOPPER")):
+      cc = 9.0
+    elif any(k in dk for k in ("L40", "L4", "RTX 40", "ADA")):
+      cc = 8.9
+    elif any(k in dk for k in ("A100", "A10", "A30", "A40", "RTX 30", "AMPERE")):
+      cc = 8.0
+    else:
+      cc = 8.0
+
+  if kernel_kind == "bonded_fused":
+    num_warps = 2
+    num_stages = 1
+  elif kernel_kind in ("nonbonded_nl", "cell_prune", "pme"):
+    num_warps = 4
+    if 0 < grid_blocks < 256:
+      num_stages = 1
+    elif cc >= 9.0:
+      num_stages = 2
+    else:
+      num_stages = 2
+  else:
+    num_warps = 4
+    num_stages = 2
+
+  if env_warps:
+    num_warps = max(1, int(env_warps))
+  if env_stages:
+    num_stages = max(1, int(env_stages))
+
+  return plt.CompilerParams(num_warps=num_warps, num_stages=num_stages)
+
 
 # Claim 2 W3 gate (#277): roadmap target for browser-deployable artifacts.
 WASM_ARTIFACT_MAX_BYTES = 50 * 1024 * 1024
@@ -256,5 +327,6 @@ __all__ = [
     "find_iree_compile",
     "in_export_context",
     "load_artifact",
+    "resolve_pallas_compiler_params",
     "save_artifact",
 ]

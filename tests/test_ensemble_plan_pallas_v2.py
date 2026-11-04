@@ -386,7 +386,7 @@ def test_ensemble_plan_pallas_v2_skin_rebuild_and_pbc_wrapping():
             use_neighbor_list=True,
             nl_update_every=2,
         )
-        assert traj.positions.shape == (1, int(bundle.positions.shape[0]), 3)
+        assert traj.positions.shape == (1, int(bundle.n_atoms), 3)
         assert traj.positions.dtype == jnp.float64
         assert jnp.all(jnp.isfinite(traj.positions))
     finally:
@@ -1124,3 +1124,195 @@ def test_antipodal_box_invalidation_and_custom_vmap_nl_rebuild():
     assert updated_batch.idx.shape == (2, N, seed.idx.shape[-1])
     assert not bool(jnp.any(updated_batch.did_buffer_overflow))
     jax.config.update("jax_enable_x64", prev_x64)
+
+
+def test_pallas_v24_ghost_atom_filtering_and_compaction_in_nl_and_prune():
+    """v2.4: Ghost atoms (~atom_mask) are excluded from cell buffers and compacted to trailing sentinels."""
+    from jax_md import partition, space
+    from prolix.physics.neighbor_list import (
+        _NB_INDEX_MASK,
+        encode_nl_exclusions,
+        pallas_prune_and_encode_cell_list,
+    )
+
+    N_bucket = 64
+    n_real = 20
+    box = jnp.array([30.0, 30.0, 30.0], dtype=jnp.float32)
+    r_cutoff = 9.0
+    rng = np.random.default_rng(123)
+    # Place ghost atoms (20:64) right inside the same volume as real atoms (0:20)
+    pos = jnp.asarray(rng.uniform(2.0, 12.0, size=(N_bucket, 3)).astype(np.float32))
+    atom_mask = jnp.arange(N_bucket) < n_real
+
+    ei = jnp.full((N_bucket, 4), -1, dtype=jnp.int32)
+    ev = jnp.ones((N_bucket, 4), dtype=jnp.float32)
+    ee = jnp.ones((N_bucket, 4), dtype=jnp.float32)
+
+    disp_fn, _ = space.periodic(box)
+    nl_fns = partition.neighbor_list(
+        disp_fn, box, r_cutoff=r_cutoff, dr_threshold=0.5, capacity_multiplier=1.25, mask_self=True
+    )
+    nbr_raw = nl_fns.allocate(pos, extra_capacity=32)
+    # Raw jax_md neighbor list contains ghost indices >= n_real because ghosts sit near real atoms
+    raw_real_rows = np.asarray(nbr_raw.idx[:n_real])
+    assert np.any((raw_real_rows >= n_real) & (raw_real_rows < N_bucket))
+
+    # 1. encode_nl_exclusions with atom_mask filters ghost neighbors and compacts valid entries left
+    enc = np.asarray(
+        encode_nl_exclusions(nbr_raw.idx, ei, ev, ee, n_atoms=N_bucket, atom_mask=atom_mask)
+    )
+    # Ghost rows (20:64) must be 100% sentinel N_bucket
+    assert np.all(enc[n_real:] == N_bucket)
+    # Real rows (0:20) must have zero ghost indices in [n_real, N_bucket) and all valid entries compacted left
+    for i in range(n_real):
+        row = enc[i]
+        base_indices = np.where(row == N_bucket, N_bucket, row & _NB_INDEX_MASK)
+        assert not np.any((base_indices >= n_real) & (base_indices < N_bucket))
+        # Check compaction: once N_bucket appears, all subsequent slots must be N_bucket
+        first_sent = np.where(row == N_bucket)[0]
+        if len(first_sent) > 0:
+            assert np.all(row[first_sent[0] :] == N_bucket)
+
+    # 2. pallas_prune_and_encode_cell_list with atom_mask (single and batched heterogeneous masks)
+    K = 64
+    C = 32
+    nbr_pal, occ_pal = pallas_prune_and_encode_cell_list(
+        pos,
+        box,
+        ei,
+        ev,
+        ee,
+        cell_size=9.5,
+        cell_capacity=C,
+        max_occupancy=K,
+        r_cutoff=9.5,
+        interpret=True,
+        atom_mask=atom_mask,
+    )
+    nbr_pal_np = np.asarray(nbr_pal)
+    assert np.all(nbr_pal_np[n_real:] == N_bucket)
+    base_pal = np.where(nbr_pal_np[:n_real] == N_bucket, N_bucket, nbr_pal_np[:n_real] & _NB_INDEX_MASK)
+    assert not np.any((base_pal >= n_real) & (base_pal < N_bucket))
+    assert int(occ_pal) <= n_real - 1
+
+    # Batched vmap over 2 replicas with heterogeneous atom_masks (n_real=20 and n_real=12)
+    mask_b = jnp.stack([jnp.arange(N_bucket) < 20, jnp.arange(N_bucket) < 12], axis=0)
+    pos_b = jnp.stack([pos, pos], axis=0)
+    nbr_b, occ_b = jax.vmap(
+        lambda p, m: pallas_prune_and_encode_cell_list(
+            p,
+            box,
+            ei,
+            ev,
+            ee,
+            cell_size=9.5,
+            cell_capacity=C,
+            max_occupancy=K,
+            r_cutoff=9.5,
+            interpret=True,
+            atom_mask=m,
+        )
+    )(pos_b, mask_b)
+    nbr_b_np = np.asarray(nbr_b)
+    assert np.all(nbr_b_np[0, 20:] == N_bucket)
+    assert np.all(nbr_b_np[1, 12:] == N_bucket)
+    base_b1 = np.where(nbr_b_np[1, :12] == N_bucket, N_bucket, nbr_b_np[1, :12] & _NB_INDEX_MASK)
+    assert not np.any((base_b1 >= 12) & (base_b1 < N_bucket))
+    assert int(occ_b[1]) <= 11
+
+
+def test_pallas_v24_stacked_inference_cache_and_dynamic_n_steps(monkeypatch):
+    """v2.4: Repeated multi-bundle plan.run(run_mode='inference') hits _STACKED_INFERENCE_CACHE across varying n_steps."""
+    from prolix.api.ensemble_plan import _STACKED_INFERENCE_CACHE
+
+    prev_x64 = jax.config.read("jax_enable_x64")
+    jax.config.update("jax_enable_x64", True)
+    try:
+        _STACKED_INFERENCE_CACHE.clear()
+        b1 = _make_periodic_solvated_bundle(dtype=jnp.float64, seed=21)
+        b2 = _make_periodic_solvated_bundle(dtype=jnp.float64, seed=22, shift_solute=0.5)
+
+        alloc_calls = {"n": 0}
+        orig_make_nl = nl_mod.make_neighbor_list_fn
+
+        def spy_make_nl(*args, **kwargs):
+            nf = orig_make_nl(*args, **kwargs)
+            orig_alloc = nf.allocate
+
+            def spy_alloc(*a, **kw):
+                alloc_calls["n"] += 1
+                return orig_alloc(*a, **kw)
+
+            return nf._replace(allocate=spy_alloc) if hasattr(nf, "_replace") else type(nf)(spy_alloc, nf.update)
+
+        monkeypatch.setattr(nl_mod, "make_neighbor_list_fn", spy_make_nl)
+
+        plan = EnsemblePlan.from_bundles([b1, b2], use_pallas=True)
+        trajs_1 = plan.run(
+            n_steps=2,
+            dt=1.0,
+            kT=0.6,
+            seed=10,
+            run_mode="inference",
+            use_neighbor_list=True,
+            nl_update_every=2,
+        )
+        first_allocs = alloc_calls["n"]
+        assert first_allocs == 1, f"Expected exactly 1 host NL allocate call on first stacked run, got {first_allocs}"
+        assert all(t.n_steps == 2 for t in trajs_1)
+
+        # Second call with DIFFERENT n_steps (4) and seed (99) must reuse _STACKED_INFERENCE_CACHE
+        trajs_2 = plan.run(
+            n_steps=4,
+            dt=1.0,
+            kT=0.6,
+            seed=99,
+            run_mode="inference",
+            use_neighbor_list=True,
+            nl_update_every=2,
+        )
+        assert alloc_calls["n"] == first_allocs, "Expected zero additional host NL allocations on cached stacked run"
+        assert all(t.n_steps == 4 for t in trajs_2)
+        assert all(bool(jnp.all(jnp.isfinite(t.positions))) for t in trajs_2)
+    finally:
+        _STACKED_INFERENCE_CACHE.clear()
+        jax.config.update("jax_enable_x64", prev_x64)
+
+
+def test_pallas_v24_multi_gpu_compiler_params_resolution(monkeypatch):
+    """v2.4: resolve_pallas_compiler_params adapts across GPU architectures, grid sizes, and env overrides."""
+    from prolix.export import resolve_pallas_compiler_params as resolve_from_export
+    from prolix.pallas_kernels import resolve_pallas_compiler_params
+
+    assert resolve_from_export is resolve_pallas_compiler_params
+
+    monkeypatch.delenv("PROLIX_PALLAS_NUM_WARPS", raising=False)
+    monkeypatch.delenv("PROLIX_PALLAS_NUM_STAGES", raising=False)
+
+    # Small grid (< 256 blocks) uses 1 stage for higher SM occupancy across architectures
+    for gpu_name in (
+        "NVIDIA B300",
+        "NVIDIA RTX PRO 6000 Blackwell",
+        "NVIDIA H200",
+        "NVIDIA L40S",
+        "NVIDIA A100",
+    ):
+        cp_small = resolve_pallas_compiler_params("nonbonded_nl", grid_blocks=64, device_kind=gpu_name)
+        assert cp_small.num_warps == 4
+        assert cp_small.num_stages == 1
+
+        cp_large = resolve_pallas_compiler_params("nonbonded_nl", grid_blocks=1024, device_kind=gpu_name)
+        assert cp_large.num_warps == 4
+        assert cp_large.num_stages == 2
+
+    cp_bonded = resolve_pallas_compiler_params("bonded_fused", grid_blocks=128, device_kind="NVIDIA B300")
+    assert cp_bonded.num_warps == 2
+    assert cp_bonded.num_stages == 1
+
+    # Environment variable override
+    monkeypatch.setenv("PROLIX_PALLAS_NUM_WARPS", "8")
+    monkeypatch.setenv("PROLIX_PALLAS_NUM_STAGES", "3")
+    cp_env = resolve_pallas_compiler_params("nonbonded_nl", grid_blocks=512, device_kind="NVIDIA H200")
+    assert cp_env.num_warps == 8
+    assert cp_env.num_stages == 3
+

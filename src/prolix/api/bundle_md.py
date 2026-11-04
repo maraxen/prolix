@@ -854,7 +854,9 @@ def energy_fn_from_bundle(
         dyn_box = kwargs.pop("box", None)
         del kwargs
         sys = physics_system_from_bundle(
-            bundle, positions, pme_grid_points=_pme_grid,
+            bundle,
+            positions,
+            pme_grid_points=_pme_grid,
             build_dense_exclusions=_build_dense,
         )
         cur_disp_fn = disp_fn

@@ -13,6 +13,8 @@ from jax._src.pallas.primitives import store as _pl_store
 from jax.experimental import pallas as pl
 from jax.experimental.pallas import triton as plt
 
+from prolix.export import resolve_pallas_compiler_params
+
 BLOCK_N = 32
 
 
@@ -123,64 +125,73 @@ def _spread_charges_pallas_batch(
         box_base = (b_id if b_box else 0) * 3
         mesh_base = b_id * mesh_stride
 
-        px = _pl_load(px_ref, (pos_base + offs,))
-        py = _pl_load(py_ref, (pos_base + offs,))
-        pz = _pl_load(pz_ref, (pos_base + offs,))
-        qi = _pl_load(charges_ref, (q_base + offs,))
         is_real = (_pl_load(mask_ref, (m_base + offs,)) > 0) & (offs < n_atoms)
 
-        bx = _pl_load(box_ref, (box_base + jnp.zeros((1,), dtype=jnp.int32),))[0]
-        by = _pl_load(box_ref, (box_base + jnp.ones((1,), dtype=jnp.int32),))[0]
-        bz = _pl_load(box_ref, (box_base + jnp.full((1,), 2, dtype=jnp.int32),))[0]
-        kx = jnp.asarray(Kx, dtype=dtype)
-        ky = jnp.asarray(Ky, dtype=dtype)
-        kz = jnp.asarray(Kz, dtype=dtype)
+        def _do_spread(_):
+            px = _pl_load(px_ref, (pos_base + offs,))
+            py = _pl_load(py_ref, (pos_base + offs,))
+            pz = _pl_load(pz_ref, (pos_base + offs,))
+            qi = _pl_load(charges_ref, (q_base + offs,))
 
-        frac_x = (px / bx) * kx
-        frac_y = (py / by) * ky
-        frac_z = (pz / bz) * kz
-        gx = jnp.floor(frac_x)
-        gy = jnp.floor(frac_y)
-        gz = jnp.floor(frac_z)
-        ux = frac_x - gx
-        uy = frac_y - gy
-        uz = frac_z - gz
+            bx = _pl_load(box_ref, (box_base + jnp.zeros((1,), dtype=jnp.int32),))[0]
+            by = _pl_load(box_ref, (box_base + jnp.ones((1,), dtype=jnp.int32),))[0]
+            bz = _pl_load(box_ref, (box_base + jnp.full((1,), 2, dtype=jnp.int32),))[0]
+            kx = jnp.asarray(Kx, dtype=dtype)
+            ky = jnp.asarray(Ky, dtype=dtype)
+            kz = jnp.asarray(Kz, dtype=dtype)
 
-        wx = _bspline4_vec(ux)
-        wy = _bspline4_vec(uy)
-        wz = _bspline4_vec(uz)
+            frac_x = (px / bx) * kx
+            frac_y = (py / by) * ky
+            frac_z = (pz / bz) * kz
+            gx = jnp.floor(frac_x)
+            gy = jnp.floor(frac_y)
+            gz = jnp.floor(frac_z)
+            ux = frac_x - gx
+            uy = frac_y - gy
+            uz = frac_z - gz
 
-        gxi = gx.astype(jnp.int32)
-        gyi = gy.astype(jnp.int32)
-        gzi = gz.astype(jnp.int32)
+            wx = _bspline4_vec(ux)
+            wy = _bspline4_vec(uy)
+            wz = _bspline4_vec(uz)
 
-        s_idx = jnp.arange(64, dtype=jnp.int32)
-        ox = (s_idx // 16)[None, :]
-        oy = ((s_idx // 4) % 4)[None, :]
-        oz = (s_idx % 4)[None, :]
+            gxi = gx.astype(jnp.int32)
+            gyi = gy.astype(jnp.int32)
+            gzi = gz.astype(jnp.int32)
 
-        ix = jnp.mod(gxi[:, None] + ox - 1, Kx)
-        iy = jnp.mod(gyi[:, None] + oy - 1, Ky)
-        iz = jnp.mod(gzi[:, None] + oz - 1, Kz)
-        flat_idx = mesh_base + (ix * Ky + iy) * Kz + iz
+            s_idx = jnp.arange(64, dtype=jnp.int32)
+            ox = (s_idx // 16)[None, :]
+            oy = ((s_idx // 4) % 4)[None, :]
+            oz = (s_idx % 4)[None, :]
 
-        wx_s = _select_stencil(wx, ox)
-        wy_s = _select_stencil(wy, oy)
-        wz_s = _select_stencil(wz, oz)
+            ix = jnp.mod(gxi[:, None] + ox - 1, Kx)
+            iy = jnp.mod(gyi[:, None] + oy - 1, Ky)
+            iz = jnp.mod(gzi[:, None] + oz - 1, Kz)
+            flat_idx = mesh_base + (ix * Ky + iy) * Kz + iz
 
-        mask_2d = jnp.broadcast_to(is_real[:, None], (BLOCK_N, 64))
-        w_2d = jnp.where(mask_2d, (wx_s * wy_s * wz_s) * qi[:, None], jnp.asarray(0.0, dtype=dtype)).astype(dtype)
+            wx_s = _select_stencil(wx, ox)
+            wy_s = _select_stencil(wy, oy)
+            wz_s = _select_stencil(wz, oz)
 
-        flat_idx_1d = flat_idx.reshape(BLOCK_N * 64)
-        w_1d = w_2d.reshape(BLOCK_N * 64)
-        mask_1d = mask_2d.reshape(BLOCK_N * 64)
-        if interpret:
-            def _serial_atomic(k, _):
-                plt.atomic_add(mesh_out_ref, (flat_idx_1d[k],), w_1d[k])
+            mask_2d = jnp.broadcast_to(is_real[:, None], (BLOCK_N, 64))
+            w_2d = jnp.where(mask_2d, (wx_s * wy_s * wz_s) * qi[:, None], jnp.asarray(0.0, dtype=dtype)).astype(dtype)
 
-            jax.lax.fori_loop(0, BLOCK_N * 64, _serial_atomic, None)
-        else:
-            plt.atomic_add(mesh_out_ref, (flat_idx_1d,), w_1d, mask=mask_1d)
+            flat_idx_1d = flat_idx.reshape(BLOCK_N * 64)
+            w_1d = w_2d.reshape(BLOCK_N * 64)
+            mask_1d = mask_2d.reshape(BLOCK_N * 64)
+            if interpret:
+                def _serial_atomic(k, _):
+                    plt.atomic_add(mesh_out_ref, (flat_idx_1d[k],), w_1d[k])
+
+                jax.lax.fori_loop(0, BLOCK_N * 64, _serial_atomic, None)
+            else:
+                plt.atomic_add(mesh_out_ref, (flat_idx_1d,), w_1d, mask=mask_1d)
+
+        jax.lax.cond(
+            jnp.max(is_real.astype(jnp.int32)) > 0,
+            _do_spread,
+            lambda _: None,
+            None,
+        )
 
     any_spec = pl.BlockSpec(memory_space=pl.ANY)
     mesh_flat = pl.pallas_call(
@@ -190,7 +201,9 @@ def _spread_charges_pallas_batch(
         out_specs=any_spec,
         grid=(B, n_blocks),
         interpret=interpret,
-        compiler_params=plt.CompilerParams() if not interpret else None,
+        compiler_params=resolve_pallas_compiler_params("pme", grid_blocks=B * n_blocks)
+        if not interpret
+        else None,
         input_output_aliases={6: 0},
         name="pme_charge_spread",
     )(pos_x, pos_y, pos_z, q_flat, mask_flat, box_flat, mesh0_flat)
@@ -362,86 +375,97 @@ def _gather_pallas_batch(
         mesh_base = (b_id if b_mesh else 0) * mesh_stride
         out_base = b_id * n_pad
 
-        px = _pl_load(px_ref, (pos_base + offs,))
-        py = _pl_load(py_ref, (pos_base + offs,))
-        pz = _pl_load(pz_ref, (pos_base + offs,))
-        qi = _pl_load(charges_ref, (q_base + offs,))
         is_real = (_pl_load(mask_ref, (m_base + offs,)) > 0) & (offs < n_atoms)
+        zero_vec = (offs - offs).astype(dtype)
 
-        bx = _pl_load(box_ref, (box_base + jnp.zeros((1,), dtype=jnp.int32),))[0]
-        by = _pl_load(box_ref, (box_base + jnp.ones((1,), dtype=jnp.int32),))[0]
-        bz = _pl_load(box_ref, (box_base + jnp.full((1,), 2, dtype=jnp.int32),))[0]
-        kx = jnp.asarray(Kx, dtype=dtype)
-        ky = jnp.asarray(Ky, dtype=dtype)
-        kz = jnp.asarray(Kz, dtype=dtype)
+        def _do_gather(_):
+            px = _pl_load(px_ref, (pos_base + offs,))
+            py = _pl_load(py_ref, (pos_base + offs,))
+            pz = _pl_load(pz_ref, (pos_base + offs,))
+            qi = _pl_load(charges_ref, (q_base + offs,))
 
-        frac_x = (px / bx) * kx
-        frac_y = (py / by) * ky
-        frac_z = (pz / bz) * kz
-        gx = jnp.floor(frac_x)
-        gy = jnp.floor(frac_y)
-        gz = jnp.floor(frac_z)
-        ux = frac_x - gx
-        uy = frac_y - gy
-        uz = frac_z - gz
+            bx = _pl_load(box_ref, (box_base + jnp.zeros((1,), dtype=jnp.int32),))[0]
+            by = _pl_load(box_ref, (box_base + jnp.ones((1,), dtype=jnp.int32),))[0]
+            bz = _pl_load(box_ref, (box_base + jnp.full((1,), 2, dtype=jnp.int32),))[0]
+            kx = jnp.asarray(Kx, dtype=dtype)
+            ky = jnp.asarray(Ky, dtype=dtype)
+            kz = jnp.asarray(Kz, dtype=dtype)
 
-        wx = _bspline4_vec(ux)
-        wy = _bspline4_vec(uy)
-        wz = _bspline4_vec(uz)
-        dwx = _bspline4_deriv_vec(ux)
-        dwy = _bspline4_deriv_vec(uy)
-        dwz = _bspline4_deriv_vec(uz)
+            frac_x = (px / bx) * kx
+            frac_y = (py / by) * ky
+            frac_z = (pz / bz) * kz
+            gx = jnp.floor(frac_x)
+            gy = jnp.floor(frac_y)
+            gz = jnp.floor(frac_z)
+            ux = frac_x - gx
+            uy = frac_y - gy
+            uz = frac_z - gz
 
-        gxi = gx.astype(jnp.int32)
-        gyi = gy.astype(jnp.int32)
-        gzi = gz.astype(jnp.int32)
+            wx = _bspline4_vec(ux)
+            wy = _bspline4_vec(uy)
+            wz = _bspline4_vec(uz)
+            dwx = _bspline4_deriv_vec(ux)
+            dwy = _bspline4_deriv_vec(uy)
+            dwz = _bspline4_deriv_vec(uz)
 
-        s_idx = jnp.arange(64, dtype=jnp.int32)
-        ox = (s_idx // 16)[None, :]
-        oy = ((s_idx // 4) % 4)[None, :]
-        oz = (s_idx % 4)[None, :]
+            gxi = gx.astype(jnp.int32)
+            gyi = gy.astype(jnp.int32)
+            gzi = gz.astype(jnp.int32)
 
-        ix = jnp.mod(gxi[:, None] + ox - 1, Kx)
-        iy = jnp.mod(gyi[:, None] + oy - 1, Ky)
-        iz = jnp.mod(gzi[:, None] + oz - 1, Kz)
-        flat_idx = mesh_base + (ix * Ky + iy) * Kz + iz
+            s_idx = jnp.arange(64, dtype=jnp.int32)
+            ox = (s_idx // 16)[None, :]
+            oy = ((s_idx // 4) % 4)[None, :]
+            oz = (s_idx % 4)[None, :]
 
-        wx_s = _select_stencil(wx, ox)
-        wy_s = _select_stencil(wy, oy)
-        wz_s = _select_stencil(wz, oz)
-        dwx_s = _select_stencil(dwx, ox)
-        dwy_s = _select_stencil(dwy, oy)
-        dwz_s = _select_stencil(dwz, oz)
+            ix = jnp.mod(gxi[:, None] + ox - 1, Kx)
+            iy = jnp.mod(gyi[:, None] + oy - 1, Ky)
+            iz = jnp.mod(gzi[:, None] + oz - 1, Kz)
+            flat_idx = mesh_base + (ix * Ky + iy) * Kz + iz
 
-        zero = jnp.asarray(0.0, dtype=dtype)
-        mask_2d = jnp.broadcast_to(is_real[:, None], (BLOCK_N, 64))
-        flat_idx_1d = flat_idx.reshape(BLOCK_N * 64)
-        mask_1d = mask_2d.reshape(BLOCK_N * 64)
-        t_val = _pl_load(theta_flat_ref, (flat_idx_1d,), mask=mask_1d, other=zero).reshape(
-            BLOCK_N, 64
+            wx_s = _select_stencil(wx, ox)
+            wy_s = _select_stencil(wy, oy)
+            wz_s = _select_stencil(wz, oz)
+            dwx_s = _select_stencil(dwx, ox)
+            dwy_s = _select_stencil(dwy, oy)
+            dwz_s = _select_stencil(dwz, oz)
+
+            zero = jnp.asarray(0.0, dtype=dtype)
+            mask_2d = jnp.broadcast_to(is_real[:, None], (BLOCK_N, 64))
+            flat_idx_1d = flat_idx.reshape(BLOCK_N * 64)
+            mask_1d = mask_2d.reshape(BLOCK_N * 64)
+            t_val = _pl_load(theta_flat_ref, (flat_idx_1d,), mask=mask_1d, other=zero).reshape(
+                BLOCK_N, 64
+            )
+
+            sx = kx / bx
+            sy = ky / by
+            sz = kz / bz
+
+            w_unit = wx_s * wy_s * wz_s
+            dq_v = jnp.where(is_real, jnp.sum(w_unit * t_val, axis=-1), zero).astype(dtype)
+            dpx_v = jnp.where(
+                is_real,
+                qi * sx * jnp.sum(dwx_s * wy_s * wz_s * t_val, axis=-1),
+                zero,
+            ).astype(dtype)
+            dpy_v = jnp.where(
+                is_real,
+                qi * sy * jnp.sum(wx_s * dwy_s * wz_s * t_val, axis=-1),
+                zero,
+            ).astype(dtype)
+            dpz_v = jnp.where(
+                is_real,
+                qi * sz * jnp.sum(wx_s * wy_s * dwz_s * t_val, axis=-1),
+                zero,
+            ).astype(dtype)
+            return (dpx_v, dpy_v, dpz_v, dq_v)
+
+        dpx, dpy, dpz, dq = jax.lax.cond(
+            jnp.max(is_real.astype(jnp.int32)) > 0,
+            _do_gather,
+            lambda z0: z0,
+            (zero_vec, zero_vec, zero_vec, zero_vec),
         )
-
-        sx = kx / bx
-        sy = ky / by
-        sz = kz / bz
-
-        w_unit = wx_s * wy_s * wz_s
-        dq = jnp.where(is_real, jnp.sum(w_unit * t_val, axis=-1), zero).astype(dtype)
-        dpx = jnp.where(
-            is_real,
-            qi * sx * jnp.sum(dwx_s * wy_s * wz_s * t_val, axis=-1),
-            zero,
-        ).astype(dtype)
-        dpy = jnp.where(
-            is_real,
-            qi * sy * jnp.sum(wx_s * dwy_s * wz_s * t_val, axis=-1),
-            zero,
-        ).astype(dtype)
-        dpz = jnp.where(
-            is_real,
-            qi * sz * jnp.sum(wx_s * wy_s * dwz_s * t_val, axis=-1),
-            zero,
-        ).astype(dtype)
 
         _pl_store(fx_out_ref, (out_base + offs,), dpx)
         _pl_store(fy_out_ref, (out_base + offs,), dpy)
@@ -461,7 +485,9 @@ def _gather_pallas_batch(
         out_specs=[any_spec] * 4,
         grid=(B, n_blocks),
         interpret=interpret,
-        compiler_params=plt.CompilerParams() if not interpret else None,
+        compiler_params=resolve_pallas_compiler_params("pme", grid_blocks=B * n_blocks)
+        if not interpret
+        else None,
         name="pme_bwd_gather",
     )(pos_x, pos_y, pos_z, q_flat, mask_flat, box_flat, theta_flat)
     fx_b = fx_pad.reshape((B, n_pad))[:, :n_atoms]

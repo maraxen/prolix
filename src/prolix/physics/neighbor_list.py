@@ -13,11 +13,10 @@ import numpy as np
 from jax._src.pallas.primitives import load as _pl_load
 from jax._src.pallas.primitives import store as _pl_store
 from jax.experimental import pallas as pl
-from jax.experimental.pallas import triton as plt
 from jax_md import partition, space, util
 
 from prolix.compat import system_params_to_protein
-from prolix.export import in_export_context
+from prolix.export import in_export_context, resolve_pallas_compiler_params
 from prolix.physics.pbc import wrap_positions
 from prolix.utils import topology
 
@@ -187,6 +186,7 @@ def make_neighbor_list_fn(
   scale_14_vdw: float = 0.5,
   scale_14_elec: float = 0.83333333,
   use_pallas_nl: bool | None = None,
+  atom_mask: Array | None = None,
 ) -> Callable[..., partition.NeighborList]:
   """Creates a neighbor list function optimized for solvent systems.
 
@@ -270,16 +270,20 @@ def make_neighbor_list_fn(
     return jnp.mod(position, b)
 
   def _encode_if_needed(idx: Array, n_atoms: int) -> Array:
-    if not has_excl:
+    if not has_excl and atom_mask is None:
       return idx
+    ei = excl_indices if has_excl else jnp.zeros((n_atoms, 0), dtype=jnp.int32)
+    ev = excl_scales_vdw if has_excl else jnp.zeros((n_atoms, 0), dtype=jnp.float32)
+    ee = excl_scales_elec if has_excl else jnp.zeros((n_atoms, 0), dtype=jnp.float32)
     return encode_nl_exclusions(
       idx,
-      excl_indices,
-      excl_scales_vdw,
-      excl_scales_elec,
+      ei,
+      ev,
+      ee,
       n_atoms=n_atoms,
       scale_14_vdw=scale_14_vdw,
       scale_14_elec=scale_14_elec,
+      atom_mask=atom_mask,
     )
 
   def _rebuild_unconditional(
@@ -315,6 +319,7 @@ def make_neighbor_list_fn(
         encode_exclusions=has_excl,
         interpret=(jax.default_backend() == "cpu"),
         grid_dims=static_grid_dims,
+        atom_mask=atom_mask,
       )
       err_new = neighbors.error.update(
         partition.PartitionErrorCode.NEIGHBOR_LIST_OVERFLOW,
@@ -357,6 +362,8 @@ def make_neighbor_list_fn(
       def _cond_rebuild(pos_in: Array, ref_in: Array, idx_in: Array, err_code_in: Array, box_in: Array):
         dr = jax.vmap(displacement_fn)(pos_in, ref_in)
         dr_sq = jnp.sum(dr * dr, axis=-1)
+        if atom_mask is not None:
+          dr_sq = jnp.where(jnp.asarray(atom_mask, dtype=jnp.bool_), dr_sq, 0.0)
         should_upd = jnp.any(dr_sq > jnp.asarray(half_skin_sq, dtype=pos_in.dtype))
 
         def _do_one(operands):
@@ -387,6 +394,7 @@ def make_neighbor_list_fn(
               encode_exclusions=has_excl,
               interpret=(jax.default_backend() == "cpu"),
               grid_dims=static_grid_dims,
+              atom_mask=atom_mask,
             )
             err_new = nbr_tmp.error.update(
               partition.PartitionErrorCode.NEIGHBOR_LIST_OVERFLOW,
@@ -422,6 +430,8 @@ def make_neighbor_list_fn(
 
         dr_b = jax.vmap(jax.vmap(displacement_fn))(pos_b, ref_b)
         dr_sq_b = jnp.sum(dr_b * dr_b, axis=-1)
+        if atom_mask is not None:
+          dr_sq_b = jnp.where(jnp.asarray(atom_mask, dtype=jnp.bool_), dr_sq_b, 0.0)
         any_upd = jnp.any(dr_sq_b > jnp.asarray(half_skin_sq, dtype=pos_b.dtype))
 
         def _do_batch(operands):
@@ -448,6 +458,8 @@ def make_neighbor_list_fn(
               encode_exclusions=has_excl,
               interpret=(jax.default_backend() == "cpu"),
               grid_dims=static_grid_dims,
+              atom_mask=atom_mask,
+              mask_batched=(atom_mask is not None and atom_mask.ndim == 2),
             )
             overflow_bit = jnp.uint8(partition.PartitionErrorCode.NEIGHBOR_LIST_OVERFLOW)
             err_new_b = jnp.where(occ_new_b > max_occ_i, e_b | overflow_bit, e_b)
@@ -499,6 +511,7 @@ def make_neighbor_list_fn(
     return dataclasses.replace(nbr, update_fn=update)
 
   update._pre_encoded_exclusions = has_excl  # type: ignore[attr-defined]
+  update._ghosts_filtered = atom_mask is not None  # type: ignore[attr-defined]
   update._rebuild_unconditional = _rebuild_unconditional  # type: ignore[attr-defined]
 
   def allocate(position: Array, **kwargs) -> partition.NeighborList:
@@ -926,6 +939,7 @@ def encode_nl_exclusions(
     scale_14_vdw: float = 0.5,
     scale_14_elec: float = 0.83333333,
     tol: float = 1e-4,
+    atom_mask: Array | None = None,
 ) -> Array:
     """Losslessly pre-encode 1-2/1-3 full exclusions and 1-4 scaled exclusions into ``neighbor_idx``.
 
@@ -934,10 +948,13 @@ def encode_nl_exclusions(
     exclusions ``(w_vdw == 0, w_elec == 0)`` and ``_NB_EXCL_14_BIT`` (bit 29)
     on standard 1-4 exclusions ``(scale_14_vdw, scale_14_elec)``.
 
-    Optimized (v2.2): Precomputes the 2-bit integer tag directly on the small
+    Optimized (v2.2 / v2.4): Precomputes the 2-bit integer tag directly on the small
     ``(N, M)`` exclusion table and gates the binary search with ``[excl_min, excl_max]``
     bounds, avoiding any ``(N, K)`` float32 scale allocations and supporting both
-    ``(N, K)`` and batched ``(B, N, K)`` ``neighbor_idx``.
+    ``(N, K)`` and batched ``(B, N, K)`` ``neighbor_idx``. When ``atom_mask`` is
+    provided, ghost padding atoms (``~atom_mask``) are replaced with sentinel ``N``
+    and valid real neighbors are compacted to the front of each row so trailing
+    32-neighbor tiles in ``pallas_nonbonded_nl`` exit in O(1).
     """
     nbr_i32 = jnp.asarray(neighbor_idx, dtype=jnp.int32)
     N = int(nbr_i32.shape[-2]) if n_atoms is None else int(n_atoms)
@@ -947,53 +964,70 @@ def encode_nl_exclusions(
         )
     M = int(excl_indices.shape[-1]) if excl_indices.ndim >= 2 else 0
     if M == 0:
-        return jnp.where(
+        out = jnp.where(
             (nbr_i32 >= 0) & ((nbr_i32 & jnp.int32(_NB_INDEX_MASK)) < N),
             nbr_i32 & jnp.int32(_NB_INDEX_MASK),
             nbr_i32,
         )
+    else:
+        ei_i32 = jnp.asarray(excl_indices, dtype=jnp.int32)
+        ev = jnp.asarray(excl_scales_vdw)
+        ee = jnp.asarray(excl_scales_elec)
+        valid_e = (ei_i32 >= 0) & (ei_i32 < N)
+        is_full_e = valid_e & (jnp.abs(ev) <= tol) & (jnp.abs(ee) <= tol)
+        is_14_e = (
+            valid_e
+            & (~is_full_e)
+            & (jnp.abs(ev - scale_14_vdw) <= tol)
+            & (jnp.abs(ee - scale_14_elec) <= tol)
+        )
+        excl_tag = jnp.where(
+            is_full_e,
+            jnp.int32(_NB_EXCL_FULL_BIT),
+            jnp.where(is_14_e, jnp.int32(_NB_EXCL_14_BIT), jnp.int32(0)),
+        )
 
-    ei_i32 = jnp.asarray(excl_indices, dtype=jnp.int32)
-    ev = jnp.asarray(excl_scales_vdw)
-    ee = jnp.asarray(excl_scales_elec)
-    valid_e = (ei_i32 >= 0) & (ei_i32 < N)
-    is_full_e = valid_e & (jnp.abs(ev) <= tol) & (jnp.abs(ee) <= tol)
-    is_14_e = (
-        valid_e
-        & (~is_full_e)
-        & (jnp.abs(ev - scale_14_vdw) <= tol)
-        & (jnp.abs(ee - scale_14_elec) <= tol)
-    )
-    excl_tag = jnp.where(
-        is_full_e,
-        jnp.int32(_NB_EXCL_FULL_BIT),
-        jnp.where(is_14_e, jnp.int32(_NB_EXCL_14_BIT), jnp.int32(0)),
-    )
+        int_max = jnp.int32(0x7FFFFFFF)
+        excl_sorted = jnp.where(valid_e, ei_i32, int_max)
+        excl_min = jnp.min(excl_sorted, axis=-1, keepdims=True)
+        excl_max = jnp.max(jnp.where(valid_e, ei_i32, jnp.int32(-1)), axis=-1, keepdims=True)
 
-    int_max = jnp.int32(0x7FFFFFFF)
-    excl_sorted = jnp.where(valid_e, ei_i32, int_max)
-    excl_min = jnp.min(excl_sorted, axis=-1, keepdims=True)
-    excl_max = jnp.max(jnp.where(valid_e, ei_i32, jnp.int32(-1)), axis=-1, keepdims=True)
+        j_clean = jnp.where(nbr_i32 >= 0, nbr_i32 & jnp.int32(_NB_INDEX_MASK), nbr_i32)
+        valid_j = (j_clean >= 0) & (j_clean < N)
+        in_range = valid_j & (j_clean >= excl_min) & (j_clean <= excl_max)
 
-    j_clean = jnp.where(nbr_i32 >= 0, nbr_i32 & jnp.int32(_NB_INDEX_MASK), nbr_i32)
-    valid_j = (j_clean >= 0) & (j_clean < N)
-    in_range = valid_j & (j_clean >= excl_min) & (j_clean <= excl_max)
+        pos = jnp.zeros_like(j_clean)
+        if M > 1:
+            step = 1 << ((M - 1).bit_length() - 1)
+            while step > 0:
+                cand = pos + step
+                cand_safe = jnp.minimum(cand, M - 1)
+                val = jnp.take_along_axis(excl_sorted, cand_safe, axis=-1)
+                pos = jnp.where(in_range & (cand < M) & (val <= j_clean), cand_safe, pos)
+                step >>= 1
 
-    pos = jnp.zeros_like(j_clean)
-    if M > 1:
-        step = 1 << ((M - 1).bit_length() - 1)
-        while step > 0:
-            cand = pos + step
-            cand_safe = jnp.minimum(cand, M - 1)
-            val = jnp.take_along_axis(excl_sorted, cand_safe, axis=-1)
-            pos = jnp.where(in_range & (cand < M) & (val <= j_clean), cand_safe, pos)
-            step >>= 1
+        matched_idx = jnp.take_along_axis(ei_i32, pos, axis=-1)
+        is_match = in_range & (matched_idx == j_clean)
+        gathered_tag = jnp.take_along_axis(excl_tag, pos, axis=-1)
+        tagged = jnp.where(is_match, j_clean | gathered_tag, j_clean)
+        out = jnp.where(valid_j, tagged, nbr_i32)
 
-    matched_idx = jnp.take_along_axis(ei_i32, pos, axis=-1)
-    is_match = in_range & (matched_idx == j_clean)
-    gathered_tag = jnp.take_along_axis(excl_tag, pos, axis=-1)
-    tagged = jnp.where(is_match, j_clean | gathered_tag, j_clean)
-    return jnp.where(valid_j, tagged, nbr_i32)
+    if atom_mask is not None and N > 0:
+        mask_b = jnp.asarray(atom_mask, dtype=jnp.bool_)
+        j_idx = jnp.where(out >= 0, out & jnp.int32(_NB_INDEX_MASK), out)
+        valid_entry = (j_idx >= 0) & (j_idx < N)
+        safe_j = jnp.clip(j_idx, 0, max(N - 1, 0))
+        if mask_b.ndim == 1:
+            real_j = mask_b[safe_j]
+            real_i = mask_b[:, None] if out.ndim == 2 else mask_b[None, :, None]
+        else:
+            real_j = jnp.take_along_axis(mask_b, safe_j, axis=-1)
+            real_i = mask_b[:, :, None]
+        keep = valid_entry & real_i & real_j
+        out = jnp.where(keep, out, jnp.int32(N))
+        perm = jnp.argsort((out == jnp.int32(N)).astype(jnp.int32), axis=-1)
+        out = jnp.take_along_axis(out, perm, axis=-1)
+    return out
 
 
 def _expand_bits_10(v: Array) -> Array:
@@ -1139,16 +1173,18 @@ def _compute_static_grid_dims(box: Array, cell_size: float) -> tuple[int, int, i
 
 @functools.lru_cache(maxsize=64)
 def _build_stencil_cell_lut_np(grid_dims_static: tuple[int, int, int]) -> np.ndarray:
-    """Precompute ``(G_cells * 27,)`` int32 neighbor-cell lookup table on the host.
+    """Precompute ``((G_cells + 1) * 27,)`` int32 neighbor-cell lookup table on the host.
 
     When any grid dimension is ``< 3``, periodic ``(-1, 0, +1)`` offsets wrap to the
     same cell; duplicate cell IDs within a 27-entry row are replaced with the sentinel
     cell index ``G_cells`` (whose count is ``0``) so no neighbor cell is scanned twice.
+    Row ``G_cells`` is also populated with ``G_cells`` so ghost atoms (``c_i == G_cells``)
+    always have in-bounds LUT offsets.
     """
     nx, ny, nz = int(grid_dims_static[0]), int(grid_dims_static[1]), int(grid_dims_static[2])
     G_cells = nx * ny * nz
     deltas = [(0, 0, 0)] + list(_NL_NEIGHBOR_DELTAS_3D)
-    lut = np.full((G_cells, 27), G_cells, dtype=np.int32)
+    lut = np.full((G_cells + 1, 27), G_cells, dtype=np.int32)
     for cx in range(nx):
         for cy in range(ny):
             for cz in range(nz):
@@ -1173,8 +1209,13 @@ def _build_cell_stencil_buffers_batched(
     cell_size: float,
     cell_capacity: int,
     grid_dims_static: tuple[int, int, int],
+    atom_mask_b: Array | None = None,
 ) -> tuple[Array, Array, Array, Array, Array, Array, int]:
-    """Bin ``(B, N, 3)`` positions into compact ``(B, G_cells, C)`` L2-resident cell buffers."""
+    """Bin ``(B, N, 3)`` positions into compact ``(B, G_cells, C)`` L2-resident cell buffers.
+
+    When ``atom_mask_b`` is provided, ghost padding atoms (``~atom_mask_b``) are assigned
+    sentinel cell ID ``G_cells`` and excluded from all 3D cell buffers.
+    """
     B, N, _ = position_b.shape
     nx, ny, nz = int(grid_dims_static[0]), int(grid_dims_static[1]), int(grid_dims_static[2])
     G_cells = nx * ny * nz
@@ -1193,6 +1234,11 @@ def _build_cell_stencil_buffers_batched(
         + coords[:, :, 1] * nz
         + coords[:, :, 2]
     ).astype(jnp.int32)
+    if atom_mask_b is not None:
+        mask_bool = jnp.asarray(atom_mask_b, dtype=jnp.bool_)
+        if mask_bool.ndim == 1:
+            mask_bool = mask_bool[None, :]
+        cell_id = jnp.where(mask_bool, cell_id, jnp.int32(G_cells))
 
     def _bin_single(c_id: Array, pos_s: Array) -> tuple[Array, Array, Array, Array, Array]:
         if N == 0:
@@ -1214,7 +1260,8 @@ def _build_cell_stencil_buffers_batched(
         group_start = cell_start[sorted_c]
         slot = idx_in_n - group_start
 
-        valid_slot = slot < C
+        is_real_cell = sorted_c < jnp.int32(G_cells)
+        valid_slot = (slot < C) & is_real_cell
         flat_dest = jnp.where(valid_slot, sorted_c * C + slot, jnp.int32(G_cells * C))
 
         buf_id = jnp.full((G_cells * C + 1,), N, dtype=jnp.int32).at[flat_dest].set(order)[:-1]
@@ -1223,7 +1270,7 @@ def _build_cell_stencil_buffers_batched(
         buf_y = jnp.zeros((G_cells * C + 1,), dtype=jnp.float32).at[flat_dest].set(pos_sorted[:, 1])[:-1]
         buf_z = jnp.zeros((G_cells * C + 1,), dtype=jnp.float32).at[flat_dest].set(pos_sorted[:, 2])[:-1]
 
-        end_dest = jnp.where(is_end, sorted_c, jnp.int32(G_cells))
+        end_dest = jnp.where(is_end & is_real_cell, sorted_c, jnp.int32(G_cells))
         cell_counts = (
             jnp.zeros((G_cells + 1,), dtype=jnp.int32)
             .at[end_dest]
@@ -1252,7 +1299,7 @@ def _make_prune_and_encode_kernel(
     r_sq_max_f: float,
     encode_exclusions: bool,
 ):
-    """Build Pallas v2.3 kernel: L2-cached cell lookup, dynamic count-bounded tiling, gated exclusion match."""
+    """Build Pallas v2.4 kernel: L2-cached cell lookup, dynamic count-bounded tiling, gated exclusion match, and ghost CTA skip."""
     BLOCK_C = 64
     C_blocks = (cell_capacity + BLOCK_C - 1) // BLOCK_C
     C_pad = C_blocks * BLOCK_C
@@ -1371,7 +1418,13 @@ def _make_prune_and_encode_kernel(
 
             return jax.lax.fori_loop(jnp.int32(0), n_tiles, _tile_body, count_acc)
 
-        total_hits = jax.lax.fori_loop(jnp.int32(0), jnp.int32(27), _stencil_body, jnp.int32(0))
+        zero_hits = c_i - c_i
+        total_hits = jax.lax.cond(
+            c_i < jnp.int32(G_cells),
+            lambda h0: jax.lax.fori_loop(jnp.int32(0), jnp.int32(27), _stencil_body, h0),
+            lambda h0: h0,
+            zero_hits,
+        )
 
         start_pad_tile = jnp.minimum(total_hits, jnp.int32(K)) // jnp.int32(BLOCK_C)
         sentinel_vec = jnp.full((BLOCK_C,), n_sentinel, dtype=jnp.int32)
@@ -1381,7 +1434,6 @@ def _make_prune_and_encode_kernel(
             should_pad = (slot >= total_hits) & (slot < jnp.int32(K))
             safe_dest = jnp.where(should_pad, base_nbr_row + slot, dummy_nbr_slot)
             _pl_store(nbr_out_ref, (safe_dest,), sentinel_vec, mask=should_pad)
-            return None
 
         jax.lax.fori_loop(start_pad_tile, jnp.int32(K_blocks), _pad_body, None)
         _pl_store(occ_out_ref, (base_atom,), total_hits)
@@ -1406,6 +1458,8 @@ def _pallas_prune_and_encode_cell_list_batch(
     encode_exclusions: bool = True,
     interpret: bool = False,
     grid_dims: tuple[int, int, int] | None = None,
+    atom_mask: Array | None = None,
+    mask_batched: bool = False,
 ) -> tuple[Array, Array]:
     """Batched 2D-grid ``(N, B)`` Pallas cell-list pruning + in-register exclusion encoding."""
     B = int(axis_size)
@@ -1414,6 +1468,10 @@ def _pallas_prune_and_encode_cell_list_batch(
     ei_b = excl_indices if in_batched[2] else excl_indices[None, ...]
     ev_b = excl_scales_vdw if in_batched[3] else excl_scales_vdw[None, ...]
     ee_b = excl_scales_elec if in_batched[4] else excl_scales_elec[None, ...]
+    if atom_mask is not None:
+        mask_b = atom_mask if mask_batched else atom_mask[None, ...]
+    else:
+        mask_b = None
 
     N = int(pos_b.shape[1])
     K = int(max_occupancy)
@@ -1439,7 +1497,7 @@ def _pallas_prune_and_encode_cell_list_batch(
         cell_z_b,
         cell_counts_b,
         G_cells,
-    ) = _build_cell_stencil_buffers_batched(pos_f32, bx_3, float(cell_size), C_pad, g_dims)
+    ) = _build_cell_stencil_buffers_batched(pos_f32, bx_3, float(cell_size), C_pad, g_dims, atom_mask_b=mask_b)
 
     stencil_lut_flat = jnp.asarray(_build_stencil_cell_lut_np(g_dims), dtype=jnp.int32)
     cell_x_flat = cell_x_b.reshape(B * G_cells * C_pad)
@@ -1517,7 +1575,9 @@ def _pallas_prune_and_encode_cell_list_batch(
         out_shape=out_shapes,
         grid=(N, B),
         interpret=interpret,
-        compiler_params=plt.CompilerParams() if not interpret else None,
+        compiler_params=resolve_pallas_compiler_params("cell_prune", grid_blocks=N * B)
+        if not interpret
+        else None,
         name="pallas_prune_and_encode_cell_list",
     )(
         px_flat,
@@ -1556,6 +1616,7 @@ def pallas_prune_and_encode_cell_list(
     encode_exclusions: bool = True,
     interpret: bool = False,
     grid_dims: tuple[int, int, int] | None = None,
+    atom_mask: Array | None = None,
 ) -> tuple[Array, Array]:
     """Prune 3D cell-list stencil candidates and pre-encode exclusions in one Pallas kernel."""
     cs = float(cell_size)
@@ -1571,6 +1632,64 @@ def pallas_prune_and_encode_cell_list(
         if grid_dims is not None
         else (None if isinstance(box, jax.core.Tracer) else _compute_static_grid_dims(box, cs))
     )
+
+    if atom_mask is not None:
+        @jax.custom_batching.custom_vmap
+        def _vmappable_masked(pos, bx, ei, ev, ee, am):
+            nbr_b, occ_b = _pallas_prune_and_encode_cell_list_batch(
+                1,
+                (False, False, False, False, False),
+                pos,
+                bx,
+                ei,
+                ev,
+                ee,
+                cs,
+                cc,
+                mo,
+                rc,
+                s14_v,
+                s14_e,
+                enc,
+                interp,
+                g_dims,
+                atom_mask=am,
+                mask_batched=False,
+            )
+            return nbr_b[0], occ_b[0]
+
+        @_vmappable_masked.def_vmap
+        def _vmap_rule_masked(axis_size, in_batched, pos, bx, ei, ev, ee, am):
+            nbr_b, occ_b = _pallas_prune_and_encode_cell_list_batch(
+                int(axis_size),
+                tuple(bool(b) for b in in_batched[:5]),
+                pos,
+                bx,
+                ei,
+                ev,
+                ee,
+                cs,
+                cc,
+                mo,
+                rc,
+                s14_v,
+                s14_e,
+                enc,
+                interp,
+                g_dims,
+                atom_mask=am,
+                mask_batched=bool(in_batched[5]),
+            )
+            return (nbr_b, occ_b), (True, True)
+
+        return _vmappable_masked(
+            position,
+            box,
+            excl_indices,
+            excl_scales_vdw,
+            excl_scales_elec,
+            jnp.asarray(atom_mask, dtype=jnp.bool_),
+        )
 
     @jax.custom_batching.custom_vmap
     def _vmappable(pos, bx, ei, ev, ee):

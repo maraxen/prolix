@@ -305,3 +305,71 @@ Every entry added to this ledger must record:
   1. Whenever a cached runner uses a `@jax.jit` reseeder (`fast_reseed_fn`) on warm calls (`cached_entry is not None`), assign `state = fast_reseed_fn(seed, kT_s)` on the initial cache-populating call (`cached_entry is None`) as well rather than discarding the warmup output. This guarantees identical PyTree leaf metadata (`aval`, `weak_type`, `sharding`, `committed`) across Call 1 and all subsequent calls (`jitted_while._cache_size() == 1`).
   2. When a runner cache key inspects `sys.modules` for monkeypatchable kernel references that may be lazily imported during setup, gate optional module attributes on whether that backend is active and recompute `cache_key = _make_cache_key()` *after* setup right before inserting into the cache (`len(_JITTED_WHILE_CACHE) == 1`).
 
+### MK-31: Ragged-Bucket Ghost-Atom Sentinel Cell Routing (`c_i = G_cells`) & Row-Level Valid-Neighbor Compaction
+- **Category**: `Grid & Work-Unit Dispatch` / `Verification & Negative Controls`
+- **Symptom / Failure Mode**: When a smaller solvated system (e.g., 6,658 real atoms) is placed into a larger size bucket (`25,000` padded atoms) for multi-system batching, un-filtered 3D cell-list builders place the 18,342 ghost atoms (`~atom_mask`) into spatial cells inside the periodic box. Real atoms' neighbor rows accumulate **1,899,431 ghost neighbor entries**, wasting >50% of cell-list pruning and nonbonded tile iterations, and scattered sentinel entries (`idx == N`) prevent `pallas_nonbonded_nl`'s `row_max_k` early exit from halting early.
+- **Root Cause**: `_build_cell_stencil_buffers_batched` binned all `N` padded positions into `[0, G_cells)` regardless of `atom_mask`, and `encode_nl_exclusions` left invalid/ghost slots scattered across the `K` columns of each row.
+- **Generalizable Rule for `xtrax` Skill**:
+  1. Route every ghost atom (`~atom_mask`) to an out-of-bounds sentinel cell index `c_i = G_cells` (`G_cells = nx * ny * nz`), size the 27-neighbor stencil LUT to `((G_cells + 1) * 27,)`, and zero out the sentinel cell's occupancy (`cell_counts = cell_counts.at[:, G_cells].set(0)`).
+  2. In `encode_nl_exclusions`, replace any neighbor where `~atom_mask[i]` or `~atom_mask[j]` with sentinel `N` and compact valid (`< N`) neighbors to the front of each row via `order = jnp.argsort((out == N).astype(jnp.int32), axis=-1); out = jnp.take_along_axis(out, order, axis=-1)` so `row_max_k` halts immediately after the last real neighbor tile.
+  3. **Verified Multi-GPU Impact (`261102_{h200,l40s,preempt}_pallas_v24_e2e_ensemble_buckets.json`)**:
+     - Reduces ghost neighbors in real rows from **`1,899,431` (v2.3) $\to$ `0` (v2.4)** with exact ragged-bucket padding invariance (`8,192` vs `25,000` bucket: $\Delta E \le 0.00098\text{ kcal/mol}$, $\max |\Delta F| \le 4.56\times 10^{-5}\text{ kcal/(mol}\cdot\text{\AA)}$).
+     - Speeds up 25k ragged-bucket cell-list pruning by **`1.95x` on Hopper H200 (`0.740 ms -> 0.380 ms`)**, **`1.94x` on Blackwell RTX PRO 6000 (`0.665 ms -> 0.343 ms`)**, **`1.61x` on Ada L4 (`2.553 ms -> 1.581 ms`)**, and **`1.51x` on Ada L40S (`0.900 ms -> 0.597 ms`)**.
+     - Speeds up 25k ragged-bucket force evaluation by **`1.24x–1.36x`** across H200 (`0.274 ms -> 0.221 ms`), Blackwell (`0.252 ms -> 0.203 ms`), L40S (`0.245 ms -> 0.197 ms`), and L4 (`0.397 ms -> 0.293 ms`), matching the compact 8k bucket latency within ~7–10%.
+
+### MK-32: CTA-Level $O(1)$ Empty-Tile Early Exit & Triton `scf.yield` MLIR `ir.Value` Zero-Carry Rule
+- **Category**: `Lowering & Triton Constraints` / `Grid & Work-Unit Dispatch`
+- **Symptom / Failure Mode**:
+  1. In ragged size buckets, trailing atom tiles (`pid * BLOCK_N` where all `mask_i == 0`) and trailing bonded-term tiles (`b_msk == 0`, `a_msk == 0`, `d_msk == 0`, etc.) still execute full transcendental math (`erf`, `erfc`, `cos`, `sin`, `atan2`, 64-point B-spline stencils) and atomic/global memory traffic.
+  2. Wrapping a Pallas Triton tile body in `jax.lax.cond(has_any, _body, lambda _: jnp.int32(0), None)` or returning `jnp.zeros_like(x)` from the false branch crashes Triton MLIR lowering with `ValueError: Operand 0 of operation "scf.yield" must be a Value (was TypedNdArray)`.
+- **Root Cause**: Pallas Triton lowers `jax.lax.cond` to an MLIR `scf.if` op whose `scf.yield` operands must be dynamic MLIR `ir.Value`s rather than host-constant `TypedNdArray` literals.
+- **Generalizable Rule for `xtrax` Skill**:
+  1. Guard every Pallas tile group (`pallas_nonbonded_nl`, `pallas_prune_and_encode_cell_list`, `pallas_bonded_all_fused`, `pme_charge_spread`, `pme_bwd_gather`) with a CTA-level `jax.lax.cond(jnp.max(valid_mask.astype(jnp.int32)) > 0, _active_branch, _empty_branch, zero_carry)`.
+  2. Always construct `zero_carry` via algebraic cancellation of an existing in-kernel MLIR `ir.Value` (e.g., `zero_hits = c_i - c_i` for scalar `int32` or `zero_vec = (offs - offs).astype(dtype)` for vector `float32`) and pass it as the carry operand into `jax.lax.cond`.
+
+### MK-33: Single-Pass SETTLE Water COM/Inertia Reduction & Direct Tuple Impulse Projection (`settle.py`)
+- **Category**: `Grid & Work-Unit Dispatch` / `Buffer Aliasing & Atomics`
+- **Symptom / Failure Mode**: In explicit-solvent BAOAB dynamics (`_langevin_step_o_constrained`), calling `settle_velocities` followed by `_remove_angular_momentum_from_impulse` recomputed water center-of-mass positions/velocities and the regularized $3\times 3$ inertia tensor a second time across all $W$ waters, and scattered `(dv_O, dv_H1, dv_H2)` into a full `(N, 3)` atom array only to immediately re-gather `dv[water_indices]` on the next line.
+- **Root Cause**: `settle_velocities` and `_remove_angular_momentum_from_impulse` were authored as independent full-array stages rather than sharing the water-indexed `(W, 3)` impulse tuple.
+- **Generalizable Rule for `xtrax` Skill**:
+  1. Fuse water center-of-mass, relative coordinates, and regularized $3\times 3$ inertia tensor construction into a single pass per step.
+  2. Pass `dv_tuple = (dv_O, dv_H1, dv_H2)` directly into `_remove_angular_momentum_from_impulse` before performing a single final `.at[idx_O/H1/H2].set(...)` scatter onto the `(N, 3)` velocity array.
+
+### MK-34: `BatchTracer` Host-Fallback Box-Size Trap, Densest-Bundle Union-Mask NL Seed, & `_STACKED_INFERENCE_CACHE` (`B >= 2`)
+- **Category**: `Grid & Work-Unit Dispatch` / `Compilation Cache Sharing`
+- **Symptom / Failure Mode**:
+  1. Under `jax.vmap` (`B >= 2`), `bundle.box` is a `BatchTracer`, causing `_host_box_size(bundle, default=(30.0, 30.0, 30.0))` to catch `TracerArrayConversionError` and silently substitute a `30.0 A` box on a `61.645 A` solvated DHFR system—wrapping coordinates across a `30 A` boundary inside Pallas kernels and exploding to `NaN` on Step 0.
+  2. In heterogeneous same-bucket batches (e.g., `[sys_4199, ubq_6656]` in an `8,192` bucket), allocating the shared `NeighborList` seed from `bundles[0]` under-sizes `max_occupancy` and `cell_list_capacity` for the denser `bundles[1]`, whereas calling `neighbor_fn.allocate` per bundle produces incompatible `cell_list_capacity` shapes that cannot be stacked.
+  3. Repeated multi-bundle `EnsemblePlan.run(run_mode="inference")` calls re-stacked bundles, re-allocated neighbor lists on the host, and re-traced `_batched` whenever `n_steps` changed.
+- **Root Cause**:
+  1. Silent exception fallback in `_host_box_size` masked `BatchTracer` box inspection inside `vmap`.
+  2. `neighbor_fn.allocate` sizes `cell_list_capacity` and `max_occupancy` from the active density of the single input configuration.
+  3. Multi-bundle inference lacked an analog of `_SINGLE_INFERENCE_CACHE` with a dynamic `n_steps` scalar parameter.
+- **Generalizable Rule for `xtrax` Skill**:
+  1. Extract concrete `host_box_vec` on the host *before* entering `@jax.jit` / `jax.vmap` and attach it as a concrete `np.ndarray` on the energy-construction bundle so `vmap` never falls back to a default box size.
+  2. In `_build_stacked_neighbor_seed`, compute `union_mask = jnp.any(jnp.stack([b.atom_mask for b in bundles]), axis=0)` and call `neighbor_fn.allocate` **once** on `densest_bundle` with `atom_mask=union_mask`, pad columns in $O(1)$, and initialize the remaining bundles via `seed_invalidated.update(b_pos)`.
+  3. Cache `(stacked, stacked_neighbor, neighbor_fn, _batched)` in `_STACKED_INFERENCE_CACHE` with `n_steps` passed as a dynamic `jnp.int32` scalar into `_batched(stacked, seeds, stacked_neighbor, n_steps_arr)`.
+
+### MK-35: Capability- and Grid-Size-Aware `resolve_pallas_compiler_params` Across GPU Architectures (`prolix.export`)
+- **Category**: `Lowering & Triton Constraints` / `Grid & Work-Unit Dispatch`
+- **Symptom / Failure Mode**: Hardcoding `plt.CompilerParams()` (or over-tuning `num_warps`/`num_stages` for a single GPU SKU or a single large problem size) either wastes shared memory / registers on small-grid buckets (`grid_blocks < 256` on 132-SM Hopper / 140+-SM Blackwell) or under-utilizes pipeline stages on large multi-replica 2D grids (`B * n_blocks >= 256`), and placing `resolve_pallas_compiler_params` in `prolix.pallas_kernels` prevented `prolix.physics.{neighbor_list,pallas_bonded,pme_pallas}` from importing it at module top level without violating `tests/test_import_architecture.py`.
+- **Root Cause**: Different Pallas kernel families (`bonded_fused` 1D vs `nonbonded_nl`, `cell_prune`, `pme` 2D tiles) and different grid sizes (`grid_blocks < 256` vs `>= 256`) have distinct register and shared-memory footprints across `sm_80` (Ampere), `sm_89` (Ada L4/L40S), `sm_90` (Hopper H100/H200), and `sm_100`/`sm_120` (Blackwell B200/B300/RTX PRO 6000).
+- **Generalizable Rule for `xtrax` Skill**:
+  1. Place `resolve_pallas_compiler_params(kernel_kind, grid_blocks, ...)` in the shared leaf `prolix.export` (imported at top level by `neighbor_list.py`, `pallas_bonded.py`, `pme_pallas.py`, and `pallas_kernels.py`) and wire it into every `pl.pallas_call`.
+  2. Use `num_warps=2, num_stages=1` for 1D register-light `bonded_fused` kernels; for 2D-tiled `nonbonded_nl`, `cell_prune`, and `pme` kernels, use `num_warps=4` with `num_stages=1` on small grids (`0 < grid_blocks < 256`) to maximize multi-CTA SM occupancy and `num_stages=2` on large grids (`grid_blocks >= 256`), with `PROLIX_PALLAS_NUM_WARPS` and `PROLIX_PALLAS_NUM_STAGES` environment overrides.
+  3. **Verified Multi-GPU End-to-End `EnsemblePlan.run()` Throughput**:
+     - **NVIDIA H200 (`sm_90`, `261102_h200_pallas_v24_e2e_ensemble_buckets.json`)**:
+       - Solvated DHFR (`23,558` real atoms in `25,000` bucket): $B=1 \to 1.897\text{ ms/step}$ (`91.08 ns/day` at $\Delta t=2\text{ fs}$), $B=2 \to 1.173\text{ ms/step/replica}$ (`147.27 ns/day` agg), $B=4 \to 1.063\text{ ms/step/replica}$ (`162.52 ns/day` agg), $B=8 \to \mathbf{1.001\text{ ms/step/replica}}$ (**`172.56 ns/day` agg**).
+       - Medium solvated protein (`6,658` real atoms in `8,192` bucket): $B=1 \to 0.524\text{ ms/step}$ (`329.75 ns/day`), $B=4 \to 0.295\text{ ms/step/replica}$ (`585.13 ns/day` agg), $B=8 \to \mathbf{0.241\text{ ms/step/replica}}$ (**`716.44 ns/day` agg**).
+       - Heterogeneous same-bucket (`4,199` + `6,656` atoms in `8,192` bucket): **`0.384 ms/step/system`** (`0.767 ms/step` batch).
+       - Solvated DHFR WT + Mutant (`2 × 23,558` atoms with perturbed charges/$\sigma$/$\varepsilon$ in `25,000` bucket): **`1.177 ms/step/variant`** (`2.354 ms/step` batch, `5.305 Å` RMSD divergence, all finite).
+       - Heterogeneous multi-bucket (`[4199, 23558, 6656, 23558]` across `8,192` + `25,000` buckets): **`0.780 ms/step/system`** (`3.120 ms/step` total for 4 systems).
+     - **NVIDIA RTX PRO 6000 Blackwell (`sm_120`, Job `27817876`)**:
+       - Solvated DHFR (`23,558` real atoms in `25,000` bucket): $B=1 \to 1.884\text{ ms/step}$ (`91.74 ns/day`), $B=2 \to 1.387\text{ ms/step/replica}$ (`124.55 ns/day`), $B=4 \to 1.273\text{ ms/step/replica}$ (`135.72 ns/day`), $B=8 \to \mathbf{1.184\text{ ms/step/replica}}$ (**`145.94 ns/day` agg**).
+       - Medium solvated protein (`6,658` real atoms in `8,192` bucket): $B=1 \to 0.601\text{ ms/step}$ (`287.57 ns/day`), $B=4 \to 0.360\text{ ms/step/replica}$ (`479.54 ns/day`), $B=8 \to \mathbf{0.320\text{ ms/step/replica}}$ (**`539.74 ns/day` agg**).
+     - **NVIDIA L40S (`sm_89`, `261102_l40s_pallas_v24_e2e_ensemble_buckets.json`)**:
+       - Solvated DHFR (`23,558` real atoms in `25,000` bucket): $B=1 \to 2.168\text{ ms/step}$ (`79.69 ns/day`), $B=8 \to \mathbf{1.558\text{ ms/step/replica}}$ (**`110.93 ns/day` agg**); DHFR WT + Mutant: **`1.697 ms/step/variant`**; Medium `8,192` bucket $B=8$: **`0.372 ms/step/replica`** (**`464.45 ns/day` agg**); Heterogeneous multi-bucket (4 systems): **`1.066 ms/step/system`**.
+     - **NVIDIA L4 (`sm_89`, `261102_preempt_pallas_v24_e2e_ensemble_buckets.json`)**:
+       - Solvated DHFR (`25,000` bucket): $B=1 \to 5.438\text{ ms/step}$, $B=8 \to 5.002\text{ ms/step/replica}$ (`34.55 ns/day` agg); Medium `8,192` bucket: $B=1 \to 1.024\text{ ms/step}$ (`168.68 ns/day`); Heterogeneous same-bucket: **`1.000 ms/step/system`**.
+
+
