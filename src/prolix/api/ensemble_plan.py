@@ -878,6 +878,7 @@ class EnsemblePlan:
                         use_pallas_pme,
                         bool(jax.config.jax_enable_x64),
                         os.environ.get("PROLIX_USE_PALLAS", ""),
+                        os.environ.get("PROLIX_PME_GRID_POINTS", ""),
                         getattr(_bmd, "single_padded_energy", None),
                         getattr(_bmd, "pallas_bonded_all_fused", None),
                         getattr(_be, "pallas_bonded_all_fused", None),
@@ -1485,6 +1486,7 @@ class EnsemblePlan:
                     use_pallas_pme,
                     bool(jax.config.jax_enable_x64),
                     os.environ.get("PROLIX_USE_PALLAS", ""),
+                    os.environ.get("PROLIX_PME_GRID_POINTS", ""),
                     getattr(_bmd, "single_padded_energy", None),
                     getattr(_bmd, "pallas_bonded_all_fused", None),
                     getattr(_be, "pallas_bonded_all_fused", None),
@@ -1731,7 +1733,7 @@ class EnsemblePlan:
                                     nl_mod.partition.PartitionErrorCode.NEIGHBOR_LIST_OVERFLOW
                                 )
                                 err_new = jnp.where(occ_new > max_occ_i, e_o | overflow_bit, e_o)
-                                return idx_new, p_w, err_new, p_o
+                                return idx_new, p_w.astype(r_o.dtype), err_new, p_o
                             forced_ref = r_o + jnp.asarray(0.5, dtype=r_o.dtype) * bx_o.astype(r_o.dtype)
                             n_tmp = dataclasses.replace(
                                 neighbor,
@@ -1824,7 +1826,7 @@ class EnsemblePlan:
                                     nl_mod.partition.PartitionErrorCode.NEIGHBOR_LIST_OVERFLOW
                                 )
                                 err_new_b = jnp.where(occ_new_b > max_occ_i, e_b | overflow_bit, e_b)
-                                return idx_new_b, p_w_b, err_new_b, p_b
+                                return idx_new_b, p_w_b.astype(r_b.dtype), err_new_b, p_b
 
                             ei_full = jnp.broadcast_to(ei_op, (B, *ei_op.shape[1:]))
                             ev_full = jnp.broadcast_to(ev_op, (B, *ev_op.shape[1:]))

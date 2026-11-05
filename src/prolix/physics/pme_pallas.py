@@ -310,6 +310,7 @@ def _gather_pallas_batch(
     theta_norm: jax.Array,
     grid_dims: tuple[int, int, int],
     interpret: bool,
+    compute_dq: bool = True,
 ) -> tuple[jax.Array, jax.Array]:
     b_pos, b_q, b_m, b_box, b_mesh = in_batched
     Kx, Ky, Kz = (int(grid_dims[0]), int(grid_dims[1]), int(grid_dims[2]))
@@ -362,7 +363,7 @@ def _gather_pallas_batch(
         fx_out_ref,
         fy_out_ref,
         fz_out_ref,
-        dq_out_ref,
+        *dq_out_refs,
     ):
         b_id = pl.program_id(0)
         pid = pl.program_id(1)
@@ -441,8 +442,11 @@ def _gather_pallas_batch(
             sy = ky / by
             sz = kz / bz
 
-            w_unit = wx_s * wy_s * wz_s
-            dq_v = jnp.where(is_real, jnp.sum(w_unit * t_val, axis=-1), zero).astype(dtype)
+            if compute_dq:
+                w_unit = wx_s * wy_s * wz_s
+                dq_v = jnp.where(is_real, jnp.sum(w_unit * t_val, axis=-1), zero).astype(dtype)
+            else:
+                dq_v = zero_vec
             dpx_v = jnp.where(
                 is_real,
                 qi * sx * jnp.sum(dwx_s * wy_s * wz_s * t_val, axis=-1),
@@ -470,32 +474,52 @@ def _gather_pallas_batch(
         _pl_store(fx_out_ref, (out_base + offs,), dpx)
         _pl_store(fy_out_ref, (out_base + offs,), dpy)
         _pl_store(fz_out_ref, (out_base + offs,), dpz)
-        _pl_store(dq_out_ref, (out_base + offs,), dq)
+        if compute_dq:
+            _pl_store(dq_out_refs[0], (out_base + offs,), dq)
 
     any_spec = pl.BlockSpec(memory_space=pl.ANY)
-    fx_pad, fy_pad, fz_pad, dq_pad = pl.pallas_call(
-        _gather_kernel,
-        out_shape=[
-            jax.ShapeDtypeStruct((B * n_pad,), dtype),
-            jax.ShapeDtypeStruct((B * n_pad,), dtype),
-            jax.ShapeDtypeStruct((B * n_pad,), dtype),
-            jax.ShapeDtypeStruct((B * n_pad,), dtype),
-        ],
-        in_specs=[any_spec] * 7,
-        out_specs=[any_spec] * 4,
-        grid=(B, n_blocks),
-        interpret=interpret,
-        compiler_params=resolve_pallas_compiler_params("pme", grid_blocks=B * n_blocks)
-        if not interpret
-        else None,
-        name="pme_bwd_gather",
-    )(pos_x, pos_y, pos_z, q_flat, mask_flat, box_flat, theta_flat)
+    if compute_dq:
+        fx_pad, fy_pad, fz_pad, dq_pad = pl.pallas_call(
+            _gather_kernel,
+            out_shape=[
+                jax.ShapeDtypeStruct((B * n_pad,), dtype),
+                jax.ShapeDtypeStruct((B * n_pad,), dtype),
+                jax.ShapeDtypeStruct((B * n_pad,), dtype),
+                jax.ShapeDtypeStruct((B * n_pad,), dtype),
+            ],
+            in_specs=[any_spec] * 7,
+            out_specs=[any_spec] * 4,
+            grid=(B, n_blocks),
+            interpret=interpret,
+            compiler_params=resolve_pallas_compiler_params("pme", grid_blocks=B * n_blocks)
+            if not interpret
+            else None,
+            name="pme_bwd_gather",
+        )(pos_x, pos_y, pos_z, q_flat, mask_flat, box_flat, theta_flat)
+        dq_b = dq_pad.reshape((B, n_pad))[:, :n_atoms].astype(orig_dtype)
+    else:
+        fx_pad, fy_pad, fz_pad = pl.pallas_call(
+            _gather_kernel,
+            out_shape=[
+                jax.ShapeDtypeStruct((B * n_pad,), dtype),
+                jax.ShapeDtypeStruct((B * n_pad,), dtype),
+                jax.ShapeDtypeStruct((B * n_pad,), dtype),
+            ],
+            in_specs=[any_spec] * 7,
+            out_specs=[any_spec] * 3,
+            grid=(B, n_blocks),
+            interpret=interpret,
+            compiler_params=resolve_pallas_compiler_params("pme", grid_blocks=B * n_blocks)
+            if not interpret
+            else None,
+            name="pme_bwd_gather",
+        )(pos_x, pos_y, pos_z, q_flat, mask_flat, box_flat, theta_flat)
+        dq_b = jnp.zeros((B, n_atoms), dtype=orig_dtype)
     fx_b = fx_pad.reshape((B, n_pad))[:, :n_atoms]
     fy_b = fy_pad.reshape((B, n_pad))[:, :n_atoms]
     fz_b = fz_pad.reshape((B, n_pad))[:, :n_atoms]
-    dq_b = dq_pad.reshape((B, n_pad))[:, :n_atoms]
     dpos = jnp.stack([fx_b, fy_b, fz_b], axis=-1)
-    return dpos.astype(orig_dtype), dq_b.astype(orig_dtype)
+    return dpos.astype(orig_dtype), dq_b
 
 
 def _gather_pallas_single(
@@ -506,6 +530,7 @@ def _gather_pallas_single(
     theta_norm: jax.Array,
     grid_dims: tuple[int, int, int],
     interpret: bool,
+    compute_dq: bool = True,
 ) -> tuple[jax.Array, jax.Array]:
     dpos_b, dq_b = _gather_pallas_batch(
         1,
@@ -517,6 +542,7 @@ def _gather_pallas_single(
         theta_norm,
         grid_dims,
         interpret,
+        compute_dq=compute_dq,
     )
     return dpos_b[0], dq_b[0]
 
@@ -533,6 +559,7 @@ def gather_pallas(
     atom_perm: jax.Array | None = None,
     atom_inv_perm: jax.Array | None = None,
     interpret: bool = False,
+    compute_dq: bool = True,
 ) -> tuple[jax.Array, jax.Array]:
     """Gather potential and dE/dr contributions from ``theta_norm``.
 
@@ -542,6 +569,7 @@ def gather_pallas(
     if order != 4:
         raise NotImplementedError("Pallas SPME stencil is order-4 only")
     grid_tuple = (int(grid_dims[0]), int(grid_dims[1]), int(grid_dims[2]))
+    cdq = bool(compute_dq)
 
     inv_p = None
     if atom_perm is not None:
@@ -562,7 +590,9 @@ def gather_pallas(
 
     @jax.custom_batching.custom_vmap
     def _vmappable(pos, q, mask, box, dE_dmesh):
-        return _gather_pallas_single(pos, q, mask, box, dE_dmesh, grid_tuple, interpret)
+        return _gather_pallas_single(
+            pos, q, mask, box, dE_dmesh, grid_tuple, interpret, compute_dq=cdq
+        )
 
     @_vmappable.def_vmap
     def _vmap_rule(axis_size, in_batched, pos, q, mask, box, dE_dmesh):
@@ -576,6 +606,7 @@ def gather_pallas(
             dE_dmesh,
             grid_tuple,
             interpret,
+            compute_dq=cdq,
         )
         return (dpos_out, dq_out), (True, True)
 
@@ -595,6 +626,7 @@ def gather_pallas(
             theta_norm,
             grid_tuple,
             interpret,
+            compute_dq=cdq,
         )
         if inv_p is not None:
             return dpos_s[:, inv_p, :], dq_s[:, inv_p]
@@ -672,6 +704,7 @@ def make_gather_op(
     grid_dims: tuple[int, int, int],
     order: int = 4,
     *,
+    compute_dq: bool = True,
     context: object | None = None,
 ):
     """Build the SPME backward gather op for one mesh shape."""
@@ -680,6 +713,7 @@ def make_gather_op(
     import xtrax
 
     dims = (int(grid_dims[0]), int(grid_dims[1]), int(grid_dims[2]))
+    cdq = bool(compute_dq)
 
     def _gather_ref_one(pos_1, q_1, mask_1, box_1, theta_1):
         dtype = pos_1.dtype
@@ -708,7 +742,11 @@ def make_gather_op(
         dwx_s = _select_stencil(dwx, ox)
         dwy_s = _select_stencil(dwy, oy)
         dwz_s = _select_stencil(dwz, oz)
-        pot = jnp.where(mask_1 > 0, jnp.sum(wx_s * wy_s * wz_s * t_val, axis=1), 0.0).astype(dtype)
+        pot = (
+            jnp.where(mask_1 > 0, jnp.sum(wx_s * wy_s * wz_s * t_val, axis=1), 0.0).astype(dtype)
+            if cdq
+            else jnp.zeros_like(q_1, dtype=dtype)
+        )
         q_masked = (q_1 * (mask_1 > 0).astype(q_1.dtype)).astype(dtype)
         scale = K_arr / box_arr
         fx = q_masked * scale[0] * jnp.sum(dwx_s * wy_s * wz_s * t_val, axis=1)
@@ -737,8 +775,12 @@ def make_gather_op(
     return xtrax.op(
         _gather_ref,
         kernels={
-            "gpu": functools.partial(gather_pallas, grid_dims=dims, order=order, interpret=False),
-            "cpu": functools.partial(gather_pallas, grid_dims=dims, order=order, interpret=True),
+            "gpu": functools.partial(
+                gather_pallas, grid_dims=dims, order=order, interpret=False, compute_dq=cdq
+            ),
+            "cpu": functools.partial(
+                gather_pallas, grid_dims=dims, order=order, interpret=True, compute_dq=cdq
+            ),
         },
         name="pme_gather",
         context=context,

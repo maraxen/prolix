@@ -1297,13 +1297,16 @@ def test_pallas_v24_multi_gpu_compiler_params_resolution(monkeypatch):
         "NVIDIA L40S",
         "NVIDIA A100",
     ):
+        # Small grid (< 256 blocks) uses 1 stage for higher SM occupancy across architectures
         cp_small = resolve_pallas_compiler_params("nonbonded_nl", grid_blocks=64, device_kind=gpu_name)
         assert cp_small.num_warps == 4
         assert cp_small.num_stages == 1
 
         cp_large = resolve_pallas_compiler_params("nonbonded_nl", grid_blocks=1024, device_kind=gpu_name)
         assert cp_large.num_warps == 4
-        assert cp_large.num_stages == 2
+        # Blackwell (B300 / RTX PRO 6000 Blackwell) uses num_stages=1 across all grid sizes (MK-43/MK-45)
+        expected_stages = 1 if ("B300" in gpu_name or "Blackwell" in gpu_name) else 2
+        assert cp_large.num_stages == expected_stages
 
     cp_bonded = resolve_pallas_compiler_params("bonded_fused", grid_blocks=128, device_kind="NVIDIA B300")
     assert cp_bonded.num_warps == 2
@@ -1315,4 +1318,445 @@ def test_pallas_v24_multi_gpu_compiler_params_resolution(monkeypatch):
     cp_env = resolve_pallas_compiler_params("nonbonded_nl", grid_blocks=512, device_kind="NVIDIA H200")
     assert cp_env.num_warps == 8
     assert cp_env.num_stages == 3
+
+
+def test_pallas_v25_fused_bonded_and_nonbonded_nl_megakernel_parity_and_dispatch(monkeypatch):
+    """MK-36: pallas_bonded_and_nonbonded_nl_fused matches separate kernels (B=1, vmap B=2, param grads, CUDA lowering) and is dispatched by single_padded_energy."""
+    import prolix.pallas_kernels as pk
+    from prolix.pallas_kernels import (
+        pallas_bonded_all_fused,
+        pallas_bonded_and_nonbonded_nl_fused,
+        pallas_nonbonded_nl,
+    )
+
+    prev_x64 = jax.config.read("jax_enable_x64")
+    jax.config.update("jax_enable_x64", True)
+    try:
+        bundle = _make_periodic_solvated_bundle(dtype=jnp.float64, seed=55)
+        disp_fn, _ = displacement_fn_for_bundle(bundle)
+        box_vec = jnp.diag(bundle.box)
+        neighbor_fn = nl_mod.make_neighbor_list_fn(
+            disp_fn, box_vec, 9.0, capacity_multiplier=1.5, dr_threshold=0.5, atom_mask=bundle.atom_mask
+        )
+        nbr_enc = _encode_bundle_nl(neighbor_fn.allocate(bundle.positions), bundle)
+
+        def _fused_eval(pos, q, sig, eps, bp, ap, dp):
+            return pallas_bonded_and_nonbonded_nl_fused(
+                pos,
+                q,
+                sig,
+                eps,
+                bundle.atom_mask,
+                nbr_enc.idx,
+                bundle.excl_dense_indices,
+                bundle.excl_dense_scales_vdw,
+                bundle.excl_dense_scales_elec,
+                bonds=bundle.bond_idx,
+                bond_params=bp,
+                bond_mask=bundle.bond_mask,
+                angles=bundle.angle_idx,
+                angle_params=ap,
+                angle_mask=bundle.angle_mask,
+                dihedrals=bundle.dihedral_idx,
+                dihedral_params=dp,
+                dihedral_mask=bundle.dihedral_mask,
+                impropers=bundle.improper_idx,
+                improper_params=bundle.improper_params,
+                improper_mask=bundle.improper_mask,
+                exception_pairs=bundle.exception_pairs,
+                exception_sigmas=bundle.exception_sigmas,
+                exception_epsilons=bundle.exception_epsilons,
+                exception_chargeprods=bundle.exception_chargeprods,
+                exception_mask=bundle.exception_mask,
+                box=box_vec,
+                pme_alpha=float(bundle.pme_alpha),
+                cutoff=float(bundle.cutoff_distance),
+                excl_mode="pre_encoded",
+                interpret=True,
+            )
+
+        def _sep_eval(pos, q, sig, eps, bp, ap, dp):
+            e_b = pallas_bonded_all_fused(
+                pos,
+                bonds=bundle.bond_idx,
+                bond_params=bp,
+                bond_mask=bundle.bond_mask,
+                angles=bundle.angle_idx,
+                angle_params=ap,
+                angle_mask=bundle.angle_mask,
+                dihedrals=bundle.dihedral_idx,
+                dihedral_params=dp,
+                dihedral_mask=bundle.dihedral_mask,
+                impropers=bundle.improper_idx,
+                improper_params=bundle.improper_params,
+                improper_mask=bundle.improper_mask,
+                exception_pairs=bundle.exception_pairs,
+                exception_sigmas=bundle.exception_sigmas,
+                exception_epsilons=bundle.exception_epsilons,
+                exception_chargeprods=bundle.exception_chargeprods,
+                exception_mask=bundle.exception_mask,
+                box=box_vec,
+                interpret=True,
+            )
+            e_nb = pallas_nonbonded_nl(
+                pos,
+                q,
+                sig,
+                eps,
+                bundle.atom_mask,
+                nbr_enc.idx,
+                bundle.excl_dense_indices,
+                bundle.excl_dense_scales_vdw,
+                bundle.excl_dense_scales_elec,
+                box=box_vec,
+                pme_alpha=float(bundle.pme_alpha),
+                cutoff=float(bundle.cutoff_distance),
+                excl_mode="pre_encoded",
+                interpret=True,
+            )
+            return e_b + e_nb
+
+        args = (
+            bundle.positions,
+            bundle.charges,
+            bundle.sigmas,
+            bundle.epsilons,
+            bundle.bond_params,
+            bundle.angle_params,
+            bundle.dihedral_params,
+        )
+        # 1. Position-only grad parity (MD fast path)
+        e_f, g_f = jax.value_and_grad(_fused_eval, argnums=0)(*args)
+        e_s, g_s = jax.value_and_grad(_sep_eval, argnums=0)(*args)
+        np.testing.assert_allclose(np.asarray(e_f), np.asarray(e_s), rtol=1e-5, atol=1e-4)
+        np.testing.assert_allclose(np.asarray(g_f), np.asarray(g_s), rtol=1e-4, atol=1e-4)
+
+        # 2. Full parameter gradient parity (symbolic_zeros=True active AD)
+        _, grads_f = jax.value_and_grad(_fused_eval, argnums=(0, 1, 2, 3, 4, 5, 6))(*args)
+        _, grads_s = jax.value_and_grad(_sep_eval, argnums=(0, 1, 2, 3, 4, 5, 6))(*args)
+        for gf, gs in zip(grads_f, grads_s):
+            np.testing.assert_allclose(np.asarray(gf), np.asarray(gs), rtol=1e-4, atol=1e-4)
+
+        # 3. Batched vmap (B=2) + single_padded_energy dispatch verification
+        fused_batch_calls: list[int] = []
+        orig_fused_batch = pk._pallas_bonded_and_nonbonded_nl_fused_batch
+
+        def spy_fused_batch(B, *a, **kw):
+            fused_batch_calls.append(int(B))
+            return orig_fused_batch(B, *a, **kw)
+
+        monkeypatch.setattr(pk, "_pallas_bonded_and_nonbonded_nl_fused_batch", spy_fused_batch)
+        e_fn = energy_fn_from_bundle(
+            bundle,
+            build_dense_exclusions=False,
+            use_pallas=True,
+            use_pallas_pme=True,
+            excl_mode="pre_encoded",
+        )
+        pos_b = jnp.stack([bundle.positions, bundle.positions + 0.05], axis=0)
+        nbr_b = jax.tree_util.tree_map(lambda x: jnp.stack([x, x], axis=0), nbr_enc)
+        vg_b = jax.jit(jax.vmap(jax.value_and_grad(lambda r, n: e_fn(r, neighbor=n))))
+        eb, gb = vg_b(pos_b, nbr_b)
+        assert 2 in fused_batch_calls
+        assert bool(jnp.all(jnp.isfinite(eb)))
+        assert bool(jnp.all(jnp.isfinite(gb)))
+
+        # 4. Offline CUDA Triton MLIR lowering verification (interpret=False)
+        lowered_cuda = (
+            jax.jit(
+                lambda r: pallas_bonded_and_nonbonded_nl_fused(
+                    r,
+                    bundle.charges,
+                    bundle.sigmas,
+                    bundle.epsilons,
+                    bundle.atom_mask,
+                    nbr_enc.idx,
+                    bundle.excl_dense_indices,
+                    bundle.excl_dense_scales_vdw,
+                    bundle.excl_dense_scales_elec,
+                    bonds=bundle.bond_idx,
+                    bond_params=bundle.bond_params,
+                    bond_mask=bundle.bond_mask,
+                    angles=bundle.angle_idx,
+                    angle_params=bundle.angle_params,
+                    angle_mask=bundle.angle_mask,
+                    dihedrals=bundle.dihedral_idx,
+                    dihedral_params=bundle.dihedral_params,
+                    dihedral_mask=bundle.dihedral_mask,
+                    box=box_vec,
+                    pme_alpha=float(bundle.pme_alpha),
+                    cutoff=float(bundle.cutoff_distance),
+                    excl_mode="pre_encoded",
+                    interpret=False,
+                )
+            )
+            .trace(bundle.positions)
+            .lower(lowering_platforms=("cuda",))
+        )
+        assert "pallas_bonded_and_nonbonded_nl_fused" in lowered_cuda.as_text()
+    finally:
+        jax.config.update("jax_enable_x64", prev_x64)
+
+
+def test_pallas_v25_compacted_k_tile_early_exit_parity():
+    """MK-37: while_loop K-tile early exit on compacted pre_encoded NL matches across K=32 and K=256."""
+    from prolix.pallas_kernels import pallas_nonbonded_nl
+    from prolix.physics.neighbor_list import encode_nl_exclusions
+
+    N = 64
+    rng = np.random.default_rng(2026)
+    pos = jnp.asarray(rng.uniform(2.0, 22.0, size=(N, 3)).astype(np.float32))
+    q = jnp.asarray(rng.uniform(-0.4, 0.4, size=(N,)).astype(np.float32))
+    sig = jnp.full((N,), 3.1, dtype=jnp.float32)
+    eps = jnp.full((N,), 0.08, dtype=jnp.float32)
+    mask = jnp.arange(N) < 48
+    box = jnp.array([25.0, 25.0, 25.0], dtype=jnp.float32)
+    ei = jnp.full((N, 4), -1, dtype=jnp.int32)
+    ev = jnp.ones((N, 4), dtype=jnp.float32)
+    ee = jnp.ones((N, 4), dtype=jnp.float32)
+
+    # Construct a sparse neighbor list with <= 12 neighbors per atom, padded to K=32 vs K=256
+    nbr_raw_32 = np.full((N, 32), N, dtype=np.int32)
+    for i in range(48):
+        # Put valid neighbors at scattered column indices to also verify compaction when atom_mask=None
+        nbr_raw_32[i, [3, 11, 19, 27]] = [(i + 1) % 48, (i + 2) % 48, (i + 3) % 48, (i + 5) % 48]
+    nbr_enc_32 = encode_nl_exclusions(jnp.asarray(nbr_raw_32), ei, ev, ee, n_atoms=N, atom_mask=None)
+    # Verify compaction moved the 4 valid entries to columns 0..3 even with atom_mask=None
+    assert bool(jnp.all(nbr_enc_32[:48, 4:] == N))
+
+    nbr_raw_256 = np.full((N, 256), N, dtype=np.int32)
+    nbr_raw_256[:, :32] = nbr_raw_32
+    nbr_enc_256 = encode_nl_exclusions(jnp.asarray(nbr_raw_256), ei, ev, ee, n_atoms=N, atom_mask=mask)
+    assert bool(jnp.all(nbr_enc_256[:, 32:] == N))
+
+    e_32, g_32 = jax.value_and_grad(
+        lambda r: pallas_nonbonded_nl(
+            r, q, sig, eps, mask, nbr_enc_32, ei, ev, ee,
+            box=box, pme_alpha=0.34, cutoff=9.0, excl_mode="pre_encoded", interpret=True,
+        )
+    )(pos)
+    e_256, g_256 = jax.value_and_grad(
+        lambda r: pallas_nonbonded_nl(
+            r, q, sig, eps, mask, nbr_enc_256, ei, ev, ee,
+            box=box, pme_alpha=0.34, cutoff=9.0, excl_mode="pre_encoded", interpret=True,
+        )
+    )(pos)
+    np.testing.assert_allclose(np.asarray(e_32), np.asarray(e_256), rtol=1e-6, atol=1e-6)
+    np.testing.assert_allclose(np.asarray(g_32), np.asarray(g_256), rtol=1e-6, atol=1e-6)
+
+
+def test_pallas_v25_spme_active_ad_charge_gradient_gating(monkeypatch):
+    """MK-38: spme_energy_with_forces sets compute_dq=False when charges is unperturbed and True when differentiated."""
+    import prolix.physics.pme_pallas as pme_pallas
+    from prolix.physics.pme import spme_energy_with_forces
+
+    N = 32
+    rng = np.random.default_rng(88)
+    pos = jnp.asarray(rng.uniform(1.0, 18.0, size=(N, 3)).astype(np.float32))
+    q = jnp.asarray(rng.uniform(-0.5, 0.5, size=(N,)).astype(np.float32))
+    q = q - jnp.mean(q)
+    mask = jnp.ones((N,), dtype=jnp.bool_)
+    box = jnp.array([20.0, 20.0, 20.0], dtype=jnp.float32)
+    grid_dims = (16, 16, 16)
+
+    seen_compute_dq: list[bool] = []
+    orig_gather_batch = pme_pallas._gather_pallas_batch
+
+    def spy_gather_batch(B, in_batched, positions, charges, atom_mask, box_size, theta_norm, gdims, interpret, compute_dq=True):
+        seen_compute_dq.append(bool(compute_dq))
+        return orig_gather_batch(
+            B, in_batched, positions, charges, atom_mask, box_size, theta_norm, gdims, interpret, compute_dq=compute_dq
+        )
+
+    monkeypatch.setattr(pme_pallas, "_gather_pallas_batch", spy_gather_batch)
+
+    # 1. Position-only gradient (MD step): compute_dq must be False
+    seen_compute_dq.clear()
+    e_pos, g_pos = jax.value_and_grad(
+        lambda r: spme_energy_with_forces(r, q, mask, box, grid_dims, 0.34, 4, True)
+    )(pos)
+    assert seen_compute_dq and all(v is False for v in seen_compute_dq)
+    assert bool(jnp.isfinite(e_pos)) and bool(jnp.all(jnp.isfinite(g_pos)))
+
+    # 2. Position + charge gradient: compute_dq must be True and match XLA reference
+    seen_compute_dq.clear()
+    e_pq, (g_pos_pq, g_q_pal) = jax.value_and_grad(
+        lambda r, c: spme_energy_with_forces(r, c, mask, box, grid_dims, 0.34, 4, True),
+        argnums=(0, 1),
+    )(pos, q)
+    assert seen_compute_dq and all(v is True for v in seen_compute_dq)
+    _, (g_pos_xla, g_q_xla) = jax.value_and_grad(
+        lambda r, c: spme_energy_with_forces(r, c, mask, box, grid_dims, 0.34, 4, False),
+        argnums=(0, 1),
+    )(pos, q)
+    np.testing.assert_allclose(np.asarray(g_pos), np.asarray(g_pos_pq), rtol=1e-5, atol=1e-5)
+    np.testing.assert_allclose(np.asarray(g_q_pal), np.asarray(g_q_xla), rtol=1e-4, atol=1e-4)
+
+
+def test_pallas_v26_spme_float32_fft_and_single_megakernel_store_and_grid_points(monkeypatch):
+    """MK-36, MK-41, MK-42:
+    1. Under jax_enable_x64=True and use_pallas_pme=True, _spme_fwd and _spme_cached_fwd run 3D FFTs
+       in float32/complex64 (theta_norm.dtype == float32) while returning float64 energy and forces,
+       for both 1D (3,) and 2D batched orthorhombic (B, 3) boxes (including B=3).
+    2. pallas_bonded_and_nonbonded_nl_fused with total_bonded_blocks == 0 and with mixed bonded
+       protein blocks + pure-solvent blocks (blk_has_bonded direct _pl_store fast path) matches
+       separate kernels to float32 precision.
+    3. PROLIX_PME_GRID_POINTS (both scalar and bucket-mapped '8192:48,25000:64') overrides
+       make_spme_energy_fn's FFT grid dimensions when grid_dims is None.
+    """
+    from prolix.pallas_kernels import (
+        pallas_bonded_all_fused,
+        pallas_bonded_and_nonbonded_nl_fused,
+        pallas_nonbonded_nl,
+    )
+    from prolix.physics.neighbor_list import encode_nl_exclusions
+    from prolix.physics.pme import (
+        _resolve_env_pme_grid_points,
+        _spme_cached_fwd,
+        _spme_fwd,
+        make_spme_energy_fn,
+        spme_energy_with_forces,
+    )
+
+    prev_x64 = jax.config.jax_enable_x64
+    jax.config.update("jax_enable_x64", True)
+    try:
+        N = 64
+        rng = np.random.default_rng(123)
+        pos_f64 = jnp.asarray(rng.uniform(1.5, 18.5, size=(N, 3)), dtype=jnp.float64)
+        q_f64 = jnp.asarray(rng.uniform(-0.4, 0.4, size=(N,)), dtype=jnp.float64)
+        q_f64 = q_f64 - jnp.mean(q_f64)
+        mask = jnp.ones((N,), dtype=jnp.bool_)
+        box_f64 = jnp.array([20.0, 20.0, 20.0], dtype=jnp.float64)
+        grid_dims = (16, 16, 16)
+
+        # 1a. Verify _spme_fwd and _spme_cached_fwd produce float32 theta_norm when use_pallas_pme=True
+        e_fwd, res_fwd = _spme_fwd(pos_f64, q_f64, mask, box_f64, grid_dims, 0.34, 4, True)
+        theta_norm_fwd = res_fwd[4]
+        assert theta_norm_fwd.dtype == jnp.float32
+        assert e_fwd.dtype == jnp.float64
+
+        G_dummy = jnp.ones((16, 16, 9), dtype=jnp.float64)
+        e_cfwd, res_cfwd = _spme_cached_fwd(pos_f64, q_f64, mask, G_dummy, box_f64, grid_dims, 0.34, 4, True)
+        theta_norm_cfwd = res_cfwd[4]
+        assert theta_norm_cfwd.dtype == jnp.float32
+        assert e_cfwd.dtype == jnp.float64
+
+        # Verify end-to-end energy and force parity against XLA float64 reference
+        e_pal, g_pal = jax.value_and_grad(
+            lambda r: spme_energy_with_forces(r, q_f64, mask, box_f64, grid_dims, 0.34, 4, True)
+        )(pos_f64)
+        e_xla, g_xla = jax.value_and_grad(
+            lambda r: spme_energy_with_forces(r, q_f64, mask, box_f64, grid_dims, 0.34, 4, False)
+        )(pos_f64)
+        assert e_pal.dtype == jnp.float64 and g_pal.dtype == jnp.float64
+        np.testing.assert_allclose(np.asarray(e_pal), np.asarray(e_xla), rtol=1e-5, atol=1e-4)
+        np.testing.assert_allclose(np.asarray(g_pal), np.asarray(g_xla), rtol=1e-4, atol=1e-4)
+
+        # 1b. Verify batched orthorhombic box_size (B, 3) for B=2 and B=3 (where shape == (3, 3))
+        for B_test in (2, 3):
+            pos_b = jnp.stack([pos_f64 + 0.03 * b for b in range(B_test)], axis=0)
+            q_b = jnp.stack([q_f64 for _ in range(B_test)], axis=0)
+            mask_b = jnp.stack([mask for _ in range(B_test)], axis=0)
+            box_b = jnp.stack(
+                [jnp.array([20.0 + 0.5 * b, 20.0 + 0.5 * b, 20.0 + 0.5 * b], dtype=jnp.float64) for b in range(B_test)],
+                axis=0,
+            )
+            e_b_fwd, res_b_fwd = _spme_fwd(pos_b, q_b, mask_b, box_b, grid_dims, 0.34, 4, True)
+            assert res_b_fwd[4].dtype == jnp.float32
+            assert e_b_fwd.shape == (B_test,) and e_b_fwd.dtype == jnp.float64
+
+            g_b = jax.grad(
+                lambda r: jnp.sum(spme_energy_with_forces(r, q_b, mask_b, box_b, grid_dims, 0.34, 4, True))
+            )(pos_b)
+            g_b_ref = jnp.stack(
+                [
+                    jax.grad(
+                        lambda r1, b=b: spme_energy_with_forces(
+                            r1, q_b[b], mask_b[b], box_b[b], grid_dims, 0.34, 4, False
+                        )
+                    )(pos_b[b])
+                    for b in range(B_test)
+                ],
+                axis=0,
+            )
+            np.testing.assert_allclose(np.asarray(g_b), np.asarray(g_b_ref), rtol=1e-4, atol=1e-4)
+
+        # 2. Verify PROLIX_PME_GRID_POINTS (scalar and bucket-mapped) in make_spme_energy_fn
+        monkeypatch.setenv("PROLIX_PME_GRID_POINTS", "24")
+        fn_24 = make_spme_energy_fn(box_f64, alpha=0.34, grid_spacing=1.0, use_pallas_pme=True)
+        assert fn_24.G_cached.shape == (24, 24, 13)
+        monkeypatch.setenv("PROLIX_PME_GRID_POINTS", "8192:48,25000:64")
+        assert _resolve_env_pme_grid_points(n_atoms=4199) == 48
+        assert _resolve_env_pme_grid_points(n_atoms=8192) == 48
+        assert _resolve_env_pme_grid_points(n_atoms=25000) == 64
+        fn_48 = make_spme_energy_fn(box_f64, alpha=0.34, grid_spacing=1.0, use_pallas_pme=True, n_atoms=8192)
+        fn_64 = make_spme_energy_fn(box_f64, alpha=0.34, grid_spacing=1.0, use_pallas_pme=True, n_atoms=25000)
+        assert fn_48.G_cached.shape == (48, 48, 25)
+        assert fn_64.G_cached.shape == (64, 64, 33)
+        monkeypatch.delenv("PROLIX_PME_GRID_POINTS", raising=False)
+
+        # 3. Verify pallas_bonded_and_nonbonded_nl_fused with total_bonded_blocks == 0 AND
+        #    with mixed bonded block 0 (atoms 0..31) + pure-water block 1 (atoms 32..63, zero bonded terms),
+        #    plus MK-43 resolve_pallas_compiler_params("megakernel") num_warps=4, num_stages=1
+        from prolix.export import resolve_pallas_compiler_params
+
+        cp_mk = resolve_pallas_compiler_params("megakernel", grid_blocks=4096)
+        assert cp_mk.num_warps == 4
+        assert cp_mk.num_stages == 1
+        sig = jnp.full((N,), 3.1, dtype=jnp.float64)
+        eps = jnp.full((N,), 0.12, dtype=jnp.float64)
+        ei = jnp.full((N, 4), -1, dtype=jnp.int32)
+        ev = jnp.ones((N, 4), dtype=jnp.float64)
+        ee = jnp.ones((N, 4), dtype=jnp.float64)
+        nbr_raw = np.full((N, 16), N, dtype=np.int32)
+        for i in range(N):
+            nbr_raw[i, :3] = [(i + 1) % N, (i + 2) % N, (i + 3) % N]
+        nbr_enc = encode_nl_exclusions(jnp.asarray(nbr_raw), ei, ev, ee, n_atoms=N, atom_mask=mask)
+
+        e_fused_0, g_fused_0 = jax.value_and_grad(
+            lambda r: pallas_bonded_and_nonbonded_nl_fused(
+                r, q_f64, sig, eps, mask, nbr_enc, ei, ev, ee,
+                box=box_f64, pme_alpha=0.34, cutoff=9.0, excl_mode="pre_encoded", interpret=True,
+            )
+        )(pos_f64)
+        e_nb_only, g_nb_only = jax.value_and_grad(
+            lambda r: pallas_nonbonded_nl(
+                r, q_f64, sig, eps, mask, nbr_enc, ei, ev, ee,
+                box=box_f64, pme_alpha=0.34, cutoff=9.0, excl_mode="pre_encoded", interpret=True,
+            )
+        )(pos_f64)
+        np.testing.assert_allclose(np.asarray(e_fused_0), np.asarray(e_nb_only), rtol=1e-5, atol=1e-3)
+        np.testing.assert_allclose(np.asarray(g_fused_0), np.asarray(g_nb_only), rtol=1e-5, atol=1e-3)
+
+        # Mixed protein (block 0 has harmonic bonds) + pure water (block 1 has zero bonded terms)
+        bonds_blk0 = jnp.array([[0, 1], [2, 3], [10, 15], [20, 31]], dtype=jnp.int32)
+        bond_params_blk0 = jnp.array(
+            [[1.5, 300.0], [1.4, 280.0], [1.55, 250.0], [1.48, 310.0]], dtype=jnp.float64
+        )
+        bond_mask_blk0 = jnp.ones((4,), dtype=jnp.float64)
+
+        e_mixed, g_mixed = jax.value_and_grad(
+            lambda r: pallas_bonded_and_nonbonded_nl_fused(
+                r, q_f64, sig, eps, mask, nbr_enc, ei, ev, ee,
+                bonds=bonds_blk0, bond_params=bond_params_blk0, bond_mask=bond_mask_blk0,
+                box=box_f64, pme_alpha=0.34, cutoff=9.0, excl_mode="pre_encoded", interpret=True,
+            )
+        )(pos_f64)
+        e_sep_m, g_sep_m = jax.value_and_grad(
+            lambda r: (
+                pallas_bonded_all_fused(
+                    r, bonds=bonds_blk0, bond_params=bond_params_blk0, bond_mask=bond_mask_blk0,
+                    box=box_f64, interpret=True,
+                )
+                + pallas_nonbonded_nl(
+                    r, q_f64, sig, eps, mask, nbr_enc, ei, ev, ee,
+                    box=box_f64, pme_alpha=0.34, cutoff=9.0, excl_mode="pre_encoded", interpret=True,
+                )
+            )
+        )(pos_f64)
+        np.testing.assert_allclose(np.asarray(e_mixed), np.asarray(e_sep_m), rtol=1e-5, atol=1e-3)
+        np.testing.assert_allclose(np.asarray(g_mixed), np.asarray(g_sep_m), rtol=1e-5, atol=1e-3)
+    finally:
+        jax.config.update("jax_enable_x64", prev_x64)
 

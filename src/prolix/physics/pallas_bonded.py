@@ -4726,7 +4726,7 @@ def _pallas_bonded_all_fused_batch(
     fy_b = fy_pad.reshape((B, N_pad))[:, :N]
     fz_b = fz_pad.reshape((B, N_pad))[:, :N]
     forces = jnp.stack([fx_b, fy_b, fz_b], axis=-1).astype(orig_dtype)
-    energies = jnp.sum(e_blk.reshape((B, total_blocks)), axis=-1).astype(orig_dtype)
+    energies = jnp.sum(e_blk.reshape((B, total_blocks)).astype(orig_dtype), axis=-1)
     return energies, forces
 
 

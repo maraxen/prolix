@@ -2405,7 +2405,7 @@ def _langevin_step_o(
   c2 = jnp.sqrt(1 - c1**2)
 
   key, split = jax.random.split(rng)
-  noise = jax.random.normal(split, momentum.shape)
+  noise = jax.random.normal(split, momentum.shape, dtype=jnp.float32).astype(momentum.dtype)
   momentum_new = c1 * momentum + c2 * jnp.sqrt(mass * kT) * noise
   return momentum_new, key
 
@@ -2511,8 +2511,8 @@ def _langevin_step_o_constrained(
   c1 = jnp.exp(-gamma * dt)
   c2 = jnp.sqrt(1 - c1**2)
 
-  key, split = jax.random.split(rng)
-  noise_std = jax.random.normal(split, momentum.shape, dtype=momentum.dtype)
+  key, split, split_w = jax.random.split(rng, 3)
+  noise_std = jax.random.normal(split, momentum.shape, dtype=jnp.float32).astype(momentum.dtype)
   p_ou = c1 * momentum + c2 * jnp.sqrt(mass * kT) * noise_std
 
   idx = water_indices
@@ -2522,12 +2522,13 @@ def _langevin_step_o_constrained(
   m_water = jnp.stack([mass_flat[idx[:, 0]], mass_flat[idx[:, 1]], mass_flat[idx[:, 2]]], axis=1)
 
   # Batched over waters via xtrax dispatch (Vmap/ChunkedMap), not lax.scan.
+  # MK-44: Sample all (N_waters, 6) Gaussian deviates in one vectorized float32
+  # Threefry call instead of n_w+1 PRNG splits and 2*n_w float64 normal calls.
   n_w = r_water.shape[0]
-  splits = jax.random.split(key, n_w + 1)
-  key, water_keys = splits[0], splits[1:]
+  z6_all = jax.random.normal(split_w, (n_w, 6), dtype=jnp.float32).astype(r_water.dtype)
 
   def step_one_water(pack):
-    key_w, r_w, m_w, p_w = pack
+    z6_w, r_w, m_w, p_w = pack
     msum = jnp.sum(m_w)
     eps = jnp.array(1e-30, dtype=msum.dtype)
     msum_safe = jnp.maximum(msum, eps)
@@ -2553,11 +2554,10 @@ def _langevin_step_o_constrained(
     p_rigid = v_proj * m_w[:, None]
 
     # 2. Rigid-subspace OU noise (matches _ou_noise_one_water_rigid)
-    _, k_trans, k_rot = jax.random.split(key_w, 3)
-    z_trans = jax.random.normal(k_trans, (3,), dtype=r_w.dtype)
+    z_trans = z6_w[:3]
     xi_trans = z_trans * jnp.sqrt(kT / msum_safe)
     p_trans = m_w[:, None] * xi_trans[None, :]
-    z_rot = jax.random.normal(k_rot, (3,), dtype=r_w.dtype)
+    z_rot = z6_w[3:]
     omega_noise = _cholesky_upper_solve_3x3(I_reg, jnp.sqrt(kT) * z_rot)
     p_rot = m_w[:, None] * jnp.cross(omega_noise[None, :], rrel)
     noise_w = p_trans + p_rot
@@ -2568,7 +2568,7 @@ def _langevin_step_o_constrained(
     None,
     n_w,
     step_one_water,
-    (water_keys, r_water, m_water, p_water_in),
+    (z6_all, r_water, m_water, p_water_in),
   )
 
   idx_flat = idx.reshape(-1)

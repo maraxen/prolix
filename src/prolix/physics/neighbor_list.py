@@ -400,7 +400,7 @@ def make_neighbor_list_fn(
               partition.PartitionErrorCode.NEIGHBOR_LIST_OVERFLOW,
               occ_new > max_occ_i,
             )
-            return idx_new, p_o, err_new.code
+            return idx_new, p_o.astype(_r_o.dtype), err_new.code
           b_diag = jnp.diag(bx_o) if bx_o.ndim == 2 else bx_o
           forced_ref = p_o + jnp.asarray(0.5, dtype=p_o.dtype) * b_diag.astype(p_o.dtype)
           nbr_forced = dataclasses.replace(nbr_tmp, reference_position=forced_ref)
@@ -463,7 +463,7 @@ def make_neighbor_list_fn(
             )
             overflow_bit = jnp.uint8(partition.PartitionErrorCode.NEIGHBOR_LIST_OVERFLOW)
             err_new_b = jnp.where(occ_new_b > max_occ_i, e_b | overflow_bit, e_b)
-            return idx_new_b, p_b, err_new_b
+            return idx_new_b, p_b.astype(_r_b.dtype), err_new_b
 
           def _single_fallback(p_1, r_1, i_1, e_1, bx_1):
             b_diag = jnp.diag(bx_1) if bx_1.ndim == 2 else bx_1
@@ -1012,18 +1012,21 @@ def encode_nl_exclusions(
         tagged = jnp.where(is_match, j_clean | gathered_tag, j_clean)
         out = jnp.where(valid_j, tagged, nbr_i32)
 
-    if atom_mask is not None and N > 0:
-        mask_b = jnp.asarray(atom_mask, dtype=jnp.bool_)
+    if N > 0:
         j_idx = jnp.where(out >= 0, out & jnp.int32(_NB_INDEX_MASK), out)
         valid_entry = (j_idx >= 0) & (j_idx < N)
-        safe_j = jnp.clip(j_idx, 0, max(N - 1, 0))
-        if mask_b.ndim == 1:
-            real_j = mask_b[safe_j]
-            real_i = mask_b[:, None] if out.ndim == 2 else mask_b[None, :, None]
+        if atom_mask is not None:
+            mask_b = jnp.asarray(atom_mask, dtype=jnp.bool_)
+            safe_j = jnp.clip(j_idx, 0, max(N - 1, 0))
+            if mask_b.ndim == 1:
+                real_j = mask_b[safe_j]
+                real_i = mask_b[:, None] if out.ndim == 2 else mask_b[None, :, None]
+            else:
+                real_j = jnp.take_along_axis(mask_b, safe_j, axis=-1)
+                real_i = mask_b[:, :, None]
+            keep = valid_entry & real_i & real_j
         else:
-            real_j = jnp.take_along_axis(mask_b, safe_j, axis=-1)
-            real_i = mask_b[:, :, None]
-        keep = valid_entry & real_i & real_j
+            keep = valid_entry
         out = jnp.where(keep, out, jnp.int32(N))
         perm = jnp.argsort((out == jnp.int32(N)).astype(jnp.int32), axis=-1)
         out = jnp.take_along_axis(out, perm, axis=-1)

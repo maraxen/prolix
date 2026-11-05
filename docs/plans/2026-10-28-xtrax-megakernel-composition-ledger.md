@@ -372,4 +372,143 @@ Every entry added to this ledger must record:
      - **NVIDIA L4 (`sm_89`, `261102_preempt_pallas_v24_e2e_ensemble_buckets.json`)**:
        - Solvated DHFR (`25,000` bucket): $B=1 \to 5.438\text{ ms/step}$, $B=8 \to 5.002\text{ ms/step/replica}$ (`34.55 ns/day` agg); Medium `8,192` bucket: $B=1 \to 1.024\text{ ms/step}$ (`168.68 ns/day`); Heterogeneous same-bucket: **`1.000 ms/step/system`**.
 
+### MK-36: True Single-Launch Fused Bonded + Direct-Space Nonbonded Megakernel (`pallas_bonded_and_nonbonded_nl_fused`) Across All Bucket Sizes
+- **Category**: `Grid & Work-Unit Dispatch` / `Buffer Aliasing & Atomics`
+- **Symptom / Failure Mode**:
+  1. Launching `pallas_bonded_all_fused` and `pallas_nonbonded_nl` as two separate Pallas kernels (or falling back to two separate launches when `B * N > 16384`) incurs back-to-back GPU kernel launch latency, redundant zero-initialization of two `(B, N)` force buffers per coordinate axis, and an extra host/XLA elementwise buffer addition (`g_pos = f_bonded + f_nb`) on every BAOAB step.
+  2. Inside `_megakernel`'s `_do_nonbonded_nl` branch, returning four `(32,)` vectors `(e_blk, fx_blk, fy_blk, fz_blk)` from `jax.lax.cond(has_any_valid, _run_k_tiles, _skip_k_tiles, None)` forces Triton's `scf.if` / `scf.yield` to allocate 128 `float32` registers across the branch and execute 96 `atomic_add` operations even on trailing ghost-atom tiles (`jnp.max(mask_i) == 0`).
+- **Root Cause**:
+  1. Both `pallas_bonded_all_fused` and `pallas_nonbonded_nl` scatter/accumulate forces into the same `(B, N)` force buffers `(fx_out_ref, fy_out_ref, fz_out_ref)` and reduce scalar block energies into `e_blk_out_ref`.
+  2. Performing the force writeback outside `jax.lax.cond(has_any_valid, ...)` requires `scf.yield` to carry the 3D force accumulator vectors out of the conditional and executes global memory atomics unconditionally.
+- **Generalizable Rule for `xtrax` Skill**:
+  1. Fuse all bonded CTA groups (`0 <= pid < total_bonded_blocks`) and direct-space nonbonded NL CTA blocks (`total_bonded_blocks <= pid < total_blocks`) into a single 2D-grid `(B, total_blocks)` Pallas megakernel (`pallas_bonded_and_nonbonded_nl_fused`) across all bucket sizes (`8,192`, `25,000`, etc.) with `compiler_params=resolve_pallas_compiler_params("nonbonded_nl", grid_blocks=B * total_blocks)`.
+  2. Move the force writeback inside `_run_k_tiles` so ghost-atom blocks (`jnp.max(mask_i) == 0`) skip global memory writes completely and `jax.lax.cond` yields only a single scalar `jnp.sum(e_blk)` instead of 128 vector registers.
+  3. When `total_bonded_blocks == 0`, write `fx_blk, fy_blk, fz_blk` directly via `_pl_store` instead of `_pl_atomic_add_1d`. Even when `total_bonded_blocks > 0`, precompute a loop-invariant per-32-atom-block `blk_has_bonded` mask (`(B_hb * n_atom_blocks,)` `int32`, hoisted out of `lax.while_loop` by XLA LICM) from active bonded indices/masks so pure-solvent water/padding blocks (~85–90% of blocks in solvated protein systems, since rigid TIP3P water is handled by SETTLE) execute direct `_pl_store` (`_store_write`) instead of `_pl_atomic_add_1d` (`_atomic_write`).
+
+### MK-37: Avoiding `jax.lax.while_loop` (`scf.while`) C++ Triton Layout Pass Segfaults in Pallas K-Tile Loops
+- **Category**: `Grid & Work-Unit Dispatch` / `Lowering & Triton Constraints`
+- **Symptom / Failure Mode**:
+  1. Using `jax.lax.while_loop` (`scf.while`) inside `pallas_nonbonded_nl` or `pallas_bonded_and_nonbonded_nl_fused` to carry 1D `(32,)` vector accumulators `(acc_e, acc_fx, acc_fy, acc_fz)` alongside scalar `int32` loop-continuation state (`k_tile, keep_going`) crashes the C++ Triton compiler (`SIGSEGV` in `jax/_src/compiler.py:353 in backend_compile_and_load` during `TritonGPURemoveLayoutConversionsPass`) on Hopper (`H100`/`H200`) and Ada (`L40S`).
+  2. Even after `encode_nl_exclusions` compacts all valid neighbors (`< N`) to the front of each neighbor-list row (`MK-31`), scanning trailing sentinel tiles without skipping empty tiles wastes global memory loads on padded sentinel columns (`K` up to `544–864`).
+- **Root Cause**: Triton's MLIR `TritonGPURemoveLayoutConversionsPass` segfaults when reconciling `#ttg.blocked` vector layouts and scalar `i32` condition carries across the `scf.condition` / `scf.yield` regions of an `scf.while` op inside a multi-branch Pallas kernel. By contrast, `jax.lax.fori_loop` lowers to `scf.for` with a flat homogeneous `(acc_e, acc_fx, acc_fy, acc_fz)` vector carry.
+- **Generalizable Rule for `xtrax` Skill**:
+  1. Never use `jax.lax.while_loop` (`scf.while`) to carry 1D/2D vector accumulators inside a Pallas Triton kernel.
+  2. Always use `jax.lax.fori_loop(0, k_blocks, _k_tile_body, c0)` with a flat homogeneous `(acc_e, acc_fx, acc_fy, acc_fz)` carry and guard the inner tile evaluation via `jax.lax.cond(has_any_valid, _eval_nonempty_tile, lambda c_in: c_in, carry)` so empty sentinel tiles skip all global memory loads and math while avoiding the C++ `scf.while` layout-conversion compiler segfault.
+
+### MK-38: Active-AD Charge-Gradient Gating (`compute_dq=False`) in Pallas SPME Backward Gather
+- **Category**: `Differentiation (JVP/VJP)` / `Buffer Aliasing & Atomics`
+- **Symptom / Failure Mode**: During standard MD trajectory steps (`jax.grad(energy_fn)(positions)`), `charges` is unperturbed, yet `_spme_bwd` unconditionally computed `dE/dq` (`potentials` output of `gather_pallas`), allocating a `(B, N)` output buffer and executing 64-point B-spline potential summation and global memory stores per atom.
+- **Root Cause**: `_spme_fwd` did not record `charges_perturbed = _is_perturbed(charges)` in its `custom_vjp` residuals, so `_spme_bwd` always requested both `forces` and `potentials` from `gather_pallas`.
+- **Generalizable Rule for `xtrax` Skill**:
+  1. Record `charges_perturbed = _is_perturbed(charges)` in `_spme_fwd` / `_spme_cached_fwd` residuals.
+  2. Pass `compute_dq=bool(charges_perturbed)` to `gather_pallas` so position-only MD steps skip the `potentials` accumulation and global store (`1.07x–1.11x` faster PME gather on H100 and L40S), while parameter-learning / charge-perturbation gradients (`argnums=(0, 1)`) still compute exact `dE/dq`.
+
+### MK-39: Eliminating `float32` Energy Summation Quantization Before `.astype(orig_dtype)` & Caching Host Influence Function (`G_cached_np`)
+- **Category**: `Mixed-Precision Stability` / `Compilation Cache Sharing` / `Grid & Work-Unit Dispatch`
+- **Symptom / Failure Mode**:
+  1. In mixed-precision mode (`orig_dtype = float64`, internal Pallas kernel `dtype = float32`), summing per-atom nonbonded energies inside the Pallas CTA (`jnp.sum(e_blk)`) or summing the output buffer across blocks in `float32` before casting `.astype(orig_dtype)` accumulates ~`0.05–0.11 kcal/mol` rounding error across thousands of atoms (`N = 8,192–25,000`), breaking tight (`< 1e-4`) mixed-precision energy parity and ragged-bucket padding invariance.
+  2. Recomputing the 3D reciprocal-space influence function $G(\mathbf{m})$ inside the traced energy function on every call or re-evaluating it on the device when `box_size` is a static orthorhombic box adds unnecessary FFT frequency grid setup ops.
+- **Root Cause**:
+  1. `float32` has only 24 bits of mantissa (~7 decimal digits); reducing thousands of `float32` terms of magnitude $10^1\text{–}10^2\text{ kcal/mol}$ in `float32` loses 3–4 bits of precision compared to upcasting the per-atom/per-block array to `orig_dtype` (`float64`) before `jnp.sum`.
+  2. When `box_size` is concrete at `make_spme_energy_fn` construction time, $G(\mathbf{m})$ depends only on static `(grid_dims, box_size, alpha, order)`.
+- **Generalizable Rule for `xtrax` Skill**:
+  1. In `_pallas_bonded_and_nonbonded_nl_fused_batch`, size `e_out_ref` to `e_out_dim = max(1, n_nb_blocks * _NB_BLOCK_N + total_bonded_blocks)`, store per-atom nonbonded energies `jnp.where(mask_i, e_blk, zero)` at `b_id * e_out_dim + nb_pid * _NB_BLOCK_N + offs_i` (and zeros in `_skip_k_tiles`) and per-block bonded energies at `b_id * e_out_dim + e_atom_slots + b_pid`, and always cast `.astype(orig_dtype)` **before** `jnp.sum(..., axis=-1)` on the host in `_pallas_nonbonded_nl_batch`, `_pallas_bonded_and_nonbonded_nl_fused_batch`, and `_pallas_bonded_all_fused_batch`.
+  2. Precompute and LRU-cache `G_cached_np` (and its `float32` cast `G_cached_f32_np`) on the host via `_cached_host_influence_function_np` and pass it into `_spme_energy_with_forces_cached`.
+
+### MK-40: Multi-GPU Pallas v2.5 Verification Across Hopper (`H100`) and Ada (`L40S`)
+- **Category**: `Verification & Negative Controls`
+- **Symptom / Failure Mode**: Verifying that `MK-36`..`MK-39` preserve numerical parity (`< 1e-4` vs XLA, exact ragged-bucket invariance between `8,192` and `25,000` buckets) and pass all 19 GPU tests in `tests/test_ensemble_plan_pallas_v2.py`.
+- **Root Cause**: Multi-architecture Triton codegen (`sm_89` vs `sm_90`) can exhibit different register allocation and atomic coalescing behavior.
+- **Generalizable Rule for `xtrax` Skill**:
+  1. Always validate fused megakernel changes across at least two distinct GPU SM architectures (`sm_89` Ada and `sm_90` Hopper / `sm_120` Blackwell) with full energy/force parity and ragged-bucket padding invariance checks.
+
+### MK-41: Eliminating the `float64` / `complex128` 3D FFT Trap in Mixed-Precision Pallas SPME (`src/prolix/physics/pme.py`)
+- **Category**: `Mixed-Precision Stability` / `Lowering & Triton Constraints`
+- **Symptom / Failure Mode**:
+  1. Under `jax_enable_x64=True` (required for `float64` coordinate/velocity accumulation in `mixed` precision mode), even when `spread_charges_pallas` and `gather_pallas` run their B-spline stencil kernels in `float32`, `spread_charges_pallas` casts its output `charge_grid` back to `orig_dtype` (`float64` at `pme_pallas.py:206`), and `make_spme_energy_fn` passed `G_cached` in `positions.dtype` (`float64`).
+  2. Consequently, `jnp.fft.rfftn(Q)` and `jnp.fft.irfftn(Q_hat * G)` executed in **double precision (`float64` / `complex128`)** on every MD step (`(B, 64, 64, 64)` cuFFT double-precision plans), consuming `2x` memory bandwidth and up to `4x–32x` lower FFT throughput on GPUs (`L40S`, `Blackwell`, `H100`), whereas OpenMM's `mixed` precision mode always executes PME 3D FFTs (`cufftExecR2C` / `cufftExecC2R`) and force evaluations in `float32`!
+  3. Checking `jnp.asarray(box_size).ndim == 1` instead of `_is_ortho_box(positions, box_size)` silently disabled Pallas SPME and `float32` 3D FFT whenever `box_size` was a 2D batched orthorhombic array `(B, 3)` (including `B = 3` where `box_size.shape == (3, 3)`).
+- **Root Cause**: `Q` and `G` were allowed to inherit `positions.dtype` (`float64`) before calling `jnp.fft.rfftn` / `jnp.fft.irfftn` inside `_spme_fwd`, `_spme_cached_fwd`, and `spme_reciprocal_energy`, and orthorhombic detection checked `ndim == 1` rather than distinguishing `(3,)` / `(B, 3)` orthorhombic vectors from `(3, 3)` lower-triangular triclinic matrices.
+- **Generalizable Rule for `xtrax` Skill**:
+  1. Whenever `use_pallas_pme=True` (outside `export_context`) and `_is_ortho_box(positions, box_size)` is `True` (covering both 1D `(3,)` and 2D batched `(B, 3)` orthorhombic boxes), explicitly keep `Q`, `G`, `G_cached`, `theta`, and `theta_norm` in `jnp.float32` (so `rfftn` produces `complex64` and `irfftn` produces `float32`), pass the `float32` `theta_norm` directly to `gather_pallas`, and cast **only** the final scalar reciprocal energy `e_recip` and `(N, 3)` atomic forces back to `orig_dtype = positions.dtype`.
+  2. Pre-cast `G_cached_f32_np = G_cached_np.astype(np.float32)` on the host in `make_spme_energy_fn` so zero per-step `float64 -> float32` conversion of the influence grid occurs on the device.
+
+### MK-42: System-Scaled PME FFT Grids (`PROLIX_PME_GRID_POINTS`), Single vs Mixed Precision Modes, and OpenMM `CUDA` Head-to-Head Parity (`bench_e2e_ensemble_buckets.py`)
+- **Category**: `Verification & Negative Controls` / `Grid & Work-Unit Dispatch`
+- **Symptom / Failure Mode**:
+  1. Truncating a 23,558-atom DHFR bundle (`64^3` PME grid) to `small_4200` (`4,199` atoms) and `medium_6658` (`6,658` atoms) without scaling the PME FFT grid forced a 4,199-atom system to execute a `64^3 = 262,144`-point 3D FFT at every step instead of the `32^3 = 32,768`-point (`8x` smaller) grid appropriate for a ~34.8 Å solvated box (`48^3` for 6,658 atoms).
+  2. Spawning an external OpenMM Python environment (`b1-openmm/bin/python`) via `subprocess.run` without populating `LD_LIBRARY_PATH` with `b1-openmm/lib`, `nvidia/*/lib`, and `/orcd/software/core/001/pkg/cuda/*/lib64` caused `dlopen("libOpenMMCUDA.so")` to fail on missing `libcufft.so` / `libnvrtc.so` and silently fall back to `OpenCL`.
+  3. Unpacking `for (ai, aj), (k_b, r0_b), valid_b in zip(d['bond_idx'], d['bond_params'], d['bond_mask'])` in `build_sys_from_npz` swapped `r0` (`bond_params[:, 0]`) and `k` (`bond_params[:, 1]`), and wrapping truncated water coordinates via atom-wise `jnp.mod(pos_real, box_vec)` split boundary water molecules across opposite periodic faces, causing OpenMM SETTLE to explode (`Particle coordinate is NaN`).
+- **Root Cause**:
+  1. `MolecularBundle.bond_params` stores `(r0, k)` and `angle_params` stores `(theta0, k)`.
+  2. Rigid water molecules must be re-imaged as whole molecules (`H1, H2` wrapped to `O`'s nearest periodic image) before SETTLE initialization.
+  3. Dynamic library search paths (`LD_LIBRARY_PATH`) must include the CUDA runtime/cuFFT/NVRTC directories before `openmm.Platform.loadPluginsFromDirectory` runs.
+- **Generalizable Rule for `xtrax` Skill**:
+  1. Support both scalar (`"32"`, `"48"`, `"64"`) and bucket-mapped (`"8192:48,25000:64"`) `PROLIX_PME_GRID_POINTS` in `make_spme_energy_fn` (and include `PROLIX_PME_GRID_POINTS` in `EnsemblePlan`'s `_SINGLE_INFERENCE_CACHE` / `_STACKED_INFERENCE_CACHE` keys) so benchmarks and heterogeneous multi-bucket runners match PME FFT grids (`32^3` for 4.2k atoms, `48^3` for 6.7k/8k bucket, `64^3` for 23.6k/25k bucket) identically across Prolix and OpenMM (`nb.setPMEParameters(alpha, g_pts, g_pts, g_pts)`).
+  2. Benchmark both `single` (`float32` bundle, where BAOAB + SETTLE + Pallas megakernel + SPME 3D FFT all execute in `float32`) and `mixed` (`float64` positions/velocities + `float32` Pallas megakernel + `float32` SPME 3D FFT) precision modes across batch sizes $B \in [1, 2, 4, 8, 16, 32]$.
+  3. Always re-image rigid water hydrogens onto their oxygen's periodic image after box wrapping, unpack `(r0, k)` / `(theta0, k)` in canonical `MolecularBundle` column order, configure `LD_LIBRARY_PATH` + `OPENMM_PLUGIN_DIR` for `libOpenMMCUDA.so`, and log `openmm.Platform.getPluginLoadFailures()` in the benchmark output JSON.
+
+### MK-43: Eliminating `num_stages=2` Software-Pipelining Register Spill and `sm_120` Per-Thread Stack Overflow in the 58-Argument Multi-Branch Megakernel (`src/prolix/export.py`, `src/prolix/pallas_kernels.py`)
+- **Category**: `Lowering & Triton Constraints` / `Multi-Architecture Tuning`
+- **Symptom / Failure Mode**:
+  1. On `NVIDIA RTX PRO 6000 Blackwell` (`sm_120`), changing `_pallas_bonded_and_nonbonded_nl_fused_batch` (`59` buffer arguments, `7` top-level `pid` branches) to use `resolve_pallas_compiler_params("nonbonded_nl", grid_blocks=B * total_blocks)` (`num_stages=2` for `grid_blocks >= 256`) and adding a nested runtime `jax.lax.cond(has_b_blk, _atomic_write, _store_write)` inside `_run_k_tiles` caused `mk36_fused_direct_and_bonded_megakernel_8k_ms` to regress `5.5x` (`0.138 ms -> 0.766 ms`) and triggered `CUDA_ERROR_ILLEGAL_ADDRESS` (per-thread local-memory stack overflow) at `DHFR [mixed] B=4` (`grid=(4, 965)`), even though `NVIDIA L40S` (`sm_89`) compiled and ran at `0.1168 ms` (`1.21x` faster than separate launches) and `NVIDIA H200` (`sm_90`) ran at `0.1342 ms` (`1.10x` faster).
+- **Root Cause**:
+  1. While standalone `_pallas_nonbonded_nl_batch` on Hopper/Ada benefits from `num_stages=2`, `_megakernel` has 58 buffer refs and 7 top-level `pid` branches. On `sm_120` (Blackwell, `cc >= 10.0`), `num_stages=2` software pipelining under `PTX 8.8` combined with the 59th `blk_has_bonded_ref` pointer and nested `jax.lax.cond` around vector force stores inside `_run_k_tiles` spilled tile registers to per-thread local memory (`.local`), exceeding the default CUDA per-thread stack size at `B=4, N=25000`.
+- **Generalizable Rule for `xtrax` Skill**:
+  1. Dedicated `kernel_kind == "megakernel"` in `resolve_pallas_compiler_params` MUST return `num_warps=4, num_stages=1` across all grid sizes and GPU architectures (`sm_80`, `sm_89`, `sm_90`, `sm_120`), and all Pallas kernels (`megakernel`, `nonbonded_nl`, `cell_prune`, `pme`) on Blackwell (`cc >= 10.0` / `"b300"` / `"blackwell"`) should use `num_stages=1` unless overridden by `PROLIX_PALLAS_NUM_STAGES`.
+  2. Keep `_run_k_tiles` writeback branchless at runtime: use compile-time `if total_bonded_blocks == 0: _pl_store(...) else: _pl_atomic_add_1d(...)` with 58 input refs (`input_output_aliases={55: 1, 56: 2, 57: 3}`), never a runtime `jax.lax.cond` around vector force stores inside the megakernel.
+
+### MK-44: Vectorized `float32` Threefry Thermal Noise in Constrained & Unconstrained Langevin BAOAB O-Steps (`src/prolix/physics/settle.py`, `src/prolix/batched_simulate.py`)
+- **Category**: `Mixed-Precision Stability` / `Host-Boundary & Scan Overhead`
+- **Symptom / Failure Mode**:
+  1. Under `jax_enable_x64=True` (`mixed` precision mode), `EnsemblePlan.run` calls `_langevin_step_o_constrained` (`src/prolix/physics/settle.py:2514-2572`), which on **every MD step** executed `jax.random.split(key, n_w + 1)` (`8,193` Threefry splits per replica!) plus `jax.random.normal(split, momentum.shape, dtype=float64)` and `2 * n_w` per-water `jax.random.normal(..., (3,), dtype=float64)` calls inside `step_one_water` (`16,384` separate `float64` Threefry + Box-Muller calls per replica per step!).
+  2. Similarly, unconstrained BAOAB integrators in `src/prolix/batched_simulate.py` called `jax.random.normal(subkey, p.shape)` which defaulted to `float64` when `jax_enable_x64=True`.
+- **Root Cause**:
+  1. `jax.random.normal` without `dtype=jnp.float32` defaults to `float64` under `jax_enable_x64=True`, running twice as many Threefry2x32 rounds and `float64` Box-Muller `log`/`sqrt`/`sin`/`cos` instructions even though thermal Langevin noise is scaled by $\sqrt{m k_B T (1 - e^{-2\gamma \Delta t})}$ and has no physical accuracy beyond `float32`.
+  2. Splitting PRNG keys per water molecule (`jax.random.split(key, n_w + 1)` + `jax.random.split(key_w, 3)`) per step executed $3 \times N_{\text{waters}}$ sequential Threefry rounds instead of a single contiguous `(N_waters, 6)` draw.
+- **Generalizable Rule for `xtrax` Skill**:
+  1. In all Langevin BAOAB O-steps (`_langevin_step_o_constrained`, `_langevin_step_o`, and `batched_simulate.py`), always sample Gaussian thermal deviates in `dtype=jnp.float32` and cast `.astype(momentum.dtype)` before multiplying by `c2`.
+  2. In rigid-water constrained O-steps (`_langevin_step_o_constrained`), sample a single contiguous `z6_all = jax.random.normal(split_w, (n_w, 6), dtype=jnp.float32).astype(r_water.dtype)` tensor once per step outside `step_one_water` and slice `z_trans = z6_w[:3]`, `z_rot = z6_w[3:]`, eliminating $3 \times N_{\text{waters}}$ per-step PRNG splits and $2 \times N_{\text{waters}}$ `float64` Box-Muller calls.
+
+### MK-45: Uniform Floating-Point Bundle Precision in Mixed-Precision `EnsemblePlan` Runs & `lax.cond` `reference_position.dtype` Normalization (`src/prolix/api/ensemble_plan.py`, `src/prolix/physics/neighbor_list.py`)
+- **Category**: `Mixed-Precision Stability` / `Buffer Aliasing & Atomics`
+- **Symptom / Failure Mode**:
+  1. When `MolecularBundle` instances are constructed from serialized `.npz` fixtures while `jax_enable_x64=True` (e.g., `B_dhfr._build_bundle_from_sys_data(sys_data)`), `positions` can be promoted to `float64` while `masses`, `charges`, `sigmas`, and `epsilons` remain `float32` (as stored in the `.npz`).
+  2. Passing a half-`float64` (`positions`), half-`float32` (`masses`) bundle into `EnsemblePlan.run` causes `settle_positions` (`pos_oxygen_c` in `float64`) and `_langevin_step_o_constrained` (`r_water` in `float64` combined with `m_water` in `float32`) to attempt `scatter` updates of `float64` values into `float32` target arrays (`FutureWarning: scatter inputs have incompatible types: cannot safely cast value from dtype=float64 to dtype=float32 with jax_numpy_dtype_promotion=standard`), and causes `neighbor.reference_position` (`float32` if allocated before promotion) vs `positions` (`float64`) to mismatch inside `_maybe_rebuild_nl`'s `jax.lax.cond`.
+- **Root Cause**:
+  1. JAX's `scatter` primitive requires update values to be safely castable to the target buffer's dtype; mixing `float64` `positions` with `float32` `masses` inside `settle.py` produces `float64` impulses/velocities scattered into a `float32`-derived momentum array.
+  2. In `_maybe_rebuild_nl` (`ensemble_plan.py`) and `_cond_rebuild` (`neighbor_list.py`), the `True` branch returned `p_w` (with `positions.dtype`) while the `False` branch returned `r_o` (with `neighbor.reference_position.dtype`).
+- **Generalizable Rule for `xtrax` Skill**:
+  1. In `_maybe_rebuild_nl` and `_cond_rebuild`, always cast the rebuilt reference position `p_w.astype(r_o.dtype)` so both branches of `jax.lax.cond(needs_rebuild, ...)` return identical dtypes regardless of how `neighbor` was initially allocated.
+  2. Before running `mixed` precision (`jax_enable_x64=True`, `float64` integration state + `float32` Pallas force/PME kernels) vs `single` precision (`float32` integration state + `float32` Pallas force/PME kernels), normalize all floating-point fields of the `MolecularBundle` (`positions`, `masses`, `charges`, `sigmas`, `epsilons`, `bond_params`, `angle_params`, `dihedral_params`, `improper_params`, `cmap_coeffs`) to a uniform floating-point dtype (`float64` for `mixed`, `float32` for `single`) via `_cast_bundle_precision`.
+  3. **Verified Pallas v2.6 / v2.7 Multi-GPU End-to-End `EnsemblePlan.run()` Throughput (`NVIDIA H200` `sm_90` Job `27989419`, `NVIDIA L40S` `sm_89` Job `28016116`, `NVIDIA A100-SXM4-80GB` `sm_80` Job `28016109`, & `NVIDIA RTX PRO 6000 Blackwell` `sm_120`)**:
+     - **All 7 GPU Unit Tests in `tests/test_ensemble_plan_pallas_v2.py` (`test_pallas_v24`, `test_pallas_v25`, `test_pallas_v26`) PASSED (`7 passed`) Across All 4 GPU Architectures (`sm_80` A100, `sm_89` L40S, `sm_90` H200, `sm_120` Blackwell)** with zero `scatter` dtype warnings (`MK-45`).
+     - **Single-Launch Fused Megakernel (`MK-36`, `8,192` Bucket)**:
+       - `NVIDIA L40S` (`sm_89`, v2.7 Job `28016116`): Separate `0.0944 ms` $\to$ Fused **`0.0802 ms` (`1.18x` speedup)**; `cell_prune_25k_ragged_speedup`: **`1.56x`** (`0.858 ms` $\to$ `0.551 ms`); `force_eval_25k_ragged_speedup`: **`1.29x`** (`0.183 ms` $\to$ `0.142 ms`); `mk38_pme_gather_compute_dq_false_vs_true`: **`1.09x`** (`0.0392 ms` $\to$ `0.0359 ms`).
+       - `NVIDIA A100-SXM4-80GB` (`sm_80`, v2.7 Job `28016109`): Separate `0.1464 ms` $\to$ Fused **`0.1188 ms` (`1.23x` speedup)**; `cell_prune_25k_ragged_speedup`: **`2.22x`** (`1.334 ms` $\to$ `0.601 ms`); `force_eval_25k_ragged_speedup`: **`1.23x`** (`0.353 ms` $\to$ `0.286 ms`).
+       - `NVIDIA H200` (`sm_90`, Job `27989419`): Separate `0.1481 ms` $\to$ Fused **`0.1342 ms` (`1.10x` speedup)**; `cell_prune_25k_ragged_speedup`: **`1.99x`** (`0.745 ms` $\to$ `0.374 ms`).
+     - **Solvated DHFR (`23,558` real atoms in `25,000` bucket, `64^3` PME grid)**:
+       - `NVIDIA H200` (`sm_90`):
+         - `single`: $B=1 \to 1.798\text{ ms/step}$ (`96.08 ns/day`), $B=2 \to 1.197\text{ ms/step/rep}$ (`144.42 ns/day`), $B=4 \to 1.088\text{ ms/step/rep}$ (`158.78 ns/day`), $B=8 \to 1.033\text{ ms/step/rep}$ (`167.33 ns/day`), $B=16 \to \mathbf{1.019\text{ ms/step/rep}}$ (**`169.60 ns/day` agg**).
+         - `mixed`: $B=1 \to \mathbf{1.479\text{ ms/step}}$ (**`116.85 ns/day`**, **`1.28x` faster** than v2.4's `1.897 ms/step`), $B=2 \to 1.237\text{ ms/step/rep}$ (`139.68 ns/day`), $B=4 \to 1.118\text{ ms/step/rep}$ (`154.51 ns/day`), $B=8 \to 1.065\text{ ms/step/rep}$ (`162.23 ns/day`), $B=16 \to \mathbf{1.050\text{ ms/step/rep}}$ (**`164.61 ns/day` agg**).
+       - `NVIDIA RTX PRO 6000 Blackwell` (`sm_120`, v2.7 `MK-43`/`MK-44`):
+         - `single`: $B=1 \to 1.711\text{ ms/step}$ (`101.00 ns/day`) $\to B=8 \to 1.196\text{ ms/step/rep}$ (`144.43 ns/day`) $\to B=16 \to \mathbf{1.158\text{ ms/step/rep}}$ (**`149.17 ns/day` agg**).
+         - `mixed`: $B=1 \to \mathbf{1.551\text{ ms/step}}$ (**`111.42 ns/day`**, **`1.21x` faster** than v2.4's `1.884 ms/step`).
+       - `NVIDIA L40S` (`sm_89`, v2.7 Job `28016116`):
+         - `single`: $B=1 \to 1.955\text{ ms/step}$ (`88.37 ns/day`) $\to B=16 \to \mathbf{1.375\text{ ms/step/rep}}$ (**`125.72 ns/day` agg**).
+         - `mixed`: $B=1 \to \mathbf{1.844\text{ ms/step}}$ (**`93.70 ns/day`**, **`1.18x` faster** than v2.4's `2.168 ms/step`) $\to B=16 \to \mathbf{1.545\text{ ms/step/rep}}$ (**`111.84 ns/day` agg**).
+       - `NVIDIA A100-SXM4-80GB` (`sm_80`, v2.7 Job `28016109`):
+         - `single`: $B=1 \to 2.992\text{ ms/step}$ (`57.76 ns/day`) $\to B=8 \to \mathbf{1.783\text{ ms/step/rep}}$ (**`96.92 ns/day` agg**), $B=16 \to 1.790\text{ ms/step/rep}$ (`96.54 ns/day` agg).
+         - `mixed`: $B=1 \to \mathbf{2.401\text{ ms/step}}$ (**`71.98 ns/day`**) $\to B=8 \to \mathbf{1.828\text{ ms/step/rep}}$ (**`94.52 ns/day` agg**), $B=16 \to 1.836\text{ ms/step/rep}$ (`94.10 ns/day` agg).
+     - **Medium Solvated Protein (`6,658` real atoms in `8,192` bucket, `48^3` PME grid)**:
+       - `NVIDIA H200` (`sm_90`): `single` $B=32 \to \mathbf{0.204\text{ ms/step/rep}}$ (**`847.38 ns/day` agg**); `mixed` $B=32 \to \mathbf{0.212\text{ ms/step/rep}}$ (**`813.48 ns/day` agg**).
+       - `NVIDIA L40S` (`sm_89`, v2.7 Job `28016116`): `single` $B=32 \to \mathbf{0.286\text{ ms/step/rep}}$ (**`604.79 ns/day` agg**); `mixed` $B=1 \to 0.711\text{ ms/step}$ (`243.10 ns/day`) $\to B=32 \to \mathbf{0.333\text{ ms/step/rep}}$ (**`518.18 ns/day` agg**).
+       - `NVIDIA A100-SXM4-80GB` (`sm_80`, v2.7 Job `28016109`): `single` $B=32 \to \mathbf{0.357\text{ ms/step/rep}}$ (**`483.65 ns/day` agg**); `mixed` $B=32 \to \mathbf{0.368\text{ ms/step/rep}}$ (**`469.20 ns/day` agg**).
+     - **Small Solvated Protein (`4,199` real atoms in `8,192` bucket, `32^3` PME grid)**:
+       - `NVIDIA H200` (`sm_90`): `single` $B=16 \to 0.169\text{ ms/step/rep}$ (`1,024.51 ns/day` agg), $B=32 \to \mathbf{0.167\text{ ms/step/rep}}$ (**`1,036.49 ns/day` agg**); `mixed` $B=32 \to \mathbf{0.175\text{ ms/step/rep}}$ (**`984.83 ns/day` agg**).
+       - `NVIDIA L40S` (`sm_89`, v2.7 Job `28016116`): `single` $B=32 \to \mathbf{0.249\text{ ms/step/rep}}$ (**`693.18 ns/day` agg**); `mixed` $B=32 \to \mathbf{0.298\text{ ms/step/rep}}$ (**`579.41 ns/day` agg**).
+       - `NVIDIA A100-SXM4-80GB` (`sm_80`, v2.7 Job `28016109`): `single` $B=32 \to \mathbf{0.277\text{ ms/step/rep}}$ (**`623.71 ns/day` agg**); `mixed` $B=32 \to \mathbf{0.289\text{ ms/step/rep}}$ (**`597.14 ns/day` agg**).
+
+
+
 

@@ -61,16 +61,14 @@ def resolve_pallas_compiler_params(
 
   cc = compute_capability
   dk = (device_kind or "").upper()
-  if cc is None or not dk:
+  if cc is None and not dk:
     try:
       if jax.default_backend() == "gpu":
         dev = jax.devices("gpu")[0]
-        if cc is None:
-          raw_cc = getattr(dev, "compute_capability", None)
-          if raw_cc is not None:
-            cc = float(raw_cc)
-        if not dk:
-          dk = str(getattr(dev, "device_kind", "")).upper()
+        raw_cc = getattr(dev, "compute_capability", None)
+        if raw_cc is not None:
+          cc = float(raw_cc)
+        dk = str(getattr(dev, "device_kind", "")).upper()
     except Exception:
       pass
 
@@ -89,9 +87,12 @@ def resolve_pallas_compiler_params(
   if kernel_kind == "bonded_fused":
     num_warps = 2
     num_stages = 1
-  elif kernel_kind in ("nonbonded_nl", "cell_prune", "pme"):
+  elif kernel_kind == "megakernel":
     num_warps = 4
-    if 0 < grid_blocks < 256:
+    num_stages = 1
+  elif kernel_kind in ("nonbonded_nl", "explicit_megakernel", "cell_prune", "pme"):
+    num_warps = 4
+    if 0 < grid_blocks < 256 or cc >= 10.0:
       num_stages = 1
     elif cc >= 9.0:
       num_stages = 2
