@@ -479,7 +479,7 @@ wheels = [
 
 [[package]]
 name = "dm-haiku"
-version = "0.0.15"
+version = "0.0.17"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "absl-py" },
@@ -487,9 +487,9 @@ dependencies = [
     { name = "numpy" },
     { name = "tabulate" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/8c/23/9ef52649e8da5771354d6916b420c065c5b551b10796b33949ad9419738b/dm_haiku-0.0.15.tar.gz", hash = "sha256:de08b3673d8ef1148daa5793653fbeb4e8d87de78164c4f6ecaca7c36eadfbb2", size = 262919, upload-time = "2025-09-18T14:58:37.314Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/6b/1c/0968ff6092ff510dca8dfb8ce14c4fcb6059dd680ee15e46410de993415d/dm_haiku-0.0.17.tar.gz", hash = "sha256:6daa56f3b54f43675713ef7525d1dec7327f2512b57cc2b12104f76f6d7cf581", size = 265004, upload-time = "2026-07-27T09:46:52.571Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/c4/b2/6f8e3d6dda02e30fde68dbaf5cb09c98db0383a755c0c72c9d13064d3138/dm_haiku-0.0.15-py3-none-any.whl", hash = "sha256:bcdae40ae21ada79b9295e961fb5e9f212440aaf690238011ee3956aaf2566c6", size = 374099, upload-time = "2025-09-18T14:58:36.055Z" },
+    { url = "https://files.pythonhosted.org/packages/54/82/7045ad957defb3bfc28b89c748a1874c73f37b9337963b52d6de48ca4648/dm_haiku-0.0.17-py3-none-any.whl", hash = "sha256:aa1394276adf59d695c910810ad90febb741503a83c32b022ce1162483904bbb", size = 377007, upload-time = "2026-07-27T09:46:51.365Z" },
 ]
 
 [[package]]
