@@ -509,6 +509,79 @@ Every entry added to this ledger must record:
        - `NVIDIA L40S` (`sm_89`, v2.7 Job `28016116`): `single` $B=32 \to \mathbf{0.249\text{ ms/step/rep}}$ (**`693.18 ns/day` agg**); `mixed` $B=32 \to \mathbf{0.298\text{ ms/step/rep}}$ (**`579.41 ns/day` agg**).
        - `NVIDIA A100-SXM4-80GB` (`sm_80`, v2.7 Job `28016109`): `single` $B=32 \to \mathbf{0.277\text{ ms/step/rep}}$ (**`623.71 ns/day` agg**); `mixed` $B=32 \to \mathbf{0.289\text{ ms/step/rep}}$ (**`597.14 ns/day` agg**).
 
+---
+
+### MK-46: Fused Pallas BAOAB + Analytical Miyamoto–Kollman / Horn Quaternion SETTLE + RATTLE Integrator Kernels & Triton `lax.neg_p` `TypedNdArray` Rule (`src/prolix/physics/settle.py`, `src/prolix/export.py`, `src/prolix/api/ensemble_plan.py`)
+- **Category**: `Megakernel Fusion` / `Pallas Triton Lowering`
+- **Symptom / Failure Mode**:
+  1. In Pallas v2.7, while bonded, direct-space nonbonded, and SPME electrostatics were fused into Pallas kernels (`~0.131 ms/step` on `8,192` bucket), the Langevin BAOAB + rigid-water analytical SETTLE + RATTLE velocity projection integrator in `src/prolix/physics/settle.py` still launched ~18 separate per-step XLA scatter/gather/elementwise kernels (`_langevin_step_b`, `_langevin_step_a`, `settle_positions`, `_langevin_step_r`, `_remove_angular_momentum_from_impulse`, `_langevin_step_o_constrained`, `_langevin_step_a`, `settle_positions`, `_langevin_step_r`, `_langevin_step_b`, `settle_velocities`, and ghost-atom `jnp.where` pinning in `ensemble_plan.py`), costing `0.1199 ms/step` at `B=1` on `NVIDIA L40S`.
+  2. During initial GPU compilation of the fused Pallas BAOAB+SETTLE kernel on `L40S` (`JAX 0.10.2`), Triton lowering crashed with `AttributeError: 'TypedNdArray' object has no attribute 'type'` inside `jax._src.pallas.triton.lowering._minus` (`lax.neg_p`).
+- **Root Cause**:
+  1. Un-fused BAOAB+SETTLE repeatedly gathers `(B, N_waters, 3, 3)` water triads from `(B, N_atoms, 3)` state arrays and scatters updated positions/momenta back to global memory 6 times per step.
+  2. In JAX's Pallas Triton lowering (`_minus`), `lax.neg_p` checks `_is_triton_pointer_type(x.type)` before negating `x`. When unary `-` is applied inside a Pallas kernel to a scalar constant created via `jnp.asarray(val, dtype=dtype)` (which Pallas represents as a `TypedNdArray` literal rather than a `triton.language.tensor`), `x.type` does not exist and raises `AttributeError`.
+- **Generalizable Rule for `xtrax` Skill**:
+  1. Fuse the entire pre-force BAOAB half-step (`B1 -> A1 -> PBC wrap -> SETTLE1 -> R1 + AM -> 6D rigid-body OU / isotropic float32 O-step -> A2 -> SETTLE2 -> R2 + AM -> ghost pinning`) into a single 2D-grid `(B, cdiv(N_atoms, 64) + cdiv(N_waters, 32))` Pallas kernel (`pallas_baoab_pre_force`), and fuse the post-force half-step (`B2 -> RATTLE 3x3 Gram velocity projection + AM -> ghost pinning`) into a second 2D-grid Pallas kernel (`pallas_baoab_post_force`).
+  2. Precompute the loop-invariant `(B, N_atoms)` water/ghost exclusion mask (`_iwg_precomputed`) once outside the `while_loop` (`settle_langevin` setup) and mark `apply_fn._pallas_settle_pins_ghosts = True` so `ensemble_plan.py` skips redundant post-step `jnp.where(pad_mask_3d, ...)` scatters.
+  3. **Triton `lax.neg_p` Constant Rule**: Never apply unary `-` to a `jnp.asarray(c, dtype=dtype)` constant inside a Pallas Triton kernel; negate the Python float before wrapping (`jnp.asarray(-c, dtype=dtype)`) or write `zero - expr`.
+  4. Always fall back automatically to pure-JAX/StableHLO SETTLE when `in_export_context()` is active, when JVP tracers are present (`_is_ad`), or when `settle_velocity_iters == 0`.
+  5. **Measured Speedup (`NVIDIA L40S`, Job `28062261`)**: Reduces BAOAB+SETTLE integrator time on the `8,192` bucket from `0.1199 ms` (XLA) to **`0.0530 ms` (Pallas)** — a **`2.26x` speedup**.
+
+### MK-47: Per-Replica Independent Neighbor-List Rebuild Masking (`rebuild_mask: bool[B]`) & `old_idx` In-Place Aliasing (`src/prolix/physics/neighbor_list.py`, `src/prolix/api/ensemble_plan.py`)
+- **Category**: `Multi-Replica Scaling` / `Buffer Aliasing & Atomics`
+- **Symptom / Failure Mode**:
+  - In multi-replica `EnsemblePlan` batches (`B = 2..32`), `_maybe_rebuild_nl_vmap` previously triggered a full batch neighbor-list rebuild across all `B` replicas whenever `jnp.any(should_update)` was `True`, even if only a single replica crossed the Verlet skin threshold (`dr_threshold / 2`).
+- **Root Cause**:
+  - `_build_cell_stencil_buffers_batched` and `_make_prune_and_encode_kernel` lacked per-replica `rebuild_mask: bool[B]` awareness and allocated a fresh sentinel-filled `(B * N * K + 1,)` output buffer instead of aliasing the existing neighbor list `old_idx`.
+- **Generalizable Rule for `xtrax` Skill**:
+  1. Thread `rebuild_mask: bool[B]` and `old_idx: int32[B, N, K]` into `_build_cell_stencil_buffers_batched` and `_pallas_prune_and_encode_cell_list_batch`.
+  2. For any replica `b` with `rebuild_mask[b] == False`, assign sentinel cell ID `G_cells` to all atoms in replica `b` and alias `old_idx` to `nbr_out_ref` via `input_output_aliases={15: 0}`. Inside `_make_prune_and_encode_kernel`, CTAs with `c_i == G_cells` exit in $O(1)$ at the top of the kernel without touching `nbr_out_ref`, preserving `old_idx[b]` in-place while only updating `reference_position[b]` and `last_pos[b]` where `rebuild_mask[b]` is `True`.
+
+### MK-48: Spatially Pruned `32x32` Block Nonbonded Megakernel (`O(1)` Ghost Block Skip, Skin-Shell Load Gating, & Branchless Reciprocal-Multiply PBC/Forces) (`src/prolix/pallas_kernels.py`)
+- **Category**: `Ragged-Bucket Compaction` / `Megakernel Fusion`
+- **Symptom / Failure Mode**:
+  - Inside `_nb_nl_kernel` and `_megakernel` (`_do_nonbonded_nl`), trailing ghost 32-atom blocks (`~atom_mask`) and skin-shell neighbor tiles (`min_r_sq >= cutoff_sq`) still executed redundant per-tile global parameter loads (`charges`, `sigmas`, `epsilons`) and `jnp.round(dx / Lx)` floating-point divisions inside the inner K-tile loop.
+- **Root Cause**:
+  - Unconditional `q_j`, `sig_j`, `eps_j` gathers before checking whether any pair in the 32-atom neighbor tile lies within `cutoff_sq`, plus per-tile `dx / Lx` divisions.
+- **Generalizable Rule for `xtrax` Skill**:
+  1. Gate the entire 32-atom row block at the CTA level on `jnp.max(mask_i_b) > 0` so pure-ghost padding blocks exit in $O(1)$ with zero neighbor-list reads or atomic writes.
+  2. Precompute `inv_Lx, inv_Ly, inv_Lz` once per CTA and use `dx - Lx * jnp.floor(dx * inv_Lx + 0.5)` for minimum-image PBC wrapping.
+  3. Compute `r_sq` from `px_j, py_j, pz_j` first and gate the `q_j, sig_j, eps_j` global loads and LJ/PME force evaluation on `jnp.max((r_sq < cutoff_sq).astype(jnp.int32)) > 0` via `jax.lax.cond`, skipping parameter loads for pure skin-shell tiles.
+  4. **Measured Speedup (`NVIDIA L40S`, Job `28062261`)**: Reduces `8,192`-bucket force evaluation from `0.1387 ms` (v2.7) to **`0.1313 ms` (v3.0)** and `25,000`-bucket ragged force evaluation to **`0.1366 ms`** (`1.28x` faster than unfiltered).
+
+### MK-49: Separable `(BLOCK_N=32, 16)` YZ-Plane Factorized & Charge-Gated Pallas SPME Spread/Gather + Pallas v3.0 `NVIDIA L40S` Benchmark Summary (`src/prolix/physics/pme_pallas.py`)
+- **Category**: `Buffer Aliasing & Atomics` / `End-to-End Throughput`
+- **Symptom / Failure Mode**:
+  - In `src/prolix/physics/pme_pallas.py`, `_spread_kernel` and `_gather_kernel` iterated over `u` (`0..3`) in a `lax.fori_loop` and flattened all `16` `(v, w)` grid points into a `(32, 16)` tensor per `u`, recomputing `v = k_idx // 4` and `w = k_idx % 4` and executing `atomic_add` even for uncharged/ghost atoms (`q_i == 0`).
+- **Root Cause**:
+  - Un-factorized 3D B-spline weight evaluation and un-gated atomic updates for zero-charge ghost atoms.
+- **Generalizable Rule for `xtrax` Skill**:
+  1. Factorize the 64-point $(4 \times 4 \times 4)$ B-spline stencil into a precomputed `(BLOCK_N=32, 16)` YZ-plane outer product (`wyz = wy[:, :, None] * wz[:, None, :]` and its derivatives `dwyz_dy`, `dwyz_dz`) outside the 4-iteration X-axis loop (`u = 0..3`), and gate global `atomic_add` writes in `_spread_kernel` on `(mask_n > 0) & (jnp.abs(q) > 0)` with early CTA exit when `jnp.max(active_i) == 0`.
+  2. **Verified Pallas v3.0 End-to-End `EnsemblePlan.run()` Performance on `NVIDIA L40S` (`sm_89`, Job `28062261`, [`outputs/bench/261105_l40s_pallas_v30_e2e_ensemble_buckets.json`](file:///home/marielle/projects/prolix/outputs/bench/261105_l40s_pallas_v30_e2e_ensemble_buckets.json))**:
+     - **All 8 GPU Unit Tests in `tests/test_ensemble_plan_pallas_v2.py` (`test_pallas_v24`, `test_pallas_v25`, `test_pallas_v26`, `test_pallas_v30`) PASSED (`8 passed in 145.98s`)**:
+       - `energy_diff_pallas_vs_xla_kcal_mol`: **`0.01395 kcal/mol`** (`< 0.02 kcal/mol`)
+       - `force_max_diff_pallas_vs_xla_kcal_mol_A`: **`2.67e-4 kcal/(mol*A)`** (`< 5e-4 kcal/(mol*A)`)
+       - `ragged_bucket_invariance_energy_diff_8k_vs_25k`: **`1.56e-5 kcal/mol`**
+       - `ghost_neighbors_in_real_rows_v24`: **`0`**
+     - **Kernel Microbenchmarks (`NVIDIA L40S` `sm_89`)**:
+       - `mk46_pallas_fused_baoab_settle_8k_ms`: **`0.0530 ms`** vs `0.1199 ms` XLA (**`2.26x` speedup**)
+       - `force_eval_8k_compact_bucket_v25_ms`: **`0.1313 ms`** (improved from `0.1387 ms` in v2.7)
+       - `force_eval_25k_ragged_v24_filtered_ms`: **`0.1366 ms`** vs `0.1748 ms` unfiltered (**`1.28x` speedup**)
+       - `cell_prune_25k_ragged_v24_filtered_ms`: **`0.5749 ms`** vs `0.9685 ms` unfiltered (**`1.68x` speedup**)
+       - `mk38_pme_gather_compute_dq_false_ms`: **`0.0342 ms`** vs `0.0376 ms` (**`1.10x` speedup**)
+     - **End-to-End `EnsemblePlan.run()` Throughput on `NVIDIA L40S` (`sm_89`, v3.0 vs v2.7)**:
+       - **Small (`4,199` atoms in `8,192` bucket, `32^3` PME)**:
+         - `single`: $B=1 \to \mathbf{0.734\text{ ms/step}}$ (**`235.57 ns/day`**, **`+19.7%`** vs v2.7), $B=2 \to \mathbf{0.488\text{ ms/step}}$ batch / **`0.244 ms/step/rep`** (**`708.54 ns/day` agg**, **`+24.1%`** vs v2.7, **`53.3%` of OpenMM mixed** / `53.0%` of OpenMM single), $B=32 \to 0.274\text{ ms/step/rep}$ (`630.90 ns/day`).
+         - `mixed`: $B=1 \to \mathbf{0.628\text{ ms/step}}$ (**`275.13 ns/day`**, **`+10.5%`** vs v2.7), $B=2 \to \mathbf{0.337\text{ ms/step/rep}}$ (**`512.26 ns/day`**, **`+26.1%`** vs v2.7), $B=32 \to \mathbf{0.301\text{ ms/step/rep}}$ (`574.72 ns/day`).
+       - **Medium (`6,658` atoms in `8,192` bucket, `48^3` PME)**:
+         - `single`: $B=1 \to \mathbf{0.821\text{ ms/step}}$ (**`210.56 ns/day`**, **`+9.6%`** vs v2.7), $B=2 \to \mathbf{0.567\text{ ms/step}}$ batch / **`0.284 ms/step/rep`** (**`609.27 ns/day` agg**, **`+17.4%`** vs v2.7, **`49.0%` of OpenMM mixed**), $B=32 \to 0.307\text{ ms/step/rep}$ (`562.20 ns/day`).
+         - `mixed`: $B=1 \to \mathbf{0.619\text{ ms/step}}$ (**`279.09 ns/day`**, **`+14.8%`** vs v2.7), $B=32 \to 0.348\text{ ms/step/rep}$ (`496.70 ns/day`).
+       - **Solvated DHFR (`23,558` atoms in `25,000` bucket, `64^3` PME)**:
+         - `single`: $B=1 \to \mathbf{1.751\text{ ms/step}}$ (**`98.67 ns/day`**, **`+11.7%`** vs v2.7's `88.37 ns/day`), $B=2 \to 1.486\text{ ms/step/rep}$ (`116.26 ns/day`), $B=4 \to \mathbf{1.475\text{ ms/step/rep}}$ (**`117.17 ns/day`**), $B=16 \to 1.486\text{ ms/step/rep}$ (`116.27 ns/day`).
+         - `mixed`: $B=1 \to \mathbf{1.757\text{ ms/step}}$ (**`98.38 ns/day`**, **`+5.0%`** vs v2.7's `93.70 ns/day`), $B=16 \to 1.666\text{ ms/step/rep}$ (`103.73 ns/day`).
+       - **Heterogeneous Same-Bucket (`4,199 + 6,656` in `8,192` bucket)**: **`0.521 ms/step` batch (`0.260 ms/step/system`)**, **`+21.0%` faster** than v2.7 (`0.630 ms/step`).
+       - **Heterogeneous Multi-Bucket (`[8192, 25000, 8192, 25000]`)**: **`3.474 ms/step` total for 4 systems (`0.869 ms/step/system`)**, **`+9.2%` faster** than v2.7 (`3.795 ms/step`).
+
+
 
 
 

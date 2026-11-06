@@ -128,10 +128,12 @@ def _spread_charges_pallas_batch(
         is_real = (_pl_load(mask_ref, (m_base + offs,)) > 0) & (offs < n_atoms)
 
         def _do_spread(_):
-            px = _pl_load(px_ref, (pos_base + offs,))
-            py = _pl_load(py_ref, (pos_base + offs,))
-            pz = _pl_load(pz_ref, (pos_base + offs,))
-            qi = _pl_load(charges_ref, (q_base + offs,))
+            zero = jnp.asarray(0.0, dtype=dtype)
+            px = _pl_load(px_ref, (pos_base + offs,), mask=is_real, other=zero)
+            py = _pl_load(py_ref, (pos_base + offs,), mask=is_real, other=zero)
+            pz = _pl_load(pz_ref, (pos_base + offs,), mask=is_real, other=zero)
+            qi = _pl_load(charges_ref, (q_base + offs,), mask=is_real, other=zero)
+            active_q = is_real & (jnp.abs(qi) > zero)
 
             bx = _pl_load(box_ref, (box_base + jnp.zeros((1,), dtype=jnp.int32),))[0]
             by = _pl_load(box_ref, (box_base + jnp.ones((1,), dtype=jnp.int32),))[0]
@@ -140,9 +142,9 @@ def _spread_charges_pallas_batch(
             ky = jnp.asarray(Ky, dtype=dtype)
             kz = jnp.asarray(Kz, dtype=dtype)
 
-            frac_x = (px / bx) * kx
-            frac_y = (py / by) * ky
-            frac_z = (pz / bz) * kz
+            frac_x = px * (kx / bx)
+            frac_y = py * (ky / by)
+            frac_z = pz * (kz / bz)
             gx = jnp.floor(frac_x)
             gy = jnp.floor(frac_y)
             gz = jnp.floor(frac_z)
@@ -158,33 +160,32 @@ def _spread_charges_pallas_batch(
             gyi = gy.astype(jnp.int32)
             gzi = gz.astype(jnp.int32)
 
-            s_idx = jnp.arange(64, dtype=jnp.int32)
-            ox = (s_idx // 16)[None, :]
-            oy = ((s_idx // 4) % 4)[None, :]
-            oz = (s_idx % 4)[None, :]
+            # MK-49: Separable (BLOCK_N=32, 16) YZ-plane stencil reused across 4 X-planes
+            s_yz = jnp.arange(16, dtype=jnp.int32)
+            oy = (s_yz // 4)[None, :]
+            oz = (s_yz % 4)[None, :]
 
-            ix = jnp.mod(gxi[:, None] + ox - 1, Kx)
-            iy = jnp.mod(gyi[:, None] + oy - 1, Ky)
-            iz = jnp.mod(gzi[:, None] + oz - 1, Kz)
-            flat_idx = mesh_base + (ix * Ky + iy) * Kz + iz
+            iy_16 = jnp.mod(gyi[:, None] + oy - 1, Ky)
+            iz_16 = jnp.mod(gzi[:, None] + oz - 1, Kz)
+            iyz_16 = iy_16 * Kz + iz_16
 
-            wx_s = _select_stencil(wx, ox)
-            wy_s = _select_stencil(wy, oy)
-            wz_s = _select_stencil(wz, oz)
+            wy_16 = _select_stencil(wy, oy)
+            wz_16 = _select_stencil(wz, oz)
+            q_wyz_16 = jnp.where(active_q[:, None], qi[:, None] * (wy_16 * wz_16), zero)
+            mask_16 = jnp.broadcast_to(active_q[:, None], (BLOCK_N, 16)).reshape(BLOCK_N * 16)
+            ky_kz = Ky * Kz
 
-            mask_2d = jnp.broadcast_to(is_real[:, None], (BLOCK_N, 64))
-            w_2d = jnp.where(mask_2d, (wx_s * wy_s * wz_s) * qi[:, None], jnp.asarray(0.0, dtype=dtype)).astype(dtype)
+            for ox_i in range(4):
+                ix_plane = jnp.mod(gxi + (ox_i - 1), Kx)[:, None]
+                flat_idx_16 = (mesh_base + ix_plane * ky_kz + iyz_16).reshape(BLOCK_N * 16)
+                w_16 = (wx[ox_i][:, None] * q_wyz_16).astype(dtype).reshape(BLOCK_N * 16)
+                if interpret:
+                    def _serial_atomic(k, _, idx_vec=flat_idx_16, w_vec=w_16):
+                        plt.atomic_add(mesh_out_ref, (idx_vec[k],), w_vec[k])
 
-            flat_idx_1d = flat_idx.reshape(BLOCK_N * 64)
-            w_1d = w_2d.reshape(BLOCK_N * 64)
-            mask_1d = mask_2d.reshape(BLOCK_N * 64)
-            if interpret:
-                def _serial_atomic(k, _):
-                    plt.atomic_add(mesh_out_ref, (flat_idx_1d[k],), w_1d[k])
-
-                jax.lax.fori_loop(0, BLOCK_N * 64, _serial_atomic, None)
-            else:
-                plt.atomic_add(mesh_out_ref, (flat_idx_1d,), w_1d, mask=mask_1d)
+                    jax.lax.fori_loop(0, BLOCK_N * 16, _serial_atomic, None)
+                else:
+                    plt.atomic_add(mesh_out_ref, (flat_idx_16,), w_16, mask=mask_16)
 
         jax.lax.cond(
             jnp.max(is_real.astype(jnp.int32)) > 0,
@@ -380,10 +381,11 @@ def _gather_pallas_batch(
         zero_vec = (offs - offs).astype(dtype)
 
         def _do_gather(_):
-            px = _pl_load(px_ref, (pos_base + offs,))
-            py = _pl_load(py_ref, (pos_base + offs,))
-            pz = _pl_load(pz_ref, (pos_base + offs,))
-            qi = _pl_load(charges_ref, (q_base + offs,))
+            zero = jnp.asarray(0.0, dtype=dtype)
+            px = _pl_load(px_ref, (pos_base + offs,), mask=is_real, other=zero)
+            py = _pl_load(py_ref, (pos_base + offs,), mask=is_real, other=zero)
+            pz = _pl_load(pz_ref, (pos_base + offs,), mask=is_real, other=zero)
+            qi = _pl_load(charges_ref, (q_base + offs,), mask=is_real, other=zero)
 
             bx = _pl_load(box_ref, (box_base + jnp.zeros((1,), dtype=jnp.int32),))[0]
             by = _pl_load(box_ref, (box_base + jnp.ones((1,), dtype=jnp.int32),))[0]
@@ -392,9 +394,12 @@ def _gather_pallas_batch(
             ky = jnp.asarray(Ky, dtype=dtype)
             kz = jnp.asarray(Kz, dtype=dtype)
 
-            frac_x = (px / bx) * kx
-            frac_y = (py / by) * ky
-            frac_z = (pz / bz) * kz
+            sx = kx / bx
+            sy = ky / by
+            sz = kz / bz
+            frac_x = px * sx
+            frac_y = py * sy
+            frac_z = pz * sz
             gx = jnp.floor(frac_x)
             gy = jnp.floor(frac_y)
             gz = jnp.floor(frac_z)
@@ -413,55 +418,59 @@ def _gather_pallas_batch(
             gyi = gy.astype(jnp.int32)
             gzi = gz.astype(jnp.int32)
 
-            s_idx = jnp.arange(64, dtype=jnp.int32)
-            ox = (s_idx // 16)[None, :]
-            oy = ((s_idx // 4) % 4)[None, :]
-            oz = (s_idx % 4)[None, :]
+            # MK-49: Separable (BLOCK_N=32, 16) YZ-plane stencil reused across 4 X-planes
+            s_yz = jnp.arange(16, dtype=jnp.int32)
+            oy = (s_yz // 4)[None, :]
+            oz = (s_yz % 4)[None, :]
 
-            ix = jnp.mod(gxi[:, None] + ox - 1, Kx)
-            iy = jnp.mod(gyi[:, None] + oy - 1, Ky)
-            iz = jnp.mod(gzi[:, None] + oz - 1, Kz)
-            flat_idx = mesh_base + (ix * Ky + iy) * Kz + iz
+            iy_16 = jnp.mod(gyi[:, None] + oy - 1, Ky)
+            iz_16 = jnp.mod(gzi[:, None] + oz - 1, Kz)
+            iyz_16 = iy_16 * Kz + iz_16
 
-            wx_s = _select_stencil(wx, ox)
-            wy_s = _select_stencil(wy, oy)
-            wz_s = _select_stencil(wz, oz)
-            dwx_s = _select_stencil(dwx, ox)
-            dwy_s = _select_stencil(dwy, oy)
-            dwz_s = _select_stencil(dwz, oz)
+            wy_16 = _select_stencil(wy, oy)
+            wz_16 = _select_stencil(wz, oz)
+            dwy_16 = _select_stencil(dwy, oy)
+            dwz_16 = _select_stencil(dwz, oz)
 
-            zero = jnp.asarray(0.0, dtype=dtype)
-            mask_2d = jnp.broadcast_to(is_real[:, None], (BLOCK_N, 64))
-            flat_idx_1d = flat_idx.reshape(BLOCK_N * 64)
-            mask_1d = mask_2d.reshape(BLOCK_N * 64)
-            t_val = _pl_load(theta_flat_ref, (flat_idx_1d,), mask=mask_1d, other=zero).reshape(
-                BLOCK_N, 64
-            )
+            wyz_16 = wy_16 * wz_16
+            dwyz_16 = dwy_16 * wz_16
+            wdyz_16 = wy_16 * dwz_16
 
-            sx = kx / bx
-            sy = ky / by
-            sz = kz / bz
+            mask_16 = jnp.broadcast_to(is_real[:, None], (BLOCK_N, 16)).reshape(BLOCK_N * 16)
+            ky_kz = Ky * Kz
+
+            acc_dx = zero_vec
+            acc_dy = zero_vec
+            acc_dz = zero_vec
+            acc_dq = zero_vec
+
+            for ox_i in range(4):
+                ix_plane = jnp.mod(gxi + (ox_i - 1), Kx)[:, None]
+                flat_idx_16 = (mesh_base + ix_plane * ky_kz + iyz_16).reshape(BLOCK_N * 16)
+                t_16 = _pl_load(
+                    theta_flat_ref,
+                    (flat_idx_16,),
+                    mask=mask_16,
+                    other=zero,
+                ).reshape(BLOCK_N, 16)
+                sum_wyz = jnp.sum(wyz_16 * t_16, axis=-1)
+                sum_dwyz = jnp.sum(dwyz_16 * t_16, axis=-1)
+                sum_wdyz = jnp.sum(wdyz_16 * t_16, axis=-1)
+                wx_i = wx[ox_i]
+                dwx_i = dwx[ox_i]
+                acc_dx = acc_dx + dwx_i * sum_wyz
+                acc_dy = acc_dy + wx_i * sum_dwyz
+                acc_dz = acc_dz + wx_i * sum_wdyz
+                if compute_dq:
+                    acc_dq = acc_dq + wx_i * sum_wyz
 
             if compute_dq:
-                w_unit = wx_s * wy_s * wz_s
-                dq_v = jnp.where(is_real, jnp.sum(w_unit * t_val, axis=-1), zero).astype(dtype)
+                dq_v = jnp.where(is_real, acc_dq, zero).astype(dtype)
             else:
                 dq_v = zero_vec
-            dpx_v = jnp.where(
-                is_real,
-                qi * sx * jnp.sum(dwx_s * wy_s * wz_s * t_val, axis=-1),
-                zero,
-            ).astype(dtype)
-            dpy_v = jnp.where(
-                is_real,
-                qi * sy * jnp.sum(wx_s * dwy_s * wz_s * t_val, axis=-1),
-                zero,
-            ).astype(dtype)
-            dpz_v = jnp.where(
-                is_real,
-                qi * sz * jnp.sum(wx_s * wy_s * dwz_s * t_val, axis=-1),
-                zero,
-            ).astype(dtype)
+            dpx_v = jnp.where(is_real, qi * sx * acc_dx, zero).astype(dtype)
+            dpy_v = jnp.where(is_real, qi * sy * acc_dy, zero).astype(dtype)
+            dpz_v = jnp.where(is_real, qi * sz * acc_dz, zero).astype(dtype)
             return (dpx_v, dpy_v, dpz_v, dq_v)
 
         dpx, dpy, dpz, dq = jax.lax.cond(

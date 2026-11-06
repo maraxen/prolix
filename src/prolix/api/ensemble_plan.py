@@ -1264,6 +1264,7 @@ class EnsemblePlan:
             # code touching a bundle's static box_size field; see settle.py's
             # _make_settle_compatible_force_fn docstring for the full mechanism).
             is_force_shaped=use_flash_forces,
+            use_pallas=use_pallas,
         )
 
         key = jax.random.PRNGKey(jnp.asarray(seed, dtype=jnp.uint32))
@@ -1801,7 +1802,7 @@ class EnsemblePlan:
                         any_upd = jnp.any(su_b)
 
                         def _do_batch(operands):
-                            p_b, _lp_b, i_b, r_b, e_b, b_b, ei_op, ev_op, ee_op, am_op = operands
+                            su_op, p_b, lp_op, i_b, r_b, e_b, b_b, ei_op, ev_op, ee_op, am_op = operands
                             if can_pallas_nl:
                                 p_w_b = jnp.mod(p_b, b_b[:, None, :])
                                 idx_new_b, occ_new_b = nl_mod._pallas_prune_and_encode_cell_list_batch(
@@ -1821,56 +1822,78 @@ class EnsemblePlan:
                                     grid_dims=grid_dims_nl,
                                     atom_mask=am_op if in_batched[10] else am_in,
                                     mask_batched=bool(in_batched[10]),
+                                    rebuild_mask=su_op,
+                                    old_idx=i_b,
                                 )
                                 overflow_bit = jnp.uint8(
                                     nl_mod.partition.PartitionErrorCode.NEIGHBOR_LIST_OVERFLOW
                                 )
-                                err_new_b = jnp.where(occ_new_b > max_occ_i, e_b | overflow_bit, e_b)
-                                return idx_new_b, p_w_b.astype(r_b.dtype), err_new_b, p_b
+                                err_new_b = jnp.where(
+                                    su_op & (occ_new_b > max_occ_i),
+                                    e_b | overflow_bit,
+                                    e_b,
+                                )
+                                ref_new_b = jnp.where(
+                                    su_op[:, None, None],
+                                    p_w_b.astype(r_b.dtype),
+                                    r_b,
+                                )
+                                last_new_b = jnp.where(
+                                    su_op[:, None, None],
+                                    p_b,
+                                    lp_op,
+                                )
+                                return idx_new_b, ref_new_b, err_new_b, last_new_b
 
                             ei_full = jnp.broadcast_to(ei_op, (B, *ei_op.shape[1:]))
                             ev_full = jnp.broadcast_to(ev_op, (B, *ev_op.shape[1:]))
                             ee_full = jnp.broadcast_to(ee_op, (B, *ee_op.shape[1:]))
                             am_full = jnp.broadcast_to(am_op, (B, *am_op.shape[1:]))
 
-                            def _one_fallback(p_1, r_1, i_1, e_1, bx_1, ei_1, ev_1, ee_1, am_1):
-                                forced_ref = r_1 + jnp.asarray(0.5, dtype=r_1.dtype) * bx_1.astype(r_1.dtype)
-                                n_tmp = dataclasses.replace(
-                                    neighbor,
-                                    idx=i_1,
-                                    reference_position=forced_ref,
-                                    error=nl_mod.partition.PartitionError(e_1),
-                                )
-                                n_upd = n_tmp.update(p_1)
-                                upd_fn = getattr(n_upd, "update_fn", None)
-                                pre_enc = bool(getattr(upd_fn, "_pre_encoded_exclusions", False))
-                                ghosts_filt = bool(getattr(upd_fn, "_ghosts_filtered", False))
-                                if (has_excl_nl and not pre_enc) or not ghosts_filt:
-                                    idx_enc = nl_mod.encode_nl_exclusions(
-                                        n_upd.idx,
-                                        ei_1 if (has_excl_nl and not pre_enc) else jnp.zeros((n_nl_rows, 0), dtype=jnp.int32),
-                                        ev_1 if (has_excl_nl and not pre_enc) else jnp.zeros((n_nl_rows, 0), dtype=jnp.float32),
-                                        ee_1 if (has_excl_nl and not pre_enc) else jnp.zeros((n_nl_rows, 0), dtype=jnp.float32),
-                                        n_atoms=n_nl_rows,
-                                        atom_mask=am_1,
+                            def _one_fallback(su_1, p_1, lp_1, r_1, i_1, e_1, bx_1, ei_1, ev_1, ee_1, am_1):
+                                def _do_one(_):
+                                    forced_ref = r_1 + jnp.asarray(0.5, dtype=r_1.dtype) * bx_1.astype(r_1.dtype)
+                                    n_tmp = dataclasses.replace(
+                                        neighbor,
+                                        idx=i_1,
+                                        reference_position=forced_ref,
+                                        error=nl_mod.partition.PartitionError(e_1),
                                     )
-                                else:
-                                    idx_enc = n_upd.idx
-                                return idx_enc, n_upd.reference_position, n_upd.error.code, p_1
+                                    n_upd = n_tmp.update(p_1)
+                                    upd_fn = getattr(n_upd, "update_fn", None)
+                                    pre_enc = bool(getattr(upd_fn, "_pre_encoded_exclusions", False))
+                                    ghosts_filt = bool(getattr(upd_fn, "_ghosts_filtered", False))
+                                    if (has_excl_nl and not pre_enc) or not ghosts_filt:
+                                        idx_enc = nl_mod.encode_nl_exclusions(
+                                            n_upd.idx,
+                                            ei_1 if (has_excl_nl and not pre_enc) else jnp.zeros((n_nl_rows, 0), dtype=jnp.int32),
+                                            ev_1 if (has_excl_nl and not pre_enc) else jnp.zeros((n_nl_rows, 0), dtype=jnp.float32),
+                                            ee_1 if (has_excl_nl and not pre_enc) else jnp.zeros((n_nl_rows, 0), dtype=jnp.float32),
+                                            n_atoms=n_nl_rows,
+                                            atom_mask=am_1,
+                                        )
+                                    else:
+                                        idx_enc = n_upd.idx
+                                    return idx_enc, n_upd.reference_position, n_upd.error.code, p_1
+
+                                def _keep_one(_):
+                                    return i_1, r_1, e_1, lp_1
+
+                                return jax.lax.cond(su_1, _do_one, _keep_one, operand=None)
 
                             return jax.vmap(_one_fallback)(
-                                p_b, r_b, i_b, e_b, b_b, ei_full, ev_full, ee_full, am_full
+                                su_op, p_b, lp_op, r_b, i_b, e_b, b_b, ei_full, ev_full, ee_full, am_full
                             )
 
                         def _keep_batch(operands):
-                            _p_b, l_b, i_b, r_b, e_b, _b_b, _ei_op, _ev_op, _ee_op, _am_op = operands
+                            _su_op, _p_b, l_b, i_b, r_b, e_b, _b_b, _ei_op, _ev_op, _ee_op, _am_op = operands
                             return i_b, r_b, e_b, l_b
 
                         out = jax.lax.cond(
                             any_upd,
                             _do_batch,
                             _keep_batch,
-                            (pos_b, lp_b, idx_b, ref_b, err_b, bx_b, ei_b, ev_b, ee_b, am_b),
+                            (su_b, pos_b, lp_b, idx_b, ref_b, err_b, bx_b, ei_b, ev_b, ee_b, am_b),
                         )
                         return out, (True, True, True, True)
 
@@ -1897,28 +1920,29 @@ class EnsemblePlan:
                     new_langevin_state = apply_fn(
                         langevin_state, neighbor=new_neighbor, kT=kT_s, dt=dt_s
                     )
-                    # Ghost-position/momentum pinning (debt 772's deferred piece):
-                    # settle.py's O-step has no atom_mask awareness, so ghosts
-                    # would otherwise random-walk off their fixed NL-capacity
-                    # lattice. Masking happens here, at the dispatch layer,
-                    # outside settle.py's validated internals -- matches the
-                    # existing batched_simulate.py precedent (equilibrate_single).
-                    new_R = jnp.where(
-                        pad_mask_3d,
-                        _integrator_positions(new_langevin_state),
-                        pos,
-                    )
-                    new_P = jnp.where(pad_mask_3d, new_langevin_state.momentum, 0.0)
-                    if hasattr(new_langevin_state, "positions"):
-                        new_langevin_state = eqx.tree_at(
-                            lambda s: (s.positions, s.momentum),
-                            new_langevin_state,
-                            (new_R, new_P),
+                    if not getattr(apply_fn, "_pallas_settle_pins_ghosts", False):
+                        # Ghost-position/momentum pinning (debt 772's deferred piece):
+                        # settle.py's O-step has no atom_mask awareness, so ghosts
+                        # would otherwise random-walk off their fixed NL-capacity
+                        # lattice. Masking happens here, at the dispatch layer,
+                        # outside settle.py's validated internals -- matches the
+                        # existing batched_simulate.py precedent (equilibrate_single).
+                        new_R = jnp.where(
+                            pad_mask_3d,
+                            _integrator_positions(new_langevin_state),
+                            pos,
                         )
-                    else:
-                        new_langevin_state = new_langevin_state.set(
-                            position=new_R, momentum=new_P
-                        )
+                        new_P = jnp.where(pad_mask_3d, new_langevin_state.momentum, 0.0)
+                        if hasattr(new_langevin_state, "positions"):
+                            new_langevin_state = eqx.tree_at(
+                                lambda s: (s.positions, s.momentum),
+                                new_langevin_state,
+                                (new_R, new_P),
+                            )
+                        else:
+                            new_langevin_state = new_langevin_state.set(
+                                position=new_R, momentum=new_P
+                            )
                     return _NLDispatchCarry(
                         new_langevin_state, new_neighbor, did_overflow, new_last
                     )

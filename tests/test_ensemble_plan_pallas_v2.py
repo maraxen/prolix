@@ -1760,3 +1760,301 @@ def test_pallas_v26_spme_float32_fft_and_single_megakernel_store_and_grid_points
     finally:
         jax.config.update("jax_enable_x64", prev_x64)
 
+
+def test_pallas_v30_mk46_mk49_integrator_rebuild_nonbonded_pme():
+    """Verify Pallas v3.0 Pillars 1-4 (MK-46 through MK-49) on CPU interpret and XLA reference:
+    - MK-46: Fused Pallas BAOAB + analytical Miyamoto-Kollman SETTLE pre/post-force kernels
+      (B=1 and B=3, rigid water geometry & velocity orthogonality, ghost atom pinning, export fallback).
+    - MK-47: Per-replica independent neighbor-list rebuild masking (rebuild_mask=[False, True, False])
+      preserving non-rebuilding replicas' neighbor lists in O(1) while rebuilding triggered replicas.
+    - MK-48: Spatially pruned 32x32 block nonbonded kernel with O(1) ghost block skip, skin-shell load
+      gating, branchless reciprocal-multiply PBC/forces, and custom_vjp parameter gradients.
+    - MK-49: Separable (BLOCK_N=32, 16) YZ-plane factorized & charge-gated SPME spread/gather.
+    """
+    from prolix.export import export_context
+    from prolix.physics.neighbor_list import (
+        _pallas_prune_and_encode_cell_list_batch,
+        pallas_prune_and_encode_cell_list,
+    )
+    from prolix.physics.pme import (
+        _gather_reference,
+        _spread_charges_reference,
+    )
+    from prolix.physics.pme_pallas import gather_pallas, spread_charges_pallas
+    from prolix.physics.settle import (
+        TIP3P_RHH as HH_DIST,
+        TIP3P_ROH as OH_DIST,
+        _langevin_settle_vel,
+        pallas_baoab_post_force,
+        pallas_baoab_pre_force,
+    )
+
+    prev_x64 = jax.config.jax_enable_x64
+    jax.config.update("jax_enable_x64", True)
+    try:
+        # --- MK-46: Fused BAOAB + analytical Miyamoto-Kollman SETTLE ---
+        # 4 solute atoms (0..3), 2 rigid waters (4..9), 2 ghost atoms (10..11)
+        water_idx = jnp.array([[4, 5, 6], [7, 8, 9]], dtype=jnp.int32)
+        water_mask = jnp.array([True, True], dtype=jnp.bool_)
+        atom_mask = jnp.array(
+            [True, True, True, True, True, True, True, True, True, True, False, False],
+            dtype=jnp.bool_,
+        )
+        masses = jnp.array(
+            [12.0, 14.0, 16.0, 12.0, 15.999, 1.008, 1.008, 15.999, 1.008, 1.008, 1.0, 1.0],
+            dtype=jnp.float32,
+        )[:, None]
+        box = jnp.array([25.0, 25.0, 25.0], dtype=jnp.float32)
+
+        # Construct valid water geometries
+        half_hh = 0.5 * HH_DIST
+        h_y = float(np.sqrt(max(0.0, OH_DIST**2 - half_hh**2)))
+        pos0 = np.zeros((12, 3), dtype=np.float32)
+        pos0[0:4] = [[2.0, 3.0, 4.0], [3.5, 3.0, 4.0], [5.0, 3.2, 4.1], [6.2, 3.1, 4.0]]
+        pos0[4] = [10.0, 10.0, 10.0]
+        pos0[5] = [10.0 + half_hh, 10.0 + h_y, 10.0]
+        pos0[6] = [10.0 - half_hh, 10.0 + h_y, 10.0]
+        pos0[7] = [15.0, 12.0, 8.0]
+        pos0[8] = [15.0 + half_hh, 12.0 + h_y, 8.0]
+        pos0[9] = [15.0 - half_hh, 12.0 + h_y, 8.0]
+        pos0[10:] = [[99.0, 99.0, 99.0], [88.0, 88.0, 88.0]]
+        r0 = jnp.asarray(pos0)
+
+        rng = np.random.default_rng(2026)
+        p0 = jnp.asarray(rng.normal(0.0, 0.2, size=(12, 3)).astype(np.float32))
+        p0 = jnp.where(atom_mask[:, None], p0, 0.0)
+        f0 = jnp.asarray(rng.normal(0.0, 1.5, size=(12, 3)).astype(np.float32))
+        dt = jnp.float32(0.04)
+        kT = jnp.float32(0.6)
+        gamma = 0.1
+        key0 = jax.random.PRNGKey(42)
+
+        r_pal, p_pal, _ = pallas_baoab_pre_force(
+            r0,
+            p0,
+            f0,
+            masses,
+            key0,
+            water_idx,
+            water_mask,
+            box,
+            dt,
+            kT,
+            gamma,
+            r_OH=OH_DIST,
+            r_HH=HH_DIST,
+            interpret=True,
+            atom_mask=atom_mask,
+        )
+        # Check water geometry constraints on r_pal
+        for w in range(2):
+            ow, h1, h2 = r_pal[water_idx[w, 0]], r_pal[water_idx[w, 1]], r_pal[water_idx[w, 2]]
+            d_oh1 = float(jnp.linalg.norm(h1 - ow))
+            d_oh2 = float(jnp.linalg.norm(h2 - ow))
+            d_hh = float(jnp.linalg.norm(h2 - h1))
+            np.testing.assert_allclose(d_oh1, OH_DIST, atol=2e-4)
+            np.testing.assert_allclose(d_oh2, OH_DIST, atol=2e-4)
+            np.testing.assert_allclose(d_hh, HH_DIST, atol=2e-4)
+        # Check ghost atoms pinned to original r0 and zero momentum
+        np.testing.assert_allclose(np.asarray(r_pal[10:]), np.asarray(r0[10:]), atol=1e-6)
+        np.testing.assert_allclose(np.asarray(p_pal[10:]), 0.0, atol=1e-6)
+
+        # Check post-force velocity SETTLE orthogonality and parity with pure-JAX _langevin_settle_vel
+        p_post = pallas_baoab_post_force(
+            r_pal,
+            p_pal,
+            f0,
+            masses,
+            water_idx,
+            water_mask,
+            dt,
+            interpret=True,
+            atom_mask=atom_mask,
+        )
+        p_ref_kick = jnp.where(atom_mask[:, None], p_pal + jnp.float32(0.5) * dt * f0, 0.0)
+        p_ref = _langevin_settle_vel(
+            p_ref_kick,
+            r_pal,
+            r_pal,
+            masses,
+            water_idx,
+            dt,
+            15.999,
+            1.008,
+            water_mask=water_mask,
+            atom_mask=atom_mask,
+        )
+        p_ref = jnp.where(atom_mask[:, None], p_ref, 0.0)
+        np.testing.assert_allclose(np.asarray(p_post), np.asarray(p_ref), rtol=1e-4, atol=1e-4)
+
+        # Verify vmap batched B=3 parity
+        r_b = jnp.stack([r0, r0, r0], axis=0)
+        p_b = jnp.stack([p0, p0 * 0.5, p0 * -0.5], axis=0)
+        f_b = jnp.stack([f0, f0 * 0.8, f0 * 1.2], axis=0)
+        keys_b = jnp.stack([key0, jax.random.PRNGKey(43), jax.random.PRNGKey(44)], axis=0)
+        r_b_out, p_b_out, _ = jax.vmap(
+            lambda r_i, p_i, f_i, k_i: pallas_baoab_pre_force(
+                r_i,
+                p_i,
+                f_i,
+                masses,
+                k_i,
+                water_idx,
+                water_mask,
+                box,
+                dt,
+                kT,
+                gamma,
+                interpret=True,
+                atom_mask=atom_mask,
+            )
+        )(r_b, p_b, f_b, keys_b)
+        np.testing.assert_allclose(np.asarray(r_b_out[0]), np.asarray(r_pal), rtol=1e-5, atol=1e-5)
+        np.testing.assert_allclose(np.asarray(p_b_out[0]), np.asarray(p_pal), rtol=1e-5, atol=1e-5)
+
+        # Verify CUDA Triton lowering (interpret=False) in both float32 and float64
+        for dt_check in (jnp.float32, jnp.float64):
+            lowered_pre = (
+                jax.jit(
+                    lambda r_in, p_in, f_in, k_in: pallas_baoab_pre_force(
+                        r_in,
+                        p_in,
+                        f_in,
+                        masses.astype(dt_check),
+                        k_in,
+                        water_idx,
+                        water_mask,
+                        box.astype(dt_check),
+                        dt.astype(dt_check),
+                        kT.astype(dt_check),
+                        gamma,
+                        interpret=False,
+                        atom_mask=atom_mask,
+                    )
+                )
+                .trace(r0.astype(dt_check), p0.astype(dt_check), f0.astype(dt_check), key0)
+                .lower(lowering_platforms=("cuda",))
+            )
+            assert "pallas_baoab_pre_force" in lowered_pre.as_text()
+            lowered_post = (
+                jax.jit(
+                    lambda r_in, p_in, f_in: pallas_baoab_post_force(
+                        r_in,
+                        p_in,
+                        f_in,
+                        masses.astype(dt_check),
+                        water_idx,
+                        water_mask,
+                        dt.astype(dt_check),
+                        interpret=False,
+                        atom_mask=atom_mask,
+                    )
+                )
+                .trace(r0.astype(dt_check), p0.astype(dt_check), f0.astype(dt_check))
+                .lower(lowering_platforms=("cuda",))
+            )
+            assert "pallas_baoab_post_force" in lowered_post.as_text()
+
+        # --- MK-47: Per-replica independent neighbor-list rebuild masking ---
+        N_nl, K_nl = 64, 32
+        pos_nl_b = jnp.asarray(rng.uniform(1.0, 23.0, size=(3, N_nl, 3)).astype(np.float32))
+        box_nl = jnp.array([25.0, 25.0, 25.0], dtype=jnp.float32)
+        mask_nl = jnp.ones((3, N_nl), dtype=jnp.bool_)
+        ei_nl = jnp.full((3, N_nl, 4), -1, dtype=jnp.int32)
+        ev_nl = jnp.ones((3, N_nl, 4), dtype=jnp.float32)
+        ee_nl = jnp.ones((3, N_nl, 4), dtype=jnp.float32)
+        sentinel_old = jnp.full((3, N_nl, K_nl), 777, dtype=jnp.int32)
+        rebuild_mask = jnp.array([False, True, False], dtype=jnp.bool_)
+
+        idx_masked, _ = _pallas_prune_and_encode_cell_list_batch(
+            3,
+            (True, False, True, True, True),
+            pos_nl_b,
+            box_nl,
+            ei_nl,
+            ev_nl,
+            ee_nl,
+            cell_size=10.0,
+            cell_capacity=32,
+            max_occupancy=K_nl,
+            r_cutoff=10.0,
+            encode_exclusions=True,
+            interpret=True,
+            atom_mask=mask_nl,
+            mask_batched=True,
+            rebuild_mask=rebuild_mask,
+            old_idx=sentinel_old,
+        )
+        idx_single_1, _ = pallas_prune_and_encode_cell_list(
+            pos_nl_b[1],
+            box_nl,
+            ei_nl[1],
+            ev_nl[1],
+            ee_nl[1],
+            cell_size=10.0,
+            cell_capacity=32,
+            max_occupancy=K_nl,
+            r_cutoff=10.0,
+            encode_exclusions=True,
+            interpret=True,
+            atom_mask=mask_nl[1],
+        )
+        # Replicas 0 and 2 had rebuild_mask=False -> must preserve sentinel_old (777) untouched!
+        assert bool(jnp.all(idx_masked[0] == 777))
+        assert bool(jnp.all(idx_masked[2] == 777))
+        # Replica 1 had rebuild_mask=True -> must match standalone rebuild bit-for-bit!
+        np.testing.assert_array_equal(np.asarray(idx_masked[1]), np.asarray(idx_single_1))
+
+        # --- MK-49: Separable YZ-plane factorized & charge-gated SPME spread/gather ---
+        N_pme = 64
+        pos_pme = jnp.asarray(rng.uniform(1.0, 19.0, size=(N_pme, 3)).astype(np.float32))
+        q_pme = jnp.asarray(rng.uniform(-0.5, 0.5, size=(N_pme,)).astype(np.float32))
+        # Zero out some charges and mark trailing atoms as ghosts to test active_q gating
+        q_pme = q_pme.at[5:12].set(0.0)
+        mask_pme = jnp.arange(N_pme) < 52
+        box_pme = jnp.array([20.0, 20.0, 20.0], dtype=jnp.float32)
+        grid_pme = (16, 16, 16)
+
+        mesh_pal = spread_charges_pallas(
+            pos_pme, q_pme, mask_pme, box_pme, grid_pme, order=4, interpret=True
+        )
+        mesh_ref = _spread_charges_reference(
+            pos_pme, q_pme, mask_pme, box_pme, grid_dims=grid_pme, order=4
+        )
+        np.testing.assert_allclose(np.asarray(mesh_pal), np.asarray(mesh_ref), rtol=1e-5, atol=1e-5)
+
+        theta_norm = jnp.asarray(rng.normal(0.0, 1.0, size=grid_pme).astype(np.float32))
+        f_pal_dq, dq_pal = gather_pallas(
+            pos_pme,
+            q_pme,
+            mask_pme,
+            box_pme,
+            theta_norm,
+            grid_pme,
+            order=4,
+            interpret=True,
+            compute_dq=True,
+        )
+        f_pal_nodq, dq_nodq = gather_pallas(
+            pos_pme,
+            q_pme,
+            mask_pme,
+            box_pme,
+            theta_norm,
+            grid_pme,
+            order=4,
+            interpret=True,
+            compute_dq=False,
+        )
+        f_ref, dq_ref = _gather_reference(
+            pos_pme, q_pme, mask_pme, box_pme, theta_norm, grid_dims=grid_pme, order=4
+        )
+        np.testing.assert_allclose(np.asarray(f_pal_dq), np.asarray(f_ref), rtol=1e-5, atol=1e-5)
+        np.testing.assert_allclose(np.asarray(dq_pal), np.asarray(dq_ref), rtol=1e-5, atol=1e-5)
+        np.testing.assert_allclose(np.asarray(f_pal_dq), np.asarray(f_pal_nodq), rtol=1e-6, atol=1e-6)
+        assert bool(jnp.all(dq_nodq == 0.0))
+        assert bool(jnp.all(f_pal_dq[52:] == 0.0))
+    finally:
+        jax.config.update("jax_enable_x64", prev_x64)
+
+

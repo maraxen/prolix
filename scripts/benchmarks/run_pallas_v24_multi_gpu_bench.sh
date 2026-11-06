@@ -3,7 +3,7 @@ set -euo pipefail
 
 GPU_TAG="${GPU_TAG:-b300}"
 echo "========================================================================"
-echo "Engaging Multi-GPU Benchmark: Pallas v2.7 E2E Ensemble Buckets (${GPU_TAG})"
+echo "Engaging Multi-GPU Benchmark: Pallas v3.0 E2E Ensemble Buckets (${GPU_TAG})"
 echo "Host: $(hostname)  Job: ${SLURM_JOB_ID:-local}  Date: $(date -Is)"
 nvidia-smi --query-gpu=name,memory.total,compute_cap --format=csv,noheader | head -1 || true
 echo "========================================================================"
@@ -39,13 +39,13 @@ fi
 
 mkdir -p outputs/bench
 
-echo "=== [1/2] Verify Pallas v2.4, v2.5, v2.6 & v2.7 GPU unit tests ==="
+echo "=== [1/2] Verify Pallas v2.4, v2.5, v2.6, v2.7 & v3.0 GPU unit tests ==="
 if [[ "${SKIP_PYTEST:-0}" != "1" ]]; then
-    "${PROLIX_PY}" -m pytest tests/test_ensemble_plan_pallas_v2.py -k "test_pallas_v26 or test_pallas_v25 or test_pallas_v24" -v
+    "${PROLIX_PY}" -m pytest tests/test_ensemble_plan_pallas_v2.py -k "test_pallas_v30 or test_pallas_v26 or test_pallas_v25 or test_pallas_v24" -v
 fi
 
 echo "=== [2/2] Run E2E Multi-Bucket / Multi-System / Ragged-Bucket + OpenMM CUDA Benchmark ==="
 "${PROLIX_PY}" scripts/benchmarks/bench_e2e_ensemble_buckets.py \
-    --out "outputs/bench/261105_${GPU_TAG}_pallas_v27_e2e_ensemble_buckets.json"
+    --out "outputs/bench/261105_${GPU_TAG}_pallas_v30_e2e_ensemble_buckets.json"
 
-echo "=== PALLAS v2.7 (${GPU_TAG}) BENCHMARK COMPLETE ==="
+echo "=== PALLAS v3.0 (${GPU_TAG}) BENCHMARK COMPLETE ==="

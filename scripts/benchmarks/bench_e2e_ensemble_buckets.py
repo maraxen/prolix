@@ -463,6 +463,65 @@ def run_ragged_bucket_and_accuracy_audit(dhfr_bundle, quick: bool = False) -> di
     ms_gather_dq_true, _ = _probe_ms(jit_gather_dq_true, ubq_8k.positions, n_steady=n_steady, n_wall=n_wall)
     ms_gather_dq_false, _ = _probe_ms(jit_gather_dq_false, ubq_8k.positions, n_steady=n_steady, n_wall=n_wall)
 
+    # Profile MK-46 (Fused Pallas BAOAB + analytical Miyamoto-Kollman SETTLE vs pure-JAX BAOAB + SETTLE)
+    from prolix.physics.settle import (
+        _langevin_settle_vel,
+        pallas_baoab_post_force,
+        pallas_baoab_pre_force,
+        settle_positions,
+    )
+
+    w_valid = jnp.asarray(ubq_8k.water_mask, dtype=jnp.bool_)
+    w_idx_8k = jnp.asarray(ubq_8k.water_indices, dtype=jnp.int32)
+    masses_8k = jnp.where(ubq_8k.atom_mask, ubq_8k.masses, 1.0).astype(jnp.float32)[:, None]
+    inv_mass_8k = jnp.where(ubq_8k.atom_mask[:, None], 1.0 / masses_8k, 0.0).astype(jnp.float32)
+    dt_val = jnp.float32(0.0409)
+    kT_val = jnp.float32(0.6)
+    gamma_val = 0.48888
+    c1_val = jnp.float32(0.9918)
+    c2_8k = jnp.sqrt((1.0 - c1_val * c1_val) * kT_val * masses_8k).astype(jnp.float32)
+    r0_8k = ubq_8k.positions.astype(jnp.float32)
+    p0_8k = jnp.zeros_like(r0_8k)
+    f0_8k = g_pal_8k.astype(jnp.float32)
+    noise_8k = jnp.ones_like(r0_8k) * jnp.float32(0.01)
+    key_8k = jax.random.PRNGKey(123)
+    box_f32 = box_vec.astype(jnp.float32)
+
+    def _pallas_baoab_step(r, p, f, k):
+        r1, p1, _ = pallas_baoab_pre_force(
+            r, p, f, masses_8k, k, w_idx_8k, w_valid, box_f32, dt_val, kT_val, gamma_val, atom_mask=ubq_8k.atom_mask
+        )
+        return pallas_baoab_post_force(
+            r1, p1, f, masses_8k, w_idx_8k, w_valid, dt_val, atom_mask=ubq_8k.atom_mask
+        )
+
+    jit_mk46_pallas = jax.jit(_pallas_baoab_step)
+
+    def _xla_baoab_settle(r, p, f, n):
+        m3 = ubq_8k.atom_mask[:, None]
+        p1 = jnp.where(m3, p + 0.5 * dt_val * f, 0.0)
+        r_half = jnp.where(m3, r + 0.5 * dt_val * p1 * inv_mass_8k, r)
+        r_half_c = settle_positions(r, r_half, w_idx_8k, box=box_f32, water_mask=w_valid)
+        v_half = (r_half_c - r) / (0.5 * dt_val)
+        p_half = jnp.where(m3, v_half * masses_8k, 0.0)
+        p_o = jnp.where(m3, c1_val * p_half + c2_8k * n, 0.0)
+        p_o_c = _langevin_settle_vel(
+            p_o, r_half_c, r_half_c, masses_8k, w_idx_8k, dt_val, 15.999, 1.008, water_mask=w_valid, atom_mask=ubq_8k.atom_mask
+        )
+        r_un = jnp.where(m3, r_half_c + 0.5 * dt_val * p_o_c * inv_mass_8k, r_half_c)
+        r_new = settle_positions(r_half_c, r_un, w_idx_8k, box=box_f32, water_mask=w_valid)
+        v_a2 = (r_new - r_half_c) / (0.5 * dt_val)
+        p_a2 = jnp.where(m3, v_a2 * masses_8k, 0.0)
+        p_b2 = jnp.where(m3, p_a2 + 0.5 * dt_val * f, 0.0)
+        p_f = _langevin_settle_vel(
+            p_b2, r_new, r_new, masses_8k, w_idx_8k, dt_val, 15.999, 1.008, water_mask=w_valid, atom_mask=ubq_8k.atom_mask
+        )
+        return jnp.where(m3, p_f, 0.0)
+
+    jit_mk46_xla = jax.jit(_xla_baoab_settle)
+    ms_mk46_pallas, _ = _probe_ms(jit_mk46_pallas, r0_8k, p0_8k, f0_8k, key_8k, n_steady=n_steady, n_wall=n_wall)
+    ms_mk46_xla, _ = _probe_ms(jit_mk46_xla, r0_8k, p0_8k, f0_8k, noise_8k, n_steady=n_steady, n_wall=n_wall)
+
     res = {
         "n_real_atoms": n_real,
         "ghost_neighbors_in_real_rows_v23": ghost_count_v23,
@@ -484,6 +543,9 @@ def run_ragged_bucket_and_accuracy_audit(dhfr_bundle, quick: bool = False) -> di
         "mk38_pme_gather_compute_dq_true_ms": ms_gather_dq_true,
         "mk38_pme_gather_compute_dq_false_ms": ms_gather_dq_false,
         "mk38_speedup_compute_dq_false_vs_true": ms_gather_dq_true / max(ms_gather_dq_false, 1e-9),
+        "mk46_xla_baoab_settle_8k_ms": ms_mk46_xla,
+        "mk46_pallas_fused_baoab_settle_8k_ms": ms_mk46_pallas,
+        "mk46_speedup_pallas_vs_xla": ms_mk46_xla / max(ms_mk46_pallas, 1e-9),
     }
     print(json.dumps(res, indent=2))
     return res
@@ -1142,7 +1204,7 @@ def main():
 
     payload = {
         "meta": {
-            "version": "pallas_v2.7",
+            "version": "pallas_v3.0",
             "device": str(dev),
             "device_kind": dev_kind,
             "compute_capability": cc,

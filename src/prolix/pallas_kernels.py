@@ -1071,234 +1071,297 @@ def _pallas_nonbonded_nl_batch(
         base_lam = b_id if B_lam > 1 else jnp.int32(0)
         base_out = b_id * N_pad
 
-        mask_i = (_pl_load(mask_ref, (base_mask + offs_i,)) > 0) & in_bounds_i
-        px_i = _pl_load(px_ref, (base_pos + offs_i,))
-        py_i = _pl_load(py_ref, (base_pos + offs_i,))
-        pz_i = _pl_load(pz_ref, (base_pos + offs_i,))
-        q_i = _pl_load(q_ref, (base_q + offs_i,))
-        sig_i = _pl_load(sig_ref, (base_sig + offs_i,))
-        eps_i = _pl_load(eps_ref, (base_eps + offs_i,))
-
-        if not use_pre_encoded:
-            base_ei = (b_id * N_pad) if B_ei > 1 else jnp.int32(0)
-            base_ei_flat = (b_id * (N_pad * _NB_MAX_EXCL)) if B_ei > 1 else jnp.int32(0)
-            base_ev_flat = (b_id * (N_pad * _NB_MAX_EXCL)) if B_ev > 1 else jnp.int32(0)
-            base_ee_flat = (b_id * (N_pad * _NB_MAX_EXCL)) if B_ee > 1 else jnp.int32(0)
-            excl_min_i = _pl_load(excl_min_ref, (base_ei + offs_i,))
-            excl_max_i = _pl_load(excl_max_ref, (base_ei + offs_i,))
-            offs_m = jnp.arange(_NB_MAX_EXCL, dtype=jnp.int32)
-            flat_excl_offs = (offs_i[:, None] * _NB_MAX_EXCL + offs_m[None, :]).reshape(
-                _NB_BLOCK_N * _NB_MAX_EXCL
-            )
-
-        ax = _pl_load(box_ref, (base_box + jnp.zeros((1,), dtype=jnp.int32),))[0]
-        by = _pl_load(box_ref, (base_box + jnp.ones((1,), dtype=jnp.int32),))[0]
-        cz = _pl_load(box_ref, (base_box + jnp.full((1,), 2, dtype=jnp.int32),))[0]
-        bx_t = _pl_load(box_ref, (base_box + jnp.full((1,), 3, dtype=jnp.int32),))[0]
-        cx_t = _pl_load(box_ref, (base_box + jnp.full((1,), 4, dtype=jnp.int32),))[0]
-        cy_t = _pl_load(box_ref, (base_box + jnp.full((1,), 5, dtype=jnp.int32),))[0]
-
         zero_sc = jnp.asarray(0.0, dtype=dtype)
         one_sc = jnp.asarray(1.0, dtype=dtype)
-        s14_vdw = jnp.asarray(scale_14_vdw, dtype=dtype)
-        s14_elec = jnp.asarray(scale_14_elec, dtype=dtype)
-
-        if has_box:
-            pos_big = jnp.asarray(1e30, dtype=dtype)
-            neg_big = jnp.asarray(-1e30, dtype=dtype)
-            r_min_x = jnp.min(jnp.where(mask_i, px_i, pos_big))
-            r_max_x = jnp.max(jnp.where(mask_i, px_i, neg_big))
-            r_min_y = jnp.min(jnp.where(mask_i, py_i, pos_big))
-            r_max_y = jnp.max(jnp.where(mask_i, py_i, neg_big))
-            r_min_z = jnp.min(jnp.where(mask_i, pz_i, pos_big))
-            r_max_z = jnp.max(jnp.where(mask_i, pz_i, neg_big))
-            is_ortho = (bx_t == zero_sc) & (cx_t == zero_sc) & (cy_t == zero_sc)
-            r_m_val = jnp.asarray(r_margin, dtype=dtype)
-            interior_x = is_ortho & (r_min_x >= r_m_val) & (r_max_x <= ax - r_m_val)
-            interior_y = is_ortho & (r_min_y >= r_m_val) & (r_max_y <= by - r_m_val)
-            interior_z = is_ortho & (r_min_z >= r_m_val) & (r_max_z <= cz - r_m_val)
-            interior_all = interior_x & interior_y & interior_z
-        else:
-            interior_all = jnp.bool_(True)
-
-        lam = _pl_load(lam_ref, (base_lam + jnp.zeros((1,), dtype=jnp.int32),))[0]
-        one_minus_lam = one_sc - lam
-        soft_alpha_lj = jnp.asarray(softcore_alpha, dtype=dtype) * (
-            one_minus_lam ** int(softcore_exponent)
-        )
-        coul_const = jnp.asarray(coulomb_constant, dtype=dtype)
-        alpha_val = jnp.asarray(pme_alpha, dtype=dtype)
-        two_over_sqrt_pi = jnp.asarray(1.1283791670955126, dtype=dtype)
-
-        def _k_tile_body(k_tile, carry):
-            offs_k = k_tile * _NB_BLOCK_K + jnp.arange(_NB_BLOCK_K, dtype=jnp.int32)
-            in_bounds_nk = in_bounds_i[:, None] & (offs_k[None, :] < K)
-            safe_offs_k = jnp.minimum(offs_k, max(K - 1, 0))
-            flat_nbr_offs = base_nbr + (safe_offs_i[:, None] * K + safe_offs_k[None, :]).reshape(
-                _NB_BLOCK_N * _NB_BLOCK_K
-            )
-            raw_j_1d = _pl_load(nbr_flat_ref, (flat_nbr_offs,))
-            raw_j = jnp.where(in_bounds_nk, raw_j_1d.reshape(_NB_BLOCK_N, _NB_BLOCK_K), jnp.int32(N))
-            is_full_excl = (raw_j >= 0) & ((raw_j & jnp.int32(_NB_EXCL_FULL_BIT)) != 0)
-            is_14_excl = (raw_j >= 0) & ((raw_j & jnp.int32(_NB_EXCL_14_BIT)) != 0)
-            j_idx = jnp.where(raw_j >= 0, raw_j & jnp.int32(_NB_INDEX_MASK), raw_j)
-            cand_pair = (
-                mask_i[:, None]
-                & (j_idx >= 0)
-                & (j_idx < N)
-                & (j_idx != offs_i[:, None])
-                & (True if (not use_pre_encoded or include_pme_excl_erf) else (~is_full_excl))
-            )
-            has_any_valid = jnp.max(cand_pair.astype(jnp.int32)) > 0
-
-            def _eval_nonempty_tile(c_in):
-                acc_e, acc_fx, acc_fy, acc_fz = c_in
-                safe_j_1d = jnp.clip(j_idx.reshape(_NB_BLOCK_N * _NB_BLOCK_K), 0, N_pad - 1)
-
-                px_j = _pl_load(px_ref, (base_pos + safe_j_1d,)).reshape(_NB_BLOCK_N, _NB_BLOCK_K)
-                py_j = _pl_load(py_ref, (base_pos + safe_j_1d,)).reshape(_NB_BLOCK_N, _NB_BLOCK_K)
-                pz_j = _pl_load(pz_ref, (base_pos + safe_j_1d,)).reshape(_NB_BLOCK_N, _NB_BLOCK_K)
-                q_j = _pl_load(q_ref, (base_q + safe_j_1d,)).reshape(_NB_BLOCK_N, _NB_BLOCK_K)
-                sig_j = _pl_load(sig_ref, (base_sig + safe_j_1d,)).reshape(_NB_BLOCK_N, _NB_BLOCK_K)
-                eps_j = _pl_load(eps_ref, (base_eps + safe_j_1d,)).reshape(_NB_BLOCK_N, _NB_BLOCK_K)
-                mask_j = _pl_load(mask_ref, (base_mask + safe_j_1d,)).reshape(_NB_BLOCK_N, _NB_BLOCK_K) > 0
-
-                valid_pair = cand_pair & mask_j
-
-                raw_dx = px_i[:, None] - px_j
-                raw_dy = py_i[:, None] - py_j
-                raw_dz = pz_i[:, None] - pz_j
-                if has_box:
-                    dx, dy, dz = jax.lax.cond(
-                        interior_all,
-                        lambda d: d,
-                        lambda d: _min_image_triclinic_xyz(
-                            d[0], d[1], d[2], ax, by, cz, bx_t, cx_t, cy_t, True
-                        ),
-                        (raw_dx, raw_dy, raw_dz),
-                    )
-                else:
-                    dx, dy, dz = raw_dx, raw_dy, raw_dz
-
-                r_sq = dx * dx + dy * dy + dz * dz + jnp.asarray(1e-12, dtype=dtype)
-                dist = jnp.sqrt(r_sq)
-                in_cutoff = dist < jnp.asarray(cutoff, dtype=dtype)
-                active = valid_pair & in_cutoff
-
-                zero = jnp.asarray(0.0, dtype=dtype)
-                if use_pre_encoded:
-                    w_vdw = jnp.where(is_full_excl, zero, jnp.where(is_14_excl, s14_vdw, one_sc))
-                    w_elec = jnp.where(is_full_excl, zero, jnp.where(is_14_excl, s14_elec, one_sc))
-                else:
-                    has_tag = is_full_excl | is_14_excl
-                    in_excl_range = (
-                        active
-                        & (~has_tag)
-                        & (j_idx >= excl_min_i[:, None])
-                        & (j_idx <= excl_max_i[:, None])
-                    )
-
-                    def _lookup_excl_tile(_):
-                        excl_idx_i = _pl_load(excl_idx_flat_ref, (base_ei_flat + flat_excl_offs,)).reshape(
-                            _NB_BLOCK_N, _NB_MAX_EXCL
-                        )
-                        excl_vdw_i = _pl_load(excl_vdw_flat_ref, (base_ev_flat + flat_excl_offs,)).reshape(
-                            _NB_BLOCK_N, _NB_MAX_EXCL
-                        )
-                        excl_elec_i = _pl_load(excl_elec_flat_ref, (base_ee_flat + flat_excl_offs,)).reshape(
-                            _NB_BLOCK_N, _NB_MAX_EXCL
-                        )
-                        valid_excl_i = (excl_idx_i >= 0) & (excl_idx_i < N)
-                        matches = (j_idx[:, :, None] == excl_idx_i[:, None, :]) & valid_excl_i[:, None, :]
-                        any_match = jnp.sum(matches.astype(jnp.int32), axis=2) > 0
-                        wv = jnp.where(
-                            any_match,
-                            jnp.sum(jnp.where(matches, excl_vdw_i[:, None, :], zero), axis=2),
-                            one_sc,
-                        )
-                        we = jnp.where(
-                            any_match,
-                            jnp.sum(jnp.where(matches, excl_elec_i[:, None, :], zero), axis=2),
-                            one_sc,
-                        )
-                        return wv, we
-
-                    def _no_excl_tile(_):
-                        ones_t = jnp.ones((_NB_BLOCK_N, _NB_BLOCK_K), dtype=dtype)
-                        return ones_t, ones_t
-
-                    w_vdw_tbl, w_elec_tbl = jax.lax.cond(
-                        jnp.sum(in_excl_range.astype(jnp.int32)) > 0,
-                        _lookup_excl_tile,
-                        _no_excl_tile,
-                        None,
-                    )
-                    w_vdw = jnp.where(
-                        is_full_excl, zero, jnp.where(is_14_excl, s14_vdw, w_vdw_tbl)
-                    )
-                    w_elec = jnp.where(
-                        is_full_excl, zero, jnp.where(is_14_excl, s14_elec, w_elec_tbl)
-                    )
-
-                sig_ij = jnp.asarray(0.5, dtype=dtype) * (sig_i[:, None] + sig_j)
-                sig_safe = jnp.where(active, jnp.maximum(sig_ij, jnp.asarray(1e-4, dtype=dtype)), jnp.asarray(1.0, dtype=dtype))
-                eps_ij = jnp.sqrt(jnp.maximum(eps_i[:, None] * eps_j, jnp.asarray(0.0, dtype=dtype)) + jnp.asarray(1e-30, dtype=dtype))
-
-                u = dist / sig_safe
-                u6 = u ** 6
-                denom_lj = soft_alpha_lj + u6
-                x_inv6 = jnp.asarray(1.0, dtype=dtype) / jnp.maximum(denom_lj, jnp.asarray(1e-6, dtype=dtype))
-                v_unsw = jnp.asarray(4.0, dtype=dtype) * eps_ij * lam * (x_inv6 * x_inv6 - x_inv6)
-                dv_unsw_dr = (
-                    jnp.asarray(-24.0, dtype=dtype)
-                    * eps_ij
-                    * lam
-                    * (jnp.asarray(2.0, dtype=dtype) * x_inv6 - jnp.asarray(1.0, dtype=dtype))
-                    * (x_inv6 * x_inv6)
-                    * u6
-                    / dist
-                )
-
-                s_w, ds_dr = _lj_switch_weight_and_deriv(dist, cutoff, lj_switch_width)
-                e_lj = w_vdw * v_unsw * s_w
-                de_lj_dr = w_vdw * (dv_unsw_dr * s_w + v_unsw * ds_dr)
-
-                qq = coul_const * q_i[:, None] * q_j
-                if pme_alpha > 0.0:
-                    alpha_r = alpha_val * dist
-                    exp_term = jnp.exp(zero - (alpha_r * alpha_r))
-                    if include_pme_excl_erf:
-                        erf_v = erf(alpha_r) if (interpret and dtype == jnp.float64) else _triton_erf(alpha_r)
-                        eff_w = w_elec - erf_v
-                        e_coul = qq * eff_w / dist
-                        de_coul_dr = qq * (
-                            (zero - eff_w) / r_sq
-                            - (alpha_val * two_over_sqrt_pi * exp_term) / dist
-                        )
-                    else:
-                        erfc_val = erfc(alpha_r) if (interpret and dtype == jnp.float64) else _triton_erfc(alpha_r)
-                        e_coul = qq * w_elec * erfc_val / dist
-                        de_coul_dr = qq * w_elec * (
-                            (zero - erfc_val) / r_sq
-                            - (alpha_val * two_over_sqrt_pi * exp_term) / dist
-                        )
-                else:
-                    valid_coul = dist >= jnp.asarray(1e-4, dtype=dtype)
-                    e_coul = jnp.where(valid_coul, qq * w_elec / dist, zero)
-                    de_coul_dr = jnp.where(valid_coul, (zero - qq) * w_elec / r_sq, zero)
-
-                e_pair = jnp.where(active, e_lj + e_coul, zero)
-                f_scalar = jnp.where(active, (zero - (de_lj_dr + de_coul_dr)) / dist, zero)
-
-                acc_e = acc_e + jnp.asarray(0.5, dtype=dtype) * jnp.sum(e_pair, axis=1)
-                acc_fx = acc_fx + jnp.sum(f_scalar * dx, axis=1)
-                acc_fy = acc_fy + jnp.sum(f_scalar * dy, axis=1)
-                acc_fz = acc_fz + jnp.sum(f_scalar * dz, axis=1)
-                return (acc_e, acc_fx, acc_fy, acc_fz)
-
-            return jax.lax.cond(has_any_valid, _eval_nonempty_tile, lambda c_in: c_in, carry)
+        half_sc = jnp.asarray(0.5, dtype=dtype)
+        mask_i = (_pl_load(mask_ref, (base_mask + offs_i,)) > 0) & in_bounds_i
 
         def _run_k_tiles(c0):
+            px_i = _pl_load(px_ref, (base_pos + offs_i,))
+            py_i = _pl_load(py_ref, (base_pos + offs_i,))
+            pz_i = _pl_load(pz_ref, (base_pos + offs_i,))
+            q_i = _pl_load(q_ref, (base_q + offs_i,))
+            sig_i = _pl_load(sig_ref, (base_sig + offs_i,))
+            eps_i = _pl_load(eps_ref, (base_eps + offs_i,))
+
+            if not use_pre_encoded:
+                base_ei = (b_id * N_pad) if B_ei > 1 else jnp.int32(0)
+                base_ei_flat = (b_id * (N_pad * _NB_MAX_EXCL)) if B_ei > 1 else jnp.int32(0)
+                base_ev_flat = (b_id * (N_pad * _NB_MAX_EXCL)) if B_ev > 1 else jnp.int32(0)
+                base_ee_flat = (b_id * (N_pad * _NB_MAX_EXCL)) if B_ee > 1 else jnp.int32(0)
+                excl_min_i = _pl_load(excl_min_ref, (base_ei + offs_i,))
+                excl_max_i = _pl_load(excl_max_ref, (base_ei + offs_i,))
+                offs_m = jnp.arange(_NB_MAX_EXCL, dtype=jnp.int32)
+                flat_excl_offs = (offs_i[:, None] * _NB_MAX_EXCL + offs_m[None, :]).reshape(
+                    _NB_BLOCK_N * _NB_MAX_EXCL
+                )
+
+            ax = _pl_load(box_ref, (base_box + jnp.zeros((1,), dtype=jnp.int32),))[0]
+            by = _pl_load(box_ref, (base_box + jnp.ones((1,), dtype=jnp.int32),))[0]
+            cz = _pl_load(box_ref, (base_box + jnp.full((1,), 2, dtype=jnp.int32),))[0]
+            bx_t = _pl_load(box_ref, (base_box + jnp.full((1,), 3, dtype=jnp.int32),))[0]
+            cx_t = _pl_load(box_ref, (base_box + jnp.full((1,), 4, dtype=jnp.int32),))[0]
+            cy_t = _pl_load(box_ref, (base_box + jnp.full((1,), 5, dtype=jnp.int32),))[0]
+
+            s14_vdw = jnp.asarray(scale_14_vdw, dtype=dtype)
+            s14_elec = jnp.asarray(scale_14_elec, dtype=dtype)
+            cutoff_val = jnp.asarray(cutoff, dtype=dtype)
+            cutoff_sq = cutoff_val * cutoff_val
+
+            if has_box:
+                ax_pos = ax > zero_sc
+                by_pos = by > zero_sc
+                cz_pos = cz > zero_sc
+                inv_ax = jnp.where(ax_pos, one_sc / jnp.where(ax_pos, ax, one_sc), zero_sc)
+                inv_by = jnp.where(by_pos, one_sc / jnp.where(by_pos, by, one_sc), zero_sc)
+                inv_cz = jnp.where(cz_pos, one_sc / jnp.where(cz_pos, cz, one_sc), zero_sc)
+                pos_big = jnp.asarray(1e30, dtype=dtype)
+                neg_big = jnp.asarray(-1e30, dtype=dtype)
+                r_min_x = jnp.min(jnp.where(mask_i, px_i, pos_big))
+                r_max_x = jnp.max(jnp.where(mask_i, px_i, neg_big))
+                r_min_y = jnp.min(jnp.where(mask_i, py_i, pos_big))
+                r_max_y = jnp.max(jnp.where(mask_i, py_i, neg_big))
+                r_min_z = jnp.min(jnp.where(mask_i, pz_i, pos_big))
+                r_max_z = jnp.max(jnp.where(mask_i, pz_i, neg_big))
+                is_ortho = (bx_t == zero_sc) & (cx_t == zero_sc) & (cy_t == zero_sc)
+                r_m_val = jnp.asarray(r_margin, dtype=dtype)
+                interior_x = is_ortho & (r_min_x >= r_m_val) & (r_max_x <= ax - r_m_val)
+                interior_y = is_ortho & (r_min_y >= r_m_val) & (r_max_y <= by - r_m_val)
+                interior_z = is_ortho & (r_min_z >= r_m_val) & (r_max_z <= cz - r_m_val)
+                interior_all = interior_x & interior_y & interior_z
+            else:
+                inv_ax = zero_sc
+                inv_by = zero_sc
+                inv_cz = zero_sc
+                interior_all = jnp.bool_(True)
+
+            lam = _pl_load(lam_ref, (base_lam + jnp.zeros((1,), dtype=jnp.int32),))[0]
+            one_minus_lam = one_sc - lam
+            soft_alpha_lj = jnp.asarray(softcore_alpha, dtype=dtype) * (
+                one_minus_lam ** int(softcore_exponent)
+            )
+            coul_const = jnp.asarray(coulomb_constant, dtype=dtype)
+            alpha_val = jnp.asarray(pme_alpha, dtype=dtype)
+            two_over_sqrt_pi = jnp.asarray(1.1283791670955126, dtype=dtype)
+
+            def _k_tile_body(k_tile, carry):
+                offs_k = k_tile * _NB_BLOCK_K + jnp.arange(_NB_BLOCK_K, dtype=jnp.int32)
+                in_bounds_nk = in_bounds_i[:, None] & (offs_k[None, :] < K)
+                safe_offs_k = jnp.minimum(offs_k, max(K - 1, 0))
+                flat_nbr_offs = base_nbr + (safe_offs_i[:, None] * K + safe_offs_k[None, :]).reshape(
+                    _NB_BLOCK_N * _NB_BLOCK_K
+                )
+                raw_j_1d = _pl_load(nbr_flat_ref, (flat_nbr_offs,))
+                raw_j = jnp.where(in_bounds_nk, raw_j_1d.reshape(_NB_BLOCK_N, _NB_BLOCK_K), jnp.int32(N))
+                is_full_excl = (raw_j >= 0) & ((raw_j & jnp.int32(_NB_EXCL_FULL_BIT)) != 0)
+                is_14_excl = (raw_j >= 0) & ((raw_j & jnp.int32(_NB_EXCL_14_BIT)) != 0)
+                j_idx = jnp.where(raw_j >= 0, raw_j & jnp.int32(_NB_INDEX_MASK), raw_j)
+                cand_pair = (
+                    mask_i[:, None]
+                    & (j_idx >= 0)
+                    & (j_idx < N)
+                    & (j_idx != offs_i[:, None])
+                    & (True if (not use_pre_encoded or include_pme_excl_erf) else (~is_full_excl))
+                )
+                has_any_valid = jnp.max(cand_pair.astype(jnp.int32)) > 0
+
+                def _eval_nonempty_tile(c_in):
+                    safe_j_1d = jnp.clip(j_idx.reshape(_NB_BLOCK_N * _NB_BLOCK_K), 0, N_pad - 1)
+                    cand_1d = cand_pair.reshape(_NB_BLOCK_N * _NB_BLOCK_K)
+
+                    px_j = _pl_load(
+                        px_ref, (base_pos + safe_j_1d,), mask=cand_1d, other=zero_sc
+                    ).reshape(_NB_BLOCK_N, _NB_BLOCK_K)
+                    py_j = _pl_load(
+                        py_ref, (base_pos + safe_j_1d,), mask=cand_1d, other=zero_sc
+                    ).reshape(_NB_BLOCK_N, _NB_BLOCK_K)
+                    pz_j = _pl_load(
+                        pz_ref, (base_pos + safe_j_1d,), mask=cand_1d, other=zero_sc
+                    ).reshape(_NB_BLOCK_N, _NB_BLOCK_K)
+
+                    if use_pre_encoded:
+                        valid_pair = cand_pair
+                    else:
+                        mask_j = (
+                            _pl_load(
+                                mask_ref,
+                                (base_mask + safe_j_1d,),
+                                mask=cand_1d,
+                                other=jnp.int32(0),
+                            ).reshape(_NB_BLOCK_N, _NB_BLOCK_K)
+                            > 0
+                        )
+                        valid_pair = cand_pair & mask_j
+
+                    raw_dx = px_i[:, None] - px_j
+                    raw_dy = py_i[:, None] - py_j
+                    raw_dz = pz_i[:, None] - pz_j
+                    if has_box:
+                        sz = jnp.where(
+                            interior_all,
+                            zero_sc,
+                            jnp.floor(raw_dz * inv_cz + half_sc),
+                        )
+                        dx_z = raw_dx - sz * cx_t
+                        dy_z = raw_dy - sz * cy_t
+                        dz = raw_dz - sz * cz
+                        sy = jnp.where(
+                            interior_all,
+                            zero_sc,
+                            jnp.floor(dy_z * inv_by + half_sc),
+                        )
+                        dx_y = dx_z - sy * bx_t
+                        dy = dy_z - sy * by
+                        sx = jnp.where(
+                            interior_all,
+                            zero_sc,
+                            jnp.floor(dx_y * inv_ax + half_sc),
+                        )
+                        dx = dx_y - sx * ax
+                    else:
+                        dx, dy, dz = raw_dx, raw_dy, raw_dz
+
+                    raw_r_sq = dx * dx + dy * dy + dz * dz
+                    active = valid_pair & (raw_r_sq < cutoff_sq)
+
+                    def _eval_active_pairs(c_act):
+                        acc_e, acc_fx, acc_fy, acc_fz = c_act
+                        active_1d = active.reshape(_NB_BLOCK_N * _NB_BLOCK_K)
+                        q_j = _pl_load(
+                            q_ref, (base_q + safe_j_1d,), mask=active_1d, other=zero_sc
+                        ).reshape(_NB_BLOCK_N, _NB_BLOCK_K)
+                        sig_j = _pl_load(
+                            sig_ref, (base_sig + safe_j_1d,), mask=active_1d, other=one_sc
+                        ).reshape(_NB_BLOCK_N, _NB_BLOCK_K)
+                        eps_j = _pl_load(
+                            eps_ref, (base_eps + safe_j_1d,), mask=active_1d, other=zero_sc
+                        ).reshape(_NB_BLOCK_N, _NB_BLOCK_K)
+
+                        r_sq = raw_r_sq + jnp.asarray(1e-12, dtype=dtype)
+                        dist = jnp.sqrt(r_sq)
+                        inv_dist = jnp.where(active, one_sc / dist, zero_sc)
+                        inv_r_sq = inv_dist * inv_dist
+
+                        zero = zero_sc
+                        if use_pre_encoded:
+                            w_vdw = jnp.where(is_full_excl, zero, jnp.where(is_14_excl, s14_vdw, one_sc))
+                            w_elec = jnp.where(is_full_excl, zero, jnp.where(is_14_excl, s14_elec, one_sc))
+                        else:
+                            has_tag = is_full_excl | is_14_excl
+                            in_excl_range = (
+                                active
+                                & (~has_tag)
+                                & (j_idx >= excl_min_i[:, None])
+                                & (j_idx <= excl_max_i[:, None])
+                            )
+
+                            def _lookup_excl_tile(_):
+                                excl_idx_i = _pl_load(excl_idx_flat_ref, (base_ei_flat + flat_excl_offs,)).reshape(
+                                    _NB_BLOCK_N, _NB_MAX_EXCL
+                                )
+                                excl_vdw_i = _pl_load(excl_vdw_flat_ref, (base_ev_flat + flat_excl_offs,)).reshape(
+                                    _NB_BLOCK_N, _NB_MAX_EXCL
+                                )
+                                excl_elec_i = _pl_load(excl_elec_flat_ref, (base_ee_flat + flat_excl_offs,)).reshape(
+                                    _NB_BLOCK_N, _NB_MAX_EXCL
+                                )
+                                valid_excl_i = (excl_idx_i >= 0) & (excl_idx_i < N)
+                                matches = (j_idx[:, :, None] == excl_idx_i[:, None, :]) & valid_excl_i[:, None, :]
+                                any_match = jnp.sum(matches.astype(jnp.int32), axis=2) > 0
+                                wv = jnp.where(
+                                    any_match,
+                                    jnp.sum(jnp.where(matches, excl_vdw_i[:, None, :], zero), axis=2),
+                                    one_sc,
+                                )
+                                we = jnp.where(
+                                    any_match,
+                                    jnp.sum(jnp.where(matches, excl_elec_i[:, None, :], zero), axis=2),
+                                    one_sc,
+                                )
+                                return wv, we
+
+                            def _no_excl_tile(_):
+                                ones_t = jnp.ones((_NB_BLOCK_N, _NB_BLOCK_K), dtype=dtype)
+                                return ones_t, ones_t
+
+                            w_vdw_tbl, w_elec_tbl = jax.lax.cond(
+                                jnp.sum(in_excl_range.astype(jnp.int32)) > 0,
+                                _lookup_excl_tile,
+                                _no_excl_tile,
+                                None,
+                            )
+                            w_vdw = jnp.where(
+                                is_full_excl, zero, jnp.where(is_14_excl, s14_vdw, w_vdw_tbl)
+                            )
+                            w_elec = jnp.where(
+                                is_full_excl, zero, jnp.where(is_14_excl, s14_elec, w_elec_tbl)
+                            )
+
+                        sig_ij = half_sc * (sig_i[:, None] + sig_j)
+                        sig_safe = jnp.where(active, jnp.maximum(sig_ij, jnp.asarray(1e-4, dtype=dtype)), one_sc)
+                        eps_ij = jnp.sqrt(jnp.maximum(eps_i[:, None] * eps_j, zero) + jnp.asarray(1e-30, dtype=dtype))
+
+                        u = dist / sig_safe
+                        u6 = u ** 6
+                        denom_lj = soft_alpha_lj + u6
+                        x_inv6 = one_sc / jnp.maximum(denom_lj, jnp.asarray(1e-6, dtype=dtype))
+                        v_unsw = jnp.asarray(4.0, dtype=dtype) * eps_ij * lam * (x_inv6 * x_inv6 - x_inv6)
+                        dv_unsw_dr = (
+                            jnp.asarray(-24.0, dtype=dtype)
+                            * eps_ij
+                            * lam
+                            * (jnp.asarray(2.0, dtype=dtype) * x_inv6 - one_sc)
+                            * (x_inv6 * x_inv6)
+                            * u6
+                            * inv_dist
+                        )
+
+                        s_w, ds_dr = _lj_switch_weight_and_deriv(dist, cutoff, lj_switch_width)
+                        e_lj = w_vdw * v_unsw * s_w
+                        de_lj_dr = w_vdw * (dv_unsw_dr * s_w + v_unsw * ds_dr)
+
+                        qq = coul_const * q_i[:, None] * q_j
+                        if pme_alpha > 0.0:
+                            alpha_r = alpha_val * dist
+                            exp_term = jnp.exp(zero - (alpha_r * alpha_r))
+                            if include_pme_excl_erf:
+                                erf_v = erf(alpha_r) if (interpret and dtype == jnp.float64) else _triton_erf(alpha_r)
+                                eff_w = w_elec - erf_v
+                                e_coul = qq * eff_w * inv_dist
+                                de_coul_dr = qq * (
+                                    (zero - eff_w) * inv_r_sq
+                                    - (alpha_val * two_over_sqrt_pi * exp_term) * inv_dist
+                                )
+                            else:
+                                erfc_val = erfc(alpha_r) if (interpret and dtype == jnp.float64) else _triton_erfc(alpha_r)
+                                e_coul = qq * w_elec * erfc_val * inv_dist
+                                de_coul_dr = qq * w_elec * (
+                                    (zero - erfc_val) * inv_r_sq
+                                    - (alpha_val * two_over_sqrt_pi * exp_term) * inv_dist
+                                )
+                        else:
+                            valid_coul = dist >= jnp.asarray(1e-4, dtype=dtype)
+                            e_coul = jnp.where(valid_coul, qq * w_elec * inv_dist, zero)
+                            de_coul_dr = jnp.where(valid_coul, (zero - qq) * w_elec * inv_r_sq, zero)
+
+                        e_pair = jnp.where(active, e_lj + e_coul, zero)
+                        f_scalar = jnp.where(active, (zero - (de_lj_dr + de_coul_dr)) * inv_dist, zero)
+
+                        acc_e = acc_e + half_sc * jnp.sum(e_pair, axis=1)
+                        acc_fx = acc_fx + jnp.sum(f_scalar * dx, axis=1)
+                        acc_fy = acc_fy + jnp.sum(f_scalar * dy, axis=1)
+                        acc_fz = acc_fz + jnp.sum(f_scalar * dz, axis=1)
+                        return (acc_e, acc_fx, acc_fy, acc_fz)
+
+                    return jax.lax.cond(
+                        jnp.max(active.astype(jnp.int32)) > 0,
+                        _eval_active_pairs,
+                        lambda c_act: c_act,
+                        c_in,
+                    )
+
+                return jax.lax.cond(has_any_valid, _eval_nonempty_tile, lambda c_in: c_in, carry)
+
             return jax.lax.fori_loop(0, k_blocks, _k_tile_body, c0)
 
         init_carry = (
@@ -3883,229 +3946,292 @@ def _pallas_bonded_and_nonbonded_nl_fused_batch(
             base_lam = b_id * s_lam
 
             mask_i = (_pl_load(mask_ref, (base_mask + offs_i,)) > 0) & in_bounds_i
-            px_i = _pl_load(px_ref, (pos_base + offs_i,))
-            py_i = _pl_load(py_ref, (pos_base + offs_i,))
-            pz_i = _pl_load(pz_ref, (pos_base + offs_i,))
-            q_i = _pl_load(q_ref, (base_q + offs_i,))
-            sig_i = _pl_load(sig_ref, (base_sig + offs_i,))
-            eps_i = _pl_load(eps_ref, (base_eps + offs_i,))
-
-            if not use_pre_encoded:
-                base_ei = (b_id * N_pad) if B_ei > 1 else jnp.int32(0)
-                base_ei_flat = (b_id * (N_pad * _NB_MAX_EXCL)) if B_ei > 1 else jnp.int32(0)
-                base_ev_flat = (b_id * (N_pad * _NB_MAX_EXCL)) if B_ev > 1 else jnp.int32(0)
-                base_ee_flat = (b_id * (N_pad * _NB_MAX_EXCL)) if B_ee > 1 else jnp.int32(0)
-                excl_min_i = _pl_load(excl_min_ref, (base_ei + offs_i,))
-                excl_max_i = _pl_load(excl_max_ref, (base_ei + offs_i,))
-                offs_m = jnp.arange(_NB_MAX_EXCL, dtype=jnp.int32)
-                flat_excl_offs = (offs_i[:, None] * _NB_MAX_EXCL + offs_m[None, :]).reshape(
-                    _NB_BLOCK_N * _NB_MAX_EXCL
-                )
-
-            ax = _pl_load(box_ref, (base_box + jnp.zeros((1,), dtype=jnp.int32),))[0]
-            by = _pl_load(box_ref, (base_box + jnp.ones((1,), dtype=jnp.int32),))[0]
-            cz = _pl_load(box_ref, (base_box + jnp.full((1,), 2, dtype=jnp.int32),))[0]
-            bx_t = _pl_load(box_ref, (base_box + jnp.full((1,), 3, dtype=jnp.int32),))[0]
-            cx_t = _pl_load(box_ref, (base_box + jnp.full((1,), 4, dtype=jnp.int32),))[0]
-            cy_t = _pl_load(box_ref, (base_box + jnp.full((1,), 5, dtype=jnp.int32),))[0]
-
-            s14_vdw = jnp.asarray(scale_14_vdw, dtype=dtype)
-            s14_elec = jnp.asarray(scale_14_elec, dtype=dtype)
-            if has_box:
-                pos_big = jnp.asarray(1e30, dtype=dtype)
-                neg_big = jnp.asarray(-1e30, dtype=dtype)
-                r_min_x = jnp.min(jnp.where(mask_i, px_i, pos_big))
-                r_max_x = jnp.max(jnp.where(mask_i, px_i, neg_big))
-                r_min_y = jnp.min(jnp.where(mask_i, py_i, pos_big))
-                r_max_y = jnp.max(jnp.where(mask_i, py_i, neg_big))
-                r_min_z = jnp.min(jnp.where(mask_i, pz_i, pos_big))
-                r_max_z = jnp.max(jnp.where(mask_i, pz_i, neg_big))
-                is_ortho = (bx_t == zero) & (cx_t == zero) & (cy_t == zero)
-                r_m_val = jnp.asarray(float(max(cutoff, 6.0)), dtype=dtype)
-                interior_x = is_ortho & (r_min_x >= r_m_val) & (r_max_x <= ax - r_m_val)
-                interior_y = is_ortho & (r_min_y >= r_m_val) & (r_max_y <= by - r_m_val)
-                interior_z = is_ortho & (r_min_z >= r_m_val) & (r_max_z <= cz - r_m_val)
-                interior_all = interior_x & interior_y & interior_z
-            else:
-                interior_all = jnp.bool_(True)
-
-            lam = _pl_load(lam_ref, (base_lam + jnp.zeros((1,), dtype=jnp.int32),))[0]
-            one_minus_lam = one - lam
-            soft_alpha_lj = jnp.asarray(softcore_alpha, dtype=dtype) * (
-                one_minus_lam ** int(softcore_exponent)
-            )
-            coul_const = jnp.asarray(coulomb_constant, dtype=dtype)
-            alpha_val = jnp.asarray(pme_alpha, dtype=dtype)
-            two_over_sqrt_pi = jnp.asarray(1.1283791670955126, dtype=dtype)
-
-            def _k_tile_body(k_tile, carry):
-                offs_k = k_tile * _NB_BLOCK_K + jnp.arange(_NB_BLOCK_K, dtype=jnp.int32)
-                in_bounds_nk = in_bounds_i[:, None] & (offs_k[None, :] < K)
-                safe_offs_k = jnp.minimum(offs_k, max(K - 1, 0))
-                flat_nbr_offs = base_nbr + (safe_offs_i[:, None] * K + safe_offs_k[None, :]).reshape(
-                    _NB_BLOCK_N * _NB_BLOCK_K
-                )
-                raw_j_1d = _pl_load(nbr_flat_ref, (flat_nbr_offs,))
-                raw_j = jnp.where(in_bounds_nk, raw_j_1d.reshape(_NB_BLOCK_N, _NB_BLOCK_K), jnp.int32(N))
-                is_full_excl = (raw_j >= 0) & ((raw_j & jnp.int32(_NB_EXCL_FULL_BIT)) != 0)
-                is_14_excl = (raw_j >= 0) & ((raw_j & jnp.int32(_NB_EXCL_14_BIT)) != 0)
-                j_idx = jnp.where(raw_j >= 0, raw_j & jnp.int32(_NB_INDEX_MASK), raw_j)
-                cand_pair = (
-                    mask_i[:, None]
-                    & (j_idx >= 0)
-                    & (j_idx < N)
-                    & (j_idx != offs_i[:, None])
-                    & (True if (not use_pre_encoded or include_pme_excl_erf) else (~is_full_excl))
-                )
-                has_any_valid = jnp.max(cand_pair.astype(jnp.int32)) > 0
-
-                def _eval_nonempty_tile(c_in):
-                    acc_e, acc_fx, acc_fy, acc_fz = c_in
-                    safe_j_1d = jnp.clip(j_idx.reshape(_NB_BLOCK_N * _NB_BLOCK_K), 0, N_pad - 1)
-
-                    px_j = _pl_load(px_ref, (pos_base + safe_j_1d,)).reshape(_NB_BLOCK_N, _NB_BLOCK_K)
-                    py_j = _pl_load(py_ref, (pos_base + safe_j_1d,)).reshape(_NB_BLOCK_N, _NB_BLOCK_K)
-                    pz_j = _pl_load(pz_ref, (pos_base + safe_j_1d,)).reshape(_NB_BLOCK_N, _NB_BLOCK_K)
-                    q_j = _pl_load(q_ref, (base_q + safe_j_1d,)).reshape(_NB_BLOCK_N, _NB_BLOCK_K)
-                    sig_j = _pl_load(sig_ref, (base_sig + safe_j_1d,)).reshape(_NB_BLOCK_N, _NB_BLOCK_K)
-                    eps_j = _pl_load(eps_ref, (base_eps + safe_j_1d,)).reshape(_NB_BLOCK_N, _NB_BLOCK_K)
-                    mask_j = _pl_load(mask_ref, (base_mask + safe_j_1d,)).reshape(_NB_BLOCK_N, _NB_BLOCK_K) > 0
-
-                    valid_pair = cand_pair & mask_j
-
-                    raw_dx = px_i[:, None] - px_j
-                    raw_dy = py_i[:, None] - py_j
-                    raw_dz = pz_i[:, None] - pz_j
-                    if has_box:
-                        dx, dy, dz = jax.lax.cond(
-                            interior_all,
-                            lambda d: d,
-                            lambda d: _min_image_triclinic_xyz(
-                                d[0], d[1], d[2], ax, by, cz, bx_t, cx_t, cy_t, True
-                            ),
-                            (raw_dx, raw_dy, raw_dz),
-                        )
-                    else:
-                        dx, dy, dz = raw_dx, raw_dy, raw_dz
-
-                    r_sq = dx * dx + dy * dy + dz * dz + jnp.asarray(1e-12, dtype=dtype)
-                    dist = jnp.sqrt(r_sq)
-                    in_cutoff = dist < jnp.asarray(cutoff, dtype=dtype)
-                    active = valid_pair & in_cutoff
-
-                    if use_pre_encoded:
-                        w_vdw = jnp.where(is_full_excl, zero, jnp.where(is_14_excl, s14_vdw, one))
-                        w_elec = jnp.where(is_full_excl, zero, jnp.where(is_14_excl, s14_elec, one))
-                    else:
-                        has_tag = is_full_excl | is_14_excl
-                        in_excl_range = (
-                            active
-                            & (~has_tag)
-                            & (j_idx >= excl_min_i[:, None])
-                            & (j_idx <= excl_max_i[:, None])
-                        )
-
-                        def _lookup_excl_tile(_):
-                            excl_idx_i = _pl_load(excl_idx_flat_ref, (base_ei_flat + flat_excl_offs,)).reshape(
-                                _NB_BLOCK_N, _NB_MAX_EXCL
-                            )
-                            excl_vdw_i = _pl_load(excl_vdw_flat_ref, (base_ev_flat + flat_excl_offs,)).reshape(
-                                _NB_BLOCK_N, _NB_MAX_EXCL
-                            )
-                            excl_elec_i = _pl_load(excl_elec_flat_ref, (base_ee_flat + flat_excl_offs,)).reshape(
-                                _NB_BLOCK_N, _NB_MAX_EXCL
-                            )
-                            valid_excl_i = (excl_idx_i >= 0) & (excl_idx_i < N)
-                            matches = (j_idx[:, :, None] == excl_idx_i[:, None, :]) & valid_excl_i[:, None, :]
-                            any_match = jnp.sum(matches.astype(jnp.int32), axis=2) > 0
-                            wv = jnp.where(
-                                any_match,
-                                jnp.sum(jnp.where(matches, excl_vdw_i[:, None, :], zero), axis=2),
-                                one,
-                            )
-                            we = jnp.where(
-                                any_match,
-                                jnp.sum(jnp.where(matches, excl_elec_i[:, None, :], zero), axis=2),
-                                one,
-                            )
-                            return wv, we
-
-                        def _no_excl_tile(_):
-                            ones_t = jnp.ones((_NB_BLOCK_N, _NB_BLOCK_K), dtype=dtype)
-                            return ones_t, ones_t
-
-                        w_vdw_tbl, w_elec_tbl = jax.lax.cond(
-                            jnp.sum(in_excl_range.astype(jnp.int32)) > 0,
-                            _lookup_excl_tile,
-                            _no_excl_tile,
-                            None,
-                        )
-                        w_vdw = jnp.where(
-                            is_full_excl, zero, jnp.where(is_14_excl, s14_vdw, w_vdw_tbl)
-                        )
-                        w_elec = jnp.where(
-                            is_full_excl, zero, jnp.where(is_14_excl, s14_elec, w_elec_tbl)
-                        )
-
-                    sig_ij = half * (sig_i[:, None] + sig_j)
-                    sig_safe = jnp.where(active, jnp.maximum(sig_ij, jnp.asarray(1e-4, dtype=dtype)), one)
-                    eps_ij = jnp.sqrt(jnp.maximum(eps_i[:, None] * eps_j, zero) + jnp.asarray(1e-30, dtype=dtype))
-
-                    u = dist / sig_safe
-                    u6 = u ** 6
-                    denom_lj = soft_alpha_lj + u6
-                    x_inv6 = one / jnp.maximum(denom_lj, jnp.asarray(1e-6, dtype=dtype))
-                    v_unsw = four * eps_ij * lam * (x_inv6 * x_inv6 - x_inv6)
-                    dv_unsw_dr = (
-                        jnp.asarray(-24.0, dtype=dtype)
-                        * eps_ij
-                        * lam
-                        * (two * x_inv6 - one)
-                        * (x_inv6 * x_inv6)
-                        * u6
-                        / dist
-                    )
-
-                    s_w, ds_dr = _lj_switch_weight_and_deriv(dist, cutoff, lj_switch_width)
-                    e_lj = w_vdw * v_unsw * s_w
-                    de_lj_dr = w_vdw * (dv_unsw_dr * s_w + v_unsw * ds_dr)
-
-                    qq = coul_const * q_i[:, None] * q_j
-                    if pme_alpha > 0.0:
-                        alpha_r = alpha_val * dist
-                        exp_term = jnp.exp(zero - (alpha_r * alpha_r))
-                        if include_pme_excl_erf:
-                            erf_v = erf(alpha_r) if (interpret and dtype == jnp.float64) else _triton_erf(alpha_r)
-                            eff_w = w_elec - erf_v
-                            e_coul = qq * eff_w / dist
-                            de_coul_dr = qq * (
-                                (zero - eff_w) / r_sq
-                                - (alpha_val * two_over_sqrt_pi * exp_term) / dist
-                            )
-                        else:
-                            erfc_val = erfc(alpha_r) if (interpret and dtype == jnp.float64) else _triton_erfc(alpha_r)
-                            e_coul = qq * w_elec * erfc_val / dist
-                            de_coul_dr = qq * w_elec * (
-                                (zero - erfc_val) / r_sq
-                                - (alpha_val * two_over_sqrt_pi * exp_term) / dist
-                            )
-                    else:
-                        valid_coul = dist >= jnp.asarray(1e-4, dtype=dtype)
-                        e_coul = jnp.where(valid_coul, qq * w_elec / dist, zero)
-                        de_coul_dr = jnp.where(valid_coul, (zero - qq) * w_elec / r_sq, zero)
-
-                    e_pair = jnp.where(active, e_lj + e_coul, zero)
-                    f_scalar = jnp.where(active, (zero - (de_lj_dr + de_coul_dr)) / dist, zero)
-
-                    acc_e = acc_e + half * jnp.sum(e_pair, axis=1)
-                    acc_fx = acc_fx + jnp.sum(f_scalar * dx, axis=1)
-                    acc_fy = acc_fy + jnp.sum(f_scalar * dy, axis=1)
-                    acc_fz = acc_fz + jnp.sum(f_scalar * dz, axis=1)
-                    return (acc_e, acc_fx, acc_fy, acc_fz)
-
-                return jax.lax.cond(has_any_valid, _eval_nonempty_tile, lambda c_in: c_in, carry)
 
             def _run_k_tiles(c0):
+                px_i = _pl_load(px_ref, (pos_base + offs_i,))
+                py_i = _pl_load(py_ref, (pos_base + offs_i,))
+                pz_i = _pl_load(pz_ref, (pos_base + offs_i,))
+                q_i = _pl_load(q_ref, (base_q + offs_i,))
+                sig_i = _pl_load(sig_ref, (base_sig + offs_i,))
+                eps_i = _pl_load(eps_ref, (base_eps + offs_i,))
+
+                if not use_pre_encoded:
+                    base_ei = (b_id * N_pad) if B_ei > 1 else jnp.int32(0)
+                    base_ei_flat = (b_id * (N_pad * _NB_MAX_EXCL)) if B_ei > 1 else jnp.int32(0)
+                    base_ev_flat = (b_id * (N_pad * _NB_MAX_EXCL)) if B_ev > 1 else jnp.int32(0)
+                    base_ee_flat = (b_id * (N_pad * _NB_MAX_EXCL)) if B_ee > 1 else jnp.int32(0)
+                    excl_min_i = _pl_load(excl_min_ref, (base_ei + offs_i,))
+                    excl_max_i = _pl_load(excl_max_ref, (base_ei + offs_i,))
+                    offs_m = jnp.arange(_NB_MAX_EXCL, dtype=jnp.int32)
+                    flat_excl_offs = (offs_i[:, None] * _NB_MAX_EXCL + offs_m[None, :]).reshape(
+                        _NB_BLOCK_N * _NB_MAX_EXCL
+                    )
+
+                ax = _pl_load(box_ref, (base_box + jnp.zeros((1,), dtype=jnp.int32),))[0]
+                by = _pl_load(box_ref, (base_box + jnp.ones((1,), dtype=jnp.int32),))[0]
+                cz = _pl_load(box_ref, (base_box + jnp.full((1,), 2, dtype=jnp.int32),))[0]
+                bx_t = _pl_load(box_ref, (base_box + jnp.full((1,), 3, dtype=jnp.int32),))[0]
+                cx_t = _pl_load(box_ref, (base_box + jnp.full((1,), 4, dtype=jnp.int32),))[0]
+                cy_t = _pl_load(box_ref, (base_box + jnp.full((1,), 5, dtype=jnp.int32),))[0]
+
+                s14_vdw = jnp.asarray(scale_14_vdw, dtype=dtype)
+                s14_elec = jnp.asarray(scale_14_elec, dtype=dtype)
+                cutoff_val = jnp.asarray(cutoff, dtype=dtype)
+                cutoff_sq = cutoff_val * cutoff_val
+
+                if has_box:
+                    ax_pos = ax > zero
+                    by_pos = by > zero
+                    cz_pos = cz > zero
+                    inv_ax = jnp.where(ax_pos, one / jnp.where(ax_pos, ax, one), zero)
+                    inv_by = jnp.where(by_pos, one / jnp.where(by_pos, by, one), zero)
+                    inv_cz = jnp.where(cz_pos, one / jnp.where(cz_pos, cz, one), zero)
+                    pos_big = jnp.asarray(1e30, dtype=dtype)
+                    neg_big = jnp.asarray(-1e30, dtype=dtype)
+                    r_min_x = jnp.min(jnp.where(mask_i, px_i, pos_big))
+                    r_max_x = jnp.max(jnp.where(mask_i, px_i, neg_big))
+                    r_min_y = jnp.min(jnp.where(mask_i, py_i, pos_big))
+                    r_max_y = jnp.max(jnp.where(mask_i, py_i, neg_big))
+                    r_min_z = jnp.min(jnp.where(mask_i, pz_i, pos_big))
+                    r_max_z = jnp.max(jnp.where(mask_i, pz_i, neg_big))
+                    is_ortho = (bx_t == zero) & (cx_t == zero) & (cy_t == zero)
+                    r_m_val = jnp.asarray(float(max(cutoff, 6.0)), dtype=dtype)
+                    interior_x = is_ortho & (r_min_x >= r_m_val) & (r_max_x <= ax - r_m_val)
+                    interior_y = is_ortho & (r_min_y >= r_m_val) & (r_max_y <= by - r_m_val)
+                    interior_z = is_ortho & (r_min_z >= r_m_val) & (r_max_z <= cz - r_m_val)
+                    interior_all = interior_x & interior_y & interior_z
+                else:
+                    inv_ax = zero
+                    inv_by = zero
+                    inv_cz = zero
+                    interior_all = jnp.bool_(True)
+
+                lam = _pl_load(lam_ref, (base_lam + jnp.zeros((1,), dtype=jnp.int32),))[0]
+                one_minus_lam = one - lam
+                soft_alpha_lj = jnp.asarray(softcore_alpha, dtype=dtype) * (
+                    one_minus_lam ** int(softcore_exponent)
+                )
+                coul_const = jnp.asarray(coulomb_constant, dtype=dtype)
+                alpha_val = jnp.asarray(pme_alpha, dtype=dtype)
+                two_over_sqrt_pi = jnp.asarray(1.1283791670955126, dtype=dtype)
+
+                def _k_tile_body(k_tile, carry):
+                    offs_k = k_tile * _NB_BLOCK_K + jnp.arange(_NB_BLOCK_K, dtype=jnp.int32)
+                    in_bounds_nk = in_bounds_i[:, None] & (offs_k[None, :] < K)
+                    safe_offs_k = jnp.minimum(offs_k, max(K - 1, 0))
+                    flat_nbr_offs = base_nbr + (safe_offs_i[:, None] * K + safe_offs_k[None, :]).reshape(
+                        _NB_BLOCK_N * _NB_BLOCK_K
+                    )
+                    raw_j_1d = _pl_load(nbr_flat_ref, (flat_nbr_offs,))
+                    raw_j = jnp.where(in_bounds_nk, raw_j_1d.reshape(_NB_BLOCK_N, _NB_BLOCK_K), jnp.int32(N))
+                    is_full_excl = (raw_j >= 0) & ((raw_j & jnp.int32(_NB_EXCL_FULL_BIT)) != 0)
+                    is_14_excl = (raw_j >= 0) & ((raw_j & jnp.int32(_NB_EXCL_14_BIT)) != 0)
+                    j_idx = jnp.where(raw_j >= 0, raw_j & jnp.int32(_NB_INDEX_MASK), raw_j)
+                    cand_pair = (
+                        mask_i[:, None]
+                        & (j_idx >= 0)
+                        & (j_idx < N)
+                        & (j_idx != offs_i[:, None])
+                        & (True if (not use_pre_encoded or include_pme_excl_erf) else (~is_full_excl))
+                    )
+                    has_any_valid = jnp.max(cand_pair.astype(jnp.int32)) > 0
+
+                    def _eval_nonempty_tile(c_in):
+                        safe_j_1d = jnp.clip(j_idx.reshape(_NB_BLOCK_N * _NB_BLOCK_K), 0, N_pad - 1)
+                        cand_1d = cand_pair.reshape(_NB_BLOCK_N * _NB_BLOCK_K)
+
+                        px_j = _pl_load(
+                            px_ref, (pos_base + safe_j_1d,), mask=cand_1d, other=zero
+                        ).reshape(_NB_BLOCK_N, _NB_BLOCK_K)
+                        py_j = _pl_load(
+                            py_ref, (pos_base + safe_j_1d,), mask=cand_1d, other=zero
+                        ).reshape(_NB_BLOCK_N, _NB_BLOCK_K)
+                        pz_j = _pl_load(
+                            pz_ref, (pos_base + safe_j_1d,), mask=cand_1d, other=zero
+                        ).reshape(_NB_BLOCK_N, _NB_BLOCK_K)
+
+                        if use_pre_encoded:
+                            valid_pair = cand_pair
+                        else:
+                            mask_j = (
+                                _pl_load(
+                                    mask_ref,
+                                    (base_mask + safe_j_1d,),
+                                    mask=cand_1d,
+                                    other=jnp.int32(0),
+                                ).reshape(_NB_BLOCK_N, _NB_BLOCK_K)
+                                > 0
+                            )
+                            valid_pair = cand_pair & mask_j
+
+                        raw_dx = px_i[:, None] - px_j
+                        raw_dy = py_i[:, None] - py_j
+                        raw_dz = pz_i[:, None] - pz_j
+                        if has_box:
+                            sz = jnp.where(
+                                interior_all,
+                                zero,
+                                jnp.floor(raw_dz * inv_cz + half),
+                            )
+                            dx_z = raw_dx - sz * cx_t
+                            dy_z = raw_dy - sz * cy_t
+                            dz = raw_dz - sz * cz
+                            sy = jnp.where(
+                                interior_all,
+                                zero,
+                                jnp.floor(dy_z * inv_by + half),
+                            )
+                            dx_y = dx_z - sy * bx_t
+                            dy = dy_z - sy * by
+                            sx = jnp.where(
+                                interior_all,
+                                zero,
+                                jnp.floor(dx_y * inv_ax + half),
+                            )
+                            dx = dx_y - sx * ax
+                        else:
+                            dx, dy, dz = raw_dx, raw_dy, raw_dz
+
+                        raw_r_sq = dx * dx + dy * dy + dz * dz
+                        active = valid_pair & (raw_r_sq < cutoff_sq)
+
+                        def _eval_active_pairs(c_act):
+                            acc_e, acc_fx, acc_fy, acc_fz = c_act
+                            active_1d = active.reshape(_NB_BLOCK_N * _NB_BLOCK_K)
+                            q_j = _pl_load(
+                                q_ref, (base_q + safe_j_1d,), mask=active_1d, other=zero
+                            ).reshape(_NB_BLOCK_N, _NB_BLOCK_K)
+                            sig_j = _pl_load(
+                                sig_ref, (base_sig + safe_j_1d,), mask=active_1d, other=one
+                            ).reshape(_NB_BLOCK_N, _NB_BLOCK_K)
+                            eps_j = _pl_load(
+                                eps_ref, (base_eps + safe_j_1d,), mask=active_1d, other=zero
+                            ).reshape(_NB_BLOCK_N, _NB_BLOCK_K)
+
+                            r_sq = raw_r_sq + jnp.asarray(1e-12, dtype=dtype)
+                            dist = jnp.sqrt(r_sq)
+                            inv_dist = jnp.where(active, one / dist, zero)
+                            inv_r_sq = inv_dist * inv_dist
+
+                            if use_pre_encoded:
+                                w_vdw = jnp.where(is_full_excl, zero, jnp.where(is_14_excl, s14_vdw, one))
+                                w_elec = jnp.where(is_full_excl, zero, jnp.where(is_14_excl, s14_elec, one))
+                            else:
+                                has_tag = is_full_excl | is_14_excl
+                                in_excl_range = (
+                                    active
+                                    & (~has_tag)
+                                    & (j_idx >= excl_min_i[:, None])
+                                    & (j_idx <= excl_max_i[:, None])
+                                )
+
+                                def _lookup_excl_tile(_):
+                                    excl_idx_i = _pl_load(excl_idx_flat_ref, (base_ei_flat + flat_excl_offs,)).reshape(
+                                        _NB_BLOCK_N, _NB_MAX_EXCL
+                                    )
+                                    excl_vdw_i = _pl_load(excl_vdw_flat_ref, (base_ev_flat + flat_excl_offs,)).reshape(
+                                        _NB_BLOCK_N, _NB_MAX_EXCL
+                                    )
+                                    excl_elec_i = _pl_load(excl_elec_flat_ref, (base_ee_flat + flat_excl_offs,)).reshape(
+                                        _NB_BLOCK_N, _NB_MAX_EXCL
+                                    )
+                                    valid_excl_i = (excl_idx_i >= 0) & (excl_idx_i < N)
+                                    matches = (j_idx[:, :, None] == excl_idx_i[:, None, :]) & valid_excl_i[:, None, :]
+                                    any_match = jnp.sum(matches.astype(jnp.int32), axis=2) > 0
+                                    wv = jnp.where(
+                                        any_match,
+                                        jnp.sum(jnp.where(matches, excl_vdw_i[:, None, :], zero), axis=2),
+                                        one,
+                                    )
+                                    we = jnp.where(
+                                        any_match,
+                                        jnp.sum(jnp.where(matches, excl_elec_i[:, None, :], zero), axis=2),
+                                        one,
+                                    )
+                                    return wv, we
+
+                                def _no_excl_tile(_):
+                                    ones_t = jnp.ones((_NB_BLOCK_N, _NB_BLOCK_K), dtype=dtype)
+                                    return ones_t, ones_t
+
+                                w_vdw_tbl, w_elec_tbl = jax.lax.cond(
+                                    jnp.sum(in_excl_range.astype(jnp.int32)) > 0,
+                                    _lookup_excl_tile,
+                                    _no_excl_tile,
+                                    None,
+                                )
+                                w_vdw = jnp.where(
+                                    is_full_excl, zero, jnp.where(is_14_excl, s14_vdw, w_vdw_tbl)
+                                )
+                                w_elec = jnp.where(
+                                    is_full_excl, zero, jnp.where(is_14_excl, s14_elec, w_elec_tbl)
+                                )
+
+                            sig_ij = half * (sig_i[:, None] + sig_j)
+                            sig_safe = jnp.where(active, jnp.maximum(sig_ij, jnp.asarray(1e-4, dtype=dtype)), one)
+                            eps_ij = jnp.sqrt(jnp.maximum(eps_i[:, None] * eps_j, zero) + jnp.asarray(1e-30, dtype=dtype))
+
+                            u = dist / sig_safe
+                            u6 = u ** 6
+                            denom_lj = soft_alpha_lj + u6
+                            x_inv6 = one / jnp.maximum(denom_lj, jnp.asarray(1e-6, dtype=dtype))
+                            v_unsw = four * eps_ij * lam * (x_inv6 * x_inv6 - x_inv6)
+                            dv_unsw_dr = (
+                                jnp.asarray(-24.0, dtype=dtype)
+                                * eps_ij
+                                * lam
+                                * (two * x_inv6 - one)
+                                * (x_inv6 * x_inv6)
+                                * u6
+                                * inv_dist
+                            )
+
+                            s_w, ds_dr = _lj_switch_weight_and_deriv(dist, cutoff, lj_switch_width)
+                            e_lj = w_vdw * v_unsw * s_w
+                            de_lj_dr = w_vdw * (dv_unsw_dr * s_w + v_unsw * ds_dr)
+
+                            qq = coul_const * q_i[:, None] * q_j
+                            if pme_alpha > 0.0:
+                                alpha_r = alpha_val * dist
+                                exp_term = jnp.exp(zero - (alpha_r * alpha_r))
+                                if include_pme_excl_erf:
+                                    erf_v = erf(alpha_r) if (interpret and dtype == jnp.float64) else _triton_erf(alpha_r)
+                                    eff_w = w_elec - erf_v
+                                    e_coul = qq * eff_w * inv_dist
+                                    de_coul_dr = qq * (
+                                        (zero - eff_w) * inv_r_sq
+                                        - (alpha_val * two_over_sqrt_pi * exp_term) * inv_dist
+                                    )
+                                else:
+                                    erfc_val = erfc(alpha_r) if (interpret and dtype == jnp.float64) else _triton_erfc(alpha_r)
+                                    e_coul = qq * w_elec * erfc_val * inv_dist
+                                    de_coul_dr = qq * w_elec * (
+                                        (zero - erfc_val) * inv_r_sq
+                                        - (alpha_val * two_over_sqrt_pi * exp_term) * inv_dist
+                                    )
+                            else:
+                                valid_coul = dist >= jnp.asarray(1e-4, dtype=dtype)
+                                e_coul = jnp.where(valid_coul, qq * w_elec * inv_dist, zero)
+                                de_coul_dr = jnp.where(valid_coul, (zero - qq) * w_elec * inv_r_sq, zero)
+
+                            e_pair = jnp.where(active, e_lj + e_coul, zero)
+                            f_scalar = jnp.where(active, (zero - (de_lj_dr + de_coul_dr)) * inv_dist, zero)
+
+                            acc_e = acc_e + half * jnp.sum(e_pair, axis=1)
+                            acc_fx = acc_fx + jnp.sum(f_scalar * dx, axis=1)
+                            acc_fy = acc_fy + jnp.sum(f_scalar * dy, axis=1)
+                            acc_fz = acc_fz + jnp.sum(f_scalar * dz, axis=1)
+                            return (acc_e, acc_fx, acc_fy, acc_fz)
+
+                        return jax.lax.cond(
+                            jnp.max(active.astype(jnp.int32)) > 0,
+                            _eval_active_pairs,
+                            lambda c_act: c_act,
+                            c_in,
+                        )
+
+                    return jax.lax.cond(has_any_valid, _eval_nonempty_tile, lambda c_in: c_in, carry)
+
                 e_blk, fx_blk, fy_blk, fz_blk = jax.lax.fori_loop(0, k_blocks, _k_tile_body, c0)
                 if total_bonded_blocks == 0:
                     _pl_store(fx_out_ref, (f_base + offs_i,), fx_blk, mask=mask_i)

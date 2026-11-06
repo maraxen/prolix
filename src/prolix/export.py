@@ -87,7 +87,7 @@ def resolve_pallas_compiler_params(
   if kernel_kind == "bonded_fused":
     num_warps = 2
     num_stages = 1
-  elif kernel_kind == "megakernel":
+  elif kernel_kind in ("megakernel", "settle_integrator"):
     num_warps = 4
     num_stages = 1
   elif kernel_kind in ("nonbonded_nl", "explicit_megakernel", "cell_prune", "pme"):
