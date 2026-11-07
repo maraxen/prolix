@@ -1,0 +1,54 @@
+{
+  "prolix_ns_per_day": 72.77831521099202,
+  "per_step_corrected_s": 0.0011871668057925947,
+  "compile_fixed_s": 0.13719416051903022,
+  "r_squared": 0.998131242225774,
+  "n_atoms": 23558,
+  "n_steps_list": [
+    100,
+    500,
+    2000,
+    5000
+  ],
+  "raw_results": [
+    {
+      "n_steps": 100,
+      "t_first_step": 39.87180806789547,
+      "t_steady_state": 0.3988709142431617
+    },
+    {
+      "n_steps": 500,
+      "t_first_step": 0.006691941060125828,
+      "t_steady_state": 0.616475036367774
+    },
+    {
+      "n_steps": 2000,
+      "t_first_step": 0.00628749281167984,
+      "t_steady_state": 2.4445731537416577
+    },
+    {
+      "n_steps": 5000,
+      "t_first_step": 0.005371410399675369,
+      "t_steady_state": 6.1065765945240855
+    }
+  ],
+  "use_pallas": true,
+  "peak_vram_mb": 3343.869873046875,
+  "nl_capacity": 768,
+  "nl_retry_count": 0,
+  "nl_candidate_pairs": 18092544,
+  "dense_equivalent_pairs": 554979364,
+  "pair_reduction_factor": 30.674479166666668,
+  "openmm_ns_per_day": 214.23561219475837,
+  "openmm_wallclock_s": 2.016471470706165,
+  "openmm_platform": "CUDA",
+  "openmm_n_production_steps": 5000,
+  "ratio": 0.3397115655301526,
+  "shim_mode": "autograd",
+  "seed": 0,
+  "dt_fs": 1.0,
+  "smoke": false,
+  "backend": "combined",
+  "prolix_gpu_tag": "b300",
+  "openmm_gpu_tag": "b300"
+}

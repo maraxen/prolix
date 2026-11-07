@@ -200,6 +200,9 @@ def dispatch_n_steps(
     return iterator(step_fn, init_state, xs)
 
 
+_JITTED_WHILE_CACHE: dict[tuple[Any, Any], Any] = {}
+
+
 def dispatch_n_steps_inference(
     step_fn: Callable[[Any, Any], Any],
     init_state: Any,
@@ -238,15 +241,15 @@ def dispatch_n_steps_inference(
     """
     import jax
 
-    if n_steps < 1:
+    if not isinstance(n_steps, jax.core.Tracer) and int(n_steps) < 1:
         raise ValueError(f"n_steps must be >= 1, got {n_steps}")
 
-    n = int(n_steps)
+    n_limit = jnp.asarray(n_steps, dtype=jnp.int32)
 
-    def _while(init: Any) -> Any:
+    def _while(init: Any, limit: jax.Array) -> Any:
         def cond(carry: tuple[Any, Any]) -> Any:
             step_i, _state = carry
-            return step_i < n
+            return step_i < limit
 
         def body(carry: tuple[Any, Any]) -> tuple[Any, Any]:
             step_i, state = carry
@@ -259,15 +262,22 @@ def dispatch_n_steps_inference(
 
                 payload = getattr(new_state, "position", new_state)
                 io_callback(_hook, None, step_i, payload)
-            return (step_i + 1, new_state)
+            return (step_i + jnp.int32(1), new_state)
 
         iterator = make_axis_dispatch(WhileCarry(), axis=N_STEPS.name)
-        _final_i, final_state = iterator(cond, body, (0, init))
+        _final_i, final_state = iterator(cond, body, (jnp.int32(0), init))
         return final_state
 
     # Nested jit under vmap is wrong; host call sites want one jitted program.
     leaves = jax.tree_util.tree_leaves(init_state)
     under_transform = any(isinstance(x, jax.core.Tracer) for x in leaves)
     if under_transform:
-        return _while(init_state)
-    return jax.jit(_while)(init_state)
+        return _while(init_state, n_limit)
+    cache_key = (step_fn, on_step)
+    jitted_while = _JITTED_WHILE_CACHE.get(cache_key)
+    if jitted_while is None:
+        if len(_JITTED_WHILE_CACHE) >= 128:
+            _JITTED_WHILE_CACHE.pop(next(iter(_JITTED_WHILE_CACHE)))
+        jitted_while = jax.jit(_while)
+        _JITTED_WHILE_CACHE[cache_key] = jitted_while
+    return jitted_while(init_state, n_limit)

@@ -348,7 +348,7 @@ def make_langevin_step(
         
         # O: stochastic (Ornstein-Uhlenbeck) update
         rng, subkey = jax.random.split(rng)
-        noise = jax.random.normal(subkey, p.shape)
+        noise = jax.random.normal(subkey, p.shape, dtype=jnp.float32).astype(p.dtype)
         p = c1 * p + jnp.sqrt(m[:, None] * kT) * c2 * noise
         
         # A: second half-step position update
@@ -521,7 +521,7 @@ def make_langevin_step_nl(
 
         # O
         rng, subkey = jax.random.split(rng)
-        noise = jax.random.normal(subkey, p.shape)
+        noise = jax.random.normal(subkey, p.shape, dtype=jnp.float32).astype(p.dtype)
         p = c1 * p + jnp.sqrt(m[:, None] * kT) * c2 * noise
 
         # A
@@ -627,7 +627,7 @@ def make_langevin_step_nl_fused(
 
         # O
         rng, subkey = jax.random.split(rng)
-        noise = jax.random.normal(subkey, p.shape)
+        noise = jax.random.normal(subkey, p.shape, dtype=jnp.float32).astype(p.dtype)
         p = c1 * p + jnp.sqrt(m[:, None] * kT) * c2 * noise
 
         # A
@@ -1130,7 +1130,7 @@ def batched_equilibrate(
         key, v_key = jax.random.split(key)
         eq_dtype = pos.dtype
         kT0 = jnp.asarray(10.0 * BOLTZMANN_KCAL, dtype=eq_dtype)
-        v = jax.random.normal(v_key, sys.positions.shape, dtype=eq_dtype) * jnp.sqrt(
+        v = jax.random.normal(v_key, sys.positions.shape, dtype=jnp.float32).astype(eq_dtype) * jnp.sqrt(
             kT0 / (mass_3d + 1e-12)
         )
         v = v * pad_mask_3d # Zero padding velocities
@@ -1157,7 +1157,7 @@ def batched_equilibrate(
                 c2 = jnp.sqrt(1.0 - jnp.exp(-2.0 * gamma * dt))
                 kT = t_target * jnp.asarray(BOLTZMANN_KCAL, dtype=t_target.dtype)
                 key_curr, subkey = jax.random.split(key_curr)
-                noise = jax.random.normal(subkey, v_curr.shape)
+                noise = jax.random.normal(subkey, v_curr.shape, dtype=jnp.float32).astype(v_curr.dtype)
                 v_curr = c1 * v_curr + c2 * jnp.sqrt(kT / (mass_3d + 1e-12)) * noise
                 
                 r_curr = r_curr + 0.5 * dt * v_curr
@@ -1671,7 +1671,7 @@ def make_langevin_step_nl_dynamic(
         r = r + 0.5 * dt * p / m[:, None]
         # O
         key, subkey = jax.random.split(key)
-        noise = jax.random.normal(subkey, p.shape)
+        noise = jax.random.normal(subkey, p.shape, dtype=jnp.float32).astype(p.dtype)
         p = c1 * p + jnp.sqrt(m[:, None] * kT) * c2 * noise
         # A
         r = r + 0.5 * dt * p / m[:, None]
@@ -2147,7 +2147,7 @@ def make_langevin_step_explicit(
 
         # O: p = c1*p + sqrt(m*kT)*c2*noise
         key, subkey = jax.random.split(key)
-        noise = jax.random.normal(subkey, p.shape)
+        noise = jax.random.normal(subkey, p.shape, dtype=jnp.float32).astype(p.dtype)
         p = c1 * p + jnp.sqrt(mass_2d * kT) * c2 * noise
 
         # A: r = r + 0.5 * dt * p / m
