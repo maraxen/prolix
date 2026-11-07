@@ -21,6 +21,8 @@ from xtrax.intent import Context
 
 from prolix.physics.pme import (
     _gather_reference as gather_reference,
+)
+from prolix.physics.pme import (
     _spread_charges_reference as spread_reference,
 )
 from prolix.physics.pme_pallas import gather_pallas, spread_charges_pallas
@@ -65,6 +67,7 @@ def make_gather_op(
     grid_dims: tuple[int, int, int],
     order: int = 4,
     *,
+    compute_dq: bool = True,
     context: Context | None = None,
 ) -> xtrax.Op:
     """Build the gather op for one mesh shape.
@@ -75,6 +78,8 @@ def make_gather_op(
         Mesh shape, closed over by the reference and both kernels.
     order : int
         B-spline order; only 4 is supported.
+    compute_dq : bool
+        Whether to accumulate per-atom potential ``dE/dq`` in the gather kernel.
     context : Context or None
         Context the op selects against. ``None`` leaves it unbound, so it runs
         the reference.
@@ -86,11 +91,16 @@ def make_gather_op(
         (forces, potentials)``.
     """
     dims = (int(grid_dims[0]), int(grid_dims[1]), int(grid_dims[2]))
+    cdq = bool(compute_dq)
     return xtrax.op(
         functools.partial(gather_reference, grid_dims=dims, order=order),
         kernels={
-            "gpu": functools.partial(gather_pallas, grid_dims=dims, order=order, interpret=False),
-            "cpu": functools.partial(gather_pallas, grid_dims=dims, order=order, interpret=True),
+            "gpu": functools.partial(
+                gather_pallas, grid_dims=dims, order=order, interpret=False, compute_dq=cdq
+            ),
+            "cpu": functools.partial(
+                gather_pallas, grid_dims=dims, order=order, interpret=True, compute_dq=cdq
+            ),
         },
         name="pme_gather",
         context=context,

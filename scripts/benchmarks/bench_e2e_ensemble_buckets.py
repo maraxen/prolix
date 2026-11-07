@@ -223,6 +223,618 @@ def _cast_bundle_precision(bundle, dtype):
     return jax.tree_util.tree_map(_cast_leaf, bundle)
 
 
+def _make_heterogeneous_dhfr_mutant_screen(dhfr_bundle, n_variants: int) -> list:
+    """Build ``n_variants`` heterogeneous DHFR mutant bundles in the 25,000-atom bucket.
+
+    Combines:
+    - Deletion/insertion solvation length variants (23,501..23,558 real atoms, distinct
+      ``n_atoms``, ``atom_mask``, ``water_mask``, and ``excl_dense_indices`` per variant).
+    - Point mutations: dipole-neutral partial charge perturbations, sidechain LJ
+      ``sigmas``/``epsilons`` perturbations, and torsion barrier ``dihedral_params``
+      perturbations across protein residues.
+    """
+    variants = []
+    for b in range(n_variants):
+        # Vary water count by up to 19 waters (57 atoms) so real_atoms spans 23,501..23,558
+        waters_removed = (b * 3) % 20 if b > 0 else 0
+        n_real_target = 23558 - 3 * waters_removed
+        q_pert = 0.0 if b == 0 else 0.015 * ((b % 7) + 1) * (1.0 if (b % 2 == 0) else -1.0)
+        seed_shift = 0.0 if b == 0 else 0.002 * ((b % 11) + 1)
+        bun = _make_truncated_solvated_bundle(
+            dhfr_bundle,
+            n_real_target=n_real_target,
+            bucket_atoms=25000,
+            bucket_waters=8192,
+            seed_shift=seed_shift,
+            charge_perturbation=q_pert,
+        )
+        if b > 0:
+            # Perturb LJ sigmas & epsilons on a variant-specific 60-atom protein window
+            p_start = (b * 73) % 2400
+            p_end = p_start + 60
+            sig_scale = 1.0 + 0.004 * ((b % 5) - 2)
+            eps_scale = 1.0 + 0.025 * ((b % 5) - 2)
+            new_sig = bun.sigmas.at[p_start:p_end].multiply(sig_scale)
+            new_eps = bun.epsilons.at[p_start:p_end].multiply(eps_scale)
+            # Perturb torsion barrier heights on a variant-specific 120-dihedral window
+            d_len = int(bun.dihedral_params.shape[0])
+            d_start = (b * 131) % max(1, d_len - 120)
+            tors_scale = 1.0 + 0.04 * ((b % 4) + 1)
+            new_dih_p = bun.dihedral_params.at[d_start : d_start + 120, 2].multiply(tors_scale)
+            bun = dataclasses.replace(
+                bun,
+                sigmas=new_sig,
+                epsilons=new_eps,
+                dihedral_params=new_dih_p,
+            )
+        variants.append(bun)
+    return variants
+
+
+def run_dhfr_25k_substep_profile(
+    dhfr_bundle,
+    batch_sizes: tuple[int, ...] = (1, 2, 4, 8, 16),
+    quick: bool = False,
+) -> dict:
+    """Continuous sub-step ``xtrax.profiling.probe_unit`` decomposition on 23,558-atom DHFR (25k bucket, 64^3 PME).
+
+    Isolates the exact ``ms/call`` and ``ms/step/replica`` of:
+    (a) ``init_fn`` / ``fast_reseed_fn`` / ``jnp.isin`` water-mask setup latency,
+    (b) ``pallas_baoab_pre_force`` + ``pallas_baoab_post_force`` (MK-46),
+    (c) ``pallas_bonded_and_nonbonded_nl_fused`` (MK-48 direct-space + bonded megakernel, homog & hetero),
+    (d) ``spme_spread_64`` + ``spme_fft_64`` + ``spme_gather_64`` (MK-49),
+    (e) ``cell_bin_argsort`` vs ``pallas_cell_prune`` vs per-replica ``rebuild_mask`` (MK-47),
+    (f) Pure 200-step ``lax.while_loop`` propagation vs total ``EnsemblePlan.run(n_steps=200)`` wall time.
+    """
+    import os
+
+    from prolix.api.bundle_stack import stack_molecular_bundles
+    from prolix.api.ensemble_dispatch import dispatch_n_steps_inference
+    from prolix.pallas_kernels import (
+        build_tile_pair_neighbor_list,
+        pallas_bonded_and_nonbonded_nl_fused,
+        pallas_nonbonded_tile_pairs,
+    )
+    from prolix.physics.pme import influence_function
+    from prolix.physics.pme_pallas import (
+        compute_pme_spatial_perm,
+        gather_pallas,
+        spread_charges_pallas,
+    )
+    from prolix.physics.settle import pallas_baoab_post_force, pallas_baoab_pre_force
+
+    print("=== [0/3] DHFR 23,558-Atom (25k Bucket, 64^3 PME) Sub-Step xtrax.profiling Breakdown ===")
+    n_steady = 1 if quick else 2
+    n_wall = 2 if quick else 5
+    n_steps_loop = 20 if quick else 200
+    eff_batches = (1, 2) if quick else batch_sizes
+
+    prev_gp = os.environ.get("PROLIX_PME_GRID_POINTS")
+    os.environ["PROLIX_PME_GRID_POINTS"] = "64"
+    _SINGLE_INFERENCE_CACHE.clear()
+    _STACKED_INFERENCE_CACHE.clear()
+
+    dhfr_wt = _cast_bundle_precision(
+        _make_truncated_solvated_bundle(
+            dhfr_bundle, n_real_target=23558, bucket_atoms=25000, bucket_waters=8192
+        ),
+        jnp.float32,
+    )
+    box_vec = jnp.diag(dhfr_wt.box).astype(jnp.float32)
+    cell_size = 9.5
+    grid_dims_nl = nl_mod._compute_static_grid_dims(box_vec, cell_size)
+
+    # Pre-allocate base neighbor list for DHFR 25k
+    disp_fn, _ = displacement_fn_for_bundle(dhfr_wt)
+    nl_fn = nl_mod.make_neighbor_list_fn(
+        disp_fn,
+        box_vec,
+        float(dhfr_wt.cutoff_distance),
+        capacity_multiplier=1.25,
+        dr_threshold=0.5,
+        atom_mask=dhfr_wt.atom_mask,
+    )
+    nbr_wt = _encode_bundle_nl(nl_fn.allocate(dhfr_wt.positions), dhfr_wt)
+    max_occ = int(nbr_wt.idx.shape[-1])
+    tp_nl_wt = build_tile_pair_neighbor_list(
+        nbr_wt.idx,
+        excl_indices=dhfr_wt.excl_dense_indices,
+        excl_scales_vdw=dhfr_wt.excl_dense_scales_vdw,
+        excl_scales_elec=dhfr_wt.excl_dense_scales_elec,
+        atom_mask=dhfr_wt.atom_mask,
+    )
+    pme_perm_wt, pme_inv_perm_wt = compute_pme_spatial_perm(
+        dhfr_wt.positions, box_vec, (64, 64, 64), atom_mask=dhfr_wt.atom_mask
+    )
+    G_cached_f32 = influence_function(
+        (64, 64, 64), box_vec, float(dhfr_wt.pme_alpha), 4
+    ).astype(jnp.float32)
+
+    from prolix.api.ensemble_plan import _NLDispatchCarry
+
+    _SINGLE_INFERENCE_CACHE.clear()
+    _STACKED_INFERENCE_CACHE.clear()
+    plan_1 = EnsemblePlan.from_bundle(dhfr_wt, use_pallas=True, use_pallas_pme=True)
+    state0, apply_fn0, dt_s0, kT_s0 = plan_1._setup_integrator(
+        dhfr_wt,
+        2.0,
+        0.6,
+        42,
+        integration_prefix=25000,
+        dt_unit="fs",
+        gamma=10.0,
+        initial_neighbor=nbr_wt,
+        use_pallas=True,
+        use_pallas_pme=True,
+        excl_mode="pre_encoded",
+    )
+    reseed_1 = plan_1._build_fast_reseed_fn(
+        dhfr_wt, state0, integration_prefix=25000, gamma=10.0
+    )
+    _ = plan_1.run(
+        n_steps=2, dt=2.0, kT=0.6, seed=10, run_mode="inference", use_neighbor_list=True, nl_update_every=20
+    )
+    ce1 = next(iter(_SINGLE_INFERENCE_CACHE.values()))
+    nl_step_fn_1 = ce1["nl_step_fn"]
+    nbr0_ce1 = ce1["nbr0"]
+
+    per_batch_records: list[dict] = []
+    try:
+        for B in eff_batches:
+            het_bundles = [
+                _cast_bundle_precision(b, jnp.float32)
+                for b in _make_heterogeneous_dhfr_mutant_screen(dhfr_bundle, B)
+            ]
+            hom_bundles = [dhfr_wt for _ in range(B)]
+
+            pos_b = jnp.stack([b.positions for b in het_bundles], axis=0)
+            q_b = jnp.stack([b.charges for b in het_bundles], axis=0)
+            sig_b = jnp.stack([b.sigmas for b in het_bundles], axis=0)
+            eps_b = jnp.stack([b.epsilons for b in het_bundles], axis=0)
+            am_b = jnp.stack([b.atom_mask for b in het_bundles], axis=0)
+            wm_b = jnp.stack([b.water_mask for b in het_bundles], axis=0)
+            wi_b = jnp.stack([b.water_indices for b in het_bundles], axis=0)
+            masses_b = jnp.stack([b.masses for b in het_bundles], axis=0)[:, :, None]
+            ei_b = jnp.stack([b.excl_dense_indices for b in het_bundles], axis=0)
+            ev_b = jnp.stack([b.excl_dense_scales_vdw for b in het_bundles], axis=0)
+            ee_b = jnp.stack([b.excl_dense_scales_elec for b in het_bundles], axis=0)
+            bx_b = jnp.broadcast_to(box_vec[None, :], (B, 3))
+            nbr_idx_b = jnp.broadcast_to(nbr_wt.idx[None, :, :], (B, 25000, max_occ))
+
+            # (a) init_fn / fast_reseed_fn / jnp.isin water mask latency
+            seeds_u32 = jnp.arange(B, dtype=jnp.uint32) + jnp.uint32(42)
+            jit_reseed_b = jax.jit(
+                lambda s_vec: jax.vmap(lambda s: reseed_1(s, kT_s0))(s_vec)
+            )
+            ms_reseed_b, _ = _probe_ms(jit_reseed_b, seeds_u32, n_steady=n_steady, n_wall=n_wall)
+
+            def _isin_water_mask_only(wi_in, wm_in):
+                def _one(wi_1, wm_1):
+                    idx_f = wi_1.reshape(-1)
+                    mask_f = jnp.broadcast_to(wm_1[:, None], wi_1.shape).reshape(-1)
+                    real_idx_f = jnp.where(mask_f, idx_f, -1)
+                    return jnp.isin(jnp.arange(25000, dtype=jnp.int32), real_idx_f, assume_unique=False)
+                return jax.vmap(_one)(wi_in, wm_in)
+
+            jit_isin_b = jax.jit(_isin_water_mask_only)
+            ms_isin_b, _ = _probe_ms(jit_isin_b, wi_b, wm_b, n_steady=n_steady, n_wall=n_wall)
+
+            # (b) pallas_baoab_pre_force + pallas_baoab_post_force (MK-46)
+            mom_b = jnp.zeros_like(pos_b)
+            f_b = jnp.ones_like(pos_b) * jnp.float32(0.01)
+            keys_b = jax.vmap(jax.random.PRNGKey)(seeds_u32)
+            dt_f32 = jnp.float32(dt_s0)
+            kT_f32 = jnp.float32(kT_s0)
+            gamma_akma = 10.0 * 0.04888821
+
+            jit_baoab_pre = jax.jit(
+                lambda r, p, f, k: jax.vmap(
+                    lambda r1, p1, f1, m1, k1, wi1, wm1, am1: pallas_baoab_pre_force(
+                        r1, p1, f1, m1, k1, wi1, wm1, box_vec, dt_f32, kT_f32, gamma_akma, atom_mask=am1
+                    )
+                )(r, p, f, masses_b, k, wi_b, wm_b, am_b)
+            )
+            jit_baoab_post = jax.jit(
+                lambda r, p, f: jax.vmap(
+                    lambda r1, p1, f1, m1, wi1, wm1, am1: pallas_baoab_post_force(
+                        r1, p1, f1, m1, wi1, wm1, dt_f32, atom_mask=am1
+                    )
+                )(r, p, f, masses_b, wi_b, wm_b, am_b)
+            )
+            ms_baoab_pre, _ = _probe_ms(jit_baoab_pre, pos_b, mom_b, f_b, keys_b, n_steady=n_steady, n_wall=n_wall)
+            ms_baoab_post, _ = _probe_ms(jit_baoab_post, pos_b, mom_b, f_b, n_steady=n_steady, n_wall=n_wall)
+
+            # (c) pallas_bonded_and_nonbonded_nl_fused (MK-48, homogeneous vs heterogeneous)
+            def _mk48_homog_grad(r_in):
+                def _one(r1, n1):
+                    return pallas_bonded_and_nonbonded_nl_fused(
+                        r1,
+                        dhfr_wt.charges,
+                        dhfr_wt.sigmas,
+                        dhfr_wt.epsilons,
+                        dhfr_wt.atom_mask,
+                        n1,
+                        dhfr_wt.excl_dense_indices,
+                        dhfr_wt.excl_dense_scales_vdw,
+                        dhfr_wt.excl_dense_scales_elec,
+                        bonds=dhfr_wt.bond_idx,
+                        bond_params=dhfr_wt.bond_params,
+                        bond_mask=dhfr_wt.bond_mask,
+                        angles=dhfr_wt.angle_idx,
+                        angle_params=dhfr_wt.angle_params,
+                        angle_mask=dhfr_wt.angle_mask,
+                        dihedrals=dhfr_wt.dihedral_idx,
+                        dihedral_params=dhfr_wt.dihedral_params,
+                        dihedral_mask=dhfr_wt.dihedral_mask,
+                        impropers=dhfr_wt.improper_idx,
+                        improper_params=dhfr_wt.improper_params,
+                        improper_mask=dhfr_wt.improper_mask,
+                        exception_pairs=dhfr_wt.exception_pairs,
+                        exception_sigmas=dhfr_wt.exception_sigmas,
+                        exception_epsilons=dhfr_wt.exception_epsilons,
+                        exception_chargeprods=dhfr_wt.exception_chargeprods,
+                        exception_mask=dhfr_wt.exception_mask,
+                        box=box_vec,
+                        pme_alpha=float(dhfr_wt.pme_alpha),
+                        cutoff=float(dhfr_wt.cutoff_distance),
+                        excl_mode="pre_encoded",
+                    )
+                return jax.vmap(jax.grad(_one))(r_in, nbr_idx_b)
+
+            dih_p_b = jnp.stack([b.dihedral_params for b in het_bundles], axis=0)
+
+            def _mk48_hetero_grad(r_in, q_in, sig_in, eps_in, am_in, dp_in):
+                def _one(r1, q1, s1, e1, m1, dp1, n1):
+                    return pallas_bonded_and_nonbonded_nl_fused(
+                        r1,
+                        q1,
+                        s1,
+                        e1,
+                        m1,
+                        n1,
+                        dhfr_wt.excl_dense_indices,
+                        dhfr_wt.excl_dense_scales_vdw,
+                        dhfr_wt.excl_dense_scales_elec,
+                        bonds=dhfr_wt.bond_idx,
+                        bond_params=dhfr_wt.bond_params,
+                        bond_mask=dhfr_wt.bond_mask,
+                        angles=dhfr_wt.angle_idx,
+                        angle_params=dhfr_wt.angle_params,
+                        angle_mask=dhfr_wt.angle_mask,
+                        dihedrals=dhfr_wt.dihedral_idx,
+                        dihedral_params=dp1,
+                        dihedral_mask=dhfr_wt.dihedral_mask,
+                        impropers=dhfr_wt.improper_idx,
+                        improper_params=dhfr_wt.improper_params,
+                        improper_mask=dhfr_wt.improper_mask,
+                        exception_pairs=dhfr_wt.exception_pairs,
+                        exception_sigmas=dhfr_wt.exception_sigmas,
+                        exception_epsilons=dhfr_wt.exception_epsilons,
+                        exception_chargeprods=dhfr_wt.exception_chargeprods,
+                        exception_mask=dhfr_wt.exception_mask,
+                        box=box_vec,
+                        pme_alpha=float(dhfr_wt.pme_alpha),
+                        cutoff=float(dhfr_wt.cutoff_distance),
+                        excl_mode="pre_encoded",
+                    )
+                return jax.vmap(jax.grad(_one))(r_in, q_in, sig_in, eps_in, am_in, dp_in, nbr_idx_b)
+
+            jit_mk48_hom = jax.jit(_mk48_homog_grad)
+            jit_mk48_het = jax.jit(_mk48_hetero_grad)
+            ms_mk48_hom, _ = _probe_ms(jit_mk48_hom, pos_b, n_steady=n_steady, n_wall=n_wall)
+            ms_mk48_het, _ = _probe_ms(
+                jit_mk48_het, pos_b, q_b, sig_b, eps_b, am_b, dih_p_b, n_steady=n_steady, n_wall=n_wall
+            )
+
+            # MK-51: 32x32 Tile-Pair Newton 3rd Law nonbonded kernel probe
+            jit_mk51_tp = jax.jit(
+                lambda r_in: jax.vmap(
+                    lambda r1: pallas_nonbonded_tile_pairs(
+                        r1,
+                        dhfr_wt.charges,
+                        dhfr_wt.sigmas,
+                        dhfr_wt.epsilons,
+                        tp_nl_wt,
+                        atom_mask=dhfr_wt.atom_mask,
+                        box=box_vec,
+                        pme_alpha=float(dhfr_wt.pme_alpha),
+                        cutoff=float(dhfr_wt.cutoff_distance),
+                        return_forces=True,
+                    )[1]
+                )(r_in)
+            )
+            ms_mk51_tp, _ = _probe_ms(jit_mk51_tp, pos_b, n_steady=n_steady, n_wall=n_wall)
+
+            # (d) SPME 64^3 breakdown: spread, rfftn+irfftn, gather
+            jit_spme_spread = jax.jit(
+                lambda r_in, q_in, m_in: jax.vmap(
+                    lambda r1, q1, m1: spread_charges_pallas(r1, q1, m1, box_vec, (64, 64, 64))
+                )(r_in, q_in, m_in)
+            )
+            q_grid_b = jit_spme_spread(pos_b, q_b, am_b)
+            jax.block_until_ready(q_grid_b)
+
+            def _spme_fft_only(q_mesh):
+                q_hat = jnp.fft.rfftn(q_mesh, s=(64, 64, 64), axes=(-3, -2, -1))
+                theta = jnp.fft.irfftn(q_hat * G_cached_f32, s=(64, 64, 64), axes=(-3, -2, -1))
+                return theta * jnp.float32(64 * 64 * 64)
+
+            jit_spme_fft = jax.jit(_spme_fft_only)
+            theta_b = jit_spme_fft(q_grid_b)
+            jax.block_until_ready(theta_b)
+
+            jit_spme_gather = jax.jit(
+                lambda r_in, q_in, m_in, th_in: jax.vmap(
+                    lambda r1, q1, m1, th1: gather_pallas(
+                        r1, q1, m1, box_vec, th1, (64, 64, 64), compute_dq=False
+                    )[0]
+                )(r_in, q_in, m_in, th_in)
+            )
+            ms_spme_spread, _ = _probe_ms(jit_spme_spread, pos_b, q_b, am_b, n_steady=n_steady, n_wall=n_wall)
+            ms_spme_fft, _ = _probe_ms(jit_spme_fft, q_grid_b, n_steady=n_steady, n_wall=n_wall)
+            ms_spme_gather, _ = _probe_ms(
+                jit_spme_gather, pos_b, q_b, am_b, theta_b, n_steady=n_steady, n_wall=n_wall
+            )
+            jit_spme_spread_sorted = jax.jit(
+                lambda r_in, q_in, m_in: spread_charges_pallas(
+                    r_in, q_in, m_in, box_vec, (64, 64, 64), atom_perm=pme_perm_wt
+                )
+            )
+            jit_spme_gather_sorted = jax.jit(
+                lambda r_in, q_in, m_in, th_in: gather_pallas(
+                    r_in,
+                    q_in,
+                    m_in,
+                    box_vec,
+                    th_in,
+                    (64, 64, 64),
+                    atom_perm=pme_perm_wt,
+                    atom_inv_perm=pme_inv_perm_wt,
+                    compute_dq=False,
+                )[0]
+            )
+            ms_spme_spread_sorted, _ = _probe_ms(
+                jit_spme_spread_sorted, pos_b, q_b, am_b, n_steady=n_steady, n_wall=n_wall
+            )
+            ms_spme_gather_sorted, _ = _probe_ms(
+                jit_spme_gather_sorted, pos_b, q_b, am_b, theta_b, n_steady=n_steady, n_wall=n_wall
+            )
+
+            # (e) Cell-list binning (argsort vs MK-52 Pallas atomic) vs Pallas cell-prune vs single-replica rebuild_mask
+            reb_all = jnp.ones((B,), dtype=jnp.bool_)
+            reb_one = jnp.arange(B) == 0
+            jit_cell_bin_argsort = jax.jit(
+                lambda r_in, m_in, rb_in: nl_mod._build_cell_stencil_buffers_batched(
+                    r_in,
+                    bx_b,
+                    cell_size,
+                    64,
+                    grid_dims_nl,
+                    atom_mask_b=m_in,
+                    rebuild_mask_b=rb_in,
+                    interpret=True,
+                )
+            )
+            jit_cell_bin_mk52 = jax.jit(
+                lambda r_in, m_in, rb_in: nl_mod._build_cell_stencil_buffers_batched(
+                    r_in,
+                    bx_b,
+                    cell_size,
+                    64,
+                    grid_dims_nl,
+                    atom_mask_b=m_in,
+                    rebuild_mask_b=rb_in,
+                    interpret=(jax.default_backend() == "cpu"),
+                )
+            )
+            jit_nl_full_all = jax.jit(
+                lambda r_in, m_in, rb_in: nl_mod._pallas_prune_and_encode_cell_list_batch(
+                    B,
+                    (True, True, True, True, True),
+                    jnp.mod(r_in, bx_b[:, None, :]),
+                    bx_b,
+                    ei_b,
+                    ev_b,
+                    ee_b,
+                    cell_size=cell_size,
+                    cell_capacity=64,
+                    max_occupancy=max_occ,
+                    r_cutoff=cell_size,
+                    encode_exclusions=True,
+                    interpret=(jax.default_backend() == "cpu"),
+                    grid_dims=grid_dims_nl,
+                    atom_mask=m_in,
+                    mask_batched=True,
+                    rebuild_mask=rb_in,
+                    old_idx=nbr_idx_b,
+                )
+            )
+            ms_cell_bin_all, _ = _probe_ms(jit_cell_bin_argsort, pos_b, am_b, reb_all, n_steady=n_steady, n_wall=n_wall)
+            ms_cell_bin_one, _ = _probe_ms(jit_cell_bin_argsort, pos_b, am_b, reb_one, n_steady=n_steady, n_wall=n_wall)
+            ms_cell_bin_mk52_all, _ = _probe_ms(jit_cell_bin_mk52, pos_b, am_b, reb_all, n_steady=n_steady, n_wall=n_wall)
+            ms_cell_bin_mk52_one, _ = _probe_ms(jit_cell_bin_mk52, pos_b, am_b, reb_one, n_steady=n_steady, n_wall=n_wall)
+            ms_nl_all, _ = _probe_ms(jit_nl_full_all, pos_b, am_b, reb_all, n_steady=n_steady, n_wall=n_wall)
+            ms_nl_one, _ = _probe_ms(jit_nl_full_all, pos_b, am_b, reb_one, n_steady=n_steady, n_wall=n_wall)
+
+            # (f) Pure while_loop propagation vs total EnsemblePlan.run wall time (homog & hetero)
+            _SINGLE_INFERENCE_CACHE.clear()
+            _STACKED_INFERENCE_CACHE.clear()
+            # Build 1-replica _nl_step_fn and pre-initialized carry to time pure while_loop without init_fn/reseed
+            _ = plan_1.run(
+                n_steps=2, dt=2.0, kT=0.6, seed=10, run_mode="inference", use_neighbor_list=True, nl_update_every=20
+            )
+            ce1 = next(iter(_SINGLE_INFERENCE_CACHE.values()))
+            nl_step_fn_1 = ce1["nl_step_fn"]
+            from prolix.api.ensemble_plan import _NLDispatchCarry
+
+            state_b_init = jit_reseed_b(seeds_u32)
+            nbr_b_init = jax.tree.map(
+                lambda x: jnp.broadcast_to(x[None, ...], (B,) + x.shape) if isinstance(x, jnp.ndarray) else x,
+                ce1["nbr0"],
+            )
+            carry_b_init = _NLDispatchCarry(
+                state_b_init,
+                nbr_b_init,
+                jnp.zeros((B,), dtype=jnp.bool_),
+                state_b_init.position,
+            )
+            n_steps_i32 = jnp.asarray(n_steps_loop, dtype=jnp.int32)
+            jit_pure_while_b = jax.jit(
+                lambda c_in, n_in: (
+                    dispatch_n_steps_inference(nl_step_fn_1, jax.tree.map(lambda x: x[0], c_in), n_in)
+                    if B == 1
+                    else jax.vmap(lambda c1: dispatch_n_steps_inference(nl_step_fn_1, c1, n_in))(c_in)
+                )
+            )
+            w_pure = jit_pure_while_b(carry_b_init, jnp.asarray(2, dtype=jnp.int32))
+            jax.block_until_ready(w_pure.langevin_state.position)
+            t0_pure = time.perf_counter()
+            out_pure = jit_pure_while_b(carry_b_init, n_steps_i32)
+            jax.block_until_ready(out_pure.langevin_state.position)
+            pure_while_wall_ms = (time.perf_counter() - t0_pure) * 1000.0
+
+            _SINGLE_INFERENCE_CACHE.clear()
+            _STACKED_INFERENCE_CACHE.clear()
+            plan_hom = EnsemblePlan.from_bundles(hom_bundles, use_pallas=True, use_pallas_pme=True)
+            out_w_hom = plan_hom.run(
+                n_steps=5, dt=2.0, kT=0.6, seed=10, run_mode="inference", use_neighbor_list=True, nl_update_every=20
+            )
+            if isinstance(out_w_hom, list):
+                for t in out_w_hom:
+                    jax.block_until_ready(t.positions)
+            else:
+                jax.block_until_ready(out_w_hom.positions)
+
+            t0 = time.perf_counter()
+            out_p_hom = plan_hom.run(
+                n_steps=n_steps_loop,
+                dt=2.0,
+                kT=0.6,
+                seed=42,
+                run_mode="inference",
+                use_neighbor_list=True,
+                nl_update_every=20,
+            )
+            if isinstance(out_p_hom, list):
+                for t in out_p_hom:
+                    jax.block_until_ready(t.positions)
+            else:
+                jax.block_until_ready(out_p_hom.positions)
+            total_hom_wall_ms = (time.perf_counter() - t0) * 1000.0
+
+            _SINGLE_INFERENCE_CACHE.clear()
+            _STACKED_INFERENCE_CACHE.clear()
+            plan_het = EnsemblePlan.from_bundles(het_bundles, use_pallas=True, use_pallas_pme=True)
+            out_w_het = plan_het.run(
+                n_steps=5, dt=2.0, kT=0.6, seed=10, run_mode="inference", use_neighbor_list=True, nl_update_every=20
+            )
+            if isinstance(out_w_het, list):
+                for t in out_w_het:
+                    jax.block_until_ready(t.positions)
+            else:
+                jax.block_until_ready(out_w_het.positions)
+
+            t0 = time.perf_counter()
+            out_p_het = plan_het.run(
+                n_steps=n_steps_loop,
+                dt=2.0,
+                kT=0.6,
+                seed=42,
+                run_mode="inference",
+                use_neighbor_list=True,
+                nl_update_every=20,
+            )
+            if isinstance(out_p_het, list):
+                for t in out_p_het:
+                    jax.block_until_ready(t.positions)
+            else:
+                jax.block_until_ready(out_p_het.positions)
+            total_het_wall_ms = (time.perf_counter() - t0) * 1000.0
+
+            est_step_sum_hom_ms = (
+                ms_baoab_pre
+                + ms_baoab_post
+                + ms_mk48_hom
+                + ms_spme_spread
+                + ms_spme_fft
+                + ms_spme_gather
+                + (ms_nl_all / 20.0)
+            )
+            est_step_sum_het_ms = (
+                ms_baoab_pre
+                + ms_baoab_post
+                + ms_mk48_het
+                + ms_spme_spread
+                + ms_spme_fft
+                + ms_spme_gather
+                + (ms_nl_all / 20.0)
+            )
+
+            rec = {
+                "replicas_B": B,
+                "n_steps_timed": n_steps_loop,
+                "a_reseed_init_ms_call": ms_reseed_b,
+                "a_reseed_init_ms_per_rep": ms_reseed_b / B,
+                "a_isin_water_mask_ms_call": ms_isin_b,
+                "b_baoab_pre_force_ms_call": ms_baoab_pre,
+                "b_baoab_post_force_ms_call": ms_baoab_post,
+                "b_baoab_total_ms_per_rep": (ms_baoab_pre + ms_baoab_post) / B,
+                "c_megakernel_homog_ms_call": ms_mk48_hom,
+                "c_megakernel_homog_ms_per_rep": ms_mk48_hom / B,
+                "c_megakernel_hetero_ms_call": ms_mk48_het,
+                "c_megakernel_hetero_ms_per_rep": ms_mk48_het / B,
+                "c_tile_pairs_mk51_homog_ms_call": ms_mk51_tp,
+                "c_tile_pairs_mk51_homog_ms_per_rep": ms_mk51_tp / B,
+                "d_spme_spread_64_ms_call": ms_spme_spread,
+                "d_spme_spread_sorted_mk53_ms_call": ms_spme_spread_sorted,
+                "d_spme_fft_64_ms_call": ms_spme_fft,
+                "d_spme_gather_64_ms_call": ms_spme_gather,
+                "d_spme_gather_sorted_mk53_ms_call": ms_spme_gather_sorted,
+                "d_spme_total_64_ms_call": ms_spme_spread + ms_spme_fft + ms_spme_gather,
+                "d_spme_total_64_ms_per_rep": (ms_spme_spread + ms_spme_fft + ms_spme_gather) / B,
+                "e_cell_bin_argsort_all_ms_call": ms_cell_bin_all,
+                "e_cell_bin_argsort_1rep_ms_call": ms_cell_bin_one,
+                "e_cell_bin_pallas_mk52_all_ms_call": ms_cell_bin_mk52_all,
+                "e_cell_bin_pallas_mk52_1rep_ms_call": ms_cell_bin_mk52_one,
+                "e_nl_rebuild_all_ms_call": ms_nl_all,
+                "e_nl_rebuild_1rep_ms_call": ms_nl_one,
+                "e_pallas_prune_only_all_ms_call": max(0.0, ms_nl_all - ms_cell_bin_mk52_all),
+                "e_nl_amortized_20steps_ms_per_rep": (ms_nl_all / 20.0) / B,
+                "f_sum_substeps_homog_ms_step_batch": est_step_sum_hom_ms,
+                "f_sum_substeps_homog_ms_step_per_rep": est_step_sum_hom_ms / B,
+                "f_sum_substeps_hetero_ms_step_batch": est_step_sum_het_ms,
+                "f_sum_substeps_hetero_ms_step_per_rep": est_step_sum_het_ms / B,
+                "f_pure_while_loop_homog_ms_step_batch": pure_while_wall_ms / n_steps_loop,
+                "f_pure_while_loop_homog_ms_step_per_rep": (pure_while_wall_ms / n_steps_loop) / B,
+                "f_plan_run_homog_ms_step_batch": total_hom_wall_ms / n_steps_loop,
+                "f_plan_run_homog_ms_step_per_rep": (total_hom_wall_ms / n_steps_loop) / B,
+                "f_plan_run_hetero_ms_step_batch": total_het_wall_ms / n_steps_loop,
+                "f_plan_run_hetero_ms_step_per_rep": (total_het_wall_ms / n_steps_loop) / B,
+                "f_non_step_overhead_vs_pure_while_homog_ms_total": total_hom_wall_ms - pure_while_wall_ms,
+                "f_non_step_overhead_homog_ms_total": total_hom_wall_ms - est_step_sum_hom_ms * n_steps_loop,
+                "f_non_step_overhead_hetero_ms_total": total_het_wall_ms - est_step_sum_het_ms * n_steps_loop,
+            }
+            per_batch_records.append(rec)
+            print(
+                f"  [Substep B={B:2d}] reseed={ms_reseed_b:6.2f}ms (isin={ms_isin_b:5.2f}ms) | "
+                f"BAOAB={(ms_baoab_pre + ms_baoab_post)/B:5.3f}ms/rep | "
+                f"MK48(hom/het)={ms_mk48_hom/B:5.3f}/{ms_mk48_het/B:5.3f}ms/rep | "
+                f"SPME={(ms_spme_spread + ms_spme_fft + ms_spme_gather)/B:5.3f}ms/rep "
+                f"(spr={ms_spme_spread/B:5.3f}, fft={ms_spme_fft/B:5.3f}, gat={ms_spme_gather/B:5.3f}) | "
+                f"NL_reb(all/1rep)={ms_nl_all:5.2f}/{ms_nl_one:5.2f}ms (bin_arg={ms_cell_bin_all:5.2f}, bin_mk52={ms_cell_bin_mk52_all:5.2f}/{ms_cell_bin_mk52_one:5.2f}ms) | "
+                f"while_loop={(pure_while_wall_ms/n_steps_loop)/B:5.3f}ms/step/rep | "
+                f"plan.run(hom/het)={(total_hom_wall_ms/n_steps_loop)/B:5.3f}/{(total_het_wall_ms/n_steps_loop)/B:5.3f}ms/step/rep"
+            )
+    finally:
+        if prev_gp is None:
+            os.environ.pop("PROLIX_PME_GRID_POINTS", None)
+        else:
+            os.environ["PROLIX_PME_GRID_POINTS"] = prev_gp
+
+    return {"dhfr_25k_substep_breakdown": per_batch_records}
+
+
+
 def run_ragged_bucket_and_accuracy_audit(dhfr_bundle, quick: bool = False) -> dict:
     print("=== [1/3] Ragged-Bucket Ghost-Atom Filtering Speedup & Numerical Accuracy Audit ===")
     ubq_8k = _make_truncated_solvated_bundle(
@@ -865,11 +1477,13 @@ def _run_homogeneous_scaling_sweep(
                 if isinstance(trajs_p, list):
                     for t in trajs_p:
                         jax.block_until_ready(t.positions)
-                    all_finite = all(bool(jnp.all(jnp.isfinite(t.positions))) for t in trajs_p)
                 else:
                     jax.block_until_ready(trajs_p.positions)
-                    all_finite = bool(jnp.all(jnp.isfinite(trajs_p.positions)))
                 warm_s = time.perf_counter() - t0_warm
+                if isinstance(trajs_p, list):
+                    all_finite = all(bool(np.all(np.isfinite(np.asarray(t.positions)))) for t in trajs_p)
+                else:
+                    all_finite = bool(np.all(np.isfinite(np.asarray(trajs_p.positions))))
 
                 assert all_finite, f"Non-finite trajectory on {label} ({prec_mode}) B={B}"
                 step_ms = (warm_s / n_steps_prod) * 1000.0
@@ -1095,6 +1709,90 @@ def run_e2e_ensemble_pipeline_benchmarks(dhfr_bundle, quick: bool = False) -> di
         "all_finite": all(bool(jnp.all(jnp.isfinite(t.positions))) for t in trajs_wm),
     }
 
+    # 4b. Heterogeneous DHFR mutant screen scaling (B = 1, 2, 4, 8, 16, 32 variants with point mutations + length deletions)
+    screen_batch_sizes = (1, 2) if quick else (1, 2, 4, 8, 16, 32)
+    ps_per_step = dt_fs * 1e-3
+    screen_rows_single: list[dict] = []
+    screen_rows_mixed: list[dict] = []
+    os.environ["PROLIX_PME_GRID_POINTS"] = "64"
+    for prec_mode, dtype_target, target_rows in (
+        ("single", jnp.float32, screen_rows_single),
+        ("mixed", jnp.float64, screen_rows_mixed),
+    ):
+        for B_scr in screen_batch_sizes:
+            _SINGLE_INFERENCE_CACHE.clear()
+            _STACKED_INFERENCE_CACHE.clear()
+            het_scr_bundles = [
+                _cast_bundle_precision(b, dtype_target)
+                for b in _make_heterogeneous_dhfr_mutant_screen(dhfr_bundle, B_scr)
+            ]
+            plan_scr = EnsemblePlan.from_bundles(het_scr_bundles, use_pallas=True, use_pallas_pme=True)
+            t0_c = time.perf_counter()
+            tr_w = plan_scr.run(
+                n_steps=n_steps_warm,
+                dt=dt_fs,
+                kT=0.6,
+                seed=50,
+                run_mode="inference",
+                use_neighbor_list=True,
+                nl_update_every=20,
+            )
+            if isinstance(tr_w, list):
+                for t in tr_w:
+                    jax.block_until_ready(t.positions)
+            else:
+                jax.block_until_ready(tr_w.positions)
+            cold_scr_s = time.perf_counter() - t0_c
+
+            t0_w = time.perf_counter()
+            tr_p = plan_scr.run(
+                n_steps=n_steps_prod,
+                dt=dt_fs,
+                kT=0.6,
+                seed=99,
+                run_mode="inference",
+                use_neighbor_list=True,
+                nl_update_every=20,
+            )
+            if isinstance(tr_p, list):
+                for t in tr_p:
+                    jax.block_until_ready(t.positions)
+            else:
+                jax.block_until_ready(tr_p.positions)
+            warm_scr_s = time.perf_counter() - t0_w
+            if isinstance(tr_p, list):
+                all_fin = all(bool(np.all(np.isfinite(np.asarray(t.positions)))) for t in tr_p)
+            else:
+                all_fin = bool(np.all(np.isfinite(np.asarray(tr_p.positions))))
+            assert all_fin, f"Non-finite trajectory on DHFR heterogeneous screen ({prec_mode}) B={B_scr}"
+            step_ms_s = (warm_scr_s / n_steps_prod) * 1000.0
+            per_var_ms = step_ms_s / B_scr
+            agg_ns_day = (B_scr * n_steps_prod * ps_per_step * 1e-3) / (warm_scr_s / 86400.0)
+            row_scr = {
+                "precision_mode": prec_mode,
+                "bucket_atoms": 25000,
+                "real_atoms_min": min(int(b.n_atoms) for b in het_scr_bundles),
+                "real_atoms_max": max(int(b.n_atoms) for b in het_scr_bundles),
+                "pme_grid_points": 64,
+                "variants_B": B_scr,
+                "n_steps": n_steps_prod,
+                "cold_compile_and_warmup_s": cold_scr_s,
+                "warm_wall_s": warm_scr_s,
+                "ms_per_step_batch": step_ms_s,
+                "ms_per_step_per_variant": per_var_ms,
+                "aggregate_ns_per_day": agg_ns_day,
+                "per_variant_ns_per_day": agg_ns_day / B_scr,
+                "all_finite": all_fin,
+            }
+            target_rows.append(row_scr)
+            print(
+                f"DHFR Hetero Mutant Screen [{prec_mode:6s}, grid=64^3] B={B_scr:2d}: "
+                f"{step_ms_s:7.3f} ms/step ({per_var_ms:6.3f} ms/step/var) | "
+                f"agg={agg_ns_day:7.2f} ns/day"
+            )
+    results["dhfr_25k_heterogeneous_mutant_screen_single"] = screen_rows_single
+    results["dhfr_25k_heterogeneous_mutant_screen_mixed"] = screen_rows_mixed
+
     # 5. Heterogeneous multi-bucket ([sys_4200, ubq_8k] in 8k bucket + [dhfr_bundle, dhfr_mutant] in 25k bucket)
     os.environ["PROLIX_PME_GRID_POINTS"] = "8192:48,25000:64"
     multi_bucket_bundles = [
@@ -1175,6 +1873,15 @@ def run_e2e_ensemble_pipeline_benchmarks(dhfr_bundle, quick: bool = False) -> di
                     r["openmm_cuda_single_ns_per_day"] = omm_single_ns
                     r["speedup_vs_openmm_cuda_mixed"] = r["aggregate_ns_per_day"] / max(omm_mixed_ns, 1e-9)
                     r["speedup_vs_openmm_cuda_single"] = r["aggregate_ns_per_day"] / max(omm_single_ns, 1e-9)
+        omm_dhfr = omm_raw["systems"].get("dhfr_23558", {})
+        if "mixed" in omm_dhfr and "single" in omm_dhfr:
+            omm_mixed_ns = omm_dhfr["mixed"]["ns_per_day"]
+            omm_single_ns = omm_dhfr["single"]["ns_per_day"]
+            for r in screen_rows_single + screen_rows_mixed:
+                r["openmm_cuda_mixed_ns_per_day"] = omm_mixed_ns
+                r["openmm_cuda_single_ns_per_day"] = omm_single_ns
+                r["speedup_vs_openmm_cuda_mixed"] = r["aggregate_ns_per_day"] / max(omm_mixed_ns, 1e-9)
+                r["speedup_vs_openmm_cuda_single"] = r["aggregate_ns_per_day"] / max(omm_single_ns, 1e-9)
     results["openmm_cuda_comparison"] = omm_raw
     return results
 
@@ -1184,9 +1891,10 @@ def main():
     parser.add_argument(
         "--out",
         type=Path,
-        default=Path("outputs/bench/261105_pallas_v27_e2e_ensemble_buckets.json"),
+        default=Path("outputs/bench/261106_pallas_v31_e2e_ensemble_buckets.json"),
     )
     parser.add_argument("--quick", action="store_true")
+    parser.add_argument("--substep-only", action="store_true")
     args = parser.parse_args()
 
     ff_path = B_dhfr._resolve_ff_path()
@@ -1199,12 +1907,29 @@ def main():
     cp_small = resolve_pallas_compiler_params("nonbonded_nl", grid_blocks=128)
     cp_large = resolve_pallas_compiler_params("nonbonded_nl", grid_blocks=2048)
 
+    substep_profile = run_dhfr_25k_substep_profile(dhfr_bundle, quick=args.quick)
+    if args.substep_only:
+        payload = {
+            "meta": {
+                "version": "pallas_v3.1_substep_profile",
+                "device": str(dev),
+                "device_kind": dev_kind,
+                "compute_capability": cc,
+                "jax_version": jax.__version__,
+            },
+            "dhfr_substep_profile": substep_profile,
+        }
+        args.out.parent.mkdir(parents=True, exist_ok=True)
+        args.out.write_text(json.dumps(payload, indent=2))
+        print(f"Wrote {args.out}")
+        return
+
     ragged_and_audit = run_ragged_bucket_and_accuracy_audit(dhfr_bundle, quick=args.quick)
     e2e_results = run_e2e_ensemble_pipeline_benchmarks(dhfr_bundle, quick=args.quick)
 
     payload = {
         "meta": {
-            "version": "pallas_v3.0",
+            "version": "pallas_v3.1",
             "device": str(dev),
             "device_kind": dev_kind,
             "compute_capability": cc,
@@ -1218,6 +1943,7 @@ def main():
                 "num_stages": cp_large.num_stages,
             },
         },
+        "dhfr_substep_profile": substep_profile,
         "ragged_bucket_and_accuracy_audit": ragged_and_audit,
         "e2e_ensemble_pipeline": e2e_results,
     }

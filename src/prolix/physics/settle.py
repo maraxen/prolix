@@ -12,7 +12,6 @@ References:
 
 from __future__ import annotations
 
-import functools
 import os
 import warnings
 from collections.abc import Callable
@@ -845,7 +844,7 @@ def _remove_angular_momentum_from_impulse(
   # omega broadcast over atom axis: (N_waters, 1, 3) x (N_waters, 3, 3)
   omega_exp = omega[:, None, :]  # (N_waters, 1, 3)
   # cross product: (omega x d_i) per atom => (N_waters, 3, 3)
-  omega_cross_d = jnp.cross(omega_exp, d)  # (N_waters, 3, 3)
+  omega_cross_d = jnp.cross(omega_exp * jnp.ones_like(d), d)  # (N_waters, 3, 3)
   # m_i * (omega x d_i): broadcast mass per atom
   angular_dp = m_all[None, :, None] * omega_cross_d  # (N_waters, 3, 3)
 
@@ -969,7 +968,7 @@ def _r_step_conserve_angular_momentum(
 
   # Corrective impulse: m_i * (omega × d_con_i)
   omega_exp = omega[:, None, :]  # (N_w, 1, 3)
-  omega_cross_d = jnp.cross(omega_exp, d_con)  # (N_w, 3, 3)
+  omega_cross_d = jnp.cross(omega_exp * jnp.ones_like(d_con), d_con)  # (N_w, 3, 3)
   dp_correct = m_all[None, :, None] * omega_cross_d  # (N_w, 3, 3)
 
   if water_mask is None:
@@ -1066,9 +1065,13 @@ def settle_velocities(
       dv_H1 = jnp.where(mask_col, dv_H1, 0.0)
       dv_H2 = jnp.where(mask_col, dv_H2, 0.0)
 
+    vel_rattle = velocities.at[indices.oxygen].add(dv_O)
+    vel_rattle = vel_rattle.at[indices.hydrogen1].add(dv_H1)
+    vel_rattle = vel_rattle.at[indices.hydrogen2].add(dv_H2)
+
   return _remove_angular_momentum_from_impulse(
     velocities,
-    None,
+    vel_rattle,
     indices,
     pos_O,
     pos_H1,
@@ -1076,7 +1079,6 @@ def settle_velocities(
     mass_oxygen,
     mass_hydrogen,
     water_mask,
-    dv_tuple=(dv_O, dv_H1, dv_H2),
   )
 
 
@@ -1167,7 +1169,7 @@ def _should_use_pallas_settle_default(use_pallas: bool | None = None) -> bool:
     return False
   if use_pallas is False:
     return False
-  flag = os.environ.get("PROLIX_USE_PALLAS_SETTLE", "1").strip().lower()
+  flag = os.environ.get("PROLIX_USE_PALLAS_SETTLE", "").strip().lower()
   if flag in ("0", "false", "no", "off"):
     return False
   if use_pallas is True:
@@ -1196,7 +1198,7 @@ def _settle_water_vec3(
   zero = jnp.asarray(0.0, dtype=dtype)
   one = jnp.asarray(1.0, dtype=dtype)
   two = jnp.asarray(2.0, dtype=dtype)
-  half = jnp.asarray(0.5, dtype=dtype)
+  jnp.asarray(0.5, dtype=dtype)
 
   if has_box and box_xyz is not None:
     bx, by, bz = box_xyz
@@ -1501,7 +1503,7 @@ def _r_step_and_am_vec3(
 ) -> tuple[tuple[Array, Array, Array], tuple[Array, Array, Array], tuple[Array, Array, Array]]:
   """In-register R-step momentum impulse + angular momentum restoration for a water block."""
   dtype = r_con_O[0].dtype
-  two = jnp.asarray(2.0, dtype=dtype)
+  jnp.asarray(2.0, dtype=dtype)
   m_O = jnp.asarray(mass_oxygen, dtype=dtype)
   m_H = jnp.asarray(mass_hydrogen, dtype=dtype)
   inv_m_tot = jnp.asarray(1.0 / (mass_oxygen + 2.0 * mass_hydrogen), dtype=dtype)
@@ -2431,7 +2433,7 @@ def _pallas_baoab_post_force_batch(
     base_w = b_id * W_pad
     scratch_slot = jnp.int32(B * N_pad)
 
-    zero = jnp.asarray(0.0, dtype=dtype)
+    jnp.asarray(0.0, dtype=dtype)
     half = jnp.asarray(0.5, dtype=dtype)
     dt_val = _pl_load(dt_ref, (b_id + jnp.zeros((1,), dtype=jnp.int32),))[0]
     half_dt = half * dt_val
@@ -3070,10 +3072,37 @@ def settle_langevin(
 
     return masked_init_fn, plain_apply_fn
 
+  # Precompute loop-invariant (N,) water/ghost exclusion mask once outside init_fn and apply_fn
+  # when mass is a 1D/2D per-atom array, avoiding O(N * 3N_w) jnp.isin in init_fn and per-step scatters.
+  _mass_init_arr = jnp.asarray(mass)
+  _iwg_precomputed: Array | None = None
+  if (
+    _mass_init_arr.ndim >= 1
+    and water_indices is not None
+    and int(water_indices.shape[0]) > 0
+  ):
+    _n_a_init = int(_mass_init_arr.reshape(-1).shape[0])
+    _wi_init = jnp.asarray(water_indices, dtype=jnp.int32)
+    _n_w_init = int(_wi_init.shape[0])
+    _wm_init = (
+      jnp.ones((1, _n_w_init), dtype=jnp.int32)
+      if water_mask is None
+      else jnp.asarray(water_mask, dtype=jnp.int32)[None, :]
+    )
+    _am_init = (
+      None
+      if atom_mask is None
+      else jnp.asarray(atom_mask, dtype=jnp.int32)[None, :]
+    )
+    _iwg_precomputed = _build_is_water_or_ghost_mask(
+      1, _n_a_init, _n_w_init, _n_w_init, _wi_init[None, ...], _wm_init, _am_init
+    )
+
   def init_fn(key, R, mass=mass, **kwargs):
     _kT = kwargs.pop("kT", kT)
+    _precomputed_force = kwargs.pop("precomputed_force", None)
     key, split = random.split(key)
-    force = force_fn(R, **kwargs)
+    force = _precomputed_force if _precomputed_force is not None else force_fn(R, **kwargs)
 
     # Handle mass array
     mass_arr = jnp.array(mass, dtype=R.dtype)
@@ -3090,45 +3119,95 @@ def settle_langevin(
       mass_flat = mass_arr.reshape(-1)
       r_water = jnp.stack([R[idx[:, 0]], R[idx[:, 1]], R[idx[:, 2]]], axis=1)
       m_water = jnp.stack([mass_flat[idx[:, 0]], mass_flat[idx[:, 1]], mass_flat[idx[:, 2]]], axis=1)
-      n_w = r_water.shape[0]
-      splits = jax.random.split(key, n_w + 1)
-      key, water_keys = splits[0], splits[1:]
-      p_water = dispatch_n_waters(
-        None,
-        n_w,
-        lambda pack: _init_momentum_one_water_rigid(pack[0], pack[1], pack[2], _kT)[0],
-        (water_keys, r_water, m_water),
-      )
+      n_w = int(r_water.shape[0])
+      if n_w <= 1:
+        splits = jax.random.split(key, n_w + 1)
+        key, water_keys = splits[0], splits[1:]
+        p_water = dispatch_n_waters(
+          None,
+          n_w,
+          lambda pack: _init_momentum_one_water_rigid(pack[0], pack[1], pack[2], _kT)[0],
+          (water_keys, r_water, m_water),
+        )
+      else:
+        # MK-50: Vectorized single-draw Box-Muller + rigid-water COM/angular initialization
+        # eliminating the 8,193-way jax.random.split and 8,192 separate normal calls.
+        key, split_w = jax.random.split(key)
+        z6_all = jax.random.normal(split_w, (n_w, 6), dtype=jnp.float32).astype(R.dtype)
+
+        def _init_water_from_z6(pack):
+          z6_w, r_w, m_w = pack
+          msum = jnp.sum(m_w)
+          eps = jnp.array(1e-30, dtype=msum.dtype)
+          msum_safe = jnp.maximum(msum, eps)
+          com = jnp.sum(m_w[:, None] * r_w, axis=0) / msum_safe
+          rrel = r_w - com
+          z_trans = z6_w[:3]
+          xi_trans = z_trans * jnp.sqrt(_kT / msum_safe)
+          p_trans = m_w[:, None] * xi_trans[None, :]
+          eye3 = jnp.eye(3, dtype=r_w.dtype)
+          r_sq = jnp.einsum("ia,ia->i", rrel, rrel)
+          I_tensor = (
+            jnp.einsum("i,i->", m_w, r_sq) * eye3
+            - jnp.einsum("i,ia,ib->ab", m_w, rrel, rrel)
+          )
+          reg_r = jnp.array(1e-12, dtype=I_tensor.dtype) * (jnp.trace(I_tensor) / 3.0 + 1.0)
+          I_reg = I_tensor + reg_r * eye3
+          z_rot = z6_w[3:]
+          omega = _cholesky_upper_solve_3x3(I_reg, jnp.sqrt(_kT) * z_rot)
+          p_rot = m_w[:, None] * jnp.cross(omega[None, :], rrel)
+          return p_trans + p_rot
+
+        p_water = jax.vmap(_init_water_from_z6)((z6_all, r_water, m_water))
+
       idx_flat = idx.reshape(-1)
       if water_mask is None:
         momenta = momenta.at[idx_flat].set(p_water.reshape(-1, 3))
-        real_idx_flat = idx_flat
       else:
         mask_flat = jnp.broadcast_to(water_mask[:, None], idx.shape).reshape(-1)
         p_water_flat = p_water.reshape(-1, 3)
         delta_p = jnp.where(mask_flat[:, None], p_water_flat - momenta[idx_flat], 0.0)
         momenta = momenta.at[idx_flat].add(delta_p)
-        real_idx_flat = jnp.where(mask_flat, idx_flat, -1)
 
-      # Non-water atoms (solute): standard unconstrained noise
-      # Create a mask for non-water atoms
-      all_indices = jnp.arange(R.shape[0])
-      is_water = jnp.isin(all_indices, real_idx_flat, assume_unique=False)
-      non_water_mask = ~is_water
+      # MK-50: O(N) non-water active solute mask via precomputed _iwg_precomputed
+      # (or direct O(N + 3N_w) scatter), eliminating the 614.4M-element jnp.isin.
+      if n_w <= 1:
+        real_idx_flat = (
+          idx_flat
+          if water_mask is None
+          else jnp.where(
+            jnp.broadcast_to(water_mask[:, None], idx.shape).reshape(-1), idx_flat, -1
+          )
+        )
+        all_indices = jnp.arange(R.shape[0])
+        is_water = jnp.isin(all_indices, real_idx_flat, assume_unique=False)
+        non_water_mask = ~is_water
+        if atom_mask is not None:
+          non_water_mask = non_water_mask & jnp.asarray(atom_mask, dtype=jnp.bool_)
+      elif _iwg_precomputed is not None and int(_iwg_precomputed.shape[0]) == int(R.shape[0]):
+        non_water_mask = _iwg_precomputed == 0
+      else:
+        n_a_curr = int(R.shape[0])
+        wi_curr = jnp.asarray(idx, dtype=jnp.int32)
+        wm_curr = (
+          jnp.ones((1, n_w), dtype=jnp.int32)
+          if water_mask is None
+          else jnp.asarray(water_mask, dtype=jnp.int32)[None, :]
+        )
+        am_curr = (
+          None
+          if atom_mask is None
+          else jnp.asarray(atom_mask, dtype=jnp.int32)[None, :]
+        )
+        iwg_curr = _build_is_water_or_ghost_mask(
+          1, n_a_curr, n_w, n_w, wi_curr[None, ...], wm_curr, am_curr
+        )
+        non_water_mask = iwg_curr == 0
 
-      # Fixed-shape jnp.where select, not a Python `if jnp.any(...)` +
-      # boolean-mask index/scatter: under vmap (the B1 stacked path)
-      # non_water_mask is a traced per-batch-element array, so a Python `if`
-      # on it raises TracerBoolConversionError, and boolean-mask indexing
-      # produces a dynamically-shaped output that can't trace at all. Noise
-      # is computed for every atom (fixed R.shape) and selected, which is
-      # numerically identical for real (non-padding) callers.
       key, split = jax.random.split(key)
       non_water_noise_full = jnp.sqrt(mass_arr[:, None] * _kT) * jax.random.normal(
         split, R.shape, dtype=R.dtype
       )
-      if atom_mask is not None:
-        non_water_mask = non_water_mask & jnp.asarray(atom_mask, dtype=jnp.bool_)
       momenta = jnp.where(non_water_mask[:, None], non_water_noise_full, momenta)
     else:
       # Standard unconstrained initialization
@@ -3154,32 +3233,6 @@ def settle_langevin(
       )
 
     return NVTLangevinState(R, momenta, force, mass_state, key)
-
-  # Precompute loop-invariant (N,) water/ghost exclusion mask once outside apply_fn
-  # when mass is a 1D/2D per-atom array, avoiding per-step .at[...].set(1) scatters.
-  _mass_init_arr = jnp.asarray(mass)
-  _iwg_precomputed: Array | None = None
-  if (
-    _mass_init_arr.ndim >= 1
-    and water_indices is not None
-    and int(water_indices.shape[0]) > 0
-  ):
-    _n_a_init = int(_mass_init_arr.reshape(-1).shape[0])
-    _wi_init = jnp.asarray(water_indices, dtype=jnp.int32)
-    _n_w_init = int(_wi_init.shape[0])
-    _wm_init = (
-      jnp.ones((1, _n_w_init), dtype=jnp.int32)
-      if water_mask is None
-      else jnp.asarray(water_mask, dtype=jnp.int32)[None, :]
-    )
-    _am_init = (
-      None
-      if atom_mask is None
-      else jnp.asarray(atom_mask, dtype=jnp.int32)[None, :]
-    )
-    _iwg_precomputed = _build_is_water_or_ghost_mask(
-      1, _n_a_init, _n_w_init, _n_w_init, _wi_init[None, ...], _wm_init, _am_init
-    )
 
   def apply_fn(state, **kwargs):
     _dt = kwargs.pop("dt", dt)
@@ -4393,65 +4446,104 @@ def _langevin_step_o_constrained(
   c1 = jnp.exp(-gamma * dt)
   c2 = jnp.sqrt(1 - c1**2)
 
-  key, split, split_w = jax.random.split(rng, 3)
-  noise_std = jax.random.normal(split, momentum.shape, dtype=jnp.float32).astype(momentum.dtype)
-  p_ou = c1 * momentum + c2 * jnp.sqrt(mass * kT) * noise_std
-
   idx = water_indices
-  mass_flat = mass.reshape(-1)
-  p_water_in = jnp.stack([momentum[idx[:, 0]], momentum[idx[:, 1]], momentum[idx[:, 2]]], axis=1)
-  r_water = jnp.stack([position[idx[:, 0]], position[idx[:, 1]], position[idx[:, 2]]], axis=1)
-  m_water = jnp.stack([mass_flat[idx[:, 0]], mass_flat[idx[:, 1]], mass_flat[idx[:, 2]]], axis=1)
+  n_w = int(idx.shape[0])
+  if n_w <= 1:
+    key, split = jax.random.split(rng)
+    noise_std = jax.random.normal(split, momentum.shape, dtype=momentum.dtype)
+    p_ou = c1 * momentum + c2 * jnp.sqrt(mass * kT) * noise_std
+    mass_flat = mass.reshape(-1)
+    p_water_in = jnp.stack([momentum[idx[:, 0]], momentum[idx[:, 1]], momentum[idx[:, 2]]], axis=1)
+    r_water = jnp.stack([position[idx[:, 0]], position[idx[:, 1]], position[idx[:, 2]]], axis=1)
+    m_water = jnp.stack([mass_flat[idx[:, 0]], mass_flat[idx[:, 1]], mass_flat[idx[:, 2]]], axis=1)
+    splits = jax.random.split(key, n_w + 1)
+    key, water_keys = splits[0], splits[1:]
 
-  # Batched over waters via xtrax dispatch (Vmap/ChunkedMap), not lax.scan.
-  # MK-44: Sample all (N_waters, 6) Gaussian deviates in one vectorized float32
-  # Threefry call instead of n_w+1 PRNG splits and 2*n_w float64 normal calls.
-  n_w = r_water.shape[0]
-  z6_all = jax.random.normal(split_w, (n_w, 6), dtype=jnp.float32).astype(r_water.dtype)
+    def step_one_water_single(pack):
+      key_w, r_w, m_w, p_w = pack
+      msum = jnp.sum(m_w)
+      eps = jnp.array(1e-30, dtype=msum.dtype)
+      msum_safe = jnp.maximum(msum, eps)
+      com = jnp.sum(m_w[:, None] * r_w, axis=0) / msum_safe
+      rrel = r_w - com
+      eye3 = jnp.eye(3, dtype=r_w.dtype)
+      r_sq = jnp.einsum("ia,ia->i", rrel, rrel)
+      I_tensor = (
+        jnp.einsum("i,i->", m_w, r_sq) * eye3
+        - jnp.einsum("i,ia,ib->ab", m_w, rrel, rrel)
+      )
+      reg = jnp.array(1e-12, dtype=I_tensor.dtype) * (jnp.trace(I_tensor) / 3.0 + 1.0)
+      I_reg = I_tensor + reg * eye3
+      m_safe = jnp.maximum(m_w[:, None], eps)
+      v = p_w / m_safe
+      v_com = jnp.sum(m_w[:, None] * v, axis=0) / msum_safe
+      L_ang = jnp.sum(jnp.cross(rrel, p_w), axis=0)
+      omega_proj = _solve_3x3(I_reg, L_ang)
+      v_proj = v_com[None, :] + jnp.cross(omega_proj[None, :], rrel)
+      p_rigid = v_proj * m_w[:, None]
+      _, k_trans, k_rot = jax.random.split(key_w, 3)
+      z_trans = jax.random.normal(k_trans, (3,), dtype=r_w.dtype)
+      xi_trans = z_trans * jnp.sqrt(kT / msum_safe)
+      p_trans = m_w[:, None] * xi_trans[None, :]
+      z_rot = jax.random.normal(k_rot, (3,), dtype=r_w.dtype)
+      omega_noise = _cholesky_upper_solve_3x3(I_reg, jnp.sqrt(kT) * z_rot)
+      p_rot = m_w[:, None] * jnp.cross(omega_noise[None, :], rrel)
+      noise_w = p_trans + p_rot
+      return c1 * p_rigid + c2 * noise_w
 
-  def step_one_water(pack):
-    z6_w, r_w, m_w, p_w = pack
-    msum = jnp.sum(m_w)
-    eps = jnp.array(1e-30, dtype=msum.dtype)
-    msum_safe = jnp.maximum(msum, eps)
-    com = jnp.sum(m_w[:, None] * r_w, axis=0) / msum_safe
-    rrel = r_w - com
-
-    eye3 = jnp.eye(3, dtype=r_w.dtype)
-    r_sq = jnp.einsum("ia,ia->i", rrel, rrel)
-    I_tensor = (
-      jnp.einsum("i,i->", m_w, r_sq) * eye3
-      - jnp.einsum("i,ia,ib->ab", m_w, rrel, rrel)
+    p_water_out = dispatch_n_waters(
+      None,
+      n_w,
+      step_one_water_single,
+      (water_keys, r_water, m_water, p_water_in),
     )
-    reg = jnp.array(1e-12, dtype=I_tensor.dtype) * (jnp.trace(I_tensor) / 3.0 + 1.0)
-    I_reg = I_tensor + reg * eye3
+  else:
+    key, split, split_w = jax.random.split(rng, 3)
+    noise_std = jax.random.normal(split, momentum.shape, dtype=jnp.float32).astype(momentum.dtype)
+    p_ou = c1 * momentum + c2 * jnp.sqrt(mass * kT) * noise_std
+    mass_flat = mass.reshape(-1)
+    p_water_in = jnp.stack([momentum[idx[:, 0]], momentum[idx[:, 1]], momentum[idx[:, 2]]], axis=1)
+    r_water = jnp.stack([position[idx[:, 0]], position[idx[:, 1]], position[idx[:, 2]]], axis=1)
+    m_water = jnp.stack([mass_flat[idx[:, 0]], mass_flat[idx[:, 1]], mass_flat[idx[:, 2]]], axis=1)
+    z6_all = jax.random.normal(split_w, (n_w, 6), dtype=jnp.float32).astype(r_water.dtype)
 
-    # 1. Rigid momentum projection (matches _project_one_water_momentum_rigid)
-    m_safe = jnp.maximum(m_w[:, None], eps)
-    v = p_w / m_safe
-    v_com = jnp.sum(m_w[:, None] * v, axis=0) / msum_safe
-    L_ang = jnp.sum(jnp.cross(rrel, p_w), axis=0)
-    omega_proj = _solve_3x3(I_reg, L_ang)
-    v_proj = v_com[None, :] + jnp.cross(omega_proj[None, :], rrel)
-    p_rigid = v_proj * m_w[:, None]
+    def step_one_water(pack):
+      z6_w, r_w, m_w, p_w = pack
+      msum = jnp.sum(m_w)
+      eps = jnp.array(1e-30, dtype=msum.dtype)
+      msum_safe = jnp.maximum(msum, eps)
+      com = jnp.sum(m_w[:, None] * r_w, axis=0) / msum_safe
+      rrel = r_w - com
+      eye3 = jnp.eye(3, dtype=r_w.dtype)
+      r_sq = jnp.einsum("ia,ia->i", rrel, rrel)
+      I_tensor = (
+        jnp.einsum("i,i->", m_w, r_sq) * eye3
+        - jnp.einsum("i,ia,ib->ab", m_w, rrel, rrel)
+      )
+      reg = jnp.array(1e-12, dtype=I_tensor.dtype) * (jnp.trace(I_tensor) / 3.0 + 1.0)
+      I_reg = I_tensor + reg * eye3
+      m_safe = jnp.maximum(m_w[:, None], eps)
+      v = p_w / m_safe
+      v_com = jnp.sum(m_w[:, None] * v, axis=0) / msum_safe
+      L_ang = jnp.sum(jnp.cross(rrel, p_w), axis=0)
+      omega_proj = _solve_3x3(I_reg, L_ang)
+      v_proj = v_com[None, :] + jnp.cross(omega_proj[None, :], rrel)
+      p_rigid = v_proj * m_w[:, None]
+      z_trans = z6_w[:3]
+      xi_trans = z_trans * jnp.sqrt(kT / msum_safe)
+      p_trans = m_w[:, None] * xi_trans[None, :]
+      z_rot = z6_w[3:]
+      omega_noise = _cholesky_upper_solve_3x3(I_reg, jnp.sqrt(kT) * z_rot)
+      p_rot = m_w[:, None] * jnp.cross(omega_noise[None, :], rrel)
+      noise_w = p_trans + p_rot
+      return c1 * p_rigid + c2 * noise_w
 
-    # 2. Rigid-subspace OU noise (matches _ou_noise_one_water_rigid)
-    z_trans = z6_w[:3]
-    xi_trans = z_trans * jnp.sqrt(kT / msum_safe)
-    p_trans = m_w[:, None] * xi_trans[None, :]
-    z_rot = z6_w[3:]
-    omega_noise = _cholesky_upper_solve_3x3(I_reg, jnp.sqrt(kT) * z_rot)
-    p_rot = m_w[:, None] * jnp.cross(omega_noise[None, :], rrel)
-    noise_w = p_trans + p_rot
-
-    return c1 * p_rigid + c2 * noise_w
-
-  p_water_out = dispatch_n_waters(
-    None,
-    n_w,
-    step_one_water,
-    (z6_all, r_water, m_water, p_water_in),
-  )
+    p_water_out = dispatch_n_waters(
+      None,
+      n_w,
+      step_one_water,
+      (z6_all, r_water, m_water, p_water_in),
+    )
 
   idx_flat = idx.reshape(-1)
   # Highest-frequency scatter site — this runs every integration step (the

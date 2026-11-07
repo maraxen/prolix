@@ -42,6 +42,7 @@ from prolix.api.bundle_stack import (
 )
 from prolix.api.ensemble_dedup import partition_bundles_by_shape
 from prolix.api.ensemble_dispatch import (
+    _JITTED_WHILE_CACHE,
     dispatch_n_mols,
     dispatch_n_steps,
     dispatch_n_steps_inference,
@@ -109,6 +110,12 @@ _SINGLE_INFERENCE_CACHE: dict[Any, dict[str, Any]] = {}
 
 #: Cache for multi-bundle stacked inference runners keyed by bundle identities + runtime knobs.
 _STACKED_INFERENCE_CACHE: dict[Any, dict[str, Any]] = {}
+
+#: Cache for compiled (_eval_force0_jit, _batched) functions keyed by bucket shape_spec + leaf shapes/dtypes + runtime knobs.
+_STACKED_JIT_FN_CACHE: dict[Any, tuple[Any, Any]] = {}
+
+#: Cache for canonical (neighbor_fn, seed_template) keyed by bucket size + box + cutoff/skin so stacked NeighborList shares PyTreeDef across batches.
+_STACKED_NL_SEED_CACHE: dict[Any, tuple[Any, Any]] = {}
 
 
 def _nl_target_capacity(
@@ -902,13 +909,20 @@ class EnsemblePlan:
                 ):
                     cached_stacked = cand_s
 
+            n_reals_cached = None
             if cached_stacked is not None:
                 stacked = cached_stacked["stacked"]
                 stacked_neighbor = cached_stacked["stacked_neighbor"]
+                stacked_force0 = cached_stacked.get("stacked_force0")
                 neighbor_fn = cached_stacked["neighbor_fn"]
                 _batched = cached_stacked["batched_fn"]
+                n_reals_cached = cached_stacked.get("n_reals")
             else:
                 stacked = stack_molecular_bundles(bundles)
+                n_reals_cached = [
+                    b.n_atoms if isinstance(b.n_atoms, int) else int(jnp.asarray(b.n_atoms))
+                    for b in bundles
+                ]
                 stacked_neighbor = None
                 neighbor_fn = None
                 if use_neighbor_list:
@@ -916,19 +930,140 @@ class EnsemblePlan:
                         bundles, integration_prefix, nb_cfg=nb_cfg
                     )
 
-                @jax.jit
-                def _batched(sb, sd, snb, n_steps_in):
-                    return dispatch_n_mols(
-                        plan,
+                _eval_force0_jit = None
+                _batched = None
+                jit_fn_key = None
+                if can_cache_stacked and _make_stacked_cache_key is not None:
+                    jit_fn_key = (
                         n_systems,
-                        _make_run_one(n_steps_in, host_box_vec=host_box_vec_0),
-                        sb,
-                        sd,
-                        extra_stacked=snb,
+                        jax.tree_util.tree_structure(stacked),
+                        tuple(
+                            (x.shape, x.dtype)
+                            for x in jax.tree_util.tree_leaves(stacked)
+                            if hasattr(x, "shape")
+                        ),
+                        jax.tree_util.tree_structure(stacked_neighbor)
+                        if stacked_neighbor is not None
+                        else None,
+                        tuple(
+                            (x.shape, x.dtype)
+                            for x in jax.tree_util.tree_leaves(stacked_neighbor)
+                            if hasattr(x, "shape")
+                        )
+                        if stacked_neighbor is not None
+                        else None,
+                        tuple(np.asarray(host_box_vec_0).reshape(-1).tolist())
+                        if host_box_vec_0 is not None
+                        else None,
+                        float(_host_float(getattr(bundles[0], "cutoff_distance", 9.0), 9.0)),
+                        float(_host_float(getattr(bundles[0], "pme_alpha", 0.34), 0.34)),
+                        _make_stacked_cache_key()[1:],
                     )
+                    cached_jit_pair = _STACKED_JIT_FN_CACHE.get(jit_fn_key)
+                    if cached_jit_pair is not None:
+                        _eval_force0_jit, _batched = cached_jit_pair
+
+                if _batched is None:
+                    if can_cache_stacked and use_neighbor_list:
+                        def _eval_force0_one(bundle_i, _seed_i, nbr_i=None):
+                            eff_excl = (
+                                "pre_encoded"
+                                if (
+                                    nbr_i is not None
+                                    and getattr(bundle_i, "excl_dense_indices", None) is not None
+                                )
+                                else "table"
+                            )
+                            st0, _, _, _ = self._setup_integrator(
+                                bundle_i,
+                                dt,
+                                kT,
+                                0,
+                                integration_prefix=integration_prefix,
+                                dt_unit=dt_unit,
+                                gamma=gamma,
+                                use_flash_forces=use_flash_forces,
+                                initial_neighbor=nbr_i,
+                                nb_cfg=nb_cfg,
+                                use_pallas=use_pallas,
+                                use_pallas_pme=use_pallas_pme,
+                                excl_mode=eff_excl,
+                                host_box_vec=host_box_vec_0,
+                            )
+                            return st0.force
+
+                        _eval_force0_jit = jax.jit(
+                            lambda sb_in, snb_in: dispatch_n_mols(
+                                plan,
+                                n_systems,
+                                _eval_force0_one,
+                                sb_in,
+                                jnp.zeros(n_systems, dtype=jnp.int32),
+                                extra_stacked=snb_in,
+                            )
+                        )
+
+                    @jax.jit
+                    def _batched(sb, sd, snb, sf0, n_steps_in):
+                        def _run_one_with_f0(bundle, seed_i, extra=None):
+                            if sf0 is not None and extra is not None:
+                                nbr_arg, f0_arg = extra
+                            else:
+                                nbr_arg, f0_arg = extra, None
+                            obs = observables
+                            if observables is not None:
+                                obs = _observables_for_bundle(
+                                    bundle, observables, atom_mask=bundle.atom_mask
+                                )
+                            return self._run_single_inference(
+                                bundle,
+                                n_steps_in,
+                                dt,
+                                kT,
+                                seed_i,
+                                observables=obs,
+                                integration_prefix=integration_prefix,
+                                trim_output=False,
+                                dt_unit=dt_unit,
+                                gamma=gamma,
+                                use_neighbor_list=use_neighbor_list,
+                                nl_update_every=nl_update_every,
+                                initial_neighbor=nbr_arg,
+                                use_flash_forces=use_flash_forces,
+                                nb_cfg=nb_cfg,
+                                use_pallas=use_pallas,
+                                use_pallas_pme=use_pallas_pme,
+                                host_box_vec=host_box_vec_0,
+                                precomputed_force0=f0_arg,
+                            )
+
+                        extra_arg = (
+                            (snb, sf0)
+                            if (sf0 is not None and snb is not None)
+                            else snb
+                        )
+                        return dispatch_n_mols(
+                            plan,
+                            n_systems,
+                            _run_one_with_f0,
+                            sb,
+                            sd,
+                            extra_stacked=extra_arg,
+                        )
+
+                    if jit_fn_key is not None:
+                        if len(_STACKED_JIT_FN_CACHE) >= 32:
+                            _STACKED_JIT_FN_CACHE.pop(next(iter(_STACKED_JIT_FN_CACHE)))
+                        _STACKED_JIT_FN_CACHE[jit_fn_key] = (_eval_force0_jit, _batched)
+
+                stacked_force0 = (
+                    _eval_force0_jit(stacked, stacked_neighbor)
+                    if (_eval_force0_jit is not None and use_neighbor_list)
+                    else None
+                )
 
             n_steps_arr = jnp.asarray(n_steps, dtype=jnp.int32)
-            batched = _batched(stacked, seeds, stacked_neighbor, n_steps_arr)
+            batched = _batched(stacked, seeds, stacked_neighbor, stacked_force0, n_steps_arr)
 
             if can_cache_stacked and cached_stacked is None and _make_stacked_cache_key is not None:
                 stacked_cache_key = _make_stacked_cache_key()
@@ -938,37 +1073,52 @@ class EnsemblePlan:
                     "bundles": list(bundles),
                     "stacked": stacked,
                     "stacked_neighbor": stacked_neighbor,
+                    "stacked_force0": stacked_force0,
                     "neighbor_fn": neighbor_fn,
                     "batched_fn": _batched,
+                    "n_reals": n_reals_cached,
+                    "verified_no_overflow": False,
                 }
 
             if use_neighbor_list:
                 overflow_arr = batched.observable_values.pop("_nl_did_overflow", None)
-                if overflow_arr is not None and bool(jnp.any(overflow_arr)):
-                    bumped_capacity = int(0.5 * stacked_neighbor.idx.shape[-1])
-                    retried_neighbor = self._reallocate_stacked_neighbor_seed(
-                        neighbor_fn, bundles, integration_prefix, extra_capacity=bumped_capacity
-                    )
+                already_verified = (
+                    cached_stacked is not None
+                    and bool(cached_stacked.get("verified_no_overflow", False))
+                )
+                if not already_verified and overflow_arr is not None:
+                    if bool(jnp.any(overflow_arr)):
+                        bumped_capacity = int(0.5 * stacked_neighbor.idx.shape[-1])
+                        retried_neighbor = self._reallocate_stacked_neighbor_seed(
+                            neighbor_fn, bundles, integration_prefix, extra_capacity=bumped_capacity
+                        )
+                        if cached_stacked is not None:
+                            cached_stacked["stacked_neighbor"] = retried_neighbor
+                        elif can_cache_stacked and stacked_cache_key in _STACKED_INFERENCE_CACHE:
+                            _STACKED_INFERENCE_CACHE[stacked_cache_key]["stacked_neighbor"] = (
+                                retried_neighbor
+                            )
+                        batched = _batched(
+                            stacked, seeds, retried_neighbor, stacked_force0, n_steps_arr
+                        )
+                        overflow_arr = batched.observable_values.pop("_nl_did_overflow", None)
+                        if overflow_arr is not None and bool(jnp.any(overflow_arr)):
+                            raise RuntimeError(
+                                "Stacked neighbor list overflowed even after reallocating "
+                                f"with +{bumped_capacity} extra capacity -- capacity formula "
+                                "(compute_nl_capacity) likely needs a larger safety_factor "
+                                "for this shape class."
+                            )
                     if cached_stacked is not None:
-                        cached_stacked["stacked_neighbor"] = retried_neighbor
+                        cached_stacked["verified_no_overflow"] = True
                     elif can_cache_stacked and stacked_cache_key in _STACKED_INFERENCE_CACHE:
-                        _STACKED_INFERENCE_CACHE[stacked_cache_key]["stacked_neighbor"] = (
-                            retried_neighbor
-                        )
-                    batched = _batched(stacked, seeds, retried_neighbor, n_steps_arr)
-                    overflow_arr = batched.observable_values.pop("_nl_did_overflow", None)
-                    if overflow_arr is not None and bool(jnp.any(overflow_arr)):
-                        raise RuntimeError(
-                            "Stacked neighbor list overflowed even after reallocating "
-                            f"with +{bumped_capacity} extra capacity -- capacity formula "
-                            "(compute_nl_capacity) likely needs a larger safety_factor "
-                            "for this shape class."
-                        )
+                        _STACKED_INFERENCE_CACHE[stacked_cache_key]["verified_no_overflow"] = True
             if not isinstance(n_steps, jax.core.Tracer):
                 import dataclasses
 
                 batched = dataclasses.replace(batched, n_steps=int(n_steps))
         else:
+            n_reals_cached = None
             stacked = stack_molecular_bundles(bundles)
             batched = dispatch_n_mols(
                 plan,
@@ -977,7 +1127,7 @@ class EnsemblePlan:
                 stacked,
                 seeds,
             )
-        return unstack_trajectories(batched, bundles)
+        return unstack_trajectories(batched, bundles, n_reals=n_reals_cached)
 
     @staticmethod
     def _build_stacked_neighbor_seed(
@@ -988,6 +1138,7 @@ class EnsemblePlan:
 
         import jax
         import jax.numpy as jnp
+        import numpy as np
 
         ref = bundles[0]
         box_vec = jnp.diag(ref.box)
@@ -1020,44 +1171,164 @@ class EnsemblePlan:
                 max_real = b_real
                 densest_bundle = b
 
-        densest_positions = positions_with_prefix(densest_bundle, integration_prefix)
-        neighbor_fn = nl_mod.make_neighbor_list_fn(
-            displacement_fn,
-            box_vec,
-            cutoff,
-            capacity_multiplier=cap_mult,
-            disable_cell_list=disable_cl,
-            dr_threshold=skin,
-            atom_mask=union_mask,
+        seed_cache_key = (
+            n_seed_rows,
+            seed_positions_0.dtype,
+            tuple(np.asarray(box_vec, dtype=np.float64).reshape(-1).tolist()),
+            float(cutoff),
+            float(skin),
+            float(cap_mult),
+            bool(disable_cl),
+            nl_mod.make_neighbor_list_fn,
+            _nl_target_capacity,
         )
+        cached_seed_pair = _STACKED_NL_SEED_CACHE.get(seed_cache_key)
+        if cached_seed_pair is not None and nl_mod._should_use_pallas_nl_default(None):
+            neighbor_fn, seed_template = cached_seed_pair
+            seed = seed_template
+        else:
+            densest_positions = positions_with_prefix(densest_bundle, integration_prefix)
+            neighbor_fn = nl_mod.make_neighbor_list_fn(
+                displacement_fn,
+                box_vec,
+                cutoff,
+                capacity_multiplier=cap_mult,
+                disable_cell_list=disable_cl,
+                dr_threshold=skin,
+                atom_mask=union_mask,
+            )
 
-        seed = neighbor_fn.allocate(densest_positions)
-        target_capacity = _nl_target_capacity(
-            nl_mod, n_seed_rows, box_vec, cutoff, skin
+            seed = neighbor_fn.allocate(densest_positions)
+            target_capacity = _nl_target_capacity(
+                nl_mod, n_seed_rows, box_vec, cutoff, skin
+            )
+            cap_limit = max(0, n_seed_rows - 1)
+            if getattr(seed, "cell_list_capacity", None) is not None:
+                cap_limit = min(cap_limit, 27 * int(seed.cell_list_capacity))
+            target_capacity = min(target_capacity, cap_limit)
+            extra_needed = max(0, target_capacity - int(seed.idx.shape[-1]))
+            if extra_needed > 0:
+                pad_cols = jnp.full(
+                    (n_seed_rows, extra_needed),
+                    n_seed_rows,
+                    dtype=seed.idx.dtype,
+                )
+                seed = dataclasses.replace(
+                    seed,
+                    idx=jnp.concatenate([seed.idx, pad_cols], axis=-1),
+                    max_occupancy=target_capacity,
+                )
+            seed_template = _encode_bundle_nl(seed, densest_bundle)
+            if (
+                getattr(seed_template, "cell_list_fn", None) is not None
+                and getattr(seed_template, "cell_list_capacity", None) is not None
+                and nl_mod._should_use_pallas_nl_default(None)
+            ):
+                if len(_STACKED_NL_SEED_CACHE) >= 32:
+                    _STACKED_NL_SEED_CACHE.pop(next(iter(_STACKED_NL_SEED_CACHE)))
+                _STACKED_NL_SEED_CACHE[seed_cache_key] = (neighbor_fn, seed_template)
+                seed = seed_template
+
+        all_same_nl = all(
+            b is densest_bundle
+            or (
+                b.positions is densest_bundle.positions
+                and b.atom_mask is densest_bundle.atom_mask
+                and getattr(b, "excl_dense_indices", None)
+                is getattr(densest_bundle, "excl_dense_indices", None)
+            )
+            for b in bundles
         )
-        cap_limit = max(0, n_seed_rows - 1)
-        if getattr(seed, "cell_list_capacity", None) is not None:
-            cap_limit = min(cap_limit, 27 * int(seed.cell_list_capacity))
-        target_capacity = min(target_capacity, cap_limit)
-        extra_needed = max(0, target_capacity - int(seed.idx.shape[-1]))
-        if extra_needed > 0:
-            pad_cols = jnp.full(
-                (n_seed_rows, extra_needed),
-                n_seed_rows,
-                dtype=seed.idx.dtype,
+        can_pallas_batch_seed = (
+            len(bundles) > 1
+            and getattr(seed, "cell_list_fn", None) is not None
+            and getattr(seed, "cell_list_capacity", None) is not None
+            and nl_mod._should_use_pallas_nl_default(None)
+        )
+        if can_pallas_batch_seed:
+            B_total = len(bundles)
+            B_eval = 1 if all_same_nl else B_total
+            eval_bundles = [densest_bundle] if all_same_nl else bundles
+            pos_b_seed = jnp.stack(
+                [positions_with_prefix(b, integration_prefix) for b in eval_bundles], axis=0
             )
-            seed = dataclasses.replace(
-                seed,
-                idx=jnp.concatenate([seed.idx, pad_cols], axis=-1),
-                max_occupancy=target_capacity,
+            box_b_seed = jnp.broadcast_to(box_vec[None, :], (B_eval, 3))
+            has_excl_seed = all(
+                getattr(b, "excl_dense_indices", None) is not None
+                and getattr(b, "excl_dense_scales_vdw", None) is not None
+                and getattr(b, "excl_dense_scales_elec", None) is not None
+                for b in eval_bundles
             )
+            if has_excl_seed:
+                ei_b_seed = jnp.stack([b.excl_dense_indices[:n_seed_rows] for b in eval_bundles], axis=0)
+                ev_b_seed = jnp.stack(
+                    [b.excl_dense_scales_vdw[:n_seed_rows] for b in eval_bundles], axis=0
+                )
+                ee_b_seed = jnp.stack(
+                    [b.excl_dense_scales_elec[:n_seed_rows] for b in eval_bundles], axis=0
+                )
+            else:
+                ei_b_seed = jnp.full((B_eval, n_seed_rows, 1), -1, dtype=jnp.int32)
+                ev_b_seed = jnp.ones((B_eval, n_seed_rows, 1), dtype=jnp.float32)
+                ee_b_seed = jnp.ones((B_eval, n_seed_rows, 1), dtype=jnp.float32)
+            am_b_seed = jnp.stack([b.atom_mask[:n_seed_rows] for b in eval_bundles], axis=0)
+            r_tot_seed = float(cutoff) + float(skin)
+            cell_size_seed = (
+                float(seed.cell_size)
+                if getattr(seed, "cell_size", None) is not None
+                else r_tot_seed
+            )
+            cell_cap_seed = int(seed.cell_list_capacity)
+            max_occ_seed = int(seed.idx.shape[-1])
+            grid_dims_seed = nl_mod._compute_static_grid_dims(box_vec, cell_size_seed)
+            p_w_b_seed = jnp.mod(pos_b_seed, box_b_seed[:, None, :])
+            idx_b_seed, occ_b_seed = nl_mod._pallas_prune_and_encode_cell_list_batch(
+                B_eval,
+                (True, True, True, True, True),
+                p_w_b_seed,
+                box_b_seed,
+                ei_b_seed,
+                ev_b_seed,
+                ee_b_seed,
+                cell_size=cell_size_seed,
+                cell_capacity=cell_cap_seed,
+                max_occupancy=max_occ_seed,
+                r_cutoff=r_tot_seed,
+                encode_exclusions=has_excl_seed,
+                interpret=(jax.default_backend() == "cpu"),
+                grid_dims=grid_dims_seed,
+                atom_mask=am_b_seed,
+                mask_batched=True,
+            )
+            if all_same_nl and B_total > 1:
+                idx_b_seed = jnp.broadcast_to(idx_b_seed, (B_total, n_seed_rows, max_occ_seed))
+                occ_b_seed = jnp.broadcast_to(occ_b_seed, (B_total,))
+                p_w_b_seed = jnp.broadcast_to(p_w_b_seed, (B_total, n_seed_rows, 3))
+            base_stacked = jax.tree.map(
+                lambda *xs: jnp.stack(xs, axis=0), *([seed] * B_total)
+            )
+            overflow_bit_s = jnp.uint8(
+                nl_mod.partition.PartitionErrorCode.NEIGHBOR_LIST_OVERFLOW
+            )
+            err_b_seed = jnp.where(
+                occ_b_seed > max_occ_seed,
+                base_stacked.error.code | overflow_bit_s,
+                base_stacked.error.code,
+            )
+            stacked_neighbor = dataclasses.replace(
+                base_stacked,
+                idx=idx_b_seed,
+                reference_position=p_w_b_seed.astype(base_stacked.reference_position.dtype),
+                error=nl_mod.partition.PartitionError(err_b_seed),
+            )
+            return stacked_neighbor, neighbor_fn
+
         seed_invalidated = dataclasses.replace(
             seed,
             reference_position=seed.reference_position
             + jnp.asarray(0.5, dtype=seed.reference_position.dtype)
             * jnp.asarray(box_vec, dtype=seed.reference_position.dtype),
         )
-
         densest_nl = _encode_bundle_nl(seed, densest_bundle)
         per_bundle = []
         for b in bundles:
@@ -1131,6 +1402,7 @@ class EnsemblePlan:
         use_pallas_pme: bool | None = None,
         excl_mode: str = "table",
         host_box_vec: Any = None,
+        precomputed_force0: Any = None,
     ) -> tuple[Any, Any, Any, Any]:
         """Shared settle_langevin init. Returns (state, apply_fn, dt, kT)."""
         import dataclasses
@@ -1201,34 +1473,12 @@ class EnsemblePlan:
         if integration_prefix is not None:
             positions_init = positions_with_prefix(bundle, integration_prefix)
             masses = masses_with_prefix(bundle, integration_prefix)
-            # bundle.water_indices is already bucket-sized (static shape from
-            # shape_spec.water_bucket_idx) — no host int() needed, unlike
-            # water_indices_for_integration below which slices to the real
-            # (traced) count and is unsafe under vmap. water_mask marks real
-            # vs. padding rows so settle_langevin can redirect padding
-            # scatters away from real atoms. See B1-SETTLE-STACK
-            # (.praxia/docs/specs/260715_b1-settle-stack.md).
-            #
-            # WATER_BUCKETS has no zero-size entry (smallest is 8), so a
-            # bundle with zero real water molecules still gets
-            # water_indices.shape[0] == 8 (all masked-off placeholder rows).
-            # settle_langevin's "no water -> plain Langevin" fallback keys
-            # off water_indices.shape[0] == 0, which can therefore never
-            # trigger here -- silently running the SETTLE rigid-body
-            # integrator (different PRNG-consumption pattern) instead of
-            # plain Langevin for non-water systems (debt 841). shape_spec is
-            # this bundle's static field (host-known, vmap-safe even when
-            # this runs under vmap), so checking it here is safe.
             if bundle.shape_spec.has_real_water:
                 water_indices = bundle.water_indices
                 water_mask = bundle.water_mask
             else:
                 water_indices = None
                 water_mask = None
-            # Padding atoms carry unit mass (masses_with_prefix), not zero, so
-            # they draw genuine nonzero initial momentum -- atom_mask lets the
-            # no-water fallback re-center momentum using only real atoms
-            # (debt 841; see settle_langevin's atom_mask docstring).
             atom_mask = bundle.atom_mask[:integration_prefix]
         else:
             positions_init = active_positions(bundle)
@@ -1248,21 +1498,7 @@ class EnsemblePlan:
             project_ou_momentum_rigid=True,
             water_mask=water_mask,
             atom_mask=atom_mask,
-            # #4971: this MUST come from the same predicate as the shift_fn above.
-            # settle_langevin's `box` defaults to None, and every PBC protection in
-            # settle.py is gated on it being non-None -- the per-atom unwrap, both
-            # minimum-image corrections on the SETTLE displacement, and the
-            # post-solve re-wrap. Omitting it while shift_fn wraps atoms into
-            # [0, box) leaves water molecules straddling a face permanently split
-            # between two images, and SETTLE then fits a rigid body to an object up
-            # to a box across and launches it.
             box=pbc_box_for_bundle(bundle),
-            # use_flash_forces=True means energy_or_force_fn is
-            # force_fn_from_bundle's already-force-shaped output -- tell
-            # settle_langevin so it skips jax_md.quantity.canonicalize_force's
-            # unprotected internal eval_shape probe (crashes on PME grid-sizing
-            # code touching a bundle's static box_size field; see settle.py's
-            # _make_settle_compatible_force_fn docstring for the full mechanism).
             is_force_shaped=use_flash_forces,
             use_pallas=use_pallas,
         )
@@ -1271,6 +1507,8 @@ class EnsemblePlan:
         init_kwargs: dict[str, Any] = {"kT": kT_s}
         if initial_neighbor is not None:
             init_kwargs["neighbor"] = initial_neighbor
+        if precomputed_force0 is not None:
+            init_kwargs["precomputed_force"] = precomputed_force0
         state = init_fn(key, positions_init, **init_kwargs)
         return state, apply_fn, dt_s, kT_s
 
@@ -1404,23 +1642,9 @@ class EnsemblePlan:
         use_pallas: bool | None = None,
         use_pallas_pme: bool | None = None,
         host_box_vec: Any = None,
+        precomputed_force0: Any = None,
     ) -> Trajectory:
-        """Carry-only MD via while_loop; Trajectory holds final frame only.
-
-        Args:
-            initial_neighbor: debt 802 -- a pre-allocated ``jax_md.NeighborList``
-                supplied by ``_run_stacked_dispatch`` when this call happens
-                *inside* a vmapped/jitted context (``neighbor_fn.allocate()``
-                is host-only and cannot run on a traced position array, so
-                the stacked path must allocate outside and pass the result
-                in). When given, internal allocation and the
-                overflow-then-reallocate retry are both skipped -- overflow
-                is instead surfaced via
-                ``observable_values["_nl_did_overflow"]`` for the caller to
-                check and retry the whole stack if needed. ``None`` (default)
-                preserves the original single-bundle behavior exactly
-                (internal allocation + retry, as verified in Phase 6 steps 4-5).
-        """
+        """Carry-only MD via while_loop; Trajectory holds final frame only."""
         import dataclasses
         import os
 
@@ -1437,11 +1661,6 @@ class EnsemblePlan:
                     "use_neighbor_list=True requires a periodic bundle (box_size)"
                 )
             if integration_prefix is None:
-                # Ghost atoms (debt 772's uniform lattice) must be present for
-                # the shape-class NL capacity formula (compute_nl_capacity) to
-                # apply -- default to the bundle's full padded/bucket size
-                # rather than the real-atom-only slice active_positions()
-                # would otherwise give _setup_integrator.
                 integration_prefix = int(bundle.positions.shape[0])
 
         can_cache = (
@@ -1506,6 +1725,34 @@ class EnsemblePlan:
             cand = _SINGLE_INFERENCE_CACHE.get(cache_key)
             if cand is not None and cand.get("bundle") is bundle:
                 cached_entry = cand
+
+        # MK-50: Single-JIT fast path for warm B=1 cached neighbor-list inference.
+        # Executes fast_reseed_fn + while_loop + real-atom slice inside one @jax.jit
+        # without synchronous mid-run host transfers (bool(did_overflow), int(n_atoms)).
+        if (
+            cached_entry is not None
+            and not observables
+            and use_neighbor_list
+            and trim_output
+            and not isinstance(n_steps, jax.core.Tracer)
+            and cached_entry.get("fused_nl_run_fn") is not None
+            and bool(cached_entry.get("verified_no_overflow", False))
+        ):
+            _JITTED_WHILE_CACHE[(cached_entry["nl_step_fn"], None)] = cached_entry["fused_nl_run_fn"]
+            positions_array, _ = cached_entry["fused_nl_run_fn"](
+                jnp.asarray(seed, dtype=jnp.uint32),
+                cached_entry["kT_s"],
+                cached_entry["nbr0"],
+                jnp.asarray(n_steps, dtype=jnp.int32),
+            )
+            return Trajectory(
+                positions=positions_array,
+                observable_values={
+                    "_nl_capacity": cached_entry["nl_capacity"],
+                    "_nl_retry_count": 0,
+                },
+                n_steps=int(n_steps),
+            )
 
         neighbor_fn = None
         target_capacity = 0
@@ -1593,6 +1840,7 @@ class EnsemblePlan:
                 use_pallas_pme=use_pallas_pme,
                 excl_mode=eff_excl_mode,
                 host_box_vec=host_box_vec,
+                precomputed_force0=precomputed_force0,
             )
 
         sink_cm = None
@@ -1921,12 +2169,6 @@ class EnsemblePlan:
                         langevin_state, neighbor=new_neighbor, kT=kT_s, dt=dt_s
                     )
                     if not getattr(apply_fn, "_pallas_settle_pins_ghosts", False):
-                        # Ghost-position/momentum pinning (debt 772's deferred piece):
-                        # settle.py's O-step has no atom_mask awareness, so ghosts
-                        # would otherwise random-walk off their fixed NL-capacity
-                        # lattice. Masking happens here, at the dispatch layer,
-                        # outside settle.py's validated internals -- matches the
-                        # existing batched_simulate.py precedent (equilibrate_single).
                         new_R = jnp.where(
                             pad_mask_3d,
                             _integrator_positions(new_langevin_state),
@@ -1951,10 +2193,17 @@ class EnsemblePlan:
                 fast_reseed_fn = self._build_fast_reseed_fn(
                     bundle, state, integration_prefix=integration_prefix, gamma=gamma
                 )
-                # Warm up fast_reseed_fn during the initial call and use its output
-                # so Call 1 and subsequent cached calls pass identical state leaf
-                # metadata (dtype/weak_type/sharding) into jitted_while.
-                state = fast_reseed_fn(jnp.asarray(seed, dtype=jnp.uint32), kT_s)
+                raw_n_b = bundle.n_atoms
+                n_real_cached = raw_n_b if isinstance(raw_n_b, int) else int(jnp.asarray(raw_n_b))
+
+                @jax.jit
+                def _fused_nl_run(seed_u32: Any, kT_val: Any, nbr_in: Any, n_steps_i32: Any) -> Any:
+                    st_reseeded = fast_reseed_fn(seed_u32, kT_val)
+                    init_p = _integrator_positions(st_reseeded)
+                    c0 = _NLDispatchCarry(st_reseeded, nbr_in, jnp.array(False), init_p)
+                    fc = dispatch_n_steps_inference(_nl_step_fn, c0, n_steps_i32)
+                    return fc.langevin_state.position[None, :n_real_cached, :], fc.did_overflow
+
                 if len(_SINGLE_INFERENCE_CACHE) >= 8:
                     _SINGLE_INFERENCE_CACHE.pop(next(iter(_SINGLE_INFERENCE_CACHE)))
                 cached_entry = {
@@ -1962,17 +2211,49 @@ class EnsemblePlan:
                     "nbr0": nbr0,
                     "neighbor_fn": neighbor_fn,
                     "target_capacity": target_capacity,
+                    "nl_capacity": int(nbr0.idx.shape[-1]),
+                    "n_real": n_real_cached,
                     "cutoff": cutoff,
                     "skin": skin,
                     "apply_fn": apply_fn,
                     "dt_s": dt_s,
                     "kT_s": kT_s,
                     "fast_reseed_fn": fast_reseed_fn,
+                    "fused_nl_run_fn": _fused_nl_run,
+                    "verified_no_overflow": False,
                     "nl_step_fn": _nl_step_fn,
                     "step_fn": None,
                 }
                 cache_key = _make_cache_key()
                 _SINGLE_INFERENCE_CACHE[cache_key] = cached_entry
+
+                if (
+                    not observables
+                    and trim_output
+                    and initial_neighbor is None
+                    and not isinstance(n_steps, jax.core.Tracer)
+                ):
+                    if len(_JITTED_WHILE_CACHE) >= 128:
+                        _JITTED_WHILE_CACHE.pop(next(iter(_JITTED_WHILE_CACHE)))
+                    _JITTED_WHILE_CACHE[(_nl_step_fn, None)] = _fused_nl_run
+                    positions_array, did_overflow_1 = _fused_nl_run(
+                        jnp.asarray(seed, dtype=jnp.uint32),
+                        kT_s,
+                        nbr0,
+                        jnp.asarray(n_steps, dtype=jnp.int32),
+                    )
+                    if not bool(did_overflow_1):
+                        cached_entry["verified_no_overflow"] = True
+                        return Trajectory(
+                            positions=positions_array,
+                            observable_values={
+                                "_nl_capacity": cached_entry["nl_capacity"],
+                                "_nl_retry_count": 0,
+                            },
+                            n_steps=int(n_steps),
+                        )
+
+                state = fast_reseed_fn(jnp.asarray(seed, dtype=jnp.uint32), kT_s)
 
             init_pos = _integrator_positions(state)
             init_carry = _NLDispatchCarry(state, nbr0, jnp.array(False), init_pos)
@@ -1980,26 +2261,12 @@ class EnsemblePlan:
                 _nl_step_fn, init_carry, n_steps
             )
             if initial_neighbor is not None:
-                # debt 802 (stacked/vmapped path): overflow retry is host-side
-                # in _run_stacked_dispatch -- neighbor_fn.allocate() cannot run
-                # on a tracer.
                 nl_overflow_for_caller = final_carry.did_overflow
             elif neighbor_fn is not None and bool(final_carry.did_overflow):
-                # Size every retry from `state` -- the configuration the scan
-                # actually restarts from. The old code sized from the overflowed
-                # trajectory's *final* positions, which were produced by a run with
-                # a known-broken neighbor list, and then restarted from `state`
-                # anyway: capacity fitted to coordinates it would never see.
-                #
-                # Grow geometrically over a bounded number of attempts rather than
-                # making one fixed +50% bump and giving up. At DHFR scale that
-                # single bump added 271 to an already-undersized 542 and still
-                # overflowed (job 21835473).
                 retry_positions = _integrator_positions(state)
                 base_capacity = int(nbr0.idx.shape[-1])
                 retried_neighbor = nbr0
                 for attempt in range(1, _NL_MAX_REALLOC_ATTEMPTS + 1):
-                    # total capacity ~= base * 2**attempt
                     bumped_capacity = base_capacity * (2**attempt - 1)
                     retried_neighbor = _encode_bundle_nl(
                         neighbor_fn.allocate(
@@ -2034,6 +2301,10 @@ class EnsemblePlan:
                 nl_capacity_for_caller = int(retried_neighbor.idx.shape[-1])
                 if cached_entry is not None:
                     cached_entry["nbr0"] = retried_neighbor
+                    cached_entry["nl_capacity"] = nl_capacity_for_caller
+                    cached_entry["verified_no_overflow"] = True
+            elif cached_entry is not None:
+                cached_entry["verified_no_overflow"] = True
             state = final_carry.langevin_state
         else:
             if cached_entry is not None and cached_entry.get("step_fn") is not None:
@@ -2047,6 +2318,10 @@ class EnsemblePlan:
                     fast_reseed_fn = self._build_fast_reseed_fn(
                         bundle, state, integration_prefix=integration_prefix, gamma=gamma
                     )
+                    raw_n_b = bundle.n_atoms
+                    n_real_cached = (
+                        raw_n_b if isinstance(raw_n_b, int) else int(jnp.asarray(raw_n_b))
+                    )
                     state = fast_reseed_fn(jnp.asarray(seed, dtype=jnp.uint32), kT_s)
                     if len(_SINGLE_INFERENCE_CACHE) >= 8:
                         _SINGLE_INFERENCE_CACHE.pop(next(iter(_SINGLE_INFERENCE_CACHE)))
@@ -2055,12 +2330,16 @@ class EnsemblePlan:
                         "nbr0": None,
                         "neighbor_fn": None,
                         "target_capacity": 0,
+                        "nl_capacity": 0,
+                        "n_real": n_real_cached,
                         "cutoff": cutoff,
                         "skin": skin,
                         "apply_fn": apply_fn,
                         "dt_s": dt_s,
                         "kT_s": kT_s,
                         "fast_reseed_fn": fast_reseed_fn,
+                        "fused_nl_run_fn": None,
+                        "verified_no_overflow": True,
                         "nl_step_fn": None,
                         "step_fn": step_fn,
                     }
@@ -2077,16 +2356,16 @@ class EnsemblePlan:
 
         # Final frame only: (1, n_atoms, 3)
         final_pos = state.position
+        n_real_opt = cached_entry.get("n_real") if cached_entry is not None else None
         if trim_output:
-            # trim expects (steps, atoms, 3)
             stacked = final_pos[None, ...]
-            stacked = trim_trajectory_positions(stacked, bundle)
+            stacked = trim_trajectory_positions(stacked, bundle, n_real=n_real_opt)
             positions_array = stacked
         else:
             n_active = (
                 integration_prefix
                 if integration_prefix is not None
-                else int(jnp.asarray(bundle.n_atoms))
+                else (n_real_opt if n_real_opt is not None else int(jnp.asarray(bundle.n_atoms)))
             )
             positions_array = final_pos[None, :n_active, :]
 
@@ -2097,11 +2376,6 @@ class EnsemblePlan:
         if nl_overflow_for_caller is not None:
             observable_values["_nl_did_overflow"] = nl_overflow_for_caller
         if nl_capacity_for_caller is not None:
-            # Capacity actually in force, and how many host-side reallocations it
-            # took to get there. A benchmark that times plan.run() must treat a
-            # non-zero retry count as a failed measurement: the overflow is only
-            # detected after the full scan completes, so the timed region contains
-            # a discarded scan plus the retry (roughly 2x the true per-step cost).
             observable_values["_nl_capacity"] = nl_capacity_for_caller
             observable_values["_nl_retry_count"] = nl_retry_count
 

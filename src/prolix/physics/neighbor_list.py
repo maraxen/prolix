@@ -13,6 +13,7 @@ import numpy as np
 from jax._src.pallas.primitives import load as _pl_load
 from jax._src.pallas.primitives import store as _pl_store
 from jax.experimental import pallas as pl
+from jax.experimental.pallas import triton as plt
 from jax_md import partition, space, util
 
 from prolix.compat import system_params_to_protein
@@ -625,9 +626,9 @@ def map_exclusions_to_dense_padded(
   N = exclusion_spec.n_atoms
 
   # Initialize with -1 (invalid index)
-  excl_indices = jnp.full((N, max_exclusions), -1, dtype=jnp.int32)
-  scales_vdw = jnp.ones((N, max_exclusions), dtype=jnp.float32)
-  scales_elec = jnp.ones((N, max_exclusions), dtype=jnp.float32)
+  jnp.full((N, max_exclusions), -1, dtype=jnp.int32)
+  jnp.ones((N, max_exclusions), dtype=jnp.float32)
+  jnp.ones((N, max_exclusions), dtype=jnp.float32)
 
   # Helper to scatter pairs into the arrays
   # Since we can't use dynamic loops easily in JAX to fill this without scan,
@@ -1226,6 +1227,72 @@ def _build_stencil_cell_lut_np(grid_dims_static: tuple[int, int, int]) -> np.nda
     return lut.reshape(-1)
 
 
+@functools.lru_cache(maxsize=64)
+def _make_pallas_bin_cells_kernel(B: int, N: int, G_cells: int, C: int, BLOCK_BIN: int = 128):
+    """MK-52: 2D-grid ``(B, cdiv(N, 128))`` Pallas atomic 3D cell-list binning kernel.
+
+    Bins atoms in O(N) via ``plt.atomic_add`` on ``cell_counts`` and exits in O(1)
+    for replicas where ``rebuild_mask[b] == False``.
+    """
+
+    def _bin_kernel(
+        cell_id_ref,
+        px_ref,
+        py_ref,
+        pz_ref,
+        reb_ref,
+        id_init_ref,
+        x_init_ref,
+        y_init_ref,
+        z_init_ref,
+        counts_init_ref,
+        id_out_ref,
+        x_out_ref,
+        y_out_ref,
+        z_out_ref,
+        counts_out_ref,
+    ):
+        del id_init_ref, x_init_ref, y_init_ref, z_init_ref, counts_init_ref
+        b_id = pl.program_id(0)
+        pid = pl.program_id(1)
+        reb_val = _pl_load(reb_ref, (b_id,))
+
+        def _do_bin(_):
+            offs = pid * BLOCK_BIN + jnp.arange(BLOCK_BIN, dtype=jnp.int32)
+            in_bounds = offs < jnp.int32(N)
+            base_atom = b_id * N + offs
+            c_i = _pl_load(cell_id_ref, (base_atom,), mask=in_bounds, other=jnp.int32(G_cells))
+            valid_cell = in_bounds & (c_i >= jnp.int32(0)) & (c_i < jnp.int32(G_cells))
+            has_any = jnp.max(valid_cell.astype(jnp.int32)) > jnp.int32(0)
+
+            def _scatter_active(_):
+                zero_f = jnp.float32(0.0)
+                px_i = _pl_load(px_ref, (base_atom,), mask=valid_cell, other=zero_f)
+                py_i = _pl_load(py_ref, (base_atom,), mask=valid_cell, other=zero_f)
+                pz_i = _pl_load(pz_ref, (base_atom,), mask=valid_cell, other=zero_f)
+                safe_c = jnp.where(valid_cell, c_i, jnp.int32(G_cells))
+                count_idx = b_id * (G_cells + 1) + safe_c
+                ones = jnp.ones((BLOCK_BIN,), dtype=jnp.int32)
+                slot = plt.atomic_add(counts_out_ref, (count_idx,), ones, mask=valid_cell)
+                can_store = valid_cell & (slot >= jnp.int32(0)) & (slot < jnp.int32(C))
+                dummy_dest = jnp.int32(B * G_cells * C)
+                dest = jnp.where(
+                    can_store,
+                    b_id * (G_cells * C) + safe_c * C + slot,
+                    dummy_dest,
+                )
+                _pl_store(id_out_ref, (dest,), offs, mask=can_store)
+                _pl_store(x_out_ref, (dest,), px_i, mask=can_store)
+                _pl_store(y_out_ref, (dest,), py_i, mask=can_store)
+                _pl_store(z_out_ref, (dest,), pz_i, mask=can_store)
+
+            jax.lax.cond(has_any, _scatter_active, lambda _: None, None)
+
+        jax.lax.cond(reb_val > jnp.int32(0), _do_bin, lambda _: None, None)
+
+    return _bin_kernel
+
+
 def _build_cell_stencil_buffers_batched(
     position_b: Array,
     box_b: Array,
@@ -1234,12 +1301,13 @@ def _build_cell_stencil_buffers_batched(
     grid_dims_static: tuple[int, int, int],
     atom_mask_b: Array | None = None,
     rebuild_mask_b: Array | None = None,
+    interpret: bool = True,
 ) -> tuple[Array, Array, Array, Array, Array, Array, int]:
     """Bin ``(B, N, 3)`` positions into compact ``(B, G_cells, C)`` L2-resident cell buffers.
 
     When ``atom_mask_b`` is provided, ghost padding atoms (``~atom_mask_b``) are assigned
     sentinel cell ID ``G_cells`` and excluded from all 3D cell buffers.
-    When ``rebuild_mask_b`` is provided (MK-47), replicas with ``~rebuild_mask_b[b]`` also
+    When ``rebuild_mask_b`` is provided (MK-47 / MK-52), replicas with ``~rebuild_mask_b[b]`` also
     receive sentinel cell ID ``G_cells`` for all atoms so their CTAs exit in O(1).
     """
     B, N, _ = position_b.shape
@@ -1268,49 +1336,108 @@ def _build_cell_stencil_buffers_batched(
     if rebuild_mask_b is not None:
         reb_bool = jnp.asarray(rebuild_mask_b, dtype=jnp.bool_).reshape(B, 1)
         cell_id = jnp.where(reb_bool, cell_id, jnp.int32(G_cells))
+        reb_i32 = reb_bool[:, 0].astype(jnp.int32)
+    else:
+        reb_i32 = jnp.ones((B,), dtype=jnp.int32)
 
-    def _bin_single(c_id: Array, pos_s: Array) -> tuple[Array, Array, Array, Array, Array]:
-        if N == 0:
-            return (
-                jnp.full((G_cells * C,), N, dtype=jnp.int32),
-                jnp.zeros((G_cells * C,), dtype=jnp.float32),
-                jnp.zeros((G_cells * C,), dtype=jnp.float32),
-                jnp.zeros((G_cells * C,), dtype=jnp.float32),
-                jnp.zeros((G_cells + 1,), dtype=jnp.int32),
-            )
-        order = jnp.argsort(c_id).astype(jnp.int32)
-        sorted_c = c_id[order]
-        idx_in_n = jnp.arange(N, dtype=jnp.int32)
-        is_start = jnp.concatenate([jnp.array([True]), sorted_c[1:] != sorted_c[:-1]])
-        is_end = jnp.concatenate([sorted_c[:-1] != sorted_c[1:], jnp.array([True])])
-
-        start_dest = jnp.where(is_start, sorted_c, jnp.int32(G_cells))
-        cell_start = jnp.zeros((G_cells + 1,), dtype=jnp.int32).at[start_dest].set(idx_in_n)
-        group_start = cell_start[sorted_c]
-        slot = idx_in_n - group_start
-
-        is_real_cell = sorted_c < jnp.int32(G_cells)
-        valid_slot = (slot < C) & is_real_cell
-        flat_dest = jnp.where(valid_slot, sorted_c * C + slot, jnp.int32(G_cells * C))
-
-        buf_id = jnp.full((G_cells * C + 1,), N, dtype=jnp.int32).at[flat_dest].set(order)[:-1]
-        pos_sorted = pos_s[order]
-        buf_x = jnp.zeros((G_cells * C + 1,), dtype=jnp.float32).at[flat_dest].set(pos_sorted[:, 0])[:-1]
-        buf_y = jnp.zeros((G_cells * C + 1,), dtype=jnp.float32).at[flat_dest].set(pos_sorted[:, 1])[:-1]
-        buf_z = jnp.zeros((G_cells * C + 1,), dtype=jnp.float32).at[flat_dest].set(pos_sorted[:, 2])[:-1]
-
-        end_dest = jnp.where(is_end & is_real_cell, sorted_c, jnp.int32(G_cells))
-        cell_counts = (
-            jnp.zeros((G_cells + 1,), dtype=jnp.int32)
-            .at[end_dest]
-            .set(jnp.minimum(slot + jnp.int32(1), jnp.int32(C)))
-            .at[G_cells]
+    if not interpret and N > 0 and not in_export_context():
+        BLOCK_BIN = 128
+        n_bin_blocks = max(1, (N + BLOCK_BIN - 1) // BLOCK_BIN)
+        bin_kernel = _make_pallas_bin_cells_kernel(B, N, G_cells, C, BLOCK_BIN)
+        total_slots = B * G_cells * C + 1
+        id_init = jnp.full((total_slots,), N, dtype=jnp.int32)
+        x_init = jnp.zeros((total_slots,), dtype=jnp.float32)
+        y_init = jnp.zeros((total_slots,), dtype=jnp.float32)
+        z_init = jnp.zeros((total_slots,), dtype=jnp.float32)
+        counts_init = jnp.zeros((B * (G_cells + 1),), dtype=jnp.int32)
+        any_spec = pl.BlockSpec(memory_space=pl.ANY)
+        out_shapes = (
+            jax.ShapeDtypeStruct((total_slots,), jnp.int32),
+            jax.ShapeDtypeStruct((total_slots,), jnp.float32),
+            jax.ShapeDtypeStruct((total_slots,), jnp.float32),
+            jax.ShapeDtypeStruct((total_slots,), jnp.float32),
+            jax.ShapeDtypeStruct((B * (G_cells + 1),), jnp.int32),
+        )
+        id_flat, x_flat, y_flat, z_flat, counts_flat = pl.pallas_call(
+            bin_kernel,
+            out_shape=out_shapes,
+            in_specs=[any_spec] * 10,
+            out_specs=[any_spec] * 5,
+            grid=(B, n_bin_blocks),
+            input_output_aliases={5: 0, 6: 1, 7: 2, 8: 3, 9: 4},
+            interpret=False,
+            compiler_params=resolve_pallas_compiler_params("cell_prune", grid_blocks=B * n_bin_blocks),
+            name="pallas_bin_cells_batch",
+        )(
+            cell_id.reshape(B * N),
+            pos_wrapped[:, :, 0].astype(jnp.float32).reshape(B * N),
+            pos_wrapped[:, :, 1].astype(jnp.float32).reshape(B * N),
+            pos_wrapped[:, :, 2].astype(jnp.float32).reshape(B * N),
+            reb_i32,
+            id_init,
+            x_init,
+            y_init,
+            z_init,
+            counts_init,
+        )
+        cell_atom_b = id_flat[:-1].reshape((B, G_cells * C))
+        cell_x_b = x_flat[:-1].reshape((B, G_cells * C))
+        cell_y_b = y_flat[:-1].reshape((B, G_cells * C))
+        cell_z_b = z_flat[:-1].reshape((B, G_cells * C))
+        cell_counts_b = (
+            jnp.minimum(counts_flat.reshape((B, G_cells + 1)), jnp.int32(C))
+            .at[:, G_cells]
             .set(jnp.int32(0))
         )
-        return buf_id, buf_x, buf_y, buf_z, cell_counts
+        return cell_id, cell_atom_b, cell_x_b, cell_y_b, cell_z_b, cell_counts_b, G_cells
+
+    def _bin_single(c_id: Array, pos_s: Array, reb_flag: Array) -> tuple[Array, Array, Array, Array, Array]:
+        empty_res = (
+            jnp.full((G_cells * C,), N, dtype=jnp.int32),
+            jnp.zeros((G_cells * C,), dtype=jnp.float32),
+            jnp.zeros((G_cells * C,), dtype=jnp.float32),
+            jnp.zeros((G_cells * C,), dtype=jnp.float32),
+            jnp.zeros((G_cells + 1,), dtype=jnp.int32),
+        )
+        if N == 0:
+            return empty_res
+
+        def _do_argsort(_):
+            order = jnp.argsort(c_id).astype(jnp.int32)
+            sorted_c = c_id[order]
+            idx_in_n = jnp.arange(N, dtype=jnp.int32)
+            is_start = jnp.concatenate([jnp.array([True]), sorted_c[1:] != sorted_c[:-1]])
+            is_end = jnp.concatenate([sorted_c[:-1] != sorted_c[1:], jnp.array([True])])
+
+            start_dest = jnp.where(is_start, sorted_c, jnp.int32(G_cells))
+            cell_start = jnp.zeros((G_cells + 1,), dtype=jnp.int32).at[start_dest].set(idx_in_n)
+            group_start = cell_start[sorted_c]
+            slot = idx_in_n - group_start
+
+            is_real_cell = sorted_c < jnp.int32(G_cells)
+            valid_slot = (slot < C) & is_real_cell
+            flat_dest = jnp.where(valid_slot, sorted_c * C + slot, jnp.int32(G_cells * C))
+
+            buf_id = jnp.full((G_cells * C + 1,), N, dtype=jnp.int32).at[flat_dest].set(order)[:-1]
+            pos_sorted = pos_s[order].astype(jnp.float32)
+            buf_x = jnp.zeros((G_cells * C + 1,), dtype=jnp.float32).at[flat_dest].set(pos_sorted[:, 0])[:-1]
+            buf_y = jnp.zeros((G_cells * C + 1,), dtype=jnp.float32).at[flat_dest].set(pos_sorted[:, 1])[:-1]
+            buf_z = jnp.zeros((G_cells * C + 1,), dtype=jnp.float32).at[flat_dest].set(pos_sorted[:, 2])[:-1]
+
+            end_dest = jnp.where(is_end & is_real_cell, sorted_c, jnp.int32(G_cells))
+            cell_counts = (
+                jnp.zeros((G_cells + 1,), dtype=jnp.int32)
+                .at[end_dest]
+                .set(jnp.minimum(slot + jnp.int32(1), jnp.int32(C)))
+                .at[G_cells]
+                .set(jnp.int32(0))
+            )
+            return buf_id, buf_x, buf_y, buf_z, cell_counts
+
+        return jax.lax.cond(reb_flag > jnp.int32(0), _do_argsort, lambda _: empty_res, None)
 
     cell_atom_b, cell_x_b, cell_y_b, cell_z_b, cell_counts_b = jax.vmap(_bin_single)(
-        cell_id, pos_wrapped
+        cell_id, pos_wrapped, reb_i32
     )
     return cell_id, cell_atom_b, cell_x_b, cell_y_b, cell_z_b, cell_counts_b, G_cells
 
@@ -1327,6 +1454,7 @@ def _make_prune_and_encode_kernel(
     B_excl: int,
     r_sq_max_f: float,
     encode_exclusions: bool,
+    use_scratch_slot: bool = False,
 ):
     """Build Pallas v3.0 (MK-47) kernel: L2-cached cell lookup, dynamic count-bounded tiling, gated exclusion match, and O(1) ghost/non-rebuilding CTA skip."""
     BLOCK_C = 64
@@ -1394,7 +1522,7 @@ def _make_prune_and_encode_kernel(
             base_b_counts = b_id * (G_cells + 1)
             base_c_lut = c_i * 27
             base_nbr_row = base_atom * K
-            dummy_nbr_slot = jnp.int32(B * N * K)
+            dummy_nbr_slot = jnp.int32(B * N * K) if use_scratch_slot else jnp.int32(0)
 
             def _stencil_body(s_idx, count_acc):
                 n_cell = _pl_load(stencil_lut_ref, (base_c_lut + s_idx,))
@@ -1535,7 +1663,14 @@ def _pallas_prune_and_encode_cell_list_batch(
         cell_counts_b,
         G_cells,
     ) = _build_cell_stencil_buffers_batched(
-        pos_f32, bx_3, float(cell_size), C_pad, g_dims, atom_mask_b=mask_b, rebuild_mask_b=rebuild_mask
+        pos_f32,
+        bx_3,
+        float(cell_size),
+        C_pad,
+        g_dims,
+        atom_mask_b=mask_b,
+        rebuild_mask_b=rebuild_mask,
+        interpret=interpret,
     )
 
     stencil_lut_flat = jnp.asarray(_build_stencil_cell_lut_np(g_dims), dtype=jnp.int32)
@@ -1592,14 +1727,23 @@ def _pallas_prune_and_encode_cell_list_batch(
         excl_tag_flat = jnp.zeros((M_BLOCK,), dtype=jnp.int32)
         do_encode = False
 
-    if old_idx is not None:
-        nbr_init_flat = jnp.pad(
-            jnp.asarray(old_idx, dtype=jnp.int32).reshape(B * N * K),
-            (0, 1),
-            constant_values=N,
-        )
+    use_scratch_slot = bool(interpret)
+    if use_scratch_slot:
+        if old_idx is not None:
+            nbr_init_flat = jnp.pad(
+                jnp.asarray(old_idx, dtype=jnp.int32).reshape(B * N * K),
+                (0, 1),
+                constant_values=N,
+            )
+        else:
+            nbr_init_flat = jnp.full((B * N * K + 1,), N, dtype=jnp.int32)
+        nbr_out_len = B * N * K + 1
     else:
-        nbr_init_flat = jnp.full((B * N * K + 1,), N, dtype=jnp.int32)
+        if old_idx is not None:
+            nbr_init_flat = jnp.asarray(old_idx, dtype=jnp.int32).reshape(B * N * K)
+        else:
+            nbr_init_flat = jnp.full((B * N * K,), N, dtype=jnp.int32)
+        nbr_out_len = B * N * K
 
     r_sq_max_f = float(r_cutoff) * float(r_cutoff)
     kernel_fn = _make_prune_and_encode_kernel(
@@ -1613,9 +1757,10 @@ def _pallas_prune_and_encode_cell_list_batch(
         int(B_excl),
         r_sq_max_f,
         do_encode,
+        use_scratch_slot,
     )
     out_shapes = (
-        jax.ShapeDtypeStruct((B * N * K + 1,), jnp.int32),
+        jax.ShapeDtypeStruct((nbr_out_len,), jnp.int32),
         jax.ShapeDtypeStruct((B * N,), jnp.int32),
     )
     nbr_flat, occ_flat = pl.pallas_call(
@@ -1647,7 +1792,8 @@ def _pallas_prune_and_encode_cell_list_batch(
         nbr_init_flat,
     )
     occ_b = jnp.max(occ_flat.reshape((B, N)), axis=-1)
-    return nbr_flat[:-1].reshape((B, N, K)), occ_b
+    nbr_out_b = (nbr_flat[:-1] if use_scratch_slot else nbr_flat).reshape((B, N, K))
+    return nbr_out_b, occ_b
 
 
 def pallas_prune_and_encode_cell_list(

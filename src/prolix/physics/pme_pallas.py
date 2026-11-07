@@ -6,6 +6,8 @@ Do not autodiff through ``atomic_add``; pair with the existing custom VJP.
 
 from __future__ import annotations
 
+import os
+
 import jax
 import jax.numpy as jnp
 from jax._src.pallas.primitives import load as _pl_load
@@ -64,6 +66,51 @@ def _select_stencil(
         + w2[:, None] * (offset == 2)
         + w3[:, None] * (offset == 3)
     )
+
+
+def compute_pme_spatial_perm(
+    positions: jax.Array,
+    box_size: jax.Array,
+    grid_dims: tuple[int, int, int],
+    atom_mask: jax.Array | None = None,
+) -> tuple[jax.Array, jax.Array]:
+    """MK-53: Compute spatial 3D grid-cell permutation ``(perm, inv_perm)`` for SPME locality.
+
+    Sorting atoms by their coarse 3D PME grid cell before ``spread_charges_pallas`` /
+    ``gather_pallas`` groups spatially adjacent atoms into the same 32-atom Pallas CTA,
+    maximizing L2 cache hit rate on the ``64^3`` PME mesh and pushing ghost atoms (`~atom_mask`)
+    to the trailing CTAs where they exit in O(1).
+    """
+    pos_single = positions[0] if positions.ndim == 3 else positions
+    box_arr = jnp.asarray(box_size, dtype=pos_single.dtype)
+    if box_arr.ndim == 3:
+        box_1 = jnp.diag(box_arr[0])
+    elif box_arr.ndim == 2:
+        box_1 = jnp.diag(box_arr) if box_arr.shape == (3, 3) else box_arr[0, :3]
+    else:
+        box_1 = box_arr[:3]
+    Kx, Ky, Kz = int(grid_dims[0]), int(grid_dims[1]), int(grid_dims[2])
+    k_vec = jnp.asarray([Kx, Ky, Kz], dtype=pos_single.dtype)
+    safe_box = jnp.where(box_1 > 0, box_1, jnp.ones_like(box_1))
+    frac = jnp.mod(pos_single, safe_box[None, :]) * (k_vec / safe_box)[None, :]
+    g_idx = jnp.clip(
+        jnp.floor(frac).astype(jnp.int32),
+        jnp.zeros((3,), dtype=jnp.int32),
+        jnp.asarray([Kx - 1, Ky - 1, Kz - 1], dtype=jnp.int32),
+    )
+    # Sort by 4x4x4 sub-grid tiles so each 32-atom CTA lands in a compact L2-resident sub-volume
+    cell_key = (
+        (g_idx[:, 0] >> 2) * ((Ky // 4 + 1) * (Kz // 4 + 1))
+        + (g_idx[:, 1] >> 2) * (Kz // 4 + 1)
+        + (g_idx[:, 2] >> 2)
+    ).astype(jnp.int32)
+    if atom_mask is not None:
+        m_single = atom_mask[0] if atom_mask.ndim == 2 else atom_mask
+        sentinel = jnp.int32(Kx * Ky * Kz + 1)
+        cell_key = jnp.where(jnp.asarray(m_single, dtype=jnp.bool_), cell_key, sentinel)
+    perm = jnp.argsort(cell_key).astype(jnp.int32)
+    inv_perm = jnp.argsort(perm).astype(jnp.int32)
+    return perm, inv_perm
 
 
 def _spread_charges_pallas_batch(
@@ -125,15 +172,15 @@ def _spread_charges_pallas_batch(
         box_base = (b_id if b_box else 0) * 3
         mesh_base = b_id * mesh_stride
 
+        zero = jnp.asarray(0.0, dtype=dtype)
         is_real = (_pl_load(mask_ref, (m_base + offs,)) > 0) & (offs < n_atoms)
+        qi = _pl_load(charges_ref, (q_base + offs,), mask=is_real, other=zero)
+        active_q = is_real & (jnp.abs(qi) > zero)
 
         def _do_spread(_):
-            zero = jnp.asarray(0.0, dtype=dtype)
-            px = _pl_load(px_ref, (pos_base + offs,), mask=is_real, other=zero)
-            py = _pl_load(py_ref, (pos_base + offs,), mask=is_real, other=zero)
-            pz = _pl_load(pz_ref, (pos_base + offs,), mask=is_real, other=zero)
-            qi = _pl_load(charges_ref, (q_base + offs,), mask=is_real, other=zero)
-            active_q = is_real & (jnp.abs(qi) > zero)
+            px = _pl_load(px_ref, (pos_base + offs,), mask=active_q, other=zero)
+            py = _pl_load(py_ref, (pos_base + offs,), mask=active_q, other=zero)
+            pz = _pl_load(pz_ref, (pos_base + offs,), mask=active_q, other=zero)
 
             bx = _pl_load(box_ref, (box_base + jnp.zeros((1,), dtype=jnp.int32),))[0]
             by = _pl_load(box_ref, (box_base + jnp.ones((1,), dtype=jnp.int32),))[0]
@@ -160,14 +207,14 @@ def _spread_charges_pallas_batch(
             gyi = gy.astype(jnp.int32)
             gzi = gz.astype(jnp.int32)
 
-            # MK-49: Separable (BLOCK_N=32, 16) YZ-plane stencil reused across 4 X-planes
+            # MK-49 / MK-53: Separable (BLOCK_N=32, 16) YZ-plane stencil reused across 4 X-planes
             s_yz = jnp.arange(16, dtype=jnp.int32)
             oy = (s_yz // 4)[None, :]
             oz = (s_yz % 4)[None, :]
 
             iy_16 = jnp.mod(gyi[:, None] + oy - 1, Ky)
             iz_16 = jnp.mod(gzi[:, None] + oz - 1, Kz)
-            iyz_16 = iy_16 * Kz + iz_16
+            iyz_16 = mesh_base + iy_16 * Kz + iz_16
 
             wy_16 = _select_stencil(wy, oy)
             wz_16 = _select_stencil(wz, oz)
@@ -176,8 +223,8 @@ def _spread_charges_pallas_batch(
             ky_kz = Ky * Kz
 
             for ox_i in range(4):
-                ix_plane = jnp.mod(gxi + (ox_i - 1), Kx)[:, None]
-                flat_idx_16 = (mesh_base + ix_plane * ky_kz + iyz_16).reshape(BLOCK_N * 16)
+                ix_plane = jnp.mod(gxi + (ox_i - 1), Kx)[:, None] * ky_kz
+                flat_idx_16 = (ix_plane + iyz_16).reshape(BLOCK_N * 16)
                 w_16 = (wx[ox_i][:, None] * q_wyz_16).astype(dtype).reshape(BLOCK_N * 16)
                 if interpret:
                     def _serial_atomic(k, _, idx_vec=flat_idx_16, w_vec=w_16):
@@ -188,7 +235,7 @@ def _spread_charges_pallas_batch(
                     plt.atomic_add(mesh_out_ref, (flat_idx_16,), w_16, mask=mask_16)
 
         jax.lax.cond(
-            jnp.max(is_real.astype(jnp.int32)) > 0,
+            jnp.max(active_q.astype(jnp.int32)) > 0,
             _do_spread,
             lambda _: None,
             None,
@@ -247,6 +294,10 @@ def spread_charges_pallas(
     if order != 4:
         raise NotImplementedError("Pallas SPME stencil is order-4 only")
     grid_tuple = (int(grid_dims[0]), int(grid_dims[1]), int(grid_dims[2]))
+    if atom_perm is None and os.environ.get("PROLIX_PME_SPATIAL_SORT", "").strip() == "1":
+        atom_perm, _ = compute_pme_spatial_perm(
+            positions, box_size, grid_tuple, atom_mask=atom_mask
+        )
     if atom_perm is not None:
         perm = jnp.asarray(atom_perm, dtype=jnp.int32)
         if positions.ndim == 3:
@@ -377,15 +428,16 @@ def _gather_pallas_batch(
         mesh_base = (b_id if b_mesh else 0) * mesh_stride
         out_base = b_id * n_pad
 
+        zero = jnp.asarray(0.0, dtype=dtype)
         is_real = (_pl_load(mask_ref, (m_base + offs,)) > 0) & (offs < n_atoms)
+        qi = _pl_load(charges_ref, (q_base + offs,), mask=is_real, other=zero)
+        active_lane = is_real if compute_dq else (is_real & (jnp.abs(qi) > zero))
         zero_vec = (offs - offs).astype(dtype)
 
         def _do_gather(_):
-            zero = jnp.asarray(0.0, dtype=dtype)
-            px = _pl_load(px_ref, (pos_base + offs,), mask=is_real, other=zero)
-            py = _pl_load(py_ref, (pos_base + offs,), mask=is_real, other=zero)
-            pz = _pl_load(pz_ref, (pos_base + offs,), mask=is_real, other=zero)
-            qi = _pl_load(charges_ref, (q_base + offs,), mask=is_real, other=zero)
+            px = _pl_load(px_ref, (pos_base + offs,), mask=active_lane, other=zero)
+            py = _pl_load(py_ref, (pos_base + offs,), mask=active_lane, other=zero)
+            pz = _pl_load(pz_ref, (pos_base + offs,), mask=active_lane, other=zero)
 
             bx = _pl_load(box_ref, (box_base + jnp.zeros((1,), dtype=jnp.int32),))[0]
             by = _pl_load(box_ref, (box_base + jnp.ones((1,), dtype=jnp.int32),))[0]
@@ -418,14 +470,14 @@ def _gather_pallas_batch(
             gyi = gy.astype(jnp.int32)
             gzi = gz.astype(jnp.int32)
 
-            # MK-49: Separable (BLOCK_N=32, 16) YZ-plane stencil reused across 4 X-planes
+            # MK-49 / MK-53: Separable (BLOCK_N=32, 16) YZ-plane stencil reused across 4 X-planes
             s_yz = jnp.arange(16, dtype=jnp.int32)
             oy = (s_yz // 4)[None, :]
             oz = (s_yz % 4)[None, :]
 
             iy_16 = jnp.mod(gyi[:, None] + oy - 1, Ky)
             iz_16 = jnp.mod(gzi[:, None] + oz - 1, Kz)
-            iyz_16 = iy_16 * Kz + iz_16
+            iyz_16 = mesh_base + iy_16 * Kz + iz_16
 
             wy_16 = _select_stencil(wy, oy)
             wz_16 = _select_stencil(wz, oz)
@@ -436,7 +488,7 @@ def _gather_pallas_batch(
             dwyz_16 = dwy_16 * wz_16
             wdyz_16 = wy_16 * dwz_16
 
-            mask_16 = jnp.broadcast_to(is_real[:, None], (BLOCK_N, 16)).reshape(BLOCK_N * 16)
+            mask_16 = jnp.broadcast_to(active_lane[:, None], (BLOCK_N, 16)).reshape(BLOCK_N * 16)
             ky_kz = Ky * Kz
 
             acc_dx = zero_vec
@@ -445,8 +497,8 @@ def _gather_pallas_batch(
             acc_dq = zero_vec
 
             for ox_i in range(4):
-                ix_plane = jnp.mod(gxi + (ox_i - 1), Kx)[:, None]
-                flat_idx_16 = (mesh_base + ix_plane * ky_kz + iyz_16).reshape(BLOCK_N * 16)
+                ix_plane = jnp.mod(gxi + (ox_i - 1), Kx)[:, None] * ky_kz
+                flat_idx_16 = (ix_plane + iyz_16).reshape(BLOCK_N * 16)
                 t_16 = _pl_load(
                     theta_flat_ref,
                     (flat_idx_16,),
@@ -468,13 +520,13 @@ def _gather_pallas_batch(
                 dq_v = jnp.where(is_real, acc_dq, zero).astype(dtype)
             else:
                 dq_v = zero_vec
-            dpx_v = jnp.where(is_real, qi * sx * acc_dx, zero).astype(dtype)
-            dpy_v = jnp.where(is_real, qi * sy * acc_dy, zero).astype(dtype)
-            dpz_v = jnp.where(is_real, qi * sz * acc_dz, zero).astype(dtype)
+            dpx_v = jnp.where(active_lane, qi * sx * acc_dx, zero).astype(dtype)
+            dpy_v = jnp.where(active_lane, qi * sy * acc_dy, zero).astype(dtype)
+            dpz_v = jnp.where(active_lane, qi * sz * acc_dz, zero).astype(dtype)
             return (dpx_v, dpy_v, dpz_v, dq_v)
 
         dpx, dpy, dpz, dq = jax.lax.cond(
-            jnp.max(is_real.astype(jnp.int32)) > 0,
+            jnp.max(active_lane.astype(jnp.int32)) > 0,
             _do_gather,
             lambda z0: z0,
             (zero_vec, zero_vec, zero_vec, zero_vec),
@@ -581,6 +633,10 @@ def gather_pallas(
     cdq = bool(compute_dq)
 
     inv_p = None
+    if atom_perm is None and os.environ.get("PROLIX_PME_SPATIAL_SORT", "").strip() == "1":
+        atom_perm, atom_inv_perm = compute_pme_spatial_perm(
+            positions, box_size, grid_tuple, atom_mask=atom_mask
+        )
     if atom_perm is not None:
         perm = jnp.asarray(atom_perm, dtype=jnp.int32)
         inv_p = (

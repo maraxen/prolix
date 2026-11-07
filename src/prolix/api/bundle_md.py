@@ -167,10 +167,14 @@ def unit_masses(prefix: int, dtype) -> jnp.ndarray:
 
 
 def trim_trajectory_positions(
-    positions: jnp.ndarray, bundle: MolecularBundle
+    positions: jnp.ndarray, bundle: MolecularBundle, *, n_real: int | None = None
 ) -> jnp.ndarray:
     """Trim ``(steps, bucket, 3)`` or ``(steps, n, 3)`` to real atoms (host)."""
-    n_real = int(jnp.asarray(bundle.n_atoms))
+    if n_real is None:
+        raw_n = bundle.n_atoms
+        n_real = raw_n if isinstance(raw_n, int) else int(jnp.asarray(raw_n))
+    if int(positions.shape[1]) == n_real:
+        return positions
     return positions[:, :n_real, ...]
 
 
@@ -842,6 +846,16 @@ def energy_fn_from_bundle(
     _build_dense = bool(build_dense_exclusions)
     _use_disp = bool(use_dispersion_correction)
     _excl_mode = str(excl_mode)
+    _base_sys = (
+        physics_system_from_bundle(
+            bundle,
+            bundle.positions,
+            pme_grid_points=_pme_grid,
+            build_dense_exclusions=_build_dense,
+        )
+        if getattr(bundle, "positions", None) is not None
+        else None
+    )
 
     def energy_fn(positions: jnp.ndarray, **kwargs: object) -> jnp.ndarray:
         # `neighbor` (debt 760's NL path, see single_padded_energy's docstring)
@@ -853,12 +867,19 @@ def energy_fn_from_bundle(
         neighbor = kwargs.pop("neighbor", None)
         dyn_box = kwargs.pop("box", None)
         del kwargs
-        sys = physics_system_from_bundle(
-            bundle,
-            positions,
-            pme_grid_points=_pme_grid,
-            build_dense_exclusions=_build_dense,
-        )
+        if (
+            _base_sys is not None
+            and int(positions.shape[0]) == _base_sys.n_padded_atoms
+            and (_base_sys.box_size is None or _base_sys.box_size.dtype == positions.dtype)
+        ):
+            sys = _base_sys.replace(positions=positions)
+        else:
+            sys = physics_system_from_bundle(
+                bundle,
+                positions,
+                pme_grid_points=_pme_grid,
+                build_dense_exclusions=_build_dense,
+            )
         cur_disp_fn = disp_fn
         if dyn_box is not None:
             dyn_box_arr = jnp.asarray(dyn_box)
