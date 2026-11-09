@@ -342,6 +342,8 @@ def run_dhfr_25k_substep_profile(
         excl_scales_vdw=dhfr_wt.excl_dense_scales_vdw,
         excl_scales_elec=dhfr_wt.excl_dense_scales_elec,
         atom_mask=dhfr_wt.atom_mask,
+        positions=dhfr_wt.positions,
+        box=box_vec,
     )
     pme_perm_wt, pme_inv_perm_wt = compute_pme_spatial_perm(
         dhfr_wt.positions, box_vec, (64, 64, 64), atom_mask=dhfr_wt.atom_mask
@@ -445,8 +447,25 @@ def run_dhfr_25k_substep_profile(
             ms_baoab_post, _ = _probe_ms(jit_baoab_post, pos_b, mom_b, f_b, n_steady=n_steady, n_wall=n_wall)
 
             # (c) pallas_bonded_and_nonbonded_nl_fused (MK-48, homogeneous vs heterogeneous)
+            from prolix.pallas_kernels import _infer_first_pure_water_block
+
+            nbr_mkt_wt = getattr(nbr_wt, "max_k_tiles", None)
+            if nbr_mkt_wt is None:
+                nbr_mkt_wt = nl_mod._max_k_tiles_from_idx(nbr_wt.idx)
+            nbr_mkt_b = jnp.broadcast_to(nbr_mkt_wt[None, :], (B, *nbr_mkt_wt.shape))
+            dhfr_pw_blk = _infer_first_pure_water_block(
+                int(dhfr_wt.positions.shape[0]),
+                (
+                    (dhfr_wt.bond_idx, dhfr_wt.bond_mask, 2),
+                    (dhfr_wt.angle_idx, dhfr_wt.angle_mask, 3),
+                    (dhfr_wt.dihedral_idx, dhfr_wt.dihedral_mask, 4),
+                    (dhfr_wt.improper_idx, dhfr_wt.improper_mask, 4),
+                    (dhfr_wt.exception_pairs, dhfr_wt.exception_mask, 2),
+                ),
+            )
+
             def _mk48_homog_grad(r_in):
-                def _one(r1, n1):
+                def _one(r1, n1, mkt1):
                     return pallas_bonded_and_nonbonded_nl_fused(
                         r1,
                         dhfr_wt.charges,
@@ -478,13 +497,15 @@ def run_dhfr_25k_substep_profile(
                         pme_alpha=float(dhfr_wt.pme_alpha),
                         cutoff=float(dhfr_wt.cutoff_distance),
                         excl_mode="pre_encoded",
+                        max_k_tiles=mkt1,
+                        first_pure_water_block=dhfr_pw_blk,
                     )
-                return jax.vmap(jax.grad(_one))(r_in, nbr_idx_b)
+                return jax.vmap(jax.grad(_one))(r_in, nbr_idx_b, nbr_mkt_b)
 
             dih_p_b = jnp.stack([b.dihedral_params for b in het_bundles], axis=0)
 
             def _mk48_hetero_grad(r_in, q_in, sig_in, eps_in, am_in, dp_in):
-                def _one(r1, q1, s1, e1, m1, dp1, n1):
+                def _one(r1, q1, s1, e1, m1, dp1, n1, mkt1):
                     return pallas_bonded_and_nonbonded_nl_fused(
                         r1,
                         q1,
@@ -516,8 +537,12 @@ def run_dhfr_25k_substep_profile(
                         pme_alpha=float(dhfr_wt.pme_alpha),
                         cutoff=float(dhfr_wt.cutoff_distance),
                         excl_mode="pre_encoded",
+                        max_k_tiles=mkt1,
+                        first_pure_water_block=dhfr_pw_blk,
                     )
-                return jax.vmap(jax.grad(_one))(r_in, q_in, sig_in, eps_in, am_in, dp_in, nbr_idx_b)
+                return jax.vmap(jax.grad(_one))(
+                    r_in, q_in, sig_in, eps_in, am_in, dih_p_b, nbr_idx_b, nbr_mkt_b
+                )
 
             jit_mk48_hom = jax.jit(_mk48_homog_grad)
             jit_mk48_het = jax.jit(_mk48_hetero_grad)
@@ -627,6 +652,9 @@ def run_dhfr_25k_substep_profile(
                     interpret=(jax.default_backend() == "cpu"),
                 )
             )
+            precomp_excl_b = nl_mod.precompute_static_nl_exclusion_tables(
+                ei_b, ev_b, ee_b, 25000
+            )
             jit_nl_full_all = jax.jit(
                 lambda r_in, m_in, rb_in: nl_mod._pallas_prune_and_encode_cell_list_batch(
                     B,
@@ -647,6 +675,9 @@ def run_dhfr_25k_substep_profile(
                     mask_batched=True,
                     rebuild_mask=rb_in,
                     old_idx=nbr_idx_b,
+                    precomputed_excl=precomp_excl_b,
+                    return_max_k_tiles=True,
+                    old_max_k_tiles=nbr_mkt_b,
                 )
             )
             ms_cell_bin_all, _ = _probe_ms(jit_cell_bin_argsort, pos_b, am_b, reb_all, n_steady=n_steady, n_wall=n_wall)
@@ -1911,7 +1942,7 @@ def main():
     if args.substep_only:
         payload = {
             "meta": {
-                "version": "pallas_v3.1_substep_profile",
+                "version": "pallas_v3.2_substep_profile",
                 "device": str(dev),
                 "device_kind": dev_kind,
                 "compute_capability": cc,
@@ -1929,7 +1960,7 @@ def main():
 
     payload = {
         "meta": {
-            "version": "pallas_v3.1",
+            "version": "pallas_v3.2",
             "device": str(dev),
             "device_kind": dev_kind,
             "compute_capability": cc,

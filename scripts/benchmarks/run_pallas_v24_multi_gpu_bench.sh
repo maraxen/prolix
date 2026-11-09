@@ -41,14 +41,24 @@ mkdir -p outputs/bench
 
 echo "=== [1/2] Verify Pallas v2.4..v3.1 GPU unit tests + architecture/export/parity guardrails ==="
 if [[ "${FAST_PYTEST:-0}" == "1" ]]; then
-    "${PROLIX_PY}" -m pytest tests/test_ensemble_plan_pallas_v2.py -k "test_pallas_v31" -v -o addopts=""
+    "${PROLIX_PY}" -m pytest tests/test_ensemble_plan_pallas_v2.py -k "test_pallas_v32 or test_pallas_v31" -v -o addopts=""
 elif [[ "${SKIP_PYTEST:-0}" != "1" ]]; then
-    "${PROLIX_PY}" -m pytest tests/test_ensemble_plan_pallas_v2.py -k "test_pallas_v31 or test_pallas_v30 or test_pallas_v26 or test_pallas_v25 or test_pallas_v24" -v -o addopts=""
+    "${PROLIX_PY}" -m pytest tests/test_ensemble_plan_pallas_v2.py -k "test_pallas_v32 or test_pallas_v31 or test_pallas_v30 or test_pallas_v26 or test_pallas_v25 or test_pallas_v24" -v -o addopts=""
     "${PROLIX_PY}" -m pytest tests/test_import_architecture.py tests/test_stablehlo_export_guardrails.py tests/api/test_v1_ensemble_plan_parity.py -v -o addopts=""
+fi
+
+BENCH_OUT="${BENCH_OUT:-outputs/bench/261108_${GPU_TAG}_pallas_v32_e2e_ensemble_buckets.json}"
+BENCH_EXTRA_ARGS=()
+if [[ "${SUBSTEP_ONLY:-0}" == "1" ]]; then
+    BENCH_EXTRA_ARGS+=("--substep-only")
+fi
+if [[ "${QUICK_BENCH:-0}" == "1" ]]; then
+    BENCH_EXTRA_ARGS+=("--quick")
 fi
 
 echo "=== [2/2] Run E2E Multi-Bucket / Multi-System / Ragged-Bucket + Sub-Step Profile + OpenMM CUDA Benchmark ==="
 "${PROLIX_PY}" scripts/benchmarks/bench_e2e_ensemble_buckets.py \
-    --out "outputs/bench/261106_${GPU_TAG}_pallas_v31_e2e_ensemble_buckets.json"
+    --out "${BENCH_OUT}" "${BENCH_EXTRA_ARGS[@]}"
 
-echo "=== PALLAS v3.1 (${GPU_TAG}) BENCHMARK COMPLETE ==="
+echo "=== PALLAS v3.2 (${GPU_TAG}) BENCHMARK COMPLETE ==="
+

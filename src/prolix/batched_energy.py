@@ -661,6 +661,9 @@ def single_padded_energy(
     use_pallas: bool | None = None,
     use_pallas_pme: bool | None = None,
     excl_mode: str = "table",
+    first_pure_water_block: int | None = None,
+    return_forces: bool = False,
+    pme_force_fn: Callable[..., Array] | None = None,
 ) -> Array:
     """Computes total potential energy for a single padded system.
 
@@ -747,10 +750,116 @@ def single_padded_energy(
     )
     _use_fused_bonded = pallas_enabled and pallas_bonded_all_fused is not None
 
+    if return_forces:
+        has_cosolvent = (
+            getattr(sys, "cosolvent_group_id", None) is not None
+            and getattr(sys, "cosolvent_mol_id", None) is not None
+        )
+        if _use_fused_explicit_megakernel and not implicit_solvent and not has_cosolvent:
+            nb_raw = getattr(neighbor, "idx", neighbor)
+            nb_mkt = getattr(neighbor, "max_k_tiles", None)
+            is_pme = elec_method == "pme"
+            imp_is_harm = sys.improper_params is not None and (
+                sys.improper_params.shape[-1] == 2 or not bool(getattr(sys, "improper_is_periodic", True))
+            )
+            _, f_direct = pallas_bonded_and_nonbonded_nl_fused(
+                r,
+                sys.charges,
+                sys.sigmas,
+                sys.epsilons,
+                sys.atom_mask,
+                nb_raw,
+                sys.excl_indices,
+                sys.excl_scales_vdw,
+                sys.excl_scales_elec,
+                bonds=sys.bonds,
+                bond_params=sys.bond_params,
+                bond_mask=sys.bond_mask,
+                urey_bradley_bonds=sys.urey_bradley_bonds,
+                urey_bradley_params=sys.urey_bradley_params,
+                urey_bradley_mask=sys.urey_bradley_mask,
+                angles=sys.angles,
+                angle_params=sys.angle_params,
+                angle_mask=sys.angle_mask,
+                dihedrals=sys.dihedrals,
+                dihedral_params=sys.dihedral_params,
+                dihedral_mask=sys.dihedral_mask,
+                impropers=sys.impropers,
+                improper_params=sys.improper_params,
+                improper_mask=sys.improper_mask,
+                improper_is_harmonic=imp_is_harm,
+                exception_pairs=getattr(sys, "exception_pairs", None),
+                exception_sigmas=getattr(sys, "exception_sigmas", None),
+                exception_epsilons=getattr(sys, "exception_epsilons", None),
+                exception_chargeprods=getattr(sys, "exception_chargeprods", None),
+                exception_mask=getattr(sys, "exception_mask", None),
+                cmap_torsions=sys.cmap_torsions,
+                cmap_indices=sys.cmap_indices,
+                cmap_mask=sys.cmap_mask,
+                cmap_coeffs=sys.cmap_coeffs,
+                cmap_first_is_psi=True,
+                box=box_pbc,
+                pme_alpha=float(sys.pme_alpha) if is_pme else 0.0,
+                cutoff=float(sys.nonbonded_cutoff),
+                lj_switch_width=eff_switch,
+                soft_core_lambda=soft_core_lambda,
+                softcore_alpha=sc_alpha,
+                softcore_exponent=sc_exp,
+                include_pme_excl_erf=is_pme,
+                excl_mode=excl_mode,
+                dist_eps=1e-10,
+                b0_is_ji=True,
+                interpret=interpret,
+                max_k_tiles=nb_mkt,
+                first_pure_water_block=first_pure_water_block,
+                return_forces=True,
+                compute_energy=False,
+            )
+            f_total = f_direct
+            if pme_force_fn is not None:
+                f_total = f_total + pme_force_fn(r, sys.charges, sys.atom_mask)
+            elif sys.box_size is not None and sys.pme_alpha > 0.0 and is_pme:
+                try:
+                    box_np = np.asarray(sys.box_size, dtype=np.float64)
+                    diag_np = np.diag(box_np) if box_np.ndim == 2 else box_np
+                    mean_l = float(np.mean(diag_np))
+                    grid_points = int(sys.pme_grid_points)
+                    grid_spacing = mean_l / float(max(grid_points, 1))
+                    eff_pallas_pme = use_pallas_pme if use_pallas_pme is not None else use_pallas
+                    built_pme_force_fn = make_spme_energy_fn(
+                        box_size=sys.box_size,
+                        alpha=float(sys.pme_alpha),
+                        grid_spacing=grid_spacing,
+                        use_pallas_pme=eff_pallas_pme,
+                        n_atoms=int(N),
+                        return_forces=True,
+                    )
+                    f_total = f_total + built_pme_force_fn(r, sys.charges, sys.atom_mask)
+                except (TypeError, ValueError, jax.errors.ConcretizationTypeError):
+                    pass
+            return f_total.astype(r.dtype)
+        return -jax.grad(
+            lambda pos: single_padded_energy(
+                sys.replace(positions=pos),
+                displacement_fn,
+                implicit_solvent=implicit_solvent,
+                soft_core_lambda=soft_core_lambda,
+                neighbor=neighbor,
+                lj_switch_width=lj_switch_width,
+                use_dispersion_correction=use_dispersion_correction,
+                use_pallas=use_pallas,
+                use_pallas_pme=use_pallas_pme,
+                excl_mode=excl_mode,
+                first_pure_water_block=first_pure_water_block,
+                return_forces=False,
+            )
+        )(r)
+
     # Bonded terms (or fused Bonded + Direct-Space Nonbonded NL Megakernel, MK-36)
     if _use_fused_explicit_megakernel:
         with jax.named_scope("dense_bonded_and_nonbonded_nl_fused"):
             nb_raw = getattr(neighbor, "idx", neighbor)
+            nb_mkt = getattr(neighbor, "max_k_tiles", None)
             is_pme = elec_method == "pme"
             imp_is_harm = sys.improper_params is not None and (
                 sys.improper_params.shape[-1] == 2 or not bool(getattr(sys, "improper_is_periodic", True))
@@ -803,6 +912,8 @@ def single_padded_energy(
                 dist_eps=1e-10,
                 b0_is_ji=True,
                 interpret=interpret,
+                max_k_tiles=nb_mkt,
+                first_pure_water_block=first_pure_water_block,
             )
             e_ub = jnp.asarray(0.0, dtype=r.dtype)
             e_angle = jnp.asarray(0.0, dtype=r.dtype)

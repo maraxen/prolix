@@ -3511,7 +3511,7 @@ def _cmap_coeffs_grad(
         cmap_torsions[:, 1].astype(jnp.int32),
         cmap_torsions[:, 2].astype(jnp.int32),
         cmap_torsions[:, 3].astype(jnp.int32),
-        cmap_torsions[:, 4].astype(jnp.int32),
+        cmap_torsions[:, 7 if cmap_torsions.shape[-1] == 8 else 4].astype(jnp.int32),
     )
     m_f = mask.astype(dtype)
     valid = (

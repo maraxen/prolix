@@ -247,6 +247,13 @@ def dispatch_n_steps_inference(
     n_limit = jnp.asarray(n_steps, dtype=jnp.int32)
 
     def _while(init: Any, limit: jax.Array) -> Any:
+        iterator = make_axis_dispatch(WhileCarry(), axis=N_STEPS.name)
+        two_level = (
+            getattr(step_fn, "_two_level_runner", None) if on_step is None else None
+        )
+        if two_level is not None:
+            return two_level(init, limit, iterator)
+
         def cond(carry: tuple[Any, Any]) -> Any:
             step_i, _state = carry
             return step_i < limit
@@ -264,7 +271,6 @@ def dispatch_n_steps_inference(
                 io_callback(_hook, None, step_i, payload)
             return (step_i + jnp.int32(1), new_state)
 
-        iterator = make_axis_dispatch(WhileCarry(), axis=N_STEPS.name)
         _final_i, final_state = iterator(cond, body, (jnp.int32(0), init))
         return final_state
 

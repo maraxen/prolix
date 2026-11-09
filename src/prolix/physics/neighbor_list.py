@@ -14,7 +14,7 @@ from jax._src.pallas.primitives import load as _pl_load
 from jax._src.pallas.primitives import store as _pl_store
 from jax.experimental import pallas as pl
 from jax.experimental.pallas import triton as plt
-from jax_md import partition, space, util
+from jax_md import dataclasses as jax_md_dataclasses, partition, space, util
 
 from prolix.compat import system_params_to_protein
 from prolix.export import in_export_context, resolve_pallas_compiler_params
@@ -29,6 +29,15 @@ if TYPE_CHECKING:
   from prolix.typing import SystemParams
 
 Array = util.Array
+
+if not hasattr(partition.NeighborList, "max_k_tiles"):
+  @jax_md_dataclasses.dataclass
+  class _ProlixNeighborList(partition.NeighborList):
+    max_k_tiles: Array | None = None
+
+  _ProlixNeighborList.__name__ = "NeighborList"
+  _ProlixNeighborList.__qualname__ = "NeighborList"
+  partition.NeighborList = _ProlixNeighborList
 
 
 @dataclasses.dataclass(frozen=True)
@@ -263,6 +272,18 @@ def make_neighbor_list_fn(
     if isinstance(box_diag, jax.core.Tracer)
     else _compute_static_grid_dims(box_diag, r_total_cutoff)
   )
+  precomp_excl_static = (
+    precompute_static_nl_exclusion_tables(
+      excl_indices,
+      excl_scales_vdw,
+      excl_scales_elec,
+      int(excl_indices.shape[-2]),
+      scale_14_vdw=float(scale_14_vdw),
+      scale_14_elec=float(scale_14_elec),
+    )
+    if has_excl
+    else None
+  )
 
   def _wrap(position: Array, dyn_box: Array | None = None) -> Array:
     b = jnp.asarray(dyn_box) if dyn_box is not None else box
@@ -305,7 +326,7 @@ def make_neighbor_list_fn(
       ei = excl_indices if has_excl else jnp.full((N_atoms, 1), -1, dtype=jnp.int32)
       ev = excl_scales_vdw if has_excl else jnp.ones((N_atoms, 1), dtype=jnp.float32)
       ee = excl_scales_elec if has_excl else jnp.ones((N_atoms, 1), dtype=jnp.float32)
-      idx_new, occ_new = pallas_prune_and_encode_cell_list(
+      idx_new, occ_new, mkt_new = pallas_prune_and_encode_cell_list(
         pos_w,
         b_eff,
         ei,
@@ -321,6 +342,8 @@ def make_neighbor_list_fn(
         interpret=(jax.default_backend() == "cpu"),
         grid_dims=static_grid_dims,
         atom_mask=atom_mask,
+        precomputed_excl=precomp_excl_static,
+        return_max_k_tiles=True,
       )
       err_new = neighbors.error.update(
         partition.PartitionErrorCode.NEIGHBOR_LIST_OVERFLOW,
@@ -331,15 +354,18 @@ def make_neighbor_list_fn(
         idx=idx_new,
         reference_position=pos_w,
         error=err_new,
+        max_k_tiles=mkt_new,
         update_fn=update,
       )
     # Fallback to jax_md update; force rebuild by shifting reference_position
     b_diag = jnp.diag(b_eff) if b_eff.ndim == 2 else b_eff
     forced_ref = pos_w + jnp.asarray(0.5, dtype=pos_w.dtype) * b_diag.astype(pos_w.dtype)
-    nbr_forced = dataclasses.replace(neighbors, reference_position=forced_ref)
+    nbr_forced = dataclasses.replace(neighbors, reference_position=forced_ref, max_k_tiles=None)
     nbr = fns.update(pos_w, nbr_forced, **kwargs)
-    idx_enc = _encode_if_needed(nbr.idx, int(pos_w.shape[-2]))
-    return dataclasses.replace(nbr, idx=idx_enc, update_fn=update)
+    n_at = int(pos_w.shape[-2])
+    idx_enc = _encode_if_needed(nbr.idx, n_at)
+    mkt_enc = _max_k_tiles_from_idx(idx_enc, n_at)
+    return dataclasses.replace(nbr, idx=idx_enc, max_k_tiles=mkt_enc, update_fn=update)
 
   def update(
     position: Array, neighbors: partition.NeighborList, **kwargs
@@ -358,9 +384,22 @@ def make_neighbor_list_fn(
       cell_size_f = float(neighbors.cell_size) if neighbors.cell_size is not None else r_total_cutoff
       cell_cap_i = int(neighbors.cell_list_capacity) if neighbors.cell_list_capacity is not None else 64
       max_occ_i = int(neighbors.max_occupancy)
+      n_at_u = int(pos_w.shape[-2])
+      mkt_in = (
+        neighbors.max_k_tiles
+        if getattr(neighbors, "max_k_tiles", None) is not None
+        else _max_k_tiles_from_idx(neighbors.idx, n_at_u)
+      )
 
       @jax.custom_batching.custom_vmap
-      def _cond_rebuild(pos_in: Array, ref_in: Array, idx_in: Array, err_code_in: Array, box_in: Array):
+      def _cond_rebuild(
+        pos_in: Array,
+        ref_in: Array,
+        idx_in: Array,
+        err_code_in: Array,
+        box_in: Array,
+        mkt_in_arg: Array,
+      ):
         dr = jax.vmap(displacement_fn)(pos_in, ref_in)
         dr_sq = jnp.sum(dr * dr, axis=-1)
         if atom_mask is not None:
@@ -368,19 +407,20 @@ def make_neighbor_list_fn(
         should_upd = jnp.any(dr_sq > jnp.asarray(half_skin_sq, dtype=pos_in.dtype))
 
         def _do_one(operands):
-          p_o, _r_o, _i_o, e_o, bx_o = operands
+          p_o, _r_o, _i_o, e_o, bx_o, _m_o = operands
           nbr_tmp = dataclasses.replace(
             neighbors,
             idx=_i_o,
             reference_position=_r_o,
             error=partition.PartitionError(e_o),
+            max_k_tiles=None,
           )
           if can_pallas:
             N_atoms = int(p_o.shape[0])
             ei = excl_indices if has_excl else jnp.full((N_atoms, 1), -1, dtype=jnp.int32)
             ev = excl_scales_vdw if has_excl else jnp.ones((N_atoms, 1), dtype=jnp.float32)
             ee = excl_scales_elec if has_excl else jnp.ones((N_atoms, 1), dtype=jnp.float32)
-            idx_new, occ_new = pallas_prune_and_encode_cell_list(
+            idx_new, occ_new, mkt_new = pallas_prune_and_encode_cell_list(
               p_o,
               bx_o,
               ei,
@@ -396,38 +436,44 @@ def make_neighbor_list_fn(
               interpret=(jax.default_backend() == "cpu"),
               grid_dims=static_grid_dims,
               atom_mask=atom_mask,
+              precomputed_excl=precomp_excl_static,
+              return_max_k_tiles=True,
             )
             err_new = nbr_tmp.error.update(
               partition.PartitionErrorCode.NEIGHBOR_LIST_OVERFLOW,
               occ_new > max_occ_i,
             )
-            return idx_new, p_o.astype(_r_o.dtype), err_new.code
+            return idx_new, p_o.astype(_r_o.dtype), err_new.code, mkt_new
           b_diag = jnp.diag(bx_o) if bx_o.ndim == 2 else bx_o
           forced_ref = p_o + jnp.asarray(0.5, dtype=p_o.dtype) * b_diag.astype(p_o.dtype)
-          nbr_forced = dataclasses.replace(nbr_tmp, reference_position=forced_ref)
+          nbr_forced = dataclasses.replace(nbr_tmp, reference_position=forced_ref, max_k_tiles=None)
           nbr_out = fns.update(p_o, nbr_forced, **kwargs)
           idx_enc = _encode_if_needed(nbr_out.idx, int(p_o.shape[0]))
-          return idx_enc, nbr_out.reference_position, nbr_out.error.code
+          mkt_enc = _max_k_tiles_from_idx(idx_enc, int(p_o.shape[0]))
+          return idx_enc, nbr_out.reference_position, nbr_out.error.code, mkt_enc
 
         def _keep_one(operands):
-          _p_o, r_o, i_o, e_o, _bx_o = operands
-          return i_o, r_o, e_o
+          _p_o, r_o, i_o, e_o, _bx_o, m_o = operands
+          return i_o, r_o, e_o, m_o
 
         return jax.lax.cond(
           should_upd,
           _do_one,
           _keep_one,
-          (pos_in, ref_in, idx_in, err_code_in, box_in),
+          (pos_in, ref_in, idx_in, err_code_in, box_in, mkt_in_arg),
         )
 
       @_cond_rebuild.def_vmap
-      def _cond_rebuild_vmap(axis_size, in_batched, pos_in, ref_in, idx_in, err_code_in, box_in):
+      def _cond_rebuild_vmap(
+        axis_size, in_batched, pos_in, ref_in, idx_in, err_code_in, box_in, mkt_in_arg
+      ):
         B = int(axis_size)
         pos_b = pos_in if in_batched[0] else jnp.broadcast_to(pos_in[None, ...], (B,) + pos_in.shape)
         ref_b = ref_in if in_batched[1] else jnp.broadcast_to(ref_in[None, ...], (B,) + ref_in.shape)
         idx_b = idx_in if in_batched[2] else jnp.broadcast_to(idx_in[None, ...], (B,) + idx_in.shape)
         err_b = err_code_in if in_batched[3] else jnp.broadcast_to(err_code_in[None, ...], (B,) + err_code_in.shape)
         bx_b = box_in if in_batched[4] else jnp.broadcast_to(box_in[None, ...], (B,) + box_in.shape)
+        mkt_b = mkt_in_arg if in_batched[5] else jnp.broadcast_to(mkt_in_arg[None, ...], (B,) + mkt_in_arg.shape)
 
         dr_b = jax.vmap(jax.vmap(displacement_fn))(pos_b, ref_b)
         dr_sq_b = jnp.sum(dr_b * dr_b, axis=-1)
@@ -437,13 +483,13 @@ def make_neighbor_list_fn(
         any_upd = jnp.any(su_b)
 
         def _do_batch(operands):
-          p_b, _r_b, _i_b, e_b, b_b, su_op = operands
+          p_b, _r_b, _i_b, e_b, b_b, su_op, m_b = operands
           if can_pallas:
             N_atoms = int(p_b.shape[1])
             ei = excl_indices if has_excl else jnp.full((N_atoms, 1), -1, dtype=jnp.int32)
             ev = excl_scales_vdw if has_excl else jnp.ones((N_atoms, 1), dtype=jnp.float32)
             ee = excl_scales_elec if has_excl else jnp.ones((N_atoms, 1), dtype=jnp.float32)
-            idx_new_b, occ_new_b = _pallas_prune_and_encode_cell_list_batch(
+            idx_new_b, occ_new_b, mkt_new_b = _pallas_prune_and_encode_cell_list_batch(
               B,
               (True, True, False, False, False),
               p_b,
@@ -464,13 +510,16 @@ def make_neighbor_list_fn(
               mask_batched=(atom_mask is not None and atom_mask.ndim == 2),
               rebuild_mask=su_op,
               old_idx=_i_b,
+              precomputed_excl=precomp_excl_static,
+              return_max_k_tiles=True,
+              old_max_k_tiles=m_b,
             )
             overflow_bit = jnp.uint8(partition.PartitionErrorCode.NEIGHBOR_LIST_OVERFLOW)
             err_new_b = jnp.where(su_op & (occ_new_b > max_occ_i), e_b | overflow_bit, e_b)
             ref_new_b = jnp.where(su_op[:, None, None], p_b.astype(_r_b.dtype), _r_b)
-            return idx_new_b, ref_new_b, err_new_b
+            return idx_new_b, ref_new_b, err_new_b, mkt_new_b
 
-          def _single_fallback(p_1, r_1, i_1, e_1, bx_1, su_1):
+          def _single_fallback(p_1, r_1, i_1, e_1, bx_1, su_1, m_1):
             def _do_1(_):
               b_diag = jnp.diag(bx_1) if bx_1.ndim == 2 else bx_1
               forced_ref = p_1 + jnp.asarray(0.5, dtype=p_1.dtype) * b_diag.astype(p_1.dtype)
@@ -479,49 +528,55 @@ def make_neighbor_list_fn(
                 idx=i_1,
                 reference_position=forced_ref,
                 error=partition.PartitionError(e_1),
+                max_k_tiles=None,
               )
               nbr_out = fns.update(p_1, nbr_tmp, **kwargs)
               idx_enc = _encode_if_needed(nbr_out.idx, int(p_1.shape[0]))
-              return idx_enc, nbr_out.reference_position, nbr_out.error.code
+              mkt_enc = _max_k_tiles_from_idx(idx_enc, int(p_1.shape[0]))
+              return idx_enc, nbr_out.reference_position, nbr_out.error.code, mkt_enc
 
             return jax.lax.cond(
               su_1,
               _do_1,
-              lambda _: (i_1, r_1, e_1),
+              lambda _: (i_1, r_1, e_1, m_1),
               None,
             )
 
-          return jax.vmap(_single_fallback)(p_b, _r_b, _i_b, e_b, b_b, su_op)
+          return jax.vmap(_single_fallback)(p_b, _r_b, _i_b, e_b, b_b, su_op, m_b)
 
         def _keep_batch(operands):
-          _p_b, r_b, i_b, e_b, _b_b, _su_op = operands
-          return i_b, r_b, e_b
+          _p_b, r_b, i_b, e_b, _b_b, _su_op, m_b = operands
+          return i_b, r_b, e_b, m_b
 
-        out_idx_b, out_ref_b, out_err_b = jax.lax.cond(
+        out_idx_b, out_ref_b, out_err_b, out_mkt_b = jax.lax.cond(
           any_upd,
           _do_batch,
           _keep_batch,
-          (pos_b, ref_b, idx_b, err_b, bx_b, su_b),
+          (pos_b, ref_b, idx_b, err_b, bx_b, su_b, mkt_b),
         )
-        return (out_idx_b, out_ref_b, out_err_b), (True, True, True)
+        return (out_idx_b, out_ref_b, out_err_b, out_mkt_b), (True, True, True, True)
 
-      idx_out, ref_out, err_code_out = _cond_rebuild(
+      idx_out, ref_out, err_code_out, mkt_out = _cond_rebuild(
         pos_w,
         neighbors.reference_position,
         neighbors.idx,
         neighbors.error.code,
         b_eff,
+        mkt_in,
       )
       return dataclasses.replace(
         neighbors,
         idx=idx_out,
         reference_position=ref_out,
         error=partition.PartitionError(err_code_out),
+        max_k_tiles=mkt_out,
         update_fn=update,
       )
 
-    nbr = fns.update(pos_w, neighbors, **kwargs)
-    return dataclasses.replace(nbr, update_fn=update)
+    nbr_plain = dataclasses.replace(neighbors, max_k_tiles=None)
+    nbr = fns.update(pos_w, nbr_plain, **kwargs)
+    mkt_out = _max_k_tiles_from_idx(nbr.idx, int(pos_w.shape[-2]))
+    return dataclasses.replace(nbr, max_k_tiles=mkt_out, update_fn=update)
 
   update._pre_encoded_exclusions = has_excl  # type: ignore[attr-defined]
   update._ghosts_filtered = atom_mask is not None  # type: ignore[attr-defined]
@@ -529,10 +584,22 @@ def make_neighbor_list_fn(
 
   def allocate(position: Array, **kwargs) -> partition.NeighborList:
     b = kwargs.get("box", None)
+    b_eff = jnp.asarray(b) if b is not None else box
     pos_w = _wrap(position, b)
     nbr = fns.allocate(pos_w, **kwargs)
-    idx_enc = _encode_if_needed(nbr.idx, int(pos_w.shape[-2]))
-    return dataclasses.replace(nbr, idx=idx_enc, update_fn=update)
+    can_pallas_alloc = (
+      not disable_cell_list
+      and b_eff.ndim == 1
+      and getattr(nbr, "cell_list_fn", None) is not None
+      and getattr(nbr, "cell_list_capacity", None) is not None
+      and _should_use_pallas_nl_default(use_pallas_nl)
+    )
+    if can_pallas_alloc:
+      return _rebuild_unconditional(pos_w, nbr, **kwargs)
+    n_at_a = int(pos_w.shape[-2])
+    idx_enc = _encode_if_needed(nbr.idx, n_at_a)
+    mkt_enc = _max_k_tiles_from_idx(idx_enc, n_at_a)
+    return dataclasses.replace(nbr, idx=idx_enc, max_k_tiles=mkt_enc, update_fn=update)
 
   return partition.NeighborListFns(allocate, update)
 
@@ -1604,6 +1671,95 @@ def _make_prune_and_encode_kernel(
     return _kernel
 
 
+def _max_k_tiles_from_idx(idx: Array, n_atoms: int | None = None) -> Array:
+    """Compute per-32-atom-block active K-tile count from an ``(N, K)`` or ``(B, N, K)`` neighbor array."""
+    is_batched = idx.ndim == 3
+    idx_b = idx if is_batched else idx[None, ...]
+    B_i, N_i, K_i = int(idx_b.shape[0]), int(idx_b.shape[1]), int(idx_b.shape[2])
+    eff_n = int(n_atoms) if n_atoms is not None else N_i
+    n_atom_blocks = max(1, (N_i + 31) // 32)
+    if K_i == 0 or N_i == 0:
+        out = jnp.zeros((B_i, n_atom_blocks), dtype=jnp.int32)
+        return out if is_batched else out[0]
+    k_blocks = max(1, (K_i + 31) // 32)
+    pad_n = n_atom_blocks * 32 - N_i
+    pad_k = k_blocks * 32 - K_i
+    if K_i >= 128:
+        first_cols = idx_b[:, :, ::32].astype(jnp.int32)
+        raw_first = jnp.where(first_cols >= 0, first_cols & jnp.int32(_NB_INDEX_MASK), first_cols)
+        col_valid = (raw_first >= 0) & (raw_first < eff_n)
+        if pad_n > 0:
+            col_valid = jnp.pad(col_valid, ((0, 0), (0, pad_n), (0, 0)), constant_values=False)
+        tile_valid = jnp.any(col_valid.reshape((B_i, n_atom_blocks, 32, k_blocks)), axis=2)
+    else:
+        raw_all = idx_b.astype(jnp.int32)
+        raw_idx = jnp.where(raw_all >= 0, raw_all & jnp.int32(_NB_INDEX_MASK), raw_all)
+        val_mask = (raw_idx >= 0) & (raw_idx < eff_n)
+        if pad_n > 0 or pad_k > 0:
+            val_mask = jnp.pad(val_mask, ((0, 0), (0, pad_n), (0, pad_k)), constant_values=False)
+        tile_valid = jnp.any(val_mask.reshape((B_i, n_atom_blocks, 32, k_blocks, 32)), axis=(2, 4))
+    tile_idx = jnp.arange(1, k_blocks + 1, dtype=jnp.int32)[None, None, :]
+    mkt = jnp.max(jnp.where(tile_valid, tile_idx, jnp.int32(0)), axis=-1).astype(jnp.int32)
+    return mkt if is_batched else mkt[0]
+
+
+def precompute_static_nl_exclusion_tables(
+    excl_indices: Array,
+    excl_scales_vdw: Array,
+    excl_scales_elec: Array,
+    n_atoms: int,
+    *,
+    scale_14_vdw: float = 0.5,
+    scale_14_elec: float = 0.83333333,
+) -> tuple[Array, Array, Array, Array]:
+    """Precompute ``(excl_min, excl_max, excl_idx_32, excl_tag_32)`` once outside the MD step loop (MK-56)."""
+    M_BLOCK = 32
+    is_batched = excl_indices.ndim == 3
+    ei_b = excl_indices if is_batched else excl_indices[None, ...]
+    ev_b = excl_scales_vdw if is_batched else excl_scales_vdw[None, ...]
+    ee_b = excl_scales_elec if is_batched else excl_scales_elec[None, ...]
+    N = int(n_atoms)
+    M_raw = int(ei_b.shape[2])
+    if M_raw == 0:
+        B_e = int(ei_b.shape[0])
+        z_min = jnp.full((B_e, N), 0x7FFFFFFF, dtype=jnp.int32)
+        z_max = jnp.full((B_e, N), -1, dtype=jnp.int32)
+        z_idx = jnp.full((B_e, N, M_BLOCK), -1, dtype=jnp.int32)
+        z_tag = jnp.zeros((B_e, N, M_BLOCK), dtype=jnp.int32)
+        if is_batched:
+            return z_min, z_max, z_idx, z_tag
+        return z_min[0], z_max[0], z_idx[0], z_tag[0]
+
+    ei_clip = ei_b[:, :, :M_BLOCK].astype(jnp.int32)
+    ev_clip = ev_b[:, :, :M_BLOCK].astype(jnp.float32)
+    ee_clip = ee_b[:, :, :M_BLOCK].astype(jnp.float32)
+    pad_m = max(0, M_BLOCK - int(ei_clip.shape[2]))
+    if pad_m > 0:
+        ei_clip = jnp.pad(ei_clip, ((0, 0), (0, 0), (0, pad_m)), constant_values=-1)
+        ev_clip = jnp.pad(ev_clip, ((0, 0), (0, 0), (0, pad_m)), constant_values=1.0)
+        ee_clip = jnp.pad(ee_clip, ((0, 0), (0, 0), (0, pad_m)), constant_values=1.0)
+    valid_e = (ei_clip >= 0) & (ei_clip < N)
+    tol = 1e-4
+    is_full = valid_e & (jnp.abs(ev_clip) <= tol) & (jnp.abs(ee_clip) <= tol)
+    is_14 = (
+        valid_e
+        & (~is_full)
+        & (jnp.abs(ev_clip - float(scale_14_vdw)) <= tol)
+        & (jnp.abs(ee_clip - float(scale_14_elec)) <= tol)
+    )
+    excl_tag = jnp.where(
+        is_full,
+        jnp.int32(_NB_EXCL_FULL_BIT),
+        jnp.where(is_14, jnp.int32(_NB_EXCL_14_BIT), jnp.int32(0)),
+    )
+    int_max = jnp.int32(0x7FFFFFFF)
+    excl_min = jnp.min(jnp.where(valid_e, ei_clip, int_max), axis=-1)
+    excl_max = jnp.max(jnp.where(valid_e, ei_clip, jnp.int32(-1)), axis=-1)
+    if is_batched:
+        return excl_min, excl_max, ei_clip, excl_tag
+    return excl_min[0], excl_max[0], ei_clip[0], excl_tag[0]
+
+
 def _pallas_prune_and_encode_cell_list_batch(
     axis_size: int,
     in_batched: tuple[bool, ...],
@@ -1625,7 +1781,10 @@ def _pallas_prune_and_encode_cell_list_batch(
     mask_batched: bool = False,
     rebuild_mask: Array | None = None,
     old_idx: Array | None = None,
-) -> tuple[Array, Array]:
+    precomputed_excl: tuple[Array, Array, Array, Array] | None = None,
+    return_max_k_tiles: bool = False,
+    old_max_k_tiles: Array | None = None,
+) -> tuple[Array, Array] | tuple[Array, Array, Array]:
     """Batched 2D-grid ``(N, B)`` Pallas cell-list pruning + in-register exclusion encoding."""
     B = int(axis_size)
     pos_b = position if in_batched[0] else jnp.broadcast_to(position[None, ...], (B,) + position.shape)
@@ -1687,45 +1846,41 @@ def _pallas_prune_and_encode_cell_list_batch(
     cell_id_flat = cell_id_b.reshape(B * N)
     box_flat = bx_3.reshape(bx_3.shape[0] * 3)
 
-    B_excl = ei_b.shape[0]
-    M_raw = int(ei_b.shape[2]) if ei_b.ndim == 3 else 0
-    if encode_exclusions and M_raw > 0:
-        ei_clip = ei_b[:, :, :M_BLOCK].astype(jnp.int32)
-        ev_clip = ev_b[:, :, :M_BLOCK].astype(jnp.float32)
-        ee_clip = ee_b[:, :, :M_BLOCK].astype(jnp.float32)
-        pad_m = max(0, M_BLOCK - ei_clip.shape[2])
-        if pad_m > 0:
-            ei_clip = jnp.pad(ei_clip, ((0, 0), (0, 0), (0, pad_m)), constant_values=-1)
-            ev_clip = jnp.pad(ev_clip, ((0, 0), (0, 0), (0, pad_m)), constant_values=1.0)
-            ee_clip = jnp.pad(ee_clip, ((0, 0), (0, 0), (0, pad_m)), constant_values=1.0)
-        valid_e = (ei_clip >= 0) & (ei_clip < N)
-        tol = 1e-4
-        is_full = valid_e & (jnp.abs(ev_clip) <= tol) & (jnp.abs(ee_clip) <= tol)
-        is_14 = (
-            valid_e
-            & (~is_full)
-            & (jnp.abs(ev_clip - float(scale_14_vdw)) <= tol)
-            & (jnp.abs(ee_clip - float(scale_14_elec)) <= tol)
-        )
-        excl_tag = jnp.where(
-            is_full,
-            jnp.int32(_NB_EXCL_FULL_BIT),
-            jnp.where(is_14, jnp.int32(_NB_EXCL_14_BIT), jnp.int32(0)),
-        )
-        int_max = jnp.int32(0x7FFFFFFF)
-        excl_min = jnp.min(jnp.where(valid_e, ei_clip, int_max), axis=-1)
-        excl_max = jnp.max(jnp.where(valid_e, ei_clip, jnp.int32(-1)), axis=-1)
-        excl_min_flat = excl_min.reshape(B_excl * N)
-        excl_max_flat = excl_max.reshape(B_excl * N)
-        excl_idx_flat = ei_clip.reshape(B_excl * N * M_BLOCK)
-        excl_tag_flat = excl_tag.reshape(B_excl * N * M_BLOCK)
+    if encode_exclusions and precomputed_excl is not None:
+        em_in, ex_in, ei32_in, et32_in = precomputed_excl
+        em_b = em_in if em_in.ndim == 2 else em_in[None, ...]
+        ex_b = ex_in if ex_in.ndim == 2 else ex_in[None, ...]
+        ei32_b = ei32_in if ei32_in.ndim == 3 else ei32_in[None, ...]
+        et32_b = et32_in if et32_in.ndim == 3 else et32_in[None, ...]
+        B_excl = int(ei32_b.shape[0])
+        excl_min_flat = em_b.astype(jnp.int32).reshape(B_excl * N)
+        excl_max_flat = ex_b.astype(jnp.int32).reshape(B_excl * N)
+        excl_idx_flat = ei32_b.astype(jnp.int32).reshape(B_excl * N * M_BLOCK)
+        excl_tag_flat = et32_b.astype(jnp.int32).reshape(B_excl * N * M_BLOCK)
         do_encode = True
     else:
-        excl_min_flat = jnp.zeros((1,), dtype=jnp.int32)
-        excl_max_flat = jnp.zeros((1,), dtype=jnp.int32)
-        excl_idx_flat = jnp.zeros((M_BLOCK,), dtype=jnp.int32)
-        excl_tag_flat = jnp.zeros((M_BLOCK,), dtype=jnp.int32)
-        do_encode = False
+        B_excl = int(ei_b.shape[0])
+        M_raw = int(ei_b.shape[2]) if ei_b.ndim == 3 else 0
+        if encode_exclusions and M_raw > 0:
+            excl_min, excl_max, ei_clip, excl_tag = precompute_static_nl_exclusion_tables(
+                ei_b,
+                ev_b,
+                ee_b,
+                N,
+                scale_14_vdw=scale_14_vdw,
+                scale_14_elec=scale_14_elec,
+            )
+            excl_min_flat = excl_min.reshape(B_excl * N)
+            excl_max_flat = excl_max.reshape(B_excl * N)
+            excl_idx_flat = ei_clip.reshape(B_excl * N * M_BLOCK)
+            excl_tag_flat = excl_tag.reshape(B_excl * N * M_BLOCK)
+            do_encode = True
+        else:
+            excl_min_flat = jnp.zeros((1,), dtype=jnp.int32)
+            excl_max_flat = jnp.zeros((1,), dtype=jnp.int32)
+            excl_idx_flat = jnp.zeros((M_BLOCK,), dtype=jnp.int32)
+            excl_tag_flat = jnp.zeros((M_BLOCK,), dtype=jnp.int32)
+            do_encode = False
 
     use_scratch_slot = bool(interpret)
     if use_scratch_slot:
@@ -1791,8 +1946,22 @@ def _pallas_prune_and_encode_cell_list_batch(
         excl_tag_flat,
         nbr_init_flat,
     )
-    occ_b = jnp.max(occ_flat.reshape((B, N)), axis=-1)
+    occ_2d = occ_flat.reshape((B, N))
+    occ_b = jnp.max(occ_2d, axis=-1)
     nbr_out_b = (nbr_flat[:-1] if use_scratch_slot else nbr_flat).reshape((B, N, K))
+    if return_max_k_tiles:
+        n_atom_blocks = max(1, (N + 31) // 32)
+        pad_n = n_atom_blocks * 32 - N
+        occ_pad = jnp.pad(occ_2d, ((0, 0), (0, pad_n))) if pad_n > 0 else occ_2d
+        max_occ_blk = jnp.minimum(
+            jnp.max(occ_pad.reshape((B, n_atom_blocks, 32)), axis=-1),
+            jnp.int32(K),
+        )
+        mkt_b = (max_occ_blk + jnp.int32(31)) // jnp.int32(32)
+        if rebuild_mask is not None and old_max_k_tiles is not None:
+            su_bool = jnp.asarray(rebuild_mask, dtype=jnp.bool_).reshape((B, 1))
+            mkt_b = jnp.where(su_bool, mkt_b, jnp.asarray(old_max_k_tiles, dtype=jnp.int32))
+        return nbr_out_b, occ_b, mkt_b
     return nbr_out_b, occ_b
 
 
@@ -1813,7 +1982,9 @@ def pallas_prune_and_encode_cell_list(
     interpret: bool = False,
     grid_dims: tuple[int, int, int] | None = None,
     atom_mask: Array | None = None,
-) -> tuple[Array, Array]:
+    precomputed_excl: tuple[Array, Array, Array, Array] | None = None,
+    return_max_k_tiles: bool = False,
+) -> tuple[Array, Array] | tuple[Array, Array, Array]:
     """Prune 3D cell-list stencil candidates and pre-encode exclusions in one Pallas kernel."""
     cs = float(cell_size)
     cc = int(cell_capacity)
@@ -1823,6 +1994,7 @@ def pallas_prune_and_encode_cell_list(
     s14_e = float(scale_14_elec)
     enc = bool(encode_exclusions)
     interp = bool(interpret)
+    ret_mkt = bool(return_max_k_tiles)
     g_dims = (
         grid_dims
         if grid_dims is not None
@@ -1832,7 +2004,7 @@ def pallas_prune_and_encode_cell_list(
     if atom_mask is not None:
         @jax.custom_batching.custom_vmap
         def _vmappable_masked(pos, bx, ei, ev, ee, am):
-            nbr_b, occ_b = _pallas_prune_and_encode_cell_list_batch(
+            res = _pallas_prune_and_encode_cell_list_batch(
                 1,
                 (False, False, False, False, False),
                 pos,
@@ -1851,12 +2023,16 @@ def pallas_prune_and_encode_cell_list(
                 g_dims,
                 atom_mask=am,
                 mask_batched=False,
+                precomputed_excl=precomputed_excl,
+                return_max_k_tiles=ret_mkt,
             )
-            return nbr_b[0], occ_b[0]
+            if ret_mkt:
+                return res[0][0], res[1][0], res[2][0]
+            return res[0][0], res[1][0]
 
         @_vmappable_masked.def_vmap
         def _vmap_rule_masked(axis_size, in_batched, pos, bx, ei, ev, ee, am):
-            nbr_b, occ_b = _pallas_prune_and_encode_cell_list_batch(
+            res = _pallas_prune_and_encode_cell_list_batch(
                 int(axis_size),
                 tuple(bool(b) for b in in_batched[:5]),
                 pos,
@@ -1875,8 +2051,12 @@ def pallas_prune_and_encode_cell_list(
                 g_dims,
                 atom_mask=am,
                 mask_batched=bool(in_batched[5]),
+                precomputed_excl=precomputed_excl,
+                return_max_k_tiles=ret_mkt,
             )
-            return (nbr_b, occ_b), (True, True)
+            if ret_mkt:
+                return res, (True, True, True)
+            return res, (True, True)
 
         return _vmappable_masked(
             position,
@@ -1889,7 +2069,7 @@ def pallas_prune_and_encode_cell_list(
 
     @jax.custom_batching.custom_vmap
     def _vmappable(pos, bx, ei, ev, ee):
-        nbr_b, occ_b = _pallas_prune_and_encode_cell_list_batch(
+        res = _pallas_prune_and_encode_cell_list_batch(
             1,
             (False, False, False, False, False),
             pos,
@@ -1906,12 +2086,16 @@ def pallas_prune_and_encode_cell_list(
             enc,
             interp,
             g_dims,
+            precomputed_excl=precomputed_excl,
+            return_max_k_tiles=ret_mkt,
         )
-        return nbr_b[0], occ_b[0]
+        if ret_mkt:
+            return res[0][0], res[1][0], res[2][0]
+        return res[0][0], res[1][0]
 
     @_vmappable.def_vmap
     def _vmap_rule(axis_size, in_batched, pos, bx, ei, ev, ee):
-        nbr_b, occ_b = _pallas_prune_and_encode_cell_list_batch(
+        res = _pallas_prune_and_encode_cell_list_batch(
             int(axis_size),
             tuple(bool(b) for b in in_batched),
             pos,
@@ -1928,7 +2112,12 @@ def pallas_prune_and_encode_cell_list(
             enc,
             interp,
             g_dims,
+            precomputed_excl=precomputed_excl,
+            return_max_k_tiles=ret_mkt,
         )
-        return (nbr_b, occ_b), (True, True)
+        if ret_mkt:
+            return res, (True, True, True)
+        return res, (True, True)
 
     return _vmappable(position, box, excl_indices, excl_scales_vdw, excl_scales_elec)
+

@@ -2333,4 +2333,263 @@ def test_pallas_v31_mk50_mk53_pillars():
         jax.config.update("jax_enable_x64", prev_x64)
 
 
+def test_pallas_v32_mk54_to_mk57_optimizations_and_parity():
+    """Verify Pallas v3.2 pillars MK-54, MK-55, MK-56, and MK-57."""
+    from prolix.api.ensemble_dispatch import dispatch_n_steps_inference
+    from prolix.pallas_kernels import (
+        _infer_first_pure_water_block,
+        build_tile_pair_neighbor_list,
+        pallas_bonded_and_nonbonded_nl_fused,
+        pallas_nonbonded_nl,
+        pallas_nonbonded_tile_pairs,
+    )
+    from prolix.physics.neighbor_list import (
+        _max_k_tiles_from_idx,
+        _pallas_prune_and_encode_cell_list_batch,
+        precompute_static_nl_exclusion_tables,
+    )
+    from prolix.physics.pme import make_spme_energy_fn
+    from prolix.physics.settle import (
+        _philox2x32_box_muller_pair,
+        pallas_baoab_post_force,
+        pallas_baoab_pre_force,
+    )
 
+    prev_x64 = jax.config.read("jax_enable_x64")
+    jax.config.update("jax_enable_x64", False)
+    try:
+        # 1. MK-54: dispatch_n_steps_inference with _two_level_runner & scalar while_loop(vmap)
+        init_carry = (jnp.array([1.0, 2.0], dtype=jnp.float32), jnp.array([10, 20], dtype=jnp.int32))
+        def _dummy_step(c):
+            return (c[0] + jnp.float32(1.0), c[1] + jnp.int32(2))
+        _dummy_step._two_level_runner = lambda c, n, _it: jax.lax.fori_loop(
+            0, n, lambda _, x: _dummy_step(x), c
+        )
+        fin_carry = dispatch_n_steps_inference(_dummy_step, init_carry, 5)
+        np.testing.assert_allclose(np.asarray(fin_carry[0]), np.array([6.0, 7.0], dtype=np.float32))
+        np.testing.assert_allclose(np.asarray(fin_carry[1]), np.array([20, 30], dtype=np.int32))
+
+        # 2. MK-55: In-register Philox-4x32-10 + Box-Muller & non-multiple-of-64 BAOAB (N=50)
+        offs = jnp.arange(256, dtype=jnp.int32)
+        z0, z1 = _philox2x32_box_muller_pair(
+            jnp.int32(123), jnp.int32(456), offs, offs + jnp.int32(0x10000001), jnp.float32
+        )
+        assert z0.shape == (256,) and z1.shape == (256,)
+        assert bool(jnp.all(jnp.isfinite(z0)) and jnp.all(jnp.isfinite(z1)))
+        assert 0.5 < float(jnp.std( jnp.concatenate([z0, z1]) )) < 1.5
+
+        rng = np.random.default_rng(20261108)
+        N_50 = 50  # N % 64 != 0 and N % 32 != 0
+        _g = np.stack(np.meshgrid(np.linspace(2.5, 17.5, 4), np.linspace(2.5, 17.5, 4), np.linspace(2.5, 17.5, 4)), axis=-1).reshape(-1, 3)[:N_50]
+        pos_50 = jnp.asarray((_g + rng.uniform(-0.3, 0.3, size=(N_50, 3))).astype(np.float32))
+        pos_50 = pos_50.at[1].set(pos_50[0] + jnp.array([1.8, 0.1, -0.1], dtype=jnp.float32))
+        pos_50 = pos_50.at[3].set(pos_50[2] + jnp.array([2.2, -0.2, 0.1], dtype=jnp.float32))
+        mom_50 = jnp.asarray(rng.normal(0.0, 0.5, size=(N_50, 3)).astype(np.float32))
+        f_50 = jnp.asarray(rng.normal(0.0, 0.2, size=(N_50, 3)).astype(np.float32))
+        mass_50 = jnp.full((N_50, 1), 12.0, dtype=jnp.float32)
+        am_50 = jnp.arange(N_50) < 44
+        wi_50 = jnp.array([[38, 39, 40], [41, 42, 43]], dtype=jnp.int32)
+        wm_50 = jnp.array([True, True], dtype=jnp.bool_)
+        box_50 = jnp.array([20.0, 20.0, 20.0], dtype=jnp.float32)
+        r_pre, p_pre, k_pre = pallas_baoab_pre_force(
+            pos_50,
+            mom_50,
+            f_50,
+            mass_50,
+            jax.random.PRNGKey(7),
+            wi_50,
+            wm_50,
+            box_50,
+            jnp.float32(0.04),
+            jnp.float32(0.6),
+            0.5,
+            atom_mask=am_50,
+            interpret=True,
+        )
+        p_post = pallas_baoab_post_force(
+            r_pre, p_pre, f_50, mass_50, wi_50, wm_50, jnp.float32(0.04), atom_mask=am_50, interpret=True
+        )
+        assert r_pre.shape == (N_50, 3) and p_post.shape == (N_50, 3)
+        assert bool(jnp.all(jnp.isfinite(r_pre)) and jnp.all(jnp.isfinite(p_post)))
+        np.testing.assert_allclose(np.asarray(p_post[44:]), np.asarray(mom_50[44:]), atol=1e-7)
+
+        # 3. MK-56: precompute_static_nl_exclusion_tables, return_max_k_tiles, _infer_first_pure_water_block, N=50 megakernel
+        ei_50 = jnp.full((N_50, 4), -1, dtype=jnp.int32)
+        ev_50 = jnp.ones((N_50, 4), dtype=jnp.float32)
+        ee_50 = jnp.ones((N_50, 4), dtype=jnp.float32)
+        ei_50 = ei_50.at[0, 0].set(1).at[1, 0].set(0).at[2, 0].set(3).at[3, 0].set(2)
+        ev_50 = ev_50.at[0, 0].set(0.0).at[1, 0].set(0.0).at[2, 0].set(0.5).at[3, 0].set(0.5)
+        ee_50 = ee_50.at[0, 0].set(0.0).at[1, 0].set(0.0).at[2, 0].set(0.83333333).at[3, 0].set(0.83333333)
+        pre_excl = precompute_static_nl_exclusion_tables(ei_50, ev_50, ee_50, n_atoms=N_50)
+        assert len(pre_excl) == 4
+        idx_p, occ_p, mkt_p = _pallas_prune_and_encode_cell_list_batch(
+            1,
+            (False, False, False, False, False),
+            pos_50,
+            box_50,
+            ei_50,
+            ev_50,
+            ee_50,
+            cell_size=5.0,
+            cell_capacity=32,
+            max_occupancy=64,
+            r_cutoff=4.8,
+            encode_exclusions=True,
+            interpret=True,
+            grid_dims=(4, 4, 4),
+            atom_mask=am_50,
+            precomputed_excl=pre_excl,
+            return_max_k_tiles=True,
+        )
+        assert mkt_p.shape == (1, 2)
+        mkt_ref = _max_k_tiles_from_idx(idx_p[0])
+        assert mkt_ref.shape == (2,)
+        assert bool(jnp.all(mkt_p[0] >= mkt_ref))
+
+        bonds_50 = jnp.array([[0, 1], [2, 3]], dtype=jnp.int32)
+        b_params_50 = jnp.array([[1.5, 300.0], [1.5, 300.0]], dtype=jnp.float32)
+        b_mask_50 = jnp.array([True, True], dtype=jnp.bool_)
+        pw_blk = _infer_first_pure_water_block(N_50, ((bonds_50, b_mask_50, 2),))
+        assert pw_blk == 1  # max bonded atom is 3 -> block 0 has bonded atoms, block 1 is pure water
+
+        q_50 = jnp.asarray(rng.uniform(-0.4, 0.4, size=(N_50,)).astype(np.float32))
+        sig_50 = jnp.full((N_50,), 3.0, dtype=jnp.float32)
+        eps_50 = jnp.full((N_50,), 0.1, dtype=jnp.float32)
+        e_mk56, f_mk56 = pallas_bonded_and_nonbonded_nl_fused(
+            pos_50,
+            q_50,
+            sig_50,
+            eps_50,
+            am_50,
+            idx_p[0],
+            ei_50,
+            ev_50,
+            ee_50,
+            bonds=bonds_50,
+            bond_params=b_params_50,
+            bond_mask=b_mask_50,
+            box=box_50,
+            pme_alpha=0.34,
+            cutoff=4.8,
+            include_pme_excl_erf=True,
+            excl_mode="pre_encoded",
+            max_k_tiles=mkt_p[0],
+            first_pure_water_block=pw_blk,
+            return_forces=True,
+            interpret=True,
+        )
+        e_mk56_ref, f_mk56_ref = pallas_bonded_and_nonbonded_nl_fused(
+            pos_50,
+            q_50,
+            sig_50,
+            eps_50,
+            am_50,
+            idx_p[0],
+            ei_50,
+            ev_50,
+            ee_50,
+            bonds=bonds_50,
+            bond_params=b_params_50,
+            bond_mask=b_mask_50,
+            box=box_50,
+            pme_alpha=0.34,
+            cutoff=4.8,
+            include_pme_excl_erf=True,
+            excl_mode="pre_encoded",
+            max_k_tiles=None,
+            first_pure_water_block=2,
+            return_forces=True,
+            interpret=True,
+        )
+        np.testing.assert_allclose(np.asarray(e_mk56), np.asarray(e_mk56_ref), rtol=1e-5, atol=1e-5)
+        np.testing.assert_allclose(np.asarray(f_mk56), np.asarray(f_mk56_ref), rtol=1e-5, atol=1e-5)
+        e_mk56_no_e, f_mk56_no_e = pallas_bonded_and_nonbonded_nl_fused(
+            pos_50,
+            q_50,
+            sig_50,
+            eps_50,
+            am_50,
+            idx_p[0],
+            ei_50,
+            ev_50,
+            ee_50,
+            bonds=bonds_50,
+            bond_params=b_params_50,
+            bond_mask=b_mask_50,
+            box=box_50,
+            pme_alpha=0.34,
+            cutoff=4.8,
+            include_pme_excl_erf=True,
+            excl_mode="pre_encoded",
+            max_k_tiles=mkt_p[0],
+            first_pure_water_block=pw_blk,
+            return_forces=True,
+            compute_energy=False,
+            interpret=True,
+        )
+        assert float(e_mk56_no_e) == 0.0
+        np.testing.assert_allclose(np.asarray(f_mk56_no_e), np.asarray(f_mk56), rtol=1e-6, atol=1e-6)
+
+        # 4. MK-57 (a): Direct force-only SPME & energy_fn_from_bundle(return_forces=True) parity
+        spme_e_fn = make_spme_energy_fn(box_50, alpha=0.34, grid_dims=(16, 16, 16), use_pallas_pme=True, return_forces=False)
+        spme_f_fn = make_spme_energy_fn(box_50, alpha=0.34, grid_dims=(16, 16, 16), use_pallas_pme=True, return_forces=True)
+        f_spme_direct = spme_f_fn(pos_50, q_50, am_50)
+        f_spme_grad = -jax.grad(lambda r: spme_e_fn(r, q_50, am_50))(pos_50)
+        np.testing.assert_allclose(np.asarray(f_spme_direct), np.asarray(f_spme_grad), rtol=1e-5, atol=1e-5)
+
+        bundle = _make_periodic_solvated_bundle(dtype=jnp.float32, seed=77)
+        disp_fn, _ = displacement_fn_for_bundle(bundle)
+        nl_fn = nl_mod.make_neighbor_list_fn(disp_fn, jnp.diag(bundle.box), 9.0, capacity_multiplier=1.5, dr_threshold=0.5)
+        nbr_enc = _encode_bundle_nl(nl_fn.allocate(bundle.positions), bundle)
+        e_fn_bun = energy_fn_from_bundle(
+            bundle, build_dense_exclusions=False, use_pallas=True, use_pallas_pme=True, excl_mode="pre_encoded", return_forces=False
+        )
+        f_fn_bun = energy_fn_from_bundle(
+            bundle, build_dense_exclusions=False, use_pallas=True, use_pallas_pme=True, excl_mode="pre_encoded", return_forces=True
+        )
+        f_bun_direct = f_fn_bun(bundle.positions, neighbor=nbr_enc)
+        f_bun_grad = -jax.grad(lambda r: e_fn_bun(r, neighbor=nbr_enc))(bundle.positions)
+        np.testing.assert_allclose(np.asarray(f_bun_direct), np.asarray(f_bun_grad), rtol=1e-5, atol=1e-5)
+        f_bun_jaxpr = jax.make_jaxpr(lambda r: f_fn_bun(r, neighbor=nbr_enc))(bundle.positions)
+        assert sum(1 for eq in f_bun_jaxpr.jaxpr.eqns if eq.primitive.name == "reduce_sum") == 0
+
+        # 5. MK-57 (b): Morton-sorted 32x32 Tile-Pair neighbor list & pallas_nonbonded_tile_pairs parity
+        tp_unsorted = build_tile_pair_neighbor_list(
+            idx_p[0], excl_indices=ei_50, excl_scales_vdw=ev_50, excl_scales_elec=ee_50, atom_mask=am_50, morton_sort=False
+        )
+        tp_morton = build_tile_pair_neighbor_list(
+            idx_p[0],
+            excl_indices=ei_50,
+            excl_scales_vdw=ev_50,
+            excl_scales_elec=ee_50,
+            atom_mask=am_50,
+            positions=pos_50,
+            box=box_50,
+            morton_sort=True,
+        )
+        assert tp_morton.atom_perm is not None and tp_morton.atom_inv_perm is not None
+        e_tp_u, f_tp_u = pallas_nonbonded_tile_pairs(
+            pos_50, q_50, sig_50, eps_50, tp_unsorted, atom_mask=am_50, box=box_50, pme_alpha=0.34, cutoff=4.8, include_pme_excl_erf=True, return_forces=True, interpret=True
+        )
+        e_tp_m, f_tp_m = pallas_nonbonded_tile_pairs(
+            pos_50, q_50, sig_50, eps_50, tp_morton, atom_mask=am_50, box=box_50, pme_alpha=0.34, cutoff=4.8, include_pme_excl_erf=True, return_forces=True, interpret=True
+        )
+        np.testing.assert_allclose(np.asarray(e_tp_m), np.asarray(e_tp_u), rtol=1e-5, atol=1e-5)
+        np.testing.assert_allclose(np.asarray(f_tp_m), np.asarray(f_tp_u), rtol=1e-5, atol=1e-5)
+
+        g_tp_m = jax.grad(
+            lambda r, q, s, ep: pallas_nonbonded_tile_pairs(
+                r, q, s, ep, tp_morton, atom_mask=am_50, box=box_50, pme_alpha=0.34, cutoff=4.8, include_pme_excl_erf=True, interpret=True
+            ),
+            argnums=(0, 1, 2, 3),
+        )(pos_50, q_50, sig_50, eps_50)
+        g_nb_ref = jax.grad(
+            lambda r, q, s, ep: pallas_nonbonded_nl(
+                r, q, s, ep, am_50, idx_p[0], ei_50, ev_50, ee_50, box=box_50, pme_alpha=0.34, cutoff=4.8, include_pme_excl_erf=True, excl_mode="pre_encoded", interpret=True
+            ),
+            argnums=(0, 1, 2, 3),
+        )(pos_50, q_50, sig_50, eps_50)
+        for g_m, g_r in zip(g_tp_m, g_nb_ref):
+            np.testing.assert_allclose(np.asarray(g_m), np.asarray(g_r), rtol=2e-4, atol=2e-4)
+    finally:
+        jax.config.update("jax_enable_x64", prev_x64)

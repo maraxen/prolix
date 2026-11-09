@@ -783,6 +783,129 @@ def _spme_cached_bwd(grid_dims, alpha, order, use_pallas_pme, residuals, g):
 _spme_energy_with_forces_cached.defvjp(_spme_cached_fwd, _spme_cached_bwd, symbolic_zeros=True)
 
 
+def _spme_forces_from_theta(
+    positions: jnp.ndarray,
+    charges: jnp.ndarray,
+    atom_mask: jnp.ndarray,
+    box_size: jnp.ndarray,
+    theta_norm: jnp.ndarray,
+    grid_dims: tuple[int, int, int],
+    order: int,
+    use_pallas_pme: bool,
+) -> jnp.ndarray:
+    dtype = positions.dtype
+    box_arr = jnp.asarray(box_size, dtype=dtype)
+    if use_pallas_pme and not in_export_context() and _is_ortho_box(positions, box_arr):
+        from xtrax.intent import Context
+
+        from prolix.physics.pme_pallas import make_gather_op
+
+        backend = "gpu" if not _pallas_interpret() else "cpu"
+        gather_op = make_gather_op(
+            grid_dims,
+            order,
+            compute_dq=False,
+            context=Context(kernels=True, backend=backend),
+        )
+        with jax.named_scope("pme_bwd_gather"):
+            forces, _ = gather_op(
+                positions.astype(jnp.float32),
+                charges.astype(jnp.float32),
+                atom_mask,
+                box_arr.astype(jnp.float32),
+                theta_norm.astype(jnp.float32),
+            )
+            forces = forces.astype(dtype)
+    else:
+        forces, _ = _gather_reference(
+            positions,
+            charges,
+            atom_mask,
+            box_size,
+            theta_norm.astype(dtype),
+            grid_dims=grid_dims,
+            order=order,
+        )
+    return (-COULOMB_CONSTANT * forces).astype(dtype)
+
+
+def spme_forces(
+    positions: jnp.ndarray,
+    charges: jnp.ndarray,
+    atom_mask: jnp.ndarray,
+    box_size: jnp.ndarray,
+    grid_dims: tuple[int, int, int],
+    alpha: float,
+    order: int = 4,
+    use_pallas_pme: bool = False,
+) -> jnp.ndarray:
+    """Direct SPME reciprocal force evaluation F = -dE/dr without scalar energy reductions (MK-57)."""
+    Kx, Ky, Kz = grid_dims
+    orig_dtype = positions.dtype
+    is_ortho = _is_ortho_box(positions, box_size)
+    if use_pallas_pme and not in_export_context() and is_ortho:
+        pos_w = positions.astype(jnp.float32)
+        q_w = charges.astype(jnp.float32)
+        box_w = jnp.asarray(box_size, dtype=jnp.float32)
+    else:
+        pos_w, q_w, box_w = positions, charges, jnp.asarray(box_size)
+    Q = spread_charges(
+        pos_w, q_w, atom_mask, box_w, grid_dims, order, use_pallas_pme
+    )
+    if use_pallas_pme and not in_export_context() and is_ortho:
+        Q = jnp.asarray(Q, dtype=jnp.float32)
+    with jax.named_scope("pme_fft_forward"):
+        Q_hat = jnp.fft.rfftn(Q, s=grid_dims, axes=(-3, -2, -1))
+    with jax.named_scope("pme_greens_setup"):
+        if is_ortho and box_w.ndim == 2:
+            G = jax.vmap(lambda b: influence_function(grid_dims, b, alpha, order))(box_w).astype(Q.dtype)
+        else:
+            G = influence_function(grid_dims, box_w, alpha, order).astype(Q.dtype)
+    with jax.named_scope("pme_fft_inverse"):
+        theta = jnp.fft.irfftn(Q_hat * G, s=grid_dims, axes=(-3, -2, -1)).astype(Q.dtype)
+    N_grid = jnp.asarray(float(Kx * Ky * Kz), dtype=Q.dtype)
+    theta_norm = (theta * N_grid).astype(Q.dtype)
+    return _spme_forces_from_theta(
+        positions, charges, atom_mask, box_size, theta_norm, grid_dims, order, use_pallas_pme
+    ).astype(orig_dtype)
+
+
+def _spme_forces_cached(
+    positions: jnp.ndarray,
+    charges: jnp.ndarray,
+    atom_mask: jnp.ndarray,
+    G_cached: jnp.ndarray,
+    box_size: jnp.ndarray,
+    grid_dims: tuple[int, int, int],
+    order: int,
+    use_pallas_pme: bool = False,
+) -> jnp.ndarray:
+    Kx, Ky, Kz = grid_dims
+    orig_dtype = positions.dtype
+    is_ortho = _is_ortho_box(positions, box_size)
+    if use_pallas_pme and not in_export_context() and is_ortho:
+        pos_w = positions.astype(jnp.float32)
+        q_w = charges.astype(jnp.float32)
+        box_w = jnp.asarray(box_size, dtype=jnp.float32)
+    else:
+        pos_w, q_w, box_w = positions, charges, box_size
+    Q = spread_charges(
+        pos_w, q_w, atom_mask, box_w, grid_dims, order, use_pallas_pme
+    )
+    if use_pallas_pme and not in_export_context() and is_ortho:
+        Q = jnp.asarray(Q, dtype=jnp.float32)
+    with jax.named_scope("pme_fft_forward"):
+        Q_hat = jnp.fft.rfftn(Q, s=grid_dims, axes=(-3, -2, -1))
+    G = G_cached.astype(Q.dtype)
+    with jax.named_scope("pme_fft_inverse"):
+        theta = jnp.fft.irfftn(Q_hat * G, s=grid_dims, axes=(-3, -2, -1)).astype(Q.dtype)
+    N_grid = jnp.asarray(float(Kx * Ky * Kz), dtype=Q.dtype)
+    theta_norm = (theta * N_grid).astype(Q.dtype)
+    return _spme_forces_from_theta(
+        positions, charges, atom_mask, box_size, theta_norm, grid_dims, order, use_pallas_pme
+    ).astype(orig_dtype)
+
+
 def make_spme_energy_fn(
     box_size: jnp.ndarray,
     alpha: float = 0.34,
@@ -793,6 +916,7 @@ def make_spme_energy_fn(
     grid_dims: tuple[int, int, int] | None = None,
     use_pallas: bool | None = None,
     n_atoms: int | None = None,
+    return_forces: bool = False,
 ):
     gp_env = _resolve_env_pme_grid_points(n_atoms=n_atoms)
     if grid_dims is None and gp_env is not None and gp_env > 0:
@@ -816,6 +940,26 @@ def make_spme_energy_fn(
         )
         G_cached_f32_np = G_cached_np.astype(np.float32)
 
+        if return_forces:
+            def _cached_force_fn(positions, charges, atom_mask):
+                use_p = pallas and not in_export_context()
+                g_dtype = jnp.float32 if (use_p and is_ortho_host) else positions.dtype
+                g_np = G_cached_f32_np if g_dtype == jnp.float32 else G_cached_np
+                return _spme_forces_cached(
+                    positions,
+                    charges,
+                    atom_mask,
+                    jnp.asarray(g_np, dtype=g_dtype),
+                    box_np.astype(np.dtype(positions.dtype)),
+                    grid_dims,
+                    order,
+                    use_p,
+                )
+
+            with jax.ensure_compile_time_eval():
+                _cached_force_fn.G_cached = jnp.asarray(G_cached_np)  # type: ignore[attr-defined]
+            return _cached_force_fn
+
         def _cached_fn(positions, charges, atom_mask):
             use_p = pallas and not in_export_context()
             g_dtype = jnp.float32 if (use_p and is_ortho_host) else positions.dtype
@@ -836,6 +980,10 @@ def make_spme_energy_fn(
             _cached_fn.G_cached = jnp.asarray(G_cached_np)  # type: ignore[attr-defined]
         return _cached_fn
 
+    if return_forces:
+        return lambda positions, charges, atom_mask: spme_forces(
+            positions, charges, atom_mask, box_size, grid_dims, alpha, order, pallas and not in_export_context()
+        )
     return lambda positions, charges, atom_mask: spme_energy_with_forces(
         positions, charges, atom_mask, box_size, grid_dims, alpha, order, pallas
     )
