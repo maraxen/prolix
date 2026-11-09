@@ -12,6 +12,7 @@ any other `prolix.*` modules, strictly adhering to `tests/test_import_architectu
 
 from __future__ import annotations
 
+import math
 import re
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, ClassVar, Literal
@@ -121,30 +122,45 @@ class ProlixOpenMMConfig:
             )
 
         # PME & LJ validation
-        if not isinstance(self.pme_grid_spacing, (int, float)) or self.pme_grid_spacing <= 0.0:
+        if (
+            not isinstance(self.pme_grid_spacing, (int, float))
+            or not math.isfinite(self.pme_grid_spacing)
+            or self.pme_grid_spacing <= 0.0
+        ):
             raise ValueError(
-                f"pme_grid_spacing must be positive, got {self.pme_grid_spacing} Å."
+                f"pme_grid_spacing must be positive and finite, got {self.pme_grid_spacing} Å."
             )
-        if not isinstance(self.ewald_error_tolerance, (int, float)) or not (
-            0.0 < self.ewald_error_tolerance < 1.0
+        if (
+            not isinstance(self.ewald_error_tolerance, (int, float))
+            or not math.isfinite(self.ewald_error_tolerance)
+            or not (0.0 < self.ewald_error_tolerance < 1.0)
         ):
             raise ValueError(
                 f"ewald_error_tolerance must be in (0, 1), got {self.ewald_error_tolerance}."
             )
-        if not isinstance(self.lj_switch_width, (int, float)) or self.lj_switch_width < 0.0:
+        if (
+            not isinstance(self.lj_switch_width, (int, float))
+            or not math.isfinite(self.lj_switch_width)
+            or self.lj_switch_width < 0.0
+        ):
             raise ValueError(
-                f"lj_switch_width must be non-negative, got {self.lj_switch_width} Å."
+                f"lj_switch_width must be non-negative and finite, got {self.lj_switch_width} Å."
             )
 
         # Neighbor list validation
-        if not isinstance(self.nl_skin, (int, float)) or self.nl_skin <= 0.0:
-            raise ValueError(f"nl_skin must be positive, got {self.nl_skin} Å.")
+        if (
+            not isinstance(self.nl_skin, (int, float))
+            or not math.isfinite(self.nl_skin)
+            or self.nl_skin <= 0.0
+        ):
+            raise ValueError(f"nl_skin must be positive and finite, got {self.nl_skin} Å.")
         if (
             not isinstance(self.nl_capacity_multiplier, (int, float))
+            or not math.isfinite(self.nl_capacity_multiplier)
             or self.nl_capacity_multiplier <= 1.0
         ):
             raise ValueError(
-                f"nl_capacity_multiplier must be > 1.0, got {self.nl_capacity_multiplier}."
+                f"nl_capacity_multiplier must be > 1.0 and finite, got {self.nl_capacity_multiplier}."
             )
         if not isinstance(self.nl_update_every, int) or self.nl_update_every < 1:
             raise ValueError(
@@ -203,13 +219,21 @@ class ProlixOpenMMConfig:
             raise ValueError(
                 f"shake_iterations must be >= 1, got {self.shake_iterations}."
             )
-        if not isinstance(self.constraint_tolerance, (int, float)) or self.constraint_tolerance <= 0.0:
+        if (
+            not isinstance(self.constraint_tolerance, (int, float))
+            or not math.isfinite(self.constraint_tolerance)
+            or self.constraint_tolerance <= 0.0
+        ):
             raise ValueError(
-                f"constraint_tolerance must be positive, got {self.constraint_tolerance}."
+                f"constraint_tolerance must be positive and finite, got {self.constraint_tolerance}."
             )
-        if not isinstance(self.settle_velocity_tol, (int, float)) or self.settle_velocity_tol <= 0.0:
+        if (
+            not isinstance(self.settle_velocity_tol, (int, float))
+            or not math.isfinite(self.settle_velocity_tol)
+            or self.settle_velocity_tol <= 0.0
+        ):
             raise ValueError(
-                f"settle_velocity_tol must be positive, got {self.settle_velocity_tol}."
+                f"settle_velocity_tol must be positive and finite, got {self.settle_velocity_tol}."
             )
 
         # Bucketing & execution validation
@@ -274,11 +298,15 @@ def _parse_opt_int(val: Any, key: str) -> int | None:
 
 def _parse_float(val: Any, key: str) -> float:
     if isinstance(val, (int, float)) and not isinstance(val, bool):
-        return float(val)
-    try:
-        return float(str(val).strip())
-    except (ValueError, TypeError) as err:
-        raise ValueError(f"Invalid float value for property {key!r}: {val!r}") from err
+        f = float(val)
+    else:
+        try:
+            f = float(str(val).strip())
+        except (ValueError, TypeError) as err:
+            raise ValueError(f"Invalid float value for property {key!r}: {val!r}") from err
+    if not math.isfinite(f):
+        raise ValueError(f"Float value for property {key!r} cannot be NaN or Inf: {val!r}")
+    return f
 
 
 def _parse_str(val: Any, key: str) -> str:
@@ -604,11 +632,13 @@ class ProlixPlatform(openmm.Platform):
             def getNumPlatforms() -> int:  # noqa: N802
                 return orig_get_num() + 1
 
-            def getPlatform(index: int):  # noqa: N802
+            def getPlatform(index_or_name: int | str):  # noqa: N802
+                if isinstance(index_or_name, str):
+                    return getPlatformByName(index_or_name)
                 orig_num = orig_get_num()
-                if index in (orig_num, -1):
+                if index_or_name in (orig_num, -1):
                     return cls._instance
-                return orig_get_plat(index)
+                return orig_get_plat(index_or_name)
 
             def registerPlatform(plat):  # noqa: N802
                 if hasattr(plat, "getName") and plat.getName().lower() == "prolix":
