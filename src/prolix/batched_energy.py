@@ -656,7 +656,9 @@ def _pme_reciprocal_and_corrections(
     return e_elec, e_lj
 
 
-def _resolve_active_atoms(n_atoms: int) -> int:
+def _resolve_active_atoms(
+    n_atoms: int, atom_mask: Any = None, n_real_atoms: Any = None
+) -> int:
     raw = os.environ.get("PROLIX_ACTIVE_ATOMS", "").strip()
     if raw:
         try:
@@ -665,6 +667,25 @@ def _resolve_active_atoms(n_atoms: int) -> int:
                 v_blk = ((v + 31) // 32) * 32
                 return max(min(32, int(n_atoms)), min(v_blk, int(n_atoms)))
         except ValueError:
+            pass
+    if n_real_atoms is not None and not isinstance(n_real_atoms, jax.core.Tracer):
+        try:
+            nr = int(np.max(np.asarray(n_real_atoms)))
+            if nr > 0:
+                v_blk = ((nr + 31) // 32) * 32
+                return max(min(32, int(n_atoms)), min(v_blk, int(n_atoms)))
+        except Exception:
+            pass
+    if atom_mask is not None and not isinstance(atom_mask, jax.core.Tracer):
+        try:
+            m_np = np.asarray(atom_mask, dtype=bool)
+            if m_np.ndim >= 2:
+                m_np = np.any(m_np, axis=0)
+            nz = np.flatnonzero(m_np)
+            if nz.size > 0:
+                v_blk = ((int(nz[-1]) + 1 + 31) // 32) * 32
+                return max(min(32, int(n_atoms)), min(v_blk, int(n_atoms)))
+        except Exception:
             pass
     return int(n_atoms)
 
@@ -798,7 +819,9 @@ def single_padded_energy(
             imp_is_harm = sys.improper_params is not None and (
                 sys.improper_params.shape[-1] == 2 or not bool(getattr(sys, "improper_is_periodic", True))
             )
-            n_act = _resolve_active_atoms(N)
+            n_act = _resolve_active_atoms(
+                N, sys.atom_mask, getattr(sys, "n_real_atoms", None)
+            )
             if n_act < N:
                 n_act_blk = (n_act + 31) // 32
                 r_mk = r[:n_act]

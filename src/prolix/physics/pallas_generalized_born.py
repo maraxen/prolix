@@ -32,7 +32,6 @@ from prolix.physics.generalized_born import (
 from prolix.physics.pallas_bonded import (
     _min_image3,
     _normalize_box,
-    _pl_atomic_add_1d,
     _triton_gpu_available,
 )
 from prolix.physics.pallas_implicit import (
@@ -214,7 +213,7 @@ def _pallas_gbsa_dense_batch(
     tau = (1.0 / float(solute_dielectric)) - (1.0 / float(solvent_dielectric))
     any_spec = pl.BlockSpec(memory_space=pl.ANY)
 
-    # --- Pass 1: 2D-grid (B, n_act_blocks) Upper-Triangular Symmetric Born Pair Integrals ---
+    # --- Pass 1: 2D-grid (B, n_act_blocks) Atomic-Free Row Born Pair Integrals ---
     def _pass1_born_dense_kernel(
         px_ref,
         py_ref,
@@ -223,10 +222,8 @@ def _pallas_gbsa_dense_batch(
         sr_ref,
         mask_ref,
         box_ref,
-        i_in_ref,
         i_out_ref,
     ):
-        del i_in_ref
         b_id = pl.program_id(0)
         pid = pl.program_id(1)
         lane = jnp.arange(_GB_BLOCK, dtype=jnp.int32)
@@ -259,31 +256,16 @@ def _pallas_gbsa_dense_batch(
         pz_i = _pl_load(pz_ref, (base_pos + offs_i,))
         rad_i = jnp.maximum(_pl_load(rad_ref, (base_rad + offs_i,)), eps6)
         or_i = jnp.maximum(rad_i - offset, eps4)
-        sr_i = _pl_load(sr_ref, (base_sr + offs_i,))
 
-        # Diagonal tile (t_j == pid): evaluate in registers with zero atomic ops
-        active_diag = mask_i[:, None] & mask_i[None, :] & (offs_i[:, None] != offs_i[None, :])
-        dx_d, dy_d, dz_d = _min_image3(
-            (px_i[:, None] - px_i[None, :], py_i[:, None] - py_i[None, :], pz_i[:, None] - pz_i[None, :]),
-            box6,
-            has_box,
-        )
-        dist_d = jnp.sqrt(dx_d * dx_d + dy_d * dy_d + dz_d * dz_d + eps12)
-        I_diag = compute_pair_integral(dist_d, or_i[:, None], sr_i[None, :])
-        acc_I_init = jnp.sum(jnp.where(active_diag, I_diag, zero), axis=1)
-
-        # Strict upper-triangular tiles (t_j > pid): evaluate both I_ij (row i) and I_ji (col j)
         def _tile_body(t_j, acc_I):
             offs_j = t_j * _GB_BLOCK + lane
             px_j = _pl_load(px_ref, (base_pos + offs_j,))
             py_j = _pl_load(py_ref, (base_pos + offs_j,))
             pz_j = _pl_load(pz_ref, (base_pos + offs_j,))
-            rad_j = jnp.maximum(_pl_load(rad_ref, (base_rad + offs_j,)), eps6)
-            or_j = jnp.maximum(rad_j - offset, eps4)
             sr_j = _pl_load(sr_ref, (base_sr + offs_j,))
             mask_j = (_pl_load(mask_ref, (base_msk + offs_j,)) > 0) & (offs_j < N_act)
 
-            active = mask_i[:, None] & mask_j[None, :]
+            active = mask_i[:, None] & mask_j[None, :] & (offs_i[:, None] != offs_j[None, :])
             dx, dy, dz = _min_image3(
                 (px_i[:, None] - px_j[None, :], py_i[:, None] - py_j[None, :], pz_i[:, None] - pz_j[None, :]),
                 box6,
@@ -291,28 +273,25 @@ def _pallas_gbsa_dense_batch(
             )
             dist = jnp.sqrt(dx * dx + dy * dy + dz * dz + eps12)
             I_ij = compute_pair_integral(dist, or_i[:, None], sr_j[None, :])
-            I_ji = compute_pair_integral(dist, or_j[None, :], sr_i[:, None])
-            I_j_col = jnp.sum(jnp.where(active, I_ji, zero), axis=0)
-            _pl_atomic_add_1d(i_out_ref, base_out + offs_j, I_j_col, mask_j, interpret)
             return acc_I + jnp.sum(jnp.where(active, I_ij, zero), axis=1)
 
-        I_i = jax.lax.fori_loop(pid + 1, n_act_blocks, _tile_body, acc_I_init)
-        _pl_atomic_add_1d(i_out_ref, base_out + offs_i, I_i, mask_i, interpret)
+        I_i = jax.lax.fori_loop(
+            0, n_act_blocks, _tile_body, jnp.zeros((_GB_BLOCK,), dtype=dtype)
+        )
+        _pl_store(i_out_ref, (base_out + offs_i,), jnp.where(mask_i, I_i, zero))
 
-    i_init = jnp.zeros((B * N_pad,), dtype=dtype)
     i_flat = pl.pallas_call(
         _pass1_born_dense_kernel,
         out_shape=jax.ShapeDtypeStruct((B * N_pad,), dtype),
-        in_specs=[any_spec] * 8,
+        in_specs=[any_spec] * 7,
         out_specs=any_spec,
         grid=(B, n_act_blocks),
-        input_output_aliases={7: 0},
         interpret=interpret,
         compiler_params=resolve_pallas_compiler_params("nonbonded_nl", grid_blocks=B * n_act_blocks)
         if not interpret
         else None,
         name="pallas_gbsa_pass1_born_dense",
-    )(px_flat, py_flat, pz_flat, rad_flat, sr_flat, mask_flat, box_flat, i_init)
+    )(px_flat, py_flat, pz_flat, rad_flat, sr_flat, mask_flat, box_flat)
 
     i_pad = i_flat.reshape(B, N_pad)
 
@@ -371,7 +350,7 @@ def _pallas_gbsa_dense_batch(
         e_ace_vec = jnp.zeros_like(born_pad)
         de_ace_db = jnp.zeros_like(born_pad)
 
-    # --- Pass 2: 2D-grid (B, n_act_blocks) Upper-Triangular Symmetric Pair GB (+ optional LJ & Coulomb) ---
+    # --- Pass 2: 2D-grid (B, n_act_blocks) Atomic-Free Row Pair GB (+ optional LJ & Coulomb) ---
     def _pass2_pair_dense_kernel(
         px_ref,
         py_ref,
@@ -388,12 +367,6 @@ def _pallas_gbsa_dense_batch(
         excl_elec_ref,
         box_ref,
         lam_ref,
-        e_in_ref,
-        fx_in_ref,
-        fy_in_ref,
-        fz_in_ref,
-        dedb_in_ref,
-        gq_in_ref,
         e_out_ref,
         fx_out_ref,
         fy_out_ref,
@@ -401,7 +374,6 @@ def _pallas_gbsa_dense_batch(
         dedb_out_ref,
         gq_out_ref,
     ):
-        del e_in_ref, fx_in_ref, fy_in_ref, fz_in_ref, dedb_in_ref, gq_in_ref
         b_id = pl.program_id(0)
         pid = pl.program_id(1)
         lane = jnp.arange(_GB_BLOCK, dtype=jnp.int32)
@@ -499,77 +471,9 @@ def _pallas_gbsa_dense_batch(
                 None,
             )
 
-        # 1. Diagonal tile (t_j == pid): evaluate in registers with zero atomic ops
-        active_d = mask_i[:, None] & mask_i[None, :] & (offs_i[:, None] != offs_i[None, :])
-        dx_d, dy_d, dz_d = _min_image3(
-            (px_i[:, None] - px_i[None, :], py_i[:, None] - py_i[None, :], pz_i[:, None] - pz_i[None, :]),
-            box6,
-            has_box,
-        )
-        r_sq_d = dx_d * dx_d + dy_d * dy_d + dz_d * dz_d + eps12
-        p_d = b_i[:, None] * b_i[None, :]
-        u_d = r_sq_d / (four * p_d)
-        e_d = jnp.exp(zero - u_d)
-        f_gb_sq_d = r_sq_d + p_d * e_d
-        f_gb_d = jnp.sqrt(f_gb_sq_d)
-        f_gb_cubed_d = f_gb_d * f_gb_sq_d
-        qq_d = q_i[:, None] * q_i[None, :]
-        e_gb_d = jnp.where(active_d, pref * qq_d / f_gb_d, zero)
-        f_gb_coeff_d = jnp.where(active_d, two * pref * qq_d * (one - quarter * e_d) / f_gb_cubed_d, zero)
-        dedb_d = jnp.where(active_d, (zero - pref) * qq_d * b_i[None, :] * e_d * (one + u_d) / f_gb_cubed_d, zero)
-        gq_d = jnp.where(active_d, two * pref * q_i[None, :] / f_gb_d, zero)
+        z_vec = jnp.zeros((_GB_BLOCK,), dtype=dtype)
+        init_carry = (z_vec, z_vec, z_vec, z_vec, z_vec, z_vec)
 
-        if include_lj_coulomb:
-            dist_d = jnp.sqrt(r_sq_d)
-            inv_dist_d = jnp.where(active_d, one / dist_d, zero)
-            inv_r_sq_d = inv_dist_d * inv_dist_d
-            w_vdw_d, w_elec_d = _compute_tile_excl_weights(pid, offs_i)
-            sig_ij_d = half * (sig_i[:, None] + sig_i[None, :])
-            sig_safe_d = jnp.where(active_d, jnp.maximum(sig_ij_d, jnp.asarray(1e-4, dtype=dtype)), one)
-            eps_ij_d = jnp.sqrt(
-                jnp.maximum(eps_i[:, None] * eps_i[None, :], zero) + jnp.asarray(1e-30, dtype=dtype)
-            )
-            u6_d = (dist_d / sig_safe_d) ** 6
-            x_inv6_d = one / jnp.maximum(soft_term + u6_d, jnp.asarray(1e-6, dtype=dtype))
-            e_lj_d = jnp.where(
-                active_d,
-                half * w_vdw_d * four * eps_ij_d * lam * (x_inv6_d * x_inv6_d - x_inv6_d),
-                zero,
-            )
-            f_lj_d = jnp.where(
-                active_d,
-                w_vdw_d
-                * jnp.asarray(24.0, dtype=dtype)
-                * eps_ij_d
-                * lam
-                * (two * x_inv6_d - one)
-                * (x_inv6_d * x_inv6_d)
-                * u6_d
-                * inv_r_sq_d,
-                zero,
-            )
-            valid_coul_d = active_d & (dist_d >= jnp.asarray(1e-4, dtype=dtype))
-            e_coul_d = jnp.where(valid_coul_d, half * coul_c * qq_d * w_elec_d * inv_dist_d, zero)
-            f_coul_d = jnp.where(valid_coul_d, coul_c * qq_d * w_elec_d * inv_dist_d * inv_r_sq_d, zero)
-            gq_coul_d = jnp.where(valid_coul_d, coul_c * q_i[None, :] * w_elec_d * inv_dist_d, zero)
-            e_tot_d = e_gb_d + e_lj_d + e_coul_d
-            f_tot_d = f_gb_coeff_d + f_lj_d + f_coul_d
-            gq_tot_d = gq_d + gq_coul_d
-        else:
-            e_tot_d = e_gb_d
-            f_tot_d = f_gb_coeff_d
-            gq_tot_d = gq_d
-
-        init_carry = (
-            jnp.sum(e_tot_d, axis=1),
-            jnp.sum(f_tot_d * dx_d, axis=1),
-            jnp.sum(f_tot_d * dy_d, axis=1),
-            jnp.sum(f_tot_d * dz_d, axis=1),
-            jnp.sum(dedb_d, axis=1),
-            jnp.sum(gq_tot_d, axis=1),
-        )
-
-        # 2. Strict upper-triangular tiles (t_j > pid): Newton's 3rd Law & symmetric dE/dB, dE/dq
         def _tile_body(t_j, carry):
             acc_e, acc_fx, acc_fy, acc_fz, acc_dedb, acc_gq = carry
             offs_j = t_j * _GB_BLOCK + lane
@@ -580,7 +484,7 @@ def _pallas_gbsa_dense_batch(
             b_j = _pl_load(born_ref, (base_born + offs_j,))
             mask_j = (_pl_load(mask_ref, (base_msk + offs_j,)) > 0) & (offs_j < N_act)
 
-            active = mask_i[:, None] & mask_j[None, :]
+            active = mask_i[:, None] & mask_j[None, :] & (offs_i[:, None] != offs_j[None, :])
             dx, dy, dz = _min_image3(
                 (px_i[:, None] - px_j[None, :], py_i[:, None] - py_j[None, :], pz_i[:, None] - pz_j[None, :]),
                 box6,
@@ -596,7 +500,7 @@ def _pallas_gbsa_dense_batch(
             f_gb_cubed = f_gb * f_gb_sq
 
             qq = q_i[:, None] * q_j[None, :]
-            e_gb_pair = jnp.where(active, two * pref * qq / f_gb, zero)
+            e_gb_pair = jnp.where(active, pref * qq / f_gb, zero)
             f_gb_coeff = jnp.where(
                 active,
                 two * pref * qq * (one - quarter * e_ij) / f_gb_cubed,
@@ -626,7 +530,7 @@ def _pallas_gbsa_dense_batch(
                 x_inv6 = one / jnp.maximum(soft_term + u6, jnp.asarray(1e-6, dtype=dtype))
                 e_lj = jnp.where(
                     active,
-                    w_vdw * four * eps_ij * lam * (x_inv6 * x_inv6 - x_inv6),
+                    half * w_vdw * four * eps_ij * lam * (x_inv6 * x_inv6 - x_inv6),
                     zero,
                 )
                 f_lj_scalar = jnp.where(
@@ -642,7 +546,7 @@ def _pallas_gbsa_dense_batch(
                     zero,
                 )
                 valid_coul = active & (dist >= jnp.asarray(1e-4, dtype=dtype))
-                e_coul = jnp.where(valid_coul, coul_c * qq * w_elec * inv_dist, zero)
+                e_coul = jnp.where(valid_coul, half * coul_c * qq * w_elec * inv_dist, zero)
                 f_coul_scalar = jnp.where(
                     valid_coul,
                     coul_c * qq * w_elec * inv_dist * inv_r_sq,
@@ -658,42 +562,27 @@ def _pallas_gbsa_dense_batch(
                 f_tot_coeff = f_gb_coeff
                 gq_common = gq_common_gb
 
-            fx_mat = f_tot_coeff * dx
-            fy_mat = f_tot_coeff * dy
-            fz_mat = f_tot_coeff * dz
-
-            _pl_atomic_add_1d(fx_out_ref, base_out + offs_j, zero - jnp.sum(fx_mat, axis=0), mask_j, interpret)
-            _pl_atomic_add_1d(fy_out_ref, base_out + offs_j, zero - jnp.sum(fy_mat, axis=0), mask_j, interpret)
-            _pl_atomic_add_1d(fz_out_ref, base_out + offs_j, zero - jnp.sum(fz_mat, axis=0), mask_j, interpret)
-            _pl_atomic_add_1d(
-                dedb_out_ref, base_out + offs_j, jnp.sum(dedb_common * b_i[:, None], axis=0), mask_j, interpret
-            )
-            _pl_atomic_add_1d(
-                gq_out_ref, base_out + offs_j, jnp.sum(gq_common * q_i[:, None], axis=0), mask_j, interpret
-            )
-
             return (
                 acc_e + jnp.sum(e_tot, axis=1),
-                acc_fx + jnp.sum(fx_mat, axis=1),
-                acc_fy + jnp.sum(fy_mat, axis=1),
-                acc_fz + jnp.sum(fz_mat, axis=1),
+                acc_fx + jnp.sum(f_tot_coeff * dx, axis=1),
+                acc_fy + jnp.sum(f_tot_coeff * dy, axis=1),
+                acc_fz + jnp.sum(f_tot_coeff * dz, axis=1),
                 acc_dedb + jnp.sum(dedb_common * b_j[None, :], axis=1),
                 acc_gq + jnp.sum(gq_common * q_j[None, :], axis=1),
             )
 
         e_p, fx_d, fy_d, fz_d, dedb_p, gq_p = jax.lax.fori_loop(
-            pid + 1, n_act_blocks, _tile_body, init_carry
+            0, n_act_blocks, _tile_body, init_carry
         )
         gq_self = jnp.where(mask_i, two * pref * (q_i / b_i), zero)
 
-        _pl_store(e_out_ref, (base_out + offs_i,), e_p)
-        _pl_atomic_add_1d(fx_out_ref, base_out + offs_i, fx_d, mask_i, interpret)
-        _pl_atomic_add_1d(fy_out_ref, base_out + offs_i, fy_d, mask_i, interpret)
-        _pl_atomic_add_1d(fz_out_ref, base_out + offs_i, fz_d, mask_i, interpret)
-        _pl_atomic_add_1d(dedb_out_ref, base_out + offs_i, dedb_p, mask_i, interpret)
-        _pl_atomic_add_1d(gq_out_ref, base_out + offs_i, gq_p + gq_self, mask_i, interpret)
+        _pl_store(e_out_ref, (base_out + offs_i,), jnp.where(mask_i, e_p, zero))
+        _pl_store(fx_out_ref, (base_out + offs_i,), jnp.where(mask_i, fx_d, zero))
+        _pl_store(fy_out_ref, (base_out + offs_i,), jnp.where(mask_i, fy_d, zero))
+        _pl_store(fz_out_ref, (base_out + offs_i,), jnp.where(mask_i, fz_d, zero))
+        _pl_store(dedb_out_ref, (base_out + offs_i,), jnp.where(mask_i, dedb_p, zero))
+        _pl_store(gq_out_ref, (base_out + offs_i,), jnp.where(mask_i, gq_p + gq_self, zero))
 
-    zeros_bn = jnp.zeros((B * N_pad,), dtype=dtype)
     (
         e_pair_flat,
         fx_dir_flat,
@@ -704,10 +593,9 @@ def _pallas_gbsa_dense_batch(
     ) = pl.pallas_call(
         _pass2_pair_dense_kernel,
         out_shape=[jax.ShapeDtypeStruct((B * N_pad,), dtype) for _ in range(6)],
-        in_specs=[any_spec] * 21,
+        in_specs=[any_spec] * 15,
         out_specs=[any_spec] * 6,
         grid=(B, n_act_blocks),
-        input_output_aliases={15: 0, 16: 1, 17: 2, 18: 3, 19: 4, 20: 5},
         interpret=interpret,
         compiler_params=resolve_pallas_compiler_params("nonbonded_nl", grid_blocks=B * n_act_blocks)
         if not interpret
@@ -729,19 +617,13 @@ def _pallas_gbsa_dense_batch(
         excl_elec_flat,
         box_flat,
         lam_flat,
-        zeros_bn,
-        zeros_bn,
-        zeros_bn,
-        zeros_bn,
-        zeros_bn,
-        zeros_bn,
     )
 
     e_pair_pad = e_pair_flat.reshape(B, N_pad)
     de_pair_db_pad = de_pair_db_flat.reshape(B, N_pad)
     grad_q_pad = grad_q_flat.reshape(B, N_pad)
 
-    # --- Pass 3: 2D-grid (B, n_act_blocks) Upper-Triangular Born Chain-Rule Forces + Direct Force Sum ---
+    # --- Pass 3: 2D-grid (B, n_act_blocks) Atomic-Free Born Chain-Rule Forces + Direct Force Sum ---
     w_pad = (de_self_db + de_ace_db + de_pair_db_pad) * db_di_pad
     w_flat = jnp.asarray(w_pad.reshape(B * N_pad))
     or_flat = jnp.asarray(or_pad.reshape(B_rad * N_pad))
@@ -762,7 +644,6 @@ def _pallas_gbsa_dense_batch(
         fy_out_ref,
         fz_out_ref,
     ):
-        del fx_dir_ref, fy_dir_ref, fz_dir_ref
         b_id = pl.program_id(0)
         pid = pl.program_id(1)
         lane = jnp.arange(_GB_BLOCK, dtype=jnp.int32)
@@ -795,26 +676,10 @@ def _pallas_gbsa_dense_batch(
         sr_i = _pl_load(sr_ref, (base_sr + offs_i,))
         w_i = _pl_load(w_ref, (base_w + offs_i,))
 
-        # 1. Diagonal tile (t_j == pid): evaluate in registers
-        active_d = mask_i[:, None] & mask_i[None, :] & (offs_i[:, None] != offs_i[None, :])
-        dx_d, dy_d, dz_d = _min_image3(
-            (px_i[:, None] - px_i[None, :], py_i[:, None] - py_i[None, :], pz_i[:, None] - pz_i[None, :]),
-            box6,
-            has_box,
-        )
-        dist_d = jnp.sqrt(dx_d * dx_d + dy_d * dy_d + dz_d * dz_d + eps12)
-        dI_ij_d = _pair_integral_deriv(dist_d, or_i[:, None], sr_i[None, :])
-        dI_ji_d = _pair_integral_deriv(dist_d, or_i[None, :], sr_i[:, None])
-        f_scalar_d = jnp.where(
-            active_d,
-            (zero - (w_i[:, None] * dI_ij_d + w_i[None, :] * dI_ji_d)) / dist_d,
-            zero,
-        )
-        init_fx = jnp.sum(f_scalar_d * dx_d, axis=1)
-        init_fy = jnp.sum(f_scalar_d * dy_d, axis=1)
-        init_fz = jnp.sum(f_scalar_d * dz_d, axis=1)
+        init_fx = _pl_load(fx_dir_ref, (base_out + offs_i,))
+        init_fy = _pl_load(fy_dir_ref, (base_out + offs_i,))
+        init_fz = _pl_load(fz_dir_ref, (base_out + offs_i,))
 
-        # 2. Strict upper-triangular tiles (t_j > pid): Newton's 3rd Law
         def _tile_body(t_j, carry):
             acc_fx, acc_fy, acc_fz = carry
             offs_j = t_j * _GB_BLOCK + lane
@@ -826,7 +691,7 @@ def _pallas_gbsa_dense_batch(
             w_j = _pl_load(w_ref, (base_w + offs_j,))
             mask_j = (_pl_load(mask_ref, (base_msk + offs_j,)) > 0) & (offs_j < N_act)
 
-            active = mask_i[:, None] & mask_j[None, :]
+            active = mask_i[:, None] & mask_j[None, :] & (offs_i[:, None] != offs_j[None, :])
             dx, dy, dz = _min_image3(
                 (px_i[:, None] - px_j[None, :], py_i[:, None] - py_j[None, :], pz_i[:, None] - pz_j[None, :]),
                 box6,
@@ -841,24 +706,18 @@ def _pallas_gbsa_dense_batch(
                 (zero - (w_i[:, None] * dI_ij_dr + w_j[None, :] * dI_ji_dr)) / dist,
                 zero,
             )
-            fx_mat = f_scalar * dx
-            fy_mat = f_scalar * dy
-            fz_mat = f_scalar * dz
-            _pl_atomic_add_1d(fx_out_ref, base_out + offs_j, zero - jnp.sum(fx_mat, axis=0), mask_j, interpret)
-            _pl_atomic_add_1d(fy_out_ref, base_out + offs_j, zero - jnp.sum(fy_mat, axis=0), mask_j, interpret)
-            _pl_atomic_add_1d(fz_out_ref, base_out + offs_j, zero - jnp.sum(fz_mat, axis=0), mask_j, interpret)
             return (
-                acc_fx + jnp.sum(fx_mat, axis=1),
-                acc_fy + jnp.sum(fy_mat, axis=1),
-                acc_fz + jnp.sum(fz_mat, axis=1),
+                acc_fx + jnp.sum(f_scalar * dx, axis=1),
+                acc_fy + jnp.sum(f_scalar * dy, axis=1),
+                acc_fz + jnp.sum(f_scalar * dz, axis=1),
             )
 
         fx_b, fy_b, fz_b = jax.lax.fori_loop(
-            pid + 1, n_act_blocks, _tile_body, (init_fx, init_fy, init_fz)
+            0, n_act_blocks, _tile_body, (init_fx, init_fy, init_fz)
         )
-        _pl_atomic_add_1d(fx_out_ref, base_out + offs_i, fx_b, mask_i, interpret)
-        _pl_atomic_add_1d(fy_out_ref, base_out + offs_i, fy_b, mask_i, interpret)
-        _pl_atomic_add_1d(fz_out_ref, base_out + offs_i, fz_b, mask_i, interpret)
+        _pl_store(fx_out_ref, (base_out + offs_i,), jnp.where(mask_i, fx_b, zero))
+        _pl_store(fy_out_ref, (base_out + offs_i,), jnp.where(mask_i, fy_b, zero))
+        _pl_store(fz_out_ref, (base_out + offs_i,), jnp.where(mask_i, fz_b, zero))
 
     fx_tot_flat, fy_tot_flat, fz_tot_flat = pl.pallas_call(
         _pass3_born_chain_dense_kernel,
@@ -866,7 +725,6 @@ def _pallas_gbsa_dense_batch(
         in_specs=[any_spec] * 11,
         out_specs=[any_spec] * 3,
         grid=(B, n_act_blocks),
-        input_output_aliases={8: 0, 9: 1, 10: 2},
         interpret=interpret,
         compiler_params=resolve_pallas_compiler_params("nonbonded_nl", grid_blocks=B * n_act_blocks)
         if not interpret
@@ -1090,6 +948,147 @@ def _pallas_gbsa_dense_diff(
     return e
 
 
+def _unwrap_primal(x):
+    return x.value if hasattr(x, "perturbed") else x
+
+
+def _is_perturbed(x, default: bool = True) -> bool:
+    return bool(x.perturbed) if hasattr(x, "perturbed") else bool(default)
+
+
+def _gbsa_dense_param_energy_one(
+    pos_1: jax.Array,
+    q_1: jax.Array,
+    rad_1: jax.Array,
+    sr_1: jax.Array,
+    sig_1: jax.Array,
+    eps_1: jax.Array,
+    m_1: jax.Array,
+    ei_1: jax.Array,
+    ev_1: jax.Array,
+    box_1: jax.Array,
+    lam_1: jax.Array,
+    has_box: bool,
+    solvent_dielectric: float,
+    solute_dielectric: float,
+    dielectric_offset: float,
+    surface_tension: float,
+    include_ace: bool,
+    include_lj_coulomb: bool,
+    softcore_alpha: float,
+    softcore_exponent: int,
+    coulomb_constant: float,
+    n_active_atoms: int | None,
+) -> jax.Array:
+    N = int(pos_1.shape[0])
+    dtype = pos_1.dtype
+    n_act = N if n_active_atoms is None else min(int(n_active_atoms), N)
+    idx = jnp.arange(N, dtype=jnp.int32)
+    m_bool = (m_1 > 0) & (idx < n_act)
+    box6 = (box_1[0], box_1[1], box_1[2], box_1[3], box_1[4], box_1[5])
+    dx, dy, dz = _min_image3(
+        (
+            pos_1[:, None, 0] - pos_1[None, :, 0],
+            pos_1[:, None, 1] - pos_1[None, :, 1],
+            pos_1[:, None, 2] - pos_1[None, :, 2],
+        ),
+        box6,
+        has_box,
+    )
+    r_sq = dx * dx + dy * dy + dz * dz + jnp.asarray(1e-12, dtype=dtype)
+    dist = jnp.sqrt(r_sq)
+    active = m_bool[:, None] & m_bool[None, :] & (idx[:, None] != idx[None, :])
+    zero = jnp.asarray(0.0, dtype=dtype)
+    one = jnp.asarray(1.0, dtype=dtype)
+
+    rad_safe = jnp.maximum(rad_1.astype(dtype), jnp.asarray(1e-6, dtype=dtype))
+    or_1 = jnp.maximum(
+        rad_safe - jnp.asarray(dielectric_offset, dtype=dtype),
+        jnp.asarray(1e-4, dtype=dtype),
+    )
+    sr_w = sr_1.astype(dtype)
+    I_ij = compute_pair_integral(dist, or_1[:, None], sr_w[None, :])
+    I_i = jnp.sum(jnp.where(active, I_ij, zero), axis=1)
+    psi = or_1 * I_i
+    arg = (
+        jnp.asarray(ALPHA_OBC, dtype=dtype) * psi
+        - jnp.asarray(BETA_OBC, dtype=dtype) * (psi * psi)
+        + jnp.asarray(GAMMA_OBC, dtype=dtype) * (psi * psi * psi)
+    )
+    th = jnp.tanh(arg)
+    r_safe = jnp.maximum(rad_safe, jnp.asarray(1e-4, dtype=dtype))
+    b_inv = jnp.maximum(one / or_1 - th / r_safe, jnp.asarray(1e-4, dtype=dtype))
+    born_r = jnp.where(m_bool, one / b_inv, one)
+
+    tau = (1.0 / float(solute_dielectric)) - (1.0 / float(solvent_dielectric))
+    pref = jnp.asarray(-0.5 * float(coulomb_constant) * tau, dtype=dtype)
+    q_w = q_1.astype(dtype)
+    e_gb_self = jnp.sum(jnp.where(m_bool, pref * (q_w * q_w) / born_r, zero))
+    p_ij = born_r[:, None] * born_r[None, :]
+    u_ij = r_sq / (jnp.asarray(4.0, dtype=dtype) * p_ij)
+    f_gb = jnp.sqrt(r_sq + p_ij * jnp.exp(zero - u_ij))
+    e_gb_pair = jnp.sum(jnp.where(active, pref * (q_w[:, None] * q_w[None, :]) / f_gb, zero))
+    e_tot = e_gb_self + e_gb_pair
+
+    if include_ace:
+        st_scale = float(surface_tension) / float(SURFACE_TENSION) if SURFACE_TENSION > 0.0 else 1.0
+        radius_nm = (rad_1.astype(dtype) - jnp.asarray(dielectric_offset, dtype=dtype)) * jnp.asarray(
+            0.1, dtype=dtype
+        ) + jnp.asarray(0.009, dtype=dtype)
+        born_nm = born_r * jnp.asarray(0.1, dtype=dtype)
+        e_ace = jnp.sum(
+            jnp.where(
+                m_bool,
+                jnp.asarray(28.3919551 * 0.239006 * st_scale, dtype=dtype)
+                * ((radius_nm + jnp.asarray(0.14, dtype=dtype)) ** 2)
+                * ((radius_nm / born_nm) ** 6),
+                zero,
+            )
+        )
+        e_tot = e_tot + e_ace
+
+    if include_lj_coulomb:
+        if ei_1.shape[-1] > 0:
+            valid_e = (ei_1 >= 0) & (ei_1 < N)
+            match_e = valid_e[:, :, None] & (ei_1[:, :, None] == idx[None, None, :])
+            any_e = jnp.any(match_e, axis=1)
+            w_vdw = jnp.where(
+                any_e,
+                jnp.max(jnp.where(match_e, ev_1.astype(dtype)[:, :, None], zero), axis=1),
+                one,
+            )
+        else:
+            w_vdw = one
+        sig_w = sig_1.astype(dtype)
+        eps_w = eps_1.astype(dtype)
+        sig_ij = jnp.asarray(0.5, dtype=dtype) * (sig_w[:, None] + sig_w[None, :])
+        sig_safe = jnp.where(active, jnp.maximum(sig_ij, jnp.asarray(1e-4, dtype=dtype)), one)
+        eps_ij = jnp.sqrt(
+            jnp.maximum(eps_w[:, None] * eps_w[None, :], zero) + jnp.asarray(1e-30, dtype=dtype)
+        )
+        lam = lam_1.reshape(()).astype(dtype)
+        soft_term = jnp.asarray(float(softcore_alpha), dtype=dtype) * (
+            jnp.maximum(one - lam, zero) ** int(softcore_exponent)
+        )
+        u6 = (dist / sig_safe) ** 6
+        x_inv6 = one / jnp.maximum(soft_term + u6, jnp.asarray(1e-6, dtype=dtype))
+        e_lj = jnp.sum(
+            jnp.where(
+                active,
+                jnp.asarray(0.5, dtype=dtype)
+                * w_vdw
+                * jnp.asarray(4.0, dtype=dtype)
+                * eps_ij
+                * lam
+                * (x_inv6 * x_inv6 - x_inv6),
+                zero,
+            )
+        )
+        e_tot = e_tot + e_lj
+
+    return e_tot.astype(dtype)
+
+
 def _pallas_gbsa_dense_fwd(
     positions,
     charges,
@@ -1116,19 +1115,34 @@ def _pallas_gbsa_dense_fwd(
     interpret,
     n_active_atoms,
 ):
+    pos_v = _unwrap_primal(positions)
+    q_v = _unwrap_primal(charges)
+    rad_v = _unwrap_primal(radii)
+    sr_v = _unwrap_primal(scaled_radii)
+    sig_v = _unwrap_primal(sigmas)
+    eps_v = _unwrap_primal(epsilons)
+    msk_v = _unwrap_primal(atom_mask)
+    ei_v = _unwrap_primal(excl_indices)
+    ev_v = _unwrap_primal(excl_scales_vdw)
+    ee_v = _unwrap_primal(excl_scales_elec)
+    box_v = _unwrap_primal(box)
+    lam_v = _unwrap_primal(lam_arr)
+    params_perturbed = any(
+        _is_perturbed(x, default=True) for x in (radii, scaled_radii, sigmas, epsilons)
+    )
     e, forces, grad_q = _pallas_gbsa_dense_vmappable(
-        positions,
-        charges,
-        radii,
-        scaled_radii,
-        sigmas,
-        epsilons,
-        atom_mask,
-        excl_indices,
-        excl_scales_vdw,
-        excl_scales_elec,
-        box,
-        lam_arr,
+        pos_v,
+        q_v,
+        rad_v,
+        sr_v,
+        sig_v,
+        eps_v,
+        msk_v,
+        ei_v,
+        ev_v,
+        ee_v,
+        box_v,
+        lam_v,
         has_box,
         solvent_dielectric,
         solute_dielectric,
@@ -1145,18 +1159,19 @@ def _pallas_gbsa_dense_fwd(
     res = (
         forces,
         grad_q,
-        positions,
-        charges,
-        radii,
-        scaled_radii,
-        sigmas,
-        epsilons,
-        atom_mask,
-        excl_indices,
-        excl_scales_vdw,
-        excl_scales_elec,
-        box,
-        lam_arr,
+        pos_v,
+        q_v,
+        rad_v,
+        sr_v,
+        sig_v,
+        eps_v,
+        msk_v,
+        ei_v,
+        ev_v,
+        ee_v,
+        box_v,
+        lam_v,
+        params_perturbed,
     )
     return e, res
 
@@ -1177,9 +1192,7 @@ def _pallas_gbsa_dense_bwd(
     res,
     g,
 ):
-    del has_box, solvent_dielectric, solute_dielectric, dielectric_offset, surface_tension
-    del include_ace, include_lj_coulomb, softcore_alpha, softcore_exponent, coulomb_constant
-    del interpret, n_active_atoms
+    del interpret
     (
         forces,
         grad_q,
@@ -1195,19 +1208,132 @@ def _pallas_gbsa_dense_bwd(
         excl_scales_elec,
         box,
         lam_arr,
+        params_perturbed,
     ) = res
+    if hasattr(jax.custom_derivatives, "SymbolicZero") and isinstance(
+        g, jax.custom_derivatives.SymbolicZero
+    ):
+        return (
+            jnp.zeros_like(positions),
+            jnp.zeros_like(charges),
+            jnp.zeros_like(radii),
+            jnp.zeros_like(scaled_radii),
+            jnp.zeros_like(sigmas),
+            jnp.zeros_like(epsilons),
+            jnp.zeros_like(atom_mask),
+            jnp.zeros_like(excl_indices),
+            jnp.zeros_like(excl_scales_vdw),
+            jnp.zeros_like(excl_scales_elec),
+            jnp.zeros_like(box),
+            jnp.zeros_like(lam_arr),
+        )
     g_arr = jnp.asarray(g, dtype=positions.dtype)
     grad_pos = -g_arr[..., None, None] * forces if g_arr.ndim > 0 else -g_arr * forces
     gq_scaled = g_arr[..., None] * grad_q if g_arr.ndim > 0 else g_arr * grad_q
     while gq_scaled.ndim > charges.ndim:
         gq_scaled = jnp.sum(gq_scaled, axis=0)
+
+    if params_perturbed:
+        if positions.ndim == 2:
+            _, vjp_fn = jax.vjp(
+                lambda r_in, sr_in, sg_in, ep_in: _gbsa_dense_param_energy_one(
+                    positions,
+                    charges,
+                    r_in,
+                    sr_in,
+                    sg_in,
+                    ep_in,
+                    atom_mask,
+                    excl_indices,
+                    excl_scales_vdw,
+                    box,
+                    lam_arr,
+                    has_box,
+                    solvent_dielectric,
+                    solute_dielectric,
+                    dielectric_offset,
+                    surface_tension,
+                    include_ace,
+                    include_lj_coulomb,
+                    softcore_alpha,
+                    softcore_exponent,
+                    coulomb_constant,
+                    n_active_atoms,
+                ),
+                radii,
+                scaled_radii,
+                sigmas,
+                epsilons,
+            )
+            drad, dsr, dsig, deps = vjp_fn(g_arr)
+        else:
+            B = positions.shape[0]
+            b_q = charges.ndim > 1
+            b_rad = radii.ndim > 1
+            b_sr = scaled_radii.ndim > 1
+            b_sig = sigmas.ndim > 1
+            b_eps = epsilons.ndim > 1
+            b_msk = atom_mask.ndim > 1
+            b_ei = excl_indices.ndim > 2
+            b_ev = excl_scales_vdw.ndim > 2
+            b_bx = box.ndim > 1
+            b_lm = lam_arr.shape[0] > 1
+
+            def _step(b):
+                _, vjp_b = jax.vjp(
+                    lambda r_in, sr_in, sg_in, ep_in: _gbsa_dense_param_energy_one(
+                        positions[b],
+                        charges[b] if b_q else charges,
+                        r_in,
+                        sr_in,
+                        sg_in,
+                        ep_in,
+                        atom_mask[b] if b_msk else atom_mask,
+                        excl_indices[b] if b_ei else excl_indices,
+                        excl_scales_vdw[b] if b_ev else excl_scales_vdw,
+                        box[b] if b_bx else box,
+                        lam_arr[b] if b_lm else lam_arr,
+                        has_box,
+                        solvent_dielectric,
+                        solute_dielectric,
+                        dielectric_offset,
+                        surface_tension,
+                        include_ace,
+                        include_lj_coulomb,
+                        softcore_alpha,
+                        softcore_exponent,
+                        coulomb_constant,
+                        n_active_atoms,
+                    ),
+                    radii[b] if b_rad else radii,
+                    scaled_radii[b] if b_sr else scaled_radii,
+                    sigmas[b] if b_sig else sigmas,
+                    epsilons[b] if b_eps else epsilons,
+                )
+                return vjp_b(g_arr[b] if g_arr.ndim > 0 else g_arr)
+
+            drad_all, dsr_all, dsig_all, deps_all = jax.lax.map(_step, jnp.arange(B))
+            drad = drad_all if b_rad else jnp.sum(drad_all, axis=0)
+            dsr = dsr_all if b_sr else jnp.sum(dsr_all, axis=0)
+            dsig = dsig_all if b_sig else jnp.sum(dsig_all, axis=0)
+            deps = deps_all if b_eps else jnp.sum(deps_all, axis=0)
+        drad = drad.astype(radii.dtype)
+        dsr = dsr.astype(scaled_radii.dtype)
+        dsig = dsig.astype(sigmas.dtype)
+        deps = deps.astype(epsilons.dtype)
+    else:
+        drad = jnp.zeros_like(radii)
+        dsr = jnp.zeros_like(scaled_radii)
+        dsig = jnp.zeros_like(sigmas)
+        deps = jnp.zeros_like(epsilons)
+
     return (
         grad_pos,
         gq_scaled.astype(charges.dtype),
-        jnp.zeros_like(radii),
-        jnp.zeros_like(scaled_radii),
-        jnp.zeros_like(sigmas),
-        jnp.zeros_like(epsilons),
+        drad,
+        dsr,
+        dsig,
+        deps,
         jnp.zeros_like(atom_mask),
         jnp.zeros_like(excl_indices),
         jnp.zeros_like(excl_scales_vdw),
@@ -1217,7 +1343,9 @@ def _pallas_gbsa_dense_bwd(
     )
 
 
-_pallas_gbsa_dense_diff.defvjp(_pallas_gbsa_dense_fwd, _pallas_gbsa_dense_bwd)
+_pallas_gbsa_dense_diff.defvjp(
+    _pallas_gbsa_dense_fwd, _pallas_gbsa_dense_bwd, symbolic_zeros=True
+)
 
 
 def pallas_gbsa_dense(
