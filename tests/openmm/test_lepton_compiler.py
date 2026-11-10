@@ -542,3 +542,123 @@ class TestStableHLOLoweringCompliance:
 
             hlo_text = jax.jit(_eval_jit).lower(pos_akma).as_text()
             assert "custom_call" not in hlo_text or "forbidden" not in hlo_text
+
+
+# =============================================================================
+# 8. Milestone 2 Iteration 2 Parity Tests (Explorer Blueprints)
+# =============================================================================
+
+
+class TestMilestone2Iteration2Fixes:
+    """Verify bugfixes for M2 R2: 3D spline, pointdihedral, negative exponents, dispersion."""
+
+    def test_continuous_3d_spline_openmm_reference_parity(self):
+        """Verify 64-coefficient tricubic Hermite spline parity against OpenMM Reference platform."""
+        values = [float(i) ** 2 for i in range(27)]
+        fn_omm = openmm.Continuous3DFunction(3, 3, 3, values, 0.0, 2.0, 0.0, 2.0, 0.0, 2.0)
+        f = openmm.CustomCompoundBondForce(1, "fn(x1, y1, z1)")
+        f.addTabulatedFunction("fn", fn_omm)
+        f.addBond([0], [])
+        s = openmm.System()
+        s.addParticle(1.0)
+        s.addForce(f)
+        ctx = openmm.Context(s, openmm.VerletIntegrator(1.0), openmm.Platform.getPlatformByName("Reference"))
+        ctx.setPositions([[0.4, 0.7, 1.3]] * unit.nanometer)
+        omm_energy = ctx.getState(getEnergy=True).getPotentialEnergy().value_in_unit(unit.kilojoules_per_mole)
+
+        fn_jax = compile_tabulated_function(fn_omm)
+        jax_val = float(fn_jax(jnp.array(0.4), jnp.array(0.7), jnp.array(1.3)))
+
+        assert abs(jax_val - omm_energy) < 1e-5, f"Discrepancy: {jax_val} vs {omm_energy}"
+        assert abs(jax_val - 204.547) < 1e-3
+
+    def test_pointdihedral_openmm_reference_positive_parity(self):
+        """Verify pointdihedral vector orientation eliminates sign inversion and matches OpenMM Reference."""
+        p1 = np.array([1.0, 1.0, 0.0])
+        p2 = np.array([0.0, 1.0, 0.0])
+        p3 = np.array([0.0, 0.0, 0.0])
+        p4 = np.array([0.0, 0.0, 1.0])
+
+        f = openmm.CustomCompoundBondForce(4, "dihedral(p1, p2, p3, p4)")
+        f.addBond([0, 1, 2, 3], [])
+        s = openmm.System()
+        for _ in range(4):
+            s.addParticle(1.0)
+        s.addForce(f)
+        ctx = openmm.Context(s, openmm.VerletIntegrator(1.0), openmm.Platform.getPlatformByName("Reference"))
+        ctx.setPositions([p1, p2, p3, p4] * unit.nanometer)
+        omm_e = ctx.getState(getEnergy=True).getPotentialEnergy().value_in_unit(unit.kilojoules_per_mole)
+
+        compiled = compile_custom_force(f)
+        pos_akma = jnp.array([p1, p2, p3, p4]) * 10.0
+        e_akma, _, _ = evaluate_custom_force(compiled, pos_akma, None, {})
+        jax_e = float(e_akma * 4.184)
+
+        assert abs(jax_e - omm_e) < 1e-5, f"Discrepancy: {jax_e} vs {omm_e}"
+        assert jax_e > 0.0, "Sign inverted! Expected positive dihedral angle (+pi/2)."
+        np.testing.assert_allclose(jax_e, math.pi / 2.0, rtol=1e-5)
+
+    def test_negative_integer_exponent_fast_path_and_autodiff_safety(self):
+        """Verify negative integer power fast paths and non-zero clamping preventing autodiff NaNs."""
+        ast_neg2 = parse_lepton_single_expression("r^-2")
+        fn_neg2 = lambda r: lower_ast_to_jax(ast_neg2, {"r": r}, None, None)
+        assert abs(float(fn_neg2(jnp.array(2.0))) - 0.25) < 1e-6
+
+        ast_neg6 = parse_lepton_single_expression("(r - r0)^-6")
+        fn_neg6 = lambda r: lower_ast_to_jax(ast_neg6, {"r": r, "r0": jnp.array(0.0)}, None, None)
+        assert abs(float(fn_neg6(jnp.array(2.0))) - (1.0 / 64.0)) < 1e-6
+
+        # Autodiff NaN test on masked dead branch: r = 0.0
+        def masked_potential(r):
+            val = lower_ast_to_jax(ast_neg2, {"r": r}, None, None)
+            return jnp.where(r > 0.5, val, 0.0)
+
+        grad_at_zero = float(jax.grad(masked_potential)(jnp.array(0.0)))
+        assert not jnp.isnan(grad_at_zero), "Autodiff produced NaN on dead branch!"
+        assert grad_at_zero == 0.0
+
+    def test_custom_nonbonded_dispersion_correction_parity(self):
+        """Verify isotropic long-range dispersion correction coefficient parity vs OpenMM Reference."""
+        f = openmm.CustomNonbondedForce(
+            "4*eps*((sigma/r)^12-(sigma/r)^6); sigma=0.5*(sigma1+sigma2); eps=sqrt(eps1*eps2)"
+        )
+        f.addPerParticleParameter("sigma")
+        f.addPerParticleParameter("eps")
+        f.setNonbondedMethod(openmm.CustomNonbondedForce.CutoffPeriodic)
+        f.setCutoffDistance(1.0)
+        f.setUseSwitchingFunction(True)
+        f.setSwitchingDistance(0.8)
+        f.setUseLongRangeCorrection(True)
+
+        for _ in range(10):
+            f.addParticle([1.0, 0.5])
+
+        s = openmm.System()
+        s.setDefaultPeriodicBoxVectors([3.0, 0.0, 0.0], [0.0, 3.0, 0.0], [0.0, 0.0, 3.0])
+        for _ in range(10):
+            s.addParticle(1.0)
+        s.addForce(f)
+
+        ctx = openmm.Context(s, openmm.VerletIntegrator(1.0), openmm.Platform.getPlatformByName("Reference"))
+        positions = [[i * 0.2, 0.0, 0.0] for i in range(10)]
+        ctx.setPositions(positions * unit.nanometer)
+        omm_e_corr_on = ctx.getState(getEnergy=True).getPotentialEnergy().value_in_unit(unit.kilojoules_per_mole)
+
+        f.setUseLongRangeCorrection(False)
+        ctx.reinitialize()
+        ctx.setPositions(positions * unit.nanometer)
+        omm_e_corr_off = ctx.getState(getEnergy=True).getPotentialEnergy().value_in_unit(unit.kilojoules_per_mole)
+
+        omm_tail_delta = omm_e_corr_on - omm_e_corr_off
+
+        # Compile in Prolix
+        f.setUseLongRangeCorrection(True)
+        compiled = compile_custom_force(f)
+        pos_nm = jnp.array(positions, dtype=jnp.float32)
+        box_nm = jnp.array([[3.0, 0.0, 0.0], [0.0, 3.0, 0.0], [0.0, 0.0, 3.0]], dtype=jnp.float32)
+        vol_nm3 = 27.0
+        prolix_tail_delta = float(compiled.dispersion_coeff / vol_nm3)
+
+        assert abs(prolix_tail_delta - omm_tail_delta) < 1e-4, (
+            f"Dispersion tail delta discrepancy: Prolix={prolix_tail_delta}, OpenMM={omm_tail_delta}"
+        )
