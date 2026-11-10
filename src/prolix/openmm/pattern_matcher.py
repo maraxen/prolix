@@ -28,7 +28,6 @@ from prolix.openmm.lepton_compiler import (
     ConstNode,
     UnaryOpNode,
     VarNode,
-    extract_free_variables,
     inline_definitions,
     parse_lepton_expression,
 )
@@ -367,30 +366,40 @@ def _extract_harmonic_power(node: BinaryOpNode, expected_coord: str) -> tuple[fl
     if isinstance(node.right, ConstNode) and math.isclose(node.right.value, 2.0):
         extracted = _extract_coord_param_from_base(node.left, expected_coord)
         if extracted is not None:
-            coord_node, param_node = extracted
-            return 1.0, coord_node, param_node
+            _, param_node = extracted
+            # Return ConstNode(1.0) as k_node so unscaled differences (r - r0)^2 match with k = 1.0
+            return 1.0, ConstNode(1.0), param_node
     return None
 
 
 def _extract_harmonic_product(node: BinaryOpNode, expected_coord: str) -> tuple[float, ASTNode, ASTNode] | None:
     factors = flatten_binary(node, "*")
     const_mult = 1.0
-    power_node = None
-    param_nodes = []
+    power_nodes: list[BinaryOpNode] = []
+    param_nodes: list[ASTNode] = []
     for f in factors:
         if isinstance(f, ConstNode):
             const_mult *= f.value
-        elif isinstance(f, BinaryOpNode) and f.op == "^" and isinstance(f.right, ConstNode) and math.isclose(f.right.value, 2.0):
-            power_node = f
+        elif (
+            isinstance(f, BinaryOpNode)
+            and f.op == "^"
+            and isinstance(f.right, ConstNode)
+            and math.isclose(f.right.value, 2.0)
+        ):
+            power_nodes.append(f)
         else:
             param_nodes.append(f)
 
-    if power_node is not None:
-        extracted = _extract_coord_param_from_base(power_node.left, expected_coord)
-        if extracted is not None:
-            _, param_node = extracted
-            k_node = param_nodes[0] if param_nodes else ConstNode(1.0)
-            return const_mult, k_node, param_node
+    # Strictly enforce: exactly ONE squared power term, and at most ONE variable multiplier
+    if len(power_nodes) != 1 or len(param_nodes) > 1:
+        return None
+
+    power_node = power_nodes[0]
+    extracted = _extract_coord_param_from_base(power_node.left, expected_coord)
+    if extracted is not None:
+        _, param_node = extracted
+        k_node = param_nodes[0] if param_nodes else ConstNode(1.0)
+        return const_mult, k_node, param_node
     return None
 
 
@@ -540,58 +549,165 @@ def _match_harmonic_improper(force: openmm.CustomTorsionForce, ast: ASTNode) -> 
     )
 
 
-def _match_periodic_torsion(force: openmm.CustomTorsionForce, ast: ASTNode) -> MatchedPattern | None:
-    # Match k * (1 + cos(n * theta - phase)) or k + k * cos(n * theta - phase)
-    # Look for cos call node
-    cos_node = None
-    k_factor = ConstNode(1.0)
+def _extract_periodic_cos_call(ast: ASTNode) -> tuple[CallNode, float, ASTNode] | None:
+    """Extract (cos_call, const_mult, k_node) from factored or expanded periodic torsion AST."""
+    # --- Pattern Form 1: Factored Product Form: C * k * (1 + cos(n * theta - phase)) ---
+    factors = flatten_binary(ast, "*")
+    plus_node: BinaryOpNode | None = None
+    param_nodes: list[ASTNode] = []
+    c_prod = 1.0
 
-    def _find_cos(n: ASTNode):
-        nonlocal cos_node
-        if isinstance(n, CallNode) and n.name.lower() == "cos":
-            cos_node = n
-        elif isinstance(n, BinaryOpNode):
-            _find_cos(n.left)
-            _find_cos(n.right)
-        elif isinstance(n, UnaryOpNode):
-            _find_cos(n.operand)
+    for f in factors:
+        if isinstance(f, ConstNode):
+            c_prod *= f.value
+        elif isinstance(f, BinaryOpNode) and f.op == "+":
+            plus_node = f
+        else:
+            param_nodes.append(f)
 
-    _find_cos(ast)
-    if cos_node is None or len(cos_node.args) != 1:
-        return None
+    if plus_node is not None:
+        terms = flatten_binary(plus_node, "+")
+        cos_call = None
+        if len(terms) == 2:
+            t1, t2 = terms
+            if (
+                isinstance(t1, ConstNode)
+                and math.isclose(t1.value, 1.0)
+                and isinstance(t2, CallNode)
+                and t2.name.lower() == "cos"
+                and len(t2.args) == 1
+            ):
+                cos_call = t2
+            elif (
+                isinstance(t2, ConstNode)
+                and math.isclose(t2.value, 1.0)
+                and isinstance(t1, CallNode)
+                and t1.name.lower() == "cos"
+                and len(t1.args) == 1
+            ):
+                cos_call = t1
 
-    cos_arg = cos_node.args[0]
-    # Arg should be n * theta - phase or n * theta
-    n_node = ConstNode(1.0)
-    phase_node = ConstNode(0.0)
+        if cos_call is not None and len(param_nodes) <= 1:
+            k_node = param_nodes[0] if param_nodes else ConstNode(1.0)
+            return cos_call, c_prod, k_node
+
+    # --- Pattern Form 2: Expanded Sum Form: C * k + C * k * cos(n * theta - phase) ---
+    if isinstance(ast, BinaryOpNode) and ast.op == "+":
+        terms = flatten_binary(ast, "+")
+        if len(terms) == 2:
+            t1, t2 = terms
+
+            def _split_cos_term(node: ASTNode) -> tuple[CallNode, float, ASTNode] | None:
+                f_list = flatten_binary(node, "*")
+                cos_list = [
+                    f for f in f_list
+                    if isinstance(f, CallNode) and f.name.lower() == "cos" and len(f.args) == 1
+                ]
+                if len(cos_list) != 1:
+                    return None
+                other_factors = [f for f in f_list if f is not cos_list[0]]
+                cm = 1.0
+                pn: list[ASTNode] = []
+                for f in other_factors:
+                    if isinstance(f, ConstNode):
+                        cm *= f.value
+                    else:
+                        pn.append(f)
+                if len(pn) > 1:
+                    return None
+                kn = pn[0] if pn else ConstNode(1.0)
+                return cos_list[0], cm, kn
+
+            def _split_base_term(node: ASTNode) -> tuple[float, ASTNode] | None:
+                f_list = flatten_binary(node, "*")
+                if any(isinstance(f, CallNode) and f.name.lower() == "cos" for f in f_list):
+                    return None
+                cm = 1.0
+                pn: list[ASTNode] = []
+                for f in f_list:
+                    if isinstance(f, ConstNode):
+                        cm *= f.value
+                    else:
+                        pn.append(f)
+                if len(pn) > 1:
+                    return None
+                kn = pn[0] if pn else ConstNode(1.0)
+                return cm, kn
+
+            s1 = _split_cos_term(t1)
+            s2 = _split_base_term(t2)
+            if s1 is None or s2 is None:
+                s1 = _split_cos_term(t2)
+                s2 = _split_base_term(t1)
+
+            if s1 is not None and s2 is not None:
+                cos_cand, cm1, kn1 = s1
+                cm2, kn2 = s2
+                if math.isclose(cm1, cm2, rel_tol=1e-5) and kn1 == kn2:
+                    return cos_cand, cm1, kn1
+
+    return None
+
+
+def _extract_cos_angle_params(cos_arg: ASTNode) -> tuple[ASTNode, ASTNode] | None:
+    """Extract (n_node, phase_node) from cosine argument (e.g. n * theta - phase)."""
+    n_node: ASTNode = ConstNode(1.0)
+    phase_node: ASTNode = ConstNode(0.0)
 
     if isinstance(cos_arg, BinaryOpNode) and cos_arg.op == "-":
         phase_node = cos_arg.right
-        cos_arg = cos_arg.left
+        n_part = cos_arg.left
+    elif isinstance(cos_arg, BinaryOpNode) and cos_arg.op == "+":
+        terms_arg = flatten_binary(cos_arg, "+")
+        if len(terms_arg) == 2:
+            if isinstance(terms_arg[0], ConstNode):
+                phase_node = ConstNode(-terms_arg[0].value)
+                n_part = terms_arg[1]
+            elif isinstance(terms_arg[1], ConstNode):
+                phase_node = ConstNode(-terms_arg[1].value)
+                n_part = terms_arg[0]
+            else:
+                return None
+        else:
+            return None
+    else:
+        n_part = cos_arg
 
-    if isinstance(cos_arg, BinaryOpNode) and cos_arg.op == "*":
-        if isinstance(cos_arg.left, VarNode) and cos_arg.left.name == "theta":
-            n_node = cos_arg.right
-        elif isinstance(cos_arg.right, VarNode) and cos_arg.right.name == "theta":
-            n_node = cos_arg.left
-    elif isinstance(cos_arg, VarNode) and cos_arg.name == "theta":
+    if isinstance(n_part, VarNode) and n_part.name == "theta":
         n_node = ConstNode(1.0)
+    elif isinstance(n_part, BinaryOpNode) and n_part.op == "*":
+        factors_n = flatten_binary(n_part, "*")
+        theta_factors = [f for f in factors_n if isinstance(f, VarNode) and f.name == "theta"]
+        if len(theta_factors) != 1:
+            return None
+        other_n = [f for f in factors_n if f is not theta_factors[0]]
+        if len(other_n) != 1:
+            return None
+        n_node = other_n[0]
     else:
         return None
 
-    # Find k multiplier on cos
+    return n_node, phase_node
+
+
+def _match_periodic_torsion(force: openmm.CustomTorsionForce, ast: ASTNode) -> MatchedPattern | None:
     num_torsions = force.getNumTorsions()
     if num_torsions == 0:
         return None
 
+    cos_match = _extract_periodic_cos_call(ast)
+    if cos_match is None:
+        return None
+    cos_call, const_mult, k_node = cos_match
+
+    angle_params = _extract_cos_angle_params(cos_call.args[0])
+    if angle_params is None:
+        return None
+    n_node, phase_node = angle_params
+
+    # Per-torsion parameter resolution and conversion
     num_params = force.getNumPerTorsionParameters()
     param_names = [force.getPerTorsionParameterName(i) for i in range(num_params)]
-
-    # Search for k parameter in AST
-    free_vars = extract_free_variables(ast) - {"theta"}
-    k_name = next((v for v in free_vars if "k" in v.lower()), None)
-    if k_name is None and free_vars:
-        k_name = sorted(free_vars)[0]
 
     indices_list = []
     params_list = []
@@ -599,14 +715,14 @@ def _match_periodic_torsion(force: openmm.CustomTorsionForce, ast: ASTNode) -> M
         p1, p2, p3, p4, raw_params = force.getTorsionParameters(i)
         p_dict = dict(zip(param_names, raw_params, strict=True))
 
-        k_val = p_dict.get(k_name, 1.0) if k_name else 1.0
+        k_val = _get_param_val(k_node, p_dict)
         n_val = _get_param_val(n_node, p_dict)
         phase_val = _get_param_val(phase_node, p_dict)
-        if n_val is None or phase_val is None:
+        if k_val is None or n_val is None or phase_val is None:
             return None
 
         # Convert to AKMA: k in kcal/mol
-        k_akma = k_val * TORSION_K_OMM_TO_AKMA
+        k_akma = const_mult * (k_val * TORSION_K_OMM_TO_AKMA)
         periodicity = float(round(n_val))
         phase_akma = float(phase_val)
 
@@ -741,18 +857,25 @@ def _match_compound_bond_3p(
     terms = flatten_binary(ast, "+") if (isinstance(ast, BinaryOpNode) and ast.op == "+") else [ast]
     angle_term = None
     ub_term = None
+
     for t in terms:
         r_ang = _extract_harmonic_diff(t, "angle")
         r_ub = _extract_harmonic_diff(t, "distance")
-        if r_ang is not None:
+        if r_ang is not None and angle_term is None:
             angle_term = r_ang
-        elif r_ub is not None:
+        elif r_ub is not None and ub_term is None:
             ub_term = r_ub
+        else:
+            # Term did not match either, was duplicate, or is an unrecognized non-harmonic term
+            return None
 
-    if ub_term is not None and angle_term is not None:
+    # Strict term length assertions:
+    # Combined Angle + Urey-Bradley requires exactly 2 terms
+    if len(terms) == 2 and ub_term is not None and angle_term is not None:
         return _build_combined_angle_ub_pattern(force, angle_term, ub_term, param_names, num_bonds)
 
-    if ub_term is not None:
+    # Pure Urey-Bradley requires exactly 1 term
+    if len(terms) == 1 and ub_term is not None:
         return _build_pure_ub_pattern(force, ub_term, param_names, num_bonds)
 
     return None
@@ -780,16 +903,115 @@ def _match_position_restraint(force: openmm.CustomExternalForce, ast: ASTNode) -
     if num_particles == 0:
         return None
 
+    # Step 1: Structural AST Matching
+    # Target canonical forms:
+    # Form 1: mult * k * periodicdistance(x, y, z, x0, y0, z0)^2
+    # Form 2A (factored): mult * k * ((x - x0)^2 + (y - y0)^2 + (z - z0)^2)
+    # Form 2B (distributed): mult * k * (x - x0)^2 + mult * k * (y - y0)^2 + mult * k * (z - z0)^2
+
+    const_mult = 1.0
+    k_node: ASTNode | None = None
+    x0_node: ASTNode | None = None
+    y0_node: ASTNode | None = None
+    z0_node: ASTNode | None = None
+
+    # --- Pattern Form 2B: Distributed sum of 3 harmonic coordinate differences ---
+    if isinstance(ast, BinaryOpNode) and ast.op == "+":
+        terms = flatten_binary(ast, "+")
+        if len(terms) == 3:
+            extracted: dict[str, tuple[float, ASTNode, ASTNode]] = {}
+            for t in terms:
+                for c in ("x", "y", "z"):
+                    res = _extract_harmonic_diff(t, c)
+                    if res is not None and c not in extracted:
+                        extracted[c] = res
+                        break
+            if len(extracted) == 3:
+                mult_x, k_x, x0_cand = extracted["x"]
+                mult_y, k_y, y0_cand = extracted["y"]
+                mult_z, k_z, z0_cand = extracted["z"]
+                if (
+                    math.isclose(mult_x, mult_y, rel_tol=1e-5)
+                    and math.isclose(mult_x, mult_z, rel_tol=1e-5)
+                    and k_x == k_y == k_z
+                ):
+                    const_mult = mult_x
+                    k_node = k_x
+                    x0_node, y0_node, z0_node = x0_cand, y0_cand, z0_cand
+
+    # --- Pattern Form 1 and Form 2A: Factored products ---
+    if k_node is None:
+        factors = flatten_binary(ast, "*")
+        c_prod = 1.0
+        param_nodes: list[ASTNode] = []
+        pdist_call: CallNode | None = None
+        sum_of_squares_node: BinaryOpNode | None = None
+
+        for f in factors:
+            if isinstance(f, ConstNode):
+                c_prod *= f.value
+            elif (
+                isinstance(f, BinaryOpNode)
+                and f.op == "^"
+                and isinstance(f.right, ConstNode)
+                and math.isclose(f.right.value, 2.0)
+            ):
+                if isinstance(f.left, CallNode) and f.left.name.lower() == "periodicdistance":
+                    pdist_call = f.left
+                else:
+                    param_nodes.append(f)
+            elif isinstance(f, BinaryOpNode) and f.op == "+":
+                sum_of_squares_node = f
+            else:
+                param_nodes.append(f)
+
+        # Enforce multi-variable multiplier guard
+        if len(param_nodes) > 1:
+            return None
+
+        # Try Form 1: periodicdistance^2
+        if pdist_call is not None and len(pdist_call.args) == 6:
+            args = pdist_call.args
+            coord_names_first = [getattr(a, "name", None) for a in args[:3]]
+            coord_names_last = [getattr(a, "name", None) for a in args[3:]]
+            if coord_names_first == ["x", "y", "z"]:
+                const_mult = c_prod
+                k_node = param_nodes[0] if param_nodes else ConstNode(1.0)
+                x0_node, y0_node, z0_node = args[3], args[4], args[5]
+            elif coord_names_last == ["x", "y", "z"]:
+                const_mult = c_prod
+                k_node = param_nodes[0] if param_nodes else ConstNode(1.0)
+                x0_node, y0_node, z0_node = args[0], args[1], args[2]
+
+        # Try Form 2A: sum of squares ((x - x0)^2 + (y - y0)^2 + (z - z0)^2)
+        elif sum_of_squares_node is not None:
+            terms = flatten_binary(sum_of_squares_node, "+")
+            if len(terms) == 3:
+                coords: dict[str, ASTNode] = {}
+                for t in terms:
+                    if (
+                        isinstance(t, BinaryOpNode)
+                        and t.op == "^"
+                        and isinstance(t.right, ConstNode)
+                        and math.isclose(t.right.value, 2.0)
+                    ):
+                        for c in ("x", "y", "z"):
+                            extracted_base = _extract_coord_param_from_base(t.left, c)
+                            if extracted_base is not None and c not in coords:
+                                coords[c] = extracted_base[1]
+                                break
+                if len(coords) == 3:
+                    const_mult = c_prod
+                    k_node = param_nodes[0] if param_nodes else ConstNode(1.0)
+                    x0_node, y0_node, z0_node = coords["x"], coords["y"], coords["z"]
+
+    # If neither pattern matched, reject
+    if k_node is None or x0_node is None or y0_node is None or z0_node is None:
+        return None
+
+    # Step 2: Per-particle parameter extraction and unit conversion
     num_params = force.getNumPerParticleParameters()
     param_names = [force.getPerParticleParameterName(i) for i in range(num_params)]
-
-    # Check for ((x - x0)^2 + (y - y0)^2 + (z - z0)^2) or periodicdistance^2
-    mult = 1.0
-    k_name = "k"
-    free_vars = extract_free_variables(ast) - {"x", "y", "z"}
-    k_candidate = next((v for v in free_vars if "k" in v.lower()), None)
-    if k_candidate is not None:
-        k_name = k_candidate
 
     indices_list = []
     params_list = []
@@ -797,17 +1019,21 @@ def _match_position_restraint(force: openmm.CustomExternalForce, ast: ASTNode) -
         p_idx, raw_params = force.getParticleParameters(i)
         p_dict = dict(zip(param_names, raw_params, strict=True))
 
-        x0 = p_dict.get("x0", 0.0)
-        y0 = p_dict.get("y0", 0.0)
-        z0 = p_dict.get("z0", 0.0)
-        k_val = p_dict.get(k_name, 1000.0)
+        k_val = _get_param_val(k_node, p_dict)
+        x0_val = _get_param_val(x0_node, p_dict)
+        y0_val = _get_param_val(y0_node, p_dict)
+        z0_val = _get_param_val(z0_node, p_dict)
 
-        # Prolix compute_positional_restraint_energy: E = sum k * Delta_r^2 (unhalved)
+        if any(v is None for v in (k_val, x0_val, y0_val, z0_val)):
+            return None
+
+        # AKMA conversion:
+        # Prolix compute_positional_restraint_energy evaluates E = sum k_prolix * Delta_r^2 (unhalved)
         # Therefore: k_prolix = mult * (k_omm / 418.4)
-        x0_akma = x0 * NM_TO_ANGSTROM
-        y0_akma = y0 * NM_TO_ANGSTROM
-        z0_akma = z0 * NM_TO_ANGSTROM
-        k_akma = mult * (k_val * BOND_K_OMM_TO_AKMA)
+        x0_akma = x0_val * NM_TO_ANGSTROM
+        y0_akma = y0_val * NM_TO_ANGSTROM
+        z0_akma = z0_val * NM_TO_ANGSTROM
+        k_akma = const_mult * (k_val * BOND_K_OMM_TO_AKMA)
 
         indices_list.append([p_idx])
         params_list.append([x0_akma, y0_akma, z0_akma, k_akma])
@@ -875,6 +1101,48 @@ def match_custom_force_pattern(
 # =============================================================================
 
 
+# Shared bucket ladder families and their associated bundle fields
+_BUCKET_FAMILIES: dict[str, tuple[tuple[int, ...], str, list[tuple[str, str, str]]]] = {
+    "bond": (
+        BOND_BUCKETS,
+        "bond_bucket_idx",
+        [("bond_idx", "bond_params", "bond_mask")],
+    ),
+    "angle": (
+        ANGLE_BUCKETS,
+        "angle_bucket_idx",
+        [
+            ("angle_idx", "angle_params", "angle_mask"),
+            ("urey_bradley_idx", "urey_bradley_params", "urey_bradley_mask"),
+        ],
+    ),
+    "urey_bradley": (
+        ANGLE_BUCKETS,
+        "angle_bucket_idx",
+        [
+            ("angle_idx", "angle_params", "angle_mask"),
+            ("urey_bradley_idx", "urey_bradley_params", "urey_bradley_mask"),
+        ],
+    ),
+    "dihedral": (
+        DIHEDRAL_BUCKETS,
+        "dihedral_bucket_idx",
+        [
+            ("dihedral_idx", "dihedral_params", "dihedral_mask"),
+            ("improper_idx", "improper_params", "improper_mask"),
+        ],
+    ),
+    "improper": (
+        DIHEDRAL_BUCKETS,
+        "dihedral_bucket_idx",
+        [
+            ("dihedral_idx", "dihedral_params", "dihedral_mask"),
+            ("improper_idx", "improper_params", "improper_mask"),
+        ],
+    ),
+}
+
+
 def fold_matched_pattern_into_bundle(
     bundle: MolecularBundle,
     matched: MatchedPattern,
@@ -894,28 +1162,22 @@ def fold_matched_pattern_into_bundle(
         return bundle
 
     # Map target term to bundle field names and bucket ladder
-    spec_field = f"{term}_bucket_idx"
+    if term not in _BUCKET_FAMILIES:
+        raise ValueError(f"Unsupported target term '{term}'")
+
+    ladder, spec_field, family_fields = _BUCKET_FAMILIES[term]
     extra_kwargs: dict[str, Any] = {}
     if term == "bond":
-        ladder = BOND_BUCKETS
         idx_field, prm_field, msk_field, n_field = "bond_idx", "bond_params", "bond_mask", "n_bonds"
     elif term == "angle":
-        ladder = ANGLE_BUCKETS
         idx_field, prm_field, msk_field, n_field = "angle_idx", "angle_params", "angle_mask", "n_angles"
+    elif term == "urey_bradley":
+        idx_field, prm_field, msk_field, n_field = "urey_bradley_idx", "urey_bradley_params", "urey_bradley_mask", "n_urey_bradley"
     elif term == "dihedral":
-        ladder = DIHEDRAL_BUCKETS
         idx_field, prm_field, msk_field, n_field = "dihedral_idx", "dihedral_params", "dihedral_mask", "n_dihedrals"
     elif term == "improper":
-        ladder = DIHEDRAL_BUCKETS
-        spec_field = "dihedral_bucket_idx"
         idx_field, prm_field, msk_field, n_field = "improper_idx", "improper_params", "improper_mask", "n_impropers"
         extra_kwargs = {"improper_is_periodic": jnp.array(False, dtype=bool)}
-    elif term == "urey_bradley":
-        ladder = ANGLE_BUCKETS
-        spec_field = "angle_bucket_idx"
-        idx_field, prm_field, msk_field, n_field = "urey_bradley_idx", "urey_bradley_params", "urey_bradley_mask", "n_urey_bradley"
-    else:
-        raise ValueError(f"Unsupported target term '{term}'")
 
     # Extract existing active entries
     n_old = int(getattr(bundle, n_field))
@@ -951,7 +1213,7 @@ def fold_matched_pattern_into_bundle(
     padded_prm = jnp.pad(cat_prm, ((0, pad_len), (0, 0))) if pad_len > 0 else cat_prm
     mask = jnp.arange(target_cap) < n_total
 
-    updates = {
+    updates: dict[str, Any] = {
         idx_field: padded_idx,
         prm_field: padded_prm,
         msk_field: mask,
@@ -959,4 +1221,15 @@ def fold_matched_pattern_into_bundle(
         "shape_spec": shape_spec,
         **extra_kwargs,
     }
+
+    # CRITICAL: Synchronize all companion arrays in the same bucket family
+    for c_idx, c_prm, c_msk in family_fields:
+        if c_idx != idx_field:
+            curr_comp_cap = getattr(bundle, c_idx).shape[0]
+            if curr_comp_cap < target_cap:
+                c_pad = target_cap - curr_comp_cap
+                updates[c_idx] = jnp.pad(getattr(bundle, c_idx), ((0, c_pad), (0, 0)))
+                updates[c_prm] = jnp.pad(getattr(bundle, c_prm), ((0, c_pad), (0, 0)))
+                updates[c_msk] = jnp.pad(getattr(bundle, c_msk), ((0, c_pad),), constant_values=False)
+
     return dataclasses.replace(bundle, **updates)

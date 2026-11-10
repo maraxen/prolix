@@ -690,3 +690,187 @@ def test_charmm_harmonic_improper_unhalved_numerical_parity_vs_openmm():
     prolix_energy_akma = float(improper_energy_fn(pos_angstrom, p_imp_3d))
 
     np.testing.assert_allclose(prolix_energy_akma, omm_energy_akma, rtol=1e-5)
+
+
+def test_match_position_restraint_periodicdistance_and_custom_coords():
+    """Verify position restraint matching for periodicdistance and custom Cartesian target parameters."""
+    # 1. Factored form with custom coordinates: 0.5 * k * ((x - x_target)^2 + (y - y_target)^2 + (z - z_target)^2)
+    f1 = openmm.CustomExternalForce("0.5 * k * ((x - x_target)^2 + (y - y_target)^2 + (z - z_target)^2)")
+    f1.addPerParticleParameter("k")
+    f1.addPerParticleParameter("x_target")
+    f1.addPerParticleParameter("y_target")
+    f1.addPerParticleParameter("z_target")
+    f1.addParticle(0, [500.0, 1.5, 2.5, 3.5])
+
+    m1 = match_custom_force_pattern(f1)
+    assert m1 is not None
+    assert m1.pattern_name == "harmonic_position_restraint"
+    # Target positions in AKMA (nm -> Angstrom, factor 10)
+    np.testing.assert_allclose(m1.params[0, :3], [15.0, 25.0, 35.0])
+    # k_akma = 0.5 * (500.0 * BOND_K_OMM_TO_AKMA)
+    np.testing.assert_allclose(m1.params[0, 3], 0.5 * 500.0 * BOND_K_OMM_TO_AKMA)
+
+    # 2. periodicdistance form: 0.5 * k * periodicdistance(x, y, z, x0, y0, z0)^2
+    f2 = openmm.CustomExternalForce("0.5 * k * periodicdistance(x, y, z, x0, y0, z0)^2")
+    f2.addPerParticleParameter("k")
+    f2.addPerParticleParameter("x0")
+    f2.addPerParticleParameter("y0")
+    f2.addPerParticleParameter("z0")
+    f2.addParticle(0, [1000.0, 0.4, 0.6, 0.8])
+
+    m2 = match_custom_force_pattern(f2)
+    assert m2 is not None
+    assert m2.pattern_name == "harmonic_position_restraint"
+    np.testing.assert_allclose(m2.params[0, :3], [4.0, 6.0, 8.0])
+    np.testing.assert_allclose(m2.params[0, 3], 0.5 * 1000.0 * BOND_K_OMM_TO_AKMA)
+
+    # 3. Non-matching nonlinear potential: must return None
+    f3 = openmm.CustomExternalForce("a * x^4 + exp(y)")
+    f3.addPerParticleParameter("a")
+    f3.addParticle(0, [10.0])
+    assert match_custom_force_pattern(f3) is None
+
+    # 4. 2D restraint: must return None
+    f4 = openmm.CustomExternalForce("0.5 * k * ((x - x0)^2 + (y - y0)^2)")
+    f4.addPerParticleParameter("k")
+    f4.addPerParticleParameter("x0")
+    f4.addPerParticleParameter("y0")
+    f4.addParticle(0, [500.0, 1.0, 1.0])
+    assert match_custom_force_pattern(f4) is None
+
+
+def test_match_periodic_torsion_strict_matching_and_rejections():
+    """Verify strict structural AST matching for periodic torsions including multiplier and sign checks."""
+    # 1. Factored form with multiplier: 2.5 * k * (1 + cos(3 * theta - 0.5))
+    f1 = openmm.CustomTorsionForce("2.5 * k * (1 + cos(3 * theta - 0.5))")
+    f1.addPerTorsionParameter("k")
+    f1.addTorsion(0, 1, 2, 3, [10.0])
+    m1 = match_custom_force_pattern(f1)
+    assert m1 is not None
+    assert m1.pattern_name == "periodic_torsion"
+    assert m1.params[0, 0] == 3.0  # periodicity
+    assert math.isclose(m1.params[0, 1], 0.5, abs_tol=1e-5)  # phase
+    # k_akma = 2.5 * 10.0 * TORSION_K_OMM_TO_AKMA
+    np.testing.assert_allclose(m1.params[0, 2], 2.5 * 10.0 * TORSION_K_OMM_TO_AKMA)
+
+    # 2. Expanded form: k + k * cos(2 * theta - 1.0)
+    f2 = openmm.CustomTorsionForce("k + k * cos(2 * theta - 1.0)")
+    f2.addPerTorsionParameter("k")
+    f2.addTorsion(0, 1, 2, 3, [5.0])
+    m2 = match_custom_force_pattern(f2)
+    assert m2 is not None
+    assert m2.pattern_name == "periodic_torsion"
+    assert m2.params[0, 0] == 2.0
+    assert math.isclose(m2.params[0, 1], 1.0, abs_tol=1e-5)
+    np.testing.assert_allclose(m2.params[0, 2], 5.0 * TORSION_K_OMM_TO_AKMA)
+
+    # 3. Negative cosine: 10.0 * (1 - cos(theta)) -> MUST REJECT (returns None)
+    f3 = openmm.CustomTorsionForce("10.0 * (1 - cos(theta))")
+    f3.addTorsion(0, 1, 2, 3, [])
+    assert match_custom_force_pattern(f3) is None
+
+    # 4. Extra trailing term: cos(theta) + exp(theta) -> MUST REJECT
+    f4 = openmm.CustomTorsionForce("cos(theta) + exp(theta)")
+    f4.addTorsion(0, 1, 2, 3, [])
+    assert match_custom_force_pattern(f4) is None
+
+    # 5. Invalid constant term: k * (2 + cos(theta)) -> MUST REJECT
+    f5 = openmm.CustomTorsionForce("k * (2 + cos(theta))")
+    f5.addPerTorsionParameter("k")
+    f5.addTorsion(0, 1, 2, 3, [1.0])
+    assert match_custom_force_pattern(f5) is None
+
+
+def test_match_compound_bond_3p_strict_term_lengths():
+    """Verify that compound bond 3-particle matcher rejects trailing extra non-harmonic terms."""
+    # Composite Angle + Urey-Bradley with trailing quartic term
+    expr = (
+        "0.5 * k_ang * (angle(p1, p2, p3) - theta0)^2 + "
+        "0.5 * k_ub * (distance(p1, p3) - r0)^2 + "
+        "distance(p1, p2)^4"
+    )
+    f = openmm.CustomCompoundBondForce(3, expr)
+    f.addPerBondParameter("k_ang")
+    f.addPerBondParameter("theta0")
+    f.addPerBondParameter("k_ub")
+    f.addPerBondParameter("r0")
+    f.addBond([0, 1, 2], [500.0, 1.91, 120000.0, 0.24])
+    assert match_custom_force_pattern(f) is None
+
+    # Pure Urey-Bradley with extra non-harmonic term
+    expr_ub_extra = "0.5 * k_ub * (distance(p1, p3) - r0)^2 + distance(p1, p2)^2"
+    f_ub = openmm.CustomCompoundBondForce(3, expr_ub_extra)
+    f_ub.addPerBondParameter("k_ub")
+    f_ub.addPerBondParameter("r0")
+    f_ub.addBond([0, 1, 2], [120000.0, 0.24])
+    assert match_custom_force_pattern(f_ub) is None
+
+
+def test_companion_array_padding_synchronization():
+    """Verify that bucket expansion pads companion arrays in lockstep (preventing shape desync)."""
+    # 1. Expand angle bucket via Urey-Bradley: companion angle_idx must also expand
+    bundle = _create_minimal_test_bundle(n_atoms=32, n_angles=10, n_urey_bradley=0, angle_cap=32)
+    assert bundle.shape_spec.angle_bucket_idx == 0
+    assert bundle.angle_idx.shape == (32, 3)
+    assert bundle.urey_bradley_idx.shape == (32, 3)
+
+    # Add 40 Urey-Bradley terms: n_total = 40 > 32, so capacity expands to ANGLE_BUCKETS[1] = 128
+    matched_ub = MatchedPattern(
+        pattern_name="urey_bradley",
+        target_term="urey_bradley",
+        indices=np.zeros((40, 3), dtype=np.int32),
+        params=np.zeros((40, 2), dtype=np.float32),
+    )
+    folded = fold_matched_pattern_into_bundle(bundle, matched_ub)
+
+    assert folded.shape_spec.angle_bucket_idx == 1
+    assert folded.urey_bradley_idx.shape == (128, 3)
+    assert folded.angle_idx.shape == (128, 3), "angle_idx failed to synchronize shape with companion!"
+    assert folded.angle_params.shape == (128, 2)
+    assert folded.angle_mask.shape == (128,)
+    assert int(jnp.sum(folded.angle_mask)) == 10
+    assert int(jnp.sum(folded.urey_bradley_mask)) == 40
+
+    # 2. Expand dihedral bucket via Improper: companion dihedral_idx must also expand
+    bundle_dih = _create_minimal_test_bundle(n_atoms=32, n_dihedrals=12, n_impropers=0, dihedral_cap=32)
+    assert bundle_dih.shape_spec.dihedral_bucket_idx == 0
+    assert bundle_dih.dihedral_idx.shape == (32, 4)
+    assert bundle_dih.improper_idx.shape == (32, 4)
+
+    matched_imp = MatchedPattern(
+        pattern_name="harmonic_improper",
+        target_term="improper",
+        indices=np.zeros((45, 4), dtype=np.int32),
+        params=np.zeros((45, 4), dtype=np.float32),
+    )
+    folded_dih = fold_matched_pattern_into_bundle(bundle_dih, matched_imp)
+
+    assert folded_dih.shape_spec.dihedral_bucket_idx == 1
+    assert folded_dih.improper_idx.shape == (128, 4)
+    assert folded_dih.dihedral_idx.shape == (128, 4), "dihedral_idx failed to synchronize shape with companion!"
+    assert folded_dih.dihedral_params.shape == (128, 4)
+    assert folded_dih.dihedral_mask.shape == (128,)
+    assert int(jnp.sum(folded_dih.dihedral_mask)) == 12
+    assert int(jnp.sum(folded_dih.improper_mask)) == 45
+
+
+def test_harmonic_multiplier_guards_and_bare_powers():
+    """Verify multi-variable multipliers are rejected while unscaled bare powers match with k=1.0."""
+    # 1. Multi-variable multiplier: k * extra * (r - r0)^2 -> must return None
+    f_multi = openmm.CustomBondForce("k * extra * (r - r0)^2")
+    f_multi.addPerBondParameter("k")
+    f_multi.addPerBondParameter("extra")
+    f_multi.addPerBondParameter("r0")
+    f_multi.addBond(0, 1, [100.0, 2.0, 0.15])
+    assert match_custom_force_pattern(f_multi) is None
+
+    # 2. Bare power without explicit force constant: (r - r0)^2 -> matches with implicit k = 1.0
+    # Since OpenMM expression is unhalved (mult=1.0), Prolix k_akma = 2.0 * mult * (1.0 * BOND_K_OMM_TO_AKMA)
+    f_bare = openmm.CustomBondForce("(r - r0)^2")
+    f_bare.addPerBondParameter("r0")
+    f_bare.addBond(0, 1, [0.15])
+    m_bare = match_custom_force_pattern(f_bare)
+    assert m_bare is not None
+    assert m_bare.pattern_name == "harmonic_bond"
+    np.testing.assert_allclose(m_bare.params[0, 0], 1.5)  # r0 in Angstrom
+    np.testing.assert_allclose(m_bare.params[0, 1], 2.0 * 1.0 * BOND_K_OMM_TO_AKMA)
