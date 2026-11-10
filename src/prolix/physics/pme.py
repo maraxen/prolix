@@ -51,15 +51,28 @@ def _is_ortho_box(positions: jnp.ndarray, box_size: jnp.ndarray) -> bool:
     return False
 
 
-def _resolve_env_pme_grid_points(
-    n_atoms: int | None = None, default: int | None = None
-) -> int | None:
-    """Resolve ``PROLIX_PME_GRID_POINTS`` (scalar int or bucket map like ``'8192:48,25000:64'``)."""
+def _parse_grid_dims_token(token: str) -> tuple[int, int, int] | None:
+    s = token.strip().lower()
+    if not s:
+        return None
+    if "x" in s:
+        parts = [int(p.strip()) for p in s.split("x") if p.strip()]
+        if len(parts) == 3 and all(p > 0 for p in parts):
+            return (parts[0], parts[1], parts[2])
+        return None
+    gp = int(s)
+    return (gp, gp, gp) if gp > 0 else None
+
+
+def _resolve_env_pme_grid_dims(
+    n_atoms: int | None = None, default: tuple[int, int, int] | None = None
+) -> tuple[int, int, int] | None:
+    """Resolve ``PROLIX_PME_GRID_POINTS`` as ``(Kx, Ky, Kz)`` (supports ``'64'``, ``'96x96x64'``, or bucket map)."""
     raw = os.environ.get("PROLIX_PME_GRID_POINTS", "").strip()
     if not raw:
         return default
     if ":" in raw or "," in raw:
-        mapping: list[tuple[int, int]] = []
+        mapping: list[tuple[int, tuple[int, int, int]]] = []
         fallback = default
         for part in raw.split(","):
             part = part.strip()
@@ -67,19 +80,32 @@ def _resolve_env_pme_grid_points(
                 continue
             if ":" in part:
                 k_s, v_s = part.split(":", 1)
-                mapping.append((int(k_s.strip()), int(v_s.strip())))
+                parsed = _parse_grid_dims_token(v_s)
+                if parsed is not None:
+                    mapping.append((int(k_s.strip()), parsed))
             else:
-                fallback = int(part)
+                parsed = _parse_grid_dims_token(part)
+                if parsed is not None:
+                    fallback = parsed
         if n_atoms is not None and mapping:
             mapping.sort(key=lambda kv: kv[0])
-            for max_n, gp in mapping:
-                if int(n_atoms) <= max_n and gp > 0:
-                    return gp
-            if mapping[-1][1] > 0:
-                return mapping[-1][1]
+            for max_n, gd in mapping:
+                if int(n_atoms) <= max_n:
+                    return gd
+            return mapping[-1][1]
         return fallback
-    gp = int(raw)
-    return gp if gp > 0 else default
+    parsed = _parse_grid_dims_token(raw)
+    return parsed if parsed is not None else default
+
+
+def _resolve_env_pme_grid_points(
+    n_atoms: int | None = None, default: int | None = None
+) -> int | None:
+    """Resolve ``PROLIX_PME_GRID_POINTS`` (scalar int, ``'KxxKyxKz'``, or bucket map like ``'8192:48,25000:64'``)."""
+    gd = _resolve_env_pme_grid_dims(n_atoms=n_atoms, default=None)
+    if gd is not None:
+        return int(gd[0])
+    return default
 
 
 def _spread_charges_reference(
@@ -829,6 +855,22 @@ def _spme_forces_from_theta(
     return (-COULOMB_CONSTANT * forces).astype(dtype)
 
 
+def scale_influence_function_isotropic(
+    G_ref: jnp.ndarray,
+    box_ref: jnp.ndarray,
+    box_cur: jnp.ndarray,
+) -> jnp.ndarray:
+    """Fast isotropic NPT scaling ``G_iso = G_ref * (V_ref / V_cur)`` without recomputing B-splines (MK-59)."""
+    v_ref = box_volume(jnp.asarray(box_ref, dtype=G_ref.dtype))
+    v_cur = jnp.maximum(box_volume(jnp.asarray(box_cur, dtype=G_ref.dtype)), jnp.asarray(1e-12, dtype=G_ref.dtype))
+    ratio = v_ref / v_cur
+    if ratio.ndim == 1 and G_ref.ndim == 3:
+        return G_ref[None, ...] * ratio[:, None, None, None]
+    if ratio.ndim == 1 and G_ref.ndim == 4:
+        return G_ref * ratio[:, None, None, None]
+    return G_ref * ratio
+
+
 def spme_forces(
     positions: jnp.ndarray,
     charges: jnp.ndarray,
@@ -838,8 +880,20 @@ def spme_forces(
     alpha: float,
     order: int = 4,
     use_pallas_pme: bool = False,
+    G_cached: jnp.ndarray | None = None,
 ) -> jnp.ndarray:
-    """Direct SPME reciprocal force evaluation F = -dE/dr without scalar energy reductions (MK-57)."""
+    """Direct SPME reciprocal force evaluation F = -dE/dr without scalar energy reductions (MK-57 / MK-59)."""
+    if G_cached is not None:
+        return _spme_forces_cached(
+            positions,
+            charges,
+            atom_mask,
+            G_cached,
+            box_size,
+            grid_dims,
+            order,
+            use_pallas_pme,
+        )
     Kx, Ky, Kz = grid_dims
     orig_dtype = positions.dtype
     is_ortho = _is_ortho_box(positions, box_size)
@@ -918,9 +972,9 @@ def make_spme_energy_fn(
     n_atoms: int | None = None,
     return_forces: bool = False,
 ):
-    gp_env = _resolve_env_pme_grid_points(n_atoms=n_atoms)
-    if grid_dims is None and gp_env is not None and gp_env > 0:
-        grid_dims = (gp_env, gp_env, gp_env)
+    gd_env = _resolve_env_pme_grid_dims(n_atoms=n_atoms)
+    if grid_dims is None and gd_env is not None:
+        grid_dims = gd_env
     if grid_dims is None:
         grid_dims = compute_pme_grid_dims(box_size, grid_spacing)
     else:
@@ -941,16 +995,24 @@ def make_spme_energy_fn(
         G_cached_f32_np = G_cached_np.astype(np.float32)
 
         if return_forces:
-            def _cached_force_fn(positions, charges, atom_mask):
+            def _cached_force_fn(positions, charges, atom_mask, box=None):
                 use_p = pallas and not in_export_context()
                 g_dtype = jnp.float32 if (use_p and is_ortho_host) else positions.dtype
                 g_np = G_cached_f32_np if g_dtype == jnp.float32 else G_cached_np
+                g_dev = jnp.asarray(g_np, dtype=g_dtype)
+                if box is not None:
+                    box_cur = jnp.asarray(box, dtype=positions.dtype)
+                    g_dev = scale_influence_function_isotropic(
+                        g_dev, jnp.asarray(box_np, dtype=g_dtype), box_cur
+                    )
+                else:
+                    box_cur = box_np.astype(np.dtype(positions.dtype))
                 return _spme_forces_cached(
                     positions,
                     charges,
                     atom_mask,
-                    jnp.asarray(g_np, dtype=g_dtype),
-                    box_np.astype(np.dtype(positions.dtype)),
+                    g_dev,
+                    box_cur,
                     grid_dims,
                     order,
                     use_p,
@@ -960,16 +1022,24 @@ def make_spme_energy_fn(
                 _cached_force_fn.G_cached = jnp.asarray(G_cached_np)  # type: ignore[attr-defined]
             return _cached_force_fn
 
-        def _cached_fn(positions, charges, atom_mask):
+        def _cached_fn(positions, charges, atom_mask, box=None):
             use_p = pallas and not in_export_context()
             g_dtype = jnp.float32 if (use_p and is_ortho_host) else positions.dtype
             g_np = G_cached_f32_np if g_dtype == jnp.float32 else G_cached_np
+            g_dev = jnp.asarray(g_np, dtype=g_dtype)
+            if box is not None:
+                box_cur = jnp.asarray(box, dtype=positions.dtype)
+                g_dev = scale_influence_function_isotropic(
+                    g_dev, jnp.asarray(box_np, dtype=g_dtype), box_cur
+                )
+            else:
+                box_cur = box_np.astype(np.dtype(positions.dtype))
             return _spme_energy_with_forces_cached(
                 positions,
                 charges,
                 atom_mask,
-                jnp.asarray(g_np, dtype=g_dtype),
-                box_np.astype(np.dtype(positions.dtype)),
+                g_dev,
+                box_cur,
                 grid_dims,
                 alpha,
                 order,
@@ -981,11 +1051,25 @@ def make_spme_energy_fn(
         return _cached_fn
 
     if return_forces:
-        return lambda positions, charges, atom_mask: spme_forces(
-            positions, charges, atom_mask, box_size, grid_dims, alpha, order, pallas and not in_export_context()
+        return lambda positions, charges, atom_mask, box=None: spme_forces(
+            positions,
+            charges,
+            atom_mask,
+            box_size if box is None else box,
+            grid_dims,
+            alpha,
+            order,
+            pallas and not in_export_context(),
         )
-    return lambda positions, charges, atom_mask: spme_energy_with_forces(
-        positions, charges, atom_mask, box_size, grid_dims, alpha, order, pallas
+    return lambda positions, charges, atom_mask, box=None: spme_energy_with_forces(
+        positions,
+        charges,
+        atom_mask,
+        box_size if box is None else box,
+        grid_dims,
+        alpha,
+        order,
+        pallas,
     )
 
 def make_pme_energy_fn(

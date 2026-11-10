@@ -113,6 +113,34 @@ def compute_pme_spatial_perm(
     return perm, inv_perm
 
 
+def _resolve_pme_active_atoms(
+    n_active_atoms: int | None,
+    n_atoms: int,
+    atom_mask: jax.Array | None = None,
+) -> int:
+    if n_active_atoms is not None:
+        return min(n_atoms, max(1, int(n_active_atoms)))
+    raw = os.environ.get("PROLIX_ACTIVE_ATOMS", "").strip()
+    if raw:
+        try:
+            return min(n_atoms, max(1, int(raw)))
+        except ValueError:
+            pass
+    if atom_mask is not None and not isinstance(atom_mask, jax.core.Tracer):
+        try:
+            import numpy as _np
+
+            m_np = _np.asarray(atom_mask, dtype=bool)
+            if m_np.size > 0:
+                m_any = _np.any(m_np, axis=tuple(range(m_np.ndim - 1))) if m_np.ndim > 1 else m_np
+                nz = _np.nonzero(m_any)[0]
+                if nz.size > 0:
+                    return min(n_atoms, max(1, int(nz[-1]) + 1))
+        except Exception:
+            pass
+    return n_atoms
+
+
 def _spread_charges_pallas_batch(
     B: int,
     in_batched: tuple[bool, bool, bool, bool],
@@ -122,14 +150,16 @@ def _spread_charges_pallas_batch(
     box_size: jax.Array,
     grid_dims: tuple[int, int, int],
     interpret: bool,
+    n_active_atoms: int | None = None,
 ) -> jax.Array:
     b_pos, b_q, b_m, b_box = in_batched
     Kx, Ky, Kz = (int(grid_dims[0]), int(grid_dims[1]), int(grid_dims[2]))
     mesh_stride = Kx * Ky * Kz
     n_atoms = int(positions.shape[1] if b_pos else positions.shape[0])
-    n_blocks = max(1, (n_atoms + BLOCK_N - 1) // BLOCK_N)
+    n_act = _resolve_pme_active_atoms(n_active_atoms, n_atoms, atom_mask)
+    n_blocks = max(1, (n_act + BLOCK_N - 1) // BLOCK_N)
     n_pad = n_blocks * BLOCK_N
-    pad = n_pad - n_atoms
+    pad = n_pad - n_act
 
     orig_dtype = positions.dtype
     dtype = jnp.float32
@@ -146,6 +176,11 @@ def _spread_charges_pallas_batch(
         mask_in = mask_in[None, ...]
     if not b_box:
         box_in = box_in[None, ...]
+
+    if n_act < n_atoms:
+        pos_in = pos_in[:, :n_act, :]
+        q_in = q_in[:, :n_act]
+        mask_in = mask_in[:, :n_act]
 
     if pad > 0:
         pos_in = jnp.pad(pos_in, ((0, 0), (0, pad), (0, 0)), constant_values=0.0)
@@ -173,7 +208,7 @@ def _spread_charges_pallas_batch(
         mesh_base = b_id * mesh_stride
 
         zero = jnp.asarray(0.0, dtype=dtype)
-        is_real = (_pl_load(mask_ref, (m_base + offs,)) > 0) & (offs < n_atoms)
+        is_real = (_pl_load(mask_ref, (m_base + offs,)) > 0) & (offs < n_act)
         qi = _pl_load(charges_ref, (q_base + offs,), mask=is_real, other=zero)
         active_q = is_real & (jnp.abs(qi) > zero)
 
@@ -265,7 +300,9 @@ def _spread_charges_pallas_single(
     box_size: jax.Array,
     grid_dims: tuple[int, int, int],
     interpret: bool,
+    n_active_atoms: int | None = None,
 ) -> jax.Array:
+    extra_kw = {"n_active_atoms": n_active_atoms} if n_active_atoms is not None else {}
     out = _spread_charges_pallas_batch(
         1,
         (False, False, False, False),
@@ -275,6 +312,7 @@ def _spread_charges_pallas_single(
         box_size,
         grid_dims,
         interpret,
+        **extra_kw,
     )
     return out[0]
 
@@ -289,11 +327,13 @@ def spread_charges_pallas(
     *,
     atom_perm: jax.Array | None = None,
     interpret: bool = False,
+    n_active_atoms: int | None = None,
 ) -> jax.Array:
     """Spread charges onto the PME mesh with a vectorized ``(BLOCK_N=32, 64)`` stencil."""
     if order != 4:
         raise NotImplementedError("Pallas SPME stencil is order-4 only")
     grid_tuple = (int(grid_dims[0]), int(grid_dims[1]), int(grid_dims[2]))
+    extra_kw = {"n_active_atoms": n_active_atoms} if n_active_atoms is not None else {}
     if atom_perm is None and os.environ.get("PROLIX_PME_SPATIAL_SORT", "").strip() == "1":
         atom_perm, _ = compute_pme_spatial_perm(
             positions, box_size, grid_tuple, atom_mask=atom_mask
@@ -317,7 +357,9 @@ def spread_charges_pallas(
 
     @jax.custom_batching.custom_vmap
     def _vmappable(pos, q, mask, box):
-        return _spread_charges_pallas_single(pos, q, mask, box, grid_tuple, interpret)
+        return _spread_charges_pallas_single(
+            pos, q, mask, box, grid_tuple, interpret, n_active_atoms=n_active_atoms
+        )
 
     @_vmappable.def_vmap
     def _vmap_rule(axis_size, in_batched, pos, q, mask, box):
@@ -330,6 +372,7 @@ def spread_charges_pallas(
             box,
             grid_tuple,
             interpret,
+            **extra_kw,
         )
         return out, True
 
@@ -347,6 +390,7 @@ def spread_charges_pallas(
             box_size,
             grid_tuple,
             interpret,
+            **extra_kw,
         )
 
     return _vmappable(positions, charges, atom_mask, box_size)
@@ -363,14 +407,16 @@ def _gather_pallas_batch(
     grid_dims: tuple[int, int, int],
     interpret: bool,
     compute_dq: bool = True,
+    n_active_atoms: int | None = None,
 ) -> tuple[jax.Array, jax.Array]:
     b_pos, b_q, b_m, b_box, b_mesh = in_batched
     Kx, Ky, Kz = (int(grid_dims[0]), int(grid_dims[1]), int(grid_dims[2]))
     mesh_stride = Kx * Ky * Kz
     n_atoms = int(positions.shape[1] if b_pos else positions.shape[0])
-    n_blocks = max(1, (n_atoms + BLOCK_N - 1) // BLOCK_N)
+    n_act = _resolve_pme_active_atoms(n_active_atoms, n_atoms)
+    n_blocks = max(1, (n_act + BLOCK_N - 1) // BLOCK_N)
     n_pad = n_blocks * BLOCK_N
-    pad = n_pad - n_atoms
+    pad = n_pad - n_act
 
     orig_dtype = positions.dtype
     dtype = jnp.float32
@@ -390,6 +436,11 @@ def _gather_pallas_batch(
         box_in = box_in[None, ...]
     if not b_mesh:
         theta_in = theta_in[None, ...]
+
+    if n_act < n_atoms:
+        pos_in = pos_in[:, :n_act, :]
+        q_in = q_in[:, :n_act]
+        mask_in = mask_in[:, :n_act]
 
     if pad > 0:
         pos_in = jnp.pad(pos_in, ((0, 0), (0, pad), (0, 0)), constant_values=0.0)
@@ -429,7 +480,7 @@ def _gather_pallas_batch(
         out_base = b_id * n_pad
 
         zero = jnp.asarray(0.0, dtype=dtype)
-        is_real = (_pl_load(mask_ref, (m_base + offs,)) > 0) & (offs < n_atoms)
+        is_real = (_pl_load(mask_ref, (m_base + offs,)) > 0) & (offs < n_act)
         qi = _pl_load(charges_ref, (q_base + offs,), mask=is_real, other=zero)
         active_lane = is_real if compute_dq else (is_real & (jnp.abs(qi) > zero))
         zero_vec = (offs - offs).astype(dtype)
@@ -557,7 +608,7 @@ def _gather_pallas_batch(
             else None,
             name="pme_bwd_gather",
         )(pos_x, pos_y, pos_z, q_flat, mask_flat, box_flat, theta_flat)
-        dq_b = dq_pad.reshape((B, n_pad))[:, :n_atoms].astype(orig_dtype)
+        dq_b = dq_pad.reshape((B, n_pad))[:, :n_act].astype(orig_dtype)
     else:
         fx_pad, fy_pad, fz_pad = pl.pallas_call(
             _gather_kernel,
@@ -575,12 +626,16 @@ def _gather_pallas_batch(
             else None,
             name="pme_bwd_gather",
         )(pos_x, pos_y, pos_z, q_flat, mask_flat, box_flat, theta_flat)
-        dq_b = jnp.zeros((B, n_atoms), dtype=orig_dtype)
-    fx_b = fx_pad.reshape((B, n_pad))[:, :n_atoms]
-    fy_b = fy_pad.reshape((B, n_pad))[:, :n_atoms]
-    fz_b = fz_pad.reshape((B, n_pad))[:, :n_atoms]
-    dpos = jnp.stack([fx_b, fy_b, fz_b], axis=-1)
-    return dpos.astype(orig_dtype), dq_b
+        dq_b = jnp.zeros((B, n_act), dtype=orig_dtype)
+    fx_b = fx_pad.reshape((B, n_pad))[:, :n_act]
+    fy_b = fy_pad.reshape((B, n_pad))[:, :n_act]
+    fz_b = fz_pad.reshape((B, n_pad))[:, :n_act]
+    dpos = jnp.stack([fx_b, fy_b, fz_b], axis=-1).astype(orig_dtype)
+    if n_act < n_atoms:
+        tail = n_atoms - n_act
+        dpos = jnp.pad(dpos, ((0, 0), (0, tail), (0, 0)), constant_values=0.0)
+        dq_b = jnp.pad(dq_b, ((0, 0), (0, tail)), constant_values=0.0)
+    return dpos, dq_b
 
 
 def _gather_pallas_single(
@@ -592,7 +647,9 @@ def _gather_pallas_single(
     grid_dims: tuple[int, int, int],
     interpret: bool,
     compute_dq: bool = True,
+    n_active_atoms: int | None = None,
 ) -> tuple[jax.Array, jax.Array]:
+    extra_kw = {"n_active_atoms": n_active_atoms} if n_active_atoms is not None else {}
     dpos_b, dq_b = _gather_pallas_batch(
         1,
         (False, False, False, False, False),
@@ -604,6 +661,7 @@ def _gather_pallas_single(
         grid_dims,
         interpret,
         compute_dq=compute_dq,
+        **extra_kw,
     )
     return dpos_b[0], dq_b[0]
 
@@ -621,6 +679,7 @@ def gather_pallas(
     atom_inv_perm: jax.Array | None = None,
     interpret: bool = False,
     compute_dq: bool = True,
+    n_active_atoms: int | None = None,
 ) -> tuple[jax.Array, jax.Array]:
     """Gather potential and dE/dr contributions from ``theta_norm``.
 
@@ -631,6 +690,7 @@ def gather_pallas(
         raise NotImplementedError("Pallas SPME stencil is order-4 only")
     grid_tuple = (int(grid_dims[0]), int(grid_dims[1]), int(grid_dims[2]))
     cdq = bool(compute_dq)
+    extra_kw = {"n_active_atoms": n_active_atoms} if n_active_atoms is not None else {}
 
     inv_p = None
     if atom_perm is None and os.environ.get("PROLIX_PME_SPATIAL_SORT", "").strip() == "1":
@@ -656,7 +716,15 @@ def gather_pallas(
     @jax.custom_batching.custom_vmap
     def _vmappable(pos, q, mask, box, dE_dmesh):
         return _gather_pallas_single(
-            pos, q, mask, box, dE_dmesh, grid_tuple, interpret, compute_dq=cdq
+            pos,
+            q,
+            mask,
+            box,
+            dE_dmesh,
+            grid_tuple,
+            interpret,
+            compute_dq=cdq,
+            n_active_atoms=n_active_atoms,
         )
 
     @_vmappable.def_vmap
@@ -672,6 +740,7 @@ def gather_pallas(
             grid_tuple,
             interpret,
             compute_dq=cdq,
+            **extra_kw,
         )
         return (dpos_out, dq_out), (True, True)
 
@@ -692,6 +761,7 @@ def gather_pallas(
             grid_tuple,
             interpret,
             compute_dq=cdq,
+            **extra_kw,
         )
         if inv_p is not None:
             return dpos_s[:, inv_p, :], dq_s[:, inv_p]

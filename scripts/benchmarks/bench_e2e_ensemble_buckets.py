@@ -1926,7 +1926,19 @@ def main():
     )
     parser.add_argument("--quick", action="store_true")
     parser.add_argument("--substep-only", action="store_true")
+    parser.add_argument("--v33-diverse-panel", action="store_true")
+    parser.add_argument("--axis", type=str, default="all")
     args = parser.parse_args()
+
+    if args.v33_diverse_panel:
+        import bench_v33_diverse_panel as B_v33
+
+        axes = None if args.axis == "all" else [int(x.strip()) for x in args.axis.split(",") if x.strip()]
+        payload = B_v33.run_v33_diverse_benchmark_panel(quick=args.quick, axes=axes)
+        args.out.parent.mkdir(parents=True, exist_ok=True)
+        args.out.write_text(json.dumps(payload, indent=2))
+        print(f"Wrote {args.out}")
+        return
 
     ff_path = B_dhfr._resolve_ff_path()
     sys_data = B_dhfr._build_dhfr_system_dict(ff_path)

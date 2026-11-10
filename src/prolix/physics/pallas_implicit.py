@@ -11,13 +11,13 @@ import functools
 
 import jax
 import jax.numpy as jnp
+import xtrax
 from jax import custom_vjp
 from jax._src.pallas.primitives import load as _pl_load
 from jax._src.pallas.primitives import store as _pl_store
 from jax.experimental import pallas as pl
 from jax.experimental.pallas import triton as plt
 from proxide.physics import constants
-import xtrax
 from xtrax.intent import Context
 from xtrax.kernel_seam import VjpKernel
 
@@ -886,10 +886,14 @@ def pallas_gb_ace_nl(
     box: jax.Array | None = None,
     *,
     interpret: bool | None = None,
-) -> jax.Array:
+    return_forces: bool = False,
+) -> jax.Array | tuple[jax.Array, jax.Array]:
     """3-pass atomic-free (32, 32) OBC-II GB + ACE nonpolar Pallas kernel over symmetric neighbor list."""
     if positions.shape[-2] == 0:
-        return jnp.zeros(positions.shape[:-2], dtype=positions.dtype)
+        z_e = jnp.zeros(positions.shape[:-2], dtype=positions.dtype)
+        if return_forces:
+            return z_e, jnp.zeros_like(positions)
+        return z_e
 
     rad_arr = jnp.asarray(radii, dtype=positions.dtype)
     sr_arr = rad_arr if scaled_radii is None else jnp.asarray(scaled_radii, dtype=positions.dtype)
@@ -910,6 +914,25 @@ def pallas_gb_ace_nl(
             interpret = not _triton_gpu_available()
         ctx = Context(kernels=True, backend="cpu" if interpret else "gpu")
 
+    if return_forces and not in_export_context():
+        e_out, f_out, _ = _pallas_gb_ace_nl_vmappable(
+            positions,
+            q_arr,
+            rad_arr,
+            sr_arr,
+            msk_arr,
+            nbr_arr,
+            box_arr,
+            bool(has_box),
+            float(solvent_dielectric),
+            float(solute_dielectric),
+            float(dielectric_offset),
+            float(surface_tension),
+            bool(include_ace),
+            bool(interpret),
+        )
+        return e_out.astype(positions.dtype), f_out.astype(positions.dtype)
+
     op = make_gb_ace_nl_op(
         has_box=bool(has_box),
         solvent_dielectric=float(solvent_dielectric),
@@ -919,7 +942,15 @@ def pallas_gb_ace_nl(
         include_ace=bool(include_ace),
         context=ctx,
     )
-    return op(positions, q_arr, rad_arr, sr_arr, msk_arr, nbr_arr, box_arr)
+    e_val = op(positions, q_arr, rad_arr, sr_arr, msk_arr, nbr_arr, box_arr)
+    if return_forces:
+        f_val = -jax.grad(
+            lambda pos_in: jnp.sum(
+                op(pos_in, q_arr, rad_arr, sr_arr, msk_arr, nbr_arr, box_arr)
+            )
+        )(positions)
+        return e_val, f_val
+    return e_val
 
 
 # =============================================================================

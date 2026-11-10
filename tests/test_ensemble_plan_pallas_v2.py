@@ -2593,3 +2593,304 @@ def test_pallas_v32_mk54_to_mk57_optimizations_and_parity():
             np.testing.assert_allclose(np.asarray(g_m), np.asarray(g_r), rtol=2e-4, atol=2e-4)
     finally:
         jax.config.update("jax_enable_x64", prev_x64)
+
+
+def test_pallas_v33_mk58_to_mk61_optimizations_and_parity(monkeypatch):
+    """Verify Pallas v3.3 pillars MK-58, MK-59, MK-60, and MK-61."""
+    from prolix.pallas_kernels import pallas_nonbonded_nl, pallas_nonbonded_tile_pairs
+    from prolix.physics.generalized_born import compute_ace_nonpolar_energy, compute_gb_energy
+    from prolix.physics.neighbor_list import (
+        _pallas_prune_and_encode_cell_list_batch,
+        build_tile_pair_neighbor_list_gpu,
+        precompute_static_nl_exclusion_tables,
+    )
+    from prolix.physics.pallas_generalized_born import pallas_gbsa_dense
+    from prolix.physics.pme import (
+        _resolve_env_pme_grid_dims,
+        influence_function,
+        make_spme_energy_fn,
+        scale_influence_function_isotropic,
+        spme_forces,
+    )
+    from prolix.physics.pme_pallas import gather_pallas, spread_charges_pallas
+    from prolix.physics.settle import (
+        _build_rattle_clusters,
+        pallas_baoab_post_force,
+        pallas_baoab_pre_force,
+    )
+
+    prev_x64 = jax.config.read("jax_enable_x64")
+    jax.config.update("jax_enable_x64", True)
+    try:
+        # 1. MK-58: Mixed-precision dual writeout (return_pos_f32=True), f32 force input,
+        # reference_position/return_max_dr_sq, and in-register solute X-H RATTLE clusters
+        bundle_f64 = _make_periodic_solvated_bundle(dtype=jnp.float64, seed=101)
+        N = int(bundle_f64.positions.shape[0])
+        box_f64 = jnp.diag(bundle_f64.box).astype(jnp.float64)
+        mom_f64 = jnp.zeros_like(bundle_f64.positions)
+        frc_f32 = jnp.ones((N, 3), dtype=jnp.float32) * jnp.float32(0.05)
+        frc_f64 = frc_f32.astype(jnp.float64)
+        key0 = jax.random.PRNGKey(55)
+        dt_f64 = jnp.float64(0.04)
+        kT_f64 = jnp.float64(0.6)
+
+        # Solute X-H constraint pairs on atoms (0, 1) and (0, 2)
+        d01 = float(jnp.linalg.norm(bundle_f64.positions[0] - bundle_f64.positions[1]))
+        d02 = float(jnp.linalg.norm(bundle_f64.positions[0] - bundle_f64.positions[2]))
+        c_pairs = jnp.array([[0, 1], [0, 2], [0, 0]], dtype=jnp.int32)
+        c_lens = jnp.array([d01, d02, 1.0], dtype=jnp.float64)
+        c_mask = jnp.array([True, True, False], dtype=jnp.bool_)
+        cX, cH0, cH1, cH2, cH3, cD0, cD1, cD2, cD3, cM, c_am = _build_rattle_clusters(
+            1,
+            N,
+            int(c_pairs.shape[0]),
+            c_pairs[None, ...],
+            c_lens[None, ...],
+            c_mask[None, ...].astype(jnp.int32),
+            bundle_f64.masses[None, ...],
+        )
+        assert int(jnp.sum(cM > 0)) == 1
+        assert bool(c_am[0, 0]) and bool(c_am[0, 1]) and bool(c_am[0, 2])
+
+        pos_new, mom_mid, key_new, pos_f32_out, max_dr_sq = pallas_baoab_pre_force(
+            bundle_f64.positions,
+            mom_f64,
+            frc_f32,
+            bundle_f64.masses[:, None],
+            key0,
+            bundle_f64.water_indices,
+            bundle_f64.water_mask,
+            box_f64,
+            dt_f64,
+            kT_f64,
+            1.0,
+            atom_mask=bundle_f64.atom_mask,
+            constraint_pairs=c_pairs,
+            constraint_lengths=c_lens,
+            constraint_mask=c_mask,
+            reference_position=bundle_f64.positions,
+            return_max_dr_sq=True,
+            return_pos_f32=True,
+            interpret=True,
+        )
+        assert pos_new.dtype == jnp.float64
+        assert pos_f32_out.dtype == jnp.float32
+        np.testing.assert_allclose(
+            np.asarray(pos_f32_out),
+            np.asarray(pos_new.astype(jnp.float32)),
+            rtol=1e-6,
+            atol=1e-6,
+        )
+        assert float(max_dr_sq) > 0.0
+        # Verify RATTLE bond lengths (0, 1) and (0, 2) are satisfied to < 1e-5 A
+        d01_after = float(jnp.linalg.norm(pos_new[0] - pos_new[1]))
+        d02_after = float(jnp.linalg.norm(pos_new[0] - pos_new[2]))
+        assert abs(d01_after - d01) < 1e-5
+        assert abs(d02_after - d02) < 1e-5
+
+        mom_fin = pallas_baoab_post_force(
+            pos_new,
+            mom_mid,
+            frc_f32,
+            bundle_f64.masses[:, None],
+            bundle_f64.water_indices,
+            bundle_f64.water_mask,
+            dt_f64,
+            atom_mask=bundle_f64.atom_mask,
+            constraint_pairs=c_pairs,
+            constraint_lengths=c_lens,
+            constraint_mask=c_mask,
+            interpret=True,
+        )
+        assert mom_fin.dtype == jnp.float64
+        # Verify RATTLE velocity orthogonality on (0, 1) and (0, 2)
+        v_fin = mom_fin / bundle_f64.masses[:, None]
+        r01_vec = pos_new[1] - pos_new[0]
+        r02_vec = pos_new[2] - pos_new[0]
+        assert abs(float(jnp.dot(v_fin[1] - v_fin[0], r01_vec))) < 1e-4
+        assert abs(float(jnp.dot(v_fin[2] - v_fin[0], r02_vec))) < 1e-4
+
+        # 2. MK-59: Non-cubic (Kx, Ky, Kz) SPME grids, isotropic NPT G scaling, & 2-step RESPA PME
+        monkeypatch.setenv("PROLIX_PME_GRID_POINTS", "16x16x12")
+        assert _resolve_env_pme_grid_dims(64, (16, 16, 16)) == (16, 16, 12)
+        monkeypatch.setenv("PROLIX_PME_GRID_POINTS", "64:16x16x12,25000:64x64x48")
+        assert _resolve_env_pme_grid_dims(64, (16, 16, 16)) == (16, 16, 12)
+        assert _resolve_env_pme_grid_dims(25000, (64, 64, 64)) == (64, 64, 48)
+        monkeypatch.delenv("PROLIX_PME_GRID_POINTS", raising=False)
+
+        box_ref = jnp.array([24.0, 24.0, 18.0], dtype=jnp.float32)
+        box_cur = box_ref * jnp.float32(1.02)
+        G_ref = influence_function((16, 16, 12), box_ref, 0.34, 4).astype(jnp.float32)
+        G_cur_exact = influence_function((16, 16, 12), box_cur, 0.34, 4).astype(jnp.float32)
+        G_cur_iso = scale_influence_function_isotropic(G_ref, box_ref, box_cur)
+        pos_f32 = bundle_f64.positions.astype(jnp.float32)
+        q_f32 = bundle_f64.charges.astype(jnp.float32)
+        f_spme_cached = spme_forces(
+            pos_f32, q_f32, bundle_f64.atom_mask, box_cur, (16, 16, 12), 0.34, 4, True, G_cur_iso
+        )
+        assert f_spme_cached.shape == pos_f32.shape
+        assert bool(jnp.all(jnp.isfinite(f_spme_cached)))
+
+        spme_dyn_fn = make_spme_energy_fn(
+            box_ref, alpha=0.34, grid_dims=(16, 16, 12), use_pallas_pme=True, return_forces=True
+        )
+        f_dyn = spme_dyn_fn(pos_f32, q_f32, bundle_f64.atom_mask, box=box_cur)
+        np.testing.assert_allclose(np.asarray(f_dyn), np.asarray(f_spme_cached), rtol=1e-5, atol=1e-5)
+
+        # Test 2-step RESPA PME (PROLIX_PME_EVERY=2) and skin check (PROLIX_NL_CHECK_EVERY=10) in EnsemblePlan
+        monkeypatch.setenv("PROLIX_PME_EVERY", "2")
+        monkeypatch.setenv("PROLIX_NL_CHECK_EVERY", "10")
+        plan_respa = EnsemblePlan.from_bundles([bundle_f64], use_pallas=True, use_pallas_pme=True)
+        traj_respa = plan_respa.run(
+            n_steps=6, dt=1.0, kT=0.6, seed=19, run_mode="inference",
+            use_neighbor_list=True, nl_update_every=0, use_pallas=True, use_pallas_pme=True,
+        )
+        if isinstance(traj_respa, list):
+            traj_respa = traj_respa[0]
+        assert bool(jnp.all(jnp.isfinite(traj_respa.positions)))
+        monkeypatch.delenv("PROLIX_PME_EVERY", raising=False)
+        monkeypatch.delenv("PROLIX_NL_CHECK_EVERY", raising=False)
+
+        # 3. MK-60: Native GPU Tile-Pair Builder (build_tile_pair_neighbor_list_gpu) parity
+        jax.config.update("jax_enable_x64", False)
+        rng = np.random.default_rng(330)
+        N_tp = 64
+        pos_tp = jnp.asarray(rng.uniform(1.0, 15.0, size=(N_tp, 3)).astype(np.float32))
+        pos_tp = pos_tp.at[52:].set(0.0)
+        q_tp = jnp.asarray(rng.uniform(-0.4, 0.4, size=(N_tp,)).astype(np.float32)).at[52:].set(0.0)
+        sig_tp = jnp.asarray(rng.uniform(2.8, 3.4, size=(N_tp,)).astype(np.float32))
+        eps_tp = jnp.asarray(rng.uniform(0.05, 0.15, size=(N_tp,)).astype(np.float32)).at[52:].set(0.0)
+        am_tp = jnp.arange(N_tp) < 52
+        box_tp = jnp.array([18.0, 18.0, 18.0], dtype=jnp.float32)
+        ei_tp = jnp.full((N_tp, 8), -1, dtype=jnp.int32).at[0, 0].set(1).at[1, 0].set(0)
+        ev_tp = jnp.ones((N_tp, 8), dtype=jnp.float32).at[0, 0].set(0.0).at[1, 0].set(0.0)
+        ee_tp = jnp.ones((N_tp, 8), dtype=jnp.float32).at[0, 0].set(0.0).at[1, 0].set(0.0)
+
+        tp_gpu = build_tile_pair_neighbor_list_gpu(
+            pos_tp,
+            box_tp,
+            cutoff=4.8,
+            skin=0.5,
+            excl_indices=ei_tp,
+            excl_scales_vdw=ev_tp,
+            excl_scales_elec=ee_tp,
+            atom_mask=am_tp,
+            max_pairs=32,
+        )
+        assert int(tp_gpu.num_valid_pairs) > 0
+        assert tp_gpu.atom_perm is not None
+
+        pem_tp, pex_tp, pei32_tp, pet32_tp = precompute_static_nl_exclusion_tables(
+            ei_tp, ev_tp, ee_tp, N_tp
+        )
+        idx_tp_b, _, _ = _pallas_prune_and_encode_cell_list_batch(
+            1,
+            (True, True, False, False, False),
+            pos_tp[None, ...],
+            box_tp[None, ...],
+            ei_tp,
+            ev_tp,
+            ee_tp,
+            cell_size=5.3,
+            cell_capacity=64,
+            max_occupancy=64,
+            r_cutoff=5.3,
+            encode_exclusions=True,
+            interpret=True,
+            grid_dims=(3, 3, 3),
+            atom_mask=am_tp,
+            precomputed_excl=(pem_tp, pex_tp, pei32_tp, pet32_tp),
+            return_max_k_tiles=True,
+        )
+        e_tp_gpu, f_tp_gpu = pallas_nonbonded_tile_pairs(
+            pos_tp, q_tp, sig_tp, eps_tp, tp_gpu, atom_mask=am_tp, box=box_tp,
+            pme_alpha=0.34, cutoff=4.8, include_pme_excl_erf=True, return_forces=True, interpret=True,
+        )
+        e_nl_ref, f_nl_ref = pallas_nonbonded_nl(
+            pos_tp, q_tp, sig_tp, eps_tp, am_tp, idx_tp_b[0], ei_tp, ev_tp, ee_tp,
+            box=box_tp, pme_alpha=0.34, cutoff=4.8, include_pme_excl_erf=True,
+            excl_mode="pre_encoded", return_forces=True, interpret=True,
+        )
+        np.testing.assert_allclose(np.asarray(e_tp_gpu), np.asarray(e_nl_ref), rtol=1e-5, atol=1e-5)
+        np.testing.assert_allclose(np.asarray(f_tp_gpu), np.asarray(f_nl_ref), rtol=1e-5, atol=1e-5)
+
+        # 4. MK-61 (a): Active-atom CTA grid clamping parity (n_active_atoms=64 on N=96 padded)
+        N_pad = 96
+        pos_96 = jnp.pad(pos_tp, ((0, 32), (0, 0)))
+        q_96 = jnp.pad(q_tp, (0, 32))
+        am_96 = jnp.arange(N_pad) < 52
+        mesh_full = spread_charges_pallas(
+            pos_96, q_96, am_96, box_tp, (16, 16, 16), interpret=True
+        )
+        mesh_clamp = spread_charges_pallas(
+            pos_96, q_96, am_96, box_tp, (16, 16, 16), interpret=True, n_active_atoms=64
+        )
+        np.testing.assert_allclose(np.asarray(mesh_clamp), np.asarray(mesh_full), rtol=1e-6, atol=1e-6)
+        theta_96 = jnp.ones((16, 16, 16), dtype=jnp.float32)
+        f_g_full, _ = gather_pallas(
+            pos_96, q_96, am_96, box_tp, theta_96, (16, 16, 16), interpret=True, compute_dq=False
+        )
+        f_g_clamp, _ = gather_pallas(
+            pos_96, q_96, am_96, box_tp, theta_96, (16, 16, 16), interpret=True, compute_dq=False, n_active_atoms=64
+        )
+        np.testing.assert_allclose(np.asarray(f_g_clamp), np.asarray(f_g_full), rtol=1e-6, atol=1e-6)
+
+        # 5. MK-61 (b): Fused 2-pass Pallas GBSA + ACE + dense LJ/Coulomb parity & custom_vjp
+        rad_tp = jnp.asarray(rng.uniform(1.2, 1.8, size=(N_tp,)).astype(np.float32))
+        srad_tp = rad_tp * jnp.float32(0.85)
+        e_gb_p, f_gb_p = pallas_gbsa_dense(
+            pos_tp,
+            q_tp,
+            rad_tp,
+            srad_tp,
+            am_tp,
+            sigmas=sig_tp,
+            epsilons=eps_tp,
+            excl_indices=ei_tp,
+            excl_scales_vdw=ev_tp,
+            excl_scales_elec=ee_tp,
+            include_ace=True,
+            include_lj_coulomb=False,
+            return_forces=True,
+            interpret=True,
+        )
+        def _ref_gb_ace_dense(r):
+            mask_2d = (am_tp[:, None] & am_tp[None, :]).astype(jnp.float32)
+            e_gb, br = compute_gb_energy(
+                r, q_tp, rad_tp, scaled_radii=srad_tp, mask=mask_2d, energy_mask=mask_2d
+            )
+            e_ace = jnp.sum(compute_ace_nonpolar_energy(rad_tp, br) * am_tp.astype(jnp.float32))
+            return e_gb + e_ace
+
+        e_tot_ref, g_tot_ref = jax.value_and_grad(_ref_gb_ace_dense)(pos_tp)
+        f_tot_ref = -g_tot_ref
+        np.testing.assert_allclose(np.asarray(e_gb_p), np.asarray(e_tot_ref), rtol=1e-4, atol=1e-4)
+        np.testing.assert_allclose(np.asarray(f_gb_p), np.asarray(f_tot_ref), rtol=2e-4, atol=2e-4)
+
+        # Vmap B=2 and jax.grad w.r.t. (r, q, radii, scaled_radii, sigmas, epsilons)
+        pos_b2 = jnp.stack([pos_tp, pos_tp + jnp.float32(0.05)], axis=0)
+        e_b2, f_b2 = jax.vmap(
+            lambda r1: pallas_gbsa_dense(
+                r1, q_tp, rad_tp, srad_tp, am_tp,
+                sigmas=sig_tp, epsilons=eps_tp,
+                excl_indices=ei_tp, excl_scales_vdw=ev_tp, excl_scales_elec=ee_tp,
+                include_ace=True, include_lj_coulomb=True, return_forces=True, interpret=True,
+            )
+        )(pos_b2)
+        assert e_b2.shape == (2,) and f_b2.shape == (2, N_tp, 3)
+        np.testing.assert_allclose(np.asarray(e_b2[0]), np.asarray(e_b2[1]), rtol=1e-5, atol=1e-4)
+
+        grads_gbsa = jax.grad(
+            lambda r, q, rd, sr, sg, ep: pallas_gbsa_dense(
+                r, q, rd, sr, am_tp,
+                sigmas=sg, epsilons=ep,
+                excl_indices=ei_tp, excl_scales_vdw=ev_tp, excl_scales_elec=ee_tp,
+                include_ace=True, include_lj_coulomb=True, return_forces=False, interpret=True,
+            ),
+            argnums=(0, 1, 2, 3, 4, 5),
+        )(pos_tp, q_tp, rad_tp, srad_tp, sig_tp, eps_tp)
+        for g_arr in grads_gbsa:
+            assert bool(jnp.all(jnp.isfinite(g_arr)))
+    finally:
+        jax.config.update("jax_enable_x64", prev_x64)
+
