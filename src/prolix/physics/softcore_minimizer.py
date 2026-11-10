@@ -18,9 +18,9 @@ Implements `FR-8` (`CA-2`, `R-1`, `NBB-2`) for `naurmalade` parity:
 
 from __future__ import annotations
 
+import inspect
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
-import inspect
 from typing import TYPE_CHECKING
 
 import jax

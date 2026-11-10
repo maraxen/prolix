@@ -8,10 +8,11 @@ from __future__ import annotations
 
 import jax
 import jax.numpy as jnp
-from prolix.physics import pbc
 from jax_md import space
 from jax_md.util import Array
 from proxide.physics.constants import COULOMB_CONSTANT
+
+from prolix.physics import pbc
 
 
 def pme_exclusion_correction_energy(

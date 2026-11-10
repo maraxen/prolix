@@ -15,7 +15,6 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     from collections.abc import Mapping
 
-    from prolix.typing import ArrayLike
 
 
 @dataclass(frozen=True)

@@ -63,7 +63,7 @@ class MC_Barostat_Step(Step):
         self.volume_scale_factor = volume_scale_factor
         self.atom_mask = atom_mask
         self.anisotropic = False
-        self.barostat_mode = "isotropic" 
+        self.barostat_mode = "isotropic"
 
     def apply(
         self,

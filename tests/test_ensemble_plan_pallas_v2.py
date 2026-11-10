@@ -14,7 +14,6 @@ import dataclasses
 import jax
 import jax.numpy as jnp
 import numpy as np
-import pytest
 
 from prolix.api.bundle_md import (
     displacement_fn_for_bundle,
@@ -1773,7 +1772,6 @@ def test_pallas_v30_mk46_mk49_integrator_rebuild_nonbonded_pme():
       gating, branchless reciprocal-multiply PBC/forces, and custom_vjp parameter gradients.
     - MK-49: Separable (BLOCK_N=32, 16) YZ-plane factorized & charge-gated SPME spread/gather.
     """
-    from prolix.export import export_context
     from prolix.physics.neighbor_list import (
         _pallas_prune_and_encode_cell_list_batch,
         pallas_prune_and_encode_cell_list,
@@ -2629,7 +2627,6 @@ def test_pallas_v33_mk58_to_mk61_optimizations_and_parity(monkeypatch):
         box_f64 = jnp.diag(bundle_f64.box).astype(jnp.float64)
         mom_f64 = jnp.zeros_like(bundle_f64.positions)
         frc_f32 = jnp.ones((N, 3), dtype=jnp.float32) * jnp.float32(0.05)
-        frc_f64 = frc_f32.astype(jnp.float64)
         key0 = jax.random.PRNGKey(55)
         dt_f64 = jnp.float64(0.04)
         kT_f64 = jnp.float64(0.6)
@@ -2721,7 +2718,6 @@ def test_pallas_v33_mk58_to_mk61_optimizations_and_parity(monkeypatch):
         box_ref = jnp.array([24.0, 24.0, 18.0], dtype=jnp.float32)
         box_cur = box_ref * jnp.float32(1.02)
         G_ref = influence_function((16, 16, 12), box_ref, 0.34, 4).astype(jnp.float32)
-        G_cur_exact = influence_function((16, 16, 12), box_cur, 0.34, 4).astype(jnp.float32)
         G_cur_iso = scale_influence_function_isotropic(G_ref, box_ref, box_cur)
         pos_f32 = bundle_f64.positions.astype(jnp.float32)
         q_f32 = bundle_f64.charges.astype(jnp.float32)
@@ -2891,6 +2887,24 @@ def test_pallas_v33_mk58_to_mk61_optimizations_and_parity(monkeypatch):
         )(pos_tp, q_tp, rad_tp, srad_tp, sig_tp, eps_tp)
         for g_arr in grads_gbsa:
             assert bool(jnp.all(jnp.isfinite(g_arr)))
+            assert float(jnp.linalg.norm(g_arr)) > 0.0
+        grads_gb_only = jax.grad(
+            lambda r, q, rd, sr: pallas_gbsa_dense(
+                r, q, rd, sr, am_tp,
+                include_ace=True, include_lj_coulomb=False, return_forces=False, interpret=True,
+            ),
+            argnums=(0, 1, 2, 3),
+        )(pos_tp, q_tp, rad_tp, srad_tp)
+        grads_gb_ref = jax.grad(
+            lambda r, q, rd, sr: (
+                lambda m2d: (
+                    lambda eg_br: eg_br[0] + jnp.sum(compute_ace_nonpolar_energy(rd, eg_br[1]) * am_tp.astype(jnp.float32))
+                )(compute_gb_energy(r, q, rd, scaled_radii=sr, mask=m2d, energy_mask=m2d))
+            )((am_tp[:, None] & am_tp[None, :]).astype(jnp.float32)),
+            argnums=(0, 1, 2, 3),
+        )(pos_tp, q_tp, rad_tp, srad_tp)
+        for g_got, g_exp in zip(grads_gb_only, grads_gb_ref):
+            np.testing.assert_allclose(np.asarray(g_got), np.asarray(g_exp), rtol=2e-4, atol=2e-4)
     finally:
         jax.config.update("jax_enable_x64", prev_x64)
 

@@ -134,8 +134,8 @@ def make_bias_state_from_controls(
     gamma_val = float(controls.metad_bias_factor)
     if opes_epsilon is not None:
         eps_val = float(opes_epsilon)
-    elif hasattr(controls, "opes_epsilon") and getattr(controls, "opes_epsilon") is not None:
-        eps_val = float(getattr(controls, "opes_epsilon"))
+    elif hasattr(controls, "opes_epsilon") and controls.opes_epsilon is not None:
+        eps_val = float(controls.opes_epsilon)
     elif barrier_kcal is not None:
         eps_val = compute_opes_epsilon_from_barrier(barrier_kcal, gamma_val, temp_val)
     else:

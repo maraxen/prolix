@@ -6,7 +6,7 @@ from collections.abc import Callable
 
 import jax
 import jax.numpy as jnp
-from jax_md import energy, space
+from jax_md import space
 from jaxtyping import Array
 
 from prolix.typing import (

@@ -19,7 +19,6 @@ Provides:
 from __future__ import annotations
 
 import ast
-import dataclasses
 from dataclasses import dataclass, field, fields, is_dataclass, make_dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -311,7 +310,7 @@ def adapt_model_to_dataclass(cls: type) -> type:
     ``dataclasses.make_dataclass(cls.__name__, list(cls.model_fields.keys()))``.
     """
     if hasattr(cls, "model_fields"):
-        model_fields = getattr(cls, "model_fields")
+        model_fields = cls.model_fields
         field_names = list(model_fields.keys())
         return make_dataclass(cls.__name__, field_names)
     if is_dataclass(cls):
