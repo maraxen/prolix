@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
@@ -70,6 +71,11 @@ from prolix.physics.neighbor_list import (
     get_neighbor_exclusion_scales,
 )
 from prolix.physics.optimization import chunked_coulomb_energy_nl, chunked_lj_energy_nl
+
+try:
+    from prolix.physics.pallas_generalized_born import pallas_gbsa_dense
+except ImportError:
+    pallas_gbsa_dense = None  # type: ignore[assignment]
 from prolix.physics.pme import make_spme_energy_fn, spme_background_energy
 
 if TYPE_CHECKING:
@@ -650,6 +656,40 @@ def _pme_reciprocal_and_corrections(
     return e_elec, e_lj
 
 
+def _resolve_active_atoms(
+    n_atoms: int, atom_mask: Any = None, n_real_atoms: Any = None
+) -> int:
+    raw = os.environ.get("PROLIX_ACTIVE_ATOMS", "").strip()
+    if raw:
+        try:
+            v = int(raw)
+            if v > 0:
+                v_blk = ((v + 31) // 32) * 32
+                return max(min(32, int(n_atoms)), min(v_blk, int(n_atoms)))
+        except ValueError:
+            pass
+    if n_real_atoms is not None and not isinstance(n_real_atoms, jax.core.Tracer):
+        try:
+            nr = int(np.max(np.asarray(n_real_atoms)))
+            if nr > 0:
+                v_blk = ((nr + 31) // 32) * 32
+                return max(min(32, int(n_atoms)), min(v_blk, int(n_atoms)))
+        except Exception:
+            pass
+    if atom_mask is not None and not isinstance(atom_mask, jax.core.Tracer):
+        try:
+            m_np = np.asarray(atom_mask, dtype=bool)
+            if m_np.ndim >= 2:
+                m_np = np.any(m_np, axis=0)
+            nz = np.flatnonzero(m_np)
+            if nz.size > 0:
+                v_blk = ((int(nz[-1]) + 1 + 31) // 32) * 32
+                return max(min(32, int(n_atoms)), min(v_blk, int(n_atoms)))
+        except Exception:
+            pass
+    return int(n_atoms)
+
+
 def single_padded_energy(
     sys: PaddedSystem,
     displacement_fn: space.DisplacementFn,
@@ -664,7 +704,9 @@ def single_padded_energy(
     first_pure_water_block: int | None = None,
     return_forces: bool = False,
     pme_force_fn: Callable[..., Array] | None = None,
-) -> Array:
+    pme_cached_force: Array | None = None,
+    return_pme_force: bool = False,
+) -> Any:
     """Computes total potential energy for a single padded system.
 
     This is the public API for computing energy of one PaddedSystem.
@@ -749,6 +791,21 @@ def single_padded_energy(
         and pallas_nonbonded_nl is _ORIG_PALLAS_NONBONDED_NL
     )
     _use_fused_bonded = pallas_enabled and pallas_bonded_all_fused is not None
+    _can_pallas_gbsa_dense = (
+        pallas_enabled
+        and implicit_solvent
+        and neighbor is None
+        and pallas_gbsa_dense is not None
+        and sys.excl_indices is not None
+        and sys.excl_scales_vdw is not None
+        and sys.excl_scales_elec is not None
+        and sys.box_size is None
+        and elec_method not in ("reaction_field", "rf", "dsf", "damped_shifted_force", "cutoff")
+        and eff_switch == 0.0
+        and float(getattr(sys, "nonbonded_cutoff", 0.0)) == 0.0
+        and not isinstance(soft_core_lambda, jax.core.Tracer)
+        and float(soft_core_lambda) == 1.0
+    )
 
     if return_forces:
         has_cosolvent = (
@@ -762,16 +819,42 @@ def single_padded_energy(
             imp_is_harm = sys.improper_params is not None and (
                 sys.improper_params.shape[-1] == 2 or not bool(getattr(sys, "improper_is_periodic", True))
             )
+            n_act = _resolve_active_atoms(
+                N, sys.atom_mask, getattr(sys, "n_real_atoms", None)
+            )
+            if n_act < N:
+                n_act_blk = (n_act + 31) // 32
+                r_mk = r[:n_act]
+                q_mk = sys.charges[:n_act]
+                sig_mk = sys.sigmas[:n_act]
+                eps_mk = sys.epsilons[:n_act]
+                mask_mk = sys.atom_mask[:n_act]
+                nb_mk = nb_raw[:n_act]
+                ex_idx_mk = sys.excl_indices[:n_act] if sys.excl_indices is not None else None
+                ex_vdw_mk = sys.excl_scales_vdw[:n_act] if sys.excl_scales_vdw is not None else None
+                ex_elec_mk = sys.excl_scales_elec[:n_act] if sys.excl_scales_elec is not None else None
+                mkt_mk = nb_mkt[:n_act_blk] if nb_mkt is not None else None
+            else:
+                r_mk = r
+                q_mk = sys.charges
+                sig_mk = sys.sigmas
+                eps_mk = sys.epsilons
+                mask_mk = sys.atom_mask
+                nb_mk = nb_raw
+                ex_idx_mk = sys.excl_indices
+                ex_vdw_mk = sys.excl_scales_vdw
+                ex_elec_mk = sys.excl_scales_elec
+                mkt_mk = nb_mkt
             _, f_direct = pallas_bonded_and_nonbonded_nl_fused(
-                r,
-                sys.charges,
-                sys.sigmas,
-                sys.epsilons,
-                sys.atom_mask,
-                nb_raw,
-                sys.excl_indices,
-                sys.excl_scales_vdw,
-                sys.excl_scales_elec,
+                r_mk,
+                q_mk,
+                sig_mk,
+                eps_mk,
+                mask_mk,
+                nb_mk,
+                ex_idx_mk,
+                ex_vdw_mk,
+                ex_elec_mk,
                 bonds=sys.bonds,
                 bond_params=sys.bond_params,
                 bond_mask=sys.bond_mask,
@@ -810,14 +893,21 @@ def single_padded_energy(
                 dist_eps=1e-10,
                 b0_is_ji=True,
                 interpret=interpret,
-                max_k_tiles=nb_mkt,
+                max_k_tiles=mkt_mk,
                 first_pure_water_block=first_pure_water_block,
                 return_forces=True,
                 compute_energy=False,
             )
+            if n_act < N:
+                f_direct = jnp.pad(f_direct, ((0, N - n_act), (0, 0)))
             f_total = f_direct
-            if pme_force_fn is not None:
-                f_total = f_total + pme_force_fn(r, sys.charges, sys.atom_mask)
+            f_pme_val = None
+            if pme_cached_force is not None:
+                f_pme_val = pme_cached_force.astype(f_direct.dtype)
+                f_total = f_total + f_pme_val
+            elif pme_force_fn is not None:
+                f_pme_val = pme_force_fn(r, sys.charges, sys.atom_mask)
+                f_total = f_total + f_pme_val
             elif sys.box_size is not None and sys.pme_alpha > 0.0 and is_pme:
                 try:
                     box_np = np.asarray(sys.box_size, dtype=np.float64)
@@ -834,10 +924,92 @@ def single_padded_energy(
                         n_atoms=int(N),
                         return_forces=True,
                     )
-                    f_total = f_total + built_pme_force_fn(r, sys.charges, sys.atom_mask)
+                    f_pme_val = built_pme_force_fn(r, sys.charges, sys.atom_mask)
+                    f_total = f_total + f_pme_val
                 except (TypeError, ValueError, jax.errors.ConcretizationTypeError):
                     pass
-            return f_total.astype(r.dtype)
+            f_out = f_total.astype(r.dtype)
+            if return_pme_force:
+                f_pme_out = (
+                    f_pme_val.astype(r.dtype)
+                    if f_pme_val is not None
+                    else jnp.zeros_like(f_out)
+                )
+                return f_out, f_pme_out
+            return f_out
+        if (
+            _can_pallas_gbsa_dense
+            and _use_fused_bonded
+            and pallas_bonded_all_fused is _ORIG_PALLAS_BONDED_ALL_FUSED
+            and not has_cosolvent
+        ):
+            imp_is_harm = sys.improper_params is not None and (
+                sys.improper_params.shape[-1] == 2 or not bool(getattr(sys, "improper_is_periodic", True))
+            )
+            _, f_bonded = pallas_bonded_all_fused(
+                r,
+                bonds=sys.bonds,
+                bond_params=sys.bond_params,
+                bond_mask=sys.bond_mask,
+                urey_bradley_bonds=sys.urey_bradley_bonds,
+                urey_bradley_params=sys.urey_bradley_params,
+                urey_bradley_mask=sys.urey_bradley_mask,
+                angles=sys.angles,
+                angle_params=sys.angle_params,
+                angle_mask=sys.angle_mask,
+                dihedrals=sys.dihedrals,
+                dihedral_params=sys.dihedral_params,
+                dihedral_mask=sys.dihedral_mask,
+                impropers=sys.impropers,
+                improper_params=sys.improper_params,
+                improper_mask=sys.improper_mask,
+                improper_is_harmonic=imp_is_harm,
+                exception_pairs=getattr(sys, "exception_pairs", None),
+                exception_sigmas=getattr(sys, "exception_sigmas", None),
+                exception_epsilons=getattr(sys, "exception_epsilons", None),
+                exception_chargeprods=getattr(sys, "exception_chargeprods", None),
+                exception_mask=getattr(sys, "exception_mask", None),
+                cmap_torsions=sys.cmap_torsions,
+                cmap_indices=sys.cmap_indices,
+                cmap_mask=sys.cmap_mask,
+                cmap_coeffs=sys.cmap_coeffs,
+                box=box_pbc,
+                dist_eps=1e-10,
+                b0_is_ji=True,
+                cmap_first_is_psi=True,
+                soft_core_lambda=soft_core_lambda,
+                softcore_alpha=sc_alpha,
+                softcore_exponent=sc_exp,
+                interpret=interpret,
+                return_forces=True,
+                compute_energy=False,
+            )
+            _, f_gbsa = pallas_gbsa_dense(
+                r,
+                sys.charges,
+                sys.radii,
+                sys.scaled_radii,
+                sys.atom_mask,
+                sigmas=sys.sigmas,
+                epsilons=sys.epsilons,
+                excl_indices=sys.excl_indices,
+                excl_scales_vdw=sys.excl_scales_vdw,
+                excl_scales_elec=sys.excl_scales_elec,
+                solvent_dielectric=float(getattr(sys, "solvent_dielectric", 78.5)),
+                solute_dielectric=float(getattr(sys, "solute_dielectric", 1.0)),
+                dielectric_offset=float(getattr(sys, "dielectric_offset", 0.09)),
+                surface_tension=float(getattr(sys, "surface_tension", 0.0054)),
+                include_ace=True,
+                include_lj_coulomb=True,
+                interpret=interpret,
+                return_forces=True,
+            )
+            f_tot_gb = f_bonded + f_gbsa
+            if getattr(sys, "r_ref", None) is not None and getattr(sys, "k_restraint", None) is not None:
+                f_tot_gb = f_tot_gb - (
+                    sys.k_restraint * (r - sys.r_ref) * sys.atom_mask[:, None]
+                ).astype(f_tot_gb.dtype)
+            return f_tot_gb.astype(r.dtype)
         return -jax.grad(
             lambda pos: single_padded_energy(
                 sys.replace(positions=pos),
@@ -1014,7 +1186,12 @@ def single_padded_energy(
         with jax.named_scope("dense_bonded_cmap"):
             e_cmap = _cmap_energy_masked(r, sys.cmap_torsions, sys.cmap_indices, sys.cmap_mask, sys.cmap_coeffs, displacement_fn)
 
-    if _use_fused_explicit_megakernel:
+    _use_pallas_gbsa_energy = _can_pallas_gbsa_dense and not any(
+        isinstance(x, jax.core.Tracer)
+        for x in (sys.radii, sys.scaled_radii, sys.sigmas, sys.epsilons)
+    )
+
+    if _use_fused_explicit_megakernel or _use_pallas_gbsa_energy:
         e_lj = jnp.asarray(0.0, dtype=r.dtype)
         e_elec = jnp.asarray(0.0, dtype=r.dtype)
     elif neighbor is not None:
@@ -1217,28 +1394,50 @@ def single_padded_energy(
             pass
 
     if implicit_solvent:
-        mask_ij = sys.atom_mask[:, None] & sys.atom_mask[None, :]
-        energy_mask = mask_ij * (1.0 - jnp.eye(N))
-        e_gb, born_radii = compute_gb_energy(
-            positions=r,
-            charges=sys.charges,
-            radii=sys.radii,
-            scaled_radii=sys.scaled_radii,
-            mask=sys.atom_mask,
-            energy_mask=energy_mask,
-            solvent_dielectric=float(getattr(sys, "solvent_dielectric", 78.5)),
-            solute_dielectric=float(getattr(sys, "solute_dielectric", 1.0)),
-            dielectric_offset=float(getattr(sys, "dielectric_offset", 0.09)),
-        )
-        e_np = compute_ace_nonpolar_energy(
-            sys.radii,
-            born_radii,
-            surface_tension=float(getattr(sys, "surface_tension", 0.0054)),
-            dielectric_offset=float(getattr(sys, "dielectric_offset", 0.09)),
-        )
-        # Mask out nonpolar energy for padding atoms (ACE is per-atom)
-        e_np = jnp.sum(e_np * sys.atom_mask)
-        e_solv = e_gb + e_np
+        if _use_pallas_gbsa_energy:
+            e_solv = pallas_gbsa_dense(
+                r,
+                sys.charges,
+                sys.radii,
+                sys.scaled_radii,
+                sys.atom_mask,
+                sigmas=sys.sigmas,
+                epsilons=sys.epsilons,
+                excl_indices=sys.excl_indices,
+                excl_scales_vdw=sys.excl_scales_vdw,
+                excl_scales_elec=sys.excl_scales_elec,
+                solvent_dielectric=float(getattr(sys, "solvent_dielectric", 78.5)),
+                solute_dielectric=float(getattr(sys, "solute_dielectric", 1.0)),
+                dielectric_offset=float(getattr(sys, "dielectric_offset", 0.09)),
+                surface_tension=float(getattr(sys, "surface_tension", 0.0054)),
+                include_ace=True,
+                include_lj_coulomb=True,
+                interpret=interpret,
+                return_forces=False,
+            )
+        else:
+            mask_ij = sys.atom_mask[:, None] & sys.atom_mask[None, :]
+            energy_mask = mask_ij * (1.0 - jnp.eye(N))
+            e_gb, born_radii = compute_gb_energy(
+                positions=r,
+                charges=sys.charges,
+                radii=sys.radii,
+                scaled_radii=sys.scaled_radii,
+                mask=sys.atom_mask,
+                energy_mask=energy_mask,
+                solvent_dielectric=float(getattr(sys, "solvent_dielectric", 78.5)),
+                solute_dielectric=float(getattr(sys, "solute_dielectric", 1.0)),
+                dielectric_offset=float(getattr(sys, "dielectric_offset", 0.09)),
+            )
+            e_np = compute_ace_nonpolar_energy(
+                sys.radii,
+                born_radii,
+                surface_tension=float(getattr(sys, "surface_tension", 0.0054)),
+                dielectric_offset=float(getattr(sys, "dielectric_offset", 0.09)),
+            )
+            # Mask out nonpolar energy for padding atoms (ACE is per-atom)
+            e_np = jnp.sum(e_np * sys.atom_mask)
+            e_solv = e_gb + e_np
     else:
         e_solv = 0.0
 

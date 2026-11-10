@@ -939,6 +939,34 @@ def _compute_max_k_tiles(
     return jnp.asarray(max_k.reshape(B_nbr * n_atom_blocks), dtype=jnp.int32)
 
 
+def _resolve_active_atoms(
+    n_active_atoms: int | None, n_total: int, mask: jax.Array | None = None
+) -> int:
+    if n_active_atoms is not None and int(n_active_atoms) > 0:
+        return min(max(1, int(n_active_atoms)), max(1, int(n_total)))
+    env_val = os.environ.get("PROLIX_ACTIVE_ATOMS", "").strip()
+    if env_val:
+        try:
+            v = int(env_val)
+            if v > 0:
+                return min(v, max(1, int(n_total)))
+        except ValueError:
+            pass
+    if mask is not None and not isinstance(mask, jax.core.Tracer):
+        try:
+            import numpy as _np
+
+            m_np = _np.asarray(mask, dtype=bool)
+            if m_np.ndim >= 2:
+                m_np = _np.any(m_np, axis=0)
+            nz = _np.flatnonzero(m_np)
+            if nz.size > 0:
+                return min(max(1, int(nz[-1]) + 1), max(1, int(n_total)))
+        except Exception:
+            pass
+    return int(n_total)
+
+
 def _pallas_nonbonded_nl_batch(
     axis_size: int,
     in_batched: tuple[bool, ...],
@@ -965,6 +993,7 @@ def _pallas_nonbonded_nl_batch(
     excl_mode: str = "table",
     scale_14_vdw: float = 0.5,
     scale_14_elec: float = 0.83333333,
+    n_active_atoms: int | None = None,
 ) -> tuple[jax.Array, jax.Array]:
     """Batched 2D-grid (B, n_blocks) Pallas O(N*K) nonbonded energy & forces."""
     B = int(axis_size)
@@ -1009,8 +1038,11 @@ def _pallas_nonbonded_nl_batch(
     eps_b = eps_b.astype(dtype)
     use_pre_encoded = excl_mode == "pre_encoded"
 
+    N_act = _resolve_active_atoms(n_active_atoms, N, mask_b)
     n_blocks = max(1, (N + _NB_BLOCK_N - 1) // _NB_BLOCK_N)
+    n_act_blocks = max(1, (N_act + _NB_BLOCK_N - 1) // _NB_BLOCK_N)
     N_pad = n_blocks * _NB_BLOCK_N
+    N_act_pad = n_act_blocks * _NB_BLOCK_N
     pad_n = N_pad - N
     k_blocks = max(1, (K + _NB_BLOCK_K - 1) // _NB_BLOCK_K)
     max_k_tiles_flat = _compute_max_k_tiles(
@@ -1120,7 +1152,7 @@ def _pallas_nonbonded_nl_batch(
         base_mkt = (b_id * n_blocks) if B_nbr > 1 else jnp.int32(0)
         base_box = (b_id * 6) if B_box > 1 else jnp.int32(0)
         base_lam = b_id if B_lam > 1 else jnp.int32(0)
-        base_out = b_id * N_pad
+        base_out = b_id * N_act_pad
 
         zero_sc = jnp.asarray(0.0, dtype=dtype)
         one_sc = jnp.asarray(1.0, dtype=dtype)
@@ -1435,17 +1467,17 @@ def _pallas_nonbonded_nl_batch(
 
     in_specs = [pl.BlockSpec(memory_space=pl.ANY) for _ in range(16)]
     out_specs = [pl.BlockSpec(memory_space=pl.ANY) for _ in range(4)]
-    out_shapes = [jax.ShapeDtypeStruct((B * N_pad,), dtype) for _ in range(4)]
+    out_shapes = [jax.ShapeDtypeStruct((B * N_act_pad,), dtype) for _ in range(4)]
 
     e_pad, fx_pad, fy_pad, fz_pad = pl.pallas_call(
         _nb_nl_kernel,
         out_shape=out_shapes,
         in_specs=in_specs,
         out_specs=out_specs,
-        grid=(B, n_blocks),
+        grid=(B, n_act_blocks),
         interpret=interpret,
         compiler_params=(
-            resolve_pallas_compiler_params("nonbonded_nl", grid_blocks=B * n_blocks)
+            resolve_pallas_compiler_params("nonbonded_nl", grid_blocks=B * n_act_blocks)
             if not interpret
             else None
         ),
@@ -1468,15 +1500,20 @@ def _pallas_nonbonded_nl_batch(
         box_flat,
         lam_flat,
     )
-    e_b = jnp.sum(e_pad.reshape(B, N_pad)[:, :N].astype(orig_dtype), axis=-1)
-    forces_b = jnp.stack(
+    n_valid = min(N, N_act_pad)
+    e_b = jnp.sum(e_pad.reshape(B, N_act_pad)[:, :n_valid].astype(orig_dtype), axis=-1)
+    forces_act = jnp.stack(
         [
-            fx_pad.reshape(B, N_pad)[:, :N],
-            fy_pad.reshape(B, N_pad)[:, :N],
-            fz_pad.reshape(B, N_pad)[:, :N],
+            fx_pad.reshape(B, N_act_pad)[:, :n_valid],
+            fy_pad.reshape(B, N_act_pad)[:, :n_valid],
+            fz_pad.reshape(B, N_act_pad)[:, :n_valid],
         ],
         axis=-1,
-    ).astype(orig_dtype)
+    )
+    if n_valid < N:
+        forces_b = jnp.pad(forces_act, ((0, 0), (0, N - n_valid), (0, 0))).astype(orig_dtype)
+    else:
+        forces_b = forces_act.astype(orig_dtype)
     return e_b, forces_b
 
 
@@ -3756,7 +3793,8 @@ def _pallas_bonded_and_nonbonded_nl_fused_batch(
     if N == 0:
         return jnp.zeros((B,), dtype=orig_dtype), jnp.zeros((B, 0, 3), dtype=orig_dtype)
 
-    n_nb_blocks = ((N + _NB_BLOCK_N - 1) // _NB_BLOCK_N) if K > 0 else 0
+    N_act = _resolve_active_atoms(None, N, atom_mask)
+    n_nb_blocks = ((N_act + _NB_BLOCK_N - 1) // _NB_BLOCK_N) if K > 0 else 0
     n_blk_b = (B_real + _BLOCK_B - 1) // _BLOCK_B
     n_blk_a = (A_real + _BLOCK_B - 1) // _BLOCK_B
     n_blk_d = (D_real + _BLOCK_B - 1) // _BLOCK_B

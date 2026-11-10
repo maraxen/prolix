@@ -119,6 +119,80 @@ _STACKED_JIT_FN_CACHE: dict[Any, tuple[Any, Any]] = {}
 _STACKED_NL_SEED_CACHE: dict[Any, tuple[Any, Any]] = {}
 
 
+import contextlib as _contextlib
+
+
+@_contextlib.contextmanager
+def _scoped_active_atom_env(bundles: list[Any], n_padded: int | None):
+    """Auto-clamp PROLIX_ACTIVE_ATOMS / PROLIX_ACTIVE_WATERS from bundle.n_atoms or concrete atom_mask."""
+    import os
+
+    import jax
+    import numpy as np
+
+    saved_a = os.environ.get("PROLIX_ACTIVE_ATOMS")
+    saved_w = os.environ.get("PROLIX_ACTIVE_WATERS")
+    did_set_a = False
+    did_set_w = False
+    try:
+        if (
+            n_padded is not None
+            and int(n_padded) >= 64
+            and not os.environ.get("PROLIX_ACTIVE_ATOMS", "").strip()
+            and bundles
+            and not any(isinstance(getattr(b, "n_atoms", None), jax.core.Tracer) for b in bundles)
+        ):
+            n_pad_i = int(n_padded)
+            real_counts = []
+            for b in bundles:
+                na = int(b.n_atoms if isinstance(b.n_atoms, int) else int(np.asarray(b.n_atoms)))
+                am = getattr(b, "atom_mask", None)
+                if na >= n_pad_i and am is not None and not isinstance(am, jax.core.Tracer):
+                    am_np = np.asarray(am, dtype=bool)
+                    nz = np.nonzero(am_np)[0]
+                    if nz.size > 0:
+                        na = min(na, int(nz[-1]) + 1)
+                real_counts.append(na)
+            max_real_a = max(real_counts)
+            is_implicit = getattr(bundles[0], "box", None) is None
+            if (is_implicit and 0 < max_real_a < n_pad_i) or (
+                n_pad_i >= 4096 and 0 < max_real_a <= int(0.75 * n_pad_i)
+            ):
+                gran = 32 if is_implicit else 1024
+                clamped_a = min(n_pad_i, max(gran, ((max_real_a + gran - 1) // gran) * gran))
+                if clamped_a < n_pad_i:
+                    os.environ["PROLIX_ACTIVE_ATOMS"] = str(clamped_a)
+                    did_set_a = True
+                if not is_implicit and not os.environ.get("PROLIX_ACTIVE_WATERS", "").strip():
+                    w_counts = []
+                    w_pads = []
+                    for b in bundles:
+                        wm = getattr(b, "water_mask", None)
+                        wi = getattr(b, "water_indices", None)
+                        if wm is not None and wi is not None and not isinstance(wm, jax.core.Tracer):
+                            w_counts.append(int(np.sum(np.asarray(wm, dtype=np.int32))))
+                            w_pads.append(int(wi.shape[0]))
+                    if w_counts and w_pads:
+                        max_real_w = max(w_counts)
+                        max_pad_w = max(w_pads)
+                        if 0 < max_real_w < max_pad_w:
+                            clamped_w = min(max_pad_w, max(512, ((max_real_w + 511) // 512) * 512))
+                            os.environ["PROLIX_ACTIVE_WATERS"] = str(clamped_w)
+                            did_set_w = True
+        yield
+    finally:
+        if did_set_a:
+            if saved_a is None:
+                os.environ.pop("PROLIX_ACTIVE_ATOMS", None)
+            else:
+                os.environ["PROLIX_ACTIVE_ATOMS"] = saved_a
+        if did_set_w:
+            if saved_w is None:
+                os.environ.pop("PROLIX_ACTIVE_WATERS", None)
+            else:
+                os.environ["PROLIX_ACTIVE_WATERS"] = saved_w
+
+
 def _nl_target_capacity(
     nl_mod: Any, n_atoms: int, box_vec: Any, cutoff: float, skin: float
 ) -> int:
@@ -558,24 +632,25 @@ class EnsemblePlan:
     ) -> Trajectory | list[Trajectory]:
         """Inference path: while_loop carry-only; group-by-shape for multi-bundle."""
         if len(self.bundles) == 1:
-            return self._run_single_inference(
-                self.bundles[0],
-                n_steps,
-                dt,
-                kT,
-                seed,
-                observables=observables,
-                dt_unit=dt_unit,
-                gamma=gamma,
-                xtc_path=xtc_path,
-                save_every=save_every,
-                use_neighbor_list=use_neighbor_list,
-                nl_update_every=nl_update_every,
-                use_flash_forces=use_flash_forces,
-                nb_cfg=nb_cfg,
-                use_pallas=use_pallas,
-                use_pallas_pme=use_pallas_pme,
-            )
+            with _scoped_active_atom_env(self.bundles, int(self.bundles[0].positions.shape[0])):
+                return self._run_single_inference(
+                    self.bundles[0],
+                    n_steps,
+                    dt,
+                    kT,
+                    seed,
+                    observables=observables,
+                    dt_unit=dt_unit,
+                    gamma=gamma,
+                    xtc_path=xtc_path,
+                    save_every=save_every,
+                    use_neighbor_list=use_neighbor_list,
+                    nl_update_every=nl_update_every,
+                    use_flash_forces=use_flash_forces,
+                    nb_cfg=nb_cfg,
+                    use_pallas=use_pallas,
+                    use_pallas_pme=use_pallas_pme,
+                )
 
         return self._run_grouped(
             n_steps,
@@ -628,21 +703,57 @@ class EnsemblePlan:
             base_seed = int(seed) + indices[0]
             group_plan = planner.plan(group)
 
-            if len(group) == 1:
-                bundle = group[0]
-                obs = observables
-                if observables is not None:
-                    obs = _observables_for_bundle(bundle, observables)
-                if run_mode == "inference":
-                    traj = self._run_single_inference(
-                        bundle,
+            with _scoped_active_atom_env(group, int(group[0].positions.shape[0])):
+                if len(group) == 1:
+                    bundle = group[0]
+                    obs = observables
+                    if observables is not None:
+                        obs = _observables_for_bundle(bundle, observables)
+                    if run_mode == "inference":
+                        traj = self._run_single_inference(
+                            bundle,
+                            n_steps,
+                            dt,
+                            kT,
+                            base_seed,
+                            observables=obs,
+                            dt_unit=dt_unit,
+                            gamma=gamma,
+                            use_neighbor_list=use_neighbor_list,
+                            nl_update_every=nl_update_every,
+                            use_flash_forces=use_flash_forces,
+                            nb_cfg=nb_cfg,
+                            use_pallas=use_pallas,
+                            use_pallas_pme=use_pallas_pme,
+                        )
+                    else:
+                        traj = self._run_single(
+                            bundle,
+                            n_steps,
+                            dt,
+                            kT,
+                            base_seed,
+                            observables=obs,
+                            dt_unit=dt_unit,
+                            gamma=gamma,
+                            use_flash_forces=use_flash_forces,
+                            nb_cfg=nb_cfg,
+                            use_pallas=use_pallas,
+                            use_pallas_pme=use_pallas_pme,
+                        )
+                    trajs = [traj]
+                elif can_jit_vmap_n_mols(group):
+                    trajs = self._run_stacked_dispatch(
                         n_steps,
                         dt,
                         kT,
                         base_seed,
-                        observables=obs,
+                        observables=observables,
                         dt_unit=dt_unit,
                         gamma=gamma,
+                        run_mode=run_mode,
+                        bundles_override=group,
+                        plan_override=group_plan,
                         use_neighbor_list=use_neighbor_list,
                         nl_update_every=nl_update_every,
                         use_flash_forces=use_flash_forces,
@@ -651,96 +762,61 @@ class EnsemblePlan:
                         use_pallas_pme=use_pallas_pme,
                     )
                 else:
-                    traj = self._run_single(
-                        bundle,
-                        n_steps,
-                        dt,
-                        kT,
-                        base_seed,
-                        observables=obs,
-                        dt_unit=dt_unit,
-                        gamma=gamma,
-                        use_flash_forces=use_flash_forces,
-                        nb_cfg=nb_cfg,
-                        use_pallas=use_pallas,
-                        use_pallas_pme=use_pallas_pme,
-                    )
-                trajs = [traj]
-            elif can_jit_vmap_n_mols(group):
-                trajs = self._run_stacked_dispatch(
-                    n_steps,
-                    dt,
-                    kT,
-                    base_seed,
-                    observables=observables,
-                    dt_unit=dt_unit,
-                    gamma=gamma,
-                    run_mode=run_mode,
-                    bundles_override=group,
-                    plan_override=group_plan,
-                    use_neighbor_list=use_neighbor_list,
-                    nl_update_every=nl_update_every,
-                    use_flash_forces=use_flash_forces,
-                    nb_cfg=nb_cfg,
-                    use_pallas=use_pallas,
-                    use_pallas_pme=use_pallas_pme,
-                )
-            else:
-                # Defensive: same shape_spec should always stack; fall back
-                # without inventing DedupGather of seeded MD. NL is not
-                # extended to this rare fallback path (each bundle would
-                # independently allocate/compile its own NL, defeating the
-                # compile-sharing this whole path exists to preserve) --
-                # raise clearly rather than silently ignoring the request.
-                if use_neighbor_list:
-                    raise RuntimeError(
-                        "use_neighbor_list=True: this shape-class group failed "
-                        "can_jit_vmap_n_mols's stackability check and fell back to "
-                        "the defensive per-bundle loop -- NL is not supported there "
-                        "(would defeat the compile-sharing this path exists for). "
-                        "This indicates a real shape_spec/array-shape mismatch "
-                        "within a group partition_bundles_by_shape considered "
-                        "identical -- investigate before retrying."
-                    )
-                trajs = []
-                for j, bundle in enumerate(group):
-                    obs = observables
-                    if observables is not None:
-                        obs = _observables_for_bundle(bundle, observables)
-                    if run_mode == "inference":
-                        trajs.append(
-                            self._run_single_inference(
-                                bundle,
-                                n_steps,
-                                dt,
-                                kT,
-                                base_seed + j,
-                                observables=obs,
-                                dt_unit=dt_unit,
-                                gamma=gamma,
-                                use_flash_forces=use_flash_forces,
-                                nb_cfg=nb_cfg,
-                                use_pallas=use_pallas,
-                                use_pallas_pme=use_pallas_pme,
-                            )
+                    # Defensive: same shape_spec should always stack; fall back
+                    # without inventing DedupGather of seeded MD. NL is not
+                    # extended to this rare fallback path (each bundle would
+                    # independently allocate/compile its own NL, defeating the
+                    # compile-sharing this whole path exists to preserve) --
+                    # raise clearly rather than silently ignoring the request.
+                    if use_neighbor_list:
+                        raise RuntimeError(
+                            "use_neighbor_list=True: this shape-class group failed "
+                            "can_jit_vmap_n_mols's stackability check and fell back to "
+                            "the defensive per-bundle loop -- NL is not supported there "
+                            "(would defeat the compile-sharing this path exists for). "
+                            "This indicates a real shape_spec/array-shape mismatch "
+                            "within a group partition_bundles_by_shape considered "
+                            "identical -- investigate before retrying."
                         )
-                    else:
-                        trajs.append(
-                            self._run_single(
-                                bundle,
-                                n_steps,
-                                dt,
-                                kT,
-                                base_seed + j,
-                                observables=obs,
-                                dt_unit=dt_unit,
-                                gamma=gamma,
-                                use_flash_forces=use_flash_forces,
-                                nb_cfg=nb_cfg,
-                                use_pallas=use_pallas,
-                                use_pallas_pme=use_pallas_pme,
+                    trajs = []
+                    for j, bundle in enumerate(group):
+                        obs = observables
+                        if observables is not None:
+                            obs = _observables_for_bundle(bundle, observables)
+                        if run_mode == "inference":
+                            trajs.append(
+                                self._run_single_inference(
+                                    bundle,
+                                    n_steps,
+                                    dt,
+                                    kT,
+                                    base_seed + j,
+                                    observables=obs,
+                                    dt_unit=dt_unit,
+                                    gamma=gamma,
+                                    use_flash_forces=use_flash_forces,
+                                    nb_cfg=nb_cfg,
+                                    use_pallas=use_pallas,
+                                    use_pallas_pme=use_pallas_pme,
+                                )
                             )
-                        )
+                        else:
+                            trajs.append(
+                                self._run_single(
+                                    bundle,
+                                    n_steps,
+                                    dt,
+                                    kT,
+                                    base_seed + j,
+                                    observables=obs,
+                                    dt_unit=dt_unit,
+                                    gamma=gamma,
+                                    use_flash_forces=use_flash_forces,
+                                    nb_cfg=nb_cfg,
+                                    use_pallas=use_pallas,
+                                    use_pallas_pme=use_pallas_pme,
+                                )
+                            )
             for idx, traj in zip(indices, trajs, strict=True):
                 out[idx] = traj
 
@@ -895,6 +971,10 @@ class EnsemblePlan:
                         bool(jax.config.jax_enable_x64),
                         os.environ.get("PROLIX_USE_PALLAS", ""),
                         os.environ.get("PROLIX_PME_GRID_POINTS", ""),
+                        os.environ.get("PROLIX_ACTIVE_ATOMS", ""),
+                        os.environ.get("PROLIX_ACTIVE_WATERS", ""),
+                        os.environ.get("PROLIX_PME_EVERY", ""),
+                        os.environ.get("PROLIX_NL_CHECK_EVERY", ""),
                         getattr(_bmd, "single_padded_energy", None),
                         getattr(_bmd, "pallas_bonded_all_fused", None),
                         getattr(_be, "pallas_bonded_all_fused", None),
@@ -1483,8 +1563,7 @@ class EnsemblePlan:
                     (getattr(hb_item, "cmap_torsion_idx", None), getattr(hb_item, "cmap_mask", None), 8),
                 ),
             )
-            if blk_i > host_pw_blk:
-                host_pw_blk = blk_i
+            host_pw_blk = max(host_pw_blk, blk_i)
 
         # debt 761: force_fn_from_bundle returns an (N, 3) force array rather
         # than a scalar energy -- settle_langevin's energy_or_force_fn
@@ -1492,6 +1571,31 @@ class EnsemblePlan:
         # _make_settle_compatible_force_fn/make_force_fn_like_canonicalize),
         # so no other change is needed here for the integrator itself to
         # skip the dense-energy autodiff pass.
+        import os
+
+        env_up = os.environ.get("PROLIX_USE_PALLAS", "").strip().lower()
+        pallas_enabled_here = (
+            bool(use_pallas)
+            if use_pallas is not None
+            else (
+                True
+                if env_up in ("1", "true", "yes")
+                else (
+                    False
+                    if env_up in ("0", "false", "no")
+                    else (jax.default_backend() != "cpu")
+                )
+            )
+        )
+        can_pallas_gbsa = bool(
+            pallas_enabled_here
+            and bundle.shape_spec.has_implicit_solvent
+            and not bundle.shape_spec.has_pbc
+            and getattr(bundle, "excl_dense_indices", None) is not None
+            and not use_flash_forces
+            and initial_neighbor is None
+            and lj_switch_width_from_config(nb_cfg) == 0.0
+        )
         tile = int(getattr(nb_cfg, "flash_tile_size", 256) or 256) if nb_cfg is not None else 256
         remat = bool(getattr(nb_cfg, "flash_remat", True)) if nb_cfg is not None else True
         energy_or_force_fn = (
@@ -1512,12 +1616,12 @@ class EnsemblePlan:
                 # on that path, so skipping their construction cannot change a
                 # number. This is what made the NL path OOM at init (job 20528981)
                 # while flash, which already opted out, did not.
-                build_dense_exclusions=initial_neighbor is None,
+                build_dense_exclusions=(initial_neighbor is None and not can_pallas_gbsa),
                 use_pallas=use_pallas,
                 use_pallas_pme=use_pallas_pme,
                 excl_mode=excl_mode,
                 first_pure_water_block=host_pw_blk,
-                return_forces=(initial_neighbor is not None),
+                return_forces=bool(initial_neighbor is not None or can_pallas_gbsa),
             )
         )
         if initial_neighbor is not None:
@@ -1547,7 +1651,7 @@ class EnsemblePlan:
             water_mask=water_mask,
             atom_mask=atom_mask,
             box=pbc_box_for_bundle(bundle),
-            is_force_shaped=bool(use_flash_forces or initial_neighbor is not None),
+            is_force_shaped=bool(use_flash_forces or initial_neighbor is not None or can_pallas_gbsa),
             use_pallas=use_pallas,
         )
 
@@ -1755,6 +1859,10 @@ class EnsemblePlan:
                     bool(jax.config.jax_enable_x64),
                     os.environ.get("PROLIX_USE_PALLAS", ""),
                     os.environ.get("PROLIX_PME_GRID_POINTS", ""),
+                    os.environ.get("PROLIX_ACTIVE_ATOMS", ""),
+                    os.environ.get("PROLIX_ACTIVE_WATERS", ""),
+                    os.environ.get("PROLIX_PME_EVERY", ""),
+                    os.environ.get("PROLIX_NL_CHECK_EVERY", ""),
                     getattr(_bmd, "single_padded_energy", None),
                     getattr(_bmd, "pallas_bonded_all_fused", None),
                     getattr(_be, "pallas_bonded_all_fused", None),
@@ -2004,10 +2112,39 @@ class EnsemblePlan:
                     del axis_size, in_batched
                     return jnp.any(flag), False
 
+                n_act_su = nl_mod._resolve_nl_active_atoms(None, n_nl_rows)
+                pad_mask_3d_su = pad_mask_3d[:n_act_su]
+                nl_check_every = 1
+                raw_ce = os.environ.get("PROLIX_NL_CHECK_EVERY", "").strip()
+                if raw_ce:
+                    try:
+                        nl_check_every = max(1, int(raw_ce))
+                    except ValueError:
+                        nl_check_every = 1
+                pme_every_val = 1
+                raw_pe = os.environ.get("PROLIX_PME_EVERY", "").strip()
+                if raw_pe:
+                    try:
+                        pme_every_val = max(1, int(raw_pe))
+                    except ValueError:
+                        pme_every_val = 1
+                respa_2step_fn = getattr(apply_fn, "_respa_2step_fn", None)
+
                 def _check_su(pos: Any, last_pos: Any, step_i: Any) -> Any:
-                    d_pos = jnp.where(pad_mask_3d, jax.vmap(_nl_disp_fn)(pos, last_pos), 0.0)
-                    max_dr_sq = jnp.max(jnp.sum(d_pos * d_pos, axis=-1))
-                    verlet = max_dr_sq > thresh_sq
+                    def _eval_verlet(_):
+                        d_pos = jnp.where(
+                            pad_mask_3d_su,
+                            jax.vmap(_nl_disp_fn)(pos[:n_act_su], last_pos[:n_act_su]),
+                            0.0,
+                        )
+                        max_dr_sq = jnp.max(jnp.sum(d_pos * d_pos, axis=-1))
+                        return max_dr_sq > thresh_sq
+
+                    if nl_check_every > 1:
+                        do_v = (step_i == 0) | ((step_i % nl_check_every) == 0)
+                        verlet = jax.lax.cond(do_v, _eval_verlet, lambda _: jnp.bool_(False), operand=None)
+                    else:
+                        verlet = _eval_verlet(None)
                     if stride > 0:
                         by_stride = (step_i > 0) & ((step_i % stride) == 0)
                         return verlet | by_stride
@@ -2016,6 +2153,30 @@ class EnsemblePlan:
                 def _integrate_step_only(langevin_state: Any, neighbor: Any) -> Any:
                     pos = _integrator_positions(langevin_state)
                     new_langevin_state = apply_fn(
+                        langevin_state, neighbor=neighbor, kT=kT_s, dt=dt_s
+                    )
+                    if not getattr(apply_fn, "_pallas_settle_pins_ghosts", False):
+                        new_R = jnp.where(
+                            pad_mask_3d,
+                            _integrator_positions(new_langevin_state),
+                            pos,
+                        )
+                        new_P = jnp.where(pad_mask_3d, new_langevin_state.momentum, 0.0)
+                        if hasattr(new_langevin_state, "positions"):
+                            new_langevin_state = eqx.tree_at(
+                                lambda s: (s.positions, s.momentum),
+                                new_langevin_state,
+                                (new_R, new_P),
+                            )
+                        else:
+                            new_langevin_state = new_langevin_state.set(
+                                position=new_R, momentum=new_P
+                            )
+                    return new_langevin_state
+
+                def _integrate_2steps_respa(langevin_state: Any, neighbor: Any) -> Any:
+                    pos = _integrator_positions(langevin_state)
+                    new_langevin_state = respa_2step_fn(
                         langevin_state, neighbor=neighbor, kT=kT_s, dt=dt_s
                     )
                     if not getattr(apply_fn, "_pallas_settle_pins_ghosts", False):
@@ -2463,6 +2624,54 @@ class EnsemblePlan:
                         any_u_start: Any,
                     ) -> tuple[Any, Any, Any]:
                         if has_nvt_fields:
+                            if pme_every_val == 2 and respa_2step_fn is not None:
+                                def _inner_cond_nvt_2(ic: Any) -> Any:
+                                    s_i, _p_i, _m_i, _f_i, _r_i, any_u = ic
+                                    return (s_i + jnp.int32(2) <= n_limit) & (~any_u)
+
+                                def _inner_body_nvt_2(ic: Any) -> Any:
+                                    s_i, p_i, m_i, f_i, r_i, _any_u = ic
+                                    st_in = st_start.replace(
+                                        position=p_i,
+                                        momentum=m_i,
+                                        force=f_i,
+                                        mass=mass_fixed,
+                                        rng=r_i,
+                                    )
+                                    st_next = _integrate_2steps_respa(st_in, nb_fixed)
+                                    s_next = s_i + jnp.int32(2)
+                                    pos_next = st_next.position
+                                    su_next = _check_su(pos_next, lp_fixed, s_next)
+                                    any_u_next = _any_replica_true(su_next)
+                                    return (
+                                        s_next,
+                                        pos_next,
+                                        st_next.momentum,
+                                        st_next.force,
+                                        st_next.rng,
+                                        any_u_next,
+                                    )
+
+                                s_out, p_out, m_out, f_out, r_out, any_u_out = iterator(
+                                    _inner_cond_nvt_2,
+                                    _inner_body_nvt_2,
+                                    (
+                                        s_start,
+                                        st_start.position,
+                                        st_start.momentum,
+                                        st_start.force,
+                                        st_start.rng,
+                                        any_u_start,
+                                    ),
+                                )
+                            else:
+                                s_out = s_start
+                                p_out = st_start.position
+                                m_out = st_start.momentum
+                                f_out = st_start.force
+                                r_out = st_start.rng
+                                any_u_out = any_u_start
+
                             def _inner_cond_nvt(ic: Any) -> Any:
                                 s_i, _p_i, _m_i, _f_i, _r_i, any_u = ic
                                 return (s_i < n_limit) & (~any_u)
@@ -2483,7 +2692,7 @@ class EnsemblePlan:
                                 any_u_next = _any_replica_true(su_next)
                                 return (
                                     s_next,
-                                     pos_next,
+                                    pos_next,
                                     st_next.momentum,
                                     st_next.force,
                                     st_next.rng,
@@ -2494,12 +2703,12 @@ class EnsemblePlan:
                                 _inner_cond_nvt,
                                 _inner_body_nvt,
                                 (
-                                    s_start,
-                                    st_start.position,
-                                    st_start.momentum,
-                                    st_start.force,
-                                    st_start.rng,
-                                    any_u_start,
+                                    s_out,
+                                    p_out,
+                                    m_out,
+                                    f_out,
+                                    r_out,
+                                    any_u_out,
                                 ),
                             )
                             st_out = st_start.replace(

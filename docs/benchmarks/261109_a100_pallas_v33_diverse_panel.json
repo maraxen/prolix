@@ -1,0 +1,909 @@
+{
+  "benchmark": "pallas_v33_diverse_6axis_panel",
+  "gpu_tag": "a100",
+  "backend": "gpu",
+  "device_kind": "NVIDIA A100 80GB PCIe",
+  "quick": true,
+  "axes_run": [
+    4,
+    5,
+    3,
+    1,
+    2
+  ],
+  "axis4_rattle_npt_logged": {
+    "axis": "Axis4_RATTLE_NPT_Barostat_And_Logged_MD",
+    "baoab_precision_and_rattle_substeps": {
+      "B=1": {
+        "n_solute_xh_constraints": 1221,
+        "single_f32_no_rattle_ms_per_rep": 0.07169712334871292,
+        "single_f32_with_rattle_ms_per_rep": 0.14143874868750572,
+        "mixed_f64_no_rattle_ms_per_rep": 0.08773412555456161
+      },
+      "B=4": {
+        "n_solute_xh_constraints": 1221,
+        "single_f32_no_rattle_ms_per_rep": 0.026121456176042557,
+        "single_f32_with_rattle_ms_per_rep": 0.0500398688018322,
+        "mixed_f64_no_rattle_ms_per_rep": 0.04000626504421234
+      }
+    },
+    "npt_dynamic_box_spme": {
+      "full_recompute_ms": 0.12527117505669594,
+      "isotropic_fast_scale_ms": 0.11469526216387749,
+      "speedup": 1.0922088035136752,
+      "max_abs_force_diff": 0.02585315704345703
+    },
+    "logged_vs_unlogged_force_eval_b1": {
+      "logged_value_energy_and_forces_ms": 0.19354084506630898,
+      "unlogged_return_forces_ms": 0.197155075147748
+    },
+    "mk60_tile_pair_builder_b1": {
+      "host_builder_ms": 6532.745540142059,
+      "gpu_builder_ms": 58.94508492201567,
+      "speedup": 110.82765507565016
+    },
+    "e2e_single_vs_mixed": {
+      "single_f32": [
+        {
+          "B": 1,
+          "ms_per_step_batch": 1.2236539274454117,
+          "ms_per_step_per_replica": 1.2236539274454117,
+          "ns_per_day_per_replica": 141.2163979735265
+        }
+      ],
+      "mixed_f64_state": [
+        {
+          "B": 1,
+          "ms_per_step_batch": 1.169226411730051,
+          "ms_per_step_per_replica": 1.169226411730051,
+          "ns_per_day_per_replica": 147.79002446952572
+        }
+      ],
+      "single_f32_respa_pme2_skin10": [
+        {
+          "B": 1,
+          "ms_per_step_batch": 1.0210624895989895,
+          "ms_per_step_per_replica": 1.0210624895989895,
+          "ns_per_day_per_replica": 169.235479473803
+        }
+      ],
+      "mixed_f64_respa_pme2_skin10": [
+        {
+          "B": 1,
+          "ms_per_step_batch": 1.0251122526824474,
+          "ms_per_step_per_replica": 1.0251122526824474,
+          "ns_per_day_per_replica": 168.56690528069305
+        }
+      ]
+    }
+  },
+  "axis5_differentiable_ff": {
+    "axis": "Axis5_Differentiable_FF_And_Structure_Refinement",
+    "systems": [
+      {
+        "system": "1UBQ_solvated_8k",
+        "n_real_atoms": 6656,
+        "bucket_atoms": 8192,
+        "pme_grid": "48",
+        "batch_scaling": [
+          {
+            "B": 1,
+            "mk48_row_nl_val_and_grad_ms_batch": 1.0481346398591995,
+            "mk48_row_nl_val_and_grad_ms_per_rep": 1.0481346398591995,
+            "mk51_morton_tp_val_and_grad_ms_batch": 0.2538258209824562,
+            "mk51_morton_tp_val_and_grad_ms_per_rep": 0.2538258209824562,
+            "mk51_speedup_over_mk48": 4.129346005076623
+          },
+          {
+            "B": 4,
+            "mk48_row_nl_val_and_grad_ms_batch": 2.0743248984217644,
+            "mk48_row_nl_val_and_grad_ms_per_rep": 0.5185812246054411,
+            "mk51_morton_tp_val_and_grad_ms_batch": 0.36320039071142673,
+            "mk51_morton_tp_val_and_grad_ms_per_rep": 0.09080009767785668,
+            "mk51_speedup_over_mk48": 5.711240823168265
+          }
+        ]
+      },
+      {
+        "system": "DHFR_25k",
+        "n_real_atoms": 23558,
+        "bucket_atoms": 25000,
+        "pme_grid": "64",
+        "batch_scaling": [
+          {
+            "B": 1,
+            "mk48_row_nl_val_and_grad_ms_batch": 3.030350338667631,
+            "mk48_row_nl_val_and_grad_ms_per_rep": 3.030350338667631,
+            "mk51_morton_tp_val_and_grad_ms_batch": 0.2963487524539232,
+            "mk51_morton_tp_val_and_grad_ms_per_rep": 0.2963487524539232,
+            "mk51_speedup_over_mk48": 10.22562205366056
+          },
+          {
+            "B": 4,
+            "mk48_row_nl_val_and_grad_ms_batch": 6.289832107722759,
+            "mk48_row_nl_val_and_grad_ms_per_rep": 1.5724580269306898,
+            "mk51_morton_tp_val_and_grad_ms_batch": 0.6761472672224045,
+            "mk51_morton_tp_val_and_grad_ms_per_rep": 0.16903681680560112,
+            "mk51_speedup_over_mk48": 9.302458817235522
+          }
+        ]
+      }
+    ]
+  },
+  "axis3_apoa1_noncubic": {
+    "axis": "Axis3_ApoA1_92224_NonCubic_Lipoprotein",
+    "n_real_atoms": 92224,
+    "bucket_atoms": 100000,
+    "box_A": [
+      108.86,
+      108.86,
+      77.76
+    ],
+    "openmm_apoa1pme_single": {
+      "available": true,
+      "platform": "OpenCL",
+      "precision": "single",
+      "ms_per_step": 0.868480900923411,
+      "ns_per_day": 198.96810605307573
+    },
+    "openmm_apoa1pme_mixed": {
+      "available": true,
+      "platform": "OpenCL",
+      "precision": "mixed",
+      "ms_per_step": 0.8980510445932547,
+      "ns_per_day": 192.41667947534606
+    },
+    "openmm_apoa1rf_single": {
+      "available": true,
+      "platform": "OpenCL",
+      "precision": "single",
+      "ms_per_step": 0.7241076479355494,
+      "ns_per_day": 238.63855117765638
+    },
+    "spme_grid_comparison_b1": {
+      "cubic_96x96x96": {
+        "grid_dims": [
+          96,
+          96,
+          96
+        ],
+        "spread_ms": 0.0965360552072525,
+        "fft_ms": 0.10956469923257828,
+        "gather_ms": 0.07616966031491756,
+        "total_spme_ms": 0.28227041475474834
+      },
+      "noncubic_96x96x64": {
+        "grid_dims": [
+          96,
+          96,
+          64
+        ],
+        "spread_ms": 0.09653116576373577,
+        "fft_ms": 0.08605439215898514,
+        "gather_ms": 0.07752189412713051,
+        "total_spme_ms": 0.2601074520498514
+      }
+    },
+    "prolix_scaling": {
+      "apoa1pme_96x96x64": [
+        {
+          "B": 1,
+          "ms_per_step_batch": 3.688143752515316,
+          "ms_per_step_per_replica": 3.688143752515316,
+          "ns_per_day_per_replica": 46.85283752352394,
+          "ns_per_day_aggregate": 46.85283752352394
+        },
+        {
+          "B": 2,
+          "ms_per_step_batch": 4.495838563889265,
+          "ms_per_step_per_replica": 2.2479192819446325,
+          "ns_per_day_per_replica": 76.87108758216353,
+          "ns_per_day_aggregate": 76.87108758216353
+        }
+      ],
+      "apoa1rf": [
+        {
+          "B": 1,
+          "ms_per_step_batch": 1.1654521338641644,
+          "ms_per_step_per_replica": 1.1654521338641644,
+          "ns_per_day_per_replica": 148.26863753474422,
+          "ns_per_day_aggregate": 148.26863753474422
+        },
+        {
+          "B": 2,
+          "ms_per_step_batch": 4.257613141089678,
+          "ms_per_step_per_replica": 2.128806570544839,
+          "ns_per_day_per_replica": 81.1722410062715,
+          "ns_per_day_aggregate": 81.1722410062715
+        }
+      ]
+    }
+  },
+  "axis1_implicit_fold_panel": {
+    "axis": "Axis1_Implicit_GBSA_CMAP_Fold_Panel",
+    "proteins": [
+      {
+        "protein": "1UAO",
+        "n_real_atoms": 138,
+        "bucket_atoms": 256,
+        "n_cmap_torsions": 8,
+        "openmm_single": {
+          "available": true,
+          "platform": "OpenCL",
+          "precision": "single",
+          "ms_per_step": 0.12765901163220406,
+          "ns_per_day": 1353.6059678877255
+        },
+        "openmm_mixed": {
+          "available": true,
+          "platform": "OpenCL",
+          "precision": "mixed",
+          "ms_per_step": 0.12825870886445045,
+          "ns_per_day": 1347.2769337060986
+        },
+        "substep_breakdown": {
+          "B=1": {
+            "total_substeps_ms": 0.2109144814312458,
+            "gbsa_and_nonbonded_ms": 0.07843933999538422,
+            "bonded_and_2d_cmap_ms": 0.05974271334707737,
+            "baoab_integrator_ms": 0.07273242808878422,
+            "gbsa_and_nonbonded_pct": 37.190115853165814,
+            "bonded_and_2d_cmap_pct": 28.325562541589814,
+            "baoab_integrator_pct": 34.48432160524437
+          },
+          "B=4": {
+            "total_substeps_ms": 0.21497090347111225,
+            "gbsa_and_nonbonded_ms": 0.0818887259811163,
+            "bonded_and_2d_cmap_ms": 0.05929581820964813,
+            "baoab_integrator_ms": 0.07378635928034782,
+            "gbsa_and_nonbonded_pct": 38.092934745524985,
+            "bonded_and_2d_cmap_pct": 27.58318323652405,
+            "baoab_integrator_pct": 34.323882017950964
+          }
+        },
+        "batch_scaling": [
+          {
+            "B": 1,
+            "ms_per_step_batch": 0.23704874329268932,
+            "ms_per_step_per_replica": 0.23704874329268932,
+            "ns_per_day_per_replica": 728.9639995544715,
+            "ns_per_day_aggregate": 728.9639995544715,
+            "speedup_vs_openmm_single": 0.5385348593667955
+          },
+          {
+            "B": 4,
+            "ms_per_step_batch": 0.3695052582770586,
+            "ms_per_step_per_replica": 0.09237631456926465,
+            "ns_per_day_per_replica": 1870.6093743373242,
+            "ns_per_day_aggregate": 1870.6093743373242,
+            "speedup_vs_openmm_single": 1.3819452770708243
+          },
+          {
+            "B": 16,
+            "ms_per_step_batch": 0.773183535784483,
+            "ms_per_step_per_replica": 0.048323970986530185,
+            "ns_per_day_per_replica": 3575.8650721846975,
+            "ns_per_day_aggregate": 3575.8650721846975,
+            "speedup_vs_openmm_single": 2.6417326437802
+          }
+        ]
+      },
+      {
+        "protein": "1VII",
+        "n_real_atoms": 596,
+        "bucket_atoms": 1024,
+        "n_cmap_torsions": 34,
+        "openmm_single": {
+          "available": true,
+          "platform": "OpenCL",
+          "precision": "single",
+          "ms_per_step": 0.11038916185498238,
+          "ns_per_day": 1565.3710662918736
+        },
+        "openmm_mixed": {
+          "available": true,
+          "platform": "OpenCL",
+          "precision": "mixed",
+          "ms_per_step": 0.11175224557518959,
+          "ns_per_day": 1546.2776529509288
+        },
+        "substep_breakdown": {
+          "B=1": {
+            "total_substeps_ms": 0.3876625094562769,
+            "gbsa_and_nonbonded_ms": 0.25794729590415955,
+            "bonded_and_2d_cmap_ms": 0.06332406774163246,
+            "baoab_integrator_ms": 0.06639114581048489,
+            "gbsa_and_nonbonded_pct": 66.53913897063407,
+            "bonded_and_2d_cmap_pct": 16.334844406401018,
+            "baoab_integrator_pct": 17.126016622964908
+          },
+          "B=4": {
+            "total_substeps_ms": 0.39020790718495846,
+            "gbsa_and_nonbonded_ms": 0.25271247141063213,
+            "bonded_and_2d_cmap_ms": 0.06486838683485985,
+            "baoab_integrator_ms": 0.07262704893946648,
+            "gbsa_and_nonbonded_pct": 64.76354444833085,
+            "bonded_and_2d_cmap_pct": 16.62405749356387,
+            "baoab_integrator_pct": 18.612398058105285
+          }
+        },
+        "batch_scaling": [
+          {
+            "B": 1,
+            "ms_per_step_batch": 0.4107627086341381,
+            "ms_per_step_per_replica": 0.4107627086341381,
+            "ns_per_day_per_replica": 420.68083681352647,
+            "ns_per_day_aggregate": 420.68083681352647,
+            "speedup_vs_openmm_single": 0.2687419269924642
+          },
+          {
+            "B": 4,
+            "ms_per_step_batch": 0.5524389445781708,
+            "ms_per_step_per_replica": 0.1381097361445427,
+            "ns_per_day_per_replica": 1251.1789887075827,
+            "ns_per_day_aggregate": 1251.1789887075827,
+            "speedup_vs_openmm_single": 0.7992858790161719
+          },
+          {
+            "B": 16,
+            "ms_per_step_batch": 1.0809741914272308,
+            "ms_per_step_per_replica": 0.06756088696420193,
+            "ns_per_day_per_replica": 2557.6928865892546,
+            "ns_per_day_aggregate": 2557.6928865892546,
+            "speedup_vs_openmm_single": 1.6339211460245275
+          }
+        ]
+      },
+      {
+        "protein": "1UBQ",
+        "n_real_atoms": 1231,
+        "bucket_atoms": 5000,
+        "n_cmap_torsions": 74,
+        "openmm_single": {
+          "available": true,
+          "platform": "OpenCL",
+          "precision": "single",
+          "ms_per_step": 0.1793350651860237,
+          "ns_per_day": 963.5594679755188
+        },
+        "openmm_mixed": {
+          "available": true,
+          "platform": "OpenCL",
+          "precision": "mixed",
+          "ms_per_step": 0.17663607373833656,
+          "ns_per_day": 978.2826143202253
+        },
+        "substep_breakdown": {
+          "B=1": {
+            "total_substeps_ms": 0.5931847728788853,
+            "gbsa_and_nonbonded_ms": 0.4577421583235264,
+            "bonded_and_2d_cmap_ms": 0.06450065411627293,
+            "baoab_integrator_ms": 0.07094196043908596,
+            "gbsa_and_nonbonded_pct": 77.16687603122051,
+            "bonded_and_2d_cmap_pct": 10.873619328296966,
+            "baoab_integrator_pct": 11.959504640482516
+          },
+          "B=4": {
+            "total_substeps_ms": 0.6995625793933868,
+            "gbsa_and_nonbonded_ms": 0.5585113540291786,
+            "bonded_and_2d_cmap_ms": 0.07015368901193142,
+            "baoab_integrator_ms": 0.0708975363522768,
+            "gbsa_and_nonbonded_pct": 79.83722550075245,
+            "bonded_and_2d_cmap_pct": 10.028222074537481,
+            "baoab_integrator_pct": 10.134552424710071
+          }
+        },
+        "batch_scaling": [
+          {
+            "B": 1,
+            "ms_per_step_batch": 0.644140737131238,
+            "ms_per_step_per_replica": 0.644140737131238,
+            "ns_per_day_per_replica": 268.26435596914206,
+            "ns_per_day_aggregate": 268.26435596914206,
+            "speedup_vs_openmm_single": 0.2784097555834072
+          },
+          {
+            "B": 4,
+            "ms_per_step_batch": 0.9220792911946774,
+            "ms_per_step_per_replica": 0.23051982279866934,
+            "ns_per_day_per_replica": 749.6101545719107,
+            "ns_per_day_aggregate": 749.6101545719107,
+            "speedup_vs_openmm_single": 0.7779594093417762
+          },
+          {
+            "B": 16,
+            "ms_per_step_batch": 2.361279958859086,
+            "ms_per_step_per_replica": 0.14757999742869288,
+            "ns_per_day_per_replica": 1170.8903849486298,
+            "ns_per_day_aggregate": 1170.8903849486298,
+            "speedup_vs_openmm_single": 1.2151718953151096
+          }
+        ]
+      },
+      {
+        "protein": "5DFR",
+        "n_real_atoms": 2489,
+        "bucket_atoms": 5000,
+        "n_cmap_torsions": 157,
+        "openmm_single": {
+          "available": true,
+          "platform": "OpenCL",
+          "precision": "single",
+          "ms_per_step": 0.2818181924521923,
+          "ns_per_day": 613.1612671858074
+        },
+        "openmm_mixed": {
+          "available": true,
+          "platform": "OpenCL",
+          "precision": "mixed",
+          "ms_per_step": 0.28050417080521584,
+          "ns_per_day": 616.0336208333729
+        },
+        "substep_breakdown": {
+          "B=1": {
+            "total_substeps_ms": 1.0433114599436522,
+            "gbsa_and_nonbonded_ms": 0.8963674772530794,
+            "bonded_and_2d_cmap_ms": 0.06797770038247108,
+            "baoab_integrator_ms": 0.07896628230810165,
+            "gbsa_and_nonbonded_pct": 85.9156169243546,
+            "bonded_and_2d_cmap_pct": 6.515571139814996,
+            "baoab_integrator_pct": 7.568811935830411
+          },
+          "B=4": {
+            "total_substeps_ms": 1.9961824174970388,
+            "gbsa_and_nonbonded_ms": 1.8241424579173326,
+            "bonded_and_2d_cmap_ms": 0.0855941791087389,
+            "baoab_integrator_ms": 0.08644578047096729,
+            "gbsa_and_nonbonded_pct": 91.38155120134648,
+            "bonded_and_2d_cmap_pct": 4.28789364932205,
+            "baoab_integrator_pct": 4.330555149331463
+          }
+        },
+        "batch_scaling": [
+          {
+            "B": 1,
+            "ms_per_step_batch": 1.0702569968998432,
+            "ms_per_step_per_replica": 1.0702569968998432,
+            "ns_per_day_per_replica": 161.45654782032784,
+            "ns_per_day_aggregate": 161.45654782032784,
+            "speedup_vs_openmm_single": 0.26331824343921145
+          },
+          {
+            "B": 4,
+            "ms_per_step_batch": 2.0830220077186823,
+            "ms_per_step_per_replica": 0.5207555019296706,
+            "ns_per_day_per_replica": 331.82558678628635,
+            "ns_per_day_aggregate": 331.82558678628635,
+            "speedup_vs_openmm_single": 0.5411718002170097
+          },
+          {
+            "B": 16,
+            "ms_per_step_batch": 6.84869303368032,
+            "ms_per_step_per_replica": 0.42804331460502,
+            "ns_per_day_per_replica": 403.6974626258383,
+            "ns_per_day_aggregate": 403.6974626258383,
+            "speedup_vs_openmm_single": 0.6583870903631378
+          }
+        ]
+      }
+    ]
+  },
+  "axis2_explicit_ragged_screen": {
+    "axis": "Axis2_Explicit_MultiProtein_And_Ragged_Screen",
+    "systems": [
+      {
+        "system": "1UAO_solvated_tip3p",
+        "n_real_atoms": 2492,
+        "bucket_atoms": 4096,
+        "bucket_waters": 1024,
+        "occupancy_pct": 60.83984375,
+        "electrostatic_method": "pme",
+        "pme_grid": "32",
+        "substep_breakdown": {
+          "B=1": {
+            "total_substeps_ms": 0.39734011515975,
+            "baoab_pre_force_ms": 0.07524215616285801,
+            "baoab_post_force_ms": 0.06008441559970379,
+            "mk48_row_nl_megakernel_ms": 0.0683031976222992,
+            "spme_spread_ms": 0.05431114695966244,
+            "spme_fft_ms": 0.08315420709550381,
+            "spme_gather_ms": 0.05624499171972275,
+            "baoab_pre_force_pct": 18.936461054934515,
+            "baoab_post_force_pct": 15.121658575939895,
+            "mk48_row_nl_megakernel_pct": 17.190108679270402,
+            "spme_spread_pct": 13.668679523542878,
+            "spme_fft_pct": 20.927715053908358,
+            "spme_gather_pct": 14.15537711240395,
+            "mk51_morton_tile_pairs_ms_per_rep": 0.05832468159496784
+          },
+          "B=4": {
+            "total_substeps_ms": 0.11835716431960464,
+            "baoab_pre_force_ms": 0.018981960602104664,
+            "baoab_post_force_ms": 0.01474445452913642,
+            "mk48_row_nl_megakernel_ms": 0.03713450860232115,
+            "spme_spread_ms": 0.013565656263381243,
+            "spme_fft_ms": 0.020376010797917843,
+            "spme_gather_ms": 0.013554573524743319,
+            "baoab_pre_force_pct": 16.037863623402558,
+            "baoab_post_force_pct": 12.457593601449737,
+            "mk48_row_nl_megakernel_pct": 31.374956316159565,
+            "spme_spread_pct": 11.461626629334708,
+            "spme_fft_pct": 17.215697009177813,
+            "spme_gather_pct": 11.452262820475621,
+            "mk51_morton_tile_pairs_ms_per_rep": 0.018041813746094704
+          }
+        },
+        "batch_scaling": [
+          {
+            "B": 1,
+            "ms_per_step_batch": 1.0848814621567726,
+            "ms_per_step_per_replica": 1.0848814621567726,
+            "ns_per_day_per_replica": 159.28007439307618,
+            "ns_per_day_aggregate": 159.28007439307618
+          },
+          {
+            "B": 4,
+            "ms_per_step_batch": 1.5347085893154144,
+            "ms_per_step_per_replica": 0.3836771473288536,
+            "ns_per_day_per_replica": 450.3786613381259,
+            "ns_per_day_aggregate": 450.3786613381259
+          }
+        ]
+      },
+      {
+        "system": "1VII_solvated_8k",
+        "n_real_atoms": 4199,
+        "bucket_atoms": 8192,
+        "bucket_waters": 2048,
+        "occupancy_pct": 51.25732421875,
+        "electrostatic_method": "pme",
+        "pme_grid": "48",
+        "substep_breakdown": {
+          "B=1": {
+            "total_substeps_ms": 0.407505314797163,
+            "baoab_pre_force_ms": 0.08067507296800613,
+            "baoab_post_force_ms": 0.061397720128297806,
+            "mk48_row_nl_megakernel_ms": 0.07340540178120136,
+            "spme_spread_ms": 0.0521054957062006,
+            "spme_fft_ms": 0.08469056338071823,
+            "spme_gather_ms": 0.055231060832738876,
+            "baoab_pre_force_pct": 19.797305713218094,
+            "baoab_post_force_pct": 15.066728677847724,
+            "mk48_row_nl_megakernel_pct": 18.013360590827908,
+            "spme_spread_pct": 12.786457946477647,
+            "spme_fft_pct": 20.78268928170255,
+            "spme_gather_pct": 13.553457789926078,
+            "mk51_morton_tile_pairs_ms_per_rep": 0.07880828343331814
+          },
+          "B=4": {
+            "total_substeps_ms": 0.12806991580873728,
+            "baoab_pre_force_ms": 0.0210284604690969,
+            "baoab_post_force_ms": 0.01487563131377101,
+            "mk48_row_nl_megakernel_ms": 0.043207930866628885,
+            "spme_spread_ms": 0.01340832095593214,
+            "spme_fft_ms": 0.021092593669891357,
+            "spme_gather_ms": 0.014456978533416986,
+            "baoab_pre_force_pct": 16.41951611844683,
+            "baoab_post_force_pct": 11.615242517990438,
+            "mk48_row_nl_megakernel_pct": 33.737767838589555,
+            "spme_spread_pct": 10.469532107725012,
+            "spme_fft_pct": 16.46959282880419,
+            "spme_gather_pct": 11.288348588443979,
+            "mk51_morton_tile_pairs_ms_per_rep": 0.02194509143009782
+          }
+        },
+        "batch_scaling": [
+          {
+            "B": 1,
+            "ms_per_step_batch": 1.1291742324829102,
+            "ms_per_step_per_replica": 1.1291742324829102,
+            "ns_per_day_per_replica": 153.03218496231077,
+            "ns_per_day_aggregate": 153.03218496231077
+          },
+          {
+            "B": 4,
+            "ms_per_step_batch": 1.6936251893639565,
+            "ms_per_step_per_replica": 0.4234062973409891,
+            "ns_per_day_per_replica": 408.11863471372976,
+            "ns_per_day_aggregate": 408.11863471372976
+          }
+        ]
+      },
+      {
+        "system": "1VII_solvated_25k_ragged",
+        "n_real_atoms": 4199,
+        "bucket_atoms": 25000,
+        "bucket_waters": 8192,
+        "occupancy_pct": 16.796,
+        "electrostatic_method": "pme",
+        "pme_grid": "48",
+        "substep_breakdown": {
+          "B=1": {
+            "total_substeps_ms": 0.46186852268874645,
+            "baoab_pre_force_ms": 0.07746214978396893,
+            "baoab_post_force_ms": 0.07259631529450417,
+            "mk48_row_nl_megakernel_ms": 0.1162718515843153,
+            "spme_spread_ms": 0.0554411206394434,
+            "spme_fft_ms": 0.08396925404667854,
+            "spme_gather_ms": 0.05612783133983612,
+            "baoab_pre_force_pct": 16.771471961983156,
+            "baoab_post_force_pct": 15.71796122236,
+            "mk48_row_nl_megakernel_pct": 25.17423159895029,
+            "spme_spread_pct": 12.003658598922362,
+            "spme_fft_pct": 18.180337027051632,
+            "spme_gather_pct": 12.152339590732558,
+            "mk51_morton_tile_pairs_ms_per_rep": 0.08401451632380486
+          },
+          "B=4": {
+            "total_substeps_ms": 0.16852846601977944,
+            "baoab_pre_force_ms": 0.02134410897269845,
+            "baoab_post_force_ms": 0.015028950292617083,
+            "mk48_row_nl_megakernel_ms": 0.08340635104104877,
+            "spme_spread_ms": 0.014163833111524582,
+            "spme_fft_ms": 0.020303612109273672,
+            "spme_gather_ms": 0.014281610492616892,
+            "baoab_pre_force_pct": 12.664987391621654,
+            "baoab_post_force_pct": 8.917751788503908,
+            "mk48_row_nl_megakernel_pct": 49.490957231676056,
+            "spme_spread_pct": 8.404415850947244,
+            "spme_fft_pct": 12.047586137104414,
+            "spme_gather_pct": 8.47430160014672,
+            "mk51_morton_tile_pairs_ms_per_rep": 0.02864367561414838
+          }
+        },
+        "batch_scaling": [
+          {
+            "B": 1,
+            "ms_per_step_batch": 1.085892366245389,
+            "ms_per_step_per_replica": 1.085892366245389,
+            "ns_per_day_per_replica": 159.13179369469,
+            "ns_per_day_aggregate": 159.13179369469
+          },
+          {
+            "B": 4,
+            "ms_per_step_batch": 1.825573854148388,
+            "ms_per_step_per_replica": 0.456393463537097,
+            "ns_per_day_per_replica": 378.6206723049492,
+            "ns_per_day_aggregate": 378.6206723049492
+          }
+        ]
+      },
+      {
+        "system": "1UBQ_solvated_8k",
+        "n_real_atoms": 6656,
+        "bucket_atoms": 8192,
+        "bucket_waters": 2048,
+        "occupancy_pct": 81.25,
+        "electrostatic_method": "pme",
+        "pme_grid": "48",
+        "substep_breakdown": {
+          "B=1": {
+            "total_substeps_ms": 0.41322531178593636,
+            "baoab_pre_force_ms": 0.07814676500856876,
+            "baoab_post_force_ms": 0.059139495715498924,
+            "mk48_row_nl_megakernel_ms": 0.07029692642390728,
+            "spme_spread_ms": 0.05678953602910042,
+            "spme_fft_ms": 0.08896049112081528,
+            "spme_gather_ms": 0.05989209748804569,
+            "baoab_pre_force_pct": 18.911417761613606,
+            "baoab_post_force_pct": 14.311682762099297,
+            "mk48_row_nl_megakernel_pct": 17.0117668058832,
+            "spme_spread_pct": 13.742995506170535,
+            "spme_fft_pct": 21.528325730176856,
+            "spme_gather_pct": 14.493811434056507,
+            "mk51_morton_tile_pairs_ms_per_rep": 0.07833843119442463
+          },
+          "B=4": {
+            "total_substeps_ms": 0.13157195644453168,
+            "baoab_pre_force_ms": 0.02114892704412341,
+            "baoab_post_force_ms": 0.015582318883389235,
+            "mk48_row_nl_megakernel_ms": 0.04218632820993662,
+            "spme_spread_ms": 0.01776791177690029,
+            "spme_fft_ms": 0.020582193974405527,
+            "spme_gather_ms": 0.014304276555776596,
+            "baoab_pre_force_pct": 16.074038583624322,
+            "baoab_post_force_pct": 11.843191592243636,
+            "mk48_row_nl_megakernel_pct": 32.06331299612589,
+            "spme_spread_pct": 13.504330449316468,
+            "spme_fft_pct": 15.643298564981514,
+            "spme_gather_pct": 10.87182781370817,
+            "mk51_morton_tile_pairs_ms_per_rep": 0.022641709074378014
+          }
+        },
+        "batch_scaling": [
+          {
+            "B": 1,
+            "ms_per_step_batch": 1.2700029648840427,
+            "ms_per_step_per_replica": 1.2700029648840427,
+            "ns_per_day_per_replica": 136.06267448027373,
+            "ns_per_day_aggregate": 136.06267448027373
+          },
+          {
+            "B": 4,
+            "ms_per_step_batch": 1.6063908580690622,
+            "ms_per_step_per_replica": 0.40159771451726556,
+            "ns_per_day_per_replica": 430.28133316871987,
+            "ns_per_day_aggregate": 430.28133316871987
+          }
+        ]
+      },
+      {
+        "system": "1UBQ_solvated_25k_ragged",
+        "n_real_atoms": 6656,
+        "bucket_atoms": 25000,
+        "bucket_waters": 8192,
+        "occupancy_pct": 26.624,
+        "electrostatic_method": "pme",
+        "pme_grid": "48",
+        "substep_breakdown": {
+          "B=1": {
+            "total_substeps_ms": 0.4558475222438574,
+            "baoab_pre_force_ms": 0.0822325237095356,
+            "baoab_post_force_ms": 0.059566181153059006,
+            "mk48_row_nl_megakernel_ms": 0.11457768268883228,
+            "spme_spread_ms": 0.05690231919288635,
+            "spme_fft_ms": 0.08191755041480064,
+            "spme_gather_ms": 0.0606512650847435,
+            "baoab_pre_force_pct": 18.039480242155403,
+            "baoab_post_force_pct": 13.067128424840675,
+            "mk48_row_nl_megakernel_pct": 25.13508949765411,
+            "spme_spread_pct": 12.482752766273947,
+            "spme_fft_pct": 17.970384046746783,
+            "spme_gather_pct": 13.305165022329083,
+            "mk51_morton_tile_pairs_ms_per_rep": 0.08362876251339912
+          },
+          "B=4": {
+            "total_substeps_ms": 0.17074450151994824,
+            "baoab_pre_force_ms": 0.022408028598874807,
+            "baoab_post_force_ms": 0.015195575542747974,
+            "mk48_row_nl_megakernel_ms": 0.081562006380409,
+            "spme_spread_ms": 0.015390850603580475,
+            "spme_fft_ms": 0.020845001563429832,
+            "spme_gather_ms": 0.015343038830906154,
+            "baoab_pre_force_pct": 13.123719006703626,
+            "baoab_post_force_pct": 8.899598761587448,
+            "mk48_row_nl_megakernel_pct": 47.76845266134678,
+            "spme_spread_pct": 9.01396558399999,
+            "spme_fft_pct": 12.208300342248204,
+            "spme_gather_pct": 8.985963644113959,
+            "mk51_morton_tile_pairs_ms_per_rep": 0.027885951567441225
+          }
+        },
+        "batch_scaling": [
+          {
+            "B": 1,
+            "ms_per_step_batch": 1.3117693364620209,
+            "ms_per_step_per_replica": 1.3117693364620209,
+            "ns_per_day_per_replica": 131.7304766904063,
+            "ns_per_day_aggregate": 131.7304766904063
+          },
+          {
+            "B": 4,
+            "ms_per_step_batch": 1.831396808847785,
+            "ms_per_step_per_replica": 0.45784920221194625,
+            "ns_per_day_per_replica": 377.4168419758606,
+            "ns_per_day_aggregate": 377.4168419758606
+          }
+        ]
+      },
+      {
+        "system": "DHFR_25k_pme",
+        "n_real_atoms": 23558,
+        "bucket_atoms": 25000,
+        "bucket_waters": 8192,
+        "occupancy_pct": 94.232,
+        "electrostatic_method": "pme",
+        "pme_grid": "64",
+        "substep_breakdown": {
+          "B=1": {
+            "total_substeps_ms": 0.440718699246645,
+            "baoab_pre_force_ms": 0.07866933010518551,
+            "baoab_post_force_ms": 0.06566299125552177,
+            "mk48_row_nl_megakernel_ms": 0.10017454624176025,
+            "spme_spread_ms": 0.055054156109690666,
+            "spme_fft_ms": 0.08491063490509987,
+            "spme_gather_ms": 0.0562470406293869,
+            "baoab_pre_force_pct": 17.85023649771638,
+            "baoab_post_force_pct": 14.899070851262874,
+            "mk48_row_nl_megakernel_pct": 22.729815279677595,
+            "spme_spread_pct": 12.49190383884302,
+            "spme_fft_pct": 19.26640168666414,
+            "spme_gather_pct": 12.76257184583599,
+            "mk51_morton_tile_pairs_ms_per_rep": 0.08270023390650749
+          },
+          "B=4": {
+            "total_substeps_ms": 0.17685985658317804,
+            "baoab_pre_force_ms": 0.02663428895175457,
+            "baoab_post_force_ms": 0.015438045375049112,
+            "mk48_row_nl_megakernel_ms": 0.06463692989200354,
+            "spme_spread_ms": 0.024509208742529154,
+            "spme_fft_ms": 0.025101203937083483,
+            "spme_gather_ms": 0.020540179684758186,
+            "baoab_pre_force_pct": 15.059544583102348,
+            "baoab_post_force_pct": 8.728970877452072,
+            "mk48_row_nl_megakernel_pct": 36.54697631262891,
+            "spme_spread_pct": 13.857982934076595,
+            "spme_fft_pct": 14.192708521890193,
+            "spme_gather_pct": 11.613816770849885,
+            "mk51_morton_tile_pairs_ms_per_rep": 0.029821984935551882
+          }
+        },
+        "batch_scaling": [
+          {
+            "B": 1,
+            "ms_per_step_batch": 1.336882309988141,
+            "ms_per_step_per_replica": 1.336882309988141,
+            "ns_per_day_per_replica": 129.25595522431053,
+            "ns_per_day_aggregate": 129.25595522431053
+          },
+          {
+            "B": 4,
+            "ms_per_step_batch": 2.167839976027608,
+            "ms_per_step_per_replica": 0.541959994006902,
+            "ns_per_day_per_replica": 318.84272254567804,
+            "ns_per_day_aggregate": 318.84272254567804
+          }
+        ]
+      },
+      {
+        "system": "DHFR_25k_rf",
+        "n_real_atoms": 23558,
+        "bucket_atoms": 25000,
+        "bucket_waters": 8192,
+        "occupancy_pct": 94.232,
+        "electrostatic_method": "rf",
+        "pme_grid": "64",
+        "substep_breakdown": {
+          "B=1": {
+            "total_substeps_ms": 0.24497117847204208,
+            "baoab_pre_force_ms": 0.08952510543167591,
+            "baoab_post_force_ms": 0.059803761541843414,
+            "mk48_row_nl_megakernel_ms": 0.09564231149852276,
+            "spme_spread_ms": 0.0,
+            "spme_fft_ms": 0.0,
+            "spme_gather_ms": 0.0,
+            "baoab_pre_force_pct": 36.54515849173382,
+            "baoab_post_force_pct": 24.412570456188853,
+            "mk48_row_nl_megakernel_pct": 39.042271052077325,
+            "spme_spread_pct": 0.0,
+            "spme_fft_pct": 0.0,
+            "spme_gather_pct": 0.0,
+            "mk51_morton_tile_pairs_ms_per_rep": 0.07947464473545551
+          },
+          "B=4": {
+            "total_substeps_ms": 0.10857217712327838,
+            "baoab_pre_force_ms": 0.025624874979257584,
+            "baoab_post_force_ms": 0.018734321929514408,
+            "mk48_row_nl_megakernel_ms": 0.06421298021450639,
+            "spme_spread_ms": 0.0,
+            "spme_fft_ms": 0.0,
+            "spme_gather_ms": 0.0,
+            "baoab_pre_force_pct": 23.601695810301194,
+            "baoab_post_force_pct": 17.255177547229714,
+            "mk48_row_nl_megakernel_pct": 59.14312664246909,
+            "spme_spread_pct": 0.0,
+            "spme_fft_pct": 0.0,
+            "spme_gather_pct": 0.0,
+            "mk51_morton_tile_pairs_ms_per_rep": 0.034673057962208986
+          }
+        },
+        "batch_scaling": [
+          {
+            "B": 1,
+            "ms_per_step_batch": 0.34341439604759216,
+            "ms_per_step_per_replica": 0.34341439604759216,
+            "ns_per_day_per_replica": 503.1821670517635,
+            "ns_per_day_aggregate": 503.1821670517635
+          },
+          {
+            "B": 4,
+            "ms_per_step_batch": 2.1405814215540886,
+            "ms_per_step_per_replica": 0.5351453553885221,
+            "ns_per_day_per_replica": 322.9029239626775,
+            "ns_per_day_aggregate": 322.9029239626775
+          }
+        ]
+      }
+    ]
+  }
+}

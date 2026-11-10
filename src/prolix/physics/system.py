@@ -4,7 +4,9 @@ from collections.abc import Callable
 from typing import Any
 
 import equinox as eqx
+import jax
 import jax.numpy as jnp
+import numpy as np
 from jax_md import space
 from jaxtyping import Array
 
@@ -894,8 +896,12 @@ def _pad_3d(arr, bucket: int, d1: int, d2: int, dtype=None):
     if arr.ndim != 3:
         msg = f"expected 3D cmap grid, got ndim={arr.ndim}"
         raise ValueError(msg)
+    if arr.shape[0] >= bucket:
+        out = arr[:bucket]
+        return out.astype(dtype) if dtype is not None else out
     pad = bucket - arr.shape[0]
-    return jnp.pad(arr, ((0, pad), (0, 0), (0, 0)))
+    out = jnp.pad(arr, ((0, pad), (0, 0), (0, 0)))
+    return out.astype(dtype) if dtype is not None else out
 
 
 def _dense_excl_to_pair_list(
@@ -1155,13 +1161,16 @@ def make_bundle_from_system(
     else:
         cmap_coeffs_padded = raw_coeffs[:mb]
 
+    def _bidx(count: int, ladder: tuple[int, ...]) -> int:
+        return _bucket_idx(min(count, ladder[-1]) if not use_size_buckets else count, ladder)
+
     # --- Solute constraints -----------------------------------------------
     c_pairs_in = _get("constraint_pairs")
     c_lens_in = _get("constraint_lengths")
     c_mask_in = _get("constraint_mask")
     n_cons = 0 if c_pairs_in is None or getattr(c_pairs_in, "size", 0) == 0 else int(jnp.asarray(c_pairs_in).shape[0])
     cons_b = _nb(n_cons, CONSTRAINT_BUCKETS)
-    constraint_bucket_idx = _bucket_idx(n_cons, CONSTRAINT_BUCKETS)
+    constraint_bucket_idx = _bidx(n_cons, CONSTRAINT_BUCKETS)
     if cons_b == 0:
         c_pairs_padded = jnp.zeros((0, 2), dtype=jnp.int32)
         c_lens_padded = jnp.zeros((0,), dtype=jnp.float32)
@@ -1201,15 +1210,15 @@ def make_bundle_from_system(
         has_implicit_solvent = bool(_get("has_implicit_solvent", _get("implicit_solvent", False)))
 
     # --- shape spec -------------------------------------------------------
-    atom_bucket_idx = _bucket_idx(n, ATOM_BUCKETS)
-    bond_bucket_idx = _bucket_idx(max(nb, 1), BOND_BUCKETS)
-    angle_bucket_idx = _bucket_idx(max(na, 1), ANGLE_BUCKETS)
-    dihedral_bucket_idx = _bucket_idx(max(nd, 1), DIHEDRAL_BUCKETS)
-    water_bucket_idx = _bucket_idx(max(nw, 1), WATER_BUCKETS)
-    excl_bucket_idx = _bucket_idx(max(ne, 1), EXCL_BUCKETS)
-    cmap_bucket_idx = _bucket_idx(max(nc, 1), CMAP_BUCKETS)
-    cmap_map_bucket_idx = _bucket_idx(max(n_maps, 1), CMAP_MAP_BUCKETS)
-    exception_bucket_idx = _bucket_idx(max(nx, 1), EXCEPTION_BUCKETS)
+    atom_bucket_idx = _bidx(n, ATOM_BUCKETS)
+    bond_bucket_idx = _bidx(max(nb, 1), BOND_BUCKETS)
+    angle_bucket_idx = _bidx(max(na, 1), ANGLE_BUCKETS)
+    dihedral_bucket_idx = _bidx(max(nd, 1), DIHEDRAL_BUCKETS)
+    water_bucket_idx = _bidx(max(nw, 1), WATER_BUCKETS)
+    excl_bucket_idx = _bidx(max(ne, 1), EXCL_BUCKETS)
+    cmap_bucket_idx = _bidx(max(nc, 1), CMAP_BUCKETS)
+    cmap_map_bucket_idx = _bidx(max(n_maps, 1), CMAP_MAP_BUCKETS)
+    exception_bucket_idx = _bidx(max(nx, 1), EXCEPTION_BUCKETS)
 
     cosolv_gid_in = _get("cosolvent_group_id")
     has_real_cosolvents = (

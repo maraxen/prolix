@@ -882,6 +882,7 @@ def energy_fn_from_bundle(
         _first_pw_blk = None
 
     _base_pme_force_fn = None
+    _base_sys_f32 = None
     if _base_sys is not None and _ret_forces:
         _rep_kw: dict[str, object] = {}
         if (
@@ -941,6 +942,13 @@ def energy_fn_from_bundle(
             _rep_kw["improper_mask"] = jnp.zeros((0,), dtype=jnp.bool_)
         if _rep_kw:
             _base_sys = _base_sys.replace(**_rep_kw)
+        if _base_sys.positions.dtype == jnp.float64:
+            _base_sys_f32 = jax.tree.map(
+                lambda x: x.astype(jnp.float32)
+                if (hasattr(x, "dtype") and x.dtype == jnp.float64)
+                else x,
+                _base_sys,
+            )
         _elec_m = str(getattr(_base_sys, "electrostatic_method", "pme")).lower()
         if _base_sys.box_size is not None and _base_sys.pme_alpha > 0.0 and _elec_m == "pme":
             try:
@@ -970,14 +978,25 @@ def energy_fn_from_bundle(
         # doesn't use).
         neighbor = kwargs.pop("neighbor", None)
         dyn_box = kwargs.pop("box", None)
+        pme_cached_force = kwargs.pop("pme_cached_force", None)
+        return_pme_force = bool(kwargs.pop("return_pme_force", False))
         del kwargs
-        use_base = (
+        use_base_exact = (
             _base_sys is not None
             and int(positions.shape[0]) == _base_sys.n_padded_atoms
             and (_base_sys.box_size is None or _base_sys.box_size.dtype == positions.dtype)
         )
-        if use_base:
+        use_base_f32 = (
+            not use_base_exact
+            and _base_sys_f32 is not None
+            and int(positions.shape[0]) == _base_sys_f32.n_padded_atoms
+            and positions.dtype == jnp.float32
+        )
+        use_base = use_base_exact or use_base_f32
+        if use_base_exact:
             sys = _base_sys.replace(positions=positions)
+        elif use_base_f32:
+            sys = _base_sys_f32.replace(positions=positions)
         else:
             sys = physics_system_from_bundle(
                 bundle,
@@ -1007,6 +1026,8 @@ def energy_fn_from_bundle(
             first_pure_water_block=_first_pw_blk,
             return_forces=_ret_forces,
             pme_force_fn=(_base_pme_force_fn if (use_base and dyn_box is None) else None),
+            pme_cached_force=pme_cached_force,
+            return_pme_force=return_pme_force,
         )
 
     return energy_fn
