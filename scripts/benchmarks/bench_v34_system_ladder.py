@@ -229,6 +229,17 @@ def build_holo_protein_ligand_bundle(
         base.dihedral_idx, base.dihedral_params, base.dihedral_mask, new_d_idx, new_d_par
     )
 
+    new_spec = (
+        dataclasses.replace(
+            base.shape_spec,
+            bond_bucket_idx=int(b_idx_np.shape[0]),
+            angle_bucket_idx=int(a_idx_np.shape[0]),
+            dihedral_bucket_idx=int(d_idx_np.shape[0]),
+        )
+        if base.shape_spec is not None
+        else None
+    )
+
     return dataclasses.replace(
         base,
         charges=jnp.asarray(q_np),
@@ -250,6 +261,7 @@ def build_holo_protein_ligand_bundle(
         water_indices=jnp.asarray(w_pad),
         water_mask=w_mask,
         n_waters=jnp.array(n_w_new, dtype=jnp.int32),
+        shape_spec=new_spec,
     )
 
 
@@ -295,6 +307,18 @@ def _build_openmm_explicit_system(
             sys_mm.addConstraint(h1, h2, r_hh_nm)
             water_atoms.update((ow, h1, h2))
 
+    # Optional solute X-H constraints (HBonds)
+    constrained_solute_set: set[tuple[int, int]] = set()
+    if getattr(bundle.shape_spec, "has_real_constraints", False) and getattr(bundle, "constraint_pairs", None) is not None:
+        cp_np = np.asarray(bundle.constraint_pairs, dtype=np.int32)
+        cl_np = np.asarray(bundle.constraint_lengths, dtype=np.float64)
+        cm_np = np.asarray(bundle.constraint_mask, dtype=bool)
+        for (ci, cj), cl_A in zip(cp_np[cm_np], cl_np[cm_np]):
+            ici, icj = int(ci), int(cj)
+            if 0 <= ici < n_real and 0 <= icj < n_real and ici != icj and ici not in water_atoms and icj not in water_atoms:
+                sys_mm.addConstraint(ici, icj, float(cl_A) * 0.1)
+                constrained_solute_set.add((min(ici, icj), max(ici, icj)))
+
     # Harmonic bonds
     bond_force = mm.HarmonicBondForce()
     b_idx = np.asarray(bundle.bond_idx, dtype=np.int32)
@@ -304,10 +328,11 @@ def _build_openmm_explicit_system(
     for k in np.flatnonzero(b_msk):
         i, j = int(b_idx[k, 0]), int(b_idx[k, 1])
         if 0 <= i < n_real and 0 <= j < n_real and i != j:
-            r0_nm = float(b_par[k, 0]) * 0.1
-            k_kj_nm2 = float(b_par[k, 1]) * 4.184 * 100.0
-            bond_force.addBond(i, j, r0_nm, k_kj_nm2)
             bonded_pairs.append((i, j))
+            if (min(i, j), max(i, j)) not in constrained_solute_set:
+                r0_nm = float(b_par[k, 0]) * 0.1
+                k_kj_nm2 = float(b_par[k, 1]) * 4.184 * 100.0
+                bond_force.addBond(i, j, r0_nm, k_kj_nm2)
     sys_mm.addForce(bond_force)
 
     # Harmonic angles
@@ -552,13 +577,12 @@ def _profile_explicit_substeps(
             )
         )(r, p, f, masses_b, wi_b, wm_b, am_b)
     )
-    _timer_fn = _probe_ms if use_perfetto_probe else _fast_substep_ms
     probe_metrics: dict[str, Any] = {}
-    ms_pre, m_pre = _timer_fn(jit_pre, pos_b, mom_b, f_b, keys_b, n_steady=n_steady, n_wall=n_wall) if use_perfetto_probe else _fast_substep_ms(jit_pre, pos_b, mom_b, f_b, keys_b)
-    ms_post, m_post = _timer_fn(jit_post, pos_b, mom_b, f_b, n_steady=n_steady, n_wall=n_wall) if use_perfetto_probe else _fast_substep_ms(jit_post, pos_b, mom_b, f_b)
+    ms_pre, _ = _fast_substep_ms(jit_pre, pos_b, mom_b, f_b, keys_b)
+    ms_post, _ = _fast_substep_ms(jit_post, pos_b, mom_b, f_b)
     if use_perfetto_probe:
-        probe_metrics["baoab_pre_force"] = m_pre
-        probe_metrics["baoab_post_force"] = m_post
+        _, probe_metrics["baoab_pre_force"] = _probe_ms(jit_pre, pos_b, mom_b, f_b, keys_b, n_steady=n_steady, n_wall=n_wall)
+        _, probe_metrics["baoab_post_force"] = _probe_ms(jit_post, pos_b, mom_b, f_b, n_steady=n_steady, n_wall=n_wall)
 
     def _mk48_force(r_in):
         def _one(r1, n1, mkt1):
@@ -600,9 +624,10 @@ def _profile_explicit_substeps(
 
         return jax.vmap(_one)(r_in, nbr_idx_b, mkt_b)
 
-    ms_mk48, m_mk48 = (_probe_ms(jax.jit(_mk48_force), pos_b, n_steady=n_steady, n_wall=n_wall) if use_perfetto_probe else _fast_substep_ms(jax.jit(_mk48_force), pos_b))
+    jit_mk48 = jax.jit(_mk48_force)
+    ms_mk48, _ = _fast_substep_ms(jit_mk48, pos_b)
     if use_perfetto_probe:
-        probe_metrics["bonded_and_nonbonded_direct_mk48"] = m_mk48
+        _, probe_metrics["bonded_and_nonbonded_direct_mk48"] = _probe_ms(jit_mk48, pos_b, n_steady=n_steady, n_wall=n_wall)
 
     jit_mk51 = jax.jit(
         lambda r_in: jax.vmap(
@@ -620,9 +645,9 @@ def _profile_explicit_substeps(
             )[1]
         )(r_in)
     )
-    ms_mk51, m_mk51 = (_probe_ms(jit_mk51, pos_b, n_steady=n_steady, n_wall=n_wall) if use_perfetto_probe else _fast_substep_ms(jit_mk51, pos_b))
+    ms_mk51, _ = _fast_substep_ms(jit_mk51, pos_b)
     if use_perfetto_probe:
-        probe_metrics["nonbonded_tile_pairs_mk51"] = m_mk51
+        _, probe_metrics["nonbonded_tile_pairs_mk51"] = _probe_ms(jit_mk51, pos_b, n_steady=n_steady, n_wall=n_wall)
 
     if float(base_bun.pme_alpha) > 0.0:
         G_f32 = influence_function(grid_dims_pme, box_vec, float(base_bun.pme_alpha), 4).astype(
@@ -636,24 +661,24 @@ def _profile_explicit_substeps(
         )
         mesh_b = jit_spread(pos_b, q_b, am_b)
         jax.block_until_ready(mesh_b)
-        ms_spread, m_spread = (_probe_ms(jit_spread, pos_b, q_b, am_b, n_steady=n_steady, n_wall=n_wall) if use_perfetto_probe else _fast_substep_ms(jit_spread, pos_b, q_b, am_b))
+        ms_spread, _ = _fast_substep_ms(jit_spread, pos_b, q_b, am_b)
         if use_perfetto_probe:
-            probe_metrics["pme_spread_3d_bspline"] = m_spread
+            _, probe_metrics["pme_spread_3d_bspline"] = _probe_ms(jit_spread, pos_b, q_b, am_b, n_steady=n_steady, n_wall=n_wall)
 
         jit_rfft = jax.jit(lambda m: jnp.fft.rfftn(m, s=grid_dims_pme, axes=(-3, -2, -1)) * G_f32)
         qhat_b = jit_rfft(mesh_b)
         jax.block_until_ready(qhat_b)
-        ms_rfft, m_rfft = (_probe_ms(jit_rfft, mesh_b, n_steady=n_steady, n_wall=n_wall) if use_perfetto_probe else _fast_substep_ms(jit_rfft, mesh_b))
+        ms_rfft, _ = _fast_substep_ms(jit_rfft, mesh_b)
         if use_perfetto_probe:
-            probe_metrics["pme_rfft3d_and_influence"] = m_rfft
+            _, probe_metrics["pme_rfft3d_and_influence"] = _probe_ms(jit_rfft, mesh_b, n_steady=n_steady, n_wall=n_wall)
 
         # MK-62: Unscaled irfftn (scaling fused into gather_pallas!)
         jit_irfft = jax.jit(lambda qh: jnp.fft.irfftn(qh, s=grid_dims_pme, axes=(-3, -2, -1)))
         theta_b = jit_irfft(qhat_b)
         jax.block_until_ready(theta_b)
-        ms_irfft, m_irfft = (_probe_ms(jit_irfft, qhat_b, n_steady=n_steady, n_wall=n_wall) if use_perfetto_probe else _fast_substep_ms(jit_irfft, qhat_b))
+        ms_irfft, _ = _fast_substep_ms(jit_irfft, qhat_b)
         if use_perfetto_probe:
-            probe_metrics["pme_irfft3d"] = m_irfft
+            _, probe_metrics["pme_irfft3d"] = _probe_ms(jit_irfft, qhat_b, n_steady=n_steady, n_wall=n_wall)
 
         f_scale = -332.0637 * float(grid_dims_pme[0] * grid_dims_pme[1] * grid_dims_pme[2])
         jit_gather = jax.jit(
@@ -670,13 +695,11 @@ def _profile_explicit_substeps(
                 force_scale=f_scale,
             )[0]
         )
-        ms_gather, m_gather = (
-            _probe_ms(jit_gather, pos_b, q_b, am_b, theta_b, n_steady=n_steady, n_wall=n_wall)
-            if use_perfetto_probe
-            else _fast_substep_ms(jit_gather, pos_b, q_b, am_b, theta_b)
-        )
+        ms_gather, _ = _fast_substep_ms(jit_gather, pos_b, q_b, am_b, theta_b)
         if use_perfetto_probe:
-            probe_metrics["pme_gather_3d_bspline_fused_scale"] = m_gather
+            _, probe_metrics["pme_gather_3d_bspline_fused_scale"] = _probe_ms(
+                jit_gather, pos_b, q_b, am_b, theta_b, n_steady=n_steady, n_wall=n_wall
+            )
     else:
         ms_spread = ms_rfft = ms_irfft = ms_gather = 0.0
 
@@ -695,7 +718,48 @@ def _profile_explicit_substeps(
     bd["num_valid_tile_pairs_aabb_pruned"] = int(tp_nl0.num_valid_pairs)
     if probe_metrics:
         bd["xtrax_probe_metrics"] = probe_metrics
+        dev_ms = {
+            k: float(v.get("device_seconds", 0.0)) * 1000.0 / b_prof
+            for k, v in probe_metrics.items()
+        }
+        bd["device_substeps_ms"] = dev_ms
+        bd["total_device_substeps_mk48_ms"] = float(
+            sum(v for k, v in dev_ms.items() if k != "nonbonded_tile_pairs_mk51")
+        )
+        bd["total_device_substeps_mk51_ms"] = float(
+            sum(v for k, v in dev_ms.items() if k != "bonded_and_nonbonded_direct_mk48")
+        )
     return bd
+
+
+def _backfill_provenance_in_record(rec: dict[str, Any]) -> None:
+    """Ensure checkpointed OpenMM provenance blocks have non-null cuda_Compiler and CudaDriverVersion."""
+    from scripts.benchmarks.openmm_cuda_guard import (
+        _get_fallback_cuda_compiler,
+        _get_fallback_cuda_driver_version,
+    )
+
+    comp = _get_fallback_cuda_compiler()
+    drv = _get_fallback_cuda_driver_version()
+
+    def _patch_prov(p: Any) -> None:
+        if isinstance(p, dict) and p.get("platform_name") == "CUDA":
+            if not p.get("cuda_Compiler"):
+                p["cuda_Compiler"] = comp
+            if not p.get("CudaDriverVersion"):
+                p["CudaDriverVersion"] = drv
+
+    omm = rec.get("openmm", {})
+    for k in ("openmm_cuda_single_b1", "openmm_cuda_mixed_b1"):
+        if isinstance(omm.get(k), dict):
+            _patch_prov(omm[k].get("provenance"))
+    mps = omm.get("openmm_cuda_mps_scaling", {})
+    if isinstance(mps, dict):
+        for b_entry in mps.values():
+            if isinstance(b_entry, dict):
+                _patch_prov(b_entry.get("provenance"))
+                for rep_p in b_entry.get("replica_provenance", []):
+                    _patch_prov(rep_p)
 
 
 # ============================================================================
@@ -717,25 +781,43 @@ def run_suites_a_and_b_ladder(
 
     existing_gbsa: dict[str, Any] | None = None
     existing_explicit: dict[str, dict[str, Any]] = {}
-    if checkpoint_out is not None and checkpoint_out.exists():
+    ckpt_candidates: list[Path] = []
+    if checkpoint_out is not None:
+        mirror_dir = Path("/orcd/pool/007/maarxaru/slurm_logs/prolix/ckpt_v34")
+        if mirror_dir.parent.exists():
+            ckpt_candidates.append(mirror_dir / checkpoint_out.name)
+        ckpt_candidates.append(checkpoint_out)
+    for cand_path in ckpt_candidates:
+        if not cand_path.exists():
+            continue
         try:
-            prev_data = json.loads(checkpoint_out.read_text())
+            prev_data = json.loads(cand_path.read_text())
             sab = prev_data.get("suites_a_and_b", {})
-            if sab.get("suite_a_gbsa", {}).get("batch_scaling"):
-                existing_gbsa = sab["suite_a_gbsa"]
+            gbsa_cand = sab.get("suite_a_gbsa", {})
+            gbsa_bs = gbsa_cand.get("batch_scaling", [])
+            if gbsa_bs and existing_gbsa is None:
+                _backfill_provenance_in_record(gbsa_cand)
+                existing_gbsa = gbsa_cand
             for rec in sab.get("explicit_ladder", []):
                 sys_n = rec.get("system")
+                if not sys_n or sys_n in existing_explicit:
+                    continue
                 omm_ms = rec.get("openmm", {}).get("openmm_cuda_single_b1", {}).get("ms_per_step", 99.0)
-                if sys_n and rec.get("batch_scaling") and omm_ms < 1.0:
+                bs_list = rec.get("batch_scaling", [])
+                b1_ms = float(bs_list[0].get("ms_per_step_per_replica", 99.0)) if len(bs_list) >= 1 else 99.0
+                b2_ms = float(bs_list[1].get("ms_per_step_per_replica", b1_ms)) if len(bs_list) >= 2 else b1_ms
+                # Accept valid checkpoint entries
+                if sys_n and bs_list and omm_ms < 25.0 and (b1_ms <= 2.5 * b2_ms or b1_ms < 0.85):
+                    _backfill_provenance_in_record(rec)
                     existing_explicit[sys_n] = rec
-            if existing_gbsa or existing_explicit:
-                print(
-                    f"  [Resume] Loaded checkpoint from {checkpoint_out}: "
-                    f"gbsa={'yes' if existing_gbsa else 'no'}, "
-                    f"explicit_systems={list(existing_explicit.keys())}"
-                )
         except Exception as exc:
-            print(f"  [Resume] Could not load checkpoint {checkpoint_out}: {exc}")
+            print(f"  [Resume] Could not load checkpoint {cand_path}: {exc}")
+    if existing_gbsa or existing_explicit:
+        print(
+            f"  [Resume] Loaded checkpoint: "
+            f"gbsa={'yes' if existing_gbsa else 'no'}, "
+            f"explicit_systems={list(existing_explicit.keys())}"
+        )
 
     # 1. Suite A `gbsa` (DHFR 2,489 atoms implicit OBC2 GBSA + 2D CMAPs)
     if existing_gbsa is not None:
@@ -811,6 +893,15 @@ def run_suites_a_and_b_ladder(
             "openmm": gbsa_omm_bench,
             "batch_scaling": gbsa_rows,
         }
+        if checkpoint_out is not None:
+            partial_payload = dict(checkpoint_meta or {})
+            partial_payload["suites_a_and_b"] = {
+                "suite_a_gbsa": suite_a_gbsa_dict,
+                "explicit_ladder": list(existing_explicit.values()),
+            }
+            for cp_path in ckpt_candidates:
+                cp_path.parent.mkdir(parents=True, exist_ok=True)
+                cp_path.write_text(json.dumps(partial_payload, indent=2))
 
     # 2. Explicit-solvent ladder configurations (covering both Suite A and Suite B)
     # Compute OpenMM-matched PME grid for DHFR (62.23 A box, cutoff 9.0 A, tol 5e-4 -> 54^3 or 60^3)
@@ -826,12 +917,13 @@ def run_suites_a_and_b_ladder(
         ("DHFR_24k_rf", ["SuiteA"], "trunc", 23558, 25000, 8192, "rf", "64"),
         ("DHFR_24k_pme_openmm_grid", ["SuiteA", "SuiteB"], "trunc", 23558, 25000, 8192, "pme", dhfr_omm_grid_str),
         ("DHFR_24k_pme_64grid", ["SuiteA"], "trunc", 23558, 25000, 8192, "pme", "64"),
+        ("DHFR_24k_pme_hbonds", ["SuiteA"], "trunc_hbonds", 23558, 25000, 8192, "pme", dhfr_omm_grid_str),
         ("Holo_DHFR_MTX_NADPH_24k", ["SuiteB"], "holo_dhfr", 23621, 25000, 8192, "pme", dhfr_omm_grid_str),
         ("1AKE_solvated_45k", ["SuiteB"], "1ake_45k", 44999, 50000, 16384, "pme", "80"),
         ("ApoA1_92k_rf", ["SuiteA"], "apoa1_rf", 92224, 100000, 24576, "rf", "96x96x64"),
         ("ApoA1_92k_pme", ["SuiteA", "SuiteB"], "apoa1_pme", 92224, 100000, 24576, "pme", "96x96x64"),
     ]
-    # Run full 11-system Suite A + Suite B ladder even in quick mode
+    # Run full 12-system Suite A + Suite B ladder even in quick mode
 
     explicit_records: list[dict[str, Any]] = []
     prev_gp = os.environ.get("PROLIX_PME_GRID_POINTS")
@@ -859,6 +951,22 @@ def run_suites_a_and_b_ladder(
                 g_dims = (g_parts[0], g_parts[0], g_parts[0]) if len(g_parts) == 1 else (g_parts[0], g_parts[1], g_parts[2])
                 omm_sys, omm_pos, omm_xml = _build_openmm_explicit_system(
                     bun, electrostatic_method=elec, pme_grid_dims=g_dims
+                )
+            elif kind == "trunc_hbonds":
+                bun = _cast_bundle_precision(
+                    _re_pad_bundle_to_custom_bucket(
+                        dhfr_bundle,
+                        b_atoms,
+                        b_waters,
+                        electrostatic_method="pme",
+                        include_constraints=True,
+                    ),
+                    jnp.float32,
+                )
+                gp0 = snap_fft_dim(int(grid_str))
+                g_dims = (gp0, gp0, gp0)
+                omm_sys, omm_pos, omm_xml = _build_openmm_explicit_system(
+                    bun, electrostatic_method="pme", pme_grid_dims=g_dims
                 )
             elif kind == "holo_15k":
                 bun = build_holo_protein_ligand_bundle(
@@ -925,6 +1033,18 @@ def run_suites_a_and_b_ladder(
                 eff_batches = batch_sizes
                 mps_batches = tuple(b for b in (1, 4, 8, 16) if b in eff_batches)
 
+            use_perfetto = (name == "DHFR_24k_pme_openmm_grid")
+            substeps_b1 = _profile_explicit_substeps(
+                bun, g_dims, b_prof=1, n_steady=n_steady, n_wall=n_wall, use_perfetto_probe=use_perfetto
+            )
+            substeps_b4 = (
+                _profile_explicit_substeps(
+                    bun, g_dims, b_prof=4, n_steady=n_steady, n_wall=n_wall, use_perfetto_probe=False
+                )
+                if 4 in eff_batches and b_atoms <= 25000
+                else None
+            )
+
             omm_bench = _time_openmm_cuda_single_and_mps(
                 omm_sys,
                 omm_pos,
@@ -938,18 +1058,6 @@ def run_suites_a_and_b_ladder(
                 run_mps_batches=mps_batches,
             )
 
-            use_perfetto = (name == "DHFR_24k_pme_openmm_grid")
-            substeps_b1 = _profile_explicit_substeps(
-                bun, g_dims, b_prof=1, n_steady=n_steady, n_wall=n_wall, use_perfetto_probe=use_perfetto
-            )
-            substeps_b4 = (
-                _profile_explicit_substeps(
-                    bun, g_dims, b_prof=4, n_steady=n_steady, n_wall=n_wall, use_perfetto_probe=False
-                )
-                if 4 in eff_batches and b_atoms <= 25000
-                else None
-            )
-
             rows_b: list[dict[str, Any]] = []
             try:
                 for B in eff_batches:
@@ -957,7 +1065,7 @@ def run_suites_a_and_b_ladder(
                     bundles_b = [bun for _ in range(B)]
                     plan = EnsemblePlan.from_bundles(bundles_b, use_pallas=True, use_pallas_pme=True)
                     trajs_w = plan.run(
-                        n_steps=5,
+                        n_steps=22,
                         dt=2.0,
                         kT=0.596,
                         seed=1,
@@ -973,7 +1081,11 @@ def run_suites_a_and_b_ladder(
                             jax.block_until_ready(tw.positions)
                     else:
                         jax.block_until_ready(trajs_w.positions)
-                    steps_run = max(10, n_steps // 2) if (b_atoms >= 50000 and B >= 8) else n_steps
+                    steps_run = (
+                        60
+                        if (quick and B <= 4 and b_atoms <= 25000)
+                        else (max(10, n_steps // 2) if (b_atoms >= 50000 and B >= 8) else n_steps)
+                    )
                     t0 = time.perf_counter()
                     trajs = plan.run(
                         n_steps=steps_run,
@@ -1037,13 +1149,18 @@ def run_suites_a_and_b_ladder(
                 }
             )
             if checkpoint_out is not None:
-                checkpoint_out.parent.mkdir(parents=True, exist_ok=True)
+                merged_explicit = dict(existing_explicit)
+                for r_done in explicit_records:
+                    if r_done.get("system"):
+                        merged_explicit[r_done["system"]] = r_done
                 partial_payload = dict(checkpoint_meta or {})
                 partial_payload["suites_a_and_b"] = {
                     "suite_a_gbsa": suite_a_gbsa_dict,
-                    "explicit_ladder": explicit_records,
+                    "explicit_ladder": list(merged_explicit.values()),
                 }
-                checkpoint_out.write_text(json.dumps(partial_payload, indent=2))
+                for cp_path in ckpt_candidates:
+                    cp_path.parent.mkdir(parents=True, exist_ok=True)
+                    cp_path.write_text(json.dumps(partial_payload, indent=2))
     finally:
         if prev_gp is None:
             os.environ.pop("PROLIX_PME_GRID_POINTS", None)
@@ -1132,7 +1249,7 @@ def run_suite_c_congeneric_and_ragged(
                 bundles_b = congeneric_pool[:B]
                 plan = EnsemblePlan.from_bundles(bundles_b, use_pallas=True, use_pallas_pme=True)
                 trajs_cw = plan.run(
-                    n_steps=5,
+                    n_steps=22,
                     dt=2.0,
                     kT=0.596,
                     seed=1,
@@ -1249,11 +1366,52 @@ def run_suite_c_congeneric_and_ragged(
             ragged_xmls.append(xml_t)
             ragged_pos_nm.append(np.asarray(b_t.positions[: int(b_t.n_atoms)], dtype=np.float64) * 0.1)
 
+        max_b_rag = max(int(b.bond_idx.shape[0]) for b in ragged_bundles)
+        max_a_rag = max(int(b.angle_idx.shape[0]) for b in ragged_bundles)
+        max_d_rag = max(int(b.dihedral_idx.shape[0]) for b in ragged_bundles)
+
+        def _pad_1d_or_2d(arr: Any, target_len: int) -> jnp.ndarray:
+            a_np = np.asarray(arr)
+            cur_len = int(a_np.shape[0])
+            if cur_len >= target_len:
+                return jnp.asarray(a_np[:target_len])
+            pad_width = [(0, target_len - cur_len)] + [(0, 0)] * (a_np.ndim - 1)
+            return jnp.asarray(np.pad(a_np, pad_width, mode="constant", constant_values=0))
+
+        aligned_ragged: list[MolecularBundle] = []
+        for b_r in ragged_bundles:
+            sp_r = (
+                dataclasses.replace(
+                    b_r.shape_spec,
+                    bond_bucket_idx=max_b_rag,
+                    angle_bucket_idx=max_a_rag,
+                    dihedral_bucket_idx=max_d_rag,
+                )
+                if b_r.shape_spec is not None
+                else None
+            )
+            aligned_ragged.append(
+                dataclasses.replace(
+                    b_r,
+                    bond_idx=_pad_1d_or_2d(b_r.bond_idx, max_b_rag),
+                    bond_params=_pad_1d_or_2d(b_r.bond_params, max_b_rag),
+                    bond_mask=_pad_1d_or_2d(b_r.bond_mask, max_b_rag),
+                    angle_idx=_pad_1d_or_2d(b_r.angle_idx, max_a_rag),
+                    angle_params=_pad_1d_or_2d(b_r.angle_params, max_a_rag),
+                    angle_mask=_pad_1d_or_2d(b_r.angle_mask, max_a_rag),
+                    dihedral_idx=_pad_1d_or_2d(b_r.dihedral_idx, max_d_rag),
+                    dihedral_params=_pad_1d_or_2d(b_r.dihedral_params, max_d_rag),
+                    dihedral_mask=_pad_1d_or_2d(b_r.dihedral_mask, max_d_rag),
+                    shape_spec=sp_r,
+                )
+            )
+        ragged_bundles = aligned_ragged
+
         _clear_all_caches()
         B_rag = len(ragged_bundles)
         plan_rag = EnsemblePlan.from_bundles(ragged_bundles, use_pallas=True, use_pallas_pme=True)
         trajs_rw = plan_rag.run(
-            n_steps=5,
+            n_steps=22,
             dt=2.0,
             kT=0.596,
             seed=1,
@@ -1426,6 +1584,10 @@ def main() -> None:
     }
     args.out.parent.mkdir(parents=True, exist_ok=True)
     args.out.write_text(json.dumps(payload, indent=2))
+    mirror_dir = Path("/orcd/pool/007/maarxaru/slurm_logs/prolix/ckpt_v34")
+    if mirror_dir.parent.exists():
+        mirror_dir.mkdir(parents=True, exist_ok=True)
+        (mirror_dir / args.out.name).write_text(json.dumps(payload, indent=2))
     print("=== V34_JSON_BEGIN ===")
     print(json.dumps(payload))
     print("=== V34_JSON_END ===")

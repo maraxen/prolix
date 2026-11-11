@@ -21,6 +21,7 @@
     "mps_active": false
   },
   "quick_mode": true,
+  "total_wall_s": 673.8147964160889,
   "suites_a_and_b": {
     "suite_a_gbsa": {
       "system": "5DFR_gbsa_implicit",
@@ -29,15 +30,15 @@
         "openmm_cuda_single_b1": {
           "platform": "CUDA",
           "precision": "single",
-          "ms_per_step": 0.21054860204458237,
-          "ns_per_day": 820.7131195457221,
+          "ms_per_step": 0.2113659493625164,
+          "ns_per_day": 817.5394405824021,
           "provenance": {
             "platform_name": "CUDA",
             "device_name": "NVIDIA A100-SXM4-80GB",
             "device_index": "0",
             "precision": "single",
-            "cuda_Compiler": null,
-            "CudaDriverVersion": null,
+            "cuda_Compiler": "openmm-nvrtc-builtin",
+            "CudaDriverVersion": "590.48.01",
             "lib_openmm_cuda_path": "/orcd/pool/008/so3_shared/marielle/projects/.venv/lib/python3.13/site-packages/OpenMM.libs/lib/plugins/libOpenMMCUDA.so",
             "mps_active": false,
             "cuda_mps_pipe_directory": null,
@@ -47,15 +48,15 @@
         "openmm_cuda_mixed_b1": {
           "platform": "CUDA",
           "precision": "mixed",
-          "ms_per_step": 0.20783426240086555,
-          "ns_per_day": 831.431728358184,
+          "ms_per_step": 0.2088557928800583,
+          "ns_per_day": 827.3651289109112,
           "provenance": {
             "platform_name": "CUDA",
             "device_name": "NVIDIA A100-SXM4-80GB",
             "device_index": "0",
             "precision": "mixed",
-            "cuda_Compiler": null,
-            "CudaDriverVersion": null,
+            "cuda_Compiler": "openmm-nvrtc-builtin",
+            "CudaDriverVersion": "590.48.01",
             "lib_openmm_cuda_path": "/orcd/pool/008/so3_shared/marielle/projects/.venv/lib/python3.13/site-packages/OpenMM.libs/lib/plugins/libOpenMMCUDA.so",
             "mps_active": false,
             "cuda_mps_pipe_directory": null,
@@ -70,11 +71,11 @@
             "precision": "single",
             "n_steps": 30,
             "dt_fs": 2.0,
-            "wall_elapsed_s": 0.006501700263470411,
-            "ms_per_step_batch": 0.21672334211568037,
-            "ms_per_step_per_replica": 0.21672334211568037,
-            "per_replica_ns_per_day": 797.32989678502,
-            "aggregate_ns_per_day": 797.32989678502,
+            "wall_elapsed_s": 0.006550365127623081,
+            "ms_per_step_batch": 0.2183455042541027,
+            "ms_per_step_per_replica": 0.2183455042541027,
+            "per_replica_ns_per_day": 791.4062649941329,
+            "aggregate_ns_per_day": 791.4062649941329,
             "total_gpu_memory_mb": 420.0,
             "memory_mb_per_replica": 420.0,
             "mps_info": {
@@ -86,8 +87,8 @@
               "device_name": "NVIDIA A100-SXM4-80GB",
               "device_index": "0",
               "precision": "single",
-              "cuda_Compiler": null,
-              "CudaDriverVersion": null,
+              "cuda_Compiler": "openmm-nvrtc-builtin",
+              "CudaDriverVersion": "590.48.01",
               "lib_openmm_cuda_path": "/orcd/pool/008/so3_shared/marielle/projects/.venv/lib/python3.13/site-packages/OpenMM.libs/lib/plugins/libOpenMMCUDA.so",
               "mps_active": false,
               "cuda_mps_pipe_directory": null,
@@ -101,27 +102,31 @@
             "precision": "single",
             "n_steps": 30,
             "dt_fs": 2.0,
-            "wall_elapsed_s": 0.02592271100729704,
-            "ms_per_step_batch": 0.8640903669099013,
-            "ms_per_step_per_replica": 0.21602259172747532,
-            "per_replica_ns_per_day": 199.97908392145965,
-            "aggregate_ns_per_day": 799.9163356858386,
-            "total_gpu_memory_mb": 1680.0,
-            "memory_mb_per_replica": 420.0,
+            "wall_elapsed_s": 0.011722001247107983,
+            "ms_per_step_batch": 0.39073337490359944,
+            "ms_per_step_per_replica": 0.09768334372589986,
+            "per_replica_ns_per_day": 442.24530357211665,
+            "aggregate_ns_per_day": 1768.9812142884666,
+            "total_gpu_memory_mb": 1672.0,
+            "memory_mb_per_replica": 418.0,
             "mps_info": {
-              "mps_active": false,
-              "started_by_harness": false
+              "mps_active": true,
+              "started_by_harness": true,
+              "pipe_dir": "/tmp/mps_28702584_3103334/pipe",
+              "log_dir": "/tmp/mps_28702584_3103334/log",
+              "stdout": "",
+              "stderr": ""
             },
             "provenance": {
               "platform_name": "CUDA",
               "device_name": "NVIDIA A100-SXM4-80GB",
               "device_index": "0",
               "precision": "single",
-              "cuda_Compiler": null,
-              "CudaDriverVersion": null,
+              "cuda_Compiler": "openmm-nvrtc-builtin",
+              "CudaDriverVersion": "590.48.01",
               "lib_openmm_cuda_path": "/orcd/pool/008/so3_shared/marielle/projects/.venv/lib/python3.13/site-packages/OpenMM.libs/lib/plugins/libOpenMMCUDA.so",
               "mps_active": true,
-              "cuda_mps_pipe_directory": null,
+              "cuda_mps_pipe_directory": "/tmp/mps_28702584_3103334/pipe",
               "plugin_load_failures": []
             }
           },
@@ -132,27 +137,31 @@
             "precision": "single",
             "n_steps": 30,
             "dt_fs": 2.0,
-            "wall_elapsed_s": 0.051695659290999174,
-            "ms_per_step_batch": 1.7231886430333057,
-            "ms_per_step_per_replica": 0.2153985803791632,
-            "per_replica_ns_per_day": 100.27921243481647,
-            "aggregate_ns_per_day": 802.2336994785318,
-            "total_gpu_memory_mb": 3360.0,
-            "memory_mb_per_replica": 420.0,
+            "wall_elapsed_s": 0.021692046895623207,
+            "ms_per_step_batch": 0.7230682298541069,
+            "ms_per_step_per_replica": 0.09038352873176336,
+            "per_replica_ns_per_day": 238.98159657058332,
+            "aggregate_ns_per_day": 1911.8527725646666,
+            "total_gpu_memory_mb": 3344.0,
+            "memory_mb_per_replica": 418.0,
             "mps_info": {
-              "mps_active": false,
-              "started_by_harness": false
+              "mps_active": true,
+              "started_by_harness": true,
+              "pipe_dir": "/tmp/mps_28702584_3104120/pipe",
+              "log_dir": "/tmp/mps_28702584_3104120/log",
+              "stdout": "",
+              "stderr": ""
             },
             "provenance": {
               "platform_name": "CUDA",
               "device_name": "NVIDIA A100-SXM4-80GB",
               "device_index": "0",
               "precision": "single",
-              "cuda_Compiler": null,
-              "CudaDriverVersion": null,
+              "cuda_Compiler": "openmm-nvrtc-builtin",
+              "CudaDriverVersion": "590.48.01",
               "lib_openmm_cuda_path": "/orcd/pool/008/so3_shared/marielle/projects/.venv/lib/python3.13/site-packages/OpenMM.libs/lib/plugins/libOpenMMCUDA.so",
-              "mps_active": false,
-              "cuda_mps_pipe_directory": null,
+              "mps_active": true,
+              "cuda_mps_pipe_directory": "/tmp/mps_28702584_3104120/pipe",
               "plugin_load_failures": []
             }
           }
@@ -161,56 +170,56 @@
       "batch_scaling": [
         {
           "B": 1,
-          "ms_per_step_batch": 1.13479508087039,
-          "ms_per_step_per_replica": 1.13479508087039,
-          "ns_per_day_per_replica": 152.27418845300429,
-          "ns_per_day_aggregate": 152.27418845300429,
-          "speedup_vs_openmm_cuda_single_b1": 0.1855388744574846,
-          "speedup_vs_openmm_cuda_mps_same_B": 0.1909801564785187
+          "ms_per_step_batch": 1.124836914241314,
+          "ms_per_step_per_replica": 1.124836914241314,
+          "ns_per_day_per_replica": 153.62226987060703,
+          "ns_per_day_aggregate": 153.62226987060703,
+          "speedup_vs_openmm_cuda_single_b1": 0.18790808399551828,
+          "speedup_vs_openmm_cuda_mps_same_B": 0.19411303228910615
         },
         {
           "B": 2,
-          "ms_per_step_batch": 1.5347190387547016,
-          "ms_per_step_per_replica": 0.7673595193773508,
-          "ns_per_day_per_replica": 225.18779742279472,
-          "ns_per_day_aggregate": 225.18779742279472,
-          "speedup_vs_openmm_cuda_single_b1": 0.27438064782909743,
+          "ms_per_step_batch": 1.554255485534668,
+          "ms_per_step_per_replica": 0.777127742767334,
+          "ns_per_day_per_replica": 222.35726572398917,
+          "ns_per_day_aggregate": 222.35726572398917,
+          "speedup_vs_openmm_cuda_single_b1": 0.2719835333761823,
           "speedup_vs_openmm_cuda_mps_same_B": null
         },
         {
           "B": 4,
-          "ms_per_step_batch": 2.473431434482336,
-          "ms_per_step_per_replica": 0.618357858620584,
-          "ns_per_day_per_replica": 279.4498324731856,
-          "ns_per_day_aggregate": 279.4498324731856,
-          "speedup_vs_openmm_cuda_single_b1": 0.34049636324549754,
-          "speedup_vs_openmm_cuda_mps_same_B": 0.3493488256288562
+          "ms_per_step_batch": 2.487635724246502,
+          "ms_per_step_per_replica": 0.6219089310616255,
+          "ns_per_day_per_replica": 277.8541863115278,
+          "ns_per_day_aggregate": 277.8541863115278,
+          "speedup_vs_openmm_cuda_single_b1": 0.3398663997342916,
+          "speedup_vs_openmm_cuda_mps_same_B": 0.15707017353674302
         },
         {
           "B": 8,
-          "ms_per_step_batch": 4.093109518289566,
-          "ms_per_step_per_replica": 0.5116386897861958,
-          "ns_per_day_per_replica": 337.73833654411453,
-          "ns_per_day_aggregate": 337.73833654411453,
-          "speedup_vs_openmm_cuda_single_b1": 0.4115181401401968,
-          "speedup_vs_openmm_cuda_mps_same_B": 0.42099744346772183
+          "ms_per_step_batch": 4.131552875041962,
+          "ms_per_step_per_replica": 0.5164441093802452,
+          "ns_per_day_per_replica": 334.59574203947705,
+          "ns_per_day_aggregate": 334.59574203947705,
+          "speedup_vs_openmm_cuda_single_b1": 0.40927168211128306,
+          "speedup_vs_openmm_cuda_mps_same_B": 0.1750112492138354
         },
         {
           "B": 16,
-          "ms_per_step_batch": 7.465941198170185,
-          "ms_per_step_per_replica": 0.46662132488563657,
-          "ns_per_day_per_replica": 370.3216950968781,
-          "ns_per_day_aggregate": 370.3216950968781,
-          "speedup_vs_openmm_cuda_single_b1": 0.45121941672122545,
+          "ms_per_step_batch": 7.928755022585393,
+          "ms_per_step_per_replica": 0.49554718891158706,
+          "ns_per_day_per_replica": 348.7054388897564,
+          "ns_per_day_aggregate": 348.7054388897564,
+          "speedup_vs_openmm_cuda_single_b1": 0.42653041746994397,
           "speedup_vs_openmm_cuda_mps_same_B": null
         },
         {
           "B": 32,
-          "ms_per_step_batch": 14.085434917360544,
-          "ms_per_step_per_replica": 0.440169841167517,
-          "ns_per_day_per_replica": 392.5757374509374,
-          "ns_per_day_aggregate": 392.5757374509374,
-          "speedup_vs_openmm_cuda_single_b1": 0.47833491155622615,
+          "ms_per_step_batch": 14.237046092748642,
+          "ms_per_step_per_replica": 0.44490769039839506,
+          "ns_per_day_per_replica": 388.3951743905916,
+          "ns_per_day_aggregate": 388.3951743905916,
+          "speedup_vs_openmm_cuda_single_b1": 0.47507821043337684,
           "speedup_vs_openmm_cuda_mps_same_B": null
         }
       ]
@@ -243,8 +252,8 @@
               "device_name": "NVIDIA A100-SXM4-80GB",
               "device_index": "0",
               "precision": "single",
-              "cuda_Compiler": null,
-              "CudaDriverVersion": null,
+              "cuda_Compiler": "openmm-nvrtc-builtin",
+              "CudaDriverVersion": "590.48.01",
               "lib_openmm_cuda_path": "/orcd/pool/008/so3_shared/marielle/projects/.venv/lib/python3.13/site-packages/OpenMM.libs/lib/plugins/libOpenMMCUDA.so",
               "mps_active": false,
               "cuda_mps_pipe_directory": null,
@@ -261,8 +270,8 @@
               "device_name": "NVIDIA A100-SXM4-80GB",
               "device_index": "0",
               "precision": "mixed",
-              "cuda_Compiler": null,
-              "CudaDriverVersion": null,
+              "cuda_Compiler": "openmm-nvrtc-builtin",
+              "CudaDriverVersion": "590.48.01",
               "lib_openmm_cuda_path": "/orcd/pool/008/so3_shared/marielle/projects/.venv/lib/python3.13/site-packages/OpenMM.libs/lib/plugins/libOpenMMCUDA.so",
               "mps_active": false,
               "cuda_mps_pipe_directory": null,
@@ -293,8 +302,8 @@
                 "device_name": "NVIDIA A100-SXM4-80GB",
                 "device_index": "0",
                 "precision": "single",
-                "cuda_Compiler": null,
-                "CudaDriverVersion": null,
+                "cuda_Compiler": "openmm-nvrtc-builtin",
+                "CudaDriverVersion": "590.48.01",
                 "lib_openmm_cuda_path": "/orcd/pool/008/so3_shared/marielle/projects/.venv/lib/python3.13/site-packages/OpenMM.libs/lib/plugins/libOpenMMCUDA.so",
                 "mps_active": false,
                 "cuda_mps_pipe_directory": null,
@@ -324,8 +333,8 @@
                 "device_name": "NVIDIA A100-SXM4-80GB",
                 "device_index": "0",
                 "precision": "single",
-                "cuda_Compiler": null,
-                "CudaDriverVersion": null,
+                "cuda_Compiler": "openmm-nvrtc-builtin",
+                "CudaDriverVersion": "590.48.01",
                 "lib_openmm_cuda_path": "/orcd/pool/008/so3_shared/marielle/projects/.venv/lib/python3.13/site-packages/OpenMM.libs/lib/plugins/libOpenMMCUDA.so",
                 "mps_active": true,
                 "cuda_mps_pipe_directory": null,
@@ -355,8 +364,8 @@
                 "device_name": "NVIDIA A100-SXM4-80GB",
                 "device_index": "0",
                 "precision": "single",
-                "cuda_Compiler": null,
-                "CudaDriverVersion": null,
+                "cuda_Compiler": "openmm-nvrtc-builtin",
+                "CudaDriverVersion": "590.48.01",
                 "lib_openmm_cuda_path": "/orcd/pool/008/so3_shared/marielle/projects/.venv/lib/python3.13/site-packages/OpenMM.libs/lib/plugins/libOpenMMCUDA.so",
                 "mps_active": true,
                 "cuda_mps_pipe_directory": null,
@@ -386,8 +395,8 @@
                 "device_name": "NVIDIA A100-SXM4-80GB",
                 "device_index": "0",
                 "precision": "single",
-                "cuda_Compiler": null,
-                "CudaDriverVersion": null,
+                "cuda_Compiler": "openmm-nvrtc-builtin",
+                "CudaDriverVersion": "590.48.01",
                 "lib_openmm_cuda_path": "/orcd/pool/008/so3_shared/marielle/projects/.venv/lib/python3.13/site-packages/OpenMM.libs/lib/plugins/libOpenMMCUDA.so",
                 "mps_active": false,
                 "cuda_mps_pipe_directory": null,
@@ -520,8 +529,8 @@
               "device_name": "NVIDIA A100-SXM4-80GB",
               "device_index": "0",
               "precision": "single",
-              "cuda_Compiler": null,
-              "CudaDriverVersion": null,
+              "cuda_Compiler": "openmm-nvrtc-builtin",
+              "CudaDriverVersion": "590.48.01",
               "lib_openmm_cuda_path": "/orcd/pool/008/so3_shared/marielle/projects/.venv/lib/python3.13/site-packages/OpenMM.libs/lib/plugins/libOpenMMCUDA.so",
               "mps_active": false,
               "cuda_mps_pipe_directory": null,
@@ -538,8 +547,8 @@
               "device_name": "NVIDIA A100-SXM4-80GB",
               "device_index": "0",
               "precision": "mixed",
-              "cuda_Compiler": null,
-              "CudaDriverVersion": null,
+              "cuda_Compiler": "openmm-nvrtc-builtin",
+              "CudaDriverVersion": "590.48.01",
               "lib_openmm_cuda_path": "/orcd/pool/008/so3_shared/marielle/projects/.venv/lib/python3.13/site-packages/OpenMM.libs/lib/plugins/libOpenMMCUDA.so",
               "mps_active": false,
               "cuda_mps_pipe_directory": null,
@@ -570,8 +579,8 @@
                 "device_name": "NVIDIA A100-SXM4-80GB",
                 "device_index": "0",
                 "precision": "single",
-                "cuda_Compiler": null,
-                "CudaDriverVersion": null,
+                "cuda_Compiler": "openmm-nvrtc-builtin",
+                "CudaDriverVersion": "590.48.01",
                 "lib_openmm_cuda_path": "/orcd/pool/008/so3_shared/marielle/projects/.venv/lib/python3.13/site-packages/OpenMM.libs/lib/plugins/libOpenMMCUDA.so",
                 "mps_active": false,
                 "cuda_mps_pipe_directory": null,
@@ -601,8 +610,8 @@
                 "device_name": "NVIDIA A100-SXM4-80GB",
                 "device_index": "0",
                 "precision": "single",
-                "cuda_Compiler": null,
-                "CudaDriverVersion": null,
+                "cuda_Compiler": "openmm-nvrtc-builtin",
+                "CudaDriverVersion": "590.48.01",
                 "lib_openmm_cuda_path": "/orcd/pool/008/so3_shared/marielle/projects/.venv/lib/python3.13/site-packages/OpenMM.libs/lib/plugins/libOpenMMCUDA.so",
                 "mps_active": false,
                 "cuda_mps_pipe_directory": null,
@@ -632,8 +641,8 @@
                 "device_name": "NVIDIA A100-SXM4-80GB",
                 "device_index": "0",
                 "precision": "single",
-                "cuda_Compiler": null,
-                "CudaDriverVersion": null,
+                "cuda_Compiler": "openmm-nvrtc-builtin",
+                "CudaDriverVersion": "590.48.01",
                 "lib_openmm_cuda_path": "/orcd/pool/008/so3_shared/marielle/projects/.venv/lib/python3.13/site-packages/OpenMM.libs/lib/plugins/libOpenMMCUDA.so",
                 "mps_active": true,
                 "cuda_mps_pipe_directory": null,
@@ -663,8 +672,8 @@
                 "device_name": "NVIDIA A100-SXM4-80GB",
                 "device_index": "0",
                 "precision": "single",
-                "cuda_Compiler": null,
-                "CudaDriverVersion": null,
+                "cuda_Compiler": "openmm-nvrtc-builtin",
+                "CudaDriverVersion": "590.48.01",
                 "lib_openmm_cuda_path": "/orcd/pool/008/so3_shared/marielle/projects/.venv/lib/python3.13/site-packages/OpenMM.libs/lib/plugins/libOpenMMCUDA.so",
                 "mps_active": false,
                 "cuda_mps_pipe_directory": null,
@@ -797,8 +806,8 @@
               "device_name": "NVIDIA A100-SXM4-80GB",
               "device_index": "0",
               "precision": "single",
-              "cuda_Compiler": null,
-              "CudaDriverVersion": null,
+              "cuda_Compiler": "openmm-nvrtc-builtin",
+              "CudaDriverVersion": "590.48.01",
               "lib_openmm_cuda_path": "/orcd/pool/008/so3_shared/marielle/projects/.venv/lib/python3.13/site-packages/OpenMM.libs/lib/plugins/libOpenMMCUDA.so",
               "mps_active": false,
               "cuda_mps_pipe_directory": null,
@@ -815,8 +824,8 @@
               "device_name": "NVIDIA A100-SXM4-80GB",
               "device_index": "0",
               "precision": "mixed",
-              "cuda_Compiler": null,
-              "CudaDriverVersion": null,
+              "cuda_Compiler": "openmm-nvrtc-builtin",
+              "CudaDriverVersion": "590.48.01",
               "lib_openmm_cuda_path": "/orcd/pool/008/so3_shared/marielle/projects/.venv/lib/python3.13/site-packages/OpenMM.libs/lib/plugins/libOpenMMCUDA.so",
               "mps_active": false,
               "cuda_mps_pipe_directory": null,
@@ -847,8 +856,8 @@
                 "device_name": "NVIDIA A100-SXM4-80GB",
                 "device_index": "0",
                 "precision": "single",
-                "cuda_Compiler": null,
-                "CudaDriverVersion": null,
+                "cuda_Compiler": "openmm-nvrtc-builtin",
+                "CudaDriverVersion": "590.48.01",
                 "lib_openmm_cuda_path": "/orcd/pool/008/so3_shared/marielle/projects/.venv/lib/python3.13/site-packages/OpenMM.libs/lib/plugins/libOpenMMCUDA.so",
                 "mps_active": false,
                 "cuda_mps_pipe_directory": null,
@@ -878,8 +887,8 @@
                 "device_name": "NVIDIA A100-SXM4-80GB",
                 "device_index": "0",
                 "precision": "single",
-                "cuda_Compiler": null,
-                "CudaDriverVersion": null,
+                "cuda_Compiler": "openmm-nvrtc-builtin",
+                "CudaDriverVersion": "590.48.01",
                 "lib_openmm_cuda_path": "/orcd/pool/008/so3_shared/marielle/projects/.venv/lib/python3.13/site-packages/OpenMM.libs/lib/plugins/libOpenMMCUDA.so",
                 "mps_active": true,
                 "cuda_mps_pipe_directory": null,
@@ -909,8 +918,8 @@
                 "device_name": "NVIDIA A100-SXM4-80GB",
                 "device_index": "0",
                 "precision": "single",
-                "cuda_Compiler": null,
-                "CudaDriverVersion": null,
+                "cuda_Compiler": "openmm-nvrtc-builtin",
+                "CudaDriverVersion": "590.48.01",
                 "lib_openmm_cuda_path": "/orcd/pool/008/so3_shared/marielle/projects/.venv/lib/python3.13/site-packages/OpenMM.libs/lib/plugins/libOpenMMCUDA.so",
                 "mps_active": false,
                 "cuda_mps_pipe_directory": null,
@@ -940,8 +949,8 @@
                 "device_name": "NVIDIA A100-SXM4-80GB",
                 "device_index": "0",
                 "precision": "single",
-                "cuda_Compiler": null,
-                "CudaDriverVersion": null,
+                "cuda_Compiler": "openmm-nvrtc-builtin",
+                "CudaDriverVersion": "590.48.01",
                 "lib_openmm_cuda_path": "/orcd/pool/008/so3_shared/marielle/projects/.venv/lib/python3.13/site-packages/OpenMM.libs/lib/plugins/libOpenMMCUDA.so",
                 "mps_active": false,
                 "cuda_mps_pipe_directory": null,
@@ -1074,8 +1083,8 @@
               "device_name": "NVIDIA A100-SXM4-80GB",
               "device_index": "0",
               "precision": "single",
-              "cuda_Compiler": null,
-              "CudaDriverVersion": null,
+              "cuda_Compiler": "openmm-nvrtc-builtin",
+              "CudaDriverVersion": "590.48.01",
               "lib_openmm_cuda_path": "/orcd/pool/008/so3_shared/marielle/projects/.venv/lib/python3.13/site-packages/OpenMM.libs/lib/plugins/libOpenMMCUDA.so",
               "mps_active": false,
               "cuda_mps_pipe_directory": null,
@@ -1092,8 +1101,8 @@
               "device_name": "NVIDIA A100-SXM4-80GB",
               "device_index": "0",
               "precision": "mixed",
-              "cuda_Compiler": null,
-              "CudaDriverVersion": null,
+              "cuda_Compiler": "openmm-nvrtc-builtin",
+              "CudaDriverVersion": "590.48.01",
               "lib_openmm_cuda_path": "/orcd/pool/008/so3_shared/marielle/projects/.venv/lib/python3.13/site-packages/OpenMM.libs/lib/plugins/libOpenMMCUDA.so",
               "mps_active": false,
               "cuda_mps_pipe_directory": null,
@@ -1124,8 +1133,8 @@
                 "device_name": "NVIDIA A100-SXM4-80GB",
                 "device_index": "0",
                 "precision": "single",
-                "cuda_Compiler": null,
-                "CudaDriverVersion": null,
+                "cuda_Compiler": "openmm-nvrtc-builtin",
+                "CudaDriverVersion": "590.48.01",
                 "lib_openmm_cuda_path": "/orcd/pool/008/so3_shared/marielle/projects/.venv/lib/python3.13/site-packages/OpenMM.libs/lib/plugins/libOpenMMCUDA.so",
                 "mps_active": false,
                 "cuda_mps_pipe_directory": null,
@@ -1155,8 +1164,8 @@
                 "device_name": "NVIDIA A100-SXM4-80GB",
                 "device_index": "0",
                 "precision": "single",
-                "cuda_Compiler": null,
-                "CudaDriverVersion": null,
+                "cuda_Compiler": "openmm-nvrtc-builtin",
+                "CudaDriverVersion": "590.48.01",
                 "lib_openmm_cuda_path": "/orcd/pool/008/so3_shared/marielle/projects/.venv/lib/python3.13/site-packages/OpenMM.libs/lib/plugins/libOpenMMCUDA.so",
                 "mps_active": false,
                 "cuda_mps_pipe_directory": null,
@@ -1186,8 +1195,8 @@
                 "device_name": "NVIDIA A100-SXM4-80GB",
                 "device_index": "0",
                 "precision": "single",
-                "cuda_Compiler": null,
-                "CudaDriverVersion": null,
+                "cuda_Compiler": "openmm-nvrtc-builtin",
+                "CudaDriverVersion": "590.48.01",
                 "lib_openmm_cuda_path": "/orcd/pool/008/so3_shared/marielle/projects/.venv/lib/python3.13/site-packages/OpenMM.libs/lib/plugins/libOpenMMCUDA.so",
                 "mps_active": false,
                 "cuda_mps_pipe_directory": null,
@@ -1217,8 +1226,8 @@
                 "device_name": "NVIDIA A100-SXM4-80GB",
                 "device_index": "0",
                 "precision": "single",
-                "cuda_Compiler": null,
-                "CudaDriverVersion": null,
+                "cuda_Compiler": "openmm-nvrtc-builtin",
+                "CudaDriverVersion": "590.48.01",
                 "lib_openmm_cuda_path": "/orcd/pool/008/so3_shared/marielle/projects/.venv/lib/python3.13/site-packages/OpenMM.libs/lib/plugins/libOpenMMCUDA.so",
                 "mps_active": false,
                 "cuda_mps_pipe_directory": null,
@@ -1347,8 +1356,8 @@
               "device_name": "NVIDIA A100-SXM4-80GB",
               "device_index": "0",
               "precision": "single",
-              "cuda_Compiler": null,
-              "CudaDriverVersion": null,
+              "cuda_Compiler": "openmm-nvrtc-builtin",
+              "CudaDriverVersion": "590.48.01",
               "lib_openmm_cuda_path": "/orcd/pool/008/so3_shared/marielle/projects/.venv/lib/python3.13/site-packages/OpenMM.libs/lib/plugins/libOpenMMCUDA.so",
               "mps_active": false,
               "cuda_mps_pipe_directory": null,
@@ -1365,8 +1374,8 @@
               "device_name": "NVIDIA A100-SXM4-80GB",
               "device_index": "0",
               "precision": "mixed",
-              "cuda_Compiler": null,
-              "CudaDriverVersion": null,
+              "cuda_Compiler": "openmm-nvrtc-builtin",
+              "CudaDriverVersion": "590.48.01",
               "lib_openmm_cuda_path": "/orcd/pool/008/so3_shared/marielle/projects/.venv/lib/python3.13/site-packages/OpenMM.libs/lib/plugins/libOpenMMCUDA.so",
               "mps_active": false,
               "cuda_mps_pipe_directory": null,
@@ -1397,8 +1406,8 @@
                 "device_name": "NVIDIA A100-SXM4-80GB",
                 "device_index": "0",
                 "precision": "single",
-                "cuda_Compiler": null,
-                "CudaDriverVersion": null,
+                "cuda_Compiler": "openmm-nvrtc-builtin",
+                "CudaDriverVersion": "590.48.01",
                 "lib_openmm_cuda_path": "/orcd/pool/008/so3_shared/marielle/projects/.venv/lib/python3.13/site-packages/OpenMM.libs/lib/plugins/libOpenMMCUDA.so",
                 "mps_active": false,
                 "cuda_mps_pipe_directory": null,
@@ -1428,8 +1437,8 @@
                 "device_name": "NVIDIA A100-SXM4-80GB",
                 "device_index": "0",
                 "precision": "single",
-                "cuda_Compiler": null,
-                "CudaDriverVersion": null,
+                "cuda_Compiler": "openmm-nvrtc-builtin",
+                "CudaDriverVersion": "590.48.01",
                 "lib_openmm_cuda_path": "/orcd/pool/008/so3_shared/marielle/projects/.venv/lib/python3.13/site-packages/OpenMM.libs/lib/plugins/libOpenMMCUDA.so",
                 "mps_active": false,
                 "cuda_mps_pipe_directory": null,
@@ -1459,8 +1468,8 @@
                 "device_name": "NVIDIA A100-SXM4-80GB",
                 "device_index": "0",
                 "precision": "single",
-                "cuda_Compiler": null,
-                "CudaDriverVersion": null,
+                "cuda_Compiler": "openmm-nvrtc-builtin",
+                "CudaDriverVersion": "590.48.01",
                 "lib_openmm_cuda_path": "/orcd/pool/008/so3_shared/marielle/projects/.venv/lib/python3.13/site-packages/OpenMM.libs/lib/plugins/libOpenMMCUDA.so",
                 "mps_active": false,
                 "cuda_mps_pipe_directory": null,
@@ -1490,8 +1499,8 @@
                 "device_name": "NVIDIA A100-SXM4-80GB",
                 "device_index": "0",
                 "precision": "single",
-                "cuda_Compiler": null,
-                "CudaDriverVersion": null,
+                "cuda_Compiler": "openmm-nvrtc-builtin",
+                "CudaDriverVersion": "590.48.01",
                 "lib_openmm_cuda_path": "/orcd/pool/008/so3_shared/marielle/projects/.venv/lib/python3.13/site-packages/OpenMM.libs/lib/plugins/libOpenMMCUDA.so",
                 "mps_active": true,
                 "cuda_mps_pipe_directory": null,
@@ -1596,7 +1605,2097 @@
             "speedup_vs_openmm_cuda_mps_same_B": null
           }
         ]
+      },
+      {
+        "system": "DHFR_24k_pme_openmm_grid",
+        "suites": [
+          "SuiteA",
+          "SuiteB"
+        ],
+        "kind": "trunc",
+        "n_real_atoms": 23558,
+        "bucket_atoms": 25000,
+        "bucket_waters": 8192,
+        "occupancy_pct": 94.232,
+        "electrostatics": "pme",
+        "pme_grid": [
+          60,
+          60,
+          60
+        ],
+        "openmm": {
+          "openmm_cuda_single_b1": {
+            "platform": "CUDA",
+            "precision": "single",
+            "ms_per_step": 0.2749319886788726,
+            "ns_per_day": 628.5190778648704,
+            "provenance": {
+              "platform_name": "CUDA",
+              "device_name": "NVIDIA A100-SXM4-80GB",
+              "device_index": "0",
+              "precision": "single",
+              "cuda_Compiler": "openmm-nvrtc-builtin",
+              "CudaDriverVersion": "590.48.01",
+              "lib_openmm_cuda_path": "/orcd/pool/008/so3_shared/marielle/projects/.venv/lib/python3.13/site-packages/OpenMM.libs/lib/plugins/libOpenMMCUDA.so",
+              "mps_active": false,
+              "cuda_mps_pipe_directory": null,
+              "plugin_load_failures": []
+            }
+          },
+          "openmm_cuda_mixed_b1": {
+            "platform": "CUDA",
+            "precision": "mixed",
+            "ms_per_step": 0.274388724938035,
+            "ns_per_day": 629.763486232983,
+            "provenance": {
+              "platform_name": "CUDA",
+              "device_name": "NVIDIA A100-SXM4-80GB",
+              "device_index": "0",
+              "precision": "mixed",
+              "cuda_Compiler": "openmm-nvrtc-builtin",
+              "CudaDriverVersion": "590.48.01",
+              "lib_openmm_cuda_path": "/orcd/pool/008/so3_shared/marielle/projects/.venv/lib/python3.13/site-packages/OpenMM.libs/lib/plugins/libOpenMMCUDA.so",
+              "mps_active": false,
+              "cuda_mps_pipe_directory": null,
+              "plugin_load_failures": []
+            }
+          },
+          "openmm_cuda_mps_scaling": {
+            "B=1": {
+              "available": true,
+              "ok": true,
+              "replicas_B": 1,
+              "precision": "single",
+              "n_steps": 30,
+              "dt_fs": 2.0,
+              "wall_elapsed_s": 0.008550110273063183,
+              "ms_per_step_batch": 0.2850036757687727,
+              "ms_per_step_per_replica": 0.2850036757687727,
+              "per_replica_ns_per_day": 606.3079696564859,
+              "aggregate_ns_per_day": 606.3079696564859,
+              "total_gpu_memory_mb": 444.0,
+              "memory_mb_per_replica": 444.0,
+              "mps_info": {
+                "mps_active": false,
+                "started_by_harness": false
+              },
+              "provenance": {
+                "platform_name": "CUDA",
+                "device_name": "NVIDIA A100-SXM4-80GB",
+                "device_index": "0",
+                "precision": "single",
+                "cuda_Compiler": "openmm-nvrtc-builtin",
+                "CudaDriverVersion": "590.48.01",
+                "lib_openmm_cuda_path": "/orcd/pool/008/so3_shared/marielle/projects/.venv/lib/python3.13/site-packages/OpenMM.libs/lib/plugins/libOpenMMCUDA.so",
+                "mps_active": false,
+                "cuda_mps_pipe_directory": null,
+                "plugin_load_failures": []
+              }
+            },
+            "B=4": {
+              "available": true,
+              "ok": true,
+              "replicas_B": 4,
+              "precision": "single",
+              "n_steps": 30,
+              "dt_fs": 2.0,
+              "wall_elapsed_s": 0.017326978035271168,
+              "ms_per_step_batch": 0.5775659345090389,
+              "ms_per_step_per_replica": 0.14439148362725973,
+              "per_replica_ns_per_day": 299.1866203932006,
+              "aggregate_ns_per_day": 1196.7464815728024,
+              "total_gpu_memory_mb": 1768.0,
+              "memory_mb_per_replica": 442.0,
+              "mps_info": {
+                "mps_active": true,
+                "started_by_harness": true,
+                "pipe_dir": "/tmp/mps_28702584_3106750/pipe",
+                "log_dir": "/tmp/mps_28702584_3106750/log",
+                "stdout": "",
+                "stderr": ""
+              },
+              "provenance": {
+                "platform_name": "CUDA",
+                "device_name": "NVIDIA A100-SXM4-80GB",
+                "device_index": "0",
+                "precision": "single",
+                "cuda_Compiler": "openmm-nvrtc-builtin",
+                "CudaDriverVersion": "590.48.01",
+                "lib_openmm_cuda_path": "/orcd/pool/008/so3_shared/marielle/projects/.venv/lib/python3.13/site-packages/OpenMM.libs/lib/plugins/libOpenMMCUDA.so",
+                "mps_active": true,
+                "cuda_mps_pipe_directory": "/tmp/mps_28702584_3106750/pipe",
+                "plugin_load_failures": []
+              }
+            },
+            "B=8": {
+              "available": true,
+              "ok": true,
+              "replicas_B": 8,
+              "precision": "single",
+              "n_steps": 30,
+              "dt_fs": 2.0,
+              "wall_elapsed_s": 0.03339922055602074,
+              "ms_per_step_batch": 1.113307351867358,
+              "ms_per_step_per_replica": 0.13916341898341975,
+              "per_replica_ns_per_day": 155.21320299390945,
+              "aggregate_ns_per_day": 1241.7056239512756,
+              "total_gpu_memory_mb": 3536.0,
+              "memory_mb_per_replica": 442.0,
+              "mps_info": {
+                "mps_active": true,
+                "started_by_harness": true,
+                "pipe_dir": "/tmp/mps_28702584_3107666/pipe",
+                "log_dir": "/tmp/mps_28702584_3107666/log",
+                "stdout": "",
+                "stderr": ""
+              },
+              "provenance": {
+                "platform_name": "CUDA",
+                "device_name": "NVIDIA A100-SXM4-80GB",
+                "device_index": "0",
+                "precision": "single",
+                "cuda_Compiler": "openmm-nvrtc-builtin",
+                "CudaDriverVersion": "590.48.01",
+                "lib_openmm_cuda_path": "/orcd/pool/008/so3_shared/marielle/projects/.venv/lib/python3.13/site-packages/OpenMM.libs/lib/plugins/libOpenMMCUDA.so",
+                "mps_active": true,
+                "cuda_mps_pipe_directory": "/tmp/mps_28702584_3107666/pipe",
+                "plugin_load_failures": []
+              }
+            },
+            "B=16": {
+              "available": true,
+              "ok": true,
+              "replicas_B": 16,
+              "precision": "single",
+              "n_steps": 30,
+              "dt_fs": 2.0,
+              "wall_elapsed_s": 0.06064702104777098,
+              "ms_per_step_batch": 2.0215673682590323,
+              "ms_per_step_per_replica": 0.12634796051618952,
+              "per_replica_ns_per_day": 85.47822977020788,
+              "aggregate_ns_per_day": 1367.651676323326,
+              "total_gpu_memory_mb": 7072.0,
+              "memory_mb_per_replica": 442.0,
+              "mps_info": {
+                "mps_active": true,
+                "started_by_harness": true,
+                "pipe_dir": "/tmp/mps_28702584_3109018/pipe",
+                "log_dir": "/tmp/mps_28702584_3109018/log",
+                "stdout": "",
+                "stderr": ""
+              },
+              "provenance": {
+                "platform_name": "CUDA",
+                "device_name": "NVIDIA A100-SXM4-80GB",
+                "device_index": "0",
+                "precision": "single",
+                "cuda_Compiler": "openmm-nvrtc-builtin",
+                "CudaDriverVersion": "590.48.01",
+                "lib_openmm_cuda_path": "/orcd/pool/008/so3_shared/marielle/projects/.venv/lib/python3.13/site-packages/OpenMM.libs/lib/plugins/libOpenMMCUDA.so",
+                "mps_active": true,
+                "cuda_mps_pipe_directory": "/tmp/mps_28702584_3109018/pipe",
+                "plugin_load_failures": []
+              }
+            }
+          }
+        },
+        "substep_breakdown": {
+          "B=1": {
+            "total_substeps_ms": 0.48745468258857727,
+            "baoab_pre_force_ms": 0.07375109940767288,
+            "bonded_and_nonbonded_direct_mk48_ms": 0.0895795226097107,
+            "pme_spread_3d_bspline_ms": 0.05285240709781647,
+            "pme_rfft3d_and_influence_ms": 0.05656979978084564,
+            "pme_irfft3d_ms": 0.08064139634370804,
+            "pme_gather_3d_bspline_fused_scale_ms": 0.0697202980518341,
+            "baoab_post_force_ms": 0.06434015929698944,
+            "baoab_pre_force_pct": 15.129837099117678,
+            "bonded_and_nonbonded_direct_mk48_pct": 18.37699499243868,
+            "pme_spread_3d_bspline_pct": 10.842527312928716,
+            "pme_rfft3d_and_influence_pct": 11.60514029333714,
+            "pme_irfft3d_pct": 16.543362742044103,
+            "pme_gather_3d_bspline_fused_scale_pct": 14.302929183404647,
+            "baoab_post_force_pct": 13.19920837672904,
+            "nonbonded_tile_pairs_mk51_ms_per_rep": 0.05532268434762955,
+            "num_valid_tile_pairs_aabb_pruned": 782,
+            "xtrax_probe_metrics": {
+              "baoab_pre_force": {
+                "n_executions": 1.0,
+                "n_compilations": 0.0,
+                "n_jit_traces": 2.0,
+                "total_step_seconds": 0.00014961371198296547,
+                "compile_seconds": 0.0,
+                "device_seconds": 6.313600000005681e-05,
+                "host_seconds": 0.000290342826582375
+              },
+              "baoab_post_force": {
+                "n_executions": 1.0,
+                "n_compilations": 0.0,
+                "n_jit_traces": 2.0,
+                "total_step_seconds": 0.000112172681838274,
+                "compile_seconds": 0.0,
+                "device_seconds": 3.7919999999998255e-05,
+                "host_seconds": 0.00019081282432556327
+              },
+              "bonded_and_nonbonded_direct_mk48": {
+                "n_executions": 1.0,
+                "n_compilations": 0.0,
+                "n_jit_traces": 2.0,
+                "total_step_seconds": 0.00015999237075448036,
+                "compile_seconds": 0.0,
+                "device_seconds": 8.569499999999971e-05,
+                "host_seconds": 0.00016130199133634595
+              },
+              "nonbonded_tile_pairs_mk51": {
+                "n_executions": 1.0,
+                "n_compilations": 0.0,
+                "n_jit_traces": 2.0,
+                "total_step_seconds": 0.00012168008834123611,
+                "compile_seconds": 0.0,
+                "device_seconds": 4.655999999999949e-05,
+                "host_seconds": 0.00016420761186122944
+              },
+              "pme_spread_3d_bspline": {
+                "n_executions": 1.0,
+                "n_compilations": 0.0,
+                "n_jit_traces": 2.0,
+                "total_step_seconds": 0.00010869046673178673,
+                "compile_seconds": 0.0,
+                "device_seconds": 3.78859999999986e-05,
+                "host_seconds": 0.00016897657630586765
+              },
+              "pme_rfft3d_and_influence": {
+                "n_executions": 1.0,
+                "n_compilations": 0.0,
+                "n_jit_traces": 2.0,
+                "total_step_seconds": 7.067900151014328e-05,
+                "compile_seconds": 0.0,
+                "device_seconds": 1.8527000000000045e-05,
+                "host_seconds": 0.00013585461790370938
+              },
+              "pme_irfft3d": {
+                "n_executions": 1.0,
+                "n_compilations": 0.0,
+                "n_jit_traces": 2.0,
+                "total_step_seconds": 0.00010044034570455551,
+                "compile_seconds": 0.0,
+                "device_seconds": 3.046399999999812e-05,
+                "host_seconds": 0.0001954227025375385
+              },
+              "pme_gather_3d_bspline_fused_scale": {
+                "n_executions": 1.0,
+                "n_compilations": 0.0,
+                "n_jit_traces": 2.0,
+                "total_step_seconds": 0.00010632118210196495,
+                "compile_seconds": 0.0,
+                "device_seconds": 2.8606999999998152e-05,
+                "host_seconds": 0.00015602211248207277
+              }
+            },
+            "device_substeps_ms": {
+              "baoab_pre_force": 0.06313600000005681,
+              "baoab_post_force": 0.037919999999998254,
+              "bonded_and_nonbonded_direct_mk48": 0.08569499999999972,
+              "nonbonded_tile_pairs_mk51": 0.04655999999999949,
+              "pme_spread_3d_bspline": 0.0378859999999986,
+              "pme_rfft3d_and_influence": 0.018527000000000043,
+              "pme_irfft3d": 0.03046399999999812,
+              "pme_gather_3d_bspline_fused_scale": 0.02860699999999815
+            },
+            "total_device_substeps_mk48_ms": 0.3022350000000497,
+            "total_device_substeps_mk51_ms": 0.26310000000004946
+          },
+          "B=4": {
+            "total_substeps_ms": 0.1800884399563074,
+            "baoab_pre_force_ms": 0.02510078251361847,
+            "bonded_and_nonbonded_direct_mk48_ms": 0.06433573551476002,
+            "pme_spread_3d_bspline_ms": 0.024331528693437576,
+            "pme_rfft3d_and_influence_ms": 0.014475090429186821,
+            "pme_irfft3d_ms": 0.020208042114973068,
+            "pme_gather_3d_bspline_fused_scale_ms": 0.0164753757417202,
+            "baoab_post_force_ms": 0.01516188494861126,
+            "baoab_pre_force_pct": 13.938030958404857,
+            "bonded_and_nonbonded_direct_mk48_pct": 35.724522645856105,
+            "pme_spread_3d_bspline_pct": 13.510877599550993,
+            "pme_rfft3d_and_influence_pct": 8.037767683866177,
+            "pme_irfft3d_pct": 11.221176728431814,
+            "pme_gather_3d_bspline_fused_scale_pct": 9.148491566542202,
+            "baoab_post_force_pct": 8.419132817347853,
+            "nonbonded_tile_pairs_mk51_ms_per_rep": 0.04322679713368416,
+            "num_valid_tile_pairs_aabb_pruned": 782
+          }
+        },
+        "batch_scaling": [
+          {
+            "B": 1,
+            "ms_per_step_batch": 0.5039661346624296,
+            "ms_per_step_per_replica": 0.5039661346624296,
+            "ns_per_day_per_replica": 342.88018204982404,
+            "ns_per_day_aggregate": 342.88018204982404,
+            "speedup_vs_openmm_cuda_single_b1": 0.5455366338514583,
+            "speedup_vs_openmm_cuda_mps_same_B": 0.5655214828267698
+          },
+          {
+            "B": 2,
+            "ms_per_step_batch": 0.7507093871633211,
+            "ms_per_step_per_replica": 0.37535469358166057,
+            "ns_per_day_per_replica": 460.36456438343794,
+            "ns_per_day_aggregate": 460.36456438343794,
+            "speedup_vs_openmm_cuda_single_b1": 0.7324591736297539,
+            "speedup_vs_openmm_cuda_mps_same_B": null
+          },
+          {
+            "B": 4,
+            "ms_per_step_batch": 1.21738330150644,
+            "ms_per_step_per_replica": 0.30434582537661,
+            "ns_per_day_per_replica": 567.7751609905284,
+            "ns_per_day_aggregate": 567.7751609905284,
+            "speedup_vs_openmm_cuda_single_b1": 0.9033539012360708,
+            "speedup_vs_openmm_cuda_mps_same_B": 0.474432279294726
+          },
+          {
+            "B": 8,
+            "ms_per_step_batch": 2.40174800157547,
+            "ms_per_step_per_replica": 0.30021850019693375,
+            "ns_per_day_per_replica": 575.5807849504569,
+            "ns_per_day_aggregate": 575.5807849504569,
+            "speedup_vs_openmm_cuda_single_b1": 0.9157729736792569,
+            "speedup_vs_openmm_cuda_mps_same_B": 0.46354045101195623
+          },
+          {
+            "B": 16,
+            "ms_per_step_batch": 4.497262462973595,
+            "ms_per_step_per_replica": 0.28107890393584967,
+            "ns_per_day_per_replica": 614.7739925705628,
+            "ns_per_day_aggregate": 614.7739925705628,
+            "speedup_vs_openmm_cuda_single_b1": 0.9781309974853895,
+            "speedup_vs_openmm_cuda_mps_same_B": 0.44951064895651427
+          },
+          {
+            "B": 32,
+            "ms_per_step_batch": 8.184387981891632,
+            "ms_per_step_per_replica": 0.2557621244341135,
+            "ns_per_day_per_replica": 675.6277943121119,
+            "ns_per_day_aggregate": 675.6277943121119,
+            "speedup_vs_openmm_cuda_single_b1": 1.074951927644382,
+            "speedup_vs_openmm_cuda_mps_same_B": null
+          }
+        ]
+      },
+      {
+        "system": "DHFR_24k_pme_64grid",
+        "suites": [
+          "SuiteA"
+        ],
+        "kind": "trunc",
+        "n_real_atoms": 23558,
+        "bucket_atoms": 25000,
+        "bucket_waters": 8192,
+        "occupancy_pct": 94.232,
+        "electrostatics": "pme",
+        "pme_grid": [
+          64,
+          64,
+          64
+        ],
+        "openmm": {
+          "openmm_cuda_single_b1": {
+            "platform": "CUDA",
+            "precision": "single",
+            "ms_per_step": 0.26934517081826925,
+            "ns_per_day": 641.5559613526185,
+            "provenance": {
+              "platform_name": "CUDA",
+              "device_name": "NVIDIA A100-SXM4-80GB",
+              "device_index": "0",
+              "precision": "single",
+              "cuda_Compiler": "openmm-nvrtc-builtin",
+              "CudaDriverVersion": "590.48.01",
+              "lib_openmm_cuda_path": "/orcd/pool/008/so3_shared/marielle/projects/.venv/lib/python3.13/site-packages/OpenMM.libs/lib/plugins/libOpenMMCUDA.so",
+              "mps_active": false,
+              "cuda_mps_pipe_directory": null,
+              "plugin_load_failures": []
+            }
+          },
+          "openmm_cuda_mixed_b1": {
+            "platform": "CUDA",
+            "precision": "mixed",
+            "ms_per_step": 0.26495561469346285,
+            "ns_per_day": 652.1847072383005,
+            "provenance": {
+              "platform_name": "CUDA",
+              "device_name": "NVIDIA A100-SXM4-80GB",
+              "device_index": "0",
+              "precision": "mixed",
+              "cuda_Compiler": "openmm-nvrtc-builtin",
+              "CudaDriverVersion": "590.48.01",
+              "lib_openmm_cuda_path": "/orcd/pool/008/so3_shared/marielle/projects/.venv/lib/python3.13/site-packages/OpenMM.libs/lib/plugins/libOpenMMCUDA.so",
+              "mps_active": false,
+              "cuda_mps_pipe_directory": null,
+              "plugin_load_failures": []
+            }
+          },
+          "openmm_cuda_mps_scaling": {
+            "B=1": {
+              "available": true,
+              "ok": true,
+              "replicas_B": 1,
+              "precision": "single",
+              "n_steps": 30,
+              "dt_fs": 2.0,
+              "wall_elapsed_s": 0.008275087922811508,
+              "ms_per_step_batch": 0.275836264093717,
+              "ms_per_step_per_replica": 0.275836264093717,
+              "per_replica_ns_per_day": 626.4586006040532,
+              "aggregate_ns_per_day": 626.4586006040532,
+              "total_gpu_memory_mb": 446.0,
+              "memory_mb_per_replica": 446.0,
+              "mps_info": {
+                "mps_active": false,
+                "started_by_harness": false
+              },
+              "provenance": {
+                "platform_name": "CUDA",
+                "device_name": "NVIDIA A100-SXM4-80GB",
+                "device_index": "0",
+                "precision": "single",
+                "cuda_Compiler": "openmm-nvrtc-builtin",
+                "CudaDriverVersion": "590.48.01",
+                "lib_openmm_cuda_path": "/orcd/pool/008/so3_shared/marielle/projects/.venv/lib/python3.13/site-packages/OpenMM.libs/lib/plugins/libOpenMMCUDA.so",
+                "mps_active": false,
+                "cuda_mps_pipe_directory": null,
+                "plugin_load_failures": []
+              }
+            },
+            "B=4": {
+              "available": true,
+              "ok": true,
+              "replicas_B": 4,
+              "precision": "single",
+              "n_steps": 30,
+              "dt_fs": 2.0,
+              "wall_elapsed_s": 0.016714968718588352,
+              "ms_per_step_batch": 0.5571656239529451,
+              "ms_per_step_per_replica": 0.13929140598823628,
+              "per_replica_ns_per_day": 310.14117269839613,
+              "aggregate_ns_per_day": 1240.5646907935845,
+              "total_gpu_memory_mb": 1776.0,
+              "memory_mb_per_replica": 444.0,
+              "mps_info": {
+                "mps_active": true,
+                "started_by_harness": true,
+                "pipe_dir": "/tmp/mps_28702584_3115674/pipe",
+                "log_dir": "/tmp/mps_28702584_3115674/log",
+                "stdout": "",
+                "stderr": ""
+              },
+              "provenance": {
+                "platform_name": "CUDA",
+                "device_name": "NVIDIA A100-SXM4-80GB",
+                "device_index": "0",
+                "precision": "single",
+                "cuda_Compiler": "openmm-nvrtc-builtin",
+                "CudaDriverVersion": "590.48.01",
+                "lib_openmm_cuda_path": "/orcd/pool/008/so3_shared/marielle/projects/.venv/lib/python3.13/site-packages/OpenMM.libs/lib/plugins/libOpenMMCUDA.so",
+                "mps_active": true,
+                "cuda_mps_pipe_directory": "/tmp/mps_28702584_3115674/pipe",
+                "plugin_load_failures": []
+              }
+            },
+            "B=8": {
+              "available": true,
+              "ok": true,
+              "replicas_B": 8,
+              "precision": "single",
+              "n_steps": 30,
+              "dt_fs": 2.0,
+              "wall_elapsed_s": 0.03019415494054556,
+              "ms_per_step_batch": 1.0064718313515186,
+              "ms_per_step_per_replica": 0.12580897891893983,
+              "per_replica_ns_per_day": 171.68885866180608,
+              "aggregate_ns_per_day": 1373.5108692944486,
+              "total_gpu_memory_mb": 3552.0,
+              "memory_mb_per_replica": 444.0,
+              "mps_info": {
+                "mps_active": true,
+                "started_by_harness": true,
+                "pipe_dir": "/tmp/mps_28702584_3116493/pipe",
+                "log_dir": "/tmp/mps_28702584_3116493/log",
+                "stdout": "",
+                "stderr": ""
+              },
+              "provenance": {
+                "platform_name": "CUDA",
+                "device_name": "NVIDIA A100-SXM4-80GB",
+                "device_index": "0",
+                "precision": "single",
+                "cuda_Compiler": "openmm-nvrtc-builtin",
+                "CudaDriverVersion": "590.48.01",
+                "lib_openmm_cuda_path": "/orcd/pool/008/so3_shared/marielle/projects/.venv/lib/python3.13/site-packages/OpenMM.libs/lib/plugins/libOpenMMCUDA.so",
+                "mps_active": true,
+                "cuda_mps_pipe_directory": "/tmp/mps_28702584_3116493/pipe",
+                "plugin_load_failures": []
+              }
+            },
+            "B=16": {
+              "available": true,
+              "ok": true,
+              "replicas_B": 16,
+              "precision": "single",
+              "n_steps": 30,
+              "dt_fs": 2.0,
+              "wall_elapsed_s": 0.05879392474889755,
+              "ms_per_step_batch": 1.9597974916299183,
+              "ms_per_step_per_replica": 0.1224873432268699,
+              "per_replica_ns_per_day": 88.17237532857857,
+              "aggregate_ns_per_day": 1410.758005257257,
+              "total_gpu_memory_mb": 7104.0,
+              "memory_mb_per_replica": 444.0,
+              "mps_info": {
+                "mps_active": true,
+                "started_by_harness": true,
+                "pipe_dir": "/tmp/mps_28702584_3117845/pipe",
+                "log_dir": "/tmp/mps_28702584_3117845/log",
+                "stdout": "",
+                "stderr": ""
+              },
+              "provenance": {
+                "platform_name": "CUDA",
+                "device_name": "NVIDIA A100-SXM4-80GB",
+                "device_index": "0",
+                "precision": "single",
+                "cuda_Compiler": "openmm-nvrtc-builtin",
+                "CudaDriverVersion": "590.48.01",
+                "lib_openmm_cuda_path": "/orcd/pool/008/so3_shared/marielle/projects/.venv/lib/python3.13/site-packages/OpenMM.libs/lib/plugins/libOpenMMCUDA.so",
+                "mps_active": true,
+                "cuda_mps_pipe_directory": "/tmp/mps_28702584_3117845/pipe",
+                "plugin_load_failures": []
+              }
+            }
+          }
+        },
+        "substep_breakdown": {
+          "B=1": {
+            "total_substeps_ms": 0.5370891466736794,
+            "baoab_pre_force_ms": 0.07376398891210556,
+            "bonded_and_nonbonded_direct_mk48_ms": 0.08961036801338196,
+            "pme_spread_3d_bspline_ms": 0.06021350622177124,
+            "pme_rfft3d_and_influence_ms": 0.05753368139266968,
+            "pme_irfft3d_ms": 0.09586501866579056,
+            "pme_gather_3d_bspline_fused_scale_ms": 0.0683741644024849,
+            "baoab_post_force_ms": 0.09172841906547546,
+            "baoab_pre_force_pct": 13.734030815730213,
+            "bonded_and_nonbonded_direct_mk48_pct": 16.68444960550036,
+            "pme_spread_3d_bspline_pct": 11.211082293263193,
+            "pme_rfft3d_and_influence_pct": 10.712128842854009,
+            "pme_irfft3d_pct": 17.84899569457052,
+            "pme_gather_3d_bspline_fused_scale_pct": 12.73050569462115,
+            "baoab_post_force_pct": 17.078807053460558,
+            "nonbonded_tile_pairs_mk51_ms_per_rep": 0.08309923112392426,
+            "num_valid_tile_pairs_aabb_pruned": 782
+          },
+          "B=4": {
+            "total_substeps_ms": 0.1821378618478775,
+            "baoab_pre_force_ms": 0.025102300569415092,
+            "bonded_and_nonbonded_direct_mk48_ms": 0.06451648660004139,
+            "pme_spread_3d_bspline_ms": 0.024190470576286316,
+            "pme_rfft3d_and_influence_ms": 0.015354268252849579,
+            "pme_irfft3d_ms": 0.02074655145406723,
+            "pme_gather_3d_bspline_fused_scale_ms": 0.017443904653191566,
+            "baoab_post_force_ms": 0.014783879742026329,
+            "baoab_pre_force_pct": 13.782033188893292,
+            "bonded_and_nonbonded_direct_mk48_pct": 35.421787620371816,
+            "pme_spread_3d_bspline_pct": 13.281406913895983,
+            "pme_rfft3d_and_influence_pct": 8.430025529603254,
+            "pme_irfft3d_pct": 11.390575931650531,
+            "pme_gather_3d_bspline_fused_scale_pct": 9.577308351055976,
+            "baoab_post_force_pct": 8.11686246452915,
+            "nonbonded_tile_pairs_mk51_ms_per_rep": 0.043242527171969414,
+            "num_valid_tile_pairs_aabb_pruned": 782
+          }
+        },
+        "batch_scaling": [
+          {
+            "B": 1,
+            "ms_per_step_batch": 0.5195458109180132,
+            "ms_per_step_per_replica": 0.5195458109180132,
+            "ns_per_day_per_replica": 332.59819705729217,
+            "ns_per_day_aggregate": 332.59819705729217,
+            "speedup_vs_openmm_cuda_single_b1": 0.5184242951403052,
+            "speedup_vs_openmm_cuda_mps_same_B": 0.5309180794015588
+          },
+          {
+            "B": 2,
+            "ms_per_step_batch": 0.7440115480373303,
+            "ms_per_step_per_replica": 0.37200577401866514,
+            "ns_per_day_per_replica": 464.5089191312656,
+            "ns_per_day_aggregate": 464.5089191312656,
+            "speedup_vs_openmm_cuda_single_b1": 0.7240349199653956,
+            "speedup_vs_openmm_cuda_mps_same_B": null
+          },
+          {
+            "B": 4,
+            "ms_per_step_batch": 1.1026376703133185,
+            "ms_per_step_per_replica": 0.2756594175783296,
+            "ns_per_day_per_replica": 626.8604987924937,
+            "ns_per_day_aggregate": 626.8604987924937,
+            "speedup_vs_openmm_cuda_single_b1": 0.9770940285097782,
+            "speedup_vs_openmm_cuda_mps_same_B": 0.5053025476579487
+          },
+          {
+            "B": 8,
+            "ms_per_step_batch": 2.3913590610027313,
+            "ms_per_step_per_replica": 0.2989198826253414,
+            "ns_per_day_per_replica": 578.0813189217765,
+            "ns_per_day_aggregate": 578.0813189217765,
+            "speedup_vs_openmm_cuda_single_b1": 0.9010614096749785,
+            "speedup_vs_openmm_cuda_mps_same_B": 0.42087859065777034
+          },
+          {
+            "B": 16,
+            "ms_per_step_batch": 4.3703655153512955,
+            "ms_per_step_per_replica": 0.27314784470945597,
+            "ns_per_day_per_replica": 632.624431592368,
+            "ns_per_day_aggregate": 632.624431592368,
+            "speedup_vs_openmm_cuda_single_b1": 0.9860783309667642,
+            "speedup_vs_openmm_cuda_mps_same_B": 0.4484287377671173
+          },
+          {
+            "B": 32,
+            "ms_per_step_batch": 8.457253910601139,
+            "ms_per_step_per_replica": 0.2642891847062856,
+            "ns_per_day_per_replica": 653.8292521959953,
+            "ns_per_day_aggregate": 653.8292521959953,
+            "speedup_vs_openmm_cuda_single_b1": 1.0191305070527292,
+            "speedup_vs_openmm_cuda_mps_same_B": null
+          }
+        ]
+      },
+      {
+        "system": "DHFR_24k_pme_hbonds",
+        "suites": [
+          "SuiteA"
+        ],
+        "kind": "trunc_hbonds",
+        "n_real_atoms": 23558,
+        "bucket_atoms": 25000,
+        "bucket_waters": 8192,
+        "occupancy_pct": 94.232,
+        "electrostatics": "pme",
+        "pme_grid": [
+          60,
+          60,
+          60
+        ],
+        "openmm": {
+          "openmm_cuda_single_b1": {
+            "platform": "CUDA",
+            "precision": "single",
+            "ms_per_step": 0.24644783698022363,
+            "ns_per_day": 701.1625750802042,
+            "provenance": {
+              "platform_name": "CUDA",
+              "device_name": "NVIDIA A100-SXM4-80GB",
+              "device_index": "0",
+              "precision": "single",
+              "cuda_Compiler": "openmm-nvrtc-builtin",
+              "CudaDriverVersion": "590.48.01",
+              "lib_openmm_cuda_path": "/orcd/pool/008/so3_shared/marielle/projects/.venv/lib/python3.13/site-packages/OpenMM.libs/lib/plugins/libOpenMMCUDA.so",
+              "mps_active": false,
+              "cuda_mps_pipe_directory": null,
+              "plugin_load_failures": []
+            }
+          },
+          "openmm_cuda_mixed_b1": {
+            "platform": "CUDA",
+            "precision": "mixed",
+            "ms_per_step": 0.2791289472952485,
+            "ns_per_day": 619.0687195807781,
+            "provenance": {
+              "platform_name": "CUDA",
+              "device_name": "NVIDIA A100-SXM4-80GB",
+              "device_index": "0",
+              "precision": "mixed",
+              "cuda_Compiler": "openmm-nvrtc-builtin",
+              "CudaDriverVersion": "590.48.01",
+              "lib_openmm_cuda_path": "/orcd/pool/008/so3_shared/marielle/projects/.venv/lib/python3.13/site-packages/OpenMM.libs/lib/plugins/libOpenMMCUDA.so",
+              "mps_active": false,
+              "cuda_mps_pipe_directory": null,
+              "plugin_load_failures": []
+            }
+          },
+          "openmm_cuda_mps_scaling": {
+            "B=1": {
+              "available": true,
+              "ok": true,
+              "replicas_B": 1,
+              "precision": "single",
+              "n_steps": 30,
+              "dt_fs": 2.0,
+              "wall_elapsed_s": 0.008691186085343361,
+              "ms_per_step_batch": 0.2897062028447787,
+              "ms_per_step_per_replica": 0.2897062028447787,
+              "per_replica_ns_per_day": 596.4663452255603,
+              "aggregate_ns_per_day": 596.4663452255603,
+              "total_gpu_memory_mb": 444.0,
+              "memory_mb_per_replica": 444.0,
+              "mps_info": {
+                "mps_active": false,
+                "started_by_harness": false
+              },
+              "provenance": {
+                "platform_name": "CUDA",
+                "device_name": "NVIDIA A100-SXM4-80GB",
+                "device_index": "0",
+                "precision": "single",
+                "cuda_Compiler": "openmm-nvrtc-builtin",
+                "CudaDriverVersion": "590.48.01",
+                "lib_openmm_cuda_path": "/orcd/pool/008/so3_shared/marielle/projects/.venv/lib/python3.13/site-packages/OpenMM.libs/lib/plugins/libOpenMMCUDA.so",
+                "mps_active": false,
+                "cuda_mps_pipe_directory": null,
+                "plugin_load_failures": []
+              }
+            },
+            "B=4": {
+              "available": true,
+              "ok": true,
+              "replicas_B": 4,
+              "precision": "single",
+              "n_steps": 30,
+              "dt_fs": 2.0,
+              "wall_elapsed_s": 0.016919617541134357,
+              "ms_per_step_batch": 0.5639872513711452,
+              "ms_per_step_per_replica": 0.1409968128427863,
+              "per_replica_ns_per_day": 306.3899043460556,
+              "aggregate_ns_per_day": 1225.5596173842223,
+              "total_gpu_memory_mb": 1768.0,
+              "memory_mb_per_replica": 442.0,
+              "mps_info": {
+                "mps_active": true,
+                "started_by_harness": true,
+                "pipe_dir": "/tmp/mps_28702584_3123683/pipe",
+                "log_dir": "/tmp/mps_28702584_3123683/log",
+                "stdout": "",
+                "stderr": ""
+              },
+              "provenance": {
+                "platform_name": "CUDA",
+                "device_name": "NVIDIA A100-SXM4-80GB",
+                "device_index": "0",
+                "precision": "single",
+                "cuda_Compiler": "openmm-nvrtc-builtin",
+                "CudaDriverVersion": "590.48.01",
+                "lib_openmm_cuda_path": "/orcd/pool/008/so3_shared/marielle/projects/.venv/lib/python3.13/site-packages/OpenMM.libs/lib/plugins/libOpenMMCUDA.so",
+                "mps_active": true,
+                "cuda_mps_pipe_directory": "/tmp/mps_28702584_3123683/pipe",
+                "plugin_load_failures": []
+              }
+            },
+            "B=8": {
+              "available": true,
+              "ok": true,
+              "replicas_B": 8,
+              "precision": "single",
+              "n_steps": 30,
+              "dt_fs": 2.0,
+              "wall_elapsed_s": 0.029712404124438763,
+              "ms_per_step_batch": 0.9904134708146255,
+              "ms_per_step_per_replica": 0.12380168385182819,
+              "per_replica_ns_per_day": 174.47258654294168,
+              "aggregate_ns_per_day": 1395.7806923435335,
+              "total_gpu_memory_mb": 3536.0,
+              "memory_mb_per_replica": 442.0,
+              "mps_info": {
+                "mps_active": true,
+                "started_by_harness": true,
+                "pipe_dir": "/tmp/mps_28702584_3124493/pipe",
+                "log_dir": "/tmp/mps_28702584_3124493/log",
+                "stdout": "",
+                "stderr": ""
+              },
+              "provenance": {
+                "platform_name": "CUDA",
+                "device_name": "NVIDIA A100-SXM4-80GB",
+                "device_index": "0",
+                "precision": "single",
+                "cuda_Compiler": "openmm-nvrtc-builtin",
+                "CudaDriverVersion": "590.48.01",
+                "lib_openmm_cuda_path": "/orcd/pool/008/so3_shared/marielle/projects/.venv/lib/python3.13/site-packages/OpenMM.libs/lib/plugins/libOpenMMCUDA.so",
+                "mps_active": true,
+                "cuda_mps_pipe_directory": "/tmp/mps_28702584_3124493/pipe",
+                "plugin_load_failures": []
+              }
+            },
+            "B=16": {
+              "available": true,
+              "ok": true,
+              "replicas_B": 16,
+              "precision": "single",
+              "n_steps": 30,
+              "dt_fs": 2.0,
+              "wall_elapsed_s": 0.058565462939441204,
+              "ms_per_step_batch": 1.9521820979813735,
+              "ms_per_step_per_replica": 0.12201138112383585,
+              "per_replica_ns_per_day": 88.51633266111875,
+              "aggregate_ns_per_day": 1416.2613225779,
+              "total_gpu_memory_mb": 7072.0,
+              "memory_mb_per_replica": 442.0,
+              "mps_info": {
+                "mps_active": true,
+                "started_by_harness": true,
+                "pipe_dir": "/tmp/mps_28702584_3125848/pipe",
+                "log_dir": "/tmp/mps_28702584_3125848/log",
+                "stdout": "",
+                "stderr": ""
+              },
+              "provenance": {
+                "platform_name": "CUDA",
+                "device_name": "NVIDIA A100-SXM4-80GB",
+                "device_index": "0",
+                "precision": "single",
+                "cuda_Compiler": "openmm-nvrtc-builtin",
+                "CudaDriverVersion": "590.48.01",
+                "lib_openmm_cuda_path": "/orcd/pool/008/so3_shared/marielle/projects/.venv/lib/python3.13/site-packages/OpenMM.libs/lib/plugins/libOpenMMCUDA.so",
+                "mps_active": true,
+                "cuda_mps_pipe_directory": "/tmp/mps_28702584_3125848/pipe",
+                "plugin_load_failures": []
+              }
+            }
+          }
+        },
+        "substep_breakdown": {
+          "B=1": {
+            "total_substeps_ms": 0.4783259704709053,
+            "baoab_pre_force_ms": 0.0736621767282486,
+            "bonded_and_nonbonded_direct_mk48_ms": 0.09008809924125671,
+            "pme_spread_3d_bspline_ms": 0.05295179784297943,
+            "pme_rfft3d_and_influence_ms": 0.05861174315214157,
+            "pme_irfft3d_ms": 0.0779082253575325,
+            "pme_gather_3d_bspline_fused_scale_ms": 0.05993261933326721,
+            "baoab_post_force_ms": 0.06517130881547928,
+            "baoab_pre_force_pct": 15.399995249208233,
+            "bonded_and_nonbonded_direct_mk48_pct": 18.834038877831834,
+            "pme_spread_3d_bspline_pct": 11.070232668079703,
+            "pme_rfft3d_and_influence_pct": 12.253514709736358,
+            "pme_irfft3d_pct": 16.287684584810005,
+            "pme_gather_3d_bspline_fused_scale_pct": 12.52966032228281,
+            "baoab_post_force_pct": 13.624873588051058,
+            "nonbonded_tile_pairs_mk51_ms_per_rep": 0.05702909082174301,
+            "num_valid_tile_pairs_aabb_pruned": 782
+          },
+          "B=4": {
+            "total_substeps_ms": 0.18246905878186226,
+            "baoab_pre_force_ms": 0.02509898506104946,
+            "bonded_and_nonbonded_direct_mk48_ms": 0.06420889869332314,
+            "pme_spread_3d_bspline_ms": 0.02437792718410492,
+            "pme_rfft3d_and_influence_ms": 0.014158589765429497,
+            "pme_irfft3d_ms": 0.021081585437059402,
+            "pme_gather_3d_bspline_fused_scale_ms": 0.018436890095472336,
+            "baoab_post_force_ms": 0.015106182545423508,
+            "baoab_pre_force_pct": 13.75520059598419,
+            "bonded_and_nonbonded_direct_mk48_pct": 35.18892415074243,
+            "pme_spread_3d_bspline_pct": 13.360033392427477,
+            "pme_rfft3d_and_influence_pct": 7.759446922097505,
+            "pme_irfft3d_pct": 11.553512457288429,
+            "pme_gather_3d_bspline_fused_scale_pct": 10.10411859334093,
+            "baoab_post_force_pct": 8.278763888119036,
+            "nonbonded_tile_pairs_mk51_ms_per_rep": 0.042897872626781464,
+            "num_valid_tile_pairs_aabb_pruned": 782
+          }
+        },
+        "batch_scaling": [
+          {
+            "B": 1,
+            "ms_per_step_batch": 0.5151150748133659,
+            "ms_per_step_per_replica": 0.5151150748133659,
+            "ns_per_day_per_replica": 335.45902352519596,
+            "ns_per_day_aggregate": 335.45902352519596,
+            "speedup_vs_openmm_cuda_single_b1": 0.47843258531992183,
+            "speedup_vs_openmm_cuda_mps_same_B": 0.562410647659154
+          },
+          {
+            "B": 2,
+            "ms_per_step_batch": 0.7569107847909133,
+            "ms_per_step_per_replica": 0.37845539239545667,
+            "ns_per_day_per_replica": 456.5927807402922,
+            "ns_per_day_aggregate": 456.5927807402922,
+            "speedup_vs_openmm_cuda_single_b1": 0.6511938842258711,
+            "speedup_vs_openmm_cuda_mps_same_B": null
+          },
+          {
+            "B": 4,
+            "ms_per_step_batch": 1.221137618025144,
+            "ms_per_step_per_replica": 0.305284404506286,
+            "ns_per_day_per_replica": 566.0295693108094,
+            "ns_per_day_aggregate": 566.0295693108094,
+            "speedup_vs_openmm_cuda_single_b1": 0.8072729341637531,
+            "speedup_vs_openmm_cuda_mps_same_B": 0.46185396555323577
+          },
+          {
+            "B": 8,
+            "ms_per_step_batch": 2.425180822610855,
+            "ms_per_step_per_replica": 0.3031476028263569,
+            "ns_per_day_per_replica": 570.0193515928277,
+            "ns_per_day_aggregate": 570.0193515928277,
+            "speedup_vs_openmm_cuda_single_b1": 0.8129631726673725,
+            "speedup_vs_openmm_cuda_mps_same_B": 0.40838747427846844
+          },
+          {
+            "B": 16,
+            "ms_per_step_batch": 4.1867924109101295,
+            "ms_per_step_per_replica": 0.2616745256818831,
+            "ns_per_day_per_replica": 660.3623319836353,
+            "ns_per_day_aggregate": 660.3623319836353,
+            "speedup_vs_openmm_cuda_single_b1": 0.9418105806746717,
+            "speedup_vs_openmm_cuda_mps_same_B": 0.46627152874699274
+          },
+          {
+            "B": 32,
+            "ms_per_step_batch": 8.184171132743359,
+            "ms_per_step_per_replica": 0.25575534789822996,
+            "ns_per_day_per_replica": 675.6456958575916,
+            "ns_per_day_aggregate": 675.6456958575916,
+            "speedup_vs_openmm_cuda_single_b1": 0.9636077564184113,
+            "speedup_vs_openmm_cuda_mps_same_B": null
+          }
+        ]
+      },
+      {
+        "system": "Holo_DHFR_MTX_NADPH_24k",
+        "suites": [
+          "SuiteB"
+        ],
+        "kind": "holo_dhfr",
+        "n_real_atoms": 23558,
+        "bucket_atoms": 25000,
+        "bucket_waters": 8192,
+        "occupancy_pct": 94.232,
+        "electrostatics": "pme",
+        "pme_grid": [
+          60,
+          60,
+          60
+        ],
+        "openmm": {
+          "openmm_cuda_single_b1": {
+            "platform": "CUDA",
+            "precision": "single",
+            "ms_per_step": 0.24716972839087245,
+            "ns_per_day": 699.1147383822638,
+            "provenance": {
+              "platform_name": "CUDA",
+              "device_name": "NVIDIA A100-SXM4-80GB",
+              "device_index": "0",
+              "precision": "single",
+              "cuda_Compiler": "openmm-nvrtc-builtin",
+              "CudaDriverVersion": "590.48.01",
+              "lib_openmm_cuda_path": "/orcd/pool/008/so3_shared/marielle/projects/.venv/lib/python3.13/site-packages/OpenMM.libs/lib/plugins/libOpenMMCUDA.so",
+              "mps_active": false,
+              "cuda_mps_pipe_directory": null,
+              "plugin_load_failures": []
+            }
+          },
+          "openmm_cuda_mixed_b1": {
+            "platform": "CUDA",
+            "precision": "mixed",
+            "ms_per_step": 0.272760889492929,
+            "ns_per_day": 633.5219111553735,
+            "provenance": {
+              "platform_name": "CUDA",
+              "device_name": "NVIDIA A100-SXM4-80GB",
+              "device_index": "0",
+              "precision": "mixed",
+              "cuda_Compiler": "openmm-nvrtc-builtin",
+              "CudaDriverVersion": "590.48.01",
+              "lib_openmm_cuda_path": "/orcd/pool/008/so3_shared/marielle/projects/.venv/lib/python3.13/site-packages/OpenMM.libs/lib/plugins/libOpenMMCUDA.so",
+              "mps_active": false,
+              "cuda_mps_pipe_directory": null,
+              "plugin_load_failures": []
+            }
+          },
+          "openmm_cuda_mps_scaling": {
+            "B=1": {
+              "available": true,
+              "ok": true,
+              "replicas_B": 1,
+              "precision": "single",
+              "n_steps": 30,
+              "dt_fs": 2.0,
+              "wall_elapsed_s": 0.008348899893462658,
+              "ms_per_step_batch": 0.27829666311542195,
+              "ms_per_step_per_replica": 0.27829666311542195,
+              "per_replica_ns_per_day": 620.9201291369137,
+              "aggregate_ns_per_day": 620.9201291369137,
+              "total_gpu_memory_mb": 444.0,
+              "memory_mb_per_replica": 444.0,
+              "mps_info": {
+                "mps_active": false,
+                "started_by_harness": false
+              },
+              "provenance": {
+                "platform_name": "CUDA",
+                "device_name": "NVIDIA A100-SXM4-80GB",
+                "device_index": "0",
+                "precision": "single",
+                "cuda_Compiler": "openmm-nvrtc-builtin",
+                "CudaDriverVersion": "590.48.01",
+                "lib_openmm_cuda_path": "/orcd/pool/008/so3_shared/marielle/projects/.venv/lib/python3.13/site-packages/OpenMM.libs/lib/plugins/libOpenMMCUDA.so",
+                "mps_active": false,
+                "cuda_mps_pipe_directory": null,
+                "plugin_load_failures": []
+              }
+            },
+            "B=4": {
+              "available": true,
+              "ok": true,
+              "replicas_B": 4,
+              "precision": "single",
+              "n_steps": 30,
+              "dt_fs": 2.0,
+              "wall_elapsed_s": 0.016965444199740887,
+              "ms_per_step_batch": 0.5655148066580296,
+              "ms_per_step_per_replica": 0.1413787016645074,
+              "per_replica_ns_per_day": 305.56229114703495,
+              "aggregate_ns_per_day": 1222.2491645881398,
+              "total_gpu_memory_mb": 1768.0,
+              "memory_mb_per_replica": 442.0,
+              "mps_info": {
+                "mps_active": true,
+                "started_by_harness": true,
+                "pipe_dir": "/tmp/mps_28702584_3132712/pipe",
+                "log_dir": "/tmp/mps_28702584_3132712/log",
+                "stdout": "",
+                "stderr": ""
+              },
+              "provenance": {
+                "platform_name": "CUDA",
+                "device_name": "NVIDIA A100-SXM4-80GB",
+                "device_index": "0",
+                "precision": "single",
+                "cuda_Compiler": "openmm-nvrtc-builtin",
+                "CudaDriverVersion": "590.48.01",
+                "lib_openmm_cuda_path": "/orcd/pool/008/so3_shared/marielle/projects/.venv/lib/python3.13/site-packages/OpenMM.libs/lib/plugins/libOpenMMCUDA.so",
+                "mps_active": true,
+                "cuda_mps_pipe_directory": "/tmp/mps_28702584_3132712/pipe",
+                "plugin_load_failures": []
+              }
+            },
+            "B=8": {
+              "available": true,
+              "ok": true,
+              "replicas_B": 8,
+              "precision": "single",
+              "n_steps": 30,
+              "dt_fs": 2.0,
+              "wall_elapsed_s": 0.029768411070108414,
+              "ms_per_step_batch": 0.9922803690036138,
+              "ms_per_step_per_replica": 0.12403504612545173,
+              "per_replica_ns_per_day": 174.1443299674617,
+              "aggregate_ns_per_day": 1393.1546397396935,
+              "total_gpu_memory_mb": 3536.0,
+              "memory_mb_per_replica": 442.0,
+              "mps_info": {
+                "mps_active": true,
+                "started_by_harness": true,
+                "pipe_dir": "/tmp/mps_28702584_3133483/pipe",
+                "log_dir": "/tmp/mps_28702584_3133483/log",
+                "stdout": "",
+                "stderr": ""
+              },
+              "provenance": {
+                "platform_name": "CUDA",
+                "device_name": "NVIDIA A100-SXM4-80GB",
+                "device_index": "0",
+                "precision": "single",
+                "cuda_Compiler": "openmm-nvrtc-builtin",
+                "CudaDriverVersion": "590.48.01",
+                "lib_openmm_cuda_path": "/orcd/pool/008/so3_shared/marielle/projects/.venv/lib/python3.13/site-packages/OpenMM.libs/lib/plugins/libOpenMMCUDA.so",
+                "mps_active": true,
+                "cuda_mps_pipe_directory": "/tmp/mps_28702584_3133483/pipe",
+                "plugin_load_failures": []
+              }
+            },
+            "B=16": {
+              "available": true,
+              "ok": true,
+              "replicas_B": 16,
+              "precision": "single",
+              "n_steps": 30,
+              "dt_fs": 2.0,
+              "wall_elapsed_s": 0.06246748939156532,
+              "ms_per_step_batch": 2.0822496463855105,
+              "ms_per_step_per_replica": 0.1301406028990944,
+              "per_replica_ns_per_day": 82.98716741287782,
+              "aggregate_ns_per_day": 1327.7946786060452,
+              "total_gpu_memory_mb": 7072.0,
+              "memory_mb_per_replica": 442.0,
+              "mps_info": {
+                "mps_active": true,
+                "started_by_harness": true,
+                "pipe_dir": "/tmp/mps_28702584_3134843/pipe",
+                "log_dir": "/tmp/mps_28702584_3134843/log",
+                "stdout": "",
+                "stderr": ""
+              },
+              "provenance": {
+                "platform_name": "CUDA",
+                "device_name": "NVIDIA A100-SXM4-80GB",
+                "device_index": "0",
+                "precision": "single",
+                "cuda_Compiler": "openmm-nvrtc-builtin",
+                "CudaDriverVersion": "590.48.01",
+                "lib_openmm_cuda_path": "/orcd/pool/008/so3_shared/marielle/projects/.venv/lib/python3.13/site-packages/OpenMM.libs/lib/plugins/libOpenMMCUDA.so",
+                "mps_active": true,
+                "cuda_mps_pipe_directory": "/tmp/mps_28702584_3134843/pipe",
+                "plugin_load_failures": []
+              }
+            }
+          }
+        },
+        "substep_breakdown": {
+          "B=1": {
+            "total_substeps_ms": 0.46925172209739685,
+            "baoab_pre_force_ms": 0.0737864151597023,
+            "bonded_and_nonbonded_direct_mk48_ms": 0.08934430778026581,
+            "pme_spread_3d_bspline_ms": 0.0532984733581543,
+            "pme_rfft3d_and_influence_ms": 0.056747421622276306,
+            "pme_irfft3d_ms": 0.08071232587099075,
+            "pme_gather_3d_bspline_fused_scale_ms": 0.056773871183395386,
+            "baoab_post_force_ms": 0.058588907122612,
+            "baoab_pre_force_pct": 15.72427157643704,
+            "bonded_and_nonbonded_direct_mk48_pct": 19.03973998879043,
+            "pme_spread_3d_bspline_pct": 11.358183859172238,
+            "pme_rfft3d_and_influence_pct": 12.093172800439492,
+            "pme_irfft3d_pct": 17.20021942812141,
+            "pme_gather_3d_bspline_fused_scale_pct": 12.098809340461306,
+            "baoab_post_force_pct": 12.48560300657808,
+            "nonbonded_tile_pairs_mk51_ms_per_rep": 0.05744472146034241,
+            "num_valid_tile_pairs_aabb_pruned": 782
+          },
+          "B=4": {
+            "total_substeps_ms": 0.18137031234800816,
+            "baoab_pre_force_ms": 0.025311503559350967,
+            "bonded_and_nonbonded_direct_mk48_ms": 0.06364203058183193,
+            "pme_spread_3d_bspline_ms": 0.024359896779060364,
+            "pme_rfft3d_and_influence_ms": 0.014810319989919662,
+            "pme_irfft3d_ms": 0.02027115784585476,
+            "pme_gather_3d_bspline_fused_scale_ms": 0.018199747428297997,
+            "baoab_post_force_ms": 0.014775656163692474,
+            "baoab_pre_force_pct": 13.955703792792715,
+            "bonded_and_nonbonded_direct_mk48_pct": 35.08955228555676,
+            "pme_spread_3d_bspline_pct": 13.431027638260495,
+            "pme_rfft3d_and_influence_pct": 8.16579064025762,
+            "pme_irfft3d_pct": 11.176668101535295,
+            "pme_gather_3d_bspline_fused_scale_pct": 10.034579084462756,
+            "baoab_post_force_pct": 8.146678457134357,
+            "nonbonded_tile_pairs_mk51_ms_per_rep": 0.043079424649477005,
+            "num_valid_tile_pairs_aabb_pruned": 782
+          }
+        },
+        "batch_scaling": [
+          {
+            "B": 1,
+            "ms_per_step_batch": 0.5163985149314007,
+            "ms_per_step_per_replica": 0.5163985149314007,
+            "ns_per_day_per_replica": 334.62528454977274,
+            "ns_per_day_aggregate": 334.62528454977274,
+            "speedup_vs_openmm_cuda_single_b1": 0.47864143920651464,
+            "speedup_vs_openmm_cuda_mps_same_B": 0.5389184032653375
+          },
+          {
+            "B": 2,
+            "ms_per_step_batch": 0.752313295379281,
+            "ms_per_step_per_replica": 0.3761566476896405,
+            "ns_per_day_per_replica": 459.38308165318904,
+            "ns_per_day_aggregate": 459.38308165318904,
+            "speedup_vs_openmm_cuda_single_b1": 0.6570925435160921,
+            "speedup_vs_openmm_cuda_mps_same_B": null
+          },
+          {
+            "B": 4,
+            "ms_per_step_batch": 1.2323199616124234,
+            "ms_per_step_per_replica": 0.30807999040310585,
+            "ns_per_day_per_replica": 560.8932919463566,
+            "ns_per_day_aggregate": 560.8932919463566,
+            "speedup_vs_openmm_cuda_single_b1": 0.8022907559412228,
+            "speedup_vs_openmm_cuda_mps_same_B": 0.45890257747515856
+          },
+          {
+            "B": 8,
+            "ms_per_step_batch": 2.387109585106373,
+            "ms_per_step_per_replica": 0.2983886981382966,
+            "ns_per_day_per_replica": 579.1104055821544,
+            "ns_per_day_aggregate": 579.1104055821544,
+            "speedup_vs_openmm_cuda_single_b1": 0.8283481577318814,
+            "speedup_vs_openmm_cuda_mps_same_B": 0.4156827885886087
+          },
+          {
+            "B": 16,
+            "ms_per_step_batch": 4.301201291382313,
+            "ms_per_step_per_replica": 0.26882508071139455,
+            "ns_per_day_per_replica": 642.7971658846623,
+            "ns_per_day_aggregate": 642.7971658846623,
+            "speedup_vs_openmm_cuda_single_b1": 0.9194444496651305,
+            "speedup_vs_openmm_cuda_mps_same_B": 0.48410885827580524
+          },
+          {
+            "B": 32,
+            "ms_per_step_batch": 8.112737163901329,
+            "ms_per_step_per_replica": 0.25352303637191653,
+            "ns_per_day_per_replica": 681.5948659848945,
+            "ns_per_day_aggregate": 681.5948659848945,
+            "speedup_vs_openmm_cuda_single_b1": 0.9749399183917795,
+            "speedup_vs_openmm_cuda_mps_same_B": null
+          }
+        ]
+      },
+      {
+        "system": "1AKE_solvated_45k",
+        "suites": [
+          "SuiteB"
+        ],
+        "kind": "1ake_45k",
+        "n_real_atoms": 44999,
+        "bucket_atoms": 50000,
+        "bucket_waters": 16384,
+        "occupancy_pct": 89.998,
+        "electrostatics": "pme",
+        "pme_grid": [
+          80,
+          80,
+          80
+        ],
+        "openmm": {
+          "openmm_cuda_single_b1": {
+            "platform": "CUDA",
+            "precision": "single",
+            "ms_per_step": 5.752359610050917,
+            "ns_per_day": 30.039846552373394,
+            "provenance": {
+              "platform_name": "CUDA",
+              "device_name": "NVIDIA A100-SXM4-80GB",
+              "device_index": "0",
+              "precision": "single",
+              "cuda_Compiler": "openmm-nvrtc-builtin",
+              "CudaDriverVersion": "590.48.01",
+              "lib_openmm_cuda_path": "/orcd/pool/008/so3_shared/marielle/projects/.venv/lib/python3.13/site-packages/OpenMM.libs/lib/plugins/libOpenMMCUDA.so",
+              "mps_active": false,
+              "cuda_mps_pipe_directory": null,
+              "plugin_load_failures": []
+            }
+          },
+          "openmm_cuda_mixed_b1": {
+            "platform": "CUDA",
+            "precision": "mixed",
+            "ms_per_step": 5.651171249337494,
+            "ns_per_day": 30.577732009140213,
+            "provenance": {
+              "platform_name": "CUDA",
+              "device_name": "NVIDIA A100-SXM4-80GB",
+              "device_index": "0",
+              "precision": "mixed",
+              "cuda_Compiler": "openmm-nvrtc-builtin",
+              "CudaDriverVersion": "590.48.01",
+              "lib_openmm_cuda_path": "/orcd/pool/008/so3_shared/marielle/projects/.venv/lib/python3.13/site-packages/OpenMM.libs/lib/plugins/libOpenMMCUDA.so",
+              "mps_active": false,
+              "cuda_mps_pipe_directory": null,
+              "plugin_load_failures": []
+            }
+          },
+          "openmm_cuda_mps_scaling": {
+            "B=1": {
+              "available": true,
+              "ok": true,
+              "replicas_B": 1,
+              "precision": "single",
+              "n_steps": 30,
+              "dt_fs": 2.0,
+              "wall_elapsed_s": 0.17753342259675264,
+              "ms_per_step_batch": 5.917780753225088,
+              "ms_per_step_per_replica": 5.917780753225088,
+              "per_replica_ns_per_day": 29.200135524761876,
+              "aggregate_ns_per_day": 29.200135524761876,
+              "total_gpu_memory_mb": 462.0,
+              "memory_mb_per_replica": 462.0,
+              "mps_info": {
+                "mps_active": false,
+                "started_by_harness": false
+              },
+              "provenance": {
+                "platform_name": "CUDA",
+                "device_name": "NVIDIA A100-SXM4-80GB",
+                "device_index": "0",
+                "precision": "single",
+                "cuda_Compiler": "openmm-nvrtc-builtin",
+                "CudaDriverVersion": "590.48.01",
+                "lib_openmm_cuda_path": "/orcd/pool/008/so3_shared/marielle/projects/.venv/lib/python3.13/site-packages/OpenMM.libs/lib/plugins/libOpenMMCUDA.so",
+                "mps_active": false,
+                "cuda_mps_pipe_directory": null,
+                "plugin_load_failures": []
+              }
+            },
+            "B=4": {
+              "available": true,
+              "ok": true,
+              "replicas_B": 4,
+              "precision": "single",
+              "n_steps": 30,
+              "dt_fs": 2.0,
+              "wall_elapsed_s": 0.1937170447781682,
+              "ms_per_step_batch": 6.45723482593894,
+              "ms_per_step_per_replica": 1.614308706484735,
+              "per_replica_ns_per_day": 26.760680795726415,
+              "aggregate_ns_per_day": 107.04272318290566,
+              "total_gpu_memory_mb": 1840.0,
+              "memory_mb_per_replica": 460.0,
+              "mps_info": {
+                "mps_active": true,
+                "started_by_harness": true,
+                "pipe_dir": "/tmp/mps_28707394_3655060/pipe",
+                "log_dir": "/tmp/mps_28707394_3655060/log",
+                "stdout": "",
+                "stderr": ""
+              },
+              "provenance": {
+                "platform_name": "CUDA",
+                "device_name": "NVIDIA A100-SXM4-80GB",
+                "device_index": "0",
+                "precision": "single",
+                "cuda_Compiler": "openmm-nvrtc-builtin",
+                "CudaDriverVersion": "590.48.01",
+                "lib_openmm_cuda_path": "/orcd/pool/008/so3_shared/marielle/projects/.venv/lib/python3.13/site-packages/OpenMM.libs/lib/plugins/libOpenMMCUDA.so",
+                "mps_active": true,
+                "cuda_mps_pipe_directory": "/tmp/mps_28707394_3655060/pipe",
+                "plugin_load_failures": []
+              }
+            },
+            "B=8": {
+              "available": true,
+              "ok": true,
+              "replicas_B": 8,
+              "precision": "single",
+              "n_steps": 30,
+              "dt_fs": 2.0,
+              "wall_elapsed_s": 0.22082959301769733,
+              "ms_per_step_batch": 7.3609864339232445,
+              "ms_per_step_per_replica": 0.9201233042404056,
+              "per_replica_ns_per_day": 23.47511458568215,
+              "aggregate_ns_per_day": 187.8009166854572,
+              "total_gpu_memory_mb": 3680.0,
+              "memory_mb_per_replica": 460.0,
+              "mps_info": {
+                "mps_active": true,
+                "started_by_harness": true,
+                "pipe_dir": "/tmp/mps_28707394_3656785/pipe",
+                "log_dir": "/tmp/mps_28707394_3656785/log",
+                "stdout": "",
+                "stderr": ""
+              },
+              "provenance": {
+                "platform_name": "CUDA",
+                "device_name": "NVIDIA A100-SXM4-80GB",
+                "device_index": "0",
+                "precision": "single",
+                "cuda_Compiler": "openmm-nvrtc-builtin",
+                "CudaDriverVersion": "590.48.01",
+                "lib_openmm_cuda_path": "/orcd/pool/008/so3_shared/marielle/projects/.venv/lib/python3.13/site-packages/OpenMM.libs/lib/plugins/libOpenMMCUDA.so",
+                "mps_active": true,
+                "cuda_mps_pipe_directory": "/tmp/mps_28707394_3656785/pipe",
+                "plugin_load_failures": []
+              }
+            }
+          }
+        },
+        "substep_breakdown": {
+          "B=1": {
+            "total_substeps_ms": 0.5647219717502594,
+            "baoab_pre_force_ms": 0.08947044610977173,
+            "bonded_and_nonbonded_direct_mk48_ms": 0.12513279914855957,
+            "pme_spread_3d_bspline_ms": 0.06619580090045929,
+            "pme_rfft3d_and_influence_ms": 0.05741693079471588,
+            "pme_irfft3d_ms": 0.08563000708818436,
+            "pme_gather_3d_bspline_fused_scale_ms": 0.06236258894205094,
+            "baoab_post_force_ms": 0.07851339876651764,
+            "baoab_pre_force_pct": 15.843273431078543,
+            "bonded_and_nonbonded_direct_mk48_pct": 22.1583018561739,
+            "pme_spread_3d_bspline_pct": 11.721839101690465,
+            "pme_rfft3d_and_influence_pct": 10.167291812068495,
+            "pme_irfft3d_pct": 15.163215063651368,
+            "pme_gather_3d_bspline_fused_scale_pct": 11.043060490238894,
+            "baoab_post_force_pct": 13.903018245098338,
+            "nonbonded_tile_pairs_mk51_ms_per_rep": 0.08590415120124817,
+            "num_valid_tile_pairs_aabb_pruned": 1563
+          },
+          "B=4": null
+        },
+        "batch_scaling": [
+          {
+            "B": 1,
+            "ms_per_step_batch": 0.7911226153373718,
+            "ms_per_step_per_replica": 0.7911226153373718,
+            "ns_per_day_per_replica": 218.42379000417017,
+            "ns_per_day_aggregate": 218.42379000417017,
+            "speedup_vs_openmm_cuda_single_b1": 7.271135344295322,
+            "speedup_vs_openmm_cuda_mps_same_B": 7.4802320632705825
+          },
+          {
+            "B": 2,
+            "ms_per_step_batch": 1.2448620423674583,
+            "ms_per_step_per_replica": 0.6224310211837292,
+            "ns_per_day_per_replica": 277.6211244603005,
+            "ns_per_day_aggregate": 277.6211244603005,
+            "speedup_vs_openmm_cuda_single_b1": 9.241762403022864,
+            "speedup_vs_openmm_cuda_mps_same_B": null
+          },
+          {
+            "B": 4,
+            "ms_per_step_batch": 2.1311431005597115,
+            "ms_per_step_per_replica": 0.5327857751399279,
+            "ns_per_day_per_replica": 324.332983467167,
+            "ns_per_day_aggregate": 324.332983467167,
+            "speedup_vs_openmm_cuda_single_b1": 10.796758994813908,
+            "speedup_vs_openmm_cuda_mps_same_B": 3.0299395776112115
+          },
+          {
+            "B": 8,
+            "ms_per_step_batch": 4.138444395114978,
+            "ms_per_step_per_replica": 0.5173055493893722,
+            "ns_per_day_per_replica": 334.03855845732414,
+            "ns_per_day_aggregate": 334.03855845732414,
+            "speedup_vs_openmm_cuda_single_b1": 11.119849027022822,
+            "speedup_vs_openmm_cuda_mps_same_B": 1.7786843874505496
+          }
+        ]
+      },
+      {
+        "system": "ApoA1_92k_rf",
+        "suites": [
+          "SuiteA"
+        ],
+        "kind": "apoa1_rf",
+        "n_real_atoms": 92224,
+        "bucket_atoms": 100000,
+        "bucket_waters": 24576,
+        "occupancy_pct": 92.224,
+        "electrostatics": "rf",
+        "pme_grid": null,
+        "openmm": {
+          "openmm_cuda_single_b1": {
+            "platform": "CUDA",
+            "precision": "single",
+            "ms_per_step": 0.5760924657806754,
+            "ns_per_day": 299.9518484690387,
+            "provenance": {
+              "platform_name": "CUDA",
+              "device_name": "NVIDIA A100-SXM4-80GB",
+              "device_index": "0",
+              "precision": "single",
+              "cuda_Compiler": "openmm-nvrtc-builtin",
+              "CudaDriverVersion": "590.48.01",
+              "lib_openmm_cuda_path": "/orcd/pool/008/so3_shared/marielle/projects/.venv/lib/python3.13/site-packages/OpenMM.libs/lib/plugins/libOpenMMCUDA.so",
+              "mps_active": false,
+              "cuda_mps_pipe_directory": null,
+              "plugin_load_failures": []
+            }
+          },
+          "openmm_cuda_mixed_b1": {
+            "platform": "CUDA",
+            "precision": "mixed",
+            "ms_per_step": 0.6146995350718498,
+            "ns_per_day": 281.11295054062805,
+            "provenance": {
+              "platform_name": "CUDA",
+              "device_name": "NVIDIA A100-SXM4-80GB",
+              "device_index": "0",
+              "precision": "mixed",
+              "cuda_Compiler": "openmm-nvrtc-builtin",
+              "CudaDriverVersion": "590.48.01",
+              "lib_openmm_cuda_path": "/orcd/pool/008/so3_shared/marielle/projects/.venv/lib/python3.13/site-packages/OpenMM.libs/lib/plugins/libOpenMMCUDA.so",
+              "mps_active": false,
+              "cuda_mps_pipe_directory": null,
+              "plugin_load_failures": []
+            }
+          },
+          "openmm_cuda_mps_scaling": {
+            "B=1": {
+              "available": true,
+              "ok": true,
+              "replicas_B": 1,
+              "precision": "single",
+              "n_steps": 30,
+              "dt_fs": 2.0,
+              "wall_elapsed_s": 0.016480538062751293,
+              "ms_per_step_batch": 0.5493512687583765,
+              "ms_per_step_per_replica": 0.5493512687583765,
+              "per_replica_ns_per_day": 314.5528368225238,
+              "aggregate_ns_per_day": 314.5528368225238,
+              "total_gpu_memory_mb": 472.0,
+              "memory_mb_per_replica": 472.0,
+              "mps_info": {
+                "mps_active": false,
+                "started_by_harness": false
+              },
+              "provenance": {
+                "platform_name": "CUDA",
+                "device_name": "NVIDIA A100-SXM4-80GB",
+                "device_index": "0",
+                "precision": "single",
+                "cuda_Compiler": "openmm-nvrtc-builtin",
+                "CudaDriverVersion": "590.48.01",
+                "lib_openmm_cuda_path": "/orcd/pool/008/so3_shared/marielle/projects/.venv/lib/python3.13/site-packages/OpenMM.libs/lib/plugins/libOpenMMCUDA.so",
+                "mps_active": false,
+                "cuda_mps_pipe_directory": null,
+                "plugin_load_failures": []
+              }
+            },
+            "B=2": {
+              "available": true,
+              "ok": true,
+              "replicas_B": 2,
+              "precision": "single",
+              "n_steps": 30,
+              "dt_fs": 2.0,
+              "wall_elapsed_s": 0.0235643545165658,
+              "ms_per_step_batch": 0.7854784838855267,
+              "ms_per_step_per_replica": 0.39273924194276333,
+              "per_replica_ns_per_day": 219.99329522714635,
+              "aggregate_ns_per_day": 439.9865904542927,
+              "total_gpu_memory_mb": 940.0,
+              "memory_mb_per_replica": 470.0,
+              "mps_info": {
+                "mps_active": true,
+                "started_by_harness": true,
+                "pipe_dir": "/tmp/mps_28702584_3147298/pipe",
+                "log_dir": "/tmp/mps_28702584_3147298/log",
+                "stdout": "",
+                "stderr": ""
+              },
+              "provenance": {
+                "platform_name": "CUDA",
+                "device_name": "NVIDIA A100-SXM4-80GB",
+                "device_index": "0",
+                "precision": "single",
+                "cuda_Compiler": "openmm-nvrtc-builtin",
+                "CudaDriverVersion": "590.48.01",
+                "lib_openmm_cuda_path": "/orcd/pool/008/so3_shared/marielle/projects/.venv/lib/python3.13/site-packages/OpenMM.libs/lib/plugins/libOpenMMCUDA.so",
+                "mps_active": true,
+                "cuda_mps_pipe_directory": "/tmp/mps_28702584_3147298/pipe",
+                "plugin_load_failures": []
+              }
+            },
+            "B=4": {
+              "available": true,
+              "ok": true,
+              "replicas_B": 4,
+              "precision": "single",
+              "n_steps": 30,
+              "dt_fs": 2.0,
+              "wall_elapsed_s": 0.04137813486158848,
+              "ms_per_step_batch": 1.3792711620529492,
+              "ms_per_step_per_replica": 0.3448177905132373,
+              "per_replica_ns_per_day": 125.28355899415689,
+              "aggregate_ns_per_day": 501.13423597662756,
+              "total_gpu_memory_mb": 1880.0,
+              "memory_mb_per_replica": 470.0,
+              "mps_info": {
+                "mps_active": true,
+                "started_by_harness": true,
+                "pipe_dir": "/tmp/mps_28702584_3147801/pipe",
+                "log_dir": "/tmp/mps_28702584_3147801/log",
+                "stdout": "",
+                "stderr": ""
+              },
+              "provenance": {
+                "platform_name": "CUDA",
+                "device_name": "NVIDIA A100-SXM4-80GB",
+                "device_index": "0",
+                "precision": "single",
+                "cuda_Compiler": "openmm-nvrtc-builtin",
+                "CudaDriverVersion": "590.48.01",
+                "lib_openmm_cuda_path": "/orcd/pool/008/so3_shared/marielle/projects/.venv/lib/python3.13/site-packages/OpenMM.libs/lib/plugins/libOpenMMCUDA.so",
+                "mps_active": true,
+                "cuda_mps_pipe_directory": "/tmp/mps_28702584_3147801/pipe",
+                "plugin_load_failures": []
+              }
+            }
+          }
+        },
+        "substep_breakdown": {
+          "B=1": {
+            "total_substeps_ms": 0.5042317882180214,
+            "baoab_pre_force_ms": 0.09110476821660995,
+            "bonded_and_nonbonded_direct_mk48_ms": 0.35083871334791183,
+            "pme_spread_3d_bspline_ms": 0.0,
+            "pme_rfft3d_and_influence_ms": 0.0,
+            "pme_irfft3d_ms": 0.0,
+            "pme_gather_3d_bspline_fused_scale_ms": 0.0,
+            "baoab_post_force_ms": 0.0622883066534996,
+            "baoab_pre_force_pct": 18.068033461075203,
+            "bonded_and_nonbonded_direct_mk48_pct": 69.57885669758984,
+            "pme_spread_3d_bspline_pct": 0.0,
+            "pme_rfft3d_and_influence_pct": 0.0,
+            "pme_irfft3d_pct": 0.0,
+            "pme_gather_3d_bspline_fused_scale_pct": 0.0,
+            "baoab_post_force_pct": 12.35310984133495,
+            "nonbonded_tile_pairs_mk51_ms_per_rep": 0.10724294930696487,
+            "num_valid_tile_pairs_aabb_pruned": 3125
+          },
+          "B=4": null
+        },
+        "batch_scaling": [
+          {
+            "B": 1,
+            "ms_per_step_batch": 1.799820028245449,
+            "ms_per_step_per_replica": 1.799820028245449,
+            "ns_per_day_per_replica": 96.00959945337074,
+            "ns_per_day_aggregate": 96.00959945337074,
+            "speedup_vs_openmm_cuda_single_b1": 0.3200833731927508,
+            "speedup_vs_openmm_cuda_mps_same_B": 0.30522566708734233
+          },
+          {
+            "B": 2,
+            "ms_per_step_batch": 2.7056563273072243,
+            "ms_per_step_per_replica": 1.3528281636536121,
+            "ns_per_day_per_replica": 127.73240877342124,
+            "ns_per_day_aggregate": 127.73240877342124,
+            "speedup_vs_openmm_cuda_single_b1": 0.42584304589343414,
+            "speedup_vs_openmm_cuda_mps_same_B": 0.29030977658099905
+          },
+          {
+            "B": 4,
+            "ms_per_step_batch": 4.675959013402462,
+            "ms_per_step_per_replica": 1.1689897533506155,
+            "ns_per_day_per_replica": 147.8199441053373,
+            "ns_per_day_aggregate": 147.8199441053373,
+            "speedup_vs_openmm_cuda_single_b1": 0.49281224589817924,
+            "speedup_vs_openmm_cuda_mps_same_B": 0.29497075532518885
+          }
+        ]
+      },
+      {
+        "system": "ApoA1_92k_pme",
+        "suites": [
+          "SuiteA",
+          "SuiteB"
+        ],
+        "kind": "apoa1_pme",
+        "n_real_atoms": 92224,
+        "bucket_atoms": 100000,
+        "bucket_waters": 24576,
+        "occupancy_pct": 92.224,
+        "electrostatics": "pme",
+        "pme_grid": [
+          96,
+          96,
+          64
+        ],
+        "openmm": {
+          "openmm_cuda_single_b1": {
+            "platform": "CUDA",
+            "precision": "single",
+            "ms_per_step": 0.7602211786434054,
+            "ns_per_day": 227.30227051600562,
+            "provenance": {
+              "platform_name": "CUDA",
+              "device_name": "NVIDIA A100-SXM4-80GB",
+              "device_index": "0",
+              "precision": "single",
+              "cuda_Compiler": "openmm-nvrtc-builtin",
+              "CudaDriverVersion": "590.48.01",
+              "lib_openmm_cuda_path": "/orcd/pool/008/so3_shared/marielle/projects/.venv/lib/python3.13/site-packages/OpenMM.libs/lib/plugins/libOpenMMCUDA.so",
+              "mps_active": false,
+              "cuda_mps_pipe_directory": null,
+              "plugin_load_failures": []
+            }
+          },
+          "openmm_cuda_mixed_b1": {
+            "platform": "CUDA",
+            "precision": "mixed",
+            "ms_per_step": 0.7789613911882043,
+            "ns_per_day": 221.8338443403672,
+            "provenance": {
+              "platform_name": "CUDA",
+              "device_name": "NVIDIA A100-SXM4-80GB",
+              "device_index": "0",
+              "precision": "mixed",
+              "cuda_Compiler": "openmm-nvrtc-builtin",
+              "CudaDriverVersion": "590.48.01",
+              "lib_openmm_cuda_path": "/orcd/pool/008/so3_shared/marielle/projects/.venv/lib/python3.13/site-packages/OpenMM.libs/lib/plugins/libOpenMMCUDA.so",
+              "mps_active": false,
+              "cuda_mps_pipe_directory": null,
+              "plugin_load_failures": []
+            }
+          },
+          "openmm_cuda_mps_scaling": {
+            "B=1": {
+              "available": true,
+              "ok": true,
+              "replicas_B": 1,
+              "precision": "single",
+              "n_steps": 30,
+              "dt_fs": 2.0,
+              "wall_elapsed_s": 0.452924576587975,
+              "ms_per_step_batch": 15.097485886265835,
+              "ms_per_step_per_replica": 15.097485886265835,
+              "per_replica_ns_per_day": 11.445614276559512,
+              "aggregate_ns_per_day": 11.445614276559512,
+              "total_gpu_memory_mb": 504.0,
+              "memory_mb_per_replica": 504.0,
+              "mps_info": {
+                "mps_active": false,
+                "started_by_harness": false
+              },
+              "provenance": {
+                "platform_name": "CUDA",
+                "device_name": "NVIDIA A100-SXM4-80GB",
+                "device_index": "0",
+                "precision": "single",
+                "cuda_Compiler": "openmm-nvrtc-builtin",
+                "CudaDriverVersion": "590.48.01",
+                "lib_openmm_cuda_path": "/orcd/pool/008/so3_shared/marielle/projects/.venv/lib/python3.13/site-packages/OpenMM.libs/lib/plugins/libOpenMMCUDA.so",
+                "mps_active": false,
+                "cuda_mps_pipe_directory": null,
+                "plugin_load_failures": []
+              }
+            },
+            "B=2": {
+              "available": true,
+              "ok": true,
+              "replicas_B": 2,
+              "precision": "single",
+              "n_steps": 30,
+              "dt_fs": 2.0,
+              "wall_elapsed_s": 0.46498516108840704,
+              "ms_per_step_batch": 15.499505369613567,
+              "ms_per_step_per_replica": 7.749752684806784,
+              "per_replica_ns_per_day": 11.148742871419014,
+              "aggregate_ns_per_day": 22.297485742838028,
+              "total_gpu_memory_mb": 1004.0,
+              "memory_mb_per_replica": 502.0,
+              "mps_info": {
+                "mps_active": true,
+                "started_by_harness": true,
+                "pipe_dir": "/tmp/mps_28702584_3151172/pipe",
+                "log_dir": "/tmp/mps_28702584_3151172/log",
+                "stdout": "",
+                "stderr": ""
+              },
+              "provenance": {
+                "platform_name": "CUDA",
+                "device_name": "NVIDIA A100-SXM4-80GB",
+                "device_index": "0",
+                "precision": "single",
+                "cuda_Compiler": "openmm-nvrtc-builtin",
+                "CudaDriverVersion": "590.48.01",
+                "lib_openmm_cuda_path": "/orcd/pool/008/so3_shared/marielle/projects/.venv/lib/python3.13/site-packages/OpenMM.libs/lib/plugins/libOpenMMCUDA.so",
+                "mps_active": true,
+                "cuda_mps_pipe_directory": "/tmp/mps_28702584_3151172/pipe",
+                "plugin_load_failures": []
+              }
+            },
+            "B=4": {
+              "available": true,
+              "ok": true,
+              "replicas_B": 4,
+              "precision": "single",
+              "n_steps": 30,
+              "dt_fs": 2.0,
+              "wall_elapsed_s": 0.5026064272969961,
+              "ms_per_step_batch": 16.75354757656654,
+              "ms_per_step_per_replica": 4.188386894141635,
+              "per_replica_ns_per_day": 10.31423340103192,
+              "aggregate_ns_per_day": 41.25693360412768,
+              "total_gpu_memory_mb": 2008.0,
+              "memory_mb_per_replica": 502.0,
+              "mps_info": {
+                "mps_active": true,
+                "started_by_harness": true,
+                "pipe_dir": "/tmp/mps_28702584_3151672/pipe",
+                "log_dir": "/tmp/mps_28702584_3151672/log",
+                "stdout": "",
+                "stderr": ""
+              },
+              "provenance": {
+                "platform_name": "CUDA",
+                "device_name": "NVIDIA A100-SXM4-80GB",
+                "device_index": "0",
+                "precision": "single",
+                "cuda_Compiler": "openmm-nvrtc-builtin",
+                "CudaDriverVersion": "590.48.01",
+                "lib_openmm_cuda_path": "/orcd/pool/008/so3_shared/marielle/projects/.venv/lib/python3.13/site-packages/OpenMM.libs/lib/plugins/libOpenMMCUDA.so",
+                "mps_active": true,
+                "cuda_mps_pipe_directory": "/tmp/mps_28702584_3151672/pipe",
+                "plugin_load_failures": []
+              }
+            }
+          }
+        },
+        "substep_breakdown": {
+          "B=1": {
+            "total_substeps_ms": 0.7605131715536118,
+            "baoab_pre_force_ms": 0.09076494723558426,
+            "bonded_and_nonbonded_direct_mk48_ms": 0.3145107999444008,
+            "pme_spread_3d_bspline_ms": 0.0929795578122139,
+            "pme_rfft3d_and_influence_ms": 0.05524292588233948,
+            "pme_irfft3d_ms": 0.08000943809747696,
+            "pme_gather_3d_bspline_fused_scale_ms": 0.06859377026557922,
+            "baoab_post_force_ms": 0.05841173231601715,
+            "baoab_pre_force_pct": 11.934697600327604,
+            "bonded_and_nonbonded_direct_mk48_pct": 41.35507598138024,
+            "pme_spread_3d_bspline_pct": 12.225897103434898,
+            "pme_rfft3d_and_influence_pct": 7.263901264127569,
+            "pme_irfft3d_pct": 10.520453963214068,
+            "pme_gather_3d_bspline_fused_scale_pct": 9.01940595262179,
+            "baoab_post_force_pct": 7.6805681348938295,
+            "nonbonded_tile_pairs_mk51_ms_per_rep": 0.15680313110351562,
+            "num_valid_tile_pairs_aabb_pruned": 3125
+          },
+          "B=4": null
+        },
+        "batch_scaling": [
+          {
+            "B": 1,
+            "ms_per_step_batch": 1.7799845337867737,
+            "ms_per_step_per_replica": 1.7799845337867737,
+            "ns_per_day_per_replica": 97.0794951978498,
+            "ns_per_day_aggregate": 97.0794951978498,
+            "speedup_vs_openmm_cuda_single_b1": 0.4270942607720844,
+            "speedup_vs_openmm_cuda_mps_same_B": 8.48180734140827
+          },
+          {
+            "B": 2,
+            "ms_per_step_batch": 2.9029709845781326,
+            "ms_per_step_per_replica": 1.4514854922890663,
+            "ns_per_day_per_replica": 119.05044929349285,
+            "ns_per_day_aggregate": 119.05044929349285,
+            "speedup_vs_openmm_cuda_single_b1": 0.5237538939810539,
+            "speedup_vs_openmm_cuda_mps_same_B": 5.339187147220486
+          },
+          {
+            "B": 4,
+            "ms_per_step_batch": 5.2844347059726715,
+            "ms_per_step_per_replica": 1.3211086764931679,
+            "ns_per_day_per_replica": 130.79923179271742,
+            "ns_per_day_aggregate": 130.79923179271742,
+            "speedup_vs_openmm_cuda_single_b1": 0.5754418180504145,
+            "speedup_vs_openmm_cuda_mps_same_B": 3.1703575706273814
+          }
+        ]
       }
     ]
+  },
+  "suite_c": {
+    "congeneric_holo_dhfr_screen": {
+      "bucket_atoms": 25000,
+      "n_real_atoms": 23558,
+      "n_ligand_atoms": 63,
+      "pme_grid": [
+        60,
+        60,
+        60
+      ],
+      "batch_scaling": [
+        {
+          "B": 1,
+          "prolix_ms_per_step_batch": 0.5455497279763222,
+          "prolix_ms_per_step_per_replica": 0.5455497279763222,
+          "prolix_ns_per_day_per_replica": 316.7447276364508,
+          "prolix_ns_per_day_aggregate": 316.7447276364508,
+          "openmm_cuda_mps": {
+            "available": true,
+            "ok": true,
+            "replicas_B": 1,
+            "precision": "single",
+            "n_steps": 30,
+            "dt_fs": 2.0,
+            "wall_elapsed_s": 0.008457524701952934,
+            "ms_per_step_batch": 0.2819174900650978,
+            "ms_per_step_per_replica": 0.2819174900650978,
+            "per_replica_ns_per_day": 612.9452981441435,
+            "aggregate_ns_per_day": 612.9452981441435,
+            "total_gpu_memory_mb": 444.0,
+            "memory_mb_per_replica": 444.0,
+            "mps_info": {
+              "mps_active": false,
+              "started_by_harness": false
+            },
+            "provenance": {
+              "platform_name": "CUDA",
+              "device_name": "NVIDIA A100-SXM4-80GB",
+              "device_index": "0",
+              "precision": "single",
+              "cuda_Compiler": "openmm-nvrtc-builtin",
+              "CudaDriverVersion": "590.48.01",
+              "lib_openmm_cuda_path": "/orcd/pool/008/so3_shared/marielle/projects/.venv/lib/python3.13/site-packages/OpenMM.libs/lib/plugins/libOpenMMCUDA.so",
+              "mps_active": false,
+              "cuda_mps_pipe_directory": null,
+              "plugin_load_failures": []
+            }
+          },
+          "speedup_vs_openmm_cuda_mps": 0.5167585567512802
+        },
+        {
+          "B": 2,
+          "prolix_ms_per_step_batch": 0.8675527945160866,
+          "prolix_ms_per_step_per_replica": 0.4337763972580433,
+          "prolix_ns_per_day_per_replica": 398.3619235446906,
+          "prolix_ns_per_day_aggregate": 398.3619235446906,
+          "openmm_cuda_mps": null,
+          "speedup_vs_openmm_cuda_mps": null
+        },
+        {
+          "B": 4,
+          "prolix_ms_per_step_batch": 1.3873524591326714,
+          "prolix_ms_per_step_per_replica": 0.34683811478316784,
+          "prolix_ns_per_day_per_replica": 498.2151402478619,
+          "prolix_ns_per_day_aggregate": 498.2151402478619,
+          "openmm_cuda_mps": {
+            "available": true,
+            "ok": true,
+            "replicas_B": 4,
+            "precision": "single",
+            "n_steps": 30,
+            "dt_fs": 2.0,
+            "wall_elapsed_s": 0.017617516219615936,
+            "ms_per_step_batch": 0.5872505406538645,
+            "ms_per_step_per_replica": 0.14681263516346613,
+            "per_replica_ns_per_day": 294.25260265848146,
+            "aggregate_ns_per_day": 1177.0104106339259,
+            "total_gpu_memory_mb": 1768.0,
+            "memory_mb_per_replica": 442.0,
+            "mps_info": {
+              "mps_active": true,
+              "started_by_harness": true,
+              "pipe_dir": "/tmp/mps_28707394_3701940/pipe",
+              "log_dir": "/tmp/mps_28707394_3701940/log",
+              "stdout": "",
+              "stderr": ""
+            },
+            "provenance": {
+              "platform_name": "CUDA",
+              "device_name": "NVIDIA A100-SXM4-80GB",
+              "device_index": "0",
+              "precision": "single",
+              "cuda_Compiler": "openmm-nvrtc-builtin",
+              "CudaDriverVersion": "590.48.01",
+              "lib_openmm_cuda_path": "/orcd/pool/008/so3_shared/marielle/projects/.venv/lib/python3.13/site-packages/OpenMM.libs/lib/plugins/libOpenMMCUDA.so",
+              "mps_active": true,
+              "cuda_mps_pipe_directory": "/tmp/mps_28707394_3701940/pipe",
+              "plugin_load_failures": []
+            }
+          },
+          "speedup_vs_openmm_cuda_mps": 0.42328864362340546
+        },
+        {
+          "B": 8,
+          "prolix_ms_per_step_batch": 2.4081941321492195,
+          "prolix_ms_per_step_per_replica": 0.30102426651865244,
+          "prolix_ns_per_day_per_replica": 574.0400998179751,
+          "prolix_ns_per_day_aggregate": 574.0400998179751,
+          "openmm_cuda_mps": {
+            "available": true,
+            "ok": true,
+            "replicas_B": 8,
+            "precision": "single",
+            "n_steps": 30,
+            "dt_fs": 2.0,
+            "wall_elapsed_s": 0.029209984466433525,
+            "ms_per_step_batch": 0.9736661488811175,
+            "ms_per_step_per_replica": 0.12170826861013968,
+            "per_replica_ns_per_day": 177.47356236896195,
+            "aggregate_ns_per_day": 1419.7884989516956,
+            "total_gpu_memory_mb": 3536.0,
+            "memory_mb_per_replica": 442.0,
+            "mps_info": {
+              "mps_active": true,
+              "started_by_harness": true,
+              "pipe_dir": "/tmp/mps_28707394_3707542/pipe",
+              "log_dir": "/tmp/mps_28707394_3707542/log",
+              "stdout": "",
+              "stderr": ""
+            },
+            "provenance": {
+              "platform_name": "CUDA",
+              "device_name": "NVIDIA A100-SXM4-80GB",
+              "device_index": "0",
+              "precision": "single",
+              "cuda_Compiler": "openmm-nvrtc-builtin",
+              "CudaDriverVersion": "590.48.01",
+              "lib_openmm_cuda_path": "/orcd/pool/008/so3_shared/marielle/projects/.venv/lib/python3.13/site-packages/OpenMM.libs/lib/plugins/libOpenMMCUDA.so",
+              "mps_active": true,
+              "cuda_mps_pipe_directory": "/tmp/mps_28707394_3707542/pipe",
+              "plugin_load_failures": []
+            }
+          },
+          "speedup_vs_openmm_cuda_mps": 0.40431381169929115
+        },
+        {
+          "B": 16,
+          "prolix_ms_per_step_batch": 4.3249281868338585,
+          "prolix_ms_per_step_per_replica": 0.27030801167711616,
+          "prolix_ns_per_day_per_replica": 639.2707301861633,
+          "prolix_ns_per_day_aggregate": 639.2707301861633,
+          "openmm_cuda_mps": null,
+          "speedup_vs_openmm_cuda_mps": null
+        }
+      ]
+    },
+    "cross_size_ragged_screen": {
+      "systems": [
+        "1UAO_2k",
+        "1VII_4k",
+        "1UBQ_7k",
+        "Holo_Lysozyme_15k",
+        "Holo_DHFR_24k"
+      ],
+      "n_real_atoms_list": [
+        1962,
+        4199,
+        6656,
+        15002,
+        23558
+      ],
+      "bucket_atoms": 25000,
+      "prolix_ms_per_step_batch": 1.3034334406256676,
+      "prolix_ms_per_step_per_replica": 0.2606866881251335,
+      "prolix_ns_per_day_per_replica": 662.8646872718464,
+      "prolix_ns_per_day_aggregate": 662.8646872718464,
+      "openmm_cuda_mps": {
+        "available": true,
+        "ok": true,
+        "replicas_B": 5,
+        "precision": "single",
+        "n_steps": 30,
+        "dt_fs": 2.0,
+        "wall_elapsed_s": 0.013356572017073631,
+        "ms_per_step_batch": 0.4452190672357877,
+        "ms_per_step_per_replica": 0.08904381344715753,
+        "per_replica_ns_per_day": 388.1235389868989,
+        "aggregate_ns_per_day": 1940.6176949344945,
+        "total_gpu_memory_mb": 2176.0,
+        "memory_mb_per_replica": 435.2,
+        "mps_info": {
+          "mps_active": true,
+          "started_by_harness": true,
+          "pipe_dir": "/tmp/mps_28707394_3721815/pipe",
+          "log_dir": "/tmp/mps_28707394_3721815/log",
+          "stdout": "",
+          "stderr": ""
+        },
+        "provenance": {
+          "platform_name": "CUDA",
+          "device_name": "NVIDIA A100-SXM4-80GB",
+          "device_index": "0",
+          "precision": "single",
+          "cuda_Compiler": "openmm-nvrtc-builtin",
+          "CudaDriverVersion": "590.48.01",
+          "lib_openmm_cuda_path": "/orcd/pool/008/so3_shared/marielle/projects/.venv/lib/python3.13/site-packages/OpenMM.libs/lib/plugins/libOpenMMCUDA.so",
+          "mps_active": true,
+          "cuda_mps_pipe_directory": "/tmp/mps_28707394_3721815/pipe",
+          "plugin_load_failures": []
+        }
+      },
+      "speedup_vs_openmm_cuda_mps": 0.34157407149388147
+    }
   }
 }

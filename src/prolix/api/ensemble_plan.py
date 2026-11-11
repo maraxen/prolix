@@ -20,6 +20,8 @@ from __future__ import annotations
 import dataclasses
 from typing import TYPE_CHECKING, Any, Literal, NamedTuple
 
+import jax
+
 from prolix.api.bundle_md import (
     _host_float,
     active_positions,
@@ -118,6 +120,25 @@ _STACKED_JIT_FN_CACHE: dict[Any, tuple[Any, Any]] = {}
 #: Cache for canonical (neighbor_fn, seed_template) keyed by bucket size + box + cutoff/skin so stacked NeighborList shares PyTreeDef across batches.
 _STACKED_NL_SEED_CACHE: dict[Any, tuple[Any, Any]] = {}
 
+#: Cache for active atom/water counts and cutoff values per bundle identity to avoid synchronous GPU->CPU transfers on warm EnsemblePlan.run() calls.
+_ACTIVE_ATOM_ENV_CACHE: dict[Any, tuple[int | None, int | None]] = {}
+_BUNDLE_CUTOFF_CACHE: dict[int, float] = {}
+
+
+def _cached_bundle_cutoff(bundle: Any, default: float = 9.0) -> float:
+    bid = id(bundle)
+    cached = _BUNDLE_CUTOFF_CACHE.get(bid)
+    if cached is not None:
+        return cached
+    raw = getattr(bundle, "cutoff_distance", default)
+    if isinstance(raw, jax.core.Tracer):
+        return float(default)
+    val = _host_float(raw, default)
+    if len(_BUNDLE_CUTOFF_CACHE) >= 256:
+        _BUNDLE_CUTOFF_CACHE.pop(next(iter(_BUNDLE_CUTOFF_CACHE)))
+    _BUNDLE_CUTOFF_CACHE[bid] = val
+    return val
+
 
 import contextlib as _contextlib
 
@@ -143,42 +164,56 @@ def _scoped_active_atom_env(bundles: list[Any], n_padded: int | None):
             and not any(isinstance(getattr(b, "n_atoms", None), jax.core.Tracer) for b in bundles)
         ):
             n_pad_i = int(n_padded)
-            real_counts = []
-            for b in bundles:
-                na = int(b.n_atoms if isinstance(b.n_atoms, int) else int(np.asarray(b.n_atoms)))
-                am = getattr(b, "atom_mask", None)
-                if na >= n_pad_i and am is not None and not isinstance(am, jax.core.Tracer):
-                    am_np = np.asarray(am, dtype=bool)
-                    nz = np.nonzero(am_np)[0]
-                    if nz.size > 0:
-                        na = min(na, int(nz[-1]) + 1)
-                real_counts.append(na)
-            max_real_a = max(real_counts)
-            is_implicit = getattr(bundles[0], "box", None) is None
-            if (is_implicit and 0 < max_real_a < n_pad_i) or (
-                n_pad_i >= 4096 and 0 < max_real_a <= int(0.75 * n_pad_i)
-            ):
-                gran = 32 if is_implicit else 1024
-                clamped_a = min(n_pad_i, max(gran, ((max_real_a + gran - 1) // gran) * gran))
-                if clamped_a < n_pad_i:
-                    os.environ["PROLIX_ACTIVE_ATOMS"] = str(clamped_a)
-                    did_set_a = True
-                if not is_implicit and not os.environ.get("PROLIX_ACTIVE_WATERS", "").strip():
-                    w_counts = []
-                    w_pads = []
-                    for b in bundles:
-                        wm = getattr(b, "water_mask", None)
-                        wi = getattr(b, "water_indices", None)
-                        if wm is not None and wi is not None and not isinstance(wm, jax.core.Tracer):
-                            w_counts.append(int(np.sum(np.asarray(wm, dtype=np.int32))))
-                            w_pads.append(int(wi.shape[0]))
-                    if w_counts and w_pads:
-                        max_real_w = max(w_counts)
-                        max_pad_w = max(w_pads)
-                        if 0 < max_real_w < max_pad_w:
-                            clamped_w = min(max_pad_w, max(512, ((max_real_w + 511) // 512) * 512))
-                            os.environ["PROLIX_ACTIVE_WATERS"] = str(clamped_w)
-                            did_set_w = True
+            env_key = (n_pad_i, tuple(id(b) for b in bundles))
+            cached_aw = _ACTIVE_ATOM_ENV_CACHE.get(env_key)
+            if cached_aw is not None:
+                clamped_a_opt, clamped_w_opt = cached_aw
+            else:
+                real_counts = []
+                for b in bundles:
+                    na = int(b.n_atoms if isinstance(b.n_atoms, int) else int(np.asarray(b.n_atoms)))
+                    am = getattr(b, "atom_mask", None)
+                    if na >= n_pad_i and am is not None and not isinstance(am, jax.core.Tracer):
+                        am_np = np.asarray(am, dtype=bool)
+                        nz = np.nonzero(am_np)[0]
+                        if nz.size > 0:
+                            na = min(na, int(nz[-1]) + 1)
+                    real_counts.append(na)
+                max_real_a = max(real_counts)
+                is_implicit = getattr(bundles[0], "box", None) is None
+                clamped_a_opt = None
+                clamped_w_opt = None
+                if (is_implicit and 0 < max_real_a < n_pad_i) or (
+                    n_pad_i >= 4096 and 0 < max_real_a <= int(0.75 * n_pad_i)
+                ):
+                    gran = 32 if is_implicit else 1024
+                    clamped_a = min(n_pad_i, max(gran, ((max_real_a + gran - 1) // gran) * gran))
+                    if clamped_a < n_pad_i:
+                        clamped_a_opt = clamped_a
+                    if not is_implicit:
+                        w_counts = []
+                        w_pads = []
+                        for b in bundles:
+                            wm = getattr(b, "water_mask", None)
+                            wi = getattr(b, "water_indices", None)
+                            if wm is not None and wi is not None and not isinstance(wm, jax.core.Tracer):
+                                w_counts.append(int(np.sum(np.asarray(wm, dtype=np.int32))))
+                                w_pads.append(int(wi.shape[0]))
+                        if w_counts and w_pads:
+                            max_real_w = max(w_counts)
+                            max_pad_w = max(w_pads)
+                            if 0 < max_real_w < max_pad_w:
+                                clamped_w_opt = min(max_pad_w, max(512, ((max_real_w + 511) // 512) * 512))
+                if len(_ACTIVE_ATOM_ENV_CACHE) >= 256:
+                    _ACTIVE_ATOM_ENV_CACHE.pop(next(iter(_ACTIVE_ATOM_ENV_CACHE)))
+                _ACTIVE_ATOM_ENV_CACHE[env_key] = (clamped_a_opt, clamped_w_opt)
+
+            if clamped_a_opt is not None:
+                os.environ["PROLIX_ACTIVE_ATOMS"] = str(clamped_a_opt)
+                did_set_a = True
+            if clamped_w_opt is not None and not os.environ.get("PROLIX_ACTIVE_WATERS", "").strip():
+                os.environ["PROLIX_ACTIVE_WATERS"] = str(clamped_w_opt)
+                did_set_w = True
         yield
     finally:
         if did_set_a:
@@ -482,7 +517,7 @@ class EnsemblePlan:
         )
 
         used_legacy = use_neighbor_list is not None or use_flash_forces is not None
-        cutoff0 = _host_float(getattr(self.bundles[0], "cutoff_distance", 9.0), 9.0)
+        cutoff0 = _cached_bundle_cutoff(self.bundles[0], 9.0)
         if nonbonded is None:
             use_neighbor_list, use_flash_forces = self._resolve_nonbonded_defaults(
                 run_mode, use_neighbor_list, use_flash_forces
@@ -1784,7 +1819,10 @@ class EnsemblePlan:
         @jax.jit
         def _reseed(seed_u32: Any, kT_val: Any) -> Any:
             k = jax.random.PRNGKey(seed_u32)
-            return fast_init_fn(k, positions_init, kT=kT_val)
+            st = fast_init_fn(k, positions_init, kT=kT_val)
+            if hasattr(st, "force") and hasattr(state0, "force") and st.force.dtype != state0.force.dtype:
+                st = dataclasses.replace(st, force=st.force.astype(state0.force.dtype))
+            return st
 
         return _reseed
 
@@ -1892,9 +1930,8 @@ class EnsemblePlan:
             and not isinstance(dt, jax.core.Tracer)
             and not isinstance(kT, jax.core.Tracer)
             and not isinstance(seed, jax.core.Tracer)
-            and not any(
-                isinstance(x, jax.core.Tracer) for x in jax.tree_util.tree_leaves(bundle)
-            )
+            and not isinstance(bundle.positions, jax.core.Tracer)
+            and not isinstance(bundle.charges, jax.core.Tracer)
         )
         cache_key = None
         cached_entry = None
@@ -1983,7 +2020,7 @@ class EnsemblePlan:
 
         neighbor_fn = None
         target_capacity = 0
-        cutoff = _host_float(getattr(bundle, "cutoff_distance", 9.0), 9.0)
+        cutoff = _cached_bundle_cutoff(bundle, 9.0)
         nlc_top = getattr(nb_cfg, "neighbor_list", None) if nb_cfg is not None else None
         skin = float(nlc_top.skin) if nlc_top is not None else 0.5
         nbr0 = initial_neighbor
@@ -2711,14 +2748,14 @@ class EnsemblePlan:
                                     )
                                     st_next = _integrate_2steps_respa(st_in, nb_fixed)
                                     s_next = s_i + jnp.int32(2)
-                                    pos_next = st_next.position
+                                    pos_next = st_next.position.astype(p_i.dtype)
                                     su_next = _check_su(pos_next, lp_fixed, s_next)
                                     any_u_next = _any_replica_true(su_next)
                                     return (
                                         s_next,
                                         pos_next,
-                                        st_next.momentum,
-                                        st_next.force,
+                                        st_next.momentum.astype(m_i.dtype),
+                                        st_next.force.astype(f_i.dtype),
                                         st_next.rng,
                                         any_u_next,
                                     )
@@ -2758,14 +2795,14 @@ class EnsemblePlan:
                                 )
                                 st_next = _integrate_step_only(st_in, nb_fixed)
                                 s_next = s_i + jnp.int32(1)
-                                pos_next = st_next.position
+                                pos_next = st_next.position.astype(p_i.dtype)
                                 su_next = _check_su(pos_next, lp_fixed, s_next)
                                 any_u_next = _any_replica_true(su_next)
                                 return (
                                     s_next,
                                     pos_next,
-                                    st_next.momentum,
-                                    st_next.force,
+                                    st_next.momentum.astype(m_i.dtype),
+                                    st_next.force.astype(f_i.dtype),
                                     st_next.rng,
                                     any_u_next,
                                 )
@@ -2990,7 +3027,10 @@ class EnsemblePlan:
             else:
 
                 def step_fn(carry: Any, _step_i: Any) -> Any:
-                    return apply_fn(carry, kT=kT_s, dt=dt_s)
+                    st_next = apply_fn(carry, kT=kT_s, dt=dt_s)
+                    if hasattr(st_next, "force") and hasattr(carry, "force") and st_next.force.dtype != carry.force.dtype:
+                        st_next = dataclasses.replace(st_next, force=st_next.force.astype(carry.force.dtype))
+                    return st_next
 
                 if can_cache and cached_entry is None and cache_key is not None:
                     fast_reseed_fn = self._build_fast_reseed_fn(

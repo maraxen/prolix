@@ -214,6 +214,44 @@ def ensure_openmm_cuda_installed(
     return {"repaired": True, "repair_logs": repair_logs, **inv_after}
 
 
+_CACHED_NVIDIA_DRIVER_VERSION: str | None = None
+_CACHED_CUDA_COMPILER_PATH: str | None = None
+
+
+def _get_fallback_cuda_driver_version() -> str:
+    global _CACHED_NVIDIA_DRIVER_VERSION
+    if _CACHED_NVIDIA_DRIVER_VERSION is not None:
+        return _CACHED_NVIDIA_DRIVER_VERSION
+    try:
+        proc = subprocess.run(
+            ["nvidia-smi", "--query-gpu=driver_version", "--format=csv,noheader"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+        if proc.returncode == 0 and proc.stdout.strip():
+            _CACHED_NVIDIA_DRIVER_VERSION = proc.stdout.strip().splitlines()[0].strip()
+            return _CACHED_NVIDIA_DRIVER_VERSION
+    except Exception:
+        pass
+    _CACHED_NVIDIA_DRIVER_VERSION = "unknown-driver"
+    return _CACHED_NVIDIA_DRIVER_VERSION
+
+
+def _get_fallback_cuda_compiler() -> str:
+    global _CACHED_CUDA_COMPILER_PATH
+    if _CACHED_CUDA_COMPILER_PATH is not None:
+        return _CACHED_CUDA_COMPILER_PATH
+    env_comp = os.environ.get("OPENMM_CUDA_COMPILER")
+    if env_comp:
+        _CACHED_CUDA_COMPILER_PATH = env_comp
+        return _CACHED_CUDA_COMPILER_PATH
+    nvcc_p = shutil.which("nvcc")
+    _CACHED_CUDA_COMPILER_PATH = nvcc_p if nvcc_p else "openmm-nvrtc-builtin"
+    return _CACHED_CUDA_COMPILER_PATH
+
+
 def extract_openmm_context_provenance(ctx: Any) -> dict[str, Any]:
     """Extract hardware, compiler, driver, and library provenance from a live OpenMM `Context`."""
     plat = ctx.getPlatform()
@@ -231,13 +269,21 @@ def extract_openmm_context_provenance(ctx: Any) -> dict[str, Any]:
                     pass
         return None
 
+    cuda_compiler = _prop(("Compiler", "CudaCompiler"))
+    cuda_driver = _prop(("CudaDriverVersion", "DriverVersion"))
+    if plat_name == "CUDA":
+        if not cuda_compiler:
+            cuda_compiler = _get_fallback_cuda_compiler()
+        if not cuda_driver:
+            cuda_driver = _get_fallback_cuda_driver_version()
+
     return {
         "platform_name": plat_name,
         "device_name": _prop(("DeviceName", "OpenCLDeviceName")),
         "device_index": _prop(("DeviceIndex", "OpenCLDeviceIndex")),
         "precision": _prop(("Precision", "CudaPrecision", "OpenCLPrecision")),
-        "cuda_Compiler": _prop(("Compiler", "CudaCompiler")),
-        "CudaDriverVersion": _prop(("CudaDriverVersion", "DriverVersion")),
+        "cuda_Compiler": cuda_compiler,
+        "CudaDriverVersion": cuda_driver,
         "lib_openmm_cuda_path": find_lib_openmm_cuda_path(),
         "mps_active": is_cuda_mps_active(),
         "cuda_mps_pipe_directory": os.environ.get("CUDA_MPS_PIPE_DIRECTORY"),
