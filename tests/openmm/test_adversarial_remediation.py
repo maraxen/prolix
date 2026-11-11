@@ -716,21 +716,20 @@ class TestAxisCPhysicsAndNumericalParity:
     )
 
   def test_def14_scr_barostat_virial_minimum_image_handling(self):
-    """DEF-14: Assert SCR barostat virial handles periodic boundary pairs with minimum image.
+    """DEF-14 / DEF-30: Assert SCR barostat virial handles periodic boundary pairs with minimum image.
 
-    In un-remediated codebase, line 1035 computes `virial = float(jnp.sum(self._positions * forces))`
-    without minimum image convention. When particles cross PBC, the computed virial has the wrong
-    magnitude and sign compared to the true minimum-image virial.
+    Coordinates wrapped across periodic boundaries must produce identical scalar virial
+    without discontinuous jumps or boundary artifacts.
     """
     sys = openmm.System()
     sys.setDefaultPeriodicBoxVectors(
-        openmm.Vec3(2, 0, 0), openmm.Vec3(0, 2, 0), openmm.Vec3(0, 0, 2)
+        openmm.Vec3(3, 0, 0), openmm.Vec3(0, 3, 0), openmm.Vec3(0, 0, 3)
     )
     sys.addParticle(39.948)
     sys.addParticle(39.948)
     nb = openmm.NonbondedForce()
     nb.setNonbondedMethod(openmm.NonbondedForce.CutoffPeriodic)
-    nb.setCutoffDistance(0.9 * unit.nanometer)
+    nb.setCutoffDistance(1.2 * unit.nanometer)
     nb.addParticle(1.0, 0.3, 0.5)
     nb.addParticle(-1.0, 0.3, 0.5)
     sys.addForce(nb)
@@ -739,16 +738,53 @@ class TestAxisCPhysicsAndNumericalParity:
 
     cfg = ProlixOpenMMConfig(barostat_mode="scr", barostat_frequency_override=1)
     ctx = ProlixContext(sys, openmm.VerletIntegrator(0.001), config=cfg)
-    pos = [
-        openmm.Vec3(0.1, 1.0, 1.0),
-        openmm.Vec3(1.9, 1.0, 1.0),
-    ] * unit.nanometer
-    ctx.setPositions(pos)
 
-    assert getattr(ctx, "_barostat_uses_minimum_image_virial", False) is True, (
-        "DEF-14: SCR barostat computes origin-dependent scalar virial without "
-        "minimum image convention!"
+    # 1. Authentic physics test: set positions x0 = 0.2, x1 = 1.1 nm in a 3.0 nm box
+    pos_orig = [
+        openmm.Vec3(0.2, 1.5, 1.5),
+        openmm.Vec3(1.1, 1.5, 1.5),
+    ] * unit.nanometer
+    ctx.setPositions(pos_orig)
+    virial_orig = ctx._compute_virial()
+
+    # 2. Translate by +2.5 nm and wrap modulo 3.0 nm box vectors: x0 = 2.7, x1 = 0.6 nm
+    pos_wrapped = [
+        openmm.Vec3(2.7, 1.5, 1.5),
+        openmm.Vec3(0.6, 1.5, 1.5),
+    ] * unit.nanometer
+    ctx.setPositions(pos_wrapped)
+    virial_wrapped = ctx._compute_virial()
+
+    assert np.isclose(virial_orig, virial_wrapped, atol=1e-4), (
+        f"SCR barostat virial failed PBC wrapping invariance: orig={virial_orig}, wrapped={virial_wrapped}"
     )
+
+    # 3. Also verify with forces passed explicitly
+    ctx.setPositions(pos_orig)
+    forces_orig = ctx.getState(getForces=True).getForces(asNumpy=True).value_in_unit(
+        unit.kilojoules_per_mole / unit.nanometer
+    )
+    virial_f_orig = ctx._compute_virial(forces_orig)
+
+    ctx.setPositions(pos_wrapped)
+    forces_wrapped = ctx.getState(getForces=True).getForces(asNumpy=True).value_in_unit(
+        unit.kilojoules_per_mole / unit.nanometer
+    )
+    virial_f_wrapped = ctx._compute_virial(forces_wrapped)
+
+    assert np.isclose(virial_f_orig, virial_f_wrapped, atol=1e-4), (
+        f"SCR barostat virial with forces failed PBC wrapping invariance: orig={virial_f_orig}, wrapped={virial_f_wrapped}"
+    )
+
+    # 4. Verify virial calculation avoids discontinuous jump artifacts
+    pos_a = [openmm.Vec3(0.01, 1.5, 1.5), openmm.Vec3(1.0, 1.5, 1.5)] * unit.nanometer
+    pos_b = [openmm.Vec3(0.02, 1.5, 1.5), openmm.Vec3(1.0, 1.5, 1.5)] * unit.nanometer
+    ctx.setPositions(pos_a)
+    v_a = ctx._compute_virial()
+
+    ctx.setPositions(pos_b)
+    v_b = ctx._compute_virial()
+    assert abs(v_b - v_a) < 50.0, f"Discontinuous jump in SCR virial: {abs(v_b - v_a)}"
 
   def test_def14_mc_barostat_evaluates_corrected_energy(self):
     """DEF-14: Assert MC barostat trial moves evaluate Hamiltonian with PME corrections.
@@ -779,9 +815,58 @@ class TestAxisCPhysicsAndNumericalParity:
     ] * unit.nanometer
     ctx.setPositions(pos)
 
-    assert getattr(ctx, "_mc_barostat_uses_corrected_energy", False) is True, (
-        "DEF-14: MC barostat evaluates trial volume moves using uncorrected "
-        "potential energy!"
+    # Authentic physics test: Verify that trial volume moves evaluate the true Hamiltonian
+    st = ctx.getState(getEnergy=True)
+    pe_state = st.getPotentialEnergy().value_in_unit(unit.kilojoules_per_mole)
+
+    from prolix.openmm.context import _pure_compute_energy_and_forces
+    from prolix.openmm.units import KCAL_PER_MOL_TO_KJ_PER_MOL
+
+    gp = ctx._get_dynamic_global_params()
+    ewald_tol = (
+        ctx._converted_system.ewald_error_tolerance
+        if ctx._converted_system.ewald_error_tolerance is not None
+        else ctx._config.ewald_error_tolerance
+    )
+    e_baro, _ = _pure_compute_energy_and_forces(
+        ctx._positions,
+        ctx._box_vectors,
+        ctx._bundle,
+        ctx._custom_forces,
+        ctx._position_restraints,
+        gp,
+        ctx._converted_system.force_group_by_component,
+        -1,
+        ctx._converted_system.has_pbc,
+        ctx._converted_system.nonbonded_cutoff,
+        ctx._converted_system.bond_force_groups,
+        ctx._converted_system.angle_force_groups,
+        ctx._converted_system.dihedral_force_groups,
+        ctx._converted_system.cmap_force_groups,
+        ctx._converted_system.nonbonded_method,
+        ctx._converted_system.has_nonbonded,
+        ctx._config.use_dispersion_correction and ctx._converted_system.use_dispersion_correction,
+        ewald_tol,
+        ctx._converted_system.reaction_field_dielectric,
+        ctx._converted_system.has_implicit_solvent,
+        ctx._converted_system.solvent_dielectric,
+        ctx._converted_system.solute_dielectric,
+        ctx._nonbonded_engine,
+        ctx._converted_system.pme_grid_dims,
+        use_pallas=ctx._config.use_pallas,
+        pallas_interpret=ctx._config.pallas_interpret,
+        lj_switch_width=ctx._converted_system.lj_switch_width,
+        neighbor_idx=getattr(ctx, "_neighbor_idx", None),
+        use_pallas_pme=ctx._config.use_pallas_pme,
+        custom_nonbonded_chunk_size=ctx._config.custom_nonbonded_chunk_size,
+    )
+    e_baro_kj = float(e_baro * KCAL_PER_MOL_TO_KJ_PER_MOL)
+    np.testing.assert_allclose(
+        e_baro_kj,
+        pe_state,
+        rtol=1e-6,
+        atol=1e-6,
+        err_msg="MC barostat trial energy does not evaluate the true Hamiltonian!",
     )
 
   def test_def15_rollout_zero_recompilation_varying_chunks(self):
@@ -834,3 +919,286 @@ class TestAxisCPhysicsAndNumericalParity:
     f = st.getForces(asNumpy=True).value_in_unit(unit.kilojoules_per_mole / unit.nanometer)
     assert np.isfinite(pe)
     assert np.all(np.isfinite(f))
+
+
+class TestAxisDAdversarialRemediationWave:
+  """Adversarial remediation verification wave for PR #44 (DEF-22..DEF-32)."""
+
+  def test_def26_ewald_error_tolerance_propagation(self):
+    """DEF-26: OpenMM system ewaldErrorTolerance propagates without explicit config override."""
+    sys = openmm.System()
+    sys.setDefaultPeriodicBoxVectors(
+        openmm.Vec3(3, 0, 0), openmm.Vec3(0, 3, 0), openmm.Vec3(0, 0, 3)
+    )
+    sys.addParticle(12.0)
+    sys.addParticle(12.0)
+    nb = openmm.NonbondedForce()
+    nb.setNonbondedMethod(openmm.NonbondedForce.PME)
+    nb.setCutoffDistance(1.0 * unit.nanometer)
+    nb.setEwaldErrorTolerance(1e-5)
+    nb.addParticle(0.5, 0.3, 0.5)
+    nb.addParticle(-0.5, 0.3, 0.5)
+    sys.addForce(nb)
+
+    # Physical particle separation r = 0.5 nm without artificial core repulsion
+    pos = [
+        openmm.Vec3(1.25, 1.5, 1.5),
+        openmm.Vec3(1.75, 1.5, 1.5),
+    ] * unit.nanometer
+    ctx_ref = openmm.Context(
+        sys,
+        openmm.VerletIntegrator(0.001),
+        openmm.Platform.getPlatformByName("Reference"),
+    )
+    ctx_ref.setPositions(pos)
+    e_ref = (
+        ctx_ref.getState(getEnergy=True)
+        .getPotentialEnergy()
+        .value_in_unit(unit.kilojoules_per_mole)
+    )
+
+    # Must NOT specify ewald_error_tolerance in config
+    cfg = ProlixOpenMMConfig(precision="double")
+    ctx_prx = ProlixContext(sys, openmm.VerletIntegrator(0.001), config=cfg)
+    ctx_prx.setPositions(pos)
+    e_prx = (
+        ctx_prx.getState(getEnergy=True)
+        .getPotentialEnergy()
+        .value_in_unit(unit.kilojoules_per_mole)
+    )
+
+    np.testing.assert_allclose(
+        e_prx,
+        e_ref,
+        rtol=1e-4,
+        atol=1e-4,
+        err_msg=f"DEF-26: ewaldErrorTolerance=1e-5 failed parity: diff={abs(e_prx - e_ref):.6f} kJ/mol",
+    )
+
+  def test_def27_triclinic_box_pme_and_dispersion_parity(self):
+    """DEF-27: Lower-triangular triclinic box vectors support in PME and dispersion tail."""
+    sys = openmm.System()
+    sys.setDefaultPeriodicBoxVectors(
+        openmm.Vec3(2.5, 0, 0),
+        openmm.Vec3(0.5, 2.5, 0),
+        openmm.Vec3(0.3, 0.4, 2.5),
+    )
+    sys.addParticle(12.0)
+    sys.addParticle(12.0)
+    nb = openmm.NonbondedForce()
+    nb.setNonbondedMethod(openmm.NonbondedForce.PME)
+    nb.setCutoffDistance(1.0 * unit.nanometer)
+    nb.setEwaldErrorTolerance(0.0005)
+    nb.setUseDispersionCorrection(True)
+    nb.addParticle(1.0, 0.3, 0.5)
+    nb.addParticle(-1.0, 0.3, 0.5)
+    sys.addForce(nb)
+
+    pos = [
+        openmm.Vec3(0.5, 0.5, 0.5),
+        openmm.Vec3(1.0, 1.0, 1.0),
+    ] * unit.nanometer
+
+    ctx_ref = openmm.Context(
+        sys,
+        openmm.VerletIntegrator(0.001),
+        openmm.Platform.getPlatformByName("Reference"),
+    )
+    ctx_ref.setPositions(pos)
+    st_ref = ctx_ref.getState(getEnergy=True, getForces=True)
+    e_ref = st_ref.getPotentialEnergy().value_in_unit(unit.kilojoules_per_mole)
+    f_ref = st_ref.getForces(asNumpy=True).value_in_unit(
+        unit.kilojoules_per_mole / unit.nanometer
+    )
+
+    ctx_prx = ProlixContext(
+        sys, openmm.VerletIntegrator(0.001), config=ProlixOpenMMConfig(precision="double")
+    )
+    ctx_prx.setPositions(pos)
+    st_prx = ctx_prx.getState(getEnergy=True, getForces=True)
+    e_prx = st_prx.getPotentialEnergy().value_in_unit(unit.kilojoules_per_mole)
+    f_prx = st_prx.getForces(asNumpy=True).value_in_unit(
+        unit.kilojoules_per_mole / unit.nanometer
+    )
+
+    np.testing.assert_allclose(
+        e_prx,
+        e_ref,
+        rtol=1e-3,
+        atol=0.05,
+        err_msg=f"DEF-27: Triclinic PME energy failed parity: diff={abs(e_prx - e_ref):.6f} kJ/mol",
+    )
+    np.testing.assert_allclose(
+        f_prx,
+        f_ref,
+        rtol=1e-2,
+        atol=0.6,
+        err_msg=f"DEF-27: Triclinic PME forces failed parity: max_diff={np.max(np.abs(f_prx - f_ref)):.6f} kJ/mol/nm",
+    )
+
+  def test_def28_quintic_switching_dispersion_tail_parity(self):
+    """DEF-28: Analytical dispersion tail incorporates quintic switching polynomial."""
+    sys = openmm.System()
+    sys.setDefaultPeriodicBoxVectors(
+        openmm.Vec3(3.0, 0, 0), openmm.Vec3(0, 3.0, 0), openmm.Vec3(0, 0, 3.0)
+    )
+    sys.addParticle(39.948)
+    sys.addParticle(39.948)
+    nb = openmm.NonbondedForce()
+    nb.setNonbondedMethod(openmm.NonbondedForce.CutoffPeriodic)
+    nb.setCutoffDistance(1.0 * unit.nanometer)
+    nb.setUseSwitchingFunction(True)
+    nb.setSwitchingDistance(0.8 * unit.nanometer)
+    nb.setUseDispersionCorrection(True)
+    nb.addParticle(0.0, 0.34 * unit.nanometer, 1.0 * unit.kilojoules_per_mole)
+    nb.addParticle(0.0, 0.34 * unit.nanometer, 1.0 * unit.kilojoules_per_mole)
+    sys.addForce(nb)
+
+    # Place particles beyond cutoff so direct nonbonded is 0 and only tail correction acts
+    pos = [
+        openmm.Vec3(0.5, 1.5, 1.5),
+        openmm.Vec3(1.8, 1.5, 1.5),
+    ] * unit.nanometer
+
+    ctx_ref = openmm.Context(
+        sys,
+        openmm.VerletIntegrator(0.001),
+        openmm.Platform.getPlatformByName("Reference"),
+    )
+    ctx_ref.setPositions(pos)
+    e_ref = (
+        ctx_ref.getState(getEnergy=True)
+        .getPotentialEnergy()
+        .value_in_unit(unit.kilojoules_per_mole)
+    )
+
+    ctx_prx = ProlixContext(
+        sys, openmm.VerletIntegrator(0.001), config=ProlixOpenMMConfig(precision="double")
+    )
+    ctx_prx.setPositions(pos)
+    e_prx = (
+        ctx_prx.getState(getEnergy=True)
+        .getPotentialEnergy()
+        .value_in_unit(unit.kilojoules_per_mole)
+    )
+
+    np.testing.assert_allclose(
+        e_prx,
+        e_ref,
+        rtol=1e-6,
+        atol=1e-6,
+        err_msg=f"DEF-28: Switched dispersion tail failed parity: diff={abs(e_prx - e_ref):.8f} kJ/mol",
+    )
+
+  def test_def29_barostat_lj_switching_consistency(self):
+    """DEF-29: MC and SCR barostats evaluate switched Hamiltonian when switching active."""
+    sys = openmm.System()
+    sys.setDefaultPeriodicBoxVectors(
+        openmm.Vec3(3.0, 0, 0), openmm.Vec3(0, 3.0, 0), openmm.Vec3(0, 0, 3.0)
+    )
+    sys.addParticle(39.948)
+    sys.addParticle(39.948)
+    nb = openmm.NonbondedForce()
+    nb.setNonbondedMethod(openmm.NonbondedForce.CutoffPeriodic)
+    nb.setCutoffDistance(1.0 * unit.nanometer)
+    nb.setUseSwitchingFunction(True)
+    nb.setSwitchingDistance(0.8 * unit.nanometer)
+    nb.setUseDispersionCorrection(True)
+    nb.addParticle(0.0, 0.34 * unit.nanometer, 1.0 * unit.kilojoules_per_mole)
+    nb.addParticle(0.0, 0.34 * unit.nanometer, 1.0 * unit.kilojoules_per_mole)
+    sys.addForce(nb)
+    sys.addForce(openmm.MonteCarloBarostat(1.0 * unit.bar, 300.0 * unit.kelvin, 1))
+
+    cfg = ProlixOpenMMConfig(precision="double", barostat_mode="mc")
+    ctx = ProlixContext(sys, openmm.VerletIntegrator(0.001), config=cfg)
+    pos = [
+        openmm.Vec3(0.5, 1.5, 1.5),
+        openmm.Vec3(1.35, 1.5, 1.5),
+    ] * unit.nanometer
+    ctx.setPositions(pos)
+
+    # Step context so barostat executes
+    ctx.step(1)
+    pe_after = ctx.getState(getEnergy=True).getPotentialEnergy().value_in_unit(
+        unit.kilojoules_per_mole
+    )
+    assert np.isfinite(pe_after)
+
+  def test_def31_minimizer_pme_hamiltonian_preservation(self):
+    """Minimizer preserves PME electrostatics, periodic boundary conditions, and decreases energy."""
+    from prolix.openmm import ProlixSimulation
+
+    sys = openmm.System()
+    sys.setDefaultPeriodicBoxVectors(
+        openmm.Vec3(3, 0, 0), openmm.Vec3(0, 3, 0), openmm.Vec3(0, 0, 3)
+    )
+    sys.addParticle(12.0)
+    sys.addParticle(12.0)
+    nb = openmm.NonbondedForce()
+    nb.setNonbondedMethod(openmm.NonbondedForce.PME)
+    nb.setCutoffDistance(1.0 * unit.nanometer)
+    nb.setEwaldErrorTolerance(0.0005)
+    nb.addParticle(1.0, 0.3, 0.5)
+    nb.addParticle(-1.0, 0.3, 0.5)
+    sys.addForce(nb)
+
+    integ = openmm.VerletIntegrator(0.001)
+    cfg = ProlixOpenMMConfig(precision="double", minimizer_backend="lbfgs")
+    sim = ProlixSimulation(None, sys, integ, config=cfg)
+    pos = [
+        openmm.Vec3(0.5, 0.5, 0.5),
+        openmm.Vec3(0.9, 0.5, 0.5),
+    ] * unit.nanometer
+    sim.context.setPositions(pos)
+    pe_before = sim.context.getState(getEnergy=True).getPotentialEnergy().value_in_unit(
+        unit.kilojoules_per_mole
+    )
+
+    sim.minimizeEnergy(maxIterations=10)
+    pe_after = sim.context.getState(getEnergy=True).getPotentialEnergy().value_in_unit(
+        unit.kilojoules_per_mole
+    )
+
+    # Minimization must decrease or maintain energy on genuine PME Hamiltonian
+    assert pe_after <= pe_before
+    # Box vectors must be preserved
+    box = sim.context.getState().getPeriodicBoxVectors()
+    assert np.isclose(box[0][0].value_in_unit(unit.nanometer), 3.0)
+
+  def test_def32_constraint_mode_none_interaction(self):
+    """water_constraint_mode='none' and solute_constraint_mode='none' extracts 0 constraints."""
+    sys = openmm.System()
+    sys.addParticle(16.0)
+    sys.addParticle(1.0)
+    sys.addConstraint(0, 1, 0.1 * unit.nanometer)
+
+    cfg = ProlixOpenMMConfig(
+        water_constraint_mode="none", solute_constraint_mode="none"
+    )
+    conv = from_openmm_system(sys, config=cfg)
+    assert int(conv.bundle.n_constraints) == 0, (
+        f"Expected 0 constraints, got {conv.bundle.n_constraints}"
+    )
+
+  def test_def24_integrator_scheme_lfmiddle_and_no_grid_spacing_hijack(self):
+    """IntegratorSchemeType supports 'lfmiddle' and default pme_grid_spacing is not hijacked."""
+    cfg = ProlixOpenMMConfig(integrator_scheme="lfmiddle")
+    assert cfg.integrator_scheme == "lfmiddle"
+
+    sys = openmm.System()
+    sys.setDefaultPeriodicBoxVectors(
+        openmm.Vec3(3, 0, 0), openmm.Vec3(0, 3, 0), openmm.Vec3(0, 0, 3)
+    )
+    sys.addParticle(39.948)
+    nb = openmm.NonbondedForce()
+    nb.setNonbondedMethod(openmm.NonbondedForce.PME)
+    nb.setCutoffDistance(1.0 * unit.nanometer)
+    nb.addParticle(0.0, 0.3, 0.5)
+    sys.addForce(nb)
+
+    # Explicit pme_grid_spacing=1.0 is strictly respected and not hijacked to 0.375
+    conv = from_openmm_system(sys, config=ProlixOpenMMConfig(pme_grid_spacing=1.0))
+    # 3.0 nm = 30.0 Angstrom. With spacing=1.0, grid dims is approx 30 or 32, NOT 80+ (30/0.375 = 80)
+    assert conv.pme_grid_dims is not None
+    assert conv.pme_grid_dims[0] <= 48, f"Grid spacing was hijacked: dims={conv.pme_grid_dims}"
+

@@ -212,6 +212,11 @@ class ProlixSimulation(app.Simulation):
         max_iterations = max_iter if max_iter > 0 else 500
 
         gp = {k: jnp.asarray(v, dtype=jnp.float32) for k, v in ctx._parameters.items()}
+        ewald_tol = (
+            ctx._converted_system.ewald_error_tolerance
+            if ctx._converted_system.ewald_error_tolerance is not None
+            else ctx._config.ewald_error_tolerance
+        )
 
         def energy_fn(p: jnp.ndarray) -> jnp.ndarray:
             return _eval_system_potential_energy(
@@ -222,9 +227,30 @@ class ProlixSimulation(app.Simulation):
                 ctx._position_restraints,
                 gp,
                 ctx._converted_system.force_group_by_component,
-                0xFFFFFFFF,
+                -1,
                 ctx._converted_system.has_pbc,
                 ctx._converted_system.nonbonded_cutoff,
+                bond_force_groups=ctx._converted_system.bond_force_groups,
+                angle_force_groups=ctx._converted_system.angle_force_groups,
+                dihedral_force_groups=ctx._converted_system.dihedral_force_groups,
+                cmap_force_groups=ctx._converted_system.cmap_force_groups,
+                nonbonded_method=ctx._converted_system.nonbonded_method,
+                has_nonbonded=ctx._converted_system.has_nonbonded,
+                use_dispersion_correction=ctx._config.use_dispersion_correction
+                and ctx._converted_system.use_dispersion_correction,
+                ewald_error_tolerance=ewald_tol,
+                rf_dielectric=ctx._converted_system.reaction_field_dielectric,
+                has_implicit_solvent=ctx._converted_system.has_implicit_solvent,
+                solvent_dielectric=ctx._converted_system.solvent_dielectric,
+                solute_dielectric=ctx._converted_system.solute_dielectric,
+                nonbonded_engine=ctx._nonbonded_engine,
+                pme_grid_dims=ctx._converted_system.pme_grid_dims,
+                use_pallas=ctx._config.use_pallas,
+                pallas_interpret=ctx._config.pallas_interpret,
+                lj_switch_width=ctx._converted_system.lj_switch_width,
+                neighbor_idx=getattr(ctx, "_neighbor_idx", None),
+                use_pallas_pme=ctx._config.use_pallas_pme,
+                custom_nonbonded_chunk_size=ctx._config.custom_nonbonded_chunk_size,
             )
 
         solver = jaxopt.LBFGS(
@@ -254,6 +280,11 @@ class ProlixSimulation(app.Simulation):
         max_iterations = max_iter if max_iter > 0 else 500
 
         gp = {k: jnp.asarray(v, dtype=jnp.float32) for k, v in ctx._parameters.items()}
+        ewald_tol = (
+            ctx._converted_system.ewald_error_tolerance
+            if ctx._converted_system.ewald_error_tolerance is not None
+            else ctx._config.ewald_error_tolerance
+        )
 
         def energy_fn(p: jnp.ndarray) -> jnp.ndarray:
             return _eval_system_potential_energy(
@@ -264,9 +295,30 @@ class ProlixSimulation(app.Simulation):
                 ctx._position_restraints,
                 gp,
                 ctx._converted_system.force_group_by_component,
-                0xFFFFFFFF,
+                -1,
                 ctx._converted_system.has_pbc,
                 ctx._converted_system.nonbonded_cutoff,
+                bond_force_groups=ctx._converted_system.bond_force_groups,
+                angle_force_groups=ctx._converted_system.angle_force_groups,
+                dihedral_force_groups=ctx._converted_system.dihedral_force_groups,
+                cmap_force_groups=ctx._converted_system.cmap_force_groups,
+                nonbonded_method=ctx._converted_system.nonbonded_method,
+                has_nonbonded=ctx._converted_system.has_nonbonded,
+                use_dispersion_correction=ctx._config.use_dispersion_correction
+                and ctx._converted_system.use_dispersion_correction,
+                ewald_error_tolerance=ewald_tol,
+                rf_dielectric=ctx._converted_system.reaction_field_dielectric,
+                has_implicit_solvent=ctx._converted_system.has_implicit_solvent,
+                solvent_dielectric=ctx._converted_system.solvent_dielectric,
+                solute_dielectric=ctx._converted_system.solute_dielectric,
+                nonbonded_engine=ctx._nonbonded_engine,
+                pme_grid_dims=ctx._converted_system.pme_grid_dims,
+                use_pallas=ctx._config.use_pallas,
+                pallas_interpret=ctx._config.pallas_interpret,
+                lj_switch_width=ctx._converted_system.lj_switch_width,
+                neighbor_idx=getattr(ctx, "_neighbor_idx", None),
+                use_pallas_pme=ctx._config.use_pallas_pme,
+                custom_nonbonded_chunk_size=ctx._config.custom_nonbonded_chunk_size,
             )
 
         init_fn, step_fn = jax_md_minimize.fire_descent(

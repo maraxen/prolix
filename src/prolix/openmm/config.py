@@ -37,13 +37,20 @@ PrecisionType = Literal["single", "mixed", "double"]
 NonbondedEngineType = Literal["auto", "neighbor_list", "flash", "dense"]
 CustomForceModeType = Literal["auto", "lepton_only", "pattern_only"]
 IntegratorSchemeType = Literal[
-    "auto", "baoab", "leapfrog", "langevin", "verlet", "brownian", "nose_hoover"
+    "auto", "baoab", "leapfrog", "langevin", "verlet", "brownian", "nose_hoover", "lfmiddle"
 ]
 BarostatModeType = Literal["auto", "mc", "scr"]
 WaterConstraintModeType = Literal["settle", "none"]
 SoluteConstraintModeType = Literal["shake", "none"]
 ExecutionModeType = Literal["inference", "trajectory"]
 MinimizerBackendType = Literal["lbfgs", "fire", "openmm_cpu"]
+
+
+class _DefaultFloat(float):
+    """Marker subclass for default float parameters, allowing distinction between default and explicit values."""
+
+
+DEFAULT_PME_GRID_SPACING = _DefaultFloat(1.0)
 
 
 @dataclass(frozen=True)
@@ -68,7 +75,7 @@ class ProlixOpenMMConfig:
     pallas_interpret: bool = False
 
     # --- PME & LJ Parameters (Lengths in Å) ---
-    pme_grid_spacing: float = 1.0
+    pme_grid_spacing: float = DEFAULT_PME_GRID_SPACING
     ewald_error_tolerance: float = 5e-4
     lj_switch_width: float = 1.5
     use_dispersion_correction: bool = True

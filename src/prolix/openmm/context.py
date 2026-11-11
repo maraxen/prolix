@@ -62,7 +62,11 @@ from prolix.physics.generalized_born import (
     compute_gb_energy,
 )
 from prolix.physics.neighbor_list import make_neighbor_list_fn
-from prolix.physics.pbc import minimum_image_displacement, reduce_triclinic_box_vectors
+from prolix.physics.pbc import (
+    box_volume,
+    minimum_image_displacement,
+    reduce_triclinic_box_vectors,
+)
 from prolix.physics.pme import (
     spme_background_energy,
     spme_reciprocal_energy,
@@ -784,27 +788,53 @@ def _eval_nonbonded_terms(  # noqa: PLR0913
 
     # PME reciprocal, self, and plasma background terms
     if is_pme and has_pbc and box is not None and pme_grid_dims is not None:
-        box_diag = jnp.diag(box) if box.ndim == 2 else box
         atom_mask = jnp.ones(n, dtype=bool)
         e_recip = spme_reciprocal_energy(
             pos,
             q,
             atom_mask,
-            box_diag,
+            box,
             pme_grid_dims,
             alpha=alpha,
             order=4,
             use_pallas_pme=use_pallas_pme,
         )
         e_self = spme_self_energy(q, atom_mask, alpha=alpha)
-        e_plasma = spme_background_energy(q, atom_mask, alpha=alpha, box_size=box_diag)
+        e_plasma = spme_background_energy(q, atom_mask, alpha=alpha, box_size=box)
         tot = tot + e_recip + e_self + e_plasma
 
     # LJ dispersion tail correction
     if use_dispersion_correction and has_pbc and box is not None and cutoff < float("inf"):
-        box_diag = jnp.diag(box) if box.ndim == 2 else box
         atom_mask = jnp.ones(n, dtype=bool)
-        e_tail = lj_dispersion_tail_energy(box_diag, sig, eps, cutoff, atom_mask)
+        if lj_switch_width > 0.0 and cutoff > lj_switch_width:
+            rc = cutoff
+            d = lj_switch_width
+            rsw = rc - d
+            volume = box_volume(box)
+            inv_vol = 1.0 / volume
+            atom_mask_f = atom_mask.astype(eps.dtype)
+            sum_c6 = jnp.sum(jnp.sqrt(eps) * (sig**3) * atom_mask_f)
+            sum_c12 = jnp.sum(jnp.sqrt(eps) * (sig**6) * atom_mask_f)
+
+            I6_val = (
+                10.0
+                * (
+                    (rc**2 + 4.0 * rc * rsw + rsw**2) * jnp.log(rc / rsw)
+                    - 3.0 * (rc**2 - rsw**2)
+                )
+                / (d**5)
+            )
+            I12_val = (
+                (rc + rsw)
+                * (5.0 * rc**2 + 4.0 * rc * rsw + 5.0 * rsw**2)
+                / (252.0 * (rc**6) * (rsw**6))
+            )
+
+            e_c12 = (8.0 * jnp.pi * inv_vol) * (sum_c12**2) * I12_val
+            e_c6 = (8.0 * jnp.pi * inv_vol) * (sum_c6**2) * I6_val
+            e_tail = e_c12 - e_c6
+        else:
+            e_tail = lj_dispersion_tail_energy(box, sig, eps, cutoff, atom_mask)
         tot = tot + e_tail
 
     return tot
@@ -1317,8 +1347,6 @@ class ProlixContext:
             self._nonbonded_engine = "pallas"
         else:
             self._nonbonded_engine = "dense"
-        self._barostat_uses_minimum_image_virial = True
-        self._mc_barostat_uses_corrected_energy = True
         self._neighbor_fn = None
         self._neighbor = None
         self._neighbor_idx = None
@@ -1492,6 +1520,11 @@ class ProlixContext:
                 chunk = min(remaining, chunk_size)
 
             gp = self._get_dynamic_global_params()
+            ewald_tol = (
+                self._converted_system.ewald_error_tolerance
+                if self._converted_system.ewald_error_tolerance is not None
+                else self._config.ewald_error_tolerance
+            )
             self._positions, self._velocities, self._prng_key = _pure_step_rollout(
                 self._positions,
                 self._velocities,
@@ -1521,7 +1554,7 @@ class ProlixContext:
                 self._converted_system.nonbonded_method,
                 self._converted_system.has_nonbonded,
                 self._config.use_dispersion_correction and self._converted_system.use_dispersion_correction,
-                self._config.ewald_error_tolerance,
+                ewald_tol,
                 self._converted_system.reaction_field_dielectric,
                 self._converted_system.has_implicit_solvent,
                 self._converted_system.solvent_dielectric,
@@ -1615,6 +1648,11 @@ class ProlixContext:
             new_pos_jnp = self._converted_system.compute_virtual_sites(new_pos_jnp)
 
         gp = self._get_dynamic_global_params()
+        ewald_tol = (
+            self._converted_system.ewald_error_tolerance
+            if self._converted_system.ewald_error_tolerance is not None
+            else self._config.ewald_error_tolerance
+        )
         e_curr, _ = _pure_compute_energy_and_forces(
             self._positions,
             self._box_vectors,
@@ -1633,13 +1671,19 @@ class ProlixContext:
             self._converted_system.nonbonded_method,
             self._converted_system.has_nonbonded,
             self._config.use_dispersion_correction and self._converted_system.use_dispersion_correction,
-            self._config.ewald_error_tolerance,
+            ewald_tol,
             self._converted_system.reaction_field_dielectric,
             self._converted_system.has_implicit_solvent,
             self._converted_system.solvent_dielectric,
             self._converted_system.solute_dielectric,
             self._nonbonded_engine,
             self._converted_system.pme_grid_dims,
+            use_pallas=self._config.use_pallas,
+            pallas_interpret=self._config.pallas_interpret,
+            lj_switch_width=self._converted_system.lj_switch_width,
+            neighbor_idx=getattr(self, "_neighbor_idx", None),
+            use_pallas_pme=self._config.use_pallas_pme,
+            custom_nonbonded_chunk_size=self._config.custom_nonbonded_chunk_size,
         )
         new_box_jnp = jnp.asarray(new_box, dtype=self._box_vectors.dtype)
         new_bundle = eqx.tree_at(lambda b: b.box, self._bundle, new_box_jnp)
@@ -1661,13 +1705,19 @@ class ProlixContext:
             self._converted_system.nonbonded_method,
             self._converted_system.has_nonbonded,
             self._config.use_dispersion_correction and self._converted_system.use_dispersion_correction,
-            self._config.ewald_error_tolerance,
+            ewald_tol,
             self._converted_system.reaction_field_dielectric,
             self._converted_system.has_implicit_solvent,
             self._converted_system.solvent_dielectric,
             self._converted_system.solute_dielectric,
             self._nonbonded_engine,
             self._converted_system.pme_grid_dims,
+            use_pallas=self._config.use_pallas,
+            pallas_interpret=self._config.pallas_interpret,
+            lj_switch_width=self._converted_system.lj_switch_width,
+            neighbor_idx=getattr(self, "_neighbor_idx", None),
+            use_pallas_pme=self._config.use_pallas_pme,
+            custom_nonbonded_chunk_size=self._config.custom_nonbonded_chunk_size,
         )
 
         delta_u = float(e_new - e_curr)
@@ -1684,6 +1734,68 @@ class ProlixContext:
                 lambda s: s.bundle.box, self._converted_system, new_box_jnp
             )
             self.applyConstraints()
+
+    def _compute_virial(self, forces: jnp.ndarray | np.ndarray | None = None) -> float:
+        """Compute scalar virial trace W = sum_i (r_i - r_com) * F_i with PBC minimum-image unwrapping."""
+        if forces is None:
+            gp = self._get_dynamic_global_params()
+            ewald_tol = (
+                self._converted_system.ewald_error_tolerance
+                if self._converted_system.ewald_error_tolerance is not None
+                else self._config.ewald_error_tolerance
+            )
+            _, forces_akma = _pure_compute_energy_and_forces(
+                self._positions,
+                self._box_vectors,
+                self._bundle,
+                self._custom_forces,
+                self._position_restraints,
+                gp,
+                self._converted_system.force_group_by_component,
+                -1,
+                self._converted_system.has_pbc,
+                self._converted_system.nonbonded_cutoff,
+                self._converted_system.bond_force_groups,
+                self._converted_system.angle_force_groups,
+                self._converted_system.dihedral_force_groups,
+                self._converted_system.cmap_force_groups,
+                self._converted_system.nonbonded_method,
+                self._converted_system.has_nonbonded,
+                self._config.use_dispersion_correction and self._converted_system.use_dispersion_correction,
+                ewald_tol,
+                self._converted_system.reaction_field_dielectric,
+                self._converted_system.has_implicit_solvent,
+                self._converted_system.solvent_dielectric,
+                self._converted_system.solute_dielectric,
+                self._nonbonded_engine,
+                self._converted_system.pme_grid_dims,
+                use_pallas=self._config.use_pallas,
+                pallas_interpret=self._config.pallas_interpret,
+                lj_switch_width=self._converted_system.lj_switch_width,
+                neighbor_idx=getattr(self, "_neighbor_idx", None),
+                use_pallas_pme=self._config.use_pallas_pme,
+                custom_nonbonded_chunk_size=self._config.custom_nonbonded_chunk_size,
+            )
+            if self._converted_system.virtual_sites is not None:
+                forces_akma = self._converted_system.redistribute_virtual_site_forces(
+                    forces_akma, self._positions
+                )
+            forces_arr = forces_akma
+        else:
+            forces_arr = jnp.asarray(forces)
+
+        if self._converted_system.has_pbc and self._box_vectors is not None:
+            # Minimum-image unwrapped positions relative to anchor particle 0 to avoid
+            # discontinuous jumps when coordinates fold/wrap across periodic boundaries (DEF-30).
+            rel_anchor = _minimum_image_dr(
+                self._positions - self._positions[0],
+                self._box_vectors,
+                self._converted_system.has_pbc,
+            )
+            com = jnp.mean(rel_anchor, axis=0)
+            rel_pos = rel_anchor - com
+            return float(jnp.sum(rel_pos * forces_arr))
+        return float(jnp.sum(self._positions * forces_arr))
 
     def _apply_scr_barostat(
         self,
@@ -1706,6 +1818,11 @@ class ProlixContext:
         ke_total = float(0.5 * jnp.sum(masses * (vel**2)))
 
         gp = self._get_dynamic_global_params()
+        ewald_tol = (
+            self._converted_system.ewald_error_tolerance
+            if self._converted_system.ewald_error_tolerance is not None
+            else self._config.ewald_error_tolerance
+        )
         _, forces = _pure_compute_energy_and_forces(
             self._positions,
             self._box_vectors,
@@ -1724,25 +1841,26 @@ class ProlixContext:
             self._converted_system.nonbonded_method,
             self._converted_system.has_nonbonded,
             self._config.use_dispersion_correction and self._converted_system.use_dispersion_correction,
-            self._config.ewald_error_tolerance,
+            ewald_tol,
             self._converted_system.reaction_field_dielectric,
             self._converted_system.has_implicit_solvent,
             self._converted_system.solvent_dielectric,
             self._converted_system.solute_dielectric,
             self._nonbonded_engine,
             self._converted_system.pme_grid_dims,
+            use_pallas=self._config.use_pallas,
+            pallas_interpret=self._config.pallas_interpret,
+            lj_switch_width=self._converted_system.lj_switch_width,
+            neighbor_idx=getattr(self, "_neighbor_idx", None),
+            use_pallas_pme=self._config.use_pallas_pme,
+            custom_nonbonded_chunk_size=self._config.custom_nonbonded_chunk_size,
         )
         if self._converted_system.virtual_sites is not None:
             forces = self._converted_system.redistribute_virtual_site_forces(
                 forces, self._positions
             )
 
-        if self._converted_system.has_pbc and self._box_vectors is not None:
-            com = jnp.mean(self._positions, axis=0)
-            rel_pos = _minimum_image_dr(self._positions - com, self._box_vectors, True)
-            virial = float(jnp.sum(rel_pos * forces))
-        else:
-            virial = float(jnp.sum(self._positions * forces))
+        virial = self._compute_virial(forces)
         inst_pressure = (2.0 * ke_total + virial) / (3.0 * volume)
 
         tau = 2000.0  # AKMA time (~0.1 ps)
@@ -2457,6 +2575,11 @@ class ProlixContext:
                 k: jnp.asarray(val, dtype=jnp.float32)
                 for k, val in self._parameters.items()
             }
+            ewald_tol = (
+                self._converted_system.ewald_error_tolerance
+                if self._converted_system.ewald_error_tolerance is not None
+                else self._config.ewald_error_tolerance
+            )
             pe_akma, forces_akma = _pure_compute_energy_and_forces(
                 self._positions,
                 self._box_vectors,
@@ -2475,7 +2598,7 @@ class ProlixContext:
                 self._converted_system.nonbonded_method,
                 self._converted_system.has_nonbonded,
                 self._config.use_dispersion_correction and self._converted_system.use_dispersion_correction,
-                self._config.ewald_error_tolerance,
+                ewald_tol,
                 self._converted_system.reaction_field_dielectric,
                 self._converted_system.has_implicit_solvent,
                 self._converted_system.solvent_dielectric,

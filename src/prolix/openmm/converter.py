@@ -19,7 +19,7 @@ from jaxtyping import Array, Float, Int
 from openmm import unit
 
 from prolix.batched_energy import solve_ewald_alpha
-from prolix.openmm.config import ProlixOpenMMConfig
+from prolix.openmm.config import ProlixOpenMMConfig, _DefaultFloat
 from prolix.openmm.exceptions import (
     UnsupportedOpenMMForceError,
     check_unsupported_force,
@@ -487,6 +487,7 @@ class ConvertedOpenMMSystem(eqx.Module):
     lj_switch_width: float = eqx.field(static=True, default=0.0)
     use_dispersion_correction: bool = eqx.field(static=True, default=True)
     reaction_field_dielectric: float = eqx.field(static=True, default=78.3)
+    ewald_error_tolerance: float | None = eqx.field(static=True, default=None)
     pme_grid_dims: tuple[int, int, int] | None = eqx.field(static=True, default=None)
     pme_order: int = eqx.field(static=True, default=4)
     barostat: Any = eqx.field(static=True, default=None)
@@ -872,13 +873,28 @@ def _partition_constraints(
     n_particles = omm_system.getNumParticles()
     n_constraints = omm_system.getNumConstraints()
 
-    if n_constraints == 0 or config.water_constraint_mode == "none":
+    if n_constraints == 0 or (
+        config.water_constraint_mode == "none"
+        and getattr(config, "solute_constraint_mode", "shake") == "none"
+    ):
+        return (
+            np.zeros((0, 3), dtype=np.int32),
+            None,
+            None,
+            set(),
+            set(),
+            np.zeros((0, 2), dtype=np.int32),
+            np.zeros((0,), dtype=np.float32),
+        )
+
+    if config.water_constraint_mode == "none":
         solute_pairs = []
         solute_lengths = []
-        for i in range(n_constraints):
-            p1, p2, d = omm_system.getConstraintParameters(i)
-            solute_pairs.append((min(p1, p2), max(p1, p2)))
-            solute_lengths.append(d.value_in_unit(unit.nanometer) * NM_TO_ANGSTROM)
+        if getattr(config, "solute_constraint_mode", "shake") != "none":
+            for i in range(n_constraints):
+                p1, p2, d = omm_system.getConstraintParameters(i)
+                solute_pairs.append((min(p1, p2), max(p1, p2)))
+                solute_lengths.append(d.value_in_unit(unit.nanometer) * NM_TO_ANGSTROM)
 
         return (
             np.zeros((0, 3), dtype=np.int32),
@@ -1462,6 +1478,7 @@ def from_openmm_system(
     lj_switch_width = 0.0  # Å
     use_dispersion_correction = True
     reaction_field_dielectric = 78.3
+    ewald_error_tolerance: float | None = None
     pme_alpha = 0.0
     pme_grid_dims: tuple[int, int, int] | None = None
 
@@ -1470,6 +1487,7 @@ def from_openmm_system(
         if isinstance(f, openmm.NonbondedForce):
             has_nonbonded = True
             force_group_by_component["nonbonded"] = f.getForceGroup()
+            ewald_error_tolerance = float(f.getEwaldErrorTolerance())
 
             # Method validation & mapping
             omm_method = f.getNonbondedMethod()
@@ -1574,8 +1592,8 @@ def from_openmm_system(
             elif has_pbc:
                 grid_sp = config.pme_grid_spacing
                 if (
-                    config.ewald_error_tolerance <= 0.0005
-                    and abs(config.pme_grid_spacing - 1.0) < 1e-6
+                    isinstance(config.pme_grid_spacing, _DefaultFloat)
+                    and config.ewald_error_tolerance <= 0.0005
                 ):
                     grid_sp = 0.375
                 pme_grid_dims = compute_pme_grid_dims(
@@ -2048,6 +2066,7 @@ def from_openmm_system(
         lj_switch_width=float(lj_switch_width),
         use_dispersion_correction=use_dispersion_correction,
         reaction_field_dielectric=float(reaction_field_dielectric),
+        ewald_error_tolerance=ewald_error_tolerance,
         pme_grid_dims=pme_grid_dims,
         pme_order=4,
         barostat=barostat_info,
