@@ -1022,12 +1022,56 @@ class EnsemblePlan:
                         use_pallas=use_pallas,
                     )
 
+                # MK-64: Detect shared topology index/mask arrays across congeneric replicas
+                # so jax.vmap passes in_batched=False (stride=0) to the Pallas megakernel.
+                _shared_top_candidates = (
+                    "bond_idx",
+                    "bond_mask",
+                    "angle_idx",
+                    "angle_mask",
+                    "dihedral_idx",
+                    "dihedral_mask",
+                    "improper_idx",
+                    "improper_mask",
+                    "exception_pairs",
+                    "exception_mask",
+                    "cmap_torsion_idx",
+                    "cmap_indices",
+                    "cmap_coeffs",
+                    "cmap_mask",
+                )
+                shared_top_fields: tuple[str, ...] = ()
+                if n_systems > 1 and can_cache_stacked:
+                    _shared_list: list[str] = []
+                    for _tf in _shared_top_candidates:
+                        _v0 = getattr(bundles[0], _tf, None)
+                        if _v0 is None or isinstance(_v0, jax.core.Tracer):
+                            continue
+                        _v0_np = np.asarray(_v0)
+                        _all_eq = True
+                        for _b_other in bundles[1:]:
+                            _vb = getattr(_b_other, _tf, None)
+                            if _vb is _v0:
+                                continue
+                            if _vb is None or isinstance(_vb, jax.core.Tracer):
+                                _all_eq = False
+                                break
+                            if not np.array_equal(_v0_np, np.asarray(_vb)):
+                                _all_eq = False
+                                break
+                        if _all_eq:
+                            _shared_list.append(_tf)
+                    shared_top_fields = tuple(_shared_list)
+
+                host_cutoff_0 = float(_host_float(getattr(bundles[0], "cutoff_distance", 9.0), 9.0))
+                host_pme_alpha_0 = float(_host_float(getattr(bundles[0], "pme_alpha", 0.34), 0.34))
                 _eval_force0_jit = None
                 _batched = None
                 jit_fn_key = None
                 if can_cache_stacked and _make_stacked_cache_key is not None:
                     jit_fn_key = (
                         n_systems,
+                        shared_top_fields,
                         jax.tree_util.tree_structure(stacked),
                         tuple(
                             (x.shape, x.dtype)
@@ -1047,8 +1091,8 @@ class EnsemblePlan:
                         tuple(np.asarray(host_box_vec_0).reshape(-1).tolist())
                         if host_box_vec_0 is not None
                         else None,
-                        float(_host_float(getattr(bundles[0], "cutoff_distance", 9.0), 9.0)),
-                        float(_host_float(getattr(bundles[0], "pme_alpha", 0.34), 0.34)),
+                        host_cutoff_0,
+                        host_pme_alpha_0,
                         _make_stacked_cache_key()[1:],
                     )
                     cached_jit_pair = _STACKED_JIT_FN_CACHE.get(jit_fn_key)
@@ -1056,36 +1100,50 @@ class EnsemblePlan:
                         _eval_force0_jit, _batched = cached_jit_pair
 
                 if _batched is None:
-                    if can_cache_stacked and use_neighbor_list:
-                        def _eval_force0_one(bundle_i, _seed_i, nbr_i=None):
-                            eff_excl = (
-                                "pre_encoded"
-                                if (
-                                    nbr_i is not None
-                                    and getattr(bundle_i, "excl_dense_indices", None) is not None
-                                )
-                                else "table"
-                            )
-                            st0, _, _, _ = self._setup_integrator(
-                                bundle_i,
-                                dt,
-                                kT,
-                                0,
-                                integration_prefix=integration_prefix,
-                                dt_unit=dt_unit,
-                                gamma=gamma,
-                                use_flash_forces=use_flash_forces,
-                                initial_neighbor=nbr_i,
-                                nb_cfg=nb_cfg,
-                                use_pallas=use_pallas,
-                                use_pallas_pme=use_pallas_pme,
-                                excl_mode=eff_excl,
-                                host_box_vec=host_box_vec_0,
-                            )
-                            return st0.force
+                    import dataclasses as _dc_ep
 
-                        _eval_force0_jit = jax.jit(
-                            lambda sb_in, snb_in: dispatch_n_mols(
+                    if can_cache_stacked and use_neighbor_list:
+                        def _make_eval_force0(sb_in, snb_in):
+                            _shared_0 = (
+                                {_tf: getattr(sb_in, _tf)[0] for _tf in shared_top_fields}
+                                if shared_top_fields
+                                else {}
+                            )
+
+                            def _eval_force0_one(bundle_i, _seed_i, nbr_i=None):
+                                bundle_i = _dc_ep.replace(
+                                    bundle_i,
+                                    cutoff_distance=host_cutoff_0,
+                                    pme_alpha=host_pme_alpha_0,
+                                    **_shared_0,
+                                )
+                                eff_excl = (
+                                    "pre_encoded"
+                                    if (
+                                        nbr_i is not None
+                                        and getattr(bundle_i, "excl_dense_indices", None) is not None
+                                    )
+                                    else "table"
+                                )
+                                st0, _, _, _ = self._setup_integrator(
+                                    bundle_i,
+                                    dt,
+                                    kT,
+                                    0,
+                                    integration_prefix=integration_prefix,
+                                    dt_unit=dt_unit,
+                                    gamma=gamma,
+                                    use_flash_forces=use_flash_forces,
+                                    initial_neighbor=nbr_i,
+                                    nb_cfg=nb_cfg,
+                                    use_pallas=use_pallas,
+                                    use_pallas_pme=use_pallas_pme,
+                                    excl_mode=eff_excl,
+                                    host_box_vec=host_box_vec_0,
+                                )
+                                return st0.force
+
+                            return dispatch_n_mols(
                                 plan,
                                 n_systems,
                                 _eval_force0_one,
@@ -1093,11 +1151,24 @@ class EnsemblePlan:
                                 jnp.zeros(n_systems, dtype=jnp.int32),
                                 extra_stacked=snb_in,
                             )
-                        )
+
+                        _eval_force0_jit = jax.jit(_make_eval_force0)
 
                     @jax.jit
                     def _batched(sb, sd, snb, sf0, n_steps_in):
+                        _shared_0 = (
+                            {_tf: getattr(sb, _tf)[0] for _tf in shared_top_fields}
+                            if shared_top_fields
+                            else {}
+                        )
+
                         def _run_one_with_f0(bundle, seed_i, extra=None):
+                            bundle = _dc_ep.replace(
+                                bundle,
+                                cutoff_distance=host_cutoff_0,
+                                pme_alpha=host_pme_alpha_0,
+                                **_shared_0,
+                            )
                             if sf0 is not None and extra is not None:
                                 nbr_arg, f0_arg = extra
                             else:

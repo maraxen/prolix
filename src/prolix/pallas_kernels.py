@@ -3794,7 +3794,21 @@ def _pallas_bonded_and_nonbonded_nl_fused_batch(
         return jnp.zeros((B,), dtype=orig_dtype), jnp.zeros((B, 0, 3), dtype=orig_dtype)
 
     N_act = _resolve_active_atoms(None, N, atom_mask)
-    n_nb_blocks = ((N_act + _NB_BLOCK_N - 1) // _NB_BLOCK_N) if K > 0 else 0
+    n_nb_atom_blocks = ((N_act + _NB_BLOCK_N - 1) // _NB_BLOCK_N) if K > 0 else 0
+    k_blocks = max(1, (K + _NB_BLOCK_K - 1) // _NB_BLOCK_K)
+    # MK-63: Adaptive K-tile splitting across CTAs for small-N / low-B SM saturation
+    env_k_splits = os.environ.get("PROLIX_NB_K_SPLITS", "").strip()
+    if n_nb_atom_blocks == 0 or interpret:
+        nb_k_splits = 1
+    elif env_k_splits:
+        nb_k_splits = max(1, min(k_blocks, int(env_k_splits)))
+    elif B * n_nb_atom_blocks <= 32 and k_blocks >= 4:
+        nb_k_splits = 4
+    elif B * n_nb_atom_blocks <= 64 and k_blocks >= 2:
+        nb_k_splits = 2
+    else:
+        nb_k_splits = 1
+    n_nb_blocks = n_nb_atom_blocks * nb_k_splits
     n_blk_b = (B_real + _BLOCK_B - 1) // _BLOCK_B
     n_blk_a = (A_real + _BLOCK_B - 1) // _BLOCK_B
     n_blk_d = (D_real + _BLOCK_B - 1) // _BLOCK_B
@@ -3820,10 +3834,9 @@ def _pallas_bonded_and_nonbonded_nl_fused_batch(
     # lowers to .at[idx].set() and requires unique in-bounds indices across all 32 lanes.
     N_eff = N_pad if interpret else N
     pad_n = N_eff - N
-    k_blocks = max(1, (K + _NB_BLOCK_K - 1) // _NB_BLOCK_K)
     use_pre_encoded = excl_mode == "pre_encoded"
     eff_pure_water_blk = (
-        int(first_pure_water_block) if int(first_pure_water_block) >= 0 else n_nb_blocks
+        int(first_pure_water_block) if int(first_pure_water_block) >= 0 else n_nb_atom_blocks
     )
 
     pos_b = (positions if b_pos else positions[None]).astype(dtype)
@@ -3922,19 +3935,45 @@ def _pallas_bonded_and_nonbonded_nl_fused_batch(
     lam_flat = jnp.asarray(lam_b.reshape(B_lam))
     s_lam = 1 if B_lam > 1 else 0
 
+    # MK-64: Deduplicate shared topology index/mask arrays across congeneric replicas (stride=0)
+    force_shared_top = os.environ.get("PROLIX_CONGENERIC_SHARED_TOPOLOGY", "").strip() == "1"
+
     def _prep_int(
         arr: jax.Array, is_b: bool, real_n: int, pad_val: int, col: int | None = None
     ) -> tuple[jax.Array, int]:
         if real_n == 0:
             return jnp.full((1,), pad_val, dtype=jnp.int32), 0
+        if is_b:
+            if int(arr.shape[0]) == 1 or force_shared_top:
+                arr = arr[0]
+                is_b = False
+            elif not isinstance(arr, jax.core.Tracer) and int(arr.shape[0]) > 1:
+                arr_np = np.asarray(arr)
+                if np.array_equal(arr_np, np.broadcast_to(arr_np[:1], arr_np.shape)):
+                    arr = arr[0]
+                    is_b = False
         x = arr[..., col].astype(jnp.int32) if col is not None else arr.astype(jnp.int32)
         return jnp.asarray(x.reshape(-1), dtype=jnp.int32), (real_n if is_b else 0)
 
     def _prep_flt(
-        arr: jax.Array, is_b: bool, real_n: int, pad_val: float, col: int | None = None
+        arr: jax.Array,
+        is_b: bool,
+        real_n: int,
+        pad_val: float,
+        col: int | None = None,
+        is_mask: bool = False,
     ) -> tuple[jax.Array, int]:
         if real_n == 0 or (col is not None and arr.shape[-1] <= col):
             return jnp.full((1,), pad_val, dtype=dtype), 0
+        if is_b:
+            if int(arr.shape[0]) == 1 or (is_mask and force_shared_top):
+                arr = arr[0]
+                is_b = False
+            elif not isinstance(arr, jax.core.Tracer) and int(arr.shape[0]) > 1:
+                arr_np = np.asarray(arr)
+                if np.array_equal(arr_np, np.broadcast_to(arr_np[:1], arr_np.shape)):
+                    arr = arr[0]
+                    is_b = False
         x = arr[..., col].astype(dtype) if col is not None else arr.astype(dtype)
         return jnp.asarray(x.reshape(-1), dtype=dtype), (real_n if is_b else 0)
 
@@ -3942,14 +3981,14 @@ def _pallas_bonded_and_nonbonded_nl_fused_batch(
     b_j, _ = _prep_int(bond_indices, b_bi, B_real, -1, 1)
     b_r0, s_bp = _prep_flt(bond_params, b_bp, B_real, 0.0, 0)
     b_k, _ = _prep_flt(bond_params, b_bp, B_real, 0.0, 1)
-    b_msk, s_bm = _prep_flt(bond_mask, b_bm, B_real, 0.0, None)
+    b_msk, s_bm = _prep_flt(bond_mask, b_bm, B_real, 0.0, None, is_mask=True)
 
     a_i, s_ai = _prep_int(angle_indices, b_ai, A_real, -1, 0)
     a_j, _ = _prep_int(angle_indices, b_ai, A_real, -1, 1)
     a_k, _ = _prep_int(angle_indices, b_ai, A_real, -1, 2)
     a_th0, s_ap = _prep_flt(angle_params, b_ap, A_real, 0.0, 0)
     a_kval, _ = _prep_flt(angle_params, b_ap, A_real, 0.0, 1)
-    a_msk, s_am = _prep_flt(angle_mask, b_am, A_real, 0.0, None)
+    a_msk, s_am = _prep_flt(angle_mask, b_am, A_real, 0.0, None, is_mask=True)
 
     d_i, s_di = _prep_int(dih_indices, b_di, D_real, -1, 0)
     d_j, _ = _prep_int(dih_indices, b_di, D_real, -1, 1)
@@ -3958,7 +3997,7 @@ def _pallas_bonded_and_nonbonded_nl_fused_batch(
     d_p0, s_dp = _prep_flt(dih_params, b_dp, D_real, 0.0, 0)
     d_p1, _ = _prep_flt(dih_params, b_dp, D_real, 0.0, 1)
     d_p2, _ = _prep_flt(dih_params, b_dp, D_real, 0.0, 2)
-    d_msk, s_dm = _prep_flt(dih_mask, b_dm, D_real, 0.0, None)
+    d_msk, s_dm = _prep_flt(dih_mask, b_dm, D_real, 0.0, None, is_mask=True)
 
     h_i, s_hi = _prep_int(harm_imp_indices, b_hi, H_real, -1, 0)
     h_j, _ = _prep_int(harm_imp_indices, b_hi, H_real, -1, 1)
@@ -3966,14 +4005,14 @@ def _pallas_bonded_and_nonbonded_nl_fused_batch(
     h_l, _ = _prep_int(harm_imp_indices, b_hi, H_real, -1, 3)
     h_kval, s_hp = _prep_flt(harm_imp_params, b_hp, H_real, 0.0, 0)
     h_phi0, _ = _prep_flt(harm_imp_params, b_hp, H_real, 0.0, 1)
-    h_msk, s_hm = _prep_flt(harm_imp_mask, b_hm, H_real, 0.0, None)
+    h_msk, s_hm = _prep_flt(harm_imp_mask, b_hm, H_real, 0.0, None, is_mask=True)
 
     e_i, s_ep = _prep_int(exc14_pairs, b_ep, E_real, -1, 0)
     e_j, _ = _prep_int(exc14_pairs, b_ep, E_real, -1, 1)
     e_sig, s_es = _prep_flt(exc14_sigmas, b_es, E_real, 1.0, None)
     e_eps, s_ee = _prep_flt(exc14_epsilons, b_ees, E_real, 0.0, None)
     e_qp, s_eq = _prep_flt(exc14_chargeprods, b_eq, E_real, 0.0, None)
-    e_msk, s_em = _prep_flt(exc14_mask, b_em, E_real, 0.0, None)
+    e_msk, s_em = _prep_flt(exc14_mask, b_em, E_real, 0.0, None, is_mask=True)
 
     c_col4 = 7 if (C_real > 0 and int(cmap_torsions.shape[-1]) == 8) else 4
     c_0, s_ct = _prep_int(cmap_torsions, b_ct, C_real, -1, 0)
@@ -3982,7 +4021,7 @@ def _pallas_bonded_and_nonbonded_nl_fused_batch(
     c_3, _ = _prep_int(cmap_torsions, b_ct, C_real, -1, 3)
     c_4, _ = _prep_int(cmap_torsions, b_ct, C_real, -1, c_col4)
     c_midx, s_cmi = _prep_int(cmap_map_indices, b_cmi, C_real, 0, None)
-    c_msk, s_cm = _prep_flt(cmap_mask, b_cm, C_real, 0.0, None)
+    c_msk, s_cm = _prep_flt(cmap_mask, b_cm, C_real, 0.0, None, is_mask=True)
 
     cmap_base_ndim = 5 if b_cc else 4
     if cmap_coeffs.size > 0 and cmap_coeffs.ndim >= cmap_base_ndim:
@@ -4092,7 +4131,15 @@ def _pallas_bonded_and_nonbonded_nl_fused_batch(
             )
 
         def _do_nonbonded_nl(nb_pid):
-            offs_i = nb_pid * _NB_BLOCK_N + jnp.arange(_NB_BLOCK_N, dtype=jnp.int32)
+            if nb_k_splits > 1:
+                atom_blk = nb_pid // jnp.int32(nb_k_splits)
+                k_split_id = nb_pid % jnp.int32(nb_k_splits)
+            else:
+                atom_blk = nb_pid
+                k_split_id = jnp.int32(0)
+            lane_nb = jnp.arange(_NB_BLOCK_N, dtype=jnp.int32)
+            offs_i = atom_blk * _NB_BLOCK_N + lane_nb
+            e_offs_i = nb_pid * _NB_BLOCK_N + lane_nb
             in_bounds_i = offs_i < N
             safe_offs_i = jnp.minimum(offs_i, max_atom)
             io_offs_i = offs_i if interpret else safe_offs_i
@@ -4110,7 +4157,7 @@ def _pallas_bonded_and_nonbonded_nl_fused_batch(
             mask_i = (
                 _pl_load(mask_ref, (base_mask + io_offs_i,), mask=in_bounds_i, other=jnp.int32(0)) > 0
             ) & in_bounds_i
-            max_k_blk = _pl_load(max_k_tiles_ref, (base_mkt + jnp.full((1,), nb_pid, dtype=jnp.int32),))[0]
+            max_k_blk = _pl_load(max_k_tiles_ref, (base_mkt + jnp.full((1,), atom_blk, dtype=jnp.int32),))[0]
 
             def _run_k_tiles(c0):
                 px_i = _pl_load(px_ref, (pos_base + io_offs_i,), mask=in_bounds_i, other=zero)
@@ -4397,41 +4444,58 @@ def _pallas_bonded_and_nonbonded_nl_fused_batch(
 
                     return jax.lax.cond(has_any_valid, _eval_nonempty_tile, lambda c_in: c_in, carry)
 
-                e_blk, fx_blk, fy_blk, fz_blk = jax.lax.fori_loop(0, max_k_blk, _k_tile_body, c0)
-                if total_bonded_blocks == 0 or eff_pure_water_blk <= 0:
-                    _pl_store(fx_out_ref, (f_base + io_offs_i,), fx_blk, mask=mask_i)
-                    _pl_store(fy_out_ref, (f_base + io_offs_i,), fy_blk, mask=mask_i)
-                    _pl_store(fz_out_ref, (f_base + io_offs_i,), fz_blk, mask=mask_i)
-                elif eff_pure_water_blk < n_nb_blocks:
-                    def _store_direct(_):
-                        _pl_store(fx_out_ref, (f_base + io_offs_i,), fx_blk, mask=mask_i)
-                        _pl_store(fy_out_ref, (f_base + io_offs_i,), fy_blk, mask=mask_i)
-                        _pl_store(fz_out_ref, (f_base + io_offs_i,), fz_blk, mask=mask_i)
-                        return jnp.int32(0)
-
-                    def _store_atomic(_):
-                        _pl_atomic_add_1d(fx_out_ref, f_base + io_offs_i, fx_blk, mask_i, interpret)
-                        _pl_atomic_add_1d(fy_out_ref, f_base + io_offs_i, fy_blk, mask_i, interpret)
-                        _pl_atomic_add_1d(fz_out_ref, f_base + io_offs_i, fz_blk, mask_i, interpret)
-                        return jnp.int32(0)
-
-                    _ = jax.lax.cond(
-                        nb_pid >= jnp.int32(eff_pure_water_blk),
-                        _store_direct,
-                        _store_atomic,
-                        None,
+                if nb_k_splits > 1:
+                    n_split_steps = jnp.maximum(
+                        jnp.int32(0),
+                        (max_k_blk - k_split_id + jnp.int32(nb_k_splits - 1)) // jnp.int32(nb_k_splits),
                     )
-                else:
+                    e_blk, fx_blk, fy_blk, fz_blk = jax.lax.fori_loop(
+                        0,
+                        n_split_steps,
+                        lambda s_idx, carry: _k_tile_body(
+                            s_idx * jnp.int32(nb_k_splits) + k_split_id, carry
+                        ),
+                        c0,
+                    )
                     _pl_atomic_add_1d(fx_out_ref, f_base + io_offs_i, fx_blk, mask_i, interpret)
                     _pl_atomic_add_1d(fy_out_ref, f_base + io_offs_i, fy_blk, mask_i, interpret)
                     _pl_atomic_add_1d(fz_out_ref, f_base + io_offs_i, fz_blk, mask_i, interpret)
+                else:
+                    e_blk, fx_blk, fy_blk, fz_blk = jax.lax.fori_loop(0, max_k_blk, _k_tile_body, c0)
+                    if total_bonded_blocks == 0 or eff_pure_water_blk <= 0:
+                        _pl_store(fx_out_ref, (f_base + io_offs_i,), fx_blk, mask=mask_i)
+                        _pl_store(fy_out_ref, (f_base + io_offs_i,), fy_blk, mask=mask_i)
+                        _pl_store(fz_out_ref, (f_base + io_offs_i,), fz_blk, mask=mask_i)
+                    elif eff_pure_water_blk < n_nb_atom_blocks:
+                        def _store_direct(_):
+                            _pl_store(fx_out_ref, (f_base + io_offs_i,), fx_blk, mask=mask_i)
+                            _pl_store(fy_out_ref, (f_base + io_offs_i,), fy_blk, mask=mask_i)
+                            _pl_store(fz_out_ref, (f_base + io_offs_i,), fz_blk, mask=mask_i)
+                            return jnp.int32(0)
+
+                        def _store_atomic(_):
+                            _pl_atomic_add_1d(fx_out_ref, f_base + io_offs_i, fx_blk, mask_i, interpret)
+                            _pl_atomic_add_1d(fy_out_ref, f_base + io_offs_i, fy_blk, mask_i, interpret)
+                            _pl_atomic_add_1d(fz_out_ref, f_base + io_offs_i, fz_blk, mask_i, interpret)
+                            return jnp.int32(0)
+
+                        _ = jax.lax.cond(
+                            atom_blk >= jnp.int32(eff_pure_water_blk),
+                            _store_direct,
+                            _store_atomic,
+                            None,
+                        )
+                    else:
+                        _pl_atomic_add_1d(fx_out_ref, f_base + io_offs_i, fx_blk, mask_i, interpret)
+                        _pl_atomic_add_1d(fy_out_ref, f_base + io_offs_i, fy_blk, mask_i, interpret)
+                        _pl_atomic_add_1d(fz_out_ref, f_base + io_offs_i, fz_blk, mask_i, interpret)
                 if compute_energy:
-                    _pl_store(e_out_ref, (e_nb_base + offs_i,), jnp.where(mask_i, e_blk, zero))
+                    _pl_store(e_out_ref, (e_nb_base + e_offs_i,), jnp.where(mask_i, e_blk, zero))
                 return nb_pid - nb_pid
 
             def _skip_k_tiles(_c0):
                 if compute_energy:
-                    _pl_store(e_out_ref, (e_nb_base + offs_i,), (offs_i - offs_i).astype(dtype))
+                    _pl_store(e_out_ref, (e_nb_base + e_offs_i,), (e_offs_i - e_offs_i).astype(dtype))
                 return nb_pid - nb_pid
 
             init_carry = (
@@ -4441,7 +4505,7 @@ def _pallas_bonded_and_nonbonded_nl_fused_batch(
                 jnp.zeros((_NB_BLOCK_N,), dtype=dtype),
             )
             return jax.lax.cond(
-                (jnp.max(mask_i.astype(jnp.int32)) > 0) & (max_k_blk > 0),
+                (jnp.max(mask_i.astype(jnp.int32)) > 0) & (max_k_blk > k_split_id),
                 _run_k_tiles,
                 _skip_k_tiles,
                 init_carry,
@@ -5832,6 +5896,9 @@ def _build_tile_pair_neighbor_list_single(
     excl_scales_elec: jax.Array | None,
     atom_mask: jax.Array | None,
     max_tile_pairs: int,
+    positions: jax.Array | None = None,
+    box: jax.Array | None = None,
+    cutoff: float | None = None,
 ) -> TilePairNeighborList:
     N, K = int(neighbor_idx.shape[0]), int(neighbor_idx.shape[1])
     n_blocks = max(1, (N + _NB_BLOCK_N - 1) // _NB_BLOCK_N)
@@ -5854,6 +5921,54 @@ def _build_tile_pair_neighbor_list_single(
     adj = jnp.eye(n_blocks, dtype=jnp.bool_)
     if K > 0 and N > 0:
         adj = adj.at[t_lo.reshape(-1), t_hi.reshape(-1)].max(valid_nbr.reshape(-1))
+
+    # MK-62: Prune skin-only tile pairs via 32-atom tile AABB minimum-image distance <= cutoff^2
+    if positions is not None and cutoff is not None and float(cutoff) > 0.0 and N > 0:
+        pos_f32 = positions.astype(jnp.float32)
+        am_f = (
+            jnp.ones((N,), dtype=jnp.bool_)
+            if atom_mask is None
+            else jnp.asarray(atom_mask, dtype=jnp.bool_)
+        )
+        has_bx = box is not None
+        if has_bx:
+            b_arr = jnp.asarray(box, dtype=jnp.float32)
+            L_vec = jnp.diag(b_arr) if (b_arr.ndim == 2 and b_arr.shape == (3, 3)) else b_arr[:3]
+            safe_L = jnp.where(L_vec > 0.0, L_vec, jnp.ones_like(L_vec))
+            inv_L = jnp.where(L_vec > 0.0, 1.0 / safe_L, jnp.zeros_like(L_vec))
+            pos_f32 = jnp.where(
+                L_vec[None, :] > 0.0,
+                pos_f32 - L_vec[None, :] * jnp.floor(pos_f32 * inv_L[None, :]),
+                pos_f32,
+            )
+        else:
+            L_vec = jnp.zeros((3,), dtype=jnp.float32)
+            inv_L = jnp.zeros((3,), dtype=jnp.float32)
+        if pad_n > 0:
+            pos_pad = jnp.pad(pos_f32, ((0, pad_n), (0, 0)))
+            am_pad = jnp.pad(am_f, (0, pad_n), constant_values=False)
+        else:
+            pos_pad = pos_f32
+            am_pad = am_f
+        pos_tiles = pos_pad.reshape(n_blocks, _NB_BLOCK_N, 3)
+        mask_tiles = am_pad.reshape(n_blocks, _NB_BLOCK_N)
+        first_real = jnp.argmax(mask_tiles.astype(jnp.int32), axis=1)
+        anchor = jnp.take_along_axis(pos_tiles, first_real[:, None, None], axis=1)[:, 0, :]
+        rel = pos_tiles - anchor[:, None, :]
+        if has_bx:
+            rel = rel - L_vec[None, None, :] * jnp.floor(rel * inv_L[None, None, :] + 0.5)
+        rel = jnp.where(mask_tiles[:, :, None], rel, 0.0)
+        rel_min = jnp.min(rel, axis=1)
+        rel_max = jnp.max(rel, axis=1)
+        center = anchor + 0.5 * (rel_min + rel_max)
+        half_ext = 0.5 * (rel_max - rel_min)
+        dc = center[:, None, :] - center[None, :, :]
+        if has_bx:
+            dc = dc - L_vec[None, None, :] * jnp.floor(dc * inv_L[None, None, :] + 0.5)
+        gap = jnp.maximum(0.0, jnp.abs(dc) - (half_ext[:, None, :] + half_ext[None, :, :]))
+        dist_sq = jnp.sum(gap * gap, axis=-1)
+        r_cut_sq = jnp.float32(float(cutoff) * float(cutoff))
+        adj = adj & ((dist_sq <= r_cut_sq) | jnp.eye(n_blocks, dtype=jnp.bool_))
 
     num_valid = jnp.sum(adj.astype(jnp.int32))
     M_pairs = max(1, int(max_tile_pairs))
@@ -6006,13 +6121,16 @@ def build_tile_pair_neighbor_list(
     max_tile_pairs: int | None = None,
     positions: jax.Array | None = None,
     box: jax.Array | None = None,
+    cutoff: float | None = None,
     morton_sort: bool = True,
 ) -> TilePairNeighborList:
-    """Build a spatially sorted 32x32 tile-pair neighbor list with 32-bit exclusion masks (MK-51 / MK-57).
+    """Build a spatially sorted 32x32 tile-pair neighbor list with 32-bit exclusion masks (MK-51 / MK-57 / MK-62).
 
     When `positions` is provided and `morton_sort=True`, applies 3D Morton (Z-order)
     spatial sorting (`compute_morton_codes_3d`) so each 32-atom tile forms a tight 3D
     bounding box (~8,500 interacting tile pairs on 25k DHFR instead of ~45,000 un-sorted).
+    When `cutoff` is also provided, prunes skin-only tile pairs whose 32-atom AABB
+    minimum distance exceeds `cutoff` (MK-62).
     Supports both unbatched `(N, K)` and batched `(B, N, K)` neighbor lists.
     """
     is_batched = neighbor_idx.ndim == 3
@@ -6027,12 +6145,14 @@ def build_tile_pair_neighbor_list(
     ev_work = excl_scales_vdw
     ee_work = excl_scales_elec
     am_work = atom_mask
+    pos_work = positions
 
     if use_morton and positions is not None:
         if not is_batched and positions.ndim == 2:
             perm_out, inv_perm_out = compute_morton_codes_3d(
                 positions, box=box, atom_mask=atom_mask
             )
+            pos_work = positions[perm_out]
             nbr_work = permute_neighbor_list_morton(
                 neighbor_idx, perm_out, inv_perm_out, n_atoms=N
             )
@@ -6068,6 +6188,7 @@ def build_tile_pair_neighbor_list(
                     atom_mask=(atom_mask[b] if b_am_m else atom_mask) if atom_mask is not None else None,
                 )
             )(jnp.arange(B_m, dtype=jnp.int32))
+            pos_work = jax.vmap(lambda p1, perm1: p1[perm1])(pos_b, perm_out)
             nbr_b_in = (
                 neighbor_idx
                 if is_batched
@@ -6151,6 +6272,9 @@ def build_tile_pair_neighbor_list(
             ee_work,
             am_work,
             int(max_tile_pairs),
+            positions=pos_work,
+            box=box,
+            cutoff=cutoff,
         )
         return tp_single._replace(atom_perm=perm_out, atom_inv_perm=inv_perm_out)
 
@@ -6159,6 +6283,8 @@ def build_tile_pair_neighbor_list(
     b_ev = ev_work is not None and ev_work.ndim == 3
     b_ee = ee_work is not None and ee_work.ndim == 3
     b_am = am_work is not None and am_work.ndim == 2
+    b_pos_w = pos_work is not None and pos_work.ndim == 3
+    b_bx_w = box is not None and ((box.ndim == 2 and box.shape != (3, 3)) or box.ndim == 3)
 
     tp_batched = jax.vmap(
         lambda b: _build_tile_pair_neighbor_list_single(
@@ -6168,6 +6294,9 @@ def build_tile_pair_neighbor_list(
             (ee_work[b] if b_ee else ee_work) if ee_work is not None else None,
             (am_work[b] if b_am else am_work) if am_work is not None else None,
             int(max_tile_pairs),
+            positions=(pos_work[b] if b_pos_w else pos_work) if pos_work is not None else None,
+            box=(box[b] if b_bx_w else box) if box is not None else None,
+            cutoff=cutoff,
         )
     )(jnp.arange(B, dtype=jnp.int32))
     return tp_batched._replace(atom_perm=perm_out, atom_inv_perm=inv_perm_out)
@@ -6198,7 +6327,7 @@ def _pallas_nonbonded_tile_pairs_batch(
     scale_14_vdw: float = 0.5,
     scale_14_elec: float = 0.83333333,
 ) -> tuple[jax.Array, jax.Array]:
-    """2D-grid `(B, n_pair_blocks)` 32x32 Tile-Pair Newton's 3rd Law Pallas Kernel (MK-51)."""
+    """2D-grid `(B, n_pair_blocks)` 32x32 Tile-Pair Newton's 3rd Law Pallas Kernel (MK-51 / MK-62 / MK-63)."""
     B = int(axis_size)
     pos_b = positions if in_batched[0] else positions[None, ...]
     q_b = charges if in_batched[1] else charges[None, ...]
@@ -6269,8 +6398,19 @@ def _pallas_nonbonded_tile_pairs_batch(
         eps_pad = eps_b
         mask_pad = mask_b.astype(jnp.int32)
 
-    # Group 8 tile pairs per CTA so grid size stays compact and amortized
-    tp_group = 8 if M_pairs >= 256 else 1
+    # MK-63: Adaptive tp_group (1, 2, 4, 8) based on B * M_pairs so small systems saturate all SMs
+    total_tp = B * M_pairs
+    env_tpg = os.environ.get("PROLIX_TP_GROUP", "").strip()
+    if env_tpg:
+        tp_group = max(1, int(env_tpg))
+    elif total_tp < 512:
+        tp_group = 1
+    elif total_tp < 1024:
+        tp_group = 2
+    elif total_tp < 2048:
+        tp_group = 4
+    else:
+        tp_group = 8
     n_pair_blocks = (M_pairs + tp_group - 1) // tp_group
     M_pairs_pad = n_pair_blocks * tp_group
     pad_tp = M_pairs_pad - M_pairs
@@ -6393,27 +6533,19 @@ def _pallas_nonbonded_tile_pairs_batch(
                 offs_i = safe_ti * _NB_BLOCK_N + lane_32
                 offs_j = safe_tj * _NB_BLOCK_N + lane_32
 
-                # Coalesced 32-element contiguous vector loads for tile_I and tile_J
+                # Coalesced 32-element contiguous position & mask loads for tile_I and tile_J
                 px_i = _pl_load(px_ref, (base_pos + offs_i,))
                 py_i = _pl_load(py_ref, (base_pos + offs_i,))
                 pz_i = _pl_load(pz_ref, (base_pos + offs_i,))
-                q_i = _pl_load(q_ref, (base_q + offs_i,))
-                sig_i = _pl_load(sig_ref, (base_sig + offs_i,))
-                eps_i = _pl_load(eps_ref, (base_eps + offs_i,))
                 mask_i = (_pl_load(mask_ref, (base_mask + offs_i,)) > 0) & (offs_i < N)
 
                 px_j = _pl_load(px_ref, (base_pos + offs_j,))
                 py_j = _pl_load(py_ref, (base_pos + offs_j,))
                 pz_j = _pl_load(pz_ref, (base_pos + offs_j,))
-                q_j = _pl_load(q_ref, (base_q + offs_j,))
-                sig_j = _pl_load(sig_ref, (base_sig + offs_j,))
-                eps_j = _pl_load(eps_ref, (base_eps + offs_j,))
                 mask_j = (_pl_load(mask_ref, (base_mask + offs_j,)) > 0) & (offs_j < N)
 
                 full_bits = _pl_load(ef_ref, (base_ef + p_idx * _NB_BLOCK_N + lane_32,))
-                bits_14 = _pl_load(e14_ref, (base_e14 + p_idx * _NB_BLOCK_N + lane_32,))
                 is_full_excl = ((full_bits[:, None] >> bit_shifts) & jnp.int32(1)) != 0
-                is_14_excl = ((bits_14[:, None] >> bit_shifts) & jnp.int32(1)) != 0
 
                 is_diag = safe_ti == safe_tj
                 pair_geom_valid = jnp.where(is_diag, upper_tri_mask, jnp.bool_(True))
@@ -6443,95 +6575,113 @@ def _pallas_nonbonded_tile_pairs_batch(
                 raw_r_sq = dx * dx + dy * dy + dz * dz
                 active = valid_pair & (raw_r_sq < cutoff_sq)
 
-                r_sq = raw_r_sq + jnp.asarray(1e-12, dtype=dtype)
-                dist = jnp.sqrt(r_sq)
-                inv_dist = jnp.where(active, one / dist, zero)
-                inv_r_sq = inv_dist * inv_dist
+                # MK-62: Skip parameter loads, SFU sqrt/erfc/LJ, and 6 atomic adds for skin-only tile pairs
+                def _eval_active_tp(e_act_in):
+                    q_i = _pl_load(q_ref, (base_q + offs_i,))
+                    sig_i = _pl_load(sig_ref, (base_sig + offs_i,))
+                    eps_i = _pl_load(eps_ref, (base_eps + offs_i,))
+                    q_j = _pl_load(q_ref, (base_q + offs_j,))
+                    sig_j = _pl_load(sig_ref, (base_sig + offs_j,))
+                    eps_j = _pl_load(eps_ref, (base_eps + offs_j,))
+                    bits_14 = _pl_load(e14_ref, (base_e14 + p_idx * _NB_BLOCK_N + lane_32,))
+                    is_14_excl = ((bits_14[:, None] >> bit_shifts) & jnp.int32(1)) != 0
 
-                w_vdw = jnp.where(is_full_excl, zero, jnp.where(is_14_excl, s14_vdw, one))
-                w_elec = jnp.where(is_full_excl, zero, jnp.where(is_14_excl, s14_elec, one))
+                    r_sq = raw_r_sq + jnp.asarray(1e-12, dtype=dtype)
+                    dist = jnp.sqrt(r_sq)
+                    inv_dist = jnp.where(active, one / dist, zero)
+                    inv_r_sq = inv_dist * inv_dist
 
-                sig_ij = half * (sig_i[:, None] + sig_j[None, :])
-                sig_safe = jnp.where(active, jnp.maximum(sig_ij, jnp.asarray(1e-4, dtype=dtype)), one)
-                eps_ij = jnp.sqrt(
-                    jnp.maximum(eps_i[:, None] * eps_j[None, :], zero) + jnp.asarray(1e-30, dtype=dtype)
-                )
+                    w_vdw = jnp.where(is_full_excl, zero, jnp.where(is_14_excl, s14_vdw, one))
+                    w_elec = jnp.where(is_full_excl, zero, jnp.where(is_14_excl, s14_elec, one))
 
-                u = dist / sig_safe
-                u6 = u ** 6
-                denom_lj = soft_alpha_lj + u6
-                x_inv6 = one / jnp.maximum(denom_lj, jnp.asarray(1e-6, dtype=dtype))
-                v_unsw = four * eps_ij * lam * (x_inv6 * x_inv6 - x_inv6)
-                dv_unsw_dr = (
-                    jnp.asarray(-24.0, dtype=dtype)
-                    * eps_ij
-                    * lam
-                    * (two * x_inv6 - one)
-                    * (x_inv6 * x_inv6)
-                    * u6
-                    * inv_dist
-                )
+                    sig_ij = half * (sig_i[:, None] + sig_j[None, :])
+                    sig_safe = jnp.where(active, jnp.maximum(sig_ij, jnp.asarray(1e-4, dtype=dtype)), one)
+                    eps_ij = jnp.sqrt(
+                        jnp.maximum(eps_i[:, None] * eps_j[None, :], zero) + jnp.asarray(1e-30, dtype=dtype)
+                    )
 
-                s_w, ds_dr = _lj_switch_weight_and_deriv(dist, cutoff, lj_switch_width)
-                e_lj = w_vdw * v_unsw * s_w
-                de_lj_dr = w_vdw * (dv_unsw_dr * s_w + v_unsw * ds_dr)
+                    u = dist / sig_safe
+                    u6 = u ** 6
+                    denom_lj = soft_alpha_lj + u6
+                    x_inv6 = one / jnp.maximum(denom_lj, jnp.asarray(1e-6, dtype=dtype))
+                    v_unsw = four * eps_ij * lam * (x_inv6 * x_inv6 - x_inv6)
+                    dv_unsw_dr = (
+                        jnp.asarray(-24.0, dtype=dtype)
+                        * eps_ij
+                        * lam
+                        * (two * x_inv6 - one)
+                        * (x_inv6 * x_inv6)
+                        * u6
+                        * inv_dist
+                    )
 
-                qq = coul_const * q_i[:, None] * q_j[None, :]
-                if pme_alpha > 0.0:
-                    alpha_r = alpha_val * dist
-                    exp_term = jnp.exp(zero - (alpha_r * alpha_r))
-                    if include_pme_excl_erf:
-                        erf_v = erf(alpha_r) if (interpret and dtype == jnp.float64) else _triton_erf(alpha_r)
-                        eff_w = w_elec - erf_v
-                        e_coul = qq * eff_w * inv_dist
-                        de_coul_dr = qq * (
-                            (zero - eff_w) * inv_r_sq
-                            - (alpha_val * two_over_sqrt_pi * exp_term) * inv_dist
-                        )
+                    s_w, ds_dr = _lj_switch_weight_and_deriv(dist, cutoff, lj_switch_width)
+                    e_lj = w_vdw * v_unsw * s_w
+                    de_lj_dr = w_vdw * (dv_unsw_dr * s_w + v_unsw * ds_dr)
+
+                    qq = coul_const * q_i[:, None] * q_j[None, :]
+                    if pme_alpha > 0.0:
+                        alpha_r = alpha_val * dist
+                        exp_term = jnp.exp(zero - (alpha_r * alpha_r))
+                        if include_pme_excl_erf:
+                            erf_v = erf(alpha_r) if (interpret and dtype == jnp.float64) else _triton_erf(alpha_r)
+                            eff_w = w_elec - erf_v
+                            e_coul = qq * eff_w * inv_dist
+                            de_coul_dr = qq * (
+                                (zero - eff_w) * inv_r_sq
+                                - (alpha_val * two_over_sqrt_pi * exp_term) * inv_dist
+                            )
+                        else:
+                            erfc_val = erfc(alpha_r) if (interpret and dtype == jnp.float64) else _triton_erfc(alpha_r)
+                            e_coul = qq * w_elec * erfc_val * inv_dist
+                            de_coul_dr = qq * w_elec * (
+                                (zero - erfc_val) * inv_r_sq
+                                - (alpha_val * two_over_sqrt_pi * exp_term) * inv_dist
+                            )
                     else:
-                        erfc_val = erfc(alpha_r) if (interpret and dtype == jnp.float64) else _triton_erfc(alpha_r)
-                        e_coul = qq * w_elec * erfc_val * inv_dist
-                        de_coul_dr = qq * w_elec * (
-                            (zero - erfc_val) * inv_r_sq
-                            - (alpha_val * two_over_sqrt_pi * exp_term) * inv_dist
-                        )
-                else:
-                    valid_coul = dist >= jnp.asarray(1e-4, dtype=dtype)
-                    e_coul = jnp.where(valid_coul, qq * w_elec * inv_dist, zero)
-                    de_coul_dr = jnp.where(valid_coul, (zero - qq) * w_elec * inv_r_sq, zero)
+                        valid_coul = dist >= jnp.asarray(1e-4, dtype=dtype)
+                        e_coul = jnp.where(valid_coul, qq * w_elec * inv_dist, zero)
+                        de_coul_dr = jnp.where(valid_coul, (zero - qq) * w_elec * inv_r_sq, zero)
 
-                e_pair = jnp.where(active, e_lj + e_coul, zero)
-                f_scalar = jnp.where(active, (zero - (de_lj_dr + de_coul_dr)) * inv_dist, zero)
+                    e_pair = jnp.where(active, e_lj + e_coul, zero)
+                    f_scalar = jnp.where(active, (zero - (de_lj_dr + de_coul_dr)) * inv_dist, zero)
 
-                fx_mat = f_scalar * dx
-                fy_mat = f_scalar * dy
-                fz_mat = f_scalar * dz
+                    fx_mat = f_scalar * dx
+                    fy_mat = f_scalar * dy
+                    fz_mat = f_scalar * dz
 
-                # Newton's 3rd Law: F_I += sum_c f_ij, F_J -= sum_r f_ij
-                fx_i = jnp.sum(fx_mat, axis=1)
-                fy_i = jnp.sum(fy_mat, axis=1)
-                fz_i = jnp.sum(fz_mat, axis=1)
-                fx_j = zero - jnp.sum(fx_mat, axis=0)
-                fy_j = zero - jnp.sum(fy_mat, axis=0)
-                fz_j = zero - jnp.sum(fz_mat, axis=0)
+                    # Newton's 3rd Law: F_I += sum_c f_ij, F_J -= sum_r f_ij
+                    fx_i = jnp.sum(fx_mat, axis=1)
+                    fy_i = jnp.sum(fy_mat, axis=1)
+                    fz_i = jnp.sum(fz_mat, axis=1)
+                    fx_j = zero - jnp.sum(fx_mat, axis=0)
+                    fy_j = zero - jnp.sum(fy_mat, axis=0)
+                    fz_j = zero - jnp.sum(fz_mat, axis=0)
 
-                def _accum_diag(_):
-                    _pl_atomic_add_1d(fx_out_ref, f_base + offs_i, fx_i + fx_j, mask_i, interpret)
-                    _pl_atomic_add_1d(fy_out_ref, f_base + offs_i, fy_i + fy_j, mask_i, interpret)
-                    _pl_atomic_add_1d(fz_out_ref, f_base + offs_i, fz_i + fz_j, mask_i, interpret)
-                    return jnp.int32(0)
+                    def _accum_diag(_):
+                        _pl_atomic_add_1d(fx_out_ref, f_base + offs_i, fx_i + fx_j, mask_i, interpret)
+                        _pl_atomic_add_1d(fy_out_ref, f_base + offs_i, fy_i + fy_j, mask_i, interpret)
+                        _pl_atomic_add_1d(fz_out_ref, f_base + offs_i, fz_i + fz_j, mask_i, interpret)
+                        return jnp.int32(0)
 
-                def _accum_offdiag(_):
-                    _pl_atomic_add_1d(fx_out_ref, f_base + offs_i, fx_i, mask_i, interpret)
-                    _pl_atomic_add_1d(fy_out_ref, f_base + offs_i, fy_i, mask_i, interpret)
-                    _pl_atomic_add_1d(fz_out_ref, f_base + offs_i, fz_i, mask_i, interpret)
-                    _pl_atomic_add_1d(fx_out_ref, f_base + offs_j, fx_j, mask_j, interpret)
-                    _pl_atomic_add_1d(fy_out_ref, f_base + offs_j, fy_j, mask_j, interpret)
-                    _pl_atomic_add_1d(fz_out_ref, f_base + offs_j, fz_j, mask_j, interpret)
-                    return jnp.int32(0)
+                    def _accum_offdiag(_):
+                        _pl_atomic_add_1d(fx_out_ref, f_base + offs_i, fx_i, mask_i, interpret)
+                        _pl_atomic_add_1d(fy_out_ref, f_base + offs_i, fy_i, mask_i, interpret)
+                        _pl_atomic_add_1d(fz_out_ref, f_base + offs_i, fz_i, mask_i, interpret)
+                        _pl_atomic_add_1d(fx_out_ref, f_base + offs_j, fx_j, mask_j, interpret)
+                        _pl_atomic_add_1d(fy_out_ref, f_base + offs_j, fy_j, mask_j, interpret)
+                        _pl_atomic_add_1d(fz_out_ref, f_base + offs_j, fz_j, mask_j, interpret)
+                        return jnp.int32(0)
 
-                _ = jax.lax.cond(is_diag, _accum_diag, _accum_offdiag, None)
-                return e_in + jnp.sum(e_pair)
+                    _ = jax.lax.cond(is_diag, _accum_diag, _accum_offdiag, None)
+                    return e_act_in + jnp.sum(e_pair)
+
+                return jax.lax.cond(
+                    jnp.max(active.astype(jnp.int32)) > 0,
+                    _eval_active_tp,
+                    lambda e_act_in: e_act_in,
+                    e_in,
+                )
 
             return jax.lax.cond(valid_tp, _do_tp, lambda e_in: e_in, e_acc)
 

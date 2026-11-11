@@ -601,25 +601,35 @@ def build_solvated_1ake_bundle(
     assert n_real <= bucket_atoms
     assert n_waters_keep <= bucket_waters
 
-    box_edge = 76.5
+    box_edge = 86.0
     box_vec = jnp.array([box_edge, box_edge, box_edge], dtype=jnp.float32)
     box_mat = jnp.diag(box_vec)
 
     pos_prot = dhfr_bundle.positions[:n_prot].astype(jnp.float32)
     w_dhfr = int(jnp.sum(dhfr_bundle.water_mask))
-    pos_w1 = dhfr_bundle.positions[n_prot : n_prot + 3 * w_dhfr].astype(jnp.float32)
-    # Shift second water slab by [14.0, 14.0, 14.0] A inside the 76.5 A box
-    pos_w2 = jnp.mod(pos_w1 + jnp.array([14.2, 14.2, 14.2], dtype=jnp.float32), box_vec[None, :])
-    # Repair O-H vectors in pos_w2 after periodic wrap
-    pos_w2_trip = pos_w2.reshape(-1, 3, 3)
-    ow2 = pos_w2_trip[:, 0:1, :]
-    dr_h = pos_w2_trip[:, 1:, :] - ow2
-    dr_h = dr_h - box_vec[None, None, :] * jnp.round(dr_h / box_vec[None, None, :])
-    pos_w2 = jnp.concatenate([ow2, ow2 + dr_h], axis=1).reshape(-1, 3)
-
-    pos_all_w = jnp.concatenate([pos_w1, pos_w2, pos_w2 + jnp.array([3.1, 0.0, 0.0], dtype=jnp.float32)], axis=0)[
-        : 3 * n_waters_keep
-    ]
+    pos_w1_trip = np.asarray(
+        dhfr_bundle.positions[n_prot : n_prot + 3 * w_dhfr], dtype=np.float32
+    ).reshape(-1, 3, 3)
+    # Shift into the 7 disjoint outer octants with 64.8 A stride inside an 86.0 A box
+    # (>2.5 A margin from both the [0, 62.23]^3 core and the 86.0 A periodic boundary)
+    slabs = [pos_w1_trip]
+    for dx in (0, 1):
+        for dy in (0, 1):
+            for dz in (0, 1):
+                if dx == 0 and dy == 0 and dz == 0:
+                    continue
+                shift = np.array([64.8 * dx, 64.8 * dy, 64.8 * dz], dtype=np.float32)
+                cand = pos_w1_trip + shift[None, None, :]
+                ow_cand = cand[:, 0, :]
+                keep = np.all((ow_cand >= 1.8) & (ow_cand <= box_edge - 2.6), axis=-1)
+                slabs.append(cand[keep])
+    pos_all_w_trip = np.concatenate(slabs, axis=0)
+    if pos_all_w_trip.shape[0] < n_waters_keep:
+        # Fallback non-overlapping Z slab if ever needed
+        extra_n = n_waters_keep - pos_all_w_trip.shape[0]
+        extra_slab = pos_w1_trip[:extra_n] + np.array([0.0, 0.0, 64.8], dtype=np.float32)
+        pos_all_w_trip = np.concatenate([pos_all_w_trip, extra_slab], axis=0)
+    pos_all_w = jnp.asarray(pos_all_w_trip[:n_waters_keep].reshape(-1, 3), dtype=jnp.float32)
     pos_real = jnp.concatenate([pos_prot, pos_all_w], axis=0)
     pos_padded = _pad_positions_with_ghost_lattice(pos_real, bucket_atoms, box_vec, dtype=jnp.float32)
 
@@ -708,6 +718,11 @@ def build_solvated_1ake_bundle(
     )
 
 
+from scripts.benchmarks.openmm_cuda_guard import require_openmm_cuda_context
+
+_ALLOW_OPENCL_FALLBACK: bool = False
+
+
 def _time_openmm_context(
     omm_system: Any,
     positions: Any,
@@ -717,28 +732,24 @@ def _time_openmm_context(
     gamma_ps: float = 10.0,
     n_warmup: int = 100,
     n_steps: int = 500,
+    allow_opencl_fallback: bool | None = None,
 ) -> dict[str, Any]:
-    """Benchmark an OpenMM System on the CUDA platform (`single` or `mixed`)."""
+    """Benchmark an OpenMM System on the CUDA platform (`single` or `mixed`) with Anti-Fallback Sensor."""
     import openmm as mm
     import openmm.unit as unit
 
+    allow_fb = _ALLOW_OPENCL_FALLBACK if allow_opencl_fallback is None else bool(allow_opencl_fallback)
     integrator = mm.LangevinMiddleIntegrator(
         300.0 * unit.kelvin,
         gamma_ps / unit.picoseconds,
         dt_fs * unit.femtoseconds,
     )
-    platform = None
-    for pname in ("CUDA", "OpenCL"):
-        try:
-            platform = mm.Platform.getPlatformByName(pname)
-            break
-        except Exception:
-            continue
-    if platform is None:
-        return {"available": False, "reason": "No GPU OpenMM platform available"}
-
-    props = {"Precision": precision} if platform.getName() in ("CUDA", "OpenCL") else {}
-    ctx = mm.Context(omm_system, integrator, platform, props)
+    ctx, prov = require_openmm_cuda_context(
+        omm_system,
+        integrator,
+        expected_precision=precision,
+        allow_opencl_fallback=allow_fb,
+    )
     ctx.setPositions(positions)
     ctx.setVelocitiesToTemperature(300.0 * unit.kelvin, 42)
     integrator.step(n_warmup)
@@ -751,10 +762,11 @@ def _time_openmm_context(
     ms_per_step = (elapsed_s / n_steps) * 1000.0
     return {
         "available": True,
-        "platform": platform.getName(),
+        "platform": prov["platform_name"],
         "precision": precision,
         "ms_per_step": float(ms_per_step),
         "ns_per_day": _ns_per_day(ms_per_step, dt_fs=dt_fs),
+        "provenance": prov,
     }
 
 
@@ -1867,8 +1879,11 @@ def run_v33_diverse_benchmark_panel(
     axes: tuple[int, ...] = (1, 2, 3, 4, 5),
     quick: bool = False,
     gpu_tag: str = "l40s",
+    allow_opencl_fallback: bool = False,
 ) -> dict[str, Any]:
     """Run the complete Pallas v3.3 6-Axis Realistic Benchmark Panel."""
+    global _ALLOW_OPENCL_FALLBACK
+    _ALLOW_OPENCL_FALLBACK = bool(allow_opencl_fallback)
     if dhfr_bundle is None and any(a in axes for a in (2, 4, 5)):
         dhfr_bundle, _ = B_dhfr.build_dhfr_prolix_bundle()
 
@@ -1910,8 +1925,9 @@ def main() -> None:
         description="Pallas v3.3 6-Axis Realistic Benchmark Panel & Sub-Step Profiler"
     )
     parser.add_argument("--gpu-tag", type=str, default="l40s")
-    parser.add_argument("--axes", type=str, default="1,2,3,4,5")
+    parser.add_argument("--axes", "--axis", dest="axes", type=str, default="1,2,3,4,5")
     parser.add_argument("--quick", action="store_true")
+    parser.add_argument("--allow-opencl-fallback", action="store_true")
     parser.add_argument(
         "--out",
         type=str,
@@ -1919,11 +1935,13 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    axes_tuple = tuple(int(x.strip()) for x in args.axes.split(",") if x.strip())
+    axes_str = "1,2,3,4,5" if args.axes.strip().lower() == "all" else args.axes
+    axes_tuple = tuple(int(x.strip()) for x in axes_str.split(",") if x.strip())
     res = run_v33_diverse_benchmark_panel(
         axes=axes_tuple,
         quick=args.quick,
         gpu_tag=args.gpu_tag,
+        allow_opencl_fallback=args.allow_opencl_fallback,
     )
     out_path = Path(args.out)
     out_path.parent.mkdir(parents=True, exist_ok=True)

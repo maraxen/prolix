@@ -2908,3 +2908,308 @@ def test_pallas_v33_mk58_to_mk61_optimizations_and_parity(monkeypatch):
     finally:
         jax.config.update("jax_enable_x64", prev_x64)
 
+
+
+def test_pallas_v34_cuda_guard_and_mk62_to_mk64():
+    """Verify Phase 0 OpenMM CUDA anti-fallback guard and Pallas v3.4 MK-62, MK-63, MK-64."""
+    import importlib.util
+    import pytest
+    from pathlib import Path
+    from prolix.physics.pme import (
+        snap_fft_dim,
+        compute_openmm_pme_params,
+        spme_forces,
+        influence_function,
+        _spme_forces_cached,
+    )
+    from prolix.pallas_kernels import (
+        build_tile_pair_neighbor_list,
+        pallas_nonbonded_tile_pairs,
+        nonbonded_nl_reference,
+        pallas_bonded_and_nonbonded_nl_fused,
+    )
+
+    prev_x64 = jax.config.jax_enable_x64
+    jax.config.update("jax_enable_x64", False)
+    try:
+        # 1. Phase 0: OpenMM CUDA Anti-Fallback Guard
+        guard_path = Path(__file__).resolve().parents[1] / "scripts" / "benchmarks" / "openmm_cuda_guard.py"
+        spec = importlib.util.spec_from_file_location("openmm_cuda_guard", guard_path)
+        assert spec is not None and spec.loader is not None
+        guard_mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(guard_mod)
+
+        inv = guard_mod.get_openmm_platform_inventory()
+        assert isinstance(inv, dict)
+        assert "platforms" in inv and "has_cuda_platform" in inv
+
+        class _FakePlatform:
+            def __init__(self, name: str, props: dict[str, str] | None = None):
+                self._name = name
+                self._props = props or {}
+
+            def getName(self) -> str:
+                return self._name
+
+            def getPropertyNames(self):
+                return list(self._props.keys())
+
+            def getPropertyValue(self, _ctx, key: str) -> str:
+                return self._props.get(key, "")
+
+        class _FakeContext:
+            def __init__(self, plat: _FakePlatform):
+                self._plat = plat
+
+            def getPlatform(self) -> _FakePlatform:
+                return self._plat
+
+        with pytest.raises(RuntimeError, match="OpenMM Anti-Fallback Sensor tripped"):
+            guard_mod.verify_openmm_cuda_context(
+                _FakeContext(_FakePlatform("OpenCL")), allow_opencl_fallback=False
+            )
+        info_opencl = guard_mod.verify_openmm_cuda_context(
+            _FakeContext(_FakePlatform("OpenCL")), allow_opencl_fallback=True
+        )
+        assert info_opencl["platform_name"] == "OpenCL"
+        orig_find_lib = guard_mod.find_lib_openmm_cuda_path
+        guard_mod.find_lib_openmm_cuda_path = lambda: "/mock/libOpenMMCUDA.so"
+        try:
+            info_cuda = guard_mod.verify_openmm_cuda_context(
+                _FakeContext(_FakePlatform("CUDA", {"CudaPrecision": "single"})),
+                allow_opencl_fallback=False,
+            )
+            assert info_cuda["platform_name"] == "CUDA"
+        finally:
+            guard_mod.find_lib_openmm_cuda_path = orig_find_lib
+
+        # 2. MK-62 (a & b): snap_fft_dim, compute_openmm_pme_params, & fused gather force_scale
+        assert snap_fft_dim(17) == 18
+        assert snap_fft_dim(53) == 54
+        assert snap_fft_dim(61) == 64
+        for n_test in range(4, 130):
+            snapped = snap_fft_dim(n_test)
+            assert snapped >= max(8, n_test)
+            assert snapped % 2 == 0
+            rem = snapped
+            for p_fac in (2, 3, 5):
+                while rem % p_fac == 0:
+                    rem //= p_fac
+            assert rem == 1
+
+        alpha_dhfr, grid_dhfr = compute_openmm_pme_params(
+            (62.23, 62.23, 62.23), cutoff=8.0, ewald_error_tolerance=5e-4
+        )
+        assert 0.30 < alpha_dhfr < 0.45
+        assert all(g in (54, 60, 64) for g in grid_dhfr)
+
+        rng = np.random.default_rng(20261110)
+        N_pme = 48
+        box_pme = jnp.array([24.0, 24.0, 24.0], dtype=jnp.float32)
+        pos_pme = jnp.asarray(rng.uniform(1.0, 23.0, size=(N_pme, 3)).astype(np.float32))
+        q_pme = jnp.asarray(rng.uniform(-0.5, 0.5, size=(N_pme,)).astype(np.float32))
+        q_pme = q_pme - jnp.mean(q_pme)
+        am_pme = jnp.arange(N_pme) < 40
+
+        f_pme_ref = spme_forces(
+            pos_pme, q_pme, am_pme, box_pme, (18, 18, 18), 0.34,
+            use_pallas_pme=False,
+        )
+        f_pme_pal = spme_forces(
+            pos_pme, q_pme, am_pme, box_pme, (18, 18, 18), 0.34,
+            use_pallas_pme=True,
+        )
+        np.testing.assert_allclose(
+            np.asarray(f_pme_pal), np.asarray(f_pme_ref), rtol=1e-4, atol=1e-4
+        )
+        # Cached SPME forces path with fused force_scale
+        G_cached = influence_function((18, 18, 18), box_pme, 0.34, 4).astype(jnp.float32)
+        f_pme_cached = _spme_forces_cached(
+            pos_pme, q_pme, am_pme, G_cached, box_pme, (18, 18, 18), 4, True,
+        )
+        np.testing.assert_allclose(
+            np.asarray(f_pme_cached), np.asarray(f_pme_ref), rtol=1e-4, atol=1e-4
+        )
+
+        # 3. MK-62 (c) & MK-63: 32-atom tile AABB cutoff pruning + has_any_active cond + adaptive tp_group/nb_k_splits
+        N_tp = 96  # 3 tiles of 32 atoms
+        # Place tile 0 on a well-separated lattice in x in [2, 8], tile 1 in x in [4, 10], and tile 2 far away at x in [24, 30]
+        grid_32 = np.stack(np.meshgrid([0.0, 2.2, 4.4, 6.6], [0.0, 2.2, 4.4, 6.6], [0.0, 2.2], indexing="ij"), axis=-1).reshape(32, 3).astype(np.float32)
+        pos_t0 = grid_32 + np.array([2.0, 2.0, 2.0], dtype=np.float32) + rng.uniform(-0.1, 0.1, size=(32, 3)).astype(np.float32)
+        pos_t1 = grid_32 + np.array([3.1, 3.1, 3.1], dtype=np.float32) + rng.uniform(-0.1, 0.1, size=(32, 3)).astype(np.float32)
+        pos_t2 = grid_32 + np.array([24.0, 24.0, 24.0], dtype=np.float32) + rng.uniform(-0.1, 0.1, size=(32, 3)).astype(np.float32)
+        pos_3t = jnp.asarray(np.concatenate([pos_t0, pos_t1, pos_t2], axis=0))
+        q_3t = jnp.asarray(rng.uniform(-0.3, 0.3, size=(N_tp,)).astype(np.float32))
+        sig_3t = jnp.asarray(rng.uniform(2.9, 3.3, size=(N_tp,)).astype(np.float32))
+        eps_3t = jnp.asarray(rng.uniform(0.05, 0.15, size=(N_tp,)).astype(np.float32))
+        am_3t = jnp.arange(N_tp) < 90
+        box_3t = jnp.array([40.0, 40.0, 40.0, 0.0, 0.0, 0.0], dtype=jnp.float32)
+        lam_3t = jnp.array([1.0], dtype=jnp.float32)
+        ei_3t = jnp.full((N_tp, 4), -1, dtype=jnp.int32)
+        ev_3t = jnp.ones((N_tp, 4), dtype=jnp.float32)
+        ee_3t = jnp.ones((N_tp, 4), dtype=jnp.float32)
+
+        # Build a neighbor list that includes a false-positive neighbor between tile 0 (atom 0) and tile 2 (atom 64, >18 A away)
+        K_3t = 96
+        nbr_rows_3t = []
+        for i in range(N_tp):
+            row = np.full((K_3t,), N_tp, dtype=np.int32)
+            others = [j for j in range(90) if j != i]
+            row[:len(others)] = others
+            nbr_rows_3t.append(row)
+        nbr_3t = jnp.asarray(np.stack(nbr_rows_3t, axis=0), dtype=jnp.int32)
+
+        tp_unpruned = build_tile_pair_neighbor_list(
+            nbr_3t, excl_indices=ei_3t, excl_scales_vdw=ev_3t, excl_scales_elec=ee_3t, atom_mask=am_3t,
+        )
+        tp_pruned = build_tile_pair_neighbor_list(
+            nbr_3t, excl_indices=ei_3t, excl_scales_vdw=ev_3t, excl_scales_elec=ee_3t, atom_mask=am_3t,
+            positions=pos_3t, box=box_3t[:3], cutoff=8.0,
+        )
+        # Tile (0, 2) and (1, 2) are > 15 A apart > 8.0 A cutoff, so AABB pruning strictly reduces num_valid_pairs!
+        assert int(tp_pruned.num_valid_pairs) < int(tp_unpruned.num_valid_pairs)
+
+        e_tp_p, f_tp_p = pallas_nonbonded_tile_pairs(
+            pos_3t, q_3t, sig_3t, eps_3t, tp_pruned, atom_mask=am_3t, box=box_3t,
+            pme_alpha=0.34, cutoff=8.0, return_forces=True, interpret=True,
+        )
+        def _ref_3t(p, q, s, ep):
+            return jnp.sum(
+                nonbonded_nl_reference(
+                    p, q, s, ep, am_3t.astype(jnp.int32), nbr_3t, ei_3t, ev_3t, ee_3t, box_3t, lam_3t,
+                    has_box=True, pme_alpha=0.34, cutoff=8.0,
+                )
+            )
+        e_ref_3t, g_ref_3t = jax.value_and_grad(_ref_3t, argnums=(0, 1, 2, 3))(pos_3t, q_3t, sig_3t, eps_3t)
+        np.testing.assert_allclose(np.asarray(e_tp_p), np.asarray(e_ref_3t), rtol=1e-5, atol=1e-4)
+        np.testing.assert_allclose(np.asarray(f_tp_p), np.asarray(-g_ref_3t[0]), rtol=1e-5, atol=1e-4)
+
+        g_tp_3t = jax.grad(
+            lambda p, q, s, ep: jnp.sum(
+                pallas_nonbonded_tile_pairs(
+                    p, q, s, ep, tp_pruned, atom_mask=am_3t, box=box_3t,
+                    pme_alpha=0.34, cutoff=8.0, return_forces=False, interpret=True,
+                )
+            ),
+            argnums=(0, 1, 2, 3),
+        )(pos_3t, q_3t, sig_3t, eps_3t)
+        for g_got, g_exp in zip(g_tp_3t, g_ref_3t):
+            np.testing.assert_allclose(np.asarray(g_got), np.asarray(g_exp), rtol=2e-4, atol=2e-4)
+
+        # Test B=4 vmap on tile-pairs (adaptive tp_group)
+        pos_3t_b4 = jnp.stack([pos_3t + 0.01 * b for b in range(4)], axis=0)
+        e_b4, f_b4 = jax.vmap(
+            lambda r_b: pallas_nonbonded_tile_pairs(
+                r_b, q_3t, sig_3t, eps_3t, tp_pruned, atom_mask=am_3t, box=box_3t,
+                pme_alpha=0.34, cutoff=8.0, return_forces=True, interpret=True,
+            )
+        )(pos_3t_b4)
+        assert e_b4.shape == (4,) and f_b4.shape == (4, N_tp, 3)
+        np.testing.assert_allclose(np.asarray(e_b4[0]), np.asarray(e_tp_p), rtol=1e-5, atol=1e-4)
+
+        # 4. MK-63 & MK-64: Adaptive nb_k_splits & Congeneric shared topology deduplication (B=4)
+        B_cong = 4
+        b_idx = jnp.array([[0, 1], [2, 3], [4, 5], [6, 7]], dtype=jnp.int32)
+        b_msk = jnp.array([1.0, 1.0, 1.0, 0.0], dtype=jnp.float32)
+        a_idx = jnp.array([[0, 1, 2], [3, 4, 5]], dtype=jnp.int32)
+        a_msk = jnp.array([1.0, 1.0], dtype=jnp.float32)
+        d_idx = jnp.array([[0, 1, 2, 3], [4, 5, 6, 7]], dtype=jnp.int32)
+        d_msk = jnp.array([1.0, 1.0], dtype=jnp.float32)
+        h_idx = jnp.array([[0, 1, 2, 3]], dtype=jnp.int32)
+        h_msk = jnp.array([1.0], dtype=jnp.float32)
+        ep_idx = jnp.array([[0, 3], [4, 7]], dtype=jnp.int32)
+        ep_msk = jnp.array([1.0, 1.0], dtype=jnp.float32)
+
+        # Replicate topology indices across B=4 (to test MK-64 automatic deduplication to stride=0)
+        b_idx_b4 = jnp.broadcast_to(b_idx[None, ...], (B_cong,) + b_idx.shape)
+        b_msk_b4 = jnp.broadcast_to(b_msk[None, ...], (B_cong,) + b_msk.shape)
+        a_idx_b4 = jnp.broadcast_to(a_idx[None, ...], (B_cong,) + a_idx.shape)
+        a_msk_b4 = jnp.broadcast_to(a_msk[None, ...], (B_cong,) + a_msk.shape)
+        d_idx_b4 = jnp.broadcast_to(d_idx[None, ...], (B_cong,) + d_idx.shape)
+        d_msk_b4 = jnp.broadcast_to(d_msk[None, ...], (B_cong,) + d_msk.shape)
+        h_idx_b4 = jnp.broadcast_to(h_idx[None, ...], (B_cong,) + h_idx.shape)
+        h_msk_b4 = jnp.broadcast_to(h_msk[None, ...], (B_cong,) + h_msk.shape)
+        ep_idx_b4 = jnp.broadcast_to(ep_idx[None, ...], (B_cong,) + ep_idx.shape)
+        ep_msk_b4 = jnp.broadcast_to(ep_msk[None, ...], (B_cong,) + ep_msk.shape)
+
+        # Distinct ligand parameters per replica
+        q_b4 = jnp.stack([q_3t * (1.0 + 0.05 * b) for b in range(B_cong)], axis=0)
+        sig_b4 = jnp.stack([sig_3t * (1.0 + 0.02 * b) for b in range(B_cong)], axis=0)
+        eps_b4 = jnp.stack([eps_3t * (1.0 + 0.03 * b) for b in range(B_cong)], axis=0)
+        bp_base = jnp.array([[1.5, 300.0], [1.4, 320.0], [1.5, 280.0], [1.5, 0.0]], dtype=jnp.float32)
+        bp_b4 = jnp.stack([bp_base * jnp.array([1.0, 1.0 + 0.1 * b], dtype=jnp.float32) for b in range(B_cong)], axis=0)
+        ap_base = jnp.array([[1.9, 50.0], [2.0, 60.0]], dtype=jnp.float32)
+        ap_b4 = jnp.stack([ap_base * jnp.array([1.0, 1.0 + 0.05 * b], dtype=jnp.float32) for b in range(B_cong)], axis=0)
+        dp_base = jnp.array([[2.0, 0.0, 1.5], [3.0, 3.14159, 0.8]], dtype=jnp.float32)
+        dp_b4 = jnp.stack([dp_base * jnp.array([1.0, 1.0, 1.0 + 0.1 * b], dtype=jnp.float32) for b in range(B_cong)], axis=0)
+        hp_base = jnp.array([[10.0, 0.0]], dtype=jnp.float32)
+        hp_b4 = jnp.stack([hp_base * (1.0 + 0.05 * b) for b in range(B_cong)], axis=0)
+        es_b4 = jnp.stack([jnp.array([3.0, 3.1], dtype=jnp.float32) * (1.0 + 0.01 * b) for b in range(B_cong)], axis=0)
+        ee_14_b4 = jnp.stack([jnp.array([0.08, 0.09], dtype=jnp.float32) * (1.0 + 0.02 * b) for b in range(B_cong)], axis=0)
+        eq_b4 = jnp.stack([jnp.array([-0.05, 0.04], dtype=jnp.float32) * (1.0 + 0.05 * b) for b in range(B_cong)], axis=0)
+
+        e_cong, f_cong = pallas_bonded_and_nonbonded_nl_fused(
+            pos_3t_b4,
+            q_b4,
+            sig_b4,
+            eps_b4,
+            jnp.broadcast_to(am_3t[None, :], (B_cong, N_tp)),
+            jnp.broadcast_to(nbr_3t[None, :, :], (B_cong, N_tp, K_3t)),
+            jnp.broadcast_to(ei_3t[None, :, :], (B_cong, N_tp, 4)),
+            jnp.broadcast_to(ev_3t[None, :, :], (B_cong, N_tp, 4)),
+            jnp.broadcast_to(ee_3t[None, :, :], (B_cong, N_tp, 4)),
+            bonds=b_idx_b4, bond_params=bp_b4, bond_mask=b_msk_b4,
+            angles=a_idx_b4, angle_params=ap_b4, angle_mask=a_msk_b4,
+            dihedrals=d_idx_b4, dihedral_params=dp_b4, dihedral_mask=d_msk_b4,
+            impropers=h_idx_b4, improper_params=hp_b4, improper_mask=h_msk_b4,
+            exception_pairs=ep_idx_b4, exception_sigmas=es_b4, exception_epsilons=ee_14_b4,
+            exception_chargeprods=eq_b4, exception_mask=ep_msk_b4,
+            box=jnp.broadcast_to(box_3t[None, :], (B_cong, 6)),
+            pme_alpha=0.34,
+            cutoff=8.0,
+            return_forces=True,
+            interpret=True,
+        )
+        for b in range(B_cong):
+            e_b1, f_b1 = pallas_bonded_and_nonbonded_nl_fused(
+                pos_3t_b4[b],
+                q_b4[b],
+                sig_b4[b],
+                eps_b4[b],
+                am_3t,
+                nbr_3t,
+                ei_3t,
+                ev_3t,
+                ee_3t,
+                bonds=b_idx, bond_params=bp_b4[b], bond_mask=b_msk,
+                angles=a_idx, angle_params=ap_b4[b], angle_mask=a_msk,
+                dihedrals=d_idx, dihedral_params=dp_b4[b], dihedral_mask=d_msk,
+                impropers=h_idx, improper_params=hp_b4[b], improper_mask=h_msk,
+                exception_pairs=ep_idx, exception_sigmas=es_b4[b], exception_epsilons=ee_14_b4[b],
+                exception_chargeprods=eq_b4[b], exception_mask=ep_msk,
+                box=box_3t,
+                pme_alpha=0.34,
+                cutoff=8.0,
+                return_forces=True,
+                interpret=True,
+            )
+            np.testing.assert_allclose(np.asarray(e_cong[b]), np.asarray(e_b1), rtol=1e-5, atol=1e-4)
+            np.testing.assert_allclose(np.asarray(f_cong[b]), np.asarray(f_b1), rtol=1e-5, atol=1e-4)
+
+        # 5. MK-64 EnsemblePlan._run_stacked_dispatch congeneric shared_top_fields execution
+        bun_c0 = _make_periodic_solvated_bundle(dtype=jnp.float32, seed=40)
+        bun_c1 = dataclasses.replace(
+            bun_c0,
+            charges=bun_c0.charges * jnp.float32(1.05),
+            sigmas=bun_c0.sigmas * jnp.float32(1.01),
+        )
+        plan_cong = EnsemblePlan.from_bundles([bun_c0, bun_c1], use_pallas=True)
+        trajs_cong = plan_cong.run(
+            n_steps=2, dt=1.0, kT=0.6, seed=7, gamma=5.0,
+            run_mode="inference", use_neighbor_list=True, use_pallas=True,
+        )
+        assert len(trajs_cong) == 2
+        assert bool(jnp.all(jnp.isfinite(trajs_cong[0].positions)))
+        assert bool(jnp.all(jnp.isfinite(trajs_cong[1].positions)))
+    finally:
+        jax.config.update("jax_enable_x64", prev_x64)

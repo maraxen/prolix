@@ -156,8 +156,12 @@ def _gather_reference(
     *,
     grid_dims: tuple[int, int, int],
     order: int = 4,
+    force_scale: float = 1.0,
+    pot_scale: float = 1.0,
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
     """Gather ``(forces, potentials)`` from ``theta_norm`` in plain JAX."""
+    f_scale_f = float(force_scale)
+    q_scale_f = float(pot_scale)
 
     def _gather_single(pos_1, q_1, mask_1, box_1, theta_1):
         dtype = pos_1.dtype
@@ -171,11 +175,13 @@ def _gather_reference(
         dwy = _bspline4_deriv(u[:, 1])
         dwz = _bspline4_deriv(u[:, 2])
         q_masked = st["q"].astype(dtype)
+        f_scale = jnp.asarray(f_scale_f, dtype=dtype)
+        q_scale = jnp.asarray(q_scale_f, dtype=dtype)
 
         with jax.named_scope("pme_bwd_gather"):
             t_val = theta_1[st["ix"], st["iy"], st["iz"]]
             w_unit = jnp.transpose(wx[ox] * wy[oy] * wz[oz], (1, 0))
-            pot_1 = jnp.where(mask_1 > 0, jnp.sum(w_unit * t_val, axis=1), 0.0)
+            pot_1 = jnp.where(mask_1 > 0, jnp.sum(w_unit * t_val, axis=1) * q_scale, 0.0)
             du_x = q_masked[:, None] * jnp.transpose(dwx[ox] * wy[oy] * wz[oz], (1, 0)) * t_val
             du_y = q_masked[:, None] * jnp.transpose(wx[ox] * dwy[oy] * wz[oz], (1, 0)) * t_val
             du_z = q_masked[:, None] * jnp.transpose(wx[ox] * wy[oy] * dwz[oz], (1, 0)) * t_val
@@ -189,9 +195,9 @@ def _gather_reference(
                     ],
                     axis=-1,
                 )
-                f_1 = dE_ds @ B_mat.T
+                f_1 = (dE_ds @ B_mat.T) * f_scale
             else:
-                scale = K_arr / box_arr
+                scale = (K_arr / box_arr) * f_scale
                 f_1 = jnp.stack(
                     [
                         jnp.sum(du_x, axis=1) * scale[0],
@@ -271,6 +277,58 @@ def _factorizable(n: int) -> bool:
     return n == 1
 
 
+def _is_smooth_235(n: int) -> bool:
+    """True if n > 0 is an even integer with prime factors exclusively in {2, 3, 5}."""
+    if n < 2 or (n % 2) != 0:
+        return False
+    m = int(n)
+    for p in (2, 3, 5):
+        while m % p == 0:
+            m //= p
+    return m == 1
+
+
+def snap_fft_dim(n: int, min_dim: int = 8) -> int:
+    """Return the smallest even 5-smooth integer (2^a * 3^b * 5^c, a >= 1) >= max(n, min_dim) (MK-62)."""
+    cand = max(int(n), int(min_dim), 2)
+    if cand % 2 != 0:
+        cand += 1
+    while not _is_smooth_235(cand):
+        cand += 2
+    return cand
+
+
+def compute_openmm_pme_params(
+    box_size: jnp.ndarray | np.ndarray,
+    cutoff: float = 9.0,
+    ewald_error_tolerance: float = 5e-4,
+    min_dim: int = 8,
+) -> tuple[float, tuple[int, int, int]]:
+    """Compute OpenMM-matched PME (alpha, (Kx, Ky, Kz)) in Å^-1 and 5-smooth FFT grid dims (MK-62).
+
+    Matches ``NonbondedForceImpl::calcPMEParameters``:
+      - ``alpha = sqrt(-log(2 * tol)) / cutoff``
+      - ``K_d = snap_fft_dim(ceil(2 * alpha * L_d / (3 * tol**0.2)))``
+    """
+    box_np = np.asarray(box_size, dtype=np.float64)
+    if box_np.ndim == 3:
+        box_np = np.diag(box_np[0])
+    elif box_np.ndim == 2:
+        if _is_triclinic_box_array(box_np):
+            box_np = np.diag(box_np)
+        else:
+            box_np = box_np[0]
+    tol = max(float(ewald_error_tolerance), 1e-12)
+    cut = max(float(cutoff), 1e-6)
+    alpha = float(np.sqrt(-np.log(2.0 * tol)) / cut)
+    denom = 3.0 * (tol ** 0.2)
+    dims = []
+    for d in range(3):
+        raw_k = int(np.ceil(2.0 * alpha * float(box_np[d]) / denom))
+        dims.append(snap_fft_dim(raw_k, min_dim=min_dim))
+    return alpha, (dims[0], dims[1], dims[2])
+
+
 def compute_pme_grid_dims(
     box_size: jnp.ndarray,
     grid_spacing: float = 1.0,
@@ -288,8 +346,11 @@ def compute_pme_grid_dims(
         else:
             box_size_np = box_size_np[0]
     dims = np.maximum(np.ceil(box_size_np / grid_spacing).astype(np.int32), min_dim)
-    # Ensure even/optimal FFT dimensions? For now just cast.
-    return (int(dims[0]), int(dims[1]), int(dims[2]))
+    return (
+        snap_fft_dim(int(dims[0]), min_dim=min_dim),
+        snap_fft_dim(int(dims[1]), min_dim=min_dim),
+        snap_fft_dim(int(dims[2]), min_dim=min_dim),
+    )
 
 
 # ===========================================================================
@@ -818,6 +879,8 @@ def _spme_forces_from_theta(
     grid_dims: tuple[int, int, int],
     order: int,
     use_pallas_pme: bool,
+    *,
+    force_scale: float = -COULOMB_CONSTANT,
 ) -> jnp.ndarray:
     dtype = positions.dtype
     box_arr = jnp.asarray(box_size, dtype=dtype)
@@ -831,6 +894,7 @@ def _spme_forces_from_theta(
             grid_dims,
             order,
             compute_dq=False,
+            force_scale=float(force_scale),
             context=Context(kernels=True, backend=backend),
         )
         with jax.named_scope("pme_bwd_gather"):
@@ -841,18 +905,18 @@ def _spme_forces_from_theta(
                 box_arr.astype(jnp.float32),
                 theta_norm.astype(jnp.float32),
             )
-            forces = forces.astype(dtype)
-    else:
-        forces, _ = _gather_reference(
-            positions,
-            charges,
-            atom_mask,
-            box_size,
-            theta_norm.astype(dtype),
-            grid_dims=grid_dims,
-            order=order,
-        )
-    return (-COULOMB_CONSTANT * forces).astype(dtype)
+            return forces.astype(dtype)
+    forces, _ = _gather_reference(
+        positions,
+        charges,
+        atom_mask,
+        box_size,
+        theta_norm.astype(dtype),
+        grid_dims=grid_dims,
+        order=order,
+        force_scale=float(force_scale),
+    )
+    return forces.astype(dtype)
 
 
 def scale_influence_function_isotropic(
@@ -882,7 +946,7 @@ def spme_forces(
     use_pallas_pme: bool = False,
     G_cached: jnp.ndarray | None = None,
 ) -> jnp.ndarray:
-    """Direct SPME reciprocal force evaluation F = -dE/dr without scalar energy reductions (MK-57 / MK-59)."""
+    """Direct SPME reciprocal force evaluation F = -dE/dr without scalar energy reductions (MK-57 / MK-59 / MK-62)."""
     if G_cached is not None:
         return _spme_forces_cached(
             positions,
@@ -917,10 +981,18 @@ def spme_forces(
             G = influence_function(grid_dims, box_w, alpha, order).astype(Q.dtype)
     with jax.named_scope("pme_fft_inverse"):
         theta = jnp.fft.irfftn(Q_hat * G, s=grid_dims, axes=(-3, -2, -1)).astype(Q.dtype)
-    N_grid = jnp.asarray(float(Kx * Ky * Kz), dtype=Q.dtype)
-    theta_norm = (theta * N_grid).astype(Q.dtype)
+    # MK-62: Fuse -COULOMB_CONSTANT * (Kx * Ky * Kz) directly into gather registers
+    force_scale = -COULOMB_CONSTANT * float(Kx * Ky * Kz)
     return _spme_forces_from_theta(
-        positions, charges, atom_mask, box_size, theta_norm, grid_dims, order, use_pallas_pme
+        positions,
+        charges,
+        atom_mask,
+        box_size,
+        theta,
+        grid_dims,
+        order,
+        use_pallas_pme,
+        force_scale=force_scale,
     ).astype(orig_dtype)
 
 
@@ -953,10 +1025,18 @@ def _spme_forces_cached(
     G = G_cached.astype(Q.dtype)
     with jax.named_scope("pme_fft_inverse"):
         theta = jnp.fft.irfftn(Q_hat * G, s=grid_dims, axes=(-3, -2, -1)).astype(Q.dtype)
-    N_grid = jnp.asarray(float(Kx * Ky * Kz), dtype=Q.dtype)
-    theta_norm = (theta * N_grid).astype(Q.dtype)
+    # MK-62: Fuse -COULOMB_CONSTANT * (Kx * Ky * Kz) directly into gather registers
+    force_scale = -COULOMB_CONSTANT * float(Kx * Ky * Kz)
     return _spme_forces_from_theta(
-        positions, charges, atom_mask, box_size, theta_norm, grid_dims, order, use_pallas_pme
+        positions,
+        charges,
+        atom_mask,
+        box_size,
+        theta,
+        grid_dims,
+        order,
+        use_pallas_pme,
+        force_scale=force_scale,
     ).astype(orig_dtype)
 
 

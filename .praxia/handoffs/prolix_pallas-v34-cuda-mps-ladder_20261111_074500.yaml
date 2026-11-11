@@ -1,0 +1,50 @@
+workspace: prolix
+metadata:
+  workspace: prolix
+  session_id: d3abae81-abe8-49a3-9a35-2d9732717af2
+  task_id: 261111_pallas_v34_cuda_mps_ladder
+  status: blocked
+  phase: Pallas v3.4 (PR #42, branch feat/pallas-v2-megakernel-o1-o5-261028)
+  goal_statement: >
+    Anti-fallback OpenMM CUDA sensor, true OpenMM CUDA + CUDA MPS ladder (Suites A/B/C),
+    MK-62/63/64 kernel work to reach <0.13 ms/step on DHFR PME at B=1, 4-GPU sweep, report, push.
+  summary: >
+    DeepCoder subagent 0e4527c2 (v3.4 architect) hit RESOURCE_EXHAUSTED (429) twice (resets ~56h at 2026-11-11T15:41Z).
+    Substantial work is on disk but UNVERIFIED and UNCOMMITTED; no tests run by me, no report written.
+    Note: mcp__praxia__handoff is not available in this session, so this handoff was written as a file; not logged via transduction_log.
+  next_steps:
+    - "Decide: wait for quota reset and message subagent 0e4527c2, or take over directly."
+    - "Audit on-disk diffs for MK-62/63/64 (pme.py, pme_pallas.py, neighbor_list.py, pallas_kernels.py, ensemble_plan.py) against the spec."
+    - "Run /home/marielle/.cargo/bin/pytest on tests/test_ensemble_plan_pallas_v2.py tests/test_import_architecture.py tests/test_stablehlo_export_guardrails.py, plus ruff check."
+    - "Validate docs/benchmarks/261110_*_pallas_v34_e2e_ensemble_buckets.json (L40S, A100, B300, Blackwell): provenance platform_name==CUDA; check Prolix vs OpenMM numbers."
+    - "Fill gaps: Suite C congeneric/ragged screens, H200 sweep (no H200 v34 JSON seen), DHFR B=1 target <0.13 ms, report docs/benchmarks/261110_pallas_v34_cuda_mps_ladder_report.md (not yet present)."
+    - "Commit and push ONLY named v3.4 files (never git add . / -A; tree has many unrelated M/?? files)."
+  immediately_relevant:
+    - {file: scripts/benchmarks/openmm_cuda_guard.py, reason: "CUDA sensor + MPS runner (new, untracked)"}
+    - {file: scripts/benchmarks/bench_v34_system_ladder.py, reason: "ladder harness (new, untracked)"}
+    - {file: src/prolix/pallas_kernels.py, reason: "~420-line diff; MK-62 pruning/early-exit, MK-63 tp_group/k-splits"}
+    - {file: src/prolix/physics/pme.py, reason: "snap_fft_dim / compute_openmm_pme_params / fused force_scale"}
+    - {file: src/prolix/physics/pme_pallas.py, reason: "gather force_scale fusion"}
+    - {file: src/prolix/api/ensemble_plan.py, reason: "MK-64 topology dedup"}
+    - {file: tests/test_ensemble_plan_pallas_v2.py, reason: "+305 lines, new v34 tests"}
+    - {file: docs/benchmarks/261110_l40s_pallas_v34_e2e_ensemble_buckets.json, reason: "L40S results"}
+  active_dispatches:
+    - "0e4527c2-7989-4314-9fb5-a399423f325e (DeepCoder, stopped on 429 quota)"
+  failed_attempts:
+    - attempt_id: a1
+      description: "Subagent edit_file/replace_file_content on existing files in unattended mode"
+      outcome: "UI permission prompt timed out"
+      reason_failed: "user away; approval required"
+      do_not_retry: false
+      evidence_ref: "conversation 9f87174e-f137-4ffa-a42e-3cba39065c97; use write_file Overwrite or python scripts"
+    - attempt_id: a2
+      description: "run_command in sandbox"
+      outcome: "sandbox configuration error: readonly ~/.cargo/bin non-absolute path"
+      reason_failed: "sandbox config"
+      do_not_retry: false
+      evidence_ref: "use BypassSandbox true for local commands"
+  open_questions:
+    - "Do the v34 JSONs show Prolix meeting <0.13 ms/step on DHFR PME B=1? (L40S OpenMM CUDA single measured ~0.082-0.097 ms/step on small systems; Prolix GBSA B=1 was 0.64 ms/step per replica)"
+    - "Was H200 included in the sweep? Only L40S/A100/B300/Blackwell v34 JSONs seen."
+  deferred: []
+  lessons_refs: []

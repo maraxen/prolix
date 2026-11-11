@@ -981,6 +981,21 @@ def build_dense_exclusion_scales(
         (N, N) float32 scale matrix. 1.0 = full interaction, 0.0 = excluded,
         0.5 = 1-4 scaled (for vdw), 1/1.2 = 1-4 scaled (for elec).
     """
+    if excl_indices is None or excl_scales is None or excl_indices.shape[0] == 0:
+        return jnp.ones((N, N), dtype=jnp.float32)
+
+    if excl_indices.ndim == 2 and excl_indices.shape[1] == 2 and excl_scales.ndim == 1:
+        scale = jnp.ones((N, N), dtype=jnp.float32)
+        u = excl_indices[:, 0]
+        v = excl_indices[:, 1]
+        valid = (u >= 0) & (v >= 0) & (u < N) & (v < N)
+        u_s = jnp.where(valid, u, 0)
+        v_s = jnp.where(valid, v, 0)
+        sc = jnp.where(valid, excl_scales, 1.0)
+        scale = scale.at[u_s, v_s].set(jnp.where(valid, sc, scale[u_s, v_s]))
+        scale = scale.at[v_s, u_s].set(jnp.where(valid, sc, scale[v_s, u_s]))
+        return scale
+
     M = excl_indices.shape[1]
     scale = jnp.ones((N, N), dtype=jnp.float32)
 
@@ -2342,7 +2357,7 @@ def _build_tile_pair_aabb_single(
         t_col = jnp.where(valid_e, partner_tile, 0)
         t_lo = jnp.where(valid_e, jnp.minimum(t_row, t_col), 0)
         t_hi = jnp.where(valid_e, jnp.maximum(t_row, t_col), 0)
-        adj = adj.at[t_lo.reshape(-1), t_hi.reshape(-1)].max(valid_e.reshape(-1))
+        adj = adj.at[t_lo.reshape(-1), t_hi.reshape(-1)].max(valid_e.reshape(-1)) & (dist_sq <= r_cut_sq)
 
     num_valid = jnp.sum(adj.astype(jnp.int32))
     ti_idx, tj_idx = jnp.nonzero(adj, size=M_pairs, fill_value=-1)

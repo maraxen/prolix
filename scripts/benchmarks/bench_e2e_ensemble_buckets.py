@@ -75,28 +75,29 @@ def _make_truncated_solvated_bundle(
 ):
     """Construct a valid periodic solvated MolecularBundle with ``n_real_target`` real atoms in ``bucket_atoms``."""
     # DHFR has 2,489 protein atoms (0..2488) followed by 7,023 waters (3 atoms each).
-    n_prot = 2489
+    n_prot_full = 2489
+    n_prot = 138 if n_real_target < n_prot_full else n_prot_full
     n_waters_keep = max(1, (n_real_target - n_prot) // 3)
     n_waters_keep = min(n_waters_keep, int(jnp.sum(dhfr_bundle.water_mask)), bucket_waters)
     n_real = n_prot + 3 * n_waters_keep
     assert n_real <= bucket_atoms
 
-    def _resize_1d(arr, target_len, pad_val):
-        cur = arr[:n_real]
+    w_start = n_prot_full
+    w_end = n_prot_full + 3 * n_waters_keep
+    shift_w = n_prot_full - n_prot
+
+    def _concat_and_pad_1d(arr, target_len, pad_val):
+        cur = jnp.concatenate([arr[:n_prot], arr[w_start:w_end]], axis=0)
         if target_len > n_real:
             return jnp.pad(cur, (0, target_len - n_real), constant_values=pad_val)
         return cur[:target_len]
 
-    def _resize_2d(arr, target_len, pad_val):
-        cur = arr[:n_real]
-        if target_len > n_real:
-            return jnp.pad(cur, ((0, target_len - n_real), (0, 0)), constant_values=pad_val)
-        return cur[:target_len]
-
-    pos_real = dhfr_bundle.positions[:n_real] + jnp.asarray(seed_shift, dtype=dhfr_bundle.positions.dtype)
+    pos_real = jnp.concatenate(
+        [dhfr_bundle.positions[:n_prot], dhfr_bundle.positions[w_start:w_end]], axis=0
+    ) + jnp.asarray(seed_shift, dtype=dhfr_bundle.positions.dtype)
     box_vec = jnp.diag(dhfr_bundle.box)
     pos_real = jnp.mod(pos_real, box_vec[None, :])
-    w_real_init = dhfr_bundle.water_indices[:n_waters_keep]
+    w_real_init = dhfr_bundle.water_indices[:n_waters_keep] - shift_w
     if n_waters_keep > 0:
         ow_i = w_real_init[:, 0]
         r_ow = pos_real[ow_i]
@@ -117,7 +118,7 @@ def _make_truncated_solvated_bundle(
         pos_padded = pos_real
 
     atom_mask = jnp.arange(bucket_atoms) < n_real
-    charges = _resize_1d(dhfr_bundle.charges, bucket_atoms, 0.0)
+    charges = _concat_and_pad_1d(dhfr_bundle.charges, bucket_atoms, 0.0)
     if charge_perturbation != 0.0:
         # Neutral dipole perturbation on first 20 protein atoms
         delta_q = jnp.zeros_like(charges)
@@ -125,15 +126,15 @@ def _make_truncated_solvated_bundle(
         delta_q = delta_q.at[10:20].add(-charge_perturbation)
         charges = jnp.where(atom_mask, charges + delta_q, 0.0)
 
-    sigmas = _resize_1d(dhfr_bundle.sigmas, bucket_atoms, 1.0)
-    epsilons = _resize_1d(dhfr_bundle.epsilons, bucket_atoms, 0.0)
-    masses = _resize_1d(dhfr_bundle.masses, bucket_atoms, 1.0)
-    radii = _resize_1d(dhfr_bundle.radii, bucket_atoms, 1.5)
-    scaled_radii = _resize_1d(dhfr_bundle.scaled_radii, bucket_atoms, 1.2)
+    sigmas = _concat_and_pad_1d(dhfr_bundle.sigmas, bucket_atoms, 1.0)
+    epsilons = _concat_and_pad_1d(dhfr_bundle.epsilons, bucket_atoms, 0.0)
+    masses = _concat_and_pad_1d(dhfr_bundle.masses, bucket_atoms, 1.0)
+    radii = _concat_and_pad_1d(dhfr_bundle.radii, bucket_atoms, 1.5)
+    scaled_radii = _concat_and_pad_1d(dhfr_bundle.scaled_radii, bucket_atoms, 1.2)
 
-    # Filter bonds/angles/dihedrals/impropers/exceptions so all atom indices < n_real
+    # Filter bonds/angles/dihedrals/impropers/exceptions so all atom indices < n_prot
     def _filter_bonded(idx_arr, param_arr, mask_arr):
-        valid = jnp.asarray(mask_arr, dtype=bool) & jnp.all(idx_arr < n_real, axis=-1)
+        valid = jnp.asarray(mask_arr, dtype=bool) & jnp.all(idx_arr < n_prot, axis=-1)
         safe_idx = jnp.where(valid[:, None], idx_arr, 0)
         return safe_idx, param_arr, valid
 
@@ -150,12 +151,12 @@ def _make_truncated_solvated_bundle(
         dhfr_bundle.improper_idx, dhfr_bundle.improper_params, dhfr_bundle.improper_mask
     )
     ex_valid = jnp.asarray(dhfr_bundle.exception_mask, dtype=bool) & jnp.all(
-        dhfr_bundle.exception_pairs < n_real, axis=-1
+        dhfr_bundle.exception_pairs < n_prot, axis=-1
     )
     ex_pairs = jnp.where(ex_valid[:, None], dhfr_bundle.exception_pairs, 0)
 
     # Water indices & mask in bucket_waters
-    w_real = dhfr_bundle.water_indices[:n_waters_keep]
+    w_real = w_real_init
     w_pad_n = bucket_waters - n_waters_keep
     if w_pad_n > 0:
         w_pad = jnp.zeros((w_pad_n, 3), dtype=w_real.dtype)
@@ -165,11 +166,28 @@ def _make_truncated_solvated_bundle(
     w_mask = jnp.arange(bucket_waters) < n_waters_keep
 
     # Exclusions dense table
-    ei_raw = _resize_2d(dhfr_bundle.excl_dense_indices, bucket_atoms, -1)
-    ei_valid = (ei_raw >= 0) & (ei_raw < n_real) & atom_mask[:, None]
-    ei = jnp.where(ei_valid, ei_raw, -1)
-    ev = jnp.where(ei_valid, _resize_2d(dhfr_bundle.excl_dense_scales_vdw, bucket_atoms, 1.0), 1.0)
-    ee = jnp.where(ei_valid, _resize_2d(dhfr_bundle.excl_dense_scales_elec, bucket_atoms, 1.0), 1.0)
+    ei_prot = dhfr_bundle.excl_dense_indices[:n_prot]
+    ei_prot_valid = (ei_prot >= 0) & (ei_prot < n_prot)
+    ei_prot = jnp.where(ei_prot_valid, ei_prot, -1)
+    ev_prot = jnp.where(ei_prot_valid, dhfr_bundle.excl_dense_scales_vdw[:n_prot], 1.0)
+    ee_prot = jnp.where(ei_prot_valid, dhfr_bundle.excl_dense_scales_elec[:n_prot], 1.0)
+
+    ei_wat_raw = dhfr_bundle.excl_dense_indices[w_start:w_end]
+    ei_wat_shifted = jnp.where(ei_wat_raw >= w_start, ei_wat_raw - shift_w, -1)
+    ei_wat_valid = (ei_wat_shifted >= n_prot) & (ei_wat_shifted < n_real)
+    ei_wat = jnp.where(ei_wat_valid, ei_wat_shifted, -1)
+    ev_wat = jnp.where(ei_wat_valid, dhfr_bundle.excl_dense_scales_vdw[w_start:w_end], 1.0)
+    ee_wat = jnp.where(ei_wat_valid, dhfr_bundle.excl_dense_scales_elec[w_start:w_end], 1.0)
+
+    def _pad_2d_rows(arr_p, arr_w, pad_val):
+        cur = jnp.concatenate([arr_p, arr_w], axis=0)
+        if bucket_atoms > n_real:
+            return jnp.pad(cur, ((0, bucket_atoms - n_real), (0, 0)), constant_values=pad_val)
+        return cur[:bucket_atoms]
+
+    ei = _pad_2d_rows(ei_prot, ei_wat, -1)
+    ev = _pad_2d_rows(ev_prot, ev_wat, 1.0)
+    ee = _pad_2d_rows(ee_prot, ee_wat, 1.0)
 
     new_spec = dataclasses.replace(
         dhfr_bundle.shape_spec,
@@ -206,6 +224,7 @@ def _make_truncated_solvated_bundle(
         exception_mask=ex_valid,
         water_indices=w_idx,
         water_mask=w_mask,
+        n_waters=jnp.asarray(n_waters_keep, dtype=jnp.int32),
         excl_dense_indices=ei,
         excl_dense_scales_vdw=ev,
         excl_dense_scales_elec=ee,
@@ -1230,11 +1249,16 @@ def _dump_bundle_to_npz(bundle, out_npz: str, pme_grid_points: int = 64) -> None
     )
 
 
+_ALLOW_OPENCL_FALLBACK: bool = False
+
+
 def run_openmm_cuda_benchmarks(
     bundles_by_name: dict,
     grid_points_by_name: dict[str, int] | None = None,
     n_steps: int = 200,
     dt_fs: float = 2.0,
+    *,
+    allow_opencl_fallback: bool | None = None,
 ) -> dict:
     """Benchmark OpenMM CUDA platform across system sizes (single & mixed precision)."""
     import glob
@@ -1242,13 +1266,16 @@ def run_openmm_cuda_benchmarks(
     import subprocess
     import tempfile
 
+    allow_fb = _ALLOW_OPENCL_FALLBACK if allow_opencl_fallback is None else bool(allow_opencl_fallback)
     print("=== [3/3] OpenMM CUDA Platform Head-to-Head Throughput Comparison ===")
-    ext_omm_py = os.environ.get(
-        "OPENMM_PYTHON",
-        "/orcd/pool/007/maarxaru/local/share/mamba/envs/b1-openmm/bin/python",
-    )
-    if not os.path.isfile(ext_omm_py):
-        ext_omm_py = sys.executable
+    default_b1_py = "/orcd/pool/007/maarxaru/local/share/mamba/envs/b1-openmm/bin/python"
+    default_b1_cuda = "/orcd/pool/007/maarxaru/local/share/mamba/envs/b1-openmm/lib/plugins/libOpenMMCUDA.so"
+    ext_omm_py = os.environ.get("OPENMM_PYTHON", "")
+    if not ext_omm_py or not os.path.isfile(ext_omm_py):
+        if os.path.isfile(default_b1_py) and os.path.isfile(default_b1_cuda):
+            ext_omm_py = default_b1_py
+        else:
+            ext_omm_py = sys.executable
 
     grid_points_by_name = grid_points_by_name or {}
     omm_results: dict = {}
@@ -1265,6 +1292,8 @@ def run_openmm_cuda_benchmarks(
 
         worker_code = """
 import json, os, sys, time, numpy as np, openmm, openmm.unit as u
+sys.path.insert(0, sys.argv[4])
+from scripts.benchmarks.openmm_cuda_guard import get_openmm_platform_inventory, require_openmm_cuda_context
 
 def build_sys_from_npz(d):
     n_real = int(d['n_real'])
@@ -1337,21 +1366,14 @@ def build_sys_from_npz(d):
 specs = json.loads(open(sys.argv[1]).read())
 n_steps = int(sys.argv[2])
 dt_ps = float(sys.argv[3]) * 1e-3
+allow_opencl_fb = sys.argv[5] == '1'
 ps_per_step = dt_ps
-load_failures = list(openmm.Platform.getPluginLoadFailures())
-avail = [openmm.Platform.getPlatform(i).getName() for i in range(openmm.Platform.getNumPlatforms())]
-if 'CUDA' not in avail:
-    plug_dir = os.environ.get('OPENMM_PLUGIN_DIR', '')
-    if plug_dir and os.path.isdir(plug_dir):
-        openmm.Platform.loadPluginsFromDirectory(plug_dir)
-        load_failures.extend(list(openmm.Platform.getPluginLoadFailures()))
-        avail = [openmm.Platform.getPlatform(i).getName() for i in range(openmm.Platform.getNumPlatforms())]
-plat_name = 'CUDA' if 'CUDA' in avail else ('OpenCL' if 'OpenCL' in avail else 'CPU')
-plat = openmm.Platform.getPlatformByName(plat_name)
+inv = get_openmm_platform_inventory()
 res = {
-    'platform': plat_name,
-    'available_platforms': avail,
-    'plugin_load_failures': load_failures,
+    'platform': 'CUDA' if inv['has_cuda_platform'] else ('OpenCL' if allow_opencl_fb else 'MISSING_CUDA'),
+    'available_platforms': inv['platforms'],
+    'lib_openmm_cuda_path': inv['lib_openmm_cuda_path'],
+    'plugin_load_failures': inv['plugin_load_failures'],
     'systems': {},
 }
 for sp in specs:
@@ -1359,9 +1381,14 @@ for sp in specs:
     sys_obj, pos_nm = build_sys_from_npz(d)
     sys_entry = {'n_atoms': sp['n_atoms'], 'pme_grid_points': int(d['pme_grid_points'])}
     for prec in ('mixed', 'single'):
-        props = {'Precision': prec} if plat_name in ('CUDA', 'OpenCL') else {}
         integ = openmm.LangevinMiddleIntegrator(300.0*u.kelvin, 10.0/u.picosecond, dt_ps*u.picoseconds)
-        ctx = openmm.Context(sys_obj, integ, plat, props)
+        ctx, prov = require_openmm_cuda_context(
+            sys_obj,
+            integ,
+            expected_precision=prec,
+            allow_opencl_fallback=allow_opencl_fb,
+        )
+        res['platform'] = prov['platform_name']
         ctx.setPositions(pos_nm)
         ctx.setVelocitiesToTemperature(300.0*u.kelvin, 42)
         integ.step(25)
@@ -1377,6 +1404,7 @@ for sp in specs:
             'ns_per_day': ns_per_day,
             'wall_s': wall_s,
             'n_steps': n_steps,
+            'provenance': prov,
         }
         del ctx, integ
     res['systems'][sp['name']] = sys_entry
@@ -1386,7 +1414,7 @@ print(json.dumps(res))
         omm_root = os.path.dirname(os.path.dirname(ext_omm_py))
         cur_root = os.path.dirname(os.path.dirname(sys.executable))
         plug_dir = os.path.join(omm_root, "lib", "plugins")
-        if os.path.isdir(plug_dir):
+        if os.path.isdir(plug_dir) and os.path.isfile(os.path.join(plug_dir, "libOpenMMCUDA.so")):
             env_sub["OPENMM_PLUGIN_DIR"] = plug_dir
 
         ld_candidates: list[str] = [
@@ -1424,7 +1452,16 @@ print(json.dumps(res))
                 break
 
         proc = subprocess.run(
-            [ext_omm_py, "-c", worker_code, specs_json, str(n_steps), str(dt_fs)],
+            [
+                ext_omm_py,
+                "-c",
+                worker_code,
+                specs_json,
+                str(n_steps),
+                str(dt_fs),
+                str(ROOT),
+                "1" if allow_fb else "0",
+            ],
             capture_output=True,
             text=True,
             check=False,
@@ -1434,6 +1471,8 @@ print(json.dumps(res))
             omm_results = json.loads(proc.stdout.strip().splitlines()[-1])
             print(json.dumps(omm_results, indent=2))
         else:
+            if not allow_fb and "Anti-Fallback Sensor" in proc.stderr:
+                raise RuntimeError(proc.stderr[-1200:])
             omm_results = {"error": proc.stderr[-1200:], "stdout": proc.stdout[-400:]}
             print("OpenMM worker warning:", omm_results)
     return omm_results
@@ -1915,6 +1954,7 @@ def run_e2e_ensemble_pipeline_benchmarks(dhfr_bundle, quick: bool = False) -> di
 
 
 def main():
+    global _ALLOW_OPENCL_FALLBACK
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--out",
@@ -1923,15 +1963,21 @@ def main():
     )
     parser.add_argument("--quick", action="store_true")
     parser.add_argument("--substep-only", action="store_true")
+    parser.add_argument("--allow-opencl-fallback", action="store_true")
     parser.add_argument("--v33-diverse-panel", action="store_true")
     parser.add_argument("--axis", type=str, default="all")
     args = parser.parse_args()
+    _ALLOW_OPENCL_FALLBACK = bool(args.allow_opencl_fallback)
 
     if args.v33_diverse_panel:
         import bench_v33_diverse_panel as B_v33
 
-        axes = None if args.axis == "all" else [int(x.strip()) for x in args.axis.split(",") if x.strip()]
-        payload = B_v33.run_v33_diverse_benchmark_panel(quick=args.quick, axes=axes)
+        axes = (1, 2, 3, 4, 5) if args.axis == "all" else tuple(int(x.strip()) for x in args.axis.split(",") if x.strip())
+        payload = B_v33.run_v33_diverse_benchmark_panel(
+            quick=args.quick,
+            axes=axes,
+            allow_opencl_fallback=args.allow_opencl_fallback,
+        )
         args.out.parent.mkdir(parents=True, exist_ok=True)
         args.out.write_text(json.dumps(payload, indent=2))
         print(f"Wrote {args.out}")

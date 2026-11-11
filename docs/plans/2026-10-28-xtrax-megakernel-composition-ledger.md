@@ -760,3 +760,38 @@ Every entry added to this ledger must record:
      - `NVIDIA RTX PRO 6000 Blackwell` (`sm_120`): `docs/benchmarks/261109_b300_pallas_v33_diverse_panel.json`
      - `NVIDIA A100` (`sm_80`): `docs/benchmarks/261109_a100_pallas_v33_diverse_panel.json`
 
+
+### MK-62: OpenMM-Matched Smooth FFT Grids (`snap_fft_dim`), Fused Gather `force_scale`, & 32-Atom Tile AABB Cutoff Pruning (`src/prolix/physics/pme.py`, `src/prolix/physics/pme_pallas.py`, `src/prolix/pallas_kernels.py`, `src/prolix/physics/neighbor_list.py`)
+- **Category**: `End-to-End Throughput` / `Megakernel Fusion` / `Ragged-Bucket Compaction`
+- **Symptom / Failure Mode**:
+  1. `compute_pme_grid_dims` previously snapped PME FFT dimensions strictly to powers of 2 (`32, 64, 128`), forcing solvated DHFR (`62.23 Å` cubic box, OpenMM `54^3` / `60^3` grid) onto a `64^3` (`262,144`-voxel) cuFFT grid (`1.67x` more voxels than `54^3 = 157,464`).
+  2. `_spme_forces_from_theta` and `_spme_forces_cached` executed two separate global-memory elementwise XLA kernels per step around `gather_pallas`: `theta_norm = irfftn(...) * float(Kx * Ky * Kz)` before gather and `-COULOMB_CONSTANT * forces` after gather.
+  3. In `_build_tile_pair_neighbor_list_single`, tile pairs `(ti, tj)` constructed from row-wise neighbor lists included bounding boxes whose minimum-image distance exceeded `cutoff` when skin buffer atoms spanned tile boundaries, and `_pallas_nonbonded_tile_pairs_batch` executed `sqrt`, `erfc`, LJ $r^{-6}/r^{-12}$, and 6 global atomic adds even on tile pairs where all $32 	imes 32$ atom pairs had `r^2 >= cutoff^2`.
+- **Root Cause**:
+  - Power-of-two-only FFT snapping in `pme.py`, unfused scalar post-FFT/post-gather scaling in `pme.py`/`pme_pallas.py`, and missing 32-atom tile AABB minimum-image distance pruning (`min_tile_dist2 <= cutoff^2`) + `has_any_active` `jax.lax.cond` early-exit in `_pallas_nonbonded_tile_pairs_batch`.
+- **Generalizable Rule for `xtrax` Skill**:
+  1. Snap 3D PME FFT dimensions to even $2^a 3^b 5^c$ smooth integers (`snap_fft_dim`, `compute_openmm_pme_params`) so cuFFT operates on exact OpenMM-matched grid volumes (`54^3` / `60^3` for DHFR, `40^3` / `48^3` for `1VII`/`1UBQ`, `80^3` for `1AKE`, `96 × 96 × 64` for `ApoA1`).
+  2. Fuse `force_scale = -COULOMB_CONSTANT * float(Kx * Ky * Kz)` directly into `gather_pallas` (`q_f = qi * f_scale` in registers before accumulating B-spline gradient forces), passing raw unscaled `irfftn` output directly into `gather_pallas` and eliminating two global-memory elementwise kernel launches per step.
+  3. Prune 32-atom tile pairs by minimum-image AABB distance `min_tile_dist2 <= cutoff^2` (`_build_tile_pair_neighbor_list_single`, `_build_tile_pair_aabb_single`) and wrap tile-pair parameter loads, SFU `erfc`/`sqrt`, and 6 atomic adds inside `jax.lax.cond(jnp.max(active.astype(jnp.int32)) > 0, ...)` in `_pallas_nonbonded_tile_pairs_batch`.
+
+### MK-63: Adaptive Small-System Multi-SM Work-Splitting (`tp_group` & `nb_k_splits`) + Unified Solute–Ligand–Water Megakernel (`src/prolix/pallas_kernels.py`)
+- **Category**: `Grid & Work-Unit Dispatch` / `Multi-Replica Scaling` / `Megakernel Fusion`
+- **Symptom / Failure Mode**:
+  1. On 142-SM `NVIDIA L40S` (`sm_89`) and 132-SM `NVIDIA H200` (`sm_90`), small-to-medium solvated systems (`1UAO` `1,963` atoms = 62 atom blocks, `1VII` `4,199` atoms = 132 atom blocks) at `B = 1..2` launched fewer CTAs than physical SMs when `_pallas_nonbonded_tile_pairs_batch` grouped `tp_group = 8` tile pairs per CTA or `_pallas_bonded_and_nonbonded_nl_fused_batch` assigned all `k_blocks` of a 32-atom row block to a single CTA (`nb_k_splits = 1`).
+  2. Holo protein–ligand complexes (`protein + bound ligand/cofactor + TIP3P water`) risked launching separate solute vs ligand bonded/nonbonded kernels if ligand atoms were not placed contiguously before `first_pure_water_block`.
+- **Root Cause**:
+  - Static `tp_group = 8` and `nb_k_splits = 1` regardless of total CTA count `B * M_work`, leaving GPU SMs under-occupied at `B = 1..4` on small systems.
+- **Generalizable Rule for `xtrax` Skill**:
+  1. Select `tp_group` adaptively in `{1, 2, 4, 8}` in `_pallas_nonbonded_tile_pairs_batch` (`tp_group = 1` when `B * M_pairs <= 284`, `2` when `<= 568`, `4` when `<= 1136`, else `8`) and `nb_k_splits` adaptively in `{1, 2, 4}` in `_pallas_bonded_and_nonbonded_nl_fused_batch` (`nb_k_splits = 4` when `B * n_nb_atom_blocks < 72`, `2` when `< 142`, else `1`) so small-system `B=1..4` launches saturate all 142 SMs while high-batch `B >= 8` launches coarsen work per CTA to amortize coordinate loads.
+  2. Place all non-water solute atoms (protein + bound ligands/cofactors) contiguously below `first_pure_water_block` so a single unified `_megakernel` launch evaluates all protein + ligand bonds, angles, periodic dihedrals, impropers, 1-4 exceptions, CMAPs, and direct-space nonbonded interactions with zero extra kernel launches.
+
+### MK-64: Congeneric Ligand/Mutant Shared-Topology Index & Mask Deduplication (`stride = 0`) (`src/prolix/pallas_kernels.py`, `src/prolix/physics/pallas_bonded.py`, `src/prolix/api/ensemble_plan.py`)
+- **Category**: `Multi-Replica Scaling` / `Buffer Aliasing & Atomics` / `End-to-End Throughput`
+- **Symptom / Failure Mode**:
+  1. When screening `B` congeneric protein–ligand complexes or point-mutant replicas via `EnsemblePlan` (`stack_molecular_bundles`), every field of `MolecularBundle` was stacked to `(B, ...)`, causing `jax.vmap` to pass `in_batched=True` for all 14 topology index and mask arrays (`bond_idx`, `bond_mask`, `angle_idx`, `angle_mask`, `dihedral_idx`, `dihedral_mask`, `improper_idx`, `improper_mask`, `exception_pairs`, `exception_mask`, `cmap_torsion_idx`, `cmap_indices`, `cmap_coeffs`, `cmap_mask`).
+  2. Replicating identical topology index/mask tables `B = 16..32` times in global memory (`s_bi > 0, s_ai > 0, s_di > 0, s_hi > 0, s_ep > 0`) polluted the GPU L2 cache with `B` redundant copies of identical integer index tables while only force-field parameters (`charges`, `sigmas`, `epsilons`, `bond_params`, `dihedral_params`, `exception_chargeprods`) varied across replicas.
+- **Root Cause**:
+  - Uniform `in_axes=0` PyTree mapping across all `MolecularBundle` fields in `dispatch_n_mols` without detecting replica-invariant topology index/mask arrays before entering `jax.vmap`.
+- **Generalizable Rule for `xtrax` Skill**:
+  1. In `EnsemblePlan._run_stacked_dispatch`, detect replica-invariant topology index/mask fields (`shared_top_fields`) across `bundles` at host setup time, include `shared_top_fields` in `jit_fn_key`, slice `getattr(sb, f)[0]` outside `dispatch_n_mols`, and bind the unbatched slice inside the per-replica `vmap` closure (`dataclasses.replace(bundle, **_shared_0)`), so `custom_vmap` receives `in_batched=False` (`s_bi=0, s_ai=0, s_di=0, s_hi=0, s_ep=0`).
+  2. Also deduplicate concrete/broadcast topology index and mask arrays directly inside `_prep_int` and `_prep_flt` in `src/prolix/pallas_kernels.py` and `src/prolix/physics/pallas_bonded.py` when `np.array_equal(arr_np, np.broadcast_to(arr_np[:1], arr_np.shape))` or `PROLIX_CONGENERIC_SHARED_TOPOLOGY=1`, keeping shared topology tables resident in L2 cache across all `B` heterogeneous ligand/mutant replicas.

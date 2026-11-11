@@ -118,6 +118,7 @@ def _resolve_pme_active_atoms(
     n_atoms: int,
     atom_mask: jax.Array | None = None,
 ) -> int:
+    del atom_mask
     if n_active_atoms is not None:
         return min(n_atoms, max(1, int(n_active_atoms)))
     raw = os.environ.get("PROLIX_ACTIVE_ATOMS", "").strip()
@@ -125,18 +126,6 @@ def _resolve_pme_active_atoms(
         try:
             return min(n_atoms, max(1, int(raw)))
         except ValueError:
-            pass
-    if atom_mask is not None and not isinstance(atom_mask, jax.core.Tracer):
-        try:
-            import numpy as _np
-
-            m_np = _np.asarray(atom_mask, dtype=bool)
-            if m_np.size > 0:
-                m_any = _np.any(m_np, axis=tuple(range(m_np.ndim - 1))) if m_np.ndim > 1 else m_np
-                nz = _np.nonzero(m_any)[0]
-                if nz.size > 0:
-                    return min(n_atoms, max(1, int(nz[-1]) + 1))
-        except Exception:
             pass
     return n_atoms
 
@@ -177,15 +166,20 @@ def _spread_charges_pallas_batch(
     if not b_box:
         box_in = box_in[None, ...]
 
-    if n_act < n_atoms:
-        pos_in = pos_in[:, :n_act, :]
-        q_in = q_in[:, :n_act]
-        mask_in = mask_in[:, :n_act]
-
-    if pad > 0:
-        pos_in = jnp.pad(pos_in, ((0, 0), (0, pad), (0, 0)), constant_values=0.0)
-        q_in = jnp.pad(q_in, ((0, 0), (0, pad)), constant_values=0.0)
-        mask_in = jnp.pad(mask_in, ((0, 0), (0, pad)), constant_values=0)
+    # MK-62: On GPU (interpret=False), pass unpadded (B, n_atoms) buffers directly using
+    # masked pointer loads so zero global-memory slice/pad kernels execute per step.
+    if interpret:
+        if n_act < n_atoms:
+            pos_in = pos_in[:, :n_act, :]
+            q_in = q_in[:, :n_act]
+            mask_in = mask_in[:, :n_act]
+        if pad > 0:
+            pos_in = jnp.pad(pos_in, ((0, 0), (0, pad), (0, 0)), constant_values=0.0)
+            q_in = jnp.pad(q_in, ((0, 0), (0, pad)), constant_values=0.0)
+            mask_in = jnp.pad(mask_in, ((0, 0), (0, pad)), constant_values=0)
+        n_stride = n_pad
+    else:
+        n_stride = n_atoms
 
     pos_x = jnp.asarray(pos_in[:, :, 0], dtype=dtype).reshape(-1)
     pos_y = jnp.asarray(pos_in[:, :, 1], dtype=dtype).reshape(-1)
@@ -201,14 +195,15 @@ def _spread_charges_pallas_batch(
         pid = pl.program_id(1)
         offs = pid * BLOCK_N + jnp.arange(BLOCK_N, dtype=jnp.int32)
 
-        pos_base = (b_id if b_pos else 0) * n_pad
-        q_base = (b_id if b_q else 0) * n_pad
-        m_base = (b_id if b_m else 0) * n_pad
+        pos_base = (b_id if b_pos else 0) * n_stride
+        q_base = (b_id if b_q else 0) * n_stride
+        m_base = (b_id if b_m else 0) * n_stride
         box_base = (b_id if b_box else 0) * 3
         mesh_base = b_id * mesh_stride
 
         zero = jnp.asarray(0.0, dtype=dtype)
-        is_real = (_pl_load(mask_ref, (m_base + offs,)) > 0) & (offs < n_act)
+        in_bounds = offs < n_act
+        is_real = (_pl_load(mask_ref, (m_base + offs,), mask=in_bounds, other=0) > 0) & in_bounds
         qi = _pl_load(charges_ref, (q_base + offs,), mask=is_real, other=zero)
         active_q = is_real & (jnp.abs(qi) > zero)
 
@@ -408,6 +403,8 @@ def _gather_pallas_batch(
     interpret: bool,
     compute_dq: bool = True,
     n_active_atoms: int | None = None,
+    force_scale: float = 1.0,
+    pot_scale: float = 1.0,
 ) -> tuple[jax.Array, jax.Array]:
     b_pos, b_q, b_m, b_box, b_mesh = in_batched
     Kx, Ky, Kz = (int(grid_dims[0]), int(grid_dims[1]), int(grid_dims[2]))
@@ -437,15 +434,22 @@ def _gather_pallas_batch(
     if not b_mesh:
         theta_in = theta_in[None, ...]
 
-    if n_act < n_atoms:
-        pos_in = pos_in[:, :n_act, :]
-        q_in = q_in[:, :n_act]
-        mask_in = mask_in[:, :n_act]
-
-    if pad > 0:
-        pos_in = jnp.pad(pos_in, ((0, 0), (0, pad), (0, 0)), constant_values=0.0)
-        q_in = jnp.pad(q_in, ((0, 0), (0, pad)), constant_values=0.0)
-        mask_in = jnp.pad(mask_in, ((0, 0), (0, pad)), constant_values=0)
+    # MK-62: On GPU (interpret=False), eliminate all input/output slice & jnp.pad kernels
+    # by reading/writing directly with masked pointer operations over n_stride = n_atoms.
+    if interpret:
+        if n_act < n_atoms:
+            pos_in = pos_in[:, :n_act, :]
+            q_in = q_in[:, :n_act]
+            mask_in = mask_in[:, :n_act]
+        if pad > 0:
+            pos_in = jnp.pad(pos_in, ((0, 0), (0, pad), (0, 0)), constant_values=0.0)
+            q_in = jnp.pad(q_in, ((0, 0), (0, pad)), constant_values=0.0)
+            mask_in = jnp.pad(mask_in, ((0, 0), (0, pad)), constant_values=0)
+        n_stride = n_pad
+        n_blocks_out = n_blocks
+    else:
+        n_stride = n_atoms
+        n_blocks_out = max(1, (n_atoms + BLOCK_N - 1) // BLOCK_N)
 
     pos_x = jnp.asarray(pos_in[:, :, 0], dtype=dtype).reshape(-1)
     pos_y = jnp.asarray(pos_in[:, :, 1], dtype=dtype).reshape(-1)
@@ -472,15 +476,17 @@ def _gather_pallas_batch(
         pid = pl.program_id(1)
         offs = pid * BLOCK_N + jnp.arange(BLOCK_N, dtype=jnp.int32)
 
-        pos_base = (b_id if b_pos else 0) * n_pad
-        q_base = (b_id if b_q else 0) * n_pad
-        m_base = (b_id if b_m else 0) * n_pad
+        pos_base = (b_id if b_pos else 0) * n_stride
+        q_base = (b_id if b_q else 0) * n_stride
+        m_base = (b_id if b_m else 0) * n_stride
         box_base = (b_id if b_box else 0) * 3
         mesh_base = (b_id if b_mesh else 0) * mesh_stride
-        out_base = b_id * n_pad
+        out_base = b_id * n_stride
 
         zero = jnp.asarray(0.0, dtype=dtype)
-        is_real = (_pl_load(mask_ref, (m_base + offs,)) > 0) & (offs < n_act)
+        in_bounds_act = offs < n_act
+        in_bounds_out = offs < n_stride
+        is_real = (_pl_load(mask_ref, (m_base + offs,), mask=in_bounds_act, other=0) > 0) & in_bounds_act
         qi = _pl_load(charges_ref, (q_base + offs,), mask=is_real, other=zero)
         active_lane = is_real if compute_dq else (is_real & (jnp.abs(qi) > zero))
         zero_vec = (offs - offs).astype(dtype)
@@ -567,13 +573,17 @@ def _gather_pallas_batch(
                 if compute_dq:
                     acc_dq = acc_dq + wx_i * sum_wyz
 
+            # MK-62: Fuse force_scale and pot_scale directly into gather output registers
+            f_scale = jnp.asarray(force_scale, dtype=dtype)
+            q_scale = jnp.asarray(pot_scale, dtype=dtype)
             if compute_dq:
-                dq_v = jnp.where(is_real, acc_dq, zero).astype(dtype)
+                dq_v = jnp.where(is_real, acc_dq * q_scale, zero).astype(dtype)
             else:
                 dq_v = zero_vec
-            dpx_v = jnp.where(active_lane, qi * sx * acc_dx, zero).astype(dtype)
-            dpy_v = jnp.where(active_lane, qi * sy * acc_dy, zero).astype(dtype)
-            dpz_v = jnp.where(active_lane, qi * sz * acc_dz, zero).astype(dtype)
+            q_f = qi * f_scale
+            dpx_v = jnp.where(active_lane, q_f * sx * acc_dx, zero).astype(dtype)
+            dpy_v = jnp.where(active_lane, q_f * sy * acc_dy, zero).astype(dtype)
+            dpz_v = jnp.where(active_lane, q_f * sz * acc_dz, zero).astype(dtype)
             return (dpx_v, dpy_v, dpz_v, dq_v)
 
         dpx, dpy, dpz, dq = jax.lax.cond(
@@ -583,58 +593,75 @@ def _gather_pallas_batch(
             (zero_vec, zero_vec, zero_vec, zero_vec),
         )
 
-        _pl_store(fx_out_ref, (out_base + offs,), dpx)
-        _pl_store(fy_out_ref, (out_base + offs,), dpy)
-        _pl_store(fz_out_ref, (out_base + offs,), dpz)
-        if compute_dq:
-            _pl_store(dq_out_refs[0], (out_base + offs,), dq)
+        if interpret:
+            _pl_store(fx_out_ref, (out_base + offs,), dpx)
+            _pl_store(fy_out_ref, (out_base + offs,), dpy)
+            _pl_store(fz_out_ref, (out_base + offs,), dpz)
+            if compute_dq:
+                _pl_store(dq_out_refs[0], (out_base + offs,), dq)
+        else:
+            _pl_store(fx_out_ref, (out_base + offs,), dpx, mask=in_bounds_out)
+            _pl_store(fy_out_ref, (out_base + offs,), dpy, mask=in_bounds_out)
+            _pl_store(fz_out_ref, (out_base + offs,), dpz, mask=in_bounds_out)
+            if compute_dq:
+                _pl_store(dq_out_refs[0], (out_base + offs,), dq, mask=in_bounds_out)
 
     any_spec = pl.BlockSpec(memory_space=pl.ANY)
     if compute_dq:
         fx_pad, fy_pad, fz_pad, dq_pad = pl.pallas_call(
             _gather_kernel,
             out_shape=[
-                jax.ShapeDtypeStruct((B * n_pad,), dtype),
-                jax.ShapeDtypeStruct((B * n_pad,), dtype),
-                jax.ShapeDtypeStruct((B * n_pad,), dtype),
-                jax.ShapeDtypeStruct((B * n_pad,), dtype),
+                jax.ShapeDtypeStruct((B * n_stride,), dtype),
+                jax.ShapeDtypeStruct((B * n_stride,), dtype),
+                jax.ShapeDtypeStruct((B * n_stride,), dtype),
+                jax.ShapeDtypeStruct((B * n_stride,), dtype),
             ],
             in_specs=[any_spec] * 7,
             out_specs=[any_spec] * 4,
-            grid=(B, n_blocks),
+            grid=(B, n_blocks_out),
             interpret=interpret,
-            compiler_params=resolve_pallas_compiler_params("pme", grid_blocks=B * n_blocks)
+            compiler_params=resolve_pallas_compiler_params("pme", grid_blocks=B * n_blocks_out)
             if not interpret
             else None,
             name="pme_bwd_gather",
         )(pos_x, pos_y, pos_z, q_flat, mask_flat, box_flat, theta_flat)
-        dq_b = dq_pad.reshape((B, n_pad))[:, :n_act].astype(orig_dtype)
+        dq_b = (
+            dq_pad.reshape((B, n_pad))[:, :n_act].astype(orig_dtype)
+            if interpret
+            else dq_pad.reshape((B, n_atoms)).astype(orig_dtype)
+        )
     else:
         fx_pad, fy_pad, fz_pad = pl.pallas_call(
             _gather_kernel,
             out_shape=[
-                jax.ShapeDtypeStruct((B * n_pad,), dtype),
-                jax.ShapeDtypeStruct((B * n_pad,), dtype),
-                jax.ShapeDtypeStruct((B * n_pad,), dtype),
+                jax.ShapeDtypeStruct((B * n_stride,), dtype),
+                jax.ShapeDtypeStruct((B * n_stride,), dtype),
+                jax.ShapeDtypeStruct((B * n_stride,), dtype),
             ],
             in_specs=[any_spec] * 7,
             out_specs=[any_spec] * 3,
-            grid=(B, n_blocks),
+            grid=(B, n_blocks_out),
             interpret=interpret,
-            compiler_params=resolve_pallas_compiler_params("pme", grid_blocks=B * n_blocks)
+            compiler_params=resolve_pallas_compiler_params("pme", grid_blocks=B * n_blocks_out)
             if not interpret
             else None,
             name="pme_bwd_gather",
         )(pos_x, pos_y, pos_z, q_flat, mask_flat, box_flat, theta_flat)
-        dq_b = jnp.zeros((B, n_act), dtype=orig_dtype)
-    fx_b = fx_pad.reshape((B, n_pad))[:, :n_act]
-    fy_b = fy_pad.reshape((B, n_pad))[:, :n_act]
-    fz_b = fz_pad.reshape((B, n_pad))[:, :n_act]
+        dq_b = jnp.zeros((B, n_act if interpret else n_atoms), dtype=orig_dtype)
+    if interpret:
+        fx_b = fx_pad.reshape((B, n_pad))[:, :n_act]
+        fy_b = fy_pad.reshape((B, n_pad))[:, :n_act]
+        fz_b = fz_pad.reshape((B, n_pad))[:, :n_act]
+        dpos = jnp.stack([fx_b, fy_b, fz_b], axis=-1).astype(orig_dtype)
+        if n_act < n_atoms:
+            tail = n_atoms - n_act
+            dpos = jnp.pad(dpos, ((0, 0), (0, tail), (0, 0)), constant_values=0.0)
+            dq_b = jnp.pad(dq_b, ((0, 0), (0, tail)), constant_values=0.0)
+        return dpos, dq_b
+    fx_b = fx_pad.reshape((B, n_atoms))
+    fy_b = fy_pad.reshape((B, n_atoms))
+    fz_b = fz_pad.reshape((B, n_atoms))
     dpos = jnp.stack([fx_b, fy_b, fz_b], axis=-1).astype(orig_dtype)
-    if n_act < n_atoms:
-        tail = n_atoms - n_act
-        dpos = jnp.pad(dpos, ((0, 0), (0, tail), (0, 0)), constant_values=0.0)
-        dq_b = jnp.pad(dq_b, ((0, 0), (0, tail)), constant_values=0.0)
     return dpos, dq_b
 
 
@@ -648,8 +675,16 @@ def _gather_pallas_single(
     interpret: bool,
     compute_dq: bool = True,
     n_active_atoms: int | None = None,
+    force_scale: float = 1.0,
+    pot_scale: float = 1.0,
 ) -> tuple[jax.Array, jax.Array]:
-    extra_kw = {"n_active_atoms": n_active_atoms} if n_active_atoms is not None else {}
+    extra_kw = {}
+    if n_active_atoms is not None:
+        extra_kw["n_active_atoms"] = n_active_atoms
+    if force_scale != 1.0:
+        extra_kw["force_scale"] = force_scale
+    if pot_scale != 1.0:
+        extra_kw["pot_scale"] = pot_scale
     dpos_b, dq_b = _gather_pallas_batch(
         1,
         (False, False, False, False, False),
@@ -680,17 +715,28 @@ def gather_pallas(
     interpret: bool = False,
     compute_dq: bool = True,
     n_active_atoms: int | None = None,
+    force_scale: float = 1.0,
+    pot_scale: float = 1.0,
 ) -> tuple[jax.Array, jax.Array]:
     """Gather potential and dE/dr contributions from ``theta_norm``.
 
     Returns ``(forces, potentials)`` in the same convention as ``_spme_bwd``
-    *before* multiplying by ``COULOMB_CONSTANT`` / ``g``.
+    *before* multiplying by ``COULOMB_CONSTANT`` / ``g`` (unless ``force_scale`` /
+    ``pot_scale`` are explicitly passed, as in MK-62 fused force evaluation).
     """
     if order != 4:
         raise NotImplementedError("Pallas SPME stencil is order-4 only")
     grid_tuple = (int(grid_dims[0]), int(grid_dims[1]), int(grid_dims[2]))
     cdq = bool(compute_dq)
-    extra_kw = {"n_active_atoms": n_active_atoms} if n_active_atoms is not None else {}
+    f_scale = float(force_scale)
+    q_scale = float(pot_scale)
+    extra_kw = {}
+    if n_active_atoms is not None:
+        extra_kw["n_active_atoms"] = n_active_atoms
+    if f_scale != 1.0:
+        extra_kw["force_scale"] = f_scale
+    if q_scale != 1.0:
+        extra_kw["pot_scale"] = q_scale
 
     inv_p = None
     if atom_perm is None and os.environ.get("PROLIX_PME_SPATIAL_SORT", "").strip() == "1":
@@ -725,6 +771,8 @@ def gather_pallas(
             interpret,
             compute_dq=cdq,
             n_active_atoms=n_active_atoms,
+            force_scale=f_scale,
+            pot_scale=q_scale,
         )
 
     @_vmappable.def_vmap
@@ -840,6 +888,8 @@ def make_gather_op(
     order: int = 4,
     *,
     compute_dq: bool = True,
+    force_scale: float = 1.0,
+    pot_scale: float = 1.0,
     context: object | None = None,
 ):
     """Build the SPME backward gather op for one mesh shape."""
@@ -849,6 +899,8 @@ def make_gather_op(
 
     dims = (int(grid_dims[0]), int(grid_dims[1]), int(grid_dims[2]))
     cdq = bool(compute_dq)
+    f_scale = float(force_scale)
+    q_scale = float(pot_scale)
 
     def _gather_ref_one(pos_1, q_1, mask_1, box_1, theta_1):
         dtype = pos_1.dtype
@@ -878,12 +930,16 @@ def make_gather_op(
         dwy_s = _select_stencil(dwy, oy)
         dwz_s = _select_stencil(dwz, oz)
         pot = (
-            jnp.where(mask_1 > 0, jnp.sum(wx_s * wy_s * wz_s * t_val, axis=1), 0.0).astype(dtype)
+            jnp.where(
+                mask_1 > 0,
+                jnp.sum(wx_s * wy_s * wz_s * t_val, axis=1) * jnp.asarray(q_scale, dtype=dtype),
+                0.0,
+            ).astype(dtype)
             if cdq
             else jnp.zeros_like(q_1, dtype=dtype)
         )
         q_masked = (q_1 * (mask_1 > 0).astype(q_1.dtype)).astype(dtype)
-        scale = K_arr / box_arr
+        scale = (K_arr / box_arr) * jnp.asarray(f_scale, dtype=dtype)
         fx = q_masked * scale[0] * jnp.sum(dwx_s * wy_s * wz_s * t_val, axis=1)
         fy = q_masked * scale[1] * jnp.sum(wx_s * dwy_s * wz_s * t_val, axis=1)
         fz = q_masked * scale[2] * jnp.sum(wx_s * wy_s * dwz_s * t_val, axis=1)
@@ -911,13 +967,26 @@ def make_gather_op(
         _gather_ref,
         kernels={
             "gpu": functools.partial(
-                gather_pallas, grid_dims=dims, order=order, interpret=False, compute_dq=cdq
+                gather_pallas,
+                grid_dims=dims,
+                order=order,
+                interpret=False,
+                compute_dq=cdq,
+                force_scale=f_scale,
+                pot_scale=q_scale,
             ),
             "cpu": functools.partial(
-                gather_pallas, grid_dims=dims, order=order, interpret=True, compute_dq=cdq
+                gather_pallas,
+                grid_dims=dims,
+                order=order,
+                interpret=True,
+                compute_dq=cdq,
+                force_scale=f_scale,
+                pot_scale=q_scale,
             ),
         },
         name="pme_gather",
         context=context,
     )
+
 

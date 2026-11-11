@@ -1,5 +1,6 @@
 #!/bin/bash
 set -euo pipefail
+exec 2>&1
 
 GPU_TAG="${GPU_TAG:-b300}"
 echo "========================================================================"
@@ -14,6 +15,7 @@ fi
 module load cuda/12.9.1 2>/dev/null || true
 
 export XLA_PYTHON_CLIENT_PREALLOCATE=false
+export PYTHONUNBUFFERED=1
 export UV_CACHE_DIR="/tmp/uv_cache_prolix_${SLURM_JOB_ID:-$$}"
 if [[ -d "/orcd/pool/008/so3_shared/marielle/projects/prolix/tmp_xtrax_pkg" ]]; then
     export PYTHONPATH="${PWD}/src:/orcd/pool/008/so3_shared/marielle/projects/prolix/tmp_xtrax_pkg:${PYTHONPATH:-}"
@@ -31,24 +33,33 @@ else
 fi
 
 OMM_ROOT="/orcd/pool/007/maarxaru/local/share/mamba/envs/b1-openmm"
-if [[ -x "${OMM_ROOT}/bin/python" ]]; then
+if [[ -f "${OMM_ROOT}/lib/plugins/libOpenMMCUDA.so" ]]; then
     export OPENMM_PYTHON="${OMM_ROOT}/bin/python"
     export OPENMM_PLUGIN_DIR="${OMM_ROOT}/lib/plugins"
     export LD_LIBRARY_PATH="${OMM_ROOT}/lib:${OMM_ROOT}/lib/plugins:/orcd/software/core/001/pkg/cuda/12.9.1/lib64:/usr/lib64:${LD_LIBRARY_PATH:-}"
+else
+    export LD_LIBRARY_PATH="/orcd/software/core/001/pkg/cuda/12.9.1/lib64:/usr/lib64:${LD_LIBRARY_PATH:-}"
 fi
 
-mkdir -p outputs/bench
+mkdir -p outputs/bench docs/benchmarks
 
-echo "=== [1/2] Verify Pallas v2.4..v3.1 GPU unit tests + architecture/export/parity guardrails ==="
+echo "=== [0/2] Enforce OpenMM CUDA Anti-Fallback Sensor (libOpenMMCUDA.so) ==="
+ALLOW_FALLBACK_ARGS=()
+if [[ "${ALLOW_OPENCL_FALLBACK:-0}" == "1" ]]; then
+    ALLOW_FALLBACK_ARGS+=("--allow-opencl-fallback")
+fi
+"${PROLIX_PY}" scripts/benchmarks/openmm_cuda_guard.py --check --repair "${ALLOW_FALLBACK_ARGS[@]}"
+
+echo "=== [1/2] Verify Pallas v2.4..v3.4 GPU unit tests + architecture/export/parity guardrails ==="
 if [[ "${FAST_PYTEST:-0}" == "1" ]]; then
-    "${PROLIX_PY}" -m pytest tests/test_ensemble_plan_pallas_v2.py -k "test_pallas_v32 or test_pallas_v31" -v -o addopts=""
+    "${PROLIX_PY}" -m pytest tests/test_ensemble_plan_pallas_v2.py -k "test_pallas_v34 or test_pallas_v33 or test_pallas_v32 or test_pallas_v31" -v -o addopts=""
 elif [[ "${SKIP_PYTEST:-0}" != "1" ]]; then
-    "${PROLIX_PY}" -m pytest tests/test_ensemble_plan_pallas_v2.py -k "test_pallas_v32 or test_pallas_v31 or test_pallas_v30 or test_pallas_v26 or test_pallas_v25 or test_pallas_v24" -v -o addopts=""
+    "${PROLIX_PY}" -m pytest tests/test_ensemble_plan_pallas_v2.py -k "test_pallas_v34 or test_pallas_v33 or test_pallas_v32 or test_pallas_v31 or test_pallas_v30 or test_pallas_v26 or test_pallas_v25 or test_pallas_v24" -v -o addopts=""
     "${PROLIX_PY}" -m pytest tests/test_import_architecture.py tests/test_stablehlo_export_guardrails.py tests/api/test_v1_ensemble_plan_parity.py -v -o addopts=""
 fi
 
-BENCH_OUT="${BENCH_OUT:-outputs/bench/261108_${GPU_TAG}_pallas_v32_e2e_ensemble_buckets.json}"
-BENCH_EXTRA_ARGS=()
+BENCH_OUT="${BENCH_OUT:-outputs/bench/261110_${GPU_TAG}_pallas_v34_e2e_ensemble_buckets.json}"
+BENCH_EXTRA_ARGS=("${ALLOW_FALLBACK_ARGS[@]}")
 if [[ "${SUBSTEP_ONLY:-0}" == "1" ]]; then
     BENCH_EXTRA_ARGS+=("--substep-only")
 fi
@@ -56,9 +67,20 @@ if [[ "${QUICK_BENCH:-0}" == "1" ]]; then
     BENCH_EXTRA_ARGS+=("--quick")
 fi
 
-echo "=== [2/2] Run E2E Multi-Bucket / Multi-System / Ragged-Bucket + Sub-Step Profile + OpenMM CUDA Benchmark ==="
-"${PROLIX_PY}" scripts/benchmarks/bench_e2e_ensemble_buckets.py \
-    --out "${BENCH_OUT}" "${BENCH_EXTRA_ARGS[@]}"
+if [[ "${V34_LADDER:-0}" == "1" ]]; then
+    V34_SUITES="${V34_SUITES:-A,B,C}"
+    echo "=== [2/2] Run Pallas v3.4 True OpenMM CUDA + CUDA MPS System Ladder (suites=${V34_SUITES}) ==="
+    "${PROLIX_PY}" scripts/benchmarks/bench_v34_system_ladder.py \
+        --gpu-tag "${GPU_TAG}" --suites "${V34_SUITES}" --out "${BENCH_OUT}" "${BENCH_EXTRA_ARGS[@]}"
+elif [[ "${V33_PANEL:-0}" == "1" ]]; then
+    V33_AXIS="${V33_AXIS:-1,2,3,4,5}"
+    echo "=== [2/2] Run Pallas v3.3 6-Axis Realistic Benchmark Panel (axes=${V33_AXIS}) ==="
+    "${PROLIX_PY}" scripts/benchmarks/bench_v33_diverse_panel.py \
+        --gpu-tag "${GPU_TAG}" --out "${BENCH_OUT}" --axes "${V33_AXIS}" "${BENCH_EXTRA_ARGS[@]}"
+else
+    echo "=== [2/2] Run E2E Multi-Bucket / Multi-System / Ragged-Bucket + Sub-Step Profile + OpenMM CUDA Benchmark ==="
+    "${PROLIX_PY}" scripts/benchmarks/bench_e2e_ensemble_buckets.py \
+        --out "${BENCH_OUT}" "${BENCH_EXTRA_ARGS[@]}"
+fi
 
-echo "=== PALLAS v3.2 (${GPU_TAG}) BENCHMARK COMPLETE ==="
-
+echo "=== PALLAS v3.4 (${GPU_TAG}) BENCHMARK COMPLETE ==="
