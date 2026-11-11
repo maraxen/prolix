@@ -991,7 +991,7 @@ def build_dense_exclusion_scales(
         valid = (u >= 0) & (v >= 0) & (u < N) & (v < N)
         u_s = jnp.where(valid, u, 0)
         v_s = jnp.where(valid, v, 0)
-        sc = jnp.where(valid, excl_scales, 1.0)
+        sc = jnp.where(valid, excl_scales.astype(jnp.float32), jnp.float32(1.0))
         scale = scale.at[u_s, v_s].set(jnp.where(valid, sc, scale[u_s, v_s]))
         scale = scale.at[v_s, u_s].set(jnp.where(valid, sc, scale[v_s, u_s]))
         return scale

@@ -873,8 +873,8 @@ def run_suites_a_and_b_ladder(
                         "B": B,
                         "ms_per_step_batch": float(ms_batch),
                         "ms_per_step_per_replica": float(ms_rep),
-                        "ns_per_day_per_replica": _ns_per_day(ms_rep, dt_fs=2.0),
-                        "ns_per_day_aggregate": _ns_per_day(ms_batch, dt_fs=2.0) * B,
+                        "ns_per_day_per_replica": _ns_per_day(ms_batch, dt_fs=2.0),
+                        "ns_per_day_aggregate": _ns_per_day(ms_rep, dt_fs=2.0),
                         "speedup_vs_openmm_cuda_single_b1": float(omm_b1 / ms_rep),
                         "speedup_vs_openmm_cuda_mps_same_B": (
                             float(mps_rep / ms_rep) if mps_rep and mps_rep > 0 else None
@@ -883,7 +883,7 @@ def run_suites_a_and_b_ladder(
                 )
                 print(
                     f"  [Suite A] gbsa (N=2489) B={B:2d}: Prolix={ms_rep:.4f} ms/step/rep "
-                    f"({_ns_per_day(ms_rep):.1f} ns/day/rep) vs OpenMM CUDA B=1={omm_b1:.4f} ms/step"
+                    f"({_ns_per_day(ms_batch):.1f} ns/day/rep, {_ns_per_day(ms_rep):.1f} ns/day agg) vs OpenMM CUDA B=1={omm_b1:.4f} ms/step"
                 )
         finally:
             os.environ.pop("PROLIX_ACTIVE_ATOMS", None)
@@ -1114,8 +1114,8 @@ def run_suites_a_and_b_ladder(
                             "B": B,
                             "ms_per_step_batch": float(ms_batch),
                             "ms_per_step_per_replica": float(ms_rep),
-                            "ns_per_day_per_replica": _ns_per_day(ms_rep, dt_fs=2.0),
-                            "ns_per_day_aggregate": _ns_per_day(ms_batch, dt_fs=2.0) * B,
+                            "ns_per_day_per_replica": _ns_per_day(ms_batch, dt_fs=2.0),
+                            "ns_per_day_aggregate": _ns_per_day(ms_rep, dt_fs=2.0),
                             "speedup_vs_openmm_cuda_single_b1": float(omm_b1 / ms_rep),
                             "speedup_vs_openmm_cuda_mps_same_B": (
                                 float(mps_rep / ms_rep) if mps_rep and mps_rep > 0 else None
@@ -1124,8 +1124,8 @@ def run_suites_a_and_b_ladder(
                     )
                     print(
                         f"  [{','.join(suites)}] {name:26s} (N={n_real:6d}, pad={b_atoms:6d}, grid={grid_str:8s}) B={B:2d}: "
-                        f"Prolix={ms_rep:.4f} ms/step/rep ({_ns_per_day(ms_rep):.1f} ns/day/rep, "
-                        f"{_ns_per_day(ms_batch) * B:.1f} ns/day agg) vs OpenMM CUDA B=1={omm_b1:.4f} ms/step"
+                        f"Prolix={ms_rep:.4f} ms/step/rep ({_ns_per_day(ms_batch):.1f} ns/day/rep, "
+                        f"{_ns_per_day(ms_rep):.1f} ns/day agg) vs OpenMM CUDA B=1={omm_b1:.4f} ms/step"
                         + (f", MPS B={B}={mps_rep:.4f} ms/step/rep" if mps_rep else "")
                     )
             finally:
@@ -1304,8 +1304,8 @@ def run_suite_c_congeneric_and_ragged(
                         "B": B,
                         "prolix_ms_per_step_batch": float(ms_batch),
                         "prolix_ms_per_step_per_replica": float(ms_rep),
-                        "prolix_ns_per_day_per_replica": _ns_per_day(ms_rep, dt_fs=2.0),
-                        "prolix_ns_per_day_aggregate": _ns_per_day(ms_batch, dt_fs=2.0) * B,
+                        "prolix_ns_per_day_per_replica": _ns_per_day(ms_batch, dt_fs=2.0),
+                        "prolix_ns_per_day_aggregate": _ns_per_day(ms_rep, dt_fs=2.0),
                         "openmm_cuda_mps": mps_res,
                         "speedup_vs_openmm_cuda_mps": (
                             float(mps_rep / ms_rep) if mps_rep and mps_rep > 0 else None
@@ -1314,7 +1314,7 @@ def run_suite_c_congeneric_and_ragged(
                 )
                 print(
                     f"  [Suite C1 Congeneric Holo-DHFR] B={B:2d}: Prolix={ms_rep:.4f} ms/step/rep "
-                    f"({_ns_per_day(ms_rep):.1f} ns/day/rep)"
+                    f"({_ns_per_day(ms_batch):.1f} ns/day/rep, {_ns_per_day(ms_rep):.1f} ns/day agg)"
                     + (
                         f" vs OpenMM CUDA+MPS={mps_rep:.4f} ms/step/rep (speedup={mps_rep / ms_rep:.2f}x)"
                         if mps_rep
@@ -1488,8 +1488,8 @@ def run_suite_c_congeneric_and_ragged(
             "bucket_atoms": 25000,
             "prolix_ms_per_step_batch": float(ms_rag_batch),
             "prolix_ms_per_step_per_replica": float(ms_rag_rep),
-            "prolix_ns_per_day_per_replica": _ns_per_day(ms_rag_rep, dt_fs=2.0),
-            "prolix_ns_per_day_aggregate": _ns_per_day(ms_rag_batch, dt_fs=2.0) * B_rag,
+            "prolix_ns_per_day_per_replica": _ns_per_day(ms_rag_batch, dt_fs=2.0),
+            "prolix_ns_per_day_aggregate": _ns_per_day(ms_rag_rep, dt_fs=2.0),
             "openmm_cuda_mps": mps_rag,
             "speedup_vs_openmm_cuda_mps": (
                 float(mps_rag_rep / ms_rag_rep) if mps_rag_rep and mps_rag_rep > 0 else None

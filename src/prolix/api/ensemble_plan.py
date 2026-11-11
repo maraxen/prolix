@@ -1100,6 +1100,28 @@ class EnsemblePlan:
 
                 host_cutoff_0 = float(_host_float(getattr(bundles[0], "cutoff_distance", 9.0), 9.0))
                 host_pme_alpha_0 = float(_host_float(getattr(bundles[0], "pme_alpha", 0.34), 0.34))
+                n_pad_host_stacked = (
+                    int(integration_prefix)
+                    if integration_prefix is not None
+                    else int(bundles[0].positions.shape[0])
+                )
+                host_pw_blk_stacked = 0
+                for hb_item in bundles:
+                    if int(hb_item.positions.shape[0]) < n_pad_host_stacked:
+                        continue
+                    blk_i = _infer_first_pure_water_block(
+                        n_pad_host_stacked,
+                        (
+                            (getattr(hb_item, "bond_idx", None), getattr(hb_item, "bond_mask", None), 2),
+                            (getattr(hb_item, "urey_bradley_idx", None), getattr(hb_item, "urey_bradley_mask", None), 3),
+                            (getattr(hb_item, "angle_idx", None), getattr(hb_item, "angle_mask", None), 3),
+                            (getattr(hb_item, "dihedral_idx", None), getattr(hb_item, "dihedral_mask", None), 4),
+                            (getattr(hb_item, "improper_idx", None), getattr(hb_item, "improper_mask", None), 4),
+                            (getattr(hb_item, "exception_pairs", None), getattr(hb_item, "exception_mask", None), 2),
+                            (getattr(hb_item, "cmap_torsion_idx", None), getattr(hb_item, "cmap_mask", None), 8),
+                        ),
+                    )
+                    host_pw_blk_stacked = max(host_pw_blk_stacked, blk_i)
                 _eval_force0_jit = None
                 _batched = None
                 jit_fn_key = None
@@ -1107,6 +1129,8 @@ class EnsemblePlan:
                     jit_fn_key = (
                         n_systems,
                         shared_top_fields,
+                        host_pw_blk_stacked,
+                        tuple(observables) if observables is not None else None,
                         jax.tree_util.tree_structure(stacked),
                         tuple(
                             (x.shape, x.dtype)

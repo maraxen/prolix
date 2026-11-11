@@ -3938,20 +3938,21 @@ def _pallas_bonded_and_nonbonded_nl_fused_batch(
     # MK-64: Deduplicate shared topology index/mask arrays across congeneric replicas (stride=0)
     force_shared_top = os.environ.get("PROLIX_CONGENERIC_SHARED_TOPOLOGY", "").strip() == "1"
 
+    def _is_concrete_rank_gt1_identical(arr: jax.Array) -> bool:
+        if isinstance(arr, jax.core.Tracer) or arr.ndim < 1 or int(arr.shape[0]) <= 1:
+            return False
+        arr_np = np.asarray(arr)
+        return bool(np.array_equal(arr_np, np.broadcast_to(arr_np[:1], arr_np.shape)))
+
     def _prep_int(
         arr: jax.Array, is_b: bool, real_n: int, pad_val: int, col: int | None = None
     ) -> tuple[jax.Array, int]:
         if real_n == 0:
             return jnp.full((1,), pad_val, dtype=jnp.int32), 0
         if is_b:
-            if int(arr.shape[0]) == 1 or force_shared_top:
+            if int(arr.shape[0]) == 1 or force_shared_top or _is_concrete_rank_gt1_identical(arr):
                 arr = arr[0]
                 is_b = False
-            elif not isinstance(arr, jax.core.Tracer) and int(arr.shape[0]) > 1:
-                arr_np = np.asarray(arr)
-                if np.array_equal(arr_np, np.broadcast_to(arr_np[:1], arr_np.shape)):
-                    arr = arr[0]
-                    is_b = False
         x = arr[..., col].astype(jnp.int32) if col is not None else arr.astype(jnp.int32)
         return jnp.asarray(x.reshape(-1), dtype=jnp.int32), (real_n if is_b else 0)
 
@@ -3966,14 +3967,11 @@ def _pallas_bonded_and_nonbonded_nl_fused_batch(
         if real_n == 0 or (col is not None and arr.shape[-1] <= col):
             return jnp.full((1,), pad_val, dtype=dtype), 0
         if is_b:
-            if int(arr.shape[0]) == 1 or (is_mask and force_shared_top):
+            if int(arr.shape[0]) == 1 or (
+                is_mask and (force_shared_top or _is_concrete_rank_gt1_identical(arr))
+            ):
                 arr = arr[0]
                 is_b = False
-            elif not isinstance(arr, jax.core.Tracer) and int(arr.shape[0]) > 1:
-                arr_np = np.asarray(arr)
-                if np.array_equal(arr_np, np.broadcast_to(arr_np[:1], arr_np.shape)):
-                    arr = arr[0]
-                    is_b = False
         x = arr[..., col].astype(dtype) if col is not None else arr.astype(dtype)
         return jnp.asarray(x.reshape(-1), dtype=dtype), (real_n if is_b else 0)
 

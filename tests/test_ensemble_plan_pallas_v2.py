@@ -3196,12 +3196,79 @@ def test_pallas_v34_cuda_guard_and_mk62_to_mk64():
             np.testing.assert_allclose(np.asarray(e_cong[b]), np.asarray(e_b1), rtol=1e-5, atol=1e-4)
             np.testing.assert_allclose(np.asarray(f_cong[b]), np.asarray(f_b1), rtol=1e-5, atol=1e-4)
 
+        # Verify MK-64 congeneric stride=0 jax.grad parity wrt (positions, charges, sigmas, epsilons, bond_params, dihedral_params)
+        def _loss_cong_b4(r_in, q_in, s_in, e_in, bp_in, dp_in):
+            return jnp.sum(
+                pallas_bonded_and_nonbonded_nl_fused(
+                    r_in,
+                    q_in,
+                    s_in,
+                    e_in,
+                    jnp.broadcast_to(am_3t[None, :], (B_cong, N_tp)),
+                    jnp.broadcast_to(nbr_3t[None, :, :], (B_cong, N_tp, K_3t)),
+                    jnp.broadcast_to(ei_3t[None, :, :], (B_cong, N_tp, 4)),
+                    jnp.broadcast_to(ev_3t[None, :, :], (B_cong, N_tp, 4)),
+                    jnp.broadcast_to(ee_3t[None, :, :], (B_cong, N_tp, 4)),
+                    bonds=b_idx_b4, bond_params=bp_in, bond_mask=b_msk_b4,
+                    angles=a_idx_b4, angle_params=ap_b4, angle_mask=a_msk_b4,
+                    dihedrals=d_idx_b4, dihedral_params=dp_in, dihedral_mask=d_msk_b4,
+                    impropers=h_idx_b4, improper_params=hp_b4, improper_mask=h_msk_b4,
+                    exception_pairs=ep_idx_b4, exception_sigmas=es_b4, exception_epsilons=ee_14_b4,
+                    exception_chargeprods=eq_b4, exception_mask=ep_msk_b4,
+                    box=jnp.broadcast_to(box_3t[None, :], (B_cong, 6)),
+                    pme_alpha=0.34,
+                    cutoff=8.0,
+                    return_forces=False,
+                    interpret=True,
+                )
+            )
+
+        grads_b4 = jax.grad(_loss_cong_b4, argnums=(0, 1, 2, 3, 4, 5))(
+            pos_3t_b4, q_b4, sig_b4, eps_b4, bp_b4, dp_b4
+        )
+        for b in range(B_cong):
+            def _loss_cong_b1(r_1, q_1, s_1, e_1, bp_1, dp_1, _b=b):
+                return pallas_bonded_and_nonbonded_nl_fused(
+                    r_1,
+                    q_1,
+                    s_1,
+                    e_1,
+                    am_3t,
+                    nbr_3t,
+                    ei_3t,
+                    ev_3t,
+                    ee_3t,
+                    bonds=b_idx, bond_params=bp_1, bond_mask=b_msk,
+                    angles=a_idx, angle_params=ap_b4[_b], angle_mask=a_msk,
+                    dihedrals=d_idx, dihedral_params=dp_1, dihedral_mask=d_msk,
+                    impropers=h_idx, improper_params=hp_b4[_b], improper_mask=h_msk,
+                    exception_pairs=ep_idx, exception_sigmas=es_b4[_b], exception_epsilons=ee_14_b4[_b],
+                    exception_chargeprods=eq_b4[_b], exception_mask=ep_msk,
+                    box=box_3t,
+                    pme_alpha=0.34,
+                    cutoff=8.0,
+                    return_forces=False,
+                    interpret=True,
+                )
+
+            grads_b1 = jax.grad(_loss_cong_b1, argnums=(0, 1, 2, 3, 4, 5))(
+                pos_3t_b4[b], q_b4[b], sig_b4[b], eps_b4[b], bp_b4[b], dp_b4[b]
+            )
+            for g_batch, g_single in zip(grads_b4, grads_b1):
+                np.testing.assert_allclose(
+                    np.asarray(g_batch[b]), np.asarray(g_single), rtol=1e-4, atol=1e-4
+                )
+
         # 5. MK-64 EnsemblePlan._run_stacked_dispatch congeneric shared_top_fields execution
+        #    and cache invalidation when switching to a non-congeneric batch of identical shape
         bun_c0 = _make_periodic_solvated_bundle(dtype=jnp.float32, seed=40)
         bun_c1 = dataclasses.replace(
             bun_c0,
             charges=bun_c0.charges * jnp.float32(1.05),
             sigmas=bun_c0.sigmas * jnp.float32(1.01),
+            bond_params=bun_c0.bond_params.at[0].set(
+                jnp.array([2.20, 800.0], dtype=jnp.float32)
+            ),
         )
         plan_cong = EnsemblePlan.from_bundles([bun_c0, bun_c1], use_pallas=True)
         trajs_cong = plan_cong.run(
@@ -3211,5 +3278,77 @@ def test_pallas_v34_cuda_guard_and_mk62_to_mk64():
         assert len(trajs_cong) == 2
         assert bool(jnp.all(jnp.isfinite(trajs_cong[0].positions)))
         assert bool(jnp.all(jnp.isfinite(trajs_cong[1].positions)))
+
+        # Non-congeneric second bundle with permuted bond_idx (rows 0 and 2 swapped)
+        # and matching permuted bond_params: physically identical to bun_c1, but if
+        # _STACKED_JIT_FN_CACHE reused the congeneric stride=0 bond_idx from bun_c0,
+        # [2.20, 800.0] would be applied to bond [2, 3] instead of [0, 1]!
+        b_idx_perm = bun_c1.bond_idx.at[0].set(bun_c1.bond_idx[2]).at[2].set(bun_c1.bond_idx[0])
+        b_prm_perm = bun_c1.bond_params.at[0].set(bun_c1.bond_params[2]).at[2].set(bun_c1.bond_params[0])
+        bun_noncong = dataclasses.replace(
+            bun_c1,
+            bond_idx=b_idx_perm,
+            bond_params=b_prm_perm,
+        )
+        plan_noncong = EnsemblePlan.from_bundles([bun_c0, bun_noncong], use_pallas=True)
+        trajs_noncong = plan_noncong.run(
+            n_steps=2, dt=1.0, kT=0.6, seed=7, gamma=5.0,
+            run_mode="inference", use_neighbor_list=True, use_pallas=True,
+        )
+        assert len(trajs_noncong) == 2
+        assert bool(jnp.all(jnp.isfinite(trajs_noncong[0].positions)))
+        assert bool(jnp.all(jnp.isfinite(trajs_noncong[1].positions)))
+        np.testing.assert_allclose(
+            np.asarray(trajs_noncong[1].positions),
+            np.asarray(trajs_cong[1].positions),
+            rtol=1e-4,
+            atol=1e-4,
+        )
+
+        # 6. Verify all 4 GPU v3.4 JSON artifacts stamp all 7 OpenMM CUDA provenance keys
+        import json as _json_v34
+        from pathlib import Path as _Path_v34
+
+        _repo_root = _Path_v34(__file__).resolve().parents[1]
+        _req_keys = (
+            "platform_name",
+            "device_name",
+            "precision",
+            "cuda_Compiler",
+            "CudaDriverVersion",
+            "lib_openmm_cuda_path",
+            "mps_active",
+        )
+
+        def _collect_prov(node, out_list):
+            if isinstance(node, dict):
+                if "platform_name" in node and "lib_openmm_cuda_path" in node:
+                    out_list.append(node)
+                for _v in node.values():
+                    _collect_prov(_v, out_list)
+            elif isinstance(node, list):
+                for _item in node:
+                    _collect_prov(_item, out_list)
+
+        for _gpu_json in (
+            "261110_l40s_pallas_v34_e2e_ensemble_buckets.json",
+            "261110_h200_pallas_v34_e2e_ensemble_buckets.json",
+            "261110_rtx_pro_6000_blackwell_pallas_v34_e2e_ensemble_buckets.json",
+            "261110_a100_pallas_v34_e2e_ensemble_buckets.json",
+        ):
+            _p = _repo_root / "docs" / "benchmarks" / _gpu_json
+            assert _p.is_file(), f"Missing v3.4 benchmark artifact: {_p}"
+            _data = _json_v34.loads(_p.read_text())
+            _blocks = []
+            _collect_prov(_data, _blocks)
+            assert len(_blocks) >= 78, f"{_gpu_json}: expected >=78 provenance blocks, got {len(_blocks)}"
+            for _blk in _blocks:
+                for _k in _req_keys:
+                    assert _k in _blk and _blk[_k] is not None and _blk[_k] != "", (
+                        f"{_gpu_json}: missing or empty provenance key {_k} in {_blk}"
+                    )
+                assert _blk["platform_name"] == "CUDA"
+                assert _blk["precision"] in ("single", "mixed")
+                assert isinstance(_blk["mps_active"], bool)
     finally:
         jax.config.update("jax_enable_x64", prev_x64)
