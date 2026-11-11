@@ -73,6 +73,8 @@ def stack_molecular_bundles(bundles: list[MolecularBundle]) -> MolecularBundle:
 def unstack_trajectories(
     batched: Any,
     bundles: list[MolecularBundle],
+    *,
+    n_reals: list[int] | None = None,
 ) -> list[Any]:
     """Split a vmapped Trajectory and trim each to real atom count on the host."""
 
@@ -80,13 +82,25 @@ def unstack_trajectories(
         raise TypeError(f"Expected Trajectory, got {type(batched)}")
 
     batch_size = len(bundles)
+    if n_reals is None:
+        n_reals = [
+            b.n_atoms if isinstance(b.n_atoms, int) else int(jnp.asarray(b.n_atoms))
+            for b in bundles
+        ]
 
     def _slice_leaf(x):
         if isinstance(x, jnp.ndarray) and x.ndim > 0:
             return [x[i] for i in range(batch_size)]
         return [x] * batch_size
 
-    positions_lists = _slice_leaf(batched.positions)
+    pos_batched = batched.positions
+    uniform_n_real = len(set(n_reals)) == 1
+    if uniform_n_real and isinstance(pos_batched, jnp.ndarray) and pos_batched.ndim >= 3:
+        n_r0 = n_reals[0]
+        if int(pos_batched.shape[2]) != n_r0:
+            pos_batched = pos_batched[:, :, :n_r0, ...]
+
+    positions_lists = _slice_leaf(pos_batched)
     obs_lists: dict[str, list[Any]] = {}
     for name, value in batched.observable_values.items():
         obs_lists[name] = _slice_leaf(value)
@@ -94,7 +108,11 @@ def unstack_trajectories(
     out: list[Trajectory] = []
     for i, bundle in enumerate(bundles):
         obs_i = {name: obs_lists[name][i] for name in batched.observable_values}
-        pos = trim_trajectory_positions(positions_lists[i], bundle)
+        pos = (
+            positions_lists[i]
+            if uniform_n_real
+            else trim_trajectory_positions(positions_lists[i], bundle, n_real=n_reals[i])
+        )
         out.append(
             Trajectory(
                 positions=pos,

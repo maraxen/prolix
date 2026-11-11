@@ -1,0 +1,97 @@
+{
+  "meta": {
+    "backend": "gpu",
+    "device": "cuda:0",
+    "device_kind": "NVIDIA RTX PRO 6000 Blackwell Server Edition",
+    "pallas_interpret": false,
+    "kups_package_installed": false,
+    "jax": "0.10.2",
+    "host": "node5104",
+    "cutoff": 9.0,
+    "density": 0.1
+  },
+  "tier4_full_potential_throughput": {
+    "rows": [
+      {
+        "n_atoms": 512,
+        "k": 392,
+        "n_steps": 20,
+        "prolix_full_xla": {
+          "compile_s": 3.474453625269234,
+          "scan_median_s": 0.006822015158832073,
+          "step_ms": 0.34110075794160366,
+          "ns_per_day": 253.29759019413154
+        },
+        "prolix_full_pallas": {
+          "compile_s": 2.6073069479316473,
+          "scan_median_s": 0.011483152396976948,
+          "step_ms": 0.5741576198488474,
+          "ns_per_day": 150.4813260559803
+        },
+        "prolix_full_pallas_vs_xla_speedup": 0.5940890552517648,
+        "trajectory_rel_dE_full_pallas_vs_xla": 3.9141318097790645e-07
+      },
+      {
+        "n_atoms": 2048,
+        "k": 424,
+        "n_steps": 20,
+        "prolix_full_xla": {
+          "compile_s": 3.777967912144959,
+          "scan_median_s": 0.013739880174398422,
+          "step_ms": 0.6869940087199211,
+          "ns_per_day": 125.76528893023315
+        },
+        "prolix_full_pallas": {
+          "compile_s": 2.5571125457063317,
+          "scan_median_s": 0.012412398122251034,
+          "step_ms": 0.6206199061125517,
+          "ns_per_day": 139.21564414714575
+        },
+        "prolix_full_pallas_vs_xla_speedup": 1.106948072328399,
+        "trajectory_rel_dE_full_pallas_vs_xla": 2.717732456858357e-07
+      },
+      {
+        "n_atoms": 8192,
+        "k": 408,
+        "n_steps": 20,
+        "prolix_full_xla": {
+          "compile_s": 4.335681889206171,
+          "scan_median_s": 0.04292363114655018,
+          "step_ms": 2.146181557327509,
+          "ns_per_day": 40.25754471005143
+        },
+        "prolix_full_pallas": {
+          "compile_s": 3.1628452595323324,
+          "scan_median_s": 0.015364181250333786,
+          "step_ms": 0.7682090625166893,
+          "ns_per_day": 112.4693839421127
+        },
+        "prolix_full_pallas_vs_xla_speedup": 2.793746731256354,
+        "trajectory_rel_dE_full_pallas_vs_xla": 1.6799364743746992e-07
+      },
+      {
+        "n_atoms": 32768,
+        "k": 448,
+        "n_steps": 20,
+        "prolix_full_xla": {
+          "compile_s": 6.827436708845198,
+          "scan_median_s": 0.17685385886579752,
+          "step_ms": 8.842692943289876,
+          "ns_per_day": 9.770779168077201
+        },
+        "prolix_full_pallas": {
+          "compile_s": 3.2489485340192914,
+          "scan_median_s": 0.05231846775859594,
+          "step_ms": 2.615923387929797,
+          "ns_per_day": 33.02849020680826
+        },
+        "prolix_full_pallas_vs_xla_speedup": 3.380333301843313,
+        "trajectory_rel_dE_full_pallas_vs_xla": 1.57783162535452e-07
+      }
+    ],
+    "summary": {
+      "prolix_full_xla_time_exponent": 0.7866025243227668,
+      "prolix_full_pallas_time_exponent": 0.3435596814775033
+    }
+  }
+}

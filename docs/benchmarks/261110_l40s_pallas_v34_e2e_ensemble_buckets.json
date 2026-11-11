@@ -1,0 +1,3701 @@
+{
+  "schema_version": "pallas_v34_cuda_mps_ladder_v1",
+  "gpu_tag": "l40s",
+  "suites_requested": "A,B,C",
+  "device_kind": "NVIDIA L40S",
+  "jax_version": "0.10.2",
+  "openmm_inventory": {
+    "openmm_version": "8.3.1",
+    "python_executable": "/orcd/pool/008/so3_shared/marielle/projects/.venv/bin/python",
+    "default_plugin_dir": "/usr/local/openmm/lib/plugins",
+    "env_plugin_dir": null,
+    "platforms": [
+      "Reference",
+      "CPU",
+      "CUDA",
+      "OpenCL"
+    ],
+    "has_cuda_platform": true,
+    "lib_openmm_cuda_path": "/orcd/pool/008/so3_shared/marielle/projects/.venv/lib/python3.13/site-packages/OpenMM.libs/lib/plugins/libOpenMMCUDA.so",
+    "plugin_load_failures": [],
+    "mps_active": false
+  },
+  "quick_mode": true,
+  "total_wall_s": 474.30146430432796,
+  "suites_a_and_b": {
+    "suite_a_gbsa": {
+      "system": "5DFR_gbsa_implicit",
+      "n_real_atoms": 2489,
+      "openmm": {
+        "openmm_cuda_single_b1": {
+          "platform": "CUDA",
+          "precision": "single",
+          "ms_per_step": 0.09800242260098457,
+          "ns_per_day": 1763.2217185441696,
+          "provenance": {
+            "platform_name": "CUDA",
+            "device_name": "NVIDIA L40S",
+            "device_index": "0",
+            "precision": "single",
+            "cuda_Compiler": "openmm-nvrtc-builtin",
+            "CudaDriverVersion": "590.48.01",
+            "lib_openmm_cuda_path": "/orcd/pool/008/so3_shared/marielle/projects/.venv/lib/python3.13/site-packages/OpenMM.libs/lib/plugins/libOpenMMCUDA.so",
+            "mps_active": false,
+            "cuda_mps_pipe_directory": null,
+            "plugin_load_failures": []
+          }
+        },
+        "openmm_cuda_mixed_b1": {
+          "platform": "CUDA",
+          "precision": "mixed",
+          "ms_per_step": 0.10051868855953217,
+          "ns_per_day": 1719.0833115342452,
+          "provenance": {
+            "platform_name": "CUDA",
+            "device_name": "NVIDIA L40S",
+            "device_index": "0",
+            "precision": "mixed",
+            "cuda_Compiler": "openmm-nvrtc-builtin",
+            "CudaDriverVersion": "590.48.01",
+            "lib_openmm_cuda_path": "/orcd/pool/008/so3_shared/marielle/projects/.venv/lib/python3.13/site-packages/OpenMM.libs/lib/plugins/libOpenMMCUDA.so",
+            "mps_active": false,
+            "cuda_mps_pipe_directory": null,
+            "plugin_load_failures": []
+          }
+        },
+        "openmm_cuda_mps_scaling": {
+          "B=1": {
+            "available": true,
+            "ok": true,
+            "replicas_B": 1,
+            "precision": "single",
+            "n_steps": 30,
+            "dt_fs": 2.0,
+            "wall_elapsed_s": 0.0030575133860111237,
+            "ms_per_step_batch": 0.10191711286703746,
+            "ms_per_step_per_replica": 0.10191711286703746,
+            "per_replica_ns_per_day": 1695.4954387830567,
+            "aggregate_ns_per_day": 1695.4954387830567,
+            "total_gpu_memory_mb": 430.0,
+            "memory_mb_per_replica": 430.0,
+            "mps_info": {
+              "mps_active": false,
+              "started_by_harness": false
+            },
+            "provenance": {
+              "platform_name": "CUDA",
+              "device_name": "NVIDIA L40S",
+              "device_index": "0",
+              "precision": "single",
+              "cuda_Compiler": "openmm-nvrtc-builtin",
+              "CudaDriverVersion": "590.48.01",
+              "lib_openmm_cuda_path": "/orcd/pool/008/so3_shared/marielle/projects/.venv/lib/python3.13/site-packages/OpenMM.libs/lib/plugins/libOpenMMCUDA.so",
+              "mps_active": false,
+              "cuda_mps_pipe_directory": null,
+              "plugin_load_failures": []
+            }
+          },
+          "B=4": {
+            "available": true,
+            "ok": true,
+            "replicas_B": 4,
+            "precision": "single",
+            "n_steps": 30,
+            "dt_fs": 2.0,
+            "wall_elapsed_s": 0.006001682952046394,
+            "ms_per_step_batch": 0.20005609840154648,
+            "ms_per_step_per_replica": 0.05001402460038662,
+            "per_replica_ns_per_day": 863.75772286212,
+            "aggregate_ns_per_day": 3455.03089144848,
+            "total_gpu_memory_mb": 1712.0,
+            "memory_mb_per_replica": 428.0,
+            "mps_info": {
+              "mps_active": true,
+              "started_by_harness": true,
+              "pipe_dir": "/tmp/mps_28702134_3442248/pipe",
+              "log_dir": "/tmp/mps_28702134_3442248/log",
+              "stdout": "",
+              "stderr": ""
+            },
+            "provenance": {
+              "platform_name": "CUDA",
+              "device_name": "NVIDIA L40S",
+              "device_index": "0",
+              "precision": "single",
+              "cuda_Compiler": "openmm-nvrtc-builtin",
+              "CudaDriverVersion": "590.48.01",
+              "lib_openmm_cuda_path": "/orcd/pool/008/so3_shared/marielle/projects/.venv/lib/python3.13/site-packages/OpenMM.libs/lib/plugins/libOpenMMCUDA.so",
+              "mps_active": true,
+              "cuda_mps_pipe_directory": "/tmp/mps_28702134_3442248/pipe",
+              "plugin_load_failures": []
+            }
+          },
+          "B=8": {
+            "available": true,
+            "ok": true,
+            "replicas_B": 8,
+            "precision": "single",
+            "n_steps": 30,
+            "dt_fs": 2.0,
+            "wall_elapsed_s": 0.010759269818663597,
+            "ms_per_step_batch": 0.3586423272887866,
+            "ms_per_step_per_replica": 0.044830290911098324,
+            "per_replica_ns_per_day": 481.81708307078236,
+            "aggregate_ns_per_day": 3854.536664566259,
+            "total_gpu_memory_mb": 3424.0,
+            "memory_mb_per_replica": 428.0,
+            "mps_info": {
+              "mps_active": true,
+              "started_by_harness": true,
+              "pipe_dir": "/tmp/mps_28702134_3443048/pipe",
+              "log_dir": "/tmp/mps_28702134_3443048/log",
+              "stdout": "",
+              "stderr": ""
+            },
+            "provenance": {
+              "platform_name": "CUDA",
+              "device_name": "NVIDIA L40S",
+              "device_index": "0",
+              "precision": "single",
+              "cuda_Compiler": "openmm-nvrtc-builtin",
+              "CudaDriverVersion": "590.48.01",
+              "lib_openmm_cuda_path": "/orcd/pool/008/so3_shared/marielle/projects/.venv/lib/python3.13/site-packages/OpenMM.libs/lib/plugins/libOpenMMCUDA.so",
+              "mps_active": true,
+              "cuda_mps_pipe_directory": "/tmp/mps_28702134_3443048/pipe",
+              "plugin_load_failures": []
+            }
+          }
+        }
+      },
+      "batch_scaling": [
+        {
+          "B": 1,
+          "ms_per_step_batch": 0.6340929865837097,
+          "ms_per_step_per_replica": 0.6340929865837097,
+          "ns_per_day_per_replica": 272.51523618166976,
+          "ns_per_day_aggregate": 272.51523618166976,
+          "speedup_vs_openmm_cuda_single_b1": 0.15455528554099027,
+          "speedup_vs_openmm_cuda_mps_same_B": 0.16072897039302433
+        },
+        {
+          "B": 2,
+          "ms_per_step_batch": 0.8346337452530861,
+          "ms_per_step_per_replica": 0.41731687262654305,
+          "ns_per_day_per_replica": 414.07384013116274,
+          "ns_per_day_aggregate": 414.07384013116274,
+          "speedup_vs_openmm_cuda_single_b1": 0.23483934877631216,
+          "speedup_vs_openmm_cuda_mps_same_B": null
+        },
+        {
+          "B": 4,
+          "ms_per_step_batch": 1.3431601971387863,
+          "ms_per_step_per_replica": 0.3357900492846966,
+          "ns_per_day_per_replica": 514.6072683455044,
+          "ns_per_day_aggregate": 514.6072683455044,
+          "speedup_vs_openmm_cuda_single_b1": 0.2918562441315648,
+          "speedup_vs_openmm_cuda_mps_same_B": 0.14894433205190866
+        },
+        {
+          "B": 8,
+          "ms_per_step_batch": 1.9722298532724383,
+          "ms_per_step_per_replica": 0.24652873165905478,
+          "ns_per_day_per_replica": 700.9324991740905,
+          "ns_per_day_aggregate": 700.9324991740905,
+          "speedup_vs_openmm_cuda_single_b1": 0.39752941550245074,
+          "speedup_vs_openmm_cuda_mps_same_B": 0.18184611022579666
+        },
+        {
+          "B": 16,
+          "ms_per_step_batch": 3.2867813482880592,
+          "ms_per_step_per_replica": 0.2054238342680037,
+          "ns_per_day_per_replica": 841.1876869874728,
+          "ns_per_day_aggregate": 841.1876869874728,
+          "speedup_vs_openmm_cuda_single_b1": 0.4770742545537676,
+          "speedup_vs_openmm_cuda_mps_same_B": null
+        },
+        {
+          "B": 32,
+          "ms_per_step_batch": 6.501605249941349,
+          "ms_per_step_per_replica": 0.20317516406066716,
+          "ns_per_day_per_replica": 850.4976521067442,
+          "ns_per_day_aggregate": 850.4976521067442,
+          "speedup_vs_openmm_cuda_single_b1": 0.4823543421464717,
+          "speedup_vs_openmm_cuda_mps_same_B": null
+        }
+      ]
+    },
+    "explicit_ladder": [
+      {
+        "system": "1UAO_solvated_2k",
+        "suites": [
+          "SuiteB"
+        ],
+        "kind": "trunc",
+        "n_real_atoms": 1962,
+        "bucket_atoms": 4096,
+        "bucket_waters": 1024,
+        "occupancy_pct": 47.900390625,
+        "electrostatics": "pme",
+        "pme_grid": [
+          32,
+          32,
+          32
+        ],
+        "openmm": {
+          "openmm_cuda_single_b1": {
+            "platform": "CUDA",
+            "precision": "single",
+            "ms_per_step": 0.08171210065484047,
+            "ns_per_day": 2114.741863385979,
+            "provenance": {
+              "platform_name": "CUDA",
+              "device_name": "NVIDIA L40S",
+              "device_index": "0",
+              "precision": "single",
+              "cuda_Compiler": "openmm-nvrtc-builtin",
+              "CudaDriverVersion": "590.48.01",
+              "lib_openmm_cuda_path": "/orcd/pool/008/so3_shared/marielle/projects/.venv/lib/python3.13/site-packages/OpenMM.libs/lib/plugins/libOpenMMCUDA.so",
+              "mps_active": false,
+              "cuda_mps_pipe_directory": null,
+              "plugin_load_failures": []
+            }
+          },
+          "openmm_cuda_mixed_b1": {
+            "platform": "CUDA",
+            "precision": "mixed",
+            "ms_per_step": 0.09393692016601562,
+            "ns_per_day": 1839.5323126903552,
+            "provenance": {
+              "platform_name": "CUDA",
+              "device_name": "NVIDIA L40S",
+              "device_index": "0",
+              "precision": "mixed",
+              "cuda_Compiler": "openmm-nvrtc-builtin",
+              "CudaDriverVersion": "590.48.01",
+              "lib_openmm_cuda_path": "/orcd/pool/008/so3_shared/marielle/projects/.venv/lib/python3.13/site-packages/OpenMM.libs/lib/plugins/libOpenMMCUDA.so",
+              "mps_active": false,
+              "cuda_mps_pipe_directory": null,
+              "plugin_load_failures": []
+            }
+          },
+          "openmm_cuda_mps_scaling": {
+            "B=1": {
+              "available": true,
+              "ok": true,
+              "replicas_B": 1,
+              "precision": "single",
+              "n_steps": 30,
+              "dt_fs": 2.0,
+              "wall_elapsed_s": 0.0025546159595251083,
+              "ms_per_step_batch": 0.0851538653175036,
+              "ms_per_step_per_replica": 0.0851538653175036,
+              "per_replica_ns_per_day": 2029.2678360013388,
+              "aggregate_ns_per_day": 2029.2678360013388,
+              "total_gpu_memory_mb": 440.0,
+              "memory_mb_per_replica": 440.0,
+              "mps_info": {
+                "mps_active": false,
+                "started_by_harness": false
+              },
+              "provenance": {
+                "platform_name": "CUDA",
+                "device_name": "NVIDIA L40S",
+                "device_index": "0",
+                "precision": "single",
+                "cuda_Compiler": "openmm-nvrtc-builtin",
+                "CudaDriverVersion": "590.48.01",
+                "lib_openmm_cuda_path": "/orcd/pool/008/so3_shared/marielle/projects/.venv/lib/python3.13/site-packages/OpenMM.libs/lib/plugins/libOpenMMCUDA.so",
+                "mps_active": false,
+                "cuda_mps_pipe_directory": null,
+                "plugin_load_failures": []
+              }
+            },
+            "B=4": {
+              "available": true,
+              "ok": true,
+              "replicas_B": 4,
+              "precision": "single",
+              "n_steps": 30,
+              "dt_fs": 2.0,
+              "wall_elapsed_s": 0.01875506155192852,
+              "ms_per_step_batch": 0.6251687183976173,
+              "ms_per_step_per_replica": 0.15629217959940434,
+              "per_replica_ns_per_day": 276.40538452228895,
+              "aggregate_ns_per_day": 1105.6215380891558,
+              "total_gpu_memory_mb": 1760.0,
+              "memory_mb_per_replica": 440.0,
+              "mps_info": {
+                "mps_active": false,
+                "started_by_harness": false
+              },
+              "provenance": {
+                "platform_name": "CUDA",
+                "device_name": "NVIDIA L40S",
+                "device_index": "0",
+                "precision": "single",
+                "cuda_Compiler": "openmm-nvrtc-builtin",
+                "CudaDriverVersion": "590.48.01",
+                "lib_openmm_cuda_path": "/orcd/pool/008/so3_shared/marielle/projects/.venv/lib/python3.13/site-packages/OpenMM.libs/lib/plugins/libOpenMMCUDA.so",
+                "mps_active": false,
+                "cuda_mps_pipe_directory": null,
+                "plugin_load_failures": []
+              }
+            },
+            "B=8": {
+              "available": true,
+              "ok": true,
+              "replicas_B": 8,
+              "precision": "single",
+              "n_steps": 30,
+              "dt_fs": 2.0,
+              "wall_elapsed_s": 0.037464942783117294,
+              "ms_per_step_batch": 1.24883142610391,
+              "ms_per_step_per_replica": 0.15610392826298874,
+              "per_replica_ns_per_day": 138.36935585381565,
+              "aggregate_ns_per_day": 1106.9548468305252,
+              "total_gpu_memory_mb": 3520.0,
+              "memory_mb_per_replica": 440.0,
+              "mps_info": {
+                "mps_active": false,
+                "started_by_harness": false
+              },
+              "provenance": {
+                "platform_name": "CUDA",
+                "device_name": "NVIDIA L40S",
+                "device_index": "0",
+                "precision": "single",
+                "cuda_Compiler": "openmm-nvrtc-builtin",
+                "CudaDriverVersion": "590.48.01",
+                "lib_openmm_cuda_path": "/orcd/pool/008/so3_shared/marielle/projects/.venv/lib/python3.13/site-packages/OpenMM.libs/lib/plugins/libOpenMMCUDA.so",
+                "mps_active": false,
+                "cuda_mps_pipe_directory": null,
+                "plugin_load_failures": []
+              }
+            },
+            "B=16": {
+              "available": true,
+              "ok": true,
+              "replicas_B": 16,
+              "precision": "single",
+              "n_steps": 30,
+              "dt_fs": 2.0,
+              "wall_elapsed_s": 0.07509206794202328,
+              "ms_per_step_batch": 2.503068931400776,
+              "ms_per_step_per_replica": 0.1564418082125485,
+              "per_replica_ns_per_day": 69.0352542162301,
+              "aggregate_ns_per_day": 1104.5640674596816,
+              "total_gpu_memory_mb": 7040.0,
+              "memory_mb_per_replica": 440.0,
+              "mps_info": {
+                "mps_active": false,
+                "started_by_harness": false
+              },
+              "provenance": {
+                "platform_name": "CUDA",
+                "device_name": "NVIDIA L40S",
+                "device_index": "0",
+                "precision": "single",
+                "cuda_Compiler": "openmm-nvrtc-builtin",
+                "CudaDriverVersion": "590.48.01",
+                "lib_openmm_cuda_path": "/orcd/pool/008/so3_shared/marielle/projects/.venv/lib/python3.13/site-packages/OpenMM.libs/lib/plugins/libOpenMMCUDA.so",
+                "mps_active": false,
+                "cuda_mps_pipe_directory": null,
+                "plugin_load_failures": []
+              }
+            }
+          }
+        },
+        "substep_breakdown": {
+          "B=1": {
+            "total_substeps_ms": 0.2275662124156952,
+            "baoab_pre_force_ms": 0.039576590061187744,
+            "bonded_and_nonbonded_direct_mk48_ms": 0.03385864198207855,
+            "pme_spread_3d_bspline_ms": 0.02725653350353241,
+            "pme_rfft3d_and_influence_ms": 0.025228187441825867,
+            "pme_irfft3d_ms": 0.03899596631526947,
+            "pme_gather_3d_bspline_fused_scale_ms": 0.03312043845653534,
+            "baoab_post_force_ms": 0.029529854655265808,
+            "baoab_pre_force_pct": 17.391241714254658,
+            "bonded_and_nonbonded_direct_mk48_pct": 14.878589234604377,
+            "pme_spread_3d_bspline_pct": 11.97740789996667,
+            "pme_rfft3d_and_influence_pct": 11.086086626841395,
+            "pme_irfft3d_pct": 17.13609674358667,
+            "pme_gather_3d_bspline_fused_scale_pct": 14.554198580250672,
+            "baoab_post_force_pct": 12.976379200495558,
+            "nonbonded_tile_pairs_mk51_ms_per_rep": 0.029971599578857422,
+            "num_valid_tile_pairs_aabb_pruned": 128
+          },
+          "B=4": {
+            "total_substeps_ms": 0.05815358832478523,
+            "baoab_pre_force_ms": 0.009816475212574005,
+            "bonded_and_nonbonded_direct_mk48_ms": 0.010602511465549469,
+            "pme_spread_3d_bspline_ms": 0.006699357181787491,
+            "pme_rfft3d_and_influence_ms": 0.006704498082399368,
+            "pme_irfft3d_ms": 0.008635148406028748,
+            "pme_gather_3d_bspline_fused_scale_ms": 0.007679946720600129,
+            "baoab_post_force_ms": 0.008015651255846024,
+            "baoab_pre_force_pct": 16.8802570836204,
+            "bonded_and_nonbonded_direct_mk48_pct": 18.231912717638178,
+            "pme_spread_3d_bspline_pct": 11.520109721126538,
+            "pme_rfft3d_and_influence_pct": 11.528949933330066,
+            "pme_irfft3d_pct": 14.84886600256174,
+            "pme_gather_3d_bspline_fused_scale_pct": 13.206316139440897,
+            "baoab_post_force_pct": 13.783588402282184,
+            "nonbonded_tile_pairs_mk51_ms_per_rep": 0.00806199386715889,
+            "num_valid_tile_pairs_aabb_pruned": 128
+          }
+        },
+        "batch_scaling": [
+          {
+            "B": 1,
+            "ms_per_step_batch": 0.16768857836723328,
+            "ms_per_step_per_replica": 0.16768857836723328,
+            "ns_per_day_per_replica": 1030.4816325747174,
+            "ns_per_day_aggregate": 1030.4816325747174,
+            "speedup_vs_openmm_cuda_single_b1": 0.4872848315041068,
+            "speedup_vs_openmm_cuda_mps_same_B": 0.5078095726413699
+          },
+          {
+            "B": 2,
+            "ms_per_step_batch": 0.29069602489471436,
+            "ms_per_step_per_replica": 0.14534801244735718,
+            "ns_per_day_per_replica": 1188.8707460832015,
+            "ns_per_day_aggregate": 1188.8707460832015,
+            "speedup_vs_openmm_cuda_single_b1": 0.562182442532094,
+            "speedup_vs_openmm_cuda_mps_same_B": null
+          },
+          {
+            "B": 4,
+            "ms_per_step_batch": 0.3557935357093811,
+            "ms_per_step_per_replica": 0.08894838392734528,
+            "ns_per_day_per_replica": 1942.699713815445,
+            "ns_per_day_aggregate": 1942.699713815445,
+            "speedup_vs_openmm_cuda_single_b1": 0.9186462647998693,
+            "speedup_vs_openmm_cuda_mps_same_B": 1.7571109524268225
+          },
+          {
+            "B": 8,
+            "ms_per_step_batch": 0.5188152939081192,
+            "ms_per_step_per_replica": 0.0648519117385149,
+            "ns_per_day_per_replica": 2664.5320911546205,
+            "ns_per_day_aggregate": 2664.5320911546205,
+            "speedup_vs_openmm_cuda_single_b1": 1.2599798288800863,
+            "speedup_vs_openmm_cuda_mps_same_B": 2.407082907477039
+          },
+          {
+            "B": 16,
+            "ms_per_step_batch": 0.7965073734521866,
+            "ms_per_step_per_replica": 0.04978171084076166,
+            "ns_per_day_per_replica": 3471.1543071056926,
+            "ns_per_day_aggregate": 3471.1543071056926,
+            "speedup_vs_openmm_cuda_single_b1": 1.641408044737867,
+            "speedup_vs_openmm_cuda_mps_same_B": 3.1425558818772594
+          },
+          {
+            "B": 32,
+            "ms_per_step_batch": 1.4857539534568787,
+            "ms_per_step_per_replica": 0.04642981104552746,
+            "ns_per_day_per_replica": 3721.746785283238,
+            "ns_per_day_aggregate": 3721.746785283238,
+            "speedup_vs_openmm_cuda_single_b1": 1.7599059486741486,
+            "speedup_vs_openmm_cuda_mps_same_B": null
+          }
+        ]
+      },
+      {
+        "system": "1VII_solvated_4k",
+        "suites": [
+          "SuiteB"
+        ],
+        "kind": "trunc",
+        "n_real_atoms": 4199,
+        "bucket_atoms": 8192,
+        "bucket_waters": 2048,
+        "occupancy_pct": 51.25732421875,
+        "electrostatics": "pme",
+        "pme_grid": [
+          40,
+          40,
+          40
+        ],
+        "openmm": {
+          "openmm_cuda_single_b1": {
+            "platform": "CUDA",
+            "precision": "single",
+            "ms_per_step": 0.09298627264797688,
+            "ns_per_day": 1858.3388179691667,
+            "provenance": {
+              "platform_name": "CUDA",
+              "device_name": "NVIDIA L40S",
+              "device_index": "0",
+              "precision": "single",
+              "cuda_Compiler": "openmm-nvrtc-builtin",
+              "CudaDriverVersion": "590.48.01",
+              "lib_openmm_cuda_path": "/orcd/pool/008/so3_shared/marielle/projects/.venv/lib/python3.13/site-packages/OpenMM.libs/lib/plugins/libOpenMMCUDA.so",
+              "mps_active": false,
+              "cuda_mps_pipe_directory": null,
+              "plugin_load_failures": []
+            }
+          },
+          "openmm_cuda_mixed_b1": {
+            "platform": "CUDA",
+            "precision": "mixed",
+            "ms_per_step": 0.10328642092645168,
+            "ns_per_day": 1673.0175995065956,
+            "provenance": {
+              "platform_name": "CUDA",
+              "device_name": "NVIDIA L40S",
+              "device_index": "0",
+              "precision": "mixed",
+              "cuda_Compiler": "openmm-nvrtc-builtin",
+              "CudaDriverVersion": "590.48.01",
+              "lib_openmm_cuda_path": "/orcd/pool/008/so3_shared/marielle/projects/.venv/lib/python3.13/site-packages/OpenMM.libs/lib/plugins/libOpenMMCUDA.so",
+              "mps_active": false,
+              "cuda_mps_pipe_directory": null,
+              "plugin_load_failures": []
+            }
+          },
+          "openmm_cuda_mps_scaling": {
+            "B=1": {
+              "available": true,
+              "ok": true,
+              "replicas_B": 1,
+              "precision": "single",
+              "n_steps": 30,
+              "dt_fs": 2.0,
+              "wall_elapsed_s": 0.0029251910746097565,
+              "ms_per_step_batch": 0.09750636915365855,
+              "ms_per_step_per_replica": 0.09750636915365855,
+              "per_replica_ns_per_day": 1772.1919244853384,
+              "aggregate_ns_per_day": 1772.1919244853384,
+              "total_gpu_memory_mb": 442.0,
+              "memory_mb_per_replica": 442.0,
+              "mps_info": {
+                "mps_active": false,
+                "started_by_harness": false
+              },
+              "provenance": {
+                "platform_name": "CUDA",
+                "device_name": "NVIDIA L40S",
+                "device_index": "0",
+                "precision": "single",
+                "cuda_Compiler": "openmm-nvrtc-builtin",
+                "CudaDriverVersion": "590.48.01",
+                "lib_openmm_cuda_path": "/orcd/pool/008/so3_shared/marielle/projects/.venv/lib/python3.13/site-packages/OpenMM.libs/lib/plugins/libOpenMMCUDA.so",
+                "mps_active": false,
+                "cuda_mps_pipe_directory": null,
+                "plugin_load_failures": []
+              }
+            },
+            "B=4": {
+              "available": true,
+              "ok": true,
+              "replicas_B": 4,
+              "precision": "single",
+              "n_steps": 30,
+              "dt_fs": 2.0,
+              "wall_elapsed_s": 0.019474806264042854,
+              "ms_per_step_batch": 0.6491602088014284,
+              "ms_per_step_per_replica": 0.1622900522003571,
+              "per_replica_ns_per_day": 266.19006780937457,
+              "aggregate_ns_per_day": 1064.7602712374983,
+              "total_gpu_memory_mb": 1768.0,
+              "memory_mb_per_replica": 442.0,
+              "mps_info": {
+                "mps_active": false,
+                "started_by_harness": false
+              },
+              "provenance": {
+                "platform_name": "CUDA",
+                "device_name": "NVIDIA L40S",
+                "device_index": "0",
+                "precision": "single",
+                "cuda_Compiler": "openmm-nvrtc-builtin",
+                "CudaDriverVersion": "590.48.01",
+                "lib_openmm_cuda_path": "/orcd/pool/008/so3_shared/marielle/projects/.venv/lib/python3.13/site-packages/OpenMM.libs/lib/plugins/libOpenMMCUDA.so",
+                "mps_active": false,
+                "cuda_mps_pipe_directory": null,
+                "plugin_load_failures": []
+              }
+            },
+            "B=8": {
+              "available": true,
+              "ok": true,
+              "replicas_B": 8,
+              "precision": "single",
+              "n_steps": 30,
+              "dt_fs": 2.0,
+              "wall_elapsed_s": 0.03900453262031078,
+              "ms_per_step_batch": 1.3001510873436928,
+              "ms_per_step_per_replica": 0.1625188859179616,
+              "per_replica_ns_per_day": 132.90763026091338,
+              "aggregate_ns_per_day": 1063.261042087307,
+              "total_gpu_memory_mb": 3536.0,
+              "memory_mb_per_replica": 442.0,
+              "mps_info": {
+                "mps_active": false,
+                "started_by_harness": false
+              },
+              "provenance": {
+                "platform_name": "CUDA",
+                "device_name": "NVIDIA L40S",
+                "device_index": "0",
+                "precision": "single",
+                "cuda_Compiler": "openmm-nvrtc-builtin",
+                "CudaDriverVersion": "590.48.01",
+                "lib_openmm_cuda_path": "/orcd/pool/008/so3_shared/marielle/projects/.venv/lib/python3.13/site-packages/OpenMM.libs/lib/plugins/libOpenMMCUDA.so",
+                "mps_active": false,
+                "cuda_mps_pipe_directory": null,
+                "plugin_load_failures": []
+              }
+            },
+            "B=16": {
+              "available": true,
+              "ok": true,
+              "replicas_B": 16,
+              "precision": "single",
+              "n_steps": 30,
+              "dt_fs": 2.0,
+              "wall_elapsed_s": 0.07865183986723423,
+              "ms_per_step_batch": 2.6217279955744743,
+              "ms_per_step_per_replica": 0.16385799972340465,
+              "per_replica_ns_per_day": 65.91072769245689,
+              "aggregate_ns_per_day": 1054.5716430793102,
+              "total_gpu_memory_mb": 7072.0,
+              "memory_mb_per_replica": 442.0,
+              "mps_info": {
+                "mps_active": false,
+                "started_by_harness": false
+              },
+              "provenance": {
+                "platform_name": "CUDA",
+                "device_name": "NVIDIA L40S",
+                "device_index": "0",
+                "precision": "single",
+                "cuda_Compiler": "openmm-nvrtc-builtin",
+                "CudaDriverVersion": "590.48.01",
+                "lib_openmm_cuda_path": "/orcd/pool/008/so3_shared/marielle/projects/.venv/lib/python3.13/site-packages/OpenMM.libs/lib/plugins/libOpenMMCUDA.so",
+                "mps_active": false,
+                "cuda_mps_pipe_directory": null,
+                "plugin_load_failures": []
+              }
+            }
+          }
+        },
+        "substep_breakdown": {
+          "B=1": {
+            "total_substeps_ms": 0.22517792880535126,
+            "baoab_pre_force_ms": 0.03816358745098114,
+            "bonded_and_nonbonded_direct_mk48_ms": 0.04369795322418213,
+            "pme_spread_3d_bspline_ms": 0.025436654686927795,
+            "pme_rfft3d_and_influence_ms": 0.026221126317977905,
+            "pme_irfft3d_ms": 0.0333075225353241,
+            "pme_gather_3d_bspline_fused_scale_ms": 0.028278827667236328,
+            "baoab_post_force_ms": 0.030072256922721863,
+            "baoab_pre_force_pct": 16.948191882504872,
+            "bonded_and_nonbonded_direct_mk48_pct": 19.40596640888175,
+            "pme_spread_3d_bspline_pct": 11.296246848826733,
+            "pme_rfft3d_and_influence_pct": 11.644625411153871,
+            "pme_irfft3d_pct": 14.791646193759892,
+            "pme_gather_3d_bspline_fused_scale_pct": 12.558436707036757,
+            "baoab_post_force_pct": 13.354886547836125,
+            "nonbonded_tile_pairs_mk51_ms_per_rep": 0.029983818531036377,
+            "num_valid_tile_pairs_aabb_pruned": 256
+          },
+          "B=4": {
+            "total_substeps_ms": 0.06771951913833618,
+            "baoab_pre_force_ms": 0.00952577218413353,
+            "bonded_and_nonbonded_direct_mk48_ms": 0.02148101106286049,
+            "pme_spread_3d_bspline_ms": 0.006970968097448349,
+            "pme_rfft3d_and_influence_ms": 0.00647377222776413,
+            "pme_irfft3d_ms": 0.008708667010068893,
+            "pme_gather_3d_bspline_fused_scale_ms": 0.0068315863609313965,
+            "baoab_post_force_ms": 0.0077277421951293945,
+            "baoab_pre_force_pct": 14.06650889631165,
+            "bonded_and_nonbonded_direct_mk48_pct": 31.720560535847095,
+            "pme_spread_3d_bspline_pct": 10.293883043097493,
+            "pme_rfft3d_and_influence_pct": 9.559684283256098,
+            "pme_irfft3d_pct": 12.859906746057941,
+            "pme_gather_3d_bspline_fused_scale_pct": 10.088060942925418,
+            "baoab_post_force_pct": 11.411395552504302,
+            "nonbonded_tile_pairs_mk51_ms_per_rep": 0.007971208542585373,
+            "num_valid_tile_pairs_aabb_pruned": 256
+          }
+        },
+        "batch_scaling": [
+          {
+            "B": 1,
+            "ms_per_step_batch": 0.21407276391983032,
+            "ms_per_step_per_replica": 0.21407276391983032,
+            "ns_per_day_per_replica": 807.2021719900489,
+            "ns_per_day_aggregate": 807.2021719900489,
+            "speedup_vs_openmm_cuda_single_b1": 0.43436759980732526,
+            "speedup_vs_openmm_cuda_mps_same_B": 0.4554823666880595
+          },
+          {
+            "B": 2,
+            "ms_per_step_batch": 0.3475628048181534,
+            "ms_per_step_per_replica": 0.1737814024090767,
+            "ns_per_day_per_replica": 994.3526614731392,
+            "ns_per_day_aggregate": 994.3526614731392,
+            "speedup_vs_openmm_cuda_single_b1": 0.5350760861573077,
+            "speedup_vs_openmm_cuda_mps_same_B": null
+          },
+          {
+            "B": 4,
+            "ms_per_step_batch": 0.4839562624692917,
+            "ms_per_step_per_replica": 0.12098906561732292,
+            "ns_per_day_per_replica": 1428.228237967803,
+            "ns_per_day_aggregate": 1428.228237967803,
+            "speedup_vs_openmm_cuda_single_b1": 0.768551043629709,
+            "speedup_vs_openmm_cuda_mps_same_B": 1.3413613153577477
+          },
+          {
+            "B": 8,
+            "ms_per_step_batch": 0.9099838137626648,
+            "ms_per_step_per_replica": 0.1137479767203331,
+            "ns_per_day_per_replica": 1519.1479003169911,
+            "ns_per_day_aggregate": 1519.1479003169911,
+            "speedup_vs_openmm_cuda_single_b1": 0.8174762780756789,
+            "speedup_vs_openmm_cuda_mps_same_B": 1.4287628721303702
+          },
+          {
+            "B": 16,
+            "ms_per_step_batch": 1.6083662956953049,
+            "ms_per_step_per_replica": 0.10052289348095655,
+            "ns_per_day_per_replica": 1719.0114014449443,
+            "ns_per_day_aggregate": 1719.0114014449443,
+            "speedup_vs_openmm_cuda_single_b1": 0.925025826734609,
+            "speedup_vs_openmm_cuda_mps_same_B": 1.6300565378616618
+          },
+          {
+            "B": 32,
+            "ms_per_step_batch": 2.9865464568138123,
+            "ms_per_step_per_replica": 0.09332957677543163,
+            "ns_per_day_per_replica": 1851.5030922704066,
+            "ns_per_day_aggregate": 1851.5030922704066,
+            "speedup_vs_openmm_cuda_single_b1": 0.9963215934399787,
+            "speedup_vs_openmm_cuda_mps_same_B": null
+          }
+        ]
+      },
+      {
+        "system": "1UBQ_solvated_7k",
+        "suites": [
+          "SuiteB"
+        ],
+        "kind": "trunc",
+        "n_real_atoms": 6656,
+        "bucket_atoms": 8192,
+        "bucket_waters": 2048,
+        "occupancy_pct": 81.25,
+        "electrostatics": "pme",
+        "pme_grid": [
+          48,
+          48,
+          48
+        ],
+        "openmm": {
+          "openmm_cuda_single_b1": {
+            "platform": "CUDA",
+            "precision": "single",
+            "ms_per_step": 0.1009231898933649,
+            "ns_per_day": 1712.1932053731148,
+            "provenance": {
+              "platform_name": "CUDA",
+              "device_name": "NVIDIA L40S",
+              "device_index": "0",
+              "precision": "single",
+              "cuda_Compiler": "openmm-nvrtc-builtin",
+              "CudaDriverVersion": "590.48.01",
+              "lib_openmm_cuda_path": "/orcd/pool/008/so3_shared/marielle/projects/.venv/lib/python3.13/site-packages/OpenMM.libs/lib/plugins/libOpenMMCUDA.so",
+              "mps_active": false,
+              "cuda_mps_pipe_directory": null,
+              "plugin_load_failures": []
+            }
+          },
+          "openmm_cuda_mixed_b1": {
+            "platform": "CUDA",
+            "precision": "mixed",
+            "ms_per_step": 0.11038403026759624,
+            "ns_per_day": 1565.4438380361098,
+            "provenance": {
+              "platform_name": "CUDA",
+              "device_name": "NVIDIA L40S",
+              "device_index": "0",
+              "precision": "mixed",
+              "cuda_Compiler": "openmm-nvrtc-builtin",
+              "CudaDriverVersion": "590.48.01",
+              "lib_openmm_cuda_path": "/orcd/pool/008/so3_shared/marielle/projects/.venv/lib/python3.13/site-packages/OpenMM.libs/lib/plugins/libOpenMMCUDA.so",
+              "mps_active": false,
+              "cuda_mps_pipe_directory": null,
+              "plugin_load_failures": []
+            }
+          },
+          "openmm_cuda_mps_scaling": {
+            "B=1": {
+              "available": true,
+              "ok": true,
+              "replicas_B": 1,
+              "precision": "single",
+              "n_steps": 30,
+              "dt_fs": 2.0,
+              "wall_elapsed_s": 0.0031340867280960083,
+              "ms_per_step_batch": 0.10446955760320027,
+              "ms_per_step_per_replica": 0.10446955760320027,
+              "per_replica_ns_per_day": 1654.070371929157,
+              "aggregate_ns_per_day": 1654.070371929157,
+              "total_gpu_memory_mb": 444.0,
+              "memory_mb_per_replica": 444.0,
+              "mps_info": {
+                "mps_active": false,
+                "started_by_harness": false
+              },
+              "provenance": {
+                "platform_name": "CUDA",
+                "device_name": "NVIDIA L40S",
+                "device_index": "0",
+                "precision": "single",
+                "cuda_Compiler": "openmm-nvrtc-builtin",
+                "CudaDriverVersion": "590.48.01",
+                "lib_openmm_cuda_path": "/orcd/pool/008/so3_shared/marielle/projects/.venv/lib/python3.13/site-packages/OpenMM.libs/lib/plugins/libOpenMMCUDA.so",
+                "mps_active": false,
+                "cuda_mps_pipe_directory": null,
+                "plugin_load_failures": []
+              }
+            },
+            "B=4": {
+              "available": true,
+              "ok": true,
+              "replicas_B": 4,
+              "precision": "single",
+              "n_steps": 30,
+              "dt_fs": 2.0,
+              "wall_elapsed_s": 0.020556630566716194,
+              "ms_per_step_batch": 0.6852210188905398,
+              "ms_per_step_per_replica": 0.17130525472263494,
+              "per_replica_ns_per_day": 252.1814060517076,
+              "aggregate_ns_per_day": 1008.7256242068304,
+              "total_gpu_memory_mb": 1776.0,
+              "memory_mb_per_replica": 444.0,
+              "mps_info": {
+                "mps_active": false,
+                "started_by_harness": false
+              },
+              "provenance": {
+                "platform_name": "CUDA",
+                "device_name": "NVIDIA L40S",
+                "device_index": "0",
+                "precision": "single",
+                "cuda_Compiler": "openmm-nvrtc-builtin",
+                "CudaDriverVersion": "590.48.01",
+                "lib_openmm_cuda_path": "/orcd/pool/008/so3_shared/marielle/projects/.venv/lib/python3.13/site-packages/OpenMM.libs/lib/plugins/libOpenMMCUDA.so",
+                "mps_active": false,
+                "cuda_mps_pipe_directory": null,
+                "plugin_load_failures": []
+              }
+            },
+            "B=8": {
+              "available": true,
+              "ok": true,
+              "replicas_B": 8,
+              "precision": "single",
+              "n_steps": 30,
+              "dt_fs": 2.0,
+              "wall_elapsed_s": 0.04098580218851566,
+              "ms_per_step_batch": 1.3661934062838554,
+              "ms_per_step_per_replica": 0.17077417578548193,
+              "per_replica_ns_per_day": 126.48282388511042,
+              "aggregate_ns_per_day": 1011.8625910808834,
+              "total_gpu_memory_mb": 3552.0,
+              "memory_mb_per_replica": 444.0,
+              "mps_info": {
+                "mps_active": false,
+                "started_by_harness": false
+              },
+              "provenance": {
+                "platform_name": "CUDA",
+                "device_name": "NVIDIA L40S",
+                "device_index": "0",
+                "precision": "single",
+                "cuda_Compiler": "openmm-nvrtc-builtin",
+                "CudaDriverVersion": "590.48.01",
+                "lib_openmm_cuda_path": "/orcd/pool/008/so3_shared/marielle/projects/.venv/lib/python3.13/site-packages/OpenMM.libs/lib/plugins/libOpenMMCUDA.so",
+                "mps_active": false,
+                "cuda_mps_pipe_directory": null,
+                "plugin_load_failures": []
+              }
+            },
+            "B=16": {
+              "available": true,
+              "ok": true,
+              "replicas_B": 16,
+              "precision": "single",
+              "n_steps": 30,
+              "dt_fs": 2.0,
+              "wall_elapsed_s": 0.08372780121862888,
+              "ms_per_step_batch": 2.7909267072876296,
+              "ms_per_step_per_replica": 0.17443291920547685,
+              "per_replica_ns_per_day": 61.9149186357302,
+              "aggregate_ns_per_day": 990.6386981716832,
+              "total_gpu_memory_mb": 7104.0,
+              "memory_mb_per_replica": 444.0,
+              "mps_info": {
+                "mps_active": false,
+                "started_by_harness": false
+              },
+              "provenance": {
+                "platform_name": "CUDA",
+                "device_name": "NVIDIA L40S",
+                "device_index": "0",
+                "precision": "single",
+                "cuda_Compiler": "openmm-nvrtc-builtin",
+                "CudaDriverVersion": "590.48.01",
+                "lib_openmm_cuda_path": "/orcd/pool/008/so3_shared/marielle/projects/.venv/lib/python3.13/site-packages/OpenMM.libs/lib/plugins/libOpenMMCUDA.so",
+                "mps_active": false,
+                "cuda_mps_pipe_directory": null,
+                "plugin_load_failures": []
+              }
+            }
+          }
+        },
+        "substep_breakdown": {
+          "B=1": {
+            "total_substeps_ms": 0.22978506982326508,
+            "baoab_pre_force_ms": 0.038839131593704224,
+            "bonded_and_nonbonded_direct_mk48_ms": 0.038870275020599365,
+            "pme_spread_3d_bspline_ms": 0.026417076587677002,
+            "pme_rfft3d_and_influence_ms": 0.027732402086257935,
+            "pme_irfft3d_ms": 0.03789663314819336,
+            "pme_gather_3d_bspline_fused_scale_ms": 0.02971164882183075,
+            "baoab_post_force_ms": 0.03031790256500244,
+            "baoab_pre_force_pct": 16.902373867708906,
+            "bonded_and_nonbonded_direct_mk48_pct": 16.915927153359316,
+            "pme_spread_3d_bspline_pct": 11.49642864438286,
+            "pme_rfft3d_and_influence_pct": 12.068844206278413,
+            "pme_irfft3d_pct": 16.492208644078072,
+            "pme_gather_3d_bspline_fused_scale_pct": 12.930191175903166,
+            "baoab_post_force_pct": 13.194026308289262,
+            "nonbonded_tile_pairs_mk51_ms_per_rep": 0.030725523829460144,
+            "num_valid_tile_pairs_aabb_pruned": 256
+          },
+          "B=4": {
+            "total_substeps_ms": 0.06946580484509468,
+            "baoab_pre_force_ms": 0.010524466633796692,
+            "bonded_and_nonbonded_direct_mk48_ms": 0.0222674198448658,
+            "pme_spread_3d_bspline_ms": 0.007089264690876007,
+            "pme_rfft3d_and_influence_ms": 0.006436742842197418,
+            "pme_irfft3d_ms": 0.008953139185905457,
+            "pme_gather_3d_bspline_fused_scale_ms": 0.006982423365116119,
+            "baoab_post_force_ms": 0.007212348282337189,
+            "baoab_pre_force_pct": 15.150571791784078,
+            "bonded_and_nonbonded_direct_mk48_pct": 32.05522471742903,
+            "pme_spread_3d_bspline_pct": 10.205402077590144,
+            "pme_rfft3d_and_influence_pct": 9.266059547645115,
+            "pme_irfft3d_pct": 12.888556039724172,
+            "pme_gather_3d_bspline_fused_scale_pct": 10.051597877094462,
+            "baoab_post_force_pct": 10.382587948733006,
+            "nonbonded_tile_pairs_mk51_ms_per_rep": 0.008463915437459946,
+            "num_valid_tile_pairs_aabb_pruned": 256
+          }
+        },
+        "batch_scaling": [
+          {
+            "B": 1,
+            "ms_per_step_batch": 0.24210259318351746,
+            "ms_per_step_per_replica": 0.24210259318351746,
+            "ns_per_day_per_replica": 713.7470017473747,
+            "ns_per_day_aggregate": 713.7470017473747,
+            "speedup_vs_openmm_cuda_single_b1": 0.41686125111788286,
+            "speedup_vs_openmm_cuda_mps_same_B": 0.4315094532011508
+          },
+          {
+            "B": 2,
+            "ms_per_step_batch": 0.3079216182231903,
+            "ms_per_step_per_replica": 0.15396080911159515,
+            "ns_per_day_per_replica": 1122.363548211478,
+            "ns_per_day_aggregate": 1122.363548211478,
+            "speedup_vs_openmm_cuda_single_b1": 0.6555122077866772,
+            "speedup_vs_openmm_cuda_mps_same_B": null
+          },
+          {
+            "B": 4,
+            "ms_per_step_batch": 0.44564180076122284,
+            "ms_per_step_per_replica": 0.11141045019030571,
+            "ns_per_day_per_replica": 1551.0214679577343,
+            "ns_per_day_aggregate": 1551.0214679577343,
+            "speedup_vs_openmm_cuda_single_b1": 0.9058682531214353,
+            "speedup_vs_openmm_cuda_mps_same_B": 1.5376049053748544
+          },
+          {
+            "B": 8,
+            "ms_per_step_batch": 0.7067950069904327,
+            "ms_per_step_per_replica": 0.08834937587380409,
+            "ns_per_day_per_replica": 1955.8712021556657,
+            "ns_per_day_aggregate": 1955.8712021556657,
+            "speedup_vs_openmm_cuda_single_b1": 1.14231921725764,
+            "speedup_vs_openmm_cuda_mps_same_B": 1.9329415074692915
+          },
+          {
+            "B": 16,
+            "ms_per_step_batch": 1.1662475019693375,
+            "ms_per_step_per_replica": 0.07289046887308359,
+            "ns_per_day_per_replica": 2370.680318998609,
+            "ns_per_day_aggregate": 2370.680318998609,
+            "speedup_vs_openmm_cuda_single_b1": 1.384586921358562,
+            "speedup_vs_openmm_cuda_mps_same_B": 2.39308268834432
+          },
+          {
+            "B": 32,
+            "ms_per_step_batch": 2.1646734327077866,
+            "ms_per_step_per_replica": 0.06764604477211833,
+            "ns_per_day_per_replica": 2554.473074990823,
+            "ns_per_day_aggregate": 2554.473074990823,
+            "speedup_vs_openmm_cuda_single_b1": 1.4919303890323299,
+            "speedup_vs_openmm_cuda_mps_same_B": null
+          }
+        ]
+      },
+      {
+        "system": "Holo_Lysozyme_15k",
+        "suites": [
+          "SuiteB"
+        ],
+        "kind": "holo_15k",
+        "n_real_atoms": 15002,
+        "bucket_atoms": 16384,
+        "bucket_waters": 4608,
+        "occupancy_pct": 91.56494140625,
+        "electrostatics": "pme",
+        "pme_grid": [
+          54,
+          54,
+          54
+        ],
+        "openmm": {
+          "openmm_cuda_single_b1": {
+            "platform": "CUDA",
+            "precision": "single",
+            "ms_per_step": 0.14257915318012238,
+            "ns_per_day": 1211.9583834370173,
+            "provenance": {
+              "platform_name": "CUDA",
+              "device_name": "NVIDIA L40S",
+              "device_index": "0",
+              "precision": "single",
+              "cuda_Compiler": "openmm-nvrtc-builtin",
+              "CudaDriverVersion": "590.48.01",
+              "lib_openmm_cuda_path": "/orcd/pool/008/so3_shared/marielle/projects/.venv/lib/python3.13/site-packages/OpenMM.libs/lib/plugins/libOpenMMCUDA.so",
+              "mps_active": false,
+              "cuda_mps_pipe_directory": null,
+              "plugin_load_failures": []
+            }
+          },
+          "openmm_cuda_mixed_b1": {
+            "platform": "CUDA",
+            "precision": "mixed",
+            "ms_per_step": 0.16016117297112942,
+            "ns_per_day": 1078.9131772352143,
+            "provenance": {
+              "platform_name": "CUDA",
+              "device_name": "NVIDIA L40S",
+              "device_index": "0",
+              "precision": "mixed",
+              "cuda_Compiler": "openmm-nvrtc-builtin",
+              "CudaDriverVersion": "590.48.01",
+              "lib_openmm_cuda_path": "/orcd/pool/008/so3_shared/marielle/projects/.venv/lib/python3.13/site-packages/OpenMM.libs/lib/plugins/libOpenMMCUDA.so",
+              "mps_active": false,
+              "cuda_mps_pipe_directory": null,
+              "plugin_load_failures": []
+            }
+          },
+          "openmm_cuda_mps_scaling": {
+            "B=1": {
+              "available": true,
+              "ok": true,
+              "replicas_B": 1,
+              "precision": "single",
+              "n_steps": 30,
+              "dt_fs": 2.0,
+              "wall_elapsed_s": 0.004431026056408882,
+              "ms_per_step_batch": 0.14770086854696274,
+              "ms_per_step_per_replica": 0.14770086854696274,
+              "per_replica_ns_per_day": 1169.9321859103136,
+              "aggregate_ns_per_day": 1169.9321859103136,
+              "total_gpu_memory_mb": 450.0,
+              "memory_mb_per_replica": 450.0,
+              "mps_info": {
+                "mps_active": false,
+                "started_by_harness": false
+              },
+              "provenance": {
+                "platform_name": "CUDA",
+                "device_name": "NVIDIA L40S",
+                "device_index": "0",
+                "precision": "single",
+                "cuda_Compiler": "openmm-nvrtc-builtin",
+                "CudaDriverVersion": "590.48.01",
+                "lib_openmm_cuda_path": "/orcd/pool/008/so3_shared/marielle/projects/.venv/lib/python3.13/site-packages/OpenMM.libs/lib/plugins/libOpenMMCUDA.so",
+                "mps_active": false,
+                "cuda_mps_pipe_directory": null,
+                "plugin_load_failures": []
+              }
+            },
+            "B=4": {
+              "available": true,
+              "ok": true,
+              "replicas_B": 4,
+              "precision": "single",
+              "n_steps": 30,
+              "dt_fs": 2.0,
+              "wall_elapsed_s": 0.025979654863476753,
+              "ms_per_step_batch": 0.8659884954492251,
+              "ms_per_step_per_replica": 0.21649712386230627,
+              "per_replica_ns_per_day": 199.54075707479382,
+              "aggregate_ns_per_day": 798.1630282991753,
+              "total_gpu_memory_mb": 1800.0,
+              "memory_mb_per_replica": 450.0,
+              "mps_info": {
+                "mps_active": false,
+                "started_by_harness": false
+              },
+              "provenance": {
+                "platform_name": "CUDA",
+                "device_name": "NVIDIA L40S",
+                "device_index": "0",
+                "precision": "single",
+                "cuda_Compiler": "openmm-nvrtc-builtin",
+                "CudaDriverVersion": "590.48.01",
+                "lib_openmm_cuda_path": "/orcd/pool/008/so3_shared/marielle/projects/.venv/lib/python3.13/site-packages/OpenMM.libs/lib/plugins/libOpenMMCUDA.so",
+                "mps_active": false,
+                "cuda_mps_pipe_directory": null,
+                "plugin_load_failures": []
+              }
+            },
+            "B=8": {
+              "available": true,
+              "ok": true,
+              "replicas_B": 8,
+              "precision": "single",
+              "n_steps": 30,
+              "dt_fs": 2.0,
+              "wall_elapsed_s": 0.052436647936701775,
+              "ms_per_step_batch": 1.747888264556726,
+              "ms_per_step_per_replica": 0.21848603306959075,
+              "per_replica_ns_per_day": 98.86215469489579,
+              "aggregate_ns_per_day": 790.8972375591663,
+              "total_gpu_memory_mb": 3600.0,
+              "memory_mb_per_replica": 450.0,
+              "mps_info": {
+                "mps_active": false,
+                "started_by_harness": false
+              },
+              "provenance": {
+                "platform_name": "CUDA",
+                "device_name": "NVIDIA L40S",
+                "device_index": "0",
+                "precision": "single",
+                "cuda_Compiler": "openmm-nvrtc-builtin",
+                "CudaDriverVersion": "590.48.01",
+                "lib_openmm_cuda_path": "/orcd/pool/008/so3_shared/marielle/projects/.venv/lib/python3.13/site-packages/OpenMM.libs/lib/plugins/libOpenMMCUDA.so",
+                "mps_active": true,
+                "cuda_mps_pipe_directory": null,
+                "plugin_load_failures": []
+              }
+            },
+            "B=16": {
+              "available": true,
+              "ok": true,
+              "replicas_B": 16,
+              "precision": "single",
+              "n_steps": 30,
+              "dt_fs": 2.0,
+              "wall_elapsed_s": 0.10758665204048157,
+              "ms_per_step_batch": 3.5862217346827188,
+              "ms_per_step_per_replica": 0.22413885841766992,
+              "per_replica_ns_per_day": 48.184416018907434,
+              "aggregate_ns_per_day": 770.950656302519,
+              "total_gpu_memory_mb": 7200.0,
+              "memory_mb_per_replica": 450.0,
+              "mps_info": {
+                "mps_active": false,
+                "started_by_harness": false
+              },
+              "provenance": {
+                "platform_name": "CUDA",
+                "device_name": "NVIDIA L40S",
+                "device_index": "0",
+                "precision": "single",
+                "cuda_Compiler": "openmm-nvrtc-builtin",
+                "CudaDriverVersion": "590.48.01",
+                "lib_openmm_cuda_path": "/orcd/pool/008/so3_shared/marielle/projects/.venv/lib/python3.13/site-packages/OpenMM.libs/lib/plugins/libOpenMMCUDA.so",
+                "mps_active": false,
+                "cuda_mps_pipe_directory": null,
+                "plugin_load_failures": []
+              }
+            }
+          }
+        },
+        "substep_breakdown": {
+          "B=1": {
+            "total_substeps_ms": 0.22384725511074066,
+            "baoab_pre_force_ms": 0.03965459764003754,
+            "bonded_and_nonbonded_direct_mk48_ms": 0.03856182098388672,
+            "pme_spread_3d_bspline_ms": 0.027536004781723022,
+            "pme_rfft3d_and_influence_ms": 0.02548813819885254,
+            "pme_irfft3d_ms": 0.03369271755218506,
+            "pme_gather_3d_bspline_fused_scale_ms": 0.028627663850784302,
+            "baoab_post_force_ms": 0.030286312103271484,
+            "baoab_pre_force_pct": 17.715025194488,
+            "bonded_and_nonbonded_direct_mk48_pct": 17.226845584865266,
+            "pme_spread_3d_bspline_pct": 12.30124745916609,
+            "pme_rfft3d_and_influence_pct": 11.386397472795977,
+            "pme_irfft3d_pct": 15.051655440455034,
+            "pme_gather_3d_bspline_fused_scale_pct": 12.788927805534966,
+            "baoab_post_force_pct": 13.529901042694664,
+            "nonbonded_tile_pairs_mk51_ms_per_rep": 0.028590485453605652,
+            "num_valid_tile_pairs_aabb_pruned": 512
+          },
+          "B=4": {
+            "total_substeps_ms": 0.11874256655573845,
+            "baoab_pre_force_ms": 0.01095091924071312,
+            "bonded_and_nonbonded_direct_mk48_ms": 0.06265643984079361,
+            "pme_spread_3d_bspline_ms": 0.012075770646333694,
+            "pme_rfft3d_and_influence_ms": 0.0064490363001823425,
+            "pme_irfft3d_ms": 0.008838456124067307,
+            "pme_gather_3d_bspline_fused_scale_ms": 0.00718533992767334,
+            "baoab_post_force_ms": 0.010586604475975037,
+            "baoab_pre_force_pct": 9.222404027769347,
+            "bonded_and_nonbonded_direct_mk48_pct": 52.76662081527631,
+            "pme_spread_3d_bspline_pct": 10.169706615416013,
+            "pme_rfft3d_and_influence_pct": 5.431107384018963,
+            "pme_irfft3d_pct": 7.443376356463109,
+            "pme_gather_3d_bspline_fused_scale_pct": 6.051191359671765,
+            "baoab_post_force_pct": 8.915593441384496,
+            "nonbonded_tile_pairs_mk51_ms_per_rep": 0.013498850166797638,
+            "num_valid_tile_pairs_aabb_pruned": 512
+          }
+        },
+        "batch_scaling": [
+          {
+            "B": 1,
+            "ms_per_step_batch": 0.2627936005592346,
+            "ms_per_step_per_replica": 0.2627936005592346,
+            "ns_per_day_per_replica": 657.5502585765983,
+            "ns_per_day_aggregate": 657.5502585765983,
+            "speedup_vs_openmm_cuda_single_b1": 0.5425518463033674,
+            "speedup_vs_openmm_cuda_mps_same_B": 0.5620413443578907
+          },
+          {
+            "B": 2,
+            "ms_per_step_batch": 0.39000436663627625,
+            "ms_per_step_per_replica": 0.19500218331813812,
+            "ns_per_day_per_replica": 886.1439244404963,
+            "ns_per_day_aggregate": 886.1439244404963,
+            "speedup_vs_openmm_cuda_single_b1": 0.7311669580002101,
+            "speedup_vs_openmm_cuda_mps_same_B": null
+          },
+          {
+            "B": 4,
+            "ms_per_step_batch": 0.5640128999948502,
+            "ms_per_step_per_replica": 0.14100322499871254,
+            "ns_per_day_per_replica": 1225.5038847627618,
+            "ns_per_day_aggregate": 1225.5038847627618,
+            "speedup_vs_openmm_cuda_single_b1": 1.0111765399793107,
+            "speedup_vs_openmm_cuda_mps_same_B": 1.5354054764654004
+          },
+          {
+            "B": 8,
+            "ms_per_step_batch": 0.9600977599620819,
+            "ms_per_step_per_replica": 0.12001221999526024,
+            "ns_per_day_per_replica": 1439.853374988185,
+            "ns_per_day_aggregate": 1439.853374988185,
+            "speedup_vs_openmm_cuda_single_b1": 1.1880386279476656,
+            "speedup_vs_openmm_cuda_mps_same_B": 1.820531551522167
+          },
+          {
+            "B": 16,
+            "ms_per_step_batch": 1.6836581379175186,
+            "ms_per_step_per_replica": 0.10522863361984491,
+            "ns_per_day_per_replica": 1642.138589618747,
+            "ns_per_day_aggregate": 1642.138589618747,
+            "speedup_vs_openmm_cuda_single_b1": 1.3549463513439899,
+            "speedup_vs_openmm_cuda_mps_same_B": 2.1300177594950727
+          },
+          {
+            "B": 32,
+            "ms_per_step_batch": 3.1245309114456177,
+            "ms_per_step_per_replica": 0.09764159098267555,
+            "ns_per_day_per_replica": 1769.7376523766363,
+            "ns_per_day_aggregate": 1769.7376523766363,
+            "speedup_vs_openmm_cuda_single_b1": 1.460229721220131,
+            "speedup_vs_openmm_cuda_mps_same_B": null
+          }
+        ]
+      },
+      {
+        "system": "DHFR_24k_rf",
+        "suites": [
+          "SuiteA"
+        ],
+        "kind": "trunc",
+        "n_real_atoms": 23558,
+        "bucket_atoms": 25000,
+        "bucket_waters": 8192,
+        "occupancy_pct": 94.232,
+        "electrostatics": "rf",
+        "pme_grid": null,
+        "openmm": {
+          "openmm_cuda_single_b1": {
+            "platform": "CUDA",
+            "precision": "single",
+            "ms_per_step": 0.11645406484603882,
+            "ns_per_day": 1483.8468732581796,
+            "provenance": {
+              "platform_name": "CUDA",
+              "device_name": "NVIDIA L40S",
+              "device_index": "0",
+              "precision": "single",
+              "cuda_Compiler": "openmm-nvrtc-builtin",
+              "CudaDriverVersion": "590.48.01",
+              "lib_openmm_cuda_path": "/orcd/pool/008/so3_shared/marielle/projects/.venv/lib/python3.13/site-packages/OpenMM.libs/lib/plugins/libOpenMMCUDA.so",
+              "mps_active": false,
+              "cuda_mps_pipe_directory": null,
+              "plugin_load_failures": []
+            }
+          },
+          "openmm_cuda_mixed_b1": {
+            "platform": "CUDA",
+            "precision": "mixed",
+            "ms_per_step": 0.1289869425818324,
+            "ns_per_day": 1339.6704855638511,
+            "provenance": {
+              "platform_name": "CUDA",
+              "device_name": "NVIDIA L40S",
+              "device_index": "0",
+              "precision": "mixed",
+              "cuda_Compiler": "openmm-nvrtc-builtin",
+              "CudaDriverVersion": "590.48.01",
+              "lib_openmm_cuda_path": "/orcd/pool/008/so3_shared/marielle/projects/.venv/lib/python3.13/site-packages/OpenMM.libs/lib/plugins/libOpenMMCUDA.so",
+              "mps_active": false,
+              "cuda_mps_pipe_directory": null,
+              "plugin_load_failures": []
+            }
+          },
+          "openmm_cuda_mps_scaling": {
+            "B=1": {
+              "available": true,
+              "ok": true,
+              "replicas_B": 1,
+              "precision": "single",
+              "n_steps": 30,
+              "dt_fs": 2.0,
+              "wall_elapsed_s": 0.0036080749705433846,
+              "ms_per_step_batch": 0.1202691656847795,
+              "ms_per_step_per_replica": 0.1202691656847795,
+              "per_replica_ns_per_day": 1436.777240584687,
+              "aggregate_ns_per_day": 1436.777240584687,
+              "total_gpu_memory_mb": 440.0,
+              "memory_mb_per_replica": 440.0,
+              "mps_info": {
+                "mps_active": false,
+                "started_by_harness": false
+              },
+              "provenance": {
+                "platform_name": "CUDA",
+                "device_name": "NVIDIA L40S",
+                "device_index": "0",
+                "precision": "single",
+                "cuda_Compiler": "openmm-nvrtc-builtin",
+                "CudaDriverVersion": "590.48.01",
+                "lib_openmm_cuda_path": "/orcd/pool/008/so3_shared/marielle/projects/.venv/lib/python3.13/site-packages/OpenMM.libs/lib/plugins/libOpenMMCUDA.so",
+                "mps_active": false,
+                "cuda_mps_pipe_directory": null,
+                "plugin_load_failures": []
+              }
+            },
+            "B=4": {
+              "available": true,
+              "ok": true,
+              "replicas_B": 4,
+              "precision": "single",
+              "n_steps": 30,
+              "dt_fs": 2.0,
+              "wall_elapsed_s": 0.006674204021692276,
+              "ms_per_step_batch": 0.22247346738974255,
+              "ms_per_step_per_replica": 0.05561836684743564,
+              "per_replica_ns_per_day": 776.7218357651542,
+              "aggregate_ns_per_day": 3106.887343060617,
+              "total_gpu_memory_mb": 1752.0,
+              "memory_mb_per_replica": 438.0,
+              "mps_info": {
+                "mps_active": true,
+                "started_by_harness": true,
+                "pipe_dir": "/tmp/mps_28702134_3445934/pipe",
+                "log_dir": "/tmp/mps_28702134_3445934/log",
+                "stdout": "",
+                "stderr": ""
+              },
+              "provenance": {
+                "platform_name": "CUDA",
+                "device_name": "NVIDIA L40S",
+                "device_index": "0",
+                "precision": "single",
+                "cuda_Compiler": "openmm-nvrtc-builtin",
+                "CudaDriverVersion": "590.48.01",
+                "lib_openmm_cuda_path": "/orcd/pool/008/so3_shared/marielle/projects/.venv/lib/python3.13/site-packages/OpenMM.libs/lib/plugins/libOpenMMCUDA.so",
+                "mps_active": true,
+                "cuda_mps_pipe_directory": "/tmp/mps_28702134_3445934/pipe",
+                "plugin_load_failures": []
+              }
+            },
+            "B=8": {
+              "available": true,
+              "ok": true,
+              "replicas_B": 8,
+              "precision": "single",
+              "n_steps": 30,
+              "dt_fs": 2.0,
+              "wall_elapsed_s": 0.011319337412714958,
+              "ms_per_step_batch": 0.37731124709049857,
+              "ms_per_step_per_replica": 0.04716390588631232,
+              "per_replica_ns_per_day": 457.97733656890887,
+              "aggregate_ns_per_day": 3663.818692551271,
+              "total_gpu_memory_mb": 3504.0,
+              "memory_mb_per_replica": 438.0,
+              "mps_info": {
+                "mps_active": true,
+                "started_by_harness": true,
+                "pipe_dir": "/tmp/mps_28702134_3446739/pipe",
+                "log_dir": "/tmp/mps_28702134_3446739/log",
+                "stdout": "",
+                "stderr": ""
+              },
+              "provenance": {
+                "platform_name": "CUDA",
+                "device_name": "NVIDIA L40S",
+                "device_index": "0",
+                "precision": "single",
+                "cuda_Compiler": "openmm-nvrtc-builtin",
+                "CudaDriverVersion": "590.48.01",
+                "lib_openmm_cuda_path": "/orcd/pool/008/so3_shared/marielle/projects/.venv/lib/python3.13/site-packages/OpenMM.libs/lib/plugins/libOpenMMCUDA.so",
+                "mps_active": true,
+                "cuda_mps_pipe_directory": "/tmp/mps_28702134_3446739/pipe",
+                "plugin_load_failures": []
+              }
+            },
+            "B=16": {
+              "available": true,
+              "ok": true,
+              "replicas_B": 16,
+              "precision": "single",
+              "n_steps": 30,
+              "dt_fs": 2.0,
+              "wall_elapsed_s": 0.022275143302977085,
+              "ms_per_step_batch": 0.7425047767659029,
+              "ms_per_step_per_replica": 0.04640654854786893,
+              "per_replica_ns_per_day": 232.72577551979902,
+              "aggregate_ns_per_day": 3723.6124083167842,
+              "total_gpu_memory_mb": 7008.0,
+              "memory_mb_per_replica": 438.0,
+              "mps_info": {
+                "mps_active": true,
+                "started_by_harness": true,
+                "pipe_dir": "/tmp/mps_28702134_3448167/pipe",
+                "log_dir": "/tmp/mps_28702134_3448167/log",
+                "stdout": "",
+                "stderr": ""
+              },
+              "provenance": {
+                "platform_name": "CUDA",
+                "device_name": "NVIDIA L40S",
+                "device_index": "0",
+                "precision": "single",
+                "cuda_Compiler": "openmm-nvrtc-builtin",
+                "CudaDriverVersion": "590.48.01",
+                "lib_openmm_cuda_path": "/orcd/pool/008/so3_shared/marielle/projects/.venv/lib/python3.13/site-packages/OpenMM.libs/lib/plugins/libOpenMMCUDA.so",
+                "mps_active": true,
+                "cuda_mps_pipe_directory": "/tmp/mps_28702134_3448167/pipe",
+                "plugin_load_failures": []
+              }
+            }
+          }
+        },
+        "substep_breakdown": {
+          "B=1": {
+            "total_substeps_ms": 0.1255740225315094,
+            "baoab_pre_force_ms": 0.04225723445415497,
+            "bonded_and_nonbonded_direct_mk48_ms": 0.04922352731227875,
+            "pme_spread_3d_bspline_ms": 0.0,
+            "pme_rfft3d_and_influence_ms": 0.0,
+            "pme_irfft3d_ms": 0.0,
+            "pme_gather_3d_bspline_fused_scale_ms": 0.0,
+            "baoab_post_force_ms": 0.034093260765075684,
+            "baoab_pre_force_pct": 33.65125493495413,
+            "bonded_and_nonbonded_direct_mk48_pct": 39.19881383104331,
+            "pme_spread_3d_bspline_pct": 0.0,
+            "pme_rfft3d_and_influence_pct": 0.0,
+            "pme_irfft3d_pct": 0.0,
+            "pme_gather_3d_bspline_fused_scale_pct": 0.0,
+            "baoab_post_force_pct": 27.149931234002562,
+            "nonbonded_tile_pairs_mk51_ms_per_rep": 0.027685724198818207,
+            "num_valid_tile_pairs_aabb_pruned": 782
+          },
+          "B=4": {
+            "total_substeps_ms": 0.11394246481359005,
+            "baoab_pre_force_ms": 0.013525551185011864,
+            "bonded_and_nonbonded_direct_mk48_ms": 0.09161481633782387,
+            "pme_spread_3d_bspline_ms": 0.0,
+            "pme_rfft3d_and_influence_ms": 0.0,
+            "pme_irfft3d_ms": 0.0,
+            "pme_gather_3d_bspline_fused_scale_ms": 0.0,
+            "baoab_post_force_ms": 0.008802097290754318,
+            "baoab_pre_force_pct": 11.870509565630053,
+            "bonded_and_nonbonded_direct_mk48_pct": 80.40445367555087,
+            "pme_spread_3d_bspline_pct": 0.0,
+            "pme_rfft3d_and_influence_pct": 0.0,
+            "pme_irfft3d_pct": 0.0,
+            "pme_gather_3d_bspline_fused_scale_pct": 0.0,
+            "baoab_post_force_pct": 7.725036758819072,
+            "nonbonded_tile_pairs_mk51_ms_per_rep": 0.014411024749279022,
+            "num_valid_tile_pairs_aabb_pruned": 782
+          }
+        },
+        "batch_scaling": [
+          {
+            "B": 1,
+            "ms_per_step_batch": 0.3525442909449339,
+            "ms_per_step_per_replica": 0.3525442909449339,
+            "ns_per_day_per_replica": 490.15117940738605,
+            "ns_per_day_aggregate": 490.15117940738605,
+            "speedup_vs_openmm_cuda_single_b1": 0.33032463675387813,
+            "speedup_vs_openmm_cuda_mps_same_B": 0.3411462581408391
+          },
+          {
+            "B": 2,
+            "ms_per_step_batch": 0.32036895863711834,
+            "ms_per_step_per_replica": 0.16018447931855917,
+            "ns_per_day_per_replica": 1078.75619869733,
+            "ns_per_day_aggregate": 1078.75619869733,
+            "speedup_vs_openmm_cuda_single_b1": 0.7269996777555858,
+            "speedup_vs_openmm_cuda_mps_same_B": null
+          },
+          {
+            "B": 4,
+            "ms_per_step_batch": 0.49658720381557936,
+            "ms_per_step_per_replica": 0.12414680095389484,
+            "ns_per_day_per_replica": 1391.9005457432108,
+            "ns_per_day_aggregate": 1391.9005457432108,
+            "speedup_vs_openmm_cuda_single_b1": 0.9380351644283373,
+            "speedup_vs_openmm_cuda_mps_same_B": 0.44800483314983663
+          },
+          {
+            "B": 8,
+            "ms_per_step_batch": 1.051999181509018,
+            "ms_per_step_per_replica": 0.13149989768862724,
+            "ns_per_day_per_replica": 1314.069463454378,
+            "ns_per_day_aggregate": 1314.069463454378,
+            "speedup_vs_openmm_cuda_single_b1": 0.8855829311881688,
+            "speedup_vs_openmm_cuda_mps_same_B": 0.35866116031504175
+          },
+          {
+            "B": 16,
+            "ms_per_step_batch": 1.899125762283802,
+            "ms_per_step_per_replica": 0.11869536014273763,
+            "ns_per_day_per_replica": 1455.8277576494868,
+            "ns_per_day_aggregate": 1455.8277576494868,
+            "speedup_vs_openmm_cuda_single_b1": 0.9811172459142167,
+            "speedup_vs_openmm_cuda_mps_same_B": 0.3909718837540282
+          },
+          {
+            "B": 32,
+            "ms_per_step_batch": 3.626105859875679,
+            "ms_per_step_per_replica": 0.11331580812111497,
+            "ns_per_day_per_replica": 1524.941690530122,
+            "ns_per_day_aggregate": 1524.941690530122,
+            "speedup_vs_openmm_cuda_single_b1": 1.027694783075364,
+            "speedup_vs_openmm_cuda_mps_same_B": null
+          }
+        ]
+      },
+      {
+        "system": "DHFR_24k_pme_openmm_grid",
+        "suites": [
+          "SuiteA",
+          "SuiteB"
+        ],
+        "kind": "trunc",
+        "n_real_atoms": 23558,
+        "bucket_atoms": 25000,
+        "bucket_waters": 8192,
+        "occupancy_pct": 94.232,
+        "electrostatics": "pme",
+        "pme_grid": [
+          60,
+          60,
+          60
+        ],
+        "openmm": {
+          "openmm_cuda_single_b1": {
+            "platform": "CUDA",
+            "precision": "single",
+            "ms_per_step": 0.15151139814406633,
+            "ns_per_day": 1140.5082529546137,
+            "provenance": {
+              "platform_name": "CUDA",
+              "device_name": "NVIDIA L40S",
+              "device_index": "0",
+              "precision": "single",
+              "cuda_Compiler": "openmm-nvrtc-builtin",
+              "CudaDriverVersion": "590.48.01",
+              "lib_openmm_cuda_path": "/orcd/pool/008/so3_shared/marielle/projects/.venv/lib/python3.13/site-packages/OpenMM.libs/lib/plugins/libOpenMMCUDA.so",
+              "mps_active": false,
+              "cuda_mps_pipe_directory": null,
+              "plugin_load_failures": []
+            }
+          },
+          "openmm_cuda_mixed_b1": {
+            "platform": "CUDA",
+            "precision": "mixed",
+            "ms_per_step": 0.16184067353606224,
+            "ns_per_day": 1067.716762569551,
+            "provenance": {
+              "platform_name": "CUDA",
+              "device_name": "NVIDIA L40S",
+              "device_index": "0",
+              "precision": "mixed",
+              "cuda_Compiler": "openmm-nvrtc-builtin",
+              "CudaDriverVersion": "590.48.01",
+              "lib_openmm_cuda_path": "/orcd/pool/008/so3_shared/marielle/projects/.venv/lib/python3.13/site-packages/OpenMM.libs/lib/plugins/libOpenMMCUDA.so",
+              "mps_active": false,
+              "cuda_mps_pipe_directory": null,
+              "plugin_load_failures": []
+            }
+          },
+          "openmm_cuda_mps_scaling": {
+            "B=1": {
+              "available": true,
+              "ok": true,
+              "replicas_B": 1,
+              "precision": "single",
+              "n_steps": 30,
+              "dt_fs": 2.0,
+              "wall_elapsed_s": 0.004685171879827976,
+              "ms_per_step_batch": 0.15617239599426588,
+              "ms_per_step_per_replica": 0.15617239599426588,
+              "per_replica_ns_per_day": 1106.469545401254,
+              "aggregate_ns_per_day": 1106.469545401254,
+              "total_gpu_memory_mb": 456.0,
+              "memory_mb_per_replica": 456.0,
+              "mps_info": {
+                "mps_active": false,
+                "started_by_harness": false
+              },
+              "provenance": {
+                "platform_name": "CUDA",
+                "device_name": "NVIDIA L40S",
+                "device_index": "0",
+                "precision": "single",
+                "cuda_Compiler": "openmm-nvrtc-builtin",
+                "CudaDriverVersion": "590.48.01",
+                "lib_openmm_cuda_path": "/orcd/pool/008/so3_shared/marielle/projects/.venv/lib/python3.13/site-packages/OpenMM.libs/lib/plugins/libOpenMMCUDA.so",
+                "mps_active": false,
+                "cuda_mps_pipe_directory": null,
+                "plugin_load_failures": []
+              }
+            },
+            "B=4": {
+              "available": true,
+              "ok": true,
+              "replicas_B": 4,
+              "precision": "single",
+              "n_steps": 30,
+              "dt_fs": 2.0,
+              "wall_elapsed_s": 0.010708489455282688,
+              "ms_per_step_batch": 0.35694964850942296,
+              "ms_per_step_per_replica": 0.08923741212735574,
+              "per_replica_ns_per_day": 484.1018914616982,
+              "aggregate_ns_per_day": 1936.4075658467927,
+              "total_gpu_memory_mb": 1816.0,
+              "memory_mb_per_replica": 454.0,
+              "mps_info": {
+                "mps_active": true,
+                "started_by_harness": true,
+                "pipe_dir": "/tmp/mps_28702134_3454674/pipe",
+                "log_dir": "/tmp/mps_28702134_3454674/log",
+                "stdout": "",
+                "stderr": ""
+              },
+              "provenance": {
+                "platform_name": "CUDA",
+                "device_name": "NVIDIA L40S",
+                "device_index": "0",
+                "precision": "single",
+                "cuda_Compiler": "openmm-nvrtc-builtin",
+                "CudaDriverVersion": "590.48.01",
+                "lib_openmm_cuda_path": "/orcd/pool/008/so3_shared/marielle/projects/.venv/lib/python3.13/site-packages/OpenMM.libs/lib/plugins/libOpenMMCUDA.so",
+                "mps_active": true,
+                "cuda_mps_pipe_directory": "/tmp/mps_28702134_3454674/pipe",
+                "plugin_load_failures": []
+              }
+            },
+            "B=8": {
+              "available": true,
+              "ok": true,
+              "replicas_B": 8,
+              "precision": "single",
+              "n_steps": 30,
+              "dt_fs": 2.0,
+              "wall_elapsed_s": 0.019694636575877666,
+              "ms_per_step_batch": 0.6564878858625889,
+              "ms_per_step_per_replica": 0.08206098573282361,
+              "per_replica_ns_per_day": 263.21887078380786,
+              "aggregate_ns_per_day": 2105.750966270463,
+              "total_gpu_memory_mb": 3632.0,
+              "memory_mb_per_replica": 454.0,
+              "mps_info": {
+                "mps_active": true,
+                "started_by_harness": true,
+                "pipe_dir": "/tmp/mps_28702134_3455519/pipe",
+                "log_dir": "/tmp/mps_28702134_3455519/log",
+                "stdout": "",
+                "stderr": ""
+              },
+              "provenance": {
+                "platform_name": "CUDA",
+                "device_name": "NVIDIA L40S",
+                "device_index": "0",
+                "precision": "single",
+                "cuda_Compiler": "openmm-nvrtc-builtin",
+                "CudaDriverVersion": "590.48.01",
+                "lib_openmm_cuda_path": "/orcd/pool/008/so3_shared/marielle/projects/.venv/lib/python3.13/site-packages/OpenMM.libs/lib/plugins/libOpenMMCUDA.so",
+                "mps_active": true,
+                "cuda_mps_pipe_directory": "/tmp/mps_28702134_3455519/pipe",
+                "plugin_load_failures": []
+              }
+            },
+            "B=16": {
+              "available": true,
+              "ok": true,
+              "replicas_B": 16,
+              "precision": "single",
+              "n_steps": 30,
+              "dt_fs": 2.0,
+              "wall_elapsed_s": 0.038805389776825905,
+              "ms_per_step_batch": 1.2935129925608635,
+              "ms_per_step_per_replica": 0.08084456203505397,
+              "per_replica_ns_per_day": 133.58969024183904,
+              "aggregate_ns_per_day": 2137.4350438694246,
+              "total_gpu_memory_mb": 7264.0,
+              "memory_mb_per_replica": 454.0,
+              "mps_info": {
+                "mps_active": true,
+                "started_by_harness": true,
+                "pipe_dir": "/tmp/mps_28702134_3456963/pipe",
+                "log_dir": "/tmp/mps_28702134_3456963/log",
+                "stdout": "",
+                "stderr": ""
+              },
+              "provenance": {
+                "platform_name": "CUDA",
+                "device_name": "NVIDIA L40S",
+                "device_index": "0",
+                "precision": "single",
+                "cuda_Compiler": "openmm-nvrtc-builtin",
+                "CudaDriverVersion": "590.48.01",
+                "lib_openmm_cuda_path": "/orcd/pool/008/so3_shared/marielle/projects/.venv/lib/python3.13/site-packages/OpenMM.libs/lib/plugins/libOpenMMCUDA.so",
+                "mps_active": true,
+                "cuda_mps_pipe_directory": "/tmp/mps_28702134_3456963/pipe",
+                "plugin_load_failures": []
+              }
+            }
+          }
+        },
+        "substep_breakdown": {
+          "B=1": {
+            "total_substeps_ms": 0.23032698780298233,
+            "baoab_pre_force_ms": 0.03857079893350601,
+            "bonded_and_nonbonded_direct_mk48_ms": 0.05071263760328293,
+            "pme_spread_3d_bspline_ms": 0.027275048196315765,
+            "pme_rfft3d_and_influence_ms": 0.02472575753927231,
+            "pme_irfft3d_ms": 0.033242367208004,
+            "pme_gather_3d_bspline_fused_scale_ms": 0.02681143581867218,
+            "baoab_post_force_ms": 0.028988942503929138,
+            "baoab_pre_force_pct": 16.746104875256215,
+            "bonded_and_nonbonded_direct_mk48_pct": 22.017670654670148,
+            "pme_spread_3d_bspline_pct": 11.841881169238562,
+            "pme_rfft3d_and_influence_pct": 10.735067468699016,
+            "pme_irfft3d_pct": 14.43268438713701,
+            "pme_gather_3d_bspline_fused_scale_pct": 11.640596733547444,
+            "baoab_post_force_pct": 12.585994711451605,
+            "nonbonded_tile_pairs_mk51_ms_per_rep": 0.028573349118232727,
+            "num_valid_tile_pairs_aabb_pruned": 782,
+            "xtrax_probe_metrics": {
+              "baoab_pre_force": {
+                "n_executions": 1.0,
+                "n_compilations": 0.0,
+                "n_jit_traces": 2.0,
+                "total_step_seconds": 9.824894368648529e-05,
+                "compile_seconds": 0.0,
+                "device_seconds": 2.9021999999997206e-05,
+                "host_seconds": 0.0005246818668990163
+              },
+              "baoab_post_force": {
+                "n_executions": 1.0,
+                "n_compilations": 0.0,
+                "n_jit_traces": 2.0,
+                "total_step_seconds": 7.598940283060074e-05,
+                "compile_seconds": 0.0,
+                "device_seconds": 2.0160000000000762e-05,
+                "host_seconds": 0.00021530628654003068
+              },
+              "bonded_and_nonbonded_direct_mk48": {
+                "n_executions": 1.0,
+                "n_compilations": 0.0,
+                "n_jit_traces": 2.0,
+                "total_step_seconds": 0.00011985329911112785,
+                "compile_seconds": 0.0,
+                "device_seconds": 4.720000000000073e-05,
+                "host_seconds": 0.00014926529108285833
+              },
+              "nonbonded_tile_pairs_mk51": {
+                "n_executions": 1.0,
+                "n_compilations": 0.0,
+                "n_jit_traces": 2.0,
+                "total_step_seconds": 6.588827818632126e-05,
+                "compile_seconds": 0.0,
+                "device_seconds": 1.7951000000000022e-05,
+                "host_seconds": 0.00015669247183704374
+              },
+              "pme_spread_3d_bspline": {
+                "n_executions": 1.0,
+                "n_compilations": 0.0,
+                "n_jit_traces": 2.0,
+                "total_step_seconds": 6.718980148434639e-05,
+                "compile_seconds": 0.0,
+                "device_seconds": 2.345600000000195e-05,
+                "host_seconds": 0.00016874197104596898
+              },
+              "pme_rfft3d_and_influence": {
+                "n_executions": 1.0,
+                "n_compilations": 0.0,
+                "n_jit_traces": 2.0,
+                "total_step_seconds": 5.084369331598282e-05,
+                "compile_seconds": 0.0,
+                "device_seconds": 9.11999999999989e-06,
+                "host_seconds": 0.00015549126506328594
+              },
+              "pme_irfft3d": {
+                "n_executions": 1.0,
+                "n_compilations": 0.0,
+                "n_jit_traces": 2.0,
+                "total_step_seconds": 5.952175706624985e-05,
+                "compile_seconds": 0.0,
+                "device_seconds": 1.4432000000000698e-05,
+                "host_seconds": 0.00019040867499637535
+              },
+              "pme_gather_3d_bspline_fused_scale": {
+                "n_executions": 1.0,
+                "n_compilations": 0.0,
+                "n_jit_traces": 2.0,
+                "total_step_seconds": 6.256019696593285e-05,
+                "compile_seconds": 0.0,
+                "device_seconds": 1.4751999999999497e-05,
+                "host_seconds": 0.00018326766845989278
+              }
+            },
+            "device_substeps_ms": {
+              "baoab_pre_force": 0.029021999999997206,
+              "baoab_post_force": 0.020160000000000764,
+              "bonded_and_nonbonded_direct_mk48": 0.04720000000000073,
+              "nonbonded_tile_pairs_mk51": 0.017951000000000022,
+              "pme_spread_3d_bspline": 0.023456000000001948,
+              "pme_rfft3d_and_influence": 0.00911999999999989,
+              "pme_irfft3d": 0.014432000000000698,
+              "pme_gather_3d_bspline_fused_scale": 0.014751999999999496
+            },
+            "total_device_substeps_mk48_ms": 0.15814200000000073,
+            "total_device_substeps_mk51_ms": 0.12889300000000004
+          },
+          "B=4": {
+            "total_substeps_ms": 0.15727033838629723,
+            "baoab_pre_force_ms": 0.014035375788807869,
+            "bonded_and_nonbonded_direct_mk48_ms": 0.09262800216674805,
+            "pme_spread_3d_bspline_ms": 0.01659785397350788,
+            "pme_rfft3d_and_influence_ms": 0.0060292799025774,
+            "pme_irfft3d_ms": 0.008941162377595901,
+            "pme_gather_3d_bspline_fused_scale_ms": 0.009642131626605988,
+            "baoab_post_force_ms": 0.00939653255045414,
+            "baoab_pre_force_pct": 8.924362936342963,
+            "bonded_and_nonbonded_direct_mk48_pct": 58.897312180526605,
+            "pme_spread_3d_bspline_pct": 10.553709074332374,
+            "pme_rfft3d_and_influence_pct": 3.833704412695995,
+            "pme_irfft3d_pct": 5.68521850295385,
+            "pme_gather_3d_bspline_fused_scale_pct": 6.130928263740605,
+            "baoab_post_force_pct": 5.974764629407606,
+            "nonbonded_tile_pairs_mk51_ms_per_rep": 0.014967164024710655,
+            "num_valid_tile_pairs_aabb_pruned": 782
+          }
+        },
+        "batch_scaling": [
+          {
+            "B": 1,
+            "ms_per_step_batch": 0.40414544443289435,
+            "ms_per_step_per_replica": 0.40414544443289435,
+            "ns_per_day_per_replica": 427.56884280231515,
+            "ns_per_day_aggregate": 427.56884280231515,
+            "speedup_vs_openmm_cuda_single_b1": 0.3748932475452505,
+            "speedup_vs_openmm_cuda_mps_same_B": 0.38642621894058554
+          },
+          {
+            "B": 2,
+            "ms_per_step_batch": 0.39884617241720355,
+            "ms_per_step_per_replica": 0.19942308620860177,
+            "ns_per_day_per_replica": 866.4994774940283,
+            "ns_per_day_aggregate": 866.4994774940283,
+            "speedup_vs_openmm_cuda_single_b1": 0.7597485377674952,
+            "speedup_vs_openmm_cuda_mps_same_B": null
+          },
+          {
+            "B": 4,
+            "ms_per_step_batch": 0.6382099663217862,
+            "ms_per_step_per_replica": 0.15955249158044654,
+            "ns_per_day_per_replica": 1083.0291541569193,
+            "ns_per_day_aggregate": 1083.0291541569193,
+            "speedup_vs_openmm_cuda_single_b1": 0.949602207043405,
+            "speedup_vs_openmm_cuda_mps_same_B": 0.5592981422189959
+          },
+          {
+            "B": 8,
+            "ms_per_step_batch": 1.2735768407583237,
+            "ms_per_step_per_replica": 0.15919710509479046,
+            "ns_per_day_per_replica": 1085.4468735289502,
+            "ns_per_day_aggregate": 1085.4468735289502,
+            "speedup_vs_openmm_cuda_single_b1": 0.9517220683997498,
+            "speedup_vs_openmm_cuda_mps_same_B": 0.5154678264027615
+          },
+          {
+            "B": 16,
+            "ms_per_step_batch": 2.2814559936523438,
+            "ms_per_step_per_replica": 0.14259099960327148,
+            "ns_per_day_per_replica": 1211.8576942498369,
+            "ns_per_day_aggregate": 1211.8576942498369,
+            "speedup_vs_openmm_cuda_single_b1": 1.0625593380060026,
+            "speedup_vs_openmm_cuda_mps_same_B": 0.5669681975719816
+          },
+          {
+            "B": 32,
+            "ms_per_step_batch": 4.484208598732948,
+            "ms_per_step_per_replica": 0.14013151871040463,
+            "ns_per_day_per_replica": 1233.1272906355061,
+            "ns_per_day_aggregate": 1233.1272906355061,
+            "speedup_vs_openmm_cuda_single_b1": 1.0812085642001734,
+            "speedup_vs_openmm_cuda_mps_same_B": null
+          }
+        ]
+      },
+      {
+        "system": "DHFR_24k_pme_64grid",
+        "suites": [
+          "SuiteA"
+        ],
+        "kind": "trunc",
+        "n_real_atoms": 23558,
+        "bucket_atoms": 25000,
+        "bucket_waters": 8192,
+        "occupancy_pct": 94.232,
+        "electrostatics": "pme",
+        "pme_grid": [
+          64,
+          64,
+          64
+        ],
+        "openmm": {
+          "openmm_cuda_single_b1": {
+            "platform": "CUDA",
+            "precision": "single",
+            "ms_per_step": 0.1488116104155779,
+            "ns_per_day": 1161.199717666055,
+            "provenance": {
+              "platform_name": "CUDA",
+              "device_name": "NVIDIA L40S",
+              "device_index": "0",
+              "precision": "single",
+              "cuda_Compiler": "openmm-nvrtc-builtin",
+              "CudaDriverVersion": "590.48.01",
+              "lib_openmm_cuda_path": "/orcd/pool/008/so3_shared/marielle/projects/.venv/lib/python3.13/site-packages/OpenMM.libs/lib/plugins/libOpenMMCUDA.so",
+              "mps_active": false,
+              "cuda_mps_pipe_directory": null,
+              "plugin_load_failures": []
+            }
+          },
+          "openmm_cuda_mixed_b1": {
+            "platform": "CUDA",
+            "precision": "mixed",
+            "ms_per_step": 0.15929816290736198,
+            "ns_per_day": 1084.75827245095,
+            "provenance": {
+              "platform_name": "CUDA",
+              "device_name": "NVIDIA L40S",
+              "device_index": "0",
+              "precision": "mixed",
+              "cuda_Compiler": "openmm-nvrtc-builtin",
+              "CudaDriverVersion": "590.48.01",
+              "lib_openmm_cuda_path": "/orcd/pool/008/so3_shared/marielle/projects/.venv/lib/python3.13/site-packages/OpenMM.libs/lib/plugins/libOpenMMCUDA.so",
+              "mps_active": false,
+              "cuda_mps_pipe_directory": null,
+              "plugin_load_failures": []
+            }
+          },
+          "openmm_cuda_mps_scaling": {
+            "B=1": {
+              "available": true,
+              "ok": true,
+              "replicas_B": 1,
+              "precision": "single",
+              "n_steps": 30,
+              "dt_fs": 2.0,
+              "wall_elapsed_s": 0.00466572493314743,
+              "ms_per_step_batch": 0.15552416443824768,
+              "ms_per_step_per_replica": 0.15552416443824768,
+              "per_replica_ns_per_day": 1111.0813591196747,
+              "aggregate_ns_per_day": 1111.0813591196747,
+              "total_gpu_memory_mb": 456.0,
+              "memory_mb_per_replica": 456.0,
+              "mps_info": {
+                "mps_active": false,
+                "started_by_harness": false
+              },
+              "provenance": {
+                "platform_name": "CUDA",
+                "device_name": "NVIDIA L40S",
+                "device_index": "0",
+                "precision": "single",
+                "cuda_Compiler": "openmm-nvrtc-builtin",
+                "CudaDriverVersion": "590.48.01",
+                "lib_openmm_cuda_path": "/orcd/pool/008/so3_shared/marielle/projects/.venv/lib/python3.13/site-packages/OpenMM.libs/lib/plugins/libOpenMMCUDA.so",
+                "mps_active": false,
+                "cuda_mps_pipe_directory": null,
+                "plugin_load_failures": []
+              }
+            },
+            "B=4": {
+              "available": true,
+              "ok": true,
+              "replicas_B": 4,
+              "precision": "single",
+              "n_steps": 30,
+              "dt_fs": 2.0,
+              "wall_elapsed_s": 0.02676653116941452,
+              "ms_per_step_batch": 0.8922177056471506,
+              "ms_per_step_per_replica": 0.22305442641178766,
+              "per_replica_ns_per_day": 193.6747039498205,
+              "aggregate_ns_per_day": 774.698815799282,
+              "total_gpu_memory_mb": 1824.0,
+              "memory_mb_per_replica": 456.0,
+              "mps_info": {
+                "mps_active": false,
+                "started_by_harness": false
+              },
+              "provenance": {
+                "platform_name": "CUDA",
+                "device_name": "NVIDIA L40S",
+                "device_index": "0",
+                "precision": "single",
+                "cuda_Compiler": "openmm-nvrtc-builtin",
+                "CudaDriverVersion": "590.48.01",
+                "lib_openmm_cuda_path": "/orcd/pool/008/so3_shared/marielle/projects/.venv/lib/python3.13/site-packages/OpenMM.libs/lib/plugins/libOpenMMCUDA.so",
+                "mps_active": false,
+                "cuda_mps_pipe_directory": null,
+                "plugin_load_failures": []
+              }
+            },
+            "B=8": {
+              "available": true,
+              "ok": true,
+              "replicas_B": 8,
+              "precision": "single",
+              "n_steps": 30,
+              "dt_fs": 2.0,
+              "wall_elapsed_s": 0.05534674599766731,
+              "ms_per_step_batch": 1.844891533255577,
+              "ms_per_step_per_replica": 0.23061144165694714,
+              "per_replica_ns_per_day": 93.6640430535607,
+              "aggregate_ns_per_day": 749.3123444284856,
+              "total_gpu_memory_mb": 3648.0,
+              "memory_mb_per_replica": 456.0,
+              "mps_info": {
+                "mps_active": false,
+                "started_by_harness": false
+              },
+              "provenance": {
+                "platform_name": "CUDA",
+                "device_name": "NVIDIA L40S",
+                "device_index": "0",
+                "precision": "single",
+                "cuda_Compiler": "openmm-nvrtc-builtin",
+                "CudaDriverVersion": "590.48.01",
+                "lib_openmm_cuda_path": "/orcd/pool/008/so3_shared/marielle/projects/.venv/lib/python3.13/site-packages/OpenMM.libs/lib/plugins/libOpenMMCUDA.so",
+                "mps_active": false,
+                "cuda_mps_pipe_directory": null,
+                "plugin_load_failures": []
+              }
+            },
+            "B=16": {
+              "available": true,
+              "ok": true,
+              "replicas_B": 16,
+              "precision": "single",
+              "n_steps": 30,
+              "dt_fs": 2.0,
+              "wall_elapsed_s": 0.11128350719809532,
+              "ms_per_step_batch": 3.7094502399365106,
+              "ms_per_step_per_replica": 0.2318406399960319,
+              "per_replica_ns_per_day": 46.58372233696753,
+              "aggregate_ns_per_day": 745.3395573914805,
+              "total_gpu_memory_mb": 7296.0,
+              "memory_mb_per_replica": 456.0,
+              "mps_info": {
+                "mps_active": false,
+                "started_by_harness": false
+              },
+              "provenance": {
+                "platform_name": "CUDA",
+                "device_name": "NVIDIA L40S",
+                "device_index": "0",
+                "precision": "single",
+                "cuda_Compiler": "openmm-nvrtc-builtin",
+                "CudaDriverVersion": "590.48.01",
+                "lib_openmm_cuda_path": "/orcd/pool/008/so3_shared/marielle/projects/.venv/lib/python3.13/site-packages/OpenMM.libs/lib/plugins/libOpenMMCUDA.so",
+                "mps_active": false,
+                "cuda_mps_pipe_directory": null,
+                "plugin_load_failures": []
+              }
+            }
+          }
+        },
+        "substep_breakdown": {
+          "B=1": {
+            "total_substeps_ms": 0.2450013905763626,
+            "baoab_pre_force_ms": 0.041343048214912415,
+            "bonded_and_nonbonded_direct_mk48_ms": 0.05604781210422516,
+            "pme_spread_3d_bspline_ms": 0.029165223240852356,
+            "pme_rfft3d_and_influence_ms": 0.024806857109069824,
+            "pme_irfft3d_ms": 0.03446824848651886,
+            "pme_gather_3d_bspline_fused_scale_ms": 0.028191953897476196,
+            "baoab_post_force_ms": 0.0309782475233078,
+            "baoab_pre_force_pct": 16.87461777978216,
+            "bonded_and_nonbonded_direct_mk48_pct": 22.876528158625305,
+            "pme_spread_3d_bspline_pct": 11.904105185787536,
+            "pme_rfft3d_and_influence_pct": 10.125190330843434,
+            "pme_irfft3d_pct": 14.06859300081226,
+            "pme_gather_3d_bspline_fused_scale_pct": 11.506854647296079,
+            "baoab_post_force_pct": 12.644110896853228,
+            "nonbonded_tile_pairs_mk51_ms_per_rep": 0.029410570859909058,
+            "num_valid_tile_pairs_aabb_pruned": 782
+          },
+          "B=4": {
+            "total_substeps_ms": 0.15697166323661804,
+            "baoab_pre_force_ms": 0.013319626450538635,
+            "bonded_and_nonbonded_direct_mk48_ms": 0.09469563141465187,
+            "pme_spread_3d_bspline_ms": 0.01584090292453766,
+            "pme_rfft3d_and_influence_ms": 0.006411690264940262,
+            "pme_irfft3d_ms": 0.008748415857553482,
+            "pme_gather_3d_bspline_fused_scale_ms": 0.00936189666390419,
+            "baoab_post_force_ms": 0.008593499660491943,
+            "baoab_pre_force_pct": 8.485370018957319,
+            "bonded_and_nonbonded_direct_mk48_pct": 60.32657707901604,
+            "pme_spread_3d_bspline_pct": 10.091568502181943,
+            "pme_rfft3d_and_influence_pct": 4.084616377718648,
+            "pme_irfft3d_pct": 5.573245308846717,
+            "pme_gather_3d_bspline_fused_scale_pct": 5.964067953967035,
+            "baoab_post_force_pct": 5.474554759312296,
+            "nonbonded_tile_pairs_mk51_ms_per_rep": 0.01594729721546173,
+            "num_valid_tile_pairs_aabb_pruned": 782
+          }
+        },
+        "batch_scaling": [
+          {
+            "B": 1,
+            "ms_per_step_batch": 0.45477867126464844,
+            "ms_per_step_per_replica": 0.45477867126464844,
+            "ns_per_day_per_replica": 379.965048755426,
+            "ns_per_day_aggregate": 379.965048755426,
+            "speedup_vs_openmm_cuda_single_b1": 0.32721765513268813,
+            "speedup_vs_openmm_cuda_mps_same_B": 0.3419777009457504
+          },
+          {
+            "B": 2,
+            "ms_per_step_batch": 0.5130800604820251,
+            "ms_per_step_per_replica": 0.2565400302410126,
+            "ns_per_day_per_replica": 673.5790895388099,
+            "ns_per_day_aggregate": 673.5790895388099,
+            "speedup_vs_openmm_cuda_single_b1": 0.5800716959289874,
+            "speedup_vs_openmm_cuda_mps_same_B": null
+          },
+          {
+            "B": 4,
+            "ms_per_step_batch": 0.7604379206895828,
+            "ms_per_step_per_replica": 0.1901094801723957,
+            "ns_per_day_per_replica": 908.9499368642792,
+            "ns_per_day_aggregate": 908.9499368642792,
+            "speedup_vs_openmm_cuda_single_b1": 0.7827679623374492,
+            "speedup_vs_openmm_cuda_mps_same_B": 1.1732945995618773
+          },
+          {
+            "B": 8,
+            "ms_per_step_batch": 1.2979629635810852,
+            "ms_per_step_per_replica": 0.16224537044763565,
+            "ns_per_day_per_replica": 1065.0535021322585,
+            "ns_per_day_aggregate": 1065.0535021322585,
+            "speedup_vs_openmm_cuda_single_b1": 0.9172009654574799,
+            "speedup_vs_openmm_cuda_mps_same_B": 1.421374557688082
+          },
+          {
+            "B": 16,
+            "ms_per_step_batch": 2.345130816102028,
+            "ms_per_step_per_replica": 0.14657067600637674,
+            "ns_per_day_per_replica": 1178.953421709552,
+            "ns_per_day_aggregate": 1178.953421709552,
+            "speedup_vs_openmm_cuda_single_b1": 1.015289104684921,
+            "speedup_vs_openmm_cuda_mps_same_B": 1.5817668739273973
+          },
+          {
+            "B": 32,
+            "ms_per_step_batch": 4.617628380656242,
+            "ms_per_step_per_replica": 0.14430088689550757,
+            "ns_per_day_per_replica": 1197.4978374535524,
+            "ns_per_day_aggregate": 1197.4978374535524,
+            "speedup_vs_openmm_cuda_single_b1": 1.0312591531286752,
+            "speedup_vs_openmm_cuda_mps_same_B": null
+          }
+        ]
+      },
+      {
+        "system": "DHFR_24k_pme_hbonds",
+        "suites": [
+          "SuiteA"
+        ],
+        "kind": "trunc_hbonds",
+        "n_real_atoms": 23558,
+        "bucket_atoms": 25000,
+        "bucket_waters": 8192,
+        "occupancy_pct": 94.232,
+        "electrostatics": "pme",
+        "pme_grid": [
+          60,
+          60,
+          60
+        ],
+        "openmm": {
+          "openmm_cuda_single_b1": {
+            "platform": "CUDA",
+            "precision": "single",
+            "ms_per_step": 0.15307697467505932,
+            "ns_per_day": 1128.8438406024634,
+            "provenance": {
+              "platform_name": "CUDA",
+              "device_name": "NVIDIA L40S",
+              "device_index": "0",
+              "precision": "single",
+              "cuda_Compiler": "openmm-nvrtc-builtin",
+              "CudaDriverVersion": "590.48.01",
+              "lib_openmm_cuda_path": "/orcd/pool/008/so3_shared/marielle/projects/.venv/lib/python3.13/site-packages/OpenMM.libs/lib/plugins/libOpenMMCUDA.so",
+              "mps_active": false,
+              "cuda_mps_pipe_directory": null,
+              "plugin_load_failures": []
+            }
+          },
+          "openmm_cuda_mixed_b1": {
+            "platform": "CUDA",
+            "precision": "mixed",
+            "ms_per_step": 0.16314168460667133,
+            "ns_per_day": 1059.2020084665332,
+            "provenance": {
+              "platform_name": "CUDA",
+              "device_name": "NVIDIA L40S",
+              "device_index": "0",
+              "precision": "mixed",
+              "cuda_Compiler": "openmm-nvrtc-builtin",
+              "CudaDriverVersion": "590.48.01",
+              "lib_openmm_cuda_path": "/orcd/pool/008/so3_shared/marielle/projects/.venv/lib/python3.13/site-packages/OpenMM.libs/lib/plugins/libOpenMMCUDA.so",
+              "mps_active": false,
+              "cuda_mps_pipe_directory": null,
+              "plugin_load_failures": []
+            }
+          },
+          "openmm_cuda_mps_scaling": {
+            "B=1": {
+              "available": true,
+              "ok": true,
+              "replicas_B": 1,
+              "precision": "single",
+              "n_steps": 30,
+              "dt_fs": 2.0,
+              "wall_elapsed_s": 0.004739483818411827,
+              "ms_per_step_batch": 0.1579827939470609,
+              "ms_per_step_per_replica": 0.1579827939470609,
+              "per_replica_ns_per_day": 1093.7899987887556,
+              "aggregate_ns_per_day": 1093.7899987887556,
+              "total_gpu_memory_mb": 456.0,
+              "memory_mb_per_replica": 456.0,
+              "mps_info": {
+                "mps_active": false,
+                "started_by_harness": false
+              },
+              "provenance": {
+                "platform_name": "CUDA",
+                "device_name": "NVIDIA L40S",
+                "device_index": "0",
+                "precision": "single",
+                "cuda_Compiler": "openmm-nvrtc-builtin",
+                "CudaDriverVersion": "590.48.01",
+                "lib_openmm_cuda_path": "/orcd/pool/008/so3_shared/marielle/projects/.venv/lib/python3.13/site-packages/OpenMM.libs/lib/plugins/libOpenMMCUDA.so",
+                "mps_active": false,
+                "cuda_mps_pipe_directory": null,
+                "plugin_load_failures": []
+              }
+            },
+            "B=4": {
+              "available": true,
+              "ok": true,
+              "replicas_B": 4,
+              "precision": "single",
+              "n_steps": 30,
+              "dt_fs": 2.0,
+              "wall_elapsed_s": 0.010866482742130756,
+              "ms_per_step_batch": 0.3622160914043585,
+              "ms_per_step_per_replica": 0.09055402285108963,
+              "per_replica_ns_per_day": 477.06328929240027,
+              "aggregate_ns_per_day": 1908.253157169601,
+              "total_gpu_memory_mb": 1816.0,
+              "memory_mb_per_replica": 454.0,
+              "mps_info": {
+                "mps_active": true,
+                "started_by_harness": true,
+                "pipe_dir": "/tmp/mps_28702134_3462539/pipe",
+                "log_dir": "/tmp/mps_28702134_3462539/log",
+                "stdout": "",
+                "stderr": ""
+              },
+              "provenance": {
+                "platform_name": "CUDA",
+                "device_name": "NVIDIA L40S",
+                "device_index": "0",
+                "precision": "single",
+                "cuda_Compiler": "openmm-nvrtc-builtin",
+                "CudaDriverVersion": "590.48.01",
+                "lib_openmm_cuda_path": "/orcd/pool/008/so3_shared/marielle/projects/.venv/lib/python3.13/site-packages/OpenMM.libs/lib/plugins/libOpenMMCUDA.so",
+                "mps_active": true,
+                "cuda_mps_pipe_directory": "/tmp/mps_28702134_3462539/pipe",
+                "plugin_load_failures": []
+              }
+            },
+            "B=8": {
+              "available": true,
+              "ok": true,
+              "replicas_B": 8,
+              "precision": "single",
+              "n_steps": 30,
+              "dt_fs": 2.0,
+              "wall_elapsed_s": 0.019360376521945,
+              "ms_per_step_batch": 0.6453458840648334,
+              "ms_per_step_per_replica": 0.08066823550810417,
+              "per_replica_ns_per_day": 267.7633874591195,
+              "aggregate_ns_per_day": 2142.107099672956,
+              "total_gpu_memory_mb": 3632.0,
+              "memory_mb_per_replica": 454.0,
+              "mps_info": {
+                "mps_active": true,
+                "started_by_harness": true,
+                "pipe_dir": "/tmp/mps_28702134_3463359/pipe",
+                "log_dir": "/tmp/mps_28702134_3463359/log",
+                "stdout": "",
+                "stderr": ""
+              },
+              "provenance": {
+                "platform_name": "CUDA",
+                "device_name": "NVIDIA L40S",
+                "device_index": "0",
+                "precision": "single",
+                "cuda_Compiler": "openmm-nvrtc-builtin",
+                "CudaDriverVersion": "590.48.01",
+                "lib_openmm_cuda_path": "/orcd/pool/008/so3_shared/marielle/projects/.venv/lib/python3.13/site-packages/OpenMM.libs/lib/plugins/libOpenMMCUDA.so",
+                "mps_active": true,
+                "cuda_mps_pipe_directory": "/tmp/mps_28702134_3463359/pipe",
+                "plugin_load_failures": []
+              }
+            },
+            "B=16": {
+              "available": true,
+              "ok": true,
+              "replicas_B": 16,
+              "precision": "single",
+              "n_steps": 30,
+              "dt_fs": 2.0,
+              "wall_elapsed_s": 0.04106864985078573,
+              "ms_per_step_batch": 1.3689549950261912,
+              "ms_per_step_per_replica": 0.08555968718913695,
+              "per_replica_ns_per_day": 126.2276704696884,
+              "aggregate_ns_per_day": 2019.6427275150145,
+              "total_gpu_memory_mb": 7264.0,
+              "memory_mb_per_replica": 454.0,
+              "mps_info": {
+                "mps_active": true,
+                "started_by_harness": true,
+                "pipe_dir": "/tmp/mps_28702134_3464804/pipe",
+                "log_dir": "/tmp/mps_28702134_3464804/log",
+                "stdout": "",
+                "stderr": ""
+              },
+              "provenance": {
+                "platform_name": "CUDA",
+                "device_name": "NVIDIA L40S",
+                "device_index": "0",
+                "precision": "single",
+                "cuda_Compiler": "openmm-nvrtc-builtin",
+                "CudaDriverVersion": "590.48.01",
+                "lib_openmm_cuda_path": "/orcd/pool/008/so3_shared/marielle/projects/.venv/lib/python3.13/site-packages/OpenMM.libs/lib/plugins/libOpenMMCUDA.so",
+                "mps_active": true,
+                "cuda_mps_pipe_directory": "/tmp/mps_28702134_3464804/pipe",
+                "plugin_load_failures": []
+              }
+            }
+          }
+        },
+        "substep_breakdown": {
+          "B=1": {
+            "total_substeps_ms": 0.23578044027090073,
+            "baoab_pre_force_ms": 0.039452873170375824,
+            "bonded_and_nonbonded_direct_mk48_ms": 0.04940342158079147,
+            "pme_spread_3d_bspline_ms": 0.02753574401140213,
+            "pme_rfft3d_and_influence_ms": 0.025963634252548218,
+            "pme_irfft3d_ms": 0.03369353711605072,
+            "pme_gather_3d_bspline_fused_scale_ms": 0.0284465029835701,
+            "baoab_post_force_ms": 0.03128472715616226,
+            "baoab_pre_force_pct": 16.732886377278078,
+            "bonded_and_nonbonded_direct_mk48_pct": 20.953146717356727,
+            "pme_spread_3d_bspline_pct": 11.678553140271028,
+            "pme_rfft3d_and_influence_pct": 11.011784617382686,
+            "pme_irfft3d_pct": 14.290217236569081,
+            "pme_gather_3d_bspline_fused_scale_pct": 12.06482732447458,
+            "baoab_post_force_pct": 13.26858458666782,
+            "nonbonded_tile_pairs_mk51_ms_per_rep": 0.029164664447307587,
+            "num_valid_tile_pairs_aabb_pruned": 782
+          },
+          "B=4": {
+            "total_substeps_ms": 0.1606997661292553,
+            "baoab_pre_force_ms": 0.014314539730548859,
+            "bonded_and_nonbonded_direct_mk48_ms": 0.0935331080108881,
+            "pme_spread_3d_bspline_ms": 0.016527771949768066,
+            "pme_rfft3d_and_influence_ms": 0.007310258224606514,
+            "pme_irfft3d_ms": 0.010765241459012032,
+            "pme_gather_3d_bspline_fused_scale_ms": 0.00970505177974701,
+            "baoab_post_force_ms": 0.008543794974684715,
+            "baoab_pre_force_pct": 8.907629472861382,
+            "bonded_and_nonbonded_direct_mk48_pct": 58.20363667216343,
+            "pme_spread_3d_bspline_pct": 10.284876168689829,
+            "pme_rfft3d_and_influence_pct": 4.549016094227959,
+            "pme_irfft3d_pct": 6.6989776763914195,
+            "pme_gather_3d_bspline_fused_scale_pct": 6.039244495191714,
+            "baoab_post_force_pct": 5.316619420474267,
+            "nonbonded_tile_pairs_mk51_ms_per_rep": 0.015029748901724815,
+            "num_valid_tile_pairs_aabb_pruned": 782
+          }
+        },
+        "batch_scaling": [
+          {
+            "B": 1,
+            "ms_per_step_batch": 0.4022997027883927,
+            "ms_per_step_per_replica": 0.4022997027883927,
+            "ns_per_day_per_replica": 429.5305186712797,
+            "ns_per_day_aggregate": 429.5305186712797,
+            "speedup_vs_openmm_cuda_single_b1": 0.38050481671764225,
+            "speedup_vs_openmm_cuda_mps_same_B": 0.3926992559329802
+          },
+          {
+            "B": 2,
+            "ms_per_step_batch": 0.40831676063438255,
+            "ms_per_step_per_replica": 0.20415838031719127,
+            "ns_per_day_per_replica": 846.4016991686982,
+            "ns_per_day_aggregate": 846.4016991686982,
+            "speedup_vs_openmm_cuda_single_b1": 0.7497952052579513,
+            "speedup_vs_openmm_cuda_mps_same_B": null
+          },
+          {
+            "B": 4,
+            "ms_per_step_batch": 0.63744083357354,
+            "ms_per_step_per_replica": 0.159360208393385,
+            "ns_per_day_per_replica": 1084.3359314229717,
+            "ns_per_day_aggregate": 1084.3359314229717,
+            "speedup_vs_openmm_cuda_single_b1": 0.9605721291301569,
+            "speedup_vs_openmm_cuda_mps_same_B": 0.5682348420852624
+          },
+          {
+            "B": 8,
+            "ms_per_step_batch": 1.2588991597294807,
+            "ms_per_step_per_replica": 0.1573623949661851,
+            "ns_per_day_per_replica": 1098.102250141352,
+            "ns_per_day_aggregate": 1098.102250141352,
+            "speedup_vs_openmm_cuda_single_b1": 0.9727671894416283,
+            "speedup_vs_openmm_cuda_mps_same_B": 0.5126271465647089
+          },
+          {
+            "B": 16,
+            "ms_per_step_batch": 2.310890629887581,
+            "ms_per_step_per_replica": 0.1444306643679738,
+            "ns_per_day_per_replica": 1196.4218315838255,
+            "ns_per_day_aggregate": 1196.4218315838255,
+            "speedup_vs_openmm_cuda_single_b1": 1.0598647824886884,
+            "speedup_vs_openmm_cuda_mps_same_B": 0.5923928105125371
+          },
+          {
+            "B": 32,
+            "ms_per_step_batch": 4.480263032019138,
+            "ms_per_step_per_replica": 0.14000821975059807,
+            "ns_per_day_per_replica": 1234.2132505349698,
+            "ns_per_day_aggregate": 1234.2132505349698,
+            "speedup_vs_openmm_cuda_single_b1": 1.0933427690727096,
+            "speedup_vs_openmm_cuda_mps_same_B": null
+          }
+        ]
+      },
+      {
+        "system": "Holo_DHFR_MTX_NADPH_24k",
+        "suites": [
+          "SuiteB"
+        ],
+        "kind": "holo_dhfr",
+        "n_real_atoms": 23558,
+        "bucket_atoms": 25000,
+        "bucket_waters": 8192,
+        "occupancy_pct": 94.232,
+        "electrostatics": "pme",
+        "pme_grid": [
+          60,
+          60,
+          60
+        ],
+        "openmm": {
+          "openmm_cuda_single_b1": {
+            "platform": "CUDA",
+            "precision": "single",
+            "ms_per_step": 0.15027762856334448,
+            "ns_per_day": 1149.8717517169362,
+            "provenance": {
+              "platform_name": "CUDA",
+              "device_name": "NVIDIA L40S",
+              "device_index": "0",
+              "precision": "single",
+              "cuda_Compiler": "openmm-nvrtc-builtin",
+              "CudaDriverVersion": "590.48.01",
+              "lib_openmm_cuda_path": "/orcd/pool/008/so3_shared/marielle/projects/.venv/lib/python3.13/site-packages/OpenMM.libs/lib/plugins/libOpenMMCUDA.so",
+              "mps_active": false,
+              "cuda_mps_pipe_directory": null,
+              "plugin_load_failures": []
+            }
+          },
+          "openmm_cuda_mixed_b1": {
+            "platform": "CUDA",
+            "precision": "mixed",
+            "ms_per_step": 0.1634411746636033,
+            "ns_per_day": 1057.261123799796,
+            "provenance": {
+              "platform_name": "CUDA",
+              "device_name": "NVIDIA L40S",
+              "device_index": "0",
+              "precision": "mixed",
+              "cuda_Compiler": "openmm-nvrtc-builtin",
+              "CudaDriverVersion": "590.48.01",
+              "lib_openmm_cuda_path": "/orcd/pool/008/so3_shared/marielle/projects/.venv/lib/python3.13/site-packages/OpenMM.libs/lib/plugins/libOpenMMCUDA.so",
+              "mps_active": false,
+              "cuda_mps_pipe_directory": null,
+              "plugin_load_failures": []
+            }
+          },
+          "openmm_cuda_mps_scaling": {
+            "B=1": {
+              "available": true,
+              "ok": true,
+              "replicas_B": 1,
+              "precision": "single",
+              "n_steps": 30,
+              "dt_fs": 2.0,
+              "wall_elapsed_s": 0.004685923457145691,
+              "ms_per_step_batch": 0.15619744857152304,
+              "ms_per_step_per_replica": 0.15619744857152304,
+              "per_replica_ns_per_day": 1106.2920782657638,
+              "aggregate_ns_per_day": 1106.2920782657638,
+              "total_gpu_memory_mb": 456.0,
+              "memory_mb_per_replica": 456.0,
+              "mps_info": {
+                "mps_active": false,
+                "started_by_harness": false
+              },
+              "provenance": {
+                "platform_name": "CUDA",
+                "device_name": "NVIDIA L40S",
+                "device_index": "0",
+                "precision": "single",
+                "cuda_Compiler": "openmm-nvrtc-builtin",
+                "CudaDriverVersion": "590.48.01",
+                "lib_openmm_cuda_path": "/orcd/pool/008/so3_shared/marielle/projects/.venv/lib/python3.13/site-packages/OpenMM.libs/lib/plugins/libOpenMMCUDA.so",
+                "mps_active": false,
+                "cuda_mps_pipe_directory": null,
+                "plugin_load_failures": []
+              }
+            },
+            "B=4": {
+              "available": true,
+              "ok": true,
+              "replicas_B": 4,
+              "precision": "single",
+              "n_steps": 30,
+              "dt_fs": 2.0,
+              "wall_elapsed_s": 0.010962926782667637,
+              "ms_per_step_batch": 0.36543089275558793,
+              "ms_per_step_per_replica": 0.09135772318889698,
+              "per_replica_ns_per_day": 472.86642543265833,
+              "aggregate_ns_per_day": 1891.4657017306333,
+              "total_gpu_memory_mb": 1816.0,
+              "memory_mb_per_replica": 454.0,
+              "mps_info": {
+                "mps_active": true,
+                "started_by_harness": true,
+                "pipe_dir": "/tmp/mps_28702134_3470438/pipe",
+                "log_dir": "/tmp/mps_28702134_3470438/log",
+                "stdout": "",
+                "stderr": ""
+              },
+              "provenance": {
+                "platform_name": "CUDA",
+                "device_name": "NVIDIA L40S",
+                "device_index": "0",
+                "precision": "single",
+                "cuda_Compiler": "openmm-nvrtc-builtin",
+                "CudaDriverVersion": "590.48.01",
+                "lib_openmm_cuda_path": "/orcd/pool/008/so3_shared/marielle/projects/.venv/lib/python3.13/site-packages/OpenMM.libs/lib/plugins/libOpenMMCUDA.so",
+                "mps_active": true,
+                "cuda_mps_pipe_directory": "/tmp/mps_28702134_3470438/pipe",
+                "plugin_load_failures": []
+              }
+            },
+            "B=8": {
+              "available": true,
+              "ok": true,
+              "replicas_B": 8,
+              "precision": "single",
+              "n_steps": 30,
+              "dt_fs": 2.0,
+              "wall_elapsed_s": 0.01999309193342924,
+              "ms_per_step_batch": 0.6664363977809746,
+              "ms_per_step_per_replica": 0.08330454972262183,
+              "per_replica_ns_per_day": 259.2895594768985,
+              "aggregate_ns_per_day": 2074.316475815188,
+              "total_gpu_memory_mb": 3632.0,
+              "memory_mb_per_replica": 454.0,
+              "mps_info": {
+                "mps_active": true,
+                "started_by_harness": true,
+                "pipe_dir": "/tmp/mps_28702134_3471261/pipe",
+                "log_dir": "/tmp/mps_28702134_3471261/log",
+                "stdout": "",
+                "stderr": ""
+              },
+              "provenance": {
+                "platform_name": "CUDA",
+                "device_name": "NVIDIA L40S",
+                "device_index": "0",
+                "precision": "single",
+                "cuda_Compiler": "openmm-nvrtc-builtin",
+                "CudaDriverVersion": "590.48.01",
+                "lib_openmm_cuda_path": "/orcd/pool/008/so3_shared/marielle/projects/.venv/lib/python3.13/site-packages/OpenMM.libs/lib/plugins/libOpenMMCUDA.so",
+                "mps_active": true,
+                "cuda_mps_pipe_directory": "/tmp/mps_28702134_3471261/pipe",
+                "plugin_load_failures": []
+              }
+            },
+            "B=16": {
+              "available": true,
+              "ok": true,
+              "replicas_B": 16,
+              "precision": "single",
+              "n_steps": 30,
+              "dt_fs": 2.0,
+              "wall_elapsed_s": 0.03939288482069969,
+              "ms_per_step_batch": 1.3130961606899896,
+              "ms_per_step_per_replica": 0.08206851004312435,
+              "per_replica_ns_per_day": 131.5973690070034,
+              "aggregate_ns_per_day": 2105.5579041120545,
+              "total_gpu_memory_mb": 7264.0,
+              "memory_mb_per_replica": 454.0,
+              "mps_info": {
+                "mps_active": true,
+                "started_by_harness": true,
+                "pipe_dir": "/tmp/mps_28702134_3472703/pipe",
+                "log_dir": "/tmp/mps_28702134_3472703/log",
+                "stdout": "",
+                "stderr": ""
+              },
+              "provenance": {
+                "platform_name": "CUDA",
+                "device_name": "NVIDIA L40S",
+                "device_index": "0",
+                "precision": "single",
+                "cuda_Compiler": "openmm-nvrtc-builtin",
+                "CudaDriverVersion": "590.48.01",
+                "lib_openmm_cuda_path": "/orcd/pool/008/so3_shared/marielle/projects/.venv/lib/python3.13/site-packages/OpenMM.libs/lib/plugins/libOpenMMCUDA.so",
+                "mps_active": true,
+                "cuda_mps_pipe_directory": "/tmp/mps_28702134_3472703/pipe",
+                "plugin_load_failures": []
+              }
+            }
+          }
+        },
+        "substep_breakdown": {
+          "B=1": {
+            "total_substeps_ms": 0.22902030497789383,
+            "baoab_pre_force_ms": 0.0377354770898819,
+            "bonded_and_nonbonded_direct_mk48_ms": 0.049111731350421906,
+            "pme_spread_3d_bspline_ms": 0.026650428771972656,
+            "pme_rfft3d_and_influence_ms": 0.02652972936630249,
+            "pme_irfft3d_ms": 0.03327608108520508,
+            "pme_gather_3d_bspline_fused_scale_ms": 0.026958659291267395,
+            "baoab_post_force_ms": 0.028758198022842407,
+            "baoab_pre_force_pct": 16.47691329968507,
+            "bonded_and_nonbonded_direct_mk48_pct": 21.444269474343077,
+            "pme_spread_3d_bspline_pct": 11.636710017718773,
+            "pme_rfft3d_and_influence_pct": 11.584007526696496,
+            "pme_irfft3d_pct": 14.529751450823127,
+            "pme_gather_3d_bspline_fused_scale_pct": 11.771296564236772,
+            "baoab_post_force_pct": 12.557051666496685,
+            "nonbonded_tile_pairs_mk51_ms_per_rep": 0.028490200638771057,
+            "num_valid_tile_pairs_aabb_pruned": 782
+          },
+          "B=4": {
+            "total_substeps_ms": 0.15996149741113186,
+            "baoab_pre_force_ms": 0.013928990811109543,
+            "bonded_and_nonbonded_direct_mk48_ms": 0.09347361512482166,
+            "pme_spread_3d_bspline_ms": 0.01663748174905777,
+            "pme_rfft3d_and_influence_ms": 0.0074914004653692245,
+            "pme_irfft3d_ms": 0.008904775604605675,
+            "pme_gather_3d_bspline_fused_scale_ms": 0.009725978597998619,
+            "baoab_post_force_ms": 0.009799255058169365,
+            "baoab_pre_force_pct": 8.707714691685684,
+            "bonded_and_nonbonded_direct_mk48_pct": 58.43507133755848,
+            "pme_spread_3d_bspline_pct": 10.40092898498958,
+            "pme_rfft3d_and_influence_pct": 4.683252274211264,
+            "pme_irfft3d_pct": 5.566824360063776,
+            "pme_gather_3d_bspline_fused_scale_pct": 6.080199770199063,
+            "baoab_post_force_pct": 6.1260085812921545,
+            "nonbonded_tile_pairs_mk51_ms_per_rep": 0.015923278406262398,
+            "num_valid_tile_pairs_aabb_pruned": 782
+          }
+        },
+        "batch_scaling": [
+          {
+            "B": 1,
+            "ms_per_step_batch": 0.40406195136408013,
+            "ms_per_step_per_replica": 0.40406195136408013,
+            "ns_per_day_per_replica": 427.6571932017883,
+            "ns_per_day_aggregate": 427.6571932017883,
+            "speedup_vs_openmm_cuda_single_b1": 0.3719172964839166,
+            "speedup_vs_openmm_cuda_mps_same_B": 0.3865680696839017
+          },
+          {
+            "B": 2,
+            "ms_per_step_batch": 0.408999715000391,
+            "ms_per_step_per_replica": 0.2044998575001955,
+            "ns_per_day_per_replica": 844.9883638663895,
+            "ns_per_day_aggregate": 844.9883638663895,
+            "speedup_vs_openmm_cuda_single_b1": 0.7348544414667908,
+            "speedup_vs_openmm_cuda_mps_same_B": null
+          },
+          {
+            "B": 4,
+            "ms_per_step_batch": 0.6491180043667555,
+            "ms_per_step_per_replica": 0.16227950109168887,
+            "ns_per_day_per_replica": 1064.8294999524737,
+            "ns_per_day_aggregate": 1064.8294999524737,
+            "speedup_vs_openmm_cuda_single_b1": 0.9260419680390608,
+            "speedup_vs_openmm_cuda_mps_same_B": 0.5629652702548015
+          },
+          {
+            "B": 8,
+            "ms_per_step_batch": 1.2547868490219116,
+            "ms_per_step_per_replica": 0.15684835612773895,
+            "ns_per_day_per_replica": 1101.7010586918095,
+            "ns_per_day_aggregate": 1101.7010586918095,
+            "speedup_vs_openmm_cuda_single_b1": 0.9581077690158053,
+            "speedup_vs_openmm_cuda_mps_same_B": 0.5311152235142186
+          },
+          {
+            "B": 16,
+            "ms_per_step_batch": 2.2862624004483223,
+            "ms_per_step_per_replica": 0.14289140002802014,
+            "ns_per_day_per_replica": 1209.3100072230725,
+            "ns_per_day_aggregate": 1209.3100072230725,
+            "speedup_vs_openmm_cuda_single_b1": 1.0516912041863677,
+            "speedup_vs_openmm_cuda_mps_same_B": 0.5743418430152634
+          },
+          {
+            "B": 32,
+            "ms_per_step_batch": 4.473423771560192,
+            "ms_per_step_per_replica": 0.139794492861256,
+            "ns_per_day_per_replica": 1236.1001958174525,
+            "ns_per_day_aggregate": 1236.1001958174525,
+            "speedup_vs_openmm_cuda_single_b1": 1.0749896186003038,
+            "speedup_vs_openmm_cuda_mps_same_B": null
+          }
+        ]
+      },
+      {
+        "system": "1AKE_solvated_45k",
+        "suites": [
+          "SuiteB"
+        ],
+        "kind": "1ake_45k",
+        "n_real_atoms": 44999,
+        "bucket_atoms": 50000,
+        "bucket_waters": 16384,
+        "occupancy_pct": 89.998,
+        "electrostatics": "pme",
+        "pme_grid": [
+          80,
+          80,
+          80
+        ],
+        "openmm": {
+          "openmm_cuda_single_b1": {
+            "platform": "CUDA",
+            "precision": "single",
+            "ms_per_step": 3.5940302768722177,
+            "ns_per_day": 48.079728518698765,
+            "provenance": {
+              "platform_name": "CUDA",
+              "device_name": "NVIDIA L40S",
+              "device_index": "0",
+              "precision": "single",
+              "cuda_Compiler": "openmm-nvrtc-builtin",
+              "CudaDriverVersion": "590.48.01",
+              "lib_openmm_cuda_path": "/orcd/pool/008/so3_shared/marielle/projects/.venv/lib/python3.13/site-packages/OpenMM.libs/lib/plugins/libOpenMMCUDA.so",
+              "mps_active": false,
+              "cuda_mps_pipe_directory": null,
+              "plugin_load_failures": []
+            }
+          },
+          "openmm_cuda_mixed_b1": {
+            "platform": "CUDA",
+            "precision": "mixed",
+            "ms_per_step": 3.687364002689719,
+            "ns_per_day": 46.862745276558634,
+            "provenance": {
+              "platform_name": "CUDA",
+              "device_name": "NVIDIA L40S",
+              "device_index": "0",
+              "precision": "mixed",
+              "cuda_Compiler": "openmm-nvrtc-builtin",
+              "CudaDriverVersion": "590.48.01",
+              "lib_openmm_cuda_path": "/orcd/pool/008/so3_shared/marielle/projects/.venv/lib/python3.13/site-packages/OpenMM.libs/lib/plugins/libOpenMMCUDA.so",
+              "mps_active": false,
+              "cuda_mps_pipe_directory": null,
+              "plugin_load_failures": []
+            }
+          },
+          "openmm_cuda_mps_scaling": {
+            "B=1": {
+              "available": true,
+              "ok": true,
+              "replicas_B": 1,
+              "precision": "single",
+              "n_steps": 30,
+              "dt_fs": 2.0,
+              "wall_elapsed_s": 0.1092496020719409,
+              "ms_per_step_batch": 3.6416534023980303,
+              "ms_per_step_per_replica": 3.6416534023980303,
+              "per_replica_ns_per_day": 47.45097374896005,
+              "aggregate_ns_per_day": 47.45097374896005,
+              "total_gpu_memory_mb": 472.0,
+              "memory_mb_per_replica": 472.0,
+              "mps_info": {
+                "mps_active": false,
+                "started_by_harness": false
+              },
+              "provenance": {
+                "platform_name": "CUDA",
+                "device_name": "NVIDIA L40S",
+                "device_index": "0",
+                "precision": "single",
+                "cuda_Compiler": "openmm-nvrtc-builtin",
+                "CudaDriverVersion": "590.48.01",
+                "lib_openmm_cuda_path": "/orcd/pool/008/so3_shared/marielle/projects/.venv/lib/python3.13/site-packages/OpenMM.libs/lib/plugins/libOpenMMCUDA.so",
+                "mps_active": false,
+                "cuda_mps_pipe_directory": null,
+                "plugin_load_failures": []
+              }
+            },
+            "B=4": {
+              "available": true,
+              "ok": true,
+              "replicas_B": 4,
+              "precision": "single",
+              "n_steps": 30,
+              "dt_fs": 2.0,
+              "wall_elapsed_s": 0.12701124511659145,
+              "ms_per_step_batch": 4.233708170553048,
+              "ms_per_step_per_replica": 1.058427042638262,
+              "per_replica_ns_per_day": 40.81528368012838,
+              "aggregate_ns_per_day": 163.26113472051352,
+              "total_gpu_memory_mb": 1880.0,
+              "memory_mb_per_replica": 470.0,
+              "mps_info": {
+                "mps_active": true,
+                "started_by_harness": true,
+                "pipe_dir": "/tmp/mps_28702134_3478120/pipe",
+                "log_dir": "/tmp/mps_28702134_3478120/log",
+                "stdout": "",
+                "stderr": ""
+              },
+              "provenance": {
+                "platform_name": "CUDA",
+                "device_name": "NVIDIA L40S",
+                "device_index": "0",
+                "precision": "single",
+                "cuda_Compiler": "openmm-nvrtc-builtin",
+                "CudaDriverVersion": "590.48.01",
+                "lib_openmm_cuda_path": "/orcd/pool/008/so3_shared/marielle/projects/.venv/lib/python3.13/site-packages/OpenMM.libs/lib/plugins/libOpenMMCUDA.so",
+                "mps_active": true,
+                "cuda_mps_pipe_directory": "/tmp/mps_28702134_3478120/pipe",
+                "plugin_load_failures": []
+              }
+            },
+            "B=8": {
+              "available": true,
+              "ok": true,
+              "replicas_B": 8,
+              "precision": "single",
+              "n_steps": 30,
+              "dt_fs": 2.0,
+              "wall_elapsed_s": 0.15258269384503365,
+              "ms_per_step_batch": 5.086089794834455,
+              "ms_per_step_per_replica": 0.6357612243543068,
+              "per_replica_ns_per_day": 33.97501950820835,
+              "aggregate_ns_per_day": 271.8001560656668,
+              "total_gpu_memory_mb": 3760.0,
+              "memory_mb_per_replica": 470.0,
+              "mps_info": {
+                "mps_active": true,
+                "started_by_harness": true,
+                "pipe_dir": "/tmp/mps_28702134_3478969/pipe",
+                "log_dir": "/tmp/mps_28702134_3478969/log",
+                "stdout": "",
+                "stderr": ""
+              },
+              "provenance": {
+                "platform_name": "CUDA",
+                "device_name": "NVIDIA L40S",
+                "device_index": "0",
+                "precision": "single",
+                "cuda_Compiler": "openmm-nvrtc-builtin",
+                "CudaDriverVersion": "590.48.01",
+                "lib_openmm_cuda_path": "/orcd/pool/008/so3_shared/marielle/projects/.venv/lib/python3.13/site-packages/OpenMM.libs/lib/plugins/libOpenMMCUDA.so",
+                "mps_active": true,
+                "cuda_mps_pipe_directory": "/tmp/mps_28702134_3478969/pipe",
+                "plugin_load_failures": []
+              }
+            }
+          }
+        },
+        "substep_breakdown": {
+          "B=1": {
+            "total_substeps_ms": 0.39436981081962585,
+            "baoab_pre_force_ms": 0.042821094393730164,
+            "bonded_and_nonbonded_direct_mk48_ms": 0.1963282749056816,
+            "pme_spread_3d_bspline_ms": 0.037611909210681915,
+            "pme_rfft3d_and_influence_ms": 0.02650957554578781,
+            "pme_irfft3d_ms": 0.03552231937646866,
+            "pme_gather_3d_bspline_fused_scale_ms": 0.027257278561592102,
+            "baoab_post_force_ms": 0.028319358825683594,
+            "baoab_pre_force_pct": 10.858106583953349,
+            "bonded_and_nonbonded_direct_mk48_pct": 49.78278496968341,
+            "pme_spread_3d_bspline_pct": 9.537218158893149,
+            "pme_rfft3d_and_influence_pct": 6.72200934718925,
+            "pme_irfft3d_pct": 9.007362734647966,
+            "pme_gather_3d_bspline_fused_scale_pct": 6.911603731772169,
+            "baoab_post_force_pct": 7.180914473860705,
+            "nonbonded_tile_pairs_mk51_ms_per_rep": 0.033859312534332275,
+            "num_valid_tile_pairs_aabb_pruned": 1563
+          },
+          "B=4": null
+        },
+        "batch_scaling": [
+          {
+            "B": 1,
+            "ms_per_step_batch": 0.6562671437859535,
+            "ms_per_step_per_replica": 0.6562671437859535,
+            "ns_per_day_per_replica": 263.30740710731055,
+            "ns_per_day_aggregate": 263.30740710731055,
+            "speedup_vs_openmm_cuda_single_b1": 5.47647449808098,
+            "speedup_vs_openmm_cuda_mps_same_B": 5.549041174588778
+          },
+          {
+            "B": 2,
+            "ms_per_step_batch": 0.6508959457278252,
+            "ms_per_step_per_replica": 0.3254479728639126,
+            "ns_per_day_per_replica": 530.9604434754216,
+            "ns_per_day_aggregate": 530.9604434754216,
+            "speedup_vs_openmm_cuda_single_b1": 11.043332810602806,
+            "speedup_vs_openmm_cuda_mps_same_B": null
+          },
+          {
+            "B": 4,
+            "ms_per_step_batch": 1.068970412015915,
+            "ms_per_step_per_replica": 0.26724260300397873,
+            "ns_per_day_per_replica": 646.6034908267501,
+            "ns_per_day_aggregate": 646.6034908267501,
+            "speedup_vs_openmm_cuda_single_b1": 13.4485678423762,
+            "speedup_vs_openmm_cuda_mps_same_B": 3.960547572658182
+          },
+          {
+            "B": 8,
+            "ms_per_step_batch": 2.1425774320960045,
+            "ms_per_step_per_replica": 0.26782217901200056,
+            "ns_per_day_per_replica": 645.2042195962313,
+            "ns_per_day_aggregate": 645.2042195962313,
+            "speedup_vs_openmm_cuda_single_b1": 13.419464699042631,
+            "speedup_vs_openmm_cuda_mps_same_B": 2.3738184294506084
+          }
+        ]
+      },
+      {
+        "system": "ApoA1_92k_rf",
+        "suites": [
+          "SuiteA"
+        ],
+        "kind": "apoa1_rf",
+        "n_real_atoms": 92224,
+        "bucket_atoms": 100000,
+        "bucket_waters": 24576,
+        "occupancy_pct": 92.224,
+        "electrostatics": "rf",
+        "pme_grid": null,
+        "openmm": {
+          "openmm_cuda_single_b1": {
+            "platform": "CUDA",
+            "precision": "single",
+            "ms_per_step": 0.32408791594207287,
+            "ns_per_day": 533.1886549910306,
+            "provenance": {
+              "platform_name": "CUDA",
+              "device_name": "NVIDIA L40S",
+              "device_index": "0",
+              "precision": "single",
+              "cuda_Compiler": "openmm-nvrtc-builtin",
+              "CudaDriverVersion": "590.48.01",
+              "lib_openmm_cuda_path": "/orcd/pool/008/so3_shared/marielle/projects/.venv/lib/python3.13/site-packages/OpenMM.libs/lib/plugins/libOpenMMCUDA.so",
+              "mps_active": false,
+              "cuda_mps_pipe_directory": null,
+              "plugin_load_failures": []
+            }
+          },
+          "openmm_cuda_mixed_b1": {
+            "platform": "CUDA",
+            "precision": "mixed",
+            "ms_per_step": 0.3849224653095007,
+            "ns_per_day": 448.921576611691,
+            "provenance": {
+              "platform_name": "CUDA",
+              "device_name": "NVIDIA L40S",
+              "device_index": "0",
+              "precision": "mixed",
+              "cuda_Compiler": "openmm-nvrtc-builtin",
+              "CudaDriverVersion": "590.48.01",
+              "lib_openmm_cuda_path": "/orcd/pool/008/so3_shared/marielle/projects/.venv/lib/python3.13/site-packages/OpenMM.libs/lib/plugins/libOpenMMCUDA.so",
+              "mps_active": false,
+              "cuda_mps_pipe_directory": null,
+              "plugin_load_failures": []
+            }
+          },
+          "openmm_cuda_mps_scaling": {
+            "B=1": {
+              "available": true,
+              "ok": true,
+              "replicas_B": 1,
+              "precision": "single",
+              "n_steps": 30,
+              "dt_fs": 2.0,
+              "wall_elapsed_s": 0.009492501616477966,
+              "ms_per_step_batch": 0.3164167205492655,
+              "ms_per_step_per_replica": 0.3164167205492655,
+              "per_replica_ns_per_day": 546.1152612290454,
+              "aggregate_ns_per_day": 546.1152612290454,
+              "total_gpu_memory_mb": 482.0,
+              "memory_mb_per_replica": 482.0,
+              "mps_info": {
+                "mps_active": false,
+                "started_by_harness": false
+              },
+              "provenance": {
+                "platform_name": "CUDA",
+                "device_name": "NVIDIA L40S",
+                "device_index": "0",
+                "precision": "single",
+                "cuda_Compiler": "openmm-nvrtc-builtin",
+                "CudaDriverVersion": "590.48.01",
+                "lib_openmm_cuda_path": "/orcd/pool/008/so3_shared/marielle/projects/.venv/lib/python3.13/site-packages/OpenMM.libs/lib/plugins/libOpenMMCUDA.so",
+                "mps_active": false,
+                "cuda_mps_pipe_directory": null,
+                "plugin_load_failures": []
+              }
+            },
+            "B=2": {
+              "available": true,
+              "ok": true,
+              "replicas_B": 2,
+              "precision": "single",
+              "n_steps": 30,
+              "dt_fs": 2.0,
+              "wall_elapsed_s": 0.015133228152990341,
+              "ms_per_step_batch": 0.5044409384330114,
+              "ms_per_step_per_replica": 0.2522204692165057,
+              "per_replica_ns_per_day": 342.55744693676843,
+              "aggregate_ns_per_day": 685.1148938735369,
+              "total_gpu_memory_mb": 960.0,
+              "memory_mb_per_replica": 480.0,
+              "mps_info": {
+                "mps_active": true,
+                "started_by_harness": true,
+                "pipe_dir": "/tmp/mps_28707383_4075282/pipe",
+                "log_dir": "/tmp/mps_28707383_4075282/log",
+                "stdout": "",
+                "stderr": ""
+              },
+              "provenance": {
+                "platform_name": "CUDA",
+                "device_name": "NVIDIA L40S",
+                "device_index": "0",
+                "precision": "single",
+                "cuda_Compiler": "openmm-nvrtc-builtin",
+                "CudaDriverVersion": "590.48.01",
+                "lib_openmm_cuda_path": "/orcd/pool/008/so3_shared/marielle/projects/.venv/lib/python3.13/site-packages/OpenMM.libs/lib/plugins/libOpenMMCUDA.so",
+                "mps_active": true,
+                "cuda_mps_pipe_directory": "/tmp/mps_28707383_4075282/pipe",
+                "plugin_load_failures": []
+              }
+            },
+            "B=4": {
+              "available": true,
+              "ok": true,
+              "replicas_B": 4,
+              "precision": "single",
+              "n_steps": 30,
+              "dt_fs": 2.0,
+              "wall_elapsed_s": 0.026845956221222878,
+              "ms_per_step_batch": 0.8948652073740959,
+              "ms_per_step_per_replica": 0.22371630184352398,
+              "per_replica_ns_per_day": 193.10170802937634,
+              "aggregate_ns_per_day": 772.4068321175054,
+              "total_gpu_memory_mb": 1920.0,
+              "memory_mb_per_replica": 480.0,
+              "mps_info": {
+                "mps_active": true,
+                "started_by_harness": true,
+                "pipe_dir": "/tmp/mps_28707383_4075778/pipe",
+                "log_dir": "/tmp/mps_28707383_4075778/log",
+                "stdout": "",
+                "stderr": ""
+              },
+              "provenance": {
+                "platform_name": "CUDA",
+                "device_name": "NVIDIA L40S",
+                "device_index": "0",
+                "precision": "single",
+                "cuda_Compiler": "openmm-nvrtc-builtin",
+                "CudaDriverVersion": "590.48.01",
+                "lib_openmm_cuda_path": "/orcd/pool/008/so3_shared/marielle/projects/.venv/lib/python3.13/site-packages/OpenMM.libs/lib/plugins/libOpenMMCUDA.so",
+                "mps_active": true,
+                "cuda_mps_pipe_directory": "/tmp/mps_28707383_4075778/pipe",
+                "plugin_load_failures": []
+              }
+            }
+          }
+        },
+        "substep_breakdown": {
+          "B=1": {
+            "total_substeps_ms": 0.5941293388605118,
+            "baoab_pre_force_ms": 0.04938356578350067,
+            "bonded_and_nonbonded_direct_mk48_ms": 0.5123277753591537,
+            "pme_spread_3d_bspline_ms": 0.0,
+            "pme_rfft3d_and_influence_ms": 0.0,
+            "pme_irfft3d_ms": 0.0,
+            "pme_gather_3d_bspline_fused_scale_ms": 0.0,
+            "baoab_post_force_ms": 0.03241799771785736,
+            "baoab_pre_force_pct": 8.311921757342272,
+            "bonded_and_nonbonded_direct_mk48_pct": 86.23169095499537,
+            "pme_spread_3d_bspline_pct": 0.0,
+            "pme_rfft3d_and_influence_pct": 0.0,
+            "pme_irfft3d_pct": 0.0,
+            "pme_gather_3d_bspline_fused_scale_pct": 0.0,
+            "baoab_post_force_pct": 5.456387287662355,
+            "nonbonded_tile_pairs_mk51_ms_per_rep": 0.053157731890678406,
+            "num_valid_tile_pairs_aabb_pruned": 3125
+          },
+          "B=4": null
+        },
+        "batch_scaling": [
+          {
+            "B": 1,
+            "ms_per_step_batch": 1.949741691350937,
+            "ms_per_step_per_replica": 1.949741691350937,
+            "ns_per_day_per_replica": 88.62712469376923,
+            "ns_per_day_aggregate": 88.62712469376923,
+            "speedup_vs_openmm_cuda_single_b1": 0.16622094987234892,
+            "speedup_vs_openmm_cuda_mps_same_B": 0.16228648233398893
+          },
+          {
+            "B": 2,
+            "ms_per_step_batch": 1.5019205212593079,
+            "ms_per_step_per_replica": 0.7509602606296539,
+            "ns_per_day_per_replica": 230.10538514396652,
+            "ns_per_day_aggregate": 230.10538514396652,
+            "speedup_vs_openmm_cuda_single_b1": 0.4315646685090054,
+            "speedup_vs_openmm_cuda_mps_same_B": 0.33586393640194445
+          },
+          {
+            "B": 4,
+            "ms_per_step_batch": 2.7636636048555374,
+            "ms_per_step_per_replica": 0.6909159012138844,
+            "ns_per_day_per_replica": 250.10279788958994,
+            "ns_per_day_aggregate": 250.10279788958994,
+            "speedup_vs_openmm_cuda_single_b1": 0.469069991546983,
+            "speedup_vs_openmm_cuda_mps_same_B": 0.32379671889223016
+          }
+        ]
+      },
+      {
+        "system": "ApoA1_92k_pme",
+        "suites": [
+          "SuiteA",
+          "SuiteB"
+        ],
+        "kind": "apoa1_pme",
+        "n_real_atoms": 92224,
+        "bucket_atoms": 100000,
+        "bucket_waters": 24576,
+        "occupancy_pct": 92.224,
+        "electrostatics": "pme",
+        "pme_grid": [
+          96,
+          96,
+          64
+        ],
+        "openmm": {
+          "openmm_cuda_single_b1": {
+            "platform": "CUDA",
+            "precision": "single",
+            "ms_per_step": 0.3965215990319848,
+            "ns_per_day": 435.7896276567303,
+            "provenance": {
+              "platform_name": "CUDA",
+              "device_name": "NVIDIA L40S",
+              "device_index": "0",
+              "precision": "single",
+              "cuda_Compiler": "openmm-nvrtc-builtin",
+              "CudaDriverVersion": "590.48.01",
+              "lib_openmm_cuda_path": "/orcd/pool/008/so3_shared/marielle/projects/.venv/lib/python3.13/site-packages/OpenMM.libs/lib/plugins/libOpenMMCUDA.so",
+              "mps_active": false,
+              "cuda_mps_pipe_directory": null,
+              "plugin_load_failures": []
+            }
+          },
+          "openmm_cuda_mixed_b1": {
+            "platform": "CUDA",
+            "precision": "mixed",
+            "ms_per_step": 0.4676681477576494,
+            "ns_per_day": 369.49277137759395,
+            "provenance": {
+              "platform_name": "CUDA",
+              "device_name": "NVIDIA L40S",
+              "device_index": "0",
+              "precision": "mixed",
+              "cuda_Compiler": "openmm-nvrtc-builtin",
+              "CudaDriverVersion": "590.48.01",
+              "lib_openmm_cuda_path": "/orcd/pool/008/so3_shared/marielle/projects/.venv/lib/python3.13/site-packages/OpenMM.libs/lib/plugins/libOpenMMCUDA.so",
+              "mps_active": false,
+              "cuda_mps_pipe_directory": null,
+              "plugin_load_failures": []
+            }
+          },
+          "openmm_cuda_mps_scaling": {
+            "B=1": {
+              "available": true,
+              "ok": true,
+              "replicas_B": 1,
+              "precision": "single",
+              "n_steps": 30,
+              "dt_fs": 2.0,
+              "wall_elapsed_s": 0.2830445133149624,
+              "ms_per_step_batch": 9.434817110498745,
+              "ms_per_step_per_replica": 9.434817110498745,
+              "per_replica_ns_per_day": 18.315140397126935,
+              "aggregate_ns_per_day": 18.315140397126935,
+              "total_gpu_memory_mb": 514.0,
+              "memory_mb_per_replica": 514.0,
+              "mps_info": {
+                "mps_active": false,
+                "started_by_harness": false
+              },
+              "provenance": {
+                "platform_name": "CUDA",
+                "device_name": "NVIDIA L40S",
+                "device_index": "0",
+                "precision": "single",
+                "cuda_Compiler": "openmm-nvrtc-builtin",
+                "CudaDriverVersion": "590.48.01",
+                "lib_openmm_cuda_path": "/orcd/pool/008/so3_shared/marielle/projects/.venv/lib/python3.13/site-packages/OpenMM.libs/lib/plugins/libOpenMMCUDA.so",
+                "mps_active": false,
+                "cuda_mps_pipe_directory": null,
+                "plugin_load_failures": []
+              }
+            },
+            "B=2": {
+              "available": true,
+              "ok": true,
+              "replicas_B": 2,
+              "precision": "single",
+              "n_steps": 30,
+              "dt_fs": 2.0,
+              "wall_elapsed_s": 0.29371506720781326,
+              "ms_per_step_batch": 9.790502240260441,
+              "ms_per_step_per_replica": 4.8952511201302205,
+              "per_replica_ns_per_day": 17.649758486282035,
+              "aggregate_ns_per_day": 35.29951697256407,
+              "total_gpu_memory_mb": 1024.0,
+              "memory_mb_per_replica": 512.0,
+              "mps_info": {
+                "mps_active": true,
+                "started_by_harness": true,
+                "pipe_dir": "/tmp/mps_28702134_3488923/pipe",
+                "log_dir": "/tmp/mps_28702134_3488923/log",
+                "stdout": "",
+                "stderr": ""
+              },
+              "provenance": {
+                "platform_name": "CUDA",
+                "device_name": "NVIDIA L40S",
+                "device_index": "0",
+                "precision": "single",
+                "cuda_Compiler": "openmm-nvrtc-builtin",
+                "CudaDriverVersion": "590.48.01",
+                "lib_openmm_cuda_path": "/orcd/pool/008/so3_shared/marielle/projects/.venv/lib/python3.13/site-packages/OpenMM.libs/lib/plugins/libOpenMMCUDA.so",
+                "mps_active": true,
+                "cuda_mps_pipe_directory": "/tmp/mps_28702134_3488923/pipe",
+                "plugin_load_failures": []
+              }
+            },
+            "B=4": {
+              "available": true,
+              "ok": true,
+              "replicas_B": 4,
+              "precision": "single",
+              "n_steps": 30,
+              "dt_fs": 2.0,
+              "wall_elapsed_s": 0.3181797442957759,
+              "ms_per_step_batch": 10.605991476525862,
+              "ms_per_step_per_replica": 2.6514978691314655,
+              "per_replica_ns_per_day": 16.29267762306396,
+              "aggregate_ns_per_day": 65.17071049225584,
+              "total_gpu_memory_mb": 2048.0,
+              "memory_mb_per_replica": 512.0,
+              "mps_info": {
+                "mps_active": true,
+                "started_by_harness": true,
+                "pipe_dir": "/tmp/mps_28702134_3489443/pipe",
+                "log_dir": "/tmp/mps_28702134_3489443/log",
+                "stdout": "",
+                "stderr": ""
+              },
+              "provenance": {
+                "platform_name": "CUDA",
+                "device_name": "NVIDIA L40S",
+                "device_index": "0",
+                "precision": "single",
+                "cuda_Compiler": "openmm-nvrtc-builtin",
+                "CudaDriverVersion": "590.48.01",
+                "lib_openmm_cuda_path": "/orcd/pool/008/so3_shared/marielle/projects/.venv/lib/python3.13/site-packages/OpenMM.libs/lib/plugins/libOpenMMCUDA.so",
+                "mps_active": true,
+                "cuda_mps_pipe_directory": "/tmp/mps_28702134_3489443/pipe",
+                "plugin_load_failures": []
+              }
+            }
+          }
+        },
+        "substep_breakdown": {
+          "B=1": {
+            "total_substeps_ms": 0.6537662819027901,
+            "baoab_pre_force_ms": 0.04581168293952942,
+            "bonded_and_nonbonded_direct_mk48_ms": 0.41198935359716415,
+            "pme_spread_3d_bspline_ms": 0.06225921213626862,
+            "pme_rfft3d_and_influence_ms": 0.025301016867160797,
+            "pme_irfft3d_ms": 0.033780746161937714,
+            "pme_gather_3d_bspline_fused_scale_ms": 0.03686167299747467,
+            "baoab_post_force_ms": 0.0377625972032547,
+            "baoab_pre_force_pct": 7.00734868219179,
+            "bonded_and_nonbonded_direct_mk48_pct": 63.01783450777961,
+            "pme_spread_3d_bspline_pct": 9.523160471822266,
+            "pme_rfft3d_and_influence_pct": 3.870040038394464,
+            "pme_irfft3d_pct": 5.1670982577472,
+            "pme_gather_3d_bspline_fused_scale_pct": 5.638356400117269,
+            "baoab_post_force_pct": 5.776161641947405,
+            "nonbonded_tile_pairs_mk51_ms_per_rep": 0.05817092955112457,
+            "num_valid_tile_pairs_aabb_pruned": 3125
+          },
+          "B=4": null
+        },
+        "batch_scaling": [
+          {
+            "B": 1,
+            "ms_per_step_batch": 1.6130217909812927,
+            "ms_per_step_per_replica": 1.6130217909812927,
+            "ns_per_day_per_replica": 107.12812496778233,
+            "ns_per_day_aggregate": 107.12812496778233,
+            "speedup_vs_openmm_cuda_single_b1": 0.24582532068011195,
+            "speedup_vs_openmm_cuda_mps_same_B": 5.849156634616207
+          },
+          {
+            "B": 2,
+            "ms_per_step_batch": 1.4441822469234467,
+            "ms_per_step_per_replica": 0.7220911234617233,
+            "ns_per_day_per_replica": 239.304977426661,
+            "ns_per_day_aggregate": 239.304977426661,
+            "speedup_vs_openmm_cuda_single_b1": 0.5491295851014621,
+            "speedup_vs_openmm_cuda_mps_same_B": 6.7792705949108765
+          },
+          {
+            "B": 4,
+            "ms_per_step_batch": 2.6926208287477493,
+            "ms_per_step_per_replica": 0.6731552071869373,
+            "ns_per_day_per_replica": 256.70157217102667,
+            "ns_per_day_aggregate": 256.70157217102667,
+            "speedup_vs_openmm_cuda_single_b1": 0.5890492932365737,
+            "speedup_vs_openmm_cuda_mps_same_B": 3.938910136656101
+          }
+        ]
+      }
+    ]
+  },
+  "suite_c": {
+    "congeneric_holo_dhfr_screen": {
+      "bucket_atoms": 25000,
+      "n_real_atoms": 23558,
+      "n_ligand_atoms": 63,
+      "pme_grid": [
+        60,
+        60,
+        60
+      ],
+      "batch_scaling": [
+        {
+          "B": 1,
+          "prolix_ms_per_step_batch": 0.43171510100364685,
+          "prolix_ms_per_step_per_replica": 0.43171510100364685,
+          "prolix_ns_per_day_per_replica": 400.26396945178965,
+          "prolix_ns_per_day_aggregate": 400.26396945178965,
+          "openmm_cuda_mps": {
+            "available": true,
+            "ok": true,
+            "replicas_B": 1,
+            "precision": "single",
+            "n_steps": 30,
+            "dt_fs": 2.0,
+            "wall_elapsed_s": 0.004705833271145821,
+            "ms_per_step_batch": 0.15686110903819403,
+            "ms_per_step_per_replica": 0.15686110903819403,
+            "per_replica_ns_per_day": 1101.6114896773106,
+            "aggregate_ns_per_day": 1101.6114896773106,
+            "total_gpu_memory_mb": 456.0,
+            "memory_mb_per_replica": 456.0,
+            "mps_info": {
+              "mps_active": false,
+              "started_by_harness": false
+            },
+            "provenance": {
+              "platform_name": "CUDA",
+              "device_name": "NVIDIA L40S",
+              "device_index": "0",
+              "precision": "single",
+              "cuda_Compiler": "openmm-nvrtc-builtin",
+              "CudaDriverVersion": "590.48.01",
+              "lib_openmm_cuda_path": "/orcd/pool/008/so3_shared/marielle/projects/.venv/lib/python3.13/site-packages/OpenMM.libs/lib/plugins/libOpenMMCUDA.so",
+              "mps_active": false,
+              "cuda_mps_pipe_directory": null,
+              "plugin_load_failures": []
+            }
+          },
+          "speedup_vs_openmm_cuda_mps": 0.3633440402560043
+        },
+        {
+          "B": 2,
+          "prolix_ms_per_step_batch": 0.4856514185667038,
+          "prolix_ms_per_step_per_replica": 0.2428257092833519,
+          "prolix_ns_per_day_per_replica": 711.6215186191866,
+          "prolix_ns_per_day_aggregate": 711.6215186191866,
+          "openmm_cuda_mps": null,
+          "speedup_vs_openmm_cuda_mps": null
+        },
+        {
+          "B": 4,
+          "prolix_ms_per_step_batch": 0.7395555824041367,
+          "prolix_ms_per_step_per_replica": 0.18488889560103416,
+          "prolix_ns_per_day_per_replica": 934.6153506854171,
+          "prolix_ns_per_day_aggregate": 934.6153506854171,
+          "openmm_cuda_mps": {
+            "available": true,
+            "ok": true,
+            "replicas_B": 4,
+            "precision": "single",
+            "n_steps": 30,
+            "dt_fs": 2.0,
+            "wall_elapsed_s": 0.010738331824541092,
+            "ms_per_step_batch": 0.3579443941513697,
+            "ms_per_step_per_replica": 0.08948609853784242,
+            "per_replica_ns_per_day": 482.7565477304983,
+            "aggregate_ns_per_day": 1931.0261909219932,
+            "total_gpu_memory_mb": 1816.0,
+            "memory_mb_per_replica": 454.0,
+            "mps_info": {
+              "mps_active": true,
+              "started_by_harness": true,
+              "pipe_dir": "/tmp/mps_28707383_4079273/pipe",
+              "log_dir": "/tmp/mps_28707383_4079273/log",
+              "stdout": "",
+              "stderr": ""
+            },
+            "provenance": {
+              "platform_name": "CUDA",
+              "device_name": "NVIDIA L40S",
+              "device_index": "0",
+              "precision": "single",
+              "cuda_Compiler": "openmm-nvrtc-builtin",
+              "CudaDriverVersion": "590.48.01",
+              "lib_openmm_cuda_path": "/orcd/pool/008/so3_shared/marielle/projects/.venv/lib/python3.13/site-packages/OpenMM.libs/lib/plugins/libOpenMMCUDA.so",
+              "mps_active": true,
+              "cuda_mps_pipe_directory": "/tmp/mps_28707383_4079273/pipe",
+              "plugin_load_failures": []
+            }
+          },
+          "speedup_vs_openmm_cuda_mps": 0.48399931346305197
+        },
+        {
+          "B": 8,
+          "prolix_ms_per_step_batch": 1.2543066591024399,
+          "prolix_ms_per_step_per_replica": 0.15678833238780499,
+          "prolix_ns_per_day_per_replica": 1102.1228261589724,
+          "prolix_ns_per_day_aggregate": 1102.1228261589724,
+          "openmm_cuda_mps": {
+            "available": true,
+            "ok": true,
+            "replicas_B": 8,
+            "precision": "single",
+            "n_steps": 30,
+            "dt_fs": 2.0,
+            "wall_elapsed_s": 0.019196975976228714,
+            "ms_per_step_batch": 0.6398991992076238,
+            "ms_per_step_per_replica": 0.07998739990095298,
+            "per_replica_ns_per_day": 270.0425320331316,
+            "aggregate_ns_per_day": 2160.3402562650526,
+            "total_gpu_memory_mb": 3632.0,
+            "memory_mb_per_replica": 454.0,
+            "mps_info": {
+              "mps_active": true,
+              "started_by_harness": true,
+              "pipe_dir": "/tmp/mps_28707383_4080359/pipe",
+              "log_dir": "/tmp/mps_28707383_4080359/log",
+              "stdout": "",
+              "stderr": ""
+            },
+            "provenance": {
+              "platform_name": "CUDA",
+              "device_name": "NVIDIA L40S",
+              "device_index": "0",
+              "precision": "single",
+              "cuda_Compiler": "openmm-nvrtc-builtin",
+              "CudaDriverVersion": "590.48.01",
+              "lib_openmm_cuda_path": "/orcd/pool/008/so3_shared/marielle/projects/.venv/lib/python3.13/site-packages/OpenMM.libs/lib/plugins/libOpenMMCUDA.so",
+              "mps_active": true,
+              "cuda_mps_pipe_directory": "/tmp/mps_28707383_4080359/pipe",
+              "plugin_load_failures": []
+            }
+          },
+          "speedup_vs_openmm_cuda_mps": 0.5101616853932073
+        },
+        {
+          "B": 16,
+          "prolix_ms_per_step_batch": 2.3238951712846756,
+          "prolix_ms_per_step_per_replica": 0.14524344820529222,
+          "prolix_ns_per_day_per_replica": 1189.7266426486815,
+          "prolix_ns_per_day_aggregate": 1189.7266426486815,
+          "openmm_cuda_mps": null,
+          "speedup_vs_openmm_cuda_mps": null
+        }
+      ]
+    },
+    "cross_size_ragged_screen": {
+      "systems": [
+        "1UAO_2k",
+        "1VII_4k",
+        "1UBQ_7k",
+        "Holo_Lysozyme_15k",
+        "Holo_DHFR_24k"
+      ],
+      "n_real_atoms_list": [
+        1962,
+        4199,
+        6656,
+        15002,
+        23558
+      ],
+      "bucket_atoms": 25000,
+      "prolix_ms_per_step_batch": 0.752020850777626,
+      "prolix_ms_per_step_per_replica": 0.1504041701555252,
+      "prolix_ns_per_day_per_replica": 1148.9043144303541,
+      "prolix_ns_per_day_aggregate": 1148.904314430354,
+      "openmm_cuda_mps": {
+        "available": true,
+        "ok": true,
+        "replicas_B": 5,
+        "precision": "single",
+        "n_steps": 30,
+        "dt_fs": 2.0,
+        "wall_elapsed_s": 0.008124122396111488,
+        "ms_per_step_batch": 0.27080407987038296,
+        "ms_per_step_per_replica": 0.05416081597407659,
+        "per_replica_ns_per_day": 638.0996921564424,
+        "aggregate_ns_per_day": 3190.498460782212,
+        "total_gpu_memory_mb": 2232.0,
+        "memory_mb_per_replica": 446.4,
+        "mps_info": {
+          "mps_active": true,
+          "started_by_harness": true,
+          "pipe_dir": "/tmp/mps_28707383_4083120/pipe",
+          "log_dir": "/tmp/mps_28707383_4083120/log",
+          "stdout": "",
+          "stderr": ""
+        },
+        "provenance": {
+          "platform_name": "CUDA",
+          "device_name": "NVIDIA L40S",
+          "device_index": "0",
+          "precision": "single",
+          "cuda_Compiler": "openmm-nvrtc-builtin",
+          "CudaDriverVersion": "590.48.01",
+          "lib_openmm_cuda_path": "/orcd/pool/008/so3_shared/marielle/projects/.venv/lib/python3.13/site-packages/OpenMM.libs/lib/plugins/libOpenMMCUDA.so",
+          "mps_active": true,
+          "cuda_mps_pipe_directory": "/tmp/mps_28707383_4083120/pipe",
+          "plugin_load_failures": []
+        }
+      },
+      "speedup_vs_openmm_cuda_mps": 0.36010182375975136
+    }
+  }
+}

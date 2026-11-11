@@ -1,0 +1,3761 @@
+{
+  "schema_version": "pallas_v34_cuda_mps_ladder_v1",
+  "gpu_tag": "h200",
+  "suites_requested": "A,B,C",
+  "device_kind": "NVIDIA H200",
+  "jax_version": "0.10.2",
+  "openmm_inventory": {
+    "openmm_version": "8.3.1",
+    "python_executable": "/orcd/pool/008/so3_shared/marielle/projects/.venv/bin/python",
+    "default_plugin_dir": "/usr/local/openmm/lib/plugins",
+    "env_plugin_dir": null,
+    "platforms": [
+      "Reference",
+      "CPU",
+      "CUDA",
+      "OpenCL"
+    ],
+    "has_cuda_platform": true,
+    "lib_openmm_cuda_path": "/orcd/pool/008/so3_shared/marielle/projects/.venv/lib/python3.13/site-packages/OpenMM.libs/lib/plugins/libOpenMMCUDA.so",
+    "plugin_load_failures": [],
+    "mps_active": false
+  },
+  "quick_mode": true,
+  "total_wall_s": 2307.043260205537,
+  "suites_a_and_b": {
+    "suite_a_gbsa": {
+      "system": "5DFR_gbsa_implicit",
+      "n_real_atoms": 2489,
+      "openmm": {
+        "openmm_cuda_single_b1": {
+          "platform": "CUDA",
+          "precision": "single",
+          "ms_per_step": 0.11881094425916672,
+          "ns_per_day": 1454.4114692251326,
+          "provenance": {
+            "platform_name": "CUDA",
+            "device_name": "NVIDIA H200",
+            "device_index": "0",
+            "precision": "single",
+            "cuda_Compiler": "openmm-nvrtc-builtin",
+            "CudaDriverVersion": "590.48.01",
+            "lib_openmm_cuda_path": "/orcd/pool/008/so3_shared/marielle/projects/.venv/lib/python3.13/site-packages/OpenMM.libs/lib/plugins/libOpenMMCUDA.so",
+            "mps_active": false,
+            "cuda_mps_pipe_directory": null,
+            "plugin_load_failures": []
+          }
+        },
+        "openmm_cuda_mixed_b1": {
+          "platform": "CUDA",
+          "precision": "mixed",
+          "ms_per_step": 0.12136692181229591,
+          "ns_per_day": 1423.7816813649572,
+          "provenance": {
+            "platform_name": "CUDA",
+            "device_name": "NVIDIA H200",
+            "device_index": "0",
+            "precision": "mixed",
+            "cuda_Compiler": "openmm-nvrtc-builtin",
+            "CudaDriverVersion": "590.48.01",
+            "lib_openmm_cuda_path": "/orcd/pool/008/so3_shared/marielle/projects/.venv/lib/python3.13/site-packages/OpenMM.libs/lib/plugins/libOpenMMCUDA.so",
+            "mps_active": false,
+            "cuda_mps_pipe_directory": null,
+            "plugin_load_failures": []
+          }
+        },
+        "openmm_cuda_mps_scaling": {
+          "B=1": {
+            "available": true,
+            "ok": true,
+            "replicas_B": 1,
+            "precision": "single",
+            "n_steps": 30,
+            "dt_fs": 2.0,
+            "wall_elapsed_s": 0.0036767451092600822,
+            "ms_per_step_batch": 0.12255817030866942,
+            "ms_per_step_per_replica": 0.12255817030866942,
+            "per_replica_ns_per_day": 1409.9427199736565,
+            "aggregate_ns_per_day": 1409.9427199736565,
+            "total_gpu_memory_mb": 522.0,
+            "memory_mb_per_replica": 522.0,
+            "mps_info": {
+              "mps_active": false,
+              "started_by_harness": false
+            },
+            "provenance": {
+              "platform_name": "CUDA",
+              "device_name": "NVIDIA H200",
+              "device_index": "0",
+              "precision": "single",
+              "cuda_Compiler": "openmm-nvrtc-builtin",
+              "CudaDriverVersion": "590.48.01",
+              "lib_openmm_cuda_path": "/orcd/pool/008/so3_shared/marielle/projects/.venv/lib/python3.13/site-packages/OpenMM.libs/lib/plugins/libOpenMMCUDA.so",
+              "mps_active": false,
+              "cuda_mps_pipe_directory": null,
+              "plugin_load_failures": []
+            }
+          },
+          "B=4": {
+            "available": true,
+            "ok": true,
+            "replicas_B": 4,
+            "precision": "single",
+            "n_steps": 30,
+            "dt_fs": 2.0,
+            "wall_elapsed_s": 0.007353714667260647,
+            "ms_per_step_batch": 0.24512382224202156,
+            "ms_per_step_per_replica": 0.06128095556050539,
+            "per_replica_ns_per_day": 704.9498429793043,
+            "aggregate_ns_per_day": 2819.7993719172173,
+            "total_gpu_memory_mb": 2080.0,
+            "memory_mb_per_replica": 520.0,
+            "mps_info": {
+              "mps_active": true,
+              "started_by_harness": true,
+              "pipe_dir": "/tmp/mps_28703506_362917/pipe",
+              "log_dir": "/tmp/mps_28703506_362917/log",
+              "stdout": "",
+              "stderr": ""
+            },
+            "provenance": {
+              "platform_name": "CUDA",
+              "device_name": "NVIDIA H200",
+              "device_index": "0",
+              "precision": "single",
+              "cuda_Compiler": "openmm-nvrtc-builtin",
+              "CudaDriverVersion": "590.48.01",
+              "lib_openmm_cuda_path": "/orcd/pool/008/so3_shared/marielle/projects/.venv/lib/python3.13/site-packages/OpenMM.libs/lib/plugins/libOpenMMCUDA.so",
+              "mps_active": true,
+              "cuda_mps_pipe_directory": "/tmp/mps_28703506_362917/pipe",
+              "plugin_load_failures": []
+            }
+          },
+          "B=8": {
+            "available": true,
+            "ok": true,
+            "replicas_B": 8,
+            "precision": "single",
+            "n_steps": 30,
+            "dt_fs": 2.0,
+            "wall_elapsed_s": 0.013524002395570278,
+            "ms_per_step_batch": 0.4508000798523426,
+            "ms_per_step_per_replica": 0.056350009981542826,
+            "per_replica_ns_per_day": 383.3184769102077,
+            "aggregate_ns_per_day": 3066.5478152816618,
+            "total_gpu_memory_mb": 4160.0,
+            "memory_mb_per_replica": 520.0,
+            "mps_info": {
+              "mps_active": true,
+              "started_by_harness": true,
+              "pipe_dir": "/tmp/mps_28703506_364281/pipe",
+              "log_dir": "/tmp/mps_28703506_364281/log",
+              "stdout": "",
+              "stderr": ""
+            },
+            "provenance": {
+              "platform_name": "CUDA",
+              "device_name": "NVIDIA H200",
+              "device_index": "0",
+              "precision": "single",
+              "cuda_Compiler": "openmm-nvrtc-builtin",
+              "CudaDriverVersion": "590.48.01",
+              "lib_openmm_cuda_path": "/orcd/pool/008/so3_shared/marielle/projects/.venv/lib/python3.13/site-packages/OpenMM.libs/lib/plugins/libOpenMMCUDA.so",
+              "mps_active": true,
+              "cuda_mps_pipe_directory": "/tmp/mps_28703506_364281/pipe",
+              "plugin_load_failures": []
+            }
+          }
+        }
+      },
+      "batch_scaling": [
+        {
+          "B": 1,
+          "ms_per_step_batch": 0.8025146275758743,
+          "ms_per_step_per_replica": 0.8025146275758743,
+          "ns_per_day_per_replica": 215.32317799859976,
+          "ns_per_day_aggregate": 215.32317799859976,
+          "speedup_vs_openmm_cuda_single_b1": 0.1480483223315872,
+          "speedup_vs_openmm_cuda_mps_same_B": 0.1527176777809973
+        },
+        {
+          "B": 2,
+          "ms_per_step_batch": 1.0024115070700645,
+          "ms_per_step_per_replica": 0.5012057535350323,
+          "ns_per_day_per_replica": 344.76858811223116,
+          "ns_per_day_aggregate": 344.76858811223116,
+          "speedup_vs_openmm_cuda_single_b1": 0.23705024018815918,
+          "speedup_vs_openmm_cuda_mps_same_B": null
+        },
+        {
+          "B": 4,
+          "ms_per_step_batch": 1.6278912127017975,
+          "ms_per_step_per_replica": 0.40697280317544937,
+          "ns_per_day_per_replica": 424.5983973663824,
+          "ns_per_day_aggregate": 424.5983973663824,
+          "speedup_vs_openmm_cuda_single_b1": 0.29193829005803695,
+          "speedup_vs_openmm_cuda_mps_same_B": 0.1505775203707818
+        },
+        {
+          "B": 8,
+          "ms_per_step_batch": 2.4172332137823105,
+          "ms_per_step_per_replica": 0.3021541517227888,
+          "ns_per_day_per_replica": 571.8935153290075,
+          "ns_per_day_aggregate": 571.8935153290075,
+          "speedup_vs_openmm_cuda_single_b1": 0.3932130125690603,
+          "speedup_vs_openmm_cuda_mps_same_B": 0.18649424361787725
+        },
+        {
+          "B": 16,
+          "ms_per_step_batch": 4.161570928990841,
+          "ms_per_step_per_replica": 0.26009818306192756,
+          "ns_per_day_per_replica": 664.3645025342508,
+          "ns_per_day_aggregate": 664.3645025342508,
+          "speedup_vs_openmm_cuda_single_b1": 0.45679267290721004,
+          "speedup_vs_openmm_cuda_mps_same_B": null
+        },
+        {
+          "B": 32,
+          "ms_per_step_batch": 7.963712178170681,
+          "ms_per_step_per_replica": 0.24886600556783378,
+          "ns_per_day_per_replica": 694.3495541133666,
+          "ns_per_day_aggregate": 694.3495541133666,
+          "speedup_vs_openmm_cuda_single_b1": 0.47740929496609064,
+          "speedup_vs_openmm_cuda_mps_same_B": null
+        }
+      ]
+    },
+    "explicit_ladder": [
+      {
+        "system": "1UAO_solvated_2k",
+        "suites": [
+          "SuiteB"
+        ],
+        "kind": "trunc",
+        "n_real_atoms": 1962,
+        "bucket_atoms": 4096,
+        "bucket_waters": 1024,
+        "occupancy_pct": 47.900390625,
+        "electrostatics": "pme",
+        "pme_grid": [
+          32,
+          32,
+          32
+        ],
+        "openmm": {
+          "openmm_cuda_single_b1": {
+            "platform": "CUDA",
+            "precision": "single",
+            "ms_per_step": 0.11502301786094904,
+            "ns_per_day": 1502.3080007246667,
+            "provenance": {
+              "platform_name": "CUDA",
+              "device_name": "NVIDIA H200",
+              "device_index": "0",
+              "precision": "single",
+              "cuda_Compiler": "openmm-nvrtc-builtin",
+              "CudaDriverVersion": "590.48.01",
+              "lib_openmm_cuda_path": "/orcd/pool/008/so3_shared/marielle/projects/.venv/lib/python3.13/site-packages/OpenMM.libs/lib/plugins/libOpenMMCUDA.so",
+              "mps_active": false,
+              "cuda_mps_pipe_directory": null,
+              "plugin_load_failures": []
+            }
+          },
+          "openmm_cuda_mixed_b1": {
+            "platform": "CUDA",
+            "precision": "mixed",
+            "ms_per_step": 0.11642798781394958,
+            "ns_per_day": 1484.1792187985945,
+            "provenance": {
+              "platform_name": "CUDA",
+              "device_name": "NVIDIA H200",
+              "device_index": "0",
+              "precision": "mixed",
+              "cuda_Compiler": "openmm-nvrtc-builtin",
+              "CudaDriverVersion": "590.48.01",
+              "lib_openmm_cuda_path": "/orcd/pool/008/so3_shared/marielle/projects/.venv/lib/python3.13/site-packages/OpenMM.libs/lib/plugins/libOpenMMCUDA.so",
+              "mps_active": false,
+              "cuda_mps_pipe_directory": null,
+              "plugin_load_failures": []
+            }
+          },
+          "openmm_cuda_mps_scaling": {
+            "B=1": {
+              "available": true,
+              "ok": true,
+              "replicas_B": 1,
+              "precision": "single",
+              "n_steps": 30,
+              "dt_fs": 2.0,
+              "wall_elapsed_s": 0.0037432434037327766,
+              "ms_per_step_batch": 0.12477478012442589,
+              "ms_per_step_per_replica": 0.12477478012442589,
+              "per_replica_ns_per_day": 1384.8952474825696,
+              "aggregate_ns_per_day": 1384.8952474825696,
+              "total_gpu_memory_mb": 534.0,
+              "memory_mb_per_replica": 534.0,
+              "mps_info": {
+                "mps_active": false,
+                "started_by_harness": false
+              },
+              "provenance": {
+                "platform_name": "CUDA",
+                "device_name": "NVIDIA H200",
+                "device_index": "0",
+                "precision": "single",
+                "cuda_Compiler": "openmm-nvrtc-builtin",
+                "CudaDriverVersion": "590.48.01",
+                "lib_openmm_cuda_path": "/orcd/pool/008/so3_shared/marielle/projects/.venv/lib/python3.13/site-packages/OpenMM.libs/lib/plugins/libOpenMMCUDA.so",
+                "mps_active": false,
+                "cuda_mps_pipe_directory": null,
+                "plugin_load_failures": []
+              }
+            },
+            "B=4": {
+              "available": true,
+              "ok": true,
+              "replicas_B": 4,
+              "precision": "single",
+              "n_steps": 30,
+              "dt_fs": 2.0,
+              "wall_elapsed_s": 0.005540741607546806,
+              "ms_per_step_batch": 0.18469138691822687,
+              "ms_per_step_per_replica": 0.04617284672955672,
+              "per_replica_ns_per_day": 935.6148268923235,
+              "aggregate_ns_per_day": 3742.459307569294,
+              "total_gpu_memory_mb": 2128.0,
+              "memory_mb_per_replica": 532.0,
+              "mps_info": {
+                "mps_active": true,
+                "started_by_harness": true,
+                "pipe_dir": "/tmp/mps_28707398_3125218/pipe",
+                "log_dir": "/tmp/mps_28707398_3125218/log",
+                "stdout": "",
+                "stderr": ""
+              },
+              "provenance": {
+                "platform_name": "CUDA",
+                "device_name": "NVIDIA H200",
+                "device_index": "0",
+                "precision": "single",
+                "cuda_Compiler": "openmm-nvrtc-builtin",
+                "CudaDriverVersion": "590.48.01",
+                "lib_openmm_cuda_path": "/orcd/pool/008/so3_shared/marielle/projects/.venv/lib/python3.13/site-packages/OpenMM.libs/lib/plugins/libOpenMMCUDA.so",
+                "mps_active": true,
+                "cuda_mps_pipe_directory": "/tmp/mps_28707398_3125218/pipe",
+                "plugin_load_failures": []
+              }
+            },
+            "B=8": {
+              "available": true,
+              "ok": true,
+              "replicas_B": 8,
+              "precision": "single",
+              "n_steps": 30,
+              "dt_fs": 2.0,
+              "wall_elapsed_s": 0.007321462035179138,
+              "ms_per_step_batch": 0.24404873450597128,
+              "ms_per_step_per_replica": 0.03050609181324641,
+              "per_replica_ns_per_day": 708.0553003063083,
+              "aggregate_ns_per_day": 5664.442402450466,
+              "total_gpu_memory_mb": 4256.0,
+              "memory_mb_per_replica": 532.0,
+              "mps_info": {
+                "mps_active": true,
+                "started_by_harness": true,
+                "pipe_dir": "/tmp/mps_28707398_3126626/pipe",
+                "log_dir": "/tmp/mps_28707398_3126626/log",
+                "stdout": "",
+                "stderr": ""
+              },
+              "provenance": {
+                "platform_name": "CUDA",
+                "device_name": "NVIDIA H200",
+                "device_index": "0",
+                "precision": "single",
+                "cuda_Compiler": "openmm-nvrtc-builtin",
+                "CudaDriverVersion": "590.48.01",
+                "lib_openmm_cuda_path": "/orcd/pool/008/so3_shared/marielle/projects/.venv/lib/python3.13/site-packages/OpenMM.libs/lib/plugins/libOpenMMCUDA.so",
+                "mps_active": true,
+                "cuda_mps_pipe_directory": "/tmp/mps_28707398_3126626/pipe",
+                "plugin_load_failures": []
+              }
+            },
+            "B=16": {
+              "available": true,
+              "ok": true,
+              "replicas_B": 16,
+              "precision": "single",
+              "n_steps": 30,
+              "dt_fs": 2.0,
+              "wall_elapsed_s": 0.013235502876341343,
+              "ms_per_step_batch": 0.4411834292113781,
+              "ms_per_step_per_replica": 0.02757396432571113,
+              "per_replica_ns_per_day": 391.6738221761469,
+              "aggregate_ns_per_day": 6266.781154818351,
+              "total_gpu_memory_mb": 8512.0,
+              "memory_mb_per_replica": 532.0,
+              "mps_info": {
+                "mps_active": true,
+                "started_by_harness": true,
+                "pipe_dir": "/tmp/mps_28707398_3129078/pipe",
+                "log_dir": "/tmp/mps_28707398_3129078/log",
+                "stdout": "",
+                "stderr": ""
+              },
+              "provenance": {
+                "platform_name": "CUDA",
+                "device_name": "NVIDIA H200",
+                "device_index": "0",
+                "precision": "single",
+                "cuda_Compiler": "openmm-nvrtc-builtin",
+                "CudaDriverVersion": "590.48.01",
+                "lib_openmm_cuda_path": "/orcd/pool/008/so3_shared/marielle/projects/.venv/lib/python3.13/site-packages/OpenMM.libs/lib/plugins/libOpenMMCUDA.so",
+                "mps_active": true,
+                "cuda_mps_pipe_directory": "/tmp/mps_28707398_3129078/pipe",
+                "plugin_load_failures": []
+              }
+            }
+          }
+        },
+        "substep_breakdown": {
+          "B=1": {
+            "total_substeps_ms": 0.3060459718108177,
+            "baoab_pre_force_ms": 0.04903431981801987,
+            "bonded_and_nonbonded_direct_mk48_ms": 0.044525861740112305,
+            "pme_spread_3d_bspline_ms": 0.07372099906206131,
+            "pme_rfft3d_and_influence_ms": 0.030655898153781887,
+            "pme_irfft3d_ms": 0.03975939005613327,
+            "pme_gather_3d_bspline_fused_scale_ms": 0.0333491712808609,
+            "baoab_post_force_ms": 0.035000331699848175,
+            "baoab_pre_force_pct": 16.021880480207866,
+            "bonded_and_nonbonded_direct_mk48_pct": 14.548749482524135,
+            "pme_spread_3d_bspline_pct": 24.08821087429046,
+            "pme_rfft3d_and_influence_pct": 10.016762505448634,
+            "pme_irfft3d_pct": 12.99131297853204,
+            "pme_gather_3d_bspline_fused_scale_pct": 10.896784912260072,
+            "baoab_post_force_pct": 11.436298766736792,
+            "nonbonded_tile_pairs_mk51_ms_per_rep": 0.03211211413145065,
+            "num_valid_tile_pairs_aabb_pruned": 128
+          },
+          "B=4": {
+            "total_substeps_ms": 0.08125507272779942,
+            "baoab_pre_force_ms": 0.011494774371385574,
+            "bonded_and_nonbonded_direct_mk48_ms": 0.015745507553219795,
+            "pme_spread_3d_bspline_ms": 0.00937366858124733,
+            "pme_rfft3d_and_influence_ms": 0.009541576728224754,
+            "pme_irfft3d_ms": 0.013031475245952606,
+            "pme_gather_3d_bspline_fused_scale_ms": 0.011090021580457687,
+            "baoab_post_force_ms": 0.010978048667311668,
+            "baoab_pre_force_pct": 14.146531392436895,
+            "bonded_and_nonbonded_direct_mk48_pct": 19.377876389288936,
+            "pme_spread_3d_bspline_pct": 11.536102629122823,
+            "pme_rfft3d_and_influence_pct": 11.742745908539861,
+            "pme_irfft3d_pct": 16.03773747099756,
+            "pme_gather_3d_bspline_fused_scale_pct": 13.648405211092145,
+            "baoab_post_force_pct": 13.510600998521783,
+            "nonbonded_tile_pairs_mk51_ms_per_rep": 0.009240573272109032,
+            "num_valid_tile_pairs_aabb_pruned": 128
+          }
+        },
+        "batch_scaling": [
+          {
+            "B": 1,
+            "ms_per_step_batch": 0.15929273019234338,
+            "ms_per_step_per_replica": 0.15929273019234338,
+            "ns_per_day_per_replica": 1084.7952683800872,
+            "ns_per_day_aggregate": 1084.7952683800872,
+            "speedup_vs_openmm_cuda_single_b1": 0.7220857958932627,
+            "speedup_vs_openmm_cuda_mps_same_B": 0.7833049253017533
+          },
+          {
+            "B": 2,
+            "ms_per_step_batch": 0.26657325215637684,
+            "ms_per_step_per_replica": 0.13328662607818842,
+            "ns_per_day_per_replica": 1296.4541536120232,
+            "ns_per_day_aggregate": 1296.4541536120232,
+            "speedup_vs_openmm_cuda_single_b1": 0.8629749378866743,
+            "speedup_vs_openmm_cuda_mps_same_B": null
+          },
+          {
+            "B": 4,
+            "ms_per_step_batch": 0.32549131040771806,
+            "ms_per_step_per_replica": 0.08137282760192951,
+            "ns_per_day_per_replica": 2123.55899496729,
+            "ns_per_day_aggregate": 2123.55899496729,
+            "speedup_vs_openmm_cuda_single_b1": 1.4135310428640138,
+            "speedup_vs_openmm_cuda_mps_same_B": 0.5674234027534502
+          },
+          {
+            "B": 8,
+            "ms_per_step_batch": 0.6770080327987671,
+            "ms_per_step_per_replica": 0.08462600409984589,
+            "ns_per_day_per_replica": 2041.9255504031848,
+            "ns_per_day_aggregate": 2041.9255504031848,
+            "speedup_vs_openmm_cuda_single_b1": 1.359192355640936,
+            "speedup_vs_openmm_cuda_mps_same_B": 0.3604812981273916
+          },
+          {
+            "B": 16,
+            "ms_per_step_batch": 1.0083707422018051,
+            "ms_per_step_per_replica": 0.06302317138761282,
+            "ns_per_day_per_replica": 2741.8486914475357,
+            "ns_per_day_aggregate": 2741.8486914475357,
+            "speedup_vs_openmm_cuda_single_b1": 1.8250909201874403,
+            "speedup_vs_openmm_cuda_mps_same_B": 0.437521053266621
+          },
+          {
+            "B": 32,
+            "ms_per_step_batch": 1.6476314514875412,
+            "ms_per_step_per_replica": 0.05148848285898566,
+            "ns_per_day_per_replica": 3356.0903410818464,
+            "ns_per_day_aggregate": 3356.0903410818464,
+            "speedup_vs_openmm_cuda_single_b1": 2.2339562456320357,
+            "speedup_vs_openmm_cuda_mps_same_B": null
+          }
+        ]
+      },
+      {
+        "system": "1VII_solvated_4k",
+        "suites": [
+          "SuiteB"
+        ],
+        "kind": "trunc",
+        "n_real_atoms": 4199,
+        "bucket_atoms": 8192,
+        "bucket_waters": 2048,
+        "occupancy_pct": 51.25732421875,
+        "electrostatics": "pme",
+        "pme_grid": [
+          40,
+          40,
+          40
+        ],
+        "openmm": {
+          "openmm_cuda_single_b1": {
+            "platform": "CUDA",
+            "precision": "single",
+            "ms_per_step": 0.12491613160818814,
+            "ns_per_day": 1383.3281400516337,
+            "provenance": {
+              "platform_name": "CUDA",
+              "device_name": "NVIDIA H200",
+              "device_index": "0",
+              "precision": "single",
+              "cuda_Compiler": "openmm-nvrtc-builtin",
+              "CudaDriverVersion": "590.48.01",
+              "lib_openmm_cuda_path": "/orcd/pool/008/so3_shared/marielle/projects/.venv/lib/python3.13/site-packages/OpenMM.libs/lib/plugins/libOpenMMCUDA.so",
+              "mps_active": false,
+              "cuda_mps_pipe_directory": null,
+              "plugin_load_failures": []
+            }
+          },
+          "openmm_cuda_mixed_b1": {
+            "platform": "CUDA",
+            "precision": "mixed",
+            "ms_per_step": 0.12836854439228773,
+            "ns_per_day": 1346.1241678641459,
+            "provenance": {
+              "platform_name": "CUDA",
+              "device_name": "NVIDIA H200",
+              "device_index": "0",
+              "precision": "mixed",
+              "cuda_Compiler": "openmm-nvrtc-builtin",
+              "CudaDriverVersion": "590.48.01",
+              "lib_openmm_cuda_path": "/orcd/pool/008/so3_shared/marielle/projects/.venv/lib/python3.13/site-packages/OpenMM.libs/lib/plugins/libOpenMMCUDA.so",
+              "mps_active": false,
+              "cuda_mps_pipe_directory": null,
+              "plugin_load_failures": []
+            }
+          },
+          "openmm_cuda_mps_scaling": {
+            "B=1": {
+              "available": true,
+              "ok": true,
+              "replicas_B": 1,
+              "precision": "single",
+              "n_steps": 30,
+              "dt_fs": 2.0,
+              "wall_elapsed_s": 0.004018193110823631,
+              "ms_per_step_batch": 0.13393977036078772,
+              "ms_per_step_per_replica": 0.13393977036078772,
+              "per_replica_ns_per_day": 1290.1321208371207,
+              "aggregate_ns_per_day": 1290.1321208371207,
+              "total_gpu_memory_mb": 536.0,
+              "memory_mb_per_replica": 536.0,
+              "mps_info": {
+                "mps_active": false,
+                "started_by_harness": false
+              },
+              "provenance": {
+                "platform_name": "CUDA",
+                "device_name": "NVIDIA H200",
+                "device_index": "0",
+                "precision": "single",
+                "cuda_Compiler": "openmm-nvrtc-builtin",
+                "CudaDriverVersion": "590.48.01",
+                "lib_openmm_cuda_path": "/orcd/pool/008/so3_shared/marielle/projects/.venv/lib/python3.13/site-packages/OpenMM.libs/lib/plugins/libOpenMMCUDA.so",
+                "mps_active": false,
+                "cuda_mps_pipe_directory": null,
+                "plugin_load_failures": []
+              }
+            },
+            "B=4": {
+              "available": true,
+              "ok": true,
+              "replicas_B": 4,
+              "precision": "single",
+              "n_steps": 30,
+              "dt_fs": 2.0,
+              "wall_elapsed_s": 0.0063575441017746925,
+              "ms_per_step_batch": 0.21191813672582308,
+              "ms_per_step_per_replica": 0.05297953418145577,
+              "per_replica_ns_per_day": 815.4092078658014,
+              "aggregate_ns_per_day": 3261.6368314632055,
+              "total_gpu_memory_mb": 2136.0,
+              "memory_mb_per_replica": 534.0,
+              "mps_info": {
+                "mps_active": true,
+                "started_by_harness": true,
+                "pipe_dir": "/tmp/mps_28707398_3152101/pipe",
+                "log_dir": "/tmp/mps_28707398_3152101/log",
+                "stdout": "",
+                "stderr": ""
+              },
+              "provenance": {
+                "platform_name": "CUDA",
+                "device_name": "NVIDIA H200",
+                "device_index": "0",
+                "precision": "single",
+                "cuda_Compiler": "openmm-nvrtc-builtin",
+                "CudaDriverVersion": "590.48.01",
+                "lib_openmm_cuda_path": "/orcd/pool/008/so3_shared/marielle/projects/.venv/lib/python3.13/site-packages/OpenMM.libs/lib/plugins/libOpenMMCUDA.so",
+                "mps_active": true,
+                "cuda_mps_pipe_directory": "/tmp/mps_28707398_3152101/pipe",
+                "plugin_load_failures": []
+              }
+            },
+            "B=8": {
+              "available": true,
+              "ok": true,
+              "replicas_B": 8,
+              "precision": "single",
+              "n_steps": 30,
+              "dt_fs": 2.0,
+              "wall_elapsed_s": 0.010225885547697544,
+              "ms_per_step_batch": 0.34086285158991814,
+              "ms_per_step_per_replica": 0.04260785644873977,
+              "per_replica_ns_per_day": 506.94876016554156,
+              "aggregate_ns_per_day": 4055.5900813243325,
+              "total_gpu_memory_mb": 4272.0,
+              "memory_mb_per_replica": 534.0,
+              "mps_info": {
+                "mps_active": true,
+                "started_by_harness": true,
+                "pipe_dir": "/tmp/mps_28707398_3153778/pipe",
+                "log_dir": "/tmp/mps_28707398_3153778/log",
+                "stdout": "",
+                "stderr": ""
+              },
+              "provenance": {
+                "platform_name": "CUDA",
+                "device_name": "NVIDIA H200",
+                "device_index": "0",
+                "precision": "single",
+                "cuda_Compiler": "openmm-nvrtc-builtin",
+                "CudaDriverVersion": "590.48.01",
+                "lib_openmm_cuda_path": "/orcd/pool/008/so3_shared/marielle/projects/.venv/lib/python3.13/site-packages/OpenMM.libs/lib/plugins/libOpenMMCUDA.so",
+                "mps_active": true,
+                "cuda_mps_pipe_directory": "/tmp/mps_28707398_3153778/pipe",
+                "plugin_load_failures": []
+              }
+            },
+            "B=16": {
+              "available": true,
+              "ok": true,
+              "replicas_B": 16,
+              "precision": "single",
+              "n_steps": 30,
+              "dt_fs": 2.0,
+              "wall_elapsed_s": 0.021012622863054276,
+              "ms_per_step_batch": 0.7004207621018091,
+              "ms_per_step_per_replica": 0.04377629763136307,
+              "per_replica_ns_per_day": 246.70884895168595,
+              "aggregate_ns_per_day": 3947.341583226975,
+              "total_gpu_memory_mb": 8544.0,
+              "memory_mb_per_replica": 534.0,
+              "mps_info": {
+                "mps_active": true,
+                "started_by_harness": true,
+                "pipe_dir": "/tmp/mps_28707398_3156227/pipe",
+                "log_dir": "/tmp/mps_28707398_3156227/log",
+                "stdout": "",
+                "stderr": ""
+              },
+              "provenance": {
+                "platform_name": "CUDA",
+                "device_name": "NVIDIA H200",
+                "device_index": "0",
+                "precision": "single",
+                "cuda_Compiler": "openmm-nvrtc-builtin",
+                "CudaDriverVersion": "590.48.01",
+                "lib_openmm_cuda_path": "/orcd/pool/008/so3_shared/marielle/projects/.venv/lib/python3.13/site-packages/OpenMM.libs/lib/plugins/libOpenMMCUDA.so",
+                "mps_active": true,
+                "cuda_mps_pipe_directory": "/tmp/mps_28707398_3156227/pipe",
+                "plugin_load_failures": []
+              }
+            }
+          }
+        },
+        "substep_breakdown": {
+          "B=1": {
+            "total_substeps_ms": 0.27342136949300766,
+            "baoab_pre_force_ms": 0.04432588815689087,
+            "bonded_and_nonbonded_direct_mk48_ms": 0.04474598914384842,
+            "pme_spread_3d_bspline_ms": 0.031136833131313324,
+            "pme_rfft3d_and_influence_ms": 0.03301750868558884,
+            "pme_irfft3d_ms": 0.04920098930597305,
+            "pme_gather_3d_bspline_fused_scale_ms": 0.036168769001960754,
+            "baoab_post_force_ms": 0.034825392067432404,
+            "baoab_pre_force_pct": 16.211566871705116,
+            "bonded_and_nonbonded_direct_mk48_pct": 16.36521286789646,
+            "pme_spread_3d_bspline_pct": 11.387856475537696,
+            "pme_rfft3d_and_influence_pct": 12.07568696872949,
+            "pme_irfft3d_pct": 17.994566188152785,
+            "pme_gather_3d_bspline_fused_scale_pct": 13.228215873918998,
+            "baoab_post_force_pct": 12.736894754059453,
+            "nonbonded_tile_pairs_mk51_ms_per_rep": 0.03885909914970398,
+            "num_valid_tile_pairs_aabb_pruned": 256
+          },
+          "B=4": {
+            "total_substeps_ms": 0.19167814403772354,
+            "baoab_pre_force_ms": 0.11801554821431637,
+            "bonded_and_nonbonded_direct_mk48_ms": 0.029508862644433975,
+            "pme_spread_3d_bspline_ms": 0.007852427661418915,
+            "pme_rfft3d_and_influence_ms": 0.007486594840884209,
+            "pme_irfft3d_ms": 0.011178441345691681,
+            "pme_gather_3d_bspline_fused_scale_ms": 0.008010119199752808,
+            "baoab_post_force_ms": 0.009626150131225586,
+            "baoab_pre_force_pct": 61.56964259372739,
+            "bonded_and_nonbonded_direct_mk48_pct": 15.395006453436045,
+            "pme_spread_3d_bspline_pct": 4.096673463132816,
+            "pme_rfft3d_and_influence_pct": 3.9058155944012043,
+            "pme_irfft3d_pct": 5.831881042990321,
+            "pme_gather_3d_bspline_fused_scale_pct": 4.178942382797886,
+            "baoab_post_force_pct": 5.022038469514341,
+            "nonbonded_tile_pairs_mk51_ms_per_rep": 0.009410372003912926,
+            "num_valid_tile_pairs_aabb_pruned": 256
+          }
+        },
+        "batch_scaling": [
+          {
+            "B": 1,
+            "ms_per_step_batch": 0.2041923968742291,
+            "ms_per_step_per_replica": 0.2041923968742291,
+            "ns_per_day_per_replica": 846.260696505928,
+            "ns_per_day_aggregate": 846.260696505928,
+            "speedup_vs_openmm_cuda_single_b1": 0.6117570170114089,
+            "speedup_vs_openmm_cuda_mps_same_B": 0.6559488620102099
+          },
+          {
+            "B": 2,
+            "ms_per_step_batch": 0.3355184569954872,
+            "ms_per_step_per_replica": 0.1677592284977436,
+            "ns_per_day_per_replica": 1030.0476554845636,
+            "ns_per_day_aggregate": 1030.0476554845636,
+            "speedup_vs_openmm_cuda_single_b1": 0.7446155584213854,
+            "speedup_vs_openmm_cuda_mps_same_B": null
+          },
+          {
+            "B": 4,
+            "ms_per_step_batch": 0.4500417970120907,
+            "ms_per_step_per_replica": 0.11251044925302267,
+            "ns_per_day_per_replica": 1535.8573461154108,
+            "ns_per_day_aggregate": 1535.8573461154108,
+            "speedup_vs_openmm_cuda_single_b1": 1.1102624906177965,
+            "speedup_vs_openmm_cuda_mps_same_B": 0.4708854558238504
+          },
+          {
+            "B": 8,
+            "ms_per_step_batch": 0.8598295971751213,
+            "ms_per_step_per_replica": 0.10747869964689016,
+            "ns_per_day_per_replica": 1607.7604266493363,
+            "ns_per_day_aggregate": 1607.7604266493363,
+            "speedup_vs_openmm_cuda_single_b1": 1.1622408162602154,
+            "speedup_vs_openmm_cuda_mps_same_B": 0.3964307029087935
+          },
+          {
+            "B": 16,
+            "ms_per_step_batch": 1.3567331805825233,
+            "ms_per_step_per_replica": 0.08479582378640771,
+            "ns_per_day_per_replica": 2037.8362080102684,
+            "ns_per_day_aggregate": 2037.8362080102684,
+            "speedup_vs_openmm_cuda_single_b1": 1.4731401386327647,
+            "speedup_vs_openmm_cuda_mps_same_B": 0.5162553493392698
+          },
+          {
+            "B": 32,
+            "ms_per_step_batch": 2.396131232380867,
+            "ms_per_step_per_replica": 0.0748791010119021,
+            "ns_per_day_per_replica": 2307.720013525981,
+            "ns_per_day_aggregate": 2307.720013525981,
+            "speedup_vs_openmm_cuda_single_b1": 1.6682375979424835,
+            "speedup_vs_openmm_cuda_mps_same_B": null
+          }
+        ]
+      },
+      {
+        "system": "1UBQ_solvated_7k",
+        "suites": [
+          "SuiteB"
+        ],
+        "kind": "trunc",
+        "n_real_atoms": 6656,
+        "bucket_atoms": 8192,
+        "bucket_waters": 2048,
+        "occupancy_pct": 81.25,
+        "electrostatics": "pme",
+        "pme_grid": [
+          48,
+          48,
+          48
+        ],
+        "openmm": {
+          "openmm_cuda_single_b1": {
+            "platform": "CUDA",
+            "precision": "single",
+            "ms_per_step": 0.14103902503848076,
+            "ns_per_day": 1225.192814207654,
+            "provenance": {
+              "platform_name": "CUDA",
+              "device_name": "NVIDIA H200",
+              "device_index": "0",
+              "precision": "single",
+              "cuda_Compiler": "openmm-nvrtc-builtin",
+              "CudaDriverVersion": "590.48.01",
+              "lib_openmm_cuda_path": "/orcd/pool/008/so3_shared/marielle/projects/.venv/lib/python3.13/site-packages/OpenMM.libs/lib/plugins/libOpenMMCUDA.so",
+              "mps_active": false,
+              "cuda_mps_pipe_directory": null,
+              "plugin_load_failures": []
+            }
+          },
+          "openmm_cuda_mixed_b1": {
+            "platform": "CUDA",
+            "precision": "mixed",
+            "ms_per_step": 0.1433907076716423,
+            "ns_per_day": 1205.0990109882403,
+            "provenance": {
+              "platform_name": "CUDA",
+              "device_name": "NVIDIA H200",
+              "device_index": "0",
+              "precision": "mixed",
+              "cuda_Compiler": "openmm-nvrtc-builtin",
+              "CudaDriverVersion": "590.48.01",
+              "lib_openmm_cuda_path": "/orcd/pool/008/so3_shared/marielle/projects/.venv/lib/python3.13/site-packages/OpenMM.libs/lib/plugins/libOpenMMCUDA.so",
+              "mps_active": false,
+              "cuda_mps_pipe_directory": null,
+              "plugin_load_failures": []
+            }
+          },
+          "openmm_cuda_mps_scaling": {
+            "B=1": {
+              "available": true,
+              "ok": true,
+              "replicas_B": 1,
+              "precision": "single",
+              "n_steps": 30,
+              "dt_fs": 2.0,
+              "wall_elapsed_s": 0.004388370551168919,
+              "ms_per_step_batch": 0.1462790183722973,
+              "ms_per_step_per_replica": 0.1462790183722973,
+              "per_replica_ns_per_day": 1181.3040716489068,
+              "aggregate_ns_per_day": 1181.3040716489068,
+              "total_gpu_memory_mb": 538.0,
+              "memory_mb_per_replica": 538.0,
+              "mps_info": {
+                "mps_active": false,
+                "started_by_harness": false
+              },
+              "provenance": {
+                "platform_name": "CUDA",
+                "device_name": "NVIDIA H200",
+                "device_index": "0",
+                "precision": "single",
+                "cuda_Compiler": "openmm-nvrtc-builtin",
+                "CudaDriverVersion": "590.48.01",
+                "lib_openmm_cuda_path": "/orcd/pool/008/so3_shared/marielle/projects/.venv/lib/python3.13/site-packages/OpenMM.libs/lib/plugins/libOpenMMCUDA.so",
+                "mps_active": false,
+                "cuda_mps_pipe_directory": null,
+                "plugin_load_failures": []
+              }
+            },
+            "B=4": {
+              "available": true,
+              "ok": true,
+              "replicas_B": 4,
+              "precision": "single",
+              "n_steps": 30,
+              "dt_fs": 2.0,
+              "wall_elapsed_s": 0.007116945460438728,
+              "ms_per_step_batch": 0.2372315153479576,
+              "ms_per_step_per_replica": 0.0593078788369894,
+              "per_replica_ns_per_day": 728.4023783541021,
+              "aggregate_ns_per_day": 2913.6095134164084,
+              "total_gpu_memory_mb": 2144.0,
+              "memory_mb_per_replica": 536.0,
+              "mps_info": {
+                "mps_active": true,
+                "started_by_harness": true,
+                "pipe_dir": "/tmp/mps_28707398_3178580/pipe",
+                "log_dir": "/tmp/mps_28707398_3178580/log",
+                "stdout": "",
+                "stderr": ""
+              },
+              "provenance": {
+                "platform_name": "CUDA",
+                "device_name": "NVIDIA H200",
+                "device_index": "0",
+                "precision": "single",
+                "cuda_Compiler": "openmm-nvrtc-builtin",
+                "CudaDriverVersion": "590.48.01",
+                "lib_openmm_cuda_path": "/orcd/pool/008/so3_shared/marielle/projects/.venv/lib/python3.13/site-packages/OpenMM.libs/lib/plugins/libOpenMMCUDA.so",
+                "mps_active": true,
+                "cuda_mps_pipe_directory": "/tmp/mps_28707398_3178580/pipe",
+                "plugin_load_failures": []
+              }
+            },
+            "B=8": {
+              "available": true,
+              "ok": true,
+              "replicas_B": 8,
+              "precision": "single",
+              "n_steps": 30,
+              "dt_fs": 2.0,
+              "wall_elapsed_s": 0.011507145129144192,
+              "ms_per_step_batch": 0.3835715043048064,
+              "ms_per_step_per_replica": 0.0479464380381008,
+              "per_replica_ns_per_day": 450.5027043476198,
+              "aggregate_ns_per_day": 3604.0216347809583,
+              "total_gpu_memory_mb": 4288.0,
+              "memory_mb_per_replica": 536.0,
+              "mps_info": {
+                "mps_active": true,
+                "started_by_harness": true,
+                "pipe_dir": "/tmp/mps_28707398_3179952/pipe",
+                "log_dir": "/tmp/mps_28707398_3179952/log",
+                "stdout": "",
+                "stderr": ""
+              },
+              "provenance": {
+                "platform_name": "CUDA",
+                "device_name": "NVIDIA H200",
+                "device_index": "0",
+                "precision": "single",
+                "cuda_Compiler": "openmm-nvrtc-builtin",
+                "CudaDriverVersion": "590.48.01",
+                "lib_openmm_cuda_path": "/orcd/pool/008/so3_shared/marielle/projects/.venv/lib/python3.13/site-packages/OpenMM.libs/lib/plugins/libOpenMMCUDA.so",
+                "mps_active": true,
+                "cuda_mps_pipe_directory": "/tmp/mps_28707398_3179952/pipe",
+                "plugin_load_failures": []
+              }
+            },
+            "B=16": {
+              "available": true,
+              "ok": true,
+              "replicas_B": 16,
+              "precision": "single",
+              "n_steps": 30,
+              "dt_fs": 2.0,
+              "wall_elapsed_s": 0.022628418169915676,
+              "ms_per_step_batch": 0.7542806056638558,
+              "ms_per_step_per_replica": 0.04714253785399099,
+              "per_replica_ns_per_day": 229.09246068698218,
+              "aggregate_ns_per_day": 3665.479370991715,
+              "total_gpu_memory_mb": 8576.0,
+              "memory_mb_per_replica": 536.0,
+              "mps_info": {
+                "mps_active": true,
+                "started_by_harness": true,
+                "pipe_dir": "/tmp/mps_28707398_3182402/pipe",
+                "log_dir": "/tmp/mps_28707398_3182402/log",
+                "stdout": "",
+                "stderr": ""
+              },
+              "provenance": {
+                "platform_name": "CUDA",
+                "device_name": "NVIDIA H200",
+                "device_index": "0",
+                "precision": "single",
+                "cuda_Compiler": "openmm-nvrtc-builtin",
+                "CudaDriverVersion": "590.48.01",
+                "lib_openmm_cuda_path": "/orcd/pool/008/so3_shared/marielle/projects/.venv/lib/python3.13/site-packages/OpenMM.libs/lib/plugins/libOpenMMCUDA.so",
+                "mps_active": true,
+                "cuda_mps_pipe_directory": "/tmp/mps_28707398_3182402/pipe",
+                "plugin_load_failures": []
+              }
+            }
+          }
+        },
+        "substep_breakdown": {
+          "B=1": {
+            "total_substeps_ms": 0.2816552668809891,
+            "baoab_pre_force_ms": 0.056605264544487,
+            "bonded_and_nonbonded_direct_mk48_ms": 0.043778009712696075,
+            "pme_spread_3d_bspline_ms": 0.03260541707277298,
+            "pme_rfft3d_and_influence_ms": 0.034968145191669464,
+            "pme_irfft3d_ms": 0.04421602934598923,
+            "pme_gather_3d_bspline_fused_scale_ms": 0.033723823726177216,
+            "baoab_post_force_ms": 0.03575857728719711,
+            "baoab_pre_force_pct": 20.097357017791914,
+            "bonded_and_nonbonded_direct_mk48_pct": 15.543117725966077,
+            "pme_spread_3d_bspline_pct": 11.576356243517402,
+            "pme_rfft3d_and_influence_pct": 12.415228580278935,
+            "pme_irfft3d_pct": 15.698633949093633,
+            "pme_gather_3d_bspline_fused_scale_pct": 11.973439765437412,
+            "baoab_post_force_pct": 12.695866717914628,
+            "nonbonded_tile_pairs_mk51_ms_per_rep": 0.035649314522743225,
+            "num_valid_tile_pairs_aabb_pruned": 256
+          },
+          "B=4": {
+            "total_substeps_ms": 0.09564468637108803,
+            "baoab_pre_force_ms": 0.014150198549032211,
+            "bonded_and_nonbonded_direct_mk48_ms": 0.02938956953585148,
+            "pme_spread_3d_bspline_ms": 0.00885138288140297,
+            "pme_rfft3d_and_influence_ms": 0.00966251827776432,
+            "pme_irfft3d_ms": 0.013520177453756332,
+            "pme_gather_3d_bspline_fused_scale_ms": 0.010439343750476837,
+            "baoab_post_force_ms": 0.009631495922803879,
+            "baoab_pre_force_pct": 14.794547492300216,
+            "bonded_and_nonbonded_direct_mk48_pct": 30.72786440202653,
+            "pme_spread_3d_bspline_pct": 9.254442894047287,
+            "pme_rfft3d_and_influence_pct": 10.102514467217864,
+            "pme_irfft3d_pct": 14.135837511453518,
+            "pme_gather_3d_bspline_fused_scale_pct": 10.914713766715321,
+            "baoab_post_force_pct": 10.070079466239264,
+            "nonbonded_tile_pairs_mk51_ms_per_rep": 0.01040622591972351,
+            "num_valid_tile_pairs_aabb_pruned": 256
+          }
+        },
+        "batch_scaling": [
+          {
+            "B": 1,
+            "ms_per_step_batch": 0.22348398342728615,
+            "ms_per_step_per_replica": 0.22348398342728615,
+            "ns_per_day_per_replica": 773.2097725751477,
+            "ns_per_day_aggregate": 773.2097725751477,
+            "speedup_vs_openmm_cuda_single_b1": 0.6310923175591683,
+            "speedup_vs_openmm_cuda_mps_same_B": 0.6545391581490732
+          },
+          {
+            "B": 2,
+            "ms_per_step_batch": 0.3466598068674406,
+            "ms_per_step_per_replica": 0.1733299034337203,
+            "ns_per_day_per_replica": 996.9428043100311,
+            "ns_per_day_aggregate": 996.9428043100311,
+            "speedup_vs_openmm_cuda_single_b1": 0.8137027843693039,
+            "speedup_vs_openmm_cuda_mps_same_B": null
+          },
+          {
+            "B": 4,
+            "ms_per_step_batch": 0.426416735475262,
+            "ms_per_step_per_replica": 0.1066041838688155,
+            "ns_per_day_per_replica": 1620.949513694917,
+            "ns_per_day_aggregate": 1620.949513694917,
+            "speedup_vs_openmm_cuda_single_b1": 1.3230158509729781,
+            "speedup_vs_openmm_cuda_mps_same_B": 0.5563372532355036
+          },
+          {
+            "B": 8,
+            "ms_per_step_batch": 0.867035798728466,
+            "ms_per_step_per_replica": 0.10837947484105825,
+            "ns_per_day_per_replica": 1594.3978345846053,
+            "ns_per_day_aggregate": 1594.3978345846053,
+            "speedup_vs_openmm_cuda_single_b1": 1.3013444219518384,
+            "speedup_vs_openmm_cuda_mps_same_B": 0.4423940797684773
+          },
+          {
+            "B": 16,
+            "ms_per_step_batch": 1.4397897571325302,
+            "ms_per_step_per_replica": 0.08998685982078314,
+            "ns_per_day_per_replica": 1920.2803647571056,
+            "ns_per_day_aggregate": 1920.2803647571056,
+            "speedup_vs_openmm_cuda_single_b1": 1.5673291113766228,
+            "speedup_vs_openmm_cuda_mps_same_B": 0.5238824640384113
+          },
+          {
+            "B": 32,
+            "ms_per_step_batch": 2.5444602966308594,
+            "ms_per_step_per_replica": 0.07951438426971436,
+            "ns_per_day_per_replica": 2173.1917009362605,
+            "ns_per_day_aggregate": 2173.1917009362605,
+            "speedup_vs_openmm_cuda_single_b1": 1.7737548537139345,
+            "speedup_vs_openmm_cuda_mps_same_B": null
+          }
+        ]
+      },
+      {
+        "system": "Holo_Lysozyme_15k",
+        "suites": [
+          "SuiteB"
+        ],
+        "kind": "holo_15k",
+        "n_real_atoms": 15002,
+        "bucket_atoms": 16384,
+        "bucket_waters": 4608,
+        "occupancy_pct": 91.56494140625,
+        "electrostatics": "pme",
+        "pme_grid": [
+          54,
+          54,
+          54
+        ],
+        "openmm": {
+          "openmm_cuda_single_b1": {
+            "platform": "CUDA",
+            "precision": "single",
+            "ms_per_step": 0.18051278311759233,
+            "ns_per_day": 957.2729255824062,
+            "provenance": {
+              "platform_name": "CUDA",
+              "device_name": "NVIDIA H200",
+              "device_index": "0",
+              "precision": "single",
+              "cuda_Compiler": "openmm-nvrtc-builtin",
+              "CudaDriverVersion": "590.48.01",
+              "lib_openmm_cuda_path": "/orcd/pool/008/so3_shared/marielle/projects/.venv/lib/python3.13/site-packages/OpenMM.libs/lib/plugins/libOpenMMCUDA.so",
+              "mps_active": false,
+              "cuda_mps_pipe_directory": null,
+              "plugin_load_failures": []
+            }
+          },
+          "openmm_cuda_mixed_b1": {
+            "platform": "CUDA",
+            "precision": "mixed",
+            "ms_per_step": 0.18123446498066187,
+            "ns_per_day": 953.461031920381,
+            "provenance": {
+              "platform_name": "CUDA",
+              "device_name": "NVIDIA H200",
+              "device_index": "0",
+              "precision": "mixed",
+              "cuda_Compiler": "openmm-nvrtc-builtin",
+              "CudaDriverVersion": "590.48.01",
+              "lib_openmm_cuda_path": "/orcd/pool/008/so3_shared/marielle/projects/.venv/lib/python3.13/site-packages/OpenMM.libs/lib/plugins/libOpenMMCUDA.so",
+              "mps_active": false,
+              "cuda_mps_pipe_directory": null,
+              "plugin_load_failures": []
+            }
+          },
+          "openmm_cuda_mps_scaling": {
+            "B=1": {
+              "available": true,
+              "ok": true,
+              "replicas_B": 1,
+              "precision": "single",
+              "n_steps": 30,
+              "dt_fs": 2.0,
+              "wall_elapsed_s": 0.005482561886310577,
+              "ms_per_step_batch": 0.18275206287701923,
+              "ms_per_step_per_replica": 0.18275206287701923,
+              "per_replica_ns_per_day": 945.5433623000122,
+              "aggregate_ns_per_day": 945.5433623000122,
+              "total_gpu_memory_mb": 544.0,
+              "memory_mb_per_replica": 544.0,
+              "mps_info": {
+                "mps_active": false,
+                "started_by_harness": false
+              },
+              "provenance": {
+                "platform_name": "CUDA",
+                "device_name": "NVIDIA H200",
+                "device_index": "0",
+                "precision": "single",
+                "cuda_Compiler": "openmm-nvrtc-builtin",
+                "CudaDriverVersion": "590.48.01",
+                "lib_openmm_cuda_path": "/orcd/pool/008/so3_shared/marielle/projects/.venv/lib/python3.13/site-packages/OpenMM.libs/lib/plugins/libOpenMMCUDA.so",
+                "mps_active": false,
+                "cuda_mps_pipe_directory": null,
+                "plugin_load_failures": []
+              }
+            },
+            "B=4": {
+              "available": true,
+              "ok": true,
+              "replicas_B": 4,
+              "precision": "single",
+              "n_steps": 30,
+              "dt_fs": 2.0,
+              "wall_elapsed_s": 0.010342775844037533,
+              "ms_per_step_batch": 0.34475919480125106,
+              "ms_per_step_per_replica": 0.08618979870031276,
+              "per_replica_ns_per_day": 501.2194093898404,
+              "aggregate_ns_per_day": 2004.8776375593616,
+              "total_gpu_memory_mb": 2168.0,
+              "memory_mb_per_replica": 542.0,
+              "mps_info": {
+                "mps_active": true,
+                "started_by_harness": true,
+                "pipe_dir": "/tmp/mps_28707398_3190487/pipe",
+                "log_dir": "/tmp/mps_28707398_3190487/log",
+                "stdout": "",
+                "stderr": ""
+              },
+              "provenance": {
+                "platform_name": "CUDA",
+                "device_name": "NVIDIA H200",
+                "device_index": "0",
+                "precision": "single",
+                "cuda_Compiler": "openmm-nvrtc-builtin",
+                "CudaDriverVersion": "590.48.01",
+                "lib_openmm_cuda_path": "/orcd/pool/008/so3_shared/marielle/projects/.venv/lib/python3.13/site-packages/OpenMM.libs/lib/plugins/libOpenMMCUDA.so",
+                "mps_active": true,
+                "cuda_mps_pipe_directory": "/tmp/mps_28707398_3190487/pipe",
+                "plugin_load_failures": []
+              }
+            },
+            "B=8": {
+              "available": true,
+              "ok": true,
+              "replicas_B": 8,
+              "precision": "single",
+              "n_steps": 30,
+              "dt_fs": 2.0,
+              "wall_elapsed_s": 0.01663352269679308,
+              "ms_per_step_batch": 0.5544507565597693,
+              "ms_per_step_per_replica": 0.06930634456997116,
+              "per_replica_ns_per_day": 311.6597785386416,
+              "aggregate_ns_per_day": 2493.278228309133,
+              "total_gpu_memory_mb": 4336.0,
+              "memory_mb_per_replica": 542.0,
+              "mps_info": {
+                "mps_active": true,
+                "started_by_harness": true,
+                "pipe_dir": "/tmp/mps_28707398_3191871/pipe",
+                "log_dir": "/tmp/mps_28707398_3191871/log",
+                "stdout": "",
+                "stderr": ""
+              },
+              "provenance": {
+                "platform_name": "CUDA",
+                "device_name": "NVIDIA H200",
+                "device_index": "0",
+                "precision": "single",
+                "cuda_Compiler": "openmm-nvrtc-builtin",
+                "CudaDriverVersion": "590.48.01",
+                "lib_openmm_cuda_path": "/orcd/pool/008/so3_shared/marielle/projects/.venv/lib/python3.13/site-packages/OpenMM.libs/lib/plugins/libOpenMMCUDA.so",
+                "mps_active": true,
+                "cuda_mps_pipe_directory": "/tmp/mps_28707398_3191871/pipe",
+                "plugin_load_failures": []
+              }
+            },
+            "B=16": {
+              "available": true,
+              "ok": true,
+              "replicas_B": 16,
+              "precision": "single",
+              "n_steps": 30,
+              "dt_fs": 2.0,
+              "wall_elapsed_s": 0.03545429743826389,
+              "ms_per_step_batch": 1.1818099146087966,
+              "ms_per_step_per_replica": 0.07386311966304979,
+              "per_replica_ns_per_day": 146.21640744755499,
+              "aggregate_ns_per_day": 2339.4625191608798,
+              "total_gpu_memory_mb": 8672.0,
+              "memory_mb_per_replica": 542.0,
+              "mps_info": {
+                "mps_active": true,
+                "started_by_harness": true,
+                "pipe_dir": "/tmp/mps_28707398_3194322/pipe",
+                "log_dir": "/tmp/mps_28707398_3194322/log",
+                "stdout": "",
+                "stderr": ""
+              },
+              "provenance": {
+                "platform_name": "CUDA",
+                "device_name": "NVIDIA H200",
+                "device_index": "0",
+                "precision": "single",
+                "cuda_Compiler": "openmm-nvrtc-builtin",
+                "CudaDriverVersion": "590.48.01",
+                "lib_openmm_cuda_path": "/orcd/pool/008/so3_shared/marielle/projects/.venv/lib/python3.13/site-packages/OpenMM.libs/lib/plugins/libOpenMMCUDA.so",
+                "mps_active": true,
+                "cuda_mps_pipe_directory": "/tmp/mps_28707398_3194322/pipe",
+                "plugin_load_failures": []
+              }
+            }
+          }
+        },
+        "substep_breakdown": {
+          "B=1": {
+            "total_substeps_ms": 0.2749219164252281,
+            "baoab_pre_force_ms": 0.05022004246711731,
+            "bonded_and_nonbonded_direct_mk48_ms": 0.05311690270900726,
+            "pme_spread_3d_bspline_ms": 0.029396377503871918,
+            "pme_rfft3d_and_influence_ms": 0.02952367067337036,
+            "pme_irfft3d_ms": 0.04020322114229202,
+            "pme_gather_3d_bspline_fused_scale_ms": 0.034539029002189636,
+            "baoab_post_force_ms": 0.03792267292737961,
+            "baoab_pre_force_pct": 18.2670203671361,
+            "bonded_and_nonbonded_direct_mk48_pct": 19.32072328015134,
+            "pme_spread_3d_bspline_pct": 10.692627887259398,
+            "pme_rfft3d_and_influence_pct": 10.738929459412546,
+            "pme_irfft3d_pct": 14.623505344735326,
+            "pme_gather_3d_bspline_fused_scale_pct": 12.563214112318102,
+            "baoab_post_force_pct": 13.793979548987185,
+            "nonbonded_tile_pairs_mk51_ms_per_rep": 0.03371700644493103,
+            "num_valid_tile_pairs_aabb_pruned": 512
+          },
+          "B=4": {
+            "total_substeps_ms": 0.10256094858050346,
+            "baoab_pre_force_ms": 0.016750860959291458,
+            "bonded_and_nonbonded_direct_mk48_ms": 0.03501373343169689,
+            "pme_spread_3d_bspline_ms": 0.012129666283726692,
+            "pme_rfft3d_and_influence_ms": 0.008371146395802498,
+            "pme_irfft3d_ms": 0.011627916246652603,
+            "pme_gather_3d_bspline_fused_scale_ms": 0.009571965783834457,
+            "baoab_post_force_ms": 0.009095659479498863,
+            "baoab_pre_force_pct": 16.33259168439063,
+            "bonded_and_nonbonded_direct_mk48_pct": 34.139439929432264,
+            "pme_spread_3d_bspline_pct": 11.826788316223224,
+            "pme_rfft3d_and_influence_pct": 8.162118731996427,
+            "pme_irfft3d_pct": 11.337566985864477,
+            "pme_gather_3d_bspline_fused_scale_pct": 9.332953640070038,
+            "baoab_post_force_pct": 8.86854071202294,
+            "nonbonded_tile_pairs_mk51_ms_per_rep": 0.015706662088632584,
+            "num_valid_tile_pairs_aabb_pruned": 512
+          }
+        },
+        "batch_scaling": [
+          {
+            "B": 1,
+            "ms_per_step_batch": 0.2906452864408493,
+            "ms_per_step_per_replica": 0.2906452864408493,
+            "ns_per_day_per_replica": 594.5391446599889,
+            "ns_per_day_aggregate": 594.5391446599889,
+            "speedup_vs_openmm_cuda_single_b1": 0.6210759008965707,
+            "speedup_vs_openmm_cuda_mps_same_B": 0.6287804117346731
+          },
+          {
+            "B": 2,
+            "ms_per_step_batch": 0.3849758145709833,
+            "ms_per_step_per_replica": 0.19248790728549164,
+            "ns_per_day_per_replica": 897.7187317212025,
+            "ns_per_day_aggregate": 897.7187317212025,
+            "speedup_vs_openmm_cuda_single_b1": 0.9377876546284115,
+            "speedup_vs_openmm_cuda_mps_same_B": null
+          },
+          {
+            "B": 4,
+            "ms_per_step_batch": 0.556437112390995,
+            "ms_per_step_per_replica": 0.13910927809774876,
+            "ns_per_day_per_replica": 1242.1888918047407,
+            "ns_per_day_aggregate": 1242.1888918047407,
+            "speedup_vs_openmm_cuda_single_b1": 1.2976329514897658,
+            "speedup_vs_openmm_cuda_mps_same_B": 0.6195833942848101
+          },
+          {
+            "B": 8,
+            "ms_per_step_batch": 1.1393162235617638,
+            "ms_per_step_per_replica": 0.14241452794522047,
+            "ns_per_day_per_replica": 1213.3593566133031,
+            "ns_per_day_aggregate": 1213.3593566133031,
+            "speedup_vs_openmm_cuda_single_b1": 1.26751663416689,
+            "speedup_vs_openmm_cuda_mps_same_B": 0.48665220866111175
+          },
+          {
+            "B": 16,
+            "ms_per_step_batch": 3.173377439379692,
+            "ms_per_step_per_replica": 0.19833608996123075,
+            "ns_per_day_per_replica": 871.2483947514426,
+            "ns_per_day_aggregate": 871.2483947514426,
+            "speedup_vs_openmm_cuda_single_b1": 0.9101358363617919,
+            "speedup_vs_openmm_cuda_mps_same_B": 0.3724139145704042
+          },
+          {
+            "B": 32,
+            "ms_per_step_batch": 3.658040575683117,
+            "ms_per_step_per_replica": 0.1143137679900974,
+            "ns_per_day_per_replica": 1511.628940574936,
+            "ns_per_day_aggregate": 1511.628940574936,
+            "speedup_vs_openmm_cuda_single_b1": 1.5790992309275425,
+            "speedup_vs_openmm_cuda_mps_same_B": null
+          }
+        ]
+      },
+      {
+        "system": "DHFR_24k_rf",
+        "suites": [
+          "SuiteA"
+        ],
+        "kind": "trunc",
+        "n_real_atoms": 23558,
+        "bucket_atoms": 25000,
+        "bucket_waters": 8192,
+        "occupancy_pct": 94.232,
+        "electrostatics": "rf",
+        "pme_grid": null,
+        "openmm": {
+          "openmm_cuda_single_b1": {
+            "platform": "CUDA",
+            "precision": "single",
+            "ms_per_step": 0.13029954861849546,
+            "ns_per_day": 1326.174970152366,
+            "provenance": {
+              "platform_name": "CUDA",
+              "device_name": "NVIDIA H200",
+              "device_index": "0",
+              "precision": "single",
+              "cuda_Compiler": "openmm-nvrtc-builtin",
+              "CudaDriverVersion": "590.48.01",
+              "lib_openmm_cuda_path": "/orcd/pool/008/so3_shared/marielle/projects/.venv/lib/python3.13/site-packages/OpenMM.libs/lib/plugins/libOpenMMCUDA.so",
+              "mps_active": false,
+              "cuda_mps_pipe_directory": null,
+              "plugin_load_failures": []
+            }
+          },
+          "openmm_cuda_mixed_b1": {
+            "platform": "CUDA",
+            "precision": "mixed",
+            "ms_per_step": 0.13769869692623615,
+            "ns_per_day": 1254.9138362040367,
+            "provenance": {
+              "platform_name": "CUDA",
+              "device_name": "NVIDIA H200",
+              "device_index": "0",
+              "precision": "mixed",
+              "cuda_Compiler": "openmm-nvrtc-builtin",
+              "CudaDriverVersion": "590.48.01",
+              "lib_openmm_cuda_path": "/orcd/pool/008/so3_shared/marielle/projects/.venv/lib/python3.13/site-packages/OpenMM.libs/lib/plugins/libOpenMMCUDA.so",
+              "mps_active": false,
+              "cuda_mps_pipe_directory": null,
+              "plugin_load_failures": []
+            }
+          },
+          "openmm_cuda_mps_scaling": {
+            "B=1": {
+              "available": true,
+              "ok": true,
+              "replicas_B": 1,
+              "precision": "single",
+              "n_steps": 30,
+              "dt_fs": 2.0,
+              "wall_elapsed_s": 0.004184219986200333,
+              "ms_per_step_batch": 0.1394739995400111,
+              "ms_per_step_per_replica": 0.1394739995400111,
+              "per_replica_ns_per_day": 1238.9405951639653,
+              "aggregate_ns_per_day": 1238.9405951639653,
+              "total_gpu_memory_mb": 532.0,
+              "memory_mb_per_replica": 532.0,
+              "mps_info": {
+                "mps_active": false,
+                "started_by_harness": false
+              },
+              "provenance": {
+                "platform_name": "CUDA",
+                "device_name": "NVIDIA H200",
+                "device_index": "0",
+                "precision": "single",
+                "cuda_Compiler": "openmm-nvrtc-builtin",
+                "CudaDriverVersion": "590.48.01",
+                "lib_openmm_cuda_path": "/orcd/pool/008/so3_shared/marielle/projects/.venv/lib/python3.13/site-packages/OpenMM.libs/lib/plugins/libOpenMMCUDA.so",
+                "mps_active": false,
+                "cuda_mps_pipe_directory": null,
+                "plugin_load_failures": []
+              }
+            },
+            "B=4": {
+              "available": true,
+              "ok": true,
+              "replicas_B": 4,
+              "precision": "single",
+              "n_steps": 30,
+              "dt_fs": 2.0,
+              "wall_elapsed_s": 0.008290911093354225,
+              "ms_per_step_batch": 0.2763637031118075,
+              "ms_per_step_per_replica": 0.06909092577795188,
+              "per_replica_ns_per_day": 625.2630068793472,
+              "aggregate_ns_per_day": 2501.052027517389,
+              "total_gpu_memory_mb": 2120.0,
+              "memory_mb_per_replica": 530.0,
+              "mps_info": {
+                "mps_active": true,
+                "started_by_harness": true,
+                "pipe_dir": "/tmp/mps_28707398_3202931/pipe",
+                "log_dir": "/tmp/mps_28707398_3202931/log",
+                "stdout": "",
+                "stderr": ""
+              },
+              "provenance": {
+                "platform_name": "CUDA",
+                "device_name": "NVIDIA H200",
+                "device_index": "0",
+                "precision": "single",
+                "cuda_Compiler": "openmm-nvrtc-builtin",
+                "CudaDriverVersion": "590.48.01",
+                "lib_openmm_cuda_path": "/orcd/pool/008/so3_shared/marielle/projects/.venv/lib/python3.13/site-packages/OpenMM.libs/lib/plugins/libOpenMMCUDA.so",
+                "mps_active": true,
+                "cuda_mps_pipe_directory": "/tmp/mps_28707398_3202931/pipe",
+                "plugin_load_failures": []
+              }
+            },
+            "B=8": {
+              "available": true,
+              "ok": true,
+              "replicas_B": 8,
+              "precision": "single",
+              "n_steps": 30,
+              "dt_fs": 2.0,
+              "wall_elapsed_s": 0.013928183354437351,
+              "ms_per_step_batch": 0.46427277848124504,
+              "ms_per_step_per_replica": 0.05803409731015563,
+              "per_replica_ns_per_day": 372.1949853818115,
+              "aggregate_ns_per_day": 2977.559883054492,
+              "total_gpu_memory_mb": 4240.0,
+              "memory_mb_per_replica": 530.0,
+              "mps_info": {
+                "mps_active": true,
+                "started_by_harness": true,
+                "pipe_dir": "/tmp/mps_28707398_3204355/pipe",
+                "log_dir": "/tmp/mps_28707398_3204355/log",
+                "stdout": "",
+                "stderr": ""
+              },
+              "provenance": {
+                "platform_name": "CUDA",
+                "device_name": "NVIDIA H200",
+                "device_index": "0",
+                "precision": "single",
+                "cuda_Compiler": "openmm-nvrtc-builtin",
+                "CudaDriverVersion": "590.48.01",
+                "lib_openmm_cuda_path": "/orcd/pool/008/so3_shared/marielle/projects/.venv/lib/python3.13/site-packages/OpenMM.libs/lib/plugins/libOpenMMCUDA.so",
+                "mps_active": true,
+                "cuda_mps_pipe_directory": "/tmp/mps_28707398_3204355/pipe",
+                "plugin_load_failures": []
+              }
+            },
+            "B=16": {
+              "available": true,
+              "ok": true,
+              "replicas_B": 16,
+              "precision": "single",
+              "n_steps": 30,
+              "dt_fs": 2.0,
+              "wall_elapsed_s": 0.02425375860184431,
+              "ms_per_step_batch": 0.8084586200614771,
+              "ms_per_step_per_replica": 0.050528663753842316,
+              "per_replica_ns_per_day": 213.74006747167826,
+              "aggregate_ns_per_day": 3419.841079546852,
+              "total_gpu_memory_mb": 8480.0,
+              "memory_mb_per_replica": 530.0,
+              "mps_info": {
+                "mps_active": true,
+                "started_by_harness": true,
+                "pipe_dir": "/tmp/mps_28707398_3206785/pipe",
+                "log_dir": "/tmp/mps_28707398_3206785/log",
+                "stdout": "",
+                "stderr": ""
+              },
+              "provenance": {
+                "platform_name": "CUDA",
+                "device_name": "NVIDIA H200",
+                "device_index": "0",
+                "precision": "single",
+                "cuda_Compiler": "openmm-nvrtc-builtin",
+                "CudaDriverVersion": "590.48.01",
+                "lib_openmm_cuda_path": "/orcd/pool/008/so3_shared/marielle/projects/.venv/lib/python3.13/site-packages/OpenMM.libs/lib/plugins/libOpenMMCUDA.so",
+                "mps_active": true,
+                "cuda_mps_pipe_directory": "/tmp/mps_28707398_3206785/pipe",
+                "plugin_load_failures": []
+              }
+            }
+          }
+        },
+        "substep_breakdown": {
+          "B=1": {
+            "total_substeps_ms": 0.17726685851812363,
+            "baoab_pre_force_ms": 0.05373731255531311,
+            "bonded_and_nonbonded_direct_mk48_ms": 0.08858419954776764,
+            "pme_spread_3d_bspline_ms": 0.0,
+            "pme_rfft3d_and_influence_ms": 0.0,
+            "pme_irfft3d_ms": 0.0,
+            "pme_gather_3d_bspline_fused_scale_ms": 0.0,
+            "baoab_post_force_ms": 0.03494534641504288,
+            "baoab_pre_force_pct": 30.314359381406337,
+            "bonded_and_nonbonded_direct_mk48_pct": 49.972228474230484,
+            "pme_spread_3d_bspline_pct": 0.0,
+            "pme_rfft3d_and_influence_pct": 0.0,
+            "pme_irfft3d_pct": 0.0,
+            "pme_gather_3d_bspline_fused_scale_pct": 0.0,
+            "baoab_post_force_pct": 19.71341214436318,
+            "nonbonded_tile_pairs_mk51_ms_per_rep": 0.03326535224914551,
+            "num_valid_tile_pairs_aabb_pruned": 782
+          },
+          "B=4": {
+            "total_substeps_ms": 0.06948178634047508,
+            "baoab_pre_force_ms": 0.014666682109236717,
+            "bonded_and_nonbonded_direct_mk48_ms": 0.04293752834200859,
+            "pme_spread_3d_bspline_ms": 0.0,
+            "pme_rfft3d_and_influence_ms": 0.0,
+            "pme_irfft3d_ms": 0.0,
+            "pme_gather_3d_bspline_fused_scale_ms": 0.0,
+            "baoab_post_force_ms": 0.011877575889229774,
+            "baoab_pre_force_pct": 21.108671612682713,
+            "bonded_and_nonbonded_direct_mk48_pct": 61.796811227054306,
+            "pme_spread_3d_bspline_pct": 0.0,
+            "pme_rfft3d_and_influence_pct": 0.0,
+            "pme_irfft3d_pct": 0.0,
+            "pme_gather_3d_bspline_fused_scale_pct": 0.0,
+            "baoab_post_force_pct": 17.094517160262985,
+            "nonbonded_tile_pairs_mk51_ms_per_rep": 0.01943846233189106,
+            "num_valid_tile_pairs_aabb_pruned": 782
+          }
+        },
+        "batch_scaling": [
+          {
+            "B": 1,
+            "ms_per_step_batch": 0.2595157362520695,
+            "ms_per_step_per_replica": 0.2595157362520695,
+            "ns_per_day_per_replica": 665.8555758335908,
+            "ns_per_day_aggregate": 665.8555758335908,
+            "speedup_vs_openmm_cuda_single_b1": 0.5020872741679703,
+            "speedup_vs_openmm_cuda_mps_same_B": 0.5374394691986578
+          },
+          {
+            "B": 2,
+            "ms_per_step_batch": 0.36592953838407993,
+            "ms_per_step_per_replica": 0.18296476919203997,
+            "ns_per_day_per_replica": 944.4441176466546,
+            "ns_per_day_aggregate": 944.4441176466546,
+            "speedup_vs_openmm_cuda_single_b1": 0.7121564943562055,
+            "speedup_vs_openmm_cuda_mps_same_B": null
+          },
+          {
+            "B": 4,
+            "ms_per_step_batch": 0.5739864427596331,
+            "ms_per_step_per_replica": 0.14349661068990827,
+            "ns_per_day_per_replica": 1204.2096267584704,
+            "ns_per_day_aggregate": 1204.2096267584704,
+            "speedup_vs_openmm_cuda_single_b1": 0.908032238476132,
+            "speedup_vs_openmm_cuda_mps_same_B": 0.48148123809875365
+          },
+          {
+            "B": 8,
+            "ms_per_step_batch": 1.2061386927962303,
+            "ms_per_step_per_replica": 0.1507673365995288,
+            "ns_per_day_per_replica": 1146.1368483214292,
+            "ns_per_day_aggregate": 1146.1368483214292,
+            "speedup_vs_openmm_cuda_single_b1": 0.864242557820065,
+            "speedup_vs_openmm_cuda_mps_same_B": 0.3849248691333386
+          },
+          {
+            "B": 16,
+            "ms_per_step_batch": 2.1613865718245506,
+            "ms_per_step_per_replica": 0.13508666073903441,
+            "ns_per_day_per_replica": 1279.1788549264804,
+            "ns_per_day_aggregate": 1279.1788549264804,
+            "speedup_vs_openmm_cuda_single_b1": 0.9645626585604417,
+            "speedup_vs_openmm_cuda_mps_same_B": 0.3740462861204003
+          },
+          {
+            "B": 32,
+            "ms_per_step_batch": 4.08840224146843,
+            "ms_per_step_per_replica": 0.12776257004588842,
+            "ns_per_day_per_replica": 1352.508797670049,
+            "ns_per_day_aggregate": 1352.508797670049,
+            "speedup_vs_openmm_cuda_single_b1": 1.0198569782346727,
+            "speedup_vs_openmm_cuda_mps_same_B": null
+          }
+        ]
+      },
+      {
+        "system": "DHFR_24k_pme_openmm_grid",
+        "suites": [
+          "SuiteA",
+          "SuiteB"
+        ],
+        "kind": "trunc",
+        "n_real_atoms": 23558,
+        "bucket_atoms": 25000,
+        "bucket_waters": 8192,
+        "occupancy_pct": 94.232,
+        "electrostatics": "pme",
+        "pme_grid": [
+          60,
+          60,
+          60
+        ],
+        "openmm": {
+          "openmm_cuda_single_b1": {
+            "platform": "CUDA",
+            "precision": "single",
+            "ms_per_step": 0.17643023747950792,
+            "ns_per_day": 979.4239494807143,
+            "provenance": {
+              "platform_name": "CUDA",
+              "device_name": "NVIDIA H200",
+              "device_index": "0",
+              "precision": "single",
+              "cuda_Compiler": "openmm-nvrtc-builtin",
+              "CudaDriverVersion": "590.48.01",
+              "lib_openmm_cuda_path": "/orcd/pool/008/so3_shared/marielle/projects/.venv/lib/python3.13/site-packages/OpenMM.libs/lib/plugins/libOpenMMCUDA.so",
+              "mps_active": false,
+              "cuda_mps_pipe_directory": null,
+              "plugin_load_failures": []
+            }
+          },
+          "openmm_cuda_mixed_b1": {
+            "platform": "CUDA",
+            "precision": "mixed",
+            "ms_per_step": 0.19437249284237623,
+            "ns_per_day": 889.0146824434147,
+            "provenance": {
+              "platform_name": "CUDA",
+              "device_name": "NVIDIA H200",
+              "device_index": "0",
+              "precision": "mixed",
+              "cuda_Compiler": "openmm-nvrtc-builtin",
+              "CudaDriverVersion": "590.48.01",
+              "lib_openmm_cuda_path": "/orcd/pool/008/so3_shared/marielle/projects/.venv/lib/python3.13/site-packages/OpenMM.libs/lib/plugins/libOpenMMCUDA.so",
+              "mps_active": false,
+              "cuda_mps_pipe_directory": null,
+              "plugin_load_failures": []
+            }
+          },
+          "openmm_cuda_mps_scaling": {
+            "B=1": {
+              "available": true,
+              "ok": true,
+              "replicas_B": 1,
+              "precision": "single",
+              "n_steps": 30,
+              "dt_fs": 2.0,
+              "wall_elapsed_s": 0.005411489866673946,
+              "ms_per_step_batch": 0.1803829955557982,
+              "ms_per_step_per_replica": 0.1803829955557982,
+              "per_replica_ns_per_day": 957.961694047527,
+              "aggregate_ns_per_day": 957.961694047527,
+              "total_gpu_memory_mb": 550.0,
+              "memory_mb_per_replica": 550.0,
+              "mps_info": {
+                "mps_active": false,
+                "started_by_harness": false
+              },
+              "provenance": {
+                "platform_name": "CUDA",
+                "device_name": "NVIDIA H200",
+                "device_index": "0",
+                "precision": "single",
+                "cuda_Compiler": "openmm-nvrtc-builtin",
+                "CudaDriverVersion": "590.48.01",
+                "lib_openmm_cuda_path": "/orcd/pool/008/so3_shared/marielle/projects/.venv/lib/python3.13/site-packages/OpenMM.libs/lib/plugins/libOpenMMCUDA.so",
+                "mps_active": false,
+                "cuda_mps_pipe_directory": null,
+                "plugin_load_failures": []
+              }
+            },
+            "B=4": {
+              "available": true,
+              "ok": true,
+              "replicas_B": 4,
+              "precision": "single",
+              "n_steps": 30,
+              "dt_fs": 2.0,
+              "wall_elapsed_s": 0.011509058065712452,
+              "ms_per_step_batch": 0.3836352688570817,
+              "ms_per_step_per_replica": 0.09590881721427043,
+              "per_replica_ns_per_day": 450.42782566577415,
+              "aggregate_ns_per_day": 1801.7113026630966,
+              "total_gpu_memory_mb": 2192.0,
+              "memory_mb_per_replica": 548.0,
+              "mps_info": {
+                "mps_active": true,
+                "started_by_harness": true,
+                "pipe_dir": "/tmp/mps_28712257_759109/pipe",
+                "log_dir": "/tmp/mps_28712257_759109/log",
+                "stdout": "",
+                "stderr": ""
+              },
+              "provenance": {
+                "platform_name": "CUDA",
+                "device_name": "NVIDIA H200",
+                "device_index": "0",
+                "precision": "single",
+                "cuda_Compiler": "openmm-nvrtc-builtin",
+                "CudaDriverVersion": "590.48.01",
+                "lib_openmm_cuda_path": "/orcd/pool/008/so3_shared/marielle/projects/.venv/lib/python3.13/site-packages/OpenMM.libs/lib/plugins/libOpenMMCUDA.so",
+                "mps_active": true,
+                "cuda_mps_pipe_directory": "/tmp/mps_28712257_759109/pipe",
+                "plugin_load_failures": []
+              }
+            },
+            "B=8": {
+              "available": true,
+              "ok": true,
+              "replicas_B": 8,
+              "precision": "single",
+              "n_steps": 30,
+              "dt_fs": 2.0,
+              "wall_elapsed_s": 0.019702433608472347,
+              "ms_per_step_batch": 0.6567477869490782,
+              "ms_per_step_per_replica": 0.08209347336863478,
+              "per_replica_ns_per_day": 263.11470466119476,
+              "aggregate_ns_per_day": 2104.917637289558,
+              "total_gpu_memory_mb": 4384.0,
+              "memory_mb_per_replica": 548.0,
+              "mps_info": {
+                "mps_active": true,
+                "started_by_harness": true,
+                "pipe_dir": "/tmp/mps_28712257_760458/pipe",
+                "log_dir": "/tmp/mps_28712257_760458/log",
+                "stdout": "",
+                "stderr": ""
+              },
+              "provenance": {
+                "platform_name": "CUDA",
+                "device_name": "NVIDIA H200",
+                "device_index": "0",
+                "precision": "single",
+                "cuda_Compiler": "openmm-nvrtc-builtin",
+                "CudaDriverVersion": "590.48.01",
+                "lib_openmm_cuda_path": "/orcd/pool/008/so3_shared/marielle/projects/.venv/lib/python3.13/site-packages/OpenMM.libs/lib/plugins/libOpenMMCUDA.so",
+                "mps_active": true,
+                "cuda_mps_pipe_directory": "/tmp/mps_28712257_760458/pipe",
+                "plugin_load_failures": []
+              }
+            },
+            "B=16": {
+              "available": true,
+              "ok": true,
+              "replicas_B": 16,
+              "precision": "single",
+              "n_steps": 30,
+              "dt_fs": 2.0,
+              "wall_elapsed_s": 0.04234529659152031,
+              "ms_per_step_batch": 1.4115098863840103,
+              "ms_per_step_per_replica": 0.08821936789900064,
+              "per_replica_ns_per_day": 122.42209683892263,
+              "aggregate_ns_per_day": 1958.753549422762,
+              "total_gpu_memory_mb": 8768.0,
+              "memory_mb_per_replica": 548.0,
+              "mps_info": {
+                "mps_active": true,
+                "started_by_harness": true,
+                "pipe_dir": "/tmp/mps_28712257_762854/pipe",
+                "log_dir": "/tmp/mps_28712257_762854/log",
+                "stdout": "",
+                "stderr": ""
+              },
+              "provenance": {
+                "platform_name": "CUDA",
+                "device_name": "NVIDIA H200",
+                "device_index": "0",
+                "precision": "single",
+                "cuda_Compiler": "openmm-nvrtc-builtin",
+                "CudaDriverVersion": "590.48.01",
+                "lib_openmm_cuda_path": "/orcd/pool/008/so3_shared/marielle/projects/.venv/lib/python3.13/site-packages/OpenMM.libs/lib/plugins/libOpenMMCUDA.so",
+                "mps_active": true,
+                "cuda_mps_pipe_directory": "/tmp/mps_28712257_762854/pipe",
+                "plugin_load_failures": []
+              }
+            }
+          }
+        },
+        "substep_breakdown": {
+          "B=1": {
+            "total_substeps_ms": 0.2572987601161003,
+            "baoab_pre_force_ms": 0.04258506000041962,
+            "bonded_and_nonbonded_direct_mk48_ms": 0.05652431398630142,
+            "pme_spread_3d_bspline_ms": 0.028723813593387604,
+            "pme_rfft3d_and_influence_ms": 0.02948526293039322,
+            "pme_irfft3d_ms": 0.03658078610897064,
+            "pme_gather_3d_bspline_fused_scale_ms": 0.02972617745399475,
+            "baoab_post_force_ms": 0.03367334604263306,
+            "baoab_pre_force_pct": 16.55082207982816,
+            "bonded_and_nonbonded_direct_mk48_pct": 21.96835847976729,
+            "pme_spread_3d_bspline_pct": 11.1636035791337,
+            "pme_rfft3d_and_influence_pct": 11.459543340624204,
+            "pme_irfft3d_pct": 14.2172415026269,
+            "pme_gather_3d_bspline_fused_scale_pct": 11.553175553812027,
+            "baoab_post_force_pct": 13.087255464207722,
+            "nonbonded_tile_pairs_mk51_ms_per_rep": 0.03105033189058304,
+            "num_valid_tile_pairs_aabb_pruned": 782,
+            "xtrax_probe_metrics": {
+              "baoab_pre_force": {
+                "n_executions": 1.0,
+                "n_compilations": 0.0,
+                "n_jit_traces": 2.0,
+                "total_step_seconds": 0.0001038997434079647,
+                "compile_seconds": 0.0,
+                "device_seconds": 2.9119999999995344e-05,
+                "host_seconds": 0.0004021587204980897
+              },
+              "baoab_post_force": {
+                "n_executions": 1.0,
+                "n_compilations": 0.0,
+                "n_jit_traces": 2.0,
+                "total_step_seconds": 7.949629798531532e-05,
+                "compile_seconds": 0.0,
+                "device_seconds": 1.7280000000002474e-05,
+                "host_seconds": 0.00033505329981565226
+              },
+              "bonded_and_nonbonded_direct_mk48": {
+                "n_executions": 1.0,
+                "n_compilations": 0.0,
+                "n_jit_traces": 2.0,
+                "total_step_seconds": 0.00011765351518988609,
+                "compile_seconds": 0.0,
+                "device_seconds": 5.081600000000253e-05,
+                "host_seconds": 0.00041604948739671455
+              },
+              "nonbonded_tile_pairs_mk51": {
+                "n_executions": 1.0,
+                "n_compilations": 0.0,
+                "n_jit_traces": 2.0,
+                "total_step_seconds": 8.22264701128006e-05,
+                "compile_seconds": 0.0,
+                "device_seconds": 2.0256999999983235e-05,
+                "host_seconds": 0.0002604752889566589
+              },
+              "pme_spread_3d_bspline": {
+                "n_executions": 1.0,
+                "n_compilations": 0.0,
+                "n_jit_traces": 2.0,
+                "total_step_seconds": 7.814913988113403e-05,
+                "compile_seconds": 0.0,
+                "device_seconds": 2.3552000000003318e-05,
+                "host_seconds": 0.00017379991017388966
+              },
+              "pme_rfft3d_and_influence": {
+                "n_executions": 1.0,
+                "n_compilations": 0.0,
+                "n_jit_traces": 2.0,
+                "total_step_seconds": 5.110492929816246e-05,
+                "compile_seconds": 0.0,
+                "device_seconds": 9.152000000001863e-06,
+                "host_seconds": 0.00029117345328140073
+              },
+              "pme_irfft3d": {
+                "n_executions": 1.0,
+                "n_compilations": 0.0,
+                "n_jit_traces": 2.0,
+                "total_step_seconds": 6.508920341730118e-05,
+                "compile_seconds": 0.0,
+                "device_seconds": 1.4496000000002824e-05,
+                "host_seconds": 0.00018476232748412802
+              },
+              "pme_gather_3d_bspline_fused_scale": {
+                "n_executions": 1.0,
+                "n_compilations": 0.0,
+                "n_jit_traces": 2.0,
+                "total_step_seconds": 7.793260738253593e-05,
+                "compile_seconds": 0.0,
+                "device_seconds": 1.5264999999999418e-05,
+                "host_seconds": 0.0001409885762786871
+              }
+            },
+            "device_substeps_ms": {
+              "baoab_pre_force": 0.029119999999995344,
+              "baoab_post_force": 0.017280000000002474,
+              "bonded_and_nonbonded_direct_mk48": 0.05081600000000253,
+              "nonbonded_tile_pairs_mk51": 0.020256999999983236,
+              "pme_spread_3d_bspline": 0.023552000000003317,
+              "pme_rfft3d_and_influence": 0.009152000000001864,
+              "pme_irfft3d": 0.014496000000002824,
+              "pme_gather_3d_bspline_fused_scale": 0.015264999999999418
+            },
+            "total_device_substeps_mk48_ms": 0.15968100000000776,
+            "total_device_substeps_mk51_ms": 0.12912199999998847
+          },
+          "B=4": {
+            "total_substeps_ms": 0.1077099610120058,
+            "baoab_pre_force_ms": 0.014501474797725677,
+            "bonded_and_nonbonded_direct_mk48_ms": 0.04122268408536911,
+            "pme_spread_3d_bspline_ms": 0.016406597569584846,
+            "pme_rfft3d_and_influence_ms": 0.007265694439411163,
+            "pme_irfft3d_ms": 0.009787213057279587,
+            "pme_gather_3d_bspline_fused_scale_ms": 0.01057594083249569,
+            "baoab_post_force_ms": 0.007950356230139732,
+            "baoab_pre_force_pct": 13.463448191304499,
+            "bonded_and_nonbonded_direct_mk48_pct": 38.27193297449458,
+            "pme_spread_3d_bspline_pct": 15.232200824727899,
+            "pme_rfft3d_and_influence_pct": 6.74561049985089,
+            "pme_irfft3d_pct": 9.086636895345885,
+            "pme_gather_3d_bspline_fused_scale_pct": 9.818906935930327,
+            "baoab_post_force_pct": 7.381263678345917,
+            "nonbonded_tile_pairs_mk51_ms_per_rep": 0.018612155690789223,
+            "num_valid_tile_pairs_aabb_pruned": 782
+          }
+        },
+        "batch_scaling": [
+          {
+            "B": 1,
+            "ms_per_step_batch": 0.28578710431853926,
+            "ms_per_step_per_replica": 0.28578710431853926,
+            "ns_per_day_per_replica": 604.645896854032,
+            "ns_per_day_aggregate": 604.645896854032,
+            "speedup_vs_openmm_cuda_single_b1": 0.6173484905842994,
+            "speedup_vs_openmm_cuda_mps_same_B": 0.6311796187792389
+          },
+          {
+            "B": 2,
+            "ms_per_step_batch": 0.43423517296711606,
+            "ms_per_step_per_replica": 0.21711758648355803,
+            "ns_per_day_per_replica": 795.8820968797287,
+            "ns_per_day_aggregate": 795.8820968797287,
+            "speedup_vs_openmm_cuda_single_b1": 0.81260224165613,
+            "speedup_vs_openmm_cuda_mps_same_B": null
+          },
+          {
+            "B": 4,
+            "ms_per_step_batch": 0.683513144031167,
+            "ms_per_step_per_replica": 0.17087828600779176,
+            "ns_per_day_per_replica": 1011.2460982439899,
+            "ns_per_day_aggregate": 1011.2460982439899,
+            "speedup_vs_openmm_cuda_single_b1": 1.032490678607714,
+            "speedup_vs_openmm_cuda_mps_same_B": 0.5612697754347626
+          },
+          {
+            "B": 8,
+            "ms_per_step_batch": 1.317826770246029,
+            "ms_per_step_per_replica": 0.1647283462807536,
+            "ns_per_day_per_replica": 1048.9997860203703,
+            "ns_per_day_aggregate": 1048.9997860203703,
+            "speedup_vs_openmm_cuda_single_b1": 1.0710375078907808,
+            "speedup_vs_openmm_cuda_mps_same_B": 0.49835668979957665
+          },
+          {
+            "B": 16,
+            "ms_per_step_batch": 2.4340489506721497,
+            "ms_per_step_per_replica": 0.15212805941700935,
+            "ns_per_day_per_replica": 1135.8851264008126,
+            "ns_per_day_aggregate": 1135.8851264008126,
+            "speedup_vs_openmm_cuda_single_b1": 1.1597481631963904,
+            "speedup_vs_openmm_cuda_mps_same_B": 0.5799020130610888
+          },
+          {
+            "B": 32,
+            "ms_per_step_batch": 4.679276496171951,
+            "ms_per_step_per_replica": 0.14622739050537348,
+            "ns_per_day_per_replica": 1181.721149524651,
+            "ns_per_day_aggregate": 1181.721149524651,
+            "speedup_vs_openmm_cuda_single_b1": 1.2065471241041164,
+            "speedup_vs_openmm_cuda_mps_same_B": null
+          }
+        ]
+      },
+      {
+        "system": "DHFR_24k_pme_64grid",
+        "suites": [
+          "SuiteA"
+        ],
+        "kind": "trunc",
+        "n_real_atoms": 23558,
+        "bucket_atoms": 25000,
+        "bucket_waters": 8192,
+        "occupancy_pct": 94.232,
+        "electrostatics": "pme",
+        "pme_grid": [
+          64,
+          64,
+          64
+        ],
+        "openmm": {
+          "openmm_cuda_single_b1": {
+            "platform": "CUDA",
+            "precision": "single",
+            "ms_per_step": 0.18855491653084755,
+            "ns_per_day": 916.4438837198389,
+            "provenance": {
+              "platform_name": "CUDA",
+              "device_name": "NVIDIA H200",
+              "device_index": "0",
+              "precision": "single",
+              "cuda_Compiler": "openmm-nvrtc-builtin",
+              "CudaDriverVersion": "590.48.01",
+              "lib_openmm_cuda_path": "/orcd/pool/008/so3_shared/marielle/projects/.venv/lib/python3.13/site-packages/OpenMM.libs/lib/plugins/libOpenMMCUDA.so",
+              "mps_active": false,
+              "cuda_mps_pipe_directory": null,
+              "plugin_load_failures": []
+            }
+          },
+          "openmm_cuda_mixed_b1": {
+            "platform": "CUDA",
+            "precision": "mixed",
+            "ms_per_step": 0.17671321984380484,
+            "ns_per_day": 977.855534253387,
+            "provenance": {
+              "platform_name": "CUDA",
+              "device_name": "NVIDIA H200",
+              "device_index": "0",
+              "precision": "mixed",
+              "cuda_Compiler": "openmm-nvrtc-builtin",
+              "CudaDriverVersion": "590.48.01",
+              "lib_openmm_cuda_path": "/orcd/pool/008/so3_shared/marielle/projects/.venv/lib/python3.13/site-packages/OpenMM.libs/lib/plugins/libOpenMMCUDA.so",
+              "mps_active": false,
+              "cuda_mps_pipe_directory": null,
+              "plugin_load_failures": []
+            }
+          },
+          "openmm_cuda_mps_scaling": {
+            "B=1": {
+              "available": true,
+              "ok": true,
+              "replicas_B": 1,
+              "precision": "single",
+              "n_steps": 30,
+              "dt_fs": 2.0,
+              "wall_elapsed_s": 0.005357120186090469,
+              "ms_per_step_batch": 0.1785706728696823,
+              "ms_per_step_per_replica": 0.1785706728696823,
+              "per_replica_ns_per_day": 967.6840951711391,
+              "aggregate_ns_per_day": 967.6840951711391,
+              "total_gpu_memory_mb": 550.0,
+              "memory_mb_per_replica": 550.0,
+              "mps_info": {
+                "mps_active": false,
+                "started_by_harness": false
+              },
+              "provenance": {
+                "platform_name": "CUDA",
+                "device_name": "NVIDIA H200",
+                "device_index": "0",
+                "precision": "single",
+                "cuda_Compiler": "openmm-nvrtc-builtin",
+                "CudaDriverVersion": "590.48.01",
+                "lib_openmm_cuda_path": "/orcd/pool/008/so3_shared/marielle/projects/.venv/lib/python3.13/site-packages/OpenMM.libs/lib/plugins/libOpenMMCUDA.so",
+                "mps_active": false,
+                "cuda_mps_pipe_directory": null,
+                "plugin_load_failures": []
+              }
+            },
+            "B=4": {
+              "available": true,
+              "ok": true,
+              "replicas_B": 4,
+              "precision": "single",
+              "n_steps": 30,
+              "dt_fs": 2.0,
+              "wall_elapsed_s": 0.01130747515708208,
+              "ms_per_step_batch": 0.3769158385694027,
+              "ms_per_step_per_replica": 0.09422895964235067,
+              "per_replica_ns_per_day": 458.4577837213434,
+              "aggregate_ns_per_day": 1833.8311348853736,
+              "total_gpu_memory_mb": 2192.0,
+              "memory_mb_per_replica": 548.0,
+              "mps_info": {
+                "mps_active": true,
+                "started_by_harness": true,
+                "pipe_dir": "/tmp/mps_28712257_775774/pipe",
+                "log_dir": "/tmp/mps_28712257_775774/log",
+                "stdout": "",
+                "stderr": ""
+              },
+              "provenance": {
+                "platform_name": "CUDA",
+                "device_name": "NVIDIA H200",
+                "device_index": "0",
+                "precision": "single",
+                "cuda_Compiler": "openmm-nvrtc-builtin",
+                "CudaDriverVersion": "590.48.01",
+                "lib_openmm_cuda_path": "/orcd/pool/008/so3_shared/marielle/projects/.venv/lib/python3.13/site-packages/OpenMM.libs/lib/plugins/libOpenMMCUDA.so",
+                "mps_active": true,
+                "cuda_mps_pipe_directory": "/tmp/mps_28712257_775774/pipe",
+                "plugin_load_failures": []
+              }
+            },
+            "B=8": {
+              "available": true,
+              "ok": true,
+              "replicas_B": 8,
+              "precision": "single",
+              "n_steps": 30,
+              "dt_fs": 2.0,
+              "wall_elapsed_s": 0.02005821466445923,
+              "ms_per_step_batch": 0.6686071554819742,
+              "ms_per_step_per_replica": 0.08357589443524678,
+              "per_replica_ns_per_day": 258.44772761283843,
+              "aggregate_ns_per_day": 2067.5818209027075,
+              "total_gpu_memory_mb": 4384.0,
+              "memory_mb_per_replica": 548.0,
+              "mps_info": {
+                "mps_active": true,
+                "started_by_harness": true,
+                "pipe_dir": "/tmp/mps_28712257_777125/pipe",
+                "log_dir": "/tmp/mps_28712257_777125/log",
+                "stdout": "",
+                "stderr": ""
+              },
+              "provenance": {
+                "platform_name": "CUDA",
+                "device_name": "NVIDIA H200",
+                "device_index": "0",
+                "precision": "single",
+                "cuda_Compiler": "openmm-nvrtc-builtin",
+                "CudaDriverVersion": "590.48.01",
+                "lib_openmm_cuda_path": "/orcd/pool/008/so3_shared/marielle/projects/.venv/lib/python3.13/site-packages/OpenMM.libs/lib/plugins/libOpenMMCUDA.so",
+                "mps_active": true,
+                "cuda_mps_pipe_directory": "/tmp/mps_28712257_777125/pipe",
+                "plugin_load_failures": []
+              }
+            },
+            "B=16": {
+              "available": true,
+              "ok": true,
+              "replicas_B": 16,
+              "precision": "single",
+              "n_steps": 30,
+              "dt_fs": 2.0,
+              "wall_elapsed_s": 0.04058464150875807,
+              "ms_per_step_batch": 1.352821383625269,
+              "ms_per_step_per_replica": 0.08455133647657931,
+              "per_replica_ns_per_day": 127.73304893875445,
+              "aggregate_ns_per_day": 2043.7287830200712,
+              "total_gpu_memory_mb": 8768.0,
+              "memory_mb_per_replica": 548.0,
+              "mps_info": {
+                "mps_active": true,
+                "started_by_harness": true,
+                "pipe_dir": "/tmp/mps_28712257_779525/pipe",
+                "log_dir": "/tmp/mps_28712257_779525/log",
+                "stdout": "",
+                "stderr": ""
+              },
+              "provenance": {
+                "platform_name": "CUDA",
+                "device_name": "NVIDIA H200",
+                "device_index": "0",
+                "precision": "single",
+                "cuda_Compiler": "openmm-nvrtc-builtin",
+                "CudaDriverVersion": "590.48.01",
+                "lib_openmm_cuda_path": "/orcd/pool/008/so3_shared/marielle/projects/.venv/lib/python3.13/site-packages/OpenMM.libs/lib/plugins/libOpenMMCUDA.so",
+                "mps_active": true,
+                "cuda_mps_pipe_directory": "/tmp/mps_28712257_779525/pipe",
+                "plugin_load_failures": []
+              }
+            }
+          }
+        },
+        "substep_breakdown": {
+          "B=1": {
+            "total_substeps_ms": 0.25580961257219315,
+            "baoab_pre_force_ms": 0.045571960508823395,
+            "bonded_and_nonbonded_direct_mk48_ms": 0.056819841265678406,
+            "pme_spread_3d_bspline_ms": 0.027814768254756927,
+            "pme_rfft3d_and_influence_ms": 0.026238970458507538,
+            "pme_irfft3d_ms": 0.03581628203392029,
+            "pme_gather_3d_bspline_fused_scale_ms": 0.03100641071796417,
+            "baoab_post_force_ms": 0.03254137933254242,
+            "baoab_pre_force_pct": 17.814795953362516,
+            "bonded_and_nonbonded_direct_mk48_pct": 22.21176940707927,
+            "pme_spread_3d_bspline_pct": 10.873230280549837,
+            "pme_rfft3d_and_influence_pct": 10.25722614356508,
+            "pme_irfft3d_pct": 14.00114783560466,
+            "pme_gather_3d_bspline_fused_scale_pct": 12.120893505991184,
+            "baoab_post_force_pct": 12.72093687384745,
+            "nonbonded_tile_pairs_mk51_ms_per_rep": 0.03554467111825943,
+            "num_valid_tile_pairs_aabb_pruned": 782
+          },
+          "B=4": {
+            "total_substeps_ms": 0.1080866064876318,
+            "baoab_pre_force_ms": 0.014423457905650139,
+            "bonded_and_nonbonded_direct_mk48_ms": 0.04200035706162453,
+            "pme_spread_3d_bspline_ms": 0.016720620915293694,
+            "pme_rfft3d_and_influence_ms": 0.007330114021897316,
+            "pme_irfft3d_ms": 0.009222123771905899,
+            "pme_gather_3d_bspline_fused_scale_ms": 0.010230205953121185,
+            "baoab_post_force_ms": 0.008159726858139038,
+            "baoab_pre_force_pct": 13.344352620877773,
+            "bonded_and_nonbonded_direct_mk48_pct": 38.858058760897976,
+            "pme_spread_3d_bspline_pct": 15.46965110539113,
+            "pme_rfft3d_and_influence_pct": 6.781704283348086,
+            "pme_irfft3d_pct": 8.532161450513458,
+            "pme_gather_3d_bspline_fused_scale_pct": 9.464822965176369,
+            "baoab_post_force_pct": 7.5492488137952085,
+            "nonbonded_tile_pairs_mk51_ms_per_rep": 0.017918143421411514,
+            "num_valid_tile_pairs_aabb_pruned": 782
+          }
+        },
+        "batch_scaling": [
+          {
+            "B": 1,
+            "ms_per_step_batch": 0.2921237299839656,
+            "ms_per_step_per_replica": 0.2921237299839656,
+            "ns_per_day_per_replica": 591.5301711691989,
+            "ns_per_day_aggregate": 591.5301711691989,
+            "speedup_vs_openmm_cuda_single_b1": 0.6454625118650825,
+            "speedup_vs_openmm_cuda_mps_same_B": 0.611284378983809
+          },
+          {
+            "B": 2,
+            "ms_per_step_batch": 0.46528824605047703,
+            "ms_per_step_per_replica": 0.23264412302523851,
+            "ns_per_day_per_replica": 742.7653780931904,
+            "ns_per_day_aggregate": 742.7653780931904,
+            "speedup_vs_openmm_cuda_single_b1": 0.8104864807197045,
+            "speedup_vs_openmm_cuda_mps_same_B": null
+          },
+          {
+            "B": 4,
+            "ms_per_step_batch": 0.6868410234649976,
+            "ms_per_step_per_replica": 0.1717102558662494,
+            "ns_per_day_per_replica": 1006.3464126138127,
+            "ns_per_day_aggregate": 1006.3464126138127,
+            "speedup_vs_openmm_cuda_single_b1": 1.0980993277286768,
+            "speedup_vs_openmm_cuda_mps_same_B": 0.5487672193310842
+          },
+          {
+            "B": 8,
+            "ms_per_step_batch": 1.339918039739132,
+            "ms_per_step_per_replica": 0.1674897549673915,
+            "ns_per_day_per_replica": 1031.704894628584,
+            "ns_per_day_aggregate": 1031.704894628584,
+            "speedup_vs_openmm_cuda_single_b1": 1.125769851221988,
+            "speedup_vs_openmm_cuda_mps_same_B": 0.49899108426971034
+          },
+          {
+            "B": 16,
+            "ms_per_step_batch": 2.4512747302651405,
+            "ms_per_step_per_replica": 0.15320467064157128,
+            "ns_per_day_per_replica": 1127.902950193162,
+            "ns_per_day_aggregate": 1127.902950193162,
+            "speedup_vs_openmm_cuda_single_b1": 1.2307386957671782,
+            "speedup_vs_openmm_cuda_mps_same_B": 0.5518848486962299
+          },
+          {
+            "B": 32,
+            "ms_per_step_batch": 4.701363891363144,
+            "ms_per_step_per_replica": 0.14691762160509825,
+            "ns_per_day_per_replica": 1176.1693261307437,
+            "ns_per_day_aggregate": 1176.1693261307437,
+            "speedup_vs_openmm_cuda_single_b1": 1.2834057240435508,
+            "speedup_vs_openmm_cuda_mps_same_B": null
+          }
+        ]
+      },
+      {
+        "system": "DHFR_24k_pme_hbonds",
+        "suites": [
+          "SuiteA"
+        ],
+        "kind": "trunc_hbonds",
+        "n_real_atoms": 23558,
+        "bucket_atoms": 25000,
+        "bucket_waters": 8192,
+        "occupancy_pct": 94.232,
+        "electrostatics": "pme",
+        "pme_grid": [
+          60,
+          60,
+          60
+        ],
+        "openmm": {
+          "openmm_cuda_single_b1": {
+            "platform": "CUDA",
+            "precision": "single",
+            "ms_per_step": 0.17826305702328682,
+            "ns_per_day": 969.3539586131233,
+            "provenance": {
+              "platform_name": "CUDA",
+              "device_name": "NVIDIA H200",
+              "device_index": "0",
+              "precision": "single",
+              "cuda_Compiler": "openmm-nvrtc-builtin",
+              "CudaDriverVersion": "590.48.01",
+              "lib_openmm_cuda_path": "/orcd/pool/008/so3_shared/marielle/projects/.venv/lib/python3.13/site-packages/OpenMM.libs/lib/plugins/libOpenMMCUDA.so",
+              "mps_active": false,
+              "cuda_mps_pipe_directory": null,
+              "plugin_load_failures": []
+            }
+          },
+          "openmm_cuda_mixed_b1": {
+            "platform": "CUDA",
+            "precision": "mixed",
+            "ms_per_step": 0.17708486411720514,
+            "ns_per_day": 975.803329445654,
+            "provenance": {
+              "platform_name": "CUDA",
+              "device_name": "NVIDIA H200",
+              "device_index": "0",
+              "precision": "mixed",
+              "cuda_Compiler": "openmm-nvrtc-builtin",
+              "CudaDriverVersion": "590.48.01",
+              "lib_openmm_cuda_path": "/orcd/pool/008/so3_shared/marielle/projects/.venv/lib/python3.13/site-packages/OpenMM.libs/lib/plugins/libOpenMMCUDA.so",
+              "mps_active": false,
+              "cuda_mps_pipe_directory": null,
+              "plugin_load_failures": []
+            }
+          },
+          "openmm_cuda_mps_scaling": {
+            "B=1": {
+              "available": true,
+              "ok": true,
+              "replicas_B": 1,
+              "precision": "single",
+              "n_steps": 30,
+              "dt_fs": 2.0,
+              "wall_elapsed_s": 0.005450150929391384,
+              "ms_per_step_batch": 0.18167169764637947,
+              "ms_per_step_per_replica": 0.18167169764637947,
+              "per_replica_ns_per_day": 951.1663194580365,
+              "aggregate_ns_per_day": 951.1663194580365,
+              "total_gpu_memory_mb": 550.0,
+              "memory_mb_per_replica": 550.0,
+              "mps_info": {
+                "mps_active": false,
+                "started_by_harness": false
+              },
+              "provenance": {
+                "platform_name": "CUDA",
+                "device_name": "NVIDIA H200",
+                "device_index": "0",
+                "precision": "single",
+                "cuda_Compiler": "openmm-nvrtc-builtin",
+                "CudaDriverVersion": "590.48.01",
+                "lib_openmm_cuda_path": "/orcd/pool/008/so3_shared/marielle/projects/.venv/lib/python3.13/site-packages/OpenMM.libs/lib/plugins/libOpenMMCUDA.so",
+                "mps_active": false,
+                "cuda_mps_pipe_directory": null,
+                "plugin_load_failures": []
+              }
+            },
+            "B=4": {
+              "available": true,
+              "ok": true,
+              "replicas_B": 4,
+              "precision": "single",
+              "n_steps": 30,
+              "dt_fs": 2.0,
+              "wall_elapsed_s": 0.011522801592946053,
+              "ms_per_step_batch": 0.3840933864315351,
+              "ms_per_step_per_replica": 0.09602334660788378,
+              "per_replica_ns_per_day": 449.89058938353185,
+              "aggregate_ns_per_day": 1799.5623575341274,
+              "total_gpu_memory_mb": 2192.0,
+              "memory_mb_per_replica": 548.0,
+              "mps_info": {
+                "mps_active": true,
+                "started_by_harness": true,
+                "pipe_dir": "/tmp/mps_28712257_787927/pipe",
+                "log_dir": "/tmp/mps_28712257_787927/log",
+                "stdout": "",
+                "stderr": ""
+              },
+              "provenance": {
+                "platform_name": "CUDA",
+                "device_name": "NVIDIA H200",
+                "device_index": "0",
+                "precision": "single",
+                "cuda_Compiler": "openmm-nvrtc-builtin",
+                "CudaDriverVersion": "590.48.01",
+                "lib_openmm_cuda_path": "/orcd/pool/008/so3_shared/marielle/projects/.venv/lib/python3.13/site-packages/OpenMM.libs/lib/plugins/libOpenMMCUDA.so",
+                "mps_active": true,
+                "cuda_mps_pipe_directory": "/tmp/mps_28712257_787927/pipe",
+                "plugin_load_failures": []
+              }
+            },
+            "B=8": {
+              "available": true,
+              "ok": true,
+              "replicas_B": 8,
+              "precision": "single",
+              "n_steps": 30,
+              "dt_fs": 2.0,
+              "wall_elapsed_s": 0.02153153996914625,
+              "ms_per_step_batch": 0.7177179989715418,
+              "ms_per_step_per_replica": 0.08971474987144272,
+              "per_replica_ns_per_day": 240.76308556788985,
+              "aggregate_ns_per_day": 1926.1046845431188,
+              "total_gpu_memory_mb": 4384.0,
+              "memory_mb_per_replica": 548.0,
+              "mps_info": {
+                "mps_active": true,
+                "started_by_harness": true,
+                "pipe_dir": "/tmp/mps_28712257_789265/pipe",
+                "log_dir": "/tmp/mps_28712257_789265/log",
+                "stdout": "",
+                "stderr": ""
+              },
+              "provenance": {
+                "platform_name": "CUDA",
+                "device_name": "NVIDIA H200",
+                "device_index": "0",
+                "precision": "single",
+                "cuda_Compiler": "openmm-nvrtc-builtin",
+                "CudaDriverVersion": "590.48.01",
+                "lib_openmm_cuda_path": "/orcd/pool/008/so3_shared/marielle/projects/.venv/lib/python3.13/site-packages/OpenMM.libs/lib/plugins/libOpenMMCUDA.so",
+                "mps_active": true,
+                "cuda_mps_pipe_directory": "/tmp/mps_28712257_789265/pipe",
+                "plugin_load_failures": []
+              }
+            },
+            "B=16": {
+              "available": true,
+              "ok": true,
+              "replicas_B": 16,
+              "precision": "single",
+              "n_steps": 30,
+              "dt_fs": 2.0,
+              "wall_elapsed_s": 0.03997310530394316,
+              "ms_per_step_batch": 1.332436843464772,
+              "ms_per_step_per_replica": 0.08327730271654825,
+              "per_replica_ns_per_day": 129.68719744394295,
+              "aggregate_ns_per_day": 2074.995159103087,
+              "total_gpu_memory_mb": 8768.0,
+              "memory_mb_per_replica": 548.0,
+              "mps_info": {
+                "mps_active": true,
+                "started_by_harness": true,
+                "pipe_dir": "/tmp/mps_28712257_791658/pipe",
+                "log_dir": "/tmp/mps_28712257_791658/log",
+                "stdout": "",
+                "stderr": ""
+              },
+              "provenance": {
+                "platform_name": "CUDA",
+                "device_name": "NVIDIA H200",
+                "device_index": "0",
+                "precision": "single",
+                "cuda_Compiler": "openmm-nvrtc-builtin",
+                "CudaDriverVersion": "590.48.01",
+                "lib_openmm_cuda_path": "/orcd/pool/008/so3_shared/marielle/projects/.venv/lib/python3.13/site-packages/OpenMM.libs/lib/plugins/libOpenMMCUDA.so",
+                "mps_active": true,
+                "cuda_mps_pipe_directory": "/tmp/mps_28712257_791658/pipe",
+                "plugin_load_failures": []
+              }
+            }
+          }
+        },
+        "substep_breakdown": {
+          "B=1": {
+            "total_substeps_ms": 0.26144467294216156,
+            "baoab_pre_force_ms": 0.041221193969249725,
+            "bonded_and_nonbonded_direct_mk48_ms": 0.06051886826753616,
+            "pme_spread_3d_bspline_ms": 0.031071938574314114,
+            "pme_rfft3d_and_influence_ms": 0.028299987316131592,
+            "pme_irfft3d_ms": 0.03677189350128174,
+            "pme_gather_3d_bspline_fused_scale_ms": 0.030875802040100098,
+            "baoab_post_force_ms": 0.032684989273548126,
+            "baoab_pre_force_pct": 15.766698745615267,
+            "bonded_and_nonbonded_direct_mk48_pct": 23.147868184303963,
+            "pme_spread_3d_bspline_pct": 11.88470899966971,
+            "pme_rfft3d_and_influence_pct": 10.824465076170167,
+            "pme_irfft3d_pct": 14.06488534934374,
+            "pme_gather_3d_bspline_fused_scale_pct": 11.80968871640794,
+            "baoab_post_force_pct": 12.501684928489212,
+            "nonbonded_tile_pairs_mk51_ms_per_rep": 0.03473956137895584,
+            "num_valid_tile_pairs_aabb_pruned": 782
+          },
+          "B=4": {
+            "total_substeps_ms": 0.10640918277204037,
+            "baoab_pre_force_ms": 0.01276266761124134,
+            "bonded_and_nonbonded_direct_mk48_ms": 0.04128001630306244,
+            "pme_spread_3d_bspline_ms": 0.01648552715778351,
+            "pme_rfft3d_and_influence_ms": 0.007628500461578369,
+            "pme_irfft3d_ms": 0.009728586301207542,
+            "pme_gather_3d_bspline_fused_scale_ms": 0.010258974507451057,
+            "baoab_post_force_ms": 0.00826491042971611,
+            "baoab_pre_force_pct": 11.993953227310008,
+            "bonded_and_nonbonded_direct_mk48_pct": 38.793659745979184,
+            "pme_spread_3d_bspline_pct": 15.492579426251526,
+            "pme_rfft3d_and_influence_pct": 7.169024573678807,
+            "pme_irfft3d_pct": 9.142619130953221,
+            "pme_gather_3d_bspline_fused_scale_pct": 9.641061269522938,
+            "baoab_post_force_pct": 7.767102626304319,
+            "nonbonded_tile_pairs_mk51_ms_per_rep": 0.017995992675423622,
+            "num_valid_tile_pairs_aabb_pruned": 782
+          }
+        },
+        "batch_scaling": [
+          {
+            "B": 1,
+            "ms_per_step_batch": 0.3039560125519832,
+            "ms_per_step_per_replica": 0.3039560125519832,
+            "ns_per_day_per_replica": 568.5033125325901,
+            "ns_per_day_aggregate": 568.5033125325901,
+            "speedup_vs_openmm_cuda_single_b1": 0.5864764954856746,
+            "speedup_vs_openmm_cuda_mps_same_B": 0.5976907517672795
+          },
+          {
+            "B": 2,
+            "ms_per_step_batch": 0.445279898121953,
+            "ms_per_step_per_replica": 0.2226399490609765,
+            "ns_per_day_per_replica": 776.1410327697911,
+            "ns_per_day_aggregate": 776.1410327697911,
+            "speedup_vs_openmm_cuda_single_b1": 0.8006786642520486,
+            "speedup_vs_openmm_cuda_mps_same_B": null
+          },
+          {
+            "B": 4,
+            "ms_per_step_batch": 0.6901679094880819,
+            "ms_per_step_per_replica": 0.17254197737202048,
+            "ns_per_day_per_replica": 1001.4954194446444,
+            "ns_per_day_aggregate": 1001.4954194446444,
+            "speedup_vs_openmm_cuda_single_b1": 1.0331576103299838,
+            "speedup_vs_openmm_cuda_mps_same_B": 0.5565216538630847
+          },
+          {
+            "B": 8,
+            "ms_per_step_batch": 1.3447318971157074,
+            "ms_per_step_per_replica": 0.16809148713946342,
+            "ns_per_day_per_replica": 1028.0116080871483,
+            "ns_per_day_aggregate": 1028.0116080871483,
+            "speedup_vs_openmm_cuda_single_b1": 1.0605121059782412,
+            "speedup_vs_openmm_cuda_mps_same_B": 0.5337257192388779
+          },
+          {
+            "B": 16,
+            "ms_per_step_batch": 2.4510109052062035,
+            "ms_per_step_per_replica": 0.15318818157538772,
+            "ns_per_day_per_replica": 1128.0243568591536,
+            "ns_per_day_aggregate": 1128.0243568591536,
+            "speedup_vs_openmm_cuda_single_b1": 1.1636867491344893,
+            "speedup_vs_openmm_cuda_mps_same_B": 0.5436274643391169
+          },
+          {
+            "B": 32,
+            "ms_per_step_batch": 4.687256179749966,
+            "ms_per_step_per_replica": 0.14647675561718643,
+            "ns_per_day_per_replica": 1179.709362566773,
+            "ns_per_day_aggregate": 1179.709362566773,
+            "speedup_vs_openmm_cuda_single_b1": 1.2170057718179745,
+            "speedup_vs_openmm_cuda_mps_same_B": null
+          }
+        ]
+      },
+      {
+        "system": "Holo_DHFR_MTX_NADPH_24k",
+        "suites": [
+          "SuiteB"
+        ],
+        "kind": "holo_dhfr",
+        "n_real_atoms": 23558,
+        "bucket_atoms": 25000,
+        "bucket_waters": 8192,
+        "occupancy_pct": 94.232,
+        "electrostatics": "pme",
+        "pme_grid": [
+          60,
+          60,
+          60
+        ],
+        "openmm": {
+          "openmm_cuda_single_b1": {
+            "platform": "CUDA",
+            "precision": "single",
+            "ms_per_step": 0.17849232535809278,
+            "ns_per_day": 968.1088509174118,
+            "provenance": {
+              "platform_name": "CUDA",
+              "device_name": "NVIDIA H200",
+              "device_index": "0",
+              "precision": "single",
+              "cuda_Compiler": "openmm-nvrtc-builtin",
+              "CudaDriverVersion": "590.48.01",
+              "lib_openmm_cuda_path": "/orcd/pool/008/so3_shared/marielle/projects/.venv/lib/python3.13/site-packages/OpenMM.libs/lib/plugins/libOpenMMCUDA.so",
+              "mps_active": false,
+              "cuda_mps_pipe_directory": null,
+              "plugin_load_failures": []
+            }
+          },
+          "openmm_cuda_mixed_b1": {
+            "platform": "CUDA",
+            "precision": "mixed",
+            "ms_per_step": 0.17967596650123596,
+            "ns_per_day": 961.7312953138412,
+            "provenance": {
+              "platform_name": "CUDA",
+              "device_name": "NVIDIA H200",
+              "device_index": "0",
+              "precision": "mixed",
+              "cuda_Compiler": "openmm-nvrtc-builtin",
+              "CudaDriverVersion": "590.48.01",
+              "lib_openmm_cuda_path": "/orcd/pool/008/so3_shared/marielle/projects/.venv/lib/python3.13/site-packages/OpenMM.libs/lib/plugins/libOpenMMCUDA.so",
+              "mps_active": false,
+              "cuda_mps_pipe_directory": null,
+              "plugin_load_failures": []
+            }
+          },
+          "openmm_cuda_mps_scaling": {
+            "B=1": {
+              "available": true,
+              "ok": true,
+              "replicas_B": 1,
+              "precision": "single",
+              "n_steps": 30,
+              "dt_fs": 2.0,
+              "wall_elapsed_s": 0.005451072007417679,
+              "ms_per_step_batch": 0.18170240024725598,
+              "ms_per_step_per_replica": 0.18170240024725598,
+              "per_replica_ns_per_day": 951.0055990722091,
+              "aggregate_ns_per_day": 951.0055990722091,
+              "total_gpu_memory_mb": 550.0,
+              "memory_mb_per_replica": 550.0,
+              "mps_info": {
+                "mps_active": false,
+                "started_by_harness": false
+              },
+              "provenance": {
+                "platform_name": "CUDA",
+                "device_name": "NVIDIA H200",
+                "device_index": "0",
+                "precision": "single",
+                "cuda_Compiler": "openmm-nvrtc-builtin",
+                "CudaDriverVersion": "590.48.01",
+                "lib_openmm_cuda_path": "/orcd/pool/008/so3_shared/marielle/projects/.venv/lib/python3.13/site-packages/OpenMM.libs/lib/plugins/libOpenMMCUDA.so",
+                "mps_active": false,
+                "cuda_mps_pipe_directory": null,
+                "plugin_load_failures": []
+              }
+            },
+            "B=4": {
+              "available": true,
+              "ok": true,
+              "replicas_B": 4,
+              "precision": "single",
+              "n_steps": 30,
+              "dt_fs": 2.0,
+              "wall_elapsed_s": 0.011593208648264408,
+              "ms_per_step_batch": 0.38644028827548027,
+              "ms_per_step_per_replica": 0.09661007206887007,
+              "per_replica_ns_per_day": 447.15834565576324,
+              "aggregate_ns_per_day": 1788.633382623053,
+              "total_gpu_memory_mb": 2192.0,
+              "memory_mb_per_replica": 548.0,
+              "mps_info": {
+                "mps_active": true,
+                "started_by_harness": true,
+                "pipe_dir": "/tmp/mps_28712257_799641/pipe",
+                "log_dir": "/tmp/mps_28712257_799641/log",
+                "stdout": "",
+                "stderr": ""
+              },
+              "provenance": {
+                "platform_name": "CUDA",
+                "device_name": "NVIDIA H200",
+                "device_index": "0",
+                "precision": "single",
+                "cuda_Compiler": "openmm-nvrtc-builtin",
+                "CudaDriverVersion": "590.48.01",
+                "lib_openmm_cuda_path": "/orcd/pool/008/so3_shared/marielle/projects/.venv/lib/python3.13/site-packages/OpenMM.libs/lib/plugins/libOpenMMCUDA.so",
+                "mps_active": true,
+                "cuda_mps_pipe_directory": "/tmp/mps_28712257_799641/pipe",
+                "plugin_load_failures": []
+              }
+            },
+            "B=8": {
+              "available": true,
+              "ok": true,
+              "replicas_B": 8,
+              "precision": "single",
+              "n_steps": 30,
+              "dt_fs": 2.0,
+              "wall_elapsed_s": 0.021190635859966278,
+              "ms_per_step_batch": 0.7063545286655426,
+              "ms_per_step_per_replica": 0.08829431608319283,
+              "per_replica_ns_per_day": 244.636358920862,
+              "aggregate_ns_per_day": 1957.090871366896,
+              "total_gpu_memory_mb": 4384.0,
+              "memory_mb_per_replica": 548.0,
+              "mps_info": {
+                "mps_active": true,
+                "started_by_harness": true,
+                "pipe_dir": "/tmp/mps_28712257_800984/pipe",
+                "log_dir": "/tmp/mps_28712257_800984/log",
+                "stdout": "",
+                "stderr": ""
+              },
+              "provenance": {
+                "platform_name": "CUDA",
+                "device_name": "NVIDIA H200",
+                "device_index": "0",
+                "precision": "single",
+                "cuda_Compiler": "openmm-nvrtc-builtin",
+                "CudaDriverVersion": "590.48.01",
+                "lib_openmm_cuda_path": "/orcd/pool/008/so3_shared/marielle/projects/.venv/lib/python3.13/site-packages/OpenMM.libs/lib/plugins/libOpenMMCUDA.so",
+                "mps_active": true,
+                "cuda_mps_pipe_directory": "/tmp/mps_28712257_800984/pipe",
+                "plugin_load_failures": []
+              }
+            },
+            "B=16": {
+              "available": true,
+              "ok": true,
+              "replicas_B": 16,
+              "precision": "single",
+              "n_steps": 30,
+              "dt_fs": 2.0,
+              "wall_elapsed_s": 0.04040365666151047,
+              "ms_per_step_batch": 1.3467885553836823,
+              "ms_per_step_per_replica": 0.08417428471148014,
+              "per_replica_ns_per_day": 128.3052185951874,
+              "aggregate_ns_per_day": 2052.8834975229984,
+              "total_gpu_memory_mb": 8768.0,
+              "memory_mb_per_replica": 548.0,
+              "mps_info": {
+                "mps_active": true,
+                "started_by_harness": true,
+                "pipe_dir": "/tmp/mps_28712257_803374/pipe",
+                "log_dir": "/tmp/mps_28712257_803374/log",
+                "stdout": "",
+                "stderr": ""
+              },
+              "provenance": {
+                "platform_name": "CUDA",
+                "device_name": "NVIDIA H200",
+                "device_index": "0",
+                "precision": "single",
+                "cuda_Compiler": "openmm-nvrtc-builtin",
+                "CudaDriverVersion": "590.48.01",
+                "lib_openmm_cuda_path": "/orcd/pool/008/so3_shared/marielle/projects/.venv/lib/python3.13/site-packages/OpenMM.libs/lib/plugins/libOpenMMCUDA.so",
+                "mps_active": true,
+                "cuda_mps_pipe_directory": "/tmp/mps_28712257_803374/pipe",
+                "plugin_load_failures": []
+              }
+            }
+          }
+        },
+        "substep_breakdown": {
+          "B=1": {
+            "total_substeps_ms": 0.26076674461364746,
+            "baoab_pre_force_ms": 0.04622131586074829,
+            "bonded_and_nonbonded_direct_mk48_ms": 0.05557689815759659,
+            "pme_spread_3d_bspline_ms": 0.02888757735490799,
+            "pme_rfft3d_and_influence_ms": 0.02668038010597229,
+            "pme_irfft3d_ms": 0.036120377480983734,
+            "pme_gather_3d_bspline_fused_scale_ms": 0.029107220470905304,
+            "baoab_post_force_ms": 0.038172975182533264,
+            "baoab_pre_force_pct": 17.72515737358684,
+            "bonded_and_nonbonded_direct_mk48_pct": 21.31287800518407,
+            "pme_spread_3d_bspline_pct": 11.077937640287638,
+            "pme_rfft3d_and_influence_pct": 10.231511746446808,
+            "pme_irfft3d_pct": 13.85160425057258,
+            "pme_gather_3d_bspline_fused_scale_pct": 11.162167366866745,
+            "baoab_post_force_pct": 14.63874361705532,
+            "nonbonded_tile_pairs_mk51_ms_per_rep": 0.030154623091220856,
+            "num_valid_tile_pairs_aabb_pruned": 782
+          },
+          "B=4": {
+            "total_substeps_ms": 0.10288364253938198,
+            "baoab_pre_force_ms": 0.0126727856695652,
+            "bonded_and_nonbonded_direct_mk48_ms": 0.04083855077624321,
+            "pme_spread_3d_bspline_ms": 0.016442956402897835,
+            "pme_rfft3d_and_influence_ms": 0.006338702514767647,
+            "pme_irfft3d_ms": 0.008898191154003143,
+            "pme_gather_3d_bspline_fused_scale_ms": 0.010000457987189293,
+            "baoab_post_force_ms": 0.007691998034715652,
+            "baoab_pre_force_pct": 12.317590393161177,
+            "bonded_and_nonbonded_direct_mk48_pct": 39.69392001319448,
+            "pme_spread_3d_bspline_pct": 15.9820900553786,
+            "pme_rfft3d_and_influence_pct": 6.161040140410374,
+            "pme_irfft3d_pct": 8.648790939334285,
+            "pme_gather_3d_bspline_fused_scale_pct": 9.72016322552081,
+            "baoab_post_force_pct": 7.476405233000275,
+            "nonbonded_tile_pairs_mk51_ms_per_rep": 0.018046395853161812,
+            "num_valid_tile_pairs_aabb_pruned": 782
+          }
+        },
+        "batch_scaling": [
+          {
+            "B": 1,
+            "ms_per_step_batch": 0.3029639987895886,
+            "ms_per_step_per_replica": 0.3029639987895886,
+            "ns_per_day_per_replica": 570.3647980960644,
+            "ns_per_day_aggregate": 570.3647980960644,
+            "speedup_vs_openmm_cuda_single_b1": 0.5891535828389215,
+            "speedup_vs_openmm_cuda_mps_same_B": 0.5997491483252109
+          },
+          {
+            "B": 2,
+            "ms_per_step_batch": 0.43322909623384476,
+            "ms_per_step_per_replica": 0.21661454811692238,
+            "ns_per_day_per_replica": 797.7303533035439,
+            "ns_per_day_aggregate": 797.7303533035439,
+            "speedup_vs_openmm_cuda_single_b1": 0.8240089454275605,
+            "speedup_vs_openmm_cuda_mps_same_B": null
+          },
+          {
+            "B": 4,
+            "ms_per_step_batch": 0.7013711923112472,
+            "ms_per_step_per_replica": 0.1753427980778118,
+            "ns_per_day_per_replica": 985.4981321976885,
+            "ns_per_day_aggregate": 985.4981321976885,
+            "speedup_vs_openmm_cuda_single_b1": 1.0179621137269825,
+            "speedup_vs_openmm_cuda_mps_same_B": 0.5509782730055297
+          },
+          {
+            "B": 8,
+            "ms_per_step_batch": 1.3158323615789413,
+            "ms_per_step_per_replica": 0.16447904519736767,
+            "ns_per_day_per_replica": 1050.5897562370183,
+            "ns_per_day_aggregate": 1050.5897562370183,
+            "speedup_vs_openmm_cuda_single_b1": 1.085197966366535,
+            "speedup_vs_openmm_cuda_mps_same_B": 0.536811944507846
+          },
+          {
+            "B": 16,
+            "ms_per_step_batch": 2.4355140700936317,
+            "ms_per_step_per_replica": 0.15221962938085198,
+            "ns_per_day_per_replica": 1135.2018179446234,
+            "ns_per_day_aggregate": 1135.2018179446234,
+            "speedup_vs_openmm_cuda_single_b1": 1.1725972930304986,
+            "speedup_vs_openmm_cuda_mps_same_B": 0.5529791726195635
+          },
+          {
+            "B": 32,
+            "ms_per_step_batch": 4.657916836440563,
+            "ms_per_step_per_replica": 0.1455599011387676,
+            "ns_per_day_per_replica": 1187.1401302702411,
+            "ns_per_day_aggregate": 1187.1401302702411,
+            "speedup_vs_openmm_cuda_single_b1": 1.2262465415384523,
+            "speedup_vs_openmm_cuda_mps_same_B": null
+          }
+        ]
+      },
+      {
+        "system": "1AKE_solvated_45k",
+        "suites": [
+          "SuiteB"
+        ],
+        "kind": "1ake_45k",
+        "n_real_atoms": 44999,
+        "bucket_atoms": 50000,
+        "bucket_waters": 16384,
+        "occupancy_pct": 89.998,
+        "electrostatics": "pme",
+        "pme_grid": [
+          80,
+          80,
+          80
+        ],
+        "openmm": {
+          "openmm_cuda_single_b1": {
+            "platform": "CUDA",
+            "precision": "single",
+            "ms_per_step": 4.62219649925828,
+            "ns_per_day": 37.384823433562175,
+            "provenance": {
+              "platform_name": "CUDA",
+              "device_name": "NVIDIA H200",
+              "device_index": "0",
+              "precision": "single",
+              "cuda_Compiler": "openmm-nvrtc-builtin",
+              "CudaDriverVersion": "590.48.01",
+              "lib_openmm_cuda_path": "/orcd/pool/008/so3_shared/marielle/projects/.venv/lib/python3.13/site-packages/OpenMM.libs/lib/plugins/libOpenMMCUDA.so",
+              "mps_active": false,
+              "cuda_mps_pipe_directory": null,
+              "plugin_load_failures": []
+            }
+          },
+          "openmm_cuda_mixed_b1": {
+            "platform": "CUDA",
+            "precision": "mixed",
+            "ms_per_step": 4.624946601688862,
+            "ns_per_day": 37.36259353500422,
+            "provenance": {
+              "platform_name": "CUDA",
+              "device_name": "NVIDIA H200",
+              "device_index": "0",
+              "precision": "mixed",
+              "cuda_Compiler": "openmm-nvrtc-builtin",
+              "CudaDriverVersion": "590.48.01",
+              "lib_openmm_cuda_path": "/orcd/pool/008/so3_shared/marielle/projects/.venv/lib/python3.13/site-packages/OpenMM.libs/lib/plugins/libOpenMMCUDA.so",
+              "mps_active": false,
+              "cuda_mps_pipe_directory": null,
+              "plugin_load_failures": []
+            }
+          },
+          "openmm_cuda_mps_scaling": {
+            "B=1": {
+              "available": true,
+              "ok": true,
+              "replicas_B": 1,
+              "precision": "single",
+              "n_steps": 30,
+              "dt_fs": 2.0,
+              "wall_elapsed_s": 0.14141311217099428,
+              "ms_per_step_batch": 4.71377040569981,
+              "ms_per_step_per_replica": 4.71377040569981,
+              "per_replica_ns_per_day": 36.65855252327377,
+              "aggregate_ns_per_day": 36.65855252327377,
+              "total_gpu_memory_mb": 566.0,
+              "memory_mb_per_replica": 566.0,
+              "mps_info": {
+                "mps_active": false,
+                "started_by_harness": false
+              },
+              "provenance": {
+                "platform_name": "CUDA",
+                "device_name": "NVIDIA H200",
+                "device_index": "0",
+                "precision": "single",
+                "cuda_Compiler": "openmm-nvrtc-builtin",
+                "CudaDriverVersion": "590.48.01",
+                "lib_openmm_cuda_path": "/orcd/pool/008/so3_shared/marielle/projects/.venv/lib/python3.13/site-packages/OpenMM.libs/lib/plugins/libOpenMMCUDA.so",
+                "mps_active": false,
+                "cuda_mps_pipe_directory": null,
+                "plugin_load_failures": []
+              }
+            },
+            "B=4": {
+              "available": true,
+              "ok": true,
+              "replicas_B": 4,
+              "precision": "single",
+              "n_steps": 30,
+              "dt_fs": 2.0,
+              "wall_elapsed_s": 0.15782887488603592,
+              "ms_per_step_batch": 5.260962496201198,
+              "ms_per_step_per_replica": 1.3152406240502994,
+              "per_replica_ns_per_day": 32.845700786647754,
+              "aggregate_ns_per_day": 131.38280314659102,
+              "total_gpu_memory_mb": 2256.0,
+              "memory_mb_per_replica": 564.0,
+              "mps_info": {
+                "mps_active": true,
+                "started_by_harness": true,
+                "pipe_dir": "/tmp/mps_28712257_812076/pipe",
+                "log_dir": "/tmp/mps_28712257_812076/log",
+                "stdout": "",
+                "stderr": ""
+              },
+              "provenance": {
+                "platform_name": "CUDA",
+                "device_name": "NVIDIA H200",
+                "device_index": "0",
+                "precision": "single",
+                "cuda_Compiler": "openmm-nvrtc-builtin",
+                "CudaDriverVersion": "590.48.01",
+                "lib_openmm_cuda_path": "/orcd/pool/008/so3_shared/marielle/projects/.venv/lib/python3.13/site-packages/OpenMM.libs/lib/plugins/libOpenMMCUDA.so",
+                "mps_active": true,
+                "cuda_mps_pipe_directory": "/tmp/mps_28712257_812076/pipe",
+                "plugin_load_failures": []
+              }
+            },
+            "B=8": {
+              "available": true,
+              "ok": true,
+              "replicas_B": 8,
+              "precision": "single",
+              "n_steps": 30,
+              "dt_fs": 2.0,
+              "wall_elapsed_s": 0.17769488506019115,
+              "ms_per_step_batch": 5.9231628353397054,
+              "ms_per_step_per_replica": 0.7403953544174632,
+              "per_replica_ns_per_day": 29.17360282061021,
+              "aggregate_ns_per_day": 233.38882256488168,
+              "total_gpu_memory_mb": 4512.0,
+              "memory_mb_per_replica": 564.0,
+              "mps_info": {
+                "mps_active": true,
+                "started_by_harness": true,
+                "pipe_dir": "/tmp/mps_28712257_813418/pipe",
+                "log_dir": "/tmp/mps_28712257_813418/log",
+                "stdout": "",
+                "stderr": ""
+              },
+              "provenance": {
+                "platform_name": "CUDA",
+                "device_name": "NVIDIA H200",
+                "device_index": "0",
+                "precision": "single",
+                "cuda_Compiler": "openmm-nvrtc-builtin",
+                "CudaDriverVersion": "590.48.01",
+                "lib_openmm_cuda_path": "/orcd/pool/008/so3_shared/marielle/projects/.venv/lib/python3.13/site-packages/OpenMM.libs/lib/plugins/libOpenMMCUDA.so",
+                "mps_active": true,
+                "cuda_mps_pipe_directory": "/tmp/mps_28712257_813418/pipe",
+                "plugin_load_failures": []
+              }
+            }
+          }
+        },
+        "substep_breakdown": {
+          "B=1": {
+            "total_substeps_ms": 0.301201231777668,
+            "baoab_pre_force_ms": 0.04989601671695709,
+            "bonded_and_nonbonded_direct_mk48_ms": 0.07883060723543167,
+            "pme_spread_3d_bspline_ms": 0.043535828590393066,
+            "pme_rfft3d_and_influence_ms": 0.027796700596809387,
+            "pme_irfft3d_ms": 0.03928713500499725,
+            "pme_gather_3d_bspline_fused_scale_ms": 0.03072556108236313,
+            "baoab_post_force_ms": 0.0311293825507164,
+            "baoab_pre_force_pct": 16.565674855469346,
+            "bonded_and_nonbonded_direct_mk48_pct": 26.172073324594027,
+            "pme_spread_3d_bspline_pct": 14.454067247151594,
+            "pme_rfft3d_and_influence_pct": 9.228614515536758,
+            "pme_irfft3d_pct": 13.043484176053136,
+            "pme_gather_3d_bspline_fused_scale_pct": 10.201007778428753,
+            "baoab_post_force_pct": 10.335078102766388,
+            "nonbonded_tile_pairs_mk51_ms_per_rep": 0.0385776162147522,
+            "num_valid_tile_pairs_aabb_pruned": 1563
+          },
+          "B=4": null
+        },
+        "batch_scaling": [
+          {
+            "B": 1,
+            "ms_per_step_batch": 0.49724768847227097,
+            "ms_per_step_per_replica": 0.49724768847227097,
+            "ns_per_day_per_replica": 347.5129276737426,
+            "ns_per_day_aggregate": 347.5129276737426,
+            "speedup_vs_openmm_cuda_single_b1": 9.295561560998662,
+            "speedup_vs_openmm_cuda_mps_same_B": 9.479723113811264
+          },
+          {
+            "B": 2,
+            "ms_per_step_batch": 0.689595565199852,
+            "ms_per_step_per_replica": 0.344797782599926,
+            "ns_per_day_per_replica": 501.1633157760252,
+            "ns_per_day_aggregate": 501.1633157760252,
+            "speedup_vs_openmm_cuda_single_b1": 13.405528493846155,
+            "speedup_vs_openmm_cuda_mps_same_B": null
+          },
+          {
+            "B": 4,
+            "ms_per_step_batch": 1.150302141904831,
+            "ms_per_step_per_replica": 0.28757553547620773,
+            "ns_per_day_per_replica": 600.8856063289725,
+            "ns_per_day_aggregate": 600.8856063289725,
+            "speedup_vs_openmm_cuda_single_b1": 16.072982326553618,
+            "speedup_vs_openmm_cuda_mps_same_B": 4.573548378767131
+          },
+          {
+            "B": 8,
+            "ms_per_step_batch": 2.2222528544565043,
+            "ms_per_step_per_replica": 0.27778160680706304,
+            "ns_per_day_per_replica": 622.0714250530654,
+            "ns_per_day_aggregate": 622.0714250530654,
+            "speedup_vs_openmm_cuda_single_b1": 16.639678027597732,
+            "speedup_vs_openmm_cuda_mps_same_B": 2.6653865348677126
+          }
+        ]
+      },
+      {
+        "system": "ApoA1_92k_rf",
+        "suites": [
+          "SuiteA"
+        ],
+        "kind": "apoa1_rf",
+        "n_real_atoms": 92224,
+        "bucket_atoms": 100000,
+        "bucket_waters": 24576,
+        "occupancy_pct": 92.224,
+        "electrostatics": "rf",
+        "pme_grid": null,
+        "openmm": {
+          "openmm_cuda_single_b1": {
+            "platform": "CUDA",
+            "precision": "single",
+            "ms_per_step": 0.3336420049890876,
+            "ns_per_day": 517.9203979596386,
+            "provenance": {
+              "platform_name": "CUDA",
+              "device_name": "NVIDIA H200",
+              "device_index": "0",
+              "precision": "single",
+              "cuda_Compiler": "openmm-nvrtc-builtin",
+              "CudaDriverVersion": "590.48.01",
+              "lib_openmm_cuda_path": "/orcd/pool/008/so3_shared/marielle/projects/.venv/lib/python3.13/site-packages/OpenMM.libs/lib/plugins/libOpenMMCUDA.so",
+              "mps_active": false,
+              "cuda_mps_pipe_directory": null,
+              "plugin_load_failures": []
+            }
+          },
+          "openmm_cuda_mixed_b1": {
+            "platform": "CUDA",
+            "precision": "mixed",
+            "ms_per_step": 0.35312457475811243,
+            "ns_per_day": 489.34572202562407,
+            "provenance": {
+              "platform_name": "CUDA",
+              "device_name": "NVIDIA H200",
+              "device_index": "0",
+              "precision": "mixed",
+              "cuda_Compiler": "openmm-nvrtc-builtin",
+              "CudaDriverVersion": "590.48.01",
+              "lib_openmm_cuda_path": "/orcd/pool/008/so3_shared/marielle/projects/.venv/lib/python3.13/site-packages/OpenMM.libs/lib/plugins/libOpenMMCUDA.so",
+              "mps_active": false,
+              "cuda_mps_pipe_directory": null,
+              "plugin_load_failures": []
+            }
+          },
+          "openmm_cuda_mps_scaling": {
+            "B=1": {
+              "available": true,
+              "ok": true,
+              "replicas_B": 1,
+              "precision": "single",
+              "n_steps": 30,
+              "dt_fs": 2.0,
+              "wall_elapsed_s": 0.009016714990139008,
+              "ms_per_step_batch": 0.3005571663379669,
+              "ms_per_step_per_replica": 0.3005571663379669,
+              "per_replica_ns_per_day": 574.9322237277547,
+              "aggregate_ns_per_day": 574.9322237277547,
+              "total_gpu_memory_mb": 574.0,
+              "memory_mb_per_replica": 574.0,
+              "mps_info": {
+                "mps_active": false,
+                "started_by_harness": false
+              },
+              "provenance": {
+                "platform_name": "CUDA",
+                "device_name": "NVIDIA H200",
+                "device_index": "0",
+                "precision": "single",
+                "cuda_Compiler": "openmm-nvrtc-builtin",
+                "CudaDriverVersion": "590.48.01",
+                "lib_openmm_cuda_path": "/orcd/pool/008/so3_shared/marielle/projects/.venv/lib/python3.13/site-packages/OpenMM.libs/lib/plugins/libOpenMMCUDA.so",
+                "mps_active": false,
+                "cuda_mps_pipe_directory": null,
+                "plugin_load_failures": []
+              }
+            },
+            "B=2": {
+              "available": true,
+              "ok": true,
+              "replicas_B": 2,
+              "precision": "single",
+              "n_steps": 30,
+              "dt_fs": 2.0,
+              "wall_elapsed_s": 0.013243732042610645,
+              "ms_per_step_batch": 0.4414577347536882,
+              "ms_per_step_per_replica": 0.2207288673768441,
+              "per_replica_ns_per_day": 391.43045051960394,
+              "aggregate_ns_per_day": 782.8609010392079,
+              "total_gpu_memory_mb": 1144.0,
+              "memory_mb_per_replica": 572.0,
+              "mps_info": {
+                "mps_active": true,
+                "started_by_harness": true,
+                "pipe_dir": "/tmp/mps_28712257_819065/pipe",
+                "log_dir": "/tmp/mps_28712257_819065/log",
+                "stdout": "",
+                "stderr": ""
+              },
+              "provenance": {
+                "platform_name": "CUDA",
+                "device_name": "NVIDIA H200",
+                "device_index": "0",
+                "precision": "single",
+                "cuda_Compiler": "openmm-nvrtc-builtin",
+                "CudaDriverVersion": "590.48.01",
+                "lib_openmm_cuda_path": "/orcd/pool/008/so3_shared/marielle/projects/.venv/lib/python3.13/site-packages/OpenMM.libs/lib/plugins/libOpenMMCUDA.so",
+                "mps_active": true,
+                "cuda_mps_pipe_directory": "/tmp/mps_28712257_819065/pipe",
+                "plugin_load_failures": []
+              }
+            },
+            "B=4": {
+              "available": true,
+              "ok": true,
+              "replicas_B": 4,
+              "precision": "single",
+              "n_steps": 30,
+              "dt_fs": 2.0,
+              "wall_elapsed_s": 0.021138845942914486,
+              "ms_per_step_batch": 0.7046281980971496,
+              "ms_per_step_per_replica": 0.1761570495242874,
+              "per_replica_ns_per_day": 245.23571504326236,
+              "aggregate_ns_per_day": 980.9428601730494,
+              "total_gpu_memory_mb": 2288.0,
+              "memory_mb_per_replica": 572.0,
+              "mps_info": {
+                "mps_active": true,
+                "started_by_harness": true,
+                "pipe_dir": "/tmp/mps_28712257_819874/pipe",
+                "log_dir": "/tmp/mps_28712257_819874/log",
+                "stdout": "",
+                "stderr": ""
+              },
+              "provenance": {
+                "platform_name": "CUDA",
+                "device_name": "NVIDIA H200",
+                "device_index": "0",
+                "precision": "single",
+                "cuda_Compiler": "openmm-nvrtc-builtin",
+                "CudaDriverVersion": "590.48.01",
+                "lib_openmm_cuda_path": "/orcd/pool/008/so3_shared/marielle/projects/.venv/lib/python3.13/site-packages/OpenMM.libs/lib/plugins/libOpenMMCUDA.so",
+                "mps_active": true,
+                "cuda_mps_pipe_directory": "/tmp/mps_28712257_819874/pipe",
+                "plugin_load_failures": []
+              }
+            }
+          }
+        },
+        "substep_breakdown": {
+          "B=1": {
+            "total_substeps_ms": 0.32475192099809647,
+            "baoab_pre_force_ms": 0.06982572376728058,
+            "bonded_and_nonbonded_direct_mk48_ms": 0.2234889194369316,
+            "pme_spread_3d_bspline_ms": 0.0,
+            "pme_rfft3d_and_influence_ms": 0.0,
+            "pme_irfft3d_ms": 0.0,
+            "pme_gather_3d_bspline_fused_scale_ms": 0.0,
+            "baoab_post_force_ms": 0.03143727779388428,
+            "baoab_pre_force_pct": 21.50125041683429,
+            "bonded_and_nonbonded_direct_mk48_pct": 68.81835178990106,
+            "pme_spread_3d_bspline_pct": 0.0,
+            "pme_rfft3d_and_influence_pct": 0.0,
+            "pme_irfft3d_pct": 0.0,
+            "pme_gather_3d_bspline_fused_scale_pct": 0.0,
+            "baoab_post_force_pct": 9.680397793264646,
+            "nonbonded_tile_pairs_mk51_ms_per_rep": 0.06941989064216614,
+            "num_valid_tile_pairs_aabb_pruned": 3125
+          },
+          "B=4": null
+        },
+        "batch_scaling": [
+          {
+            "B": 1,
+            "ms_per_step_batch": 0.9309541061520576,
+            "ms_per_step_per_replica": 0.9309541061520576,
+            "ns_per_day_per_replica": 185.61602431105842,
+            "ns_per_day_aggregate": 185.61602431105842,
+            "speedup_vs_openmm_cuda_single_b1": 0.3583871672988701,
+            "speedup_vs_openmm_cuda_mps_same_B": 0.3228485317931186
+          },
+          {
+            "B": 2,
+            "ms_per_step_batch": 1.4308995008468628,
+            "ms_per_step_per_replica": 0.7154497504234314,
+            "ns_per_day_per_replica": 241.526396364986,
+            "ns_per_day_aggregate": 241.526396364986,
+            "speedup_vs_openmm_cuda_single_b1": 0.46633883762154515,
+            "speedup_vs_openmm_cuda_mps_same_B": 0.30851763837531293
+          },
+          {
+            "B": 4,
+            "ms_per_step_batch": 2.6618125289678574,
+            "ms_per_step_per_replica": 0.6654531322419643,
+            "ns_per_day_per_replica": 259.6726826092517,
+            "ns_per_day_aggregate": 259.6726826092517,
+            "speedup_vs_openmm_cuda_single_b1": 0.5013756624227182,
+            "speedup_vs_openmm_cuda_mps_same_B": 0.26471743987559326
+          }
+        ]
+      },
+      {
+        "system": "ApoA1_92k_pme",
+        "suites": [
+          "SuiteA",
+          "SuiteB"
+        ],
+        "kind": "apoa1_pme",
+        "n_real_atoms": 92224,
+        "bucket_atoms": 100000,
+        "bucket_waters": 24576,
+        "occupancy_pct": 92.224,
+        "electrostatics": "pme",
+        "pme_grid": [
+          96,
+          96,
+          64
+        ],
+        "openmm": {
+          "openmm_cuda_single_b1": {
+            "platform": "CUDA",
+            "precision": "single",
+            "ms_per_step": 0.4098790930584073,
+            "ns_per_day": 421.5877387417176,
+            "provenance": {
+              "platform_name": "CUDA",
+              "device_name": "NVIDIA H200",
+              "device_index": "0",
+              "precision": "single",
+              "cuda_Compiler": "openmm-nvrtc-builtin",
+              "CudaDriverVersion": "590.48.01",
+              "lib_openmm_cuda_path": "/orcd/pool/008/so3_shared/marielle/projects/.venv/lib/python3.13/site-packages/OpenMM.libs/lib/plugins/libOpenMMCUDA.so",
+              "mps_active": false,
+              "cuda_mps_pipe_directory": null,
+              "plugin_load_failures": []
+            }
+          },
+          "openmm_cuda_mixed_b1": {
+            "platform": "CUDA",
+            "precision": "mixed",
+            "ms_per_step": 0.41694457177072763,
+            "ns_per_day": 414.4435776346321,
+            "provenance": {
+              "platform_name": "CUDA",
+              "device_name": "NVIDIA H200",
+              "device_index": "0",
+              "precision": "mixed",
+              "cuda_Compiler": "openmm-nvrtc-builtin",
+              "CudaDriverVersion": "590.48.01",
+              "lib_openmm_cuda_path": "/orcd/pool/008/so3_shared/marielle/projects/.venv/lib/python3.13/site-packages/OpenMM.libs/lib/plugins/libOpenMMCUDA.so",
+              "mps_active": false,
+              "cuda_mps_pipe_directory": null,
+              "plugin_load_failures": []
+            }
+          },
+          "openmm_cuda_mps_scaling": {
+            "B=1": {
+              "available": true,
+              "ok": true,
+              "replicas_B": 1,
+              "precision": "single",
+              "n_steps": 30,
+              "dt_fs": 2.0,
+              "wall_elapsed_s": 0.3684513485059142,
+              "ms_per_step_batch": 12.281711616863808,
+              "ms_per_step_per_replica": 12.281711616863808,
+              "per_replica_ns_per_day": 14.069700168071956,
+              "aggregate_ns_per_day": 14.069700168071956,
+              "total_gpu_memory_mb": 608.0,
+              "memory_mb_per_replica": 608.0,
+              "mps_info": {
+                "mps_active": false,
+                "started_by_harness": false
+              },
+              "provenance": {
+                "platform_name": "CUDA",
+                "device_name": "NVIDIA H200",
+                "device_index": "0",
+                "precision": "single",
+                "cuda_Compiler": "openmm-nvrtc-builtin",
+                "CudaDriverVersion": "590.48.01",
+                "lib_openmm_cuda_path": "/orcd/pool/008/so3_shared/marielle/projects/.venv/lib/python3.13/site-packages/OpenMM.libs/lib/plugins/libOpenMMCUDA.so",
+                "mps_active": false,
+                "cuda_mps_pipe_directory": null,
+                "plugin_load_failures": []
+              }
+            },
+            "B=2": {
+              "available": true,
+              "ok": true,
+              "replicas_B": 2,
+              "precision": "single",
+              "n_steps": 30,
+              "dt_fs": 2.0,
+              "wall_elapsed_s": 0.37849497329443693,
+              "ms_per_step_batch": 12.616499109814566,
+              "ms_per_step_per_replica": 6.308249554907283,
+              "per_replica_ns_per_day": 13.696350984210529,
+              "aggregate_ns_per_day": 27.392701968421058,
+              "total_gpu_memory_mb": 1212.0,
+              "memory_mb_per_replica": 606.0,
+              "mps_info": {
+                "mps_active": true,
+                "started_by_harness": true,
+                "pipe_dir": "/tmp/mps_28712257_824208/pipe",
+                "log_dir": "/tmp/mps_28712257_824208/log",
+                "stdout": "",
+                "stderr": ""
+              },
+              "provenance": {
+                "platform_name": "CUDA",
+                "device_name": "NVIDIA H200",
+                "device_index": "0",
+                "precision": "single",
+                "cuda_Compiler": "openmm-nvrtc-builtin",
+                "CudaDriverVersion": "590.48.01",
+                "lib_openmm_cuda_path": "/orcd/pool/008/so3_shared/marielle/projects/.venv/lib/python3.13/site-packages/OpenMM.libs/lib/plugins/libOpenMMCUDA.so",
+                "mps_active": true,
+                "cuda_mps_pipe_directory": "/tmp/mps_28712257_824208/pipe",
+                "plugin_load_failures": []
+              }
+            },
+            "B=4": {
+              "available": true,
+              "ok": true,
+              "replicas_B": 4,
+              "precision": "single",
+              "n_steps": 30,
+              "dt_fs": 2.0,
+              "wall_elapsed_s": 0.40548673272132874,
+              "ms_per_step_batch": 13.51622442404429,
+              "ms_per_step_per_replica": 3.3790561060110726,
+              "per_replica_ns_per_day": 12.78463530781588,
+              "aggregate_ns_per_day": 51.13854123126352,
+              "total_gpu_memory_mb": 2424.0,
+              "memory_mb_per_replica": 606.0,
+              "mps_info": {
+                "mps_active": true,
+                "started_by_harness": true,
+                "pipe_dir": "/tmp/mps_28712257_825067/pipe",
+                "log_dir": "/tmp/mps_28712257_825067/log",
+                "stdout": "",
+                "stderr": ""
+              },
+              "provenance": {
+                "platform_name": "CUDA",
+                "device_name": "NVIDIA H200",
+                "device_index": "0",
+                "precision": "single",
+                "cuda_Compiler": "openmm-nvrtc-builtin",
+                "CudaDriverVersion": "590.48.01",
+                "lib_openmm_cuda_path": "/orcd/pool/008/so3_shared/marielle/projects/.venv/lib/python3.13/site-packages/OpenMM.libs/lib/plugins/libOpenMMCUDA.so",
+                "mps_active": true,
+                "cuda_mps_pipe_directory": "/tmp/mps_28712257_825067/pipe",
+                "plugin_load_failures": []
+              }
+            }
+          }
+        },
+        "substep_breakdown": {
+          "B=1": {
+            "total_substeps_ms": 0.4482610151171684,
+            "baoab_pre_force_ms": 0.049234144389629364,
+            "bonded_and_nonbonded_direct_mk48_ms": 0.2017531543970108,
+            "pme_spread_3d_bspline_ms": 0.06463110446929932,
+            "pme_rfft3d_and_influence_ms": 0.02788729965686798,
+            "pme_irfft3d_ms": 0.035155750811100006,
+            "pme_gather_3d_bspline_fused_scale_ms": 0.038294717669487,
+            "baoab_post_force_ms": 0.031304843723773956,
+            "baoab_pre_force_pct": 10.983365211172854,
+            "bonded_and_nonbonded_direct_mk48_pct": 45.00796357324888,
+            "pme_spread_3d_bspline_pct": 14.41818545215353,
+            "pme_rfft3d_and_influence_pct": 6.22121904791981,
+            "pme_irfft3d_pct": 7.842696470472865,
+            "pme_gather_3d_bspline_fused_scale_pct": 8.542950731389693,
+            "baoab_post_force_pct": 6.983619513642372,
+            "nonbonded_tile_pairs_mk51_ms_per_rep": 0.07076073437929153,
+            "num_valid_tile_pairs_aabb_pruned": 3125
+          },
+          "B=4": null
+        },
+        "batch_scaling": [
+          {
+            "B": 1,
+            "ms_per_step_batch": 0.9507617354393005,
+            "ms_per_step_per_replica": 0.9507617354393005,
+            "ns_per_day_per_replica": 181.7490056224839,
+            "ns_per_day_aggregate": 181.7490056224839,
+            "speedup_vs_openmm_cuda_single_b1": 0.4311060045648789,
+            "speedup_vs_openmm_cuda_mps_same_B": 12.917759685805013
+          },
+          {
+            "B": 2,
+            "ms_per_step_batch": 1.560092568397522,
+            "ms_per_step_per_replica": 0.780046284198761,
+            "ns_per_day_per_replica": 221.52531651053852,
+            "ns_per_day_aggregate": 221.52531651053852,
+            "speedup_vs_openmm_cuda_single_b1": 0.5254548369260194,
+            "speedup_vs_openmm_cuda_mps_same_B": 8.087019556008677
+          },
+          {
+            "B": 4,
+            "ms_per_step_batch": 2.9117747768759727,
+            "ms_per_step_per_replica": 0.7279436942189932,
+            "ns_per_day_per_replica": 237.38099714620947,
+            "ns_per_day_aggregate": 237.38099714620947,
+            "speedup_vs_openmm_cuda_single_b1": 0.5630642813633606,
+            "speedup_vs_openmm_cuda_mps_same_B": 4.641919605659121
+          }
+        ]
+      }
+    ]
+  },
+  "suite_c": {
+    "congeneric_holo_dhfr_screen": {
+      "bucket_atoms": 25000,
+      "n_real_atoms": 23558,
+      "n_ligand_atoms": 63,
+      "pme_grid": [
+        60,
+        60,
+        60
+      ],
+      "batch_scaling": [
+        {
+          "B": 1,
+          "prolix_ms_per_step_batch": 0.3247510641813278,
+          "prolix_ms_per_step_per_replica": 0.3247510641813278,
+          "prolix_ns_per_day_per_replica": 532.0998729769072,
+          "prolix_ns_per_day_aggregate": 532.0998729769072,
+          "openmm_cuda_mps": {
+            "available": true,
+            "ok": true,
+            "replicas_B": 1,
+            "precision": "single",
+            "n_steps": 30,
+            "dt_fs": 2.0,
+            "wall_elapsed_s": 0.0055907126516103745,
+            "ms_per_step_batch": 0.18635708838701248,
+            "ms_per_step_per_replica": 0.18635708838701248,
+            "per_replica_ns_per_day": 927.2520916464516,
+            "aggregate_ns_per_day": 927.2520916464516,
+            "total_gpu_memory_mb": 550.0,
+            "memory_mb_per_replica": 550.0,
+            "mps_info": {
+              "mps_active": false,
+              "started_by_harness": false
+            },
+            "provenance": {
+              "platform_name": "CUDA",
+              "device_name": "NVIDIA H200",
+              "device_index": "0",
+              "precision": "single",
+              "cuda_Compiler": "openmm-nvrtc-builtin",
+              "CudaDriverVersion": "590.48.01",
+              "lib_openmm_cuda_path": "/orcd/pool/008/so3_shared/marielle/projects/.venv/lib/python3.13/site-packages/OpenMM.libs/lib/plugins/libOpenMMCUDA.so",
+              "mps_active": false,
+              "cuda_mps_pipe_directory": null,
+              "plugin_load_failures": []
+            }
+          },
+          "speedup_vs_openmm_cuda_mps": 0.573845966777058
+        },
+        {
+          "B": 2,
+          "prolix_ms_per_step_batch": 0.5544463545084,
+          "prolix_ms_per_step_per_replica": 0.2772231772542,
+          "prolix_ns_per_day_per_replica": 623.3245059504925,
+          "prolix_ns_per_day_aggregate": 623.3245059504925,
+          "openmm_cuda_mps": null,
+          "speedup_vs_openmm_cuda_mps": null
+        },
+        {
+          "B": 4,
+          "prolix_ms_per_step_batch": 0.7944819331169128,
+          "prolix_ms_per_step_per_replica": 0.1986204832792282,
+          "prolix_ns_per_day_per_replica": 870.0009039705698,
+          "prolix_ns_per_day_aggregate": 870.0009039705698,
+          "openmm_cuda_mps": {
+            "available": true,
+            "ok": true,
+            "replicas_B": 4,
+            "precision": "single",
+            "n_steps": 30,
+            "dt_fs": 2.0,
+            "wall_elapsed_s": 0.011712592095136642,
+            "ms_per_step_batch": 0.39041973650455475,
+            "ms_per_step_per_replica": 0.09760493412613869,
+            "per_replica_ns_per_day": 442.60057533742037,
+            "aggregate_ns_per_day": 1770.4023013496815,
+            "total_gpu_memory_mb": 2192.0,
+            "memory_mb_per_replica": 548.0,
+            "mps_info": {
+              "mps_active": true,
+              "started_by_harness": true,
+              "pipe_dir": "/tmp/mps_28712257_832173/pipe",
+              "log_dir": "/tmp/mps_28712257_832173/log",
+              "stdout": "",
+              "stderr": ""
+            },
+            "provenance": {
+              "platform_name": "CUDA",
+              "device_name": "NVIDIA H200",
+              "device_index": "0",
+              "precision": "single",
+              "cuda_Compiler": "openmm-nvrtc-builtin",
+              "CudaDriverVersion": "590.48.01",
+              "lib_openmm_cuda_path": "/orcd/pool/008/so3_shared/marielle/projects/.venv/lib/python3.13/site-packages/OpenMM.libs/lib/plugins/libOpenMMCUDA.so",
+              "mps_active": true,
+              "cuda_mps_pipe_directory": "/tmp/mps_28712257_832173/pipe",
+              "plugin_load_failures": []
+            }
+          },
+          "speedup_vs_openmm_cuda_mps": 0.4914142414451885
+        },
+        {
+          "B": 8,
+          "prolix_ms_per_step_batch": 1.3438916951417923,
+          "prolix_ms_per_step_per_replica": 0.16798646189272404,
+          "prolix_ns_per_day_per_replica": 1028.654321622357,
+          "prolix_ns_per_day_aggregate": 1028.654321622357,
+          "openmm_cuda_mps": {
+            "available": true,
+            "ok": true,
+            "replicas_B": 8,
+            "precision": "single",
+            "n_steps": 30,
+            "dt_fs": 2.0,
+            "wall_elapsed_s": 0.019685127772390842,
+            "ms_per_step_batch": 0.6561709257463614,
+            "ms_per_step_per_replica": 0.08202136571829517,
+            "per_replica_ns_per_day": 263.3460173558417,
+            "aggregate_ns_per_day": 2106.7681388467336,
+            "total_gpu_memory_mb": 4384.0,
+            "memory_mb_per_replica": 548.0,
+            "mps_info": {
+              "mps_active": true,
+              "started_by_harness": true,
+              "pipe_dir": "/tmp/mps_28712257_834145/pipe",
+              "log_dir": "/tmp/mps_28712257_834145/log",
+              "stdout": "",
+              "stderr": ""
+            },
+            "provenance": {
+              "platform_name": "CUDA",
+              "device_name": "NVIDIA H200",
+              "device_index": "0",
+              "precision": "single",
+              "cuda_Compiler": "openmm-nvrtc-builtin",
+              "CudaDriverVersion": "590.48.01",
+              "lib_openmm_cuda_path": "/orcd/pool/008/so3_shared/marielle/projects/.venv/lib/python3.13/site-packages/OpenMM.libs/lib/plugins/libOpenMMCUDA.so",
+              "mps_active": true,
+              "cuda_mps_pipe_directory": "/tmp/mps_28712257_834145/pipe",
+              "plugin_load_failures": []
+            }
+          },
+          "speedup_vs_openmm_cuda_mps": 0.4882617610618761
+        },
+        {
+          "B": 16,
+          "prolix_ms_per_step_batch": 2.4675466492772102,
+          "prolix_ms_per_step_per_replica": 0.15422166557982564,
+          "prolix_ns_per_day_per_replica": 1120.4651392547576,
+          "prolix_ns_per_day_aggregate": 1120.4651392547576,
+          "openmm_cuda_mps": null,
+          "speedup_vs_openmm_cuda_mps": null
+        }
+      ]
+    },
+    "cross_size_ragged_screen": {
+      "systems": [
+        "1UAO_2k",
+        "1VII_4k",
+        "1UBQ_7k",
+        "Holo_Lysozyme_15k",
+        "Holo_DHFR_24k"
+      ],
+      "n_real_atoms_list": [
+        1962,
+        4199,
+        6656,
+        15002,
+        23558
+      ],
+      "bucket_atoms": 25000,
+      "prolix_ms_per_step_batch": 0.7660547643899918,
+      "prolix_ms_per_step_per_replica": 0.15321095287799835,
+      "prolix_ns_per_day_per_replica": 1127.8567018482051,
+      "prolix_ns_per_day_aggregate": 1127.8567018482051,
+      "openmm_cuda_mps": {
+        "available": true,
+        "ok": true,
+        "replicas_B": 5,
+        "precision": "single",
+        "n_steps": 30,
+        "dt_fs": 2.0,
+        "wall_elapsed_s": 0.00971596222370863,
+        "ms_per_step_batch": 0.3238654074569543,
+        "ms_per_step_per_replica": 0.06477308149139085,
+        "per_replica_ns_per_day": 533.5549769172777,
+        "aggregate_ns_per_day": 2667.7748845863885,
+        "total_gpu_memory_mb": 2700.0,
+        "memory_mb_per_replica": 540.0,
+        "mps_info": {
+          "mps_active": true,
+          "started_by_harness": true,
+          "pipe_dir": "/tmp/mps_28712257_840681/pipe",
+          "log_dir": "/tmp/mps_28712257_840681/log",
+          "stdout": "",
+          "stderr": ""
+        },
+        "provenance": {
+          "platform_name": "CUDA",
+          "device_name": "NVIDIA H200",
+          "device_index": "0",
+          "precision": "single",
+          "cuda_Compiler": "openmm-nvrtc-builtin",
+          "CudaDriverVersion": "590.48.01",
+          "lib_openmm_cuda_path": "/orcd/pool/008/so3_shared/marielle/projects/.venv/lib/python3.13/site-packages/OpenMM.libs/lib/plugins/libOpenMMCUDA.so",
+          "mps_active": true,
+          "cuda_mps_pipe_directory": "/tmp/mps_28712257_840681/pipe",
+          "plugin_load_failures": []
+        }
+      },
+      "speedup_vs_openmm_cuda_mps": 0.422770567473525
+    }
+  }
+}

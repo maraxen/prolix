@@ -37,11 +37,12 @@ from prolix.batched_energy import (
     single_padded_force,
     solve_ewald_alpha,
 )
-from prolix.pallas_kernels import resolve_pallas_mode
+from prolix.pallas_kernels import _infer_first_pure_water_block, resolve_pallas_mode
 
 try:
     from prolix.pallas_kernels import (
         pallas_angles_harmonic,
+        pallas_bonded_all_fused,
         pallas_bonds_2body,
         pallas_cmap_torsions,
         pallas_exceptions_14,
@@ -49,11 +50,13 @@ try:
     )
 except ImportError:
     pallas_angles_harmonic = None  # type: ignore[assignment]
+    pallas_bonded_all_fused = None  # type: ignore[assignment]
     pallas_bonds_2body = None  # type: ignore[assignment]
     pallas_cmap_torsions = None  # type: ignore[assignment]
     pallas_exceptions_14 = None  # type: ignore[assignment]
     pallas_torsions_4body = None  # type: ignore[assignment]
 from prolix.physics.pbc import create_periodic_space
+from prolix.physics.pme import make_spme_energy_fn
 from prolix.types.bundles import MolecularBundle, atom_pad_length, water_pad_length
 from prolix.typing import PhysicsSystem
 
@@ -165,10 +168,14 @@ def unit_masses(prefix: int, dtype) -> jnp.ndarray:
 
 
 def trim_trajectory_positions(
-    positions: jnp.ndarray, bundle: MolecularBundle
+    positions: jnp.ndarray, bundle: MolecularBundle, *, n_real: int | None = None
 ) -> jnp.ndarray:
     """Trim ``(steps, bucket, 3)`` or ``(steps, n, 3)`` to real atoms (host)."""
-    n_real = int(jnp.asarray(bundle.n_atoms))
+    if n_real is None:
+        raw_n = bundle.n_atoms
+        n_real = raw_n if isinstance(raw_n, int) else int(jnp.asarray(raw_n))
+    if int(positions.shape[1]) == n_real:
+        return positions
     return positions[:, :n_real, ...]
 
 
@@ -289,6 +296,42 @@ def _bonded_energy_core(
         r = positions
         mask_dtype = r.dtype
         e = jnp.array(0.0, dtype=r.dtype)
+        if pallas_enabled and pallas_bonded_all_fused is not None:
+            box_vec = pbc_box_for_bundle(bundle)
+            ub_idx_2 = (
+                bundle.urey_bradley_idx[:, ::2]
+                if bundle.urey_bradley_idx.shape[-1] == 3
+                else bundle.urey_bradley_idx[:, :2]
+            )
+            has_cmap = bundle.cmap_coeffs is not None and bundle.cmap_indices is not None
+            return pallas_bonded_all_fused(
+                r,
+                bonds=bundle.bond_idx,
+                bond_params=bundle.bond_params,
+                bond_mask=bundle.bond_mask.astype(mask_dtype),
+                urey_bradley_bonds=ub_idx_2,
+                urey_bradley_params=bundle.urey_bradley_params,
+                urey_bradley_mask=bundle.urey_bradley_mask.astype(mask_dtype),
+                angles=bundle.angle_idx,
+                angle_params=bundle.angle_params,
+                angle_mask=bundle.angle_mask.astype(mask_dtype),
+                dihedrals=bundle.dihedral_idx,
+                dihedral_params=bundle.dihedral_params[..., :3],
+                dihedral_mask=bundle.dihedral_mask.astype(mask_dtype),
+                impropers=bundle.improper_idx,
+                improper_params=bundle.improper_params,
+                improper_mask=bundle.improper_mask.astype(mask_dtype),
+                improper_is_harmonic=False,
+                cmap_torsions=bundle.cmap_torsion_idx if has_cmap else None,
+                cmap_indices=bundle.cmap_indices if has_cmap else None,
+                cmap_mask=bundle.cmap_mask.astype(mask_dtype) if has_cmap else None,
+                cmap_coeffs=bundle.cmap_coeffs if has_cmap else None,
+                box=box_vec,
+                dist_eps=1e-10,
+                b0_is_ji=True,
+                cmap_first_is_psi=False,
+                interpret=interpret,
+            ).astype(r.dtype)
         if pallas_enabled and _has_pallas_bonded:
             box_vec = pbc_box_for_bundle(bundle)
             e = e + pallas_bonds_2body(
@@ -407,7 +450,7 @@ def _bonded_energy_core(
 def _host_float(x: object, default: float) -> float:
     """Concrete float for PhysicsSystem static fields; default when traced."""
     try:
-        return float(jnp.asarray(x))
+        return float(np.asarray(x))
     except (TypeError, ValueError, jax.errors.ConcretizationTypeError):
         return default
 
@@ -471,36 +514,17 @@ def _host_box_size(bundle: MolecularBundle, default: tuple[float, float, float])
     fix for arbitrarily-varying box sizes within one stacked group.
     """
     if getattr(bundle.shape_spec, "is_triclinic", False):
-        box_arr = jnp.asarray(bundle.box)
         try:
+            box_arr = np.asarray(bundle.box, dtype=np.float64)
             return np.array(
                 [[float(box_arr[i, j]) for j in range(3)] for i in range(3)],
                 dtype=np.float64,
             )
         except (TypeError, ValueError, jax.errors.ConcretizationTypeError):
             return np.diag(np.array(default, dtype=np.float64))
-    diag = jnp.diag(jnp.asarray(bundle.box))
     try:
-        # jnp.diag itself never raises under tracing (it's a normal traced op)
-        # -- force concretization per-element via float(), mirroring
-        # _host_float, so a traced bundle.box is actually detected here
-        # rather than silently propagating as a "static" tracer.
-        #
-        # Returns a plain numpy array, NOT jnp.array (debt 770 follow-up):
-        # constructing via jnp.array here still produces a DynamicJaxprTracer
-        # Python object whenever this runs inside an active trace (e.g. every
-        # single MD step, since physics_system_from_bundle -> _host_box_size
-        # is called fresh inside lax.while_loop's per-step body) -- even
-        # though its inputs (float(diag[i])) are genuinely concrete Python
-        # floats by this point. np.asarray()/float() calls downstream (the
-        # debt-770 PME-grid-sizing workaround) then fail with
-        # TracerArrayConversionError regardless of the underlying value's
-        # concreteness. A plain numpy array has no such tracer wrapping --
-        # jax arithmetic downstream (dr / sys.box_size etc.) accepts numpy
-        # operands transparently, and this matches box_size's actual intent
-        # as PhysicsSystem's eqx.field(static=True) value (a static Python/
-        # numpy value, not a live jax array -- exactly what equinox's own
-        # "A JAX array is being set as static!" warning was flagging).
+        box_np = np.asarray(bundle.box, dtype=np.float64)
+        diag = np.diag(box_np) if box_np.ndim == 2 else box_np
         return np.array([float(diag[0]), float(diag[1]), float(diag[2])])
     except (TypeError, ValueError, jax.errors.ConcretizationTypeError):
         return np.array(default)
@@ -770,8 +794,16 @@ def physics_system_from_bundle(
         constraint_pairs=bundle.constraint_pairs,
         constraint_lengths=bundle.constraint_lengths,
         constraint_mask=bundle.constraint_mask,
-        cosolvent_mol_id=_slice1(bundle.molecule_id) if bundle.molecule_id is not None else None,
-        cosolvent_group_id=_slice1(bundle.cosolvent_group_id) if bundle.cosolvent_group_id is not None else None,
+        cosolvent_mol_id=(
+            _slice1(bundle.molecule_id)
+            if (bool(getattr(bundle.shape_spec, "has_real_cosolvents", False)) and bundle.molecule_id is not None)
+            else None
+        ),
+        cosolvent_group_id=(
+            _slice1(bundle.cosolvent_group_id)
+            if (bool(getattr(bundle.shape_spec, "has_real_cosolvents", False)) and bundle.cosolvent_group_id is not None)
+            else None
+        ),
         **extra_kwargs,
     )
 
@@ -786,6 +818,9 @@ def energy_fn_from_bundle(
     use_dispersion_correction: bool = True,
     use_pallas: bool | None = None,
     use_pallas_pme: bool | None = None,
+    excl_mode: str = "table",
+    first_pure_water_block: int | None = None,
+    return_forces: bool = False,
 ) -> Callable[..., jnp.ndarray]:
     """Total energy from bundle fields (bonded + optional nonbonded via ``single_padded_energy``).
 
@@ -805,14 +840,134 @@ def energy_fn_from_bundle(
     bound ``neighbor``; passing it while still using the dense path would silently
     fall back to rebuilding the matrices per step via ``_build_dense_exclusion_scales``.
     """
+    _ret_forces = bool(return_forces)
     if not include_nonbonded:
-        return bonded_energy_fn_from_bundle(bundle, use_pallas=use_pallas)
+        _b_fn = bonded_energy_fn_from_bundle(bundle, use_pallas=use_pallas)
+        if _ret_forces:
+            return lambda pos, **_kw: -jax.grad(_b_fn)(pos)
+        return _b_fn
 
     disp_fn, _ = displacement_fn_for_bundle(bundle)
     _lj_sw = float(lj_switch_width)
     _pme_grid = int(pme_grid_points)
     _build_dense = bool(build_dense_exclusions)
     _use_disp = bool(use_dispersion_correction)
+    _excl_mode = str(excl_mode)
+    _base_sys = (
+        physics_system_from_bundle(
+            bundle,
+            bundle.positions,
+            pme_grid_points=_pme_grid,
+            build_dense_exclusions=_build_dense,
+        )
+        if getattr(bundle, "positions", None) is not None
+        else None
+    )
+    if first_pure_water_block is not None:
+        _first_pw_blk: int | None = int(first_pure_water_block)
+    elif _base_sys is not None:
+        _first_pw_blk = _infer_first_pure_water_block(
+            int(_base_sys.n_padded_atoms),
+            (
+                (_base_sys.bonds, _base_sys.bond_mask, 2),
+                (_base_sys.urey_bradley_bonds, _base_sys.urey_bradley_mask, 3),
+                (_base_sys.angles, _base_sys.angle_mask, 3),
+                (_base_sys.dihedrals, _base_sys.dihedral_mask, 4),
+                (_base_sys.impropers, _base_sys.improper_mask, 4),
+                (getattr(_base_sys, "exception_pairs", None), getattr(_base_sys, "exception_mask", None), 2),
+                (_base_sys.cmap_torsions, _base_sys.cmap_mask, 8),
+            ),
+        )
+    else:
+        _first_pw_blk = None
+
+    _base_pme_force_fn = None
+    _base_sys_f32 = None
+    if _base_sys is not None and _ret_forces:
+        _rep_kw: dict[str, object] = {}
+        if (
+            _base_sys.urey_bradley_bonds is not None
+            and _base_sys.urey_bradley_params is not None
+            and _base_sys.urey_bradley_bonds.shape[-2] > 0
+        ):
+            _bi = jnp.asarray(_base_sys.bonds[..., :, :2], dtype=jnp.int32)
+            _bp = jnp.asarray(_base_sys.bond_params, dtype=_base_sys.positions.dtype)
+            _bm = (
+                jnp.ones(_bi.shape[:-1], dtype=_base_sys.positions.dtype)
+                if _base_sys.bond_mask is None
+                else jnp.asarray(_base_sys.bond_mask, dtype=_base_sys.positions.dtype)
+            )
+            _ui = jnp.asarray(_base_sys.urey_bradley_bonds[..., :, :2], dtype=jnp.int32)
+            _up = jnp.asarray(_base_sys.urey_bradley_params, dtype=_base_sys.positions.dtype)
+            _um = (
+                jnp.ones(_ui.shape[:-1], dtype=_base_sys.positions.dtype)
+                if _base_sys.urey_bradley_mask is None
+                else jnp.asarray(_base_sys.urey_bradley_mask, dtype=_base_sys.positions.dtype)
+            )
+            _rep_kw["bonds"] = jnp.concatenate([_bi, _ui], axis=-2) if _bi.shape[-2] > 0 else _ui
+            _rep_kw["bond_params"] = jnp.concatenate([_bp, _up], axis=-2) if _bp.shape[-2] > 0 else _up
+            _rep_kw["bond_mask"] = jnp.concatenate([_bm, _um], axis=-1) if _bm.shape[-1] > 0 else _um
+            _rep_kw["urey_bradley_bonds"] = jnp.zeros((0, 2), dtype=jnp.int32)
+            _rep_kw["urey_bradley_params"] = jnp.zeros((0, 2), dtype=_base_sys.positions.dtype)
+            _rep_kw["urey_bradley_mask"] = jnp.zeros((0,), dtype=jnp.bool_)
+        _imp_harm = _base_sys.improper_params is not None and (
+            _base_sys.improper_params.shape[-1] == 2
+            or not bool(getattr(_base_sys, "improper_is_periodic", True))
+        )
+        if (
+            not _imp_harm
+            and _base_sys.impropers is not None
+            and _base_sys.improper_params is not None
+            and _base_sys.impropers.shape[-2] > 0
+        ):
+            _di = jnp.asarray(_base_sys.dihedrals[..., :, :4], dtype=jnp.int32)
+            _dp = jnp.asarray(_base_sys.dihedral_params[..., :3], dtype=_base_sys.positions.dtype)
+            _dm = (
+                jnp.ones(_di.shape[:-1], dtype=_base_sys.positions.dtype)
+                if _base_sys.dihedral_mask is None
+                else jnp.asarray(_base_sys.dihedral_mask, dtype=_base_sys.positions.dtype)
+            )
+            _ii = jnp.asarray(_base_sys.impropers[..., :, :4], dtype=jnp.int32)
+            _ip = jnp.asarray(_base_sys.improper_params[..., :3], dtype=_base_sys.positions.dtype)
+            _im = (
+                jnp.ones(_ii.shape[:-1], dtype=_base_sys.positions.dtype)
+                if _base_sys.improper_mask is None
+                else jnp.asarray(_base_sys.improper_mask, dtype=_base_sys.positions.dtype)
+            )
+            _rep_kw["dihedrals"] = jnp.concatenate([_di, _ii], axis=-2) if _di.shape[-2] > 0 else _ii
+            _rep_kw["dihedral_params"] = jnp.concatenate([_dp, _ip], axis=-2) if _dp.shape[-2] > 0 else _ip
+            _rep_kw["dihedral_mask"] = jnp.concatenate([_dm, _im], axis=-1) if _dm.shape[-1] > 0 else _im
+            _rep_kw["impropers"] = jnp.zeros((0, 4), dtype=jnp.int32)
+            _rep_kw["improper_params"] = jnp.zeros((0, 3), dtype=_base_sys.positions.dtype)
+            _rep_kw["improper_mask"] = jnp.zeros((0,), dtype=jnp.bool_)
+        if _rep_kw:
+            _base_sys = _base_sys.replace(**_rep_kw)
+        if _base_sys.positions.dtype == jnp.float64:
+            _base_sys_f32 = jax.tree.map(
+                lambda x: x.astype(jnp.float32)
+                if (hasattr(x, "dtype") and x.dtype == jnp.float64)
+                else x,
+                _base_sys,
+            )
+        _elec_m = str(getattr(_base_sys, "electrostatic_method", "pme")).lower()
+        if _base_sys.box_size is not None and _base_sys.pme_alpha > 0.0 and _elec_m == "pme":
+            try:
+                _b_np = np.asarray(_base_sys.box_size, dtype=np.float64)
+                _d_np = np.diag(_b_np) if _b_np.ndim == 2 else _b_np
+                _mean_l = float(np.mean(_d_np))
+                _gp = int(_base_sys.pme_grid_points)
+                _gs = _mean_l / float(max(_gp, 1))
+                _eff_pme = use_pallas_pme if use_pallas_pme is not None else use_pallas
+                _base_pme_force_fn = make_spme_energy_fn(
+                    box_size=_base_sys.box_size,
+                    alpha=float(_base_sys.pme_alpha),
+                    grid_spacing=_gs,
+                    use_pallas_pme=_eff_pme,
+                    n_atoms=int(_base_sys.n_padded_atoms),
+                    return_forces=True,
+                )
+            except (TypeError, ValueError, jax.errors.ConcretizationTypeError):
+                _base_pme_force_fn = None
 
     def energy_fn(positions: jnp.ndarray, **kwargs: object) -> jnp.ndarray:
         # `neighbor` (debt 760's NL path, see single_padded_energy's docstring)
@@ -823,11 +978,32 @@ def energy_fn_from_bundle(
         # doesn't use).
         neighbor = kwargs.pop("neighbor", None)
         dyn_box = kwargs.pop("box", None)
+        pme_cached_force = kwargs.pop("pme_cached_force", None)
+        return_pme_force = bool(kwargs.pop("return_pme_force", False))
         del kwargs
-        sys = physics_system_from_bundle(
-            bundle, positions, pme_grid_points=_pme_grid,
-            build_dense_exclusions=_build_dense,
+        use_base_exact = (
+            _base_sys is not None
+            and int(positions.shape[0]) == _base_sys.n_padded_atoms
+            and (_base_sys.box_size is None or _base_sys.box_size.dtype == positions.dtype)
         )
+        use_base_f32 = (
+            not use_base_exact
+            and _base_sys_f32 is not None
+            and int(positions.shape[0]) == _base_sys_f32.n_padded_atoms
+            and positions.dtype == jnp.float32
+        )
+        use_base = use_base_exact or use_base_f32
+        if use_base_exact:
+            sys = _base_sys.replace(positions=positions)
+        elif use_base_f32:
+            sys = _base_sys_f32.replace(positions=positions)
+        else:
+            sys = physics_system_from_bundle(
+                bundle,
+                positions,
+                pme_grid_points=_pme_grid,
+                build_dense_exclusions=_build_dense,
+            )
         cur_disp_fn = disp_fn
         if dyn_box is not None:
             dyn_box_arr = jnp.asarray(dyn_box)
@@ -846,6 +1022,12 @@ def energy_fn_from_bundle(
             use_dispersion_correction=_use_disp,
             use_pallas=use_pallas,
             use_pallas_pme=use_pallas_pme,
+            excl_mode=_excl_mode,
+            first_pure_water_block=_first_pw_blk,
+            return_forces=_ret_forces,
+            pme_force_fn=(_base_pme_force_fn if (use_base and dyn_box is None) else None),
+            pme_cached_force=pme_cached_force,
+            return_pme_force=return_pme_force,
         )
 
     return energy_fn
@@ -857,6 +1039,8 @@ def force_fn_from_bundle(
     flash_tile_size: int = 256,
     flash_remat: bool = True,
     use_pallas: bool | None = None,
+    use_pallas_pme: bool | None = None,
+    excl_mode: str = "table",
 ) -> Callable[..., jnp.ndarray]:
     """Analytical/FlashMD forces from bundle fields (debt 761).
 
@@ -899,6 +1083,7 @@ def force_fn_from_bundle(
         )
 
     disp_fn, _ = displacement_fn_for_bundle(bundle)
+    del use_pallas_pme, excl_mode
 
     def force_fn(positions: jnp.ndarray, **kwargs: object) -> jnp.ndarray:
         # single_padded_force has no neighbor-list branch (debt 761 is scoped
