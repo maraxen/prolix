@@ -284,6 +284,58 @@ class MolecularBundle(eqx.Module):
         """Alias for ``cmap_indices`` for backward compatibility."""
         return self.cmap_indices
 
+    @property
+    def box_size(self) -> Array | None:
+        """Alias for box matching PhysicsSystem / PaddedSystem interface."""
+        if hasattr(self, "shape_spec") and getattr(self.shape_spec, "has_pbc", False):
+            return self.box
+        return None
+
+    @property
+    def bonds(self) -> Array:
+        """Alias for bond_idx matching PhysicsSystem / PaddedSystem interface."""
+        return self.bond_idx
+
+    @property
+    def angles(self) -> Array:
+        """Alias for angle_idx matching PhysicsSystem / PaddedSystem interface."""
+        return self.angle_idx
+
+    @property
+    def dihedrals(self) -> Array:
+        """Alias for dihedral_idx matching PhysicsSystem / PaddedSystem interface."""
+        return self.dihedral_idx
+
+    @property
+    def impropers(self) -> Array:
+        """Alias for improper_idx matching PhysicsSystem / PaddedSystem interface."""
+        return self.improper_idx
+
+    @property
+    def urey_bradley_bonds(self) -> Array:
+        """Alias for urey_bradley_idx matching PhysicsSystem / PaddedSystem interface."""
+        return self.urey_bradley_idx
+
+    @property
+    def cmap_torsions(self) -> Array:
+        """Alias for cmap_torsion_idx matching PhysicsSystem / PaddedSystem interface."""
+        return self.cmap_torsion_idx
+
+    @property
+    def nonbonded_cutoff(self) -> Array:
+        """Alias for cutoff_distance matching PhysicsSystem / PaddedSystem interface."""
+        return self.cutoff_distance
+
+    @property
+    def dense_excl_scale_vdw(self) -> Array | None:
+        """Dense exclusion scale vdw matrix placeholder."""
+        return None
+
+    @property
+    def dense_excl_scale_elec(self) -> Array | None:
+        """Dense exclusion scale elec matrix placeholder."""
+        return None
+
     @classmethod
     def from_pdb(
         cls,

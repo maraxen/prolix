@@ -335,11 +335,11 @@ class TestBoundaryStressAllFields:
             ProlixOpenMMConfig(custom_nonbonded_chunk_size=-1)
 
     # --- Integrator & Thermostat Routing ---
-    @pytest.mark.parametrize("val", ["auto", "baoab", "leapfrog", "langevin"])
+    @pytest.mark.parametrize("val", ["auto", "baoab", "leapfrog", "langevin", "verlet", "brownian"])
     def test_integrator_scheme_valid(self, val):
         assert ProlixOpenMMConfig(integrator_scheme=val).integrator_scheme == val
 
-    @pytest.mark.parametrize("val", ["", "verlet", "rk4", "euler", None])
+    @pytest.mark.parametrize("val", ["", "bogus", "rk4", "euler", None])
     def test_integrator_scheme_invalid(self, val):
         with pytest.raises(ValueError, match="integrator_scheme"):
             ProlixOpenMMConfig(integrator_scheme=val)  # type: ignore[arg-type]

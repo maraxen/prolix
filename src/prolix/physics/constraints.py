@@ -242,6 +242,8 @@ class ConstraintAlgorithm(eqx.Module):
       mass: Array,
       dt: float,
       shift_fn: Callable | None = None,
+      box: Array | None = None,
+      **kwargs,
   ) -> Array:
     """Apply velocity constraints. Return corrected momenta.
 
@@ -252,6 +254,7 @@ class ConstraintAlgorithm(eqx.Module):
         mass: Atomic masses, shape (N,1).
         dt: Timestep.
         shift_fn: Displacement function for periodic boundary conditions.
+        box: Periodic box vectors or None.
 
     Returns:
         Constrained momenta.
@@ -278,7 +281,10 @@ class NullConstraint(ConstraintAlgorithm):
       mass: Array,
       dt: float,
       shift_fn: Callable | None = None,
+      box: Array | None = None,
+      **kwargs,
   ) -> Array:
+    del pos_start, pos_constrained, mass, dt, shift_fn, box, kwargs
     return momenta
 
 
@@ -318,7 +324,10 @@ class SETTLEConstraint(ConstraintAlgorithm):
       mass: Array,
       dt: float,
       shift_fn: Callable | None = None,
+      box: Array | None = None,
+      **kwargs,
   ) -> Array:
+    del box, kwargs
     # settle_velocities expects velocities, not momenta. Convert and convert back.
     velocities = momenta / mass  # (N, 3) / (N, 1) = (N, 3)
     velocities_constrained = settle.settle_velocities(
@@ -338,21 +347,26 @@ class SETTLEConstraint(ConstraintAlgorithm):
 class ShakeRattleConstraint(ConstraintAlgorithm):
   """SHAKE/RATTLE constraint for solute X-H bonds.
 
-  Wraps project_positions() and project_momenta() from physics/simulate.py.
-  Note: requires shift_fn for periodic boundary conditions.
+  Wraps project_positions() and project_momenta() from physics/constraint_projection.py.
   """
 
   pairs: Array  # (N_bonds, 2) int32
   lengths: Array  # (N_bonds,) float
+  tol: float = 1e-5
+  max_iter: int = 25
 
   def apply_positions(
       self, pos_start: Array, pos_unconstrained: Array, mass: Array, box: Array | None = None
   ) -> Array:
-    # SHAKE position constraint doesn't need shift_fn for unconstrained path
-    # (shift_fn would be used inside project_positions if periodic, but we pass None here
-    # and rely on caller to ensure consistency)
+    disp_fn = None
+    if box is not None:
+      def disp_fn(ra, rb):
+        dr = ra - rb
+        box_diag = jnp.diag(box) if box.ndim == 2 else box
+        return dr - jnp.round(dr / box_diag) * box_diag
     return project_positions(
-        pos_unconstrained, self.pairs, self.lengths, mass, shift_fn=None
+        pos_unconstrained, self.pairs, self.lengths, mass,
+        displacement_fn=disp_fn, tol=self.tol, max_iter=self.max_iter
     )
 
   def apply_velocities(
@@ -363,8 +377,19 @@ class ShakeRattleConstraint(ConstraintAlgorithm):
       mass: Array,
       dt: float,
       shift_fn: Callable | None = None,
+      box: Array | None = None,
   ) -> Array:
-    return project_momenta(momenta, pos_constrained, self.pairs, mass, shift_fn)
+    disp_fn = None
+    if box is not None:
+      def disp_fn(ra, rb):
+        dr = ra - rb
+        box_diag = jnp.diag(box) if box.ndim == 2 else box
+        return dr - jnp.round(dr / box_diag) * box_diag
+    return project_momenta(
+        momenta, pos_constrained, self.pairs, mass,
+        shift_fn=shift_fn, displacement_fn=disp_fn,
+        tol=self.tol, max_iter=self.max_iter
+    )
 
 
 class CompositeConstraint(ConstraintAlgorithm):
@@ -374,6 +399,20 @@ class CompositeConstraint(ConstraintAlgorithm):
   """
 
   constraints: tuple  # tuple[ConstraintAlgorithm, ...]
+
+  @property
+  def max_iter(self) -> int | None:
+    for c in self.constraints:
+      if hasattr(c, "max_iter"):
+        return c.max_iter
+    return None
+
+  @property
+  def tol(self) -> float | None:
+    for c in self.constraints:
+      if hasattr(c, "tol"):
+        return c.tol
+    return None
 
   def apply_positions(
       self, pos_start: Array, pos_unconstrained: Array, mass: Array, box: Array | None = None
@@ -391,10 +430,13 @@ class CompositeConstraint(ConstraintAlgorithm):
       mass: Array,
       dt: float,
       shift_fn: Callable | None = None,
+      box: Array | None = None,
   ) -> Array:
     mom = momenta
     for constraint in self.constraints:
-      mom = constraint.apply_velocities(pos_start, pos_constrained, mom, mass, dt, shift_fn)
+      mom = constraint.apply_velocities(
+          pos_start, pos_constrained, mom, mass, dt, shift_fn=shift_fn, box=box
+      )
     return mom
 
 
@@ -408,6 +450,8 @@ def make_constraint(
     mass_hydrogen: float = 1.008,
     n_iters: int = 10,
     settle_velocity_tol: float | None = None,
+    shake_iterations: int = 25,
+    constraint_tolerance: float = 1e-5,
 ) -> ConstraintAlgorithm:
   """Factory function: build appropriate constraint algorithm from topology.
 
@@ -424,6 +468,8 @@ def make_constraint(
       mass_oxygen, mass_hydrogen: Water masses.
       n_iters: Max iterations for SETTLE velocity constraint.
       settle_velocity_tol: Adaptive SETTLE tolerance or None (uses fixed n_iters).
+      shake_iterations: Max iterations for SHAKE solute constraints.
+      constraint_tolerance: Convergence tolerance for SHAKE solute constraints.
 
   Returns:
       A ConstraintAlgorithm instance.
@@ -435,7 +481,14 @@ def make_constraint(
 
   # Add SHAKE/RATTLE for solute constraints
   if constraint_pairs is not None and len(constraint_pairs) > 0:
-    parts.append(ShakeRattleConstraint(pairs=constraint_pairs, lengths=constraint_lengths))
+    parts.append(
+        ShakeRattleConstraint(
+            pairs=constraint_pairs,
+            lengths=constraint_lengths,
+            tol=constraint_tolerance,
+            max_iter=shake_iterations,
+        )
+    )
 
   # Add SETTLE for rigid water
   if water_indices is not None and water_indices.shape[0] > 0:

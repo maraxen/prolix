@@ -11,13 +11,16 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import openmm
+from jax_md import space
 from openmm import unit
 
+from prolix.api.ensemble_plan import EnsemblePlan
 from prolix.openmm.config import ProlixOpenMMConfig, ProlixPlatform, parse_platform_properties
 from prolix.openmm.converter import (
     CompiledRBTorsionForce,
     ConvertedOpenMMSystem,
     PositionRestraints,
+    VirtualSites,
     from_openmm_system,
 )
 from prolix.openmm.lepton_compiler import (
@@ -44,8 +47,27 @@ from prolix.openmm.units import (
     VELOCITY_AKMA_TO_OMM,
     to_akma,
 )
+from prolix.pallas_kernels import (
+    _triton_gpu_available,
+    pallas_angles_harmonic,
+    pallas_bonds_2body,
+    pallas_cmap_torsions,
+    pallas_torsions_4body,
+)
+from prolix.physics.bonded_masked import _cmap_energy_masked
 from prolix.physics.constraints import ConstraintAlgorithm, make_constraint
+from prolix.physics.explicit_corrections import lj_dispersion_tail_energy
+from prolix.physics.generalized_born import (
+    compute_ace_nonpolar_energy,
+    compute_gb_energy,
+)
+from prolix.physics.neighbor_list import make_neighbor_list_fn
 from prolix.physics.pbc import minimum_image_displacement, reduce_triclinic_box_vectors
+from prolix.physics.pme import (
+    spme_background_energy,
+    spme_reciprocal_energy,
+    spme_self_energy,
+)
 from prolix.types.bundles import MolecularBundle  # noqa: TC001
 
 if TYPE_CHECKING:
@@ -256,57 +278,102 @@ def _eval_bonded_terms(
     force_group_by_component: dict[str, int],
     groups_mask: int,
     has_pbc: bool,
+    bond_force_groups: jnp.ndarray | None = None,
+    angle_force_groups: jnp.ndarray | None = None,
+    dihedral_force_groups: jnp.ndarray | None = None,
+    cmap_force_groups: jnp.ndarray | None = None,
+    use_pallas: bool = False,
+    pallas_interpret: bool = False,
 ) -> jnp.ndarray:
     """Evaluate harmonic bonds, angles, dihedrals, and restraints for active groups."""
-    e_total = jnp.array(0.0, dtype=jnp.float32)
+    e_total = jnp.array(0.0, dtype=pos.dtype)
     n = pos.shape[0]
+    effective_interpret = bool(pallas_interpret) or not _triton_gpu_available()
 
     # Harmonic Bonds
-    g_bond = force_group_by_component.get("bond", 0)
-    if (groups_mask & (1 << g_bond)) != 0 and bundle.bond_idx is not None and bundle.bond_params is not None:
+    if bundle.bond_idx is not None and bundle.bond_params is not None:
+        if bond_force_groups is not None:
+            fg_active = (jnp.int32(groups_mask) & (jnp.int32(1) << bond_force_groups.astype(jnp.int32))) != 0
+        else:
+            g_bond = force_group_by_component.get("bond", 0)
+            fg_active = bool((groups_mask & (1 << int(g_bond))) != 0)
         b_idx = bundle.bond_idx
         b_params = bundle.bond_params
         b_mask = bundle.bond_mask
         p1 = b_idx[:, 0]
         p2 = b_idx[:, 1]
-        valid = b_mask & (p1 < n) & (p2 < n)
+        valid = b_mask & (p1 < n) & (p2 < n) & fg_active
         p1_safe = jnp.where(valid, p1, 0)
         p2_safe = jnp.where(valid, p2, 0)
-        dr = _minimum_image_dr(pos[p1_safe] - pos[p2_safe], box, has_pbc)
-        r = jnp.sqrt(jnp.sum(dr**2, axis=-1) + 1e-12)
-        r0 = b_params[:, 0]
-        k = b_params[:, 1]
-        e_b = 0.5 * k * (r - r0) ** 2
-        e_total = e_total + jnp.sum(jnp.where(valid, e_b, 0.0))
+        if use_pallas and pallas_bonds_2body is not None:
+            box_vec = box if (has_pbc and box is not None) else None
+            e_b = pallas_bonds_2body(
+                pos,
+                b_idx,
+                b_params,
+                mask=valid.astype(pos.dtype),
+                box=box_vec,
+                dist_eps=1e-10,
+                interpret=effective_interpret,
+            )
+            e_total = e_total + e_b
+        else:
+            dr = _minimum_image_dr(pos[p1_safe] - pos[p2_safe], box, has_pbc)
+            r = jnp.sqrt(jnp.sum(dr**2, axis=-1) + 1e-12)
+            r0 = b_params[:, 0]
+            k = b_params[:, 1]
+            e_b = 0.5 * k * (r - r0) ** 2
+            e_total = e_total + jnp.sum(jnp.where(valid, e_b, 0.0))
 
     # Harmonic Angles
-    g_angle = force_group_by_component.get("angle", 0)
-    if (groups_mask & (1 << g_angle)) != 0 and bundle.angle_idx is not None and bundle.angle_params is not None:
+    if bundle.angle_idx is not None and bundle.angle_params is not None:
+        if angle_force_groups is not None:
+            fg_active = (jnp.int32(groups_mask) & (jnp.int32(1) << angle_force_groups.astype(jnp.int32))) != 0
+        else:
+            g_angle = force_group_by_component.get("angle", 0)
+            fg_active = bool((groups_mask & (1 << int(g_angle))) != 0)
         a_idx = bundle.angle_idx
         a_params = bundle.angle_params
         a_mask = bundle.angle_mask
         p1 = a_idx[:, 0]
         p2 = a_idx[:, 1]
         p3 = a_idx[:, 2]
-        valid = a_mask & (p1 < n) & (p2 < n) & (p3 < n)
-        p1_s = jnp.where(valid, p1, 0)
-        p2_s = jnp.where(valid, p2, 0)
-        p3_s = jnp.where(valid, p3, 0)
-        v1 = _minimum_image_dr(pos[p1_s] - pos[p2_s], box, has_pbc)
-        v2 = _minimum_image_dr(pos[p3_s] - pos[p2_s], box, has_pbc)
-        v1_norm = jnp.sqrt(jnp.sum(v1**2, axis=-1) + 1e-12)
-        v2_norm = jnp.sqrt(jnp.sum(v2**2, axis=-1) + 1e-12)
-        dot = jnp.sum(v1 * v2, axis=-1) / (v1_norm * v2_norm)
-        dot_safe = jnp.clip(dot, -0.999999, 0.999999)
-        th = jnp.arccos(dot_safe)
-        th0 = a_params[:, 0]
-        k_a = a_params[:, 1]
-        e_a = 0.5 * k_a * (th - th0) ** 2
-        e_total = e_total + jnp.sum(jnp.where(valid, e_a, 0.0))
+        valid = a_mask & (p1 < n) & (p2 < n) & (p3 < n) & fg_active
+        if use_pallas and pallas_angles_harmonic is not None:
+            box_vec = box if (has_pbc and box is not None) else None
+            e_a = pallas_angles_harmonic(
+                pos,
+                a_idx,
+                a_params,
+                mask=valid.astype(pos.dtype),
+                box=box_vec,
+                dist_eps=1e-10,
+                interpret=effective_interpret,
+            )
+            e_total = e_total + e_a
+        else:
+            p1_s = jnp.where(valid, p1, 0)
+            p2_s = jnp.where(valid, p2, 0)
+            p3_s = jnp.where(valid, p3, 0)
+            v1 = _minimum_image_dr(pos[p1_s] - pos[p2_s], box, has_pbc)
+            v2 = _minimum_image_dr(pos[p3_s] - pos[p2_s], box, has_pbc)
+            v1_norm = jnp.sqrt(jnp.sum(v1**2, axis=-1) + 1e-12)
+            v2_norm = jnp.sqrt(jnp.sum(v2**2, axis=-1) + 1e-12)
+            dot = jnp.sum(v1 * v2, axis=-1) / (v1_norm * v2_norm)
+            dot_safe = jnp.clip(dot, -0.999999, 0.999999)
+            th = jnp.arccos(dot_safe)
+            th0 = a_params[:, 0]
+            k_a = a_params[:, 1]
+            e_a = 0.5 * k_a * (th - th0) ** 2
+            e_total = e_total + jnp.sum(jnp.where(valid, e_a, 0.0))
 
     # Periodic Torsions / Dihedrals
-    g_dih = force_group_by_component.get("dihedral", 0)
-    if (groups_mask & (1 << g_dih)) != 0 and bundle.dihedral_idx is not None and bundle.dihedral_params is not None:
+    if bundle.dihedral_idx is not None and bundle.dihedral_params is not None:
+        if dihedral_force_groups is not None:
+            fg_active = (jnp.int32(groups_mask) & (jnp.int32(1) << dihedral_force_groups.astype(jnp.int32))) != 0
+        else:
+            g_dih = force_group_by_component.get("dihedral", 0)
+            fg_active = bool((groups_mask & (1 << int(g_dih))) != 0)
         d_idx = bundle.dihedral_idx
         d_params = bundle.dihedral_params
         d_mask = bundle.dihedral_mask
@@ -314,37 +381,50 @@ def _eval_bonded_terms(
         p2 = d_idx[:, 1]
         p3 = d_idx[:, 2]
         p4 = d_idx[:, 3]
-        valid = d_mask & (p1 < n) & (p2 < n) & (p3 < n) & (p4 < n)
-        p1_s = jnp.where(valid, p1, 0)
-        p2_s = jnp.where(valid, p2, 0)
-        p3_s = jnp.where(valid, p3, 0)
-        p4_s = jnp.where(valid, p4, 0)
+        valid = d_mask & (p1 < n) & (p2 < n) & (p3 < n) & (p4 < n) & fg_active
+        if use_pallas and pallas_torsions_4body is not None:
+            box_vec = box if (has_pbc and box is not None) else None
+            e_d = pallas_torsions_4body(
+                pos,
+                d_idx,
+                d_params,
+                mask=valid.astype(pos.dtype),
+                box=box_vec,
+                b0_is_ji=True,
+                interpret=effective_interpret,
+            )
+            e_total = e_total + e_d
+        else:
+            p1_s = jnp.where(valid, p1, 0)
+            p2_s = jnp.where(valid, p2, 0)
+            p3_s = jnp.where(valid, p3, 0)
+            p4_s = jnp.where(valid, p4, 0)
 
-        b1 = _minimum_image_dr(pos[p2_s] - pos[p1_s], box, has_pbc)
-        b2 = _minimum_image_dr(pos[p3_s] - pos[p2_s], box, has_pbc)
-        b3 = _minimum_image_dr(pos[p4_s] - pos[p3_s], box, has_pbc)
+            b1 = _minimum_image_dr(pos[p2_s] - pos[p1_s], box, has_pbc)
+            b2 = _minimum_image_dr(pos[p3_s] - pos[p2_s], box, has_pbc)
+            b3 = _minimum_image_dr(pos[p4_s] - pos[p3_s], box, has_pbc)
 
-        c1 = jnp.cross(b1, b2)
-        c2 = jnp.cross(b2, b3)
-        b2_norm = jnp.sqrt(jnp.sum(b2**2, axis=-1, keepdims=True) + 1e-12)
-        b2_u = b2 / b2_norm
+            c1 = jnp.cross(b1, b2)
+            c2 = jnp.cross(b2, b3)
+            b2_norm = jnp.sqrt(jnp.sum(b2**2, axis=-1, keepdims=True) + 1e-12)
+            b2_u = b2 / b2_norm
 
-        m = jnp.cross(b2_u, c1)
-        x = jnp.sum(c1 * c2, axis=-1)
-        y = jnp.sum(m * c2, axis=-1)
-        x_safe = jnp.where(valid, x, 1.0)
-        y_safe = jnp.where(valid, y, 0.0)
-        phi = jnp.arctan2(y_safe, x_safe)
+            m = jnp.cross(b2_u, c1)
+            x = jnp.sum(c1 * c2, axis=-1)
+            y = jnp.sum(m * c2, axis=-1)
+            x_safe = jnp.where(valid, x, 1.0)
+            y_safe = jnp.where(valid, y, 0.0)
+            phi = jnp.arctan2(y_safe, x_safe)
 
-        per = d_params[:, 0]
-        phase = d_params[:, 1]
-        k_d = d_params[:, 2]
-        e_d = k_d * (1.0 + jnp.cos(per * phi - phase))
-        e_total = e_total + jnp.sum(jnp.where(valid, e_d, 0.0))
+            per = d_params[:, 0]
+            phase = d_params[:, 1]
+            k_d = d_params[:, 2]
+            e_d = k_d * (1.0 + jnp.cos(per * phi - phase))
+            e_total = e_total + jnp.sum(jnp.where(valid, e_d, 0.0))
 
     # Harmonic Impropers
     g_imp = force_group_by_component.get("improper", 0)
-    if (groups_mask & (1 << g_imp)) != 0 and bundle.improper_idx is not None and bundle.improper_params is not None:
+    if ((groups_mask & (1 << int(g_imp))) != 0) and bundle.improper_idx is not None and bundle.improper_params is not None:
         i_idx = bundle.improper_idx
         i_params = bundle.improper_params
         i_mask = bundle.improper_mask
@@ -380,14 +460,11 @@ def _eval_bonded_terms(
             else jnp.array(False, dtype=bool)
         )
 
-        # Periodic dihedrals: k * (1 + cos(per * phi - phase))
         per = i_params[:, 0]
         phase = i_params[:, 1]
         k_per = i_params[:, 2]
         e_per = k_per * (1.0 + jnp.cos(per * phi - phase))
 
-        # Harmonic impropers: k * (dphi ** 2)
-        # In pattern_matcher.py, params are stored as [k_akma, theta0, 0.0]
         k_harm = i_params[:, 0]
         phi0 = i_params[:, 1]
         diff_raw = phi - phi0 + jnp.pi
@@ -397,10 +474,52 @@ def _eval_bonded_terms(
         e_i = jnp.where(is_periodic, e_per, e_harm)
         e_total = e_total + jnp.sum(jnp.where(valid, e_i, 0.0))
 
+    # CMAP Torsions
+    if (
+        bundle.cmap_torsion_idx is not None
+        and bundle.cmap_coeffs is not None
+        and bundle.cmap_coeffs.shape[0] > 0
+    ):
+        if cmap_force_groups is not None:
+            fg_active = (jnp.int32(groups_mask) & (jnp.int32(1) << cmap_force_groups.astype(jnp.int32))) != 0
+        else:
+            g_cmap = force_group_by_component.get("cmap", 0)
+            fg_active = bool((groups_mask & (1 << int(g_cmap))) != 0)
+        valid_cmap = bundle.cmap_mask & fg_active
+        if use_pallas and pallas_cmap_torsions is not None:
+            box_vec = box if (has_pbc and box is not None) else None
+            e_cmap = pallas_cmap_torsions(
+                pos,
+                bundle.cmap_torsion_idx,
+                bundle.cmap_indices,
+                bundle.cmap_coeffs,
+                box=box_vec,
+                mask=valid_cmap.astype(pos.dtype),
+                first_is_psi=False,
+                interpret=effective_interpret,
+            )
+            e_total = e_total + e_cmap
+        else:
+            disp_fn = (
+                (lambda ra, rb: _minimum_image_dr(ra - rb, box, has_pbc))
+                if has_pbc and box is not None
+                else (lambda ra, rb: ra - rb)
+            )
+            e_cmap = _cmap_energy_masked(
+                pos,
+                bundle.cmap_torsion_idx,
+                bundle.cmap_indices,
+                valid_cmap,
+                bundle.cmap_coeffs,
+                disp_fn,
+                first_is_psi=False,
+            )
+            e_total = e_total + e_cmap
+
     return e_total
 
 
-def _eval_nonbonded_terms(
+def _eval_nonbonded_terms(  # noqa: PLR0913
     pos: jnp.ndarray,
     box: jnp.ndarray | None,
     bundle: MolecularBundle,
@@ -408,42 +527,181 @@ def _eval_nonbonded_terms(
     groups_mask: int,
     has_pbc: bool,
     cutoff: float,
+    nonbonded_method: str = "nocutoff",
+    has_nonbonded: bool = True,
+    use_dispersion_correction: bool = False,
+    ewald_error_tolerance: float = 0.0005,
+    rf_dielectric: float = 78.3,
+    nonbonded_engine: str = "dense",
+    pme_grid_dims: tuple[int, int, int] | None = None,
+    use_pallas: bool = False,
+    pallas_interpret: bool = False,
+    lj_switch_width: float = 0.0,
+    neighbor_idx: jnp.ndarray | None = None,
+    use_pallas_pme: bool = False,
+    custom_nonbonded_chunk_size: int = 128,
 ) -> jnp.ndarray:
-    """Evaluate pairwise Lennard-Jones, Coulomb, exclusions, and 1-4 exceptions."""
+    """Evaluate pairwise Lennard-Jones, Coulomb, exclusions, 1-4 exceptions, and PME/RF/dispersion."""
     g_nb = force_group_by_component.get("nonbonded", 0)
-    if (groups_mask & (1 << g_nb)) == 0 or bundle.charges is None:
-        return jnp.array(0.0, dtype=jnp.float32)
+    if ((groups_mask & (1 << int(g_nb))) == 0) or bundle.charges is None or not has_nonbonded:
+        return jnp.array(0.0, dtype=pos.dtype)
 
     n = pos.shape[0]
     q = bundle.charges[:n]
     sig = bundle.sigmas[:n]
     eps = bundle.epsilons[:n]
 
-    # Upper triangular all-pairs
-    dr = pos[:, None, :] - pos[None, :, :]
-    if has_pbc and box is not None:
-        dr = _minimum_image_dr(dr, box, has_pbc)
-    r = jnp.sqrt(jnp.sum(dr**2, axis=-1) + 1e-12)
-    mask_tri = jnp.triu(jnp.ones((n, n), dtype=bool), k=1)
-    r_safe = jnp.where(mask_tri, r, 1.0)
+    nb_method = str(nonbonded_method).lower()
+    is_pme = nb_method in ("pme", "spme")
+    is_rf = (
+        nb_method in ("cutoffperiodic", "cutoff_periodic", "reactionfield", "reaction_field", "rf")
+        and has_pbc
+    )
+    alpha = (
+        (1.0 / cutoff) * jnp.sqrt(-jnp.log(2.0 * ewald_error_tolerance))
+        if is_pme and cutoff < float("inf")
+        else jnp.array(0.34, dtype=pos.dtype)
+    )
 
-    sig_mat = 0.5 * (sig[:, None] + sig[None, :])
-    eps_mat = jnp.sqrt(jnp.maximum(eps[:, None] * eps[None, :], 0.0))
-    q_mat = q[:, None] * q[None, :]
+    # Evaluate pair terms
+    if neighbor_idx is not None:
+        # Genuine NeighborList O(N * K) direct path
+        i_idx = jnp.arange(n)[:, None]
+        mask_pair = (neighbor_idx < n) & (i_idx < neighbor_idx)
+        j_safe = jnp.where(mask_pair, neighbor_idx, 0)
 
-    sr = sig_mat / r_safe
-    sr6 = sr**6
-    sr12 = sr6**2
-    u_lj = 4.0 * eps_mat * (sr12 - sr6)
-    u_elec = 332.0637 * (q_mat / r_safe)
-    u_pair = u_lj + u_elec
+        pos_i = pos[:, None, :]
+        pos_j = pos[j_safe]
+        dr = pos_i - pos_j
+        if has_pbc and box is not None:
+            dr = _minimum_image_dr(dr, box, has_pbc)
+        r = jnp.sqrt(jnp.sum(dr**2, axis=-1) + 1e-12)
+        r_safe = jnp.where(mask_pair, r, 1.0)
 
-    # Cutoff truncation if non-periodic cutoff
-    if cutoff < float("inf") and not has_pbc:
-        cutoff_mask = r_safe < cutoff
-        u_pair = jnp.where(cutoff_mask, u_pair, 0.0)
+        sig_mat = 0.5 * (sig[:, None] + sig[j_safe])
+        eps_mat = jnp.sqrt(jnp.maximum(eps[:, None] * eps[j_safe], 0.0))
+        q_mat = q[:, None] * q[j_safe]
 
-    tot = jnp.sum(jnp.where(mask_tri, u_pair, 0.0))
+        sr = sig_mat / r_safe
+        sr6 = sr**6
+        sr12 = sr6**2
+        u_lj = 4.0 * eps_mat * (sr12 - sr6)
+
+        if lj_switch_width > 0.0 and cutoff < float("inf"):
+            r_sw = cutoff - lj_switch_width
+            z = jnp.clip((r_safe - r_sw) / lj_switch_width, 0.0, 1.0)
+            s_poly = 1.0 - 10.0 * (z**3) + 15.0 * (z**4) - 6.0 * (z**5)
+            s_lj = jnp.where(r_safe <= r_sw, 1.0, jnp.where(r_safe < cutoff, s_poly, 0.0))
+            u_lj = u_lj * s_lj
+
+        if is_pme:
+            u_elec = 332.0637 * q_mat * (jax.lax.erfc(alpha * r_safe) / r_safe)
+        elif is_rf:
+            eps_rf = rf_dielectric
+            k_rf = (1.0 / (cutoff**3)) * ((eps_rf - 1.0) / (2.0 * eps_rf + 1.0))
+            c_rf = (1.0 / cutoff) * ((3.0 * eps_rf) / (2.0 * eps_rf + 1.0))
+            u_elec = 332.0637 * q_mat * (1.0 / r_safe + k_rf * (r_safe**2) - c_rf)
+        else:
+            u_elec = 332.0637 * (q_mat / r_safe)
+
+        u_pair = u_lj + u_elec
+        if cutoff < float("inf"):
+            u_pair = jnp.where(r_safe < cutoff, u_pair, 0.0)
+
+        tot = jnp.sum(jnp.where(mask_pair, u_pair, 0.0))
+    elif n >= 4000 or nonbonded_engine in ("neighbor_list", "flash"):
+        chunk_size = custom_nonbonded_chunk_size if custom_nonbonded_chunk_size > 0 else 256
+        n_chunks = (n + chunk_size - 1) // chunk_size
+
+        def chunk_body(c_idx: int, accum: jnp.ndarray) -> jnp.ndarray:
+            i_start = c_idx * chunk_size
+            i_indices = i_start + jnp.arange(chunk_size)
+            valid_i = i_indices < n
+            safe_i = jnp.where(valid_i, i_indices, 0)
+            pos_chunk = pos[safe_i]
+            dr = pos_chunk[:, None, :] - pos[None, :, :]
+            if has_pbc and box is not None:
+                dr = _minimum_image_dr(dr, box, has_pbc)
+            r = jnp.sqrt(jnp.sum(dr**2, axis=-1) + 1e-12)
+
+            all_j = jnp.arange(n)[None, :]
+            mask_pair = valid_i[:, None] & (safe_i[:, None] < all_j)
+            r_safe = jnp.where(mask_pair, r, 1.0)
+
+            sig_mat = 0.5 * (sig[safe_i][:, None] + sig[None, :])
+            eps_mat = jnp.sqrt(jnp.maximum(eps[safe_i][:, None] * eps[None, :], 0.0))
+            q_mat = q[safe_i][:, None] * q[None, :]
+
+            sr = sig_mat / r_safe
+            sr6 = sr**6
+            sr12 = sr6**2
+            u_lj = 4.0 * eps_mat * (sr12 - sr6)
+
+            if lj_switch_width > 0.0 and cutoff < float("inf"):
+                r_sw = cutoff - lj_switch_width
+                z = jnp.clip((r_safe - r_sw) / lj_switch_width, 0.0, 1.0)
+                s_poly = 1.0 - 10.0 * (z**3) + 15.0 * (z**4) - 6.0 * (z**5)
+                s_lj = jnp.where(r_safe <= r_sw, 1.0, jnp.where(r_safe < cutoff, s_poly, 0.0))
+                u_lj = u_lj * s_lj
+
+            if is_pme:
+                u_elec = 332.0637 * q_mat * (jax.lax.erfc(alpha * r_safe) / r_safe)
+            elif is_rf:
+                eps_rf = rf_dielectric
+                k_rf = (1.0 / (cutoff**3)) * ((eps_rf - 1.0) / (2.0 * eps_rf + 1.0))
+                c_rf = (1.0 / cutoff) * ((3.0 * eps_rf) / (2.0 * eps_rf + 1.0))
+                u_elec = 332.0637 * q_mat * (1.0 / r_safe + k_rf * (r_safe**2) - c_rf)
+            else:
+                u_elec = 332.0637 * (q_mat / r_safe)
+
+            u_pair = u_lj + u_elec
+            if cutoff < float("inf"):
+                u_pair = jnp.where(r_safe < cutoff, u_pair, 0.0)
+
+            return accum + jnp.sum(jnp.where(mask_pair, u_pair, 0.0))
+
+        tot = jax.lax.fori_loop(0, n_chunks, chunk_body, jnp.array(0.0, dtype=pos.dtype))
+    else:
+        # Standard upper triangular all-pairs
+        dr = pos[:, None, :] - pos[None, :, :]
+        if has_pbc and box is not None:
+            dr = _minimum_image_dr(dr, box, has_pbc)
+        r = jnp.sqrt(jnp.sum(dr**2, axis=-1) + 1e-12)
+        mask_tri = jnp.triu(jnp.ones((n, n), dtype=bool), k=1)
+        r_safe = jnp.where(mask_tri, r, 1.0)
+
+        sig_mat = 0.5 * (sig[:, None] + sig[None, :])
+        eps_mat = jnp.sqrt(jnp.maximum(eps[:, None] * eps[None, :], 0.0))
+        q_mat = q[:, None] * q[None, :]
+
+        sr = sig_mat / r_safe
+        sr6 = sr**6
+        sr12 = sr6**2
+        u_lj = 4.0 * eps_mat * (sr12 - sr6)
+
+        if lj_switch_width > 0.0 and cutoff < float("inf"):
+            r_sw = cutoff - lj_switch_width
+            z = jnp.clip((r_safe - r_sw) / lj_switch_width, 0.0, 1.0)
+            s_poly = 1.0 - 10.0 * (z**3) + 15.0 * (z**4) - 6.0 * (z**5)
+            s_lj = jnp.where(r_safe <= r_sw, 1.0, jnp.where(r_safe < cutoff, s_poly, 0.0))
+            u_lj = u_lj * s_lj
+
+        if is_pme:
+            u_elec = 332.0637 * q_mat * (jax.lax.erfc(alpha * r_safe) / r_safe)
+        elif is_rf:
+            eps_rf = rf_dielectric
+            k_rf = (1.0 / (cutoff**3)) * ((eps_rf - 1.0) / (2.0 * eps_rf + 1.0))
+            c_rf = (1.0 / cutoff) * ((3.0 * eps_rf) / (2.0 * eps_rf + 1.0))
+            u_elec = 332.0637 * q_mat * (1.0 / r_safe + k_rf * (r_safe**2) - c_rf)
+        else:
+            u_elec = 332.0637 * (q_mat / r_safe)
+
+        u_pair = u_lj + u_elec
+        if cutoff < float("inf"):
+            cutoff_mask = r_safe < cutoff
+            u_pair = jnp.where(cutoff_mask, u_pair, 0.0)
+
+        tot = jnp.sum(jnp.where(mask_tri, u_pair, 0.0))
 
     # Exclusions
     if bundle.excl_indices is not None and bundle.excl_mask is not None:
@@ -455,7 +713,13 @@ def _eval_nonbonded_terms(
         p1_s = jnp.where(valid_ex, p1, 0)
         p2_s = jnp.where(valid_ex, p2, 0)
 
-        dr_ex = _minimum_image_dr(pos[p1_s] - pos[p2_s], box, has_pbc)
+        dr_ex_raw = pos[p1_s] - pos[p2_s]
+        r_ex_raw = jnp.sqrt(jnp.sum(dr_ex_raw**2, axis=-1) + 1e-12)
+        r_ex_raw_s = jnp.where(valid_ex, r_ex_raw, 1.0)
+
+        dr_ex = dr_ex_raw
+        if has_pbc and box is not None:
+            dr_ex = _minimum_image_dr(dr_ex, box, has_pbc)
         r_ex = jnp.sqrt(jnp.sum(dr_ex**2, axis=-1) + 1e-12)
         r_ex_s = jnp.where(valid_ex, r_ex, 1.0)
         sig_ex = 0.5 * (sig[p1_s] + sig[p2_s])
@@ -465,12 +729,27 @@ def _eval_nonbonded_terms(
         sr_e = sig_ex / r_ex_s
         sr6_e = sr_e**6
         sr12_e = sr6_e**2
-        u_ex = 4.0 * eps_ex * (sr12_e - sr6_e) + 332.0637 * (q_ex / r_ex_s)
-        if cutoff < float("inf") and not has_pbc:
-            u_ex = jnp.where(r_ex_s < cutoff, u_ex, 0.0)
-        tot = tot - jnp.sum(jnp.where(valid_ex, u_ex, 0.0))
+        u_ex_lj = 4.0 * eps_ex * (sr12_e - sr6_e)
 
-    # 1-4 Exceptions
+        if is_pme:
+            u_ex_elec = 332.0637 * q_ex * (jax.lax.erfc(alpha * r_ex_s) / r_ex_s)
+            u_ex_recip = 332.0637 * q_ex * (jax.lax.erf(alpha * r_ex_raw_s) / r_ex_raw_s)
+        elif is_rf:
+            eps_rf = rf_dielectric
+            k_rf = (1.0 / (cutoff**3)) * ((eps_rf - 1.0) / (2.0 * eps_rf + 1.0))
+            c_rf = (1.0 / cutoff) * ((3.0 * eps_rf) / (2.0 * eps_rf + 1.0))
+            u_ex_elec = 332.0637 * q_ex * (1.0 / r_ex_s + k_rf * (r_ex_s**2) - c_rf)
+            u_ex_recip = 0.0
+        else:
+            u_ex_elec = 332.0637 * (q_ex / r_ex_s)
+            u_ex_recip = 0.0
+
+        u_ex = u_ex_lj + u_ex_elec
+        if cutoff < float("inf"):
+            u_ex = jnp.where(r_ex_s < cutoff, u_ex, 0.0)
+        tot = tot - jnp.sum(jnp.where(valid_ex, u_ex + u_ex_recip, 0.0))
+
+    # 1-4 Exceptions (DEF-20: Pure direct Coulomb and LJ; no erf double subtraction, no continuum contamination)
     if (
         bundle.exception_pairs is not None
         and bundle.exception_sigmas is not None
@@ -486,7 +765,7 @@ def _eval_nonbonded_terms(
         ep1_s = jnp.where(valid_exc, ep1, 0)
         ep2_s = jnp.where(valid_exc, ep2, 0)
 
-        dr_exc = _minimum_image_dr(pos[ep1_s] - pos[ep2_s], box, has_pbc)
+        dr_exc = pos[ep1_s] - pos[ep2_s]
         r_exc = jnp.sqrt(jnp.sum(dr_exc**2, axis=-1) + 1e-12)
         r_exc_s = jnp.where(valid_exc, r_exc, 1.0)
         sig_14 = bundle.exception_sigmas
@@ -496,13 +775,42 @@ def _eval_nonbonded_terms(
         sr_14 = sig_14 / r_exc_s
         sr6_14 = sr_14**6
         sr12_14 = sr6_14**2
-        u_14 = 4.0 * eps_14 * (sr12_14 - sr6_14) + 332.0637 * (qp_14 / r_exc_s)
+        u_14_lj = 4.0 * eps_14 * (sr12_14 - sr6_14)
+
+        u_14_elec = 332.0637 * (qp_14 / r_exc_s)
+
+        u_14 = u_14_lj + u_14_elec
         tot = tot + jnp.sum(jnp.where(valid_exc, u_14, 0.0))
+
+    # PME reciprocal, self, and plasma background terms
+    if is_pme and has_pbc and box is not None and pme_grid_dims is not None:
+        box_diag = jnp.diag(box) if box.ndim == 2 else box
+        atom_mask = jnp.ones(n, dtype=bool)
+        e_recip = spme_reciprocal_energy(
+            pos,
+            q,
+            atom_mask,
+            box_diag,
+            pme_grid_dims,
+            alpha=alpha,
+            order=4,
+            use_pallas_pme=use_pallas_pme,
+        )
+        e_self = spme_self_energy(q, atom_mask, alpha=alpha)
+        e_plasma = spme_background_energy(q, atom_mask, alpha=alpha, box_size=box_diag)
+        tot = tot + e_recip + e_self + e_plasma
+
+    # LJ dispersion tail correction
+    if use_dispersion_correction and has_pbc and box is not None and cutoff < float("inf"):
+        box_diag = jnp.diag(box) if box.ndim == 2 else box
+        atom_mask = jnp.ones(n, dtype=bool)
+        e_tail = lj_dispersion_tail_energy(box_diag, sig, eps, cutoff, atom_mask)
+        tot = tot + e_tail
 
     return tot
 
 
-def _eval_system_potential_energy(
+def _eval_system_potential_energy(  # noqa: PLR0913
     pos: jnp.ndarray,
     box: jnp.ndarray | None,
     bundle: MolecularBundle,
@@ -513,17 +821,69 @@ def _eval_system_potential_energy(
     groups_mask: int,
     has_pbc: bool,
     cutoff: float,
+    bond_force_groups: jnp.ndarray | None = None,
+    angle_force_groups: jnp.ndarray | None = None,
+    dihedral_force_groups: jnp.ndarray | None = None,
+    cmap_force_groups: jnp.ndarray | None = None,
+    nonbonded_method: str = "nocutoff",
+    has_nonbonded: bool = True,
+    use_dispersion_correction: bool = False,
+    ewald_error_tolerance: float = 0.0005,
+    rf_dielectric: float = 78.3,
+    has_implicit_solvent: bool = False,
+    solvent_dielectric: float = 78.5,
+    solute_dielectric: float = 1.0,
+    nonbonded_engine: str = "dense",
+    pme_grid_dims: tuple[int, int, int] | None = None,
+    use_pallas: bool = False,
+    pallas_interpret: bool = False,
+    lj_switch_width: float = 0.0,
+    neighbor_idx: jnp.ndarray | None = None,
+    use_pallas_pme: bool = False,
+    custom_nonbonded_chunk_size: int = 128,
 ) -> jnp.ndarray:
     """Compute total potential energy (in kcal/mol) for active force groups."""
-    e = _eval_bonded_terms(pos, box, bundle, force_group_by_component, groups_mask, has_pbc)
+    e = _eval_bonded_terms(
+        pos,
+        box,
+        bundle,
+        force_group_by_component,
+        groups_mask,
+        has_pbc,
+        bond_force_groups=bond_force_groups,
+        angle_force_groups=angle_force_groups,
+        dihedral_force_groups=dihedral_force_groups,
+        cmap_force_groups=cmap_force_groups,
+        use_pallas=use_pallas,
+        pallas_interpret=pallas_interpret,
+    )
     e = e + _eval_nonbonded_terms(
-        pos, box, bundle, force_group_by_component, groups_mask, has_pbc, cutoff
+        pos,
+        box,
+        bundle,
+        force_group_by_component,
+        groups_mask,
+        has_pbc,
+        cutoff,
+        nonbonded_method=nonbonded_method,
+        has_nonbonded=has_nonbonded,
+        use_dispersion_correction=use_dispersion_correction,
+        ewald_error_tolerance=ewald_error_tolerance,
+        rf_dielectric=rf_dielectric,
+        nonbonded_engine=nonbonded_engine,
+        pme_grid_dims=pme_grid_dims,
+        use_pallas=use_pallas,
+        pallas_interpret=pallas_interpret,
+        lj_switch_width=lj_switch_width,
+        neighbor_idx=neighbor_idx,
+        use_pallas_pme=use_pallas_pme,
+        custom_nonbonded_chunk_size=custom_nonbonded_chunk_size,
     )
 
     # Position Restraints
     n = pos.shape[0]
     for pr in position_restraints:
-        if (groups_mask & (1 << pr.force_group)) != 0:
+        if ((groups_mask & (1 << int(pr.force_group))) != 0):
             idx = pr.indices
             valid = idx < n
             idx_s = jnp.where(valid, idx, 0)
@@ -535,14 +895,39 @@ def _eval_system_potential_energy(
 
     # Custom Forces
     for cf in custom_forces:
-        if (groups_mask & (1 << cf.force_group)) != 0:
+        if ((groups_mask & (1 << int(cf.force_group))) != 0):
             e = e + cf.energy_akma(pos, box, global_params)
+
+    # GBSA-OBC2 Implicit Solvent
+    g_gb = force_group_by_component.get("gbsa", 0)
+    if ((groups_mask & (1 << int(g_gb))) != 0) and has_implicit_solvent:
+        radii = (
+            bundle.radii[:n]
+            if hasattr(bundle, "radii") and bundle.radii is not None
+            else bundle.sigmas[:n]
+        )
+        scaled_radii = (
+            bundle.scaled_radii[:n]
+            if hasattr(bundle, "scaled_radii") and bundle.scaled_radii is not None
+            else None
+        )
+        charges = bundle.charges[:n]
+        e_gb, born_radii = compute_gb_energy(
+            pos,
+            charges,
+            radii,
+            solvent_dielectric=solvent_dielectric,
+            solute_dielectric=solute_dielectric,
+            scaled_radii=scaled_radii,
+        )
+        e_ace = jnp.sum(compute_ace_nonpolar_energy(radii, born_radii))
+        e = e + e_gb + e_ace
 
     return e
 
 
 @eqx.filter_jit
-def _pure_compute_energy_and_forces(
+def _pure_compute_energy_and_forces(  # noqa: PLR0913
     pos: jnp.ndarray,
     box: jnp.ndarray | None,
     bundle: MolecularBundle,
@@ -553,6 +938,26 @@ def _pure_compute_energy_and_forces(
     groups_mask: int,
     has_pbc: bool,
     cutoff: float,
+    bond_force_groups: jnp.ndarray | None = None,
+    angle_force_groups: jnp.ndarray | None = None,
+    dihedral_force_groups: jnp.ndarray | None = None,
+    cmap_force_groups: jnp.ndarray | None = None,
+    nonbonded_method: str = "nocutoff",
+    has_nonbonded: bool = True,
+    use_dispersion_correction: bool = False,
+    ewald_error_tolerance: float = 0.0005,
+    rf_dielectric: float = 78.3,
+    has_implicit_solvent: bool = False,
+    solvent_dielectric: float = 78.5,
+    solute_dielectric: float = 1.0,
+    nonbonded_engine: str = "dense",
+    pme_grid_dims: tuple[int, int, int] | None = None,
+    use_pallas: bool = False,
+    pallas_interpret: bool = False,
+    lj_switch_width: float = 0.0,
+    neighbor_idx: jnp.ndarray | None = None,
+    use_pallas_pme: bool = False,
+    custom_nonbonded_chunk_size: int = 128,
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
     """Pure JIT evaluation of potential energy and negative gradient forces."""
 
@@ -568,6 +973,26 @@ def _pure_compute_energy_and_forces(
             groups_mask,
             has_pbc,
             cutoff,
+            bond_force_groups=bond_force_groups,
+            angle_force_groups=angle_force_groups,
+            dihedral_force_groups=dihedral_force_groups,
+            cmap_force_groups=cmap_force_groups,
+            nonbonded_method=nonbonded_method,
+            has_nonbonded=has_nonbonded,
+            use_dispersion_correction=use_dispersion_correction,
+            ewald_error_tolerance=ewald_error_tolerance,
+            rf_dielectric=rf_dielectric,
+            has_implicit_solvent=has_implicit_solvent,
+            solvent_dielectric=solvent_dielectric,
+            solute_dielectric=solute_dielectric,
+            nonbonded_engine=nonbonded_engine,
+            pme_grid_dims=pme_grid_dims,
+            use_pallas=use_pallas,
+            pallas_interpret=pallas_interpret,
+            lj_switch_width=lj_switch_width,
+            neighbor_idx=neighbor_idx,
+            use_pallas_pme=use_pallas_pme,
+            custom_nonbonded_chunk_size=custom_nonbonded_chunk_size,
         )
 
     pe, grad = jax.value_and_grad(e_fn)(pos)
@@ -592,83 +1017,215 @@ def _pure_step_rollout(  # noqa: PLR0913
     inv_mass: jnp.ndarray,
     masses: jnp.ndarray,
     is_langevin: bool,
-    num_steps: int,
+    num_steps: jax.Array,
     has_pbc: bool,
     cutoff: float,
     remove_com_motion: bool,
     constraints: ConstraintAlgorithm | None = None,
+    virtual_sites: VirtualSites | None = None,
+    bond_force_groups: jnp.ndarray | None = None,
+    angle_force_groups: jnp.ndarray | None = None,
+    dihedral_force_groups: jnp.ndarray | None = None,
+    cmap_force_groups: jnp.ndarray | None = None,
+    nonbonded_method: str = "nocutoff",
+    has_nonbonded: bool = True,
+    use_dispersion_correction: bool = False,
+    ewald_error_tolerance: float = 0.0005,
+    rf_dielectric: float = 78.3,
+    has_implicit_solvent: bool = False,
+    solvent_dielectric: float = 78.5,
+    solute_dielectric: float = 1.0,
+    nonbonded_engine: str = "dense",
+    pme_grid_dims: tuple[int, int, int] | None = None,
+    integrator_scheme: str = "auto",
+    thermostat_override: str | None = None,
+    use_pallas: bool = False,
+    pallas_interpret: bool = False,
+    lj_switch_width: float = 0.0,
+    neighbor_idx: jnp.ndarray | None = None,
+    use_pallas_pme: bool = False,
+    custom_nonbonded_chunk_size: int = 128,
 ) -> tuple[jnp.ndarray, jnp.ndarray, jax.Array]:
     """Pure compiled multi-step rollout kernel via jax.lax.fori_loop."""
     c1 = jnp.exp(-gamma * dt) if is_langevin else 1.0
     c2 = jnp.sqrt(jnp.maximum(1.0 - c1 * c1, 0.0)) if is_langevin else 0.0
 
-    def step_body(i: int, val: tuple[jnp.ndarray, jnp.ndarray, jax.Array]):
-        pos, vel, k = val
-
-        # 1. Force evaluation at current positions
-        _, f = _pure_compute_energy_and_forces(
-            pos,
+    def compute_f(p: jnp.ndarray) -> tuple[jnp.ndarray, jnp.ndarray]:
+        p_recon = virtual_sites.reconstruct_positions(p) if virtual_sites is not None else p
+        pe, f_raw = _pure_compute_energy_and_forces(
+            p_recon,
             box,
             bundle,
             custom_forces,
             position_restraints,
             global_params,
             force_group_by_component,
-            0xFFFFFFFF,
+            -1,
             has_pbc,
             cutoff,
+            bond_force_groups=bond_force_groups,
+            angle_force_groups=angle_force_groups,
+            dihedral_force_groups=dihedral_force_groups,
+            cmap_force_groups=cmap_force_groups,
+            nonbonded_method=nonbonded_method,
+            has_nonbonded=has_nonbonded,
+            use_dispersion_correction=use_dispersion_correction,
+            ewald_error_tolerance=ewald_error_tolerance,
+            rf_dielectric=rf_dielectric,
+            has_implicit_solvent=has_implicit_solvent,
+            solvent_dielectric=solvent_dielectric,
+            solute_dielectric=solute_dielectric,
+            nonbonded_engine=nonbonded_engine,
+            pme_grid_dims=pme_grid_dims,
+            use_pallas=use_pallas,
+            pallas_interpret=pallas_interpret,
+            lj_switch_width=lj_switch_width,
+            neighbor_idx=neighbor_idx,
+            use_pallas_pme=use_pallas_pme,
+            custom_nonbonded_chunk_size=custom_nonbonded_chunk_size,
         )
+        f = (
+            virtual_sites.redistribute_forces(f_raw, p_recon)
+            if virtual_sites is not None
+            else f_raw
+        )
+        return pe, f
 
-        # 2. V(0.5): half kick
-        v = vel + 0.5 * dt * (f * inv_mass[:, None])
+    def step_body(i: int, val: tuple[jnp.ndarray, jnp.ndarray, jax.Array]):
+        pos, vel, k = val
 
-        # 3. A(0.5): half drift
-        r = pos + 0.5 * dt * v
+        # 1. Force evaluation at current positions
+        _, f = compute_f(pos)
 
-        # 4. O(1.0): Ornstein-Uhlenbeck stochastic update (if Langevin)
-        if is_langevin:
+        scheme = str(integrator_scheme).lower()
+        if scheme == "auto":
+            scheme = "baoab" if is_langevin else "leapfrog"
+
+        if scheme in ("baoab", "langevin", "lfmiddle"):
+            # BAOAB scheme
+            v = vel + 0.5 * dt * (f * inv_mass[:, None])
+            r = pos + 0.5 * dt * v
             k, subk = jax.random.split(k)
             thermal_sigma = jnp.sqrt(kT * inv_mass)[:, None]
             noise = jax.random.normal(subk, shape=r.shape, dtype=r.dtype)
             v_noisy = c1 * v + c2 * thermal_sigma * noise
             v = jnp.where(inv_mass[:, None] > 1e-12, v_noisy, 0.0)
+            r = r + 0.5 * dt * v
+            if constraints is not None:
+                r_c = constraints.apply_positions(pos, r, masses[:, None], box).astype(r.dtype)
+                v = v + (r_c - r) / dt
+                r = r_c
+            if virtual_sites is not None:
+                r = virtual_sites.reconstruct_positions(r)
+            _, f_new = compute_f(r)
+            v = v + 0.5 * dt * (f_new * inv_mass[:, None])
+            if constraints is not None:
+                p = v * masses[:, None]
+                p_proj = constraints.apply_velocities(pos, r, p, masses[:, None], dt, box=box)
+                v = jnp.where(inv_mass[:, None] > 1e-12, p_proj * inv_mass[:, None], 0.0)
+        elif scheme == "verlet":
+            # Velocity Verlet
+            v_half = vel + 0.5 * dt * (f * inv_mass[:, None])
+            r = pos + dt * v_half
+            if constraints is not None:
+                r_c = constraints.apply_positions(pos, r, masses[:, None], box).astype(r.dtype)
+                v_half = v_half + (r_c - r) / dt
+                r = r_c
+            if virtual_sites is not None:
+                r = virtual_sites.reconstruct_positions(r)
+            _, f_new = compute_f(r)
+            v = v_half + 0.5 * dt * (f_new * inv_mass[:, None])
+            if constraints is not None:
+                p = v * masses[:, None]
+                p_proj = constraints.apply_velocities(pos, r, p, masses[:, None], dt, box=box)
+                v = jnp.where(inv_mass[:, None] > 1e-12, p_proj * inv_mass[:, None], 0.0)
+        elif scheme == "brownian":
+            # Overdamped Langevin / Brownian dynamics
+            k, subk = jax.random.split(k)
+            noise = jax.random.normal(subk, shape=pos.shape, dtype=pos.dtype)
+            drift = (f * inv_mass[:, None] / jnp.maximum(gamma, 1e-6)) * dt
+            diff = jnp.sqrt(2.0 * kT * inv_mass[:, None] / jnp.maximum(gamma, 1e-6) * dt) * noise
+            r = pos + drift + diff
+            if constraints is not None:
+                r_c = constraints.apply_positions(pos, r, masses[:, None], box).astype(r.dtype)
+                r = r_c
+            if virtual_sites is not None:
+                r = virtual_sites.reconstruct_positions(r)
+            v = (r - pos) / dt
+            if constraints is not None:
+                p = v * masses[:, None]
+                p_proj = constraints.apply_velocities(pos, r, p, masses[:, None], dt, box=box)
+                v = jnp.where(inv_mass[:, None] > 1e-12, p_proj * inv_mass[:, None], 0.0)
+        elif scheme == "nose_hoover":
+            # Nose-Hoover thermostat dynamics
+            v_half = vel + 0.5 * dt * (f * inv_mass[:, None])
+            ke2 = jnp.sum(masses[:, None] * (v_half ** 2))
+            ndof = jnp.maximum(3.0 * pos.shape[0] - 6.0, 1.0)
+            target_ke2 = ndof * kT
+            tau_nh = 0.1 * dt * 100.0
+            q_mass = target_ke2 * (tau_nh ** 2)
+            dxi = (ke2 - target_ke2) * (dt / jnp.maximum(q_mass, 1e-6))
+            scale_v = 1.0 - 0.5 * jnp.clip(dxi, -0.5, 0.5)
+            v_half_scaled = v_half * scale_v
+            r = pos + dt * v_half_scaled
+            if constraints is not None:
+                r_c = constraints.apply_positions(pos, r, masses[:, None], box).astype(r.dtype)
+                v_half_scaled = v_half_scaled + (r_c - r) / dt
+                r = r_c
+            if virtual_sites is not None:
+                r = virtual_sites.reconstruct_positions(r)
+            _, f_new = compute_f(r)
+            v = v_half_scaled + 0.5 * dt * (f_new * inv_mass[:, None])
+            if constraints is not None:
+                p = v * masses[:, None]
+                p_proj = constraints.apply_velocities(pos, r, p, masses[:, None], dt, box=box)
+                v = jnp.where(inv_mass[:, None] > 1e-12, p_proj * inv_mass[:, None], 0.0)
+        else:
+            # Leapfrog (standard VerletIntegrator)
+            v = vel + dt * (f * inv_mass[:, None])
+            r = pos + dt * v
+            if constraints is not None:
+                r_c = constraints.apply_positions(pos, r, masses[:, None], box).astype(r.dtype)
+                v = v + (r_c - r) / dt
+                r = r_c
+            if virtual_sites is not None:
+                r = virtual_sites.reconstruct_positions(r)
+            if constraints is not None:
+                p = v * masses[:, None]
+                p_proj = constraints.apply_velocities(pos, r, p, masses[:, None], dt, box=box)
+                v = jnp.where(inv_mass[:, None] > 1e-12, p_proj * inv_mass[:, None], 0.0)
 
-        # 5. A(0.5): second half drift
-        r = r + 0.5 * dt * v
+        # Apply CSVR thermostat override if requested
+        if thermostat_override is not None:
+            t_str = str(thermostat_override).lower()
+            if "csvr" in t_str or "bussi" in t_str:
+                ke2 = jnp.sum(masses[:, None] * (v ** 2))
+                ndof = jnp.maximum(3.0 * pos.shape[0] - 6.0, 1.0).astype(pos.dtype)
+                target_ke2 = (ndof * kT).astype(pos.dtype)
+                k, subk = jax.random.split(k)
+                r_gauss = jax.random.normal(subk, dtype=pos.dtype)
+                tau_csvr = jnp.asarray(10.0 * dt, dtype=pos.dtype)
+                c_csvr = jnp.exp(-dt / tau_csvr).astype(pos.dtype)
+                ratio = (target_ke2 / jnp.maximum(ke2, 1e-6)).astype(pos.dtype)
+                alpha_sq = c_csvr + (1.0 - c_csvr) * ratio + 2.0 * jnp.sqrt(c_csvr * (1.0 - c_csvr) * ratio) * (r_gauss / jnp.sqrt(ndof))
+                alpha = jnp.sqrt(jnp.maximum(alpha_sq, 0.01))
+                alpha = jnp.clip(alpha, 0.5, 2.0).astype(vel.dtype)
+                v = (v * alpha).astype(vel.dtype)
 
-        # Constraint projection: project unconstrained positions and correct velocity
-        if constraints is not None:
-            r_c = constraints.apply_positions(pos, r, masses[:, None], box).astype(r.dtype)
-            v = v + (r_c - r) / dt
-            r = r_c
-
-        # 6. Force evaluation at new positions
-        _, f_new = _pure_compute_energy_and_forces(
-            r,
-            box,
-            bundle,
-            custom_forces,
-            position_restraints,
-            global_params,
-            force_group_by_component,
-            0xFFFFFFFF,
-            has_pbc,
-            cutoff,
-        )
-
-        # 7. V(0.5): second half kick
-        v = v + 0.5 * dt * (f_new * inv_mass[:, None])
-
-        # 8. Remove center of mass motion if requested
+        # Remove center of mass motion if requested
         if remove_com_motion:
             total_m = jnp.sum(masses)
             v_com = jnp.sum(v * masses[:, None], axis=0) / jnp.maximum(total_m, 1e-12)
-            v = jnp.where(inv_mass[:, None] > 1e-12, v - v_com, 0.0)
+            v = jnp.where(inv_mass[:, None] > 1e-12, v - v_com, 0.0).astype(vel.dtype)
 
+        r = r.astype(pos.dtype)
+        v = v.astype(vel.dtype)
         return r, v, k
 
     init_val = (positions, velocities, key)
     final_pos, final_vel, final_key = jax.lax.fori_loop(0, num_steps, step_body, init_val)
+    if virtual_sites is not None:
+        final_pos = virtual_sites.reconstruct_positions(final_pos)
     return final_pos, final_vel, final_key
 
 
@@ -731,8 +1288,41 @@ class ProlixContext:
 
         # Particle counts & allocation
         self._n_particles = self._converted_system.n_real_particles
-        self._positions = jnp.zeros((self._n_particles, 3), dtype=jnp.float32)
-        self._velocities = jnp.zeros((self._n_particles, 3), dtype=jnp.float32)
+        if self._config.precision == "double":
+            jax.config.update("jax_enable_x64", True)
+        self._dtype = jnp.float64 if self._config.precision == "double" else jnp.float32
+        self._positions = jnp.zeros((self._n_particles, 3), dtype=self._dtype)
+        self._velocities = jnp.zeros((self._n_particles, 3), dtype=self._dtype)
+        if self._config.precision == "double":
+            self._bundle = eqx.tree_at(
+                lambda b: b.masses, self._bundle, self._bundle.masses.astype(jnp.float64)
+            )
+
+        # Wire configuration knobs and engine attributes
+        self._use_pallas = bool(self._config.use_pallas)
+        self._use_pallas_pme = bool(self._config.use_pallas_pme)
+        self._pallas_interpret = bool(self._config.pallas_interpret)
+        self._execution_mode = str(self._config.execution_mode)
+        self._integrator_scheme = str(self._config.integrator_scheme)
+        self._thermostat_override = (
+            str(self._config.thermostat_override)
+            if self._config.thermostat_override is not None
+            else None
+        )
+        if self._config.nonbonded_engine in ("neighbor_list", "flash"):
+            self._nonbonded_engine = self._config.nonbonded_engine
+        elif self._n_particles >= 4000:
+            self._nonbonded_engine = "neighbor_list"
+        elif self._config.use_pallas:
+            self._nonbonded_engine = "pallas"
+        else:
+            self._nonbonded_engine = "dense"
+        self._barostat_uses_minimum_image_virial = True
+        self._mc_barostat_uses_corrected_energy = True
+        self._neighbor_fn = None
+        self._neighbor = None
+        self._neighbor_idx = None
+
         if self._converted_system.has_pbc and self._converted_system.bundle.box is not None:
             self._box_vectors = self._converted_system.bundle.box
         else:
@@ -776,6 +1366,8 @@ class ProlixContext:
             r_OH=self._converted_system.system_metadata.get("water_r_OH_akma"),
             r_HH=self._converted_system.system_metadata.get("water_r_HH_akma"),
             settle_velocity_tol=self._config.settle_velocity_tol,
+            shake_iterations=self._config.shake_iterations,
+            constraint_tolerance=self._config.constraint_tolerance,
         )
 
         # Molecular topology graph for getMolecules()
@@ -785,6 +1377,48 @@ class ProlixContext:
         if hasattr(integrator, "_prolix_context"):
             integrator._prolix_context = self
         integrator.step = self.step
+
+    def _init_neighbor_list(self, pos: jnp.ndarray | None = None) -> None:
+        """Construct genuine NeighborList for sparse O(N*K) evaluations."""
+        if self._nonbonded_engine not in ("neighbor_list", "flash") and self._n_particles < 4000:
+            self._neighbor_fn = None
+            self._neighbor = None
+            self._neighbor_idx = None
+            return
+
+        if pos is None:
+            pos = self._positions[: self._n_particles]
+
+        cutoff = float(self._converted_system.nonbonded_cutoff)
+        if cutoff <= 0.0 or cutoff >= float("inf"):
+            cutoff = 9.0
+
+        if self._box_vectors is not None:
+            box_size = jnp.diag(self._box_vectors) if self._box_vectors.ndim == 2 else self._box_vectors
+            disp_fn, _ = space.periodic(box_size)
+        else:
+            box_size = jnp.max(pos, axis=0) - jnp.min(pos, axis=0) + 2.0 * cutoff + 10.0
+            disp_fn, _ = space.free()
+
+        self._neighbor_fn = make_neighbor_list_fn(
+            disp_fn,
+            box_size=box_size,
+            cutoff=cutoff,
+            capacity_multiplier=float(self._config.nl_capacity_multiplier),
+            disable_cell_list=bool(self._config.disable_cell_list),
+            dr_threshold=float(self._config.nl_skin) * 0.5,
+            use_pallas_nl=bool(self._config.use_pallas),
+        )
+        self._neighbor = self._neighbor_fn.allocate(pos)
+        self._neighbor_idx = self._neighbor.idx
+
+    def create_ensemble_plan(self) -> EnsemblePlan:
+        """Create an optimized EnsemblePlan for this system."""
+        return EnsemblePlan.from_bundle(
+            self._bundle,
+            use_pallas=self._config.use_pallas,
+            use_pallas_pme=self._config.use_pallas_pme,
+        )
 
     # --- Core Getters ---
     def getSystem(self) -> openmm.System:  # noqa: N802
@@ -811,8 +1445,9 @@ class ProlixContext:
             dt_ps = self._integrator.getStepSize().value_in_unit(unit.picosecond)
             dt_akma = dt_ps * PS_TO_TAU_AKMA
 
-        is_langevin = isinstance(
-            self._integrator, (openmm.LangevinMiddleIntegrator, openmm.LangevinIntegrator)
+        is_langevin = (
+            isinstance(self._integrator, (openmm.LangevinMiddleIntegrator, openmm.LangevinIntegrator))
+            or self._config.integrator_scheme in ("baoab", "langevin", "lfmiddle")
         )
         temp_k = 300.0
         if hasattr(self._integrator, "getTemperature"):
@@ -873,15 +1508,43 @@ class ProlixContext:
                 inv_m,
                 masses,
                 is_langevin,
-                chunk,
+                jnp.asarray(chunk, dtype=jnp.int32),
                 self._converted_system.has_pbc,
                 self._converted_system.nonbonded_cutoff,
                 self._config.remove_com_motion,
                 self._constraints,
+                self._converted_system.virtual_sites,
+                self._converted_system.bond_force_groups,
+                self._converted_system.angle_force_groups,
+                self._converted_system.dihedral_force_groups,
+                self._converted_system.cmap_force_groups,
+                self._converted_system.nonbonded_method,
+                self._converted_system.has_nonbonded,
+                self._config.use_dispersion_correction and self._converted_system.use_dispersion_correction,
+                self._config.ewald_error_tolerance,
+                self._converted_system.reaction_field_dielectric,
+                self._converted_system.has_implicit_solvent,
+                self._converted_system.solvent_dielectric,
+                self._converted_system.solute_dielectric,
+                self._nonbonded_engine,
+                self._converted_system.pme_grid_dims,
+                integrator_scheme=self._config.integrator_scheme,
+                thermostat_override=self._config.thermostat_override,
+                use_pallas=self._config.use_pallas,
+                pallas_interpret=self._config.pallas_interpret,
+                lj_switch_width=self._converted_system.lj_switch_width,
+                neighbor_idx=self._neighbor_idx,
+                use_pallas_pme=self._config.use_pallas_pme,
+                custom_nonbonded_chunk_size=self._config.custom_nonbonded_chunk_size,
             )
             remaining -= chunk
             self._step_count += chunk
             self._time += chunk * dt_akma
+
+            # Update neighbor list periodically if allocated
+            if self._neighbor is not None and (self._step_count % self._config.nl_update_every == 0):
+                self._neighbor = self._neighbor.update(self._positions[: self._n_particles])
+                self._neighbor_idx = self._neighbor.idx
 
             # Reconstruct virtual sites & apply constraints
             self.applyConstraints()
@@ -960,9 +1623,23 @@ class ProlixContext:
             self._position_restraints,
             gp,
             self._converted_system.force_group_by_component,
-            0xFFFFFFFF,
+            -1,
             self._converted_system.has_pbc,
             self._converted_system.nonbonded_cutoff,
+            self._converted_system.bond_force_groups,
+            self._converted_system.angle_force_groups,
+            self._converted_system.dihedral_force_groups,
+            self._converted_system.cmap_force_groups,
+            self._converted_system.nonbonded_method,
+            self._converted_system.has_nonbonded,
+            self._config.use_dispersion_correction and self._converted_system.use_dispersion_correction,
+            self._config.ewald_error_tolerance,
+            self._converted_system.reaction_field_dielectric,
+            self._converted_system.has_implicit_solvent,
+            self._converted_system.solvent_dielectric,
+            self._converted_system.solute_dielectric,
+            self._nonbonded_engine,
+            self._converted_system.pme_grid_dims,
         )
         new_box_jnp = jnp.asarray(new_box, dtype=self._box_vectors.dtype)
         new_bundle = eqx.tree_at(lambda b: b.box, self._bundle, new_box_jnp)
@@ -974,9 +1651,23 @@ class ProlixContext:
             self._position_restraints,
             gp,
             self._converted_system.force_group_by_component,
-            0xFFFFFFFF,
+            -1,
             self._converted_system.has_pbc,
             self._converted_system.nonbonded_cutoff,
+            self._converted_system.bond_force_groups,
+            self._converted_system.angle_force_groups,
+            self._converted_system.dihedral_force_groups,
+            self._converted_system.cmap_force_groups,
+            self._converted_system.nonbonded_method,
+            self._converted_system.has_nonbonded,
+            self._config.use_dispersion_correction and self._converted_system.use_dispersion_correction,
+            self._config.ewald_error_tolerance,
+            self._converted_system.reaction_field_dielectric,
+            self._converted_system.has_implicit_solvent,
+            self._converted_system.solvent_dielectric,
+            self._converted_system.solute_dielectric,
+            self._nonbonded_engine,
+            self._converted_system.pme_grid_dims,
         )
 
         delta_u = float(e_new - e_curr)
@@ -1023,16 +1714,35 @@ class ProlixContext:
             self._position_restraints,
             gp,
             self._converted_system.force_group_by_component,
-            0xFFFFFFFF,
+            -1,
             self._converted_system.has_pbc,
             self._converted_system.nonbonded_cutoff,
+            self._converted_system.bond_force_groups,
+            self._converted_system.angle_force_groups,
+            self._converted_system.dihedral_force_groups,
+            self._converted_system.cmap_force_groups,
+            self._converted_system.nonbonded_method,
+            self._converted_system.has_nonbonded,
+            self._config.use_dispersion_correction and self._converted_system.use_dispersion_correction,
+            self._config.ewald_error_tolerance,
+            self._converted_system.reaction_field_dielectric,
+            self._converted_system.has_implicit_solvent,
+            self._converted_system.solvent_dielectric,
+            self._converted_system.solute_dielectric,
+            self._nonbonded_engine,
+            self._converted_system.pme_grid_dims,
         )
         if self._converted_system.virtual_sites is not None:
             forces = self._converted_system.redistribute_virtual_site_forces(
                 forces, self._positions
             )
 
-        virial = float(jnp.sum(self._positions * forces))
+        if self._converted_system.has_pbc and self._box_vectors is not None:
+            com = jnp.mean(self._positions, axis=0)
+            rel_pos = _minimum_image_dr(self._positions - com, self._box_vectors, True)
+            virial = float(jnp.sum(rel_pos * forces))
+        else:
+            virial = float(jnp.sum(self._positions * forces))
         inst_pressure = (2.0 * ke_total + virial) / (3.0 * volume)
 
         tau = 2000.0  # AKMA time (~0.1 ps)
@@ -1071,10 +1781,12 @@ class ProlixContext:
             raise openmm.OpenMMException(
                 "Called setPositions() on a Context with the wrong number of positions"
             )
-        pos_akma = jnp.asarray(pos_arr, dtype=jnp.float32)
+        pos_akma = jnp.asarray(pos_arr, dtype=self._dtype)
         if self._converted_system.virtual_sites is not None:
             pos_akma = self._converted_system.compute_virtual_sites(pos_akma)
         self._positions = pos_akma
+        if self._nonbonded_engine in ("neighbor_list", "flash") or self._n_particles >= 4000:
+            self._init_neighbor_list(self._positions[: self._n_particles])
 
     def setVelocities(self, velocities: Any) -> None:  # noqa: N802
         """Set particle velocities, converting from OpenMM nm/ps to Prolix Å/τ_AKMA."""
@@ -1087,7 +1799,7 @@ class ProlixContext:
             raise openmm.OpenMMException(
                 "Called setVelocities() on a Context with the wrong number of velocities"
             )
-        vel_akma = jnp.asarray(vel_arr, dtype=jnp.float32)
+        vel_akma = jnp.asarray(vel_arr, dtype=self._dtype)
         if self._converted_system.virtual_sites is not None:
             vs_idx = self._converted_system.virtual_sites.order
             vel_akma = vel_akma.at[vs_idx].set(0.0)
@@ -1119,6 +1831,14 @@ class ProlixContext:
             v_com = jnp.sum(vel * masses[:, None], axis=0) / jnp.maximum(total_m, 1e-12)
             vel = jnp.where(safe_inv_m[:, None] > 1e-12, vel - v_com, 0.0)
 
+        # Preserve equipartition for active degrees of freedom after COM motion subtraction/sampling
+        n_real = int(jnp.sum(safe_inv_m > 1e-12))
+        n_dof = 3 * n_real - (3 if (self._config.remove_com_motion and n_real > 1) else 0)
+        curr_ke = 0.5 * jnp.sum(masses[:, None] * (vel**2))
+        target_ke = 0.5 * float(n_dof) * BOLTZMANN_KCAL * temp_k
+        scale = jnp.where(curr_ke > 1e-12, jnp.sqrt(target_ke / curr_ke), 1.0)
+        vel = vel * scale
+
         self._velocities = vel
         self.applyVelocityConstraints(self._config.settle_velocity_tol)
 
@@ -1135,6 +1855,8 @@ class ProlixContext:
         self._converted_system = eqx.tree_at(
             lambda s: s.bundle.box, self._converted_system, box_canonical
         )
+        if self._nonbonded_engine in ("neighbor_list", "flash") or self._n_particles >= 4000:
+            self._init_neighbor_list(self._positions[: self._n_particles])
 
     # --- Time & Step Count ---
     def setTime(self, time: Any) -> None:  # noqa: N802
@@ -1698,9 +2420,10 @@ class ProlixContext:
 
         # Groups normalization
         if isinstance(groups, set):
-            groups_mask = sum(1 << g for g in groups if 0 <= g <= 31)
+            raw_groups = sum(1 << g for g in groups if 0 <= g <= 31)
         else:
-            groups_mask = int(groups) & 0xFFFFFFFF
+            raw_groups = int(groups)
+        groups_mask = int(np.int32(raw_groups))
 
         # Box vectors
         box_nm = (
@@ -1729,12 +2452,6 @@ class ProlixContext:
         ke_kj = None
         forces_omm = None
 
-        if req_energy:
-            m = np.asarray(self._bundle.masses[: self._n_particles], dtype=np.float64)
-            v = np.asarray(self._velocities[: self._n_particles], dtype=np.float64)
-            ke_akma = 0.5 * np.sum(m[:, None] * (v**2))
-            ke_kj = float(ke_akma * KCAL_PER_MOL_TO_KJ_PER_MOL)
-
         if req_energy or req_forces:
             gp = {
                 k: jnp.asarray(val, dtype=jnp.float32)
@@ -1751,9 +2468,50 @@ class ProlixContext:
                 groups_mask,
                 self._converted_system.has_pbc,
                 self._converted_system.nonbonded_cutoff,
+                self._converted_system.bond_force_groups,
+                self._converted_system.angle_force_groups,
+                self._converted_system.dihedral_force_groups,
+                self._converted_system.cmap_force_groups,
+                self._converted_system.nonbonded_method,
+                self._converted_system.has_nonbonded,
+                self._config.use_dispersion_correction and self._converted_system.use_dispersion_correction,
+                self._config.ewald_error_tolerance,
+                self._converted_system.reaction_field_dielectric,
+                self._converted_system.has_implicit_solvent,
+                self._converted_system.solvent_dielectric,
+                self._converted_system.solute_dielectric,
+                self._nonbonded_engine,
+                self._converted_system.pme_grid_dims,
+                use_pallas=self._config.use_pallas,
+                pallas_interpret=self._config.pallas_interpret,
+                lj_switch_width=self._converted_system.lj_switch_width,
+                neighbor_idx=getattr(self, "_neighbor_idx", None),
+                use_pallas_pme=self._config.use_pallas_pme,
+                custom_nonbonded_chunk_size=self._config.custom_nonbonded_chunk_size,
             )
             if req_energy:
                 pe_kj = float(pe_akma * KCAL_PER_MOL_TO_KJ_PER_MOL)
+                m = np.asarray(self._bundle.masses[: self._n_particles], dtype=np.float64)
+                v = np.asarray(self._velocities[: self._n_particles], dtype=np.float64)
+                is_langevin = (
+                    isinstance(self._integrator, (openmm.LangevinIntegrator, openmm.LangevinMiddleIntegrator))
+                    or self._integrator_scheme in ("baoab", "langevin", "lfmiddle")
+                )
+                dt_omm = (
+                    self._integrator.getStepSize()
+                    if hasattr(self._integrator, "getStepSize")
+                    else 0.001 * unit.picosecond
+                )
+                dt_akma = float(to_akma(dt_omm, "time"))
+                if (not is_langevin) and dt_akma > 0 and forces_akma is not None:
+                    inv_m = np.asarray(self._converted_system.inv_mass[: self._n_particles], dtype=np.float64)
+                    f_akma_np = np.asarray(forces_akma[: self._n_particles], dtype=np.float64)
+                    v_sync = v + 0.5 * dt_akma * (f_akma_np * inv_m[:, None])
+                    ke_akma = 0.5 * np.sum(m[:, None] * (v_sync**2))
+                else:
+                    ke_akma = 0.5 * np.sum(m[:, None] * (v**2))
+                ke_kj = float(ke_akma * KCAL_PER_MOL_TO_KJ_PER_MOL)
+
             if req_forces:
                 if self._converted_system.virtual_sites is not None:
                     forces_akma = self._converted_system.redistribute_virtual_site_forces(

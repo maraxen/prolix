@@ -802,7 +802,6 @@ def single_padded_energy(
         and sys.box_size is None
         and elec_method not in ("reaction_field", "rf", "dsf", "damped_shifted_force", "cutoff")
         and eff_switch == 0.0
-        and float(getattr(sys, "nonbonded_cutoff", 0.0)) == 0.0
         and not isinstance(soft_core_lambda, jax.core.Tracer)
         and float(soft_core_lambda) == 1.0
     )
@@ -982,7 +981,6 @@ def single_padded_energy(
                 softcore_exponent=sc_exp,
                 interpret=interpret,
                 return_forces=True,
-                compute_energy=False,
             )
             _, f_gbsa = pallas_gbsa_dense(
                 r,

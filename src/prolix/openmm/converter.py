@@ -495,6 +495,15 @@ class ConvertedOpenMMSystem(eqx.Module):
     n_real_particles: int = eqx.field(static=True, default=0)
     has_pbc: bool = eqx.field(static=True, default=False)
     is_triclinic: bool = eqx.field(static=True, default=False)
+    bond_force_groups: Array | None = None
+    angle_force_groups: Array | None = None
+    dihedral_force_groups: Array | None = None
+    cmap_force_groups: Array | None = None
+    has_nonbonded: bool = eqx.field(static=True, default=False)
+    has_implicit_solvent: bool = eqx.field(static=True, default=False)
+    solvent_dielectric: float = eqx.field(static=True, default=78.5)
+    solute_dielectric: float = eqx.field(static=True, default=1.0)
+    custom_nonbonded_chunk_size: int = eqx.field(static=True, default=128)
 
     def compute_virtual_sites(
         self, positions: Float[Array, "... 3"]
@@ -1062,10 +1071,11 @@ def _partition_constraints(
     # 4. Solute constraints are remaining unconsumed constraints
     solute_pairs = []
     solute_lengths = []
-    for u, v, d_A in raw_constraints:
-        if (u, v) not in consumed_edges:
-            solute_pairs.append((u, v))
-            solute_lengths.append(d_A)
+    if getattr(config, "solute_constraint_mode", "shake") != "none":
+        for u, v, d_A in raw_constraints:
+            if (u, v) not in consumed_edges:
+                solute_pairs.append((u, v))
+                solute_lengths.append(d_A)
 
     w_arr = (
         np.asarray(water_indices_list, dtype=np.int32).reshape(-1, 3)
@@ -1198,18 +1208,22 @@ def from_openmm_system(
     # --- Step 6: Bonded Forces Extraction with Internal Water Zeroing ---
     bond_indices_list: list[list[int]] = []
     bond_params_list: list[list[float]] = []
+    bond_fg_list: list[int] = []
     bundle_bond_counter = 0
 
     angle_indices_list: list[list[int]] = []
     angle_params_list: list[list[float]] = []
+    angle_fg_list: list[int] = []
     bundle_angle_counter = 0
 
     dih_indices_list: list[list[int]] = []
     dih_params_list: list[list[float]] = []
+    dih_fg_list: list[int] = []
     bundle_dihedral_counter = 0
 
     cmap_torsions_list: list[list[int]] = []
     cmap_map_indices_list: list[int] = []
+    cmap_fg_list: list[int] = []
     cmap_grids_list: list[np.ndarray] = []
     cmap_grid_size = 24
 
@@ -1275,6 +1289,7 @@ def from_openmm_system(
                     )
                     bond_indices_list.append([p1, p2])
                     bond_params_list.append([r0_A, k_akma])
+                    bond_fg_list.append(f.getForceGroup())
                     omm_bond_to_bundle_idx[(f_idx, b_i)] = bundle_bond_counter
                     omm_forces_bond_to_bundle_idx[f_idx][b_i] = bundle_bond_counter
                     bundle_bond_counter += 1
@@ -1296,6 +1311,7 @@ def from_openmm_system(
                     )
                     angle_indices_list.append([p1, p2, p3])
                     angle_params_list.append([th0_rad, k_akma])
+                    angle_fg_list.append(f.getForceGroup())
                     omm_angle_to_bundle_idx[(f_idx, a_i)] = bundle_angle_counter
                     omm_forces_angle_to_bundle_idx[f_idx][a_i] = bundle_angle_counter
                     bundle_angle_counter += 1
@@ -1311,6 +1327,7 @@ def from_openmm_system(
                 )
                 dih_indices_list.append([p1, p2, p3, p4])
                 dih_params_list.append([float(periodicity), phase_rad, k_akma, 0.0])
+                dih_fg_list.append(f.getForceGroup())
                 omm_torsion_to_bundle_idx[(f_idx, t_i)] = bundle_dihedral_counter
                 omm_forces_torsion_to_bundle_idx[f_idx][t_i] = bundle_dihedral_counter
                 bundle_dihedral_counter += 1
@@ -1338,6 +1355,7 @@ def from_openmm_system(
                 map_idx, a1, a2, a3, a4, b1, b2, b3, b4 = f.getTorsionParameters(t_i)
                 cmap_torsions_list.append([a1, a2, a3, a4, b1, b2, b3, b4])
                 cmap_map_indices_list.append(map_idx)
+                cmap_fg_list.append(f.getForceGroup())
 
         elif isinstance(f, openmm.RBTorsionForce):
             force_group_by_component["rb_torsion"] = f.getForceGroup()
@@ -1419,9 +1437,9 @@ def from_openmm_system(
             precompute_cmap_coefficients(jnp.asarray(cmap_grids_np))
         )
     else:
-        cmap_grids_np = np.zeros((0, cmap_grid_size, cmap_grid_size), dtype=np.float32)
+        cmap_grids_np = np.zeros((1, cmap_grid_size, cmap_grid_size), dtype=np.float32)
         cmap_coeffs_np = np.zeros(
-            (0, cmap_grid_size, cmap_grid_size, 16), dtype=np.float32
+            (1, cmap_grid_size, cmap_grid_size, 16), dtype=np.float32
         )
 
     # --- Step 7: NonbondedForce Extraction ---
@@ -1439,6 +1457,7 @@ def from_openmm_system(
     exc14_qprod_list: list[float] = []
 
     nonbonded_method = "pme" if has_pbc else "coulomb"
+    has_nonbonded = False
     nonbonded_cutoff = 9.0  # Å
     lj_switch_width = 0.0  # Å
     use_dispersion_correction = True
@@ -1449,6 +1468,7 @@ def from_openmm_system(
     for f_idx in range(omm_system.getNumForces()):
         f = omm_system.getForce(f_idx)
         if isinstance(f, openmm.NonbondedForce):
+            has_nonbonded = True
             force_group_by_component["nonbonded"] = f.getForceGroup()
 
             # Method validation & mapping
@@ -1552,9 +1572,15 @@ def from_openmm_system(
             if nx > 0 and ny > 0 and nz > 0:
                 pme_grid_dims = (int(nx), int(ny), int(nz))
             elif has_pbc:
+                grid_sp = config.pme_grid_spacing
+                if (
+                    config.ewald_error_tolerance <= 0.0005
+                    and abs(config.pme_grid_spacing - 1.0) < 1e-6
+                ):
+                    grid_sp = 0.375
                 pme_grid_dims = compute_pme_grid_dims(
                     jnp.diag(jnp.asarray(box_mat_np)),
-                    grid_spacing=config.pme_grid_spacing,
+                    grid_spacing=grid_sp,
                 )
 
     excl_indices_np = (
@@ -1612,7 +1638,7 @@ def from_openmm_system(
                 q, r, s = f.getParticleParameters(p_i)
                 r_A = r.value_in_unit(unit.nanometer) * NM_TO_ANGSTROM
                 radii_np[p_i] = r_A
-                scaled_radii_np[p_i] = r_A * float(s)
+                scaled_radii_np[p_i] = max(r_A - 0.09, 0.0) * float(s)
                 # If charge not yet set by NonbondedForce, take from GBSA
                 if charges_np[p_i] == 0.0:
                     charges_np[p_i] = q.value_in_unit(unit.elementary_charge)
@@ -1978,6 +2004,35 @@ def from_openmm_system(
                 unit.picosecond**-1
             )
 
+    bond_fg_padded = _pad_1d(
+        np.asarray(bond_fg_list, dtype=np.int32)
+        if bond_fg_list
+        else np.zeros((0,), dtype=np.int32),
+        b_cap,
+        dtype=jnp.int32,
+    )
+    angle_fg_padded = _pad_1d(
+        np.asarray(angle_fg_list, dtype=np.int32)
+        if angle_fg_list
+        else np.zeros((0,), dtype=np.int32),
+        ang_cap,
+        dtype=jnp.int32,
+    )
+    dih_fg_padded = _pad_1d(
+        np.asarray(dih_fg_list, dtype=np.int32)
+        if dih_fg_list
+        else np.zeros((0,), dtype=np.int32),
+        dih_cap,
+        dtype=jnp.int32,
+    )
+    cmap_fg_padded = _pad_1d(
+        np.asarray(cmap_fg_list, dtype=np.int32)
+        if cmap_fg_list
+        else np.zeros((0,), dtype=np.int32),
+        cmap_cap,
+        dtype=jnp.int32,
+    )
+
     return ConvertedOpenMMSystem(
         bundle=bundle,
         custom_forces=custom_forces,
@@ -2001,4 +2056,13 @@ def from_openmm_system(
         n_real_particles=n_atoms_real,
         has_pbc=has_pbc,
         is_triclinic=is_triclinic,
+        bond_force_groups=bond_fg_padded,
+        angle_force_groups=angle_fg_padded,
+        dihedral_force_groups=dih_fg_padded,
+        cmap_force_groups=cmap_fg_padded,
+        has_nonbonded=has_nonbonded,
+        has_implicit_solvent=has_implicit_solvent,
+        solvent_dielectric=float(solvent_dielectric),
+        solute_dielectric=float(solute_dielectric),
+        custom_nonbonded_chunk_size=int(config.custom_nonbonded_chunk_size),
     )

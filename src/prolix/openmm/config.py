@@ -36,7 +36,9 @@ __all__ = [
 PrecisionType = Literal["single", "mixed", "double"]
 NonbondedEngineType = Literal["auto", "neighbor_list", "flash", "dense"]
 CustomForceModeType = Literal["auto", "lepton_only", "pattern_only"]
-IntegratorSchemeType = Literal["auto", "baoab", "leapfrog", "langevin"]
+IntegratorSchemeType = Literal[
+    "auto", "baoab", "leapfrog", "langevin", "verlet", "brownian", "nose_hoover"
+]
 BarostatModeType = Literal["auto", "mc", "scr"]
 WaterConstraintModeType = Literal["settle", "none"]
 SoluteConstraintModeType = Literal["shake", "none"]
@@ -179,7 +181,16 @@ class ProlixOpenMMConfig:
             )
 
         # Integrator scheme validation
-        valid_integrators = ("auto", "baoab", "leapfrog", "langevin")
+        valid_integrators = (
+            "auto",
+            "baoab",
+            "leapfrog",
+            "langevin",
+            "verlet",
+            "brownian",
+            "nose_hoover",
+            "lfmiddle",
+        )
         if self.integrator_scheme not in valid_integrators:
             raise ValueError(
                 f"Invalid integrator_scheme: {self.integrator_scheme!r}. "

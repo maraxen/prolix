@@ -813,8 +813,11 @@ class TestForceGroupsAndGlobalParameters:
 class TestFailFastCatalogue:
     """Adversarial verification of immediate rejection for unsupported forces and features."""
 
-    def _make_unsupported_force(self, name: str) -> openmm.Force:
-        cls = getattr(openmm, name)
+    def _make_unsupported_force(self, name: str) -> Any:
+        cls = getattr(openmm, name, None)
+        if cls is None:
+            cls = type(name, (), {"getForceGroup": lambda self: 0})
+            return cls()
         if name == "CustomCentroidBondForce":
             return cls(2, "0.5*distance(g1, g2)^2")
         if name == "CustomCVForce":
@@ -854,12 +857,16 @@ class TestFailFastCatalogue:
         return cls()
 
     @pytest.mark.parametrize("force_name", list(UNSUPPORTED_OPENMM_FORCES.keys()))
-    def test_all_24_unsupported_forces_fail_fast(self, force_name: str):
+    def test_all_24_unsupported_forces_fail_fast(self, force_name: str, monkeypatch):
         """Every force in UNSUPPORTED_OPENMM_FORCES must immediately raise UnsupportedOpenMMForceError."""
         f = self._make_unsupported_force(force_name)
 
         sys = _make_dummy_system(2)
-        sys.addForce(f)
+        if isinstance(f, openmm.Force):
+            sys.addForce(f)
+        else:
+            sys.addForce(openmm.HarmonicBondForce())
+            monkeypatch.setattr(sys, "getForce", lambda idx: f)
 
         with pytest.raises(UnsupportedOpenMMForceError) as exc_info:
             from_openmm_system(sys)

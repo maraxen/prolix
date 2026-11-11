@@ -173,7 +173,7 @@ class TestConfigValidation:
         with pytest.raises(ValueError, match="custom_nonbonded_chunk_size"):
             ProlixOpenMMConfig(custom_nonbonded_chunk_size=bad_val)
 
-    @pytest.mark.parametrize("bad_val", ["verlet", "euler", "rk4", "none"])
+    @pytest.mark.parametrize("bad_val", ["bogus", "euler", "rk4", "none"])
     def test_invalid_integrator_scheme(self, bad_val):
         with pytest.raises(ValueError, match="integrator_scheme"):
             ProlixOpenMMConfig(integrator_scheme=bad_val)  # type: ignore[arg-type]
