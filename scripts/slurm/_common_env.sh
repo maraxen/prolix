@@ -25,4 +25,13 @@ export PROLIX_ROOT="${PROLIX_ROOT:-$(pwd -P)}"
 export ENGAGING_LOG_DATE="${ENGAGING_LOG_DATE:-$(date +%Y%m%d)}"
 export LOG_ROOT="${PROLIX_ROOT}/outputs/logs/engaging/${ENGAGING_LOG_DATE}"
 mkdir -p "${LOG_ROOT}/slurm" "${LOG_ROOT}/app"
+# myxcel lock-keyed uv venv (no-op without myxcel). Scripts that manage their own uv env set
+# PROLIX_UV_OPT_OUT=1 before sourcing this file. See scripts/slurm/_uv_env.sh.
+# shellcheck source=scripts/slurm/_uv_env.sh
+source "${_PROJ}/scripts/slurm/_uv_env.sh"
+if [[ "${PROLIX_UV_OPT_OUT:-0}" == "1" ]]; then
+    prolix_uv_opt_out
+else
+    prolix_uv_sync
+fi
 uv run python scripts/write_engaging_manifest.py

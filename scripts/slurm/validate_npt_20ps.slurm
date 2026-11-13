@@ -34,6 +34,7 @@ fi
 cd "${PROLIX_ROOT}"
 
 # shellcheck source=/dev/null
+export PROLIX_UV_OPT_OUT=1  # manages its own uv env (workspace mode / --python); no myxcel lock-keyed venv
 source "scripts/slurm/_common_env.sh"
 
 echo "npt_20ps job=${SLURM_JOB_ID:-local} host=$(hostname) workspace=${PROLIX_ROOT}"

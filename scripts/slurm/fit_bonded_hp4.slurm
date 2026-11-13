@@ -41,6 +41,8 @@ _PROJ="${SLURM_SUBMIT_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
 cd "${_PROJ}"
 
 cd "${SLURM_SUBMIT_DIR:-${HOME}/projects/prolix}"
+# myxcel lock-keyed uv venv (no-op without myxcel): see scripts/slurm/_uv_env.sh
+source "${PWD}/scripts/slurm/_uv_env.sh" && prolix_uv_sync
 
 # ===== Decode array task ID into (N, MODE, PRECISION) =====
 N_VALUES=(16 32 64 128 256 512)

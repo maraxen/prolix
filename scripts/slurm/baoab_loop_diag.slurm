@@ -11,6 +11,8 @@ set -euo pipefail
 _SUBMIT_DIR="${SLURM_SUBMIT_DIR:-${PWD}}"
 PROLIX_ROOT="$(git -C "${_SUBMIT_DIR}" rev-parse --show-toplevel 2>/dev/null || echo "${HOME}/projects/prolix")"
 cd "${PROLIX_ROOT}"
+# myxcel lock-keyed uv venv (no-op without myxcel): see scripts/slurm/_uv_env.sh
+source "${PWD}/scripts/slurm/_uv_env.sh" && prolix_uv_sync
 export JAX_PLATFORMS=cuda JAX_ENABLE_X64=1 XLA_PYTHON_CLIENT_PREALLOCATE=false
 OUT="${PROLIX_ROOT}/outputs/results/baoab_loop_diag_${SLURM_JOB_ID}.json"
 mkdir -p "${PROLIX_ROOT}/outputs/results"

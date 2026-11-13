@@ -11,6 +11,8 @@
 set -euo pipefail
 _PROJ="${SLURM_SUBMIT_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
 cd "${_PROJ}"
+# myxcel lock-keyed uv venv (no-op without myxcel): see scripts/slurm/_uv_env.sh
+source "${PWD}/scripts/slurm/_uv_env.sh" && prolix_uv_sync
 # shellcheck source=_bth_env.sh
 source scripts/slurm/_bth_env.sh
 OUT="${OUT:-outputs/nonbonded_omm_parity/flash_${SLURM_JOB_ID:-local}.json}"

@@ -28,3 +28,10 @@ cpus_per_task = 16
 mem          = "128G"
 gpus         = "1"
 env          = { XLA_FLAGS = "--xla_gpu_shard_autotuning=false" }
+
+[uv]
+# One shared venv per uv.lock hash (profile uv.venv_root). Dependencies only: prolix is NOT installed
+# into it (scripts/slurm/_uv_env.sh puts this worktree's src/ on PYTHONPATH), so worktrees never
+# import each other's source. sync_args feed the lock key and must equal PROLIX_UV_SYNC_ARGS there.
+venv = "lock-keyed"
+sync_args = ["--frozen", "--extra", "cuda", "--extra", "openmm", "--extra", "dev", "--no-install-project"]
