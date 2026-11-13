@@ -47,6 +47,8 @@ else
 fi
 _is_repo_root "${_PROJ}" || { echo "FATAL: no prolix repo root found (tried PWD=${PWD}, SLURM_SUBMIT_DIR=${SLURM_SUBMIT_DIR:-unset})" >&2; exit 1; }
 cd "${_PROJ}" || exit 1
+# myxcel lock-keyed uv venv (no-op without myxcel): see scripts/slurm/_uv_env.sh
+source "${PWD}/scripts/slurm/_uv_env.sh" && prolix_uv_opt_out
 echo "repo root: $(pwd)"
 # bathos provenance (CLAUDE.md "Experiment Tracking"): the combine step below is
 # the one that emits the sidecar's result_schema row, so it runs under `bth run`.

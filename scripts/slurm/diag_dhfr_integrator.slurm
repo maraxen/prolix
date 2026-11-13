@@ -33,6 +33,8 @@ else
 fi
 _is_repo_root "${_PROJ}" || { echo "FATAL: no prolix repo root found (PWD=${PWD}, SLURM_SUBMIT_DIR=${SLURM_SUBMIT_DIR:-unset})" >&2; exit 1; }
 cd "${_PROJ}" || exit 1
+# myxcel lock-keyed uv venv (no-op without myxcel): see scripts/slurm/_uv_env.sh
+source "${PWD}/scripts/slurm/_uv_env.sh" && prolix_uv_sync
 echo "repo root: $(pwd)"
 mkdir -p outputs/logs/slurm outputs/dhfr_integrator
 echo "Host: $(hostname)  Job: ${SLURM_JOB_ID:-local}  Date: $(date -Is)"

@@ -47,6 +47,8 @@ else
     _PROJ="${HOME}/projects/prolix"
 fi
 cd "${_PROJ}" || exit 1
+# myxcel lock-keyed uv venv (no-op without myxcel): see scripts/slurm/_uv_env.sh
+source "${PWD}/scripts/slurm/_uv_env.sh" && prolix_uv_sync
 echo "repo root: $(pwd)"
 mkdir -p outputs/logs/slurm
 echo "Host: $(hostname)  Job: ${SLURM_JOB_ID:-local}  Date: $(date -Is)"
