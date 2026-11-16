@@ -26,6 +26,7 @@ _PROJ="$(pwd)"
 unset SLURM_SUBMIT_DIR
 
 # shellcheck source=/dev/null
+export PROLIX_UV_OPT_OUT=1  # manages its own uv env (workspace mode / --python); no myxcel lock-keyed venv
 source "scripts/slurm/_common_env.sh"
 
 # Blackwell (SM120) workaround — node4007/4008 currently run rtx_pro_6000 (Blackwell);

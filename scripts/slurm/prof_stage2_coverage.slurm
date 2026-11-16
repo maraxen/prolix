@@ -35,6 +35,8 @@ _PROJ="$(_locate_root)" || {
     exit 1
 }
 cd "${_PROJ}"
+# myxcel lock-keyed uv venv (no-op without myxcel): see scripts/slurm/_uv_env.sh
+source "${PWD}/scripts/slurm/_uv_env.sh" && prolix_uv_sync
 echo "P7 cwd=${_PROJ}"
 source "scripts/slurm/_bth_env.sh"
 

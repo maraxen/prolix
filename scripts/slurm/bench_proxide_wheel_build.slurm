@@ -27,6 +27,7 @@ _PROJ="${SLURM_SUBMIT_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
 cd "${_PROJ}"
 
 # shellcheck source=/dev/null
+export PROLIX_UV_OPT_OUT=1  # manages its own uv env (workspace mode / --python); no myxcel lock-keyed venv
 source "scripts/slurm/_common_env.sh"
 # shellcheck source=/dev/null
 source "scripts/slurm/_engaging_modules.sh"

@@ -27,6 +27,8 @@ set -euo pipefail
 # re-deriving it (see scripts/slurm/p5_settle_fix_fastsuite_gpu.slurm for the same fix).
 PROLIX_ROOT="$(pwd)"
 cd "${PROLIX_ROOT}"
+# myxcel lock-keyed uv venv (no-op without myxcel): see scripts/slurm/_uv_env.sh
+source "${PWD}/scripts/slurm/_uv_env.sh" && prolix_uv_sync
 
 # Sanity check: fail loudly rather than silently running against a wrong
 # checkout if chdir wasn't set (e.g. a manual sbatch or scontrol requeue).

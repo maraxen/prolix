@@ -27,6 +27,8 @@ else
   PROLIX_ROOT="${HOME}/projects/prolix"
 fi
 cd "${PROLIX_ROOT}"
+# myxcel lock-keyed uv venv (no-op without myxcel): see scripts/slurm/_uv_env.sh
+source "${PWD}/scripts/slurm/_uv_env.sh" && prolix_uv_sync
 
 echo "=== P5 NVT gate dt=1.0 fs ==="
 echo "Host: $(hostname)"

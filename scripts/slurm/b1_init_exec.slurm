@@ -111,6 +111,8 @@ fi
 # shellcheck source=/dev/null
 source "scripts/slurm/_bth_env.sh"
 cd "${PROLIX_ROOT}"
+# myxcel lock-keyed uv venv (no-op without myxcel): see scripts/slurm/_uv_env.sh
+source "${PWD}/scripts/slurm/_uv_env.sh" && prolix_uv_opt_out
 
 export XLA_PYTHON_CLIENT_PREALLOCATE=false
 export B1_XLA_TRITON_FLAG="${B1_XLA_TRITON_FLAG:-0}"

@@ -41,6 +41,8 @@ else
   PROLIX_ROOT="${HOME}/projects/prolix"
 fi
 cd "${PROLIX_ROOT}"
+# myxcel lock-keyed uv venv (no-op without myxcel): see scripts/slurm/_uv_env.sh
+source "${PWD}/scripts/slurm/_uv_env.sh" && prolix_uv_opt_out
 
 TOOL="${TOOL:?TOOL env var required (prolix|dmff|torchmd|espaloma|pytorch_scratch)}"
 N_MOLS="${N_MOLS:-64}"

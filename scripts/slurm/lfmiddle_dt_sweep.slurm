@@ -34,6 +34,8 @@ else
   PROLIX_ROOT="${HOME}/projects/prolix"
 fi
 cd "${PROLIX_ROOT}"
+# myxcel lock-keyed uv venv (no-op without myxcel): see scripts/slurm/_uv_env.sh
+source "${PWD}/scripts/slurm/_uv_env.sh" && prolix_uv_sync
 
 DT_VALUES=(0.25 0.5 1.0)
 if [[ -n "${SLURM_ARRAY_TASK_ID:-}" ]]; then
