@@ -32,9 +32,12 @@ def _lj_switch_weight_and_deriv(
     one = jnp.asarray(1.0, dtype=r.dtype)
     zero = jnp.asarray(0.0, dtype=r.dtype)
     z = jnp.clip((r - r_sw) / w, zero, one)
+    z2 = z * z
+    omz = one - z
+    omz2 = omz * omz
     ds_dr = jnp.where(
         (r > r_sw) & (r < r_cut),
-        -jnp.asarray(30.0, dtype=r.dtype) * (z ** 2) * ((one - z) ** 2) / w,
+        jnp.asarray(-30.0, dtype=r.dtype) * z2 * omz2 / w,
         zero,
     )
     return s_val, ds_dr

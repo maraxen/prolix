@@ -7,17 +7,18 @@ import os
 from typing import NamedTuple
 
 import jax
+import jax.core
 import jax.numpy as jnp
 import numpy as np
 
 from prolix.export import in_export_context
 from prolix.physics.pbc import box_volume, invert_box_lower_triangular
 
-# kcal*A/(mol*e^2)
-COULOMB_CONSTANT = 332.0637
+# kcal*A/(mol*e^2) — exact OpenMM ONE_4PI_EPS0 * 10 / 4.184
+COULOMB_CONSTANT = 332.06371329919216
 
 
-def _is_triclinic_box_array(box: jnp.ndarray | None) -> bool:
+def _is_triclinic_box_array(box: jnp.ndarray | np.ndarray | None = None) -> bool:
     """Return True if ``box`` is a (3, 3) or (B, 3, 3) lower-triangular triclinic matrix."""
     if box is None:
         return False
@@ -36,7 +37,7 @@ def _is_triclinic_box_array(box: jnp.ndarray | None) -> bool:
     return False
 
 
-def _is_ortho_box(positions: jnp.ndarray, box_size: jnp.ndarray) -> bool:
+def _is_ortho_box(positions: jnp.ndarray, box_size: jnp.ndarray | np.ndarray) -> bool:
     """Return True if ``box_size`` is orthorhombic ``(3,)`` or batched ``(B, 3)``."""
     box_arr = jnp.asarray(box_size)
     if box_arr.ndim == 1:
@@ -74,8 +75,8 @@ def _resolve_env_pme_grid_dims(
     if ":" in raw or "," in raw:
         mapping: list[tuple[int, tuple[int, int, int]]] = []
         fallback = default
-        for part in raw.split(","):
-            part = part.strip()
+        for raw_part in raw.split(","):
+            part = raw_part.strip()
             if not part:
                 continue
             if ":" in part:
@@ -195,7 +196,7 @@ def _gather_reference(
                     ],
                     axis=-1,
                 )
-                f_1 = (dE_ds @ B_mat.T) * f_scale
+                f_1 = jnp.matmul(dE_ds, B_mat.T, precision=jax.lax.Precision.HIGHEST) * f_scale
             else:
                 scale = (K_arr / box_arr) * f_scale
                 f_1 = jnp.stack(
@@ -371,7 +372,7 @@ def _bspline4_stencil(positions, charges, atom_mask, box_size, grid_dims, order:
     box_arr = jnp.asarray(box_size, dtype=work_dtype)
     if box_arr.ndim == 2:
         B = invert_box_lower_triangular(box_arr)
-        s = positions @ B
+        s = jnp.matmul(positions, B, precision=jax.lax.Precision.HIGHEST)
         s_wrap = s - jnp.floor(s)
         frac = s_wrap * K_arr
     else:
@@ -486,8 +487,9 @@ def influence_function(grid_dims: tuple[int, int, int], box_size: jnp.ndarray, a
         n_grid = jnp.stack(jnp.meshgrid(nx, ny, nz, indexing="ij"), axis=0)
         B = invert_box_lower_triangular(box_arr)
         # Row-vector lattice A (r = s @ A, s = r @ B): phase invariance exp(2*pi*i * m . (r + a_i))
-        # requires A @ m = n => m = B @ n (NOT B.T @ n).
-        m_vecs = jnp.einsum("ij,jxyz->ixyz", B, n_grid)
+        # requires A @ m = n => m = B @ n (NOT B.T @ n). Use HIGHEST precision to prevent GPU TF32
+        # GEMM mantissa truncation on orthorhombic/triclinic (3, 3) boxes.
+        m_vecs = jnp.einsum("ij,jxyz->ixyz", B, n_grid, precision=jax.lax.Precision.HIGHEST)
         m_sq = jnp.sum(m_vecs ** 2, axis=0)
     else:
         mx = jnp.fft.fftfreq(Kx, dtype=box_arr.dtype) * Kx / box_arr[0]
@@ -538,7 +540,9 @@ def spme_reciprocal_energy(
         q_w = charges.astype(jnp.float32)
         box_w = jnp.asarray(box_size, dtype=jnp.float32)
     else:
-        pos_w, q_w, box_w = positions, charges, jnp.asarray(box_size)
+        pos_w = positions
+        q_w = jnp.asarray(charges, dtype=orig_dtype)
+        box_w = jnp.asarray(box_size, dtype=orig_dtype)
     Q = spread_charges(
         pos_w, q_w, atom_mask, box_w, grid_dims, order, use_pallas_pme
     )
@@ -639,7 +643,9 @@ def _spme_fwd(positions, charges, atom_mask, box_size, grid_dims, alpha, order, 
         q_w = charges_v.astype(jnp.float32)
         box_w = jnp.asarray(box_size_v, dtype=jnp.float32)
     else:
-        pos_w, q_w, box_w = positions_v, charges_v, jnp.asarray(box_size_v)
+        pos_w = positions_v
+        q_w = jnp.asarray(charges_v, dtype=orig_dtype)
+        box_w = jnp.asarray(box_size_v, dtype=orig_dtype)
     Q = spread_charges(
         pos_w, q_w, atom_mask_v, box_w, grid_dims, order, use_pallas_pme
     )
@@ -788,7 +794,9 @@ def _spme_energy_with_forces_cached(
         q_w = charges.astype(jnp.float32)
         box_w = jnp.asarray(box_size, dtype=jnp.float32)
     else:
-        pos_w, q_w, box_w = positions, charges, box_size
+        pos_w = positions
+        q_w = jnp.asarray(charges, dtype=orig_dtype)
+        box_w = jnp.asarray(box_size, dtype=orig_dtype)
     Q = spread_charges(
         pos_w, q_w, atom_mask, box_w, grid_dims, order, use_pallas_pme
     )
@@ -819,7 +827,9 @@ def _spme_cached_fwd(positions, charges, atom_mask, G_cached, box_size, grid_dim
         q_w = charges_v.astype(jnp.float32)
         box_w = jnp.asarray(box_size_v, dtype=jnp.float32)
     else:
-        pos_w, q_w, box_w = positions_v, charges_v, box_size_v
+        pos_w = positions_v
+        q_w = jnp.asarray(charges_v, dtype=orig_dtype)
+        box_w = jnp.asarray(box_size_v, dtype=orig_dtype)
     Q = spread_charges(
         pos_w, q_w, atom_mask_v, box_w, grid_dims, order, use_pallas_pme
     )
@@ -966,7 +976,9 @@ def spme_forces(
         q_w = charges.astype(jnp.float32)
         box_w = jnp.asarray(box_size, dtype=jnp.float32)
     else:
-        pos_w, q_w, box_w = positions, charges, jnp.asarray(box_size)
+        pos_w = positions
+        q_w = jnp.asarray(charges, dtype=orig_dtype)
+        box_w = jnp.asarray(box_size, dtype=orig_dtype)
     Q = spread_charges(
         pos_w, q_w, atom_mask, box_w, grid_dims, order, use_pallas_pme
     )
@@ -1001,7 +1013,7 @@ def _spme_forces_cached(
     charges: jnp.ndarray,
     atom_mask: jnp.ndarray,
     G_cached: jnp.ndarray,
-    box_size: jnp.ndarray,
+    box_size: jnp.ndarray | np.ndarray,
     grid_dims: tuple[int, int, int],
     order: int,
     use_pallas_pme: bool = False,
@@ -1014,7 +1026,9 @@ def _spme_forces_cached(
         q_w = charges.astype(jnp.float32)
         box_w = jnp.asarray(box_size, dtype=jnp.float32)
     else:
-        pos_w, q_w, box_w = positions, charges, box_size
+        pos_w = positions
+        q_w = jnp.asarray(charges, dtype=orig_dtype)
+        box_w = jnp.asarray(box_size, dtype=orig_dtype)
     Q = spread_charges(
         pos_w, q_w, atom_mask, box_w, grid_dims, order, use_pallas_pme
     )
@@ -1031,7 +1045,7 @@ def _spme_forces_cached(
         positions,
         charges,
         atom_mask,
-        box_size,
+        jnp.asarray(box_size),
         theta,
         grid_dims,
         order,
@@ -1099,7 +1113,7 @@ def make_spme_energy_fn(
                 )
 
             with jax.ensure_compile_time_eval():
-                _cached_force_fn.G_cached = jnp.asarray(G_cached_np)  # type: ignore[attr-defined]
+                _cached_force_fn.__dict__["G_cached"] = jnp.asarray(G_cached_np)
             return _cached_force_fn
 
         def _cached_fn(positions, charges, atom_mask, box=None):
@@ -1127,7 +1141,7 @@ def make_spme_energy_fn(
             )
 
         with jax.ensure_compile_time_eval():
-            _cached_fn.G_cached = jnp.asarray(G_cached_np)  # type: ignore[attr-defined]
+            _cached_fn.__dict__["G_cached"] = jnp.asarray(G_cached_np)
         return _cached_fn
 
     if return_forces:

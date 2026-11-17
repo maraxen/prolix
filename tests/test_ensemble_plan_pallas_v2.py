@@ -178,8 +178,8 @@ def _make_periodic_solvated_bundle(dtype=jnp.float64, seed: int = 0, shift_solut
 
 def test_ensemble_plan_use_pallas_dispatches_megakernel_and_pre_encoded_nl(monkeypatch):
     """G1 + G3: EnsemblePlan(use_pallas=True).run() dispatches pallas_bonded_all_fused and pre_encoded NL."""
-    import prolix.api.bundle_md as bundle_md
-    import prolix.batched_energy as batched_energy
+    from prolix import batched_energy
+    from prolix.api import bundle_md
 
     prev_x64 = jax.config.read("jax_enable_x64")
     jax.config.update("jax_enable_x64", True)
@@ -191,7 +191,7 @@ def test_ensemble_plan_use_pallas_dispatches_megakernel_and_pre_encoded_nl(monke
         spread_calls: list[int] = []
         gather_calls: list[int] = []
 
-        import prolix.physics.pme_pallas as pme_pallas
+        from prolix.physics import pme_pallas
 
         real_bonded_fused = bundle_md.pallas_bonded_all_fused
         real_nonbonded_nl = batched_energy.pallas_nonbonded_nl
@@ -439,9 +439,8 @@ def test_stacked_multi_bundle_pallas_v2_distinct_encoded_nl():
 
 def test_pallas_v2_native_2d_grid_batching_parity(monkeypatch):
     """2D Pallas grid batching (B, n_blocks) across replicas matches single-replica energies and forces."""
-    import prolix.pallas_kernels as pallas_kernels
-    import prolix.physics.pallas_bonded as pallas_bonded
-    import prolix.physics.pme_pallas as pme_pallas
+    from prolix import pallas_kernels
+    from prolix.physics import pallas_bonded, pme_pallas
 
     prev_x64 = jax.config.read("jax_enable_x64")
     jax.config.update("jax_enable_x64", True)
@@ -839,9 +838,11 @@ def test_dispatch_n_steps_inference_dynamic_limit_no_retrace():
 
 
 def test_single_bundle_inference_runner_cache_no_retrace(monkeypatch):
-    """Repeated plan.run(run_mode='inference') reuses cached nbr0 + step_fn with zero re-tracing."""
+    """Repeated plan.run(run_mode='inference') reuses cached runner + step_fn with zero re-tracing."""
+    from prolix.api import ensemble_plan as ensemble_plan_mod
     from prolix.api.ensemble_dispatch import _JITTED_WHILE_CACHE
     from prolix.api.ensemble_plan import _SINGLE_INFERENCE_CACHE
+    from prolix.knob_surface import KnobSurface, PallasControls
 
     prev_x64 = jax.config.read("jax_enable_x64")
     jax.config.update("jax_enable_x64", True)
@@ -849,6 +850,7 @@ def test_single_bundle_inference_runner_cache_no_retrace(monkeypatch):
         bundle = _make_periodic_solvated_bundle(dtype=jnp.float64, seed=11)
         alloc_calls = {"n": 0}
         orig_make_nl = nl_mod.make_neighbor_list_fn
+        orig_build_morton = ensemble_plan_mod.pallas_build_morton_tile_pairs_gpu
 
         def spy_make_nl(*args, **kwargs):
             nf = orig_make_nl(*args, **kwargs)
@@ -860,66 +862,94 @@ def test_single_bundle_inference_runner_cache_no_retrace(monkeypatch):
 
             return nf._replace(allocate=spy_alloc) if hasattr(nf, "_replace") else type(nf)(spy_alloc, nf.update)
 
-        monkeypatch.setattr(nl_mod, "make_neighbor_list_fn", spy_make_nl)
+        def spy_build_morton(*args, **kwargs):
+            alloc_calls["n"] += 1
+            return orig_build_morton(*args, **kwargs)
 
-        for use_pallas_flag in (False, True):
-            if use_pallas_flag:
-                import sys
+        ks_row_nl = KnobSurface(
+            pallas=PallasControls(nonbonded_engine="neighbor_list", precision="mixed")
+        )
+        morton_eng_default = "morton_tile_pairs" if jax.default_backend() == "cpu" else None
+        cases = [
+            (False, None, None, True),
+            (True, morton_eng_default, None, False),
+            (True, None, ks_row_nl, True),
+        ]
 
-                sys.modules.pop("prolix.physics.pme_pallas", None)
-            _SINGLE_INFERENCE_CACHE.clear()
-            _JITTED_WHILE_CACHE.clear()
-            alloc_before = alloc_calls["n"]
+        for use_pallas_flag, nb_eng, ks_arg, patch_row_nl in cases:
+            with monkeypatch.context() as mp:
+                mp.setattr(
+                    ensemble_plan_mod, "pallas_build_morton_tile_pairs_gpu", spy_build_morton
+                )
+                if patch_row_nl:
+                    mp.setattr(nl_mod, "make_neighbor_list_fn", spy_make_nl)
+                if use_pallas_flag:
+                    import sys
 
-            plan = EnsemblePlan.from_bundle(bundle, use_pallas=use_pallas_flag)
-            t1 = plan.run(
-                n_steps=1,
-                dt=1.0,
-                kT=0.6,
-                seed=10,
-                run_mode="inference",
-                use_neighbor_list=True,
-                nl_update_every=2,
-            )
-            count_after_first = alloc_calls["n"]
-            assert count_after_first > alloc_before
-            assert len(_JITTED_WHILE_CACHE) == 1
-            jitted_while = next(iter(_JITTED_WHILE_CACHE.values()))
-            assert jitted_while._cache_size() == 1
+                    sys.modules.pop("prolix.physics.pme_pallas", None)
+                _SINGLE_INFERENCE_CACHE.clear()
+                _JITTED_WHILE_CACHE.clear()
+                alloc_before = alloc_calls["n"]
 
-            t2 = plan.run(
-                n_steps=4,
-                dt=1.0,
-                kT=0.6,
-                seed=20,
-                run_mode="inference",
-                use_neighbor_list=True,
-                nl_update_every=2,
-            )
-            # Second call with different n_steps and seed should hit _SINGLE_INFERENCE_CACHE
-            # without reallocating nbr0 and without recompiling jitted_while (_cache_size() == 1).
-            assert alloc_calls["n"] == count_after_first
-            assert len(_JITTED_WHILE_CACHE) == 1
-            assert jitted_while._cache_size() == 1
+                plan = EnsemblePlan.from_bundle(
+                    bundle,
+                    use_pallas=use_pallas_flag,
+                    nonbonded_engine=nb_eng,
+                    knob_surface=ks_arg,
+                )
+                t1 = plan.run(
+                    n_steps=1,
+                    dt=1.0,
+                    kT=0.6,
+                    seed=10,
+                    run_mode="inference",
+                    use_neighbor_list=True,
+                    nl_update_every=2,
+                )
+                count_after_first = alloc_calls["n"]
+                assert count_after_first > alloc_before
+                assert len(_JITTED_WHILE_CACHE) == 1
+                jitted_while = next(iter(_JITTED_WHILE_CACHE.values()))
+                assert jitted_while._cache_size() == 1
 
-            # Third call on a fresh EnsemblePlan.from_bundle(bundle) instance (mirroring
-            # bench_dhfr_parity.py's n_steps_list loop) must also reuse jitted_while.
-            plan2 = EnsemblePlan.from_bundle(bundle, use_pallas=use_pallas_flag)
-            t3 = plan2.run(
-                n_steps=6,
-                dt=1.0,
-                kT=0.6,
-                seed=30,
-                run_mode="inference",
-                use_neighbor_list=True,
-                nl_update_every=2,
-            )
-            assert alloc_calls["n"] == count_after_first
-            assert len(_JITTED_WHILE_CACHE) == 1
-            assert jitted_while._cache_size() == 1
-            assert jnp.all(jnp.isfinite(t1.positions))
-            assert jnp.all(jnp.isfinite(t2.positions))
-            assert jnp.all(jnp.isfinite(t3.positions))
+                t2 = plan.run(
+                    n_steps=4,
+                    dt=1.0,
+                    kT=0.6,
+                    seed=20,
+                    run_mode="inference",
+                    use_neighbor_list=True,
+                    nl_update_every=2,
+                )
+                # Second call with different n_steps and seed should hit _SINGLE_INFERENCE_CACHE
+                # without reallocating nbr0/tp0 and without recompiling jitted_while (_cache_size() == 1).
+                assert alloc_calls["n"] == count_after_first
+                assert len(_JITTED_WHILE_CACHE) == 1
+                assert jitted_while._cache_size() == 1
+
+                # Third call on a fresh EnsemblePlan.from_bundle(bundle) instance (mirroring
+                # bench_dhfr_parity.py's n_steps_list loop) must also reuse jitted_while.
+                plan2 = EnsemblePlan.from_bundle(
+                    bundle,
+                    use_pallas=use_pallas_flag,
+                    nonbonded_engine=nb_eng,
+                    knob_surface=ks_arg,
+                )
+                t3 = plan2.run(
+                    n_steps=6,
+                    dt=1.0,
+                    kT=0.6,
+                    seed=30,
+                    run_mode="inference",
+                    use_neighbor_list=True,
+                    nl_update_every=2,
+                )
+                assert alloc_calls["n"] == count_after_first
+                assert len(_JITTED_WHILE_CACHE) == 1
+                assert jitted_while._cache_size() == 1
+                assert jnp.all(jnp.isfinite(t1.positions))
+                assert jnp.all(jnp.isfinite(t2.positions))
+                assert jnp.all(jnp.isfinite(t3.positions))
 
         # Also verify use_neighbor_list=False branch canonicalizes initial state via fast_reseed_fn
         _SINGLE_INFERENCE_CACHE.clear()
@@ -956,6 +986,7 @@ def test_single_bundle_inference_runner_cache_no_retrace(monkeypatch):
 def test_pallas_v22_prune_and_encode_cell_list_cpu_and_cuda_lowering():
     """Patch E: Bit-exact parity of pallas_prune_and_encode_cell_list (B=1 & vmap B=3) + CUDA Triton MLIR lowering."""
     from jax_md import partition, space
+
     from prolix.physics.neighbor_list import (
         encode_nl_exclusions,
         pallas_prune_and_encode_cell_list,
@@ -1077,6 +1108,7 @@ def test_pallas_v22_prune_and_encode_cell_list_cpu_and_cuda_lowering():
 def test_antipodal_box_invalidation_and_custom_vmap_nl_rebuild():
     """Patch D: +0.5*box_vec invalidates L=32.0 A (where +1e6 aliases to 0.0 mod 32) and custom_vmap works with Pallas NL."""
     from jax_md import space
+
     from prolix.physics import neighbor_list as nl_mod
 
     prev_x64 = jax.config.jax_enable_x64
@@ -1129,6 +1161,7 @@ def test_antipodal_box_invalidation_and_custom_vmap_nl_rebuild():
 def test_pallas_v24_ghost_atom_filtering_and_compaction_in_nl_and_prune():
     """v2.4: Ghost atoms (~atom_mask) are excluded from cell buffers and compacted to trailing sentinels."""
     from jax_md import partition, space
+
     from prolix.physics.neighbor_list import (
         _NB_INDEX_MASK,
         encode_nl_exclusions,
@@ -1548,7 +1581,7 @@ def test_pallas_v25_compacted_k_tile_early_exit_parity():
 
 def test_pallas_v25_spme_active_ad_charge_gradient_gating(monkeypatch):
     """MK-38: spme_energy_with_forces sets compute_dq=False when charges is unperturbed and True when differentiated."""
-    import prolix.physics.pme_pallas as pme_pallas
+    from prolix.physics import pme_pallas
     from prolix.physics.pme import spme_energy_with_forces
 
     N = 32
@@ -1783,7 +1816,11 @@ def test_pallas_v30_mk46_mk49_integrator_rebuild_nonbonded_pme():
     from prolix.physics.pme_pallas import gather_pallas, spread_charges_pallas
     from prolix.physics.settle import (
         TIP3P_RHH as HH_DIST,
+    )
+    from prolix.physics.settle import (
         TIP3P_ROH as OH_DIST,
+    )
+    from prolix.physics.settle import (
         _langevin_settle_vel,
         pallas_baoab_post_force,
         pallas_baoab_pre_force,
@@ -2913,20 +2950,22 @@ def test_pallas_v33_mk58_to_mk61_optimizations_and_parity(monkeypatch):
 def test_pallas_v34_cuda_guard_and_mk62_to_mk64():
     """Verify Phase 0 OpenMM CUDA anti-fallback guard and Pallas v3.4 MK-62, MK-63, MK-64."""
     import importlib.util
-    import pytest
     from pathlib import Path
-    from prolix.physics.pme import (
-        snap_fft_dim,
-        compute_openmm_pme_params,
-        spme_forces,
-        influence_function,
-        _spme_forces_cached,
-    )
+
+    import pytest
+
     from prolix.pallas_kernels import (
         build_tile_pair_neighbor_list,
-        pallas_nonbonded_tile_pairs,
         nonbonded_nl_reference,
         pallas_bonded_and_nonbonded_nl_fused,
+        pallas_nonbonded_tile_pairs,
+    )
+    from prolix.physics.pme import (
+        _spme_forces_cached,
+        compute_openmm_pme_params,
+        influence_function,
+        snap_fft_dim,
+        spme_forces,
     )
 
     prev_x64 = jax.config.jax_enable_x64
@@ -3350,5 +3389,155 @@ def test_pallas_v34_cuda_guard_and_mk62_to_mk64():
                 assert _blk["platform_name"] == "CUDA"
                 assert _blk["precision"] in ("single", "mixed")
                 assert isinstance(_blk["mps_active"], bool)
+    finally:
+        jax.config.update("jax_enable_x64", prev_x64)
+
+
+def test_v35_morton_tile_pairs_and_param_grads_bug_tp1():
+    """MK-65/MK-71/MK-73 + #40 BUG-TP1: Morton 32x32 tile pairs, fused bonded+NB SoA, and vmap param grads."""
+    from prolix.pallas_kernels import (
+        _pallas_bonded_and_tile_pairs_soa,
+        pallas_build_morton_tile_pairs_gpu,
+        pallas_nonbonded_tile_pairs,
+        precompute_dedup_excl_edges,
+        prepare_fused_bonded_buffers,
+    )
+
+    bun = _make_periodic_solvated_bundle(dtype=jnp.float32, seed=41)
+    n_act = int(np.asarray(bun.n_atoms))
+    n_act_blocks = max(1, (n_act + 31) // 32)
+    n_act_pad = n_act_blocks * 32
+    box_vec = jnp.diag(bun.box).astype(jnp.float32) if bun.box.ndim == 2 else bun.box.astype(jnp.float32)
+    dedup = precompute_dedup_excl_edges(
+        bun.excl_dense_indices, bun.excl_dense_scales_vdw, bun.excl_dense_scales_elec, n_act
+    )
+    interpret = jax.default_backend() == "cpu"
+    tp = pallas_build_morton_tile_pairs_gpu(
+        bun.positions.astype(jnp.float32),
+        bun.charges.astype(jnp.float32),
+        bun.sigmas.astype(jnp.float32),
+        bun.epsilons.astype(jnp.float32),
+        bun.atom_mask.astype(jnp.bool_),
+        box_vec,
+        dedup,
+        n_act=n_act,
+        max_pairs=64,
+        cutoff=8.0,
+        skin=1.5,
+        host_min_box=float(np.min(np.asarray(box_vec))),
+        interpret=interpret,
+    )
+    assert int(np.asarray(tp.n_valid_pairs)[0]) > 0
+    pad_tail = n_act_pad - n_act
+    pos_act = bun.positions[:n_act].astype(jnp.float32)
+    if pad_tail > 0:
+        pos_act = jnp.pad(pos_act, ((0, pad_tail), (0, 0)))
+    pos_m = pos_act[tp.perm[0]]
+    tp_nl = (jnp.stack([tp.pair_ti[0], tp.pair_tj[0]], axis=-1), tp.excl_full_bits[0], tp.excl_14_bits[0])
+
+    def _loss_single(pos, q, sig, eps):
+        e, f = pallas_nonbonded_tile_pairs(
+            pos, q, sig, eps, tp_nl,
+            atom_mask=tp.mask_m[0], box=box_vec, cutoff=8.0, pme_alpha=float(bun.pme_alpha),
+            return_forces=True, interpret=interpret,
+        )
+        return e + 0.05 * jnp.sum(f * f)
+
+    val1, grads1 = jax.value_and_grad(_loss_single, argnums=(0, 1, 2, 3))(
+        pos_m, tp.q_m[0], tp.sig_m[0], tp.eps_m[0]
+    )
+    assert jnp.isfinite(val1)
+    for g in grads1:
+        assert g.shape[0] == n_act_pad and bool(jnp.all(jnp.isfinite(g)))
+
+    # Batched vmap regression for #40 BUG-TP1 (batched custom_vjp backward signature)
+    pos_b = jnp.stack([pos_m, pos_m], axis=0)
+    q_b = jnp.stack([tp.q_m[0], tp.q_m[0] * 0.98], axis=0)
+    sig_b = jnp.stack([tp.sig_m[0], tp.sig_m[0]], axis=0)
+    eps_b = jnp.stack([tp.eps_m[0], tp.eps_m[0]], axis=0)
+    vals_b, grads_b = jax.vmap(jax.value_and_grad(_loss_single, argnums=(0, 1, 2, 3)))(
+        pos_b, q_b, sig_b, eps_b
+    )
+    np.testing.assert_allclose(np.asarray(vals_b[0]), np.asarray(val1), rtol=1e-5, atol=1e-5)
+    np.testing.assert_allclose(np.asarray(grads_b[1][0]), np.asarray(grads1[1]), rtol=1e-4, atol=1e-4)
+
+    bbufs = prepare_fused_bonded_buffers(
+        1, bonds=bun.bond_idx, bond_params=bun.bond_params, bond_mask=bun.bond_mask,
+        angles=bun.angle_idx, angle_params=bun.angle_params, angle_mask=bun.angle_mask,
+    )
+    e_soa, fx, fy, fz = _pallas_bonded_and_tile_pairs_soa(
+        1, pos_m[:, 0], pos_m[:, 1], pos_m[:, 2],
+        tp.q_m.reshape(n_act_pad), tp.sig_m.reshape(n_act_pad), tp.eps_m.reshape(n_act_pad),
+        tp.mask_m.reshape(n_act_pad), tp.inv_perm.reshape(n_act_pad),
+        tp.pair_ti.reshape(64), tp.pair_tj.reshape(64),
+        tp.excl_full_bits.reshape(64 * 32), tp.excl_14_bits.reshape(64 * 32),
+        tp.n_valid_pairs.reshape(1), box_vec.reshape(3), jnp.ones((1,), dtype=jnp.float32), bbufs,
+        n_act=n_act, n_act_blocks=n_act_blocks, max_pairs=64, cutoff=8.0,
+        pme_alpha=float(bun.pme_alpha), compute_energy=True, interpret=interpret,
+    )
+    assert bool(jnp.all(jnp.isfinite(e_soa))) and fx.shape == (n_act_pad,)
+
+
+def test_v35_interstep_baoab_mixed_precision_npt_and_ragged():
+    """MK-66/MK-68/MK-70/MK-74: inter-step BAOAB, precision='mixed', dynamic-box NPT, SoA PME, and ragged queue."""
+    from prolix.physics.pme_pallas import _gather_pallas_soa, _spread_charges_pallas_soa
+
+    prev_x64 = jax.config.read("jax_enable_x64")
+    jax.config.update("jax_enable_x64", True)
+    try:
+        bun1 = _make_periodic_solvated_bundle(dtype=jnp.float32, seed=11)
+        bun2 = _make_periodic_solvated_bundle(dtype=jnp.float32, seed=12, shift_solute=-1.2)
+        bun2_ragged = dataclasses.replace(
+            bun2,
+            n_atoms=jnp.asarray(9, dtype=jnp.int32),
+            atom_mask=bun2.atom_mask.at[9:12].set(False),
+            water_mask=bun2.water_mask.at[1].set(False),
+        )
+        plan_mix = EnsemblePlan.from_bundle(
+            bun1, use_pallas=True, nonbonded_engine="morton_tile_pairs", precision="mixed"
+        )
+        traj_mix = plan_mix.run(
+            n_steps=4, dt=1.0, kT=0.596, gamma=5.0, seed=21,
+            run_mode="inference", use_neighbor_list=True, nl_update_every=2,
+        )
+        assert traj_mix.positions.dtype == jnp.float64 and bool(jnp.all(jnp.isfinite(traj_mix.positions)))
+
+        plan_npt = EnsemblePlan.from_bundle(
+            bun1, use_pallas=True, nonbonded_engine="morton_tile_pairs",
+            pressure_atm=1.0, barostat_interval=2,
+        )
+        traj_npt = plan_npt.run(
+            n_steps=4, dt=1.0, kT=0.596, gamma=5.0, seed=22,
+            run_mode="inference", use_neighbor_list=True, nl_update_every=2,
+        )
+        assert "box" in traj_npt.observable_values and bool(jnp.all(jnp.isfinite(traj_npt.observable_values["box"])))
+
+        plan_rag = EnsemblePlan.from_bundles(
+            [bun1, bun2_ragged], use_pallas=True,
+            nonbonded_engine="ragged_tile_pairs", pme_tier_mode="grouped",
+        )
+        trajs_rag = plan_rag.run(
+            n_steps=4, dt=1.0, kT=0.596, gamma=5.0, seed=23,
+            run_mode="inference", use_neighbor_list=True, nl_update_every=2,
+        )
+        assert len(trajs_rag) == 2 and all(bool(jnp.all(jnp.isfinite(t.positions))) for t in trajs_rag)
+
+        interpret = jax.default_backend() == "cpu"
+        N = int(bun1.positions.shape[0])
+        px = bun1.positions[:, 0].astype(jnp.float32)
+        py = bun1.positions[:, 1].astype(jnp.float32)
+        pz = bun1.positions[:, 2].astype(jnp.float32)
+        qf = bun1.charges.astype(jnp.float32)
+        mf = bun1.atom_mask.astype(jnp.int32)
+        box_f = (jnp.diag(bun1.box) if bun1.box.ndim == 2 else bun1.box).astype(jnp.float32).reshape(3)
+        q_grid = _spread_charges_pallas_soa(
+            1, (True, True, True, True), px, py, pz, qf, mf, box_f, (16, 16, 16), N, N, interpret
+        )
+        fx1, fy1, fz1, _ = _gather_pallas_soa(
+            1, (True, True, True, True, True), px, py, pz, qf, mf, box_f, q_grid.reshape(-1),
+            (16, 16, 16), N, N, max(1, (N + 31) // 32), interpret,
+            force_scale=-1.0, force_accum=(jnp.ones_like(px), jnp.zeros_like(py), jnp.zeros_like(pz)),
+        )
+        assert q_grid.shape == (1, 16, 16, 16) and bool(jnp.all(jnp.isfinite(fx1 + fy1 + fz1)))
     finally:
         jax.config.update("jax_enable_x64", prev_x64)

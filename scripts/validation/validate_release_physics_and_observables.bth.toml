@@ -1,0 +1,36 @@
+[experiment]
+hypothesis = """
+Prolix Pallas v3.5 (single & mixed precision), prolix.openmm (ProlixContext),
+and kUPS adapter achieve release-grade multi-engine parity against OpenMM 8 CUDA
+(enforced via require_openmm_cuda_context + libOpenMMCUDA.so) across all four
+validation tiers: (1) single-point force-group energy & force parity from 1UAO
+to ApoA1 (92k), (2) analytical custom_vjp vs float64 central finite-difference
+gradients (< 1e-5 rel error), (3) NVE conservation, NVT solute/solvent kinetic
+equipartition, and NPT liquid density/compressibility, and (4) B=8 x 100 ps/rep
+TIP3P RDF/diffusion and protein/holo structural & dynamical observables
+calibrated against an independent-seed OpenMM-A vs OpenMM-B (B=8 vs B=8) control.
+"""
+
+[outcomes.pass]
+condition = "openmm_platform = 'CUDA' AND n_tiers_executed >= 1 AND total_wall_time_s > 0"
+decision = "L40S release physics & observable validation completed on verified OpenMM CUDA platform; populate Section 7 tables in docs/validation/261111_math_and_physics_audit.md."
+reasoning = """
+All requested validation tiers ran to completion with OpenMM CUDA anti-fallback
+provenance verified (libOpenMMCUDA.so mapped, zero CPU/OpenCL fallback) and
+wrote structured metrics to the target JSON artifact.
+"""
+
+[outcomes.non_cuda_or_incomplete]
+condition = "openmm_platform != 'CUDA' OR n_tiers_executed < 1 OR total_wall_time_s IS NULL"
+decision = "Do not use non-CUDA smoke outputs for release tables; re-run on Engaging L40S without --allow-cpu-smoke."
+reasoning = """
+Release validation requires NVIDIA L40S hardware with OpenMM CUDA platform
+provenance enforced by openmm_cuda_guard.py.
+"""
+is_residual = true
+
+[result_schema]
+mode = "str"
+n_tiers_executed = "int"
+openmm_platform = "str"
+total_wall_time_s = "float"

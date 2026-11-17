@@ -6,9 +6,10 @@ import dataclasses
 import functools
 import os
 import sys
-from typing import TYPE_CHECKING, NamedTuple
+from typing import TYPE_CHECKING, Any, NamedTuple, cast
 
 import jax
+import jax.core
 import jax.numpy as jnp
 import numpy as np
 from jax._src.pallas.primitives import load as _pl_load
@@ -39,7 +40,7 @@ if not hasattr(partition.NeighborList, "max_k_tiles"):
 
   _ProlixNeighborList.__name__ = "NeighborList"
   _ProlixNeighborList.__qualname__ = "NeighborList"
-  partition.NeighborList = _ProlixNeighborList
+  cast("Any", partition).NeighborList = _ProlixNeighborList
 
 
 @dataclasses.dataclass(frozen=True)
@@ -251,15 +252,18 @@ def make_neighbor_list_fn(
           f"Triclinic box violates OpenMM reduced-basis conditions: {box_np}"
         )
 
-  fns = partition.neighbor_list(
-    displacement_fn,
-    box_diag,
-    r_cutoff=cutoff,
-    dr_threshold=dr_threshold,
-    capacity_multiplier=capacity_multiplier,
-    disable_cell_list=disable_cell_list or (box.ndim == 2),
-    mask_self=True,
-    fractional_coordinates=False,
+  fns = cast(
+    "Any",
+    partition.neighbor_list(
+      displacement_fn,
+      box_diag,
+      r_cutoff=cutoff,
+      dr_threshold=dr_threshold,
+      capacity_multiplier=capacity_multiplier,
+      disable_cell_list=disable_cell_list or (box.ndim == 2),
+      mask_self=True,
+      fractional_coordinates=False,
+    ),
   )
 
   has_excl = (
@@ -274,18 +278,23 @@ def make_neighbor_list_fn(
     if isinstance(box_diag, jax.core.Tracer)
     else _compute_static_grid_dims(box_diag, r_total_cutoff)
   )
-  precomp_excl_static = (
-    precompute_static_nl_exclusion_tables(
-      excl_indices,
-      excl_scales_vdw,
-      excl_scales_elec,
-      int(excl_indices.shape[-2]),
+  if excl_indices is not None and excl_scales_vdw is not None and excl_scales_elec is not None:
+    excl_idx_static: Array = excl_indices
+    excl_vdw_static: Array = excl_scales_vdw
+    excl_elec_static: Array = excl_scales_elec
+    precomp_excl_static = precompute_static_nl_exclusion_tables(
+      excl_idx_static,
+      excl_vdw_static,
+      excl_elec_static,
+      int(excl_idx_static.shape[-2]),
       scale_14_vdw=float(scale_14_vdw),
       scale_14_elec=float(scale_14_elec),
     )
-    if has_excl
-    else None
-  )
+  else:
+    excl_idx_static = jnp.zeros((0, 0), dtype=jnp.int32)
+    excl_vdw_static = jnp.zeros((0, 0), dtype=jnp.float32)
+    excl_elec_static = jnp.zeros((0, 0), dtype=jnp.float32)
+    precomp_excl_static = None
 
   def _wrap(position: Array, dyn_box: Array | None = None) -> Array:
     b = jnp.asarray(dyn_box) if dyn_box is not None else box
@@ -296,9 +305,9 @@ def make_neighbor_list_fn(
   def _encode_if_needed(idx: Array, n_atoms: int) -> Array:
     if not has_excl and atom_mask is None:
       return idx
-    ei = excl_indices if has_excl else jnp.zeros((n_atoms, 0), dtype=jnp.int32)
-    ev = excl_scales_vdw if has_excl else jnp.zeros((n_atoms, 0), dtype=jnp.float32)
-    ee = excl_scales_elec if has_excl else jnp.zeros((n_atoms, 0), dtype=jnp.float32)
+    ei = excl_idx_static if has_excl else jnp.zeros((n_atoms, 0), dtype=jnp.int32)
+    ev = excl_vdw_static if has_excl else jnp.zeros((n_atoms, 0), dtype=jnp.float32)
+    ee = excl_elec_static if has_excl else jnp.zeros((n_atoms, 0), dtype=jnp.float32)
     return encode_nl_exclusions(
       idx,
       ei,
@@ -313,6 +322,7 @@ def make_neighbor_list_fn(
   def _rebuild_unconditional(
     position: Array, neighbors: partition.NeighborList, **kwargs
   ) -> partition.NeighborList:
+    nbr_any = cast("Any", neighbors)
     b = kwargs.get("box", None)
     b_eff = jnp.asarray(b) if b is not None else box
     pos_w = _wrap(position, b)
@@ -325,18 +335,18 @@ def make_neighbor_list_fn(
     )
     if can_pallas:
       N_atoms = int(pos_w.shape[-2])
-      ei = excl_indices if has_excl else jnp.full((N_atoms, 1), -1, dtype=jnp.int32)
-      ev = excl_scales_vdw if has_excl else jnp.ones((N_atoms, 1), dtype=jnp.float32)
-      ee = excl_scales_elec if has_excl else jnp.ones((N_atoms, 1), dtype=jnp.float32)
+      ei = excl_idx_static if has_excl else jnp.full((N_atoms, 1), -1, dtype=jnp.int32)
+      ev = excl_vdw_static if has_excl else jnp.ones((N_atoms, 1), dtype=jnp.float32)
+      ee = excl_elec_static if has_excl else jnp.ones((N_atoms, 1), dtype=jnp.float32)
       idx_new, occ_new, mkt_new = pallas_prune_and_encode_cell_list(
         pos_w,
         b_eff,
         ei,
         ev,
         ee,
-        cell_size=float(neighbors.cell_size),
-        cell_capacity=int(neighbors.cell_list_capacity),
-        max_occupancy=int(neighbors.max_occupancy),
+        cell_size=float(nbr_any.cell_size),
+        cell_capacity=int(nbr_any.cell_list_capacity),
+        max_occupancy=int(nbr_any.max_occupancy),
         r_cutoff=r_total_cutoff,
         scale_14_vdw=float(scale_14_vdw),
         scale_14_elec=float(scale_14_elec),
@@ -347,12 +357,12 @@ def make_neighbor_list_fn(
         precomputed_excl=precomp_excl_static,
         return_max_k_tiles=True,
       )
-      err_new = neighbors.error.update(
-        partition.PartitionErrorCode.NEIGHBOR_LIST_OVERFLOW,
-        occ_new > int(neighbors.max_occupancy),
+      err_new = nbr_any.error.update(
+        cast("Any", partition.PartitionErrorCode.NEIGHBOR_LIST_OVERFLOW),
+        occ_new > int(nbr_any.max_occupancy),
       )
       return dataclasses.replace(
-        neighbors,
+        nbr_any,
         idx=idx_new,
         reference_position=pos_w,
         error=err_new,
@@ -362,7 +372,7 @@ def make_neighbor_list_fn(
     # Fallback to jax_md update; force rebuild by shifting reference_position
     b_diag = jnp.diag(b_eff) if b_eff.ndim == 2 else b_eff
     forced_ref = pos_w + jnp.asarray(0.5, dtype=pos_w.dtype) * b_diag.astype(pos_w.dtype)
-    nbr_forced = dataclasses.replace(neighbors, reference_position=forced_ref, max_k_tiles=None)
+    nbr_forced = dataclasses.replace(nbr_any, reference_position=forced_ref, max_k_tiles=None)
     nbr = fns.update(pos_w, nbr_forced, **kwargs)
     n_at = int(pos_w.shape[-2])
     idx_enc = _encode_if_needed(nbr.idx, n_at)
@@ -383,12 +393,14 @@ def make_neighbor_list_fn(
       and _should_use_pallas_nl_default(use_pallas_nl)
     )
     if can_pallas or has_excl:
-      cell_size_f = float(neighbors.cell_size) if neighbors.cell_size is not None else r_total_cutoff
-      cell_cap_i = int(neighbors.cell_list_capacity) if neighbors.cell_list_capacity is not None else 64
-      max_occ_i = int(neighbors.max_occupancy)
+      nbr_u = cast("Any", neighbors)
+      part_err_cls = cast("Any", partition.PartitionError)
+      cell_size_f = float(nbr_u.cell_size) if nbr_u.cell_size is not None else r_total_cutoff
+      cell_cap_i = int(nbr_u.cell_list_capacity) if nbr_u.cell_list_capacity is not None else 64
+      max_occ_i = int(nbr_u.max_occupancy)
       n_at_u = int(pos_w.shape[-2])
       mkt_in = (
-        neighbors.max_k_tiles
+        nbr_u.max_k_tiles
         if getattr(neighbors, "max_k_tiles", None) is not None
         else _max_k_tiles_from_idx(neighbors.idx, n_at_u)
       )
@@ -411,17 +423,17 @@ def make_neighbor_list_fn(
         def _do_one(operands):
           p_o, _r_o, _i_o, e_o, bx_o, _m_o = operands
           nbr_tmp = dataclasses.replace(
-            neighbors,
+            nbr_u,
             idx=_i_o,
             reference_position=_r_o,
-            error=partition.PartitionError(e_o),
+            error=part_err_cls(e_o),
             max_k_tiles=None,
           )
           if can_pallas:
             N_atoms = int(p_o.shape[0])
-            ei = excl_indices if has_excl else jnp.full((N_atoms, 1), -1, dtype=jnp.int32)
-            ev = excl_scales_vdw if has_excl else jnp.ones((N_atoms, 1), dtype=jnp.float32)
-            ee = excl_scales_elec if has_excl else jnp.ones((N_atoms, 1), dtype=jnp.float32)
+            ei = excl_idx_static if has_excl else jnp.full((N_atoms, 1), -1, dtype=jnp.int32)
+            ev = excl_vdw_static if has_excl else jnp.ones((N_atoms, 1), dtype=jnp.float32)
+            ee = excl_elec_static if has_excl else jnp.ones((N_atoms, 1), dtype=jnp.float32)
             idx_new, occ_new, mkt_new = pallas_prune_and_encode_cell_list(
               p_o,
               bx_o,
@@ -442,7 +454,7 @@ def make_neighbor_list_fn(
               return_max_k_tiles=True,
             )
             err_new = nbr_tmp.error.update(
-              partition.PartitionErrorCode.NEIGHBOR_LIST_OVERFLOW,
+              cast("Any", partition.PartitionErrorCode.NEIGHBOR_LIST_OVERFLOW),
               occ_new > max_occ_i,
             )
             return idx_new, p_o.astype(_r_o.dtype), err_new.code, mkt_new
@@ -470,12 +482,12 @@ def make_neighbor_list_fn(
         axis_size, in_batched, pos_in, ref_in, idx_in, err_code_in, box_in, mkt_in_arg
       ):
         B = int(axis_size)
-        pos_b = pos_in if in_batched[0] else jnp.broadcast_to(pos_in[None, ...], (B,) + pos_in.shape)
-        ref_b = ref_in if in_batched[1] else jnp.broadcast_to(ref_in[None, ...], (B,) + ref_in.shape)
-        idx_b = idx_in if in_batched[2] else jnp.broadcast_to(idx_in[None, ...], (B,) + idx_in.shape)
-        err_b = err_code_in if in_batched[3] else jnp.broadcast_to(err_code_in[None, ...], (B,) + err_code_in.shape)
-        bx_b = box_in if in_batched[4] else jnp.broadcast_to(box_in[None, ...], (B,) + box_in.shape)
-        mkt_b = mkt_in_arg if in_batched[5] else jnp.broadcast_to(mkt_in_arg[None, ...], (B,) + mkt_in_arg.shape)
+        pos_b = pos_in if in_batched[0] else jnp.broadcast_to(pos_in[None, ...], (B, *pos_in.shape))
+        ref_b = ref_in if in_batched[1] else jnp.broadcast_to(ref_in[None, ...], (B, *ref_in.shape))
+        idx_b = idx_in if in_batched[2] else jnp.broadcast_to(idx_in[None, ...], (B, *idx_in.shape))
+        err_b = err_code_in if in_batched[3] else jnp.broadcast_to(err_code_in[None, ...], (B, *err_code_in.shape))
+        bx_b = box_in if in_batched[4] else jnp.broadcast_to(box_in[None, ...], (B, *box_in.shape))
+        mkt_b = mkt_in_arg if in_batched[5] else jnp.broadcast_to(mkt_in_arg[None, ...], (B, *mkt_in_arg.shape))
 
         dr_b = jax.vmap(jax.vmap(displacement_fn))(pos_b, ref_b)
         dr_sq_b = jnp.sum(dr_b * dr_b, axis=-1)
@@ -488,9 +500,9 @@ def make_neighbor_list_fn(
           p_b, _r_b, _i_b, e_b, b_b, su_op, m_b = operands
           if can_pallas:
             N_atoms = int(p_b.shape[1])
-            ei = excl_indices if has_excl else jnp.full((N_atoms, 1), -1, dtype=jnp.int32)
-            ev = excl_scales_vdw if has_excl else jnp.ones((N_atoms, 1), dtype=jnp.float32)
-            ee = excl_scales_elec if has_excl else jnp.ones((N_atoms, 1), dtype=jnp.float32)
+            ei = excl_idx_static if has_excl else jnp.full((N_atoms, 1), -1, dtype=jnp.int32)
+            ev = excl_vdw_static if has_excl else jnp.ones((N_atoms, 1), dtype=jnp.float32)
+            ee = excl_elec_static if has_excl else jnp.ones((N_atoms, 1), dtype=jnp.float32)
             idx_new_b, occ_new_b, mkt_new_b = _pallas_prune_and_encode_cell_list_batch(
               B,
               (True, True, False, False, False),
@@ -526,10 +538,10 @@ def make_neighbor_list_fn(
               b_diag = jnp.diag(bx_1) if bx_1.ndim == 2 else bx_1
               forced_ref = p_1 + jnp.asarray(0.5, dtype=p_1.dtype) * b_diag.astype(p_1.dtype)
               nbr_tmp = dataclasses.replace(
-                neighbors,
+                nbr_u,
                 idx=i_1,
                 reference_position=forced_ref,
-                error=partition.PartitionError(e_1),
+                error=part_err_cls(e_1),
                 max_k_tiles=None,
               )
               nbr_out = fns.update(p_1, nbr_tmp, **kwargs)
@@ -567,22 +579,22 @@ def make_neighbor_list_fn(
         mkt_in,
       )
       return dataclasses.replace(
-        neighbors,
+        nbr_u,
         idx=idx_out,
         reference_position=ref_out,
-        error=partition.PartitionError(err_code_out),
+        error=part_err_cls(err_code_out),
         max_k_tiles=mkt_out,
         update_fn=update,
       )
 
-    nbr_plain = dataclasses.replace(neighbors, max_k_tiles=None)
+    nbr_plain = dataclasses.replace(cast("Any", neighbors), max_k_tiles=None)
     nbr = fns.update(pos_w, nbr_plain, **kwargs)
     mkt_out = _max_k_tiles_from_idx(nbr.idx, int(pos_w.shape[-2]))
     return dataclasses.replace(nbr, max_k_tiles=mkt_out, update_fn=update)
 
-  update._pre_encoded_exclusions = has_excl  # type: ignore[attr-defined]
-  update._ghosts_filtered = atom_mask is not None  # type: ignore[attr-defined]
-  update._rebuild_unconditional = _rebuild_unconditional  # type: ignore[attr-defined]
+  update.__dict__["_pre_encoded_exclusions"] = has_excl
+  update.__dict__["_ghosts_filtered"] = atom_mask is not None
+  update.__dict__["_rebuild_unconditional"] = _rebuild_unconditional
 
   def allocate(position: Array, **kwargs) -> partition.NeighborList:
     b = kwargs.get("box", None)
@@ -603,7 +615,7 @@ def make_neighbor_list_fn(
     mkt_enc = _max_k_tiles_from_idx(idx_enc, n_at_a)
     return dataclasses.replace(nbr, idx=idx_enc, max_k_tiles=mkt_enc, update_fn=update)
 
-  return partition.NeighborListFns(allocate, update)
+  return cast("Any", partition.NeighborListFns)(allocate, update)
 
 
 def compute_exclusion_mask_neighbor_list(
@@ -744,10 +756,10 @@ def map_exclusions_to_dense_padded(
 
 
 def pair_list_to_dense_padded(
-  pair_indices: Array,
-  pair_scales_vdw: Array,
-  pair_scales_elec: Array,
-  pair_mask: Array,
+  pair_indices: Array | np.ndarray,
+  pair_scales_vdw: Array | np.ndarray,
+  pair_scales_elec: Array | np.ndarray,
+  pair_mask: Array | np.ndarray,
   n_atoms: int,
   max_exclusions: int = 32,
 ) -> tuple[Array, Array, Array]:
@@ -1258,7 +1270,7 @@ def _shift_cell_array_3d(arr: Array, dxyz: tuple[int, int, int]) -> Array:
     return arr
 
 
-def _compute_static_grid_dims(box: Array, cell_size: float) -> tuple[int, int, int]:
+def _compute_static_grid_dims(box: Array | np.ndarray, cell_size: float) -> tuple[int, int, int]:
     """Compute static 3D cell grid dimensions ``(nx, ny, nz)`` on the host."""
     box_np = np.asarray(box, dtype=np.float64)
     if box_np.ndim == 3:
@@ -1291,7 +1303,7 @@ def _build_stencil_cell_lut_np(grid_dims_static: tuple[int, int, int]) -> np.nda
     """
     nx, ny, nz = int(grid_dims_static[0]), int(grid_dims_static[1]), int(grid_dims_static[2])
     G_cells = nx * ny * nz
-    deltas = [(0, 0, 0)] + list(_NL_NEIGHBOR_DELTAS_3D)
+    deltas = [(0, 0, 0), *_NL_NEIGHBOR_DELTAS_3D]
     lut = np.full((G_cells + 1, 27), G_cells, dtype=np.int32)
     for cx in range(nx):
         for cy in range(ny):
@@ -1356,8 +1368,10 @@ def _make_pallas_bin_cells_kernel(B: int, N: int, G_cells: int, C: int, BLOCK_BI
                 pz_i = _pl_load(pz_ref, (base_atom,), mask=valid_cell, other=zero_f)
                 safe_c = jnp.where(valid_cell, c_i, jnp.int32(G_cells))
                 count_idx = b_id * (G_cells + 1) + safe_c
-                ones = jnp.ones((BLOCK_BIN,), dtype=jnp.int32)
-                slot = plt.atomic_add(counts_out_ref, (count_idx,), ones, mask=valid_cell)
+                ones_f32 = jnp.ones((BLOCK_BIN,), dtype=jnp.float32)
+                slot = plt.atomic_add(counts_out_ref, (count_idx,), ones_f32, mask=valid_cell).astype(
+                    jnp.int32
+                )
                 can_store = valid_cell & (slot >= jnp.int32(0)) & (slot < jnp.int32(C))
                 dummy_dest = jnp.int32(B * G_cells * C)
                 dest = jnp.where(
@@ -1392,16 +1406,14 @@ def _resolve_nl_active_atoms(
             pass
     if mask is not None and not isinstance(mask, jax.core.Tracer):
         try:
-            import numpy as _np
-
-            m_np = _np.asarray(mask, dtype=bool)
+            m_np = np.asarray(mask, dtype=bool)
             if m_np.ndim >= 2:
-                m_np = _np.any(m_np, axis=0)
-            nz = _np.flatnonzero(m_np)
+                m_np = np.any(m_np, axis=0)
+            nz = np.flatnonzero(m_np)
             if nz.size > 0:
                 return min(max(1, int(nz[-1]) + 1), max(1, int(n_total)))
-        except Exception:
-            pass
+        except (TypeError, ValueError):
+            return int(n_total)
     return int(n_total)
 
 
@@ -1463,14 +1475,14 @@ def _build_cell_stencil_buffers_batched(
         x_init = jnp.zeros((total_slots,), dtype=jnp.float32)
         y_init = jnp.zeros((total_slots,), dtype=jnp.float32)
         z_init = jnp.zeros((total_slots,), dtype=jnp.float32)
-        counts_init = jnp.zeros((B * (G_cells + 1),), dtype=jnp.int32)
+        counts_init = jnp.zeros((B * (G_cells + 1),), dtype=jnp.float32)
         any_spec = pl.BlockSpec(memory_space=pl.ANY)
         out_shapes = (
             jax.ShapeDtypeStruct((total_slots,), jnp.int32),
             jax.ShapeDtypeStruct((total_slots,), jnp.float32),
             jax.ShapeDtypeStruct((total_slots,), jnp.float32),
             jax.ShapeDtypeStruct((total_slots,), jnp.float32),
-            jax.ShapeDtypeStruct((B * (G_cells + 1),), jnp.int32),
+            jax.ShapeDtypeStruct((B * (G_cells + 1),), jnp.float32),
         )
         id_flat, x_flat, y_flat, z_flat, counts_flat = pl.pallas_call(
             bin_kernel,
@@ -1499,7 +1511,7 @@ def _build_cell_stencil_buffers_batched(
         cell_y_b = y_flat[:-1].reshape((B, G_cells * C))
         cell_z_b = z_flat[:-1].reshape((B, G_cells * C))
         cell_counts_b = (
-            jnp.minimum(counts_flat.reshape((B, G_cells + 1)), jnp.int32(C))
+            jnp.minimum(counts_flat.astype(jnp.int32).reshape((B, G_cells + 1)), jnp.int32(C))
             .at[:, G_cells]
             .set(jnp.int32(0))
         )
@@ -1577,7 +1589,7 @@ def _make_prune_and_encode_kernel(
     K_blocks = (K + BLOCK_C - 1) // BLOCK_C
     M_BLOCK = 32
 
-    def _kernel(
+    def _kernel(  # noqa: PLR0913
         px_ref,
         py_ref,
         pz_ref,
@@ -1807,7 +1819,7 @@ def precompute_static_nl_exclusion_tables(
     return excl_min[0], excl_max[0], ei_clip[0], excl_tag[0]
 
 
-def _pallas_prune_and_encode_cell_list_batch(
+def _pallas_prune_and_encode_cell_list_batch(  # noqa: PLR0913
     axis_size: int,
     in_batched: tuple[bool, ...],
     position: Array,
@@ -1832,10 +1844,10 @@ def _pallas_prune_and_encode_cell_list_batch(
     return_max_k_tiles: bool = False,
     old_max_k_tiles: Array | None = None,
     n_active_atoms: int | None = None,
-) -> tuple[Array, Array] | tuple[Array, Array, Array]:
+) -> Any:
     """Batched 2D-grid ``(N_act, B)`` Pallas cell-list pruning + in-register exclusion encoding."""
     B = int(axis_size)
-    pos_b = position if in_batched[0] else jnp.broadcast_to(position[None, ...], (B,) + position.shape)
+    pos_b = position if in_batched[0] else jnp.broadcast_to(position[None, ...], (B, *position.shape))
     bx_b = box if in_batched[1] else box[None, ...]
     ei_b = excl_indices if in_batched[2] else excl_indices[None, ...]
     ev_b = excl_scales_vdw if in_batched[3] else excl_scales_vdw[None, ...]
@@ -1968,9 +1980,12 @@ def _pallas_prune_and_encode_cell_list_batch(
         jax.ShapeDtypeStruct((nbr_out_len,), jnp.int32),
         jax.ShapeDtypeStruct((B * N,), jnp.int32),
     )
+    any_spec = pl.BlockSpec(memory_space=pl.ANY)
     nbr_flat, occ_flat = pl.pallas_call(
         kernel_fn,
         out_shape=out_shapes,
+        in_specs=[any_spec] * 16,
+        out_specs=[any_spec] * 2,
         grid=(N_act, B),
         input_output_aliases={15: 0},
         interpret=interpret,
@@ -2016,7 +2031,7 @@ def _pallas_prune_and_encode_cell_list_batch(
     return nbr_out_b, occ_b
 
 
-def pallas_prune_and_encode_cell_list(
+def pallas_prune_and_encode_cell_list(  # noqa: PLR0913
     position: Array,
     box: Array,
     excl_indices: Array,
@@ -2036,7 +2051,7 @@ def pallas_prune_and_encode_cell_list(
     precomputed_excl: tuple[Array, Array, Array, Array] | None = None,
     return_max_k_tiles: bool = False,
     n_active_atoms: int | None = None,
-) -> tuple[Array, Array] | tuple[Array, Array, Array]:
+) -> Any:
     """Prune 3D cell-list stencil candidates and pre-encode exclusions in one Pallas kernel."""
     cs = float(cell_size)
     cc = int(cell_capacity)

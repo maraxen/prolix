@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-from pathlib import Path
 import sys
 import tomllib
+from pathlib import Path
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(_REPO_ROOT) not in sys.path:
@@ -12,10 +12,10 @@ if str(_REPO_ROOT) not in sys.path:
 if str(_REPO_ROOT / "src") not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT / "src"))
 
+from prolix.governance.pending_knobs import PENDING_EPIC_KNOBS  # noqa: E402
 from scripts.experiments.knob_parity_matrix import (  # noqa: E402
     evaluate_knob_parity_matrix,
 )
-from prolix.governance.pending_knobs import PENDING_EPIC_KNOBS  # noqa: E402
 
 
 def test_pending_epic_knobs_empty_at_tier_3() -> None:
@@ -34,7 +34,7 @@ def test_knob_parity_matrix_passes_with_negative_control() -> None:
     assert res["n_untracked_gaps"] == 0, f"Unexpected untracked gaps: {res}"
     assert res["max_rel_energy_err"] < 1e-5, f"Relative error too high: {res}"
     assert res["negative_control_detected"] is True
-    assert res["n_total_knobs"] == 72
+    assert res["n_total_knobs"] == 87
     assert res["n_pending_epic_knobs"] == 0
 
     # Verify differential injection increases n_silent_drops by >= 1

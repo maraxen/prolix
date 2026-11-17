@@ -698,7 +698,7 @@ def physics_system_from_bundle(
     # not exercise this fallback at all, so it did not catch that the real vmapped B1
     # dispatch would silently use a different (and disagreeing-with-OpenMM) alpha.
     pme_alpha = _host_float(bundle.pme_alpha, 0.0 if not is_periodic else 0.34)
-    nonbonded_cutoff = _host_float(bundle.cutoff_distance, 9.0)
+    nonbonded_cutoff = _host_float(bundle.cutoff_distance, 0.0 if not is_periodic else 9.0)
     ub_idx_2 = (
         bundle.urey_bradley_idx[:, ::2]
         if bundle.urey_bradley_idx.shape[-1] == 3
@@ -1150,6 +1150,15 @@ def lower_knob_surface(
         if nl_switch is not None
         else float(getattr(nonbonded, "switch_width_angstrom", 0.0))
     )
+    raw_cmm = getattr(thermostat, "cmm_frequency", 1)
+    raw_nb_k_splits = getattr(pallas, "nb_k_splits", None)
+    raw_tp_group = getattr(pallas, "tp_group", None)
+    pallas_nb_engine = str(getattr(pallas, "nonbonded_engine", "auto"))
+    resolved_engine = str(
+        nb_engine.value
+        if hasattr(nb_engine, "value")
+        else (nb_engine or (pallas_nb_engine if pallas_nb_engine != "auto" else "dense"))
+    )
 
     return {
         # ThermostatControls
@@ -1160,6 +1169,7 @@ def lower_knob_surface(
         "n_steps": int(getattr(thermostat, "n_steps", 1000)),
         "save_interval": int(getattr(thermostat, "save_interval", 500)),
         "seed": int(getattr(thermostat, "seed", 0)),
+        "cmm_frequency": int(raw_cmm) if raw_cmm is not None else None,
         # BarostatControls
         "pressure_atm": getattr(barostat, "pressure_atm", None),
         "barostat_method": str(getattr(barostat, "barostat_method", "mc")),
@@ -1169,7 +1179,7 @@ def lower_knob_surface(
         "tau_p_ps": float(getattr(barostat, "tau_p_ps", 1.0)),
         # NonbondedControls & NonbondedConfig
         "nonbonded_method": str(getattr(nonbonded, "nonbonded_method", "pme")),
-        "engine": str(nb_engine.value if hasattr(nb_engine, "value") else (nb_engine or "dense")),
+        "engine": resolved_engine,
         "cutoff_angstrom": float(getattr(nonbonded, "cutoff_angstrom", 9.0)),
         "switch_width_angstrom": eff_switch_width,
         "ewald_error_tolerance": float(getattr(nonbonded, "ewald_error_tolerance", 5e-4)),
@@ -1220,6 +1230,7 @@ def lower_knob_surface(
         "shake_tolerance": float(getattr(constraints, "shake_tolerance", 1e-5)),
         "rattle_tolerance": float(getattr(constraints, "rattle_tolerance", 1e-5)),
         "max_shake_iterations": int(getattr(constraints, "max_shake_iterations", 50)),
+        "virtual_site_mode": str(getattr(constraints, "virtual_site_mode", "auto")),
         # CosolventControls
         "cosolvent_entries": tuple(getattr(cosolvent, "cosolvent_entries", ())),
         "protein_radius_angstrom": float(getattr(cosolvent, "protein_radius_angstrom", 5.5)),
@@ -1259,4 +1270,17 @@ def lower_knob_surface(
         "use_pallas": getattr(pallas, "use_pallas", None),
         "use_pallas_pme": getattr(pallas, "use_pallas_pme", None),
         "gb_use_neighbor_list": bool(getattr(pallas, "gb_use_neighbor_list", False)),
+        "precision": str(getattr(pallas, "precision", "single")),
+        "nonbonded_engine": pallas_nb_engine,
+        "pallas_interpret": bool(getattr(pallas, "pallas_interpret", False)),
+        "nb_k_splits": int(raw_nb_k_splits) if raw_nb_k_splits is not None else None,
+        "tp_group": int(raw_tp_group) if raw_tp_group is not None else None,
+        "deterministic_forces": bool(getattr(pallas, "deterministic_forces", False)),
+        "disable_pme_stream": bool(getattr(pallas, "disable_pme_stream", False)),
+        "custom_force_mode": str(getattr(pallas, "custom_force_mode", "auto")),
+        "custom_nonbonded_chunk_size": int(getattr(pallas, "custom_nonbonded_chunk_size", 128)),
+        "use_size_buckets": bool(getattr(pallas, "use_size_buckets", True)),
+        "max_steps_per_scan": int(getattr(pallas, "max_steps_per_scan", 1000)),
+        "execution_mode": str(getattr(pallas, "execution_mode", "inference")),
+        "minimizer_backend": str(getattr(pallas, "minimizer_backend", "lbfgs")),
     }

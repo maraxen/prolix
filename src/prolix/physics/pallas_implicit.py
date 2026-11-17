@@ -8,6 +8,7 @@ Provides:
 from __future__ import annotations
 
 import functools
+import math
 
 import jax
 import jax.numpy as jnp
@@ -26,6 +27,7 @@ from prolix.physics.generalized_born import (
     ALPHA_OBC,
     BETA_OBC,
     GAMMA_OBC,
+    GB_COULOMB_CONSTANT,
     SURFACE_TENSION,
     compute_ace_nonpolar_energy,
     compute_gb_energy_neighbor_list,
@@ -257,21 +259,20 @@ def _pallas_gb_ace_nl_single(
 
     # --- Pass 2: Host O(N) self GB + ACE, plus Pallas O(N*K) pair GB, direct forces, dE_pair/dB, grad_q ---
     tau = (1.0 / solute_dielectric) - (1.0 / solvent_dielectric)
-    prefactor = jnp.asarray(-0.5 * constants.COULOMB_CONSTANT * tau, dtype=dtype)
+    prefactor = jnp.asarray(-0.5 * GB_COULOMB_CONSTANT * tau, dtype=dtype)
     mask_f = (mask_pad > 0).astype(dtype)
 
     e_gb_self_vec = prefactor * mask_f * (q_pad * q_pad) / born_pad
     de_self_db = -e_gb_self_vec / born_pad
 
     if include_ace:
-        st_scale = float(surface_tension) / float(SURFACE_TENSION) if SURFACE_TENSION > 0.0 else 1.0
-        radius_nm = (rad_pad - jnp.asarray(dielectric_offset, dtype=dtype)) * jnp.asarray(0.1, dtype=dtype) + jnp.asarray(0.009, dtype=dtype)
-        born_nm = born_pad * jnp.asarray(0.1, dtype=dtype)
+        ace_pref = jnp.asarray(4.0 * math.pi * float(surface_tension), dtype=dtype)
+        probe_r = jnp.asarray(constants.PROBE_RADIUS, dtype=dtype)
         e_ace_vec = (
             mask_f
-            * jnp.asarray(28.3919551 * 0.239006 * st_scale, dtype=dtype)
-            * ((radius_nm + jnp.asarray(0.14, dtype=dtype)) ** 2)
-            * ((radius_nm / born_nm) ** 6)
+            * ace_pref
+            * ((rad_pad + probe_r) ** 2)
+            * ((rad_pad / born_pad) ** 6)
         )
         de_ace_db = -jnp.asarray(6.0, dtype=dtype) * e_ace_vec / born_pad
     else:
@@ -302,7 +303,7 @@ def _pallas_gb_ace_nl_single(
         four = jnp.asarray(4.0, dtype=dtype)
         quarter = jnp.asarray(0.25, dtype=dtype)
         eps12 = jnp.asarray(1e-12, dtype=dtype)
-        pref = jnp.asarray(-0.5 * constants.COULOMB_CONSTANT * tau, dtype=dtype)
+        pref = jnp.asarray(-0.5 * GB_COULOMB_CONSTANT * tau, dtype=dtype)
         box6 = _load_box6(box_ref)
 
         mask_i = (_pl_load(mask_ref, (offs_i,)) > 0) & (offs_i < N)
@@ -540,11 +541,15 @@ def _gb_ace_nl_ref_one(
         scaled_radii=sr_1,
     )
     if include_ace:
-        st_scale = float(surface_tension) / float(SURFACE_TENSION) if SURFACE_TENSION > 0.0 else 1.0
-        e_ace = st_scale * jnp.sum(
+        e_ace = jnp.sum(
             jnp.where(
                 m_bool,
-                compute_ace_nonpolar_energy(rad_1, born_r, dielectric_offset=dielectric_offset),
+                compute_ace_nonpolar_energy(
+                    rad_1,
+                    born_r,
+                    surface_tension=surface_tension,
+                    dielectric_offset=dielectric_offset,
+                ),
                 0.0,
             )
         )

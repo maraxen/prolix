@@ -1,3 +1,4 @@
+# ruff: noqa: PLR0913
 """Pallas kernels for 2-, 3-, 4-, and 5-body bonded & pair-correction potentials (R1-R4).
 
 Provides:
@@ -14,11 +15,12 @@ from __future__ import annotations
 import dataclasses
 import functools
 import os
-import numpy as np
-from typing import Any
+from typing import Any, cast
 
 import jax
+import jax.core
 import jax.numpy as jnp
+import numpy as np
 import xtrax
 from jax import custom_vjp
 from jax._src.pallas.primitives import load as _pl_load
@@ -556,8 +558,9 @@ def _pallas_bonds_2body_bwd(has_box, dist_eps, interpret, compute_param_grads, r
         shapes_meta[0].dtype
     )
     if param_res is None:
-        return (grad_pos,) + tuple(
-            jnp.zeros(m.shape, dtype=m.dtype) for m in shapes_meta[1:]
+        return (
+            grad_pos,
+            *(jnp.zeros(m.shape, dtype=m.dtype) for m in shapes_meta[1:]),
         )
 
     positions, indices, params, mask, box = param_res
@@ -857,8 +860,13 @@ def _pallas_exceptions_14_single(
 
         sig_safe = jnp.where(valid, jnp.maximum(sig_e, jnp.asarray(1e-4, dtype=dtype)), one)
         one_minus_lam = jnp.maximum(one - lam_v, zero)
-        soft_term = jnp.asarray(softcore_alpha, dtype=dtype) * (one_minus_lam ** int(softcore_exponent))
-        r6 = (dist / sig_safe) ** 6
+        oml_pow = one
+        for _ in range(int(softcore_exponent)):
+            oml_pow = oml_pow * one_minus_lam
+        soft_term = jnp.asarray(softcore_alpha, dtype=dtype) * oml_pow
+        _r_rat = dist / sig_safe
+        _r2 = _r_rat * _r_rat
+        r6 = _r2 * _r2 * _r2
         denom = soft_term + r6 + jnp.asarray(1e-12, dtype=dtype)
         inv_d = one / denom
         inv_d2 = inv_d * inv_d
@@ -1140,8 +1148,9 @@ def _pallas_exceptions_14_bwd(
         shapes_meta[0].dtype
     )
     if param_res is None:
-        return (grad_pos,) + tuple(
-            jnp.zeros(m.shape, dtype=m.dtype) for m in shapes_meta[1:]
+        return (
+            grad_pos,
+            *(jnp.zeros(m.shape, dtype=m.dtype) for m in shapes_meta[1:]),
         )
 
     positions, pairs, sigmas, epsilons, chargeprods, mask, box, lam = param_res
@@ -1450,6 +1459,8 @@ def _pallas_pme_exclusion_pairs_single(
     pz = jnp.asarray(pos_pad[:, 2])
     box_vec = jnp.asarray(box.astype(dtype))
     zero_f = jnp.zeros((N_pad,), dtype=dtype)
+    _alpha_f = float(pme_alpha)
+    _alpha3_f = _alpha_f * _alpha_f * _alpha_f
 
     def _pme_excl_kernel(
         px_ref,
@@ -1475,7 +1486,8 @@ def _pallas_pme_exclusion_pairs_single(
         zero = jnp.asarray(0.0, dtype=dtype)
         one = jnp.asarray(1.0, dtype=dtype)
         coul = jnp.asarray(coulomb_constant, dtype=dtype)
-        alpha = jnp.asarray(pme_alpha, dtype=dtype)
+        alpha = jnp.asarray(_alpha_f, dtype=dtype)
+        alpha3 = jnp.asarray(_alpha3_f, dtype=dtype)
         two_over_sqrt_pi = jnp.asarray(1.1283791670955126, dtype=dtype)
 
         a_i = _pl_load(idx_i_ref, (offs,))
@@ -1511,7 +1523,7 @@ def _pallas_pme_exclusion_pairs_single(
         de_dr_full = pref * (alpha * two_over_sqrt_pi * r_p * jnp.exp(zero - alpha_r * alpha_r) - erf_val) / (r_p * r_p)
         de_dr_taylor = (
             pref
-            * (alpha ** 3)
+            * alpha3
             * two_over_sqrt_pi
             * (zero - r_p)
             * (jnp.asarray(2.0 / 3.0, dtype=dtype) - jnp.asarray(2.0 / 5.0, dtype=dtype) * (alpha_r * alpha_r))
@@ -1736,8 +1748,9 @@ def _pallas_pme_exclusion_pairs_bwd(
         shapes_meta[0].dtype
     )
     if param_res is None:
-        return (grad_pos,) + tuple(
-            jnp.zeros(m.shape, dtype=m.dtype) for m in shapes_meta[1:]
+        return (
+            grad_pos,
+            *(jnp.zeros(m.shape, dtype=m.dtype) for m in shapes_meta[1:]),
         )
 
     positions, excl_pair_indices, excl_pair_scales_elec, charges, atom_mask, box = param_res
@@ -2374,8 +2387,9 @@ def _pallas_angles_harmonic_bwd(
         shapes_meta[0].dtype
     )
     if param_res is None:
-        return (grad_pos,) + tuple(
-            jnp.zeros(m.shape, dtype=m.dtype) for m in shapes_meta[1:]
+        return (
+            grad_pos,
+            *(jnp.zeros(m.shape, dtype=m.dtype) for m in shapes_meta[1:]),
         )
 
     positions, indices, params, mask, box = param_res
@@ -2584,7 +2598,7 @@ def _torsion_angle_and_atom_grads_vec3(
     r_k: Vec3,
     r_l: Vec3,
     valid: jax.Array,
-    box_xyz: Vec3,
+    box_xyz: Any,
     has_box: bool,
     b0_is_ji: bool,
 ) -> tuple[jax.Array, Vec3, Vec3, Vec3, Vec3]:
@@ -3010,8 +3024,9 @@ def _pallas_torsions_4body_bwd(
         shapes_meta[0].dtype
     )
     if param_res is None:
-        return (grad_pos,) + tuple(
-            jnp.zeros(m.shape, dtype=m.dtype) for m in shapes_meta[1:]
+        return (
+            grad_pos,
+            *(jnp.zeros(m.shape, dtype=m.dtype) for m in shapes_meta[1:]),
         )
 
     positions, indices, params, mask, box = param_res
@@ -3703,8 +3718,9 @@ def _pallas_cmap_torsions_bwd(
         shapes_meta[0].dtype
     )
     if param_res is None:
-        return (grad_pos,) + tuple(
-            jnp.zeros(m.shape, dtype=m.dtype) for m in shapes_meta[1:]
+        return (
+            grad_pos,
+            *(jnp.zeros(m.shape, dtype=m.dtype) for m in shapes_meta[1:]),
         )
 
     positions, cmap_torsions, map_indices, cmap_coeffs, mask, box = param_res
@@ -4538,8 +4554,13 @@ def _pallas_bonded_all_fused_batch(
                 qp_e = _pl_load(e_qp_ref, (b_id * s_eq + offs,))
                 sig_safe = jnp.where(valid, jnp.maximum(sig_e, jnp.asarray(1e-4, dtype=dtype)), one)
                 one_minus_lam = jnp.maximum(one - lam_v, zero)
-                soft_term = jnp.asarray(softcore_alpha, dtype=dtype) * (one_minus_lam ** int(softcore_exponent))
-                r6 = (dist / sig_safe) ** 6
+                oml_pow = one
+                for _ in range(int(softcore_exponent)):
+                    oml_pow = oml_pow * one_minus_lam
+                soft_term = jnp.asarray(softcore_alpha, dtype=dtype) * oml_pow
+                _r_rat = dist / sig_safe
+                _r2 = _r_rat * _r_rat
+                r6 = _r2 * _r2 * _r2
                 denom = soft_term + r6 + jnp.asarray(1e-12, dtype=dtype)
                 inv_d = one / denom
                 inv_d2 = inv_d * inv_d
@@ -4977,7 +4998,7 @@ def _pallas_bonded_all_fused_vmappable(
 
     @_vmappable.def_vmap
     def _vmap_rule(axis_size, in_batched, *args):
-        e_batch, f_batch = _pallas_bonded_all_fused_batch(
+        e_batch, f_batch = cast("Any", _pallas_bonded_all_fused_batch)(
             int(axis_size),
             tuple(bool(ib) for ib in in_batched),
             *args,
@@ -5022,7 +5043,7 @@ def _pallas_bonded_all_fused_vmappable(
     if positions.ndim == 3:
         B = int(positions.shape[0])
         base_ndims = (2, 2, 2, 1, 2, 2, 1, 2, 2, 1, 2, 2, 1, 2, 1, 1, 1, 1, 2, 1, 4, 1, 1, 0)
-        in_b = tuple(bool(a.ndim > bn) for a, bn in zip(all_args, base_ndims))
+        in_b = tuple(bool(a.ndim > bn) for a, bn in zip(all_args, base_ndims, strict=True))
         return _pallas_bonded_all_fused_batch(
             B,
             in_b,
@@ -5178,7 +5199,7 @@ def _pallas_bonded_all_fused_fwd(
         lam,
     )
     vals = tuple(_unwrap_primal(a) for a in raw_args)
-    energy, forces = _pallas_bonded_all_fused_vmappable(
+    energy, forces = cast("Any", _pallas_bonded_all_fused_vmappable)(
         *vals,
         has_box,
         dist_eps,
@@ -5235,8 +5256,9 @@ def _pallas_bonded_all_fused_bwd(
         shapes_meta[0].dtype
     )
     if param_res is None:
-        return (grad_pos,) + tuple(
-            jnp.zeros(m.shape, dtype=m.dtype) for m in shapes_meta[1:]
+        return (
+            grad_pos,
+            *(jnp.zeros(m.shape, dtype=m.dtype) for m in shapes_meta[1:]),
         )
 
     (
@@ -5316,9 +5338,11 @@ def _pallas_bonded_all_fused_bwd(
         def _step(b):
             step_in = [
                 a[b] if a.ndim > bn else a
-                for a, bn in zip(param_res, base_ndims)
+                for a, bn in zip(param_res, base_ndims, strict=True)
             ]
-            gb_b, ga_b, gd_b, gh_b, ges_b, gee_b, geq_b, gc_b, glam_b = _bonded_all_fused_param_grads(
+            gb_b, ga_b, gd_b, gh_b, ges_b, gee_b, geq_b, gc_b, glam_b = cast(
+                "Any", _bonded_all_fused_param_grads
+            )(
                 *step_in,
                 has_box,
                 dist_eps,
@@ -5354,7 +5378,9 @@ def _pallas_bonded_all_fused_bwd(
         grad_cc = gc_all if cmap_coeffs.ndim > 4 else jnp.sum(gc_all, axis=0)
         grad_lm = glam_all if lam.ndim > 0 else jnp.sum(glam_all, axis=0)
 
-    z = lambda idx: jnp.zeros(shapes_meta[idx].shape, dtype=shapes_meta[idx].dtype)
+    def z(idx: int) -> jax.Array:
+        return jnp.zeros(shapes_meta[idx].shape, dtype=shapes_meta[idx].dtype)
+
     return (
         grad_pos,
         z(1),
@@ -5506,7 +5532,7 @@ def make_bonded_all_fused_op(
 
     def _make_vk(interp: bool) -> VjpKernel:
         def _fwd(*args):
-            return _pallas_bonded_all_fused_fwd(
+            return cast("Any", _pallas_bonded_all_fused_fwd)(
                 *args, hb, de, b0_ji, arm, cc, sa, se, fpsi, interp, cpg
             )
 

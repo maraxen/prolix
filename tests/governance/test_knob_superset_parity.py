@@ -3,12 +3,12 @@
 from __future__ import annotations
 
 import ast
-from dataclasses import dataclass, fields
 import importlib.util
-from pathlib import Path
 import sys
 import tomllib
 import types
+from dataclasses import dataclass, fields
+from pathlib import Path
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _SRC_ROOT = _REPO_ROOT / "src"
@@ -39,8 +39,6 @@ from prolix.governance import (  # noqa: E402
     PENDING_EPIC_KNOBS,
     PENDING_EPIC_KNOBS_BY_ITEM,
     SUPERSET_ALIAS_MAP,
-    ImplicitSolventParams,
-    PMEParams,
     adapt_model_to_dataclass,
     check_prolix_reachability,
     check_reachability,
@@ -62,9 +60,7 @@ from prolix.knob_surface import (  # noqa: E402
 )
 from prolix.physics.nonbonded_config import (  # noqa: E402
     NeighborListConfig,
-    NonbondedConfig,
 )
-
 
 EXPECTED_SUB_SURFACES: dict[type, set[str]] = {
     ThermostatControls: {
@@ -75,6 +71,7 @@ EXPECTED_SUB_SURFACES: dict[type, set[str]] = {
         "n_steps",
         "save_interval",
         "seed",
+        "cmm_frequency",
     },
     BarostatControls: {
         "pressure_atm",
@@ -119,6 +116,7 @@ EXPECTED_SUB_SURFACES: dict[type, set[str]] = {
         "shake_tolerance",
         "rattle_tolerance",
         "max_shake_iterations",
+        "virtual_site_mode",
     },
     CosolventControls: {
         "cosolvent_entries",
@@ -156,6 +154,19 @@ EXPECTED_SUB_SURFACES: dict[type, set[str]] = {
         "use_pallas",
         "use_pallas_pme",
         "gb_use_neighbor_list",
+        "precision",
+        "nonbonded_engine",
+        "pallas_interpret",
+        "nb_k_splits",
+        "tp_group",
+        "deterministic_forces",
+        "disable_pme_stream",
+        "custom_force_mode",
+        "custom_nonbonded_chunk_size",
+        "use_size_buckets",
+        "max_steps_per_scan",
+        "execution_mode",
+        "minimizer_backend",
     },
 }
 

@@ -107,8 +107,8 @@ class OpenMMSystemData:
     cmap_energy_grids: jnp.ndarray  # (N_maps, G, G) float32, kcal/mol
     cmap_coeffs: jnp.ndarray  # (M_bucket, G, G, 16) float32
     water_indices: jnp.ndarray  # (N_waters, 3) int32 [O, H1, H2]
-    water_r_OH: float  # A
-    water_r_HH: float  # A
+    water_r_OH: float  # noqa: N815
+    water_r_HH: float  # noqa: N815
     constraint_pairs: jnp.ndarray  # (N_constraints, 2) int32
     constraint_lengths: jnp.ndarray  # (N_constraints,) float32, A
     excl_indices: jnp.ndarray  # (N_excl, 2) int32 (both 1-2/1-3 and 1-4 pairs)
@@ -139,15 +139,15 @@ def _load_xml_root(xml_path_or_str: str | Path | ET.Element) -> ET.Element:
     if isinstance(xml_path_or_str, Path):
         if not xml_path_or_str.exists():
             raise FileNotFoundError(f"OpenMM XML file not found: {xml_path_or_str}")
-        return ET.parse(xml_path_or_str).getroot()
+        return ET.parse(xml_path_or_str).getroot()  # noqa: S314
     if isinstance(xml_path_or_str, str):
         stripped = xml_path_or_str.lstrip()
         if stripped.startswith("<"):
-            return ET.fromstring(stripped)
+            return ET.fromstring(stripped)  # noqa: S314
         path = Path(xml_path_or_str)
         if not path.exists():
             raise FileNotFoundError(f"OpenMM XML file not found: {path}")
-        return ET.parse(path).getroot()
+        return ET.parse(path).getroot()  # noqa: S314
     raise TypeError(f"Unsupported xml_path_or_str type: {type(xml_path_or_str)!r}")
 
 
@@ -227,7 +227,7 @@ def _separate_water_and_solute_constraints(
             edge = (min(p1, p2), max(p1, p2))
             if edge in water_edge_map:
                 o_idx, h1_idx, h2_idx = water_edge_map[edge]
-                if p1 == o_idx or p2 == o_idx:
+                if o_idx in (p1, p2):
                     r_oh_vals.append(d_a)
                 else:
                     r_hh_vals.append(d_a)
@@ -279,8 +279,8 @@ def _separate_water_and_solute_constraints(
         # Candidate triangle (u, v, w)
         tri = [u, v, w]
         tri_masses = [float(masses_np[idx]) if idx < len(masses_np) else 1.0 for idx in tri]
-        heavy = [idx for idx, m in zip(tri, tri_masses) if m > 4.0]
-        light = [idx for idx, m in zip(tri, tri_masses) if m <= 4.0]
+        heavy = [idx for idx, m in zip(tri, tri_masses, strict=True) if m > 4.0]
+        light = [idx for idx, m in zip(tri, tri_masses, strict=True) if m <= 4.0]
 
         if len(heavy) == 1 and len(light) == 2:
             o_idx = heavy[0]
@@ -623,16 +623,18 @@ def parse_openmm_system_xml(
             if "energy" in m_elem.attrib:
                 text_parts.extend(m_elem.attrib["energy"].split())
             for child in m_elem:
+                if "e" in child.attrib:
+                    text_parts.extend(child.attrib["e"].split())
                 if child.text and child.text.strip():
                     text_parts.extend(child.text.split())
             vals = np.asarray([float(x) * KJ_TO_KCAL for x in text_parts], dtype=np.float32)
-            grid_size = int(m_elem.attrib.get("size", int( round(np.sqrt(vals.size)) )))
+            grid_size = int(m_elem.attrib.get("size", round(float(np.sqrt(vals.size)))))
             if vals.size != grid_size * grid_size:
                 raise ValueError(
                     f"CMAP <Map size='{grid_size}'> expected {grid_size * grid_size} "
                     f"values, got {vals.size}"
                 )
-            cmap_maps_list.append(vals.reshape(grid_size, grid_size))
+            cmap_maps_list.append(vals.reshape((grid_size, grid_size)))
 
         torsions_container = f_elem.find("Torsions")
         torsion_iter = (
@@ -1026,38 +1028,48 @@ def bundle_from_openmm_system_xml(
     )
 
     n = data.n_atoms
+    nb = int(data.bonds.shape[0])
+    na = int(data.angles.shape[0])
+    nd = int(data.dihedrals.shape[0])
+    nw = int(data.water_indices.shape[0])
+    ne = int(data.excl_indices.shape[0])
+    nx = int(data.exception_pairs.shape[0])
+    nc = int(data.cmap_torsions.shape[0])
+    n_maps = int(data.cmap_energy_grids.shape[0])
+    n_constr = int(data.constraint_pairs.shape[0])
+
+    if use_size_buckets and (
+        n > ATOM_BUCKETS[-1]
+        or nb > BOND_BUCKETS[-1]
+        or na > ANGLE_BUCKETS[-1]
+        or nd > DIHEDRAL_BUCKETS[-1]
+        or nw > WATER_BUCKETS[-1]
+        or ne > EXCL_BUCKETS[-1]
+        or nx > EXCEPTION_BUCKETS[-1]
+        or nc > CMAP_BUCKETS[-1]
+        or n_maps > CMAP_MAP_BUCKETS[-1]
+        or n_constr > CONSTRAINT_BUCKETS[-1]
+    ):
+        use_size_buckets = False
 
     def _nb(count: int, ladder: tuple[int, ...]) -> int:
         return _next_bucket(count, ladder, use_size_buckets=use_size_buckets)
 
     a = _nb(n, ATOM_BUCKETS)
-
-    nb = int(data.bonds.shape[0])
     bb = _nb(max(nb, 1), BOND_BUCKETS)
-
-    na = int(data.angles.shape[0])
     ab = _nb(max(na, 1), ANGLE_BUCKETS)
-
-    nd = int(data.dihedrals.shape[0])
     db = _nb(max(nd, 1), DIHEDRAL_BUCKETS)
-
-    nw = int(data.water_indices.shape[0])
     wb = _nb(max(nw, 1), WATER_BUCKETS)
-
-    ne = int(data.excl_indices.shape[0])
     eb = _nb(max(ne, 1), EXCL_BUCKETS)
-
-    nx = int(data.exception_pairs.shape[0])
     xb = _nb(max(nx, 1), EXCEPTION_BUCKETS)
-
-    nc = int(data.cmap_torsions.shape[0])
     cb = _nb(max(nc, 1), CMAP_BUCKETS)
 
-    n_maps = int(data.cmap_energy_grids.shape[0])
-    cmap_map_bucket_idx = _bucket_idx(max(n_maps, 1), CMAP_MAP_BUCKETS)
-
-    n_constr = int(data.constraint_pairs.shape[0])
-    constraint_bucket_idx = _bucket_idx(n_constr, CONSTRAINT_BUCKETS)
+    cmap_map_bucket_idx = (
+        _bucket_idx(max(n_maps, 1), CMAP_MAP_BUCKETS) if use_size_buckets else 0
+    )
+    constraint_bucket_idx = (
+        _bucket_idx(n_constr, CONSTRAINT_BUCKETS) if use_size_buckets else 0
+    )
     cb_constr = (
         CONSTRAINT_BUCKETS[constraint_bucket_idx] if use_size_buckets else n_constr
     )
@@ -1099,14 +1111,28 @@ def bundle_from_openmm_system_xml(
     )
 
     spec = MolecularShapeSpec(
-        atom_bucket_idx=_bucket_idx(n, ATOM_BUCKETS),
-        bond_bucket_idx=_bucket_idx(max(nb, 1), BOND_BUCKETS),
-        angle_bucket_idx=_bucket_idx(max(na, 1), ANGLE_BUCKETS),
-        dihedral_bucket_idx=_bucket_idx(max(nd, 1), DIHEDRAL_BUCKETS),
-        water_bucket_idx=_bucket_idx(max(nw, 1), WATER_BUCKETS),
-        excl_bucket_idx=_bucket_idx(max(ne, 1), EXCL_BUCKETS),
-        cmap_bucket_idx=_bucket_idx(max(nc, 1), CMAP_BUCKETS),
-        exception_bucket_idx=_bucket_idx(max(nx, 1), EXCEPTION_BUCKETS),
+        atom_bucket_idx=_bucket_idx(n, ATOM_BUCKETS) if use_size_buckets else 0,
+        bond_bucket_idx=_bucket_idx(max(nb, 1), BOND_BUCKETS)
+        if use_size_buckets
+        else 0,
+        angle_bucket_idx=_bucket_idx(max(na, 1), ANGLE_BUCKETS)
+        if use_size_buckets
+        else 0,
+        dihedral_bucket_idx=_bucket_idx(max(nd, 1), DIHEDRAL_BUCKETS)
+        if use_size_buckets
+        else 0,
+        water_bucket_idx=_bucket_idx(max(nw, 1), WATER_BUCKETS)
+        if use_size_buckets
+        else 0,
+        excl_bucket_idx=_bucket_idx(max(ne, 1), EXCL_BUCKETS)
+        if use_size_buckets
+        else 0,
+        cmap_bucket_idx=_bucket_idx(max(nc, 1), CMAP_BUCKETS)
+        if use_size_buckets
+        else 0,
+        exception_bucket_idx=_bucket_idx(max(nx, 1), EXCEPTION_BUCKETS)
+        if use_size_buckets
+        else 0,
         has_pbc=data.has_pbc and bc == "periodic",
         has_implicit_solvent=data.has_implicit_solvent,
         boundary_condition=bc,
@@ -1348,6 +1374,9 @@ def physics_system_from_openmm_xml(
     )
 
 
+bundle_from_openmm_xml = bundle_from_openmm_system_xml
+
+
 __all__ = [
     "BAR_TO_ATM",
     "DEFAULT_TIP3P_R_HH",
@@ -1358,6 +1387,7 @@ __all__ = [
     "BarostatSpec",
     "OpenMMSystemData",
     "bundle_from_openmm_system_xml",
+    "bundle_from_openmm_xml",
     "parse_openmm_system_xml",
     "physics_system_from_openmm_xml",
 ]

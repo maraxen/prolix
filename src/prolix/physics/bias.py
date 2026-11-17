@@ -2,5 +2,5 @@
 
 from __future__ import annotations
 
-from prolix.physics.collective_variables import *  # noqa: F401,F403
+from prolix.physics.collective_variables import *  # noqa: F403
 from prolix.physics.collective_variables import __all__  # noqa: F401

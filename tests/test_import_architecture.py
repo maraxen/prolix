@@ -80,6 +80,11 @@ def test_leaf_modules_stay_leaves(graph):
     leaves = {
         # Flat core-types module: every other layer may depend on it, it depends on none.
         "prolix.typing": set(),
+        "prolix.constants": set(),
+        "prolix.knob_surface": {"prolix.typing"},
+        "prolix.openmm.config": set(),
+        "prolix.openmm.exceptions": set(),
+        "prolix.openmm.units": set(),
         "prolix.physics.water_models": set(),
         "prolix.physics.electrostatic_methods": set(),
         "prolix.physics.constraint_projection": set(),

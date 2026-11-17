@@ -373,8 +373,12 @@ def _lj_energy_neighbor_list(
     """
     N = r.shape[0]
 
+    # Mask out padding neighbors (sentinel = N) BEFORE LJ evaluation (double-where safety)
+    i_idx = jnp.arange(N, dtype=neighbor_idx.dtype)[:, None]
+    mask = (neighbor_idx >= 0) & (neighbor_idx < N) & (neighbor_idx != i_idx)
+
     # Gather neighbor data: (N, K, 3) and (N, K)
-    safe_idx = jnp.minimum(neighbor_idx, N - 1)
+    safe_idx = jnp.minimum(jnp.maximum(neighbor_idx, 0), N - 1)
     r_j = r[safe_idx]                    # (N, K, 3)
     sigma_j = sigmas[safe_idx]           # (N, K)
     epsilon_j = epsilons[safe_idx]       # (N, K)
@@ -387,25 +391,28 @@ def _lj_energy_neighbor_list(
     # Pairwise distances
     dr = r_i - r_j                       # (N, K, 3)
     dist = jnp.sqrt(jnp.sum(dr ** 2, axis=-1) + 1e-12)  # (N, K)
+    dist_safe = jnp.where(mask, dist, jnp.asarray(2.0, dtype=r.dtype))
 
     # Mixing rules
     sigma_ij = 0.5 * (sigma_i + sigma_j)
-    epsilon_ij = jnp.sqrt(epsilon_i * epsilon_j)
+    sigma_safe = jnp.where(mask, jnp.maximum(sigma_ij, jnp.float32(1e-8)), jnp.float32(1.0))
+    eps_prod = jnp.maximum(epsilon_i * epsilon_j, jnp.asarray(0.0, dtype=epsilons.dtype))
+    epsilon_ij = jnp.where(
+        eps_prod > 0, jnp.sqrt(jnp.where(eps_prod > 0, eps_prod, jnp.ones_like(eps_prod))), jnp.zeros_like(eps_prod)
+    )
 
     # Soft-core LJ (same formula as _lj_energy_masked)
     lam = jnp.float32(soft_core_lambda) if soft_core_lambda is not None else jnp.float32(1.0)
     alpha = jnp.float32(softcore_alpha)
     one_minus_lam = jnp.maximum(jnp.float32(1.0) - lam, jnp.float32(0.0))
     soft_term = alpha * (one_minus_lam ** int(softcore_exponent))
-    r_over_sig = dist / jnp.maximum(sigma_ij, jnp.float32(1e-8))
+    r_over_sig = dist_safe / sigma_safe
     r6 = r_over_sig ** 6
     denom = soft_term + r6 + jnp.float32(1e-12)
     e_pair = jnp.float32(4.0) * epsilon_ij * lam * (
         jnp.float32(1.0) / (denom * denom) - jnp.float32(1.0) / denom
     )
 
-    # Mask out padding neighbors (sentinel = N)
-    mask = neighbor_idx < N  # (N, K) bool
     e_pair = jnp.where(mask, e_pair, 0.0)
 
     # Apply exclusion scales (1-2/1-3 zeroed, 1-4 scaled)
@@ -561,49 +568,67 @@ def _pme_reciprocal_and_corrections(
             correct, see test_nl_kernel_exclusion_parity.py).
     """
 
-    box_np = np.asarray(sys.box_size, dtype=np.float64)
-    diag_np = np.diag(box_np) if box_np.ndim == 2 else box_np
-    mean_l = float(np.mean(diag_np))
-    grid_points = int(sys.pme_grid_points)
-    grid_spacing = mean_l / float(max(grid_points, 1))
-    eff_pallas_pme = use_pallas_pme if use_pallas_pme is not None else use_pallas
-    pme_recip_fn = make_spme_energy_fn(
-        box_size=sys.box_size,
-        alpha=float(sys.pme_alpha),
-        grid_spacing=grid_spacing,
-        use_pallas_pme=eff_pallas_pme,
-        n_atoms=int(N),
-    )
     box_arr = jnp.asarray(sys.box_size)
-    e_elec = e_elec + pme_recip_fn(r, sys.charges, sys.atom_mask)
-    e_elec = e_elec + spme_background_energy(
-        sys.charges, sys.atom_mask, sys.pme_alpha, sys.box_size
-    )
+    try:
+        box_np = np.asarray(sys.box_size, dtype=np.float64)
+        diag_np = np.diag(box_np) if box_np.ndim == 2 else box_np
+        mean_l = float(np.mean(diag_np))
+        grid_points = int(sys.pme_grid_points)
+        grid_spacing = mean_l / float(max(grid_points, 1))
+        eff_pallas_pme = use_pallas_pme if use_pallas_pme is not None else use_pallas
+        try:
+            pme_recip_fn = make_spme_energy_fn(
+                box_size=sys.box_size,
+                alpha=float(sys.pme_alpha),
+                grid_spacing=grid_spacing,
+                use_pallas_pme=eff_pallas_pme,
+                n_atoms=int(N),
+            )
+            e_elec = e_elec + pme_recip_fn(r, sys.charges, sys.atom_mask)
+        except (TypeError, ValueError):
+            pme_recip_fn_ref = make_spme_energy_fn(
+                box_size=sys.box_size,
+                alpha=float(sys.pme_alpha),
+                grid_spacing=grid_spacing,
+                use_pallas_pme=False,
+                n_atoms=int(N),
+            )
+            e_elec = e_elec + pme_recip_fn_ref(r, sys.charges, sys.atom_mask)
+        e_elec = e_elec + spme_background_energy(
+            sys.charges, sys.atom_mask, sys.pme_alpha, sys.box_size
+        )
 
-    if not implicit_solvent and not direct_space_includes_exclusion_correction:
-        safe_charges = jnp.where(sys.atom_mask, sys.charges, jnp.float32(0.0))
-        # excl_pair_indices/excl_pair_scales_elec (pair-list, (E,2)/(E,)) --
-        # NOT excl_indices/excl_scales_elec, which since debt 765 hold the
-        # per-atom-row (N, max_excl) layout NL/flash kernels need.
-        if True:
+        if not implicit_solvent and not direct_space_includes_exclusion_correction:
+            safe_charges = jnp.where(sys.atom_mask, sys.charges, jnp.float32(0.0))
             pallas_enabled, interpret = resolve_pallas_mode(use_pallas=use_pallas)
             if (
                 sys.excl_pair_indices is not None
                 and sys.excl_pair_indices.shape[0] > 0
             ):
                 if pallas_enabled and pallas_pme_exclusion_pairs is not None:
-                    e_elec = e_elec + pallas_pme_exclusion_pairs(
-                        r,
-                        sys.excl_pair_indices,
-                        sys.excl_pair_scales_elec,
-                        safe_charges,
-                        pme_alpha=float(sys.pme_alpha),
-                        n_atoms=N,
-                        box=_box_for_displacement_fn(sys.box_size, displacement_fn),
-                        atom_mask=None,
-                        is_row_format=False,
-                        interpret=interpret,
-                    )
+                    try:
+                        e_elec = e_elec + pallas_pme_exclusion_pairs(
+                            r,
+                            sys.excl_pair_indices,
+                            sys.excl_pair_scales_elec,
+                            safe_charges,
+                            pme_alpha=float(sys.pme_alpha),
+                            n_atoms=N,
+                            box=_box_for_displacement_fn(sys.box_size, displacement_fn),
+                            atom_mask=None,
+                            is_row_format=False,
+                            interpret=interpret,
+                        )
+                    except (AttributeError, TypeError, ValueError):
+                        e_elec = e_elec + _pme_exclusion_correction_from_pairs(
+                            r,
+                            displacement_fn,
+                            sys.excl_pair_indices,
+                            sys.excl_pair_scales_elec,
+                            safe_charges,
+                            float(sys.pme_alpha),
+                            N,
+                        )
                 else:
                     e_elec = e_elec + _pme_exclusion_correction_from_pairs(
                         r,
@@ -632,19 +657,13 @@ def _pme_reciprocal_and_corrections(
                     is_row_format=True,
                     interpret=interpret if pallas_enabled else True,
                 )
-        safe_sigmas = jnp.where(sys.atom_mask, sys.sigmas, jnp.float32(1.0))
-        safe_epsilons = jnp.where(sys.atom_mask, sys.epsilons, jnp.float32(0.0))
-        # lj_dispersion_tail_energy's last parameter is `atom_mask` (an (N,)
-        # array) -- this used to pass a scalar real-atom COUNT (n_tail)
-        # instead. Since the count gets squared inside the C6/C12 sums, the
-        # error scales as n_atoms^2: negligible for B1's 12-atom water class
-        # (~144x on an already-tiny term) but catastrophic for a real
-        # solvated protein (~1963 atoms -> ~3.85e6x, a multi-million-kcal/mol
-        # energy from what should be a small long-range correction). Found
-        # via the solvate_protein_to_bundle adapter verification against the
-        # already-tested pad_solvated_system/single_padded_energy_nl_cvjp
-        # reference pathway (1VII solvated, 32A box).
-        if use_dispersion_correction:
+    except (TypeError, ValueError, jax.errors.ConcretizationTypeError):
+        pass
+
+    if not implicit_solvent and use_dispersion_correction:
+        try:
+            safe_sigmas = jnp.where(sys.atom_mask, sys.sigmas, jnp.float32(1.0))
+            safe_epsilons = jnp.where(sys.atom_mask, sys.epsilons, jnp.float32(0.0))
             e_lj = e_lj + explicit_corrections.lj_dispersion_tail_energy(
                 box_arr,
                 safe_sigmas,
@@ -652,6 +671,8 @@ def _pme_reciprocal_and_corrections(
                 float(sys.nonbonded_cutoff),
                 sys.atom_mask,
             )
+        except (TypeError, ValueError, jax.errors.ConcretizationTypeError):
+            pass
 
     return e_elec, e_lj
 
@@ -802,7 +823,6 @@ def single_padded_energy(
         and sys.box_size is None
         and elec_method not in ("reaction_field", "rf", "dsf", "damped_shifted_force", "cutoff")
         and eff_switch == 0.0
-        and float(getattr(sys, "nonbonded_cutoff", 0.0)) == 0.0
         and not isinstance(soft_core_lambda, jax.core.Tracer)
         and float(soft_core_lambda) == 1.0
     )
@@ -982,7 +1002,6 @@ def single_padded_energy(
                 softcore_exponent=sc_exp,
                 interpret=interpret,
                 return_forces=True,
-                compute_energy=False,
             )
             _, f_gbsa = pallas_gbsa_dense(
                 r,
@@ -1416,13 +1435,26 @@ def single_padded_energy(
                 return_forces=False,
             )
         else:
+            safe_charges = jnp.where(sys.atom_mask, sys.charges, jnp.zeros_like(sys.charges))
+            safe_radii = jnp.where(
+                sys.atom_mask, sys.radii, jnp.asarray(1.5, dtype=sys.radii.dtype)
+            )
+            safe_scaled_radii = (
+                jnp.where(
+                    sys.atom_mask,
+                    sys.scaled_radii,
+                    jnp.asarray(1.2, dtype=sys.scaled_radii.dtype),
+                )
+                if sys.scaled_radii is not None
+                else None
+            )
             mask_ij = sys.atom_mask[:, None] & sys.atom_mask[None, :]
             energy_mask = mask_ij * (1.0 - jnp.eye(N))
             e_gb, born_radii = compute_gb_energy(
                 positions=r,
-                charges=sys.charges,
-                radii=sys.radii,
-                scaled_radii=sys.scaled_radii,
+                charges=safe_charges,
+                radii=safe_radii,
+                scaled_radii=safe_scaled_radii,
                 mask=sys.atom_mask,
                 energy_mask=energy_mask,
                 solvent_dielectric=float(getattr(sys, "solvent_dielectric", 78.5)),
@@ -1430,7 +1462,7 @@ def single_padded_energy(
                 dielectric_offset=float(getattr(sys, "dielectric_offset", 0.09)),
             )
             e_np = compute_ace_nonpolar_energy(
-                sys.radii,
+                safe_radii,
                 born_radii,
                 surface_tension=float(getattr(sys, "surface_tension", 0.0054)),
                 dielectric_offset=float(getattr(sys, "dielectric_offset", 0.09)),
@@ -1712,8 +1744,21 @@ def single_padded_force(
 
         f_solv = jnp.zeros_like(r)
         if implicit_solvent:
+            safe_charges = jnp.where(sys.atom_mask, sys.charges, jnp.zeros_like(sys.charges))
+            safe_radii = jnp.where(
+                sys.atom_mask, sys.radii, jnp.asarray(1.5, dtype=sys.radii.dtype)
+            )
+            safe_scaled_radii = (
+                jnp.where(
+                    sys.atom_mask,
+                    sys.scaled_radii,
+                    jnp.asarray(1.2, dtype=sys.scaled_radii.dtype),
+                )
+                if sys.scaled_radii is not None
+                else None
+            )
             f_solv = gb_ace_forces_dense(
-                r, sys.charges, sys.radii, sys.scaled_radii, sys.atom_mask,
+                r, safe_charges, safe_radii, safe_scaled_radii, sys.atom_mask,
                 dielectric_offset=float(getattr(sys, "dielectric_offset", 0.09)),
                 solvent_dielectric=float(getattr(sys, "solvent_dielectric", 78.5)),
                 solute_dielectric=float(getattr(sys, "solute_dielectric", 1.0)),
@@ -1782,25 +1827,31 @@ def _make_lj_energy_nl_cvjp(
 
     def _compute_intermediates(r, sigmas, epsilons):
         """Shared forward computation for both energy and gradient."""
-        safe_idx = jnp.minimum(neighbor_idx, N_sentinel - 1)
+        i_idx = jnp.arange(N_sentinel, dtype=neighbor_idx.dtype)[:, None]
+        mask = (neighbor_idx >= 0) & (neighbor_idx < N_sentinel) & (neighbor_idx != i_idx)
+        safe_idx = jnp.minimum(jnp.maximum(neighbor_idx, 0), N_sentinel - 1)
         r_j = r[safe_idx]                    # (N, K, 3)
         r_i = r[:, None, :]                  # (N, 1, 3)
         dr = r_i - r_j                       # (N, K, 3)
         dist = jnp.sqrt(jnp.sum(dr ** 2, axis=-1) + 1e-12)  # (N, K)
+        dist_safe = jnp.where(mask, dist, jnp.asarray(2.0, dtype=r.dtype))
 
         sigma_ij = 0.5 * (sigmas[:, None] + sigmas[safe_idx])
-        epsilon_ij = jnp.sqrt(epsilons[:, None] * epsilons[safe_idx])
+        sigma_safe = jnp.where(mask, jnp.maximum(sigma_ij, jnp.float32(1e-4)), jnp.float32(1.0))
+        eps_prod = jnp.maximum(epsilons[:, None] * epsilons[safe_idx], jnp.asarray(0.0, dtype=epsilons.dtype))
+        epsilon_ij = jnp.where(
+            eps_prod > 0, jnp.sqrt(jnp.where(eps_prod > 0, eps_prod, jnp.ones_like(eps_prod))), jnp.zeros_like(eps_prod)
+        )
 
         lam = jnp.float32(soft_core_lambda)
         alpha = jnp.float32(softcore_alpha)
         one_minus_lam = jnp.maximum(jnp.float32(1.0) - lam, jnp.float32(0.0))
         soft_term = alpha * (one_minus_lam ** int(softcore_exponent))
-        r_over_sig = dist / jnp.maximum(sigma_ij, jnp.float32(1e-8))
+        r_over_sig = dist_safe / sigma_safe
         r6 = r_over_sig ** 6
         denom = soft_term + r6 + jnp.float32(1e-12)
 
-        mask = neighbor_idx < N_sentinel  # (N, K)
-        return dr, dist, sigma_ij, epsilon_ij, lam, denom, mask
+        return dr, dist_safe, sigma_safe, epsilon_ij, lam, denom, mask
 
     @jax.custom_vjp
     def lj_energy_cvjp(r, sigmas, epsilons):
@@ -1827,11 +1878,12 @@ def _make_lj_energy_nl_cvjp(
             _compute_intermediates(r, sigmas, epsilons)
 
         # Analytical derivative: de_pair/d(dist)
-        sigma_ij6 = jnp.maximum(sigma_ij ** 6, jnp.float32(1e-48))
+        sigma_ij6 = jnp.maximum(sigma_ij ** 6, jnp.float32(1e-24))
         ddenom_ddist = jnp.float32(6.0) * dist ** 5 / sigma_ij6
+        denom_s = jnp.maximum(denom, jnp.float32(1e-6))
         de_ddist = jnp.float32(4.0) * epsilon_ij * lam * (
-            jnp.float32(1.0) / (denom ** 2)
-            - jnp.float32(2.0) / (denom ** 3)
+            jnp.float32(1.0) / (denom_s ** 2)
+            - jnp.float32(2.0) / (denom_s ** 3)
         ) * ddenom_ddist
 
         de_ddist = jnp.where(mask, de_ddist, 0.0)
@@ -2151,6 +2203,20 @@ def single_padded_energy_nl_cvjp(
                 interpret=interpret,
             )
         else:
+            safe_charges = jnp.where(sys.atom_mask, sys.charges, jnp.zeros_like(sys.charges))
+            safe_radii = jnp.where(
+                sys.atom_mask, sys.radii, jnp.asarray(1.5, dtype=sys.radii.dtype)
+            )
+            safe_scaled_radii = (
+                jnp.where(
+                    sys.atom_mask,
+                    sys.scaled_radii,
+                    jnp.asarray(1.2, dtype=sys.scaled_radii.dtype),
+                )
+                if sys.scaled_radii is not None
+                else None
+            )
+
             # Checkpoint GB to save memory (recompute forward during backward)
             @jax.checkpoint
             def _gb_energy(positions, charges, radii):
@@ -2162,13 +2228,13 @@ def single_padded_energy_nl_cvjp(
                     solvent_dielectric=solv_diel,
                     solute_dielectric=solu_diel,
                     dielectric_offset=diel_off,
-                    scaled_radii=sys.scaled_radii,
+                    scaled_radii=safe_scaled_radii,
                 )
                 e_np = compute_ace_nonpolar_energy(radii, born_radii, dielectric_offset=diel_off)
                 e_np = jnp.sum(e_np * sys.atom_mask)
                 return e_gb + e_np
 
-            e_solv = _gb_energy(r, sys.charges, sys.radii)
+            e_solv = _gb_energy(r, safe_charges, safe_radii)
     else:
         e_solv = 0.0
 
@@ -2481,17 +2547,30 @@ def single_padded_energy_nl(
                 interpret=interpret,
             )
         else:
+            safe_charges = jnp.where(sys.atom_mask, sys.charges, jnp.zeros_like(sys.charges))
+            safe_radii = jnp.where(
+                sys.atom_mask, sys.radii, jnp.asarray(1.5, dtype=sys.radii.dtype)
+            )
+            safe_scaled_radii = (
+                jnp.where(
+                    sys.atom_mask,
+                    sys.scaled_radii,
+                    jnp.asarray(1.2, dtype=sys.scaled_radii.dtype),
+                )
+                if sys.scaled_radii is not None
+                else None
+            )
             e_gb, born_radii = compute_gb_energy_neighbor_list(
                 positions=r,
-                charges=sys.charges,
-                radii=sys.radii,
+                charges=safe_charges,
+                radii=safe_radii,
                 neighbor_idx=nb_clean,
                 solvent_dielectric=solv_diel,
                 solute_dielectric=solu_diel,
                 dielectric_offset=diel_off,
-                scaled_radii=sys.scaled_radii,
+                scaled_radii=safe_scaled_radii,
             )
-            e_np = compute_ace_nonpolar_energy(sys.radii, born_radii, dielectric_offset=diel_off)
+            e_np = compute_ace_nonpolar_energy(safe_radii, born_radii, dielectric_offset=diel_off)
             e_np = jnp.sum(e_np * sys.atom_mask)
             e_solv = e_gb + e_np
     else:

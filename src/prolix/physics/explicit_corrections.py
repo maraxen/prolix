@@ -6,12 +6,55 @@ Stack A and Stack B stay physically aligned.
 
 from __future__ import annotations
 
+import math
+
 import jax
 import jax.numpy as jnp
-from prolix.physics import pbc
 from jax_md import space
 from jax_md.util import Array
-from proxide.physics.constants import COULOMB_CONSTANT
+
+from prolix.physics import pbc
+
+# kcal*A/(mol*e^2) — exact OpenMM ONE_4PI_EPS0 * 10 / 4.184
+COULOMB_CONSTANT = 332.06371329919216
+
+_BINOM_6: tuple[float, ...] = tuple(float(math.comb(6, k)) for k in range(7))
+_BINOM_12: tuple[float, ...] = tuple(float(math.comb(12, k)) for k in range(13))
+
+
+def _lorentz_berthelot_pair_moments(
+    sigma: Array,
+    epsilon: Array,
+    atom_mask: Array,
+) -> tuple[Array, Array]:
+    """Exact O(N) pair sums of eps_ij * sigma_ij^6 and eps_ij * sigma_ij^12.
+
+    Uses Lorentz-Berthelot combining rules ``eps_ij = sqrt(eps_i * eps_j)`` and
+    ``sigma_ij = (sigma_i + sigma_j) / 2`` expanded via the 13-term binomial
+    identity ``sum_{i,j} sqrt(eps_i eps_j) ((sig_i + sig_j)/2)^m =
+    2^-m * sum_{k=0}^m comb(m, k) * S_k * S_{m-k}`` where
+    ``S_k = sum_i sqrt(eps_i) * sig_i^k * mask_i``.
+    """
+    eps_pos = epsilon > 0
+    sqrt_eps = (
+        jnp.where(
+            eps_pos,
+            jnp.sqrt(jnp.where(eps_pos, epsilon, jnp.ones_like(epsilon))),
+            jnp.zeros_like(epsilon),
+        )
+        * atom_mask
+    )
+    moments = [jnp.sum(sqrt_eps * (sigma**k)) for k in range(13)]
+    c6_pair_sum = jnp.zeros((), dtype=epsilon.dtype)
+    for k, binom_k in enumerate(_BINOM_6):
+        c6_pair_sum = c6_pair_sum + binom_k * moments[k] * moments[6 - k]
+    c6_pair_sum = c6_pair_sum * (1.0 / 64.0)
+
+    c12_pair_sum = jnp.zeros((), dtype=epsilon.dtype)
+    for k, binom_k in enumerate(_BINOM_12):
+        c12_pair_sum = c12_pair_sum + binom_k * moments[k] * moments[12 - k]
+    c12_pair_sum = c12_pair_sum * (1.0 / 4096.0)
+    return c6_pair_sum, c12_pair_sum
 
 
 def pme_exclusion_correction_energy(
@@ -67,10 +110,9 @@ def lj_dispersion_tail_energy(
 ) -> Array:
     """Isotropic long-range Lennard-Jones dispersion correction beyond the cutoff.
 
-    Formula based on heterogenous sum-of-sqrt approximation:
-    E_tail = (4 * pi / V) * [ C12_sum / (9 * r_c^9) - C6_sum / (3 * r_c^3) ]
-    where C12_sum = (sum_i sqrt(eps_i) * sig_i^6)^2
-          C6_sum  = (sum_i sqrt(eps_i) * sig_i^3)^2
+    Exact O(N) binomial evaluation under Lorentz-Berthelot combining rules
+    ``eps_ij = sqrt(eps_i * eps_j)`` and ``sigma_ij = (sigma_i + sigma_j) / 2``:
+    ``E_tail = (8 * pi / V) * [ C12_pair_sum / (9 * r_c^9) - C6_pair_sum / (3 * r_c^3) ]``.
     """
     box = jnp.asarray(box)
     sigma = jnp.asarray(sigma)
@@ -79,12 +121,13 @@ def lj_dispersion_tail_energy(
     atom_mask = jnp.asarray(atom_mask).astype(epsilon.dtype)
     volume = pbc.box_volume(box)
 
-    sum_c6 = jnp.sum(jnp.sqrt(epsilon) * (sigma**3) * atom_mask)
-    sum_c12 = jnp.sum(jnp.sqrt(epsilon) * (sigma**6) * atom_mask)
+    c6_pair_sum, c12_pair_sum = _lorentz_berthelot_pair_moments(
+        sigma, epsilon, atom_mask
+    )
 
     inv_vol = 1.0 / volume
-    e_c12 = (8.0 * jnp.pi / 9.0) * (sum_c12**2) * inv_vol * (cutoff**-9)
-    e_c6 = (8.0 * jnp.pi / 3.0) * (sum_c6**2) * inv_vol * (cutoff**-3)
+    e_c12 = (8.0 * jnp.pi / 9.0) * c12_pair_sum * inv_vol * (cutoff**-9)
+    e_c6 = (8.0 * jnp.pi / 3.0) * c6_pair_sum * inv_vol * (cutoff**-3)
     return e_c12 - e_c6
 
 
@@ -97,7 +140,7 @@ def lj_dispersion_tail_pressure(
 ) -> Array:
     """Isotropic long-range Lennard-Jones dispersion pressure correction.
 
-    P_tail = E_tail / V.
+    P_tail = -d(E_tail)/dV = E_tail / V.
     """
     volume = pbc.box_volume(box)
     e_tail = lj_dispersion_tail_energy(box, sigma, epsilon, cutoff, atom_mask)
@@ -119,16 +162,11 @@ def lj_dispersion_tail_impulsive_pressure(
     atom_mask = jnp.asarray(atom_mask).astype(epsilon.dtype)
     volume = pbc.box_volume(box)
 
-    sum_c6 = jnp.sum(jnp.sqrt(epsilon) * (sigma**3) * atom_mask)
-    sum_c12 = jnp.sum(jnp.sqrt(epsilon) * (sigma**6) * atom_mask)
+    c6_pair_sum, c12_pair_sum = _lorentz_berthelot_pair_moments(
+        sigma, epsilon, atom_mask
+    )
 
-    # u(rc) = 4 * eps * ((sig/rc)^12 - (sig/rc)^6)
-    # Impulsive term: -(2/3) * pi * rho^2 * rc^3 * u(rc)
-    # rho = N / V
-    # For mixture: -(2/3) * pi * (1/V^2) * rc^3 * sum_{i,j} u_{ij}(rc)
-    # sum_{i,j} u_{ij}(rc) = 4 * [ (sum_c12^2) * rc^-12 - (sum_c6^2) * rc^-6 ]
-    
     inv_vol2 = 1.0 / (volume**2)
-    sum_u = 4.0 * ( (sum_c12**2) * (cutoff**-12) - (sum_c6**2) * (cutoff**-6) )
-    
+    sum_u = 4.0 * (c12_pair_sum * (cutoff**-12) - c6_pair_sum * (cutoff**-6))
+
     return (2.0 * jnp.pi / 3.0) * inv_vol2 * (cutoff**3) * sum_u

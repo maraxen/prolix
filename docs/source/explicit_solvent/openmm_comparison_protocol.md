@@ -7,8 +7,8 @@ Shared conventions for **Prolix vs OpenMM Reference** parity tests and benchmark
 | Quantity | Prolix | OpenMM |
 |----------|--------|--------|
 | Positions | Å | nm (`setPositions`; multiply by 0.1 from Å) |
-| Box edge \(L\) | Å orthorhombic `(Lx,Ly,Lz)` | nm (`setDefaultPeriodicBoxVectors`; divide Å by 10) |
-| Ewald \(\alpha\) | Å\(^{-1}\) | nm\(^{-1}\): **multiply by 10** when calling `setPMEParameters` |
+| Box edge $L$ | Å orthorhombic `(Lx,Ly,Lz)` | nm (`setDefaultPeriodicBoxVectors`; divide Å by 10) |
+| Ewald $\alpha$ | Å$^{-1}$ | nm$^{-1}$: **multiply by 10** when calling `setPMEParameters` |
 
 ## PME (`NonbondedForce.PME`)
 
@@ -60,7 +60,7 @@ Tighten tolerances only after locking grid-spacing policy in `make_energy_fn` / 
 
 ## Benchmark JSON
 
-Machine-readable runs should conform to [benchmark_run.schema.json](schemas/benchmark_run.schema.json) (see [explicit_solvent_parity_and_benchmark_requirements](explicit_solvent_parity_and_benchmark_requirements.md)).
+Machine-readable runs should conform to {download}`benchmark_run.schema.json <schemas/benchmark_run.schema.json>` (see {doc}`../guides/physics_validation`).
 
 ## Related tests and scripts
 
@@ -69,5 +69,4 @@ Machine-readable runs should conform to [benchmark_run.schema.json](schemas/benc
 - `tests/physics/test_solvated_explicit_integration.py`
 - `tests/physics/test_solvated_openmm_explicit_parity.py`
 - `scripts/benchmarks/openmm_langevin_temperature_stats.py` (OpenMM-only thermostat **statistics**)
-- `scripts/benchmarks/tip3p_ke_compare.py` (TIP3P rigid-water KE / thermometer diagnostics; `--jax-x64`, `--remove-cmmotion`, `--dt-fs`, `--gamma-ps`, `--verbose-samples`, replicate stats; see [tip3p_ke_x64_rerun_decision](tip3p_ke_x64_rerun_decision.md))
-- [tip3p_ke_x64_rerun_decision](tip3p_ke_x64_rerun_decision.md) (local x64 rerun matrix + gate outcomes)
+- `scripts/benchmarks/tip3p_ke_compare.py` (TIP3P rigid-water KE / thermometer diagnostics; `--jax-x64`, `--remove-cmmotion`, `--dt-fs`, `--gamma-ps`, `--verbose-samples`, replicate stats)

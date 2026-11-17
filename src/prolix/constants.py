@@ -1,5 +1,12 @@
 """Physical constants for molecular dynamics simulation."""
 
+# Electrostatic conversion factor 1 / (4 * pi * eps_0) in AKMA units: kcal * A / (mol * e^2)
+# Matches NIST CODATA 2018 / OpenMM ONE_4PI_EPS0 (138.93545764438198 kJ * nm / (mol * e^2) * 10 / 4.184).
+COULOMB_CONSTANT: float = 332.06371329919216
+
+# Boltzmann constant k_B in kcal / (mol * K) (exact SI R = 8.31446261815324e-3 kJ/(mol*K) / 4.184).
+BOLTZMANN_KCAL_PER_MOL_K: float = 0.00198720425864083
+
 # Element masses in Daltons (atomic mass units).
 # Used as fallback when force-field masses are unavailable.
 ELEMENT_MASS: dict[str, float] = {

@@ -3,6 +3,7 @@ target_package = "prolix"
 target_source_root = "src/prolix"
 target_dataclasses = [
     "prolix.knob_surface.KnobSurface",
+    "prolix.openmm.config.ProlixOpenMMConfig",
     "prolix.simulate.SimulationSpec",
     "prolix.physics.spec.PhysicsSpec",
     "prolix.physics.nonbonded_config.NonbondedConfig",
@@ -11,6 +12,7 @@ target_dataclasses = [
 consumer_module_globs = [
     "src/prolix/physics/**/*.py",
     "src/prolix/api/**/*.py",
+    "src/prolix/openmm/**/*.py",
     "src/prolix/pallas_kernels.py",
     "src/prolix/batched_energy.py",
     "src/prolix/batched_simulate.py",
@@ -56,6 +58,7 @@ config_classes = [
 consumer_paths = [
     "src/prolix/physics",
     "src/prolix/api",
+    "src/prolix/openmm",
     "src/prolix/pallas_kernels.py",
     "src/prolix/batched_energy.py",
     "src/prolix/batched_simulate.py",
@@ -63,6 +66,7 @@ consumer_paths = [
 exclude_files = [
     "knob_surface.py",
     "nonbonded_config.py",
+    "config.py",
     "spec.py",
     "simulate.py",
 ]
@@ -91,6 +95,10 @@ vendor_reference_classes = [
     "prolix.physics.nonbonded_config.NonbondedConfig",
     "prolix.governance.redsox_adapter.PMEParams",
     "prolix.governance.redsox_adapter.ImplicitSolventParams",
+    "prolix.openmm.config.ProlixOpenMMConfig",
+    "prolix.governance.redsox_adapter.OpenMMPlatformPropertiesSchema",
+    "prolix.governance.redsox_adapter.OpenMMSystemKnobsSchema",
+    "prolix.governance.redsox_adapter.OpenMMIntegratorKnobsSchema",
 ]
 
 [superset_alias_map]
@@ -255,3 +263,43 @@ nonbonded = "nonbonded_method"
 minimization = "per_stage_max_iterations"
 equilibration = "n_steps"
 production = "n_steps"
+integrator_scheme = "integrator_method"
+thermostat_override = "integrator_method"
+remove_com_motion = "cmm_frequency"
+com_motion_frequency = "cmm_frequency"
+deterministic_seed = "seed"
+random_number_seed = "seed"
+lj_switch_width = "switch_width_angstrom"
+switching_distance = "switch_width_angstrom"
+nl_skin = "cutoff_angstrom"
+nl_capacity_multiplier = "cutoff_angstrom"
+pme_parameters = "pme_grid_dims"
+barostat_mode = "barostat_method"
+barostat_frequency_override = "barostat_interval"
+barostat_frequency = "barostat_interval"
+default_pressure = "pressure_atm"
+anisotropic_barostat = "anisotropic"
+scale_x = "anisotropic"
+scale_y = "anisotropic"
+scale_z = "anisotropic"
+xy_mode = "anisotropic"
+z_mode = "anisotropic"
+default_surface_tension = "anisotropic"
+water_constraint_mode = "rigid_water"
+solute_constraint_mode = "constraint_mode"
+shake_iterations = "max_shake_iterations"
+hydrogen_mass = "constraint_mode"
+surface_area_energy = "surface_tension_kcal_mol_a2"
+step_size = "timestep_fs"
+error_tolerance = "timestep_fs"
+friction_coeff = "gamma_inv_ps"
+collision_frequency = "gamma_inv_ps"
+num_mts = "integrator_method"
+num_yoshida_suzuki = "integrator_method"
+use_cpu_pme = "use_pallas_pme"
+use_blocking_sync = "deterministic_forces"
+Precision = "precision"
+DeterministicForces = "deterministic_forces"
+DisablePmeStream = "disable_pme_stream"
+UseCpuPme = "use_pallas_pme"
+UseBlockingSync = "deterministic_forces"

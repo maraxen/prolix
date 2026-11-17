@@ -19,16 +19,16 @@ Provides:
 from __future__ import annotations
 
 import ast
-import dataclasses
 from dataclasses import dataclass, field, fields, is_dataclass, make_dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, ClassVar, cast
 
 from prolix.governance.pending_knobs import (
     DOCUMENTED_INERT_KNOBS,
     PENDING_EPIC_KNOBS,
 )
 from prolix.knob_surface import KnobSurface
+from prolix.openmm.config import ProlixOpenMMConfig
 from prolix.physics.nonbonded_config import NeighborListConfig, NonbondedConfig
 
 if TYPE_CHECKING:
@@ -63,6 +63,7 @@ except ImportError:
 DEFAULT_CONSUMER_PATHS: tuple[str, ...] = (
     "src/prolix/physics",
     "src/prolix/api",
+    "src/prolix/openmm",
     "src/prolix/pallas_kernels.py",
     "src/prolix/batched_energy.py",
     "src/prolix/batched_simulate.py",
@@ -72,6 +73,7 @@ DEFAULT_EXCLUDED_DECLARATION_MODULES: frozenset[str] = frozenset(
     {
         "knob_surface.py",
         "nonbonded_config.py",
+        "config.py",
         "spec.py",
         "simulate.py",
     }
@@ -248,6 +250,47 @@ SUPERSET_ALIAS_MAP: dict[str, str] = {
     "minimization": "per_stage_max_iterations",
     "equilibration": "n_steps",
     "production": "n_steps",
+    # OpenMM Backend (ProlixOpenMMConfig, Platform, System, and Integrator schemas)
+    "integrator_scheme": "integrator_method",
+    "thermostat_override": "integrator_method",
+    "remove_com_motion": "cmm_frequency",
+    "com_motion_frequency": "cmm_frequency",
+    "deterministic_seed": "seed",
+    "random_number_seed": "seed",
+    "lj_switch_width": "switch_width_angstrom",
+    "switching_distance": "switch_width_angstrom",
+    "nl_skin": "cutoff_angstrom",
+    "nl_capacity_multiplier": "cutoff_angstrom",
+    "pme_parameters": "pme_grid_dims",
+    "barostat_mode": "barostat_method",
+    "barostat_frequency_override": "barostat_interval",
+    "barostat_frequency": "barostat_interval",
+    "default_pressure": "pressure_atm",
+    "anisotropic_barostat": "anisotropic",
+    "scale_x": "anisotropic",
+    "scale_y": "anisotropic",
+    "scale_z": "anisotropic",
+    "xy_mode": "anisotropic",
+    "z_mode": "anisotropic",
+    "default_surface_tension": "anisotropic",
+    "water_constraint_mode": "rigid_water",
+    "solute_constraint_mode": "constraint_mode",
+    "shake_iterations": "max_shake_iterations",
+    "hydrogen_mass": "constraint_mode",
+    "surface_area_energy": "surface_tension_kcal_mol_a2",
+    "step_size": "timestep_fs",
+    "error_tolerance": "timestep_fs",
+    "friction_coeff": "gamma_inv_ps",
+    "collision_frequency": "gamma_inv_ps",
+    "num_mts": "integrator_method",
+    "num_yoshida_suzuki": "integrator_method",
+    "use_cpu_pme": "use_pallas_pme",
+    "use_blocking_sync": "deterministic_forces",
+    "Precision": "precision",
+    "DeterministicForces": "deterministic_forces",
+    "DisablePmeStream": "disable_pme_stream",
+    "UseCpuPme": "use_pallas_pme",
+    "UseBlockingSync": "deterministic_forces",
 }
 
 
@@ -310,15 +353,16 @@ def adapt_model_to_dataclass(cls: type) -> type:
     ``CosolvConfig`` / ``CosolvEntry``), constructs a dynamic ``@dataclass`` via
     ``dataclasses.make_dataclass(cls.__name__, list(cls.model_fields.keys()))``.
     """
-    if hasattr(cls, "model_fields"):
-        model_fields = getattr(cls, "model_fields")
-        field_names = list(model_fields.keys())
+    model_fields = getattr(cls, "model_fields", None)
+    if isinstance(model_fields, dict):
+        field_names: list[str] = [str(k) for k in model_fields]
         return make_dataclass(cls.__name__, field_names)
     if is_dataclass(cls):
         return cls
     nt_fields = getattr(cls, "_fields", None)
     if isinstance(nt_fields, tuple):
-        return make_dataclass(cls.__name__, list(nt_fields))
+        nt_field_names: list[str] = [str(k) for k in nt_fields]
+        return make_dataclass(cls.__name__, nt_field_names)
     raise TypeError(
         f"Cannot adapt {cls!r} to dataclass: expected @dataclass, Pydantic "
         "BaseModel (with model_fields), or NamedTuple (with _fields)."
@@ -327,10 +371,11 @@ def adapt_model_to_dataclass(cls: type) -> type:
 
 def extract_dataclass_fields(cls: type) -> set[str]:
     """Extract canonical field names from a dataclass, ``KnobSurface``, or Pydantic model."""
-    if hasattr(cls, "leaf_field_names") and callable(cls.leaf_field_names):
-        return set(cls.leaf_field_names())
+    leaf_fn = getattr(cls, "leaf_field_names", None)
+    if callable(leaf_fn):
+        return set(cast("Any", leaf_fn)())
     adapted = adapt_model_to_dataclass(cls)
-    return {f.name for f in fields(adapted)}
+    return {f.name for f in fields(cast("Any", adapted))}
 
 
 def check_superset(
@@ -524,7 +569,7 @@ def check_reachability(
 
 
 def check_prolix_reachability(
-    repo_root: Path | str | None = None,
+    repo_root: Path | str | type | Sequence[type] | None = None,
     *,
     config_classes: type | Sequence[type] | None = None,
 ) -> ReachabilityResult:
@@ -533,15 +578,22 @@ def check_prolix_reachability(
     Consumer paths:
     - ``src/prolix/physics/``
     - ``src/prolix/api/``
+    - ``src/prolix/openmm/``
+    - ``src/prolix/pallas_kernels.py``
     - ``src/prolix/batched_energy.py``
     - ``src/prolix/batched_simulate.py``
 
     Excluded declaration modules:
     - ``knob_surface.py``
     - ``nonbonded_config.py``
+    - ``config.py``
     - ``spec.py``
     - ``simulate.py``
     """
+    if repo_root is not None and not isinstance(repo_root, (str, Path)):
+        if config_classes is None:
+            config_classes = repo_root
+        repo_root = None
     root = (
         Path(repo_root)
         if repo_root is not None
@@ -760,7 +812,7 @@ class _FallbackNaurmaladeSimulationConfig:
 @dataclass(frozen=True)
 class _FallbackNaurmaladeRestraintSpec:
     atom_names: frozenset[str] | None = None
-    force_constant_kcal_per_mol_per_A2: float = 10.0
+    force_constant_kcal_per_mol_per_A2: float = 10.0  # noqa: N815
     exclude_residue_names: frozenset[str] = frozenset({"HOH", "CL", "NA", "WAT"})
     anchor: str = "reference"
 
@@ -786,7 +838,7 @@ class _FallbackNaurmaladeSoftcoreSweepStep:
 class _FallbackNaurmaladeCosolvEntry:
     """Pydantic v2 ``BaseModel`` mirror with ``model_fields``."""
 
-    model_fields: dict[str, Any] = {
+    model_fields: ClassVar[dict[str, Any]] = {
         "name": str,
         "smiles": str,
         "concentration_molar": float,
@@ -801,7 +853,7 @@ _FallbackNaurmaladeCosolvEntry.__name__ = "CosolvEntry"
 class _FallbackNaurmaladeCosolvConfig:
     """Pydantic v2 ``BaseModel`` mirror with ``model_fields``."""
 
-    model_fields: dict[str, Any] = {
+    model_fields: ClassVar[dict[str, Any]] = {
         "cosolvents": list,
         "padding_nm": float,
         "ionic_strength_molar": float,
@@ -824,8 +876,77 @@ class _FallbackNaurmaladeCosolvConfig:
 _FallbackNaurmaladeCosolvConfig.__name__ = "CosolvConfig"
 
 
+@dataclass(frozen=True)
+class OpenMMPlatformPropertiesSchema:
+    """Canonical OpenMM Platform properties reference schema (CUDA/OpenCL/CPU/Prolix)."""
+
+    precision: str = "single"
+    deterministic_forces: bool = False
+    disable_pme_stream: bool = False
+    device_index: str | None = None
+    threads: int | None = None
+    use_cpu_pme: bool = False
+    use_blocking_sync: bool = False
+    Precision: str = "single"
+    DeterministicForces: bool = False
+    DisablePmeStream: bool = False
+    DeviceIndex: str | None = None
+    Threads: int | None = None
+    UseCpuPme: bool = False
+    UseBlockingSync: bool = False
+
+
+@dataclass(frozen=True)
+class OpenMMSystemKnobsSchema:
+    """Canonical OpenMM System / NonbondedForce / GBSA / Barostat / Constraints schema."""
+
+    nonbonded_method: str = "PME"
+    cutoff_distance: float = 0.9
+    use_switching_function: bool = True
+    switching_distance: float = 0.75
+    use_dispersion_correction: bool = True
+    ewald_error_tolerance: float = 5e-4
+    pme_parameters: tuple[float, int, int, int] | None = None
+    reaction_field_dielectric: float = 78.3
+    coulomb14scale: float = 0.8333333333333334
+    lj14scale: float = 0.5
+    solvent_dielectric: float = 78.5
+    solute_dielectric: float = 1.0
+    surface_area_energy: float = 2.25936
+    cmm_frequency: int = 1
+    com_motion_frequency: int = 1
+    default_pressure: float | None = None
+    barostat_frequency: int = 25
+    scale_x: bool = True
+    scale_y: bool = True
+    scale_z: bool = True
+    xy_mode: str = "XYIsotropic"
+    z_mode: str = "ZFree"
+    default_surface_tension: float = 0.0
+    constraints: str = "HBonds"
+    rigid_water: bool = True
+    hydrogen_mass: float | None = None
+    virtual_site_mode: str = "auto"
+
+
+@dataclass(frozen=True)
+class OpenMMIntegratorKnobsSchema:
+    """Canonical OpenMM Integrator (Langevin/Verlet/Brownian/NoseHoover) knobs schema."""
+
+    step_size: float = 0.002
+    temperature: float = 300.0
+    friction_coeff: float = 1.0
+    constraint_tolerance: float = 1e-5
+    random_number_seed: int = 0
+    collision_frequency: float = 1.0
+    chain_length: int = 3
+    num_mts: int = 3
+    num_yoshida_suzuki: int = 7
+    error_tolerance: float = 0.001
+
+
 def get_reference_config_schemas() -> dict[str, type]:
-    """Return dictionary of all Prolix and ``naurmalade`` reference config schemas."""
+    """Return dictionary of all Prolix, OpenMM, and ``naurmalade`` reference config schemas."""
     schemas: dict[str, type] = {
         "SimulationConfig": _FallbackNaurmaladeSimulationConfig,
         "EquilibrationConfig": _FallbackNaurmaladeEquilibrationConfig,
@@ -848,6 +969,10 @@ def get_reference_config_schemas() -> dict[str, type]:
         "NeighborListConfig": NeighborListConfig,
         "PMEParams": PMEParams,
         "ImplicitSolventParams": ImplicitSolventParams,
+        "ProlixOpenMMConfig": ProlixOpenMMConfig,
+        "OpenMMPlatformPropertiesSchema": OpenMMPlatformPropertiesSchema,
+        "OpenMMSystemKnobsSchema": OpenMMSystemKnobsSchema,
+        "OpenMMIntegratorKnobsSchema": OpenMMIntegratorKnobsSchema,
     }
     try:
         from naurmalade.cosolv.config import (  # type: ignore[import-not-found]
@@ -896,6 +1021,9 @@ __all__ = [
     "DEFAULT_EXCLUDED_DECLARATION_MODULES",
     "HAS_REDSOX",
     "ImplicitSolventParams",
+    "OpenMMIntegratorKnobsSchema",
+    "OpenMMPlatformPropertiesSchema",
+    "OpenMMSystemKnobsSchema",
     "PMEParams",
     "ReachabilityResult",
     "SUPERSET_ALIAS_MAP",

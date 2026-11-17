@@ -1,7 +1,7 @@
 r"""Tier 3 (#6194 / FR-3): Bathos Knob-Parity Coverage Matrix & Synthetic Negative Control.
 
 Evaluates:
-1. Consumer-only static AST reachability (U1) across all 72 canonical ``KnobSurface``
+1. Consumer-only static AST reachability (U1) across all 87 canonical ``KnobSurface``
    leaf fields, ``NonbondedConfig``, and ``NeighborListConfig``, asserting
    ``set(unread_fields) - DOCUMENTED_INERT_KNOBS == set()`` and
    ``PENDING_EPIC_KNOBS == frozenset()``.
@@ -26,16 +26,14 @@ import dataclasses
 import json
 import math
 import os
-from pathlib import Path
 import sys
+from pathlib import Path
 from typing import Any
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _SRC_ROOT = _REPO_ROOT / "src"
 if str(_SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(_SRC_ROOT))
-if "/tmp/prolix_py312_site" not in sys.path and Path("/tmp/prolix_py312_site").exists():
-    sys.path.insert(0, "/tmp/prolix_py312_site")
 
 import jax.numpy as jnp  # noqa: E402
 import numpy as np  # noqa: E402
@@ -325,8 +323,8 @@ def evaluate_knob_parity_matrix(*, inject_drop: bool = False) -> dict[str, Any]:
         "n_untracked_gaps": int(n_untracked_gaps),
         "max_rel_energy_err": float(max_rel_energy_err),
         "negative_control_detected": bool(negative_control_detected),
-        "n_total_knobs": int(len(KnobSurface.leaf_field_names())),
-        "n_pending_epic_knobs": int(len(PENDING_EPIC_KNOBS)),
+        "n_total_knobs": len(KnobSurface.leaf_field_names()),
+        "n_pending_epic_knobs": len(PENDING_EPIC_KNOBS),
         "u1_unaccounted_knobs": sorted(unaccounted_u1),
         "runtime_unread_knobs": sorted(runtime_unread),
         "u5_unmapped_by_schema": per_schema_u5,

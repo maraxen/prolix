@@ -6,7 +6,8 @@ Does not import ``prolix.api`` (physics must not depend on the API layer).
 
 from __future__ import annotations
 
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 
 from xtrax.tiling.dispatch import DispatchRejected, make_axis_dispatch
 from xtrax.tiling.strategy import Bucket, DedupGather, Scan, Vmap

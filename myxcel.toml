@@ -28,3 +28,48 @@ cpus_per_task = 16
 mem          = "128G"
 gpus         = "1"
 env          = { XLA_FLAGS = "--xla_gpu_shard_autotuning=false" }
+
+[slurm.presets.gpu_l40s_fast]
+partition     = "mit_normal_gpu,mit_preemptable"
+time          = "00:45:00"
+cpus_per_task = 8
+mem           = "48G"
+gpus          = "l40s:1"
+
+
+[slurm.presets.gpu_h200_fast]
+partition     = "mit_normal_gpu,mit_preemptable,pi_so3"
+time          = "00:45:00"
+cpus_per_task = 8
+mem           = "48G"
+gpus          = "h200:1"
+
+[slurm.presets.gpu_a100_fast]
+partition     = "mit_preemptable,mit_normal_gpu"
+time          = "00:45:00"
+cpus_per_task = 8
+mem           = "48G"
+gpus          = "a100:1"
+
+[slurm.presets.gpu_b300_fast]
+partition     = "pi_so3,mit_preemptable"
+time          = "00:45:00"
+cpus_per_task = 8
+mem           = "48G"
+gpus          = "rtx_pro_6000:1"
+env           = { XLA_FLAGS = "--xla_gpu_shard_autotuning=false" }
+
+[slurm.presets.gpu_any_fast]
+partition     = "pi_so3,mit_preemptable"
+time          = "00:45:00"
+cpus_per_task = 8
+mem           = "48G"
+gpus          = "1"
+env           = { XLA_FLAGS = "--xla_gpu_shard_autotuning=false" }
+
+[uv]
+# One shared venv per uv.lock hash (profile uv.venv_root). Dependencies only: prolix is NOT installed
+# into it (scripts/slurm/_uv_env.sh puts this worktree's src/ on PYTHONPATH), so worktrees never
+# import each other's source. sync_args feed the lock key and must equal PROLIX_UV_SYNC_ARGS there.
+venv = "lock-keyed"
+sync_args = ["--frozen", "--extra", "cuda", "--extra", "openmm", "--extra", "dev", "--no-install-project"]

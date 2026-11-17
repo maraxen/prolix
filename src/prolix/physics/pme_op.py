@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import functools
 
+import jax.numpy as jnp
 import xtrax
 from xtrax.intent import Context
 
@@ -52,11 +53,21 @@ def make_spread_op(
         Callable ``(positions, charges, atom_mask, box_size) -> Q``.
     """
     dims = (int(grid_dims[0]), int(grid_dims[1]), int(grid_dims[2]))
+
+    def _cpu_spread(positions, charges, atom_mask, box_size):
+        if positions.dtype == jnp.float64:
+            return spread_reference(
+                positions, charges, atom_mask, box_size, grid_dims=dims, order=order
+            )
+        return spread_charges_pallas(
+            positions, charges, atom_mask, box_size, grid_dims=dims, order=order, interpret=True
+        )
+
     return xtrax.op(
         functools.partial(spread_reference, grid_dims=dims, order=order),
         kernels={
             "gpu": functools.partial(spread_charges_pallas, grid_dims=dims, order=order, interpret=False),
-            "cpu": functools.partial(spread_charges_pallas, grid_dims=dims, order=order, interpret=True),
+            "cpu": _cpu_spread,
         },
         name="pme_spread",
         context=context,
@@ -92,15 +103,34 @@ def make_gather_op(
     """
     dims = (int(grid_dims[0]), int(grid_dims[1]), int(grid_dims[2]))
     cdq = bool(compute_dq)
+
+    def _cpu_gather(positions, charges, atom_mask, box_size, theta_norm):
+        if positions.dtype == jnp.float64:
+            forces, potentials = gather_reference(
+                positions, charges, atom_mask, box_size, theta_norm, grid_dims=dims, order=order
+            )
+            if not cdq:
+                potentials = jnp.zeros_like(potentials)
+            return forces, potentials
+        return gather_pallas(
+            positions,
+            charges,
+            atom_mask,
+            box_size,
+            theta_norm,
+            grid_dims=dims,
+            order=order,
+            interpret=True,
+            compute_dq=cdq,
+        )
+
     return xtrax.op(
         functools.partial(gather_reference, grid_dims=dims, order=order),
         kernels={
             "gpu": functools.partial(
                 gather_pallas, grid_dims=dims, order=order, interpret=False, compute_dq=cdq
             ),
-            "cpu": functools.partial(
-                gather_pallas, grid_dims=dims, order=order, interpret=True, compute_dq=cdq
-            ),
+            "cpu": _cpu_gather,
         },
         name="pme_gather",
         context=context,

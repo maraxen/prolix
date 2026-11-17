@@ -10,12 +10,11 @@ converge onto :class:`KnobSurface`.
 from __future__ import annotations
 
 from dataclasses import dataclass, field, fields
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
 
-    from prolix.typing import ArrayLike
 
 
 @dataclass(frozen=True)
@@ -29,6 +28,7 @@ class ThermostatControls:
     n_steps: int = 1000
     save_interval: int = 500
     seed: int = 0
+    cmm_frequency: int = 1
 
 
 @dataclass(frozen=True)
@@ -56,7 +56,7 @@ class NonbondedControls:
     dispersion_correction: bool = True
     reaction_field_dielectric: float = 78.3
     dsf_alpha: float | None = None
-    coulomb_constant: float = 332.0637
+    coulomb_constant: float = 332.06371329919216
     scale_14_lj: float = 0.5
     scale_14_elec: float = 0.8333333333333334
 
@@ -80,7 +80,7 @@ class ImplicitSolventControls:
 
 @dataclass(frozen=True)
 class ConstraintControls:
-    """Holonomic bond/angle (SETTLE / SHAKE / RATTLE) constraint control knobs."""
+    """Holonomic bond/angle (SETTLE / SHAKE / RATTLE) and virtual-site control knobs."""
 
     constraint_mode: str = "hbonds"
     rigid_water: bool = True
@@ -89,6 +89,7 @@ class ConstraintControls:
     shake_tolerance: float = 1e-5
     rattle_tolerance: float = 1e-5
     max_shake_iterations: int = 50
+    virtual_site_mode: str = "auto"
 
 
 @dataclass(frozen=True)
@@ -137,11 +138,24 @@ class CollectiveVariableBiasControls:
 
 @dataclass(frozen=True)
 class PallasControls:
-    """Full-potential Pallas GPU kernel dispatch control knobs."""
+    """Full-potential Pallas v3.5 GPU kernel dispatch and runtime execution control knobs."""
 
     use_pallas: bool | None = None
     use_pallas_pme: bool | None = None
     gb_use_neighbor_list: bool = False
+    precision: str = "single"
+    nonbonded_engine: str = "auto"
+    pallas_interpret: bool = False
+    nb_k_splits: int | None = None
+    tp_group: int | None = None
+    deterministic_forces: bool = False
+    disable_pme_stream: bool = False
+    custom_force_mode: str = "auto"
+    custom_nonbonded_chunk_size: int = 128
+    use_size_buckets: bool = True
+    max_steps_per_scan: int = 1000
+    execution_mode: str = "inference"
+    minimizer_backend: str = "lbfgs"
 
 
 SUB_SURFACE_TYPES: tuple[type, ...] = (
@@ -187,14 +201,14 @@ class KnobSurface:
         """Return the set of all leaf knob field names across all 9 sub-surfaces."""
         names: set[str] = set()
         for sub_cls in SUB_SURFACE_TYPES:
-            for f in fields(sub_cls):
+            for f in fields(cast("Any", sub_cls)):
                 names.add(f.name)
         return names
 
     def to_flat_dict(self) -> dict[str, Any]:
         """Flatten all 9 sub-surfaces into a single ``{leaf_field: value}`` dict."""
         flat: dict[str, Any] = {}
-        for top_field in fields(self):
+        for top_field in fields(cast("Any", self)):
             sub_obj = getattr(self, top_field.name)
             for leaf_field in fields(sub_obj):
                 flat[leaf_field.name] = getattr(sub_obj, leaf_field.name)
@@ -207,17 +221,17 @@ class KnobSurface:
         if unknown:
             raise ValueError(f"Unknown KnobSurface leaf fields: {sorted(unknown)}")
         kwargs: dict[str, Any] = {}
-        for top_field in fields(cls):
+        for top_field in fields(cast("Any", cls)):
             sub_cls = top_field.default_factory  # type: ignore[assignment]
             if isinstance(sub_cls, type):
-                sub_names = {f.name for f in fields(sub_cls)}
+                sub_names = {f.name for f in fields(cast("Any", sub_cls))}
                 sub_kwargs = {k: v for k, v in values.items() if k in sub_names}
                 kwargs[top_field.name] = sub_cls(**sub_kwargs)
         return cls(**kwargs)
 
     def __getattr__(self, name: str) -> Any:
         """Delegate leaf knob attribute access to the owning sub-surface."""
-        for top_field in fields(type(self)):
+        for top_field in fields(cast("Any", type(self))):
             sub_obj = object.__getattribute__(self, top_field.name)
             if hasattr(type(sub_obj), "__dataclass_fields__") and (
                 name in type(sub_obj).__dataclass_fields__
