@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import os
 from typing import NamedTuple
 
@@ -33,8 +34,27 @@ from prolix.physics.pallas_bonded import (
 )
 
 COULOMB_CONSTANT: float = 332.06371329919216
+DEFAULT_NPT_BOX_SAFETY: float = 1.15
 _NB_BLOCK_N: int = 32
+_SUB_TILES: int = 4
 _BLOCK_B: int = 64
+
+
+def reaction_field_k_c(cutoff: float, rf_dielectric: float) -> tuple[float, float]:
+    """Compute OpenMM reaction-field ``(k_rf, c_rf)`` safely including conductor limit ``rf_dielectric=inf``."""
+    rc = float(cutoff)
+    if rc <= 0.0:
+        raise ValueError("cutoff must be positive")
+    eps = float(rf_dielectric)
+    if eps <= 0.0:
+        raise ValueError("rf_dielectric must be positive")
+    inv_rc = 1.0 / rc
+    inv_rc3 = inv_rc * inv_rc * inv_rc
+    inv_eps = 1.0 / eps  # 0.0 when eps == +inf (conductor limit), avoiding inf/inf NaN
+    denom = 2.0 + inv_eps
+    k_rf = inv_rc3 * ((1.0 - inv_eps) / denom)
+    c_rf = inv_rc * (3.0 / denom)
+    return k_rf, c_rf
 
 
 def _tile_pairs_compiler_params(grid_blocks: int = 0) -> plt.CompilerParams:
@@ -129,14 +149,27 @@ def _morton_tp_unflatten(aux, children) -> MortonTilePairState:
 jax.tree_util.register_pytree_node(MortonTilePairState, _morton_tp_flatten, _morton_tp_unflatten)
 
 
-def estimate_max_tile_pairs(n_act_blocks: int, cutoff: float = 9.0, skin: float = 2.0) -> int:
-    """Conservative upper-triangular 32x32 tile-pair capacity per replica."""
+def estimate_max_tile_pairs(
+    n_act_blocks: int,
+    cutoff: float = 9.0,
+    skin: float = 2.0,
+    *,
+    box_safety: float = 1.0,
+) -> int:
+    """Conservative upper-triangular 32x32 tile-pair capacity per replica.
+
+    ``box_safety`` (default ``1.0`` for NVT, ``DEFAULT_NPT_BOX_SAFETY = 1.15`` for NPT)
+    scales estimated density headroom by ``box_safety ** 3`` to guard against isotropic
+    or anisotropic box compression between host allocations.
+    """
     nb = max(1, int(n_act_blocks))
     upper_all = nb * (nb + 1) // 2
     r_eff = max(float(cutoff) + float(skin), 6.0)
+    safety = max(1.0, float(box_safety))
+    safety_vol = safety * safety * safety
     # ~0.10 atoms/A^3 -> 1 tile ~ 320 A^3 (~6.8 A); sphere of (r_eff + 7.5 A)
-    est_per_tile = int(max(96.0, 0.5 * (4.189 * ((r_eff + 7.5) ** 3) / 320.0) * 2.8))
-    cap = max(2048, nb * est_per_tile)
+    est_per_tile = int(max(96.0 * safety_vol, 0.5 * (4.189 * ((r_eff + 7.5) ** 3) / 320.0) * 2.8 * safety_vol))
+    cap = max(math.ceil(2048 * safety_vol), nb * est_per_tile)
     cap = ((min(upper_all, cap) + 63) // 64) * 64
     return max(64, cap)
 
@@ -235,12 +268,18 @@ def _compute_tile_aabbs(
     mask_m: jax.Array,
     safe_box: jax.Array,
     n_act_blocks: int,
-) -> tuple[jax.Array, jax.Array, jax.Array]:
-    """Compute tight PBC-unwrapped 32-atom tile AABBs ``(center, half_ext, has_tile)``."""
+) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array, jax.Array, jax.Array]:
+    """Compute 32-atom tile AABBs plus 4 octant-jump-split sub-AABBs per tile.
+
+    Partitions each 32-atom Morton tile at its 3 largest consecutive MIC spatial jumps
+    (falling back to balanced 8-atom quarters ``[0..7], [8..15], [16..23], [24..31]``
+    when smooth) so Z-order octant jumps never bloat sub-tile bounding boxes with empty
+    interior volume while preserving exact triangle-inequality soundness (zero missed pairs).
+    """
     B = pos_m.shape[0]
     box_b = safe_box[:, None, None, :]
     pos_t = jnp.mod(pos_m.reshape(B, n_act_blocks, _NB_BLOCK_N, 3), box_b)
-    msk_t = (mask_m.reshape(B, n_act_blocks, _NB_BLOCK_N) > 0)
+    msk_t = mask_m.reshape(B, n_act_blocks, _NB_BLOCK_N) > 0
     lane = jnp.arange(_NB_BLOCK_N, dtype=jnp.int32)[None, None, :]
     first_lane = jnp.min(jnp.where(msk_t, lane, _NB_BLOCK_N), axis=2, keepdims=True)
     is_first = lane == jnp.minimum(first_lane, _NB_BLOCK_N - 1)
@@ -253,57 +292,62 @@ def _compute_tile_aabbs(
     center = jnp.mod(0.5 * (lo + hi), safe_box[:, None, :])
     half_ext = 0.5 * (hi - lo)
     has_tile = jnp.any(msk_t, axis=2).astype(jnp.int32)
-    return center, half_ext, has_tile
+
+    # Identify top-3 spatial jump transitions inside each 32-atom Morton tile (or {7, 15, 23})
+    both_act = msk_t[:, :, 1:] & msk_t[:, :, :-1]
+    dp = pos_t[:, :, 1:, :] - pos_t[:, :, :-1, :]
+    dp_mic = dp - box_b * jnp.round(dp / box_b)
+    step_d2 = jnp.where(both_act, jnp.sum(dp_mic * dp_mic, axis=-1), -1.0)
+    s_idx = jnp.arange(_NB_BLOCK_N - 1, dtype=jnp.int32)[None, None, :]
+    q_bonus = jnp.where((s_idx == 7) | (s_idx == 15) | (s_idx == 23), 9.0, 0.0)
+    score0 = step_d2 + q_bonus + s_idx.astype(jnp.float32) * 1e-4
+    p0 = jnp.argmax(score0, axis=-1, keepdims=True)
+    score1 = jnp.where(s_idx == p0, -1e9, score0)
+    p1 = jnp.argmax(score1, axis=-1, keepdims=True)
+    score2 = jnp.where((s_idx == p0) | (s_idx == p1), -1e9, score1)
+    p2 = jnp.argmax(score2, axis=-1, keepdims=True)
+    seg_id = (lane > p0).astype(jnp.int32) + (lane > p1).astype(jnp.int32) + (lane > p2).astype(jnp.int32)
+
+    s_vec = jnp.arange(_SUB_TILES, dtype=jnp.int32)[None, None, :, None]
+    in_seg = msk_t[:, :, None, :] & (seg_id[:, :, None, :] == s_vec)
+    lane4 = jnp.arange(_NB_BLOCK_N, dtype=jnp.int32)[None, None, None, :]
+    first_s = jnp.min(jnp.where(in_seg, lane4, _NB_BLOCK_N), axis=3, keepdims=True)
+    is_first_s = lane4 == jnp.minimum(first_s, _NB_BLOCK_N - 1)
+    pos_t4 = pos_t[:, :, None, :, :]
+    ref_s = jnp.sum(jnp.where(is_first_s[..., None], pos_t4, 0.0), axis=3, keepdims=True)
+    box5 = safe_box[:, None, None, None, :]
+    dr_s = pos_t4 - ref_s
+    unwrap_s = ref_s + (dr_s - box5 * jnp.round(dr_s / box5))
+    pts_s = jnp.where(in_seg[..., None], unwrap_s, ref_s)
+    lo_s = jnp.min(pts_s, axis=3)
+    hi_s = jnp.max(pts_s, axis=3)
+    sub_center = jnp.mod(0.5 * (lo_s + hi_s), safe_box[:, None, None, :])
+    sub_half_ext = 0.5 * (hi_s - lo_s)
+    sub_has = jnp.any(in_seg, axis=3).astype(jnp.int32)
+    return center, half_ext, has_tile, sub_center, sub_half_ext, sub_has
 
 
-def _build_tile_pairs_jax_fallback(
-    center: jax.Array,
-    half_ext: jax.Array,
-    has_tile: jax.Array,
-    safe_box: jax.Array,
-    inv_perm: jax.Array,
-    dedup_excl: DedupExclEdges,
-    r_eff_sq: float,
+def _stamp_excl_bitmasks_jax(
+    nb: int,
     max_pairs: int,
-) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array, jax.Array]:
-    """Pure-JAX tile-pair & bitmask builder for CPU ``interpret=True`` and StableHLO export."""
-    B, nb, _ = center.shape
+    inv_perm: jax.Array,
+    pair_ti: jax.Array,
+    pair_tj: jax.Array,
+    n_valid: jax.Array,
+    dedup_excl: DedupExclEdges,
+) -> tuple[jax.Array, jax.Array]:
+    """Pure-JAX exclusion bitmask stamper for ``interpret=True`` and export fallback."""
 
-    def _one_rep(c_b, h_b, has_b, box_b, inv_b):
-        dc = jnp.abs(c_b[:, None, :] - c_b[None, :, :])
-        dc = jnp.minimum(dc, box_b[None, None, :] - dc)
-        gap = jnp.maximum(0.0, dc - (h_b[:, None, :] + h_b[None, :, :]))
-        dist_sq = jnp.sum(gap * gap, axis=-1)
-        idx_i = jnp.arange(nb, dtype=jnp.int32)
-        valid = (
-            (has_b[:, None] > 0)
-            & (has_b[None, :] > 0)
-            & (idx_i[:, None] <= idx_i[None, :])
-            & (dist_sq <= r_eff_sq)
-        )
-        flat_v = valid.reshape(-1)
-        n_val = jnp.minimum(
-            jnp.sum(flat_v.astype(jnp.int32), dtype=jnp.int32),
-            jnp.int32(max_pairs),
-        ).astype(jnp.int32)
-        order_raw = jnp.argsort(~flat_v)[:max_pairs].astype(jnp.int32)
-        pad_ord = max_pairs - int(order_raw.shape[0])
-        order = (
-            jnp.pad(order_raw, (0, pad_ord), constant_values=0)
-            if pad_ord > 0
-            else order_raw
-        )
+    def _one(ti, tj, n_val, inv_b):
         p_idx = jnp.arange(max_pairs, dtype=jnp.int32)
-        keep = p_idx < n_val
-        ti = jnp.where(keep, order // jnp.int32(nb), jnp.int32(-1)).astype(jnp.int32)
-        tj = jnp.where(keep, order % jnp.int32(nb), jnp.int32(-1)).astype(jnp.int32)
-
+        keep = (p_idx < n_val) & (ti >= 0) & (tj >= 0)
         pair_lookup = jnp.full((nb * nb,), -1, dtype=jnp.int32)
         safe_flat = jnp.where(keep, ti * jnp.int32(nb) + tj, jnp.int32(0)).astype(jnp.int32)
         pair_lookup = pair_lookup.at[safe_flat].set(jnp.where(keep, p_idx, jnp.int32(-1)))
-        # Ensure slot 0 wasn't clobbered if pair (0, 0) was valid at p_idx == 0
+        ti0 = jnp.maximum(ti[0], jnp.int32(0))
+        tj0 = jnp.maximum(tj[0], jnp.int32(0))
         pair_lookup = jnp.where(
-            (jnp.arange(nb * nb, dtype=jnp.int32) == (ti[0] * jnp.int32(nb) + tj[0])) & (n_val > 0),
+            (jnp.arange(nb * nb, dtype=jnp.int32) == (ti0 * jnp.int32(nb) + tj0)) & (n_val > 0),
             jnp.int32(0),
             pair_lookup,
         )
@@ -328,9 +372,78 @@ def _build_tile_pairs_jax_fallback(
 
         ef = _stamp(dedup_excl.full_u, dedup_excl.full_v, dedup_excl.n_full)
         e14 = _stamp(dedup_excl.excl14_u, dedup_excl.excl14_v, dedup_excl.n_14)
-        return ti, tj, ef, e14, n_val
+        return ef, e14
 
-    return jax.vmap(_one_rep)(center, half_ext, has_tile, safe_box, inv_perm)
+    return jax.vmap(_one)(pair_ti, pair_tj, n_valid, inv_perm)
+
+
+def _build_tile_pairs_jax_fallback(
+    center: jax.Array,
+    half_ext: jax.Array,
+    has_tile: jax.Array,
+    sub_center: jax.Array,
+    sub_half_ext: jax.Array,
+    sub_has: jax.Array,
+    safe_box: jax.Array,
+    inv_perm: jax.Array,
+    dedup_excl: DedupExclEdges,
+    r_eff_sq: float,
+    max_pairs: int,
+) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array, jax.Array]:
+    """Pure-JAX tile-pair & bitmask builder for CPU ``interpret=True`` and StableHLO export."""
+    _, nb, _ = center.shape
+
+    def _discover_one(c_b, h_b, has_b, sc_b, sh_b, shas_b, box_b):
+        dc = jnp.abs(c_b[:, None, :] - c_b[None, :, :])
+        dc = jnp.minimum(dc, box_b[None, None, :] - dc)
+        gap = jnp.maximum(0.0, dc - (h_b[:, None, :] + h_b[None, :, :]))
+        dist_sq = jnp.sum(gap * gap, axis=-1)
+        idx_i = jnp.arange(nb, dtype=jnp.int32)
+        coarse_valid = (
+            (has_b[:, None] > 0)
+            & (has_b[None, :] > 0)
+            & (idx_i[:, None] <= idx_i[None, :])
+            & (dist_sq <= r_eff_sq)
+        )
+        sub_any = idx_i[:, None] == idx_i[None, :]
+        for sa in range(_SUB_TILES):
+            ca = sc_b[:, sa, :][:, None, :]
+            ha = sh_b[:, sa, :][:, None, :]
+            ma = (shas_b[:, sa] > 0)[:, None]
+            for sb in range(_SUB_TILES):
+                cb = sc_b[:, sb, :][None, :, :]
+                hb = sh_b[:, sb, :][None, :, :]
+                mb = (shas_b[:, sb] > 0)[None, :]
+                sdc = jnp.abs(ca - cb)
+                sdc = jnp.minimum(sdc, box_b[None, None, :] - sdc)
+                sgap = jnp.maximum(0.0, sdc - (ha + hb))
+                sub_any = sub_any | (ma & mb & (jnp.sum(sgap * sgap, axis=-1) <= r_eff_sq))
+        valid = coarse_valid & sub_any
+        flat_v = valid.reshape(-1)
+        n_val = jnp.minimum(
+            jnp.sum(flat_v.astype(jnp.int32), dtype=jnp.int32),
+            jnp.int32(max_pairs),
+        ).astype(jnp.int32)
+        order_raw = jnp.argsort(~flat_v)[:max_pairs].astype(jnp.int32)
+        pad_ord = max_pairs - int(order_raw.shape[0])
+        order = (
+            jnp.pad(order_raw, (0, pad_ord), constant_values=0)
+            if pad_ord > 0
+            else order_raw
+        )
+        p_idx = jnp.arange(max_pairs, dtype=jnp.int32)
+        keep = p_idx < n_val
+        ti = jnp.where(keep, order // jnp.int32(nb), jnp.int32(-1)).astype(jnp.int32)
+        tj = jnp.where(keep, order % jnp.int32(nb), jnp.int32(-1)).astype(jnp.int32)
+        return ti, tj, n_val
+
+    pair_ti, pair_tj, n_valid = jax.vmap(_discover_one)(
+        center, half_ext, has_tile, sub_center, sub_half_ext, sub_has, safe_box
+    )
+    ef_bits, e14_bits = _stamp_excl_bitmasks_jax(
+        nb, max_pairs, inv_perm, pair_ti, pair_tj, n_valid, dedup_excl
+    )
+    return pair_ti, pair_tj, ef_bits, e14_bits, n_valid
 
 
 def _stamp_excl_bitmasks_gpu(
@@ -420,12 +533,18 @@ def _discover_pairs_gpu(
     center: jax.Array,
     half_ext: jax.Array,
     has_tile: jax.Array,
+    sub_center: jax.Array,
+    sub_half_ext: jax.Array,
+    sub_has: jax.Array,
     safe_box: jax.Array,
     r_eff: float,
     host_min_box: float,
+    *,
+    interpret: bool = False,
 ) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array, jax.Array]:
     """Two-pass GPU Pallas tile-pair discovery returning ``(ti, tj, row_start, row_len, n_valid)``."""
-    r_eff_sq = float(r_eff * r_eff)
+    r_eff_pad = float(r_eff) + 1e-3
+    r_eff_sq = float(r_eff_pad * r_eff_pad)
     cx_f = center[:, :, 0].reshape(-1).astype(jnp.float32)
     cy_f = center[:, :, 1].reshape(-1).astype(jnp.float32)
     cz_f = center[:, :, 2].reshape(-1).astype(jnp.float32)
@@ -433,19 +552,27 @@ def _discover_pairs_gpu(
     hy_f = half_ext[:, :, 1].reshape(-1).astype(jnp.float32)
     hz_f = half_ext[:, :, 2].reshape(-1).astype(jnp.float32)
     has_f = has_tile.reshape(-1).astype(jnp.int32)
+    scx_f = sub_center[:, :, :, 0].reshape(-1).astype(jnp.float32)
+    scy_f = sub_center[:, :, :, 1].reshape(-1).astype(jnp.float32)
+    scz_f = sub_center[:, :, :, 2].reshape(-1).astype(jnp.float32)
+    shx_f = sub_half_ext[:, :, :, 0].reshape(-1).astype(jnp.float32)
+    shy_f = sub_half_ext[:, :, :, 1].reshape(-1).astype(jnp.float32)
+    shz_f = sub_half_ext[:, :, :, 2].reshape(-1).astype(jnp.float32)
+    shas_f = sub_has.reshape(-1).astype(jnp.int32)
     box_f = safe_box.reshape(-1).astype(jnp.float32)
     any_spec = pl.BlockSpec(memory_space=pl.ANY)
     chunk_w = 64
     n_chunks = (nb + chunk_w - 1) // chunk_w
 
-    use_cell_grid = (nb > 1024) and (host_min_box >= 2.0 * (r_eff + 3.0))
-    g_cell = int(np.clip(int(host_min_box // max(r_eff + 4.5, 12.0)), 4, 20)) if use_cell_grid else 1
+    use_cell_grid = (nb >= 64) and (host_min_box >= 3.0 * (r_eff + 1.0))
+    g_cell = int(np.clip(int(host_min_box // max(r_eff + 7.0, 14.0)), 3, 20)) if use_cell_grid else 1
     n_cells = g_cell * g_cell * g_cell
 
     if use_cell_grid:
         cell_len = safe_box / float(g_cell)
-        h_lim = 0.5 * jnp.maximum(cell_len - float(r_eff), 0.0)
-        is_wide = (has_tile > 0) & jnp.any(half_ext > h_lim[:, None, :], axis=-1)
+        h_lim = 0.5 * jnp.maximum(cell_len - float(r_eff_pad), 0.0)
+        cell_too_small = jnp.any(cell_len <= float(r_eff_pad) + 1e-3, axis=-1)
+        is_wide = (has_tile > 0) & (cell_too_small[:, None] | jnp.any(half_ext > h_lim[:, None, :], axis=-1))
         is_narrow = (has_tile > 0) & (~is_wide)
         g_coord = jnp.clip(
             jnp.floor(center / jnp.maximum(cell_len[:, None, :], 1e-4)).astype(jnp.int32),
@@ -475,13 +602,15 @@ def _discover_pairs_gpu(
         ns_flat = jnp.zeros((1,), dtype=jnp.int32)
 
     def _run_pass(emit: bool, row_start_in: jax.Array | None = None):
+        out_stride = max_pairs + 1
         rs_arg = row_start_in.reshape(-1) if row_start_in is not None else jnp.zeros((B * nb,), dtype=jnp.int32)
-        ti_init = jnp.full((B * max_pairs,), -1, dtype=jnp.int32) if emit else jnp.zeros((1,), dtype=jnp.int32)
-        tj_init = jnp.full((B * max_pairs,), -1, dtype=jnp.int32) if emit else jnp.zeros((1,), dtype=jnp.int32)
+        ti_init = jnp.full((B * out_stride,), -1, dtype=jnp.int32) if emit else jnp.zeros((1,), dtype=jnp.int32)
+        tj_init = jnp.full((B * out_stride,), -1, dtype=jnp.int32) if emit else jnp.zeros((1,), dtype=jnp.int32)
 
         def _pair_kernel(  # noqa: PLR0913
-            cx_r, cy_r, cz_r, hx_r, hy_r, hz_r, has_r, box_r,
-            cs_r, ce_r, ns_r, ws_r, nw_r, iw_r, cid_r, rs_r, ti_in_r, tj_in_r, *out_refs
+            cx_r, cy_r, cz_r, hx_r, hy_r, hz_r, has_r,
+            scx_r, scy_r, scz_r, shx_r, shy_r, shz_r, shas_r,
+            box_r, cs_r, ce_r, ns_r, ws_r, nw_r, iw_r, cid_r, rs_r, ti_in_r, tj_in_r, *out_refs
         ):
             del ti_in_r, tj_in_r
             b_id = pl.program_id(0)
@@ -521,7 +650,57 @@ def _discover_pairs_gpu(
                 gx = jnp.maximum(zf, dcx - (hxi + hxj))
                 gy = jnp.maximum(zf, dcy - (hyi + hyj))
                 gz = jnp.maximum(zf, dcz - (hzi + hzj))
-                return ok_j & hj & ((gx * gx + gy * gy + gz * gz) <= r2_lim)
+                coarse_ok = ok_j & hj & ((gx * gx + gy * gy + gz * gz) <= r2_lim)
+                is_self = coarse_ok & (tj_v == ti)
+                need_sub = coarse_ok & (~is_self)
+
+                def _refine_sub(_):
+                    def _sub_step(sp_k, any_hit):
+                        sa = sp_k >> 2
+                        sb = sp_k & 3
+                        base_si = (base_t + ti) * _SUB_TILES + sa + z0
+                        has_sa = _pl_load(shas_r, (base_si,))[0] > 0
+
+                        def _do_sa(cur_hit):
+                            pend = need_sub & (~cur_hit)
+                            scxi = _pl_load(scx_r, (base_si,))[0]
+                            scyi = _pl_load(scy_r, (base_si,))[0]
+                            sczi = _pl_load(scz_r, (base_si,))[0]
+                            shxi = _pl_load(shx_r, (base_si,))[0]
+                            shyi = _pl_load(shy_r, (base_si,))[0]
+                            shzi = _pl_load(shz_r, (base_si,))[0]
+                            idx_sb = (base_t + stj) * _SUB_TILES + sb
+                            has_sb = _pl_load(shas_r, (idx_sb,), mask=pend, other=0) > 0
+                            scxj = _pl_load(scx_r, (idx_sb,), mask=pend, other=zf)
+                            scyj = _pl_load(scy_r, (idx_sb,), mask=pend, other=zf)
+                            sczj = _pl_load(scz_r, (idx_sb,), mask=pend, other=zf)
+                            shxj = _pl_load(shx_r, (idx_sb,), mask=pend, other=zf)
+                            shyj = _pl_load(shy_r, (idx_sb,), mask=pend, other=zf)
+                            shzj = _pl_load(shz_r, (idx_sb,), mask=pend, other=zf)
+                            sdcx = jnp.abs(scxi - scxj)
+                            sdcx = jnp.minimum(sdcx, bx - sdcx)
+                            sdcy = jnp.abs(scyi - scyj)
+                            sdcy = jnp.minimum(sdcy, by - sdcy)
+                            sdcz = jnp.abs(sczi - sczj)
+                            sdcz = jnp.minimum(sdcz, bz - sdcz)
+                            sgx = jnp.maximum(zf, sdcx - (shxi + shxj))
+                            sgy = jnp.maximum(zf, sdcy - (shyi + shyj))
+                            sgz = jnp.maximum(zf, sdcz - (shzi + shzj))
+                            hit = pend & has_sb & ((sgx * sgx + sgy * sgy + sgz * sgz) <= r2_lim)
+                            return cur_hit | hit
+
+                        return jax.lax.cond(has_sa, _do_sa, lambda h: h, any_hit)
+
+                    return jax.lax.fori_loop(
+                        jnp.int32(0), jnp.int32(_SUB_TILES * _SUB_TILES), _sub_step, is_self
+                    )
+
+                return jax.lax.cond(
+                    jnp.max(need_sub.astype(jnp.int32)) > 0,
+                    _refine_sub,
+                    lambda _: is_self,
+                    None,
+                )
 
             def _store_vec(cur_cnt, tj_v, v_mask):
                 n_add = jnp.sum(v_mask.astype(jnp.int32), dtype=jnp.int32).astype(jnp.int32)
@@ -529,7 +708,7 @@ def _discover_pairs_gpu(
                     loc = (jnp.cumsum(v_mask.astype(jnp.int32), dtype=jnp.int32) - jnp.int32(1)).astype(jnp.int32)
                     dst = (rs_i + cur_cnt + loc).astype(jnp.int32)
                     w_ok = v_mask & (dst < max_pairs)
-                    s_dst = (b_id * max_pairs + jnp.where(w_ok, dst, jnp.int32(0))).astype(jnp.int32)
+                    s_dst = (b_id * out_stride + jnp.where(w_ok, dst, jnp.int32(max_pairs))).astype(jnp.int32)
                     _pl_store(out_refs[0], (s_dst,), jnp.broadcast_to(ti, tj_v.shape).astype(jnp.int32), mask=w_ok)
                     _pl_store(out_refs[1], (s_dst,), tj_v.astype(jnp.int32), mask=w_ok)
                 return (cur_cnt + n_add).astype(jnp.int32)
@@ -598,17 +777,20 @@ def _discover_pairs_gpu(
                 _pl_store(out_refs[0], (base_t + ti + z0,), cnt_out[None])
 
         in_args = (
-            cx_f, cy_f, cz_f, hx_f, hy_f, hz_f, has_f, box_f,
-            c_start, c_end, ns_flat, wide_sorted, n_wide, is_wide_flat, cid_flat, rs_arg, ti_init, tj_init,
+            cx_f, cy_f, cz_f, hx_f, hy_f, hz_f, has_f,
+            scx_f, scy_f, scz_f, shx_f, shy_f, shz_f, shas_f,
+            box_f, c_start, c_end, ns_flat, wide_sorted, n_wide, is_wide_flat, cid_flat, rs_arg, ti_init, tj_init,
         )
+        cp_disc = plt.CompilerParams(num_warps=2, num_stages=1) if not interpret else None
         if not emit:
             rl = pl.pallas_call(
                 _pair_kernel,
                 out_shape=jax.ShapeDtypeStruct((B * nb,), jnp.int32),
-                in_specs=[any_spec] * 18,
+                in_specs=[any_spec] * 25,
                 out_specs=any_spec,
                 grid=(B, nb),
-                compiler_params=plt.CompilerParams(num_warps=2, num_stages=1),
+                interpret=interpret,
+                compiler_params=cp_disc,
                 name="morton_count_tile_pairs",
             )(*in_args)
             return rl.reshape(B, nb)
@@ -616,17 +798,21 @@ def _discover_pairs_gpu(
         ti_out, tj_out = pl.pallas_call(
             _pair_kernel,
             out_shape=[
-                jax.ShapeDtypeStruct((B * max_pairs,), jnp.int32),
-                jax.ShapeDtypeStruct((B * max_pairs,), jnp.int32),
+                jax.ShapeDtypeStruct((B * out_stride,), jnp.int32),
+                jax.ShapeDtypeStruct((B * out_stride,), jnp.int32),
             ],
-            in_specs=[any_spec] * 18,
+            in_specs=[any_spec] * 25,
             out_specs=[any_spec, any_spec],
             grid=(B, nb),
-            compiler_params=plt.CompilerParams(num_warps=2, num_stages=1),
-            input_output_aliases={16: 0, 17: 1},
+            interpret=interpret,
+            compiler_params=cp_disc,
+            input_output_aliases={23: 0, 24: 1},
             name="morton_emit_tile_pairs",
         )(*in_args)
-        return ti_out.reshape(B, max_pairs), tj_out.reshape(B, max_pairs)
+        return (
+            ti_out.reshape(B, out_stride)[:, :max_pairs],
+            tj_out.reshape(B, out_stride)[:, :max_pairs],
+        )
 
     row_len = _run_pass(emit=False)
     row_end = jnp.cumsum(row_len, axis=1, dtype=jnp.int32).astype(jnp.int32)
@@ -698,20 +884,33 @@ def pallas_build_morton_tile_pairs_gpu(
     eps_m = jnp.take_along_axis(eps_f32, perm, axis=1)
     mask_m = jnp.take_along_axis(msk_bool.astype(jnp.int32), perm, axis=1)
 
-    center, half_ext, has_tile = _compute_tile_aabbs(pos_m, mask_m, safe_box, n_act_blocks)
+    center, half_ext, has_tile, sub_center, sub_half_ext, sub_has = _compute_tile_aabbs(
+        pos_m, mask_m, safe_box, n_act_blocks
+    )
     r_eff = float(cutoff) + float(skin)
 
     use_gpu = (not interpret) and (not in_export_context()) and _triton_gpu_available()
     if use_gpu:
         pair_ti, pair_tj, row_start, row_len, n_valid = _discover_pairs_gpu(
-            B, n_act_blocks, max_pairs, center, half_ext, has_tile, safe_box, r_eff, host_min_box
+            B, n_act_blocks, max_pairs, center, half_ext, has_tile,
+            sub_center, sub_half_ext, sub_has, safe_box, r_eff, host_min_box, interpret=False,
         )
         ef_bits, e14_bits = _stamp_excl_bitmasks_gpu(
             B, n_act_blocks, max_pairs, n_act_pad, inv_perm, row_start, row_len, pair_tj, dedup_excl
         )
+    elif (not in_export_context()) and (n_act_blocks >= 64):
+        pair_ti, pair_tj, _row_start, _row_len, n_valid = _discover_pairs_gpu(
+            B, n_act_blocks, max_pairs, center, half_ext, has_tile,
+            sub_center, sub_half_ext, sub_has, safe_box, r_eff, host_min_box, interpret=True,
+        )
+        ef_bits, e14_bits = _stamp_excl_bitmasks_jax(
+            n_act_blocks, max_pairs, inv_perm, pair_ti, pair_tj, n_valid, dedup_excl
+        )
     else:
+        r_eff_pad = r_eff + 1e-3
         pair_ti, pair_tj, ef_bits, e14_bits, n_valid = _build_tile_pairs_jax_fallback(
-            center, half_ext, has_tile, safe_box, inv_perm, dedup_excl, r_eff * r_eff, max_pairs
+            center, half_ext, has_tile, sub_center, sub_half_ext, sub_has,
+            safe_box, inv_perm, dedup_excl, r_eff_pad * r_eff_pad, max_pairs,
         )
 
     return MortonTilePairState(
@@ -1080,6 +1279,7 @@ def _pallas_bonded_and_tile_pairs_soa(  # noqa: PLR0913
     max_pairs: int,
     pme_alpha: float = 0.0,
     cutoff: float = 9.0,
+    rf_dielectric: float | None = None,
     coulomb_constant: float = COULOMB_CONSTANT,
     lj_switch_width: float = 0.0,
     softcore_alpha: float = 0.5,
@@ -1125,6 +1325,8 @@ def _pallas_bonded_and_tile_pairs_soa(  # noqa: PLR0913
     s_inv = n_act_pad if int(inv_perm_flat.size) == B * n_act_pad and B > 1 else (n_act_pad if B == 1 else 0)
     s_box = 3 if int(box_flat.size) == B * 3 and B > 1 else (3 if B == 1 else 0)
     s_lam = 1 if int(lam_flat.size) == B and B > 1 else 0
+    has_rf = (pme_alpha <= 0.0) and (rf_dielectric is not None)
+    k_rf_f, c_rf_f = reaction_field_k_c(cutoff, rf_dielectric) if has_rf and rf_dielectric is not None else (0.0, 0.0)
 
     fx0 = jnp.zeros((B * n_act_pad,), dtype=dtype)
     fy0 = jnp.zeros((B * n_act_pad,), dtype=dtype)
@@ -1302,6 +1504,13 @@ def _pallas_bonded_and_tile_pairs_soa(  # noqa: PLR0913
                                     erfc_v = _triton_erfc(ar)
                                     e_c = qq * w_e * erfc_v * inv_r
                                     de_c = qq * w_e * ((zero - erfc_v) * inv_r2 - (alpha_c * two_sqrt_pi * ex_t) * inv_r)
+                            elif has_rf:
+                                vc = dist >= jnp.asarray(1e-4, dtype=dtype)
+                                k_rf_c = jnp.asarray(k_rf_f, dtype=dtype)
+                                two_k_rf_c = jnp.asarray(2.0 * k_rf_f, dtype=dtype)
+                                c_rf_c = jnp.asarray(c_rf_f, dtype=dtype)
+                                e_c = jnp.where(vc, qq * w_e * (inv_r + k_rf_c * r2_raw - c_rf_c), zero)
+                                de_c = jnp.where(vc, qq * w_e * (two_k_rf_c * dist - inv_r2), zero)
                             else:
                                 vc = dist >= jnp.asarray(1e-4, dtype=dtype)
                                 e_c = jnp.where(vc, qq * w_e * inv_r, zero)
@@ -1716,10 +1925,13 @@ def pallas_tile_pairs_param_grads(  # noqa: PLR0913
     include_pme_excl_erf: bool,
     scale_14_vdw: float,
     scale_14_elec: float,
+    rf_dielectric: float | None = None,
     interpret: bool = False,
 ) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array]:
     """MK-73: Native O(N) memory 2D-grid Pallas parameter-gradient kernel for 32x32 tile pairs."""
     b_pos, b_q, b_sig, b_eps, b_mask, b_tp, b_ef, b_e14, b_box, b_lam = in_b
+    has_rf_bwd = (pme_alpha <= 0.0) and (rf_dielectric is not None)
+    k_rf_bwd, c_rf_bwd = reaction_field_k_c(cutoff, rf_dielectric) if has_rf_bwd and rf_dielectric is not None else (0.0, 0.0)
     N_orig = int(positions.shape[1] if b_pos else positions.shape[0])
     M_pairs = int(tile_pairs.shape[1] if b_tp else tile_pairs.shape[0])
     n_blocks = max(1, (N_orig + _NB_BLOCK_N - 1) // _NB_BLOCK_N)
@@ -1907,6 +2119,14 @@ def pallas_tile_pairs_param_grads(  # noqa: PLR0913
                         else:
                             erfc_v = erfc(ar) if (interpret and dtype == jnp.float64) else _triton_erfc(ar)
                             cfac = we * erfc_v * inv_r
+                    elif has_rf_bwd:
+                        k_rf_bc = jnp.asarray(k_rf_bwd, dtype=dtype)
+                        c_rf_bc = jnp.asarray(c_rf_bwd, dtype=dtype)
+                        cfac = jnp.where(
+                            dist >= jnp.asarray(1e-4, dtype=dtype),
+                            we * (inv_r + k_rf_bc * r2_raw - c_rf_bc),
+                            zero,
+                        )
                     else:
                         cfac = jnp.where(dist >= jnp.asarray(1e-4, dtype=dtype), we * inv_r, zero)
                     c_mat = jnp.where(act, gv * coul_c * cfac, zero)

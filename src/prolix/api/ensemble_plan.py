@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import contextlib as _contextlib
 import dataclasses
+import inspect
 import math
 import os
 import sys
@@ -74,6 +75,7 @@ from prolix.constants import COULOMB_CONSTANT
 from prolix.export import in_export_context
 from prolix.knob_surface import KnobSurface  # noqa: TC001
 from prolix.pallas_kernels import _infer_first_pure_water_block, pallas_bonded_all_fused
+from prolix.physics import explicit_corrections
 from prolix.physics import neighbor_list as nl_mod
 from prolix.physics import pme_pallas as pme_pallas_mod
 from prolix.physics.kups_adapter import AKMA_TIME_UNIT_FS, gamma_ps_to_akma
@@ -94,6 +96,7 @@ from prolix.physics.pallas_ragged_queue import (
     spme_forces_ragged_tiered,
 )
 from prolix.physics.pallas_tile_pairs import (
+    DEFAULT_NPT_BOX_SAFETY,
     _pallas_bonded_and_tile_pairs_soa,
     estimate_max_tile_pairs,
     pallas_build_morton_tile_pairs_gpu,
@@ -641,6 +644,102 @@ def _encode_bundle_nl(nbr: Any, bundle: Any) -> Any:
     )
 
 
+def _compute_morton_npt_vol_constants(
+    *,
+    box_b: np.ndarray | jax.Array,
+    sig_b: jax.Array | np.ndarray,
+    eps_b: jax.Array | np.ndarray,
+    q_b: jax.Array | np.ndarray,
+    am_b: jax.Array | np.ndarray,
+    cutoff: float,
+    lj_switch_width: float = 0.0,
+    combining_rule: str = "lorentz_berthelot",
+    use_dispersion_correction: bool = True,
+    do_pme: bool = True,
+    pme_alpha: float = 0.34,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Precompute volume-invariant NPT barostat constants ``(c_tail_b, c_net_q_b)``.
+
+    Both isotropic long-range LJ dispersion tail energy ``E_tail(V) = c_tail / V`` and
+    SPME neutralizing background energy ``E_bg(V) = c_net_q / V`` scale strictly as ``1 / V``,
+    so ``Delta(E_tail + E_bg) = (c_tail + c_net_q) * (1 / V_new - 1 / V_old)`` without O(N)
+    recomputation on each barostat trial.
+    """
+    box_arr = np.asarray(box_b, dtype=np.float64)
+    B = int(box_arr.shape[0])
+    c_tail = np.zeros((B,), dtype=np.float64)
+    c_net_q = np.zeros((B,), dtype=np.float64)
+
+    sig_params = inspect.signature(explicit_corrections.lj_dispersion_tail_energy).parameters
+    tail_kwargs: dict[str, Any] = {}
+    if "lj_switch_width" in sig_params:
+        tail_kwargs["lj_switch_width"] = float(lj_switch_width)
+    if "combining_rule" in sig_params:
+        tail_kwargs["combining_rule"] = str(combining_rule)
+
+    alpha_f = float(pme_alpha)
+    bg_prefactor = (
+        -(math.pi * float(COULOMB_CONSTANT) / (2.0 * alpha_f * alpha_f))
+        if (do_pme and alpha_f > 0.0)
+        else 0.0
+    )
+
+    tail_dt = jnp.float64 if bool(jax.config.read("jax_enable_x64")) else jnp.float32
+    for b in range(B):
+        bx_one = np.diag(box_arr[b]) if box_arr[b].ndim == 2 else box_arr[b]
+        v0 = float(np.prod(bx_one))
+        if use_dispersion_correction and v0 > 0.0:
+            sig_j = jnp.asarray(sig_b[b], dtype=tail_dt)
+            eps_j = jnp.asarray(eps_b[b], dtype=tail_dt)
+            msk_b = jnp.asarray(np.asarray(am_b[b], dtype=bool))
+            e_t0 = float(
+                np.asarray(
+                    explicit_corrections.lj_dispersion_tail_energy(
+                        jnp.asarray(bx_one, dtype=tail_dt),
+                        sig_j,
+                        eps_j,
+                        float(cutoff),
+                        msk_b,
+                        **tail_kwargs,
+                    )
+                )
+            )
+            c_tail[b] = e_t0 * v0
+        if do_pme and alpha_f > 0.0:
+            q_np = np.asarray(q_b[b], dtype=np.float64)
+            m_np = np.asarray(am_b[b], dtype=bool)
+            q_net = float(np.sum(np.where(m_np, q_np, 0.0)))
+            c_net_q[b] = bg_prefactor * (q_net * q_net)
+
+    return c_tail, c_net_q
+
+
+def _compute_mc_barostat_dh(
+    e_old: jax.Array,
+    e_new: jax.Array,
+    v_old: jax.Array,
+    v_new: jax.Array,
+    *,
+    c_tail_b: jax.Array,
+    c_net_q_b: jax.Array,
+    p0_akma: float | jax.Array,
+    n_mols: float | jax.Array,
+    kT: jax.Array,
+    dlnv: jax.Array | None = None,
+) -> jax.Array:
+    """Compute exact isotropic MC barostat acceptance exponent ``Delta H``."""
+    if dlnv is None:
+        dlnv = jnp.log(v_new / v_old)
+    de_vol_corr = (c_tail_b + c_net_q_b) * (1.0 / v_new - 1.0 / v_old)
+    out_dt = e_new.dtype
+    return (
+        (e_new - e_old)
+        + de_vol_corr.astype(out_dt)
+        + jnp.asarray(p0_akma, dtype=out_dt) * (v_new - v_old).astype(out_dt)
+        - jnp.asarray(n_mols, dtype=out_dt) * kT.astype(out_dt) * dlnv.astype(out_dt)
+    )
+
+
 class EnsemblePlan:
     """Orchestrates batch MD simulations over multiple MolecularBundle instances.
 
@@ -804,6 +903,15 @@ class EnsemblePlan:
         if engine == "auto":
             if not use_neighbor_list or jax.default_backend() == "cpu":
                 return False
+            if self.knob_surface is not None and self.knob_surface.nonbonded is not None:
+                comb_m = (
+                    str(getattr(self.knob_surface.nonbonded, "lj_combining_rule", "lorentz_berthelot"))
+                    .strip()
+                    .lower()
+                    .replace("-", "_")
+                )
+                if comb_m != "lorentz_berthelot":
+                    return False
             cur_pme_pallas = sys.modules.get("prolix.physics.pme_pallas", pme_pallas_mod)
             if (
                 nl_mod.make_neighbor_list_fn is not _ORIG_MAKE_NL_FN
@@ -977,7 +1085,7 @@ class EnsemblePlan:
 
         cutoff = _cached_bundle_cutoff(bundles[0], 9.0)
         nlc = getattr(nb_cfg, "neighbor_list", None) if nb_cfg is not None else None
-        eff_skin = max(float(nlc.skin) if nlc is not None else 1.5, 1.5)
+        eff_skin = max(float(nlc.skin) if nlc is not None else 2.0, 2.0)
         thresh_sq = float((0.5 * eff_skin) ** 2)
         lj_sw = float(lj_switch_width_from_config(nb_cfg))
         tp_grp = knobs.get("tp_group")
@@ -994,8 +1102,12 @@ class EnsemblePlan:
             else np.asarray(bundles[0].box, dtype=np.float64)
         )
         host_min_box = float(np.min(box0_np))
+        box_safety = DEFAULT_NPT_BOX_SAFETY if press_atm is not None else 1.0
+        eff_host_min_box = host_min_box / box_safety
         box_init_b = jnp.broadcast_to(jnp.asarray(box0_np, dtype=state_dtype)[None, :], (B, 3))
-        max_pairs = estimate_max_tile_pairs(n_act_blocks, cutoff=cutoff, skin=eff_skin)
+        max_pairs = estimate_max_tile_pairs(
+            n_act_blocks, cutoff=cutoff, skin=eff_skin, box_safety=box_safety
+        )
         dedup_excl = precompute_dedup_excl_edges(
             bundles[0].excl_dense_indices,
             bundles[0].excl_dense_scales_vdw,
@@ -1045,8 +1157,52 @@ class EnsemblePlan:
             cmap_coeffs=_stack_or_dedup("cmap_coeffs"),
             cmap_mask=_stack_or_dedup("cmap_mask"),
         )
-        pme_alpha = float(_host_float(getattr(bundles[0], "pme_alpha", 0.34), 0.34))
-        do_pme = pme_alpha > 0.0
+        ks_nb = self.knob_surface.nonbonded if self.knob_surface is not None else None
+        pme_alpha_raw = (
+            float(ks_nb.pme_alpha)
+            if ks_nb is not None
+            else float(_host_float(getattr(bundles[0], "pme_alpha", 0.34), 0.34))
+        )
+        elec_method_raw = (
+            str(ks_nb.nonbonded_method)
+            if ks_nb is not None
+            else str(
+                getattr(bundles[0], "electrostatic_method", "pme" if pme_alpha_raw > 0.0 else "cutoff")
+            )
+        ).strip().lower().replace("-", "_")
+        if elec_method_raw in ("reaction_field", "rf", "cutoff_periodic", "cutoffperiodic"):
+            do_pme = False
+            pme_alpha = 0.0
+            rf_diel: float | None = float(
+                ks_nb.reaction_field_dielectric
+                if ks_nb is not None
+                else getattr(bundles[0], "reaction_field_dielectric", 78.3)
+            )
+        elif elec_method_raw in (
+            "cutoff",
+            "no_cutoff",
+            "nocutoff",
+            "cutoff_non_periodic",
+            "cutoffnonperiodic",
+            "coulomb",
+        ):
+            do_pme = False
+            pme_alpha = 0.0
+            rf_diel = None
+        else:
+            pme_alpha = pme_alpha_raw
+            do_pme = pme_alpha > 0.0
+            rf_diel = None
+        use_disp = bool(
+            ks_nb.dispersion_correction
+            if ks_nb is not None
+            else getattr(bundles[0], "use_dispersion_correction", True)
+        )
+        comb_rule = str(
+            getattr(ks_nb, "lj_combining_rule", "lorentz_berthelot")
+            if ks_nb is not None
+            else getattr(bundles[0], "lj_combining_rule", "lorentz_berthelot")
+        )
         if do_pme:
             gd_env = _resolve_env_pme_grid_dims(n_atoms=N)
             if gd_env is not None:
@@ -1144,6 +1300,7 @@ class EnsemblePlan:
                 include_pme_excl_erf=do_pme,
                 scale_14_vdw=dedup_excl.scale_14_vdw,
                 scale_14_elec=dedup_excl.scale_14_elec,
+                rf_dielectric=rf_diel,
                 tp_group=tp_grp,
                 compute_energy=compute_energy,
                 interpret=interpret,
@@ -1173,7 +1330,7 @@ class EnsemblePlan:
         tp0 = pallas_build_morton_tile_pairs_gpu(
             pos_init_b, q_b, sig_b, eps_b, am_b, box_init_b, dedup_excl,
             n_act=n_act, max_pairs=max_pairs, cutoff=cutoff, skin=eff_skin,
-            host_min_box=host_min_box, interpret=interpret,
+            host_min_box=eff_host_min_box, interpret=interpret,
         )
         pad_tail = n_act_pad - n_act
         pos_act0 = pos_init_b[:, :n_act, :].astype(jnp.float32)
@@ -1190,6 +1347,25 @@ class EnsemblePlan:
             compute_energy=False,
         )
         p0_akma = float(press_atm) * 1.01325 / KCAL_MOL_PER_A3_TO_BAR if press_atm is not None else 0.0
+        if press_atm is not None:
+            c_tail_np, c_net_q_np = _compute_morton_npt_vol_constants(
+                box_b=np.broadcast_to(box0_np[None, :], (B, 3)),
+                sig_b=sig_b,
+                eps_b=eps_b,
+                q_b=q_b,
+                am_b=am_b,
+                cutoff=cutoff,
+                lj_switch_width=lj_sw,
+                combining_rule=comb_rule,
+                use_dispersion_correction=use_disp,
+                do_pme=do_pme,
+                pme_alpha=pme_alpha,
+            )
+        else:
+            c_tail_np = np.zeros((B,), dtype=np.float64)
+            c_net_q_np = np.zeros((B,), dtype=np.float64)
+        c_tail_j = jnp.asarray(c_tail_np, dtype=state_dtype)
+        c_net_q_j = jnp.asarray(c_net_q_np, dtype=state_dtype)
 
         @jax.jit
         def _jit_run(
@@ -1234,7 +1410,7 @@ class EnsemblePlan:
                     tp_new = pallas_build_morton_tile_pairs_gpu(
                         pos_full, q_b, sig_b, eps_b, am_b, bx_r, dedup_excl,
                         n_act=n_act, max_pairs=max_pairs, cutoff=cutoff, skin=eff_skin,
-                        host_min_box=host_min_box, interpret=interpret,
+                        host_min_box=eff_host_min_box, interpret=interpret,
                     )
                     remap = jnp.take_along_axis(tp_old.inv_perm, tp_new.perm, axis=1)
                     fx_n = jnp.take_along_axis(fx_r.reshape(B, n_act_pad), remap, axis=1).reshape(B * n_act_pad)
@@ -1247,18 +1423,11 @@ class EnsemblePlan:
                     (px, py, pz, fx_m, fy_m, fz_m, tp_c, box_c),
                 )
                 k_cur = jnp.minimum(jnp.int32(chunk_k), n_steps_i32 - step_i)
+                if press_atm is not None:
+                    next_baro = ((step_i // jnp.int32(baro_int)) + jnp.int32(1)) * jnp.int32(baro_int)
+                    k_cur = jnp.minimum(k_cur, next_baro - step_i)
+                step_next = step_i + k_cur
                 inv_n = _inv_for_n(tp_c.inv_perm)
-                seeds_0 = jax.vmap(lambda k: jax.random.fold_in(k, step_i))(keys_b)
-                px, py, pz, mxh, myh, mzh, px_m, py_m, pz_m = _pallas_baoab_pre_force_batch(
-                    B, in_b_pre, pos_init_b, pos_init_b, pos_init_b, mass_b, seeds_0,
-                    wi_b, wm_b, box_c, dt_b, kT_b, gamma_akma, 0.9572, 1.5139, 15.999, 1.008,
-                    True, True, interpret, atom_mask=am_b, constraint_pairs=cp_b,
-                    constraint_lengths=cl_b, constraint_mask=cm_b, n_active_atoms=n_act,
-                    n_active_waters=n_waters_real, f64_accumulators=f64_acc, fuse_prev_post=False,
-                    morton_inv_perm=inv_n, morton_pad=n_act_pad,
-                    prebuilt_soa=(px, py, pz, mx, my, mz, fx_m, fy_m, fz_m, soa_plan),
-                )
-                _, fx_m, fy_m, fz_m = _eval_morton_forces(px_m, py_m, pz_m, tp_c, box_c, G_c, False)
 
                 def _inner_step(s_rel: Any, ic: Any) -> Any:
                     px_s, py_s, pz_s, mxh_s, myh_s, mzh_s, fx_s, fy_s, fz_s = ic
@@ -1275,14 +1444,72 @@ class EnsemblePlan:
                     _, fx_s, fy_s, fz_s = _eval_morton_forces(px_ms, py_ms, pz_ms, tp_c, box_c, G_c, False)
                     return (px_s, py_s, pz_s, mxh_s, myh_s, mzh_s, fx_s, fy_s, fz_s)
 
-                px, py, pz, mxh, myh, mzh, fx_m, fy_m, fz_m = jax.lax.fori_loop(
-                    jnp.int32(1), k_cur, _inner_step, (px, py, pz, mxh, myh, mzh, fx_m, fy_m, fz_m)
+                seeds_0 = jax.vmap(lambda k: jax.random.fold_in(k, step_i))(keys_b)
+                px, py, pz, mxh, myh, mzh, px_m, py_m, pz_m = _pallas_baoab_pre_force_batch(
+                    B, in_b_pre, pos_init_b, pos_init_b, pos_init_b, mass_b, seeds_0,
+                    wi_b, wm_b, box_c, dt_b, kT_b, gamma_akma, 0.9572, 1.5139, 15.999, 1.008,
+                    True, True, interpret, atom_mask=am_b, constraint_pairs=cp_b,
+                    constraint_lengths=cl_b, constraint_mask=cm_b, n_active_atoms=n_act,
+                    n_active_waters=n_waters_real, f64_accumulators=f64_acc, fuse_prev_post=False,
+                    morton_inv_perm=inv_n, morton_pad=n_act_pad,
+                    prebuilt_soa=(px, py, pz, mx, my, mz, fx_m, fy_m, fz_m, soa_plan),
                 )
+                if press_atm is None:
+                    _, fx_m, fy_m, fz_m = _eval_morton_forces(px_m, py_m, pz_m, tp_c, box_c, G_c, False)
+                    px, py, pz, mxh, myh, mzh, fx_m, fy_m, fz_m = jax.lax.fori_loop(
+                        jnp.int32(1), k_cur, _inner_step, (px, py, pz, mxh, myh, mzh, fx_m, fy_m, fz_m)
+                    )
+                    e_old = jnp.zeros((B,), dtype=jnp.float32)
+                    do_baro = jnp.bool_(False)
+                else:
+                    do_baro = ((step_next // jnp.int32(baro_int)) > (step_i // jnp.int32(baro_int)))
+
+                    def _eval_forces_cond_e(
+                        px_ce: Any, py_ce: Any, pz_ce: Any, want_e: Any
+                    ) -> tuple[Any, Any, Any, Any]:
+                        return jax.lax.cond(
+                            want_e,
+                            lambda _: _eval_morton_forces(px_ce, py_ce, pz_ce, tp_c, box_c, G_c, True),
+                            lambda _: _eval_morton_forces(px_ce, py_ce, pz_ce, tp_c, box_c, G_c, False),
+                            None,
+                        )
+
+                    e_old, fx_m, fy_m, fz_m = _eval_forces_cond_e(
+                        px_m, py_m, pz_m, do_baro & (k_cur == jnp.int32(1))
+                    )
+                    px, py, pz, mxh, myh, mzh, fx_m, fy_m, fz_m = jax.lax.fori_loop(
+                        jnp.int32(1),
+                        k_cur - jnp.int32(1),
+                        _inner_step,
+                        (px, py, pz, mxh, myh, mzh, fx_m, fy_m, fz_m),
+                    )
+
+                    def _final_md_step(st_last: Any) -> Any:
+                        _, px_l, py_l, pz_l, mxh_l, myh_l, mzh_l, fx_l, fy_l, fz_l = st_last
+                        seeds_l = jax.vmap(lambda k: jax.random.fold_in(k, step_i + k_cur - jnp.int32(1)))(keys_b)
+                        px_l, py_l, pz_l, mxh_l, myh_l, mzh_l, px_ml, py_ml, pz_ml = _pallas_baoab_pre_force_batch(
+                            B, in_b_pre, pos_init_b, pos_init_b, pos_init_b, mass_b, seeds_l,
+                            wi_b, wm_b, box_c, dt_b, kT_b, gamma_akma, 0.9572, 1.5139, 15.999, 1.008,
+                            True, True, interpret, atom_mask=am_b, constraint_pairs=cp_b,
+                            constraint_lengths=cl_b, constraint_mask=cm_b, n_active_atoms=n_act,
+                            n_active_waters=n_waters_real, f64_accumulators=f64_acc, fuse_prev_post=True,
+                            morton_inv_perm=inv_n, morton_pad=n_act_pad,
+                            prebuilt_soa=(px_l, py_l, pz_l, mxh_l, myh_l, mzh_l, fx_l, fy_l, fz_l, soa_plan),
+                        )
+                        e_l, fx_l, fy_l, fz_l = _eval_forces_cond_e(px_ml, py_ml, pz_ml, do_baro)
+                        return (e_l, px_l, py_l, pz_l, mxh_l, myh_l, mzh_l, fx_l, fy_l, fz_l)
+
+                    e_old, px, py, pz, mxh, myh, mzh, fx_m, fy_m, fz_m = jax.lax.cond(
+                        k_cur > jnp.int32(1),
+                        _final_md_step,
+                        lambda st_last: st_last,
+                        (e_old, px, py, pz, mxh, myh, mzh, fx_m, fy_m, fz_m),
+                    )
+
                 mx, my, mz = _pallas_baoab_post_soa(
                     px, py, pz, mxh, myh, mzh, fx_m, fy_m, fz_m,
                     inv_n, n_act_pad, dt_b, 15.999, 1.008, interpret, soa_plan, f64_accumulators=f64_acc,
                 )
-                step_next = step_i + k_cur
                 if cmm_freq > 0:
                     do_cmm = ((step_next // jnp.int32(max(1, cmm_freq))) > (step_i // jnp.int32(max(1, cmm_freq))))
                     def _rm_cmm(m_xyz: Any) -> Any:
@@ -1300,24 +1527,14 @@ class EnsemblePlan:
                     mx, my, mz = jax.lax.cond(do_cmm, _rm_cmm, lambda m_xyz: m_xyz, (mx, my, mz))
 
                 if press_atm is not None:
-                    do_baro = ((step_next // jnp.int32(baro_int)) > (step_i // jnp.int32(baro_int)))
                     def _mc_baro(b_ops: Any) -> Any:
-                        px_b, py_b, pz_b, fx_b, fy_b, fz_b, tp_b, bx_b, G_b = b_ops
+                        e_cur, px_b, py_b, pz_b, fx_b, fy_b, fz_b, tp_b, bx_b, G_b = b_ops
                         pos_cur = jnp.stack([px_b.reshape(B, N), py_b.reshape(B, N), pz_b.reshape(B, N)], axis=-1)
-                        p_a0 = pos_cur[:, :n_act, :].astype(jnp.float32)
-                        if pad_tail > 0:
-                            p_a0 = jnp.pad(p_a0, ((0, 0), (0, pad_tail), (0, 0)))
-                        pm_cur = jnp.take_along_axis(p_a0, tp_b.perm[:, :, None], axis=1)
-                        e_old, _, _, _ = _eval_morton_forces(
-                            pm_cur[:, :, 0].reshape(B * n_act_pad),
-                            pm_cur[:, :, 1].reshape(B * n_act_pad),
-                            pm_cur[:, :, 2].reshape(B * n_act_pad),
-                            tp_b, bx_b, G_b, True,
-                        )
                         b_keys = jax.vmap(lambda k: jax.random.fold_in(k, step_next + jnp.int32(999983)))(keys_b)
                         u_pair = jax.vmap(lambda k: jax.random.uniform(k, (2,), dtype=jnp.float32))(b_keys)
                         dlnv = (u_pair[:, 0] - 0.5) * 0.004
-                        mu = jnp.exp(dlnv / 3.0).astype(state_dtype)
+                        dlnv_st = dlnv.astype(state_dtype)
+                        mu = jnp.exp(dlnv_st / 3.0)
                         bx_prop = bx_b * mu[:, None]
                         anc = pos_cur[:, anchor_idx_j, :]
                         intra = pos_cur - anc
@@ -1337,7 +1554,7 @@ class EnsemblePlan:
                         tp_prop = pallas_build_morton_tile_pairs_gpu(
                             pos_prop, q_b, sig_b, eps_b, am_b, bx_prop, dedup_excl,
                             n_act=n_act, max_pairs=max_pairs, cutoff=cutoff, skin=eff_skin,
-                            host_min_box=host_min_box, interpret=interpret,
+                            host_min_box=eff_host_min_box, interpret=interpret,
                         )
                         p_ap = pos_prop[:, :n_act, :].astype(jnp.float32)
                         if pad_tail > 0:
@@ -1349,10 +1566,21 @@ class EnsemblePlan:
                             pm_prop[:, :, 2].reshape(B * n_act_pad),
                             tp_prop, bx_prop, G_prop, True,
                         )
-                        v_old = jnp.prod(bx_b.astype(jnp.float32), axis=-1)
-                        v_new = jnp.prod(bx_prop.astype(jnp.float32), axis=-1)
+                        v_old = jnp.prod(bx_b, axis=-1)
+                        v_new = jnp.prod(bx_prop, axis=-1)
                         kT_f = kT_b.astype(jnp.float32)
-                        dh = (e_new - e_old) + float(p0_akma) * (v_new - v_old) - float(n_mols_baro) * kT_f * dlnv
+                        dh = _compute_mc_barostat_dh(
+                            e_cur,
+                            e_new,
+                            v_old,
+                            v_new,
+                            c_tail_b=c_tail_j,
+                            c_net_q_b=c_net_q_j,
+                            p0_akma=p0_akma,
+                            n_mols=n_mols_baro,
+                            kT=kT_f,
+                            dlnv=dlnv_st,
+                        )
                         acc = u_pair[:, 1] < jnp.exp(jnp.clip(-dh / jnp.maximum(kT_f, 1e-6), -50.0, 50.0))
                         pos_sel = jnp.where(acc[:, None, None], pos_prop, pos_cur)
                         bx_sel = jnp.where(acc[:, None], bx_prop, bx_b)
@@ -1369,8 +1597,10 @@ class EnsemblePlan:
                             fx_sel, fy_sel, fz_sel, tp_sel, bx_sel, G_sel,
                         )
                     px, py, pz, fx_m, fy_m, fz_m, tp_c, box_c, G_c = jax.lax.cond(
-                        do_baro, _mc_baro, lambda b_ops: b_ops,
-                        (px, py, pz, fx_m, fy_m, fz_m, tp_c, box_c, G_c),
+                        do_baro,
+                        _mc_baro,
+                        lambda b_ops: b_ops[1:],
+                        (e_old, px, py, pz, fx_m, fy_m, fz_m, tp_c, box_c, G_c),
                     )
                 return (step_next, px, py, pz, mx, my, mz, fx_m, fy_m, fz_m, tp_c, box_c, G_c)
 
@@ -1395,6 +1625,12 @@ class EnsemblePlan:
             "n_reals": n_reals,
             "N": N,
             "state_dtype": state_dtype,
+            "eff_skin": eff_skin,
+            "box_safety": box_safety,
+            "max_pairs": max_pairs,
+            "c_tail_b": c_tail_np,
+            "c_net_q_b": c_net_q_np,
+            "rf_dielectric": rf_diel,
         }
 
     def _run_morton_soa_batch(
@@ -1430,8 +1666,12 @@ class EnsemblePlan:
         cache_key = None
         entry = None
         if can_cache:
+            try:
+                ks_hash: Any = hash(self.knob_surface)
+            except TypeError:
+                ks_hash = id(self.knob_surface)
             cache_key = (
-                "morton_soa_v35",
+                "morton_soa_v36",
                 tuple(id(b) for b in bundles),
                 integration_prefix,
                 float(gamma),
@@ -1443,6 +1683,7 @@ class EnsemblePlan:
                 os.environ.get("PROLIX_ACTIVE_ATOMS", ""),
                 os.environ.get("PROLIX_ACTIVE_WATERS", ""),
                 tuple(sorted(knobs.items())),
+                ks_hash,
             )
             if B == 1:
                 cand = _SINGLE_INFERENCE_CACHE.get(cache_key)
