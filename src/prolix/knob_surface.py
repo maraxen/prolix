@@ -59,6 +59,9 @@ class NonbondedControls:
     coulomb_constant: float = 332.06371329919216
     scale_14_lj: float = 0.5
     scale_14_elec: float = 0.8333333333333334
+    lj_combining_rule: str = "lorentz_berthelot"
+    exceptions_use_pbc: bool = False
+    dispersion_follows_parameters: bool = True
 
 
 @dataclass(frozen=True)

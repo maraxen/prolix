@@ -291,6 +291,9 @@ SUPERSET_ALIAS_MAP: dict[str, str] = {
     "DisablePmeStream": "disable_pme_stream",
     "UseCpuPme": "use_pallas_pme",
     "UseBlockingSync": "deterministic_forces",
+    "combining_rule": "lj_combining_rule",
+    "exceptions_use_periodic_boundary_conditions": "exceptions_use_pbc",
+    "dispersion_correction_follows_parameters": "dispersion_follows_parameters",
 }
 
 
@@ -927,6 +930,9 @@ class OpenMMSystemKnobsSchema:
     rigid_water: bool = True
     hydrogen_mass: float | None = None
     virtual_site_mode: str = "auto"
+    lj_combining_rule: str = "lorentz_berthelot"
+    exceptions_use_periodic_boundary_conditions: bool = False
+    dispersion_correction_follows_parameters: bool = True
 
 
 @dataclass(frozen=True)

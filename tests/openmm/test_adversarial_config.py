@@ -114,6 +114,9 @@ class TestParsePlatformPropertiesFuzzing:
             "pme_grid_spacing": "1.0",
             "ewald_error_tolerance": "1e-4",
             "lj_switch_width": "1.5",
+            "lj_combining_rule": "geometric",
+            "exceptions_use_pbc": "true",
+            "dispersion_follows_parameters": "false",
             "use_dispersion_correction": "false",
             "disable_cell_list": "false",
             "custom_force_mode": "lepton_only",
@@ -509,10 +512,10 @@ class TestProlixPlatformShimStress:
         assert plat.supportsKernels() is True
 
     def test_all_39_platform_property_defaults_and_mutation(self):
-        """Test getting and setting default values across all 39 properties."""
+        """Test getting and setting default values across all 42 properties."""
         plat = ProlixPlatform()
         names = plat.getPropertyNames()
-        assert len(names) == 39
+        assert len(names) == 42
 
         for name in names:
             # Case-insensitivity for property access

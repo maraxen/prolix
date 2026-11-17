@@ -61,6 +61,7 @@ SoluteConstraintModeType = Literal["shake", "none"]
 VirtualSiteModeType = Literal["auto", "none"]
 ExecutionModeType = Literal["inference", "trajectory"]
 MinimizerBackendType = Literal["lbfgs", "fire", "openmm_cpu"]
+LjCombiningRuleType = Literal["lorentz_berthelot", "geometric"]
 
 
 class _DefaultFloat(float):
@@ -103,6 +104,9 @@ class ProlixOpenMMConfig:
     ewald_error_tolerance: float = 5e-4
     lj_switch_width: float = 1.5
     use_dispersion_correction: bool = True
+    lj_combining_rule: LjCombiningRuleType = "lorentz_berthelot"
+    exceptions_use_pbc: bool = False
+    dispersion_follows_parameters: bool = True
 
     # --- Neighbor List Parameters (Lengths in Å) ---
     nl_skin: float = 2.0
@@ -207,6 +211,20 @@ class ProlixOpenMMConfig:
         ):
             raise ValueError(
                 f"lj_switch_width must be non-negative and finite, got {self.lj_switch_width} Å."
+            )
+        if self.lj_combining_rule not in ("lorentz_berthelot", "geometric"):
+            raise ValueError(
+                f"Invalid lj_combining_rule: {self.lj_combining_rule!r}. "
+                "Allowed: 'lorentz_berthelot', 'geometric'."
+            )
+        if not isinstance(self.exceptions_use_pbc, bool):
+            raise ValueError(
+                f"exceptions_use_pbc must be a boolean, got {self.exceptions_use_pbc!r}."
+            )
+        if not isinstance(self.dispersion_follows_parameters, bool):
+            raise ValueError(
+                "dispersion_follows_parameters must be a boolean, "
+                f"got {self.dispersion_follows_parameters!r}."
             )
 
         # Neighbor list validation
@@ -406,6 +424,16 @@ def _parse_opt_str(val: Any, key: str) -> str | None:
     return s
 
 
+def _parse_combining_rule(val: Any, _key: str) -> str:
+    s = str(val).strip().lower()
+    norm = s.replace("-", "_").replace(" ", "_")
+    if norm in ("lorentzberthelot", "lorentz_berthelot", "lb"):
+        return "lorentz_berthelot"
+    if norm == "geometric":
+        return "geometric"
+    return s
+
+
 # Parsers per field
 _FIELD_PARSERS: dict[str, Any] = {
     "precision": _parse_str,
@@ -423,6 +451,9 @@ _FIELD_PARSERS: dict[str, Any] = {
     "ewald_error_tolerance": _parse_float,
     "lj_switch_width": _parse_float,
     "use_dispersion_correction": _parse_bool,
+    "lj_combining_rule": _parse_combining_rule,
+    "exceptions_use_pbc": _parse_bool,
+    "dispersion_follows_parameters": _parse_bool,
     "nl_skin": _parse_float,
     "nl_capacity_multiplier": _parse_float,
     "nl_update_every": _parse_int,
@@ -466,6 +497,9 @@ _CANONICAL_NAMES: dict[str, str] = {
     "ewald_error_tolerance": "EwaldErrorTolerance",
     "lj_switch_width": "LjSwitchWidth",
     "use_dispersion_correction": "UseDispersionCorrection",
+    "lj_combining_rule": "LjCombiningRule",
+    "exceptions_use_pbc": "ExceptionsUsePbc",
+    "dispersion_follows_parameters": "DispersionFollowsParameters",
     "nl_skin": "NeighborListSkin",
     "nl_capacity_multiplier": "NeighborListCapacityMultiplier",
     "nl_update_every": "NeighborListUpdateEvery",
@@ -527,6 +561,12 @@ _EXTRA_ALIASES: dict[str, str] = {
     "switchwidth": "lj_switch_width",
     "usedispersioncorrection": "use_dispersion_correction",
     "dispersioncorrection": "use_dispersion_correction",
+    "ljcombiningrule": "lj_combining_rule",
+    "combiningrule": "lj_combining_rule",
+    "exceptionsusepbc": "exceptions_use_pbc",
+    "exceptionsuseperiodicboundaryconditions": "exceptions_use_pbc",
+    "dispersionfollowsparameters": "dispersion_follows_parameters",
+    "dispersioncorrectionfollowsparameters": "dispersion_follows_parameters",
     "disablecelllist": "disable_cell_list",
     "customforcemode": "custom_force_mode",
     "customnonbondedchunksize": "custom_nonbonded_chunk_size",

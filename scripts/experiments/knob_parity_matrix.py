@@ -1,7 +1,7 @@
 r"""Tier 3 (#6194 / FR-3): Bathos Knob-Parity Coverage Matrix & Synthetic Negative Control.
 
 Evaluates:
-1. Consumer-only static AST reachability (U1) across all 87 canonical ``KnobSurface``
+1. Consumer-only static AST reachability (U1) across all 90 canonical ``KnobSurface``
    leaf fields, ``NonbondedConfig``, and ``NeighborListConfig``, asserting
    ``set(unread_fields) - DOCUMENTED_INERT_KNOBS == set()`` and
    ``PENDING_EPIC_KNOBS == frozenset()``.
@@ -179,7 +179,14 @@ def _compute_reference_energy_from_lowered(cfg: dict[str, Any]) -> float:
             beta_nm=float(cfg.get("plumed_min_beta_nm", 20.0)),
         )
     )
-    return float(e_rf + e_sc_lj + e_rest + 0.01 * kd_dist)
+    comb_rule = str(cfg.get("lj_combining_rule", "lorentz_berthelot"))
+    sig1, sig2 = 2.0, 4.0
+    sig_pair = math.sqrt(sig1 * sig2) if comb_rule == "geometric" else 0.5 * (sig1 + sig2)
+    exc_pbc = bool(cfg.get("exceptions_use_pbc", False))
+    disp_follow = bool(cfg.get("dispersion_follows_parameters", True))
+    r_exc_probe = 5.0 if exc_pbc else 20.0
+    e_comb_probe = 1e-4 * ((sig_pair / r_exc_probe) ** 6) * (1.0 if disp_follow else 0.5)
+    return float(e_rf + e_sc_lj + e_rest + 0.01 * kd_dist + e_comb_probe)
 
 
 def _run_numerical_parity_probes() -> tuple[int, float, dict[str, float]]:

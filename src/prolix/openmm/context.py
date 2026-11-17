@@ -17,6 +17,7 @@ from jax_md import space
 
 import prolix.api.ensemble_plan as _ensemble_plan_mod
 from prolix.constants import COULOMB_CONSTANT
+from prolix.export import in_export_context
 from prolix.openmm.config import (
     ProlixOpenMMConfig,
     ProlixPlatform,
@@ -26,6 +27,7 @@ from prolix.openmm.config import (
 from prolix.openmm.converter import (
     CompiledRBTorsionForce,
     ConvertedOpenMMSystem,
+    NonbondedParameterOffsets,
     PositionRestraints,
     VirtualSites,
     from_openmm_system,
@@ -80,17 +82,37 @@ from prolix.physics.pallas_gbsa_tile import (
     pallas_gbsa_tile,
 )
 from prolix.physics.pallas_implicit import pallas_gb_ace_nl
+from prolix.physics.pallas_tile_pairs import (
+    FusedBondedBuffers,
+    MortonTilePairState,
+    _pallas_bonded_and_tile_pairs_soa,
+    estimate_max_tile_pairs,
+    pallas_build_morton_tile_pairs_gpu,
+    precompute_dedup_excl_edges,
+    prepare_fused_bonded_buffers,
+)
 from prolix.physics.pbc import (
     box_volume,
     minimum_image_displacement,
     reduce_triclinic_box_vectors,
 )
 from prolix.physics.pme import (
+    _cached_host_influence_function_np,
     compute_openmm_pme_params,
     compute_pme_grid_dims,
+    influence_function,
     spme_background_energy,
     spme_reciprocal_energy,
     spme_self_energy,
+)
+from prolix.physics.pme_pallas import (
+    _gather_pallas_soa,
+    _spread_charges_pallas_soa,
+)
+from prolix.physics.settle import (
+    _pallas_baoab_post_soa,
+    _pallas_baoab_pre_force_batch,
+    build_baoab_soa_static_plan,
 )
 from prolix.types.bundles import MolecularBundle  # noqa: TC001
 
@@ -591,6 +613,325 @@ def _eval_bonded_terms(
     return e_total
 
 
+_LJ_TAIL_SIG_PARAMS = frozenset(inspect.signature(lj_dispersion_tail_energy).parameters.keys())
+_LJ_TAIL_ACCEPTS_SWITCH_AND_RULE = (
+    "lj_switch_width" in _LJ_TAIL_SIG_PARAMS and "combining_rule" in _LJ_TAIL_SIG_PARAMS
+)
+_PALLAS_NB_TP_SIG_PARAMS = frozenset(
+    inspect.signature(pallas_nonbonded_tile_pairs).parameters.keys()
+)
+_PALLAS_SOA_SIG_PARAMS = frozenset(
+    inspect.signature(_pallas_bonded_and_tile_pairs_soa).parameters.keys()
+)
+_BINOM_6_CTX: tuple[float, ...] = tuple(float(math.comb(6, k)) for k in range(7))
+_BINOM_12_CTX: tuple[float, ...] = tuple(float(math.comb(12, k)) for k in range(13))
+_SWITCH_I6_SERIES_CTX: tuple[float, ...] = tuple(
+    (n + 1.0) / ((2.0 * n + 3.0) * (2.0 * n + 5.0)) for n in range(85)
+)
+
+
+def _safe_sqrt(x: jnp.ndarray) -> jnp.ndarray:
+    """AD-safe square root avoiding 1 / (2 * sqrt(0)) NaNs on zero inputs."""
+    pos_mask = x > 0.0
+    return jnp.where(
+        pos_mask,
+        jnp.sqrt(jnp.where(pos_mask, x, jnp.ones_like(x))),
+        jnp.zeros_like(x),
+    )
+
+
+def _rf_k_c(cutoff: float, rf_dielectric: float) -> tuple[float, float]:
+    """Reaction-field (k_rf, c_rf) safe in the metallic conductor limit rf_dielectric=inf."""
+    inv_eps = 1.0 / float(rf_dielectric)
+    k_rf = ((1.0 - inv_eps) / (2.0 + inv_eps)) / (cutoff**3)
+    c_rf = (3.0 / (2.0 + inv_eps)) / cutoff
+    return k_rf, c_rf
+
+
+def _combine_sig_eps(
+    sig_a: jnp.ndarray,
+    sig_b: jnp.ndarray,
+    eps_a: jnp.ndarray,
+    eps_b: jnp.ndarray,
+    lj_combining_rule: str,
+) -> tuple[jnp.ndarray, jnp.ndarray]:
+    """Combine pairwise LJ (sigma_ij, epsilon_ij) under Lorentz-Berthelot or Geometric mixing."""
+    if lj_combining_rule == "geometric":
+        sig_ij = _safe_sqrt(sig_a * sig_b)
+    else:
+        sig_ij = 0.5 * (sig_a + sig_b)
+    eps_ij = _safe_sqrt(eps_a * eps_b)
+    return sig_ij, eps_ij
+
+
+def _apply_particle_offsets(
+    q: jnp.ndarray,
+    sig: jnp.ndarray,
+    eps: jnp.ndarray,
+    offsets: NonbondedParameterOffsets | None,
+    gp_map: dict[str, Any] | None,
+    n: int,
+) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+    """Apply NonbondedForce ParticleParameterOffsets on-GPU with exact autodiff wrt globals."""
+    if offsets is None or not gp_map or len(offsets.param_names) == 0:
+        return q, sig, eps
+    if int(offsets.particle_indices.shape[0]) == 0:
+        return q, sig, eps
+    dtype = q.dtype
+    gp_vec = jnp.stack(
+        [jnp.asarray(gp_map.get(nm, 0.0), dtype=dtype) for nm in offsets.param_names]
+    )
+    valid_p = (offsets.particle_indices >= 0) & (offsets.particle_indices < n)
+    safe_p = jnp.where(valid_p, offsets.particle_indices.astype(jnp.int32), jnp.int32(0))
+    lam_p = jnp.where(valid_p, gp_vec[offsets.particle_param_idx.astype(jnp.int32)], 0.0)
+    deltas = lam_p[:, None] * offsets.particle_scales.astype(dtype)
+    q = q.at[safe_p].add(deltas[:, 0])
+    sig = sig.at[safe_p].add(deltas[:, 1])
+    eps = eps.at[safe_p].add(deltas[:, 2])
+    return q, sig, eps
+
+
+def _apply_exception_offsets(
+    qp_14: jnp.ndarray,
+    sig_14: jnp.ndarray,
+    eps_14: jnp.ndarray,
+    offsets: NonbondedParameterOffsets | None,
+    gp_map: dict[str, Any] | None,
+) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+    """Apply NonbondedForce ExceptionParameterOffsets on-GPU with exact autodiff wrt globals."""
+    if offsets is None or not gp_map or len(offsets.param_names) == 0:
+        return qp_14, sig_14, eps_14
+    if int(offsets.exception_bundle_indices.shape[0]) == 0:
+        return qp_14, sig_14, eps_14
+    n_exc = int(qp_14.shape[0])
+    if n_exc == 0:
+        return qp_14, sig_14, eps_14
+    dtype = qp_14.dtype
+    gp_vec = jnp.stack(
+        [jnp.asarray(gp_map.get(nm, 0.0), dtype=dtype) for nm in offsets.param_names]
+    )
+    valid_e = (offsets.exception_bundle_indices >= 0) & (
+        offsets.exception_bundle_indices < n_exc
+    )
+    safe_e = jnp.where(valid_e, offsets.exception_bundle_indices.astype(jnp.int32), jnp.int32(0))
+    lam_e = jnp.where(valid_e, gp_vec[offsets.exception_param_idx.astype(jnp.int32)], 0.0)
+    deltas = lam_e[:, None] * offsets.exception_scales.astype(dtype)
+    qp_14 = qp_14.at[safe_e].add(deltas[:, 0])
+    sig_14 = sig_14.at[safe_e].add(deltas[:, 1])
+    eps_14 = eps_14.at[safe_e].add(deltas[:, 2])
+    return qp_14, sig_14, eps_14
+
+
+def _compute_lj_tail_energy_compat(
+    box_pbc: jnp.ndarray,
+    sig: jnp.ndarray,
+    eps: jnp.ndarray,
+    cutoff: float,
+    atom_mask: jnp.ndarray,
+    *,
+    lj_switch_width: float = 0.0,
+    combining_rule: str = "lorentz_berthelot",
+) -> jnp.ndarray:
+    """Evaluate switched/unswitched isotropic LJ tail correction compatibly across Track 1."""
+    if _LJ_TAIL_ACCEPTS_SWITCH_AND_RULE:
+        return lj_dispersion_tail_energy(
+            box_pbc,
+            sig,
+            eps,
+            cutoff,
+            atom_mask,
+            lj_switch_width=float(lj_switch_width),
+            combining_rule=str(combining_rule),
+        )
+    dtype = eps.dtype
+    mask_f = atom_mask.astype(dtype)
+    sqrt_eps = _safe_sqrt(eps) * mask_f
+    if combining_rule == "geometric":
+        m3 = jnp.sum(sqrt_eps * (sig**3))
+        m6 = jnp.sum(sqrt_eps * (sig**6))
+        c6_sum, c12_sum = m3 * m3, m6 * m6
+    else:
+        moments = [jnp.sum(sqrt_eps * (sig**k)) for k in range(13)]
+        c6_sum = jnp.zeros((), dtype=dtype)
+        for k_b, b_k in enumerate(_BINOM_6_CTX):
+            c6_sum = c6_sum + b_k * moments[k_b] * moments[6 - k_b]
+        c6_sum = c6_sum * (1.0 / 64.0)
+        c12_sum = jnp.zeros((), dtype=dtype)
+        for k_b, b_k in enumerate(_BINOM_12_CTX):
+            c12_sum = c12_sum + b_k * moments[k_b] * moments[12 - k_b]
+        c12_sum = c12_sum * (1.0 / 4096.0)
+
+    rc = float(cutoff)
+    sw = float(lj_switch_width)
+    if sw > 0.0:
+        rsw = rc - sw
+        if rsw <= 0.0:
+            raise ValueError("switched LJ tail requires positive switching distance (0 < start <= cutoff)")
+        t = rsw / rc
+        i12 = (((5.0 * t + 9.0) * t + 9.0) * t + 5.0) / (252.0 * (rsw**6) * (rc**3))
+        z = (rc - rsw) / (rc + rsw)
+        z2 = z * z
+        if z2 <= 0.61:
+            s_acc = 0.0
+            z2_pow = 1.0
+            for coeff in _SWITCH_I6_SERIES_CTX:
+                s_acc += coeff * z2_pow
+                z2_pow *= z2
+            i6 = 8.0 * s_acc / ((rc + rsw) ** 3)
+        else:
+            i6 = (
+                10.0
+                * ((t * t + 4.0 * t + 1.0) * math.log(rc / rsw) - 3.0 * (1.0 - t * t))
+                / ((rc**3) * ((1.0 - t) ** 5))
+            )
+    else:
+        i6 = 1.0 / (3.0 * (rc**3))
+        i12 = 1.0 / (9.0 * (rc**9))
+    inv_vol = 1.0 / box_volume(box_pbc)
+    return (8.0 * jnp.pi * inv_vol) * (c12_sum * i12 - c6_sum * i6)
+
+
+def _eval_tile_pairs_jax(
+    pos: jnp.ndarray,
+    q: jnp.ndarray,
+    sig: jnp.ndarray,
+    eps: jnp.ndarray,
+    tile_pair_nl: TilePairNeighborList,
+    box_diag: jnp.ndarray | None,
+    *,
+    cutoff: float,
+    lj_switch_width: float,
+    is_pme: bool,
+    alpha_float: float,
+    is_rf: bool,
+    rf_dielectric: float,
+    lj_combining_rule: str,
+) -> jnp.ndarray:
+    """Pure-JAX O(P) tile-pair evaluation supporting RF, geometric mixing, and box autodiff."""
+    dtype = pos.dtype
+    n_real = int(pos.shape[0])
+    tp_arr = jnp.asarray(tile_pair_nl.tile_pairs, dtype=jnp.int32)
+    ef_arr = jnp.asarray(tile_pair_nl.excl_full_mask, dtype=jnp.int32)
+    perm = tile_pair_nl.atom_perm
+
+    if perm is not None:
+        perm_arr = jnp.asarray(perm, dtype=jnp.int32)
+        n_perm = int(perm_arr.shape[-1])
+    else:
+        perm_arr = None
+        n_perm = n_real
+
+    n_blocks = max(1, (max(n_real, n_perm) + 31) // 32)
+    n_pad = n_blocks * 32
+    pad_len = n_pad - n_real
+    if pad_len > 0:
+        pos_p = jnp.pad(pos, ((0, pad_len), (0, 0)))
+        q_p = jnp.pad(q, (0, pad_len))
+        sig_p = jnp.pad(sig, (0, pad_len), constant_values=1.0)
+        eps_p = jnp.pad(eps, (0, pad_len))
+        msk_p = jnp.arange(n_pad) < n_real
+    else:
+        pos_p, q_p, sig_p, eps_p = pos, q, sig, eps
+        msk_p = jnp.ones((n_pad,), dtype=jnp.bool_)
+
+    if perm_arr is not None:
+        if int(perm_arr.shape[-1]) < n_pad:
+            extra = jnp.arange(int(perm_arr.shape[-1]), n_pad, dtype=jnp.int32)
+            perm_arr = jnp.concatenate([perm_arr, extra], axis=0)
+        pos_p = pos_p[perm_arr]
+        q_p = q_p[perm_arr]
+        sig_p = sig_p[perm_arr]
+        eps_p = eps_p[perm_arr]
+        msk_p = msk_p[perm_arr]
+
+    lane_32 = jnp.arange(32, dtype=jnp.int32)
+    upper_tri = lane_32[:, None] < lane_32[None, :]
+    bit_shifts = lane_32[None, :]
+    has_box = box_diag is not None
+    bx_v = (
+        box_diag.astype(dtype)
+        if box_diag is not None
+        else jnp.ones((3,), dtype=dtype)
+    )
+    has_fin_cut = cutoff < float("inf")
+    cutoff_sq = jnp.asarray(cutoff * cutoff if has_fin_cut else 1.0e30, dtype=dtype)
+    alpha_c = jnp.asarray(alpha_float, dtype=dtype)
+    k_rf, c_rf = _rf_k_c(cutoff, rf_dielectric) if (is_rf and has_fin_cut) else (0.0, 0.0)
+
+    def _pair_tile_energy(tp_row: jnp.ndarray, ef_row: jnp.ndarray) -> jnp.ndarray:
+        ti, tj = tp_row[0], tp_row[1]
+        v_tp = (ti >= 0) & (tj >= 0) & (ti < n_blocks) & (tj < n_blocks)
+        s_ti = jnp.clip(ti, 0, n_blocks - 1)
+        s_tj = jnp.clip(tj, 0, n_blocks - 1)
+        oi = s_ti * 32 + lane_32
+        oj = s_tj * 32 + lane_32
+
+        ri, rj = pos_p[oi], pos_p[oj]
+        qi, qj = q_p[oi], q_p[oj]
+        si, sj = sig_p[oi], sig_p[oj]
+        ei, ej = eps_p[oi], eps_p[oj]
+        mi, mj = msk_p[oi], msk_p[oj]
+
+        is_full = ((ef_row[:, None] >> bit_shifts) & jnp.int32(1)) != 0
+        geom_ok = jnp.where(s_ti == s_tj, upper_tri, jnp.bool_(True))
+        valid_p = v_tp & mi[:, None] & mj[None, :] & geom_ok & (~is_full)
+
+        dr = ri[:, None, :] - rj[None, :, :]
+        if has_box:
+            dr = dr - bx_v[None, None, :] * jnp.floor(dr / bx_v[None, None, :] + 0.5)
+        r_sq = jnp.sum(dr * dr, axis=-1)
+        active = valid_p & (r_sq < cutoff_sq) if has_fin_cut else valid_p
+        r_safe = jnp.sqrt(jnp.where(active, r_sq, 1.0) + jnp.asarray(1e-12, dtype=dtype))
+
+        sig_ij, eps_ij = _combine_sig_eps(
+            si[:, None], sj[None, :], ei[:, None], ej[None, :], lj_combining_rule
+        )
+        sr = sig_ij / r_safe
+        sr6 = sr**6
+        u_lj = jnp.where(eps_ij > 0.0, 4.0 * eps_ij * (sr6 * sr6 - sr6), 0.0)
+        if lj_switch_width > 0.0 and has_fin_cut:
+            r_sw = cutoff - lj_switch_width
+            z = jnp.clip((r_safe - r_sw) / lj_switch_width, 0.0, 1.0)
+            s_poly = 1.0 - 10.0 * (z**3) + 15.0 * (z**4) - 6.0 * (z**5)
+            s_lj = jnp.where(
+                r_safe <= r_sw, 1.0, jnp.where(r_safe < cutoff, s_poly, 0.0)
+            )
+            u_lj = u_lj * s_lj
+
+        q_mat = qi[:, None] * qj[None, :]
+        if is_pme:
+            u_elec = COULOMB_CONSTANT * q_mat * (jax.lax.erfc(alpha_c * r_safe) / r_safe)
+        elif is_rf:
+            u_elec = COULOMB_CONSTANT * q_mat * (1.0 / r_safe + k_rf * (r_safe**2) - c_rf)
+        else:
+            u_elec = COULOMB_CONSTANT * (q_mat / r_safe)
+
+        return jnp.sum(jnp.where(active, u_lj + u_elec, 0.0))
+
+    m_pairs = int(tp_arr.shape[0])
+    if m_pairs == 0:
+        return jnp.asarray(0.0, dtype=dtype)
+    if m_pairs <= 512:
+        return jnp.sum(jax.vmap(_pair_tile_energy)(tp_arr, ef_arr))
+    chunk_sz = 256
+    n_chunks = (m_pairs + chunk_sz - 1) // chunk_sz
+    pad_m = n_chunks * chunk_sz - m_pairs
+    if pad_m > 0:
+        tp_c = jnp.pad(tp_arr, ((0, pad_m), (0, 0)), constant_values=-1)
+        ef_c = jnp.pad(ef_arr, ((0, pad_m), (0, 0)), constant_values=0)
+    else:
+        tp_c, ef_c = tp_arr, ef_arr
+    tp_c = tp_c.reshape(n_chunks, chunk_sz, 2)
+    ef_c = ef_c.reshape(n_chunks, chunk_sz, 32)
+
+    def _scan_step(acc: jnp.ndarray, elem: tuple[jnp.ndarray, jnp.ndarray]):
+        t_ch, e_ch = elem
+        return acc + jnp.sum(jax.vmap(_pair_tile_energy)(t_ch, e_ch)), None
+
+    e_tot, _ = jax.lax.scan(_scan_step, jnp.asarray(0.0, dtype=dtype), (tp_c, ef_c))
+    return e_tot
+
+
 def _eval_nonbonded_terms(  # noqa: PLR0913
     pos: jnp.ndarray,
     box: jnp.ndarray | None,
@@ -615,6 +956,13 @@ def _eval_nonbonded_terms(  # noqa: PLR0913
     custom_nonbonded_chunk_size: int = 128,
     tile_pair_nl: TilePairNeighborList | None = None,
     is_triclinic: bool = False,
+    global_params: dict[str, jnp.ndarray] | None = None,
+    nonbonded_offsets: NonbondedParameterOffsets | None = None,
+    default_params: dict[str, float] | None = None,
+    lj_combining_rule: str = "lorentz_berthelot",
+    exceptions_use_pbc: bool = False,
+    dispersion_follows_parameters: bool = True,
+    force_pure_jax_tile_pairs: bool = False,
 ) -> jnp.ndarray:
     """Evaluate pairwise Lennard-Jones, Coulomb, exclusions, 1-4 exceptions, and PME/RF/dispersion."""
     g_nb = force_group_by_component.get("nonbonded", 0)
@@ -622,9 +970,12 @@ def _eval_nonbonded_terms(  # noqa: PLR0913
         return jnp.array(0.0, dtype=pos.dtype)
 
     n = pos.shape[0]
-    q = bundle.charges[:n].astype(pos.dtype)
-    sig = bundle.sigmas[:n].astype(pos.dtype)
-    eps = bundle.epsilons[:n].astype(pos.dtype)
+    q_base = bundle.charges[:n].astype(pos.dtype)
+    sig_base = bundle.sigmas[:n].astype(pos.dtype)
+    eps_base = bundle.epsilons[:n].astype(pos.dtype)
+    q, sig, eps = _apply_particle_offsets(
+        q_base, sig_base, eps_base, nonbonded_offsets, global_params, n
+    )
     box_eval = box.astype(pos.dtype) if box is not None else None
     box_pbc = (
         jnp.diag(box_eval)
@@ -659,7 +1010,6 @@ def _eval_nonbonded_terms(  # noqa: PLR0913
         tile_pair_nl is not None
         and (use_pallas or nonbonded_engine == "morton_tile_pairs")
         and not is_triclinic
-        and not is_rf
         and pos.dtype == jnp.float32
     )
 
@@ -673,24 +1023,50 @@ def _eval_nonbonded_terms(  # noqa: PLR0913
             else None
         )
         eff_cutoff = cutoff if cutoff < float("inf") else 1.0e6
-        tot = cast(
-            "jnp.ndarray",
-            pallas_nonbonded_tile_pairs(
+        can_call_pallas_tp = (
+            not force_pure_jax_tile_pairs
+            and lj_combining_rule == "lorentz_berthelot"
+            and (not is_rf or "rf_dielectric" in _PALLAS_NB_TP_SIG_PARAMS)
+        )
+        if can_call_pallas_tp:
+            tp_extra_kw: dict[str, Any] = {}
+            if is_rf and "rf_dielectric" in _PALLAS_NB_TP_SIG_PARAMS:
+                tp_extra_kw["rf_dielectric"] = float(rf_dielectric)
+            tot = cast(
+                "jnp.ndarray",
+                pallas_nonbonded_tile_pairs(
+                    pos,
+                    q,
+                    sig,
+                    eps,
+                    tile_pair_nl,
+                    box=box_diag,
+                    pme_alpha=alpha_float if is_pme else 0.0,
+                    cutoff=float(eff_cutoff),
+                    coulomb_constant=COULOMB_CONSTANT,
+                    lj_switch_width=float(lj_switch_width) if cutoff < float("inf") else 0.0,
+                    include_pme_excl_erf=False,
+                    return_forces=False,
+                    interpret=pallas_interpret or not _triton_gpu_available(),
+                    **tp_extra_kw,
+                ),
+            )
+        else:
+            tot = _eval_tile_pairs_jax(
                 pos,
                 q,
                 sig,
                 eps,
                 tile_pair_nl,
-                box=box_diag,
-                pme_alpha=alpha_float if is_pme else 0.0,
-                cutoff=float(eff_cutoff),
-                coulomb_constant=COULOMB_CONSTANT,
-                lj_switch_width=float(lj_switch_width) if cutoff < float("inf") else 0.0,
-                include_pme_excl_erf=False,
-                return_forces=False,
-                interpret=pallas_interpret,
-            ),
-        )
+                box_diag,
+                cutoff=cutoff,
+                lj_switch_width=lj_switch_width,
+                is_pme=is_pme,
+                alpha_float=alpha_float,
+                is_rf=is_rf,
+                rf_dielectric=rf_dielectric,
+                lj_combining_rule=lj_combining_rule,
+            )
     elif neighbor_idx is not None:
         # Genuine NeighborList O(N * K) direct path (O(N * K * log2 M) exclusion binary search)
         i_idx = jnp.arange(n, dtype=jnp.int32)[:, None]
@@ -726,14 +1102,15 @@ def _eval_nonbonded_terms(  # noqa: PLR0913
         r = jnp.sqrt(jnp.sum(dr**2, axis=-1) + 1e-12)
         r_safe = jnp.where(mask_pair, r, 1.0)
 
-        sig_mat = 0.5 * (sig[:, None] + sig[j_safe])
-        eps_mat = jnp.sqrt(jnp.maximum(eps[:, None] * eps[j_safe], 0.0))
+        sig_mat, eps_mat = _combine_sig_eps(
+            sig[:, None], sig[j_safe], eps[:, None], eps[j_safe], lj_combining_rule
+        )
         q_mat = q[:, None] * q[j_safe]
 
         sr = sig_mat / r_safe
         sr6 = sr**6
         sr12 = sr6**2
-        u_lj = 4.0 * eps_mat * (sr12 - sr6)
+        u_lj = jnp.where(eps_mat > 0.0, 4.0 * eps_mat * (sr12 - sr6), 0.0)
 
         if lj_switch_width > 0.0 and cutoff < float("inf"):
             r_sw = cutoff - lj_switch_width
@@ -745,9 +1122,7 @@ def _eval_nonbonded_terms(  # noqa: PLR0913
         if is_pme:
             u_elec = COULOMB_CONSTANT * q_mat * (jax.lax.erfc(alpha * r_safe) / r_safe)
         elif is_rf:
-            eps_rf = rf_dielectric
-            k_rf = (1.0 / (cutoff**3)) * ((eps_rf - 1.0) / (2.0 * eps_rf + 1.0))
-            c_rf = (1.0 / cutoff) * ((3.0 * eps_rf) / (2.0 * eps_rf + 1.0))
+            k_rf, c_rf = _rf_k_c(cutoff, rf_dielectric)
             u_elec = COULOMB_CONSTANT * q_mat * (1.0 / r_safe + k_rf * (r_safe**2) - c_rf)
         else:
             u_elec = COULOMB_CONSTANT * (q_mat / r_safe)
@@ -789,14 +1164,19 @@ def _eval_nonbonded_terms(  # noqa: PLR0913
                 mask_pair = mask_pair.at[row_idx, col_idx].set(False)
             r_safe = jnp.where(mask_pair, r, 1.0)
 
-            sig_mat = 0.5 * (sig[safe_i][:, None] + sig[None, :])
-            eps_mat = jnp.sqrt(jnp.maximum(eps[safe_i][:, None] * eps[None, :], 0.0))
+            sig_mat, eps_mat = _combine_sig_eps(
+                sig[safe_i][:, None],
+                sig[None, :],
+                eps[safe_i][:, None],
+                eps[None, :],
+                lj_combining_rule,
+            )
             q_mat = q[safe_i][:, None] * q[None, :]
 
             sr = sig_mat / r_safe
             sr6 = sr**6
             sr12 = sr6**2
-            u_lj = 4.0 * eps_mat * (sr12 - sr6)
+            u_lj = jnp.where(eps_mat > 0.0, 4.0 * eps_mat * (sr12 - sr6), 0.0)
 
             if lj_switch_width > 0.0 and cutoff < float("inf"):
                 r_sw = cutoff - lj_switch_width
@@ -808,9 +1188,7 @@ def _eval_nonbonded_terms(  # noqa: PLR0913
             if is_pme:
                 u_elec = COULOMB_CONSTANT * q_mat * (jax.lax.erfc(alpha * r_safe) / r_safe)
             elif is_rf:
-                eps_rf = rf_dielectric
-                k_rf = (1.0 / (cutoff**3)) * ((eps_rf - 1.0) / (2.0 * eps_rf + 1.0))
-                c_rf = (1.0 / cutoff) * ((3.0 * eps_rf) / (2.0 * eps_rf + 1.0))
+                k_rf, c_rf = _rf_k_c(cutoff, rf_dielectric)
                 u_elec = COULOMB_CONSTANT * q_mat * (1.0 / r_safe + k_rf * (r_safe**2) - c_rf)
             else:
                 u_elec = COULOMB_CONSTANT * (q_mat / r_safe)
@@ -838,14 +1216,15 @@ def _eval_nonbonded_terms(  # noqa: PLR0913
             direct_exclusions_premasked = True
         r_safe = jnp.where(mask_tri, r, 1.0)
 
-        sig_mat = 0.5 * (sig[:, None] + sig[None, :])
-        eps_mat = jnp.sqrt(jnp.maximum(eps[:, None] * eps[None, :], 0.0))
+        sig_mat, eps_mat = _combine_sig_eps(
+            sig[:, None], sig[None, :], eps[:, None], eps[None, :], lj_combining_rule
+        )
         q_mat = q[:, None] * q[None, :]
 
         sr = sig_mat / r_safe
         sr6 = sr**6
         sr12 = sr6**2
-        u_lj = 4.0 * eps_mat * (sr12 - sr6)
+        u_lj = jnp.where(eps_mat > 0.0, 4.0 * eps_mat * (sr12 - sr6), 0.0)
 
         if lj_switch_width > 0.0 and cutoff < float("inf"):
             r_sw = cutoff - lj_switch_width
@@ -857,9 +1236,7 @@ def _eval_nonbonded_terms(  # noqa: PLR0913
         if is_pme:
             u_elec = COULOMB_CONSTANT * q_mat * (jax.lax.erfc(alpha * r_safe) / r_safe)
         elif is_rf:
-            eps_rf = rf_dielectric
-            k_rf = (1.0 / (cutoff**3)) * ((eps_rf - 1.0) / (2.0 * eps_rf + 1.0))
-            c_rf = (1.0 / cutoff) * ((3.0 * eps_rf) / (2.0 * eps_rf + 1.0))
+            k_rf, c_rf = _rf_k_c(cutoff, rf_dielectric)
             u_elec = COULOMB_CONSTANT * q_mat * (1.0 / r_safe + k_rf * (r_safe**2) - c_rf)
         else:
             u_elec = COULOMB_CONSTANT * (q_mat / r_safe)
@@ -871,7 +1248,9 @@ def _eval_nonbonded_terms(  # noqa: PLR0913
 
         tot = jnp.sum(jnp.where(mask_tri, u_pair, 0.0))
 
-    # Exclusions
+    # Exclusions: obey exceptions_use_pbc (OpenMM default False -> r_ex_raw; True -> r_ex_mic)
+    # on unwrapped host coordinates so ProlixContext matches stock OpenMM Reference/CUDA
+    # under both conventions (including test_far_exceptions.py when True).
     if bundle.excl_indices is not None and bundle.excl_mask is not None:
         ex_idx = bundle.excl_indices
         ex_mask = bundle.excl_mask
@@ -884,30 +1263,36 @@ def _eval_nonbonded_terms(  # noqa: PLR0913
         dr_ex_raw = pos[p1_s] - pos[p2_s]
         r_ex_raw = jnp.sqrt(jnp.sum(dr_ex_raw**2, axis=-1) + 1e-12)
         r_ex_raw_s = jnp.where(valid_ex, r_ex_raw, 1.0)
+        dr_ex_mic = (
+            _minimum_image_dr(dr_ex_raw, box_pbc, True)
+            if (has_pbc and box_pbc is not None)
+            else dr_ex_raw
+        )
+        r_ex_mic = jnp.sqrt(jnp.sum(dr_ex_mic**2, axis=-1) + 1e-12)
+        r_ex_mic_s = jnp.where(valid_ex, r_ex_mic, 1.0)
+        r_ex_recip_s = (
+            r_ex_mic_s
+            if (exceptions_use_pbc and has_pbc and box_pbc is not None)
+            else r_ex_raw_s
+        )
 
         if direct_exclusions_premasked:
-            # Direct-space exclusions were masked before r_safe / (sig/r)^12 to prevent
-            # float32 catastrophic cancellation (~10^8 kcal/mol on 1-2/1-3 covalent bonds; BUG-OMM10);
-            # only subtract PME reciprocal-space erf self-pair contribution.
             if is_pme:
                 u_ex_recip = COULOMB_CONSTANT * q[p1_s] * q[p2_s] * (
-                    jax.lax.erf(alpha * r_ex_raw_s) / r_ex_raw_s
+                    jax.lax.erf(alpha * r_ex_recip_s) / r_ex_recip_s
                 )
                 tot = tot - jnp.sum(jnp.where(valid_ex, u_ex_recip, 0.0))
         else:
-            dr_ex = dr_ex_raw
-            if has_pbc and box_pbc is not None:
-                dr_ex = _minimum_image_dr(dr_ex, box_pbc, has_pbc)
-            r_ex = jnp.sqrt(jnp.sum(dr_ex**2, axis=-1) + 1e-12)
-            r_ex_s = jnp.where(valid_ex, r_ex, 1.0)
-            sig_ex = 0.5 * (sig[p1_s] + sig[p2_s])
-            eps_ex = jnp.sqrt(jnp.maximum(eps[p1_s] * eps[p2_s], 0.0))
+            r_ex_s = r_ex_mic_s
+            sig_ex, eps_ex = _combine_sig_eps(
+                sig[p1_s], sig[p2_s], eps[p1_s], eps[p2_s], lj_combining_rule
+            )
             q_ex = q[p1_s] * q[p2_s]
 
             sr_e = sig_ex / r_ex_s
             sr6_e = sr_e**6
             sr12_e = sr6_e**2
-            u_ex_lj = 4.0 * eps_ex * (sr12_e - sr6_e)
+            u_ex_lj = jnp.where(eps_ex > 0.0, 4.0 * eps_ex * (sr12_e - sr6_e), 0.0)
             if lj_switch_width > 0.0 and cutoff < float("inf"):
                 r_sw = cutoff - lj_switch_width
                 z_e = jnp.clip((r_ex_s - r_sw) / lj_switch_width, 0.0, 1.0)
@@ -919,11 +1304,11 @@ def _eval_nonbonded_terms(  # noqa: PLR0913
 
             if is_pme:
                 u_ex_elec = COULOMB_CONSTANT * q_ex * (jax.lax.erfc(alpha * r_ex_s) / r_ex_s)
-                u_ex_recip = COULOMB_CONSTANT * q_ex * (jax.lax.erf(alpha * r_ex_raw_s) / r_ex_raw_s)
+                u_ex_recip = COULOMB_CONSTANT * q_ex * (
+                    jax.lax.erf(alpha * r_ex_recip_s) / r_ex_recip_s
+                )
             elif is_rf:
-                eps_rf = rf_dielectric
-                k_rf = (1.0 / (cutoff**3)) * ((eps_rf - 1.0) / (2.0 * eps_rf + 1.0))
-                c_rf = (1.0 / cutoff) * ((3.0 * eps_rf) / (2.0 * eps_rf + 1.0))
+                k_rf, c_rf = _rf_k_c(cutoff, rf_dielectric)
                 u_ex_elec = COULOMB_CONSTANT * q_ex * (1.0 / r_ex_s + k_rf * (r_ex_s**2) - c_rf)
                 u_ex_recip = 0.0
             else:
@@ -935,7 +1320,8 @@ def _eval_nonbonded_terms(  # noqa: PLR0913
                 u_ex = jnp.where(r_ex_s < cutoff, u_ex, 0.0)
             tot = tot - jnp.sum(jnp.where(valid_ex, u_ex + u_ex_recip, 0.0))
 
-    # 1-4 Exceptions (DEF-20: Pure direct Coulomb and LJ; no erf double subtraction, no continuum contamination)
+    # 1-4 / Explicit Exceptions: obey exceptions_use_pbc (default False in OpenMM)
+    # and apply ExceptionParameterOffsets on-GPU.
     if (
         bundle.exception_pairs is not None
         and bundle.exception_sigmas is not None
@@ -952,17 +1338,22 @@ def _eval_nonbonded_terms(  # noqa: PLR0913
         ep2_s = jnp.where(valid_exc, ep2, 0)
 
         dr_exc = pos[ep1_s] - pos[ep2_s]
+        if exceptions_use_pbc and has_pbc and box_pbc is not None:
+            dr_exc = _minimum_image_dr(dr_exc, box_pbc, True)
         r_exc = jnp.sqrt(jnp.sum(dr_exc**2, axis=-1) + 1e-12)
         r_exc_s = jnp.where(valid_exc, r_exc, 1.0)
-        sig_14 = bundle.exception_sigmas.astype(pos.dtype)
-        eps_14 = bundle.exception_epsilons.astype(pos.dtype)
-        qp_14 = bundle.exception_chargeprods.astype(pos.dtype)
+        qp_14, sig_14, eps_14 = _apply_exception_offsets(
+            bundle.exception_chargeprods.astype(pos.dtype),
+            bundle.exception_sigmas.astype(pos.dtype),
+            bundle.exception_epsilons.astype(pos.dtype),
+            nonbonded_offsets,
+            global_params,
+        )
 
         sr_14 = sig_14 / r_exc_s
         sr6_14 = sr_14**6
         sr12_14 = sr6_14**2
-        u_14_lj = 4.0 * eps_14 * (sr12_14 - sr6_14)
-
+        u_14_lj = jnp.where(eps_14 != 0.0, 4.0 * eps_14 * (sr12_14 - sr6_14), 0.0)
         u_14_elec = COULOMB_CONSTANT * (qp_14 / r_exc_s)
 
         u_14 = u_14_lj + u_14_elec
@@ -986,38 +1377,24 @@ def _eval_nonbonded_terms(  # noqa: PLR0913
         e_plasma = spme_background_energy(q, atom_mask, alpha=alpha_float, box_size=box_pbc)
         tot = tot + e_recip + e_self + e_plasma
 
-    # LJ dispersion tail correction
+    # LJ dispersion tail correction (obeying dispersion_follows_parameters & lj_combining_rule)
     if use_dispersion_correction and has_pbc and box_pbc is not None and cutoff < float("inf"):
         atom_mask = jnp.ones(n, dtype=bool)
-        if lj_switch_width > 0.0 and cutoff > lj_switch_width:
-            rc = cutoff
-            d = lj_switch_width
-            rsw = rc - d
-            volume = box_volume(box_pbc)
-            inv_vol = 1.0 / volume
-            atom_mask_f = atom_mask.astype(eps.dtype)
-            sum_c6 = jnp.sum(jnp.sqrt(eps) * (sig**3) * atom_mask_f)
-            sum_c12 = jnp.sum(jnp.sqrt(eps) * (sig**6) * atom_mask_f)
-
-            I6_val = (
-                10.0
-                * (
-                    (rc**2 + 4.0 * rc * rsw + rsw**2) * jnp.log(rc / rsw)
-                    - 3.0 * (rc**2 - rsw**2)
-                )
-                / (d**5)
-            )
-            I12_val = (
-                (rc + rsw)
-                * (5.0 * rc**2 + 4.0 * rc * rsw + 5.0 * rsw**2)
-                / (252.0 * (rc**6) * (rsw**6))
-            )
-
-            e_c12 = (8.0 * jnp.pi * inv_vol) * (sum_c12**2) * I12_val
-            e_c6 = (8.0 * jnp.pi * inv_vol) * (sum_c6**2) * I6_val
-            e_tail = e_c12 - e_c6
+        if dispersion_follows_parameters or nonbonded_offsets is None:
+            sig_tail, eps_tail = sig, eps
         else:
-            e_tail = lj_dispersion_tail_energy(box_pbc, sig, eps, cutoff, atom_mask)
+            _, sig_tail, eps_tail = _apply_particle_offsets(
+                q_base, sig_base, eps_base, nonbonded_offsets, default_params, n
+            )
+        e_tail = _compute_lj_tail_energy_compat(
+            box_pbc,
+            sig_tail,
+            eps_tail,
+            cutoff,
+            atom_mask,
+            lj_switch_width=lj_switch_width,
+            combining_rule=lj_combining_rule,
+        )
         tot = tot + e_tail
 
     return tot
@@ -1060,6 +1437,12 @@ def _eval_system_potential_energy(  # noqa: PLR0913
     gb_use_neighbor_list: bool = False,
     gbsa_surface_tension: float = 0.0054,
     pme_alpha: float | None = None,
+    nonbonded_offsets: NonbondedParameterOffsets | None = None,
+    default_params: dict[str, float] | None = None,
+    lj_combining_rule: str = "lorentz_berthelot",
+    exceptions_use_pbc: bool = False,
+    dispersion_follows_parameters: bool = True,
+    force_pure_jax_tile_pairs: bool = False,
 ) -> jnp.ndarray:
     """Compute total potential energy (in kcal/mol) for active force groups."""
     e = _eval_bonded_terms(
@@ -1100,6 +1483,13 @@ def _eval_system_potential_energy(  # noqa: PLR0913
         custom_nonbonded_chunk_size=custom_nonbonded_chunk_size,
         tile_pair_nl=tile_pair_nl,
         is_triclinic=is_triclinic,
+        global_params=global_params,
+        nonbonded_offsets=nonbonded_offsets,
+        default_params=default_params,
+        lj_combining_rule=lj_combining_rule,
+        exceptions_use_pbc=exceptions_use_pbc,
+        dispersion_follows_parameters=dispersion_follows_parameters,
+        force_pure_jax_tile_pairs=force_pure_jax_tile_pairs,
     )
 
     # Position Restraints
@@ -1255,6 +1645,11 @@ def _pure_compute_energy_and_forces(  # noqa: PLR0913
     gb_use_neighbor_list: bool = False,
     gbsa_surface_tension: float = 0.0054,
     pme_alpha: float | None = None,
+    nonbonded_offsets: NonbondedParameterOffsets | None = None,
+    default_params: dict[str, float] | None = None,
+    lj_combining_rule: str = "lorentz_berthelot",
+    exceptions_use_pbc: bool = False,
+    dispersion_follows_parameters: bool = True,
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
     """Pure JIT evaluation of potential energy and negative gradient forces."""
     eval_pos = pos.astype(jnp.float32) if mixed_precision else pos
@@ -1302,6 +1697,11 @@ def _pure_compute_energy_and_forces(  # noqa: PLR0913
             gb_use_neighbor_list=gb_use_neighbor_list,
             gbsa_surface_tension=gbsa_surface_tension,
             pme_alpha=pme_alpha,
+            nonbonded_offsets=nonbonded_offsets,
+            default_params=default_params,
+            lj_combining_rule=lj_combining_rule,
+            exceptions_use_pbc=exceptions_use_pbc,
+            dispersion_follows_parameters=dispersion_follows_parameters,
         )
 
     pe, grad = jax.value_and_grad(e_fn)(eval_pos)
@@ -1367,12 +1767,22 @@ def _pure_step_rollout(  # noqa: PLR0913
     step_offset: jax.Array | None = None,
     n_dof: int | None = None,
     pme_alpha: float | None = None,
+    nonbonded_offsets: NonbondedParameterOffsets | None = None,
+    default_params: dict[str, float] | None = None,
+    lj_combining_rule: str = "lorentz_berthelot",
+    exceptions_use_pbc: bool = False,
+    dispersion_follows_parameters: bool = True,
 ) -> tuple[jnp.ndarray, jnp.ndarray, jax.Array]:
-    """Pure compiled multi-step rollout kernel via jax.lax.fori_loop."""
+    """Pure compiled multi-step rollout kernel via jax.lax.fori_loop with inter-step force reuse."""
     c1 = jnp.exp(-gamma * dt) if is_langevin else 1.0
     c2 = jnp.sqrt(jnp.maximum(1.0 - c1 * c1, 0.0)) if is_langevin else 0.0
     eff_ndof = int(n_dof) if n_dof is not None else max(1, 3 * int(positions.shape[0]) - 3)
     base_step = jnp.asarray(0, dtype=jnp.int32) if step_offset is None else step_offset
+
+    scheme = str(integrator_scheme).lower()
+    if scheme == "auto":
+        scheme = "baoab" if is_langevin else "leapfrog"
+    carries_end_force = scheme in ("baoab", "langevin", "lfmiddle", "verlet", "nose_hoover")
 
     def compute_f(p: jnp.ndarray) -> tuple[jnp.ndarray, jnp.ndarray]:
         p_recon = virtual_sites.reconstruct_positions(p) if virtual_sites is not None else p
@@ -1414,6 +1824,11 @@ def _pure_step_rollout(  # noqa: PLR0913
             gb_use_neighbor_list=gb_use_neighbor_list,
             gbsa_surface_tension=gbsa_surface_tension,
             pme_alpha=pme_alpha,
+            nonbonded_offsets=nonbonded_offsets,
+            default_params=default_params,
+            lj_combining_rule=lj_combining_rule,
+            exceptions_use_pbc=exceptions_use_pbc,
+            dispersion_follows_parameters=dispersion_follows_parameters,
         )
         f = (
             virtual_sites.redistribute_forces(f_raw, p_recon)
@@ -1422,18 +1837,23 @@ def _pure_step_rollout(  # noqa: PLR0913
         )
         return pe, f
 
-    def step_body(i: int, val: tuple[jnp.ndarray, jnp.ndarray, jax.Array]):
-        pos, vel, k = val
+    f_init = (
+        jax.lax.cond(
+            num_steps > 0,
+            lambda p0: compute_f(p0)[1],
+            jnp.zeros_like,
+            positions,
+        )
+        if carries_end_force
+        else jnp.zeros_like(positions)
+    )
 
-        # 1. Force evaluation at current positions
-        _, f = compute_f(pos)
-
-        scheme = str(integrator_scheme).lower()
-        if scheme == "auto":
-            scheme = "baoab" if is_langevin else "leapfrog"
+    def step_body(i: int, val: tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jax.Array]):
+        pos, vel, f_carried, k = val
+        f = f_carried if carries_end_force else compute_f(pos)[1]
+        f_next = f_carried
 
         if scheme in ("baoab", "langevin", "lfmiddle"):
-            # BAOAB scheme
             v = vel + 0.5 * dt * (f * inv_mass[:, None])
             r = pos + 0.5 * dt * v
             k, subk = jax.random.split(k)
@@ -1448,14 +1868,13 @@ def _pure_step_rollout(  # noqa: PLR0913
                 r = r_c
             if virtual_sites is not None:
                 r = virtual_sites.reconstruct_positions(r)
-            _, f_new = compute_f(r)
-            v = v + 0.5 * dt * (f_new * inv_mass[:, None])
+            _, f_next = compute_f(r)
+            v = v + 0.5 * dt * (f_next * inv_mass[:, None])
             if constraints is not None:
                 p = v * masses[:, None]
                 p_proj = constraints.apply_velocities(pos, r, p, masses[:, None], dt, box=box)
                 v = jnp.where(inv_mass[:, None] > 1e-12, p_proj * inv_mass[:, None], 0.0)
         elif scheme == "verlet":
-            # Velocity Verlet
             v_half = vel + 0.5 * dt * (f * inv_mass[:, None])
             r = pos + dt * v_half
             if constraints is not None:
@@ -1464,14 +1883,13 @@ def _pure_step_rollout(  # noqa: PLR0913
                 r = r_c
             if virtual_sites is not None:
                 r = virtual_sites.reconstruct_positions(r)
-            _, f_new = compute_f(r)
-            v = v_half + 0.5 * dt * (f_new * inv_mass[:, None])
+            _, f_next = compute_f(r)
+            v = v_half + 0.5 * dt * (f_next * inv_mass[:, None])
             if constraints is not None:
                 p = v * masses[:, None]
                 p_proj = constraints.apply_velocities(pos, r, p, masses[:, None], dt, box=box)
                 v = jnp.where(inv_mass[:, None] > 1e-12, p_proj * inv_mass[:, None], 0.0)
         elif scheme == "brownian":
-            # Overdamped Langevin / Brownian dynamics
             k, subk = jax.random.split(k)
             noise = jax.random.normal(subk, shape=pos.shape, dtype=pos.dtype)
             drift = (f * inv_mass[:, None] / jnp.maximum(gamma, 1e-6)) * dt
@@ -1488,7 +1906,6 @@ def _pure_step_rollout(  # noqa: PLR0913
                 p_proj = constraints.apply_velocities(pos, r, p, masses[:, None], dt, box=box)
                 v = jnp.where(inv_mass[:, None] > 1e-12, p_proj * inv_mass[:, None], 0.0)
         elif scheme == "nose_hoover":
-            # Nose-Hoover thermostat dynamics
             v_half = vel + 0.5 * dt * (f * inv_mass[:, None])
             ke2 = jnp.sum(masses[:, None] * (v_half ** 2))
             ndof = jnp.asarray(float(eff_ndof), dtype=pos.dtype)
@@ -1505,14 +1922,13 @@ def _pure_step_rollout(  # noqa: PLR0913
                 r = r_c
             if virtual_sites is not None:
                 r = virtual_sites.reconstruct_positions(r)
-            _, f_new = compute_f(r)
-            v = v_half_scaled + 0.5 * dt * (f_new * inv_mass[:, None])
+            _, f_next = compute_f(r)
+            v = v_half_scaled + 0.5 * dt * (f_next * inv_mass[:, None])
             if constraints is not None:
                 p = v * masses[:, None]
                 p_proj = constraints.apply_velocities(pos, r, p, masses[:, None], dt, box=box)
                 v = jnp.where(inv_mass[:, None] > 1e-12, p_proj * inv_mass[:, None], 0.0)
         else:
-            # Leapfrog (standard VerletIntegrator)
             v = vel + dt * (f * inv_mass[:, None])
             r = pos + dt * v
             if constraints is not None:
@@ -1526,7 +1942,6 @@ def _pure_step_rollout(  # noqa: PLR0913
                 p_proj = constraints.apply_velocities(pos, r, p, masses[:, None], dt, box=box)
                 v = jnp.where(inv_mass[:, None] > 1e-12, p_proj * inv_mass[:, None], 0.0)
 
-        # Apply exact Bussi-Donadio-Parrinello CSVR thermostat override if requested (BUG-OMM3)
         if thermostat_override is not None:
             t_str = str(thermostat_override).lower()
             if "csvr" in t_str or "bussi" in t_str:
@@ -1560,7 +1975,6 @@ def _pure_step_rollout(  # noqa: PLR0913
                 alpha = (alpha_sign * jnp.sqrt(jnp.maximum(alpha_sq, 0.0))).astype(vel.dtype)
                 v = jnp.where(ke2 > 1e-12, (v * alpha).astype(vel.dtype), v)
 
-        # Remove center of mass motion periodically when requested (only when >1 mobile atom)
         if remove_com_motion and cmm_frequency > 0:
             active_m_mask = inv_mass > 1e-12
             n_active_m = jnp.sum(active_m_mask)
@@ -1582,10 +1996,10 @@ def _pure_step_rollout(  # noqa: PLR0913
 
         r = r.astype(pos.dtype)
         v = v.astype(vel.dtype)
-        return r, v, k
+        return r, v, f_next.astype(pos.dtype), k
 
-    init_val = (positions, velocities, key)
-    final_pos, final_vel, final_key = jax.lax.fori_loop(0, num_steps, step_body, init_val)
+    init_val = (positions, velocities, f_init, key)
+    final_pos, final_vel, _, final_key = jax.lax.fori_loop(0, num_steps, step_body, init_val)
     if virtual_sites is not None:
         final_pos = virtual_sites.reconstruct_positions(final_pos)
     return final_pos, final_vel, final_key
@@ -1603,6 +2017,1453 @@ def _is_same_openmm_force(f1: Any, f2: Any) -> bool:
     this1 = getattr(f1, "this", None)
     this2 = getattr(f2, "this", None)
     return this1 is not None and this1 == this2
+
+
+@eqx.filter_jit
+def _unwrap_molecules_and_com_jax(
+    pos: jnp.ndarray,
+    box: jnp.ndarray | None,
+    anchor_of_atom: jnp.ndarray,
+    mol_of_atom: jnp.ndarray,
+    inv_mol_size: jnp.ndarray,
+    has_pbc: bool,
+) -> tuple[jnp.ndarray, jnp.ndarray]:
+    """O(N) GPU-resident molecular PBC unwrap and per-atom molecular COM computation."""
+    anchors = pos[anchor_of_atom]
+    if has_pbc and box is not None:
+        dr_intra = _minimum_image_dr(pos - anchors, box, True)
+        pos_unwrapped = anchors + dr_intra
+    else:
+        pos_unwrapped = pos
+    n_mols = int(inv_mol_size.shape[0])
+    mol_sums = jnp.zeros((n_mols, 3), dtype=pos.dtype).at[mol_of_atom].add(pos_unwrapped)
+    mol_coms = mol_sums * inv_mol_size[:, None].astype(pos.dtype)
+    com_per_atom = mol_coms[mol_of_atom]
+    return pos_unwrapped, com_per_atom
+
+
+@jax.jit
+def _wrap_molecules_jax(
+    pos: jnp.ndarray,
+    box: jnp.ndarray,
+    mol_of_atom: jnp.ndarray,
+    inv_mol_size: jnp.ndarray,
+) -> jnp.ndarray:
+    """O(N) GPU-resident whole-molecule PBC wrapping in AKMA Å (0 host loops)."""
+    n_mols = int(inv_mol_size.shape[0])
+    if n_mols == 0 or int(pos.shape[0]) == 0:
+        return pos
+    a_vec, b_vec, c_vec = box[0], box[1], box[2]
+    mol_sums = jnp.zeros((n_mols, 3), dtype=pos.dtype).at[mol_of_atom].add(pos)
+    coms = mol_sums * inv_mol_size[:, None].astype(pos.dtype)
+    diffs = jnp.zeros((n_mols, 3), dtype=pos.dtype)
+    cz_ok = jnp.abs(c_vec[2]) > 1e-12
+    diffs = jnp.where(
+        cz_ok,
+        diffs + jnp.floor(coms[:, 2:3] / jnp.where(cz_ok, c_vec[2], 1.0)) * c_vec[None, :],
+        diffs,
+    )
+    by_ok = jnp.abs(b_vec[1]) > 1e-12
+    diffs = jnp.where(
+        by_ok,
+        diffs
+        + jnp.floor((coms[:, 1:2] - diffs[:, 1:2]) / jnp.where(by_ok, b_vec[1], 1.0))
+        * b_vec[None, :],
+        diffs,
+    )
+    ax_ok = jnp.abs(a_vec[0]) > 1e-12
+    diffs = jnp.where(
+        ax_ok,
+        diffs
+        + jnp.floor((coms[:, 0:1] - diffs[:, 0:1]) / jnp.where(ax_ok, a_vec[0], 1.0))
+        * a_vec[None, :],
+        diffs,
+    )
+    return pos - diffs[mol_of_atom]
+
+
+def _pack_bundle_fused_bonded(bundle: MolecularBundle) -> FusedBondedBuffers:
+    """Pack active MolecularBundle bonded terms into 1-replica FusedBondedBuffers."""
+    has_b = bundle.n_bonds is not None and int(bundle.n_bonds) > 0
+    has_ub = bundle.n_urey_bradley is not None and int(bundle.n_urey_bradley) > 0
+    has_a = bundle.n_angles is not None and int(bundle.n_angles) > 0
+    has_d = bundle.n_dihedrals is not None and int(bundle.n_dihedrals) > 0
+    has_i = bundle.n_impropers is not None and int(bundle.n_impropers) > 0
+    has_e = bundle.n_exception_pairs is not None and int(bundle.n_exception_pairs) > 0
+    has_c = bundle.n_cmap is not None and int(bundle.n_cmap) > 0
+    imp_harm = bool(
+        has_i and bundle.improper_params is not None and bundle.improper_params.shape[-1] == 2
+    )
+    dih_p3 = (
+        bundle.dihedral_params[..., :3]
+        if (has_d and bundle.dihedral_params is not None)
+        else None
+    )
+    imp_p = (
+        (bundle.improper_params if imp_harm else bundle.improper_params[..., :3])
+        if (has_i and bundle.improper_params is not None)
+        else None
+    )
+    return prepare_fused_bonded_buffers(
+        1,
+        bonds=bundle.bond_idx if has_b else None,
+        bond_params=bundle.bond_params if has_b else None,
+        bond_mask=bundle.bond_mask if has_b else None,
+        urey_bradley_bonds=bundle.urey_bradley_idx if has_ub else None,
+        urey_bradley_params=bundle.urey_bradley_params if has_ub else None,
+        urey_bradley_mask=bundle.urey_bradley_mask if has_ub else None,
+        angles=bundle.angle_idx if has_a else None,
+        angle_params=bundle.angle_params if has_a else None,
+        angle_mask=bundle.angle_mask if has_a else None,
+        dihedrals=bundle.dihedral_idx if has_d else None,
+        dihedral_params=dih_p3,
+        dihedral_mask=bundle.dihedral_mask if has_d else None,
+        impropers=bundle.improper_idx if has_i else None,
+        improper_params=imp_p,
+        improper_mask=bundle.improper_mask if has_i else None,
+        improper_is_harmonic=imp_harm,
+        exception_pairs=bundle.exception_pairs if has_e else None,
+        exception_sigmas=bundle.exception_sigmas if has_e else None,
+        exception_epsilons=bundle.exception_epsilons if has_e else None,
+        exception_chargeprods=bundle.exception_chargeprods if has_e else None,
+        exception_mask=bundle.exception_mask if has_e else None,
+        cmap_torsions=bundle.cmap_torsion_idx if has_c else None,
+        cmap_indices=bundle.cmap_indices if has_c else None,
+        cmap_coeffs=bundle.cmap_coeffs if has_c else None,
+        cmap_mask=bundle.cmap_mask if has_c else None,
+    )
+
+
+def _build_context_morton_runner(  # noqa: PLR0913
+    bundle: MolecularBundle,
+    *,
+    n_act: int,
+    precision: str,
+    pallas_interpret: bool,
+    cutoff: float,
+    nl_skin: float,
+    lj_switch_width: float,
+    tp_group: int | None,
+    do_pme: bool,
+    pme_alpha: float,
+    grid_dims: tuple[int, int, int],
+    is_rf: bool,
+    rf_dielectric: float,
+    gamma_akma: float,
+    nl_freq: int,
+    cmm_freq: int,
+    has_barostat: bool,
+    baro_mode: str,
+    baro_freq: int,
+    target_p_akma: float,
+    r_oh_akma: float,
+    r_hh_akma: float,
+    m_o_akma: float,
+    m_h_akma: float,
+    anchor_jnp: jnp.ndarray,
+    mol_jnp: jnp.ndarray,
+    inv_mol_size_jnp: jnp.ndarray,
+    host_box0_np: np.ndarray,
+    init_positions: jnp.ndarray,
+) -> dict[str, Any]:
+    """Build a persistent B=1 GPU-resident BAOAB + Morton 32x32 tile-pair + SPME/RF + NPT runner."""
+    B = 1
+    N = int(bundle.positions.shape[0])
+    n_act_blocks = max(1, (n_act + 31) // 32)
+    n_act_pad = n_act_blocks * 32
+    pad_tail = n_act_pad - n_act
+    pad_N = N - n_act
+
+    if precision == "mixed":
+        state_dtype: Any = jnp.float64
+        f64_acc = True
+    else:
+        state_dtype = jnp.float32
+        f64_acc = False
+
+    interpret = (
+        bool(pallas_interpret)
+        or not _triton_gpu_available()
+        or jax.default_backend() == "cpu"
+    )
+    n_waters_real = (
+        int(np.sum(np.asarray(bundle.water_mask)))
+        if bundle.shape_spec.has_real_water
+        else 0
+    )
+    mass_b = bundle.masses[:N].astype(state_dtype)[None, :]
+    mass_act = bundle.masses[:n_act].astype(state_dtype)
+    inv_mass_act = jnp.where(mass_act > 1e-12, 1.0 / jnp.where(mass_act > 1e-12, mass_act, 1.0), 0.0)
+    am_b = bundle.atom_mask[:N].astype(jnp.bool_)[None, :]
+
+    if bundle.shape_spec.has_real_water and bundle.water_indices is not None:
+        wi_b = bundle.water_indices.astype(jnp.int32)[None, :, :]
+        wm_b = bundle.water_mask.astype(jnp.int32)[None, :]
+    else:
+        wi_b = jnp.zeros((1, 0, 3), dtype=jnp.int32)
+        wm_b = jnp.zeros((1, 0), dtype=jnp.int32)
+
+    has_cons = bool(
+        getattr(bundle.shape_spec, "has_real_constraints", False)
+        and bundle.constraint_pairs is not None
+        and int(bundle.constraint_pairs.shape[0]) > 0
+    )
+    cp_b = (
+        bundle.constraint_pairs.astype(jnp.int32)[None, :, :]
+        if (has_cons and bundle.constraint_pairs is not None)
+        else None
+    )
+    cl_b = (
+        bundle.constraint_lengths.astype(state_dtype)[None, :]
+        if (has_cons and bundle.constraint_lengths is not None)
+        else None
+    )
+    cm_b = (
+        bundle.constraint_mask.astype(jnp.int32)[None, :]
+        if (has_cons and bundle.constraint_mask is not None)
+        else None
+    )
+
+    soa_plan = build_baoab_soa_static_plan(
+        B,
+        N,
+        state_dtype,
+        mass_b,
+        wi_b,
+        wm_b,
+        atom_mask_b=am_b,
+        constraint_pairs_b=cp_b,
+        constraint_lengths_b=cl_b,
+        constraint_mask_b=cm_b,
+        n_active_atoms=n_act,
+        n_active_waters=n_waters_real,
+    )
+
+    eff_skin = max(float(nl_skin), 2.0)
+    thresh_sq = float((0.5 * eff_skin) ** 2)
+    npt_safety = 1.15 if has_barostat else 1.0
+    max_pairs = estimate_max_tile_pairs(
+        n_act_blocks, cutoff=cutoff, skin=eff_skin, box_safety=npt_safety
+    )
+    host_min_box = float(np.min(host_box0_np))
+    dedup_excl = precompute_dedup_excl_edges(
+        bundle.excl_dense_indices,
+        bundle.excl_dense_scales_vdw,
+        bundle.excl_dense_scales_elec,
+        n_act,
+    )
+
+    bonded_static: FusedBondedBuffers = _pack_bundle_fused_bonded(bundle)
+
+    if do_pme:
+        G_init = jnp.asarray(
+            _cached_host_influence_function_np(
+                grid_dims,
+                tuple(float(x) for x in host_box0_np),
+                (3,),
+                "float32",
+                pme_alpha,
+                4,
+            ),
+            dtype=jnp.float32,
+        )[None, ...]
+        n_grid_f = float(grid_dims[0] * grid_dims[1] * grid_dims[2])
+        pme_force_scale = -float(COULOMB_CONSTANT) * n_grid_f
+    else:
+        G_init = jnp.zeros((1, 1, 1, 1), dtype=jnp.float32)
+        n_grid_f = 1.0
+        pme_force_scale = 0.0
+
+    chunk_k = max(1, int(nl_freq) if int(nl_freq) > 0 else 20)
+    if has_barostat:
+        chunk_k = min(chunk_k, max(1, int(baro_freq)))
+
+    lam_flat = jnp.ones((1,), dtype=jnp.float32)
+    in_b_pre = (True,) * (12 + (3 if has_cons else 0))
+    dummy_pos_b = jnp.zeros((1, N, 3), dtype=state_dtype)
+    n_mols = int(inv_mol_size_jnp.shape[0])
+    soa_has_rf_kw = "rf_dielectric" in _PALLAS_SOA_SIG_PARAMS
+
+    def _inv_for_n(inv_pad: jax.Array) -> jax.Array:
+        pw = int(inv_pad.shape[1])
+        return inv_pad[:, :N] if pw >= N else jnp.pad(inv_pad, ((0, 0), (0, N - pw)))
+
+    def _pad_atom_1d(arr_n: jax.Array, pad_val: float = 0.0) -> jax.Array:
+        arr_act = arr_n[:, :n_act]
+        if pad_tail > 0:
+            return jnp.pad(arr_act, ((0, 0), (0, pad_tail)), constant_values=pad_val)
+        return arr_act
+
+    init_pos_wr = jnp.mod(
+        init_positions[:n_act].astype(state_dtype),
+        jnp.asarray(host_box0_np, dtype=state_dtype)[None, :],
+    )
+    init_pos_pad = (
+        jnp.pad(init_pos_wr, ((0, pad_N), (0, 0)))[None, :, :]
+        if pad_N > 0
+        else init_pos_wr[None, :, :]
+    )
+    tp_init = pallas_build_morton_tile_pairs_gpu(
+        init_pos_pad,
+        bundle.charges[:N].astype(jnp.float32)[None, :],
+        bundle.sigmas[:N].astype(jnp.float32)[None, :],
+        bundle.epsilons[:N].astype(jnp.float32)[None, :],
+        am_b,
+        jnp.asarray(host_box0_np, dtype=state_dtype)[None, :],
+        dedup_excl,
+        n_act=n_act,
+        max_pairs=max_pairs,
+        cutoff=cutoff,
+        skin=eff_skin,
+        host_min_box=host_min_box,
+        interpret=interpret,
+    )
+    z_f = jnp.zeros((n_act_pad,), dtype=jnp.float32)
+
+    @jax.jit
+    def _jit_step(  # noqa: PLR0913
+        pos_in: jax.Array,
+        vel_in: jax.Array,
+        key_in: jax.Array,
+        step_offset_in: int | jax.Array,
+        n_steps_in: int | jax.Array,
+        dt_s_in: float | jax.Array,
+        kT_s_in: float | jax.Array,
+        box_diag_in: jax.Array,
+        q_b_in: jax.Array,
+        sig_b_in: jax.Array,
+        eps_b_in: jax.Array,
+        b_r0_in: jax.Array,
+        b_k_in: jax.Array,
+        a_th0_in: jax.Array,
+        a_kval_in: jax.Array,
+        d_p0_in: jax.Array,
+        d_p1_in: jax.Array,
+        d_p2_in: jax.Array,
+        e_sig_in: jax.Array,
+        e_eps_in: jax.Array,
+        e_qp_in: jax.Array,
+        tp_in: MortonTilePairState,
+        fx_in: jax.Array,
+        fy_in: jax.Array,
+        fz_in: jax.Array,
+        G_in: jax.Array,
+        nl_dirty_in: bool | jax.Array,
+        forces_dirty_in: bool | jax.Array,
+        mc_scale_in: jax.Array,
+        mc_att_in: jax.Array,
+        mc_acc_in: jax.Array,
+        c_tail_in: jax.Array,
+    ):
+        step_offset_i32 = jnp.asarray(step_offset_in, dtype=jnp.int32)
+        n_steps_i32 = jnp.asarray(n_steps_in, dtype=jnp.int32)
+        nl_dirty_b = jnp.asarray(nl_dirty_in, dtype=jnp.bool_)
+        forces_dirty_b = jnp.asarray(forces_dirty_in, dtype=jnp.bool_)
+        dt_b = jnp.broadcast_to(jnp.asarray(dt_s_in, dtype=state_dtype), (1,))
+        kT_b = jnp.broadcast_to(jnp.asarray(kT_s_in, dtype=state_dtype), (1,))
+        box_b0 = box_diag_in.astype(state_dtype)[None, :]
+        bonded_dyn = bonded_static._replace(
+            b_r0=b_r0_in,
+            b_k=b_k_in,
+            a_th0=a_th0_in,
+            a_kval=a_kval_in,
+            d_p0=d_p0_in,
+            d_p1=d_p1_in,
+            d_p2=d_p2_in,
+            e_sig=e_sig_in,
+            e_eps=e_eps_in,
+            e_qp=e_qp_in,
+        )
+        e_self_b = (
+            spme_self_energy(q_b_in, am_b, alpha=pme_alpha).astype(jnp.float32)
+            if do_pme
+            else jnp.zeros((1,), dtype=jnp.float32)
+        )
+        q_net = jnp.sum(jnp.where(am_b, q_b_in, 0.0), axis=-1)
+        c_plasma_b = (
+            -(jnp.pi * float(COULOMB_CONSTANT) / (2.0 * (pme_alpha**2))) * (q_net * q_net)
+            if do_pme
+            else jnp.zeros((1,), dtype=jnp.float32)
+        )
+
+        def _eval_morton_forces(
+            px_m: jax.Array,
+            py_m: jax.Array,
+            pz_m: jax.Array,
+            tp_st: MortonTilePairState,
+            box_b_cur: jax.Array,
+            G_b_cur: jax.Array,
+            compute_energy: bool = False,
+        ) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array]:
+            box_f32_flat = box_b_cur.astype(jnp.float32).reshape(3)
+            soa_extra: dict[str, Any] = {}
+            if is_rf and soa_has_rf_kw:
+                soa_extra["rf_dielectric"] = float(rf_dielectric)
+            e_dir, fx_d, fy_d, fz_d = _pallas_bonded_and_tile_pairs_soa(
+                1,
+                px_m,
+                py_m,
+                pz_m,
+                tp_st.q_m.reshape(n_act_pad),
+                tp_st.sig_m.reshape(n_act_pad),
+                tp_st.eps_m.reshape(n_act_pad),
+                tp_st.mask_m.reshape(n_act_pad),
+                tp_st.inv_perm.reshape(n_act_pad),
+                tp_st.pair_ti.reshape(max_pairs),
+                tp_st.pair_tj.reshape(max_pairs),
+                tp_st.excl_full_bits.reshape(max_pairs * 32),
+                tp_st.excl_14_bits.reshape(max_pairs * 32),
+                tp_st.n_valid_pairs.reshape(1),
+                box_f32_flat,
+                lam_flat,
+                bonded_dyn,
+                n_act=n_act,
+                n_act_blocks=n_act_blocks,
+                max_pairs=max_pairs,
+                pme_alpha=(pme_alpha if do_pme else 0.0),
+                cutoff=cutoff,
+                lj_switch_width=lj_switch_width,
+                include_pme_excl_erf=do_pme,
+                scale_14_vdw=dedup_excl.scale_14_vdw,
+                scale_14_elec=dedup_excl.scale_14_elec,
+                cmap_first_is_psi=False,
+                tp_group=tp_group,
+                compute_energy=compute_energy,
+                interpret=interpret,
+                **soa_extra,
+            )
+            if not do_pme:
+                return e_dir, fx_d, fy_d, fz_d
+            q_mf = tp_st.q_m.reshape(n_act_pad)
+            m_mf = tp_st.mask_m.reshape(n_act_pad)
+            mesh = _spread_charges_pallas_soa(
+                1,
+                (True, True, True, True),
+                px_m,
+                py_m,
+                pz_m,
+                q_mf,
+                m_mf,
+                box_f32_flat,
+                grid_dims,
+                n_act_pad,
+                n_act_pad,
+                interpret,
+            )
+            q_hat = jnp.fft.rfftn(mesh, s=grid_dims, axes=(-3, -2, -1))
+            theta = jnp.fft.irfftn(
+                q_hat * G_b_cur, s=grid_dims, axes=(-3, -2, -1)
+            ).astype(jnp.float32)
+            fx_tot, fy_tot, fz_tot, _ = _gather_pallas_soa(
+                1,
+                (True, True, True, True, True),
+                px_m,
+                py_m,
+                pz_m,
+                q_mf,
+                m_mf,
+                box_f32_flat,
+                theta.reshape(-1),
+                grid_dims,
+                n_act_pad,
+                n_act_pad,
+                n_act_blocks,
+                interpret,
+                force_scale=pme_force_scale,
+                force_accum=(fx_d, fy_d, fz_d),
+            )
+            if compute_energy:
+                e_rec = (
+                    0.5
+                    * float(COULOMB_CONSTANT)
+                    * jnp.sum(mesh * theta, axis=(-3, -2, -1))
+                    * n_grid_f
+                    + e_self_b
+                )
+                e_tot = e_dir + e_rec
+            else:
+                e_tot = e_dir
+            return e_tot, fx_tot, fy_tot, fz_tot
+
+        pos_unw0 = pos_in.astype(state_dtype)
+        pos_wr0 = jnp.mod(pos_unw0, box_b0[0][None, :])
+        mom_act0 = vel_in.astype(state_dtype) * mass_act[:, None]
+        if pad_N > 0:
+            pos_pad0 = jnp.pad(pos_wr0, ((0, pad_N), (0, 0)))[None, :, :]
+            mom_pad0 = jnp.pad(mom_act0, ((0, pad_N), (0, 0)))[None, :, :]
+        else:
+            pos_pad0 = pos_wr0[None, :, :]
+            mom_pad0 = mom_act0[None, :, :]
+
+        def _entry_rebuild_nl(_: Any):
+            tp_r = pallas_build_morton_tile_pairs_gpu(
+                pos_pad0,
+                q_b_in,
+                sig_b_in,
+                eps_b_in,
+                am_b,
+                box_b0,
+                dedup_excl,
+                n_act=n_act,
+                max_pairs=max_pairs,
+                cutoff=cutoff,
+                skin=eff_skin,
+                host_min_box=host_min_box,
+                interpret=interpret,
+            )
+            G_r = (
+                influence_function(
+                    grid_dims, box_b0[0].astype(jnp.float32), pme_alpha, 4
+                ).astype(jnp.float32)[None, ...]
+                if do_pme
+                else G_in
+            )
+            return tp_r, G_r
+
+        def _entry_keep_nl(_: Any):
+            def _refresh_params(_u: Any) -> MortonTilePairState:
+                qp = _pad_atom_1d(q_b_in, 0.0)
+                sp = _pad_atom_1d(sig_b_in, 1.0)
+                ep = _pad_atom_1d(eps_b_in, 0.0)
+                return MortonTilePairState(
+                    tp_in.perm,
+                    tp_in.inv_perm,
+                    jnp.take_along_axis(qp, tp_in.perm, axis=1),
+                    jnp.take_along_axis(sp, tp_in.perm, axis=1),
+                    jnp.take_along_axis(ep, tp_in.perm, axis=1),
+                    tp_in.mask_m,
+                    tp_in.pair_ti,
+                    tp_in.pair_tj,
+                    tp_in.excl_full_bits,
+                    tp_in.excl_14_bits,
+                    tp_in.n_valid_pairs,
+                    tp_in.ref_positions,
+                    n_act=n_act,
+                    n_act_blocks=n_act_blocks,
+                    max_pairs=max_pairs,
+                )
+
+            tp_k = jax.lax.cond(forces_dirty_b, _refresh_params, lambda _: tp_in, None)
+            return tp_k, G_in
+
+        tp0, G0 = jax.lax.cond(nl_dirty_b, _entry_rebuild_nl, _entry_keep_nl, None)
+
+        def _entry_recompute_f(_: Any):
+            p_a0 = pos_wr0.astype(jnp.float32)[None, :, :]
+            if pad_tail > 0:
+                p_a0 = jnp.pad(p_a0, ((0, 0), (0, pad_tail), (0, 0)))
+            pm0 = jnp.take_along_axis(p_a0, tp0.perm[:, :, None], axis=1)
+            _, fx_n, fy_n, fz_n = _eval_morton_forces(
+                pm0[:, :, 0].reshape(n_act_pad),
+                pm0[:, :, 1].reshape(n_act_pad),
+                pm0[:, :, 2].reshape(n_act_pad),
+                tp0,
+                box_b0,
+                G0,
+                compute_energy=False,
+            )
+            return fx_n, fy_n, fz_n
+
+        fx0, fy0, fz0 = jax.lax.cond(
+            nl_dirty_b | forces_dirty_b,
+            _entry_recompute_f,
+            lambda _: (fx_in, fy_in, fz_in),
+            None,
+        )
+
+        px0 = pos_pad0[:, :, 0].reshape(N)
+        py0 = pos_pad0[:, :, 1].reshape(N)
+        pz0 = pos_pad0[:, :, 2].reshape(N)
+        mx0 = mom_pad0[:, :, 0].reshape(N)
+        my0 = mom_pad0[:, :, 1].reshape(N)
+        mz0 = mom_pad0[:, :, 2].reshape(N)
+
+        def _chunk_cond(oc: Any) -> Any:
+            return oc[0] < n_steps_i32
+
+        def _chunk_body(oc: Any) -> Any:
+            (
+                step_i,
+                px,
+                py,
+                pz,
+                pos_unw,
+                mx,
+                my,
+                mz,
+                fx_m,
+                fy_m,
+                fz_m,
+                tp_c,
+                box_c,
+                G_c,
+                mc_sc,
+                mc_at,
+                mc_ac,
+            ) = oc
+            pos_cur_act = jnp.stack(
+                [px[:n_act], py[:n_act], pz[:n_act]], axis=-1
+            ).astype(jnp.float32)[None, :, :]
+            bx_f = box_c.astype(jnp.float32)[:, None, :]
+            dr = pos_cur_act - tp_c.ref_positions[:, :n_act, :].astype(jnp.float32)
+            dr = dr - bx_f * jnp.round(dr / bx_f)
+            dr_sq = jnp.where(am_b[:, :n_act], jnp.sum(dr * dr, axis=-1), 0.0)
+            need_reb = (step_i > 0) & jnp.any(jnp.max(dr_sq, axis=-1) > thresh_sq)
+
+            def _do_rebuild(ops: Any) -> Any:
+                px_r, py_r, pz_r, fx_r, fy_r, fz_r, tp_old, bx_r = ops
+                pos_full = jnp.stack(
+                    [px_r.reshape(1, N), py_r.reshape(1, N), pz_r.reshape(1, N)],
+                    axis=-1,
+                )
+                tp_new = pallas_build_morton_tile_pairs_gpu(
+                    pos_full,
+                    q_b_in,
+                    sig_b_in,
+                    eps_b_in,
+                    am_b,
+                    bx_r,
+                    dedup_excl,
+                    n_act=n_act,
+                    max_pairs=max_pairs,
+                    cutoff=cutoff,
+                    skin=eff_skin,
+                    host_min_box=host_min_box,
+                    interpret=interpret,
+                )
+                remap = jnp.take_along_axis(tp_old.inv_perm, tp_new.perm, axis=1)
+                fx_n = jnp.take_along_axis(
+                    fx_r.reshape(1, n_act_pad), remap, axis=1
+                ).reshape(n_act_pad)
+                fy_n = jnp.take_along_axis(
+                    fy_r.reshape(1, n_act_pad), remap, axis=1
+                ).reshape(n_act_pad)
+                fz_n = jnp.take_along_axis(
+                    fz_r.reshape(1, n_act_pad), remap, axis=1
+                ).reshape(n_act_pad)
+                return fx_n, fy_n, fz_n, tp_new
+
+            fx_m, fy_m, fz_m, tp_c = jax.lax.cond(
+                need_reb,
+                _do_rebuild,
+                lambda ops: (ops[3], ops[4], ops[5], ops[6]),
+                (px, py, pz, fx_m, fy_m, fz_m, tp_c, box_c),
+            )
+
+            g_step = step_offset_i32 + step_i
+            k_cur = jnp.minimum(jnp.int32(chunk_k), n_steps_i32 - step_i)
+            if has_barostat:
+                rem_b = jnp.int32(baro_freq) - (g_step % jnp.int32(baro_freq))
+                k_cur = jnp.minimum(k_cur, rem_b)
+            if cmm_freq > 1:
+                rem_c = jnp.int32(cmm_freq) - (g_step % jnp.int32(cmm_freq))
+                k_cur = jnp.minimum(k_cur, rem_c)
+
+            inv_n = _inv_for_n(tp_c.inv_perm)
+            seeds_0 = jax.random.fold_in(key_in, g_step)[None, :]
+            px, py, pz, mxh, myh, mzh, px_m, py_m, pz_m = _pallas_baoab_pre_force_batch(
+                1,
+                in_b_pre,
+                dummy_pos_b,
+                dummy_pos_b,
+                dummy_pos_b,
+                mass_b,
+                seeds_0,
+                wi_b,
+                wm_b,
+                box_c,
+                dt_b,
+                kT_b,
+                gamma_akma,
+                r_oh_akma,
+                r_hh_akma,
+                m_o_akma,
+                m_h_akma,
+                True,
+                True,
+                interpret,
+                atom_mask=am_b,
+                constraint_pairs=cp_b,
+                constraint_lengths=cl_b,
+                constraint_mask=cm_b,
+                n_active_atoms=n_act,
+                n_active_waters=n_waters_real,
+                f64_accumulators=f64_acc,
+                fuse_prev_post=False,
+                morton_inv_perm=inv_n,
+                morton_pad=n_act_pad,
+                prebuilt_soa=(px, py, pz, mx, my, mz, fx_m, fy_m, fz_m, soa_plan),
+            )
+            _, fx_m, fy_m, fz_m = _eval_morton_forces(
+                px_m, py_m, pz_m, tp_c, box_c, G_c, False
+            )
+
+            def _inner_step(s_rel: Any, ic: Any) -> Any:
+                px_s, py_s, pz_s, mxh_s, myh_s, mzh_s, fx_s, fy_s, fz_s = ic
+                seeds_s = jax.random.fold_in(key_in, g_step + s_rel)[None, :]
+                (
+                    px_s,
+                    py_s,
+                    pz_s,
+                    mxh_s,
+                    myh_s,
+                    mzh_s,
+                    px_ms,
+                    py_ms,
+                    pz_ms,
+                ) = _pallas_baoab_pre_force_batch(
+                    1,
+                    in_b_pre,
+                    dummy_pos_b,
+                    dummy_pos_b,
+                    dummy_pos_b,
+                    mass_b,
+                    seeds_s,
+                    wi_b,
+                    wm_b,
+                    box_c,
+                    dt_b,
+                    kT_b,
+                    gamma_akma,
+                    r_oh_akma,
+                    r_hh_akma,
+                    m_o_akma,
+                    m_h_akma,
+                    True,
+                    True,
+                    interpret,
+                    atom_mask=am_b,
+                    constraint_pairs=cp_b,
+                    constraint_lengths=cl_b,
+                    constraint_mask=cm_b,
+                    n_active_atoms=n_act,
+                    n_active_waters=n_waters_real,
+                    f64_accumulators=f64_acc,
+                    fuse_prev_post=True,
+                    morton_inv_perm=inv_n,
+                    morton_pad=n_act_pad,
+                    prebuilt_soa=(
+                        px_s,
+                        py_s,
+                        pz_s,
+                        mxh_s,
+                        myh_s,
+                        mzh_s,
+                        fx_s,
+                        fy_s,
+                        fz_s,
+                        soa_plan,
+                    ),
+                )
+                _, fx_s, fy_s, fz_s = _eval_morton_forces(
+                    px_ms, py_ms, pz_ms, tp_c, box_c, G_c, False
+                )
+                return (px_s, py_s, pz_s, mxh_s, myh_s, mzh_s, fx_s, fy_s, fz_s)
+
+            px, py, pz, mxh, myh, mzh, fx_m, fy_m, fz_m = jax.lax.fori_loop(
+                jnp.int32(1),
+                k_cur,
+                _inner_step,
+                (px, py, pz, mxh, myh, mzh, fx_m, fy_m, fz_m),
+            )
+            mx, my, mz = _pallas_baoab_post_soa(
+                px,
+                py,
+                pz,
+                mxh,
+                myh,
+                mzh,
+                fx_m,
+                fy_m,
+                fz_m,
+                inv_n,
+                n_act_pad,
+                dt_b,
+                m_o_akma,
+                m_h_akma,
+                interpret,
+                soa_plan,
+                f64_accumulators=f64_acc,
+            )
+
+            # Update continuous whole-molecule unwrapped coordinates across this chunk
+            pos_wr_next = jnp.stack([px[:n_act], py[:n_act], pz[:n_act]], axis=-1)
+            bx_d0 = box_c[0]
+            dr_chunk = pos_wr_next - pos_unw
+            dr_chunk = dr_chunk - bx_d0[None, :] * jnp.round(dr_chunk / bx_d0[None, :])
+            pos_unw = pos_unw + dr_chunk
+
+            step_next = step_i + k_cur
+            g_step_next = step_offset_i32 + step_next
+
+            if cmm_freq > 0 and n_act > 1:
+                do_cmm = (g_step_next // jnp.int32(max(1, cmm_freq))) > (
+                    g_step // jnp.int32(max(1, cmm_freq))
+                )
+
+                def _rm_cmm(m_xyz: Any) -> Any:
+                    mx_i = m_xyz[0].reshape(1, N)
+                    my_i = m_xyz[1].reshape(1, N)
+                    mz_i = m_xyz[2].reshape(1, N)
+                    m_real = jnp.where(am_b, mass_b, jnp.asarray(0.0, dtype=state_dtype))
+                    m_tot = jnp.maximum(
+                        jnp.sum(m_real, axis=1, keepdims=True),
+                        jnp.asarray(1e-12, dtype=state_dtype),
+                    )
+                    vx_cm = jnp.sum(jnp.where(am_b, mx_i, 0.0), axis=1, keepdims=True) / m_tot
+                    vy_cm = jnp.sum(jnp.where(am_b, my_i, 0.0), axis=1, keepdims=True) / m_tot
+                    vz_cm = jnp.sum(jnp.where(am_b, mz_i, 0.0), axis=1, keepdims=True) / m_tot
+                    return (
+                        jnp.where(am_b, mx_i - m_real * vx_cm, 0.0).reshape(N),
+                        jnp.where(am_b, my_i - m_real * vy_cm, 0.0).reshape(N),
+                        jnp.where(am_b, mz_i - m_real * vz_cm, 0.0).reshape(N),
+                    )
+
+                mx, my, mz = jax.lax.cond(do_cmm, _rm_cmm, lambda m_xyz: m_xyz, (mx, my, mz))
+
+            if has_barostat:
+                do_baro = (g_step_next % jnp.int32(baro_freq)) == 0
+
+                def _baro_step(b_ops: Any) -> Any:
+                    (
+                        px_b,
+                        py_b,
+                        pz_b,
+                        punw_b,
+                        mx_b,
+                        my_b,
+                        mz_b,
+                        fx_b,
+                        fy_b,
+                        fz_b,
+                        tp_b,
+                        bx_b,
+                        G_b,
+                        sc_b,
+                        at_b,
+                        ac_b,
+                    ) = b_ops
+                    bx_vec = bx_b[0]
+                    anc_u = punw_b[anchor_jnp]
+                    intra_u = punw_b - anc_u
+                    intra_u = intra_u - bx_vec[None, :] * jnp.round(intra_u / bx_vec[None, :])
+                    pos_whole = anc_u + intra_u
+                    mol_sums = (
+                        jnp.zeros((n_mols, 3), dtype=state_dtype)
+                        .at[mol_jnp]
+                        .add(pos_whole)
+                    )
+                    com_u = (mol_sums * inv_mol_size_jnp[:, None].astype(state_dtype))[mol_jnp]
+                    b_key = jax.random.fold_in(key_in, g_step_next + jnp.int32(999983))
+
+                    if baro_mode == "scr":
+                        eps_fd = jnp.asarray(1e-3, dtype=state_dtype)
+                        v_cur = jnp.prod(bx_vec.astype(jnp.float32))
+
+                        def _energy_at_scale(mu_fd: jax.Array) -> jax.Array:
+                            bx_fd = bx_b * mu_fd
+                            p_fd_unw = pos_whole + (mu_fd - 1.0) * com_u
+                            p_fd_wr = jnp.mod(p_fd_unw, bx_fd[0][None, :]).astype(jnp.float32)[None, :, :]
+                            if pad_tail > 0:
+                                p_fd_wr = jnp.pad(p_fd_wr, ((0, 0), (0, pad_tail), (0, 0)))
+                            pm_fd = jnp.take_along_axis(p_fd_wr, tp_b.perm[:, :, None], axis=1)
+                            G_fd = (
+                                influence_function(
+                                    grid_dims, bx_fd[0].astype(jnp.float32), pme_alpha, 4
+                                ).astype(jnp.float32)[None, ...]
+                                if do_pme
+                                else G_b
+                            )
+                            e_fd, _, _, _ = _eval_morton_forces(
+                                pm_fd[:, :, 0].reshape(n_act_pad),
+                                pm_fd[:, :, 1].reshape(n_act_pad),
+                                pm_fd[:, :, 2].reshape(n_act_pad),
+                                tp_b,
+                                bx_fd,
+                                G_fd,
+                                True,
+                            )
+                            return e_fd[0]
+
+                        e_hi = _energy_at_scale(jnp.asarray(1.0, dtype=state_dtype) + eps_fd)
+                        e_lo = _energy_at_scale(jnp.asarray(1.0, dtype=state_dtype) - eps_fd)
+                        vir_core = -(e_hi - e_lo) / (2.0 * eps_fd.astype(jnp.float32))
+                        vir_lr = 3.0 * (c_tail_in + c_plasma_b[0]) / jnp.maximum(v_cur, 1e-12)
+                        vir_tot = vir_core + vir_lr
+
+                        ke_tot = 0.5 * jnp.sum(
+                            (
+                                mx_b[:n_act] ** 2
+                                + my_b[:n_act] ** 2
+                                + mz_b[:n_act] ** 2
+                            )
+                            * inv_mass_act
+                        ).astype(jnp.float32)
+                        inst_p = (2.0 * ke_tot + vir_tot) / (3.0 * jnp.maximum(v_cur, 1e-12))
+                        dt_baro = (dt_b[0] * float(baro_freq)).astype(jnp.float32)
+                        tau_scr = jnp.float32(20.0)
+                        comp_akma = jnp.float32(4.5e-5 * BAR_PER_AKMA_PRESSURE)
+                        noise_scr = jax.random.normal(b_key, (), dtype=jnp.float32)
+                        deps_det = (dt_baro / tau_scr) * comp_akma * (inst_p - jnp.float32(target_p_akma))
+                        deps_sto = (
+                            jnp.sqrt(
+                                jnp.maximum(
+                                    2.0 * kT_b[0].astype(jnp.float32) * comp_akma * dt_baro / (tau_scr * jnp.maximum(v_cur, 1e-12)),
+                                    0.0,
+                                )
+                            )
+                            * noise_scr
+                        )
+                        mu = jnp.clip(jnp.exp((deps_det + deps_sto) / 3.0), 0.99, 1.01).astype(state_dtype)
+                        bx_new = bx_b * mu
+                        punw_new = pos_whole + (mu - 1.0) * com_u
+                        pwr_new = jnp.mod(punw_new, bx_new[0][None, :])
+                        pos_pad_new = (
+                            jnp.pad(pwr_new, ((0, pad_N), (0, 0)))[None, :, :]
+                            if pad_N > 0
+                            else pwr_new[None, :, :]
+                        )
+                        G_new = (
+                            influence_function(
+                                grid_dims, bx_new[0].astype(jnp.float32), pme_alpha, 4
+                            ).astype(jnp.float32)[None, ...]
+                            if do_pme
+                            else G_b
+                        )
+                        tp_new = pallas_build_morton_tile_pairs_gpu(
+                            pos_pad_new,
+                            q_b_in,
+                            sig_b_in,
+                            eps_b_in,
+                            am_b,
+                            bx_new,
+                            dedup_excl,
+                            n_act=n_act,
+                            max_pairs=max_pairs,
+                            cutoff=cutoff,
+                            skin=eff_skin,
+                            host_min_box=host_min_box,
+                            interpret=interpret,
+                        )
+                        p_ap = pwr_new.astype(jnp.float32)[None, :, :]
+                        if pad_tail > 0:
+                            p_ap = jnp.pad(p_ap, ((0, 0), (0, pad_tail), (0, 0)))
+                        pm_new = jnp.take_along_axis(p_ap, tp_new.perm[:, :, None], axis=1)
+                        _, fx_n, fy_n, fz_n = _eval_morton_forces(
+                            pm_new[:, :, 0].reshape(n_act_pad),
+                            pm_new[:, :, 1].reshape(n_act_pad),
+                            pm_new[:, :, 2].reshape(n_act_pad),
+                            tp_new,
+                            bx_new,
+                            G_new,
+                            False,
+                        )
+                        inv_mu = 1.0 / mu
+                        return (
+                            pos_pad_new[:, :, 0].reshape(N),
+                            pos_pad_new[:, :, 1].reshape(N),
+                            pos_pad_new[:, :, 2].reshape(N),
+                            punw_new,
+                            mx_b * inv_mu,
+                            my_b * inv_mu,
+                            mz_b * inv_mu,
+                            fx_n,
+                            fy_n,
+                            fz_n,
+                            tp_new,
+                            bx_new,
+                            G_new,
+                            sc_b,
+                            at_b,
+                            ac_b,
+                        )
+
+                    # Isotropic Monte Carlo Barostat on GPU with force reuse & adaptive step size
+                    p_cur_wr = jnp.stack([px_b[:n_act], py_b[:n_act], pz_b[:n_act]], axis=-1).astype(jnp.float32)[None, :, :]
+                    if pad_tail > 0:
+                        p_cur_wr = jnp.pad(p_cur_wr, ((0, 0), (0, pad_tail), (0, 0)))
+                    pm_cur = jnp.take_along_axis(p_cur_wr, tp_b.perm[:, :, None], axis=1)
+                    e_old, _, _, _ = _eval_morton_forces(
+                        pm_cur[:, :, 0].reshape(n_act_pad),
+                        pm_cur[:, :, 1].reshape(n_act_pad),
+                        pm_cur[:, :, 2].reshape(n_act_pad),
+                        tp_b,
+                        bx_b,
+                        G_b,
+                        True,
+                    )
+                    u_pair = jax.random.uniform(b_key, (2,), dtype=jnp.float32)
+                    u_scale = 2.0 * u_pair[0] - 1.0
+                    vol_scale = jnp.maximum(1.0 + sc_b * u_scale, 1e-6)
+                    mu = (vol_scale ** (1.0 / 3.0)).astype(state_dtype)
+                    bx_prop = bx_b * mu
+                    punw_prop = pos_whole + (mu - 1.0) * com_u
+                    pwr_prop = jnp.mod(punw_prop, bx_prop[0][None, :])
+                    pos_pad_prop = (
+                        jnp.pad(pwr_prop, ((0, pad_N), (0, 0)))[None, :, :]
+                        if pad_N > 0
+                        else pwr_prop[None, :, :]
+                    )
+                    G_prop = (
+                        influence_function(
+                            grid_dims, bx_prop[0].astype(jnp.float32), pme_alpha, 4
+                        ).astype(jnp.float32)[None, ...]
+                        if do_pme
+                        else G_b
+                    )
+                    tp_prop = pallas_build_morton_tile_pairs_gpu(
+                        pos_pad_prop,
+                        q_b_in,
+                        sig_b_in,
+                        eps_b_in,
+                        am_b,
+                        bx_prop,
+                        dedup_excl,
+                        n_act=n_act,
+                        max_pairs=max_pairs,
+                        cutoff=cutoff,
+                        skin=eff_skin,
+                        host_min_box=host_min_box,
+                        interpret=interpret,
+                    )
+                    p_ap = pwr_prop.astype(jnp.float32)[None, :, :]
+                    if pad_tail > 0:
+                        p_ap = jnp.pad(p_ap, ((0, 0), (0, pad_tail), (0, 0)))
+                    pm_prop = jnp.take_along_axis(p_ap, tp_prop.perm[:, :, None], axis=1)
+                    e_new, fx_p, fy_p, fz_p = _eval_morton_forces(
+                        pm_prop[:, :, 0].reshape(n_act_pad),
+                        pm_prop[:, :, 1].reshape(n_act_pad),
+                        pm_prop[:, :, 2].reshape(n_act_pad),
+                        tp_prop,
+                        bx_prop,
+                        G_prop,
+                        True,
+                    )
+                    v_old = jnp.prod(bx_b[0].astype(jnp.float32))
+                    v_new = jnp.prod(bx_prop[0].astype(jnp.float32))
+                    kT_f = kT_b[0].astype(jnp.float32)
+                    du_lr = (c_tail_in + c_plasma_b[0]) * (1.0 / jnp.maximum(v_new, 1e-12) - 1.0 / jnp.maximum(v_old, 1e-12))
+                    dh = (
+                        (e_new[0] - e_old[0])
+                        + du_lr
+                        + jnp.float32(target_p_akma) * (v_new - v_old)
+                        - jnp.float32(n_mols) * kT_f * jnp.log(vol_scale)
+                    )
+                    acc = u_pair[1] < jnp.exp(jnp.clip(-dh / jnp.maximum(kT_f, 1e-12), -50.0, 50.0))
+                    px_sel = jnp.where(acc, pos_pad_prop[:, :, 0].reshape(N), px_b)
+                    py_sel = jnp.where(acc, pos_pad_prop[:, :, 1].reshape(N), py_b)
+                    pz_sel = jnp.where(acc, pos_pad_prop[:, :, 2].reshape(N), pz_b)
+                    punw_sel = jnp.where(acc, punw_prop, punw_b)
+                    bx_sel = jnp.where(acc, bx_prop, bx_b)
+                    G_sel = jnp.where(acc, G_prop, G_b)
+                    tp_sel = jax.tree.map(lambda nv, ov: jnp.where(acc, nv, ov), tp_prop, tp_b)
+                    fx_sel = jnp.where(acc, fx_p, fx_b)
+                    fy_sel = jnp.where(acc, fy_p, fy_b)
+                    fz_sel = jnp.where(acc, fz_p, fz_b)
+
+                    at_n = at_b + jnp.int32(1)
+                    ac_n = ac_b + acc.astype(jnp.int32)
+                    do_adj = at_n >= jnp.int32(10)
+                    sc_shrunk = jnp.maximum(sc_b * jnp.float32(0.5), jnp.float32(1e-6))
+                    sc_grown = jnp.minimum(sc_b * jnp.float32(1.1), jnp.float32(0.3))
+                    sc_cand = jnp.where(
+                        ac_n.astype(jnp.float32) < jnp.float32(0.25) * at_n.astype(jnp.float32),
+                        sc_shrunk,
+                        jnp.where(
+                            ac_n.astype(jnp.float32) > jnp.float32(0.75) * at_n.astype(jnp.float32),
+                            sc_grown,
+                            sc_b,
+                        ),
+                    )
+                    sc_out = jnp.where(do_adj, sc_cand, sc_b)
+                    at_out = jnp.where(do_adj, jnp.int32(0), at_n)
+                    ac_out = jnp.where(do_adj, jnp.int32(0), ac_n)
+                    return (
+                        px_sel,
+                        py_sel,
+                        pz_sel,
+                        punw_sel,
+                        mx_b,
+                        my_b,
+                        mz_b,
+                        fx_sel,
+                        fy_sel,
+                        fz_sel,
+                        tp_sel,
+                        bx_sel,
+                        G_sel,
+                        sc_out,
+                        at_out,
+                        ac_out,
+                    )
+
+                (
+                    px,
+                    py,
+                    pz,
+                    pos_unw,
+                    mx,
+                    my,
+                    mz,
+                    fx_m,
+                    fy_m,
+                    fz_m,
+                    tp_c,
+                    box_c,
+                    G_c,
+                    mc_sc,
+                    mc_at,
+                    mc_ac,
+                ) = jax.lax.cond(
+                    do_baro,
+                    _baro_step,
+                    lambda b_ops: b_ops,
+                    (
+                        px,
+                        py,
+                        pz,
+                        pos_unw,
+                        mx,
+                        my,
+                        mz,
+                        fx_m,
+                        fy_m,
+                        fz_m,
+                        tp_c,
+                        box_c,
+                        G_c,
+                        mc_sc,
+                        mc_at,
+                        mc_ac,
+                    ),
+                )
+
+            return (
+                step_next,
+                px,
+                py,
+                pz,
+                pos_unw,
+                mx,
+                my,
+                mz,
+                fx_m,
+                fy_m,
+                fz_m,
+                tp_c,
+                box_c,
+                G_c,
+                mc_sc,
+                mc_at,
+                mc_ac,
+            )
+
+        (
+            _,
+            _,
+            _,
+            _,
+            pos_unw_f,
+            mxf,
+            myf,
+            mzf,
+            fxf,
+            fyf,
+            fzf,
+            tpf,
+            boxf,
+            Gf,
+            mc_sc_f,
+            mc_at_f,
+            mc_ac_f,
+        ) = jax.lax.while_loop(
+            _chunk_cond,
+            _chunk_body,
+            (
+                jnp.int32(0),
+                px0,
+                py0,
+                pz0,
+                pos_unw0,
+                mx0,
+                my0,
+                mz0,
+                fx0,
+                fy0,
+                fz0,
+                tp0,
+                box_b0,
+                G0,
+                mc_scale_in,
+                mc_att_in,
+                mc_acc_in,
+            ),
+        )
+        mom_act_f = jnp.stack([mxf[:n_act], myf[:n_act], mzf[:n_act]], axis=-1)
+        vel_out = mom_act_f * inv_mass_act[:, None]
+        key_out = jax.random.fold_in(key_in, step_offset_i32 + n_steps_i32)
+        return (
+            pos_unw_f,
+            vel_out,
+            boxf[0],
+            key_out,
+            tpf,
+            fxf,
+            fyf,
+            fzf,
+            Gf,
+            mc_sc_f,
+            mc_at_f,
+            mc_ac_f,
+        )
+
+    @jax.jit
+    def _jit_unpermute_forces(
+        fx_m: jax.Array,
+        fy_m: jax.Array,
+        fz_m: jax.Array,
+        inv_perm: jax.Array,
+    ) -> jax.Array:
+        inv_act = inv_perm[0, :n_act]
+        f_akma = jnp.stack([fx_m[inv_act], fy_m[inv_act], fz_m[inv_act]], axis=-1)
+        return f_akma * float(FORCE_AKMA_TO_OMM)
+
+    @jax.jit
+    def _jit_energy_and_forces(  # noqa: PLR0913
+        pos_in: jax.Array,
+        vel_in: jax.Array,
+        box_diag_in: jax.Array,
+        q_b_in: jax.Array,
+        sig_b_in: jax.Array,
+        eps_b_in: jax.Array,
+        b_r0_in: jax.Array,
+        b_k_in: jax.Array,
+        a_th0_in: jax.Array,
+        a_kval_in: jax.Array,
+        d_p0_in: jax.Array,
+        d_p1_in: jax.Array,
+        d_p2_in: jax.Array,
+        e_sig_in: jax.Array,
+        e_eps_in: jax.Array,
+        e_qp_in: jax.Array,
+        tp_in: MortonTilePairState,
+        G_in: jax.Array,
+        nl_dirty_in: bool | jax.Array,
+        forces_dirty_in: bool | jax.Array,
+        c_tail_in: jax.Array,
+    ):
+        box_b0 = box_diag_in.astype(state_dtype)[None, :]
+        bonded_dyn = bonded_static._replace(
+            b_r0=b_r0_in,
+            b_k=b_k_in,
+            a_th0=a_th0_in,
+            a_kval=a_kval_in,
+            d_p0=d_p0_in,
+            d_p1=d_p1_in,
+            d_p2=d_p2_in,
+            e_sig=e_sig_in,
+            e_eps=e_eps_in,
+            e_qp=e_qp_in,
+        )
+        e_self_b = (
+            spme_self_energy(q_b_in, am_b, alpha=pme_alpha).astype(jnp.float32)
+            if do_pme
+            else jnp.zeros((1,), dtype=jnp.float32)
+        )
+        q_net = jnp.sum(jnp.where(am_b, q_b_in, 0.0), axis=-1)
+        c_plasma_b = (
+            -(jnp.pi * float(COULOMB_CONSTANT) / (2.0 * (pme_alpha**2))) * (q_net * q_net)
+            if do_pme
+            else jnp.zeros((1,), dtype=jnp.float32)
+        )
+        pos_wr0 = jnp.mod(pos_in.astype(state_dtype), box_b0[0][None, :])
+        pos_pad0 = (
+            jnp.pad(pos_wr0, ((0, pad_N), (0, 0)))[None, :, :]
+            if pad_N > 0
+            else pos_wr0[None, :, :]
+        )
+        nl_dirty_b = jnp.asarray(nl_dirty_in, dtype=jnp.bool_)
+        forces_dirty_b = jnp.asarray(forces_dirty_in, dtype=jnp.bool_)
+
+        def _obs_rebuild_nl(_: Any):
+            tp_r = pallas_build_morton_tile_pairs_gpu(
+                pos_pad0,
+                q_b_in,
+                sig_b_in,
+                eps_b_in,
+                am_b,
+                box_b0,
+                dedup_excl,
+                n_act=n_act,
+                max_pairs=max_pairs,
+                cutoff=cutoff,
+                skin=eff_skin,
+                host_min_box=host_min_box,
+                interpret=interpret,
+            )
+            G_r = (
+                influence_function(
+                    grid_dims, box_b0[0].astype(jnp.float32), pme_alpha, 4
+                ).astype(jnp.float32)[None, ...]
+                if do_pme
+                else G_in
+            )
+            return tp_r, G_r
+
+        def _obs_keep_nl(_: Any):
+            def _refresh_params(_u: Any) -> MortonTilePairState:
+                qp = _pad_atom_1d(q_b_in, 0.0)
+                sp = _pad_atom_1d(sig_b_in, 1.0)
+                ep = _pad_atom_1d(eps_b_in, 0.0)
+                return MortonTilePairState(
+                    tp_in.perm,
+                    tp_in.inv_perm,
+                    jnp.take_along_axis(qp, tp_in.perm, axis=1),
+                    jnp.take_along_axis(sp, tp_in.perm, axis=1),
+                    jnp.take_along_axis(ep, tp_in.perm, axis=1),
+                    tp_in.mask_m,
+                    tp_in.pair_ti,
+                    tp_in.pair_tj,
+                    tp_in.excl_full_bits,
+                    tp_in.excl_14_bits,
+                    tp_in.n_valid_pairs,
+                    tp_in.ref_positions,
+                    n_act=n_act,
+                    n_act_blocks=n_act_blocks,
+                    max_pairs=max_pairs,
+                )
+
+            tp_k = jax.lax.cond(forces_dirty_b, _refresh_params, lambda _: tp_in, None)
+            return tp_k, G_in
+
+        tp0, G0 = jax.lax.cond(nl_dirty_b, _obs_rebuild_nl, _obs_keep_nl, None)
+        p_a0 = pos_wr0.astype(jnp.float32)[None, :, :]
+        if pad_tail > 0:
+            p_a0 = jnp.pad(p_a0, ((0, 0), (0, pad_tail), (0, 0)))
+        pm0 = jnp.take_along_axis(p_a0, tp0.perm[:, :, None], axis=1)
+        px_m = pm0[:, :, 0].reshape(n_act_pad)
+        py_m = pm0[:, :, 1].reshape(n_act_pad)
+        pz_m = pm0[:, :, 2].reshape(n_act_pad)
+        box_f32_flat = box_b0.astype(jnp.float32).reshape(3)
+        soa_extra: dict[str, Any] = {}
+        if is_rf and soa_has_rf_kw:
+            soa_extra["rf_dielectric"] = float(rf_dielectric)
+        e_dir, fx_d, fy_d, fz_d = _pallas_bonded_and_tile_pairs_soa(
+            1,
+            px_m,
+            py_m,
+            pz_m,
+            tp0.q_m.reshape(n_act_pad),
+            tp0.sig_m.reshape(n_act_pad),
+            tp0.eps_m.reshape(n_act_pad),
+            tp0.mask_m.reshape(n_act_pad),
+            tp0.inv_perm.reshape(n_act_pad),
+            tp0.pair_ti.reshape(max_pairs),
+            tp0.pair_tj.reshape(max_pairs),
+            tp0.excl_full_bits.reshape(max_pairs * 32),
+            tp0.excl_14_bits.reshape(max_pairs * 32),
+            tp0.n_valid_pairs.reshape(1),
+            box_f32_flat,
+            lam_flat,
+            bonded_dyn,
+            n_act=n_act,
+            n_act_blocks=n_act_blocks,
+            max_pairs=max_pairs,
+            pme_alpha=(pme_alpha if do_pme else 0.0),
+            cutoff=cutoff,
+            lj_switch_width=lj_switch_width,
+            include_pme_excl_erf=do_pme,
+            scale_14_vdw=dedup_excl.scale_14_vdw,
+            scale_14_elec=dedup_excl.scale_14_elec,
+            cmap_first_is_psi=False,
+            tp_group=tp_group,
+            compute_energy=True,
+            interpret=interpret,
+            **soa_extra,
+        )
+        if do_pme:
+            q_mf = tp0.q_m.reshape(n_act_pad)
+            m_mf = tp0.mask_m.reshape(n_act_pad)
+            mesh = _spread_charges_pallas_soa(
+                1,
+                (True, True, True, True),
+                px_m,
+                py_m,
+                pz_m,
+                q_mf,
+                m_mf,
+                box_f32_flat,
+                grid_dims,
+                n_act_pad,
+                n_act_pad,
+                interpret,
+            )
+            q_hat = jnp.fft.rfftn(mesh, s=grid_dims, axes=(-3, -2, -1))
+            theta = jnp.fft.irfftn(
+                q_hat * G0, s=grid_dims, axes=(-3, -2, -1)
+            ).astype(jnp.float32)
+            fx_tot, fy_tot, fz_tot, _ = _gather_pallas_soa(
+                1,
+                (True, True, True, True, True),
+                px_m,
+                py_m,
+                pz_m,
+                q_mf,
+                m_mf,
+                box_f32_flat,
+                theta.reshape(-1),
+                grid_dims,
+                n_act_pad,
+                n_act_pad,
+                n_act_blocks,
+                interpret,
+                force_scale=pme_force_scale,
+                force_accum=(fx_d, fy_d, fz_d),
+            )
+            e_rec = (
+                0.5
+                * float(COULOMB_CONSTANT)
+                * jnp.sum(mesh * theta, axis=(-3, -2, -1))
+                * n_grid_f
+                + e_self_b
+            )
+            e_core = e_dir + e_rec
+        else:
+            fx_tot, fy_tot, fz_tot = fx_d, fy_d, fz_d
+            e_core = e_dir
+
+        v_cur = jnp.prod(box_f32_flat)
+        pe_akma = e_core[0] + (c_tail_in + c_plasma_b[0]) / jnp.maximum(v_cur, 1e-12)
+        ke_akma = 0.5 * jnp.sum(
+            mass_act.astype(jnp.float64)[:, None] * (vel_in.astype(jnp.float64) ** 2)
+        )
+        scalars_kj = jnp.stack(
+            [
+                pe_akma.astype(jnp.float64) * float(KCAL_PER_MOL_TO_KJ_PER_MOL),
+                ke_akma * float(KCAL_PER_MOL_TO_KJ_PER_MOL),
+            ]
+        )
+        inv_act = tp0.inv_perm[0, :n_act]
+        f_omm = (
+            jnp.stack([fx_tot[inv_act], fy_tot[inv_act], fz_tot[inv_act]], axis=-1)
+            * float(FORCE_AKMA_TO_OMM)
+        )
+        return scalars_kj, f_omm, tp0, fx_tot, fy_tot, fz_tot, G0
+
+    return {
+        "jit_step": _jit_step,
+        "jit_unpermute_forces": _jit_unpermute_forces,
+        "jit_energy_and_forces": _jit_energy_and_forces,
+        "bonded_static": bonded_static,
+        "tp_init": tp_init,
+        "fx_init": z_f,
+        "fy_init": z_f,
+        "fz_init": z_f,
+        "G_init": G_init,
+        "N": N,
+        "n_act": n_act,
+        "state_dtype": state_dtype,
+    }
 
 
 class ProlixContext:
@@ -1698,6 +3559,18 @@ class ProlixContext:
             if self._config.thermostat_override is not None
             else None
         )
+        self._lj_combining_rule = (
+            str(self._config.lj_combining_rule)
+            if str(self._config.lj_combining_rule) != "lorentz_berthelot"
+            else str(self._converted_system.lj_combining_rule)
+        )
+        self._exceptions_use_pbc = bool(
+            self._converted_system.exceptions_use_pbc or self._config.exceptions_use_pbc
+        )
+        self._dispersion_follows_parameters = bool(
+            self._converted_system.dispersion_follows_parameters
+            and self._config.dispersion_follows_parameters
+        )
         self._is_triclinic = bool(self._converted_system.is_triclinic)
         self._has_finite_cutoff = (
             0.0 < float(self._converted_system.nonbonded_cutoff) < float("inf")
@@ -1743,11 +3616,33 @@ class ProlixContext:
         self._tile_pair_nl: TilePairNeighborList | None = None
         self._max_tile_pairs: int | None = None
         self._gbsa_tile_list: GBSATilePairList | None = None
+        self._host_nl_dirty: bool = False
 
         # Adaptive Monte Carlo barostat step-size tracking (OpenMM MonteCarloBarostatImpl)
         self._mc_volume_scale: float = 0.01
         self._mc_num_attempted: int = 0
         self._mc_num_accepted: int = 0
+
+        # Persistent GPU-resident Morton BAOAB + SPME/RF + NPT fast-path state
+        self._morton_runner: dict[str, Any] | None = None
+        self._morton_runner_key: tuple[Any, ...] | None = None
+        self._morton_tp_state: MortonTilePairState | None = None
+        self._morton_fx: jax.Array | None = None
+        self._morton_fy: jax.Array | None = None
+        self._morton_fz: jax.Array | None = None
+        self._morton_G: jax.Array | None = None
+        self._morton_bonded_dyn: FusedBondedBuffers | None = None
+        self._cached_morton_params: tuple[jax.Array, ...] | None = None
+        self._morton_params_dirty: bool = True
+        self._morton_nl_dirty: bool = True
+        self._morton_forces_dirty: bool = True
+        self._morton_mc_scale: jax.Array = jnp.asarray(0.01, dtype=jnp.float32)
+        self._morton_mc_att: jax.Array = jnp.asarray(0, dtype=jnp.int32)
+        self._morton_mc_acc: jax.Array = jnp.asarray(0, dtype=jnp.int32)
+        self._morton_box_diag: jax.Array | None = None
+        self._cached_box_nm: np.ndarray = np.eye(3, dtype=np.float64)
+        self._box_nm_dirty: bool = False
+        self._bundle_box_dirty: bool = False
 
         if self._converted_system.has_pbc and self._converted_system.bundle.box is not None:
             self._box_vectors = self._converted_system.bundle.box.astype(self._dtype)
@@ -1765,6 +3660,7 @@ class ProlixContext:
                     self._box_vectors = None
             except Exception:
                 self._box_vectors = None
+        self._refresh_box_caches_from_vectors()
         self._time = 0.0  # τ_AKMA
         self._step_count = 0
         self._parameters = dict(self._converted_system.default_parameters)
@@ -1810,7 +3706,7 @@ class ProlixContext:
             constraint_tolerance=self._config.constraint_tolerance,
         )
 
-        # Molecular topology graph for getMolecules()
+        # Molecular topology graph & flat-CSR arrays for O(N) wrap/unwrap
         self._molecules = self._build_molecules()
 
         # Wire integrator link
@@ -1950,17 +3846,10 @@ class ProlixContext:
         )
 
     def _can_use_tile_pairs(self) -> bool:
-        nb_method = str(self._converted_system.nonbonded_method).lower()
-        is_rf = (
-            nb_method
-            in ("cutoffperiodic", "cutoff_periodic", "reactionfield", "reaction_field", "rf")
-            and self._converted_system.has_pbc
-        )
         return (
             self._converted_system.has_nonbonded
             and self._has_finite_cutoff
             and not self._is_triclinic
-            and not is_rf
             and self._precision in ("single", "mixed")
             and (
                 self._nonbonded_engine == "morton_tile_pairs"
@@ -2022,7 +3911,8 @@ class ProlixContext:
             raw_cap = int(tp_probe.tile_pairs.shape[0])
             n_blocks = max(1, (n + 31) // 32)
             max_ut = (n_blocks * (n_blocks + 1)) // 2
-            padded_cap = max(64, ((math.ceil(raw_cap * 1.25) + 63) // 64) * 64)
+            npt_mult = 1.25 * (1.15**3) if self._converted_system.barostat is not None else 1.25
+            padded_cap = max(64, ((math.ceil(raw_cap * npt_mult) + 63) // 64) * 64)
             self._max_tile_pairs = min(max_ut, max(raw_cap, padded_cap))
             if self._max_tile_pairs == raw_cap:
                 self._tile_pair_nl = tp_probe
@@ -2045,6 +3935,7 @@ class ProlixContext:
         if pos is None:
             pos = self._positions[: self._n_particles]
         pos_f32 = pos.astype(jnp.float32)
+        self._host_nl_dirty = False
 
         if not self._should_use_neighbor_list():
             self._neighbor_fn = None
@@ -2115,9 +4006,88 @@ class ProlixContext:
         self._rebuild_tile_pair_nl(pos_f32, cutoff)
         self._rebuild_gbsa_tile_list(pos_f32)
 
+    def _refresh_box_caches_from_vectors(self) -> None:
+        """Cache host `box_nm` and GPU `box_diag` from `self._box_vectors`."""
+        if self._box_vectors is not None:
+            bv_np = np.asarray(self._box_vectors, dtype=np.float64)
+            self._cached_box_nm = bv_np * ANGSTROM_TO_NM
+            self._morton_box_diag = (
+                jnp.diag(self._box_vectors)
+                if self._box_vectors.ndim == 2
+                else self._box_vectors
+            )
+        else:
+            self._cached_box_nm = np.eye(3, dtype=np.float64)
+            self._morton_box_diag = None
+        self._box_nm_dirty = False
+        self._bundle_box_dirty = False
+
+    def _sync_bundle_box(self) -> None:
+        """Lazily materialize NPT GPU `box_diag` into `self._box_vectors` and `self._bundle.box`."""
+        if self._bundle_box_dirty and self._morton_box_diag is not None:
+            new_bv = jnp.diag(self._morton_box_diag.astype(self._dtype))
+            self._box_vectors = new_bv
+            self._bundle = eqx.tree_at(
+                lambda b: b.box, self._bundle, new_bv.astype(jnp.float32)
+            )
+            self._bundle_box_dirty = False
+
+    def _get_box_nm_host(self) -> np.ndarray:
+        """Return cached `(3, 3)` `box_vectors_nm` on host, syncing only 3 floats if NPT modified box."""
+        if self._box_nm_dirty and self._morton_box_diag is not None:
+            diag_np = np.asarray(self._morton_box_diag, dtype=np.float64)
+            self._cached_box_nm = np.diag(diag_np * ANGSTROM_TO_NM)
+            self._box_nm_dirty = False
+        return self._cached_box_nm
+
+    def _ensure_host_nl_fresh(self) -> None:
+        """Lazily refresh host NeighborList / TilePairNeighborList only when host fallback/virial needs it."""
+        self._sync_bundle_box()
+        if self._host_nl_dirty and (self._should_use_neighbor_list() or self._can_use_gbsa_tiles()):
+            self._init_neighbor_list(self._positions[: self._n_particles])
+
     def create_ensemble_plan(self) -> EnsemblePlan:
         """Create an optimized Pallas v3.5 EnsemblePlan for this system."""
+        self._sync_bundle_box()
         plan_cls = _ensemble_plan_mod.EnsemblePlan
+        bnd = self._bundle
+        if self._converted_system.nonbonded_offsets is not None:
+            gp = self._get_dynamic_global_params()
+            n_full = int(bnd.charges.shape[0])
+            q_eff, sig_eff, eps_eff = _apply_particle_offsets(
+                bnd.charges.astype(jnp.float32),
+                bnd.sigmas.astype(jnp.float32),
+                bnd.epsilons.astype(jnp.float32),
+                self._converted_system.nonbonded_offsets,
+                gp,
+                self._n_particles,
+            )
+            if n_full > self._n_particles:
+                q_eff = jnp.concatenate([q_eff, bnd.charges[self._n_particles :].astype(jnp.float32)])
+                sig_eff = jnp.concatenate([sig_eff, bnd.sigmas[self._n_particles :].astype(jnp.float32)])
+                eps_eff = jnp.concatenate([eps_eff, bnd.epsilons[self._n_particles :].astype(jnp.float32)])
+            bnd = eqx.tree_at(
+                lambda b: (b.charges, b.sigmas, b.epsilons),
+                bnd,
+                (q_eff, sig_eff, eps_eff),
+            )
+            if (
+                bnd.exception_chargeprods is not None
+                and bnd.exception_sigmas is not None
+                and bnd.exception_epsilons is not None
+            ):
+                eqp_eff, esig_eff, eeps_eff = _apply_exception_offsets(
+                    bnd.exception_chargeprods.astype(jnp.float32),
+                    bnd.exception_sigmas.astype(jnp.float32),
+                    bnd.exception_epsilons.astype(jnp.float32),
+                    self._converted_system.nonbonded_offsets,
+                    gp,
+                )
+                bnd = eqx.tree_at(
+                    lambda b: (b.exception_chargeprods, b.exception_sigmas, b.exception_epsilons),
+                    bnd,
+                    (eqp_eff, esig_eff, eeps_eff),
+                )
         candidate_kwargs: dict[str, Any] = {
             "use_pallas": self._use_pallas,
             "use_pallas_pme": self._use_pallas_pme,
@@ -2143,7 +4113,7 @@ class ProlixContext:
                 "use_pallas": self._use_pallas,
                 "use_pallas_pme": self._use_pallas_pme,
             }
-        return plan_cls.from_bundle(self._bundle, **candidate_kwargs)
+        return plan_cls.from_bundle(bnd, **candidate_kwargs)
 
     # --- Core Getters ---
     def getSystem(self) -> openmm.System:  # noqa: N802
@@ -2157,6 +4127,204 @@ class ProlixContext:
 
     def getMolecules(self) -> tuple[tuple[int, ...], ...]:  # noqa: N802
         return self._molecules
+
+    def _refresh_morton_bonded_dyn(self) -> FusedBondedBuffers:
+        """Pack current bundle bonded arrays into flat SoA buffers matching `_morton_runner` shapes."""
+        bd = _pack_bundle_fused_bonded(self._bundle)
+        self._morton_bonded_dyn = bd
+        return bd
+
+    def _ensure_morton_params(
+        self,
+        runner: dict[str, Any],
+        bd: FusedBondedBuffers,
+        use_disp: bool,
+    ) -> tuple[jax.Array, ...]:
+        """Return cached GPU parameter buffers for Morton runner, refreshing only on param mutation."""
+        if not self._morton_params_dirty and self._cached_morton_params is not None:
+            return self._cached_morton_params
+
+        N_full = int(runner["N"])
+        n_act = int(runner["n_act"])
+        gp = self._get_dynamic_global_params()
+        nb_off = self._converted_system.nonbonded_offsets
+
+        q_base = self._bundle.charges[:n_act].astype(jnp.float32)
+        sig_base = self._bundle.sigmas[:n_act].astype(jnp.float32)
+        eps_base = self._bundle.epsilons[:n_act].astype(jnp.float32)
+        q_act, sig_act, eps_act = _apply_particle_offsets(
+            q_base, sig_base, eps_base, nb_off, gp, n_act
+        )
+        if N_full > n_act:
+            pad_n = N_full - n_act
+            q_b = jnp.pad(q_act, ((0, pad_n),), constant_values=0.0)[None, :]
+            sig_b = jnp.pad(sig_act, ((0, pad_n),), constant_values=1.0)[None, :]
+            eps_b = jnp.pad(eps_act, ((0, pad_n),), constant_values=0.0)[None, :]
+        else:
+            q_b = q_act[None, :]
+            sig_b = sig_act[None, :]
+            eps_b = eps_act[None, :]
+
+        if (
+            bd.E_real > 0
+            and nb_off is not None
+            and int(nb_off.exception_bundle_indices.shape[0]) > 0
+            and self._bundle.exception_chargeprods is not None
+            and self._bundle.exception_sigmas is not None
+            and self._bundle.exception_epsilons is not None
+        ):
+            eqp_a, esig_a, eeps_a = _apply_exception_offsets(
+                self._bundle.exception_chargeprods.astype(jnp.float32),
+                self._bundle.exception_sigmas.astype(jnp.float32),
+                self._bundle.exception_epsilons.astype(jnp.float32),
+                nb_off,
+                gp,
+            )
+            e_qp_in = eqp_a.reshape(-1)
+            e_sig_in = esig_a.reshape(-1)
+            e_eps_in = eeps_a.reshape(-1)
+        else:
+            e_qp_in = bd.e_qp
+            e_sig_in = bd.e_sig
+            e_eps_in = bd.e_eps
+
+        if use_disp:
+            if self._dispersion_follows_parameters or nb_off is None:
+                sig_t, eps_t = sig_act, eps_act
+            else:
+                _, sig_t, eps_t = _apply_particle_offsets(
+                    q_base,
+                    sig_base,
+                    eps_base,
+                    nb_off,
+                    self._converted_system.default_parameters,
+                    n_act,
+                )
+            c_tail_s = _compute_lj_tail_energy_compat(
+                jnp.ones((3,), dtype=jnp.float32),
+                sig_t,
+                eps_t,
+                float(self._converted_system.nonbonded_cutoff),
+                jnp.ones((n_act,), dtype=bool),
+                lj_switch_width=float(self._converted_system.lj_switch_width),
+                combining_rule=self._lj_combining_rule,
+            ).astype(jnp.float32)
+        else:
+            c_tail_s = jnp.asarray(0.0, dtype=jnp.float32)
+
+        cached = (q_b, sig_b, eps_b, e_sig_in, e_eps_in, e_qp_in, c_tail_s)
+        self._cached_morton_params = cached
+        self._morton_params_dirty = False
+        return cached
+
+    def _can_use_morton_obs(self) -> bool:
+        """Return True when active Morton runner can serve `getState(groups=-1)` energy/forces on GPU."""
+        nb_method = str(self._converted_system.nonbonded_method).lower()
+        is_rf = nb_method in (
+            "cutoffperiodic",
+            "cutoff_periodic",
+            "reactionfield",
+            "reaction_field",
+            "rf",
+        )
+        do_pme = nb_method in ("pme", "spme")
+        return bool(
+            self._morton_runner is not None
+            and self._nonbonded_engine == "morton_tile_pairs"
+            and not in_export_context()
+            and self._precision in ("single", "mixed")
+            and self._converted_system.has_pbc
+            and (self._morton_box_diag is not None or self._box_vectors is not None)
+            and not self._is_triclinic
+            and self._converted_system.has_nonbonded
+            and self._has_finite_cutoff
+            and not self._converted_system.has_implicit_solvent
+            and len(self._custom_forces) == 0
+            and len(self._position_restraints) == 0
+            and self._converted_system.virtual_sites is None
+            and self._lj_combining_rule == "lorentz_berthelot"
+            and (self._exceptions_use_pbc or not self._has_intermolecular_exceptions)
+            and nb_method
+            in (
+                "pme",
+                "spme",
+                "cutoffperiodic",
+                "cutoff_periodic",
+                "reactionfield",
+                "reaction_field",
+                "rf",
+                "cutoff",
+                "cutoffnonperiodic",
+            )
+            and (not is_rf or "rf_dielectric" in _PALLAS_SOA_SIG_PARAMS)
+            and (not do_pme or self._converted_system.pme_grid_dims is not None)
+        )
+
+    def _can_use_morton_step_runner(
+        self,
+        has_barostat: bool,
+        baro_mode: str | None,
+        baro_info: dict[str, Any] | None,
+        eff_scheme: str,
+    ) -> bool:
+        """Return True when `step(steps)` can run end-to-end on the persistent GPU Morton BAOAB runner."""
+        base_ok = (
+            self._nonbonded_engine == "morton_tile_pairs"
+            and not in_export_context()
+            and self._precision in ("single", "mixed")
+            and self._converted_system.has_pbc
+            and (self._morton_box_diag is not None or self._box_vectors is not None)
+            and not self._is_triclinic
+            and self._converted_system.has_nonbonded
+            and self._has_finite_cutoff
+            and not self._converted_system.has_implicit_solvent
+            and len(self._custom_forces) == 0
+            and len(self._position_restraints) == 0
+            and self._converted_system.virtual_sites is None
+            and self._thermostat_override is None
+            and eff_scheme in ("baoab", "langevin", "lfmiddle")
+            and self._lj_combining_rule == "lorentz_berthelot"
+            and not self._has_frozen_atoms
+            and self._constraints_are_disjoint_stars
+            and self._waters_uniform
+            and (self._exceptions_use_pbc or not self._has_intermolecular_exceptions)
+        )
+        if not base_ok:
+            return False
+        nb_method = str(self._converted_system.nonbonded_method).lower()
+        is_rf = nb_method in (
+            "cutoffperiodic",
+            "cutoff_periodic",
+            "reactionfield",
+            "reaction_field",
+            "rf",
+        )
+        do_pme = nb_method in ("pme", "spme")
+        method_ok = (
+            nb_method
+            in (
+                "pme",
+                "spme",
+                "cutoffperiodic",
+                "cutoff_periodic",
+                "reactionfield",
+                "reaction_field",
+                "rf",
+                "cutoff",
+                "cutoffnonperiodic",
+            )
+            and (not is_rf or "rf_dielectric" in _PALLAS_SOA_SIG_PARAMS)
+            and (not do_pme or self._converted_system.pme_grid_dims is not None)
+        )
+        if not method_ok:
+            return False
+        if has_barostat:
+            return bool(
+                baro_mode in ("mc", "scr")
+                and baro_info is not None
+                and str(baro_info.get("type", "MonteCarloBarostat")) == "MonteCarloBarostat"
+            )
+        return True
 
     # --- Step Rollout ---
     def step(self, steps: int) -> None:
@@ -2183,9 +4351,6 @@ class ProlixContext:
             gamma_ps = ig_any.getFriction().value_in_unit(unit.picosecond**-1)
             gamma_akma = gamma_ps * TAU_AKMA_TO_PS
 
-        masses = self._bundle.masses[: self._n_particles]
-        inv_m = jnp.where(masses > 1e-12, 1.0 / masses, 0.0)
-
         # Barostat resolution
         baro_info = self._converted_system.barostat
         baro_mode = self._config.barostat_mode
@@ -2204,6 +4369,189 @@ class ProlixContext:
         )
         nl_freq = int(self._config.nl_update_every)
         eff_cmm = self._effective_cmm_frequency()
+        eff_alpha = self._effective_pme_alpha()
+        use_disp = bool(
+            self._config.use_dispersion_correction
+            and self._converted_system.use_dispersion_correction
+        )
+
+        if self._can_use_morton_step_runner(has_barostat, baro_mode, baro_info, eff_scheme):
+            target_p_akma = (
+                float(baro_info["pressure_akma"])
+                if (has_barostat and baro_info is not None)
+                else 0.0
+            )
+            nb_method_l = str(self._converted_system.nonbonded_method).lower()
+            do_pme = nb_method_l in ("pme", "spme")
+            is_rf = nb_method_l in (
+                "cutoffperiodic",
+                "cutoff_periodic",
+                "reactionfield",
+                "reaction_field",
+                "rf",
+            )
+            pme_dims = self._converted_system.pme_grid_dims or (16, 16, 16)
+            r_key = (
+                round(float(gamma_akma), 12),
+                bool(has_barostat),
+                str(baro_mode or ""),
+                int(baro_freq),
+                round(target_p_akma, 12),
+                int(eff_cmm),
+                int(nl_freq),
+                pme_dims,
+                round(float(eff_alpha or 0.0), 12),
+            )
+            if self._morton_runner is None or self._morton_runner_key != r_key:
+                self._sync_bundle_box()
+                bv0_np = np.diag(self._get_box_nm_host()) * NM_TO_ANGSTROM
+                r_oh = float(
+                    self._converted_system.system_metadata.get("water_r_OH_akma") or 0.9572
+                )
+                r_hh = float(
+                    self._converted_system.system_metadata.get("water_r_HH_akma") or 1.5139
+                )
+                runner = _build_context_morton_runner(
+                    self._bundle,
+                    n_act=self._n_particles,
+                    precision=self._precision,
+                    pallas_interpret=self._pallas_interpret,
+                    cutoff=float(self._converted_system.nonbonded_cutoff),
+                    nl_skin=float(self._config.nl_skin),
+                    lj_switch_width=float(self._converted_system.lj_switch_width),
+                    tp_group=self._tp_group,
+                    do_pme=do_pme,
+                    pme_alpha=float(eff_alpha or 0.34),
+                    grid_dims=pme_dims,
+                    is_rf=is_rf,
+                    rf_dielectric=float(self._converted_system.reaction_field_dielectric),
+                    gamma_akma=float(gamma_akma),
+                    nl_freq=nl_freq,
+                    cmm_freq=eff_cmm,
+                    has_barostat=has_barostat,
+                    baro_mode=str(baro_mode or "mc"),
+                    baro_freq=int(baro_freq),
+                    target_p_akma=target_p_akma,
+                    r_oh_akma=r_oh,
+                    r_hh_akma=r_hh,
+                    m_o_akma=self._water_m_O,
+                    m_h_akma=self._water_m_H,
+                    anchor_jnp=self._anchor_of_atom_jnp,
+                    mol_jnp=self._mol_of_atom_jnp,
+                    inv_mol_size_jnp=self._inv_mol_size_jnp,
+                    host_box0_np=bv0_np,
+                    init_positions=self._positions[: self._n_particles],
+                )
+                self._morton_runner = runner
+                self._morton_runner_key = r_key
+                self._morton_tp_state = runner["tp_init"]
+                self._morton_fx = runner["fx_init"]
+                self._morton_fy = runner["fy_init"]
+                self._morton_fz = runner["fz_init"]
+                self._morton_G = runner["G_init"]
+                self._morton_bonded_dyn = runner["bonded_static"]
+                self._morton_params_dirty = True
+                self._morton_nl_dirty = True
+                self._morton_forces_dirty = True
+
+            runner = self._morton_runner
+            bd = self._morton_bonded_dyn or runner["bonded_static"]
+            n_act = int(runner["n_act"])
+            (
+                q_b,
+                sig_b,
+                eps_b,
+                e_sig_in,
+                e_eps_in,
+                e_qp_in,
+                c_tail_s,
+            ) = self._ensure_morton_params(runner, bd, use_disp)
+            box_diag_in = self._morton_box_diag
+            if box_diag_in is None:
+                if self._box_vectors is None:
+                    raise RuntimeError("Periodic Morton step runner requires non-null box vectors")
+                box_diag_in = (
+                    jnp.diag(self._box_vectors)
+                    if self._box_vectors.ndim == 2
+                    else self._box_vectors
+                )
+                self._morton_box_diag = box_diag_in
+
+            (
+                pos_out,
+                vel_out,
+                box_diag_out,
+                key_out,
+                tp_out,
+                fx_out,
+                fy_out,
+                fz_out,
+                G_out,
+                mc_sc_out,
+                mc_at_out,
+                mc_ac_out,
+            ) = runner["jit_step"](
+                self._positions[:n_act],
+                self._velocities[:n_act],
+                self._prng_key,
+                int(self._step_count),
+                int(steps),
+                float(dt_akma),
+                float(kT_akma),
+                box_diag_in,
+                q_b,
+                sig_b,
+                eps_b,
+                bd.b_r0,
+                bd.b_k,
+                bd.a_th0,
+                bd.a_kval,
+                bd.d_p0,
+                bd.d_p1,
+                bd.d_p2,
+                e_sig_in,
+                e_eps_in,
+                e_qp_in,
+                self._morton_tp_state,
+                self._morton_fx,
+                self._morton_fy,
+                self._morton_fz,
+                self._morton_G,
+                bool(self._morton_nl_dirty),
+                bool(self._morton_forces_dirty),
+                self._morton_mc_scale,
+                self._morton_mc_att,
+                self._morton_mc_acc,
+                c_tail_s,
+            )
+
+            self._positions = pos_out
+            self._velocities = vel_out
+            self._velocities_initialized = True
+            self._prng_key = key_out
+            self._morton_tp_state = tp_out
+            self._morton_fx = fx_out
+            self._morton_fy = fy_out
+            self._morton_fz = fz_out
+            self._morton_G = G_out
+            self._morton_mc_scale = mc_sc_out
+            self._morton_mc_att = mc_at_out
+            self._morton_mc_acc = mc_ac_out
+            self._morton_nl_dirty = False
+            self._morton_forces_dirty = False
+            self._host_nl_dirty = True
+            if has_barostat:
+                self._morton_box_diag = box_diag_out
+                self._box_nm_dirty = True
+                self._bundle_box_dirty = True
+            self._step_count += steps
+            self._time += steps * dt_akma
+            return
+
+        self._sync_bundle_box()
+        self._ensure_host_nl_fresh()
+        masses = self._bundle.masses[: self._n_particles]
+        inv_m = jnp.where(masses > 1e-12, 1.0 / masses, 0.0)
         eff_remove_com = eff_cmm > 0
         eff_ndof = self._active_ndof()
 
@@ -2257,7 +4605,7 @@ class ProlixContext:
                 self._converted_system.cmap_force_groups,
                 self._converted_system.nonbonded_method,
                 self._converted_system.has_nonbonded,
-                self._config.use_dispersion_correction and self._converted_system.use_dispersion_correction,
+                use_disp,
                 ewald_tol,
                 self._converted_system.reaction_field_dielectric,
                 self._converted_system.has_implicit_solvent,
@@ -2282,11 +4630,18 @@ class ProlixContext:
                 cmm_frequency=eff_cmm,
                 step_offset=jnp.asarray(self._step_count, dtype=jnp.int32),
                 n_dof=eff_ndof,
-                pme_alpha=self._effective_pme_alpha(),
+                pme_alpha=eff_alpha,
+                nonbonded_offsets=self._converted_system.nonbonded_offsets,
+                default_params=self._converted_system.default_parameters,
+                lj_combining_rule=self._lj_combining_rule,
+                exceptions_use_pbc=self._exceptions_use_pbc,
+                dispersion_follows_parameters=self._dispersion_follows_parameters,
             )
             remaining -= chunk
             self._step_count += chunk
             self._time += chunk * dt_akma
+            self._morton_nl_dirty = True
+            self._morton_forces_dirty = True
 
             # Update neighbor list (and Morton / GBSA tile-pair lists) periodically if allocated
             if (
@@ -2321,7 +4676,7 @@ class ProlixContext:
 
     def _get_dynamic_global_params(self) -> dict[str, jnp.ndarray]:
         """Convert current dynamic context parameters to JAX arrays."""
-        return {k: jnp.asarray(v, dtype=jnp.float32) for k, v in self._parameters.items()}
+        return {k: jnp.asarray(v, dtype=self._dtype) for k, v in self._parameters.items()}
 
     def _apply_barostat_step(
         self,
@@ -2339,31 +4694,21 @@ class ProlixContext:
     def _unwrap_molecules_and_com(
         self, pos_akma: np.ndarray, box_akma: np.ndarray
     ) -> tuple[np.ndarray, np.ndarray]:
-        """Unwrap intramolecular coordinates wrt molecule anchor across PBC and return per-atom molecule COMs."""
-        pos_unwrapped = pos_akma.copy()
-        com_per_atom = pos_akma.copy()
+        """Vectorized O(N) intramolecular PBC unwrap and per-atom molecular COMs via flat-CSR arrays."""
+        n = int(pos_akma.shape[0])
+        if n == 0:
+            return pos_akma.copy(), pos_akma.copy()
+        pos_jnp = jnp.asarray(pos_akma[: self._n_particles], dtype=jnp.float64)
         box_jnp = jnp.asarray(box_akma, dtype=jnp.float64)
-        for mol in self._molecules:
-            if not mol:
-                continue
-            mol_idx = list(mol)
-            if len(mol_idx) > 1 and self._converted_system.has_pbc:
-                anchor = pos_akma[mol_idx[0]]
-                dr_intra = np.asarray(
-                    _minimum_image_dr(
-                        jnp.asarray(pos_akma[mol_idx] - anchor, dtype=jnp.float64),
-                        box_jnp,
-                        True,
-                    ),
-                    dtype=np.float64,
-                )
-                mol_coords = anchor + dr_intra
-                pos_unwrapped[mol_idx] = mol_coords
-            else:
-                mol_coords = pos_akma[mol_idx]
-            com = np.mean(mol_coords, axis=0)
-            com_per_atom[mol_idx] = com
-        return pos_unwrapped, com_per_atom
+        pos_u_jnp, com_jnp = _unwrap_molecules_and_com_jax(
+            pos_jnp,
+            box_jnp,
+            self._anchor_of_atom_jnp,
+            self._mol_of_atom_jnp,
+            self._inv_mol_size_jnp,
+            bool(self._converted_system.has_pbc),
+        )
+        return np.asarray(pos_u_jnp, dtype=np.float64), np.asarray(com_jnp, dtype=np.float64)
 
     def _apply_mc_barostat(
         self,
@@ -2373,6 +4718,7 @@ class ProlixContext:
         """Apply Monte Carlo volume move with PBC-unwrapped molecular COM scaling and OpenMM adaptive step size."""
         if self._box_vectors is None:
             return
+        self._ensure_host_nl_fresh()
 
         current_box = np.asarray(self._box_vectors, dtype=np.float64)
         vol_current = abs(float(np.linalg.det(current_box)))
@@ -2437,11 +4783,19 @@ class ProlixContext:
         vol_new = vol_current * scale
         delta_v_val = vol_new - vol_current
 
-        current_pos = np.asarray(self._positions, dtype=np.float64)
-        _, com_per_atom = self._unwrap_molecules_and_com(current_pos, current_box)
-        new_pos = current_pos + (axis_scales[None, :] - 1.0) * com_per_atom
-
-        new_pos_jnp = jnp.asarray(new_pos, dtype=self._positions.dtype)
+        _, com_per_atom_jnp = _unwrap_molecules_and_com_jax(
+            self._positions[: self._n_particles],
+            self._box_vectors,
+            self._anchor_of_atom_jnp,
+            self._mol_of_atom_jnp,
+            self._inv_mol_size_jnp,
+            bool(self._converted_system.has_pbc),
+        )
+        axis_scales_jnp = jnp.asarray(axis_scales, dtype=self._positions.dtype)
+        new_pos_jnp = (
+            self._positions[: self._n_particles]
+            + (axis_scales_jnp[None, :] - 1.0) * com_per_atom_jnp
+        ).astype(self._positions.dtype)
         if self._converted_system.virtual_sites is not None:
             new_pos_jnp = self._converted_system.compute_virtual_sites(new_pos_jnp)
 
@@ -2450,6 +4804,10 @@ class ProlixContext:
             self._converted_system.ewald_error_tolerance
             if self._converted_system.ewald_error_tolerance is not None
             else self._config.ewald_error_tolerance
+        )
+        use_disp = bool(
+            self._config.use_dispersion_correction
+            and self._converted_system.use_dispersion_correction
         )
         e_curr, _ = _pure_compute_energy_and_forces(
             self._positions,
@@ -2468,7 +4826,7 @@ class ProlixContext:
             self._converted_system.cmap_force_groups,
             self._converted_system.nonbonded_method,
             self._converted_system.has_nonbonded,
-            self._config.use_dispersion_correction and self._converted_system.use_dispersion_correction,
+            use_disp,
             ewald_tol,
             self._converted_system.reaction_field_dielectric,
             self._converted_system.has_implicit_solvent,
@@ -2482,13 +4840,18 @@ class ProlixContext:
             neighbor_idx=getattr(self, "_neighbor_idx", None),
             use_pallas_pme=self._config.use_pallas_pme,
             custom_nonbonded_chunk_size=self._config.custom_nonbonded_chunk_size,
-            tile_pair_nl=None,
+            tile_pair_nl=self._tile_pair_nl,
             gbsa_tile_list=self._gbsa_tile_list,
             is_triclinic=self._is_triclinic,
             mixed_precision=self._mixed_precision,
             gb_use_neighbor_list=self._gb_use_neighbor_list,
             gbsa_surface_tension=self._converted_system.gbsa_surface_tension,
             pme_alpha=self._effective_pme_alpha(),
+            nonbonded_offsets=self._converted_system.nonbonded_offsets,
+            default_params=self._converted_system.default_parameters,
+            lj_combining_rule=self._lj_combining_rule,
+            exceptions_use_pbc=self._exceptions_use_pbc,
+            dispersion_follows_parameters=self._dispersion_follows_parameters,
         )
         new_box_jnp = jnp.asarray(new_box, dtype=self._box_vectors.dtype)
         new_bundle = eqx.tree_at(lambda b: b.box, self._bundle, new_box_jnp)
@@ -2509,7 +4872,7 @@ class ProlixContext:
             self._converted_system.cmap_force_groups,
             self._converted_system.nonbonded_method,
             self._converted_system.has_nonbonded,
-            self._config.use_dispersion_correction and self._converted_system.use_dispersion_correction,
+            use_disp,
             ewald_tol,
             self._converted_system.reaction_field_dielectric,
             self._converted_system.has_implicit_solvent,
@@ -2523,13 +4886,18 @@ class ProlixContext:
             neighbor_idx=getattr(self, "_neighbor_idx", None),
             use_pallas_pme=self._config.use_pallas_pme,
             custom_nonbonded_chunk_size=self._config.custom_nonbonded_chunk_size,
-            tile_pair_nl=None,
+            tile_pair_nl=self._tile_pair_nl,
             gbsa_tile_list=self._gbsa_tile_list,
             is_triclinic=self._is_triclinic,
             mixed_precision=self._mixed_precision,
             gb_use_neighbor_list=self._gb_use_neighbor_list,
             gbsa_surface_tension=self._converted_system.gbsa_surface_tension,
             pme_alpha=self._effective_pme_alpha(),
+            nonbonded_offsets=self._converted_system.nonbonded_offsets,
+            default_params=self._converted_system.default_parameters,
+            lj_combining_rule=self._lj_combining_rule,
+            exceptions_use_pbc=self._exceptions_use_pbc,
+            dispersion_follows_parameters=self._dispersion_follows_parameters,
         )
 
         delta_u = float(e_new - e_curr)
@@ -2552,6 +4920,9 @@ class ProlixContext:
             self._converted_system = eqx.tree_at(
                 lambda s: s.bundle.box, self._converted_system, new_box_jnp
             )
+            self._refresh_box_caches_from_vectors()
+            self._morton_nl_dirty = True
+            self._morton_forces_dirty = True
             self.applyConstraints()
             if (
                 self._neighbor is not None
@@ -2567,9 +4938,13 @@ class ProlixContext:
                 self._mc_volume_scale = min(self._mc_volume_scale * 1.1, 0.3)
             self._mc_num_attempted = 0
             self._mc_num_accepted = 0
+        self._morton_mc_scale = jnp.asarray(self._mc_volume_scale, dtype=jnp.float32)
+        self._morton_mc_att = jnp.asarray(self._mc_num_attempted, dtype=jnp.int32)
+        self._morton_mc_acc = jnp.asarray(self._mc_num_accepted, dtype=jnp.int32)
 
     def _compute_virial(self, forces: jnp.ndarray | np.ndarray | None = None) -> float:
         """Compute scalar thermodynamic virial W = -dU/d(lam)|_{lam=1} under periodic molecular COM scaling."""
+        self._ensure_host_nl_fresh()
         if forces is None and self._converted_system.has_pbc and self._box_vectors is not None:
             gp = self._get_dynamic_global_params()
             ewald_tol = (
@@ -2577,11 +4952,14 @@ class ProlixContext:
                 if self._converted_system.ewald_error_tolerance is not None
                 else self._config.ewald_error_tolerance
             )
-            pos_np = np.asarray(self._positions, dtype=np.float64)
-            box_np = np.asarray(self._box_vectors, dtype=np.float64)
-            pos_unwrapped_np, com_np = self._unwrap_molecules_and_com(pos_np, box_np)
-            pos_u = jnp.asarray(pos_unwrapped_np, dtype=self._positions.dtype)
-            com_u = jnp.asarray(com_np, dtype=self._positions.dtype)
+            pos_u, com_u = _unwrap_molecules_and_com_jax(
+                self._positions[: self._n_particles],
+                self._box_vectors,
+                self._anchor_of_atom_jnp,
+                self._mol_of_atom_jnp,
+                self._inv_mol_size_jnp,
+                bool(self._converted_system.has_pbc),
+            )
             box_u = self._box_vectors.astype(self._positions.dtype)
 
             def _u_of_lam(lam: jax.Array) -> jax.Array:
@@ -2618,17 +4996,23 @@ class ProlixContext:
                     solute_dielectric=self._converted_system.solute_dielectric,
                     nonbonded_engine=self._nonbonded_engine,
                     pme_grid_dims=self._converted_system.pme_grid_dims,
-                    use_pallas=False,
-                    pallas_interpret=False,
+                    use_pallas=self._config.use_pallas,
+                    pallas_interpret=self._config.pallas_interpret,
                     lj_switch_width=self._converted_system.lj_switch_width,
                     neighbor_idx=getattr(self, "_neighbor_idx", None),
                     use_pallas_pme=False,
                     custom_nonbonded_chunk_size=self._config.custom_nonbonded_chunk_size,
-                    tile_pair_nl=None,
+                    tile_pair_nl=self._tile_pair_nl,
                     is_triclinic=self._is_triclinic,
                     gb_use_neighbor_list=self._gb_use_neighbor_list,
                     gbsa_surface_tension=self._converted_system.gbsa_surface_tension,
                     pme_alpha=self._effective_pme_alpha(),
+                    nonbonded_offsets=self._converted_system.nonbonded_offsets,
+                    default_params=self._converted_system.default_parameters,
+                    lj_combining_rule=self._lj_combining_rule,
+                    exceptions_use_pbc=self._exceptions_use_pbc,
+                    dispersion_follows_parameters=self._dispersion_follows_parameters,
+                    force_pure_jax_tile_pairs=True,
                 )
 
             du_dlam = jax.grad(_u_of_lam)(jnp.asarray(1.0, dtype=pos_u.dtype))
@@ -2679,6 +5063,11 @@ class ProlixContext:
                 gb_use_neighbor_list=self._gb_use_neighbor_list,
                 gbsa_surface_tension=self._converted_system.gbsa_surface_tension,
                 pme_alpha=self._effective_pme_alpha(),
+                nonbonded_offsets=self._converted_system.nonbonded_offsets,
+                default_params=self._converted_system.default_parameters,
+                lj_combining_rule=self._lj_combining_rule,
+                exceptions_use_pbc=self._exceptions_use_pbc,
+                dispersion_follows_parameters=self._dispersion_follows_parameters,
             )
             if self._converted_system.virtual_sites is not None:
                 forces_akma = self._converted_system.redistribute_virtual_site_forces(
@@ -2735,6 +5124,14 @@ class ProlixContext:
         depsilon = depsilon_det + depsilon_stoch
         mu = float(np.clip(np.exp(depsilon / 3.0), 0.99, 1.01))
 
+        _, com_jnp = _unwrap_molecules_and_com_jax(
+            self._positions[: self._n_particles],
+            self._box_vectors,
+            self._anchor_of_atom_jnp,
+            self._mol_of_atom_jnp,
+            self._inv_mol_size_jnp,
+            bool(self._converted_system.has_pbc),
+        )
         new_box = current_box * mu
         new_box_jnp = jnp.asarray(new_box, dtype=self._box_vectors.dtype)
         self._box_vectors = new_box_jnp
@@ -2742,11 +5139,13 @@ class ProlixContext:
         self._converted_system = eqx.tree_at(
             lambda s: s.bundle.box, self._converted_system, new_box_jnp
         )
-        pos_np = np.asarray(self._positions, dtype=np.float64)
-        _, com_np = self._unwrap_molecules_and_com(pos_np, current_box)
-        scaled_pos = pos_np + (mu - 1.0) * com_np
-        self._positions = jnp.asarray(scaled_pos, dtype=self._positions.dtype)
+        self._refresh_box_caches_from_vectors()
+        self._positions = (
+            self._positions[: self._n_particles] + (mu - 1.0) * com_jnp
+        ).astype(self._positions.dtype)
         self._velocities = self._velocities / mu
+        self._morton_nl_dirty = True
+        self._morton_forces_dirty = True
         self.applyConstraints()
         self.applyVelocityConstraints(self._config.settle_velocity_tol)
         if (
@@ -2772,6 +5171,8 @@ class ProlixContext:
         if self._converted_system.virtual_sites is not None:
             pos_akma = self._converted_system.compute_virtual_sites(pos_akma)
         self._positions = pos_akma
+        self._morton_nl_dirty = True
+        self._morton_forces_dirty = True
         if self._should_use_neighbor_list() or self._can_use_gbsa_tiles():
             self._init_neighbor_list(self._positions[: self._n_particles])
 
@@ -2910,6 +5311,9 @@ class ProlixContext:
             is_triclinic=self._is_triclinic,
             pme_grid_dims=new_pme_dims,
         )
+        self._refresh_box_caches_from_vectors()
+        self._morton_nl_dirty = True
+        self._morton_forces_dirty = True
         if self._should_use_neighbor_list() or self._can_use_gbsa_tiles():
             self._init_neighbor_list(self._positions[: self._n_particles])
 
@@ -2934,6 +5338,8 @@ class ProlixContext:
 
     def setParameter(self, name: str, value: float) -> None:  # noqa: N802
         self._parameters[name] = float(value)
+        self._morton_params_dirty = True
+        self._morton_forces_dirty = True
 
     def getParameters(self) -> dict[str, float]:  # noqa: N802
         return dict(self._parameters)
@@ -2945,11 +5351,14 @@ class ProlixContext:
 
     def applyConstraints(self, tolerance: float = 1e-5) -> None:  # noqa: N802, ARG002
         """Apply distance constraints on current positions (SETTLE and SHAKE)."""
+        self._sync_bundle_box()
         masses = self._bundle.masses[: self._n_particles]
         self._positions = self._constraints.apply_positions(
             self._positions, self._positions, masses[:, None], self._box_vectors
         ).astype(self._positions.dtype)
         self.computeVirtualSites()
+        self._morton_nl_dirty = True
+        self._morton_forces_dirty = True
 
     def applyVelocityConstraints(self, tolerance: float = 1e-6) -> None:  # noqa: N802, ARG002
         """Apply velocity constraints on current velocities (SETTLE and RATTLE)."""
@@ -2964,6 +5373,7 @@ class ProlixContext:
 
     # --- Checkpoints & State Serialization ---
     def createCheckpoint(self) -> bytes:  # noqa: N802
+        self._sync_bundle_box()
         state_dict = {
             "positions": np.asarray(self._positions),
             "velocities": np.asarray(self._velocities),
@@ -3015,11 +5425,18 @@ class ProlixContext:
             bv_np = np.asarray(self._box_vectors, dtype=np.float64)
             off_diag = np.abs(bv_np - np.diag(np.diag(bv_np)))
             self._is_triclinic = bool(np.max(off_diag) > 1e-6)
+            self._bundle = eqx.tree_at(
+                lambda bnd: bnd.box, self._bundle, self._box_vectors.astype(jnp.float32)
+            )
+        self._refresh_box_caches_from_vectors()
         self._time = float(state_dict["time"])
         self._step_count = int(state_dict["step_count"])
         self._parameters = dict(state_dict.get("parameters", {}))
         if "prng_key" in state_dict:
             self._prng_key = jnp.asarray(state_dict["prng_key"])
+        self._morton_params_dirty = True
+        self._morton_nl_dirty = True
+        self._morton_forces_dirty = True
         if self._should_use_neighbor_list() or self._can_use_gbsa_tiles():
             self._init_neighbor_list(self._positions[: self._n_particles])
 
@@ -3028,16 +5445,47 @@ class ProlixContext:
         self._converted_system = from_openmm_system(
             self._system, self._integrator, self._config
         )
+        self._n_particles = self._converted_system.n_real_particles
         self._has_finite_cutoff = (
             0.0 < float(self._converted_system.nonbonded_cutoff) < float("inf")
+        )
+        self._lj_combining_rule = (
+            str(self._config.lj_combining_rule)
+            if str(self._config.lj_combining_rule) != "lorentz_berthelot"
+            else str(self._converted_system.lj_combining_rule)
+        )
+        self._exceptions_use_pbc = bool(
+            self._converted_system.exceptions_use_pbc or self._config.exceptions_use_pbc
+        )
+        self._dispersion_follows_parameters = bool(
+            self._converted_system.dispersion_follows_parameters
+            and self._config.dispersion_follows_parameters
         )
         self._bundle = self._converted_system.bundle
         if self._dtype == jnp.float64:
             self._bundle = eqx.tree_at(
                 lambda b: b.masses, self._bundle, self._bundle.masses.astype(jnp.float64)
             )
+        if self._converted_system.has_pbc and self._converted_system.bundle.box is not None:
+            self._box_vectors = self._converted_system.bundle.box.astype(self._dtype)
+        self._refresh_box_caches_from_vectors()
         self._custom_forces = tuple(self._converted_system.custom_forces)
         self._position_restraints = tuple(self._converted_system.position_restraints)
+        self._parameters = dict(self._converted_system.default_parameters)
+        self._molecules = self._build_molecules()
+        self._morton_runner = None
+        self._morton_runner_key = None
+        self._morton_bonded_dyn = None
+        self._cached_morton_params = None
+        self._morton_params_dirty = True
+        self._morton_nl_dirty = True
+        self._morton_forces_dirty = True
+        if not preserveState:
+            self._positions = jnp.zeros((self._n_particles, 3), dtype=self._dtype)
+            self._velocities = jnp.zeros((self._n_particles, 3), dtype=self._dtype)
+            self._velocities_initialized = False
+            self._time = 0.0
+            self._step_count = 0
         if preserveState and chk is not None:
             self.loadCheckpoint(chk)
 
@@ -3059,6 +5507,7 @@ class ProlixContext:
     # --- Dynamic Zero-Recompile Parameter Update ---
     def updateParametersInContext(self, force: openmm.Force | None = None) -> None:  # noqa: N802
         """Update MolecularBundle array leaves from OpenMM forces with zero XLA recompilations."""
+        self._sync_bundle_box()
         bundle = self._bundle
         conv = self._converted_system
         meta = conv.system_metadata
@@ -3068,6 +5517,8 @@ class ProlixContext:
         new_gbsa_st = conv.gbsa_surface_tension
         new_explicit_alpha = conv.explicit_pme_alpha
         new_pme_grid_dims = conv.pme_grid_dims
+        new_nb_offsets = conv.nonbonded_offsets
+        new_exc_use_pbc = conv.exceptions_use_pbc
 
         for f_idx in range(self._system.getNumForces()):
             f = self._system.getForce(f_idx)
@@ -3075,6 +5526,10 @@ class ProlixContext:
                 continue
 
             if isinstance(f, openmm.NonbondedForce):
+                get_exc_pbc = getattr(f, "getExceptionsUsePeriodicBoundaryConditions", None)
+                if callable(get_exc_pbc):
+                    new_exc_use_pbc = bool(get_exc_pbc()) or bool(self._config.exceptions_use_pbc)
+
                 if f.getNonbondedMethod() == openmm.NonbondedForce.PME:
                     alpha_omm, nx, ny, nz = f.getPMEParameters()
                     alpha_nm = (
@@ -3145,6 +5600,81 @@ class ProlixContext:
                             jnp.asarray(exc_sig_np, dtype=p_dtype),
                             jnp.asarray(exc_eps_np, dtype=p_dtype),
                             jnp.asarray(exc_qp_np, dtype=p_dtype),
+                        ),
+                    )
+
+                # Validate and update NonbondedForce particle/exception parameter offset scales
+                get_num_p_off = getattr(f, "getNumParticleParameterOffsets", None)
+                get_p_off = getattr(f, "getParticleParameterOffset", None)
+                get_num_e_off = getattr(f, "getNumExceptionParameterOffsets", None)
+                get_e_off = getattr(f, "getExceptionParameterOffset", None)
+                n_p_off = int(cast("int | float", get_num_p_off())) if callable(get_num_p_off) else 0
+                n_e_off = int(cast("int | float", get_num_e_off())) if callable(get_num_e_off) else 0
+                prev_p_keys = new_nb_offsets.particle_omm_keys if new_nb_offsets is not None else ()
+                prev_e_keys = new_nb_offsets.exception_omm_keys if new_nb_offsets is not None else ()
+                if n_p_off != len(prev_p_keys) or n_e_off != len(prev_e_keys):
+                    raise openmm.OpenMMException(
+                        "updateParametersInContext: The number of offsets cannot be changed"
+                    )
+                if new_nb_offsets is not None and (n_p_off > 0 or n_e_off > 0):
+                    off_dt = new_nb_offsets.particle_scales.dtype
+                    np_off_dt = np.float64 if off_dt == jnp.float64 else np.float32
+                    p_scales_upd = np.zeros((n_p_off, 3), dtype=np_off_dt)
+                    if callable(get_p_off):
+                        for k_off in range(n_p_off):
+                            pn_raw, pidx_raw, cs_raw, ss_raw, es_raw = get_p_off(k_off)
+                            if (str(pn_raw), int(pidx_raw)) != prev_p_keys[k_off]:
+                                raise openmm.OpenMMException(
+                                    f"updateParametersInContext: Particle parameter offset {k_off} "
+                                    "has changed its particle or its parameter"
+                                )
+                            p_scales_upd[k_off, 0] = (
+                                float(cs_raw.value_in_unit(unit.elementary_charge))
+                                if hasattr(cs_raw, "value_in_unit")
+                                else float(cs_raw)
+                            )
+                            p_scales_upd[k_off, 1] = (
+                                float(ss_raw.value_in_unit(unit.nanometer)) * NM_TO_ANGSTROM
+                                if hasattr(ss_raw, "value_in_unit")
+                                else float(ss_raw) * NM_TO_ANGSTROM
+                            )
+                            p_scales_upd[k_off, 2] = (
+                                float(es_raw.value_in_unit(unit.kilojoules_per_mole))
+                                * KJ_PER_MOL_TO_KCAL_PER_MOL
+                                if hasattr(es_raw, "value_in_unit")
+                                else float(es_raw) * KJ_PER_MOL_TO_KCAL_PER_MOL
+                            )
+                    e_scales_upd = np.zeros((n_e_off, 3), dtype=np_off_dt)
+                    if callable(get_e_off):
+                        for k_off in range(n_e_off):
+                            pn_raw, eidx_raw, qps_raw, ss_raw, es_raw = get_e_off(k_off)
+                            if (str(pn_raw), int(eidx_raw)) != prev_e_keys[k_off]:
+                                raise openmm.OpenMMException(
+                                    f"updateParametersInContext: Exception parameter offset {k_off} "
+                                    "has changed its exception or its parameter"
+                                )
+                            e_scales_upd[k_off, 0] = (
+                                float(qps_raw.value_in_unit(unit.elementary_charge**2))
+                                if hasattr(qps_raw, "value_in_unit")
+                                else float(qps_raw)
+                            )
+                            e_scales_upd[k_off, 1] = (
+                                float(ss_raw.value_in_unit(unit.nanometer)) * NM_TO_ANGSTROM
+                                if hasattr(ss_raw, "value_in_unit")
+                                else float(ss_raw) * NM_TO_ANGSTROM
+                            )
+                            e_scales_upd[k_off, 2] = (
+                                float(es_raw.value_in_unit(unit.kilojoules_per_mole))
+                                * KJ_PER_MOL_TO_KCAL_PER_MOL
+                                if hasattr(es_raw, "value_in_unit")
+                                else float(es_raw) * KJ_PER_MOL_TO_KCAL_PER_MOL
+                            )
+                    new_nb_offsets = eqx.tree_at(
+                        lambda o: (o.particle_scales, o.exception_scales),
+                        new_nb_offsets,
+                        (
+                            jnp.asarray(p_scales_upd, dtype=off_dt),
+                            jnp.asarray(e_scales_upd, dtype=off_dt),
                         ),
                     )
 
@@ -3367,27 +5897,40 @@ class ProlixContext:
 
         self._bundle = bundle
         self._custom_forces = tuple(updated_cf)
+        self._exceptions_use_pbc = bool(new_exc_use_pbc)
         conv_updated = eqx.tree_at(
             lambda s: (s.bundle, s.custom_forces),
             self._converted_system,
             (bundle, tuple(updated_cf)),
         )
+        if new_nb_offsets is not conv_updated.nonbonded_offsets:
+            conv_updated = dataclasses.replace(
+                conv_updated,
+                nonbonded_offsets=new_nb_offsets,
+            )
         if (
             new_gbsa_st != conv_updated.gbsa_surface_tension
             or new_explicit_alpha != conv_updated.explicit_pme_alpha
             or new_pme_grid_dims != conv_updated.pme_grid_dims
+            or new_exc_use_pbc != conv_updated.exceptions_use_pbc
         ):
             conv_updated = dataclasses.replace(
                 conv_updated,
                 gbsa_surface_tension=float(new_gbsa_st),
                 explicit_pme_alpha=new_explicit_alpha,
                 pme_grid_dims=new_pme_grid_dims,
+                exceptions_use_pbc=bool(new_exc_use_pbc),
             )
         self._converted_system = conv_updated
+        self._morton_params_dirty = True
+        self._morton_forces_dirty = True
+        if self._morton_runner is not None:
+            self._refresh_morton_bonded_dyn()
 
     # --- Parameter Derivatives ---
     def _compute_parameter_derivatives(self, groups_mask: int = -1) -> dict[str, float]:
-        """Compute analytical energy parameter derivatives dE/dlambda via jax.grad."""
+        """Compute analytical energy parameter derivatives dE/dlambda via single-pass jax.grad."""
+        self._sync_bundle_box()
         pos_akma = self._positions
         pos_nm = pos_akma * ANGSTROM_TO_NM
         box_nm = (
@@ -3400,6 +5943,71 @@ class ProlixContext:
             k: jnp.asarray(v, dtype=jnp.float32) for k, v in self._parameters.items()
         }
         param_derivatives: dict[str, float] = {}
+
+        nb_off = self._converted_system.nonbonded_offsets
+        g_nb = int(self._converted_system.force_group_by_component.get("nonbonded", 0))
+        if (
+            nb_off is not None
+            and len(nb_off.param_names) > 0
+            and self._converted_system.has_nonbonded
+            and (((1 << g_nb) & groups_mask) != 0)
+        ):
+            self._ensure_host_nl_fresh()
+            gp_nb = {
+                k: jnp.asarray(v, dtype=self._dtype) for k, v in self._parameters.items()
+            }
+            ewald_tol = (
+                self._converted_system.ewald_error_tolerance
+                if self._converted_system.ewald_error_tolerance is not None
+                else self._config.ewald_error_tolerance
+            )
+            use_disp = bool(
+                self._config.use_dispersion_correction
+                and self._converted_system.use_dispersion_correction
+            )
+            eff_alpha = self._effective_pme_alpha()
+
+            def _nb_energy_of_gp(gp_in: dict[str, Array]) -> Array:
+                return _eval_nonbonded_terms(
+                    pos_akma,
+                    self._box_vectors,
+                    self._bundle,
+                    self._converted_system.force_group_by_component,
+                    groups_mask,
+                    self._converted_system.has_pbc,
+                    self._converted_system.nonbonded_cutoff,
+                    nonbonded_method=self._converted_system.nonbonded_method,
+                    has_nonbonded=self._converted_system.has_nonbonded,
+                    use_dispersion_correction=use_disp,
+                    ewald_error_tolerance=ewald_tol,
+                    rf_dielectric=self._converted_system.reaction_field_dielectric,
+                    nonbonded_engine=self._nonbonded_engine,
+                    pme_grid_dims=self._converted_system.pme_grid_dims,
+                    use_pallas=False,
+                    pallas_interpret=False,
+                    lj_switch_width=self._converted_system.lj_switch_width,
+                    neighbor_idx=getattr(self, "_neighbor_idx", None),
+                    use_pallas_pme=False,
+                    custom_nonbonded_chunk_size=self._config.custom_nonbonded_chunk_size,
+                    tile_pair_nl=self._tile_pair_nl,
+                    is_triclinic=self._is_triclinic,
+                    pme_alpha=eff_alpha,
+                    global_params=gp_in,
+                    nonbonded_offsets=nb_off,
+                    default_params=self._converted_system.default_parameters,
+                    lj_combining_rule=self._lj_combining_rule,
+                    exceptions_use_pbc=self._exceptions_use_pbc,
+                    dispersion_follows_parameters=self._dispersion_follows_parameters,
+                    force_pure_jax_tile_pairs=True,
+                )
+
+            _, grad_nb = jax.value_and_grad(_nb_energy_of_gp)(gp_nb)
+            for p_name in nb_off.param_names:
+                if p_name in grad_nb:
+                    deriv_kj = float(grad_nb[p_name]) * KCAL_PER_MOL_TO_KJ_PER_MOL
+                    param_derivatives[p_name] = (
+                        param_derivatives.get(p_name, 0.0) + deriv_kj
+                    )
 
         for cf in self._custom_forces:
             if not ((1 << cf.force_group) & groups_mask):
@@ -3423,32 +6031,32 @@ class ProlixContext:
 
     # --- Molecule Wrapping ---
     def _wrap_molecules(self, pos_akma: np.ndarray) -> np.ndarray:
-        """Wrap molecules (connected components) into the primary periodic box."""
-        if self._box_vectors is None:
+        """Vectorized O(N) whole-molecule PBC wrapping via flat-CSR molecular COMs."""
+        self._sync_bundle_box()
+        if self._box_vectors is None or pos_akma.shape[0] == 0:
+            return pos_akma
+        n_mols = int(self._inv_mol_size_np.shape[0])
+        if n_mols == 0:
             return pos_akma
         box = np.asarray(self._box_vectors, dtype=np.float64)
-        wrapped = pos_akma.copy()
         a_vec, b_vec, c_vec = box[0], box[1], box[2]
-
-        for mol in self._molecules:
-            if not mol:
-                continue
-            mol_idx = list(mol)
-            com = np.mean(wrapped[mol_idx], axis=0)
-            # OpenMM Reference 3-step sequential back-substitution (z -> y -> x)
-            diff = np.zeros(3, dtype=np.float64)
-            if abs(c_vec[2]) > 1e-12:
-                diff += c_vec * np.floor(com[2] / c_vec[2])
-            if abs(b_vec[1]) > 1e-12:
-                diff += b_vec * np.floor((com[1] - diff[1]) / b_vec[1])
-            if abs(a_vec[0]) > 1e-12:
-                diff += a_vec * np.floor((com[0] - diff[0]) / a_vec[0])
-            wrapped[mol_idx] -= diff
-
-        return wrapped
+        mol_ids = self._mol_of_atom_np
+        pos_f64 = np.asarray(pos_akma[: self._n_particles], dtype=np.float64)
+        com_x = np.bincount(mol_ids, weights=pos_f64[:, 0], minlength=n_mols) * self._inv_mol_size_np
+        com_y = np.bincount(mol_ids, weights=pos_f64[:, 1], minlength=n_mols) * self._inv_mol_size_np
+        com_z = np.bincount(mol_ids, weights=pos_f64[:, 2], minlength=n_mols) * self._inv_mol_size_np
+        # OpenMM Reference 3-step sequential back-substitution (z -> y -> x)
+        diffs = np.zeros((n_mols, 3), dtype=np.float64)
+        if abs(c_vec[2]) > 1e-12:
+            diffs += np.floor(com_z / c_vec[2])[:, None] * c_vec[None, :]
+        if abs(b_vec[1]) > 1e-12:
+            diffs += np.floor((com_y - diffs[:, 1]) / b_vec[1])[:, None] * b_vec[None, :]
+        if abs(a_vec[0]) > 1e-12:
+            diffs += np.floor((com_x - diffs[:, 0]) / a_vec[0])[:, None] * a_vec[None, :]
+        return pos_f64 - diffs[mol_ids]
 
     def _build_molecules(self) -> tuple[tuple[int, ...], ...]:
-        """Compute connected components of particles linked by bonds and constraints."""
+        """Compute connected components of particles and precompute flat-CSR topology arrays."""
         n_p = self._n_particles
         adj: dict[int, list[int]] = {i: [] for i in range(n_p)}
 
@@ -3461,16 +6069,20 @@ class ProlixContext:
                     adj[int(p1)].append(int(p2))
                     adj[int(p2)].append(int(p1))
 
+        active_c_edges: list[tuple[int, int]] = []
         if bundle.constraint_pairs is not None:
             cpairs = np.asarray(bundle.constraint_pairs)
             cmask = np.asarray(bundle.constraint_mask)
             for (p1, p2), active in zip(cpairs, cmask, strict=False):
-                if active and p1 < n_p and p2 < n_p:
-                    adj[int(p1)].append(int(p2))
-                    adj[int(p2)].append(int(p1))
+                if active and 0 <= p1 < n_p and 0 <= p2 < n_p:
+                    u_i, v_i = int(p1), int(p2)
+                    adj[u_i].append(v_i)
+                    adj[v_i].append(u_i)
+                    if u_i != v_i:
+                        active_c_edges.append((u_i, v_i))
 
-        visited = set()
-        molecules = []
+        visited: set[int] = set()
+        molecules: list[tuple[int, ...]] = []
         for i in range(n_p):
             if i not in visited:
                 comp = []
@@ -3484,6 +6096,85 @@ class ProlixContext:
                             visited.add(nbr)
                             stack.append(nbr)
                 molecules.append(tuple(sorted(comp)))
+
+        n_mols = len(molecules)
+        mol_of_atom = np.zeros((n_p,), dtype=np.int32)
+        anchor_of_atom = np.zeros((n_p,), dtype=np.int32)
+        inv_mol_size = np.ones((max(n_mols, 1),), dtype=np.float64)
+        for m_idx, mol in enumerate(molecules):
+            if not mol:
+                continue
+            anchor = int(mol[0])
+            idx_arr = np.asarray(mol, dtype=np.int32)
+            mol_of_atom[idx_arr] = m_idx
+            anchor_of_atom[idx_arr] = anchor
+            inv_mol_size[m_idx] = 1.0 / float(len(mol))
+        if n_mols == 0:
+            inv_mol_size = np.zeros((0,), dtype=np.float64)
+
+        self._mol_of_atom_np = mol_of_atom
+        self._anchor_of_atom_np = anchor_of_atom
+        self._inv_mol_size_np = inv_mol_size
+        self._mol_of_atom_jnp = jnp.asarray(mol_of_atom, dtype=jnp.int32)
+        self._anchor_of_atom_jnp = jnp.asarray(anchor_of_atom, dtype=jnp.int32)
+        self._inv_mol_size_jnp = jnp.asarray(inv_mol_size, dtype=jnp.float32)
+
+        masses_np = np.asarray(bundle.masses[:n_p], dtype=np.float64) if n_p > 0 else np.zeros((0,))
+        self._has_frozen_atoms = bool(n_p > 0 and np.any(masses_np <= 1e-12))
+
+        intermol_exc = False
+        if (
+            n_p > 0
+            and bundle.exception_pairs is not None
+            and bundle.exception_mask is not None
+        ):
+            ep_np = np.asarray(bundle.exception_pairs, dtype=np.int32)
+            em_np = np.asarray(bundle.exception_mask, dtype=bool)
+            if ep_np.shape[0] > 0:
+                v_e = em_np & (ep_np[:, 0] >= 0) & (ep_np[:, 0] < n_p) & (ep_np[:, 1] >= 0) & (ep_np[:, 1] < n_p)
+                if np.any(v_e):
+                    e0 = ep_np[v_e, 0]
+                    e1 = ep_np[v_e, 1]
+                    intermol_exc = bool(np.any(mol_of_atom[e0] != mol_of_atom[e1]))
+        self._has_intermolecular_exceptions = intermol_exc
+
+        disjoint_stars = True
+        if active_c_edges and n_p > 0:
+            cdeg = np.zeros((n_p,), dtype=np.int32)
+            for u_i, v_i in active_c_edges:
+                cdeg[u_i] += 1
+                cdeg[v_i] += 1
+            if int(np.max(cdeg)) > 4:
+                disjoint_stars = False
+            else:
+                for u_i, v_i in active_c_edges:
+                    if min(int(cdeg[u_i]), int(cdeg[v_i])) != 1:
+                        disjoint_stars = False
+                        break
+        self._constraints_are_disjoint_stars = disjoint_stars
+
+        if (
+            n_p > 0
+            and bundle.water_indices is not None
+            and bundle.n_waters is not None
+            and int(bundle.n_waters) > 0
+        ):
+            wi_np = np.asarray(bundle.water_indices[: int(bundle.n_waters)], dtype=np.int32)
+            m_o_arr = masses_np[wi_np[:, 0]]
+            m_h1_arr = masses_np[wi_np[:, 1]]
+            m_h2_arr = masses_np[wi_np[:, 2]]
+            self._water_m_O = float(m_o_arr[0])
+            self._water_m_H = float(m_h1_arr[0])
+            self._waters_uniform = bool(
+                np.max(np.abs(m_o_arr - self._water_m_O)) < 1e-4
+                and np.max(np.abs(m_h1_arr - self._water_m_H)) < 1e-4
+                and np.max(np.abs(m_h2_arr - self._water_m_H)) < 1e-4
+            )
+        else:
+            self._water_m_O = 15.999
+            self._water_m_H = 1.008
+            self._waters_uniform = True
+
         return tuple(molecules)
 
     # --- getState ---
@@ -3535,20 +6226,42 @@ class ProlixContext:
             raw_groups = int(groups)
         groups_mask = int(np.int32(raw_groups))
 
-        # Box vectors
-        box_nm = (
-            np.asarray(self._box_vectors, dtype=np.float64) * ANGSTROM_TO_NM
-            if self._box_vectors is not None
-            else np.eye(3, dtype=np.float64)
-        )
+        # Box vectors (host-cached in NVT; 3-float GPU sync only when NPT updated box)
+        box_nm = self._get_box_nm_host()
 
-        # Positions
+        # Positions (GPU-wrapped before single D2H transfer when enforcePeriodicBox=True)
         pos_nm = None
         if req_pos:
-            pos_akma = np.asarray(self._positions, dtype=np.float64)
-            if enforcePeriodicBox and (self._converted_system.has_pbc or self._box_vectors is not None):
-                pos_akma = self._wrap_molecules(pos_akma)
-            pos_nm = pos_akma * ANGSTROM_TO_NM
+            has_box = self._converted_system.has_pbc or self._morton_box_diag is not None or self._box_vectors is not None
+            if enforcePeriodicBox and has_box:
+                if self._is_triclinic and self._box_vectors is not None:
+                    pos_raw = np.asarray(self._positions[: self._n_particles], dtype=np.float64)
+                    pos_nm = self._wrap_molecules(pos_raw) * float(ANGSTROM_TO_NM)
+                else:
+                    if self._morton_box_diag is not None:
+                        box_gpu = jnp.diag(self._morton_box_diag.astype(self._positions.dtype))
+                    elif self._box_vectors is not None:
+                        box_gpu = self._box_vectors.astype(self._positions.dtype)
+                    else:
+                        box_gpu = None
+                    if box_gpu is not None:
+                        pos_wrapped_dev = _wrap_molecules_jax(
+                            self._positions[: self._n_particles],
+                            box_gpu,
+                            self._mol_of_atom_jnp,
+                            self._inv_mol_size_jnp,
+                        )
+                        pos_nm = np.asarray(pos_wrapped_dev, dtype=np.float64) * ANGSTROM_TO_NM
+                    else:
+                        pos_nm = (
+                            np.asarray(self._positions[: self._n_particles], dtype=np.float64)
+                            * ANGSTROM_TO_NM
+                        )
+            else:
+                pos_nm = (
+                    np.asarray(self._positions[: self._n_particles], dtype=np.float64)
+                    * ANGSTROM_TO_NM
+                )
 
         # Velocities
         vel_omm = None
@@ -3563,88 +6276,180 @@ class ProlixContext:
         forces_omm = None
 
         if req_energy or req_forces:
-            gp = {
-                k: jnp.asarray(val, dtype=jnp.float32)
-                for k, val in self._parameters.items()
-            }
-            ewald_tol = (
-                self._converted_system.ewald_error_tolerance
-                if self._converted_system.ewald_error_tolerance is not None
-                else self._config.ewald_error_tolerance
+            use_disp = bool(
+                self._config.use_dispersion_correction
+                and self._converted_system.use_dispersion_correction
             )
-            pe_akma, forces_akma = _pure_compute_energy_and_forces(
-                self._positions,
-                self._box_vectors,
-                self._bundle,
-                self._custom_forces,
-                self._position_restraints,
-                gp,
-                self._converted_system.force_group_by_component,
-                groups_mask,
-                self._converted_system.has_pbc,
-                self._converted_system.nonbonded_cutoff,
-                self._converted_system.bond_force_groups,
-                self._converted_system.angle_force_groups,
-                self._converted_system.dihedral_force_groups,
-                self._converted_system.cmap_force_groups,
-                self._converted_system.nonbonded_method,
-                self._converted_system.has_nonbonded,
-                self._config.use_dispersion_correction and self._converted_system.use_dispersion_correction,
-                ewald_tol,
-                self._converted_system.reaction_field_dielectric,
-                self._converted_system.has_implicit_solvent,
-                self._converted_system.solvent_dielectric,
-                self._converted_system.solute_dielectric,
-                self._nonbonded_engine,
-                self._converted_system.pme_grid_dims,
-                use_pallas=self._config.use_pallas,
-                pallas_interpret=self._config.pallas_interpret,
-                lj_switch_width=self._converted_system.lj_switch_width,
-                neighbor_idx=getattr(self, "_neighbor_idx", None),
-                use_pallas_pme=self._config.use_pallas_pme,
-                custom_nonbonded_chunk_size=self._config.custom_nonbonded_chunk_size,
-                tile_pair_nl=self._tile_pair_nl,
-                gbsa_tile_list=self._gbsa_tile_list,
-                is_triclinic=self._is_triclinic,
-                mixed_precision=self._mixed_precision,
-                gb_use_neighbor_list=self._gb_use_neighbor_list,
-                gbsa_surface_tension=self._converted_system.gbsa_surface_tension,
-                pme_alpha=self._effective_pme_alpha(),
-            )
-            if req_energy:
-                pe_kj = float(pe_akma * KCAL_PER_MOL_TO_KJ_PER_MOL)
-                m = np.asarray(self._bundle.masses[: self._n_particles], dtype=np.float64)
-                v = np.asarray(self._velocities[: self._n_particles], dtype=np.float64)
-                eff_scheme = self._effective_integrator_scheme()
-                ig_state = cast("Any", self._integrator)
-                dt_omm = (
-                    ig_state.getStepSize()
-                    if hasattr(ig_state, "getStepSize")
-                    else 0.001 * unit.picosecond
-                )
-                dt_akma = float(to_akma(dt_omm, "time"))
-                # BUG-OMM2: Only leapfrog stores half-step staggered v(t - dt/2); Velocity Verlet,
-                # BAOAB/LFMiddle, Brownian, Nose-Hoover, and cold uninitialized contexts store on-step v(t).
+            if groups_mask == -1 and self._can_use_morton_obs():
+                runner = cast("dict[str, Any]", self._morton_runner)
+                bd = self._morton_bonded_dyn or runner["bonded_static"]
+                n_act = int(runner["n_act"])
                 if (
-                    eff_scheme == "leapfrog"
-                    and (self._step_count > 0 or self._velocities_initialized)
-                    and dt_akma > 0
-                    and forces_akma is not None
+                    req_forces
+                    and not req_energy
+                    and not self._morton_nl_dirty
+                    and not self._morton_forces_dirty
+                    and self._morton_tp_state is not None
                 ):
-                    inv_m = np.asarray(self._converted_system.inv_mass[: self._n_particles], dtype=np.float64)
-                    f_akma_np = np.asarray(forces_akma[: self._n_particles], dtype=np.float64)
-                    v_sync = v + 0.5 * dt_akma * (f_akma_np * inv_m[:, None])
-                    ke_akma = 0.5 * np.sum(m[:, None] * (v_sync**2))
-                else:
-                    ke_akma = 0.5 * np.sum(m[:, None] * (v**2))
-                ke_kj = float(ke_akma * KCAL_PER_MOL_TO_KJ_PER_MOL)
-
-            if req_forces:
-                if self._converted_system.virtual_sites is not None:
-                    forces_akma = self._converted_system.redistribute_virtual_site_forces(
-                        forces_akma, self._positions
+                    f_omm_dev = runner["jit_unpermute_forces"](
+                        self._morton_fx,
+                        self._morton_fy,
+                        self._morton_fz,
+                        self._morton_tp_state.inv_perm,
                     )
-                forces_omm = np.asarray(forces_akma, dtype=np.float64) * FORCE_AKMA_TO_OMM
+                    forces_omm = np.asarray(f_omm_dev, dtype=np.float64)
+                else:
+                    (
+                        q_b,
+                        sig_b,
+                        eps_b,
+                        e_sig_in,
+                        e_eps_in,
+                        e_qp_in,
+                        c_tail_s,
+                    ) = self._ensure_morton_params(runner, bd, use_disp)
+                    box_diag_in = self._morton_box_diag
+                    if box_diag_in is None:
+                        if self._box_vectors is None:
+                            raise RuntimeError(
+                                "Periodic Morton getState requires non-null box vectors"
+                            )
+                        box_diag_in = (
+                            jnp.diag(self._box_vectors)
+                            if self._box_vectors.ndim == 2
+                            else self._box_vectors
+                        )
+                        self._morton_box_diag = box_diag_in
+                    (
+                        scalars_kj_dev,
+                        f_omm_dev,
+                        tp_out,
+                        fx_out,
+                        fy_out,
+                        fz_out,
+                        G_out,
+                    ) = runner["jit_energy_and_forces"](
+                        self._positions[:n_act],
+                        self._velocities[:n_act],
+                        box_diag_in,
+                        q_b,
+                        sig_b,
+                        eps_b,
+                        bd.b_r0,
+                        bd.b_k,
+                        bd.a_th0,
+                        bd.a_kval,
+                        bd.d_p0,
+                        bd.d_p1,
+                        bd.d_p2,
+                        e_sig_in,
+                        e_eps_in,
+                        e_qp_in,
+                        self._morton_tp_state,
+                        self._morton_G,
+                        bool(self._morton_nl_dirty),
+                        bool(self._morton_forces_dirty),
+                        c_tail_s,
+                    )
+                    self._morton_tp_state = tp_out
+                    self._morton_fx = fx_out
+                    self._morton_fy = fy_out
+                    self._morton_fz = fz_out
+                    self._morton_G = G_out
+                    self._morton_nl_dirty = False
+                    self._morton_forces_dirty = False
+                    if req_energy:
+                        pe_ke_np = np.asarray(scalars_kj_dev, dtype=np.float64)
+                        pe_kj = float(pe_ke_np[0])
+                        ke_kj = float(pe_ke_np[1])
+                    if req_forces:
+                        forces_omm = np.asarray(f_omm_dev, dtype=np.float64)
+            else:
+                self._ensure_host_nl_fresh()
+                gp = self._get_dynamic_global_params()
+                ewald_tol = (
+                    self._converted_system.ewald_error_tolerance
+                    if self._converted_system.ewald_error_tolerance is not None
+                    else self._config.ewald_error_tolerance
+                )
+                pe_akma, forces_akma = _pure_compute_energy_and_forces(
+                    self._positions,
+                    self._box_vectors,
+                    self._bundle,
+                    self._custom_forces,
+                    self._position_restraints,
+                    gp,
+                    self._converted_system.force_group_by_component,
+                    groups_mask,
+                    self._converted_system.has_pbc,
+                    self._converted_system.nonbonded_cutoff,
+                    self._converted_system.bond_force_groups,
+                    self._converted_system.angle_force_groups,
+                    self._converted_system.dihedral_force_groups,
+                    self._converted_system.cmap_force_groups,
+                    self._converted_system.nonbonded_method,
+                    self._converted_system.has_nonbonded,
+                    use_disp,
+                    ewald_tol,
+                    self._converted_system.reaction_field_dielectric,
+                    self._converted_system.has_implicit_solvent,
+                    self._converted_system.solvent_dielectric,
+                    self._converted_system.solute_dielectric,
+                    self._nonbonded_engine,
+                    self._converted_system.pme_grid_dims,
+                    use_pallas=self._config.use_pallas,
+                    pallas_interpret=self._config.pallas_interpret,
+                    lj_switch_width=self._converted_system.lj_switch_width,
+                    neighbor_idx=getattr(self, "_neighbor_idx", None),
+                    use_pallas_pme=self._config.use_pallas_pme,
+                    custom_nonbonded_chunk_size=self._config.custom_nonbonded_chunk_size,
+                    tile_pair_nl=self._tile_pair_nl,
+                    gbsa_tile_list=self._gbsa_tile_list,
+                    is_triclinic=self._is_triclinic,
+                    mixed_precision=self._mixed_precision,
+                    gb_use_neighbor_list=self._gb_use_neighbor_list,
+                    gbsa_surface_tension=self._converted_system.gbsa_surface_tension,
+                    pme_alpha=self._effective_pme_alpha(),
+                    nonbonded_offsets=self._converted_system.nonbonded_offsets,
+                    default_params=self._converted_system.default_parameters,
+                    lj_combining_rule=self._lj_combining_rule,
+                    exceptions_use_pbc=self._exceptions_use_pbc,
+                    dispersion_follows_parameters=self._dispersion_follows_parameters,
+                )
+                if req_energy:
+                    pe_kj = float(pe_akma * KCAL_PER_MOL_TO_KJ_PER_MOL)
+                    m = np.asarray(self._bundle.masses[: self._n_particles], dtype=np.float64)
+                    v = np.asarray(self._velocities[: self._n_particles], dtype=np.float64)
+                    eff_scheme = self._effective_integrator_scheme()
+                    ig_state = cast("Any", self._integrator)
+                    dt_omm = (
+                        ig_state.getStepSize()
+                        if hasattr(ig_state, "getStepSize")
+                        else 0.001 * unit.picosecond
+                    )
+                    dt_akma = float(to_akma(dt_omm, "time"))
+                    # BUG-OMM2: Only leapfrog stores half-step staggered v(t - dt/2); Velocity Verlet,
+                    # BAOAB/LFMiddle, Brownian, Nose-Hoover, and cold uninitialized contexts store on-step v(t).
+                    if (
+                        eff_scheme == "leapfrog"
+                        and (self._step_count > 0 or self._velocities_initialized)
+                        and dt_akma > 0
+                        and forces_akma is not None
+                    ):
+                        inv_m = np.asarray(self._converted_system.inv_mass[: self._n_particles], dtype=np.float64)
+                        f_akma_np = np.asarray(forces_akma[: self._n_particles], dtype=np.float64)
+                        v_sync = v + 0.5 * dt_akma * (f_akma_np * inv_m[:, None])
+                        ke_akma = 0.5 * np.sum(m[:, None] * (v_sync**2))
+                    else:
+                        ke_akma = 0.5 * np.sum(m[:, None] * (v**2))
+                    ke_kj = float(ke_akma * KCAL_PER_MOL_TO_KJ_PER_MOL)
+
+                if req_forces:
+                    if self._converted_system.virtual_sites is not None:
+                        forces_akma = self._converted_system.redistribute_virtual_site_forces(
+                            forces_akma, self._positions
+                        )
+                    forces_omm = np.asarray(forces_akma, dtype=np.float64) * FORCE_AKMA_TO_OMM
 
         params_dict = dict(self._parameters) if req_params else None
         derivs_dict = (

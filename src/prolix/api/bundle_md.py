@@ -21,7 +21,10 @@ Patterns:
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 import jax
 import jax.numpy as jnp
@@ -1159,6 +1162,11 @@ def lower_knob_surface(
         if hasattr(nb_engine, "value")
         else (nb_engine or (pallas_nb_engine if pallas_nb_engine != "auto" else "dense"))
     )
+    raw_combining = str(getattr(nonbonded, "lj_combining_rule", "lorentz_berthelot")).strip().lower()
+    if raw_combining not in ("lorentz_berthelot", "geometric"):
+        raise ValueError(
+            f"Invalid lj_combining_rule: {raw_combining!r}. Allowed: 'lorentz_berthelot', 'geometric'."
+        )
 
     return {
         # ThermostatControls
@@ -1206,6 +1214,11 @@ def lower_knob_surface(
         "coulomb_constant": float(getattr(nonbonded, "coulomb_constant", 332.0637)),
         "scale_14_lj": float(getattr(nonbonded, "scale_14_lj", 0.5)),
         "scale_14_elec": float(getattr(nonbonded, "scale_14_elec", 0.8333333333333334)),
+        "lj_combining_rule": raw_combining,
+        "exceptions_use_pbc": bool(getattr(nonbonded, "exceptions_use_pbc", False)),
+        "dispersion_follows_parameters": bool(
+            getattr(nonbonded, "dispersion_follows_parameters", True)
+        ),
         # ImplicitSolventControls
         "solvent_model": getattr(implicit_solvent, "solvent_model", None),
         "solvent_dielectric": float(getattr(implicit_solvent, "solvent_dielectric", 78.5)),

@@ -482,6 +482,24 @@ class CompiledRBTorsionForce(CompiledLeptonForce):
 # =============================================================================
 
 
+class NonbondedParameterOffsets(eqx.Module):
+    """Sparse GPU-resident NonbondedForce particle and exception parameter offsets."""
+
+    param_names: tuple[str, ...] = eqx.field(static=True)
+    particle_param_idx: Int[Array, " P_off"]
+    particle_indices: Int[Array, " P_off"]
+    particle_scales: Float[Array, "P_off 3"]
+    exception_param_idx: Int[Array, " E_off"]
+    exception_bundle_indices: Int[Array, " E_off"]
+    exception_scales: Float[Array, "E_off 3"]
+    particle_omm_keys: tuple[tuple[str, int], ...] = eqx.field(
+        static=True, default=()
+    )
+    exception_omm_keys: tuple[tuple[str, int], ...] = eqx.field(
+        static=True, default=()
+    )
+
+
 class ConvertedOpenMMSystem(eqx.Module):
     """Complete converted OpenMM System bundle ready for ProlixContext execution."""
 
@@ -523,6 +541,10 @@ class ConvertedOpenMMSystem(eqx.Module):
     solute_dielectric: float = eqx.field(static=True, default=1.0)
     gbsa_surface_tension: float = eqx.field(static=True, default=0.0054)
     custom_nonbonded_chunk_size: int = eqx.field(static=True, default=128)
+    nonbonded_offsets: NonbondedParameterOffsets | None = None
+    exceptions_use_pbc: bool = eqx.field(static=True, default=False)
+    lj_combining_rule: str = eqx.field(static=True, default="lorentz_berthelot")
+    dispersion_follows_parameters: bool = eqx.field(static=True, default=True)
 
     def compute_virtual_sites(
         self, positions: Float[Array, "... 3"]
@@ -1547,6 +1569,10 @@ def from_openmm_system(
     explicit_pme_alpha: float | None = None
     pme_alpha = 0.0
     pme_grid_dims: tuple[int, int, int] | None = None
+    exceptions_use_pbc = bool(config.exceptions_use_pbc)
+    lj_combining_rule = str(config.lj_combining_rule)
+    dispersion_follows_parameters = bool(config.dispersion_follows_parameters)
+    nonbonded_offsets: NonbondedParameterOffsets | None = None
 
     for f_idx in range(omm_system.getNumForces()):
         f = omm_system.getForce(f_idx)
@@ -1596,6 +1622,77 @@ def from_openmm_system(
                 lj_switch_width = 0.0
 
             use_dispersion_correction = bool(f.getUseDispersionCorrection())
+            get_exc_pbc = getattr(f, "getExceptionsUsePeriodicBoundaryConditions", None)
+            if callable(get_exc_pbc):
+                exceptions_use_pbc = bool(get_exc_pbc()) or bool(config.exceptions_use_pbc)
+
+            # Pre-scan ParticleParameterOffsets and ExceptionParameterOffsets
+            raw_p_offsets: list[tuple[str, int, float, float, float]] = []
+            get_num_p_off = getattr(f, "getNumParticleParameterOffsets", None)
+            get_p_off = getattr(f, "getParticleParameterOffset", None)
+            if callable(get_num_p_off) and callable(get_p_off):
+                n_p_off = int(cast("int | float", get_num_p_off()))
+                for k_off in range(n_p_off):
+                    p_name_raw, p_idx_raw, cs_raw, ss_raw, es_raw = get_p_off(k_off)
+                    p_name_s = str(p_name_raw)
+                    p_idx_i = int(p_idx_raw)
+                    if p_idx_i < 0 or p_idx_i >= n_particles:
+                        raise ValueError(
+                            f"Illegal particle index {p_idx_i} in ParticleParameterOffset "
+                            f"(n_particles={n_particles})."
+                        )
+                    cs_f = (
+                        float(cs_raw.value_in_unit(unit.elementary_charge))
+                        if hasattr(cs_raw, "value_in_unit")
+                        else float(cs_raw)
+                    )
+                    ss_f = (
+                        float(ss_raw.value_in_unit(unit.nanometer)) * NM_TO_ANGSTROM
+                        if hasattr(ss_raw, "value_in_unit")
+                        else float(ss_raw) * NM_TO_ANGSTROM
+                    )
+                    es_f = (
+                        float(es_raw.value_in_unit(unit.kilojoules_per_mole))
+                        * KJ_PER_MOL_TO_KCAL_PER_MOL
+                        if hasattr(es_raw, "value_in_unit")
+                        else float(es_raw) * KJ_PER_MOL_TO_KCAL_PER_MOL
+                    )
+                    raw_p_offsets.append((p_name_s, p_idx_i, cs_f, ss_f, es_f))
+
+            raw_e_offsets: list[tuple[str, int, float, float, float]] = []
+            offset_referenced_exceptions: set[int] = set()
+            n_total_exc = int(f.getNumExceptions())
+            get_num_e_off = getattr(f, "getNumExceptionParameterOffsets", None)
+            get_e_off = getattr(f, "getExceptionParameterOffset", None)
+            if callable(get_num_e_off) and callable(get_e_off):
+                n_e_off = int(cast("int | float", get_num_e_off()))
+                for k_off in range(n_e_off):
+                    p_name_raw, e_idx_raw, qps_raw, ss_raw, es_raw = get_e_off(k_off)
+                    p_name_s = str(p_name_raw)
+                    e_idx_i = int(e_idx_raw)
+                    if e_idx_i < 0 or e_idx_i >= n_total_exc:
+                        raise ValueError(
+                            f"Illegal exception index {e_idx_i} in ExceptionParameterOffset "
+                            f"(num_exceptions={n_total_exc})."
+                        )
+                    qps_f = (
+                        float(qps_raw.value_in_unit(unit.elementary_charge**2))
+                        if hasattr(qps_raw, "value_in_unit")
+                        else float(qps_raw)
+                    )
+                    ss_f = (
+                        float(ss_raw.value_in_unit(unit.nanometer)) * NM_TO_ANGSTROM
+                        if hasattr(ss_raw, "value_in_unit")
+                        else float(ss_raw) * NM_TO_ANGSTROM
+                    )
+                    es_f = (
+                        float(es_raw.value_in_unit(unit.kilojoules_per_mole))
+                        * KJ_PER_MOL_TO_KCAL_PER_MOL
+                        if hasattr(es_raw, "value_in_unit")
+                        else float(es_raw) * KJ_PER_MOL_TO_KCAL_PER_MOL
+                    )
+                    raw_e_offsets.append((p_name_s, e_idx_i, qps_f, ss_f, es_f))
+                    offset_referenced_exceptions.add(e_idx_i)
 
             # Particle nonbonded parameters
             for p_i in range(f.getNumParticles()):
@@ -1611,8 +1708,12 @@ def from_openmm_system(
 
             # Exceptions & Exclusions
             bundle_exc_counter = 0
-            for e_i in range(f.getNumExceptions()):
+            for e_i in range(n_total_exc):
                 p1, p2, qprod, sig, eps = f.getExceptionParameters(e_i)
+                if p1 < 0 or p1 >= n_particles or p2 < 0 or p2 >= n_particles:
+                    raise ValueError(
+                        f"Illegal exception particle index ({p1}, {p2}) for n_particles={n_particles}."
+                    )
                 p1_idx, p2_idx = min(p1, p2), max(p1, p2)
                 qprod_val = qprod.value_in_unit(unit.elementary_charge**2)
                 sig_val = sig.value_in_unit(unit.nanometer) * NM_TO_ANGSTROM
@@ -1626,8 +1727,12 @@ def from_openmm_system(
                 excl_vdw_list.append(0.0)
                 excl_elec_list.append(0.0)
 
-                # Non-zero 1-4 exceptions populated in dedicated exception arrays
-                if abs(qprod_val) > 0.0 or abs(eps_val) > 0.0:
+                # Non-zero 1-4 or offset-referenced zero exceptions populated in dedicated exception arrays
+                if (
+                    abs(qprod_val) > 0.0
+                    or abs(eps_val) > 0.0
+                    or (e_i in offset_referenced_exceptions)
+                ):
                     exc14_pairs_list.append([p1_idx, p2_idx])
                     exc14_sigmas_list.append(sig_val)
                     exc14_eps_list.append(eps_val)
@@ -1636,6 +1741,65 @@ def from_openmm_system(
                     bundle_exc_counter += 1
                 else:
                     omm_exception_to_bundle_idx[e_i] = None
+
+            if raw_p_offsets or raw_e_offsets:
+                seen_params: dict[str, int] = {}
+                for p_name_s, *_ in raw_p_offsets:
+                    if p_name_s not in seen_params:
+                        seen_params[p_name_s] = len(seen_params)
+                    global_params.setdefault(p_name_s, 0.0)
+                for p_name_s, *_ in raw_e_offsets:
+                    if p_name_s not in seen_params:
+                        seen_params[p_name_s] = len(seen_params)
+                    global_params.setdefault(p_name_s, 0.0)
+
+                p_param_idx_np = (
+                    np.asarray([seen_params[it[0]] for it in raw_p_offsets], dtype=np.int32)
+                    if raw_p_offsets
+                    else np.zeros((0,), dtype=np.int32)
+                )
+                p_indices_np = (
+                    np.asarray([it[1] for it in raw_p_offsets], dtype=np.int32)
+                    if raw_p_offsets
+                    else np.zeros((0,), dtype=np.int32)
+                )
+                p_scales_np = (
+                    np.asarray([[it[2], it[3], it[4]] for it in raw_p_offsets], dtype=np_float)
+                    if raw_p_offsets
+                    else np.zeros((0, 3), dtype=np_float)
+                )
+                e_param_idx_np = (
+                    np.asarray([seen_params[it[0]] for it in raw_e_offsets], dtype=np.int32)
+                    if raw_e_offsets
+                    else np.zeros((0,), dtype=np.int32)
+                )
+                e_bundle_idx_np = (
+                    np.asarray(
+                        [int(omm_exception_to_bundle_idx[it[1]] or 0) for it in raw_e_offsets],
+                        dtype=np.int32,
+                    )
+                    if raw_e_offsets
+                    else np.zeros((0,), dtype=np.int32)
+                )
+                e_scales_np = (
+                    np.asarray([[it[2], it[3], it[4]] for it in raw_e_offsets], dtype=np_float)
+                    if raw_e_offsets
+                    else np.zeros((0, 3), dtype=np_float)
+                )
+                nonbonded_offsets = _as_eqx(
+                    NonbondedParameterOffsets(
+                        param_names=tuple(seen_params.keys()),
+                        particle_param_idx=jnp.asarray(p_param_idx_np, dtype=jnp.int32),
+                        particle_indices=jnp.asarray(p_indices_np, dtype=jnp.int32),
+                        particle_scales=jnp.asarray(p_scales_np, dtype=jnp_float),
+                        particle_omm_keys=tuple((it[0], it[1]) for it in raw_p_offsets),
+                        exception_param_idx=jnp.asarray(e_param_idx_np, dtype=jnp.int32),
+                        exception_bundle_indices=jnp.asarray(e_bundle_idx_np, dtype=jnp.int32),
+                        exception_scales=jnp.asarray(e_scales_np, dtype=jnp_float),
+                        exception_omm_keys=tuple((it[0], it[1]) for it in raw_e_offsets),
+                    ),
+                    NonbondedParameterOffsets,
+                )
 
             # PME grid parameters
             alpha_omm, nx, ny, nz = f.getPMEParameters()
@@ -2279,6 +2443,10 @@ def from_openmm_system(
             solute_dielectric=float(solute_dielectric),
             gbsa_surface_tension=float(gbsa_surface_tension),
             custom_nonbonded_chunk_size=int(config.custom_nonbonded_chunk_size),
+            nonbonded_offsets=nonbonded_offsets,
+            exceptions_use_pbc=bool(exceptions_use_pbc),
+            lj_combining_rule=str(lj_combining_rule),
+            dispersion_follows_parameters=bool(dispersion_follows_parameters),
         ),
         ConvertedOpenMMSystem,
     )

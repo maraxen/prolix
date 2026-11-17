@@ -126,6 +126,9 @@ def test_u1_consumer_reachability_100_percent() -> None:
         "anisotropic",
         "virtual_site_mode",
         "ewald_error_tolerance",
+        "lj_combining_rule",
+        "exceptions_use_pbc",
+        "dispersion_follows_parameters",
     }
     assert required_active_surface.issubset(res.read_fields)
 
@@ -134,18 +137,24 @@ def test_u1_consumer_reachability_100_percent() -> None:
         f"U1 failed for ProlixOpenMMConfig with unread leaves: {sorted(res_omm.unread_fields)}"
     )
     assert res_omm.unread_fields == frozenset()
-    assert {"device_index", "anisotropic_barostat"}.issubset(res_omm.read_fields)
+    assert {
+        "device_index",
+        "anisotropic_barostat",
+        "lj_combining_rule",
+        "exceptions_use_pbc",
+        "dispersion_follows_parameters",
+    }.issubset(res_omm.read_fields)
 
 
 def test_openmm_platform_property_roundtrip() -> None:
-    """All 39 `ProlixOpenMMConfig` fields and OpenMM platform aliases round-trip cleanly."""
+    """All 42 `ProlixOpenMMConfig` fields and OpenMM platform aliases round-trip cleanly."""
     field_names = [f.name for f in dataclasses.fields(ProlixOpenMMConfig)]
-    assert len(field_names) == 39
+    assert len(field_names) == 42
     assert set(field_names) == set(_CANONICAL_NAMES.keys())
 
     plat = ProlixPlatform()
     prop_names = plat.getPropertyNames()
-    assert len(prop_names) == 39
+    assert len(prop_names) == 42
     assert set(prop_names) == set(_CANONICAL_NAMES.values())
 
     roundtrip_props = {
@@ -163,6 +172,9 @@ def test_openmm_platform_property_roundtrip() -> None:
         "CmmFrequency": "50",
         "AnisotropicBarostat": "true",
         "VirtualSiteMode": "auto",
+        "LjCombiningRule": "geometric",
+        "ExceptionsUsePbc": "true",
+        "DispersionFollowsParameters": "false",
     }
     for k, v in roundtrip_props.items():
         plat.setPropertyDefaultValue(k, v)
@@ -183,20 +195,29 @@ def test_openmm_platform_property_roundtrip() -> None:
     assert cfg.cmm_frequency == 50
     assert cfg.anisotropic_barostat is True
     assert cfg.virtual_site_mode == "auto"
+    assert cfg.lj_combining_rule == "geometric"
+    assert cfg.exceptions_use_pbc is True
+    assert cfg.dispersion_follows_parameters is False
 
-    # Also verify CUDA/OpenCL platform alias compatibility
+    # Also verify CUDA/OpenCL & OpenMM PascalCase alias compatibility
     alias_cfg = parse_platform_properties(
         {
             "CudaPrecision": "mixed",
             "CudaDeviceIndex": "0,1",
             "DeterministicForces": "true",
             "DisablePmeStream": "false",
+            "CombiningRule": "LorentzBerthelot",
+            "ExceptionsUsePeriodicBoundaryConditions": "true",
+            "DispersionCorrectionFollowsParameters": "false",
         }
     )
     assert alias_cfg.precision == "mixed"
     assert alias_cfg.device_index == "0,1"
     assert alias_cfg.deterministic_forces is True
     assert alias_cfg.disable_pme_stream is False
+    assert alias_cfg.lj_combining_rule == "lorentz_berthelot"
+    assert alias_cfg.exceptions_use_pbc is True
+    assert alias_cfg.dispersion_follows_parameters is False
     assert "cudaprecision" in _EXTRA_ALIASES
 
 

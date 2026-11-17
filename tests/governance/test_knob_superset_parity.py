@@ -94,6 +94,9 @@ EXPECTED_SUB_SURFACES: dict[type, set[str]] = {
         "coulomb_constant",
         "scale_14_lj",
         "scale_14_elec",
+        "lj_combining_rule",
+        "exceptions_use_pbc",
+        "dispersion_follows_parameters",
     },
     ImplicitSolventControls: {
         "solvent_model",
@@ -234,7 +237,8 @@ def test_knob_surface_zero_cycle_leaf_import_purity() -> None:
     # Verify repo-wide import architecture guardrails (cycles, dodges, lazy imports)
     script_path = _REPO_ROOT / "scripts" / "ci" / "import_graph.py"
     spec = importlib.util.spec_from_file_location("prolix_import_graph", script_path)
-    assert spec is not None and spec.loader is not None
+    assert spec is not None
+    assert spec.loader is not None
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
     graph = mod.build(_SRC_ROOT / "prolix")
