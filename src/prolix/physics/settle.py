@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import os
 import warnings
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, Literal, cast, overload
 
 import jax
 import jax.core
@@ -47,6 +47,27 @@ from prolix.physics.constraint_projection import (
   project_momenta,
   project_positions,
   unpack_constraints,
+)
+from prolix.physics.fltflt_pallas import (
+  FltFlt,
+  fadd_rn,
+  ff_add,
+  ff_add_f32,
+  ff_from_f32,
+  ff_from_float64,
+  ff_min_image_f32,
+  ff_mod_f32,
+  ff_mul,
+  ff_mul_f32,
+  ff_sub,
+  ff_to_f32,
+  ff_to_float64,
+  ff_where,
+  fltflt_triton_asm_context,
+  fmul_rn,
+  fneg_f32,
+  fsub_rn,
+  two_prod_fma,
 )
 from prolix.tiling.axis_dispatch import dispatch_n_waters
 from prolix.typing import NPTState, NVTLangevinState, WaterIndices, WaterIndicesArray
@@ -2278,6 +2299,3058 @@ def _normalize_box_batch(
   return bx_b, jnp.asarray(bx_b.reshape(B * 3), dtype=dtype)
 
 
+def _resolve_baoab_accumulator_mode(
+  f64_accumulators: bool | str = False,
+  accumulator_mode: str | None = None,
+) -> tuple[bool, bool]:
+  """Resolve ``(use_f64_accumulators, use_fltflt_accumulators)`` from args/env."""
+  mode_raw = accumulator_mode
+  if mode_raw is None and isinstance(f64_accumulators, str):
+    mode_raw = f64_accumulators
+  if mode_raw is None:
+    env_m = os.environ.get("PROLIX_BAOAB_ACCUMULATOR", "").strip().lower()
+    if env_m:
+      mode_raw = env_m
+  if mode_raw is not None:
+    m = mode_raw.strip().lower()
+    if m in ("fltflt", "float_float", "ds", "double_single"):
+      return False, True
+    if m in ("f64", "float64", "double", "true", "1"):
+      return True, False
+    if m in ("f32", "float32", "single", "false", "0", "auto"):
+      return False, False
+    msg = f"Invalid accumulator_mode={mode_raw!r}; expected 'f32'|'f64'|'fltflt'"
+    raise ValueError(msg)
+  return bool(f64_accumulators), False
+
+
+def _ff_sq(a: FltFlt) -> FltFlt:
+  """Normalized square ``a * a`` in ``FltFlt``."""
+  p = two_prod_fma(a.hi, a.hi)
+  two_hi = fadd_rn(a.hi, a.hi)
+  p_lo = fadd_rn(p.lo, fmul_rn(two_hi, a.lo))
+  s = fadd_rn(p.hi, p_lo)
+  e = fsub_rn(p_lo, fsub_rn(s, p.hi))
+  return FltFlt(s, e)
+
+
+def _settle_water_fltflt_vec3(
+  o_old: tuple[FltFlt, FltFlt, FltFlt],
+  h1_old: tuple[FltFlt, FltFlt, FltFlt],
+  h2_old: tuple[FltFlt, FltFlt, FltFlt],
+  o_new: tuple[FltFlt, FltFlt, FltFlt],
+  h1_new: tuple[FltFlt, FltFlt, FltFlt],
+  h2_new: tuple[FltFlt, FltFlt, FltFlt],
+  r_OH: float,
+  r_HH: float,
+  mass_oxygen: float,
+  mass_hydrogen: float,
+  box_xyz: tuple[Array, Array, Array] | None,
+  has_box: bool,
+) -> tuple[
+  tuple[FltFlt, FltFlt, FltFlt],
+  tuple[FltFlt, FltFlt, FltFlt],
+  tuple[FltFlt, FltFlt, FltFlt],
+]:
+  """Analytical Horn-SETTLE in ~48-bit ``rn.f32`` ``FltFlt`` pairs (zero FP64 ops)."""
+  zero = jnp.asarray(0.0, dtype=jnp.float32)
+  one = jnp.asarray(1.0, dtype=jnp.float32)
+  two = jnp.asarray(2.0, dtype=jnp.float32)
+
+  if has_box and box_xyz is not None:
+    bx, by, bz = box_xyz
+
+    def _unwrap_ff3(p_n, p_o):
+      d0 = ff_min_image_f32(ff_sub(p_n[0], p_o[0]), bx)
+      d1 = ff_min_image_f32(ff_sub(p_n[1], p_o[1]), by)
+      d2 = ff_min_image_f32(ff_sub(p_n[2], p_o[2]), bz)
+      return (ff_add(p_o[0], d0), ff_add(p_o[1], d1), ff_add(p_o[2], d2))
+
+    o_u = _unwrap_ff3(o_new, o_old)
+    h1_u = _unwrap_ff3(h1_new, h1_old)
+    h2_u = _unwrap_ff3(h2_new, h2_old)
+
+    dh1_x = ff_min_image_f32(ff_sub(h1_u[0], o_u[0]), bx)
+    dh1_y = ff_min_image_f32(ff_sub(h1_u[1], o_u[1]), by)
+    dh1_z = ff_min_image_f32(ff_sub(h1_u[2], o_u[2]), bz)
+    h1_u = (ff_add(o_u[0], dh1_x), ff_add(o_u[1], dh1_y), ff_add(o_u[2], dh1_z))
+
+    dh2_x = ff_min_image_f32(ff_sub(h2_u[0], o_u[0]), bx)
+    dh2_y = ff_min_image_f32(ff_sub(h2_u[1], o_u[1]), by)
+    dh2_z = ff_min_image_f32(ff_sub(h2_u[2], o_u[2]), bz)
+    h2_u = (ff_add(o_u[0], dh2_x), ff_add(o_u[1], dh2_y), ff_add(o_u[2], dh2_z))
+  else:
+    o_u, h1_u, h2_u = o_new, h1_new, h2_new
+
+  m_tot_f = float(mass_oxygen + 2.0 * mass_hydrogen)
+  mO_f32 = jnp.asarray(mass_oxygen, dtype=jnp.float32)
+  mH_f32 = jnp.asarray(mass_hydrogen, dtype=jnp.float32)
+
+  def _const_ff(val64: np.float64) -> FltFlt:
+    h = np.float32(val64)
+    l = np.float32(val64 - np.float64(h))
+    return FltFlt(jnp.asarray(h, dtype=jnp.float32), jnp.asarray(l, dtype=jnp.float32))
+
+  wH_ff = _const_ff(np.float64(mass_hydrogen) / np.float64(m_tot_f))
+
+  def _com_axis(oa: FltFlt, h1a: FltFlt, h2a: FltFlt) -> FltFlt:
+    rel_sum = ff_add(ff_sub(h1a, oa), ff_sub(h2a, oa))
+    return ff_add(oa, ff_mul(rel_sum, wH_ff))
+
+  com_x = _com_axis(o_u[0], h1_u[0], h2_u[0])
+  com_y = _com_axis(o_u[1], h1_u[1], h2_u[1])
+  com_z = _com_axis(o_u[2], h1_u[2], h2_u[2])
+
+  yO_x = ff_to_f32(ff_sub(o_u[0], com_x))
+  yO_y = ff_to_f32(ff_sub(o_u[1], com_y))
+  yO_z = ff_to_f32(ff_sub(o_u[2], com_z))
+  yH1_x = ff_to_f32(ff_sub(h1_u[0], com_x))
+  yH1_y = ff_to_f32(ff_sub(h1_u[1], com_y))
+  yH1_z = ff_to_f32(ff_sub(h1_u[2], com_z))
+  yH2_x = ff_to_f32(ff_sub(h2_u[0], com_x))
+  yH2_y = ff_to_f32(ff_sub(h2_u[1], com_y))
+  yH2_z = ff_to_f32(ff_sub(h2_u[2], com_z))
+
+  half_rhh = 0.5 * float(r_HH)
+  dist_oh_mid = float(np.sqrt(max(float(r_OH) * float(r_OH) - half_rhh * half_rhh, 0.0)))
+  bO_y_f64 = np.float64(2.0 * float(mass_hydrogen) * dist_oh_mid / m_tot_f)
+  bH_y_f64 = np.float64(-float(mass_oxygen) * dist_oh_mid / m_tot_f)
+  bH_x_f64 = np.float64(half_rhh)
+
+  bO_y_ff = _const_ff(bO_y_f64)
+  bH_y_ff = _const_ff(bH_y_f64)
+  bH_x_ff = _const_ff(bH_x_f64)
+
+  c_s0 = mH_f32 * jnp.asarray(float(bH_x_f64), dtype=jnp.float32)
+  sxx = c_s0 * (yH1_x - yH2_x)
+  sxy = c_s0 * (yH1_y - yH2_y)
+  sxz = c_s0 * (yH1_z - yH2_z)
+
+  c_s1_O = mO_f32 * jnp.asarray(float(bO_y_f64), dtype=jnp.float32)
+  c_s1_H = mH_f32 * jnp.asarray(float(bH_y_f64), dtype=jnp.float32)
+  syx = c_s1_O * yO_x + c_s1_H * (yH1_x + yH2_x)
+  syy = c_s1_O * yO_y + c_s1_H * (yH1_y + yH2_y)
+  syz = c_s1_O * yO_z + c_s1_H * (yH1_z + yH2_z)
+
+  p_tr = sxx * sxx + sxy * sxy + sxz * sxz + syx * syx + syy * syy + syz * syz
+  cr_x = sxy * syz - sxz * syy
+  cr_y = sxz * syx - sxx * syz
+  cr_z = sxx * syy - sxy * syx
+  c_sq = cr_x * cr_x + cr_y * cr_y + cr_z * cr_z
+  q_val = jnp.where(c_sq > zero, jnp.sqrt(jnp.where(c_sq > zero, c_sq, one)), zero)
+  lam_max_sq = jnp.maximum(p_tr + two * q_val, zero)
+  lam_max = jnp.where(
+    lam_max_sq > zero,
+    jnp.sqrt(jnp.where(lam_max_sq > zero, lam_max_sq, one)),
+    zero,
+  )
+
+  n00 = sxx + syy + lam_max
+  n01 = syz
+  n02 = zero - sxz
+  n03 = sxy - syx
+  n11 = sxx - syy + lam_max
+  n12 = sxy + syx
+  n13 = sxz
+  n22 = syy - sxx + lam_max
+  n23 = syz
+  n33 = lam_max - sxx - syy
+
+  q_denom = jnp.maximum(q_val, jnp.asarray(1e-12, dtype=jnp.float32))
+  cx = cr_x / q_denom
+  cy = cr_y / q_denom
+  cz = cr_z / q_denom
+  has_q = q_val > jnp.asarray(1e-12, dtype=jnp.float32)
+
+  def _mul_col(c0, c1, c2, c3):
+    r0 = n00 * c0 + n01 * c1 + n02 * c2 + n03 * c3
+    r1 = n01 * c0 + n11 * c1 + n12 * c2 + n13 * c3
+    r2 = n02 * c0 + n12 * c1 + n22 * c2 + n23 * c3
+    r3 = n03 * c0 + n13 * c1 + n23 * c2 + n33 * c3
+    nsq = r0 * r0 + r1 * r1 + r2 * r2 + r3 * r3
+    return r0, r1, r2, r3, nsq
+
+  col0_0, col0_1, col0_2, col0_3, nsq0 = _mul_col(
+    jnp.where(has_q, one + cz, one), jnp.where(has_q, zero - cy, zero), jnp.where(has_q, cx, zero), zero
+  )
+  col1_0, col1_1, col1_2, col1_3, nsq1 = _mul_col(
+    jnp.where(has_q, zero - cy, zero), jnp.where(has_q, one - cz, one), zero, jnp.where(has_q, cx, zero)
+  )
+  col2_0, col2_1, col2_2, col2_3, nsq2 = _mul_col(
+    jnp.where(has_q, cx, zero), zero, jnp.where(has_q, one - cz, one), jnp.where(has_q, cy, zero)
+  )
+  col3_0, col3_1, col3_2, col3_3, nsq3 = _mul_col(
+    zero, jnp.where(has_q, cx, zero), jnp.where(has_q, cy, zero), jnp.where(has_q, one + cz, one)
+  )
+
+  best_nsq = nsq0
+  qr0, qr1, qr2, qr3 = col0_0, col0_1, col0_2, col0_3
+  for nsq_i, c0_i, c1_i, c2_i, c3_i in (
+    (nsq1, col1_0, col1_1, col1_2, col1_3),
+    (nsq2, col2_0, col2_1, col2_2, col2_3),
+    (nsq3, col3_0, col3_1, col3_2, col3_3),
+  ):
+    take = nsq_i > best_nsq
+    best_nsq = jnp.where(take, nsq_i, best_nsq)
+    qr0 = jnp.where(take, c0_i, qr0)
+    qr1 = jnp.where(take, c1_i, qr1)
+    qr2 = jnp.where(take, c2_i, qr2)
+    qr3 = jnp.where(take, c3_i, qr3)
+
+  valid_q = best_nsq > jnp.asarray(1e-30, dtype=jnp.float32)
+  inv_n0 = jnp.where(valid_q, jax.lax.rsqrt(jnp.where(valid_q, best_nsq, one)), zero)
+
+  # Refine quaternion normalization to ~48-bit precision in FltFlt (zero FP64 ops)
+  qr0_ff = ff_from_f32(qr0)
+  qr1_ff = ff_from_f32(qr1)
+  qr2_ff = ff_from_f32(qr2)
+  qr3_ff = ff_from_f32(qr3)
+  nsq_ff = ff_add(ff_add(_ff_sq(qr0_ff), _ff_sq(qr1_ff)), ff_add(_ff_sq(qr2_ff), _ff_sq(qr3_ff)))
+  inv0_ff = ff_from_f32(inv_n0)
+  inv0_sq = _ff_sq(inv0_ff)
+  half_nsq_inv2 = ff_mul_f32(ff_mul(nsq_ff, inv0_sq), jnp.asarray(0.5, dtype=jnp.float32))
+  corr_ff = ff_sub(ff_from_f32(jnp.asarray(1.5, dtype=jnp.float32)), half_nsq_inv2)
+  inv_ff = ff_mul(inv0_ff, corr_ff)
+
+  z_ff = ff_from_f32(jnp.zeros_like(qr0))
+  one_ff = ff_from_f32(jnp.ones_like(qr0))
+  q0 = ff_where(valid_q, ff_mul(qr0_ff, inv_ff), one_ff)
+  q1 = ff_where(valid_q, ff_mul(qr1_ff, inv_ff), z_ff)
+  q2 = ff_where(valid_q, ff_mul(qr2_ff, inv_ff), z_ff)
+  q3 = ff_where(valid_q, ff_mul(qr3_ff, inv_ff), z_ff)
+
+  r00 = ff_sub(one_ff, ff_mul_f32(ff_add(_ff_sq(q2), _ff_sq(q3)), two))
+  r01 = ff_mul_f32(ff_sub(ff_mul(q1, q2), ff_mul(q0, q3)), two)
+  r10 = ff_mul_f32(ff_add(ff_mul(q1, q2), ff_mul(q0, q3)), two)
+  r11 = ff_sub(one_ff, ff_mul_f32(ff_add(_ff_sq(q1), _ff_sq(q3)), two))
+  r20 = ff_mul_f32(ff_sub(ff_mul(q1, q3), ff_mul(q0, q2)), two)
+  r21 = ff_mul_f32(ff_add(ff_mul(q2, q3), ff_mul(q0, q1)), two)
+
+  o_cx = ff_add(com_x, ff_mul(r01, bO_y_ff))
+  o_cy = ff_add(com_y, ff_mul(r11, bO_y_ff))
+  o_cz = ff_add(com_z, ff_mul(r21, bO_y_ff))
+
+  r01_bHy = ff_mul(r01, bH_y_ff)
+  r11_bHy = ff_mul(r11, bH_y_ff)
+  r21_bHy = ff_mul(r21, bH_y_ff)
+  r00_bHx = ff_mul(r00, bH_x_ff)
+  r10_bHx = ff_mul(r10, bH_x_ff)
+  r20_bHx = ff_mul(r20, bH_x_ff)
+
+  h1_cx = ff_add(com_x, ff_add(r00_bHx, r01_bHy))
+  h1_cy = ff_add(com_y, ff_add(r10_bHx, r11_bHy))
+  h1_cz = ff_add(com_z, ff_add(r20_bHx, r21_bHy))
+
+  h2_cx = ff_add(com_x, ff_sub(r01_bHy, r00_bHx))
+  h2_cy = ff_add(com_y, ff_sub(r11_bHy, r10_bHx))
+  h2_cz = ff_add(com_z, ff_sub(r21_bHy, r20_bHx))
+
+  if has_box and box_xyz is not None:
+    bx, by, bz = box_xyz
+    nx = jnp.rint(ff_to_f32(ff_sub(o_cx, o_new[0])) / bx)
+    ny = jnp.rint(ff_to_f32(ff_sub(o_cy, o_new[1])) / by)
+    nz = jnp.rint(ff_to_f32(ff_sub(o_cz, o_new[2])) / bz)
+    sh_x = two_prod_fma(fneg_f32(nx), bx)
+    sh_y = two_prod_fma(fneg_f32(ny), by)
+    sh_z = two_prod_fma(fneg_f32(nz), bz)
+    o_cx, o_cy, o_cz = ff_add(o_cx, sh_x), ff_add(o_cy, sh_y), ff_add(o_cz, sh_z)
+    h1_cx, h1_cy, h1_cz = ff_add(h1_cx, sh_x), ff_add(h1_cy, sh_y), ff_add(h1_cz, sh_z)
+    h2_cx, h2_cy, h2_cz = ff_add(h2_cx, sh_x), ff_add(h2_cy, sh_y), ff_add(h2_cz, sh_z)
+
+  return (o_cx, o_cy, o_cz), (h1_cx, h1_cy, h1_cz), (h2_cx, h2_cy, h2_cz)
+
+
+def _r_step_and_am_fltflt_vec3(  # noqa: PLR0913
+  r_unc_O: tuple[FltFlt, FltFlt, FltFlt],
+  r_unc_H1: tuple[FltFlt, FltFlt, FltFlt],
+  r_unc_H2: tuple[FltFlt, FltFlt, FltFlt],
+  r_con_O: tuple[FltFlt, FltFlt, FltFlt],
+  r_con_H1: tuple[FltFlt, FltFlt, FltFlt],
+  r_con_H2: tuple[FltFlt, FltFlt, FltFlt],
+  p_pre_O: tuple[FltFlt, FltFlt, FltFlt],
+  p_pre_H1: tuple[FltFlt, FltFlt, FltFlt],
+  p_pre_H2: tuple[FltFlt, FltFlt, FltFlt],
+  mO: Array,
+  mH1: Array,
+  mH2: Array,
+  half_dt_f32: Array,
+  mass_oxygen: float,
+  mass_hydrogen: float,
+  box_xyz: tuple[Array, Array, Array] | None,
+  has_box: bool,
+) -> tuple[
+  tuple[FltFlt, FltFlt, FltFlt],
+  tuple[FltFlt, FltFlt, FltFlt],
+  tuple[FltFlt, FltFlt, FltFlt],
+]:
+  """R-step + rigid angular-momentum restoration using exact ``FltFlt`` displacements."""
+  inv_hdt = jnp.asarray(1.0, dtype=jnp.float32) / jnp.maximum(
+    half_dt_f32, jnp.asarray(1e-30, dtype=jnp.float32)
+  )
+
+  def _disp_f32(rc: tuple[FltFlt, FltFlt, FltFlt], ru: tuple[FltFlt, FltFlt, FltFlt]):
+    dx = ff_sub(rc[0], ru[0])
+    dy = ff_sub(rc[1], ru[1])
+    dz = ff_sub(rc[2], ru[2])
+    if has_box and box_xyz is not None:
+      dx = ff_min_image_f32(dx, box_xyz[0])
+      dy = ff_min_image_f32(dy, box_xyz[1])
+      dz = ff_min_image_f32(dz, box_xyz[2])
+    return (ff_to_f32(dx), ff_to_f32(dy), ff_to_f32(dz))
+
+  dO = _disp_f32(r_con_O, r_unc_O)
+  dH1 = _disp_f32(r_con_H1, r_unc_H1)
+  dH2 = _disp_f32(r_con_H2, r_unc_H2)
+
+  p_r_O = (
+    ff_add_f32(p_pre_O[0], mO * dO[0] * inv_hdt),
+    ff_add_f32(p_pre_O[1], mO * dO[1] * inv_hdt),
+    ff_add_f32(p_pre_O[2], mO * dO[2] * inv_hdt),
+  )
+  p_r_H1 = (
+    ff_add_f32(p_pre_H1[0], mH1 * dH1[0] * inv_hdt),
+    ff_add_f32(p_pre_H1[1], mH1 * dH1[1] * inv_hdt),
+    ff_add_f32(p_pre_H1[2], mH1 * dH1[2] * inv_hdt),
+  )
+  p_r_H2 = (
+    ff_add_f32(p_pre_H2[0], mH2 * dH2[0] * inv_hdt),
+    ff_add_f32(p_pre_H2[1], mH2 * dH2[1] * inv_hdt),
+    ff_add_f32(p_pre_H2[2], mH2 * dH2[2] * inv_hdt),
+  )
+
+  # Translation-invariant angular-momentum correction around water COM using FltFlt relative vectors
+  m_tot_inv = jnp.asarray(1.0 / float(mass_oxygen + 2.0 * mass_hydrogen), dtype=jnp.float32)
+  mO_c = jnp.asarray(mass_oxygen, dtype=jnp.float32)
+  mH_c = jnp.asarray(mass_hydrogen, dtype=jnp.float32)
+
+  def _rel_com_ff(
+    pO_ff: tuple[FltFlt, FltFlt, FltFlt],
+    p1_ff: tuple[FltFlt, FltFlt, FltFlt],
+    p2_ff: tuple[FltFlt, FltFlt, FltFlt],
+  ):
+    u1 = _disp_f32(p1_ff, pO_ff)
+    u2 = _disp_f32(p2_ff, pO_ff)
+    cx = mH_c * (u1[0] + u2[0]) * m_tot_inv
+    cy = mH_c * (u1[1] + u2[1]) * m_tot_inv
+    cz = mH_c * (u1[2] + u2[2]) * m_tot_inv
+    z0 = jnp.zeros_like(cx)
+    return (
+      (z0 - cx, z0 - cy, z0 - cz),
+      (u1[0] - cx, u1[1] - cy, u1[2] - cz),
+      (u2[0] - cx, u2[1] - cy, u2[2] - cz),
+    )
+
+  duO, du1, du2 = _rel_com_ff(r_unc_O, r_unc_H1, r_unc_H2)
+  dcO, dc1, dc2 = _rel_com_ff(r_con_O, r_con_H1, r_con_H2)
+
+  ppO_f = (ff_to_f32(p_pre_O[0]), ff_to_f32(p_pre_O[1]), ff_to_f32(p_pre_O[2]))
+  pp1_f = (ff_to_f32(p_pre_H1[0]), ff_to_f32(p_pre_H1[1]), ff_to_f32(p_pre_H1[2]))
+  pp2_f = (ff_to_f32(p_pre_H2[0]), ff_to_f32(p_pre_H2[1]), ff_to_f32(p_pre_H2[2]))
+  prO_f = (ff_to_f32(p_r_O[0]), ff_to_f32(p_r_O[1]), ff_to_f32(p_r_O[2]))
+  pr1_f = (ff_to_f32(p_r_H1[0]), ff_to_f32(p_r_H1[1]), ff_to_f32(p_r_H1[2]))
+  pr2_f = (ff_to_f32(p_r_H2[0]), ff_to_f32(p_r_H2[1]), ff_to_f32(p_r_H2[2]))
+
+  Lt_O = _cross_vec3(duO, ppO_f)
+  Lt_1 = _cross_vec3(du1, pp1_f)
+  Lt_2 = _cross_vec3(du2, pp2_f)
+  Lc_O = _cross_vec3(dcO, prO_f)
+  Lc_1 = _cross_vec3(dc1, pr1_f)
+  Lc_2 = _cross_vec3(dc2, pr2_f)
+
+  dLx = (Lt_O[0] + Lt_1[0] + Lt_2[0]) - (Lc_O[0] + Lc_1[0] + Lc_2[0])
+  dLy = (Lt_O[1] + Lt_1[1] + Lt_2[1]) - (Lc_O[1] + Lc_1[1] + Lc_2[1])
+  dLz = (Lt_O[2] + Lt_1[2] + Lt_2[2]) - (Lc_O[2] + Lc_1[2] + Lc_2[2])
+
+  Ixx, Iyy, Izz, Ixy, Ixz, Iyz = _inertia_tensor_vec3(dcO, dc1, dc2, mO_c, mH_c, mH_c)
+  ox, oy, oz = _solve_3x3_vec3(Ixx, Iyy, Izz, Ixy, Ixz, Iyz, dLx, dLy, dLz)
+  om = (ox, oy, oz)
+  cO = _cross_vec3(om, dcO)
+  c1 = _cross_vec3(om, dc1)
+  c2 = _cross_vec3(om, dc2)
+
+  return (
+    (ff_add_f32(p_r_O[0], mO * cO[0]), ff_add_f32(p_r_O[1], mO * cO[1]), ff_add_f32(p_r_O[2], mO * cO[2])),
+    (ff_add_f32(p_r_H1[0], mH1 * c1[0]), ff_add_f32(p_r_H1[1], mH1 * c1[1]), ff_add_f32(p_r_H1[2], mH1 * c1[2])),
+    (ff_add_f32(p_r_H2[0], mH2 * c2[0]), ff_add_f32(p_r_H2[1], mH2 * c2[1]), ff_add_f32(p_r_H2[2], mH2 * c2[2])),
+  )
+
+
+def _rattle_shake_cluster_fltflt_vec3(
+  r_unc_X: tuple[FltFlt, FltFlt, FltFlt],
+  r_unc_H: list[tuple[FltFlt, FltFlt, FltFlt]],
+  ab_ref: list[tuple[Array, Array, Array]],
+  inv_mX: Array,
+  inv_mH: list[Array],
+  d_sq_ff: list[FltFlt],
+  v_slot: list[Array],
+  n_iters: int = 10,
+) -> tuple[tuple[FltFlt, FltFlt, FltFlt], list[tuple[FltFlt, FltFlt, FltFlt]]]:
+  """Coupled star-cluster SHAKE in ~48-bit ``rn.f32`` ``FltFlt`` (zero FP64 ops)."""
+  zero = jnp.asarray(0.0, dtype=jnp.float32)
+  two = jnp.asarray(2.0, dtype=jnp.float32)
+  eps = jnp.asarray(1e-12, dtype=jnp.float32)
+  z_vec = r_unc_X[0].hi - r_unc_X[0].hi
+  z_ff = FltFlt(z_vec, z_vec)
+
+  ab_u = [
+    (
+      ff_sub(r_unc_H[k][0], r_unc_X[0]),
+      ff_sub(r_unc_H[k][1], r_unc_X[1]),
+      ff_sub(r_unc_H[k][2], r_unc_X[2]),
+    )
+    for k in range(4)
+  ]
+
+  def ff_sub_f32_local(a_ff: FltFlt, b_f32: Array) -> FltFlt:
+    return ff_add_f32(a_ff, fneg_f32(b_f32))
+
+  def _shake_iter(_i, carry):
+    dxX_x, dxX_y, dxX_z, dxH_t = carry
+    dxH_next = list(dxH_t)
+    for k in range(4):
+      vk = v_slot[k]
+      ab_x = ff_sub(ff_add(ab_u[k][0], dxH_next[k][0]), dxX_x)
+      ab_y = ff_sub(ff_add(ab_u[k][1], dxH_next[k][1]), dxX_y)
+      ab_z = ff_sub(ff_add(ab_u[k][2], dxH_next[k][2]), dxX_z)
+      dist_sq = ff_add(ff_add(_ff_sq(ab_x), _ff_sq(ab_y)), _ff_sq(ab_z))
+      dot = ab_x.hi * ab_ref[k][0] + ab_y.hi * ab_ref[k][1] + ab_z.hi * ab_ref[k][2]
+      denom = two * (inv_mX + inv_mH[k]) * dot
+      ok = vk & (jnp.abs(denom) > eps)
+      err = ff_to_f32(ff_sub(d_sq_ff[k], dist_sq))
+      lam = jnp.where(ok, err / jnp.where(ok, denom, two), zero)
+      cX_k = lam * inv_mX
+      cH_k = lam * inv_mH[k]
+      dxX_x = ff_sub_f32_local(dxX_x, cX_k * ab_ref[k][0])
+      dxX_y = ff_sub_f32_local(dxX_y, cX_k * ab_ref[k][1])
+      dxX_z = ff_sub_f32_local(dxX_z, cX_k * ab_ref[k][2])
+      dxH_next[k] = (
+        ff_add_f32(dxH_next[k][0], cH_k * ab_ref[k][0]),
+        ff_add_f32(dxH_next[k][1], cH_k * ab_ref[k][1]),
+        ff_add_f32(dxH_next[k][2], cH_k * ab_ref[k][2]),
+      )
+    return (dxX_x, dxX_y, dxX_z, tuple(dxH_next))
+
+  dxX_x, dxX_y, dxX_z, dxH_out = jax.lax.fori_loop(
+    jnp.int32(0),
+    jnp.int32(n_iters),
+    _shake_iter,
+    (z_ff, z_ff, z_ff, ((z_ff, z_ff, z_ff),) * 4),
+  )
+  rX_out = (
+    ff_add(r_unc_X[0], dxX_x),
+    ff_add(r_unc_X[1], dxX_y),
+    ff_add(r_unc_X[2], dxX_z),
+  )
+  rH_out = [
+    (
+      ff_add(r_unc_H[k][0], ff_where(v_slot[k], dxH_out[k][0], z_ff)),
+      ff_add(r_unc_H[k][1], ff_where(v_slot[k], dxH_out[k][1], z_ff)),
+      ff_add(r_unc_H[k][2], ff_where(v_slot[k], dxH_out[k][2], z_ff)),
+    )
+    for k in range(4)
+  ]
+  return rX_out, rH_out
+
+
+def _settle_vel_and_am_fltflt_vec3(
+  pO: tuple[FltFlt, FltFlt, FltFlt],
+  pH1: tuple[FltFlt, FltFlt, FltFlt],
+  pH2: tuple[FltFlt, FltFlt, FltFlt],
+  rO: tuple[FltFlt, FltFlt, FltFlt],
+  rH1: tuple[FltFlt, FltFlt, FltFlt],
+  rH2: tuple[FltFlt, FltFlt, FltFlt],
+  mO_state: Array,
+  mH1_state: Array,
+  mH2_state: Array,
+  mass_oxygen: float,
+  mass_hydrogen: float,
+  valid_w: Array,
+) -> tuple[tuple[FltFlt, FltFlt, FltFlt], tuple[FltFlt, FltFlt, FltFlt], tuple[FltFlt, FltFlt, FltFlt]]:
+  """Translation-invariant ``FltFlt`` wrapper for SETTLE velocity + AM impulse removal."""
+  z_f32 = jnp.zeros_like(rO[0].hi)
+  rO_rel = (z_f32, z_f32, z_f32)
+  rH1_rel = (
+    ff_to_f32(ff_sub(rH1[0], rO[0])),
+    ff_to_f32(ff_sub(rH1[1], rO[1])),
+    ff_to_f32(ff_sub(rH1[2], rO[2])),
+  )
+  rH2_rel = (
+    ff_to_f32(ff_sub(rH2[0], rO[0])),
+    ff_to_f32(ff_sub(rH2[1], rO[1])),
+    ff_to_f32(ff_sub(rH2[2], rO[2])),
+  )
+  pO_f32 = (ff_to_f32(pO[0]), ff_to_f32(pO[1]), ff_to_f32(pO[2]))
+  pH1_f32 = (ff_to_f32(pH1[0]), ff_to_f32(pH1[1]), ff_to_f32(pH1[2]))
+  pH2_f32 = (ff_to_f32(pH2[0]), ff_to_f32(pH2[1]), ff_to_f32(pH2[2]))
+  pO_p, pH1_p, pH2_p = _settle_vel_and_am_vec3(
+    pO_f32,
+    pH1_f32,
+    pH2_f32,
+    rO_rel,
+    rH1_rel,
+    rH2_rel,
+    mO_state,
+    mH1_state,
+    mH2_state,
+    mass_oxygen,
+    mass_hydrogen,
+    valid_w,
+    use_f32_math=True,
+  )
+  return (
+    (
+      ff_add_f32(pO[0], pO_p[0] - pO_f32[0]),
+      ff_add_f32(pO[1], pO_p[1] - pO_f32[1]),
+      ff_add_f32(pO[2], pO_p[2] - pO_f32[2]),
+    ),
+    (
+      ff_add_f32(pH1[0], pH1_p[0] - pH1_f32[0]),
+      ff_add_f32(pH1[1], pH1_p[1] - pH1_f32[1]),
+      ff_add_f32(pH1[2], pH1_p[2] - pH1_f32[2]),
+    ),
+    (
+      ff_add_f32(pH2[0], pH2_p[0] - pH2_f32[0]),
+      ff_add_f32(pH2[1], pH2_p[1] - pH2_f32[1]),
+      ff_add_f32(pH2[2], pH2_p[2] - pH2_f32[2]),
+    ),
+  )
+
+
+def _rattle_vel_cluster_fltflt_vec3(
+  pX: tuple[FltFlt, FltFlt, FltFlt],
+  pH: list[tuple[FltFlt, FltFlt, FltFlt]],
+  ab_cur: list[tuple[Array, Array, Array]],
+  inv_mX: Array,
+  inv_mH: list[Array],
+  v_slot: list[Array],
+  n_iters: int = 8,
+) -> tuple[tuple[FltFlt, FltFlt, FltFlt], list[tuple[FltFlt, FltFlt, FltFlt]]]:
+  """Star-cluster RATTLE velocity projection preserving ``FltFlt`` momentum accumulators."""
+  pX_f32 = (ff_to_f32(pX[0]), ff_to_f32(pX[1]), ff_to_f32(pX[2]))
+  pH_f32 = [(ff_to_f32(pH[k][0]), ff_to_f32(pH[k][1]), ff_to_f32(pH[k][2])) for k in range(4)]
+  pX_p, pH_p = _rattle_vel_cluster_vec3(
+    pX_f32, pH_f32, ab_cur, inv_mX, inv_mH, v_slot, n_iters=n_iters, use_f32_math=True
+  )
+  pX_out = (
+    ff_add_f32(pX[0], pX_p[0] - pX_f32[0]),
+    ff_add_f32(pX[1], pX_p[1] - pX_f32[1]),
+    ff_add_f32(pX[2], pX_p[2] - pX_f32[2]),
+  )
+  pH_out = [
+    (
+      ff_add_f32(pH[k][0], pH_p[k][0] - pH_f32[k][0]),
+      ff_add_f32(pH[k][1], pH_p[k][1] - pH_f32[k][1]),
+      ff_add_f32(pH[k][2], pH_p[k][2] - pH_f32[k][2]),
+    )
+    for k in range(4)
+  ]
+  return pX_out, pH_out
+
+
+def _split_state_to_fltflt_soa(
+  arr_b: Array,
+  arr_lo_b: Array | None,
+  B: int,
+  N: int,
+) -> tuple[Array, Array, Array, Array, Array, Array]:
+  """Split ``(B, N, 3)`` ``float64`` or ``(float32, float32_lo)`` state into flat ``float32`` SoA."""
+  if arr_b.dtype == jnp.float64:
+    ff = ff_from_float64(arr_b)
+    hi_b, lo_b = ff.hi, ff.lo
+  else:
+    hi_b = jnp.asarray(arr_b, dtype=jnp.float32)
+    lo_b = (
+      jnp.zeros_like(hi_b)
+      if arr_lo_b is None
+      else jnp.broadcast_to(jnp.asarray(arr_lo_b, dtype=jnp.float32), hi_b.shape)
+    )
+  return (
+    hi_b[:, :, 0].reshape(B * N),
+    hi_b[:, :, 1].reshape(B * N),
+    hi_b[:, :, 2].reshape(B * N),
+    lo_b[:, :, 0].reshape(B * N),
+    lo_b[:, :, 1].reshape(B * N),
+    lo_b[:, :, 2].reshape(B * N),
+  )
+
+
+def _split_1d_to_fltflt(arr_flat: Array, lo_flat: Array | None = None) -> tuple[Array, Array]:
+  """Split flat ``float64`` or ``float32`` vector into ``(hi_f32, lo_f32)``."""
+  if arr_flat.dtype == jnp.float64:
+    ff = ff_from_float64(arr_flat)
+    return ff.hi, ff.lo
+  hi = jnp.asarray(arr_flat, dtype=jnp.float32)
+  lo = jnp.zeros_like(hi) if lo_flat is None else jnp.asarray(lo_flat, dtype=jnp.float32)
+  return hi, lo
+
+
+def _pure_jax_baoab_pre_force_fltflt(  # noqa: PLR0913
+  B: int,
+  N: int,
+  W: int,
+  C: int,
+  N_pad: int,
+  n_blk_a: int,
+  n_blk_w: int,
+  n_blk_c: int,
+  px_hi: Array,
+  py_hi: Array,
+  pz_hi: Array,
+  px_lo: Array,
+  py_lo: Array,
+  pz_lo: Array,
+  mx_hi: Array,
+  my_hi: Array,
+  mz_hi: Array,
+  mx_lo: Array,
+  my_lo: Array,
+  mz_lo: Array,
+  fx_f32: Array,
+  fy_f32: Array,
+  fz_f32: Array,
+  m_f32: Array,
+  seed_flat: Array,
+  is_water_flat: Array,
+  wO_in: Array,
+  wH1_in: Array,
+  wH2_in: Array,
+  wm_in: Array,
+  bx_flat: Array,
+  dt_b: Array,
+  kT_b: Array,
+  gamma_f: float,
+  r_OH_f: float,
+  r_HH_f: float,
+  mO_f: float,
+  mH_f: float,
+  has_box: bool,
+  project_ou_momentum_rigid: bool,
+  fuse_prev_post: bool,
+  has_rattle: bool,
+  cX_in: Array | None,
+  cH0_in: Array | None,
+  cH1_in: Array | None,
+  cH2_in: Array | None,
+  cH3_in: Array | None,
+  cD0_hi: Array | None,
+  cD1_hi: Array | None,
+  cD2_hi: Array | None,
+  cD3_hi: Array | None,
+  cD0_lo: Array | None,
+  cD1_lo: Array | None,
+  cD2_lo: Array | None,
+  cD3_lo: Array | None,
+  cM_in: Array | None,
+  has_morton: bool,
+  inv_perm_in: Array | None,
+) -> tuple[Array, ...]:
+  """Vectorized pure-JAX ``FltFlt`` BAOAB pre-force step for CPU ``interpret`` & StableHLO export."""
+  with fltflt_triton_asm_context(False):
+    zero = jnp.asarray(0.0, dtype=jnp.float32)
+    one = jnp.asarray(1.0, dtype=jnp.float32)
+    half = jnp.asarray(0.5, dtype=jnp.float32)
+
+    s0_b = seed_flat[0::2]
+    s1_b = seed_flat[1::2]
+    bx_3 = bx_flat.reshape(B, 3)
+
+    b_a = jnp.repeat(jnp.arange(B, dtype=jnp.int32), N)
+    offs_a = jnp.tile(jnp.arange(N, dtype=jnp.int32), B)
+    dt_a = dt_b[b_a]
+    kT_a = kT_b[b_a]
+    half_dt_a = half * dt_a
+    c1_a = jnp.exp(jnp.asarray(-gamma_f, dtype=jnp.float32) * dt_a)
+    c2_a = jnp.sqrt(jnp.maximum(one - c1_a * c1_a, zero))
+    s0_a = s0_b[b_a]
+    s1_a = s1_b[b_a]
+
+    def _wrap_ff(
+      rx_v: FltFlt,
+      ry_v: FltFlt,
+      rz_v: FltFlt,
+      box_v: tuple[Array, Array, Array] | None,
+    ) -> tuple[FltFlt, FltFlt, FltFlt]:
+      if has_box and box_v is not None:
+        return (
+          ff_mod_f32(rx_v, box_v[0]),
+          ff_mod_f32(ry_v, box_v[1]),
+          ff_mod_f32(rz_v, box_v[2]),
+        )
+      return (rx_v, ry_v, rz_v)
+
+    def _f_slot_global(b_idx: Array, local_idx: Array) -> Array:
+      if has_morton and inv_perm_in is not None:
+        m_idx = inv_perm_in[b_idx * N + local_idx]
+        return (b_idx * N_pad + jnp.clip(m_idx, 0, max(N_pad - 1, 0))).astype(jnp.int32)
+      return (b_idx * N + local_idx).astype(jnp.int32)
+
+    px_ho, py_ho, pz_ho = px_hi, py_hi, pz_hi
+    px_lo_o, py_lo_o, pz_lo_o = px_lo, py_lo, pz_lo
+    mx_ho, my_ho, mz_ho = mx_hi, my_hi, mz_hi
+    mx_lo_o, my_lo_o, mz_lo_o = mx_lo, my_lo, mz_lo
+
+    if n_blk_a > 0 and N > 0:
+      valid_s = (offs_a < (n_blk_a * _SETTLE_ATOM_BLOCK)) & (is_water_flat == 0)
+      box_a = (bx_3[b_a, 0], bx_3[b_a, 1], bx_3[b_a, 2]) if has_box else None
+      fa_s = _f_slot_global(b_a, offs_a)
+      fx_s, fy_s, fz_s = fx_f32[fa_s], fy_f32[fa_s], fz_f32[fa_s]
+      nsx, nsy = _philox2x32_box_muller_pair(
+        s0_a, s1_a, offs_a, offs_a + jnp.int32(0x10000001), jnp.float32
+      )
+      nsz, _ = _philox2x32_box_muller_pair(
+        s0_a, s1_a, offs_a, offs_a + jnp.int32(0x20000002), jnp.float32
+      )
+      inv_m_s = one / jnp.maximum(m_f32, jnp.asarray(1e-30, dtype=jnp.float32))
+      kick_dt_s = dt_a if fuse_prev_post else half_dt_a
+      px1 = ff_add(FltFlt(mx_hi, mx_lo), two_prod_fma(kick_dt_s, fx_s))
+      py1 = ff_add(FltFlt(my_hi, my_lo), two_prod_fma(kick_dt_s, fy_s))
+      pz1 = ff_add(FltFlt(mz_hi, mz_lo), two_prod_fma(kick_dt_s, fz_s))
+      dt_im_s = half_dt_a * inv_m_s
+      rx1, ry1, rz1 = _wrap_ff(
+        ff_add(FltFlt(px_hi, px_lo), ff_mul_f32(px1, dt_im_s)),
+        ff_add(FltFlt(py_hi, py_lo), ff_mul_f32(py1, dt_im_s)),
+        ff_add(FltFlt(pz_hi, pz_lo), ff_mul_f32(pz1, dt_im_s)),
+        box_a,
+      )
+      if gamma_f == 0.0:
+        px_os, py_os, pz_os = px1, py1, pz1
+      else:
+        nsc_s = c2_a * jnp.sqrt(jnp.maximum(m_f32 * kT_a, zero))
+        px_os = ff_add_f32(ff_mul_f32(px1, c1_a), nsc_s * nsx)
+        py_os = ff_add_f32(ff_mul_f32(py1, c1_a), nsc_s * nsy)
+        pz_os = ff_add_f32(ff_mul_f32(pz1, c1_a), nsc_s * nsz)
+      rx2, ry2, rz2 = _wrap_ff(
+        ff_add(rx1, ff_mul_f32(px_os, dt_im_s)),
+        ff_add(ry1, ff_mul_f32(py_os, dt_im_s)),
+        ff_add(rz1, ff_mul_f32(pz_os, dt_im_s)),
+        box_a,
+      )
+      px_ho = jnp.where(valid_s, rx2.hi, px_ho)
+      py_ho = jnp.where(valid_s, ry2.hi, py_ho)
+      pz_ho = jnp.where(valid_s, rz2.hi, pz_ho)
+      px_lo_o = jnp.where(valid_s, rx2.lo, px_lo_o)
+      py_lo_o = jnp.where(valid_s, ry2.lo, py_lo_o)
+      pz_lo_o = jnp.where(valid_s, rz2.lo, pz_lo_o)
+      mx_ho = jnp.where(valid_s, px_os.hi, mx_ho)
+      my_ho = jnp.where(valid_s, py_os.hi, my_ho)
+      mz_ho = jnp.where(valid_s, pz_os.hi, mz_ho)
+      mx_lo_o = jnp.where(valid_s, px_os.lo, mx_lo_o)
+      my_lo_o = jnp.where(valid_s, py_os.lo, my_lo_o)
+      mz_lo_o = jnp.where(valid_s, pz_os.lo, mz_lo_o)
+
+    scratch_idx = jnp.int32(B * N)
+
+    def _scatter_pos_mom(
+      dest_idx: Array,
+      rv: tuple[FltFlt, FltFlt, FltFlt],
+      pv: tuple[FltFlt, FltFlt, FltFlt],
+      bufs: tuple[Array, ...],
+    ) -> tuple[Array, ...]:
+      d32 = dest_idx.astype(jnp.int32)
+      return (
+        bufs[0].at[d32].set(rv[0].hi),
+        bufs[1].at[d32].set(rv[1].hi),
+        bufs[2].at[d32].set(rv[2].hi),
+        bufs[3].at[d32].set(rv[0].lo),
+        bufs[4].at[d32].set(rv[1].lo),
+        bufs[5].at[d32].set(rv[2].lo),
+        bufs[6].at[d32].set(pv[0].hi),
+        bufs[7].at[d32].set(pv[1].hi),
+        bufs[8].at[d32].set(pv[2].hi),
+        bufs[9].at[d32].set(pv[0].lo),
+        bufs[10].at[d32].set(pv[1].lo),
+        bufs[11].at[d32].set(pv[2].lo),
+      )
+
+    padded_bufs: tuple[Array, ...] = tuple(
+      jnp.pad(arr, (0, 1))
+      for arr in (
+        px_ho, py_ho, pz_ho, px_lo_o, py_lo_o, pz_lo_o,
+        mx_ho, my_ho, mz_ho, mx_lo_o, my_lo_o, mz_lo_o,
+      )
+    )
+
+    if W > 0 and n_blk_w > 0:
+      b_w = jnp.repeat(jnp.arange(B, dtype=jnp.int32), W)
+      offs_w = jnp.tile(jnp.arange(W, dtype=jnp.int32), B)
+      valid_w = (offs_w < (n_blk_w * _SETTLE_WATER_BLOCK)) & (wm_in[: B * W] > 0)
+      sO = jnp.where(valid_w, jnp.clip(wO_in[: B * W], 0, max(N - 1, 0)), 0)
+      sH1 = jnp.where(valid_w, jnp.clip(wH1_in[: B * W], 0, max(N - 1, 0)), 0)
+      sH2 = jnp.where(valid_w, jnp.clip(wH2_in[: B * W], 0, max(N - 1, 0)), 0)
+      gO, gH1, gH2 = b_w * N + sO, b_w * N + sH1, b_w * N + sH2
+
+      def _ld_pm(g_idx: Array):
+        return (
+          (FltFlt(px_hi[g_idx], px_lo[g_idx]), FltFlt(py_hi[g_idx], py_lo[g_idx]), FltFlt(pz_hi[g_idx], pz_lo[g_idx])),
+          (FltFlt(mx_hi[g_idx], mx_lo[g_idx]), FltFlt(my_hi[g_idx], my_lo[g_idx]), FltFlt(mz_hi[g_idx], mz_lo[g_idx])),
+        )
+
+      r0_O, p0_O = _ld_pm(gO)
+      r0_H1, p0_H1 = _ld_pm(gH1)
+      r0_H2, p0_H2 = _ld_pm(gH2)
+      fa_O, fa_H1, fa_H2 = _f_slot_global(b_w, sO), _f_slot_global(b_w, sH1), _f_slot_global(b_w, sH2)
+      f0_O = (fx_f32[fa_O], fy_f32[fa_O], fz_f32[fa_O])
+      f0_H1 = (fx_f32[fa_H1], fy_f32[fa_H1], fz_f32[fa_H1])
+      f0_H2 = (fx_f32[fa_H2], fy_f32[fa_H2], fz_f32[fa_H2])
+      mO_s, mH1_s, mH2_s = m_f32[gO], m_f32[gH1], m_f32[gH2]
+      inv_mO = one / jnp.maximum(mO_s, jnp.asarray(1e-30, dtype=jnp.float32))
+      inv_mH1 = one / jnp.maximum(mH1_s, jnp.asarray(1e-30, dtype=jnp.float32))
+      inv_mH2 = one / jnp.maximum(mH2_s, jnp.asarray(1e-30, dtype=jnp.float32))
+
+      dt_w = dt_b[b_w]
+      kT_w = kT_b[b_w]
+      half_dt_w = half * dt_w
+      c1_w = jnp.exp(jnp.asarray(-gamma_f, dtype=jnp.float32) * dt_w)
+      c2_w = jnp.sqrt(jnp.maximum(one - c1_w * c1_w, zero))
+      s0_w, s1_w = s0_b[b_w], s1_b[b_w]
+      box_w = (bx_3[b_w, 0], bx_3[b_w, 1], bx_3[b_w, 2]) if has_box else None
+
+      if fuse_prev_post:
+        p_b2_O = (
+          ff_add(p0_O[0], two_prod_fma(half_dt_w, f0_O[0])),
+          ff_add(p0_O[1], two_prod_fma(half_dt_w, f0_O[1])),
+          ff_add(p0_O[2], two_prod_fma(half_dt_w, f0_O[2])),
+        )
+        p_b2_H1 = (
+          ff_add(p0_H1[0], two_prod_fma(half_dt_w, f0_H1[0])),
+          ff_add(p0_H1[1], two_prod_fma(half_dt_w, f0_H1[1])),
+          ff_add(p0_H1[2], two_prod_fma(half_dt_w, f0_H1[2])),
+        )
+        p_b2_H2 = (
+          ff_add(p0_H2[0], two_prod_fma(half_dt_w, f0_H2[0])),
+          ff_add(p0_H2[1], two_prod_fma(half_dt_w, f0_H2[1])),
+          ff_add(p0_H2[2], two_prod_fma(half_dt_w, f0_H2[2])),
+        )
+        p0_O, p0_H1, p0_H2 = _settle_vel_and_am_fltflt_vec3(
+          p_b2_O, p_b2_H1, p_b2_H2, r0_O, r0_H1, r0_H2, mO_s, mH1_s, mH2_s, mO_f, mH_f, valid_w
+        )
+
+      p_pre1_O = (
+        ff_add(p0_O[0], two_prod_fma(half_dt_w, f0_O[0])),
+        ff_add(p0_O[1], two_prod_fma(half_dt_w, f0_O[1])),
+        ff_add(p0_O[2], two_prod_fma(half_dt_w, f0_O[2])),
+      )
+      p_pre1_H1 = (
+        ff_add(p0_H1[0], two_prod_fma(half_dt_w, f0_H1[0])),
+        ff_add(p0_H1[1], two_prod_fma(half_dt_w, f0_H1[1])),
+        ff_add(p0_H1[2], two_prod_fma(half_dt_w, f0_H1[2])),
+      )
+      p_pre1_H2 = (
+        ff_add(p0_H2[0], two_prod_fma(half_dt_w, f0_H2[0])),
+        ff_add(p0_H2[1], two_prod_fma(half_dt_w, f0_H2[1])),
+        ff_add(p0_H2[2], two_prod_fma(half_dt_w, f0_H2[2])),
+      )
+      dt_imO, dt_imH1, dt_imH2 = half_dt_w * inv_mO, half_dt_w * inv_mH1, half_dt_w * inv_mH2
+      r_unc1_O = _wrap_ff(
+        ff_add(r0_O[0], ff_mul_f32(p_pre1_O[0], dt_imO)),
+        ff_add(r0_O[1], ff_mul_f32(p_pre1_O[1], dt_imO)),
+        ff_add(r0_O[2], ff_mul_f32(p_pre1_O[2], dt_imO)),
+        box_w,
+      )
+      r_unc1_H1 = _wrap_ff(
+        ff_add(r0_H1[0], ff_mul_f32(p_pre1_H1[0], dt_imH1)),
+        ff_add(r0_H1[1], ff_mul_f32(p_pre1_H1[1], dt_imH1)),
+        ff_add(r0_H1[2], ff_mul_f32(p_pre1_H1[2], dt_imH1)),
+        box_w,
+      )
+      r_unc1_H2 = _wrap_ff(
+        ff_add(r0_H2[0], ff_mul_f32(p_pre1_H2[0], dt_imH2)),
+        ff_add(r0_H2[1], ff_mul_f32(p_pre1_H2[1], dt_imH2)),
+        ff_add(r0_H2[2], ff_mul_f32(p_pre1_H2[2], dt_imH2)),
+        box_w,
+      )
+      r_con1_O, r_con1_H1, r_con1_H2 = _settle_water_fltflt_vec3(
+        r0_O, r0_H1, r0_H2, r_unc1_O, r_unc1_H1, r_unc1_H2,
+        r_OH_f, r_HH_f, mO_f, mH_f, box_w, has_box,
+      )
+      p_mid_O, p_mid_H1, p_mid_H2 = _r_step_and_am_fltflt_vec3(
+        r_unc1_O, r_unc1_H1, r_unc1_H2, r_con1_O, r_con1_H1, r_con1_H2,
+        p_pre1_O, p_pre1_H1, p_pre1_H2, mO_s, mH1_s, mH2_s,
+        half_dt_w, mO_f, mH_f, box_w, has_box,
+      )
+      if project_ou_momentum_rigid:
+        z0, z1 = _philox2x32_box_muller_pair(s0_w, s1_w, offs_w, offs_w + jnp.int32(0x30000001), jnp.float32)
+        z2, z3 = _philox2x32_box_muller_pair(s0_w, s1_w, offs_w, offs_w + jnp.int32(0x40000002), jnp.float32)
+        z4, z5 = _philox2x32_box_muller_pair(s0_w, s1_w, offs_w, offs_w + jnp.int32(0x50000003), jnp.float32)
+        z_rel = jnp.zeros_like(r_con1_O[0].hi)
+        rO_rel = (z_rel, z_rel, z_rel)
+        rH1_rel = (
+          ff_to_f32(ff_sub(r_con1_H1[0], r_con1_O[0])),
+          ff_to_f32(ff_sub(r_con1_H1[1], r_con1_O[1])),
+          ff_to_f32(ff_sub(r_con1_H1[2], r_con1_O[2])),
+        )
+        rH2_rel = (
+          ff_to_f32(ff_sub(r_con1_H2[0], r_con1_O[0])),
+          ff_to_f32(ff_sub(r_con1_H2[1], r_con1_O[1])),
+          ff_to_f32(ff_sub(r_con1_H2[2], r_con1_O[2])),
+        )
+        p_mid_O_f = (ff_to_f32(p_mid_O[0]), ff_to_f32(p_mid_O[1]), ff_to_f32(p_mid_O[2]))
+        p_mid_H1_f = (ff_to_f32(p_mid_H1[0]), ff_to_f32(p_mid_H1[1]), ff_to_f32(p_mid_H1[2]))
+        p_mid_H2_f = (ff_to_f32(p_mid_H2[0]), ff_to_f32(p_mid_H2[1]), ff_to_f32(p_mid_H2[2]))
+        po_O, po_H1, po_H2 = _water_o_step_vec3(
+          p_mid_O_f, p_mid_H1_f, p_mid_H2_f, rO_rel, rH1_rel, rH2_rel,
+          mO_s, mH1_s, mH2_s, z0, z1, z2, z3, z4, z5, c1_w, c2_w, kT_w,
+          use_f32_math=True,
+        )
+        if gamma_f == 0.0:
+          p_pre2_O = (
+            ff_add_f32(p_mid_O[0], po_O[0] - p_mid_O_f[0]),
+            ff_add_f32(p_mid_O[1], po_O[1] - p_mid_O_f[1]),
+            ff_add_f32(p_mid_O[2], po_O[2] - p_mid_O_f[2]),
+          )
+          p_pre2_H1 = (
+            ff_add_f32(p_mid_H1[0], po_H1[0] - p_mid_H1_f[0]),
+            ff_add_f32(p_mid_H1[1], po_H1[1] - p_mid_H1_f[1]),
+            ff_add_f32(p_mid_H1[2], po_H1[2] - p_mid_H1_f[2]),
+          )
+          p_pre2_H2 = (
+            ff_add_f32(p_mid_H2[0], po_H2[0] - p_mid_H2_f[0]),
+            ff_add_f32(p_mid_H2[1], po_H2[1] - p_mid_H2_f[1]),
+            ff_add_f32(p_mid_H2[2], po_H2[2] - p_mid_H2_f[2]),
+          )
+        else:
+          p_pre2_O = (ff_from_f32(po_O[0]), ff_from_f32(po_O[1]), ff_from_f32(po_O[2]))
+          p_pre2_H1 = (ff_from_f32(po_H1[0]), ff_from_f32(po_H1[1]), ff_from_f32(po_H1[2]))
+          p_pre2_H2 = (ff_from_f32(po_H2[0]), ff_from_f32(po_H2[1]), ff_from_f32(po_H2[2]))
+      else:
+        nsOx, nsOy = _philox2x32_box_muller_pair(s0_w, s1_w, sO, sO + jnp.int32(0x10000001), jnp.float32)
+        nsOz, _ = _philox2x32_box_muller_pair(s0_w, s1_w, sO, sO + jnp.int32(0x20000002), jnp.float32)
+        nsH1x, nsH1y = _philox2x32_box_muller_pair(s0_w, s1_w, sH1, sH1 + jnp.int32(0x10000001), jnp.float32)
+        nsH1z, _ = _philox2x32_box_muller_pair(s0_w, s1_w, sH1, sH1 + jnp.int32(0x20000002), jnp.float32)
+        nsH2x, nsH2y = _philox2x32_box_muller_pair(s0_w, s1_w, sH2, sH2 + jnp.int32(0x10000001), jnp.float32)
+        nsH2z, _ = _philox2x32_box_muller_pair(s0_w, s1_w, sH2, sH2 + jnp.int32(0x20000002), jnp.float32)
+        scO = c2_w * jnp.sqrt(jnp.maximum(mO_s * kT_w, zero))
+        scH1 = c2_w * jnp.sqrt(jnp.maximum(mH1_s * kT_w, zero))
+        scH2 = c2_w * jnp.sqrt(jnp.maximum(mH2_s * kT_w, zero))
+        p_pre2_O = (
+          ff_add_f32(ff_mul_f32(p_mid_O[0], c1_w), scO * nsOx),
+          ff_add_f32(ff_mul_f32(p_mid_O[1], c1_w), scO * nsOy),
+          ff_add_f32(ff_mul_f32(p_mid_O[2], c1_w), scO * nsOz),
+        )
+        p_pre2_H1 = (
+          ff_add_f32(ff_mul_f32(p_mid_H1[0], c1_w), scH1 * nsH1x),
+          ff_add_f32(ff_mul_f32(p_mid_H1[1], c1_w), scH1 * nsH1y),
+          ff_add_f32(ff_mul_f32(p_mid_H1[2], c1_w), scH1 * nsH1z),
+        )
+        p_pre2_H2 = (
+          ff_add_f32(ff_mul_f32(p_mid_H2[0], c1_w), scH2 * nsH2x),
+          ff_add_f32(ff_mul_f32(p_mid_H2[1], c1_w), scH2 * nsH2y),
+          ff_add_f32(ff_mul_f32(p_mid_H2[2], c1_w), scH2 * nsH2z),
+        )
+
+      r_unc2_O = _wrap_ff(
+        ff_add(r_con1_O[0], ff_mul_f32(p_pre2_O[0], dt_imO)),
+        ff_add(r_con1_O[1], ff_mul_f32(p_pre2_O[1], dt_imO)),
+        ff_add(r_con1_O[2], ff_mul_f32(p_pre2_O[2], dt_imO)),
+        box_w,
+      )
+      r_unc2_H1 = _wrap_ff(
+        ff_add(r_con1_H1[0], ff_mul_f32(p_pre2_H1[0], dt_imH1)),
+        ff_add(r_con1_H1[1], ff_mul_f32(p_pre2_H1[1], dt_imH1)),
+        ff_add(r_con1_H1[2], ff_mul_f32(p_pre2_H1[2], dt_imH1)),
+        box_w,
+      )
+      r_unc2_H2 = _wrap_ff(
+        ff_add(r_con1_H2[0], ff_mul_f32(p_pre2_H2[0], dt_imH2)),
+        ff_add(r_con1_H2[1], ff_mul_f32(p_pre2_H2[1], dt_imH2)),
+        ff_add(r_con1_H2[2], ff_mul_f32(p_pre2_H2[2], dt_imH2)),
+        box_w,
+      )
+      r_con2_O, r_con2_H1, r_con2_H2 = _settle_water_fltflt_vec3(
+        r_con1_O, r_con1_H1, r_con1_H2, r_unc2_O, r_unc2_H1, r_unc2_H2,
+        r_OH_f, r_HH_f, mO_f, mH_f, box_w, has_box,
+      )
+      p_fin_O, p_fin_H1, p_fin_H2 = _r_step_and_am_fltflt_vec3(
+        r_unc2_O, r_unc2_H1, r_unc2_H2, r_con2_O, r_con2_H1, r_con2_H2,
+        p_pre2_O, p_pre2_H1, p_pre2_H2, mO_s, mH1_s, mH2_s,
+        half_dt_w, mO_f, mH_f, box_w, has_box,
+      )
+      for g_idx, rv_w, pv_w in (
+        (gO, r_con2_O, p_fin_O),
+        (gH1, r_con2_H1, p_fin_H1),
+        (gH2, r_con2_H2, p_fin_H2),
+      ):
+        padded_bufs = _scatter_pos_mom(jnp.where(valid_w, g_idx, scratch_idx), rv_w, pv_w, padded_bufs)
+
+    if (
+      has_rattle
+      and C > 0
+      and n_blk_c > 0
+      and cX_in is not None
+      and cH0_in is not None
+      and cH1_in is not None
+      and cH2_in is not None
+      and cH3_in is not None
+      and cD0_hi is not None
+      and cD1_hi is not None
+      and cD2_hi is not None
+      and cD3_hi is not None
+      and cD0_lo is not None
+      and cD1_lo is not None
+      and cD2_lo is not None
+      and cD3_lo is not None
+      and cM_in is not None
+    ):
+      b_c = jnp.repeat(jnp.arange(B, dtype=jnp.int32), C)
+      offs_c = jnp.tile(jnp.arange(C, dtype=jnp.int32), B)
+      in_c = offs_c < (n_blk_c * _SETTLE_RATTLE_BLOCK)
+      cm_bits = cM_in[: B * C]
+      v0 = in_c & ((cm_bits & jnp.int32(1)) != 0)
+      v1 = in_c & ((cm_bits & jnp.int32(2)) != 0)
+      v2 = in_c & ((cm_bits & jnp.int32(4)) != 0)
+      v3 = in_c & ((cm_bits & jnp.int32(8)) != 0)
+      v_slots = [v0, v1, v2, v3]
+      sX = jnp.where(v0, jnp.clip(cX_in[: B * C], 0, max(N - 1, 0)), 0)
+      sH = [
+        jnp.where(v0, jnp.clip(cH0_in[: B * C], 0, max(N - 1, 0)), 0),
+        jnp.where(v1, jnp.clip(cH1_in[: B * C], 0, max(N - 1, 0)), 0),
+        jnp.where(v2, jnp.clip(cH2_in[: B * C], 0, max(N - 1, 0)), 0),
+        jnp.where(v3, jnp.clip(cH3_in[: B * C], 0, max(N - 1, 0)), 0),
+      ]
+      gX = b_c * N + sX
+      gH = [b_c * N + sH[k] for k in range(4)]
+      d_ff = [
+        FltFlt(cD0_hi[: B * C], cD0_lo[: B * C]),
+        FltFlt(cD1_hi[: B * C], cD1_lo[: B * C]),
+        FltFlt(cD2_hi[: B * C], cD2_lo[: B * C]),
+        FltFlt(cD3_hi[: B * C], cD3_lo[: B * C]),
+      ]
+      d_sq_ff = [_ff_sq(d_ff[k]) for k in range(4)]
+
+      def _ld_c_pm(g_idx: Array):
+        return (
+          (FltFlt(px_hi[g_idx], px_lo[g_idx]), FltFlt(py_hi[g_idx], py_lo[g_idx]), FltFlt(pz_hi[g_idx], pz_lo[g_idx])),
+          (FltFlt(mx_hi[g_idx], mx_lo[g_idx]), FltFlt(my_hi[g_idx], my_lo[g_idx]), FltFlt(mz_hi[g_idx], mz_lo[g_idx])),
+        )
+
+      r0_X, p0_X = _ld_c_pm(gX)
+      r0_H_raw = [_ld_c_pm(gH[k])[0] for k in range(4)]
+      p0_H = [_ld_c_pm(gH[k])[1] for k in range(4)]
+      fa_X = _f_slot_global(b_c, sX)
+      f0_X = (fx_f32[fa_X], fy_f32[fa_X], fz_f32[fa_X])
+      f0_H = [
+        (
+          fx_f32[_f_slot_global(b_c, sH[k])],
+          fy_f32[_f_slot_global(b_c, sH[k])],
+          fz_f32[_f_slot_global(b_c, sH[k])],
+        )
+        for k in range(4)
+      ]
+      mX = m_f32[gX]
+      mH = [m_f32[gH[k]] for k in range(4)]
+      inv_mX = one / jnp.maximum(mX, jnp.asarray(1e-30, dtype=jnp.float32))
+      inv_mH = [one / jnp.maximum(mH[k], jnp.asarray(1e-30, dtype=jnp.float32)) for k in range(4)]
+
+      dt_c = dt_b[b_c]
+      kT_c = kT_b[b_c]
+      half_dt_c = half * dt_c
+      inv_half_dt_c = one / jnp.maximum(half_dt_c, jnp.asarray(1e-30, dtype=jnp.float32))
+      c1_c = jnp.exp(jnp.asarray(-gamma_f, dtype=jnp.float32) * dt_c)
+      c2_c = jnp.sqrt(jnp.maximum(one - c1_c * c1_c, zero))
+      s0_c, s1_c = s0_b[b_c], s1_b[b_c]
+      box_c = (bx_3[b_c, 0], bx_3[b_c, 1], bx_3[b_c, 2]) if has_box else None
+
+      r0_H = []
+      ab0 = []
+      for k in range(4):
+        dx = ff_sub(r0_H_raw[k][0], r0_X[0])
+        dy = ff_sub(r0_H_raw[k][1], r0_X[1])
+        dz = ff_sub(r0_H_raw[k][2], r0_X[2])
+        if has_box and box_c is not None:
+          dx = ff_min_image_f32(dx, box_c[0])
+          dy = ff_min_image_f32(dy, box_c[1])
+          dz = ff_min_image_f32(dz, box_c[2])
+        ab0.append((ff_to_f32(dx), ff_to_f32(dy), ff_to_f32(dz)))
+        r0_H.append((ff_add(r0_X[0], dx), ff_add(r0_X[1], dy), ff_add(r0_X[2], dz)))
+
+      if fuse_prev_post:
+        pb2_X = (
+          ff_add(p0_X[0], two_prod_fma(half_dt_c, f0_X[0])),
+          ff_add(p0_X[1], two_prod_fma(half_dt_c, f0_X[1])),
+          ff_add(p0_X[2], two_prod_fma(half_dt_c, f0_X[2])),
+        )
+        pb2_H = [
+          (
+            ff_add(p0_H[k][0], two_prod_fma(half_dt_c, f0_H[k][0])),
+            ff_add(p0_H[k][1], two_prod_fma(half_dt_c, f0_H[k][1])),
+            ff_add(p0_H[k][2], two_prod_fma(half_dt_c, f0_H[k][2])),
+          )
+          for k in range(4)
+        ]
+        p0_X, p0_H = _rattle_vel_cluster_fltflt_vec3(
+          pb2_X, pb2_H, ab0, inv_mX, inv_mH, v_slots, n_iters=6
+        )
+
+      p1_X = (
+        ff_add(p0_X[0], two_prod_fma(half_dt_c, f0_X[0])),
+        ff_add(p0_X[1], two_prod_fma(half_dt_c, f0_X[1])),
+        ff_add(p0_X[2], two_prod_fma(half_dt_c, f0_X[2])),
+      )
+      p1_H = [
+        (
+          ff_add(p0_H[k][0], two_prod_fma(half_dt_c, f0_H[k][0])),
+          ff_add(p0_H[k][1], two_prod_fma(half_dt_c, f0_H[k][1])),
+          ff_add(p0_H[k][2], two_prod_fma(half_dt_c, f0_H[k][2])),
+        )
+        for k in range(4)
+      ]
+      dt_imX = half_dt_c * inv_mX
+      dt_imH = [half_dt_c * inv_mH[k] for k in range(4)]
+      r_unc1_X = (
+        ff_add(r0_X[0], ff_mul_f32(p1_X[0], dt_imX)),
+        ff_add(r0_X[1], ff_mul_f32(p1_X[1], dt_imX)),
+        ff_add(r0_X[2], ff_mul_f32(p1_X[2], dt_imX)),
+      )
+      r_unc1_H = [
+        (
+          ff_add(r0_H[k][0], ff_mul_f32(p1_H[k][0], dt_imH[k])),
+          ff_add(r0_H[k][1], ff_mul_f32(p1_H[k][1], dt_imH[k])),
+          ff_add(r0_H[k][2], ff_mul_f32(p1_H[k][2], dt_imH[k])),
+        )
+        for k in range(4)
+      ]
+      r_con1_X, r_con1_H = _rattle_shake_cluster_fltflt_vec3(
+        r_unc1_X, r_unc1_H, ab0, inv_mX, inv_mH, d_sq_ff, v_slots, n_iters=10
+      )
+      cX_dt = mX * inv_half_dt_c
+      p_mid_X = (
+        ff_add(p1_X[0], ff_mul_f32(ff_sub(r_con1_X[0], r_unc1_X[0]), cX_dt)),
+        ff_add(p1_X[1], ff_mul_f32(ff_sub(r_con1_X[1], r_unc1_X[1]), cX_dt)),
+        ff_add(p1_X[2], ff_mul_f32(ff_sub(r_con1_X[2], r_unc1_X[2]), cX_dt)),
+      )
+      p_mid_H = []
+      ab1 = []
+      for k in range(4):
+        cH_dt = mH[k] * inv_half_dt_c
+        p_mid_H.append(
+          (
+            ff_add(p1_H[k][0], ff_mul_f32(ff_sub(r_con1_H[k][0], r_unc1_H[k][0]), cH_dt)),
+            ff_add(p1_H[k][1], ff_mul_f32(ff_sub(r_con1_H[k][1], r_unc1_H[k][1]), cH_dt)),
+            ff_add(p1_H[k][2], ff_mul_f32(ff_sub(r_con1_H[k][2], r_unc1_H[k][2]), cH_dt)),
+          )
+        )
+        ab1.append(
+          (
+            ff_to_f32(ff_sub(r_con1_H[k][0], r_con1_X[0])),
+            ff_to_f32(ff_sub(r_con1_H[k][1], r_con1_X[1])),
+            ff_to_f32(ff_sub(r_con1_H[k][2], r_con1_X[2])),
+          )
+        )
+
+      nsXx, nsXy = _philox2x32_box_muller_pair(s0_c, s1_c, sX, sX + jnp.int32(0x10000001), jnp.float32)
+      nsXz, _ = _philox2x32_box_muller_pair(s0_c, s1_c, sX, sX + jnp.int32(0x20000002), jnp.float32)
+      scX = c2_c * jnp.sqrt(jnp.maximum(mX * kT_c, zero))
+      p_o_X = (
+        ff_add_f32(ff_mul_f32(p_mid_X[0], c1_c), scX * nsXx),
+        ff_add_f32(ff_mul_f32(p_mid_X[1], c1_c), scX * nsXy),
+        ff_add_f32(ff_mul_f32(p_mid_X[2], c1_c), scX * nsXz),
+      )
+      p_o_H = []
+      for k in range(4):
+        nsHx, nsHy = _philox2x32_box_muller_pair(
+          s0_c, s1_c, sH[k], sH[k] + jnp.int32(0x10000001), jnp.float32
+        )
+        nsHz, _ = _philox2x32_box_muller_pair(
+          s0_c, s1_c, sH[k], sH[k] + jnp.int32(0x20000002), jnp.float32
+        )
+        scH = c2_c * jnp.sqrt(jnp.maximum(mH[k] * kT_c, zero))
+        p_o_H.append(
+          (
+            ff_add_f32(ff_mul_f32(p_mid_H[k][0], c1_c), scH * nsHx),
+            ff_add_f32(ff_mul_f32(p_mid_H[k][1], c1_c), scH * nsHy),
+            ff_add_f32(ff_mul_f32(p_mid_H[k][2], c1_c), scH * nsHz),
+          )
+        )
+      p_o_X, p_o_H = _rattle_vel_cluster_fltflt_vec3(
+        p_o_X, p_o_H, ab1, inv_mX, inv_mH, v_slots, n_iters=6
+      )
+
+      r_unc2_X = (
+        ff_add(r_con1_X[0], ff_mul_f32(p_o_X[0], dt_imX)),
+        ff_add(r_con1_X[1], ff_mul_f32(p_o_X[1], dt_imX)),
+        ff_add(r_con1_X[2], ff_mul_f32(p_o_X[2], dt_imX)),
+      )
+      r_unc2_H = [
+        (
+          ff_add(r_con1_H[k][0], ff_mul_f32(p_o_H[k][0], dt_imH[k])),
+          ff_add(r_con1_H[k][1], ff_mul_f32(p_o_H[k][1], dt_imH[k])),
+          ff_add(r_con1_H[k][2], ff_mul_f32(p_o_H[k][2], dt_imH[k])),
+        )
+        for k in range(4)
+      ]
+      r_con2_X, r_con2_H = _rattle_shake_cluster_fltflt_vec3(
+        r_unc2_X, r_unc2_H, ab1, inv_mX, inv_mH, d_sq_ff, v_slots, n_iters=10
+      )
+      p_fin_X = (
+        ff_add(p_o_X[0], ff_mul_f32(ff_sub(r_con2_X[0], r_unc2_X[0]), cX_dt)),
+        ff_add(p_o_X[1], ff_mul_f32(ff_sub(r_con2_X[1], r_unc2_X[1]), cX_dt)),
+        ff_add(p_o_X[2], ff_mul_f32(ff_sub(r_con2_X[2], r_unc2_X[2]), cX_dt)),
+      )
+      p_fin_H = []
+      for k in range(4):
+        cH_dt = mH[k] * inv_half_dt_c
+        p_fin_H.append(
+          (
+            ff_add(p_o_H[k][0], ff_mul_f32(ff_sub(r_con2_H[k][0], r_unc2_H[k][0]), cH_dt)),
+            ff_add(p_o_H[k][1], ff_mul_f32(ff_sub(r_con2_H[k][1], r_unc2_H[k][1]), cH_dt)),
+            ff_add(p_o_H[k][2], ff_mul_f32(ff_sub(r_con2_H[k][2], r_unc2_H[k][2]), cH_dt)),
+          )
+        )
+      r_w_X = _wrap_ff(r_con2_X[0], r_con2_X[1], r_con2_X[2], box_c)
+      sh_x = ff_sub(r_w_X[0], r_con2_X[0])
+      sh_y = ff_sub(r_w_X[1], r_con2_X[1])
+      sh_z = ff_sub(r_w_X[2], r_con2_X[2])
+      padded_bufs = _scatter_pos_mom(jnp.where(v0, gX, scratch_idx), r_w_X, p_fin_X, padded_bufs)
+      for k in range(4):
+        r_w_Hk = (
+          ff_add(r_con2_H[k][0], sh_x),
+          ff_add(r_con2_H[k][1], sh_y),
+          ff_add(r_con2_H[k][2], sh_z),
+        )
+        padded_bufs = _scatter_pos_mom(
+          jnp.where(v_slots[k], gH[k], scratch_idx), r_w_Hk, p_fin_H[k], padded_bufs
+        )
+
+    out_12 = tuple(arr[:-1] for arr in padded_bufs)
+    if has_morton and inv_perm_in is not None:
+      m_slot = (b_a * N_pad + jnp.clip(inv_perm_in, 0, max(N_pad - 1, 0))).astype(jnp.int32)
+      is_ghost = is_water_flat == 3
+      px_f = jnp.where(is_ghost, px_hi, ff_to_f32(FltFlt(out_12[0], out_12[3])))
+      py_f = jnp.where(is_ghost, py_hi, ff_to_f32(FltFlt(out_12[1], out_12[4])))
+      pz_f = jnp.where(is_ghost, pz_hi, ff_to_f32(FltFlt(out_12[2], out_12[5])))
+      px_m = jnp.zeros((B * N_pad,), dtype=jnp.float32).at[m_slot].set(px_f)
+      py_m = jnp.zeros((B * N_pad,), dtype=jnp.float32).at[m_slot].set(py_f)
+      pz_m = jnp.zeros((B * N_pad,), dtype=jnp.float32).at[m_slot].set(pz_f)
+      return (*out_12, px_m, py_m, pz_m)
+    return out_12
+
+
+def _pure_jax_baoab_post_force_fltflt(  # noqa: PLR0913
+  B: int,
+  N: int,
+  W: int,
+  C: int,
+  n_blk_a: int,
+  n_blk_w: int,
+  n_blk_c: int,
+  px_hi: Array,
+  py_hi: Array,
+  pz_hi: Array,
+  px_lo: Array,
+  py_lo: Array,
+  pz_lo: Array,
+  mx_hi: Array,
+  my_hi: Array,
+  mz_hi: Array,
+  mx_lo: Array,
+  my_lo: Array,
+  mz_lo: Array,
+  fx_f32: Array,
+  fy_f32: Array,
+  fz_f32: Array,
+  m_f32: Array,
+  is_water_flat: Array,
+  wO_in: Array,
+  wH1_in: Array,
+  wH2_in: Array,
+  wm_in: Array,
+  dt_b: Array,
+  mO_f: float,
+  mH_f: float,
+  has_rattle: bool,
+  cX_in: Array | None,
+  cH0_in: Array | None,
+  cH1_in: Array | None,
+  cH2_in: Array | None,
+  cH3_in: Array | None,
+  cM_in: Array | None,
+) -> tuple[Array, Array, Array, Array, Array, Array]:
+  """Vectorized pure-JAX ``FltFlt`` BAOAB post-force step for CPU ``interpret`` & StableHLO export."""
+  with fltflt_triton_asm_context(False):
+    one = jnp.asarray(1.0, dtype=jnp.float32)
+    half = jnp.asarray(0.5, dtype=jnp.float32)
+
+    b_a = jnp.repeat(jnp.arange(B, dtype=jnp.int32), N)
+    offs_a = jnp.tile(jnp.arange(N, dtype=jnp.int32), B)
+    half_dt_a = half * dt_b[b_a]
+
+    mx_ho, my_ho, mz_ho = mx_hi, my_hi, mz_hi
+    mx_lo_o, my_lo_o, mz_lo_o = mx_lo, my_lo, mz_lo
+
+    if n_blk_a > 0 and N > 0:
+      valid_s = (offs_a < (n_blk_a * _SETTLE_ATOM_BLOCK)) & (is_water_flat == 0)
+      out_px = ff_add(FltFlt(mx_hi, mx_lo), two_prod_fma(half_dt_a, fx_f32))
+      out_py = ff_add(FltFlt(my_hi, my_lo), two_prod_fma(half_dt_a, fy_f32))
+      out_pz = ff_add(FltFlt(mz_hi, mz_lo), two_prod_fma(half_dt_a, fz_f32))
+      mx_ho = jnp.where(valid_s, out_px.hi, mx_ho)
+      my_ho = jnp.where(valid_s, out_py.hi, my_ho)
+      mz_ho = jnp.where(valid_s, out_pz.hi, mz_ho)
+      mx_lo_o = jnp.where(valid_s, out_px.lo, mx_lo_o)
+      my_lo_o = jnp.where(valid_s, out_py.lo, my_lo_o)
+      mz_lo_o = jnp.where(valid_s, out_pz.lo, mz_lo_o)
+
+    scratch_idx = jnp.int32(B * N)
+    m_bufs: tuple[Array, ...] = tuple(
+      jnp.pad(arr, (0, 1)) for arr in (mx_ho, my_ho, mz_ho, mx_lo_o, my_lo_o, mz_lo_o)
+    )
+
+    def _scatter_mom(
+      dest_idx: Array,
+      pv: tuple[FltFlt, FltFlt, FltFlt],
+      bufs: tuple[Array, ...],
+    ) -> tuple[Array, ...]:
+      d32 = dest_idx.astype(jnp.int32)
+      return (
+        bufs[0].at[d32].set(pv[0].hi),
+        bufs[1].at[d32].set(pv[1].hi),
+        bufs[2].at[d32].set(pv[2].hi),
+        bufs[3].at[d32].set(pv[0].lo),
+        bufs[4].at[d32].set(pv[1].lo),
+        bufs[5].at[d32].set(pv[2].lo),
+      )
+
+    if W > 0 and n_blk_w > 0:
+      b_w = jnp.repeat(jnp.arange(B, dtype=jnp.int32), W)
+      offs_w = jnp.tile(jnp.arange(W, dtype=jnp.int32), B)
+      valid_w = (offs_w < (n_blk_w * _SETTLE_WATER_BLOCK)) & (wm_in[: B * W] > 0)
+      sO = jnp.where(valid_w, jnp.clip(wO_in[: B * W], 0, max(N - 1, 0)), 0)
+      sH1 = jnp.where(valid_w, jnp.clip(wH1_in[: B * W], 0, max(N - 1, 0)), 0)
+      sH2 = jnp.where(valid_w, jnp.clip(wH2_in[: B * W], 0, max(N - 1, 0)), 0)
+      gO, gH1, gH2 = b_w * N + sO, b_w * N + sH1, b_w * N + sH2
+      half_dt_w = half * dt_b[b_w]
+
+      def _ld_w(g_idx: Array):
+        return (
+          (FltFlt(px_hi[g_idx], px_lo[g_idx]), FltFlt(py_hi[g_idx], py_lo[g_idx]), FltFlt(pz_hi[g_idx], pz_lo[g_idx])),
+          (
+            ff_add(FltFlt(mx_hi[g_idx], mx_lo[g_idx]), two_prod_fma(half_dt_w, fx_f32[g_idx])),
+            ff_add(FltFlt(my_hi[g_idx], my_lo[g_idx]), two_prod_fma(half_dt_w, fy_f32[g_idx])),
+            ff_add(FltFlt(mz_hi[g_idx], mz_lo[g_idx]), two_prod_fma(half_dt_w, fz_f32[g_idx])),
+          ),
+        )
+
+      rO, p_b2_O = _ld_w(gO)
+      rH1, p_b2_H1 = _ld_w(gH1)
+      rH2, p_b2_H2 = _ld_w(gH2)
+      p_out_O, p_out_H1, p_out_H2 = _settle_vel_and_am_fltflt_vec3(
+        p_b2_O, p_b2_H1, p_b2_H2, rO, rH1, rH2, m_f32[gO], m_f32[gH1], m_f32[gH2], mO_f, mH_f, valid_w
+      )
+      for g_idx, pv_w in ((gO, p_out_O), (gH1, p_out_H1), (gH2, p_out_H2)):
+        m_bufs = _scatter_mom(jnp.where(valid_w, g_idx, scratch_idx), pv_w, m_bufs)
+
+    if (
+      has_rattle
+      and C > 0
+      and n_blk_c > 0
+      and cX_in is not None
+      and cH0_in is not None
+      and cH1_in is not None
+      and cH2_in is not None
+      and cH3_in is not None
+      and cM_in is not None
+    ):
+      b_c = jnp.repeat(jnp.arange(B, dtype=jnp.int32), C)
+      offs_c = jnp.tile(jnp.arange(C, dtype=jnp.int32), B)
+      in_c = offs_c < (n_blk_c * _SETTLE_RATTLE_BLOCK)
+      cm_bits = cM_in[: B * C]
+      v0 = in_c & ((cm_bits & jnp.int32(1)) != 0)
+      v1 = in_c & ((cm_bits & jnp.int32(2)) != 0)
+      v2 = in_c & ((cm_bits & jnp.int32(4)) != 0)
+      v3 = in_c & ((cm_bits & jnp.int32(8)) != 0)
+      v_slots = [v0, v1, v2, v3]
+      sX = jnp.where(v0, jnp.clip(cX_in[: B * C], 0, max(N - 1, 0)), 0)
+      sH = [
+        jnp.where(v0, jnp.clip(cH0_in[: B * C], 0, max(N - 1, 0)), 0),
+        jnp.where(v1, jnp.clip(cH1_in[: B * C], 0, max(N - 1, 0)), 0),
+        jnp.where(v2, jnp.clip(cH2_in[: B * C], 0, max(N - 1, 0)), 0),
+        jnp.where(v3, jnp.clip(cH3_in[: B * C], 0, max(N - 1, 0)), 0),
+      ]
+      gX = b_c * N + sX
+      gH = [b_c * N + sH[k] for k in range(4)]
+      half_dt_c = half * dt_b[b_c]
+
+      def _ld_c(g_idx: Array):
+        return (
+          (FltFlt(px_hi[g_idx], px_lo[g_idx]), FltFlt(py_hi[g_idx], py_lo[g_idx]), FltFlt(pz_hi[g_idx], pz_lo[g_idx])),
+          (
+            ff_add(FltFlt(mx_hi[g_idx], mx_lo[g_idx]), two_prod_fma(half_dt_c, fx_f32[g_idx])),
+            ff_add(FltFlt(my_hi[g_idx], my_lo[g_idx]), two_prod_fma(half_dt_c, fy_f32[g_idx])),
+            ff_add(FltFlt(mz_hi[g_idx], mz_lo[g_idx]), two_prod_fma(half_dt_c, fz_f32[g_idx])),
+          ),
+        )
+
+      rX, p_b2_X = _ld_c(gX)
+      rH = [_ld_c(gH[k])[0] for k in range(4)]
+      p_b2_H = [_ld_c(gH[k])[1] for k in range(4)]
+      inv_mX = one / jnp.maximum(m_f32[gX], jnp.asarray(1e-30, dtype=jnp.float32))
+      inv_mH = [one / jnp.maximum(m_f32[gH[k]], jnp.asarray(1e-30, dtype=jnp.float32)) for k in range(4)]
+      ab_cur = [
+        (
+          ff_to_f32(ff_sub(rH[k][0], rX[0])),
+          ff_to_f32(ff_sub(rH[k][1], rX[1])),
+          ff_to_f32(ff_sub(rH[k][2], rX[2])),
+        )
+        for k in range(4)
+      ]
+      p_out_X, p_out_H = _rattle_vel_cluster_fltflt_vec3(
+        p_b2_X, p_b2_H, ab_cur, inv_mX, inv_mH, v_slots, n_iters=8
+      )
+      m_bufs = _scatter_mom(jnp.where(v0, gX, scratch_idx), p_out_X, m_bufs)
+      for k in range(4):
+        m_bufs = _scatter_mom(jnp.where(v_slots[k], gH[k], scratch_idx), p_out_H[k], m_bufs)
+
+    return (m_bufs[0][:-1], m_bufs[1][:-1], m_bufs[2][:-1], m_bufs[3][:-1], m_bufs[4][:-1], m_bufs[5][:-1])
+
+
+def _pallas_baoab_pre_force_fltflt_impl(  # noqa: PLR0913
+  B: int,
+  in_batched: tuple[bool, ...],
+  positions: Array,
+  momentum: Array,
+  force: Array,
+  mass: Array,
+  rng_seeds: Array,
+  water_indices: Array,
+  water_mask: Array,
+  box: Array,
+  dt_arr: Array,
+  kT_arr: Array,
+  gamma: float,
+  r_OH: float,
+  r_HH: float,
+  mass_oxygen: float,
+  mass_hydrogen: float,
+  has_box: bool,
+  project_ou_momentum_rigid: bool,
+  interpret: bool,
+  atom_mask: Array | None = None,
+  is_water_or_ghost: Array | None = None,
+  constraint_pairs: Array | None = None,
+  constraint_lengths: Array | None = None,
+  constraint_mask: Array | None = None,
+  return_pos_f32: bool = False,
+  reference_position: Array | None = None,
+  return_max_dr_sq: bool = False,
+  n_active_atoms: int | None = None,
+  n_active_waters: int | None = None,
+  fuse_prev_post: bool = False,
+  morton_inv_perm: Array | None = None,
+  morton_pad: int = 0,
+  prebuilt_soa: Any = None,
+  positions_lo: Array | None = None,
+  momentum_lo: Array | None = None,
+  return_lo_accumulators: bool = False,
+) -> tuple[Array, ...]:
+  """100% ``float32`` ``(hi, lo)`` ``FltFlt`` Pallas BAOAB pre-force kernel (zero GPU FP64 ops)."""
+  if prebuilt_soa is not None:
+    if isinstance(prebuilt_soa, tuple):
+      px_in, py_in, pz_in, mx_in, my_in, mz_in, fx_in, fy_in, fz_in, soa_plan = prebuilt_soa
+    else:
+      soa_plan = prebuilt_soa
+      px_in, py_in, pz_in = positions
+      mx_in, my_in, mz_in = momentum
+      fx_in, fy_in, fz_in = force
+    orig_dtype = soa_plan["dtype"]
+    N = int(soa_plan["N"])
+    W = int(soa_plan["W"])
+    W_eff = int(soa_plan["W_eff"])
+    C = int(soa_plan["C"])
+    C_eff = int(soa_plan["C_eff"])
+    has_rattle = bool(soa_plan["has_rattle"])
+    n_blk_a = int(soa_plan["n_blk_a"])
+    n_blk_w = int(soa_plan["n_blk_w"])
+    n_blk_c = int(soa_plan["n_blk_c"])
+    px_hi, px_lo = _split_1d_to_fltflt(px_in)
+    py_hi, py_lo = _split_1d_to_fltflt(py_in)
+    pz_hi, pz_lo = _split_1d_to_fltflt(pz_in)
+    mx_hi, mx_lo = _split_1d_to_fltflt(mx_in)
+    my_hi, my_lo = _split_1d_to_fltflt(my_in)
+    mz_hi, mz_lo = _split_1d_to_fltflt(mz_in)
+    fx_f32 = jnp.asarray(fx_in, dtype=jnp.float32)
+    fy_f32 = jnp.asarray(fy_in, dtype=jnp.float32)
+    fz_f32 = jnp.asarray(fz_in, dtype=jnp.float32)
+    m_f32 = jnp.asarray(soa_plan["m_in"], dtype=jnp.float32)
+    is_water_flat = soa_plan["is_water_flat"]
+    wO_in, wH1_in, wH2_in, wm_in = soa_plan["water_in"]
+    cX_in, cH0_in, cH1_in, cH2_in, cH3_in, cD0_raw, cD1_raw, cD2_raw, cD3_raw, cM_in = soa_plan["rattle_in"]
+    if has_rattle:
+      cD0_hi, cD0_lo = _split_1d_to_fltflt(cD0_raw)
+      cD1_hi, cD1_lo = _split_1d_to_fltflt(cD1_raw)
+      cD2_hi, cD2_lo = _split_1d_to_fltflt(cD2_raw)
+      cD3_hi, cD3_lo = _split_1d_to_fltflt(cD3_raw)
+    else:
+      cD0_hi = cD1_hi = cD2_hi = cD3_hi = None
+      cD0_lo = cD1_lo = cD2_lo = cD3_lo = None
+    seed_flat = _normalize_seed_flat(B, in_batched[4] if len(in_batched) > 4 else True, rng_seeds)
+    bx_b, bx_flat = _normalize_box_batch(B, in_batched[7] if len(in_batched) > 7 else True, box, jnp.float32)
+    dt_b = jnp.broadcast_to(jnp.asarray(dt_arr, dtype=jnp.float32).reshape(-1), (B,))
+    kT_b = jnp.broadcast_to(jnp.asarray(kT_arr, dtype=jnp.float32).reshape(-1), (B,))
+    am_b = soa_plan.get("am_b")
+    ref_pos_b = None
+    pos_b = (
+      jnp.stack([px_in.reshape(B, N), py_in.reshape(B, N), pz_in.reshape(B, N)], axis=-1)
+      if return_max_dr_sq
+      else None
+    )
+  else:
+    soa_plan = None
+    orig_dtype = positions.dtype
+
+    def _bcast(arr, is_b):
+      return arr if is_b else jnp.broadcast_to(arr[None, ...], (B, *arr.shape))
+
+    pos_b = _bcast(positions, in_batched[0])
+    mom_b = _bcast(momentum, in_batched[1])
+    frc_b = _bcast(force, in_batched[2])
+    mass_raw = mass.squeeze(-1) if mass.ndim >= 2 and mass.shape[-1] == 1 else mass
+    mass_b = _bcast(mass_raw, in_batched[3])
+    seed_flat = _normalize_seed_flat(B, in_batched[4], rng_seeds)
+    wi_b = _bcast(water_indices, in_batched[5]).astype(jnp.int32)
+    wm_b = _bcast(water_mask, in_batched[6]).astype(jnp.int32)
+    bx_b, bx_flat = _normalize_box_batch(B, in_batched[7], box, jnp.float32)
+    dt_b = jnp.broadcast_to(jnp.asarray(_bcast(dt_arr, in_batched[8]), dtype=jnp.float32).reshape(-1), (B,))
+    kT_b = jnp.broadcast_to(jnp.asarray(_bcast(kT_arr, in_batched[9]), dtype=jnp.float32).reshape(-1), (B,))
+
+    N = int(pos_b.shape[1])
+    W = int(wi_b.shape[1])
+    W_eff = max(W, 1)
+    N_act = _resolve_active_limit(n_active_atoms, "PROLIX_ACTIVE_ATOMS", N, min_val=1)
+    W_act = _resolve_active_limit(n_active_waters, "PROLIX_ACTIVE_WATERS", W, min_val=0)
+    n_blk_a = (N_act + _SETTLE_ATOM_BLOCK - 1) // _SETTLE_ATOM_BLOCK
+    n_blk_w = (W_act + _SETTLE_WATER_BLOCK - 1) // _SETTLE_WATER_BLOCK
+
+    arg_cursor = 10
+    am_b = None
+    if atom_mask is not None:
+      am_b = _bcast(atom_mask, in_batched[arg_cursor]).astype(jnp.int32)
+      arg_cursor += 1
+
+    iwg_b = None
+    if is_water_or_ghost is not None:
+      iwg_b = _bcast(is_water_or_ghost, in_batched[arg_cursor]).astype(jnp.int32)
+      arg_cursor += 1
+
+    has_rattle = (
+      constraint_pairs is not None
+      and constraint_lengths is not None
+      and int(constraint_pairs.shape[-2]) > 0
+    )
+    C = int(constraint_pairs.shape[-2]) if has_rattle and constraint_pairs is not None else 0
+    C_eff = max(C, 1)
+    n_blk_c = (C + _SETTLE_RATTLE_BLOCK - 1) // _SETTLE_RATTLE_BLOCK if has_rattle else 0
+
+    if has_rattle:
+      cp_b = _bcast(constraint_pairs, in_batched[arg_cursor]).astype(jnp.int32)
+      arg_cursor += 1
+      cl_b = _bcast(constraint_lengths, in_batched[arg_cursor])
+      arg_cursor += 1
+      if constraint_mask is not None:
+        cm_b = _bcast(constraint_mask, in_batched[arg_cursor]).astype(jnp.int32)
+        arg_cursor += 1
+      else:
+        cm_b = jnp.ones((B, C), dtype=jnp.int32)
+      cX, cH0, cH1, cH2, cH3, cD0, cD1, cD2, cD3, cM, constrained_atom_mask = _build_rattle_clusters(
+        B, N, C, cp_b, cl_b, cm_b, mass_b
+      )
+      cX_in = jnp.asarray(cX.reshape(B * C), dtype=jnp.int32)
+      cH0_in = jnp.asarray(cH0.reshape(B * C), dtype=jnp.int32)
+      cH1_in = jnp.asarray(cH1.reshape(B * C), dtype=jnp.int32)
+      cH2_in = jnp.asarray(cH2.reshape(B * C), dtype=jnp.int32)
+      cH3_in = jnp.asarray(cH3.reshape(B * C), dtype=jnp.int32)
+      cD0_hi, cD0_lo = _split_1d_to_fltflt(cD0.reshape(B * C))
+      cD1_hi, cD1_lo = _split_1d_to_fltflt(cD1.reshape(B * C))
+      cD2_hi, cD2_lo = _split_1d_to_fltflt(cD2.reshape(B * C))
+      cD3_hi, cD3_lo = _split_1d_to_fltflt(cD3.reshape(B * C))
+      cM_in = jnp.asarray(cM.reshape(B * C), dtype=jnp.int32)
+    else:
+      constrained_atom_mask = None
+      cX_in = cH0_in = cH1_in = cH2_in = cH3_in = cM_in = None
+      cD0_hi = cD1_hi = cD2_hi = cD3_hi = None
+      cD0_lo = cD1_lo = cD2_lo = cD3_lo = None
+
+    ref_pos_b = None
+    if reference_position is not None:
+      ref_pos_b = _bcast(reference_position, in_batched[arg_cursor]).astype(orig_dtype)
+      arg_cursor += 1
+
+    pos_lo_b = None
+    if positions_lo is not None:
+      pos_lo_b = _bcast(positions_lo, in_batched[arg_cursor])
+      arg_cursor += 1
+    mom_lo_b = None
+    if momentum_lo is not None:
+      mom_lo_b = _bcast(momentum_lo, in_batched[arg_cursor])
+      arg_cursor += 1
+
+    px_hi, py_hi, pz_hi, px_lo, py_lo, pz_lo = _split_state_to_fltflt_soa(pos_b, pos_lo_b, B, N)
+    mx_hi, my_hi, mz_hi, mx_lo, my_lo, mz_lo = _split_state_to_fltflt_soa(mom_b, mom_lo_b, B, N)
+    fx_f32 = jnp.asarray(frc_b[:, :, 0].reshape(B * N), dtype=jnp.float32)
+    fy_f32 = jnp.asarray(frc_b[:, :, 1].reshape(B * N), dtype=jnp.float32)
+    fz_f32 = jnp.asarray(frc_b[:, :, 2].reshape(B * N), dtype=jnp.float32)
+    m_f32 = jnp.asarray(mass_b.reshape(B * N), dtype=jnp.float32)
+
+    if W > 0:
+      wO_in = jnp.asarray(wi_b[:, :, 0].reshape(B * W), dtype=jnp.int32)
+      wH1_in = jnp.asarray(wi_b[:, :, 1].reshape(B * W), dtype=jnp.int32)
+      wH2_in = jnp.asarray(wi_b[:, :, 2].reshape(B * W), dtype=jnp.int32)
+      wm_in = jnp.asarray(wm_b.reshape(B * W), dtype=jnp.int32)
+    else:
+      wO_in = jnp.zeros((B * W_eff,), dtype=jnp.int32)
+      wH1_in = jnp.zeros((B * W_eff,), dtype=jnp.int32)
+      wH2_in = jnp.zeros((B * W_eff,), dtype=jnp.int32)
+      wm_in = jnp.zeros((B * W_eff,), dtype=jnp.int32)
+
+    if iwg_b is not None and not has_rattle:
+      is_water_flat = jnp.asarray(iwg_b.reshape(B * N), dtype=jnp.int32)
+    else:
+      is_water_flat = _build_is_water_or_ghost_mask(
+        B, N, W, wi_b, wm_b, am_b, constrained_atom_mask=constrained_atom_mask
+      )
+
+  has_morton = morton_inv_perm is not None and int(morton_pad) > 0
+  N_pad = int(morton_pad) if has_morton else N
+  inv_perm_in = (
+    jnp.asarray(morton_inv_perm.reshape(B * N), dtype=jnp.int32)
+    if has_morton and morton_inv_perm is not None
+    else None
+  )
+
+  gamma_f = float(gamma)
+  r_OH_f = float(r_OH)
+  r_HH_f = float(r_HH)
+  mO_f = float(mass_oxygen)
+  mH_f = float(mass_hydrogen)
+
+  def _format_pre_fltflt_outs(raw_t: tuple[Array, ...], trim_scratch: bool) -> tuple[Array, ...]:
+    px_ho, py_ho, pz_ho, px_lo_o, py_lo_o, pz_lo_o = raw_t[0:6]
+    mx_ho, my_ho, mz_ho, mx_lo_o, my_lo_o, mz_lo_o = raw_t[6:12]
+    if trim_scratch:
+      px_ho, py_ho, pz_ho = px_ho[:-1], py_ho[:-1], pz_ho[:-1]
+      px_lo_o, py_lo_o, pz_lo_o = px_lo_o[:-1], py_lo_o[:-1], pz_lo_o[:-1]
+      mx_ho, my_ho, mz_ho = mx_ho[:-1], my_ho[:-1], mz_ho[:-1]
+      mx_lo_o, my_lo_o, mz_lo_o = mx_lo_o[:-1], my_lo_o[:-1], mz_lo_o[:-1]
+
+    if soa_plan is not None:
+      if orig_dtype == jnp.float64:
+        px_ret = ff_to_float64(FltFlt(px_ho, px_lo_o))
+        py_ret = ff_to_float64(FltFlt(py_ho, py_lo_o))
+        pz_ret = ff_to_float64(FltFlt(pz_ho, pz_lo_o))
+        mx_ret = ff_to_float64(FltFlt(mx_ho, mx_lo_o))
+        my_ret = ff_to_float64(FltFlt(my_ho, my_lo_o))
+        mz_ret = ff_to_float64(FltFlt(mz_ho, mz_lo_o))
+      else:
+        px_ret = ff_to_f32(FltFlt(px_ho, px_lo_o))
+        py_ret = ff_to_f32(FltFlt(py_ho, py_lo_o))
+        pz_ret = ff_to_f32(FltFlt(pz_ho, pz_lo_o))
+        mx_ret = ff_to_f32(FltFlt(mx_ho, mx_lo_o))
+        my_ret = ff_to_f32(FltFlt(my_ho, my_lo_o))
+        mz_ret = ff_to_f32(FltFlt(mz_ho, mz_lo_o))
+      if has_morton:
+        px_m_o, py_m_o, pz_m_o = raw_t[12:15]
+        if trim_scratch:
+          px_m_o, py_m_o, pz_m_o = px_m_o[:-1], py_m_o[:-1], pz_m_o[:-1]
+        if return_max_dr_sq:
+          pos_tmp = jnp.stack([px_ret.reshape(B, N), py_ret.reshape(B, N), pz_ret.reshape(B, N)], axis=-1)
+          ref_p = (pos_b if pos_b is not None else pos_tmp) if ref_pos_b is None else ref_pos_b
+          dr = pos_tmp - ref_p
+          if has_box and bx_b is not None:
+            bx_d = bx_b.astype(orig_dtype)
+            dr = dr - bx_d[:, None, :] * _PBC_ROUND_FN(dr / bx_d[:, None, :])
+          dr_sq = jnp.sum(dr * dr, axis=-1)
+          if am_b is not None:
+            dr_sq = jnp.where(am_b > 0, dr_sq, jnp.asarray(0.0, dtype=orig_dtype))
+          return (px_ret, py_ret, pz_ret, mx_ret, my_ret, mz_ret, px_m_o, py_m_o, pz_m_o, jnp.max(dr_sq, axis=-1))
+        return (px_ret, py_ret, pz_ret, mx_ret, my_ret, mz_ret, px_m_o, py_m_o, pz_m_o)
+      return (px_ret, py_ret, pz_ret, mx_ret, my_ret, mz_ret)
+
+    pos_hi_b = jnp.stack([px_ho.reshape(B, N), py_ho.reshape(B, N), pz_ho.reshape(B, N)], axis=-1)
+    pos_lo_b_out = jnp.stack([px_lo_o.reshape(B, N), py_lo_o.reshape(B, N), pz_lo_o.reshape(B, N)], axis=-1)
+    mom_hi_b = jnp.stack([mx_ho.reshape(B, N), my_ho.reshape(B, N), mz_ho.reshape(B, N)], axis=-1)
+    mom_lo_b_out = jnp.stack([mx_lo_o.reshape(B, N), my_lo_o.reshape(B, N), mz_lo_o.reshape(B, N)], axis=-1)
+
+    if orig_dtype == jnp.float64:
+      pos_out = ff_to_float64(FltFlt(pos_hi_b, pos_lo_b_out))
+      mom_out = ff_to_float64(FltFlt(mom_hi_b, mom_lo_b_out))
+    elif return_lo_accumulators:
+      pos_out = pos_hi_b
+      mom_out = mom_hi_b
+    else:
+      pos_out = ff_to_f32(FltFlt(pos_hi_b, pos_lo_b_out))
+      mom_out = ff_to_f32(FltFlt(mom_hi_b, mom_lo_b_out))
+
+    ret: list[Array] = [pos_out, mom_out]
+    if return_pos_f32:
+      ret.append(ff_to_f32(FltFlt(pos_hi_b, pos_lo_b_out)))
+    if return_max_dr_sq:
+      ref_p = (pos_b if pos_b is not None else pos_out) if ref_pos_b is None else ref_pos_b
+      dr = pos_out - ref_p
+      if has_box and bx_b is not None:
+        bx_d = bx_b.astype(pos_out.dtype)
+        dr = dr - bx_d[:, None, :] * _PBC_ROUND_FN(dr / bx_d[:, None, :])
+      dr_sq = jnp.sum(dr * dr, axis=-1)
+      if am_b is not None:
+        dr_sq = jnp.where(am_b > 0, dr_sq, jnp.asarray(0.0, dtype=pos_out.dtype))
+      ret.append(jnp.max(dr_sq, axis=-1))
+    if return_lo_accumulators:
+      ret.extend([pos_lo_b_out, mom_lo_b_out])
+    return tuple(ret)
+
+  if interpret or in_export_context():
+    return _format_pre_fltflt_outs(
+      _pure_jax_baoab_pre_force_fltflt(
+        B,
+        N,
+        W,
+        C,
+        N_pad,
+        n_blk_a,
+        n_blk_w,
+        n_blk_c,
+        px_hi,
+        py_hi,
+        pz_hi,
+        px_lo,
+        py_lo,
+        pz_lo,
+        mx_hi,
+        my_hi,
+        mz_hi,
+        mx_lo,
+        my_lo,
+        mz_lo,
+        fx_f32,
+        fy_f32,
+        fz_f32,
+        m_f32,
+        seed_flat,
+        is_water_flat,
+        wO_in,
+        wH1_in,
+        wH2_in,
+        wm_in,
+        bx_flat,
+        dt_b,
+        kT_b,
+        gamma_f,
+        r_OH_f,
+        r_HH_f,
+        mO_f,
+        mH_f,
+        has_box,
+        project_ou_momentum_rigid,
+        fuse_prev_post,
+        has_rattle,
+        cX_in,
+        cH0_in,
+        cH1_in,
+        cH2_in,
+        cH3_in,
+        cD0_hi,
+        cD1_hi,
+        cD2_hi,
+        cD3_hi,
+        cD0_lo,
+        cD1_lo,
+        cD2_lo,
+        cD3_lo,
+        cM_in,
+        has_morton,
+        inv_perm_in,
+      ),
+      False,
+    )
+
+  use_scratch = False
+  out_len = B * N
+  m_out_len = B * N_pad
+  if has_morton:
+    px_m_init = jnp.zeros((m_out_len,), dtype=jnp.float32)
+    py_m_init = jnp.zeros((m_out_len,), dtype=jnp.float32)
+    pz_m_init = jnp.zeros((m_out_len,), dtype=jnp.float32)
+  else:
+    px_m_init = py_m_init = pz_m_init = None
+  total_blocks = max(1, n_blk_a + n_blk_w + n_blk_c)
+
+  def _pre_fltflt_kernel(*refs):
+    px_hi_ref, py_hi_ref, pz_hi_ref, px_lo_ref, py_lo_ref, pz_lo_ref = refs[0:6]
+    mx_hi_ref, my_hi_ref, mz_hi_ref, mx_lo_ref, my_lo_ref, mz_lo_ref = refs[6:12]
+    fx_ref, fy_ref, fz_ref, m_ref, seed_ref, is_w_ref = refs[12:18]
+    wO_ref, wH1_ref, wH2_ref, wm_ref, bx_ref, dt_ref, kT_ref = refs[18:25]
+    rc = 25
+    if has_rattle:
+      cX_ref, cH0_ref, cH1_ref, cH2_ref, cH3_ref = refs[rc : rc + 5]
+      cD0_hi_r, cD1_hi_r, cD2_hi_r, cD3_hi_r = refs[rc + 5 : rc + 9]
+      cD0_lo_r, cD1_lo_r, cD2_lo_r, cD3_lo_r = refs[rc + 9 : rc + 13]
+      cM_ref = refs[rc + 13]
+      rc += 14
+    else:
+      cX_ref = cH0_ref = cH1_ref = cH2_ref = cH3_ref = cM_ref = None
+      cD0_hi_r = cD1_hi_r = cD2_hi_r = cD3_hi_r = None
+      cD0_lo_r = cD1_lo_r = cD2_lo_r = cD3_lo_r = None
+    if has_morton:
+      inv_perm_ref = refs[rc]
+      rc += 4  # inv_perm_in + 3 morton init inputs
+    else:
+      inv_perm_ref = None
+    px_hi_o, py_hi_o, pz_hi_o, px_lo_o, py_lo_o, pz_lo_o = refs[rc : rc + 6]
+    mx_hi_o, my_hi_o, mz_hi_o, mx_lo_o, my_lo_o, mz_lo_o = refs[rc + 6 : rc + 12]
+    rc += 12
+    if has_morton:
+      px_m_out_ref, py_m_out_ref, pz_m_out_ref = refs[rc : rc + 3]
+    else:
+      px_m_out_ref = py_m_out_ref = pz_m_out_ref = None
+
+    b_id = pl.program_id(0)
+    pid = pl.program_id(1)
+    base_a = b_id * N
+    base_m = b_id * N_pad
+    base_w = b_id * W_eff
+    base_c = b_id * C_eff
+    base_bx = b_id * 3
+    scratch_slot = jnp.int32(B * N)
+    m_scratch_slot = jnp.int32(B * N_pad)
+
+    zero = jnp.asarray(0.0, dtype=jnp.float32)
+    one = jnp.asarray(1.0, dtype=jnp.float32)
+    half = jnp.asarray(0.5, dtype=jnp.float32)
+
+    dt_val = _pl_load(dt_ref, (b_id + jnp.zeros((1,), dtype=jnp.int32),))[0]
+    kT_val = _pl_load(kT_ref, (b_id + jnp.zeros((1,), dtype=jnp.int32),))[0]
+    s0 = _pl_load(seed_ref, (b_id * 2 + jnp.zeros((1,), dtype=jnp.int32),))[0]
+    s1 = _pl_load(seed_ref, (b_id * 2 + jnp.ones((1,), dtype=jnp.int32),))[0]
+    half_dt = half * dt_val
+    c1 = jnp.exp(jnp.asarray(-gamma_f, dtype=jnp.float32) * dt_val)
+    c2 = jnp.sqrt(jnp.maximum(one - c1 * c1, zero))
+
+    if has_box:
+      Lx = _pl_load(bx_ref, (base_bx + jnp.zeros((1,), dtype=jnp.int32),))[0]
+      Ly = _pl_load(bx_ref, (base_bx + jnp.ones((1,), dtype=jnp.int32),))[0]
+      Lz = _pl_load(bx_ref, (base_bx + jnp.full((1,), 2, dtype=jnp.int32),))[0]
+      box_xyz = (Lx, Ly, Lz)
+    else:
+      box_xyz = None
+
+    def _wrap_pos_ff(rx_ff: FltFlt, ry_ff: FltFlt, rz_ff: FltFlt) -> tuple[FltFlt, FltFlt, FltFlt]:
+      if has_box and box_xyz is not None:
+        return (
+          ff_mod_f32(rx_ff, box_xyz[0]),
+          ff_mod_f32(ry_ff, box_xyz[1]),
+          ff_mod_f32(rz_ff, box_xyz[2]),
+        )
+      return (rx_ff, ry_ff, rz_ff)
+
+    def _f_slot(local_idx, mask_v):
+      if has_morton:
+        m_idx = _pl_load(inv_perm_ref, (base_a + local_idx,), mask=mask_v, other=jnp.int32(0))
+        return base_m + jnp.clip(m_idx, 0, max(N_pad - 1, 0))
+      return base_a + local_idx
+
+    def _store_pos_mom_ff(
+      local_idx,
+      rx_v: FltFlt,
+      ry_v: FltFlt,
+      rz_v: FltFlt,
+      px_v: FltFlt,
+      py_v: FltFlt,
+      pz_v: FltFlt,
+      mask_v,
+    ):
+      dest = jnp.where(mask_v, base_a + local_idx, scratch_slot) if use_scratch else (base_a + local_idx)
+      _pl_store(px_hi_o, (dest,), rx_v.hi, mask=mask_v)
+      _pl_store(py_hi_o, (dest,), ry_v.hi, mask=mask_v)
+      _pl_store(pz_hi_o, (dest,), rz_v.hi, mask=mask_v)
+      _pl_store(px_lo_o, (dest,), rx_v.lo, mask=mask_v)
+      _pl_store(py_lo_o, (dest,), ry_v.lo, mask=mask_v)
+      _pl_store(pz_lo_o, (dest,), rz_v.lo, mask=mask_v)
+      _pl_store(mx_hi_o, (dest,), px_v.hi, mask=mask_v)
+      _pl_store(my_hi_o, (dest,), py_v.hi, mask=mask_v)
+      _pl_store(mz_hi_o, (dest,), pz_v.hi, mask=mask_v)
+      _pl_store(mx_lo_o, (dest,), px_v.lo, mask=mask_v)
+      _pl_store(my_lo_o, (dest,), py_v.lo, mask=mask_v)
+      _pl_store(mz_lo_o, (dest,), pz_v.lo, mask=mask_v)
+      if has_morton:
+        m_idx = _pl_load(inv_perm_ref, (base_a + local_idx,), mask=mask_v, other=jnp.int32(0))
+        m_slot = base_m + jnp.clip(m_idx, 0, max(N_pad - 1, 0))
+        m_dest = jnp.where(mask_v, m_slot, m_scratch_slot) if use_scratch else m_slot
+        _pl_store(px_m_out_ref, (m_dest,), ff_to_f32(rx_v), mask=mask_v)
+        _pl_store(py_m_out_ref, (m_dest,), ff_to_f32(ry_v), mask=mask_v)
+        _pl_store(pz_m_out_ref, (m_dest,), ff_to_f32(rz_v), mask=mask_v)
+
+    def _load_ff_vec3(xh_r, yh_r, zh_r, xl_r, yl_r, zl_r, idx, msk):
+      return (
+        FltFlt(
+          _pl_load(xh_r, (base_a + idx,), mask=msk, other=zero),
+          _pl_load(xl_r, (base_a + idx,), mask=msk, other=zero),
+        ),
+        FltFlt(
+          _pl_load(yh_r, (base_a + idx,), mask=msk, other=zero),
+          _pl_load(yl_r, (base_a + idx,), mask=msk, other=zero),
+        ),
+        FltFlt(
+          _pl_load(zh_r, (base_a + idx,), mask=msk, other=zero),
+          _pl_load(zl_r, (base_a + idx,), mask=msk, other=zero),
+        ),
+      )
+
+    def _do_solute(a_pid):
+      offs = a_pid * _SETTLE_ATOM_BLOCK + jnp.arange(_SETTLE_ATOM_BLOCK, dtype=jnp.int32)
+      in_a = offs < N
+      safe_local = jnp.minimum(offs, max(N - 1, 0))
+      safe_a = base_a + safe_local
+      w_code = _pl_load(is_w_ref, (safe_a,), mask=in_a, other=jnp.int32(1))
+      valid_s = in_a & (w_code == 0)
+
+      if has_morton:
+        valid_g = in_a & (w_code == 3)
+
+        def _copy_ghost_morton(_):
+          gx = _pl_load(px_hi_ref, (safe_a,), mask=valid_g, other=zero)
+          gy = _pl_load(py_hi_ref, (safe_a,), mask=valid_g, other=zero)
+          gz = _pl_load(pz_hi_ref, (safe_a,), mask=valid_g, other=zero)
+          mg_idx = _pl_load(inv_perm_ref, (safe_a,), mask=valid_g, other=jnp.int32(0))
+          mg_slot = base_m + jnp.clip(mg_idx, 0, max(N_pad - 1, 0))
+          mg_dest = jnp.where(valid_g, mg_slot, m_scratch_slot) if use_scratch else mg_slot
+          _pl_store(px_m_out_ref, (mg_dest,), gx, mask=valid_g)
+          _pl_store(py_m_out_ref, (mg_dest,), gy, mask=valid_g)
+          _pl_store(pz_m_out_ref, (mg_dest,), gz, mask=valid_g)
+          return a_pid - a_pid
+
+        _ = jax.lax.cond(
+          jnp.max(valid_g.astype(jnp.int32)) > 0,
+          _copy_ghost_morton,
+          lambda _: a_pid - a_pid,
+          None,
+        )
+
+      def _run_solute(_):
+        rx, ry, rz = _load_ff_vec3(
+          px_hi_ref, py_hi_ref, pz_hi_ref, px_lo_ref, py_lo_ref, pz_lo_ref, safe_local, valid_s
+        )
+        px, py, pz = _load_ff_vec3(
+          mx_hi_ref, my_hi_ref, mz_hi_ref, mx_lo_ref, my_lo_ref, mz_lo_ref, safe_local, valid_s
+        )
+        f_addr = _f_slot(safe_local, valid_s)
+        fx = _pl_load(fx_ref, (f_addr,), mask=valid_s, other=zero)
+        fy = _pl_load(fy_ref, (f_addr,), mask=valid_s, other=zero)
+        fz = _pl_load(fz_ref, (f_addr,), mask=valid_s, other=zero)
+        m_a = _pl_load(m_ref, (safe_a,), mask=valid_s, other=one)
+        nsx, nsy = _philox2x32_box_muller_pair(s0, s1, offs, offs + jnp.int32(0x10000001), jnp.float32)
+        nsz, _ = _philox2x32_box_muller_pair(s0, s1, offs, offs + jnp.int32(0x20000002), jnp.float32)
+
+        inv_m = one / jnp.maximum(m_a, jnp.asarray(1e-30, dtype=jnp.float32))
+        kick_dt = dt_val if fuse_prev_post else half_dt
+        px1 = ff_add(px, two_prod_fma(kick_dt, fx))
+        py1 = ff_add(py, two_prod_fma(kick_dt, fy))
+        pz1 = ff_add(pz, two_prod_fma(kick_dt, fz))
+
+        dt_im = half_dt * inv_m
+        rx1, ry1, rz1 = _wrap_pos_ff(
+          ff_add(rx, ff_mul_f32(px1, dt_im)),
+          ff_add(ry, ff_mul_f32(py1, dt_im)),
+          ff_add(rz, ff_mul_f32(pz1, dt_im)),
+        )
+
+        if gamma_f == 0.0:
+          px_o, py_o, pz_o = px1, py1, pz1
+        else:
+          noise_scale = c2 * jnp.sqrt(jnp.maximum(m_a * kT_val, zero))
+          px_o = ff_add_f32(ff_mul_f32(px1, c1), noise_scale * nsx)
+          py_o = ff_add_f32(ff_mul_f32(py1, c1), noise_scale * nsy)
+          pz_o = ff_add_f32(ff_mul_f32(pz1, c1), noise_scale * nsz)
+
+        rx2, ry2, rz2 = _wrap_pos_ff(
+          ff_add(rx1, ff_mul_f32(px_o, dt_im)),
+          ff_add(ry1, ff_mul_f32(py_o, dt_im)),
+          ff_add(rz1, ff_mul_f32(pz_o, dt_im)),
+        )
+
+        _store_pos_mom_ff(safe_local, rx2, ry2, rz2, px_o, py_o, pz_o, valid_s)
+        return a_pid - a_pid
+
+      return jax.lax.cond(
+        jnp.max(valid_s.astype(jnp.int32)) > 0,
+        _run_solute,
+        lambda _: a_pid - a_pid,
+        None,
+      )
+
+    def _do_water(w_pid):
+      offs_w = w_pid * _SETTLE_WATER_BLOCK + jnp.arange(_SETTLE_WATER_BLOCK, dtype=jnp.int32)
+      in_w = offs_w < W
+      safe_w = base_w + jnp.minimum(offs_w, max(W - 1, 0))
+      wm = _pl_load(wm_ref, (safe_w,), mask=in_w, other=jnp.int32(0)) > 0
+      valid_w = in_w & wm
+
+      def _run_water(_):
+        iO = _pl_load(wO_ref, (safe_w,), mask=valid_w, other=jnp.int32(0))
+        iH1 = _pl_load(wH1_ref, (safe_w,), mask=valid_w, other=jnp.int32(0))
+        iH2 = _pl_load(wH2_ref, (safe_w,), mask=valid_w, other=jnp.int32(0))
+        sO = jnp.where(valid_w, jnp.clip(iO, 0, max(N - 1, 0)), 0)
+        sH1 = jnp.where(valid_w, jnp.clip(iH1, 0, max(N - 1, 0)), 0)
+        sH2 = jnp.where(valid_w, jnp.clip(iH2, 0, max(N - 1, 0)), 0)
+
+        r0_O = _load_ff_vec3(px_hi_ref, py_hi_ref, pz_hi_ref, px_lo_ref, py_lo_ref, pz_lo_ref, sO, valid_w)
+        r0_H1 = _load_ff_vec3(px_hi_ref, py_hi_ref, pz_hi_ref, px_lo_ref, py_lo_ref, pz_lo_ref, sH1, valid_w)
+        r0_H2 = _load_ff_vec3(px_hi_ref, py_hi_ref, pz_hi_ref, px_lo_ref, py_lo_ref, pz_lo_ref, sH2, valid_w)
+
+        p0_O = _load_ff_vec3(mx_hi_ref, my_hi_ref, mz_hi_ref, mx_lo_ref, my_lo_ref, mz_lo_ref, sO, valid_w)
+        p0_H1 = _load_ff_vec3(mx_hi_ref, my_hi_ref, mz_hi_ref, mx_lo_ref, my_lo_ref, mz_lo_ref, sH1, valid_w)
+        p0_H2 = _load_ff_vec3(mx_hi_ref, my_hi_ref, mz_hi_ref, mx_lo_ref, my_lo_ref, mz_lo_ref, sH2, valid_w)
+
+        def _load_f3(idx):
+          fa = _f_slot(idx, valid_w)
+          return (
+            _pl_load(fx_ref, (fa,), mask=valid_w, other=zero),
+            _pl_load(fy_ref, (fa,), mask=valid_w, other=zero),
+            _pl_load(fz_ref, (fa,), mask=valid_w, other=zero),
+          )
+
+        f0_O = _load_f3(sO)
+        f0_H1 = _load_f3(sH1)
+        f0_H2 = _load_f3(sH2)
+
+        mO_s = _pl_load(m_ref, (base_a + sO,), mask=valid_w, other=one)
+        mH1_s = _pl_load(m_ref, (base_a + sH1,), mask=valid_w, other=one)
+        mH2_s = _pl_load(m_ref, (base_a + sH2,), mask=valid_w, other=one)
+        inv_mO = one / jnp.maximum(mO_s, jnp.asarray(1e-30, dtype=jnp.float32))
+        inv_mH1 = one / jnp.maximum(mH1_s, jnp.asarray(1e-30, dtype=jnp.float32))
+        inv_mH2 = one / jnp.maximum(mH2_s, jnp.asarray(1e-30, dtype=jnp.float32))
+
+        if fuse_prev_post:
+          p_b2_O = (
+            ff_add(p0_O[0], two_prod_fma(half_dt, f0_O[0])),
+            ff_add(p0_O[1], two_prod_fma(half_dt, f0_O[1])),
+            ff_add(p0_O[2], two_prod_fma(half_dt, f0_O[2])),
+          )
+          p_b2_H1 = (
+            ff_add(p0_H1[0], two_prod_fma(half_dt, f0_H1[0])),
+            ff_add(p0_H1[1], two_prod_fma(half_dt, f0_H1[1])),
+            ff_add(p0_H1[2], two_prod_fma(half_dt, f0_H1[2])),
+          )
+          p_b2_H2 = (
+            ff_add(p0_H2[0], two_prod_fma(half_dt, f0_H2[0])),
+            ff_add(p0_H2[1], two_prod_fma(half_dt, f0_H2[1])),
+            ff_add(p0_H2[2], two_prod_fma(half_dt, f0_H2[2])),
+          )
+          p0_O, p0_H1, p0_H2 = _settle_vel_and_am_fltflt_vec3(
+            p_b2_O, p_b2_H1, p_b2_H2, r0_O, r0_H1, r0_H2, mO_s, mH1_s, mH2_s, mO_f, mH_f, valid_w
+          )
+
+        p_pre1_O = (
+          ff_add(p0_O[0], two_prod_fma(half_dt, f0_O[0])),
+          ff_add(p0_O[1], two_prod_fma(half_dt, f0_O[1])),
+          ff_add(p0_O[2], two_prod_fma(half_dt, f0_O[2])),
+        )
+        p_pre1_H1 = (
+          ff_add(p0_H1[0], two_prod_fma(half_dt, f0_H1[0])),
+          ff_add(p0_H1[1], two_prod_fma(half_dt, f0_H1[1])),
+          ff_add(p0_H1[2], two_prod_fma(half_dt, f0_H1[2])),
+        )
+        p_pre1_H2 = (
+          ff_add(p0_H2[0], two_prod_fma(half_dt, f0_H2[0])),
+          ff_add(p0_H2[1], two_prod_fma(half_dt, f0_H2[1])),
+          ff_add(p0_H2[2], two_prod_fma(half_dt, f0_H2[2])),
+        )
+
+        dt_imO = half_dt * inv_mO
+        dt_imH1 = half_dt * inv_mH1
+        dt_imH2 = half_dt * inv_mH2
+        r_unc1_O = _wrap_pos_ff(
+          ff_add(r0_O[0], ff_mul_f32(p_pre1_O[0], dt_imO)),
+          ff_add(r0_O[1], ff_mul_f32(p_pre1_O[1], dt_imO)),
+          ff_add(r0_O[2], ff_mul_f32(p_pre1_O[2], dt_imO)),
+        )
+        r_unc1_H1 = _wrap_pos_ff(
+          ff_add(r0_H1[0], ff_mul_f32(p_pre1_H1[0], dt_imH1)),
+          ff_add(r0_H1[1], ff_mul_f32(p_pre1_H1[1], dt_imH1)),
+          ff_add(r0_H1[2], ff_mul_f32(p_pre1_H1[2], dt_imH1)),
+        )
+        r_unc1_H2 = _wrap_pos_ff(
+          ff_add(r0_H2[0], ff_mul_f32(p_pre1_H2[0], dt_imH2)),
+          ff_add(r0_H2[1], ff_mul_f32(p_pre1_H2[1], dt_imH2)),
+          ff_add(r0_H2[2], ff_mul_f32(p_pre1_H2[2], dt_imH2)),
+        )
+
+        r_con1_O, r_con1_H1, r_con1_H2 = _settle_water_fltflt_vec3(
+          r0_O, r0_H1, r0_H2, r_unc1_O, r_unc1_H1, r_unc1_H2,
+          r_OH_f, r_HH_f, mO_f, mH_f, box_xyz, has_box,
+        )
+        p_mid_O, p_mid_H1, p_mid_H2 = _r_step_and_am_fltflt_vec3(
+          r_unc1_O, r_unc1_H1, r_unc1_H2, r_con1_O, r_con1_H1, r_con1_H2,
+          p_pre1_O, p_pre1_H1, p_pre1_H2, mO_s, mH1_s, mH2_s,
+          half_dt, mO_f, mH_f, box_xyz, has_box,
+        )
+
+        if project_ou_momentum_rigid:
+          z0, z1 = _philox2x32_box_muller_pair(s0, s1, offs_w, offs_w + jnp.int32(0x30000001), jnp.float32)
+          z2, z3 = _philox2x32_box_muller_pair(s0, s1, offs_w, offs_w + jnp.int32(0x40000002), jnp.float32)
+          z4, z5 = _philox2x32_box_muller_pair(s0, s1, offs_w, offs_w + jnp.int32(0x50000003), jnp.float32)
+          z_rel = jnp.zeros_like(r_con1_O[0].hi)
+          rO_rel = (z_rel, z_rel, z_rel)
+          rH1_rel = (
+            ff_to_f32(ff_sub(r_con1_H1[0], r_con1_O[0])),
+            ff_to_f32(ff_sub(r_con1_H1[1], r_con1_O[1])),
+            ff_to_f32(ff_sub(r_con1_H1[2], r_con1_O[2])),
+          )
+          rH2_rel = (
+            ff_to_f32(ff_sub(r_con1_H2[0], r_con1_O[0])),
+            ff_to_f32(ff_sub(r_con1_H2[1], r_con1_O[1])),
+            ff_to_f32(ff_sub(r_con1_H2[2], r_con1_O[2])),
+          )
+          p_mid_O_f = (ff_to_f32(p_mid_O[0]), ff_to_f32(p_mid_O[1]), ff_to_f32(p_mid_O[2]))
+          p_mid_H1_f = (ff_to_f32(p_mid_H1[0]), ff_to_f32(p_mid_H1[1]), ff_to_f32(p_mid_H1[2]))
+          p_mid_H2_f = (ff_to_f32(p_mid_H2[0]), ff_to_f32(p_mid_H2[1]), ff_to_f32(p_mid_H2[2]))
+          po_O, po_H1, po_H2 = _water_o_step_vec3(
+            p_mid_O_f, p_mid_H1_f, p_mid_H2_f, rO_rel, rH1_rel, rH2_rel,
+            mO_s, mH1_s, mH2_s, z0, z1, z2, z3, z4, z5, c1, c2, kT_val,
+            use_f32_math=True,
+          )
+          if gamma_f == 0.0:
+            p_pre2_O = (
+              ff_add_f32(p_mid_O[0], po_O[0] - p_mid_O_f[0]),
+              ff_add_f32(p_mid_O[1], po_O[1] - p_mid_O_f[1]),
+              ff_add_f32(p_mid_O[2], po_O[2] - p_mid_O_f[2]),
+            )
+            p_pre2_H1 = (
+              ff_add_f32(p_mid_H1[0], po_H1[0] - p_mid_H1_f[0]),
+              ff_add_f32(p_mid_H1[1], po_H1[1] - p_mid_H1_f[1]),
+              ff_add_f32(p_mid_H1[2], po_H1[2] - p_mid_H1_f[2]),
+            )
+            p_pre2_H2 = (
+              ff_add_f32(p_mid_H2[0], po_H2[0] - p_mid_H2_f[0]),
+              ff_add_f32(p_mid_H2[1], po_H2[1] - p_mid_H2_f[1]),
+              ff_add_f32(p_mid_H2[2], po_H2[2] - p_mid_H2_f[2]),
+            )
+          else:
+            p_pre2_O = (ff_from_f32(po_O[0]), ff_from_f32(po_O[1]), ff_from_f32(po_O[2]))
+            p_pre2_H1 = (ff_from_f32(po_H1[0]), ff_from_f32(po_H1[1]), ff_from_f32(po_H1[2]))
+            p_pre2_H2 = (ff_from_f32(po_H2[0]), ff_from_f32(po_H2[1]), ff_from_f32(po_H2[2]))
+        else:
+          nsOx, nsOy = _philox2x32_box_muller_pair(s0, s1, sO, sO + jnp.int32(0x10000001), jnp.float32)
+          nsOz, _ = _philox2x32_box_muller_pair(s0, s1, sO, sO + jnp.int32(0x20000002), jnp.float32)
+          nsH1x, nsH1y = _philox2x32_box_muller_pair(s0, s1, sH1, sH1 + jnp.int32(0x10000001), jnp.float32)
+          nsH1z, _ = _philox2x32_box_muller_pair(s0, s1, sH1, sH1 + jnp.int32(0x20000002), jnp.float32)
+          nsH2x, nsH2y = _philox2x32_box_muller_pair(s0, s1, sH2, sH2 + jnp.int32(0x10000001), jnp.float32)
+          nsH2z, _ = _philox2x32_box_muller_pair(s0, s1, sH2, sH2 + jnp.int32(0x20000002), jnp.float32)
+          scO = c2 * jnp.sqrt(jnp.maximum(mO_s * kT_val, zero))
+          scH1 = c2 * jnp.sqrt(jnp.maximum(mH1_s * kT_val, zero))
+          scH2 = c2 * jnp.sqrt(jnp.maximum(mH2_s * kT_val, zero))
+          p_pre2_O = (
+            ff_add_f32(ff_mul_f32(p_mid_O[0], c1), scO * nsOx),
+            ff_add_f32(ff_mul_f32(p_mid_O[1], c1), scO * nsOy),
+            ff_add_f32(ff_mul_f32(p_mid_O[2], c1), scO * nsOz),
+          )
+          p_pre2_H1 = (
+            ff_add_f32(ff_mul_f32(p_mid_H1[0], c1), scH1 * nsH1x),
+            ff_add_f32(ff_mul_f32(p_mid_H1[1], c1), scH1 * nsH1y),
+            ff_add_f32(ff_mul_f32(p_mid_H1[2], c1), scH1 * nsH1z),
+          )
+          p_pre2_H2 = (
+            ff_add_f32(ff_mul_f32(p_mid_H2[0], c1), scH2 * nsH2x),
+            ff_add_f32(ff_mul_f32(p_mid_H2[1], c1), scH2 * nsH2y),
+            ff_add_f32(ff_mul_f32(p_mid_H2[2], c1), scH2 * nsH2z),
+          )
+
+        r_unc2_O = _wrap_pos_ff(
+          ff_add(r_con1_O[0], ff_mul_f32(p_pre2_O[0], dt_imO)),
+          ff_add(r_con1_O[1], ff_mul_f32(p_pre2_O[1], dt_imO)),
+          ff_add(r_con1_O[2], ff_mul_f32(p_pre2_O[2], dt_imO)),
+        )
+        r_unc2_H1 = _wrap_pos_ff(
+          ff_add(r_con1_H1[0], ff_mul_f32(p_pre2_H1[0], dt_imH1)),
+          ff_add(r_con1_H1[1], ff_mul_f32(p_pre2_H1[1], dt_imH1)),
+          ff_add(r_con1_H1[2], ff_mul_f32(p_pre2_H1[2], dt_imH1)),
+        )
+        r_unc2_H2 = _wrap_pos_ff(
+          ff_add(r_con1_H2[0], ff_mul_f32(p_pre2_H2[0], dt_imH2)),
+          ff_add(r_con1_H2[1], ff_mul_f32(p_pre2_H2[1], dt_imH2)),
+          ff_add(r_con1_H2[2], ff_mul_f32(p_pre2_H2[2], dt_imH2)),
+        )
+
+        r_con2_O, r_con2_H1, r_con2_H2 = _settle_water_fltflt_vec3(
+          r_con1_O, r_con1_H1, r_con1_H2, r_unc2_O, r_unc2_H1, r_unc2_H2,
+          r_OH_f, r_HH_f, mO_f, mH_f, box_xyz, has_box,
+        )
+        p_fin_O, p_fin_H1, p_fin_H2 = _r_step_and_am_fltflt_vec3(
+          r_unc2_O, r_unc2_H1, r_unc2_H2, r_con2_O, r_con2_H1, r_con2_H2,
+          p_pre2_O, p_pre2_H1, p_pre2_H2, mO_s, mH1_s, mH2_s,
+          half_dt, mO_f, mH_f, box_xyz, has_box,
+        )
+
+        for s_idx, r_v, p_v in (
+          (sO, r_con2_O, p_fin_O),
+          (sH1, r_con2_H1, p_fin_H1),
+          (sH2, r_con2_H2, p_fin_H2),
+        ):
+          _store_pos_mom_ff(s_idx, r_v[0], r_v[1], r_v[2], p_v[0], p_v[1], p_v[2], valid_w)
+        return w_pid - w_pid
+
+      return jax.lax.cond(
+        jnp.max(valid_w.astype(jnp.int32)) > 0,
+        _run_water,
+        lambda _: w_pid - w_pid,
+        None,
+      )
+
+    def _do_rattle(c_pid):
+      offs_c = c_pid * _SETTLE_RATTLE_BLOCK + jnp.arange(_SETTLE_RATTLE_BLOCK, dtype=jnp.int32)
+      in_c = offs_c < C
+      safe_c = base_c + jnp.minimum(offs_c, max(C - 1, 0))
+      cm_bits = _pl_load(cM_ref, (safe_c,), mask=in_c, other=jnp.int32(0))
+      v0 = in_c & ((cm_bits & jnp.int32(1)) != 0)
+      v1 = in_c & ((cm_bits & jnp.int32(2)) != 0)
+      v2 = in_c & ((cm_bits & jnp.int32(4)) != 0)
+      v3 = in_c & ((cm_bits & jnp.int32(8)) != 0)
+      v_slots = [v0, v1, v2, v3]
+
+      def _run_rattle(_):
+        iX = _pl_load(cX_ref, (safe_c,), mask=v0, other=jnp.int32(0))
+        iH0 = _pl_load(cH0_ref, (safe_c,), mask=v0, other=jnp.int32(0))
+        iH1 = _pl_load(cH1_ref, (safe_c,), mask=v1, other=jnp.int32(0))
+        iH2 = _pl_load(cH2_ref, (safe_c,), mask=v2, other=jnp.int32(0))
+        iH3 = _pl_load(cH3_ref, (safe_c,), mask=v3, other=jnp.int32(0))
+        sX = jnp.where(v0, jnp.clip(iX, 0, max(N - 1, 0)), 0)
+        sH = [
+          jnp.where(v0, jnp.clip(iH0, 0, max(N - 1, 0)), 0),
+          jnp.where(v1, jnp.clip(iH1, 0, max(N - 1, 0)), 0),
+          jnp.where(v2, jnp.clip(iH2, 0, max(N - 1, 0)), 0),
+          jnp.where(v3, jnp.clip(iH3, 0, max(N - 1, 0)), 0),
+        ]
+        d_ff = [
+          FltFlt(
+            _pl_load(cD0_hi_r, (safe_c,), mask=v0, other=one),
+            _pl_load(cD0_lo_r, (safe_c,), mask=v0, other=zero),
+          ),
+          FltFlt(
+            _pl_load(cD1_hi_r, (safe_c,), mask=v1, other=one),
+            _pl_load(cD1_lo_r, (safe_c,), mask=v1, other=zero),
+          ),
+          FltFlt(
+            _pl_load(cD2_hi_r, (safe_c,), mask=v2, other=one),
+            _pl_load(cD2_lo_r, (safe_c,), mask=v2, other=zero),
+          ),
+          FltFlt(
+            _pl_load(cD3_hi_r, (safe_c,), mask=v3, other=one),
+            _pl_load(cD3_lo_r, (safe_c,), mask=v3, other=zero),
+          ),
+        ]
+        d_sq_ff = [_ff_sq(d_ff[k]) for k in range(4)]
+
+        def _ld_f3(idx, msk):
+          fa = _f_slot(idx, msk)
+          return (
+            _pl_load(fx_ref, (fa,), mask=msk, other=zero),
+            _pl_load(fy_ref, (fa,), mask=msk, other=zero),
+            _pl_load(fz_ref, (fa,), mask=msk, other=zero),
+          )
+
+        r0_X = _load_ff_vec3(px_hi_ref, py_hi_ref, pz_hi_ref, px_lo_ref, py_lo_ref, pz_lo_ref, sX, v0)
+        r0_H_raw = [
+          _load_ff_vec3(px_hi_ref, py_hi_ref, pz_hi_ref, px_lo_ref, py_lo_ref, pz_lo_ref, sH[k], v_slots[k])
+          for k in range(4)
+        ]
+        p0_X = _load_ff_vec3(mx_hi_ref, my_hi_ref, mz_hi_ref, mx_lo_ref, my_lo_ref, mz_lo_ref, sX, v0)
+        p0_H = [
+          _load_ff_vec3(mx_hi_ref, my_hi_ref, mz_hi_ref, mx_lo_ref, my_lo_ref, mz_lo_ref, sH[k], v_slots[k])
+          for k in range(4)
+        ]
+        f0_X = _ld_f3(sX, v0)
+        f0_H = [_ld_f3(sH[k], v_slots[k]) for k in range(4)]
+
+        mX = _pl_load(m_ref, (base_a + sX,), mask=v0, other=one)
+        mH = [_pl_load(m_ref, (base_a + sH[k]), mask=v_slots[k], other=one) for k in range(4)]
+        inv_mX = one / jnp.maximum(mX, jnp.asarray(1e-30, dtype=jnp.float32))
+        inv_mH = [one / jnp.maximum(mH[k], jnp.asarray(1e-30, dtype=jnp.float32)) for k in range(4)]
+        inv_half_dt = one / jnp.maximum(half_dt, jnp.asarray(1e-30, dtype=jnp.float32))
+
+        r0_H = []
+        ab0 = []
+        for k in range(4):
+          dx = ff_sub(r0_H_raw[k][0], r0_X[0])
+          dy = ff_sub(r0_H_raw[k][1], r0_X[1])
+          dz = ff_sub(r0_H_raw[k][2], r0_X[2])
+          if has_box and box_xyz is not None:
+            dx = ff_min_image_f32(dx, box_xyz[0])
+            dy = ff_min_image_f32(dy, box_xyz[1])
+            dz = ff_min_image_f32(dz, box_xyz[2])
+          ab0.append((ff_to_f32(dx), ff_to_f32(dy), ff_to_f32(dz)))
+          r0_H.append((ff_add(r0_X[0], dx), ff_add(r0_X[1], dy), ff_add(r0_X[2], dz)))
+
+        if fuse_prev_post:
+          pb2_X = (
+            ff_add(p0_X[0], two_prod_fma(half_dt, f0_X[0])),
+            ff_add(p0_X[1], two_prod_fma(half_dt, f0_X[1])),
+            ff_add(p0_X[2], two_prod_fma(half_dt, f0_X[2])),
+          )
+          pb2_H = [
+            (
+              ff_add(p0_H[k][0], two_prod_fma(half_dt, f0_H[k][0])),
+              ff_add(p0_H[k][1], two_prod_fma(half_dt, f0_H[k][1])),
+              ff_add(p0_H[k][2], two_prod_fma(half_dt, f0_H[k][2])),
+            )
+            for k in range(4)
+          ]
+          p0_X, p0_H = _rattle_vel_cluster_fltflt_vec3(
+            pb2_X, pb2_H, ab0, inv_mX, inv_mH, v_slots, n_iters=6
+          )
+
+        p1_X = (
+          ff_add(p0_X[0], two_prod_fma(half_dt, f0_X[0])),
+          ff_add(p0_X[1], two_prod_fma(half_dt, f0_X[1])),
+          ff_add(p0_X[2], two_prod_fma(half_dt, f0_X[2])),
+        )
+        p1_H = [
+          (
+            ff_add(p0_H[k][0], two_prod_fma(half_dt, f0_H[k][0])),
+            ff_add(p0_H[k][1], two_prod_fma(half_dt, f0_H[k][1])),
+            ff_add(p0_H[k][2], two_prod_fma(half_dt, f0_H[k][2])),
+          )
+          for k in range(4)
+        ]
+
+        dt_imX = half_dt * inv_mX
+        dt_imH = [half_dt * inv_mH[k] for k in range(4)]
+        r_unc1_X = (
+          ff_add(r0_X[0], ff_mul_f32(p1_X[0], dt_imX)),
+          ff_add(r0_X[1], ff_mul_f32(p1_X[1], dt_imX)),
+          ff_add(r0_X[2], ff_mul_f32(p1_X[2], dt_imX)),
+        )
+        r_unc1_H = [
+          (
+            ff_add(r0_H[k][0], ff_mul_f32(p1_H[k][0], dt_imH[k])),
+            ff_add(r0_H[k][1], ff_mul_f32(p1_H[k][1], dt_imH[k])),
+            ff_add(r0_H[k][2], ff_mul_f32(p1_H[k][2], dt_imH[k])),
+          )
+          for k in range(4)
+        ]
+        r_con1_X, r_con1_H = _rattle_shake_cluster_fltflt_vec3(
+          r_unc1_X, r_unc1_H, ab0, inv_mX, inv_mH, d_sq_ff, v_slots, n_iters=10
+        )
+        cX_dt = mX * inv_half_dt
+        p_mid_X = (
+          ff_add(p1_X[0], ff_mul_f32(ff_sub(r_con1_X[0], r_unc1_X[0]), cX_dt)),
+          ff_add(p1_X[1], ff_mul_f32(ff_sub(r_con1_X[1], r_unc1_X[1]), cX_dt)),
+          ff_add(p1_X[2], ff_mul_f32(ff_sub(r_con1_X[2], r_unc1_X[2]), cX_dt)),
+        )
+        p_mid_H = []
+        ab1 = []
+        for k in range(4):
+          cH_dt = mH[k] * inv_half_dt
+          p_mid_H.append(
+            (
+              ff_add(p1_H[k][0], ff_mul_f32(ff_sub(r_con1_H[k][0], r_unc1_H[k][0]), cH_dt)),
+              ff_add(p1_H[k][1], ff_mul_f32(ff_sub(r_con1_H[k][1], r_unc1_H[k][1]), cH_dt)),
+              ff_add(p1_H[k][2], ff_mul_f32(ff_sub(r_con1_H[k][2], r_unc1_H[k][2]), cH_dt)),
+            )
+          )
+          ab1.append(
+            (
+              ff_to_f32(ff_sub(r_con1_H[k][0], r_con1_X[0])),
+              ff_to_f32(ff_sub(r_con1_H[k][1], r_con1_X[1])),
+              ff_to_f32(ff_sub(r_con1_H[k][2], r_con1_X[2])),
+            )
+          )
+
+        nsXx, nsXy = _philox2x32_box_muller_pair(s0, s1, sX, sX + jnp.int32(0x10000001), jnp.float32)
+        nsXz, _ = _philox2x32_box_muller_pair(s0, s1, sX, sX + jnp.int32(0x20000002), jnp.float32)
+        scX = c2 * jnp.sqrt(jnp.maximum(mX * kT_val, zero))
+        p_o_X = (
+          ff_add_f32(ff_mul_f32(p_mid_X[0], c1), scX * nsXx),
+          ff_add_f32(ff_mul_f32(p_mid_X[1], c1), scX * nsXy),
+          ff_add_f32(ff_mul_f32(p_mid_X[2], c1), scX * nsXz),
+        )
+        p_o_H = []
+        for k in range(4):
+          nsHx, nsHy = _philox2x32_box_muller_pair(s0, s1, sH[k], sH[k] + jnp.int32(0x10000001), jnp.float32)
+          nsHz, _ = _philox2x32_box_muller_pair(s0, s1, sH[k], sH[k] + jnp.int32(0x20000002), jnp.float32)
+          scH = c2 * jnp.sqrt(jnp.maximum(mH[k] * kT_val, zero))
+          p_o_H.append(
+            (
+              ff_add_f32(ff_mul_f32(p_mid_H[k][0], c1), scH * nsHx),
+              ff_add_f32(ff_mul_f32(p_mid_H[k][1], c1), scH * nsHy),
+              ff_add_f32(ff_mul_f32(p_mid_H[k][2], c1), scH * nsHz),
+            )
+          )
+        p_o_X, p_o_H = _rattle_vel_cluster_fltflt_vec3(
+          p_o_X, p_o_H, ab1, inv_mX, inv_mH, v_slots, n_iters=6
+        )
+
+        r_unc2_X = (
+          ff_add(r_con1_X[0], ff_mul_f32(p_o_X[0], dt_imX)),
+          ff_add(r_con1_X[1], ff_mul_f32(p_o_X[1], dt_imX)),
+          ff_add(r_con1_X[2], ff_mul_f32(p_o_X[2], dt_imX)),
+        )
+        r_unc2_H = [
+          (
+            ff_add(r_con1_H[k][0], ff_mul_f32(p_o_H[k][0], dt_imH[k])),
+            ff_add(r_con1_H[k][1], ff_mul_f32(p_o_H[k][1], dt_imH[k])),
+            ff_add(r_con1_H[k][2], ff_mul_f32(p_o_H[k][2], dt_imH[k])),
+          )
+          for k in range(4)
+        ]
+        r_con2_X, r_con2_H = _rattle_shake_cluster_fltflt_vec3(
+          r_unc2_X, r_unc2_H, ab1, inv_mX, inv_mH, d_sq_ff, v_slots, n_iters=10
+        )
+        p_fin_X = (
+          ff_add(p_o_X[0], ff_mul_f32(ff_sub(r_con2_X[0], r_unc2_X[0]), cX_dt)),
+          ff_add(p_o_X[1], ff_mul_f32(ff_sub(r_con2_X[1], r_unc2_X[1]), cX_dt)),
+          ff_add(p_o_X[2], ff_mul_f32(ff_sub(r_con2_X[2], r_unc2_X[2]), cX_dt)),
+        )
+        p_fin_H = []
+        for k in range(4):
+          cH_dt = mH[k] * inv_half_dt
+          p_fin_H.append(
+            (
+              ff_add(p_o_H[k][0], ff_mul_f32(ff_sub(r_con2_H[k][0], r_unc2_H[k][0]), cH_dt)),
+              ff_add(p_o_H[k][1], ff_mul_f32(ff_sub(r_con2_H[k][1], r_unc2_H[k][1]), cH_dt)),
+              ff_add(p_o_H[k][2], ff_mul_f32(ff_sub(r_con2_H[k][2], r_unc2_H[k][2]), cH_dt)),
+            )
+          )
+
+        r_w_X = _wrap_pos_ff(r_con2_X[0], r_con2_X[1], r_con2_X[2])
+        sh_x = ff_sub(r_w_X[0], r_con2_X[0])
+        sh_y = ff_sub(r_w_X[1], r_con2_X[1])
+        sh_z = ff_sub(r_w_X[2], r_con2_X[2])
+
+        _store_pos_mom_ff(sX, r_w_X[0], r_w_X[1], r_w_X[2], p_fin_X[0], p_fin_X[1], p_fin_X[2], v0)
+        for k in range(4):
+          vk = v_slots[k]
+          _store_pos_mom_ff(
+            sH[k],
+            ff_add(r_con2_H[k][0], sh_x),
+            ff_add(r_con2_H[k][1], sh_y),
+            ff_add(r_con2_H[k][2], sh_z),
+            p_fin_H[k][0],
+            p_fin_H[k][1],
+            p_fin_H[k][2],
+            vk,
+          )
+        return c_pid - c_pid
+
+      return jax.lax.cond(
+        jnp.max(v0.astype(jnp.int32)) > 0,
+        _run_rattle,
+        lambda _: c_pid - c_pid,
+        None,
+      )
+
+    def _dispatch_non_solute(p_rem):
+      if n_blk_w > 0 and n_blk_c > 0:
+        return jax.lax.cond(
+          p_rem < n_blk_w,
+          _do_water,
+          lambda p2: _do_rattle(p2 - n_blk_w),
+          p_rem,
+        )
+      if n_blk_w > 0:
+        return _do_water(p_rem)
+      if n_blk_c > 0:
+        return _do_rattle(p_rem)
+      return p_rem - p_rem
+
+    if n_blk_a > 0 and (n_blk_w + n_blk_c) > 0:
+      _ = jax.lax.cond(
+        pid < n_blk_a,
+        _do_solute,
+        lambda p: _dispatch_non_solute(p - n_blk_a),
+        pid,
+      )
+    elif n_blk_a > 0:
+      _ = _do_solute(pid)
+    else:
+      _ = _dispatch_non_solute(pid)
+
+  any_spec = pl.BlockSpec(memory_space=pl.ANY)
+  in_args: list[Any] = [
+    px_hi, py_hi, pz_hi, px_lo, py_lo, pz_lo,
+    mx_hi, my_hi, mz_hi, mx_lo, my_lo, mz_lo,
+    fx_f32, fy_f32, fz_f32,
+    m_f32, seed_flat, is_water_flat,
+    wO_in, wH1_in, wH2_in, wm_in, bx_flat, dt_b, kT_b,
+  ]
+  if has_rattle:
+    in_args.extend([
+      cX_in, cH0_in, cH1_in, cH2_in, cH3_in,
+      cD0_hi, cD1_hi, cD2_hi, cD3_hi,
+      cD0_lo, cD1_lo, cD2_lo, cD3_lo,
+      cM_in,
+    ])
+  if has_morton:
+    in_args.append(inv_perm_in)
+  m_init_idx = len(in_args)
+  if has_morton:
+    in_args.extend([px_m_init, py_m_init, pz_m_init])
+
+  out_shapes: list[jax.ShapeDtypeStruct] = [
+    jax.ShapeDtypeStruct((out_len,), jnp.float32) for _ in range(12)
+  ]
+  aliases: dict[int, int] = {i: i for i in range(12)}
+  if has_morton:
+    out_shapes.extend([jax.ShapeDtypeStruct((m_out_len,), jnp.float32) for _ in range(3)])
+    aliases[m_init_idx] = 12
+    aliases[m_init_idx + 1] = 13
+    aliases[m_init_idx + 2] = 14
+
+  with fltflt_triton_asm_context(True):
+    raw_outs = pl.pallas_call(
+      _pre_fltflt_kernel,
+      out_shape=out_shapes,
+      in_specs=[any_spec] * len(in_args),
+      out_specs=[any_spec] * len(out_shapes),
+      grid=(B, total_blocks),
+      input_output_aliases=aliases,
+      interpret=False,
+      compiler_params=resolve_pallas_compiler_params("settle_integrator", grid_blocks=B * total_blocks),
+      name="pallas_baoab_pre_force_fltflt",
+    )(*in_args)
+
+  return _format_pre_fltflt_outs(raw_outs, use_scratch)
+
+
+def _pallas_baoab_post_force_fltflt_impl(  # noqa: PLR0913
+  B: int,
+  in_batched: tuple[bool, ...],
+  positions: Array,
+  momentum: Array,
+  force: Array,
+  mass: Array,
+  water_indices: Array,
+  water_mask: Array,
+  dt_arr: Array,
+  mass_oxygen: float,
+  mass_hydrogen: float,
+  interpret: bool,
+  atom_mask: Array | None = None,
+  is_water_or_ghost: Array | None = None,
+  constraint_pairs: Array | None = None,
+  constraint_lengths: Array | None = None,
+  constraint_mask: Array | None = None,
+  n_active_atoms: int | None = None,
+  n_active_waters: int | None = None,
+  prebuilt_soa: Any = None,
+  positions_lo: Array | None = None,
+  momentum_lo: Array | None = None,
+  return_lo_accumulators: bool = False,
+) -> Array | tuple[Array, ...]:
+  """100% ``float32`` ``(hi, lo)`` ``FltFlt`` Pallas BAOAB post-force kernel (zero GPU FP64 ops)."""
+  if prebuilt_soa is not None:
+    if isinstance(prebuilt_soa, tuple):
+      px_in, py_in, pz_in, mx_in, my_in, mz_in, fx_in, fy_in, fz_in, soa_plan = prebuilt_soa
+    else:
+      soa_plan = prebuilt_soa
+      px_in, py_in, pz_in = positions
+      mx_in, my_in, mz_in = momentum
+      fx_in, fy_in, fz_in = force
+    orig_dtype = soa_plan["dtype"]
+    N = int(soa_plan["N"])
+    W = int(soa_plan["W"])
+    W_eff = int(soa_plan["W_eff"])
+    C = int(soa_plan["C"])
+    C_eff = int(soa_plan["C_eff"])
+    has_rattle = bool(soa_plan["has_rattle"])
+    n_blk_a = int(soa_plan["n_blk_a"])
+    n_blk_w = int(soa_plan["n_blk_w"])
+    n_blk_c = int(soa_plan["n_blk_c"])
+    px_hi, px_lo = _split_1d_to_fltflt(px_in)
+    py_hi, py_lo = _split_1d_to_fltflt(py_in)
+    pz_hi, pz_lo = _split_1d_to_fltflt(pz_in)
+    mx_hi, mx_lo = _split_1d_to_fltflt(mx_in)
+    my_hi, my_lo = _split_1d_to_fltflt(my_in)
+    mz_hi, mz_lo = _split_1d_to_fltflt(mz_in)
+    fx_f32 = jnp.asarray(fx_in, dtype=jnp.float32)
+    fy_f32 = jnp.asarray(fy_in, dtype=jnp.float32)
+    fz_f32 = jnp.asarray(fz_in, dtype=jnp.float32)
+    m_f32 = jnp.asarray(soa_plan["m_in"], dtype=jnp.float32)
+    am_in = soa_plan["am_in"]
+    is_water_flat = soa_plan["is_water_flat"]
+    wO_in, wH1_in, wH2_in, wm_in = soa_plan["water_in"]
+    cX_in, cH0_in, cH1_in, cH2_in, cH3_in, _cD0, _cD1, _cD2, _cD3, cM_in = soa_plan["rattle_in"]
+    dt_b = jnp.broadcast_to(jnp.asarray(dt_arr, dtype=jnp.float32).reshape(-1), (B,))
+  else:
+    soa_plan = None
+    orig_dtype = positions.dtype
+
+    def _bcast(arr, is_b):
+      return arr if is_b else jnp.broadcast_to(arr[None, ...], (B, *arr.shape))
+
+    pos_b = _bcast(positions, in_batched[0])
+    mom_b = _bcast(momentum, in_batched[1])
+    frc_b = _bcast(force, in_batched[2])
+    mass_raw = mass.squeeze(-1) if mass.ndim >= 2 and mass.shape[-1] == 1 else mass
+    mass_b = _bcast(mass_raw, in_batched[3])
+    wi_b = _bcast(water_indices, in_batched[4]).astype(jnp.int32)
+    wm_b = _bcast(water_mask, in_batched[5]).astype(jnp.int32)
+    dt_b = jnp.broadcast_to(jnp.asarray(_bcast(dt_arr, in_batched[6]), dtype=jnp.float32).reshape(-1), (B,))
+
+    arg_cursor = 7
+    has_atom_mask = atom_mask is not None
+    if has_atom_mask:
+      am_b = _bcast(atom_mask, in_batched[arg_cursor]).astype(jnp.int32)
+      arg_cursor += 1
+    else:
+      am_b = jnp.ones((B, int(pos_b.shape[1])), dtype=jnp.int32)
+
+    N = int(pos_b.shape[1])
+    W = int(wi_b.shape[1])
+    W_eff = max(W, 1)
+    N_act = _resolve_active_limit(n_active_atoms, "PROLIX_ACTIVE_ATOMS", N, min_val=1)
+    W_act = _resolve_active_limit(n_active_waters, "PROLIX_ACTIVE_WATERS", W, min_val=0)
+    n_blk_a = (N_act + _SETTLE_ATOM_BLOCK - 1) // _SETTLE_ATOM_BLOCK
+    n_blk_w = (W_act + _SETTLE_WATER_BLOCK - 1) // _SETTLE_WATER_BLOCK
+
+    iwg_b = None
+    if is_water_or_ghost is not None:
+      iwg_b = _bcast(is_water_or_ghost, in_batched[arg_cursor]).astype(jnp.int32)
+      arg_cursor += 1
+
+    has_rattle = (
+      constraint_pairs is not None
+      and constraint_lengths is not None
+      and int(constraint_pairs.shape[-2]) > 0
+    )
+    C = int(constraint_pairs.shape[-2]) if has_rattle and constraint_pairs is not None else 0
+    C_eff = max(C, 1)
+    n_blk_c = (C + _SETTLE_RATTLE_BLOCK - 1) // _SETTLE_RATTLE_BLOCK if has_rattle else 0
+
+    if has_rattle:
+      cp_b = _bcast(constraint_pairs, in_batched[arg_cursor]).astype(jnp.int32)
+      arg_cursor += 1
+      cl_b = _bcast(constraint_lengths, in_batched[arg_cursor])
+      arg_cursor += 1
+      if constraint_mask is not None:
+        cm_b = _bcast(constraint_mask, in_batched[arg_cursor]).astype(jnp.int32)
+        arg_cursor += 1
+      else:
+        cm_b = jnp.ones((B, C), dtype=jnp.int32)
+      cX, cH0, cH1, cH2, cH3, _cD0, _cD1, _cD2, _cD3, cM, constrained_atom_mask = _build_rattle_clusters(
+        B, N, C, cp_b, cl_b, cm_b, mass_b
+      )
+      cX_in = jnp.asarray(cX.reshape(B * C), dtype=jnp.int32)
+      cH0_in = jnp.asarray(cH0.reshape(B * C), dtype=jnp.int32)
+      cH1_in = jnp.asarray(cH1.reshape(B * C), dtype=jnp.int32)
+      cH2_in = jnp.asarray(cH2.reshape(B * C), dtype=jnp.int32)
+      cH3_in = jnp.asarray(cH3.reshape(B * C), dtype=jnp.int32)
+      cM_in = jnp.asarray(cM.reshape(B * C), dtype=jnp.int32)
+    else:
+      constrained_atom_mask = None
+      cX_in = cH0_in = cH1_in = cH2_in = cH3_in = cM_in = None
+
+    pos_lo_b = None
+    if positions_lo is not None:
+      pos_lo_b = _bcast(positions_lo, in_batched[arg_cursor])
+      arg_cursor += 1
+    mom_lo_b = None
+    if momentum_lo is not None:
+      mom_lo_b = _bcast(momentum_lo, in_batched[arg_cursor])
+      arg_cursor += 1
+
+    px_hi, py_hi, pz_hi, px_lo, py_lo, pz_lo = _split_state_to_fltflt_soa(pos_b, pos_lo_b, B, N)
+    mx_hi, my_hi, mz_hi, mx_lo, my_lo, mz_lo = _split_state_to_fltflt_soa(mom_b, mom_lo_b, B, N)
+    fx_f32 = jnp.asarray(frc_b[:, :, 0].reshape(B * N), dtype=jnp.float32)
+    fy_f32 = jnp.asarray(frc_b[:, :, 1].reshape(B * N), dtype=jnp.float32)
+    fz_f32 = jnp.asarray(frc_b[:, :, 2].reshape(B * N), dtype=jnp.float32)
+    m_f32 = jnp.asarray(mass_b.reshape(B * N), dtype=jnp.float32)
+    am_in = jnp.asarray(am_b.reshape(B * N), dtype=jnp.int32)
+
+    if W > 0:
+      wO_in = jnp.asarray(wi_b[:, :, 0].reshape(B * W), dtype=jnp.int32)
+      wH1_in = jnp.asarray(wi_b[:, :, 1].reshape(B * W), dtype=jnp.int32)
+      wH2_in = jnp.asarray(wi_b[:, :, 2].reshape(B * W), dtype=jnp.int32)
+      wm_in = jnp.asarray(wm_b.reshape(B * W), dtype=jnp.int32)
+    else:
+      wO_in = jnp.zeros((B * W_eff,), dtype=jnp.int32)
+      wH1_in = jnp.zeros((B * W_eff,), dtype=jnp.int32)
+      wH2_in = jnp.zeros((B * W_eff,), dtype=jnp.int32)
+      wm_in = jnp.zeros((B * W_eff,), dtype=jnp.int32)
+
+    if iwg_b is not None and not has_rattle:
+      is_water_flat = jnp.asarray(iwg_b.reshape(B * N), dtype=jnp.int32)
+    else:
+      is_water_flat = _build_is_water_or_ghost_mask(
+        B, N, W, wi_b, wm_b, am_b if has_atom_mask else None,
+        constrained_atom_mask=constrained_atom_mask,
+      )
+
+  mO_f = float(mass_oxygen)
+  mH_f = float(mass_hydrogen)
+
+  def _format_post_fltflt_outs(
+    raw_m: tuple[Array, Array, Array, Array, Array, Array],
+    trim_scratch: bool,
+  ) -> Array | tuple[Array, ...]:
+    mx_ho, my_ho, mz_ho, mx_lo_o, my_lo_o, mz_lo_o = raw_m
+    if trim_scratch:
+      mx_ho, my_ho, mz_ho = mx_ho[:-1], my_ho[:-1], mz_ho[:-1]
+      mx_lo_o, my_lo_o, mz_lo_o = mx_lo_o[:-1], my_lo_o[:-1], mz_lo_o[:-1]
+    if soa_plan is not None:
+      if orig_dtype == jnp.float64:
+        return (
+          ff_to_float64(FltFlt(mx_ho, mx_lo_o)),
+          ff_to_float64(FltFlt(my_ho, my_lo_o)),
+          ff_to_float64(FltFlt(mz_ho, mz_lo_o)),
+        )
+      return (
+        ff_to_f32(FltFlt(mx_ho, mx_lo_o)),
+        ff_to_f32(FltFlt(my_ho, my_lo_o)),
+        ff_to_f32(FltFlt(mz_ho, mz_lo_o)),
+      )
+
+    mom_hi_b = jnp.stack([mx_ho.reshape(B, N), my_ho.reshape(B, N), mz_ho.reshape(B, N)], axis=-1)
+    mom_lo_b_out = jnp.stack([mx_lo_o.reshape(B, N), my_lo_o.reshape(B, N), mz_lo_o.reshape(B, N)], axis=-1)
+    if orig_dtype == jnp.float64:
+      mom_out = ff_to_float64(FltFlt(mom_hi_b, mom_lo_b_out))
+      return (mom_out, mom_lo_b_out) if return_lo_accumulators else mom_out
+    if return_lo_accumulators:
+      return (mom_hi_b, mom_lo_b_out)
+    return ff_to_f32(FltFlt(mom_hi_b, mom_lo_b_out))
+
+  if interpret or in_export_context():
+    return _format_post_fltflt_outs(
+      _pure_jax_baoab_post_force_fltflt(
+        B,
+        N,
+        W,
+        C,
+        n_blk_a,
+        n_blk_w,
+        n_blk_c,
+        px_hi,
+        py_hi,
+        pz_hi,
+        px_lo,
+        py_lo,
+        pz_lo,
+        mx_hi,
+        my_hi,
+        mz_hi,
+        mx_lo,
+        my_lo,
+        mz_lo,
+        fx_f32,
+        fy_f32,
+        fz_f32,
+        m_f32,
+        is_water_flat,
+        wO_in,
+        wH1_in,
+        wH2_in,
+        wm_in,
+        dt_b,
+        mO_f,
+        mH_f,
+        has_rattle,
+        cX_in,
+        cH0_in,
+        cH1_in,
+        cH2_in,
+        cH3_in,
+        cM_in,
+      ),
+      False,
+    )
+
+  use_scratch = False
+  total_blocks = max(1, n_blk_a + n_blk_w + n_blk_c)
+
+  def _post_fltflt_kernel(*refs):
+    px_hi_ref, py_hi_ref, pz_hi_ref, px_lo_ref, py_lo_ref, pz_lo_ref = refs[0:6]
+    mx_hi_ref, my_hi_ref, mz_hi_ref, mx_lo_ref, my_lo_ref, mz_lo_ref = refs[6:12]
+    fx_ref, fy_ref, fz_ref, m_ref, am_ref, is_w_ref = refs[12:18]
+    wO_ref, wH1_ref, wH2_ref, wm_ref, dt_ref = refs[18:23]
+    rc = 23
+    if has_rattle:
+      cX_ref, cH0_ref, cH1_ref, cH2_ref, cH3_ref, cM_ref = refs[rc : rc + 6]
+      rc += 6
+    else:
+      cX_ref = cH0_ref = cH1_ref = cH2_ref = cH3_ref = cM_ref = None
+    mx_hi_o, my_hi_o, mz_hi_o, mx_lo_o, my_lo_o, mz_lo_o = refs[rc : rc + 6]
+    del am_ref
+
+    b_id = pl.program_id(0)
+    pid = pl.program_id(1)
+    base_a = b_id * N
+    base_w = b_id * W_eff
+    base_c = b_id * C_eff
+    scratch_slot = jnp.int32(B * N)
+
+    zero = jnp.asarray(0.0, dtype=jnp.float32)
+    one = jnp.asarray(1.0, dtype=jnp.float32)
+    half = jnp.asarray(0.5, dtype=jnp.float32)
+    dt_val = _pl_load(dt_ref, (b_id + jnp.zeros((1,), dtype=jnp.int32),))[0]
+    half_dt = half * dt_val
+
+    def _load_ff_v3(xh_r, yh_r, zh_r, xl_r, yl_r, zl_r, idx, msk):
+      return (
+        FltFlt(
+          _pl_load(xh_r, (base_a + idx,), mask=msk, other=zero),
+          _pl_load(xl_r, (base_a + idx,), mask=msk, other=zero),
+        ),
+        FltFlt(
+          _pl_load(yh_r, (base_a + idx,), mask=msk, other=zero),
+          _pl_load(yl_r, (base_a + idx,), mask=msk, other=zero),
+        ),
+        FltFlt(
+          _pl_load(zh_r, (base_a + idx,), mask=msk, other=zero),
+          _pl_load(zl_r, (base_a + idx,), mask=msk, other=zero),
+        ),
+      )
+
+    def _store_mom_ff(dest_idx, px_v: FltFlt, py_v: FltFlt, pz_v: FltFlt, msk):
+      _pl_store(mx_hi_o, (dest_idx,), px_v.hi, mask=msk)
+      _pl_store(my_hi_o, (dest_idx,), py_v.hi, mask=msk)
+      _pl_store(mz_hi_o, (dest_idx,), pz_v.hi, mask=msk)
+      _pl_store(mx_lo_o, (dest_idx,), px_v.lo, mask=msk)
+      _pl_store(my_lo_o, (dest_idx,), py_v.lo, mask=msk)
+      _pl_store(mz_lo_o, (dest_idx,), pz_v.lo, mask=msk)
+
+    def _do_solute(a_pid):
+      offs = a_pid * _SETTLE_ATOM_BLOCK + jnp.arange(_SETTLE_ATOM_BLOCK, dtype=jnp.int32)
+      in_a = offs < N
+      safe_local = jnp.minimum(offs, max(N - 1, 0))
+      safe_a = base_a + safe_local
+      is_w = _pl_load(is_w_ref, (safe_a,), mask=in_a, other=jnp.int32(1)) > 0
+      valid_s = in_a & (~is_w)
+
+      def _run_solute(_):
+        px, py, pz = _load_ff_v3(
+          mx_hi_ref, my_hi_ref, mz_hi_ref, mx_lo_ref, my_lo_ref, mz_lo_ref, safe_local, valid_s
+        )
+        fx = _pl_load(fx_ref, (safe_a,), mask=valid_s, other=zero)
+        fy = _pl_load(fy_ref, (safe_a,), mask=valid_s, other=zero)
+        fz = _pl_load(fz_ref, (safe_a,), mask=valid_s, other=zero)
+        out_px = ff_add(px, two_prod_fma(half_dt, fx))
+        out_py = ff_add(py, two_prod_fma(half_dt, fy))
+        out_pz = ff_add(pz, two_prod_fma(half_dt, fz))
+        dest = jnp.where(valid_s, safe_a, scratch_slot) if use_scratch else safe_a
+        _store_mom_ff(dest, out_px, out_py, out_pz, valid_s)
+        return a_pid - a_pid
+
+      return jax.lax.cond(
+        jnp.max(valid_s.astype(jnp.int32)) > 0,
+        _run_solute,
+        lambda _: a_pid - a_pid,
+        None,
+      )
+
+    def _do_water(w_pid):
+      offs_w = w_pid * _SETTLE_WATER_BLOCK + jnp.arange(_SETTLE_WATER_BLOCK, dtype=jnp.int32)
+      in_w = offs_w < W
+      safe_w = base_w + jnp.minimum(offs_w, max(W - 1, 0))
+      wm = _pl_load(wm_ref, (safe_w,), mask=in_w, other=jnp.int32(0)) > 0
+      valid_w = in_w & wm
+
+      def _run_water(_):
+        iO = _pl_load(wO_ref, (safe_w,), mask=valid_w, other=jnp.int32(0))
+        iH1 = _pl_load(wH1_ref, (safe_w,), mask=valid_w, other=jnp.int32(0))
+        iH2 = _pl_load(wH2_ref, (safe_w,), mask=valid_w, other=jnp.int32(0))
+        sO = jnp.where(valid_w, jnp.clip(iO, 0, max(N - 1, 0)), 0)
+        sH1 = jnp.where(valid_w, jnp.clip(iH1, 0, max(N - 1, 0)), 0)
+        sH2 = jnp.where(valid_w, jnp.clip(iH2, 0, max(N - 1, 0)), 0)
+
+        rO = _load_ff_v3(px_hi_ref, py_hi_ref, pz_hi_ref, px_lo_ref, py_lo_ref, pz_lo_ref, sO, valid_w)
+        rH1 = _load_ff_v3(px_hi_ref, py_hi_ref, pz_hi_ref, px_lo_ref, py_lo_ref, pz_lo_ref, sH1, valid_w)
+        rH2 = _load_ff_v3(px_hi_ref, py_hi_ref, pz_hi_ref, px_lo_ref, py_lo_ref, pz_lo_ref, sH2, valid_w)
+
+        pO = _load_ff_v3(mx_hi_ref, my_hi_ref, mz_hi_ref, mx_lo_ref, my_lo_ref, mz_lo_ref, sO, valid_w)
+        pH1 = _load_ff_v3(mx_hi_ref, my_hi_ref, mz_hi_ref, mx_lo_ref, my_lo_ref, mz_lo_ref, sH1, valid_w)
+        pH2 = _load_ff_v3(mx_hi_ref, my_hi_ref, mz_hi_ref, mx_lo_ref, my_lo_ref, mz_lo_ref, sH2, valid_w)
+
+        def _ld_f(idx):
+          return (
+            _pl_load(fx_ref, (base_a + idx,), mask=valid_w, other=zero),
+            _pl_load(fy_ref, (base_a + idx,), mask=valid_w, other=zero),
+            _pl_load(fz_ref, (base_a + idx,), mask=valid_w, other=zero),
+          )
+
+        fO = _ld_f(sO)
+        fH1 = _ld_f(sH1)
+        fH2 = _ld_f(sH2)
+
+        mO_s = _pl_load(m_ref, (base_a + sO,), mask=valid_w, other=one)
+        mH1_s = _pl_load(m_ref, (base_a + sH1,), mask=valid_w, other=one)
+        mH2_s = _pl_load(m_ref, (base_a + sH2,), mask=valid_w, other=one)
+
+        p_b2_O = (
+          ff_add(pO[0], two_prod_fma(half_dt, fO[0])),
+          ff_add(pO[1], two_prod_fma(half_dt, fO[1])),
+          ff_add(pO[2], two_prod_fma(half_dt, fO[2])),
+        )
+        p_b2_H1 = (
+          ff_add(pH1[0], two_prod_fma(half_dt, fH1[0])),
+          ff_add(pH1[1], two_prod_fma(half_dt, fH1[1])),
+          ff_add(pH1[2], two_prod_fma(half_dt, fH1[2])),
+        )
+        p_b2_H2 = (
+          ff_add(pH2[0], two_prod_fma(half_dt, fH2[0])),
+          ff_add(pH2[1], two_prod_fma(half_dt, fH2[1])),
+          ff_add(pH2[2], two_prod_fma(half_dt, fH2[2])),
+        )
+
+        p_out_O, p_out_H1, p_out_H2 = _settle_vel_and_am_fltflt_vec3(
+          p_b2_O, p_b2_H1, p_b2_H2, rO, rH1, rH2, mO_s, mH1_s, mH2_s, mO_f, mH_f, valid_w
+        )
+
+        for s_idx, p_v in ((sO, p_out_O), (sH1, p_out_H1), (sH2, p_out_H2)):
+          dest = jnp.where(valid_w, base_a + s_idx, scratch_slot) if use_scratch else (base_a + s_idx)
+          _store_mom_ff(dest, p_v[0], p_v[1], p_v[2], valid_w)
+        return w_pid - w_pid
+
+      return jax.lax.cond(
+        jnp.max(valid_w.astype(jnp.int32)) > 0,
+        _run_water,
+        lambda _: w_pid - w_pid,
+        None,
+      )
+
+    def _do_rattle(c_pid):
+      offs_c = c_pid * _SETTLE_RATTLE_BLOCK + jnp.arange(_SETTLE_RATTLE_BLOCK, dtype=jnp.int32)
+      in_c = offs_c < C
+      safe_c = base_c + jnp.minimum(offs_c, max(C - 1, 0))
+      cm_bits = _pl_load(cM_ref, (safe_c,), mask=in_c, other=jnp.int32(0))
+      v0 = in_c & ((cm_bits & jnp.int32(1)) != 0)
+      v1 = in_c & ((cm_bits & jnp.int32(2)) != 0)
+      v2 = in_c & ((cm_bits & jnp.int32(4)) != 0)
+      v3 = in_c & ((cm_bits & jnp.int32(8)) != 0)
+      v_slots = [v0, v1, v2, v3]
+
+      def _run_rattle(_):
+        iX = _pl_load(cX_ref, (safe_c,), mask=v0, other=jnp.int32(0))
+        iH0 = _pl_load(cH0_ref, (safe_c,), mask=v0, other=jnp.int32(0))
+        iH1 = _pl_load(cH1_ref, (safe_c,), mask=v1, other=jnp.int32(0))
+        iH2 = _pl_load(cH2_ref, (safe_c,), mask=v2, other=jnp.int32(0))
+        iH3 = _pl_load(cH3_ref, (safe_c,), mask=v3, other=jnp.int32(0))
+        sX = jnp.where(v0, jnp.clip(iX, 0, max(N - 1, 0)), 0)
+        sH = [
+          jnp.where(v0, jnp.clip(iH0, 0, max(N - 1, 0)), 0),
+          jnp.where(v1, jnp.clip(iH1, 0, max(N - 1, 0)), 0),
+          jnp.where(v2, jnp.clip(iH2, 0, max(N - 1, 0)), 0),
+          jnp.where(v3, jnp.clip(iH3, 0, max(N - 1, 0)), 0),
+        ]
+
+        rX = _load_ff_v3(px_hi_ref, py_hi_ref, pz_hi_ref, px_lo_ref, py_lo_ref, pz_lo_ref, sX, v0)
+        rH = [
+          _load_ff_v3(px_hi_ref, py_hi_ref, pz_hi_ref, px_lo_ref, py_lo_ref, pz_lo_ref, sH[k], v_slots[k])
+          for k in range(4)
+        ]
+        pX = _load_ff_v3(mx_hi_ref, my_hi_ref, mz_hi_ref, mx_lo_ref, my_lo_ref, mz_lo_ref, sX, v0)
+        pH = [
+          _load_ff_v3(mx_hi_ref, my_hi_ref, mz_hi_ref, mx_lo_ref, my_lo_ref, mz_lo_ref, sH[k], v_slots[k])
+          for k in range(4)
+        ]
+        fX = (
+          _pl_load(fx_ref, (base_a + sX,), mask=v0, other=zero),
+          _pl_load(fy_ref, (base_a + sX,), mask=v0, other=zero),
+          _pl_load(fz_ref, (base_a + sX,), mask=v0, other=zero),
+        )
+        fH = [
+          (
+            _pl_load(fx_ref, (base_a + sH[k]), mask=v_slots[k], other=zero),
+            _pl_load(fy_ref, (base_a + sH[k]), mask=v_slots[k], other=zero),
+            _pl_load(fz_ref, (base_a + sH[k]), mask=v_slots[k], other=zero),
+          )
+          for k in range(4)
+        ]
+
+        mX = _pl_load(m_ref, (base_a + sX,), mask=v0, other=one)
+        mH = [_pl_load(m_ref, (base_a + sH[k]), mask=v_slots[k], other=one) for k in range(4)]
+        inv_mX = one / jnp.maximum(mX, jnp.asarray(1e-30, dtype=jnp.float32))
+        inv_mH = [one / jnp.maximum(mH[k], jnp.asarray(1e-30, dtype=jnp.float32)) for k in range(4)]
+
+        p_b2_X = (
+          ff_add(pX[0], two_prod_fma(half_dt, fX[0])),
+          ff_add(pX[1], two_prod_fma(half_dt, fX[1])),
+          ff_add(pX[2], two_prod_fma(half_dt, fX[2])),
+        )
+        p_b2_H = [
+          (
+            ff_add(pH[k][0], two_prod_fma(half_dt, fH[k][0])),
+            ff_add(pH[k][1], two_prod_fma(half_dt, fH[k][1])),
+            ff_add(pH[k][2], two_prod_fma(half_dt, fH[k][2])),
+          )
+          for k in range(4)
+        ]
+        ab_cur = [
+          (
+            ff_to_f32(ff_sub(rH[k][0], rX[0])),
+            ff_to_f32(ff_sub(rH[k][1], rX[1])),
+            ff_to_f32(ff_sub(rH[k][2], rX[2])),
+          )
+          for k in range(4)
+        ]
+        p_out_X, p_out_H = _rattle_vel_cluster_fltflt_vec3(
+          p_b2_X, p_b2_H, ab_cur, inv_mX, inv_mH, v_slots, n_iters=8
+        )
+
+        destX = jnp.where(v0, base_a + sX, scratch_slot) if use_scratch else (base_a + sX)
+        _store_mom_ff(destX, p_out_X[0], p_out_X[1], p_out_X[2], v0)
+        for k in range(4):
+          vk = v_slots[k]
+          destH = jnp.where(vk, base_a + sH[k], scratch_slot) if use_scratch else (base_a + sH[k])
+          _store_mom_ff(destH, p_out_H[k][0], p_out_H[k][1], p_out_H[k][2], vk)
+        return c_pid - c_pid
+
+      return jax.lax.cond(
+        jnp.max(v0.astype(jnp.int32)) > 0,
+        _run_rattle,
+        lambda _: c_pid - c_pid,
+        None,
+      )
+
+    def _dispatch_non_solute(p_rem):
+      if n_blk_w > 0 and n_blk_c > 0:
+        return jax.lax.cond(
+          p_rem < n_blk_w,
+          _do_water,
+          lambda p2: _do_rattle(p2 - n_blk_w),
+          p_rem,
+        )
+      if n_blk_w > 0:
+        return _do_water(p_rem)
+      if n_blk_c > 0:
+        return _do_rattle(p_rem)
+      return p_rem - p_rem
+
+    if n_blk_a > 0 and (n_blk_w + n_blk_c) > 0:
+      _ = jax.lax.cond(
+        pid < n_blk_a,
+        _do_solute,
+        lambda p: _dispatch_non_solute(p - n_blk_a),
+        pid,
+      )
+    elif n_blk_a > 0:
+      _ = _do_solute(pid)
+    else:
+      _ = _dispatch_non_solute(pid)
+
+  any_spec = pl.BlockSpec(memory_space=pl.ANY)
+  out_len = B * N + (1 if use_scratch else 0)
+  out_shapes = [jax.ShapeDtypeStruct((out_len,), jnp.float32) for _ in range(6)]
+  in_args: list[Any] = [
+    px_hi, py_hi, pz_hi, px_lo, py_lo, pz_lo,
+    mx_hi, my_hi, mz_hi, mx_lo, my_lo, mz_lo,
+    fx_f32, fy_f32, fz_f32,
+    m_f32, am_in, is_water_flat,
+    wO_in, wH1_in, wH2_in, wm_in, dt_b,
+  ]
+  if has_rattle:
+    in_args.extend([cX_in, cH0_in, cH1_in, cH2_in, cH3_in, cM_in])
+
+  with fltflt_triton_asm_context(True):
+    raw_post = pl.pallas_call(
+      _post_fltflt_kernel,
+      out_shape=out_shapes,
+      in_specs=[any_spec] * len(in_args),
+      out_specs=[any_spec] * 6,
+      grid=(B, total_blocks),
+      input_output_aliases={6: 0, 7: 1, 8: 2, 9: 3, 10: 4, 11: 5},
+      interpret=False,
+      compiler_params=resolve_pallas_compiler_params("settle_integrator", grid_blocks=B * total_blocks),
+      name="pallas_baoab_post_force_fltflt",
+    )(*in_args)
+
+  return _format_post_fltflt_outs(raw_post, use_scratch)
+
+
 def _pallas_baoab_pre_force_batch(  # noqa: PLR0913
   B: int,
   in_batched: tuple[bool, ...],
@@ -2309,13 +5382,60 @@ def _pallas_baoab_pre_force_batch(  # noqa: PLR0913
   return_max_dr_sq: bool = False,
   n_active_atoms: int | None = None,
   n_active_waters: int | None = None,
-  f64_accumulators: bool = False,
+  f64_accumulators: bool | str = False,
   fuse_prev_post: bool = False,
   morton_inv_perm: Array | None = None,
   morton_pad: int = 0,
   prebuilt_soa: Any = None,
+  accumulator_mode: str | None = None,
+  positions_lo: Array | None = None,
+  momentum_lo: Array | None = None,
+  return_lo_accumulators: bool = False,
 ) -> tuple[Array, ...]:
   """2D-grid ``(B, n_blocks_atom + n_blocks_water + n_blocks_rattle)`` Pallas BAOAB pre-force kernel."""
+  use_f64_acc, use_fltflt_acc = _resolve_baoab_accumulator_mode(
+    f64_accumulators, accumulator_mode
+  )
+  if use_fltflt_acc or positions_lo is not None or momentum_lo is not None or return_lo_accumulators:
+    return _pallas_baoab_pre_force_fltflt_impl(
+      B,
+      in_batched,
+      positions,
+      momentum,
+      force,
+      mass,
+      rng_seeds,
+      water_indices,
+      water_mask,
+      box,
+      dt_arr,
+      kT_arr,
+      gamma,
+      r_OH,
+      r_HH,
+      mass_oxygen,
+      mass_hydrogen,
+      has_box,
+      project_ou_momentum_rigid,
+      interpret,
+      atom_mask=atom_mask,
+      is_water_or_ghost=is_water_or_ghost,
+      constraint_pairs=constraint_pairs,
+      constraint_lengths=constraint_lengths,
+      constraint_mask=constraint_mask,
+      return_pos_f32=return_pos_f32,
+      reference_position=reference_position,
+      return_max_dr_sq=return_max_dr_sq,
+      n_active_atoms=n_active_atoms,
+      n_active_waters=n_active_waters,
+      fuse_prev_post=fuse_prev_post,
+      morton_inv_perm=morton_inv_perm,
+      morton_pad=morton_pad,
+      prebuilt_soa=prebuilt_soa,
+      positions_lo=positions_lo,
+      momentum_lo=momentum_lo,
+      return_lo_accumulators=return_lo_accumulators,
+    )
   if prebuilt_soa is not None:
     if isinstance(prebuilt_soa, tuple):
       px_in, py_in, pz_in, mx_in, my_in, mz_in, fx_in, fy_in, fz_in, soa_plan = prebuilt_soa
@@ -2333,7 +5453,7 @@ def _pallas_baoab_pre_force_batch(  # noqa: PLR0913
   use_f32_math = (
     (not interpret)
     and (dtype == jnp.float64)
-    and (not f64_accumulators)
+    and (not use_f64_acc)
     and (os.environ.get("PROLIX_BAOAB_F64_INTERNAL", "0") != "1")
   )
   w_dtype = jnp.float32 if use_f32_math else dtype
@@ -3113,7 +6233,6 @@ def _pallas_baoab_pre_force_batch(  # noqa: PLR0913
           p_o_X[2] + cX_dt * (r_con2_X[2] - r_unc2_X[2]),
         )
         p_fin_H = []
-        ab2 = []
         for k in range(4):
           cH_dt = mH[k] * inv_half_dt
           p_fin_H.append(
@@ -3123,17 +6242,10 @@ def _pallas_baoab_pre_force_batch(  # noqa: PLR0913
               p_o_H[k][2] + cH_dt * (r_con2_H[k][2] - r_unc2_H[k][2]),
             )
           )
-          ab2.append(
-            (
-              r_con2_H[k][0] - r_con2_X[0],
-              r_con2_H[k][1] - r_con2_X[1],
-              r_con2_H[k][2] - r_con2_X[2],
-            )
-          )
-        p_fin_X, p_fin_H = _rattle_vel_cluster_vec3(
-          p_fin_X, p_fin_H, ab2, inv_mX, inv_mH, v_slots,
-          n_iters=6, use_f32_math=use_f32_math,
-        )
+        # Do NOT re-project velocities onto ab2 before force evaluation and B2:
+        # the R2 impulse m*(r_con2 - r_unc2)/half_dt is already symplectic along ab1,
+        # and an extra orthogonal projection before B2 drains O(dt^2) kinetic energy
+        # from HBonds solute clusters each step (matching _do_water and pure-JAX BAOAB).
 
         # Wrap heavy atom X into box and apply same periodic shift to H0..H3
         r_w_X = _wrap_pos(r_con2_X[0], r_con2_X[1], r_con2_X[2])
@@ -3338,10 +6450,43 @@ def _pallas_baoab_post_force_batch(  # noqa: PLR0913
   constraint_mask: Array | None = None,
   n_active_atoms: int | None = None,
   n_active_waters: int | None = None,
-  f64_accumulators: bool = False,
+  f64_accumulators: bool | str = False,
   prebuilt_soa: Any = None,
-) -> Array | tuple[Array, Array, Array]:
+  accumulator_mode: str | None = None,
+  positions_lo: Array | None = None,
+  momentum_lo: Array | None = None,
+  return_lo_accumulators: bool = False,
+) -> Array | tuple[Array, ...]:
   """2D-grid ``(B, n_blocks_atom + n_blocks_water + n_blocks_rattle)`` Pallas BAOAB post-force kernel."""
+  use_f64_acc, use_fltflt_acc = _resolve_baoab_accumulator_mode(
+    f64_accumulators, accumulator_mode
+  )
+  if use_fltflt_acc or positions_lo is not None or momentum_lo is not None or return_lo_accumulators:
+    return _pallas_baoab_post_force_fltflt_impl(
+      B,
+      in_batched,
+      positions,
+      momentum,
+      force,
+      mass,
+      water_indices,
+      water_mask,
+      dt_arr,
+      mass_oxygen,
+      mass_hydrogen,
+      interpret,
+      atom_mask=atom_mask,
+      is_water_or_ghost=is_water_or_ghost,
+      constraint_pairs=constraint_pairs,
+      constraint_lengths=constraint_lengths,
+      constraint_mask=constraint_mask,
+      n_active_atoms=n_active_atoms,
+      n_active_waters=n_active_waters,
+      prebuilt_soa=prebuilt_soa,
+      positions_lo=positions_lo,
+      momentum_lo=momentum_lo,
+      return_lo_accumulators=return_lo_accumulators,
+    )
   if prebuilt_soa is not None:
     if isinstance(prebuilt_soa, tuple):
       px_in, py_in, pz_in, mx_in, my_in, mz_in, fx_in, fy_in, fz_in, soa_plan = prebuilt_soa
@@ -3359,7 +6504,7 @@ def _pallas_baoab_post_force_batch(  # noqa: PLR0913
   use_f32_math = (
     (not interpret)
     and (dtype == jnp.float64)
-    and (not f64_accumulators)
+    and (not use_f64_acc)
     and (os.environ.get("PROLIX_BAOAB_F64_INTERNAL", "0") != "1")
   )
   w_dtype = jnp.float32 if use_f32_math else dtype
@@ -3819,11 +6964,19 @@ def pallas_baoab_pre_force(  # noqa: PLR0913
   return_max_dr_sq: bool = False,
   n_active_atoms: int | None = None,
   n_active_waters: int | None = None,
-  f64_accumulators: bool = False,
+  f64_accumulators: bool | str = False,
   fuse_prev_post: bool = False,
+  accumulator_mode: str | None = None,
+  positions_lo: Array | None = None,
+  momentum_lo: Array | None = None,
+  return_lo_accumulators: bool = False,
 ) -> tuple[Array, ...]:
   """Fused Pallas pre-force BAOAB + analytical SETTLE + RATTLE integrator step (MK-46 / MK-58 / MK-66)."""
-  interp = (jax.default_backend() == "cpu") if interpret is None else bool(interpret)
+  interp = (
+    ((jax.default_backend() != "gpu") or in_export_context())
+    if interpret is None
+    else (bool(interpret) or in_export_context())
+  )
   n_w = int(water_indices.shape[0])
   key, subkey = jax.random.split(rng)
   seed_pair = jax.lax.bitcast_convert_type(
@@ -3880,6 +7033,10 @@ def pallas_baoab_pre_force(  # noqa: PLR0913
     cp_arr = cl_arr = cm_arr = None
   has_ref_pos = reference_position is not None
   ref_pos_arr = jnp.asarray(reference_position, dtype=positions.dtype) if has_ref_pos else None
+  has_pos_lo = positions_lo is not None
+  pos_lo_arr = jnp.asarray(positions_lo, dtype=jnp.float32) if has_pos_lo else None
+  has_mom_lo = momentum_lo is not None
+  mom_lo_arr = jnp.asarray(momentum_lo, dtype=jnp.float32) if has_mom_lo else None
 
   dyn_args: list[Array] = [
     positions,
@@ -3900,6 +7057,10 @@ def pallas_baoab_pre_force(  # noqa: PLR0913
     dyn_args.extend([cp_arr, cl_arr, cm_arr])
   if ref_pos_arr is not None:
     dyn_args.append(ref_pos_arr)
+  if pos_lo_arr is not None:
+    dyn_args.append(pos_lo_arr)
+  if mom_lo_arr is not None:
+    dyn_args.append(mom_lo_arr)
 
   def _unpack_call(axis_size: int, in_batched_tuple: tuple[bool, ...], *args: Array):
     idx = 11
@@ -3914,6 +7075,14 @@ def pallas_baoab_pre_force(  # noqa: PLR0913
     ref_in = None
     if has_ref_pos:
       ref_in = args[idx]
+      idx += 1
+    pos_lo_in = None
+    if has_pos_lo:
+      pos_lo_in = args[idx]
+      idx += 1
+    mom_lo_in = None
+    if has_mom_lo:
+      mom_lo_in = args[idx]
       idx += 1
     return _pallas_baoab_pre_force_batch(
       axis_size,
@@ -3948,6 +7117,10 @@ def pallas_baoab_pre_force(  # noqa: PLR0913
       n_active_waters=n_active_waters,
       f64_accumulators=f64_accumulators,
       fuse_prev_post=fuse_prev_post,
+      accumulator_mode=accumulator_mode,
+      positions_lo=pos_lo_in,
+      momentum_lo=mom_lo_in,
+      return_lo_accumulators=return_lo_accumulators,
     )
 
   @jax.custom_batching.custom_vmap
@@ -3964,6 +7137,61 @@ def pallas_baoab_pre_force(  # noqa: PLR0913
   pos_new, mom_new = outs[0], outs[1]
   extra = outs[2:]
   return (pos_new, mom_new, key, *extra)
+
+
+@overload
+def pallas_baoab_post_force(
+  positions: Array,
+  momentum: Array,
+  force: Array,
+  mass: Array,
+  water_indices: Array,
+  water_mask: Array | None,
+  dt: float | Array,
+  mass_oxygen: float = ...,
+  mass_hydrogen: float = ...,
+  interpret: bool | None = ...,
+  atom_mask: Array | None = ...,
+  is_water_or_ghost: Array | None = ...,
+  constraint_pairs: Array | None = ...,
+  constraint_lengths: Array | None = ...,
+  constraint_mask: Array | None = ...,
+  n_active_atoms: int | None = ...,
+  n_active_waters: int | None = ...,
+  f64_accumulators: bool | str = ...,
+  accumulator_mode: str | None = ...,
+  positions_lo: Array | None = ...,
+  momentum_lo: Array | None = ...,
+  return_lo_accumulators: Literal[False] = ...,
+) -> Array: ...
+
+
+@overload
+def pallas_baoab_post_force(
+  positions: Array,
+  momentum: Array,
+  force: Array,
+  mass: Array,
+  water_indices: Array,
+  water_mask: Array | None,
+  dt: float | Array,
+  mass_oxygen: float = ...,
+  mass_hydrogen: float = ...,
+  interpret: bool | None = ...,
+  atom_mask: Array | None = ...,
+  is_water_or_ghost: Array | None = ...,
+  constraint_pairs: Array | None = ...,
+  constraint_lengths: Array | None = ...,
+  constraint_mask: Array | None = ...,
+  n_active_atoms: int | None = ...,
+  n_active_waters: int | None = ...,
+  f64_accumulators: bool | str = ...,
+  accumulator_mode: str | None = ...,
+  positions_lo: Array | None = ...,
+  momentum_lo: Array | None = ...,
+  *,
+  return_lo_accumulators: Literal[True],
+) -> tuple[Array, Array]: ...
 
 
 def pallas_baoab_post_force(  # noqa: PLR0913
@@ -3984,10 +7212,18 @@ def pallas_baoab_post_force(  # noqa: PLR0913
   constraint_mask: Array | None = None,
   n_active_atoms: int | None = None,
   n_active_waters: int | None = None,
-  f64_accumulators: bool = False,
-) -> Array:
+  f64_accumulators: bool | str = False,
+  accumulator_mode: str | None = None,
+  positions_lo: Array | None = None,
+  momentum_lo: Array | None = None,
+  return_lo_accumulators: bool = False,
+) -> Array | tuple[Array, Array]:
   """Fused Pallas post-force BAOAB + analytical SETTLE + RATTLE velocity kernel (MK-46 / MK-58)."""
-  interp = (jax.default_backend() == "cpu") if interpret is None else bool(interpret)
+  interp = (
+    ((jax.default_backend() != "gpu") or in_export_context())
+    if interpret is None
+    else (bool(interpret) or in_export_context())
+  )
   n_w = int(water_indices.shape[0])
   wm_arr = (
     jnp.ones((n_w,), dtype=jnp.int32)
@@ -4021,6 +7257,10 @@ def pallas_baoab_post_force(  # noqa: PLR0913
     )
   else:
     cp_arr = cl_arr = cm_arr = None
+  has_pos_lo = positions_lo is not None
+  pos_lo_arr = jnp.asarray(positions_lo, dtype=jnp.float32) if has_pos_lo else None
+  has_mom_lo = momentum_lo is not None
+  mom_lo_arr = jnp.asarray(momentum_lo, dtype=jnp.float32) if has_mom_lo else None
 
   dyn_args: list[Array] = [
     positions,
@@ -4036,6 +7276,10 @@ def pallas_baoab_post_force(  # noqa: PLR0913
     dyn_args.append(iwg_arr)
   if cp_arr is not None and cl_arr is not None and cm_arr is not None:
     dyn_args.extend([cp_arr, cl_arr, cm_arr])
+  if pos_lo_arr is not None:
+    dyn_args.append(pos_lo_arr)
+  if mom_lo_arr is not None:
+    dyn_args.append(mom_lo_arr)
 
   def _unpack_call(axis_size: int, in_batched_tuple: tuple[bool, ...], *args: Array):
     idx = 8
@@ -4047,6 +7291,14 @@ def pallas_baoab_post_force(  # noqa: PLR0913
     if has_rattle:
       cp_in, cl_in, cm_in = args[idx], args[idx + 1], args[idx + 2]
       idx += 3
+    pos_lo_in = None
+    if has_pos_lo:
+      pos_lo_in = args[idx]
+      idx += 1
+    mom_lo_in = None
+    if has_mom_lo:
+      mom_lo_in = args[idx]
+      idx += 1
     return _pallas_baoab_post_force_batch(
       axis_size,
       in_batched_tuple,
@@ -4068,16 +7320,24 @@ def pallas_baoab_post_force(  # noqa: PLR0913
       n_active_atoms=n_active_atoms,
       n_active_waters=n_active_waters,
       f64_accumulators=f64_accumulators,
+      accumulator_mode=accumulator_mode,
+      positions_lo=pos_lo_in,
+      momentum_lo=mom_lo_in,
+      return_lo_accumulators=return_lo_accumulators,
     )
 
   @jax.custom_batching.custom_vmap
   def _vmappable_m(*args: Array):
     m_b = _unpack_call(1, (False,) * len(args), *args)
+    if isinstance(m_b, tuple):
+      return tuple(o[0] for o in m_b)
     return m_b[0]
 
   @_vmappable_m.def_vmap
   def _vmap_rule_m(axis_size, in_batched, *args: Array):
     m_b = _unpack_call(int(axis_size), tuple(bool(b) for b in in_batched), *args)
+    if isinstance(m_b, tuple):
+      return m_b, (True,) * len(m_b)
     return m_b, True
 
   return _vmappable_m(*dyn_args)
@@ -4249,7 +7509,8 @@ def _pallas_baoab_post_soa(  # noqa: PLR0913
   mass_hydrogen: float,
   interpret: bool,
   soa_plan: dict[str, Any],
-  f64_accumulators: bool = False,
+  f64_accumulators: bool | str = False,
+  accumulator_mode: str | None = None,
 ) -> tuple[Array, Array, Array]:
   """Chunk-end post-force B2 + SETTLE_vel + RATTLE_vel wrapper on flat SoA state + Morton forces."""
   B = int(soa_plan["B"])
@@ -4283,6 +7544,7 @@ def _pallas_baoab_post_soa(  # noqa: PLR0913
     n_active_waters=soa_plan["n_active_waters"],
     f64_accumulators=f64_accumulators,
     prebuilt_soa=(px_in, py_in, pz_in, mx_in, my_in, mz_in, fx_orig, fy_orig, fz_orig, soa_plan),
+    accumulator_mode=accumulator_mode,
   )
   if isinstance(res, tuple):
     return cast("tuple[Array, Array, Array]", res)
@@ -4320,7 +7582,8 @@ def settle_langevin(  # noqa: PLR0913
   max_shake_iter: int = 25,
   displacement_fn: Callable[..., Array] | None = None,
   use_pallas: bool | None = None,
-  f64_accumulators: bool = False,
+  f64_accumulators: bool | str = False,
+  accumulator_mode: str | None = None,
 ):
   r"""Langevin dynamics integrator with SETTLE constraints for water.
 
@@ -4711,6 +7974,7 @@ def settle_langevin(  # noqa: PLR0913
           constraint_mask=_c_mask_sl,
           return_pos_f32=True,
           f64_accumulators=f64_accumulators,
+          accumulator_mode=accumulator_mode,
         )
         force = jnp.asarray(force_fn(pos_f32, **kwargs), dtype=jnp.float32)
       else:
@@ -4737,6 +8001,7 @@ def settle_langevin(  # noqa: PLR0913
           constraint_lengths=_c_lengths_sl,
           constraint_mask=_c_mask_sl,
           f64_accumulators=f64_accumulators,
+          accumulator_mode=accumulator_mode,
         )
         force = force_fn(position, **kwargs)
       momentum = pallas_baoab_post_force(
@@ -4755,6 +8020,7 @@ def settle_langevin(  # noqa: PLR0913
         constraint_lengths=_c_lengths_sl,
         constraint_mask=_c_mask_sl,
         f64_accumulators=f64_accumulators,
+        accumulator_mode=accumulator_mode,
       )
       if _has_waters_sl and project_ou_momentum_rigid and projection_site in ("post_settle_vel", "both"):
         momentum = project_tip3p_waters_momentum_rigid(

@@ -11,9 +11,10 @@ Provides:
 from __future__ import annotations
 
 import functools
+import math
 import os
 from dataclasses import dataclass, field
-from typing import NamedTuple, cast
+from typing import Any, NamedTuple, cast
 
 import jax
 import jax.core
@@ -104,10 +105,43 @@ from prolix.physics.pallas_tile_pairs import (
     pallas_tile_pairs_param_grads,
     precompute_dedup_excl_edges,
     prepare_fused_bonded_buffers,
+    reaction_field_k_c,
 )
 from prolix.physics.settle import pallas_baoab_interstep
 
 xtrax_op = xtrax.op
+
+
+def reaction_field_coefficients(cutoff: float, rf_dielectric: float) -> tuple[float, float]:
+    """Compute Reaction Field ``(k_rf, c_rf)`` safely including metallic conductor ``rf_dielectric=inf``.
+
+    Uses ``inv_eps = 1.0 / float(rf_dielectric)`` so ``rf_dielectric == math.inf`` yields exact
+    ``(1 / (2 r_c^3), 3 / (2 r_c))`` without ``inf / inf = NaN`` indeterminate division.
+    """
+    rc = float(cutoff)
+    if (not math.isfinite(rc)) or rc <= 0.0:
+        raise ValueError(f"cutoff must be finite and positive for Reaction Field, got {cutoff!r}")
+    eps = float(rf_dielectric)
+    if math.isnan(eps) or eps <= 0.0:
+        raise ValueError(f"rf_dielectric must be positive (or +inf), got {rf_dielectric!r}")
+    inv_rc = 1.0 / rc
+    inv_rc3 = inv_rc * inv_rc * inv_rc
+    inv_eps = 1.0 / eps
+    denom = 2.0 + inv_eps
+    k_rf = inv_rc3 * ((1.0 - inv_eps) / denom)
+    c_rf = inv_rc * (3.0 / denom)
+    return k_rf, c_rf
+
+
+def _resolve_rf_params(
+    pme_alpha: float,
+    cutoff: float,
+    rf_dielectric: float | None,
+) -> tuple[bool, float, float]:
+    if (pme_alpha <= 0.0) and (rf_dielectric is not None) and math.isfinite(float(cutoff)) and (float(cutoff) > 0.0):
+        k_rf, c_rf = reaction_field_coefficients(cutoff, rf_dielectric)
+        return True, k_rf, c_rf
+    return False, 0.0, 0.0
 
 
 def _normalize_box(box: jax.Array | None, positions: jax.Array) -> tuple[jax.Array, bool]:
@@ -1013,8 +1047,10 @@ def _pallas_nonbonded_nl_batch(  # noqa: PLR0913
     scale_14_vdw: float = 0.5,
     scale_14_elec: float = 0.83333333,
     n_active_atoms: int | None = None,
+    rf_dielectric: float | None = None,
 ) -> tuple[jax.Array, jax.Array]:
     """Batched 2D-grid (B, n_blocks) Pallas O(N*K) nonbonded energy & forces."""
+    has_rf, k_rf_f, c_rf_f = _resolve_rf_params(pme_alpha, cutoff, rf_dielectric)
     B = int(axis_size)
     pos_b = positions if in_batched[0] else positions[None, ...]
     q_b = charges if in_batched[1] else charges[None, ...]
@@ -1443,6 +1479,21 @@ def _pallas_nonbonded_nl_batch(  # noqa: PLR0913
                                     (zero - erfc_val) * inv_r_sq
                                     - (alpha_val * two_over_sqrt_pi * exp_term) * inv_dist
                                 )
+                        elif has_rf:
+                            valid_coul = dist >= jnp.asarray(1e-4, dtype=dtype)
+                            k_rf_c = jnp.asarray(k_rf_f, dtype=dtype)
+                            two_k_rf_c = jnp.asarray(2.0 * k_rf_f, dtype=dtype)
+                            c_rf_c = jnp.asarray(c_rf_f, dtype=dtype)
+                            e_coul = jnp.where(
+                                valid_coul,
+                                qq * w_elec * (inv_dist + k_rf_c * raw_r_sq - c_rf_c),
+                                zero,
+                            )
+                            de_coul_dr = jnp.where(
+                                valid_coul,
+                                qq * w_elec * (two_k_rf_c * dist - inv_r_sq),
+                                zero,
+                            )
                         else:
                             valid_coul = dist >= jnp.asarray(1e-4, dtype=dtype)
                             e_coul = jnp.where(valid_coul, qq * w_elec * inv_dist, zero)
@@ -1561,6 +1612,7 @@ def _pallas_nonbonded_nl_single(  # noqa: PLR0913
     excl_mode: str = "table",
     scale_14_vdw: float = 0.5,
     scale_14_elec: float = 0.83333333,
+    rf_dielectric: float | None = None,
 ) -> tuple[jax.Array, jax.Array]:
     """Single-system vectorized (32, 32) Pallas O(N*K) nonbonded energy & forces (v2 O1 & O4)."""
     e_b, f_b = _pallas_nonbonded_nl_batch(
@@ -1589,6 +1641,7 @@ def _pallas_nonbonded_nl_single(  # noqa: PLR0913
         excl_mode,
         scale_14_vdw,
         scale_14_elec,
+        rf_dielectric=rf_dielectric,
     )
     return e_b[0], f_b[0]
 
@@ -1617,6 +1670,7 @@ def _pallas_nonbonded_nl_vmappable(  # noqa: PLR0913
     excl_mode: str = "table",
     scale_14_vdw: float = 0.5,
     scale_14_elec: float = 0.83333333,
+    rf_dielectric: float | None = None,
 ) -> tuple[jax.Array, jax.Array]:
     hb = bool(has_box)
     pa = float(pme_alpha)
@@ -1630,6 +1684,7 @@ def _pallas_nonbonded_nl_vmappable(  # noqa: PLR0913
     em = str(excl_mode)
     s14_v = float(scale_14_vdw)
     s14_e = float(scale_14_elec)
+    rfd = None if rf_dielectric is None else float(rf_dielectric)
 
     @jax.custom_batching.custom_vmap
     def _vmappable(pos, q, sig, eps, mask, nbr, ei, ev, ee, bx, lam):
@@ -1657,6 +1712,7 @@ def _pallas_nonbonded_nl_vmappable(  # noqa: PLR0913
             em,
             s14_v,
             s14_e,
+            rfd,
         )
 
     @_vmappable.def_vmap
@@ -1690,6 +1746,7 @@ def _pallas_nonbonded_nl_vmappable(  # noqa: PLR0913
                 em,
                 s14_v,
                 s14_e,
+                rf_dielectric=rfd,
             )
             return (e_batch, f_batch), (True, True)
 
@@ -1755,6 +1812,7 @@ def _pallas_nonbonded_nl_vmappable(  # noqa: PLR0913
                 em,
                 s14_v,
                 s14_e,
+                rf_dielectric=rfd,
             )
         return jax.vmap(
             lambda b: _vmappable(
@@ -1809,8 +1867,10 @@ def _nonbonded_nl_param_grads(  # noqa: PLR0913
     include_pme_excl_erf: bool,
     scale_14_vdw: float = 0.5,
     scale_14_elec: float = 0.83333333,
+    rf_dielectric: float | None = None,
 ) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array, jax.Array, jax.Array]:
     """Chunked O(chunk_size*K) analytical parameter gradients (grad_q, grad_sig, grad_eps, grad_excl_vdw, grad_excl_elec, grad_lam)."""
+    has_rf, k_rf_f, c_rf_f = _resolve_rf_params(pme_alpha, cutoff, rf_dielectric)
     N, K = neighbor_idx.shape
     M_excl = excl_indices.shape[1]
     dtype = positions.dtype
@@ -1949,6 +2009,16 @@ def _nonbonded_nl_param_grads(  # noqa: PLR0913
                 erfc_v = erfc(alpha_val * dist)
                 coul_kernel = (w_elec * erfc_v) / dist
                 dcoul_dw_elec = erfc_v / dist
+        elif has_rf:
+            valid_coul = dist >= jnp.asarray(1e-4, dtype=dtype)
+            raw_r2 = jnp.sum(dr * dr, axis=-1)
+            rf_fac = (
+                (one / dist)
+                + jnp.asarray(k_rf_f, dtype=dtype) * raw_r2
+                - jnp.asarray(c_rf_f, dtype=dtype)
+            )
+            coul_kernel = jnp.where(valid_coul, w_elec * rf_fac, zero)
+            dcoul_dw_elec = jnp.where(valid_coul, rf_fac, zero)
         else:
             valid_coul = dist >= jnp.asarray(1e-4, dtype=dtype)
             coul_kernel = jnp.where(valid_coul, w_elec / dist, zero)
@@ -1989,7 +2059,7 @@ def _is_perturbed(x, default: bool = True) -> bool:
     return bool(x.perturbed) if hasattr(x, "perturbed") else bool(default)
 
 
-@functools.partial(custom_vjp, nondiff_argnums=(11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23))
+@functools.partial(custom_vjp, nondiff_argnums=tuple(range(11, 25)))
 def _pallas_nonbonded_nl_diff(  # noqa: PLR0913
     positions: jax.Array,
     charges: jax.Array,
@@ -2015,7 +2085,9 @@ def _pallas_nonbonded_nl_diff(  # noqa: PLR0913
     scale_14_vdw: float = 0.5,
     scale_14_elec: float = 0.83333333,
     compute_param_grads: bool | None = None,
+    rf_dielectric: float | None = None,
 ) -> jax.Array:
+    del compute_param_grads
     energy, _ = _pallas_nonbonded_nl_vmappable(
         positions,
         charges,
@@ -2040,6 +2112,7 @@ def _pallas_nonbonded_nl_diff(  # noqa: PLR0913
         excl_mode,
         scale_14_vdw,
         scale_14_elec,
+        rf_dielectric,
     )
     return energy
 
@@ -2069,6 +2142,7 @@ def _pallas_nonbonded_nl_fwd(  # noqa: PLR0913
     scale_14_vdw=0.5,
     scale_14_elec=0.83333333,
     compute_param_grads=None,
+    rf_dielectric=None,
 ):
     pos_v = _unwrap_primal(positions)
     q_v = _unwrap_primal(charges)
@@ -2106,6 +2180,7 @@ def _pallas_nonbonded_nl_fwd(  # noqa: PLR0913
         excl_mode,
         scale_14_vdw,
         scale_14_elec,
+        rf_dielectric,
     )
     default_pert = True if compute_param_grads is None else bool(compute_param_grads)
     if compute_param_grads is not None:
@@ -2131,7 +2206,7 @@ def _pallas_nonbonded_nl_fwd(  # noqa: PLR0913
     return energy, (forces, shapes_meta, param_res)
 
 
-def _pallas_nonbonded_nl_bwd(
+def _pallas_nonbonded_nl_bwd(  # noqa: PLR0913
     has_box,
     pme_alpha,
     cutoff,
@@ -2145,6 +2220,7 @@ def _pallas_nonbonded_nl_bwd(
     scale_14_vdw,
     scale_14_elec,
     compute_param_grads,
+    rf_dielectric,
     res,
     g,
 ):
@@ -2201,6 +2277,7 @@ def _pallas_nonbonded_nl_bwd(
             include_pme_excl_erf,
             scale_14_vdw,
             scale_14_elec,
+            rf_dielectric,
         )
         grad_q = (g * gq).astype(charges.dtype)
         grad_sig = (g * gs).astype(sigmas.dtype)
@@ -2244,6 +2321,7 @@ def _pallas_nonbonded_nl_bwd(
                 include_pme_excl_erf,
                 scale_14_vdw,
                 scale_14_elec,
+                rf_dielectric,
             )
             g_b = g[b] if g.ndim > 0 else g
             return (
@@ -2305,8 +2383,10 @@ def _export_nonbonded_nl_one(  # noqa: PLR0913
     include_pme_excl_erf: bool,
     scale_14_vdw: float = 0.5,
     scale_14_elec: float = 0.83333333,
+    rf_dielectric: float | None = None,
 ) -> jax.Array:
     """Portable XLA fallback for pallas_nonbonded_nl under export_context()."""
+    has_rf, k_rf_f, c_rf_f = _resolve_rf_params(pme_alpha, cutoff, rf_dielectric)
     N, K = neighbor_idx.shape
     dtype = positions.dtype
     zero = jnp.asarray(0.0, dtype=dtype)
@@ -2367,6 +2447,14 @@ def _export_nonbonded_nl_one(  # noqa: PLR0913
             e_coul = qq * (w_elec - erf(alpha_r)) / dist
         else:
             e_coul = qq * w_elec * erfc(alpha_r) / dist
+    elif has_rf:
+        raw_r2 = jnp.sum(dr * dr, axis=-1)
+        rf_fac = (
+            (one / dist)
+            + jnp.asarray(k_rf_f, dtype=dtype) * raw_r2
+            - jnp.asarray(c_rf_f, dtype=dtype)
+        )
+        e_coul = jnp.where(dist >= jnp.asarray(1e-4, dtype=dtype), qq * w_elec * rf_fac, zero)
     else:
         e_coul = jnp.where(dist >= jnp.asarray(1e-4, dtype=dtype), qq * w_elec / dist, zero)
 
@@ -2396,8 +2484,10 @@ def nonbonded_nl_reference(  # noqa: PLR0913
     include_pme_excl_erf: bool = True,
     scale_14_vdw: float = 0.5,
     scale_14_elec: float = 0.83333333,
+    rf_dielectric: float | None = None,
 ) -> jax.Array:
     """Plain-JAX reference for O(N*K) neighbor-list nonbonded energy (2D or 3D batched)."""
+    rfd = None if rf_dielectric is None else float(rf_dielectric)
     if positions.ndim == 3:
         return jax.vmap(
             lambda b: _export_nonbonded_nl_one(
@@ -2422,6 +2512,7 @@ def nonbonded_nl_reference(  # noqa: PLR0913
                 bool(include_pme_excl_erf),
                 float(scale_14_vdw),
                 float(scale_14_elec),
+                rfd,
             )
         )(jnp.arange(positions.shape[0]))
     return _export_nonbonded_nl_one(
@@ -2446,6 +2537,7 @@ def nonbonded_nl_reference(  # noqa: PLR0913
         bool(include_pme_excl_erf),
         float(scale_14_vdw),
         float(scale_14_elec),
+        rfd,
     )
 
 
@@ -2463,6 +2555,7 @@ def make_nonbonded_nl_op(
     scale_14_vdw: float = 0.5,
     scale_14_elec: float = 0.83333333,
     compute_param_grads: bool | None = None,
+    rf_dielectric: float | None = None,
     context: Context | None = None,
 ):
     """Build an ``xtrax.op`` for O(N*K) neighbor-list nonbonded energy."""
@@ -2478,6 +2571,7 @@ def make_nonbonded_nl_op(
     s14_v = float(scale_14_vdw)
     s14_e = float(scale_14_elec)
     cpg = None if compute_param_grads is None else bool(compute_param_grads)
+    rfd = None if rf_dielectric is None else float(rf_dielectric)
     ref = functools.partial(
         nonbonded_nl_reference,
         has_box=hb,
@@ -2490,6 +2584,7 @@ def make_nonbonded_nl_op(
         include_pme_excl_erf=inc_erf,
         scale_14_vdw=s14_v,
         scale_14_elec=s14_e,
+        rf_dielectric=rfd,
     )
 
     def _make_vjp_kernel(*, interpret: bool) -> VjpKernel:
@@ -2521,6 +2616,7 @@ def make_nonbonded_nl_op(
                         em,
                         s14_v,
                         s14_e,
+                        rfd,
                     )
                 )(jnp.arange(B))
                 shapes_meta = _make_shapes_meta(
@@ -2535,13 +2631,13 @@ def make_nonbonded_nl_op(
             return _pallas_nonbonded_nl_fwd(
                 pos, q, sig, eps, msk, nbr, ei, ev, ee, bx, lam,
                 hb, pa, co, cc, sw, sca, sce, inc_erf, interpret,
-                em, s14_v, s14_e, cpg,
+                em, s14_v, s14_e, cpg, rfd,
             )
 
         def _bwd(res, g):
             return _pallas_nonbonded_nl_bwd(
                 hb, pa, co, cc, sw, sca, sce, inc_erf, interpret,
-                em, s14_v, s14_e, cpg, res, g
+                em, s14_v, s14_e, cpg, rfd, res, g
             )
 
         return VjpKernel(fwd=_fwd, bwd=_bwd)
@@ -2587,9 +2683,11 @@ def pallas_nonbonded_nl(  # noqa: PLR0913
     atom_inv_perm: jax.Array | None = None,
     nl_already_permuted: bool = False,
     max_k_tiles: jax.Array | None = None,
+    rf_dielectric: float | None = None,
 ) -> jax.Array | tuple[jax.Array, jax.Array]:
     """Fused O(N*K) neighbor-list LJ + Coulomb/PME direct-space Pallas kernel (v2 O1, O2.1, O4, O5)."""
     del max_k_tiles
+    rfd = None if rf_dielectric is None else float(rf_dielectric)
     if (
         excl_scales_elec is None
         and atom_mask is not None
@@ -2647,6 +2745,7 @@ def pallas_nonbonded_nl(  # noqa: PLR0913
             include_pme_excl_erf=include_pme_excl_erf,
             scale_14_vdw=scale_14_vdw,
             scale_14_elec=scale_14_elec,
+            rf_dielectric=rfd,
             return_forces=return_forces,
             interpret=interpret,
         )
@@ -2729,6 +2828,7 @@ def pallas_nonbonded_nl(  # noqa: PLR0913
             str(excl_mode),
             float(scale_14_vdw),
             float(scale_14_elec),
+            rfd,
         )
         if inv_p is not None:
             f_val = f_val[inv_p]
@@ -2749,6 +2849,7 @@ def pallas_nonbonded_nl(  # noqa: PLR0913
             scale_14_vdw=float(scale_14_vdw),
             scale_14_elec=float(scale_14_elec),
             compute_param_grads=compute_param_grads,
+            rf_dielectric=rfd,
             context=ctx,
         )
         return op(
@@ -2785,6 +2886,7 @@ def pallas_nonbonded_nl(  # noqa: PLR0913
         float(scale_14_vdw),
         float(scale_14_elec),
         compute_param_grads,
+        rfd,
     )
 
 
@@ -3762,9 +3864,11 @@ def _pallas_bonded_and_nonbonded_nl_fused_batch(  # noqa: PLR0913
     angle_regularization_mode: str = "legacy_denom_eps",
     cmap_first_is_psi: bool = True,
     first_pure_water_block: int = -1,
+    rf_dielectric: float | None = None,
     compute_energy: bool = True,
 ) -> tuple[jax.Array, jax.Array]:
     """2D-grid `(B, n_nb_blocks + total_bonded_blocks)` single-launch Pallas megakernel (MK-36 / MK-56)."""
+    has_rf, k_rf_f, c_rf_f = _resolve_rf_params(pme_alpha, cutoff, rf_dielectric)
     orig_dtype = positions.dtype
     dtype = jnp.float32 if (not interpret and orig_dtype == jnp.float64) else orig_dtype
     (
@@ -4444,6 +4548,21 @@ def _pallas_bonded_and_nonbonded_nl_fused_batch(  # noqa: PLR0913
                                         (zero - erfc_val) * inv_r_sq
                                         - (alpha_val * two_over_sqrt_pi * exp_term) * inv_dist
                                     )
+                            elif has_rf:
+                                valid_coul = dist >= jnp.asarray(1e-4, dtype=dtype)
+                                k_rf_c = jnp.asarray(k_rf_f, dtype=dtype)
+                                two_k_rf_c = jnp.asarray(2.0 * k_rf_f, dtype=dtype)
+                                c_rf_c = jnp.asarray(c_rf_f, dtype=dtype)
+                                e_coul = jnp.where(
+                                    valid_coul,
+                                    qq * w_elec * (inv_dist + k_rf_c * raw_r_sq - c_rf_c),
+                                    zero,
+                                )
+                                de_coul_dr = jnp.where(
+                                    valid_coul,
+                                    qq * w_elec * (two_k_rf_c * dist - inv_r_sq),
+                                    zero,
+                                )
                             else:
                                 valid_coul = dist >= jnp.asarray(1e-4, dtype=dtype)
                                 e_coul = jnp.where(valid_coul, qq * w_elec * inv_dist, zero)
@@ -5144,7 +5263,7 @@ def _pallas_bonded_and_nonbonded_nl_fused_vmappable(
 
 @functools.partial(
     custom_vjp,
-    nondiff_argnums=tuple(range(33, 51)),
+    nondiff_argnums=tuple(range(33, 52)),
 )
 def _pallas_bonded_and_nonbonded_nl_fused_diff(*args):
     energy, _ = _pallas_bonded_and_nonbonded_nl_fused_vmappable(*args[:-1])
@@ -5189,6 +5308,7 @@ def _pallas_bonded_and_nonbonded_nl_fused_bwd(  # noqa: PLR0913
     angle_regularization_mode,
     cmap_first_is_psi,
     first_pure_water_block,
+    rf_dielectric,
     compute_param_grads,
     res,
     g,
@@ -5268,6 +5388,7 @@ def _pallas_bonded_and_nonbonded_nl_fused_bwd(  # noqa: PLR0913
             include_pme_excl_erf,
             scale_14_vdw,
             scale_14_elec,
+            rf_dielectric,
         )
         gb, ga, gd, gh, ges, gee14, geq, gc, glam_b = _bonded_all_fused_param_grads(
             positions,
@@ -5326,7 +5447,7 @@ def _pallas_bonded_and_nonbonded_nl_fused_bwd(  # noqa: PLR0913
                 s[0], s[1], s[2], s[3], s[4], s[5], s[6], s[7], s[8], s[30], s[31],
                 has_box, pme_alpha, cutoff, coulomb_constant, lj_switch_width,
                 softcore_alpha, softcore_exponent, include_pme_excl_erf,
-                scale_14_vdw, scale_14_elec,
+                scale_14_vdw, scale_14_elec, rf_dielectric,
             )
             gb_b, ga_b, gd_b, gh_b, ges_b, gee14_b, geq_b, gc_b, glam_b_b = _bonded_all_fused_param_grads(
                 s[0], s[9], s[10], s[11], s[12], s[13], s[14], s[15], s[16], s[17],
@@ -5481,8 +5602,10 @@ def pallas_bonded_and_nonbonded_nl_fused(  # noqa: PLR0913
     max_k_tiles: jax.Array | None = None,
     first_pure_water_block: int | None = None,
     compute_energy: bool = True,
+    rf_dielectric: float | None = None,
 ) -> jax.Array | tuple[jax.Array, jax.Array]:
     """Single-launch fused direct-space nonbonded NL + all-bonded Pallas megakernel (MK-36)."""
+    rfd = None if rf_dielectric is None else float(rf_dielectric)
     _batch_spied = (
         _pallas_nonbonded_nl_batch is not _ORIG_PALLAS_NONBONDED_NL_BATCH
         or _pallas_bonded_mod._pallas_bonded_all_fused_batch
@@ -5559,6 +5682,7 @@ def pallas_bonded_and_nonbonded_nl_fused(  # noqa: PLR0913
             compute_param_grads=compute_param_grads,
             return_forces=return_forces,
             interpret=interpret,
+            rf_dielectric=rfd,
         )
         if return_forces:
             res_b_t = cast("tuple[jax.Array, jax.Array]", res_b)
@@ -5631,6 +5755,7 @@ def pallas_bonded_and_nonbonded_nl_fused(  # noqa: PLR0913
             compute_param_grads=compute_param_grads,
             return_forces=return_forces,
             interpret=interpret,
+            rf_dielectric=rfd,
         )
         if return_forces:
             e_b_t = cast("tuple[jax.Array, jax.Array]", e_b)
@@ -5884,6 +6009,7 @@ def pallas_bonded_and_nonbonded_nl_fused(  # noqa: PLR0913
         str(angle_regularization_mode),
         bool(cmap_first_is_psi),
         int(eff_pure_water_block),
+        rfd,
     )
 
     if return_forces:
@@ -6358,8 +6484,10 @@ def _pallas_nonbonded_tile_pairs_batch(  # noqa: PLR0913
     interpret: bool,
     scale_14_vdw: float = 0.5,
     scale_14_elec: float = 0.83333333,
+    rf_dielectric: float | None = None,
 ) -> tuple[jax.Array, jax.Array]:
     """2D-grid `(B, n_pair_blocks)` 32x32 Tile-Pair Newton's 3rd Law Pallas Kernel (MK-51 / MK-62 / MK-63)."""
+    has_rf, k_rf_f, c_rf_f = _resolve_rf_params(pme_alpha, cutoff, rf_dielectric)
     B = int(axis_size)
     pos_b = positions if in_batched[0] else positions[None, ...]
     q_b = charges if in_batched[1] else charges[None, ...]
@@ -6671,6 +6799,21 @@ def _pallas_nonbonded_tile_pairs_batch(  # noqa: PLR0913
                                 (zero - erfc_val) * inv_r_sq
                                 - (alpha_val * two_over_sqrt_pi * exp_term) * inv_dist
                             )
+                    elif has_rf:
+                        valid_coul = dist >= jnp.asarray(1e-4, dtype=dtype)
+                        k_rf_c = jnp.asarray(k_rf_f, dtype=dtype)
+                        two_k_rf_c = jnp.asarray(2.0 * k_rf_f, dtype=dtype)
+                        c_rf_c = jnp.asarray(c_rf_f, dtype=dtype)
+                        e_coul = jnp.where(
+                            valid_coul,
+                            qq * w_elec * (inv_dist + k_rf_c * raw_r_sq - c_rf_c),
+                            zero,
+                        )
+                        de_coul_dr = jnp.where(
+                            valid_coul,
+                            qq * w_elec * (two_k_rf_c * dist - inv_r_sq),
+                            zero,
+                        )
                     else:
                         valid_coul = dist >= jnp.asarray(1e-4, dtype=dtype)
                         e_coul = jnp.where(valid_coul, qq * w_elec * inv_dist, zero)
@@ -6795,7 +6938,9 @@ def _pallas_nonbonded_tile_pairs_vmappable(  # noqa: PLR0913
     interpret: bool,
     scale_14_vdw: float = 0.5,
     scale_14_elec: float = 0.83333333,
+    rf_dielectric: float | None = None,
 ) -> tuple[jax.Array, jax.Array]:
+    rfd = None if rf_dielectric is None else float(rf_dielectric)
     static_args = (
         bool(has_box),
         float(pme_alpha),
@@ -6808,6 +6953,7 @@ def _pallas_nonbonded_tile_pairs_vmappable(  # noqa: PLR0913
         bool(interpret),
         float(scale_14_vdw),
         float(scale_14_elec),
+        rfd,
     )
 
     @jax.custom_batching.custom_vmap
@@ -6913,6 +7059,7 @@ def _tile_pairs_energy_analytical_params(  # noqa: PLR0913
     include_pme_excl_erf: bool,
     scale_14_vdw: float,
     scale_14_elec: float,
+    rf_dielectric: float | None = None,
 ) -> jax.Array:
     """Differentiable JAX tile-pair energy for exact parameter gradients `(charges, sigmas, epsilons)`."""
     if positions.ndim == 3:
@@ -6939,9 +7086,11 @@ def _tile_pairs_energy_analytical_params(  # noqa: PLR0913
                 include_pme_excl_erf,
                 scale_14_vdw,
                 scale_14_elec,
+                rf_dielectric,
             )
         )(jnp.arange(B, dtype=jnp.int32))
 
+    has_rf, k_rf_f, c_rf_f = _resolve_rf_params(pme_alpha, cutoff, rf_dielectric)
     dtype = positions.dtype
     N = int(positions.shape[0])
     n_blocks = max(1, (N + _NB_BLOCK_N - 1) // _NB_BLOCK_N)
@@ -7038,6 +7187,18 @@ def _tile_pairs_energy_analytical_params(  # noqa: PLR0913
                 e_coul = qq * (w_elec - erf(alpha_r)) * inv_dist
             else:
                 e_coul = qq * w_elec * erfc(alpha_r) * inv_dist
+        elif has_rf:
+            e_coul = jnp.where(
+                dist >= 1e-4,
+                qq
+                * w_elec
+                * (
+                    inv_dist
+                    + jnp.asarray(k_rf_f, dtype=dtype) * r_sq
+                    - jnp.asarray(c_rf_f, dtype=dtype)
+                ),
+                0.0,
+            )
         else:
             e_coul = jnp.where(dist >= 1e-4, qq * w_elec * inv_dist, 0.0)
 
@@ -7067,7 +7228,7 @@ def _tile_pairs_energy_analytical_params(  # noqa: PLR0913
     return e_tot
 
 
-@functools.partial(custom_vjp, nondiff_argnums=tuple(range(10, 21)))
+@functools.partial(custom_vjp, nondiff_argnums=tuple(range(10, 22)))
 def _pallas_nonbonded_tile_pairs_diff(  # noqa: PLR0913
     positions: jax.Array,
     charges: jax.Array,
@@ -7090,6 +7251,7 @@ def _pallas_nonbonded_tile_pairs_diff(  # noqa: PLR0913
     interpret: bool,
     scale_14_vdw: float,
     scale_14_elec: float,
+    rf_dielectric: float | None = None,
 ) -> jax.Array:
     e, _ = _pallas_nonbonded_tile_pairs_vmappable(
         positions,
@@ -7113,6 +7275,7 @@ def _pallas_nonbonded_tile_pairs_diff(  # noqa: PLR0913
         interpret,
         scale_14_vdw=scale_14_vdw,
         scale_14_elec=scale_14_elec,
+        rf_dielectric=rf_dielectric,
     )
     return e
 
@@ -7139,6 +7302,7 @@ def _pallas_nonbonded_tile_pairs_fwd(  # noqa: PLR0913
     interpret,
     scale_14_vdw,
     scale_14_elec,
+    rf_dielectric=None,
 ):
     e, forces = _pallas_nonbonded_tile_pairs_vmappable(
         positions,
@@ -7162,6 +7326,7 @@ def _pallas_nonbonded_tile_pairs_fwd(  # noqa: PLR0913
         interpret,
         scale_14_vdw=scale_14_vdw,
         scale_14_elec=scale_14_elec,
+        rf_dielectric=rf_dielectric,
     )
     res = (
         forces,
@@ -7191,6 +7356,7 @@ def _pallas_nonbonded_tile_pairs_bwd(
     interpret,
     scale_14_vdw,
     scale_14_elec,
+    rf_dielectric,
     res,
     g,
 ):
@@ -7214,7 +7380,7 @@ def _pallas_nonbonded_tile_pairs_bwd(
         else -g_arr * forces
     )
 
-    if not in_export_context():
+    if (not in_export_context()) and (rf_dielectric is None):
         in_b_bwd = (
             positions.ndim == 3,
             charges.ndim == 2,
@@ -7267,6 +7433,60 @@ def _pallas_nonbonded_tile_pairs_bwd(
             scale_14_elec=float(scale_14_elec),
             interpret=bool(interpret),
         )
+    elif not in_export_context():
+        in_b_bwd = (
+            positions.ndim == 3,
+            charges.ndim == 2,
+            sigmas.ndim == 2,
+            epsilons.ndim == 2,
+            atom_mask.ndim == 2,
+            tile_pairs.ndim == 3,
+            excl_full_mask.ndim == 3,
+            excl_14_mask.ndim == 3,
+            box.ndim == 2,
+            lam_arr.ndim >= 2 or int(lam_arr.shape[0]) > 1,
+        )
+        batched_dims = [
+            int(arr.shape[0])
+            for arr, is_b in zip(
+                (positions, charges, sigmas, epsilons, atom_mask, tile_pairs, excl_full_mask, excl_14_mask, box),
+                in_b_bwd[:9],
+                strict=False,
+            )
+            if is_b
+        ]
+        B_bwd = (
+            batched_dims[0]
+            if batched_dims
+            else (int(g_arr.shape[0]) if g_arr.ndim >= 1 and int(g_arr.shape[0]) > 1 else 1)
+        )
+        grad_q, grad_sig, grad_eps, grad_lam = cast("Any", pallas_tile_pairs_param_grads)(
+            B_bwd,
+            in_b_bwd,
+            jax.lax.stop_gradient(positions),
+            charges,
+            sigmas,
+            epsilons,
+            atom_mask,
+            tile_pairs,
+            excl_full_mask,
+            excl_14_mask,
+            box,
+            lam_arr,
+            g_arr,
+            has_box=bool(has_box),
+            pme_alpha=float(pme_alpha),
+            cutoff=float(cutoff),
+            coulomb_constant=float(coulomb_constant),
+            lj_switch_width=float(lj_switch_width),
+            softcore_alpha=float(softcore_alpha),
+            softcore_exponent=int(softcore_exponent),
+            include_pme_excl_erf=bool(include_pme_excl_erf),
+            scale_14_vdw=float(scale_14_vdw),
+            scale_14_elec=float(scale_14_elec),
+            rf_dielectric=rf_dielectric,
+            interpret=bool(interpret),
+        )
     else:
         def _param_fn(q_in, sig_in, eps_in, lam_in):
             return _tile_pairs_energy_analytical_params(
@@ -7290,6 +7510,7 @@ def _pallas_nonbonded_tile_pairs_bwd(
                 include_pme_excl_erf,
                 scale_14_vdw,
                 scale_14_elec,
+                rf_dielectric,
             )
 
         _, vjp_params = jax.vjp(_param_fn, charges, sigmas, epsilons, lam_arr)
@@ -7337,6 +7558,7 @@ def _ef_vjp_single(  # noqa: PLR0913
     include_pme_excl_erf: bool,
     scale_14_vdw: float,
     scale_14_elec: float,
+    rf_dielectric: float | None = None,
 ) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array, jax.Array]:
     """Sparse O(M_pairs * 32^2) analytical VJP for `(energy, forces)` on one replica."""
     ge_s = jnp.asarray(ge_1, dtype=pos_1.dtype).reshape(())
@@ -7364,6 +7586,7 @@ def _ef_vjp_single(  # noqa: PLR0913
             include_pme_excl_erf,
             scale_14_vdw,
             scale_14_elec,
+            rf_dielectric,
         )
 
     def _obj(p_in, q_in, s_in, e_in, l_in):
@@ -7386,7 +7609,7 @@ def _ef_vjp_single(  # noqa: PLR0913
     )
 
 
-@functools.partial(custom_vjp, nondiff_argnums=tuple(range(10, 21)))
+@functools.partial(custom_vjp, nondiff_argnums=tuple(range(10, 22)))
 def _pallas_nonbonded_tile_pairs_ef_diff(  # noqa: PLR0913
     positions: jax.Array,
     charges: jax.Array,
@@ -7409,6 +7632,7 @@ def _pallas_nonbonded_tile_pairs_ef_diff(  # noqa: PLR0913
     interpret: bool,
     scale_14_vdw: float,
     scale_14_elec: float,
+    rf_dielectric: float | None = None,
 ) -> tuple[jax.Array, jax.Array]:
     return _pallas_nonbonded_tile_pairs_vmappable(
         positions,
@@ -7432,6 +7656,7 @@ def _pallas_nonbonded_tile_pairs_ef_diff(  # noqa: PLR0913
         interpret,
         scale_14_vdw=scale_14_vdw,
         scale_14_elec=scale_14_elec,
+        rf_dielectric=rf_dielectric,
     )
 
 
@@ -7457,6 +7682,7 @@ def _pallas_nonbonded_tile_pairs_ef_fwd(  # noqa: PLR0913
     interpret,
     scale_14_vdw,
     scale_14_elec,
+    rf_dielectric=None,
 ):
     e, forces = _pallas_nonbonded_tile_pairs_vmappable(
         positions,
@@ -7480,6 +7706,7 @@ def _pallas_nonbonded_tile_pairs_ef_fwd(  # noqa: PLR0913
         interpret,
         scale_14_vdw=scale_14_vdw,
         scale_14_elec=scale_14_elec,
+        rf_dielectric=rf_dielectric,
     )
     res = (
         positions,
@@ -7508,6 +7735,7 @@ def _pallas_nonbonded_tile_pairs_ef_bwd(
     interpret,
     scale_14_vdw,
     scale_14_elec,
+    rf_dielectric,
     res,
     g,
 ):
@@ -7564,6 +7792,7 @@ def _pallas_nonbonded_tile_pairs_ef_bwd(
                 bool(include_pme_excl_erf),
                 float(scale_14_vdw),
                 float(scale_14_elec),
+                rf_dielectric,
             )
 
         gp_all, gq_all, gs_all, geps_all, glam_all = jax.vmap(_b_step)(
@@ -7602,6 +7831,7 @@ def _pallas_nonbonded_tile_pairs_ef_bwd(
             bool(include_pme_excl_erf),
             float(scale_14_vdw),
             float(scale_14_elec),
+            rf_dielectric,
         )
 
     return (
@@ -7678,6 +7908,7 @@ def pallas_nonbonded_tile_pairs(  # noqa: PLR0913
     include_pme_excl_erf: bool = False,
     scale_14_vdw: float = 0.5,
     scale_14_elec: float = 0.83333333,
+    rf_dielectric: float | None = None,
     return_forces: bool = False,
     interpret: bool | None = None,
 ) -> jax.Array | tuple[jax.Array, jax.Array]:
@@ -7687,6 +7918,7 @@ def pallas_nonbonded_tile_pairs(  # noqa: PLR0913
     evaluates each interacting pair once using Newton's 3rd Law (`F_I += f_ij`, `F_J -= f_ij`),
     supporting `jax.vmap` and exact `custom_vjp` gradients w.r.t. `(positions, charges, sigmas, epsilons)`.
     """
+    rfd = None if rf_dielectric is None else float(rf_dielectric)
     dtype = positions.dtype
     int(positions.shape[-2])
     q_arr = jnp.asarray(charges, dtype=dtype)
@@ -7745,6 +7977,7 @@ def pallas_nonbonded_tile_pairs(  # noqa: PLR0913
                 bool(include_pme_excl_erf),
                 float(scale_14_vdw),
                 float(scale_14_elec),
+                rfd,
             )
 
         if return_forces:
@@ -7784,6 +8017,7 @@ def pallas_nonbonded_tile_pairs(  # noqa: PLR0913
             bool(interpret),
             float(scale_14_vdw),
             float(scale_14_elec),
+            rfd,
         )
         if perm_arr is not None and inv_perm_arr is not None:
             f_out = _morton_gather_atom_axis(f_out, inv_perm_arr, perm_arr)
@@ -7811,6 +8045,7 @@ def pallas_nonbonded_tile_pairs(  # noqa: PLR0913
         bool(interpret),
         float(scale_14_vdw),
         float(scale_14_elec),
+        rfd,
     )
 
 
@@ -7868,6 +8103,8 @@ __all__ = [
     "pme_exclusion_pairs_reference",
     "precompute_dedup_excl_edges",
     "prepare_fused_bonded_buffers",
+    "reaction_field_coefficients",
+    "reaction_field_k_c",
     "resolve_pallas_mode",
     "sasa_nl_reference",
     "torsions_4body_reference",
