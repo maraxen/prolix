@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import functools
 import os
-from typing import NamedTuple
+from typing import Literal, NamedTuple
 
 import jax
 import jax.core
@@ -470,13 +470,24 @@ def spread_charges(
     )
 
 
-def influence_function(grid_dims: tuple[int, int, int], box_size: jnp.ndarray, alpha: float, order: int = 4) -> jnp.ndarray:
+DeconvMode = Literal["euler", "ik_rms16"]
+
+
+def influence_function(
+    grid_dims: tuple[int, int, int],
+    box_size: jnp.ndarray,
+    alpha: float,
+    order: int = 4,
+    deconv_mode: DeconvMode = "euler",
+) -> jnp.ndarray:
     # Note: pme_greens_setup_standalone scope removed (#4330 Fix 2a) - influence_function
     # is only called from spme_reciprocal_energy (primal energy path), never from the
     # differentiable force/gradient path that runs in production.
     box_arr = jnp.asarray(box_size)
     if box_arr.ndim == 2 and not _is_triclinic_box_array(box_arr):
-        return jax.vmap(lambda b: influence_function(grid_dims, b, alpha, order))(box_arr)
+        return jax.vmap(
+            lambda b: influence_function(grid_dims, b, alpha, order, deconv_mode=deconv_mode)
+        )(box_arr)
     Kx, Ky, Kz = grid_dims
     V = box_volume(box_arr)
 
@@ -501,9 +512,15 @@ def influence_function(grid_dims: tuple[int, int, int], box_size: jnp.ndarray, a
     m_sq_safe = jnp.where(m_sq > 0, m_sq, jnp.asarray(1.0, dtype=m_sq.dtype))
     denom = jnp.pi * m_sq_safe * V
 
-    bx = _bspline_modulation(jnp.fft.fftfreq(Kx, dtype=box_arr.dtype), Kx, order)
-    by = _bspline_modulation(jnp.fft.fftfreq(Ky, dtype=box_arr.dtype), Ky, order)
-    bz = _bspline_modulation(jnp.fft.rfftfreq(Kz, dtype=box_arr.dtype), Kz, order)
+    bx = _bspline_modulation(
+        jnp.fft.fftfreq(Kx, dtype=box_arr.dtype), Kx, order, deconv_mode=deconv_mode
+    )
+    by = _bspline_modulation(
+        jnp.fft.fftfreq(Ky, dtype=box_arr.dtype), Ky, order, deconv_mode=deconv_mode
+    )
+    bz = _bspline_modulation(
+        jnp.fft.rfftfreq(Kz, dtype=box_arr.dtype), Kz, order, deconv_mode=deconv_mode
+    )
     b_sq = (bx[:, None, None] * by[None, :, None] * bz[None, None, :]) ** 2
     b_sq_safe = jnp.maximum(b_sq, jnp.asarray(1e-10, dtype=b_sq.dtype))
 
@@ -512,15 +529,33 @@ def influence_function(grid_dims: tuple[int, int, int], box_size: jnp.ndarray, a
     return G
 
 
-def _bspline_modulation(freq_frac: jnp.ndarray, K: int, order: int) -> jnp.ndarray:
-    if order == 4: m_vals = jnp.array([1.0/6.0, 4.0/6.0, 1.0/6.0, 0.0], dtype=freq_frac.dtype)
-    else: raise NotImplementedError
-    k_indices = jnp.arange(order, dtype=freq_frac.dtype)
-    phases = jnp.exp(2j * jnp.pi * freq_frac[:, None] * k_indices[None, :])
-    return jnp.maximum(
-        jnp.abs(jnp.sum(m_vals[None, :] * phases, axis=-1)),
-        jnp.asarray(1e-6, dtype=freq_frac.dtype),
-    )
+def _bspline_modulation(
+    freq_frac: jnp.ndarray,
+    K: int,
+    order: int,
+    deconv_mode: DeconvMode = "euler",
+) -> jnp.ndarray:
+    if order != 4:
+        raise NotImplementedError(f"SPME B-spline modulation supports order=4 only, got {order}")
+    if deconv_mode == "euler":
+        m_vals = jnp.array([1.0 / 6.0, 4.0 / 6.0, 1.0 / 6.0, 0.0], dtype=freq_frac.dtype)
+        k_indices = jnp.arange(order, dtype=freq_frac.dtype)
+        phases = jnp.exp(2j * jnp.pi * freq_frac[:, None] * k_indices[None, :])
+        return jnp.maximum(
+            jnp.abs(jnp.sum(m_vals[None, :] * phases, axis=-1)),
+            jnp.asarray(1e-6, dtype=freq_frac.dtype),
+        )
+    if deconv_mode == "ik_rms16":
+        u_offsets = jnp.arange(16, dtype=freq_frac.dtype) / jnp.asarray(
+            16.0, dtype=freq_frac.dtype
+        )
+        w_sub = jnp.transpose(_bspline4(u_offsets), (1, 0))
+        k_indices = jnp.arange(order, dtype=freq_frac.dtype)
+        phases = jnp.exp(2j * jnp.pi * freq_frac[:, None] * k_indices[None, :])
+        dft = jnp.sum(phases[:, None, :] * w_sub[None, :, :], axis=-1)
+        rms = jnp.sqrt(jnp.mean(jnp.abs(dft) ** 2, axis=-1))
+        return jnp.maximum(rms, jnp.asarray(1e-6, dtype=freq_frac.dtype))
+    raise ValueError(f"Unsupported deconv_mode={deconv_mode!r}; expected 'euler' or 'ik_rms16'")
 
 
 def spme_reciprocal_energy(
@@ -532,6 +567,7 @@ def spme_reciprocal_energy(
     alpha: float = 0.34,
     order: int = 4,
     use_pallas_pme: bool = False,
+    deconv_mode: DeconvMode = "euler",
 ) -> jnp.ndarray:
     orig_dtype = positions.dtype
     is_ortho = _is_ortho_box(positions, box_size)
@@ -550,9 +586,13 @@ def spme_reciprocal_energy(
         Q = jnp.asarray(Q, dtype=jnp.float32)
     Q_hat = jnp.fft.rfftn(Q, s=grid_dims, axes=(-3, -2, -1))
     if is_ortho and box_w.ndim == 2:
-        G = jax.vmap(lambda b: influence_function(grid_dims, b, alpha, order))(box_w).astype(Q.dtype)
+        G = jax.vmap(
+            lambda b: influence_function(grid_dims, b, alpha, order, deconv_mode=deconv_mode)
+        )(box_w).astype(Q.dtype)
     else:
-        G = influence_function(grid_dims, box_w, alpha, order).astype(Q.dtype)
+        G = influence_function(grid_dims, box_w, alpha, order, deconv_mode=deconv_mode).astype(
+            Q.dtype
+        )
     theta = jnp.fft.irfftn(Q_hat * G, s=grid_dims, axes=(-3, -2, -1)).astype(Q.dtype)
     N_grid = jnp.asarray(float(grid_dims[0] * grid_dims[1] * grid_dims[2]), dtype=Q.dtype)
     return (jnp.asarray(0.5 * COULOMB_CONSTANT, dtype=Q.dtype) * jnp.sum(Q * theta, axis=(-3, -2, -1)) * N_grid).astype(orig_dtype)
@@ -589,19 +629,22 @@ def _cached_host_influence_function_np(
     box_dtype_str: str,
     alpha: float,
     order: int,
+    deconv_mode: DeconvMode = "euler",
 ) -> np.ndarray:
     with jax.ensure_compile_time_eval():
         box_arr = jnp.asarray(
             np.asarray(box_key, dtype=np.dtype(box_dtype_str)).reshape(box_shape)
         )
         if box_arr.ndim == 2 and not _is_triclinic_box_array(box_arr):
-            G = jax.vmap(lambda b: influence_function(grid_dims, b, alpha, order))(box_arr)
+            G = jax.vmap(
+                lambda b: influence_function(grid_dims, b, alpha, order, deconv_mode=deconv_mode)
+            )(box_arr)
         else:
-            G = influence_function(grid_dims, box_arr, alpha, order)
+            G = influence_function(grid_dims, box_arr, alpha, order, deconv_mode=deconv_mode)
         return np.asarray(G)
 
 
-@functools.partial(jax.custom_vjp, nondiff_argnums=(4, 5, 6, 7))
+@functools.partial(jax.custom_vjp, nondiff_argnums=(4, 5, 6, 7, 8))
 def spme_energy_with_forces(
     positions: jnp.ndarray,
     charges: jnp.ndarray,
@@ -611,6 +654,7 @@ def spme_energy_with_forces(
     alpha: float,
     order: int,
     use_pallas_pme: bool = False,
+    deconv_mode: DeconvMode = "euler",
 ) -> jnp.ndarray:
     return (
         spme_reciprocal_energy(
@@ -622,12 +666,23 @@ def spme_energy_with_forces(
             alpha,
             order,
             use_pallas_pme,
+            deconv_mode=deconv_mode,
         )
         + spme_self_energy(charges, atom_mask, alpha).astype(positions.dtype)
     ).astype(positions.dtype)
 
 
-def _spme_fwd(positions, charges, atom_mask, box_size, grid_dims, alpha, order, use_pallas_pme):
+def _spme_fwd(
+    positions,
+    charges,
+    atom_mask,
+    box_size,
+    grid_dims,
+    alpha,
+    order,
+    use_pallas_pme,
+    deconv_mode: DeconvMode = "euler",
+):
     positions_v = _unwrap_primal(positions)
     charges_v = _unwrap_primal(charges)
     atom_mask_v = _unwrap_primal(atom_mask)
@@ -656,9 +711,13 @@ def _spme_fwd(positions, charges, atom_mask, box_size, grid_dims, alpha, order, 
 
     with jax.named_scope("pme_greens_setup"):
         if is_ortho and box_w.ndim == 2:
-            G = jax.vmap(lambda b: influence_function(grid_dims, b, alpha, order))(box_w).astype(Q.dtype)
+            G = jax.vmap(
+                lambda b: influence_function(grid_dims, b, alpha, order, deconv_mode=deconv_mode)
+            )(box_w).astype(Q.dtype)
         else:
-            G = influence_function(grid_dims, box_w, alpha, order).astype(Q.dtype)
+            G = influence_function(
+                grid_dims, box_w, alpha, order, deconv_mode=deconv_mode
+            ).astype(Q.dtype)
 
     # irfftn normalization
     with jax.named_scope("pme_fft_inverse"):
@@ -680,7 +739,7 @@ def _spme_fwd(positions, charges, atom_mask, box_size, grid_dims, alpha, order, 
     )
 
 
-def _spme_bwd(grid_dims, alpha, order, use_pallas_pme, residuals, g):
+def _spme_bwd(grid_dims, alpha, order, use_pallas_pme, deconv_mode, residuals, g):
     if len(residuals) == 7:
         positions, charges, atom_mask, box_size, theta_norm, box_perturbed, charges_perturbed = residuals
     elif len(residuals) == 6:
@@ -761,7 +820,15 @@ def _spme_bwd(grid_dims, alpha, order, use_pallas_pme, residuals, g):
     if box_perturbed:
         _, vjp_box = jax.vjp(
             lambda b: spme_reciprocal_energy(
-                positions, charges, atom_mask, b, grid_dims, alpha, order, False
+                positions,
+                charges,
+                atom_mask,
+                b,
+                grid_dims,
+                alpha,
+                order,
+                False,
+                deconv_mode=deconv_mode,
             ),
             box_arr,
         )
@@ -774,7 +841,7 @@ def _spme_bwd(grid_dims, alpha, order, use_pallas_pme, residuals, g):
 
 spme_energy_with_forces.defvjp(_spme_fwd, _spme_bwd, symbolic_zeros=True)
 
-@functools.partial(jax.custom_vjp, nondiff_argnums=(5, 6, 7, 8))
+@functools.partial(jax.custom_vjp, nondiff_argnums=(5, 6, 7, 8, 9))
 def _spme_energy_with_forces_cached(
     positions: jnp.ndarray,
     charges: jnp.ndarray,
@@ -785,6 +852,7 @@ def _spme_energy_with_forces_cached(
     alpha: float,
     order: int,
     use_pallas_pme: bool = False,
+    deconv_mode: DeconvMode = "euler",
 ) -> jnp.ndarray:
     Kx, Ky, Kz = grid_dims
     orig_dtype = positions.dtype
@@ -810,7 +878,18 @@ def _spme_energy_with_forces_cached(
     return e_recip + spme_self_energy(charges, atom_mask, alpha).astype(orig_dtype)
 
 
-def _spme_cached_fwd(positions, charges, atom_mask, G_cached, box_size, grid_dims, alpha, order, use_pallas_pme):
+def _spme_cached_fwd(
+    positions,
+    charges,
+    atom_mask,
+    G_cached,
+    box_size,
+    grid_dims,
+    alpha,
+    order,
+    use_pallas_pme,
+    deconv_mode: DeconvMode = "euler",
+):
     positions_v = _unwrap_primal(positions)
     charges_v = _unwrap_primal(charges)
     atom_mask_v = _unwrap_primal(atom_mask)
@@ -856,7 +935,7 @@ def _spme_cached_fwd(positions, charges, atom_mask, G_cached, box_size, grid_dim
     )
 
 
-def _spme_cached_bwd(grid_dims, alpha, order, use_pallas_pme, residuals, g):
+def _spme_cached_bwd(grid_dims, alpha, order, use_pallas_pme, deconv_mode, residuals, g):
     if len(residuals) == 8:
         positions, charges, atom_mask, box_size, theta_norm, G_cached, box_perturbed, charges_perturbed = residuals
     elif len(residuals) == 7:
@@ -871,6 +950,7 @@ def _spme_cached_bwd(grid_dims, alpha, order, use_pallas_pme, residuals, g):
         alpha,
         order,
         use_pallas_pme,
+        deconv_mode,
         (positions, charges, atom_mask, box_size, theta_norm, box_perturbed, charges_perturbed),
         g,
     )
@@ -929,20 +1009,123 @@ def _spme_forces_from_theta(
     return forces.astype(dtype)
 
 
+def _reciprocal_m_sq_and_vol(
+    box_arr: jnp.ndarray,
+    grid_dims: tuple[int, int, int],
+    *,
+    is_batched_ortho: bool,
+) -> tuple[jnp.ndarray, jnp.ndarray]:
+    """Compute reciprocal wave-vector norm squared ``|m|^2`` and cell volume ``V``."""
+    Kx, Ky, Kz = grid_dims
+    nx = jnp.fft.fftfreq(Kx, dtype=box_arr.dtype) * Kx
+    ny = jnp.fft.fftfreq(Ky, dtype=box_arr.dtype) * Ky
+    nz = jnp.fft.rfftfreq(Kz, dtype=box_arr.dtype) * Kz
+    if box_arr.ndim == 1:
+        mx = nx / box_arr[0]
+        my = ny / box_arr[1]
+        mz = nz / box_arr[2]
+        m_sq = mx[:, None, None] ** 2 + my[None, :, None] ** 2 + mz[None, None, :] ** 2
+        return m_sq, box_arr[0] * box_arr[1] * box_arr[2]
+    if is_batched_ortho:
+        mx = nx[None, :] / box_arr[:, 0:1]
+        my = ny[None, :] / box_arr[:, 1:2]
+        mz = nz[None, :] / box_arr[:, 2:3]
+        m_sq = (
+            mx[:, :, None, None] ** 2
+            + my[:, None, :, None] ** 2
+            + mz[:, None, None, :] ** 2
+        )
+        return m_sq, jnp.prod(box_arr, axis=-1)
+    n_grid = jnp.stack(jnp.meshgrid(nx, ny, nz, indexing="ij"), axis=0)
+    if box_arr.ndim == 2:
+        b_inv = invert_box_lower_triangular(box_arr)
+        m_vecs = jnp.einsum("ij,jxyz->ixyz", b_inv, n_grid, precision=jax.lax.Precision.HIGHEST)
+        return jnp.sum(m_vecs**2, axis=0), box_volume(box_arr)
+
+    def _one_triclinic(b_mat: jnp.ndarray) -> tuple[jnp.ndarray, jnp.ndarray]:
+        b_inv = invert_box_lower_triangular(b_mat)
+        m_vecs = jnp.einsum("ij,jxyz->ixyz", b_inv, n_grid, precision=jax.lax.Precision.HIGHEST)
+        return jnp.sum(m_vecs**2, axis=0), box_volume(b_mat)
+
+    return jax.vmap(_one_triclinic)(box_arr)
+
+
 def scale_influence_function_isotropic(
     G_ref: jnp.ndarray,
     box_ref: jnp.ndarray,
     box_cur: jnp.ndarray,
+    alpha: float = 0.34,
+    grid_dims: tuple[int, int, int] | None = None,
+    order: int = 4,
 ) -> jnp.ndarray:
-    """Fast isotropic NPT scaling ``G_iso = G_ref * (V_ref / V_cur)`` without recomputing B-splines (MK-59)."""
-    v_ref = box_volume(jnp.asarray(box_ref, dtype=G_ref.dtype))
-    v_cur = jnp.maximum(box_volume(jnp.asarray(box_cur, dtype=G_ref.dtype)), jnp.asarray(1e-12, dtype=G_ref.dtype))
-    ratio = v_ref / v_cur
-    if ratio.ndim == 1 and G_ref.ndim == 3:
-        return G_ref[None, ...] * ratio[:, None, None, None]
-    if ratio.ndim == 1 and G_ref.ndim == 4:
-        return G_ref * ratio[:, None, None, None]
-    return G_ref * ratio
+    """Exact reciprocal Green's function scaling from ``box_ref`` to ``box_cur`` without recomputing B-splines.
+
+    For isotropic scaling ``L = lambda * L_0`` (``V = lambda^3 * V_0``), ``m(L) = lambda^-1 * m_0`` so
+    ``G(n; lambda * L_0) = G_ref(n) * lambda^-1 * exp(-(pi^2 * |m_0|^2 / alpha^2) * (lambda^-2 - 1))``.
+    Evaluating per-mode ``(|m_0|^2 * V_ref) / (|m_cur|^2 * V_cur) * exp(-(pi^2 / alpha^2) * (|m_cur|^2 - |m_0|^2))``
+    reduces identically to the isotropic identity when ``L = lambda * L_0`` while also remaining exact
+    under independent orthorhombic/triclinic box-axis perturbations (e.g. ``jax.vjp`` ``dE/dbox``).
+    """
+    del order  # B-spline modulation b^2(n; K) is box-invariant and cancels in G(L_cur) / G(L_ref)
+    calc_dtype = G_ref.dtype
+    if grid_dims is None:
+        kx_i = int(G_ref.shape[-3])
+        ky_i = int(G_ref.shape[-2])
+        kz_r = int(G_ref.shape[-1])
+        kz_i = 2 * (kz_r - 1) if kz_r > 1 else 1
+        gd = (kx_i, ky_i, kz_i)
+    else:
+        gd = (int(grid_dims[0]), int(grid_dims[1]), int(grid_dims[2]))
+
+    box_ref_arr = jnp.asarray(box_ref, dtype=calc_dtype)
+    box_cur_arr = jnp.asarray(box_cur, dtype=calc_dtype)
+
+    is_batched_ortho_ref = (
+        box_ref_arr.ndim == 2
+        and box_ref_arr.shape[-1] == 3
+        and (
+            (G_ref.ndim == 4 and box_ref_arr.shape[0] == G_ref.shape[0])
+            or not _is_triclinic_box_array(box_ref)
+        )
+    )
+    is_batched_ortho_cur = (
+        box_cur_arr.ndim == 2
+        and box_cur_arr.shape[-1] == 3
+        and (
+            (G_ref.ndim == 4 and box_cur_arr.shape[0] == G_ref.shape[0])
+            or is_batched_ortho_ref
+            or not _is_triclinic_box_array(box_cur)
+        )
+    )
+
+    m0_sq, v_ref = _reciprocal_m_sq_and_vol(
+        box_ref_arr, gd, is_batched_ortho=is_batched_ortho_ref
+    )
+    mc_sq, v_cur = _reciprocal_m_sq_and_vol(
+        box_cur_arr, gd, is_batched_ortho=is_batched_ortho_cur
+    )
+
+    need_batch = G_ref.ndim == 4 or m0_sq.ndim == 4 or mc_sq.ndim == 4
+    g_b = G_ref[None, ...] if (need_batch and G_ref.ndim == 3) else G_ref
+    m0_b = m0_sq[None, ...] if (need_batch and m0_sq.ndim == 3) else m0_sq
+    mc_b = mc_sq[None, ...] if (need_batch and mc_sq.ndim == 3) else mc_sq
+    v_ref_b = v_ref[:, None, None, None] if v_ref.ndim == 1 else v_ref
+    v_cur_b = v_cur[:, None, None, None] if v_cur.ndim == 1 else v_cur
+
+    nonzero = m0_b > 0
+    m0_safe = jnp.where(nonzero, m0_b, jnp.ones_like(m0_b))
+    mc_safe = jnp.where(nonzero, mc_b, jnp.ones_like(mc_b))
+    v_cur_safe = jnp.maximum(v_cur_b, jnp.asarray(1e-12, dtype=calc_dtype))
+
+    alpha_sq = jnp.asarray(float(alpha) ** 2, dtype=calc_dtype)
+    pi_sq = jnp.asarray(jnp.pi**2, dtype=calc_dtype)
+    delta_arg = -(pi_sq / alpha_sq) * (mc_safe - m0_safe)
+    max_exp = 650.0 if calc_dtype == jnp.float64 else 80.0
+    delta_arg_safe = jnp.clip(delta_arg, -max_exp, max_exp)
+
+    scale = ((m0_safe * v_ref_b) / (mc_safe * v_cur_safe)) * jnp.exp(delta_arg_safe)
+    scale = jnp.where(nonzero, scale, jnp.zeros_like(scale))
+    return (g_b * scale).astype(G_ref.dtype)
 
 
 def spme_forces(
@@ -955,6 +1138,7 @@ def spme_forces(
     order: int = 4,
     use_pallas_pme: bool = False,
     G_cached: jnp.ndarray | None = None,
+    deconv_mode: DeconvMode = "euler",
 ) -> jnp.ndarray:
     """Direct SPME reciprocal force evaluation F = -dE/dr without scalar energy reductions (MK-57 / MK-59 / MK-62)."""
     if G_cached is not None:
@@ -988,9 +1172,13 @@ def spme_forces(
         Q_hat = jnp.fft.rfftn(Q, s=grid_dims, axes=(-3, -2, -1))
     with jax.named_scope("pme_greens_setup"):
         if is_ortho and box_w.ndim == 2:
-            G = jax.vmap(lambda b: influence_function(grid_dims, b, alpha, order))(box_w).astype(Q.dtype)
+            G = jax.vmap(
+                lambda b: influence_function(grid_dims, b, alpha, order, deconv_mode=deconv_mode)
+            )(box_w).astype(Q.dtype)
         else:
-            G = influence_function(grid_dims, box_w, alpha, order).astype(Q.dtype)
+            G = influence_function(
+                grid_dims, box_w, alpha, order, deconv_mode=deconv_mode
+            ).astype(Q.dtype)
     with jax.named_scope("pme_fft_inverse"):
         theta = jnp.fft.irfftn(Q_hat * G, s=grid_dims, axes=(-3, -2, -1)).astype(Q.dtype)
     # MK-62: Fuse -COULOMB_CONSTANT * (Kx * Ky * Kz) directly into gather registers
@@ -1065,6 +1253,7 @@ def make_spme_energy_fn(
     use_pallas: bool | None = None,
     n_atoms: int | None = None,
     return_forces: bool = False,
+    deconv_mode: DeconvMode = "euler",
 ):
     gd_env = _resolve_env_pme_grid_dims(n_atoms=n_atoms)
     if grid_dims is None and gd_env is not None:
@@ -1085,6 +1274,7 @@ def make_spme_energy_fn(
             str(box_np.dtype),
             float(alpha),
             int(order),
+            deconv_mode,
         )
         G_cached_f32_np = G_cached_np.astype(np.float32)
 
@@ -1097,7 +1287,12 @@ def make_spme_energy_fn(
                 if box is not None:
                     box_cur = jnp.asarray(box, dtype=positions.dtype)
                     g_dev = scale_influence_function_isotropic(
-                        g_dev, jnp.asarray(box_np, dtype=g_dtype), box_cur
+                        g_dev,
+                        jnp.asarray(box_np, dtype=g_dtype),
+                        box_cur,
+                        alpha=float(alpha),
+                        grid_dims=grid_dims,
+                        order=int(order),
                     )
                 else:
                     box_cur = box_np.astype(np.dtype(positions.dtype))
@@ -1124,7 +1319,12 @@ def make_spme_energy_fn(
             if box is not None:
                 box_cur = jnp.asarray(box, dtype=positions.dtype)
                 g_dev = scale_influence_function_isotropic(
-                    g_dev, jnp.asarray(box_np, dtype=g_dtype), box_cur
+                    g_dev,
+                    jnp.asarray(box_np, dtype=g_dtype),
+                    box_cur,
+                    alpha=float(alpha),
+                    grid_dims=grid_dims,
+                    order=int(order),
                 )
             else:
                 box_cur = box_np.astype(np.dtype(positions.dtype))
@@ -1138,6 +1338,7 @@ def make_spme_energy_fn(
                 alpha,
                 order,
                 use_p,
+                deconv_mode,
             )
 
         with jax.ensure_compile_time_eval():
@@ -1154,6 +1355,7 @@ def make_spme_energy_fn(
             alpha,
             order,
             pallas and not in_export_context(),
+            deconv_mode=deconv_mode,
         )
     return lambda positions, charges, atom_mask, box=None: spme_energy_with_forces(
         positions,
@@ -1164,6 +1366,7 @@ def make_spme_energy_fn(
         alpha,
         order,
         pallas,
+        deconv_mode,
     )
 
 def make_pme_energy_fn(
@@ -1174,15 +1377,28 @@ def make_pme_energy_fn(
     alpha: float = 0.34,
     order: int = 4,
     grid_dims: tuple[int, int, int] | None = None,
+    deconv_mode: DeconvMode = "euler",
 ):
     charges, box_size = jnp.asarray(charges), jnp.asarray(box_size)
     mask = jnp.ones(charges.shape[0], dtype=bool)
     if grid_dims is not None:
-        inner = make_spme_energy_fn(box_size, alpha=alpha, order=order, grid_dims=grid_dims)
+        inner = make_spme_energy_fn(
+            box_size,
+            alpha=alpha,
+            order=order,
+            grid_dims=grid_dims,
+            deconv_mode=deconv_mode,
+        )
     else:
         # numpy, not jnp: see compute_pme_grid_dims above (debt 770).
         box_np = np.asarray(box_size)
         diag_np = np.diag(box_np) if box_np.ndim == 2 else box_np
         grid_spacing = float(np.mean(diag_np)) / float(max(grid_points, 1))
-        inner = make_spme_energy_fn(box_size, alpha=alpha, grid_spacing=grid_spacing, order=order)
+        inner = make_spme_energy_fn(
+            box_size,
+            alpha=alpha,
+            grid_spacing=grid_spacing,
+            order=order,
+            deconv_mode=deconv_mode,
+        )
     return lambda positions: inner(positions, charges, mask) + spme_background_energy(charges, mask, alpha, box_size)

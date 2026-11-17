@@ -1432,11 +1432,29 @@ def _resolve_tier_green(
     order: int,
     work_dtype: jnp.dtype,
 ) -> jax.Array:
-    if tier.G_cached is not None and tier.box_ref is not None and _is_ortho_box(box_t, box_t):
+    is_ortho_t = (
+        box_t.ndim == 1
+        or (
+            box_t.ndim == 2
+            and box_t.shape[-1] == 3
+            and (
+                (
+                    tier.G_cached is not None
+                    and tier.G_cached.ndim == 4
+                    and box_t.shape[0] == tier.G_cached.shape[0]
+                )
+                or not _is_triclinic_box_array(box_t)
+            )
+        )
+    )
+    if tier.G_cached is not None and tier.box_ref is not None and is_ortho_t:
         return scale_influence_function_isotropic(
             tier.G_cached.astype(work_dtype),
             tier.box_ref.astype(work_dtype),
             box_t.astype(work_dtype),
+            alpha=float(alpha),
+            grid_dims=tier.grid_dims,
+            order=int(order),
         )
     if box_t.ndim == 2 and not _is_triclinic_box_array(box_t):
         return jax.vmap(
