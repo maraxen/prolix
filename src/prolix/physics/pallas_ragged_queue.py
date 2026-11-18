@@ -50,12 +50,11 @@ from prolix.physics.pallas_bonded import (
     _triton_erfc,
     _triton_gpu_available,
 )
+from prolix.physics.pbc import invert_box_lower_triangular
 from prolix.physics.pme import (
     COULOMB_CONSTANT,
     _gather_reference,
-    _is_ortho_box,
     _is_perturbed,
-    _is_triclinic_box_array,
     _spread_charges_reference,
     _unwrap_primal,
     compute_openmm_pme_params,
@@ -519,17 +518,186 @@ def _snap_to_tier_dims(
     return (out[0], out[1], out[2])
 
 
-def _extract_ortho_lengths_np(box_sizes: np.ndarray | jax.Array) -> np.ndarray:
+def _is_lower_tri_3x3_arr(b_arr: np.ndarray | jax.Array) -> bool:
+    """Return True if a concrete ``(3, 3)`` array has zeros above the main diagonal."""
+    if b_arr.ndim != 2 or b_arr.shape != (3, 3):
+        return False
+    if not isinstance(b_arr, jax.core.Tracer):
+        b_np = np.asarray(b_arr)
+        return bool(b_np[0, 1] == 0.0 and b_np[0, 2] == 0.0 and b_np[1, 2] == 0.0)
+    return False
+
+
+def _has_nonzero_lower_tilt_np(b_np: np.ndarray) -> bool:
+    return bool(
+        np.any(b_np[..., 1, 0] != 0.0)
+        or np.any(b_np[..., 2, 0] != 0.0)
+        or np.any(b_np[..., 2, 1] != 0.0)
+    )
+
+
+def _infer_pme_is_triclinic(  # noqa: PLR0911
+    box_size: np.ndarray | jax.Array,
+    B: int,
+    *,
+    single_input: bool = False,
+    is_triclinic: bool = False,
+) -> bool:
+    """Infer triclinic mode safely across ``B == 3`` ``(3, 3)`` orthorhombic batches."""
+    if is_triclinic:
+        return True
+    b_arr = jnp.asarray(box_size)
+    if b_arr.ndim == 3 and b_arr.shape[-2:] == (3, 3):
+        if not isinstance(b_arr, jax.core.Tracer):
+            return _has_nonzero_lower_tilt_np(np.asarray(b_arr))
+        return True
+    if b_arr.ndim == 2:
+        if b_arr.shape[-1] == 9:
+            if not isinstance(b_arr, jax.core.Tracer):
+                return _has_nonzero_lower_tilt_np(np.asarray(b_arr).reshape(-1, 3, 3))
+            return True
+        if b_arr.shape[-1] == 6:
+            if not isinstance(b_arr, jax.core.Tracer):
+                return bool(np.any(np.asarray(b_arr)[:, 3:6] != 0.0))
+            return True
+        if b_arr.shape == (3, 3):
+            if (not single_input) and B == 3 and not _is_lower_tri_3x3_arr(b_arr):
+                return False
+            if isinstance(b_arr, jax.core.Tracer):
+                return single_input or B != 3
+            if not _is_lower_tri_3x3_arr(b_arr):
+                return False
+            return _has_nonzero_lower_tilt_np(np.asarray(b_arr))
+        return False
+    if b_arr.ndim == 1:
+        if b_arr.size == 6:
+            if not isinstance(b_arr, jax.core.Tracer):
+                return bool(np.any(np.asarray(b_arr)[3:6] != 0.0))
+            return True
+        if (single_input or B != 3) and b_arr.size == 9:
+            if not isinstance(b_arr, jax.core.Tracer):
+                return _has_nonzero_lower_tilt_np(np.asarray(b_arr).reshape(3, 3))
+            return True
+        if (not single_input) and B > 0 and b_arr.size == B * 9:
+            if not isinstance(b_arr, jax.core.Tracer):
+                return _has_nonzero_lower_tilt_np(np.asarray(b_arr).reshape(B, 3, 3))
+            return True
+    return False
+
+
+def _extract_box_batch_for_tiers_np(  # noqa: PLR0911
+    box_sizes: np.ndarray | jax.Array,
+    *,
+    is_triclinic: bool = False,
+    batch_size_hint: int | None = None,
+) -> tuple[np.ndarray, np.ndarray, bool]:
+    """Extract ``(lengths_np (B, 3), box_ref_np (B, 3) | (B, 3, 3), any_triclinic)`` on host."""
     b_np = np.asarray(box_sizes, dtype=np.float64)
-    if b_np.ndim == 1:
-        return b_np[None, :3]
+    b_hint = int(batch_size_hint) if batch_size_hint is not None else None
+
+    if b_np.ndim == 3 and b_np.shape[-2:] == (3, 3):
+        lengths = np.diagonal(b_np, axis1=-2, axis2=-1)[:, :3]
+        any_tri = bool(is_triclinic) or _has_nonzero_lower_tilt_np(b_np)
+        return lengths, (b_np if any_tri else lengths), any_tri
+
     if b_np.ndim == 2:
-        if b_np.shape == (3, 3) and _is_triclinic_box_array(b_np):
-            return np.diag(b_np)[None, :]
-        return b_np[:, :3]
-    if b_np.ndim == 3:
-        return np.diagonal(b_np, axis1=-2, axis2=-1)[:, :3]
+        if b_np.shape[-1] == 9:
+            mats = b_np.reshape(-1, 3, 3)
+            lengths = np.diagonal(mats, axis1=-2, axis2=-1)[:, :3]
+            any_tri = bool(is_triclinic) or _has_nonzero_lower_tilt_np(mats)
+            return lengths, (mats if any_tri else lengths), any_tri
+        if b_np.shape[-1] == 6:
+            B = b_np.shape[0]
+            lengths = b_np[:, :3]
+            any_tri = bool(is_triclinic or np.any(b_np[:, 3:6] != 0.0))
+            if not any_tri:
+                return lengths, lengths, False
+            mats = np.zeros((B, 3, 3), dtype=np.float64)
+            mats[:, 0, 0] = b_np[:, 0]
+            mats[:, 1, 1] = b_np[:, 1]
+            mats[:, 2, 2] = b_np[:, 2]
+            mats[:, 1, 0] = b_np[:, 3]
+            mats[:, 2, 0] = b_np[:, 4]
+            mats[:, 2, 1] = b_np[:, 5]
+            return lengths, mats, True
+        if b_np.shape == (3, 3):
+            is_low = bool(b_np[0, 1] == 0.0 and b_np[0, 2] == 0.0 and b_np[1, 2] == 0.0)
+            is_single_mat = bool(is_triclinic) or (is_low and b_hint != 3) or (is_low and _has_nonzero_lower_tilt_np(b_np))
+            if is_single_mat:
+                B_out = b_hint if (b_hint is not None and b_hint > 0) else 1
+                diag = np.broadcast_to(np.diag(b_np)[None, :], (B_out, 3)).copy()
+                any_tri = bool(is_triclinic) or _has_nonzero_lower_tilt_np(b_np)
+                if any_tri:
+                    mats = np.broadcast_to(b_np[None, :, :], (B_out, 3, 3)).copy()
+                    return diag, mats, True
+                return diag, diag, False
+            lengths = b_np[:, :3]
+            if is_triclinic:
+                mats = np.zeros((3, 3, 3), dtype=np.float64)
+                mats[:, 0, 0] = lengths[:, 0]
+                mats[:, 1, 1] = lengths[:, 1]
+                mats[:, 2, 2] = lengths[:, 2]
+                return lengths, mats, True
+            return lengths, lengths, False
+        lengths = b_np[:, :3]
+        if is_triclinic:
+            B = lengths.shape[0]
+            mats = np.zeros((B, 3, 3), dtype=np.float64)
+            mats[:, 0, 0] = lengths[:, 0]
+            mats[:, 1, 1] = lengths[:, 1]
+            mats[:, 2, 2] = lengths[:, 2]
+            return lengths, mats, True
+        return lengths, lengths, False
+
+    if b_np.ndim == 1:
+        if b_np.size == 6:
+            B_out = b_hint if (b_hint is not None and b_hint > 0) else 1
+            lengths = np.broadcast_to(b_np[:3][None, :], (B_out, 3)).copy()
+            any_tri = bool(is_triclinic or np.any(b_np[3:6] != 0.0))
+            if not any_tri:
+                return lengths, lengths, False
+            mat1 = np.array(
+                [[b_np[0], 0.0, 0.0], [b_np[3], b_np[1], 0.0], [b_np[4], b_np[5], b_np[2]]],
+                dtype=np.float64,
+            )
+            return lengths, np.broadcast_to(mat1[None, :, :], (B_out, 3, 3)).copy(), True
+        if b_hint is not None and b_hint > 0 and b_np.size == b_hint * 9:
+            mats = b_np.reshape(b_hint, 3, 3)
+            lengths = np.diagonal(mats, axis1=-2, axis2=-1)[:, :3]
+            any_tri = bool(is_triclinic) or _has_nonzero_lower_tilt_np(mats)
+            return lengths, (mats if any_tri else lengths), any_tri
+        if b_np.size == 9 and (is_triclinic or b_hint != 3):
+            mat1 = b_np.reshape(3, 3)
+            B_out = b_hint if (b_hint is not None and b_hint > 0) else 1
+            lengths = np.broadcast_to(np.diag(mat1)[None, :], (B_out, 3)).copy()
+            any_tri = bool(is_triclinic) or _has_nonzero_lower_tilt_np(mat1)
+            if any_tri:
+                return lengths, np.broadcast_to(mat1[None, :, :], (B_out, 3, 3)).copy(), True
+            return lengths, lengths, False
+        if b_hint is not None and b_hint > 0 and b_np.size == b_hint * 3:
+            lengths = b_np.reshape(b_hint, 3)
+            return lengths, lengths, False
+        if b_np.size >= 3 and (b_np.size % 9 == 0) and is_triclinic:
+            mats = b_np.reshape(-1, 3, 3)
+            lengths = np.diagonal(mats, axis1=-2, axis2=-1)[:, :3]
+            return lengths, mats, True
+        B_out = b_hint if (b_hint is not None and b_hint > 0) else 1
+        lengths = np.broadcast_to(b_np[:3][None, :], (B_out, 3)).copy()
+        return lengths, lengths, False
+
     raise ValueError(f"Unsupported box_sizes shape: {b_np.shape}")
+
+
+def _extract_ortho_lengths_np(
+    box_sizes: np.ndarray | jax.Array,
+    *,
+    is_triclinic: bool = False,
+    batch_size_hint: int | None = None,
+) -> np.ndarray:
+    lengths, _, _ = _extract_box_batch_for_tiers_np(
+        box_sizes, is_triclinic=is_triclinic, batch_size_hint=batch_size_hint
+    )
+    return lengths
 
 
 def _solve_optimal_tier_partition(
@@ -598,7 +766,7 @@ def _solve_optimal_tier_partition(
     return ranges_rev, float(best_cost)
 
 
-def plan_pme_tiers(
+def plan_pme_tiers(  # noqa: PLR0913
     box_sizes: np.ndarray | jax.Array,
     *,
     cutoff: float = 9.0,
@@ -615,6 +783,7 @@ def plan_pme_tiers(
     candidate_tier_dims: Sequence[int] | None = None,
     max_tiers: int = 4,
     cache_influence: bool = True,
+    is_triclinic: bool = False,
 ) -> PMETierPlan:
     """Build a cost-modeled multi-resolution PME execution plan (MK-68).
 
@@ -645,13 +814,26 @@ def plan_pme_tiers(
         )
     mode_typed = cast("PMETierMode", mode_norm)
 
+    b_hint: int | None = None
+    if grid_dims_per_replica is not None:
+        b_hint = len(grid_dims_per_replica)
+    elif n_real_per_replica is not None:
+        b_hint = int(np.asarray(n_real_per_replica).reshape(-1).shape[0])
+    elif atom_mask is not None and not isinstance(atom_mask, jax.core.Tracer):
+        am_sh = np.shape(atom_mask)
+        if len(am_sh) >= 2:
+            b_hint = int(am_sh[0])
+
     has_concrete_box = not isinstance(box_sizes, jax.core.Tracer)
     if has_concrete_box:
-        lengths_np = _extract_ortho_lengths_np(box_sizes)
+        lengths_np, box_ref_np, _any_tri = _extract_box_batch_for_tiers_np(
+            box_sizes, is_triclinic=is_triclinic, batch_size_hint=b_hint
+        )
         B = int(lengths_np.shape[0])
     elif grid_dims_per_replica is not None:
         B = len(grid_dims_per_replica)
         lengths_np = np.ones((B, 3), dtype=np.float64)
+        box_ref_np = lengths_np
     else:
         raise ValueError(
             "plan_pme_tiers requires concrete box_sizes or explicit grid_dims_per_replica."
@@ -812,13 +994,13 @@ def plan_pme_tiers(
 
         g_cached_arr: jax.Array | None = None
         box_ref_arr: jax.Array | None = None
-        if cache_influence and has_concrete_box and not _is_triclinic_box_array(box_sizes):
-            sub_box = jnp.asarray(lengths_np[list(rep_tuple)], dtype=jnp.float32)
+        if cache_influence and has_concrete_box:
+            sub_box = jnp.asarray(box_ref_np[list(rep_tuple)], dtype=jnp.float32)
             box_ref_arr = sub_box
             with jax.ensure_compile_time_eval():
                 g_cached_arr = jax.vmap(
-                    lambda b_vec, g_dims=gd: influence_function(
-                        g_dims, b_vec, alpha_val, int(order)
+                    lambda b_elem, g_dims=gd: influence_function(
+                        g_dims, b_elem, alpha_val, int(order)
                     )
                 )(sub_box).astype(jnp.float32)
 
@@ -855,6 +1037,164 @@ def plan_pme_tiers(
 # =============================================================================
 
 
+def _normalize_box6_batch(  # noqa: PLR0911
+    box: jax.Array | None,
+    B: int,
+    dtype: Any,
+    *,
+    single_input: bool = False,
+    is_triclinic: bool = False,
+) -> tuple[jax.Array, bool]:
+    """Normalize periodic box to ``(B_box, 6)`` ``[ax, by, cz, bx, cx, cy]`` (``B == 3`` safe)."""
+    if box is None:
+        return jnp.zeros((1, 6), dtype=dtype), False
+    b_arr = jnp.asarray(box, dtype=dtype)
+    if b_arr.ndim == 3 and b_arr.shape[-2:] == (3, 3):
+        return (
+            jnp.stack(
+                [
+                    b_arr[:, 0, 0],
+                    b_arr[:, 1, 1],
+                    b_arr[:, 2, 2],
+                    b_arr[:, 1, 0],
+                    b_arr[:, 2, 0],
+                    b_arr[:, 2, 1],
+                ],
+                axis=-1,
+            ),
+            True,
+        )
+    if b_arr.ndim == 2:
+        if b_arr.shape[-1] == 6:
+            return b_arr, True
+        if b_arr.shape[-1] == 9:
+            return (
+                jnp.stack(
+                    [
+                        b_arr[:, 0],
+                        b_arr[:, 4],
+                        b_arr[:, 8],
+                        b_arr[:, 3],
+                        b_arr[:, 6],
+                        b_arr[:, 7],
+                    ],
+                    axis=-1,
+                ),
+                True,
+            )
+        if b_arr.shape == (3, 3):
+            is_single_mat = (
+                bool(single_input)
+                or bool(is_triclinic)
+                or (int(B) != 3)
+                or _is_lower_tri_3x3_arr(b_arr)
+            )
+            if is_single_mat:
+                row = jnp.stack(
+                    [
+                        b_arr[0, 0],
+                        b_arr[1, 1],
+                        b_arr[2, 2],
+                        b_arr[1, 0],
+                        b_arr[2, 0],
+                        b_arr[2, 1],
+                    ]
+                )
+                return row[None, :], True
+        return (
+            jnp.concatenate([b_arr[:, :3], jnp.zeros((b_arr.shape[0], 3), dtype=dtype)], axis=-1),
+            True,
+        )
+    if b_arr.ndim == 1:
+        if b_arr.size == 6:
+            return b_arr[None, :], True
+        if b_arr.size == 3:
+            return jnp.concatenate([b_arr, jnp.zeros((3,), dtype=dtype)])[None, :], True
+        if (not single_input) and B > 0 and b_arr.size == B * 9:
+            b9 = b_arr.reshape(B, 9)
+            return (
+                jnp.stack([b9[:, 0], b9[:, 4], b9[:, 8], b9[:, 3], b9[:, 6], b9[:, 7]], axis=-1),
+                True,
+            )
+        if b_arr.size == 9 and (single_input or is_triclinic or int(B) != 3):
+            return (
+                jnp.stack(
+                    [b_arr[0], b_arr[4], b_arr[8], b_arr[3], b_arr[6], b_arr[7]]
+                )[None, :],
+                True,
+            )
+        if (not single_input) and B > 0 and b_arr.size == B * 3:
+            b3 = b_arr.reshape(B, 3)
+            return jnp.concatenate([b3, jnp.zeros((B, 3), dtype=dtype)], axis=-1), True
+        return jnp.concatenate([b_arr[:3], jnp.zeros((3,), dtype=dtype)])[None, :], True
+    raise ValueError(f"Unsupported periodic box shape: {b_arr.shape}")
+
+
+def _box6_to_3x3_batch(box6: jax.Array, B: int) -> jax.Array:
+    """Expand ``(B_box, 6)`` ``[ax, by, cz, bx, cx, cy]`` to ``(B, 3, 3)`` lower-triangular."""
+    b6 = jnp.broadcast_to(box6, (B, 6))
+    z = jnp.zeros((B,), dtype=b6.dtype)
+    r0 = jnp.stack([b6[:, 0], z, z], axis=-1)
+    r1 = jnp.stack([b6[:, 3], b6[:, 1], z], axis=-1)
+    r2 = jnp.stack([b6[:, 4], b6[:, 5], b6[:, 2]], axis=-1)
+    return jnp.stack([r0, r1, r2], axis=-2)
+
+
+def _spread_reference_batched(
+    pos_b: jax.Array,
+    q_b: jax.Array,
+    m_b: jax.Array,
+    box_b_canon: jax.Array,
+    grid_dims: tuple[int, int, int],
+    order: int,
+) -> jax.Array:
+    B = int(pos_b.shape[0])
+    b_q = int(q_b.shape[0]) > 1
+    b_m = int(m_b.shape[0]) > 1
+    b_bx = int(box_b_canon.shape[0]) > 1
+    return jax.vmap(
+        lambda b: _spread_charges_reference(
+            pos_b[b],
+            q_b[b] if b_q else q_b[0],
+            m_b[b] if b_m else m_b[0],
+            box_b_canon[b] if b_bx else box_b_canon[0],
+            grid_dims=grid_dims,
+            order=order,
+        )
+    )(jnp.arange(B, dtype=jnp.int32))
+
+
+def _gather_reference_batched(
+    pos_b: jax.Array,
+    q_b: jax.Array,
+    m_b: jax.Array,
+    box_b_canon: jax.Array,
+    th_b: jax.Array,
+    grid_dims: tuple[int, int, int],
+    order: int,
+    force_scale: float,
+    pot_scale: float,
+) -> tuple[jax.Array, jax.Array]:
+    B = int(pos_b.shape[0])
+    b_q = int(q_b.shape[0]) > 1
+    b_m = int(m_b.shape[0]) > 1
+    b_bx = int(box_b_canon.shape[0]) > 1
+    b_th = int(th_b.shape[0]) > 1
+    return jax.vmap(
+        lambda b: _gather_reference(
+            pos_b[b],
+            q_b[b] if b_q else q_b[0],
+            m_b[b] if b_m else m_b[0],
+            box_b_canon[b] if b_bx else box_b_canon[0],
+            th_b[b] if b_th else th_b[0],
+            grid_dims=grid_dims,
+            order=order,
+            force_scale=force_scale,
+            pot_scale=pot_scale,
+        )
+    )(jnp.arange(B, dtype=jnp.int32))
+
+
 def spread_charges_pallas_ragged(
     positions: jax.Array,
     charges: jax.Array,
@@ -866,33 +1206,12 @@ def spread_charges_pallas_ragged(
     n_real_per_replica: Sequence[int] | np.ndarray | jax.Array | None = None,
     order: int = 4,
     interpret: bool | None = None,
+    is_triclinic: bool = False,
 ) -> jax.Array:
-    """1D ragged CTA queue SPME B-spline charge spread (zero ghost CTAs launched).
-
-    Args:
-        positions: ``(B, N, 3)`` or ``(N, 3)`` coordinates in Å.
-        charges: ``(B, N)`` or ``(N,)`` partial charges in elementary charge units.
-        atom_mask: ``(B, N)`` or ``(N,)`` active-atom mask.
-        box_size: ``(B, 3)`` or ``(3,)`` orthorhombic box lengths in Å.
-        grid_dims: ``(Kx, Ky, Kz)`` 3D FFT mesh dimensions.
-        queue: Optional precomputed ``RaggedWorkQueue`` with ``tile_size == 32``.
-        n_real_per_replica: Optional ``(B,)`` active counts if ``queue`` is omitted.
-        order: B-spline order (must be ``4``).
-        interpret: Optional Pallas interpret mode override.
-    """
+    """1D ragged CTA queue SPME B-spline charge spread (ortho & reduced triclinic, zero ghost CTAs)."""
     if order != 4:
         raise NotImplementedError("Pallas ragged SPME stencil is order-4 only.")
     grid_tuple = (int(grid_dims[0]), int(grid_dims[1]), int(grid_dims[2]))
-    if in_export_context() or not _is_ortho_box(positions, box_size):
-        return _spread_charges_reference(
-            positions,
-            charges,
-            atom_mask,
-            box_size,
-            grid_dims=grid_tuple,
-            order=order,
-        )
-
     single_input = positions.ndim == 2
     pos_b = positions[None, ...] if single_input else positions
     B, n_atoms, _ = pos_b.shape
@@ -906,12 +1225,20 @@ def spread_charges_pallas_ragged(
 
     b_q = charges.ndim == 2 and not single_input
     b_m = atom_mask.ndim == 2 and not single_input
-    box_arr = jnp.asarray(box_size)
-    b_box = box_arr.ndim >= 2 and not single_input and box_arr.shape[0] == B
-
     q_b = charges if b_q else (charges[None, ...] if charges.ndim == 1 else charges[:1])
     m_b = atom_mask if b_m else (atom_mask[None, ...] if atom_mask.ndim == 1 else atom_mask[:1])
-    bx_b = box_arr[:, :3] if b_box else box_arr.reshape(-1)[:3][None, :]
+
+    eff_tri = _infer_pme_is_triclinic(
+        box_size, B, single_input=single_input, is_triclinic=is_triclinic
+    )
+    box6_b, _ = _normalize_box6_batch(
+        box_size, B, orig_dtype, single_input=single_input, is_triclinic=eff_tri
+    )
+
+    if in_export_context():
+        box_canon = _box6_to_3x3_batch(box6_b, B) if eff_tri else box6_b[:, :3]
+        out_ref = _spread_reference_batched(pos_b, q_b, m_b, box_canon, grid_tuple, order)
+        return out_ref[0] if single_input else out_ref
 
     if queue is None:
         queue = build_ragged_work_queue(
@@ -932,7 +1259,8 @@ def spread_charges_pallas_ragged(
     pos_f = pos_b.astype(dtype)
     q_f = q_b.astype(dtype)
     m_i = jnp.asarray(m_b, dtype=jnp.int32)
-    bx_f = bx_b.astype(dtype)
+    bx_f = (box6_b if eff_tri else box6_b[:, :3]).astype(dtype)
+    bx_stride = 6 if eff_tri else 3
 
     if use_interpret:
         n_blocks_pad = max(1, (n_atoms + _PME_BLOCK_N - 1) // _PME_BLOCK_N)
@@ -980,10 +1308,11 @@ def spread_charges_pallas_ragged(
         pos_base = b_id * n_stride
         q_base = (b_id if B_q > 1 else jnp.int32(0)) * n_stride
         m_base = (b_id if B_m > 1 else jnp.int32(0)) * n_stride
-        box_base = (b_id if B_box > 1 else jnp.int32(0)) * 3
+        box_base = (b_id if B_box > 1 else jnp.int32(0)) * bx_stride
         mesh_base = b_id * mesh_stride
 
         zero = jnp.asarray(0.0, dtype=dtype)
+        one = jnp.asarray(1.0, dtype=dtype)
         in_bounds = (offs < n_real_b) & (offs < n_atoms)
         is_real = (_pl_load(mask_ref, (m_base + offs,), mask=in_bounds, other=0) > 0) & in_bounds
         qi = _pl_load(charges_ref, (q_base + offs,), mask=is_real, other=zero)
@@ -994,16 +1323,33 @@ def spread_charges_pallas_ragged(
             py = _pl_load(py_ref, (pos_base + offs,), mask=active_q, other=zero)
             pz = _pl_load(pz_ref, (pos_base + offs,), mask=active_q, other=zero)
 
-            bx = _pl_load(box_ref, (box_base + jnp.zeros((1,), dtype=jnp.int32),))[0]
+            ax = _pl_load(box_ref, (box_base + jnp.zeros((1,), dtype=jnp.int32),))[0]
             by = _pl_load(box_ref, (box_base + jnp.ones((1,), dtype=jnp.int32),))[0]
-            bz = _pl_load(box_ref, (box_base + jnp.full((1,), 2, dtype=jnp.int32),))[0]
+            cz = _pl_load(box_ref, (box_base + jnp.full((1,), 2, dtype=jnp.int32),))[0]
             kx = jnp.asarray(Kx, dtype=dtype)
             ky = jnp.asarray(Ky, dtype=dtype)
             kz = jnp.asarray(Kz, dtype=dtype)
 
-            frac_x = px * (kx / bx)
-            frac_y = py * (ky / by)
-            frac_z = pz * (kz / bz)
+            if eff_tri:
+                bx_t = _pl_load(box_ref, (box_base + jnp.full((1,), 3, dtype=jnp.int32),))[0]
+                cx_t = _pl_load(box_ref, (box_base + jnp.full((1,), 4, dtype=jnp.int32),))[0]
+                cy_t = _pl_load(box_ref, (box_base + jnp.full((1,), 5, dtype=jnp.int32),))[0]
+                b00 = one / ax
+                b11 = one / by
+                b22 = one / cz
+                b10 = zero - bx_t * (b00 * b11)
+                b21 = zero - cy_t * (b11 * b22)
+                b20 = (bx_t * cy_t - by * cx_t) * (b00 * b11 * b22)
+                sx_r = px * b00 + py * b10 + pz * b20
+                sy_r = py * b11 + pz * b21
+                sz_r = pz * b22
+                frac_x = (sx_r - jnp.floor(sx_r)) * kx
+                frac_y = (sy_r - jnp.floor(sy_r)) * ky
+                frac_z = (sz_r - jnp.floor(sz_r)) * kz
+            else:
+                frac_x = px * (kx / ax)
+                frac_y = py * (ky / by)
+                frac_z = pz * (kz / cz)
             gx = jnp.floor(frac_x)
             gy = jnp.floor(frac_y)
             gz = jnp.floor(frac_z)
@@ -1095,31 +1441,12 @@ def gather_pallas_ragged(
     force_scale: float = 1.0,
     pot_scale: float = 1.0,
     interpret: bool | None = None,
+    is_triclinic: bool = False,
 ) -> tuple[jax.Array, jax.Array]:
-    """1D ragged CTA queue SPME force & potential gather (zero ghost CTAs launched).
-
-    Uses pre-zeroed aliased output buffers so padded tail blocks ``[N_real[b] .. N_pad)``
-    stay exact ``0.0`` without launching CTAs on ghost blocks.
-    """
+    """1D ragged CTA queue SPME force & potential gather (ortho & reduced triclinic, zero ghost CTAs)."""
     if order != 4:
         raise NotImplementedError("Pallas ragged SPME stencil is order-4 only.")
     grid_tuple = (int(grid_dims[0]), int(grid_dims[1]), int(grid_dims[2]))
-    if in_export_context() or not _is_ortho_box(positions, box_size):
-        forces_ref, pots_ref = _gather_reference(
-            positions,
-            charges,
-            atom_mask,
-            box_size,
-            theta_norm,
-            grid_dims=grid_tuple,
-            order=order,
-            force_scale=float(force_scale),
-            pot_scale=float(pot_scale),
-        )
-        if not compute_dq:
-            pots_ref = jnp.zeros_like(pots_ref)
-        return forces_ref, pots_ref
-
     single_input = positions.ndim == 2
     pos_b = positions[None, ...] if single_input else positions
     B, n_atoms, _ = pos_b.shape
@@ -1134,14 +1461,35 @@ def gather_pallas_ragged(
 
     b_q = charges.ndim == 2 and not single_input
     b_m = atom_mask.ndim == 2 and not single_input
-    box_arr = jnp.asarray(box_size)
-    b_box = box_arr.ndim >= 2 and not single_input and box_arr.shape[0] == B
     b_mesh = theta_norm.ndim == 4 and not single_input
 
     q_b = charges if b_q else (charges[None, ...] if charges.ndim == 1 else charges[:1])
     m_b = atom_mask if b_m else (atom_mask[None, ...] if atom_mask.ndim == 1 else atom_mask[:1])
-    bx_b = box_arr[:, :3] if b_box else box_arr.reshape(-1)[:3][None, :]
     th_b = theta_norm if b_mesh else theta_norm[None, ...]
+
+    eff_tri = _infer_pme_is_triclinic(
+        box_size, B, single_input=single_input, is_triclinic=is_triclinic
+    )
+    box6_b, _ = _normalize_box6_batch(
+        box_size, B, orig_dtype, single_input=single_input, is_triclinic=eff_tri
+    )
+
+    if in_export_context():
+        box_canon = _box6_to_3x3_batch(box6_b, B) if eff_tri else box6_b[:, :3]
+        forces_ref, pots_ref = _gather_reference_batched(
+            pos_b,
+            q_b,
+            m_b,
+            box_canon,
+            th_b.astype(orig_dtype),
+            grid_tuple,
+            order,
+            float(force_scale),
+            float(pot_scale),
+        )
+        if not compute_dq:
+            pots_ref = jnp.zeros_like(pots_ref)
+        return (forces_ref[0], pots_ref[0]) if single_input else (forces_ref, pots_ref)
 
     if queue is None:
         queue = build_ragged_work_queue(
@@ -1163,7 +1511,8 @@ def gather_pallas_ragged(
     pos_f = pos_b.astype(dtype)
     q_f = q_b.astype(dtype)
     m_i = jnp.asarray(m_b, dtype=jnp.int32)
-    bx_f = bx_b.astype(dtype)
+    bx_f = (box6_b if eff_tri else box6_b[:, :3]).astype(dtype)
+    bx_stride = 6 if eff_tri else 3
     th_f = th_b.astype(dtype)
 
     if use_interpret:
@@ -1227,11 +1576,12 @@ def gather_pallas_ragged(
         pos_base = b_id * n_stride
         q_base = (b_id if B_q > 1 else jnp.int32(0)) * n_stride
         m_base = (b_id if B_m > 1 else jnp.int32(0)) * n_stride
-        box_base = (b_id if B_box > 1 else jnp.int32(0)) * 3
+        box_base = (b_id if B_box > 1 else jnp.int32(0)) * bx_stride
         mesh_base = (b_id if B_mesh > 1 else jnp.int32(0)) * mesh_stride
         out_base = b_id * n_stride
 
         zero = jnp.asarray(0.0, dtype=dtype)
+        one = jnp.asarray(1.0, dtype=dtype)
         in_bounds_act = (offs < n_real_b) & (offs < n_atoms)
         in_bounds_out = offs < n_stride
         is_real = (_pl_load(mask_ref, (m_base + offs,), mask=in_bounds_act, other=0) > 0) & in_bounds_act
@@ -1244,19 +1594,37 @@ def gather_pallas_ragged(
             py = _pl_load(py_ref, (pos_base + offs,), mask=active_lane, other=zero)
             pz = _pl_load(pz_ref, (pos_base + offs,), mask=active_lane, other=zero)
 
-            bx = _pl_load(box_ref, (box_base + jnp.zeros((1,), dtype=jnp.int32),))[0]
+            ax = _pl_load(box_ref, (box_base + jnp.zeros((1,), dtype=jnp.int32),))[0]
             by = _pl_load(box_ref, (box_base + jnp.ones((1,), dtype=jnp.int32),))[0]
-            bz = _pl_load(box_ref, (box_base + jnp.full((1,), 2, dtype=jnp.int32),))[0]
+            cz = _pl_load(box_ref, (box_base + jnp.full((1,), 2, dtype=jnp.int32),))[0]
             kx = jnp.asarray(Kx, dtype=dtype)
             ky = jnp.asarray(Ky, dtype=dtype)
             kz = jnp.asarray(Kz, dtype=dtype)
 
-            sx = kx / bx
-            sy = ky / by
-            sz = kz / bz
-            frac_x = px * sx
-            frac_y = py * sy
-            frac_z = pz * sz
+            if eff_tri:
+                bx_t = _pl_load(box_ref, (box_base + jnp.full((1,), 3, dtype=jnp.int32),))[0]
+                cx_t = _pl_load(box_ref, (box_base + jnp.full((1,), 4, dtype=jnp.int32),))[0]
+                cy_t = _pl_load(box_ref, (box_base + jnp.full((1,), 5, dtype=jnp.int32),))[0]
+                b00 = one / ax
+                b11 = one / by
+                b22 = one / cz
+                b10 = zero - bx_t * (b00 * b11)
+                b21 = zero - cy_t * (b11 * b22)
+                b20 = (bx_t * cy_t - by * cx_t) * (b00 * b11 * b22)
+                sx_r = px * b00 + py * b10 + pz * b20
+                sy_r = py * b11 + pz * b21
+                sz_r = pz * b22
+                frac_x = (sx_r - jnp.floor(sx_r)) * kx
+                frac_y = (sy_r - jnp.floor(sy_r)) * ky
+                frac_z = (sz_r - jnp.floor(sz_r)) * kz
+            else:
+                b00 = b11 = b22 = b10 = b21 = b20 = zero
+                sx = kx / ax
+                sy = ky / by
+                sz = kz / cz
+                frac_x = px * sx
+                frac_y = py * sy
+                frac_z = pz * sz
             gx = jnp.floor(frac_x)
             gy = jnp.floor(frac_y)
             gz = jnp.floor(frac_z)
@@ -1323,9 +1691,17 @@ def gather_pallas_ragged(
             q_scale = jnp.asarray(pot_scale, dtype=dtype)
             dq_v = jnp.where(is_real, acc_dq * q_scale, zero).astype(dtype) if compute_dq else zero_vec
             q_f_lane = qi * f_scale
-            dpx_v = jnp.where(active_lane, q_f_lane * sx * acc_dx, zero).astype(dtype)
-            dpy_v = jnp.where(active_lane, q_f_lane * sy * acc_dy, zero).astype(dtype)
-            dpz_v = jnp.where(active_lane, q_f_lane * sz * acc_dz, zero).astype(dtype)
+            if eff_tri:
+                gx_f = q_f_lane * (kx * acc_dx)
+                gy_f = q_f_lane * (ky * acc_dy)
+                gz_f = q_f_lane * (kz * acc_dz)
+                dpx_v = jnp.where(active_lane, gx_f * b00, zero).astype(dtype)
+                dpy_v = jnp.where(active_lane, gx_f * b10 + gy_f * b11, zero).astype(dtype)
+                dpz_v = jnp.where(active_lane, gx_f * b20 + gy_f * b21 + gz_f * b22, zero).astype(dtype)
+            else:
+                dpx_v = jnp.where(active_lane, q_f_lane * (kx / ax) * acc_dx, zero).astype(dtype)
+                dpy_v = jnp.where(active_lane, q_f_lane * (ky / by) * acc_dy, zero).astype(dtype)
+                dpz_v = jnp.where(active_lane, q_f_lane * (kz / cz) * acc_dz, zero).astype(dtype)
             return (dpx_v, dpy_v, dpz_v, dq_v)
 
         dpx, dpy, dpz, dq = jax.lax.cond(
@@ -1433,36 +1809,48 @@ def _resolve_tier_green(
     box_t: jax.Array,
     alpha: float,
     order: int,
-    work_dtype: jnp.dtype,
+    work_dtype: Any,
 ) -> jax.Array:
-    is_ortho_t = (
-        box_t.ndim == 1
-        or (
-            box_t.ndim == 2
-            and box_t.shape[-1] == 3
-            and (
-                (
-                    tier.G_cached is not None
-                    and tier.G_cached.ndim == 4
-                    and box_t.shape[0] == tier.G_cached.shape[0]
-                )
-                or not _is_triclinic_box_array(box_t)
+    if box_t.ndim == 2 and box_t.shape[-1] == 3:
+        if (
+            tier.G_cached is not None
+            and tier.box_ref is not None
+            and tier.box_ref.ndim == 2
+            and tier.box_ref.shape == box_t.shape
+        ):
+            return scale_influence_function_isotropic(
+                tier.G_cached.astype(work_dtype),
+                tier.box_ref.astype(work_dtype),
+                box_t.astype(work_dtype),
+                alpha=float(alpha),
+                grid_dims=tier.grid_dims,
+                order=int(order),
             )
-        )
-    )
-    if tier.G_cached is not None and tier.box_ref is not None and is_ortho_t:
-        return scale_influence_function_isotropic(
-            tier.G_cached.astype(work_dtype),
-            tier.box_ref.astype(work_dtype),
-            box_t.astype(work_dtype),
-            alpha=float(alpha),
-            grid_dims=tier.grid_dims,
-            order=int(order),
-        )
-    if box_t.ndim == 2 and not _is_triclinic_box_array(box_t):
         return jax.vmap(
             lambda b_vec: influence_function(tier.grid_dims, b_vec, alpha, order)
         )(box_t).astype(work_dtype)
+
+    if box_t.ndim == 3 and box_t.shape[-2:] == (3, 3):
+        if (
+            work_dtype == jnp.float32
+            and tier.G_cached is not None
+            and tier.box_ref is not None
+            and tier.box_ref.shape == box_t.shape
+        ):
+            ref_b = tier.box_ref.astype(box_t.dtype)
+            g_cached = tier.G_cached.astype(work_dtype)
+            return jax.lax.cond(
+                jnp.all(jnp.abs(box_t - ref_b) <= jnp.asarray(1e-6, dtype=box_t.dtype)),
+                lambda _: g_cached,
+                lambda _: jax.vmap(
+                    lambda b_mat: influence_function(tier.grid_dims, b_mat, alpha, order)
+                )(box_t).astype(work_dtype),
+                None,
+            )
+        return jax.vmap(
+            lambda b_mat: influence_function(tier.grid_dims, b_mat, alpha, order)
+        )(box_t).astype(work_dtype)
+
     return influence_function(tier.grid_dims, box_t, alpha, order).astype(work_dtype)
 
 
@@ -1476,11 +1864,12 @@ def _eval_single_tier_forward(
     order: int,
     use_pallas_pme: bool,
     interpret: bool | None,
+    *,
+    is_triclinic: bool = False,
 ) -> tuple[jax.Array, jax.Array, jax.Array]:
     orig_dtype = pos_t.dtype
     Kx, Ky, Kz = tier.grid_dims
-    is_ortho = _is_ortho_box(pos_t, box_t)
-    use_pl = bool(use_pallas_pme and (not in_export_context()) and is_ortho)
+    use_pl = bool(use_pallas_pme and (not in_export_context()))
     work_dtype = jnp.float32 if use_pl else orig_dtype
 
     pos_w = pos_t.astype(work_dtype)
@@ -1497,15 +1886,16 @@ def _eval_single_tier_forward(
             queue=tier.ragged_queue,
             order=order,
             interpret=interpret,
+            is_triclinic=is_triclinic,
         ).astype(jnp.float32)
     else:
-        Q = _spread_charges_reference(
+        Q = _spread_reference_batched(
             pos_w,
             q_w,
             mask_t,
             box_w,
-            grid_dims=tier.grid_dims,
-            order=order,
+            tier.grid_dims,
+            order,
         )
 
     Q_hat = jnp.fft.rfftn(Q, s=tier.grid_dims, axes=(-3, -2, -1))
@@ -1534,10 +1924,11 @@ def _eval_single_tier_gather(
     force_scale: float,
     pot_scale: float,
     interpret: bool | None,
+    *,
+    is_triclinic: bool = False,
 ) -> tuple[jax.Array, jax.Array]:
     orig_dtype = pos_t.dtype
-    is_ortho = _is_ortho_box(pos_t, box_t)
-    use_pl = bool(use_pallas_pme and (not in_export_context()) and is_ortho)
+    use_pl = bool(use_pallas_pme and (not in_export_context()))
     if use_pl:
         f_t, dq_t = gather_pallas_ragged(
             pos_t.astype(jnp.float32),
@@ -1552,18 +1943,19 @@ def _eval_single_tier_gather(
             force_scale=force_scale,
             pot_scale=pot_scale,
             interpret=interpret,
+            is_triclinic=is_triclinic,
         )
         return f_t.astype(orig_dtype), dq_t.astype(orig_dtype)
-    f_ref, dq_ref = _gather_reference(
+    f_ref, dq_ref = _gather_reference_batched(
         pos_t,
         q_t,
         mask_t,
-        box_t,
+        jnp.asarray(box_t, dtype=orig_dtype),
         theta_norm.astype(orig_dtype),
-        grid_dims=tier.grid_dims,
-        order=order,
-        force_scale=force_scale,
-        pot_scale=pot_scale,
+        tier.grid_dims,
+        order,
+        force_scale,
+        pot_scale,
     )
     if not compute_dq:
         dq_ref = jnp.zeros_like(dq_ref)
@@ -1575,28 +1967,31 @@ def _broadcast_batch_inputs(
     charges: jax.Array,
     atom_mask: jax.Array,
     box_size: jax.Array,
-) -> tuple[bool, jax.Array, jax.Array, jax.Array, jax.Array, tuple[bool, bool, bool]]:
+    *,
+    is_triclinic: bool = False,
+) -> tuple[bool, jax.Array, jax.Array, jax.Array, jax.Array, tuple[bool, bool, bool], bool]:
     single_input = positions.ndim == 2
     pos_b = positions[None, ...] if single_input else positions
     B, n_atoms, _ = pos_b.shape
     b_q = charges.ndim == 2 and not single_input
     b_m = atom_mask.ndim == 2 and not single_input
-    box_arr = jnp.asarray(box_size)
-    b_box = box_arr.ndim >= 2 and not single_input and box_arr.shape[0] == B and not (
-        box_arr.ndim == 2 and box_arr.shape == (3, 3) and B != 3 and _is_triclinic_box_array(box_arr)
+    eff_tri = _infer_pme_is_triclinic(
+        box_size, B, single_input=single_input, is_triclinic=is_triclinic
     )
+    box6_b, _ = _normalize_box6_batch(
+        box_size, B, positions.dtype, single_input=single_input, is_triclinic=eff_tri
+    )
+    b_box = (not single_input) and (int(box6_b.shape[0]) == B) and (B > 1 or jnp.asarray(box_size).ndim >= 2)
     q_b = charges if b_q else jnp.broadcast_to(charges.reshape(1, n_atoms), (B, n_atoms))
     m_b = atom_mask if b_m else jnp.broadcast_to(atom_mask.reshape(1, n_atoms), (B, n_atoms))
-    if b_box:
-        bx_b = box_arr
-    elif box_arr.ndim == 2 and box_arr.shape == (3, 3):
-        bx_b = jnp.broadcast_to(box_arr[None, :, :], (B, 3, 3))
+    if eff_tri:
+        bx_b = _box6_to_3x3_batch(box6_b, B)
     else:
-        bx_b = jnp.broadcast_to(box_arr.reshape(1, 3), (B, 3))
-    return single_input, pos_b, q_b, m_b, bx_b, (b_q, b_m, b_box)
+        bx_b = jnp.broadcast_to(box6_b[:, :3], (B, 3))
+    return single_input, pos_b, q_b, m_b, bx_b, (b_q, b_m, b_box), eff_tri
 
 
-@functools.partial(jax.custom_vjp, nondiff_argnums=(5, 6))
+@functools.partial(jax.custom_vjp, nondiff_argnums=(5, 6, 7))
 def _spme_energy_tiered_diff(
     positions: jax.Array,
     charges: jax.Array,
@@ -1605,9 +2000,10 @@ def _spme_energy_tiered_diff(
     tier_plan: PMETierPlan,
     use_pallas_pme: bool,
     interpret: bool | None,
+    is_triclinic: bool,
 ) -> jax.Array:
-    single_input, pos_b, q_b, m_b, bx_b, _ = _broadcast_batch_inputs(
-        positions, charges, atom_mask, box_size
+    single_input, pos_b, q_b, m_b, bx_b, _, eff_tri = _broadcast_batch_inputs(
+        positions, charges, atom_mask, box_size, is_triclinic=is_triclinic
     )
     B = int(pos_b.shape[0])
     orig_dtype = positions.dtype
@@ -1628,6 +2024,7 @@ def _spme_energy_tiered_diff(
             tier_plan.order,
             use_pallas_pme,
             interpret,
+            is_triclinic=eff_tri,
         )
         return e_vec[0] if single_input else e_vec
 
@@ -1645,6 +2042,7 @@ def _spme_energy_tiered_diff(
             tier_plan.order,
             use_pallas_pme,
             interpret,
+            is_triclinic=eff_tri,
         )
         e_out = e_out.at[idx].set(e_t)
     return e_out[0] if single_input else e_out
@@ -1658,6 +2056,7 @@ def _spme_energy_tiered_fwd(
     tier_plan: PMETierPlan,
     use_pallas_pme: bool,
     interpret: bool | None,
+    is_triclinic: bool,
 ):
     pos_v = _unwrap_primal(positions)
     q_v = _unwrap_primal(charges)
@@ -1667,8 +2066,8 @@ def _spme_energy_tiered_fwd(
     q_pert = _is_perturbed(charges)
     bx_pert = _is_perturbed(box_size)
 
-    single_input, pos_b, q_b, m_b, bx_b, batched_flags = _broadcast_batch_inputs(
-        pos_v, q_v, m_v, bx_v
+    single_input, pos_b, q_b, m_b, bx_b, batched_flags, eff_tri = _broadcast_batch_inputs(
+        pos_v, q_v, m_v, bx_v, is_triclinic=is_triclinic
     )
     B = int(pos_b.shape[0])
     orig_dtype = pos_v.dtype
@@ -1687,6 +2086,7 @@ def _spme_energy_tiered_fwd(
             batched_flags,
             q_pert,
             bx_pert,
+            eff_tri,
         )
 
     if len(plan_v.tiers) == 1 and plan_v.tiers[0].replica_indices_tuple == tuple(range(B)):
@@ -1702,6 +2102,7 @@ def _spme_energy_tiered_fwd(
             plan_v.order,
             use_pallas_pme,
             interpret,
+            is_triclinic=eff_tri,
         )
         out = e_vec[0] if single_input else e_vec
         return out, (
@@ -1715,6 +2116,7 @@ def _spme_energy_tiered_fwd(
             batched_flags,
             q_pert,
             bx_pert,
+            eff_tri,
         )
 
     e_out = jnp.zeros((B,), dtype=orig_dtype)
@@ -1732,6 +2134,7 @@ def _spme_energy_tiered_fwd(
             plan_v.order,
             use_pallas_pme,
             interpret,
+            is_triclinic=eff_tri,
         )
         e_out = e_out.at[idx].set(e_t)
         thetas.append(th_t)
@@ -1747,10 +2150,14 @@ def _spme_energy_tiered_fwd(
         batched_flags,
         q_pert,
         bx_pert,
+        eff_tri,
     )
 
 
-def _spme_energy_tiered_bwd(use_pallas_pme: bool, interpret: bool | None, residuals, g):
+def _spme_energy_tiered_bwd(
+    use_pallas_pme: bool, interpret: bool | None, is_triclinic: bool, residuals, g
+):
+    del is_triclinic
     (
         pos_v,
         q_v,
@@ -1762,6 +2169,7 @@ def _spme_energy_tiered_bwd(use_pallas_pme: bool, interpret: bool | None, residu
         batched_flags,
         q_pert,
         bx_pert,
+        eff_tri,
     ) = residuals
     dtype = pos_v.dtype
     bx_arr = jnp.asarray(bx_v, dtype=dtype)
@@ -1784,15 +2192,14 @@ def _spme_energy_tiered_bwd(use_pallas_pme: bool, interpret: bool | None, residu
             zero_plan,
         )
 
-    _, pos_b, q_b, m_b, bx_b, (b_q, _b_m, b_box) = _broadcast_batch_inputs(
-        pos_v, q_v, m_v, bx_arr
+    _, pos_b, q_b, m_b, bx_b, (b_q, _b_m, _b_box), _ = _broadcast_batch_inputs(
+        pos_v, q_v, m_v, bx_arr, is_triclinic=eff_tri
     )
     B, n_atoms, _ = pos_b.shape
     g_vec = jnp.asarray(g, dtype=dtype).reshape((1,) if single_input else (B,))
 
     dpos_b = jnp.zeros((B, n_atoms, 3), dtype=dtype)
     dq_b = jnp.zeros((B, n_atoms), dtype=q_v.dtype)
-    dbox_b = jnp.zeros_like(bx_b)
 
     if len(plan_v.tiers) == 1 and plan_v.tiers[0].replica_indices_tuple == tuple(range(B)):
         t0 = plan_v.tiers[0]
@@ -1810,6 +2217,7 @@ def _spme_energy_tiered_bwd(use_pallas_pme: bool, interpret: bool | None, residu
             force_scale=float(COULOMB_CONSTANT),
             pot_scale=float(COULOMB_CONSTANT),
             interpret=interpret,
+            is_triclinic=eff_tri,
         )
         dpos_sub = (f_t * g_vec[:, None, None]).astype(dtype)
         dpos_b = dpos_sub if n_sl == n_atoms else dpos_b.at[:, :n_sl, :].set(dpos_sub)
@@ -1821,21 +2229,6 @@ def _spme_energy_tiered_bwd(use_pallas_pme: bool, interpret: bool | None, residu
                 * g_vec[:, None]
             ).astype(q_v.dtype)
             dq_b = dq_sub if n_sl == n_atoms else dq_b.at[:, :n_sl].set(dq_sub)
-        if bx_pert:
-            _, vjp_box = jax.vjp(
-                lambda b_arg: spme_reciprocal_energy(
-                    pos_b[:, :n_sl, :],
-                    q_b[:, :n_sl],
-                    m_b[:, :n_sl],
-                    b_arg,
-                    t0.grid_dims,
-                    plan_v.alpha,
-                    plan_v.order,
-                    False,
-                ),
-                bx_b,
-            )
-            (dbox_b,) = vjp_box(g_vec)
     else:
         self_coeff = -2.0 * plan_v.alpha / math.sqrt(math.pi) * COULOMB_CONSTANT
         for tier, th_t in zip(plan_v.tiers, thetas, strict=True):
@@ -1855,6 +2248,7 @@ def _spme_energy_tiered_bwd(use_pallas_pme: bool, interpret: bool | None, residu
                 force_scale=float(COULOMB_CONSTANT),
                 pot_scale=float(COULOMB_CONSTANT),
                 interpret=interpret,
+                is_triclinic=eff_tri,
             )
             dpos_b = dpos_b.at[idx, :n_sl, :].set((f_t * g_t[:, None, None]).astype(dtype))
             if q_pert:
@@ -1864,22 +2258,38 @@ def _spme_energy_tiered_bwd(use_pallas_pme: bool, interpret: bool | None, residu
                     * g_t[:, None]
                 ).astype(q_v.dtype)
                 dq_b = dq_b.at[idx, :n_sl].set(dq_t)
-            if bx_pert:
-                _, vjp_box_t = jax.vjp(
-                    lambda b_arg, p_arg=pos_b[idx, :n_sl, :], q_arg=q_b[idx, :n_sl], m_arg=m_b[idx, :n_sl], gd=tier.grid_dims: spme_reciprocal_energy(
-                        p_arg,
-                        q_arg,
-                        m_arg,
-                        b_arg,
-                        gd,
-                        plan_v.alpha,
-                        plan_v.order,
-                        False,
-                    ),
-                    bx_b[idx],
-                )
-                (dbox_t,) = vjp_box_t(g_t)
-                dbox_b = dbox_b.at[idx].set(dbox_t.astype(bx_b.dtype))
+
+    if bx_pert:
+        def _box_energy_vec(b_raw: jax.Array) -> jax.Array:
+            _, _, _, _, bx_cur, _, _ = _broadcast_batch_inputs(
+                pos_v, q_v, m_v, b_raw, is_triclinic=eff_tri
+            )
+            if len(plan_v.tiers) == 1 and plan_v.tiers[0].replica_indices_tuple == tuple(range(B)):
+                t0_b = plan_v.tiers[0]
+                ns_b = t0_b.n_slice
+                return jax.vmap(
+                    lambda p1, q1, m1, b1: spme_reciprocal_energy(
+                        p1, q1, m1, b1, t0_b.grid_dims, plan_v.alpha, plan_v.order, False
+                    )
+                )(pos_b[:, :ns_b, :], q_b[:, :ns_b], m_b[:, :ns_b], bx_cur)
+            e_acc = jnp.zeros((B,), dtype=dtype)
+            for tier_b in plan_v.tiers:
+                idx_b = tier_b.replica_indices
+                ns_b = tier_b.n_slice
+                gd_b = tier_b.grid_dims
+                e_sub = jax.vmap(
+                    lambda p1, q1, m1, b1, gd=gd_b: spme_reciprocal_energy(
+                        p1, q1, m1, b1, gd, plan_v.alpha, plan_v.order, False
+                    )
+                )(pos_b[idx_b, :ns_b, :], q_b[idx_b, :ns_b], m_b[idx_b, :ns_b], bx_cur[idx_b])
+                e_acc = e_acc.at[idx_b].set(e_sub.astype(dtype))
+            return e_acc
+
+        _, vjp_box_all = jax.vjp(_box_energy_vec, bx_arr)
+        (dbox_out_raw,) = vjp_box_all(g_vec)
+        dbox_out = dbox_out_raw.astype(bx_arr.dtype)
+    else:
+        dbox_out = jnp.zeros_like(bx_arr)
 
     dpos_out = dpos_b[0] if single_input else dpos_b
     if single_input:
@@ -1888,13 +2298,6 @@ def _spme_energy_tiered_bwd(use_pallas_pme: bool, interpret: bool | None, residu
         dq_out = jnp.sum(dq_b, axis=0).reshape(q_v.shape)
     else:
         dq_out = dq_b
-
-    if single_input:
-        dbox_out = dbox_b[0].reshape(bx_arr.shape)
-    elif not b_box:
-        dbox_out = jnp.sum(dbox_b, axis=0).reshape(bx_arr.shape)
-    else:
-        dbox_out = dbox_b.astype(bx_arr.dtype)
 
     dmask_out = (
         jnp.zeros_like(m_v, dtype=jax.dtypes.float0)
@@ -1929,8 +2332,13 @@ def spme_energy_ragged_tiered(  # noqa: PLR0913
     fft_points_per_us: float = 18000.0,
     use_pallas_pme: bool = True,
     interpret: bool | None = None,
+    is_triclinic: bool = False,
 ) -> jax.Array:
     """Compute SPME reciprocal + self energy ``(B,)`` using 1D ragged queues & multi-tier FFTs."""
+    b_hint = 1 if positions.ndim == 2 else int(positions.shape[0])
+    eff_tri = _infer_pme_is_triclinic(
+        box_size, b_hint, single_input=(positions.ndim == 2), is_triclinic=is_triclinic
+    )
     if tier_plan is None:
         tier_plan = plan_pme_tiers(
             box_size,
@@ -1939,12 +2347,13 @@ def spme_energy_ragged_tiered(  # noqa: PLR0913
             alpha=alpha,
             order=order,
             grid_dims_per_replica=grid_dims_per_replica,
-            n_real_per_replica=n_real_per_replica,
+            n_real_per_replica=n_real_per_replica if n_real_per_replica is not None else ([int(positions.shape[0])] if positions.ndim == 2 else None),
             padded_atoms=int(positions.shape[-2]),
             atom_mask=atom_mask,
             pme_tier_mode=pme_tier_mode,
             tier_launch_overhead_us=tier_launch_overhead_us,
             fft_points_per_us=fft_points_per_us,
+            is_triclinic=eff_tri,
         )
     return _spme_energy_tiered_diff(
         positions,
@@ -1954,6 +2363,7 @@ def spme_energy_ragged_tiered(  # noqa: PLR0913
         tier_plan,
         bool(use_pallas_pme),
         interpret,
+        bool(eff_tri),
     )
 
 
@@ -1975,6 +2385,7 @@ def spme_forces_ragged_tiered(  # noqa: PLR0913
     fft_points_per_us: float = 18000.0,
     use_pallas_pme: bool = True,
     interpret: bool | None = None,
+    is_triclinic: bool = False,
 ) -> jax.Array:
     """Direct SPME reciprocal force evaluation ``F = -dE/dr`` without scalar energy reductions."""
     if in_export_context():
@@ -1997,6 +2408,7 @@ def spme_forces_ragged_tiered(  # noqa: PLR0913
                     fft_points_per_us=fft_points_per_us,
                     use_pallas_pme=False,
                     interpret=interpret,
+                    is_triclinic=is_triclinic,
                 )
             )(positions)
         return -jax.grad(
@@ -2018,9 +2430,19 @@ def spme_forces_ragged_tiered(  # noqa: PLR0913
                     fft_points_per_us=fft_points_per_us,
                     use_pallas_pme=False,
                     interpret=interpret,
+                    is_triclinic=is_triclinic,
                 )
             )
         )(positions)
+
+    single_input, pos_b, q_b, m_b, bx_b, _, eff_tri = _broadcast_batch_inputs(
+        positions, charges, atom_mask, box_size, is_triclinic=is_triclinic
+    )
+    B, n_atoms, _ = pos_b.shape
+    orig_dtype = positions.dtype
+    if B == 0 or n_atoms == 0:
+        zf = jnp.zeros((B, n_atoms, 3), dtype=orig_dtype)
+        return zf[0] if single_input else zf
 
     if tier_plan is None:
         tier_plan = plan_pme_tiers(
@@ -2030,22 +2452,14 @@ def spme_forces_ragged_tiered(  # noqa: PLR0913
             alpha=alpha,
             order=order,
             grid_dims_per_replica=grid_dims_per_replica,
-            n_real_per_replica=n_real_per_replica,
-            padded_atoms=int(positions.shape[-2]),
-            atom_mask=atom_mask,
+            n_real_per_replica=n_real_per_replica if n_real_per_replica is not None else ([n_atoms] if single_input else None),
+            padded_atoms=n_atoms,
+            atom_mask=m_b,
             pme_tier_mode=pme_tier_mode,
             tier_launch_overhead_us=tier_launch_overhead_us,
             fft_points_per_us=fft_points_per_us,
+            is_triclinic=eff_tri,
         )
-
-    single_input, pos_b, q_b, m_b, bx_b, _ = _broadcast_batch_inputs(
-        positions, charges, atom_mask, box_size
-    )
-    B, n_atoms, _ = pos_b.shape
-    orig_dtype = positions.dtype
-    if B == 0 or n_atoms == 0:
-        zf = jnp.zeros((B, n_atoms, 3), dtype=orig_dtype)
-        return zf[0] if single_input else zf
 
     def _run_one_tier_forces(
         p_sub: jax.Array,
@@ -2055,8 +2469,7 @@ def spme_forces_ragged_tiered(  # noqa: PLR0913
         tier: PMETierGroup,
     ) -> jax.Array:
         Kx, Ky, Kz = tier.grid_dims
-        is_ortho = _is_ortho_box(p_sub, b_sub)
-        use_pl = bool(use_pallas_pme and is_ortho)
+        use_pl = bool(use_pallas_pme)
         work_dtype = jnp.float32 if use_pl else orig_dtype
         p_w = p_sub.astype(work_dtype)
         q_w = q_sub.astype(work_dtype)
@@ -2071,15 +2484,16 @@ def spme_forces_ragged_tiered(  # noqa: PLR0913
                 queue=tier.ragged_queue,
                 order=tier_plan.order,
                 interpret=interpret,
+                is_triclinic=eff_tri,
             ).astype(jnp.float32)
         else:
-            Q = _spread_charges_reference(
+            Q = _spread_reference_batched(
                 p_w,
                 q_w,
                 m_sub,
                 b_w,
-                grid_dims=tier.grid_dims,
-                order=tier_plan.order,
+                tier.grid_dims,
+                tier_plan.order,
             )
         Q_hat = jnp.fft.rfftn(Q, s=tier.grid_dims, axes=(-3, -2, -1))
         G = _resolve_tier_green(tier, b_w, tier_plan.alpha, tier_plan.order, Q.dtype)
@@ -2098,6 +2512,7 @@ def spme_forces_ragged_tiered(  # noqa: PLR0913
             force_scale=-float(COULOMB_CONSTANT),
             pot_scale=1.0,
             interpret=interpret,
+            is_triclinic=eff_tri,
         )
         return f_sub
 
@@ -2138,17 +2553,23 @@ def spme_energy_and_forces_ragged_tiered(
     charges: jax.Array,
     atom_mask: jax.Array,
     box_size: jax.Array,
+    *,
+    is_triclinic: bool = False,
     **kwargs,
 ) -> tuple[jax.Array, jax.Array]:
     """Return ``(energies, forces)`` for multi-tier ragged SPME."""
     if positions.ndim == 2:
         e, g = jax.value_and_grad(
-            lambda r: spme_energy_ragged_tiered(r, charges, atom_mask, box_size, **kwargs)
+            lambda r: spme_energy_ragged_tiered(
+                r, charges, atom_mask, box_size, is_triclinic=is_triclinic, **kwargs
+            )
         )(positions)
         return e, -g
 
     def _sum_fn(r):
-        e_vec = spme_energy_ragged_tiered(r, charges, atom_mask, box_size, **kwargs)
+        e_vec = spme_energy_ragged_tiered(
+            r, charges, atom_mask, box_size, is_triclinic=is_triclinic, **kwargs
+        )
         return jnp.sum(e_vec), e_vec
 
     (_, e_vec), g = jax.value_and_grad(_sum_fn, has_aux=True)(positions)
@@ -2160,46 +2581,507 @@ def spme_energy_and_forces_ragged_tiered(
 # =============================================================================
 
 
-def _normalize_box6_batch(box: jax.Array | None, B: int, dtype: jnp.dtype) -> tuple[jax.Array, bool]:
-    if box is None:
-        return jnp.zeros((1, 6), dtype=dtype), False
-    b_arr = jnp.asarray(box, dtype=dtype)
-    if b_arr.ndim == 1:
-        res = (
-            b_arr[None, :]
-            if b_arr.shape[0] == 6
-            else jnp.concatenate([b_arr[:3], jnp.zeros((3,), dtype=dtype)])[None, :]
+def _wrap_pos_box6_1(pos_1: jax.Array, bx_1: jax.Array) -> jax.Array:
+    """Wrap ``(N, 3)`` Cartesian coords sequentially ``z -> y -> x`` into ``[0, ax) x [0, by) x [0, cz)``."""
+    dtype = pos_1.dtype
+    zero = jnp.asarray(0.0, dtype=dtype)
+    one = jnp.asarray(1.0, dtype=dtype)
+    ax, by, cz = bx_1[0], bx_1[1], bx_1[2]
+    bx_t, cx_t, cy_t = bx_1[3], bx_1[4], bx_1[5]
+    px, py, pz = pos_1[:, 0], pos_1[:, 1], pos_1[:, 2]
+
+    scz = jnp.where(cz > zero, cz, one)
+    nz = jnp.where(cz > zero, jnp.floor(pz / scz), zero)
+    px = px - nz * cx_t
+    py = py - nz * cy_t
+    pz = jnp.where(cz > zero, pz - nz * cz, pz)
+
+    sby = jnp.where(by > zero, by, one)
+    ny = jnp.where(by > zero, jnp.floor(py / sby), zero)
+    px = px - ny * bx_t
+    py = jnp.where(by > zero, py - ny * by, py)
+
+    sax = jnp.where(ax > zero, ax, one)
+    nx = jnp.where(ax > zero, jnp.floor(px / sax), zero)
+    px = jnp.where(ax > zero, px - nx * ax, px)
+    return jnp.stack([px, py, pz], axis=-1)
+
+
+def _wrap_pos_box6_batch(pos_b: jax.Array, bx_b: jax.Array) -> jax.Array:
+    """Wrap ``(B, N, 3)`` Cartesian coords sequentially ``z -> y -> x`` into ``[0, ax) x [0, by) x [0, cz)``."""
+    dtype = pos_b.dtype
+    zero = jnp.asarray(0.0, dtype=dtype)
+    one = jnp.asarray(1.0, dtype=dtype)
+    ax = bx_b[:, 0:1]
+    by = bx_b[:, 1:2]
+    cz = bx_b[:, 2:3]
+    bx_t = bx_b[:, 3:4]
+    cx_t = bx_b[:, 4:5]
+    cy_t = bx_b[:, 5:6]
+    px, py, pz = pos_b[:, :, 0], pos_b[:, :, 1], pos_b[:, :, 2]
+
+    scz = jnp.where(cz > zero, cz, one)
+    nz = jnp.where(cz > zero, jnp.floor(pz / scz), zero)
+    px = px - nz * cx_t
+    py = py - nz * cy_t
+    pz = jnp.where(cz > zero, pz - nz * cz, pz)
+
+    sby = jnp.where(by > zero, by, one)
+    ny = jnp.where(by > zero, jnp.floor(py / sby), zero)
+    px = px - ny * bx_t
+    py = jnp.where(by > zero, py - ny * by, py)
+
+    sax = jnp.where(ax > zero, ax, one)
+    nx = jnp.where(ax > zero, jnp.floor(px / sax), zero)
+    px = jnp.where(ax > zero, px - nx * ax, px)
+    return jnp.stack([px, py, pz], axis=-1)
+
+
+def _spread_bits_10_rq(v: jax.Array) -> jax.Array:
+    x = v & jnp.int32(0x3FF)
+    x = (x | (x << 16)) & jnp.int32(0x030000FF)
+    x = (x | (x << 8)) & jnp.int32(0x0300F00F)
+    x = (x | (x << 4)) & jnp.int32(0x030C30C3)
+    x = (x | (x << 2)) & jnp.int32(0x09249249)
+    return x
+
+
+@dataclasses.dataclass(frozen=True)
+class RaggedMortonTilePairs:
+    """Ragged cross-size, cross-shape 32x32 Morton tile-pair state + 1D CTA work queue."""
+
+    perm: jax.Array
+    inv_perm: jax.Array
+    positions_sorted: jax.Array
+    atom_mask_sorted: jax.Array
+    tile_pairs: jax.Array
+    excl_full_mask: jax.Array
+    excl_14_mask: jax.Array
+    num_valid_pairs: jax.Array
+    pair_queue: RaggedWorkQueue
+    box6: jax.Array
+    scale_14_vdw: jax.Array
+    scale_14_elec: jax.Array
+    n_pad: int
+    max_pairs: int
+    is_triclinic: bool
+
+    def reorder_atom_array(self, arr: jax.Array, *, pad_value: float | bool = 0.0) -> jax.Array:
+        """Pad & gather ``(B, N, ...)`` or ``(N, ...)`` into Morton-sorted ``(B, n_pad, ...)``."""
+        B = int(self.perm.shape[0])
+        single = arr.ndim == 1 or (arr.ndim == 2 and int(arr.shape[0]) != B and int(arr.shape[-1]) == 3)
+        a_b = arr[None, ...] if single else arr
+        if int(a_b.shape[0]) == 1 and B > 1:
+            a_b = jnp.broadcast_to(a_b, (B, *a_b.shape[1:]))
+        n_in = int(a_b.shape[1])
+        pad_n = self.n_pad - n_in
+        if pad_n > 0:
+            pad_spec = [(0, 0), (0, pad_n)] + [(0, 0)] * (a_b.ndim - 2)
+            a_b = jnp.pad(a_b, pad_spec, constant_values=pad_value)
+        elif pad_n < 0:
+            a_b = a_b[:, : self.n_pad]
+        b_idx = jnp.arange(B, dtype=jnp.int32)[:, None]
+        return a_b[b_idx, self.perm]
+
+    def unsort_atom_array(self, arr_sorted: jax.Array, *, n_orig: int | None = None) -> jax.Array:
+        """Restore Morton-sorted ``(B, n_pad, ...)`` back to original atom order ``(B, n_orig, ...)``."""
+        B = int(self.inv_perm.shape[0])
+        b_idx = jnp.arange(B, dtype=jnp.int32)[:, None]
+        restored = arr_sorted[b_idx, self.inv_perm]
+        mask_orig = self.atom_mask_sorted[b_idx, self.inv_perm]
+        m_exp = mask_orig.reshape((B, self.n_pad) + (1,) * (restored.ndim - 2))
+        restored = jnp.where(m_exp, restored, jnp.zeros_like(restored))
+        if n_orig is not None:
+            return restored[:, : int(n_orig)]
+        return restored
+
+    def tree_flatten(self):
+        children = (
+            self.perm,
+            self.inv_perm,
+            self.positions_sorted,
+            self.atom_mask_sorted,
+            self.tile_pairs,
+            self.excl_full_mask,
+            self.excl_14_mask,
+            self.num_valid_pairs,
+            self.pair_queue,
+            self.box6,
+            self.scale_14_vdw,
+            self.scale_14_elec,
         )
-        return res, True
-    if b_arr.ndim == 2:
-        if b_arr.shape == (3, 3) and (B != 3 or _is_triclinic_box_array(b_arr)):
-            row = jnp.array(
-                [b_arr[0, 0], b_arr[1, 1], b_arr[2, 2], b_arr[1, 0], b_arr[2, 0], b_arr[2, 1]],
-                dtype=dtype,
-            )
-            return row[None, :], True
-        res = (
-            b_arr
-            if b_arr.shape[1] == 6
-            else jnp.concatenate([b_arr[:, :3], jnp.zeros((b_arr.shape[0], 3), dtype=dtype)], axis=-1)
+        aux = (self.n_pad, self.max_pairs, self.is_triclinic)
+        return children, aux
+
+    @classmethod
+    def tree_unflatten(cls, aux, children):
+        n_pad, max_pairs, is_tri = aux
+        return cls(*children, n_pad=n_pad, max_pairs=max_pairs, is_triclinic=is_tri)
+
+
+jax.tree_util.register_pytree_node_class(RaggedMortonTilePairs)
+
+
+def _min_periodic_subtile_gap_sq(
+    c_i: jax.Array,
+    h_i: jax.Array,
+    c_j: jax.Array,
+    h_j: jax.Array,
+    bx_1: jax.Array,
+    *,
+    has_box: bool,
+) -> jax.Array:
+    """Minimum squared Euclidean AABB gap across ``4 x 4`` sub-tiles for all ``(T, T)`` tile pairs.
+
+    ``c_i, h_i`` have shape ``(T, 4, 3)`` (center and half-extents of the 4 8-atom sub-tiles
+    per 32-atom tile). When ``has_box`` is True, evaluates the exact minimum over all integer
+    Bravais lattice shifts ``n_z c + n_y b + n_x a`` via 9 cascading ``(dnz, dny)`` shifts and
+    analytic nearest ``dnx``, guaranteeing zero missed cutoff pairs on skewed dodecahedron and
+    truncated-octahedron boundaries.
+    """
+    dtype = c_i.dtype
+    zf = jnp.asarray(0.0, dtype=dtype)
+    one = jnp.asarray(1.0, dtype=dtype)
+    half = jnp.asarray(0.5, dtype=dtype)
+
+    # Expand to (T, T, 4, 4)
+    d0x = c_i[:, None, :, None, 0] - c_j[None, :, None, :, 0]
+    d0y = c_i[:, None, :, None, 1] - c_j[None, :, None, :, 1]
+    d0z = c_i[:, None, :, None, 2] - c_j[None, :, None, :, 2]
+    hxs = h_i[:, None, :, None, 0] + h_j[None, :, None, :, 0]
+    hys = h_i[:, None, :, None, 1] + h_j[None, :, None, :, 1]
+    hzs = h_i[:, None, :, None, 2] + h_j[None, :, None, :, 2]
+
+    if not has_box:
+        gx = jnp.maximum(zf, jnp.abs(d0x) - hxs)
+        gy = jnp.maximum(zf, jnp.abs(d0y) - hys)
+        gz = jnp.maximum(zf, jnp.abs(d0z) - hzs)
+        return jnp.min(gx * gx + gy * gy + gz * gz, axis=(-2, -1))
+
+    ax, by, cz = bx_1[0], bx_1[1], bx_1[2]
+    bx_t, cx_t, cy_t = bx_1[3], bx_1[4], bx_1[5]
+    sax = jnp.where(ax > zf, ax, one)
+    sby = jnp.where(by > zf, by, one)
+    scz = jnp.where(cz > zf, cz, one)
+    inv_ax = jnp.where(ax > zf, one / sax, zf)
+    inv_by = jnp.where(by > zf, one / sby, zf)
+    inv_cz = jnp.where(cz > zf, one / scz, zf)
+
+    qz0 = zf - jnp.floor(d0z * inv_cz + half)
+    min_d2 = jnp.full(d0x.shape, 1.0e30, dtype=dtype)
+    for dnz_f in (-1.0, 0.0, 1.0):
+        kz = qz0 + jnp.asarray(dnz_f, dtype=dtype)
+        dz = jnp.where(cz > zf, d0z + kz * cz, d0z)
+        gz = jnp.maximum(zf, jnp.abs(dz) - hzs)
+        gz2 = gz * gz
+        y1 = jnp.where(cz > zf, d0y + kz * cy_t, d0y)
+        qy0 = zf - jnp.floor(y1 * inv_by + half)
+        for dny_f in (-1.0, 0.0, 1.0):
+            ky = qy0 + jnp.asarray(dny_f, dtype=dtype)
+            dy = jnp.where(by > zf, y1 + ky * by, y1)
+            gy = jnp.maximum(zf, jnp.abs(dy) - hys)
+            x1 = y1 * zf + d0x + jnp.where(cz > zf, kz * cx_t, zf) + jnp.where(by > zf, ky * bx_t, zf)
+            dx = jnp.where(ax > zf, x1 - sax * jnp.floor(x1 * inv_ax + half), x1)
+            gx = jnp.maximum(zf, jnp.abs(dx) - hxs)
+            min_d2 = jnp.minimum(min_d2, gx * gx + gy * gy + gz2)
+    return jnp.min(min_d2, axis=(-2, -1))
+
+
+def build_ragged_morton_tile_pairs(
+    positions: jax.Array,
+    atom_mask: jax.Array,
+    box: jax.Array | None,
+    *,
+    cutoff: float = 9.0,
+    skin: float = 2.0,
+    excl_indices: np.ndarray | jax.Array | None = None,
+    excl_scales_vdw: np.ndarray | jax.Array | None = None,
+    excl_scales_elec: np.ndarray | jax.Array | None = None,
+    max_pairs: int | None = None,
+    tp_group: int | None = None,
+    is_triclinic: bool = False,
+) -> RaggedMortonTilePairs:
+    """Build 32x32 fractional Morton-sorted tile pairs & 1D ragged CTA queue across cross-size/cross-shape batches.
+
+    Supports arbitrary mixtures of orthorhombic, rhombic-dodecahedron, and truncated-octahedron
+    replicas in a single ``(B, N_pad, 3)`` batch (``B == 3`` safe).
+    """
+    single_input = positions.ndim == 2
+    pos_in = positions[None, ...] if single_input else positions
+    B, n_in, _ = pos_in.shape
+    m_in = atom_mask[None, ...] if atom_mask.ndim == 1 else atom_mask
+    if int(m_in.shape[0]) == 1 and B > 1:
+        m_in = jnp.broadcast_to(m_in, (B, n_in))
+    m_bool_in = m_in > 0
+
+    n_blocks = max(1, (max(n_in, 1) + _NB_BLOCK_N - 1) // _NB_BLOCK_N)
+    n_pad = n_blocks * _NB_BLOCK_N
+    pad_n = n_pad - n_in
+    if pad_n > 0:
+        pos_pad = jnp.pad(pos_in, ((0, 0), (0, pad_n), (0, 0)))
+        mask_pad = jnp.pad(m_bool_in, ((0, 0), (0, pad_n)), constant_values=False)
+    else:
+        pos_pad = pos_in
+        mask_pad = m_bool_in
+
+    eff_tri = (
+        _infer_pme_is_triclinic(box, B, single_input=single_input, is_triclinic=is_triclinic)
+        if box is not None
+        else False
+    )
+    box6_raw, has_box = _normalize_box6_batch(
+        box, max(B, 1), jnp.float32, single_input=single_input, is_triclinic=eff_tri
+    )
+    box6_b = jnp.broadcast_to(box6_raw, (max(B, 1), 6))[:B]
+
+    pos_f32 = pos_pad.astype(jnp.float32)
+    if has_box and B > 0:
+        h_mats = _box6_to_3x3_batch(box6_b, B)
+        b_inv = jax.vmap(invert_box_lower_triangular)(h_mats)
+        s_frac = jnp.matmul(pos_f32, b_inv, precision=jax.lax.Precision.HIGHEST)
+        s_wrap = s_frac - jnp.floor(s_frac)
+    elif B > 0:
+        p_masked_min = jnp.where(mask_pad[:, :, None], pos_f32, jnp.asarray(1.0e30, dtype=jnp.float32))
+        p_masked_max = jnp.where(mask_pad[:, :, None], pos_f32, jnp.asarray(-1.0e30, dtype=jnp.float32))
+        mn = jnp.min(p_masked_min, axis=1, keepdims=True)
+        mx = jnp.max(p_masked_max, axis=1, keepdims=True)
+        span = jnp.maximum(mx - mn, jnp.asarray(1.0e-3, dtype=jnp.float32))
+        s_wrap = jnp.clip((pos_f32 - mn) / span, 0.0, 0.999999)
+    else:
+        s_wrap = jnp.zeros_like(pos_f32)
+
+    q_10 = jnp.clip(jnp.floor(s_wrap * 1024.0).astype(jnp.int32), 0, 1023)
+    codes = (
+        _spread_bits_10_rq(q_10[..., 0])
+        | (_spread_bits_10_rq(q_10[..., 1]) << 1)
+        | (_spread_bits_10_rq(q_10[..., 2]) << 2)
+    )
+    codes = jnp.where(mask_pad, codes, jnp.int32(0x7FFFFFFF))
+    perm = jnp.argsort(codes, axis=-1).astype(jnp.int32)
+    inv_perm = jnp.argsort(perm, axis=-1).astype(jnp.int32)
+
+    b_gather = jnp.arange(B, dtype=jnp.int32)[:, None]
+    pos_sorted = pos_pad[b_gather, perm]
+    mask_sorted = mask_pad[b_gather, perm]
+
+    upper_cap = n_blocks * (n_blocks + 1) // 2
+    if max_pairs is not None and int(max_pairs) > 0:
+        m_cap = int(max_pairs)
+    else:
+        r_eff_f = max(float(cutoff) + float(skin), 6.0)
+        est_per = int(max(96.0, 0.5 * (4.189 * ((r_eff_f + 7.5) ** 3) / 320.0) * 2.8))
+        m_cap = max(64, min(upper_cap, ((max(2048, n_blocks * est_per) + 63) // 64) * 64))
+
+    r_eff_sq = float((float(cutoff) + float(skin)) ** 2)
+    tri_ti, tri_tj = jnp.triu_indices(n_blocks)
+
+    def _build_subtile_aabbs_1(pos_s1: jax.Array, msk_s1: jax.Array, bx_1: jax.Array):
+        p_w = _wrap_pos_box6_1(pos_s1.astype(jnp.float32), bx_1) if has_box else pos_s1.astype(jnp.float32)
+        p_sub = p_w.reshape(n_blocks, 4, 8, 3)
+        m_sub = msk_s1.reshape(n_blocks, 4, 8)
+        sub_has = jnp.any(m_sub, axis=-1)
+        first_idx = jnp.argmax(m_sub.astype(jnp.int32), axis=-1)
+        ref = jnp.take_along_axis(p_sub, first_idx[:, :, None, None], axis=2)[:, :, 0, :]
+        dr = p_sub - ref[:, :, None, :]
+        if has_box:
+            ax, by, cz = bx_1[0], bx_1[1], bx_1[2]
+            bx_t, cx_t, cy_t = bx_1[3], bx_1[4], bx_1[5]
+            zf = jnp.asarray(0.0, dtype=jnp.float32)
+            one = jnp.asarray(1.0, dtype=jnp.float32)
+            half = jnp.asarray(0.5, dtype=jnp.float32)
+            dx, dy, dz = dr[..., 0], dr[..., 1], dr[..., 2]
+            sz = jnp.where(cz > zf, jnp.floor(dz / jnp.where(cz > zf, cz, one) + half), zf)
+            dx = dx - sz * cx_t
+            dy = dy - sz * cy_t
+            dz = dz - sz * cz
+            sy = jnp.where(by > zf, jnp.floor(dy / jnp.where(by > zf, by, one) + half), zf)
+            dx = dx - sy * bx_t
+            dy = dy - sy * by
+            sx = jnp.where(ax > zf, jnp.floor(dx / jnp.where(ax > zf, ax, one) + half), zf)
+            dx = dx - sx * ax
+            p_unw = ref[:, :, None, :] + jnp.stack([dx, dy, dz], axis=-1)
+        else:
+            p_unw = p_sub
+        p_lo = jnp.min(jnp.where(m_sub[..., None], p_unw, ref[:, :, None, :]), axis=2)
+        p_hi = jnp.max(jnp.where(m_sub[..., None], p_unw, ref[:, :, None, :]), axis=2)
+        centers = 0.5 * (p_lo + p_hi)
+        halves = jnp.where(sub_has[..., None], 0.5 * (p_hi - p_lo), jnp.asarray(-1.0e10, dtype=jnp.float32))
+        tile_has = jnp.any(sub_has, axis=-1)
+        gap_sq = _min_periodic_subtile_gap_sq(centers, halves, centers, halves, bx_1, has_box=has_box)
+        active_mat = tile_has[:, None] & tile_has[None, :] & (gap_sq <= jnp.asarray(r_eff_sq, dtype=jnp.float32))
+        return active_mat[tri_ti, tri_tj]
+
+    if B > 0:
+        keep_ut_b = jax.vmap(_build_subtile_aabbs_1)(pos_sorted, mask_sorted, box6_b)
+    else:
+        keep_ut_b = jnp.zeros((0, upper_cap), dtype=jnp.bool_)
+
+    # Host/concrete fast exclusion stamping + compaction when inputs are concrete
+    is_traced = (
+        isinstance(pos_sorted, jax.core.Tracer)
+        or isinstance(mask_sorted, jax.core.Tracer)
+        or isinstance(box6_b, jax.core.Tracer)
+    )
+
+    s14v_np = np.full((max(B, 1),), 0.5, dtype=np.float32)
+    s14e_np = np.full((max(B, 1),), float(1.0 / 1.2), dtype=np.float32)
+
+    if not is_traced and B > 0:
+        keep_np = np.asarray(keep_ut_b, dtype=bool).copy()
+        inv_perm_np = np.asarray(inv_perm, dtype=np.int32)
+        mask_in_np = np.asarray(m_bool_in, dtype=bool)
+        tri_ti_np = np.asarray(tri_ti, dtype=np.int32)
+        tri_tj_np = np.asarray(tri_tj, dtype=np.int32)
+
+        tp_np = np.full((B, m_cap, 2), -1, dtype=np.int32)
+        ef_np = np.zeros((B, m_cap, _NB_BLOCK_N), dtype=np.uint32)
+        e14_np = np.zeros((B, m_cap, _NB_BLOCK_N), dtype=np.uint32)
+        n_val_np = np.zeros((B,), dtype=np.int32)
+
+        excl_idx_np = np.asarray(excl_indices, dtype=np.int32) if excl_indices is not None else None
+        excl_sv_np = np.asarray(excl_scales_vdw, dtype=np.float32) if excl_scales_vdw is not None else None
+        excl_se_np = np.asarray(excl_scales_elec, dtype=np.float32) if excl_scales_elec is not None else None
+
+        for b in range(B):
+            edges_full: tuple[np.ndarray, np.ndarray] | None = None
+            edges_14: tuple[np.ndarray, np.ndarray] | None = None
+            if excl_idx_np is not None:
+                idx_b = excl_idx_np[b if (excl_idx_np.ndim == 3 and excl_idx_np.shape[0] > 1) else 0] if excl_idx_np.ndim == 3 else excl_idx_np
+                n_rows = min(n_in, idx_b.shape[0])
+                idx_b = idx_b[:n_rows]
+                if excl_sv_np is not None:
+                    sv_b = (excl_sv_np[b if (excl_sv_np.ndim == 3 and excl_sv_np.shape[0] > 1) else 0] if excl_sv_np.ndim == 3 else excl_sv_np)[:n_rows]
+                else:
+                    sv_b = np.zeros_like(idx_b, dtype=np.float32)
+                if excl_se_np is not None:
+                    se_b = (excl_se_np[b if (excl_se_np.ndim == 3 and excl_se_np.shape[0] > 1) else 0] if excl_se_np.ndim == 3 else excl_se_np)[:n_rows]
+                else:
+                    se_b = np.zeros_like(idx_b, dtype=np.float32)
+                rows = np.broadcast_to(np.arange(n_rows, dtype=np.int32)[:, None], idx_b.shape)
+                v_ex = (idx_b >= 0) & (idx_b < n_in) & (idx_b != rows)
+                if np.any(v_ex):
+                    u_orig = rows[v_ex]
+                    w_orig = idx_b[v_ex]
+                    act_both = mask_in_np[b, u_orig] & mask_in_np[b, w_orig]
+                    sv_v = sv_b[v_ex]
+                    se_v = se_b[v_ex]
+                    non_unit = act_both & ((sv_v < 1.0 - 1e-6) | (se_v < 1.0 - 1e-6))
+                    if np.any(non_unit):
+                        um = inv_perm_np[b, u_orig[non_unit]]
+                        wm = inv_perm_np[b, w_orig[non_unit]]
+                        sv_nu = sv_v[non_unit]
+                        se_nu = se_v[non_unit]
+                        a_m = np.minimum(um, wm)
+                        c_m = np.maximum(um, wm)
+                        keys = a_m.astype(np.int64) * np.int64(n_pad) + c_m.astype(np.int64)
+                        _, u_idx = np.unique(keys, return_index=True)
+                        a_u, c_u = a_m[u_idx], c_m[u_idx]
+                        sv_u, se_u = sv_nu[u_idx], se_nu[u_idx]
+                        is_f = (sv_u <= 1e-6) & (se_u <= 1e-6)
+                        is_14 = ~is_f
+                        if np.any(is_14):
+                            s14v_np[b] = float(np.median(sv_u[is_14]))
+                            s14e_np[b] = float(np.median(se_u[is_14]))
+                        if np.any(is_f):
+                            edges_full = (a_u[is_f], c_u[is_f])
+                        if np.any(is_14):
+                            edges_14 = (a_u[is_14], c_u[is_14])
+                        # Ensure every tile pair carrying an excluded edge is retained
+                        for e_tup in (edges_full, edges_14):
+                            if e_tup is not None:
+                                eti = e_tup[0] // _NB_BLOCK_N
+                                etj = e_tup[1] // _NB_BLOCK_N
+                                ut_pos = eti * n_blocks - (eti * (eti - 1)) // 2 + (etj - eti)
+                                keep_np[b, ut_pos] = True
+
+            sel = np.nonzero(keep_np[b])[0]
+            cnt = min(int(sel.size), m_cap)
+            n_val_np[b] = cnt
+            if cnt > 0:
+                sel_c = sel[:cnt]
+                tp_np[b, :cnt, 0] = tri_ti_np[sel_c]
+                tp_np[b, :cnt, 1] = tri_tj_np[sel_c]
+                ut_to_slot = np.full((upper_cap,), -1, dtype=np.int32)
+                ut_to_slot[sel_c] = np.arange(cnt, dtype=np.int32)
+                for e_tup, target_arr in ((edges_full, ef_np), (edges_14, e14_np)):
+                    if e_tup is not None:
+                        ea, ec = e_tup
+                        eti = ea // _NB_BLOCK_N
+                        eli = ea % _NB_BLOCK_N
+                        etj = ec // _NB_BLOCK_N
+                        elj = ec % _NB_BLOCK_N
+                        ut_pos = eti * n_blocks - (eti * (eti - 1)) // 2 + (etj - eti)
+                        slots = ut_to_slot[ut_pos]
+                        ok = slots >= 0
+                        if np.any(ok):
+                            bits = np.left_shift(np.uint32(1), elj[ok].astype(np.uint32))
+                            np.bitwise_or.at(target_arr[b], (slots[ok], eli[ok]), bits)
+
+        tile_pairs_arr = jnp.asarray(tp_np, dtype=jnp.int32)
+        excl_full_arr = jax.lax.bitcast_convert_type(jnp.asarray(ef_np, dtype=jnp.uint32), jnp.int32)
+        excl_14_arr = jax.lax.bitcast_convert_type(jnp.asarray(e14_np, dtype=jnp.uint32), jnp.int32)
+        num_valid_arr = jnp.asarray(n_val_np, dtype=jnp.int32)
+        pair_queue = build_ragged_tile_pair_queue(
+            n_val_np,
+            tp_group=tp_group,
+            max_tile_pairs=m_cap,
         )
-        return res, True
-    if b_arr.ndim == 3 and b_arr.shape[-2:] == (3, 3):
-        return (
-            jnp.stack(
-                [
-                    b_arr[:, 0, 0],
-                    b_arr[:, 1, 1],
-                    b_arr[:, 2, 2],
-                    b_arr[:, 1, 0],
-                    b_arr[:, 2, 0],
-                    b_arr[:, 2, 1],
-                ],
-                axis=-1,
-            ),
-            True,
+    else:
+        # Traced fallback (e.g. inside jax.jit): pure-JAX compaction with static upper-bound queue
+        m_cap = upper_cap if max_pairs is None else m_cap
+
+        def _compact_traced_1(keep_1):
+            n_v = jnp.minimum(jnp.sum(keep_1.astype(jnp.int32)), jnp.int32(m_cap))
+            order_k = jnp.argsort(~keep_1)[:m_cap]
+            valid_k = jnp.arange(m_cap, dtype=jnp.int32) < n_v
+            ti_s = jnp.where(valid_k, tri_ti[order_k], jnp.int32(-1))
+            tj_s = jnp.where(valid_k, tri_tj[order_k], jnp.int32(-1))
+            return jnp.stack([ti_s, tj_s], axis=-1), n_v
+
+        if B > 0:
+            tile_pairs_arr, num_valid_arr = jax.vmap(_compact_traced_1)(keep_ut_b)
+        else:
+            tile_pairs_arr = jnp.full((0, m_cap, 2), -1, dtype=jnp.int32)
+            num_valid_arr = jnp.zeros((0,), dtype=jnp.int32)
+        excl_full_arr = jnp.zeros((B, m_cap, _NB_BLOCK_N), dtype=jnp.int32)
+        excl_14_arr = jnp.zeros((B, m_cap, _NB_BLOCK_N), dtype=jnp.int32)
+        if not isinstance(m_bool_in, jax.core.Tracer) and B > 0:
+            n_real_est = _infer_n_real_np(None, m_bool_in)
+            t_est = (n_real_est + _NB_BLOCK_N - 1) // _NB_BLOCK_N
+            ub_pairs = np.minimum(t_est * (t_est + 1) // 2, m_cap).astype(np.int32)
+        else:
+            ub_pairs = np.full((B,), m_cap, dtype=np.int32)
+        base_q = build_ragged_tile_pair_queue(ub_pairs, tp_group=tp_group, max_tile_pairs=m_cap)
+        pair_queue = RaggedWorkQueue(
+            cta_to_replica=base_q.cta_to_replica,
+            cta_to_local_block=base_q.cta_to_local_block,
+            n_real_per_replica=num_valid_arr,
+            blocks_per_replica=base_q.blocks_per_replica,
+            block_offsets=base_q.block_offsets,
+            total_blocks=base_q.total_blocks,
+            tile_size=base_q.tile_size,
+            batch_size=base_q.batch_size,
+            n_real_tuple=base_q.n_real_tuple,
+            uniform_blocks_per_replica=base_q.uniform_blocks_per_replica,
         )
-    raise ValueError(f"Unsupported periodic box shape: {b_arr.shape}")
+
+    return RaggedMortonTilePairs(
+        perm=perm,
+        inv_perm=inv_perm,
+        positions_sorted=pos_sorted,
+        atom_mask_sorted=mask_sorted,
+        tile_pairs=tile_pairs_arr,
+        excl_full_mask=excl_full_arr,
+        excl_14_mask=excl_14_arr,
+        num_valid_pairs=num_valid_arr,
+        pair_queue=pair_queue,
+        box6=box6_b,
+        scale_14_vdw=jnp.asarray(s14v_np[:B], dtype=jnp.float32),
+        scale_14_elec=jnp.asarray(s14e_np[:B], dtype=jnp.float32),
+        n_pad=n_pad,
+        max_pairs=m_cap,
+        is_triclinic=bool(eff_tri),
+    )
 
 
 _VALID_LJ_COMBINING_RULES: frozenset[str] = frozenset({"lorentz_berthelot", "geometric"})
@@ -2305,15 +3187,7 @@ def _nonbonded_tile_pairs_ragged_reference(  # noqa: PLR0913
             n_val_1 = jnp.int32(M_pairs)
 
         if has_box:
-            L_xyz = bx_1[:3]
-            tilt_xyz = bx_1[3:6]
-            is_ortho = jnp.all(tilt_xyz == zero)
-            safe_L = jnp.where(L_xyz > zero, L_xyz, jnp.ones_like(L_xyz))
-            pos_1 = jnp.where(
-                (L_xyz[None, :] > zero) & is_ortho,
-                pos_1 - L_xyz[None, :] * jnp.floor(pos_1 / safe_L[None, :]),
-                pos_1,
-            )
+            pos_1 = _wrap_pos_box6_1(pos_1, bx_1)
 
         if pad_n > 0:
             pos_1 = jnp.pad(pos_1, ((0, pad_n), (0, 0)))
@@ -2526,15 +3400,7 @@ def _nonbonded_tile_pairs_ragged_reference_det_forces(  # noqa: PLR0913
             n_val_1 = jnp.int32(M_pairs)
 
         if has_box:
-            L_xyz = bx_1[:3]
-            tilt_xyz = bx_1[3:6]
-            is_ortho = jnp.all(tilt_xyz == zero)
-            safe_L = jnp.where(L_xyz > zero, L_xyz, jnp.ones_like(L_xyz))
-            pos_1 = jnp.where(
-                (L_xyz[None, :] > zero) & is_ortho,
-                pos_1 - L_xyz[None, :] * jnp.floor(pos_1 / safe_L[None, :]),
-                pos_1,
-            )
+            pos_1 = _wrap_pos_box6_1(pos_1, bx_1)
 
         if pad_n > 0:
             pos_1 = jnp.pad(pos_1, ((0, pad_n), (0, 0)))
@@ -2840,15 +3706,7 @@ def _pallas_nonbonded_tile_pairs_ragged_core(  # noqa: PLR0913
     pad_n = N_pad - N
 
     if has_box:
-        L_xyz = bx_b[:, :3]
-        tilt_xyz = bx_b[:, 3:6]
-        is_ortho_box = jnp.all(tilt_xyz == jnp.asarray(0.0, dtype=dtype), axis=-1, keepdims=True)
-        safe_L = jnp.where(L_xyz > jnp.asarray(0.0, dtype=dtype), L_xyz, jnp.ones_like(L_xyz))
-        pos_wrapped = jnp.where(
-            (L_xyz[:, None, :] > jnp.asarray(0.0, dtype=dtype)) & is_ortho_box[:, None, :],
-            pos_b - L_xyz[:, None, :] * jnp.floor(pos_b / safe_L[:, None, :]),
-            pos_b,
-        )
+        pos_wrapped = _wrap_pos_box6_batch(pos_b, bx_b)
     else:
         pos_wrapped = pos_b
 
@@ -3525,6 +4383,7 @@ def pallas_nonbonded_tile_pairs_ragged(  # noqa: PLR0913
     deterministic_forces: bool = False,
     return_forces: bool = False,
     interpret: bool | None = None,
+    is_triclinic: bool = False,
 ) -> Any:
     """Evaluate 32x32 symmetric tile-pair nonbonded over a 1D ragged CTA work queue."""
     rule_norm = _normalize_lj_combining_rule(lj_combining_rule)
@@ -3545,7 +4404,14 @@ def pallas_nonbonded_tile_pairs_ragged(  # noqa: PLR0913
     ef_b = excl_full_mask[None, ...] if excl_full_mask.ndim == 2 else excl_full_mask
     e14_b = excl_14_mask[None, ...] if excl_14_mask.ndim == 2 else excl_14_mask
 
-    box6, has_box = _normalize_box6_batch(box, B, pos_b.dtype)
+    eff_tri = (
+        _infer_pme_is_triclinic(box, B, single_input=single_input, is_triclinic=is_triclinic)
+        if box is not None
+        else False
+    )
+    box6, has_box = _normalize_box6_batch(
+        box, B, pos_b.dtype, single_input=single_input, is_triclinic=eff_tri
+    )
     lam_arr = jnp.asarray(soft_core_lambda, dtype=pos_b.dtype).reshape(-1)
     s14v_arr = jnp.asarray(scale_14_vdw, dtype=pos_b.dtype).reshape(-1)
     s14e_arr = jnp.asarray(scale_14_elec, dtype=pos_b.dtype).reshape(-1)
@@ -3828,7 +4694,9 @@ __all__ = [
     "PMETierGroup",
     "PMETierMode",
     "PMETierPlan",
+    "RaggedMortonTilePairs",
     "RaggedWorkQueue",
+    "build_ragged_morton_tile_pairs",
     "build_ragged_tile_pair_queue",
     "build_ragged_work_queue",
     "gather_pallas_ragged",

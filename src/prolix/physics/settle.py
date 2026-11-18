@@ -50,24 +50,27 @@ from prolix.physics.constraint_projection import (
 )
 from prolix.physics.fltflt_pallas import (
   FltFlt,
+  FltFltLike,
   fadd_rn,
   ff_add,
   ff_add_f32,
+  ff_div,
   ff_from_f32,
   ff_from_float64,
-  ff_min_image_f32,
   ff_mod_f32,
   ff_mul,
   ff_mul_f32,
   ff_sub,
+  ff_sub_f32,
   ff_to_f32,
   ff_to_float64,
-  ff_where,
   fltflt_triton_asm_context,
   fmul_rn,
   fneg_f32,
   fsub_rn,
+  should_use_triton_asm,
   two_prod_fma,
+  two_sum,
 )
 from prolix.tiling.axis_dispatch import dispatch_n_waters
 from prolix.typing import NPTState, NVTLangevinState, WaterIndices, WaterIndicesArray
@@ -1222,6 +1225,64 @@ def _should_use_pallas_settle_default(use_pallas: bool | None = None) -> bool:
   return jax.default_backend() == "gpu"
 
 
+def _wrap_vec3_std(
+  rx: Array,
+  ry: Array,
+  rz: Array,
+  box_spec: tuple[Array, ...] | None,
+) -> tuple[Array, Array, Array]:
+  """Wrap ``(rx, ry, rz)`` into orthorhombic ``(Lx, Ly, Lz)`` or triclinic ``(ax, bx, by, cx, cy, cz)`` brick."""
+  if box_spec is None:
+    return (rx, ry, rz)
+  if len(box_spec) == 3:
+    return (jnp.mod(rx, box_spec[0]), jnp.mod(ry, box_spec[1]), jnp.mod(rz, box_spec[2]))
+  ax, bx, by, cx, cy, cz = box_spec
+  dtype = rx.dtype
+  zero = jnp.asarray(0.0, dtype=dtype)
+  one = jnp.asarray(1.0, dtype=dtype)
+  nz = jnp.where(cz > zero, jnp.floor(rz / jnp.where(cz > zero, cz, one)), zero)
+  rx = rx - nz * cx
+  ry = ry - nz * cy
+  rz = rz - nz * cz
+  ny = jnp.where(by > zero, jnp.floor(ry / jnp.where(by > zero, by, one)), zero)
+  rx = rx - ny * bx
+  ry = ry - ny * by
+  nx = jnp.where(ax > zero, jnp.floor(rx / jnp.where(ax > zero, ax, one)), zero)
+  rx = rx - nx * ax
+  return (rx, ry, rz)
+
+
+def _min_image_vec3_std(
+  dx: Array,
+  dy: Array,
+  dz: Array,
+  box_spec: tuple[Array, ...] | None,
+) -> tuple[Array, Array, Array]:
+  """Minimum-image displacement for orthorhombic ``(Lx, Ly, Lz)`` or reduced triclinic ``(ax, bx, by, cx, cy, cz)``."""
+  if box_spec is None:
+    return (dx, dy, dz)
+  dtype = dx.dtype
+  zero = jnp.asarray(0.0, dtype=dtype)
+  one = jnp.asarray(1.0, dtype=dtype)
+  if len(box_spec) == 3:
+    bx, by, bz = box_spec
+    nx = jnp.where(bx > zero, _PBC_ROUND_FN(dx / jnp.where(bx > zero, bx, one)), zero)
+    ny = jnp.where(by > zero, _PBC_ROUND_FN(dy / jnp.where(by > zero, by, one)), zero)
+    nz = jnp.where(bz > zero, _PBC_ROUND_FN(dz / jnp.where(bz > zero, bz, one)), zero)
+    return (dx - nx * bx, dy - ny * by, dz - nz * bz)
+  ax, bx, by, cx, cy, cz = box_spec
+  nz = jnp.where(cz > zero, _PBC_ROUND_FN(dz / jnp.where(cz > zero, cz, one)), zero)
+  dx = dx - nz * cx
+  dy = dy - nz * cy
+  dz = dz - nz * cz
+  ny = jnp.where(by > zero, _PBC_ROUND_FN(dy / jnp.where(by > zero, by, one)), zero)
+  dx = dx - ny * bx
+  dy = dy - ny * by
+  nx = jnp.where(ax > zero, _PBC_ROUND_FN(dx / jnp.where(ax > zero, ax, one)), zero)
+  dx = dx - nx * ax
+  return (dx, dy, dz)
+
+
 def _settle_water_vec3(
   o_old: tuple[Array, Array, Array],
   h1_old: tuple[Array, Array, Array],
@@ -1233,7 +1294,7 @@ def _settle_water_vec3(
   r_HH: float,
   mass_oxygen: float,
   mass_hydrogen: float,
-  box_xyz: tuple[Array, Array, Array] | None,
+  box_xyz: tuple[Array, ...] | None,
   has_box: bool,
   use_f32_math: bool = False,
 ) -> tuple[tuple[Array, Array, Array], tuple[Array, Array, Array], tuple[Array, Array, Array]]:
@@ -1248,26 +1309,18 @@ def _settle_water_vec3(
   two = jnp.asarray(2.0, dtype=w_dtype)
 
   if has_box and box_xyz is not None:
-    bx, by, bz = box_xyz
-
-    def _min_img_3(dx, dy, dz):
-      return (
-        dx - bx * _PBC_ROUND_FN(dx / bx),
-        dy - by * _PBC_ROUND_FN(dy / by),
-        dz - bz * _PBC_ROUND_FN(dz / bz),
-      )
 
     def _unwrap_3(p_n, p_o):
-      d0, d1, d2 = _min_img_3(p_n[0] - p_o[0], p_n[1] - p_o[1], p_n[2] - p_o[2])
+      d0, d1, d2 = _min_image_vec3_std(p_n[0] - p_o[0], p_n[1] - p_o[1], p_n[2] - p_o[2], box_xyz)
       return (p_o[0] + d0, p_o[1] + d1, p_o[2] + d2)
 
     o_u = _unwrap_3(o_new, o_old)
     h1_u = _unwrap_3(h1_new, h1_old)
     h2_u = _unwrap_3(h2_new, h2_old)
 
-    dh1_x, dh1_y, dh1_z = _min_img_3(h1_u[0] - o_u[0], h1_u[1] - o_u[1], h1_u[2] - o_u[2])
+    dh1_x, dh1_y, dh1_z = _min_image_vec3_std(h1_u[0] - o_u[0], h1_u[1] - o_u[1], h1_u[2] - o_u[2], box_xyz)
     h1_u = (o_u[0] + dh1_x, o_u[1] + dh1_y, o_u[2] + dh1_z)
-    dh2_x, dh2_y, dh2_z = _min_img_3(h2_u[0] - o_u[0], h2_u[1] - o_u[1], h2_u[2] - o_u[2])
+    dh2_x, dh2_y, dh2_z = _min_image_vec3_std(h2_u[0] - o_u[0], h2_u[1] - o_u[1], h2_u[2] - o_u[2], box_xyz)
     h2_u = (o_u[0] + dh2_x, o_u[1] + dh2_y, o_u[2] + dh2_z)
   else:
     o_u, h1_u, h2_u = o_new, h1_new, h2_new
@@ -1456,13 +1509,11 @@ def _settle_water_vec3(
   h2_cz = com_z - r20 * bH_x_d + r21 * bH_y_d
 
   if has_box and box_xyz is not None:
-    bx, by, bz = box_xyz
     do_x = o_cx - o_new[0]
     do_y = o_cy - o_new[1]
     do_z = o_cz - o_new[2]
-    ic_x = (zero_d - bx) * _PBC_ROUND_FN(do_x / bx)
-    ic_y = (zero_d - by) * _PBC_ROUND_FN(do_y / by)
-    ic_z = (zero_d - bz) * _PBC_ROUND_FN(do_z / bz)
+    m_x, m_y, m_z = _min_image_vec3_std(do_x, do_y, do_z, box_xyz)
+    ic_x, ic_y, ic_z = m_x - do_x, m_y - do_y, m_z - do_z
     o_cx, o_cy, o_cz = o_cx + ic_x, o_cy + ic_y, o_cz + ic_z
     h1_cx, h1_cy, h1_cz = h1_cx + ic_x, h1_cy + ic_y, h1_cz + ic_z
     h2_cx, h2_cy, h2_cz = h2_cx + ic_x, h2_cy + ic_y, h2_cz + ic_z
@@ -1576,7 +1627,7 @@ def _r_step_and_am_vec3(  # noqa: PLR0913
   half_dt: Array,
   mass_oxygen: float,
   mass_hydrogen: float,
-  box_xyz: tuple[Array, Array, Array] | None,
+  box_xyz: tuple[Array, ...] | None,
   has_box: bool,
   use_f32_math: bool = False,
 ) -> tuple[tuple[Array, Array, Array], tuple[Array, Array, Array], tuple[Array, Array, Array]]:
@@ -1593,10 +1644,7 @@ def _r_step_and_am_vec3(  # noqa: PLR0913
   def _disp3(a, b):
     dx, dy, dz = a[0] - b[0], a[1] - b[1], a[2] - b[2]
     if has_box and box_xyz is not None:
-      bx, by, bz = box_xyz
-      dx = dx - bx * _PBC_ROUND_FN(dx / bx)
-      dy = dy - by * _PBC_ROUND_FN(dy / by)
-      dz = dz - bz * _PBC_ROUND_FN(dz / bz)
+      return _min_image_vec3_std(dx, dy, dz, box_xyz)
     return (dx, dy, dz)
 
   dxO_d = _disp3(r_con_O, r_unc_O)
@@ -1804,6 +1852,7 @@ def _settle_vel_and_am_vec3(
   mass_hydrogen: float,
   valid_w: Array,
   use_f32_math: bool = False,
+  box_xyz: tuple[Array, ...] | None = None,
 ) -> tuple[tuple[Array, Array, Array], tuple[Array, Array, Array], tuple[Array, Array, Array]]:
   """In-register 3x3 Gram RATTLE velocity constraint + angular momentum impulse removal."""
   dtype = rO[0].dtype
@@ -1813,6 +1862,12 @@ def _settle_vel_and_am_vec3(
   one = jnp.asarray(1.0, dtype=w_dtype)
   two = jnp.asarray(2.0, dtype=w_dtype)
   eps = jnp.asarray(1e-10, dtype=w_dtype)
+
+  if box_xyz is not None:
+    dh1 = _min_image_vec3_std(rH1[0] - rO[0], rH1[1] - rO[1], rH1[2] - rO[2], box_xyz)
+    dh2 = _min_image_vec3_std(rH2[0] - rO[0], rH2[1] - rO[1], rH2[2] - rO[2], box_xyz)
+    rH1 = (rO[0] + dh1[0], rO[1] + dh1[1], rO[2] + dh1[2])
+    rH2 = (rO[0] + dh2[0], rO[1] + dh2[1], rO[2] + dh2[2])
 
   mO_w = mO_state.astype(w_dtype)
   mH1_w = mH1_state.astype(w_dtype)
@@ -2277,26 +2332,251 @@ def _normalize_seed_flat(B: int, is_batched: bool, rng_seeds: Array) -> Array:
   return jnp.broadcast_to(seed_i32.reshape(-1, 2), (B, 2)).reshape(B * 2)
 
 
-def _normalize_box_batch(
-  B: int, is_batched: bool, box: Array | None, dtype: Any
-) -> tuple[Array, Array]:
-  """Normalize orthorhombic box ``(B, 3)``, ``(3,)``, ``(3, 3)``, or ``(B * 3,)`` to ``((B, 3), (B * 3,))``."""
+def _is_lower_tri_3x3(b_arr: Array) -> bool:
+  """Return True if a ``(3, 3)`` array is a lower-triangular lattice matrix."""
+  if b_arr.ndim != 2 or b_arr.shape != (3, 3):
+    return False
+  if not isinstance(b_arr, jax.core.Tracer):
+    b_np = np.asarray(b_arr)
+    return bool(b_np[0, 1] == 0.0 and b_np[0, 2] == 0.0 and b_np[1, 2] == 0.0)
+  return True
+
+
+def _has_nonzero_lower_tilt_np(b_np: np.ndarray) -> bool:
+  """Return True if a concrete ``(..., 3, 3)`` lower-triangular box has any nonzero tilt."""
+  return bool(
+    np.any(b_np[..., 1, 0] != 0.0)
+    or np.any(b_np[..., 2, 0] != 0.0)
+    or np.any(b_np[..., 2, 1] != 0.0)
+  )
+
+
+def _infer_box_is_triclinic(
+  B: int,
+  is_batched: bool,
+  box: Array | None,
+  *,
+  is_triclinic: bool = False,
+) -> bool:
+  """Auto-infer reduced lower-triangular triclinic mode safely across ``B == 3``."""
   if box is None:
-    bx_b = jnp.ones((B, 3), dtype=dtype)
-    return bx_b, bx_b.reshape(B * 3)
-  bx_arr = jnp.asarray(box, dtype=dtype)
+    return False
+  if is_triclinic:
+    return True
+  bx_arr = jnp.asarray(box)
+  is_traced = isinstance(bx_arr, jax.core.Tracer)
+  cand_3x3: np.ndarray | None = None
+  traced_match = False
+  if bx_arr.ndim == 3 and bx_arr.shape[-2:] == (3, 3):
+    if is_traced:
+      traced_match = True
+    else:
+      cand_3x3 = np.asarray(bx_arr)
+  elif bx_arr.ndim == 2 and bx_arr.shape[-1] == 9:
+    if is_traced:
+      traced_match = True
+    else:
+      cand_3x3 = np.asarray(bx_arr).reshape(-1, 3, 3)
+  elif bx_arr.ndim == 2 and bx_arr.shape == (3, 3):
+    if not (is_batched and B == 3) and _is_lower_tri_3x3(bx_arr):
+      if is_traced:
+        traced_match = True
+      else:
+        cand_3x3 = np.asarray(bx_arr)
+  elif bx_arr.ndim == 1:
+    is_single_9 = ((not is_batched) and bx_arr.size == 9 and B != 3) or (B == 1 and bx_arr.size == 9)
+    is_batch_9 = is_batched and B > 0 and bx_arr.size == B * 9
+    if is_single_9 or is_batch_9:
+      if is_traced:
+        traced_match = True
+      else:
+        cand_3x3 = np.asarray(bx_arr).reshape(-1, 3, 3)
+  if traced_match:
+    return True
+  return _has_nonzero_lower_tilt_np(cand_3x3) if cand_3x3 is not None else False
+
+
+def _infer_post_box_is_batched(
+  B: int,
+  box: Array | None,
+  *,
+  is_triclinic: bool = False,
+  explicit_batched: bool | None = None,
+) -> bool:
+  """Infer whether optional ``box`` in ``post_force`` carries a leading replica axis."""
+  if explicit_batched is not None:
+    return bool(explicit_batched)
+  if box is None:
+    return False
+  bx_arr = jnp.asarray(box)
   if bx_arr.ndim == 3:
-    bx_b = jnp.diagonal(bx_arr, axis1=-2, axis2=-1)
-  elif bx_arr.ndim == 2 and (not is_batched) and bx_arr.shape == (3, 3):
-    bx_b = jnp.broadcast_to(jnp.diag(bx_arr)[None, :], (B, 3))
-  elif bx_arr.ndim == 2:
-    bx_b = jnp.broadcast_to(bx_arr[:, :3], (B, 3))
-  elif bx_arr.ndim == 1 and bx_arr.size == B * 3:
-    bx_b = bx_arr.reshape(B, 3)
+    return True
+  if bx_arr.ndim == 2:
+    if bx_arr.shape == (3, 3):
+      return (not is_triclinic) and (B == 3) and (not _is_lower_tri_3x3(bx_arr))
+    return int(bx_arr.shape[0]) == B
+  return bool(bx_arr.ndim == 1 and B > 1 and bx_arr.size in (B * 3, B * 9))
+
+
+def _box_ok_for_pallas_settle(box: Array | None) -> tuple[bool, bool]:
+  """Check if single-system ``box`` can run on Pallas BAOAB and whether it is triclinic."""
+  if box is None:
+    return True, False
+  bx_arr = jnp.asarray(box)
+  if bx_arr.ndim == 1:
+    if bx_arr.size == 3:
+      return True, False
+    if bx_arr.size != 9:
+      return False, False
+    bx_arr = bx_arr.reshape(3, 3)
+  if bx_arr.ndim != 2 or bx_arr.shape != (3, 3):
+    return False, False
+  if isinstance(bx_arr, jax.core.Tracer):
+    return True, True
+  b_np = np.asarray(bx_arr, dtype=np.float64)
+  upper_ok = (
+    abs(b_np[0, 1]) <= 1e-12
+    and abs(b_np[0, 2]) <= 1e-12
+    and abs(b_np[1, 2]) <= 1e-12
+  )
+  ax, by, cz = float(b_np[0, 0]), float(b_np[1, 1]), float(b_np[2, 2])
+  bx, cx, cy = float(b_np[1, 0]), float(b_np[2, 0]), float(b_np[2, 1])
+  reduced_ok = (
+    upper_ok
+    and ax > 0.0
+    and by > 0.0
+    and cz > 0.0
+    and abs(bx) <= 0.5 * ax + 1e-5
+    and abs(cx) <= 0.5 * ax + 1e-5
+    and abs(cy) <= 0.5 * by + 1e-5
+  )
+  return (True, _has_nonzero_lower_tilt_np(b_np)) if reduced_ok else (False, False)
+
+
+def _ortho_to_lower_tri_batch(ortho_b: Array, B: int, dtype: Any) -> Array:
+  """Promote ``(B, 3)`` orthorhombic lengths ``[Lx, Ly, Lz]`` to ``(B, 3, 3)`` diagonal matrices."""
+  ob = jnp.broadcast_to(jnp.asarray(ortho_b, dtype=dtype)[:, :3], (B, 3))
+  z = jnp.zeros((B,), dtype=dtype)
+  row0 = jnp.stack([ob[:, 0], z, z], axis=-1)
+  row1 = jnp.stack([z, ob[:, 1], z], axis=-1)
+  row2 = jnp.stack([z, z, ob[:, 2]], axis=-1)
+  return jnp.stack([row0, row1, row2], axis=-2)
+
+
+def _normalize_box_batch(
+  B: int,
+  is_batched: bool,
+  box: Array | None,
+  dtype: Any,
+  *,
+  is_triclinic: bool = False,
+) -> tuple[Array, Array]:
+  """Normalize box to ``((B, 3), (B * 3,))`` when ortho or ``((B, 3, 3), (B * 9,))`` when triclinic."""
+  eff_tri = _infer_box_is_triclinic(B, is_batched, box, is_triclinic=is_triclinic)
+  if not eff_tri:
+    if box is None:
+      bx_b = jnp.ones((B, 3), dtype=dtype)
+      return bx_b, bx_b.reshape(B * 3)
+    bx_arr = jnp.asarray(box, dtype=dtype)
+    if bx_arr.ndim == 3:
+      bx_b = jnp.diagonal(bx_arr, axis1=-2, axis2=-1)
+    elif bx_arr.ndim == 2 and (not is_batched) and bx_arr.shape == (3, 3):
+      bx_b = jnp.broadcast_to(jnp.diag(bx_arr)[None, :], (B, 3))
+    elif bx_arr.ndim == 2:
+      bx_b = jnp.broadcast_to(bx_arr[:, :3], (B, 3))
+    elif bx_arr.ndim == 1 and bx_arr.size == B * 3:
+      bx_b = bx_arr.reshape(B, 3)
+    else:
+      bx_b = jnp.broadcast_to(bx_arr.reshape(-1)[:3][None, :], (B, 3))
+    bx_b = jnp.asarray(bx_b, dtype=dtype)
+    return bx_b, jnp.asarray(bx_b.reshape(B * 3), dtype=dtype)
+
+  if box is None:
+    bx_tri = jnp.broadcast_to(jnp.eye(3, dtype=dtype)[None, :, :], (B, 3, 3))
+    return bx_tri, jnp.asarray(bx_tri.reshape(B * 9), dtype=dtype)
+  bx_arr = jnp.asarray(box, dtype=dtype)
+  if bx_arr.ndim == 3 and bx_arr.shape[-2:] == (3, 3):
+    bx_tri = jnp.broadcast_to(bx_arr, (B, 3, 3))
+  elif bx_arr.ndim == 2 and bx_arr.shape[-1] == 9:
+    bx_tri = jnp.broadcast_to(bx_arr.reshape(-1, 3, 3), (B, 3, 3))
+  elif bx_arr.ndim == 2 and bx_arr.shape == (3, 3):
+    if is_batched and B == 3 and not _is_lower_tri_3x3(bx_arr):
+      bx_tri = _ortho_to_lower_tri_batch(bx_arr, B, dtype)
+    else:
+      bx_tri = jnp.broadcast_to(bx_arr[None, :, :], (B, 3, 3))
+  elif bx_arr.ndim == 2 and bx_arr.shape[-1] == 3:
+    bx_tri = _ortho_to_lower_tri_batch(bx_arr, B, dtype)
+  elif bx_arr.ndim == 1:
+    if bx_arr.size == B * 9:
+      bx_tri = bx_arr.reshape(B, 3, 3)
+    elif bx_arr.size == 9 and ((not is_batched) or B != 3 or is_triclinic):
+      bx_tri = jnp.broadcast_to(bx_arr.reshape(1, 3, 3), (B, 3, 3))
+    elif bx_arr.size == B * 3:
+      bx_tri = _ortho_to_lower_tri_batch(bx_arr.reshape(B, 3), B, dtype)
+    else:
+      bx_tri = _ortho_to_lower_tri_batch(bx_arr.reshape(1, 3), B, dtype)
   else:
-    bx_b = jnp.broadcast_to(bx_arr.reshape(-1)[:3][None, :], (B, 3))
-  bx_b = jnp.asarray(bx_b, dtype=dtype)
-  return bx_b, jnp.asarray(bx_b.reshape(B * 3), dtype=dtype)
+    raise ValueError(f"Unsupported periodic box shape for BAOAB: {bx_arr.shape}")
+  bx_tri = jnp.asarray(bx_tri, dtype=dtype)
+  return bx_tri, jnp.asarray(bx_tri.reshape(B * 9), dtype=dtype)
+
+
+def _min_image_batch_dr(dr: Array, bx_b: Array, *, is_triclinic: bool = False) -> Array:
+  """Minimum-image displacement for ``dr`` ``(B, N, 3)`` against ``(B, 3)`` or ``(B, 3, 3)`` ``bx_b``."""
+  dtype = dr.dtype
+  bx_d = bx_b.astype(dtype)
+  if not is_triclinic and bx_d.ndim == 2:
+    zero = jnp.asarray(0.0, dtype=dtype)
+    one = jnp.asarray(1.0, dtype=dtype)
+    safe = jnp.where(bx_d[:, None, :] > zero, bx_d[:, None, :], one)
+    n_img = jnp.where(bx_d[:, None, :] > zero, _PBC_ROUND_FN(dr / safe), zero)
+    return dr - n_img * bx_d[:, None, :]
+  ax = bx_d[:, 0, 0][:, None]
+  bx = bx_d[:, 1, 0][:, None]
+  by = bx_d[:, 1, 1][:, None]
+  cx = bx_d[:, 2, 0][:, None]
+  cy = bx_d[:, 2, 1][:, None]
+  cz = bx_d[:, 2, 2][:, None]
+  dx, dy, dz = _min_image_vec3_std(dr[:, :, 0], dr[:, :, 1], dr[:, :, 2], (ax, bx, by, cx, cy, cz))
+  return jnp.stack([dx, dy, dz], axis=-1)
+
+
+def _extract_box_tuple_batch(
+  bx_flat: Array, B: int, idx_b: Array, *, is_triclinic: bool = False
+) -> tuple[Array, ...]:
+  """Slice per-element ``(Lx, Ly, Lz)`` or ``(ax, bx, by, cx, cy, cz)`` from ``bx_flat``."""
+  if is_triclinic:
+    bx_9 = bx_flat.reshape(B, 9)
+    return (
+      bx_9[idx_b, 0],
+      bx_9[idx_b, 3],
+      bx_9[idx_b, 4],
+      bx_9[idx_b, 6],
+      bx_9[idx_b, 7],
+      bx_9[idx_b, 8],
+    )
+  bx_3 = bx_flat.reshape(B, 3)
+  return (bx_3[idx_b, 0], bx_3[idx_b, 1], bx_3[idx_b, 2])
+
+
+def _load_box_tuple_pallas(
+  bx_ref: Any, b_id: Array, *, is_triclinic: bool = False
+) -> tuple[Array, ...]:
+  """Load per-replica ``(Lx, Ly, Lz)`` or ``(ax, bx, by, cx, cy, cz)`` inside a Pallas kernel."""
+  if is_triclinic:
+    base_bx = b_id * 9
+    ax = _pl_load(bx_ref, (base_bx + jnp.zeros((1,), dtype=jnp.int32),))[0]
+    bx = _pl_load(bx_ref, (base_bx + jnp.full((1,), 3, dtype=jnp.int32),))[0]
+    by = _pl_load(bx_ref, (base_bx + jnp.full((1,), 4, dtype=jnp.int32),))[0]
+    cx = _pl_load(bx_ref, (base_bx + jnp.full((1,), 6, dtype=jnp.int32),))[0]
+    cy = _pl_load(bx_ref, (base_bx + jnp.full((1,), 7, dtype=jnp.int32),))[0]
+    cz = _pl_load(bx_ref, (base_bx + jnp.full((1,), 8, dtype=jnp.int32),))[0]
+    return (ax, bx, by, cx, cy, cz)
+  base_bx = b_id * 3
+  Lx = _pl_load(bx_ref, (base_bx + jnp.zeros((1,), dtype=jnp.int32),))[0]
+  Ly = _pl_load(bx_ref, (base_bx + jnp.ones((1,), dtype=jnp.int32),))[0]
+  Lz = _pl_load(bx_ref, (base_bx + jnp.full((1,), 2, dtype=jnp.int32),))[0]
+  return (Lx, Ly, Lz)
 
 
 def _resolve_baoab_accumulator_mode(
@@ -2324,6 +2604,290 @@ def _resolve_baoab_accumulator_mode(
   return bool(f64_accumulators), False
 
 
+def _ff_choose(cond: Array, a: FltFlt, b: FltFlt) -> FltFlt:
+  """Register-lean component-wise ``FltFlt`` select without broadcast temporaries."""
+  return FltFlt(jnp.where(cond, a.hi, b.hi), jnp.where(cond, a.lo, b.lo))
+
+
+def _ff_choose3(
+  cond: Array,
+  a: tuple[FltFlt, FltFlt, FltFlt],
+  b: tuple[FltFlt, FltFlt, FltFlt],
+) -> tuple[FltFlt, FltFlt, FltFlt]:
+  """Register-lean component-wise 3-vector ``FltFlt`` select."""
+  return (
+    _ff_choose(cond, a[0], b[0]),
+    _ff_choose(cond, a[1], b[1]),
+    _ff_choose(cond, a[2], b[2]),
+  )
+
+
+def _rint_f32_bitexact(
+  y: Array,
+  *,
+  use_triton_asm: bool | None = None,
+  interpret: bool = False,
+) -> Array:
+  """Round IEEE binary32 ``y`` to nearest-even integer without ``lax.round_p``."""
+  yf = jnp.asarray(y, dtype=jnp.float32)
+  if in_export_context():
+    return jnp.rint(yf)
+  iy = jax.lax.bitcast_convert_type(yf, jnp.int32)
+  abs_iy = iy & jnp.int32(0x7FFFFFFF)
+  sign_iy = iy & jnp.int32(-2147483648)
+  m23 = jax.lax.bitcast_convert_type(sign_iy | jnp.int32(0x4B000000), jnp.float32)
+  if should_use_triton_asm(use_triton_asm, interpret=interpret):
+    s = fadd_rn(yf, m23, use_triton_asm=True, interpret=False)
+    r = fsub_rn(s, m23, use_triton_asm=True, interpret=False)
+  else:
+    s = jax.lax.optimization_barrier(yf + m23)
+    r = s - m23
+  # Restore signed zero sign bit when |r| == 0
+  r_bits = jax.lax.bitcast_convert_type(r, jnp.int32)
+  r_zero_signed = jax.lax.bitcast_convert_type(
+    jnp.where((r_bits & jnp.int32(0x7FFFFFFF)) == jnp.int32(0), sign_iy, r_bits),
+    jnp.float32,
+  )
+  return jnp.where(abs_iy < jnp.int32(0x4B000000), r_zero_signed, yf)
+
+
+def ff_double_rt(
+  x: FltFltLike,
+  *,
+  use_triton_asm: bool | None = None,
+  interpret: bool = False,
+) -> FltFlt:
+  """Integer-bit-exact IEEE round-to-nearest-even ``rint(x)`` in ``FltFlt`` (FP32/INT32).
+
+  Uses ``jax.lax.bitcast_convert_type`` + ``ff_add``/``ff_sub`` in FP32/INT32 (zero
+  ``lax.round_p`` on Triton GPU) and falls back cleanly to portable StableHLO inside
+  ``prolix.export.in_export_context()``.
+  """
+  x0_f32 = jnp.asarray(x[0], dtype=jnp.float32)
+  x1_f32 = jnp.asarray(x[1], dtype=jnp.float32)
+  ix0 = jax.lax.bitcast_convert_type(x0_f32, jnp.int32)
+  ix1 = jax.lax.bitcast_convert_type(x1_f32, jnp.int32)
+  both_zero = ((ix0 & jnp.int32(0x7FFFFFFF)) == jnp.int32(0)) & (
+    (ix1 & jnp.int32(0x7FFFFFFF)) == jnp.int32(0)
+  )
+
+  x_norm = two_sum(x0_f32, x1_f32, use_triton_asm=use_triton_asm, interpret=interpret)
+  hi, lo = x_norm.hi, x_norm.lo
+  z = jnp.zeros_like(hi)
+  one = jnp.ones_like(hi)
+  neg_one = jnp.asarray(-1.0, dtype=jnp.float32)
+  half = jnp.asarray(0.5, dtype=jnp.float32)
+  neg_half = jnp.asarray(-0.5, dtype=jnp.float32)
+
+  ix = jax.lax.bitcast_convert_type(hi, jnp.int32)
+  abs_ix = ix & jnp.int32(0x7FFFFFFF)
+  sign_ix = jnp.where(both_zero, ix0 & jnp.int32(-2147483648), ix & jnp.int32(-2147483648))
+
+  # Regime 1: |hi| < 2^23 (0x4B000000) -> ulp(hi) <= 0.5, |lo| <= 0.25
+  r_hi = _rint_f32_bitexact(hi, use_triton_asm=use_triton_asm, interpret=interpret)
+  d = ff_sub(x_norm, ff_from_f32(r_hi), use_triton_asm=use_triton_asm, interpret=interpret)
+  adj_up = (d.hi > half) | ((d.hi == half) & (d.lo > z))
+  adj_dn = (d.hi < neg_half) | ((d.hi == neg_half) & (d.lo < z))
+  r_small_hi = jnp.where(
+    adj_up,
+    fadd_rn(r_hi, one, use_triton_asm=use_triton_asm, interpret=interpret),
+    jnp.where(
+      adj_dn,
+      fsub_rn(r_hi, one, use_triton_asm=use_triton_asm, interpret=interpret),
+      r_hi,
+    ),
+  )
+  # Preserve IEEE signed zero when rounded integer is 0
+  rs_bits = jax.lax.bitcast_convert_type(r_small_hi, jnp.int32)
+  r_small_hi = jax.lax.bitcast_convert_type(
+    jnp.where((rs_bits & jnp.int32(0x7FFFFFFF)) == jnp.int32(0), sign_ix, rs_bits),
+    jnp.float32,
+  )
+  r_small = FltFlt(r_small_hi, z)
+
+  # Regime 2: 2^23 <= |hi| < 2^24 -> hi is integer (ulp == 1.0); odd hi breaks |lo| == 0.5 ties
+  hi_is_odd = (ix & jnp.int32(1)) != jnp.int32(0)
+  r_lo_raw = _rint_f32_bitexact(lo, use_triton_asm=use_triton_asm, interpret=interpret)
+  oct23_lo = jnp.where(
+    (lo == half) & hi_is_odd,
+    one,
+    jnp.where((lo == neg_half) & hi_is_odd, neg_one, r_lo_raw),
+  )
+  # Regime 3: |hi| >= 2^24 -> hi is even integer (or Inf/NaN); round lo if |lo| < 2^23
+  is_finite = abs_ix < jnp.int32(0x7F800000)
+  r_lo = jnp.where(
+    is_finite,
+    jnp.where(abs_ix < jnp.int32(0x4B800000), oct23_lo, r_lo_raw),
+    lo,
+  )
+  r_large = ff_add(
+    ff_from_f32(hi),
+    ff_from_f32(r_lo),
+    use_triton_asm=use_triton_asm,
+    interpret=interpret,
+  )
+  return _ff_choose(abs_ix < jnp.int32(0x4B000000), r_small, r_large)
+
+
+def _ff_fma_f32_pair(a_f32: Array, b_f32: Array, c_ff: FltFlt) -> FltFlt:
+  """Exact ``(a_f32 * b_f32) + c_ff`` using a single ``two_prod_fma`` (zero ``lo == 0`` splits)."""
+  return ff_add(two_prod_fma(a_f32, b_f32), c_ff)
+
+
+def _nearest_int_quot_ff(d_ff: FltFlt, safe_L: Array) -> Array:
+  """Nearest-even integer lattice count ``round(d_ff / safe_L)`` (PTX ``ff_double_rt`` on GPU, lean on CPU/export)."""
+  if should_use_triton_asm():
+    return ff_double_rt(ff_div(d_ff, safe_L)).hi
+  return _rint_f32_bitexact(fadd_rn(d_ff.hi, d_ff.lo) / safe_L)
+
+
+def _wrap_ff(
+  rx_v: FltFlt,
+  ry_v: FltFlt,
+  rz_v: FltFlt,
+  box_spec: tuple[Array, ...] | None,
+) -> tuple[FltFlt, FltFlt, FltFlt]:
+  """Wrap ``FltFlt`` ``(rx, ry, rz)`` into orthorhombic ``(Lx, Ly, Lz)`` or triclinic ``(ax, bx, by, cx, cy, cz)`` brick."""
+  if box_spec is None:
+    return (rx_v, ry_v, rz_v)
+  if len(box_spec) == 3:
+    return (
+      ff_mod_f32(rx_v, box_spec[0]),
+      ff_mod_f32(ry_v, box_spec[1]),
+      ff_mod_f32(rz_v, box_spec[2]),
+    )
+  ax, bx, by, cx, cy, cz = box_spec
+  z = jnp.zeros_like(cz)
+  one = jnp.ones_like(cz)
+
+  safe_cz = jnp.where(cz > z, cz, one)
+  q_z = jnp.where(cz > z, jnp.floor(fadd_rn(rz_v.hi, rz_v.lo) / safe_cz), z)
+  neg_qz = fneg_f32(q_z)
+  rz_t = _ff_fma_f32_pair(neg_qz, safe_cz, rz_v)
+  below_z = (cz > z) & ((rz_t.hi < z) | ((rz_t.hi == z) & (rz_t.lo < z)))
+  above_z = (cz > z) & ((rz_t.hi > safe_cz) | ((rz_t.hi == safe_cz) & (rz_t.lo >= z)))
+  neg_qz = jnp.where(below_z, fadd_rn(neg_qz, one), jnp.where(above_z, fsub_rn(neg_qz, one), neg_qz))
+  rx_z = _ff_fma_f32_pair(neg_qz, cx, rx_v)
+  ry_z = _ff_fma_f32_pair(neg_qz, cy, ry_v)
+  rz_w = _ff_choose(cz > z, _ff_fma_f32_pair(neg_qz, safe_cz, rz_v), rz_v)
+
+  safe_by = jnp.where(by > z, by, one)
+  q_y = jnp.where(by > z, jnp.floor(fadd_rn(ry_z.hi, ry_z.lo) / safe_by), z)
+  neg_qy = fneg_f32(q_y)
+  ry_t = _ff_fma_f32_pair(neg_qy, safe_by, ry_z)
+  below_y = (by > z) & ((ry_t.hi < z) | ((ry_t.hi == z) & (ry_t.lo < z)))
+  above_y = (by > z) & ((ry_t.hi > safe_by) | ((ry_t.hi == safe_by) & (ry_t.lo >= z)))
+  neg_qy = jnp.where(below_y, fadd_rn(neg_qy, one), jnp.where(above_y, fsub_rn(neg_qy, one), neg_qy))
+  rx_y = _ff_fma_f32_pair(neg_qy, bx, rx_z)
+  ry_w = _ff_choose(by > z, _ff_fma_f32_pair(neg_qy, safe_by, ry_z), ry_z)
+
+  rx_w = ff_mod_f32(rx_y, ax)
+  return (rx_w, ry_w, rz_w)
+
+
+def _min_image_ff(
+  dx: FltFlt,
+  dy: FltFlt,
+  dz: FltFlt,
+  box_spec: tuple[Array, ...] | None,
+) -> tuple[FltFlt, FltFlt, FltFlt]:
+  """Minimum-image ``FltFlt`` displacement using ``ff_double_rt`` on GPU and lean rounding on CPU/export."""
+  if box_spec is None:
+    return (dx, dy, dz)
+  if len(box_spec) == 3:
+    Lx, Ly, Lz = box_spec
+    z = jnp.zeros_like(Lx)
+    one = jnp.ones_like(Lx)
+    sLx = jnp.where(Lx > z, Lx, one)
+    sLy = jnp.where(Ly > z, Ly, one)
+    sLz = jnp.where(Lz > z, Lz, one)
+    nx = jnp.where(Lx > z, _nearest_int_quot_ff(dx, sLx), z)
+    ny = jnp.where(Ly > z, _nearest_int_quot_ff(dy, sLy), z)
+    nz = jnp.where(Lz > z, _nearest_int_quot_ff(dz, sLz), z)
+    mx = _ff_choose(Lx > z, _ff_fma_f32_pair(fneg_f32(nx), sLx, dx), dx)
+    my = _ff_choose(Ly > z, _ff_fma_f32_pair(fneg_f32(ny), sLy, dy), dy)
+    mz = _ff_choose(Lz > z, _ff_fma_f32_pair(fneg_f32(nz), sLz, dz), dz)
+    return (mx, my, mz)
+
+  ax, bx, by, cx, cy, cz = box_spec
+  z = jnp.zeros_like(cz)
+  one = jnp.ones_like(cz)
+
+  scz = jnp.where(cz > z, cz, one)
+  nz = jnp.where(cz > z, _nearest_int_quot_ff(dz, scz), z)
+  neg_nz_f = fneg_f32(nz)
+  dx = _ff_fma_f32_pair(neg_nz_f, cx, dx)
+  dy = _ff_fma_f32_pair(neg_nz_f, cy, dy)
+  dz = _ff_choose(cz > z, _ff_fma_f32_pair(neg_nz_f, scz, dz), dz)
+
+  sby = jnp.where(by > z, by, one)
+  ny = jnp.where(by > z, _nearest_int_quot_ff(dy, sby), z)
+  neg_ny_f = fneg_f32(ny)
+  dx = _ff_fma_f32_pair(neg_ny_f, bx, dx)
+  dy = _ff_choose(by > z, _ff_fma_f32_pair(neg_ny_f, sby, dy), dy)
+
+  sax = jnp.where(ax > z, ax, one)
+  nx = jnp.where(ax > z, _nearest_int_quot_ff(dx, sax), z)
+  neg_nx_f = fneg_f32(nx)
+  dx = _ff_choose(ax > z, _ff_fma_f32_pair(neg_nx_f, sax, dx), dx)
+  return (dx, dy, dz)
+
+
+def _lattice_shift_to_ref_ff(
+  pos_ff: tuple[FltFlt, FltFlt, FltFlt],
+  ref_ff: tuple[FltFlt, FltFlt, FltFlt],
+  box_spec: tuple[Array, ...] | None,
+) -> tuple[FltFlt, FltFlt, FltFlt]:
+  """Exact integer Bravais lattice shift ``-n_z c - n_y b - n_x a`` bringing ``pos_ff`` nearest ``ref_ff``."""
+  if box_spec is None:
+    z = jnp.zeros_like(pos_ff[0].hi)
+    z_ff = FltFlt(z, z)
+    return (z_ff, z_ff, z_ff)
+  dx = ff_sub(pos_ff[0], ref_ff[0])
+  dy = ff_sub(pos_ff[1], ref_ff[1])
+  dz = ff_sub(pos_ff[2], ref_ff[2])
+  if len(box_spec) == 3:
+    Lx, Ly, Lz = box_spec
+    z = jnp.zeros_like(Lx)
+    one = jnp.ones_like(Lx)
+    sLx = jnp.where(Lx > z, Lx, one)
+    sLy = jnp.where(Ly > z, Ly, one)
+    sLz = jnp.where(Lz > z, Lz, one)
+    nx = jnp.where(Lx > z, _nearest_int_quot_ff(dx, sLx), z)
+    ny = jnp.where(Ly > z, _nearest_int_quot_ff(dy, sLy), z)
+    nz = jnp.where(Lz > z, _nearest_int_quot_ff(dz, sLz), z)
+    return (
+      two_prod_fma(fneg_f32(nx), Lx),
+      two_prod_fma(fneg_f32(ny), Ly),
+      two_prod_fma(fneg_f32(nz), Lz),
+    )
+  ax, bx, by, cx, cy, cz = box_spec
+  z = jnp.zeros_like(cz)
+  one = jnp.ones_like(cz)
+
+  scz = jnp.where(cz > z, cz, one)
+  nz = jnp.where(cz > z, _nearest_int_quot_ff(dz, scz), z)
+  neg_nz = fneg_f32(nz)
+  sh_z = two_prod_fma(neg_nz, cz)
+  sh_y_z = two_prod_fma(neg_nz, cy)
+  sh_x_z = two_prod_fma(neg_nz, cx)
+  dx_z = ff_add(dx, sh_x_z)
+  dy_z = ff_add(dy, sh_y_z)
+
+  sby = jnp.where(by > z, by, one)
+  ny = jnp.where(by > z, _nearest_int_quot_ff(dy_z, sby), z)
+  neg_ny = fneg_f32(ny)
+  sh_y = ff_add(sh_y_z, two_prod_fma(neg_ny, by))
+  sh_x_zy = ff_add(sh_x_z, two_prod_fma(neg_ny, bx))
+  dx_zy = ff_add(dx, sh_x_zy)
+
+  sax = jnp.where(ax > z, ax, one)
+  nx = jnp.where(ax > z, _nearest_int_quot_ff(dx_zy, sax), z)
+  neg_nx = fneg_f32(nx)
+  sh_x = ff_add(sh_x_zy, two_prod_fma(neg_nx, ax))
+  return (sh_x, sh_y, sh_z)
+
+
 def _ff_sq(a: FltFlt) -> FltFlt:
   """Normalized square ``a * a`` in ``FltFlt``."""
   p = two_prod_fma(a.hi, a.hi)
@@ -2345,7 +2909,7 @@ def _settle_water_fltflt_vec3(
   r_HH: float,
   mass_oxygen: float,
   mass_hydrogen: float,
-  box_xyz: tuple[Array, Array, Array] | None,
+  box_xyz: tuple[Array, ...] | None,
   has_box: bool,
 ) -> tuple[
   tuple[FltFlt, FltFlt, FltFlt],
@@ -2358,26 +2922,25 @@ def _settle_water_fltflt_vec3(
   two = jnp.asarray(2.0, dtype=jnp.float32)
 
   if has_box and box_xyz is not None:
-    bx, by, bz = box_xyz
 
     def _unwrap_ff3(p_n, p_o):
-      d0 = ff_min_image_f32(ff_sub(p_n[0], p_o[0]), bx)
-      d1 = ff_min_image_f32(ff_sub(p_n[1], p_o[1]), by)
-      d2 = ff_min_image_f32(ff_sub(p_n[2], p_o[2]), bz)
+      d0, d1, d2 = _min_image_ff(
+        ff_sub(p_n[0], p_o[0]), ff_sub(p_n[1], p_o[1]), ff_sub(p_n[2], p_o[2]), box_xyz
+      )
       return (ff_add(p_o[0], d0), ff_add(p_o[1], d1), ff_add(p_o[2], d2))
 
     o_u = _unwrap_ff3(o_new, o_old)
     h1_u = _unwrap_ff3(h1_new, h1_old)
     h2_u = _unwrap_ff3(h2_new, h2_old)
 
-    dh1_x = ff_min_image_f32(ff_sub(h1_u[0], o_u[0]), bx)
-    dh1_y = ff_min_image_f32(ff_sub(h1_u[1], o_u[1]), by)
-    dh1_z = ff_min_image_f32(ff_sub(h1_u[2], o_u[2]), bz)
+    dh1_x, dh1_y, dh1_z = _min_image_ff(
+      ff_sub(h1_u[0], o_u[0]), ff_sub(h1_u[1], o_u[1]), ff_sub(h1_u[2], o_u[2]), box_xyz
+    )
     h1_u = (ff_add(o_u[0], dh1_x), ff_add(o_u[1], dh1_y), ff_add(o_u[2], dh1_z))
 
-    dh2_x = ff_min_image_f32(ff_sub(h2_u[0], o_u[0]), bx)
-    dh2_y = ff_min_image_f32(ff_sub(h2_u[1], o_u[1]), by)
-    dh2_z = ff_min_image_f32(ff_sub(h2_u[2], o_u[2]), bz)
+    dh2_x, dh2_y, dh2_z = _min_image_ff(
+      ff_sub(h2_u[0], o_u[0]), ff_sub(h2_u[1], o_u[1]), ff_sub(h2_u[2], o_u[2]), box_xyz
+    )
     h2_u = (ff_add(o_u[0], dh2_x), ff_add(o_u[1], dh2_y), ff_add(o_u[2], dh2_z))
   else:
     o_u, h1_u, h2_u = o_new, h1_new, h2_new
@@ -2514,10 +3077,10 @@ def _settle_water_fltflt_vec3(
 
   z_ff = ff_from_f32(jnp.zeros_like(qr0))
   one_ff = ff_from_f32(jnp.ones_like(qr0))
-  q0 = ff_where(valid_q, ff_mul(qr0_ff, inv_ff), one_ff)
-  q1 = ff_where(valid_q, ff_mul(qr1_ff, inv_ff), z_ff)
-  q2 = ff_where(valid_q, ff_mul(qr2_ff, inv_ff), z_ff)
-  q3 = ff_where(valid_q, ff_mul(qr3_ff, inv_ff), z_ff)
+  q0 = _ff_choose(valid_q, ff_mul(qr0_ff, inv_ff), one_ff)
+  q1 = _ff_choose(valid_q, ff_mul(qr1_ff, inv_ff), z_ff)
+  q2 = _ff_choose(valid_q, ff_mul(qr2_ff, inv_ff), z_ff)
+  q3 = _ff_choose(valid_q, ff_mul(qr3_ff, inv_ff), z_ff)
 
   r00 = ff_sub(one_ff, ff_mul_f32(ff_add(_ff_sq(q2), _ff_sq(q3)), two))
   r01 = ff_mul_f32(ff_sub(ff_mul(q1, q2), ff_mul(q0, q3)), two)
@@ -2546,13 +3109,7 @@ def _settle_water_fltflt_vec3(
   h2_cz = ff_add(com_z, ff_sub(r21_bHy, r20_bHx))
 
   if has_box and box_xyz is not None:
-    bx, by, bz = box_xyz
-    nx = jnp.rint(ff_to_f32(ff_sub(o_cx, o_new[0])) / bx)
-    ny = jnp.rint(ff_to_f32(ff_sub(o_cy, o_new[1])) / by)
-    nz = jnp.rint(ff_to_f32(ff_sub(o_cz, o_new[2])) / bz)
-    sh_x = two_prod_fma(fneg_f32(nx), bx)
-    sh_y = two_prod_fma(fneg_f32(ny), by)
-    sh_z = two_prod_fma(fneg_f32(nz), bz)
+    sh_x, sh_y, sh_z = _lattice_shift_to_ref_ff((o_cx, o_cy, o_cz), o_new, box_xyz)
     o_cx, o_cy, o_cz = ff_add(o_cx, sh_x), ff_add(o_cy, sh_y), ff_add(o_cz, sh_z)
     h1_cx, h1_cy, h1_cz = ff_add(h1_cx, sh_x), ff_add(h1_cy, sh_y), ff_add(h1_cz, sh_z)
     h2_cx, h2_cy, h2_cz = ff_add(h2_cx, sh_x), ff_add(h2_cy, sh_y), ff_add(h2_cz, sh_z)
@@ -2576,7 +3133,7 @@ def _r_step_and_am_fltflt_vec3(  # noqa: PLR0913
   half_dt_f32: Array,
   mass_oxygen: float,
   mass_hydrogen: float,
-  box_xyz: tuple[Array, Array, Array] | None,
+  box_xyz: tuple[Array, ...] | None,
   has_box: bool,
 ) -> tuple[
   tuple[FltFlt, FltFlt, FltFlt],
@@ -2593,9 +3150,7 @@ def _r_step_and_am_fltflt_vec3(  # noqa: PLR0913
     dy = ff_sub(rc[1], ru[1])
     dz = ff_sub(rc[2], ru[2])
     if has_box and box_xyz is not None:
-      dx = ff_min_image_f32(dx, box_xyz[0])
-      dy = ff_min_image_f32(dy, box_xyz[1])
-      dz = ff_min_image_f32(dz, box_xyz[2])
+      dx, dy, dz = _min_image_ff(dx, dy, dz, box_xyz)
     return (ff_to_f32(dx), ff_to_f32(dy), ff_to_f32(dz))
 
   dO = _disp_f32(r_con_O, r_unc_O)
@@ -2701,9 +3256,6 @@ def _rattle_shake_cluster_fltflt_vec3(
     for k in range(4)
   ]
 
-  def ff_sub_f32_local(a_ff: FltFlt, b_f32: Array) -> FltFlt:
-    return ff_add_f32(a_ff, fneg_f32(b_f32))
-
   def _shake_iter(_i, carry):
     dxX_x, dxX_y, dxX_z, dxH_t = carry
     dxH_next = list(dxH_t)
@@ -2720,9 +3272,9 @@ def _rattle_shake_cluster_fltflt_vec3(
       lam = jnp.where(ok, err / jnp.where(ok, denom, two), zero)
       cX_k = lam * inv_mX
       cH_k = lam * inv_mH[k]
-      dxX_x = ff_sub_f32_local(dxX_x, cX_k * ab_ref[k][0])
-      dxX_y = ff_sub_f32_local(dxX_y, cX_k * ab_ref[k][1])
-      dxX_z = ff_sub_f32_local(dxX_z, cX_k * ab_ref[k][2])
+      dxX_x = ff_sub_f32(dxX_x, cX_k * ab_ref[k][0])
+      dxX_y = ff_sub_f32(dxX_y, cX_k * ab_ref[k][1])
+      dxX_z = ff_sub_f32(dxX_z, cX_k * ab_ref[k][2])
       dxH_next[k] = (
         ff_add_f32(dxH_next[k][0], cH_k * ab_ref[k][0]),
         ff_add_f32(dxH_next[k][1], cH_k * ab_ref[k][1]),
@@ -2743,9 +3295,9 @@ def _rattle_shake_cluster_fltflt_vec3(
   )
   rH_out = [
     (
-      ff_add(r_unc_H[k][0], ff_where(v_slot[k], dxH_out[k][0], z_ff)),
-      ff_add(r_unc_H[k][1], ff_where(v_slot[k], dxH_out[k][1], z_ff)),
-      ff_add(r_unc_H[k][2], ff_where(v_slot[k], dxH_out[k][2], z_ff)),
+      ff_add(r_unc_H[k][0], _ff_choose(v_slot[k], dxH_out[k][0], z_ff)),
+      ff_add(r_unc_H[k][1], _ff_choose(v_slot[k], dxH_out[k][1], z_ff)),
+      ff_add(r_unc_H[k][2], _ff_choose(v_slot[k], dxH_out[k][2], z_ff)),
     )
     for k in range(4)
   ]
@@ -2765,20 +3317,18 @@ def _settle_vel_and_am_fltflt_vec3(
   mass_oxygen: float,
   mass_hydrogen: float,
   valid_w: Array,
+  box_xyz: tuple[Array, ...] | None = None,
 ) -> tuple[tuple[FltFlt, FltFlt, FltFlt], tuple[FltFlt, FltFlt, FltFlt], tuple[FltFlt, FltFlt, FltFlt]]:
   """Translation-invariant ``FltFlt`` wrapper for SETTLE velocity + AM impulse removal."""
   z_f32 = jnp.zeros_like(rO[0].hi)
   rO_rel = (z_f32, z_f32, z_f32)
-  rH1_rel = (
-    ff_to_f32(ff_sub(rH1[0], rO[0])),
-    ff_to_f32(ff_sub(rH1[1], rO[1])),
-    ff_to_f32(ff_sub(rH1[2], rO[2])),
-  )
-  rH2_rel = (
-    ff_to_f32(ff_sub(rH2[0], rO[0])),
-    ff_to_f32(ff_sub(rH2[1], rO[1])),
-    ff_to_f32(ff_sub(rH2[2], rO[2])),
-  )
+  dh1_ff = (ff_sub(rH1[0], rO[0]), ff_sub(rH1[1], rO[1]), ff_sub(rH1[2], rO[2]))
+  dh2_ff = (ff_sub(rH2[0], rO[0]), ff_sub(rH2[1], rO[1]), ff_sub(rH2[2], rO[2]))
+  if box_xyz is not None:
+    dh1_ff = _min_image_ff(dh1_ff[0], dh1_ff[1], dh1_ff[2], box_xyz)
+    dh2_ff = _min_image_ff(dh2_ff[0], dh2_ff[1], dh2_ff[2], box_xyz)
+  rH1_rel = (ff_to_f32(dh1_ff[0]), ff_to_f32(dh1_ff[1]), ff_to_f32(dh1_ff[2]))
+  rH2_rel = (ff_to_f32(dh2_ff[0]), ff_to_f32(dh2_ff[1]), ff_to_f32(dh2_ff[2]))
   pO_f32 = (ff_to_f32(pO[0]), ff_to_f32(pO[1]), ff_to_f32(pO[2]))
   pH1_f32 = (ff_to_f32(pH1[0]), ff_to_f32(pH1[1]), ff_to_f32(pH1[2]))
   pH2_f32 = (ff_to_f32(pH2[0]), ff_to_f32(pH2[1]), ff_to_f32(pH2[2]))
@@ -2943,6 +3493,8 @@ def _pure_jax_baoab_pre_force_fltflt(  # noqa: PLR0913
   cM_in: Array | None,
   has_morton: bool,
   inv_perm_in: Array | None,
+  *,
+  is_triclinic: bool = False,
 ) -> tuple[Array, ...]:
   """Vectorized pure-JAX ``FltFlt`` BAOAB pre-force step for CPU ``interpret`` & StableHLO export."""
   with fltflt_triton_asm_context(False):
@@ -2952,7 +3504,6 @@ def _pure_jax_baoab_pre_force_fltflt(  # noqa: PLR0913
 
     s0_b = seed_flat[0::2]
     s1_b = seed_flat[1::2]
-    bx_3 = bx_flat.reshape(B, 3)
 
     b_a = jnp.repeat(jnp.arange(B, dtype=jnp.int32), N)
     offs_a = jnp.tile(jnp.arange(N, dtype=jnp.int32), B)
@@ -2963,20 +3514,6 @@ def _pure_jax_baoab_pre_force_fltflt(  # noqa: PLR0913
     c2_a = jnp.sqrt(jnp.maximum(one - c1_a * c1_a, zero))
     s0_a = s0_b[b_a]
     s1_a = s1_b[b_a]
-
-    def _wrap_ff(
-      rx_v: FltFlt,
-      ry_v: FltFlt,
-      rz_v: FltFlt,
-      box_v: tuple[Array, Array, Array] | None,
-    ) -> tuple[FltFlt, FltFlt, FltFlt]:
-      if has_box and box_v is not None:
-        return (
-          ff_mod_f32(rx_v, box_v[0]),
-          ff_mod_f32(ry_v, box_v[1]),
-          ff_mod_f32(rz_v, box_v[2]),
-        )
-      return (rx_v, ry_v, rz_v)
 
     def _f_slot_global(b_idx: Array, local_idx: Array) -> Array:
       if has_morton and inv_perm_in is not None:
@@ -2991,7 +3528,7 @@ def _pure_jax_baoab_pre_force_fltflt(  # noqa: PLR0913
 
     if n_blk_a > 0 and N > 0:
       valid_s = (offs_a < (n_blk_a * _SETTLE_ATOM_BLOCK)) & (is_water_flat == 0)
-      box_a = (bx_3[b_a, 0], bx_3[b_a, 1], bx_3[b_a, 2]) if has_box else None
+      box_a = _extract_box_tuple_batch(bx_flat, B, b_a, is_triclinic=is_triclinic) if has_box else None
       fa_s = _f_slot_global(b_a, offs_a)
       fx_s, fy_s, fz_s = fx_f32[fa_s], fy_f32[fa_s], fz_f32[fa_s]
       nsx, nsy = _philox2x32_box_muller_pair(
@@ -3103,7 +3640,7 @@ def _pure_jax_baoab_pre_force_fltflt(  # noqa: PLR0913
       c1_w = jnp.exp(jnp.asarray(-gamma_f, dtype=jnp.float32) * dt_w)
       c2_w = jnp.sqrt(jnp.maximum(one - c1_w * c1_w, zero))
       s0_w, s1_w = s0_b[b_w], s1_b[b_w]
-      box_w = (bx_3[b_w, 0], bx_3[b_w, 1], bx_3[b_w, 2]) if has_box else None
+      box_w = _extract_box_tuple_batch(bx_flat, B, b_w, is_triclinic=is_triclinic) if has_box else None
 
       if fuse_prev_post:
         p_b2_O = (
@@ -3122,7 +3659,8 @@ def _pure_jax_baoab_pre_force_fltflt(  # noqa: PLR0913
           ff_add(p0_H2[2], two_prod_fma(half_dt_w, f0_H2[2])),
         )
         p0_O, p0_H1, p0_H2 = _settle_vel_and_am_fltflt_vec3(
-          p_b2_O, p_b2_H1, p_b2_H2, r0_O, r0_H1, r0_H2, mO_s, mH1_s, mH2_s, mO_f, mH_f, valid_w
+          p_b2_O, p_b2_H1, p_b2_H2, r0_O, r0_H1, r0_H2, mO_s, mH1_s, mH2_s, mO_f, mH_f, valid_w,
+          box_xyz=box_w,
         )
 
       p_pre1_O = (
@@ -3348,7 +3886,7 @@ def _pure_jax_baoab_pre_force_fltflt(  # noqa: PLR0913
       c1_c = jnp.exp(jnp.asarray(-gamma_f, dtype=jnp.float32) * dt_c)
       c2_c = jnp.sqrt(jnp.maximum(one - c1_c * c1_c, zero))
       s0_c, s1_c = s0_b[b_c], s1_b[b_c]
-      box_c = (bx_3[b_c, 0], bx_3[b_c, 1], bx_3[b_c, 2]) if has_box else None
+      box_c = _extract_box_tuple_batch(bx_flat, B, b_c, is_triclinic=is_triclinic) if has_box else None
 
       r0_H = []
       ab0 = []
@@ -3357,9 +3895,7 @@ def _pure_jax_baoab_pre_force_fltflt(  # noqa: PLR0913
         dy = ff_sub(r0_H_raw[k][1], r0_X[1])
         dz = ff_sub(r0_H_raw[k][2], r0_X[2])
         if has_box and box_c is not None:
-          dx = ff_min_image_f32(dx, box_c[0])
-          dy = ff_min_image_f32(dy, box_c[1])
-          dz = ff_min_image_f32(dz, box_c[2])
+          dx, dy, dz = _min_image_ff(dx, dy, dz, box_c)
         ab0.append((ff_to_f32(dx), ff_to_f32(dy), ff_to_f32(dz)))
         r0_H.append((ff_add(r0_X[0], dx), ff_add(r0_X[1], dy), ff_add(r0_X[2], dz)))
 
@@ -3564,6 +4100,10 @@ def _pure_jax_baoab_post_force_fltflt(  # noqa: PLR0913
   cH2_in: Array | None,
   cH3_in: Array | None,
   cM_in: Array | None,
+  *,
+  bx_flat: Array | None = None,
+  has_box: bool = False,
+  is_triclinic: bool = False,
 ) -> tuple[Array, Array, Array, Array, Array, Array]:
   """Vectorized pure-JAX ``FltFlt`` BAOAB post-force step for CPU ``interpret`` & StableHLO export."""
   with fltflt_triton_asm_context(False):
@@ -3618,6 +4158,11 @@ def _pure_jax_baoab_post_force_fltflt(  # noqa: PLR0913
       sH2 = jnp.where(valid_w, jnp.clip(wH2_in[: B * W], 0, max(N - 1, 0)), 0)
       gO, gH1, gH2 = b_w * N + sO, b_w * N + sH1, b_w * N + sH2
       half_dt_w = half * dt_b[b_w]
+      box_pw = (
+        _extract_box_tuple_batch(bx_flat, B, b_w, is_triclinic=is_triclinic)
+        if (has_box and bx_flat is not None)
+        else None
+      )
 
       def _ld_w(g_idx: Array):
         return (
@@ -3633,7 +4178,8 @@ def _pure_jax_baoab_post_force_fltflt(  # noqa: PLR0913
       rH1, p_b2_H1 = _ld_w(gH1)
       rH2, p_b2_H2 = _ld_w(gH2)
       p_out_O, p_out_H1, p_out_H2 = _settle_vel_and_am_fltflt_vec3(
-        p_b2_O, p_b2_H1, p_b2_H2, rO, rH1, rH2, m_f32[gO], m_f32[gH1], m_f32[gH2], mO_f, mH_f, valid_w
+        p_b2_O, p_b2_H1, p_b2_H2, rO, rH1, rH2, m_f32[gO], m_f32[gH1], m_f32[gH2], mO_f, mH_f, valid_w,
+        box_xyz=box_pw,
       )
       for g_idx, pv_w in ((gO, p_out_O), (gH1, p_out_H1), (gH2, p_out_H2)):
         m_bufs = _scatter_mom(jnp.where(valid_w, g_idx, scratch_idx), pv_w, m_bufs)
@@ -3668,6 +4214,11 @@ def _pure_jax_baoab_post_force_fltflt(  # noqa: PLR0913
       gX = b_c * N + sX
       gH = [b_c * N + sH[k] for k in range(4)]
       half_dt_c = half * dt_b[b_c]
+      box_pc = (
+        _extract_box_tuple_batch(bx_flat, B, b_c, is_triclinic=is_triclinic)
+        if (has_box and bx_flat is not None)
+        else None
+      )
 
       def _ld_c(g_idx: Array):
         return (
@@ -3684,14 +4235,14 @@ def _pure_jax_baoab_post_force_fltflt(  # noqa: PLR0913
       p_b2_H = [_ld_c(gH[k])[1] for k in range(4)]
       inv_mX = one / jnp.maximum(m_f32[gX], jnp.asarray(1e-30, dtype=jnp.float32))
       inv_mH = [one / jnp.maximum(m_f32[gH[k]], jnp.asarray(1e-30, dtype=jnp.float32)) for k in range(4)]
-      ab_cur = [
-        (
-          ff_to_f32(ff_sub(rH[k][0], rX[0])),
-          ff_to_f32(ff_sub(rH[k][1], rX[1])),
-          ff_to_f32(ff_sub(rH[k][2], rX[2])),
-        )
-        for k in range(4)
-      ]
+      ab_cur = []
+      for k in range(4):
+        dx = ff_sub(rH[k][0], rX[0])
+        dy = ff_sub(rH[k][1], rX[1])
+        dz = ff_sub(rH[k][2], rX[2])
+        if box_pc is not None:
+          dx, dy, dz = _min_image_ff(dx, dy, dz, box_pc)
+        ab_cur.append((ff_to_f32(dx), ff_to_f32(dy), ff_to_f32(dz)))
       p_out_X, p_out_H = _rattle_vel_cluster_fltflt_vec3(
         p_b2_X, p_b2_H, ab_cur, inv_mX, inv_mH, v_slots, n_iters=8
       )
@@ -3740,8 +4291,14 @@ def _pallas_baoab_pre_force_fltflt_impl(  # noqa: PLR0913
   positions_lo: Array | None = None,
   momentum_lo: Array | None = None,
   return_lo_accumulators: bool = False,
+  *,
+  is_triclinic: bool = False,
 ) -> tuple[Array, ...]:
   """100% ``float32`` ``(hi, lo)`` ``FltFlt`` Pallas BAOAB pre-force kernel (zero GPU FP64 ops)."""
+  box_is_b = in_batched[7] if len(in_batched) > 7 else True
+  eff_tri = bool(has_box) and _infer_box_is_triclinic(
+    B, box_is_b, box, is_triclinic=is_triclinic
+  )
   if prebuilt_soa is not None:
     if isinstance(prebuilt_soa, tuple):
       px_in, py_in, pz_in, mx_in, my_in, mz_in, fx_in, fy_in, fz_in, soa_plan = prebuilt_soa
@@ -3782,7 +4339,7 @@ def _pallas_baoab_pre_force_fltflt_impl(  # noqa: PLR0913
       cD0_hi = cD1_hi = cD2_hi = cD3_hi = None
       cD0_lo = cD1_lo = cD2_lo = cD3_lo = None
     seed_flat = _normalize_seed_flat(B, in_batched[4] if len(in_batched) > 4 else True, rng_seeds)
-    bx_b, bx_flat = _normalize_box_batch(B, in_batched[7] if len(in_batched) > 7 else True, box, jnp.float32)
+    bx_b, bx_flat = _normalize_box_batch(B, box_is_b, box, jnp.float32, is_triclinic=eff_tri)
     dt_b = jnp.broadcast_to(jnp.asarray(dt_arr, dtype=jnp.float32).reshape(-1), (B,))
     kT_b = jnp.broadcast_to(jnp.asarray(kT_arr, dtype=jnp.float32).reshape(-1), (B,))
     am_b = soa_plan.get("am_b")
@@ -3807,7 +4364,7 @@ def _pallas_baoab_pre_force_fltflt_impl(  # noqa: PLR0913
     seed_flat = _normalize_seed_flat(B, in_batched[4], rng_seeds)
     wi_b = _bcast(water_indices, in_batched[5]).astype(jnp.int32)
     wm_b = _bcast(water_mask, in_batched[6]).astype(jnp.int32)
-    bx_b, bx_flat = _normalize_box_batch(B, in_batched[7], box, jnp.float32)
+    bx_b, bx_flat = _normalize_box_batch(B, in_batched[7], box, jnp.float32, is_triclinic=eff_tri)
     dt_b = jnp.broadcast_to(jnp.asarray(_bcast(dt_arr, in_batched[8]), dtype=jnp.float32).reshape(-1), (B,))
     kT_b = jnp.broadcast_to(jnp.asarray(_bcast(kT_arr, in_batched[9]), dtype=jnp.float32).reshape(-1), (B,))
 
@@ -3954,8 +4511,7 @@ def _pallas_baoab_pre_force_fltflt_impl(  # noqa: PLR0913
           ref_p = (pos_b if pos_b is not None else pos_tmp) if ref_pos_b is None else ref_pos_b
           dr = pos_tmp - ref_p
           if has_box and bx_b is not None:
-            bx_d = bx_b.astype(orig_dtype)
-            dr = dr - bx_d[:, None, :] * _PBC_ROUND_FN(dr / bx_d[:, None, :])
+            dr = _min_image_batch_dr(dr, bx_b, is_triclinic=eff_tri)
           dr_sq = jnp.sum(dr * dr, axis=-1)
           if am_b is not None:
             dr_sq = jnp.where(am_b > 0, dr_sq, jnp.asarray(0.0, dtype=orig_dtype))
@@ -3985,8 +4541,7 @@ def _pallas_baoab_pre_force_fltflt_impl(  # noqa: PLR0913
       ref_p = (pos_b if pos_b is not None else pos_out) if ref_pos_b is None else ref_pos_b
       dr = pos_out - ref_p
       if has_box and bx_b is not None:
-        bx_d = bx_b.astype(pos_out.dtype)
-        dr = dr - bx_d[:, None, :] * _PBC_ROUND_FN(dr / bx_d[:, None, :])
+        dr = _min_image_batch_dr(dr, bx_b, is_triclinic=eff_tri)
       dr_sq = jnp.sum(dr * dr, axis=-1)
       if am_b is not None:
         dr_sq = jnp.where(am_b > 0, dr_sq, jnp.asarray(0.0, dtype=pos_out.dtype))
@@ -4057,6 +4612,7 @@ def _pallas_baoab_pre_force_fltflt_impl(  # noqa: PLR0913
         cM_in,
         has_morton,
         inv_perm_in,
+        is_triclinic=eff_tri,
       ),
       False,
     )
@@ -4107,7 +4663,6 @@ def _pallas_baoab_pre_force_fltflt_impl(  # noqa: PLR0913
     b_id = pl.program_id(0)
     base_a = b_id * N
     base_m = b_id * N_pad
-    base_bx = b_id * 3
     scratch_slot = jnp.int32(B * N)
     m_scratch_slot = jnp.int32(B * N_pad)
 
@@ -4123,20 +4678,13 @@ def _pallas_baoab_pre_force_fltflt_impl(  # noqa: PLR0913
     c2 = jnp.sqrt(jnp.maximum(one - c1 * c1, zero))
 
     if has_box and bx_ref is not None:
-      Lx = _pl_load(bx_ref, (base_bx + jnp.zeros((1,), dtype=jnp.int32),))[0]
-      Ly = _pl_load(bx_ref, (base_bx + jnp.ones((1,), dtype=jnp.int32),))[0]
-      Lz = _pl_load(bx_ref, (base_bx + jnp.full((1,), 2, dtype=jnp.int32),))[0]
-      box_xyz = (Lx, Ly, Lz)
+      box_xyz = _load_box_tuple_pallas(bx_ref, b_id, is_triclinic=eff_tri)
     else:
       box_xyz = None
 
     def _wrap_pos_ff(rx_ff: FltFlt, ry_ff: FltFlt, rz_ff: FltFlt) -> tuple[FltFlt, FltFlt, FltFlt]:
       if has_box and box_xyz is not None:
-        return (
-          ff_mod_f32(rx_ff, box_xyz[0]),
-          ff_mod_f32(ry_ff, box_xyz[1]),
-          ff_mod_f32(rz_ff, box_xyz[2]),
-        )
+        return _wrap_ff(rx_ff, ry_ff, rz_ff, box_xyz)
       return (rx_ff, ry_ff, rz_ff)
 
     def _f_slot(local_idx, mask_v):
@@ -4381,7 +4929,8 @@ def _pallas_baoab_pre_force_fltflt_impl(  # noqa: PLR0913
           ff_add(p0_H2[2], two_prod_fma(half_dt, f0_H2[2])),
         )
         p0_O, p0_H1, p0_H2 = _settle_vel_and_am_fltflt_vec3(
-          p_b2_O, p_b2_H1, p_b2_H2, r0_O, r0_H1, r0_H2, mO_s, mH1_s, mH2_s, mO_f, mH_f, valid_w
+          p_b2_O, p_b2_H1, p_b2_H2, r0_O, r0_H1, r0_H2, mO_s, mH1_s, mH2_s, mO_f, mH_f, valid_w,
+          box_xyz=box_xyz,
         )
 
       p_pre1_O = (
@@ -4631,9 +5180,7 @@ def _pallas_baoab_pre_force_fltflt_impl(  # noqa: PLR0913
         dy = ff_sub(r0_H_raw[k][1], r0_X[1])
         dz = ff_sub(r0_H_raw[k][2], r0_X[2])
         if has_box and box_xyz is not None:
-          dx = ff_min_image_f32(dx, box_xyz[0])
-          dy = ff_min_image_f32(dy, box_xyz[1])
-          dz = ff_min_image_f32(dz, box_xyz[2])
+          dx, dy, dz = _min_image_ff(dx, dy, dz, box_xyz)
         ab0.append((ff_to_f32(dx), ff_to_f32(dy), ff_to_f32(dz)))
         r0_H.append((ff_add(r0_X[0], dx), ff_add(r0_X[1], dy), ff_add(r0_X[2], dz)))
 
@@ -4893,8 +5440,22 @@ def _pallas_baoab_post_force_fltflt_impl(  # noqa: PLR0913
   positions_lo: Array | None = None,
   momentum_lo: Array | None = None,
   return_lo_accumulators: bool = False,
+  *,
+  box: Array | None = None,
+  is_triclinic: bool = False,
+  _box_is_batched: bool | None = None,
 ) -> Array | tuple[Array, ...]:
   """100% ``float32`` ``(hi, lo)`` ``FltFlt`` Pallas BAOAB post-force kernel (zero GPU FP64 ops)."""
+  has_box = box is not None
+  box_is_b = _infer_post_box_is_batched(
+    B, box, is_triclinic=is_triclinic, explicit_batched=_box_is_batched
+  )
+  eff_tri = bool(has_box) and _infer_box_is_triclinic(
+    B, box_is_b, box, is_triclinic=is_triclinic
+  )
+  bx_flat: Array | None = None
+  if has_box:
+    _, bx_flat = _normalize_box_batch(B, box_is_b, box, jnp.float32, is_triclinic=eff_tri)
   if prebuilt_soa is not None:
     if isinstance(prebuilt_soa, tuple):
       px_in, py_in, pz_in, mx_in, my_in, mz_in, fx_in, fy_in, fz_in, soa_plan = prebuilt_soa
@@ -5109,6 +5670,9 @@ def _pallas_baoab_post_force_fltflt_impl(  # noqa: PLR0913
         cH2_in,
         cH3_in,
         cM_in,
+        bx_flat=bx_flat,
+        has_box=has_box,
+        is_triclinic=eff_tri,
       ),
       False,
     )
@@ -5181,7 +5745,8 @@ def _pallas_baoab_post_force_fltflt_impl(  # noqa: PLR0913
     mx_hi_ref, my_hi_ref, mz_hi_ref, mx_lo_ref, my_lo_ref, mz_lo_ref = refs[0:6]
     px_hi_ref, py_hi_ref, pz_hi_ref, px_lo_ref, py_lo_ref, pz_lo_ref = refs[6:12]
     fx_ref, fy_ref, fz_ref, m_ref, wO_ref, wH1_ref, wH2_ref, wm_ref, dt_ref = refs[12:21]
-    mx_hi_o, my_hi_o, mz_hi_o, mx_lo_o, my_lo_o, mz_lo_o = refs[21:27]
+    bx_ref = refs[21] if has_box else None
+    mx_hi_o, my_hi_o, mz_hi_o, mx_lo_o, my_lo_o, mz_lo_o = refs[-6:]
 
     b_id = pl.program_id(0)
     w_pid = pl.program_id(1)
@@ -5193,6 +5758,11 @@ def _pallas_baoab_post_force_fltflt_impl(  # noqa: PLR0913
     half = jnp.asarray(0.5, dtype=jnp.float32)
     dt_val = _pl_load(dt_ref, (b_id + jnp.zeros((1,), dtype=jnp.int32),))[0]
     half_dt = half * dt_val
+    box_xyz = (
+      _load_box_tuple_pallas(bx_ref, b_id, is_triclinic=eff_tri)
+      if (has_box and bx_ref is not None)
+      else None
+    )
 
     def _load_ff_v3(xh_r, yh_r, zh_r, xl_r, yl_r, zl_r, idx, msk):
       return (
@@ -5239,7 +5809,8 @@ def _pallas_baoab_post_force_fltflt_impl(  # noqa: PLR0913
       p_b2_H2 = (ff_add(pH2[0], two_prod_fma(half_dt, fH2[0])), ff_add(pH2[1], two_prod_fma(half_dt, fH2[1])), ff_add(pH2[2], two_prod_fma(half_dt, fH2[2])))
 
       p_out_O, p_out_H1, p_out_H2 = _settle_vel_and_am_fltflt_vec3(
-        p_b2_O, p_b2_H1, p_b2_H2, rO, rH1, rH2, mO_s, mH1_s, mH2_s, mO_f, mH_f, valid_w
+        p_b2_O, p_b2_H1, p_b2_H2, rO, rH1, rH2, mO_s, mH1_s, mH2_s, mO_f, mH_f, valid_w,
+        box_xyz=box_xyz,
       )
       for s_idx, p_v in ((sO, p_out_O), (sH1, p_out_H1), (sH2, p_out_H2)):
         dest = jnp.where(valid_w, base_a + s_idx, scratch_slot) if use_scratch else (base_a + s_idx)
@@ -5262,7 +5833,8 @@ def _pallas_baoab_post_force_fltflt_impl(  # noqa: PLR0913
     mx_hi_ref, my_hi_ref, mz_hi_ref, mx_lo_ref, my_lo_ref, mz_lo_ref = refs[0:6]
     px_hi_ref, py_hi_ref, pz_hi_ref, px_lo_ref, py_lo_ref, pz_lo_ref = refs[6:12]
     fx_ref, fy_ref, fz_ref, m_ref, cX_ref, cH0_ref, cH1_ref, cH2_ref, cH3_ref, cM_ref, dt_ref = refs[12:23]
-    mx_hi_o, my_hi_o, mz_hi_o, mx_lo_o, my_lo_o, mz_lo_o = refs[23:29]
+    bx_ref = refs[23] if has_box else None
+    mx_hi_o, my_hi_o, mz_hi_o, mx_lo_o, my_lo_o, mz_lo_o = refs[-6:]
 
     b_id = pl.program_id(0)
     c_pid = pl.program_id(1)
@@ -5274,6 +5846,11 @@ def _pallas_baoab_post_force_fltflt_impl(  # noqa: PLR0913
     half = jnp.asarray(0.5, dtype=jnp.float32)
     dt_val = _pl_load(dt_ref, (b_id + jnp.zeros((1,), dtype=jnp.int32),))[0]
     half_dt = half * dt_val
+    box_xyz = (
+      _load_box_tuple_pallas(bx_ref, b_id, is_triclinic=eff_tri)
+      if (has_box and bx_ref is not None)
+      else None
+    )
 
     def _load_ff_v3(xh_r, yh_r, zh_r, xl_r, yl_r, zl_r, idx, msk):
       return (
@@ -5334,10 +5911,14 @@ def _pallas_baoab_post_force_fltflt_impl(  # noqa: PLR0913
         (ff_add(pH[k][0], two_prod_fma(half_dt, fH[k][0])), ff_add(pH[k][1], two_prod_fma(half_dt, fH[k][1])), ff_add(pH[k][2], two_prod_fma(half_dt, fH[k][2])))
         for k in range(4)
       ]
-      ab_cur = [
-        (ff_to_f32(ff_sub(rH[k][0], rX[0])), ff_to_f32(ff_sub(rH[k][1], rX[1])), ff_to_f32(ff_sub(rH[k][2], rX[2])))
-        for k in range(4)
-      ]
+      ab_cur = []
+      for k in range(4):
+        dx = ff_sub(rH[k][0], rX[0])
+        dy = ff_sub(rH[k][1], rX[1])
+        dz = ff_sub(rH[k][2], rX[2])
+        if box_xyz is not None:
+          dx, dy, dz = _min_image_ff(dx, dy, dz, box_xyz)
+        ab_cur.append((ff_to_f32(dx), ff_to_f32(dy), ff_to_f32(dz)))
       p_out_X, p_out_H = _rattle_vel_cluster_fltflt_vec3(
         p_b2_X, p_b2_H, ab_cur, inv_mX, inv_mH, v_slots, n_iters=8
       )
@@ -5395,6 +5976,8 @@ def _pallas_baoab_post_force_fltflt_impl(  # noqa: PLR0913
         px_hi, py_hi, pz_hi, px_lo, py_lo, pz_lo,
         fx_f32, fy_f32, fz_f32, m_f32, wO_in, wH1_in, wH2_in, wm_in, dt_b,
       ]
+      if has_box and bx_flat is not None:
+        ro_pw.append(bx_flat)
       mut_mom = cast(
         "tuple[Array, Array, Array, Array, Array, Array]",
         tuple(
@@ -5420,6 +6003,8 @@ def _pallas_baoab_post_force_fltflt_impl(  # noqa: PLR0913
         px_hi, py_hi, pz_hi, px_lo, py_lo, pz_lo,
         fx_f32, fy_f32, fz_f32, m_f32, cX_in, cH0_in, cH1_in, cH2_in, cH3_in, cM_in, dt_b,
       ]
+      if has_box and bx_flat is not None:
+        ro_pc.append(bx_flat)
       mut_mom = cast(
         "tuple[Array, Array, Array, Array, Array, Array]",
         tuple(
@@ -5484,6 +6069,8 @@ def _pallas_baoab_pre_force_batch(  # noqa: PLR0913
   positions_lo: Array | None = None,
   momentum_lo: Array | None = None,
   return_lo_accumulators: bool = False,
+  *,
+  is_triclinic: bool = False,
 ) -> tuple[Array, ...]:
   """2D-grid ``(B, n_blocks_atom + n_blocks_water + n_blocks_rattle)`` Pallas BAOAB pre-force kernel."""
   use_f64_acc, use_fltflt_acc = _resolve_baoab_accumulator_mode(
@@ -5528,7 +6115,12 @@ def _pallas_baoab_pre_force_batch(  # noqa: PLR0913
       positions_lo=positions_lo,
       momentum_lo=momentum_lo,
       return_lo_accumulators=return_lo_accumulators,
+      is_triclinic=is_triclinic,
     )
+  box_is_b = in_batched[7] if len(in_batched) > 7 else True
+  eff_tri = bool(has_box) and _infer_box_is_triclinic(
+    B, box_is_b, box, is_triclinic=is_triclinic
+  )
   if prebuilt_soa is not None:
     if isinstance(prebuilt_soa, tuple):
       px_in, py_in, pz_in, mx_in, my_in, mz_in, fx_in, fy_in, fz_in, soa_plan = prebuilt_soa
@@ -5576,7 +6168,7 @@ def _pallas_baoab_pre_force_batch(  # noqa: PLR0913
     wO_in, wH1_in, wH2_in, wm_in = soa_plan["water_in"]
     cX_in, cH0_in, cH1_in, cH2_in, cH3_in, cD0_in, cD1_in, cD2_in, cD3_in, cM_in = soa_plan["rattle_in"]
     seed_flat = _normalize_seed_flat(B, in_batched[4] if len(in_batched) > 4 else True, rng_seeds)
-    bx_b, bx_flat = _normalize_box_batch(B, in_batched[7] if len(in_batched) > 7 else True, box, dtype)
+    bx_b, bx_flat = _normalize_box_batch(B, box_is_b, box, dtype, is_triclinic=eff_tri)
     dt_b = jnp.broadcast_to(jnp.asarray(dt_arr, dtype=dtype).reshape(-1), (B,))
     kT_b = jnp.broadcast_to(jnp.asarray(kT_arr, dtype=dtype).reshape(-1), (B,))
     am_b = soa_plan.get("am_b")
@@ -5598,7 +6190,7 @@ def _pallas_baoab_pre_force_batch(  # noqa: PLR0913
     seed_flat = _normalize_seed_flat(B, in_batched[4], rng_seeds)
     wi_b = _bcast(water_indices, in_batched[5]).astype(jnp.int32)
     wm_b = _bcast(water_mask, in_batched[6]).astype(jnp.int32)
-    bx_b, bx_flat = _normalize_box_batch(B, in_batched[7], box, dtype)
+    bx_b, bx_flat = _normalize_box_batch(B, in_batched[7], box, dtype, is_triclinic=eff_tri)
     dt_b = jnp.broadcast_to(jnp.asarray(_bcast(dt_arr, in_batched[8]), dtype=dtype).reshape(-1), (B,))
     kT_b = jnp.broadcast_to(jnp.asarray(_bcast(kT_arr, in_batched[9]), dtype=dtype).reshape(-1), (B,))
 
@@ -5758,7 +6350,6 @@ def _pallas_baoab_pre_force_batch(  # noqa: PLR0913
     b_id = pl.program_id(0)
     base_a = b_id * N
     base_m = b_id * N_pad
-    base_bx = b_id * 3
     scratch_slot = jnp.int32(B * N)
     m_scratch_slot = jnp.int32(B * N_pad)
 
@@ -5784,16 +6375,13 @@ def _pallas_baoab_pre_force_batch(  # noqa: PLR0913
     c2 = c2_w.astype(dtype)
 
     if has_box and bx_ref is not None:
-      Lx = _pl_load(bx_ref, (base_bx + jnp.zeros((1,), dtype=jnp.int32),))[0]
-      Ly = _pl_load(bx_ref, (base_bx + jnp.ones((1,), dtype=jnp.int32),))[0]
-      Lz = _pl_load(bx_ref, (base_bx + jnp.full((1,), 2, dtype=jnp.int32),))[0]
-      box_xyz = (Lx, Ly, Lz)
+      box_xyz = _load_box_tuple_pallas(bx_ref, b_id, is_triclinic=eff_tri)
     else:
       box_xyz = None
 
     def _wrap_pos(rx, ry, rz):
       if has_box and box_xyz is not None:
-        return (jnp.mod(rx, box_xyz[0]), jnp.mod(ry, box_xyz[1]), jnp.mod(rz, box_xyz[2]))
+        return _wrap_vec3_std(rx, ry, rz, box_xyz)
       return (rx, ry, rz)
 
     def _f_slot(local_idx, mask_v):
@@ -6019,6 +6607,7 @@ def _pallas_baoab_pre_force_batch(  # noqa: PLR0913
         p0_O, p0_H1, p0_H2 = _settle_vel_and_am_vec3(
           p_b2_O, p_b2_H1, p_b2_H2, r0_O, r0_H1, r0_H2, mO_s, mH1_s, mH2_s, mO_f, mH_f, valid_w,
           use_f32_math=use_f32_math,
+          box_xyz=box_xyz,
         )
 
       p_pre1_O = (
@@ -6230,9 +6819,7 @@ def _pallas_baoab_pre_force_batch(  # noqa: PLR0913
         dy = r0_H_raw[k][1] - r0_X[1]
         dz = r0_H_raw[k][2] - r0_X[2]
         if has_box and box_xyz is not None:
-          dx = dx - box_xyz[0] * _PBC_ROUND_FN(dx / box_xyz[0])
-          dy = dy - box_xyz[1] * _PBC_ROUND_FN(dy / box_xyz[1])
-          dz = dz - box_xyz[2] * _PBC_ROUND_FN(dz / box_xyz[2])
+          dx, dy, dz = _min_image_vec3_std(dx, dy, dz, box_xyz)
         ab0.append((dx, dy, dz))
         r0_H.append((r0_X[0] + dx, r0_X[1] + dy, r0_X[2] + dz))
 
@@ -6478,6 +7065,16 @@ def _pallas_baoab_pre_force_batch(  # noqa: PLR0913
       px_m_o, py_m_o, pz_m_o = raw_outs[m_base_out : m_base_out + 3]
       if use_scratch:
         px_m_o, py_m_o, pz_m_o = px_m_o[:-1], py_m_o[:-1], pz_m_o[:-1]
+      if return_max_dr_sq:
+        pos_tmp = jnp.stack([px_o.reshape(B, N), py_o.reshape(B, N), pz_o.reshape(B, N)], axis=-1)
+        ref_p = (pos_b if pos_b is not None else pos_tmp) if ref_pos_b is None else ref_pos_b
+        dr = pos_tmp - ref_p
+        if has_box and bx_b is not None:
+          dr = _min_image_batch_dr(dr, bx_b, is_triclinic=eff_tri)
+        dr_sq = jnp.sum(dr * dr, axis=-1)
+        if am_b is not None:
+          dr_sq = jnp.where(am_b > 0, dr_sq, jnp.asarray(0.0, dtype=dtype))
+        return (px_o, py_o, pz_o, mx_o, my_o, mz_o, px_m_o, py_m_o, pz_m_o, jnp.max(dr_sq, axis=-1))
       return (px_o, py_o, pz_o, mx_o, my_o, mz_o, px_m_o, py_m_o, pz_m_o)
     return (px_o, py_o, pz_o, mx_o, my_o, mz_o)
   pos_out = jnp.stack(
@@ -6522,7 +7119,7 @@ def _pallas_baoab_pre_force_batch(  # noqa: PLR0913
     ref_p = (pos_b if pos_b is not None else pos_out) if ref_pos_b is None else ref_pos_b
     dr = pos_out - ref_p
     if has_box and bx_b is not None:
-      dr = dr - bx_b[:, None, :] * _PBC_ROUND_FN(dr / bx_b[:, None, :])
+      dr = _min_image_batch_dr(dr, bx_b, is_triclinic=eff_tri)
     dr_sq = jnp.sum(dr * dr, axis=-1)
     if am_b is not None:
       dr_sq = jnp.where(am_b > 0, dr_sq, jnp.asarray(0.0, dtype=dtype))
@@ -6558,6 +7155,10 @@ def _pallas_baoab_post_force_batch(  # noqa: PLR0913
   positions_lo: Array | None = None,
   momentum_lo: Array | None = None,
   return_lo_accumulators: bool = False,
+  *,
+  box: Array | None = None,
+  is_triclinic: bool = False,
+  _box_is_batched: bool | None = None,
 ) -> Array | tuple[Array, ...]:
   """2D-grid ``(B, n_blocks_atom + n_blocks_water + n_blocks_rattle)`` Pallas BAOAB post-force kernel."""
   use_f64_acc, use_fltflt_acc = _resolve_baoab_accumulator_mode(
@@ -6588,6 +7189,9 @@ def _pallas_baoab_post_force_batch(  # noqa: PLR0913
       positions_lo=positions_lo,
       momentum_lo=momentum_lo,
       return_lo_accumulators=return_lo_accumulators,
+      box=box,
+      is_triclinic=is_triclinic,
+      _box_is_batched=_box_is_batched,
     )
   if prebuilt_soa is not None:
     if isinstance(prebuilt_soa, tuple):
@@ -6735,6 +7339,16 @@ def _pallas_baoab_post_force_batch(  # noqa: PLR0913
       )
 
   del am_in
+  has_box_p = box is not None
+  box_is_b_p = _infer_post_box_is_batched(
+    B, box, is_triclinic=is_triclinic, explicit_batched=_box_is_batched
+  )
+  eff_tri_p = bool(has_box_p) and _infer_box_is_triclinic(
+    B, box_is_b_p, box, is_triclinic=is_triclinic
+  )
+  bx_flat_p: Array | None = None
+  if has_box_p:
+    _, bx_flat_p = _normalize_box_batch(B, box_is_b_p, box, dtype, is_triclinic=eff_tri_p)
   use_scratch = bool(interp_eff)
   if use_scratch:
     mx_in = jnp.pad(mx_in, (0, 1))
@@ -6796,7 +7410,8 @@ def _pallas_baoab_post_force_batch(  # noqa: PLR0913
   def _post_settle_kernel(*refs):
     mx_ref, my_ref, mz_ref = refs[0:3]
     px_ref, py_ref, pz_ref, fx_ref, fy_ref, fz_ref, m_ref, wO_ref, wH1_ref, wH2_ref, wm_ref, dt_ref = refs[3:15]
-    mx_out_ref, my_out_ref, mz_out_ref = refs[15:18]
+    bx_ref = refs[15] if has_box_p else None
+    mx_out_ref, my_out_ref, mz_out_ref = refs[-3:]
 
     b_id = pl.program_id(0)
     w_pid = pl.program_id(1)
@@ -6809,6 +7424,11 @@ def _pallas_baoab_post_force_batch(  # noqa: PLR0913
     half_w = jnp.asarray(0.5, dtype=w_dtype)
     dt_val = _pl_load(dt_ref, (b_id + jnp.zeros((1,), dtype=jnp.int32),))[0]
     half_dt_w = half_w * dt_val.astype(w_dtype)
+    box_xyz = (
+      _load_box_tuple_pallas(bx_ref, b_id, is_triclinic=eff_tri_p)
+      if (has_box_p and bx_ref is not None)
+      else None
+    )
 
     offs_w = w_pid * _SETTLE_WATER_BLOCK + jnp.arange(_SETTLE_WATER_BLOCK, dtype=jnp.int32)
     in_w = offs_w < W
@@ -6864,6 +7484,7 @@ def _pallas_baoab_post_force_batch(  # noqa: PLR0913
       p_out_O, p_out_H1, p_out_H2 = _settle_vel_and_am_vec3(
         p_b2_O, p_b2_H1, p_b2_H2, rO, rH1, rH2, mO_s, mH1_s, mH2_s, mO_f, mH_f, valid_w,
         use_f32_math=use_f32_math,
+        box_xyz=box_xyz,
       )
 
       for s_idx, p_v in ((sO, p_out_O), (sH1, p_out_H1), (sH2, p_out_H2)):
@@ -6884,7 +7505,8 @@ def _pallas_baoab_post_force_batch(  # noqa: PLR0913
     mx_ref, my_ref, mz_ref = refs[0:3]
     px_ref, py_ref, pz_ref, fx_ref, fy_ref, fz_ref, m_ref = refs[3:10]
     cX_ref, cH0_ref, cH1_ref, cH2_ref, cH3_ref, cM_ref, dt_ref = refs[10:17]
-    mx_out_ref, my_out_ref, mz_out_ref = refs[17:20]
+    bx_ref = refs[17] if has_box_p else None
+    mx_out_ref, my_out_ref, mz_out_ref = refs[-3:]
 
     b_id = pl.program_id(0)
     c_pid = pl.program_id(1)
@@ -6897,6 +7519,11 @@ def _pallas_baoab_post_force_batch(  # noqa: PLR0913
     half_w = jnp.asarray(0.5, dtype=w_dtype)
     dt_val = _pl_load(dt_ref, (b_id + jnp.zeros((1,), dtype=jnp.int32),))[0]
     half_dt_w = half_w * dt_val.astype(w_dtype)
+    box_xyz = (
+      _load_box_tuple_pallas(bx_ref, b_id, is_triclinic=eff_tri_p)
+      if (has_box_p and bx_ref is not None)
+      else None
+    )
 
     offs_c = c_pid * _SETTLE_RATTLE_BLOCK + jnp.arange(_SETTLE_RATTLE_BLOCK, dtype=jnp.int32)
     in_c = offs_c < C
@@ -6954,10 +7581,14 @@ def _pallas_baoab_post_force_batch(  # noqa: PLR0913
         )
         for k in range(4)
       ]
-      ab_cur = [
-        (rH[k][0] - rX[0], rH[k][1] - rX[1], rH[k][2] - rX[2])
-        for k in range(4)
-      ]
+      ab_cur = []
+      for k in range(4):
+        dx = rH[k][0] - rX[0]
+        dy = rH[k][1] - rX[1]
+        dz = rH[k][2] - rX[2]
+        if box_xyz is not None:
+          dx, dy, dz = _min_image_vec3_std(dx, dy, dz, box_xyz)
+        ab_cur.append((dx, dy, dz))
       p_out_X, p_out_H = _rattle_vel_cluster_vec3(
         p_b2_X, p_b2_H, ab_cur, inv_mX, inv_mH, v_slots,
         n_iters=8, use_f32_math=use_f32_math,
@@ -7006,6 +7637,8 @@ def _pallas_baoab_post_force_batch(  # noqa: PLR0913
     )
   if W > 0 and n_blk_w > 0:
     ro_psw: list[Any] = [px_in, py_in, pz_in, fx_in, fy_in, fz_in, m_in, wO_in, wH1_in, wH2_in, wm_in, dt_b]
+    if has_box_p and bx_flat_p is not None:
+      ro_psw.append(bx_flat_p)
     mut_mom = cast(
       "tuple[Array, Array, Array]",
       tuple(
@@ -7028,6 +7661,8 @@ def _pallas_baoab_post_force_batch(  # noqa: PLR0913
     )
   if has_rattle and C > 0 and n_blk_c > 0:
     ro_psc: list[Any] = [px_in, py_in, pz_in, fx_in, fy_in, fz_in, m_in, cX_in, cH0_in, cH1_in, cH2_in, cH3_in, cM_in, dt_b]
+    if has_box_p and bx_flat_p is not None:
+      ro_psc.append(bx_flat_p)
     mut_mom = cast(
       "tuple[Array, Array, Array]",
       tuple(
@@ -7098,6 +7733,8 @@ def pallas_baoab_pre_force(  # noqa: PLR0913
   positions_lo: Array | None = None,
   momentum_lo: Array | None = None,
   return_lo_accumulators: bool = False,
+  *,
+  is_triclinic: bool = False,
 ) -> tuple[Array, ...]:
   """Fused Pallas pre-force BAOAB + analytical SETTLE + RATTLE integrator step (MK-46 / MK-58 / MK-66)."""
   interp = (
@@ -7118,9 +7755,18 @@ def pallas_baoab_pre_force(  # noqa: PLR0913
     else jnp.asarray(water_mask, dtype=jnp.int32)
   )
   has_box = box is not None
+  eff_tri_single = False
   if has_box:
     bx_arr = jnp.asarray(box, dtype=positions.dtype)
-    if bx_arr.ndim == 2:
+    eff_tri_single = _infer_box_is_triclinic(1, False, bx_arr, is_triclinic=is_triclinic)
+    if eff_tri_single:
+      if bx_arr.ndim == 2 and bx_arr.shape == (3, 3):
+        bx_vec = bx_arr
+      elif bx_arr.ndim == 1 and bx_arr.size == 9:
+        bx_vec = bx_arr.reshape(3, 3)
+      else:
+        bx_vec = jnp.diag(bx_arr[:3])
+    elif bx_arr.ndim == 2:
       bx_vec = jnp.diag(bx_arr)
     else:
       bx_vec = bx_arr[:3]
@@ -7249,6 +7895,7 @@ def pallas_baoab_pre_force(  # noqa: PLR0913
       positions_lo=pos_lo_in,
       momentum_lo=mom_lo_in,
       return_lo_accumulators=return_lo_accumulators,
+      is_triclinic=bool(is_triclinic or eff_tri_single),
     )
 
   @jax.custom_batching.custom_vmap
@@ -7291,6 +7938,9 @@ def pallas_baoab_post_force(
   positions_lo: Array | None = ...,
   momentum_lo: Array | None = ...,
   return_lo_accumulators: Literal[False] = ...,
+  *,
+  box: Array | None = ...,
+  is_triclinic: bool = ...,
 ) -> Array: ...
 
 
@@ -7319,6 +7969,8 @@ def pallas_baoab_post_force(
   momentum_lo: Array | None = ...,
   *,
   return_lo_accumulators: Literal[True],
+  box: Array | None = ...,
+  is_triclinic: bool = ...,
 ) -> tuple[Array, Array]: ...
 
 
@@ -7345,6 +7997,9 @@ def pallas_baoab_post_force(  # noqa: PLR0913
   positions_lo: Array | None = None,
   momentum_lo: Array | None = None,
   return_lo_accumulators: bool = False,
+  *,
+  box: Array | None = None,
+  is_triclinic: bool = False,
 ) -> Array | tuple[Array, Array]:
   """Fused Pallas post-force BAOAB + analytical SETTLE + RATTLE velocity kernel (MK-46 / MK-58)."""
   interp = (
@@ -7389,6 +8044,23 @@ def pallas_baoab_post_force(  # noqa: PLR0913
   pos_lo_arr = jnp.asarray(positions_lo, dtype=jnp.float32) if has_pos_lo else None
   has_mom_lo = momentum_lo is not None
   mom_lo_arr = jnp.asarray(momentum_lo, dtype=jnp.float32) if has_mom_lo else None
+  has_box = box is not None
+  eff_tri_post = False
+  bx_post_arr: Array | None = None
+  if has_box:
+    bx_raw = jnp.asarray(box, dtype=positions.dtype)
+    eff_tri_post = _infer_box_is_triclinic(1, False, bx_raw, is_triclinic=is_triclinic)
+    if eff_tri_post:
+      if bx_raw.ndim == 2 and bx_raw.shape == (3, 3):
+        bx_post_arr = bx_raw
+      elif bx_raw.ndim == 1 and bx_raw.size == 9:
+        bx_post_arr = bx_raw.reshape(3, 3)
+      else:
+        bx_post_arr = jnp.diag(bx_raw[:3])
+    elif bx_raw.ndim == 2:
+      bx_post_arr = jnp.diag(bx_raw)
+    else:
+      bx_post_arr = bx_raw[:3]
 
   dyn_args: list[Array] = [
     positions,
@@ -7408,6 +8080,8 @@ def pallas_baoab_post_force(  # noqa: PLR0913
     dyn_args.append(pos_lo_arr)
   if mom_lo_arr is not None:
     dyn_args.append(mom_lo_arr)
+  if bx_post_arr is not None:
+    dyn_args.append(bx_post_arr)
 
   def _unpack_call(axis_size: int, in_batched_tuple: tuple[bool, ...], *args: Array):
     idx = 8
@@ -7426,6 +8100,12 @@ def pallas_baoab_post_force(  # noqa: PLR0913
     mom_lo_in = None
     if has_mom_lo:
       mom_lo_in = args[idx]
+      idx += 1
+    box_in = None
+    box_in_b: bool | None = None
+    if has_box:
+      box_in = args[idx]
+      box_in_b = bool(in_batched_tuple[idx])
       idx += 1
     return _pallas_baoab_post_force_batch(
       axis_size,
@@ -7452,6 +8132,9 @@ def pallas_baoab_post_force(  # noqa: PLR0913
       positions_lo=pos_lo_in,
       momentum_lo=mom_lo_in,
       return_lo_accumulators=return_lo_accumulators,
+      box=box_in,
+      is_triclinic=bool(is_triclinic or eff_tri_post),
+      _box_is_batched=box_in_b,
     )
 
   @jax.custom_batching.custom_vmap
@@ -7639,6 +8322,9 @@ def _pallas_baoab_post_soa(  # noqa: PLR0913
   soa_plan: dict[str, Any],
   f64_accumulators: bool | str = False,
   accumulator_mode: str | None = None,
+  *,
+  box: Array | None = None,
+  is_triclinic: bool = False,
 ) -> tuple[Array, Array, Array]:
   """Chunk-end post-force B2 + SETTLE_vel + RATTLE_vel wrapper on flat SoA state + Morton forces."""
   B = int(soa_plan["B"])
@@ -7673,6 +8359,8 @@ def _pallas_baoab_post_soa(  # noqa: PLR0913
     f64_accumulators=f64_accumulators,
     prebuilt_soa=(px_in, py_in, pz_in, mx_in, my_in, mz_in, fx_orig, fy_orig, fz_orig, soa_plan),
     accumulator_mode=accumulator_mode,
+    box=box,
+    is_triclinic=is_triclinic,
   )
   if isinstance(res, tuple):
     return cast("tuple[Array, Array, Array]", res)
@@ -7696,7 +8384,7 @@ def settle_langevin(  # noqa: PLR0913
   mass_oxygen: float = 15.999,
   mass_hydrogen: float = 1.008,
   box: Array | None = None,
-  constraints: tuple[Array, Array] | None = None,
+  constraints: tuple[Array, Array] | tuple[Array, Array, Array] | None = None,
   remove_linear_com_momentum: bool = False,
   project_ou_momentum_rigid: bool = True,
   projection_site: str = "post_o",
@@ -7890,6 +8578,7 @@ def settle_langevin(  # noqa: PLR0913
     water_indices if _has_waters_sl else jnp.zeros((0, 3), dtype=jnp.int32)
   )
   _wm_pallas = water_mask if _has_waters_sl else None
+  _box_ok_sl, _box_is_tri_sl = _box_ok_for_pallas_settle(box)
   _use_f32_force_pos = (
     bool(is_force_shaped)
     and _can_pallas_default
@@ -7898,7 +8587,7 @@ def settle_langevin(  # noqa: PLR0913
     and displacement_fn is None
     and (_has_waters_sl or bool(use_pallas))
     and int(settle_velocity_iters) > 0
-    and (box is None or jnp.asarray(box).ndim == 1)
+    and _box_ok_sl
   )
 
   def init_fn(key, R, mass=mass, **kwargs):
@@ -7931,6 +8620,19 @@ def settle_langevin(  # noqa: PLR0913
       idx = water_indices
       mass_flat = mass_arr.reshape(-1)
       r_water = jnp.stack([R[idx[:, 0]], R[idx[:, 1]], R[idx[:, 2]]], axis=1)
+      if box is not None:
+        bx_init = jnp.asarray(box, dtype=R.dtype)
+        rO_init = r_water[:, 0]
+        if bx_init.ndim == 2:
+          dh1_i = pbc_module.minimum_image_displacement(r_water[:, 1], rO_init, bx_init)
+          dh2_i = pbc_module.minimum_image_displacement(r_water[:, 2], rO_init, bx_init)
+        else:
+          b3_i = bx_init[:3][None, :]
+          dh1_i = r_water[:, 1] - rO_init
+          dh2_i = r_water[:, 2] - rO_init
+          dh1_i = dh1_i - b3_i * _PBC_ROUND_FN(dh1_i / b3_i)
+          dh2_i = dh2_i - b3_i * _PBC_ROUND_FN(dh2_i / b3_i)
+        r_water = jnp.stack([rO_init, rO_init + dh1_i, rO_init + dh2_i], axis=1)
       m_water = jnp.stack([mass_flat[idx[:, 0]], mass_flat[idx[:, 1]], mass_flat[idx[:, 2]]], axis=1)
       n_w = int(r_water.shape[0])
       if n_w <= 1:
@@ -8033,6 +8735,11 @@ def settle_langevin(  # noqa: PLR0913
     mass_state = mass_arr[:, None]
     if constraints is not None:
       c_pairs, _c_lengths, c_mask = _unpack_constraints_nonnull(constraints)
+      _init_disp_fn = (
+        displacement_fn
+        if displacement_fn is not None
+        else (pbc_module.create_periodic_space(box)[0] if box is not None else None)
+      )
       momenta = project_momenta(
         momenta,
         R,
@@ -8042,7 +8749,7 @@ def settle_langevin(  # noqa: PLR0913
         tol=rattle_tol,
         max_iter=max_shake_iter,
         constraint_mask=c_mask,
-        displacement_fn=displacement_fn,
+        displacement_fn=_init_disp_fn,
       )
 
     return NVTLangevinState(R, momenta, force, mass_state, key)
@@ -8060,7 +8767,10 @@ def settle_langevin(  # noqa: PLR0913
     can_pallas_settle = (
       not _is_ad
       and (
-        _should_use_pallas_settle_default(use_pallas)
+        (
+          _should_use_pallas_settle_default(use_pallas)
+          or (_box_is_tri_sl and not in_export_context())
+        )
         if _use_pallas_settle is None
         else (bool(_use_pallas_settle) and not in_export_context() and _should_use_pallas_settle_default(_use_pallas_settle))
       )
@@ -8068,7 +8778,7 @@ def settle_langevin(  # noqa: PLR0913
       and displacement_fn is None
       and (_has_waters_sl or (bool(is_force_shaped) and bool(_use_pallas_settle)))
       and int(settle_velocity_iters) > 0
-      and (box is None or jnp.asarray(box).ndim == 1)
+      and _box_ok_sl
     )
 
     if can_pallas_settle:
@@ -8103,6 +8813,7 @@ def settle_langevin(  # noqa: PLR0913
           return_pos_f32=True,
           f64_accumulators=f64_accumulators,
           accumulator_mode=accumulator_mode,
+          is_triclinic=_box_is_tri_sl,
         )
         force = jnp.asarray(force_fn(pos_f32, **kwargs), dtype=jnp.float32)
       else:
@@ -8130,6 +8841,7 @@ def settle_langevin(  # noqa: PLR0913
           constraint_mask=_c_mask_sl,
           f64_accumulators=f64_accumulators,
           accumulator_mode=accumulator_mode,
+          is_triclinic=_box_is_tri_sl,
         )
         force = force_fn(position, **kwargs)
       momentum = pallas_baoab_post_force(
@@ -8149,6 +8861,8 @@ def settle_langevin(  # noqa: PLR0913
         constraint_mask=_c_mask_sl,
         f64_accumulators=f64_accumulators,
         accumulator_mode=accumulator_mode,
+        box=box,
+        is_triclinic=_box_is_tri_sl,
       )
       if _has_waters_sl and project_ou_momentum_rigid and projection_site in ("post_settle_vel", "both"):
         momentum = project_tip3p_waters_momentum_rigid(
@@ -8361,7 +9075,7 @@ def settle_langevin(  # noqa: PLR0913
     and water_indices is not None
     and int(water_indices.shape[0]) > 0
     and int(settle_velocity_iters) > 0
-    and (box is None or jnp.asarray(box).ndim == 1)
+    and _box_ok_sl
     and not remove_linear_com_momentum
     and not (project_ou_momentum_rigid and projection_site in ("post_settle_vel", "both"))
   )
@@ -8395,6 +9109,7 @@ def settle_langevin(  # noqa: PLR0913
           constraint_lengths=_c_lengths_sl,
           constraint_mask=_c_mask_sl,
           return_pos_f32=True,
+          is_triclinic=_box_is_tri_sl,
         )
         f_res_1 = force_fn(pos_f32_1, return_pme_force=True, **kwargs)
       else:
@@ -8420,6 +9135,7 @@ def settle_langevin(  # noqa: PLR0913
           constraint_pairs=_c_pairs_sl,
           constraint_lengths=_c_lengths_sl,
           constraint_mask=_c_mask_sl,
+          is_triclinic=_box_is_tri_sl,
         )
         f_res_1 = force_fn(pos_1, return_pme_force=True, **kwargs)
       if isinstance(f_res_1, tuple):
@@ -8443,6 +9159,8 @@ def settle_langevin(  # noqa: PLR0913
         constraint_pairs=_c_pairs_sl,
         constraint_lengths=_c_lengths_sl,
         constraint_mask=_c_mask_sl,
+        box=box,
+        is_triclinic=_box_is_tri_sl,
       )
       st_mid = NVTLangevinState(pos_1, mom_1, frc_1, state.mass, key_1)
       return apply_fn(st_mid, dt=_dt, kT=_kT, pme_cached_force=f_pme_1, **kwargs)
@@ -8467,7 +9185,7 @@ def settle_lfmiddle_langevin(  # noqa: PLR0913
   mass_oxygen: float = 15.999,
   mass_hydrogen: float = 1.008,
   box: Array | None = None,
-  constraints: tuple[Array, Array] | None = None,
+  constraints: tuple[Array, Array] | tuple[Array, Array, Array] | None = None,
   remove_linear_com_momentum: bool = False,
   project_ou_momentum_rigid: bool = True,
   projection_site: str = "post_o",
