@@ -110,6 +110,7 @@ from prolix.physics.pallas_tile_pairs import (
     precompute_dedup_excl_edges,
     prepare_fused_bonded_buffers,
 )
+from prolix.physics.pbc import invert_box_lower_triangular, reduce_triclinic_box_vectors
 from prolix.physics.pme import (
     _bspline4,
     _cached_host_influence_function_np,
@@ -652,6 +653,99 @@ def _encode_bundle_nl(nbr: Any, bundle: Any) -> Any:
     )
 
 
+def _extract_water_settle_params(
+    bundle: Any,
+    knob_surface: KnobSurface | None = None,
+) -> tuple[float, float, float, float]:
+    """Extract ``(r_OH, r_HH, mass_O, mass_H)`` from ``bundle`` and ``knob_surface`` (HMR-aware)."""
+    ks_cons = knob_surface.constraints if knob_surface is not None else None
+    ks_roh = float(ks_cons.r_oh_angstrom) if ks_cons is not None else 0.9572
+    ks_rhh = float(ks_cons.r_hh_angstrom) if ks_cons is not None else 1.5139
+
+    raw_roh = getattr(bundle, "water_r_OH", None)
+    raw_rhh = getattr(bundle, "water_r_HH", None)
+    r_oh = float(_host_float(raw_roh, ks_roh)) if raw_roh is not None else ks_roh
+    r_hh = float(_host_float(raw_rhh, ks_rhh)) if raw_rhh is not None else ks_rhh
+    if ks_cons is not None and abs(ks_roh - 0.9572) > 1e-6:
+        r_oh = ks_roh
+    if ks_cons is not None and abs(ks_rhh - 1.5139) > 1e-6:
+        r_hh = ks_rhh
+
+    m_o = 15.999
+    m_h = 1.008
+    sp = getattr(bundle, "shape_spec", None)
+    has_water = bool(getattr(sp, "has_real_water", False)) if sp is not None else True
+    wi = getattr(bundle, "water_indices", None)
+    masses = getattr(bundle, "masses", None)
+    if (
+        has_water
+        and wi is not None
+        and masses is not None
+        and not isinstance(wi, jax.core.Tracer)
+        and not isinstance(masses, jax.core.Tracer)
+    ):
+        wi_np = np.asarray(wi, dtype=np.int32)
+        m_np = np.asarray(masses, dtype=np.float64)
+        wm = getattr(bundle, "water_mask", None)
+        wm_np = (
+            np.asarray(wm, dtype=np.int32)
+            if (wm is not None and not isinstance(wm, jax.core.Tracer))
+            else np.ones((wi_np.shape[0],), dtype=np.int32)
+        )
+        if wi_np.ndim == 2 and wi_np.shape[0] > 0 and wi_np.shape[1] >= 3:
+            act_rows = np.flatnonzero(wm_np > 0)
+            if act_rows.size > 0:
+                k0 = int(act_rows[0])
+                oi, h1i = int(wi_np[k0, 0]), int(wi_np[k0, 1])
+                if 0 <= oi < m_np.shape[0] and 0 <= h1i < m_np.shape[0]:
+                    cand_mo = float(m_np[oi])
+                    cand_mh = float(m_np[h1i])
+                    if cand_mo > 0.0 and cand_mh > 0.0:
+                        m_o = cand_mo
+                        m_h = cand_mh
+    return r_oh, r_hh, m_o, m_h
+
+
+def _canonical_box_mat_np(box_raw: Any) -> tuple[np.ndarray, bool]:
+    """Return ``(reduced_3x3_np, is_triclinic)`` for a valid orthorhombic or lower-triangular box."""
+    bx_np = np.asarray(box_raw, dtype=np.float64)
+    if bx_np.ndim == 1:
+        return np.diag(bx_np[:3]), False
+    off = bx_np - np.diag(np.diag(bx_np))
+    if np.max(np.abs(off)) <= 1e-7:
+        return np.diag(np.diag(bx_np)), False
+    red = np.asarray(reduce_triclinic_box_vectors(jnp.asarray(bx_np, dtype=jnp.float64)), dtype=np.float64)
+    return red, True
+
+
+def _seq_mic_triclinic_ep(dr: jax.Array, box_mat_b: jax.Array) -> jax.Array:
+    """Apply OpenMM sequential ``z -> y -> x`` MIC to ``(B, N, 3)`` against ``(B, 3, 3)``."""
+    ax = box_mat_b[:, 0, 0][:, None]
+    bx = box_mat_b[:, 1, 0][:, None]
+    by = box_mat_b[:, 1, 1][:, None]
+    cx = box_mat_b[:, 2, 0][:, None]
+    cy = box_mat_b[:, 2, 1][:, None]
+    cz = box_mat_b[:, 2, 2][:, None]
+    sz = jnp.floor(dr[..., 2] / cz + 0.5)
+    dx1 = dr[..., 0] - sz * cx
+    dy1 = dr[..., 1] - sz * cy
+    dz = dr[..., 2] - sz * cz
+    sy = jnp.floor(dy1 / by + 0.5)
+    dx2 = dx1 - sy * bx
+    dy = dy1 - sy * by
+    sx = jnp.floor(dx2 / ax + 0.5)
+    dx = dx2 - sx * ax
+    return jnp.stack([dx, dy, dz], axis=-1)
+
+
+def _wrap_triclinic_ep(pts: jax.Array, box_mat_b: jax.Array) -> jax.Array:
+    """Wrap ``(B, N, 3)`` Cartesian coordinates into lower-triangular cell ``(B, 3, 3)``."""
+    b_inv = jax.vmap(invert_box_lower_triangular)(box_mat_b)
+    s = jnp.matmul(pts, b_inv, precision=jax.lax.Precision.HIGHEST)
+    s_w = s - jnp.floor(s)
+    return jnp.matmul(s_w, box_mat_b, precision=jax.lax.Precision.HIGHEST)
+
+
 def _spread_and_gather_ljpme_order5_soa(
     B: int,
     n_act_pad: int,
@@ -663,6 +757,8 @@ def _spread_and_gather_ljpme_order5_soa(
     box_b: jax.Array,
     G6_b: jax.Array,
     lj_grid_dims: tuple[int, int, int],
+    *,
+    is_triclinic: bool = False,
 ) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array]:
     """Order-5 B-spline dispersion spread + 3D rFFT + analytic gather in Morton SoA layout."""
     kx, ky, kz = int(lj_grid_dims[0]), int(lj_grid_dims[1]), int(lj_grid_dims[2])
@@ -672,7 +768,7 @@ def _spread_and_gather_ljpme_order5_soa(
     ).astype(jnp.float32)
     b_b = b_disp_m.reshape(B, n_act_pad).astype(jnp.float32)
     msk_b = (mask_m.reshape(B, n_act_pad) > 0).astype(jnp.float32)
-    box_f = box_b.reshape(B, 3).astype(jnp.float32)
+    box_f = box_b.reshape(B, 3, 3).astype(jnp.float32) if is_triclinic else box_b.reshape(B, 3).astype(jnp.float32)
     k_arr = jnp.array([kx, ky, kz], dtype=jnp.float32)
     n_grid_lj = jnp.asarray(float(kx * ky * kz), dtype=jnp.float32)
 
@@ -693,8 +789,14 @@ def _spread_and_gather_ljpme_order5_soa(
         box_1: jax.Array,
         g6_1: jax.Array,
     ) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array]:
-        frac = (pos_1 / box_1) * k_arr
-        frac = frac - jnp.floor(frac / k_arr) * k_arr
+        if is_triclinic:
+            b_inv = invert_box_lower_triangular(box_1)
+            s = jnp.matmul(pos_1, b_inv, precision=jax.lax.Precision.HIGHEST)
+            frac = (s - jnp.floor(s)) * k_arr
+        else:
+            b_inv = None
+            frac = (pos_1 / box_1) * k_arr
+            frac = frac - jnp.floor(frac / k_arr) * k_arr
         grid_idx = jnp.floor(frac).astype(jnp.int32)
         u = frac - grid_idx.astype(jnp.float32)
 
@@ -723,6 +825,10 @@ def _spread_and_gather_ljpme_order5_soa(
         du_x = jnp.sum(jnp.transpose(dwx[ox] * wy[oy] * wz[oz], (1, 0)) * t_val, axis=1)
         du_y = jnp.sum(jnp.transpose(wx[ox] * dwy[oy] * wz[oz], (1, 0)) * t_val, axis=1)
         du_z = jnp.sum(jnp.transpose(wx[ox] * wy[oy] * dwz[oz], (1, 0)) * t_val, axis=1)
+        if is_triclinic and b_inv is not None:
+            gs = jnp.stack([du_x * k_arr[0], du_y * k_arr[1], du_z * k_arr[2]], axis=-1)
+            f_vec = -b_masked[:, None] * jnp.matmul(gs, b_inv.T, precision=jax.lax.Precision.HIGHEST) * n_grid_lj
+            return e_rec_1, f_vec[:, 0], f_vec[:, 1], f_vec[:, 2]
         scale = -(k_arr / box_1) * n_grid_lj
         fx_1 = b_masked * du_x * scale[0]
         fy_1 = b_masked * du_y * scale[1]
@@ -1014,11 +1120,12 @@ class EnsemblePlan:
             ):
                 return False
         n_reals: list[int] = []
+        norm_boxes: list[np.ndarray] = []
         for b in bundles:
             sp = getattr(b, "shape_spec", None)
             if sp is None or not sp.has_pbc or sp.has_implicit_solvent:
                 return False
-            if getattr(sp, "is_triclinic", False) or getattr(sp, "has_real_cosolvents", False):
+            if getattr(sp, "has_real_cosolvents", False):
                 return False
             if (
                 isinstance(b.positions, jax.core.Tracer)
@@ -1030,10 +1137,18 @@ class EnsemblePlan:
                 return False
             bx_np = np.asarray(b.box, dtype=np.float64)
             if bx_np.ndim == 2:
-                off = bx_np - np.diag(np.diag(bx_np))
-                if np.max(np.abs(off)) > 1e-6 or np.any(np.diag(bx_np) <= 0.0):
+                if bx_np.shape != (3, 3) or np.any(np.diag(bx_np) <= 0.0):
                     return False
-            elif bx_np.ndim != 1 or bx_np.shape[0] != 3 or np.any(bx_np <= 0.0):
+                upper_max = max(abs(float(bx_np[0, 1])), abs(float(bx_np[0, 2])), abs(float(bx_np[1, 2])))
+                if upper_max > 1e-5:
+                    return False
+                bx_can, _ = _canonical_box_mat_np(bx_np)
+                if np.any(np.diag(bx_can) <= 0.0):
+                    return False
+                norm_boxes.append(bx_can)
+            elif bx_np.ndim == 1 and bx_np.shape[0] == 3 and np.all(bx_np > 0.0):
+                norm_boxes.append(np.diag(bx_np))
+            else:
                 return False
             n_reals.append(int(np.asarray(b.n_atoms)))
         if len(bundles) > 1:
@@ -1043,12 +1158,11 @@ class EnsemblePlan:
                 return False
             ei0 = bundles[0].excl_dense_indices
             ei0_np = np.asarray(ei0)
-            bx0_np = np.diag(np.asarray(bundles[0].box, dtype=np.float64)) if bundles[0].box.ndim == 2 else np.asarray(bundles[0].box, dtype=np.float64)
-            for b in bundles[1:]:
+            bx0_can = norm_boxes[0]
+            for idx_b, b in enumerate(bundles[1:], start=1):
                 if b.excl_dense_indices is not ei0 and not np.array_equal(np.asarray(b.excl_dense_indices), ei0_np):
                     return False
-                bxi = np.diag(np.asarray(b.box, dtype=np.float64)) if b.box.ndim == 2 else np.asarray(b.box, dtype=np.float64)
-                if not np.allclose(bxi, bx0_np, atol=1e-5):
+                if not np.allclose(norm_boxes[idx_b], bx0_can, atol=1e-5):
                     return False
         return True
 
@@ -1189,15 +1303,22 @@ class EnsemblePlan:
         if press_atm is not None:
             chunk_k = min(chunk_k, baro_int)
 
-        box0_np = (
-            np.diag(np.asarray(bundles[0].box, dtype=np.float64))
-            if bundles[0].box.ndim == 2
-            else np.asarray(bundles[0].box, dtype=np.float64)
-        )
+        box0_can_mat, box0_has_tilt = _canonical_box_mat_np(bundles[0].box)
+        is_triclinic = bool(getattr(bundles[0].shape_spec, "is_triclinic", False)) or box0_has_tilt
+        box0_np = np.diag(box0_can_mat)
         host_min_box = float(np.min(box0_np))
         box_safety = DEFAULT_NPT_BOX_SAFETY if press_atm is not None else 1.0
         eff_host_min_box = host_min_box / box_safety
-        box_init_b = jnp.broadcast_to(jnp.asarray(box0_np, dtype=state_dtype)[None, :], (B, 3))
+        box_init_b = (
+            jnp.broadcast_to(jnp.asarray(box0_can_mat, dtype=state_dtype)[None, :, :], (B, 3, 3))
+            if is_triclinic
+            else jnp.broadcast_to(jnp.asarray(box0_np, dtype=state_dtype)[None, :], (B, 3))
+        )
+        w_roh, w_rhh, w_mo, w_mh = _extract_water_settle_params(bundles[0], self.knob_surface)
+        _pre_sig = inspect.signature(_pallas_baoab_pre_force_batch).parameters
+        _post_sig = inspect.signature(_pallas_baoab_post_soa).parameters
+        _pre_tri_kw: dict[str, Any] = {"is_triclinic": is_triclinic} if "is_triclinic" in _pre_sig else {}
+        _has_post_box = "box" in _post_sig and "is_triclinic" in _post_sig
         max_pairs = estimate_max_tile_pairs(
             n_act_blocks, cutoff=cutoff, skin=eff_skin, box_safety=box_safety
         )
@@ -1338,15 +1459,26 @@ class EnsemblePlan:
                 grid_dims = (int(gd_env[0]), int(gd_env[1]), int(gd_env[2]))
             else:
                 gp = int(_host_float(getattr(bundles[0], "pme_grid_points", 64), 64))
-                grid_dims = compute_pme_grid_dims(
-                    jnp.asarray(box0_np, dtype=jnp.float32), float(np.mean(box0_np)) / float(max(gp, 1))
+                box_for_gd = (
+                    jnp.asarray(box0_can_mat, dtype=jnp.float32)
+                    if is_triclinic
+                    else jnp.asarray(box0_np, dtype=jnp.float32)
                 )
+                grid_dims = compute_pme_grid_dims(
+                    box_for_gd, float(np.mean(box0_np)) / float(max(gp, 1))
+                )
+            box_g_tuple = (
+                tuple(float(x) for x in box0_can_mat.reshape(-1))
+                if is_triclinic
+                else tuple(float(x) for x in box0_np)
+            )
+            box_g_shape = (3, 3) if is_triclinic else (3,)
             G_init = jnp.broadcast_to(
                 jnp.asarray(
                     _cached_host_influence_function_np(
                         grid_dims,
-                        tuple(float(x) for x in box0_np),
-                        (3,),
+                        box_g_tuple,
+                        box_g_shape,
                         "float32",
                         pme_alpha,
                         4,
@@ -1382,7 +1514,7 @@ class EnsemblePlan:
                 getattr(bundles[0], "lj_pme_grid_dims", None),
             )
             lj_pme_alpha, lj_grid_dims = resolve_ljpme_parameters(
-                box0_np,
+                box0_can_mat if is_triclinic else box0_np,
                 cutoff=cutoff,
                 ewald_error_tolerance=ewald_tol,
                 explicit_alpha=float(exp_lj_alpha_raw) if exp_lj_alpha_raw is not None else 0.0,
@@ -1394,7 +1526,7 @@ class EnsemblePlan:
             )
             g6_0 = lj_pme_influence_function(
                 lj_grid_dims,
-                jnp.asarray(box0_np, dtype=jnp.float32),
+                jnp.asarray(box0_can_mat if is_triclinic else box0_np, dtype=jnp.float32),
                 lj_pme_alpha,
                 order=5,
             ).astype(jnp.float32)
@@ -1440,6 +1572,7 @@ class EnsemblePlan:
                         anchor_np[h2_i] = o_i
             n_mols_baro = max(1, len(set(anchor_np[:n_act].tolist())))
         anchor_idx_j = jnp.asarray(anchor_np, dtype=jnp.int32)
+        box_flat_elems = 9 if is_triclinic else 3
 
         def _inv_for_n(inv_pad: Any) -> Any:
             pw = int(inv_pad.shape[1])
@@ -1455,7 +1588,7 @@ class EnsemblePlan:
             G6_b_cur: Any,
             compute_energy: bool = False,
         ) -> tuple[Any, Any, Any, Any]:
-            box_f32_flat = box_b_cur.astype(jnp.float32).reshape(B * 3)
+            box_f32_flat = box_b_cur.astype(jnp.float32).reshape(B * box_flat_elems)
             e_dir, fx_d, fy_d, fz_d = _pallas_bonded_and_tile_pairs_soa(
                 B,
                 px_m,
@@ -1490,6 +1623,7 @@ class EnsemblePlan:
                 tp_group=tp_grp,
                 compute_energy=compute_energy,
                 deterministic_forces=det_forces,
+                is_triclinic=is_triclinic,
                 interpret=interpret,
             )
             e_tot = e_dir
@@ -1500,6 +1634,7 @@ class EnsemblePlan:
                 mesh = _spread_charges_pallas_soa(
                     B, (True, True, True, True), px_m, py_m, pz_m, q_mf, m_mf,
                     box_f32_flat, grid_dims, n_act_pad, n_act_pad, interpret,
+                    is_triclinic=is_triclinic,
                 )
                 q_hat = jnp.fft.rfftn(mesh, s=grid_dims, axes=(-3, -2, -1))
                 theta = jnp.fft.irfftn(q_hat * G_b_cur, s=grid_dims, axes=(-3, -2, -1)).astype(jnp.float32)
@@ -1507,6 +1642,7 @@ class EnsemblePlan:
                     B, (True, True, True, True, True), px_m, py_m, pz_m, q_mf, m_mf,
                     box_f32_flat, theta.reshape(-1), grid_dims, n_act_pad, n_act_pad, n_act_blocks, interpret,
                     force_scale=pme_force_scale, force_accum=(fx_tot, fy_tot, fz_tot),
+                    is_triclinic=is_triclinic,
                 )
                 if compute_energy:
                     e_rec = 0.5 * float(COULOMB_CONSTANT) * jnp.sum(mesh * theta, axis=(-3, -2, -1)) * n_grid_f + e_self_b
@@ -1524,6 +1660,7 @@ class EnsemblePlan:
                     box_b_cur,
                     G6_b_cur,
                     lj_grid_dims,
+                    is_triclinic=is_triclinic,
                 )
                 fx_tot = fx_tot + fx_lj
                 fy_tot = fy_tot + fy_lj
@@ -1535,7 +1672,7 @@ class EnsemblePlan:
         tp0 = pallas_build_morton_tile_pairs_gpu(
             pos_init_b, q_b, sig_b, eps_b, am_b, box_init_b, dedup_excl,
             n_act=n_act, max_pairs=max_pairs, cutoff=cutoff, skin=eff_skin,
-            host_min_box=eff_host_min_box, interpret=interpret,
+            host_min_box=eff_host_min_box, is_triclinic=is_triclinic, interpret=interpret,
         )
         pad_tail = n_act_pad - n_act
         pos_act0 = pos_init_b[:, :n_act, :].astype(jnp.float32)
@@ -1589,11 +1726,13 @@ class EnsemblePlan:
             px0 = pos_init_b[:, :, 0].reshape(B * N)
             py0 = pos_init_b[:, :, 1].reshape(B * N)
             pz0 = pos_init_b[:, :, 2].reshape(B * N)
+            post_kw0: dict[str, Any] = {"box": box_in, "is_triclinic": is_triclinic} if _has_post_box else {}
             mx0, my0, mz0 = _pallas_baoab_post_soa(
                 px0, py0, pz0,
                 mom0_b[:, :, 0].reshape(B * N), mom0_b[:, :, 1].reshape(B * N), mom0_b[:, :, 2].reshape(B * N),
                 fx0_in, fy0_in, fz0_in, _inv_for_n(tp_in.inv_perm), n_act_pad,
-                jnp.zeros((B,), dtype=state_dtype), 15.999, 1.008, interpret, soa_plan, f64_accumulators=f64_acc,
+                jnp.zeros((B,), dtype=state_dtype), w_mo, w_mh, interpret, soa_plan, f64_accumulators=f64_acc,
+                **post_kw0,
             )
 
             def _chunk_cond(oc: Any) -> Any:
@@ -1604,9 +1743,12 @@ class EnsemblePlan:
                 pos_cur_act = jnp.stack(
                     [px.reshape(B, N)[:, :n_act], py.reshape(B, N)[:, :n_act], pz.reshape(B, N)[:, :n_act]], axis=-1
                 ).astype(jnp.float32)
-                bx_f = box_c.astype(jnp.float32)[:, None, :]
                 dr = pos_cur_act - tp_c.ref_positions[:, :n_act, :].astype(jnp.float32)
-                dr = dr - bx_f * jnp.round(dr / bx_f)
+                if is_triclinic:
+                    dr = _seq_mic_triclinic_ep(dr, box_c.astype(jnp.float32))
+                else:
+                    bx_f = box_c.astype(jnp.float32)[:, None, :]
+                    dr = dr - bx_f * jnp.round(dr / bx_f)
                 dr_sq = jnp.where(am_b[:, :n_act], jnp.sum(dr * dr, axis=-1), 0.0)
                 need_reb = (step_i > 0) & jnp.any(jnp.max(dr_sq, axis=-1) > thresh_sq)
 
@@ -1616,7 +1758,7 @@ class EnsemblePlan:
                     tp_new = pallas_build_morton_tile_pairs_gpu(
                         pos_full, q_b, sig_b, eps_b, am_b, bx_r, dedup_excl,
                         n_act=n_act, max_pairs=max_pairs, cutoff=cutoff, skin=eff_skin,
-                        host_min_box=eff_host_min_box, interpret=interpret,
+                        host_min_box=eff_host_min_box, is_triclinic=is_triclinic, interpret=interpret,
                     )
                     remap = jnp.take_along_axis(tp_old.inv_perm, tp_new.perm, axis=1)
                     fx_n = jnp.take_along_axis(fx_r.reshape(B, n_act_pad), remap, axis=1).reshape(B * n_act_pad)
@@ -1640,12 +1782,13 @@ class EnsemblePlan:
                     seeds_s = jax.vmap(lambda k: jax.random.fold_in(k, step_i + s_rel))(keys_b)
                     px_s, py_s, pz_s, mxh_s, myh_s, mzh_s, px_ms, py_ms, pz_ms = _pallas_baoab_pre_force_batch(
                         B, in_b_pre, pos_init_b, pos_init_b, pos_init_b, mass_b, seeds_s,
-                        wi_b, wm_b, box_c, dt_b, kT_b, gamma_akma, 0.9572, 1.5139, 15.999, 1.008,
+                        wi_b, wm_b, box_c, dt_b, kT_b, gamma_akma, w_roh, w_rhh, w_mo, w_mh,
                         True, True, interpret, atom_mask=am_b, constraint_pairs=cp_b,
                         constraint_lengths=cl_b, constraint_mask=cm_b, n_active_atoms=n_act,
                         n_active_waters=n_waters_real, f64_accumulators=f64_acc, fuse_prev_post=True,
                         morton_inv_perm=inv_n, morton_pad=n_act_pad,
                         prebuilt_soa=(px_s, py_s, pz_s, mxh_s, myh_s, mzh_s, fx_s, fy_s, fz_s, soa_plan),
+                        **_pre_tri_kw,
                     )
                     _, fx_s, fy_s, fz_s = _eval_morton_forces(px_ms, py_ms, pz_ms, tp_c, box_c, G_c, G6_c, False)
                     return (px_s, py_s, pz_s, mxh_s, myh_s, mzh_s, fx_s, fy_s, fz_s)
@@ -1653,12 +1796,13 @@ class EnsemblePlan:
                 seeds_0 = jax.vmap(lambda k: jax.random.fold_in(k, step_i))(keys_b)
                 px, py, pz, mxh, myh, mzh, px_m, py_m, pz_m = _pallas_baoab_pre_force_batch(
                     B, in_b_pre, pos_init_b, pos_init_b, pos_init_b, mass_b, seeds_0,
-                    wi_b, wm_b, box_c, dt_b, kT_b, gamma_akma, 0.9572, 1.5139, 15.999, 1.008,
+                    wi_b, wm_b, box_c, dt_b, kT_b, gamma_akma, w_roh, w_rhh, w_mo, w_mh,
                     True, True, interpret, atom_mask=am_b, constraint_pairs=cp_b,
                     constraint_lengths=cl_b, constraint_mask=cm_b, n_active_atoms=n_act,
                     n_active_waters=n_waters_real, f64_accumulators=f64_acc, fuse_prev_post=False,
                     morton_inv_perm=inv_n, morton_pad=n_act_pad,
                     prebuilt_soa=(px, py, pz, mx, my, mz, fx_m, fy_m, fz_m, soa_plan),
+                    **_pre_tri_kw,
                 )
                 if press_atm is None:
                     _, fx_m, fy_m, fz_m = _eval_morton_forces(px_m, py_m, pz_m, tp_c, box_c, G_c, G6_c, False)
@@ -1695,12 +1839,13 @@ class EnsemblePlan:
                         seeds_l = jax.vmap(lambda k: jax.random.fold_in(k, step_i + k_cur - jnp.int32(1)))(keys_b)
                         px_l, py_l, pz_l, mxh_l, myh_l, mzh_l, px_ml, py_ml, pz_ml = _pallas_baoab_pre_force_batch(
                             B, in_b_pre, pos_init_b, pos_init_b, pos_init_b, mass_b, seeds_l,
-                            wi_b, wm_b, box_c, dt_b, kT_b, gamma_akma, 0.9572, 1.5139, 15.999, 1.008,
+                            wi_b, wm_b, box_c, dt_b, kT_b, gamma_akma, w_roh, w_rhh, w_mo, w_mh,
                             True, True, interpret, atom_mask=am_b, constraint_pairs=cp_b,
                             constraint_lengths=cl_b, constraint_mask=cm_b, n_active_atoms=n_act,
                             n_active_waters=n_waters_real, f64_accumulators=f64_acc, fuse_prev_post=True,
                             morton_inv_perm=inv_n, morton_pad=n_act_pad,
                             prebuilt_soa=(px_l, py_l, pz_l, mxh_l, myh_l, mzh_l, fx_l, fy_l, fz_l, soa_plan),
+                            **_pre_tri_kw,
                         )
                         e_l, fx_l, fy_l, fz_l = _eval_forces_cond_e(px_ml, py_ml, pz_ml, do_baro)
                         return (e_l, px_l, py_l, pz_l, mxh_l, myh_l, mzh_l, fx_l, fy_l, fz_l)
@@ -1712,9 +1857,11 @@ class EnsemblePlan:
                         (e_old, px, py, pz, mxh, myh, mzh, fx_m, fy_m, fz_m),
                     )
 
+                post_kw_c: dict[str, Any] = {"box": box_c, "is_triclinic": is_triclinic} if _has_post_box else {}
                 mx, my, mz = _pallas_baoab_post_soa(
                     px, py, pz, mxh, myh, mzh, fx_m, fy_m, fz_m,
-                    inv_n, n_act_pad, dt_b, 15.999, 1.008, interpret, soa_plan, f64_accumulators=f64_acc,
+                    inv_n, n_act_pad, dt_b, w_mo, w_mh, interpret, soa_plan, f64_accumulators=f64_acc,
+                    **post_kw_c,
                 )
                 if cmm_freq > 0:
                     do_cmm = ((step_next // jnp.int32(max(1, cmm_freq))) > (step_i // jnp.int32(max(1, cmm_freq))))
@@ -1741,15 +1888,21 @@ class EnsemblePlan:
                         dlnv = (u_pair[:, 0] - 0.5) * 0.004
                         dlnv_st = dlnv.astype(state_dtype)
                         mu = jnp.exp(dlnv_st / 3.0)
-                        bx_prop = bx_b * mu[:, None]
                         anc = pos_cur[:, anchor_idx_j, :]
                         intra = pos_cur - anc
-                        intra = intra - bx_b[:, None, :] * jnp.round(intra / bx_b[:, None, :])
-                        pos_prop = jnp.where(
-                            am_b[:, :, None],
-                            jnp.mod(anc * mu[:, None, None] + intra, bx_prop[:, None, :]),
-                            pos_cur,
-                        )
+                        if is_triclinic:
+                            bx_prop = bx_b * mu[:, None, None]
+                            intra = _seq_mic_triclinic_ep(intra, bx_b)
+                            pos_wrapped = _wrap_triclinic_ep(anc * mu[:, None, None] + intra, bx_prop)
+                            v_old = bx_b[:, 0, 0] * bx_b[:, 1, 1] * bx_b[:, 2, 2]
+                            v_new = bx_prop[:, 0, 0] * bx_prop[:, 1, 1] * bx_prop[:, 2, 2]
+                        else:
+                            bx_prop = bx_b * mu[:, None]
+                            intra = intra - bx_b[:, None, :] * jnp.round(intra / bx_b[:, None, :])
+                            pos_wrapped = jnp.mod(anc * mu[:, None, None] + intra, bx_prop[:, None, :])
+                            v_old = jnp.prod(bx_b, axis=-1)
+                            v_new = jnp.prod(bx_prop, axis=-1)
+                        pos_prop = jnp.where(am_b[:, :, None], pos_wrapped, pos_cur)
                         G_prop = (
                             jax.vmap(lambda b_one: influence_function(grid_dims, b_one, pme_alpha, 4))(
                                 bx_prop.astype(jnp.float32)
@@ -1769,7 +1922,7 @@ class EnsemblePlan:
                         tp_prop = pallas_build_morton_tile_pairs_gpu(
                             pos_prop, q_b, sig_b, eps_b, am_b, bx_prop, dedup_excl,
                             n_act=n_act, max_pairs=max_pairs, cutoff=cutoff, skin=eff_skin,
-                            host_min_box=eff_host_min_box, interpret=interpret,
+                            host_min_box=eff_host_min_box, is_triclinic=is_triclinic, interpret=interpret,
                         )
                         p_ap = pos_prop[:, :n_act, :].astype(jnp.float32)
                         if pad_tail > 0:
@@ -1781,8 +1934,6 @@ class EnsemblePlan:
                             pm_prop[:, :, 2].reshape(B * n_act_pad),
                             tp_prop, bx_prop, G_prop, G6_prop, True,
                         )
-                        v_old = jnp.prod(bx_b, axis=-1)
-                        v_new = jnp.prod(bx_prop, axis=-1)
                         kT_f = kT_b.astype(jnp.float32)
                         dh = _compute_mc_barostat_dh(
                             e_cur,
@@ -1798,7 +1949,11 @@ class EnsemblePlan:
                         )
                         acc = u_pair[:, 1] < jnp.exp(jnp.clip(-dh / jnp.maximum(kT_f, 1e-6), -50.0, 50.0))
                         pos_sel = jnp.where(acc[:, None, None], pos_prop, pos_cur)
-                        bx_sel = jnp.where(acc[:, None], bx_prop, bx_b)
+                        bx_sel = jnp.where(
+                            acc[:, None, None] if is_triclinic else acc[:, None],
+                            bx_prop,
+                            bx_b,
+                        )
                         G_sel = jnp.where(acc[:, None, None, None], G_prop, G_b)
                         G6_sel = jnp.where(acc[:, None, None, None], G6_prop, G6_b)
                         tp_sel = jax.tree.map(
@@ -1856,6 +2011,8 @@ class EnsemblePlan:
             "lj_pme_alpha": lj_pme_alpha,
             "lj_grid_dims": lj_grid_dims,
             "deterministic_forces": det_forces,
+            "is_triclinic": is_triclinic,
+            "water_settle_params": (w_roh, w_rhh, w_mo, w_mh),
         }
 
     def _run_morton_soa_batch(
@@ -2273,6 +2430,7 @@ class EnsemblePlan:
             atom_mask_b=am_bool_b, constraint_pairs_b=cp_b, constraint_lengths_b=cl_b, constraint_mask_b=cm_b,
             n_active_atoms=n_act, n_active_waters=n_waters_real,
         )
+        w_roh, w_rhh, w_mo, w_mh = _extract_water_settle_params(bundles[0], self.knob_surface)
         gamma_akma = float(gamma_ps_to_akma(float(gamma)))
         in_b_pre = (True,) * (12 + (3 if has_cons else 0))
         ident_inv = jnp.broadcast_to(jnp.arange(N, dtype=jnp.int32)[None, :], (B, N))
@@ -2305,7 +2463,7 @@ class EnsemblePlan:
                 px0, py0, pz0,
                 mom0_b[:, :, 0].reshape(B * N), mom0_b[:, :, 1].reshape(B * N), mom0_b[:, :, 2].reshape(B * N),
                 fx0, fy0, fz0, ident_inv, N,
-                jnp.zeros((B,), dtype=state_dtype), 15.999, 1.008, interpret, soa_plan, f64_accumulators=f64_acc,
+                jnp.zeros((B,), dtype=state_dtype), w_mo, w_mh, interpret, soa_plan, f64_accumulators=f64_acc,
             )
 
             def _chunk_cond(oc: Any) -> Any:
@@ -2329,7 +2487,7 @@ class EnsemblePlan:
                 seeds_0 = jax.vmap(lambda k: jax.random.fold_in(k, step_i))(keys_b)
                 px, py, pz, mxh, myh, mzh, px_f32, py_f32, pz_f32 = _pallas_baoab_pre_force_batch(
                     B, in_b_pre, pos_init_b, pos_init_b, pos_init_b, mass_b, seeds_0,
-                    wi_b, wm_b, box_in, dt_b, kT_b, gamma_akma, 0.9572, 1.5139, 15.999, 1.008,
+                    wi_b, wm_b, box_in, dt_b, kT_b, gamma_akma, w_roh, w_rhh, w_mo, w_mh,
                     True, True, interpret, atom_mask=am_bool_b, constraint_pairs=cp_b,
                     constraint_lengths=cl_b, constraint_mask=cm_b, n_active_atoms=n_act,
                     n_active_waters=n_waters_real, f64_accumulators=f64_acc, fuse_prev_post=False,
@@ -2347,7 +2505,7 @@ class EnsemblePlan:
                     seeds_s = jax.vmap(lambda k: jax.random.fold_in(k, step_i + s_rel))(keys_b)
                     px_s, py_s, pz_s, mxh_s, myh_s, mzh_s, pxf_s, pyf_s, pzf_s = _pallas_baoab_pre_force_batch(
                         B, in_b_pre, pos_init_b, pos_init_b, pos_init_b, mass_b, seeds_s,
-                        wi_b, wm_b, box_in, dt_b, kT_b, gamma_akma, 0.9572, 1.5139, 15.999, 1.008,
+                        wi_b, wm_b, box_in, dt_b, kT_b, gamma_akma, w_roh, w_rhh, w_mo, w_mh,
                         True, True, interpret, atom_mask=am_bool_b, constraint_pairs=cp_b,
                         constraint_lengths=cl_b, constraint_mask=cm_b, n_active_atoms=n_act,
                         n_active_waters=n_waters_real, f64_accumulators=f64_acc, fuse_prev_post=True,
@@ -2368,7 +2526,7 @@ class EnsemblePlan:
                 )
                 mx, my, mz = _pallas_baoab_post_soa(
                     px, py, pz, mxh, myh, mzh, fx, fy, fz,
-                    ident_inv, N, dt_b, 15.999, 1.008, interpret, soa_plan, f64_accumulators=f64_acc,
+                    ident_inv, N, dt_b, w_mo, w_mh, interpret, soa_plan, f64_accumulators=f64_acc,
                 )
                 return (step_i + k_cur, px, py, pz, mx, my, mz, fx, fy, fz, tp_c)
 
@@ -4378,6 +4536,7 @@ class EnsemblePlan:
             dt_akma, kT, dtype=positions_init.dtype
         )
         cmm_freq_int = int(knobs.get("cmm_frequency", 0) or 0)
+        w_roh, w_rhh, w_mo, w_mh = _extract_water_settle_params(bundle, self.knob_surface)
 
         init_fn, apply_fn = settle_langevin(
             energy_or_force_fn,
@@ -4387,6 +4546,10 @@ class EnsemblePlan:
             gamma=gamma_akma,
             mass=masses,
             water_indices=water_indices,
+            r_OH=w_roh,
+            r_HH=w_rhh,
+            mass_oxygen=w_mo,
+            mass_hydrogen=w_mh,
             constraints=cast("Any", constraints_arg),
             remove_linear_com_momentum=(cmm_freq_int == 1),
             project_ou_momentum_rigid=True,
@@ -4462,6 +4625,7 @@ class EnsemblePlan:
             else None
         )
 
+        w_roh, w_rhh, w_mo, w_mh = _extract_water_settle_params(bundle, self.knob_surface)
         force0 = state0.force
         fast_init_fn, _ = settle_langevin(
             lambda _r, **_kw: force0,
@@ -4471,6 +4635,10 @@ class EnsemblePlan:
             gamma=gamma_akma,
             mass=masses,
             water_indices=water_indices,
+            r_OH=w_roh,
+            r_HH=w_rhh,
+            mass_oxygen=w_mo,
+            mass_hydrogen=w_mh,
             constraints=cast("Any", constraints_arg),
             project_ou_momentum_rigid=True,
             water_mask=water_mask,

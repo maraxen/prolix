@@ -6,16 +6,20 @@ Do not autodiff through ``atomic_add``; pair with the existing custom VJP.
 
 from __future__ import annotations
 
+import functools
 import os
+from typing import Any
 
 import jax
 import jax.numpy as jnp
+import xtrax
 from jax._src.pallas.primitives import load as _pl_load
 from jax._src.pallas.primitives import store as _pl_store
 from jax.experimental import pallas as pl
 from jax.experimental.pallas import triton as plt
 
-from prolix.export import resolve_pallas_compiler_params
+from prolix.export import in_export_context, resolve_pallas_compiler_params
+from prolix.physics.pbc import invert_box_lower_triangular
 
 BLOCK_N = 32
 
@@ -83,11 +87,47 @@ def _select_stencil(
     )
 
 
+def _infer_is_triclinic_pme(
+    box_size: jax.Array,
+    B: int,
+    is_triclinic: bool = False,
+) -> bool:
+    """Resolve ``is_triclinic`` while preserving ``B == 3`` ``(3, 3)`` orthorhombic disambiguation."""
+    if is_triclinic:
+        return True
+    box_arr = jnp.asarray(box_size)
+    if box_arr.ndim >= 1 and int(box_arr.shape[-1]) == 9:
+        return True
+    if box_arr.ndim == 3 and box_arr.shape[-2:] == (3, 3):
+        return True
+    return bool(box_arr.ndim == 2 and box_arr.shape == (3, 3) and int(B) != 3)
+
+
+def _extract_single_triclinic_box_mat(
+    box_arr: jax.Array,
+    dtype: jax.typing.DTypeLike,
+) -> jax.Array:
+    """Extract a single ``(3, 3)`` lower-triangular box matrix from ``box_arr``."""
+    b = jnp.asarray(box_arr, dtype=dtype)
+    if b.ndim == 3 and b.shape[-2:] == (3, 3):
+        return b[0]
+    if b.ndim == 2 and b.shape == (3, 3):
+        return b
+    if b.ndim == 2 and b.shape[-1] == 9:
+        return b[0, :9].reshape(3, 3)
+    if b.ndim == 1 and b.shape[0] == 9:
+        return b.reshape(3, 3)
+    d = b[0, :3] if b.ndim >= 2 else b[:3]
+    return jnp.diag(d)
+
+
 def compute_pme_spatial_perm(
     positions: jax.Array,
     box_size: jax.Array,
     grid_dims: tuple[int, int, int],
     atom_mask: jax.Array | None = None,
+    *,
+    is_triclinic: bool = False,
 ) -> tuple[jax.Array, jax.Array]:
     """MK-53: Compute spatial 3D grid-cell permutation ``(perm, inv_perm)`` for SPME locality.
 
@@ -96,18 +136,26 @@ def compute_pme_spatial_perm(
     maximizing L2 cache hit rate on the ``64^3`` PME mesh and pushing ghost atoms (`~atom_mask`)
     to the trailing CTAs where they exit in O(1).
     """
+    B_in = int(positions.shape[0]) if positions.ndim == 3 else 1
+    eff_tri = _infer_is_triclinic_pme(box_size, B_in, is_triclinic)
     pos_single = positions[0] if positions.ndim == 3 else positions
     box_arr = jnp.asarray(box_size, dtype=pos_single.dtype)
-    if box_arr.ndim == 3:
-        box_1 = jnp.diag(box_arr[0])
-    elif box_arr.ndim == 2:
-        box_1 = jnp.diag(box_arr) if box_arr.shape == (3, 3) else box_arr[0, :3]
-    else:
-        box_1 = box_arr[:3]
     Kx, Ky, Kz = int(grid_dims[0]), int(grid_dims[1]), int(grid_dims[2])
     k_vec = jnp.asarray([Kx, Ky, Kz], dtype=pos_single.dtype)
-    safe_box = jnp.where(box_1 > 0, box_1, jnp.ones_like(box_1))
-    frac = jnp.mod(pos_single, safe_box[None, :]) * (k_vec / safe_box)[None, :]
+    if eff_tri:
+        h_mat = _extract_single_triclinic_box_mat(box_arr, pos_single.dtype)
+        b_inv = invert_box_lower_triangular(h_mat)
+        s = jnp.matmul(pos_single, b_inv, precision=jax.lax.Precision.HIGHEST)
+        frac = (s - jnp.floor(s)) * k_vec[None, :]
+    else:
+        if box_arr.ndim == 3:
+            box_1 = jnp.diag(box_arr[0])
+        elif box_arr.ndim == 2:
+            box_1 = jnp.diag(box_arr) if (box_arr.shape == (3, 3) and B_in != 3) else box_arr[0, :3]
+        else:
+            box_1 = box_arr[:3]
+        safe_box = jnp.where(box_1 > 0, box_1, jnp.ones_like(box_1))
+        frac = jnp.mod(pos_single, safe_box[None, :]) * (k_vec / safe_box)[None, :]
     g_idx = jnp.clip(
         jnp.floor(frac).astype(jnp.int32),
         jnp.zeros((3,), dtype=jnp.int32),
@@ -145,14 +193,34 @@ def _resolve_pme_active_atoms(
     return n_atoms
 
 
-def _normalize_pme_box_batch(
+def _normalize_pme_box_batch(  # noqa: PLR0911
     box_size: jax.Array,
     b_box: bool,
     B: int,
     dtype: jax.typing.DTypeLike,
+    *,
+    is_triclinic: bool = False,
 ) -> jax.Array:
-    """Normalize ``(3,)``, ``(3, 3)``, ``(B, 3)``, or ``(B, 3, 3)`` orthorhombic box to ``(1, 3)`` or ``(B, 3)``."""
+    """Normalize orthorhombic box to ``(1_or_B, 3)`` or triclinic box to row-major ``(1_or_B, 9)``."""
     box_arr = jnp.asarray(box_size, dtype=dtype)
+    if is_triclinic:
+        if box_arr.ndim == 3 and box_arr.shape[-2:] == (3, 3):
+            flat = box_arr.reshape(box_arr.shape[0], 9)
+            return jnp.broadcast_to(flat, (B, 9)) if b_box else flat[:1]
+        if box_arr.ndim == 2 and box_arr.shape == (3, 3):
+            flat1 = box_arr.reshape(1, 9)
+            return jnp.broadcast_to(flat1, (B, 9)) if b_box else flat1
+        if box_arr.ndim == 2 and box_arr.shape[-1] == 9:
+            return jnp.broadcast_to(box_arr[:, :9], (B, 9)) if b_box else box_arr[:1, :9]
+        if box_arr.ndim == 1 and box_arr.shape[0] == 9:
+            flat1 = box_arr[None, :9]
+            return jnp.broadcast_to(flat1, (B, 9)) if b_box else flat1
+        if box_arr.ndim == 2:
+            d_b = jnp.broadcast_to(box_arr[:, :3], (B, 3)) if b_box else box_arr[:1, :3]
+            return jax.vmap(jnp.diag)(d_b).reshape(d_b.shape[0], 9)
+        d_1 = jnp.diag(box_arr[:3]).reshape(1, 9)
+        return jnp.broadcast_to(d_1, (B, 9)) if b_box else d_1
+
     if b_box:
         if box_arr.ndim == 3:
             out = jnp.diagonal(box_arr, axis1=-2, axis2=-1)
@@ -193,10 +261,15 @@ def _spread_charges_pallas_soa(
     grid_dims: tuple[int, int, int],
     n_stride: int,
     n_act: int,
-    interpret: bool,
+    interpret: bool = False,
+    *,
+    is_triclinic: bool = False,
 ) -> jax.Array:
     """Zero-glue SoA Pallas SPME charge spread with MK-70 8x8x8 register-brick coalescing."""
+    interpret = bool(interpret) or in_export_context()
     b_pos, b_q, b_m, b_box = in_batched
+    box_stride = 9 if is_triclinic else 3
+    eff_b_box = bool(b_box) and int(box_flat.size) >= B * box_stride
     Kx, Ky, Kz = (int(grid_dims[0]), int(grid_dims[1]), int(grid_dims[2]))
     mesh_stride = Kx * Ky * Kz
     n_blocks = max(1, (n_act + BLOCK_N - 1) // BLOCK_N)
@@ -216,10 +289,11 @@ def _spread_charges_pallas_soa(
         pos_base = (b_id if b_pos else 0) * n_stride
         q_base = (b_id if b_q else 0) * n_stride
         m_base = (b_id if b_m else 0) * n_stride
-        box_base = (b_id if b_box else 0) * 3
+        box_base = (b_id if eff_b_box else 0) * box_stride
         mesh_base = b_id * mesh_stride
 
         zero = jnp.asarray(0.0, dtype=dtype)
+        one = jnp.asarray(1.0, dtype=dtype)
         in_bounds = offs < n_act
         is_real = (_pl_load(mask_ref, (m_base + offs,), mask=in_bounds, other=0) > 0) & in_bounds
         qi = _pl_load(charges_ref, (q_base + offs,), mask=is_real, other=zero)
@@ -230,16 +304,37 @@ def _spread_charges_pallas_soa(
             py = _pl_load(py_ref, (pos_base + offs,), mask=active_q, other=zero)
             pz = _pl_load(pz_ref, (pos_base + offs,), mask=active_q, other=zero)
 
-            bx = _pl_load(box_ref, (box_base + jnp.zeros((1,), dtype=jnp.int32),))[0]
-            by = _pl_load(box_ref, (box_base + jnp.ones((1,), dtype=jnp.int32),))[0]
-            bz = _pl_load(box_ref, (box_base + jnp.full((1,), 2, dtype=jnp.int32),))[0]
             kx = jnp.asarray(Kx, dtype=dtype)
             ky = jnp.asarray(Ky, dtype=dtype)
             kz = jnp.asarray(Kz, dtype=dtype)
 
-            frac_x = px * (kx / bx)
-            frac_y = py * (ky / by)
-            frac_z = pz * (kz / bz)
+            if is_triclinic:
+                eps_b = jnp.asarray(1e-6, dtype=dtype)
+                ax = _pl_load(box_ref, (box_base + jnp.zeros((1,), dtype=jnp.int32),))[0]
+                bx_t = _pl_load(box_ref, (box_base + jnp.full((1,), 3, dtype=jnp.int32),))[0]
+                by = _pl_load(box_ref, (box_base + jnp.full((1,), 4, dtype=jnp.int32),))[0]
+                cx_t = _pl_load(box_ref, (box_base + jnp.full((1,), 6, dtype=jnp.int32),))[0]
+                cy_t = _pl_load(box_ref, (box_base + jnp.full((1,), 7, dtype=jnp.int32),))[0]
+                cz = _pl_load(box_ref, (box_base + jnp.full((1,), 8, dtype=jnp.int32),))[0]
+                b00 = one / jnp.maximum(ax, eps_b)
+                b11 = one / jnp.maximum(by, eps_b)
+                b22 = one / jnp.maximum(cz, eps_b)
+                b10 = (zero - bx_t) * b00 * b11
+                b21 = (zero - cy_t) * b11 * b22
+                b20 = (bx_t * cy_t - by * cx_t) * (b00 * b11 * b22)
+                sx_raw = px * b00 + py * b10 + pz * b20
+                sy_raw = py * b11 + pz * b21
+                sz_raw = pz * b22
+                frac_x = (sx_raw - jnp.floor(sx_raw)) * kx
+                frac_y = (sy_raw - jnp.floor(sy_raw)) * ky
+                frac_z = (sz_raw - jnp.floor(sz_raw)) * kz
+            else:
+                bx = _pl_load(box_ref, (box_base + jnp.zeros((1,), dtype=jnp.int32),))[0]
+                by = _pl_load(box_ref, (box_base + jnp.ones((1,), dtype=jnp.int32),))[0]
+                bz = _pl_load(box_ref, (box_base + jnp.full((1,), 2, dtype=jnp.int32),))[0]
+                frac_x = px * (kx / bx)
+                frac_y = py * (ky / by)
+                frac_z = pz * (kz / bz)
             gx = jnp.floor(frac_x)
             gy = jnp.floor(frac_y)
             gz = jnp.floor(frac_z)
@@ -389,6 +484,116 @@ def _spread_charges_pallas_soa(
     return mesh_flat.reshape((B, Kx, Ky, Kz))
 
 
+def _spread_pure_jax_one(
+    pos_1: jax.Array,
+    q_1: jax.Array,
+    mask_1: jax.Array,
+    box_1: jax.Array,
+    dims: tuple[int, int, int],
+    is_triclinic: bool,
+) -> jax.Array:
+    dtype = pos_1.dtype
+    K_arr = jnp.array(dims, dtype=dtype)
+    box_arr = jnp.asarray(box_1, dtype=dtype)
+    if is_triclinic or (box_arr.ndim == 2 and box_arr.shape == (3, 3)) or box_arr.shape[-1] == 9:
+        h_mat = _extract_single_triclinic_box_mat(box_arr, dtype)
+        b_inv = invert_box_lower_triangular(h_mat)
+        s = jnp.matmul(pos_1, b_inv, precision=jax.lax.Precision.HIGHEST)
+        frac = (s - jnp.floor(s)) * K_arr
+    else:
+        b_vec = box_arr[:3]
+        s = pos_1 / b_vec
+        frac = (s - jnp.floor(s)) * K_arr
+    grid_idx = jnp.floor(frac).astype(jnp.int32)
+    u = frac - grid_idx.astype(dtype)
+    wx = _bspline4_vec(u[:, 0])
+    wy = _bspline4_vec(u[:, 1])
+    wz = _bspline4_vec(u[:, 2])
+    s_idx = jnp.arange(64, dtype=jnp.int32)
+    ox = (s_idx // 16)[None, :]
+    oy = ((s_idx // 4) % 4)[None, :]
+    oz = (s_idx % 4)[None, :]
+    ix = (grid_idx[:, None, 0] + ox - 1) % dims[0]
+    iy = (grid_idx[:, None, 1] + oy - 1) % dims[1]
+    iz = (grid_idx[:, None, 2] + oz - 1) % dims[2]
+    w = (_select_stencil(wx, ox) * _select_stencil(wy, oy) * _select_stencil(wz, oz)) * (
+        q_1 * (mask_1 > 0).astype(q_1.dtype)
+    ).astype(dtype)[:, None]
+    return jnp.zeros(dims, dtype=dtype).at[ix, iy, iz].add(w)
+
+
+def _gather_pure_jax_one(
+    pos_1: jax.Array,
+    q_1: jax.Array,
+    mask_1: jax.Array,
+    box_1: jax.Array,
+    theta_1: jax.Array,
+    dims: tuple[int, int, int],
+    is_triclinic: bool,
+    compute_dq: bool,
+    force_scale: float,
+    pot_scale: float,
+) -> tuple[jax.Array, jax.Array]:
+    dtype = pos_1.dtype
+    K_arr = jnp.array(dims, dtype=dtype)
+    box_arr = jnp.asarray(box_1, dtype=dtype)
+    use_tri = is_triclinic or (box_arr.ndim == 2 and box_arr.shape == (3, 3)) or box_arr.shape[-1] == 9
+    if use_tri:
+        h_mat = _extract_single_triclinic_box_mat(box_arr, dtype)
+        b_inv = invert_box_lower_triangular(h_mat)
+        s = jnp.matmul(pos_1, b_inv, precision=jax.lax.Precision.HIGHEST)
+        frac = (s - jnp.floor(s)) * K_arr
+    else:
+        b_inv = None
+        b_vec = box_arr[:3]
+        s = pos_1 / b_vec
+        frac = (s - jnp.floor(s)) * K_arr
+    grid_idx = jnp.floor(frac).astype(jnp.int32)
+    u = frac - grid_idx.astype(dtype)
+    wx = _bspline4_vec(u[:, 0])
+    wy = _bspline4_vec(u[:, 1])
+    wz = _bspline4_vec(u[:, 2])
+    dwx = _bspline4_deriv_vec(u[:, 0])
+    dwy = _bspline4_deriv_vec(u[:, 1])
+    dwz = _bspline4_deriv_vec(u[:, 2])
+    s_idx = jnp.arange(64, dtype=jnp.int32)
+    ox = (s_idx // 16)[None, :]
+    oy = ((s_idx // 4) % 4)[None, :]
+    oz = (s_idx % 4)[None, :]
+    ix = (grid_idx[:, None, 0] + ox - 1) % dims[0]
+    iy = (grid_idx[:, None, 1] + oy - 1) % dims[1]
+    iz = (grid_idx[:, None, 2] + oz - 1) % dims[2]
+    t_val = theta_1[ix, iy, iz]
+    wx_s = _select_stencil(wx, ox)
+    wy_s = _select_stencil(wy, oy)
+    wz_s = _select_stencil(wz, oz)
+    dwx_s = _select_stencil(dwx, ox)
+    dwy_s = _select_stencil(dwy, oy)
+    dwz_s = _select_stencil(dwz, oz)
+    pot = (
+        jnp.where(
+            mask_1 > 0,
+            jnp.sum(wx_s * wy_s * wz_s * t_val, axis=1) * jnp.asarray(pot_scale, dtype=dtype),
+            0.0,
+        ).astype(dtype)
+        if compute_dq
+        else jnp.zeros_like(q_1, dtype=dtype)
+    )
+    q_masked = (q_1 * (mask_1 > 0).astype(q_1.dtype)).astype(dtype) * jnp.asarray(force_scale, dtype=dtype)
+    du_x = jnp.sum(dwx_s * wy_s * wz_s * t_val, axis=1)
+    du_y = jnp.sum(wx_s * dwy_s * wz_s * t_val, axis=1)
+    du_z = jnp.sum(wx_s * wy_s * dwz_s * t_val, axis=1)
+    if use_tri and b_inv is not None:
+        gs = jnp.stack([du_x * K_arr[0], du_y * K_arr[1], du_z * K_arr[2]], axis=-1)
+        f_vec = q_masked[:, None] * jnp.matmul(gs, b_inv.T, precision=jax.lax.Precision.HIGHEST)
+        return f_vec.astype(dtype), pot
+    scale = K_arr / box_arr[:3]
+    fx = q_masked * scale[0] * du_x
+    fy = q_masked * scale[1] * du_y
+    fz = q_masked * scale[2] * du_z
+    return jnp.stack([fx, fy, fz], axis=-1).astype(dtype), pot
+
+
 def _spread_charges_pallas_batch(
     B: int,
     in_batched: tuple[bool, bool, bool, bool],
@@ -399,7 +604,11 @@ def _spread_charges_pallas_batch(
     grid_dims: tuple[int, int, int],
     interpret: bool,
     n_active_atoms: int | None = None,
+    *,
+    is_triclinic: bool = False,
 ) -> jax.Array:
+    eff_tri = _infer_is_triclinic_pme(box_size, B, is_triclinic)
+    interpret = bool(interpret) or in_export_context()
     b_pos, b_q, b_m, b_box = in_batched
     n_atoms = int(positions.shape[1] if b_pos else positions.shape[0])
     n_act = _resolve_pme_active_atoms(n_active_atoms, n_atoms, atom_mask)
@@ -412,7 +621,7 @@ def _spread_charges_pallas_batch(
     pos_in = positions.astype(dtype)
     q_in = charges.astype(dtype)
     mask_in = jnp.asarray(atom_mask, dtype=jnp.int32)
-    box_in = _normalize_pme_box_batch(box_size, b_box, B, dtype)
+    box_in = _normalize_pme_box_batch(box_size, b_box, B, dtype, is_triclinic=eff_tri)
 
     if not b_pos:
         pos_in = pos_in[None, ...]
@@ -456,6 +665,7 @@ def _spread_charges_pallas_batch(
         n_stride,
         n_act,
         interpret,
+        is_triclinic=eff_tri,
     )
     return mesh_f32.astype(orig_dtype)
 
@@ -468,8 +678,12 @@ def _spread_charges_pallas_single(
     grid_dims: tuple[int, int, int],
     interpret: bool,
     n_active_atoms: int | None = None,
+    *,
+    is_triclinic: bool = False,
 ) -> jax.Array:
-    extra_kw = {"n_active_atoms": n_active_atoms} if n_active_atoms is not None else {}
+    extra_kw: dict[str, int | bool] = {"is_triclinic": bool(is_triclinic)}
+    if n_active_atoms is not None:
+        extra_kw["n_active_atoms"] = n_active_atoms
     out = _spread_charges_pallas_batch(
         1,
         (False, False, False, False),
@@ -479,7 +693,7 @@ def _spread_charges_pallas_single(
         box_size,
         grid_dims,
         interpret,
-        **extra_kw,
+        **extra_kw,  # type: ignore[arg-type]
     )
     return out[0]
 
@@ -495,15 +709,41 @@ def spread_charges_pallas(
     atom_perm: jax.Array | None = None,
     interpret: bool = False,
     n_active_atoms: int | None = None,
+    is_triclinic: bool = False,
 ) -> jax.Array:
     """Spread charges onto the PME mesh with a vectorized ``(BLOCK_N=32, 64)`` stencil."""
     if order != 4:
         raise NotImplementedError("Pallas SPME stencil is order-4 only")
     grid_tuple = (int(grid_dims[0]), int(grid_dims[1]), int(grid_dims[2]))
-    extra_kw = {"n_active_atoms": n_active_atoms} if n_active_atoms is not None else {}
+    B_top = int(positions.shape[0]) if positions.ndim == 3 else 1
+    eff_tri = _infer_is_triclinic_pme(box_size, B_top, is_triclinic)
+
+    if in_export_context():
+        if positions.ndim == 3:
+            b_q_e = charges.ndim == 2
+            b_m_e = atom_mask.ndim == 2
+            box_norm_e = _normalize_pme_box_batch(
+                box_size, jnp.asarray(box_size).ndim >= 2, B_top, positions.dtype, is_triclinic=eff_tri
+            )
+            b_bx_e = int(box_norm_e.shape[0]) == B_top
+            return jax.vmap(
+                lambda b: _spread_pure_jax_one(
+                    positions[b],
+                    charges[b] if b_q_e else charges,
+                    atom_mask[b] if b_m_e else atom_mask,
+                    box_norm_e[b] if b_bx_e else box_norm_e[0],
+                    grid_tuple,
+                    eff_tri,
+                )
+            )(jnp.arange(B_top))
+        return _spread_pure_jax_one(positions, charges, atom_mask, box_size, grid_tuple, eff_tri)
+
+    extra_kw: dict[str, int | bool] = {"is_triclinic": eff_tri}
+    if n_active_atoms is not None:
+        extra_kw["n_active_atoms"] = n_active_atoms
     if atom_perm is None and os.environ.get("PROLIX_PME_SPATIAL_SORT", "").strip() == "1":
         atom_perm, _ = compute_pme_spatial_perm(
-            positions, box_size, grid_tuple, atom_mask=atom_mask
+            positions, box_size, grid_tuple, atom_mask=atom_mask, is_triclinic=eff_tri
         )
     if atom_perm is not None:
         perm = jnp.asarray(atom_perm, dtype=jnp.int32)
@@ -525,11 +765,22 @@ def spread_charges_pallas(
     @jax.custom_batching.custom_vmap
     def _vmappable(pos, q, mask, box):
         return _spread_charges_pallas_single(
-            pos, q, mask, box, grid_tuple, interpret, n_active_atoms=n_active_atoms
+            pos,
+            q,
+            mask,
+            box,
+            grid_tuple,
+            interpret,
+            n_active_atoms=n_active_atoms,
+            is_triclinic=eff_tri,
         )
 
     @_vmappable.def_vmap
     def _vmap_rule(axis_size, in_batched, pos, q, mask, box):
+        v_tri = _infer_is_triclinic_pme(box, int(axis_size), is_triclinic)
+        v_kw: dict[str, int | bool] = {"is_triclinic": v_tri}
+        if n_active_atoms is not None:
+            v_kw["n_active_atoms"] = n_active_atoms
         out = _spread_charges_pallas_batch(
             int(axis_size),
             (bool(in_batched[0]), bool(in_batched[1]), bool(in_batched[2]), bool(in_batched[3])),
@@ -539,7 +790,7 @@ def spread_charges_pallas(
             box,
             grid_tuple,
             interpret,
-            **extra_kw,
+            **v_kw,  # type: ignore[arg-type]
         )
         return out, True
 
@@ -557,7 +808,7 @@ def spread_charges_pallas(
             box_size,
             grid_tuple,
             interpret,
-            **extra_kw,
+            **extra_kw,  # type: ignore[arg-type]
         )
 
     return _vmappable(positions, charges, atom_mask, box_size)
@@ -577,15 +828,19 @@ def _gather_pallas_soa(  # noqa: PLR0913
     n_stride: int,
     n_act: int,
     n_blocks_out: int,
-    interpret: bool,
+    interpret: bool = False,
     *,
     compute_dq: bool = False,
     force_scale: float = 1.0,
     pot_scale: float = 1.0,
     force_accum: tuple[jax.Array, jax.Array, jax.Array] | None = None,
+    is_triclinic: bool = False,
 ) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array | None]:
     """Zero-glue SoA Pallas SPME force/potential gather with optional in-place force accumulation."""
+    interpret = bool(interpret) or in_export_context()
     b_pos, b_q, b_m, b_box, b_mesh = in_batched
+    box_stride = 9 if is_triclinic else 3
+    eff_b_box = bool(b_box) and int(box_flat.size) >= B * box_stride
     Kx, Ky, Kz = (int(grid_dims[0]), int(grid_dims[1]), int(grid_dims[2]))
     mesh_stride = Kx * Ky * Kz
     dtype = pos_x.dtype
@@ -609,11 +864,12 @@ def _gather_pallas_soa(  # noqa: PLR0913
         pos_base = (b_id if b_pos else 0) * n_stride
         q_base = (b_id if b_q else 0) * n_stride
         m_base = (b_id if b_m else 0) * n_stride
-        box_base = (b_id if b_box else 0) * 3
+        box_base = (b_id if eff_b_box else 0) * box_stride
         mesh_base = (b_id if b_mesh else 0) * mesh_stride
         out_base = b_id * n_stride
 
         zero = jnp.asarray(0.0, dtype=dtype)
+        one = jnp.asarray(1.0, dtype=dtype)
         in_bounds_act = offs < n_act
         in_bounds_out = offs < n_stride
         is_real = (_pl_load(mask_ref, (m_base + offs,), mask=in_bounds_act, other=0) > 0) & in_bounds_act
@@ -626,19 +882,42 @@ def _gather_pallas_soa(  # noqa: PLR0913
             py = _pl_load(py_ref, (pos_base + offs,), mask=active_lane, other=zero)
             pz = _pl_load(pz_ref, (pos_base + offs,), mask=active_lane, other=zero)
 
-            bx = _pl_load(box_ref, (box_base + jnp.zeros((1,), dtype=jnp.int32),))[0]
-            by = _pl_load(box_ref, (box_base + jnp.ones((1,), dtype=jnp.int32),))[0]
-            bz = _pl_load(box_ref, (box_base + jnp.full((1,), 2, dtype=jnp.int32),))[0]
             kx = jnp.asarray(Kx, dtype=dtype)
             ky = jnp.asarray(Ky, dtype=dtype)
             kz = jnp.asarray(Kz, dtype=dtype)
 
-            sx = kx / bx
-            sy = ky / by
-            sz = kz / bz
-            frac_x = px * sx
-            frac_y = py * sy
-            frac_z = pz * sz
+            if is_triclinic:
+                eps_b = jnp.asarray(1e-6, dtype=dtype)
+                ax = _pl_load(box_ref, (box_base + jnp.zeros((1,), dtype=jnp.int32),))[0]
+                bx_t = _pl_load(box_ref, (box_base + jnp.full((1,), 3, dtype=jnp.int32),))[0]
+                by = _pl_load(box_ref, (box_base + jnp.full((1,), 4, dtype=jnp.int32),))[0]
+                cx_t = _pl_load(box_ref, (box_base + jnp.full((1,), 6, dtype=jnp.int32),))[0]
+                cy_t = _pl_load(box_ref, (box_base + jnp.full((1,), 7, dtype=jnp.int32),))[0]
+                cz = _pl_load(box_ref, (box_base + jnp.full((1,), 8, dtype=jnp.int32),))[0]
+                b00 = one / jnp.maximum(ax, eps_b)
+                b11 = one / jnp.maximum(by, eps_b)
+                b22 = one / jnp.maximum(cz, eps_b)
+                b10 = (zero - bx_t) * b00 * b11
+                b21 = (zero - cy_t) * b11 * b22
+                b20 = (bx_t * cy_t - by * cx_t) * (b00 * b11 * b22)
+                sx_raw = px * b00 + py * b10 + pz * b20
+                sy_raw = py * b11 + pz * b21
+                sz_raw = pz * b22
+                frac_x = (sx_raw - jnp.floor(sx_raw)) * kx
+                frac_y = (sy_raw - jnp.floor(sy_raw)) * ky
+                frac_z = (sz_raw - jnp.floor(sz_raw)) * kz
+                sx = sy = sz = zero
+            else:
+                bx = _pl_load(box_ref, (box_base + jnp.zeros((1,), dtype=jnp.int32),))[0]
+                by = _pl_load(box_ref, (box_base + jnp.ones((1,), dtype=jnp.int32),))[0]
+                bz = _pl_load(box_ref, (box_base + jnp.full((1,), 2, dtype=jnp.int32),))[0]
+                b00 = b11 = b22 = b10 = b21 = b20 = zero
+                sx = kx / bx
+                sy = ky / by
+                sz = kz / bz
+                frac_x = px * sx
+                frac_y = py * sy
+                frac_z = pz * sz
             gx = jnp.floor(frac_x)
             gy = jnp.floor(frac_y)
             gz = jnp.floor(frac_z)
@@ -711,9 +990,19 @@ def _gather_pallas_soa(  # noqa: PLR0913
             else:
                 dq_v = zero_vec
             q_f = qi * f_scale
-            dpx_v = jnp.where(active_lane, q_f * sx * acc_dx, zero).astype(dtype)
-            dpy_v = jnp.where(active_lane, q_f * sy * acc_dy, zero).astype(dtype)
-            dpz_v = jnp.where(active_lane, q_f * sz * acc_dz, zero).astype(dtype)
+            if is_triclinic:
+                gs_x = kx * acc_dx
+                gs_y = ky * acc_dy
+                gs_z = kz * acc_dz
+                dpx_v = jnp.where(active_lane, q_f * (b00 * gs_x), zero).astype(dtype)
+                dpy_v = jnp.where(active_lane, q_f * (b10 * gs_x + b11 * gs_y), zero).astype(dtype)
+                dpz_v = jnp.where(
+                    active_lane, q_f * (b20 * gs_x + b21 * gs_y + b22 * gs_z), zero
+                ).astype(dtype)
+            else:
+                dpx_v = jnp.where(active_lane, q_f * sx * acc_dx, zero).astype(dtype)
+                dpy_v = jnp.where(active_lane, q_f * sy * acc_dy, zero).astype(dtype)
+                dpz_v = jnp.where(active_lane, q_f * sz * acc_dz, zero).astype(dtype)
             return (dpx_v, dpy_v, dpz_v, dq_v)
 
         dpx, dpy, dpz, dq = jax.lax.cond(
@@ -806,7 +1095,11 @@ def _gather_pallas_batch(
     n_active_atoms: int | None = None,
     force_scale: float = 1.0,
     pot_scale: float = 1.0,
+    *,
+    is_triclinic: bool = False,
 ) -> tuple[jax.Array, jax.Array]:
+    eff_tri = _infer_is_triclinic_pme(box_size, B, is_triclinic)
+    interpret = bool(interpret) or in_export_context()
     b_pos, b_q, b_m, b_box, b_mesh = in_batched
     n_atoms = int(positions.shape[1] if b_pos else positions.shape[0])
     n_act = _resolve_pme_active_atoms(n_active_atoms, n_atoms)
@@ -819,7 +1112,7 @@ def _gather_pallas_batch(
     pos_in = positions.astype(dtype)
     q_in = charges.astype(dtype)
     mask_in = jnp.asarray(atom_mask, dtype=jnp.int32)
-    box_in = _normalize_pme_box_batch(box_size, b_box, B, dtype)
+    box_in = _normalize_pme_box_batch(box_size, b_box, B, dtype, is_triclinic=eff_tri)
     theta_in = jnp.asarray(theta_norm, dtype=dtype)
 
     if not b_pos:
@@ -874,6 +1167,7 @@ def _gather_pallas_batch(
         compute_dq=compute_dq,
         force_scale=force_scale,
         pot_scale=pot_scale,
+        is_triclinic=eff_tri,
     )
     if dq_pad is not None:
         dq_b = (
@@ -912,8 +1206,10 @@ def _gather_pallas_single(
     n_active_atoms: int | None = None,
     force_scale: float = 1.0,
     pot_scale: float = 1.0,
+    *,
+    is_triclinic: bool = False,
 ) -> tuple[jax.Array, jax.Array]:
-    extra_kw = {}
+    extra_kw: dict[str, Any] = {"is_triclinic": bool(is_triclinic)}
     if n_active_atoms is not None:
         extra_kw["n_active_atoms"] = n_active_atoms
     if force_scale != 1.0:
@@ -936,7 +1232,7 @@ def _gather_pallas_single(
     return dpos_b[0], dq_b[0]
 
 
-def gather_pallas(
+def gather_pallas(  # noqa: PLR0913
     positions: jax.Array,
     charges: jax.Array,
     atom_mask: jax.Array,
@@ -952,6 +1248,8 @@ def gather_pallas(
     n_active_atoms: int | None = None,
     force_scale: float = 1.0,
     pot_scale: float = 1.0,
+    force_accum: jax.Array | None = None,
+    is_triclinic: bool = False,
 ) -> tuple[jax.Array, jax.Array]:
     """Gather potential and dE/dr contributions from ``theta_norm``.
 
@@ -965,7 +1263,41 @@ def gather_pallas(
     cdq = bool(compute_dq)
     f_scale = float(force_scale)
     q_scale = float(pot_scale)
-    extra_kw = {}
+    B_top = int(positions.shape[0]) if positions.ndim == 3 else 1
+    eff_tri = _infer_is_triclinic_pme(box_size, B_top, is_triclinic)
+
+    if in_export_context():
+        if positions.ndim == 3:
+            b_q_e = charges.ndim == 2
+            b_m_e = atom_mask.ndim == 2
+            b_th_e = theta_norm.ndim == 4
+            box_norm_e = _normalize_pme_box_batch(
+                box_size, jnp.asarray(box_size).ndim >= 2, B_top, positions.dtype, is_triclinic=eff_tri
+            )
+            b_bx_e = int(box_norm_e.shape[0]) == B_top
+            dpos_e, dq_e = jax.vmap(
+                lambda b: _gather_pure_jax_one(
+                    positions[b],
+                    charges[b] if b_q_e else charges,
+                    atom_mask[b] if b_m_e else atom_mask,
+                    box_norm_e[b] if b_bx_e else box_norm_e[0],
+                    theta_norm[b] if b_th_e else theta_norm,
+                    grid_tuple,
+                    eff_tri,
+                    cdq,
+                    f_scale,
+                    q_scale,
+                )
+            )(jnp.arange(B_top))
+        else:
+            dpos_e, dq_e = _gather_pure_jax_one(
+                positions, charges, atom_mask, box_size, theta_norm, grid_tuple, eff_tri, cdq, f_scale, q_scale
+            )
+        if force_accum is not None:
+            dpos_e = dpos_e + jnp.asarray(force_accum, dtype=dpos_e.dtype)
+        return dpos_e, dq_e
+
+    extra_kw: dict[str, Any] = {"is_triclinic": eff_tri}
     if n_active_atoms is not None:
         extra_kw["n_active_atoms"] = n_active_atoms
     if f_scale != 1.0:
@@ -976,7 +1308,7 @@ def gather_pallas(
     inv_p = None
     if atom_perm is None and os.environ.get("PROLIX_PME_SPATIAL_SORT", "").strip() == "1":
         atom_perm, atom_inv_perm = compute_pme_spatial_perm(
-            positions, box_size, grid_tuple, atom_mask=atom_mask
+            positions, box_size, grid_tuple, atom_mask=atom_mask, is_triclinic=eff_tri
         )
     if atom_perm is not None:
         perm = jnp.asarray(atom_perm, dtype=jnp.int32)
@@ -1008,10 +1340,19 @@ def gather_pallas(
             n_active_atoms=n_active_atoms,
             force_scale=f_scale,
             pot_scale=q_scale,
+            is_triclinic=eff_tri,
         )
 
     @_vmappable.def_vmap
     def _vmap_rule(axis_size, in_batched, pos, q, mask, box, dE_dmesh):
+        v_tri = _infer_is_triclinic_pme(box, int(axis_size), is_triclinic)
+        v_kw: dict[str, Any] = {"is_triclinic": v_tri}
+        if n_active_atoms is not None:
+            v_kw["n_active_atoms"] = n_active_atoms
+        if f_scale != 1.0:
+            v_kw["force_scale"] = f_scale
+        if q_scale != 1.0:
+            v_kw["pot_scale"] = q_scale
         dpos_out, dq_out = _gather_pallas_batch(
             int(axis_size),
             (
@@ -1029,7 +1370,7 @@ def gather_pallas(
             grid_tuple,
             interpret,
             compute_dq=cdq,
-            **extra_kw,
+            **v_kw,
         )
         return (dpos_out, dq_out), (True, True)
 
@@ -1053,12 +1394,16 @@ def gather_pallas(
             **extra_kw,
         )
         if inv_p is not None:
-            return dpos_s[:, inv_p, :], dq_s[:, inv_p]
+            dpos_s, dq_s = dpos_s[:, inv_p, :], dq_s[:, inv_p]
+        if force_accum is not None:
+            dpos_s = dpos_s + jnp.asarray(force_accum, dtype=dpos_s.dtype)
         return dpos_s, dq_s
 
     dpos_s, dq_s = _vmappable(positions, charges, atom_mask, box_size, theta_norm)
     if inv_p is not None:
-        return dpos_s[inv_p], dq_s[inv_p]
+        dpos_s, dq_s = dpos_s[inv_p], dq_s[inv_p]
+    if force_accum is not None:
+        dpos_s = dpos_s + jnp.asarray(force_accum, dtype=dpos_s.dtype)
     return dpos_s, dq_s
 
 
@@ -1066,58 +1411,51 @@ def make_spread_op(
     grid_dims: tuple[int, int, int],
     order: int = 4,
     *,
+    is_triclinic: bool = False,
     context: object | None = None,
 ):
     """Build the SPME charge spread op for one mesh shape."""
-    import functools
-
-    import xtrax
-
     dims = (int(grid_dims[0]), int(grid_dims[1]), int(grid_dims[2]))
 
-    def _spread_ref_one(pos_1, q_1, mask_1, box_1):
-        dtype = pos_1.dtype
-        K_arr = jnp.array(dims, dtype=dtype)
-        box_arr = jnp.asarray(box_1, dtype=dtype)
-        frac = (pos_1 / box_arr) * K_arr
-        grid_idx = jnp.floor(frac).astype(jnp.int32)
-        u = frac - grid_idx.astype(dtype)
-        wx = _bspline4_vec(u[:, 0])
-        wy = _bspline4_vec(u[:, 1])
-        wz = _bspline4_vec(u[:, 2])
-        s_idx = jnp.arange(64, dtype=jnp.int32)
-        ox = (s_idx // 16)[None, :]
-        oy = ((s_idx // 4) % 4)[None, :]
-        oz = (s_idx % 4)[None, :]
-        ix = (grid_idx[:, None, 0] + ox - 1) % dims[0]
-        iy = (grid_idx[:, None, 1] + oy - 1) % dims[1]
-        iz = (grid_idx[:, None, 2] + oz - 1) % dims[2]
-        w = (_select_stencil(wx, ox) * _select_stencil(wy, oy) * _select_stencil(wz, oz)) * (
-            q_1 * (mask_1 > 0).astype(q_1.dtype)
-        ).astype(dtype)[:, None]
-        return jnp.zeros(dims, dtype=dtype).at[ix, iy, iz].add(w)
-
     def _spread_ref(pos, q, mask, box):
+        B_r = int(pos.shape[0]) if pos.ndim == 3 else 1
+        eff_tri = _infer_is_triclinic_pme(box, B_r, is_triclinic)
         if pos.ndim == 3:
-            B = pos.shape[0]
             b_q = q.ndim == 2
             b_m = mask.ndim == 2
-            b_box = jnp.asarray(box).ndim >= 2
+            box_n = _normalize_pme_box_batch(
+                box, jnp.asarray(box).ndim >= 2, B_r, pos.dtype, is_triclinic=eff_tri
+            )
+            b_box = int(box_n.shape[0]) == B_r
             return jax.vmap(
-                lambda b: _spread_ref_one(
+                lambda b: _spread_pure_jax_one(
                     pos[b],
                     q[b] if b_q else q,
                     mask[b] if b_m else mask,
-                    box[b] if b_box else box,
+                    box_n[b] if b_box else box_n[0],
+                    dims,
+                    eff_tri,
                 )
-            )(jnp.arange(B))
-        return _spread_ref_one(pos, q, mask, box)
+            )(jnp.arange(B_r))
+        return _spread_pure_jax_one(pos, q, mask, box, dims, eff_tri)
 
     return xtrax.op(
         _spread_ref,
         kernels={
-            "gpu": functools.partial(spread_charges_pallas, grid_dims=dims, order=order, interpret=False),
-            "cpu": functools.partial(spread_charges_pallas, grid_dims=dims, order=order, interpret=True),
+            "gpu": functools.partial(
+                spread_charges_pallas,
+                grid_dims=dims,
+                order=order,
+                interpret=False,
+                is_triclinic=is_triclinic,
+            ),
+            "cpu": functools.partial(
+                spread_charges_pallas,
+                grid_dims=dims,
+                order=order,
+                interpret=True,
+                is_triclinic=is_triclinic,
+            ),
         },
         name="pme_spread",
         context=context,
@@ -1131,78 +1469,41 @@ def make_gather_op(
     compute_dq: bool = True,
     force_scale: float = 1.0,
     pot_scale: float = 1.0,
+    is_triclinic: bool = False,
     context: object | None = None,
 ):
     """Build the SPME backward gather op for one mesh shape."""
-    import functools
-
-    import xtrax
-
     dims = (int(grid_dims[0]), int(grid_dims[1]), int(grid_dims[2]))
     cdq = bool(compute_dq)
     f_scale = float(force_scale)
     q_scale = float(pot_scale)
 
-    def _gather_ref_one(pos_1, q_1, mask_1, box_1, theta_1):
-        dtype = pos_1.dtype
-        K_arr = jnp.array(dims, dtype=dtype)
-        box_arr = jnp.asarray(box_1, dtype=dtype)
-        frac = (pos_1 / box_arr) * K_arr
-        grid_idx = jnp.floor(frac).astype(jnp.int32)
-        u = frac - grid_idx.astype(dtype)
-        wx = _bspline4_vec(u[:, 0])
-        wy = _bspline4_vec(u[:, 1])
-        wz = _bspline4_vec(u[:, 2])
-        dwx = _bspline4_deriv_vec(u[:, 0])
-        dwy = _bspline4_deriv_vec(u[:, 1])
-        dwz = _bspline4_deriv_vec(u[:, 2])
-        s_idx = jnp.arange(64, dtype=jnp.int32)
-        ox = (s_idx // 16)[None, :]
-        oy = ((s_idx // 4) % 4)[None, :]
-        oz = (s_idx % 4)[None, :]
-        ix = (grid_idx[:, None, 0] + ox - 1) % dims[0]
-        iy = (grid_idx[:, None, 1] + oy - 1) % dims[1]
-        iz = (grid_idx[:, None, 2] + oz - 1) % dims[2]
-        t_val = theta_1[ix, iy, iz]
-        wx_s = _select_stencil(wx, ox)
-        wy_s = _select_stencil(wy, oy)
-        wz_s = _select_stencil(wz, oz)
-        dwx_s = _select_stencil(dwx, ox)
-        dwy_s = _select_stencil(dwy, oy)
-        dwz_s = _select_stencil(dwz, oz)
-        pot = (
-            jnp.where(
-                mask_1 > 0,
-                jnp.sum(wx_s * wy_s * wz_s * t_val, axis=1) * jnp.asarray(q_scale, dtype=dtype),
-                0.0,
-            ).astype(dtype)
-            if cdq
-            else jnp.zeros_like(q_1, dtype=dtype)
-        )
-        q_masked = (q_1 * (mask_1 > 0).astype(q_1.dtype)).astype(dtype)
-        scale = (K_arr / box_arr) * jnp.asarray(f_scale, dtype=dtype)
-        fx = q_masked * scale[0] * jnp.sum(dwx_s * wy_s * wz_s * t_val, axis=1)
-        fy = q_masked * scale[1] * jnp.sum(wx_s * dwy_s * wz_s * t_val, axis=1)
-        fz = q_masked * scale[2] * jnp.sum(wx_s * wy_s * dwz_s * t_val, axis=1)
-        return jnp.stack([fx, fy, fz], axis=-1).astype(dtype), pot
-
     def _gather_ref(pos, q, mask, box, theta):
+        B_r = int(pos.shape[0]) if pos.ndim == 3 else 1
+        eff_tri = _infer_is_triclinic_pme(box, B_r, is_triclinic)
         if pos.ndim == 3:
-            B = pos.shape[0]
             b_q = q.ndim == 2
             b_m = mask.ndim == 2
-            b_box = jnp.asarray(box).ndim >= 2
             b_th = theta.ndim == 4
+            box_n = _normalize_pme_box_batch(
+                box, jnp.asarray(box).ndim >= 2, B_r, pos.dtype, is_triclinic=eff_tri
+            )
+            b_box = int(box_n.shape[0]) == B_r
             return jax.vmap(
-                lambda b: _gather_ref_one(
+                lambda b: _gather_pure_jax_one(
                     pos[b],
                     q[b] if b_q else q,
                     mask[b] if b_m else mask,
-                    box[b] if b_box else box,
+                    box_n[b] if b_box else box_n[0],
                     theta[b] if b_th else theta,
+                    dims,
+                    eff_tri,
+                    cdq,
+                    f_scale,
+                    q_scale,
                 )
-            )(jnp.arange(B))
-        return _gather_ref_one(pos, q, mask, box, theta)
+            )(jnp.arange(B_r))
+        return _gather_pure_jax_one(pos, q, mask, box, theta, dims, eff_tri, cdq, f_scale, q_scale)
 
     return xtrax.op(
         _gather_ref,
@@ -1215,6 +1516,7 @@ def make_gather_op(
                 compute_dq=cdq,
                 force_scale=f_scale,
                 pot_scale=q_scale,
+                is_triclinic=is_triclinic,
             ),
             "cpu": functools.partial(
                 gather_pallas,
@@ -1224,6 +1526,7 @@ def make_gather_op(
                 compute_dq=cdq,
                 force_scale=f_scale,
                 pot_scale=q_scale,
+                is_triclinic=is_triclinic,
             ),
         },
         name="pme_gather",
