@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING, Any, cast
 import equinox as eqx
 import jax
 import jax.core
+import jax.dlpack
 import jax.numpy as jnp
 import numpy as np
 from jax_md import space
@@ -49,6 +50,7 @@ from prolix.openmm.units import (
     BAR_PER_AKMA_PRESSURE,
     BOND_K_OMM_TO_AKMA,
     FORCE_AKMA_TO_OMM,
+    FORCE_OMM_TO_AKMA,
     KCAL_PER_MOL_TO_KJ_PER_MOL,
     KJ_PER_MOL_TO_KCAL_PER_MOL,
     NM_TO_ANGSTROM,
@@ -56,6 +58,7 @@ from prolix.openmm.units import (
     TAU_AKMA_TO_PS,
     TORSION_K_OMM_TO_AKMA,
     VELOCITY_AKMA_TO_OMM,
+    VELOCITY_OMM_TO_AKMA,
     to_akma,
 )
 from prolix.pallas_kernels import (
@@ -112,7 +115,7 @@ from prolix.physics.pme import (
     _cached_host_influence_function_np,
     compute_openmm_pme_params,
     compute_pme_grid_dims,
-    influence_function,
+    scale_influence_function_isotropic,
     spme_background_energy,
     spme_reciprocal_energy,
     spme_self_energy,
@@ -129,6 +132,8 @@ from prolix.physics.settle import (
 from prolix.types.bundles import MolecularBundle  # noqa: TC001
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
+
     import openmm
     import openmm.unit as _omm_unit
     from jaxtyping import Array
@@ -644,6 +649,100 @@ def _get_pallas_soa_sig_params() -> frozenset[str]:
     return frozenset(
         inspect.signature(_pallas_bonded_and_tile_pairs_soa).parameters.keys()
     )
+
+
+def _from_jax_or_dlpack(tensor: Any) -> jax.Array:
+    """Ingest a `jax.Array`, DLPack producer (`__dlpack__`), or array-like onto device without host copy."""
+    if isinstance(tensor, jax.Array):
+        return tensor
+    if unit is not None and unit.is_quantity(tensor):
+        raw_val = getattr(tensor, "_value", tensor)
+        if isinstance(raw_val, jax.Array):
+            return raw_val
+        if hasattr(raw_val, "__dlpack__"):
+            return jax.dlpack.from_dlpack(raw_val)
+        return jnp.asarray(raw_val)
+    if hasattr(tensor, "__dlpack__"):
+        return jax.dlpack.from_dlpack(tensor)
+    return jnp.asarray(tensor)
+
+
+def _custom_forces_are_gpu_fast(
+    custom_forces: Sequence[CompiledLeptonForce],
+) -> bool:
+    """Return True if all custom forces run in O(N) / O(|U|*N) on persistent GPU runners."""
+    return all(
+        bool(
+            getattr(
+                cf,
+                "is_gpu_runner_fast",
+                not isinstance(cf, CompiledCustomNonbondedForce),
+            )
+        )
+        for cf in custom_forces
+    )
+
+
+def _is_reduced_triclinic_box_np(box_np: np.ndarray) -> bool:
+    """Return True if `(3, 3)` matrix satisfies OpenMM lower-triangular reduced-basis invariants."""
+    if box_np.ndim != 2 or box_np.shape != (3, 3):
+        return False
+    ax = float(box_np[0, 0])
+    by = float(box_np[1, 1])
+    cz = float(box_np[2, 2])
+    if not (ax > 0.0 and by > 0.0 and cz > 0.0):
+        return False
+    if (
+        abs(float(box_np[0, 1])) > 1e-5
+        or abs(float(box_np[0, 2])) > 1e-5
+        or abs(float(box_np[1, 2])) > 1e-5
+    ):
+        return False
+    bx = abs(float(box_np[1, 0]))
+    cx = abs(float(box_np[2, 0]))
+    cy = abs(float(box_np[2, 1]))
+    return (
+        bx <= 0.5 * ax + 1e-4
+        and cx <= 0.5 * ax + 1e-4
+        and cy <= 0.5 * by + 1e-4
+    )
+
+
+def _triclinic_morton_kernels_supported(do_pme: bool = True) -> bool:
+    """Inspect whether triclinic keywords are active across Morton tile-pair, SPME, and SETTLE kernels."""
+    tp_ok = (
+        "is_triclinic" in inspect.signature(pallas_build_morton_tile_pairs_gpu).parameters
+        and "is_triclinic" in _get_pallas_soa_sig_params()
+    )
+    settle_ok = (
+        "is_triclinic" in inspect.signature(_pallas_baoab_pre_force_batch).parameters
+    )
+    if not (tp_ok and settle_ok):
+        return False
+    if do_pme:
+        return (
+            "is_triclinic" in inspect.signature(_spread_charges_pallas_soa).parameters
+            and "is_triclinic" in inspect.signature(_gather_pallas_soa).parameters
+        )
+    return True
+
+
+def _system_has_anisotropic_or_membrane_barostat(system: Any) -> bool:
+    """Return True if `system` contains `MonteCarloAnisotropicBarostat` or `MonteCarloMembraneBarostat`."""
+    if openmm is None:
+        return False
+    aniso_cls = getattr(openmm, "MonteCarloAnisotropicBarostat", None)
+    mem_cls = getattr(openmm, "MonteCarloMembraneBarostat", None)
+    baro_types = tuple(c for c in (aniso_cls, mem_cls) if c is not None)
+    if not baro_types:
+        return False
+    for f_idx in range(system.getNumForces()):
+        if isinstance(system.getForce(f_idx), baro_types):
+            return True
+    return False
+
+
+_MORTON_RUNNER_CACHE: dict[tuple[Any, ...], tuple[Any, dict[str, Any]]] = {}
 
 
 def _safe_sqrt(x: jnp.ndarray) -> jnp.ndarray:
@@ -2374,8 +2473,17 @@ def _build_context_morton_runner(  # noqa: PLR0913
     has_restraints: bool = False,
     virtual_sites: VirtualSites | None = None,
     pr_params_getter: Any = None,
+    is_triclinic: bool = False,
+    baro_type: str = "MonteCarloBarostat",
+    baro_scale_axes: tuple[bool, bool, bool] = (True, True, True),
+    baro_pressure_xyz_akma: tuple[float, float, float] | None = None,
+    baro_surface_tension_akma: float = 0.0,
+    baro_xy_isotropic: bool = True,
+    baro_z_mode: int = 0,
+    has_custom_forces: bool = False,
+    param_names: tuple[str, ...] = (),
 ) -> dict[str, Any]:
-    """Build a persistent B=1 GPU-resident BAOAB + Morton 32x32 tile-pair + SPME/LJPME/RF + VS/PR + NPT runner."""
+    """Build a persistent B=1 GPU-resident BAOAB + Morton 32x32 tile-pair + SPME/LJPME/RF + VS/PR/CF + NPT runner."""
     B = 1
     N = int(bundle.positions.shape[0])
     n_act_blocks = max(1, (n_act + 31) // 32)
@@ -2467,7 +2575,13 @@ def _build_context_morton_runner(  # noqa: PLR0913
     max_pairs = estimate_max_tile_pairs(
         n_act_blocks, cutoff=cutoff, skin=eff_skin, box_safety=npt_safety
     )
-    host_min_box = float(np.min(host_box0_np))
+    host_box0_f32_np = np.asarray(host_box0_np, dtype=np.float32)
+    host_box0_f32_dev = jnp.asarray(host_box0_f32_np, dtype=jnp.float32)
+    host_min_box = (
+        float(np.min(np.diag(host_box0_np)))
+        if host_box0_np.ndim == 2
+        else float(np.min(host_box0_np))
+    )
     dedup_excl = precompute_dedup_excl_edges(
         bundle.excl_dense_indices,
         bundle.excl_dense_scales_vdw,
@@ -2481,8 +2595,8 @@ def _build_context_morton_runner(  # noqa: PLR0913
         G_init = jnp.asarray(
             _cached_host_influence_function_np(
                 grid_dims,
-                tuple(float(x) for x in host_box0_np),
-                (3,),
+                tuple(float(x) for x in host_box0_f32_np.reshape(-1)),
+                host_box0_f32_np.shape,
                 "float32",
                 pme_alpha,
                 4,
@@ -2513,6 +2627,28 @@ def _build_context_morton_runner(  # noqa: PLR0913
         "lj_pme_alpha" in soa_params and "include_ljpme_excl" in soa_params
     )
     soa_has_det_kw = "deterministic_forces" in soa_params
+    soa_has_tri_kw = "is_triclinic" in soa_params
+    tp_build_has_tri_kw = (
+        "is_triclinic" in inspect.signature(pallas_build_morton_tile_pairs_gpu).parameters
+    )
+    spread_has_tri_kw = (
+        "is_triclinic" in inspect.signature(_spread_charges_pallas_soa).parameters
+    )
+    gather_has_tri_kw = (
+        "is_triclinic" in inspect.signature(_gather_pallas_soa).parameters
+    )
+    pre_has_tri_kw = (
+        "is_triclinic" in inspect.signature(_pallas_baoab_pre_force_batch).parameters
+    )
+    post_soa_params = inspect.signature(_pallas_baoab_post_soa).parameters
+    post_has_box_kw = "box" in post_soa_params and "is_triclinic" in post_soa_params
+
+    active_aniso_axes = tuple(ax for ax in range(3) if baro_scale_axes[ax])
+    eff_p_xyz = (
+        baro_pressure_xyz_akma
+        if baro_pressure_xyz_akma is not None
+        else (target_p_akma, target_p_akma, target_p_akma)
+    )
 
     def _inv_for_n(inv_pad: jax.Array) -> jax.Array:
         pw = int(inv_pad.shape[1])
@@ -2524,12 +2660,85 @@ def _build_context_morton_runner(  # noqa: PLR0913
             return jnp.pad(arr_act, ((0, 0), (0, pad_tail)), constant_values=pad_val)
         return arr_act
 
+    def _mic_dr(dr: jax.Array, bx_0: jax.Array) -> jax.Array:
+        if is_triclinic:
+            a_v, b_v, c_v = bx_0[0], bx_0[1], bx_0[2]
+            d1 = dr - jnp.round(dr[:, 2:3] / c_v[2]) * c_v[None, :]
+            d2 = d1 - jnp.round(d1[:, 1:2] / b_v[1]) * b_v[None, :]
+            return d2 - jnp.round(d2[:, 0:1] / a_v[0]) * a_v[None, :]
+        return dr - bx_0[None, :] * jnp.round(dr / bx_0[None, :])
+
+    def _wrap_pos(pos_any: jax.Array, bx_0: jax.Array) -> jax.Array:
+        if is_triclinic:
+            a_v, b_v, c_v = bx_0[0], bx_0[1], bx_0[2]
+            r1 = pos_any - jnp.floor(pos_any[:, 2:3] / c_v[2]) * c_v[None, :]
+            r2 = r1 - jnp.floor(r1[:, 1:2] / b_v[1]) * b_v[None, :]
+            return r2 - jnp.floor(r2[:, 0:1] / a_v[0]) * a_v[None, :]
+        return jnp.mod(pos_any, bx_0[None, :])
+
+    def _vol_f32(bx_0: jax.Array) -> jax.Array:
+        bx_f = bx_0.astype(jnp.float32)
+        if is_triclinic:
+            return bx_f[0, 0] * bx_f[1, 1] * bx_f[2, 2]
+        return jnp.prod(bx_f)
+
+    def _area_xy_f32(bx_0: jax.Array) -> jax.Array:
+        bx_f = bx_0.astype(jnp.float32)
+        if is_triclinic:
+            return jnp.abs(bx_f[0, 0] * bx_f[1, 1])
+        return jnp.abs(bx_f[0] * bx_f[1])
+
+    def _scale_box_axes(bx_b_in: jax.Array, axis_scales: jax.Array) -> jax.Array:
+        if is_triclinic:
+            return reduce_triclinic_box_vectors(
+                bx_b_in[0] * axis_scales[:, None]
+            )[None, :, :]
+        return bx_b_in * axis_scales[None, :]
+
+    def _greens_for_box(bx_0: jax.Array) -> jax.Array:
+        if not do_pme:
+            return G_init
+        return scale_influence_function_isotropic(
+            G_init[0],
+            host_box0_f32_dev,
+            bx_0.astype(jnp.float32),
+            alpha=pme_alpha,
+            grid_dims=grid_dims,
+            order=4,
+        ).astype(jnp.float32)[None, ...]
+
+    def _build_tp_gpu(
+        pos_pad_arg: jax.Array,
+        q_arg: jax.Array,
+        sig_arg: jax.Array,
+        eps_arg: jax.Array,
+        bx_b_arg: jax.Array,
+    ) -> MortonTilePairState:
+        tp_kw: dict[str, Any] = {}
+        if is_triclinic and tp_build_has_tri_kw:
+            tp_kw["is_triclinic"] = True
+        return pallas_build_morton_tile_pairs_gpu(
+            pos_pad_arg,
+            q_arg,
+            sig_arg,
+            eps_arg,
+            am_b,
+            bx_b_arg,
+            dedup_excl,
+            n_act=n_act,
+            max_pairs=max_pairs,
+            cutoff=cutoff,
+            skin=eff_skin,
+            host_min_box=host_min_box,
+            interpret=interpret,
+            **tp_kw,
+        )
+
     def _unwrap_whole_and_reconstruct_vs(
         pos_any: jax.Array, box_d0: jax.Array
     ) -> jax.Array:
         anc = pos_any[anchor_jnp]
-        intra = pos_any - anc
-        intra = intra - box_d0[None, :] * jnp.round(intra / box_d0[None, :])
+        intra = _mic_dr(pos_any - anc, box_d0)
         whole = anc + intra
         if has_vs and virtual_sites is not None:
             whole = virtual_sites.reconstruct_positions(whole)
@@ -2546,7 +2755,7 @@ def _build_context_morton_runner(  # noqa: PLR0913
             return px_v, py_v, pz_v, pos_unw_v, pos_unw_v
         pos_wr_act = jnp.stack([px_v[:n_act], py_v[:n_act], pz_v[:n_act]], axis=-1)
         pos_whole = _unwrap_whole_and_reconstruct_vs(pos_wr_act, box_d0)
-        vs_wr = jnp.mod(pos_whole[vs_order], box_d0[None, :])
+        vs_wr = _wrap_pos(pos_whole[vs_order], box_d0)
         px_v = px_v.at[vs_order].set(vs_wr[:, 0])
         py_v = py_v.at[vs_order].set(vs_wr[:, 1])
         pz_v = pz_v.at[vs_order].set(vs_wr[:, 2])
@@ -2577,6 +2786,8 @@ def _build_context_morton_runner(  # noqa: PLR0913
         e_self_b: jax.Array,
         e_lj_self_b: jax.Array,
         pr_tuple: tuple[jax.Array, ...],
+        cf_tuple: tuple[CompiledLeptonForce, ...],
+        gp_vec: jax.Array,
     ):
         (
             pr_idx_in,
@@ -2600,7 +2811,9 @@ def _build_context_morton_runner(  # noqa: PLR0913
             pos_whole_cur: jax.Array,
             compute_energy: bool = False,
         ) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array]:
-            box_f32_flat = box_b_cur.astype(jnp.float32).reshape(3)
+            box_f32_flat = box_b_cur.astype(jnp.float32).reshape(
+                9 if is_triclinic else 3
+            )
             soa_extra: dict[str, Any] = {}
             if is_rf and soa_has_rf_kw:
                 soa_extra["rf_dielectric"] = float(rf_dielectric)
@@ -2611,6 +2824,8 @@ def _build_context_morton_runner(  # noqa: PLR0913
                 soa_extra["include_ljpme_excl"] = True
             if soa_has_det_kw:
                 soa_extra["deterministic_forces"] = bool(deterministic_forces)
+            if is_triclinic and soa_has_tri_kw:
+                soa_extra["is_triclinic"] = True
             e_dir, fx_d, fy_d, fz_d = _pallas_bonded_and_tile_pairs_soa(
                 1,
                 px_m,
@@ -2647,6 +2862,8 @@ def _build_context_morton_runner(  # noqa: PLR0913
             if do_pme:
                 q_mf = tp_st.q_m.reshape(n_act_pad)
                 m_mf = tp_st.mask_m.reshape(n_act_pad)
+                sp_kw = {"is_triclinic": True} if (is_triclinic and spread_has_tri_kw) else {}
+                ga_kw = {"is_triclinic": True} if (is_triclinic and gather_has_tri_kw) else {}
                 mesh = _spread_charges_pallas_soa(
                     1,
                     (True, True, True, True),
@@ -2660,6 +2877,7 @@ def _build_context_morton_runner(  # noqa: PLR0913
                     n_act_pad,
                     n_act_pad,
                     interpret,
+                    **sp_kw,
                 )
                 q_hat = jnp.fft.rfftn(mesh, s=grid_dims, axes=(-3, -2, -1))
                 theta = jnp.fft.irfftn(
@@ -2682,6 +2900,7 @@ def _build_context_morton_runner(  # noqa: PLR0913
                     interpret,
                     force_scale=pme_force_scale,
                     force_accum=(fx_d, fy_d, fz_d),
+                    **ga_kw,
                 )
                 if compute_energy:
                     e_rec = (
@@ -2703,13 +2922,14 @@ def _build_context_morton_runner(  # noqa: PLR0913
                 m_mf_bool = tp_st.mask_m.reshape(n_act_pad) > 0
                 b_mf = dispersion_charges(sig_mf, eps_mf, m_mf_bool)
                 pos_m_3 = jnp.stack([px_m, py_m, pz_m], axis=-1)
+                box_lj_f32 = box_b_cur[0].astype(jnp.float32)
 
                 def _lj_rec_fn(p_m_in: jax.Array) -> jax.Array:
                     return lj_pme_reciprocal_energy(
                         p_m_in,
                         b_mf,
                         m_mf_bool,
-                        box_f32_flat,
+                        box_lj_f32,
                         lj_pme_grid_dims,
                         alpha_lj=lj_pme_alpha,
                         order=5,
@@ -2753,6 +2973,42 @@ def _build_context_morton_runner(  # noqa: PLR0913
                     ).astype(jnp.float32)
                     e_tot = e_tot + e_pr[None]
 
+            if has_custom_forces and len(cf_tuple) > 0:
+                gp_dict = {
+                    nm: gp_vec[i_gp] for i_gp, nm in enumerate(param_names)
+                }
+                box_cf_mat = (
+                    box_b_cur[0].astype(jnp.float32)
+                    if is_triclinic
+                    else jnp.diag(box_b_cur[0].astype(jnp.float32))
+                )
+                pos_cf_f32 = pos_unw_cur.astype(jnp.float32)
+
+                def _cf_energy_sum(p_cf: jax.Array) -> jax.Array:
+                    e_cf_acc = jnp.asarray(0.0, dtype=jnp.float32)
+                    for cf_obj in cf_tuple:
+                        e_cf_acc = e_cf_acc + cf_obj.energy_akma(
+                            p_cf, box_cf_mat, gp_dict
+                        ).astype(jnp.float32)
+                    return e_cf_acc
+
+                if compute_energy:
+                    e_cf_val, g_cf = jax.value_and_grad(_cf_energy_sum)(pos_cf_f32)
+                    e_tot = e_tot + e_cf_val[None]
+                else:
+                    g_cf = jax.grad(_cf_energy_sum)(pos_cf_f32)
+                f_cf_pad = (
+                    jnp.pad(-g_cf, ((0, pad_tail), (0, 0)))[None, :, :]
+                    if pad_tail > 0
+                    else (-g_cf)[None, :, :]
+                )
+                fm_cf = jnp.take_along_axis(
+                    f_cf_pad, tp_st.perm[:, :, None], axis=1
+                )
+                fx_tot = fx_tot + fm_cf[:, :, 0].reshape(n_act_pad)
+                fy_tot = fy_tot + fm_cf[:, :, 1].reshape(n_act_pad)
+                fz_tot = fz_tot + fm_cf[:, :, 2].reshape(n_act_pad)
+
             if has_vs and virtual_sites is not None:
                 inv_act_vs = tp_st.inv_perm[0, :n_act]
                 f_raw_act = jnp.stack(
@@ -2777,31 +3033,27 @@ def _build_context_morton_runner(  # noqa: PLR0913
         return _eval_morton_forces
 
     host_box0_dev = jnp.asarray(host_box0_np, dtype=state_dtype)
+    host_box0_b_dev = (
+        host_box0_dev[None, :, :] if is_triclinic else host_box0_dev[None, :]
+    )
     init_pos_act = init_positions[:n_act].astype(state_dtype)
     if has_vs and virtual_sites is not None:
         init_pos_act = _unwrap_whole_and_reconstruct_vs(init_pos_act, host_box0_dev)
-    init_pos_wr = jnp.mod(init_pos_act, host_box0_dev[None, :])
+    init_pos_wr = _wrap_pos(init_pos_act, host_box0_dev)
     init_pos_pad = (
         jnp.pad(init_pos_wr, ((0, pad_N), (0, 0)))[None, :, :]
         if pad_N > 0
         else init_pos_wr[None, :, :]
     )
-    tp_init = pallas_build_morton_tile_pairs_gpu(
+    tp_init = _build_tp_gpu(
         init_pos_pad,
         bundle.charges[:N].astype(jnp.float32)[None, :],
         bundle.sigmas[:N].astype(jnp.float32)[None, :],
         bundle.epsilons[:N].astype(jnp.float32)[None, :],
-        am_b,
-        host_box0_dev[None, :],
-        dedup_excl,
-        n_act=n_act,
-        max_pairs=max_pairs,
-        cutoff=cutoff,
-        skin=eff_skin,
-        host_min_box=host_min_box,
-        interpret=interpret,
+        host_box0_b_dev,
     )
     z_f = jnp.zeros((n_act_pad,), dtype=jnp.float32)
+    empty_gp_vec = jnp.zeros((len(param_names),), dtype=jnp.float32)
 
     @jax.jit
     def _jit_step(  # noqa: PLR0913
@@ -2845,6 +3097,8 @@ def _build_context_morton_runner(  # noqa: PLR0913
         pr_y0_in: jax.Array,
         pr_z0_in: jax.Array,
         pr_valid_in: jax.Array,
+        custom_forces_in: tuple[CompiledLeptonForce, ...] = (),
+        gp_vec_in: jax.Array | None = None,
     ):
         step_offset_i32 = jnp.asarray(step_offset_in, dtype=jnp.int32)
         n_steps_i32 = jnp.asarray(n_steps_in, dtype=jnp.int32)
@@ -2852,7 +3106,15 @@ def _build_context_morton_runner(  # noqa: PLR0913
         forces_dirty_b = jnp.asarray(forces_dirty_in, dtype=jnp.bool_)
         dt_b = jnp.broadcast_to(jnp.asarray(dt_s_in, dtype=state_dtype), (1,))
         kT_b = jnp.broadcast_to(jnp.asarray(kT_s_in, dtype=state_dtype), (1,))
-        box_b0 = box_diag_in.astype(state_dtype)[None, :]
+        box_b0 = (
+            box_diag_in.astype(state_dtype)[None, :, :]
+            if is_triclinic
+            else box_diag_in.astype(state_dtype)[None, :]
+        )
+        mc_sc0 = jnp.broadcast_to(jnp.asarray(mc_scale_in, dtype=jnp.float32), (3,))
+        mc_at0 = jnp.broadcast_to(jnp.asarray(mc_att_in, dtype=jnp.int32), (3,))
+        mc_ac0 = jnp.broadcast_to(jnp.asarray(mc_acc_in, dtype=jnp.int32), (3,))
+        eff_gp_vec = empty_gp_vec if gp_vec_in is None else gp_vec_in
         bonded_dyn = bonded_static._replace(
             b_r0=b_r0_in,
             b_k=b_k_in,
@@ -2899,17 +3161,19 @@ def _build_context_morton_runner(  # noqa: PLR0913
                 pr_z0_in,
                 pr_valid_in,
             ),
+            custom_forces_in,
+            eff_gp_vec,
         )
 
         pos_unw0 = pos_in.astype(state_dtype)
         if has_vs and virtual_sites is not None:
             pos_whole0 = _unwrap_whole_and_reconstruct_vs(pos_unw0, box_b0[0])
             pos_unw0 = pos_unw0.at[vs_order].set(pos_whole0[vs_order])
-            pos_wr0 = jnp.mod(pos_whole0, box_b0[0][None, :])
+            pos_wr0 = _wrap_pos(pos_whole0, box_b0[0])
             vel_act0 = vel_in.astype(state_dtype).at[vs_order].set(0.0)
         else:
             pos_whole0 = pos_unw0
-            pos_wr0 = jnp.mod(pos_unw0, box_b0[0][None, :])
+            pos_wr0 = _wrap_pos(pos_unw0, box_b0[0])
             vel_act0 = vel_in.astype(state_dtype)
 
         mom_act0 = vel_act0 * mass_act[:, None]
@@ -2921,28 +3185,8 @@ def _build_context_morton_runner(  # noqa: PLR0913
             mom_pad0 = mom_act0[None, :, :]
 
         def _entry_rebuild_nl(_: Any):
-            tp_r = pallas_build_morton_tile_pairs_gpu(
-                pos_pad0,
-                q_b_in,
-                sig_b_in,
-                eps_b_in,
-                am_b,
-                box_b0,
-                dedup_excl,
-                n_act=n_act,
-                max_pairs=max_pairs,
-                cutoff=cutoff,
-                skin=eff_skin,
-                host_min_box=host_min_box,
-                interpret=interpret,
-            )
-            G_r = (
-                influence_function(
-                    grid_dims, box_b0[0].astype(jnp.float32), pme_alpha, 4
-                ).astype(jnp.float32)[None, ...]
-                if do_pme
-                else G_in
-            )
+            tp_r = _build_tp_gpu(pos_pad0, q_b_in, sig_b_in, eps_b_in, box_b0)
+            G_r = _greens_for_box(box_b0[0]) if do_pme else G_in
             return tp_r, G_r
 
         def _entry_keep_nl(_: Any):
@@ -3030,10 +3274,11 @@ def _build_context_morton_runner(  # noqa: PLR0913
             ) = oc
             pos_cur_act = jnp.stack(
                 [px[:n_act], py[:n_act], pz[:n_act]], axis=-1
-            ).astype(jnp.float32)[None, :, :]
-            bx_f = box_c.astype(jnp.float32)[:, None, :]
-            dr = pos_cur_act - tp_c.ref_positions[:, :n_act, :].astype(jnp.float32)
-            dr = dr - bx_f * jnp.round(dr / bx_f)
+            ).astype(jnp.float32)
+            dr = _mic_dr(
+                pos_cur_act - tp_c.ref_positions[0, :n_act, :].astype(jnp.float32),
+                box_c[0].astype(jnp.float32),
+            )[None, :, :]
             dr_sq = jnp.where(am_b[:, :n_act], jnp.sum(dr * dr, axis=-1), 0.0)
             need_reb = (step_i > 0) & jnp.any(jnp.max(dr_sq, axis=-1) > thresh_sq)
 
@@ -3043,21 +3288,7 @@ def _build_context_morton_runner(  # noqa: PLR0913
                     [px_r.reshape(1, N), py_r.reshape(1, N), pz_r.reshape(1, N)],
                     axis=-1,
                 )
-                tp_new = pallas_build_morton_tile_pairs_gpu(
-                    pos_full,
-                    q_b_in,
-                    sig_b_in,
-                    eps_b_in,
-                    am_b,
-                    bx_r,
-                    dedup_excl,
-                    n_act=n_act,
-                    max_pairs=max_pairs,
-                    cutoff=cutoff,
-                    skin=eff_skin,
-                    host_min_box=host_min_box,
-                    interpret=interpret,
-                )
+                tp_new = _build_tp_gpu(pos_full, q_b_in, sig_b_in, eps_b_in, bx_r)
                 remap = jnp.take_along_axis(tp_old.inv_perm, tp_new.perm, axis=1)
                 fx_n = jnp.take_along_axis(
                     fx_r.reshape(1, n_act_pad), remap, axis=1
@@ -3122,10 +3353,10 @@ def _build_context_morton_runner(  # noqa: PLR0913
                 morton_inv_perm=inv_n,
                 morton_pad=n_act_pad,
                 prebuilt_soa=(px, py, pz, mx, my, mz, fx_m, fy_m, fz_m, soa_plan),
+                is_triclinic=bool(is_triclinic and pre_has_tri_kw),
             )
             pos_wr_next0 = jnp.stack([px[:n_act], py[:n_act], pz[:n_act]], axis=-1)
-            dr_step0 = pos_wr_next0 - pos_wr_prev0
-            dr_step0 = dr_step0 - bx_d0[None, :] * jnp.round(dr_step0 / bx_d0[None, :])
+            dr_step0 = _mic_dr(pos_wr_next0 - pos_wr_prev0, bx_d0)
             if has_vs:
                 dr_step0 = jnp.where(am_real_act[:, None], dr_step0, 0.0)
             pos_unw = pos_unw + dr_step0
@@ -3218,12 +3449,12 @@ def _build_context_morton_runner(  # noqa: PLR0913
                         fz_s,
                         soa_plan,
                     ),
+                    is_triclinic=bool(is_triclinic and pre_has_tri_kw),
                 )
                 pos_wr_next_s = jnp.stack(
                     [px_s[:n_act], py_s[:n_act], pz_s[:n_act]], axis=-1
                 )
-                dr_s = pos_wr_next_s - pos_wr_prev_s
-                dr_s = dr_s - bx_d0[None, :] * jnp.round(dr_s / bx_d0[None, :])
+                dr_s = _mic_dr(pos_wr_next_s - pos_wr_prev_s, bx_d0)
                 if has_vs:
                     dr_s = jnp.where(am_real_act[:, None], dr_s, 0.0)
                 pos_unw_s = pos_unw_s + dr_s
@@ -3286,6 +3517,8 @@ def _build_context_morton_runner(  # noqa: PLR0913
                 interpret,
                 soa_plan,
                 f64_accumulators=f64_acc,
+                box=box_c if post_has_box_kw else None,
+                is_triclinic=bool(is_triclinic and post_has_box_kw),
             )
 
             step_next = step_i + k_cur
@@ -3351,6 +3584,11 @@ def _build_context_morton_runner(  # noqa: PLR0913
                         at_b,
                         ac_b,
                     ) = b_ops
+                    if (
+                        baro_type == "MonteCarloAnisotropicBarostat"
+                        and len(active_aniso_axes) == 0
+                    ):
+                        return b_ops
                     bx_vec = bx_b[0]
                     pos_whole = _unwrap_whole_and_reconstruct_vs(punw_b, bx_vec)
                     mol_sums = (
@@ -3367,16 +3605,16 @@ def _build_context_morton_runner(  # noqa: PLR0913
 
                     if baro_mode == "scr":
                         eps_fd = jnp.asarray(1e-3, dtype=state_dtype)
-                        v_cur = jnp.prod(bx_vec.astype(jnp.float32))
+                        v_cur = _vol_f32(bx_vec)
 
                         def _energy_at_scale(mu_fd: jax.Array) -> jax.Array:
                             bx_fd = bx_b * mu_fd
                             p_fd_unw = pos_whole + (mu_fd - 1.0) * com_u
                             if has_vs and virtual_sites is not None:
                                 p_fd_unw = virtual_sites.reconstruct_positions(p_fd_unw)
-                            p_fd_wr = jnp.mod(
-                                p_fd_unw, bx_fd[0][None, :]
-                            ).astype(jnp.float32)[None, :, :]
+                            p_fd_wr = _wrap_pos(p_fd_unw, bx_fd[0]).astype(
+                                jnp.float32
+                            )[None, :, :]
                             if pad_tail > 0:
                                 p_fd_wr = jnp.pad(
                                     p_fd_wr, ((0, 0), (0, pad_tail), (0, 0))
@@ -3384,16 +3622,7 @@ def _build_context_morton_runner(  # noqa: PLR0913
                             pm_fd = jnp.take_along_axis(
                                 p_fd_wr, tp_b.perm[:, :, None], axis=1
                             )
-                            G_fd = (
-                                influence_function(
-                                    grid_dims,
-                                    bx_fd[0].astype(jnp.float32),
-                                    pme_alpha,
-                                    4,
-                                ).astype(jnp.float32)[None, ...]
-                                if do_pme
-                                else G_b
-                            )
+                            G_fd = _greens_for_box(bx_fd[0]) if do_pme else G_b
                             e_fd, _, _, _ = _eval_morton_forces(
                                 pm_fd[:, :, 0].reshape(n_act_pad),
                                 pm_fd[:, :, 1].reshape(n_act_pad),
@@ -3461,36 +3690,15 @@ def _build_context_morton_runner(  # noqa: PLR0913
                         punw_new = pos_whole + (mu - 1.0) * com_u
                         if has_vs and virtual_sites is not None:
                             punw_new = virtual_sites.reconstruct_positions(punw_new)
-                        pwr_new = jnp.mod(punw_new, bx_new[0][None, :])
+                        pwr_new = _wrap_pos(punw_new, bx_new[0])
                         pos_pad_new = (
                             jnp.pad(pwr_new, ((0, pad_N), (0, 0)))[None, :, :]
                             if pad_N > 0
                             else pwr_new[None, :, :]
                         )
-                        G_new = (
-                            influence_function(
-                                grid_dims,
-                                bx_new[0].astype(jnp.float32),
-                                pme_alpha,
-                                4,
-                            ).astype(jnp.float32)[None, ...]
-                            if do_pme
-                            else G_b
-                        )
-                        tp_new = pallas_build_morton_tile_pairs_gpu(
-                            pos_pad_new,
-                            q_b_in,
-                            sig_b_in,
-                            eps_b_in,
-                            am_b,
-                            bx_new,
-                            dedup_excl,
-                            n_act=n_act,
-                            max_pairs=max_pairs,
-                            cutoff=cutoff,
-                            skin=eff_skin,
-                            host_min_box=host_min_box,
-                            interpret=interpret,
+                        G_new = _greens_for_box(bx_new[0]) if do_pme else G_b
+                        tp_new = _build_tp_gpu(
+                            pos_pad_new, q_b_in, sig_b_in, eps_b_in, bx_new
                         )
                         p_ap = pwr_new.astype(jnp.float32)[None, :, :]
                         if pad_tail > 0:
@@ -3529,8 +3737,8 @@ def _build_context_morton_runner(  # noqa: PLR0913
                             ac_b,
                         )
 
-                    # Isotropic Monte Carlo Barostat on GPU with force reuse & adaptive step size
-                    p_cur_wr = jnp.mod(pos_whole, bx_vec[None, :]).astype(jnp.float32)[
+                    # GPU Monte Carlo Barostats: Isotropic, Anisotropic, and Membrane
+                    p_cur_wr = _wrap_pos(pos_whole, bx_vec).astype(jnp.float32)[
                         None, :, :
                     ]
                     if pad_tail > 0:
@@ -3549,44 +3757,91 @@ def _build_context_morton_runner(  # noqa: PLR0913
                         pos_whole,
                         True,
                     )
-                    u_pair = jax.random.uniform(b_key, (2,), dtype=jnp.float32)
-                    u_scale = 2.0 * u_pair[0] - 1.0
-                    vol_scale = jnp.maximum(1.0 + sc_b * u_scale, 1e-6)
-                    mu = (vol_scale ** (1.0 / 3.0)).astype(state_dtype)
-                    bx_prop = bx_b * mu
-                    punw_prop = pos_whole + (mu - 1.0) * com_u
+                    u_tri = jax.random.uniform(b_key, (3,), dtype=jnp.float32)
+                    u_scale = 2.0 * u_tri[0] - 1.0
+
+                    if baro_type == "MonteCarloAnisotropicBarostat":
+                        act_ax_jnp = jnp.asarray(active_aniso_axes, dtype=jnp.int32)
+                        n_act_ax = len(active_aniso_axes)
+                        pick_i = jnp.minimum(
+                            (u_tri[2] * float(n_act_ax)).astype(jnp.int32),
+                            jnp.int32(n_act_ax - 1),
+                        )
+                        mode_slot = act_ax_jnp[pick_i]
+                        sc_cur = sc_b[mode_slot]
+                        vol_scale = jnp.maximum(1.0 + sc_cur * u_scale, 1e-6)
+                        axis_scales = (
+                            jnp.ones((3,), dtype=state_dtype)
+                            .at[mode_slot]
+                            .set(vol_scale.astype(state_dtype))
+                        )
+                        p_xyz_jnp = jnp.asarray(eff_p_xyz, dtype=jnp.float32)
+                        p_eff = p_xyz_jnp[mode_slot]
+                        use_st = False
+                    elif baro_type == "MonteCarloMembraneBarostat":
+                        p_eff = jnp.float32(target_p_akma)
+                        use_st = True
+                        z_free = baro_z_mode == 0
+                        z_const_vol = baro_z_mode == 2
+                        if baro_xy_isotropic:
+                            if z_free:
+                                is_z_move = u_tri[2] >= 0.5
+                                mode_slot = jnp.where(
+                                    is_z_move, jnp.int32(2), jnp.int32(0)
+                                )
+                                sc_cur = sc_b[mode_slot]
+                                raw_sc = jnp.maximum(1.0 + sc_cur * u_scale, 1e-6)
+                                s_xy = jnp.where(
+                                    is_z_move,
+                                    jnp.float32(1.0),
+                                    jnp.sqrt(raw_sc),
+                                )
+                                s_z = jnp.where(is_z_move, raw_sc, jnp.float32(1.0))
+                            else:
+                                mode_slot = jnp.int32(0)
+                                sc_cur = sc_b[0]
+                                raw_sc = jnp.maximum(1.0 + sc_cur * u_scale, 1e-6)
+                                s_xy = jnp.sqrt(raw_sc)
+                                s_z = (1.0 / raw_sc) if z_const_vol else jnp.float32(1.0)
+                            axis_scales = jnp.stack(
+                                [s_xy, s_xy, s_z]
+                            ).astype(state_dtype)
+                        else:
+                            n_m_axes = 3 if z_free else 2
+                            mode_slot = jnp.minimum(
+                                (u_tri[2] * float(n_m_axes)).astype(jnp.int32),
+                                jnp.int32(n_m_axes - 1),
+                            )
+                            sc_cur = sc_b[mode_slot]
+                            raw_sc = jnp.maximum(1.0 + sc_cur * u_scale, 1e-6)
+                            s_vec = jnp.ones((3,), dtype=jnp.float32).at[mode_slot].set(
+                                raw_sc
+                            )
+                            if z_const_vol:
+                                s_vec = s_vec.at[2].set(1.0 / (s_vec[0] * s_vec[1]))
+                            axis_scales = s_vec.astype(state_dtype)
+                    else:
+                        mode_slot = jnp.int32(0)
+                        sc_cur = sc_b[0]
+                        vol_scale = jnp.maximum(1.0 + sc_cur * u_scale, 1e-6)
+                        mu = (vol_scale ** (1.0 / 3.0)).astype(state_dtype)
+                        axis_scales = jnp.stack([mu, mu, mu])
+                        p_eff = jnp.float32(target_p_akma)
+                        use_st = False
+
+                    bx_prop = _scale_box_axes(bx_b, axis_scales)
+                    punw_prop = pos_whole + (axis_scales[None, :] - 1.0) * com_u
                     if has_vs and virtual_sites is not None:
                         punw_prop = virtual_sites.reconstruct_positions(punw_prop)
-                    pwr_prop = jnp.mod(punw_prop, bx_prop[0][None, :])
+                    pwr_prop = _wrap_pos(punw_prop, bx_prop[0])
                     pos_pad_prop = (
                         jnp.pad(pwr_prop, ((0, pad_N), (0, 0)))[None, :, :]
                         if pad_N > 0
                         else pwr_prop[None, :, :]
                     )
-                    G_prop = (
-                        influence_function(
-                            grid_dims,
-                            bx_prop[0].astype(jnp.float32),
-                            pme_alpha,
-                            4,
-                        ).astype(jnp.float32)[None, ...]
-                        if do_pme
-                        else G_b
-                    )
-                    tp_prop = pallas_build_morton_tile_pairs_gpu(
-                        pos_pad_prop,
-                        q_b_in,
-                        sig_b_in,
-                        eps_b_in,
-                        am_b,
-                        bx_prop,
-                        dedup_excl,
-                        n_act=n_act,
-                        max_pairs=max_pairs,
-                        cutoff=cutoff,
-                        skin=eff_skin,
-                        host_min_box=host_min_box,
-                        interpret=interpret,
+                    G_prop = _greens_for_box(bx_prop[0]) if do_pme else G_b
+                    tp_prop = _build_tp_gpu(
+                        pos_pad_prop, q_b_in, sig_b_in, eps_b_in, bx_prop
                     )
                     p_ap = pwr_prop.astype(jnp.float32)[None, :, :]
                     if pad_tail > 0:
@@ -3605,8 +3860,17 @@ def _build_context_morton_runner(  # noqa: PLR0913
                         punw_prop,
                         True,
                     )
-                    v_old = jnp.prod(bx_b[0].astype(jnp.float32))
-                    v_new = jnp.prod(bx_prop[0].astype(jnp.float32))
+                    v_old = _vol_f32(bx_b[0])
+                    v_new = _vol_f32(bx_prop[0])
+                    vol_ratio = jnp.maximum(
+                        v_new / jnp.maximum(v_old, 1e-12), 1e-12
+                    )
+                    st_work = (
+                        -jnp.float32(baro_surface_tension_akma)
+                        * (_area_xy_f32(bx_prop[0]) - _area_xy_f32(bx_b[0]))
+                        if use_st
+                        else jnp.float32(0.0)
+                    )
                     kT_f = kT_b[0].astype(jnp.float32)
                     du_lr = (c_tail_in + c_plasma_b[0]) * (
                         1.0 / jnp.maximum(v_new, 1e-12)
@@ -3615,10 +3879,11 @@ def _build_context_morton_runner(  # noqa: PLR0913
                     dh = (
                         (e_new[0] - e_old[0])
                         + du_lr
-                        + jnp.float32(target_p_akma) * (v_new - v_old)
-                        - jnp.float32(n_mols) * kT_f * jnp.log(vol_scale)
+                        + p_eff * (v_new - v_old)
+                        + st_work
+                        - jnp.float32(n_mols) * kT_f * jnp.log(vol_ratio)
                     )
-                    acc = u_pair[1] < jnp.exp(
+                    acc = u_tri[1] < jnp.exp(
                         jnp.clip(-dh / jnp.maximum(kT_f, 1e-12), -50.0, 50.0)
                     )
                     px_sel = jnp.where(acc, pos_pad_prop[:, :, 0].reshape(N), px_b)
@@ -3634,25 +3899,30 @@ def _build_context_morton_runner(  # noqa: PLR0913
                     fy_sel = jnp.where(acc, fy_p, fy_b)
                     fz_sel = jnp.where(acc, fz_p, fz_b)
 
-                    at_n = at_b + jnp.int32(1)
-                    ac_n = ac_b + acc.astype(jnp.int32)
-                    do_adj = at_n >= jnp.int32(10)
-                    sc_shrunk = jnp.maximum(sc_b * jnp.float32(0.5), jnp.float32(1e-6))
-                    sc_grown = jnp.minimum(sc_b * jnp.float32(1.1), jnp.float32(0.3))
+                    at_s = at_b[mode_slot] + jnp.int32(1)
+                    ac_s = ac_b[mode_slot] + acc.astype(jnp.int32)
+                    do_adj = at_s >= jnp.int32(10)
+                    sc_s = sc_b[mode_slot]
+                    sc_shrunk = jnp.maximum(sc_s * jnp.float32(0.5), jnp.float32(1e-6))
+                    sc_grown = jnp.minimum(sc_s * jnp.float32(1.1), jnp.float32(0.3))
                     sc_cand = jnp.where(
-                        ac_n.astype(jnp.float32)
-                        < jnp.float32(0.25) * at_n.astype(jnp.float32),
+                        ac_s.astype(jnp.float32)
+                        < jnp.float32(0.25) * at_s.astype(jnp.float32),
                         sc_shrunk,
                         jnp.where(
-                            ac_n.astype(jnp.float32)
-                            > jnp.float32(0.75) * at_n.astype(jnp.float32),
+                            ac_s.astype(jnp.float32)
+                            > jnp.float32(0.75) * at_s.astype(jnp.float32),
                             sc_grown,
-                            sc_b,
+                            sc_s,
                         ),
                     )
-                    sc_out = jnp.where(do_adj, sc_cand, sc_b)
-                    at_out = jnp.where(do_adj, jnp.int32(0), at_n)
-                    ac_out = jnp.where(do_adj, jnp.int32(0), ac_n)
+                    sc_out = sc_b.at[mode_slot].set(jnp.where(do_adj, sc_cand, sc_s))
+                    at_out = at_b.at[mode_slot].set(
+                        jnp.where(do_adj, jnp.int32(0), at_s)
+                    )
+                    ac_out = ac_b.at[mode_slot].set(
+                        jnp.where(do_adj, jnp.int32(0), ac_s)
+                    )
                     return (
                         px_sel,
                         py_sel,
@@ -3769,9 +4039,9 @@ def _build_context_morton_runner(  # noqa: PLR0913
                 tp0,
                 box_b0,
                 G0,
-                mc_scale_in,
-                mc_att_in,
-                mc_acc_in,
+                mc_sc0,
+                mc_at0,
+                mc_ac0,
             ),
         )
         mom_act_f = jnp.stack([mxf[:n_act], myf[:n_act], mzf[:n_act]], axis=-1)
@@ -3834,8 +4104,15 @@ def _build_context_morton_runner(  # noqa: PLR0913
         pr_y0_in: jax.Array,
         pr_z0_in: jax.Array,
         pr_valid_in: jax.Array,
+        custom_forces_in: tuple[CompiledLeptonForce, ...] = (),
+        gp_vec_in: jax.Array | None = None,
     ):
-        box_b0 = box_diag_in.astype(state_dtype)[None, :]
+        box_b0 = (
+            box_diag_in.astype(state_dtype)[None, :, :]
+            if is_triclinic
+            else box_diag_in.astype(state_dtype)[None, :]
+        )
+        eff_gp_vec = empty_gp_vec if gp_vec_in is None else gp_vec_in
         bonded_dyn = bonded_static._replace(
             b_r0=b_r0_in,
             b_k=b_k_in,
@@ -3882,16 +4159,18 @@ def _build_context_morton_runner(  # noqa: PLR0913
                 pr_z0_in,
                 pr_valid_in,
             ),
+            custom_forces_in,
+            eff_gp_vec,
         )
 
         pos_unw0 = pos_in.astype(state_dtype)
         if has_vs and virtual_sites is not None:
             pos_whole0 = _unwrap_whole_and_reconstruct_vs(pos_unw0, box_b0[0])
             pos_unw0 = pos_unw0.at[vs_order].set(pos_whole0[vs_order])
-            pos_wr0 = jnp.mod(pos_whole0, box_b0[0][None, :])
+            pos_wr0 = _wrap_pos(pos_whole0, box_b0[0])
         else:
             pos_whole0 = pos_unw0
-            pos_wr0 = jnp.mod(pos_unw0, box_b0[0][None, :])
+            pos_wr0 = _wrap_pos(pos_unw0, box_b0[0])
 
         pos_pad0 = (
             jnp.pad(pos_wr0, ((0, pad_N), (0, 0)))[None, :, :]
@@ -3902,28 +4181,8 @@ def _build_context_morton_runner(  # noqa: PLR0913
         forces_dirty_b = jnp.asarray(forces_dirty_in, dtype=jnp.bool_)
 
         def _obs_rebuild_nl(_: Any):
-            tp_r = pallas_build_morton_tile_pairs_gpu(
-                pos_pad0,
-                q_b_in,
-                sig_b_in,
-                eps_b_in,
-                am_b,
-                box_b0,
-                dedup_excl,
-                n_act=n_act,
-                max_pairs=max_pairs,
-                cutoff=cutoff,
-                skin=eff_skin,
-                host_min_box=host_min_box,
-                interpret=interpret,
-            )
-            G_r = (
-                influence_function(
-                    grid_dims, box_b0[0].astype(jnp.float32), pme_alpha, 4
-                ).astype(jnp.float32)[None, ...]
-                if do_pme
-                else G_in
-            )
+            tp_r = _build_tp_gpu(pos_pad0, q_b_in, sig_b_in, eps_b_in, box_b0)
+            G_r = _greens_for_box(box_b0[0]) if do_pme else G_in
             return tp_r, G_r
 
         def _obs_keep_nl(_: Any):
@@ -3968,8 +4227,7 @@ def _build_context_morton_runner(  # noqa: PLR0913
             pos_whole0,
             compute_energy=True,
         )
-        box_f32_flat = box_b0.astype(jnp.float32).reshape(3)
-        v_cur = jnp.prod(box_f32_flat)
+        v_cur = _vol_f32(box_b0[0])
         pe_akma = e_core[0] + (c_tail_in + c_plasma_b[0]) / jnp.maximum(v_cur, 1e-12)
         ke_akma = 0.5 * jnp.sum(
             mass_act.astype(jnp.float64)[:, None] * (vel_in.astype(jnp.float64) ** 2)
@@ -4012,6 +4270,8 @@ def _build_context_morton_runner(  # noqa: PLR0913
         forces_dirty_in: bool | jax.Array,
         c_tail_in: jax.Array,
         pr_bufs: tuple[jax.Array, ...] | None = None,
+        custom_forces_in: tuple[CompiledLeptonForce, ...] = (),
+        gp_vec_in: jax.Array | None = None,
     ):
         eff_pr = (
             pr_bufs
@@ -4045,6 +4305,8 @@ def _build_context_morton_runner(  # noqa: PLR0913
             forces_dirty_in,
             c_tail_in,
             *eff_pr,
+            custom_forces_in,
+            gp_vec_in,
         )
 
     return {
@@ -4060,6 +4322,8 @@ def _build_context_morton_runner(  # noqa: PLR0913
         "N": N,
         "n_act": n_act,
         "state_dtype": state_dtype,
+        "is_triclinic": is_triclinic,
+        "param_names": param_names,
     }
 
 
@@ -4085,6 +4349,8 @@ def _build_context_gbsa_runner(  # noqa: PLR0913
     m_h_akma: float,
     has_restraints: bool = False,
     virtual_sites: VirtualSites | None = None,
+    has_custom_forces: bool = False,
+    param_names: tuple[str, ...] = (),
     init_positions: jnp.ndarray,
 ) -> dict[str, Any]:
     """Build a persistent B=1 GPU-resident BAOAB + 2-pass OBC2 GBSA + bonded + VS/PR runner."""
@@ -4279,6 +4545,8 @@ def _build_context_gbsa_runner(  # noqa: PLR0913
         pr_y0_in: jax.Array,
         pr_z0_in: jax.Array,
         pr_valid_in: jax.Array,
+        custom_forces_in: tuple[CompiledLeptonForce, ...] = (),
+        gp_vec_in: jax.Array | None = None,
     ):
         step_offset_i32 = jnp.asarray(step_offset_in, dtype=jnp.int32)
         n_steps_i32 = jnp.asarray(n_steps_in, dtype=jnp.int32)
@@ -4383,6 +4651,26 @@ def _build_context_gbsa_runner(  # noqa: PLR0913
                     .at[pr_idx_in, 2]
                     .add(jnp.where(pr_valid_in, -2.0 * pr_kz_in * dz_pr, 0.0))
                 )
+
+            if has_custom_forces and len(custom_forces_in) > 0:
+                gp_dict_cf: dict[str, jax.Array] = (
+                    {
+                        k_nm: gp_vec_in[idx_nm]
+                        for idx_nm, k_nm in enumerate(param_names)
+                    }
+                    if (gp_vec_in is not None and len(param_names) > 0)
+                    else {}
+                )
+
+                def _cf_gb_total_e(p_cf: jax.Array) -> jax.Array:
+                    e_acc_cf = jnp.asarray(0.0, dtype=jnp.float32)
+                    for cf_item in custom_forces_in:
+                        e_acc_cf = e_acc_cf + cf_item.energy_akma(
+                            p_cf, None, gp_dict_cf
+                        )
+                    return e_acc_cf
+
+                f_tot = f_tot + (-jax.grad(_cf_gb_total_e)(p_f32))
 
             if has_vs and virtual_sites is not None:
                 f_tot = virtual_sites.redistribute_forces(f_tot, p_f32)
@@ -4607,6 +4895,7 @@ def _build_context_gbsa_runner(  # noqa: PLR0913
         "N": N,
         "n_act": n_act,
         "state_dtype": state_dtype,
+        "param_names": param_names,
     }
 
 
@@ -4642,8 +4931,16 @@ class ProlixContext:
                 self._config = parse_platform_properties(platformProperties or {})
 
         # Convert OpenMM System to Prolix representation
+        eff_conv_cfg = (
+            dataclasses.replace(self._config, anisotropic_barostat=True)
+            if (
+                not self._config.anisotropic_barostat
+                and _system_has_anisotropic_or_membrane_barostat(system)
+            )
+            else self._config
+        )
         self._converted_system: ConvertedOpenMMSystem = from_openmm_system(
-            system, integrator, self._config
+            system, integrator, eff_conv_cfg
         )
         self._bundle: MolecularBundle = self._converted_system.bundle
         self._custom_forces: tuple[CompiledLeptonForce, ...] = tuple(
@@ -4695,7 +4992,10 @@ class ProlixContext:
         self._custom_force_mode = str(self._config.custom_force_mode)
         self._virtual_site_mode = str(self._config.virtual_site_mode)
         self._cmm_frequency = self._config.cmm_frequency
-        self._anisotropic_barostat = bool(self._config.anisotropic_barostat)
+        self._anisotropic_barostat = bool(
+            self._config.anisotropic_barostat
+            or _system_has_anisotropic_or_membrane_barostat(system)
+        )
         self._execution_mode = str(self._config.execution_mode)
         self._integrator_scheme = str(self._config.integrator_scheme)
         self._thermostat_override = (
@@ -4737,7 +5037,7 @@ class ProlixContext:
             self._use_pallas
             and self._converted_system.has_nonbonded
             and self._has_finite_cutoff
-            and not self._is_triclinic
+            and (not self._is_triclinic or _triclinic_morton_kernels_supported())
             and self._n_particles >= 256
             and self._precision in ("single", "mixed")
         ):
@@ -4786,9 +5086,9 @@ class ProlixContext:
         self._morton_restraints_dirty: bool = True
         self._morton_nl_dirty: bool = True
         self._morton_forces_dirty: bool = True
-        self._morton_mc_scale: jax.Array = jnp.asarray(0.01, dtype=jnp.float32)
-        self._morton_mc_att: jax.Array = jnp.asarray(0, dtype=jnp.int32)
-        self._morton_mc_acc: jax.Array = jnp.asarray(0, dtype=jnp.int32)
+        self._morton_mc_scale: jax.Array = jnp.full((3,), 0.01, dtype=jnp.float32)
+        self._morton_mc_att: jax.Array = jnp.zeros((3,), dtype=jnp.int32)
+        self._morton_mc_acc: jax.Array = jnp.zeros((3,), dtype=jnp.int32)
         self._morton_box_diag: jax.Array | None = None
 
         # Persistent GPU-resident Implicit-Solvent OBC2 GBSA BAOAB fast-path state
@@ -5033,11 +5333,27 @@ class ProlixContext:
             neighbor_idx=self._neighbor_idx if use_gb_cutoff else None,
         )
 
+    def _is_reduced_triclinic_supported(self) -> bool:
+        """Return True when periodic box is orthorhombic or reduced-form triclinic with kernel support."""
+        if not self._is_triclinic:
+            return True
+        nb_m = self._effective_nonbonded_method().lower()
+        do_pme = nb_m in ("pme", "spme", "lj_pme", "ljpme")
+        if not _triclinic_morton_kernels_supported(do_pme):
+            return False
+        if self._morton_box_diag is not None and self._morton_box_diag.ndim == 2:
+            bv_np = np.asarray(self._morton_box_diag, dtype=np.float64)
+        elif self._box_vectors is not None:
+            bv_np = np.asarray(self._box_vectors, dtype=np.float64)
+        else:
+            return False
+        return _is_reduced_triclinic_box_np(bv_np)
+
     def _can_use_tile_pairs(self) -> bool:
         return (
             self._converted_system.has_nonbonded
             and self._has_finite_cutoff
-            and not self._is_triclinic
+            and (not self._is_triclinic or self._is_reduced_triclinic_supported())
             and self._precision in ("single", "mixed")
             and (
                 self._nonbonded_engine == "morton_tile_pairs"
@@ -5051,7 +5367,7 @@ class ProlixContext:
 
     def _rebuild_tile_pair_nl(self, pos_f32: jnp.ndarray, cutoff: float) -> None:
         """Build or refresh Morton-sorted 32x32 TilePairNeighborList with static capacity."""
-        if self._neighbor_idx is None or not self._can_use_tile_pairs():
+        if self._is_triclinic or self._neighbor_idx is None or not self._can_use_tile_pairs():
             self._tile_pair_nl = None
             return
 
@@ -5125,7 +5441,9 @@ class ProlixContext:
         pos_f32 = pos.astype(jnp.float32)
         self._host_nl_dirty = False
 
-        if not self._should_use_neighbor_list():
+        if not self._should_use_neighbor_list() or (
+            self._is_triclinic and self._converted_system.has_pbc
+        ):
             self._neighbor_fn = None
             self._neighbor = None
             self._neighbor_idx = None
@@ -5195,15 +5513,22 @@ class ProlixContext:
         self._rebuild_gbsa_tile_list(pos_f32)
 
     def _refresh_box_caches_from_vectors(self) -> None:
-        """Cache host `box_nm` and GPU `box_diag` from `self._box_vectors`."""
+        """Cache host `box_nm` and GPU `box_diag` (`(3,)` ortho or `(3, 3)` triclinic) from `self._box_vectors`."""
         if self._box_vectors is not None:
             bv_np = np.asarray(self._box_vectors, dtype=np.float64)
             self._cached_box_nm = bv_np * ANGSTROM_TO_NM
-            self._morton_box_diag = (
-                jnp.diag(self._box_vectors)
-                if self._box_vectors.ndim == 2
-                else self._box_vectors
-            )
+            if self._is_triclinic:
+                self._morton_box_diag = (
+                    self._box_vectors
+                    if self._box_vectors.ndim == 2
+                    else jnp.diag(self._box_vectors)
+                )
+            else:
+                self._morton_box_diag = (
+                    jnp.diag(self._box_vectors)
+                    if self._box_vectors.ndim == 2
+                    else self._box_vectors
+                )
         else:
             self._cached_box_nm = np.eye(3, dtype=np.float64)
             self._morton_box_diag = None
@@ -5213,7 +5538,11 @@ class ProlixContext:
     def _sync_bundle_box(self) -> None:
         """Lazily materialize NPT GPU `box_diag` into `self._box_vectors` and `self._bundle.box`."""
         if self._bundle_box_dirty and self._morton_box_diag is not None:
-            new_bv = jnp.diag(self._morton_box_diag.astype(self._dtype))
+            new_bv = (
+                self._morton_box_diag.astype(self._dtype)
+                if self._morton_box_diag.ndim == 2
+                else jnp.diag(self._morton_box_diag.astype(self._dtype))
+            )
             self._box_vectors = new_bv
             self._bundle = eqx.tree_at(
                 lambda b: b.box, self._bundle, new_bv.astype(jnp.float32)
@@ -5221,10 +5550,12 @@ class ProlixContext:
             self._bundle_box_dirty = False
 
     def _get_box_nm_host(self) -> np.ndarray:
-        """Return cached `(3, 3)` `box_vectors_nm` on host, syncing only 3 floats if NPT modified box."""
+        """Return cached `(3, 3)` `box_vectors_nm` on host, syncing GPU box only if NPT modified it."""
         if self._box_nm_dirty and self._morton_box_diag is not None:
-            diag_np = np.asarray(self._morton_box_diag, dtype=np.float64)
-            self._cached_box_nm = np.diag(diag_np * ANGSTROM_TO_NM)
+            bv_arr = (
+                np.asarray(self._morton_box_diag, dtype=np.float64) * ANGSTROM_TO_NM
+            )
+            self._cached_box_nm = bv_arr if bv_arr.ndim == 2 else np.diag(bv_arr)
             self._box_nm_dirty = False
         return self._cached_box_nm
 
@@ -5503,6 +5834,15 @@ class ProlixContext:
         self._gbsa_params_dirty = False
         return cached
 
+    def _ensure_gp_vec(self, param_names: tuple[str, ...]) -> jax.Array | None:
+        """Pack dynamic context parameters into a 1D `jnp.float32` vector matching `param_names`."""
+        if len(param_names) == 0:
+            return None
+        return jnp.asarray(
+            [float(self._parameters.get(k, 0.0)) for k in param_names],
+            dtype=jnp.float32,
+        )
+
     def _morton_method_and_rule_supported(self) -> bool:
         """Check whether current nonbonded method and LJ combining rule are supported on Morton SoA."""
         soa_params = _get_pallas_soa_sig_params()
@@ -5549,21 +5889,25 @@ class ProlixContext:
         )
 
     def _can_use_morton_obs(self) -> bool:
-        """Return True when active Morton runner can serve `getState(groups=-1)` energy/forces on GPU."""
+        """Return True when GPU Morton runner can serve `getState(groups=-1)` / `getForcesJax` on GPU."""
         return bool(
-            self._morton_runner is not None
-            and self._nonbonded_engine == "morton_tile_pairs"
+            self._nonbonded_engine == "morton_tile_pairs"
             and not in_export_context()
             and self._precision in ("single", "mixed")
             and self._converted_system.has_pbc
             and (self._morton_box_diag is not None or self._box_vectors is not None)
-            and not self._is_triclinic
+            and (not self._is_triclinic or self._is_reduced_triclinic_supported())
             and self._converted_system.has_nonbonded
             and self._has_finite_cutoff
             and not self._converted_system.has_implicit_solvent
-            and len(self._custom_forces) == 0
+            and _custom_forces_are_gpu_fast(self._custom_forces)
             and (self._exceptions_use_pbc or not self._has_intermolecular_exceptions)
             and self._morton_method_and_rule_supported()
+            and not (
+                self._morton_runner is None
+                and self._effective_integrator_scheme() == "leapfrog"
+                and (self._step_count > 0 or self._velocities_initialized)
+            )
         )
 
     def _can_use_morton_step_runner(
@@ -5580,11 +5924,11 @@ class ProlixContext:
             and self._precision in ("single", "mixed")
             and self._converted_system.has_pbc
             and (self._morton_box_diag is not None or self._box_vectors is not None)
-            and not self._is_triclinic
+            and (not self._is_triclinic or self._is_reduced_triclinic_supported())
             and self._converted_system.has_nonbonded
             and self._has_finite_cutoff
             and not self._converted_system.has_implicit_solvent
-            and len(self._custom_forces) == 0
+            and _custom_forces_are_gpu_fast(self._custom_forces)
             and self._thermostat_override is None
             and eff_scheme in ("baoab", "langevin", "lfmiddle")
             and not self._has_frozen_atoms
@@ -5596,12 +5940,17 @@ class ProlixContext:
         if not base_ok:
             return False
         if has_barostat:
-            return bool(
-                baro_mode in ("mc", "scr")
-                and baro_info is not None
-                and str(baro_info.get("type", "MonteCarloBarostat"))
-                == "MonteCarloBarostat"
-            )
+            if baro_info is None:
+                return False
+            b_type = str(baro_info.get("type", "MonteCarloBarostat"))
+            if b_type == "MonteCarloBarostat":
+                return baro_mode in ("mc", "scr")
+            if b_type in (
+                "MonteCarloAnisotropicBarostat",
+                "MonteCarloMembraneBarostat",
+            ):
+                return baro_mode == "mc"
+            return False
         return True
 
     def _can_use_gbsa_step_runner(
@@ -5621,7 +5970,7 @@ class ProlixContext:
                 or str(self._config.nonbonded_engine) == "auto"
             )
             and self._n_particles <= 8192
-            and len(self._custom_forces) == 0
+            and _custom_forces_are_gpu_fast(self._custom_forces)
             and self._thermostat_override is None
             and eff_scheme in ("baoab", "langevin", "lfmiddle")
             and self._precision in ("single", "mixed")
@@ -5633,6 +5982,270 @@ class ProlixContext:
                 or self._lj_combining_rule == "lorentz_berthelot"
             )
         )
+
+    def _ensure_morton_runner(
+        self,
+        *,
+        gamma_akma: float | None = None,
+        has_barostat: bool | None = None,
+        baro_mode: str | None = None,
+        baro_info: dict[str, Any] | None = None,
+        baro_freq: int | None = None,
+    ) -> dict[str, Any]:
+        """Build or reuse the persistent GPU Morton runner for `step`, `getState`, and `getForcesJax`."""
+        ig_any = cast("Any", self._integrator)
+        if gamma_akma is None:
+            gamma_akma = 1.0 * TAU_AKMA_TO_PS
+            if hasattr(ig_any, "getFriction"):
+                gamma_akma = (
+                    ig_any.getFriction().value_in_unit(unit.picosecond**-1)
+                    * TAU_AKMA_TO_PS
+                )
+        if baro_info is None:
+            baro_info = self._converted_system.barostat
+        if baro_mode is None:
+            raw_bm = self._config.barostat_mode
+            baro_mode = "mc" if (raw_bm == "auto" and baro_info is not None) else raw_bm
+        if has_barostat is None:
+            eff_scheme = self._effective_integrator_scheme()
+            cand_baro = bool(
+                baro_info is not None
+                and baro_mode in ("mc", "scr")
+                and (self._converted_system.has_pbc or self._box_vectors is not None)
+            )
+            has_barostat = cand_baro and self._can_use_morton_step_runner(
+                cand_baro, baro_mode, baro_info, eff_scheme
+            )
+        if baro_freq is None:
+            baro_freq = (
+                self._config.barostat_frequency_override
+                if self._config.barostat_frequency_override is not None
+                else (baro_info.get("frequency", 25) if baro_info else 25)
+            )
+
+        target_p_akma = (
+            float(baro_info["pressure_akma"])
+            if (has_barostat and baro_info is not None)
+            else 0.0
+        )
+        baro_type = (
+            str(baro_info.get("type", "MonteCarloBarostat"))
+            if (has_barostat and baro_info is not None)
+            else "MonteCarloBarostat"
+        )
+        raw_s_axes = (
+            baro_info.get("scale_axes", (True, True, True))
+            if (has_barostat and baro_info is not None)
+            else (True, True, True)
+        )
+        baro_scale_axes = (
+            bool(raw_s_axes[0]),
+            bool(raw_s_axes[1]),
+            bool(raw_s_axes[2]),
+        )
+        raw_p_xyz = (
+            baro_info.get("pressure_xyz_akma")
+            if (has_barostat and baro_info is not None)
+            else None
+        )
+        baro_p_xyz = (
+            (float(raw_p_xyz[0]), float(raw_p_xyz[1]), float(raw_p_xyz[2]))
+            if raw_p_xyz is not None
+            else None
+        )
+        baro_st_akma = (
+            float(baro_info.get("surface_tension_akma", 0.0))
+            if (has_barostat and baro_info is not None)
+            else 0.0
+        )
+        baro_xymode = (
+            int(baro_info.get("xymode", 0))
+            if (has_barostat and baro_info is not None)
+            else 0
+        )
+        baro_z_mode = (
+            int(baro_info.get("z_mode", 0))
+            if (has_barostat and baro_info is not None)
+            else 0
+        )
+
+        nl_freq = int(self._config.nl_update_every)
+        eff_cmm = self._effective_cmm_frequency()
+        eff_alpha = self._effective_pme_alpha()
+        nb_method_l = self._effective_nonbonded_method().lower()
+        is_lj_pme = nb_method_l in ("lj_pme", "ljpme")
+        do_pme = nb_method_l in ("pme", "spme", "lj_pme", "ljpme")
+        is_rf = nb_method_l in (
+            "cutoffperiodic",
+            "cutoff_periodic",
+            "reactionfield",
+            "reaction_field",
+            "rf",
+        )
+        pme_dims = self._converted_system.pme_grid_dims or (16, 16, 16)
+        eff_lj_alpha = float(self._effective_lj_pme_alpha() or 0.34)
+        lj_pme_dims = self._converted_system.lj_pme_grid_dims
+        if is_lj_pme and lj_pme_dims is None:
+            self._sync_bundle_box()
+            bv_probe = np.diag(self._get_box_nm_host()) * NM_TO_ANGSTROM
+            ewald_tol_probe = float(
+                self._converted_system.ewald_error_tolerance
+                if self._converted_system.ewald_error_tolerance is not None
+                else self._config.ewald_error_tolerance
+            )
+            _, lj_pme_dims = resolve_ljpme_parameters(
+                bv_probe,
+                cutoff=float(self._converted_system.nonbonded_cutoff),
+                ewald_error_tolerance=ewald_tol_probe,
+                explicit_alpha=eff_lj_alpha,
+            )
+        eff_lj_dims = lj_pme_dims or (12, 12, 12)
+        n_pr_terms = sum(
+            int(pr.indices.shape[0]) for pr in self._position_restraints
+        )
+        has_vs_flag = self._converted_system.virtual_sites is not None
+        param_names = tuple(sorted(self._parameters.keys()))
+        cf_sig = tuple(
+            (
+                type(cf).__name__,
+                int(getattr(cf, "force_group", 0)),
+                bool(getattr(cf, "use_pbc", False)),
+            )
+            for cf in self._custom_forces
+        )
+        r_key = (
+            bool(self._is_triclinic),
+            round(float(gamma_akma), 12),
+            bool(has_barostat),
+            str(baro_mode or ""),
+            str(baro_type),
+            baro_scale_axes,
+            tuple(round(x, 12) for x in baro_p_xyz) if baro_p_xyz is not None else (),
+            round(baro_st_akma, 12),
+            int(baro_xymode),
+            int(baro_z_mode),
+            int(baro_freq),
+            round(target_p_akma, 12),
+            int(eff_cmm),
+            int(nl_freq),
+            pme_dims,
+            round(float(eff_alpha or 0.0), 12),
+            str(self._lj_combining_rule),
+            bool(is_lj_pme),
+            round(eff_lj_alpha if is_lj_pme else 0.0, 12),
+            eff_lj_dims if is_lj_pme else (0, 0, 0),
+            len(self._position_restraints),
+            int(n_pr_terms),
+            bool(has_vs_flag),
+            bool(self._deterministic_forces),
+            cf_sig,
+            param_names,
+        )
+        if self._morton_runner is None or self._morton_runner_key != r_key:
+            self._sync_bundle_box()
+            box_host_nm = self._get_box_nm_host()
+            bv0_np = (
+                box_host_nm * NM_TO_ANGSTROM
+                if self._is_triclinic
+                else np.diag(box_host_nm) * NM_TO_ANGSTROM
+            )
+            cache_sig = (
+                id(self._system),
+                int(self._n_particles),
+                int(self._system.getNumForces()),
+                int(self._system.getNumConstraints()),
+                str(self._precision),
+                bool(self._pallas_interpret),
+                round(
+                    float(np.sum(np.asarray(self._bundle.masses[: self._n_particles]))),
+                    6,
+                ),
+                tuple(round(float(x), 7) for x in bv0_np.reshape(-1)),
+                r_key,
+            )
+            cached_pair = _MORTON_RUNNER_CACHE.get(cache_sig)
+            if cached_pair is not None and cached_pair[0] is self._system:
+                runner = cached_pair[1]
+            else:
+                r_oh = float(
+                    self._converted_system.system_metadata.get("water_r_OH_akma")
+                    or 0.9572
+                )
+                r_hh = float(
+                    self._converted_system.system_metadata.get("water_r_HH_akma")
+                    or 1.5139
+                )
+                runner = _build_context_morton_runner(
+                    self._bundle,
+                    n_act=self._n_particles,
+                    precision=self._precision,
+                    pallas_interpret=self._pallas_interpret,
+                    cutoff=float(self._converted_system.nonbonded_cutoff),
+                    nl_skin=float(self._config.nl_skin),
+                    lj_switch_width=float(self._converted_system.lj_switch_width),
+                    tp_group=self._tp_group,
+                    do_pme=do_pme,
+                    pme_alpha=float(eff_alpha or 0.34),
+                    grid_dims=pme_dims,
+                    is_rf=is_rf,
+                    rf_dielectric=float(
+                        self._converted_system.reaction_field_dielectric
+                    ),
+                    gamma_akma=float(gamma_akma),
+                    nl_freq=nl_freq,
+                    cmm_freq=eff_cmm,
+                    has_barostat=bool(has_barostat),
+                    baro_mode=str(baro_mode or "mc"),
+                    baro_freq=int(baro_freq),
+                    target_p_akma=target_p_akma,
+                    baro_type=baro_type,
+                    baro_scale_axes=baro_scale_axes,
+                    baro_pressure_xyz_akma=baro_p_xyz,
+                    baro_surface_tension_akma=baro_st_akma,
+                    baro_xy_isotropic=(
+                        baro_xymode
+                        == int(openmm.MonteCarloMembraneBarostat.XYIsotropic)
+                    ),
+                    baro_z_mode=baro_z_mode,
+                    r_oh_akma=r_oh,
+                    r_hh_akma=r_hh,
+                    m_o_akma=self._water_m_O,
+                    m_h_akma=self._water_m_H,
+                    anchor_jnp=self._anchor_of_atom_jnp,
+                    mol_jnp=self._mol_of_atom_jnp,
+                    inv_mol_size_jnp=self._inv_mol_size_jnp,
+                    host_box0_np=bv0_np,
+                    init_positions=self._positions[: self._n_particles],
+                    lj_combining_rule=self._lj_combining_rule,
+                    is_lj_pme=is_lj_pme,
+                    lj_pme_alpha=eff_lj_alpha,
+                    lj_pme_grid_dims=eff_lj_dims,
+                    deterministic_forces=self._deterministic_forces,
+                    has_restraints=(n_pr_terms > 0),
+                    virtual_sites=self._converted_system.virtual_sites,
+                    pr_params_getter=None,
+                    is_triclinic=self._is_triclinic,
+                    has_custom_forces=(len(self._custom_forces) > 0),
+                    param_names=param_names,
+                )
+                if len(_MORTON_RUNNER_CACHE) >= 16:
+                    _MORTON_RUNNER_CACHE.pop(next(iter(_MORTON_RUNNER_CACHE)))
+                _MORTON_RUNNER_CACHE[cache_sig] = (self._system, runner)
+
+            self._morton_runner = runner
+            self._morton_runner_key = r_key
+            self._morton_tp_state = runner["tp_init"]
+            self._morton_fx = runner["fx_init"]
+            self._morton_fy = runner["fy_init"]
+            self._morton_fz = runner["fz_init"]
+            self._morton_G = runner["G_init"]
+            self._morton_bonded_dyn = _pack_bundle_fused_bonded(self._bundle)
+            self._morton_params_dirty = True
+            self._morton_restraints_dirty = True
+            self._morton_nl_dirty = True
+            self._morton_forces_dirty = True
+
+        return self._morton_runner
 
     # --- Step Rollout ---
     def step(self, steps: int) -> None:
@@ -5686,128 +6299,13 @@ class ProlixContext:
         if self._can_use_morton_step_runner(
             has_barostat, baro_mode, baro_info, eff_scheme
         ):
-            target_p_akma = (
-                float(baro_info["pressure_akma"])
-                if (has_barostat and baro_info is not None)
-                else 0.0
+            runner = self._ensure_morton_runner(
+                gamma_akma=float(gamma_akma),
+                has_barostat=bool(has_barostat),
+                baro_mode=baro_mode,
+                baro_info=baro_info,
+                baro_freq=int(baro_freq),
             )
-            nb_method_l = self._effective_nonbonded_method().lower()
-            is_lj_pme = nb_method_l in ("lj_pme", "ljpme")
-            do_pme = nb_method_l in ("pme", "spme", "lj_pme", "ljpme")
-            is_rf = nb_method_l in (
-                "cutoffperiodic",
-                "cutoff_periodic",
-                "reactionfield",
-                "reaction_field",
-                "rf",
-            )
-            pme_dims = self._converted_system.pme_grid_dims or (16, 16, 16)
-            eff_lj_alpha = float(self._effective_lj_pme_alpha() or 0.34)
-            lj_pme_dims = self._converted_system.lj_pme_grid_dims
-            if is_lj_pme and lj_pme_dims is None:
-                self._sync_bundle_box()
-                bv_probe = np.diag(self._get_box_nm_host()) * NM_TO_ANGSTROM
-                ewald_tol_probe = float(
-                    self._converted_system.ewald_error_tolerance
-                    if self._converted_system.ewald_error_tolerance is not None
-                    else self._config.ewald_error_tolerance
-                )
-                _, lj_pme_dims = resolve_ljpme_parameters(
-                    bv_probe,
-                    cutoff=float(self._converted_system.nonbonded_cutoff),
-                    ewald_error_tolerance=ewald_tol_probe,
-                    explicit_alpha=eff_lj_alpha,
-                )
-            eff_lj_dims = lj_pme_dims or (12, 12, 12)
-            n_pr_terms = sum(
-                int(pr.indices.shape[0]) for pr in self._position_restraints
-            )
-            has_vs_flag = self._converted_system.virtual_sites is not None
-            r_key = (
-                round(float(gamma_akma), 12),
-                bool(has_barostat),
-                str(baro_mode or ""),
-                int(baro_freq),
-                round(target_p_akma, 12),
-                int(eff_cmm),
-                int(nl_freq),
-                pme_dims,
-                round(float(eff_alpha or 0.0), 12),
-                str(self._lj_combining_rule),
-                bool(is_lj_pme),
-                round(eff_lj_alpha if is_lj_pme else 0.0, 12),
-                eff_lj_dims if is_lj_pme else (0, 0, 0),
-                len(self._position_restraints),
-                int(n_pr_terms),
-                bool(has_vs_flag),
-                bool(self._deterministic_forces),
-            )
-            if self._morton_runner is None or self._morton_runner_key != r_key:
-                self._sync_bundle_box()
-                bv0_np = np.diag(self._get_box_nm_host()) * NM_TO_ANGSTROM
-                r_oh = float(
-                    self._converted_system.system_metadata.get("water_r_OH_akma")
-                    or 0.9572
-                )
-                r_hh = float(
-                    self._converted_system.system_metadata.get("water_r_HH_akma")
-                    or 1.5139
-                )
-                runner = _build_context_morton_runner(
-                    self._bundle,
-                    n_act=self._n_particles,
-                    precision=self._precision,
-                    pallas_interpret=self._pallas_interpret,
-                    cutoff=float(self._converted_system.nonbonded_cutoff),
-                    nl_skin=float(self._config.nl_skin),
-                    lj_switch_width=float(self._converted_system.lj_switch_width),
-                    tp_group=self._tp_group,
-                    do_pme=do_pme,
-                    pme_alpha=float(eff_alpha or 0.34),
-                    grid_dims=pme_dims,
-                    is_rf=is_rf,
-                    rf_dielectric=float(
-                        self._converted_system.reaction_field_dielectric
-                    ),
-                    gamma_akma=float(gamma_akma),
-                    nl_freq=nl_freq,
-                    cmm_freq=eff_cmm,
-                    has_barostat=has_barostat,
-                    baro_mode=str(baro_mode or "mc"),
-                    baro_freq=int(baro_freq),
-                    target_p_akma=target_p_akma,
-                    r_oh_akma=r_oh,
-                    r_hh_akma=r_hh,
-                    m_o_akma=self._water_m_O,
-                    m_h_akma=self._water_m_H,
-                    anchor_jnp=self._anchor_of_atom_jnp,
-                    mol_jnp=self._mol_of_atom_jnp,
-                    inv_mol_size_jnp=self._inv_mol_size_jnp,
-                    host_box0_np=bv0_np,
-                    init_positions=self._positions[: self._n_particles],
-                    lj_combining_rule=self._lj_combining_rule,
-                    is_lj_pme=is_lj_pme,
-                    lj_pme_alpha=eff_lj_alpha,
-                    lj_pme_grid_dims=eff_lj_dims,
-                    deterministic_forces=self._deterministic_forces,
-                    has_restraints=(n_pr_terms > 0),
-                    virtual_sites=self._converted_system.virtual_sites,
-                    pr_params_getter=self._ensure_restraint_params,
-                )
-                self._morton_runner = runner
-                self._morton_runner_key = r_key
-                self._morton_tp_state = runner["tp_init"]
-                self._morton_fx = runner["fx_init"]
-                self._morton_fy = runner["fy_init"]
-                self._morton_fz = runner["fz_init"]
-                self._morton_G = runner["G_init"]
-                self._morton_bonded_dyn = runner["bonded_static"]
-                self._morton_params_dirty = True
-                self._morton_restraints_dirty = True
-                self._morton_nl_dirty = True
-                self._morton_forces_dirty = True
-
-            runner = self._morton_runner
             bd = self._morton_bonded_dyn or runner["bonded_static"]
             n_act = int(runner["n_act"])
             (
@@ -5820,6 +6318,7 @@ class ProlixContext:
                 c_tail_s,
             ) = self._ensure_morton_params(runner, bd, use_disp)
             pr_bufs = self._ensure_restraint_params()
+            gp_vec = self._ensure_gp_vec(runner["param_names"])
             box_diag_in = self._morton_box_diag
             if box_diag_in is None:
                 if self._box_vectors is None:
@@ -5827,9 +6326,17 @@ class ProlixContext:
                         "Periodic Morton step runner requires non-null box vectors"
                     )
                 box_diag_in = (
-                    jnp.diag(self._box_vectors)
-                    if self._box_vectors.ndim == 2
-                    else self._box_vectors
+                    (
+                        self._box_vectors
+                        if self._box_vectors.ndim == 2
+                        else jnp.diag(self._box_vectors)
+                    )
+                    if self._is_triclinic
+                    else (
+                        jnp.diag(self._box_vectors)
+                        if self._box_vectors.ndim == 2
+                        else self._box_vectors
+                    )
                 )
                 self._morton_box_diag = box_diag_in
 
@@ -5880,6 +6387,8 @@ class ProlixContext:
                 self._morton_mc_acc,
                 c_tail_s,
                 *pr_bufs,
+                self._custom_forces,
+                gp_vec,
             )
 
             self._positions = pos_out
@@ -5909,6 +6418,11 @@ class ProlixContext:
             n_pr_gb = sum(
                 int(pr.indices.shape[0]) for pr in self._position_restraints
             )
+            param_names_gb = tuple(sorted(self._parameters.keys()))
+            cf_sig_gb = tuple(
+                (type(cf).__name__, int(getattr(cf, "force_group", 0)))
+                for cf in self._custom_forces
+            )
             gb_key = (
                 round(float(gamma_akma), 12),
                 int(eff_cmm),
@@ -5925,6 +6439,8 @@ class ProlixContext:
                 len(self._position_restraints),
                 int(n_pr_gb),
                 self._converted_system.virtual_sites is not None,
+                cf_sig_gb,
+                param_names_gb,
             )
             if self._gbsa_runner is None or self._gbsa_runner_key != gb_key:
                 r_oh = float(
@@ -5960,6 +6476,8 @@ class ProlixContext:
                     m_h_akma=self._water_m_H,
                     has_restraints=(n_pr_gb > 0),
                     virtual_sites=self._converted_system.virtual_sites,
+                    has_custom_forces=(len(self._custom_forces) > 0),
+                    param_names=param_names_gb,
                     init_positions=self._positions[: self._n_particles],
                 )
                 self._gbsa_runner = gb_runner
@@ -5975,6 +6493,7 @@ class ProlixContext:
             n_act = int(gb_runner["n_act"])
             gb_params = self._ensure_gbsa_params(gb_runner)
             pr_bufs = self._ensure_restraint_params()
+            gp_vec_gb = self._ensure_gp_vec(gb_runner["param_names"])
             gb_forces_dirty = bool(
                 self._gbsa_forces_dirty
                 or self._morton_forces_dirty
@@ -5994,6 +6513,8 @@ class ProlixContext:
                 self._gbsa_fz,
                 gb_forces_dirty,
                 *pr_bufs,
+                self._custom_forces,
+                gp_vec_gb,
             )
             self._positions = pos_out
             self._velocities = vel_out
@@ -6174,7 +6695,7 @@ class ProlixContext:
         )
         return np.asarray(pos_u_jnp, dtype=np.float64), np.asarray(com_jnp, dtype=np.float64)
 
-    def _apply_mc_barostat(
+    def _apply_mc_barostat(  # noqa: PLR0911
         self,
         baro_info: dict[str, Any],
         kT_akma: float,
@@ -6220,16 +6741,45 @@ class ProlixContext:
             target_p_akma = float(p_xyz[ax_choice])
             new_box = current_box * axis_scales[:, None]
         elif baro_type == "MonteCarloMembraneBarostat":
-            scale_xy = 1.0 + delta_v * u_rand
-            if scale_xy <= 0:
-                return
-            s_xy = math.sqrt(scale_xy)
-            z_const_vol = (
-                int(baro_info.get("z_mode", 0))
-                == int(openmm.MonteCarloMembraneBarostat.ConstantVolume)
+            xymode_val = int(baro_info.get("xymode", 0))
+            zmode_val = int(baro_info.get("z_mode", 0))
+            z_free = zmode_val == int(openmm.MonteCarloMembraneBarostat.ZFree)
+            z_const_vol = zmode_val == int(
+                openmm.MonteCarloMembraneBarostat.ConstantVolume
             )
-            s_z = (1.0 / scale_xy) if z_const_vol else 1.0
-            axis_scales = np.array([s_xy, s_xy, s_z], dtype=np.float64)
+            xy_aniso = xymode_val == int(
+                openmm.MonteCarloMembraneBarostat.XYAnisotropic
+            )
+            do_z_move = False
+            ax_choice = 0
+            if z_free:
+                if xy_aniso:
+                    ax_choice = int(jax.random.randint(subkey_axis, (), 0, 3))
+                    do_z_move = ax_choice == 2
+                else:
+                    do_z_move = int(jax.random.randint(subkey_axis, (), 0, 3)) == 2
+            elif xy_aniso:
+                ax_choice = int(jax.random.randint(subkey_axis, (), 0, 2))
+            if do_z_move:
+                s_z = 1.0 + delta_v * u_rand
+                if s_z <= 0:
+                    return
+                axis_scales = np.array([1.0, 1.0, s_z], dtype=np.float64)
+            elif xy_aniso:
+                s_ax = 1.0 + delta_v * u_rand
+                if s_ax <= 0:
+                    return
+                s_x = s_ax if ax_choice == 0 else 1.0
+                s_y = s_ax if ax_choice == 1 else 1.0
+                s_z = (1.0 / s_ax) if z_const_vol else 1.0
+                axis_scales = np.array([s_x, s_y, s_z], dtype=np.float64)
+            else:
+                scale_xy = 1.0 + delta_v * u_rand
+                if scale_xy <= 0:
+                    return
+                s_xy = math.sqrt(scale_xy)
+                s_z = (1.0 / scale_xy) if z_const_vol else 1.0
+                axis_scales = np.array([s_xy, s_xy, s_z], dtype=np.float64)
             scale = float(axis_scales[0] * axis_scales[1] * axis_scales[2])
             new_box = current_box * axis_scales[:, None]
             area_curr = abs(float(current_box[0, 0] * current_box[1, 1]))
@@ -6406,9 +6956,9 @@ class ProlixContext:
                 self._mc_volume_scale = min(self._mc_volume_scale * 1.1, 0.3)
             self._mc_num_attempted = 0
             self._mc_num_accepted = 0
-        self._morton_mc_scale = jnp.asarray(self._mc_volume_scale, dtype=jnp.float32)
-        self._morton_mc_att = jnp.asarray(self._mc_num_attempted, dtype=jnp.int32)
-        self._morton_mc_acc = jnp.asarray(self._mc_num_accepted, dtype=jnp.int32)
+        self._morton_mc_scale = jnp.full((3,), self._mc_volume_scale, dtype=jnp.float32)
+        self._morton_mc_att = jnp.full((3,), self._mc_num_attempted, dtype=jnp.int32)
+        self._morton_mc_acc = jnp.full((3,), self._mc_num_accepted, dtype=jnp.int32)
 
     def _compute_virial(self, forces: jnp.ndarray | np.ndarray | None = None) -> float:
         """Compute scalar thermodynamic virial W = -dU/d(lam)|_{lam=1} under periodic molecular COM scaling."""
@@ -6667,6 +7217,278 @@ class ProlixContext:
         self._velocities = vel_akma
         self._velocities_initialized = True
 
+    def getPositionsJax(  # noqa: N802
+        self,
+        *,
+        in_nm: bool = True,
+        enforcePeriodicBox: bool = False,
+    ) -> jax.Array:
+        """Return zero-copy device `jax.Array` of particle positions `(N, 3)` in `nm` (default) or `Å`."""
+        pos = self._positions[: self._n_particles]
+        has_box = (
+            self._converted_system.has_pbc
+            or self._morton_box_diag is not None
+            or self._box_vectors is not None
+        )
+        if enforcePeriodicBox and has_box:
+            if self._morton_box_diag is not None:
+                box_gpu = (
+                    self._morton_box_diag.astype(pos.dtype)
+                    if self._morton_box_diag.ndim == 2
+                    else jnp.diag(self._morton_box_diag.astype(pos.dtype))
+                )
+            elif self._box_vectors is not None:
+                box_gpu = (
+                    self._box_vectors.astype(pos.dtype)
+                    if self._box_vectors.ndim == 2
+                    else jnp.diag(self._box_vectors.astype(pos.dtype))
+                )
+            else:
+                box_gpu = None
+            if box_gpu is not None:
+                pos = _wrap_molecules_jax(
+                    pos,
+                    box_gpu,
+                    self._mol_of_atom_jnp,
+                    self._inv_mol_size_jnp,
+                )
+        if in_nm:
+            return pos * jnp.asarray(ANGSTROM_TO_NM, dtype=pos.dtype)
+        return pos
+
+    def setPositionsJax(  # noqa: N802
+        self,
+        positions: Any,
+        *,
+        in_nm: bool = True,
+    ) -> None:
+        """Set particle positions from a `jax.Array` or DLPack (`__dlpack__`) tensor without host copy."""
+        pos_dev = _from_jax_or_dlpack(positions)
+        if pos_dev.ndim != 2 or pos_dev.shape[1] != 3:
+            raise ValueError(
+                f"Positions tensor must have shape (N, 3), got {pos_dev.shape}"
+            )
+        if pos_dev.shape[0] != self._n_particles:
+            raise openmm.OpenMMException(
+                "Called setPositionsJax() on a Context with the wrong number of positions"
+            )
+        pos_akma = pos_dev.astype(self._dtype)
+        if in_nm:
+            pos_akma = pos_akma * jnp.asarray(NM_TO_ANGSTROM, dtype=self._dtype)
+        if self._converted_system.virtual_sites is not None:
+            pos_akma = self._converted_system.compute_virtual_sites(pos_akma)
+        self._positions = pos_akma
+        self._morton_nl_dirty = True
+        self._morton_forces_dirty = True
+        self._gbsa_forces_dirty = True
+        self._host_nl_dirty = True
+
+    def getVelocitiesJax(  # noqa: N802
+        self,
+        *,
+        in_nm_per_ps: bool = True,
+    ) -> jax.Array:
+        """Return zero-copy device `jax.Array` of particle velocities `(N, 3)` in `nm/ps` (default) or `Å/τ_AKMA`."""
+        vel = self._velocities[: self._n_particles]
+        if in_nm_per_ps:
+            return vel * jnp.asarray(VELOCITY_AKMA_TO_OMM, dtype=vel.dtype)
+        return vel
+
+    def setVelocitiesJax(  # noqa: N802
+        self,
+        velocities: Any,
+        *,
+        in_nm_per_ps: bool = True,
+    ) -> None:
+        """Set particle velocities from a `jax.Array` or DLPack (`__dlpack__`) tensor without host copy."""
+        vel_dev = _from_jax_or_dlpack(velocities)
+        if vel_dev.ndim != 2 or vel_dev.shape[1] != 3:
+            raise ValueError(
+                f"Velocities tensor must have shape (N, 3), got {vel_dev.shape}"
+            )
+        if vel_dev.shape[0] != self._n_particles:
+            raise openmm.OpenMMException(
+                "Called setVelocitiesJax() on a Context with the wrong number of velocities"
+            )
+        vel_akma = vel_dev.astype(self._dtype)
+        if in_nm_per_ps:
+            vel_akma = vel_akma * jnp.asarray(VELOCITY_OMM_TO_AKMA, dtype=self._dtype)
+        if self._converted_system.virtual_sites is not None:
+            vs_idx = self._converted_system.virtual_sites.order
+            vel_akma = vel_akma.at[vs_idx].set(0.0)
+        self._velocities = vel_akma
+        self._velocities_initialized = True
+
+    def getForcesJax(  # noqa: N802
+        self,
+        *,
+        in_kj_per_mol_nm: bool = True,
+        groups: int | set[int] = -1,
+    ) -> jax.Array:
+        """Return device `jax.Array` of particle forces `(N, 3)` in `kJ/(mol·nm)` (default) or `kcal/(mol·Å)`."""
+        if isinstance(groups, set):
+            raw_groups = sum(1 << g for g in groups if 0 <= g <= 31)
+        else:
+            raw_groups = int(groups)
+        groups_mask = int(np.int32(raw_groups))
+        use_disp = bool(
+            self._config.use_dispersion_correction
+            and self._converted_system.use_dispersion_correction
+        )
+
+        if groups_mask == -1 and self._can_use_morton_obs():
+            runner = self._ensure_morton_runner()
+            bd = self._morton_bonded_dyn or runner["bonded_static"]
+            n_act = int(runner["n_act"])
+            if (
+                not self._morton_nl_dirty
+                and not self._morton_forces_dirty
+                and self._morton_tp_state is not None
+            ):
+                f_omm_dev = runner["jit_unpermute_forces"](
+                    self._morton_fx,
+                    self._morton_fy,
+                    self._morton_fz,
+                    self._morton_tp_state.inv_perm,
+                )
+            else:
+                (
+                    q_b,
+                    sig_b,
+                    eps_b,
+                    e_sig_in,
+                    e_eps_in,
+                    e_qp_in,
+                    c_tail_s,
+                ) = self._ensure_morton_params(runner, bd, use_disp)
+                pr_bufs = self._ensure_restraint_params()
+                gp_vec = self._ensure_gp_vec(runner["param_names"])
+                box_diag_in = self._morton_box_diag
+                if box_diag_in is None:
+                    if self._box_vectors is None:
+                        raise RuntimeError(
+                            "Periodic Morton getForcesJax requires non-null box vectors"
+                        )
+                    box_diag_in = (
+                        (
+                            self._box_vectors
+                            if self._box_vectors.ndim == 2
+                            else jnp.diag(self._box_vectors)
+                        )
+                        if self._is_triclinic
+                        else (
+                            jnp.diag(self._box_vectors)
+                            if self._box_vectors.ndim == 2
+                            else self._box_vectors
+                        )
+                    )
+                    self._morton_box_diag = box_diag_in
+                (
+                    _scalars_kj_dev,
+                    f_omm_dev,
+                    tp_out,
+                    fx_out,
+                    fy_out,
+                    fz_out,
+                    G_out,
+                ) = runner["jit_energy_and_forces"](
+                    self._positions[:n_act],
+                    self._velocities[:n_act],
+                    box_diag_in,
+                    q_b,
+                    sig_b,
+                    eps_b,
+                    bd.b_r0,
+                    bd.b_k,
+                    bd.a_th0,
+                    bd.a_kval,
+                    bd.d_p0,
+                    bd.d_p1,
+                    bd.d_p2,
+                    e_sig_in,
+                    e_eps_in,
+                    e_qp_in,
+                    self._morton_tp_state,
+                    self._morton_G,
+                    bool(self._morton_nl_dirty),
+                    bool(self._morton_forces_dirty),
+                    c_tail_s,
+                    pr_bufs,
+                    self._custom_forces,
+                    gp_vec,
+                )
+                self._morton_tp_state = tp_out
+                self._morton_fx = fx_out
+                self._morton_fy = fy_out
+                self._morton_fz = fz_out
+                self._morton_G = G_out
+                self._morton_nl_dirty = False
+                self._morton_forces_dirty = False
+            if in_kj_per_mol_nm:
+                return f_omm_dev
+            return f_omm_dev * jnp.asarray(FORCE_OMM_TO_AKMA, dtype=f_omm_dev.dtype)
+
+        self._ensure_host_nl_fresh()
+        gp = self._get_dynamic_global_params()
+        ewald_tol = (
+            self._converted_system.ewald_error_tolerance
+            if self._converted_system.ewald_error_tolerance is not None
+            else self._config.ewald_error_tolerance
+        )
+        _, forces_akma = _pure_compute_energy_and_forces(
+            self._positions,
+            self._box_vectors,
+            self._bundle,
+            self._custom_forces,
+            self._position_restraints,
+            gp,
+            self._converted_system.force_group_by_component,
+            groups_mask,
+            self._converted_system.has_pbc,
+            self._converted_system.nonbonded_cutoff,
+            self._converted_system.bond_force_groups,
+            self._converted_system.angle_force_groups,
+            self._converted_system.dihedral_force_groups,
+            self._converted_system.cmap_force_groups,
+            self._effective_nonbonded_method(),
+            self._converted_system.has_nonbonded,
+            use_disp,
+            ewald_tol,
+            self._converted_system.reaction_field_dielectric,
+            self._converted_system.has_implicit_solvent,
+            self._converted_system.solvent_dielectric,
+            self._converted_system.solute_dielectric,
+            self._nonbonded_engine,
+            self._converted_system.pme_grid_dims,
+            use_pallas=self._config.use_pallas,
+            pallas_interpret=self._config.pallas_interpret,
+            lj_switch_width=self._converted_system.lj_switch_width,
+            neighbor_idx=getattr(self, "_neighbor_idx", None),
+            use_pallas_pme=self._config.use_pallas_pme,
+            custom_nonbonded_chunk_size=self._config.custom_nonbonded_chunk_size,
+            tile_pair_nl=self._tile_pair_nl,
+            gbsa_tile_list=self._gbsa_tile_list,
+            is_triclinic=self._is_triclinic,
+            mixed_precision=self._mixed_precision,
+            gb_use_neighbor_list=self._gb_use_neighbor_list,
+            gbsa_surface_tension=self._converted_system.gbsa_surface_tension,
+            pme_alpha=self._effective_pme_alpha(),
+            nonbonded_offsets=self._converted_system.nonbonded_offsets,
+            default_params=self._converted_system.default_parameters,
+            lj_combining_rule=self._lj_combining_rule,
+            exceptions_use_pbc=self._exceptions_use_pbc,
+            dispersion_follows_parameters=self._dispersion_follows_parameters,
+            lj_pme_alpha=self._effective_lj_pme_alpha(),
+            lj_pme_grid_dims=self._converted_system.lj_pme_grid_dims,
+        )
+        if self._converted_system.virtual_sites is not None:
+            forces_akma = self._converted_system.redistribute_virtual_site_forces(
+                forces_akma, self._positions
+            )
+        if in_kj_per_mol_nm:
+            return forces_akma * jnp.asarray(FORCE_AKMA_TO_OMM, dtype=forces_akma.dtype)
+        return forces_akma
+
     def setVelocitiesToTemperature(  # noqa: N802
         self, temperature: Any, randomSeed: int | None = None
     ) -> None:
@@ -6730,6 +7552,7 @@ class ProlixContext:
         box_canonical = reduce_triclinic_box_vectors(jnp.asarray(box_mat, dtype=self._dtype))
         box_np = np.asarray(box_canonical, dtype=np.float64)
         off_diag = np.abs(box_np - np.diag(np.diag(box_np)))
+        prev_is_triclinic = self._is_triclinic
         self._is_triclinic = bool(np.max(off_diag) > 1e-6)
         self._box_vectors = box_canonical
         box_bundle = box_canonical.astype(jnp.float32)
@@ -6802,7 +7625,11 @@ class ProlixContext:
             pme_grid_dims=new_pme_dims,
             lj_pme_grid_dims=new_lj_pme_dims,
         )
-        if new_pme_dims != prev_pme_dims or new_lj_pme_dims != prev_lj_pme_dims:
+        if (
+            new_pme_dims != prev_pme_dims
+            or new_lj_pme_dims != prev_lj_pme_dims
+            or self._is_triclinic != prev_is_triclinic
+        ):
             self._morton_runner = None
             self._morton_runner_key = None
         self._refresh_box_caches_from_vectors()
@@ -6942,9 +7769,28 @@ class ProlixContext:
 
     def reinitialize(self, preserveState: bool = False) -> None:
         chk = self.createCheckpoint() if preserveState else None
-        self._converted_system = from_openmm_system(
-            self._system, self._integrator, self._config
+        for k_sig in [
+            k_s
+            for k_s, pair in _MORTON_RUNNER_CACHE.items()
+            if pair[0] is self._system
+        ]:
+            _MORTON_RUNNER_CACHE.pop(k_sig, None)
+        eff_conv_cfg = (
+            dataclasses.replace(self._config, anisotropic_barostat=True)
+            if (
+                not self._config.anisotropic_barostat
+                and _system_has_anisotropic_or_membrane_barostat(self._system)
+            )
+            else self._config
         )
+        self._converted_system = from_openmm_system(
+            self._system, self._integrator, eff_conv_cfg
+        )
+        self._anisotropic_barostat = bool(
+            self._config.anisotropic_barostat
+            or _system_has_anisotropic_or_membrane_barostat(self._system)
+        )
+        self._is_triclinic = bool(self._converted_system.is_triclinic)
         self._n_particles = self._converted_system.n_real_particles
         self._has_finite_cutoff = (
             0.0 < float(self._converted_system.nonbonded_cutoff) < float("inf")
@@ -6996,6 +7842,9 @@ class ProlixContext:
             self._positions = jnp.zeros((self._n_particles, 3), dtype=self._dtype)
             self._velocities = jnp.zeros((self._n_particles, 3), dtype=self._dtype)
             self._velocities_initialized = False
+            self._morton_mc_scale = jnp.full((3,), 0.01, dtype=jnp.float32)
+            self._morton_mc_att = jnp.zeros((3,), dtype=jnp.int32)
+            self._morton_mc_acc = jnp.zeros((3,), dtype=jnp.int32)
             self._time = 0.0
             self._step_count = 0
         if preserveState and chk is not None:
@@ -7879,29 +8728,33 @@ class ProlixContext:
         if req_pos:
             has_box = self._converted_system.has_pbc or self._morton_box_diag is not None or self._box_vectors is not None
             if enforcePeriodicBox and has_box:
-                if self._is_triclinic and self._box_vectors is not None:
-                    pos_raw = np.asarray(self._positions[: self._n_particles], dtype=np.float64)
-                    pos_nm = self._wrap_molecules(pos_raw) * float(ANGSTROM_TO_NM)
+                if self._morton_box_diag is not None:
+                    box_gpu = (
+                        self._morton_box_diag.astype(self._positions.dtype)
+                        if self._morton_box_diag.ndim == 2
+                        else jnp.diag(self._morton_box_diag.astype(self._positions.dtype))
+                    )
+                elif self._box_vectors is not None:
+                    box_gpu = (
+                        self._box_vectors.astype(self._positions.dtype)
+                        if self._box_vectors.ndim == 2
+                        else jnp.diag(self._box_vectors.astype(self._positions.dtype))
+                    )
                 else:
-                    if self._morton_box_diag is not None:
-                        box_gpu = jnp.diag(self._morton_box_diag.astype(self._positions.dtype))
-                    elif self._box_vectors is not None:
-                        box_gpu = self._box_vectors.astype(self._positions.dtype)
-                    else:
-                        box_gpu = None
-                    if box_gpu is not None:
-                        pos_wrapped_dev = _wrap_molecules_jax(
-                            self._positions[: self._n_particles],
-                            box_gpu,
-                            self._mol_of_atom_jnp,
-                            self._inv_mol_size_jnp,
-                        )
-                        pos_nm = np.asarray(pos_wrapped_dev, dtype=np.float64) * ANGSTROM_TO_NM
-                    else:
-                        pos_nm = (
-                            np.asarray(self._positions[: self._n_particles], dtype=np.float64)
-                            * ANGSTROM_TO_NM
-                        )
+                    box_gpu = None
+                if box_gpu is not None:
+                    pos_wrapped_dev = _wrap_molecules_jax(
+                        self._positions[: self._n_particles],
+                        box_gpu,
+                        self._mol_of_atom_jnp,
+                        self._inv_mol_size_jnp,
+                    )
+                    pos_nm = np.asarray(pos_wrapped_dev, dtype=np.float64) * ANGSTROM_TO_NM
+                else:
+                    pos_nm = (
+                        np.asarray(self._positions[: self._n_particles], dtype=np.float64)
+                        * ANGSTROM_TO_NM
+                    )
             else:
                 pos_nm = (
                     np.asarray(self._positions[: self._n_particles], dtype=np.float64)
@@ -7926,7 +8779,7 @@ class ProlixContext:
                 and self._converted_system.use_dispersion_correction
             )
             if groups_mask == -1 and self._can_use_morton_obs():
-                runner = cast("dict[str, Any]", self._morton_runner)
+                runner = self._ensure_morton_runner()
                 bd = self._morton_bonded_dyn or runner["bonded_static"]
                 n_act = int(runner["n_act"])
                 if (
@@ -7953,6 +8806,8 @@ class ProlixContext:
                         e_qp_in,
                         c_tail_s,
                     ) = self._ensure_morton_params(runner, bd, use_disp)
+                    pr_bufs = self._ensure_restraint_params()
+                    gp_vec = self._ensure_gp_vec(runner["param_names"])
                     box_diag_in = self._morton_box_diag
                     if box_diag_in is None:
                         if self._box_vectors is None:
@@ -7960,9 +8815,17 @@ class ProlixContext:
                                 "Periodic Morton getState requires non-null box vectors"
                             )
                         box_diag_in = (
-                            jnp.diag(self._box_vectors)
-                            if self._box_vectors.ndim == 2
-                            else self._box_vectors
+                            (
+                                self._box_vectors
+                                if self._box_vectors.ndim == 2
+                                else jnp.diag(self._box_vectors)
+                            )
+                            if self._is_triclinic
+                            else (
+                                jnp.diag(self._box_vectors)
+                                if self._box_vectors.ndim == 2
+                                else self._box_vectors
+                            )
                         )
                         self._morton_box_diag = box_diag_in
                     (
@@ -7995,6 +8858,9 @@ class ProlixContext:
                         bool(self._morton_nl_dirty),
                         bool(self._morton_forces_dirty),
                         c_tail_s,
+                        pr_bufs,
+                        self._custom_forces,
+                        gp_vec,
                     )
                     self._morton_tp_state = tp_out
                     self._morton_fx = fx_out

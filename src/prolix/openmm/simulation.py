@@ -40,8 +40,12 @@ from prolix.openmm.context import (
     _apply_particle_offsets,
     _eval_nonbonded_terms,
     _eval_system_potential_energy,
+    _from_jax_or_dlpack,
+    _is_reduced_triclinic_box_np,
     _minimum_image_dr,
     _pure_compute_energy_and_forces,
+    _system_has_anisotropic_or_membrane_barostat,
+    _triclinic_morton_kernels_supported,
     _wrap_molecules_jax,
 )
 from prolix.openmm.converter import (
@@ -111,6 +115,15 @@ class _BatchVelocityObservable(eqx.Module):
             mass = mass[:, None]
         safe_m = jnp.maximum(mass, 1e-12)
         return jnp.where(mass > 1e-12, mom / safe_m, jnp.zeros_like(mom))
+
+
+class _BatchParameterDerivatives(list[dict[str, float]]):
+    """Per-replica `{param: dU/dparam}` list also supporting `derivs['param'] -> (B,) np.ndarray`."""
+
+    def __getitem__(self, key: Any) -> Any:
+        if isinstance(key, str):
+            return np.asarray([float(d.get(key, 0.0)) for d in self], dtype=np.float64)
+        return super().__getitem__(key)
 
 
 @eqx.filter_jit
@@ -412,9 +425,11 @@ class ProlixSimulation(app.Simulation):
             or ctx._morton_box_diag is not None
             or ctx._box_vectors is not None
         )
-        if ctx._morton_box_diag is not None and not ctx._is_triclinic:
-            box_akma_d: jnp.ndarray | None = jnp.diag(
+        if ctx._morton_box_diag is not None:
+            box_akma_d: jnp.ndarray | None = (
                 ctx._morton_box_diag.astype(raw_pos_d.dtype)
+                if ctx._morton_box_diag.ndim == 2
+                else jnp.diag(ctx._morton_box_diag.astype(raw_pos_d.dtype))
             )
         elif ctx._box_vectors is not None:
             box_akma_d = ctx._box_vectors.astype(raw_pos_d.dtype)
@@ -422,7 +437,7 @@ class ProlixSimulation(app.Simulation):
             box_akma_d = None
 
         pos_wrapped_d: jnp.ndarray | None = None
-        if need_wrapped and req_pos_w and has_box and not ctx._is_triclinic and box_akma_d is not None:
+        if need_wrapped and req_pos_w and has_box and box_akma_d is not None:
             pos_wrapped_d = _wrap_molecules_jax(
                 raw_pos_d,
                 box_akma_d,
@@ -445,7 +460,7 @@ class ProlixSimulation(app.Simulation):
                 and ctx._converted_system.use_dispersion_correction
             )
             if groups_mask == -1 and ctx._can_use_morton_obs():
-                runner = cast("dict[str, Any]", ctx._morton_runner)
+                runner = ctx._ensure_morton_runner()
                 bd = ctx._morton_bonded_dyn or runner["bonded_static"]
                 n_act = int(runner["n_act"])
                 if (
@@ -471,12 +486,22 @@ class ProlixSimulation(app.Simulation):
                         e_qp_in,
                         c_tail_s,
                     ) = ctx._ensure_morton_params(runner, bd, use_disp)
+                    pr_bufs = ctx._ensure_restraint_params()
+                    gp_vec = ctx._ensure_gp_vec(runner["param_names"])
                     box_diag_in = ctx._morton_box_diag
                     if box_diag_in is None and ctx._box_vectors is not None:
                         box_diag_in = (
-                            jnp.diag(ctx._box_vectors)
-                            if ctx._box_vectors.ndim == 2
-                            else ctx._box_vectors
+                            (
+                                ctx._box_vectors
+                                if ctx._box_vectors.ndim == 2
+                                else jnp.diag(ctx._box_vectors)
+                            )
+                            if ctx._is_triclinic
+                            else (
+                                jnp.diag(ctx._box_vectors)
+                                if ctx._box_vectors.ndim == 2
+                                else ctx._box_vectors
+                            )
                         )
                         ctx._morton_box_diag = box_diag_in
                     (
@@ -509,6 +534,9 @@ class ProlixSimulation(app.Simulation):
                         bool(ctx._morton_nl_dirty),
                         bool(ctx._morton_forces_dirty),
                         c_tail_s,
+                        pr_bufs,
+                        ctx._custom_forces,
+                        gp_vec,
                     )
                     ctx._morton_tp_state = tp_out
                     ctx._morton_fx = fx_out
@@ -671,7 +699,9 @@ class ProlixSimulation(app.Simulation):
         pos_nm: np.ndarray | None = None
         if req_pos:
             if enforce_pbc and meta["has_box"]:
-                if meta["is_triclinic"] and host_dev["box_akma"] is not None:
+                if host_dev["pos_wrapped"] is not None:
+                    pos_nm = np.asarray(host_dev["pos_wrapped"], dtype=np.float64) * ANGSTROM_TO_NM
+                elif meta["is_triclinic"] and host_dev["box_akma"] is not None:
                     raw_pos_f64 = np.asarray(host_dev["raw_pos"], dtype=np.float64)
                     # Vectorized CSR float64 wrap using frame k's box
                     n_mols = int(ctx._inv_mol_size_np.shape[0])
@@ -692,8 +722,6 @@ class ProlixSimulation(app.Simulation):
                         pos_nm = (raw_pos_f64 - diffs[m_ids]) * ANGSTROM_TO_NM
                     else:
                         pos_nm = raw_pos_f64 * ANGSTROM_TO_NM
-                elif host_dev["pos_wrapped"] is not None:
-                    pos_nm = np.asarray(host_dev["pos_wrapped"], dtype=np.float64) * ANGSTROM_TO_NM
                 else:
                     pos_nm = np.asarray(host_dev["raw_pos"], dtype=np.float64) * ANGSTROM_TO_NM
             else:
@@ -920,6 +948,54 @@ class ProlixSimulation(app.Simulation):
             self._minimize_openmm_cpu(tol_omm, maxIterations, reporter)
         else:
             raise ValueError(f"Unknown minimizer backend: {backend!r}")
+
+    def getPositionsJax(  # noqa: N802
+        self,
+        *,
+        in_nm: bool = True,
+        enforcePeriodicBox: bool = False,
+    ) -> jax.Array:
+        """Return zero-copy device `jax.Array` of particle positions `(N, 3)` in `nm` (default) or `Å`."""
+        return self.context.getPositionsJax(
+            in_nm=in_nm, enforcePeriodicBox=enforcePeriodicBox
+        )
+
+    def setPositionsJax(  # noqa: N802
+        self,
+        positions: Any,
+        *,
+        in_nm: bool = True,
+    ) -> None:
+        """Set particle positions from a `jax.Array` or DLPack (`__dlpack__`) tensor without host copy."""
+        self.context.setPositionsJax(positions, in_nm=in_nm)
+
+    def getVelocitiesJax(  # noqa: N802
+        self,
+        *,
+        in_nm_per_ps: bool = True,
+    ) -> jax.Array:
+        """Return zero-copy device `jax.Array` of particle velocities `(N, 3)` in `nm/ps` (default) or `Å/τ_AKMA`."""
+        return self.context.getVelocitiesJax(in_nm_per_ps=in_nm_per_ps)
+
+    def setVelocitiesJax(  # noqa: N802
+        self,
+        velocities: Any,
+        *,
+        in_nm_per_ps: bool = True,
+    ) -> None:
+        """Set particle velocities from a `jax.Array` or DLPack (`__dlpack__`) tensor without host copy."""
+        self.context.setVelocitiesJax(velocities, in_nm_per_ps=in_nm_per_ps)
+
+    def getForcesJax(  # noqa: N802
+        self,
+        *,
+        in_kj_per_mol_nm: bool = True,
+        groups: int | set[int] = -1,
+    ) -> jax.Array:
+        """Return device `jax.Array` of particle forces `(N, 3)` in `kJ/(mol·nm)` (default) or `kcal/(mol·Å)`."""
+        return self.context.getForcesJax(
+            in_kj_per_mol_nm=in_kj_per_mol_nm, groups=groups
+        )
 
     def _minimize_lbfgs(
         self, tol_akma: float, max_iter: int, reporter: Any = None  # noqa: ARG002
@@ -1367,11 +1443,7 @@ def _constraint_penalty_energy_akma(
     n = pos.shape[0]
     e_pen = jnp.array(0.0, dtype=pos.dtype)
     half_k = jnp.asarray(0.5 * k_pen, dtype=pos.dtype)
-    box_pbc = (
-        jnp.diag(box.astype(pos.dtype))
-        if (has_pbc and box is not None and box.ndim == 2)
-        else (box.astype(pos.dtype) if (has_pbc and box is not None) else None)
-    )
+    box_pbc = box.astype(pos.dtype) if (has_pbc and box is not None) else None
     use_pbc_intra = bool(has_pbc and exceptions_use_pbc and box_pbc is not None)
 
     if (
@@ -2168,7 +2240,15 @@ class ProlixBatchSimulation:
         for sys_obj in self.systems:
             sid = id(sys_obj)
             if sid not in conv_cache:
-                conv_cache[sid] = from_openmm_system(sys_obj, config=self.config)
+                eff_conv_cfg = (
+                    dataclasses.replace(self.config, anisotropic_barostat=True)
+                    if (
+                        not self.config.anisotropic_barostat
+                        and _system_has_anisotropic_or_membrane_barostat(sys_obj)
+                    )
+                    else self.config
+                )
+                conv_cache[sid] = from_openmm_system(sys_obj, config=eff_conv_cfg)
             conv_i = conv_cache[sid]
             self._converted_systems.append(conv_i)
             b_i = dataclasses.replace(
@@ -2346,6 +2426,7 @@ class ProlixBatchSimulation:
             )
         )
 
+        tri_kernels_ok = _triclinic_morton_kernels_supported()
         needs_context_fallback = (
             not uniform_integrators
             or self.config.precision == "double"
@@ -2357,7 +2438,17 @@ class ProlixBatchSimulation:
                 bool(cs.custom_forces)
                 or bool(cs.position_restraints)
                 or bool(cs.virtual_sites is not None)
-                or cs.is_triclinic
+                or (
+                    cs.is_triclinic
+                    and (
+                        not tri_kernels_ok
+                        or self.config.nonbonded_engine in ("dense", "flash", "neighbor_list")
+                        or cs.bundle.box is None
+                        or not _is_reduced_triclinic_box_np(
+                            np.asarray(cs.bundle.box, dtype=np.float64)
+                        )
+                    )
+                )
                 or str(cs.nonbonded_method).lower() in ("cutoff", "lj_pme", "cutoffnonperiodic")
                 for cs in self._converted_systems
             )
@@ -2412,6 +2503,7 @@ class ProlixBatchSimulation:
         """Resolve `(nonbonded_engine, use_pallas, use_pallas_pme)` for `EnsemblePlan`."""
         periodic = all(b.shape_spec.has_pbc for b in self._bundles)
         implicit = any(b.shape_spec.has_implicit_solvent for b in self._bundles)
+        any_triclinic = any(cs.is_triclinic for cs in self._converted_systems)
         need_morton = bool(
             periodic
             and not implicit
@@ -2419,6 +2511,7 @@ class ProlixBatchSimulation:
                 self._pressure_atm is not None
                 or self._is_reaction_field
                 or self.config.precision == "mixed"
+                or any_triclinic
             )
             and self.config.nonbonded_engine in ("auto", "morton_tile_pairs")
         )
@@ -2436,9 +2529,15 @@ class ProlixBatchSimulation:
         eff_pallas_pme = bool(self.config.use_pallas_pme or eff_pallas)
         return eff_engine, eff_pallas, eff_pallas_pme
 
-    def _build_knob_surface(self, eff_engine: str, eff_pallas: bool, eff_pallas_pme: bool) -> KnobSurface:
+    def _build_knob_surface(
+        self,
+        eff_engine: str,
+        eff_pallas: bool,
+        eff_pallas_pme: bool,
+        replica_idx: int = 0,
+    ) -> KnobSurface:
         """Construct composite `KnobSurface` carrying RF, PME, dispersion, and barostat knobs."""
-        cs0 = self._converted_systems[0]
+        cs0 = self._converted_systems[replica_idx]
         eff_alpha = _resolve_cs_pme_alpha(cs0, self.config)
         ewald_tol = (
             cs0.ewald_error_tolerance
@@ -2813,8 +2912,12 @@ class ProlixBatchSimulation:
             for i, ctx in enumerate(self._contexts):
                 self._positions_akma[i] = ctx._positions
                 self._velocities_akma[i] = ctx._velocities
-                if ctx._morton_box_diag is not None and not ctx._is_triclinic:
-                    self._boxes_akma[i] = jnp.diag(ctx._morton_box_diag.astype(self._dtype))
+                if ctx._morton_box_diag is not None:
+                    self._boxes_akma[i] = (
+                        ctx._morton_box_diag.astype(self._dtype)
+                        if ctx._morton_box_diag.ndim == 2
+                        else jnp.diag(ctx._morton_box_diag.astype(self._dtype))
+                    )
                 elif ctx._box_vectors is not None:
                     self._boxes_akma[i] = ctx._box_vectors.astype(self._dtype)
             self.currentStep += steps
@@ -2858,12 +2961,11 @@ class ProlixBatchSimulation:
             extra_run_kw["initial_velocities"] = self._velocities_akma
 
         if need_morton and not self._boxes_match and self.batch_size > 1:
-            # Replicas diverged in box size on an earlier NPT step: run 1-bundle plans
-            # per replica so Morton SoA NPT/RF stays active with zero ProlixContext fallback.
+            # Replicas have distinct boxes (e.g. NPT divergence or cross-shape cubic/dodecahedron/octahedron):
+            # run 1-bundle Morton SoA plans per replica with zero ProlixContext fallback.
             plan_bundles_pre = self._bundles_for_plan()
             if self._per_replica_plans is None:
                 plan_cls = _ensemble_plan_mod.EnsemblePlan
-                ks = self._build_knob_surface(eff_engine, eff_pallas, eff_pallas_pme)
                 self._per_replica_plans = [
                     plan_cls.from_bundle(
                         plan_bundles_pre[i],
@@ -2876,13 +2978,18 @@ class ProlixBatchSimulation:
                         deterministic_forces=self.config.deterministic_forces,
                         pressure_atm=self._pressure_atm,
                         barostat_interval=self._barostat_interval,
-                        knob_surface=ks,
+                        knob_surface=self._build_knob_surface(
+                            eff_engine, eff_pallas, eff_pallas_pme, replica_idx=i
+                        ),
                     )
                     for i in range(self.batch_size)
                 ]
             traj_list = []
             for i, p_i in enumerate(self._per_replica_plans):
                 p_i.bundles = [plan_bundles_pre[i]]
+                extra_kw_i = dict(extra_run_kw)
+                if "initial_velocities" in extra_kw_i:
+                    extra_kw_i["initial_velocities"] = [self._velocities_akma[i]]
                 tr_i = p_i.run(
                     steps,
                     dt=self._dt_fs,
@@ -2898,7 +3005,7 @@ class ProlixBatchSimulation:
                     nonbonded_engine=eff_engine,
                     use_pallas=eff_pallas,
                     use_pallas_pme=eff_pallas_pme,
-                    **extra_run_kw,
+                    **extra_kw_i,
                 )
                 traj_list.append(tr_i[0] if isinstance(tr_i, list) else tr_i)
         else:
@@ -2988,8 +3095,12 @@ class ProlixBatchSimulation:
             n_i = self._n_atoms_per_replica[i]
             self._positions_akma[i] = jnp.asarray(ctx._positions[:n_i], dtype=self._dtype)
             self._velocities_akma[i] = jnp.asarray(ctx._velocities[:n_i], dtype=self._dtype)
-            if ctx._morton_box_diag is not None and not ctx._is_triclinic:
-                bx = jnp.diag(ctx._morton_box_diag.astype(self._dtype))
+            if ctx._morton_box_diag is not None:
+                bx = (
+                    ctx._morton_box_diag.astype(self._dtype)
+                    if ctx._morton_box_diag.ndim == 2
+                    else jnp.diag(ctx._morton_box_diag.astype(self._dtype))
+                )
             elif ctx._box_vectors is not None:
                 bx = ctx._box_vectors.astype(self._dtype)
             else:
@@ -3160,6 +3271,7 @@ class ProlixBatchSimulation:
                 "flash"
                 if (
                     cs0.has_pbc
+                    and not cs0.is_triclinic
                     and not cs0.has_implicit_solvent
                     and cs0.nonbonded_offsets is None
                     and cs0.lj_combining_rule == "lorentz_berthelot"
@@ -3167,7 +3279,11 @@ class ProlixBatchSimulation:
                 )
                 else (
                     "neighbor_list"
-                    if (int(pos_b.shape[1]) >= 4000 and cs0.nonbonded_cutoff < float("inf"))
+                    if (
+                        not cs0.is_triclinic
+                        and int(pos_b.shape[1]) >= 4000
+                        and cs0.nonbonded_cutoff < float("inf")
+                    )
                     else "dense"
                 )
             )
@@ -3851,7 +3967,7 @@ class ProlixBatchSimulation:
             return False
 
         cs0 = self._converted_systems[0]
-        if bool(cs0.custom_forces) or cs0.virtual_sites is not None or cs0.is_triclinic:
+        if bool(cs0.custom_forces) or cs0.virtual_sites is not None:
             return False
 
         pr0_sig = _pr_signature(cs0.position_restraints)
@@ -3875,7 +3991,7 @@ class ProlixBatchSimulation:
             if (
                 bool(csi.custom_forces)
                 or csi.virtual_sites is not None
-                or csi.is_triclinic
+                or csi.is_triclinic != cs0.is_triclinic
                 or _pr_signature(csi.position_restraints) != pr0_sig
                 or csi.has_pbc != cs0.has_pbc
                 or _effective_cs_nonbonded_method(csi, self.config) != eff_nb0
@@ -4056,7 +4172,11 @@ class ProlixBatchSimulation:
         )
         nb_eng = (
             "neighbor_list"
-            if (int(pos_b.shape[1]) >= 4000 and cs0.nonbonded_cutoff < float("inf"))
+            if (
+                not cs0.is_triclinic
+                and int(pos_b.shape[1]) >= 4000
+                and cs0.nonbonded_cutoff < float("inf")
+            )
             else "dense"
         )
         grads_kj = np.asarray(
@@ -4191,6 +4311,7 @@ class ProlixBatchSimulation:
                 "flash"
                 if (
                     cs0.has_pbc
+                    and not cs0.is_triclinic
                     and not cs0.has_implicit_solvent
                     and cs0.nonbonded_offsets is None
                     and cs0.lj_combining_rule == "lorentz_berthelot"
@@ -4198,7 +4319,11 @@ class ProlixBatchSimulation:
                 )
                 else (
                     "neighbor_list"
-                    if (int(pos_b.shape[1]) >= 4000 and cs0.nonbonded_cutoff < float("inf"))
+                    if (
+                        not cs0.is_triclinic
+                        and int(pos_b.shape[1]) >= 4000
+                        and cs0.nonbonded_cutoff < float("inf")
+                    )
                     else "dense"
                 )
             )
@@ -4271,24 +4396,11 @@ class ProlixBatchSimulation:
 
             pos_nm = None
             if getPositions:
-                p_eval = pos_i
-                if enforcePeriodicBox and box_i is not None:
-                    diag_b = jnp.diag(box_i).astype(pos_i.dtype)
-                    mol_id = (
-                        b_i.molecule_id[:n_i]
-                        if b_i.molecule_id is not None
-                        else jnp.arange(n_i, dtype=jnp.int32)
-                    )
-                    masses = jnp.maximum(b_i.masses[:n_i].astype(pos_i.dtype), 1e-12)
-                    n_mols = int(jnp.max(mol_id)) + 1 if n_i > 0 else 0
-                    if n_mols > 0:
-                        m_sum = jax.ops.segment_sum(masses, mol_id, num_segments=n_mols)
-                        mw_pos = jax.ops.segment_sum(
-                            pos_i * masses[:, None], mol_id, num_segments=n_mols
-                        )
-                        com = mw_pos / jnp.maximum(m_sum[:, None], 1e-12)
-                        shift = jnp.floor(com / diag_b[None, :]) * diag_b[None, :]
-                        p_eval = pos_i - shift[mol_id]
+                p_eval = (
+                    self._wrap_replica_molecules_dev(i, pos_i)
+                    if (enforcePeriodicBox and box_i is not None)
+                    else pos_i
+                )
                 pos_nm = np.asarray(p_eval, dtype=np.float64) * ANGSTROM_TO_NM
 
             vel_omm = None
@@ -4358,6 +4470,7 @@ class ProlixBatchSimulation:
                             "flash"
                             if (
                                 cs.has_pbc
+                                and not cs.is_triclinic
                                 and not cs.has_implicit_solvent
                                 and cs.nonbonded_offsets is None
                                 and cs.lj_combining_rule == "lorentz_berthelot"
@@ -4473,6 +4586,7 @@ class ProlixBatchSimulation:
                 "flash"
                 if (
                     cs0.has_pbc
+                    and not cs0.is_triclinic
                     and not cs0.has_implicit_solvent
                     and cs0.nonbonded_offsets is None
                     and cs0.lj_combining_rule == "lorentz_berthelot"
@@ -4480,7 +4594,11 @@ class ProlixBatchSimulation:
                 )
                 else (
                     "neighbor_list"
-                    if (int(pos_nm_b.shape[1]) >= 4000 and cs0.nonbonded_cutoff < float("inf"))
+                    if (
+                        not cs0.is_triclinic
+                        and int(pos_nm_b.shape[1]) >= 4000
+                        and cs0.nonbonded_cutoff < float("inf")
+                    )
                     else "dense"
                 )
             )
@@ -4588,6 +4706,7 @@ class ProlixBatchSimulation:
                         "flash"
                         if (
                             _ctx._converted_system.has_pbc
+                            and not _ctx._is_triclinic
                             and not _ctx._converted_system.has_implicit_solvent
                             and _ctx._converted_system.nonbonded_offsets is None
                             and _ctx._lj_combining_rule == "lorentz_berthelot"
@@ -4626,10 +4745,434 @@ class ProlixBatchSimulation:
             return e_stack, jnp.stack(grads, axis=0)
         return e_stack, grads
 
+    def _wrap_replica_molecules_dev(self, idx: int, pos_i: jnp.ndarray) -> jnp.ndarray:
+        """Whole-molecule PBC wrapping on device (ortho & lower-triangular triclinic `z -> y -> x`)."""
+        b_i = self._bundles[idx]
+        n_i = self._n_atoms_per_replica[idx]
+        box_i = self._boxes_akma[idx] if b_i.shape_spec.has_pbc else None
+        if box_i is None or n_i == 0:
+            return pos_i
+        bx = (
+            box_i.astype(pos_i.dtype)
+            if box_i.ndim == 2
+            else jnp.diag(box_i.astype(pos_i.dtype))
+        )
+        mol_id = (
+            b_i.molecule_id[:n_i]
+            if b_i.molecule_id is not None
+            else jnp.arange(n_i, dtype=jnp.int32)
+        )
+        masses = jnp.maximum(b_i.masses[:n_i].astype(pos_i.dtype), 1e-12)
+        n_mols = int(np.max(np.asarray(mol_id))) + 1
+        if n_mols <= 0:
+            return pos_i
+        m_sum = jax.ops.segment_sum(masses, mol_id, num_segments=n_mols)
+        mw_pos = jax.ops.segment_sum(
+            pos_i * masses[:, None], mol_id, num_segments=n_mols
+        )
+        com = mw_pos / jnp.maximum(m_sum[:, None], 1e-12)
+        a_v, b_v, c_v = bx[0], bx[1], bx[2]
+        diffs = jnp.zeros((n_mols, 3), dtype=pos_i.dtype)
+        cz_ok = jnp.abs(c_v[2]) > 1e-12
+        diffs = jnp.where(
+            cz_ok,
+            diffs
+            + jnp.floor(com[:, 2:3] / jnp.where(cz_ok, c_v[2], 1.0)) * c_v[None, :],
+            diffs,
+        )
+        by_ok = jnp.abs(b_v[1]) > 1e-12
+        diffs = jnp.where(
+            by_ok,
+            diffs
+            + jnp.floor((com[:, 1:2] - diffs[:, 1:2]) / jnp.where(by_ok, b_v[1], 1.0))
+            * b_v[None, :],
+            diffs,
+        )
+        ax_ok = jnp.abs(a_v[0]) > 1e-12
+        diffs = jnp.where(
+            ax_ok,
+            diffs
+            + jnp.floor((com[:, 0:1] - diffs[:, 0:1]) / jnp.where(ax_ok, a_v[0], 1.0))
+            * a_v[None, :],
+            diffs,
+        )
+        return pos_i - diffs[mol_id]
+
+    def getPositionsJax(  # noqa: N802
+        self,
+        *,
+        in_nm: bool = True,
+        enforcePeriodicBox: bool = False,
+    ) -> jax.Array:
+        """Return device `jax.Array` of positions `(B, N_max, 3)` in `nm` (default) or `Å`."""
+        self._sync_from_contexts_if_present()
+        n_max = max(self._n_atoms_per_replica)
+        rows: list[jax.Array] = []
+        for i in range(self.batch_size):
+            n_i = self._n_atoms_per_replica[i]
+            if self._contexts is not None:
+                p_i = self._contexts[i].getPositionsJax(
+                    in_nm=in_nm, enforcePeriodicBox=enforcePeriodicBox
+                )
+            else:
+                p_i = self._positions_akma[i][:n_i]
+                if enforcePeriodicBox:
+                    p_i = self._wrap_replica_molecules_dev(i, p_i)
+                if in_nm:
+                    p_i = p_i * jnp.asarray(ANGSTROM_TO_NM, dtype=p_i.dtype)
+            if n_i < n_max:
+                p_i = jnp.pad(p_i, ((0, n_max - n_i), (0, 0)))
+            rows.append(p_i)
+        return jnp.stack(rows, axis=0)
+
+    def setPositionsJax(  # noqa: N802
+        self,
+        positions: Any,
+        *,
+        in_nm: bool = True,
+    ) -> None:
+        """Set positions across all `B` replicas from a `(B, N_max, 3)` or per-replica `jax.Array`/DLPack tensor."""
+        n_max = max(self._n_atoms_per_replica)
+        per_rep_dev: list[jax.Array] = []
+        if isinstance(positions, Sequence) and not hasattr(positions, "__dlpack__"):
+            if len(positions) != self.batch_size:
+                raise ValueError(
+                    f"Expected {self.batch_size} position tensors, got {len(positions)}."
+                )
+            for i, p_item in enumerate(positions):
+                p_d = _from_jax_or_dlpack(p_item)
+                n_i = self._n_atoms_per_replica[i]
+                if p_d.shape != (n_i, 3):
+                    raise openmm.OpenMMException(
+                        f"Replica {i} expected positions shape ({n_i}, 3), got {p_d.shape}."
+                    )
+                per_rep_dev.append(p_d)
+        else:
+            p_b = _from_jax_or_dlpack(positions)
+            if p_b.ndim != 3 or p_b.shape[0] != self.batch_size or p_b.shape[2] != 3:
+                raise ValueError(
+                    f"Expected batch positions shape ({self.batch_size}, {n_max}, 3), got {p_b.shape}."
+                )
+            if p_b.shape[1] != n_max:
+                raise openmm.OpenMMException(
+                    f"Called setPositionsJax() with atom dimension {p_b.shape[1]}, expected {n_max}."
+                )
+            for i in range(self.batch_size):
+                per_rep_dev.append(p_b[i, : self._n_atoms_per_replica[i], :])
+
+        old_specs = [b.shape_spec for b in self._bundles]
+        for i, p_dev_i in enumerate(per_rep_dev):
+            cs = self._converted_systems[i]
+            p_akma = p_dev_i.astype(self._dtype)
+            if in_nm:
+                p_akma = p_akma * jnp.asarray(NM_TO_ANGSTROM, dtype=self._dtype)
+            if cs.virtual_sites is not None:
+                p_akma = cs.compute_virtual_sites(p_akma).astype(self._dtype)
+            self._positions_akma[i] = p_akma
+
+            b_old = self._bundles[i]
+            pad_len = int(b_old.positions.shape[0])
+            pos_f32 = _pad_positions_to_bucket(
+                p_akma.astype(jnp.float32),
+                pad_len,
+                b_old.box if b_old.shape_spec.has_pbc else None,
+            )
+            self._bundles[i] = dataclasses.replace(b_old, positions=pos_f32)
+            self._base_bundles[i] = dataclasses.replace(
+                self._base_bundles[i], positions=pos_f32
+            )
+            if self._contexts is not None:
+                self._contexts[i].setPositionsJax(p_dev_i, in_nm=in_nm)
+
+        if self.plan is not None:
+            new_specs = [b.shape_spec for b in self._bundles]
+            if new_specs == old_specs:
+                self._refresh_plan_bundles_after_state_update()
+            else:
+                self._rebuild_plan()
+
+    def getVelocitiesJax(  # noqa: N802
+        self,
+        *,
+        in_nm_per_ps: bool = True,
+    ) -> jax.Array:
+        """Return device `jax.Array` of velocities `(B, N_max, 3)` in `nm/ps` (default) or `Å/τ_AKMA`."""
+        self._sync_from_contexts_if_present()
+        n_max = max(self._n_atoms_per_replica)
+        rows: list[jax.Array] = []
+        for i in range(self.batch_size):
+            n_i = self._n_atoms_per_replica[i]
+            if self._contexts is not None:
+                v_i = self._contexts[i].getVelocitiesJax(in_nm_per_ps=in_nm_per_ps)
+            else:
+                v_i = self._velocities_akma[i][:n_i]
+                if in_nm_per_ps:
+                    v_i = v_i * jnp.asarray(VELOCITY_AKMA_TO_OMM, dtype=v_i.dtype)
+            if n_i < n_max:
+                v_i = jnp.pad(v_i, ((0, n_max - n_i), (0, 0)))
+            rows.append(v_i)
+        return jnp.stack(rows, axis=0)
+
+    def setVelocitiesJax(  # noqa: N802
+        self,
+        velocities: Any,
+        *,
+        in_nm_per_ps: bool = True,
+    ) -> None:
+        """Set velocities across all `B` replicas from a `(B, N_max, 3)` or per-replica `jax.Array`/DLPack tensor."""
+        n_max = max(self._n_atoms_per_replica)
+        per_rep_dev: list[jax.Array] = []
+        if isinstance(velocities, Sequence) and not hasattr(velocities, "__dlpack__"):
+            if len(velocities) != self.batch_size:
+                raise ValueError(
+                    f"Expected {self.batch_size} velocity tensors, got {len(velocities)}."
+                )
+            for i, v_item in enumerate(velocities):
+                v_d = _from_jax_or_dlpack(v_item)
+                n_i = self._n_atoms_per_replica[i]
+                if v_d.shape != (n_i, 3):
+                    raise openmm.OpenMMException(
+                        f"Replica {i} expected velocities shape ({n_i}, 3), got {v_d.shape}."
+                    )
+                per_rep_dev.append(v_d)
+        else:
+            v_b = _from_jax_or_dlpack(velocities)
+            if v_b.ndim != 3 or v_b.shape[0] != self.batch_size or v_b.shape[2] != 3:
+                raise ValueError(
+                    f"Expected batch velocities shape ({self.batch_size}, {n_max}, 3), got {v_b.shape}."
+                )
+            if v_b.shape[1] != n_max:
+                raise openmm.OpenMMException(
+                    f"Called setVelocitiesJax() with atom dimension {v_b.shape[1]}, expected {n_max}."
+                )
+            for i in range(self.batch_size):
+                per_rep_dev.append(v_b[i, : self._n_atoms_per_replica[i], :])
+
+        for i, v_dev_i in enumerate(per_rep_dev):
+            cs = self._converted_systems[i]
+            v_akma = v_dev_i.astype(self._dtype)
+            if in_nm_per_ps:
+                v_akma = v_akma * jnp.asarray(VELOCITY_OMM_TO_AKMA, dtype=self._dtype)
+            if cs.virtual_sites is not None:
+                v_akma = v_akma.at[cs.virtual_sites.order].set(0.0)
+            self._velocities_akma[i] = v_akma
+            if self._contexts is not None:
+                self._contexts[i].setVelocitiesJax(v_dev_i, in_nm_per_ps=in_nm_per_ps)
+        self._velocities_initialized = True
+
+    def getForcesJax(  # noqa: N802
+        self,
+        *,
+        in_kj_per_mol_nm: bool = True,
+        groups: int | set[int] = -1,
+    ) -> jax.Array:
+        """Return device `jax.Array` of forces `(B, N_max, 3)` without materializing `self._contexts`."""
+        if isinstance(groups, set):
+            raw_groups = sum(1 << g for g in groups if 0 <= g <= 31)
+        else:
+            raw_groups = int(groups)
+        groups_mask = int(np.int32(raw_groups))
+
+        self._sync_from_contexts_if_present()
+        n_max = max(self._n_atoms_per_replica)
+
+        if self._contexts is not None:
+            rows_ctx: list[jax.Array] = []
+            for i, ctx in enumerate(self._contexts):
+                f_i = ctx.getForcesJax(
+                    in_kj_per_mol_nm=in_kj_per_mol_nm, groups=groups
+                )
+                n_i = self._n_atoms_per_replica[i]
+                if n_i < n_max:
+                    f_i = jnp.pad(f_i, ((0, n_max - n_i), (0, 0)))
+                rows_ctx.append(f_i)
+            return jnp.stack(rows_ctx, axis=0)
+
+        if self._can_vmap_batch_observables(groups_mask):
+            cs0 = self._converted_systems[0]
+            pos_b = jnp.stack(self._positions_akma, axis=0)
+            (
+                box_b,
+                base_bundles_b,
+                bond_fg_b,
+                angle_fg_b,
+                dihedral_fg_b,
+                cmap_fg_b,
+                pr_b,
+                offsets_b,
+                gp_vec_b,
+                param_names,
+            ) = self._stack_batch_inputs_for_vmap()
+            ewald_tol = (
+                cs0.ewald_error_tolerance
+                if cs0.ewald_error_tolerance is not None
+                else self.config.ewald_error_tolerance
+            )
+            eff_nb_method = _effective_cs_nonbonded_method(cs0, self.config)
+            eff_alpha = _resolve_cs_pme_alpha(cs0, self.config)
+            eff_lj_alpha = _resolve_cs_lj_pme_alpha(cs0, self.config)
+            eff_lj_dims = _resolve_cs_lj_pme_grid_dims(
+                cs0, self.config, self._boxes_akma[0]
+            )
+            use_disp = bool(
+                self.config.use_dispersion_correction and cs0.use_dispersion_correction
+            )
+            nb_eng = (
+                "flash"
+                if (
+                    cs0.has_pbc
+                    and not cs0.is_triclinic
+                    and not cs0.has_implicit_solvent
+                    and cs0.nonbonded_offsets is None
+                    and cs0.lj_combining_rule == "lorentz_berthelot"
+                    and not cs0.exceptions_use_pbc
+                )
+                else (
+                    "neighbor_list"
+                    if (
+                        not cs0.is_triclinic
+                        and int(pos_b.shape[1]) >= 4000
+                        and cs0.nonbonded_cutoff < float("inf")
+                    )
+                    else "dense"
+                )
+            )
+            _, f_akma_b = _vmapped_batch_energy_and_forces_akma(
+                pos_b,
+                box_b,
+                base_bundles_b,
+                bond_fg_b,
+                angle_fg_b,
+                dihedral_fg_b,
+                cmap_fg_b,
+                pr_b,
+                offsets_b,
+                gp_vec_b,
+                param_names,
+                cs0.force_group_by_component,
+                groups_mask,
+                cs0.has_pbc,
+                cs0.nonbonded_cutoff,
+                eff_nb_method,
+                cs0.has_nonbonded,
+                use_disp,
+                ewald_tol,
+                eff_alpha,
+                cs0.reaction_field_dielectric,
+                cs0.has_implicit_solvent,
+                cs0.solvent_dielectric,
+                cs0.solute_dielectric,
+                nb_eng,
+                cs0.pme_grid_dims,
+                cs0.lj_switch_width,
+                self.config.custom_nonbonded_chunk_size,
+                cs0.is_triclinic,
+                self.config.precision == "mixed",
+                cs0.gbsa_surface_tension,
+                cs0.default_parameters,
+                cs0.lj_combining_rule,
+                cs0.exceptions_use_pbc,
+                cs0.dispersion_follows_parameters,
+                eff_lj_alpha,
+                eff_lj_dims,
+            )
+            if in_kj_per_mol_nm:
+                return f_akma_b * jnp.asarray(FORCE_AKMA_TO_OMM, dtype=f_akma_b.dtype)
+            return f_akma_b
+
+        # Cross-shape / ragged batch on `self.plan` (`self._contexts is None`): evaluate on device
+        rows_rag: list[jax.Array] = []
+        for i in range(self.batch_size):
+            cs = self._converted_systems[i]
+            b_base_i = self._base_bundles[i]
+            n_i = self._n_atoms_per_replica[i]
+            pos_i = self._positions_akma[i][:n_i]
+            box_i = self._boxes_akma[i] if b_base_i.shape_spec.has_pbc else None
+            ewald_tol = (
+                cs.ewald_error_tolerance
+                if cs.ewald_error_tolerance is not None
+                else self.config.ewald_error_tolerance
+            )
+            gp_i = {
+                k: jnp.asarray(v, dtype=pos_i.dtype)
+                for k, v in self._parameters_per_replica[i].items()
+            }
+            eff_nb_i = _effective_cs_nonbonded_method(cs, self.config)
+            _, f_akma_i = _pure_compute_energy_and_forces(
+                pos_i,
+                box_i,
+                b_base_i,
+                tuple(cs.custom_forces),
+                tuple(cs.position_restraints),
+                gp_i,
+                cs.force_group_by_component,
+                groups_mask,
+                cs.has_pbc,
+                cs.nonbonded_cutoff,
+                bond_force_groups=cs.bond_force_groups,
+                angle_force_groups=cs.angle_force_groups,
+                dihedral_force_groups=cs.dihedral_force_groups,
+                cmap_force_groups=cs.cmap_force_groups,
+                nonbonded_method=eff_nb_i,
+                has_nonbonded=cs.has_nonbonded,
+                use_dispersion_correction=(
+                    self.config.use_dispersion_correction
+                    and cs.use_dispersion_correction
+                ),
+                ewald_error_tolerance=ewald_tol,
+                rf_dielectric=cs.reaction_field_dielectric,
+                has_implicit_solvent=cs.has_implicit_solvent,
+                solvent_dielectric=cs.solvent_dielectric,
+                solute_dielectric=cs.solute_dielectric,
+                nonbonded_engine=(
+                    "flash"
+                    if (
+                        cs.has_pbc
+                        and not cs.is_triclinic
+                        and not cs.has_implicit_solvent
+                        and cs.nonbonded_offsets is None
+                        and cs.lj_combining_rule == "lorentz_berthelot"
+                        and not cs.exceptions_use_pbc
+                    )
+                    else "dense"
+                ),
+                pme_grid_dims=cs.pme_grid_dims,
+                use_pallas=self.config.use_pallas,
+                pallas_interpret=self.config.pallas_interpret,
+                lj_switch_width=cs.lj_switch_width,
+                use_pallas_pme=self.config.use_pallas_pme,
+                custom_nonbonded_chunk_size=self.config.custom_nonbonded_chunk_size,
+                is_triclinic=cs.is_triclinic,
+                mixed_precision=self.config.precision == "mixed",
+                gb_use_neighbor_list=self.config.gb_use_neighbor_list,
+                gbsa_surface_tension=cs.gbsa_surface_tension,
+                pme_alpha=_resolve_cs_pme_alpha(cs, self.config),
+                nonbonded_offsets=cs.nonbonded_offsets,
+                default_params=cs.default_parameters,
+                lj_combining_rule=cs.lj_combining_rule,
+                exceptions_use_pbc=cs.exceptions_use_pbc,
+                dispersion_follows_parameters=cs.dispersion_follows_parameters,
+                lj_pme_alpha=_resolve_cs_lj_pme_alpha(cs, self.config),
+                lj_pme_grid_dims=_resolve_cs_lj_pme_grid_dims(
+                    cs, self.config, box_i
+                ),
+            )
+            if cs.virtual_sites is not None:
+                f_akma_i = cs.redistribute_virtual_site_forces(f_akma_i, pos_i)
+            f_out_i = (
+                f_akma_i * jnp.asarray(FORCE_AKMA_TO_OMM, dtype=f_akma_i.dtype)
+                if in_kj_per_mol_nm
+                else f_akma_i
+            )
+            if n_i < n_max:
+                f_out_i = jnp.pad(f_out_i, ((0, n_max - n_i), (0, 0)))
+            rows_rag.append(f_out_i)
+        return jnp.stack(rows_rag, axis=0)
+
     def compute_parameter_derivatives(
         self,
         groups: int | set[int] = -1,
-    ) -> list[dict[str, float]]:
+    ) -> _BatchParameterDerivatives:
         """Compute OpenMM global-parameter energy derivatives dU/d(param) across all replicas."""
         if isinstance(groups, set):
             raw_groups = sum(1 << g for g in groups if 0 <= g <= 31)
@@ -4639,9 +5182,13 @@ class ProlixBatchSimulation:
 
         self._sync_from_contexts_if_present()
         if self._can_vmap_batch_observables(groups_mask):
-            return self._compute_vmapped_param_derivatives(groups_mask)
+            return _BatchParameterDerivatives(
+                self._compute_vmapped_param_derivatives(groups_mask)
+            )
         states = self.getStates(getParameterDerivatives=True, groups=groups)
-        return [st.getEnergyParameterDerivatives() for st in states]
+        return _BatchParameterDerivatives(
+            [st.getEnergyParameterDerivatives() for st in states]
+        )
 
 
 BatchSimulation = ProlixBatchSimulation

@@ -59,14 +59,19 @@ UNSUPPORTED_OPENMM_FORCES: dict[str, str] = {
         "Custom volume-dependent forces are not implemented in Prolix."
     ),
     "MonteCarloAnisotropicBarostat": (
-        "Anisotropic box volume scaling barostat is not implemented in Prolix "
-        "(use MonteCarloBarostat for isotropic scaling)."
+        "Anisotropic box volume scaling barostat is disabled by default in raw "
+        "converter calls; pass ProlixOpenMMConfig(anisotropic_barostat=True) or "
+        "platform property 'AnisotropicBarostat'='true' (enabled automatically "
+        "in ProlixContext, ProlixSimulation, and ProlixBatchSimulation)."
     ),
     "MonteCarloFlexibleBarostat": (
         "Fully flexible triclinic cell barostat is not implemented in Prolix."
     ),
     "MonteCarloMembraneBarostat": (
-        "Membrane area/volume scaling barostat is not implemented in Prolix."
+        "Membrane area/volume scaling barostat is disabled by default in raw "
+        "converter calls; pass ProlixOpenMMConfig(anisotropic_barostat=True) or "
+        "platform property 'AnisotropicBarostat'='true' (enabled automatically "
+        "in ProlixContext, ProlixSimulation, and ProlixBatchSimulation)."
     ),
     "GayBerneForce": (
         "Anisotropic Gay-Berne ellipsoid potential is not implemented in Prolix."
