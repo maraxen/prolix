@@ -97,6 +97,7 @@ EXPECTED_SUB_SURFACES: dict[type, set[str]] = {
         "lj_combining_rule",
         "exceptions_use_pbc",
         "dispersion_follows_parameters",
+        "use_lj_pme",
     },
     ImplicitSolventControls: {
         "solvent_model",
@@ -260,8 +261,9 @@ def test_pydantic_base_model_adapter() -> None:
         assert hasattr(adapted, "__dataclass_fields__")
         extracted = extract_dataclass_fields(cls)
         assert len(extracted) > 0
-        if hasattr(cls, "model_fields"):
-            assert extracted == set(cls.model_fields.keys())
+        model_fields = getattr(cls, "model_fields", None)
+        if isinstance(model_fields, dict):
+            assert extracted == set(model_fields.keys())
 
 
 def test_u5_superset_parity_across_all_reference_schemas() -> None:

@@ -25,12 +25,12 @@ Focus areas (Challenger M3-2):
 from __future__ import annotations
 
 import math
-from typing import Any
+from typing import Any, cast
 
 import numpy as np
 import openmm
 import pytest
-from openmm import unit
+from openmm import unit as _omm_unit
 
 from prolix.openmm.config import ProlixOpenMMConfig
 from prolix.openmm.converter import (
@@ -49,6 +49,8 @@ from prolix.openmm.units import (
     TORSION_K_OMM_TO_AKMA,
 )
 from prolix.physics.electrostatic_methods import openmm_reaction_field_coefficients
+
+unit: Any = cast("Any", _omm_unit)
 
 # =============================================================================
 # Helper Utilities
@@ -86,6 +88,7 @@ class TestNonbondedExclusionsAndExceptions:
 
         conv = from_openmm_system(sys)
         bundle = conv.bundle
+        assert bundle.excl_dense_indices is not None
 
         # Atom 0 row in excl_dense_indices must have exactly 32 valid entries (none -1)
         row_0 = np.asarray(bundle.excl_dense_indices[0])
@@ -866,19 +869,23 @@ class TestFailFastCatalogue:
         assert err.force_name == force_name
         assert UNSUPPORTED_OPENMM_FORCES[force_name] in str(err)
 
-    def test_fail_fast_nonbonded_ljpme(self):
-        """NonbondedForce with method LJPME (method 5) must raise UnsupportedOpenMMForceError."""
+    def test_nonbonded_ljpme_supported_default_and_explicit_params(self):
+        """NonbondedForce with method LJPME (method 5) converts to 'lj_pme' with OpenMM grid dims."""
         sys = _make_dummy_system(2)
+        sys.setDefaultPeriodicBoxVectors([3.0, 0.0, 0.0], [0.0, 3.2, 0.0], [0.0, 0.0, 3.4])
         nb = openmm.NonbondedForce()
         nb.addParticle(0.0, 0.3, 1.0)
-        nb.addParticle(0.0, 0.3, 1.0)
+        nb.addParticle(0.0, 0.35, 1.2)
         nb.setNonbondedMethod(openmm.NonbondedForce.LJPME)
+        nb.setCutoffDistance(0.9 * unit.nanometer)
+        nb.setEwaldErrorTolerance(5e-4)
         sys.addForce(nb)
 
-        with pytest.raises(UnsupportedOpenMMForceError) as exc_info:
-            from_openmm_system(sys)
-
-        assert "LJPME" in str(exc_info.value)
+        conv = from_openmm_system(sys)
+        assert conv.nonbonded_method == "lj_pme"
+        assert conv.lj_pme_grid_dims == (14, 15, 16)
+        assert conv.use_dispersion_correction is False
+        assert conv.lj_switch_width == 0.0
 
     def test_fail_fast_arbitrary_unrecognized_force(self, monkeypatch):
         """Any unrecognized third-party or mock OpenMM Force subclass must immediately raise."""

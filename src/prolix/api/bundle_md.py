@@ -21,7 +21,7 @@ Patterns:
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, cast
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -41,27 +41,44 @@ from prolix.batched_energy import (
     solve_ewald_alpha,
 )
 from prolix.pallas_kernels import _infer_first_pure_water_block, resolve_pallas_mode
-
-try:
-    from prolix.pallas_kernels import (
-        pallas_angles_harmonic,
-        pallas_bonded_all_fused,
-        pallas_bonds_2body,
-        pallas_cmap_torsions,
-        pallas_exceptions_14,
-        pallas_torsions_4body,
-    )
-except ImportError:
-    pallas_angles_harmonic = None  # type: ignore[assignment]
-    pallas_bonded_all_fused = None  # type: ignore[assignment]
-    pallas_bonds_2body = None  # type: ignore[assignment]
-    pallas_cmap_torsions = None  # type: ignore[assignment]
-    pallas_exceptions_14 = None  # type: ignore[assignment]
-    pallas_torsions_4body = None  # type: ignore[assignment]
 from prolix.physics.pbc import create_periodic_space
 from prolix.physics.pme import make_spme_energy_fn
 from prolix.types.bundles import MolecularBundle, atom_pad_length, water_pad_length
 from prolix.typing import PhysicsSystem
+
+pallas_angles_harmonic: Any = None
+pallas_bonded_all_fused: Any = None
+pallas_bonds_2body: Any = None
+pallas_cmap_torsions: Any = None
+pallas_exceptions_14: Any = None
+pallas_torsions_4body: Any = None
+try:
+    from prolix.pallas_kernels import (
+        pallas_angles_harmonic as _pallas_angles_harmonic,
+    )
+    from prolix.pallas_kernels import (
+        pallas_bonded_all_fused as _pallas_bonded_all_fused,
+    )
+    from prolix.pallas_kernels import (
+        pallas_bonds_2body as _pallas_bonds_2body,
+    )
+    from prolix.pallas_kernels import (
+        pallas_cmap_torsions as _pallas_cmap_torsions,
+    )
+    from prolix.pallas_kernels import (
+        pallas_exceptions_14 as _pallas_exceptions_14,
+    )
+    from prolix.pallas_kernels import (
+        pallas_torsions_4body as _pallas_torsions_4body,
+    )
+    pallas_angles_harmonic = _pallas_angles_harmonic
+    pallas_bonded_all_fused = _pallas_bonded_all_fused
+    pallas_bonds_2body = _pallas_bonds_2body
+    pallas_cmap_torsions = _pallas_cmap_torsions
+    pallas_exceptions_14 = _pallas_exceptions_14
+    pallas_torsions_4body = _pallas_torsions_4body
+except ImportError:
+    pass
 
 # Match prolix.physics.bonded.make_exception_pair_energy_fn default (AKMA).
 _EXCEPTION_COULOMB = 332.0637
@@ -710,7 +727,7 @@ def physics_system_from_bundle(
     water_r_oh = _host_float(bundle.water_r_OH, 0.9572) if bundle.water_r_OH is not None else 0.9572
     water_r_hh = _host_float(bundle.water_r_HH, 1.5139) if bundle.water_r_HH is not None else 1.5139
 
-    extra_kwargs: dict[str, object] = {}
+    extra_kwargs: dict[str, Any] = {}
     if knob_surface is not None:
         lowered = lower_knob_surface(knob_surface)
         nonbonded_cutoff = float(lowered.get("cutoff_angstrom", nonbonded_cutoff))
@@ -736,78 +753,81 @@ def physics_system_from_bundle(
             }
         )
 
-    return PhysicsSystem(
-        positions=positions,
-        charges=_slice1(bundle.charges),
-        sigmas=_slice1(bundle.sigmas),
-        epsilons=_slice1(bundle.epsilons),
-        radii=_slice1(bundle.radii),
-        scaled_radii=_slice1(bundle.scaled_radii),
-        masses=bundle.masses[:n],
-        element_ids=jnp.zeros(n, dtype=jnp.int32),
-        atom_mask=_slice1(bundle.atom_mask),
-        is_hydrogen=jnp.zeros(n, dtype=bool),
-        is_backbone=jnp.zeros(n, dtype=bool),
-        is_heavy=_slice1(bundle.atom_mask),
-        protein_atom_mask=jnp.zeros(n, dtype=bool),
-        water_atom_mask=jnp.zeros(n, dtype=bool),
-        bonds=bundle.bond_idx,
-        bond_params=bundle.bond_params,
-        bond_mask=bundle.bond_mask,
-        angles=bundle.angle_idx,
-        angle_params=bundle.angle_params,
-        angle_mask=bundle.angle_mask,
-        dihedrals=bundle.dihedral_idx,
-        dihedral_params=flat_dih,
-        dihedral_mask=bundle.dihedral_mask,
-        impropers=bundle.improper_idx,
-        improper_params=flat_imp,
-        improper_mask=bundle.improper_mask,
-        urey_bradley_bonds=ub_idx_2,
-        urey_bradley_params=bundle.urey_bradley_params,
-        urey_bradley_mask=bundle.urey_bradley_mask,
-        water_indices=bundle.water_indices,
-        water_mask=bundle.water_mask,
-        water_r_OH=water_r_oh,
-        water_r_HH=water_r_hh,
-        n_real_atoms=jnp.minimum(jnp.asarray(n, dtype=jnp.int32), n_real),
-        n_padded_atoms=n,
-        box_size=box_size,
-        pme_alpha=pme_alpha,
-        pme_grid_points=pme_grid_points,
-        nonbonded_cutoff=nonbonded_cutoff,
-        dense_excl_scale_vdw=dense_vdw,
-        dense_excl_scale_elec=dense_elec,
-        excl_indices=excl_dense_indices,
-        excl_scales_vdw=excl_dense_scales_vdw,
-        excl_scales_elec=excl_dense_scales_elec,
-        excl_pair_indices=excl_pair_indices,
-        excl_pair_scales_vdw=bundle.excl_scales_vdw,
-        excl_pair_scales_elec=bundle.excl_scales_elec,
-        exception_pairs=bundle.exception_pairs,
-        exception_sigmas=bundle.exception_sigmas,
-        exception_epsilons=bundle.exception_epsilons,
-        exception_chargeprods=bundle.exception_chargeprods,
-        exception_mask=bundle.exception_mask,
-        cmap_torsions=bundle.cmap_torsion_idx,
-        cmap_energy_grids=bundle.cmap_energy_grids,
-        cmap_indices=bundle.cmap_indices,
-        cmap_mask=bundle.cmap_mask,
-        cmap_coeffs=bundle.cmap_coeffs,
-        constraint_pairs=bundle.constraint_pairs,
-        constraint_lengths=bundle.constraint_lengths,
-        constraint_mask=bundle.constraint_mask,
-        cosolvent_mol_id=(
-            _slice1(bundle.molecule_id)
-            if (bool(getattr(bundle.shape_spec, "has_real_cosolvents", False)) and bundle.molecule_id is not None)
-            else None
+    return cast(
+        "PhysicsSystem",
+        PhysicsSystem(
+            positions=positions,
+            charges=_slice1(bundle.charges),
+            sigmas=_slice1(bundle.sigmas),
+            epsilons=_slice1(bundle.epsilons),
+            radii=_slice1(bundle.radii),
+            scaled_radii=_slice1(bundle.scaled_radii),
+            masses=bundle.masses[:n],
+            element_ids=jnp.zeros(n, dtype=jnp.int32),
+            atom_mask=_slice1(bundle.atom_mask),
+            is_hydrogen=jnp.zeros(n, dtype=bool),
+            is_backbone=jnp.zeros(n, dtype=bool),
+            is_heavy=_slice1(bundle.atom_mask),
+            protein_atom_mask=jnp.zeros(n, dtype=bool),
+            water_atom_mask=jnp.zeros(n, dtype=bool),
+            bonds=bundle.bond_idx,
+            bond_params=bundle.bond_params,
+            bond_mask=bundle.bond_mask,
+            angles=bundle.angle_idx,
+            angle_params=bundle.angle_params,
+            angle_mask=bundle.angle_mask,
+            dihedrals=bundle.dihedral_idx,
+            dihedral_params=flat_dih,
+            dihedral_mask=bundle.dihedral_mask,
+            impropers=bundle.improper_idx,
+            improper_params=flat_imp,
+            improper_mask=bundle.improper_mask,
+            urey_bradley_bonds=ub_idx_2,
+            urey_bradley_params=bundle.urey_bradley_params,
+            urey_bradley_mask=bundle.urey_bradley_mask,
+            water_indices=bundle.water_indices,
+            water_mask=bundle.water_mask,
+            water_r_OH=water_r_oh,
+            water_r_HH=water_r_hh,
+            n_real_atoms=jnp.minimum(jnp.asarray(n, dtype=jnp.int32), n_real),
+            n_padded_atoms=n,
+            box_size=box_size,
+            pme_alpha=pme_alpha,
+            pme_grid_points=pme_grid_points,
+            nonbonded_cutoff=nonbonded_cutoff,
+            dense_excl_scale_vdw=dense_vdw,
+            dense_excl_scale_elec=dense_elec,
+            excl_indices=excl_dense_indices,
+            excl_scales_vdw=excl_dense_scales_vdw,
+            excl_scales_elec=excl_dense_scales_elec,
+            excl_pair_indices=excl_pair_indices,
+            excl_pair_scales_vdw=bundle.excl_scales_vdw,
+            excl_pair_scales_elec=bundle.excl_scales_elec,
+            exception_pairs=bundle.exception_pairs,
+            exception_sigmas=bundle.exception_sigmas,
+            exception_epsilons=bundle.exception_epsilons,
+            exception_chargeprods=bundle.exception_chargeprods,
+            exception_mask=bundle.exception_mask,
+            cmap_torsions=bundle.cmap_torsion_idx,
+            cmap_energy_grids=bundle.cmap_energy_grids,
+            cmap_indices=bundle.cmap_indices,
+            cmap_mask=bundle.cmap_mask,
+            cmap_coeffs=bundle.cmap_coeffs,
+            constraint_pairs=bundle.constraint_pairs,
+            constraint_lengths=bundle.constraint_lengths,
+            constraint_mask=bundle.constraint_mask,
+            cosolvent_mol_id=(
+                _slice1(bundle.molecule_id)
+                if (bool(getattr(bundle.shape_spec, "has_real_cosolvents", False)) and bundle.molecule_id is not None)
+                else None
+            ),
+            cosolvent_group_id=(
+                _slice1(bundle.cosolvent_group_id)
+                if (bool(getattr(bundle.shape_spec, "has_real_cosolvents", False)) and bundle.cosolvent_group_id is not None)
+                else None
+            ),
+            **extra_kwargs,
         ),
-        cosolvent_group_id=(
-            _slice1(bundle.cosolvent_group_id)
-            if (bool(getattr(bundle.shape_spec, "has_real_cosolvents", False)) and bundle.cosolvent_group_id is not None)
-            else None
-        ),
-        **extra_kwargs,
     )
 
 
@@ -981,7 +1001,7 @@ def energy_fn_from_bundle(
         # doesn't use).
         neighbor = kwargs.pop("neighbor", None)
         dyn_box = kwargs.pop("box", None)
-        pme_cached_force = kwargs.pop("pme_cached_force", None)
+        pme_cached_force = cast("jax.Array | None", kwargs.pop("pme_cached_force", None))
         return_pme_force = bool(kwargs.pop("return_pme_force", False))
         del kwargs
         use_base_exact = (
@@ -996,9 +1016,9 @@ def energy_fn_from_bundle(
             and positions.dtype == jnp.float32
         )
         use_base = use_base_exact or use_base_f32
-        if use_base_exact:
+        if use_base_exact and _base_sys is not None:
             sys = _base_sys.replace(positions=positions)
-        elif use_base_f32:
+        elif use_base_f32 and _base_sys_f32 is not None:
             sys = _base_sys_f32.replace(positions=positions)
         else:
             sys = physics_system_from_bundle(
@@ -1117,7 +1137,7 @@ def lower_knob_surface(
     surface: object,
     *,
     nonbonded_config: object | None = None,
-) -> dict[str, object]:
+) -> dict[str, Any]:
     """Lower a :class:`~prolix.knob_surface.KnobSurface` into consumer runtime kwargs.
 
     Reads all 9 sub-surfaces of ``KnobSurface`` (plus optional ``NonbondedConfig`` /
@@ -1167,6 +1187,15 @@ def lower_knob_surface(
         raise ValueError(
             f"Invalid lj_combining_rule: {raw_combining!r}. Allowed: 'lorentz_berthelot', 'geometric'."
         )
+    use_lj_pme_val = bool(getattr(nonbonded, "use_lj_pme", False))
+    raw_nb_method = str(getattr(nonbonded, "nonbonded_method", "pme"))
+    raw_disp_corr = bool(getattr(nonbonded, "dispersion_correction", True))
+    eff_nb_method = (
+        "lj_pme"
+        if (use_lj_pme_val and raw_nb_method.strip().lower() in ("pme", "spme"))
+        else raw_nb_method
+    )
+    is_lj_pme_out = eff_nb_method.strip().lower() in ("lj_pme", "ljpme")
 
     return {
         # ThermostatControls
@@ -1186,10 +1215,10 @@ def lower_knob_surface(
         "compressibility_inv_bar": float(getattr(barostat, "compressibility_inv_bar", 4.5e-5)),
         "tau_p_ps": float(getattr(barostat, "tau_p_ps", 1.0)),
         # NonbondedControls & NonbondedConfig
-        "nonbonded_method": str(getattr(nonbonded, "nonbonded_method", "pme")),
+        "nonbonded_method": eff_nb_method,
         "engine": resolved_engine,
         "cutoff_angstrom": float(getattr(nonbonded, "cutoff_angstrom", 9.0)),
-        "switch_width_angstrom": eff_switch_width,
+        "switch_width_angstrom": 0.0 if is_lj_pme_out else eff_switch_width,
         "ewald_error_tolerance": float(getattr(nonbonded, "ewald_error_tolerance", 5e-4)),
         "pme_alpha": (
             solve_ewald_alpha(
@@ -1208,7 +1237,7 @@ def lower_knob_surface(
             float(getattr(nonbonded, "ewald_error_tolerance", 5e-4)),
         ),
         "pme_grid_dims": getattr(nonbonded, "pme_grid_dims", None),
-        "dispersion_correction": bool(getattr(nonbonded, "dispersion_correction", True)),
+        "dispersion_correction": False if is_lj_pme_out else raw_disp_corr,
         "reaction_field_dielectric": float(getattr(nonbonded, "reaction_field_dielectric", 78.3)),
         "dsf_alpha": getattr(nonbonded, "dsf_alpha", None),
         "coulomb_constant": float(getattr(nonbonded, "coulomb_constant", 332.0637)),
@@ -1219,6 +1248,7 @@ def lower_knob_surface(
         "dispersion_follows_parameters": bool(
             getattr(nonbonded, "dispersion_follows_parameters", True)
         ),
+        "use_lj_pme": use_lj_pme_val,
         # ImplicitSolventControls
         "solvent_model": getattr(implicit_solvent, "solvent_model", None),
         "solvent_dielectric": float(getattr(implicit_solvent, "solvent_dielectric", 78.5)),

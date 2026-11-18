@@ -294,6 +294,9 @@ SUPERSET_ALIAS_MAP: dict[str, str] = {
     "combining_rule": "lj_combining_rule",
     "exceptions_use_periodic_boundary_conditions": "exceptions_use_pbc",
     "dispersion_correction_follows_parameters": "dispersion_follows_parameters",
+    "ljpme_parameters": "use_lj_pme",
+    "lj_pme": "use_lj_pme",
+    "UseLjPme": "use_lj_pme",
 }
 
 
@@ -933,6 +936,8 @@ class OpenMMSystemKnobsSchema:
     lj_combining_rule: str = "lorentz_berthelot"
     exceptions_use_periodic_boundary_conditions: bool = False
     dispersion_correction_follows_parameters: bool = True
+    ljpme_parameters: tuple[float, int, int, int] | None = None
+    use_lj_pme: bool = False
 
 
 @dataclass(frozen=True)

@@ -34,7 +34,7 @@ def test_knob_parity_matrix_passes_with_negative_control() -> None:
     assert res["n_untracked_gaps"] == 0, f"Unexpected untracked gaps: {res}"
     assert res["max_rel_energy_err"] < 1e-5, f"Relative error too high: {res}"
     assert res["negative_control_detected"] is True
-    assert res["n_total_knobs"] == 90
+    assert res["n_total_knobs"] == 91
     assert res["n_pending_epic_knobs"] == 0
 
     # Verify differential injection increases n_silent_drops by >= 1

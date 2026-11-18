@@ -330,6 +330,37 @@ def compute_openmm_pme_params(
     return alpha, (dims[0], dims[1], dims[2])
 
 
+def compute_openmm_ljpme_params(
+    box_size: jnp.ndarray | np.ndarray,
+    cutoff: float = 9.0,
+    ewald_error_tolerance: float = 5e-4,
+    min_dim: int = 6,
+) -> tuple[float, tuple[int, int, int]]:
+    """Compute OpenMM-matched LJPME (alpha_lj, (nx_lj, ny_lj, nz_lj)) in Å^-1 and grid dims.
+
+    Matches ``NonbondedForceImpl::calcLJPMEParameters``:
+      - ``alpha_lj = sqrt(-log(2 * tol)) / cutoff``
+      - ``n_lj,d = max(min_dim, ceil(alpha_lj * L_d / (3 * tol**0.2)))``
+    """
+    box_np = np.asarray(box_size, dtype=np.float64)
+    if box_np.ndim == 3:
+        box_np = np.diag(box_np[0])
+    elif box_np.ndim == 2:
+        if _is_triclinic_box_array(box_np):
+            box_np = np.diag(box_np)
+        else:
+            box_np = box_np[0]
+    tol = max(float(ewald_error_tolerance), 1e-12)
+    cut = max(float(cutoff), 1e-6)
+    alpha_lj = float(np.sqrt(-np.log(2.0 * tol)) / cut)
+    denom = 3.0 * (tol**0.2)
+    dims = [
+        max(int(min_dim), int(np.ceil(alpha_lj * float(box_np[d]) / denom)))
+        for d in range(3)
+    ]
+    return alpha_lj, (dims[0], dims[1], dims[2])
+
+
 def compute_pme_grid_dims(
     box_size: jnp.ndarray,
     grid_spacing: float = 1.0,

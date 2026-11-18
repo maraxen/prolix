@@ -25,14 +25,18 @@ Covers:
 
 from __future__ import annotations
 
+from typing import Any, cast
+
 import numpy as np
 import pytest
 
 try:
     import openmm
-    from openmm import unit
+    from openmm import unit as _omm_unit
+    unit: Any = cast("Any", _omm_unit)
     HAS_OPENMM = True
 except ImportError:
+    unit = cast("Any", None)
     HAS_OPENMM = False
 
 import jax
@@ -248,7 +252,7 @@ def test_converter_virtual_sites_all_four_types(reference_platform):
 
     # 2. Prolix Converter computation
     conv = from_openmm_system(sys, positions=pos_akma)
-    vs: VirtualSites = conv.virtual_sites
+    vs: VirtualSites | None = conv.virtual_sites
     assert vs is not None
     assert vs.n_total == 4
     assert vs.n_linear == 3  # 2-particle, 3-particle, out-of-plane unified
@@ -333,6 +337,8 @@ def test_converter_water_settle_zeroing():
     water_triangle = np.asarray(bundle.water_indices[0])
     assert water_triangle[0] == 0  # Oxygen
     assert set(water_triangle[1:3]) == {1, 2}  # Hydrogens
+    assert bundle.water_r_OH is not None
+    assert bundle.water_r_HH is not None
     assert np.isclose(float(bundle.water_r_OH), 0.9572, atol=1e-4)
     assert np.isclose(float(bundle.water_r_HH), 1.5139, atol=1e-4)
 
@@ -343,6 +349,9 @@ def test_converter_water_settle_zeroing():
     assert int(bundle.n_angles) == 0  # Water angle removed
 
     # 3. Solute SHAKE constraint check
+    assert bundle.n_constraints is not None
+    assert bundle.constraint_pairs is not None
+    assert bundle.constraint_lengths is not None
     assert int(bundle.n_constraints) == 1
     assert tuple(bundle.constraint_pairs[0]) == (3, 4)
     assert np.isclose(float(bundle.constraint_lengths[0]), 1.09, atol=1e-4)
@@ -635,7 +644,7 @@ def test_converter_force_groups_and_global_params():
 
 def test_converter_unsupported_forces_fail_fast():
     """Verify that unsupported forces immediately raise UnsupportedOpenMMForceError."""
-    forces_to_test = [
+    forces_to_test: list[openmm.Force] = [
         openmm.DrudeForce(),
         openmm.CustomCVForce("0.5*r^2"),
         openmm.CustomCentroidBondForce(2, "0.5*distance(g1, g2)^2"),
@@ -652,17 +661,27 @@ def test_converter_unsupported_forces_fail_fast():
             from_openmm_system(sys)
 
 
-def test_converter_ljpme_unsupported_fail_fast():
-    """Verify that NonbondedForce with LJPME (method 5) raises UnsupportedOpenMMForceError."""
+def test_converter_ljpme_supported_and_ignores_switch_and_tail():
+    """Verify that NonbondedForce with LJPME (method 5) converts cleanly and disables switch/tail."""
     sys = openmm.System()
+    sys.setDefaultPeriodicBoxVectors([3.0, 0.0, 0.0], [0.0, 3.0, 0.0], [0.0, 0.0, 3.0])
     sys.addParticle(12.0)
     nb = openmm.NonbondedForce()
     nb.addParticle(0.0, 0.3, 1.0)
     nb.setNonbondedMethod(openmm.NonbondedForce.LJPME)
+    nb.setCutoffDistance(0.9 * unit.nanometer)
+    nb.setUseSwitchingFunction(True)
+    nb.setSwitchingDistance(0.75 * unit.nanometer)
+    nb.setUseDispersionCorrection(True)
+    nb.setLJPMEParameters(3.2, 16, 18, 20)
     sys.addForce(nb)
 
-    with pytest.raises(UnsupportedOpenMMForceError, match="LJPME"):
-        from_openmm_system(sys)
+    conv = from_openmm_system(sys)
+    assert conv.nonbonded_method == "lj_pme"
+    assert conv.lj_switch_width == 0.0
+    assert conv.use_dispersion_correction is False
+    assert conv.explicit_lj_pme_alpha == pytest.approx(0.32)
+    assert conv.lj_pme_grid_dims == (16, 18, 20)
 
 
 # =============================================================================

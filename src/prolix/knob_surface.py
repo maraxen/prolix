@@ -62,6 +62,7 @@ class NonbondedControls:
     lj_combining_rule: str = "lorentz_berthelot"
     exceptions_use_pbc: bool = False
     dispersion_follows_parameters: bool = True
+    use_lj_pme: bool = False
 
 
 @dataclass(frozen=True)

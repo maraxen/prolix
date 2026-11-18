@@ -39,6 +39,7 @@ from prolix.openmm.units import (
     TORSION_K_OMM_TO_AKMA,
 )
 from prolix.physics.cmap import precompute_cmap_coefficients
+from prolix.physics.lj_pme import resolve_ljpme_parameters
 from prolix.physics.neighbor_list import pair_list_to_dense_padded
 from prolix.physics.pbc import reduce_triclinic_box_vectors
 from prolix.physics.pme import compute_openmm_pme_params, compute_pme_grid_dims
@@ -545,6 +546,8 @@ class ConvertedOpenMMSystem(eqx.Module):
     exceptions_use_pbc: bool = eqx.field(static=True, default=False)
     lj_combining_rule: str = eqx.field(static=True, default="lorentz_berthelot")
     dispersion_follows_parameters: bool = eqx.field(static=True, default=True)
+    explicit_lj_pme_alpha: float | None = eqx.field(static=True, default=None)
+    lj_pme_grid_dims: tuple[int, int, int] | None = eqx.field(static=True, default=None)
 
     def compute_virtual_sites(
         self, positions: Float[Array, "... 3"]
@@ -1569,6 +1572,8 @@ def from_openmm_system(
     explicit_pme_alpha: float | None = None
     pme_alpha = 0.0
     pme_grid_dims: tuple[int, int, int] | None = None
+    explicit_lj_pme_alpha: float | None = None
+    lj_pme_grid_dims: tuple[int, int, int] | None = None
     exceptions_use_pbc = bool(config.exceptions_use_pbc)
     lj_combining_rule = str(config.lj_combining_rule)
     dispersion_follows_parameters = bool(config.dispersion_follows_parameters)
@@ -1583,11 +1588,6 @@ def from_openmm_system(
 
             # Method validation & mapping
             omm_method = f.getNonbondedMethod()
-            if omm_method == 5:  # LJPME
-                raise UnsupportedOpenMMForceError(
-                    "NonbondedForce (LJPME)",
-                    "Lennard-Jones PME dispersion mesh is not implemented in Prolix.",
-                )
             if omm_method == 0:  # NoCutoff
                 nonbonded_method = "coulomb"
                 nonbonded_cutoff = float("inf")
@@ -1605,23 +1605,32 @@ def from_openmm_system(
                 )
                 reaction_field_dielectric = float(f.getReactionFieldDielectric())
             elif omm_method in (3, 4):  # Ewald, PME
-                nonbonded_method = "pme"
+                nonbonded_method = "lj_pme" if bool(config.use_lj_pme) else "pme"
+                nonbonded_cutoff = (
+                    f.getCutoffDistance().value_in_unit(unit.nanometer)
+                    * NM_TO_ANGSTROM
+                )
+            elif omm_method == 5:  # LJPME
+                nonbonded_method = "lj_pme"
                 nonbonded_cutoff = (
                     f.getCutoffDistance().value_in_unit(unit.nanometer)
                     * NM_TO_ANGSTROM
                 )
 
-            # Switching function
-            if f.getUseSwitchingFunction():
-                sw_dist_A = (
-                    f.getSwitchingDistance().value_in_unit(unit.nanometer)
-                    * NM_TO_ANGSTROM
-                )
-                lj_switch_width = max(nonbonded_cutoff - sw_dist_A, 0.0)
-            else:
+            # OpenMM NonbondedForce.LJPME ignores both switching function and isotropic tail correction.
+            if nonbonded_method == "lj_pme":
                 lj_switch_width = 0.0
-
-            use_dispersion_correction = bool(f.getUseDispersionCorrection())
+                use_dispersion_correction = False
+            else:
+                if f.getUseSwitchingFunction():
+                    sw_dist_A = (
+                        f.getSwitchingDistance().value_in_unit(unit.nanometer)
+                        * NM_TO_ANGSTROM
+                    )
+                    lj_switch_width = max(nonbonded_cutoff - sw_dist_A, 0.0)
+                else:
+                    lj_switch_width = 0.0
+                use_dispersion_correction = bool(f.getUseDispersionCorrection())
             get_exc_pbc = getattr(f, "getExceptionsUsePeriodicBoundaryConditions", None)
             if callable(get_exc_pbc):
                 exceptions_use_pbc = bool(get_exc_pbc()) or bool(config.exceptions_use_pbc)
@@ -1812,7 +1821,7 @@ def from_openmm_system(
                 pme_alpha = float(alpha_omm_val / 10.0)  # nm^-1 to Å^-1
                 explicit_pme_alpha = pme_alpha
             elif (
-                nonbonded_method == "pme"
+                nonbonded_method in ("pme", "lj_pme")
                 and 0.0 < nonbonded_cutoff < float("inf")
             ):
                 eff_tol_alpha = (
@@ -1836,7 +1845,7 @@ def from_openmm_system(
                 box_diag_np = np.diag(np.asarray(box_mat_np, dtype=np.float64))
                 if (
                     isinstance(config.pme_grid_spacing, _DefaultFloat)
-                    and nonbonded_method == "pme"
+                    and nonbonded_method in ("pme", "lj_pme")
                     and 0.0 < nonbonded_cutoff < float("inf")
                 ):
                     _, omm_dims = compute_openmm_pme_params(
@@ -1857,6 +1866,34 @@ def from_openmm_system(
                     pme_grid_dims = compute_pme_grid_dims(
                         jnp.asarray(box_diag_np),
                         grid_spacing=config.pme_grid_spacing,
+                    )
+
+            # Dispersion LJ-PME grid parameters
+            get_ljpme = getattr(f, "getLJPMEParameters", None)
+            if callable(get_ljpme):
+                alpha_lj_omm, nx_lj, ny_lj, nz_lj = cast(
+                    "tuple[Any, int, int, int]", get_ljpme()
+                )
+                alpha_lj_val = (
+                    float(alpha_lj_omm.value_in_unit(unit.nanometer**-1))
+                    if hasattr(alpha_lj_omm, "value_in_unit")
+                    else float(alpha_lj_omm)
+                )
+                if alpha_lj_val > 0.0:
+                    explicit_lj_pme_alpha = float(alpha_lj_val / 10.0)
+                if nonbonded_method == "lj_pme" and has_pbc and 0.0 < nonbonded_cutoff < float("inf"):
+                    eff_lj_tol = (
+                        float(ewald_error_tolerance)
+                        if ewald_error_tolerance is not None
+                        else float(config.ewald_error_tolerance)
+                    )
+                    box_diag_lj_np = np.diag(np.asarray(box_mat_np, dtype=np.float64))
+                    _, lj_pme_grid_dims = resolve_ljpme_parameters(
+                        box_diag_lj_np,
+                        cutoff=float(nonbonded_cutoff),
+                        ewald_error_tolerance=eff_lj_tol,
+                        explicit_alpha=explicit_lj_pme_alpha or 0.0,
+                        explicit_grid_dims=(int(nx_lj), int(ny_lj), int(nz_lj)),
                     )
 
     excl_indices_np = (
@@ -2447,6 +2484,8 @@ def from_openmm_system(
             exceptions_use_pbc=bool(exceptions_use_pbc),
             lj_combining_rule=str(lj_combining_rule),
             dispersion_follows_parameters=bool(dispersion_follows_parameters),
+            explicit_lj_pme_alpha=explicit_lj_pme_alpha,
+            lj_pme_grid_dims=lj_pme_grid_dims,
         ),
         ConvertedOpenMMSystem,
     )

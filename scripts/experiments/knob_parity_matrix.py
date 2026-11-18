@@ -1,7 +1,7 @@
 r"""Tier 3 (#6194 / FR-3): Bathos Knob-Parity Coverage Matrix & Synthetic Negative Control.
 
 Evaluates:
-1. Consumer-only static AST reachability (U1) across all 90 canonical ``KnobSurface``
+1. Consumer-only static AST reachability (U1) across all 91 canonical ``KnobSurface``
    leaf fields, ``NonbondedConfig``, and ``NeighborListConfig``, asserting
    ``set(unread_fields) - DOCUMENTED_INERT_KNOBS == set()`` and
    ``PENDING_EPIC_KNOBS == frozenset()``.
@@ -28,7 +28,7 @@ import math
 import os
 import sys
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _SRC_ROOT = _REPO_ROOT / "src"
@@ -104,43 +104,46 @@ def _compute_reference_energy_from_lowered(cfg: dict[str, Any]) -> float:
     rc = float(cfg.get("cutoff_angstrom", 9.0))
     eps_rf = float(cfg.get("reaction_field_dielectric", 78.3))
     coulomb = float(cfg.get("coulomb_constant", 332.0637))
-    sys_rf = PhysicsSystem(
-        positions=pos,
-        charges=charges,
-        sigmas=sigmas,
-        epsilons=epsilons,
-        radii=jnp.ones(2, dtype=jnp.float32) * 1.5,
-        scaled_radii=jnp.ones(2, dtype=jnp.float32) * 1.2,
-        masses=jnp.ones(2, dtype=jnp.float32) * 12.0,
-        element_ids=jnp.ones(2, dtype=jnp.int32) * 6,
-        atom_mask=mask,
-        is_hydrogen=jnp.zeros(2, dtype=bool),
-        is_backbone=jnp.zeros(2, dtype=bool),
-        is_heavy=mask,
-        protein_atom_mask=mask,
-        water_atom_mask=jnp.zeros(2, dtype=bool),
-        bonds=jnp.zeros((1, 2), dtype=jnp.int32),
-        bond_params=jnp.zeros((1, 2), dtype=jnp.float32),
-        bond_mask=jnp.zeros(1, dtype=bool),
-        angles=jnp.zeros((1, 3), dtype=jnp.int32),
-        angle_params=jnp.zeros((1, 2), dtype=jnp.float32),
-        angle_mask=jnp.zeros(1, dtype=bool),
-        dihedrals=jnp.zeros((1, 4), dtype=jnp.int32),
-        dihedral_params=jnp.zeros((1, 3), dtype=jnp.float32),
-        dihedral_mask=jnp.zeros(1, dtype=bool),
-        impropers=jnp.zeros((1, 4), dtype=jnp.int32),
-        improper_params=jnp.zeros((1, 3), dtype=jnp.float32),
-        improper_mask=jnp.zeros(1, dtype=bool),
-        urey_bradley_bonds=jnp.zeros((1, 2), dtype=jnp.int32),
-        urey_bradley_params=jnp.zeros((1, 2), dtype=jnp.float32),
-        urey_bradley_mask=jnp.zeros(1, dtype=bool),
-        box_size=box,
-        nonbonded_cutoff=rc,
-        electrostatic_method="reaction_field",
-        reaction_field_dielectric=eps_rf,
-        use_dispersion_correction=False,
-        dense_excl_scale_vdw=jnp.ones((2, 2), dtype=jnp.float32),
-        dense_excl_scale_elec=jnp.ones((2, 2), dtype=jnp.float32),
+    sys_rf = cast(
+        "PhysicsSystem",
+        PhysicsSystem(
+            positions=pos,
+            charges=charges,
+            sigmas=sigmas,
+            epsilons=epsilons,
+            radii=jnp.ones(2, dtype=jnp.float32) * 1.5,
+            scaled_radii=jnp.ones(2, dtype=jnp.float32) * 1.2,
+            masses=jnp.ones(2, dtype=jnp.float32) * 12.0,
+            element_ids=jnp.ones(2, dtype=jnp.int32) * 6,
+            atom_mask=mask,
+            is_hydrogen=jnp.zeros(2, dtype=bool),
+            is_backbone=jnp.zeros(2, dtype=bool),
+            is_heavy=mask,
+            protein_atom_mask=mask,
+            water_atom_mask=jnp.zeros(2, dtype=bool),
+            bonds=jnp.zeros((1, 2), dtype=jnp.int32),
+            bond_params=jnp.zeros((1, 2), dtype=jnp.float32),
+            bond_mask=jnp.zeros(1, dtype=bool),
+            angles=jnp.zeros((1, 3), dtype=jnp.int32),
+            angle_params=jnp.zeros((1, 2), dtype=jnp.float32),
+            angle_mask=jnp.zeros(1, dtype=bool),
+            dihedrals=jnp.zeros((1, 4), dtype=jnp.int32),
+            dihedral_params=jnp.zeros((1, 3), dtype=jnp.float32),
+            dihedral_mask=jnp.zeros(1, dtype=bool),
+            impropers=jnp.zeros((1, 4), dtype=jnp.int32),
+            improper_params=jnp.zeros((1, 3), dtype=jnp.float32),
+            improper_mask=jnp.zeros(1, dtype=bool),
+            urey_bradley_bonds=jnp.zeros((1, 2), dtype=jnp.int32),
+            urey_bradley_params=jnp.zeros((1, 2), dtype=jnp.float32),
+            urey_bradley_mask=jnp.zeros(1, dtype=bool),
+            box_size=box,
+            nonbonded_cutoff=rc,
+            electrostatic_method="reaction_field",
+            reaction_field_dielectric=eps_rf,
+            use_dispersion_correction=False,
+            dense_excl_scale_vdw=jnp.ones((2, 2), dtype=jnp.float32),
+            dense_excl_scale_elec=jnp.ones((2, 2), dtype=jnp.float32),
+        ),
     )
     e_rf = float(single_padded_energy(sys_rf, disp_fn, implicit_solvent=False)) * (coulomb / 332.0637)
 
@@ -184,8 +187,12 @@ def _compute_reference_energy_from_lowered(cfg: dict[str, Any]) -> float:
     sig_pair = math.sqrt(sig1 * sig2) if comb_rule == "geometric" else 0.5 * (sig1 + sig2)
     exc_pbc = bool(cfg.get("exceptions_use_pbc", False))
     disp_follow = bool(cfg.get("dispersion_follows_parameters", True))
+    use_lj_pme = bool(cfg.get("use_lj_pme", False))
     r_exc_probe = 5.0 if exc_pbc else 20.0
-    e_comb_probe = 1e-4 * ((sig_pair / r_exc_probe) ** 6) * (1.0 if disp_follow else 0.5)
+    ljpme_scale = 1.25 if use_lj_pme else 1.0
+    e_comb_probe = (
+        1e-4 * ((sig_pair / r_exc_probe) ** 6) * (1.0 if disp_follow else 0.5) * ljpme_scale
+    )
     return float(e_rf + e_sc_lj + e_rest + 0.01 * kd_dist + e_comb_probe)
 
 

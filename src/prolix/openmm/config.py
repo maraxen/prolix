@@ -107,6 +107,7 @@ class ProlixOpenMMConfig:
     lj_combining_rule: LjCombiningRuleType = "lorentz_berthelot"
     exceptions_use_pbc: bool = False
     dispersion_follows_parameters: bool = True
+    use_lj_pme: bool = False
 
     # --- Neighbor List Parameters (Lengths in Å) ---
     nl_skin: float = 2.0
@@ -225,6 +226,10 @@ class ProlixOpenMMConfig:
             raise ValueError(
                 "dispersion_follows_parameters must be a boolean, "
                 f"got {self.dispersion_follows_parameters!r}."
+            )
+        if not isinstance(self.use_lj_pme, bool):
+            raise ValueError(
+                f"use_lj_pme must be a boolean, got {self.use_lj_pme!r}."
             )
 
         # Neighbor list validation
@@ -454,6 +459,7 @@ _FIELD_PARSERS: dict[str, Any] = {
     "lj_combining_rule": _parse_combining_rule,
     "exceptions_use_pbc": _parse_bool,
     "dispersion_follows_parameters": _parse_bool,
+    "use_lj_pme": _parse_bool,
     "nl_skin": _parse_float,
     "nl_capacity_multiplier": _parse_float,
     "nl_update_every": _parse_int,
@@ -500,6 +506,7 @@ _CANONICAL_NAMES: dict[str, str] = {
     "lj_combining_rule": "LjCombiningRule",
     "exceptions_use_pbc": "ExceptionsUsePbc",
     "dispersion_follows_parameters": "DispersionFollowsParameters",
+    "use_lj_pme": "UseLjPme",
     "nl_skin": "NeighborListSkin",
     "nl_capacity_multiplier": "NeighborListCapacityMultiplier",
     "nl_update_every": "NeighborListUpdateEvery",
@@ -567,6 +574,8 @@ _EXTRA_ALIASES: dict[str, str] = {
     "exceptionsuseperiodicboundaryconditions": "exceptions_use_pbc",
     "dispersionfollowsparameters": "dispersion_follows_parameters",
     "dispersioncorrectionfollowsparameters": "dispersion_follows_parameters",
+    "useljpme": "use_lj_pme",
+    "ljpme": "use_lj_pme",
     "disablecelllist": "disable_cell_list",
     "customforcemode": "custom_force_mode",
     "customnonbondedchunksize": "custom_nonbonded_chunk_size",

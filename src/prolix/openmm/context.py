@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING, Any, cast
 
 import equinox as eqx
 import jax
+import jax.core
 import jax.numpy as jnp
 import numpy as np
 from jax_md import space
@@ -71,6 +72,14 @@ from prolix.physics.constraints import ConstraintAlgorithm, make_constraint
 from prolix.physics.explicit_corrections import lj_dispersion_tail_energy
 from prolix.physics.generalized_born import (
     compute_gb_energy,
+)
+from prolix.physics.lj_pme import (
+    dispersion_charges,
+    ewald_p6_long_range_value,
+    lj_pme_direct_pair_energy,
+    lj_pme_reciprocal_energy,
+    lj_pme_self_energy,
+    resolve_ljpme_parameters,
 )
 from prolix.physics.neighbor_list import (
     get_neighbor_exclusion_scales,
@@ -806,8 +815,10 @@ def _eval_tile_pairs_jax(
     is_rf: bool,
     rf_dielectric: float,
     lj_combining_rule: str,
+    is_lj_pme: bool = False,
+    lj_alpha_float: float = 0.34,
 ) -> jnp.ndarray:
-    """Pure-JAX O(P) tile-pair evaluation supporting RF, geometric mixing, and box autodiff."""
+    """Pure-JAX O(P) tile-pair evaluation supporting RF, LJPME, geometric mixing, and box autodiff."""
     dtype = pos.dtype
     n_real = int(pos.shape[0])
     tp_arr = jnp.asarray(tile_pair_nl.tile_pairs, dtype=jnp.int32)
@@ -844,6 +855,7 @@ def _eval_tile_pairs_jax(
         eps_p = eps_p[perm_arr]
         msk_p = msk_p[perm_arr]
 
+    b_p = dispersion_charges(sig_p, eps_p, msk_p) if is_lj_pme else sig_p
     lane_32 = jnp.arange(32, dtype=jnp.int32)
     upper_tri = lane_32[:, None] < lane_32[None, :]
     bit_shifts = lane_32[None, :]
@@ -886,17 +898,23 @@ def _eval_tile_pairs_jax(
         sig_ij, eps_ij = _combine_sig_eps(
             si[:, None], sj[None, :], ei[:, None], ej[None, :], lj_combining_rule
         )
-        sr = sig_ij / r_safe
-        sr6 = sr**6
-        u_lj = jnp.where(eps_ij > 0.0, 4.0 * eps_ij * (sr6 * sr6 - sr6), 0.0)
-        if lj_switch_width > 0.0 and has_fin_cut:
-            r_sw = cutoff - lj_switch_width
-            z = jnp.clip((r_safe - r_sw) / lj_switch_width, 0.0, 1.0)
-            s_poly = 1.0 - 10.0 * (z**3) + 15.0 * (z**4) - 6.0 * (z**5)
-            s_lj = jnp.where(
-                r_safe <= r_sw, 1.0, jnp.where(r_safe < cutoff, s_poly, 0.0)
+        if is_lj_pme:
+            bi, bj = b_p[oi], b_p[oj]
+            u_lj = lj_pme_direct_pair_energy(
+                r_safe, sig_ij, eps_ij, bi[:, None] * bj[None, :], lj_alpha_float, cutoff
             )
-            u_lj = u_lj * s_lj
+        else:
+            sr = sig_ij / r_safe
+            sr6 = sr**6
+            u_lj = jnp.where(eps_ij > 0.0, 4.0 * eps_ij * (sr6 * sr6 - sr6), 0.0)
+            if lj_switch_width > 0.0 and has_fin_cut:
+                r_sw = cutoff - lj_switch_width
+                z = jnp.clip((r_safe - r_sw) / lj_switch_width, 0.0, 1.0)
+                s_poly = 1.0 - 10.0 * (z**3) + 15.0 * (z**4) - 6.0 * (z**5)
+                s_lj = jnp.where(
+                    r_safe <= r_sw, 1.0, jnp.where(r_safe < cutoff, s_poly, 0.0)
+                )
+                u_lj = u_lj * s_lj
 
         q_mat = qi[:, None] * qj[None, :]
         if is_pme:
@@ -963,8 +981,10 @@ def _eval_nonbonded_terms(  # noqa: PLR0913
     exceptions_use_pbc: bool = False,
     dispersion_follows_parameters: bool = True,
     force_pure_jax_tile_pairs: bool = False,
+    lj_pme_alpha: float | None = None,
+    lj_pme_grid_dims: tuple[int, int, int] | None = None,
 ) -> jnp.ndarray:
-    """Evaluate pairwise Lennard-Jones, Coulomb, exclusions, 1-4 exceptions, and PME/RF/dispersion."""
+    """Evaluate pairwise Lennard-Jones, Coulomb, exclusions, 1-4 exceptions, and PME/LJPME/RF/dispersion."""
     g_nb = force_group_by_component.get("nonbonded", 0)
     if ((groups_mask & (1 << int(g_nb))) == 0) or bundle.charges is None or not has_nonbonded:
         return jnp.array(0.0, dtype=pos.dtype)
@@ -984,11 +1004,16 @@ def _eval_nonbonded_terms(  # noqa: PLR0913
     )
 
     nb_method = str(nonbonded_method).lower()
-    is_pme = nb_method in ("pme", "spme")
+    is_lj_pme = nb_method in ("lj_pme", "ljpme") and has_pbc
+    is_pme = nb_method in ("pme", "spme", "lj_pme", "ljpme")
     is_rf = (
         nb_method in ("cutoffperiodic", "cutoff_periodic", "reactionfield", "reaction_field", "rf")
         and has_pbc
     )
+    # OpenMM NonbondedForce.LJPME ignores both switching function and isotropic dispersion tail.
+    eff_lj_switch_width = 0.0 if is_lj_pme else lj_switch_width
+    eff_use_disp = False if is_lj_pme else use_dispersion_correction
+
     bundle_alpha_concrete = 0.0
     if is_pme and pme_alpha is None and bundle.pme_alpha is not None:
         with contextlib.suppress(Exception):
@@ -1005,6 +1030,16 @@ def _eval_nonbonded_terms(  # noqa: PLR0913
     else:
         alpha_float = 0.34
     alpha = jnp.asarray(alpha_float, dtype=pos.dtype)
+
+    if is_lj_pme and lj_pme_alpha is not None and float(lj_pme_alpha) > 0.0:
+        lj_alpha_float = float(lj_pme_alpha)
+    elif is_lj_pme and cutoff < float("inf"):
+        lj_alpha_float = float(
+            (1.0 / cutoff) * math.sqrt(-math.log(2.0 * float(ewald_error_tolerance)))
+        )
+    else:
+        lj_alpha_float = alpha_float
+    b_disp = dispersion_charges(sig, eps) if is_lj_pme else sig
 
     use_tile_pairs = (
         tile_pair_nl is not None
@@ -1025,6 +1060,7 @@ def _eval_nonbonded_terms(  # noqa: PLR0913
         eff_cutoff = cutoff if cutoff < float("inf") else 1.0e6
         can_call_pallas_tp = (
             not force_pure_jax_tile_pairs
+            and not is_lj_pme
             and lj_combining_rule == "lorentz_berthelot"
             and (not is_rf or "rf_dielectric" in _PALLAS_NB_TP_SIG_PARAMS)
         )
@@ -1044,7 +1080,7 @@ def _eval_nonbonded_terms(  # noqa: PLR0913
                     pme_alpha=alpha_float if is_pme else 0.0,
                     cutoff=float(eff_cutoff),
                     coulomb_constant=COULOMB_CONSTANT,
-                    lj_switch_width=float(lj_switch_width) if cutoff < float("inf") else 0.0,
+                    lj_switch_width=float(eff_lj_switch_width) if cutoff < float("inf") else 0.0,
                     include_pme_excl_erf=False,
                     return_forces=False,
                     interpret=pallas_interpret or not _triton_gpu_available(),
@@ -1060,12 +1096,14 @@ def _eval_nonbonded_terms(  # noqa: PLR0913
                 tile_pair_nl,
                 box_diag,
                 cutoff=cutoff,
-                lj_switch_width=lj_switch_width,
+                lj_switch_width=eff_lj_switch_width,
                 is_pme=is_pme,
                 alpha_float=alpha_float,
                 is_rf=is_rf,
                 rf_dielectric=rf_dielectric,
                 lj_combining_rule=lj_combining_rule,
+                is_lj_pme=is_lj_pme,
+                lj_alpha_float=lj_alpha_float,
             )
     elif neighbor_idx is not None:
         # Genuine NeighborList O(N * K) direct path (O(N * K * log2 M) exclusion binary search)
@@ -1107,17 +1145,26 @@ def _eval_nonbonded_terms(  # noqa: PLR0913
         )
         q_mat = q[:, None] * q[j_safe]
 
-        sr = sig_mat / r_safe
-        sr6 = sr**6
-        sr12 = sr6**2
-        u_lj = jnp.where(eps_mat > 0.0, 4.0 * eps_mat * (sr12 - sr6), 0.0)
-
-        if lj_switch_width > 0.0 and cutoff < float("inf"):
-            r_sw = cutoff - lj_switch_width
-            z = jnp.clip((r_safe - r_sw) / lj_switch_width, 0.0, 1.0)
-            s_poly = 1.0 - 10.0 * (z**3) + 15.0 * (z**4) - 6.0 * (z**5)
-            s_lj = jnp.where(r_safe <= r_sw, 1.0, jnp.where(r_safe < cutoff, s_poly, 0.0))
-            u_lj = u_lj * s_lj
+        if is_lj_pme:
+            u_lj = lj_pme_direct_pair_energy(
+                r_safe,
+                sig_mat,
+                eps_mat,
+                b_disp[:, None] * b_disp[j_safe],
+                lj_alpha_float,
+                cutoff,
+            )
+        else:
+            sr = sig_mat / r_safe
+            sr6 = sr**6
+            sr12 = sr6**2
+            u_lj = jnp.where(eps_mat > 0.0, 4.0 * eps_mat * (sr12 - sr6), 0.0)
+            if eff_lj_switch_width > 0.0 and cutoff < float("inf"):
+                r_sw = cutoff - eff_lj_switch_width
+                z = jnp.clip((r_safe - r_sw) / eff_lj_switch_width, 0.0, 1.0)
+                s_poly = 1.0 - 10.0 * (z**3) + 15.0 * (z**4) - 6.0 * (z**5)
+                s_lj = jnp.where(r_safe <= r_sw, 1.0, jnp.where(r_safe < cutoff, s_poly, 0.0))
+                u_lj = u_lj * s_lj
 
         if is_pme:
             u_elec = COULOMB_CONSTANT * q_mat * (jax.lax.erfc(alpha * r_safe) / r_safe)
@@ -1173,17 +1220,28 @@ def _eval_nonbonded_terms(  # noqa: PLR0913
             )
             q_mat = q[safe_i][:, None] * q[None, :]
 
-            sr = sig_mat / r_safe
-            sr6 = sr**6
-            sr12 = sr6**2
-            u_lj = jnp.where(eps_mat > 0.0, 4.0 * eps_mat * (sr12 - sr6), 0.0)
-
-            if lj_switch_width > 0.0 and cutoff < float("inf"):
-                r_sw = cutoff - lj_switch_width
-                z = jnp.clip((r_safe - r_sw) / lj_switch_width, 0.0, 1.0)
-                s_poly = 1.0 - 10.0 * (z**3) + 15.0 * (z**4) - 6.0 * (z**5)
-                s_lj = jnp.where(r_safe <= r_sw, 1.0, jnp.where(r_safe < cutoff, s_poly, 0.0))
-                u_lj = u_lj * s_lj
+            if is_lj_pme:
+                u_lj = lj_pme_direct_pair_energy(
+                    r_safe,
+                    sig_mat,
+                    eps_mat,
+                    b_disp[safe_i][:, None] * b_disp[None, :],
+                    lj_alpha_float,
+                    cutoff,
+                )
+            else:
+                sr = sig_mat / r_safe
+                sr6 = sr**6
+                sr12 = sr6**2
+                u_lj = jnp.where(eps_mat > 0.0, 4.0 * eps_mat * (sr12 - sr6), 0.0)
+                if eff_lj_switch_width > 0.0 and cutoff < float("inf"):
+                    r_sw = cutoff - eff_lj_switch_width
+                    z = jnp.clip((r_safe - r_sw) / eff_lj_switch_width, 0.0, 1.0)
+                    s_poly = 1.0 - 10.0 * (z**3) + 15.0 * (z**4) - 6.0 * (z**5)
+                    s_lj = jnp.where(
+                        r_safe <= r_sw, 1.0, jnp.where(r_safe < cutoff, s_poly, 0.0)
+                    )
+                    u_lj = u_lj * s_lj
 
             if is_pme:
                 u_elec = COULOMB_CONSTANT * q_mat * (jax.lax.erfc(alpha * r_safe) / r_safe)
@@ -1221,17 +1279,26 @@ def _eval_nonbonded_terms(  # noqa: PLR0913
         )
         q_mat = q[:, None] * q[None, :]
 
-        sr = sig_mat / r_safe
-        sr6 = sr**6
-        sr12 = sr6**2
-        u_lj = jnp.where(eps_mat > 0.0, 4.0 * eps_mat * (sr12 - sr6), 0.0)
-
-        if lj_switch_width > 0.0 and cutoff < float("inf"):
-            r_sw = cutoff - lj_switch_width
-            z = jnp.clip((r_safe - r_sw) / lj_switch_width, 0.0, 1.0)
-            s_poly = 1.0 - 10.0 * (z**3) + 15.0 * (z**4) - 6.0 * (z**5)
-            s_lj = jnp.where(r_safe <= r_sw, 1.0, jnp.where(r_safe < cutoff, s_poly, 0.0))
-            u_lj = u_lj * s_lj
+        if is_lj_pme:
+            u_lj = lj_pme_direct_pair_energy(
+                r_safe,
+                sig_mat,
+                eps_mat,
+                b_disp[:, None] * b_disp[None, :],
+                lj_alpha_float,
+                cutoff,
+            )
+        else:
+            sr = sig_mat / r_safe
+            sr6 = sr**6
+            sr12 = sr6**2
+            u_lj = jnp.where(eps_mat > 0.0, 4.0 * eps_mat * (sr12 - sr6), 0.0)
+            if eff_lj_switch_width > 0.0 and cutoff < float("inf"):
+                r_sw = cutoff - eff_lj_switch_width
+                z = jnp.clip((r_safe - r_sw) / eff_lj_switch_width, 0.0, 1.0)
+                s_poly = 1.0 - 10.0 * (z**3) + 15.0 * (z**4) - 6.0 * (z**5)
+                s_lj = jnp.where(r_safe <= r_sw, 1.0, jnp.where(r_safe < cutoff, s_poly, 0.0))
+                u_lj = u_lj * s_lj
 
         if is_pme:
             u_elec = COULOMB_CONSTANT * q_mat * (jax.lax.erfc(alpha * r_safe) / r_safe)
@@ -1261,20 +1328,21 @@ def _eval_nonbonded_terms(  # noqa: PLR0913
         p2_s = jnp.where(valid_ex, p2, 0)
 
         dr_ex_raw = pos[p1_s] - pos[p2_s]
-        r_ex_raw = jnp.sqrt(jnp.sum(dr_ex_raw**2, axis=-1) + 1e-12)
-        r_ex_raw_s = jnp.where(valid_ex, r_ex_raw, 1.0)
         dr_ex_mic = (
             _minimum_image_dr(dr_ex_raw, box_pbc, True)
             if (has_pbc and box_pbc is not None)
             else dr_ex_raw
         )
+        dr_ex_recip = (
+            dr_ex_mic
+            if (exceptions_use_pbc and has_pbc and box_pbc is not None)
+            else dr_ex_raw
+        )
+        r2_ex_recip = jnp.sum(dr_ex_recip**2, axis=-1)
+        r2_ex_recip_s = jnp.where(valid_ex, r2_ex_recip, jnp.ones_like(r2_ex_recip))
+        r_ex_recip_s = jnp.sqrt(r2_ex_recip_s + 1e-12)
         r_ex_mic = jnp.sqrt(jnp.sum(dr_ex_mic**2, axis=-1) + 1e-12)
         r_ex_mic_s = jnp.where(valid_ex, r_ex_mic, 1.0)
-        r_ex_recip_s = (
-            r_ex_mic_s
-            if (exceptions_use_pbc and has_pbc and box_pbc is not None)
-            else r_ex_raw_s
-        )
 
         if direct_exclusions_premasked:
             if is_pme:
@@ -1282,6 +1350,13 @@ def _eval_nonbonded_terms(  # noqa: PLR0913
                     jax.lax.erf(alpha * r_ex_recip_s) / r_ex_recip_s
                 )
                 tot = tot - jnp.sum(jnp.where(valid_ex, u_ex_recip, 0.0))
+            if is_lj_pme:
+                u_ex_lj_recip = (
+                    b_disp[p1_s]
+                    * b_disp[p2_s]
+                    * ewald_p6_long_range_value(lj_alpha_float, r2_ex_recip_s)
+                )
+                tot = tot + jnp.sum(jnp.where(valid_ex, u_ex_lj_recip, 0.0))
         else:
             r_ex_s = r_ex_mic_s
             sig_ex, eps_ex = _combine_sig_eps(
@@ -1289,18 +1364,28 @@ def _eval_nonbonded_terms(  # noqa: PLR0913
             )
             q_ex = q[p1_s] * q[p2_s]
 
-            sr_e = sig_ex / r_ex_s
-            sr6_e = sr_e**6
-            sr12_e = sr6_e**2
-            u_ex_lj = jnp.where(eps_ex > 0.0, 4.0 * eps_ex * (sr12_e - sr6_e), 0.0)
-            if lj_switch_width > 0.0 and cutoff < float("inf"):
-                r_sw = cutoff - lj_switch_width
-                z_e = jnp.clip((r_ex_s - r_sw) / lj_switch_width, 0.0, 1.0)
-                s_poly_e = 1.0 - 10.0 * (z_e**3) + 15.0 * (z_e**4) - 6.0 * (z_e**5)
-                s_lj_e = jnp.where(
-                    r_ex_s <= r_sw, 1.0, jnp.where(r_ex_s < cutoff, s_poly_e, 0.0)
+            if is_lj_pme:
+                u_ex_lj = lj_pme_direct_pair_energy(
+                    r_ex_s,
+                    sig_ex,
+                    eps_ex,
+                    b_disp[p1_s] * b_disp[p2_s],
+                    lj_alpha_float,
+                    cutoff,
                 )
-                u_ex_lj = u_ex_lj * s_lj_e
+            else:
+                sr_e = sig_ex / r_ex_s
+                sr6_e = sr_e**6
+                sr12_e = sr6_e**2
+                u_ex_lj = jnp.where(eps_ex > 0.0, 4.0 * eps_ex * (sr12_e - sr6_e), 0.0)
+                if eff_lj_switch_width > 0.0 and cutoff < float("inf"):
+                    r_sw = cutoff - eff_lj_switch_width
+                    z_e = jnp.clip((r_ex_s - r_sw) / eff_lj_switch_width, 0.0, 1.0)
+                    s_poly_e = 1.0 - 10.0 * (z_e**3) + 15.0 * (z_e**4) - 6.0 * (z_e**5)
+                    s_lj_e = jnp.where(
+                        r_ex_s <= r_sw, 1.0, jnp.where(r_ex_s < cutoff, s_poly_e, 0.0)
+                    )
+                    u_ex_lj = u_ex_lj * s_lj_e
 
             if is_pme:
                 u_ex_elec = COULOMB_CONSTANT * q_ex * (jax.lax.erfc(alpha * r_ex_s) / r_ex_s)
@@ -1319,6 +1404,13 @@ def _eval_nonbonded_terms(  # noqa: PLR0913
             if cutoff < float("inf"):
                 u_ex = jnp.where(r_ex_s < cutoff, u_ex, 0.0)
             tot = tot - jnp.sum(jnp.where(valid_ex, u_ex + u_ex_recip, 0.0))
+            if is_lj_pme:
+                u_ex_lj_recip = (
+                    b_disp[p1_s]
+                    * b_disp[p2_s]
+                    * ewald_p6_long_range_value(lj_alpha_float, r2_ex_recip_s)
+                )
+                tot = tot + jnp.sum(jnp.where(valid_ex, u_ex_lj_recip, 0.0))
 
     # 1-4 / Explicit Exceptions: obey exceptions_use_pbc (default False in OpenMM)
     # and apply ExceptionParameterOffsets on-GPU.
@@ -1377,8 +1469,33 @@ def _eval_nonbonded_terms(  # noqa: PLR0913
         e_plasma = spme_background_energy(q, atom_mask, alpha=alpha_float, box_size=box_pbc)
         tot = tot + e_recip + e_self + e_plasma
 
+    # Dispersion LJ-PME reciprocal and self terms (order=5 matches OpenMM Reference)
+    if is_lj_pme and has_pbc and box_pbc is not None:
+        eff_lj_dims = lj_pme_grid_dims
+        if eff_lj_dims is None and not isinstance(box_pbc, jax.core.Tracer):
+            _, eff_lj_dims = resolve_ljpme_parameters(
+                np.asarray(box_pbc, dtype=np.float64),
+                cutoff=float(cutoff) if cutoff < float("inf") else 9.0,
+                ewald_error_tolerance=float(ewald_error_tolerance),
+                explicit_alpha=lj_alpha_float,
+            )
+        if eff_lj_dims is None:
+            eff_lj_dims = pme_grid_dims if pme_grid_dims is not None else (12, 12, 12)
+        atom_mask_lj = jnp.ones(n, dtype=bool)
+        e_lj_recip = lj_pme_reciprocal_energy(
+            pos,
+            b_disp,
+            atom_mask_lj,
+            box_pbc,
+            eff_lj_dims,
+            alpha_lj=lj_alpha_float,
+            order=5,
+        )
+        e_lj_self = lj_pme_self_energy(b_disp, atom_mask=atom_mask_lj, alpha_lj=lj_alpha_float)
+        tot = tot + e_lj_recip + e_lj_self
+
     # LJ dispersion tail correction (obeying dispersion_follows_parameters & lj_combining_rule)
-    if use_dispersion_correction and has_pbc and box_pbc is not None and cutoff < float("inf"):
+    if eff_use_disp and has_pbc and box_pbc is not None and cutoff < float("inf"):
         atom_mask = jnp.ones(n, dtype=bool)
         if dispersion_follows_parameters or nonbonded_offsets is None:
             sig_tail, eps_tail = sig, eps
@@ -1392,7 +1509,7 @@ def _eval_nonbonded_terms(  # noqa: PLR0913
             eps_tail,
             cutoff,
             atom_mask,
-            lj_switch_width=lj_switch_width,
+            lj_switch_width=eff_lj_switch_width,
             combining_rule=lj_combining_rule,
         )
         tot = tot + e_tail
@@ -1443,6 +1560,8 @@ def _eval_system_potential_energy(  # noqa: PLR0913
     exceptions_use_pbc: bool = False,
     dispersion_follows_parameters: bool = True,
     force_pure_jax_tile_pairs: bool = False,
+    lj_pme_alpha: float | None = None,
+    lj_pme_grid_dims: tuple[int, int, int] | None = None,
 ) -> jnp.ndarray:
     """Compute total potential energy (in kcal/mol) for active force groups."""
     e = _eval_bonded_terms(
@@ -1490,6 +1609,8 @@ def _eval_system_potential_energy(  # noqa: PLR0913
         exceptions_use_pbc=exceptions_use_pbc,
         dispersion_follows_parameters=dispersion_follows_parameters,
         force_pure_jax_tile_pairs=force_pure_jax_tile_pairs,
+        lj_pme_alpha=lj_pme_alpha,
+        lj_pme_grid_dims=lj_pme_grid_dims,
     )
 
     # Position Restraints
@@ -1650,6 +1771,8 @@ def _pure_compute_energy_and_forces(  # noqa: PLR0913
     lj_combining_rule: str = "lorentz_berthelot",
     exceptions_use_pbc: bool = False,
     dispersion_follows_parameters: bool = True,
+    lj_pme_alpha: float | None = None,
+    lj_pme_grid_dims: tuple[int, int, int] | None = None,
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
     """Pure JIT evaluation of potential energy and negative gradient forces."""
     eval_pos = pos.astype(jnp.float32) if mixed_precision else pos
@@ -1702,6 +1825,8 @@ def _pure_compute_energy_and_forces(  # noqa: PLR0913
             lj_combining_rule=lj_combining_rule,
             exceptions_use_pbc=exceptions_use_pbc,
             dispersion_follows_parameters=dispersion_follows_parameters,
+            lj_pme_alpha=lj_pme_alpha,
+            lj_pme_grid_dims=lj_pme_grid_dims,
         )
 
     pe, grad = jax.value_and_grad(e_fn)(eval_pos)
@@ -1772,6 +1897,8 @@ def _pure_step_rollout(  # noqa: PLR0913
     lj_combining_rule: str = "lorentz_berthelot",
     exceptions_use_pbc: bool = False,
     dispersion_follows_parameters: bool = True,
+    lj_pme_alpha: float | None = None,
+    lj_pme_grid_dims: tuple[int, int, int] | None = None,
 ) -> tuple[jnp.ndarray, jnp.ndarray, jax.Array]:
     """Pure compiled multi-step rollout kernel via jax.lax.fori_loop with inter-step force reuse."""
     c1 = jnp.exp(-gamma * dt) if is_langevin else 1.0
@@ -1829,6 +1956,8 @@ def _pure_step_rollout(  # noqa: PLR0913
             lj_combining_rule=lj_combining_rule,
             exceptions_use_pbc=exceptions_use_pbc,
             dispersion_follows_parameters=dispersion_follows_parameters,
+            lj_pme_alpha=lj_pme_alpha,
+            lj_pme_grid_dims=lj_pme_grid_dims,
         )
         f = (
             virtual_sites.redistribute_forces(f_raw, p_recon)
@@ -3571,6 +3700,10 @@ class ProlixContext:
             self._converted_system.dispersion_follows_parameters
             and self._config.dispersion_follows_parameters
         )
+        self._use_lj_pme = bool(
+            self._config.use_lj_pme
+            or str(self._converted_system.nonbonded_method).lower() in ("lj_pme", "ljpme")
+        )
         self._is_triclinic = bool(self._converted_system.is_triclinic)
         self._has_finite_cutoff = (
             0.0 < float(self._converted_system.nonbonded_cutoff) < float("inf")
@@ -3729,9 +3862,16 @@ class ProlixContext:
         """Return True if center-of-mass motion removal is active."""
         return self._effective_cmm_frequency() > 0
 
+    def _effective_nonbonded_method(self) -> str:
+        """Resolve effective nonbonded method string, honoring ``config.use_lj_pme``."""
+        raw = str(self._converted_system.nonbonded_method)
+        if self._use_lj_pme and raw.lower() in ("pme", "spme", "lj_pme", "ljpme"):
+            return "lj_pme"
+        return raw
+
     def _effective_pme_alpha(self) -> float | None:
         """Resolve effective Ewald alpha (Å⁻¹), honoring explicit NonbondedForce.setPMEParameters."""
-        if str(self._converted_system.nonbonded_method).lower() not in ("pme", "spme"):
+        if self._effective_nonbonded_method().lower() not in ("pme", "spme", "lj_pme", "ljpme"):
             return None
         if (
             self._converted_system.explicit_pme_alpha is not None
@@ -3748,6 +3888,25 @@ class ProlixContext:
             return float((1.0 / cutoff) * math.sqrt(-math.log(2.0 * float(ewald_tol))))
         if self._bundle.pme_alpha is not None and float(self._bundle.pme_alpha) > 0.0:
             return float(self._bundle.pme_alpha)
+        return 0.34
+
+    def _effective_lj_pme_alpha(self) -> float | None:
+        """Resolve effective dispersion Ewald alpha (Å⁻¹) for ``NonbondedForce.LJPME``."""
+        if self._effective_nonbonded_method().lower() not in ("lj_pme", "ljpme"):
+            return None
+        if (
+            self._converted_system.explicit_lj_pme_alpha is not None
+            and float(self._converted_system.explicit_lj_pme_alpha) > 0.0
+        ):
+            return float(self._converted_system.explicit_lj_pme_alpha)
+        ewald_tol = (
+            self._converted_system.ewald_error_tolerance
+            if self._converted_system.ewald_error_tolerance is not None
+            else self._config.ewald_error_tolerance
+        )
+        cutoff = float(self._converted_system.nonbonded_cutoff)
+        if 0.0 < cutoff < float("inf"):
+            return float((1.0 / cutoff) * math.sqrt(-math.log(2.0 * float(ewald_tol))))
         return 0.34
 
     def _effective_integrator_scheme(self) -> str:
@@ -4219,7 +4378,7 @@ class ProlixContext:
 
     def _can_use_morton_obs(self) -> bool:
         """Return True when active Morton runner can serve `getState(groups=-1)` energy/forces on GPU."""
-        nb_method = str(self._converted_system.nonbonded_method).lower()
+        nb_method = self._effective_nonbonded_method().lower()
         is_rf = nb_method in (
             "cutoffperiodic",
             "cutoff_periodic",
@@ -4291,7 +4450,7 @@ class ProlixContext:
         )
         if not base_ok:
             return False
-        nb_method = str(self._converted_system.nonbonded_method).lower()
+        nb_method = self._effective_nonbonded_method().lower()
         is_rf = nb_method in (
             "cutoffperiodic",
             "cutoff_periodic",
@@ -4603,7 +4762,7 @@ class ProlixContext:
                 self._converted_system.angle_force_groups,
                 self._converted_system.dihedral_force_groups,
                 self._converted_system.cmap_force_groups,
-                self._converted_system.nonbonded_method,
+                self._effective_nonbonded_method(),
                 self._converted_system.has_nonbonded,
                 use_disp,
                 ewald_tol,
@@ -4636,6 +4795,8 @@ class ProlixContext:
                 lj_combining_rule=self._lj_combining_rule,
                 exceptions_use_pbc=self._exceptions_use_pbc,
                 dispersion_follows_parameters=self._dispersion_follows_parameters,
+                lj_pme_alpha=self._effective_lj_pme_alpha(),
+                lj_pme_grid_dims=self._converted_system.lj_pme_grid_dims,
             )
             remaining -= chunk
             self._step_count += chunk
@@ -4824,7 +4985,7 @@ class ProlixContext:
             self._converted_system.angle_force_groups,
             self._converted_system.dihedral_force_groups,
             self._converted_system.cmap_force_groups,
-            self._converted_system.nonbonded_method,
+            self._effective_nonbonded_method(),
             self._converted_system.has_nonbonded,
             use_disp,
             ewald_tol,
@@ -4852,6 +5013,8 @@ class ProlixContext:
             lj_combining_rule=self._lj_combining_rule,
             exceptions_use_pbc=self._exceptions_use_pbc,
             dispersion_follows_parameters=self._dispersion_follows_parameters,
+            lj_pme_alpha=self._effective_lj_pme_alpha(),
+            lj_pme_grid_dims=self._converted_system.lj_pme_grid_dims,
         )
         new_box_jnp = jnp.asarray(new_box, dtype=self._box_vectors.dtype)
         new_bundle = eqx.tree_at(lambda b: b.box, self._bundle, new_box_jnp)
@@ -4870,7 +5033,7 @@ class ProlixContext:
             self._converted_system.angle_force_groups,
             self._converted_system.dihedral_force_groups,
             self._converted_system.cmap_force_groups,
-            self._converted_system.nonbonded_method,
+            self._effective_nonbonded_method(),
             self._converted_system.has_nonbonded,
             use_disp,
             ewald_tol,
@@ -4898,6 +5061,8 @@ class ProlixContext:
             lj_combining_rule=self._lj_combining_rule,
             exceptions_use_pbc=self._exceptions_use_pbc,
             dispersion_follows_parameters=self._dispersion_follows_parameters,
+            lj_pme_alpha=self._effective_lj_pme_alpha(),
+            lj_pme_grid_dims=self._converted_system.lj_pme_grid_dims,
         )
 
         delta_u = float(e_new - e_curr)
@@ -4983,7 +5148,7 @@ class ProlixContext:
                     angle_force_groups=self._converted_system.angle_force_groups,
                     dihedral_force_groups=self._converted_system.dihedral_force_groups,
                     cmap_force_groups=self._converted_system.cmap_force_groups,
-                    nonbonded_method=self._converted_system.nonbonded_method,
+                    nonbonded_method=self._effective_nonbonded_method(),
                     has_nonbonded=self._converted_system.has_nonbonded,
                     use_dispersion_correction=(
                         self._config.use_dispersion_correction
@@ -5013,6 +5178,8 @@ class ProlixContext:
                     exceptions_use_pbc=self._exceptions_use_pbc,
                     dispersion_follows_parameters=self._dispersion_follows_parameters,
                     force_pure_jax_tile_pairs=True,
+                    lj_pme_alpha=self._effective_lj_pme_alpha(),
+                    lj_pme_grid_dims=self._converted_system.lj_pme_grid_dims,
                 )
 
             du_dlam = jax.grad(_u_of_lam)(jnp.asarray(1.0, dtype=pos_u.dtype))
@@ -5040,7 +5207,7 @@ class ProlixContext:
                 self._converted_system.angle_force_groups,
                 self._converted_system.dihedral_force_groups,
                 self._converted_system.cmap_force_groups,
-                self._converted_system.nonbonded_method,
+                self._effective_nonbonded_method(),
                 self._converted_system.has_nonbonded,
                 self._config.use_dispersion_correction and self._converted_system.use_dispersion_correction,
                 ewald_tol,
@@ -5068,6 +5235,8 @@ class ProlixContext:
                 lj_combining_rule=self._lj_combining_rule,
                 exceptions_use_pbc=self._exceptions_use_pbc,
                 dispersion_follows_parameters=self._dispersion_follows_parameters,
+                lj_pme_alpha=self._effective_lj_pme_alpha(),
+                lj_pme_grid_dims=self._converted_system.lj_pme_grid_dims,
             )
             if self._converted_system.virtual_sites is not None:
                 forces_akma = self._converted_system.redistribute_virtual_site_forces(
@@ -5262,30 +5431,38 @@ class ProlixContext:
         box_bundle = box_canonical.astype(jnp.float32)
         self._bundle = eqx.tree_at(lambda bnd: bnd.box, self._bundle, box_bundle)
         new_pme_dims = self._converted_system.pme_grid_dims
+        new_lj_pme_dims = self._converted_system.lj_pme_grid_dims
+        eff_nb_m = self._effective_nonbonded_method().lower()
         if (
             self._converted_system.has_pbc
-            and self._converted_system.nonbonded_method == "pme"
+            and eff_nb_m in ("pme", "lj_pme")
         ):
             explicit_omm_grid = False
+            explicit_lj_omm_grid = False
             for f_idx in range(self._system.getNumForces()):
                 f_obj = self._system.getForce(f_idx)
                 if isinstance(f_obj, openmm.NonbondedForce):
                     _, nx, ny, nz = f_obj.getPMEParameters()
                     if nx > 0 and ny > 0 and nz > 0:
                         explicit_omm_grid = True
+                    get_ljpme = getattr(f_obj, "getLJPMEParameters", None)
+                    if callable(get_ljpme):
+                        _, nxl, nyl, nzl = cast("tuple[Any, int, int, int]", get_ljpme())
+                        if nxl > 0 and nyl > 0 and nzl > 0:
+                            explicit_lj_omm_grid = True
                     break
+            box_diag_np = np.diag(box_np)
+            cutoff_a = float(self._converted_system.nonbonded_cutoff)
+            eff_ewald_tol = (
+                float(self._converted_system.ewald_error_tolerance)
+                if self._converted_system.ewald_error_tolerance is not None
+                else float(self._config.ewald_error_tolerance)
+            )
             if not explicit_omm_grid:
-                box_diag_np = np.diag(box_np)
-                cutoff_a = float(self._converted_system.nonbonded_cutoff)
                 if (
                     isinstance(self._config.pme_grid_spacing, _DefaultFloat)
                     and 0.0 < cutoff_a < float("inf")
                 ):
-                    eff_ewald_tol = (
-                        float(self._converted_system.ewald_error_tolerance)
-                        if self._converted_system.ewald_error_tolerance is not None
-                        else float(self._config.ewald_error_tolerance)
-                    )
                     _, omm_dims = compute_openmm_pme_params(
                         box_diag_np,
                         cutoff=cutoff_a,
@@ -5305,11 +5482,19 @@ class ProlixContext:
                         jnp.asarray(box_diag_np),
                         grid_spacing=float(self._config.pme_grid_spacing),
                     )
+            if eff_nb_m == "lj_pme" and not explicit_lj_omm_grid and 0.0 < cutoff_a < float("inf"):
+                _, new_lj_pme_dims = resolve_ljpme_parameters(
+                    box_diag_np,
+                    cutoff=cutoff_a,
+                    ewald_error_tolerance=eff_ewald_tol,
+                    explicit_alpha=self._converted_system.explicit_lj_pme_alpha or 0.0,
+                )
         self._converted_system = dataclasses.replace(
             self._converted_system,
             bundle=self._bundle,
             is_triclinic=self._is_triclinic,
             pme_grid_dims=new_pme_dims,
+            lj_pme_grid_dims=new_lj_pme_dims,
         )
         self._refresh_box_caches_from_vectors()
         self._morton_nl_dirty = True
@@ -5461,6 +5646,10 @@ class ProlixContext:
             self._converted_system.dispersion_follows_parameters
             and self._config.dispersion_follows_parameters
         )
+        self._use_lj_pme = bool(
+            self._config.use_lj_pme
+            or str(self._converted_system.nonbonded_method).lower() in ("lj_pme", "ljpme")
+        )
         self._bundle = self._converted_system.bundle
         if self._dtype == jnp.float64:
             self._bundle = eqx.tree_at(
@@ -5517,6 +5706,8 @@ class ProlixContext:
         new_gbsa_st = conv.gbsa_surface_tension
         new_explicit_alpha = conv.explicit_pme_alpha
         new_pme_grid_dims = conv.pme_grid_dims
+        new_explicit_lj_alpha = conv.explicit_lj_pme_alpha
+        new_lj_pme_grid_dims = conv.lj_pme_grid_dims
         new_nb_offsets = conv.nonbonded_offsets
         new_exc_use_pbc = conv.exceptions_use_pbc
 
@@ -5530,7 +5721,10 @@ class ProlixContext:
                 if callable(get_exc_pbc):
                     new_exc_use_pbc = bool(get_exc_pbc()) or bool(self._config.exceptions_use_pbc)
 
-                if f.getNonbondedMethod() == openmm.NonbondedForce.PME:
+                if f.getNonbondedMethod() in (
+                    openmm.NonbondedForce.PME,
+                    openmm.NonbondedForce.LJPME,
+                ):
                     alpha_omm, nx, ny, nz = f.getPMEParameters()
                     alpha_nm = (
                         alpha_omm.value_in_unit(unit.nanometer**-1)
@@ -5542,6 +5736,23 @@ class ProlixContext:
                     )
                     if int(nx) > 0 and int(ny) > 0 and int(nz) > 0:
                         new_pme_grid_dims = (int(nx), int(ny), int(nz))
+
+                if f.getNonbondedMethod() == openmm.NonbondedForce.LJPME or self._use_lj_pme:
+                    get_ljpme = getattr(f, "getLJPMEParameters", None)
+                    if callable(get_ljpme):
+                        alpha_lj_omm, nxl, nyl, nzl = cast(
+                            "tuple[Any, int, int, int]", get_ljpme()
+                        )
+                        alpha_lj_nm = (
+                            float(alpha_lj_omm.value_in_unit(unit.nanometer**-1))
+                            if hasattr(alpha_lj_omm, "value_in_unit")
+                            else float(alpha_lj_omm)
+                        )
+                        new_explicit_lj_alpha = (
+                            float(alpha_lj_nm / NM_TO_ANGSTROM) if alpha_lj_nm > 0.0 else None
+                        )
+                        if int(nxl) > 0 and int(nyl) > 0 and int(nzl) > 0:
+                            new_lj_pme_grid_dims = (int(nxl), int(nyl), int(nzl))
 
                 n_particles = f.getNumParticles()
                 charges_np = np.asarray(bundle.charges).copy()
@@ -5912,6 +6123,8 @@ class ProlixContext:
             new_gbsa_st != conv_updated.gbsa_surface_tension
             or new_explicit_alpha != conv_updated.explicit_pme_alpha
             or new_pme_grid_dims != conv_updated.pme_grid_dims
+            or new_explicit_lj_alpha != conv_updated.explicit_lj_pme_alpha
+            or new_lj_pme_grid_dims != conv_updated.lj_pme_grid_dims
             or new_exc_use_pbc != conv_updated.exceptions_use_pbc
         ):
             conv_updated = dataclasses.replace(
@@ -5919,6 +6132,8 @@ class ProlixContext:
                 gbsa_surface_tension=float(new_gbsa_st),
                 explicit_pme_alpha=new_explicit_alpha,
                 pme_grid_dims=new_pme_grid_dims,
+                explicit_lj_pme_alpha=new_explicit_lj_alpha,
+                lj_pme_grid_dims=new_lj_pme_grid_dims,
                 exceptions_use_pbc=bool(new_exc_use_pbc),
             )
         self._converted_system = conv_updated
@@ -5966,6 +6181,7 @@ class ProlixContext:
                 and self._converted_system.use_dispersion_correction
             )
             eff_alpha = self._effective_pme_alpha()
+            eff_lj_alpha = self._effective_lj_pme_alpha()
 
             def _nb_energy_of_gp(gp_in: dict[str, Array]) -> Array:
                 return _eval_nonbonded_terms(
@@ -5976,7 +6192,7 @@ class ProlixContext:
                     groups_mask,
                     self._converted_system.has_pbc,
                     self._converted_system.nonbonded_cutoff,
-                    nonbonded_method=self._converted_system.nonbonded_method,
+                    nonbonded_method=self._effective_nonbonded_method(),
                     has_nonbonded=self._converted_system.has_nonbonded,
                     use_dispersion_correction=use_disp,
                     ewald_error_tolerance=ewald_tol,
@@ -5999,6 +6215,8 @@ class ProlixContext:
                     exceptions_use_pbc=self._exceptions_use_pbc,
                     dispersion_follows_parameters=self._dispersion_follows_parameters,
                     force_pure_jax_tile_pairs=True,
+                    lj_pme_alpha=eff_lj_alpha,
+                    lj_pme_grid_dims=self._converted_system.lj_pme_grid_dims,
                 )
 
             _, grad_nb = jax.value_and_grad(_nb_energy_of_gp)(gp_nb)
@@ -6387,7 +6605,7 @@ class ProlixContext:
                     self._converted_system.angle_force_groups,
                     self._converted_system.dihedral_force_groups,
                     self._converted_system.cmap_force_groups,
-                    self._converted_system.nonbonded_method,
+                    self._effective_nonbonded_method(),
                     self._converted_system.has_nonbonded,
                     use_disp,
                     ewald_tol,
@@ -6415,6 +6633,8 @@ class ProlixContext:
                     lj_combining_rule=self._lj_combining_rule,
                     exceptions_use_pbc=self._exceptions_use_pbc,
                     dispersion_follows_parameters=self._dispersion_follows_parameters,
+                    lj_pme_alpha=self._effective_lj_pme_alpha(),
+                    lj_pme_grid_dims=self._converted_system.lj_pme_grid_dims,
                 )
                 if req_energy:
                     pe_kj = float(pe_akma * KCAL_PER_MOL_TO_KJ_PER_MOL)
