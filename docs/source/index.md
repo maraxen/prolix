@@ -137,6 +137,7 @@ tutorials/index
 :caption: User Guides
 
 guides/index
+guides/cupotential_parity_and_openmm_fastpath
 ```
 
 ```{toctree}
