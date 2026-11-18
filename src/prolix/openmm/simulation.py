@@ -6,9 +6,13 @@ import contextlib
 import dataclasses
 import datetime
 import inspect
+import json
 import math
+import os
+import pickle
 import sys
 from collections.abc import Sequence
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
 import equinox as eqx
@@ -17,6 +21,7 @@ import jax.numpy as jnp
 import numpy as np
 import openmm
 import openmm.unit as _omm_unit
+from jax_md import minimize as jax_md_minimize
 from openmm import app
 
 import prolix.api.ensemble_plan as _ensemble_plan_mod
@@ -35,12 +40,14 @@ from prolix.openmm.context import (
     _apply_particle_offsets,
     _eval_nonbonded_terms,
     _eval_system_potential_energy,
+    _minimum_image_dr,
     _pure_compute_energy_and_forces,
     _wrap_molecules_jax,
 )
 from prolix.openmm.converter import (
     ConvertedOpenMMSystem,
     NonbondedParameterOffsets,
+    PositionRestraints,
     from_openmm_system,
 )
 from prolix.openmm.units import (
@@ -56,6 +63,8 @@ from prolix.openmm.units import (
     VELOCITY_OMM_TO_AKMA,
     to_akma,
 )
+from prolix.physics.constraints import ConstraintAlgorithm, make_constraint
+from prolix.physics.lj_pme import resolve_ljpme_parameters
 from prolix.types.bundles import (
     ANGLE_BUCKETS,
     ATOM_BUCKETS,
@@ -70,6 +79,14 @@ from prolix.types.bundles import (
     MolecularBundle,
     MolecularShapeSpec,
 )
+
+_jaxopt: Any = None
+try:
+    import jaxopt as _jaxopt_mod
+
+    _jaxopt = _jaxopt_mod
+except ImportError:
+    pass
 
 if TYPE_CHECKING:
     from openmm.app import Topology
@@ -525,7 +542,7 @@ class ProlixSimulation(app.Simulation):
                     ctx._converted_system.angle_force_groups,
                     ctx._converted_system.dihedral_force_groups,
                     ctx._converted_system.cmap_force_groups,
-                    ctx._converted_system.nonbonded_method,
+                    ctx._effective_nonbonded_method(),
                     ctx._converted_system.has_nonbonded,
                     use_disp,
                     ewald_tol,
@@ -553,6 +570,10 @@ class ProlixSimulation(app.Simulation):
                     lj_combining_rule=ctx._lj_combining_rule,
                     exceptions_use_pbc=ctx._exceptions_use_pbc,
                     dispersion_follows_parameters=ctx._dispersion_follows_parameters,
+                    lj_pme_alpha=ctx._effective_lj_pme_alpha(),
+                    lj_pme_grid_dims=_resolve_cs_lj_pme_grid_dims(
+                        ctx._converted_system, ctx._config, ctx._box_vectors
+                    ),
                 )
                 if req_energy:
                     eff_scheme = ctx._effective_integrator_scheme()
@@ -904,9 +925,12 @@ class ProlixSimulation(app.Simulation):
         self, tol_akma: float, max_iter: int, reporter: Any = None  # noqa: ARG002
     ) -> None:
         """Energy minimization using GPU jaxopt.LBFGS."""
-        import jaxopt
+        if _jaxopt is None:
+            raise ImportError("jaxopt is required for minimizer_backend='lbfgs'.")
 
         ctx = self.context
+        ctx.computeVirtualSites()
+        ctx.applyConstraints()
         pos_init = ctx._positions
         max_iterations = max_iter if max_iter > 0 else 500
 
@@ -916,10 +940,17 @@ class ProlixSimulation(app.Simulation):
             if ctx._converted_system.ewald_error_tolerance is not None
             else ctx._config.ewald_error_tolerance
         )
+        eff_nb_method = ctx._effective_nonbonded_method()
+        eff_pme_alpha = ctx._effective_pme_alpha()
+        eff_lj_pme_alpha = ctx._effective_lj_pme_alpha()
+        eff_lj_pme_dims = _resolve_cs_lj_pme_grid_dims(
+            ctx._converted_system, ctx._config, ctx._box_vectors
+        )
 
         def energy_fn(p: jnp.ndarray) -> jnp.ndarray:
-            return _eval_system_potential_energy(
-                p,
+            p_eval = ctx._converted_system.compute_virtual_sites(p)
+            e_sys = _eval_system_potential_energy(
+                p_eval,
                 ctx._box_vectors,
                 ctx._bundle,
                 ctx._custom_forces,
@@ -933,7 +964,7 @@ class ProlixSimulation(app.Simulation):
                 angle_force_groups=ctx._converted_system.angle_force_groups,
                 dihedral_force_groups=ctx._converted_system.dihedral_force_groups,
                 cmap_force_groups=ctx._converted_system.cmap_force_groups,
-                nonbonded_method=ctx._converted_system.nonbonded_method,
+                nonbonded_method=eff_nb_method,
                 has_nonbonded=ctx._converted_system.has_nonbonded,
                 use_dispersion_correction=ctx._config.use_dispersion_correction
                 and ctx._converted_system.use_dispersion_correction,
@@ -955,19 +986,30 @@ class ProlixSimulation(app.Simulation):
                 is_triclinic=ctx._is_triclinic,
                 gb_use_neighbor_list=ctx._gb_use_neighbor_list,
                 gbsa_surface_tension=ctx._converted_system.gbsa_surface_tension,
-                pme_alpha=ctx._effective_pme_alpha(),
+                pme_alpha=eff_pme_alpha,
                 nonbonded_offsets=ctx._converted_system.nonbonded_offsets,
                 default_params=ctx._converted_system.default_parameters,
                 lj_combining_rule=ctx._lj_combining_rule,
                 exceptions_use_pbc=ctx._exceptions_use_pbc,
                 dispersion_follows_parameters=ctx._dispersion_follows_parameters,
+                lj_pme_alpha=eff_lj_pme_alpha,
+                lj_pme_grid_dims=eff_lj_pme_dims,
+            )
+            return e_sys + _constraint_penalty_energy_akma(
+                p_eval,
+                ctx._box_vectors,
+                ctx._bundle,
+                ctx._converted_system.has_pbc,
+                exceptions_use_pbc=ctx._exceptions_use_pbc,
             )
 
-        solver = jaxopt.LBFGS(
+        solver = _jaxopt.LBFGS(
             fun=energy_fn,
             maxiter=max_iterations,
             tol=tol_akma,
-            linesearch="backtracking",
+            linesearch="zoom",
+            maxls=30,
+            stop_if_linesearch_fails=True,
         )
         res = solver.run(pos_init)
         min_pos = res.params
@@ -985,9 +1027,9 @@ class ProlixSimulation(app.Simulation):
         self, tol_akma: float, max_iter: int, reporter: Any = None  # noqa: ARG002
     ) -> None:
         """Energy minimization using FIRE descent."""
-        from jax_md import minimize as jax_md_minimize
-
         ctx = self.context
+        ctx.computeVirtualSites()
+        ctx.applyConstraints()
         pos_init = ctx._positions
         max_iterations = max_iter if max_iter > 0 else 500
 
@@ -997,10 +1039,17 @@ class ProlixSimulation(app.Simulation):
             if ctx._converted_system.ewald_error_tolerance is not None
             else ctx._config.ewald_error_tolerance
         )
+        eff_nb_method = ctx._effective_nonbonded_method()
+        eff_pme_alpha = ctx._effective_pme_alpha()
+        eff_lj_pme_alpha = ctx._effective_lj_pme_alpha()
+        eff_lj_pme_dims = _resolve_cs_lj_pme_grid_dims(
+            ctx._converted_system, ctx._config, ctx._box_vectors
+        )
 
         def energy_fn(p: jnp.ndarray) -> jnp.ndarray:
-            return _eval_system_potential_energy(
-                p,
+            p_eval = ctx._converted_system.compute_virtual_sites(p)
+            e_sys = _eval_system_potential_energy(
+                p_eval,
                 ctx._box_vectors,
                 ctx._bundle,
                 ctx._custom_forces,
@@ -1014,7 +1063,7 @@ class ProlixSimulation(app.Simulation):
                 angle_force_groups=ctx._converted_system.angle_force_groups,
                 dihedral_force_groups=ctx._converted_system.dihedral_force_groups,
                 cmap_force_groups=ctx._converted_system.cmap_force_groups,
-                nonbonded_method=ctx._converted_system.nonbonded_method,
+                nonbonded_method=eff_nb_method,
                 has_nonbonded=ctx._converted_system.has_nonbonded,
                 use_dispersion_correction=ctx._config.use_dispersion_correction
                 and ctx._converted_system.use_dispersion_correction,
@@ -1036,16 +1085,28 @@ class ProlixSimulation(app.Simulation):
                 is_triclinic=ctx._is_triclinic,
                 gb_use_neighbor_list=ctx._gb_use_neighbor_list,
                 gbsa_surface_tension=ctx._converted_system.gbsa_surface_tension,
-                pme_alpha=ctx._effective_pme_alpha(),
+                pme_alpha=eff_pme_alpha,
                 nonbonded_offsets=ctx._converted_system.nonbonded_offsets,
                 default_params=ctx._converted_system.default_parameters,
                 lj_combining_rule=ctx._lj_combining_rule,
                 exceptions_use_pbc=ctx._exceptions_use_pbc,
                 dispersion_follows_parameters=ctx._dispersion_follows_parameters,
+                lj_pme_alpha=eff_lj_pme_alpha,
+                lj_pme_grid_dims=eff_lj_pme_dims,
+            )
+            return e_sys + _constraint_penalty_energy_akma(
+                p_eval,
+                ctx._box_vectors,
+                ctx._bundle,
+                ctx._converted_system.has_pbc,
+                exceptions_use_pbc=ctx._exceptions_use_pbc,
             )
 
         init_fn, step_fn = jax_md_minimize.fire_descent(
-            energy_fn, shift_fn=lambda r, dr: r + dr, dt_start=0.01
+            energy_fn,
+            shift_fn=lambda r, dr: r + dr,
+            dt_start=0.002,
+            dt_max=0.02,
         )
         state = init_fn(pos_init)
 
@@ -1294,6 +1355,102 @@ def _align_bundles_to_common_bucket(bundles: list[MolecularBundle]) -> list[Mole
     return aligned
 
 
+def _constraint_penalty_energy_akma(
+    pos: jnp.ndarray,
+    box: jnp.ndarray | None,
+    bundle: MolecularBundle,
+    has_pbc: bool,
+    exceptions_use_pbc: bool = False,
+    k_pen: float = 1200.0,
+) -> jnp.ndarray:
+    """Harmonic penalty on SETTLE waters, SHAKE constraints, and non-PBC bond jumps during minimization."""
+    n = pos.shape[0]
+    e_pen = jnp.array(0.0, dtype=pos.dtype)
+    half_k = jnp.asarray(0.5 * k_pen, dtype=pos.dtype)
+    box_pbc = (
+        jnp.diag(box.astype(pos.dtype))
+        if (has_pbc and box is not None and box.ndim == 2)
+        else (box.astype(pos.dtype) if (has_pbc and box is not None) else None)
+    )
+    use_pbc_intra = bool(has_pbc and exceptions_use_pbc and box_pbc is not None)
+
+    if (
+        bundle.water_indices is not None
+        and bundle.water_mask is not None
+        and int(bundle.water_indices.shape[0]) > 0
+    ):
+        w_idx = bundle.water_indices
+        w_valid = (
+            bundle.water_mask
+              & (w_idx[:, 0] < n)
+              & (w_idx[:, 1] < n)
+              & (w_idx[:, 2] < n)
+        )
+        io = jnp.where(w_valid, w_idx[:, 0], 0)
+        ih1 = jnp.where(w_valid, w_idx[:, 1], 0)
+        ih2 = jnp.where(w_valid, w_idx[:, 2], 0)
+        r_oh = (
+            jnp.asarray(bundle.water_r_OH, dtype=pos.dtype)
+            if bundle.water_r_OH is not None
+            else jnp.asarray(0.9572, dtype=pos.dtype)
+        )
+        r_hh = (
+            jnp.asarray(bundle.water_r_HH, dtype=pos.dtype)
+            if bundle.water_r_HH is not None
+            else jnp.asarray(1.5139, dtype=pos.dtype)
+        )
+        dr1 = _minimum_image_dr(pos[ih1] - pos[io], box_pbc, use_pbc_intra)
+        dr2 = _minimum_image_dr(pos[ih2] - pos[io], box_pbc, use_pbc_intra)
+        dr3 = _minimum_image_dr(pos[ih2] - pos[ih1], box_pbc, use_pbc_intra)
+        d1 = jnp.sqrt(jnp.sum(dr1**2, axis=-1) + 1e-12)
+        d2 = jnp.sqrt(jnp.sum(dr2**2, axis=-1) + 1e-12)
+        d3 = jnp.sqrt(jnp.sum(dr3**2, axis=-1) + 1e-12)
+        ew = half_k * ((d1 - r_oh) ** 2 + (d2 - r_oh) ** 2 + (d3 - r_hh) ** 2)
+        e_pen = e_pen + jnp.sum(jnp.where(w_valid, ew, 0.0))
+
+    if (
+        bundle.constraint_pairs is not None
+        and bundle.constraint_lengths is not None
+        and bundle.constraint_mask is not None
+        and int(bundle.constraint_pairs.shape[0]) > 0
+    ):
+        c_idx = bundle.constraint_pairs
+        c_valid = bundle.constraint_mask & (c_idx[:, 0] < n) & (c_idx[:, 1] < n)
+        p1 = jnp.where(c_valid, c_idx[:, 0], 0)
+        p2 = jnp.where(c_valid, c_idx[:, 1], 0)
+        d0 = bundle.constraint_lengths.astype(pos.dtype)
+        drc = _minimum_image_dr(pos[p2] - pos[p1], box_pbc, use_pbc_intra)
+        dc = jnp.sqrt(jnp.sum(drc**2, axis=-1) + 1e-12)
+        ec = half_k * ((dc - d0) ** 2)
+        e_pen = e_pen + jnp.sum(jnp.where(c_valid, ec, 0.0))
+
+    # Prevent L-BFGS / FIRE line-search steps from teleporting bonded atoms into
+    # distant periodic images when nonbonded exclusions use raw unwrapped distances.
+    if (
+        has_pbc
+        and not exceptions_use_pbc
+        and box_pbc is not None
+        and bundle.bond_idx is not None
+        and bundle.bond_params is not None
+        and bundle.bond_mask is not None
+        and int(bundle.bond_idx.shape[0]) > 0
+    ):
+        b_idx = bundle.bond_idx
+        b_valid = bundle.bond_mask & (b_idx[:, 0] < n) & (b_idx[:, 1] < n)
+        bp1 = jnp.where(b_valid, b_idx[:, 0], 0)
+        bp2 = jnp.where(b_valid, b_idx[:, 1], 0)
+        r0_b = bundle.bond_params[:, 0].astype(pos.dtype)
+        k_b = bundle.bond_params[:, 1].astype(pos.dtype)
+        dr_raw = pos[bp2] - pos[bp1]
+        dr_mic = _minimum_image_dr(dr_raw, box_pbc, True)
+        r_raw = jnp.sqrt(jnp.sum(dr_raw**2, axis=-1) + 1e-12)
+        r_mic = jnp.sqrt(jnp.sum(dr_mic**2, axis=-1) + 1e-12)
+        eb_unw = 0.5 * k_b * ((r_raw - r0_b) ** 2 - (r_mic - r0_b) ** 2)
+        e_pen = e_pen + jnp.sum(jnp.where(b_valid, eb_unw, 0.0))
+
+    return e_pen
+
+
 def _clone_integrator(integrator: openmm.Integrator | str) -> openmm.Integrator:
     """Deserialize or clone an OpenMM `Integrator` so each replica has independent state."""
     omm_mod = cast("Any", openmm)
@@ -1302,9 +1459,29 @@ def _clone_integrator(integrator: openmm.Integrator | str) -> openmm.Integrator:
     return omm_mod.XmlSerializer.deserialize(omm_mod.XmlSerializer.serialize(integrator))
 
 
+def _effective_cs_nonbonded_method(
+    cs: ConvertedOpenMMSystem, config: ProlixOpenMMConfig
+) -> str:
+    """Resolve effective nonbonded method string, honoring `config.use_lj_pme`."""
+    raw = str(cs.nonbonded_method)
+    if bool(getattr(config, "use_lj_pme", False)) and raw.lower() in (
+        "pme",
+        "spme",
+        "lj_pme",
+        "ljpme",
+    ):
+        return "lj_pme"
+    return raw
+
+
 def _resolve_cs_pme_alpha(cs: ConvertedOpenMMSystem, config: ProlixOpenMMConfig) -> float | None:
     """Resolve effective Ewald alpha (Å⁻¹) for a `ConvertedOpenMMSystem`."""
-    if str(cs.nonbonded_method).lower() not in ("pme", "spme"):
+    if _effective_cs_nonbonded_method(cs, config).lower() not in (
+        "pme",
+        "spme",
+        "lj_pme",
+        "ljpme",
+    ):
         return None
     if cs.explicit_pme_alpha is not None and float(cs.explicit_pme_alpha) > 0.0:
         return float(cs.explicit_pme_alpha)
@@ -1321,6 +1498,61 @@ def _resolve_cs_pme_alpha(cs: ConvertedOpenMMSystem, config: ProlixOpenMMConfig)
     return 0.34
 
 
+def _resolve_cs_lj_pme_alpha(
+    cs: ConvertedOpenMMSystem, config: ProlixOpenMMConfig
+) -> float | None:
+    """Resolve effective dispersion Ewald alpha (Å⁻¹) for `NonbondedForce.LJPME`."""
+    if _effective_cs_nonbonded_method(cs, config).lower() not in ("lj_pme", "ljpme"):
+        return None
+    if cs.explicit_lj_pme_alpha is not None and float(cs.explicit_lj_pme_alpha) > 0.0:
+        return float(cs.explicit_lj_pme_alpha)
+    ewald_tol = (
+        cs.ewald_error_tolerance
+        if cs.ewald_error_tolerance is not None
+        else config.ewald_error_tolerance
+    )
+    cutoff = float(cs.nonbonded_cutoff)
+    if 0.0 < cutoff < float("inf"):
+        return float((1.0 / cutoff) * math.sqrt(-math.log(2.0 * float(ewald_tol))))
+    return 0.34
+
+
+def _resolve_cs_lj_pme_grid_dims(
+    cs: ConvertedOpenMMSystem,
+    config: ProlixOpenMMConfig,
+    box_akma: jnp.ndarray | None,
+) -> tuple[int, int, int] | None:
+    """Resolve concrete host `(nx, ny, nz)` grid dimensions for `NonbondedForce.LJPME`."""
+    if _effective_cs_nonbonded_method(cs, config).lower() not in ("lj_pme", "ljpme"):
+        return None
+    if cs.lj_pme_grid_dims is not None:
+        return cs.lj_pme_grid_dims
+    if box_akma is not None and cs.has_pbc:
+        box_np = np.asarray(box_akma, dtype=np.float64)
+        diag_np = np.diag(box_np) if box_np.ndim == 2 else box_np
+        ewald_tol = (
+            cs.ewald_error_tolerance
+            if cs.ewald_error_tolerance is not None
+            else config.ewald_error_tolerance
+        )
+        cutoff = float(cs.nonbonded_cutoff) if cs.nonbonded_cutoff < float("inf") else 9.0
+        _, dims = resolve_ljpme_parameters(
+            diag_np,
+            cutoff=cutoff,
+            ewald_error_tolerance=float(ewald_tol),
+            explicit_alpha=float(cs.explicit_lj_pme_alpha or 0.0),
+        )
+        return dims
+    return cs.pme_grid_dims
+
+
+def _pr_signature(
+    prs: Sequence[PositionRestraints],
+) -> tuple[tuple[int, tuple[int, ...]], ...]:
+    """Return static shape & force-group signature for uniform `PositionRestraints` stacking."""
+    return tuple((int(pr.force_group), tuple(pr.indices.shape)) for pr in prs)
+
+
 @eqx.filter_jit
 def _vmapped_batch_energy_and_forces_akma(  # noqa: PLR0913
     pos_b: jnp.ndarray,
@@ -1330,6 +1562,7 @@ def _vmapped_batch_energy_and_forces_akma(  # noqa: PLR0913
     angle_fg_b: jnp.ndarray | None,
     dihedral_fg_b: jnp.ndarray | None,
     cmap_fg_b: jnp.ndarray | None,
+    pr_b: tuple[PositionRestraints, ...],
     offsets_b: NonbondedParameterOffsets | None,
     gp_vec_b: jnp.ndarray,
     param_names: tuple[str, ...],
@@ -1357,6 +1590,8 @@ def _vmapped_batch_energy_and_forces_akma(  # noqa: PLR0913
     lj_combining_rule: str,
     exceptions_use_pbc: bool,
     dispersion_follows_parameters: bool,
+    lj_pme_alpha: float | None = None,
+    lj_pme_grid_dims: tuple[int, int, int] | None = None,
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
     """Single-compile `jax.vmap` energy (kcal/mol) and forces (kcal/(mol*Å)) across `B` replicas."""
 
@@ -1368,6 +1603,7 @@ def _vmapped_batch_energy_and_forces_akma(  # noqa: PLR0913
         afg_i: jnp.ndarray | None,
         dfg_i: jnp.ndarray | None,
         cfg_i: jnp.ndarray | None,
+        pr_i: tuple[PositionRestraints, ...],
         off_i: NonbondedParameterOffsets | None,
         gp_v_i: jnp.ndarray,
     ) -> tuple[jnp.ndarray, jnp.ndarray]:
@@ -1381,7 +1617,7 @@ def _vmapped_batch_energy_and_forces_akma(  # noqa: PLR0913
                 eval_bx,
                 b_i,
                 (),
-                (),
+                pr_i,
                 gp_dict,
                 force_group_by_component,
                 groups_mask,
@@ -1417,6 +1653,8 @@ def _vmapped_batch_energy_and_forces_akma(  # noqa: PLR0913
                 lj_combining_rule=lj_combining_rule,
                 exceptions_use_pbc=exceptions_use_pbc,
                 dispersion_follows_parameters=dispersion_follows_parameters,
+                lj_pme_alpha=lj_pme_alpha,
+                lj_pme_grid_dims=lj_pme_grid_dims,
             )
 
         pe, grad = jax.value_and_grad(_e_fn)(eval_p)
@@ -1434,6 +1672,7 @@ def _vmapped_batch_energy_and_forces_akma(  # noqa: PLR0913
         0 if angle_fg_b is not None else None,
         0 if dihedral_fg_b is not None else None,
         0 if cmap_fg_b is not None else None,
+        0 if pr_b else None,
         0 if offsets_b is not None else None,
         0,
     )
@@ -1445,6 +1684,7 @@ def _vmapped_batch_energy_and_forces_akma(  # noqa: PLR0913
         angle_fg_b,
         dihedral_fg_b,
         cmap_fg_b,
+        pr_b,
         offsets_b,
         gp_vec_b,
     )
@@ -1459,6 +1699,7 @@ def _vmapped_batch_value_and_grad_positions_kj_nm(  # noqa: PLR0913
     angle_fg_b: jnp.ndarray | None,
     dihedral_fg_b: jnp.ndarray | None,
     cmap_fg_b: jnp.ndarray | None,
+    pr_b: tuple[PositionRestraints, ...],
     offsets_b: NonbondedParameterOffsets | None,
     gp_vec_b: jnp.ndarray,
     param_names: tuple[str, ...],
@@ -1484,6 +1725,8 @@ def _vmapped_batch_value_and_grad_positions_kj_nm(  # noqa: PLR0913
     lj_combining_rule: str,
     exceptions_use_pbc: bool,
     dispersion_follows_parameters: bool,
+    lj_pme_alpha: float | None = None,
+    lj_pme_grid_dims: tuple[int, int, int] | None = None,
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
     """Differentiable `jax.vmap` energy (kJ/mol) and `dU/dx` (kJ/(mol*nm)) across `B` replicas."""
 
@@ -1495,6 +1738,7 @@ def _vmapped_batch_value_and_grad_positions_kj_nm(  # noqa: PLR0913
         afg_i: jnp.ndarray | None,
         dfg_i: jnp.ndarray | None,
         cfg_i: jnp.ndarray | None,
+        pr_i: tuple[PositionRestraints, ...],
         off_i: NonbondedParameterOffsets | None,
         gp_v_i: jnp.ndarray,
     ) -> tuple[jnp.ndarray, jnp.ndarray]:
@@ -1507,7 +1751,7 @@ def _vmapped_batch_value_and_grad_positions_kj_nm(  # noqa: PLR0913
                 bx_i,
                 b_i,
                 (),
-                (),
+                pr_i,
                 gp_dict,
                 force_group_by_component,
                 -1,
@@ -1543,6 +1787,8 @@ def _vmapped_batch_value_and_grad_positions_kj_nm(  # noqa: PLR0913
                 lj_combining_rule=lj_combining_rule,
                 exceptions_use_pbc=exceptions_use_pbc,
                 dispersion_follows_parameters=dispersion_follows_parameters,
+                lj_pme_alpha=lj_pme_alpha,
+                lj_pme_grid_dims=lj_pme_grid_dims,
             )
             return u_kcal * float(KCAL_PER_MOL_TO_KJ_PER_MOL)
 
@@ -1556,6 +1802,7 @@ def _vmapped_batch_value_and_grad_positions_kj_nm(  # noqa: PLR0913
         0 if angle_fg_b is not None else None,
         0 if dihedral_fg_b is not None else None,
         0 if cmap_fg_b is not None else None,
+        0 if pr_b else None,
         0 if offsets_b is not None else None,
         0,
     )
@@ -1567,6 +1814,7 @@ def _vmapped_batch_value_and_grad_positions_kj_nm(  # noqa: PLR0913
         angle_fg_b,
         dihedral_fg_b,
         cmap_fg_b,
+        pr_b,
         offsets_b,
         gp_vec_b,
     )
@@ -1599,6 +1847,8 @@ def _vmapped_batch_nonbonded_param_derivatives_kj(  # noqa: PLR0913
     lj_combining_rule: str,
     exceptions_use_pbc: bool,
     dispersion_follows_parameters: bool,
+    lj_pme_alpha: float | None = None,
+    lj_pme_grid_dims: tuple[int, int, int] | None = None,
 ) -> jnp.ndarray:
     """Single-pass `jax.vmap` alchemical `dU/dλ` (kJ/mol) across `B` λ windows."""
 
@@ -1642,6 +1892,8 @@ def _vmapped_batch_nonbonded_param_derivatives_kj(  # noqa: PLR0913
                 exceptions_use_pbc=exceptions_use_pbc,
                 dispersion_follows_parameters=dispersion_follows_parameters,
                 force_pure_jax_tile_pairs=True,
+                lj_pme_alpha=lj_pme_alpha,
+                lj_pme_grid_dims=lj_pme_grid_dims,
             )
             return u_kcal * float(KCAL_PER_MOL_TO_KJ_PER_MOL)
 
@@ -1650,6 +1902,182 @@ def _vmapped_batch_nonbonded_param_derivatives_kj(  # noqa: PLR0913
     in_axes = (0, 0 if box_b is not None else None, 0, 0, 0)
     return jax.vmap(_one_grad, in_axes=in_axes)(
         pos_b, box_b, base_bundles_b, offsets_b, gp_vec_b
+    )
+
+
+@eqx.filter_jit
+def _vmapped_batch_minimize_akma(  # noqa: PLR0913
+    pos_b: jnp.ndarray,
+    box_b: jnp.ndarray | None,
+    base_bundles_b: MolecularBundle,
+    bond_fg_b: jnp.ndarray | None,
+    angle_fg_b: jnp.ndarray | None,
+    dihedral_fg_b: jnp.ndarray | None,
+    cmap_fg_b: jnp.ndarray | None,
+    pr_b: tuple[PositionRestraints, ...],
+    offsets_b: NonbondedParameterOffsets | None,
+    gp_vec_b: jnp.ndarray,
+    param_names: tuple[str, ...],
+    force_group_by_component: dict[str, int],
+    has_pbc: bool,
+    cutoff: float,
+    nonbonded_method: str,
+    has_nonbonded: bool,
+    use_dispersion_correction: bool,
+    ewald_error_tolerance: float,
+    pme_alpha: float | None,
+    rf_dielectric: float,
+    has_implicit_solvent: bool,
+    solvent_dielectric: float,
+    solute_dielectric: float,
+    nonbonded_engine: str,
+    pme_grid_dims: tuple[int, int, int] | None,
+    lj_switch_width: float,
+    custom_nonbonded_chunk_size: int,
+    is_triclinic: bool,
+    mixed_precision: bool,
+    gbsa_surface_tension: float,
+    default_params: dict[str, float],
+    lj_combining_rule: str,
+    exceptions_use_pbc: bool,
+    dispersion_follows_parameters: bool,
+    lj_pme_alpha: float | None,
+    lj_pme_grid_dims: tuple[int, int, int] | None,
+    backend: str,
+    tol_akma: float,
+    max_iterations: int,
+) -> jnp.ndarray:
+    """Simultaneous `jax.vmap` GPU `fire` or `lbfgs` energy minimization across `B` replicas."""
+
+    def _one_min(
+        p_i: jnp.ndarray,
+        bx_i: jnp.ndarray | None,
+        b_i: MolecularBundle,
+        bfg_i: jnp.ndarray | None,
+        afg_i: jnp.ndarray | None,
+        dfg_i: jnp.ndarray | None,
+        cfg_i: jnp.ndarray | None,
+        pr_i: tuple[PositionRestraints, ...],
+        off_i: NonbondedParameterOffsets | None,
+        gp_v_i: jnp.ndarray,
+    ) -> jnp.ndarray:
+        eval_p = p_i.astype(jnp.float32) if mixed_precision else p_i
+        eval_bx = bx_i.astype(jnp.float32) if (mixed_precision and bx_i is not None) else bx_i
+        gp_dict = {nm: gp_v_i[idx] for idx, nm in enumerate(param_names)}
+
+        def _e_fn(p_arg: jnp.ndarray) -> jnp.ndarray:
+            e_sys = _eval_system_potential_energy(
+                p_arg,
+                eval_bx,
+                b_i,
+                (),
+                pr_i,
+                gp_dict,
+                force_group_by_component,
+                -1,
+                has_pbc,
+                cutoff,
+                bond_force_groups=bfg_i,
+                angle_force_groups=afg_i,
+                dihedral_force_groups=dfg_i,
+                cmap_force_groups=cfg_i,
+                nonbonded_method=nonbonded_method,
+                has_nonbonded=has_nonbonded,
+                use_dispersion_correction=use_dispersion_correction,
+                ewald_error_tolerance=ewald_error_tolerance,
+                pme_alpha=pme_alpha,
+                rf_dielectric=rf_dielectric,
+                has_implicit_solvent=has_implicit_solvent,
+                solvent_dielectric=solvent_dielectric,
+                solute_dielectric=solute_dielectric,
+                nonbonded_engine=nonbonded_engine,
+                pme_grid_dims=pme_grid_dims,
+                use_pallas=False,
+                pallas_interpret=False,
+                lj_switch_width=lj_switch_width,
+                neighbor_idx=None,
+                tile_pair_nl=None,
+                use_pallas_pme=False,
+                custom_nonbonded_chunk_size=custom_nonbonded_chunk_size,
+                is_triclinic=is_triclinic,
+                gb_use_neighbor_list=False,
+                gbsa_surface_tension=gbsa_surface_tension,
+                nonbonded_offsets=off_i,
+                default_params=default_params,
+                lj_combining_rule=lj_combining_rule,
+                exceptions_use_pbc=exceptions_use_pbc,
+                dispersion_follows_parameters=dispersion_follows_parameters,
+                lj_pme_alpha=lj_pme_alpha,
+                lj_pme_grid_dims=lj_pme_grid_dims,
+            )
+            return e_sys + _constraint_penalty_energy_akma(
+                p_arg,
+                eval_bx,
+                b_i,
+                has_pbc,
+                exceptions_use_pbc=exceptions_use_pbc,
+            )
+
+        if backend == "lbfgs":
+            solver = _jaxopt.LBFGS(
+                fun=_e_fn,
+                maxiter=max_iterations,
+                tol=tol_akma,
+                linesearch="zoom",
+                maxls=30,
+                stop_if_linesearch_fails=True,
+                jit=True,
+                unroll=False,
+            )
+            min_p = solver.run(eval_p).params
+        else:
+            init_fn, step_fn = jax_md_minimize.fire_descent(
+                _e_fn,
+                shift_fn=lambda r, dr: r + dr,
+                dt_start=0.002,
+                dt_max=0.02,
+            )
+            st0 = init_fn(eval_p)
+            tol_t = jnp.asarray(tol_akma, dtype=eval_p.dtype)
+            max_it_i32 = jnp.int32(max_iterations)
+
+            def _cond(carry: tuple[jnp.ndarray, Any]) -> jnp.ndarray:
+                it, st = carry
+                f_rms = jnp.sqrt(jnp.mean(jnp.sum(st.force**2, axis=-1)))
+                return (it < max_it_i32) & (f_rms > tol_t)
+
+            def _body(carry: tuple[jnp.ndarray, Any]) -> tuple[jnp.ndarray, Any]:
+                it, st = carry
+                return (it + jnp.int32(1), step_fn(st))
+
+            _, st_fin = jax.lax.while_loop(_cond, _body, (jnp.int32(0), st0))
+            min_p = st_fin.position
+
+        return min_p.astype(p_i.dtype) if mixed_precision else min_p
+
+    in_axes = (
+        0,
+        0 if box_b is not None else None,
+        0,
+        0 if bond_fg_b is not None else None,
+        0 if angle_fg_b is not None else None,
+        0 if dihedral_fg_b is not None else None,
+        0 if cmap_fg_b is not None else None,
+        0 if pr_b else None,
+        0 if offsets_b is not None else None,
+        0,
+    )
+    return jax.vmap(_one_min, in_axes=in_axes)(
+        pos_b,
+        box_b,
+        base_bundles_b,
+        bond_fg_b,
+        angle_fg_b,
+        dihedral_fg_b,
+        cmap_fg_b,
+        pr_b,
+        offsets_b,
+        gp_vec_b,
     )
 
 
@@ -1804,6 +2232,7 @@ class ProlixBatchSimulation:
         self.plan: Any = None
         self._per_replica_plans: list[Any] | None = None
         self._dih3_cache: dict[int, jnp.ndarray] = {}
+        self._constraint_algos: list[ConstraintAlgorithm | None] | None = None
 
         # Apply any nonzero default global parameter offsets onto `self._bundles`
         if any(cs.nonbonded_offsets is not None for cs in self._converted_systems):
@@ -1986,7 +2415,11 @@ class ProlixBatchSimulation:
         need_morton = bool(
             periodic
             and not implicit
-            and (self._pressure_atm is not None or self._is_reaction_field)
+            and (
+                self._pressure_atm is not None
+                or self._is_reaction_field
+                or self.config.precision == "mixed"
+            )
             and self.config.nonbonded_engine in ("auto", "morton_tile_pairs")
         )
         eff_engine = "morton_tile_pairs" if need_morton else self.config.nonbonded_engine
@@ -2391,7 +2824,11 @@ class ProlixBatchSimulation:
         eff_engine, eff_pallas, eff_pallas_pme = self._effective_plan_engine_and_pallas()
         periodic = all(b.shape_spec.has_pbc for b in self._bundles)
         implicit = any(b.shape_spec.has_implicit_solvent for b in self._bundles)
-        need_morton = bool(self._pressure_atm is not None or self._is_reaction_field)
+        need_morton = bool(
+            self._pressure_atm is not None
+            or self._is_reaction_field
+            or eff_engine == "morton_tile_pairs"
+        )
 
         if eff_engine == "dense":
             use_nl: bool | None = False
@@ -2543,21 +2980,883 @@ class ProlixBatchSimulation:
         self.currentStep += steps
         self._velocities_initialized = True
 
+    def _sync_from_contexts_if_present(self) -> None:
+        """Synchronize host-tracked arrays/parameters from `self._contexts` without D2H copies."""
+        if self._contexts is None:
+            return
+        for i, ctx in enumerate(self._contexts):
+            n_i = self._n_atoms_per_replica[i]
+            self._positions_akma[i] = jnp.asarray(ctx._positions[:n_i], dtype=self._dtype)
+            self._velocities_akma[i] = jnp.asarray(ctx._velocities[:n_i], dtype=self._dtype)
+            if ctx._morton_box_diag is not None and not ctx._is_triclinic:
+                bx = jnp.diag(ctx._morton_box_diag.astype(self._dtype))
+            elif ctx._box_vectors is not None:
+                bx = ctx._box_vectors.astype(self._dtype)
+            else:
+                bx = None
+            self._boxes_akma[i] = bx
+            self._parameters_per_replica[i] = dict(ctx._parameters)
+            if bx is not None and self._bundles[i].shape_spec.has_pbc:
+                bx_f32 = bx.astype(jnp.float32)
+                self._bundles[i] = dataclasses.replace(self._bundles[i], box=bx_f32)
+                self._base_bundles[i] = dataclasses.replace(self._base_bundles[i], box=bx_f32)
+        self.currentStep = int(self._contexts[0]._step_count)
+        if any(bool(c._velocities_initialized) for c in self._contexts):
+            self._velocities_initialized = True
+
+    def _get_replica_constraint_algo(self, idx: int) -> ConstraintAlgorithm | None:
+        """Build and cache `ConstraintAlgorithm` (SETTLE + SHAKE) for replica `idx`."""
+        if self._constraint_algos is None:
+            algos: list[ConstraintAlgorithm | None] = []
+            for cs in self._converted_systems:
+                b = cs.bundle
+                n_w = int(b.n_waters) if b.n_waters is not None else 0
+                n_c = int(b.n_constraints) if b.n_constraints is not None else 0
+                if n_w <= 0 and n_c <= 0:
+                    algos.append(None)
+                    continue
+                w_idx = (
+                    b.water_indices[:n_w]
+                    if b.water_indices is not None and n_w > 0
+                    else None
+                )
+                c_pairs = (
+                    b.constraint_pairs[:n_c]
+                    if b.constraint_pairs is not None and n_c > 0
+                    else None
+                )
+                c_lens = (
+                    b.constraint_lengths[:n_c]
+                    if b.constraint_lengths is not None and n_c > 0
+                    else None
+                )
+                algos.append(
+                    make_constraint(
+                        water_indices=w_idx,
+                        constraint_pairs=c_pairs,
+                        constraint_lengths=c_lens,
+                        r_OH=cs.system_metadata.get("water_r_OH_akma"),
+                        r_HH=cs.system_metadata.get("water_r_HH_akma"),
+                        settle_velocity_tol=self.config.settle_velocity_tol,
+                        shake_iterations=self.config.shake_iterations,
+                        constraint_tolerance=self.config.constraint_tolerance,
+                    )
+                )
+            self._constraint_algos = algos
+        return self._constraint_algos[idx]
+
+    def _apply_minimized_positions_to_replica(
+        self, idx: int, pos_akma: jnp.ndarray
+    ) -> None:
+        """Reconstruct virtual sites, project constraints, zero velocities, and sync replica `idx`."""
+        cs = self._converted_systems[idx]
+        b_old = self._bundles[idx]
+        n_i = self._n_atoms_per_replica[idx]
+        p_cur = jnp.asarray(pos_akma[:n_i], dtype=self._dtype)
+        p_cur = cs.compute_virtual_sites(p_cur).astype(self._dtype)
+
+        algo = self._get_replica_constraint_algo(idx)
+        if algo is not None:
+            masses = b_old.masses[:n_i].astype(p_cur.dtype)
+            box_i = (
+                self._boxes_akma[idx]
+                if (b_old.shape_spec.has_pbc and cs.exceptions_use_pbc)
+                else None
+            )
+            p_cur = algo.apply_positions(
+                p_cur, p_cur, masses[:, None], box_i
+            ).astype(self._dtype)
+            p_cur = cs.compute_virtual_sites(p_cur).astype(self._dtype)
+
+        self._positions_akma[idx] = p_cur
+        self._velocities_akma[idx] = jnp.zeros((n_i, 3), dtype=self._dtype)
+
+        pad_len = int(b_old.positions.shape[0])
+        pos_f32 = _pad_positions_to_bucket(
+            p_cur.astype(jnp.float32),
+            pad_len,
+            b_old.box if b_old.shape_spec.has_pbc else None,
+        )
+        self._bundles[idx] = dataclasses.replace(b_old, positions=pos_f32)
+        self._base_bundles[idx] = dataclasses.replace(self._base_bundles[idx], positions=pos_f32)
+
+        if self._contexts is not None:
+            ctx = self._contexts[idx]
+            ctx._positions = jnp.asarray(p_cur, dtype=ctx._dtype)
+            ctx._velocities = jnp.zeros_like(ctx._velocities)
+            ctx._init_neighbor_list(ctx._positions)
+            ctx._morton_nl_dirty = True
+            ctx._morton_forces_dirty = True
+            ctx._host_nl_dirty = True
+
+    def _refresh_plan_bundles_after_state_update(self) -> None:
+        """Sync `self.plan.bundles` and `self._per_replica_plans` after in-place state updates."""
+        if self.plan is not None or self._per_replica_plans is not None:
+            plan_bundles = self._bundles_for_plan()
+            if self.plan is not None:
+                self.plan.bundles = plan_bundles
+            if self._per_replica_plans is not None:
+                for i, p_i in enumerate(self._per_replica_plans):
+                    p_i.bundles = [plan_bundles[i]]
+
+    def minimizeEnergy(  # noqa: N802
+        self,
+        tolerance: Any = 10.0 * unit.kilojoules_per_mole / unit.nanometer,
+        maxIterations: int = 0,
+        backend: str | None = None,
+    ) -> None:
+        """Minimize potential energy across all `B` replicas via `fire`, `lbfgs`, or `openmm_cpu`."""
+        if hasattr(tolerance, "value_in_unit"):
+            tol_omm = float(
+                tolerance.value_in_unit(unit.kilojoules_per_mole / unit.nanometer)
+            )
+        else:
+            tol_omm = float(tolerance)
+        tol_akma = tol_omm * FORCE_OMM_TO_AKMA
+
+        eff_backend = (
+            str(backend).lower()
+            if backend is not None
+            else str(self.config.minimizer_backend).lower()
+        )
+        if eff_backend not in ("lbfgs", "fire", "openmm_cpu"):
+            raise ValueError(f"Unknown minimizer backend: {eff_backend!r}")
+        if eff_backend == "lbfgs" and _jaxopt is None:
+            raise ImportError("jaxopt is required for minimizer_backend='lbfgs'.")
+
+        self._sync_from_contexts_if_present()
+        max_iters_gpu = int(maxIterations) if int(maxIterations) > 0 else 500
+
+        if eff_backend in ("fire", "lbfgs") and self._can_vmap_batch_observables(-1):
+            cs0 = self._converted_systems[0]
+            pos_b = jnp.stack(self._positions_akma, axis=0)
+            (
+                box_b,
+                base_bundles_b,
+                bond_fg_b,
+                angle_fg_b,
+                dihedral_fg_b,
+                cmap_fg_b,
+                pr_b,
+                offsets_b,
+                gp_vec_b,
+                param_names,
+            ) = self._stack_batch_inputs_for_vmap()
+            ewald_tol = (
+                cs0.ewald_error_tolerance
+                if cs0.ewald_error_tolerance is not None
+                else self.config.ewald_error_tolerance
+            )
+            eff_nb_method = _effective_cs_nonbonded_method(cs0, self.config)
+            eff_alpha = _resolve_cs_pme_alpha(cs0, self.config)
+            eff_lj_alpha = _resolve_cs_lj_pme_alpha(cs0, self.config)
+            eff_lj_dims = _resolve_cs_lj_pme_grid_dims(
+                cs0, self.config, self._boxes_akma[0]
+            )
+            use_disp = bool(
+                self.config.use_dispersion_correction and cs0.use_dispersion_correction
+            )
+            nb_eng = (
+                "flash"
+                if (
+                    cs0.has_pbc
+                    and not cs0.has_implicit_solvent
+                    and cs0.nonbonded_offsets is None
+                    and cs0.lj_combining_rule == "lorentz_berthelot"
+                    and not cs0.exceptions_use_pbc
+                )
+                else (
+                    "neighbor_list"
+                    if (int(pos_b.shape[1]) >= 4000 and cs0.nonbonded_cutoff < float("inf"))
+                    else "dense"
+                )
+            )
+            min_pos_b = _vmapped_batch_minimize_akma(
+                pos_b,
+                box_b,
+                base_bundles_b,
+                bond_fg_b,
+                angle_fg_b,
+                dihedral_fg_b,
+                cmap_fg_b,
+                pr_b,
+                offsets_b,
+                gp_vec_b,
+                param_names,
+                cs0.force_group_by_component,
+                cs0.has_pbc,
+                cs0.nonbonded_cutoff,
+                eff_nb_method,
+                cs0.has_nonbonded,
+                use_disp,
+                ewald_tol,
+                eff_alpha,
+                cs0.reaction_field_dielectric,
+                cs0.has_implicit_solvent,
+                cs0.solvent_dielectric,
+                cs0.solute_dielectric,
+                nb_eng,
+                cs0.pme_grid_dims,
+                cs0.lj_switch_width,
+                self.config.custom_nonbonded_chunk_size,
+                cs0.is_triclinic,
+                self.config.precision == "mixed",
+                cs0.gbsa_surface_tension,
+                cs0.default_parameters,
+                cs0.lj_combining_rule,
+                cs0.exceptions_use_pbc,
+                cs0.dispersion_follows_parameters,
+                eff_lj_alpha,
+                eff_lj_dims,
+                eff_backend,
+                tol_akma,
+                max_iters_gpu,
+            )
+            for i in range(self.batch_size):
+                self._apply_minimized_positions_to_replica(i, min_pos_b[i])
+            self._refresh_plan_bundles_after_state_update()
+            return
+
+        if eff_backend == "openmm_cpu":
+            omm_mod = cast("Any", openmm)
+            platform = omm_mod.Platform.getPlatformByName("Reference")
+            for i in range(self.batch_size):
+                cpu_ctx = omm_mod.Context(
+                    self.systems[i], omm_mod.VerletIntegrator(0.001), platform
+                )
+                box_i = self._boxes_akma[i]
+                if box_i is not None:
+                    bv_nm = np.asarray(box_i, dtype=np.float64) * ANGSTROM_TO_NM
+                    cpu_ctx.setPeriodicBoxVectors(
+                        openmm.Vec3(float(bv_nm[0, 0]), float(bv_nm[0, 1]), float(bv_nm[0, 2])) * unit.nanometer,
+                        openmm.Vec3(float(bv_nm[1, 0]), float(bv_nm[1, 1]), float(bv_nm[1, 2])) * unit.nanometer,
+                        openmm.Vec3(float(bv_nm[2, 0]), float(bv_nm[2, 1]), float(bv_nm[2, 2])) * unit.nanometer,
+                    )
+                for k_nm, v_val in self._parameters_per_replica[i].items():
+                    with contextlib.suppress(Exception):
+                        cpu_ctx.setParameter(k_nm, float(v_val))
+                pos_nm_i = np.asarray(self._positions_akma[i], dtype=np.float64) * ANGSTROM_TO_NM
+                cpu_ctx.setPositions(pos_nm_i * unit.nanometer)
+                omm_mod.LocalEnergyMinimizer.minimize(cpu_ctx, tol_omm, int(maxIterations))
+                min_pos_nm = (
+                    cpu_ctx.getState(getPositions=True)
+                    .getPositions(asNumpy=True)
+                    .value_in_unit(unit.nanometer)
+                )
+                min_pos_akma = jnp.asarray(
+                    np.asarray(min_pos_nm, dtype=np.float64) * NM_TO_ANGSTROM,
+                    dtype=self._dtype,
+                )
+                self._apply_minimized_positions_to_replica(i, min_pos_akma)
+            self._refresh_plan_bundles_after_state_update()
+            return
+
+        # Per-replica GPU/JAX fallback for custom Lepton forces, virtual sites, or ragged batches
+        ctxs = self._ensure_contexts()
+        for i, ctx in enumerate(ctxs):
+            ctx.computeVirtualSites()
+            ctx.applyConstraints()
+            gp = ctx._get_dynamic_global_params()
+            ewald_tol = (
+                ctx._converted_system.ewald_error_tolerance
+                if ctx._converted_system.ewald_error_tolerance is not None
+                else ctx._config.ewald_error_tolerance
+            )
+            eff_nb_m = ctx._effective_nonbonded_method()
+            eff_pa = ctx._effective_pme_alpha()
+            eff_lpa = ctx._effective_lj_pme_alpha()
+            eff_lpd = _resolve_cs_lj_pme_grid_dims(
+                ctx._converted_system, ctx._config, ctx._box_vectors
+            )
+
+            def _rep_energy_fn(
+                p: jnp.ndarray,
+                _ctx: ProlixContext = ctx,
+                _gp: dict[str, jnp.ndarray] = gp,
+                _et: float = ewald_tol,
+                _nbm: str = eff_nb_m,
+                _pa: float | None = eff_pa,
+                _lpa: float | None = eff_lpa,
+                _lpd: tuple[int, int, int] | None = eff_lpd,
+            ) -> jnp.ndarray:
+                p_eval = _ctx._converted_system.compute_virtual_sites(p)
+                e_sys = _eval_system_potential_energy(
+                    p_eval,
+                    _ctx._box_vectors,
+                    _ctx._bundle,
+                    _ctx._custom_forces,
+                    _ctx._position_restraints,
+                    _gp,
+                    _ctx._converted_system.force_group_by_component,
+                    -1,
+                    _ctx._converted_system.has_pbc,
+                    _ctx._converted_system.nonbonded_cutoff,
+                    bond_force_groups=_ctx._converted_system.bond_force_groups,
+                    angle_force_groups=_ctx._converted_system.angle_force_groups,
+                    dihedral_force_groups=_ctx._converted_system.dihedral_force_groups,
+                    cmap_force_groups=_ctx._converted_system.cmap_force_groups,
+                    nonbonded_method=_nbm,
+                    has_nonbonded=_ctx._converted_system.has_nonbonded,
+                    use_dispersion_correction=(
+                        _ctx._config.use_dispersion_correction
+                        and _ctx._converted_system.use_dispersion_correction
+                    ),
+                    ewald_error_tolerance=_et,
+                    rf_dielectric=_ctx._converted_system.reaction_field_dielectric,
+                    has_implicit_solvent=_ctx._converted_system.has_implicit_solvent,
+                    solvent_dielectric=_ctx._converted_system.solvent_dielectric,
+                    solute_dielectric=_ctx._converted_system.solute_dielectric,
+                    nonbonded_engine=_ctx._nonbonded_engine,
+                    pme_grid_dims=_ctx._converted_system.pme_grid_dims,
+                    use_pallas=_ctx._config.use_pallas,
+                    pallas_interpret=_ctx._config.pallas_interpret,
+                    lj_switch_width=_ctx._converted_system.lj_switch_width,
+                    neighbor_idx=getattr(_ctx, "_neighbor_idx", None),
+                    tile_pair_nl=getattr(_ctx, "_tile_pair_nl", None),
+                    gbsa_tile_list=getattr(_ctx, "_gbsa_tile_list", None),
+                    use_pallas_pme=_ctx._config.use_pallas_pme,
+                    custom_nonbonded_chunk_size=_ctx._config.custom_nonbonded_chunk_size,
+                    is_triclinic=_ctx._is_triclinic,
+                    gb_use_neighbor_list=_ctx._gb_use_neighbor_list,
+                    gbsa_surface_tension=_ctx._converted_system.gbsa_surface_tension,
+                    pme_alpha=_pa,
+                    nonbonded_offsets=_ctx._converted_system.nonbonded_offsets,
+                    default_params=_ctx._converted_system.default_parameters,
+                    lj_combining_rule=_ctx._lj_combining_rule,
+                    exceptions_use_pbc=_ctx._exceptions_use_pbc,
+                    dispersion_follows_parameters=_ctx._dispersion_follows_parameters,
+                    lj_pme_alpha=_lpa,
+                    lj_pme_grid_dims=_lpd,
+                )
+                return e_sys + _constraint_penalty_energy_akma(
+                    p_eval,
+                    _ctx._box_vectors,
+                    _ctx._bundle,
+                    _ctx._converted_system.has_pbc,
+                    exceptions_use_pbc=_ctx._exceptions_use_pbc,
+                )
+
+            pos_init = ctx._positions
+            if eff_backend == "lbfgs":
+                solver = _jaxopt.LBFGS(
+                    fun=_rep_energy_fn,
+                    maxiter=max_iters_gpu,
+                    tol=tol_akma,
+                    linesearch="zoom",
+                    maxls=30,
+                    stop_if_linesearch_fails=True,
+                )
+                min_pos = solver.run(pos_init).params
+            else:
+                init_fn, step_fn = jax_md_minimize.fire_descent(
+                    _rep_energy_fn,
+                    shift_fn=lambda r, dr: r + dr,
+                    dt_start=0.002,
+                    dt_max=0.02,
+                )
+                st = init_fn(pos_init)
+                for _ in range(max_iters_gpu):
+                    st = step_fn(st)
+                    f_norm = float(jnp.sqrt(jnp.mean(jnp.sum(st.force**2, axis=-1))))
+                    if f_norm <= tol_akma:
+                        break
+                min_pos = st.position
+            self._apply_minimized_positions_to_replica(i, min_pos)
+        self._refresh_plan_bundles_after_state_update()
+
+    # --- Batch State & Checkpoint Serialization ---
+    def saveStates(  # noqa: N802
+        self,
+        files: str | os.PathLike[str] | Any | Sequence[Any],
+    ) -> None:
+        """Save portable XML OpenMM `State`s across all `B` replicas."""
+        omm_mod = cast("Any", openmm)
+        states = self.getStates(
+            getPositions=True,
+            getVelocities=True,
+            getEnergy=True,
+            getParameters=True,
+        )
+        xml_list = [str(omm_mod.XmlSerializer.serialize(st)) for st in states]
+
+        if isinstance(files, (str, os.PathLike)):
+            payload = json.dumps(
+                {
+                    "format": "prolix_batch_states_v1",
+                    "batch_size": int(self.batch_size),
+                    "n_atoms_per_replica": [int(n) for n in self._n_atoms_per_replica],
+                    "states_xml": xml_list,
+                }
+            )
+            Path(cast("str | os.PathLike[str]", files)).write_text(
+                payload, encoding="utf-8"
+            )
+            return
+        if hasattr(files, "write") and not isinstance(files, Sequence):
+            payload = json.dumps(
+                {
+                    "format": "prolix_batch_states_v1",
+                    "batch_size": int(self.batch_size),
+                    "n_atoms_per_replica": [int(n) for n in self._n_atoms_per_replica],
+                    "states_xml": xml_list,
+                }
+            )
+            files.write(payload.encode("utf-8") if "b" in str(getattr(files, "mode", "")) else payload)
+            return
+        if not isinstance(files, Sequence) or isinstance(files, bytes):
+            raise openmm.OpenMMException(
+                f"saveStates: expected file path, stream, or sequence of {self.batch_size} files."
+            )
+        if len(files) != self.batch_size:
+            raise openmm.OpenMMException(
+                f"saveStates: batch_size mismatch (expected {self.batch_size} files, got {len(files)})."
+            )
+        for f_target, xml_s in zip(files, xml_list, strict=True):
+            if isinstance(f_target, (str, os.PathLike)):
+                Path(f_target).write_text(xml_s, encoding="utf-8")
+            elif hasattr(f_target, "write"):
+                f_target.write(
+                    xml_s.encode("utf-8")
+                    if "b" in str(getattr(f_target, "mode", ""))
+                    else xml_s
+                )
+            else:
+                raise openmm.OpenMMException(
+                    f"saveStates: unsupported target of type {type(f_target).__name__}."
+                )
+
+    def loadStates(  # noqa: N802
+        self,
+        files: str | os.PathLike[str] | Any | Sequence[Any],
+    ) -> None:
+        """Load portable OpenMM `State`s across all `B` replicas, validating `batch_size` and atom counts."""
+        omm_mod = cast("Any", openmm)
+
+        def _deserialize_xml(xml_text: str) -> Any:
+            try:
+                return omm_mod.XmlSerializer.deserialize(xml_text)
+            except Exception as exc:
+                raise openmm.OpenMMException(
+                    f"loadStates: failed to deserialize OpenMM State XML ({exc})"
+                ) from exc
+
+        parsed_states: list[Any] = []
+        if isinstance(files, (str, os.PathLike)) or (
+            hasattr(files, "read") and not isinstance(files, Sequence)
+        ):
+            try:
+                raw = (
+                    Path(cast("str | os.PathLike[str]", files)).read_text(
+                        encoding="utf-8"
+                    )
+                    if isinstance(files, (str, os.PathLike))
+                    else files.read()
+                )
+            except Exception as exc:
+                raise openmm.OpenMMException(
+                    f"loadStates: unable to read state source ({exc})"
+                ) from exc
+            text = raw.decode("utf-8") if isinstance(raw, (bytes, bytearray)) else str(raw)
+            stripped = text.lstrip()
+            if stripped.startswith("{"):
+                try:
+                    data = json.loads(text)
+                except Exception as exc:
+                    raise openmm.OpenMMException(
+                        f"loadStates: invalid batch state JSON ({exc})"
+                    ) from exc
+                if (
+                    not isinstance(data, dict)
+                    or data.get("format") != "prolix_batch_states_v1"
+                    or not isinstance(data.get("states_xml"), list)
+                ):
+                    raise openmm.OpenMMException(
+                        "loadStates: invalid batch state envelope header."
+                    )
+                data_d = cast("dict[str, Any]", data)
+                saved_b = int(data_d.get("batch_size", len(data_d["states_xml"])))
+                if saved_b != self.batch_size or len(data_d["states_xml"]) != self.batch_size:
+                    raise openmm.OpenMMException(
+                        f"loadStates: batch_size mismatch (saved {saved_b}, expected {self.batch_size})."
+                    )
+                saved_counts = data_d.get("n_atoms_per_replica")
+                if isinstance(saved_counts, list):
+                    if len(saved_counts) != self.batch_size:
+                        raise openmm.OpenMMException(
+                            f"loadStates: atom count header length {len(saved_counts)} != {self.batch_size}."
+                        )
+                    for i, n_saved in enumerate(saved_counts):
+                        if int(cast("Any", n_saved)) != self._n_atoms_per_replica[i]:
+                            raise openmm.OpenMMException(
+                                f"loadStates: replica {i} atom count mismatch (saved {n_saved}, expected {self._n_atoms_per_replica[i]})."
+                            )
+                parsed_states = [_deserialize_xml(str(x)) for x in data_d["states_xml"]]
+            elif stripped.startswith("<"):
+                if self.batch_size != 1:
+                    raise openmm.OpenMMException(
+                        f"loadStates: batch_size mismatch (single State XML provided for batch_size={self.batch_size})."
+                    )
+                parsed_states = [_deserialize_xml(text)]
+            else:
+                raise openmm.OpenMMException("loadStates: unrecognized state format.")
+        elif isinstance(files, Sequence) and not isinstance(files, bytes):
+            if len(files) != self.batch_size:
+                raise openmm.OpenMMException(
+                    f"loadStates: batch_size mismatch (expected {self.batch_size} states, got {len(files)})."
+                )
+            for item in files:
+                if hasattr(item, "getPositions") and hasattr(item, "getStepCount"):
+                    parsed_states.append(item)
+                elif isinstance(item, os.PathLike):
+                    parsed_states.append(
+                        _deserialize_xml(Path(item).read_text(encoding="utf-8"))
+                    )
+                elif isinstance(item, str):
+                    if item.lstrip().startswith("<"):
+                        parsed_states.append(_deserialize_xml(item))
+                    else:
+                        try:
+                            txt = Path(item).read_text(encoding="utf-8")
+                        except Exception as exc:
+                            raise openmm.OpenMMException(
+                                f"loadStates: unable to read state file {item!r} ({exc})"
+                            ) from exc
+                        parsed_states.append(_deserialize_xml(txt))
+                elif hasattr(item, "read"):
+                    raw_i = item.read()
+                    txt_i = (
+                        raw_i.decode("utf-8")
+                        if isinstance(raw_i, (bytes, bytearray))
+                        else str(raw_i)
+                    )
+                    parsed_states.append(_deserialize_xml(txt_i))
+                else:
+                    raise openmm.OpenMMException(
+                        f"loadStates: unsupported state element of type {type(item).__name__}."
+                    )
+        else:
+            raise openmm.OpenMMException(
+                f"loadStates: expected path, stream, or sequence of {self.batch_size} states."
+            )
+
+        # Validate per-replica atom counts & parameter names BEFORE mutating batch state
+        validated_pos_ang: list[np.ndarray | None] = []
+        validated_vel_omm: list[np.ndarray | None] = []
+        validated_box_ang: list[np.ndarray | None] = []
+        validated_params: list[dict[str, float] | None] = []
+
+        for i, st in enumerate(parsed_states):
+            exp_n = self._n_atoms_per_replica[i]
+            types = int(st.getDataTypes()) if hasattr(st, "getDataTypes") else 0xFFFFFFFF
+
+            pos_ang_i: np.ndarray | None = None
+            if types & int(openmm.State.Positions):
+                pos_nm_i = np.asarray(
+                    st.getPositions(asNumpy=True).value_in_unit(unit.nanometer),
+                    dtype=np.float64,
+                )
+                if pos_nm_i.shape != (exp_n, 3):
+                    raise openmm.OpenMMException(
+                        f"loadStates: replica {i} atom count mismatch (got positions shape {pos_nm_i.shape}, expected ({exp_n}, 3))."
+                    )
+                pos_ang_i = pos_nm_i * NM_TO_ANGSTROM
+            validated_pos_ang.append(pos_ang_i)
+
+            vel_omm_i: np.ndarray | None = None
+            if types & int(openmm.State.Velocities):
+                vel_arr = np.asarray(
+                    st.getVelocities(asNumpy=True).value_in_unit(
+                        unit.nanometer / unit.picosecond
+                    ),
+                    dtype=np.float64,
+                )
+                if vel_arr.shape != (exp_n, 3):
+                    raise openmm.OpenMMException(
+                        f"loadStates: replica {i} velocity atom count mismatch (got shape {vel_arr.shape}, expected ({exp_n}, 3))."
+                    )
+                vel_omm_i = vel_arr
+            validated_vel_omm.append(vel_omm_i)
+
+            box_ang_i: np.ndarray | None = None
+            if self._bundles[i].shape_spec.has_pbc:
+                with contextlib.suppress(Exception):
+                    bv_nm = np.asarray(
+                        st.getPeriodicBoxVectors(asNumpy=True).value_in_unit(unit.nanometer),
+                        dtype=np.float64,
+                    )
+                    if bv_nm.shape == (3, 3):
+                        box_ang_i = bv_nm * NM_TO_ANGSTROM
+            validated_box_ang.append(box_ang_i)
+
+            params_i: dict[str, float] | None = None
+            if types & int(openmm.State.Parameters):
+                raw_p = dict(st.getParameters())
+                for k_nm in raw_p:
+                    if k_nm not in self._parameters_per_replica[i]:
+                        raise openmm.OpenMMException(
+                            f"loadStates: unknown parameter {k_nm!r} in replica {i}."
+                        )
+                params_i = {k_nm: float(v_v) for k_nm, v_v in raw_p.items()}
+            validated_params.append(params_i)
+
+        with contextlib.suppress(Exception):
+            self.currentStep = int(parsed_states[0].getStepCount())
+
+        any_vel = False
+        for i in range(self.batch_size):
+            b_old = self._bundles[i]
+            b_base_old = self._base_bundles[i]
+            new_box_f32 = b_old.box
+            if validated_box_ang[i] is not None:
+                bx_jnp = jnp.asarray(validated_box_ang[i], dtype=self._dtype)
+                self._boxes_akma[i] = bx_jnp
+                new_box_f32 = bx_jnp.astype(jnp.float32)
+
+            if validated_pos_ang[i] is not None:
+                p_jnp = jnp.asarray(validated_pos_ang[i], dtype=self._dtype)
+                self._positions_akma[i] = p_jnp
+                pad_len = int(b_old.positions.shape[0])
+                pos_f32 = _pad_positions_to_bucket(
+                    p_jnp.astype(jnp.float32),
+                    pad_len,
+                    new_box_f32 if b_old.shape_spec.has_pbc else None,
+                )
+            else:
+                pos_f32 = b_old.positions
+
+            self._bundles[i] = dataclasses.replace(
+                b_old, positions=pos_f32, box=new_box_f32
+            )
+            self._base_bundles[i] = dataclasses.replace(
+                b_base_old, positions=pos_f32, box=new_box_f32
+            )
+
+            if validated_vel_omm[i] is not None:
+                self._velocities_akma[i] = jnp.asarray(
+                    cast("np.ndarray", validated_vel_omm[i]) * VELOCITY_OMM_TO_AKMA,
+                    dtype=self._dtype,
+                )
+                any_vel = True
+
+            if validated_params[i] is not None:
+                self._parameters_per_replica[i].update(cast("dict[str, float]", validated_params[i]))
+
+            if self._contexts is not None:
+                self._contexts[i].setState(parsed_states[i])
+
+        if any_vel:
+            self._velocities_initialized = True
+        if any(cs.nonbonded_offsets is not None for cs in self._converted_systems):
+            self._sync_offset_parameters_to_bundles()
+        self._boxes_match = self._compute_boxes_match()
+        self._refresh_plan_bundles_after_state_update()
+
+    def createCheckpoint(self) -> bytes:  # noqa: N802
+        """Create a binary checkpoint containing exact positions, velocities, boxes, parameters, and RNG seeds."""
+        self._sync_from_contexts_if_present()
+        ckpt_dict: dict[str, Any] = {
+            "magic": "prolix_batch_checkpoint_v1",
+            "batch_size": int(self.batch_size),
+            "n_atoms_per_replica": [int(n) for n in self._n_atoms_per_replica],
+            "current_step": int(self.currentStep),
+            "seed": int(self._seed),
+            "velocities_initialized": bool(self._velocities_initialized),
+            "positions_akma": [np.asarray(p) for p in self._positions_akma],
+            "velocities_akma": [np.asarray(v) for v in self._velocities_akma],
+            "boxes_akma": [
+                np.asarray(bx) if bx is not None else None for bx in self._boxes_akma
+            ],
+            "parameters_per_replica": [dict(p) for p in self._parameters_per_replica],
+            "context_checkpoints": (
+                [ctx.createCheckpoint() for ctx in self._contexts]
+                if self._contexts is not None
+                else None
+            ),
+        }
+        return pickle.dumps(ckpt_dict, protocol=pickle.HIGHEST_PROTOCOL)
+
+    def saveCheckpoint(self, file: str | os.PathLike[str] | Any) -> None:  # noqa: N802
+        """Write binary batch checkpoint to `file` (path or binary file-like object)."""
+        data = self.createCheckpoint()
+        if isinstance(file, (str, os.PathLike)):
+            Path(file).write_bytes(data)
+        elif hasattr(file, "write"):
+            file.write(data)
+        else:
+            raise openmm.OpenMMException(
+                f"saveCheckpoint: expected file path or writable binary stream, got {type(file).__name__}."
+            )
+
+    def loadCheckpoint(  # noqa: N802
+        self,
+        checkpoint: bytes | bytearray | str | os.PathLike[str] | dict[str, Any] | Any,
+    ) -> None:
+        """Restore binary batch checkpoint, validating `batch_size` and per-replica atom counts."""
+        if isinstance(checkpoint, dict):
+            raw_ckpt: Any = checkpoint
+        else:
+            if isinstance(checkpoint, (bytes, bytearray, memoryview)):
+                raw_bytes = bytes(checkpoint)
+            elif isinstance(checkpoint, (str, os.PathLike)):
+                try:
+                    raw_bytes = Path(
+                        cast("str | os.PathLike[str]", checkpoint)
+                    ).read_bytes()
+                except Exception as exc:
+                    raise openmm.OpenMMException(
+                        f"loadCheckpoint: unable to read checkpoint file ({exc})"
+                    ) from exc
+            elif hasattr(checkpoint, "read"):
+                raw_in = checkpoint.read()
+                if not isinstance(raw_in, (bytes, bytearray, memoryview)):
+                    raise openmm.OpenMMException(
+                        "loadCheckpoint: stream did not return binary bytes."
+                    )
+                raw_bytes = bytes(raw_in)
+            else:
+                raise openmm.OpenMMException(
+                    f"loadCheckpoint: unsupported checkpoint argument type {type(checkpoint).__name__}."
+                )
+            try:
+                raw_ckpt = pickle.loads(raw_bytes)  # noqa: S301
+            except Exception as exc:
+                raise openmm.OpenMMException(
+                    f"loadCheckpoint: Checkpoint header was not correct ({exc})"
+                ) from exc
+
+        if not isinstance(raw_ckpt, dict):
+            raise openmm.OpenMMException(
+                "loadCheckpoint: Checkpoint header was not correct (expected dict)."
+            )
+        ckpt_dict = cast("dict[str, Any]", raw_ckpt)
+        if ckpt_dict.get("magic") != "prolix_batch_checkpoint_v1":
+            raise openmm.OpenMMException(
+                "loadCheckpoint: Checkpoint header was not correct (invalid magic)."
+            )
+
+        req_keys = (
+            "batch_size",
+            "n_atoms_per_replica",
+            "current_step",
+            "positions_akma",
+            "velocities_akma",
+            "boxes_akma",
+            "parameters_per_replica",
+        )
+        for k_req in req_keys:
+            if k_req not in ckpt_dict:
+                raise openmm.OpenMMException(
+                    f"loadCheckpoint: Checkpoint header was not correct (missing key {k_req!r})."
+                )
+
+        saved_b = int(ckpt_dict["batch_size"])
+        pos_list = ckpt_dict["positions_akma"]
+        vel_list = ckpt_dict["velocities_akma"]
+        box_list = ckpt_dict["boxes_akma"]
+        param_list = ckpt_dict["parameters_per_replica"]
+        saved_counts = ckpt_dict["n_atoms_per_replica"]
+
+        if (
+            saved_b != self.batch_size
+            or len(saved_counts) != self.batch_size
+            or len(pos_list) != self.batch_size
+            or len(vel_list) != self.batch_size
+            or len(box_list) != self.batch_size
+            or len(param_list) != self.batch_size
+        ):
+            raise openmm.OpenMMException(
+                f"loadCheckpoint: batch_size mismatch (checkpoint has {saved_b}, expected {self.batch_size})."
+            )
+
+        for i in range(self.batch_size):
+            exp_n = self._n_atoms_per_replica[i]
+            p_arr = np.asarray(pos_list[i])
+            v_arr = np.asarray(vel_list[i])
+            if (
+                int(saved_counts[i]) != exp_n
+                or p_arr.shape != (exp_n, 3)
+                or v_arr.shape != (exp_n, 3)
+            ):
+                raise openmm.OpenMMException(
+                    f"loadCheckpoint: replica {i} atom count mismatch "
+                    f"(checkpoint has n_atoms={saved_counts[i]}, pos={p_arr.shape}, vel={v_arr.shape}; expected ({exp_n}, 3))."
+                )
+            if box_list[i] is not None and np.asarray(box_list[i]).shape != (3, 3):
+                raise openmm.OpenMMException(
+                    f"loadCheckpoint: replica {i} invalid box shape {np.asarray(box_list[i]).shape}."
+                )
+            for p_nm in param_list[i]:
+                if p_nm not in self._parameters_per_replica[i]:
+                    raise openmm.OpenMMException(
+                        f"loadCheckpoint: unknown parameter {p_nm!r} in replica {i}."
+                    )
+
+        self.currentStep = int(ckpt_dict["current_step"])
+        self._seed = int(ckpt_dict.get("seed", self._seed))
+        self._velocities_initialized = bool(ckpt_dict.get("velocities_initialized", True))
+
+        ctx_ckpts = ckpt_dict.get("context_checkpoints")
+        for i in range(self.batch_size):
+            b_old = self._bundles[i]
+            b_base_old = self._base_bundles[i]
+            p_jnp = jnp.asarray(pos_list[i], dtype=self._dtype)
+            v_jnp = jnp.asarray(vel_list[i], dtype=self._dtype)
+            self._positions_akma[i] = p_jnp
+            self._velocities_akma[i] = v_jnp
+
+            new_box_f32 = b_old.box
+            if box_list[i] is not None:
+                bx_jnp = jnp.asarray(box_list[i], dtype=self._dtype)
+                self._boxes_akma[i] = bx_jnp
+                if b_old.shape_spec.has_pbc:
+                    new_box_f32 = bx_jnp.astype(jnp.float32)
+            else:
+                self._boxes_akma[i] = None
+
+            pad_len = int(b_old.positions.shape[0])
+            pos_f32 = _pad_positions_to_bucket(
+                p_jnp.astype(jnp.float32),
+                pad_len,
+                new_box_f32 if b_old.shape_spec.has_pbc else None,
+            )
+            self._bundles[i] = dataclasses.replace(
+                b_old, positions=pos_f32, box=new_box_f32
+            )
+            self._base_bundles[i] = dataclasses.replace(
+                b_base_old, positions=pos_f32, box=new_box_f32
+            )
+            self._parameters_per_replica[i] = {
+                str(k): float(v) for k, v in dict(param_list[i]).items()
+            }
+
+            if self._contexts is not None:
+                if isinstance(ctx_ckpts, list) and len(ctx_ckpts) == self.batch_size:
+                    self._contexts[i].loadCheckpoint(ctx_ckpts[i])
+
+        if self._contexts is not None and not (
+            isinstance(ctx_ckpts, list) and len(ctx_ckpts) == self.batch_size
+        ):
+            self._ensure_contexts()
+
+        if any(cs.nonbonded_offsets is not None for cs in self._converted_systems):
+            self._sync_offset_parameters_to_bundles()
+        self._boxes_match = self._compute_boxes_match()
+        self._refresh_plan_bundles_after_state_update()
+
     def _can_vmap_batch_observables(self, groups_mask: int) -> bool:  # noqa: PLR0911
         """Return True when all `B` replicas share uniform shapes & non-Lepton physics for `jax.vmap`."""
-        if self._contexts is not None:
-            return False
         if len(set(self._n_atoms_per_replica)) != 1:
             return False
         if len({b.shape_spec for b in self._base_bundles}) != 1:
             return False
 
         cs0 = self._converted_systems[0]
-        if bool(cs0.custom_forces) or bool(cs0.position_restraints) or cs0.virtual_sites is not None:
-            return False
-        if str(cs0.nonbonded_method).lower() == "lj_pme":
+        if bool(cs0.custom_forces) or cs0.virtual_sites is not None or cs0.is_triclinic:
             return False
 
+        pr0_sig = _pr_signature(cs0.position_restraints)
+        eff_nb0 = _effective_cs_nonbonded_method(cs0, self.config)
+        lj_dims0 = _resolve_cs_lj_pme_grid_dims(cs0, self.config, self._boxes_akma[0])
         off0 = cs0.nonbonded_offsets
         off0_sig = (
             None
@@ -2575,11 +3874,11 @@ class ProlixBatchSimulation:
             csi = self._converted_systems[i]
             if (
                 bool(csi.custom_forces)
-                or bool(csi.position_restraints)
                 or csi.virtual_sites is not None
+                or csi.is_triclinic
+                or _pr_signature(csi.position_restraints) != pr0_sig
                 or csi.has_pbc != cs0.has_pbc
-                or csi.is_triclinic != cs0.is_triclinic
-                or csi.nonbonded_method != cs0.nonbonded_method
+                or _effective_cs_nonbonded_method(csi, self.config) != eff_nb0
                 or csi.has_nonbonded != cs0.has_nonbonded
                 or csi.nonbonded_cutoff != cs0.nonbonded_cutoff
                 or csi.lj_switch_width != cs0.lj_switch_width
@@ -2587,6 +3886,8 @@ class ProlixBatchSimulation:
                 or csi.ewald_error_tolerance != cs0.ewald_error_tolerance
                 or csi.explicit_pme_alpha != cs0.explicit_pme_alpha
                 or csi.pme_grid_dims != cs0.pme_grid_dims
+                or csi.explicit_lj_pme_alpha != cs0.explicit_lj_pme_alpha
+                or _resolve_cs_lj_pme_grid_dims(csi, self.config, self._boxes_akma[i]) != lj_dims0
                 or csi.reaction_field_dielectric != cs0.reaction_field_dielectric
                 or csi.has_implicit_solvent != cs0.has_implicit_solvent
                 or csi.solvent_dielectric != cs0.solvent_dielectric
@@ -2631,11 +3932,12 @@ class ProlixBatchSimulation:
         jnp.ndarray | None,
         jnp.ndarray | None,
         jnp.ndarray | None,
+        tuple[PositionRestraints, ...],
         NonbondedParameterOffsets | None,
         jnp.ndarray,
         tuple[str, ...],
     ]:
-        """Stack replica bundles, force-group masks, offsets, and global parameter vectors."""
+        """Stack replica bundles, force-group masks, restraints, offsets, and global parameter vectors."""
         cs0 = self._converted_systems[0]
         box_b = (
             jnp.stack(
@@ -2671,6 +3973,13 @@ class ProlixBatchSimulation:
             if cs0.cmap_force_groups is not None
             else None
         )
+        pr_b: tuple[PositionRestraints, ...] = tuple(
+            jax.tree.map(
+                lambda *xs: jnp.stack(xs, axis=0),
+                *[cs.position_restraints[k] for cs in self._converted_systems],
+            )
+            for k in range(len(cs0.position_restraints))
+        )
         offsets_b: NonbondedParameterOffsets | None = (
             jax.tree.map(
                 lambda *xs: jnp.stack(xs, axis=0),
@@ -2697,6 +4006,7 @@ class ProlixBatchSimulation:
             angle_fg_b,
             dihedral_fg_b,
             cmap_fg_b,
+            pr_b,
             offsets_b,
             gp_vec_b,
             param_names,
@@ -2725,6 +4035,7 @@ class ProlixBatchSimulation:
             _afg,
             _dfg,
             _cfg,
+            _pr_b,
             offsets_b,
             gp_vec_b,
             param_names,
@@ -2734,7 +4045,12 @@ class ProlixBatchSimulation:
             if cs0.ewald_error_tolerance is not None
             else self.config.ewald_error_tolerance
         )
+        eff_nb_method = _effective_cs_nonbonded_method(cs0, self.config)
         eff_alpha = _resolve_cs_pme_alpha(cs0, self.config)
+        eff_lj_alpha = _resolve_cs_lj_pme_alpha(cs0, self.config)
+        eff_lj_dims = _resolve_cs_lj_pme_grid_dims(
+            cs0, self.config, self._boxes_akma[0]
+        )
         use_disp = bool(
             self.config.use_dispersion_correction and cs0.use_dispersion_correction
         )
@@ -2755,7 +4071,7 @@ class ProlixBatchSimulation:
                 groups_mask,
                 cs0.has_pbc,
                 cs0.nonbonded_cutoff,
-                cs0.nonbonded_method,
+                eff_nb_method,
                 cs0.has_nonbonded,
                 use_disp,
                 ewald_tol,
@@ -2770,6 +4086,8 @@ class ProlixBatchSimulation:
                 cs0.lj_combining_rule,
                 cs0.exceptions_use_pbc,
                 cs0.dispersion_follows_parameters,
+                eff_lj_alpha,
+                eff_lj_dims,
             ),
             dtype=np.float64,
         )
@@ -2801,9 +4119,10 @@ class ProlixBatchSimulation:
             raw_groups = int(groups)
         groups_mask = int(np.int32(raw_groups))
 
+        self._sync_from_contexts_if_present()
         can_vmap = self._can_vmap_batch_observables(groups_mask)
-        if self._contexts is not None or (
-            not can_vmap and (getParameterDerivatives or groups_mask != -1)
+        if not can_vmap and (
+            self._contexts is not None or getParameterDerivatives or groups_mask != -1
         ):
             ctxs = self._ensure_contexts()
             states: list[ProlixState] = []
@@ -2837,6 +4156,7 @@ class ProlixBatchSimulation:
             data_types |= int(openmm.State.ParameterDerivatives)
 
         pe_np_b: np.ndarray | None = None
+        forces_akma_np_b: np.ndarray | None = None
         forces_np_b: np.ndarray | None = None
         if can_vmap and (getEnergy or getForces):
             cs0 = self._converted_systems[0]
@@ -2848,6 +4168,7 @@ class ProlixBatchSimulation:
                 angle_fg_b,
                 dihedral_fg_b,
                 cmap_fg_b,
+                pr_b,
                 offsets_b,
                 gp_vec_b,
                 param_names,
@@ -2857,7 +4178,12 @@ class ProlixBatchSimulation:
                 if cs0.ewald_error_tolerance is not None
                 else self.config.ewald_error_tolerance
             )
+            eff_nb_method = _effective_cs_nonbonded_method(cs0, self.config)
             eff_alpha = _resolve_cs_pme_alpha(cs0, self.config)
+            eff_lj_alpha = _resolve_cs_lj_pme_alpha(cs0, self.config)
+            eff_lj_dims = _resolve_cs_lj_pme_grid_dims(
+                cs0, self.config, self._boxes_akma[0]
+            )
             use_disp = bool(
                 self.config.use_dispersion_correction and cs0.use_dispersion_correction
             )
@@ -2884,6 +4210,7 @@ class ProlixBatchSimulation:
                 angle_fg_b,
                 dihedral_fg_b,
                 cmap_fg_b,
+                pr_b,
                 offsets_b,
                 gp_vec_b,
                 param_names,
@@ -2891,7 +4218,7 @@ class ProlixBatchSimulation:
                 groups_mask,
                 cs0.has_pbc,
                 cs0.nonbonded_cutoff,
-                cs0.nonbonded_method,
+                eff_nb_method,
                 cs0.has_nonbonded,
                 use_disp,
                 ewald_tol,
@@ -2911,14 +4238,25 @@ class ProlixBatchSimulation:
                 cs0.lj_combining_rule,
                 cs0.exceptions_use_pbc,
                 cs0.dispersion_follows_parameters,
+                eff_lj_alpha,
+                eff_lj_dims,
             )
             pe_host, f_host = jax.device_get((pe_akma_b, f_akma_b))
             pe_np_b = np.asarray(pe_host, dtype=np.float64) * KCAL_PER_MOL_TO_KJ_PER_MOL
-            forces_np_b = np.asarray(f_host, dtype=np.float64) * FORCE_AKMA_TO_OMM
+            forces_akma_np_b = np.asarray(f_host, dtype=np.float64)
+            forces_np_b = forces_akma_np_b * FORCE_AKMA_TO_OMM
 
         derivs_per_rep: list[dict[str, float]] | None = None
         if getParameterDerivatives:
             derivs_per_rep = self._compute_vmapped_param_derivatives(groups_mask)
+
+        sync_lf_batch = bool(
+            self._contexts is not None
+            and len(self._contexts) > 0
+            and self._contexts[0]._effective_integrator_scheme() == "leapfrog"
+            and (self.currentStep > 0 or self._velocities_initialized)
+            and self._dt_akma > 0.0
+        )
 
         time_ps = self.currentStep * self._dt_akma * TAU_AKMA_TO_PS
         out_states: list[ProlixState] = []
@@ -2961,13 +4299,22 @@ class ProlixBatchSimulation:
             pe_kj: float | None = None
             ke_kj: float | None = None
             if getForces or getEnergy:
-                if pe_np_b is not None and forces_np_b is not None:
+                if (
+                    pe_np_b is not None
+                    and forces_np_b is not None
+                    and forces_akma_np_b is not None
+                ):
                     if getForces:
                         forces_omm = forces_np_b[i]
                     if getEnergy:
                         pe_kj = float(pe_np_b[i])
                         masses_np = np.asarray(b_i.masses[:n_i], dtype=np.float64)
                         vel_np = np.asarray(vel_i, dtype=np.float64)
+                        if sync_lf_batch:
+                            inv_m_np = np.where(masses_np > 1e-12, 1.0 / np.maximum(masses_np, 1e-12), 0.0)
+                            vel_np = vel_np + 0.5 * self._dt_akma * (
+                                forces_akma_np_b[i, :n_i] * inv_m_np[:, None]
+                            )
                         ke_akma = 0.5 * float(np.sum(masses_np[:, None] * (vel_np**2)))
                         ke_kj = ke_akma * KCAL_PER_MOL_TO_KJ_PER_MOL
                 else:
@@ -2980,6 +4327,7 @@ class ProlixBatchSimulation:
                         k: jnp.asarray(v, dtype=pos_i.dtype)
                         for k, v in self._parameters_per_replica[i].items()
                     }
+                    eff_nb_i = _effective_cs_nonbonded_method(cs, self.config)
                     pe_akma, f_akma = _pure_compute_energy_and_forces(
                         pos_i,
                         box_i,
@@ -2995,7 +4343,7 @@ class ProlixBatchSimulation:
                         angle_force_groups=cs.angle_force_groups,
                         dihedral_force_groups=cs.dihedral_force_groups,
                         cmap_force_groups=cs.cmap_force_groups,
-                        nonbonded_method=cs.nonbonded_method,
+                        nonbonded_method=eff_nb_i,
                         has_nonbonded=cs.has_nonbonded,
                         use_dispersion_correction=(
                             self.config.use_dispersion_correction
@@ -3033,6 +4381,10 @@ class ProlixBatchSimulation:
                         lj_combining_rule=cs.lj_combining_rule,
                         exceptions_use_pbc=cs.exceptions_use_pbc,
                         dispersion_follows_parameters=cs.dispersion_follows_parameters,
+                        lj_pme_alpha=_resolve_cs_lj_pme_alpha(cs, self.config),
+                        lj_pme_grid_dims=_resolve_cs_lj_pme_grid_dims(
+                            cs, self.config, box_i
+                        ),
                     )
                     if getForces:
                         forces_omm = np.asarray(f_akma, dtype=np.float64) * FORCE_AKMA_TO_OMM
@@ -3072,6 +4424,7 @@ class ProlixBatchSimulation:
         batch_positions: Sequence[Any] | jnp.ndarray | None = None,
     ) -> tuple[jnp.ndarray, jnp.ndarray | list[jnp.ndarray]]:
         """Differentiable batch energy (kJ/mol) and position gradients dU/dx (kJ/(mol*nm))."""
+        self._sync_from_contexts_if_present()
         if self._can_vmap_batch_observables(-1):
             cs0 = self._converted_systems[0]
             if batch_positions is not None:
@@ -3097,6 +4450,7 @@ class ProlixBatchSimulation:
                 angle_fg_b,
                 dihedral_fg_b,
                 cmap_fg_b,
+                pr_b,
                 offsets_b,
                 gp_vec_b,
                 param_names,
@@ -3106,7 +4460,12 @@ class ProlixBatchSimulation:
                 if cs0.ewald_error_tolerance is not None
                 else self.config.ewald_error_tolerance
             )
+            eff_nb_method = _effective_cs_nonbonded_method(cs0, self.config)
             eff_alpha = _resolve_cs_pme_alpha(cs0, self.config)
+            eff_lj_alpha = _resolve_cs_lj_pme_alpha(cs0, self.config)
+            eff_lj_dims = _resolve_cs_lj_pme_grid_dims(
+                cs0, self.config, self._boxes_akma[0]
+            )
             use_disp = bool(
                 self.config.use_dispersion_correction and cs0.use_dispersion_correction
             )
@@ -3133,13 +4492,14 @@ class ProlixBatchSimulation:
                 angle_fg_b,
                 dihedral_fg_b,
                 cmap_fg_b,
+                pr_b,
                 offsets_b,
                 gp_vec_b,
                 param_names,
                 cs0.force_group_by_component,
                 cs0.has_pbc,
                 cs0.nonbonded_cutoff,
-                cs0.nonbonded_method,
+                eff_nb_method,
                 cs0.has_nonbonded,
                 use_disp,
                 ewald_tol,
@@ -3158,6 +4518,8 @@ class ProlixBatchSimulation:
                 cs0.lj_combining_rule,
                 cs0.exceptions_use_pbc,
                 cs0.dispersion_follows_parameters,
+                eff_lj_alpha,
+                eff_lj_dims,
             )
 
         ctxs = self._ensure_contexts()
@@ -3180,7 +4542,9 @@ class ProlixBatchSimulation:
                 if ctx._converted_system.ewald_error_tolerance is not None
                 else ctx._config.ewald_error_tolerance
             )
+            eff_nb_m = ctx._effective_nonbonded_method()
             eff_alpha = ctx._effective_pme_alpha()
+            eff_lpa = ctx._effective_lj_pme_alpha()
             gp = {k: jnp.asarray(v, dtype=ctx._dtype) for k, v in ctx._parameters.items()}
 
             def _u_nm(
@@ -3188,9 +4552,11 @@ class ProlixBatchSimulation:
                 _ctx: ProlixContext = ctx,
                 _gp: dict[str, jnp.ndarray] = gp,
                 _et: float = ewald_tol,
+                _nbm: str = eff_nb_m,
                 _pa: float | None = eff_alpha,
+                _lpa: float | None = eff_lpa,
             ) -> jnp.ndarray:
-                p_a = p_nm * NM_TO_ANGSTROM
+                p_a = _ctx._converted_system.compute_virtual_sites(p_nm * NM_TO_ANGSTROM)
                 u_kcal = _eval_system_potential_energy(
                     p_a,
                     _ctx._box_vectors,
@@ -3206,7 +4572,7 @@ class ProlixBatchSimulation:
                     angle_force_groups=_ctx._converted_system.angle_force_groups,
                     dihedral_force_groups=_ctx._converted_system.dihedral_force_groups,
                     cmap_force_groups=_ctx._converted_system.cmap_force_groups,
-                    nonbonded_method=_ctx._converted_system.nonbonded_method,
+                    nonbonded_method=_nbm,
                     has_nonbonded=_ctx._converted_system.has_nonbonded,
                     use_dispersion_correction=(
                         _ctx._config.use_dispersion_correction
@@ -3245,6 +4611,8 @@ class ProlixBatchSimulation:
                     lj_combining_rule=_ctx._lj_combining_rule,
                     exceptions_use_pbc=_ctx._exceptions_use_pbc,
                     dispersion_follows_parameters=_ctx._dispersion_follows_parameters,
+                    lj_pme_alpha=_lpa,
+                    lj_pme_grid_dims=_ctx._converted_system.lj_pme_grid_dims,
                 )
                 return u_kcal * KCAL_PER_MOL_TO_KJ_PER_MOL
 
@@ -3269,6 +4637,7 @@ class ProlixBatchSimulation:
             raw_groups = int(groups)
         groups_mask = int(np.int32(raw_groups))
 
+        self._sync_from_contexts_if_present()
         if self._can_vmap_batch_observables(groups_mask):
             return self._compute_vmapped_param_derivatives(groups_mask)
         states = self.getStates(getParameterDerivatives=True, groups=groups)
