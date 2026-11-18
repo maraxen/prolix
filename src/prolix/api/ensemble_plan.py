@@ -1089,6 +1089,7 @@ class EnsemblePlan:
         thresh_sq = float((0.5 * eff_skin) ** 2)
         lj_sw = float(lj_switch_width_from_config(nb_cfg))
         tp_grp = knobs.get("tp_group")
+        det_forces = bool(knobs.get("deterministic_forces", False))
         cmm_freq = int(knobs.get("cmm_frequency", 0) or 0)
         press_atm = knobs.get("pressure_atm")
         baro_int = max(1, int(knobs.get("barostat_interval", 25) or 25))
@@ -1303,6 +1304,7 @@ class EnsemblePlan:
                 rf_dielectric=rf_diel,
                 tp_group=tp_grp,
                 compute_energy=compute_energy,
+                deterministic_forces=det_forces,
                 interpret=interpret,
             )
             if not do_pme:
@@ -1631,6 +1633,7 @@ class EnsemblePlan:
             "c_tail_b": c_tail_np,
             "c_net_q_b": c_net_q_np,
             "rf_dielectric": rf_diel,
+            "deterministic_forces": det_forces,
         }
 
     def _run_morton_soa_batch(

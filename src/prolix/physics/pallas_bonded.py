@@ -23,8 +23,18 @@ import jax.numpy as jnp
 import numpy as np
 import xtrax
 from jax import custom_vjp
+from jax._src import core as _jax_core
+from jax._src import state as _jax_state
+from jax._src import tree_util as _jax_tree_util
+from jax._src.lib.mlir import ir as _mlir_ir
+from jax._src.lib.triton import dialect as _tt_dialect
+from jax._src.pallas import primitives as _pallas_primitives
 from jax._src.pallas.primitives import load as _pl_load
 from jax._src.pallas.primitives import store as _pl_store
+from jax._src.pallas.triton import lowering as _triton_lowering
+from jax._src.state import discharge as _state_discharge
+from jax._src.state import indexing as _state_indexing
+from jax._src.state import primitives as _state_primitives
 from jax.experimental import pallas as pl
 from jax.experimental.pallas import triton as plt
 from jax.scipy.special import erf
@@ -200,6 +210,154 @@ def _pl_atomic_add_1d(
         jax.lax.fori_loop(0, block_size, _serial_body, None)
     else:
         plt.atomic_add(ref, (idx_1d,), val_masked, mask=mask_1d)
+
+
+_DET_FORCE_SCALE: float = 1048576.0  # 2^20 fractional fixed-point scale
+_DET_FORCE_INV_SCALE: float = 1.0 / 1048576.0
+_DET_FORCE_MAX_ABS: float = 1.0e9
+_PTX_ATOM_ADD_S32: str = (
+    "{ .reg .pred p_mask; mov.s32 $0, 0; "
+    "setp.ne.s32 p_mask, $3, 0; "
+    "@p_mask atom.global.add.s32 $0, [$1], $2; }"
+)
+
+_atomic_add_i32_p = _jax_core.Primitive("prolix_atomic_add_s32")
+
+
+@_atomic_add_i32_p.def_effectful_abstract_eval
+def _atomic_add_i32_abstract_eval(*avals_flat: Any, args_tree: Any) -> Any:
+    return _pallas_primitives._swap_abstract_eval(*avals_flat, args_tree=args_tree)
+
+
+def _atomic_add_i32_discharge_rule(
+    in_avals: Any, out_avals: Any, *args_flat: Any, args_tree: Any
+) -> Any:
+    del out_avals
+    ref, transforms, val, mask_i32 = args_tree.unflatten(args_flat)
+    *prev_transforms, idx = transforms
+    ref = _state_discharge.transform_array(ref, prev_transforms)
+    active = mask_i32 != 0
+    val_eff = jnp.where(active, val.astype(jnp.int32), jnp.int32(0))
+    indices = idx.indices
+    if len(indices) == 1 and not isinstance(indices[0], _state_indexing.Slice):
+        safe_i = jnp.where(active, indices[0], jnp.int32(0))
+        out = ref[safe_i]
+        x_new = ref.at[safe_i].add(val_eff)
+    else:
+        out = jnp.zeros_like(val_eff)
+        x_new = ref.at[indices].add(val_eff)
+    return (x_new,) + (None,) * (len(in_avals) - 1), out
+
+
+_state_discharge.register_discharge_rule(_atomic_add_i32_p)(
+    _atomic_add_i32_discharge_rule
+)
+
+
+@_triton_lowering.register_lowering(_atomic_add_i32_p)
+def _atomic_add_i32_triton_lowering(
+    ctx: Any, *args_flat: Any, args_tree: Any
+) -> Any:
+    block_info, *_ = ctx.block_infos
+    if block_info is None:
+        raise RuntimeError("_atomic_add_i32_triton_lowering requires non-None block_info")
+    ptr, indexers, val, mask_i32 = args_tree.unflatten(args_flat)
+    *_, value_aval, mask_aval = args_tree.unflatten(ctx.avals_in)
+    idx_list = list(indexers)
+    if not idx_list or not isinstance(idx_list[-1], _state_indexing.NDIndexer):
+        ref_aval = _jax_state.transform_type(idx_list, ctx.avals_in[0])
+        if not isinstance(ref_aval, _jax_state.AbstractRef):
+            raise TypeError(f"Expected AbstractRef after transform_type, got {type(ref_aval)}")
+        idx_list.append(_state_indexing.NDIndexer.make_trivial_indexer(ref_aval.shape))
+    idx = idx_list[0]
+    ptr_ir = _triton_lowering._compute_pointers_from_indices(ptr, block_info, idx)
+    val_ir = _triton_lowering._ensure_ir_value(val, value_aval)
+    mask_ir = _triton_lowering._ensure_ir_value(mask_i32, mask_aval)
+    if isinstance(ptr_ir.type, _mlir_ir.RankedTensorType):
+        pt = _mlir_ir.RankedTensorType(ptr_ir.type)
+        et = _tt_dialect.PointerType(pt.element_type).pointee_type
+        res_t: Any = _mlir_ir.RankedTensorType.get(pt.shape, et, pt.encoding)
+    else:
+        res_t = _tt_dialect.PointerType(ptr_ir.type).pointee_type
+    return _tt_dialect.ElementwiseInlineAsmOp(
+        [res_t],
+        _PTX_ATOM_ADD_S32,
+        constraints="=r,l,r,r",
+        pure=False,
+        packed_element=1,
+        args=[ptr_ir, val_ir, mask_ir],
+    ).result
+
+
+def _pl_atomic_add_i32_1d(
+    ref: Any,
+    idx_1d: jax.Array,
+    val_1d: jax.Array,
+    mask_1d: jax.Array,
+    interpret: bool = False,
+) -> None:
+    """1D signed int32 atomic add via inline PTX ``atom.global.add.s32`` on GPU and ``.at[].add`` on CPU.
+
+    Bypasses JAX 0.10.2 ``BUG-TRITON-ATOM1`` where vector ``int32`` ``plt.atomic_add``
+    erroneously lowers to ``tt.atomic_rmw fadd`` (subnormal FTZ flush to 0 on GPU).
+    """
+    del interpret
+    val_i32 = jnp.where(mask_1d, val_1d.astype(jnp.int32), jnp.int32(0))
+    mask_i32 = mask_1d.astype(jnp.int32)
+    x_ref, transforms = _state_primitives.get_ref_and_transforms(
+        ref, (idx_1d,), "prolix_atomic_add_s32"
+    )
+    args_flat, args_tree = _jax_tree_util.tree_flatten((x_ref, transforms, val_i32, mask_i32))
+    _ = _atomic_add_i32_p.bind(*args_flat, args_tree=args_tree)
+
+
+def _split_f32_to_hi_lo_i32(
+    val_1d: jax.Array, mask_1d: jax.Array
+) -> tuple[jax.Array, jax.Array]:
+    """Split masked ``float32`` force contribution into ``(hi_i32, lo_i32)`` with ``2^20`` fractional scale.
+
+    Uses ``jnp.floor``-based IEEE round-to-nearest-even so Triton lowers without ``lax.round_p``
+    while avoiding ``int64`` (which JAX truncates to ``int32`` when ``jax_enable_x64=False``).
+    """
+    dtype = val_1d.dtype
+    zero = jnp.asarray(0.0, dtype=dtype)
+    half = jnp.asarray(0.5, dtype=dtype)
+    scale = jnp.asarray(_DET_FORCE_SCALE, dtype=dtype)
+    max_abs = jnp.asarray(_DET_FORCE_MAX_ABS, dtype=dtype)
+    neg_max_abs = jnp.asarray(-_DET_FORCE_MAX_ABS, dtype=dtype)
+    df_m = jnp.clip(jnp.where(mask_1d, val_1d, zero), neg_max_abs, max_abs)
+    fl = jnp.floor(df_m)
+    hi = fl.astype(jnp.int32)
+    s = (df_m - fl) * scale
+    q = jnp.floor(s)
+    qi = q.astype(jnp.int32)
+    rem = s - q
+    inc = (rem > half) | ((rem == half) & ((qi & jnp.int32(1)) != jnp.int32(0)))
+    lo = (qi + inc.astype(jnp.int32)).astype(jnp.int32)
+    return hi, lo
+
+
+def _pl_atomic_add_hi_lo_1d(
+    hi_ref: Any,
+    lo_ref: Any,
+    idx_1d: jax.Array,
+    val_f32: jax.Array,
+    mask_1d: jax.Array,
+    interpret: bool = False,
+) -> None:
+    """Split ``val_f32`` into ``(hi_i32, lo_i32)`` and atomically accumulate into both planes."""
+    hi, lo = _split_f32_to_hi_lo_i32(val_f32, mask_1d)
+    _pl_atomic_add_i32_1d(hi_ref, idx_1d, hi, mask_1d, interpret)
+    _pl_atomic_add_i32_1d(lo_ref, idx_1d, lo, mask_1d, interpret)
+
+
+def _reconstruct_hi_lo_i32_to_f32(
+    f_hi: jax.Array, f_lo: jax.Array
+) -> jax.Array:
+    """Reconstruct ``float32`` force plane from ``(hi_i32, lo_i32)`` ``2^20`` fixed-point planes."""
+    return f_hi.astype(jnp.float32) + f_lo.astype(jnp.float32) * jnp.asarray(
+        _DET_FORCE_INV_SCALE, dtype=jnp.float32
+    )
 
 
 def _normalize_box(box: jax.Array | None, positions: jax.Array) -> tuple[jax.Array, bool]:
