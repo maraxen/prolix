@@ -20,8 +20,6 @@ Zero-dependency composite configuration schema (`KnobSurface`) and static AST go
    PallasControls
 ```
 
----
-
 ## Composite Knob Surface
 
 ```{eval-rst}
@@ -29,8 +27,6 @@ Zero-dependency composite configuration schema (`KnobSurface`) and static AST go
    :members:
    :undoc-members:
 ```
-
----
 
 ## Sub-Surface Control Dataclasses
 
@@ -71,8 +67,6 @@ Zero-dependency composite configuration schema (`KnobSurface`) and static AST go
    :members:
    :undoc-members:
 ```
-
----
 
 ## Static Governance (`prolix.governance.redsox_adapter`)
 

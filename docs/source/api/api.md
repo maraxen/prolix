@@ -18,8 +18,6 @@ Top-level JAX orchestration interfaces for single-system, homogeneous multi-repl
    Pressure
 ```
 
----
-
 ## Ensemble Execution Planner
 
 ```{eval-rst}
@@ -27,8 +25,6 @@ Top-level JAX orchestration interfaces for single-system, homogeneous multi-repl
    :members:
    :special-members: __init__
 ```
-
----
 
 ## Trajectory & Streaming Observables
 
@@ -54,8 +50,6 @@ Top-level JAX orchestration interfaces for single-system, homogeneous multi-repl
 .. autoclass:: prolix.api.Pressure
    :members:
 ```
-
----
 
 ## Export-Shaped Trajectory Runners (`prolix.api.export_run`)
 

@@ -29,19 +29,16 @@ ALLOWED_CYCLE_DODGES = {
     ("prolix.types.bundles", "prolix.physics.system"),
 }
 
-# (importer, target) lazy edges allowed inside prolix.physics: optional Pallas backends
-# whose import pulls ``jax.experimental.pallas`` and must stay off the default import path.
-ALLOWED_PHYSICS_LAZY = {
-    ("prolix.physics.flash_explicit", "prolix.pallas_kernels"),
-    ("prolix.physics.pme", "prolix.pallas_kernels"),
-    ("prolix.physics.pme", "prolix.physics.pme_pallas"),
-}
+# (importer, target) lazy edges allowed inside prolix.physics: all former Pallas lazy
+# imports in flash_explicit.py and pme.py were hoisted to module top level in v3.8.
+ALLOWED_PHYSICS_LAZY: set[tuple[str, str]] = set()
 
 
 def _load_graph():
     spec = importlib.util.spec_from_file_location("prolix_import_graph", _SCRIPT)
+    assert spec is not None
+    assert spec.loader is not None
     mod = importlib.util.module_from_spec(spec)
-    assert spec and spec.loader
     spec.loader.exec_module(mod)
     return mod.build(_ROOT / "src" / "prolix")
 

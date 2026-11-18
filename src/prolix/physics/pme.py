@@ -10,9 +10,12 @@ import jax
 import jax.core
 import jax.numpy as jnp
 import numpy as np
+from xtrax.intent import Context
 
 from prolix.export import in_export_context
+from prolix.pallas_kernels import _triton_gpu_available
 from prolix.physics.pbc import box_volume, invert_box_lower_triangular
+from prolix.physics.pme_pallas import make_gather_op, make_spread_op
 
 # kcal*A/(mol*e^2) — exact OpenMM ONE_4PI_EPS0 * 10 / 4.184
 COULOMB_CONSTANT = 332.06371329919216
@@ -469,8 +472,6 @@ def resolve_use_pallas_pme(
 
 
 def _pallas_interpret() -> bool:
-    from prolix.pallas_kernels import _triton_gpu_available
-
     return not _triton_gpu_available()
 
 
@@ -486,10 +487,6 @@ def spread_charges(
     """Spread charges onto FFT grid using B-spline interpolation."""
 
     if use_pallas_pme and not in_export_context() and _is_ortho_box(positions, box_size):
-        from xtrax.intent import Context
-
-        from prolix.physics.pme_pallas import make_spread_op
-
         backend = "gpu" if not _pallas_interpret() else "cpu"
         spread_op = make_spread_op(
             grid_dims, order, context=Context(kernels=True, backend=backend)
@@ -794,10 +791,6 @@ def _spme_bwd(grid_dims, alpha, order, use_pallas_pme, deconv_mode, residuals, g
 
     # StableHLO guardrail: export_context() must force pure XLA in the backward pass too.
     if use_pallas_pme and not in_export_context() and _is_ortho_box(positions, box_arr):
-        from xtrax.intent import Context
-
-        from prolix.physics.pme_pallas import make_gather_op
-
         backend = "gpu" if not _pallas_interpret() else "cpu"
         gather_op = make_gather_op(
             grid_dims,
@@ -1006,10 +999,6 @@ def _spme_forces_from_theta(
     dtype = positions.dtype
     box_arr = jnp.asarray(box_size, dtype=dtype)
     if use_pallas_pme and not in_export_context() and _is_ortho_box(positions, box_arr):
-        from xtrax.intent import Context
-
-        from prolix.physics.pme_pallas import make_gather_op
-
         backend = "gpu" if not _pallas_interpret() else "cpu"
         gather_op = make_gather_op(
             grid_dims,

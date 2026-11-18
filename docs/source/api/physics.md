@@ -1,6 +1,6 @@
 # `prolix.physics` — Potentials, Integrators & Bundles
 
-Differentiable potential-energy factories, PyTree parameter containers, bucketed host-to-device molecular bundles, isothermal-isobaric (NPT) barostats, and cross-engine unit adapters.
+Differentiable potential-energy factories, PyTree parameter containers, `P=6` dispersion Ewald (`LJ-PME`), compensated float-float (`fltflt`) GPU accumulators, bucketed host-to-device molecular bundles, isothermal-isobaric (NPT) barostats, and cross-engine unit adapters.
 
 ```{eval-rst}
 .. currentmodule:: prolix.physics
@@ -18,9 +18,9 @@ Differentiable potential-energy factories, PyTree parameter containers, bucketed
    virial_trace
    box_volume
    isotropic_box_scale
+   ~lj_pme.lj_pme_total_dispersion_energy
+   ~fltflt_pallas.FltFlt
 ```
-
----
 
 ## Pure & Differentiable Energy Factories
 
@@ -38,7 +38,48 @@ Differentiable potential-energy factories, PyTree parameter containers, bucketed
    :undoc-members:
 ```
 
----
+## `P=6` Dispersion Particle-Mesh Ewald (`prolix.physics.lj_pme`)
+
+Pure-JAX differentiable `1/r^6` dispersion Ewald / SPME matching OpenMM `NonbondedForce.LJPME` across Lorentz–Berthelot and geometric combining rules.
+
+```{eval-rst}
+.. py:module:: prolix.physics.lj_pme
+
+.. autofunction:: prolix.physics.lj_pme.dispersion_charges
+
+.. autofunction:: prolix.physics.lj_pme.resolve_ljpme_parameters
+
+.. autofunction:: prolix.physics.lj_pme.spread_dispersion_charges
+
+.. autofunction:: prolix.physics.lj_pme.lj_pme_influence_function
+
+.. autofunction:: prolix.physics.lj_pme.lj_pme_reciprocal_energy
+
+.. autofunction:: prolix.physics.lj_pme.lj_pme_self_energy
+
+.. autofunction:: prolix.physics.lj_pme.lj_pme_exclusion_energy
+
+.. autofunction:: prolix.physics.lj_pme.lj_pme_direct_pair_energy
+
+.. autofunction:: prolix.physics.lj_pme.lj_pme_direct_energy_neighbor_list
+
+.. autofunction:: prolix.physics.lj_pme.lj_pme_total_dispersion_energy
+
+.. autofunction:: prolix.physics.lj_pme.ewald_p6_fourier_kernel_value
+
+.. autofunction:: prolix.physics.lj_pme.ewald_p6_fourier_kernel_grad
+
+.. autofunction:: prolix.physics.lj_pme.ewald_p6_short_range_value
+
+.. autofunction:: prolix.physics.lj_pme.ewald_p6_long_range_value
+```
+
+## Compensated Float-Float Arithmetic (`prolix.physics.fltflt_pallas`)
+
+```{eval-rst}
+.. automodule:: prolix.physics.fltflt_pallas
+   :members:
+```
 
 ## Bucketed Device Bundles (`prolix.types.bundles`)
 
@@ -50,8 +91,6 @@ Differentiable potential-energy factories, PyTree parameter containers, bucketed
    :members:
    :undoc-members:
 ```
-
----
 
 ## Modular Integrators & NPT Barostats
 
@@ -74,8 +113,6 @@ Differentiable potential-energy factories, PyTree parameter containers, bucketed
 
 .. autofunction:: prolix.physics.isotropic_box_scale
 ```
-
----
 
 ## kUPS Cross-Validation Unit Adapter (`prolix.physics.kups_adapter`)
 

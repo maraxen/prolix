@@ -21,8 +21,6 @@ Hardware-agnostic StableHLO MLIR lowering context managers, artifact persistence
    resolve_pallas_compiler_params
 ```
 
----
-
 ## Export Context & Lowering Entry Points
 
 ```{eval-rst}
@@ -34,8 +32,6 @@ Hardware-agnostic StableHLO MLIR lowering context managers, artifact persistence
 
 .. autofunction:: prolix.export.export_langevin_step
 ```
-
----
 
 ## Artifact Persistence & IREE `wasm32` Compilation
 
@@ -54,8 +50,6 @@ Hardware-agnostic StableHLO MLIR lowering context managers, artifact persistence
 
 .. autodata:: prolix.export.WASM_ARTIFACT_MAX_BYTES
 ```
-
----
 
 ## Pallas Compiler Tuning
 

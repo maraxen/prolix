@@ -22,8 +22,6 @@ Drop-in JAX and Pallas GPU replacements for `openmm.Platform`, `openmm.Context`,
    from_akma
 ```
 
----
-
 ## Platform & Typed Configuration
 
 ```{eval-rst}
@@ -36,8 +34,6 @@ Drop-in JAX and Pallas GPU replacements for `openmm.Platform`, `openmm.Context`,
 
 .. autofunction:: prolix.openmm.parse_platform_properties
 ```
-
----
 
 ## Context, State, & Single-System Simulation
 
@@ -57,9 +53,9 @@ Drop-in JAX and Pallas GPU replacements for `openmm.Platform`, `openmm.Context`,
    :special-members: __init__
 ```
 
----
-
 ## Multi-System & Ragged Batch Simulation
+
+`ProlixBatchSimulation` provides persistent GPU ensemble stepping (`step`), per-replica state & coordinate management (`batch_size`, `n_replicas`, `bundles`, `setPositions`, `setVelocities`, `setVelocitiesToTemperature`, `getStates`), batch energy minimization & checkpoint/state serialization (`minimizeEnergy`, `saveStates`, `loadStates`, `createCheckpoint`, `loadCheckpoint`, `saveCheckpoint`), and vectorized alchemical / force-field differentiation (`setParameter`, `getParameters`, `value_and_grad_positions`, `compute_parameter_derivatives`).
 
 ```{eval-rst}
 .. autoclass:: prolix.openmm.ProlixBatchSimulation
@@ -67,8 +63,6 @@ Drop-in JAX and Pallas GPU replacements for `openmm.Platform`, `openmm.Context`,
    :undoc-members:
    :special-members: __init__
 ```
-
----
 
 ## System Converter, Exceptions, & Unit Helpers
 
