@@ -73,12 +73,19 @@ from prolix.api.observables import (
 from prolix.api.xtc_sink import XtcFrameSink, write_positions_xtc
 from prolix.constants import COULOMB_CONSTANT
 from prolix.export import in_export_context
-from prolix.knob_surface import KnobSurface  # noqa: TC001
+from prolix.knob_surface import KnobSurface, NonbondedControls
 from prolix.pallas_kernels import _infer_first_pure_water_block, pallas_bonded_all_fused
 from prolix.physics import explicit_corrections
 from prolix.physics import neighbor_list as nl_mod
 from prolix.physics import pme_pallas as pme_pallas_mod
 from prolix.physics.kups_adapter import AKMA_TIME_UNIT_FS, gamma_ps_to_akma
+from prolix.physics.lj_pme import (
+    _bspline5,
+    dispersion_charges,
+    lj_pme_influence_function,
+    lj_pme_self_energy,
+    resolve_ljpme_parameters,
+)
 from prolix.physics.nonbonded_config import (
     engine_flags,
     lj_switch_width_from_config,
@@ -104,6 +111,7 @@ from prolix.physics.pallas_tile_pairs import (
     prepare_fused_bonded_buffers,
 )
 from prolix.physics.pme import (
+    _bspline4,
     _cached_host_influence_function_np,
     _resolve_env_pme_grid_dims,
     compute_pme_grid_dims,
@@ -644,6 +652,87 @@ def _encode_bundle_nl(nbr: Any, bundle: Any) -> Any:
     )
 
 
+def _spread_and_gather_ljpme_order5_soa(
+    B: int,
+    n_act_pad: int,
+    px_m: jax.Array,
+    py_m: jax.Array,
+    pz_m: jax.Array,
+    b_disp_m: jax.Array,
+    mask_m: jax.Array,
+    box_b: jax.Array,
+    G6_b: jax.Array,
+    lj_grid_dims: tuple[int, int, int],
+) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array]:
+    """Order-5 B-spline dispersion spread + 3D rFFT + analytic gather in Morton SoA layout."""
+    kx, ky, kz = int(lj_grid_dims[0]), int(lj_grid_dims[1]), int(lj_grid_dims[2])
+    pos_b = jnp.stack(
+        [px_m.reshape(B, n_act_pad), py_m.reshape(B, n_act_pad), pz_m.reshape(B, n_act_pad)],
+        axis=-1,
+    ).astype(jnp.float32)
+    b_b = b_disp_m.reshape(B, n_act_pad).astype(jnp.float32)
+    msk_b = (mask_m.reshape(B, n_act_pad) > 0).astype(jnp.float32)
+    box_f = box_b.reshape(B, 3).astype(jnp.float32)
+    k_arr = jnp.array([kx, ky, kz], dtype=jnp.float32)
+    n_grid_lj = jnp.asarray(float(kx * ky * kz), dtype=jnp.float32)
+
+    ox, oy, oz = jnp.meshgrid(
+        jnp.arange(5, dtype=jnp.int32),
+        jnp.arange(5, dtype=jnp.int32),
+        jnp.arange(5, dtype=jnp.int32),
+        indexing="ij",
+    )
+    ox = ox.reshape(-1)
+    oy = oy.reshape(-1)
+    oz = oz.reshape(-1)
+
+    def _one_replica(
+        pos_1: jax.Array,
+        b_1: jax.Array,
+        m_1: jax.Array,
+        box_1: jax.Array,
+        g6_1: jax.Array,
+    ) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array]:
+        frac = (pos_1 / box_1) * k_arr
+        frac = frac - jnp.floor(frac / k_arr) * k_arr
+        grid_idx = jnp.floor(frac).astype(jnp.int32)
+        u = frac - grid_idx.astype(jnp.float32)
+
+        wx = _bspline5(u[:, 0])
+        wy = _bspline5(u[:, 1])
+        wz = _bspline5(u[:, 2])
+        m4_x = _bspline4(u[:, 0])
+        m4_y = _bspline4(u[:, 1])
+        m4_z = _bspline4(u[:, 2])
+        dwx = jnp.stack([-m4_x[0], m4_x[0] - m4_x[1], m4_x[1] - m4_x[2], m4_x[2] - m4_x[3], m4_x[3]])
+        dwy = jnp.stack([-m4_y[0], m4_y[0] - m4_y[1], m4_y[1] - m4_y[2], m4_y[2] - m4_y[3], m4_y[3]])
+        dwz = jnp.stack([-m4_z[0], m4_z[0] - m4_z[1], m4_z[1] - m4_z[2], m4_z[2] - m4_z[3], m4_z[3]])
+
+        b_masked = b_1 * m_1
+        ix = (grid_idx[:, None, 0] + ox[None, :]) % kx
+        iy = (grid_idx[:, None, 1] + oy[None, :]) % ky
+        iz = (grid_idx[:, None, 2] + oz[None, :]) % kz
+        weights = jnp.transpose(wx[ox] * wy[oy] * wz[oz] * b_masked[None, :], (1, 0))
+        q_grid = jnp.zeros((kx, ky, kz), dtype=jnp.float32).at[ix, iy, iz].add(weights)
+
+        q_hat = jnp.fft.rfftn(q_grid, s=(kx, ky, kz), axes=(-3, -2, -1))
+        theta = jnp.fft.irfftn(q_hat * g6_1, s=(kx, ky, kz), axes=(-3, -2, -1)).astype(jnp.float32)
+        e_rec_1 = 0.5 * jnp.sum(q_grid * theta) * n_grid_lj
+
+        t_val = theta[ix, iy, iz]
+        du_x = jnp.sum(jnp.transpose(dwx[ox] * wy[oy] * wz[oz], (1, 0)) * t_val, axis=1)
+        du_y = jnp.sum(jnp.transpose(wx[ox] * dwy[oy] * wz[oz], (1, 0)) * t_val, axis=1)
+        du_z = jnp.sum(jnp.transpose(wx[ox] * wy[oy] * dwz[oz], (1, 0)) * t_val, axis=1)
+        scale = -(k_arr / box_1) * n_grid_lj
+        fx_1 = b_masked * du_x * scale[0]
+        fy_1 = b_masked * du_y * scale[1]
+        fz_1 = b_masked * du_z * scale[2]
+        return e_rec_1, fx_1, fy_1, fz_1
+
+    e_rec_b, fx_b, fy_b, fz_b = jax.vmap(_one_replica)(pos_b, b_b, msk_b, box_f, G6_b)
+    return e_rec_b, fx_b.reshape(B * n_act_pad), fy_b.reshape(B * n_act_pad), fz_b.reshape(B * n_act_pad)
+
+
 def _compute_morton_npt_vol_constants(
     *,
     box_b: np.ndarray | jax.Array,
@@ -847,6 +936,9 @@ class EnsemblePlan:
             self.batch_plan = planner.plan(self.bundles)
         else:
             self.batch_plan = None
+        self._explicit_lj_pme_alpha: float | None = None
+        self._lj_pme_grid_dims: tuple[int, int, int] | None = None
+        self._explicit_pme_grid_dims: tuple[int, int, int] | None = None
 
     def _default_v35_knobs(self, overrides: dict[str, Any] | None = None) -> dict[str, Any]:
         knobs: dict[str, Any] = {
@@ -910,7 +1002,7 @@ class EnsemblePlan:
                     .lower()
                     .replace("-", "_")
                 )
-                if comb_m != "lorentz_berthelot":
+                if comb_m not in ("lorentz_berthelot", "geometric"):
                     return False
             cur_pme_pallas = sys.modules.get("prolix.physics.pme_pallas", pme_pallas_mod)
             if (
@@ -1164,14 +1256,29 @@ class EnsemblePlan:
             if ks_nb is not None
             else float(_host_float(getattr(bundles[0], "pme_alpha", 0.34), 0.34))
         )
-        elec_method_raw = (
-            str(ks_nb.nonbonded_method)
-            if ks_nb is not None
-            else str(
-                getattr(bundles[0], "electrostatic_method", "pme" if pme_alpha_raw > 0.0 else "cutoff")
+        bundle_nb_raw = str(
+            getattr(
+                bundles[0],
+                "nonbonded_method",
+                getattr(bundles[0], "electrostatic_method", "pme" if pme_alpha_raw > 0.0 else "cutoff"),
             )
         ).strip().lower().replace("-", "_")
-        if elec_method_raw in ("reaction_field", "rf", "cutoff_periodic", "cutoffperiodic"):
+        elec_method_raw = (
+            str(ks_nb.nonbonded_method).strip().lower().replace("-", "_")
+            if ks_nb is not None
+            else bundle_nb_raw
+        )
+        use_lj_pme_flag = (
+            bool(getattr(ks_nb, "use_lj_pme", False))
+            if ks_nb is not None
+            else bool(getattr(bundles[0], "use_lj_pme", False))
+        )
+        is_lj_pme = (
+            elec_method_raw in ("lj_pme", "ljpme")
+            or (use_lj_pme_flag and elec_method_raw in ("pme", "spme"))
+            or (ks_nb is None and bundle_nb_raw in ("lj_pme", "ljpme"))
+        )
+        if elec_method_raw in ("reaction_field", "rf", "cutoff_periodic", "cutoffperiodic") and not is_lj_pme:
             do_pme = False
             pme_alpha = 0.0
             rf_diel: float | None = float(
@@ -1179,13 +1286,17 @@ class EnsemblePlan:
                 if ks_nb is not None
                 else getattr(bundles[0], "reaction_field_dielectric", 78.3)
             )
-        elif elec_method_raw in (
-            "cutoff",
-            "no_cutoff",
-            "nocutoff",
-            "cutoff_non_periodic",
-            "cutoffnonperiodic",
-            "coulomb",
+        elif (
+            elec_method_raw
+            in (
+                "cutoff",
+                "no_cutoff",
+                "nocutoff",
+                "cutoff_non_periodic",
+                "cutoffnonperiodic",
+                "coulomb",
+            )
+            and not is_lj_pme
         ):
             do_pme = False
             pme_alpha = 0.0
@@ -1194,19 +1305,36 @@ class EnsemblePlan:
             pme_alpha = pme_alpha_raw
             do_pme = pme_alpha > 0.0
             rf_diel = None
-        use_disp = bool(
+        use_disp_raw = bool(
             ks_nb.dispersion_correction
             if ks_nb is not None
             else getattr(bundles[0], "use_dispersion_correction", True)
         )
-        comb_rule = str(
-            getattr(ks_nb, "lj_combining_rule", "lorentz_berthelot")
-            if ks_nb is not None
-            else getattr(bundles[0], "lj_combining_rule", "lorentz_berthelot")
+        use_disp = False if is_lj_pme else use_disp_raw
+        eff_lj_sw = 0.0 if is_lj_pme else lj_sw
+        comb_rule = (
+            str(
+                getattr(ks_nb, "lj_combining_rule", "lorentz_berthelot")
+                if ks_nb is not None
+                else getattr(bundles[0], "lj_combining_rule", "lorentz_berthelot")
+            )
+            .strip()
+            .lower()
+            .replace("-", "_")
         )
+        if comb_rule not in ("lorentz_berthelot", "geometric"):
+            raise ValueError(
+                f"Unsupported lj_combining_rule={comb_rule!r}; expected 'lorentz_berthelot' or 'geometric'."
+            )
         if do_pme:
+            ks_pme_dims = ks_nb.pme_grid_dims if ks_nb is not None else None
+            plan_pme_dims = getattr(self, "_explicit_pme_grid_dims", None)
             gd_env = _resolve_env_pme_grid_dims(n_atoms=N)
-            if gd_env is not None:
+            if ks_pme_dims is not None:
+                grid_dims = (int(ks_pme_dims[0]), int(ks_pme_dims[1]), int(ks_pme_dims[2]))
+            elif plan_pme_dims is not None:
+                grid_dims = (int(plan_pme_dims[0]), int(plan_pme_dims[1]), int(plan_pme_dims[2]))
+            elif gd_env is not None:
                 grid_dims = (int(gd_env[0]), int(gd_env[1]), int(gd_env[2]))
             else:
                 gp = int(_host_float(getattr(bundles[0], "pme_grid_points", 64), 64))
@@ -1236,6 +1364,53 @@ class EnsemblePlan:
             n_grid_f = 1.0
             pme_force_scale = 0.0
             e_self_b = jnp.zeros((B,), dtype=jnp.float32)
+
+        if is_lj_pme:
+            ewald_tol = float(
+                getattr(ks_nb, "ewald_error_tolerance", 5e-4)
+                if ks_nb is not None
+                else _host_float(getattr(bundles[0], "ewald_error_tolerance", 5e-4), 5e-4)
+            )
+            exp_lj_alpha_raw = getattr(
+                self,
+                "_explicit_lj_pme_alpha",
+                getattr(bundles[0], "explicit_lj_pme_alpha", getattr(bundles[0], "lj_pme_alpha", None)),
+            )
+            exp_lj_dims_raw = getattr(
+                self,
+                "_lj_pme_grid_dims",
+                getattr(bundles[0], "lj_pme_grid_dims", None),
+            )
+            lj_pme_alpha, lj_grid_dims = resolve_ljpme_parameters(
+                box0_np,
+                cutoff=cutoff,
+                ewald_error_tolerance=ewald_tol,
+                explicit_alpha=float(exp_lj_alpha_raw) if exp_lj_alpha_raw is not None else 0.0,
+                explicit_grid_dims=(
+                    (int(exp_lj_dims_raw[0]), int(exp_lj_dims_raw[1]), int(exp_lj_dims_raw[2]))
+                    if exp_lj_dims_raw is not None
+                    else (0, 0, 0)
+                ),
+            )
+            g6_0 = lj_pme_influence_function(
+                lj_grid_dims,
+                jnp.asarray(box0_np, dtype=jnp.float32),
+                lj_pme_alpha,
+                order=5,
+            ).astype(jnp.float32)
+            G6_init = jnp.broadcast_to(
+                g6_0[None, ...],
+                (B, lj_grid_dims[0], lj_grid_dims[1], lj_grid_dims[2] // 2 + 1),
+            )
+            b_disp_init = dispersion_charges(sig_b, eps_b, am_b)
+            e_lj_self_b = lj_pme_self_energy(
+                b_disp_init, atom_mask=am_b, alpha_lj=lj_pme_alpha
+            ).astype(jnp.float32)
+        else:
+            lj_pme_alpha = 0.0
+            lj_grid_dims = (6, 6, 6)
+            G6_init = jnp.zeros((B, 1, 1, 1), dtype=jnp.float32)
+            e_lj_self_b = jnp.zeros((B,), dtype=jnp.float32)
 
         gamma_akma = float(gamma_ps_to_akma(float(gamma)))
         lam_flat = jnp.ones((1,), dtype=jnp.float32)
@@ -1271,7 +1446,14 @@ class EnsemblePlan:
             return inv_pad[:, :N] if pw >= N else jnp.pad(inv_pad, ((0, 0), (0, N - pw)))
 
         def _eval_morton_forces(
-            px_m: Any, py_m: Any, pz_m: Any, tp_st: Any, box_b_cur: Any, G_b_cur: Any, compute_energy: bool = False
+            px_m: Any,
+            py_m: Any,
+            pz_m: Any,
+            tp_st: Any,
+            box_b_cur: Any,
+            G_b_cur: Any,
+            G6_b_cur: Any,
+            compute_energy: bool = False,
         ) -> tuple[Any, Any, Any, Any]:
             box_f32_flat = box_b_cur.astype(jnp.float32).reshape(B * 3)
             e_dir, fx_d, fy_d, fz_d = _pallas_bonded_and_tile_pairs_soa(
@@ -1297,8 +1479,11 @@ class EnsemblePlan:
                 max_pairs=max_pairs,
                 pme_alpha=(pme_alpha if do_pme else 0.0),
                 cutoff=cutoff,
-                lj_switch_width=lj_sw,
+                lj_switch_width=eff_lj_sw,
                 include_pme_excl_erf=do_pme,
+                lj_combining_rule=comb_rule,
+                lj_pme_alpha=(lj_pme_alpha if is_lj_pme else 0.0),
+                include_ljpme_excl=is_lj_pme,
                 scale_14_vdw=dedup_excl.scale_14_vdw,
                 scale_14_elec=dedup_excl.scale_14_elec,
                 rf_dielectric=rf_diel,
@@ -1307,26 +1492,44 @@ class EnsemblePlan:
                 deterministic_forces=det_forces,
                 interpret=interpret,
             )
-            if not do_pme:
-                return e_dir, fx_d, fy_d, fz_d
-            q_mf = tp_st.q_m.reshape(B * n_act_pad)
-            m_mf = tp_st.mask_m.reshape(B * n_act_pad)
-            mesh = _spread_charges_pallas_soa(
-                B, (True, True, True, True), px_m, py_m, pz_m, q_mf, m_mf,
-                box_f32_flat, grid_dims, n_act_pad, n_act_pad, interpret,
-            )
-            q_hat = jnp.fft.rfftn(mesh, s=grid_dims, axes=(-3, -2, -1))
-            theta = jnp.fft.irfftn(q_hat * G_b_cur, s=grid_dims, axes=(-3, -2, -1)).astype(jnp.float32)
-            fx_tot, fy_tot, fz_tot, _ = _gather_pallas_soa(
-                B, (True, True, True, True, True), px_m, py_m, pz_m, q_mf, m_mf,
-                box_f32_flat, theta.reshape(-1), grid_dims, n_act_pad, n_act_pad, n_act_blocks, interpret,
-                force_scale=pme_force_scale, force_accum=(fx_d, fy_d, fz_d),
-            )
-            if compute_energy:
-                e_rec = 0.5 * float(COULOMB_CONSTANT) * jnp.sum(mesh * theta, axis=(-3, -2, -1)) * n_grid_f + e_self_b
-                e_tot = e_dir + e_rec
-            else:
-                e_tot = e_dir
+            e_tot = e_dir
+            fx_tot, fy_tot, fz_tot = fx_d, fy_d, fz_d
+            if do_pme:
+                q_mf = tp_st.q_m.reshape(B * n_act_pad)
+                m_mf = tp_st.mask_m.reshape(B * n_act_pad)
+                mesh = _spread_charges_pallas_soa(
+                    B, (True, True, True, True), px_m, py_m, pz_m, q_mf, m_mf,
+                    box_f32_flat, grid_dims, n_act_pad, n_act_pad, interpret,
+                )
+                q_hat = jnp.fft.rfftn(mesh, s=grid_dims, axes=(-3, -2, -1))
+                theta = jnp.fft.irfftn(q_hat * G_b_cur, s=grid_dims, axes=(-3, -2, -1)).astype(jnp.float32)
+                fx_tot, fy_tot, fz_tot, _ = _gather_pallas_soa(
+                    B, (True, True, True, True, True), px_m, py_m, pz_m, q_mf, m_mf,
+                    box_f32_flat, theta.reshape(-1), grid_dims, n_act_pad, n_act_pad, n_act_blocks, interpret,
+                    force_scale=pme_force_scale, force_accum=(fx_tot, fy_tot, fz_tot),
+                )
+                if compute_energy:
+                    e_rec = 0.5 * float(COULOMB_CONSTANT) * jnp.sum(mesh * theta, axis=(-3, -2, -1)) * n_grid_f + e_self_b
+                    e_tot = e_tot + e_rec
+            if is_lj_pme:
+                b_disp_m = dispersion_charges(tp_st.sig_m, tp_st.eps_m, tp_st.mask_m > 0)
+                e_lj_rec, fx_lj, fy_lj, fz_lj = _spread_and_gather_ljpme_order5_soa(
+                    B,
+                    n_act_pad,
+                    px_m,
+                    py_m,
+                    pz_m,
+                    b_disp_m,
+                    tp_st.mask_m,
+                    box_b_cur,
+                    G6_b_cur,
+                    lj_grid_dims,
+                )
+                fx_tot = fx_tot + fx_lj
+                fy_tot = fy_tot + fy_lj
+                fz_tot = fz_tot + fz_lj
+                if compute_energy:
+                    e_tot = e_tot + e_lj_rec + e_lj_self_b
             return e_tot, fx_tot, fy_tot, fz_tot
 
         tp0 = pallas_build_morton_tile_pairs_gpu(
@@ -1346,6 +1549,7 @@ class EnsemblePlan:
             tp0,
             box_init_b,
             G_init,
+            G6_init,
             compute_energy=False,
         )
         p0_akma = float(press_atm) * 1.01325 / KCAL_MOL_PER_A3_TO_BAR if press_atm is not None else 0.0
@@ -1357,7 +1561,7 @@ class EnsemblePlan:
                 q_b=q_b,
                 am_b=am_b,
                 cutoff=cutoff,
-                lj_switch_width=lj_sw,
+                lj_switch_width=eff_lj_sw,
                 combining_rule=comb_rule,
                 use_dispersion_correction=use_disp,
                 do_pme=do_pme,
@@ -1372,7 +1576,7 @@ class EnsemblePlan:
         @jax.jit
         def _jit_run(
             seeds_u32: Any, n_steps_i32: Any, dt_s_in: Any, kT_s_in: Any,
-            tp_in: Any, fx0_in: Any, fy0_in: Any, fz0_in: Any, box_in: Any, G_in: Any,
+            tp_in: Any, fx0_in: Any, fy0_in: Any, fz0_in: Any, box_in: Any, G_in: Any, G6_in: Any,
         ) -> tuple[Any, Any, Any]:
             dt_b = jnp.broadcast_to(jnp.asarray(dt_s_in, dtype=state_dtype), (B,))
             kT_b = jnp.broadcast_to(jnp.asarray(kT_s_in, dtype=state_dtype), (B,))
@@ -1396,7 +1600,7 @@ class EnsemblePlan:
                 return oc[0] < n_steps_i32
 
             def _chunk_body(oc: Any) -> Any:
-                step_i, px, py, pz, mx, my, mz, fx_m, fy_m, fz_m, tp_c, box_c, G_c = oc
+                step_i, px, py, pz, mx, my, mz, fx_m, fy_m, fz_m, tp_c, box_c, G_c, G6_c = oc
                 pos_cur_act = jnp.stack(
                     [px.reshape(B, N)[:, :n_act], py.reshape(B, N)[:, :n_act], pz.reshape(B, N)[:, :n_act]], axis=-1
                 ).astype(jnp.float32)
@@ -1443,7 +1647,7 @@ class EnsemblePlan:
                         morton_inv_perm=inv_n, morton_pad=n_act_pad,
                         prebuilt_soa=(px_s, py_s, pz_s, mxh_s, myh_s, mzh_s, fx_s, fy_s, fz_s, soa_plan),
                     )
-                    _, fx_s, fy_s, fz_s = _eval_morton_forces(px_ms, py_ms, pz_ms, tp_c, box_c, G_c, False)
+                    _, fx_s, fy_s, fz_s = _eval_morton_forces(px_ms, py_ms, pz_ms, tp_c, box_c, G_c, G6_c, False)
                     return (px_s, py_s, pz_s, mxh_s, myh_s, mzh_s, fx_s, fy_s, fz_s)
 
                 seeds_0 = jax.vmap(lambda k: jax.random.fold_in(k, step_i))(keys_b)
@@ -1457,7 +1661,7 @@ class EnsemblePlan:
                     prebuilt_soa=(px, py, pz, mx, my, mz, fx_m, fy_m, fz_m, soa_plan),
                 )
                 if press_atm is None:
-                    _, fx_m, fy_m, fz_m = _eval_morton_forces(px_m, py_m, pz_m, tp_c, box_c, G_c, False)
+                    _, fx_m, fy_m, fz_m = _eval_morton_forces(px_m, py_m, pz_m, tp_c, box_c, G_c, G6_c, False)
                     px, py, pz, mxh, myh, mzh, fx_m, fy_m, fz_m = jax.lax.fori_loop(
                         jnp.int32(1), k_cur, _inner_step, (px, py, pz, mxh, myh, mzh, fx_m, fy_m, fz_m)
                     )
@@ -1471,8 +1675,8 @@ class EnsemblePlan:
                     ) -> tuple[Any, Any, Any, Any]:
                         return jax.lax.cond(
                             want_e,
-                            lambda _: _eval_morton_forces(px_ce, py_ce, pz_ce, tp_c, box_c, G_c, True),
-                            lambda _: _eval_morton_forces(px_ce, py_ce, pz_ce, tp_c, box_c, G_c, False),
+                            lambda _: _eval_morton_forces(px_ce, py_ce, pz_ce, tp_c, box_c, G_c, G6_c, True),
+                            lambda _: _eval_morton_forces(px_ce, py_ce, pz_ce, tp_c, box_c, G_c, G6_c, False),
                             None,
                         )
 
@@ -1530,7 +1734,7 @@ class EnsemblePlan:
 
                 if press_atm is not None:
                     def _mc_baro(b_ops: Any) -> Any:
-                        e_cur, px_b, py_b, pz_b, fx_b, fy_b, fz_b, tp_b, bx_b, G_b = b_ops
+                        e_cur, px_b, py_b, pz_b, fx_b, fy_b, fz_b, tp_b, bx_b, G_b, G6_b = b_ops
                         pos_cur = jnp.stack([px_b.reshape(B, N), py_b.reshape(B, N), pz_b.reshape(B, N)], axis=-1)
                         b_keys = jax.vmap(lambda k: jax.random.fold_in(k, step_next + jnp.int32(999983)))(keys_b)
                         u_pair = jax.vmap(lambda k: jax.random.uniform(k, (2,), dtype=jnp.float32))(b_keys)
@@ -1553,6 +1757,15 @@ class EnsemblePlan:
                             if do_pme
                             else G_b
                         )
+                        G6_prop = (
+                            jax.vmap(
+                                lambda b_one: lj_pme_influence_function(
+                                    lj_grid_dims, b_one, lj_pme_alpha, order=5
+                                )
+                            )(bx_prop.astype(jnp.float32)).astype(jnp.float32)
+                            if is_lj_pme
+                            else G6_b
+                        )
                         tp_prop = pallas_build_morton_tile_pairs_gpu(
                             pos_prop, q_b, sig_b, eps_b, am_b, bx_prop, dedup_excl,
                             n_act=n_act, max_pairs=max_pairs, cutoff=cutoff, skin=eff_skin,
@@ -1566,7 +1779,7 @@ class EnsemblePlan:
                             pm_prop[:, :, 0].reshape(B * n_act_pad),
                             pm_prop[:, :, 1].reshape(B * n_act_pad),
                             pm_prop[:, :, 2].reshape(B * n_act_pad),
-                            tp_prop, bx_prop, G_prop, True,
+                            tp_prop, bx_prop, G_prop, G6_prop, True,
                         )
                         v_old = jnp.prod(bx_b, axis=-1)
                         v_new = jnp.prod(bx_prop, axis=-1)
@@ -1587,6 +1800,7 @@ class EnsemblePlan:
                         pos_sel = jnp.where(acc[:, None, None], pos_prop, pos_cur)
                         bx_sel = jnp.where(acc[:, None], bx_prop, bx_b)
                         G_sel = jnp.where(acc[:, None, None, None], G_prop, G_b)
+                        G6_sel = jnp.where(acc[:, None, None, None], G6_prop, G6_b)
                         tp_sel = jax.tree.map(
                             lambda np_v, op_v: jnp.where(acc.reshape((B,) + (1,) * (np_v.ndim - 1)), np_v, op_v),
                             tp_prop, tp_b,
@@ -1596,19 +1810,19 @@ class EnsemblePlan:
                         fz_sel = jnp.where(acc[:, None], fz_p.reshape(B, n_act_pad), fz_b.reshape(B, n_act_pad)).reshape(B * n_act_pad)
                         return (
                             pos_sel[:, :, 0].reshape(B * N), pos_sel[:, :, 1].reshape(B * N), pos_sel[:, :, 2].reshape(B * N),
-                            fx_sel, fy_sel, fz_sel, tp_sel, bx_sel, G_sel,
+                            fx_sel, fy_sel, fz_sel, tp_sel, bx_sel, G_sel, G6_sel,
                         )
-                    px, py, pz, fx_m, fy_m, fz_m, tp_c, box_c, G_c = jax.lax.cond(
+                    px, py, pz, fx_m, fy_m, fz_m, tp_c, box_c, G_c, G6_c = jax.lax.cond(
                         do_baro,
                         _mc_baro,
                         lambda b_ops: b_ops[1:],
-                        (e_old, px, py, pz, fx_m, fy_m, fz_m, tp_c, box_c, G_c),
+                        (e_old, px, py, pz, fx_m, fy_m, fz_m, tp_c, box_c, G_c, G6_c),
                     )
-                return (step_next, px, py, pz, mx, my, mz, fx_m, fy_m, fz_m, tp_c, box_c, G_c)
+                return (step_next, px, py, pz, mx, my, mz, fx_m, fy_m, fz_m, tp_c, box_c, G_c, G6_c)
 
-            _, pxf, pyf, pzf, mxf, myf, mzf, _, _, _, _, boxf, _ = jax.lax.while_loop(
+            _, pxf, pyf, pzf, mxf, myf, mzf, _, _, _, _, boxf, _, _ = jax.lax.while_loop(
                 _chunk_cond, _chunk_body,
-                (jnp.int32(0), px0, py0, pz0, mx0, my0, mz0, fx0_in, fy0_in, fz0_in, tp_in, box_in, G_in),
+                (jnp.int32(0), px0, py0, pz0, mx0, my0, mz0, fx0_in, fy0_in, fz0_in, tp_in, box_in, G_in, G6_in),
             )
             pos_out = jnp.stack([pxf.reshape(B, N), pyf.reshape(B, N), pzf.reshape(B, N)], axis=-1)
             mom_out = jnp.stack([mxf.reshape(B, N), myf.reshape(B, N), mzf.reshape(B, N)], axis=-1)
@@ -1616,16 +1830,20 @@ class EnsemblePlan:
 
         return {
             "jit_run": _jit_run,
+            "eval_morton_forces": _eval_morton_forces,
             "tp0": tp0,
             "fx_m0": fx_m0,
             "fy_m0": fy_m0,
             "fz_m0": fz_m0,
             "box_init_b": box_init_b,
             "G_init": G_init,
+            "G6_init": G6_init,
             "mass_b": mass_b,
             "am_b": am_b,
             "n_reals": n_reals,
             "N": N,
+            "n_act": n_act,
+            "n_act_pad": n_act_pad,
             "state_dtype": state_dtype,
             "eff_skin": eff_skin,
             "box_safety": box_safety,
@@ -1633,6 +1851,10 @@ class EnsemblePlan:
             "c_tail_b": c_tail_np,
             "c_net_q_b": c_net_q_np,
             "rf_dielectric": rf_diel,
+            "lj_combining_rule": comb_rule,
+            "is_lj_pme": is_lj_pme,
+            "lj_pme_alpha": lj_pme_alpha,
+            "lj_grid_dims": lj_grid_dims,
             "deterministic_forces": det_forces,
         }
 
@@ -1740,6 +1962,7 @@ class EnsemblePlan:
             entry["fz_m0"],
             entry["box_init_b"],
             entry["G_init"],
+            entry["G6_init"],
         )
         if B == 1 and can_cache:
             if len(_JITTED_WHILE_CACHE) >= 128:
@@ -2396,6 +2619,7 @@ class EnsemblePlan:
             )
 
         converted_by_id: dict[int, Any] = {}
+        first_conv: Any = None
         bundles: list[Any] = []
         for idx, sys_obj in enumerate(systems):
             pos_raw = positions_list[idx] if positions_list is not None else None
@@ -2415,6 +2639,8 @@ class EnsemblePlan:
                 conv = _from_openmm_system(
                     sys_obj, integrator=integrator, config=config, positions=pos_raw
                 )
+                if first_conv is None:
+                    first_conv = conv
                 if sys_key is not None:
                     converted_by_id[sys_key] = conv.bundle
                 bundles.append(conv.bundle)
@@ -2425,7 +2651,28 @@ class EnsemblePlan:
                 union_spec = _union_shape_spec(specs)
                 bundles = [_re_pad_bundle_to_spec(b, union_spec) for b in bundles]
 
-        return cls.from_bundles(
+        eff_ks = knob_surface
+        if eff_ks is None and first_conv is not None:
+            conv_nb_method = str(getattr(first_conv, "nonbonded_method", "pme")).strip().lower()
+            conv_comb = str(getattr(first_conv, "lj_combining_rule", "lorentz_berthelot")).strip().lower()
+            if conv_nb_method in ("lj_pme", "ljpme") or conv_comb != "lorentz_berthelot":
+                eff_ks = KnobSurface(
+                    nonbonded=NonbondedControls(
+                        nonbonded_method=conv_nb_method,
+                        cutoff_angstrom=float(getattr(first_conv, "nonbonded_cutoff", 9.0)),
+                        switch_width_angstrom=float(getattr(first_conv, "lj_switch_width", 0.0)),
+                        ewald_error_tolerance=float(getattr(first_conv, "ewald_error_tolerance", 5e-4)),
+                        pme_alpha=float(_host_float(getattr(bundles[0], "pme_alpha", 0.34), 0.34)),
+                        pme_grid_dims=getattr(first_conv, "pme_grid_dims", None),
+                        dispersion_correction=bool(getattr(first_conv, "use_dispersion_correction", True)),
+                        reaction_field_dielectric=float(getattr(first_conv, "reaction_field_dielectric", 78.3)),
+                        lj_combining_rule=conv_comb,
+                        exceptions_use_pbc=bool(getattr(first_conv, "exceptions_use_pbc", False)),
+                        use_lj_pme=(conv_nb_method in ("lj_pme", "ljpme")),
+                    )
+                )
+
+        plan_obj = cls.from_bundles(
             bundles,
             planner,
             use_pallas=use_pallas,
@@ -2440,8 +2687,13 @@ class EnsemblePlan:
             pme_tier_mode=pme_tier_mode,
             pressure_atm=pressure_atm,
             barostat_interval=barostat_interval,
-            knob_surface=knob_surface,
+            knob_surface=eff_ks,
         )
+        if first_conv is not None:
+            plan_obj._explicit_lj_pme_alpha = getattr(first_conv, "explicit_lj_pme_alpha", None)
+            plan_obj._lj_pme_grid_dims = getattr(first_conv, "lj_pme_grid_dims", None)
+            plan_obj._explicit_pme_grid_dims = getattr(first_conv, "pme_grid_dims", None)
+        return plan_obj
 
     def _systems_chunk_size(self) -> int:
         """Chunk size for N_MOLS dispatch (0 = vmap intent)."""

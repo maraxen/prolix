@@ -44,6 +44,94 @@ _NB_BLOCK_N: int = 32
 _SUB_TILES: int = 4
 _BLOCK_B: int = 64
 
+# Precomputed Horner coefficients (descending order) for L_6(alpha_lj, r^2) = (1 - g_6(y)) / r^6
+# and dL_6 / d(r^2) on y = (alpha_lj * r)^2 < 2.0 (see samples/ltoir-usage/ewald.py, Apache-2.0).
+_P6_LR_HORNER_F32_DESC: tuple[float, ...] = tuple(
+    ((-1.0) ** n) / (2.0 * float(math.factorial(n)) * float(n + 3))
+    for n in range(16, -1, -1)
+)
+_P6_LR_DR2_HORNER_F32_DESC: tuple[float, ...] = tuple(
+    ((-1.0) ** (m + 1)) / (2.0 * float(math.factorial(m)) * float(m + 4))
+    for m in range(16, -1, -1)
+)
+
+
+def _ewald_p6_lr_host(alpha_lj: float, r2: float) -> float:
+    """Host scalar evaluation of ``L_6(alpha_lj, r^2) = (1 - g_6(alpha_lj * r)) / r^6``."""
+    a2 = float(alpha_lj) * float(alpha_lj)
+    y = a2 * float(r2)
+    if y < 2.0:
+        acc = 0.0
+        for n in range(24, -1, -1):
+            c_n = ((-1.0) ** n) / (2.0 * float(math.factorial(n)) * float(n + 3))
+            acc = c_n + y * acc
+        return acc * (a2 * a2 * a2)
+    g6 = math.exp(-y) * (1.0 + y + 0.5 * y * y)
+    return (1.0 - g6) / (float(r2) ** 3)
+
+
+def _triton_ewald_p6_lr_and_deriv(
+    r2_raw: jax.Array,
+    dist: jax.Array,
+    inv_r: jax.Array,
+    inv_r2: jax.Array,
+    act: jax.Array,
+    alpha_lj: float,
+    dtype: Any,
+) -> tuple[jax.Array, jax.Array]:
+    """Evaluate ``L_6(alpha_lj, r^2)`` and ``dL_6 / dr`` safely inside Pallas/Triton kernels."""
+    zero = jnp.asarray(0.0, dtype=dtype)
+    one = jnp.asarray(1.0, dtype=dtype)
+    half = jnp.asarray(0.5, dtype=dtype)
+    two = jnp.asarray(2.0, dtype=dtype)
+    six = jnp.asarray(6.0, dtype=dtype)
+    a2_f = float(alpha_lj) * float(alpha_lj)
+    a6_f = a2_f * a2_f * a2_f
+    a8_f = a6_f * a2_f
+    a2 = jnp.asarray(a2_f, dtype=dtype)
+    a6 = jnp.asarray(a6_f, dtype=dtype)
+    a8 = jnp.asarray(a8_f, dtype=dtype)
+
+    y = a2 * r2_raw
+    small = y < two
+    small_y = jnp.where(small, y, zero)
+
+    t_val = zero
+    for c_f in _P6_LR_HORNER_F32_DESC:
+        t_val = jnp.asarray(c_f, dtype=dtype) + small_y * t_val
+    l6_small = t_val * a6
+
+    td_val = zero
+    for d_f in _P6_LR_DR2_HORNER_F32_DESC:
+        td_val = jnp.asarray(d_f, dtype=dtype) + small_y * td_val
+    dl6_dr_small = two * dist * (td_val * a8)
+
+    y_large = jnp.where(small, two, y)
+    inv_r2_lg = jnp.where(small, one, inv_r2)
+    inv_r_lg = jnp.where(small, one, inv_r)
+    inv_r6_lg = inv_r2_lg * inv_r2_lg * inv_r2_lg
+    inv_r7_lg = inv_r6_lg * inv_r_lg
+    exp_my = jnp.exp(zero - y_large)
+    one_minus_g6 = one - exp_my * (one + y_large + half * y_large * y_large)
+    l6_large = one_minus_g6 * inv_r6_lg
+    y3_exp = y_large * y_large * y_large * exp_my
+    dl6_dr_large = (y3_exp - six * one_minus_g6) * inv_r7_lg
+
+    l6 = jnp.where(act, jnp.where(small, l6_small, l6_large), zero)
+    dl6_dr = jnp.where(act, jnp.where(small, dl6_dr_small, dl6_dr_large), zero)
+    return l6, dl6_dr
+
+
+def _normalize_lj_combining_rule(lj_combining_rule: str) -> str:
+    """Validate and canonicalize ``lj_combining_rule`` to ``'lorentz_berthelot'`` or ``'geometric'``."""
+    rule = str(lj_combining_rule).strip().lower().replace("-", "_")
+    if rule not in ("lorentz_berthelot", "geometric"):
+        raise ValueError(
+            f"Unsupported lj_combining_rule={lj_combining_rule!r}; "
+            "expected 'lorentz_berthelot' or 'geometric'."
+        )
+    return rule
+
 
 def reaction_field_k_c(cutoff: float, rf_dielectric: float) -> tuple[float, float]:
     """Compute OpenMM reaction-field ``(k_rf, c_rf)`` safely including conductor limit ``rf_dielectric=inf``."""
@@ -1111,6 +1199,17 @@ def prepare_fused_bonded_buffers(  # noqa: PLR0913
         else:
             bonds, bond_params, bond_mask = ub_idx, ub_prm, ub_msk
 
+    # Normalize 4-column periodic dihedral/improper params (..., 4) -> (..., :3) before concatenation
+    if dihedral_params is not None and jnp.asarray(dihedral_params).ndim >= 2 and jnp.asarray(dihedral_params).shape[-1] > 3:
+        dihedral_params = jnp.asarray(dihedral_params, dtype=jnp.float32)[..., :3]
+    if (
+        not improper_is_harmonic
+        and improper_params is not None
+        and jnp.asarray(improper_params).ndim >= 2
+        and jnp.asarray(improper_params).shape[-1] > 3
+    ):
+        improper_params = jnp.asarray(improper_params, dtype=jnp.float32)[..., :3]
+
     # Split periodic vs harmonic impropers
     if impropers is not None and jnp.asarray(impropers).size > 0:
         if improper_is_harmonic:
@@ -1290,6 +1389,9 @@ def _pallas_bonded_and_tile_pairs_soa(  # noqa: PLR0913
     softcore_alpha: float = 0.5,
     softcore_exponent: int = 2,
     include_pme_excl_erf: bool = False,
+    lj_combining_rule: str = "lorentz_berthelot",
+    lj_pme_alpha: float = 0.0,
+    include_ljpme_excl: bool = False,
     scale_14_vdw: float = 0.5,
     scale_14_elec: float = 1.0 / 1.2,
     dist_eps: float = 1e-10,
@@ -1302,7 +1404,15 @@ def _pallas_bonded_and_tile_pairs_soa(  # noqa: PLR0913
     separate_bonded_kernel: bool = True,
     interpret: bool = False,
 ) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array]:
-    """MK-65/71 + v3.7: Morton 32x32 tile-pairs + 6 bonded CTA groups (disjoint or fused, optional 2^20 deterministic i32 planes)."""
+    """MK-65/71 + v3.7/v3.8: Morton 32x32 tile-pairs + 6 bonded CTA groups (LB/geometric, SPME/RF/LJ-PME, 2^20 det planes)."""
+    comb_rule = _normalize_lj_combining_rule(lj_combining_rule)
+    is_geom = comb_rule == "geometric"
+    lj_alpha_f = float(lj_pme_alpha)
+    has_ljpme = lj_alpha_f > 0.0
+    inc_ljpme_ex = bool(include_ljpme_excl)
+    has_fin_cut = float(cutoff) < 1.0e15
+    l6_rc_f = _ewald_p6_lr_host(lj_alpha_f, float(cutoff) * float(cutoff)) if (has_ljpme and has_fin_cut) else 0.0
+    keep_excl = bool(include_pme_excl_erf) or (has_ljpme and inc_ljpme_ex)
     interpret = bool(interpret) or in_export_context()
     det_f = bool(deterministic_forces)
     sep_b = bool(separate_bonded_kernel)
@@ -1397,7 +1507,7 @@ def _pallas_bonded_and_tile_pairs_soa(  # noqa: PLR0913
                 is_full = ((fb[:, None] >> bit_sh) & jnp.int32(1)) != 0
                 geom_ok = jnp.where(is_diag, ut_mask, jnp.bool_(True))
                 vp = mi_bool[:, None] & mj_bool[None, :] & geom_ok & (
-                    True if include_pme_excl_erf else (~is_full)
+                    True if keep_excl else (~is_full)
                 )
                 rdx = pxi1[:, None] - pxj[None, :]
                 rdy = pyi1[:, None] - pyj[None, :]
@@ -1423,18 +1533,65 @@ def _pallas_bonded_and_tile_pairs_soa(  # noqa: PLR0913
                 w_v = jnp.where(is_full, zero, jnp.where(is_14, s14_v, one))
                 w_e = jnp.where(is_full, zero, jnp.where(is_14, s14_e, one))
 
-                sig_ij = half * (sigi1[:, None] + sigj[None, :])
-                sig_s = jnp.where(act, jnp.maximum(sig_ij, jnp.asarray(1e-4, dtype=dtype)), one)
-                eps_ij = jnp.sqrt(jnp.maximum(epsi1[:, None] * epsj[None, :], zero) + jnp.asarray(1e-30, dtype=dtype))
+                if is_geom:
+                    sig_prod = jnp.maximum(sigi1[:, None] * sigj[None, :], zero)
+                    sig_pos = sig_prod > zero
+                    sig_ij = jnp.where(sig_pos, jnp.sqrt(jnp.where(sig_pos, sig_prod, one)), zero)
+                else:
+                    sig_ij = half * (sigi1[:, None] + sigj[None, :])
+                ep_prod = jnp.maximum(epsi1[:, None] * epsj[None, :], zero)
+                ep_pos = ep_prod > zero
+                eps_ij = jnp.where(ep_pos, jnp.sqrt(jnp.where(ep_pos, ep_prod, one)), zero)
+                has_lj = act & (sig_ij > zero) & ep_pos
+                sig_s = jnp.where(has_lj, jnp.maximum(sig_ij, jnp.asarray(1e-4, dtype=dtype)), one)
                 _u_rat = dist / sig_s
                 _u2 = _u_rat * _u_rat
                 u6 = _u2 * _u2 * _u2
                 xi6 = one / jnp.maximum(soft_lj + u6, jnp.asarray(1e-6, dtype=dtype))
-                v_lj = four * eps_ij * lam_v * (xi6 * xi6 - xi6)
-                dv_lj = jnp.asarray(-24.0, dtype=dtype) * eps_ij * lam_v * (two * xi6 - one) * (xi6 * xi6) * u6 * inv_r
-                sw, dsw = _lj_switch_weight_and_deriv(dist, cutoff, lj_switch_width)
-                e_lj = w_v * v_lj * sw
-                de_lj = w_v * (dv_lj * sw + v_lj * dsw)
+                v_lj = jnp.where(has_lj, four * eps_ij * lam_v * (xi6 * xi6 - xi6), zero)
+                dv_lj = jnp.where(
+                    has_lj,
+                    jnp.asarray(-24.0, dtype=dtype) * eps_ij * lam_v * (two * xi6 - one) * (xi6 * xi6) * u6 * inv_r,
+                    zero,
+                )
+                if has_ljpme:
+                    ei_pos = (epsi1 > zero) & (sigi1 > zero)
+                    ej_pos = (epsj > zero) & (sigj > zero)
+                    bi = jnp.where(
+                        ei_pos,
+                        two * jnp.sqrt(jnp.where(ei_pos, epsi1, one)) * (sigi1 * sigi1 * sigi1),
+                        zero,
+                    )
+                    bj = jnp.where(
+                        ej_pos,
+                        two * jnp.sqrt(jnp.where(ej_pos, epsj, one)) * (sigj * sigj * sigj),
+                        zero,
+                    )
+                    b_prod = lam_v * bi[:, None] * bj[None, :]
+                    l6_r, dl6_dr = _triton_ewald_p6_lr_and_deriv(
+                        r2_raw, dist, inv_r, inv_r2, act, lj_alpha_f, dtype
+                    )
+                    w_lr = one if inc_ljpme_ex else w_v
+                    if has_fin_cut:
+                        rc_c = jnp.asarray(cutoff, dtype=dtype)
+                        _uc_rat = rc_c / sig_s
+                        _uc2 = _uc_rat * _uc_rat
+                        u6_c = _uc2 * _uc2 * _uc2
+                        xi6_c = one / jnp.maximum(soft_lj + u6_c, jnp.asarray(1e-6, dtype=dtype))
+                        v_lj_rc = jnp.where(
+                            has_lj,
+                            four * eps_ij * lam_v * (xi6_c * xi6_c - xi6_c),
+                            zero,
+                        )
+                        l6_rc_c = jnp.asarray(l6_rc_f, dtype=dtype)
+                        e_lj = w_v * (v_lj - v_lj_rc - b_prod * l6_rc_c) + w_lr * b_prod * l6_r
+                    else:
+                        e_lj = w_v * v_lj + w_lr * b_prod * l6_r
+                    de_lj = w_v * dv_lj + w_lr * b_prod * dl6_dr
+                else:
+                    sw, dsw = _lj_switch_weight_and_deriv(dist, cutoff, lj_switch_width)
+                    e_lj = w_v * v_lj * sw
+                    de_lj = w_v * (dv_lj * sw + v_lj * dsw)
 
                 qq = coul_c * qi1[:, None] * qj[None, :]
                 if pme_alpha > 0.0:
@@ -2207,9 +2364,24 @@ def pallas_tile_pairs_param_grads(  # noqa: PLR0913
     scale_14_vdw: float,
     scale_14_elec: float,
     rf_dielectric: float | None = None,
+    lj_combining_rule: str = "lorentz_berthelot",
+    lj_pme_alpha: float = 0.0,
+    include_ljpme_excl: bool = False,
     interpret: bool = False,
 ) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array]:
     """MK-73: Native O(N) memory 2D-grid Pallas parameter-gradient kernel for 32x32 tile pairs."""
+    comb_rule_bwd = _normalize_lj_combining_rule(lj_combining_rule)
+    is_geom_bwd = comb_rule_bwd == "geometric"
+    lj_alpha_bwd = float(lj_pme_alpha)
+    has_ljpme_bwd = lj_alpha_bwd > 0.0
+    inc_ljpme_ex_bwd = bool(include_ljpme_excl)
+    has_fin_cut_bwd = float(cutoff) < 1.0e15
+    l6_rc_bwd = (
+        _ewald_p6_lr_host(lj_alpha_bwd, float(cutoff) * float(cutoff))
+        if (has_ljpme_bwd and has_fin_cut_bwd)
+        else 0.0
+    )
+    keep_excl_bwd = bool(include_pme_excl_erf) or (has_ljpme_bwd and inc_ljpme_ex_bwd)
     interpret = bool(interpret) or in_export_context()
     b_pos, b_q, b_sig, b_eps, b_mask, b_tp, b_ef, b_e14, b_box, b_lam = in_b
     has_rf_bwd = (pme_alpha <= 0.0) and (rf_dielectric is not None)
@@ -2334,7 +2506,7 @@ def pallas_tile_pairs_param_grads(  # noqa: PLR0913
                 is_full = ((fb[:, None] >> bit_sh) & jnp.int32(1)) != 0
                 is_diag = sti == stj
                 vp = mi[:, None] & mj[None, :] & jnp.where(is_diag, ut_mask, jnp.bool_(True)) & (
-                    True if include_pme_excl_erf else (~is_full)
+                    True if keep_excl_bwd else (~is_full)
                 )
                 rdx = pxi[:, None] - pxj[None, :]
                 rdy = pyi[:, None] - pyj[None, :]
@@ -2367,30 +2539,113 @@ def pallas_tile_pairs_param_grads(  # noqa: PLR0913
                     inv_r = jnp.where(act, one / dist, zero)
                     wv = jnp.where(is_full, zero, jnp.where(is_14, s14_v, one))
                     we = jnp.where(is_full, zero, jnp.where(is_14, s14_e, one))
-                    sw, _ = _lj_switch_weight_and_deriv(dist, cutoff, lj_switch_width)
-                    w_lj = jnp.where(act, gv * wv * sw, zero)
 
-                    sig_ij = half * (sigi[:, None] + sigj[None, :])
-                    sig_s = jnp.where(act, jnp.maximum(sig_ij, jnp.asarray(1e-4, dtype=dtype)), one)
+                    if is_geom_bwd:
+                        sig_prod = jnp.maximum(sigi[:, None] * sigj[None, :], zero)
+                        sig_pos = sig_prod > zero
+                        sig_ij = jnp.where(sig_pos, jnp.sqrt(jnp.where(sig_pos, sig_prod, one)), zero)
+                    else:
+                        sig_ij = half * (sigi[:, None] + sigj[None, :])
                     ep_prod = jnp.maximum(epsi[:, None] * epsj[None, :], zero)
-                    eps_ij = jnp.sqrt(ep_prod + jnp.asarray(1e-30, dtype=dtype))
+                    has_ep = act & (epsi[:, None] > zero) & (epsj[None, :] > zero)
+                    eps_ij = jnp.where(has_ep, jnp.sqrt(jnp.where(has_ep, ep_prod, one)), zero)
+                    has_lj = has_ep & (sig_ij > zero)
+                    sig_s = jnp.where(has_lj, jnp.maximum(sig_ij, jnp.asarray(1e-4, dtype=dtype)), one)
+
                     _u_bwd = dist / sig_s
                     _u2_bwd = _u_bwd * _u_bwd
                     u6 = _u2_bwd * _u2_bwd * _u2_bwd
                     xi6 = one / jnp.maximum(soft_lj + u6, jnp.asarray(1e-6, dtype=dtype))
-                    x2_x = xi6 * xi6 - xi6
-                    dx_dd = (zero - xi6 * xi6) * (two * xi6 - one)
+                    x2_x_r = xi6 * xi6 - xi6
+                    dx_dd_r = (zero - xi6 * xi6) * (two * xi6 - one)
 
-                    # dE/dsigma
-                    de_dsig_mat = w_lj * four * eps_ij * lam * dx_dd * (jnp.asarray(-6.0, dtype=dtype) * u6 / sig_s) * half
-                    # dE/deps
-                    has_ep = act & (epsi[:, None] > zero) & (epsj[None, :] > zero)
-                    inv_2eij = jnp.where(has_ep, half / jnp.maximum(eps_ij, jnp.asarray(1e-15, dtype=dtype)), zero)
+                    if has_ljpme_bwd:
+                        w_lj = jnp.where(has_lj, gv * wv, zero)
+                        if has_fin_cut_bwd:
+                            rc_c = jnp.asarray(cutoff, dtype=dtype)
+                            _uc_bwd = rc_c / sig_s
+                            _uc2_bwd = _uc_bwd * _uc_bwd
+                            u6_c = _uc2_bwd * _uc2_bwd * _uc2_bwd
+                            xi6_c = one / jnp.maximum(soft_lj + u6_c, jnp.asarray(1e-6, dtype=dtype))
+                            x2_x_c = xi6_c * xi6_c - xi6_c
+                            dx_dd_c = (zero - xi6_c * xi6_c) * (two * xi6_c - one)
+                            x2_x = x2_x_r - x2_x_c
+                            dx_du_sig = (
+                                dx_dd_r * (jnp.asarray(-6.0, dtype=dtype) * u6 / sig_s)
+                                - dx_dd_c * (jnp.asarray(-6.0, dtype=dtype) * u6_c / sig_s)
+                            )
+                            dx_dlam_term = (dx_dd_r - dx_dd_c) * dsoft_dlam
+                        else:
+                            x2_x = x2_x_r
+                            dx_du_sig = dx_dd_r * (jnp.asarray(-6.0, dtype=dtype) * u6 / sig_s)
+                            dx_dlam_term = dx_dd_r * dsoft_dlam
+                    else:
+                        sw, _ = _lj_switch_weight_and_deriv(dist, cutoff, lj_switch_width)
+                        w_lj = jnp.where(has_lj, gv * wv * sw, zero)
+                        x2_x = x2_x_r
+                        dx_du_sig = dx_dd_r * (jnp.asarray(-6.0, dtype=dtype) * u6 / sig_s)
+                        dx_dlam_term = dx_dd_r * dsoft_dlam
+
+                    # dE/dsigma, dE/deps, dE/dlam
+                    de_dsij = w_lj * four * eps_ij * lam * dx_du_sig
+                    if is_geom_bwd:
+                        has_sig_pair = has_lj & (sigi[:, None] > zero) & (sigj[None, :] > zero)
+                        inv_2sij = jnp.where(
+                            has_sig_pair,
+                            half / jnp.maximum(sig_ij, jnp.asarray(1e-15, dtype=dtype)),
+                            zero,
+                        )
+                        dsi = jnp.sum(de_dsij * inv_2sij * sigj[None, :], axis=1)
+                        dsj = jnp.sum(de_dsij * inv_2sij * sigi[:, None], axis=0)
+                    else:
+                        de_dsig_mat = de_dsij * half
+                        dsi = jnp.sum(de_dsig_mat, axis=1)
+                        dsj = jnp.sum(de_dsig_mat, axis=0)
+
+                    inv_2eij = jnp.where(has_lj, half / jnp.maximum(eps_ij, jnp.asarray(1e-15, dtype=dtype)), zero)
                     base_de_deij = w_lj * four * lam * x2_x * inv_2eij
                     de_depsi = jnp.sum(base_de_deij * epsj[None, :], axis=1)
                     de_depsj = jnp.sum(base_de_deij * epsi[:, None], axis=0)
-                    # dE/dlam
-                    de_dlam_mat = w_lj * four * eps_ij * (x2_x + lam * dx_dd * dsoft_dlam)
+                    de_dlam_mat = w_lj * four * eps_ij * (x2_x + lam * dx_dlam_term)
+
+                    if has_ljpme_bwd:
+                        inv_r2_bwd = inv_r * inv_r
+                        l6_r, _ = _triton_ewald_p6_lr_and_deriv(
+                            r2_raw, dist, inv_r, inv_r2_bwd, act, lj_alpha_bwd, dtype
+                        )
+                        w_lr_bwd = one if inc_ljpme_ex_bwd else wv
+                        l6_rc_bc = jnp.asarray(l6_rc_bwd, dtype=dtype)
+                        c_disp = w_lr_bwd * l6_r - (wv * l6_rc_bc if has_fin_cut_bwd else zero)
+
+                        ei_ok = (epsi > zero) & (sigi > zero)
+                        ej_ok = (epsj > zero) & (sigj > zero)
+                        sq_ei = jnp.where(ei_ok, jnp.sqrt(jnp.where(ei_ok, epsi, one)), one)
+                        sq_ej = jnp.where(ej_ok, jnp.sqrt(jnp.where(ej_ok, epsj, one)), one)
+                        si2 = sigi * sigi
+                        sj2 = sigj * sigj
+                        si3 = si2 * sigi
+                        sj3 = sj2 * sigj
+                        bi = jnp.where(ei_ok, two * sq_ei * si3, zero)
+                        bj = jnp.where(ej_ok, two * sq_ej * sj3, zero)
+                        dbi_dsig = jnp.where(ei_ok, jnp.asarray(6.0, dtype=dtype) * sq_ei * si2, zero)
+                        dbj_dsig = jnp.where(ej_ok, jnp.asarray(6.0, dtype=dtype) * sq_ej * sj2, zero)
+                        dbi_deps = jnp.where(
+                            ei_ok, si3 / jnp.maximum(sq_ei, jnp.asarray(1e-15, dtype=dtype)), zero
+                        )
+                        dbj_deps = jnp.where(
+                            ej_ok, sj3 / jnp.maximum(sq_ej, jnp.asarray(1e-15, dtype=dtype)), zero
+                        )
+
+                        m_disp = jnp.where(act, gv * lam * c_disp, zero)
+                        sum_j_bj = jnp.sum(m_disp * bj[None, :], axis=1)
+                        sum_i_bi = jnp.sum(m_disp * bi[:, None], axis=0)
+                        dsi = dsi + dbi_dsig * sum_j_bj
+                        dsj = dsj + dbj_dsig * sum_i_bi
+                        de_depsi = de_depsi + dbi_deps * sum_j_bj
+                        de_depsj = de_depsj + dbj_deps * sum_i_bi
+                        de_dlam_mat = de_dlam_mat + jnp.where(
+                            act, gv * bi[:, None] * bj[None, :] * c_disp, zero
+                        )
 
                     # dE/dq
                     if pme_alpha > 0.0:
@@ -2414,8 +2669,6 @@ def pallas_tile_pairs_param_grads(  # noqa: PLR0913
                     c_mat = jnp.where(act, gv * coul_c * cfac, zero)
                     dqi = jnp.sum(c_mat * qj[None, :], axis=1)
                     dqj = jnp.sum(c_mat * qi[:, None], axis=0)
-                    dsi = jnp.sum(de_dsig_mat, axis=1)
-                    dsj = jnp.sum(de_dsig_mat, axis=0)
 
                     def _wr_diag(z):
                         _pl_atomic_add_1d(dq_out, out_b + oi, dqi + dqj, mi, interpret)
@@ -2476,7 +2729,7 @@ def pallas_tile_pairs_param_grads(  # noqa: PLR0913
     return grad_q, grad_s, grad_e, grad_l
 
 
-@functools.partial(jax.custom_vjp, nondiff_argnums=tuple(range(14, 37)))
+@functools.partial(jax.custom_vjp, nondiff_argnums=tuple(range(14, 40)))
 def _pallas_bonded_and_tile_pairs_energy_diff(  # noqa: PLR0913
     positions_m: jax.Array,
     charges_m: jax.Array,
@@ -2505,6 +2758,9 @@ def _pallas_bonded_and_tile_pairs_energy_diff(  # noqa: PLR0913
     softcore_alpha: float,
     softcore_exponent: int,
     include_pme_excl_erf: bool,
+    lj_combining_rule: str,
+    lj_pme_alpha: float,
+    include_ljpme_excl: bool,
     scale_14_vdw: float,
     scale_14_elec: float,
     dist_eps: float,
@@ -2547,6 +2803,9 @@ def _pallas_bonded_and_tile_pairs_energy_diff(  # noqa: PLR0913
         softcore_alpha=softcore_alpha,
         softcore_exponent=softcore_exponent,
         include_pme_excl_erf=include_pme_excl_erf,
+        lj_combining_rule=lj_combining_rule,
+        lj_pme_alpha=lj_pme_alpha,
+        include_ljpme_excl=include_ljpme_excl,
         scale_14_vdw=scale_14_vdw,
         scale_14_elec=scale_14_elec,
         dist_eps=dist_eps,
@@ -2591,6 +2850,9 @@ def _pallas_bonded_and_tile_pairs_energy_fwd(  # noqa: PLR0913
     softcore_alpha: float,
     softcore_exponent: int,
     include_pme_excl_erf: bool,
+    lj_combining_rule: str,
+    lj_pme_alpha: float,
+    include_ljpme_excl: bool,
     scale_14_vdw: float,
     scale_14_elec: float,
     dist_eps: float,
@@ -2633,6 +2895,9 @@ def _pallas_bonded_and_tile_pairs_energy_fwd(  # noqa: PLR0913
         softcore_alpha=softcore_alpha,
         softcore_exponent=softcore_exponent,
         include_pme_excl_erf=include_pme_excl_erf,
+        lj_combining_rule=lj_combining_rule,
+        lj_pme_alpha=lj_pme_alpha,
+        include_ljpme_excl=include_ljpme_excl,
         scale_14_vdw=scale_14_vdw,
         scale_14_elec=scale_14_elec,
         dist_eps=dist_eps,
@@ -2681,6 +2946,9 @@ def _pallas_bonded_and_tile_pairs_energy_bwd(  # noqa: PLR0913
     softcore_alpha: float,
     softcore_exponent: int,
     include_pme_excl_erf: bool,
+    lj_combining_rule: str,
+    lj_pme_alpha: float,
+    include_ljpme_excl: bool,
     scale_14_vdw: float,
     scale_14_elec: float,
     dist_eps: float,
@@ -2780,6 +3048,9 @@ def _pallas_bonded_and_tile_pairs_energy_bwd(  # noqa: PLR0913
         scale_14_vdw=scale_14_vdw,
         scale_14_elec=scale_14_elec,
         rf_dielectric=rf_dielectric,
+        lj_combining_rule=lj_combining_rule,
+        lj_pme_alpha=lj_pme_alpha,
+        include_ljpme_excl=include_ljpme_excl,
         interpret=interpret,
     )
     return (
@@ -2831,6 +3102,9 @@ def pallas_bonded_and_tile_pairs_fused(  # noqa: PLR0913
     softcore_alpha: float = 0.5,
     softcore_exponent: int = 2,
     include_pme_excl_erf: bool = False,
+    lj_combining_rule: str = "lorentz_berthelot",
+    lj_pme_alpha: float = 0.0,
+    include_ljpme_excl: bool = False,
     scale_14_vdw: float = 0.5,
     scale_14_elec: float = 1.0 / 1.2,
     dist_eps: float = 1e-10,
@@ -2843,7 +3117,8 @@ def pallas_bonded_and_tile_pairs_fused(  # noqa: PLR0913
     return_forces: bool = False,
     interpret: bool | None = None,
 ) -> jax.Array | tuple[jax.Array, jax.Array]:
-    """Differentiable Morton 32x32 tile-pair + bonded evaluator with optional ``2^20`` deterministic force planes."""
+    """Differentiable Morton 32x32 tile-pair + bonded evaluator with LB/geometric mixing, LJ-PME, and 2^20 deterministic planes."""
+    comb_norm = _normalize_lj_combining_rule(lj_combining_rule)
     single_in = positions_m.ndim == 2
     pos_b = positions_m[None, ...] if single_in else positions_m
     B = int(pos_b.shape[0])
@@ -2896,6 +3171,9 @@ def pallas_bonded_and_tile_pairs_fused(  # noqa: PLR0913
             softcore_alpha=float(softcore_alpha),
             softcore_exponent=int(softcore_exponent),
             include_pme_excl_erf=bool(include_pme_excl_erf),
+            lj_combining_rule=comb_norm,
+            lj_pme_alpha=float(lj_pme_alpha),
+            include_ljpme_excl=bool(include_ljpme_excl),
             scale_14_vdw=float(scale_14_vdw),
             scale_14_elec=float(scale_14_elec),
             dist_eps=float(dist_eps),
@@ -2944,6 +3222,9 @@ def pallas_bonded_and_tile_pairs_fused(  # noqa: PLR0913
         float(softcore_alpha),
         int(softcore_exponent),
         bool(include_pme_excl_erf),
+        comb_norm,
+        float(lj_pme_alpha),
+        bool(include_ljpme_excl),
         float(scale_14_vdw),
         float(scale_14_elec),
         float(dist_eps),
