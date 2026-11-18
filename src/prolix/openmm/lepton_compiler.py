@@ -1453,6 +1453,11 @@ class CompiledLeptonForce(eqx.Module):
     energy_param_derivatives: tuple[str, ...] = eqx.field(static=True)
     global_param_names: tuple[str, ...] = eqx.field(static=True)
 
+    @property
+    def is_gpu_runner_fast(self) -> bool:
+        """Whether this custom force can execute inside persistent GPU runners without O(N^2) overhead."""
+        return True
+
     def energy_akma(
         self,
         positions_akma: Float[Array, "N 3"],
@@ -1657,10 +1662,44 @@ class CompiledCustomNonbondedForce(CompiledLeptonForce):
 
     per_particle_params: dict[str, Float[Array, " N"]]
     computed_value_fns: dict[str, Callable[[dict[str, Array], Array | None], Array]] = eqx.field(static=True)
-    exclusion_mask: Bool[Array, "N N"]  # True where pair is excluded
-    interaction_matrix: Int[Array, "N N"]  # Multiplicity count (>= 1 to interact, 0 to skip)
+    exclusion_mask: Bool[Array, "N N"] | None  # True where pair is excluded (None on sparse path)
+    interaction_matrix: Int[Array, "N N"] | None  # Multiplicity count (None on sparse path)
     interaction_groups: tuple[tuple[list[int], list[int]], ...] | None = eqx.field(static=True)
     pair_eval_fn: Callable[[dict[str, Array], Array | None], Array] = eqx.field(static=True)
+    num_particles: int = eqx.field(static=True, default=0)
+    sparse_u_indices: Int[Array, " U"] | None = None
+    sparse_multiplicity: Int[Array, "U N"] | None = None
+    dispersion_coeff_fn: Callable[[dict[str, Array]], Array] | None = eqx.field(
+        static=True, default=None
+    )
+
+    @property
+    def is_gpu_runner_fast(self) -> bool:
+        """True when compiled with sparse InteractionGroups or when N <= 4096."""
+        if self.sparse_u_indices is not None:
+            return True
+        n_p = self.num_particles
+        if n_p <= 0:
+            if self.exclusion_mask is not None:
+                n_p = int(self.exclusion_mask.shape[0])
+            elif self.sparse_multiplicity is not None:
+                n_p = int(self.sparse_multiplicity.shape[1])
+        return n_p <= 4096
+
+    def _apply_switching(self, u_pair: Array, r: Array, has_cutoff: bool) -> Array:
+        if has_cutoff and self.use_switching:
+            switch_w = self.cutoff_distance - self.switching_distance
+            z = (r - self.switching_distance) / jnp.maximum(
+                switch_w, jnp.asarray(1e-12, dtype=r.dtype)
+            )
+            s = 1.0 - 10.0 * z**3 + 15.0 * z**4 - 6.0 * z**5
+            s = jnp.where(
+                r <= self.switching_distance,
+                1.0,
+                jnp.where(r >= self.cutoff_distance, 0.0, s),
+            )
+            return u_pair * s
+        return u_pair
 
     def energy_omm(
         self,
@@ -1681,97 +1720,154 @@ class CompiledCustomNonbondedForce(CompiledLeptonForce):
             computed_values[cv_name] = cv_fn(cv_env, box)
 
         all_particle_data = {**self.per_particle_params, **computed_values}
+        has_cutoff = (self.nonbonded_method != 0) and (self.cutoff_distance > 0)
 
-        # 2. Chunked pair evaluation via jax.lax.map
-        pad_len = (self.chunk_size - (N % self.chunk_size)) % self.chunk_size
-        N_padded = N + pad_len
-
-        r_padded = jnp.pad(positions_nm, ((0, pad_len), (0, 0)), constant_values=1e6)
-        excl_padded = jnp.pad(
-            self.exclusion_mask, ((0, pad_len), (0, pad_len)), constant_values=True
-        )
-        imat_padded = jnp.pad(
-            self.interaction_matrix, ((0, pad_len), (0, pad_len)), constant_values=0
-        )
-        padded_particle_data = {
-            k: jnp.pad(v, (0, pad_len), constant_values=0.0)
-            for k, v in all_particle_data.items()
-        }
-
-        n_chunks = N_padded // self.chunk_size
-        chunk_indices = jnp.arange(n_chunks)
-
-        def _eval_chunk(chunk_idx: int) -> Float[Array, ""]:
-            start_i = chunk_idx * self.chunk_size
-            r_chunk = jax.lax.dynamic_slice(
-                r_padded, (start_i, 0), (self.chunk_size, 3)
-            )
-            excl_chunk = jax.lax.dynamic_slice(
-                excl_padded, (start_i, 0), (self.chunk_size, N_padded)
-            )
-            imat_chunk = jax.lax.dynamic_slice(
-                imat_padded, (start_i, 0), (self.chunk_size, N_padded)
-            )
-
-            dr = minimum_image_displacement(
-                r_chunk[:, None, :], r_padded[None, :, :], box
-            )
-            r = jnp.sqrt(jnp.sum(dr * dr, axis=-1) + 1e-12)
-
-            i_idx = start_i + jnp.arange(self.chunk_size)[:, None]
-            j_idx = jnp.arange(N_padded)[None, :]
-
-            # Valid pair masking: j > i, real indices, not excluded, and present in interaction group
-            has_cutoff = (self.nonbonded_method != 0) and (self.cutoff_distance > 0)
-            is_valid = (
-                (j_idx > i_idx)
-                & (i_idx < N)
-                & (j_idx < N)
-                & (~excl_chunk)
-                & (imat_chunk > 0)
-            )
-            if has_cutoff:
-                is_valid = is_valid & (r < self.cutoff_distance)
-
-            # Prevent 0.0 * inf = NaN in backward pass by guarding r on invalid pairs
-            safe_r = jnp.where(is_valid, r, 1.0)
-
-            # Build pair environment
-            pair_env: dict[str, Array] = {"r": safe_r, **global_params}
-            for k, arr in padded_particle_data.items():
-                chunk_arr = jax.lax.dynamic_slice(arr, (start_i,), (self.chunk_size,))
-                pair_env[f"{k}1"] = chunk_arr[:, None]
-                pair_env[f"{k}2"] = arr[None, :]
-
-            u_pair = self.pair_eval_fn(pair_env, box)
-
-            # 5th-order polynomial switching function
-            if has_cutoff and self.use_switching:
-                switch_w = self.cutoff_distance - self.switching_distance
-                z = (r - self.switching_distance) / jnp.maximum(
-                    switch_w, jnp.asarray(1e-12, dtype=r.dtype)
+        # 2A. Sparse InteractionGroup evaluation in O(|U| * N) without (N, N) tensors
+        if self.sparse_u_indices is not None and self.sparse_multiplicity is not None:
+            u_idx = self.sparse_u_indices
+            s_mult = self.sparse_multiplicity
+            u_count = int(u_idx.shape[0])
+            if u_count == 0:
+                e_pairwise = jnp.asarray(0.0, dtype=positions_nm.dtype)
+            elif u_count <= self.chunk_size:
+                r_u = positions_nm[u_idx]
+                dr = minimum_image_displacement(
+                    r_u[:, None, :], positions_nm[None, :, :], box
                 )
-                s = 1.0 - 10.0 * z**3 + 15.0 * z**4 - 6.0 * z**5
-                s = jnp.where(
-                    r <= self.switching_distance,
-                    1.0,
-                    jnp.where(r >= self.cutoff_distance, 0.0, s),
+                r = jnp.sqrt(jnp.sum(dr * dr, axis=-1) + 1e-12)
+                is_valid = s_mult > 0
+                if has_cutoff:
+                    is_valid = is_valid & (r < self.cutoff_distance)
+                safe_r = jnp.where(is_valid, r, jnp.ones_like(r))
+                pair_env: dict[str, Array] = {"r": safe_r, **global_params}
+                for k, arr in all_particle_data.items():
+                    pair_env[f"{k}1"] = arr[u_idx][:, None]
+                    pair_env[f"{k}2"] = arr[None, :]
+                u_pair = self.pair_eval_fn(pair_env, box)
+                u_pair = self._apply_switching(u_pair, r, has_cutoff)
+                u_pair = u_pair * s_mult.astype(u_pair.dtype)
+                e_pairwise = jnp.sum(jnp.where(is_valid, u_pair, 0.0))
+            else:
+                u_pad_len = (self.chunk_size - (u_count % self.chunk_size)) % self.chunk_size
+                u_padded = u_count + u_pad_len
+                u_idx_pad = jnp.pad(u_idx, (0, u_pad_len), constant_values=0)
+                s_mult_pad = jnp.pad(
+                    s_mult, ((0, u_pad_len), (0, 0)), constant_values=0
                 )
-                u_pair = u_pair * s
+                n_u_chunks = u_padded // self.chunk_size
+                u_chunk_indices = jnp.arange(n_u_chunks)
 
-            # Multiply by group multiplicity (handles overlapping interaction groups)
-            u_pair = u_pair * imat_chunk.astype(u_pair.dtype)
+                def _eval_sparse_chunk(c_idx: Array) -> Float[Array, ""]:
+                    start_u = c_idx * self.chunk_size
+                    u_sub = jax.lax.dynamic_slice(
+                        u_idx_pad, (start_u,), (self.chunk_size,)
+                    )
+                    mult_sub = jax.lax.dynamic_slice(
+                        s_mult_pad, (start_u, 0), (self.chunk_size, N)
+                    )
+                    r_sub = positions_nm[u_sub]
+                    dr = minimum_image_displacement(
+                        r_sub[:, None, :], positions_nm[None, :, :], box
+                    )
+                    r = jnp.sqrt(jnp.sum(dr * dr, axis=-1) + 1e-12)
+                    u_row = start_u + jnp.arange(self.chunk_size)[:, None]
+                    is_valid = (u_row < u_count) & (mult_sub > 0)
+                    if has_cutoff:
+                        is_valid = is_valid & (r < self.cutoff_distance)
+                    safe_r = jnp.where(is_valid, r, jnp.ones_like(r))
+                    pair_env_c: dict[str, Array] = {"r": safe_r, **global_params}
+                    for k, arr in all_particle_data.items():
+                        pair_env_c[f"{k}1"] = arr[u_sub][:, None]
+                        pair_env_c[f"{k}2"] = arr[None, :]
+                    u_pair = self.pair_eval_fn(pair_env_c, box)
+                    u_pair = self._apply_switching(u_pair, r, has_cutoff)
+                    u_pair = u_pair * mult_sub.astype(u_pair.dtype)
+                    return jnp.sum(jnp.where(is_valid, u_pair, 0.0))
 
-            return jnp.sum(jnp.where(is_valid, u_pair, 0.0))
+                e_pairwise = jnp.sum(jax.lax.map(_eval_sparse_chunk, u_chunk_indices))
+        else:
+            # 2B. Dense chunked pair evaluation via jax.lax.map
+            if self.exclusion_mask is None or self.interaction_matrix is None:
+                raise ValueError(
+                    "Dense CompiledCustomNonbondedForce requires non-None exclusion_mask and interaction_matrix."
+                )
+            excl_dense = self.exclusion_mask
+            imat_dense = self.interaction_matrix
+            pad_len = (self.chunk_size - (N % self.chunk_size)) % self.chunk_size
+            N_padded = N + pad_len
 
-        chunk_energies = jax.lax.map(_eval_chunk, chunk_indices)
-        e_pairwise = jnp.sum(chunk_energies)
+            r_padded = jnp.pad(positions_nm, ((0, pad_len), (0, 0)), constant_values=1e6)
+            excl_padded = jnp.pad(
+                excl_dense, ((0, pad_len), (0, pad_len)), constant_values=True
+            )
+            imat_padded = jnp.pad(
+                imat_dense, ((0, pad_len), (0, pad_len)), constant_values=0
+            )
+            padded_particle_data = {
+                k: jnp.pad(v, (0, pad_len), constant_values=0.0)
+                for k, v in all_particle_data.items()
+            }
+
+            n_chunks = N_padded // self.chunk_size
+            chunk_indices = jnp.arange(n_chunks)
+
+            def _eval_chunk(chunk_idx: int) -> Float[Array, ""]:
+                start_i = chunk_idx * self.chunk_size
+                r_chunk = jax.lax.dynamic_slice(
+                    r_padded, (start_i, 0), (self.chunk_size, 3)
+                )
+                excl_chunk = jax.lax.dynamic_slice(
+                    excl_padded, (start_i, 0), (self.chunk_size, N_padded)
+                )
+                imat_chunk = jax.lax.dynamic_slice(
+                    imat_padded, (start_i, 0), (self.chunk_size, N_padded)
+                )
+
+                dr = minimum_image_displacement(
+                    r_chunk[:, None, :], r_padded[None, :, :], box
+                )
+                r = jnp.sqrt(jnp.sum(dr * dr, axis=-1) + 1e-12)
+
+                i_idx = start_i + jnp.arange(self.chunk_size)[:, None]
+                j_idx = jnp.arange(N_padded)[None, :]
+
+                is_valid = (
+                    (j_idx > i_idx)
+                    & (i_idx < N)
+                    & (j_idx < N)
+                    & (~excl_chunk)
+                    & (imat_chunk > 0)
+                )
+                if has_cutoff:
+                    is_valid = is_valid & (r < self.cutoff_distance)
+
+                safe_r = jnp.where(is_valid, r, 1.0)
+
+                pair_env: dict[str, Array] = {"r": safe_r, **global_params}
+                for k, arr in padded_particle_data.items():
+                    chunk_arr = jax.lax.dynamic_slice(arr, (start_i,), (self.chunk_size,))
+                    pair_env[f"{k}1"] = chunk_arr[:, None]
+                    pair_env[f"{k}2"] = arr[None, :]
+
+                u_pair = self.pair_eval_fn(pair_env, box)
+                u_pair = self._apply_switching(u_pair, r, has_cutoff)
+                u_pair = u_pair * imat_chunk.astype(u_pair.dtype)
+
+                return jnp.sum(jnp.where(is_valid, u_pair, 0.0))
+
+            chunk_energies = jax.lax.map(_eval_chunk, chunk_indices)
+            e_pairwise = jnp.sum(chunk_energies)
 
         # 3. Isotropic dispersion correction
         e_corr = 0.0
         if self.use_dispersion_correction and box_vectors_nm is not None:
             vol_nm3 = jnp.abs(jnp.linalg.det(box_vectors_nm))
-            e_corr = self.dispersion_coeff / jnp.maximum(vol_nm3, 1e-6)
+            c_disp = (
+                self.dispersion_coeff_fn(global_params)
+                if (self.dispersion_coeff_fn is not None and len(global_params) > 0)
+                else self.dispersion_coeff
+            )
+            e_corr = c_disp / jnp.maximum(vol_nm3, 1e-6)
 
         return e_pairwise + e_corr
 
@@ -1899,33 +1995,94 @@ def calc_custom_nonbonded_dispersion_coeff(
 
     num_classes = len(class_params)
 
-    # 2. Count pair interactions by class pair
-    interaction_counts: dict[tuple[int, int], int] = {}
-    for i in range(num_classes):
-        for j in range(i, num_classes):
-            interaction_counts[(i, j)] = 0
+    # 2. Count pair interactions by class pair without O(N^2) allocations
+    interaction_counts: dict[tuple[int, int], int] = collections.defaultdict(int)
 
     num_groups = force.getNumInteractionGroups()
     if num_groups == 0:
-        # Count particles in each class
         class_counts = np.bincount(atom_class, minlength=num_classes)
-        for i in range(num_classes):
-            interaction_counts[(i, i)] = (int(class_counts[i]) * int(class_counts[i] + 1)) // 2
-            for j in range(i + 1, num_classes):
-                interaction_counts[(i, j)] = int(class_counts[i]) * int(class_counts[j])
+        nz_c = np.flatnonzero(class_counts)
+        for idx_i, i in enumerate(nz_c):
+            ci = int(class_counts[i])
+            ii = int(i)
+            interaction_counts[(ii, ii)] += (ci * (ci + 1)) // 2
+            for j in nz_c[idx_i + 1 :]:
+                jj = int(j)
+                interaction_counts[(ii, jj)] += ci * int(class_counts[j])
     else:
-        # Count pairs across interaction groups
         for g_idx in range(num_groups):
             s1, s2 = force.getInteractionGroupParameters(g_idx)
-            set1, set2 = set(s1), set(s2)
-            for a1 in set1:
-                for a2 in set2:
-                    if a1 >= a2 and (a2 in set1) and (a1 in set2):
-                        continue
-                    c1 = atom_class[a1]
-                    c2 = atom_class[a2]
-                    key = (min(c1, c2), max(c1, c2))
-                    interaction_counts[key] += 1
+            set1 = {int(a) for a in s1 if 0 <= int(a) < num_particles}
+            set2 = {int(a) for a in s2 if 0 <= int(a) < num_particles}
+            inter = set1 & set2
+            only1 = set1 - set2
+            only2 = set2 - set1
+
+            c1_hist = (
+                np.bincount(
+                    atom_class[np.fromiter(only1, dtype=np.int32)],
+                    minlength=num_classes,
+                )
+                if only1
+                else None
+            )
+            c2_hist = (
+                np.bincount(
+                    atom_class[np.fromiter(only2, dtype=np.int32)],
+                    minlength=num_classes,
+                )
+                if only2
+                else None
+            )
+            ci_hist = (
+                np.bincount(
+                    atom_class[np.fromiter(inter, dtype=np.int32)],
+                    minlength=num_classes,
+                )
+                if inter
+                else None
+            )
+
+            if c1_hist is not None and c2_hist is not None:
+                nz1 = np.flatnonzero(c1_hist)
+                nz2 = np.flatnonzero(c2_hist)
+                for a in nz1:
+                    ca = int(c1_hist[a])
+                    ia = int(a)
+                    for b in nz2:
+                        ib = int(b)
+                        key = (min(ia, ib), max(ia, ib))
+                        interaction_counts[key] += ca * int(c2_hist[b])
+            if c1_hist is not None and ci_hist is not None:
+                nz1 = np.flatnonzero(c1_hist)
+                nzi = np.flatnonzero(ci_hist)
+                for a in nz1:
+                    ca = int(c1_hist[a])
+                    ia = int(a)
+                    for b in nzi:
+                        ib = int(b)
+                        key = (min(ia, ib), max(ia, ib))
+                        interaction_counts[key] += ca * int(ci_hist[b])
+            if ci_hist is not None and c2_hist is not None:
+                nzi = np.flatnonzero(ci_hist)
+                nz2 = np.flatnonzero(c2_hist)
+                for a in nzi:
+                    ca = int(ci_hist[a])
+                    ia = int(a)
+                    for b in nz2:
+                        ib = int(b)
+                        key = (min(ia, ib), max(ia, ib))
+                        interaction_counts[key] += ca * int(c2_hist[b])
+            if ci_hist is not None:
+                nzi = np.flatnonzero(ci_hist)
+                for idx_i, a in enumerate(nzi):
+                    ca = int(ci_hist[a])
+                    ia = int(a)
+                    if ca > 1:
+                        interaction_counts[(ia, ia)] += (ca * (ca - 1)) // 2
+                    for b in nzi[idx_i + 1 :]:
+                        ib = int(b)
+                        interaction_counts[(ia, ib)] += ca * int(ci_hist[b])
 
     # Filter to active class pairs
     active_pairs = [pair for pair, cnt in interaction_counts.items() if cnt > 0]
@@ -2007,6 +2164,170 @@ def calc_custom_nonbonded_dispersion_coeff(
     return jnp.asarray(disp_coeff, dtype=jnp.float32)
 
 
+def _build_custom_nonbonded_dispersion_coeff_fn(
+    force: openmm.CustomNonbondedForce,
+    pair_eval_fn: Callable[[dict[str, Array], Array | None], Array],
+    param_names: list[str],
+    computed_value_fns: dict[str, Callable[[dict[str, Array], Array | None], Array]],
+) -> Callable[[dict[str, Array]], Array] | None:
+    """Build a differentiable JAX closure ``gp -> C_disp(gp)`` for global-parameter LRC derivatives."""
+    method = force.getNonbondedMethod()
+    if (
+        method != openmm.CustomNonbondedForce.CutoffPeriodic
+        or not force.getUseLongRangeCorrection()
+        or force.getNumGlobalParameters() == 0
+    ):
+        return None
+
+    omm_unit = cast("Any", openmm.unit)
+    raw_cutoff = force.getCutoffDistance()
+    cutoff = float(
+        raw_cutoff.value_in_unit(omm_unit.nanometer)
+        if hasattr(raw_cutoff, "value_in_unit")
+        else raw_cutoff
+    )
+    num_particles = force.getNumParticles()
+    if cutoff <= 0 or num_particles == 0:
+        return None
+
+    use_switching = force.getUseSwitchingFunction()
+    raw_switching = force.getSwitchingDistance()
+    rswitch = float(
+        raw_switching.value_in_unit(omm_unit.nanometer)
+        if hasattr(raw_switching, "value_in_unit")
+        else raw_switching
+    )
+
+    class_map: dict[tuple[float, ...], int] = {}
+    atom_class = np.zeros(num_particles, dtype=np.int32)
+    class_params: list[tuple[float, ...]] = []
+    for i in range(num_particles):
+        p_vals = tuple(float(x) for x in force.getParticleParameters(i))
+        if p_vals not in class_map:
+            class_map[p_vals] = len(class_params)
+            class_params.append(p_vals)
+        atom_class[i] = class_map[p_vals]
+    num_classes = len(class_params)
+
+    interaction_counts: dict[tuple[int, int], int] = collections.defaultdict(int)
+    num_groups = force.getNumInteractionGroups()
+    if num_groups == 0:
+        class_counts = np.bincount(atom_class, minlength=num_classes)
+        nz_c = np.flatnonzero(class_counts)
+        for idx_i, i in enumerate(nz_c):
+            ci = int(class_counts[i])
+            ii = int(i)
+            interaction_counts[(ii, ii)] += (ci * (ci + 1)) // 2
+            for j in nz_c[idx_i + 1 :]:
+                jj = int(j)
+                interaction_counts[(ii, jj)] += ci * int(class_counts[j])
+    else:
+        for g_idx in range(num_groups):
+            s1, s2 = force.getInteractionGroupParameters(g_idx)
+            set1 = {int(a) for a in s1 if 0 <= int(a) < num_particles}
+            set2 = {int(a) for a in s2 if 0 <= int(a) < num_particles}
+            inter = set1 & set2
+            only1 = set1 - set2
+            only2 = set2 - set1
+            c1_h = (
+                np.bincount(atom_class[np.fromiter(only1, dtype=np.int32)], minlength=num_classes)
+                if only1
+                else None
+            )
+            c2_h = (
+                np.bincount(atom_class[np.fromiter(only2, dtype=np.int32)], minlength=num_classes)
+                if only2
+                else None
+            )
+            ci_h = (
+                np.bincount(atom_class[np.fromiter(inter, dtype=np.int32)], minlength=num_classes)
+                if inter
+                else None
+            )
+            for ha, hb in ((c1_h, c2_h), (c1_h, ci_h), (ci_h, c2_h)):
+                if ha is not None and hb is not None:
+                    for a in np.flatnonzero(ha):
+                        ca = int(ha[a])
+                        ia = int(a)
+                        for b in np.flatnonzero(hb):
+                            ib = int(b)
+                            interaction_counts[(min(ia, ib), max(ia, ib))] += ca * int(hb[b])
+            if ci_h is not None:
+                nzi = np.flatnonzero(ci_h)
+                for idx_i, a in enumerate(nzi):
+                    ca = int(ci_h[a])
+                    ia = int(a)
+                    if ca > 1:
+                        interaction_counts[(ia, ia)] += (ca * (ca - 1)) // 2
+                    for b in nzi[idx_i + 1 :]:
+                        interaction_counts[(ia, int(b))] += ca * int(ci_h[b])
+
+    active_pairs = [(p, cnt) for p, cnt in interaction_counts.items() if cnt > 0]
+    if not active_pairs:
+        return None
+
+    gl_nodes, gl_weights = np.polynomial.legendre.leggauss(32)
+    x_nodes = 0.5 * (gl_nodes + 1.0)
+    w_nodes = 0.5 * gl_weights
+    r_tail_np = cutoff / x_nodes
+    w_tail_np = (w_nodes * (r_tail_np**4)) / cutoff
+
+    w_switch = cutoff - rswitch if (use_switching and rswitch < cutoff) else 0.0
+    r_sw_np = rswitch + x_nodes * w_switch if w_switch > 0 else None
+    w_sw_np = (
+        w_nodes * (x_nodes**3) * (10.0 + x_nodes * (-15.0 + x_nodes * 6.0)) * (r_sw_np**2) * w_switch
+        if (w_switch > 0 and r_sw_np is not None)
+        else None
+    )
+
+    m_pairs = len(active_pairs)
+    c1_idx = np.array([p[0][0] for p in active_pairs], dtype=np.int32)
+    c2_idx = np.array([p[0][1] for p in active_pairs], dtype=np.int32)
+    pair_cnts_np = np.array([float(p[1]) for p in active_pairs], dtype=np.float64)
+    class_param_np = {
+        p_name: np.array([cp[p_idx] for cp in class_params], dtype=np.float64)
+        for p_idx, p_name in enumerate(param_names)
+    }
+    scale_factor = (2.0 * math.pi * float(num_particles**2)) / float(
+        (num_particles * (num_particles + 1)) // 2
+    )
+
+    def _eval_c_disp(gp: dict[str, Array]) -> Array:
+        sample_arr = next(iter(gp.values()))
+        dt = sample_arr.dtype if jnp.issubdtype(sample_arr.dtype, jnp.floating) else jnp.float32
+        cls_p = {k: jnp.asarray(v, dtype=dt) for k, v in class_param_np.items()}
+        cv_env = {**cls_p, **gp}
+        cls_cv = {cv_name: cv_fn(cv_env, None) for cv_name, cv_fn in computed_value_fns.items()}
+
+        r_t = jnp.broadcast_to(jnp.asarray(r_tail_np, dtype=dt)[None, :], (m_pairs, 32))
+        env_t: dict[str, Array] = {**gp, "r": r_t}
+        for p_name, arr in cls_p.items():
+            env_t[f"{p_name}1"] = arr[c1_idx][:, None]
+            env_t[f"{p_name}2"] = arr[c2_idx][:, None]
+        for cv_name, arr in cls_cv.items():
+            env_t[f"{cv_name}1"] = arr[c1_idx][:, None]
+            env_t[f"{cv_name}2"] = arr[c2_idx][:, None]
+        u_t = pair_eval_fn(env_t, None)
+        i_pair = jnp.sum(u_t * jnp.asarray(w_tail_np, dtype=dt)[None, :], axis=-1)
+
+        if r_sw_np is not None and w_sw_np is not None:
+            r_s = jnp.broadcast_to(jnp.asarray(r_sw_np, dtype=dt)[None, :], (m_pairs, 32))
+            env_s: dict[str, Array] = {**gp, "r": r_s}
+            for p_name, arr in cls_p.items():
+                env_s[f"{p_name}1"] = arr[c1_idx][:, None]
+                env_s[f"{p_name}2"] = arr[c2_idx][:, None]
+            for cv_name, arr in cls_cv.items():
+                env_s[f"{cv_name}1"] = arr[c1_idx][:, None]
+                env_s[f"{cv_name}2"] = arr[c2_idx][:, None]
+            u_s = pair_eval_fn(env_s, None)
+            i_pair = i_pair + jnp.sum(u_s * jnp.asarray(w_sw_np, dtype=dt)[None, :], axis=-1)
+
+        tot = jnp.sum(i_pair * jnp.asarray(pair_cnts_np, dtype=dt))
+        return tot * jnp.asarray(scale_factor, dtype=dt)
+
+    return _eval_c_disp
+
+
 # =============================================================================
 # 12. Compilation Factory (`compile_custom_force`)
 # =============================================================================
@@ -2015,8 +2336,11 @@ def calc_custom_nonbonded_dispersion_coeff(
 def compile_custom_force(
     force: openmm.Force,
     config: ProlixOpenMMConfig | None = None,
+    *,
+    n_particles: int | None = None,
 ) -> CompiledLeptonForce:
     """Compile an arbitrary OpenMM custom force into an Equinox JAX CompiledLeptonForce."""
+    del n_particles  # Accepted for explicit caller compatibility; CustomNonbondedForce queries force.getNumParticles()
     if config is None:
         config = ProlixOpenMMConfig()
 
@@ -2315,42 +2639,105 @@ def compile_custom_force(
             k: jnp.asarray(v, dtype=jnp.float32) for k, v in p_data.items()
         }
 
-        # Exclusion mask
-        excl_mask = jnp.zeros((num_particles, num_particles), dtype=bool)
-        for i in range(force.getNumExclusions()):
-            p1, p2 = force.getExclusionParticles(i)
-            excl_mask = excl_mask.at[p1, p2].set(True).at[p2, p1].set(True)
-
-        # Self-exclusions
-        excl_mask = excl_mask.at[jnp.diag_indices(num_particles)].set(True)
-
-        # Interaction groups and multiplicity matrix
+        # Interaction groups: choose sparse O(|U| * N) representation when
+        # num_groups > 0 and |U| <= max(512, N // 4), avoiding any (N, N) allocation.
         num_groups = force.getNumInteractionGroups()
-        interaction_groups = None
-        if num_groups == 0:
-            interaction_mat = np.ones((num_particles, num_particles), dtype=np.int32)
-            np.fill_diagonal(interaction_mat, 0)
-        else:
-            groups_list = []
-            interaction_mat = np.zeros((num_particles, num_particles), dtype=np.int32)
+        interaction_groups: tuple[tuple[list[int], list[int]], ...] | None = None
+        groups_sets: list[tuple[set[int], set[int]]] = []
+        u_union: set[int] = set()
+        if num_groups > 0:
+            groups_list: list[tuple[list[int], list[int]]] = []
             for ig_idx in range(num_groups):
                 g1, g2 = force.getInteractionGroupParameters(ig_idx)
-                groups_list.append((list(g1), list(g2)))
-                s1 = set(g1)
-                s2 = set(g2)
-                for a1 in s1:
-                    for a2 in s2:
-                        if a1 == a2:
-                            continue
-                        if a1 > a2 and (a2 in s1) and (a1 in s2):
-                            continue
-                        i = min(a1, a2)
-                        j = max(a1, a2)
-                        interaction_mat[i, j] += 1
-                        interaction_mat[j, i] += 1
+                l1 = [int(x) for x in g1]
+                l2 = [int(x) for x in g2]
+                groups_list.append((l1, l2))
+                s1 = {x for x in l1 if 0 <= x < num_particles}
+                s2 = {x for x in l2 if 0 <= x < num_particles}
+                groups_sets.append((s1, s2))
+                u_union.update(s1 if len(s1) <= len(s2) else s2)
             interaction_groups = tuple(groups_list)
 
-        interaction_matrix = jnp.asarray(interaction_mat, dtype=jnp.int32)
+        sparse_threshold = max(512, num_particles // 4)
+        use_sparse_groups = num_groups > 0 and len(u_union) <= sparse_threshold
+
+        excl_mask: Array | None
+        interaction_matrix: Array | None
+        sparse_u_indices: Array | None
+        sparse_multiplicity: Array | None
+
+        if use_sparse_groups:
+            excl_mask = None
+            interaction_matrix = None
+            u_sorted = sorted(u_union)
+            u_pos = {p_idx: row for row, p_idx in enumerate(u_sorted)}
+            mult_np = np.zeros((len(u_sorted), num_particles), dtype=np.int32)
+            for s1, s2 in groups_sets:
+                anchor_set, partner_set = (
+                    (s1, s2) if len(s1) <= len(s2) else (s2, s1)
+                )
+                inter = anchor_set & partner_set
+                partner_only = partner_set - anchor_set
+                if partner_only:
+                    anchor_rows = np.fromiter(
+                        (u_pos[a] for a in anchor_set), dtype=np.int32
+                    )
+                    partner_cols = np.fromiter(
+                        sorted(partner_only), dtype=np.int32
+                    )
+                    mult_np[np.ix_(anchor_rows, partner_cols)] += 1
+                if inter:
+                    inter_cols = np.fromiter(sorted(inter), dtype=np.int32)
+                    anchor_only = anchor_set - partner_set
+                    if anchor_only:
+                        ao_rows = np.fromiter(
+                            (u_pos[a] for a in anchor_only), dtype=np.int32
+                        )
+                        mult_np[np.ix_(ao_rows, inter_cols)] += 1
+                    for idx_i, a1 in enumerate(inter_cols):
+                        if idx_i + 1 < inter_cols.size:
+                            mult_np[u_pos[int(a1)], inter_cols[idx_i + 1 :]] += 1
+            for row_i, u_atom in enumerate(u_sorted):
+                mult_np[row_i, u_atom] = 0
+            for ex_i in range(force.getNumExclusions()):
+                p1, p2 = force.getExclusionParticles(ex_i)
+                i1, i2 = int(p1), int(p2)
+                r1 = u_pos.get(i1)
+                if r1 is not None and 0 <= i2 < num_particles:
+                    mult_np[r1, i2] = 0
+                r2 = u_pos.get(i2)
+                if r2 is not None and 0 <= i1 < num_particles:
+                    mult_np[r2, i1] = 0
+            sparse_u_indices = jnp.asarray(u_sorted, dtype=jnp.int32)
+            sparse_multiplicity = jnp.asarray(mult_np, dtype=jnp.int32)
+        else:
+            sparse_u_indices = None
+            sparse_multiplicity = None
+            excl_np = np.zeros((num_particles, num_particles), dtype=bool)
+            np.fill_diagonal(excl_np, True)
+            for ex_i in range(force.getNumExclusions()):
+                p1, p2 = force.getExclusionParticles(ex_i)
+                excl_np[int(p1), int(p2)] = True
+                excl_np[int(p2), int(p1)] = True
+            excl_mask = jnp.asarray(excl_np, dtype=bool)
+
+            if num_groups == 0:
+                interaction_mat = np.ones((num_particles, num_particles), dtype=np.int32)
+                np.fill_diagonal(interaction_mat, 0)
+            else:
+                interaction_mat = np.zeros((num_particles, num_particles), dtype=np.int32)
+                for s1, s2 in groups_sets:
+                    for a1 in s1:
+                        for a2 in s2:
+                            if a1 == a2:
+                                continue
+                            if a1 > a2 and (a2 in s1) and (a1 in s2):
+                                continue
+                            i = min(a1, a2)
+                            j = max(a1, a2)
+                            interaction_mat[i, j] += 1
+                            interaction_mat[j, i] += 1
+            interaction_matrix = jnp.asarray(interaction_mat, dtype=jnp.int32)
 
         # Cutoff, switching, dispersion
         nonbonded_method = force.getNonbondedMethod()
@@ -2390,6 +2777,12 @@ def compile_custom_force(
             computed_value_fns=computed_value_fns,
             global_params=global_params_dict,
         )
+        dispersion_coeff_fn = _build_custom_nonbonded_dispersion_coeff_fn(
+            force=force,
+            pair_eval_fn=_pair_eval,
+            param_names=param_names,
+            computed_value_fns=computed_value_fns,
+        )
 
         return cast(
             "CompiledLeptonForce",
@@ -2412,6 +2805,10 @@ def compile_custom_force(
                 interaction_matrix=interaction_matrix,
                 interaction_groups=interaction_groups,
                 pair_eval_fn=_pair_eval,
+                num_particles=num_particles,
+                sparse_u_indices=sparse_u_indices,
+                sparse_multiplicity=sparse_multiplicity,
+                dispersion_coeff_fn=dispersion_coeff_fn,
             ),
         )
 
