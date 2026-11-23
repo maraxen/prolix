@@ -674,6 +674,7 @@ def make_bundle_from_system(
     boundary_condition: str = "periodic",
     exclusion_spec: Any = None,
     target_bucket_counts: dict[str, int] | None = None,
+    use_size_buckets: bool = True,
 ) -> MolecularBundle:
     """Convert a PhysicsSystem to a MolecularBundle with bucketed padding.
 
