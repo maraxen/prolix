@@ -34,29 +34,33 @@ changes the design in four ways:
 |---|---|---|
 | D1 | Seven tools, registry `prolix`, one body per tool, wired to CLI and MCP by `cisternal.wire` | hand-written CLI+MCP pair (drifts); generic `run_script` tool |
 | D2 | In-process tools run on CPU only, Pallas off, x64 at library default; GPU work is a job | selectable GPU in-process (contention, Blackwell quirks, untestable in CI) |
-| D3 | `render_job` wraps a repo script in an sbatch file and returns the exact `myxcel submit` argv; `submit_job` runs it, dry-run unless `confirm=true` | a prolix long-run executor (no checkpoint API); submit by default; `myxcel submit-job PRESET COMMAND` (no reviewable script) |
-| D4 | `out_dir` is a required argument for in-process tools; `render_job` writes inside the checkout (see §6) | default `outputs/` or cwd |
+| D3 | `render_job` wraps a repo script in an sbatch file under a path `myxcel push` ships and returns the exact `myxcel push` + `myxcel submit` argvs; `submit_job` runs them, dry-run unless `confirm=true`; non-preemptible presets only | a prolix long-run executor (no checkpoint API); submit by default; `myxcel submit-job PRESET COMMAND` (no reviewable script) |
+| D4 | `out_dir` is a required argument for in-process tools; `render_job` writes to `scripts/slurm/agent_jobs/` inside the checkout (git-not-ignored, so `myxcel push` ships it; §6) | default `outputs/` or cwd |
 | D5 | Copy the b1 loader into the package, with a parity test against the script | import from `scripts/`; refactor the script to call the package |
 | D6 | Base `xtrax>=0.4.1b2,<0.5` unchanged; only the `agent` extra pins `xtrax[plugin]>=X,<0.5`; `check_xtrax_pin.py` reads the base floor from pyproject (regex tolerant of extras) | raising the base floor for every library user; two hard-coded floors |
-| D7 | MCP tool wrappers are `async` and run the op via `asyncio.to_thread` under an `asyncio.Lock`-guarded semaphore of 1; a second concurrent call refuses immediately (`busy`) | sync bodies (cisternal runs them on the event loop, A16); queueing silently |
+| D7 | MCP tool wrappers are `async` and run the op via `asyncio.to_thread` under an `asyncio.Lock`-guarded semaphore of 1; a second concurrent call refuses immediately (`busy`) | sync bodies (cisternal runs them on the event loop, A10); queueing silently |
 | D8 | `submit_job` is disabled unless `PROLIX_AGENT_ALLOW_SUBMIT=1` is in the server/CLI environment (set by the human, out of band) | `confirm` flag as the only gate (an agent can set it) |
+| D10 | Console scripts point at `prolix_agent_entry` (a top-level package outside `prolix`) which sets `JAX_PLATFORMS=cpu` before `prolix` is imported (§7) | `jax.config.update` inside `main()` (too late: `import prolix` initialises the backend); refactoring `prolix/__init__` or `cmap.py` (out of scope, follow-up) |
 | D9 | CI installs `--extra dev --extra agent`; ops take an optional pre-built `bundle=` seam so tests skip the 13 s load | importorskip everywhere (everything skips in CI) |
 
 ## 3. Layout and entry points
 
 ```
-src/prolix/agent/__init__.py   require_agent_extra() only (aminx/agent/__init__.py pattern); imports nothing heavy
+src/prolix_agent_entry/__init__.py  prepare(), cli_main(), mcp_main(): top-level package, imports nothing from prolix at import (§7)
+src/prolix/agent/__init__.py   require_agent_extra() raising AgentExtraMissing(ImportError) (aminx/agent/__init__.py pattern); imports nothing heavy
 src/prolix/agent/errors.py     AgentError > InputError, RefusalError
-src/prolix/agent/_runtime.py   ensure_cpu(), cap constants, run lock, versions(), sha256(), atomic_write(), write_record()
+src/prolix/agent/_runtime.py   assert_cpu(), cap constants, run lock, versions(), sha256(), atomic_write(), write_record()
 src/prolix/agent/system.py     load_system_bundle(path, ff_name, periodic): copy of _b1_paramize.paramize_pdb_to_bundle
 src/prolix/agent/ops.py        pure functions, one per operation (no cisternal import); golden tests call these
-src/prolix/agent/render.py     render_job_script(), submit_argv() (no cisternal import)
+src/prolix/agent/render.py     render_job_script(), submit_argvs(), load_allowlist() (no cisternal import)
+src/prolix/agent/job_scripts.txt  render allowlist (§6; package data)
 src/prolix/agent/tools.py      TOOL_NAMES; sync tools in registry "prolix" (CLI) and async to_thread twins in "prolix_mcp" (MCP), same names
-src/prolix/agent/cli.py        require_agent_extra() on its FIRST line; cyclopts app; wire(None, app, ...); main()
-src/prolix/agent/mcp.py        require_agent_extra() on its first line; build_server(); main()
+src/prolix/agent/cli.py        require_agent_extra() on its FIRST line; cyclopts app; wire(None, app, ...); main() (calls xtrax.agent.run_cli(app, app_kwargs={"exit_on_error": False, "print_error": True}) inside a wrapper mapping cyclopts.CycloptsError -> SystemExit(2), the demistify convention, demistify cli_support.py:226-257)
+src/prolix/agent/mcp.py        require_agent_extra() on its first line; build_server(); main() (calls xtrax.agent.serve)
 ```
 
-`pyproject.toml`: `[project.scripts] prolix = "prolix.agent.cli:main"`, `prolix-mcp = "prolix.agent.mcp:main"`;
+`pyproject.toml`: `[project.scripts] prolix = "prolix_agent_entry:cli_main"`, `prolix-mcp = "prolix_agent_entry:mcp_main"` (the entry package sits under `src/`, so `packages.find where=["src"]` ships it; A20);
+`[tool.setuptools.package-data] "prolix.agent" = ["job_scripts.txt"]`;
 `agent = ["xtrax[plugin]>=X,<0.5"]` (cisternal, cyclopts, fastmcp come transitively); base `xtrax>=0.4.1b2,<0.5` is unchanged. `X` = first
 xtrax release containing `xtrax.agent` (after 0.4.1b9; A1). `cli.py` and `mcp.py` call `require_agent_extra()` before any cisternal,
 cyclopts or fastmcp import (they wire at import time), so a missing extra prints the `prolix[agent]` hint instead of a
@@ -65,12 +69,22 @@ cyclopts or fastmcp import (they wire at import time), so a missing extra prints
 a lazy `prolix/__init__` is a follow-up.
 
 ```python
-def main() -> None:                 # cli.py, after the require/import lines
-    _runtime.ensure_cpu()           # FIRST: run_cli starts and dispatches in one call, so nothing can run between
-    agent.run_cli(app)              # exit 2 bad cache config, exit 1 missing xtrax[plugin]
-def main() -> None:                 # mcp.py
-    _runtime.ensure_cpu(); agent.serve(build_server())
+# src/prolix_agent_entry/__init__.py: no prolix import at module level
+def prepare() -> None:
+    os.environ["JAX_PLATFORMS"] = "cpu"          # unconditional; replaces any inherited value, BEFORE `import prolix`
+def cli_main() -> None:
+    prepare()
+    try: from prolix.agent import cli
+    except AgentExtraMissing as e: print(e, file=sys.stderr); raise SystemExit(1)
+    cli.main()                                   # -> xtrax.agent.run_cli(app)
+def mcp_main() -> None: ...                      # same shape, prolix.agent.mcp.main() -> xtrax.agent.serve(build_server())
 ```
+
+`prolix/__init__.py` initialises the JAX backend at import (`physics/cmap.py:39` builds a `jnp.array`; `prolix.physics.system` imports it, A6), so any `prolix.agent.*`
+module is imported after the backend exists and a `jax.config.update` in `main()` is too late. The env var must be set before the first `import prolix`;
+hence the entry package outside `prolix`. `cli.main()`/`mcp.main()` therefore contain no CPU logic; they exist so `python -c` callers and tests can reach the app.
+`python -m prolix.agent.cli` is not a supported entry (no `__main__`); a caller that imports `prolix` first is caught by `assert_cpu()` (§7). Follow-up, not this spec: make `prolix/__init__`
+or `cmap.WT` lazy.
 
 `build_server()` mirrors `aminx.agent.mcp.build_server`: `FastMCP("prolix", instructions=...)`, `cisternal.wire(server, registry="prolix_mcp",
 expected=list(TOOL_NAMES))` (the async twins, D7: cisternal's CLI path is sync, `wired.py:103`, so one async function cannot serve both), `add_middleware(CisternalMiddleware(adapter=PassthroughAdapter(), reraise=True))`. `cli.py`:
@@ -80,9 +94,19 @@ import (demistify `cli.py:1013`). `CONTRACT`: `exit_codes={InputError: 4, Refusa
 write to stdout; logs go to stderr. Tool bodies return dicts and
 raise `AgentError`; they never print (cisternal rule 2).
 
-**Exit codes (published, tested):** 0 success; 1 `xtrax[plugin]`/`prolix[agent]` missing (xtrax.agent, `require_agent_extra`); 2 bad jax-cache
-configuration (xtrax.agent) and cyclopts usage errors (cyclopts' default on a bad argument, A17 confirms in Task 4 by test); 3 `RefusalError` (caps, busy,
-submit disabled); 4 `InputError`; 1 is also an unhandled exception's default traceback status. The table lives in `--help` epilog and a test per row.
+**Exit codes (published, tested; each row has its own test):**
+
+| Code | Meaning | Source | Test |
+|---|---|---|---|
+| 0 | success | | any round trip |
+| 1 | `xtrax[plugin]` or `prolix[agent]` missing | `prolix_agent_entry` catches `require_agent_extra`'s `AgentExtraMissing` and exits 1 with the hint; `xtrax.agent` also exits 1 for missing cisternal (same meaning) (`xtrax/agent.py:98`) | cisternal import blocked, subprocess of `cli_main`: exit 1, stderr names `prolix[agent]` |
+| 1 (overlap) | unhandled exception (Python's traceback status) | interpreter | documented, not a contract; stderr carries a traceback, not the hint |
+| 2 | cyclopts usage error (bad type, missing argument, unknown command), mapped to 2 by the `CycloptsError` wrapper so the code does not depend on the cyclopts version (A28) | `prolix.agent.cli.main` wrapper | `prolix load_system --bogus` exits 2 |
+| 2 (overlap) | bad jax-cache configuration | `xtrax.agent` (`agent.py:93`), stderr prefix `prolix: jax cache configuration error:` | malformed cache setting, trigger copied from xtrax's own test for this exit; assert exit 2 **and** the stderr prefix |
+| 3 | `RefusalError` (caps, busy, submit disabled) | `CONTRACT.exit_codes` | cap refusal |
+| 4 | `InputError` | `CONTRACT.exit_codes` | missing file |
+
+Codes 2 are not distinct: both are "retrying with the same arguments cannot help", and the stderr prefix tells them apart; the overlap is printed in the `--help` epilog. The table lives in the epilog.
 
 ## 4. Operations
 
@@ -96,9 +120,9 @@ inline: they are written to `.npz` and the result carries path and sha256. Share
 | `inspect_params` | parameter rows for one term (`bond,angle,dihedral,improper,charge,lj`), `limit<=200` | same bundle | none | rows, `truncated` |
 | `energy_breakdown` | total, bonded, nonbonded, force stats | `energy_fn_from_bundle` (total); `bonded_energy_fn_from_bundle` = bond+angle+dihedral+improper(+CMAP if present) and no LJ, Coulomb or 1-4 terms (`bundle_md.py:223`; Task 2 records the exact term list in the docstring from a read); nonbonded = total - bonded, includes 1-4 | none | `total`, `bonded`, `nonbonded_by_difference`, median/max force (kcal/mol/Å) |
 | `minimize` | bounded steepest descent (`steps` is not passed: unused, A4) | `run_minimization(..., sd_steps=n)` | `minimized.npz` | energy before/after, `sd_steps`; refuses to report success unless after <= before |
-| `md_smoke` | short NVE or NVT Nose-Hoover; arguments `steps`, `dt_fs`, `ensemble`, `temperature_k` | `run_nve` / `run_nvt_nose_hoover` with `dt = dt_fs / AKMA_TIME_UNIT_FS` (`prolix/simulate.py:56`; AKMA units, `physics/simulate.py:283,310`) | `final.npz` | `finite`, start/end energy, steps, dt, ensemble, `seed:"fixed 0"`; no conservation claim |
-| `render_job` | write an sbatch script (§6) | `render.render_job_script` | `job.slurm` | path, sha256, resources, `submit_argv` |
-| `submit_job` | `myxcel submit` (§6) | `render.submit_argv` + `subprocess.run` | none | `dry_run`, argv, exit code, stdout, stderr |
+| `md_smoke` | short NVE or NVT Nose-Hoover; arguments `steps`, `dt_fs`, `ensemble` (`nve`\|`nvt`), `temperature_k` (NVT only; passing it with `nve` is `InputError`, because `run_nve` hard-codes 300 K initial velocities and key 0 at `physics/simulate.py:284-286`) | `run_nve(ef, x0, steps, dt, mass=masses)` / `run_nvt_nose_hoover(ef, x0, steps, dt, temperature=temperature_k, mass=masses)`, `masses = bundle.masses[:n_real]` (the default `mass=1.0` would be unit masses), `dt = dt_fs / AKMA_TIME_UNIT_FS` (`prolix/simulate.py:56`; AKMA units, `physics/simulate.py:283,310`) | `final.npz` | `finite`, start/end energy, steps, dt, ensemble, `temperature_k` (NVT) or `init_velocity_temperature_k: 300 (fixed by run_nve)` (NVE), `seed:"fixed 0"`; no conservation claim |
+| `render_job` | write an sbatch script (§6) | `render.render_job_script` | `scripts/slurm/agent_jobs/<name>/job.slurm` | path, sha256, resources, `submit_argvs` |
+| `submit_job` | `myxcel push` then `myxcel submit` (§6) | `render.submit_argvs` + `subprocess.run` | none | `dry_run`, per-step argv/exit/stdout/stderr, `slurm_id`, `follow` |
 
 Positions: `api.bundle_md.active_positions(bundle)` (real atoms), as `_b1_paramize.bundle_force_stats` does; masses `bundle.masses[:n_real]`.
 
@@ -117,7 +141,7 @@ An H-free PDB is **warned, not refused**: the loader adds no hydrogens (both fix
 systems are always `free` boundary (C10). `out_dir` must resolve (symlinks followed) under `$PROLIX_AGENT_OUT_ROOT` if set, else under cwd; `..` escapes
 refuse. Side files are written to `<name>.tmp.npz` (a `.npz` suffix, so `np.savez` does not append one) then `os.replace`d.
 
-**Concurrency (D7, A16):** cisternal runs a sync tool body directly on the event loop (compose.py:130-133 via `shim.dispatch`, shim.py:62-64), so a 25 s
+**Concurrency (D7, A10; the CLI path is sync, A16):** cisternal runs a sync tool body directly on the event loop (compose.py:130-133 via `shim.dispatch`, shim.py:62-64), so a 25 s
 op would freeze the server. MCP wrappers in `tools.py` are `async def` and call the op through `asyncio.to_thread`; a module-level `asyncio.Lock`
 admits one op at a time and a second concurrent call raises `RefusalError("busy")` at once (`lock.locked()` check, no waiting). The CLI path calls
 the sync op directly. Test: start one op blocked on a `threading.Event`, call a second, assert `busy` and that the event loop stays responsive
@@ -140,26 +164,31 @@ result {...}
 
 ## 6. Job rendering and submission
 
-Today (read): `scripts/slurm/*.slurm` carry `#SBATCH` headers (`b1_init_exec.slurm:2-10`: `mit_preemptable`, `gpu:h200:1`, 12:00:00,
-relative `outputs/logs/slurm/` logs), `source scripts/slurm/_common_env.sh` (cd to repo root, lock-keyed uv venv via `_uv_env.sh`
-under myxcel), then `uv run python scripts/...`. `myxcel.toml` has presets and `[uv] venv = "lock-keyed"`. `myxcel submit REMOTE PROJECT
-SCRIPT_PATH` (flags `--dry-run`, `--respect-directives`, `--array`, `--partition`, `--time`) requires the script to exist locally and
-translates a path **inside the project's local tree** to the matching remote path; a script outside it is passed verbatim and must
-already exist on the remote (myxcel `cli.py:1792-1830`, A12). No prolix executor exists for production MD, ensembles, REMD or fitting:
-they are ad hoc scripts, with no checkpoint or resume API.
+Today (read): `scripts/slurm/*.slurm` carry `#SBATCH` headers, `source scripts/slurm/_common_env.sh` (cd to repo root, lock-keyed uv venv via `_uv_env.sh`
+under myxcel), then `uv run python scripts/...`. `myxcel.toml` has `[uv] venv = "lock-keyed"`. **`myxcel submit REMOTE PROJECT SCRIPT_PATH` does not upload anything**:
+it requires the script to exist locally and translates a path inside the project's local tree to the remote path, so the file must already be on the remote
+(`cli.py:1792-1830`, A12). **`myxcel push` ships exactly `git ls-files --cached --others --exclude-standard` minus profile excludes** (`rsync.py:173-182,69-80`), and
+`.gitignore:27` ignores `outputs/`, so an artifact under `outputs/` would never reach the remote and the submit would fail there (A21). Hence the artifact lives under
+`scripts/slurm/agent_jobs/`, which no ignore rule matches (`git check-ignore` exit 1, A22); untracked-but-not-ignored files are pushed. No `.gitignore` entry may be added for that
+directory (it would silently break the push). Rendered dirs stay untracked; a human deletes them.
+No prolix executor exists for production MD, ensembles, REMD or fitting: they are ad hoc scripts with no checkpoint or resume API (§1.4).
 
 **Contract.** `render_job(script, args, preset, time, name, repo_root=None)`:
 - `script`: repo-relative path under `scripts/`, `.py`, existing, resolving inside `repo_root` (`..`, absolute, symlink escapes refused), **and listed in
-  `src/prolix/agent/job_scripts.txt`** (an allowlist file in the package; initial content the scripts a human names in the PR; empty list means none renders).
-  `repo_root` defaults to the nearest ancestor of cwd with `pyproject.toml` `name = "prolix"` and `scripts/slurm/_uv_env.sh`, else `InputError`.
-- Artifact: `<repo_root>/outputs/agent_jobs/<name>/job.slurm` and `render_job.json` (script sha256, source script sha256, args, preset, time, git rev).
-  Re-rendering an existing `<name>` refuses (`InputError`), so a rendered script is immutable after review. Writing inside the checkout is what lets
-  `myxcel submit` map the path; the one exception to D4.
-- `args`: strings, each `shlex.quote`d. `preset` closed table: `cpu_quick` (`#SBATCH --partition=mit_quicktest --time=0:10:00 --cpus-per-task=2 --mem=4G`, the
-  headers of `l3_smoke.slurm:2-9`; `mit_quicktest` is a partition used in repo scripts, not a myxcel.toml preset) or `gpu_h200_preempt` (`mit_preemptable`,
-  `--gres=gpu:h200:1`, 8 cpus, 256G; `b1_init_exec.slurm:2-8`). `time` `HH:MM:SS`, default and maximum `12:00:00`. `name` `[A-Za-z0-9_-]{1,40}`.
-- Template (golden-tested; the header sources are those scripts actually use: `l3_smoke.slurm:34-35` and `b1_init_exec.slurm:111-115`, not `_common_env.sh`, whose
-  `write_engaging_manifest.py` call is a side effect we do not want):
+  `src/prolix/agent/job_scripts.txt`**. `repo_root` defaults to the nearest ancestor of cwd with `pyproject.toml` `name = "prolix"` and `scripts/slurm/_uv_env.sh`, else `InputError`.
+- **`job_scripts.txt` format (exact):** UTF-8, one repo-relative POSIX path per line; blank lines and lines whose first non-space character is `#` are ignored; no globs; no other syntax.
+  Initial content, exactly one path line: `scripts/benchmarks/prolix_vs_openmm_speed.py` (exists, argparse CLI with `--sweep`/`--warmup`, A23); the PR author adds more only by naming them in the PR.
+  Read only through `render.load_allowlist()` using `importlib.resources.files("prolix.agent").joinpath("job_scripts.txt")` (shipped as package data, §3). An empty or missing-entry list renders nothing (`InputError`).
+- Artifact: `<repo_root>/scripts/slurm/agent_jobs/<name>/job.slurm` and `render_job.json` (script sha256, source script sha256, args, preset, time, git rev).
+  Re-rendering an existing `<name>` refuses (`InputError`), so a rendered script is immutable after review. The one exception to D4.
+- `args`: strings, each `shlex.quote`d. `preset` closed table (**non-preemptible only**):
+  `cpu_quick` (`#SBATCH --partition=mit_quicktest --time=0:10:00 --cpus-per-task=2 --mem=4G`, headers of `l3_smoke.slurm:2-9`) or
+  `gpu_l40s` (`--partition=mit_normal_gpu --gres=gpu:l40s:1 --cpus-per-task=16 --mem=64G`, headers of `prof_ensemble_apply_probe.slurm:2-7`).
+  `time` `HH:MM:SS`; defaults and maxima: `cpu_quick` 0:10:00, `gpu_l40s` 2:00:00 (placeholder, the partition limit is not verified, A24). `name` `[A-Za-z0-9_-]{1,40}`.
+  **Why no `mit_preemptable` preset:** a preempted job is requeued and restarts from step 0, because the target scripts have no checkpoint API (§1.4). A preemptable preset is added only together with
+  a chunked, resumable runner (each unit its own process and timeout, completion stamp and sha256 of input and artifact, reuse only on a hash match); that is the follow-up, and `--auto-requeue` is rejected under
+  `--respect-directives` anyway (`cli.py:1761`, A25). The 2 h cap bounds one job; there is no multi-hour single timeout.
+- Template (golden-tested; header sources `l3_smoke.slurm:34-35` and `b1_init_exec.slurm:111-115`, not `_common_env.sh`, whose `write_engaging_manifest.py` call is a side effect we do not want):
   ```
   #!/bin/bash
   <preset #SBATCH lines> --job-name=prolix_<name> --output/--error=outputs/logs/slurm/%j.<name>.{out,err}
@@ -172,31 +201,38 @@ they are ad hoc scripts, with no checkpoint or resume API.
   echo "=== <name> exit=${rc} ==="
   exit "${rc}"
   ```
-  `|| rc=$?` keeps the status line reachable under `set -e` (a bare `echo $?` after the command never runs on failure; the golden test also runs the template
-  with a stub `uv` that fails and asserts the line prints and the script exits non-zero). No `bth run`.
-- Result: `artifact` (absolute path of `job.slurm`), `submit_argv`, `notes` (sync the checkout to the remote, then submit).
+  `|| rc=$?` keeps the status line reachable under `set -e` (the golden test also runs the template with a stub `uv` that fails and asserts the line prints and the script exits non-zero). No `bth run`.
+- Result: `artifact` (absolute path), `submit_argvs` (the two argvs below), `notes`.
 
-`submit_argv = ["myxcel","submit",<remote>,"prolix",<absolute artifact path>,"--respect-directives"]`, executed with `cwd=repo_root`. myxcel resolves the script
-path and maps it to the remote only when it lies under `profile.local_workspace/<project>` or the detected worktree root (`cli.py:1793-1820`); a render from a
-checkout that is not that tree gets myxcel's own "script is outside ..." warning, so `notes` states that `repo_root` must equal the myxcel project root. Test: a stub `myxcel` records argv and cwd; assert the artifact path is absolute, exists, and sits under `repo_root`.
+`submit_argvs = [push, submit]`, both with `cwd=repo_root`:
+- push: `["myxcel","push",<remote>,"prolix","--apply","--yes"]` (`--dry-run` instead of `--apply --yes` unless `confirm`; push is dry-run by default and `--apply` performs it, `cli.py:433-445`).
+- submit: `["myxcel","submit",<remote>,"prolix",<absolute artifact path>,"--respect-directives"]` (`--dry-run` appended unless `confirm`).
+myxcel maps the script path only under `profile.local_workspace/<project>` or the detected worktree root (`cli.py:1793-1820`); elsewhere it prints "script is outside ..." and the remote path must already exist, so `notes` states `repo_root` must equal the myxcel project root.
+`push` is additive and ships the whole non-ignored tree, not just the script; `notes` says so.
 
 `submit_job(name, remote="engaging", confirm=false, repo_root=None)`:
 - Threat model: the caller is an LLM agent that can set any tool argument and read tool output, but cannot set the server's or CLI's process environment. So `confirm`
-  is a typo guard only; the authorisation is **`PROLIX_AGENT_ALLOW_SUBMIT=1` in the process environment** (D8). Unset: any non-dry-run attempt raises `RefusalError`;
-  dry-run still works. Residual risk: an agent that can edit the human's shell profile or launch its own server; out of scope, named in the PR.
-- Refuses unless `render_job.json` exists, the artifact's sha256 equals the recorded one (edited scripts do not submit), and the recorded source-script sha256 still
-  matches the file in `repo_root`. Appends `--dry-run` unless `confirm`; runs `subprocess.run(argv, shell=False, timeout=120, capture_output=True, cwd=repo_root)`; returns argv,
-  exit code, stdout, stderr; parses no job id. Missing `myxcel` raises `InputError` with the argv for a human to run. `subprocess` is spawn-safe; cisternal forbids only `fork` multiprocessing.
+  is a typo guard only; the authorisation is **`PROLIX_AGENT_ALLOW_SUBMIT=1` in the process environment** (D8). Unset: any non-dry-run attempt raises `RefusalError`; dry-run still works.
+  Residual risk: an agent that can edit the human's shell profile or launch its own server; out of scope, named in the PR.
+- Refuses unless `render_job.json` exists, the artifact's sha256 equals the recorded one, and the recorded source-script sha256 still matches the file in `repo_root`. Runs push, then (only if push exit 0) submit, each
+  `subprocess.run(argv, shell=False, timeout=120, capture_output=True, cwd=repo_root, env=os.environ minus JAX_PLATFORMS)`. Returns per-step argv, exit code, stdout, stderr, plus `slurm_id`:
+  parsed from the submit stdout line matching `^slurm_id:\s*(\d+)$` (myxcel prints it at `cli.py:2175`, A26), `null` on dry-run or no match (never guessed).
+  **Following the job:** the result's `follow` field names myxcel's `job_status(remote, slurm_id)` MCP tool (`myxcel/tools.py:116`); prolix adds no status tool (the owner's myxcel MCP server already has one, A26).
+  Missing `myxcel` raises `InputError` with both argvs for a human to run. `subprocess` is spawn-safe; cisternal forbids only `fork` multiprocessing.
+- **`--dry-run` proves:** the artifact and its sha256 pins check out, `myxcel` resolves the profile/project and maps the script path, and the sbatch line myxcel would run is printed. **It does not prove:**
+  that the remote has the file (push dry-run only lists what would transfer), that the partition/gres/time are accepted by Slurm, that the uv env builds, or that the script runs.
 
 ## 7. Process, device and multiprocessing policy
 
 - Startup is `xtrax.agent` only; `main()` never calls `jax_cache.configure()` or `cisternal.init()` itself.
-- `ensure_cpu()`: `jax.config.update("jax_platforms","cpu")`, first statement of both `main()`s (A6), never edits `os.environ`. `tests/agent/conftest.py` calls it in a session-scoped autouse fixture before any test touches JAX, so a GPU host (titanix) does not make every in-process test refuse (C9). Each in-process
-  op re-asserts `jax.default_backend() == "cpu"` and raises `RefusalError` if a backend was already initialised elsewhere (fails closed; a
-  GPU box cannot silently run an in-process tool on GPU). `xtrax/jax_cache.py` has no `devices(`/`default_backend`/`xla_bridge` call (A6);
-  a subprocess test checks that `import prolix` leaves `jax.lib.xla_bridge.backends_are_initialized()` false. Pallas stays default-off
-  (`pallas_kernels.py:81-92`, enabled only by `PROLIX_USE_PALLAS`); the record stores the flag. x64 is untouched (tests flip it per fixture,
-  `tests/physics/conftest.py:66-80`). No `device=` argument is offered.
+- **CPU policy (D10):** `prolix_agent_entry.prepare()` sets `os.environ["JAX_PLATFORMS"]="cpu"` (unconditionally, overriding an inherited value) before `prolix` is imported. Probe: with the
+  variable set first, `import prolix` then yields backends `['cpu']` and `default_backend()=='cpu'` (A6); without it the backend is initialised at import by `cmap.py:39` (A6), so later
+  `jax.config.update` cannot help. The earlier "`ensure_cpu()` via `jax.config.update`" is removed.
+- `_runtime.assert_cpu()` (each in-process op calls it first): raises `RefusalError` unless `jax.default_backend() == "cpu"`. Fails closed for callers who import `prolix` before the entry point (a library user, `python -m`).
+  `xtrax/jax_cache.py` has no `devices(`/`default_backend`/`xla_bridge` call (A6). Pallas stays default-off (`pallas_kernels.py:81-92`, enabled only by `PROLIX_USE_PALLAS`); the record stores the flag. x64 is untouched
+  (tests flip it per fixture, `tests/physics/conftest.py:66-80`). No `device=` argument is offered.
+- Tests: `tests/agent/conftest.py` cannot set the env early enough inside a pytest process that already imported jax (other conftests import it), so it asserts `jax.default_backend()=="cpu"` at session start and calls
+  `pytest.exit` naming `JAX_PLATFORMS=cpu pytest tests/agent` otherwise (loud, not silent). The real-entry-point test is a subprocess (§11 Device policy).
 - No `multiprocessing`: `src/` has none (A15); a test greps `src/prolix/agent` for `multiprocessing`/`os.fork`.
 - `MAX_ATOMS` bounds the dense `N x N` exclusion matrices (`bundle_md.py` docstring: ~4.4 GB at N=23,558).
 
@@ -206,7 +242,7 @@ checkout that is not that tree gets myxcel's own "script is outside ..." warning
 and `xtrax[extra,...]>=X,<U`; CI runs it (`ci.yml:61-63`). `tests/scripts/test_check_xtrax_pin.py` asserts the parsed floor equals the base specifier and that the `agent` extra's
 floor is >= it (a test with an `xtrax[plugin]>=...` string proves the regex). `uv.lock` regenerates in the same PR.
 `CHANGELOG.md` entry; README "Agent CLI/MCP" section (~10 lines). Not added: `agent_plugin.json`, skills, `.mcp.json`, PDB output (`.npz` only),
-GPU in-process, a lazy `__init__`, long-run executors or checkpointing, migrating `_b1_paramize`.
+GPU in-process, a preemptable job preset (needs a resumable runner), a prolix job-status tool (use myxcel's `job_status`), a lazy `__init__`, long-run executors or checkpointing, migrating `_b1_paramize`.
 
 ## 9. Old vs new
 
@@ -215,18 +251,18 @@ GPU in-process, a lazy `__init__`, long-run executors or checkpointing, migratin
 | Entry points | none | `prolix`, `prolix-mcp` |
 | PDB loading | `from_pdb` (no parameters, silent) or an unpackaged script | `load_system_bundle`, fails closed |
 | Bundle factory | `NameError` on every call | fixed by #46 (dependency) |
-| Long runs | hand-edited `.slurm`, manual submit | `render_job` + `submit_job` (dry-run default) |
+| Long runs | hand-edited `.slurm`, manual submit | `render_job` + `submit_job` (push then submit, dry-run default, non-preemptible presets, `slurm_id` returned) |
 | Outputs | `outputs/` by convention | `out_dir` + JSON record (sha256s, versions, cache setting) |
 | xtrax floor | pyproject `0.4.1b2`, checker `0.4.0a6` | one floor, checker reads pyproject |
 
 ## 10. Tasks (one PR; commits in order)
 
 - **Prerequisite, not a task:** maraxen/prolix#46 (`use_size_buckets` fix) must be on `main` before Task 1; rebase onto it. Do not re-fix it here.
-- **Task 1, scaffold**: `agent/{__init__,errors,_runtime}.py`, pyproject scripts/extra/floor, `check_xtrax_pin.py`, lock. Gate: `import prolix.agent`
-  loads none of cisternal/fastmcp/cyclopts; pin test green. ~150 LOC.
+- **Task 1, scaffold**: `prolix_agent_entry/__init__.py`, `agent/{__init__,errors,_runtime}.py`, `agent/job_scripts.txt`, pyproject scripts/extra/package-data/floor, `check_xtrax_pin.py`, lock. Gate: `import prolix.agent`
+  loads none of cisternal/fastmcp/cyclopts; `import prolix_agent_entry` leaves `prolix` unimported; pin test green; `uv build --wheel` output contains `prolix_agent_entry/` and `prolix/agent/job_scripts.txt` (`unzip -l`). ~170 LOC.
 - **Task 2, operations and loader**: `system.py`, `ops.py`, caps calibration (table goes in the PR). Gate: round-trip tests. ~400 LOC.
-- **Task 3, render/submit**: `render.py`. Gate: golden test. ~200 LOC.
-- **Task 4, wiring**: `tools.py`, `cli.py`, `mcp.py`, README, changelog. Gate: parity tests. ~250 LOC.
+- **Task 3, render/submit**: `render.py` (allowlist loader, render, push+submit argvs, `slurm_id` parse). Gate: golden, allowlist, pushed-set and stub-myxcel tests. ~250 LOC.
+- **Task 4, wiring**: `tools.py`, `cli.py`, `mcp.py`, README, changelog. Gate: parity tests, exit-code table tests, entry-point subprocess test (§11). ~250 LOC.
 - **Task 5, tests** (§11), fixture `tests/agent/data/mini.pdb` = residues 1-3 of `data/pdb/1CRN.pdb` (`awk '$1=="ATOM" && $6<=3'` plus `END`;
   20 atoms; parameterises in the probe, A8). ~500 LOC.
 
@@ -240,23 +276,31 @@ real loader, the `_b1_paramize` parity test, the cap wall-clock test. Task 5 rec
 - **Registry parity:** `EXPECTED_TOOLS` (seven names) == `set(TOOL_NAMES)` == the `prolix` registry snapshot == the `prolix_mcp` registry snapshot == `build_server()`
   tool names == cyclopts command names. Control: a registry missing one name makes `wire(expected=)` raise. Each MCP twin is `inspect.iscoroutinefunction`; each CLI tool is not.
 - **Missing extra:** with `cisternal` import blocked (`builtins.__import__` raising `ModuleNotFoundError(name="cisternal")`), importing `prolix.agent.cli`
-  raises the `prolix[agent]` `ImportError` hint, not the raw error. Same for `mcp`.
+  raises `AgentExtraMissing` carrying the `prolix[agent]` hint, not the raw error; a subprocess of `cli_main` exits 1 with that hint on stderr. Same for `mcp_main`.
+- **Exit-code table:** one test per row of the §3 table (rows 0, 1, 2 usage, 2 cache with stderr prefix, 3, 4), each asserting code and stderr text; the usage-error test is the guard on cyclopts' exit code in the locked version.
 - **Round trip, all tools** (CI: injected tiny bundle; slow: `mini.pdb`): op call and CLI call (`cli.app([...,"--json"], result_action="return_value")` with captured stdout, which
   must parse as one JSON object and contain nothing else) with a tmp `out_dir`. Assert record exists, schema, PDB sha256 equals `hashlib`,
   `jax_cache` key present, output hashes match files, no `*.tmp` left.
 - **Golden vs library** (same process, same flags): `energy_breakdown.total` and `.bonded` equal the direct `energy_fn_from_bundle` /
   `bonded_energy_fn_from_bundle` values (`rtol=1e-6`); `minimize` positions equal `run_minimization(ef, x, sd_steps=n)`; `md_smoke` final positions
-  `allclose` `run_nve` called with `dt_fs / AKMA_TIME_UNIT_FS` (control: calling the tool's dt as raw AKMA differs by a factor ~49 and is detected; a test of the unit conversion with a stub `run_nve` records `dt`); `minimize` asserts after <= before; `load_system_bundle` (slow) energy equals `_b1_paramize.paramize_pdb_to_bundle` (importable via `pythonpath=["."]`, pyproject). Controls:
+  `allclose` `run_nve(..., mass=bundle.masses[:n_real])` called with `dt_fs / AKMA_TIME_UNIT_FS` (a stub `run_nve` also records that `mass` was the bundle's, not the default 1.0; `md_smoke(ensemble="nve", temperature_k=...)` is `InputError`; NVT forwards `temperature_k`) (control: calling the tool's dt as raw AKMA differs by a factor ~49 and is detected; a test of the unit conversion with a stub `run_nve` records `dt`); `minimize` asserts after <= before; `load_system_bundle` (slow) energy equals `_b1_paramize.paramize_pdb_to_bundle` (importable via `pythonpath=["."]`, pyproject). Controls:
   moving one atom 0.1 Å changes the total beyond tolerance; a `from_pdb` bundle is refused by the all-zero-parameter check.
 - **Refusals** (no compile, fast): atoms over a monkeypatched cap of 5; steps over cap; `dt` over cap; missing file (CLI exit 4, cap refusal exit 3, message names
   the cap and `render_job`); existing record without `overwrite`; `script` with `..`, absolute path, non-`.py`, outside `scripts/`; `time=12:00:01`; `submit_job` on a
   name without a matching `render_job.json`; `myxcel` absent. Each asserts nothing was written.
-- **Rendered-script golden:** `render_job(script="scripts/benchmarks/prolix_vs_openmm_speed.py", name, preset="gpu_h200_preempt", time, args=["--n","5; rm -rf /"])`
+- **Rendered-script golden:** `render_job(script="scripts/benchmarks/prolix_vs_openmm_speed.py", name, preset="gpu_l40s", time, args=["--sweep","1000; rm -rf /"])`
   (test asserts the script exists) equals `tests/agent/golden/job_gpu_h200.slurm` byte for byte; the `;` argument is single-quoted; `bash -n` exits 0.
-  `submit_job` with a stub `myxcel` first on PATH (a tmp script echoing argv): `--dry-run` present by default, absent with `confirm=True`. Real `myxcel`
-  and sbatch are never invoked.
-- **Device policy** (subprocess): `import jax` first, then an op: backend is `cpu` and recorded; with `jax.default_backend` patched to return `"gpu"` the op raises
-  `RefusalError`; `import prolix` leaves `backends_are_initialized()` false.
+  `args=["--sweep","1000; rm -rf /"]` (the script's real flag, A23). **Allowlist:** `load_allowlist()` returns exactly `["scripts/benchmarks/prolix_vs_openmm_speed.py"]`; every returned path exists in the checkout, starts `scripts/`, ends `.py`;
+  comments/blank lines are skipped (fixture text); a monkeypatched empty list makes `render_job` raise `InputError`; the file is reachable through `importlib.resources` (and Task 1's gate checks the built wheel contains it).
+  **Pushed-set (non-vacuous):** in a tmp git repo with the repo's real `.gitignore` copied, render, then run `git ls-files -z --cached --others --exclude-standard` (the command myxcel's push uses, `rsync.py:182`) and assert
+  the artifact's repo-relative path is in the output; control: the same assertion for a file under `outputs/agent_jobs/` fails (proves `outputs/` would have been dropped, so the test can go red).
+  `submit_job` with a stub `myxcel` first on PATH (a tmp script echoing argv): the stub receives push then submit, both with `--dry-run` by default; with `confirm=True` and `PROLIX_AGENT_ALLOW_SUBMIT=1` push has `--apply --yes` and submit has no `--dry-run`;
+  a non-zero push exit stops before submit; stub stdout `slurm_id: 4242` yields `slurm_id: 4242`, any other text yields `null`. Real `myxcel` and sbatch are never invoked.
+- **Device policy.** (a) *Real entry point, subprocess, poisoned env:* parent env `JAX_PLATFORMS=cuda`; the child registers an `atexit` printer of `{backends_are_initialized, list(backends()), default_backend()}`,
+  sets `sys.argv=["prolix","--help"]`, calls `prolix_agent_entry.cli_main()`; assert exit 0 and the printed record is `['cpu']`/`cpu`. This fails if the env were set too late: `import prolix` would initialise
+  the poisoned `cuda` backend and raise or yield a non-cpu backend. (b) *Control, same child but `from prolix.agent.cli import main` (bypasses the entry package):* asserts it does **not** end
+  `['cpu']`-only with exit 0 (nonzero exit, or a backend other than cpu); if (b) passes green the test is vacuous and fails. (c) `import prolix_agent_entry` leaves `prolix` out of `sys.modules`; `prepare()` overrides a preset
+  `JAX_PLATFORMS=gpu`. (d) in-process: with `jax.default_backend` patched to `"gpu"` an op raises `RefusalError`. (e) slow: `prolix load_system mini.pdb --out-dir tmp --json` with the poisoned env writes a record with `jax.backend == "cpu"`.
 - **Import lightness** (subprocess): `import prolix.agent`, `.ops`, `.render` and plain `import prolix` leave `cisternal`, `fastmcp`, `cyclopts` out of
   `sys.modules`; positive control: `import prolix.agent.tools` puts all three in.
 - **No-fork grep** of `src/prolix/agent`; positive control: a temp file with the token is flagged by the same helper.
@@ -275,20 +319,31 @@ real loader, the `_b1_paramize` parity test, the cap wall-clock test. Task 5 rec
 | A3 | `make_bundle_from_system` raised `NameError` at `use_size_buckets`, now fixed by prolix#46; a second `NameError` at `_chunked_lj_energy_nl_core` is debt #3586 on the NL path only | the tools would break on bundle build or on the NL path | UNVERIFIED | deferred: #46 not merged in this base; read: src/prolix/physics/system.py:874-876 (pre-fix), src/prolix/physics/optimization.py:363 (NL fwd rule); the tools never pass `neighbor`, enforced by a test |
 | A4 | `run_minimization` uses only `sd_steps`; `run_nve`/`run_nvt` use key 0 and return positions only | caps and record fields change | VERIFIED | read: src/prolix/physics/simulate.py:141-197,259-328 |
 | A5 | `scripts/` is not packaged | the loader could be imported from scripts | VERIFIED | read: pyproject.toml:50-51 |
-| A6 | `jax.config.update("jax_platforms","cpu")` after `import jax` and before device use selects CPU; xtrax `jax_cache` initialises no backend | CPU policy needs an env var set before import | UNVERIFIED | deferred: spike-run tool absent here (scripts/loop/adversarial_metrics.py not in this workspace); an inline probe printed `[CpuDevice(id=0)]` on jax 0.10.2 from the main checkout's older venv, not the worktree lock; read: xtrax src/xtrax/jax_cache.py (no `devices(`/`default_backend` call) |
+| A6 | `jax.config.update("jax_platforms","cpu")` inside `main()` selects CPU (round 1 wording) | CPU policy needs an env var set before `import prolix` | REFUTED | deferred: probe, not spike-run (spike tool absent from this workspace): after `import prolix` `prolix.physics.cmap` is in `sys.modules` and `backends_are_initialized()` is True; read: src/prolix/physics/cmap.py:39 (`jnp.array` at import); changed: §3/§7 CPU policy is `JAX_PLATFORMS=cpu` set by `prolix_agent_entry` before import (D10) |
 | A7 | `jax_cache.current()` returns the applied setting; `as_record()` is JSON-ready | record key changes | VERIFIED | read: xtrax src/xtrax/jax_cache.py:223-240,827-836 |
 | A8 | `mini.pdb` (20 atoms) and 1CRN (327 atoms) parameterise through `_b1_paramize` once #46 is applied, with finite energies and the timings used for calibration | fixture and caps change | UNVERIFIED | deferred: spike-run tool absent; inline probe on a patched temp copy (CPU, 4 threads, older venv): 20 atoms load 13.5 s, grad 13.2 s, 50 sd 2.4 s, 200 NVE 2.7 s; 327 atoms 9.3 s, 14.7 s, 3.1 s, 3.7 s |
 | A9 | `import prolix` takes ~13 s and imports none of cisternal, fastmcp, cyclopts | lightness test and `--help` note change | UNVERIFIED | deferred: spike-run tool absent; one cold inline run, 12.9 s, three `in sys.modules` checks False |
 | A10 | cisternal runs sync tool bodies on the event loop, so FastMCP worker threads cannot be relied on (replaces the earlier wrong thread assumption) | async twins unnecessary | VERIFIED | read: cisternal src/cisternal/registration/compose.py:130-133; shim.py:62-64 |
 | A11 | `prolix.__version__` is "0.1.0" while pyproject says 1.0.0, so the record reads `importlib.metadata` | record shows a wrong version | VERIFIED | read: src/prolix/__init__.py:3; pyproject.toml:7 |
 | A12 | `myxcel submit REMOTE PROJECT SCRIPT_PATH` accepts `--dry-run`/`--respect-directives`, requires a local script, and maps in-tree paths to the remote | contract changes | VERIFIED | read: myxcel src/myxcel/cli.py:1689,1792-1830 |
-| A13 | the project name `prolix` and remote `engaging` exist in the owner's myxcel config | `submit_argv` defaults change | UNVERIFIED | deferred: remote profiles live in the owner's `~/.config/myxcel`, not read on purpose; both are parameters |
+| A13 | the project name `prolix` and remote `engaging` exist in the owner's myxcel config | `submit_argvs` defaults change | UNVERIFIED | deferred: remote profiles live in the owner's `~/.config/myxcel`, not read on purpose; both are parameters |
 | A14 | `bonded_energy_fn_from_bundle` is the bonded-only energy | breakdown drops to total only | VERIFIED | read: src/prolix/api/bundle_md.py:223,579-604 |
 | A16 | cisternal's CLI path calls tool bodies synchronously, so async tools need a separate MCP registry | one async tool would return an unawaited coroutine on the CLI | VERIFIED | read: cisternal src/cisternal/registration/wired.py:103 (`apply_recovery_sync`) |
-| A17 | dt units are AKMA (1 unit = 48.888 fs) in `run_nve`/`run_nvt_nose_hoover`; cyclopts exits 2 on usage errors | dt conversion or exit table changes | UNVERIFIED | read: src/prolix/simulate.py:56 and physics/simulate.py:283,310 settle the units; the cyclopts exit code is deferred to a Task 4 test |
+| A17 | dt units are AKMA (1 unit = 48.888 fs) in `run_nve`/`run_nvt_nose_hoover` | dt conversion changes | VERIFIED | read: src/prolix/simulate.py:56; src/prolix/physics/simulate.py:283,310 |
 | A18 | CI runs `uv sync --extra dev` and `uv run ty check` | CI changes unneeded | VERIFIED | read: .github/workflows/ci.yml:36,59 |
 | A19 | `format_success` is required for `--json` output; `json_option` only adds a flag | `--json` would be inert | VERIFIED | read: cisternal src/cisternal/registration/cli_contract.py:118-133 |
 | A15 | cisternal: `@tool(registry=...)`, `wire(server, app, registry, expected, cli_contract)`, no middleware from `wire`, fork unsupported; `src/prolix` uses no `multiprocessing` | wiring or spawn policy changes | VERIFIED | read: cisternal src/cisternal/registration/decorator.py:54-65; wired.py:408-420; src/prolix/tiling/planner.py:9 is the only `fork` hit (a comment) |
+| A20 | a package `src/prolix_agent_entry/` with `__init__.py` is shipped by the existing `packages.find where=["src"]`, and `[tool.setuptools.package-data]` ships `job_scripts.txt` | scripts would not resolve after install | UNVERIFIED | deferred: no build run (never run a build here); read: pyproject.toml:50-51; Task 1 gate inspects the built wheel |
+| A21 | `myxcel push` ships only files `git ls-files --cached --others --exclude-standard` lists (minus excludes), and `myxcel submit` uploads nothing | artifact location is free | VERIFIED | read: myxcel src/myxcel/rsync.py:173-182,69-80; myxcel src/myxcel/cli.py:1792-1830 |
+| A22 | `scripts/slurm/agent_jobs/x/job.slurm` is not git-ignored in prolix; `outputs/` is | artifact path is dropped by push | VERIFIED | read: .gitignore:27; inline `git check-ignore -v scripts/slurm/agent_jobs/x/job.slurm` exited 1 (no match) |
+| A23 | `scripts/benchmarks/prolix_vs_openmm_speed.py` exists with argparse flags `--sweep`, `--warmup` (no `--n`) | golden args and allowlist content change | VERIFIED | read: scripts/benchmarks/prolix_vs_openmm_speed.py:228-231 |
+| A24 | `mit_normal_gpu` with `gpu:l40s:1`, 16 cpus, 64G is a header prolix scripts use; its walltime limit is 2 h or more | `gpu_l40s` max time changes | UNVERIFIED | deferred: partition limits are cluster state; read: scripts/slurm/prof_ensemble_apply_probe.slurm:2-7 (25 min used) |
+| A25 | `myxcel submit --auto-requeue` is rejected together with `--respect-directives`; preemptable jobs without a resumable runner restart from scratch | a requeue flag could rescue a preemptable preset | VERIFIED | read: myxcel src/myxcel/cli.py:1699,1761-1762,2087-2089; prolix src/prolix/physics/simulate.py:141-197,259-328 |
+| A26 | `myxcel submit` prints a `slurm_id: <n>` line on success, and `job_status(remote, slurm_id)` exists as a myxcel MCP tool | id parse or follow-up pointer changes | VERIFIED | read: myxcel src/myxcel/cli.py:2175; myxcel src/myxcel/tools.py:116-122 (output format may change; parse falls back to `null`) |
+| A27 | with `JAX_PLATFORMS=cpu` set before `import prolix`, only the cpu backend is initialised | CPU policy fails | VERIFIED | deferred: probe, not spike-run (spike tool absent): printed `cpu [CpuDevice(id=0)]`, `True ['cpu']` on the worktree src with the main checkout venv |
+| A28 | cyclopts' own usage-error exit is version-dependent (orchestrator probe 261123: 4.21.1 and 4.25.3 exit 1, 5.5.2 exits 2), so the entry maps `CycloptsError` -> 2 itself; a control test with the wrapper removed must not pin 2 on 4.x; xtrax.agent exits 2 (cache) and 1 (cisternal missing) | exit table changes | UNVERIFIED | deferred: probe, not spike-run, on cyclopts 5.4.2 in a scratch venv (all three exit 2), not prolix's locked version; read: xtrax src/xtrax/agent.py:93,98 (PR #284 worktree); the §11 exit-code test guards the locked version |
+| A29 | `run_nve` ignores any temperature argument (300 K, key 0) and takes `mass=`; `run_nvt_nose_hoover` honours `temperature` and `mass` | md_smoke arguments change | VERIFIED | read: src/prolix/physics/simulate.py:259-328 (284-286 for the hard-coded 300 K) |
+| A30 | a mass array of shape `(n_real,)` is accepted by `run_nve`/`run_nvt_nose_hoover` | md_smoke mass handling changes | UNVERIFIED | deferred: no run here; read: src/prolix/api/bundle_md.py:109-117 (`masses_with_prefix` returns a `(prefix,)` mass array); covered by the 3-atom md_smoke CI test |
 
 ## 13. Risks
 
@@ -300,6 +355,9 @@ real loader, the `_b1_paramize` parity test, the cap wall-clock test. Task 5 rec
 | Rendered script drifts from `scripts/slurm` conventions | golden file reviewed against `b1_init_exec.slurm`; presets in one table |
 | Loader copy drifts from the script | parity test |
 | `prolix --help` pays the 13 s import | documented; lazy `__init__` is the follow-up |
+| Entry package name collides or is dropped from the wheel | Task 1 wheel gate; the subprocess test (§11) fails if `prolix` runs without the entry |
+| `agent_jobs/` clutter, `myxcel push` ships the whole tree | documented in `notes`; dirs are untracked and human-deleted |
+| Preempted or timed-out job restarts from step 0 | no preemptable preset; 2 h cap; resumable runner is the follow-up |
 | xtrax release slips | PR stays draft; rollback is reverting it (no library code changes) |
 
 ## 14. Delivery
@@ -316,7 +374,17 @@ Round 1 (challenger C1-C17), verified at source; all accepted except as noted.
 - C2 accepted: `dt_fs` converted by `AKMA_TIME_UNIT_FS`; unit test. C3 accepted: honest latency, per-process bundle/closure cache keyed by sha256, `bundle=` seam.
 - C4 accepted: CI installs `--extra agent` (also for `ty`); CI vs slow test split listed (D9, §11). C5 accepted: `format_success` defined, stdout tested.
 - C6 accepted: absolute artifact path, `cwd=repo_root`, stub-myxcel mapping test. C7 accepted: threat model, env-var gate `PROLIX_AGENT_ALLOW_SUBMIT`, sha256 pinning, script allowlist, no re-render (D8).
-- C8 accepted: template sources `_uv_env.sh` like `l3_smoke.slurm`, header provenance corrected, `rc` capture, stub-`uv` failure test. C9 accepted: conftest `ensure_cpu`.
+- C8 accepted: template sources `_uv_env.sh` like `l3_smoke.slurm`, header provenance corrected, `rc` capture, stub-`uv` failure test. C9 accepted: conftest CPU guard (revised in round 2: F1).
 - C10 accepted: `periodic` dropped. C11 modified: H-free PDBs warn and record `n_hydrogen` rather than refuse, because the probes show the loader adds no hydrogens and the fixtures are H-free. C12 recorded in A6/A8/A9 (old venv, jax 0.10.2). C13 accepted: out_dir root, `.tmp.npz`.
 - C14 accepted: minimize assertion, `bonded` defined (exact term list confirmed from a read in Task 2). C15 accepted: exit-code table. C16 accepted: base floor unchanged, regex handles extras.
 - C17 accepted: Task 0 dropped, depends on #46; debt #3586 scoped to the NL path, tools never pass `neighbor`.
+
+Round 2 (challenger F1-F2, M1-M4, m1-m3), verified at source.
+- F1 accepted: `import prolix` initialises JAX (`cmap.py:39`), so `ensure_cpu()` in `main()` was too late. Console scripts now point at `prolix_agent_entry` (top-level package, no prolix import) which sets `JAX_PLATFORMS=cpu` first (D10, §3, §7); `assert_cpu()` fails closed for other callers. The "`import prolix` leaves backends uninitialised" test is replaced by a subprocess test of the real entry with a poisoned `JAX_PLATFORMS=cuda` plus a bypass control (§11). Lazy `prolix/__init__`/`cmap` stays a follow-up.
+- F2 accepted: `outputs/` is ignored and `myxcel push` ships only non-ignored files while `submit` uploads nothing (A21). Artifact moves to `scripts/slurm/agent_jobs/<name>/`; `submit_job` runs `myxcel push` then `myxcel submit`; the pushed-set test uses myxcel's own `git ls-files` command with a failing control for `outputs/` (§6, §11).
+- M1 accepted: `gpu_h200_preempt` removed; presets are `cpu_quick` and `gpu_l40s` (non-preemptible). Preemptable preset needs a resumable runner (follow-up; `--auto-requeue` is rejected with `--respect-directives`, A25).
+- M2 accepted: exit table rewritten with one test per row; code 1 and 2 overlaps documented with the stderr prefix that separates them; cyclopts exit 2 probed (A28); `AgentExtraMissing` exits 1 through `prolix_agent_entry`.
+- M3 accepted: `job_scripts.txt` format, initial content (`prolix_vs_openmm_speed.py`), loader and tests specified; golden args corrected to the script's `--sweep` flag (A23).
+- M4 accepted: `temperature_k` is NVT-only (NVE with it is `InputError`); both integrators receive `mass=bundle.masses[:n_real]` (A29, A30).
+- m1 accepted: D7/§4 cite A10 (event loop) and A16 (sync CLI). m2 accepted: `slurm_id` parsed from submit stdout, `follow` points to myxcel `job_status` (A26). m3 accepted: what `--dry-run` proves and does not prove is stated in §6.
+- Orchestrator note (post round 2): usage-error exit 2 now comes from a `CycloptsError` wrapper, not cyclopts' default, which is 1 on 4.x and 2 on 5.x (A28).
