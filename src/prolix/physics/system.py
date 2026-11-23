@@ -712,7 +712,7 @@ def make_bundle_from_system(
     _tbc = target_bucket_counts or {}
     _validate_target_bucket_counts(_tbc)
     n_eff = _effective_bucket_count(n, _tbc.get("atom"), "atom")
-    a = _next_bucket(n_eff, ATOM_BUCKETS)
+    a = _next_bucket(n_eff, ATOM_BUCKETS, use_size_buckets=use_size_buckets)
 
     # --- bonded topology -------------------------------------------------
     bonds = _get("bonds")
@@ -750,7 +750,7 @@ def make_bundle_from_system(
     wi = _get("water_indices")
     nw = 0 if wi is None or wi.size == 0 else wi.shape[0]
     nw_eff = _effective_bucket_count(nw, _tbc.get("water"), "water")
-    wb = _next_bucket(max(nw_eff, 1), WATER_BUCKETS)
+    wb = _next_bucket(max(nw_eff, 1), WATER_BUCKETS, use_size_buckets=use_size_buckets)
 
     # --- exclusions -------------------------------------------------------
     # PhysicsSystem: dense (N, max_excl) or pair list (E, 2). Bundle: (E, 2).

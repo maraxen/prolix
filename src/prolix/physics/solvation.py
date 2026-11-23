@@ -573,6 +573,7 @@ def solvate_protein_to_bundle(
     pme_alpha: float = 0.34,
     nonbonded_cutoff: float = 9.0,
     target_bucket_counts: dict[str, int] | None = None,
+    use_size_buckets: bool = True,
 ):
     """Solvate a protein and return a MolecularBundle usable by EnsemblePlan.
 
@@ -637,4 +638,5 @@ def solvate_protein_to_bundle(
         boundary_condition="periodic",
         exclusion_spec=merged.exclusion_spec,
         target_bucket_counts=target_bucket_counts,
+        use_size_buckets=use_size_buckets,
     )
