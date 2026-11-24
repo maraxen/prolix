@@ -88,6 +88,22 @@ energy_fn = system.make_energy_fn(
 energy = energy_fn(positions)
 ```
 
+### Agent CLI and MCP server
+
+Install the extra (`uv sync --extra agent` or `pip install "prolix[agent]"`), then:
+
+```bash
+prolix load_system --pdb protein.pdb --out-dir runs/a --json     # parameterise and validate (CPU)
+prolix minimize --pdb protein.pdb --out-dir runs/a --sd-steps 50
+prolix render_job --script scripts/benchmarks/prolix_vs_openmm_speed.py --name speed1 --preset gpu_l40s
+prolix submit_job --name speed1                                  # dry run; confirm needs PROLIX_AGENT_ALLOW_SUBMIT=1
+prolix-mcp                                                       # the same tools over stdio MCP
+```
+
+Quick operations run in-process on CPU and write `<tool>.json` run records under `--out-dir`. Long
+runs are rendered as Slurm scripts under `scripts/slurm/agent_jobs/` and submitted with myxcel.
+Exit codes: 0 success, 1 extra missing, 2 usage or jax cache configuration error, 3 refused, 4 input error.
+
 ## Development
 
 ### Running Tests

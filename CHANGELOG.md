@@ -5,6 +5,16 @@ All notable changes to Prolix are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## Unreleased
+
+### Added
+- **Agent CLI and MCP server** (`prolix`, `prolix-mcp`; `prolix[agent]` extra, requires `xtrax[plugin]>=0.4.1b10`):
+  seven tools (`load_system`, `inspect_params`, `energy_breakdown`, `minimize`, `md_smoke` on CPU with run records;
+  `render_job`, `submit_job` for long runs through myxcel, dry-run by default and gated by `PROLIX_AGENT_ALLOW_SUBMIT=1`).
+
+### Changed
+- `scripts/ci/check_xtrax_pin.py` reads the base xtrax floor from `pyproject.toml`; CI installs the agent extra.
+
 ## v1.0.0 — 2026-04-26
 
 ### Added
