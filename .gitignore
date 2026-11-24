@@ -72,3 +72,31 @@ analysis/
 # myxcel local-state cache (coldify sidecar, githook bundle) -- regenerable,
 # never authoritative; see .praxia/docs/plans/260812_storage-tiering-standardization.md
 .myxcel/
+
+# praxia telemetry, caches and scratch (machine-local; curated docs, handoffs,
+# plans and the record stores stay tracked)
+.praxia/tmp/
+.praxia/scratch/
+.praxia/phase_logs/
+.praxia/worktree_manifests/
+.praxia/dispatch/
+.praxia/session_log.jsonl
+.praxia/telemetry.jsonl
+.praxia/harness_trace.jsonl
+.praxia/hook_fires-*.jsonl
+.praxia/hook_errors.jsonl
+.praxia/dispatch_cache.jsonl
+.praxia/trace_segments.jsonl
+.praxia/trace_summaries*.jsonl
+.praxia/recon.jsonl
+.praxia/recon_runner.jsonl
+.praxia/discipline_log.jsonl
+.praxia/pending_kb_ingest.jsonl
+.praxia/compaction_checkpoint.json
+.praxia/execute_context.json
+.praxia/loop_triage_cache.json
+.praxia/loop_backlog_scan.json
+.praxia/item_selection.json
+.praxia/vsm_state.json
+.praxia/phase0_spike_report.json
+.praxia/*.lock
