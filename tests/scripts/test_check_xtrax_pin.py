@@ -32,12 +32,26 @@ def _pyproject_text(deps: list[str], agent: list[str] | None = None) -> str:
     return "\n".join(lines) + "\n"
 
 
+def _declared_base_floor(text: str) -> str:
+    """The base xtrax ``>=`` floor, read here with tomllib and no help from the checker's parser."""
+    deps = tomllib.loads(text)["project"]["dependencies"]
+    reqs = [Requirement(d) for d in deps if Requirement(d).name == "xtrax" and not Requirement(d).extras]
+    assert len(reqs) == 1, reqs
+    return next(s.version for s in reqs[0].specifier if s.operator == ">=")
+
+
 def test_real_pyproject_base_floor_matches_checker_constants():
     text = (REPO / "pyproject.toml").read_text()
     floor, upper = pin.base_xtrax_bounds(text)
     assert (floor, upper) == (pin.FLOOR, pin.UPPER)
-    assert Version(floor) == Version("0.4.1b2")
-    assert upper == "0.5"
+    assert Version(floor) == Version(_declared_base_floor(text))
+    assert upper == pin.UPPER
+
+
+def test_control_floor_is_read_from_the_text_not_hard_coded():
+    text = _pyproject_text(["xtrax>=0.4.1b7,<0.5"])
+    assert pin.base_xtrax_bounds(text) == ("0.4.1b7", "0.5")
+    assert _declared_base_floor(text) == "0.4.1b7"
 
 
 def test_real_agent_extra_floor_is_at_least_base_floor():
