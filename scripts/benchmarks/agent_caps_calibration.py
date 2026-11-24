@@ -1,8 +1,14 @@
 """Calibrate the in-process caps of ``prolix.agent`` (spec section 4, Task 2).
 
+PROVISIONAL. This script is a sketch, not a calibration, and it has not been run. Nothing in the
+repo claims that the shipped caps (MAX_ATOMS, MAX_MIN_STEPS, MAX_MD_STEPS, MAX_DT_FS) were
+validated. The validating run is a calibration on a real tiled protein with exclusions, run under
+``bth run`` against the committed ``agent_caps_calibration.bth.toml`` pre-registration.
+
 Times each capped operation at a given size on a synthetic free-boundary system (a 3-D grid of
 atoms, alternating charges, one bond per consecutive pair), using the same ``ops`` functions the
-CLI and MCP call. The caps are lowered until the largest allowed call takes about 60 s.
+CLI and MCP call. The intended rule is that caps are lowered until the largest allowed call takes
+about 60 s; that rule is the pre-registered target, not a result.
 
 Caps are overridden here per run (``--atoms``, ``--sd-steps``, ``--md-steps``, ``--dt-fs``), so a
 size above the shipped cap can be measured. Thread count is recorded from the environment; run

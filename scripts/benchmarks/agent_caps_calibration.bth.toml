@@ -1,3 +1,6 @@
+# PRE-REGISTRATION ONLY. The shipped caps in src/prolix/agent/_runtime.py are PROVISIONAL and are
+# not validated. No calibration has been run. The validating run is a calibration on a real tiled
+# protein with exclusions, executed under `bth run`; this synthetic-system sketch does not replace it.
 [benchmark]
 metric = "passes_target"
 target = "minimize and md_nve each finish within 60 s wall at the shipped caps (MAX_ATOMS=1000, MAX_MIN_STEPS=200, MAX_MD_STEPS=500, MAX_DT_FS=2.0) on a synthetic 1000-atom free-boundary system, 8 CPU threads"
