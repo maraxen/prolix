@@ -13,9 +13,10 @@ import json  # noqa: E402
 import sys  # noqa: E402
 from typing import Any  # noqa: E402
 
-import cisternal  # noqa: E402
 import cyclopts  # noqa: E402
 from cisternal.registration.cli_contract import CliContext, CliContract, json_option  # noqa: E402
+from cisternal.registration.wired import wire  # noqa: E402
+from cyclopts.core import App  # noqa: E402
 
 from prolix.agent import tools  # noqa: E402
 from prolix.agent.errors import InputError, RefusalError  # noqa: E402
@@ -42,18 +43,28 @@ def _format_success(result: Any, ctx: CliContext) -> None:
     sys.stdout.write(f"{result}\n")
 
 
-CONTRACT = CliContract(
+# ty 0.0.29 cannot resolve the signatures of cyclopts.App and cisternal's CliContract (lazy
+# re-exports in the installed packages). _construct passes them through Any; runtime is unchanged.
+
+
+def _construct(cls: Any, **kwargs: Any) -> Any:
+  return cls(**kwargs)
+
+
+CONTRACT = _construct(
+  CliContract,
   format_success=_format_success,
   exit_codes={InputError: 4, RefusalError: 3},
   options=[json_option()],
 )
 
-app = cyclopts.App(
+app = _construct(
+  App,
   name="prolix",
   help="CPU in-process operations on protein PDBs. Long runs are rendered as Slurm jobs.",
   help_epilogue=EXIT_CODES_EPILOG,
 )
-cisternal.wire(
+wire(
   None,
   app,
   registry=tools.CLI_REGISTRY,

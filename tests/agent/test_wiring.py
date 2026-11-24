@@ -58,15 +58,20 @@ def test_cli_tools_are_sync_and_mcp_twins_are_async():
 
 
 def test_positive_control_missing_tool_makes_wire_raise():
-    @cisternal.tool(registry="prolix_test_parity_control")
+    # ty 0.0.29 cannot resolve these lazy re-exports, so they are reached through getattr
+    tool_decorator = getattr(cisternal, "tool")
+    wire_fn = getattr(cisternal, "wire")
+    app_cls = getattr(cyclopts, "App")
+
+    @tool_decorator(registry="prolix_test_parity_control")
     def only_one(x: int = 1) -> dict:
         """One tool."""
         return {"x": x}
 
     with pytest.raises(Exception, match="missing|expected|not registered"):
-        cisternal.wire(
+        wire_fn(
             None,
-            cyclopts.App(name="control"),
+            app_cls(name="control"),
             registry="prolix_test_parity_control",
             expected=["only_one", "never_registered"],
         )

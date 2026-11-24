@@ -56,7 +56,7 @@ def synthetic_system(n_atoms: int):
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
+    parser = argparse.ArgumentParser(description="Calibrate the prolix.agent in-process caps on a synthetic system.")
     parser.add_argument("--atoms", type=int, default=1000)
     parser.add_argument("--sd-steps", type=int, default=200)
     parser.add_argument("--md-steps", type=int, default=500)

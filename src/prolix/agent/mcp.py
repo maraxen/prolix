@@ -23,15 +23,15 @@ _INSTRUCTIONS = (
 
 def build_server() -> "FastMCP":
   """Build the FastMCP server with the MCP registry wired in and cisternal middleware installed."""
-  import cisternal
   from cisternal.adapters.base import PassthroughAdapter
   from cisternal.adapters.v3_middleware import CisternalMiddleware
+  from cisternal.registration.wired import wire
   from fastmcp import FastMCP as FastMCPServer
 
   from prolix.agent import tools
 
   server = FastMCPServer("prolix", instructions=_INSTRUCTIONS)
-  cisternal.wire(server, registry=tools.MCP_REGISTRY, expected=list(tools.TOOL_NAMES))
+  wire(server, registry=tools.MCP_REGISTRY, expected=list(tools.TOOL_NAMES))
   server.add_middleware(CisternalMiddleware(adapter=PassthroughAdapter(), reraise=True))
   return server
 

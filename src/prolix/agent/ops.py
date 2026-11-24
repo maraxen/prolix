@@ -224,7 +224,7 @@ def _jax_state() -> dict[str, Any]:
 
   return {
     "backend": jax.default_backend(),
-    "x64": bool(jax.config.jax_enable_x64),
+    "x64": bool(getattr(jax.config, "jax_enable_x64", False)),
     "devices": [str(d) for d in jax.devices()],
     "pallas": bool(os.environ.get("PROLIX_USE_PALLAS", "")),
   }
@@ -570,7 +570,14 @@ def md_smoke(
   if ensemble == "nve":
     final = run_nve(ef, x0, n, dt_akma, mass=masses)
   else:
-    final = run_nvt_nose_hoover(ef, x0, n, dt_akma, temperature=temperature_k, mass=masses)
+    final = run_nvt_nose_hoover(
+      ef,
+      x0,
+      n,
+      dt_akma,
+      temperature=NVT_DEFAULT_TEMPERATURE_K if temperature_k is None else float(temperature_k),
+      mass=masses,
+    )
   final_np = np.asarray(final)
   finite = bool(np.all(np.isfinite(final_np)))
   e_end = float(ef(final)) if finite else float("nan")
