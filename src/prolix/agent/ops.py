@@ -29,6 +29,10 @@ INSPECT_TERMS = ("bond", "angle", "dihedral", "improper", "charge", "lj")
 INSPECT_LIMIT_MAX = 200
 NO_H_WARNING = "no hydrogens: energies are for a heavy-atom model"
 NVT_DEFAULT_TEMPERATURE_K = 300.0
+# Term classes that energy_breakdown's "bonded" value leaves out relative to the total energy.
+BONDED_EXCLUDES = ("cmap",)
+# Term classes inside "nonbonded_by_difference" (total - bonded), as single_padded_energy adds them.
+NONBONDED_BY_DIFFERENCE_INCLUDES = ("cmap", "lj", "coulomb", "1-4")
 NVE_INIT_TEMPERATURE_K = 300.0  # run_nve hard-codes 300 K initial velocities (A29)
 _CACHE_SIZE = 2
 
@@ -47,8 +51,11 @@ def _out_root() -> Path:
 
 def _resolve_out_dir(out_dir: str | os.PathLike[str]) -> Path:
   """Resolve ``out_dir`` (symlinks followed) and require it under the allowed root."""
-  target = Path(out_dir).expanduser().resolve()
-  root = _out_root()
+  try:
+    target = Path(out_dir).expanduser().resolve()
+    root = _out_root()
+  except OSError as exc:
+    raise InputError(f"cannot resolve out_dir {out_dir!r}: {exc.strerror or exc}") from exc
   if target != root and root not in target.parents:
     raise InputError(
       f"out_dir {target} is outside the allowed root {root} (set PROLIX_AGENT_OUT_ROOT)"
@@ -77,7 +84,7 @@ def _check_pdb(pdb: str | None) -> Path:
 
 def _check_ff(ff: str) -> str:
   try:
-    return resolve_ff_path(ff)
+    return str(Path(resolve_ff_path(ff)).resolve())
   except FileNotFoundError as exc:
     raise InputError(str(exc)) from exc
 
@@ -116,13 +123,19 @@ def _validate_loaded(bundle: Any) -> None:
 
   mask = np.asarray(bundle.bond_mask, dtype=bool)
   params = np.asarray(bundle.bond_params)
+  n_real = int(jnp.asarray(bundle.n_atoms))
+  if n_real == 0:
+    raise InputError("loaded bundle has no real atoms")
+  if not mask.any() and n_real > 1:
+    raise InputError(
+      f"loaded bundle has {n_real} atoms and no bonds (the from_pdb failure mode); "
+      "the loader did not apply a force field"
+    )
   if mask.any() and not np.any(params[mask] != 0):
     raise InputError(
       "loaded bundle has all-zero bond parameters (the from_pdb failure mode); "
       "the loader did not apply a force field"
     )
-  if int(jnp.asarray(bundle.n_atoms)) == 0:
-    raise InputError("loaded bundle has no real atoms")
 
 
 def _get_bundle(
@@ -233,10 +246,13 @@ def _jax_state() -> dict[str, Any]:
 def _jax_cache_state() -> dict[str, Any]:
   try:
     from xtrax import jax_cache
-
+  except ImportError:  # the record must still be written when xtrax is absent
+    return {"configured": False, "error": "xtrax.jax_cache is not importable"}
+  try:
     setting = jax_cache.current()
-  except Exception:  # the record must still be written when xtrax is absent
-    setting = None
+  # Any failure is recorded, not swallowed: the record says why the cache state is unknown.
+  except Exception as exc:
+    return {"configured": None, "error": f"{type(exc).__name__}: {exc}"}
   return setting.as_record() if setting is not None else {"configured": False}
 
 
@@ -302,10 +318,15 @@ def _common_result(
   }
 
 
+def _resolved(path: str | None) -> str | None:
+  """Absolute, symlink-free form of a user path, as recorded in run records."""
+  return None if path is None else str(Path(path).expanduser().resolve())
+
+
 def _inputs(pdb: str | None, ff_path: str | None) -> list[dict[str, Any]]:
   out: list[dict[str, Any]] = []
   if pdb is not None and Path(pdb).is_file():
-    out.append(_sha_bytes_file(Path(pdb)))
+    out.append(_sha_bytes_file(Path(pdb).expanduser().resolve()))
   if ff_path is not None:
     out.append(_sha_bytes_file(Path(ff_path)))
   return out
@@ -354,7 +375,7 @@ def load_system(
     "load_system",
     started=started,
     started_utc=started_utc,
-    args={"pdb": pdb, "ff": ff, "overwrite": overwrite},
+    args={"pdb": _resolved(pdb), "ff": ff_path or ff, "overwrite": overwrite},
     inputs=_inputs(pdb, ff_path),
     outputs=[],
     result=result,
@@ -415,7 +436,13 @@ def inspect_params(
     "inspect_params",
     started=started,
     started_utc=started_utc,
-    args={"term": term, "limit": limit, "pdb": pdb, "ff": ff, "overwrite": overwrite},
+    args={
+      "term": term,
+      "limit": limit,
+      "pdb": _resolved(pdb),
+      "ff": ff_path or ff,
+      "overwrite": overwrite,
+    },
     inputs=_inputs(pdb, ff_path),
     outputs=[],
     result=result,
@@ -434,8 +461,12 @@ def energy_breakdown(
   """Total, bonded and force statistics on real atoms, dense path only (no neighbor list).
 
   ``bonded`` is ``bonded_energy_fn_from_bundle``: bond + angle + dihedral + improper terms. It
-  has no LJ, Coulomb or 1-4 terms, and no CMAP term (``api/bundle_md.py``, ``_bonded_energy_core``).
-  ``nonbonded_by_difference`` is total - bonded, so it includes CMAP, LJ, Coulomb and 1-4.
+  has no CMAP term (``api/bundle_md.py``, ``_bonded_energy_core``), so the result lists
+  ``bonded_excludes = ["cmap"]``. It also has no LJ, Coulomb or 1-4 terms, which are nonbonded
+  by construction.
+  ``nonbonded_by_difference`` is total - bonded. It is not a pure nonbonded energy: it contains
+  every term in ``nonbonded_by_difference_includes`` (CMAP, LJ, Coulomb and the AMBER 1-4 pairs,
+  as ``single_padded_energy`` adds them), listed in the result so a reader need not infer it.
   """
   rt.assert_cpu()
   started, started_utc = time.perf_counter(), _dt.datetime.now(_dt.UTC).isoformat()
@@ -461,6 +492,8 @@ def energy_breakdown(
       "total": e_total,
       "bonded": e_bonded,
       "nonbonded_by_difference": e_total - e_bonded,
+      "bonded_excludes": list(BONDED_EXCLUDES),
+      "nonbonded_by_difference_includes": list(NONBONDED_BY_DIFFERENCE_INCLUDES),
       "median_force": float(np.median(norms)),
       "max_force": float(np.max(norms)),
       "force_units": "kcal/mol/A",
@@ -471,7 +504,7 @@ def energy_breakdown(
     "energy_breakdown",
     started=started,
     started_utc=started_utc,
-    args={"pdb": pdb, "ff": ff, "overwrite": overwrite},
+    args={"pdb": _resolved(pdb), "ff": ff_path or ff, "overwrite": overwrite},
     inputs=_inputs(pdb, ff_path),
     outputs=[],
     result=result,
@@ -518,7 +551,7 @@ def minimize(
     "minimize",
     started=started,
     started_utc=started_utc,
-    args={"sd_steps": n, "pdb": pdb, "ff": ff, "overwrite": overwrite},
+    args={"sd_steps": n, "pdb": _resolved(pdb), "ff": ff_path or ff, "overwrite": overwrite},
     inputs=_inputs(pdb, ff_path),
     outputs=[_sha_bytes_file(out_path)],
     result=result,
@@ -608,8 +641,8 @@ def md_smoke(
       "dt_fs": dt,
       "ensemble": ensemble,
       "temperature_k": temperature_k,
-      "pdb": pdb,
-      "ff": ff,
+      "pdb": _resolved(pdb),
+      "ff": ff_path or ff,
       "overwrite": overwrite,
     },
     inputs=_inputs(pdb, ff_path),

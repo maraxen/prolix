@@ -11,6 +11,8 @@ import os
 from types import SimpleNamespace
 from typing import Any
 
+from prolix.agent.errors import InputError
+
 DEFAULT_FF = "protein.ff19SB.xml"
 
 
@@ -41,16 +43,19 @@ def count_pdb_atoms(pdb_path: str | os.PathLike[str]) -> tuple[int, int]:
   """
   n_atoms = 0
   n_h = 0
-  with open(pdb_path, encoding="utf-8", errors="replace") as fh:
-    for line in fh:
-      if not line.startswith(("ATOM", "HETATM")):
-        continue
-      n_atoms += 1
-      element = line[76:78].strip() if len(line.rstrip("\n")) >= 78 else ""
-      if not element:
-        element = line[12:16].strip().lstrip("0123456789")[:1]
-      if element.upper() == "H":
-        n_h += 1
+  try:
+    with open(pdb_path, encoding="utf-8", errors="replace") as fh:
+      for line in fh:
+        if not line.startswith(("ATOM", "HETATM")):
+          continue
+        n_atoms += 1
+        element = line[76:78].strip() if len(line.rstrip("\n")) >= 78 else ""
+        if not element:
+          element = line[12:16].strip().lstrip("0123456789")[:1]
+        if element.upper() == "H":
+          n_h += 1
+  except OSError as exc:
+    raise InputError(f"cannot read {pdb_path}: {exc.strerror or exc}") from exc
   return n_atoms, n_h
 
 

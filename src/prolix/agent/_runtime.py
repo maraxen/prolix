@@ -9,6 +9,7 @@ import asyncio
 import hashlib
 import importlib.metadata
 import json
+import math
 import os
 import platform
 import tempfile
@@ -18,7 +19,8 @@ from typing import Any
 from prolix.agent.errors import RefusalError
 
 # Hard caps. A call may lower them, never raise them; there is no CLI override.
-# Placeholders: Task 2 lowers them to the calibration table in the PR.
+# PROVISIONAL: these values are not validated. They await a calibration on a real tiled protein
+# with exclusions under `bth run` (scripts/benchmarks/agent_caps_calibration.bth.toml).
 MAX_ATOMS = 1000
 MAX_MIN_STEPS = 200
 MAX_MD_STEPS = 500
@@ -76,8 +78,20 @@ def versions() -> dict[str, Any]:
   return out
 
 
+def _json_safe(value: Any) -> Any:
+  """Replace non-finite floats with None so the record is strict JSON (NaN energies become null)."""
+  if isinstance(value, float) and not math.isfinite(value):
+    return None
+  if isinstance(value, dict):
+    return {k: _json_safe(v) for k, v in value.items()}
+  if isinstance(value, (list, tuple)):
+    return [_json_safe(v) for v in value]
+  return value
+
+
 def dumps_record(record: dict[str, Any]) -> bytes:
-  return (json.dumps(record, sort_keys=True, indent=2) + "\n").encode()
+  text = json.dumps(_json_safe(record), sort_keys=True, indent=2, allow_nan=False)
+  return (text + "\n").encode()
 
 
 __all__ = [
