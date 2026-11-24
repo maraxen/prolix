@@ -94,9 +94,11 @@ Commands are reproducible from any prolix checkout after `git fetch --all`.
 | 142k-line data files bloat `main`'s history. | P1.3 before P2. |
 | Review fatigue on an 86k-line source diff. | P5 slices; review conflict resolutions and P3 changes in full. |
 
-## Decisions for the owner
+## Decisions (owner, 261124)
 
-1. Approve P0 (push the four v3.x branches as backups).
-2. `data/pdb`: git-lfs or a fixtures download?
-3. Land v3.9 as one integration merge (recommended, keeps history) or as a series of squashed slices?
-4. Verify P4 on the locked jax 0.10.2 only, or also on 0.11.x ahead of a planned upgrade.
+1. **P0 approved and done.** `feat/v3.6-cupotential-fixes` (b51ac79), `feat/v3.7-cupotential-phase2` (5683b2f), `feat/v3.8-fastpath-complete` (8caa58e) and `feat/v3.9-complete` (3b8ef0e) are pushed to origin as plain branches.
+2. **`data/pdb` goes to git-lfs** (P1.3), matching the existing LFS use for `data/oracles` gold files.
+3. **One integration merge.** `land/v3.9` merges v3.9 with full history. Review runs over slice-scoped diffs (P5).
+4. **P4 verifies on the locked jax 0.10.2 only.** The P3(a) canary is the guard against a later upgrade that breaks atomics.
+
+Still requires the owner's sign-off: the P2 conflict-resolution table, and the P6 merge itself.
