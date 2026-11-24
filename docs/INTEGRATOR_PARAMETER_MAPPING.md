@@ -1,8 +1,9 @@
-# Integrator Parameter Mapping: Phase 2.1 (make_integrator)
+# Integrator Parameter Mapping (`make_integrator` & `prolix.openmm`)
 
-**Date**: 2026-04-30  
-**Reference**: ADR-005 v2.0, Phase 2.1  
-**Status**: Implementation Complete
+> **Canonical Documentation:** For `KnobSurface.thermostat`, `ProlixOpenMMConfig.integrator_scheme`, and OpenMM `Integrator` parameter mapping (`LangevinMiddleIntegrator`, `LangevinIntegrator`, `VerletIntegrator`, `BrownianIntegrator`, `NoseHooverIntegrator`, `CustomIntegrator`), see [`docs/source/guides/knob_governance.md`](source/guides/knob_governance.md). The reference below documents low-level `make_integrator` step-sequence parameter correspondence.
+
+**Reference**: ADR-005, Modular Step-Sequence Integrator Builder  
+**Status**: Shipped (`v1.0.0`)
 
 ---
 

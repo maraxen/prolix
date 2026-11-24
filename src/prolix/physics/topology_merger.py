@@ -15,6 +15,7 @@ from proxide.core.containers import Protein
 
 from prolix.physics.neighbor_list import ExclusionSpec
 from prolix.physics.water_models import WaterModelType, get_water_params
+from prolix.utils.topology import find_bonded_exclusions
 
 if TYPE_CHECKING:
     from prolix.physics.solvation import SolventTopology
@@ -188,7 +189,6 @@ def merge_solvated_topology(
     merged_angle_params = jnp.concatenate([angle_params, water_angle_params]) if angles is not None else water_angle_params
 
     # 4. Exclusions
-    from prolix.utils.topology import find_bonded_exclusions
     n_total = n_protein + len(solvent_topo.charges)
     exclusions = find_bonded_exclusions(merged_bonds, n_total)
 

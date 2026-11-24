@@ -12,13 +12,15 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-from prolix.padding import PaddedSystem
+from prolix.padding import PaddedSystem, pad_array, select_bucket
 from prolix.physics.electrostatic_methods import ElectrostaticMethod
 from prolix.physics.flash_explicit import (
     flash_explicit_energy,
     flash_explicit_forces,
 )
+from prolix.physics.rigid_water_ke import rigid_tip3p_box_ke_kcal
 from prolix.physics.water_models import WaterModelType, get_water_params
+from prolix.utils import topology
 
 
 def _tip3p_local_frame() -> tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -120,8 +122,6 @@ def make_tip3p_water_system(
     box_vec = jnp.array([box_edge, box_edge, box_edge], dtype=jnp.float64)
 
     # Create sparse exclusion for water (O-H bonds only, all intramolecular)
-    from prolix.padding import pad_array, select_bucket
-    from prolix.utils import topology
 
     bonds_list = []
     for w in range(n_waters):
@@ -314,7 +314,6 @@ def run_nve(
 
         For freeze_geometry=True, n_snapshots=1; otherwise n_snapshots=n_steps+1.
     """
-    from prolix.physics.rigid_water_ke import rigid_tip3p_box_ke_kcal
 
     pos = system.positions[: system.n_real_atoms]
     mass = system.masses[: system.n_real_atoms]
@@ -411,7 +410,6 @@ def run_nvt(
     Returns:
         Dictionary with temperature and energy traces.
     """
-    from prolix.physics.rigid_water_ke import rigid_tip3p_box_ke_kcal
 
     n_waters = system.water_indices[: system.n_real_atoms // 3].shape[0]
     dof_rigid = 6 * n_waters - 3

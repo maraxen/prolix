@@ -1,39 +1,25 @@
-# Prolix Documentation
+# Prolix Documentation Index
 
-Welcome to the Prolix documentation!
+The canonical ReadTheDocs Sphinx + MyST documentation suite is located in [`docs/source/index.md`](source/index.md) and configured via [`.readthedocs.yaml`](../.readthedocs.yaml).
 
-```{toctree}
-:maxdepth: 2
-:caption: Contents
-
-source/index
-```
-
-## Overview
-
-Prolix is a specialized library for Protein Physics and molecular dynamics simulations in JAX.
-
-## Quick Links
-
-- [API Reference](source/api/index.md)
-- [Examples](source/examples/index.md)
-- [GitHub Repository](https://github.com/maraxen/prolix)
-
-## Getting Started
-
-Install Prolix:
+## Building HTML Docs
 
 ```bash
-pip install prolix
+sphinx-build -W --keep-going -b html docs/source docs/_build/html
 ```
 
-Run your first simulation:
+## Quick Navigation
 
-```python
-from prolix.physics import system
-from proxide.physics import force_fields
-
-# Load force field
-ff = force_fields.load_force_field("ff19SB")
-# ... (see examples for more)
-```
+- **[Overview & Quickstart](source/index.md)**
+- **[Installation & Precision Modes](source/installation.md)**
+- **Tutorials**:
+  - [1. Drop-In OpenMM Acceleration (`prolix.openmm`)](source/tutorials/openmm_acceleration.md)
+  - [2. Multi-Replica & Ragged Ligand Screening (`ProlixBatchSimulation` & `EnsemblePlan`)](source/tutorials/batch_screening.md)
+  - [3. Differentiable MD & Force-Field Optimization](source/tutorials/differentiable_md.md)
+  - [4. Portable StableHLO & WebGPU/WASM Export](source/tutorials/stablehlo_export.md)
+- **User Guides**:
+  - [`KnobSurface` & `ProlixOpenMMConfig` Reference](source/guides/knob_governance.md)
+  - [Pallas v3.5 Megakernel Architecture](source/guides/pallas_megakernel.md)
+  - [Physics, Units, & Multi-Engine Validation](source/guides/physics_validation.md)
+  - [Explicit-Solvent OpenMM Comparison Protocol](source/explicit_solvent/openmm_comparison_protocol.md)
+- **[API Reference](source/api/index.md)**

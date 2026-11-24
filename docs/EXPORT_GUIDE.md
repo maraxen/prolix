@@ -1,10 +1,10 @@
 # Prolix Export Guide: StableHLO / WASM Deployment
 
+> **Canonical Documentation:** Both explicit-parameter energy lowering (`export_energy_fn`), Langevin step export (`export_langevin_step`), `EnsemblePlan` trajectory runners (`prolix.api.export_run`), and IREE `wasm32` compilation (`compile_lowered_to_wasm`) are now shipped in `v1.0.0`. See [`docs/source/tutorials/stablehlo_export.md`](source/tutorials/stablehlo_export.md) and [`docs/source/api/export.md`](source/api/export.md) for the complete tutorial and API reference.
+
 ## Overview
 
-The `prolix.export` module exports energy functions to **StableHLO** intermediate representation via JAX's `.lower()` API, enabling deployment to WASM, WebGPU, and portable execution environments.
-
-**Status**: v1.1 — Energy function export ready. Integrator export deferred to v1.2.
+The `prolix.export` module lowers pure-JAX energy functions and trajectory runners inside `export_context()` to **StableHLO** MLIR with zero GPU-locked custom calls, enabling deployment to IREE WebAssembly (`wasm32`), WebGPU, CPU, and TPU runtimes.
 
 ## Why Export?
 

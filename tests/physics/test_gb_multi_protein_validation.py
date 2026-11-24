@@ -20,6 +20,7 @@ from jax_md import space
 from proxide import CoordFormat, OutputSpec, assign_mbondi2_radii, assign_obc2_scaling_factors, parse_structure
 
 from prolix.physics import neighbor_list as nl, system
+from tests._proxide_assets import proxide_asset
 
 # Multi-protein GB dynamics / long compiles — deselect from GitHub-faithful CI (XA-CI).
 pytestmark = [pytest.mark.slow, pytest.mark.dynamics]
@@ -29,14 +30,7 @@ jax.config.update("jax_enable_x64", True)
 
 # Paths
 _DATA_DIR = Path(__file__).parent.parent.parent / "data" / "pdb"
-_FF_PATH = (
-    Path(__file__).parent.parent.parent.parent
-    / "proxide"
-    / "src"
-    / "proxide"
-    / "assets"
-    / "protein.ff19SB.xml"
-)
+_FF_PATH = proxide_asset("protein.ff19SB.xml")
 
 
 def _load_protein_with_gbsa_params(pdb_path: Path) -> tuple:

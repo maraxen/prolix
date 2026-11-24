@@ -12,6 +12,11 @@ import equinox as eqx
 import jax.numpy as jnp
 from jaxtyping import Array, Bool, Float
 
+from prolix.simulate import BOLTZMANN_KCAL
+
+# 1 kcal/(mol * A^3) = 4184 J/mol / (6.02214076e23 /mol * 1e-30 m^3) / 1e5 Pa/bar
+KCAL_MOL_PER_A3_TO_BAR: float = 69476.95457
+
 
 @runtime_checkable
 class Observable(Protocol):
@@ -96,7 +101,6 @@ class Temperature(eqx.Module):
         Returns:
             Scalar temperature in Kelvin
         """
-        from prolix.simulate import BOLTZMANN_KCAL
 
         # Ensure masses are available
         if not hasattr(state, "mass") or state.mass is None:
@@ -293,8 +297,5 @@ class Pressure(eqx.Module):
         # Ideal gas: T = 2*KE / (3*N*k_B), so P = N*k_B*T/V = 2*KE / (3*V)
         # Volume in Angstrom^3; BOLTZMANN_KCAL in kcal/mol/K
         # Pressure in kcal/mol/Angstrom^3; convert to bar
-        # 1 kcal/mol/A^3 = 68568 bar (derived from unit conversion)
-        KCAL_MOL_PER_A3_TO_BAR = 68568.0
-
         pressure_kcal = (2.0 * total_ke) / (3.0 * self.volume_angstrom3)
         return pressure_kcal * KCAL_MOL_PER_A3_TO_BAR

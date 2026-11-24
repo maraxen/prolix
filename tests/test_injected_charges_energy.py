@@ -15,16 +15,10 @@ from proxide import CoordFormat, OutputSpec, parse_structure
 
 from prolix.physics import neighbor_list as nl
 from prolix.physics import system as physics_system
+from tests._proxide_assets import proxide_asset
 
 DATA_DIR = Path(__file__).parent.parent / "data" / "pdb"
-FF_PATH = (
-  Path(__file__).parent.parent.parent
-  / "proxide"
-  / "src"
-  / "proxide"
-  / "assets"
-  / "protein.ff19SB.xml"
-)
+FF_PATH = proxide_asset("protein.ff19SB.xml")
 
 
 @pytest.fixture

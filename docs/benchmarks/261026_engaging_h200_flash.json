@@ -1,0 +1,89 @@
+{
+  "meta": {
+    "backend": "gpu",
+    "device": "cuda:0",
+    "device_kind": "NVIDIA H200",
+    "pallas_interpret": false,
+    "kernel": "flash",
+    "jax": "0.10.2",
+    "host": "node2434",
+    "cutoff": 9.0,
+    "density": 0.1
+  },
+  "rows": [
+    {
+      "n_atoms": 512,
+      "k": 0,
+      "xla_compile_s": 0.4385638162493706,
+      "xla_median_s": 0.00011821556836366653,
+      "pallas_compile_s": 2.200840685516596,
+      "pallas_median_s": 0.0006842510774731636,
+      "speedup": 0.17276636055907849,
+      "peak_mem_after_xla_bytes": 67116288,
+      "peak_mem_after_pallas_bytes": 67116288,
+      "max_abs_dE": 1.52587890625e-05,
+      "rel_dE": 2.993451744259801e-07,
+      "max_abs_dF": 1.9073486328125e-05
+    },
+    {
+      "n_atoms": 2048,
+      "k": 0,
+      "xla_compile_s": 0.48487774189561605,
+      "xla_median_s": 0.00030661653727293015,
+      "pallas_compile_s": 2.001409069634974,
+      "pallas_median_s": 0.0025623859837651253,
+      "speedup": 0.11966055825141267,
+      "peak_mem_after_xla_bytes": 67116288,
+      "peak_mem_after_pallas_bytes": 67116288,
+      "max_abs_dE": 0.0003662109375,
+      "rel_dE": 3.121927250049339e-07,
+      "max_abs_dF": 2.288818359375e-05
+    },
+    {
+      "n_atoms": 8192,
+      "k": 0,
+      "xla_compile_s": 0.47416362538933754,
+      "xla_median_s": 0.0031989840790629387,
+      "pallas_compile_s": 2.0546932853758335,
+      "pallas_median_s": 0.02010641060769558,
+      "speedup": 0.1591026932394662,
+      "peak_mem_after_xla_bytes": 67669504,
+      "peak_mem_after_pallas_bytes": 67669504,
+      "max_abs_dE": 0.00146484375,
+      "rel_dE": 4.401335615966673e-07,
+      "max_abs_dF": 4.1961669921875e-05
+    },
+    {
+      "n_atoms": 16384,
+      "k": 0,
+      "xla_compile_s": 0.4369210582226515,
+      "xla_median_s": 0.011423616670072079,
+      "pallas_compile_s": 2.041029184125364,
+      "pallas_median_s": 0.07748510595411062,
+      "speedup": 0.14742983866909265,
+      "peak_mem_after_xla_bytes": 68470272,
+      "peak_mem_after_pallas_bytes": 68470272,
+      "max_abs_dE": 0.0048828125,
+      "rel_dE": 7.456911816916545e-07,
+      "max_abs_dF": 5.340576171875e-05
+    },
+    {
+      "n_atoms": 32768,
+      "k": 0,
+      "xla_compile_s": 0.49665882904082537,
+      "xla_median_s": 0.02942893374711275,
+      "pallas_compile_s": 2.253505819477141,
+      "pallas_median_s": 0.3103294624015689,
+      "speedup": 0.0948312593956402,
+      "peak_mem_after_xla_bytes": 137095168,
+      "peak_mem_after_pallas_bytes": 137095168,
+      "max_abs_dE": 0.021484375,
+      "rel_dE": 1.2697379361270578e-06,
+      "max_abs_dF": 7.62939453125e-05
+    }
+  ],
+  "summary": {
+    "xla_scaling_exponent": 1.3869019890704508,
+    "pallas_scaling_exponent": 1.4707628570031013
+  }
+}

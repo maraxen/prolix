@@ -1,5 +1,7 @@
 # Batching Guide for Prolix Integrators
 
+> **Canonical Documentation:** For high-level OpenMM & JAX multi-replica, `stride=0` congeneric ligand screening (`MK-64`), and cross-size 1D ragged screening (`MK-68`) via `ProlixBatchSimulation` and `EnsemblePlan.from_openmm_systems`, see [`docs/source/tutorials/batch_screening.md`](source/tutorials/batch_screening.md) and [`docs/source/guides/pallas_megakernel.md`](source/guides/pallas_megakernel.md). The guide below documents the low-level `make_integrator_batched` primitive.
+
 ## Overview
 
 Phase 4 extends Prolix integrators with **batched simulation support** via `make_integrator_batched`. This enables efficient parallel simulation of **B independent molecular dynamics trajectories** on a single GPU/CPU using JAX's `vmap` (vectorized map).

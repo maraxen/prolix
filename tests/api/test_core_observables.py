@@ -343,11 +343,11 @@ class TestPressure:
 
         # KE = sum(1^2 / (2*1)) = 30 * (1 / 2) = 15 kcal/mol
         # P_kcal = (2 * 15) / (3 * 1000) = 30 / 3000 = 0.01 kcal/mol/A^3
-        # P_bar = 0.01 * 68568 = 685.68 bar
-        KCAL_MOL_PER_A3_TO_BAR = 68568.0
+        # P_bar = 0.01 * 69476.95457 = 694.7695457 bar
+        kcal_mol_per_a3_to_bar = 69476.95457
         total_ke = 15.0  # sum(p^2 / (2*m)) for 10 atoms with p=1, m=1
         expected_press_kcal = (2.0 * total_ke) / (3.0 * volume)
-        expected_press_bar = expected_press_kcal * KCAL_MOL_PER_A3_TO_BAR
+        expected_press_bar = expected_press_kcal * kcal_mol_per_a3_to_bar
 
         assert jnp.allclose(result, expected_press_bar, rtol=1e-5), \
             f"Expected pressure={expected_press_bar} bar, got {result} bar"

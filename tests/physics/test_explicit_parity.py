@@ -17,6 +17,7 @@ from proxide import CoordFormat
 from proxide.io.parsing.backend import OutputSpec, parse_structure
 
 from prolix.physics import bonded, pbc, pme, system
+from tests._proxide_assets import proxide_asset
 
 # Enable x64 for physics
 
@@ -26,14 +27,7 @@ from prolix.physics import bonded, pbc, pme, system
 pytestmark = pytest.mark.slow
 
 DATA_DIR = Path(__file__).parent.parent.parent / "data" / "pdb"
-FF_PATH = (
-  Path(__file__).parent.parent.parent.parent
-  / "proxide"
-  / "src"
-  / "proxide"
-  / "assets"
-  / "protein.ff19SB.xml"
-)
+FF_PATH = proxide_asset("protein.ff19SB.xml")
 
 # PBC settings
 BOX_PADDING = 12.0  # Angstroms

@@ -23,6 +23,7 @@ import jax.numpy as jnp
 from jax import Array, ShapeDtypeStruct
 
 
+@jax.tree_util.register_dataclass
 @dataclass(frozen=True)
 class EnergyForceBundle:
   """Scalar (or per-batch) energy and MD forces ``F = -\\nabla E`` at the same configuration."""

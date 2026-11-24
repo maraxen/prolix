@@ -1,0 +1,89 @@
+{
+  "meta": {
+    "backend": "gpu",
+    "device": "cuda:0",
+    "device_kind": "NVIDIA L40S",
+    "pallas_interpret": false,
+    "kernel": "flash",
+    "jax": "0.10.2",
+    "host": "node3202",
+    "cutoff": 9.0,
+    "density": 0.1
+  },
+  "rows": [
+    {
+      "n_atoms": 512,
+      "k": 0,
+      "xla_compile_s": 0.44234284100002697,
+      "xla_median_s": 0.00011581399996885011,
+      "pallas_compile_s": 12.23416226200004,
+      "pallas_median_s": 0.0005717580000350608,
+      "speedup": 0.20255772540436387,
+      "peak_mem_after_xla_bytes": 67116288,
+      "peak_mem_after_pallas_bytes": 67116288,
+      "max_abs_dE": 0.0,
+      "rel_dE": 0.0,
+      "max_abs_dF": 1.52587890625e-05
+    },
+    {
+      "n_atoms": 2048,
+      "k": 0,
+      "xla_compile_s": 0.40852201299998114,
+      "xla_median_s": 0.0003503020000152901,
+      "pallas_compile_s": 12.001482586999998,
+      "pallas_median_s": 0.002111538000008295,
+      "speedup": 0.1658989798023592,
+      "peak_mem_after_xla_bytes": 67116288,
+      "peak_mem_after_pallas_bytes": 67116288,
+      "max_abs_dE": 0.0003662109375,
+      "rel_dE": 3.121927250049339e-07,
+      "max_abs_dF": 2.288818359375e-05
+    },
+    {
+      "n_atoms": 8192,
+      "k": 0,
+      "xla_compile_s": 0.4216560929999673,
+      "xla_median_s": 0.0034453270000085467,
+      "pallas_compile_s": 11.886026802000003,
+      "pallas_median_s": 0.013054452000005767,
+      "speedup": 0.2639196957487779,
+      "peak_mem_after_xla_bytes": 67116288,
+      "peak_mem_after_pallas_bytes": 67116288,
+      "max_abs_dE": 0.00146484375,
+      "rel_dE": 4.401335615966673e-07,
+      "max_abs_dF": 4.1961669921875e-05
+    },
+    {
+      "n_atoms": 16384,
+      "k": 0,
+      "xla_compile_s": 0.4208170070000392,
+      "xla_median_s": 0.013279931999989003,
+      "pallas_compile_s": 12.005078657000013,
+      "pallas_median_s": 0.05642461700000467,
+      "speedup": 0.23535706055369243,
+      "peak_mem_after_xla_bytes": 68470272,
+      "peak_mem_after_pallas_bytes": 68470272,
+      "max_abs_dE": 0.0048828125,
+      "rel_dE": 7.456911816916545e-07,
+      "max_abs_dF": 5.340576171875e-05
+    },
+    {
+      "n_atoms": 32768,
+      "k": 0,
+      "xla_compile_s": 0.455906825999989,
+      "xla_median_s": 0.02920804699999735,
+      "pallas_compile_s": 12.17823054500002,
+      "pallas_median_s": 0.2404737169999862,
+      "speedup": 0.12146045465750016,
+      "peak_mem_after_xla_bytes": 137095168,
+      "peak_mem_after_pallas_bytes": 137095168,
+      "max_abs_dE": 0.021484375,
+      "rel_dE": 1.2697379361270578e-06,
+      "max_abs_dF": 7.2479248046875e-05
+    }
+  ],
+  "summary": {
+    "xla_scaling_exponent": 1.3961764389311313,
+    "pallas_scaling_exponent": 1.4366795860194104
+  }
+}

@@ -7,7 +7,7 @@ import dataclasses
 from xtrax.tiling.carry import CarrySpec
 
 from prolix.tiling.axes import N_STEPS
-from prolix.tiling.planner import AxisDecision, BatchPlan, estimate_memory_theoretical
+from prolix.tiling.plan_types import AxisDecision, BatchPlan, estimate_memory_theoretical
 from prolix.tiling.xtrax_adapter import plan_axes_with_xtrax
 
 __all__ = [

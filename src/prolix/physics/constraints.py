@@ -34,11 +34,13 @@ from collections.abc import Callable
 from dataclasses import dataclass
 
 import equinox as eqx
-import jax
 import jax.numpy as jnp
 from jaxtyping import Array as ArrayType
 from jaxtyping import Bool
 
+from prolix.physics import settle
+from prolix.physics.constraint_projection import project_momenta, project_positions
+from prolix.physics.settle import TIP3P_RHH, TIP3P_ROH
 from prolix.typing import Array, WaterIndicesArray
 
 
@@ -213,99 +215,6 @@ class ConstraintDOFMask:
     return P
 
 
-def project_positions(R, pairs, lengths, mass, shift_fn, constraint_mask=None, tol=1e-5, max_iter=20):
-  """Iterative SHAKE projection for positions.
-
-  Args:
-      R: (N, 3) atom positions.
-      pairs: (n_constraints, 2) constraint atom index pairs.
-      lengths: (n_constraints,) target constraint lengths.
-      mass: (N, 1) per-atom masses for inverse mass weighting.
-      shift_fn: JAX-MD shift function for periodic boundary conditions.
-      constraint_mask: Optional (n_constraints,) mask for selective constraint application.
-      tol: Convergence tolerance (unused in iterative version).
-      max_iter: Maximum SHAKE iterations.
-
-  Returns:
-      (N, 3) positions with constraints projected.
-  """
-  if constraint_mask is None:
-    constraint_mask = jnp.ones(len(pairs), dtype=jnp.float32)
-  else:
-    constraint_mask = constraint_mask.astype(jnp.float32)
-
-  def body_fn(i, R_curr):
-    r1 = R_curr[pairs[:, 0]]
-    r2 = R_curr[pairs[:, 1]]
-    d_vec = r1 - r2  # Free space displacement
-    d2 = jnp.sum(d_vec**2, axis=-1)
-    diff = d2 - lengths**2
-
-    inv_m1 = 1.0 / mass[pairs[:, 0], 0]
-    inv_m2 = 1.0 / mass[pairs[:, 1], 0]
-    w_sum = inv_m1 + inv_m2
-
-    g = -diff / (2.0 * w_sum * d2 + 1e-8)
-    g = g * constraint_mask
-
-    delta = d_vec * g[:, None]
-    d1 = delta * inv_m1[:, None]
-    d2_corr = -delta * inv_m2[:, None]
-
-    R_curr = R_curr.at[pairs[:, 0]].add(d1)
-    R_curr = R_curr.at[pairs[:, 1]].add(d2_corr)
-    return R_curr
-
-  return jax.lax.fori_loop(0, max_iter, body_fn, R)
-
-
-def project_momenta(P, R, pairs, mass, shift_fn, constraint_mask=None, tol=1e-6, max_iter=20):
-  """Iterative RATTLE projection for momenta.
-
-  Args:
-      P: (N, 3) momenta (p = m * v).
-      R: (N, 3) atom positions.
-      pairs: (n_constraints, 2) constraint atom index pairs.
-      mass: (N, 1) per-atom masses for inverse mass weighting.
-      shift_fn: JAX-MD shift function for periodic boundary conditions.
-      constraint_mask: Optional (n_constraints,) mask for selective constraint application.
-      tol: Convergence tolerance (unused in iterative version).
-      max_iter: Maximum RATTLE iterations.
-
-  Returns:
-      (N, 3) momenta projected orthogonal to constraint manifold.
-  """
-  if constraint_mask is None:
-    constraint_mask = jnp.ones(len(pairs), dtype=jnp.float32)
-  else:
-    constraint_mask = constraint_mask.astype(jnp.float32)
-
-  inv_m1 = 1.0 / mass[pairs[:, 0], 0]
-  inv_m2 = 1.0 / mass[pairs[:, 1], 0]
-  w_sum = inv_m1 + inv_m2
-
-  r1 = R[pairs[:, 0]]
-  r2 = R[pairs[:, 1]]
-  r12 = r1 - r2
-
-  def body_fn(i, P_curr):
-    v1 = P_curr[pairs[:, 0]] * inv_m1[:, None]
-    v2 = P_curr[pairs[:, 1]] * inv_m2[:, None]
-    v12 = v1 - v2
-
-    dot = jnp.sum(v12 * r12, axis=-1)
-    d2 = jnp.sum(r12**2, axis=-1)
-    k = -dot / (w_sum * d2 + 1e-8)
-    k = k * constraint_mask
-
-    impulse = r12 * k[:, None]
-    P_curr = P_curr.at[pairs[:, 0]].add(impulse)
-    P_curr = P_curr.at[pairs[:, 1]].add(-impulse)
-    return P_curr
-
-  return jax.lax.fori_loop(0, max_iter, body_fn, P)
-
-
 class ConstraintAlgorithm(eqx.Module):
   """Base class for constraint algorithms. Both methods return corrected arrays."""
 
@@ -333,6 +242,8 @@ class ConstraintAlgorithm(eqx.Module):
       mass: Array,
       dt: float,
       shift_fn: Callable | None = None,
+      box: Array | None = None,
+      **kwargs,
   ) -> Array:
     """Apply velocity constraints. Return corrected momenta.
 
@@ -343,6 +254,7 @@ class ConstraintAlgorithm(eqx.Module):
         mass: Atomic masses, shape (N,1).
         dt: Timestep.
         shift_fn: Displacement function for periodic boundary conditions.
+        box: Periodic box vectors or None.
 
     Returns:
         Constrained momenta.
@@ -369,7 +281,10 @@ class NullConstraint(ConstraintAlgorithm):
       mass: Array,
       dt: float,
       shift_fn: Callable | None = None,
+      box: Array | None = None,
+      **kwargs,
   ) -> Array:
+    del pos_start, pos_constrained, mass, dt, shift_fn, box, kwargs
     return momenta
 
 
@@ -390,8 +305,6 @@ class SETTLEConstraint(ConstraintAlgorithm):
   def apply_positions(
       self, pos_start: Array, pos_unconstrained: Array, mass: Array, box: Array | None = None
   ) -> Array:
-    from prolix.physics import settle
-
     return settle.settle_positions(
         pos_unconstrained,
         pos_start,
@@ -411,9 +324,10 @@ class SETTLEConstraint(ConstraintAlgorithm):
       mass: Array,
       dt: float,
       shift_fn: Callable | None = None,
+      box: Array | None = None,
+      **kwargs,
   ) -> Array:
-    from prolix.physics import settle
-
+    del box, kwargs
     # settle_velocities expects velocities, not momenta. Convert and convert back.
     velocities = momenta / mass  # (N, 3) / (N, 1) = (N, 3)
     velocities_constrained = settle.settle_velocities(
@@ -433,21 +347,26 @@ class SETTLEConstraint(ConstraintAlgorithm):
 class ShakeRattleConstraint(ConstraintAlgorithm):
   """SHAKE/RATTLE constraint for solute X-H bonds.
 
-  Wraps project_positions() and project_momenta() from physics/simulate.py.
-  Note: requires shift_fn for periodic boundary conditions.
+  Wraps project_positions() and project_momenta() from physics/constraint_projection.py.
   """
 
   pairs: Array  # (N_bonds, 2) int32
   lengths: Array  # (N_bonds,) float
+  tol: float = 1e-5
+  max_iter: int = 25
 
   def apply_positions(
       self, pos_start: Array, pos_unconstrained: Array, mass: Array, box: Array | None = None
   ) -> Array:
-    # SHAKE position constraint doesn't need shift_fn for unconstrained path
-    # (shift_fn would be used inside project_positions if periodic, but we pass None here
-    # and rely on caller to ensure consistency)
+    disp_fn = None
+    if box is not None:
+      def disp_fn(ra, rb):
+        dr = ra - rb
+        box_diag = jnp.diag(box) if box.ndim == 2 else box
+        return dr - jnp.round(dr / box_diag) * box_diag
     return project_positions(
-        pos_unconstrained, self.pairs, self.lengths, mass, shift_fn=None
+        pos_unconstrained, self.pairs, self.lengths, mass,
+        displacement_fn=disp_fn, tol=self.tol, max_iter=self.max_iter
     )
 
   def apply_velocities(
@@ -458,8 +377,19 @@ class ShakeRattleConstraint(ConstraintAlgorithm):
       mass: Array,
       dt: float,
       shift_fn: Callable | None = None,
+      box: Array | None = None,
   ) -> Array:
-    return project_momenta(momenta, pos_constrained, self.pairs, mass, shift_fn)
+    disp_fn = None
+    if box is not None:
+      def disp_fn(ra, rb):
+        dr = ra - rb
+        box_diag = jnp.diag(box) if box.ndim == 2 else box
+        return dr - jnp.round(dr / box_diag) * box_diag
+    return project_momenta(
+        momenta, pos_constrained, self.pairs, mass,
+        shift_fn=shift_fn, displacement_fn=disp_fn,
+        tol=self.tol, max_iter=self.max_iter
+    )
 
 
 class CompositeConstraint(ConstraintAlgorithm):
@@ -469,6 +399,20 @@ class CompositeConstraint(ConstraintAlgorithm):
   """
 
   constraints: tuple  # tuple[ConstraintAlgorithm, ...]
+
+  @property
+  def max_iter(self) -> int | None:
+    for c in self.constraints:
+      if hasattr(c, "max_iter"):
+        return c.max_iter
+    return None
+
+  @property
+  def tol(self) -> float | None:
+    for c in self.constraints:
+      if hasattr(c, "tol"):
+        return c.tol
+    return None
 
   def apply_positions(
       self, pos_start: Array, pos_unconstrained: Array, mass: Array, box: Array | None = None
@@ -486,10 +430,13 @@ class CompositeConstraint(ConstraintAlgorithm):
       mass: Array,
       dt: float,
       shift_fn: Callable | None = None,
+      box: Array | None = None,
   ) -> Array:
     mom = momenta
     for constraint in self.constraints:
-      mom = constraint.apply_velocities(pos_start, pos_constrained, mom, mass, dt, shift_fn)
+      mom = constraint.apply_velocities(
+          pos_start, pos_constrained, mom, mass, dt, shift_fn=shift_fn, box=box
+      )
     return mom
 
 
@@ -503,6 +450,8 @@ def make_constraint(
     mass_hydrogen: float = 1.008,
     n_iters: int = 10,
     settle_velocity_tol: float | None = None,
+    shake_iterations: int = 25,
+    constraint_tolerance: float = 1e-5,
 ) -> ConstraintAlgorithm:
   """Factory function: build appropriate constraint algorithm from topology.
 
@@ -519,12 +468,12 @@ def make_constraint(
       mass_oxygen, mass_hydrogen: Water masses.
       n_iters: Max iterations for SETTLE velocity constraint.
       settle_velocity_tol: Adaptive SETTLE tolerance or None (uses fixed n_iters).
+      shake_iterations: Max iterations for SHAKE solute constraints.
+      constraint_tolerance: Convergence tolerance for SHAKE solute constraints.
 
   Returns:
       A ConstraintAlgorithm instance.
   """
-  from prolix.physics.settle import TIP3P_RHH, TIP3P_ROH
-
   r_OH = r_OH or TIP3P_ROH
   r_HH = r_HH or TIP3P_RHH
 
@@ -532,7 +481,14 @@ def make_constraint(
 
   # Add SHAKE/RATTLE for solute constraints
   if constraint_pairs is not None and len(constraint_pairs) > 0:
-    parts.append(ShakeRattleConstraint(pairs=constraint_pairs, lengths=constraint_lengths))
+    parts.append(
+        ShakeRattleConstraint(
+            pairs=constraint_pairs,
+            lengths=constraint_lengths,
+            tol=constraint_tolerance,
+            max_iter=shake_iterations,
+        )
+    )
 
   # Add SETTLE for rigid water
   if water_indices is not None and water_indices.shape[0] > 0:

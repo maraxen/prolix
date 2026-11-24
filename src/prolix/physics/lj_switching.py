@@ -24,9 +24,15 @@ def lj_switch_weight(
     width = jnp.asarray(switch_width, dtype=r.dtype)
     r_switch = r_cut - width
     z = (r - r_switch) / jnp.maximum(width, jnp.asarray(1e-12, dtype=r.dtype))
-    s = 1.0 - 10.0 * z**3 + 15.0 * z**4 - 6.0 * z**5
+    one = jnp.asarray(1.0, dtype=r.dtype)
+    z2 = z * z
+    z3 = z2 * z
+    s = one + z3 * (
+        jnp.asarray(-10.0, dtype=r.dtype)
+        + z * (jnp.asarray(15.0, dtype=r.dtype) + z * jnp.asarray(-6.0, dtype=r.dtype))
+    )
     return jnp.where(
         r >= r_cut,
         jnp.asarray(0.0, dtype=r.dtype),
-        jnp.where(r <= r_switch, jnp.asarray(1.0, dtype=r.dtype), s),
+        jnp.where(r <= r_switch, one, s),
     )

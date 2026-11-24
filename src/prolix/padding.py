@@ -9,6 +9,16 @@ import jax.numpy as jnp
 import numpy as np
 from jax_md import util
 
+from prolix.constants import (
+  DEFAULT_MASS,
+  atomic_numbers_from_elements,
+  masses_from_elements,
+)
+from prolix.physics.neighbor_list import (
+  ExclusionSpec,
+  build_dense_exclusion_scales,
+  map_exclusions_to_dense_padded,
+)
 from prolix.typing import PhysicsSystem
 
 if TYPE_CHECKING:
@@ -72,6 +82,7 @@ def pad_protein(
   target_cmaps: int | None = None,
   target_ub: int | None = None,
   target_constraints: int | None = None,
+  target_exceptions: int | None = None,
   pme_alpha: float = 0.0,
 ) -> PhysicsSystem:
   """Pad a protein to specific array sizes."""
@@ -115,8 +126,6 @@ def pad_protein(
   padded_scaled_radii = pad_array(jnp.asarray(scaled_radii), target_atoms, 0.8) # Standard OBC2 default
   
   # Derive masses if none
-  from prolix.constants import DEFAULT_MASS, masses_from_elements
-
   masses = protein.masses
   elements_list = getattr(protein, "elements", None)
   if masses is None or jnp.all(jnp.asarray(masses) == 0):
@@ -132,8 +141,6 @@ def pad_protein(
   if element_ids_raw is not None:
     element_ids = jnp.asarray(element_ids_raw, dtype=jnp.int32).reshape(-1)
   elif elements_list is not None and len(elements_list) == n_real:
-    from prolix.constants import atomic_numbers_from_elements
-
     element_ids = jnp.array(atomic_numbers_from_elements(list(elements_list)), dtype=jnp.int32)
   else:
     element_ids = jnp.ones(n_real, dtype=jnp.int32) * 6
@@ -163,8 +170,8 @@ def pad_protein(
   padded_is_heavy = atom_mask & ~padded_is_hydrogen
 
   # Exclusion data — sparse (N, max_excl) arrays
-  from prolix.physics.neighbor_list import ExclusionSpec, map_exclusions_to_dense_padded
   MAX_EXCL = 32
+  excl_spec = None
   try:
     excl_spec = ExclusionSpec.from_protein(protein)
     ei, sv, se = map_exclusions_to_dense_padded(excl_spec, max_exclusions=MAX_EXCL)
@@ -177,6 +184,34 @@ def pad_protein(
     padded_excl_indices = jnp.full((target_atoms, MAX_EXCL), -1, dtype=jnp.int32)
     padded_excl_scales_vdw = jnp.ones((target_atoms, MAX_EXCL), dtype=jnp.float32)
     padded_excl_scales_elec = jnp.ones((target_atoms, MAX_EXCL), dtype=jnp.float32)
+
+  # Explicit 1-4 exception pairs
+  exc_pairs_raw = getattr(excl_spec, "exception_pairs", None) if excl_spec is not None else None
+  if exc_pairs_raw is not None and len(exc_pairs_raw) > 0:
+    exc_pairs_arr = jnp.asarray(exc_pairs_raw, dtype=jnp.int32)
+    exc_sig_arr = jnp.asarray(excl_spec.exception_sigmas, dtype=jnp.float32)
+    exc_eps_arr = jnp.asarray(excl_spec.exception_epsilons, dtype=jnp.float32)
+    exc_qq_arr = jnp.asarray(excl_spec.exception_chargeprods, dtype=jnp.float32)
+    n_exc = len(exc_pairs_arr)
+    t_exc = target_exceptions if target_exceptions is not None else n_exc
+    padded_exc_pairs = pad_bonded_indices(exc_pairs_arr, t_exc, 2)
+    padded_exc_sigmas = pad_array(exc_sig_arr, t_exc, 1.0)
+    padded_exc_epsilons = pad_array(exc_eps_arr, t_exc, 0.0)
+    padded_exc_chargeprods = pad_array(exc_qq_arr, t_exc, 0.0)
+    real_exc = p_mask[exc_pairs_arr].all(axis=-1)
+    padded_exc_mask = pad_array(real_exc, t_exc, False)
+  elif target_exceptions is not None and target_exceptions > 0:
+    padded_exc_pairs = jnp.zeros((target_exceptions, 2), dtype=jnp.int32)
+    padded_exc_sigmas = jnp.ones((target_exceptions,), dtype=jnp.float32)
+    padded_exc_epsilons = jnp.zeros((target_exceptions,), dtype=jnp.float32)
+    padded_exc_chargeprods = jnp.zeros((target_exceptions,), dtype=jnp.float32)
+    padded_exc_mask = jnp.zeros((target_exceptions,), dtype=jnp.bool_)
+  else:
+    padded_exc_pairs = None
+    padded_exc_sigmas = None
+    padded_exc_epsilons = None
+    padded_exc_chargeprods = None
+    padded_exc_mask = None
 
   # Target logic
   bonds = jnp.asarray(protein.bonds) if protein.bonds is not None else jnp.zeros((0, 2), dtype=jnp.int32)
@@ -325,6 +360,11 @@ def pad_protein(
       excl_indices=padded_excl_indices,
       excl_scales_vdw=padded_excl_scales_vdw,
       excl_scales_elec=padded_excl_scales_elec,
+      exception_pairs=padded_exc_pairs,
+      exception_sigmas=padded_exc_sigmas,
+      exception_epsilons=padded_exc_epsilons,
+      exception_chargeprods=padded_exc_chargeprods,
+      exception_mask=padded_exc_mask,
       constraint_pairs=padded_constr_pairs,
       constraint_lengths=padded_constr_lengths,
       constraint_mask=constr_mask,
@@ -347,6 +387,7 @@ def pad_solvated_system(
     target_ub: int | None = None,
     target_constraints: int | None = None,
     target_waters: int | None = None,
+    target_exceptions: int | None = None,
     pme_alpha: float | None = None,
 ) -> PhysicsSystem:
     """Pad a merged solvated topology to specific array sizes."""
@@ -388,12 +429,39 @@ def pad_solvated_system(
     padded_is_heavy = pad_array(is_hv, target_atoms, False)
 
     # 2. Exclusions
-    from prolix.physics.neighbor_list import map_exclusions_to_dense_padded
     MAX_EXCL = 32
     ei, sv, se = map_exclusions_to_dense_padded(topology.exclusion_spec, max_exclusions=MAX_EXCL)
     padded_excl_indices = pad_array(ei, target_atoms, -1)
     padded_excl_scales_vdw = pad_array(sv, target_atoms, 1.0)
     padded_excl_scales_elec = pad_array(se, target_atoms, 1.0)
+
+    exc_spec_solv = topology.exclusion_spec
+    exc_pairs_raw = getattr(exc_spec_solv, "exception_pairs", None) if exc_spec_solv is not None else None
+    if exc_pairs_raw is not None and len(exc_pairs_raw) > 0:
+        exc_pairs_arr = jnp.asarray(exc_pairs_raw, dtype=jnp.int32)
+        exc_sig_arr = jnp.asarray(exc_spec_solv.exception_sigmas, dtype=jnp.float32)
+        exc_eps_arr = jnp.asarray(exc_spec_solv.exception_epsilons, dtype=jnp.float32)
+        exc_qq_arr = jnp.asarray(exc_spec_solv.exception_chargeprods, dtype=jnp.float32)
+        n_exc = len(exc_pairs_arr)
+        t_exc = target_exceptions if target_exceptions is not None else n_exc
+        padded_exc_pairs = pad_bonded_indices(exc_pairs_arr, t_exc, 2)
+        padded_exc_sigmas = pad_array(exc_sig_arr, t_exc, 1.0)
+        padded_exc_epsilons = pad_array(exc_eps_arr, t_exc, 0.0)
+        padded_exc_chargeprods = pad_array(exc_qq_arr, t_exc, 0.0)
+        real_exc = t_mask[exc_pairs_arr].all(axis=-1)
+        padded_exc_mask = pad_array(real_exc, t_exc, False)
+    elif target_exceptions is not None and target_exceptions > 0:
+        padded_exc_pairs = jnp.zeros((target_exceptions, 2), dtype=jnp.int32)
+        padded_exc_sigmas = jnp.ones((target_exceptions,), dtype=jnp.float32)
+        padded_exc_epsilons = jnp.zeros((target_exceptions,), dtype=jnp.float32)
+        padded_exc_chargeprods = jnp.zeros((target_exceptions,), dtype=jnp.float32)
+        padded_exc_mask = jnp.zeros((target_exceptions,), dtype=jnp.bool_)
+    else:
+        padded_exc_pairs = None
+        padded_exc_sigmas = None
+        padded_exc_epsilons = None
+        padded_exc_chargeprods = None
+        padded_exc_mask = None
 
     # 3. Bonded terms
     if target_bonds is None: target_bonds = len(topology.bonds)
@@ -537,6 +605,11 @@ def pad_solvated_system(
         excl_indices=padded_excl_indices,
         excl_scales_vdw=padded_excl_scales_vdw,
         excl_scales_elec=padded_excl_scales_elec,
+        exception_pairs=padded_exc_pairs,
+        exception_sigmas=padded_exc_sigmas,
+        exception_epsilons=padded_exc_epsilons,
+        exception_chargeprods=padded_exc_chargeprods,
+        exception_mask=padded_exc_mask,
         constraint_pairs=padded_constr_pairs,
         constraint_lengths=padded_constr_lengths,
         constraint_mask=constr_mask,
@@ -559,13 +632,11 @@ def precompute_dense_exclusions(sys: PhysicsSystem) -> PhysicsSystem:
     This gave a measured ~4x speedup in per-step force evaluation
     (0.437ms → 0ms for exclusion construction).
     """
-    from prolix.batched_energy import _build_dense_exclusion_scales
-
     N = sys.n_padded_atoms
-    dense_vdw = _build_dense_exclusion_scales(
+    dense_vdw = build_dense_exclusion_scales(
         sys.excl_indices, sys.excl_scales_vdw, N,
     )
-    dense_elec = _build_dense_exclusion_scales(
+    dense_elec = build_dense_exclusion_scales(
         sys.excl_indices, sys.excl_scales_elec, N,
     )
     return sys.replace(dense_excl_scale_vdw=dense_vdw, dense_excl_scale_elec=dense_elec)

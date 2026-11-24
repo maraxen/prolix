@@ -55,7 +55,6 @@ for step_name in sequence.steps:
 
 from __future__ import annotations
 
-from abc import ABC, abstractmethod
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
@@ -67,6 +66,7 @@ import numpy as np
 from jaxtyping import Array as ArrayType
 from jaxtyping import PRNGKeyArray
 
+from prolix.physics.barostat import MC_Barostat_Step, SCR_Barostat_Step
 from prolix.physics.constraints import ConstraintDOFMask
 from prolix.physics.settle import (
   _DEFAULT_CSVR_TAU_AKMA,
@@ -77,6 +77,8 @@ from prolix.physics.settle import (
   settle_positions,
   settle_velocities,
 )
+from prolix.physics.step_base import Step
+from prolix.physics.virtual_sites_step import VirtualSiteReconstructionStep
 from prolix.typing import Array, IntegratorParams, IntegratorState
 
 
@@ -87,6 +89,8 @@ def _csvr_compute_lambda_jit_safe(
     kT: float | ArrayType,
     dt: float | ArrayType,
     tau: float | ArrayType | None = None,
+    max_chi_dof: int = 512,
+    max_chi: int | None = None,
 ) -> tuple[ArrayType, PRNGKeyArray]:
   r"""JIT-safe CSVR lambda computation (Bussi et al. 2007).
 
@@ -122,9 +126,10 @@ def _csvr_compute_lambda_jit_safe(
   key, split = jax.random.split(key)
   # Sample (n_dof - 1) chi-squared components as sum of squares of standard normals
   n_chi = jnp.asarray(jnp.maximum(n_dof - 1, 1), dtype=jnp.int32)
-  # To avoid dynamic shape issues, we use a sufficiently large fixed shape
-  # and mask the excess samples
-  max_chi = 512
+  # Use static upper bound 3 * N_atoms (default min 512) so systems with >171 atoms
+  # never under-sample chi-squared DOF (CB-4).
+  eff_max_chi = int(max_chi) if max_chi is not None else int(max_chi_dof)
+  max_chi = max(eff_max_chi, 512)
   chi_samples = jax.random.normal(split, (max_chi,), dtype=ke_current.dtype)
   chi_mask = jnp.arange(max_chi) < n_chi
   s_chi_squared = jnp.sum(jnp.where(chi_mask, chi_samples**2, 0.0))
@@ -147,37 +152,6 @@ def _csvr_compute_lambda_jit_safe(
   lambda_factor = jnp.where(ke_current <= 0.0, 1.0, jnp.sqrt(lambda_sq_safe))
 
   return lambda_factor, key
-
-
-class Step(eqx.Module, ABC):
-
-  """Abstract base class for integrator steps.
-
-  All steps are Equinox Modules that implement a pure `apply` method.
-  This ensures they are valid JAX PyTrees and can capture static configuration.
-
-  Purity Guarantee:
-  - No side effects (no global state mutation)
-  - No Python control flow (use jax.lax.cond, jax.lax.scan, etc.)
-  - Output deterministic given input state
-  """
-
-  @abstractmethod
-  def apply(
-      self,
-      state: IntegratorState,
-      params: IntegratorParams,
-  ) -> IntegratorState:
-    """Apply one step of the integrator.
-
-    Args:
-        state: Current integrator state.
-        params: Standardized integrator parameters (dt, kT, etc.).
-
-    Returns:
-        Updated state (including updated PRNGKey if stochastic).
-    """
-    raise NotImplementedError
 
 
 class O_Step(Step):
@@ -518,9 +492,10 @@ class SETTLE_Position_Step(Step):
       return state
 
     # Reference positions for SETTLE (used to fix orientation)
-    r_old = jnp.where(
-        params.positions_old is not None, params.positions_old, state.positions
-    )
+    if params.positions_old is not None and params.positions_old.shape == state.positions.shape:
+      r_old = params.positions_old
+    else:
+      r_old = state.positions
 
     position_constrained = settle_positions(
         state.positions,
@@ -590,7 +565,13 @@ class CSVR_Step(Step):
 
     # Compute rescaling factor and new RNG using JIT-safe version
     lambda_factor, key_out = _csvr_compute_lambda_jit_safe(
-        state.rng, ke, n_dof, kT, dt, tau=self.tau
+        state.rng,
+        ke,
+        n_dof,
+        kT,
+        dt,
+        tau=self.tau,
+        max_chi_dof=3 * int(state.momentum.shape[0]),
     )
 
     # Rescale momenta
@@ -668,13 +649,10 @@ def make_step(name: str, **kwargs) -> Step:
       KeyError: If step name not found in registry.
   """
   if name == "mc_barostat_step":
-    from prolix.physics.barostat import MC_Barostat_Step
     return MC_Barostat_Step(**kwargs)
   if name == "scr_barostat_step":
-    from prolix.physics.barostat import SCR_Barostat_Step
     return SCR_Barostat_Step(**kwargs)
   if name == "virtual_site_reconstruction_step":
-    from prolix.physics.virtual_sites_step import VirtualSiteReconstructionStep
     return VirtualSiteReconstructionStep(**kwargs)
   if name == "o_step_half":
     return O_Step(fraction=0.5, **kwargs)

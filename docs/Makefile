@@ -1,14 +1,19 @@
+SPHINXOPTS    ?= -W --keep-going
+SPHINXBUILD   ?= sphinx-build
+SOURCEDIR     = source
+BUILDDIR      = _build
+
 .PHONY: help clean html
 
 help:
-	@echo "Please use \`make <target>' where <target> is one of"
-	@echo "  html       to make standalone HTML files"
-	@echo "  clean      to remove build artifacts"
+	@echo "Please use \`make <target>' where <target> is one of:"
+	@echo "  html       build standalone HTML documentation into $(BUILDDIR)/html"
+	@echo "  clean      remove Sphinx build artifacts"
 
 clean:
-	rm -rf build/
+	rm -rf $(BUILDDIR)/ build/
 
 html:
-	sphinx-build -b html source build/html
+	$(SPHINXBUILD) $(SPHINXOPTS) -b html $(SOURCEDIR) $(BUILDDIR)/html
 	@echo
-	@echo "Build finished. The HTML pages are in build/html."
+	@echo "Build finished. The HTML pages are in $(BUILDDIR)/html."

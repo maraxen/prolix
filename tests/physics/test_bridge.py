@@ -10,17 +10,11 @@ import jax.numpy as jnp
 import pytest
 from proxide.core.containers import Protein
 from proxide import OutputSpec, parse_structure
+from tests._proxide_assets import proxide_asset
 
 # Path to test data and force field
 DATA_DIR = Path(__file__).parent.parent.parent / "data" / "pdb"
-FF_PATH = (
-  Path(__file__).parent.parent.parent.parent
-  / "proxide"
-  / "src"
-  / "proxide"
-  / "assets"
-  / "protein.ff19SB.xml"
-)
+FF_PATH = proxide_asset("protein.ff19SB.xml")
 
 
 @pytest.fixture

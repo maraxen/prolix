@@ -1,6 +1,7 @@
 """MolecularBundle: Typed host-to-device boundary with bucketed dynamic topology.
 
 Core design:
+
 - MolecularBundle: eqx.Module with concrete arrays, no Optional fields
 - MolecularShapeSpec: Frozen dataclass, hashable, serves as JIT cache key
 - Topology arrays are DYNAMIC (not static=True) to avoid O(n) recompilations
@@ -39,6 +40,8 @@ DIHEDRAL_BUCKETS = (32, 128, 512, 2_048, 10_000, 50_000)
 WATER_BUCKETS = (8, 16, 128, 1_024, 8_000)
 EXCL_BUCKETS = (32, 128, 512, 2_048, 10_000, 50_000)
 CMAP_BUCKETS = (8, 16, 128, 512)
+CMAP_MAP_BUCKETS = (1, 8, 16)
+CONSTRAINT_BUCKETS = (0, 256, 512, 1_024, 2_048, 4_096, 8_192)
 EXCEPTION_BUCKETS = (32, 128, 512, 2_048, 10_000, 50_000)
 
 
@@ -112,6 +115,21 @@ class MolecularShapeSpec:
     use_size_buckets: bool = True
     exact_n_atoms: int = 0
     exact_n_waters: int = 0
+    cmap_map_bucket_idx: int = 0
+    constraint_bucket_idx: int = 0
+    has_real_constraints: bool = False
+    is_triclinic: bool = False
+    has_real_cosolvents: bool = False
+
+
+def cmap_map_pad_length(spec: MolecularShapeSpec) -> int:
+    """Host-static padded CMAP map count (minimum 1, never 0)."""
+    return CMAP_MAP_BUCKETS[spec.cmap_map_bucket_idx]
+
+
+def constraint_pad_length(spec: MolecularShapeSpec) -> int:
+    """Host-static padded non-water constraint count."""
+    return CONSTRAINT_BUCKETS[spec.constraint_bucket_idx]
 
 
 def atom_pad_length(spec: MolecularShapeSpec) -> int:
@@ -139,6 +157,7 @@ class MolecularBundle(eqx.Module):
     Real entries are identified by mask arrays (atom_mask, bond_mask, etc.).
 
     Design constraints:
+
     - All topology arrays are DYNAMIC (not static=True) to avoid XLA recompilation
       per distinct topology. Instead, XLA caches on bucketed size.
     - shape_spec is the ONLY eqx.field(static=True) — it carries bucket indices
@@ -243,6 +262,81 @@ class MolecularBundle(eqx.Module):
     excl_dense_indices: Int[Array, "N 32"] | None = None
     excl_dense_scales_vdw: Float[Array, "N 32"] | None = None
     excl_dense_scales_elec: Float[Array, "N 32"] | None = None
+
+    # Optional CMAP precomputed bicubic coefficients & per-torsion map indices
+    cmap_indices: Int[Array, CM] | None = None
+    cmap_coeffs: Float[Array, "M G G 16"] | None = None
+
+    # Optional solute holonomic constraints (padded to CONSTRAINT_BUCKETS)
+    constraint_pairs: Int[Array, "C 2"] | None = None
+    constraint_lengths: Float[Array, C] | None = None
+    constraint_mask: Bool[Array, C] | None = None
+    n_constraints: Int[Array, ""] | None = None
+
+    # Optional per-bundle water geometry overrides (default TIP3P)
+    water_r_OH: Float[Array, ""] | None = None
+    water_r_HH: Float[Array, ""] | None = None
+
+    # Optional per-atom molecule and cosolvent group IDs (padded to ATOM_BUCKETS)
+    molecule_id: Int[Array, N] | None = None
+    cosolvent_group_id: Int[Array, N] | None = None
+
+    @property
+    def cmap_map_idx(self) -> Int[Array, CM] | None:
+        """Alias for ``cmap_indices`` for backward compatibility."""
+        return self.cmap_indices
+
+    @property
+    def box_size(self) -> Array | None:
+        """Alias for box matching PhysicsSystem / PaddedSystem interface."""
+        if hasattr(self, "shape_spec") and getattr(self.shape_spec, "has_pbc", False):
+            return self.box
+        return None
+
+    @property
+    def bonds(self) -> Array:
+        """Alias for bond_idx matching PhysicsSystem / PaddedSystem interface."""
+        return self.bond_idx
+
+    @property
+    def angles(self) -> Array:
+        """Alias for angle_idx matching PhysicsSystem / PaddedSystem interface."""
+        return self.angle_idx
+
+    @property
+    def dihedrals(self) -> Array:
+        """Alias for dihedral_idx matching PhysicsSystem / PaddedSystem interface."""
+        return self.dihedral_idx
+
+    @property
+    def impropers(self) -> Array:
+        """Alias for improper_idx matching PhysicsSystem / PaddedSystem interface."""
+        return self.improper_idx
+
+    @property
+    def urey_bradley_bonds(self) -> Array:
+        """Alias for urey_bradley_idx matching PhysicsSystem / PaddedSystem interface."""
+        return self.urey_bradley_idx
+
+    @property
+    def cmap_torsions(self) -> Array:
+        """Alias for cmap_torsion_idx matching PhysicsSystem / PaddedSystem interface."""
+        return self.cmap_torsion_idx
+
+    @property
+    def nonbonded_cutoff(self) -> Array:
+        """Alias for cutoff_distance matching PhysicsSystem / PaddedSystem interface."""
+        return self.cutoff_distance
+
+    @property
+    def dense_excl_scale_vdw(self) -> Array | None:
+        """Dense exclusion scale vdw matrix placeholder."""
+        return None
+
+    @property
+    def dense_excl_scale_elec(self) -> Array | None:
+        """Dense exclusion scale elec matrix placeholder."""
+        return None
 
     @classmethod
     def from_pdb(

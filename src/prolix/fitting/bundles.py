@@ -17,6 +17,7 @@ import jax.numpy as jnp
 import optax
 from jaxtyping import Array, Bool, Float, Int, PRNGKeyArray
 
+from prolix.fitting.batched import stack_molecules
 from prolix.fitting.params import BondedParams
 from prolix.fitting.topology import BondedTopology
 
@@ -158,7 +159,6 @@ class BatchedFittingBundle(eqx.Module):
         Raises:
             ValueError: If bundles list is empty.
         """
-        from prolix.fitting.batched import stack_molecules
 
         if not bundles:
             raise ValueError("Cannot stack zero bundles")

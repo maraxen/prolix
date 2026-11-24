@@ -8,6 +8,8 @@ References:
 
 from __future__ import annotations
 
+import math
+
 import jax
 import jax.numpy as jnp
 from jax_md import util
@@ -20,8 +22,29 @@ ALPHA_OBC = 1.0  # Corrected from 1.2 to match Onufriev 2004 & OpenMM
 BETA_OBC = 0.8
 GAMMA_OBC = 4.85
 
-# Non-polar Solvation Parameters
-SURFACE_TENSION = 0.005  # kcal/mol/A^2
+# Exact OpenMM AKMA electrostatic & non-polar solvation constants:
+# ONE_4PI_EPS0 * 10 / 4.184 = 332.06371329919216 kcal*A/(mol*e^2)
+GB_COULOMB_CONSTANT = 332.06371329919216
+# OpenMM GBSAOBCForce default surfaceAreaEnergy = 2.25936 kJ/(mol*nm^2) = 0.0054 kcal/(mol*A^2)
+SURFACE_TENSION = 0.0054  # kcal/mol/A^2
+# Srinivasan-Case / OpenMM salt screening factor (kappa_eff = 0.73 * kappa)
+GB_KAPPA_SCALE = 0.73
+
+
+def compute_debye_kappa(
+  salt_concentration_m: float,
+  solvent_dielectric: float = constants.DIELECTRIC_WATER,
+  temperature_k: float = 298.15,
+) -> float:
+  """Compute physical Debye-Huckel inverse screening length kappa (1/A) from 1:1 molar salt."""
+  conc = max(0.0, float(salt_concentration_m))
+  if conc <= 0.0:
+    return 0.0
+  # 8 * pi * N_A * e^2 / (1000 * 4 * pi * eps_0 * k_B) in A^-2 * K / M:
+  # 2 * GB_COULOMB_CONSTANT * (10^-27 L/A^3 * N_A = 6.02214076e-4) / k_B_kcal(0.001987204259)
+  # = 2 * 332.06371329919216 * 4.0 * pi * 6.02214076e-4 / 0.001987204259 = 2529.118824
+  denom = max(float(solvent_dielectric) * float(temperature_k), 1e-12)
+  return math.sqrt(2529.118824118672 * conc / denom)
 
 
 def safe_norm(x: Array, axis: int = -1, eps: float = 1e-12) -> Array:
@@ -36,6 +59,9 @@ def compute_born_radii(
   probe_radius: float = constants.PROBE_RADIUS,
   mask: Array | None = None,
   scaled_radii: Array | None = None,
+  obc_alpha: float = ALPHA_OBC,
+  obc_beta: float = BETA_OBC,
+  obc_gamma: float = GAMMA_OBC,
 ) -> Array:
   r"""Computes effective Born radii using the OBC II approximation.
 
@@ -72,6 +98,11 @@ def compute_born_radii(
 
   if mask is None:
     mask = 1.0 - jnp.eye(distances.shape[0])
+  elif mask.ndim == 1:
+    mask_b = jnp.asarray(mask) > 0
+    mask = (mask_b[:, None] & mask_b[None, :]).astype(positions.dtype) * (
+      1.0 - jnp.eye(distances.shape[0], dtype=positions.dtype)
+    )
   else:
     mask = mask * (1.0 - jnp.eye(distances.shape[0]))
 
@@ -86,7 +117,7 @@ def compute_born_radii(
 
   scaled_integral = offset_radii * born_radius_inverse_term
   tanh_argument = (
-    ALPHA_OBC * scaled_integral - BETA_OBC * scaled_integral**2 + GAMMA_OBC * scaled_integral**3
+    obc_alpha * scaled_integral - obc_beta * scaled_integral**2 + obc_gamma * scaled_integral**3
   )
   inv_born_radii = 1.0 / offset_radii - jnp.tanh(tanh_argument) / radii
 
@@ -125,6 +156,12 @@ def compute_gb_energy(
   mask: Array | None = None,
   energy_mask: Array | None = None,
   scaled_radii: Array | None = None,
+  kappa: float = 0.0,
+  kappa_scale: float = GB_KAPPA_SCALE,
+  obc_alpha: float = ALPHA_OBC,
+  obc_beta: float = BETA_OBC,
+  obc_gamma: float = GAMMA_OBC,
+  coulomb_constant: float = GB_COULOMB_CONSTANT,
 ) -> tuple[Array, Array]:
   r"""Computes the Generalized Born solvation energy.
 
@@ -150,7 +187,14 @@ def compute_gb_energy(
 
   """
   born_radii = compute_born_radii(
-    positions, radii, dielectric_offset=dielectric_offset, mask=mask, scaled_radii=scaled_radii
+    positions,
+    radii,
+    dielectric_offset=dielectric_offset,
+    mask=mask,
+    scaled_radii=scaled_radii,
+    obc_alpha=obc_alpha,
+    obc_beta=obc_beta,
+    obc_gamma=obc_gamma,
   )
 
   delta_positions = positions[:, None, :] - positions[None, :, :]
@@ -161,11 +205,16 @@ def compute_gb_energy(
 
   effective_distances = f_gb(distances, born_radii_i, born_radii_j)
 
-  tau = (1.0 / solute_dielectric) - (1.0 / solvent_dielectric)
-  prefactor = -0.5 * constants.COULOMB_CONSTANT * tau
-
   charge_products = charges[:, None] * charges[None, :]
-  energy_terms = charge_products / effective_distances
+  kappa_eff = float(kappa_scale) * float(kappa)
+  if kappa_eff != 0.0:
+    tau_ij = (1.0 / solute_dielectric) - jnp.exp(-kappa_eff * effective_distances) / solvent_dielectric
+    energy_terms = tau_ij * charge_products / effective_distances
+    prefactor = -0.5 * coulomb_constant
+  else:
+    tau = (1.0 / solute_dielectric) - (1.0 / solvent_dielectric)
+    prefactor = -0.5 * coulomb_constant * tau
+    energy_terms = charge_products / effective_distances
 
   if energy_mask is not None:
     # Mask excludes 1-2, 1-3.
@@ -198,9 +247,14 @@ def compute_gb_energy(
   # Old behavior: yes.
   # New behavior: explicit energy_mask.
   elif mask is not None:
-    # Fallback to old behavior if energy_mask not provided
-    mask_energy = mask + jnp.eye(distances.shape[0])
-    mask_energy = jnp.where(mask_energy > 0.0, 1.0, 0.0)
+    # 1D per-atom validity mask (N,): mask both rows and cols (including ghost diagonals).
+    # 2D exclusion mask (N, N): preserve self-solvation diagonal (i == j).
+    if mask.ndim == 1:
+      mask_b = jnp.asarray(mask) > 0
+      mask_energy = (mask_b[:, None] & mask_b[None, :]).astype(energy_terms.dtype)
+    else:
+      mask_energy = mask + jnp.eye(distances.shape[0])
+      mask_energy = jnp.where(mask_energy > 0.0, 1.0, 0.0)
     energy_terms = energy_terms * mask_energy
 
   total_energy = prefactor * jnp.sum(energy_terms)
@@ -254,8 +308,8 @@ def compute_pair_integral(distance: Array, radius_i: Array, radius_j: Array) -> 
   term1 = 0.5 * (inv_L - inv_U)
   term2 = 0.25 * jnp.log(L_safe / U_safe) / r_safe
 
-  sr2_sq = radius_j**2
-  term3 = 0.125 * (distance - sr2_sq / r_safe) * (inv_U**2 - inv_L**2)
+  sr2_sq = radius_j * radius_j
+  term3 = 0.125 * (distance - sr2_sq / r_safe) * (inv_U * inv_U - inv_L * inv_L)
 
   total = term1 + term2 + term3
 
@@ -270,6 +324,9 @@ def compute_born_radii_neighbor_list(
   dielectric_offset: float = 0.09,
   scaled_radii: Array | None = None,
   pair_mask: Array | None = None,
+  obc_alpha: float = ALPHA_OBC,
+  obc_beta: float = BETA_OBC,
+  obc_gamma: float = GAMMA_OBC,
 ) -> Array:
   r"""Computes effective Born radii using neighbor lists.
 
@@ -299,21 +356,25 @@ def compute_born_radii_neighbor_list(
   """
   radii = jnp.maximum(radii, 1e-6)
   N, _K = neighbor_idx.shape
+  idx_clean = jnp.where(neighbor_idx >= 0, neighbor_idx & ((1 << 29) - 1), neighbor_idx)
+  safe_idx = jnp.clip(idx_clean, 0, max(N - 1, 0))
 
-  neighbor_positions = positions[neighbor_idx]  # (N, K, 3)
+  neighbor_positions = positions[safe_idx]  # (N, K, 3)
   central_positions = positions[:, None, :]  # (N, 1, 3)
 
   delta_positions = central_positions - neighbor_positions  # (N, K, 3)
   distances = safe_norm(delta_positions, axis=-1)  # (N, K)
 
-  mask_neighbors = neighbor_idx < N  # Mask padding
+  mask_neighbors = (
+    (idx_clean >= 0)
+    & (idx_clean < N)
+    & (idx_clean != jnp.arange(N, dtype=neighbor_idx.dtype)[:, None])
+  )
 
   offset_radii = jnp.maximum(radii - dielectric_offset, 1e-4)
 
   # Use scaled_radii for descreening if provided (matches dense path)
   radii_j_raw = scaled_radii if scaled_radii is not None else radii
-  # Clamp neighbor indices for safe gather
-  safe_idx = jnp.minimum(neighbor_idx, N - 1)
   radii_j = radii_j_raw[safe_idx]  # (N, K)
 
   radii_i_broadcast = offset_radii[:, None]  # (N, 1)
@@ -327,7 +388,7 @@ def compute_born_radii_neighbor_list(
 
   scaled_integral = offset_radii * born_radius_inverse_term
   tanh_argument = (
-    ALPHA_OBC * scaled_integral - BETA_OBC * scaled_integral**2 + GAMMA_OBC * scaled_integral**3
+    obc_alpha * scaled_integral - obc_beta * scaled_integral**2 + obc_gamma * scaled_integral**3
   )
   # Match dense path formula exactly: 1/or - tanh(arg)/radii
   inv_born_radii = 1.0 / offset_radii - jnp.tanh(tanh_argument) / jnp.maximum(radii, 1e-4)
@@ -337,7 +398,7 @@ def compute_born_radii_neighbor_list(
   return 1.0 / inv_born_radii_safe
 
 
-def compute_gb_energy_neighbor_list(
+def compute_gb_energy_neighbor_list(  # noqa: PLR0913
   positions: Array,
   charges: Array,
   radii: Array,
@@ -348,6 +409,12 @@ def compute_gb_energy_neighbor_list(
   scaled_radii: Array | None = None,
   pair_mask_born: Array | None = None,
   pair_mask_energy: Array | None = None,
+  kappa: float = 0.0,
+  kappa_scale: float = GB_KAPPA_SCALE,
+  obc_alpha: float = ALPHA_OBC,
+  obc_beta: float = BETA_OBC,
+  obc_gamma: float = GAMMA_OBC,
+  coulomb_constant: float = GB_COULOMB_CONSTANT,
 ) -> tuple[Array, Array]:
   r"""Computes GB energy using neighbor lists.
 
@@ -380,37 +447,53 @@ def compute_gb_energy_neighbor_list(
     dielectric_offset,
     scaled_radii=scaled_radii,
     pair_mask=pair_mask_born,
+    obc_alpha=obc_alpha,
+    obc_beta=obc_beta,
+    obc_gamma=obc_gamma,
   )
 
-  neighbor_positions = positions[neighbor_idx]  # (N, K, 3)
+  N = positions.shape[0]
+  idx_clean = jnp.where(neighbor_idx >= 0, neighbor_idx & ((1 << 29) - 1), neighbor_idx)
+  safe_idx = jnp.clip(idx_clean, 0, max(N - 1, 0))
+
+  neighbor_positions = positions[safe_idx]  # (N, K, 3)
   central_positions = positions[:, None, :]  # (N, 1, 3)
   delta_positions = central_positions - neighbor_positions  # (N, K, 3)
   distances = safe_norm(delta_positions, axis=-1)  # (N, K)
 
   born_radii_i = born_radii[:, None]  # (N, 1)
-  born_radii_j = born_radii[neighbor_idx]  # (N, K)
+  born_radii_j = born_radii[safe_idx]  # (N, K)
 
   effective_distances = f_gb(distances, born_radii_i, born_radii_j)
 
-  tau = (1.0 / solute_dielectric) - (1.0 / solvent_dielectric)
-  prefactor = -0.5 * constants.COULOMB_CONSTANT * tau
-
   charges_i = charges[:, None]  # (N, 1)
-  charges_j = charges[neighbor_idx]  # (N, K)
+  charges_j = charges[safe_idx]  # (N, K)
   charge_products = charges_i * charges_j
 
-  energy_terms = charge_products / effective_distances
-
-  N = positions.shape[0]
-  mask_neighbors = neighbor_idx < N
-  energy_terms = jnp.where(mask_neighbors, energy_terms, 0.0)
-  if pair_mask_energy is not None:
-    energy_terms = energy_terms * pair_mask_energy
-
-  term_neighbors = jnp.sum(energy_terms)
-  term_self = jnp.sum((charges**2) / born_radii)
-
-  total_energy = prefactor * (term_neighbors + term_self)
+  mask_neighbors = (
+    (idx_clean >= 0)
+    & (idx_clean < N)
+    & (idx_clean != jnp.arange(N, dtype=neighbor_idx.dtype)[:, None])
+  )
+  kappa_eff = float(kappa_scale) * float(kappa)
+  if kappa_eff != 0.0:
+    tau_ij = (1.0 / solute_dielectric) - jnp.exp(-kappa_eff * effective_distances) / solvent_dielectric
+    tau_ii = (1.0 / solute_dielectric) - jnp.exp(-kappa_eff * born_radii) / solvent_dielectric
+    energy_terms = jnp.where(mask_neighbors, tau_ij * charge_products / effective_distances, 0.0)
+    if pair_mask_energy is not None:
+      energy_terms = energy_terms * pair_mask_energy
+    total_energy = -0.5 * coulomb_constant * (
+      jnp.sum(energy_terms) + jnp.sum(tau_ii * (charges**2) / born_radii)
+    )
+  else:
+    tau = (1.0 / solute_dielectric) - (1.0 / solvent_dielectric)
+    prefactor = -0.5 * coulomb_constant * tau
+    energy_terms = jnp.where(mask_neighbors, charge_products / effective_distances, 0.0)
+    if pair_mask_energy is not None:
+      energy_terms = energy_terms * pair_mask_energy
+    term_neighbors = jnp.sum(energy_terms)
+    term_self = jnp.sum((charges**2) / born_radii)
+    total_energy = prefactor * (term_neighbors + term_self)
 
   return total_energy, born_radii
 
@@ -500,6 +583,7 @@ def compute_sasa_neighbor_list(
   radii: Array,
   neighbor_idx: Array,
   probe_radius: float = constants.PROBE_RADIUS,
+  atom_mask: Array | None = None,
 ) -> Array:
   """Computes SASA using neighbor lists.
 
@@ -508,6 +592,7 @@ def compute_sasa_neighbor_list(
       radii: Atom radii (N,).
       neighbor_idx: Neighbor list indices (N, K).
       probe_radius: Solvent probe radius.
+      atom_mask: Optional boolean/numeric mask (N,) for valid atoms.
 
   Returns:
       Total SASA (scalar).
@@ -522,8 +607,16 @@ def compute_sasa_neighbor_list(
   # Surface area of isolated spheres
   S_i = 4.0 * jnp.pi * r_i**2
 
+  safe_nbr = jnp.clip(neighbor_idx, 0, max(N - 1, 0))
+  valid_nbr = (neighbor_idx >= 0) & (neighbor_idx < N) & (
+      neighbor_idx != jnp.arange(N, dtype=neighbor_idx.dtype)[:, None]
+  )
+  if atom_mask is not None:
+    mask_bool = jnp.asarray(atom_mask, dtype=jnp.bool_)
+    valid_nbr = valid_nbr & mask_bool[:, None] & mask_bool[safe_nbr]
+
   # Neighbor positions
-  neighbor_positions = positions[neighbor_idx]  # (N, K, 3)
+  neighbor_positions = positions[safe_nbr]  # (N, K, 3)
   central_positions = positions[:, None, :]  # (N, 1, 3)
 
   delta_positions = central_positions - neighbor_positions
@@ -531,7 +624,7 @@ def compute_sasa_neighbor_list(
 
   # Radii
   r_i_mat = r_i[:, None]  # (N, 1)
-  r_j_mat = r_j_all[neighbor_idx]  # (N, K)
+  r_j_mat = r_j_all[safe_nbr]  # (N, K)
 
   # Calculate buried area b_ij
   term1 = r_j_mat**2 - (d_ij - r_i_mat) ** 2
@@ -551,8 +644,7 @@ def compute_sasa_neighbor_list(
   b_ij = jnp.where(j_inside_i, 0.0, b_ij)
 
   # Mask neighbors
-  mask_neighbors = neighbor_idx < N
-  b_ij = jnp.where(mask_neighbors, b_ij, 0.0)
+  b_ij = jnp.where(valid_nbr, b_ij, 0.0)
 
   # Fraction exposed
   fraction_covered = b_ij / S_i[:, None]
@@ -561,6 +653,8 @@ def compute_sasa_neighbor_list(
   total_fraction_exposed = jnp.prod(fraction_exposed_pair, axis=1)
 
   A_i = S_i * total_fraction_exposed
+  if atom_mask is not None:
+    A_i = jnp.where(jnp.asarray(atom_mask, dtype=jnp.bool_), A_i, 0.0)
 
   return jnp.sum(A_i)
 
@@ -571,6 +665,7 @@ def compute_nonpolar_energy(
   surface_tension: float = SURFACE_TENSION,
   probe_radius: float = constants.PROBE_RADIUS,
   neighbor_idx: Array | None = None,
+  atom_mask: Array | None = None,
 ) -> Array:
   r"""Computes the non-polar solvation energy (SASA term).
 
@@ -584,6 +679,7 @@ def compute_nonpolar_energy(
       surface_tension: Surface tension parameter (gamma).
       probe_radius: Solvent probe radius.
       neighbor_idx: Optional neighbor list indices.
+      atom_mask: Optional boolean/numeric mask (N,) for valid atoms.
 
   Returns:
       Non-polar energy (scalar).
@@ -592,7 +688,9 @@ def compute_nonpolar_energy(
   if neighbor_idx is None:
     sasa = compute_sasa(positions, radii, probe_radius)
   else:
-    sasa = compute_sasa_neighbor_list(positions, radii, neighbor_idx, probe_radius)
+    sasa = compute_sasa_neighbor_list(
+        positions, radii, neighbor_idx, probe_radius, atom_mask=atom_mask
+    )
 
   return surface_tension * sasa
 
@@ -603,49 +701,25 @@ def compute_ace_nonpolar_energy(
   surface_tension: float = SURFACE_TENSION,
   probe_radius: float = constants.PROBE_RADIUS,
   dielectric_offset: float = 0.09,
+  mask: Array | None = None,
 ) -> Array:
-  """Computes non-polar solvation energy using the ACE approximation.
+  """Computes non-polar solvation energy using the ACE approximation (AKMA units).
 
-  OpenMM Formula (from CustomGBForce):
-  E_i = 28.3919551 * (radius + 0.14)^2 * (radius / B)^6  [kJ/mol, radius in nm]
+  Exact AKMA formula matching OpenMM ``GBSAOBCForce``:
+  ``E_i = 4 * pi * surface_tension * (r_i + probe_radius)^2 * (r_i / B_i)^6``  [kcal/mol]
 
-  where:
-  - radius = offset_radius + offset = (intrinsic_radius - dielectric_offset) + 0.009
-  - B = Born radius (in nm for OpenMM, Angstroms for JAX MD)
-
-  Args:
-      radii: Intrinsic atomic radii in Angstroms (N,).
-      born_radii: Born radii in Angstroms (N,).
-      surface_tension: Not used in OpenMM formula (legacy parameter).
-      probe_radius: Not used directly (legacy parameter).
-      dielectric_offset: Dielectric offset (default 0.09 Å).
-
-  Returns:
-      Per-atom non-polar energy (N,) in kcal/mol. Callers must mask
-      padding atoms and sum to get the total.
-
+  At default ``surface_tension = 0.0054 kcal/(mol*A^2)`` (``= 2.25936 kJ/(mol*nm^2) / 418.4``)
+  and ``probe_radius = 1.4 A``, ``4 * pi * 0.0054 * 418.4 == 28.391955129 kJ/(mol*nm^2)``
+  to exact floating-point precision (BUG-GB1).
   """
-  # OpenMM coefficient: 28.3919551 kJ/mol/nm^2
-  ACE_COEFF_KJ_NM = 28.3919551
-
-  # offset_radius in nm
-  offset_radii_nm = (radii - dielectric_offset) / 10.0  # Convert Å to nm
-
-  # radius in nm = offset_radius + 0.009
-  radius_nm = offset_radii_nm + 0.009
-
-  # Born radii in nm
-  born_radii_nm = born_radii / 10.0
-
-  # ACE formula: 28.3919551 * (radius + 0.14)^2 * (radius / B)^6 [kJ/mol]
-  term1 = (radius_nm + 0.14) ** 2
-  term2 = (radius_nm / born_radii_nm) ** 6
-
-  energy_per_atom_kj = ACE_COEFF_KJ_NM * term1 * term2
-
-  # Convert to kcal/mol — return per-atom, NOT summed
-  KJ_TO_KCAL = 0.239006
-  return energy_per_atom_kj * KJ_TO_KCAL
+  del dielectric_offset
+  prefactor = (4.0 * math.pi) * surface_tension
+  term1 = (radii + probe_radius) ** 2
+  term2 = (radii / jnp.maximum(born_radii, 1e-6)) ** 6
+  e_ace = prefactor * term1 * term2
+  if mask is not None:
+    e_ace = jnp.where(mask, e_ace, 0.0)
+  return e_ace
 
 
 # =============================================================================
@@ -667,7 +741,7 @@ def compute_ace_nonpolar_energy(
 #   4. Born radii VJP:      NL-based (0.1ms)  — dB/dr via NL, cheap
 #   5. Chain rule:          dE/dB · dB/dr     — vector-Jacobian product
 #
-# Total: ~0.4ms vs 11.3ms = 28× speedup, EXACTLY same physics.
+# Total: ~0.4ms vs 11.3ms = 28x speedup, EXACTLY same physics.
 #
 # AMBER uses the same decomposition and treats the Born radii derivative
 # as a "slowly varying" force (nrespa) for further amortization.
@@ -695,7 +769,7 @@ def _dense_coulomb_from_born_radii(
     eff_dist = f_gb(distances, br_i, br_j)
 
     tau = (1.0 / solute_dielectric) - (1.0 / solvent_dielectric)
-    prefactor = -0.5 * constants.COULOMB_CONSTANT * tau
+    prefactor = -0.5 * GB_COULOMB_CONSTANT * tau
 
     charge_prod = charges[:, None] * charges[None, :]
     energy_terms = charge_prod / eff_dist
@@ -783,35 +857,56 @@ def _gb_split_bwd(residuals, g):
         scaled_radii, dielectric_offset, solvent_dielectric, solute_dielectric,
     ) = residuals
 
-    # Stage 1: VJP of dense Coulomb w.r.t. (positions, born_radii)
-    # This gives us dE/dr_direct AND dE/dB in one backward pass
+    # Stage 1: VJP of dense Coulomb w.r.t. (positions, charges, born_radii)
+    # This gives us dE/dr_direct, dE/dq, AND dE/dB in one backward pass
     _, coulomb_vjp_fn = jax.vjp(
-        lambda pos, br: _dense_coulomb_from_born_radii(
-            pos, charges, br,
+        lambda pos, q, br: _dense_coulomb_from_born_radii(
+            pos, q, br,
             solvent_dielectric=solvent_dielectric,
             solute_dielectric=solute_dielectric,
         ),
-        positions, born_radii,
+        positions, charges, born_radii,
     )
-    dE_dr_direct, dE_dB = coulomb_vjp_fn(jnp.ones((), dtype=positions.dtype))
+    dE_dr_direct, dE_dq, dE_dB = coulomb_vjp_fn(jnp.ones((), dtype=positions.dtype))
 
-    # Stage 2: VJP of NL Born radii w.r.t. positions
+    # Stage 2: VJP of NL Born radii w.r.t. (positions, radii, scaled_radii)
     # Computes dB/dr · dE/dB (chain rule product) via NL — cheap!
-    _, born_vjp_fn = jax.vjp(
-        lambda pos: compute_born_radii_neighbor_list(
-            pos, radii, neighbor_idx,
-            dielectric_offset=dielectric_offset,
-            scaled_radii=scaled_radii,
-        ),
-        positions,
-    )
-    dE_dr_via_born = born_vjp_fn(dE_dB)[0]
+    if scaled_radii is not None:
+        _, born_vjp_fn = jax.vjp(
+            lambda pos, r, sr: compute_born_radii_neighbor_list(
+                pos, r, neighbor_idx,
+                dielectric_offset=dielectric_offset,
+                scaled_radii=sr,
+            ),
+            positions, radii, scaled_radii,
+        )
+        dE_dr_via_born, dE_drad, dE_dsr = born_vjp_fn(dE_dB)
+        grad_sr = g * dE_dsr
+    else:
+        _, born_vjp_fn = jax.vjp(
+            lambda pos, r: compute_born_radii_neighbor_list(
+                pos, r, neighbor_idx,
+                dielectric_offset=dielectric_offset,
+                scaled_radii=None,
+            ),
+            positions, radii,
+        )
+        dE_dr_via_born, dE_drad = born_vjp_fn(dE_dB)
+        grad_sr = None
 
     # Stage 3: Total = direct term + chain rule term
     total_grad = dE_dr_direct + dE_dr_via_born
 
-    # Only positions gets gradient
-    return (g * total_grad, None, None, None, None, None, None, None)
+    return (
+        g * total_grad,
+        g * dE_dq,
+        g * dE_drad,
+        jnp.zeros_like(neighbor_idx),
+        grad_sr,
+        None,
+        None,
+        None,
+    )
 
 
 gb_energy_split_vjp.defvjp(_gb_split_fwd, _gb_split_bwd)

@@ -1,0 +1,52 @@
+[claim]
+headline = "Prolix KnobSurface and consumer lowering achieve 100% static U1/U5 governance and runtime FieldAuditProxy consumption with zero silent knob drops across OpenMM, kUPS, naurmalade, and Pallas dispatch surfaces"
+kill_condition = "n_silent_drops > 0 OR n_parity_failures > 0 OR n_untracked_gaps > 0 OR negative_control_detected = false"
+regime = "All 72 canonical KnobSurface leaf fields across 9 physics sub-surfaces and 16 reference schemas"
+kill_condition_satisfiable_by_null = true
+
+[[hypotheses]]
+id = "H_zero_silent_drop"
+label = "Two-tier governance (redsox U1/U5 + FieldAuditProxy runtime audit) eliminates all silent knob drops and untracked schema gaps"
+predicted_signature = "n_silent_drops == 0, n_untracked_gaps == 0, n_parity_failures == 0, and negative_control_detected == true"
+
+[[hypotheses]]
+id = "H_null_silent_drop"
+label = "Null / misspecified governance: consumer lowering silently drops or ignores mutated control knobs without detection"
+predicted_signature = "n_silent_drops > 0 or negative_control_detected == false when a mutated knob is dropped in the shadow negative control"
+
+[[assumptions]]
+id = "A_declaration_exclusion"
+label = "Config declaration modules (knob_surface.py, nonbonded_config.py, spec.py, simulate.py) are excluded from U1 consumer AST scans"
+halt_if = "Declaration modules are included in consumer_paths, allowing __post_init__ self-reads to mask dead knobs"
+status = "tested"
+
+[[assumptions]]
+id = "A_runtime_proxy_interception"
+label = "FieldAuditProxy intercepts all dynamic attribute reads on MolecularBundle and PhysicsSystem during Stage 1 and Stage 2 lowering"
+halt_if = "A consumer bypasses attribute access via raw object.__dict__ without triggering __getattr__"
+status = "tested"
+
+[[confounds]]
+id = "C_inert_metadata_fields"
+label = "Informational or backward-compatible inert fields could be conflated with silent physics knob drops"
+control = "Explicit DOCUMENTED_INERT_KNOBS allowlist and PENDING_EPIC_KNOBS == frozenset() gate"
+isolating_run = "knob_parity_matrix"
+status = "controlled"
+
+[[claim.discriminability]]
+hypothesis_a = "H_zero_silent_drop"
+hypothesis_b = "H_null_silent_drop"
+planned_run_label = "knob_parity_matrix"
+predicted_outcome = "n_silent_drops == 0 AND negative_control_detected == true"
+
+[claim.union_gate]
+[[claim.union_gate.clauses]]
+id = "C_governance_completeness"
+description = "Primary hypothesis distinguishable from null silent-drop hypothesis across all 72 KnobSurface leaves"
+hypothesis_ids = ["H_zero_silent_drop", "H_null_silent_drop"]
+
+[[claim.union_gate.clauses]]
+id = "C_instrument_sensitivity"
+description = "Synthetic negative control deliberately drops a mutated knob and verifies FieldAuditProxy + energy-delta detection fires"
+hypothesis_ids = []
+positive_control = true

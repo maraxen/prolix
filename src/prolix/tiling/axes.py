@@ -1,5 +1,5 @@
 """Prolix-specific AxisSpec instances for molecular simulation axes."""
-from prolix.tiling.planner import AxisSpec
+from prolix.tiling.plan_types import AxisSpec
 
 # Innermost axes (homogeneous, low tile granularity)
 N_ATOMS = AxisSpec(

@@ -39,6 +39,15 @@ if [[ ! -f "${PROLIX_ROOT}/scripts/slurm/_bth_env.sh" ]]; then
     exit 1
 fi
 
+# Sanity check: fail loudly rather than silently running against a wrong
+# checkout if chdir wasn't set (e.g. a manual sbatch or scontrol requeue).
+if [[ ! -f "${PROLIX_ROOT}/scripts/slurm/_bth_env.sh" ]]; then
+    echo "FATAL: ${PROLIX_ROOT} does not look like the prolix worktree root" \
+         "(scripts/slurm/_bth_env.sh not found). Submit via" \
+         "myxcel submit --sbatch-arg=\"chdir=<worktree path>\"." >&2
+    exit 1
+fi
+
 # Map array task id -> system size.
 SIZES=(2 16 64 216 512 895)
 TASK_ID="${SLURM_ARRAY_TASK_ID:-0}"

@@ -193,10 +193,10 @@ pylint.max-args = 15
 ]
 
 [tool.ty.src]
-exclude = ["**/viewer.py"]
+exclude = ["**/viewer.py", "submodules/**", "third_party/**", ".agents/**"]
 
 [tool.ty.environment]
-root = ["src/prolix"]
+root = ["src"]
 
 [tool.ty.rules]
 invalid-type-form = "ignore"

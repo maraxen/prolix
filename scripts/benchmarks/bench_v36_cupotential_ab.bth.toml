@@ -1,0 +1,54 @@
+[experiment]
+hypothesis = """
+Prolix Pallas v3.6/v3.7 physics and fast-path improvements -- (S1) exact isotropic
+SPME Green's function box scaling eliminating the +353 bar NPT reciprocal-pressure
+bias on rigid TIP3P water, (S2) symplectic RATTLE velocity projection eliminating
+spurious post-R2 rotational kinetic-energy damping on HBonds solute-water NVT,
+(S3) GPU-resident ProlixContext Morton step/getState fast-path and staged
+ProlixSimulation reporter execution, (S4) 3D cell-grid (nb >= 64) + 8-octant
+sub-AABB Morton tile pruning on DHFR_24k, and (S5) BSD-3-Clause Pallas fltflt
+rn.f32 mixed-precision accumulators -- achieve numerical parity and throughput
+gains against verified OpenMM CUDA baselines.
+"""
+
+[outcomes.gpu_ab_complete]
+condition = "schema_version = 'pallas_v36_ab_suite_v1' AND cpu_smoke = false AND quick_mode = false AND total_wall_s > 0"
+decision = "Full GPU v3.6/v3.7 A/B benchmark suite completed with verified OpenMM CUDA provenance; record S1..S5 metrics in release validation artifacts."
+reasoning = """
+All requested S1..S5 A/B suites completed in full production GPU mode with
+require_openmm_cuda_context provenance enforced.
+"""
+
+[outcomes.quick_gpu_smoke_complete]
+condition = "schema_version = 'pallas_v36_ab_suite_v1' AND cpu_smoke = false AND quick_mode = true AND total_wall_s > 0"
+decision = "Quick GPU A/B smoke gate completed with verified OpenMM CUDA provenance; proceed to full campaign run."
+reasoning = """
+Quick GPU smoke mode completed with positive wall-clock timing and verified
+OpenMM CUDA provenance.
+"""
+
+[outcomes.cpu_smoke_complete]
+condition = "schema_version = 'pallas_v36_ab_suite_v1' AND cpu_smoke = true AND total_wall_s > 0"
+decision = "Deterministic CI --cpu-smoke verification completed cleanly; run without --cpu-smoke on GPU nodes for OpenMM CUDA timing."
+reasoning = """
+CPU interpret smoke verification confirmed S1..S5 numerical invariants and JSON
+schema parity without GPU hardware.
+"""
+
+[outcomes.incomplete_or_failed]
+condition = "schema_version != 'pallas_v36_ab_suite_v1' OR total_wall_s IS NULL OR total_wall_s <= 0"
+decision = "Inspect benchmark traceback or OpenMM CUDA anti-fallback error and re-run."
+reasoning = """
+Output artifact is missing expected schema_version or positive total_wall_s.
+"""
+is_residual = true
+
+[result_schema]
+schema_version = "str"
+gpu_tag = "str"
+suites_requested = "str"
+device_kind = "str"
+jax_version = "str"
+cpu_smoke = "bool"
+quick_mode = "bool"
+total_wall_s = "float"
