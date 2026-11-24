@@ -8,11 +8,41 @@ from __future__ import annotations
 
 import json
 import sys
+import tomllib
 from pathlib import Path
 
-# Keep in sync with pyproject.toml: xtrax>=0.4.0a6,<0.5
-FLOOR = "0.4.0a6"
-UPPER = "0.5"
+PYPROJECT = Path(__file__).resolve().parents[2] / "pyproject.toml"
+
+
+def base_xtrax_bounds(pyproject_text: str) -> tuple[str, str]:
+    """Return ``(floor, upper)`` from the base ``xtrax>=FLOOR,<UPPER`` in ``[project].dependencies``.
+
+    Entries with extras (``xtrax[plugin]>=...``) and entries under ``optional-dependencies``
+    are ignored, so the base floor is the one every library user gets. Fails closed when the
+    base entry is missing, has no ``>=`` or no ``<`` bound.
+    """
+    from packaging.requirements import Requirement
+
+    deps = tomllib.loads(pyproject_text).get("project", {}).get("dependencies", [])
+    found: list[Requirement] = []
+    for line in deps:
+        req = Requirement(line)
+        if req.name == "xtrax" and not req.extras:
+            found.append(req)
+    if len(found) != 1:
+        raise ValueError(f"expected exactly one base xtrax dependency, found {len(found)}")
+    lower = [s.version for s in found[0].specifier if s.operator == ">="]
+    upper = [s.version for s in found[0].specifier if s.operator == "<"]
+    if len(lower) != 1 or len(upper) != 1:
+        raise ValueError(f"base xtrax dependency needs one >= floor and one < upper: {found[0]}")
+    return lower[0], upper[0]
+
+
+def _load_bounds() -> tuple[str, str]:
+    return base_xtrax_bounds(PYPROJECT.read_text())
+
+
+FLOOR, UPPER = _load_bounds()
 
 
 def _fail(msg: str) -> int:
