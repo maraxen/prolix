@@ -233,3 +233,90 @@ def test_submit_refusals(repo, stub_myxcel):
     with pytest.raises(RefusalError):
         render.submit_job(name="tamper", repo_root=str(repo))
     assert _calls(stub_myxcel) == []
+
+
+# ---------------------------------------------------------------- Task 6 fixes: root check, staging, allowlist, bytes
+
+
+def test_explicit_repo_root_gets_the_checkout_check(repo, tmp_path):
+    bare = tmp_path / "bare"
+    (bare / "scripts" / "benchmarks").mkdir(parents=True)
+    shutil.copy(REPO / SCRIPT, bare / SCRIPT)
+    with pytest.raises(InputError, match="not a prolix checkout"):
+        render.render_job(repo_root=str(bare), script=SCRIPT, name="bare", preset="cpu_quick")
+    assert _no_artifact(bare, "bare")
+    # a checkout whose pyproject names another project is refused the same way
+    (repo / "pyproject.toml").write_text('[project]\nname = "not-prolix"\n')
+    with pytest.raises(InputError, match="not a prolix checkout"):
+        render.render_job(repo_root=str(repo), script=SCRIPT, name="other", preset="cpu_quick")
+    # control: restoring the project name makes the same explicit root render
+    (repo / "pyproject.toml").write_text('[project]\nname = "prolix"\n')
+    res = render.render_job(repo_root=str(repo), script=SCRIPT, name="ctl", preset="cpu_quick")
+    assert Path(res["artifact"]).is_file()
+
+
+def test_failed_second_write_does_not_burn_the_name(repo, monkeypatch):
+    real_write = render.rt.atomic_write_bytes
+    calls = {"n": 0}
+
+    def fail_on_second_write(path, data):
+        calls["n"] += 1
+        if calls["n"] == 2:
+            raise OSError("simulated failure writing render_job.json")
+        return real_write(path, data)
+
+    monkeypatch.setattr(render.rt, "atomic_write_bytes", fail_on_second_write)
+    with pytest.raises(OSError, match="simulated"):
+        render.render_job(repo_root=str(repo), script=SCRIPT, name="burn", preset="cpu_quick")
+    assert _no_artifact(repo, "burn")
+    parent = repo / "scripts" / "slurm" / "agent_jobs"
+    assert list(parent.iterdir()) == [], "staging directory was left behind"
+
+    monkeypatch.setattr(render.rt, "atomic_write_bytes", real_write)
+    res = render.render_job(repo_root=str(repo), script=SCRIPT, name="burn", preset="cpu_quick")
+    assert Path(res["artifact"]).is_file()
+    assert json.loads((_artifact(repo, "burn") / "render_job.json").read_text())["name"] == "burn"
+    # control: a completed render is still immutable
+    with pytest.raises(InputError, match="immutable"):
+        render.render_job(repo_root=str(repo), script=SCRIPT, name="burn", preset="cpu_quick")
+
+
+def test_directory_without_render_record_is_incomplete_not_immutable(repo):
+    stale = _artifact(repo, "partial")
+    stale.mkdir(parents=True)
+    (stale / "job.slurm").write_text("stale\n")
+    res = render.render_job(repo_root=str(repo), script=SCRIPT, name="partial", preset="cpu_quick")
+    assert Path(res["artifact"]).read_bytes() != b"stale\n"
+    assert (stale / "render_job.json").is_file()
+
+
+def test_submit_rechecks_the_allowlist(repo, stub_myxcel):
+    render.render_job(repo_root=str(repo), script=SCRIPT, name="offlist", preset="cpu_quick")
+    # control: the untouched record submits (dry run: push and submit)
+    res = render.submit_job(name="offlist", repo_root=str(repo))
+    assert len(res["steps"]) == 2
+    other = "scripts/benchmarks/other.py"
+    (repo / other).write_text("print('not allowlisted')\n")
+    record_path = _artifact(repo, "offlist") / "render_job.json"
+    record = json.loads(record_path.read_text())
+    record["script"] = other
+    record["source_sha256"] = render.rt.sha256_file(repo / other)  # the source check would now pass
+    record_path.write_text(json.dumps(record))
+    with pytest.raises(RefusalError, match="allowlist"):
+        render.submit_job(name="offlist", repo_root=str(repo))
+    assert len(_calls(stub_myxcel)) == 2  # the refused call ran no myxcel command
+
+
+@pytest.mark.parametrize(("output", "expected"), [(b"partial push output", "partial push output"),
+                                                  ("already text", "already text")])
+def test_timeout_output_is_returned_as_text(repo, stub_myxcel, monkeypatch, output, expected):
+    render.render_job(repo_root=str(repo), script=SCRIPT, name="tmo", preset="cpu_quick")
+
+    def timed_out(argv, **kwargs):
+        raise subprocess.TimeoutExpired(argv, 120, output=output)
+
+    monkeypatch.setattr(render.subprocess, "run", timed_out)
+    res = render.submit_job(name="tmo", repo_root=str(repo))
+    assert res["steps"][0]["stdout"] == expected
+    assert isinstance(res["steps"][0]["stdout"], str)
+    json.dumps(res)  # the record stays serialisable

@@ -12,6 +12,7 @@ import importlib.resources
 import json
 import os
 import re
+import secrets
 import shlex
 import shutil
 import subprocess
@@ -70,28 +71,49 @@ def load_allowlist() -> list[str]:
   return entries
 
 
+def _is_prolix_checkout(cand: Path) -> bool:
+  """True when ``cand`` has a pyproject.toml naming prolix and the uv helper script."""
+  pyproject = cand / "pyproject.toml"
+  if not (pyproject.is_file() and (cand / "scripts" / "slurm" / "_uv_env.sh").is_file()):
+    return False
+  try:
+    name = tomllib.loads(pyproject.read_text()).get("project", {}).get("name")
+  except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError):
+    return False
+  return name == PROJECT
+
+
 def find_repo_root(start: Path | None = None) -> Path:
   """Nearest ancestor of ``start`` (default cwd) that is the prolix checkout."""
   here = (start or Path.cwd()).resolve()
   for cand in (here, *here.parents):
-    pyproject = cand / "pyproject.toml"
-    if pyproject.is_file() and (cand / "scripts" / "slurm" / "_uv_env.sh").is_file():
-      try:
-        name = tomllib.loads(pyproject.read_text()).get("project", {}).get("name")
-      except tomllib.TOMLDecodeError:
-        continue
-      if name == PROJECT:
-        return cand
+    if _is_prolix_checkout(cand):
+      return cand
   raise InputError("no prolix checkout found above the working directory; pass repo_root")
 
 
 def _resolve_root(repo_root: str | None) -> Path:
+  """The checkout root: an explicit ``repo_root`` gets the same prolix-checkout check as a found one."""
   if repo_root is None:
     return find_repo_root()
   root = Path(repo_root).expanduser().resolve()
   if not root.is_dir():
     raise InputError(f"repo_root {repo_root!r} is not a directory")
+  if not _is_prolix_checkout(root):
+    raise InputError(
+      f"repo_root {repo_root!r} is not a prolix checkout (needs pyproject.toml named "
+      f"{PROJECT!r} and scripts/slurm/_uv_env.sh)"
+    )
   return root
+
+
+def _text(value: str | bytes | None) -> str:
+  """Subprocess output as str: a timed-out run can carry bytes even with text=True."""
+  if value is None:
+    return ""
+  if isinstance(value, bytes):
+    return value.decode("utf-8", errors="replace")
+  return value
 
 
 def _check_script(script: str, root: Path) -> None:
@@ -198,29 +220,42 @@ def render_job(
   _check_script(script, root)
   folder = _artifact_dir(root, name)
   if folder.exists():
-    raise InputError(f"{folder} exists; rendered jobs are immutable, choose another name")
+    if (folder / "render_job.json").is_file():
+      raise InputError(f"{folder} exists; rendered jobs are immutable, choose another name")
+    # No render_job.json: an interrupted render that submit_job never accepted. Replace it.
+    shutil.rmtree(folder)
 
   text = render_job_script(script=script, args=args, preset=preset, time=time, name=name)
   job_bytes = text.encode()
-  folder.mkdir(parents=True)
+  # Write both files into a sibling staging dir, then rename it into place: the final name only
+  # ever appears complete, so a failed write does not burn the job name.
+  parent = root / ARTIFACT_ROOT
+  parent.mkdir(parents=True, exist_ok=True)
+  staging = parent / f".{name}.{secrets.token_hex(6)}.tmp"
+  staging.mkdir()  # default mode, like the final folder; the random suffix avoids collisions
+  try:
+    rt.atomic_write_bytes(staging / "job.slurm", job_bytes)
+    record = {
+      "schema": "prolix.agent.render_job/1",
+      "name": name,
+      "script": script,
+      "source_sha256": rt.sha256_file(root / script),
+      "artifact_sha256": rt.sha256_file(staging / "job.slurm"),
+      "args": args,
+      "preset": preset,
+      "time": time,
+      "git_rev": _git_rev(root),
+      "repo_root": str(root),
+    }
+    rt.atomic_write_bytes(
+      staging / "render_job.json",
+      (json.dumps(record, sort_keys=True, indent=2) + "\n").encode(),
+    )
+    os.rename(staging, folder)
+  except BaseException:
+    shutil.rmtree(staging, ignore_errors=True)
+    raise
   job_path = folder / "job.slurm"
-  rt.atomic_write_bytes(job_path, job_bytes)
-  record = {
-    "schema": "prolix.agent.render_job/1",
-    "name": name,
-    "script": script,
-    "source_sha256": rt.sha256_file(root / script),
-    "artifact_sha256": rt.sha256_file(job_path),
-    "args": args,
-    "preset": preset,
-    "time": time,
-    "git_rev": _git_rev(root),
-    "repo_root": str(root),
-  }
-
-  rt.atomic_write_bytes(
-    folder / "render_job.json", (json.dumps(record, sort_keys=True, indent=2) + "\n").encode()
-  )
   argvs = submit_argvs(remote=DEFAULT_REMOTE, artifact=job_path, confirm=False)
   notes = [
     "repo_root must equal the myxcel project root: myxcel maps the script path only under the project root",
@@ -260,6 +295,10 @@ def submit_job(
     raise RefusalError(
       "rendered job.slurm is missing or its sha256 no longer matches render_job.json"
     )
+  if record["script"] not in load_allowlist():
+    raise RefusalError(
+      f"script {record['script']!r} is not in the render allowlist (job_scripts.txt); re-render"
+    )
   if (
     not (root / record["script"]).is_file()
     or rt.sha256_file(root / record["script"]) != record["source_sha256"]
@@ -295,7 +334,7 @@ def submit_job(
       )
       code, out, err = proc.returncode, proc.stdout, proc.stderr
     except subprocess.TimeoutExpired as exc:
-      code, out, err = -1, exc.stdout or "", f"timed out after 120 s: {exc}"
+      code, out, err = -1, _text(exc.stdout), f"timed out after 120 s: {exc}"
     steps.append({"argv": argv, "exit": code, "stdout": out, "stderr": err})
     if code != 0:
       break
