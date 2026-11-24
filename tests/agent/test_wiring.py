@@ -10,6 +10,7 @@ import asyncio
 import inspect
 import json
 import os
+import shutil
 import subprocess
 import sys
 import textwrap
@@ -24,6 +25,8 @@ from prolix.agent import tools
 from prolix.agent.errors import InputError, RefusalError
 
 REPO = Path(__file__).resolve().parents[2]
+SCRIPT = "scripts/benchmarks/prolix_vs_openmm_speed.py"
+ENTRY = "from prolix_agent_entry import cli_main; cli_main()"
 EXPECTED = {
     "load_system", "inspect_params", "energy_breakdown", "minimize", "md_smoke", "render_job", "submit_job",
 }
@@ -68,7 +71,7 @@ def test_positive_control_missing_tool_makes_wire_raise():
         """One tool."""
         return {"x": x}
 
-    with pytest.raises(Exception, match="missing|expected|not registered"):
+    with pytest.raises(Exception, match="never_registered"):
         wire_fn(
             None,
             app_cls(name="control"),
@@ -98,8 +101,9 @@ def _env(tmp_path: Path, **extra: str) -> dict[str, str]:
 
 
 def _prolix(args: list[str], tmp_path: Path, **extra: str) -> subprocess.CompletedProcess[str]:
+    # The running interpreter, not a .venv path: the tests work in any environment with the extra.
     return subprocess.run(
-        [str(REPO / ".venv" / "bin" / "prolix"), *args],
+        [sys.executable, "-c", ENTRY, *args],
         capture_output=True,
         text=True,
         cwd=tmp_path,
@@ -112,27 +116,36 @@ def _prolix(args: list[str], tmp_path: Path, **extra: str) -> subprocess.Complet
 # ---------------------------------------------------------------- exit-code table (spec section 3)
 
 
+def _checkout(root: Path) -> Path:
+    """A minimal prolix checkout (the pyproject and uv helper that the root check requires)."""
+    (root / "scripts" / "slurm").mkdir(parents=True)
+    (root / "scripts" / "benchmarks").mkdir(parents=True)
+    (root / "pyproject.toml").write_text('[project]\nname = "prolix"\n')
+    shutil.copy(REPO / "scripts" / "slurm" / "_uv_env.sh", root / "scripts" / "slurm" / "_uv_env.sh")
+    shutil.copy(REPO / SCRIPT, root / SCRIPT)
+    return root
+
+
 def test_exit_0_success_prints_one_json_object(tmp_path):
+    checkout = _checkout(tmp_path / "checkout")
     proc = _prolix(
-        ["render_job", "--script", "scripts/benchmarks/prolix_vs_openmm_speed.py", "--name", "ok_job",
-         "--preset", "cpu_quick", "--repo-root", str(REPO), "--json"],
+        ["render_job", "--script", SCRIPT, "--name", "ok_job",
+         "--preset", "cpu_quick", "--repo-root", str(checkout), "--json"],
         tmp_path,
     )
     assert proc.returncode == 0, proc.stderr
     payload = json.loads(proc.stdout)  # exactly one JSON object, nothing else on stdout
     assert payload["artifact"].endswith("scripts/slurm/agent_jobs/ok_job/job.slurm")
-    # clean up the rendered directory this test created in the checkout
-    import shutil
-
-    shutil.rmtree(REPO / "scripts" / "slurm" / "agent_jobs" / "ok_job")
-    (REPO / "scripts" / "slurm" / "agent_jobs").rmdir()  # only if this test left it empty
+    assert Path(payload["artifact"]).is_file()
 
 
+@pytest.mark.slow
 def test_exit_2_usage_error(tmp_path):
     proc = _prolix(["load_system", "--bogus"], tmp_path)
     assert proc.returncode == 2, proc.stderr
 
 
+@pytest.mark.slow
 def test_exit_2_jax_cache_configuration_error_has_prefix(tmp_path):
     cfg = tmp_path / "xdg" / "xtrax"
     cfg.mkdir(parents=True)
@@ -156,6 +169,7 @@ def test_exit_4_missing_file(tmp_path):
     assert proc.returncode == 4, proc.stderr
 
 
+@pytest.mark.slow
 def test_exit_1_missing_extra_prints_hint(tmp_path):
     code = textwrap.dedent(
         """
@@ -197,6 +211,7 @@ def _report(stdout: str) -> dict:
     return json.loads(line[len("REPORT "):])
 
 
+@pytest.mark.slow
 def test_entry_point_pins_cpu_even_when_env_asks_for_cuda(tmp_path):
     code = _CHILD.replace("__ENTRY__", "import prolix_agent_entry; prolix_agent_entry.cli_main()")
     proc = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, cwd=tmp_path,
@@ -206,6 +221,7 @@ def test_entry_point_pins_cpu_even_when_env_asks_for_cuda(tmp_path):
     assert rep["backends"] == ["cpu"] and rep["default"] == "cpu"
 
 
+@pytest.mark.slow
 def test_control_bypassing_the_entry_package_does_not_pin_cpu(tmp_path):
     code = _CHILD.replace("__ENTRY__", "from prolix.agent.cli import main; main()")
     proc = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, cwd=tmp_path,

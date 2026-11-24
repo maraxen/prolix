@@ -115,7 +115,8 @@ def test_entry_point_writes_cpu_record_even_with_cuda_requested(root):
     )
     (root / "home").mkdir()
     proc = subprocess.run(
-        [str(REPO / ".venv" / "bin" / "prolix"), "load_system", "--pdb", str(MINI),
+        [sys.executable, "-c", "from prolix_agent_entry import cli_main; cli_main()",
+         "load_system", "--pdb", str(MINI),
          "--out-dir", str(root / "ep"), "--json"],
         capture_output=True, text=True, cwd=root, env=env, timeout=900, check=False,
     )
