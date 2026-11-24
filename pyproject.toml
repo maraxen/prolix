@@ -47,11 +47,20 @@ Homepage = "https://github.com/maraxen/prolix"
 Repository = "https://github.com/maraxen/prolix"
 Issues = "https://github.com/maraxen/prolix/issues"
 
+[project.scripts]
+prolix = "prolix_agent_entry:cli_main"
+prolix-mcp = "prolix_agent_entry:mcp_main"
+
 [tool.setuptools.packages.find]
 where = ["src"]
 
+[tool.setuptools.package-data]
+"prolix.agent" = ["job_scripts.txt"]
+
 [project.optional-dependencies]
 cuda = ["jax[cuda12]"]
+# Agent CLI/MCP (prolix.agent). xtrax.agent ships in xtrax 0.4.1b10; the floor is the first release that has it.
+agent = ["xtrax[plugin]>=0.4.1b10,<0.5"]
 tpu = ["jax[tpu]"]
 cpu = ["jax"]
 dev = [
