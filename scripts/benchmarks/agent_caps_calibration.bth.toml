@@ -1,0 +1,36 @@
+[benchmark]
+metric = "passes_target"
+target = "minimize and md_nve each finish within 60 s wall at the shipped caps (MAX_ATOMS=1000, MAX_MIN_STEPS=200, MAX_MD_STEPS=500, MAX_DT_FS=2.0) on a synthetic 1000-atom free-boundary system, 8 CPU threads"
+regression_threshold = 0.20
+
+[experiment]
+hypothesis = """
+The in-process prolix.agent operations at the placeholder caps complete within about 60 s
+wall clock each on 8 CPU threads, so the caps can ship unchanged. If not, the caps are lowered
+to the largest size that passes (spec section 4: caps are lowered until the largest allowed call
+takes about 60 s).
+"""
+
+[outcomes.pass]
+condition = "passes_target == true"
+decision = "Keep the shipped caps. Record the table in the PR and the commit message."
+reasoning = """
+Spec section 4 requires the largest allowed call to take about 60 s on 8 threads; a pass means the
+placeholders already satisfy it for minimize (200 sd steps) and md_smoke (500 NVE steps) at 1000 atoms.
+"""
+
+[outcomes.fail]
+condition = "passes_target == false"
+decision = "Lower MAX_ATOMS in src/prolix/agent/_runtime.py to the largest size in the table that passes, and lower MAX_MIN_STEPS / MAX_MD_STEPS to the largest step counts that pass at that size. Re-run and record the new table."
+reasoning = """
+The caps are the only safety on in-process cost; a call above about 60 s freezes the MCP server
+for that duration (D7 serialises calls). Lowering is the intended remedy, not a change in behaviour.
+"""
+
+[result_schema]
+atoms = "int"
+sd_steps = "int"
+md_steps = "int"
+passes_target = "bool"
+threads_env = "dict"
+bundle_build_s = "float"
