@@ -1,7 +1,7 @@
 ---
 title: 'prolix CLI and MCP server: quick in-process operations, long runs rendered as jobs'
 description: 'Implementation spec for debt #3555: a cisternal-wired prolix CLI and MCP server (src/prolix/agent) exposing seconds-scale operations in-process on CPU and rendering or submitting long runs through myxcel; built on xtrax.agent.'
-status: draft
+status: converged
 task_id: 261123_xtrax-entrypoint-cli-mcp
 date: '261123'
 ---
@@ -74,9 +74,10 @@ def prepare() -> None:
     os.environ["JAX_PLATFORMS"] = "cpu"          # unconditional; replaces any inherited value, BEFORE `import prolix`
 def cli_main() -> None:
     prepare()
-    try: from prolix.agent import cli
-    except AgentExtraMissing as e: print(e, file=sys.stderr); raise SystemExit(1)
+    _require_agent_extra()                       # find_spec checks for cisternal/fastmcp/cyclopts/xtrax.agent; exit 1 + hint, BEFORE any prolix import (~13 s)
+    from prolix.agent import cli
     cli.main()                                   # -> xtrax.agent.run_cli(app)
+def _require_agent_extra() -> None: ...         # importlib.util.find_spec only (imports nothing heavy); on a missing module print the `prolix[agent]` hint to stderr, raise SystemExit(1)
 def mcp_main() -> None: ...                      # same shape, prolix.agent.mcp.main() -> xtrax.agent.serve(build_server())
 ```
 
@@ -99,7 +100,7 @@ raise `AgentError`; they never print (cisternal rule 2).
 | Code | Meaning | Source | Test |
 |---|---|---|---|
 | 0 | success | | any round trip |
-| 1 | `xtrax[plugin]` or `prolix[agent]` missing | `prolix_agent_entry` catches `require_agent_extra`'s `AgentExtraMissing` and exits 1 with the hint; `xtrax.agent` also exits 1 for missing cisternal (same meaning) (`xtrax/agent.py:98`) | cisternal import blocked, subprocess of `cli_main`: exit 1, stderr names `prolix[agent]` |
+| 1 | `xtrax[plugin]` or `prolix[agent]` missing | `prolix_agent_entry._require_agent_extra()` checks the extra before any `prolix` import and exits 1 with the hint (`require_agent_extra`'s `AgentExtraMissing` stays the guard for direct `prolix.agent` importers); `xtrax.agent` also exits 1 for missing cisternal (same meaning) (`xtrax/agent.py:98`) | cisternal import blocked, subprocess of `cli_main`: exit 1, stderr names `prolix[agent]` |
 | 1 (overlap) | unhandled exception (Python's traceback status) | interpreter | documented, not a contract; stderr carries a traceback, not the hint |
 | 2 | cyclopts usage error (bad type, missing argument, unknown command), mapped to 2 by the `CycloptsError` wrapper so the code does not depend on the cyclopts version (A28) | `prolix.agent.cli.main` wrapper | `prolix load_system --bogus` exits 2 |
 | 2 (overlap) | bad jax-cache configuration | `xtrax.agent` (`agent.py:93`), stderr prefix `prolix: jax cache configuration error:` | malformed cache setting, trigger copied from xtrax's own test for this exit; assert exit 2 **and** the stderr prefix |
@@ -184,17 +185,17 @@ No prolix executor exists for production MD, ensembles, REMD or fitting: they ar
 - `args`: strings, each `shlex.quote`d. `preset` closed table (**non-preemptible only**):
   `cpu_quick` (`#SBATCH --partition=mit_quicktest --time=0:10:00 --cpus-per-task=2 --mem=4G`, headers of `l3_smoke.slurm:2-9`) or
   `gpu_l40s` (`--partition=mit_normal_gpu --gres=gpu:l40s:1 --cpus-per-task=16 --mem=64G`, headers of `prof_ensemble_apply_probe.slurm:2-7`).
-  `time` `HH:MM:SS`; defaults and maxima: `cpu_quick` 0:10:00, `gpu_l40s` 2:00:00 (placeholder, the partition limit is not verified, A24). `name` `[A-Za-z0-9_-]{1,40}`.
+  `time` `HH:MM:SS`; defaults and maxima: `cpu_quick` 0:10:00, `gpu_l40s` 2:00:00 (below the 5:45 `mit_normal_gpu` cap, A24). `name` `[A-Za-z0-9_-]{1,40}`.
   **Why no `mit_preemptable` preset:** a preempted job is requeued and restarts from step 0, because the target scripts have no checkpoint API (§1.4). A preemptable preset is added only together with
   a chunked, resumable runner (each unit its own process and timeout, completion stamp and sha256 of input and artifact, reuse only on a hash match); that is the follow-up, and `--auto-requeue` is rejected under
   `--respect-directives` anyway (`cli.py:1761`, A25). The 2 h cap bounds one job; there is no multi-hour single timeout.
 - Template (golden-tested; header sources `l3_smoke.slurm:34-35` and `b1_init_exec.slurm:111-115`, not `_common_env.sh`, whose `write_engaging_manifest.py` call is a side effect we do not want):
   ```
   #!/bin/bash
-  <preset #SBATCH lines> --job-name=prolix_<name> --output/--error=outputs/logs/slurm/%j.<name>.{out,err}
+  <preset #SBATCH lines> --job-name=prolix_<name> --output/--error=scripts/slurm/agent_jobs/<name>/%j.<name>.{out,err}
   set -euo pipefail
   cd "${SLURM_SUBMIT_DIR:?}"
-  mkdir -p outputs/logs/slurm
+  mkdir -p scripts/slurm/agent_jobs/<name>   # no-op safeguard; Slurm opens the log before this runs, so the dir must already exist remotely (it does: the script is pushed into it, A31)
   source scripts/slurm/_uv_env.sh && prolix_uv_sync
   rc=0
   uv run python <script> <quoted args> || rc=$?
@@ -289,7 +290,7 @@ real loader, the `_b1_paramize` parity test, the cap wall-clock test. Task 5 rec
   the cap and `render_job`); existing record without `overwrite`; `script` with `..`, absolute path, non-`.py`, outside `scripts/`; `time=12:00:01`; `submit_job` on a
   name without a matching `render_job.json`; `myxcel` absent. Each asserts nothing was written.
 - **Rendered-script golden:** `render_job(script="scripts/benchmarks/prolix_vs_openmm_speed.py", name, preset="gpu_l40s", time, args=["--sweep","1000; rm -rf /"])`
-  (test asserts the script exists) equals `tests/agent/golden/job_gpu_h200.slurm` byte for byte; the `;` argument is single-quoted; `bash -n` exits 0.
+  (test asserts the script exists) equals `tests/agent/golden/job_gpu_l40s.slurm` byte for byte; the `;` argument is single-quoted; `bash -n` exits 0. The golden's `--output`/`--error` paths start with the artifact's own directory (`scripts/slurm/agent_jobs/<name>/`), asserted explicitly (A31).
   `args=["--sweep","1000; rm -rf /"]` (the script's real flag, A23). **Allowlist:** `load_allowlist()` returns exactly `["scripts/benchmarks/prolix_vs_openmm_speed.py"]`; every returned path exists in the checkout, starts `scripts/`, ends `.py`;
   comments/blank lines are skipped (fixture text); a monkeypatched empty list makes `render_job` raise `InputError`; the file is reachable through `importlib.resources` (and Task 1's gate checks the built wheel contains it).
   **Pushed-set (non-vacuous):** in a tmp git repo with the repo's real `.gitignore` copied, render, then run `git ls-files -z --cached --others --exclude-standard` (the command myxcel's push uses, `rsync.py:182`) and assert
@@ -337,13 +338,14 @@ real loader, the `_b1_paramize` parity test, the cap wall-clock test. Task 5 rec
 | A21 | `myxcel push` ships only files `git ls-files --cached --others --exclude-standard` lists (minus excludes), and `myxcel submit` uploads nothing | artifact location is free | VERIFIED | read: myxcel src/myxcel/rsync.py:173-182,69-80; myxcel src/myxcel/cli.py:1792-1830 |
 | A22 | `scripts/slurm/agent_jobs/x/job.slurm` is not git-ignored in prolix; `outputs/` is | artifact path is dropped by push | VERIFIED | read: .gitignore:27; inline `git check-ignore -v scripts/slurm/agent_jobs/x/job.slurm` exited 1 (no match) |
 | A23 | `scripts/benchmarks/prolix_vs_openmm_speed.py` exists with argparse flags `--sweep`, `--warmup` (no `--n`) | golden args and allowlist content change | VERIFIED | read: scripts/benchmarks/prolix_vs_openmm_speed.py:228-231 |
-| A24 | `mit_normal_gpu` with `gpu:l40s:1`, 16 cpus, 64G is a header prolix scripts use; its walltime limit is 2 h or more | `gpu_l40s` max time changes | UNVERIFIED | deferred: partition limits are cluster state; read: scripts/slurm/prof_ensemble_apply_probe.slurm:2-7 (25 min used) |
+| A24 | `mit_normal_gpu` with `gpu:l40s:1`, 16 cpus, 64G is a header prolix scripts use; its walltime limit is 2 h or more | `gpu_l40s` max time changes | VERIFIED | read: scripts/slurm/prof_ensemble_apply_probe.slurm:2-7; read: /home/marielle/projects/myxcel/.praxia/docs/reference/260714_lab-demo-script.md:63-73 (mit_quicktest 14 min cap, `gpu` preset mit_normal_gpu 05:45:00 with l40s:1, 16 cpus, 64G) |
 | A25 | `myxcel submit --auto-requeue` is rejected together with `--respect-directives`; preemptable jobs without a resumable runner restart from scratch | a requeue flag could rescue a preemptable preset | VERIFIED | read: myxcel src/myxcel/cli.py:1699,1761-1762,2087-2089; prolix src/prolix/physics/simulate.py:141-197,259-328 |
 | A26 | `myxcel submit` prints a `slurm_id: <n>` line on success, and `job_status(remote, slurm_id)` exists as a myxcel MCP tool | id parse or follow-up pointer changes | VERIFIED | read: myxcel src/myxcel/cli.py:2175; myxcel src/myxcel/tools.py:116-122 (output format may change; parse falls back to `null`) |
 | A27 | with `JAX_PLATFORMS=cpu` set before `import prolix`, only the cpu backend is initialised | CPU policy fails | VERIFIED | deferred: probe, not spike-run (spike tool absent): printed `cpu [CpuDevice(id=0)]`, `True ['cpu']` on the worktree src with the main checkout venv |
 | A28 | cyclopts' own usage-error exit is version-dependent (orchestrator probe 261123: 4.21.1 and 4.25.3 exit 1, 5.5.2 exits 2), so the entry maps `CycloptsError` -> 2 itself; a control test with the wrapper removed must not pin 2 on 4.x; xtrax.agent exits 2 (cache) and 1 (cisternal missing) | exit table changes | UNVERIFIED | deferred: probe, not spike-run, on cyclopts 5.4.2 in a scratch venv (all three exit 2), not prolix's locked version; read: xtrax src/xtrax/agent.py:93,98 (PR #284 worktree); the §11 exit-code test guards the locked version |
 | A29 | `run_nve` ignores any temperature argument (300 K, key 0) and takes `mass=`; `run_nvt_nose_hoover` honours `temperature` and `mass` | md_smoke arguments change | VERIFIED | read: src/prolix/physics/simulate.py:259-328 (284-286 for the hard-coded 300 K) |
 | A30 | a mass array of shape `(n_real,)` is accepted by `run_nve`/`run_nvt_nose_hoover` | md_smoke mass handling changes | UNVERIFIED | deferred: no run here; read: src/prolix/api/bundle_md.py:109-117 (`masses_with_prefix` returns a `(prefix,)` mass array); covered by the 3-atom md_smoke CI test |
+| A31 | `myxcel submit` runs `mkdir -p` only on its own `remote_log_dir` (default `outputs/logs/slurm`), and the pushed script's directory exists remotely so a log path beside it opens | log path under a missing dir: job fails with no log | UNVERIFIED | read: /home/marielle/projects/myxcel/src/myxcel/cli.py:2012-2014 (mkdir of `remote_log_dir` only); deferred: that push creates `scripts/slurm/agent_jobs/<name>/` remotely follows from A21 but is not run here; Task gate adds a rendered-script assertion that `--output`/`--error` sit under the artifact's directory |
 
 ## 13. Risks
 
@@ -388,3 +390,9 @@ Round 2 (challenger F1-F2, M1-M4, m1-m3), verified at source.
 - M4 accepted: `temperature_k` is NVT-only (NVE with it is `InputError`); both integrators receive `mass=bundle.masses[:n_real]` (A29, A30).
 - m1 accepted: D7/§4 cite A10 (event loop) and A16 (sync CLI). m2 accepted: `slurm_id` parsed from submit stdout, `follow` points to myxcel `job_status` (A26). m3 accepted: what `--dry-run` proves and does not prove is stated in §6.
 - Orchestrator note (post round 2): usage-error exit 2 now comes from a `CycloptsError` wrapper, not cyclopts' default, which is 1 on 4.x and 2 on 5.x (A28).
+
+Round 3 (converged; no FATAL/MAJOR). Minors applied:
+- R3-m1 accepted: §11 golden renamed `job_gpu_h200.slurm` -> `job_gpu_l40s.slurm` (h200 preset removed in round 2).
+- R3-m2 accepted: `--output/--error` now point beside the script at `scripts/slurm/agent_jobs/<name>/%j.<name>.{out,err}` (a pushed, non-ignored path), not gitignored `outputs/`; myxcel's `mkdir -p` covers only its own `remote_log_dir` (`myxcel cli.py:2012-2014`), so the template does not rely on it; claim tagged A31 (UNVERIFIED, deferred) with a golden assertion on the log paths.
+- R3-m3 accepted: the agent-extra check moved into `prolix_agent_entry._require_agent_extra()` (`find_spec`, before any prolix import); exit 1 unchanged (§3).
+- R3-m4 accepted: A24 VERIFIED from myxcel `260714_lab-demo-script.md:63-73`; the 2 h cap sits under the 5:45 partition limit.
