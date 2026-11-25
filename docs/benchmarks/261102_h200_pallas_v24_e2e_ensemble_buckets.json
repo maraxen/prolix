@@ -1,0 +1,158 @@
+{
+  "meta": {
+    "device": "cuda:0",
+    "device_kind": "NVIDIA H200",
+    "compute_capability": "9.0",
+    "jax_version": "0.10.2",
+    "compiler_params_small_grid": {
+      "num_warps": 4,
+      "num_stages": 1
+    },
+    "compiler_params_large_grid": {
+      "num_warps": 4,
+      "num_stages": 2
+    }
+  },
+  "ragged_bucket_and_accuracy_audit": {
+    "n_real_atoms": 6658,
+    "ghost_neighbors_in_real_rows_v23": 1899431,
+    "ghost_neighbors_in_real_rows_v24": 0,
+    "energy_diff_pallas_vs_xla_kcal_mol": 0.010720447373387287,
+    "force_max_diff_pallas_vs_xla_kcal_mol_A": 0.0002680655457846237,
+    "ragged_bucket_invariance_energy_diff_8k_vs_25k": 0.0009765625,
+    "ragged_bucket_invariance_force_max_diff_8k_vs_25k": 4.559193564546149e-05,
+    "force_eval_25k_ragged_v23_unfiltered_ms": 0.2737618051469326,
+    "force_eval_25k_ragged_v24_filtered_ms": 0.22088177502155304,
+    "force_eval_25k_ragged_speedup_v24_vs_v23": 1.2394042248176413,
+    "force_eval_8k_compact_bucket_v24_ms": 0.20612450316548347,
+    "cell_prune_25k_ragged_v23_unfiltered_ms": 0.7400922477245331,
+    "cell_prune_25k_ragged_v24_filtered_ms": 0.3802073188126087,
+    "cell_prune_25k_ragged_speedup_v24_vs_v23": 1.9465491880478487
+  },
+  "e2e_ensemble_pipeline": {
+    "dhfr_25k_homogeneous_scaling": [
+      {
+        "bucket_atoms": 25000,
+        "real_atoms": 23558,
+        "replicas_B": 1,
+        "n_steps": 200,
+        "cold_compile_and_warmup_s": 30.90114917140454,
+        "warm_wall_s": 0.37945917528122663,
+        "ms_per_step_batch": 1.8972958764061332,
+        "ms_per_step_per_replica": 1.8972958764061332,
+        "aggregate_ns_per_day": 91.07699128473234,
+        "per_replica_ns_per_day": 91.07699128473234,
+        "all_finite": true
+      },
+      {
+        "bucket_atoms": 25000,
+        "real_atoms": 23558,
+        "replicas_B": 2,
+        "n_steps": 200,
+        "cold_compile_and_warmup_s": 15.602743736468256,
+        "warm_wall_s": 0.46934704296290874,
+        "ms_per_step_batch": 2.3467352148145437,
+        "ms_per_step_per_replica": 1.1733676074072719,
+        "aggregate_ns_per_day": 147.26842543559474,
+        "per_replica_ns_per_day": 73.63421271779737,
+        "all_finite": true
+      },
+      {
+        "bucket_atoms": 25000,
+        "real_atoms": 23558,
+        "replicas_B": 4,
+        "n_steps": 200,
+        "cold_compile_and_warmup_s": 13.322306080721319,
+        "warm_wall_s": 0.850612223148346,
+        "ms_per_step_batch": 4.25306111574173,
+        "ms_per_step_per_replica": 1.0632652789354324,
+        "aggregate_ns_per_day": 162.518238320555,
+        "per_replica_ns_per_day": 40.62955958013875,
+        "all_finite": true
+      },
+      {
+        "bucket_atoms": 25000,
+        "real_atoms": 23558,
+        "replicas_B": 8,
+        "n_steps": 200,
+        "cold_compile_and_warmup_s": 13.774098512716591,
+        "warm_wall_s": 1.602236214093864,
+        "ms_per_step_batch": 8.01118107046932,
+        "ms_per_step_per_replica": 1.001397633808665,
+        "aggregate_ns_per_day": 172.55882595086752,
+        "per_replica_ns_per_day": 21.56985324385844,
+        "all_finite": true
+      }
+    ],
+    "medium_8k_homogeneous_scaling": [
+      {
+        "bucket_atoms": 8192,
+        "real_atoms": 6658,
+        "replicas_B": 1,
+        "n_steps": 200,
+        "ms_per_step_batch": 0.5240383092314005,
+        "ms_per_step_per_replica": 0.5240383092314005,
+        "aggregate_ns_per_day": 329.7468848287892
+      },
+      {
+        "bucket_atoms": 8192,
+        "real_atoms": 6658,
+        "replicas_B": 4,
+        "n_steps": 200,
+        "ms_per_step_batch": 1.1812810460105538,
+        "ms_per_step_per_replica": 0.29532026150263846,
+        "aggregate_ns_per_day": 585.1274786252895
+      },
+      {
+        "bucket_atoms": 8192,
+        "real_atoms": 6658,
+        "replicas_B": 8,
+        "n_steps": 200,
+        "ms_per_step_batch": 1.9295386504381895,
+        "ms_per_step_per_replica": 0.2411923313047737,
+        "aggregate_ns_per_day": 716.440688910825
+      }
+    ],
+    "heterogeneous_same_bucket_8k": {
+      "bucket_atoms": 8192,
+      "system_real_atoms": [
+        4199,
+        6656
+      ],
+      "n_steps": 200,
+      "ms_per_step_batch": 0.7670842716470361,
+      "ms_per_step_per_system": 0.38354213582351804,
+      "all_finite": true
+    },
+    "dhfr_wt_plus_mutant_25k": {
+      "bucket_atoms": 25000,
+      "real_atoms": [
+        23558,
+        23558
+      ],
+      "n_steps": 200,
+      "ms_per_step_batch": 2.3542954539880157,
+      "ms_per_step_per_variant": 1.1771477269940078,
+      "wt_vs_mutant_rmsd_A": 5.304682369736962,
+      "all_finite": true
+    },
+    "heterogeneous_multi_bucket_8k_plus_25k": {
+      "buckets": [
+        8192,
+        25000,
+        8192,
+        25000
+      ],
+      "real_atoms": [
+        4199,
+        23558,
+        6656,
+        23558
+      ],
+      "n_steps": 200,
+      "ms_per_step_total_4_systems": 3.120197169482708,
+      "ms_per_step_per_system": 0.780049292370677,
+      "all_finite": true
+    }
+  }
+}

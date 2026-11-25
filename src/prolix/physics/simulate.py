@@ -11,7 +11,9 @@ from jax import random
 from jax_md import quantity, simulate, space, util
 from proxide.physics.constants import BOLTZMANN_KCAL
 
+from prolix.compat import system_params_to_protein
 from prolix.physics import system
+from prolix.physics.constraints import project_momenta, project_positions
 
 if TYPE_CHECKING:
   from collections.abc import Callable
@@ -116,7 +118,6 @@ def rattle_langevin(
     # --- SHAKE (Position Constraint) ---
     if constraints is not None:
       pairs, lengths = constraints
-      from prolix.physics.constraints import project_momenta, project_positions
 
       position = project_positions(position, pairs, lengths, state.mass, shift_fn)
 
@@ -129,7 +130,6 @@ def rattle_langevin(
     # --- RATTLE (Velocity Constraint) ---
     if constraints is not None:
       pairs, lengths = constraints
-      from prolix.physics.constraints import project_momenta
       # Project momentum to be orthogonal to bonds
       momentum = project_momenta(momentum, position, pairs, state.mass, shift_fn)
 
@@ -400,7 +400,6 @@ def run_simulation(
  
   # Handle Migration Shim (P1.3)
   if not isinstance(system_params, Protein):
-    from prolix.compat import system_params_to_protein
     protein = system_params_to_protein(system_params)
   else:
     protein = system_params

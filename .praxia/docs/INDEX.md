@@ -176,6 +176,7 @@
 
 ## Reference
 - [261023_xtrax_composition_and_pallas_optimization_guide](reference/261023_xtrax_composition_and_pallas_optimization_guide.md)
+- [260901_named-scope-attribution-limits](reference/260901_named-scope-attribution-limits.md) — Why some prolix named_scope labels never resolve under XLA fusion, preserved from scripts/profiling/trace.py before the xtrax.profiling migration
 - [260415_explicit-solvent-runbook](reference/260415_explicit-solvent-runbook.md)
 - [230912_dmff](reference/230912_dmff.md) — DMFF: An Open-Source Automatic Differentiable Platform for Molecular Force Field Development and MD Simulation — Wang, Li, Yang et al., JCTC, 2023
 - [221107_espaloma](reference/221107_espaloma.md) — End-to-End Differentiable Construction of Molecular Mechanics Force Fields — Wang et al., Chemical Science, 2022; espaloma-0.3.0 Takaba et al., Chemical Science, 2024

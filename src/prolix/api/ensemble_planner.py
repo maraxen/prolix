@@ -15,7 +15,7 @@ from xtrax.tiling.estimators import device_memory_budget
 
 from prolix.api.bundle_stack import can_stack_molecular_bundles
 from prolix.tiling.axes import N_ATOMS, N_MOLS
-from prolix.tiling.planner import BatchPlan, estimate_memory_theoretical
+from prolix.tiling.plan_types import BatchPlan, estimate_memory_theoretical
 from prolix.tiling.xtrax_adapter import BudgetInfeasibleError, plan_axes_with_xtrax
 
 # CI / CPU backends without memory_stats: match historical _device_budget_bytes fallback.

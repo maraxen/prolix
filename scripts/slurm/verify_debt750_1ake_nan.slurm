@@ -54,11 +54,11 @@ REPLICAS="${REPLICAS:-16}"
 PS="${PS:-100}"
 CAMPAIGN_ID="${CAMPAIGN_ID:-}"
 
+# myxcel lock-keyed uv venv (no-op without myxcel): see scripts/slurm/_uv_env.sh
+source "${PWD}/scripts/slurm/_uv_env.sh" && prolix_uv_opt_out
 # shellcheck source=/dev/null
 source "scripts/slurm/_bth_env.sh"
 cd "${PROLIX_ROOT}"
-# myxcel lock-keyed uv venv (no-op without myxcel): see scripts/slurm/_uv_env.sh
-source "${PWD}/scripts/slurm/_uv_env.sh" && prolix_uv_opt_out
 
 export XLA_PYTHON_CLIENT_PREALLOCATE=false
 
@@ -90,14 +90,14 @@ mkdir -p outputs/bench outputs/logs/slurm
 OUT="outputs/bench/verify_debt750_1ake_nan_seed${SEED}_job${SLURM_JOB_ID:-local}.json"
 
 CAMPAIGN_FLAG=""
-[[ -n "${CAMPAIGN_ID}" ]] && CAMPAIGN_FLAG="--campaign ${CAMPAIGN_ID}"
+[[ -n "${CAMPAIGN_ID}" ]] && CAMPAIGN_FLAG="--campaign-id ${CAMPAIGN_ID}"
 
 # shellcheck disable=SC2086
-uv run --python "${UV_PYTHON}" "${UV_SYNC_EXTRAS[@]}" bth run python scripts/experiments/verify_debt750_1ake_nan.py \
-    --tag cluster --tag debt750 --tag debt841 --tag "seed:${SEED}" \
+bth run \
+    --tags cluster --tags debt750 --tags debt841 --tags "seed:${SEED}" \
     ${CAMPAIGN_FLAG} \
-    --out "${OUT}" \
-    -- \
+    --output-paths "${OUT}" \
+    -- uv run --python "${UV_PYTHON}" "${UV_SYNC_EXTRAS[@]}" python scripts/experiments/verify_debt750_1ake_nan.py \
     --replicas "${REPLICAS}" \
     --ps "${PS}" \
     --seed "${SEED}" \

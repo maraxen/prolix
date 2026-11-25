@@ -9,6 +9,8 @@ require_agent_extra()
 
 from typing import TYPE_CHECKING  # noqa: E402
 
+from prolix.agent import tools  # noqa: E402
+
 if TYPE_CHECKING:
   from fastmcp import FastMCP
 
@@ -27,8 +29,6 @@ def build_server() -> "FastMCP":
   from cisternal.adapters.v3_middleware import CisternalMiddleware
   from cisternal.registration.wired import wire
   from fastmcp import FastMCP as FastMCPServer
-
-  from prolix.agent import tools
 
   server = FastMCPServer("prolix", instructions=_INSTRUCTIONS)
   wire(server, registry=tools.MCP_REGISTRY, expected=list(tools.TOOL_NAMES))

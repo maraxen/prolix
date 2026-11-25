@@ -20,7 +20,18 @@ import jax.numpy as jnp
 from jax import lax
 from jax_md import partition, space
 
+from prolix.batched_energy import (
+    single_padded_energy,
+    single_padded_energy_nl_cvjp,
+    single_padded_force,
+)
+from prolix.fused_energy import fused_energy_and_forces_nl
 from prolix.padding import precompute_dense_exclusions
+from prolix.physics import pbc
+from prolix.physics.constraints import project_momenta, project_positions
+from prolix.physics.md_potential_bundle import value_energy_and_grad_energy
+from prolix.physics.settle import settle_positions, settle_velocities
+from prolix.physics.solvation import fix_water_geometry_padded
 from prolix.simulate import AKMA_TIME_UNIT_FS, BOLTZMANN_KCAL
 from prolix.typing import IntegratorState as _LangevinState
 from prolix.typing import PaddedSystem
@@ -261,7 +272,12 @@ def _restraint_schedule(k_start: float, k_end: float, n_steps: int) -> Array:
     return jnp.linspace(k_start, k_end, n_steps)
 
 
-def make_langevin_step(dt: float, kT: float, gamma: float) -> Callable[[PaddedSystem, _LangevinState], _LangevinState]:
+def make_langevin_step(
+    dt: float,
+    kT: float,
+    gamma: float,
+    use_pallas: bool | None = None,
+) -> Callable[[PaddedSystem, _LangevinState], _LangevinState]:
     """Create a BAOAB Langevin step function with RATTLE constraints.
 
     BAOAB scheme with SHAKE/RATTLE:
@@ -285,8 +301,6 @@ def make_langevin_step(dt: float, kT: float, gamma: float) -> Callable[[PaddedSy
     Returns:
         step_fn(padded_sys, state) -> _LangevinState: Integration step function.
     """
-    from prolix.batched_energy import single_padded_force
-    from prolix.physics.constraints import project_momenta, project_positions
     
     # Precompute constants
     c1 = jnp.exp(-gamma * dt)
@@ -300,6 +314,7 @@ def make_langevin_step(dt: float, kT: float, gamma: float) -> Callable[[PaddedSy
             return single_padded_force(
                 sys_with_r, displacement_fn,
                 soft_core_lambda=jnp.float32(1.0),
+                use_pallas=use_pallas,
             )
         
         r, p, f, m, rng, cap_count = (
@@ -333,7 +348,7 @@ def make_langevin_step(dt: float, kT: float, gamma: float) -> Callable[[PaddedSy
         
         # O: stochastic (Ornstein-Uhlenbeck) update
         rng, subkey = jax.random.split(rng)
-        noise = jax.random.normal(subkey, p.shape)
+        noise = jax.random.normal(subkey, p.shape, dtype=jnp.float32).astype(p.dtype)
         p = c1 * p + jnp.sqrt(m[:, None] * kT) * c2 * noise
         
         # A: second half-step position update
@@ -439,6 +454,7 @@ def make_langevin_step(dt: float, kT: float, gamma: float) -> Callable[[PaddedSy
 def make_langevin_step_nl(
     dt: float, kT: float, gamma: float,
     energy_fn: Callable | None = None,
+    use_pallas: bool | None = None,
 ) -> Callable:
     """Create a BAOAB Langevin step using neighbor-list energy.
 
@@ -459,10 +475,11 @@ def make_langevin_step_nl(
         step_fn(padded_sys, state, neighbor_idx) -> _LangevinState: Integration step function.
     """
     if energy_fn is None:
-        from prolix.batched_energy import single_padded_energy_nl_cvjp
-        energy_fn = single_padded_energy_nl_cvjp
-
-    from prolix.physics.md_potential_bundle import value_energy_and_grad_energy
+        def _default_energy_fn(sys_arg, nbr_arg, disp_arg):
+            return single_padded_energy_nl_cvjp(
+                sys_arg, nbr_arg, disp_arg, use_pallas=use_pallas,
+            )
+        energy_fn = _default_energy_fn
 
     # Precompute constants
     c1 = jnp.exp(-gamma * dt)
@@ -504,7 +521,7 @@ def make_langevin_step_nl(
 
         # O
         rng, subkey = jax.random.split(rng)
-        noise = jax.random.normal(subkey, p.shape)
+        noise = jax.random.normal(subkey, p.shape, dtype=jnp.float32).astype(p.dtype)
         p = c1 * p + jnp.sqrt(m[:, None] * kT) * c2 * noise
 
         # A
@@ -569,7 +586,6 @@ def make_langevin_step_nl_fused(
     Returns:
         step_fn(padded_sys, state, neighbor_idx) -> _LangevinState: Integration step function.
     """
-    from prolix.fused_energy import fused_energy_and_forces_nl
 
     # Precompute constants
     c1 = jnp.exp(-gamma * dt)
@@ -611,7 +627,7 @@ def make_langevin_step_nl_fused(
 
         # O
         rng, subkey = jax.random.split(rng)
-        noise = jax.random.normal(subkey, p.shape)
+        noise = jax.random.normal(subkey, p.shape, dtype=jnp.float32).astype(p.dtype)
         p = c1 * p + jnp.sqrt(m[:, None] * kT) * c2 * noise
 
         # A
@@ -800,15 +816,15 @@ def batched_minimize(
     """
     from jax_md import minimize as jax_md_minimize
 
-    from prolix.batched_energy import single_padded_energy, single_padded_force
-
-    displacement_fn, shift_fn = space.free()
-
     # Validate fire_stage_steps
     if len(fire_stage_steps) != 4:
         raise ValueError(f"fire_stage_steps must have 4 values, got {len(fire_stage_steps)}")
 
     def minimize_single(sys: PaddedSystem) -> tuple[Array, Array]:
+        if sys.box_size is not None:
+            displacement_fn, shift_fn = pbc.create_periodic_space(jnp.asarray(sys.box_size))
+        else:
+            displacement_fn, shift_fn = space.free()
         sys = precompute_dense_exclusions(sys)
         r_ref = sys.positions  # Reference geometry for restraints
         atom_mask = sys.atom_mask
@@ -816,10 +832,11 @@ def batched_minimize(
 
         def energy_fn(r, k_restraint=jnp.float32(0.0), selection_mask=None):
             if selection_mask is None: selection_mask = atom_mask
-            sys_with_r = dataclasses.replace(sys, positions=r)
+            sys_with_r = sys.replace(positions=r)
             e = single_padded_energy(sys_with_r, displacement_fn, soft_core_lambda=jnp.float32(1.0), implicit_solvent=not explicit_solvent)
-            e = e + _selective_restraint_energy(r, r_ref, k_restraint, atom_mask, selection_mask)
-            return e
+            dr_rest = jax.vmap(displacement_fn)(r, r_ref)
+            e_rest = 0.5 * k_restraint * jnp.sum(jnp.sum(dr_rest ** 2, axis=-1) * atom_mask * selection_mask)
+            return e + e_rest
 
         # =================================================================
         # Phase 1: Steepest Descent — single stage, max restraints
@@ -829,9 +846,10 @@ def batched_minimize(
         # release schedule."
         def sd_step(carry, _):
             i, r, k_rest, sel_mask, max_dx = carry
-            sys_with_r = dataclasses.replace(sys, positions=r)
+            sys_with_r = sys.replace(positions=r)
             f_phys = single_padded_force(sys_with_r, displacement_fn, soft_core_lambda=jnp.float32(1.0), explicit_solvent=explicit_solvent)
-            f_rest = -k_rest * (r - r_ref) * atom_mask[:, None] * sel_mask[:, None]
+            dr_rest = jax.vmap(displacement_fn)(r, r_ref)
+            f_rest = -k_rest * dr_rest * atom_mask[:, None] * sel_mask[:, None]
             forces = f_phys + f_rest
 
             # Mask padding atoms + NaN guard
@@ -843,7 +861,7 @@ def batched_minimize(
             rms = jnp.sqrt(jnp.sum(f_mag**2 * atom_mask) / jnp.maximum(jnp.sum(atom_mask), 1.0))
 
             # Also compute energy for diagnostics
-            sys_diag = dataclasses.replace(sys, positions=r)
+            sys_diag = sys.replace(positions=r)
             e_diag = single_padded_energy(sys_diag, displacement_fn, soft_core_lambda=jnp.float32(1.0), implicit_solvent=not explicit_solvent)
 
             def _log_sd(rms_val, step_val, e_val):
@@ -1068,7 +1086,6 @@ def batched_equilibrate(
         DeprecationWarning,
         stacklevel=2,
     )
-    from prolix.batched_energy import single_padded_energy, single_padded_force
     
     n_stages = 10
     dt = 0.002 # 2 fs
@@ -1113,7 +1130,7 @@ def batched_equilibrate(
         key, v_key = jax.random.split(key)
         eq_dtype = pos.dtype
         kT0 = jnp.asarray(10.0 * BOLTZMANN_KCAL, dtype=eq_dtype)
-        v = jax.random.normal(v_key, sys.positions.shape, dtype=eq_dtype) * jnp.sqrt(
+        v = jax.random.normal(v_key, sys.positions.shape, dtype=jnp.float32).astype(eq_dtype) * jnp.sqrt(
             kT0 / (mass_3d + 1e-12)
         )
         v = v * pad_mask_3d # Zero padding velocities
@@ -1140,7 +1157,7 @@ def batched_equilibrate(
                 c2 = jnp.sqrt(1.0 - jnp.exp(-2.0 * gamma * dt))
                 kT = t_target * jnp.asarray(BOLTZMANN_KCAL, dtype=t_target.dtype)
                 key_curr, subkey = jax.random.split(key_curr)
-                noise = jax.random.normal(subkey, v_curr.shape)
+                noise = jax.random.normal(subkey, v_curr.shape, dtype=jnp.float32).astype(v_curr.dtype)
                 v_curr = c1 * v_curr + c2 * jnp.sqrt(kT / (mass_3d + 1e-12)) * noise
                 
                 r_curr = r_curr + 0.5 * dt * v_curr
@@ -1223,7 +1240,6 @@ def batched_produce(
         DeprecationWarning,
         stacklevel=2,
     )
-    from prolix.simulate import BOLTZMANN_KCAL
     
     dt = 2.0 / AKMA_TIME_UNIT_FS
     kT = temperature_k * BOLTZMANN_KCAL
@@ -1359,8 +1375,6 @@ def batched_produce_streaming(
         Final _LangevinState (no trajectory — it was streamed to disk).
     """
     from jax.experimental import io_callback
-
-    from prolix.simulate import BOLTZMANN_KCAL
 
     dt = 2.0 / AKMA_TIME_UNIT_FS
     kT = temperature_k * BOLTZMANN_KCAL
@@ -1627,10 +1641,7 @@ def make_langevin_step_nl_dynamic(
         step_fn(padded_sys, state, nbrs) -> (_LangevinState, NeighborList)
     """
     if energy_fn is None:
-        from prolix.batched_energy import single_padded_energy_nl_cvjp
         energy_fn = single_padded_energy_nl_cvjp
-
-    from prolix.physics.md_potential_bundle import value_energy_and_grad_energy
 
     c1 = jnp.exp(-gamma * dt)
     c2 = jnp.sqrt(1.0 - jnp.exp(-2.0 * gamma * dt))
@@ -1660,7 +1671,7 @@ def make_langevin_step_nl_dynamic(
         r = r + 0.5 * dt * p / m[:, None]
         # O
         key, subkey = jax.random.split(key)
-        noise = jax.random.normal(subkey, p.shape)
+        noise = jax.random.normal(subkey, p.shape, dtype=jnp.float32).astype(p.dtype)
         p = c1 * p + jnp.sqrt(m[:, None] * kT) * c2 * noise
         # A
         r = r + 0.5 * dt * p / m[:, None]
@@ -1788,10 +1799,8 @@ def batched_equilibrate_nl(
         chunk_size: Chunk size for safe_map.
         energy_fn: Custom energy function (default: cvjp variant).
     """
-    from prolix.simulate import BOLTZMANN_KCAL
 
     if energy_fn is None:
-        from prolix.batched_energy import single_padded_energy_nl_cvjp
         energy_fn = single_padded_energy_nl_cvjp
 
     dt = 2.0 / AKMA_TIME_UNIT_FS
@@ -1814,8 +1823,6 @@ def batched_equilibrate_nl(
         def _energy_of_r(r):
             sys_with_r = dataclasses.replace(sys, positions=r)
             return energy_fn(sys_with_r, nbr, displacement_fn)
-
-        from prolix.physics.md_potential_bundle import value_energy_and_grad_energy
 
         e0, initial_f = value_energy_and_grad_energy(_energy_of_r, sys.positions)
 
@@ -1873,10 +1880,7 @@ def batched_produce_streaming_nl(
     """
     from jax.experimental import io_callback
 
-    from prolix.simulate import BOLTZMANN_KCAL
-
     if energy_fn is None:
-        from prolix.batched_energy import single_padded_energy_nl_cvjp
         energy_fn = single_padded_energy_nl_cvjp
 
     dt = 2.0 / AKMA_TIME_UNIT_FS
@@ -1946,10 +1950,8 @@ def batched_equilibrate_nl_dynamic(
     Returns:
         Tuple of (final _LangevinState, updated NeighborList).
     """
-    from prolix.simulate import BOLTZMANN_KCAL
 
     if energy_fn is None:
-        from prolix.batched_energy import single_padded_energy_nl_cvjp
         energy_fn = single_padded_energy_nl_cvjp
 
     dt = 2.0 / AKMA_TIME_UNIT_FS
@@ -1974,8 +1976,6 @@ def batched_equilibrate_nl_dynamic(
         def _energy_of_r(r):
             sys_with_r = dataclasses.replace(sys, positions=r)
             return energy_fn(sys_with_r, neighbor_idx, displacement_fn)
-
-        from prolix.physics.md_potential_bundle import value_energy_and_grad_energy
 
         e0, initial_f = value_energy_and_grad_energy(_energy_of_r, sys.positions)
 
@@ -2038,10 +2038,7 @@ def batched_produce_streaming_nl_dynamic(
     """
     from jax.experimental import io_callback
 
-    from prolix.simulate import BOLTZMANN_KCAL
-
     if energy_fn is None:
-        from prolix.batched_energy import single_padded_energy_nl_cvjp
         energy_fn = single_padded_energy_nl_cvjp
 
     dt = 2.0 / AKMA_TIME_UNIT_FS
@@ -2105,9 +2102,6 @@ def make_langevin_step_explicit(
     - PBC box wrapping for whole water molecules
     - Force dispatch to flash_explicit_forces (dense LJ/Coulomb, no GB)
     """
-    from prolix.batched_energy import single_padded_force
-    from prolix.physics.constraints import project_momenta, project_positions
-    from prolix.physics.settle import settle_positions, settle_velocities
     
     c1 = jnp.exp(-gamma * dt)
     c2 = jnp.sqrt(1.0 - jnp.exp(-2.0 * gamma * dt))
@@ -2153,7 +2147,7 @@ def make_langevin_step_explicit(
 
         # O: p = c1*p + sqrt(m*kT)*c2*noise
         key, subkey = jax.random.split(key)
-        noise = jax.random.normal(subkey, p.shape)
+        noise = jax.random.normal(subkey, p.shape, dtype=jnp.float32).astype(p.dtype)
         p = c1 * p + jnp.sqrt(mass_2d * kT) * c2 * noise
 
         # A: r = r + 0.5 * dt * p / m
@@ -2188,7 +2182,6 @@ def make_langevin_step_explicit(
         
         # 3. PBC wrap (keep molecules whole)
         if box is not None:
-             from prolix.physics.solvation import fix_water_geometry_padded
              r = fix_water_geometry_padded(r, water_indices, box)
 
         # --- Momentum correction for SHAKE/Settling ---

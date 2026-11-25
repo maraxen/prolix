@@ -18,7 +18,7 @@ import jax
 import jax.numpy as jnp
 from jax import lax
 
-from prolix.physics.cell_list import HALF_SHELL_SHIFTS, CellList
+from prolix.physics.cell_list import HALF_SHELL_SHIFTS, CellList, build_cell_list
 
 # ===========================================================================
 # Core pair energy computation (shared by both strategies)
@@ -299,7 +299,6 @@ def cell_forces_scan(
     def _energy_fn(positions):
         # Rebuild cell list from positions (CPU operation — acceptable
         # for force validation, not for production lax.scan)
-        from prolix.physics.cell_list import build_cell_list
         new_cells = build_cell_list(
             positions, box_size,
             atom_mask=jnp.ones(positions.shape[0], dtype=bool),

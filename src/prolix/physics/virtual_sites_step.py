@@ -4,10 +4,11 @@ import jax
 import jax.numpy as jnp
 from jaxtyping import Array as ArrayType
 
-from prolix.physics.step_system import IntegratorState, Step
+from prolix.physics.step_base import Step
 from prolix.physics.virtual_sites import reconstruct_virtual_sites
 from prolix.typing import (
   IntegratorParams,
+  IntegratorState,
   VirtualSiteDef,
   VirtualSiteParams,
   VirtualSiteParamsPacked,

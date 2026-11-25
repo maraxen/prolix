@@ -58,7 +58,7 @@ fi
 mkdir -p "${LOG_ROOT}/app"
 echo "dt_gamma_matrix job=${SLURM_JOB_ID:-} dt_list=${DT_LIST} gamma_list=${G_LIST} nw=${NW} steps=${ST} burn=${BR} replicas=${REP} projection_site=${PSITE}"
 
-uv run "${UV_SYNC_EXTRAS[@]}" python scripts/benchmarks/tip3p_dt_gamma_matrix.py \
+uv run "${UV_SYNC_EXTRAS[@]}" python scripts/explore/tip3p_dt_gamma_matrix.py \
   --dt-list "${DT_LIST}" \
   --gamma-list "${G_LIST}" \
   --n-waters "${NW}" \

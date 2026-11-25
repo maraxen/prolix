@@ -1,0 +1,20 @@
+{
+  "n_silent_drops": 0,
+  "n_parity_failures": 0,
+  "n_untracked_gaps": 0,
+  "max_rel_energy_err": 7.30503738542234e-08,
+  "negative_control_detected": true,
+  "n_total_knobs": 72,
+  "n_pending_epic_knobs": 0,
+  "u1_unaccounted_knobs": [],
+  "runtime_unread_knobs": [],
+  "u5_unmapped_by_schema": {},
+  "probe_errors": {
+    "ewald_alpha_rel_err": 2.0383000842727483e-14,
+    "softcore_denom_rel_err": 7.45058065243498e-09,
+    "plumed_kd_rel_err": 7.30503738542234e-08,
+    "triclinic_inv_err": 2.0489096641540527e-08,
+    "restraint_rel_err": 0.0
+  },
+  "sample_energy_kcal_mol": -6.412062255740166
+}

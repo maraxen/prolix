@@ -340,3 +340,58 @@ def test_flash_explicit_no_equinox_and_jit_vmap_safe(monkeypatch):
     )(sys.positions)
     f_pme = flash_explicit.flash_explicit_forces(sys, T=8, electrostatic_method="pme")
     np.testing.assert_allclose(np.asarray(f_pme), np.asarray(-grad_pos * sys.atom_mask[:, None]), rtol=1e-5, atol=1e-5)
+
+
+def test_triton_atomic_probe_captures_no_constants():
+    """Verify atomic_add canary kernels capture zero constants directly and on a worker thread inside jax.jit."""
+    import threading
+
+    from prolix.export import resolve_pallas_compiler_params
+    from prolix.physics.pallas_bonded import _make_triton_atomic_probe_fns
+
+    c_params = resolve_pallas_compiler_params("bonded_fused")
+    fn_f32, fn_i32 = _make_triton_atomic_probe_fns(c_params)
+
+    vf32 = jnp.ones((32,), dtype=jnp.float32)
+    zf32 = jnp.zeros((32,), dtype=jnp.float32)
+    vi32 = jnp.ones((32,), dtype=jnp.int32)
+    zi32 = jnp.zeros((32,), dtype=jnp.int32)
+
+    j_f32 = jax.make_jaxpr(fn_f32)(vf32, zf32)
+    j_i32 = jax.make_jaxpr(fn_i32)(vi32, zi32)
+    assert j_f32.consts == []
+    assert j_i32.consts == []
+    assert j_f32.jaxpr.eqns[0].params["jaxpr"].constvars == []
+    assert j_i32.jaxpr.eqns[0].params["jaxpr"].constvars == []
+
+    # Verify native tt.atomic_rmw add CUDA Triton lowering succeeds on CPU without constant/layout errors
+    hlo_i32 = jax.jit(fn_i32).trace(vi32, zi32).lower(lowering_platforms=("cuda",)).as_text()
+    assert "__gpu$xla.gpu.triton" in hlo_i32
+
+    # Simulate first _triton_gpu_available() check occurring while an outer @jax.jit is tracing
+    thread_results: dict[str, tuple[int, int]] = {}
+    thread_exc: list[BaseException] = []
+
+    def _trace_in_thread() -> None:
+        try:
+            a1 = jax.make_jaxpr(fn_f32)(vf32, zf32)
+            a2 = jax.make_jaxpr(fn_i32)(vi32, zi32)
+            thread_results["const_counts"] = (
+                len(a1.consts) + len(a1.jaxpr.eqns[0].params["jaxpr"].constvars),
+                len(a2.consts) + len(a2.jaxpr.eqns[0].params["jaxpr"].constvars),
+            )
+        except BaseException as exc:
+            thread_exc.append(exc)
+
+    @jax.jit
+    def _outer(x: jax.Array) -> jax.Array:
+        t = threading.Thread(target=_trace_in_thread, daemon=True)
+        t.start()
+        t.join(timeout=60.0)
+        assert not t.is_alive()
+        return x
+
+    out = _outer(jnp.array(1.0, dtype=jnp.float32))
+    assert float(out) == 1.0
+    assert not thread_exc
+    assert thread_results["const_counts"] == (0, 0)

@@ -280,7 +280,7 @@ def compute_bicubic_coefficients(energy: CmapGrid, size: int) -> CmapCoeffs:
     # rhs[k+4] = e1[k]*delta, rhs[k+8] = e2[k]*delta, rhs[k+12] = e12[k]*delta^2
     rhs = jnp.concatenate([e, e1 * delta, e2 * delta, e12 * delta * delta])
 
-    return jnp.dot(WT.T, rhs)
+    return jnp.dot(WT.T.astype(rhs.dtype), rhs)
 
   coeffs = jax.vmap(compute_patch_coeffs)(jnp.arange(size * size))
   return coeffs.reshape(size, size, 16)
@@ -303,8 +303,8 @@ def eval_bicubic_patch(coeffs: Float[ArrayLike, 16], da: float, db: float) -> Sc
   """
   # Vectorized: sum_{i,j} c[i*4+j] * da^i * db^j
   # Build power vectors [1, x, x², x³]
-  da_pow = jnp.array([1.0, da, da**2, da**3])
-  db_pow = jnp.array([1.0, db, db**2, db**3])
+  da_pow = jnp.array([1.0, da, da**2, da**3], dtype=coeffs.dtype)
+  db_pow = jnp.array([1.0, db, db**2, db**3], dtype=coeffs.dtype)
 
   # Coefficients are stored as c[i*4+j] -> reshape to (4, 4) with c[i, j]
   c_matrix = coeffs.reshape(4, 4)
@@ -355,6 +355,8 @@ def compute_cmap_energies(
 
   # Convert to grid coordinates
   delta = 2 * jnp.pi / grid_size
+  max_map_idx = jnp.maximum(coeffs.shape[0] - 1, 0)
+  safe_map_indices = jnp.clip(map_indices, 0, max_map_idx)
 
   def sample_one(m_idx, phi, psi):
     # Grid indices
@@ -367,13 +369,14 @@ def compute_cmap_energies(
     da = phi / delta - i
     db = psi / delta - j
 
-    # Get patch coefficients
-    patch_coeffs = coeffs[m_idx, i, j]
+    # Get patch coefficients (clamped for empty/padded CMAP slots)
+    m_safe = jnp.clip(m_idx, 0, max_map_idx)
+    patch_coeffs = coeffs[m_safe, i, j]
 
     # Evaluate
     return eval_bicubic_patch(patch_coeffs, da, db)
 
-  return jax.vmap(sample_one)(map_indices, phi_norm, psi_norm)
+  return jax.vmap(sample_one)(safe_map_indices, phi_norm, psi_norm)
 
 def compute_cmap_energy(
   phi_angles: TorsionAngles,

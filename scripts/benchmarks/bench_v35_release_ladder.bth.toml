@@ -1,0 +1,43 @@
+[experiment]
+hypothesis = """
+Prolix Pallas v3.5 (MK-65 O(N_tiles) Morton AABB skin-rebuild, MK-66 inter-step
+fused BAOAB+SETTLE+RATTLE+COM, MK-67 2-pass 32x32 symmetric tile-pair OBC2 GBSA,
+MK-68 1D prefix-sum ragged CTA queue + multi-tier SPME, MK-69..74 OpenMM
+ProlixBatchSimulation, NPT barostat, Cellulose 408k, B=1..128 MPS OOM cliff,
+and analytical custom_vjp gradients) achieves release throughput and VRAM
+targets across L40S (sm_89), H200 (sm_90), RTX PRO 6000 Blackwell (sm_120), and
+A100-SXM4-80GB (sm_80) against verified OpenMM CUDA + MPS baselines.
+"""
+
+[outcomes.release_sweep_complete]
+condition = "schema_version = 'pallas_v35_release_ladder_v1' AND quick_mode = false AND total_wall_s > 0"
+decision = "Full Pallas v3.5 release benchmark ladder completed with verified OpenMM CUDA provenance; record results in 261111_pallas_v35_release_ladder_report.md and ledger MK-65..74."
+reasoning = """
+Full-mode 6-suite Pallas v3.5 benchmark completed on target GPU hardware with
+strict OpenMM CUDA anti-fallback guard enforced.
+"""
+
+[outcomes.quick_smoke_complete]
+condition = "schema_version = 'pallas_v35_release_ladder_v1' AND quick_mode = true AND total_wall_s > 0"
+decision = "Quick smoke target gate completed on GPU; verify MK-65..69 latency gates before launching the full 4-GPU release sweep."
+reasoning = """
+Quick-mode smoke verification completed with valid timing and OpenMM CUDA
+provenance, suitable for fast gate triage prior to full multi-GPU runs.
+"""
+
+[outcomes.incomplete_or_failed]
+condition = "schema_version != 'pallas_v35_release_ladder_v1' OR total_wall_s IS NULL OR total_wall_s <= 0"
+decision = "Inspect Slurm log and re-run benchmark suite after resolving error."
+reasoning = """
+Benchmark output lacks a completed schema_version or positive wall-clock timing.
+"""
+is_residual = true
+
+[result_schema]
+schema_version = "str"
+gpu_tag = "str"
+suites_requested = "str"
+device_kind = "str"
+jax_version = "str"
+quick_mode = "bool"
+total_wall_s = "float"

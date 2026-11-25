@@ -10,6 +10,7 @@ from jax_md import space
 
 from prolix.pallas_kernels import (
     _triton_gpu_available,
+    pallas_bonded_all_fused,
     pallas_born_radii,
     pallas_flash_explicit_nonbonded,
     pallas_nonbonded_nl,
@@ -248,4 +249,41 @@ def test_all_pallas_kernels_lower_to_cuda_triton(monkeypatch):
             p, c, s, e, m, ei, ev, ee, box=b, pme_alpha=0.34, interpret=False
         )
     ).trace(pos, q, sig, eps, mask, excl_idx, excl_s, excl_s, box).lower(lowering_platforms=("cuda",))
+
+    bonds = jnp.array([[0, 1], [1, 2]], dtype=jnp.int32)
+    b_prm = jnp.ones((2, 2), dtype=jnp.float32)
+    angles = jnp.array([[0, 1, 2]], dtype=jnp.int32)
+    a_prm = jnp.ones((1, 2), dtype=jnp.float32)
+    dihs = jnp.array([[0, 1, 2, 3]], dtype=jnp.int32)
+    d_prm = jnp.ones((1, 3), dtype=jnp.float32)
+    imps = jnp.array([[0, 1, 2, 3]], dtype=jnp.int32)
+    i_prm = jnp.ones((1, 2), dtype=jnp.float32)
+    exc_p = jnp.array([[0, 3]], dtype=jnp.int32)
+    exc_1 = jnp.ones((1,), dtype=jnp.float32)
+    cmap_t = jnp.array([[0, 1, 2, 3, 4]], dtype=jnp.int32)
+    cmap_m = jnp.zeros((1,), dtype=jnp.int32)
+    cmap_c = jnp.ones((1, 24, 24, 16), dtype=jnp.float32)
+    jax.jit(
+        lambda p, b: pallas_bonded_all_fused(
+            p,
+            bonds=bonds,
+            bond_params=b_prm,
+            angles=angles,
+            angle_params=a_prm,
+            dihedrals=dihs,
+            dihedral_params=d_prm,
+            impropers=imps,
+            improper_params=i_prm,
+            improper_is_harmonic=True,
+            exception_pairs=exc_p,
+            exception_sigmas=exc_1,
+            exception_epsilons=exc_1,
+            exception_chargeprods=exc_1,
+            cmap_torsions=cmap_t,
+            cmap_indices=cmap_m,
+            cmap_coeffs=cmap_c,
+            box=b,
+            interpret=False,
+        )
+    ).trace(pos, box).lower(lowering_platforms=("cuda",))
 

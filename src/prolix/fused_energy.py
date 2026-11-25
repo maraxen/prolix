@@ -18,6 +18,18 @@ from typing import TYPE_CHECKING
 import jax
 import jax.numpy as jnp
 
+from prolix.batched_energy import (
+  _angle_energy_masked,
+  _bond_energy_masked,
+  _cmap_energy_masked,
+  _dihedral_energy_masked,
+)
+from prolix.physics.generalized_born import (
+  compute_ace_nonpolar_energy,
+  compute_gb_energy_neighbor_list,
+)
+from prolix.physics.neighbor_list import get_neighbor_exclusion_scales
+
 if TYPE_CHECKING:
   from prolix.padding import PaddedSystem
 
@@ -144,12 +156,6 @@ def _bonded_energy_from_positions(
   displacement_fn,
 ) -> jnp.ndarray:
   """Compute total bonded energy from positions (for jax.grad)."""
-  from prolix.batched_energy import (
-    _angle_energy_masked,
-    _bond_energy_masked,
-    _cmap_energy_masked,
-    _dihedral_energy_masked,
-  )
 
   e_bond = _bond_energy_masked(
     positions, sys.bonds, sys.bond_params, sys.bond_mask, displacement_fn
@@ -181,10 +187,6 @@ def _gb_energy_from_positions(
   dielectric_offset: float = 0.09,
 ) -> jnp.ndarray:
   """GB polar + ACE nonpolar using the same NL kernel as ``single_padded_energy_nl``."""
-  from prolix.physics.generalized_born import (
-    compute_ace_nonpolar_energy,
-    compute_gb_energy_neighbor_list,
-  )
 
   N = positions.shape[0]
   scaled_radii = sys.scaled_radii
@@ -251,8 +253,6 @@ def fused_energy_and_forces_nl(
       (total_energy, forces): scalar energy and (N, 3) force array.
   """
   r = sys.positions
-
-  from prolix.physics.neighbor_list import get_neighbor_exclusion_scales
 
   excl_scales_vdw_nl, _ = get_neighbor_exclusion_scales(
     sys.excl_indices, sys.excl_scales_vdw, sys.excl_scales_elec, neighbor_idx,

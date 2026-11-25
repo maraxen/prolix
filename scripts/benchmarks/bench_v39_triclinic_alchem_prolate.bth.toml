@@ -1,0 +1,57 @@
+[experiment]
+hypothesis = """
+Prolix Pallas v3.9 complete physics and OpenMM fast-path suite -- (S1) reduced-form
+lower-triangular triclinic GPU Morton 32x32 tile pairs, 8x8x8 SPME, and BAOAB
+SETTLE/RATTLE (ff_double_rt) on rhombic dodecahedron and truncated octahedron boxes,
+(S2) cross-shape 1D ragged CTA batching mixing cubic, rhombic-dodecahedron, and
+truncated-octahedron replicas with bitwise-deterministic (hi_i32, lo_i32) forces,
+(S3) clean-room C^2-continuous Prolate Spheroidal Ewald splittings (arXiv:2505.09727)
+for P=1 electrostatics (c_1 = 10.75) and P=6 dispersion (c_6 = 12.764031957789484),
+(S4) O(|U|*N) sparse CustomNonbondedForce InteractionGroups (is_gpu_runner_fast) and
+zero-recompilation dynamic global_params alchemical lambda sweeps, and (S5) GPU-resident
+MonteCarloAnisotropicBarostat / MonteCarloMembraneBarostat, 4.0 fs Hydrogen Mass
+Repartitioning (HMR), and zero-copy JAX/DLPack state buffers -- achieves accuracy
+parity and GPU fast-path execution against verified OpenMM CUDA baselines.
+"""
+
+[outcomes.gpu_v39_complete]
+condition = "schema_version = 'pallas_v39_complete_suite_v1' AND cpu_smoke = false AND quick_mode = false AND total_wall_s > 0"
+decision = "Full GPU v3.9 complete benchmark suite passed with verified OpenMM CUDA provenance; archive S1..S5 artifacts."
+reasoning = """
+All requested S1..S5 suites completed in production GPU mode with
+require_openmm_cuda_context provenance enforced.
+"""
+
+[outcomes.quick_gpu_smoke_complete]
+condition = "schema_version = 'pallas_v39_complete_suite_v1' AND cpu_smoke = false AND quick_mode = true AND total_wall_s > 0"
+decision = "Quick GPU v3.9 smoke gate completed with verified OpenMM CUDA provenance; proceed to full campaign run."
+reasoning = """
+Quick GPU mode completed with positive wall-clock timing and verified OpenMM CUDA
+provenance across S1..S5.
+"""
+
+[outcomes.cpu_smoke_complete]
+condition = "schema_version = 'pallas_v39_complete_suite_v1' AND cpu_smoke = true AND total_wall_s > 0"
+decision = "Deterministic CI --cpu-smoke verification passed across S1..S5; run without --cpu-smoke on GPU nodes for CUDA timing."
+reasoning = """
+CPU smoke mode confirmed S1..S5 numerical invariants, schema types, and parity checks
+without GPU hardware.
+"""
+
+[outcomes.incomplete_or_failed]
+condition = "schema_version != 'pallas_v39_complete_suite_v1' OR total_wall_s IS NULL OR total_wall_s <= 0"
+decision = "Inspect benchmark traceback or OpenMM CUDA anti-fallback error and re-run."
+reasoning = """
+Output artifact is missing expected schema_version 'pallas_v39_complete_suite_v1' or positive total_wall_s.
+"""
+is_residual = true
+
+[result_schema]
+schema_version = "str"
+gpu_tag = "str"
+suites_requested = "str"
+device_kind = "str"
+jax_version = "str"
+cpu_smoke = "bool"
+quick_mode = "bool"
+total_wall_s = "float"

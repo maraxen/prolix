@@ -618,7 +618,7 @@ def _pair_counts(n_atoms: int, nl_capacity: int | None) -> dict:
     }
 
 
-def _run_prolix_regression(sys_data, n_steps_list, seed: int):
+def _run_prolix_regression(sys_data, n_steps_list, seed: int, use_pallas: bool = False):
     """Time EnsemblePlan.run() across a step-count sweep and regress compile vs. compute.
 
     Mirrors scripts/experiments/profile_b1_heterogeneous_solvated_compile.py's
@@ -664,11 +664,18 @@ def _run_prolix_regression(sys_data, n_steps_list, seed: int):
     results = []
     nl_capacity = None
     for n_steps in n_steps_list:
-        plan = EnsemblePlan.from_bundle(bundle)
+        plan = EnsemblePlan.from_bundle(bundle, use_pallas=use_pallas)
 
         t_first0 = time.perf_counter()
         first = plan.run(
-            n_steps=1, dt=DT_FS, kT=kT, seed=seed, gamma=GAMMA_PS, run_mode="inference", use_neighbor_list=True
+            n_steps=1,
+            dt=DT_FS,
+            kT=kT,
+            seed=seed,
+            gamma=GAMMA_PS,
+            run_mode="inference",
+            use_neighbor_list=True,
+            use_pallas=use_pallas,
         )
         _block(first)
         t_first = time.perf_counter() - t_first0
@@ -686,6 +693,7 @@ def _run_prolix_regression(sys_data, n_steps_list, seed: int):
                 gamma=GAMMA_PS,
                 run_mode="inference",
                 use_neighbor_list=True,
+                use_pallas=use_pallas,
             )
             _block(last)
             t_ss = time.perf_counter() - t_ss0
@@ -702,7 +710,13 @@ def _run_prolix_regression(sys_data, n_steps_list, seed: int):
             del last
 
         results.append({"n_steps": n_steps, "t_first_step": t_first, "t_steady_state": t_ss})
-        logger.info("n_steps=%d: t_first=%.4fs t_steady_state=%.4fs", n_steps, t_first, t_ss)
+        logger.info(
+            "use_pallas=%s n_steps=%d: t_first=%.4fs t_steady_state=%.4fs",
+            use_pallas,
+            n_steps,
+            t_first,
+            t_ss,
+        )
 
     x_vals = [r["n_steps"] - 1 for r in results if r["n_steps"] > 1]
     y_vals = [r["t_steady_state"] for r in results if r["n_steps"] > 1]
@@ -723,6 +737,14 @@ def _run_prolix_regression(sys_data, n_steps_list, seed: int):
         DT_FS * 1e-6 / slope * 86400.0 if slope == slope and slope > 0 else float("nan")
     )
 
+    peak_vram_mb = None
+    try:
+        mem_st = jax.devices()[0].memory_stats()
+        if mem_st and "peak_bytes_in_use" in mem_st:
+            peak_vram_mb = float(mem_st["peak_bytes_in_use"]) / (1024.0 * 1024.0)
+    except Exception:  # noqa: BLE001
+        peak_vram_mb = None
+
     n_atoms = int(bundle.n_atoms)
     return {
         "per_step_corrected_s": slope,
@@ -732,6 +754,8 @@ def _run_prolix_regression(sys_data, n_steps_list, seed: int):
         "n_atoms": n_atoms,
         "n_steps_list": list(n_steps_list),
         "raw_results": results,
+        "use_pallas": bool(use_pallas),
+        "peak_vram_mb": peak_vram_mb,
         # Attribution: the wall-clock win has to be traceable to the drop in
         # evaluated pairs, not to noise. nl_retry_count is 0 by construction here
         # -- _require_no_nl_retry raises above if a realloc happened inside a
@@ -859,6 +883,7 @@ def _combine_results(prolix_json_path: Path, openmm_json_path: Path) -> dict:
     _PROLIX_FIELDS = (
         "prolix_ns_per_day", "per_step_corrected_s", "compile_fixed_s",
         "r_squared", "n_atoms", "n_steps_list", "raw_results",
+        "use_pallas", "peak_vram_mb",
         # Pair-count attribution -- these must travel with the wall-clock numbers
         # so the speedup is readable as an algorithmic change, not as noise.
         "nl_capacity", "nl_retry_count", "nl_candidate_pairs",
@@ -984,6 +1009,11 @@ def main() -> int:
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--smoke", action="store_true")
     parser.add_argument(
+        "--use-pallas",
+        action="store_true",
+        help="Dispatch Pallas v2 megakernel + pre-encoded NL + Pallas PME via EnsemblePlan(use_pallas=True).",
+    )
+    parser.add_argument(
         "--backend", choices=["both", "prolix", "openmm"], default="both",
         help=(
             "Which backend to run: 'both' (default, byte-for-byte unchanged from original), "
@@ -1069,7 +1099,7 @@ def main() -> int:
                 raise FileNotFoundError(f"dry-run: expected fixture missing: {p}")
         if need_ff_path:
             _resolve_ff_path()
-        result = {"dry_run": True, "shim_mode": args.shim_mode, "backend": args.backend}
+        result = {"dry_run": True, "shim_mode": args.shim_mode, "backend": args.backend, "use_pallas": args.use_pallas}
         if out is not None:
             out.write_text(json.dumps(result))
         print("dry-run ok")
@@ -1090,8 +1120,14 @@ def main() -> int:
             n_steps_list = sorted({*_FULL_CALIBRATION_STEPS, n_production_steps})
         pdb_path, system_xml_path = DHFR_PDB, DHFR_SYSTEM_XML
 
-    logger.info("shim_mode=%s smoke=%s backend=%s n_steps_list=%s",
-                args.shim_mode, args.smoke, args.backend, n_steps_list)
+    logger.info(
+        "shim_mode=%s smoke=%s backend=%s use_pallas=%s n_steps_list=%s",
+        args.shim_mode,
+        args.smoke,
+        args.backend,
+        args.use_pallas,
+        n_steps_list,
+    )
 
     # Run prolix if requested
     prolix_result = None
@@ -1101,11 +1137,16 @@ def main() -> int:
             sys_data = _build_smoke_system_dict(ff_path)
         else:
             sys_data = _build_dhfr_system_dict(ff_path)
-        prolix_result = _run_prolix_regression(sys_data, n_steps_list, args.seed)
+        prolix_result = _run_prolix_regression(
+            sys_data, n_steps_list, args.seed, use_pallas=args.use_pallas
+        )
         logger.info(
-            "prolix: per_step=%.6e s compile_fixed=%.6e s R^2=%.4f ns_per_day=%.4f",
-            prolix_result["per_step_corrected_s"], prolix_result["compile_fixed_s"],
-            prolix_result["r_squared"], prolix_result["ns_per_day"],
+            "prolix(use_pallas=%s): per_step=%.6e s compile_fixed=%.6e s R^2=%.4f ns_per_day=%.4f",
+            args.use_pallas,
+            prolix_result["per_step_corrected_s"],
+            prolix_result["compile_fixed_s"],
+            prolix_result["r_squared"],
+            prolix_result["ns_per_day"],
         )
 
     # Run OpenMM if requested
@@ -1148,6 +1189,8 @@ def main() -> int:
             "n_atoms": None,
             "n_steps_list": None,
             "raw_results": None,
+            "use_pallas": None,
+            "peak_vram_mb": None,
             "nl_capacity": None,
             "nl_retry_count": None,
             "nl_candidate_pairs": None,
@@ -1163,6 +1206,8 @@ def main() -> int:
             "n_atoms": prolix_result["n_atoms"],
             "n_steps_list": prolix_result["n_steps_list"],
             "raw_results": prolix_result["raw_results"],
+            "use_pallas": prolix_result["use_pallas"],
+            "peak_vram_mb": prolix_result["peak_vram_mb"],
             "nl_capacity": prolix_result["nl_capacity"],
             "nl_retry_count": prolix_result["nl_retry_count"],
             "nl_candidate_pairs": prolix_result["nl_candidate_pairs"],

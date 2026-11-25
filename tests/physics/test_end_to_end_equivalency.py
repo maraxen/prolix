@@ -13,19 +13,13 @@ from jax_md import space
 from proxide import OutputSpec, parse_structure
 
 from prolix.physics import bonded
+from tests._proxide_assets import proxide_asset
 
 # Enable x64 for physics
 
 # Paths
 DATA_DIR = Path(__file__).parent.parent.parent / "data" / "pdb"
-FF_PATH = (
-  Path(__file__).parent.parent.parent.parent
-  / "proxide"
-  / "src"
-  / "proxide"
-  / "assets"
-  / "protein.ff19SB.xml"
-)
+FF_PATH = proxide_asset("protein.ff19SB.xml")
 def openmm_available():
   """Check if OpenMM is available."""
   try:
