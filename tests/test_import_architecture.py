@@ -33,6 +33,17 @@ ALLOWED_CYCLE_DODGES = {
 # imports in flash_explicit.py and pme.py were hoisted to module top level in v3.8.
 ALLOWED_PHYSICS_LAZY: set[tuple[str, str]] = set()
 
+# (importer, target) lazy edges allowed inside prolix.agent: tests/agent/test_controls.py
+# enforces that importing prolix.agent.ops and prolix.agent.system stays lightweight without
+# pulling heavy JAX/physics stacks at CLI startup.
+ALLOWED_AGENT_LAZY = {
+    ("prolix.agent.ops", "prolix.api.bundle_md"),
+    ("prolix.agent.ops", "prolix.physics.simulate"),
+    ("prolix.agent.ops", "prolix.simulate"),
+    ("prolix.agent.system", "prolix.physics.neighbor_list"),
+    ("prolix.agent.system", "prolix.physics.system"),
+}
+
 
 def _load_graph():
     spec = importlib.util.spec_from_file_location("prolix_import_graph", _SCRIPT)
@@ -64,7 +75,7 @@ def test_no_new_cycle_dodging_lazy_imports(graph):
 def test_no_unreviewed_lazy_imports_repo_wide(graph):
     """After Phase 1 every function-level ``prolix.*`` import is reviewed and allowlisted."""
     found = {(m, t) for m, lst in graph.lazy.items() for t, _ln in lst}
-    allowed = ALLOWED_PHYSICS_LAZY | ALLOWED_CYCLE_DODGES
+    allowed = ALLOWED_PHYSICS_LAZY | ALLOWED_CYCLE_DODGES | ALLOWED_AGENT_LAZY
     new = sorted(found - allowed)
     assert not new, (
         "unreviewed lazy intra-package imports (hoist them to module level, or extract a "

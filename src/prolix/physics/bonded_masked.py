@@ -26,6 +26,8 @@ __all__ = [
     "_bond_energy_masked",
     "_cmap_energy_masked",
     "_dihedral_energy_masked",
+    "_harmonic_improper_energy_masked",
+    "_improper_energy_masked",
 ]
 
 # ==============================================================================
@@ -115,6 +117,60 @@ def _dihedral_energy_masked(r: Array, indices: Array, params: Array, mask: Array
         k = params[:, 2]
         e_per_dih = k * (1.0 + jnp.cos(periodicity * phi - phase))
     return jnp.sum(jnp.where(mask != 0, e_per_dih, 0.0))
+
+
+def _harmonic_improper_energy_masked(
+    r: Array,
+    indices: Array,
+    params: Array,
+    mask: Array,
+    displacement_fn: space.DisplacementFn,
+) -> Array:
+    """Computes harmonic improper energy ``k * wrap(phi - phi0)^2`` matching OpenMM/ProlixContext."""
+    r_i = r[indices[:, 0].astype(jnp.int32)]
+    r_j = r[indices[:, 1].astype(jnp.int32)]
+    r_k = r[indices[:, 2].astype(jnp.int32)]
+    r_l = r[indices[:, 3].astype(jnp.int32)]
+
+    b1 = jax.vmap(displacement_fn)(r_j, r_i)
+    b2 = jax.vmap(displacement_fn)(r_k, r_j)
+    b3 = jax.vmap(displacement_fn)(r_l, r_k)
+
+    c1 = jnp.cross(b1, b2)
+    c2 = jnp.cross(b2, b3)
+    b2_norm = jnp.sqrt(jnp.sum(b2**2, axis=-1, keepdims=True) + 1e-12)
+    b2_u = b2 / b2_norm
+
+    m = jnp.cross(b2_u, c1)
+    x = jnp.sum(c1 * c2, axis=-1)
+    y = jnp.sum(m * c2, axis=-1)
+
+    overlap_mask = (mask == 0) | ((x == 0.0) & (y == 0.0))
+    safe_x = jnp.where(overlap_mask, 1.0, x)
+    safe_y = jnp.where(overlap_mask, 0.0, y)
+    phi = jnp.arctan2(safe_y, safe_x)
+
+    k_harm = params[:, 0]
+    phi0 = params[:, 1]
+    diff_raw = phi - phi0 + jnp.pi
+    dphi = diff_raw - 2.0 * jnp.pi * jnp.floor(diff_raw / (2.0 * jnp.pi)) - jnp.pi
+    e_harm = k_harm * (dphi**2)
+    return jnp.sum(jnp.where(mask != 0, e_harm, 0.0))
+
+
+def _improper_energy_masked(
+    r: Array,
+    indices: Array,
+    params: Array,
+    mask: Array,
+    displacement_fn: space.DisplacementFn,
+    *,
+    is_harmonic: bool = False,
+) -> Array:
+    """Computes improper torsion energy (harmonic ``k*(phi-phi0)^2`` or periodic)."""
+    if is_harmonic or (params.ndim >= 2 and params.shape[-1] == 2):
+        return _harmonic_improper_energy_masked(r, indices, params, mask, displacement_fn)
+    return _dihedral_energy_masked(r, indices, params, mask, displacement_fn)
 
 
 def _cmap_energy_masked(

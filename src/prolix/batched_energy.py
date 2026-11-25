@@ -10,8 +10,8 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 from jax_md import space
-from proxide.physics.constants import COULOMB_CONSTANT
 
+from prolix.constants import COULOMB_CONSTANT
 from prolix.padding import PaddedSystem
 
 try:
@@ -57,6 +57,7 @@ from prolix.physics.bonded_masked import (
     _bond_energy_masked,
     _cmap_energy_masked,
     _dihedral_energy_masked,
+    _improper_energy_masked,
 )
 from prolix.physics.cosolvent import cosolvent_repulsive_energy
 from prolix.physics.flash_explicit import flash_explicit_forces
@@ -1201,7 +1202,12 @@ def single_padded_energy(
         with jax.named_scope("dense_bonded_dihedral"):
             e_dih = _dihedral_energy_masked(r, sys.dihedrals, sys.dihedral_params, sys.dihedral_mask, displacement_fn)
         with jax.named_scope("dense_bonded_improper"):
-            e_imp = _dihedral_energy_masked(r, sys.impropers, sys.improper_params, sys.improper_mask, displacement_fn)
+            imp_is_harm = sys.improper_params is not None and (
+                sys.improper_params.shape[-1] == 2 or not bool(getattr(sys, "improper_is_periodic", True))
+            )
+            e_imp = _improper_energy_masked(
+                r, sys.impropers, sys.improper_params, sys.improper_mask, displacement_fn, is_harmonic=imp_is_harm
+            )
         with jax.named_scope("dense_bonded_cmap"):
             e_cmap = _cmap_energy_masked(r, sys.cmap_torsions, sys.cmap_indices, sys.cmap_mask, sys.cmap_coeffs, displacement_fn)
 
@@ -1638,9 +1644,12 @@ def single_padded_force(
                     positions, sys.dihedrals, sys.dihedral_params,
                     sys.dihedral_mask, displacement_fn,
                 )
-                e_imp = _dihedral_energy_masked(
+                imp_is_harm = sys.improper_params is not None and (
+                    sys.improper_params.shape[-1] == 2 or not bool(getattr(sys, "improper_is_periodic", True))
+                )
+                e_imp = _improper_energy_masked(
                     positions, sys.impropers, sys.improper_params,
-                    sys.improper_mask, displacement_fn,
+                    sys.improper_mask, displacement_fn, is_harmonic=imp_is_harm,
                 )
                 e_cmap = _cmap_energy_masked(
                     positions, sys.cmap_torsions, sys.cmap_indices, sys.cmap_mask,
@@ -2135,7 +2144,12 @@ def single_padded_energy_nl_cvjp(
         e_ub = _bond_energy_masked(r, sys.urey_bradley_bonds, sys.urey_bradley_params, sys.urey_bradley_mask, displacement_fn)
         e_angle = _angle_energy_masked(r, sys.angles, sys.angle_params, sys.angle_mask, displacement_fn)
         e_dih = _dihedral_energy_masked(r, sys.dihedrals, sys.dihedral_params, sys.dihedral_mask, displacement_fn)
-        e_imp = _dihedral_energy_masked(r, sys.impropers, sys.improper_params, sys.improper_mask, displacement_fn)
+        imp_is_harm = sys.improper_params is not None and (
+            sys.improper_params.shape[-1] == 2 or not bool(getattr(sys, "improper_is_periodic", True))
+        )
+        e_imp = _improper_energy_masked(
+            r, sys.impropers, sys.improper_params, sys.improper_mask, displacement_fn, is_harmonic=imp_is_harm
+        )
         e_cmap = _cmap_energy_masked(r, sys.cmap_torsions, sys.cmap_indices, sys.cmap_mask, sys.cmap_coeffs, displacement_fn)
 
     if _use_fused_nl_megakernel:
@@ -2478,7 +2492,12 @@ def single_padded_energy_nl(
         e_ub = _bond_energy_masked(r, sys.urey_bradley_bonds, sys.urey_bradley_params, sys.urey_bradley_mask, displacement_fn)
         e_angle = _angle_energy_masked(r, sys.angles, sys.angle_params, sys.angle_mask, displacement_fn)
         e_dih = _dihedral_energy_masked(r, sys.dihedrals, sys.dihedral_params, sys.dihedral_mask, displacement_fn)
-        e_imp = _dihedral_energy_masked(r, sys.impropers, sys.improper_params, sys.improper_mask, displacement_fn)
+        imp_is_harm = sys.improper_params is not None and (
+            sys.improper_params.shape[-1] == 2 or not bool(getattr(sys, "improper_is_periodic", True))
+        )
+        e_imp = _improper_energy_masked(
+            r, sys.impropers, sys.improper_params, sys.improper_mask, displacement_fn, is_harmonic=imp_is_harm
+        )
         e_cmap = _cmap_energy_masked(r, sys.cmap_torsions, sys.cmap_indices, sys.cmap_mask, sys.cmap_coeffs, displacement_fn)
 
     if _use_fused_nl_megakernel:

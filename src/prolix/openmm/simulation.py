@@ -2153,6 +2153,63 @@ def _vmapped_batch_minimize_akma(  # noqa: PLR0913
     )
 
 
+def _converted_system_has_intermolecular_exceptions(cs: Any) -> bool:
+    """Return True iff `cs` has any active exception joining distinct covalent/constraint molecules."""
+    bundle = cs.bundle
+    n_p = int(cs.n_real_particles)
+    if n_p <= 0 or bundle.exception_pairs is None or bundle.exception_mask is None:
+        return False
+    ep_np = np.asarray(bundle.exception_pairs, dtype=np.int32)
+    em_np = np.asarray(bundle.exception_mask, dtype=bool)
+    if ep_np.shape[0] == 0:
+        return False
+    v_e = (
+        em_np
+        & (ep_np[:, 0] >= 0)
+        & (ep_np[:, 0] < n_p)
+        & (ep_np[:, 1] >= 0)
+        & (ep_np[:, 1] < n_p)
+    )
+    if not np.any(v_e):
+        return False
+
+    parent = list(range(n_p))
+
+    def _find(x: int) -> int:
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    def _union(u: int, v: int) -> None:
+        if 0 <= u < n_p and 0 <= v < n_p and u != v:
+            ru, rv = _find(u), _find(v)
+            if ru != rv:
+                parent[rv] = ru
+
+    if bundle.bond_idx is not None and bundle.bond_mask is not None:
+        bi = np.asarray(bundle.bond_idx, dtype=np.int32)
+        bm = np.asarray(bundle.bond_mask, dtype=bool)
+        for row in bi[bm]:
+            _union(int(row[0]), int(row[1]))
+    if bundle.constraint_pairs is not None and bundle.constraint_mask is not None:
+        cp = np.asarray(bundle.constraint_pairs, dtype=np.int32)
+        cm = np.asarray(bundle.constraint_mask, dtype=bool)
+        for row in cp[cm]:
+            _union(int(row[0]), int(row[1]))
+    if bundle.water_indices is not None and bundle.water_mask is not None:
+        wi = np.asarray(bundle.water_indices, dtype=np.int32)
+        wm = np.asarray(bundle.water_mask, dtype=bool)
+        for row in wi[wm]:
+            _union(int(row[0]), int(row[1]))
+            _union(int(row[0]), int(row[2]))
+
+    for e0, e1 in ep_np[v_e]:
+        if _find(int(e0)) != _find(int(e1)):
+            return True
+    return False
+
+
 class ProlixBatchSimulation:
     """Multi-replica and heterogeneous OpenMM batch simulation frontend.
 
@@ -2450,6 +2507,11 @@ class ProlixBatchSimulation:
                     )
                 )
                 or str(cs.nonbonded_method).lower() in ("cutoff", "lj_pme", "cutoffnonperiodic")
+                or (
+                    cs.has_pbc
+                    and not bool(cs.exceptions_use_pbc)
+                    and _converted_system_has_intermolecular_exceptions(cs)
+                )
                 for cs in self._converted_systems
             )
         )
@@ -2580,6 +2642,7 @@ class ProlixBatchSimulation:
             tp_group=self.config.tp_group,
             deterministic_forces=bool(self.config.deterministic_forces),
             execution_mode=str(self.config.execution_mode),
+            use_size_buckets=bool(self.config.use_size_buckets),
         )
         return KnobSurface(nonbonded=nb_ctrl, barostat=baro_ctrl, pallas=pallas_ctrl)
 

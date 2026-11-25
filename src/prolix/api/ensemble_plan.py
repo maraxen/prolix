@@ -1342,7 +1342,13 @@ class EnsemblePlan:
                     return jnp.stack([getattr(bx, attr) for bx in bundles], axis=0)
             return v0
 
-        imp_harm = bool(bundles[0].improper_params is not None and bundles[0].improper_params.shape[-1] == 2)
+        imp_harm = bool(
+            bundles[0].improper_params is not None
+            and (
+                bundles[0].improper_params.shape[-1] == 2
+                or not bool(getattr(bundles[0], "improper_is_periodic", True))
+            )
+        )
         bonded_bufs = prepare_fused_bonded_buffers(
             B,
             bonds=_stack_or_dedup("bond_idx"),
@@ -2339,7 +2345,9 @@ class EnsemblePlan:
                 impropers=sb_1.improper_idx,
                 improper_params=flat_i,
                 improper_mask=sb_1.improper_mask,
-                improper_is_harmonic=(flat_i.shape[-1] == 2),
+                improper_is_harmonic=bool(
+                    flat_i.shape[-1] == 2 or not bool(getattr(sb_1, "improper_is_periodic", True))
+                ),
                 exception_pairs=sb_1.exception_pairs,
                 exception_sigmas=sb_1.exception_sigmas,
                 exception_epsilons=sb_1.exception_epsilons,
@@ -2813,19 +2821,28 @@ class EnsemblePlan:
         if eff_ks is None and first_conv is not None:
             conv_nb_method = str(getattr(first_conv, "nonbonded_method", "pme")).strip().lower()
             conv_comb = str(getattr(first_conv, "lj_combining_rule", "lorentz_berthelot")).strip().lower()
-            if conv_nb_method in ("lj_pme", "ljpme") or conv_comb != "lorentz_berthelot":
+            conv_exc_pbc = bool(getattr(first_conv, "exceptions_use_pbc", False))
+            conv_sw_width = float(getattr(first_conv, "lj_switch_width", 0.0))
+            conv_disp_corr = bool(getattr(first_conv, "use_dispersion_correction", True))
+            if (
+                conv_nb_method in ("lj_pme", "ljpme")
+                or conv_comb != "lorentz_berthelot"
+                or conv_exc_pbc
+                or conv_sw_width > 0.0
+                or not conv_disp_corr
+            ):
                 eff_ks = KnobSurface(
                     nonbonded=NonbondedControls(
                         nonbonded_method=conv_nb_method,
                         cutoff_angstrom=float(getattr(first_conv, "nonbonded_cutoff", 9.0)),
-                        switch_width_angstrom=float(getattr(first_conv, "lj_switch_width", 0.0)),
+                        switch_width_angstrom=conv_sw_width,
                         ewald_error_tolerance=float(getattr(first_conv, "ewald_error_tolerance", 5e-4)),
                         pme_alpha=float(_host_float(getattr(bundles[0], "pme_alpha", 0.34), 0.34)),
                         pme_grid_dims=getattr(first_conv, "pme_grid_dims", None),
-                        dispersion_correction=bool(getattr(first_conv, "use_dispersion_correction", True)),
+                        dispersion_correction=conv_disp_corr,
                         reaction_field_dielectric=float(getattr(first_conv, "reaction_field_dielectric", 78.3)),
                         lj_combining_rule=conv_comb,
-                        exceptions_use_pbc=bool(getattr(first_conv, "exceptions_use_pbc", False)),
+                        exceptions_use_pbc=conv_exc_pbc,
                         use_lj_pme=(conv_nb_method in ("lj_pme", "ljpme")),
                     )
                 )
@@ -4468,7 +4485,10 @@ class EnsemblePlan:
                     impropers=bundle.improper_idx,
                     improper_params=flat_i_gb.astype(jnp.float32),
                     improper_mask=bundle.improper_mask,
-                    improper_is_harmonic=(flat_i_gb.shape[-1] == 2),
+                    improper_is_harmonic=bool(
+                        flat_i_gb.shape[-1] == 2
+                        or not bool(getattr(bundle, "improper_is_periodic", True))
+                    ),
                     exception_pairs=bundle.exception_pairs,
                     exception_sigmas=bundle.exception_sigmas.astype(jnp.float32),
                     exception_epsilons=bundle.exception_epsilons.astype(jnp.float32),

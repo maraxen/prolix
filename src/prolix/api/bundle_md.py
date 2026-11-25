@@ -36,10 +36,12 @@ from prolix.batched_energy import (
     _bond_energy_masked,
     _cmap_energy_masked,
     _dihedral_energy_masked,
+    _improper_energy_masked,
     single_padded_energy,
     single_padded_force,
     solve_ewald_alpha,
 )
+from prolix.constants import COULOMB_CONSTANT
 from prolix.pallas_kernels import _infer_first_pure_water_block, resolve_pallas_mode
 from prolix.physics.pbc import create_periodic_space
 from prolix.physics.pme import make_spme_energy_fn
@@ -80,8 +82,8 @@ try:
 except ImportError:
     pass
 
-# Match prolix.physics.bonded.make_exception_pair_energy_fn default (AKMA).
-_EXCEPTION_COULOMB = 332.0637
+# Match prolix.physics.bonded.make_exception_pair_energy_fn / explicit_corrections default (AKMA).
+_EXCEPTION_COULOMB = COULOMB_CONSTANT
 
 
 def _exception_energy_masked(
@@ -316,6 +318,10 @@ def _bonded_energy_core(
         r = positions
         mask_dtype = r.dtype
         e = jnp.array(0.0, dtype=r.dtype)
+        imp_is_harm = bundle.improper_params is not None and (
+            bundle.improper_params.shape[-1] == 2
+            or not bool(getattr(bundle, "improper_is_periodic", True))
+        )
         if pallas_enabled and pallas_bonded_all_fused is not None:
             box_vec = pbc_box_for_bundle(bundle)
             ub_idx_2 = (
@@ -341,7 +347,7 @@ def _bonded_energy_core(
                 impropers=bundle.improper_idx,
                 improper_params=bundle.improper_params,
                 improper_mask=bundle.improper_mask.astype(mask_dtype),
-                improper_is_harmonic=False,
+                improper_is_harmonic=imp_is_harm,
                 cmap_torsions=bundle.cmap_torsion_idx if has_cmap else None,
                 cmap_indices=bundle.cmap_indices if has_cmap else None,
                 cmap_mask=bundle.cmap_mask.astype(mask_dtype) if has_cmap else None,
@@ -390,7 +396,7 @@ def _bonded_energy_core(
                 bundle.improper_mask.astype(mask_dtype),
                 box=box_vec,
                 b0_is_ji=True,
-                is_harmonic=False,
+                is_harmonic=imp_is_harm,
                 interpret=interpret,
             )
             ub_idx_2 = bundle.urey_bradley_idx[:, ::2] if bundle.urey_bradley_idx.shape[-1] == 3 else bundle.urey_bradley_idx[:, :2]
@@ -445,12 +451,13 @@ def _bonded_energy_core(
             bundle.dihedral_mask.astype(mask_dtype),
             disp_fn,
         )
-        e = e + _dihedral_energy_masked(
+        e = e + _improper_energy_masked(
             r,
             bundle.improper_idx,
             bundle.improper_params,
             bundle.improper_mask.astype(mask_dtype),
             disp_fn,
+            is_harmonic=imp_is_harm,
         )
         if bundle.cmap_coeffs is not None and bundle.cmap_indices is not None:
             e = e + _cmap_energy_masked(
@@ -1260,7 +1267,7 @@ def lower_knob_surface(
         "dispersion_correction": False if is_lj_pme_out else raw_disp_corr,
         "reaction_field_dielectric": float(getattr(nonbonded, "reaction_field_dielectric", 78.3)),
         "dsf_alpha": getattr(nonbonded, "dsf_alpha", None),
-        "coulomb_constant": float(getattr(nonbonded, "coulomb_constant", 332.0637)),
+        "coulomb_constant": float(getattr(nonbonded, "coulomb_constant", COULOMB_CONSTANT)),
         "scale_14_lj": float(getattr(nonbonded, "scale_14_lj", 0.5)),
         "scale_14_elec": float(getattr(nonbonded, "scale_14_elec", 0.8333333333333334)),
         "lj_combining_rule": raw_combining,
