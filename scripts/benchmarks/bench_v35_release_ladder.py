@@ -717,7 +717,7 @@ def run_suites_a_and_b_ladder(
             _clear_all_caches()
             gbsa_bun, gbsa_omm_sys, gbsa_omm_pos = build_implicit_protein_bundle(
                 "5DFR_gbsa",
-                "submodules/openmm/examples/benchmarks/5dfr_minimized.pdb",
+                "data/pdb/5dfr_minimized.pdb",
                 keep_chain=None,
                 add_hydrogens_with_openmm=False,
                 bucket_atoms=2560,
@@ -1502,7 +1502,7 @@ def run_suite_d_openmm_frontend_and_npt(
     )
     gbsa_bun, gbsa_omm_sys, gbsa_omm_pos = build_implicit_protein_bundle(
         "5DFR_gbsa",
-        "submodules/openmm/examples/benchmarks/5dfr_minimized.pdb",
+        "data/pdb/5dfr_minimized.pdb",
         keep_chain=None,
         add_hydrogens_with_openmm=False,
         bucket_atoms=2560,
@@ -1947,7 +1947,7 @@ def run_suite_f_differentiable_moat(
     _clear_all_caches(clear_jax=True)
     gbsa_bun, _, _ = build_implicit_protein_bundle(
         "5DFR_gbsa",
-        "submodules/openmm/examples/benchmarks/5dfr_minimized.pdb",
+        "data/pdb/5dfr_minimized.pdb",
         keep_chain=None,
         add_hydrogens_with_openmm=False,
         bucket_atoms=2560,

@@ -826,7 +826,7 @@ def run_suites_a_and_b_ladder(
         _clear_all_caches()
         gbsa_bun, gbsa_omm_sys, gbsa_omm_pos = build_implicit_protein_bundle(
             "5DFR_gbsa",
-            "submodules/openmm/examples/benchmarks/5dfr_minimized.pdb",
+            "data/pdb/5dfr_minimized.pdb",
             keep_chain=None,
             add_hydrogens_with_openmm=False,
             bucket_atoms=2560,

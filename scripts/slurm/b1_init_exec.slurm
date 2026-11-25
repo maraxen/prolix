@@ -108,11 +108,11 @@ if [[ "${BACKEND}" == "openmm" ]]; then
     echo "OPENMM_PLUGIN_DIR=${OPENMM_PLUGIN_DIR}"
 fi
 
+# myxcel lock-keyed uv venv (no-op without myxcel): see scripts/slurm/_uv_env.sh
+source "${PWD}/scripts/slurm/_uv_env.sh" && prolix_uv_opt_out
 # shellcheck source=/dev/null
 source "scripts/slurm/_bth_env.sh"
 cd "${PROLIX_ROOT}"
-# myxcel lock-keyed uv venv (no-op without myxcel): see scripts/slurm/_uv_env.sh
-source "${PWD}/scripts/slurm/_uv_env.sh" && prolix_uv_opt_out
 
 export XLA_PYTHON_CLIENT_PREALLOCATE=false
 export B1_XLA_TRITON_FLAG="${B1_XLA_TRITON_FLAG:-0}"
@@ -144,14 +144,20 @@ OUT="outputs/bench/b1_full_${FOOTPRINT}_${BACKEND}_${PATH_MODE}_seed${SEED}_job$
 CAMPAIGN_FLAG=""
 [[ -n "${CAMPAIGN_ID}" ]] && CAMPAIGN_FLAG="--campaign-id ${CAMPAIGN_ID}"
 
+if [[ "${BACKEND}" == "openmm" ]]; then
+    CMD=("${PYTHON_RUN}" scripts/benchmarks/b1_init_exec.py)
+else
+    CMD=(uv run --python "${UV_PYTHON}" "${UV_SYNC_EXTRAS[@]}" python scripts/benchmarks/b1_init_exec.py)
+fi
+
 # shellcheck disable=SC2086
-uv run --python "${UV_PYTHON}" "${UV_SYNC_EXTRAS[@]}" bth run "${PYTHON_RUN}" scripts/benchmarks/b1_init_exec.py \
-    --tag cluster --tag b1-full --tag "backend:${BACKEND}" --tag "seed:${SEED}" \
-    --tag "footprint:${FOOTPRINT}" --tag "path:${PATH_MODE}" \
-    ${SLURM_ARRAY_TASK_ID:+--tag "array_task:${SLURM_ARRAY_TASK_ID}"} \
+bth run \
+    --tags cluster --tags b1-full --tags "backend:${BACKEND}" --tags "seed:${SEED}" \
+    --tags "footprint:${FOOTPRINT}" --tags "path:${PATH_MODE}" \
+    ${SLURM_ARRAY_TASK_ID:+--tags "array_task:${SLURM_ARRAY_TASK_ID}"} \
     ${CAMPAIGN_FLAG} \
     --output-paths "${OUT}" \
-    -- uv run --python "${UV_PYTHON}" "${PYTHON_RUN}" scripts/benchmarks/b1_init_exec.py \
+    -- "${CMD[@]}" \
     --backend "${BACKEND}" \
     --seed "${SEED}" \
     --footprint "${FOOTPRINT}" \

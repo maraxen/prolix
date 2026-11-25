@@ -263,6 +263,31 @@ def _re_pad_bundle_to_custom_bucket(
     )
 
 
+def _resolve_benchmark_pdb_path(pdb_rel_path: str) -> Path:
+    """Resolve benchmark PDB paths after ``submodules/`` removal."""
+    cand = ROOT / pdb_rel_path
+    if cand.exists():
+        return cand
+    basename = Path(pdb_rel_path).name
+    search_dirs: list[Path] = []
+    env_dir = os.environ.get("OPENMM_BENCHMARK_PDB_DIR", "").strip()
+    if env_dir:
+        search_dirs.append(Path(env_dir))
+    search_dirs.append(ROOT / "data" / "pdb")
+    alt_names = [basename]
+    if basename == "5dfr_minimized.pdb":
+        alt_names.append("dhfr_jac_benchmark.pdb")
+    for directory in search_dirs:
+        for name in alt_names:
+            alt = directory / name
+            if alt.exists():
+                return alt
+    raise FileNotFoundError(
+        f"Benchmark PDB {pdb_rel_path!r} not found under {ROOT / 'data' / 'pdb'}. "
+        f"Set OPENMM_BENCHMARK_PDB_DIR to a directory containing {basename!r}."
+    )
+
+
 def build_implicit_protein_bundle(
     name: str,
     pdb_rel_path: str,
@@ -285,7 +310,7 @@ def build_implicit_protein_bundle(
     ff_xml = _resolve_ff_path("protein.ff19SB.xml")
     omm_ff = app.ForceField(ff_xml, "implicit/obc2.xml")
 
-    pdb_path = ROOT / pdb_rel_path
+    pdb_path = _resolve_benchmark_pdb_path(pdb_rel_path)
     pdb = app.PDBFile(str(pdb_path))
     modeller = app.Modeller(pdb.topology, pdb.positions)
     modeller.deleteWater()
@@ -391,7 +416,7 @@ def build_apoa1_bundle(
     import openmm.app as app
     import openmm.unit as unit
 
-    pdb_path = ROOT / "submodules" / "openmm" / "examples" / "benchmarks" / "apoa1.pdb"
+    pdb_path = _resolve_benchmark_pdb_path("data/pdb/apoa1.pdb")
     pdb = app.PDBFile(str(pdb_path))
     pos_nm = np.array(pdb.positions.value_in_unit(unit.nanometer), dtype=np.float32)
     pos_A = pos_nm * 10.0
@@ -786,7 +811,7 @@ def run_axis1_implicit_fold_panel(
         ("1CRN", "data/pdb/1CRN.pdb", None, True),
         ("2GB1", "data/pdb/2GB1.pdb", None, False),
         ("1UBQ", "data/pdb/1UBQ.pdb", None, True),
-        ("5DFR", "submodules/openmm/examples/benchmarks/5dfr_minimized.pdb", None, False),
+        ("5DFR", "data/pdb/5dfr_minimized.pdb", None, False),
         ("1AKE", "data/pdb/1AKE.pdb", "A", True),
     ]
     if quick:

@@ -85,7 +85,7 @@ sphinx-build -W --keep-going -b html docs/source docs/_build/html  # Docs gate
 **`bathos` (`bth`) hard rules** for `scripts/experiments/` and `scripts/benchmarks/`:
 1. Invoke via `bth run --tags <tag> --campaign-id <id> --output-paths <out.json> -- uv run python <script.py> --out <out.json>` (never raw `uv run python`, never `uv run bth`, never `--no-sidecar` outside `scripts/explore/`).
 2. Pair every script with `<stem>.bth.toml` (`[experiment]` schema, DuckDB SQL `condition`s, exactly one `is_residual = true`).
-3. Create the campaign (`bth campaign create "<slug>" --mode exploration --question "..."`) before the first run; Slurm wrappers `source scripts/slurm/_bth_env.sh` without pinning `BTH_CATALOG_DIR`; sync cluster runs via `bth sync engaging --pull`.
+3. Create the campaign (`bth campaign create "<slug>" --mode exploration --question "..."`) before the first run; Slurm wrappers `source scripts/slurm/_bth_env.sh` without pinning `BTH_CATALOG_DIR`; sync cluster runs via `bth sync engaging --pull` (on Engaging, `HOME` and ORCD `prolix` checkouts share the same worktree inode).
 4. Query tags in `bth sql` with `WHERE list_contains(from_json(tags, '["VARCHAR"]'), 'my-tag')`.
 
 ---
