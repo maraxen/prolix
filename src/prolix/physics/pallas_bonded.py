@@ -62,6 +62,49 @@ _TRITON_ATOMIC_PROBE_CACHE: dict[tuple[Any, str, str], bool] = {}
 _TRITON_ATOMIC_WARNED: set[tuple[Any, str, str]] = set()
 
 
+def _make_triton_atomic_probe_fns(c_params: Any) -> tuple[Any, Any]:
+    """Build f32 and s32 1-CTA Pallas atomic_add canary callables."""
+
+    def _probe_f32_kernel(val_ref: Any, _init_ref: Any, out_ref: Any) -> None:
+        del _init_ref
+        offs = jnp.arange(32, dtype=jnp.int32)
+        vals = _pl_load(val_ref, (offs,))
+        plt.atomic_add(out_ref, (offs,), vals, mask=jnp.ones((32,), dtype=jnp.bool_))
+
+    def _probe_i32_kernel(val_ref: Any, _init_ref: Any, out_ref: Any) -> None:
+        del _init_ref
+        offs = jnp.arange(32, dtype=jnp.int32)
+        vals = _pl_load(val_ref, (offs,))
+        _pl_atomic_add_i32_1d(
+            out_ref, offs, vals, jnp.ones((32,), dtype=jnp.bool_), interpret=False
+        )
+
+    any_spec = pl.BlockSpec(memory_space=pl.ANY)
+    fn_f32 = pl.pallas_call(
+        _probe_f32_kernel,
+        out_shape=jax.ShapeDtypeStruct((32,), jnp.float32),
+        in_specs=[any_spec, any_spec],
+        out_specs=any_spec,
+        grid=(1,),
+        input_output_aliases={1: 0},
+        interpret=False,
+        compiler_params=c_params,
+        name="prolix_probe_triton_atomic_f32",
+    )
+    fn_i32 = pl.pallas_call(
+        _probe_i32_kernel,
+        out_shape=jax.ShapeDtypeStruct((32,), jnp.int32),
+        in_specs=[any_spec, any_spec],
+        out_specs=any_spec,
+        grid=(1,),
+        input_output_aliases={1: 0},
+        interpret=False,
+        compiler_params=c_params,
+        name="prolix_probe_triton_atomic_i32",
+    )
+    return fn_f32, fn_i32
+
+
 def _probe_triton_atomic_add(dev: Any) -> bool:
     """Run a 1-CTA canary verifying f32 plt.atomic_add and s32 inline-PTX atomic add on dev."""
     key = (
@@ -75,52 +118,42 @@ def _probe_triton_atomic_add(dev: Any) -> bool:
             return cached
 
         def _probe_impl() -> bool:
-            def _probe_f32_kernel(val_ref: Any, _init_ref: Any, out_ref: Any) -> None:
-                del _init_ref
-                offs = jnp.arange(32, dtype=jnp.int32)
-                vals = _pl_load(val_ref, (offs,))
-                plt.atomic_add(out_ref, (offs,), vals, mask=jnp.ones((32,), dtype=jnp.bool_))
-
-            def _probe_i32_kernel(val_ref: Any, _init_ref: Any, out_ref: Any) -> None:
-                del _init_ref
-                offs = jnp.arange(32, dtype=jnp.int32)
-                vals = _pl_load(val_ref, (offs,))
-                _pl_atomic_add_i32_1d(
-                    out_ref, offs, vals, jnp.ones((32,), dtype=jnp.bool_), interpret=False
-                )
-
-            any_spec = pl.BlockSpec(memory_space=pl.ANY)
             c_params = resolve_pallas_compiler_params("bonded_fused")
-            with jax.ensure_compile_time_eval():
-                with jax.default_device(dev):
-                    out_f32 = pl.pallas_call(
-                        _probe_f32_kernel,
-                        out_shape=jax.ShapeDtypeStruct((32,), jnp.float32),
-                        in_specs=[any_spec, any_spec],
-                        out_specs=any_spec,
-                        grid=(1,),
-                        input_output_aliases={1: 0},
-                        interpret=False,
-                        compiler_params=c_params,
-                        name="prolix_probe_triton_atomic_f32",
-                    )(jnp.ones((32,), dtype=jnp.float32), jnp.zeros((32,), dtype=jnp.float32))
-                    jax.block_until_ready(out_f32)
-                    if not bool(np.allclose(np.asarray(out_f32), 1.0)):
-                        return False
+            fn_f32, fn_i32 = _make_triton_atomic_probe_fns(c_params)
+            # Run on a clean worker thread so an active @jax.jit trace or
+            # ensure_compile_time_eval scope on the caller never leaks constants
+            # into pallas_call kernel tracing.
+            result: dict[str, Any] = {}
 
-                    out_i32 = pl.pallas_call(
-                        _probe_i32_kernel,
-                        out_shape=jax.ShapeDtypeStruct((32,), jnp.int32),
-                        in_specs=[any_spec, any_spec],
-                        out_specs=any_spec,
-                        grid=(1,),
-                        input_output_aliases={1: 0},
-                        interpret=False,
-                        compiler_params=c_params,
-                        name="prolix_probe_triton_atomic_i32",
-                    )(jnp.ones((32,), dtype=jnp.int32), jnp.zeros((32,), dtype=jnp.int32))
-                    jax.block_until_ready(out_i32)
-                    return bool(np.all(np.asarray(out_i32) == 1))
+            def _worker() -> None:
+                try:
+                    with jax.default_device(dev):
+                        out_f32 = fn_f32(
+                            jnp.ones((32,), dtype=jnp.float32),
+                            jnp.zeros((32,), dtype=jnp.float32),
+                        )
+                        jax.block_until_ready(out_f32)
+                        if not bool(np.allclose(np.asarray(out_f32), 1.0)):
+                            result["ok"] = False
+                            return
+
+                        out_i32 = fn_i32(
+                            jnp.ones((32,), dtype=jnp.int32),
+                            jnp.zeros((32,), dtype=jnp.int32),
+                        )
+                        jax.block_until_ready(out_i32)
+                        result["ok"] = bool(np.all(np.asarray(out_i32) == 1))
+                except Exception as exc:
+                    result["exc"] = exc
+
+            t = threading.Thread(target=_worker, daemon=True)
+            t.start()
+            t.join(timeout=120.0)
+            if t.is_alive():
+                raise TimeoutError("Triton atomic_add canary timed out after 120s")
+            if "exc" in result:
+                raise result["exc"]
+            return bool(result.get("ok", False))
 
         try:
             ok = _probe_impl()
