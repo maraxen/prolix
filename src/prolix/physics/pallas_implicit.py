@@ -17,12 +17,11 @@ from jax import custom_vjp
 from jax._src.pallas.primitives import load as _pl_load
 from jax._src.pallas.primitives import store as _pl_store
 from jax.experimental import pallas as pl
-from jax.experimental.pallas import triton as plt
 from proxide.physics import constants
 from xtrax.intent import Context
 from xtrax.kernel_seam import VjpKernel
 
-from prolix.export import in_export_context
+from prolix.export import in_export_context, resolve_pallas_compiler_params
 from prolix.physics.generalized_born import (
     ALPHA_OBC,
     BETA_OBC,
@@ -253,7 +252,7 @@ def _pallas_gb_ace_nl_single(
         out_specs=[pl.BlockSpec(memory_space=pl.ANY) for _ in range(2)],
         grid=(n_blocks,),
         interpret=interpret,
-        compiler_params=plt.CompilerParams() if not interpret else None,
+        compiler_params=resolve_pallas_compiler_params("nonbonded_nl") if not interpret else None,
         name="pallas_gb_pass1_born_nl",
     )(px, py, pz, rad_pad, sr_pad, mask_pad, nbr_flat, box_vec)
 
@@ -391,7 +390,7 @@ def _pallas_gb_ace_nl_single(
         out_specs=[pl.BlockSpec(memory_space=pl.ANY) for _ in range(6)],
         grid=(n_blocks,),
         interpret=interpret,
-        compiler_params=plt.CompilerParams() if not interpret else None,
+        compiler_params=resolve_pallas_compiler_params("nonbonded_nl") if not interpret else None,
         name="pallas_gb_pass2_pair_nl",
     )(px, py, pz, q_pad, born_pad, mask_pad, nbr_flat, box_vec)
 
@@ -488,7 +487,7 @@ def _pallas_gb_ace_nl_single(
         out_specs=[pl.BlockSpec(memory_space=pl.ANY) for _ in range(3)],
         grid=(n_blocks,),
         interpret=interpret,
-        compiler_params=plt.CompilerParams() if not interpret else None,
+        compiler_params=resolve_pallas_compiler_params("nonbonded_nl") if not interpret else None,
         name="pallas_gb_pass3_born_chain_nl",
     )(px, py, pz, or_pad, sr_pad, w_pad, mask_pad, nbr_flat, box_vec)
 
@@ -511,6 +510,8 @@ def _gb_ace_nl_ref_one(
     sr_1,
     m_1,
     nbr_1,
+    box_1,
+    has_box,
     solvent_dielectric,
     solute_dielectric,
     dielectric_offset,
@@ -539,6 +540,7 @@ def _gb_ace_nl_ref_one(
         solute_dielectric=solute_dielectric,
         dielectric_offset=dielectric_offset,
         scaled_radii=sr_1,
+        box=box_1 if bool(has_box) else None,
     )
     if include_ace:
         e_ace = jnp.sum(
@@ -686,7 +688,8 @@ def _pallas_gb_ace_nl_bwd(
     res,
     g,
 ):
-    del has_box, interpret
+    del interpret
+    hb = bool(has_box)
     forces, grad_q, positions, charges, radii, scaled_radii, atom_mask, neighbor_idx, box = res
     grad_pos = -g[..., None, None] * forces if g.ndim > 0 else -g * forces
     gq_scaled = g[..., None] * grad_q if g.ndim > 0 else g * grad_q
@@ -694,24 +697,50 @@ def _pallas_gb_ace_nl_bwd(
         gq_scaled = jnp.sum(gq_scaled, axis=0)
 
     if positions.ndim == 2:
-        _, vjp_fn = jax.vjp(
-            lambda r_in, sr_in: _gb_ace_nl_ref_one(
-                positions,
-                charges,
-                r_in,
-                sr_in,
-                atom_mask,
-                neighbor_idx,
-                solvent_dielectric,
-                solute_dielectric,
-                dielectric_offset,
-                surface_tension,
-                include_ace,
-            ),
-            radii,
-            scaled_radii,
-        )
-        drad, dsr = vjp_fn(g)
+        if hb:
+            _, vjp_fn = jax.vjp(
+                lambda r_in, sr_in, bx_in: _gb_ace_nl_ref_one(
+                    positions,
+                    charges,
+                    r_in,
+                    sr_in,
+                    atom_mask,
+                    neighbor_idx,
+                    bx_in,
+                    True,
+                    solvent_dielectric,
+                    solute_dielectric,
+                    dielectric_offset,
+                    surface_tension,
+                    include_ace,
+                ),
+                radii,
+                scaled_radii,
+                box,
+            )
+            drad, dsr, dbox = vjp_fn(g)
+        else:
+            _, vjp_fn = jax.vjp(
+                lambda r_in, sr_in: _gb_ace_nl_ref_one(
+                    positions,
+                    charges,
+                    r_in,
+                    sr_in,
+                    atom_mask,
+                    neighbor_idx,
+                    box,
+                    False,
+                    solvent_dielectric,
+                    solute_dielectric,
+                    dielectric_offset,
+                    surface_tension,
+                    include_ace,
+                ),
+                radii,
+                scaled_radii,
+            )
+            drad, dsr = vjp_fn(g)
+            dbox = jnp.zeros_like(box)
     else:
         B = positions.shape[0]
         b_q = charges.ndim > 1
@@ -719,8 +748,32 @@ def _pallas_gb_ace_nl_bwd(
         b_sr = scaled_radii.ndim > 1
         b_msk = atom_mask.ndim > 1
         b_nbr = neighbor_idx.ndim > 2
+        b_box = box.ndim > 1
 
         def _step(b):
+            bx_b = box[b] if b_box else box
+            if hb:
+                _, vjp_b = jax.vjp(
+                    lambda r_in, sr_in, bx_in: _gb_ace_nl_ref_one(
+                        positions[b],
+                        charges[b] if b_q else charges,
+                        r_in,
+                        sr_in,
+                        atom_mask[b] if b_msk else atom_mask,
+                        neighbor_idx[b] if b_nbr else neighbor_idx,
+                        bx_in,
+                        True,
+                        solvent_dielectric,
+                        solute_dielectric,
+                        dielectric_offset,
+                        surface_tension,
+                        include_ace,
+                    ),
+                    radii[b] if b_rad else radii,
+                    scaled_radii[b] if b_sr else scaled_radii,
+                    bx_b,
+                )
+                return vjp_b(g[b] if g.ndim > 0 else g)
             _, vjp_b = jax.vjp(
                 lambda r_in, sr_in: _gb_ace_nl_ref_one(
                     positions[b],
@@ -729,6 +782,8 @@ def _pallas_gb_ace_nl_bwd(
                     sr_in,
                     atom_mask[b] if b_msk else atom_mask,
                     neighbor_idx[b] if b_nbr else neighbor_idx,
+                    bx_b,
+                    False,
                     solvent_dielectric,
                     solute_dielectric,
                     dielectric_offset,
@@ -738,11 +793,13 @@ def _pallas_gb_ace_nl_bwd(
                 radii[b] if b_rad else radii,
                 scaled_radii[b] if b_sr else scaled_radii,
             )
-            return vjp_b(g[b] if g.ndim > 0 else g)
+            r_ct, sr_ct = vjp_b(g[b] if g.ndim > 0 else g)
+            return r_ct, sr_ct, jnp.zeros_like(bx_b)
 
-        drad_all, dsr_all = jax.lax.map(_step, jnp.arange(B))
+        drad_all, dsr_all, dbox_all = jax.lax.map(_step, jnp.arange(B))
         drad = drad_all if b_rad else jnp.sum(drad_all, axis=0)
         dsr = dsr_all if b_sr else jnp.sum(dsr_all, axis=0)
+        dbox = (dbox_all if b_box else jnp.sum(dbox_all, axis=0)) if hb else jnp.zeros_like(box)
 
     return (
         grad_pos,
@@ -751,7 +808,7 @@ def _pallas_gb_ace_nl_bwd(
         dsr.astype(scaled_radii.dtype),
         jnp.zeros_like(atom_mask),
         jnp.zeros_like(neighbor_idx),
-        jnp.zeros_like(box),
+        dbox.astype(box.dtype),
     )
 
 
@@ -775,7 +832,7 @@ def gb_ace_nl_reference(
     include_ace: bool = True,
 ) -> jax.Array:
     """Plain-JAX OBC-II GB + ACE nonpolar reference matching ``pallas_gb_ace_nl``."""
-    del box, has_box
+    hb = bool(has_box)
     if positions.ndim == 3:
         return jax.vmap(
             lambda b: _gb_ace_nl_ref_one(
@@ -785,6 +842,8 @@ def gb_ace_nl_reference(
                 scaled_radii[b] if scaled_radii.ndim == 2 else scaled_radii,
                 atom_mask[b] if atom_mask.ndim == 2 else atom_mask,
                 neighbor_idx[b] if neighbor_idx.ndim == 3 else neighbor_idx,
+                box[b] if box.ndim == 2 else box,
+                hb,
                 solvent_dielectric,
                 solute_dielectric,
                 dielectric_offset,
@@ -799,6 +858,8 @@ def gb_ace_nl_reference(
         scaled_radii,
         atom_mask,
         neighbor_idx,
+        box,
+        hb,
         solvent_dielectric,
         solute_dielectric,
         dielectric_offset,
@@ -1109,7 +1170,7 @@ def _pallas_sasa_nl_single(
         out_specs=[pl.BlockSpec(memory_space=pl.ANY) for _ in range(2)],
         grid=(n_blocks,),
         interpret=interpret,
-        compiler_params=plt.CompilerParams() if not interpret else None,
+        compiler_params=resolve_pallas_compiler_params("nonbonded_nl") if not interpret else None,
         name="pallas_sasa_pass1_area_nl",
     )(px, py, pz, R_pad, S_pad, mask_pad, nbr_flat, box_vec)
 
@@ -1247,7 +1308,7 @@ def _pallas_sasa_nl_single(
         out_specs=[pl.BlockSpec(memory_space=pl.ANY) for _ in range(3)],
         grid=(n_blocks,),
         interpret=interpret,
-        compiler_params=plt.CompilerParams() if not interpret else None,
+        compiler_params=resolve_pallas_compiler_params("nonbonded_nl") if not interpret else None,
         name="pallas_sasa_pass2_forces_nl",
     )(px, py, pz, R_pad, S_pad, area_pad, zcount_pad, mask_pad, nbr_flat, box_vec)
 
@@ -1256,7 +1317,7 @@ def _pallas_sasa_nl_single(
     return total_energy, forces
 
 
-def _sasa_nl_ref_one(pos_1, rad_1, m_1, nbr_1, surface_tension, probe_radius):
+def _sasa_nl_ref_one(pos_1, rad_1, m_1, nbr_1, box_1, has_box, surface_tension, probe_radius):
     nbr_clean = jnp.where(nbr_1 >= 0, nbr_1 & _NB_INDEX_MASK, nbr_1)
     return compute_nonpolar_energy(
         pos_1,
@@ -1265,6 +1326,7 @@ def _sasa_nl_ref_one(pos_1, rad_1, m_1, nbr_1, surface_tension, probe_radius):
         probe_radius=probe_radius,
         neighbor_idx=nbr_clean,
         atom_mask=m_1,
+        box=box_1 if bool(has_box) else None,
     ).astype(pos_1.dtype)
 
 
@@ -1341,47 +1403,80 @@ def _pallas_sasa_nl_fwd(
 
 
 def _pallas_sasa_nl_bwd(has_box, surface_tension, probe_radius, interpret, res, g):
-    del has_box, interpret
+    del interpret
+    hb = bool(has_box)
     forces, positions, radii, atom_mask, neighbor_idx, box = res
     grad_pos = -g[..., None, None] * forces if g.ndim > 0 else -g * forces
 
     if positions.ndim == 2:
-        _, vjp_fn = jax.vjp(
-            lambda r_in: _sasa_nl_ref_one(
-                positions, r_in, atom_mask, neighbor_idx, surface_tension, probe_radius
-            ),
-            radii,
-        )
-        (drad,) = vjp_fn(g)
+        if hb:
+            _, vjp_fn = jax.vjp(
+                lambda r_in, bx_in: _sasa_nl_ref_one(
+                    positions, r_in, atom_mask, neighbor_idx, bx_in, True, surface_tension, probe_radius
+                ),
+                radii,
+                box,
+            )
+            drad, dbox = vjp_fn(g)
+        else:
+            _, vjp_fn = jax.vjp(
+                lambda r_in: _sasa_nl_ref_one(
+                    positions, r_in, atom_mask, neighbor_idx, box, False, surface_tension, probe_radius
+                ),
+                radii,
+            )
+            (drad,) = vjp_fn(g)
+            dbox = jnp.zeros_like(box)
     else:
         B = positions.shape[0]
         b_rad = radii.ndim > 1
         b_msk = atom_mask.ndim > 1
         b_nbr = neighbor_idx.ndim > 2
+        b_box = box.ndim > 1
 
         def _step(b):
+            bx_b = box[b] if b_box else box
+            if hb:
+                _, vjp_b = jax.vjp(
+                    lambda r_in, bx_in: _sasa_nl_ref_one(
+                        positions[b],
+                        r_in,
+                        atom_mask[b] if b_msk else atom_mask,
+                        neighbor_idx[b] if b_nbr else neighbor_idx,
+                        bx_in,
+                        True,
+                        surface_tension,
+                        probe_radius,
+                    ),
+                    radii[b] if b_rad else radii,
+                    bx_b,
+                )
+                return vjp_b(g[b] if g.ndim > 0 else g)
             _, vjp_b = jax.vjp(
                 lambda r_in: _sasa_nl_ref_one(
                     positions[b],
                     r_in,
                     atom_mask[b] if b_msk else atom_mask,
                     neighbor_idx[b] if b_nbr else neighbor_idx,
+                    bx_b,
+                    False,
                     surface_tension,
                     probe_radius,
                 ),
                 radii[b] if b_rad else radii,
             )
-            return vjp_b(g[b] if g.ndim > 0 else g)[0]
+            return vjp_b(g[b] if g.ndim > 0 else g)[0], jnp.zeros_like(bx_b)
 
-        drad_all = jax.lax.map(_step, jnp.arange(B))
+        drad_all, dbox_all = jax.lax.map(_step, jnp.arange(B))
         drad = drad_all if b_rad else jnp.sum(drad_all, axis=0)
+        dbox = (dbox_all if b_box else jnp.sum(dbox_all, axis=0)) if hb else jnp.zeros_like(box)
 
     return (
         grad_pos,
         drad.astype(radii.dtype),
         jnp.zeros_like(atom_mask),
         jnp.zeros_like(neighbor_idx),
-        jnp.zeros_like(box),
+        dbox.astype(box.dtype),
     )
 
 
@@ -1400,7 +1495,7 @@ def sasa_nl_reference(
     probe_radius: float = constants.PROBE_RADIUS,
 ) -> jax.Array:
     """Plain-JAX SASA nonpolar reference matching ``pallas_sasa_nl``."""
-    del box, has_box
+    hb = bool(has_box)
     if positions.ndim == 3:
         return jax.vmap(
             lambda b: _sasa_nl_ref_one(
@@ -1408,11 +1503,13 @@ def sasa_nl_reference(
                 radii[b] if radii.ndim == 2 else radii,
                 atom_mask[b] if atom_mask.ndim == 2 else atom_mask,
                 neighbor_idx[b] if neighbor_idx.ndim == 3 else neighbor_idx,
+                box[b] if box.ndim == 2 else box,
+                hb,
                 surface_tension,
                 probe_radius,
             )
         )(jnp.arange(positions.shape[0]))
-    return _sasa_nl_ref_one(positions, radii, atom_mask, neighbor_idx, surface_tension, probe_radius)
+    return _sasa_nl_ref_one(positions, radii, atom_mask, neighbor_idx, box, hb, surface_tension, probe_radius)
 
 
 def make_sasa_nl_op(

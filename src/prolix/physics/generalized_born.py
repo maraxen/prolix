@@ -317,6 +317,52 @@ def compute_pair_integral(distance: Array, radius_i: Array, radius_j: Array) -> 
   return jnp.where(condition, total, 0.0)
 
 
+def _apply_min_image_delta(delta: Array, box: Array | None) -> Array:
+  """Apply zero-box-safe minimum-image PBC displacement to ``(..., 3)`` deltas."""
+  if box is None:
+    return delta
+  dtype = delta.dtype
+  b_arr = jnp.asarray(box, dtype=dtype)
+  zero = jnp.asarray(0.0, dtype=dtype)
+  half = jnp.asarray(0.5, dtype=dtype)
+  one = jnp.asarray(1.0, dtype=dtype)
+  if b_arr.ndim >= 2 and b_arr.shape[-2:] == (3, 3):
+    ax, by, cz = b_arr[..., 0, 0], b_arr[..., 1, 1], b_arr[..., 2, 2]
+    bx, cx, cy = b_arr[..., 1, 0], b_arr[..., 2, 0], b_arr[..., 2, 1]
+  elif b_arr.shape[-1] == 3:
+    b_safe = jnp.where(b_arr > zero, b_arr, one)
+    shift = jnp.where(b_arr > zero, jnp.floor(delta / b_safe + half), zero)
+    return delta - shift * b_arr
+  else:
+    ax, by, cz, bx, cx, cy = (
+      b_arr[..., 0],
+      b_arr[..., 1],
+      b_arr[..., 2],
+      b_arr[..., 3],
+      b_arr[..., 4],
+      b_arr[..., 5],
+    )
+  dx, dy, dz = delta[..., 0], delta[..., 1], delta[..., 2]
+  cz_pos = cz > zero
+  cz_s = jnp.where(cz_pos, cz, one)
+  sz = jnp.where(cz_pos, jnp.floor(dz / cz_s + half), zero)
+  dz = dz - sz * cz
+  dy = dy - sz * cy
+  dx = dx - sz * cx
+
+  by_pos = by > zero
+  by_s = jnp.where(by_pos, by, one)
+  sy = jnp.where(by_pos, jnp.floor(dy / by_s + half), zero)
+  dy = dy - sy * by
+  dx = dx - sy * bx
+
+  ax_pos = ax > zero
+  ax_s = jnp.where(ax_pos, ax, one)
+  sx = jnp.where(ax_pos, jnp.floor(dx / ax_s + half), zero)
+  dx = dx - sx * ax
+  return jnp.stack([dx, dy, dz], axis=-1)
+
+
 def compute_born_radii_neighbor_list(
   positions: Array,
   radii: Array,
@@ -327,6 +373,7 @@ def compute_born_radii_neighbor_list(
   obc_alpha: float = ALPHA_OBC,
   obc_beta: float = BETA_OBC,
   obc_gamma: float = GAMMA_OBC,
+  box: Array | None = None,
 ) -> Array:
   r"""Computes effective Born radii using neighbor lists.
 
@@ -362,7 +409,7 @@ def compute_born_radii_neighbor_list(
   neighbor_positions = positions[safe_idx]  # (N, K, 3)
   central_positions = positions[:, None, :]  # (N, 1, 3)
 
-  delta_positions = central_positions - neighbor_positions  # (N, K, 3)
+  delta_positions = _apply_min_image_delta(central_positions - neighbor_positions, box)  # (N, K, 3)
   distances = safe_norm(delta_positions, axis=-1)  # (N, K)
 
   mask_neighbors = (
@@ -415,6 +462,7 @@ def compute_gb_energy_neighbor_list(  # noqa: PLR0913
   obc_beta: float = BETA_OBC,
   obc_gamma: float = GAMMA_OBC,
   coulomb_constant: float = GB_COULOMB_CONSTANT,
+  box: Array | None = None,
 ) -> tuple[Array, Array]:
   r"""Computes GB energy using neighbor lists.
 
@@ -450,6 +498,7 @@ def compute_gb_energy_neighbor_list(  # noqa: PLR0913
     obc_alpha=obc_alpha,
     obc_beta=obc_beta,
     obc_gamma=obc_gamma,
+    box=box,
   )
 
   N = positions.shape[0]
@@ -458,7 +507,7 @@ def compute_gb_energy_neighbor_list(  # noqa: PLR0913
 
   neighbor_positions = positions[safe_idx]  # (N, K, 3)
   central_positions = positions[:, None, :]  # (N, 1, 3)
-  delta_positions = central_positions - neighbor_positions  # (N, K, 3)
+  delta_positions = _apply_min_image_delta(central_positions - neighbor_positions, box)  # (N, K, 3)
   distances = safe_norm(delta_positions, axis=-1)  # (N, K)
 
   born_radii_i = born_radii[:, None]  # (N, 1)
@@ -584,6 +633,7 @@ def compute_sasa_neighbor_list(
   neighbor_idx: Array,
   probe_radius: float = constants.PROBE_RADIUS,
   atom_mask: Array | None = None,
+  box: Array | None = None,
 ) -> Array:
   """Computes SASA using neighbor lists.
 
@@ -619,7 +669,7 @@ def compute_sasa_neighbor_list(
   neighbor_positions = positions[safe_nbr]  # (N, K, 3)
   central_positions = positions[:, None, :]  # (N, 1, 3)
 
-  delta_positions = central_positions - neighbor_positions
+  delta_positions = _apply_min_image_delta(central_positions - neighbor_positions, box)
   d_ij = safe_norm(delta_positions, axis=-1)  # (N, K)
 
   # Radii
@@ -666,6 +716,7 @@ def compute_nonpolar_energy(
   probe_radius: float = constants.PROBE_RADIUS,
   neighbor_idx: Array | None = None,
   atom_mask: Array | None = None,
+  box: Array | None = None,
 ) -> Array:
   r"""Computes the non-polar solvation energy (SASA term).
 
@@ -689,7 +740,7 @@ def compute_nonpolar_energy(
     sasa = compute_sasa(positions, radii, probe_radius)
   else:
     sasa = compute_sasa_neighbor_list(
-        positions, radii, neighbor_idx, probe_radius, atom_mask=atom_mask
+        positions, radii, neighbor_idx, probe_radius, atom_mask=atom_mask, box=box
     )
 
   return surface_tension * sasa
