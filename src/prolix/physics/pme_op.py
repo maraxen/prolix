@@ -20,6 +20,7 @@ import jax.numpy as jnp
 import xtrax
 from xtrax.intent import Context
 
+from prolix.physics.pallas_bonded import _triton_gpu_available
 from prolix.physics.pme import (
     _gather_reference as gather_reference,
 )
@@ -63,10 +64,20 @@ def make_spread_op(
             positions, charges, atom_mask, box_size, grid_dims=dims, order=order, interpret=True
         )
 
+    ref_spread = functools.partial(spread_reference, grid_dims=dims, order=order)
+    gpu_spread_pallas = functools.partial(
+        spread_charges_pallas, grid_dims=dims, order=order, interpret=False
+    )
+
+    def _gpu_spread(positions, charges, atom_mask, box_size):
+        if not _triton_gpu_available():
+            return ref_spread(positions, charges, atom_mask, box_size)
+        return gpu_spread_pallas(positions, charges, atom_mask, box_size)
+
     return xtrax.op(
-        functools.partial(spread_reference, grid_dims=dims, order=order),
+        ref_spread,
         kernels={
-            "gpu": functools.partial(spread_charges_pallas, grid_dims=dims, order=order, interpret=False),
+            "gpu": _gpu_spread,
             "cpu": _cpu_spread,
         },
         name="pme_spread",
@@ -124,12 +135,27 @@ def make_gather_op(
             compute_dq=cdq,
         )
 
+    def _ref_gather(positions, charges, atom_mask, box_size, theta_norm):
+        forces, potentials = gather_reference(
+            positions, charges, atom_mask, box_size, theta_norm, grid_dims=dims, order=order
+        )
+        if not cdq:
+            potentials = jnp.zeros_like(potentials)
+        return forces, potentials
+
+    gpu_gather_pallas = functools.partial(
+        gather_pallas, grid_dims=dims, order=order, interpret=False, compute_dq=cdq
+    )
+
+    def _gpu_gather(positions, charges, atom_mask, box_size, theta_norm):
+        if not _triton_gpu_available():
+            return _ref_gather(positions, charges, atom_mask, box_size, theta_norm)
+        return gpu_gather_pallas(positions, charges, atom_mask, box_size, theta_norm)
+
     return xtrax.op(
-        functools.partial(gather_reference, grid_dims=dims, order=order),
+        _ref_gather,
         kernels={
-            "gpu": functools.partial(
-                gather_pallas, grid_dims=dims, order=order, interpret=False, compute_dq=cdq
-            ),
+            "gpu": _gpu_gather,
             "cpu": _cpu_gather,
         },
         name="pme_gather",

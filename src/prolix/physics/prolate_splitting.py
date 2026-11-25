@@ -58,6 +58,7 @@ from prolix.physics.pme import (
     resolve_use_pallas_pme,
     spread_charges,
 )
+from prolix.physics.pallas_bonded import _triton_gpu_available
 from prolix.physics.pme_pallas import make_gather_op
 
 __all__ = [
@@ -1301,7 +1302,7 @@ def _prolate_p1_recip_bwd(
         and _is_ortho_box(pos_v, box_arr)
     )
     if use_p:
-        backend = "gpu" if jax.default_backend() == "gpu" else "cpu"
+        backend = "gpu" if _triton_gpu_available() else "cpu"
         gather_op = make_gather_op(
             grid_dims,
             order,

@@ -25,7 +25,6 @@ from jax import custom_vjp
 from jax._src.pallas.primitives import load as _pl_load
 from jax._src.pallas.primitives import store as _pl_store
 from jax.experimental import pallas as pl
-from jax.experimental.pallas import triton as plt
 from jax.scipy.special import erf, erfc
 from proxide.physics import constants
 from xtrax.intent import Context
@@ -66,6 +65,7 @@ from prolix.physics.pallas_bonded import (
     _scale3,
     _sub3,
     _torsion_angle_and_atom_grads_vec3,
+    _triton_gpu_available,
     angles_harmonic_reference,
     bonded_all_fused_reference,
     bonds_2body_reference,
@@ -246,20 +246,6 @@ class PallasKernelConfig:
     interpret: bool = field(default=False, metadata={"static": True})
 
 
-def _triton_gpu_available() -> bool:
-    """Return True iff default backend is GPU with compute capability >= 8.0 (Ampere+ for Triton)."""
-    if jax.default_backend() != "gpu":
-        return False
-    try:
-        dev = jax.devices("gpu")[0]
-        cc = getattr(dev, "compute_capability", None)
-        if cc is not None and float(cc) < 8.0:
-            return False
-    except Exception:
-        return False
-    return True
-
-
 def resolve_pallas_mode(
     use_pallas: bool | None = None,
     env_var: str = "PROLIX_USE_PALLAS",
@@ -309,7 +295,7 @@ def _gb_coulomb_energy_chunked(
     tau = jnp.array(
         (1.0 / solute_dielectric) - (1.0 / solvent_dielectric), dtype=dtype
     )
-    prefactor = jnp.array(-0.5 * constants.COULOMB_CONSTANT, dtype=dtype) * tau
+    prefactor = jnp.array(-0.5 * COULOMB_CONSTANT, dtype=dtype) * tau
 
     n_chunks = (N + chunk_size - 1) // chunk_size
     N_padded = n_chunks * chunk_size
@@ -379,7 +365,7 @@ def _gb_coulomb_cotangents_chunked(
     tau = jnp.array(
         (1.0 / solute_dielectric) - (1.0 / solvent_dielectric), dtype=dtype
     )
-    prefactor = jnp.array(-0.5 * constants.COULOMB_CONSTANT, dtype=dtype) * tau
+    prefactor = jnp.array(-0.5 * COULOMB_CONSTANT, dtype=dtype) * tau
     two_prefactor = jnp.array(2.0, dtype=dtype) * prefactor
 
     n_chunks = (N + chunk_size - 1) // chunk_size
@@ -588,7 +574,8 @@ def _pallas_born_radii_single(
         rad_pad = radii
         sc_rad_pad = scaled_radii
 
-    nbr_pad = neighbor_idx.astype(jnp.int32)
+    nbr_raw = neighbor_idx.astype(jnp.int32)
+    nbr_pad = jnp.where(nbr_raw >= 0, nbr_raw & _NB_INDEX_MASK, nbr_raw)
     if pad_n > 0 or pad_k > 0:
         nbr_pad = jnp.pad(nbr_pad, ((0, pad_n), (0, pad_k)), constant_values=N)
 
@@ -627,7 +614,7 @@ def _pallas_born_radii_single(
             )
             j_idx_1d = _pl_load(nbr_flat_ref, (flat_nbr_idx,))
             j_idx = j_idx_1d.reshape(_BORN_BLOCK_N, _BORN_BLOCK_K)
-            valid_nbr = (j_idx >= 0) & (j_idx < N) & is_real_i[:, None]
+            valid_nbr = (j_idx >= 0) & (j_idx < N) & (j_idx != offs_i[:, None]) & is_real_i[:, None]
             safe_j_1d = jnp.clip(j_idx_1d, 0, N_pad - 1)
 
             px_j = _pl_load(px_ref, (safe_j_1d,)).reshape(_BORN_BLOCK_N, _BORN_BLOCK_K)
@@ -679,7 +666,7 @@ def _pallas_born_radii_single(
         out_specs=out_specs,
         grid=(n_blocks,),
         interpret=interpret,
-        compiler_params=plt.CompilerParams() if not interpret else None,
+        compiler_params=resolve_pallas_compiler_params("nonbonded_nl") if not interpret else None,
         name="pallas_born_radii",
     )(pos_x, pos_y, pos_z, rad_pad, sc_rad_pad, nbr_flat)
     return born_padded[:N]
@@ -3137,7 +3124,7 @@ def _pallas_flash_explicit_single(
         out_specs=out_specs,
         grid=(n_blocks,),
         interpret=interpret,
-        compiler_params=plt.CompilerParams() if not interpret else None,
+        compiler_params=resolve_pallas_compiler_params("nonbonded_nl") if not interpret else None,
         name="pallas_flash_explicit_nonbonded",
     )(
         pos_x,

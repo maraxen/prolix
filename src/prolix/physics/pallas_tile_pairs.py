@@ -1728,7 +1728,7 @@ def _pallas_bonded_and_tile_pairs_soa(  # noqa: PLR0913
     deterministic_forces: bool = False,
     separate_bonded_kernel: bool = True,
     is_triclinic: bool = False,
-    interpret: bool = False,
+    interpret: bool | None = None,
 ) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array]:
     """MK-65/71 + v3.7/v3.8/v3.9: Morton 32x32 tile-pairs + 6 bonded CTA groups (ortho/triclinic, LB/geometric, SPME/RF/LJ-PME, 2^20 det planes)."""
     comb_rule = _normalize_lj_combining_rule(lj_combining_rule)
@@ -1740,7 +1740,7 @@ def _pallas_bonded_and_tile_pairs_soa(  # noqa: PLR0913
     has_fin_cut = float(cutoff) < 1.0e15
     l6_rc_f = _ewald_p6_lr_host(lj_alpha_f, float(cutoff) * float(cutoff)) if (has_ljpme and has_fin_cut) else 0.0
     keep_excl = bool(include_pme_excl_erf) or (has_ljpme and inc_ljpme_ex)
-    interpret = bool(interpret) or in_export_context()
+    interpret = ((not _triton_gpu_available()) if interpret is None else bool(interpret)) or in_export_context()
     det_f = bool(deterministic_forces)
     sep_b = bool(separate_bonded_kernel)
     in_exp = in_export_context()
@@ -3024,7 +3024,7 @@ def pallas_tile_pairs_param_grads(  # noqa: PLR0913
     include_ljpme_excl: bool = False,
     is_triclinic: bool = False,
     return_box_grad: bool = False,
-    interpret: bool = False,
+    interpret: bool | None = None,
 ) -> (
     tuple[jax.Array, jax.Array, jax.Array, jax.Array]
     | tuple[jax.Array, jax.Array, jax.Array, jax.Array, jax.Array]
@@ -3042,7 +3042,7 @@ def pallas_tile_pairs_param_grads(  # noqa: PLR0913
         else 0.0
     )
     keep_excl_bwd = bool(include_pme_excl_erf) or (has_ljpme_bwd and inc_ljpme_ex_bwd)
-    interpret = bool(interpret) or in_export_context()
+    interpret = ((not _triton_gpu_available()) if interpret is None else bool(interpret)) or in_export_context()
     b_pos, b_q, b_sig, b_eps, b_mask, b_tp, b_ef, b_e14, b_box, b_lam = in_b
     has_rf_bwd = (pme_alpha <= 0.0) and (rf_dielectric is not None)
     k_rf_bwd, c_rf_bwd = reaction_field_k_c(cutoff, rf_dielectric) if has_rf_bwd and rf_dielectric is not None else (0.0, 0.0)

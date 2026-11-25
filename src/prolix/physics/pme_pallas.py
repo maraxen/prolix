@@ -19,6 +19,7 @@ from jax.experimental import pallas as pl
 from jax.experimental.pallas import triton as plt
 
 from prolix.export import in_export_context, resolve_pallas_compiler_params
+from prolix.physics.pallas_bonded import _triton_gpu_available
 from prolix.physics.pbc import invert_box_lower_triangular
 
 BLOCK_N = 32
@@ -707,7 +708,7 @@ def spread_charges_pallas(
     order: int = 4,
     *,
     atom_perm: jax.Array | None = None,
-    interpret: bool = False,
+    interpret: bool | None = None,
     n_active_atoms: int | None = None,
     is_triclinic: bool = False,
 ) -> jax.Array:
@@ -762,6 +763,8 @@ def spread_charges_pallas(
             charges = charges[perm]
             atom_mask = atom_mask[perm]
 
+    interp = (not _triton_gpu_available()) if interpret is None else bool(interpret)
+
     @jax.custom_batching.custom_vmap
     def _vmappable(pos, q, mask, box):
         return _spread_charges_pallas_single(
@@ -770,7 +773,7 @@ def spread_charges_pallas(
             mask,
             box,
             grid_tuple,
-            interpret,
+            interp,
             n_active_atoms=n_active_atoms,
             is_triclinic=eff_tri,
         )
@@ -789,7 +792,7 @@ def spread_charges_pallas(
             mask,
             box,
             grid_tuple,
-            interpret,
+            interp,
             **v_kw,  # type: ignore[arg-type]
         )
         return out, True
@@ -807,7 +810,7 @@ def spread_charges_pallas(
             atom_mask,
             box_size,
             grid_tuple,
-            interpret,
+            interp,
             **extra_kw,  # type: ignore[arg-type]
         )
 
@@ -1439,16 +1442,23 @@ def make_spread_op(
             )(jnp.arange(B_r))
         return _spread_pure_jax_one(pos, q, mask, box, dims, eff_tri)
 
+    _spread_gpu_pallas = functools.partial(
+        spread_charges_pallas,
+        grid_dims=dims,
+        order=order,
+        interpret=False,
+        is_triclinic=is_triclinic,
+    )
+
+    def _spread_gpu(pos, q, mask, box):
+        if not _triton_gpu_available():
+            return _spread_ref(pos, q, mask, box)
+        return _spread_gpu_pallas(pos, q, mask, box)
+
     return xtrax.op(
         _spread_ref,
         kernels={
-            "gpu": functools.partial(
-                spread_charges_pallas,
-                grid_dims=dims,
-                order=order,
-                interpret=False,
-                is_triclinic=is_triclinic,
-            ),
+            "gpu": _spread_gpu,
             "cpu": functools.partial(
                 spread_charges_pallas,
                 grid_dims=dims,
@@ -1505,19 +1515,26 @@ def make_gather_op(
             )(jnp.arange(B_r))
         return _gather_pure_jax_one(pos, q, mask, box, theta, dims, eff_tri, cdq, f_scale, q_scale)
 
+    _gather_gpu_pallas = functools.partial(
+        gather_pallas,
+        grid_dims=dims,
+        order=order,
+        interpret=False,
+        compute_dq=cdq,
+        force_scale=f_scale,
+        pot_scale=q_scale,
+        is_triclinic=is_triclinic,
+    )
+
+    def _gather_gpu(pos, q, mask, box, theta):
+        if not _triton_gpu_available():
+            return _gather_ref(pos, q, mask, box, theta)
+        return _gather_gpu_pallas(pos, q, mask, box, theta)
+
     return xtrax.op(
         _gather_ref,
         kernels={
-            "gpu": functools.partial(
-                gather_pallas,
-                grid_dims=dims,
-                order=order,
-                interpret=False,
-                compute_dq=cdq,
-                force_scale=f_scale,
-                pot_scale=q_scale,
-                is_triclinic=is_triclinic,
-            ),
+            "gpu": _gather_gpu,
             "cpu": functools.partial(
                 gather_pallas,
                 grid_dims=dims,

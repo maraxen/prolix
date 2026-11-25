@@ -15,6 +15,8 @@ from __future__ import annotations
 import dataclasses
 import functools
 import os
+import threading
+import warnings
 from typing import Any, cast
 
 import jax
@@ -42,6 +44,7 @@ from jax_md import space
 from xtrax.intent import Context
 from xtrax.kernel_seam import VjpKernel
 
+from prolix.constants import COULOMB_CONSTANT
 from prolix.export import in_export_context, resolve_pallas_compiler_params
 from prolix.physics.cmap import compute_cmap_energies, precompute_cmap_coefficients
 from prolix.physics.pbc import create_periodic_space
@@ -54,8 +57,102 @@ _BLOCK_D = 64
 _BLOCK_C = 32
 
 
+_TRITON_ATOMIC_PROBE_LOCK = threading.Lock()
+_TRITON_ATOMIC_PROBE_CACHE: dict[tuple[Any, str, str], bool] = {}
+_TRITON_ATOMIC_WARNED: set[tuple[Any, str, str]] = set()
+
+
+def _probe_triton_atomic_add(dev: Any) -> bool:
+    """Run a 1-CTA canary verifying f32 plt.atomic_add and s32 inline-PTX atomic add on dev."""
+    key = (
+        getattr(dev, "id", None),
+        str(getattr(dev, "device_kind", "")),
+        str(getattr(dev, "compute_capability", "")),
+    )
+    with _TRITON_ATOMIC_PROBE_LOCK:
+        cached = _TRITON_ATOMIC_PROBE_CACHE.get(key)
+        if cached is not None:
+            return cached
+
+        def _probe_impl() -> bool:
+            def _probe_f32_kernel(val_ref: Any, _init_ref: Any, out_ref: Any) -> None:
+                del _init_ref
+                offs = jnp.arange(32, dtype=jnp.int32)
+                vals = _pl_load(val_ref, (offs,))
+                plt.atomic_add(out_ref, (offs,), vals, mask=jnp.ones((32,), dtype=jnp.bool_))
+
+            def _probe_i32_kernel(val_ref: Any, _init_ref: Any, out_ref: Any) -> None:
+                del _init_ref
+                offs = jnp.arange(32, dtype=jnp.int32)
+                vals = _pl_load(val_ref, (offs,))
+                _pl_atomic_add_i32_1d(
+                    out_ref, offs, vals, jnp.ones((32,), dtype=jnp.bool_), interpret=False
+                )
+
+            any_spec = pl.BlockSpec(memory_space=pl.ANY)
+            c_params = resolve_pallas_compiler_params("bonded_fused")
+            with jax.ensure_compile_time_eval():
+                with jax.default_device(dev):
+                    out_f32 = pl.pallas_call(
+                        _probe_f32_kernel,
+                        out_shape=jax.ShapeDtypeStruct((32,), jnp.float32),
+                        in_specs=[any_spec, any_spec],
+                        out_specs=any_spec,
+                        grid=(1,),
+                        input_output_aliases={1: 0},
+                        interpret=False,
+                        compiler_params=c_params,
+                        name="prolix_probe_triton_atomic_f32",
+                    )(jnp.ones((32,), dtype=jnp.float32), jnp.zeros((32,), dtype=jnp.float32))
+                    jax.block_until_ready(out_f32)
+                    if not bool(np.allclose(np.asarray(out_f32), 1.0)):
+                        return False
+
+                    out_i32 = pl.pallas_call(
+                        _probe_i32_kernel,
+                        out_shape=jax.ShapeDtypeStruct((32,), jnp.int32),
+                        in_specs=[any_spec, any_spec],
+                        out_specs=any_spec,
+                        grid=(1,),
+                        input_output_aliases={1: 0},
+                        interpret=False,
+                        compiler_params=c_params,
+                        name="prolix_probe_triton_atomic_i32",
+                    )(jnp.ones((32,), dtype=jnp.int32), jnp.zeros((32,), dtype=jnp.int32))
+                    jax.block_until_ready(out_i32)
+                    return bool(np.all(np.asarray(out_i32) == 1))
+
+        try:
+            ok = _probe_impl()
+        except Exception as exc:
+            ok = False
+            if key not in _TRITON_ATOMIC_WARNED:
+                _TRITON_ATOMIC_WARNED.add(key)
+                warnings.warn(
+                    f"Pallas Triton atomic_add canary failed on {key} ({exc!r}); "
+                    "falling back to non-Triton path.",
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
+        else:
+            if not ok and key not in _TRITON_ATOMIC_WARNED:
+                _TRITON_ATOMIC_WARNED.add(key)
+                warnings.warn(
+                    f"Pallas Triton atomic_add canary produced unexpected zeros on {key}; "
+                    "falling back to non-Triton path.",
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
+        _TRITON_ATOMIC_PROBE_CACHE[key] = ok
+        return ok
+
+
 def _triton_gpu_available() -> bool:
-    """Return True iff default backend is GPU with compute capability >= 8.0 (Ampere+ for Triton)."""
+    """Return True iff default backend is GPU with cc >= 8.0 and passing atomic_add canary."""
+    if in_export_context():
+        return False
+    if os.environ.get("PROLIX_FORCE_TRITON_INTERPRET", "").strip() == "1":
+        return False
     if jax.default_backend() != "gpu":
         return False
     try:
@@ -65,7 +162,7 @@ def _triton_gpu_available() -> bool:
             return False
     except Exception:
         return False
-    return True
+    return _probe_triton_atomic_add(dev)
 
 
 def _triton_erfc(x: jax.Array) -> jax.Array:
@@ -566,7 +663,7 @@ def _pallas_bonds_2body_single(
         grid=(n_blocks,),
         input_output_aliases={9: 1, 10: 2, 11: 3},
         interpret=interpret,
-        compiler_params=plt.CompilerParams() if not interpret else None,
+        compiler_params=resolve_pallas_compiler_params("bonded_fused") if not interpret else None,
         name="pallas_bonds_2body",
     )(px, py, pz, idx_i, idx_j, r0, k_val, mask_f, box_vec, zero_f, zero_f, zero_f)
     forces = jnp.stack([fx_pad[:N], fy_pad[:N], fz_pad[:N]], axis=-1).astype(orig_dtype)
@@ -1065,7 +1162,7 @@ def _pallas_exceptions_14_single(
         grid=(n_blocks,),
         input_output_aliases={11: 1, 12: 2, 13: 3},
         interpret=interpret,
-        compiler_params=plt.CompilerParams() if not interpret else None,
+        compiler_params=resolve_pallas_compiler_params("bonded_fused") if not interpret else None,
         name="pallas_exceptions_14",
     )(px, py, pz, idx_i, idx_j, sig_f, eps_f, qp_f, mask_f, box_vec, lam_vec, zero_f, zero_f, zero_f)
     forces = jnp.stack([fx_pad[:N], fy_pad[:N], fz_pad[:N]], axis=-1).astype(orig_dtype)
@@ -1398,7 +1495,7 @@ def exceptions_14_reference(
     lam: jax.Array,
     *,
     has_box: bool = False,
-    coulomb_constant: float = 332.0637,
+    coulomb_constant: float = COULOMB_CONSTANT,
     softcore_alpha: float = 0.5,
     softcore_exponent: int = 2,
 ) -> jax.Array:
@@ -1449,7 +1546,7 @@ def exceptions_14_reference(
 def make_exceptions_14_op(
     *,
     has_box: bool = False,
-    coulomb_constant: float = 332.0637,
+    coulomb_constant: float = COULOMB_CONSTANT,
     softcore_alpha: float = 0.5,
     softcore_exponent: int = 2,
     compute_param_grads: bool | None = None,
@@ -1500,7 +1597,7 @@ def pallas_exceptions_14(
     exception_chargeprods: jax.Array | None,
     mask: jax.Array | None = None,
     box: jax.Array | None = None,
-    coulomb_constant: float = 332.0637,
+    coulomb_constant: float = COULOMB_CONSTANT,
     *,
     soft_core_lambda: float | jax.Array | None = None,
     softcore_lambda: float | jax.Array | None = None,
@@ -1715,7 +1812,7 @@ def _pallas_pme_exclusion_pairs_single(
         grid=(n_blocks,),
         input_output_aliases={9: 1, 10: 2, 11: 3},
         interpret=interpret,
-        compiler_params=plt.CompilerParams() if not interpret else None,
+        compiler_params=resolve_pallas_compiler_params("bonded_fused") if not interpret else None,
         name="pallas_pme_exclusion_pairs",
     )(px, py, pz, q_pad, mask_pad, idx_i, idx_j, s_elec, box_vec, zero_f, zero_f, zero_f)
     forces = jnp.stack([fx_pad[:N], fy_pad[:N], fz_pad[:N]], axis=-1).astype(orig_dtype)
@@ -1983,7 +2080,7 @@ def pme_exclusion_pairs_reference(
     *,
     has_box: bool = False,
     pme_alpha: float = 0.34,
-    coulomb_constant: float = 332.0637,
+    coulomb_constant: float = COULOMB_CONSTANT,
 ) -> jax.Array:
     """Plain-JAX PME bonded exclusion pair reference matching ``pallas_pme_exclusion_pairs``."""
 
@@ -2033,7 +2130,7 @@ def make_pme_exclusion_pairs_op(
     *,
     has_box: bool = False,
     pme_alpha: float = 0.34,
-    coulomb_constant: float = 332.0637,
+    coulomb_constant: float = COULOMB_CONSTANT,
     compute_param_grads: bool | None = None,
     context: Context | None = None,
 ) -> xtrax.Op:
@@ -2080,7 +2177,7 @@ def pallas_pme_exclusion_pairs(
     atom_mask: jax.Array | None = None,
     box: jax.Array | None = None,
     pme_alpha: float = 0.34,
-    coulomb_constant: float = 332.0637,
+    coulomb_constant: float = COULOMB_CONSTANT,
     *,
     n_atoms: int | None = None,
     is_row_format: bool = False,
@@ -2348,7 +2445,7 @@ def _pallas_angles_harmonic_single(
         grid=(n_blocks,),
         input_output_aliases={10: 1, 11: 2, 12: 3},
         interpret=interpret,
-        compiler_params=plt.CompilerParams() if not interpret else None,
+        compiler_params=resolve_pallas_compiler_params("bonded_fused") if not interpret else None,
         name="pallas_angles_harmonic",
     )(px, py, pz, idx_i, idx_j, idx_k, theta0, k_val, mask_f, box_vec, zero_f, zero_f, zero_f)
     forces = jnp.stack([fx_pad[:N], fy_pad[:N], fz_pad[:N]], axis=-1).astype(orig_dtype)
@@ -2981,7 +3078,7 @@ def _pallas_torsions_4body_single(
         grid=(n_blocks,),
         input_output_aliases={12: 1, 13: 2, 14: 3},
         interpret=interpret,
-        compiler_params=plt.CompilerParams() if not interpret else None,
+        compiler_params=resolve_pallas_compiler_params("bonded_fused") if not interpret else None,
         name="pallas_torsions_4body",
     )(
         px,
@@ -3644,7 +3741,7 @@ def _pallas_cmap_torsions_single(
         grid=(n_blocks,),
         input_output_aliases={12: 1, 13: 2, 14: 3},
         interpret=interpret,
-        compiler_params=plt.CompilerParams() if not interpret else None,
+        compiler_params=resolve_pallas_compiler_params("bonded_fused") if not interpret else None,
         name="pallas_cmap_torsions",
     )(
         px,
@@ -5601,7 +5698,7 @@ def bonded_all_fused_reference(
     has_box: bool = False,
     dist_eps: float = 1e-10,
     b0_is_ji: bool = True,
-    coulomb_constant: float = 332.0637,
+    coulomb_constant: float = COULOMB_CONSTANT,
     softcore_alpha: float = 0.5,
     softcore_exponent: int = 2,
     cmap_first_is_psi: bool = False,
@@ -5660,7 +5757,7 @@ def make_bonded_all_fused_op(
     dist_eps: float = 1e-10,
     b0_is_ji: bool = True,
     angle_regularization_mode: str = "legacy_denom_eps",
-    coulomb_constant: float = 332.0637,
+    coulomb_constant: float = COULOMB_CONSTANT,
     softcore_alpha: float = 0.5,
     softcore_exponent: int = 2,
     cmap_first_is_psi: bool = False,
@@ -5776,7 +5873,7 @@ def pallas_bonded_all_fused(
     dist_eps: float = 1e-10,
     b0_is_ji: bool = True,
     angle_regularization_mode: str = "legacy_denom_eps",
-    coulomb_constant: float = 332.0637,
+    coulomb_constant: float = COULOMB_CONSTANT,
     soft_core_lambda: float | jax.Array | None = None,
     softcore_lambda: float | jax.Array | None = None,
     softcore_alpha: float = 0.5,

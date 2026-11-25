@@ -21,6 +21,7 @@ from jax_md import partition, space, util
 
 from prolix.compat import system_params_to_protein
 from prolix.export import in_export_context, resolve_pallas_compiler_params
+from prolix.physics.pallas_bonded import _triton_gpu_available
 from prolix.physics.pbc import wrap_positions
 from prolix.utils import topology
 
@@ -351,7 +352,7 @@ def make_neighbor_list_fn(
         scale_14_vdw=float(scale_14_vdw),
         scale_14_elec=float(scale_14_elec),
         encode_exclusions=has_excl,
-        interpret=(jax.default_backend() == "cpu"),
+        interpret=(not _triton_gpu_available()),
         grid_dims=static_grid_dims,
         atom_mask=atom_mask,
         precomputed_excl=precomp_excl_static,
@@ -447,7 +448,7 @@ def make_neighbor_list_fn(
               scale_14_vdw=float(scale_14_vdw),
               scale_14_elec=float(scale_14_elec),
               encode_exclusions=has_excl,
-              interpret=(jax.default_backend() == "cpu"),
+              interpret=(not _triton_gpu_available()),
               grid_dims=static_grid_dims,
               atom_mask=atom_mask,
               precomputed_excl=precomp_excl_static,
@@ -518,7 +519,7 @@ def make_neighbor_list_fn(
               scale_14_vdw=float(scale_14_vdw),
               scale_14_elec=float(scale_14_elec),
               encode_exclusions=has_excl,
-              interpret=(jax.default_backend() == "cpu"),
+              interpret=(not _triton_gpu_available()),
               grid_dims=static_grid_dims,
               atom_mask=atom_mask,
               mask_batched=(atom_mask is not None and atom_mask.ndim == 2),
@@ -1834,7 +1835,7 @@ def _pallas_prune_and_encode_cell_list_batch(  # noqa: PLR0913
     scale_14_vdw: float = 0.5,
     scale_14_elec: float = 0.83333333,
     encode_exclusions: bool = True,
-    interpret: bool = False,
+    interpret: bool | None = None,
     grid_dims: tuple[int, int, int] | None = None,
     atom_mask: Array | None = None,
     mask_batched: bool = False,
@@ -1846,6 +1847,11 @@ def _pallas_prune_and_encode_cell_list_batch(  # noqa: PLR0913
     n_active_atoms: int | None = None,
 ) -> Any:
     """Batched 2D-grid ``(N_act, B)`` Pallas cell-list pruning + in-register exclusion encoding."""
+    interp_eff = (
+        True
+        if in_export_context()
+        else ((not _triton_gpu_available()) if interpret is None else bool(interpret))
+    )
     B = int(axis_size)
     pos_b = position if in_batched[0] else jnp.broadcast_to(position[None, ...], (B, *position.shape))
     bx_b = box if in_batched[1] else box[None, ...]
@@ -1890,7 +1896,7 @@ def _pallas_prune_and_encode_cell_list_batch(  # noqa: PLR0913
         g_dims,
         atom_mask_b=mask_b,
         rebuild_mask_b=rebuild_mask,
-        interpret=interpret,
+        interpret=interp_eff,
         n_active_atoms=N_act,
     )
 
@@ -1944,7 +1950,7 @@ def _pallas_prune_and_encode_cell_list_batch(  # noqa: PLR0913
             excl_tag_flat = jnp.zeros((M_BLOCK,), dtype=jnp.int32)
             do_encode = False
 
-    use_scratch_slot = bool(interpret)
+    use_scratch_slot = bool(interp_eff)
     if use_scratch_slot:
         if old_idx is not None:
             nbr_init_flat = jnp.pad(
@@ -1988,9 +1994,9 @@ def _pallas_prune_and_encode_cell_list_batch(  # noqa: PLR0913
         out_specs=[any_spec] * 2,
         grid=(N_act, B),
         input_output_aliases={15: 0},
-        interpret=interpret,
+        interpret=interp_eff,
         compiler_params=resolve_pallas_compiler_params("cell_prune", grid_blocks=N_act * B)
-        if not interpret
+        if not interp_eff
         else None,
         name="pallas_prune_and_encode_cell_list",
     )(
@@ -2045,7 +2051,7 @@ def pallas_prune_and_encode_cell_list(  # noqa: PLR0913
     scale_14_vdw: float = 0.5,
     scale_14_elec: float = 0.83333333,
     encode_exclusions: bool = True,
-    interpret: bool = False,
+    interpret: bool | None = None,
     grid_dims: tuple[int, int, int] | None = None,
     atom_mask: Array | None = None,
     precomputed_excl: tuple[Array, Array, Array, Array] | None = None,
@@ -2060,7 +2066,11 @@ def pallas_prune_and_encode_cell_list(  # noqa: PLR0913
     s14_v = float(scale_14_vdw)
     s14_e = float(scale_14_elec)
     enc = bool(encode_exclusions)
-    interp = bool(interpret)
+    interp = (
+        True
+        if in_export_context()
+        else ((not _triton_gpu_available()) if interpret is None else bool(interpret))
+    )
     ret_mkt = bool(return_max_k_tiles)
     n_act = None if n_active_atoms is None else int(n_active_atoms)
     g_dims = (
