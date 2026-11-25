@@ -28,7 +28,6 @@ from jax import custom_vjp
 from jax._src import core as _jax_core
 from jax._src import state as _jax_state
 from jax._src import tree_util as _jax_tree_util
-from jax._src.lib.mlir import ir as _mlir_ir
 from jax._src.lib.triton import dialect as _tt_dialect
 from jax._src.pallas import primitives as _pallas_primitives
 from jax._src.pallas.primitives import load as _pl_load
@@ -117,7 +116,7 @@ def _probe_triton_atomic_add(dev: Any) -> bool:
         if cached is not None:
             return cached
 
-        def _probe_impl() -> bool:
+        def _probe_impl() -> tuple[bool, str]:
             c_params = resolve_pallas_compiler_params("bonded_fused")
             fn_f32, fn_i32 = _make_triton_atomic_probe_fns(c_params)
             # Run on a clean worker thread so an active @jax.jit trace or
@@ -133,8 +132,11 @@ def _probe_triton_atomic_add(dev: Any) -> bool:
                             jnp.zeros((32,), dtype=jnp.float32),
                         )
                         jax.block_until_ready(out_f32)
-                        if not bool(np.allclose(np.asarray(out_f32), 1.0)):
+                        out_f32_np = np.asarray(out_f32)
+                        f32_summary = f"f32={float(out_f32_np.min()):.3g}..{float(out_f32_np.max()):.3g}"
+                        if not bool(np.allclose(out_f32_np, 1.0)):
                             result["ok"] = False
+                            result["detail"] = f32_summary
                             return
 
                         out_i32 = fn_i32(
@@ -142,7 +144,10 @@ def _probe_triton_atomic_add(dev: Any) -> bool:
                             jnp.zeros((32,), dtype=jnp.int32),
                         )
                         jax.block_until_ready(out_i32)
-                        result["ok"] = bool(np.all(np.asarray(out_i32) == 1))
+                        out_i32_np = np.asarray(out_i32)
+                        i32_summary = f"i32={int(out_i32_np.min())}..{int(out_i32_np.max())}"
+                        result["ok"] = bool(np.all(out_i32_np == 1))
+                        result["detail"] = f"{f32_summary}, {i32_summary}"
                 except Exception as exc:
                     result["exc"] = exc
 
@@ -153,10 +158,11 @@ def _probe_triton_atomic_add(dev: Any) -> bool:
                 raise TimeoutError("Triton atomic_add canary timed out after 120s")
             if "exc" in result:
                 raise result["exc"]
-            return bool(result.get("ok", False))
+            return bool(result.get("ok", False)), str(result.get("detail", "unknown"))
 
+        mismatch_detail = ""
         try:
-            ok = _probe_impl()
+            ok, mismatch_detail = _probe_impl()
         except Exception as exc:
             ok = False
             if key not in _TRITON_ATOMIC_WARNED:
@@ -171,7 +177,7 @@ def _probe_triton_atomic_add(dev: Any) -> bool:
             if not ok and key not in _TRITON_ATOMIC_WARNED:
                 _TRITON_ATOMIC_WARNED.add(key)
                 warnings.warn(
-                    f"Pallas Triton atomic_add canary produced unexpected zeros on {key}; "
+                    f"Pallas Triton atomic_add canary mismatch on {key} ({mismatch_detail}); "
                     "falling back to non-Triton path.",
                     RuntimeWarning,
                     stacklevel=2,
@@ -363,10 +369,10 @@ def _atomic_add_i32_discharge_rule(
     in_avals: Any, out_avals: Any, *args_flat: Any, args_tree: Any
 ) -> Any:
     del out_avals
-    ref, transforms, val, mask_i32 = args_tree.unflatten(args_flat)
+    ref, transforms, val, mask_bool = args_tree.unflatten(args_flat)
     *prev_transforms, idx = transforms
     ref = _state_discharge.transform_array(ref, prev_transforms)
-    active = mask_i32 != 0
+    active = mask_bool.astype(jnp.bool_)
     val_eff = jnp.where(active, val.astype(jnp.int32), jnp.int32(0))
     indices = idx.indices
     if len(indices) == 1 and not isinstance(indices[0], _state_indexing.Slice):
@@ -391,7 +397,7 @@ def _atomic_add_i32_triton_lowering(
     block_info, *_ = ctx.block_infos
     if block_info is None:
         raise RuntimeError("_atomic_add_i32_triton_lowering requires non-None block_info")
-    ptr, indexers, val, mask_i32 = args_tree.unflatten(args_flat)
+    ptr, indexers, val, mask_bool = args_tree.unflatten(args_flat)
     *_, value_aval, mask_aval = args_tree.unflatten(ctx.avals_in)
     idx_list = list(indexers)
     if not idx_list or not isinstance(idx_list[-1], _state_indexing.NDIndexer):
@@ -402,21 +408,10 @@ def _atomic_add_i32_triton_lowering(
     idx = idx_list[0]
     ptr_ir = _triton_lowering._compute_pointers_from_indices(ptr, block_info, idx)
     val_ir = _triton_lowering._ensure_ir_value(val, value_aval)
-    mask_ir = _triton_lowering._ensure_ir_value(mask_i32, mask_aval)
-    if isinstance(ptr_ir.type, _mlir_ir.RankedTensorType):
-        pt = _mlir_ir.RankedTensorType(ptr_ir.type)
-        et = _tt_dialect.PointerType(pt.element_type).pointee_type
-        res_t: Any = _mlir_ir.RankedTensorType.get(pt.shape, et, pt.encoding)
-    else:
-        res_t = _tt_dialect.PointerType(ptr_ir.type).pointee_type
-    return _tt_dialect.ElementwiseInlineAsmOp(
-        [res_t],
-        _PTX_ATOM_ADD_S32,
-        constraints="=r,l,r,r",
-        pure=False,
-        packed_element=1,
-        args=[ptr_ir, val_ir, mask_ir],
-    ).result
+    mask_ir = _triton_lowering._ensure_ir_value(mask_bool, mask_aval)
+    return _triton_lowering._atomic_rmw(
+        _tt_dialect.RMWOp.ADD, ptr_ir, val_ir, mask=mask_ir
+    )
 
 
 def _pl_atomic_add_i32_1d(
@@ -426,18 +421,19 @@ def _pl_atomic_add_i32_1d(
     mask_1d: jax.Array,
     interpret: bool = False,
 ) -> None:
-    """1D signed int32 atomic add via inline PTX ``atom.global.add.s32`` on GPU and ``.at[].add`` on CPU.
+    """1D signed int32 atomic add via native Triton ``tt.atomic_rmw add`` on GPU and ``.at[].add`` on CPU.
 
-    Bypasses JAX 0.10.2 ``BUG-TRITON-ATOM1`` where vector ``int32`` ``plt.atomic_add``
-    erroneously lowers to ``tt.atomic_rmw fadd`` (subnormal FTZ flush to 0 on GPU).
+    Bypasses JAX 0.10.2 ``BUG-TRITON-ATOM1`` (where ``RankedTensorType`` integer checks miss
+    ``ir.IntegerType`` and fall back to ``RMWOp.FADD``) without ``elementwise_inline_asm``
+    warp replication when ``tensor_size < 32 * num_warps``.
     """
     del interpret
     val_i32 = jnp.where(mask_1d, val_1d.astype(jnp.int32), jnp.int32(0))
-    mask_i32 = mask_1d.astype(jnp.int32)
+    mask_bool = mask_1d.astype(jnp.bool_)
     x_ref, transforms = _state_primitives.get_ref_and_transforms(
         ref, (idx_1d,), "prolix_atomic_add_s32"
     )
-    args_flat, args_tree = _jax_tree_util.tree_flatten((x_ref, transforms, val_i32, mask_i32))
+    args_flat, args_tree = _jax_tree_util.tree_flatten((x_ref, transforms, val_i32, mask_bool))
     _ = _atomic_add_i32_p.bind(*args_flat, args_tree=args_tree)
 
 

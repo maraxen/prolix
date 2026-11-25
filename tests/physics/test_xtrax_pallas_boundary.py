@@ -364,6 +364,10 @@ def test_triton_atomic_probe_captures_no_constants():
     assert j_f32.jaxpr.eqns[0].params["jaxpr"].constvars == []
     assert j_i32.jaxpr.eqns[0].params["jaxpr"].constvars == []
 
+    # Verify native tt.atomic_rmw add CUDA Triton lowering succeeds on CPU without constant/layout errors
+    hlo_i32 = jax.jit(fn_i32).trace(vi32, zi32).lower(lowering_platforms=("cuda",)).as_text()
+    assert "__gpu$xla.gpu.triton" in hlo_i32
+
     # Simulate first _triton_gpu_available() check occurring while an outer @jax.jit is tracing
     thread_results: dict[str, tuple[int, int]] = {}
     thread_exc: list[BaseException] = []
